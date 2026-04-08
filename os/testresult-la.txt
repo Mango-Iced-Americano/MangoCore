@@ -1,0 +1,438 @@
+cp ./src/lang_items.rs.la ./src/lang_items.rs
+cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+make -f make/la64o.mk comp
+make[1]: Entering directory '/app/os'
+qemu-system-loongarch64 \
+-kernel ../kernel-la \
+-m 1G \
+-nographic \
+-smp 1 \
+-drive file=../sdcard-la.img,if=none,format=raw,id=x0 \
+-device virtio-blk-pci,drive=x0 \
+-no-reboot \
+-device virtio-net-pci,netdev=net0 \
+-netdev user,id=net0 \
+-rtc base=utc
+[kernel] UART address: 0x1fe001e0
+[bootstrap_init] PRCfg1 { SAVE reg. number: 8, Timer bits: 48, max vector entry spacing: 7 }
+[kernel] Console initialized.
+last 145216 Physical Frames.
+.text [0x80000000, 0x80094000)
+.rodata [0x80094000, 0x800a4000)
+.data [0x800b3000, 0x896bf000)
+.bss [0x896bf000, 0x8c8c0000)
+mapping .text section
+mapping .rodata section
+mapping .data section
+mapping .bss section
+mapping physical memory
+mapping memory-mapped registers
+[kernel] Hello, world!
+[get_timer_freq_first_time] clk freq: 100000000(from CPUCFG)
+[CPUCFG 0x0] 1359888
+[CPUCFG 0x1] 66253566
+[CPUCFG 0x2] 6340815
+[CPUCFG 0x3] 0
+[CPUCFG 0x4] 100000000
+[CPUCFG 0x5] 65537
+[CPUCFG 0x6] 0
+[CPUCFG 0x10] 11325
+[CPUCFG 0x11] 101187587
+[CPUCFG 0x12] 101187587
+[CPUCFG 0x13] 101187599
+[CPUCFG 0x14] 101580815
+Misc { 32-bit addr plv(1,2,3):: false,false,false, rdtime allowed for plv(1,2,3):: false,false,false, Disable dirty bit check for plv(0,1,2):: false,false,false, Misalignment check for plv(0,1,2,4):: false,false,false,false }
+RVACfg { rbits: 0 }
+[machine_init] MMAP_BASE: 0xffffff8000000000
+[fs] read magic number: 61267
+[fs] found ext4 filesystem
+[kernel] /dev init Successfully!
+[kernel] shm and misc init Successfully!
+[kernel] null_dev init successfully!
+[kernel] zero_dev init successfully!
+[kernel] urandom_dev init successfully!
+[kernel] tty_dev init successfully!
+[kernel] init_tmp_directory successfully!
+[kernel] init_proc_directory successfully!
+[kernel] init_proc_meminfo_directory successfully!
+[kernel] init_proc_mounts_directory successfully!
+[kernel] oom_handler is enabled!
+#### OS COMP TEST GROUP START basic-musl ####
+Testing brk :
+========== START test_brk ==========
+Before alloc,heap pos: 12288
+After alloc,heap pos: 12352
+Alloc again,heap pos: 12416
+========== END test_brk ==========
+Testing chdir :
+========== START test_chdir ==========
+chdir ret: 0
+  current working dir : /musl/basic/test_chdir
+========== END test_chdir ==========
+Testing clone :
+========== START test_clone ==========
+  Child says successfully!
+clone process successfully.
+pid:5
+========== END test_clone ==========
+Testing close :
+========== START test_close ==========
+  close 3 success.
+========== END test_close ==========
+Testing dup2 :
+========== START test_dup2 ==========
+  from fd 100
+========== END test_dup2 ==========
+Testing dup :
+========== START test_dup ==========
+  new fd is 3.
+========== END test_dup ==========
+Testing execve :
+========== START test_execve ==========
+  I am test_echo.
+execve success.
+========== END main ==========
+Testing exit :
+========== START test_exit ==========
+exit OK.
+========== END test_exit ==========
+Testing fork :
+========== START test_fork ==========
+  child process.
+  parent process. wstatus:0
+========== END test_fork ==========
+Testing fstat :
+========== START test_fstat ==========
+fstat ret: 0
+fstat: dev: 2048, inode: 150, mode: 33279, nlink: 1, size: 52, atime: 1775367023, mtime: 1775367023, ctime: 1775367023
+========== END test_fstat ==========
+Testing getcwd :
+========== START test_getcwd ==========
+getcwd: /musl/basic successfully!
+========== END test_getcwd ==========
+Testing getdents :
+========== START test_getdents ==========
+open fd:3
+getdents fd:456
+getdents success.
+.
+
+========== END test_getdents ==========
+Testing getpid :
+========== START test_getpid ==========
+getpid success.
+pid = 4
+========== END test_getpid ==========
+Testing getppid :
+========== START test_getppid ==========
+  getppid success. ppid : 3
+========== END test_getppid ==========
+Testing gettimeofday :
+========== START test_gettimeofday ==========
+gettimeofday success.
+start:821, end:842
+interval: 21
+========== END test_gettimeofday ==========
+Testing mkdir_ :
+========== START test_mkdir ==========
+mkdir ret: 0
+  mkdir success.
+========== END test_mkdir ==========
+Testing mmap :
+========== START test_mmap ==========
+file len: 27
+mmap content:   Hello, mmap successfully!
+========== END test_mmap ==========
+Testing mount :
+========== START test_mount ==========
+Mounting dev:/dev/vda2 to ./mnt
+mount return: 0
+mount successfully
+umount return: 0
+========== END test_mount ==========
+Testing munmap :
+========== START test_munmap ==========
+file len: 27
+munmap return: 0
+munmap successfully!
+========== END test_munmap ==========
+Testing openat :
+========== START test_openat ==========
+open dir fd: 3
+openat fd: 4
+openat success.
+========== END test_openat ==========
+Testing open :
+========== START test_open ==========
+Hi, this is a text file.
+syscalls testing success!
+
+========== END test_open ==========
+Testing pipe :
+========== START test_pipe ==========
+cpid: 5
+cpid: 0
+  Write to pipe successfully.
+
+========== END test_pipe ==========
+Testing read :
+========== START test_read ==========
+Hi, this is a text file.
+syscalls testing success!
+
+========== END test_read ==========
+Testing sleep :
+========== START test_sleep ==========
+sleep success.
+========== END test_sleep ==========
+Testing times :
+========== START test_times ==========
+mytimes success
+{tms_utime:158700, tms_stime:0, tms_cutime:0, tms_cstime:0}
+========== END test_times ==========
+Testing umount :
+========== START test_umount ==========
+Mounting dev:/dev/vda2 to ./mnt
+mount return: 0
+umount success.
+return: 0
+========== END test_umount ==========
+Testing uname :
+========== START test_uname ==========
+Uname: NPUcore blossom 5.10.0-1-la64 #1 SMP blossom 5.10.0-1 (2025-01-10) la64 
+========== END test_uname ==========
+Testing unlink :
+========== START test_unlink ==========
+  unlink success!
+========== END test_unlink ==========
+Testing wait :
+========== START test_wait ==========
+This is child process
+wait child success.
+wstatus: 0
+========== END test_wait ==========
+Testing waitpid :
+========== START test_waitpid ==========
+This is child process
+waitpid successfully.
+wstatus: 3
+========== END test_waitpid ==========
+Testing write :
+========== START test_write ==========
+Hello operating system contest.
+========== END test_write ==========
+Testing yield :
+========== START test_yield ==========
+  I am child process: 5. iteration 0.
+  I am child process: 6. iteration 1.
+  I am child process: 7. iteration 2.
+  I am child process: 5. iteration 0.
+  I am child process: 6. iteration 1.
+  I am child process: 7. iteration 2.
+  I am child process: 5. iteration 0.
+  I am child process: 6. iteration 1.
+  I am child process: 7. iteration 2.
+  I am child process: 5. iteration 0.
+  I am child process: 6. iteration 1.
+  I am child process: 7. iteration 2.
+  I am child process: 5. iteration 0.
+  I am child process: 6. iteration 1.
+  I am child process: 7. iteration 2.
+========== END test_yield ==========
+#### OS COMP TEST GROUP END basic-musl ####
+#### OS COMP TEST GROUP START busybox-musl ####
+#### independent command test
+testcase busybox echo "#### independent command test" success
+testcase busybox ash -c exit success
+testcase busybox sh -c exit success
+bbb
+testcase busybox basename /aaa/bbb success
+    January 1970
+Su Mo Tu We Th Fr Sa
+             1  2  3
+ 4  5  6  7  8  9 10
+11 12 13 14 15 16 17
+18 19 20 21 22 23 24
+25 26 27 28 29 30 31
+                     
+testcase busybox cal success
+[H[Jtestcase busybox clear success
+Thu Jan  1 00:00:02 UTC 1970
+testcase busybox date success
+Filesystem           1K-blocks      Used Available Use% Mounted on
+testcase busybox df success
+/aaa
+testcase busybox dirname /aaa/bbb success
+[    0.000000] Linux version 5.10.102.1-microsoft-standard-WSL2 (rtrt@TEAM-NPUCORE) (gcc (Ubuntu 9.4.0-1ubuntu1~20.04) 9.4.0, GNU ld (GNU Binutils for Ubuntu) 2.34) #1 SMP Thu Mar 10 13:31:47 CST 2022
+testcase busybox dmesg success
+1	./basic/mnt
+1	./basic/test_chdir
+1	./basic/test_mkdir
+501	./basic
+268	./lib
+2071	.
+testcase busybox du success
+2
+testcase busybox expr 1 + 1 success
+testcase busybox false success
+testcase busybox true success
+/ls
+testcase busybox which ls success
+NPUcore
+testcase busybox uname success
+ 00:00:02 up 0 min,  0 users,  load average: 0.06, 0.01, 0.00
+testcase busybox uptime success
+abcntestcase busybox printf "abcn" success
+PID   USER     TIME  COMMAND
+testcase busybox ps success
+/musl
+testcase busybox pwd success
+              total        used        free      shared  buff/cache   available
+Mem:         786432      214392      572040           0           0           0
+-/+ buffers/cache:       214392      572040
+Swap:             0           0           0
+testcase busybox free success
+Sun Dec 31 00:00:00 1899  0.000000 seconds
+testcase busybox hwclock success
+sh: can't execute 'sleep': No such file or directory
+testcase busybox sh -c 'sleep 5' & ./busybox kill $! success
+[1;34mbasic[m                 [1;32mlat_fcntl[m             [1;32mlat_usleep[m
+[1;32mbasic_testcode.sh[m     [1;32mlat_fifo[m              [1;34mlib[m
+[1;32mbusybox[m               [1;32mlat_fs[m                [1;32mlibctest_testcode.sh[m
+[1;32mbusybox_cmd.txt[m       [1;32mlat_http[m              [1;32mlmbench[m
+[1;32mbusybox_testcode.sh[m   [1;32mlat_mem_rd[m            [1;32mlmbench_all[m
+[1;32mbw_file_rd[m            [1;32mlat_mmap[m              [1;32mlmbench_testcode.sh[m
+[1;32mbw_mem[m                [1;32mlat_ops[m               [1;32mlmdd[m
+[1;32mbw_mmap_rd[m            [1;32mlat_pagefault[m         [1;32mlua[m
+[1;32mbw_pipe[m               [1;32mlat_pipe[m              [1;32mlua_testcode.sh[m
+[1;32mbw_tcp[m                [1;32mlat_pmake[m             [1;32mmax_min.lua[m
+[1;32mbw_unix[m               [1;32mlat_proc[m              [1;32mrandom.lua[m
+[1;32mdate.lua[m              [1;32mlat_rand[m              [1;32mremove.lua[m
+[1;32mdlopen_dso.so[m         [1;32mlat_rpc[m               [1;32mround_num.lua[m
+[1;32mentry-dynamic.exe[m     [1;32mlat_select[m            [1;32mrun-dynamic.sh[m
+[1;32mentry-static.exe[m      [1;32mlat_sem[m               [1;32mrun-static.sh[m
+[1;32mfile_io.lua[m           [1;32mlat_sig[m               [1;32mruntest.exe[m
+[1;32mhello[m                 [1;32mlat_syscall[m           [1;32msin30.lua[m
+[1;32mlat_cmd[m               [1;32mlat_tcp[m               [1;32msort.lua[m
+[1;32mlat_connect[m           [1;32mlat_udp[m               [1;32mstrings.lua[m
+[1;32mlat_ctx[m               [1;32mlat_unix[m              [1;32mtest.sh[m
+[1;32mlat_dram_page[m         [1;32mlat_unix_connect[m
+testcase busybox ls success
+testcase busybox sleep 1 success
+#### file opration test
+testcase busybox echo "#### file opration test" success
+testcase busybox touch test.txt success
+testcase busybox echo "hello world" > test.txt success
+hello world
+testcase busybox cat test.txt success
+l
+testcase busybox cut -c 3 test.txt success
+0000000 062550 066154 020157 067567 066162 005144
+0000014
+testcase busybox od test.txt success
+hello world
+testcase busybox head test.txt success
+hello world
+testcase busybox tail test.txt success
+00000000  68 65 6c 6c 6f 20 77 6f  72 6c 64 0a              |hello world.|
+0000000c
+testcase busybox hexdump -C test.txt success
+6f5902ac237024bdd0c176cb93063dc4  test.txt
+testcase busybox md5sum test.txt success
+testcase busybox echo "ccccccc" >> test.txt success
+testcase busybox echo "bbbbbbb" >> test.txt success
+testcase busybox echo "aaaaaaa" >> test.txt success
+testcase busybox echo "2222222" >> test.txt success
+testcase busybox echo "1111111" >> test.txt success
+testcase busybox echo "bbbbbbb" >> test.txt success
+bbbbbbb
+rld
+testcase busybox sort test.txt | ./busybox uniq success
+  File: test.txt
+  Size: 12        	Blocks: 1          IO Block: 2048   regular file
+Device: 800h/2048d	Inode: 299         Links: 1
+Access: (0777/-rwxrwxrwx)  Uid: (    0/ -e root)   Gid: (    0/ UNKNOWN)
+Access: 1970-01-01 00:00:00.000000000 +0000
+Modify: 1970-01-01 00:00:00.000000000 +0000
+Change: 1970-01-01 00:00:00.000000000 +0000
+testcase busybox stat test.txt success
+bbbbbbb
+testcase busybox strings test.txt success
+        2         2        12 test.txt
+testcase busybox wc test.txt success
+testcase busybox [ -f test.txt ] success
+bbbbbbb
+rld
+testcase busybox more test.txt success
+testcase busybox rm test.txt success
+testcase busybox mkdir test_dir success
+testcase busybox mv test_dir test success
+testcase busybox rmdir test success
+echo "hello world" > test.txt
+grep hello busybox_cmd.txt
+testcase busybox grep hello busybox_cmd.txt success
+testcase busybox cp busybox_cmd.txt busybox_cmd.bak success
+testcase busybox rm busybox_cmd.bak success
+./busybox_cmd.txt
+testcase busybox find -name "busybox_cmd.txt" success
+#### OS COMP TEST GROUP END busybox-musl ####
+#### OS COMP TEST GROUP START lua-musl ####
+testcase lua date.lua success
+testcase lua file_io.lua success
+testcase lua max_min.lua success
+testcase lua random.lua success
+testcase lua remove.lua success
+testcase lua round_num.lua success
+testcase lua sin30.lua success
+testcase lua sort.lua success
+testcase lua strings.lua success
+#### OS COMP TEST GROUP END lua-musl ####
+#### OS COMP TEST GROUP START lmbench-musl ####
+latency measurements
+Simple syscall: 7.9857 microseconds
+Simple read: 11.9451 microseconds
+Simple write: 11.7980 microseconds
+Simple stat: 16.2251 microseconds
+Simple fstat: 12.9772 microseconds
+Simple open/close: 27.0008 microseconds
+Select on 100 fd's: 17.9431 microseconds
+Signal handler installation: 12.7961 microseconds
+Process fork+exit: 466.5308 microseconds
+Process fork+execve: 508.0214 microseconds
+Process fork+/bin/sh -c: 529.3814 microseconds
+File /var/tmp/XXX write bandwidth:38191 KB/sec
+Pagefaults on /var/tmp/XXX: 11.6026 microseconds
+0.524288 128
+
+"size=32k ovr=37.01
+2 500114.49
+4 250050.74
+8 125042.11
+16 125035.17
+24 83364.78
+32 93785.70
+64 93800.38
+96 41697.32
+#### OS COMP TEST GROUP END lmbench-musl ####
+#### OS COMP TEST GROUP START libctest-musl ####
+========== START entry-static.exe argv ==========
+Pass!
+========== END entry-static.exe argv ==========
+========== START entry-static.exe basename ==========
+Pass!
+========== END entry-static.exe basename ==========
+========== START entry-static.exe clocale_mbfuncs ==========
+Pass!
+========== END entry-static.exe clocale_mbfuncs ==========
+========== START entry-static.exe clock_gettime ==========
+Pass!
+========== END entry-static.exe clock_gettime ==========
+========== START entry-static.exe dirname ==========
+Pass!
+========== END entry-static.exe dirname ==========
+========== START entry-static.exe env ==========
+Pass!
+========== END entry-static.exe env ==========
+========== START entry-static.exe fdopen ==========
+QEMU: Terminated
+make[1]: Leaving directory '/app/os'

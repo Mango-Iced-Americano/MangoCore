@@ -1,0 +1,23 @@
+services:
+  os-dev:
+    image: zhouzhouyi/os-contest:20260104
+    pull_policy: missing
+    command: ["sleep", "infinity"]
+    privileged: true
+    devices:
+      - /dev/loop-control:/dev/loop-control
+      - /dev/loop0:/dev/loop0
+    device_cgroup_rules:
+      - "c 10:237 rmw"
+      - "b 7:* rmw"
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    volumes:
+      - .:/app
+    environment:
+      - MODE=release
+    tty: true
+    stdin_open: true
+    working_dir: /app
