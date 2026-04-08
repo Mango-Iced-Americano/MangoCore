@@ -85,28 +85,10 @@ docker:
 	docker compose up -d && \
 	docker compose exec -it os-dev bash
 
-testsuits:
-	mkdir -p testsuits && \
-	cd testsuits && \
-	[ -d os-contest-2024-image ] || git clone https://gitlab.educg.net/wangmingjian/os-contest-2024-image/ && \
-	cd os-contest-2024-image && \
-	if docker image inspect $(DOCKER_IMAGE) >/dev/null 2>&1; then \
-		echo "Image $(DOCKER_IMAGE) already exists, skip docker build."; \
-	else \
-		docker build -t $(DOCKER_IMAGE) .; \
-	fi && \
-	cd .. && \
-	[ -d testsuits-for-oskernel ] || git clone https://github.com/oscomp/testsuits-for-oskernel.git && \
-	cd testsuits-for-oskernel && git checkout pre-2025 && \
-	if [ -f sdcard-rv.img.xz ] && [ -f sdcard-la.img.xz ]; then \
-		mv sdcard-rv.img.xz ../../fs-img-dir/ && \
-		mv sdcard-la.img.xz ../../fs-img-dir/; \
-	else \
-		echo "sdcard image files not found. Run make sdcard first."; \
-		docker run --rm -it -v .:/code --entrypoint bash -w /code --privileged $(DOCKER_IMAGE) -lc "make sdcard" && \
-		mv sdcard-rv.img.xz ../../fs-img-dir/ && \
-		mv sdcard-la.img.xz ../../fs-img-dir/; \
-	fi
+download-testsuits:
+	cd fs-img-dir && \
+	wget -O sdcard-la.img.xz https://github.com/oscomp/testsuits-for-oskernel/releases/download/pre-20250615/sdcard-la.img.xz && \
+	wget -O sdcard-rv.img.xz https://github.com/oscomp/testsuits-for-oskernel/releases/download/pre-20250615/sdcard-rv.img.xz
 
 	
 
