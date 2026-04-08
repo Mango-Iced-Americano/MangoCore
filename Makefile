@@ -85,11 +85,11 @@ docker:
 	docker compose up -d && \
 	docker compose exec -it os-dev bash
 
-download-testsuits:
+testsuits-download:
 	cd fs-img-dir && \
 	wget -O sdcard-la.img.xz https://github.com/oscomp/testsuits-for-oskernel/releases/download/pre-20250615/sdcard-la.img.xz && \
 	wget -O sdcard-rv.img.xz https://github.com/oscomp/testsuits-for-oskernel/releases/download/pre-20250615/sdcard-rv.img.xz
 
 	
 
-.PHONY: all kernel run clean testsuits docker
+.PHONY: all kernel run clean testsuits-download docker
