@@ -48,18 +48,31 @@ fi
 
 mkdir -p ${U_FS_DIR}/fs
 
-mount -f ${U_FS} ${U_FS_DIR}/fs
-if [ $? -ne 0 ]; then
-    umount ${U_FS}
+# Some container runtimes expose /dev/loop-control but do not pre-create /dev/loopN.
+# Create a small set of loop device nodes on demand so mount can attach images.
+if [ -c /dev/loop-control ]; then
+    i=0
+    while [ $i -le 7 ]; do
+        if [ ! -b /dev/loop${i} ]; then
+            mknod -m 660 /dev/loop${i} b 7 ${i} 2>/dev/null || true
+        fi
+        i=$((i + 1))
+    done
 fi
-mount ${U_FS} ${U_FS_DIR}/fs
+
+# Mount loop image and fail fast if the environment does not allow mounting.
+if ! mount ${U_FS} ${U_FS_DIR}/fs; then
+    echo "ERROR: failed to mount ${U_FS} on ${U_FS_DIR}/fs"
+    echo "HINT: run in a privileged environment (or with CAP_SYS_ADMIN) to build rootfs images."
+    exit 1
+fi
 
 # 创建根文件系统
 mkdir -p ${U_FS_DIR}/fs/lib
 mkdir -p ${U_FS_DIR}/fs/etc
 mkdir -p ${U_FS_DIR}/fs/bin
 mkdir -p ${U_FS_DIR}/fs/root
-sh -c "echo -e "root:x:0:0:root:/root:/bash\n" > ${U_FS_DIR}/fs/etc/passwd"
+printf 'root:x:0:0:root:/root:/bash\n' > ${U_FS_DIR}/fs/etc/passwd
 touch ${U_FS_DIR}/fs/root/.bash_history
 
 # 只能copy一个文件夹下所有内容，无法copy单文件
