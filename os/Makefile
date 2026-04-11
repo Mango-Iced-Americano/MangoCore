@@ -3,6 +3,11 @@ CURR_ARCH ?= la64
 FS_MODE ?= ext4
 BLK_MODE ?= virt
 MODE ?= release
+CONF_FILE ?= ../os_test.conf
+CONF_ARCH ?= $(CURR_ARCH)
+CONF_BLK_MODE ?= $(BLK_MODE)
+CONF_IMAGE ?=
+AUTO_REBUILD_MEM ?= 1
 
 .PHONY: all $(ARCHS) clean
 
@@ -126,3 +131,6 @@ lachange:
 docker:
 	docker compose up -d
 	docker compose exec -it os-dev bash
+
+conf-inject:
+	ARCH=$(CONF_ARCH) BLK_MODE=$(CONF_BLK_MODE) CONF_FILE=$(CONF_FILE) IMAGE_PATH=$(CONF_IMAGE) AUTO_REBUILD_MEM=$(AUTO_REBUILD_MEM) MODE=$(MODE) LOG=$(LOG) ./inject_os_test_conf.sh
