@@ -5,8 +5,8 @@ make  testsuits-download
 ```
 解压测例到根目录
 ```
-unxz -v fs-img-dir/sdcard-rv.img.xz > ./sdcard-rv.img
-unxz -v fs-img-dir/sdcard-la.img.xz > ./sdcard-la.img
+xz -dkc fs-img-dir/sdcard-la.img.xz > sdcard-la.img
+xz -dkc fs-img-dir/sdcard-rv.img.xz > sdcard-rv.img
 
 ```
 
