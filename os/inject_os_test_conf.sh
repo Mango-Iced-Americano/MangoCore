@@ -114,7 +114,8 @@ if [[ "${BLK_MODE}" == "mem" && "${AUTO_REBUILD_MEM}" == "1" ]]; then
     echo "[conf-inject] mem mode detected, rebuilding kernel so embedded rootfs takes effect..."
     pushd "${SCRIPT_DIR}" >/dev/null
     if [[ "${ARCH}" == "la64" ]]; then
-        make -f make/la64o.mk build BLK_MODE=mem MODE="${MODE}" LOG="${LOG}"
+        # la64o.mk has no "build" target; rebuild kernel and refresh ../kernel-la explicitly.
+        make -f make/la64o.mk kernel mv BLK_MODE=mem MODE="${MODE}" LOG="${LOG}"
     else
         make -f make/rv64.mk build BLK_MODE=mem MODE="${MODE}" LOG="${LOG}"
     fi
