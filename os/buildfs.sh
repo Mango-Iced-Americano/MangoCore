@@ -99,6 +99,7 @@ if [ "$2" = "laqemu" ]; then
     cp -r ../user/LaTest/* ${U_FS_DIR}/fs/
     cp -r ../user/fs/* ${U_FS_DIR}/fs/
     cp ./bash-la ${U_FS_DIR}/fs/bash
+    cp ./busybox-la ${U_FS_DIR}/fs/busybox
     cp ../user/target/loongarch64-unknown-linux-gnu/release/initproc ${U_FS_DIR}/fs/
 fi
 
