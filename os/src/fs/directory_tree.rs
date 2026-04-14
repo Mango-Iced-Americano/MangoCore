@@ -341,30 +341,6 @@ impl DirectoryTreeNode {
         log::debug!("[open]: cwd: {}, path: {}", self.get_cwd(), path);
         // println!("open file in dtn: cwd: {} name: {}",self.get_cwd(), path );
 
-        // for comp
-        const BUSYBOX_PATH: &str = "/musl/busybox";
-        // for test
-        // const BUSYBOX_PATH: &str = "/busybox";
-        const REDIRECT_TO_BUSYBOX: [&str; 29] = [
-            "/touch", "/rm", "/ls", "/grep",
-            "/cat", "/cp", "/mv", "/mkdir", "/rmdir", "/chmod",
-            "/chown", "/ln",
-            // 文本处理
-            "/sed", "/awk", "/head", "/tail",
-            // 系统工具
-            "/ps", "/top", "/kill", "/df",
-            // 网络工具
-            "/ping", "/ifconfig", "/netstat",
-            // 其他常用
-            "/find", "/tar", "/which",
-            // 文本读取
-            "less", "more", "vi",
-        ];
-        let path = if REDIRECT_TO_BUSYBOX.contains(&path) {
-            BUSYBOX_PATH
-        } else {
-            path
-        };
 
         // 重定向链接库
         let path = match path {

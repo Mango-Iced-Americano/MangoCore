@@ -54,10 +54,12 @@ pub fn flush_preload() {
         fn einitproc();
         fn sbash();
         fn ebash();
+        fn sbusybox();
+        fn ebusybox();
     }
     println!(
-        "sinitproc: {:X}, einitproc: {:X}, sbash: {:X}, ebash: {:X}",
-        sinitproc as usize, einitproc as usize, sbash as usize, ebash as usize,
+        "sinitproc: {:X}, einitproc: {:X}, sbash: {:X}, ebash: {:X}, sbusybox: {:X}, ebusybox: {:X}",
+        sinitproc as usize, einitproc as usize, sbash as usize, ebash as usize, sbusybox as usize, ebusybox as usize,
     );
     let initproc = ROOT_FD.open("initproc", OpenFlags::O_CREAT, false).unwrap();
     initproc.write(None, unsafe {
@@ -79,6 +81,19 @@ pub fn flush_preload() {
     for ppn in crate::mm::PPNRange::new(
         crate::mm::PhysAddr::from(sbash as usize).floor(),
         crate::mm::PhysAddr::from(ebash as usize).floor(),
+    ) {
+        crate::mm::frame_dealloc(ppn);
+    }
+    let busybox = ROOT_FD.open("busybox", OpenFlags::O_CREAT, false).unwrap();
+    busybox.write(None, unsafe {
+        core::slice::from_raw_parts(
+            sbusybox as *const u8,
+            ebusybox as usize - sbusybox as usize,
+        )
+    });
+    for ppn in crate::mm::PPNRange::new(
+        crate::mm::PhysAddr::from(sbusybox as usize).floor(),
+        crate::mm::PhysAddr::from(ebusybox as usize).floor(),
     ) {
         crate::mm::frame_dealloc(ppn);
     }

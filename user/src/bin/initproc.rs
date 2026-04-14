@@ -4,7 +4,32 @@
 extern crate alloc;
 
 use alloc::string::String;
+use alloc::format;
 use user_lib::{chdir, close, exec, exit, fork, open, read, shutdown, wait, waitpid,println, OpenFlags};
+
+fn run_bash_cmd(cmd: &str, environ: &[*const u8]) -> i32 {
+    let pid = fork();
+    if pid == 0 {
+        let shell = "/bash\0";
+        let dash_c = "-c\0";
+        let mut cmd_buf = String::from(cmd);
+        cmd_buf.push('\0');
+        let argv = [
+            shell.as_ptr(),
+            dash_c.as_ptr(),
+            cmd_buf.as_ptr(),
+            core::ptr::null(),
+        ];
+        exec(shell, &argv, environ);
+        exit(127);
+    }
+    if pid > 0 {
+        let mut code = 0;
+        waitpid(pid as usize, &mut code);
+        return code;
+    }
+    -1
+}
 
 #[derive(Copy, Clone, Eq, PartialEq)]
 enum RunMode {
@@ -285,6 +310,28 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         "LD_LIBRARY_PATH=/\0".as_ptr(),
         core::ptr::null(),
     ];
+
+    let porgrams = ["ls","cat", "echo", "mkdir", "rmdir", "chown", "chmod", "ln", "basename", "dirname", "sleep",
+        // 文本处理
+        "sed", "awk", "head", "tail",
+        // 系统工具
+        "ps", "top","kill", "free", "df", "du", "mount", "umount",
+        // 网络工具
+        "ping", "netstat", "ifconfig", "ip", "ss",
+    ];
+
+    let program_str = porgrams.join(" ");
+
+    let cmd = format!(
+        "busybox mkdir -p /bin; \
+        for c in {} ; do \
+           echo '#!/bash' >/bin/$c; \
+           echo \"busybox $c \\\"\\$@\\\"\" >> /bin/$c; \
+     done; \
+     hash -r",
+    program_str
+    ); 
+    run_bash_cmd(&cmd, &environ); // prepare busybox "symlinks" for test scripts
 
     let cfg = load_runtime_config();
 

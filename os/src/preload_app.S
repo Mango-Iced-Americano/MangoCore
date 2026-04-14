@@ -15,3 +15,12 @@ sbash:
     .incbin "./bash-la"
 ebash:
     .align 12
+
+    .section .data
+    .global sbusybox
+    .global ebusybox
+    .align 12
+sbusybox:
+    .incbin "./busybox-la"
+ebusybox:
+    .align 12
