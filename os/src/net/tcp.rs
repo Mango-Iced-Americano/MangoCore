@@ -77,41 +77,37 @@ impl Socket for TcpSocket {
     fn accept(&self, sockfd: u32, addr: usize, addrlen: usize) -> crate::utils::error::SyscallRet {
         // get old socket
         let task = current_task().unwrap();
+
+
+        let old_nonblock = task.files.lock().get_ref(sockfd as usize).unwrap().get_nonblock();
+        let peer_addr = self._accept(old_nonblock)?;
+        log::info!("[Socket::accept] connection established");
+
         let mut fd_table = task.files.lock();
         let mut socket_table = task.socket_table.lock();
-        let old_file = fd_table.get_ref(sockfd as usize).unwrap();
-        let old_nonblock = old_file.get_nonblock();
-        let old_cloexec = old_file.get_cloexec();
 
-        let peer_addr = self._accept(old_nonblock)?;
-        log::info!("[Socket::accept] get peer_addr: {:?}", peer_addr);
-        let local = self.loacl_endpoint();
-        log::info!("[Socket::accept] new socket try bind to : {:?}", local);
-        let new_socket = TcpSocket::new();
-        use core::convert::TryInto;
-        new_socket.bind(local.try_into().expect("cannot convert to ListenEndpoint"))?;
-        log::info!("[Socket::accept] new socket listen");
-        new_socket.listen()?;
-        address::fill_with_endpoint(peer_addr, addr, addrlen)?;
-        let new_socket = Arc::new(new_socket);
-        log::debug!("[Socket::accept] take old sock");
-        // 取出旧的
-        let old_file = fd_table.take(sockfd as usize).unwrap();
-        let old_socket: Option<Arc<dyn Socket>> =
-            socket_table.get_ref(sockfd as usize).cloned();
-        // 新的替换旧的
-        log::debug!("[Socket::accept] replace old sock to new");
+        let connected_socket = socket_table.get_ref(sockfd as usize).unwrap().clone();
+        let connected_file_desc = fd_table.get_ref(sockfd as usize).unwrap().clone();
+        let old_clonexec =  connected_file_desc.get_cloexec();
+
+        let new_fd = fd_table.insert(connected_file_desc).unwrap();
+        socket_table.insert(new_fd, connected_socket);
+
+        let new_listener =Arc::new(TcpSocket::new());
+
+        new_listener.bind(self.inner.lock().local_endpoint)?;
+        new_listener.listen()?;
+
         let _ = fd_table.insert_at(
-            FileDescriptor::new(old_cloexec, old_nonblock, new_socket.clone()),
+            FileDescriptor::new(old_clonexec, false, new_listener.clone()),
             sockfd as usize,
         );
-        socket_table
-            .insert(sockfd as usize, new_socket.clone());
-        // 旧的插在新的fd上
-        let fd = fd_table.insert(old_file).unwrap();
-        socket_table.insert(fd, old_socket.unwrap());
-        log::info!("[Socket::accept] insert old sock to newfd: {}", fd);
-        Ok(fd)
+
+        socket_table.insert(sockfd as usize, new_listener);
+
+        address::fill_with_endpoint(peer_addr, addr, addrlen)?;
+
+        Ok(new_fd)
     }
 
     fn socket_type(&self) -> super::SocketType {
@@ -417,6 +413,12 @@ impl TcpSocket {
                 if !socket.can_recv() {
                     // panic!();
                     log::info!("[TcpRecvFuture::poll] cannot recv yet");
+                    log::debug!(
+                    "[TcpDebug] RecvQueue: {} bytes, State: {:?}, MayRecv: {}",
+                    socket.recv_queue(), // 看看这里到底是不是 0
+                    socket.state(),
+                    socket.may_recv()
+                    );
                     return Err(SyscallErr::EAGAIN);
                 }
                 log::info!("[TcpRecvFuture::poll] start to recv...");

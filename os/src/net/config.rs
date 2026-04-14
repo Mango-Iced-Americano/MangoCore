@@ -116,7 +116,7 @@ impl<'a> NetInterface<'a> {
         self._poll()
     }
     pub fn _poll(&self) {
-        log::debug!("[NetInterface::poll] poll...");
+        log::trace!("[NetInterface::poll] poll...");
         self.inner_handler(|inner| {
             inner.iface.poll(
                 Instant::from_millis(current_time_duration().as_millis() as i64),

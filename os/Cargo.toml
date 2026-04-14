@@ -52,6 +52,8 @@ swap = []
 zram = []
 oom_handler = ["swap", "zram"]
 log_off = ["log/max_level_off"]
+log_trace = ["log/max_level_trace"]
+log_debug = ["log/max_level_debug"]
 log_info = ["log/max_level_info"]
 log_warn = ["log/max_level_warn"]
 log_error = ["log/max_level_error"]
@@ -96,3 +98,4 @@ codegen-units = 16
 rpath = false
 [profile.release]
 lto = true
+debug = true

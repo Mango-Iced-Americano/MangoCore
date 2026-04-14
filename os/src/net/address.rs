@@ -24,17 +24,14 @@ impl SocketAddrv4 {
         log::info!("[SocketAddrv4::new] new addr: {:?}", addr);
         addr
     }
-    pub fn fill(&self, addr_buf: &mut [u8], addrlen: usize) {
-        self._fill(addr_buf, addrlen);
+    pub fn fill(&self, addr_buf: &mut [u8]) {
+        self._fill(addr_buf);
     }
-    pub fn _fill(&self, addr_buf: &mut [u8], addrlen: usize) {
+    pub fn _fill(&self, addr_buf: &mut [u8]) {
         addr_buf.fill(0);
         addr_buf[0..2].copy_from_slice(u16::to_ne_bytes(AF_INET).as_slice());
         addr_buf[2..4].copy_from_slice(self.sin_port.as_slice());
         addr_buf[4..8].copy_from_slice(self.sin_addr.as_slice());
-        unsafe {
-            *(addrlen as *mut u32) = 8;
-        }
     }
 }
 
@@ -107,18 +104,15 @@ impl SocketAddrv6 {
         log::debug!("[SocketAddrv6::new] new addr: {:?}", addr);
         addr
     }
-    pub fn fill(&self, addr_buf: &mut [u8], addrlen: usize) {
-        self._fill(addr_buf, addrlen)
+    pub fn fill(&self, addr_buf: &mut [u8]) {
+        self._fill(addr_buf);
     }
-    pub fn _fill(&self, addr_buf: &mut [u8], addrlen: usize) {
+    pub fn _fill(&self, addr_buf: &mut [u8]) {
         addr_buf.fill(0);
         addr_buf[0..2].copy_from_slice(u16::to_ne_bytes(AF_INET6).as_slice());
         addr_buf[2..4].copy_from_slice(self.sin6_port.as_slice());
         addr_buf[4..8].copy_from_slice(self.sin6_flowinfo.as_slice());
         addr_buf[8..24].copy_from_slice(self.sin6_addr.as_slice());
-        unsafe {
-            *(addrlen as *mut u32) = 24;
-        }
     }
 }
 
@@ -216,16 +210,19 @@ pub fn _fill_with_endpoint(endpoint: IpEndpoint, addr: usize, addrlen: usize) ->
     let task = current_task().unwrap();
     let token = task.get_user_token();
     let addr = translated_refmut(token, addr as *mut u8).unwrap();
+    let addrlen = translated_refmut(token, addrlen as *mut u32).unwrap();
     match endpoint.addr {
         IpAddress::Ipv4(_) => {
             let len = mem::size_of::<u16>() + mem::size_of::<SocketAddrv4>();
             let addr_buf = unsafe { slice::from_raw_parts_mut(addr as *mut u8, len) };
-            SocketAddrv4::from(endpoint).fill(addr_buf, addrlen);
+            SocketAddrv4::from(endpoint).fill(addr_buf);
+            *addrlen= 8;
         }
         IpAddress::Ipv6(_) => {
             let len = mem::size_of::<u16>() + mem::size_of::<SocketAddrv6>();
             let addr_buf = unsafe { slice::from_raw_parts_mut(addr as *mut u8, len) };
-            SocketAddrv6::from(endpoint).fill(addr_buf, addrlen);
+            SocketAddrv6::from(endpoint).fill(addr_buf);
+            *addrlen = 24;
         }
     }
     Ok(0)

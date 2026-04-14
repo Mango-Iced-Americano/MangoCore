@@ -748,6 +748,7 @@ fn init_device_directory() {
     lock.as_mut().unwrap().insert("null".to_string(), null_dev);
     lock.as_mut().unwrap().insert("zero".to_string(), zero_dev);
     lock.as_mut().unwrap().insert("tty".to_string(), tty_dev);
+    lock.as_mut().unwrap().insert("urandom".to_string(), urandom_dev);
     drop(lock);
 
     let misc_inode = match dev_inode.cd_path("./misc") {
