@@ -189,6 +189,8 @@ impl Socket for TcpSocket {
         }
         Ok(0)
     }
+
+    fn send_to(&self, buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet {todo!();}
 }
 
 impl TcpSocket {
@@ -197,7 +199,7 @@ impl TcpSocket {
         let rx_buf = socket::tcp::SocketBuffer::new(vec![0 as u8; MAX_BUFFER_SIZE]);
         let socket = socket::tcp::Socket::new(rx_buf, tx_buf);
         let socket_handler = NET_INTERFACE.add_socket(socket);
-        info!("[TcpSocket::new] new {}", socket_handler);
+        log::info!("[TcpSocket::new] new {}", socket_handler);
         NET_INTERFACE.poll();
         Self {
             socket_handler,

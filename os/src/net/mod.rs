@@ -1,7 +1,7 @@
 #[allow(unused)]
 use crate::{
     fs::{file_descriptor::FileDescriptor, file_trait::File, OpenFlags},
-    net::{tcp::TcpSocket, udp::UdpSocket},
+    net::{tcp::TcpSocket, udp::UdpSocket, raw::RawSocket},
     task::current_task,
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
 };
@@ -15,6 +15,7 @@ pub mod address;
 pub mod config;
 mod tcp;
 mod udp;
+mod raw;
 mod unix;
 
 pub type Fd = usize;
@@ -35,13 +36,25 @@ pub const SHUT_WR: u32 = 1;
 #[allow(unused)]
 pub const SHUT_RDWR: u32 = 2;
 
+
+const SOCK_TYPE_MASK: u32 = 0xF;
 bitflags! {
     /// socket type
     pub struct SocketType: u32 {
         /// for TCP
-        const SOCK_STREAM = 1 << 0;
+        const SOCK_STREAM = 1 ;
         /// for UDP
-        const SOCK_DGRAM = 1 << 1;
+        const SOCK_DGRAM = 2;
+        //
+        const SOCK_RAW = 3;
+
+        const SOCK_RDM = 4;
+
+        const SOCK_SEQPACKET = 5;
+
+        const SOCK_DCCP = 6;
+
+        const SOCK_PACKET = 10;
         /// unused now
         const SOCK_CLOEXEC = 1 << 19;
     }
@@ -66,11 +79,13 @@ pub trait Socket: File {
     fn shutdown(&self, how: u32) -> GeneralRet<()>;
     fn set_nagle_enabled(&self, enabled: bool) -> SyscallRet;
     fn set_keep_alive(&self, enabled: bool) -> SyscallRet;
+    fn send_to(&self, buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet; 
 }
 
 impl dyn Socket {
-    pub fn alloc(domain: u32, socket_type: u32) -> GeneralRet<usize> {
+    pub fn alloc(domain: u32, socket_type: u32, protocol:u32) -> GeneralRet<usize> {
         log::info!("[Socket::new] domain: {}", domain);
+        let pure_type = socket_type & SOCK_TYPE_MASK;
         match domain as u16 {
             AF_INET | AF_INET6 => {
                 let socket_type = SocketType::from_bits(socket_type).ok_or(SyscallErr::EINVAL)?;
@@ -80,7 +95,7 @@ impl dyn Socket {
                     OpenFlags::O_RDWR
                 };
                 info!("[Socket::alloc] flags: {:?}", flags);
-                if socket_type.contains(SocketType::SOCK_DGRAM) {
+                if pure_type==SocketType::SOCK_DGRAM.bits() {
                     let socket = UdpSocket::new();
                     let socket = Arc::new(socket);
                     // current_process().inner_handler(|proc| {
@@ -93,7 +108,7 @@ impl dyn Socket {
                     let fd = current_tcb.files.lock().insert(FileDescriptor::new(false, false, socket.clone())).unwrap();
                     current_tcb.socket_table.lock().insert(fd, socket);
                     Ok(fd)
-                } else if socket_type.contains(SocketType::SOCK_STREAM) {
+                } else if pure_type==SocketType::SOCK_STREAM.bits() {
                     let socket = TcpSocket::new();
                     let socket = Arc::new(socket);
                     // current_process().inner_handler(|proc| {
@@ -106,7 +121,16 @@ impl dyn Socket {
                     let fd = current_tcb.files.lock().insert(FileDescriptor::new(false, false, socket.clone())).unwrap();
                     current_tcb.socket_table.lock().insert(fd, socket);
                     Ok(fd)
-                } else {
+                } 
+                else if pure_type == SocketType::SOCK_RAW.bits() {
+                    let socket = RawSocket::new(protocol);
+                    let socket = Arc::new(socket);
+                    let current_tcb = current_task().unwrap();
+                    let fd = current_tcb.files.lock().insert(FileDescriptor::new(false, false, socket.clone())).unwrap();
+                    current_tcb.socket_table.lock().insert(fd, socket);
+                    Ok(fd)
+                }
+                else {
                     Err(SyscallErr::EINVAL)
                 }
             }

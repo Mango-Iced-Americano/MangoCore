@@ -53,6 +53,7 @@ pub fn log_init() {
         Some("trace") => LevelFilter::Trace,
         _ => LevelFilter::Off,
     });
+    println!("[kernel] logger inited, level= {:?}",log::max_level());
 }
 
 struct Logger;

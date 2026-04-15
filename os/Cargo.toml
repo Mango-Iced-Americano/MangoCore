@@ -3,6 +3,9 @@ name = "os"
 version = "0.1.0"
 edition = "2018"
 
+[patch.crates-io]
+smoltcp = {path = "../dependency/smoltcp" }
+
 [dependencies]
 lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
 buddy_system_allocator = "0.8"
@@ -38,7 +41,9 @@ smoltcp = { version = "0.10.0", default-features = false, features = [
     "proto-ipv4-fragmentation",
     "socket-udp",
     "socket-tcp",
+    "socket-raw",
     "socket-dhcpv4",
+    "socket-icmp",
     "async",
 ] }
 

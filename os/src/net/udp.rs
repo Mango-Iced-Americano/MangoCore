@@ -143,6 +143,8 @@ impl Socket for UdpSocket {
     fn set_keep_alive(&self, _enabled: bool) -> SyscallRet {
         Err(SyscallErr::EOPNOTSUPP)
     }
+
+    fn send_to(&self, buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet {todo!();}
 }
 
 impl UdpSocket {

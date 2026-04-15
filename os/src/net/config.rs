@@ -3,7 +3,7 @@ use alloc::vec;
 use smoltcp::{
     iface::{Config, Interface, SocketHandle, SocketSet},
     phy::{Device, Loopback, Medium},
-    socket::{tcp, udp, AnySocket},
+    socket::{tcp, udp,raw, AnySocket},
     time::Instant,
     wire::{EthernetAddress, IpAddress, IpCidr},
 };
@@ -106,6 +106,16 @@ impl<'a> NetInterface<'a> {
             .unwrap()
             .sockets
             .get_mut::<udp::Socket>(handler))
+    }
+
+    pub fn raw_socket<T>(&self, handler: SocketHandle, f: impl FnOnce(&mut raw::Socket) -> T) -> T {
+        f(self
+            .inner
+            .lock()
+            .as_mut()
+            .unwrap()
+            .sockets
+            .get_mut::<raw::Socket>(handler))
     }
 
     pub fn inner_handler<T>(&self, f: impl FnOnce(&mut NetInterfaceInner<'a>) -> T) -> T {

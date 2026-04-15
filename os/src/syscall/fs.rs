@@ -11,6 +11,7 @@ use crate::timer::TimeSpec;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
+use smoltcp::socket;
 use core::mem::size_of;
 use core::panic;
 use log::{debug, info, trace, warn};
@@ -629,20 +630,35 @@ pub fn sys_dup(oldfd: usize) -> isize {
 }
 
 pub fn sys_dup2(oldfd: usize, newfd: usize) -> isize {
-    let task = current_task().unwrap();
-    // if oldfd == newfd {
-    //     return EINVAL;
-    // }
-    let mut fd_table = task.files.lock();
-    let mut file_descriptor = match fd_table.get_ref(oldfd) {
-        Ok(file_descriptor) => file_descriptor.clone(),
-        Err(errno) => return errno,
-    };
-    file_descriptor.set_cloexec(false);
-    match fd_table.insert_at(file_descriptor, newfd) {
-        Ok(fd) => fd as isize,
-        Err(errno) => errno,
+    if oldfd==newfd {
+        return oldfd as isize;
     }
+    let task = current_task().unwrap();
+
+    let ret = {
+        let mut fd_table = task.files.lock();
+        let mut file_descriptor = match fd_table.get_ref(oldfd) {
+            Ok(file_descriptor) => file_descriptor.clone(),
+            Err(errno) => return errno,
+        };
+
+        file_descriptor.set_cloexec(false);
+        match fd_table.insert_at(file_descriptor, newfd) {
+            Ok(fd) => fd as isize,
+            Err(errno) => errno,
+        }
+    };
+    if ret < 0 {
+        return ret;
+    }
+    let mut socket_table = task.socket_table.lock();
+    let old_socket = socket_table.get_ref(oldfd).cloned();
+    if let Some(sock)=old_socket {
+        socket_table.insert(newfd,sock);           
+    }
+    info!("[sys_dup2] oldfd: {}, newfd: {}", oldfd, newfd);
+    newfd as isize
+
 }
 
 pub fn sys_dup3(oldfd: usize, newfd: usize, flags: u32) -> isize {

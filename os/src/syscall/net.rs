@@ -28,7 +28,7 @@ pub fn sys_socket(domain: u32, socket_type: u32, protocol: u32) -> isize {
         "[sys_socket] domain: {}, type: {}, protocol: {}",
         domain, socket_type, protocol
     );
-    let result = match <dyn Socket>::alloc(domain, socket_type){
+    let result = match <dyn Socket>::alloc(domain, socket_type, protocol){
         Ok(sockfd) => {
             info!("[sys_socket] new sockfd: {}", sockfd);
             sockfd as isize
@@ -119,6 +119,18 @@ pub fn sys_sendto(
             let _ = socket.connect(dest_addr);
             socket_file.file.write(Some(&mut offset),buf)
         }
+        SocketType::SOCK_RAW => {
+            info!("[sys_sendto] socket is raw");
+            let dest_addr = trans_ref!(dest_addr,addrlen);
+            let endpoint = address::endpoint(dest_addr).unwrap();
+    
+            match socket.send_to(buf, endpoint) {
+            Ok(bytes_sent) => bytes_sent as usize, // 返回正数长度
+            Err(e) => e as usize, 
+            }
+            
+            
+        }
         _ => todo!(),
     };
     len as isize
@@ -152,6 +164,13 @@ pub  fn sys_recvfrom(
             len as isize
         }
         SocketType::SOCK_DGRAM => {
+            let len = socket_file.file.read(Some(&mut offset),buf);
+            if src_addr != 0 {
+                let _ = socket.peer_addr(src_addr, addrlen);
+            }
+            len as isize
+        }
+        SocketType::SOCK_RAW => {
             let len = socket_file.file.read(Some(&mut offset),buf);
             if src_addr != 0 {
                 let _ = socket.peer_addr(src_addr, addrlen);

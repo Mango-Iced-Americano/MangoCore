@@ -86,6 +86,10 @@ impl<const N: usize> Socket for UnixSocket<N> {
     fn set_keep_alive(&self, _enabled: bool) -> crate::utils::error::SyscallRet {
         Err(SyscallErr::EOPNOTSUPP)
     }
+
+    fn send_to(&self, buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet {
+        todo!();
+    }
 }
 
 impl<const N: usize> UnixSocket<N> {
