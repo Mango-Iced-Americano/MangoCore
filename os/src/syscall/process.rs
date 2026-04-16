@@ -240,6 +240,7 @@ pub fn sys_setitimer(
             if new_value as usize != 0 {
                 copy_from_user(token, new_value, &mut inner.timer[which]).unwrap();
                 trace!("[sys_setitimer] *new_value: {:?}", inner.timer[which]);
+                inner.clock.last_real_timer_update = TimeVal::now(); 
             }
             SUCCESS
         }

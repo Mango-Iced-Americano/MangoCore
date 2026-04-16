@@ -3,18 +3,8 @@
 use super::{Mutex, Socket};
 use crate::{
     fs::{
-        directory_tree::DirectoryTreeNode,
-        dirent::Dirent,
-        fat32::{DiskInodeType, PageCache},
-        file_trait::File,
-        OpenFlags,
-        SeekWhence,
-        Stat,
-    },
-    mm::UserBuffer,
-    net::{config::NET_INTERFACE, MAX_BUFFER_SIZE, SHUT_WR},
-    task::{current_task, suspend_current_and_run_next},
-    utils::error::{GeneralRet, SyscallErr, SyscallRet},
+        OpenFlags, SeekWhence, Stat, directory_tree::DirectoryTreeNode, dirent::Dirent, fat32::{DiskInodeType, PageCache}, file_trait::File
+    }, hal::arch::riscv::trap, mm::UserBuffer, net::{MAX_BUFFER_SIZE, SHUT_WR, config::NET_INTERFACE}, task::{current_task, suspend_current_and_run_next}, utils::error::{GeneralRet, SyscallErr, SyscallRet}
 };
 use alloc::{
     string::String,
@@ -198,8 +188,12 @@ impl File for RawSocket {
     }
 
     fn read(&self, _offset: Option<&mut usize>, buf: &mut [u8]) -> usize {
-        let ret = self._read(buf).unwrap();
-        ret
+        match self._read(buf) {
+            GeneralRet::Ok(len) => len,
+            GeneralRet::Err(err) => {
+            err as usize 
+        }
+}
     }
 
     fn write(&self, _offset: Option<&mut usize>, buf: &[u8]) -> usize {
@@ -353,20 +347,29 @@ impl RawSocket {
             });
 
             NET_INTERFACE.poll();
+
             match ret {
-                Ok(result) => return GeneralRet::Ok(result),
+                Ok(result) => {
+                    return GeneralRet::Ok(result);
+                }
                 Err(SyscallErr::EAGAIN) => {
+                    {
+                        let task = current_task().unwrap();
+                        task.acquire_inner_lock().refresh_real_timer();
+                    }
                     suspend_current_and_run_next();
                     // 如果返回 EAGAIN 错误，继续循环
+                    log::trace!("[RawSocket] recv continue");
                     let task = current_task().unwrap();
                     if !task.acquire_inner_lock().sigpending.is_empty() {
                     log::info!("[RawSocket] recv interrupted by signal!");
                     return Err(SyscallErr::EINTR);
-                    }
-    
+                    }    
                     continue;
                 }
-                Err(err) => return GeneralRet::Err(err),
+                Err(err) => {
+                    return GeneralRet::Err(err);
+                }
             }
         }
     }

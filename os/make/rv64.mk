@@ -61,8 +61,13 @@ DISASM ?= -x
 
 all: fs-img build
 
+debug: build mv-debug
+
 mv:
 	cp -f $(KERNEL_BIN) ../kernel-rv
+
+mv-debug:
+	cp -f $(KERNEL_ELF) ../kernel-rv
 
 build: env $(KERNEL_BIN) mv
 

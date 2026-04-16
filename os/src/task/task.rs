@@ -141,6 +141,8 @@ pub struct ProcClock {
     last_enter_u_mode: TimeVal,
     /// 上次进入内核态的时间
     last_enter_s_mode: TimeVal,
+    //  上次更新real计时器的时间
+    pub last_real_timer_update: TimeVal,
 }
 
 impl ProcClock {
@@ -151,6 +153,7 @@ impl ProcClock {
         Self {
             last_enter_u_mode: now,
             last_enter_s_mode: now,
+            last_real_timer_update: now,
         }
     }
 }
@@ -297,6 +300,16 @@ impl TaskControlBlockInner {
                 self.timer[2].it_value = self.timer[2].it_interval;
             }
         }
+    }
+
+    pub fn refresh_real_timer(&mut self) {
+        let now = TimeVal::now();
+        let diff = now - self.clock.last_real_timer_update;
+        log::debug!("real_timer refreshing...");
+        self.update_itimer_real_if_exists(diff);
+        // 更新锚点，防止重复计算
+        self.clock.last_real_timer_update = now; 
+        
     }
 }
 

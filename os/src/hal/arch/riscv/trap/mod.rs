@@ -19,6 +19,7 @@ use riscv::register::{
     scause::{self, Exception, Interrupt, Trap},
     sepc, sie, stval, stvec,
 };
+use crate::timer::{ITimerVal, TimeVal};
 
 pub static mut TIMER_INTERRUPT: usize = 0;
 
@@ -66,6 +67,7 @@ pub fn enable_timer_interrupt() {
 
 #[no_mangle]
 pub fn trap_handler() -> ! {
+    log::debug!("[trap_handler] trapped");
     set_kernel_trap_entry();
     {
         let task = current_task().unwrap();
@@ -146,6 +148,7 @@ pub fn trap_handler() -> ! {
     {
         let task = current_task().unwrap();
         let mut inner = task.acquire_inner_lock();
+        inner.refresh_real_timer();
         inner.update_process_times_leave_trap(scause.cause());
     }
     trap_return();
