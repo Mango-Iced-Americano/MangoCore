@@ -1,4 +1,5 @@
 use crate::timer::current_time_duration;
+use crate::drivers::NET_DEVICE;
 use alloc::vec;
 use smoltcp::{
     iface::{Config, Interface, SocketHandle, SocketSet},
@@ -14,6 +15,11 @@ pub static NET_INTERFACE: NetInterface = NetInterface::new();
 
 pub fn init() {
     NET_INTERFACE.init();
+    //初始化网卡
+    let mac = NET_DEVICE.mac_address();
+    println!("[kernel] nic init sucess!");
+    println!("[kernel] MAC : {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", 
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
 pub struct NetInterface<'a> {
