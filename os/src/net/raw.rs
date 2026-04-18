@@ -4,7 +4,12 @@ use super::{Mutex, Socket};
 use crate::{
     fs::{
         OpenFlags, SeekWhence, Stat, directory_tree::DirectoryTreeNode, dirent::Dirent, fat32::{DiskInodeType, PageCache}, file_trait::File
-    }, hal::arch::riscv::trap, mm::UserBuffer, net::{MAX_BUFFER_SIZE, SHUT_WR, config::NET_INTERFACE}, task::{current_task, suspend_current_and_run_next}, utils::error::{GeneralRet, SyscallErr, SyscallRet}
+    },
+    mm::UserBuffer,
+    net::{MAX_BUFFER_SIZE, SHUT_WR, config::NET_INTERFACE},
+    task::{block_current_and_run_next, suspend_current_and_run_next, wait_interruptible, wait_interruptible_timeout},
+    timer::TimeSpec,
+    utils::error::{GeneralRet, SyscallErr, SyscallRet},
 };
 use alloc::{
     string::String,
@@ -194,11 +199,10 @@ impl File for RawSocket {
 
     fn read(&self, _offset: Option<&mut usize>, buf: &mut [u8]) -> usize {
         match self._read(buf) {
-            GeneralRet::Ok(len) => len,
-            GeneralRet::Err(err) => {
-            err as usize 
+            Ok(ret) => ret,
+            //权衡写法，将正数err转为负数错误类型
+            Err(err) => err.as_errno_ret(),
         }
-}
     }
 
     fn write(&self, _offset: Option<&mut usize>, buf: &[u8]) -> usize {
@@ -358,18 +362,8 @@ impl RawSocket {
                     return GeneralRet::Ok(result);
                 }
                 Err(SyscallErr::EAGAIN) => {
-                    {
-                        let task = current_task().unwrap();
-                        task.acquire_inner_lock().refresh_real_timer();
-                    }
-                    suspend_current_and_run_next();
-                    // 如果返回 EAGAIN 错误，继续循环
-                    log::trace!("[RawSocket] recv continue");
-                    let task = current_task().unwrap();
-                    if !task.acquire_inner_lock().sigpending.is_empty() {
-                    log::info!("[RawSocket] recv interrupted by signal!");
-                    return Err(SyscallErr::EINTR);
-                    }    
+                    //等待SIGALRM信号，进入Interruptible状态而不是Ready状态
+                    wait_interruptible()?;
                     continue;
                 }
                 Err(err) => {

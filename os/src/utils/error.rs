@@ -151,3 +151,9 @@ pub enum SyscallErr {
     ERFKILL = 132,
     EHWPOISON = 133,
 }
+
+impl SyscallErr {
+    pub fn as_errno_ret(self) -> usize {
+        (-(self as isize)) as usize
+    }
+}

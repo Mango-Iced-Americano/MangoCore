@@ -11,6 +11,8 @@ use crate::hal::__switch;
 use crate::{
     fs::{OpenFlags, ROOT_FD},
     mm::translated_refmut,
+    timer::TimeSpec,
+    utils::error::{GeneralRet, SyscallErr},
 };
 use alloc::{collections::VecDeque, sync::Arc};
 pub use context::TaskContext;
@@ -19,8 +21,8 @@ use lazy_static::*;
 use log::warn;
 use manager::fetch_task;
 pub use manager::{
-    add_task, do_oom, do_wake_expired, find_task_by_pid, find_task_by_tgid, procs_count,
-    sleep_interruptible, wait_with_timeout, wake_interruptible,
+    add_kernel_timer, add_task, do_oom, do_wake_expired, find_task_by_pid, find_task_by_tgid,
+    procs_count, sleep_interruptible, wait_with_timeout, wake_interruptible, TimerAction,
 };
 // pub use pid::RecycleAllocator;
 pub use pid::{pid_alloc, trap_cx_bottom_from_tid, ustack_bottom_from_tid, PidHandle};
@@ -77,6 +79,46 @@ pub fn block_current_and_run_next() {
     sleep_interruptible(task);
     // jump to scheduling cycle
     schedule(task_cx_ptr);
+}
+
+//判断该task的sigpending中是否已经有未遮蔽信号
+fn has_unblocked_signal(task: &Arc<TaskControlBlock>) -> bool {
+    let inner = task.acquire_inner_lock();
+    !inner.sigpending.difference(inner.sigmask).is_empty()
+}
+
+//等待一段时间直到达到deadline
+pub fn wait_interruptible_timeout(deadline: TimeSpec) -> GeneralRet<()> {
+    let task = current_task().unwrap();
+    if has_unblocked_signal(&task) {
+        return Err(SyscallErr::ERESTART);
+    }
+    if TimeSpec::now() >= deadline {
+        return Ok(());
+    }
+    wait_with_timeout(Arc::downgrade(&task), deadline);
+    block_current_and_run_next();
+    if has_unblocked_signal(&task) {
+        Err(SyscallErr::ERESTART)
+    } else {
+        Ok(())
+    }
+}
+
+//等待直到下一个信号传来
+pub fn wait_interruptible() -> GeneralRet<()> {
+    let task = current_task().unwrap();
+    //有信号则直接抛错退出
+    if has_unblocked_signal(&task) {
+        return Err(SyscallErr::ERESTART);
+    }
+    block_current_and_run_next();
+    //醒后检查
+    if has_unblocked_signal(&task) {
+        Err(SyscallErr::ERESTART)
+    } else {
+        Ok(())
+    }
 }
 
 pub fn do_exit(task: Arc<TaskControlBlock>, exit_code: u32) {

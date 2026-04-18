@@ -9,9 +9,9 @@ use crate::config::SYSTEM_TASK_LIMIT;
 #[cfg(feature = "oom_handler")]
 use alloc::vec::Vec;
 
-use crate::timer::TimeSpec;
+use crate::timer::{TimeSpec, TimeVal};
 
-use super::{current_task, TaskControlBlock};
+use super::{current_task, signal::Signals, TaskControlBlock};
 use alloc::collections::{BinaryHeap, VecDeque};
 use alloc::sync::{Arc, Weak};
 use lazy_static::*;
@@ -422,6 +422,149 @@ pub struct TimeoutWaiter {
     timeout: TimeSpec,
 }
 
+//表示到达deadline后触发的动作
+pub enum TimerAction {
+    //唤醒task
+    WakeTask {
+        task: Weak<TaskControlBlock>,
+        generation: usize,
+    },
+    //向某个task发送signal
+    SendSignal {
+        task: Weak<TaskControlBlock>,
+        signal: Signals,
+        generation: usize,
+    },
+}
+
+//内核中的统一计时器，目前用于itimer_real
+pub struct KernelTimer {
+    action: TimerAction,
+    deadline: TimeSpec,
+}
+
+impl Ord for KernelTimer {
+    fn cmp(&self, other: &Self) -> Ordering {
+        Ordering::reverse(self.deadline.cmp(&other.deadline))
+    }
+}
+
+impl PartialOrd for KernelTimer {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Eq for KernelTimer {}
+
+impl PartialEq for KernelTimer {
+    /// 仅通过比较deadline字段
+    fn eq(&self, other: &Self) -> bool {
+        self.deadline.eq(&other.deadline)
+    }
+}
+
+//计数器触发队列
+pub struct KernelTimerQueue {
+    inner: BinaryHeap<KernelTimer>,
+}
+
+impl KernelTimerQueue {
+    pub fn new() -> Self {
+        Self {
+            inner: BinaryHeap::new(),
+        }
+    }
+    pub fn add_action(&mut self, action: TimerAction, deadline: TimeSpec) {
+        self.inner.push(KernelTimer { action, deadline });
+    }
+    pub fn wake_expired(&mut self, now: TimeSpec) {
+        while let Some(timer) = self.inner.pop() {
+            if timer.deadline > now {
+                self.inner.push(timer);
+                break;
+            }
+            self.run_timer(timer, now);
+        }
+    }
+    fn run_timer(&mut self, timer: KernelTimer, now: TimeSpec) {
+        match timer.action {
+            TimerAction::WakeTask {
+                task,
+                generation: _,
+            } => {
+                if let Some(task) = task.upgrade() {
+                    let mut inner = task.acquire_inner_lock();
+                    match inner.task_status {
+                        super::TaskStatus::Interruptible => {
+                            inner.task_status = super::task::TaskStatus::Ready
+                        }
+                        _ => return,
+                    }
+                    drop(inner);
+                    wake_interruptible(task);
+                }
+            }
+            TimerAction::SendSignal {
+                task,
+                signal,
+                generation,
+            } => {
+                if signal.is_empty() {
+                    return;
+                }
+                if let Some(task) = task.upgrade() {
+                    let mut should_wake = false;
+                    let mut next_real_timer = None;
+                    {
+                        let mut inner = task.acquire_inner_lock();
+                        if signal == Signals::SIGALRM {
+                            if inner.real_timer_generation != generation
+                                || inner.real_timer_deadline != Some(timer.deadline)
+                            {
+                                return;
+                            }
+                        }
+                        inner.add_signal(signal);
+                        if signal == Signals::SIGALRM {
+                            if inner.timer[0].it_interval.is_zero() {
+                                inner.real_timer_deadline = None;
+                                inner.timer[0].it_value = TimeVal::new();
+                            } else {
+                                let interval =
+                                    TimeSpec::from_us(inner.timer[0].it_interval.to_us());
+                                let deadline = now + interval;
+                                inner.real_timer_generation =
+                                    inner.real_timer_generation.wrapping_add(1);
+                                let next_generation = inner.real_timer_generation;
+                                inner.real_timer_deadline = Some(deadline);
+                                inner.timer[0].it_value = inner.timer[0].it_interval;
+                                next_real_timer = Some((deadline, next_generation));
+                            }
+                        }
+                        if inner.task_status == super::TaskStatus::Interruptible {
+                            inner.task_status = super::TaskStatus::Ready;
+                            should_wake = true;
+                        }
+                    }
+                    if should_wake {
+                        wake_interruptible(task.clone());
+                    }
+                    if let Some((deadline, next_generation)) = next_real_timer {
+                        self.add_action(
+                            TimerAction::SendSignal {
+                                task: Arc::downgrade(&task),
+                                signal,
+                                generation: next_generation,
+                            },
+                            deadline,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
 // 二叉堆是最大堆，所以我们需要反转排序
 impl Ord for TimeoutWaiter {
     fn cmp(&self, other: &Self) -> Ordering {
@@ -521,17 +664,31 @@ impl TimeoutWaitQueue {
 lazy_static! {
     /// 全局超时等待队列
     pub static ref TIMEOUT_WAITQUEUE: Mutex<TimeoutWaitQueue> = Mutex::new(TimeoutWaitQueue::new());
+    /// 全局内核计时器队列
+    pub static ref KERNEL_TIMER_QUEUE: Mutex<KernelTimerQueue> =
+        Mutex::new(KernelTimerQueue::new());
+}
+
+/// 加入一个内核计时器动作
+pub fn add_kernel_timer(action: TimerAction, deadline: TimeSpec) {
+    KERNEL_TIMER_QUEUE.lock().add_action(action, deadline);
 }
 
 /// 这个函数会将一个`task`添加到全局超时等待队列中，但是不会阻塞它
 /// 如果想要阻塞一个任务，使用`block_current_and_run_next()`函数
 pub fn wait_with_timeout(task: Weak<TaskControlBlock>, timeout: TimeSpec) {
-    TIMEOUT_WAITQUEUE.lock().add_task(task, timeout)
+    KERNEL_TIMER_QUEUE.lock().add_action(
+        TimerAction::WakeTask {
+            task,
+            generation: 0,
+        },
+        timeout,
+    )
 }
 
 /// 唤醒全局超时等待队列中所有已超时的任务
 pub fn do_wake_expired() {
-    TIMEOUT_WAITQUEUE
-        .lock()
-        .wake_expired(crate::timer::TimeSpec::now());
+    let now = crate::timer::TimeSpec::now();
+    TIMEOUT_WAITQUEUE.lock().wake_expired(now);
+    KERNEL_TIMER_QUEUE.lock().wake_expired(now);
 }

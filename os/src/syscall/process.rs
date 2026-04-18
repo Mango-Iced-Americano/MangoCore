@@ -11,10 +11,10 @@ use crate::show_frame_consumption;
 use crate::syscall::errno::*;
 use crate::task::threads::{do_futex_wait, FutexCmd};
 use crate::task::{
-    add_task, block_current_and_run_next, current_task, current_user_token,
+    add_kernel_timer, add_task, block_current_and_run_next, current_task, current_user_token,
     exit_current_and_run_next, exit_group_and_run_next, find_task_by_pid, find_task_by_tgid,
     procs_count, signal::*, suspend_current_and_run_next, threads, wait_with_timeout,
-    wake_interruptible, Rusage, TaskStatus,
+    wake_interruptible, Rusage, TaskStatus, TimerAction,
 };
 use crate::timer::{get_time_ms, get_time_sec, ITimerVal, TimeSpec, TimeVal, TimeZone, Times};
 use alloc::boxed::Box;
@@ -228,17 +228,69 @@ pub fn sys_setitimer(
         "[sys_setitimer] which: {}, new_value: {:?}, old_value: {:?}",
         which, new_value, old_value
     );
+    if which > 2 {
+        return EINVAL;
+    }
+    let task = current_task().unwrap();
+    let token = task.get_user_token();
+    let new_timer = if new_value as usize != 0 {
+        let mut value = ITimerVal::new();
+        copy_from_user(token, new_value, &mut value).unwrap();
+        Some(value)
+    } else {
+        None
+    };
     match which {
-        0..=2 => {
-            let task = current_task().unwrap();
+        //实时计时器走KernelTimer
+        0 => {
+            let now = TimeSpec::now();
+            //待注册计时器
+            let mut register_timer = None;
+            {
+                let mut inner = task.acquire_inner_lock();
+                if old_value as usize != 0 {
+                    inner.timer[0].it_value = match inner.real_timer_deadline {
+                        Some(deadline) => timespec_to_timeval(deadline - now),
+                        None => TimeVal::new(),
+                    };
+                    copy_to_user(token, &inner.timer[0], old_value).unwrap();
+                    trace!("[sys_setitimer] *old_value: {:?}", inner.timer[0]);
+                }
+                if let Some(value) = new_timer {
+                    //防止generation溢出
+                    inner.real_timer_generation = inner.real_timer_generation.wrapping_add(1);
+                    if value.it_value.is_zero() {
+                        inner.timer[0] = ITimerVal::new();
+                        inner.real_timer_deadline = None;
+                    } else {
+                        let deadline = now + timeval_to_timespec(value.it_value);
+                        inner.timer[0] = value;
+                        inner.real_timer_deadline = Some(deadline);
+                        register_timer = Some((deadline, inner.real_timer_generation));
+                    }
+                }
+            }
+            if let Some((deadline, generation)) = register_timer {
+                add_kernel_timer(
+                    TimerAction::SendSignal {
+                        //降为弱引用
+                        task: Arc::downgrade(&task),
+                        signal: Signals::SIGALRM,
+                        generation,
+                    },
+                    deadline,
+                );
+            }
+            SUCCESS
+        }
+        1 | 2 => {
             let mut inner = task.acquire_inner_lock();
-            let token = task.get_user_token();
             if old_value as usize != 0 {
                 copy_to_user(token, &inner.timer[which], old_value).unwrap();
                 trace!("[sys_setitimer] *old_value: {:?}", inner.timer[which]);
             }
-            if new_value as usize != 0 {
-                copy_from_user(token, new_value, &mut inner.timer[which]).unwrap();
+            if let Some(value) = new_timer {
+                inner.timer[which] = value;
                 trace!("[sys_setitimer] *new_value: {:?}", inner.timer[which]);
                 inner.clock.last_real_timer_update = TimeVal::now(); 
             }
@@ -246,6 +298,14 @@ pub fn sys_setitimer(
         }
         _ => EINVAL,
     }
+}
+
+fn timeval_to_timespec(value: TimeVal) -> TimeSpec {
+    TimeSpec::from_us(value.to_us())
+}
+
+fn timespec_to_timeval(value: TimeSpec) -> TimeVal {
+    TimeVal::from_us(value.to_ns() / 1000)
 }
 
 pub fn sys_gettimeofday(tv: *mut TimeVal, _tz: *mut TimeZone) -> isize {
