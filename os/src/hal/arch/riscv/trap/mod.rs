@@ -7,6 +7,7 @@ use crate::fs::directory_tree::ROOT;
 use crate::fs::OpenFlags;
 use crate::hal::arch::riscv::time::set_next_trigger;
 use crate::mm::{frame_reserve, MemoryError, VirtAddr};
+use crate::net::config::NET_INTERFACE;
 use crate::syscall::syscall;
 use crate::task::{
     current_task, current_trap_cx, do_signal, do_wake_expired, suspend_current_and_run_next,

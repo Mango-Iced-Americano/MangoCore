@@ -1,15 +1,19 @@
 use crate::timer::current_time_duration;
 use crate::drivers::NET_DEVICE;
+use crate::net::adapter::{SmoltcpDeviceAdapter, RoutingDevice};
 use alloc::vec;
+use alloc::collections::BTreeMap;
 use smoltcp::{
     iface::{Config, Interface, SocketHandle, SocketSet},
     phy::{Device, Loopback, Medium},
-    socket::{tcp, udp,raw, AnySocket},
+    socket::{AnySocket, raw, tcp, udp},
+    socket::dhcpv4::{Socket as Dhcpv4Socket, Event as Dhcpv4Event},
     time::Instant,
-    wire::{EthernetAddress, IpAddress, IpCidr},
+    wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr,Ipv4Address},
 };
 
 use spin::Mutex;
+use virtio_drivers::device;
 
 pub static NET_INTERFACE: NetInterface = NetInterface::new();
 
@@ -27,42 +31,38 @@ pub struct NetInterface<'a> {
 }
 
 pub struct NetInterfaceInner<'a> {
-    pub device: Loopback,
+    pub device:RoutingDevice ,
     pub iface: Interface,
     pub sockets: SocketSet<'a>,
 }
 
 impl<'a> NetInterfaceInner<'a> {
     fn new() -> Self {
-        let mut device = Loopback::new(Medium::Ethernet);
-        let iface = {
-            let config = match device.capabilities().medium {
-                Medium::Ethernet => {
-                    Config::new(EthernetAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]).into())
-                }
-                Medium::Ip => Config::new(smoltcp::wire::HardwareAddress::Ip),
-            };
+        // let mut device = Loopback::new(Medium::Ethernet);
+        let eth_device = SmoltcpDeviceAdapter::new(NET_DEVICE.clone());
+        let lo_device= Loopback::new(Medium::Ethernet);
+        let mut device = RoutingDevice::new(eth_device,lo_device);
 
-            let mut iface = Interface::new(
-                config,
-                &mut device,
-                Instant::from_millis(current_time_duration().as_millis() as i64),
-            );
-            iface.update_ip_addrs(|ip_addrs| {
-                ip_addrs
-                    .push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8))
-                    .unwrap();
-                ip_addrs
-                    .push(IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128))
-                    .unwrap();
-            });
-            iface
-        };
+         let mac = NET_DEVICE.mac_address();
+        let hw_addr = HardwareAddress::Ethernet(EthernetAddress(mac));
+        let now = Instant::from_millis(current_time_duration().as_millis() as i64);
+
+        let mut iface = Interface::new(Config::new(hw_addr), &mut device, now);
+
+        iface.update_ip_addrs(|addrs| {
+            addrs.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8)).unwrap();
+            addrs.push(IpCidr::new(IpAddress::v4(10, 0, 2, 15), 24)).unwrap();
+        });
+        
+        // 默认路由
+        iface.routes_mut().add_default_ipv4_route(Ipv4Address([10, 0, 2, 2])).unwrap();
+
         Self {
             device,
             iface,
             sockets: SocketSet::new(vec![]),
         }
+
     }
 }
 
@@ -138,7 +138,7 @@ impl<'a> NetInterface<'a> {
                 Instant::from_millis(current_time_duration().as_millis() as i64),
                 &mut inner.device,
                 &mut inner.sockets,
-            );
+            );            
         });
     }
     pub fn remove(&self, handler: SocketHandle) {

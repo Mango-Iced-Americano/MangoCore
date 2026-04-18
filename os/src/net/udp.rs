@@ -150,11 +150,11 @@ impl Socket for UdpSocket {
 impl UdpSocket {
     pub fn new() -> Self {
         let tx_buf = socket::udp::PacketBuffer::new(
-            vec![PacketMetadata::EMPTY, PacketMetadata::EMPTY],
+            vec![PacketMetadata::EMPTY;128],
             vec![0 as u8; MAX_BUFFER_SIZE],
         );
         let rx_buf = socket::udp::PacketBuffer::new(
-            vec![PacketMetadata::EMPTY, PacketMetadata::EMPTY],
+            vec![PacketMetadata::EMPTY;128],
             vec![0 as u8; MAX_BUFFER_SIZE],
         );
         let socket = socket::udp::Socket::new(rx_buf, tx_buf);
