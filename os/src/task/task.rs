@@ -16,7 +16,7 @@ use crate::mm::PageTableImpl;
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::net::SocketTable;
 use crate::syscall::CloneFlags;
-use crate::timer::{ITimerVal, TimeVal};
+use crate::timer::{ITimerVal, TimeSpec, TimeVal};
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
@@ -103,6 +103,10 @@ pub struct TaskControlBlockInner {
     pub clock: ProcClock,
     /// 定时器
     pub timer: [ITimerVal; 3],
+    /// ITIMER_REAL 的真实时间到期点
+    pub real_timer_deadline: Option<TimeSpec>,
+    /// ITIMER_REAL 的版本号，用于让旧TimerQueue节点失效
+    pub real_timer_generation: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -251,7 +255,6 @@ impl TaskControlBlockInner {
     /// 在离开陷阱时更新进程时间
     pub fn update_process_times_leave_trap(&mut self, trap_cause: TrapImpl) {
         let now = TimeVal::now();
-        self.update_itimer_real_if_exists(now - self.clock.last_enter_u_mode);
         if trap_cause.is_timer() {
             let diff = now - self.clock.last_enter_s_mode;
             self.rusage.ru_stime = self.rusage.ru_stime + diff;
@@ -403,6 +406,8 @@ impl TaskControlBlock {
                 rusage: Rusage::new(),
                 clock: ProcClock::new(),
                 timer: [ITimerVal::new(); 3],
+                real_timer_deadline: None,
+                real_timer_generation: 0,
             }),
         };
         // 准备用户空间的陷阱上下文
@@ -632,6 +637,8 @@ impl TaskControlBlock {
                 clear_child_tid: 0,
                 robust_list: RobustList::default(),
                 timer: [ITimerVal::new(); 3],
+                real_timer_deadline: None,
+                real_timer_generation: 0,
                 sigmask: Signals::empty(),
                 // compute
                 trap_cx_ppn,

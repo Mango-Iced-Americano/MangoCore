@@ -13,7 +13,8 @@ use crate::{
     },
     mm::UserBuffer,
     net::{config::NET_INTERFACE, MAX_BUFFER_SIZE, SHUT_WR},
-    task::{current_task, suspend_current_and_run_next},
+    task::{suspend_current_and_run_next, wait_interruptible_timeout},
+    timer::TimeSpec,
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
 };
 use alloc::{
@@ -198,8 +199,11 @@ impl File for RawSocket {
     }
 
     fn read(&self, _offset: Option<&mut usize>, buf: &mut [u8]) -> usize {
-        let ret = self._read(buf).unwrap();
-        ret
+        match self._read(buf) {
+            Ok(ret) => ret,
+            //权衡写法，将正数err转为负数错误类型
+            Err(err) => err.as_errno_ret(),
+        }
     }
 
     fn write(&self, _offset: Option<&mut usize>, buf: &[u8]) -> usize {
@@ -356,14 +360,7 @@ impl RawSocket {
             match ret {
                 Ok(result) => return GeneralRet::Ok(result),
                 Err(SyscallErr::EAGAIN) => {
-                    suspend_current_and_run_next();
-                    // 如果返回 EAGAIN 错误，继续循环
-                    let task = current_task().unwrap();
-                    if !task.acquire_inner_lock().sigpending.is_empty() {
-                    log::info!("[RawSocket] recv interrupted by signal!");
-                    return Err(SyscallErr::EINTR);
-                    }
-    
+                    wait_interruptible_timeout(TimeSpec::now() + TimeSpec::from_ms(10))?;
                     continue;
                 }
                 Err(err) => return GeneralRet::Err(err),
