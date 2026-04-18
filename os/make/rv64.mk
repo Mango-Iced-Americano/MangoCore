@@ -61,8 +61,13 @@ DISASM ?= -x
 
 all: fs-img build
 
+debug: build mv-debug
+
 mv:
 	cp -f $(KERNEL_BIN) ../kernel-rv
+
+mv-debug:
+	cp -f $(KERNEL_ELF) ../kernel-rv
 
 build: env $(KERNEL_BIN) mv
 
@@ -147,7 +152,8 @@ comp:
 		-drive file=$(SDCARD_RV),if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		-no-reboot \
-		-rtc base=utc
+		-rtc base=utc \
+		-device virtio-net-device,netdev=net -netdev user,id=net
 
 comp-gdb:
 	@qemu-system-riscv64 \

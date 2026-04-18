@@ -37,7 +37,7 @@ rv64-debug:
 	@rustup override set nightly-2025-01-18-x86_64-unknown-linux-gnu
 	cp ./src/lang_items.rs.rv ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
-	make -f make/rv64.mk all BLK_MODE=${BLK_MODE} MODE=debug
+	make -f make/rv64.mk debug BLK_MODE=${BLK_MODE} MODE=debug
 
 rv64-only:
 	@rustup override set nightly-2025-01-18-x86_64-unknown-linux-gnu

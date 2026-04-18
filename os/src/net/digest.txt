@@ -1,5 +1,6 @@
 Directory structure:
 └── net/
+    ├── adapter.rs
     ├── address.rs
     ├── config.rs
     ├── mod.rs
@@ -7,6 +8,12 @@ Directory structure:
     ├── tcp.rs
     ├── udp.rs
     └── unix.rs
+
+================================================
+FILE: adapter.rs
+================================================
+[Binary file]
+
 
 ================================================
 FILE: address.rs
@@ -25,6 +32,7 @@ use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint, Ipv4Address, Ipv6Ad
 pub struct SocketAddrv4 {
     sin_port: [u8; 2],
     sin_addr: [u8; 4],
+    sin_zero: [u8; 8], //padding
 }
 
 impl SocketAddrv4 {
@@ -33,6 +41,7 @@ impl SocketAddrv4 {
         let addr = Self {
             sin_port: buf[2..4].try_into().expect("ipv4 port len err"),
             sin_addr: buf[4..8].try_into().expect("ipv4 addr len err"),
+            sin_zero: [0u8;8]
         };
         log::info!("[SocketAddrv4::new] new addr: {:?}", addr);
         addr
@@ -45,6 +54,7 @@ impl SocketAddrv4 {
         addr_buf[0..2].copy_from_slice(u16::to_ne_bytes(AF_INET).as_slice());
         addr_buf[2..4].copy_from_slice(self.sin_port.as_slice());
         addr_buf[4..8].copy_from_slice(self.sin_addr.as_slice());
+        addr_buf[8..16].copy_from_slice(self.sin_zero.as_slice());
     }
 }
 
@@ -58,6 +68,7 @@ impl From<IpEndpoint> for SocketAddrv4 {
                 .as_bytes()
                 .try_into()
                 .expect("ipv4 addr len error"),
+            sin_zero:[0u8;8]
         }
     }
 }
@@ -229,7 +240,7 @@ pub fn _fill_with_endpoint(endpoint: IpEndpoint, addr: usize, addrlen: usize) ->
             let len = mem::size_of::<u16>() + mem::size_of::<SocketAddrv4>();
             let addr_buf = unsafe { slice::from_raw_parts_mut(addr as *mut u8, len) };
             SocketAddrv4::from(endpoint).fill(addr_buf);
-            *addrlen= 8;
+            *addrlen= 16;
         }
         IpAddress::Ipv6(_) => {
             let len = mem::size_of::<u16>() + mem::size_of::<SocketAddrv6>();
@@ -263,21 +274,31 @@ pub fn _listen_endpoint(addr_buf: &[u8]) -> GeneralRet<IpListenEndpoint> {
 FILE: config.rs
 ================================================
 use crate::timer::current_time_duration;
+use crate::drivers::NET_DEVICE;
+use crate::net::adapter::{SmoltcpDeviceAdapter, RoutingDevice};
 use alloc::vec;
+use alloc::collections::BTreeMap;
 use smoltcp::{
     iface::{Config, Interface, SocketHandle, SocketSet},
     phy::{Device, Loopback, Medium},
-    socket::{tcp, udp,raw, AnySocket},
+    socket::{AnySocket, raw, tcp, udp},
+    socket::dhcpv4::{Socket as Dhcpv4Socket, Event as Dhcpv4Event},
     time::Instant,
-    wire::{EthernetAddress, IpAddress, IpCidr},
+    wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr,Ipv4Address},
 };
 
 use spin::Mutex;
+use virtio_drivers::device;
 
 pub static NET_INTERFACE: NetInterface = NetInterface::new();
 
 pub fn init() {
     NET_INTERFACE.init();
+    //初始化网卡
+    let mac = NET_DEVICE.mac_address();
+    println!("[kernel] nic init sucess!");
+    println!("[kernel] MAC : {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", 
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
 pub struct NetInterface<'a> {
@@ -285,42 +306,37 @@ pub struct NetInterface<'a> {
 }
 
 pub struct NetInterfaceInner<'a> {
-    pub device: Loopback,
+    pub device:RoutingDevice ,
     pub iface: Interface,
     pub sockets: SocketSet<'a>,
 }
 
 impl<'a> NetInterfaceInner<'a> {
     fn new() -> Self {
-        let mut device = Loopback::new(Medium::Ethernet);
-        let iface = {
-            let config = match device.capabilities().medium {
-                Medium::Ethernet => {
-                    Config::new(EthernetAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]).into())
-                }
-                Medium::Ip => Config::new(smoltcp::wire::HardwareAddress::Ip),
-            };
+        // let mut device = Loopback::new(Medium::Ethernet);
+        let eth_device = SmoltcpDeviceAdapter::new(NET_DEVICE.clone());
+        let lo_device= Loopback::new(Medium::Ethernet);
+        let mut device = RoutingDevice::new(eth_device,lo_device);
 
-            let mut iface = Interface::new(
-                config,
-                &mut device,
-                Instant::from_millis(current_time_duration().as_millis() as i64),
-            );
-            iface.update_ip_addrs(|ip_addrs| {
-                ip_addrs
-                    .push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8))
-                    .unwrap();
-                ip_addrs
-                    .push(IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128))
-                    .unwrap();
-            });
-            iface
-        };
+         let mac = NET_DEVICE.mac_address();
+        let hw_addr = HardwareAddress::Ethernet(EthernetAddress(mac));
+        let now = Instant::from_millis(current_time_duration().as_millis() as i64);
+
+        let mut iface = Interface::new(Config::new(hw_addr), &mut device, now);
+
+        iface.update_ip_addrs(|addrs| {
+            addrs.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8)).unwrap();
+        });
+        
+        // 默认路由
+        iface.routes_mut().add_default_ipv4_route(Ipv4Address([10, 0, 2, 2])).unwrap();
+
         Self {
             device,
             iface,
             sockets: SocketSet::new(vec![]),
         }
+
     }
 }
 
@@ -396,7 +412,7 @@ impl<'a> NetInterface<'a> {
                 Instant::from_millis(current_time_duration().as_millis() as i64),
                 &mut inner.device,
                 &mut inner.sockets,
-            );
+            );            
         });
     }
     pub fn remove(&self, handler: SocketHandle) {
@@ -429,6 +445,7 @@ use spin::Mutex;
 
 pub mod address;
 pub mod config;
+pub mod adapter;
 mod tcp;
 mod udp;
 mod raw;
@@ -495,6 +512,7 @@ pub trait Socket: File {
     fn shutdown(&self, how: u32) -> GeneralRet<()>;
     fn set_nagle_enabled(&self, enabled: bool) -> SyscallRet;
     fn set_keep_alive(&self, enabled: bool) -> SyscallRet;
+    fn send_to(&self, buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet; 
 }
 
 impl dyn Socket {
@@ -629,18 +647,8 @@ FILE: raw.rs
 use super::{Mutex, Socket};
 use crate::{
     fs::{
-        directory_tree::DirectoryTreeNode,
-        dirent::Dirent,
-        fat32::{DiskInodeType, PageCache},
-        file_trait::File,
-        OpenFlags,
-        SeekWhence,
-        Stat,
-    },
-    mm::UserBuffer,
-    net::{config::NET_INTERFACE, MAX_BUFFER_SIZE, SHUT_WR},
-    task::{current_task, suspend_current_and_run_next},
-    utils::error::{GeneralRet, SyscallErr, SyscallRet},
+        OpenFlags, SeekWhence, Stat, directory_tree::DirectoryTreeNode, dirent::Dirent, fat32::{DiskInodeType, PageCache}, file_trait::File
+    }, hal::arch::riscv::trap, mm::UserBuffer, net::{MAX_BUFFER_SIZE, SHUT_WR, config::NET_INTERFACE}, task::{current_task, suspend_current_and_run_next}, utils::error::{GeneralRet, SyscallErr, SyscallRet}
 };
 use alloc::{
     string::String,
@@ -714,7 +722,7 @@ impl Socket for RawSocket {
     }
 
     fn remote_endpoint(&self) -> Option<IpEndpoint> {
-        todo!()
+        self.inner.lock().remote_endpoint
     }
 
     fn shutdown(&self, how: u32) -> GeneralRet<()> {
@@ -729,16 +737,63 @@ impl Socket for RawSocket {
     fn set_keep_alive(&self, _enabled: bool) -> SyscallRet {
         todo!()
     }
+
+    fn send_to(&self, user_buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet{
+        let (version, protocol) = {
+        let inner = self.inner.lock();
+        (inner.ip_version, inner.ip_protocol)
+        };
+        match version {
+            IpVersion::Ipv4 =>{
+                let target_ip = match dest_addr.addr {
+                smoltcp::wire::IpAddress::Ipv4(ip) => ip,
+                _ => return Err(SyscallErr::EINVAL),
+                };
+                let mut packet_buf = vec![0u8; 20 + user_buf.len()];
+
+                log::info!("[RawSocketsendto] make ipv4 head...");
+                //封装IP头
+                let mut ip_pkg = smoltcp::wire::Ipv4Packet::new_unchecked(&mut packet_buf);
+                ip_pkg.set_version(4);
+                ip_pkg.set_header_len(20);
+                ip_pkg.set_total_len((20 + user_buf.len()) as u16);
+                ip_pkg.set_next_header(protocol); // 使用刚才解锁拿到的 protocol
+                ip_pkg.set_hop_limit(64);
+                ip_pkg.set_dst_addr(target_ip);
+                let src_addr = if target_ip.is_loopback() {
+                    smoltcp::wire::Ipv4Address([127, 0, 0, 1])
+                } else {
+                    smoltcp::wire::Ipv4Address([10, 0, 2, 15]) // 或者是你网卡的真实 IP
+                };
+                ip_pkg.set_src_addr(src_addr); //先硬编码
+            
+                ip_pkg.payload_mut().copy_from_slice(user_buf);
+                ip_pkg.fill_checksum();
+
+                NET_INTERFACE.poll();
+                let ret=NET_INTERFACE.raw_socket(self.socket_handler,|socket|{
+                    log::info!("[RawSocket] Sending {} bytes to {}", user_buf.len(), target_ip);
+                    match socket.send_slice(ip_pkg.into_inner()) {
+                    Ok(_) => Ok(user_buf.len()),
+                    Err(_) => Err(SyscallErr::ENOBUFS),
+                    }
+                });
+                NET_INTERFACE.poll();
+                ret
+            }
+            IpVersion::Ipv6 => {todo!()}
+        }
+    }
 }
 
 impl RawSocket {
     pub fn new(protocol: u32) -> Self {
         let tx_buf = socket::raw::PacketBuffer::new(
-            vec![PacketMetadata::EMPTY,PacketMetadata::EMPTY],
+            vec![PacketMetadata::EMPTY;128],
             vec![0 as u8; MAX_BUFFER_SIZE],
         );
         let rx_buf = socket::raw::PacketBuffer::new(
-            vec![PacketMetadata::EMPTY,PacketMetadata::EMPTY],
+            vec![PacketMetadata::EMPTY;128],
             vec![0 as u8; MAX_BUFFER_SIZE],
         );
         let socket = raw::Socket::new(
@@ -765,6 +820,7 @@ impl RawSocket {
         }
 
     }
+    
 }
 
 impl File for RawSocket {
@@ -781,8 +837,12 @@ impl File for RawSocket {
     }
 
     fn read(&self, _offset: Option<&mut usize>, buf: &mut [u8]) -> usize {
-        let ret = self._read(buf).unwrap();
-        ret
+        match self._read(buf) {
+            GeneralRet::Ok(len) => len,
+            GeneralRet::Err(err) => {
+            err as usize 
+        }
+}
     }
 
     fn write(&self, _offset: Option<&mut usize>, buf: &[u8]) -> usize {
@@ -906,6 +966,7 @@ impl File for RawSocket {
     fn fcntl(&self, _cmd: u32, _arg: u32) -> isize {
         todo!()
     }
+    
 }
 
 impl RawSocket {
@@ -923,6 +984,10 @@ impl RawSocket {
                 match socket.recv_slice(buf) {
                     Ok(nbytes) => {
                         info!("[TcpRecvFuture::poll] recv {} bytes", nbytes);
+                        let packet = smoltcp::wire::Ipv4Packet::new_unchecked(&buf[..nbytes]);        
+                        let src_addr = packet.src_addr();
+                        let mut inner = self.inner.lock();
+                        inner.remote_endpoint = Some(IpEndpoint::new(src_addr.into(), 0));
                         Ok(nbytes)
                     }
                     Err(_) => return Err(SyscallErr::ENOTCONN),
@@ -931,14 +996,29 @@ impl RawSocket {
             });
 
             NET_INTERFACE.poll();
+
             match ret {
-                Ok(result) => return GeneralRet::Ok(result),
+                Ok(result) => {
+                    return GeneralRet::Ok(result);
+                }
                 Err(SyscallErr::EAGAIN) => {
+                    {
+                        let task = current_task().unwrap();
+                        task.acquire_inner_lock().refresh_real_timer();
+                    }
                     suspend_current_and_run_next();
                     // 如果返回 EAGAIN 错误，继续循环
+                    log::trace!("[RawSocket] recv continue");
+                    let task = current_task().unwrap();
+                    if !task.acquire_inner_lock().sigpending.is_empty() {
+                    log::info!("[RawSocket] recv interrupted by signal!");
+                    return Err(SyscallErr::EINTR);
+                    }    
                     continue;
                 }
-                Err(err) => return GeneralRet::Err(err),
+                Err(err) => {
+                    return GeneralRet::Err(err);
+                }
             }
         }
     }
@@ -1139,6 +1219,8 @@ impl Socket for TcpSocket {
         }
         Ok(0)
     }
+
+    fn send_to(&self, buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet {todo!();}
 }
 
 impl TcpSocket {
@@ -1548,16 +1630,18 @@ impl Socket for UdpSocket {
     fn set_keep_alive(&self, _enabled: bool) -> SyscallRet {
         Err(SyscallErr::EOPNOTSUPP)
     }
+
+    fn send_to(&self, buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet {todo!();}
 }
 
 impl UdpSocket {
     pub fn new() -> Self {
         let tx_buf = socket::udp::PacketBuffer::new(
-            vec![PacketMetadata::EMPTY, PacketMetadata::EMPTY],
+            vec![PacketMetadata::EMPTY;128],
             vec![0 as u8; MAX_BUFFER_SIZE],
         );
         let rx_buf = socket::udp::PacketBuffer::new(
-            vec![PacketMetadata::EMPTY, PacketMetadata::EMPTY],
+            vec![PacketMetadata::EMPTY;128],
             vec![0 as u8; MAX_BUFFER_SIZE],
         );
         let socket = socket::udp::Socket::new(rx_buf, tx_buf);
@@ -1824,6 +1908,10 @@ impl<const N: usize> Socket for UnixSocket<N> {
 
     fn set_keep_alive(&self, _enabled: bool) -> crate::utils::error::SyscallRet {
         Err(SyscallErr::EOPNOTSUPP)
+    }
+
+    fn send_to(&self, buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet {
+        todo!();
     }
 }
 

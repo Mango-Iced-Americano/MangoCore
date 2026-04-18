@@ -2,9 +2,9 @@ mod block_dev;
 mod mem_blk;
 mod sata_blk;
 #[cfg(feature = "block_virt")]
-mod virtio_blk;
+pub mod virtio_blk;
 #[cfg(feature = "block_virt_pci")]
-mod virtio_blk_pci;
+pub mod virtio_blk_pci;
 pub use block_dev::BlockDevice;
 #[cfg(feature = "block_mem")]
 type BlockDeviceImpl = mem_blk::MemBlockWrapper;

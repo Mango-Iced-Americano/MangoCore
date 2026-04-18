@@ -13,6 +13,7 @@ use spin::Mutex;
 
 pub mod address;
 pub mod config;
+pub mod adapter;
 mod tcp;
 mod udp;
 mod raw;

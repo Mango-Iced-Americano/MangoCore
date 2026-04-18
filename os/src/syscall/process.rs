@@ -292,6 +292,7 @@ pub fn sys_setitimer(
             if let Some(value) = new_timer {
                 inner.timer[which] = value;
                 trace!("[sys_setitimer] *new_value: {:?}", inner.timer[which]);
+                inner.clock.last_real_timer_update = TimeVal::now(); 
             }
             SUCCESS
         }

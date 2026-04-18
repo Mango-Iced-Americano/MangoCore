@@ -121,7 +121,12 @@ impl Socket for RawSocket {
                 ip_pkg.set_next_header(protocol); // 使用刚才解锁拿到的 protocol
                 ip_pkg.set_hop_limit(64);
                 ip_pkg.set_dst_addr(target_ip);
-                ip_pkg.set_src_addr(smoltcp::wire::Ipv4Address([127, 0, 0, 1])); //暂时先硬编码为本地回环地址
+                let src_addr = if target_ip.is_loopback() {
+                    smoltcp::wire::Ipv4Address([127, 0, 0, 1])
+                } else {
+                    smoltcp::wire::Ipv4Address([10, 0, 2, 15]) // 或者是你网卡的真实 IP
+                };
+                ip_pkg.set_src_addr(src_addr); //先硬编码
             
                 ip_pkg.payload_mut().copy_from_slice(user_buf);
                 ip_pkg.fill_checksum();
@@ -145,11 +150,11 @@ impl Socket for RawSocket {
 impl RawSocket {
     pub fn new(protocol: u32) -> Self {
         let tx_buf = socket::raw::PacketBuffer::new(
-            vec![PacketMetadata::EMPTY,PacketMetadata::EMPTY],
+            vec![PacketMetadata::EMPTY;128],
             vec![0 as u8; MAX_BUFFER_SIZE],
         );
         let rx_buf = socket::raw::PacketBuffer::new(
-            vec![PacketMetadata::EMPTY,PacketMetadata::EMPTY],
+            vec![PacketMetadata::EMPTY;128],
             vec![0 as u8; MAX_BUFFER_SIZE],
         );
         let socket = raw::Socket::new(
@@ -351,14 +356,19 @@ impl RawSocket {
             });
 
             NET_INTERFACE.poll();
+
             match ret {
-                Ok(result) => return GeneralRet::Ok(result),
+                Ok(result) => {
+                    return GeneralRet::Ok(result);
+                }
                 Err(SyscallErr::EAGAIN) => {
                     //等待SIGALRM信号，进入Interruptible状态而不是Ready状态
                     wait_interruptible()?;
                     continue;
                 }
-                Err(err) => return GeneralRet::Err(err),
+                Err(err) => {
+                    return GeneralRet::Err(err);
+                }
             }
         }
     }
