@@ -81,12 +81,13 @@ pub fn block_current_and_run_next() {
     schedule(task_cx_ptr);
 }
 
-//判断该task的sigpending中是否已经有未遮蔽信号，防止重复触发
+//判断该task的sigpending中是否已经有未遮蔽信号
 fn has_unblocked_signal(task: &Arc<TaskControlBlock>) -> bool {
     let inner = task.acquire_inner_lock();
     !inner.sigpending.difference(inner.sigmask).is_empty()
 }
 
+//等待一段时间直到达到deadline
 pub fn wait_interruptible_timeout(deadline: TimeSpec) -> GeneralRet<()> {
     let task = current_task().unwrap();
     if has_unblocked_signal(&task) {
@@ -97,6 +98,22 @@ pub fn wait_interruptible_timeout(deadline: TimeSpec) -> GeneralRet<()> {
     }
     wait_with_timeout(Arc::downgrade(&task), deadline);
     block_current_and_run_next();
+    if has_unblocked_signal(&task) {
+        Err(SyscallErr::ERESTART)
+    } else {
+        Ok(())
+    }
+}
+
+//等待直到下一个信号传来
+pub fn wait_interruptible() -> GeneralRet<()> {
+    let task = current_task().unwrap();
+    //有信号则直接抛错退出
+    if has_unblocked_signal(&task) {
+        return Err(SyscallErr::ERESTART);
+    }
+    block_current_and_run_next();
+    //醒后检查
     if has_unblocked_signal(&task) {
         Err(SyscallErr::ERESTART)
     } else {

@@ -3,17 +3,11 @@
 use super::{Mutex, Socket};
 use crate::{
     fs::{
-        directory_tree::DirectoryTreeNode,
-        dirent::Dirent,
-        fat32::{DiskInodeType, PageCache},
-        file_trait::File,
-        OpenFlags,
-        SeekWhence,
-        Stat,
+        OpenFlags, SeekWhence, Stat, directory_tree::DirectoryTreeNode, dirent::Dirent, fat32::{DiskInodeType, PageCache}, file_trait::File
     },
     mm::UserBuffer,
-    net::{config::NET_INTERFACE, MAX_BUFFER_SIZE, SHUT_WR},
-    task::{suspend_current_and_run_next, wait_interruptible_timeout},
+    net::{MAX_BUFFER_SIZE, SHUT_WR, config::NET_INTERFACE},
+    task::{block_current_and_run_next, suspend_current_and_run_next, wait_interruptible, wait_interruptible_timeout},
     timer::TimeSpec,
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
 };
@@ -360,7 +354,8 @@ impl RawSocket {
             match ret {
                 Ok(result) => return GeneralRet::Ok(result),
                 Err(SyscallErr::EAGAIN) => {
-                    wait_interruptible_timeout(TimeSpec::now() + TimeSpec::from_ms(10))?;
+                    //等待SIGALRM信号，进入Interruptible状态而不是Ready状态
+                    wait_interruptible()?;
                     continue;
                 }
                 Err(err) => return GeneralRet::Err(err),
