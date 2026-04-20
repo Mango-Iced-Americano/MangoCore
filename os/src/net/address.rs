@@ -75,7 +75,8 @@ impl From<SocketAddrv4> for IpListenEndpoint {
             } else {
                 IpListenEndpoint {
                     addr: None,
-                    port: unsafe { RNG.positive_u32() } as u16,
+                    // port: unsafe { RNG.positive_u32() } as u16,
+                    port: (unsafe { RNG.positive_u32() } % 16384 + 49152) as u16,
                 }
             }
         } else {
@@ -156,7 +157,8 @@ impl From<SocketAddrv6> for IpListenEndpoint {
             } else {
                 IpListenEndpoint {
                     addr: None,
-                    port: unsafe { RNG.positive_u32() as u16 },
+                    // port: unsafe { RNG.positive_u32() as u16 },
+                    port: (unsafe { RNG.positive_u32() } % 16384 + 49152) as u16,
                 }
             }
         } else {

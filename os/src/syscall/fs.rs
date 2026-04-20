@@ -6,16 +6,17 @@ use crate::mm::{
     translated_byte_buffer, translated_byte_buffer_append_to_existing_vec, translated_refmut,
     translated_str, try_get_from_user, MapPermission, UserBuffer, VirtAddr,
 };
-use crate::task::{current_task, current_user_token};
+use crate::task::{current_task, current_user_token, wait_interruptible};
 use crate::timer::TimeSpec;
+use crate::utils::error::SyscallErr;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
-use smoltcp::socket;
 use core::mem::size_of;
 use core::panic;
 use log::{debug, info, trace, warn};
 use num_enum::FromPrimitive;
+use smoltcp::socket;
 
 use super::errno::*;
 
@@ -213,25 +214,51 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: u32) -> isize {
 
 pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
     let task = current_task().unwrap();
-    let fd_table = task.files.lock();
-    let file_descriptor = match fd_table.get_ref(fd) {
-        Ok(file_descriptor) => file_descriptor,
-        Err(errno) => return errno,
+    let file_descriptor = {
+        let fd_table = task.files.lock();
+        match fd_table.get_ref(fd) {
+            Ok(fd_ref) => fd_ref.clone(),
+            Err(errno) => return errno,
+        }
     };
     // fd is not open for reading
     if !file_descriptor.readable() {
         return EBADF;
     }
-    let token = task.get_user_token();
-    file_descriptor.read_user(
-        None,
-        UserBuffer::new({
-            match translated_byte_buffer(token, buf as *const u8, count) {
-                Ok(buffer) => buffer,
-                Err(errno) => return errno,
+    // let token = task.get_user_token();
+    // file_descriptor.read_user(
+    //     None,
+    //     UserBuffer::new({
+    //         match translated_byte_buffer(token, buf as *const u8, count) {
+    //             Ok(buffer) => buffer,
+    //             Err(errno) => return errno,
+    //         }
+    //     }),
+    // ) as isize
+    let is_nonblock = file_descriptor.get_nonblock();
+    loop {
+        let token = task.get_user_token();
+        let user_buf = match translated_byte_buffer(token, buf as *const u8, count) {
+            Ok(buffer) => UserBuffer::new(buffer),
+            Err(errno) => return errno as isize,
+        };
+
+        let ret = file_descriptor.read_user(None, user_buf) as isize;
+
+        if ret == -(SyscallErr::EAGAIN as isize) {
+            if is_nonblock {
+                return ret;
+            } else {
+                wait_interruptible();
+                if !task.acquire_inner_lock().sigpending.is_empty() {
+                    return -(SyscallErr::EINTR as isize);
+                }
+                continue;
             }
-        }),
-    ) as isize
+        }
+
+        return ret;
+    }
 }
 
 pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
@@ -630,7 +657,7 @@ pub fn sys_dup(oldfd: usize) -> isize {
 }
 
 pub fn sys_dup2(oldfd: usize, newfd: usize) -> isize {
-    if oldfd==newfd {
+    if oldfd == newfd {
         return oldfd as isize;
     }
     let task = current_task().unwrap();
@@ -653,12 +680,11 @@ pub fn sys_dup2(oldfd: usize, newfd: usize) -> isize {
     }
     let mut socket_table = task.socket_table.lock();
     let old_socket = socket_table.get_ref(oldfd).cloned();
-    if let Some(sock)=old_socket {
-        socket_table.insert(newfd,sock);           
+    if let Some(sock) = old_socket {
+        socket_table.insert(newfd, sock);
     }
     info!("[sys_dup2] oldfd: {}, newfd: {}", oldfd, newfd);
     newfd as isize
-
 }
 
 pub fn sys_dup3(oldfd: usize, newfd: usize, flags: u32) -> isize {

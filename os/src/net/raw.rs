@@ -331,7 +331,6 @@ impl File for RawSocket {
 
 impl RawSocket {
     fn _read<'a>(&'a self, buf: &'a mut [u8]) -> GeneralRet<usize> {
-        loop {
             NET_INTERFACE.poll();
             let ret = NET_INTERFACE.raw_socket(self.socket_handler,|socket|{
                 if !socket.can_recv() {
@@ -361,15 +360,10 @@ impl RawSocket {
                 Ok(result) => {
                     return GeneralRet::Ok(result);
                 }
-                Err(SyscallErr::EAGAIN) => {
-                    //等待SIGALRM信号，进入Interruptible状态而不是Ready状态
-                    wait_interruptible()?;
-                    continue;
-                }
                 Err(err) => {
                     return GeneralRet::Err(err);
                 }
-            }
+        
         }
     }
 }

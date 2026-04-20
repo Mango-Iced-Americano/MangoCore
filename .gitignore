@@ -20,4 +20,6 @@ sdcard-la.img
 
 sdcard-rv.img
 
-*/digest.txt
+*digest.txt
+ 
+*packets.pcap

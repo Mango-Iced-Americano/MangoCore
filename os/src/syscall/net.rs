@@ -1,12 +1,17 @@
+use super::errno::*;
 use crate::mm::{translated_ref, translated_refmut};
 use crate::{
-    config::PAGE_SIZE, fs::FileDescriptor, net::{
+    config::PAGE_SIZE,
+    fs::FileDescriptor,
+    net::{
         address::{self, SocketAddrv4},
         make_unix_socket_pair, Socket, SocketType, TCP_MSS,
-    }, 
+    },
     task::current_task,
 };
-use super::errno::*;
+
+use crate::task::wait_interruptible;
+use crate::utils::error::SyscallErr;
 
 use log::info;
 use smoltcp::wire::IpListenEndpoint;
@@ -28,13 +33,13 @@ pub fn sys_socket(domain: u32, socket_type: u32, protocol: u32) -> isize {
         "[sys_socket] domain: {}, type: {}, protocol: {}",
         domain, socket_type, protocol
     );
-    let result = match <dyn Socket>::alloc(domain, socket_type, protocol){
+    let result = match <dyn Socket>::alloc(domain, socket_type, protocol) {
         Ok(sockfd) => {
             info!("[sys_socket] new sockfd: {}", sockfd);
             sockfd as isize
-        },
+        }
         Err(e) => {
-            info!("[sys_socket] new sockfd failed", );
+            info!("[sys_socket] new sockfd failed",);
             -(e as isize)
         }
     };
@@ -48,14 +53,26 @@ pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize {
     match socket.socket_type() {
         SocketType::SOCK_STREAM => socket.bind(endpoint).unwrap() as isize,
         SocketType::SOCK_DGRAM => {
-            let res = current_task().unwrap().socket_table.lock().can_bind(endpoint);
-            if res.is_none(){
+            let res = current_task()
+                .unwrap()
+                .socket_table
+                .lock()
+                .can_bind(endpoint);
+            if res.is_none() {
                 info!("[sys_bind] not find port exist");
                 socket.bind(endpoint).unwrap() as isize
-            }else {
-                let (_,sock) = res.unwrap();
-                current_task().unwrap().socket_table.lock().insert(sockfd as usize, sock.clone());
-                let _ = current_task().unwrap().files.lock().insert(FileDescriptor::new(false,false,sock));
+            } else {
+                let (_, sock) = res.unwrap();
+                current_task()
+                    .unwrap()
+                    .socket_table
+                    .lock()
+                    .insert(sockfd as usize, sock.clone());
+                let _ = current_task()
+                    .unwrap()
+                    .files
+                    .lock()
+                    .insert(FileDescriptor::new(false, false, sock));
                 0
             }
         }
@@ -65,28 +82,48 @@ pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize {
 
 pub fn sys_listen(sockfd: u32, _backlog: u32) -> isize {
     let socket = get_socket!(sockfd);
-    socket.listen().unwrap() as isize
+    //socket.listen().unwrap() as isize
+    match socket.listen() {
+        Ok(s) => s as isize,
+        Err(err) => -(err as isize),
+    }
 }
 
-pub  fn sys_accept(sockfd: u32, addr: usize, addrlen: usize) -> isize {
+pub fn sys_accept(sockfd: u32, addr: usize, addrlen: usize) -> isize {
     let socket = get_socket!(sockfd);
-    socket.accept(sockfd, addr, addrlen).unwrap() as isize
+    // socket.accept(sockfd, addr, addrlen).unwrap() as isize
+    match socket.accept(sockfd, addr, addrlen) {
+        Ok(s) => s as isize,
+        Err(err) => -(err as isize),
+    }
 }
 
-pub  fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
+pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
     let addr_buf = trans_ref!(addr, addrlen);
     let socket = get_socket!(sockfd);
-    socket.connect(addr_buf).unwrap() as isize
+    //socket.connect(addr_buf).unwrap() as isize
+    match socket.connect(addr_buf) {
+        Ok(s) => s as isize,
+        Err(err) => -(err as isize),
+    }
 }
 
 pub fn sys_getsockname(sockfd: u32, addr: usize, addrlen: usize) -> isize {
     let socket = get_socket!(sockfd);
-    socket.addr(addr, addrlen).unwrap() as isize
+    // socket.addr(addr, addrlen).unwrap() as isize
+    match socket.addr(addr, addrlen) {
+        Ok(new_fd) => new_fd as isize,
+        Err(err) => -(err as isize),
+    }
 }
 
 pub fn sys_getpeername(sockfd: u32, addr: usize, addrlen: usize) -> isize {
     let socket = get_socket!(sockfd);
-    socket.peer_addr(addr, addrlen).unwrap() as isize
+    // socket.peer_addr(addr, addrlen).unwrap() as isize
+    match socket.peer_addr(addr, addrlen) {
+        Ok(s) => s as isize,
+        Err(err) => -(err as isize),
+    }
 }
 
 pub fn sys_sendto(
@@ -105,9 +142,9 @@ pub fn sys_sendto(
     let buf = trans_ref!(buf, len);
     let socket = get_socket!(sockfd);
     log::info!("[sys_sendto] get socket sockfd: {}", sockfd);
-    let mut offset = 0 as usize; 
+    let mut offset = 0 as usize;
     let len = match socket.socket_type() {
-        SocketType::SOCK_STREAM => socket_file.file.write(Some(&mut offset),buf),
+        SocketType::SOCK_STREAM => socket_file.file.write(Some(&mut offset), buf),
         SocketType::SOCK_DGRAM => {
             info!("[sys_sendto] socket is udp");
             if socket.loacl_endpoint().port == 0 {
@@ -117,26 +154,24 @@ pub fn sys_sendto(
             }
             let dest_addr = trans_ref!(dest_addr, addrlen);
             let _ = socket.connect(dest_addr);
-            socket_file.file.write(Some(&mut offset),buf)
+            socket_file.file.write(Some(&mut offset), buf)
         }
         SocketType::SOCK_RAW => {
             info!("[sys_sendto] socket is raw");
-            let dest_addr = trans_ref!(dest_addr,addrlen);
+            let dest_addr = trans_ref!(dest_addr, addrlen);
             let endpoint = address::endpoint(dest_addr).unwrap();
-    
+
             match socket.send_to(buf, endpoint) {
-            Ok(bytes_sent) => bytes_sent as usize, // 返回正数长度
-            Err(e) => e as usize, 
+                Ok(bytes_sent) => bytes_sent as usize, // 返回正数长度
+                Err(e) => e as usize,
             }
-            
-            
         }
         _ => todo!(),
     };
     len as isize
 }
 
-pub  fn sys_recvfrom(
+pub fn sys_recvfrom(
     sockfd: u32,
     buf: usize,
     len: u32,
@@ -144,40 +179,56 @@ pub  fn sys_recvfrom(
     src_addr: usize,
     addrlen: usize,
 ) -> isize {
-    let socket_file = current_task().unwrap().files.lock().get_ref(sockfd as usize).unwrap().clone();
+    let socket_file = current_task()
+        .unwrap()
+        .files
+        .lock()
+        .get_ref(sockfd as usize)
+        .unwrap()
+        .clone();
     let task = current_task().unwrap();
     let token = task.get_user_token();
-    let buf = translated_refmut(token, buf as *mut u8).unwrap();
-    let buf = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
     //info!("[sys_recvfrom] file filags: {:?}", socket_file.flags);
     let socket = get_socket!(sockfd);
 
+    let file_descriptor = {
+        let fd_table = task.files.lock();
+        match fd_table.get_ref(sockfd as usize) {
+            Ok(fd) => fd.clone(),
+            Err(errno) => return errno as isize,
+        }
+    };
+
+    let is_nonblock = file_descriptor.get_nonblock();
+
     info!("[sys_recvfrom] get socket sockfd: {}", sockfd);
 
-    let mut offset = 0 as usize;
-    match socket.socket_type() {
-        SocketType::SOCK_STREAM => {
-            let len = socket_file.file.read(Some(&mut offset),buf);
-            if src_addr != 0 {
-                let _ = socket.peer_addr(src_addr, addrlen);
+    loop {
+        let buf = translated_refmut(token, buf as *mut u8).unwrap();
+        let buf = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
+        let mut offset = 0 as usize;
+        let ret = match socket.socket_type() {
+            SocketType::SOCK_STREAM | SocketType::SOCK_DGRAM | SocketType::SOCK_RAW => {
+                let read_ret = file_descriptor.file.read(Some(&mut offset), buf) as isize;
+                if read_ret > 0 && src_addr != 0 {
+                    let _ = socket.peer_addr(src_addr, addrlen);
+                }
+                read_ret
             }
-            len as isize
-        }
-        SocketType::SOCK_DGRAM => {
-            let len = socket_file.file.read(Some(&mut offset),buf);
-            if src_addr != 0 {
-                let _ = socket.peer_addr(src_addr, addrlen);
+            _ => todo!(),
+        };
+        if ret == -(SyscallErr::EAGAIN as isize) {
+            if is_nonblock {
+                return ret;
+            } else {
+                wait_interruptible();
+                if !task.acquire_inner_lock().sigpending.is_empty() {
+                    return -(SyscallErr::EINTR as isize);
+                }
+                continue;
             }
-            len as isize
         }
-        SocketType::SOCK_RAW => {
-            let len = socket_file.file.read(Some(&mut offset),buf);
-            if src_addr != 0 {
-                let _ = socket.peer_addr(src_addr, addrlen);
-            }
-            len as isize
-        }
-        _ => todo!(),
+        return ret;
     }
 }
 
@@ -303,8 +354,16 @@ pub fn sys_socketpair(domain: u32, socket_type: u32, protocol: u32, sv: usize) -
     let len = 2 * core::mem::size_of::<u32>();
     let sv = unsafe { core::slice::from_raw_parts_mut(sv as *mut u32, len) };
     let (socket1, socket2) = make_unix_socket_pair::<PAGE_SIZE>();
-    let fd1 = current_task().unwrap().files.lock().insert(FileDescriptor::new(false, false, socket1));
-    let fd2 = current_task().unwrap().files.lock().insert(FileDescriptor::new(false, false, socket2));
+    let fd1 = current_task()
+        .unwrap()
+        .files
+        .lock()
+        .insert(FileDescriptor::new(false, false, socket1));
+    let fd2 = current_task()
+        .unwrap()
+        .files
+        .lock()
+        .insert(FileDescriptor::new(false, false, socket2));
     sv[0] = fd1.unwrap() as u32;
     sv[1] = fd2.unwrap() as u32;
     info!("[sys_socketpair] new sv: {:?}", sv);

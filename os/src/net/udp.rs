@@ -1,11 +1,11 @@
 use super::{address::SocketAddrv4, config::NET_INTERFACE, Mutex, Socket, MAX_BUFFER_SIZE};
 use crate::{
-    fs::{file_trait::File, OpenFlags},
-    net::address,
-    utils::error::{GeneralRet, SyscallErr, SyscallRet},
+    fs::{OpenFlags, file_trait::File}, net::address, task::wait_interruptible, utils::error::{GeneralRet, SyscallErr, SyscallRet}
 };
 use alloc::vec;
 use log::info;
+use crate::net::config::lookup_source_ip;
+use crate::utils::random::RNG;
 use smoltcp::{
     iface::SocketHandle,
     phy::PacketMeta,
@@ -66,6 +66,13 @@ impl Socket for UdpSocket {
             info!("[Udp::connect] local: {:?}", local);
             if local.port == 0 {
                 info!("[Udp::connect] don't have local");
+                let src_ip = lookup_source_ip(remote_endpoint.addr);
+                let port = (unsafe { RNG.positive_u32() } % 16384 + 49152) as u16;
+            
+                let endpoint = IpListenEndpoint {
+                    addr: Some(src_ip),
+                    port,
+                };
                 let addr = SocketAddrv4::new([0; 16].as_slice());
                 let endpoint = IpListenEndpoint::from(addr);
                 let ret = socket.bind(endpoint);
@@ -195,14 +202,16 @@ impl File for UdpSocket {
         todo!();
     }
     fn readable(&self) -> bool{
-        todo!();
+        true
     }
     fn writable(&self) -> bool{
         true
     }
     fn read(&self, _offset: Option<&mut usize>, buf: &mut [u8]) -> usize{
-        let ret = self._read(buf).unwrap();
-        ret
+        match self._read(buf) {
+            Ok(ret) => ret,
+            Err(err) => err.as_errno_ret(),
+        }
     }
     fn write(&self, _offset: Option<&mut usize>, buf: &[u8]) -> usize{
         NET_INTERFACE.poll();
@@ -239,8 +248,13 @@ impl File for UdpSocket {
         NET_INTERFACE.poll();
         ret
     }
-    fn r_ready(&self) -> bool{true}
-    fn w_ready(&self) -> bool{todo!();}
+    fn r_ready(&self) -> bool{
+        NET_INTERFACE.poll(); // 必须先 poll 驱动网卡处理数据包
+        NET_INTERFACE.udp_socket(self.socket_handler, |socket| {
+        socket.can_recv() // 只有真正有包了才返回 true
+    })
+    }
+    fn w_ready(&self) -> bool{true}
     fn read_user(&self, _offset: Option<usize>, buf: UserBuffer) -> usize{
         let mut buffers = buf.buffers;
         let buf = unsafe { core::slice::from_raw_parts_mut(buffers[0].as_mut_ptr() as *mut u8, buf.len as usize) };
@@ -283,7 +297,9 @@ impl File for UdpSocket {
     /// memory related
     fn oom(&self) -> usize{todo!();}
     /// poll, select related
-    fn hang_up(&self) -> bool{todo!();}
+    fn hang_up(&self) -> bool{
+        false
+    }
     /// iotcl
     fn ioctl(&self, _cmd: u32, _argp: usize) -> isize {todo!();}
     /// fcntl
@@ -293,7 +309,6 @@ impl File for UdpSocket {
 
 impl UdpSocket {
     fn _read<'a>(&'a self, buf: &'a mut [u8]) -> GeneralRet<usize> {
-        loop {
             NET_INTERFACE.poll();
             let ret = NET_INTERFACE.udp_socket(self.socket_handler, |socket| {
                 if !socket.can_recv() {
@@ -319,13 +334,8 @@ impl UdpSocket {
             NET_INTERFACE.poll();
             match ret {
                 Ok(result) => return GeneralRet::Ok(result),
-                Err(SyscallErr::EAGAIN) => {
-                    suspend_current_and_run_next();
-                    // 如果返回 EAGAIN 错误，继续循环
-                    continue;
-                }
                 Err(err) => return GeneralRet::Err(err),
-            }
+        
         }
     }
 }

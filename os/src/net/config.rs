@@ -50,8 +50,8 @@ impl<'a> NetInterfaceInner<'a> {
         let mut iface = Interface::new(Config::new(hw_addr), &mut device, now);
 
         iface.update_ip_addrs(|addrs| {
-            addrs.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8)).unwrap();
             addrs.push(IpCidr::new(IpAddress::v4(10, 0, 2, 15), 24)).unwrap();
+            addrs.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8)).unwrap();
         });
         
         // 默认路由
@@ -148,5 +148,19 @@ impl<'a> NetInterface<'a> {
         self.inner_handler(|inner| {
             inner.sockets.remove(handler);
         });
+    }
+}
+
+pub fn lookup_source_ip(dest_ip: IpAddress) -> IpAddress {
+    let is_loopback = match dest_ip {
+        IpAddress::Ipv4(ipv4) => ipv4.0[0] == 127,
+        _ => false, // 暂时忽略 IPv6
+    };
+    if is_loopback {
+        // 如果目标是回环，网络层推荐使用回环地址
+        IpAddress::v4(127, 0, 0, 1)
+    } else {
+        // 否则走默认路由，网络层推荐使用以太网网卡地址
+        IpAddress::v4(10, 0, 2, 15)
     }
 }

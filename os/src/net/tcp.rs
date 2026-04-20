@@ -1,10 +1,8 @@
 use super::{Mutex, Socket};
 use crate::{
-    fs::{file_trait::File, FileDescriptor, OpenFlags}, net::{
-        address,
-        config::NET_INTERFACE,
-        MAX_BUFFER_SIZE, SHUT_WR,
-    }, task::current_task, utils::{
+    fs::{FileDescriptor, OpenFlags, file_trait::File}, net::{
+        MAX_BUFFER_SIZE, SHUT_WR, address, config::{NET_INTERFACE, lookup_source_ip}
+    }, task::{current_task, wait_interruptible}, utils::{
         error::{GeneralRet, SyscallErr, SyscallRet},
         random::RNG,
     }
@@ -130,7 +128,7 @@ impl Socket for TcpSocket {
                     return Ok(0);
                 }
                 _ => {
-                    info!("[Tcp::connect] {} not connect yet, state {:?}", self.socket_handler, state);
+                    log::trace!("[Tcp::connect] {} not connect yet, state {:?}", self.socket_handler, state);
                 }
             }
             suspend_current_and_run_next();
@@ -218,7 +216,10 @@ impl TcpSocket {
 
     fn _connect(&self, remote_endpoint: IpEndpoint) -> GeneralRet<()> {
         self.inner.lock().remote_endpoint = Some(remote_endpoint);
-        let local = self.inner.lock().local_endpoint;
+        let mut local = self.inner.lock().local_endpoint;
+        if local.addr.is_none() {
+            local.addr = Some(lookup_source_ip(remote_endpoint.addr));
+        }
         info!(
             "[Tcp::connect] local: {:?}, remote: {:?}",
             local, remote_endpoint
@@ -268,9 +269,11 @@ impl TcpSocket {
             match ret {
                 Ok(endpoint) => return GeneralRet::Ok(endpoint),
                 Err(SyscallErr::EAGAIN) => {
-                    suspend_current_and_run_next();
+                    // suspend_current_and_run_next();
                     // 如果返回 EAGAIN 错误，继续循环
-                    continue;
+                    // wait_interruptible();
+                    // continue;
+                    return GeneralRet::Err(SyscallErr::EAGAIN);
                 }
                 Err(err) => return GeneralRet::Err(err),
             }
@@ -309,8 +312,10 @@ impl File for TcpSocket {
         true
     }
     fn read(&self, _offset: Option<&mut usize>, buf: &mut [u8]) -> usize{
-        let ret = self._read(buf).unwrap();
-        ret
+        match self._read(buf) {
+            Ok(ret) => ret,
+            Err(err) => err.as_errno_ret(),
+        }
     }
     fn write(&self, _offset: Option<&mut usize>, buf: &[u8]) -> usize{
         NET_INTERFACE.poll();
@@ -335,7 +340,7 @@ impl File for TcpSocket {
                     info!("[TcpSendFuture::poll] send {} bytes", nbytes);
                     return nbytes;
                 }
-                Err(_) => SyscallErr::ENOTCONN as usize,
+                Err(_) => (SyscallErr::ENOTCONN).as_errno_ret(),
             }
         });
         NET_INTERFACE.poll();
@@ -346,8 +351,11 @@ impl File for TcpSocket {
     fn read_user(&self, _offset: Option<usize>, buf: UserBuffer) -> usize{
         let mut buffers = buf.buffers;
         let buf = unsafe { core::slice::from_raw_parts_mut(buffers[0].as_mut_ptr() as *mut u8, buf.len as usize) };
-        let ret = self._read(buf).unwrap();
-        ret
+        let ret = self._read(buf);
+        match ret {
+            Ok(s) => return s,
+            Err(err) => return err.as_errno_ret(),
+        }
     }
     fn write_user(&self, _offset: Option<usize>, buf: UserBuffer) -> usize{
         let mut buffers = buf.buffers;
@@ -389,14 +397,15 @@ impl File for TcpSocket {
     /// iotcl
     fn ioctl(&self, _cmd: u32, _argp: usize) -> isize {todo!();}
     /// fcntl
-    fn fcntl(&self, _cmd: u32, _arg: u32) -> isize{todo!();}
+    fn fcntl(&self, _cmd: u32, _arg: u32) -> isize{
+        todo!();
+    }
 
     
 }
 
 impl TcpSocket {
     fn _read<'a>(&'a self, buf: &'a mut [u8]) -> GeneralRet<usize> {
-        loop {
             NET_INTERFACE.poll();
             let ret = NET_INTERFACE.tcp_socket(self.socket_handler, |socket| {
                 if socket.state() == tcp::State::CloseWait || 
@@ -440,13 +449,7 @@ impl TcpSocket {
             NET_INTERFACE.poll();
             match ret {
                 Ok(result) => return GeneralRet::Ok(result),
-                Err(SyscallErr::EAGAIN) => {
-                    suspend_current_and_run_next();
-                    // 如果返回 EAGAIN 错误，继续循环
-                    continue;
-                }
                 Err(err) => return GeneralRet::Err(err),
-            }
         }
     }
 }
