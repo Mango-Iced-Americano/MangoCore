@@ -3,9 +3,11 @@
 // use user_lib::{exit, exec, fork, waitpid, shutdown, sleep};
 extern crate alloc;
 
-use alloc::string::String;
 use alloc::format;
-use user_lib::{chdir, close, exec, exit, fork, open, read, shutdown, wait, waitpid,println, OpenFlags};
+use alloc::string::String;
+use user_lib::{
+    chdir, close, exec, exit, fork, open, println, read, shutdown, wait, waitpid, OpenFlags,
+};
 
 fn run_bash_cmd(cmd: &str, environ: &[*const u8]) -> i32 {
     let pid = fork();
@@ -209,9 +211,7 @@ fn run_group_in_dir(environ: &[*const u8], dir: &str, script: &str) {
     if pid < 0 {
         println!(
             "[initproc] fork failed for {} in {} ret={}",
-            script,
-            dir,
-            pid
+            script, dir, pid
         );
         return;
     }
@@ -221,9 +221,7 @@ fn run_group_in_dir(environ: &[*const u8], dir: &str, script: &str) {
         if cd_ret < 0 {
             println!(
                 "[initproc] chdir failed dir={} ret={} when running {}",
-                dir,
-                cd_ret,
-                script
+                dir, cd_ret, script
             );
             exit(126);
         }
@@ -240,7 +238,10 @@ fn run_group_in_dir(environ: &[*const u8], dir: &str, script: &str) {
             core::ptr::null(),
         ];
         exec(shell, &argv, environ);
-        println!("[initproc] exec failed for {} in {} via /bash -c", script, dir);
+        println!(
+            "[initproc] exec failed for {} in {} via /bash -c",
+            script, dir
+        );
         exit(127);
     } else {
         let mut exit_code: i32 = 0;
@@ -248,9 +249,7 @@ fn run_group_in_dir(environ: &[*const u8], dir: &str, script: &str) {
         waitpid(pid as usize, &mut exit_code);
         println!(
             "[initproc] done {} in {} exit_code={}",
-            script,
-            dir,
-            exit_code
+            script, dir, exit_code
         );
     }
 }
@@ -291,7 +290,6 @@ pub extern "C" fn _start() -> ! {
 
 #[no_mangle]
 fn main(_argc: usize, _argv: &[&str]) -> i32 {
-            
     let path = "/bash\0";
     let environ = [
         "SHELL=/bash\0".as_ptr(),
@@ -311,13 +309,12 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         core::ptr::null(),
     ];
 
-    let porgrams = ["ls","cat", "echo", "mkdir", "rmdir", "chown", "chmod", "ln", "basename", "dirname", "sleep",
-        // 文本处理
-        "sed", "awk", "head", "tail",
-        // 系统工具
-        "ps", "top","kill", "free", "df", "du", "mount", "umount",
-        // 网络工具
-        "ping", "netstat", "ifconfig", "ip", "ss","nc"
+    let porgrams = [
+        "ls", "cat", "echo", "mkdir", "rmdir", "chown", "chmod", "ln", "basename", "dirname",
+        "sleep", // 文本处理
+        "sed", "awk", "head", "tail", // 系统工具
+        "ps", "top", "kill", "free", "df", "du", "mount", "umount", // 网络工具
+        "ping", "netstat", "ifconfig", "ip", "ss", "nc",
     ];
 
     let program_str = porgrams.join(" ");
@@ -329,13 +326,16 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
            echo \"busybox $c \\\"\\$@\\\"\" >> /bin/$c; \
      done; \
      hash -r",
-    program_str
-    ); 
+        program_str
+    );
     run_bash_cmd(&cmd, &environ); // prepare busybox "symlinks" for test scripts
 
     let cfg = load_runtime_config();
 
-    // run_bash_cmd("/musl/iperf3 -s & /musl/iperf3 -c 127.0.0.1 -u -t 5 ", &environ);
+    // run_bash_cmd(
+    //     "/musl/iperf3 -s & /musl/iperf3 -c 127.0.0.1 -u -t 5 -l 1400",
+    //     &environ,
+    // );
 
     // /debug_bash remains the highest-priority emergency switch.
     if should_enter_debug_shell() || cfg.mode == RunMode::Shell {
@@ -344,7 +344,6 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         shutdown();
         return 0;
     }
-
 
     run_selected_groups(&environ, cfg.mask);
 

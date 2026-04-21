@@ -292,7 +292,7 @@ pub fn sys_setitimer(
             if let Some(value) = new_timer {
                 inner.timer[which] = value;
                 trace!("[sys_setitimer] *new_value: {:?}", inner.timer[which]);
-                inner.clock.last_real_timer_update = TimeVal::now(); 
+                inner.clock.last_real_timer_update = TimeVal::now();
             }
             SUCCESS
         }
@@ -352,10 +352,7 @@ pub fn sys_uname(buf: *mut u8) -> isize {
     buffer.write_at(FIELD_OFFSET * 2, b"5.10.0-1-rv64\0");
     #[cfg(feature = "loongarch64")]
     buffer.write_at(FIELD_OFFSET * 2, b"5.10.0-1-la64\0");
-    buffer.write_at(
-        FIELD_OFFSET * 3,
-        b"#1 SMP blossom 5.10.0-1 (2025-01-10)\0",
-    );
+    buffer.write_at(FIELD_OFFSET * 3, b"#1 SMP blossom 5.10.0-1 (2025-01-10)\0");
     #[cfg(feature = "riscv")]
     buffer.write_at(FIELD_OFFSET * 4, b"rv64\0");
     #[cfg(feature = "loongarch64")]
@@ -1119,7 +1116,7 @@ pub fn sys_clock_gettime(clk_id: usize, tp: *mut TimeSpec) -> isize {
             log::error!("[sys_clock_gettime] Failed to copy to {:?}", tp);
             return EFAULT;
         };
-        info!("[sys_clock_gettime] clk_id: {}, tp: {:?}", clk_id, timespec);
+        log::trace!("[sys_clock_gettime] clk_id: {}, tp: {:?}", clk_id, timespec);
     }
     SUCCESS
 }
@@ -1142,7 +1139,7 @@ pub fn sys_clock_nanosleep(
     }
     SUCCESS
 }
-    
+
 // int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact);
 pub fn sys_sigaction(signum: usize, act: usize, oldact: usize) -> isize {
     trace!(

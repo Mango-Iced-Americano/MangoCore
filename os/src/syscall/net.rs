@@ -10,7 +10,7 @@ use crate::{
     task::current_task,
 };
 
-use crate::task::wait_interruptible;
+use crate::task::{suspend_current_and_run_next, wait_interruptible};
 use crate::utils::error::SyscallErr;
 
 use log::info;
@@ -143,8 +143,11 @@ pub fn sys_sendto(
     let socket = get_socket!(sockfd);
     log::info!("[sys_sendto] get socket sockfd: {}", sockfd);
     let mut offset = 0 as usize;
-    let len = match socket.socket_type() {
-        SocketType::SOCK_STREAM => socket_file.file.write(Some(&mut offset), buf),
+    let is_nonblock = socket_file.get_nonblock();
+    match socket.socket_type() {
+        SocketType::SOCK_STREAM => {
+            info!("[sys_sendto] socket is tcp");
+        }
         SocketType::SOCK_DGRAM => {
             info!("[sys_sendto] socket is udp");
             if socket.loacl_endpoint().port == 0 {
@@ -154,7 +157,7 @@ pub fn sys_sendto(
             }
             let dest_addr = trans_ref!(dest_addr, addrlen);
             let _ = socket.connect(dest_addr);
-            socket_file.file.write(Some(&mut offset), buf)
+            // socket_file.file.write(Some(&mut offset), buf)
         }
         SocketType::SOCK_RAW => {
             info!("[sys_sendto] socket is raw");
@@ -162,13 +165,27 @@ pub fn sys_sendto(
             let endpoint = address::endpoint(dest_addr).unwrap();
 
             match socket.send_to(buf, endpoint) {
-                Ok(bytes_sent) => bytes_sent as usize, // 返回正数长度
-                Err(e) => e as usize,
+                Ok(bytes_sent) => return bytes_sent as isize, // 返回正数长度
+                Err(e) => return e as isize,
             }
         }
         _ => todo!(),
     };
-    len as isize
+    loop {
+        let write_ret = socket_file.write(Some(&mut offset), buf);
+        if write_ret == SyscallErr::EAGAIN as usize {
+            if is_nonblock {
+                return -(write_ret as isize);
+            } else {
+                suspend_current_and_run_next();
+                if !task.acquire_inner_lock().sigpending.is_empty() {
+                    return -(SyscallErr::EINTR as isize);
+                }
+                continue;
+            }
+        }
+        return -(write_ret as isize);
+    }
 }
 
 pub fn sys_recvfrom(
@@ -187,7 +204,6 @@ pub fn sys_recvfrom(
         .unwrap()
         .clone();
     let task = current_task().unwrap();
-    let token = task.get_user_token();
     //info!("[sys_recvfrom] file filags: {:?}", socket_file.flags);
     let socket = get_socket!(sockfd);
 
@@ -204,6 +220,7 @@ pub fn sys_recvfrom(
     info!("[sys_recvfrom] get socket sockfd: {}", sockfd);
 
     loop {
+        let token = task.get_user_token();
         let buf = translated_refmut(token, buf as *mut u8).unwrap();
         let buf = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
         let mut offset = 0 as usize;
@@ -221,7 +238,8 @@ pub fn sys_recvfrom(
             if is_nonblock {
                 return ret;
             } else {
-                wait_interruptible();
+                // wait_interruptible();
+                suspend_current_and_run_next();
                 if !task.acquire_inner_lock().sigpending.is_empty() {
                     return -(SyscallErr::EINTR as isize);
                 }

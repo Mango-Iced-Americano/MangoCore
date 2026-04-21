@@ -6,7 +6,9 @@ use crate::mm::{
     translated_byte_buffer, translated_byte_buffer_append_to_existing_vec, translated_refmut,
     translated_str, try_get_from_user, MapPermission, UserBuffer, VirtAddr,
 };
-use crate::task::{current_task, current_user_token, wait_interruptible};
+use crate::task::{
+    current_task, current_user_token, signal, suspend_current_and_run_next, wait_interruptible,
+};
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
 use alloc::boxed::Box;
@@ -249,8 +251,11 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
             if is_nonblock {
                 return ret;
             } else {
-                wait_interruptible();
+                // wait_interruptible();
+                suspend_current_and_run_next();
                 if !task.acquire_inner_lock().sigpending.is_empty() {
+                    let signal = task.acquire_inner_lock().sigpending.complement();
+                    log::info!("[sys_read] interrupted by signal: {:?}", signal);
                     return -(SyscallErr::EINTR as isize);
                 }
                 continue;

@@ -33,6 +33,7 @@ feature("iface_max_sixlowpan_address_context_count", default=4, min=1, max=1024,
 feature("iface_neighbor_cache_count", default=4, min=1, max=1024, pow2=8)
 feature("iface_max_route_count", default=2, min=1, max=1024, pow2=8)
 feature("fragmentation_buffer_size", default=1500, min=256, max=65536, pow2=True)
+#feature("fragmentation_buffer_size", default=65536, min=256, max=65536, pow2=True)
 feature("assembler_max_segment_count", default=4, min=1, max=32, pow2=4)
 feature("reassembly_buffer_size", default=1500, min=256, max=65536, pow2=True)
 feature("reassembly_buffer_count", default=1, min=1, max=32, pow2=4)

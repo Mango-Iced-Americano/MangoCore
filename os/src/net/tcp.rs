@@ -1,13 +1,18 @@
 use super::{Mutex, Socket};
 use crate::{
-    fs::{FileDescriptor, OpenFlags, file_trait::File}, net::{
-        MAX_BUFFER_SIZE, SHUT_WR, address, config::{NET_INTERFACE, lookup_source_ip}
-    }, task::{current_task, wait_interruptible}, utils::{
+    fs::{file_trait::File, FileDescriptor, OpenFlags},
+    net::{
+        address,
+        config::{lookup_source_ip, NET_INTERFACE},
+        MAX_BUFFER_SIZE, SHUT_WR,
+    },
+    task::{current_task, wait_interruptible},
+    utils::{
         error::{GeneralRet, SyscallErr, SyscallRet},
         random::RNG,
-    }
+    },
 };
-use alloc::{ sync::Arc, vec};
+use alloc::{sync::Arc, vec};
 use core::time::Duration;
 use log::info;
 use smoltcp::{
@@ -16,18 +21,16 @@ use smoltcp::{
     wire::{IpEndpoint, IpListenEndpoint},
 };
 
-use crate::mm::UserBuffer;
-use crate::fs::Stat;
-use crate::fs::DiskInodeType;
-use alloc::sync::Weak;
 use crate::fs::directory_tree::DirectoryTreeNode;
-use alloc::vec::Vec;
-use alloc::string::String;
 use crate::fs::dirent::Dirent;
-use crate::fs::SeekWhence;
 use crate::fs::fat32::PageCache;
-
-
+use crate::fs::DiskInodeType;
+use crate::fs::SeekWhence;
+use crate::fs::Stat;
+use crate::mm::UserBuffer;
+use alloc::string::String;
+use alloc::sync::Weak;
+use alloc::vec::Vec;
 
 pub const TCP_MSS_DEFAULT: u32 = 1 << 15;
 pub const TCP_MSS: u32 = if TCP_MSS_DEFAULT > MAX_BUFFER_SIZE as u32 {
@@ -48,6 +51,7 @@ struct TcpSocketInner {
     last_state: tcp::State,
     recvbuf_size: usize,
     sendbuf_size: usize,
+    is_listing: bool,
     // TODO: add more
 }
 
@@ -69,6 +73,7 @@ impl Socket for TcpSocket {
             self.inner.lock().last_state = socket.state();
             ret
         })?;
+        self.inner.lock().is_listing = true;
         Ok(0)
     }
 
@@ -76,8 +81,12 @@ impl Socket for TcpSocket {
         // get old socket
         let task = current_task().unwrap();
 
-
-        let old_nonblock = task.files.lock().get_ref(sockfd as usize).unwrap().get_nonblock();
+        let old_nonblock = task
+            .files
+            .lock()
+            .get_ref(sockfd as usize)
+            .unwrap()
+            .get_nonblock();
         let peer_addr = self._accept(old_nonblock)?;
         log::info!("[Socket::accept] connection established");
 
@@ -86,12 +95,12 @@ impl Socket for TcpSocket {
 
         let connected_socket = socket_table.get_ref(sockfd as usize).unwrap().clone();
         let connected_file_desc = fd_table.get_ref(sockfd as usize).unwrap().clone();
-        let old_clonexec =  connected_file_desc.get_cloexec();
+        let old_clonexec = connected_file_desc.get_cloexec();
 
         let new_fd = fd_table.insert(connected_file_desc).unwrap();
         socket_table.insert(new_fd, connected_socket);
 
-        let new_listener =Arc::new(TcpSocket::new());
+        let new_listener = Arc::new(TcpSocket::new());
 
         new_listener.bind(self.inner.lock().local_endpoint)?;
         new_listener.listen()?;
@@ -120,15 +129,25 @@ impl Socket for TcpSocket {
             match state {
                 tcp::State::Closed => {
                     // close but not already connect, retry
-                    info!("[Tcp::connect] {} already closed, try again", self.socket_handler);
+                    info!(
+                        "[Tcp::connect] {} already closed, try again",
+                        self.socket_handler
+                    );
                     self._connect(remote_endpoint)?;
                 }
                 tcp::State::Established => {
-                    info!("[Tcp::connect] {} connected, state {:?}", self.socket_handler, state);
+                    info!(
+                        "[Tcp::connect] {} connected, state {:?}",
+                        self.socket_handler, state
+                    );
                     return Ok(0);
                 }
                 _ => {
-                    log::trace!("[Tcp::connect] {} not connect yet, state {:?}", self.socket_handler, state);
+                    log::trace!(
+                        "[Tcp::connect] {} not connect yet, state {:?}",
+                        self.socket_handler,
+                        state
+                    );
                 }
             }
             suspend_current_and_run_next();
@@ -188,7 +207,9 @@ impl Socket for TcpSocket {
         Ok(0)
     }
 
-    fn send_to(&self, buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet {todo!();}
+    fn send_to(&self, buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet {
+        todo!();
+    }
 }
 
 impl TcpSocket {
@@ -210,6 +231,7 @@ impl TcpSocket {
                 last_state: tcp::State::Closed,
                 recvbuf_size: MAX_BUFFER_SIZE,
                 sendbuf_size: MAX_BUFFER_SIZE,
+                is_listing: false,
             }),
         }
     }
@@ -267,13 +289,18 @@ impl TcpSocket {
             });
             NET_INTERFACE.poll();
             match ret {
-                Ok(endpoint) => return GeneralRet::Ok(endpoint),
+                Ok(endpoint) => {
+                    self.inner.lock().is_listing = false;
+                    return GeneralRet::Ok(endpoint);
+                }
                 Err(SyscallErr::EAGAIN) => {
-                    // suspend_current_and_run_next();
+                    if nonblock {
+                        return GeneralRet::Err(SyscallErr::EAGAIN);
+                    }
+                    suspend_current_and_run_next();
                     // 如果返回 EAGAIN 错误，继续循环
                     // wait_interruptible();
-                    // continue;
-                    return GeneralRet::Err(SyscallErr::EAGAIN);
+                    continue;
                 }
                 Err(err) => return GeneralRet::Err(err),
             }
@@ -302,32 +329,32 @@ impl Drop for TcpSocket {
 }
 
 impl File for TcpSocket {
-    fn deep_clone(&self) -> Arc<dyn File>{
+    fn deep_clone(&self) -> Arc<dyn File> {
         todo!();
     }
-    fn readable(&self) -> bool{
+    fn readable(&self) -> bool {
         true
     }
-    fn writable(&self) -> bool{
+    fn writable(&self) -> bool {
         true
     }
-    fn read(&self, _offset: Option<&mut usize>, buf: &mut [u8]) -> usize{
+    fn read(&self, _offset: Option<&mut usize>, buf: &mut [u8]) -> usize {
         match self._read(buf) {
             Ok(ret) => ret,
             Err(err) => err.as_errno_ret(),
         }
     }
-    fn write(&self, _offset: Option<&mut usize>, buf: &[u8]) -> usize{
+    fn write(&self, _offset: Option<&mut usize>, buf: &[u8]) -> usize {
         NET_INTERFACE.poll();
         let ret = NET_INTERFACE.tcp_socket(self.socket_handler, |socket| {
             if !socket.may_send() {
                 log::info!("[TcpSendFuture::poll] err when send");
-                return SyscallErr::ENOTCONN as usize;
+                return (SyscallErr::ENOTCONN).as_errno_ret();
             }
             if !socket.can_send() {
-                log::info!("[TcpSendFuture::poll] cannot send yet");
-                suspend_current_and_run_next();
-                return SyscallErr::EAGAIN as usize;
+                log::trace!("[TcpSendFuture::poll] cannot send yet");
+                // suspend_current_and_run_next();
+                return (SyscallErr::EAGAIN).as_errno_ret();
             }
             log::info!("[TcpSendFuture::poll] start to send...");
             info!(
@@ -346,110 +373,176 @@ impl File for TcpSocket {
         NET_INTERFACE.poll();
         ret
     }
-    fn r_ready(&self) -> bool{true}
-    fn w_ready(&self) -> bool{true}
-    fn read_user(&self, _offset: Option<usize>, buf: UserBuffer) -> usize{
+    fn r_ready(&self) -> bool {
+        let is_listener = self.inner.lock().is_listing;
+        NET_INTERFACE.poll();
+        NET_INTERFACE.tcp_socket(self.socket_handler, |socket| {
+            if is_listener {
+                let state = socket.state();
+                state == tcp::State::SynReceived || state == tcp::State::Established
+            } else {
+                socket.can_recv() || !socket.may_recv()
+            }
+        })
+    }
+    fn w_ready(&self) -> bool {
+        NET_INTERFACE.poll();
+        NET_INTERFACE.tcp_socket(self.socket_handler, |socket| {
+            socket.can_send() || !socket.may_send()
+        })
+    }
+    fn read_user(&self, _offset: Option<usize>, buf: UserBuffer) -> usize {
         let mut buffers = buf.buffers;
-        let buf = unsafe { core::slice::from_raw_parts_mut(buffers[0].as_mut_ptr() as *mut u8, buf.len as usize) };
+        let buf = unsafe {
+            core::slice::from_raw_parts_mut(buffers[0].as_mut_ptr() as *mut u8, buf.len as usize)
+        };
         let ret = self._read(buf);
         match ret {
             Ok(s) => return s,
             Err(err) => return err.as_errno_ret(),
         }
     }
-    fn write_user(&self, _offset: Option<usize>, buf: UserBuffer) -> usize{
+    fn write_user(&self, _offset: Option<usize>, buf: UserBuffer) -> usize {
         let mut buffers = buf.buffers;
-        let buf = unsafe { core::slice::from_raw_parts_mut(buffers[0].as_mut_ptr() as *mut u8, buf.len as usize) };
+        let buf = unsafe {
+            core::slice::from_raw_parts_mut(buffers[0].as_mut_ptr() as *mut u8, buf.len as usize)
+        };
         self.write(None, buf)
     }
-    fn get_size(&self) -> usize{todo!();}
-    fn get_stat(&self) -> Stat{todo!();}
-    fn get_file_type(&self) -> DiskInodeType{todo!();}
-    fn is_dir(&self) -> bool {todo!();}
-    fn is_file(&self) -> bool {todo!();}
-    fn info_dirtree_node(&self, _dirnode_ptr: Weak<DirectoryTreeNode>){todo!();}
-    fn get_dirtree_node(&self) -> Option<Arc<DirectoryTreeNode>>{todo!();}
-    /// open
-    fn open(&self, _flags: OpenFlags, _special_use: bool) -> Arc<dyn File>{todo!();}
-    fn open_subfile(&self) -> Result<Vec<(String, Arc<dyn File>)>, isize>{todo!();}
-    /// create
-    fn create(&self, _name: &str, _file_type: DiskInodeType) -> Result<Arc<dyn File>, isize>{todo!();}
-    fn link_child(&self, _name: &str, _child: &Self) -> Result<(), isize>{todo!();}
-    /// delete(unlink)
-    fn unlink(&self, _delete: bool) -> Result<(), isize>{todo!();}
-    /// dirent
-    fn get_dirent(&self, _count: usize) -> Vec<Dirent>{todo!();}
-    /// offset
-    fn get_offset(&self) -> usize {todo!();}
-    fn lseek(&self, _offset: isize, _whence: SeekWhence) -> Result<usize, isize>{todo!();}
-    /// size
-    fn modify_size(&self, _diff: isize) -> Result<(), isize>{todo!();}
-    fn truncate_size(&self, _new_size: usize) -> Result<(), isize>{todo!();}
-    // time
-    fn set_timestamp(&self, _ctime: Option<usize>, _atime: Option<usize>, _mtime: Option<usize>){todo!();}
-    /// cache
-    fn get_single_cache(&self, _offset: usize) -> Result<Arc<Mutex<PageCache>>, ()>{todo!();}
-    fn get_all_caches(&self) -> Result<Vec<Arc<Mutex<PageCache>>>, ()>{todo!();}
-    /// memory related
-    fn oom(&self) -> usize{todo!();}
-    /// poll, select related
-    fn hang_up(&self) -> bool{todo!();}
-    /// iotcl
-    fn ioctl(&self, _cmd: u32, _argp: usize) -> isize {todo!();}
-    /// fcntl
-    fn fcntl(&self, _cmd: u32, _arg: u32) -> isize{
+    fn get_size(&self) -> usize {
         todo!();
     }
-
-    
+    fn get_stat(&self) -> Stat {
+        todo!();
+    }
+    fn get_file_type(&self) -> DiskInodeType {
+        todo!();
+    }
+    fn is_dir(&self) -> bool {
+        todo!();
+    }
+    fn is_file(&self) -> bool {
+        todo!();
+    }
+    fn info_dirtree_node(&self, _dirnode_ptr: Weak<DirectoryTreeNode>) {
+        todo!();
+    }
+    fn get_dirtree_node(&self) -> Option<Arc<DirectoryTreeNode>> {
+        todo!();
+    }
+    /// open
+    fn open(&self, _flags: OpenFlags, _special_use: bool) -> Arc<dyn File> {
+        todo!();
+    }
+    fn open_subfile(&self) -> Result<Vec<(String, Arc<dyn File>)>, isize> {
+        todo!();
+    }
+    /// create
+    fn create(&self, _name: &str, _file_type: DiskInodeType) -> Result<Arc<dyn File>, isize> {
+        todo!();
+    }
+    fn link_child(&self, _name: &str, _child: &Self) -> Result<(), isize> {
+        todo!();
+    }
+    /// delete(unlink)
+    fn unlink(&self, _delete: bool) -> Result<(), isize> {
+        todo!();
+    }
+    /// dirent
+    fn get_dirent(&self, _count: usize) -> Vec<Dirent> {
+        todo!();
+    }
+    /// offset
+    fn get_offset(&self) -> usize {
+        todo!();
+    }
+    fn lseek(&self, _offset: isize, _whence: SeekWhence) -> Result<usize, isize> {
+        todo!();
+    }
+    /// size
+    fn modify_size(&self, _diff: isize) -> Result<(), isize> {
+        todo!();
+    }
+    fn truncate_size(&self, _new_size: usize) -> Result<(), isize> {
+        todo!();
+    }
+    // time
+    fn set_timestamp(&self, _ctime: Option<usize>, _atime: Option<usize>, _mtime: Option<usize>) {
+        todo!();
+    }
+    /// cache
+    fn get_single_cache(&self, _offset: usize) -> Result<Arc<Mutex<PageCache>>, ()> {
+        todo!();
+    }
+    fn get_all_caches(&self) -> Result<Vec<Arc<Mutex<PageCache>>>, ()> {
+        todo!();
+    }
+    /// memory related
+    fn oom(&self) -> usize {
+        todo!();
+    }
+    /// poll, select related
+    fn hang_up(&self) -> bool {
+        todo!();
+    }
+    /// iotcl
+    fn ioctl(&self, _cmd: u32, _argp: usize) -> isize {
+        todo!();
+    }
+    /// fcntl
+    fn fcntl(&self, _cmd: u32, _arg: u32) -> isize {
+        todo!();
+    }
 }
 
 impl TcpSocket {
     fn _read<'a>(&'a self, buf: &'a mut [u8]) -> GeneralRet<usize> {
-            NET_INTERFACE.poll();
-            let ret = NET_INTERFACE.tcp_socket(self.socket_handler, |socket| {
-                if socket.state() == tcp::State::CloseWait || 
-                socket.state() == tcp::State::TimeWait || socket.state() == tcp::State::FinWait2{
-                    log::info!("[TcpRecvFuture::poll] state become {:?}", socket.state());
-                    return Ok(0);
-                }
-                if !socket.may_recv() {
-                    log::info!(
-                        "[TcpRecvFuture::poll] err when recv, state {:?}",
-                        socket.state()
-                    );
-                    return Err(SyscallErr::ENOTCONN);
-                }
-                log::info!("[TcpRecvFuture::poll] state {:?}", socket.state());
-                if !socket.can_recv() {
-                    // panic!();
-                    log::info!("[TcpRecvFuture::poll] cannot recv yet");
-                    log::debug!(
+        NET_INTERFACE.poll();
+        let ret = NET_INTERFACE.tcp_socket(self.socket_handler, |socket| {
+            if socket.state() == tcp::State::CloseWait
+                || socket.state() == tcp::State::TimeWait
+                || socket.state() == tcp::State::FinWait2
+            {
+                log::info!("[TcpRecvFuture::poll] state become {:?}", socket.state());
+                return Ok(0);
+            }
+            if !socket.may_recv() {
+                log::info!(
+                    "[TcpRecvFuture::poll] err when recv, state {:?}",
+                    socket.state()
+                );
+                return Err(SyscallErr::ENOTCONN);
+            }
+            log::trace!("[TcpRecvFuture::poll] state {:?}", socket.state());
+            if !socket.can_recv() {
+                // panic!();
+                log::trace!("[TcpRecvFuture::poll] cannot recv yet");
+                log::debug!(
                     "[TcpDebug] RecvQueue: {} bytes, State: {:?}, MayRecv: {}",
                     socket.recv_queue(), // 看看这里到底是不是 0
                     socket.state(),
                     socket.may_recv()
-                    );
-                    return Err(SyscallErr::EAGAIN);
-                }
-                log::info!("[TcpRecvFuture::poll] start to recv...");
-                info!(
-                    "[TcpRecvFuture::poll] {:?} <- {:?}",
-                    socket.local_endpoint(),
-                    socket.remote_endpoint()
                 );
-                match socket.recv_slice(buf) {
-                    Ok(nbytes) => {
-                        info!("[TcpRecvFuture::poll] recv {} bytes", nbytes);
-                        Ok(nbytes)
-                    }
-                    Err(_) => return Err(SyscallErr::ENOTCONN),
+                return Err(SyscallErr::EAGAIN);
+            }
+            log::info!("[TcpRecvFuture::poll] start to recv...");
+            info!(
+                "[TcpRecvFuture::poll] {:?} <- {:?}",
+                socket.local_endpoint(),
+                socket.remote_endpoint()
+            );
+            match socket.recv_slice(buf) {
+                Ok(nbytes) => {
+                    info!("[TcpRecvFuture::poll] recv {} bytes", nbytes);
+                    Ok(nbytes)
                 }
-            });
-            NET_INTERFACE.poll();
-            match ret {
-                Ok(result) => return GeneralRet::Ok(result),
-                Err(err) => return GeneralRet::Err(err),
+                Err(_) => return Err(SyscallErr::ENOTCONN),
+            }
+        });
+        NET_INTERFACE.poll();
+        match ret {
+            Ok(result) => return GeneralRet::Ok(result),
+            Err(err) => return GeneralRet::Err(err),
         }
     }
 }

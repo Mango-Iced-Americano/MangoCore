@@ -104,3 +104,5 @@ rpath = false
 [profile.release]
 lto = true
 debug = true
+[env]
+SMOLTCP_FRAGMENTATION_BUFFER_SIZE = "65535"

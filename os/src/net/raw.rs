@@ -3,11 +3,18 @@
 use super::{Mutex, Socket};
 use crate::{
     fs::{
-        OpenFlags, SeekWhence, Stat, directory_tree::DirectoryTreeNode, dirent::Dirent, fat32::{DiskInodeType, PageCache}, file_trait::File
+        directory_tree::DirectoryTreeNode,
+        dirent::Dirent,
+        fat32::{DiskInodeType, PageCache},
+        file_trait::File,
+        OpenFlags, SeekWhence, Stat,
     },
     mm::UserBuffer,
-    net::{MAX_BUFFER_SIZE, SHUT_WR, config::NET_INTERFACE},
-    task::{block_current_and_run_next, suspend_current_and_run_next, wait_interruptible, wait_interruptible_timeout},
+    net::{config::NET_INTERFACE, MAX_BUFFER_SIZE, SHUT_WR},
+    task::{
+        block_current_and_run_next, suspend_current_and_run_next, wait_interruptible,
+        wait_interruptible_timeout,
+    },
     timer::TimeSpec,
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
 };
@@ -35,8 +42,8 @@ struct RawSocketInner {
     remote_endpoint: Option<IpEndpoint>,
     ip_version: IpVersion,
     ip_protocol: IpProtocol,
-    recvbuf_size:usize,
-    sendbuf_size:usize,
+    recvbuf_size: usize,
+    sendbuf_size: usize,
 }
 
 impl Socket for RawSocket {
@@ -75,7 +82,7 @@ impl Socket for RawSocket {
     }
 
     fn set_send_buf_size(&self, size: usize) {
-        self.inner.lock().sendbuf_size = size; 
+        self.inner.lock().sendbuf_size = size;
     }
 
     fn loacl_endpoint(&self) -> IpListenEndpoint {
@@ -99,16 +106,16 @@ impl Socket for RawSocket {
         todo!()
     }
 
-    fn send_to(&self, user_buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet{
+    fn send_to(&self, user_buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet {
         let (version, protocol) = {
-        let inner = self.inner.lock();
-        (inner.ip_version, inner.ip_protocol)
+            let inner = self.inner.lock();
+            (inner.ip_version, inner.ip_protocol)
         };
         match version {
-            IpVersion::Ipv4 =>{
+            IpVersion::Ipv4 => {
                 let target_ip = match dest_addr.addr {
-                smoltcp::wire::IpAddress::Ipv4(ip) => ip,
-                _ => return Err(SyscallErr::EINVAL),
+                    smoltcp::wire::IpAddress::Ipv4(ip) => ip,
+                    _ => return Err(SyscallErr::EINVAL),
                 };
                 let mut packet_buf = vec![0u8; 20 + user_buf.len()];
 
@@ -127,22 +134,28 @@ impl Socket for RawSocket {
                     smoltcp::wire::Ipv4Address([10, 0, 2, 15]) // 或者是你网卡的真实 IP
                 };
                 ip_pkg.set_src_addr(src_addr); //先硬编码
-            
+
                 ip_pkg.payload_mut().copy_from_slice(user_buf);
                 ip_pkg.fill_checksum();
 
                 NET_INTERFACE.poll();
-                let ret=NET_INTERFACE.raw_socket(self.socket_handler,|socket|{
-                    log::info!("[RawSocket] Sending {} bytes to {}", user_buf.len(), target_ip);
+                let ret = NET_INTERFACE.raw_socket(self.socket_handler, |socket| {
+                    log::info!(
+                        "[RawSocket] Sending {} bytes to {}",
+                        user_buf.len(),
+                        target_ip
+                    );
                     match socket.send_slice(ip_pkg.into_inner()) {
-                    Ok(_) => Ok(user_buf.len()),
-                    Err(_) => Err(SyscallErr::ENOBUFS),
+                        Ok(_) => Ok(user_buf.len()),
+                        Err(_) => Err(SyscallErr::ENOBUFS),
                     }
                 });
                 NET_INTERFACE.poll();
                 ret
             }
-            IpVersion::Ipv6 => {todo!()}
+            IpVersion::Ipv6 => {
+                todo!()
+            }
         }
     }
 }
@@ -150,27 +163,27 @@ impl Socket for RawSocket {
 impl RawSocket {
     pub fn new(protocol: u32) -> Self {
         let tx_buf = socket::raw::PacketBuffer::new(
-            vec![PacketMetadata::EMPTY;128],
+            vec![PacketMetadata::EMPTY; 128],
             vec![0 as u8; MAX_BUFFER_SIZE],
         );
         let rx_buf = socket::raw::PacketBuffer::new(
-            vec![PacketMetadata::EMPTY;128],
+            vec![PacketMetadata::EMPTY; 128],
             vec![0 as u8; MAX_BUFFER_SIZE],
         );
         let socket = raw::Socket::new(
             smoltcp::wire::IpVersion::Ipv4,
             smoltcp::wire::IpProtocol::from(protocol as u8),
             rx_buf,
-            tx_buf
+            tx_buf,
         );
         let socket_handler = NET_INTERFACE.add_socket(socket);
-        log::info!("[RawSocket::new] new {}",socket_handler);
+        log::info!("[RawSocket::new] new {}", socket_handler);
         NET_INTERFACE.poll();
-        let inner = RawSocketInner{
-            local_endpoint: None,          // no local address bound yet
-            remote_endpoint: None,         // no remote peer
+        let inner = RawSocketInner {
+            local_endpoint: None,  // no local address bound yet
+            remote_endpoint: None, // no remote peer
             ip_version: IpVersion::Ipv4,
-            ip_protocol:  IpProtocol::from(protocol as u8),
+            ip_protocol: IpProtocol::from(protocol as u8),
             recvbuf_size: MAX_BUFFER_SIZE,
             sendbuf_size: MAX_BUFFER_SIZE,
         };
@@ -179,9 +192,7 @@ impl RawSocket {
             inner: Mutex::new(inner),
             socket_handler,
         }
-
     }
-    
 }
 
 impl File for RawSocket {
@@ -207,29 +218,31 @@ impl File for RawSocket {
 
     fn write(&self, _offset: Option<&mut usize>, buf: &[u8]) -> usize {
         NET_INTERFACE.poll();
-        let ret = NET_INTERFACE.raw_socket(self.socket_handler, |socket|{
-            if ! socket.can_send() {
+        let ret = NET_INTERFACE.raw_socket(self.socket_handler, |socket| {
+            if !socket.can_send() {
                 log::info!("[RawSendFuture::poll] cannot send yet");
                 suspend_current_and_run_next();
-                return SyscallErr::EAGAIN as usize;
+                return (SyscallErr::EAGAIN).as_errno_ret();
             }
             log::info!("[RawSendFuture::poll] start to send...");
             match socket.send_slice(buf) {
                 Ok(()) => buf.len(),
-                Err(_) => SyscallErr::ENOBUFS as usize,
+                Err(_) => (SyscallErr::ENOBUFS).as_errno_ret(),
             }
-           
         });
         NET_INTERFACE.poll();
         ret
     }
 
     fn r_ready(&self) -> bool {
-        todo!()
+        NET_INTERFACE.poll();
+        NET_INTERFACE.udp_socket(self.socket_handler, |socket| {
+            socket.can_recv() // 只有真正有包了才返回 true
+        })
     }
-
     fn w_ready(&self) -> bool {
-        todo!()
+        NET_INTERFACE.poll();
+        NET_INTERFACE.udp_socket(self.socket_handler, |socket| socket.can_send())
     }
 
     fn read_user(&self, _offset: Option<usize>, _buf: UserBuffer) -> usize {
@@ -326,44 +339,41 @@ impl File for RawSocket {
     fn fcntl(&self, _cmd: u32, _arg: u32) -> isize {
         todo!()
     }
-    
 }
 
 impl RawSocket {
     fn _read<'a>(&'a self, buf: &'a mut [u8]) -> GeneralRet<usize> {
-            NET_INTERFACE.poll();
-            let ret = NET_INTERFACE.raw_socket(self.socket_handler,|socket|{
-                if !socket.can_recv() {
-                    // panic!();
-                    log::trace!("[RawRecvFuture::poll] cannot recv yet");
-                    return Err(SyscallErr::EAGAIN);
-                }
-                log::info!("[RawRecvFuture::poll] start to recv...");
-                
-                match socket.recv_slice(buf) {
-                    Ok(nbytes) => {
-                        info!("[TcpRecvFuture::poll] recv {} bytes", nbytes);
-                        let packet = smoltcp::wire::Ipv4Packet::new_unchecked(&buf[..nbytes]);        
-                        let src_addr = packet.src_addr();
-                        let mut inner = self.inner.lock();
-                        inner.remote_endpoint = Some(IpEndpoint::new(src_addr.into(), 0));
-                        Ok(nbytes)
-                    }
-                    Err(_) => return Err(SyscallErr::ENOTCONN),
-                }
+        NET_INTERFACE.poll();
+        let ret = NET_INTERFACE.raw_socket(self.socket_handler, |socket| {
+            if !socket.can_recv() {
+                // panic!();
+                log::trace!("[RawRecvFuture::poll] cannot recv yet");
+                return Err(SyscallErr::EAGAIN);
+            }
+            log::info!("[RawRecvFuture::poll] start to recv...");
 
-            });
-
-            NET_INTERFACE.poll();
-
-            match ret {
-                Ok(result) => {
-                    return GeneralRet::Ok(result);
+            match socket.recv_slice(buf) {
+                Ok(nbytes) => {
+                    info!("[RawRecvFuture::poll] recv {} bytes", nbytes);
+                    let packet = smoltcp::wire::Ipv4Packet::new_unchecked(&buf[..nbytes]);
+                    let src_addr = packet.src_addr();
+                    let mut inner = self.inner.lock();
+                    inner.remote_endpoint = Some(IpEndpoint::new(src_addr.into(), 0));
+                    Ok(nbytes)
                 }
-                Err(err) => {
-                    return GeneralRet::Err(err);
-                }
-        
+                Err(_) => return Err(SyscallErr::ENOTCONN),
+            }
+        });
+
+        NET_INTERFACE.poll();
+
+        match ret {
+            Ok(result) => {
+                return GeneralRet::Ok(result);
+            }
+            Err(err) => {
+                return GeneralRet::Err(err);
+            }
         }
     }
 }
