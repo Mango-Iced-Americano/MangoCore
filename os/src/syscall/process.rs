@@ -1233,3 +1233,27 @@ pub fn sys_getrusage(who: isize, usage: *mut Rusage) -> isize {
     //info!("[sys_getrusage] who: RUSAGE_SELF, usage: {:?}", inner.rusage);
     SUCCESS
 }
+
+//获得进程pid允许运行在哪些cpu上，对mask进行相应位置位，pid为0默认为当前task
+pub fn sys_sched_getaffinity(pid: usize, cpusetsize: usize, mask: *mut u8) -> isize {
+    //qemu上目前只有单核，对于所有进程都只能对mask0bit置位
+    if mask.is_null() {
+        return EFAULT;
+    }
+    if cpusetsize < core::mem::size_of::<usize>() {
+        return EINVAL;
+    }
+    let task = if pid == 0 {
+        current_task().unwrap()
+    } else {
+        match find_task_by_pid(pid) {
+            Some(task) => task,
+            None => return ESRCH,
+        }
+    };   
+    let token = current_task().unwrap().get_user_token();
+    match copy_to_user(token, &(1 as usize), mask as *mut usize) {
+        Ok(()) => core::mem::size_of::<usize>() as isize,
+        Err(_) => EFAULT
+    }
+}
