@@ -143,7 +143,7 @@ pub fn sys_sendto(
     let socket = get_socket!(sockfd);
     log::info!("[sys_sendto] get socket sockfd: {}", sockfd);
     let mut offset = 0 as usize;
-    let is_nonblock = socket_file.get_nonblock();
+    let is_nonblock = socket_file.get_nonblock() || (_flags & 0x40) != 0;
     match socket.socket_type() {
         SocketType::SOCK_STREAM => {
             info!("[sys_sendto] socket is tcp");
@@ -171,9 +171,10 @@ pub fn sys_sendto(
         }
         _ => todo!(),
     };
+    log::info!("[sys_sendto]is nonblock:{:?}", is_nonblock);
     loop {
-        let write_ret = socket_file.write(Some(&mut offset), buf);
-        if write_ret == SyscallErr::EAGAIN as usize {
+        let write_ret = socket_file.write(Some(&mut offset), buf) as isize;
+        if write_ret == -(SyscallErr::EAGAIN as isize) {
             if is_nonblock {
                 return -(write_ret as isize);
             } else {
@@ -184,7 +185,7 @@ pub fn sys_sendto(
                 continue;
             }
         }
-        return -(write_ret as isize);
+        return write_ret;
     }
 }
 
@@ -215,10 +216,10 @@ pub fn sys_recvfrom(
         }
     };
 
-    let is_nonblock = file_descriptor.get_nonblock();
+    let is_nonblock = file_descriptor.get_nonblock() || (_flags & 0x40) != 0;
 
     info!("[sys_recvfrom] get socket sockfd: {}", sockfd);
-
+    log::info!("[sys_recvfrom] is nonblock:{:?}", is_nonblock);
     loop {
         let token = task.get_user_token();
         let buf = translated_refmut(token, buf as *mut u8).unwrap();

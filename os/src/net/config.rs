@@ -14,7 +14,6 @@ use smoltcp::{
 };
 
 use spin::Mutex;
-use virtio_drivers::device;
 
 pub static NET_INTERFACE: NetInterface = NetInterface::new();
 
@@ -35,6 +34,7 @@ pub struct NetInterface<'a> {
 
 pub struct NetInterfaceInner<'a> {
     pub device: RoutingDevice,
+    // pub device: Loopback,
     pub iface: Interface,
     pub sockets: SocketSet<'a>,
 }
@@ -49,7 +49,7 @@ impl<'a> NetInterfaceInner<'a> {
         let mac = NET_DEVICE.mac_address();
         let hw_addr = HardwareAddress::Ethernet(EthernetAddress(mac));
         let now = Instant::from_millis(current_time_duration().as_millis() as i64);
-        let mut config = Config::new(hw_addr);
+        let config = Config::new(hw_addr);
         let mut iface = Interface::new(config, &mut device, now);
 
         iface.update_ip_addrs(|addrs| {

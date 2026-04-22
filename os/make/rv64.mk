@@ -168,6 +168,8 @@ comp-gdb:
         -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
         -no-reboot \
         -rtc base=utc \
+		-device virtio-net-device,netdev=net -netdev user,id=net \
+		-object filter-dump,id=f1,netdev=net,file=packets.pcap \
         -S \
         -s
 

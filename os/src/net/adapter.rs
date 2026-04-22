@@ -1,3 +1,5 @@
+use core::result;
+
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -11,6 +13,7 @@ use smoltcp::wire::{
 };
 use spin::Mutex;
 
+static mut ROUTING_BUF: [u8; 65536] = [0u8; 65536];
 pub struct RoutingDevice {
     pub eth: SmoltcpDeviceAdapter,
     pub lo: Loopback,
@@ -29,7 +32,7 @@ impl Device for RoutingDevice {
     fn capabilities(&self) -> DeviceCapabilities {
         let mut caps = self.eth.capabilities();
         caps.medium = Medium::Ethernet;
-        caps.max_transmission_unit = 65536;
+        caps.max_transmission_unit = 1500;
         caps
     }
 
@@ -89,7 +92,9 @@ impl<'a> TxToken for RoutingTxToken<'a> {
             Self::Lo(t) => t.consume(len, f),
             Self::Mixed { eth_tx, lo_tx } => {
                 let local_ip = &[10, 0, 2, 15]; //先硬编码
-                let mut buf = vec![0u8; len];
+                                                // let mut buf = vec![0u8; len];
+                let mut buf = unsafe { &mut ROUTING_BUF[..len] };
+
                 let res = f(&mut buf);
 
                 let mut send_to_lo = false;

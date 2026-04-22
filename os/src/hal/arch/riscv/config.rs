@@ -1,6 +1,6 @@
 #![allow(unused)]
 
-pub const MEMORY_SIZE: usize = 0x3000_0000;
+pub const MEMORY_SIZE: usize = 0x8000_0000;
 pub const TASK_SIZE: usize = 0xc000_0000;
 pub const ELF_DYN_BASE: usize = TASK_SIZE / 3 * 2;
 pub const USER_STACK_BASE: usize = TASK_SIZE - PAGE_SIZE;

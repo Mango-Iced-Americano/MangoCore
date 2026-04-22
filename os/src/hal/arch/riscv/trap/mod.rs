@@ -13,6 +13,7 @@ use crate::task::{
     current_task, current_trap_cx, do_signal, do_wake_expired, suspend_current_and_run_next,
     Signals,
 };
+use crate::timer::{ITimerVal, TimeVal};
 use alloc::format;
 pub use context::UserContext;
 use riscv::register::{
@@ -20,7 +21,6 @@ use riscv::register::{
     scause::{self, Exception, Interrupt, Trap},
     sepc, sie, stval, stvec,
 };
-use crate::timer::{ITimerVal, TimeVal};
 
 pub static mut TIMER_INTERRUPT: usize = 0;
 
@@ -68,7 +68,10 @@ pub fn enable_timer_interrupt() {
 
 #[no_mangle]
 pub fn trap_handler() -> ! {
-    log::debug!("[trap_handler] trapped");
+    log::debug!(
+        "[trap_handler] trapped >> scause {:?}",
+        scause::read().bits()
+    );
     set_kernel_trap_entry();
     {
         let task = current_task().unwrap();
@@ -82,6 +85,8 @@ pub fn trap_handler() -> ! {
             // jump to next instruction anyway
             let mut cx = current_trap_cx();
             cx.gp.pc += 4;
+            let syscall_id = cx.gp.a7; //debug 用
+            log::debug!(">>> Syscall ID: {}", syscall_id);
             // get system call return value
             let result = syscall(
                 cx.gp.a7,

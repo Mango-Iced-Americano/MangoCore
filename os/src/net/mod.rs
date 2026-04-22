@@ -1,7 +1,7 @@
 #[allow(unused)]
 use crate::{
     fs::{file_descriptor::FileDescriptor, file_trait::File, OpenFlags},
-    net::{tcp::TcpSocket, udp::UdpSocket, raw::RawSocket},
+    net::{raw::RawSocket, tcp::TcpSocket, udp::UdpSocket},
     task::current_task,
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
 };
@@ -11,12 +11,12 @@ use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
 
 use spin::Mutex;
 
+pub mod adapter;
 pub mod address;
 pub mod config;
-pub mod adapter;
+mod raw;
 mod tcp;
 mod udp;
-mod raw;
 mod unix;
 
 pub type Fd = usize;
@@ -37,7 +37,6 @@ pub const SHUT_WR: u32 = 1;
 #[allow(unused)]
 pub const SHUT_RDWR: u32 = 2;
 
-
 const SOCK_TYPE_MASK: u32 = 0xF;
 bitflags! {
     /// socket type
@@ -56,14 +55,16 @@ bitflags! {
         const SOCK_DCCP = 6;
 
         const SOCK_PACKET = 10;
-        /// unused now
+
         const SOCK_CLOEXEC = 1 << 19;
+
+        const SOCK_NONBLOCK = 0x800;
     }
 }
 
 // pub const MAX_BUFFER_SIZE: usize = 1 << 15;
 // pub const MAX_BUFFER_SIZE: usize = 1 << 16;
-pub const MAX_BUFFER_SIZE: usize = 1 << 17;
+pub const MAX_BUFFER_SIZE: usize = 1024 * 1024;
 
 pub trait Socket: File {
     fn bind(&self, addr: IpListenEndpoint) -> SyscallRet;
@@ -80,23 +81,25 @@ pub trait Socket: File {
     fn shutdown(&self, how: u32) -> GeneralRet<()>;
     fn set_nagle_enabled(&self, enabled: bool) -> SyscallRet;
     fn set_keep_alive(&self, enabled: bool) -> SyscallRet;
-    fn send_to(&self, buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet; 
+    fn send_to(&self, buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet;
 }
 
 impl dyn Socket {
-    pub fn alloc(domain: u32, socket_type: u32, protocol:u32) -> GeneralRet<usize> {
+    pub fn alloc(domain: u32, socket_type: u32, protocol: u32) -> GeneralRet<usize> {
         log::info!("[Socket::new] domain: {}", domain);
         let pure_type = socket_type & SOCK_TYPE_MASK;
         match domain as u16 {
             AF_INET | AF_INET6 => {
                 let socket_type = SocketType::from_bits(socket_type).ok_or(SyscallErr::EINVAL)?;
-                let flags = if socket_type.contains(SocketType::SOCK_CLOEXEC) {
-                    OpenFlags::O_RDWR | OpenFlags::O_CLOEXEC
-                } else {
-                    OpenFlags::O_RDWR
-                };
-                info!("[Socket::alloc] flags: {:?}", flags);
-                if pure_type==SocketType::SOCK_DGRAM.bits() {
+                // let flags = if socket_type.contains(SocketType::SOCK_CLOEXEC) {
+                //     OpenFlags::O_RDWR | OpenFlags::O_CLOEXEC
+                // } else {
+                //     OpenFlags::O_RDWR
+                // };
+                let is_nonblock = socket_type.contains(SocketType::SOCK_NONBLOCK);
+                let is_cloexec = socket_type.contains(SocketType::SOCK_CLOEXEC);
+                // info!("[Socket::alloc] flags: {:?}", flags);
+                if pure_type == SocketType::SOCK_DGRAM.bits() {
                     let socket = UdpSocket::new();
                     let socket = Arc::new(socket);
                     // current_process().inner_handler(|proc| {
@@ -106,10 +109,14 @@ impl dyn Socket {
                     //     Ok(fd)
                     // })
                     let current_tcb = current_task().unwrap();
-                    let fd = current_tcb.files.lock().insert(FileDescriptor::new(false, false, socket.clone())).unwrap();
+                    let fd = current_tcb
+                        .files
+                        .lock()
+                        .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket.clone()))
+                        .unwrap();
                     current_tcb.socket_table.lock().insert(fd, socket);
                     Ok(fd)
-                } else if pure_type==SocketType::SOCK_STREAM.bits() {
+                } else if pure_type == SocketType::SOCK_STREAM.bits() {
                     let socket = TcpSocket::new();
                     let socket = Arc::new(socket);
                     // current_process().inner_handler(|proc| {
@@ -119,19 +126,25 @@ impl dyn Socket {
                     //     Ok(fd)
                     // })
                     let current_tcb = current_task().unwrap();
-                    let fd = current_tcb.files.lock().insert(FileDescriptor::new(false, false, socket.clone())).unwrap();
+                    let fd = current_tcb
+                        .files
+                        .lock()
+                        .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket.clone()))
+                        .unwrap();
                     current_tcb.socket_table.lock().insert(fd, socket);
                     Ok(fd)
-                } 
-                else if pure_type == SocketType::SOCK_RAW.bits() {
+                } else if pure_type == SocketType::SOCK_RAW.bits() {
                     let socket = RawSocket::new(protocol);
                     let socket = Arc::new(socket);
                     let current_tcb = current_task().unwrap();
-                    let fd = current_tcb.files.lock().insert(FileDescriptor::new(false, false, socket.clone())).unwrap();
+                    let fd = current_tcb
+                        .files
+                        .lock()
+                        .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket.clone()))
+                        .unwrap();
                     current_tcb.socket_table.lock().insert(fd, socket);
                     Ok(fd)
-                }
-                else {
+                } else {
                     Err(SyscallErr::EINVAL)
                 }
             }
@@ -171,20 +184,16 @@ impl SocketTable {
         Self(BTreeMap::new())
     }
     pub fn insert(&mut self, key: Fd, value: Arc<dyn Socket>) {
-        
         self.0.insert(key, value);
     }
     pub fn get_ref(&self, fd: Fd) -> Option<&Arc<dyn Socket>> {
-        
         self.0.get(&fd)
     }
     #[allow(unused)]
     pub fn take(&mut self, fd: Fd) -> Option<Arc<dyn Socket>> {
-        
         self.0.remove(&fd)
     }
     pub fn from_another(socket_table: &SocketTable) -> GeneralRet<Self> {
-        
         let mut ret = BTreeMap::new();
         for (sockfd, socket) in socket_table.0.iter() {
             ret.insert(*sockfd, socket.clone());
@@ -192,7 +201,6 @@ impl SocketTable {
         Ok(Self(ret))
     }
     pub fn can_bind(&self, endpoint: IpListenEndpoint) -> Option<(Fd, Arc<dyn Socket>)> {
-        
         for (sockfd, socket) in self.0.clone() {
             if socket.socket_type().contains(SocketType::SOCK_DGRAM) {
                 if socket.loacl_endpoint().eq(&endpoint) {

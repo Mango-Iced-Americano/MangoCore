@@ -1,5 +1,6 @@
 use crate::{
-    mm::try_get_from_user, syscall::errno::EFAULT, task::signal::Signals, timer::TimeSpec,
+    mm::try_get_from_user, net::config::NET_INTERFACE, syscall::errno::EFAULT,
+    task::signal::Signals, timer::TimeSpec,
 };
 use alloc::vec::Vec;
 use core::ptr::null_mut;

@@ -6,6 +6,7 @@ use crate::mm::{
     translated_byte_buffer, translated_byte_buffer_append_to_existing_vec, translated_refmut,
     translated_str, try_get_from_user, MapPermission, UserBuffer, VirtAddr,
 };
+use crate::net::config::NET_INTERFACE;
 use crate::task::{
     current_task, current_user_token, signal, suspend_current_and_run_next, wait_interruptible,
 };
@@ -223,6 +224,7 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
             Err(errno) => return errno,
         }
     };
+
     // fd is not open for reading
     if !file_descriptor.readable() {
         return EBADF;
@@ -238,7 +240,10 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
     //     }),
     // ) as isize
     let is_nonblock = file_descriptor.get_nonblock();
+    log::info!("[sys_read] is nonblock:{:?}", is_nonblock);
     loop {
+        log::info!("[sys_read] looping...");
+        NET_INTERFACE.poll();
         let token = task.get_user_token();
         let user_buf = match translated_byte_buffer(token, buf as *const u8, count) {
             Ok(buffer) => UserBuffer::new(buffer),
@@ -268,24 +273,55 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
 
 pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
     let task = current_task().unwrap();
-    let fd_table = task.files.lock();
-    let file_descriptor = match fd_table.get_ref(fd) {
-        Ok(file_descriptor) => file_descriptor,
-        Err(errno) => return errno,
+    let file_descriptor = {
+        let fd_table = task.files.lock();
+        match fd_table.get_ref(fd) {
+            Ok(fd_ref) => fd_ref.clone(),
+            Err(errno) => return errno,
+        }
     };
     if !file_descriptor.writable() {
         return EBADF;
     }
-    let token = task.get_user_token();
-    file_descriptor.write_user(
-        None,
-        UserBuffer::new({
-            match translated_byte_buffer(token, buf as *const u8, count) {
-                Ok(buffer) => buffer,
-                Err(errno) => return errno,
+    // let token = task.get_user_token();
+    // file_descriptor.write_user(
+    //     None,
+    //     UserBuffer::new({
+    //         match translated_byte_buffer(token, buf as *const u8, count) {
+    //             Ok(buffer) => buffer,
+    //             Err(errno) => return errno,
+    //         }
+    //     }),
+    // ) as isize
+    let is_nonblock = file_descriptor.get_nonblock();
+    log::info!("[sys_write] is nonblock {:?}", is_nonblock);
+    loop {
+        log::info!("[sys_write] looping...");
+        NET_INTERFACE.poll();
+        let token = task.get_user_token();
+        let user_buf = match translated_byte_buffer(token, buf as *const u8, count) {
+            Ok(buffer) => UserBuffer::new(buffer),
+            Err(errno) => return errno as isize,
+        };
+
+        let ret = file_descriptor.write_user(None, user_buf) as isize;
+        if ret == -(SyscallErr::EAGAIN as isize) {
+            if is_nonblock {
+                return ret;
+            } else {
+                // wait_interruptible();
+                suspend_current_and_run_next();
+                if !task.acquire_inner_lock().sigpending.is_empty() {
+                    let signal = task.acquire_inner_lock().sigpending.complement();
+                    log::info!("[sys_read] interrupted by signal: {:?}", signal);
+                    return -(SyscallErr::EINTR as isize);
+                }
+                continue;
             }
-        }),
-    ) as isize
+        }
+
+        return ret;
+    }
 }
 
 pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
@@ -1413,6 +1449,18 @@ pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
             }
             SUCCESS
         }
+        Fcntl_Command::SETFL => {
+            let file_descriptor = match fd_table.get_refmut(fd) {
+                Ok(file_descriptor) => file_descriptor,
+                Err(errno) => return errno,
+            };
+
+            let n_block = (arg & (OpenFlags::O_NONBLOCK.bits() as usize)) != 0;
+
+            file_descriptor.set_nonblock(n_block);
+            warn!("[sys_fcntl] set fd {} nonblock to {}", fd, n_block);
+            SUCCESS
+        }
         Fcntl_Command::GETFL => {
             let file_descriptor = match fd_table.get_ref(fd) {
                 Ok(file_descriptor) => file_descriptor,
@@ -1427,7 +1475,8 @@ pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
         }
         command => {
             warn!("[fcntl] Unsupported command: {:?}", command);
-            SUCCESS
+            // SUCCESS //不可以假装success啊
+            -(SyscallErr::EINVAL as isize)
         } // WARNING!!!
     }
 }
@@ -1496,6 +1545,15 @@ pub fn sys_pselect(
             ret = EFAULT;
         };
     }
+
+    log::info!(
+        "PID {} pselect returns {}, ReadMask: {:?}, WriteMask: {:?}, ExceptMask: {:?}",
+        current_task().unwrap().pid.0,
+        ret,
+        kread_fds,
+        kwrite_fds,
+        kexception_fds
+    );
     ret
 }
 

@@ -161,11 +161,11 @@ impl Socket for UdpSocket {
 impl UdpSocket {
     pub fn new() -> Self {
         let tx_buf = socket::udp::PacketBuffer::new(
-            vec![PacketMetadata::EMPTY; 128],
+            vec![PacketMetadata::EMPTY; 1024],
             vec![0 as u8; MAX_BUFFER_SIZE],
         );
         let rx_buf = socket::udp::PacketBuffer::new(
-            vec![PacketMetadata::EMPTY; 128],
+            vec![PacketMetadata::EMPTY; 1024],
             vec![0 as u8; MAX_BUFFER_SIZE],
         );
         let socket = socket::udp::Socket::new(rx_buf, tx_buf);
@@ -199,7 +199,6 @@ impl Drop for UdpSocket {
         NET_INTERFACE.poll();
     }
 }
-use crate::task::suspend_current_and_run_next;
 impl File for UdpSocket {
     fn deep_clone(&self) -> Arc<dyn File> {
         todo!();
@@ -261,31 +260,70 @@ impl File for UdpSocket {
     }
     fn r_ready(&self) -> bool {
         NET_INTERFACE.poll();
-        NET_INTERFACE.udp_socket(self.socket_handler, |socket| {
+        let ret = NET_INTERFACE.udp_socket(self.socket_handler, |socket| {
             socket.can_recv() // 只有真正有包了才返回 true
-        })
+        });
+        log::info!(
+            "[UdpSocket::r_ready] socket {}, r_ready: {}",
+            self.socket_handler,
+            ret
+        );
+        ret
     }
     fn w_ready(&self) -> bool {
         NET_INTERFACE.poll();
-        NET_INTERFACE.udp_socket(self.socket_handler, |socket| socket.can_send())
+        let ret = NET_INTERFACE.udp_socket(self.socket_handler, |socket| socket.can_send());
+        log::info!(
+            "[UdpSocket::w_ready] socket {}, w_ready: {}",
+            self.socket_handler,
+            ret
+        );
+        ret
     }
     fn read_user(&self, _offset: Option<usize>, buf: UserBuffer) -> usize {
-        let mut buffers = buf.buffers;
-        let buf = unsafe {
-            core::slice::from_raw_parts_mut(buffers[0].as_mut_ptr() as *mut u8, buf.len as usize)
-        };
-        let ret = self._read(buf);
+        // let mut buffers = buf.buffers;
+        // let buf = unsafe {
+        //     core::slice::from_raw_parts_mut(buffers[0].as_mut_ptr() as *mut u8, buf.len as usize)
+        // };
+        // let ret = self._read(buf);
+        // match ret {
+        //     Ok(s) => s,
+        //     Err(err) => err.as_errno_ret(),
+        // }
+        let mut data = vec![0u8; buf.len];
+        let ret = self._read(&mut data);
         match ret {
-            Ok(s) => s,
+            Ok(s) => {
+                let mut offset = 0;
+                let mut remain = s;
+                // 安全地将数据分布写回到分散的物理页切片中
+                for b in buf.buffers.into_iter() {
+                    let copy_len = remain.min(b.len());
+                    b[..copy_len].copy_from_slice(&data[offset..offset + copy_len]);
+                    offset += copy_len;
+                    remain -= copy_len;
+                    if remain == 0 {
+                        break;
+                    }
+                }
+                s
+            }
             Err(err) => err.as_errno_ret(),
         }
     }
     fn write_user(&self, _offset: Option<usize>, buf: UserBuffer) -> usize {
-        let mut buffers = buf.buffers;
-        let buf = unsafe {
-            core::slice::from_raw_parts_mut(buffers[0].as_mut_ptr() as *mut u8, buf.len as usize)
-        };
-        self.write(None, buf)
+        let mut data = vec![0u8; buf.len];
+        let mut offset = 0;
+        // 安全地从分散的物理页切片中收集数据
+        for b in buf.buffers.into_iter() {
+            data[offset..offset + b.len()].copy_from_slice(&b);
+            offset += b.len();
+        }
+        // let mut buffers = buf.buffers;
+        // let buf = unsafe {
+        //     core::slice::from_raw_parts_mut(buffers[0].as_mut_ptr() as *mut u8, buf.len as usize)
+        // };
+        self.write(None, &data)
     }
     fn get_size(&self) -> usize {
         todo!();

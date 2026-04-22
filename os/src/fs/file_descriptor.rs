@@ -43,6 +43,9 @@ impl FileDescriptor {
         self.nonblock
     }
 
+    pub fn set_nonblock(&mut self, flag: bool) {
+        self.nonblock = flag;
+    }
     pub fn get_cwd(&self) -> Option<String> {
         let inode = self.file.get_dirtree_node();
         let inode = match inode {
@@ -368,7 +371,7 @@ impl FdTable {
     pub fn insert(&mut self, file_descriptor: FileDescriptor) -> Result<usize, isize> {
         // 直接pop fd省事，但是初赛openat测例要求新的fd>旧的，改为find_min，每次取最小的fd
         // let fd = match self.recycled.pop() {
-        let fd = match self.find_min(){
+        let fd = match self.find_min() {
             Some(fd) => {
                 self.inner[fd as usize] = Some(file_descriptor);
                 fd as usize
