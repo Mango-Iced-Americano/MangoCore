@@ -563,10 +563,16 @@ pub fn sys_close(fd: usize) -> isize {
     info!("[sys_close] fd: {}", fd);
     let task = current_task().unwrap();
     let mut fd_table = task.files.lock();
-    match fd_table.remove(fd) {
+    let ret = match fd_table.remove(fd) {
         Ok(_) => SUCCESS,
-        Err(errno) => errno,
-    }
+        Err(errno) => return errno,
+    };
+    let ret2 = match task.socket_table.lock().take(fd) {
+        Some(_) => SUCCESS,
+        None => return EBADF,
+    };
+
+    ret
 }
 
 /// # Warning

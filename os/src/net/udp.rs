@@ -1,12 +1,12 @@
-use super::{address::SocketAddrv4, config::NET_INTERFACE, Mutex, Socket, MAX_BUFFER_SIZE};
+use super::{config::NET_INTERFACE, Mutex, Socket, MAX_BUFFER_SIZE};
 use crate::net::config::lookup_source_ip;
 use crate::utils::random::RNG;
 use crate::{
     fs::{file_trait::File, OpenFlags},
     net::address,
-    task::wait_interruptible,
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
 };
+
 use alloc::vec;
 use log::info;
 use smoltcp::{
@@ -15,8 +15,9 @@ use smoltcp::{
     socket::{
         self,
         udp::{PacketMetadata, SendError, UdpMetadata},
+        AnySocket,
     },
-    wire::{IpEndpoint, IpListenEndpoint},
+    wire::{IpAddress, IpEndpoint, IpListenEndpoint},
 };
 
 use crate::fs::directory_tree::DirectoryTreeNode;
@@ -26,10 +27,16 @@ use crate::fs::DiskInodeType;
 use crate::fs::SeekWhence;
 use crate::fs::Stat;
 use crate::mm::UserBuffer;
+use crate::net::config::NetInterfaceInner;
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::sync::Weak;
 use alloc::vec::Vec;
+
+// 定义全局的 UDP Sockets 集合
+pub static UDP_SOCKETS: Mutex<Vec<Weak<UdpSocket>>> = Mutex::new(Vec::new());
+pub static UDP_SOCKETS_TO_REMOVE: Mutex<Vec<SocketHandle>> = Mutex::new(Vec::new());
 
 pub struct UdpSocket {
     inner: Mutex<UdpSocketInner>,
@@ -39,13 +46,17 @@ pub struct UdpSocket {
 #[allow(unused)]
 struct UdpSocketInner {
     remote_endpoint: Option<IpEndpoint>,
+    local_endpoint: Option<IpListenEndpoint>,
+    rx_queue: VecDeque<(alloc::vec::Vec<u8>, IpEndpoint)>,
     recvbuf_size: usize,
     sendbuf_size: usize,
+    reuse_addr: bool,
 }
 
 impl Socket for UdpSocket {
     fn bind(&self, addr: IpListenEndpoint) -> SyscallRet {
         log::info!("[Udp::bind] bind to {:?}", addr);
+        self.inner.lock().local_endpoint = Some(addr);
         NET_INTERFACE.poll();
         NET_INTERFACE.udp_socket(self.socket_handler, |socket| {
             socket.bind(addr).ok().ok_or(SyscallErr::EINVAL)
@@ -61,10 +72,12 @@ impl Socket for UdpSocket {
     fn connect<'a>(&'a self, addr_buf: &'a [u8]) -> crate::utils::error::SyscallRet {
         let remote_endpoint = address::endpoint(addr_buf)?;
         log::info!("[Udp::connect] connect to {:?}", remote_endpoint);
-        let mut inner = self.inner.lock();
-        inner.remote_endpoint = Some(remote_endpoint);
+        {
+            let mut inner = self.inner.lock();
+            inner.remote_endpoint = Some(remote_endpoint);
+        }
         NET_INTERFACE.poll();
-        NET_INTERFACE.udp_socket(self.socket_handler, |socket| {
+        let local_ep = NET_INTERFACE.udp_socket(self.socket_handler, |socket| {
             let local = socket.endpoint();
             info!("[Udp::connect] local: {:?}", local);
             if local.port == 0 {
@@ -91,11 +104,12 @@ impl Socket for UdpSocket {
                     }
                 }
                 log::info!("[Udp::bind] bind to {:?}", endpoint);
-                Ok(())
+                Ok(endpoint)
             } else {
-                Ok(())
+                Ok(local)
             }
         })?;
+        self.inner.lock().local_endpoint = Some(local_ep);
         NET_INTERFACE.poll();
         Ok(0)
     }
@@ -153,6 +167,16 @@ impl Socket for UdpSocket {
         Err(SyscallErr::EOPNOTSUPP)
     }
 
+    fn reuse_addr(&self) -> SyscallRet {
+        let reuse_addr = self.inner.lock().reuse_addr;
+        Ok(reuse_addr as usize)
+    }
+
+    fn set_reuse_addr(&self, enabled: bool) -> SyscallRet {
+        self.inner.lock().reuse_addr = enabled;
+        Ok(0)
+    }
+
     fn send_to(&self, buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet {
         todo!();
     }
@@ -175,28 +199,35 @@ impl UdpSocket {
         Self {
             inner: Mutex::new(UdpSocketInner {
                 remote_endpoint: None,
+                local_endpoint: None,
+                rx_queue: VecDeque::new(),
                 recvbuf_size: MAX_BUFFER_SIZE,
                 sendbuf_size: MAX_BUFFER_SIZE,
+                reuse_addr: false,
             }),
             socket_handler,
         }
+    }
+    pub fn register_udp_socket(socket: &Arc<Self>) {
+        UDP_SOCKETS.lock().push(Arc::downgrade(socket));
     }
 }
 
 impl Drop for UdpSocket {
     fn drop(&mut self) {
-        log::info!(
-            "[UdpSocket::drop] drop socket {}, remoteep {:?}",
-            self.socket_handler,
-            self.inner.lock().remote_endpoint
-        );
-        NET_INTERFACE.udp_socket(self.socket_handler, |socket| {
-            if socket.is_open() {
-                socket.close();
-            }
-        });
-        NET_INTERFACE.remove(self.socket_handler);
-        NET_INTERFACE.poll();
+        // log::info!(
+        //     "[UdpSocket::drop] drop socket {}, remoteep {:?}, localep {:?}",
+        //     self.socket_handler,
+        //     self.inner.lock().remote_endpoint,
+        //     self.inner.lock().local_endpoint
+        // );
+        // NET_INTERFACE.udp_socket(self.socket_handler, |socket| {
+        //     if socket.is_open() {
+        //         socket.close();
+        //     }
+        // });
+        // NET_INTERFACE.remove(self.socket_handler);
+        UDP_SOCKETS_TO_REMOVE.lock().push(self.socket_handler);
     }
 }
 impl File for UdpSocket {
@@ -261,7 +292,8 @@ impl File for UdpSocket {
     fn r_ready(&self) -> bool {
         NET_INTERFACE.poll();
         let ret = NET_INTERFACE.udp_socket(self.socket_handler, |socket| {
-            socket.can_recv() // 只有真正有包了才返回 true
+            // socket.can_recv() // 只有真正有包了才返回 true
+            !self.inner.lock().rx_queue.is_empty()
         });
         log::info!(
             "[UdpSocket::r_ready] socket {}, r_ready: {}",
@@ -414,28 +446,116 @@ impl File for UdpSocket {
 impl UdpSocket {
     fn _read<'a>(&'a self, buf: &'a mut [u8]) -> GeneralRet<usize> {
         NET_INTERFACE.poll();
-        let ret = NET_INTERFACE.udp_socket(self.socket_handler, |socket| {
-            if !socket.can_recv() {
-                // panic!();
-                log::trace!("[UdpRecvFuture::poll] cannot recv yet");
-                return Err(SyscallErr::EAGAIN);
+        // let ret = NET_INTERFACE.udp_socket(self.socket_handler, |socket| {
+        //     if !socket.can_recv() {
+        //         // panic!();
+        //         log::trace!("[UdpRecvFuture::poll] cannot recv yet");
+        //         return Err(SyscallErr::EAGAIN);
+        //     }
+        //     log::info!("[UdpRecvFuture::poll] start to recv...");
+        //     let (ret, meta) = socket.recv_slice(buf).ok().ok_or(SyscallErr::ENOTCONN)?;
+        //     let remote = Some(meta.endpoint);
+        //     info!(
+        //         "[UdpRecvFuture::poll] {:?} <- {:?}",
+        //         socket.endpoint(),
+        //         remote
+        //     );
+        //     self.inner.lock().remote_endpoint = remote;
+        //     log::debug!("[UdpRecvFuture::poll] recv {} bytes", ret);
+        //     Ok(ret)
+        // });
+        // NET_INTERFACE.poll();
+        // match ret {
+        //     Ok(result) => return GeneralRet::Ok(result),
+        //     Err(err) => return GeneralRet::Err(err),
+        // }
+        let mut inner = self.inner.lock();
+        if let Some((data, remote)) = inner.rx_queue.pop_front() {
+            let copy_len = data.len().min(buf.len());
+            buf[..copy_len].copy_from_slice(&data[..copy_len]);
+            // 对于未connect的socket，更新最近通信的对端(recvfrom需要)
+            if inner.remote_endpoint.is_none() {
+                // 或者在 syscall recvfrom 里处理对端信息
+                inner.remote_endpoint = Some(remote);
             }
-            log::info!("[UdpRecvFuture::poll] start to recv...");
-            let (ret, meta) = socket.recv_slice(buf).ok().ok_or(SyscallErr::ENOTCONN)?;
-            let remote = Some(meta.endpoint);
-            info!(
-                "[UdpRecvFuture::poll] {:?} <- {:?}",
-                socket.endpoint(),
-                remote
-            );
-            self.inner.lock().remote_endpoint = remote;
-            log::debug!("[UdpRecvFuture::poll] recv {} bytes", ret);
-            Ok(ret)
-        });
-        NET_INTERFACE.poll();
-        match ret {
-            Ok(result) => return GeneralRet::Ok(result),
-            Err(err) => return GeneralRet::Err(err),
+            log::debug!("[UdpSocket] read {} bytes from {:?}", copy_len, remote);
+            return GeneralRet::Ok(copy_len);
+        }
+        GeneralRet::Err(SyscallErr::EAGAIN)
+    }
+}
+
+// 新的分发函数：直接接收 NetInterfaceInner，避免重复获取锁导致死锁！
+pub fn dispatch_udp_packets(inner: &mut NetInterfaceInner) {
+    let mut os_socks = UDP_SOCKETS.lock();
+
+    // 顺便清理一下已经被 drop 掉的 socket
+    os_socks.retain(|w| w.strong_count() > 0);
+
+    for (handle, socket) in inner.sockets.iter_mut() {
+        // 尝试把这个 socket 识别为 UDP 类型
+        if let Some(udp_sock) = smoltcp::socket::udp::Socket::downcast_mut(socket) {
+            // 只要这个底层缓冲区里有包，就全部抽干
+            while udp_sock.can_recv() {
+                let mut buf = vec![0u8; 2048];
+                if let Ok((size, meta)) = udp_sock.recv_slice(&mut buf) {
+                    buf.truncate(size);
+
+                    // 3. 拿到包了，调用我们写的打分函数，找到它在 OS 层对应的 UdpSocket
+                    // 注意：这里的 local 信息直接从当前遍历到的 udp_sock 拿
+                    if let Some(target_os_sock) =
+                        find_best_match(&os_socks, udp_sock.endpoint(), meta.endpoint)
+                    {
+                        target_os_sock
+                            .inner
+                            .lock()
+                            .rx_queue
+                            .push_back((buf, meta.endpoint));
+                    } else {
+                        // 如果没人认领这个包（比如 iperf3 已经关了），就丢弃
+                        log::warn!(
+                            "[UDP Dispatch] No OS Socket matched packet from {:?}, dropping",
+                            meta.endpoint
+                        );
+                    }
+                }
+            }
         }
     }
+}
+
+// 寻找最匹配的 OS UdpSocket
+fn find_best_match(
+    sockets: &[Weak<UdpSocket>],
+    local: IpListenEndpoint,
+    remote: IpEndpoint,
+) -> Option<Arc<UdpSocket>> {
+    let mut best_match = None;
+    let mut best_score = 0;
+
+    for weak_sock in sockets {
+        if let Some(sock) = weak_sock.upgrade() {
+            let inner = sock.inner.lock();
+            let local_match = inner.local_endpoint.map(|l| l.port).unwrap_or(0) == local.port;
+
+            // 如果本地端口匹配，计算匹配得分
+            if local_match {
+                let score = match inner.remote_endpoint {
+                    // 1. 完美匹配：这是专门负责这个远端的 Socket
+                    Some(ep) if ep == remote => 2,
+
+                    // 2. 名花有主：已经 connect 了别的地址，绝不能收这个包
+                    Some(_) => 0,
+
+                    // 3. 备胎/监听者：没有 connect 任何地址，可以接纳新来的包
+                    None => 1,
+                };
+                if score > best_score {
+                    best_score = score;
+                    best_match = Some(sock.clone());
+                }
+            }
+        }
+    }
+    best_match
 }

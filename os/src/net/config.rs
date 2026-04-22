@@ -1,5 +1,7 @@
+use super::Mutex;
 use crate::drivers::NET_DEVICE;
 use crate::net::adapter::{RoutingDevice, SmoltcpDeviceAdapter};
+use crate::net::udp::dispatch_udp_packets;
 use crate::timer::current_time_duration;
 use alloc::collections::BTreeMap;
 use alloc::vec;
@@ -12,8 +14,6 @@ use smoltcp::{
     time::Instant,
     wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Address},
 };
-
-use spin::Mutex;
 
 pub static NET_INTERFACE: NetInterface = NetInterface::new();
 
@@ -143,11 +143,23 @@ impl<'a> NetInterface<'a> {
     pub fn _poll(&self) {
         log::trace!("[NetInterface::poll] poll...");
         self.inner_handler(|inner| {
+            {
+                // 使用 drain(..) 一次性清空队列并取出所有元素
+                let mut to_remove = crate::net::udp::UDP_SOCKETS_TO_REMOVE.lock();
+                for handle in to_remove.drain(..) {
+                    inner.sockets.remove(handle);
+                    log::info!(
+                        "[NetInterface] Successfully removed underlying socket {}",
+                        handle
+                    );
+                }
+            }
             inner.iface.poll(
                 Instant::from_millis(current_time_duration().as_millis() as i64),
                 &mut inner.device,
                 &mut inner.sockets,
             );
+            dispatch_udp_packets(inner);
         });
     }
     pub fn remove(&self, handler: SocketHandle) {

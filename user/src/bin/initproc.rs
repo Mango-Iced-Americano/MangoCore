@@ -332,10 +332,10 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
 
     let cfg = load_runtime_config();
 
-    // run_bash_cmd(
-    //     "/musl/iperf3 -s & /musl/iperf3 -c 127.0.0.1 -u -t 5 -l 1400",
-    //     &environ,
-    // );
+    run_bash_cmd(
+        "./musl/iperf3 -s -p 5001 -D & ./musl/iperf3 -c 127.0.0.1 -p 5001 -t 2 -i 0 ",
+        &environ,
+    );
 
     // /debug_bash remains the highest-priority emergency switch.
     if should_enter_debug_shell() || cfg.mode == RunMode::Shell {

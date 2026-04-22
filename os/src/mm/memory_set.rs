@@ -305,7 +305,8 @@ impl<T: PageTable> MemorySet<T> {
                         return Err(MemoryError::BeyondEOF);
                     }
                     if area.map_perm.contains(MapPermission::W) {
-                        let allocated_ppn = area.map_one_zeroed_unchecked(&mut self.page_table, vpn);
+                        let allocated_ppn =
+                            area.map_one_zeroed_unchecked(&mut self.page_table, vpn);
                         file.lseek(offset_in_area as isize, SeekWhence::SEEK_CUR)
                             .unwrap();
                         file.read(None, unsafe {
@@ -342,10 +343,10 @@ impl<T: PageTable> MemorySet<T> {
                             unreachable!();
                         }
                         Frame::Unallocated => {
-                            info!("[do_page_fault] addr: {:?}, solution: lazy alloc", addr);
+                            debug!("[do_page_fault] addr: {:?}, solution: lazy alloc", addr);
                             let ppn = area.map_one_zeroed_unchecked(&mut self.page_table, vpn);
                             let frame = area.inner.get_mut(&vpn);
-                            info!(
+                            debug!(
                                 "[do_page_fault map_one] addr: {:?}, vpn: {:?}, frame: {:?}",
                                 addr, vpn, frame
                             );
@@ -359,7 +360,7 @@ impl<T: PageTable> MemorySet<T> {
                                 .active
                                 .push_back((vpn.0 - area.get_start::<T>().0) as u16);
                             area.inner.compressed -= 1;
-                            info!("[do_page_fault] addr: {:?}, solution: decompress", addr);
+                            debug!("[do_page_fault] addr: {:?}, solution: decompress", addr);
                             ppn
                         }
                         #[cfg(feature = "oom_handler")]
@@ -370,7 +371,7 @@ impl<T: PageTable> MemorySet<T> {
                                 .active
                                 .push_back((vpn.0 - area.get_start::<T>().0) as u16);
                             area.inner.swapped -= 1;
-                            info!("[do_page_fault] addr: {:?}, solution: swap in", addr);
+                            debug!("[do_page_fault] addr: {:?}, solution: swap in", addr);
                             ppn
                         }
                     };
@@ -381,7 +382,7 @@ impl<T: PageTable> MemorySet<T> {
                 if area.map_perm.contains(MapPermission::W) {
                     // Whoever triggers this fault shall cause the area to be copied into a new area.
                     let allocated_ppn = area.copy_on_write(&mut self.page_table, vpn)?;
-                    info!("[do_page_fault] addr: {:?}, solution: copy on write", addr);
+                    debug!("[do_page_fault] addr: {:?}, solution: copy on write", addr);
                     Ok(allocated_ppn.offset(addr.page_offset()))
                 } else {
                     // Write without permission

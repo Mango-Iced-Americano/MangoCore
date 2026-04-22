@@ -52,6 +52,7 @@ struct TcpSocketInner {
     recvbuf_size: usize,
     sendbuf_size: usize,
     is_listing: bool,
+    reuse_addr: bool,
     // TODO: add more
 }
 
@@ -111,6 +112,7 @@ impl Socket for TcpSocket {
                 recvbuf_size: inner.recvbuf_size,
                 sendbuf_size: inner.sendbuf_size,
                 is_listing: false,
+                reuse_addr: inner.reuse_addr,
             }),
         });
         drop(inner);
@@ -229,6 +231,16 @@ impl Socket for TcpSocket {
         Ok(0)
     }
 
+    fn reuse_addr(&self) -> SyscallRet {
+        let reuse_addr = self.inner.lock().reuse_addr;
+        Ok(reuse_addr as usize)
+    }
+
+    fn set_reuse_addr(&self, enabled: bool) -> SyscallRet {
+        self.inner.lock().reuse_addr = enabled;
+        Ok(0)
+    }
+
     fn send_to(&self, buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet {
         todo!();
     }
@@ -254,6 +266,7 @@ impl TcpSocket {
                 recvbuf_size: MAX_BUFFER_SIZE,
                 sendbuf_size: MAX_BUFFER_SIZE,
                 is_listing: false,
+                reuse_addr: false,
             }),
         }
     }
@@ -423,7 +436,7 @@ impl File for TcpSocket {
                 // 如果不能 recv 且不是正在连接，说明是对端断开/连接错误 (EOF)
                 let is_eof_or_error = !may_recv && !is_connecting && state != tcp::State::Listen;
                 if !may_recv || can_recv {
-                    log::info!(
+                    log::trace!(
                         "DEBUG: Socket {} r_ready! state={:?}, can_recv={}, may_recv={}",
                         handler,
                         state,

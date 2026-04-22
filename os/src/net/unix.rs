@@ -2,24 +2,25 @@ use super::Mutex;
 use super::Socket;
 use crate::{
     fs::{
-        dev::pipe::{make_pipe,Pipe},
-        file_trait::File,  OpenFlags,
+        dev::pipe::{make_pipe, Pipe},
+        file_trait::File,
+        OpenFlags,
     },
-    utils::error::{SyscallErr,SyscallRet},
+    utils::error::{SyscallErr, SyscallRet},
 };
 use alloc::sync::Arc;
 use smoltcp::wire::IpEndpoint;
 
-use crate::mm::UserBuffer;
-use crate::fs::Stat;
-use crate::fs::DiskInodeType;
-use alloc::sync::Weak;
 use crate::fs::directory_tree::DirectoryTreeNode;
-use alloc::vec::Vec;
-use alloc::string::String;
-use crate::fs::Dirent;
-use crate::fs::SeekWhence;
 use crate::fs::fat32::PageCache;
+use crate::fs::Dirent;
+use crate::fs::DiskInodeType;
+use crate::fs::SeekWhence;
+use crate::fs::Stat;
+use crate::mm::UserBuffer;
+use alloc::string::String;
+use alloc::sync::Weak;
+use alloc::vec::Vec;
 #[allow(unused)]
 pub struct UnixSocket<const N: usize> {
     //file_meta: FileMeta,
@@ -36,7 +37,7 @@ impl<const N: usize> Socket for UnixSocket<N> {
 
     fn listen(&self) -> crate::utils::error::SyscallRet {
         todo!();
-   }
+    }
 
     fn connect(&self, _addr_buf: &[u8]) -> SyscallRet {
         todo!();
@@ -87,6 +88,14 @@ impl<const N: usize> Socket for UnixSocket<N> {
         Err(SyscallErr::EOPNOTSUPP)
     }
 
+    fn reuse_addr(&self) -> SyscallRet {
+        todo!()
+    }
+
+    fn set_reuse_addr(&self, enabled: bool) -> SyscallRet {
+        todo!()
+    }
+
     fn send_to(&self, buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet {
         todo!();
     }
@@ -103,60 +112,120 @@ impl<const N: usize> UnixSocket<N> {
     }
 }
 impl<const N: usize> File for UnixSocket<N> {
-    fn deep_clone(&self) -> Arc<dyn File>{
+    fn deep_clone(&self) -> Arc<dyn File> {
         todo!();
     }
-    fn readable(&self) -> bool{
+    fn readable(&self) -> bool {
         todo!();
     }
-    fn writable(&self) -> bool{
+    fn writable(&self) -> bool {
         todo!();
     }
-    fn read(&self, _offset: Option<&mut usize>, _buf: &mut [u8]) -> usize{todo!();}
-    fn write(&self, _offset: Option<&mut usize>, _buf: &[u8]) -> usize{todo!();}
-    fn r_ready(&self) -> bool{todo!();}
-    fn w_ready(&self) -> bool{todo!();}
-    fn read_user(&self, _offset: Option<usize>, _buf: UserBuffer) -> usize{todo!();}
-    fn write_user(&self, _offset: Option<usize>, _buf: UserBuffer) -> usize{todo!();}
-    fn get_size(&self) -> usize{todo!();}
-    fn get_stat(&self) -> Stat{todo!();}
-    fn get_file_type(&self) -> DiskInodeType{todo!();}
-    fn is_dir(&self) -> bool {todo!();}
-    fn is_file(&self) -> bool {todo!();}
-    fn info_dirtree_node(&self, _dirnode_ptr: Weak<DirectoryTreeNode>){todo!();}
-    fn get_dirtree_node(&self) -> Option<Arc<DirectoryTreeNode>>{todo!();}
+    fn read(&self, _offset: Option<&mut usize>, _buf: &mut [u8]) -> usize {
+        todo!();
+    }
+    fn write(&self, _offset: Option<&mut usize>, _buf: &[u8]) -> usize {
+        todo!();
+    }
+    fn r_ready(&self) -> bool {
+        todo!();
+    }
+    fn w_ready(&self) -> bool {
+        todo!();
+    }
+    fn read_user(&self, _offset: Option<usize>, _buf: UserBuffer) -> usize {
+        todo!();
+    }
+    fn write_user(&self, _offset: Option<usize>, _buf: UserBuffer) -> usize {
+        todo!();
+    }
+    fn get_size(&self) -> usize {
+        todo!();
+    }
+    fn get_stat(&self) -> Stat {
+        todo!();
+    }
+    fn get_file_type(&self) -> DiskInodeType {
+        todo!();
+    }
+    fn is_dir(&self) -> bool {
+        todo!();
+    }
+    fn is_file(&self) -> bool {
+        todo!();
+    }
+    fn info_dirtree_node(&self, _dirnode_ptr: Weak<DirectoryTreeNode>) {
+        todo!();
+    }
+    fn get_dirtree_node(&self) -> Option<Arc<DirectoryTreeNode>> {
+        todo!();
+    }
     /// open
-    fn open(&self, _flags: OpenFlags, _special_use: bool) -> Arc<dyn File>{todo!();}
-    fn open_subfile(&self) -> Result<Vec<(String, Arc<dyn File>)>, isize>{todo!();}
+    fn open(&self, _flags: OpenFlags, _special_use: bool) -> Arc<dyn File> {
+        todo!();
+    }
+    fn open_subfile(&self) -> Result<Vec<(String, Arc<dyn File>)>, isize> {
+        todo!();
+    }
     /// create
-    fn create(&self, _name: &str, _file_type: DiskInodeType) -> Result<Arc<dyn File>, isize>{todo!();}
-    fn link_child(&self, _name: &str, _child: &Self) -> Result<(), isize>{todo!();}
+    fn create(&self, _name: &str, _file_type: DiskInodeType) -> Result<Arc<dyn File>, isize> {
+        todo!();
+    }
+    fn link_child(&self, _name: &str, _child: &Self) -> Result<(), isize> {
+        todo!();
+    }
     /// delete(unlink)
-    fn unlink(&self, _delete: bool) -> Result<(), isize>{todo!();}
+    fn unlink(&self, _delete: bool) -> Result<(), isize> {
+        todo!();
+    }
     /// dirent
-    fn get_dirent(&self, _count: usize) -> Vec<Dirent>{todo!();}
+    fn get_dirent(&self, _count: usize) -> Vec<Dirent> {
+        todo!();
+    }
     /// offset
-    fn get_offset(&self) -> usize {todo!();}
-    fn lseek(&self, _offset: isize, _whence: SeekWhence) -> Result<usize, isize>{todo!();}
+    fn get_offset(&self) -> usize {
+        todo!();
+    }
+    fn lseek(&self, _offset: isize, _whence: SeekWhence) -> Result<usize, isize> {
+        todo!();
+    }
     /// size
-    fn modify_size(&self, _diff: isize) -> Result<(), isize>{todo!();}
-    fn truncate_size(&self, _new_size: usize) -> Result<(), isize>{todo!();}
+    fn modify_size(&self, _diff: isize) -> Result<(), isize> {
+        todo!();
+    }
+    fn truncate_size(&self, _new_size: usize) -> Result<(), isize> {
+        todo!();
+    }
     // time
-    fn set_timestamp(&self, _ctime: Option<usize>, _atime: Option<usize>, _mtime: Option<usize>){todo!();}
+    fn set_timestamp(&self, _ctime: Option<usize>, _atime: Option<usize>, _mtime: Option<usize>) {
+        todo!();
+    }
     /// cache
-    fn get_single_cache(&self, _offset: usize) -> Result<Arc<Mutex<PageCache>>, ()>{todo!();}
-    fn get_all_caches(&self) -> Result<Vec<Arc<Mutex<PageCache>>>, ()>{todo!();}
+    fn get_single_cache(&self, _offset: usize) -> Result<Arc<Mutex<PageCache>>, ()> {
+        todo!();
+    }
+    fn get_all_caches(&self) -> Result<Vec<Arc<Mutex<PageCache>>>, ()> {
+        todo!();
+    }
     /// memory related
-    fn oom(&self) -> usize{todo!();}
+    fn oom(&self) -> usize {
+        todo!();
+    }
     /// poll, select related
-    fn hang_up(&self) -> bool{todo!();}
+    fn hang_up(&self) -> bool {
+        todo!();
+    }
     /// iotcl
-    fn ioctl(&self, _cmd: u32, _argp: usize) -> isize {todo!();}
+    fn ioctl(&self, _cmd: u32, _argp: usize) -> isize {
+        todo!();
+    }
     /// fcntl
-    fn fcntl(&self, _cmd: u32, _arg: u32) -> isize{todo!();}
+    fn fcntl(&self, _cmd: u32, _arg: u32) -> isize {
+        todo!();
+    }
 }
 
-pub fn make_unix_socket_pair<const N: usize>() -> (Arc<UnixSocket<N>>, Arc<UnixSocket<N>>){
+pub fn make_unix_socket_pair<const N: usize>() -> (Arc<UnixSocket<N>>, Arc<UnixSocket<N>>) {
     let (read1, write1) = make_pipe();
     let (read2, write2) = make_pipe();
     let socket1 = Arc::new(UnixSocket::new(read1, write2));

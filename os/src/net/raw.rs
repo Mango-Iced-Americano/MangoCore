@@ -106,6 +106,14 @@ impl Socket for RawSocket {
         todo!()
     }
 
+    fn reuse_addr(&self) -> SyscallRet {
+        todo!()
+    }
+
+    fn set_reuse_addr(&self, enabled: bool) -> SyscallRet {
+        todo!()
+    }
+
     fn send_to(&self, user_buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet {
         let (version, protocol) = {
             let inner = self.inner.lock();

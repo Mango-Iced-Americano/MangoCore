@@ -1,4 +1,5 @@
 use super::errno::*;
+use crate::hal::get_bad_addr;
 use crate::mm::{translated_ref, translated_refmut};
 use crate::{
     config::PAGE_SIZE,
@@ -13,8 +14,10 @@ use crate::{
 use crate::task::{suspend_current_and_run_next, wait_interruptible};
 use crate::utils::error::SyscallErr;
 
+use alloc::task;
 use log::info;
 use smoltcp::wire::IpListenEndpoint;
+
 /// level
 const SOL_SOCKET: u32 = 1;
 const SOL_TCP: u32 = 6;
@@ -27,6 +30,8 @@ const TCP_CONGESTION: u32 = 13;
 const SO_SNDBUF: u32 = 7;
 const SO_RCVBUF: u32 = 8;
 const SO_KEEPALIVE: u32 = 9;
+const SO_REUSEADDR: u32 = 2;
+const SO_REUSEPORT: u32 = 15;
 
 pub fn sys_socket(domain: u32, socket_type: u32, protocol: u32) -> isize {
     info!(
@@ -49,34 +54,22 @@ pub fn sys_socket(domain: u32, socket_type: u32, protocol: u32) -> isize {
 pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize {
     let addr_buf = trans_ref!(addr, addrlen);
     let socket = get_socket!(sockfd);
-    let endpoint = address::listen_endpoint(addr_buf).unwrap();
-    match socket.socket_type() {
-        SocketType::SOCK_STREAM => socket.bind(endpoint).unwrap() as isize,
-        SocketType::SOCK_DGRAM => {
-            let res = current_task()
-                .unwrap()
-                .socket_table
-                .lock()
-                .can_bind(endpoint);
-            if res.is_none() {
-                info!("[sys_bind] not find port exist");
-                socket.bind(endpoint).unwrap() as isize
-            } else {
-                let (_, sock) = res.unwrap();
-                current_task()
-                    .unwrap()
-                    .socket_table
-                    .lock()
-                    .insert(sockfd as usize, sock.clone());
-                let _ = current_task()
-                    .unwrap()
-                    .files
-                    .lock()
-                    .insert(FileDescriptor::new(false, false, sock));
-                0
-            }
-        }
-        _ => todo!(),
+    let endpoint = match address::listen_endpoint(addr_buf) {
+        Ok(ep) => ep,
+        Err(e) => return -(e as isize),
+    };
+    let task = current_task().unwrap();
+    let is_confilct = {
+        let table = task.socket_table.lock();
+        table.can_bind(endpoint, &socket).is_some()
+    };
+    if is_confilct {
+        log::warn!("[sys_bind] port {} already in use", endpoint.port);
+        return -(SyscallErr::EADDRINUSE as isize);
+    }
+    match socket.bind(endpoint) {
+        Ok(_) => 0 as isize,
+        Err(e) => -(e as isize),
     }
 }
 
@@ -281,7 +274,7 @@ pub fn sys_getsockopt(
                 *(optlen as *mut u32) = congestion.len() as u32;
             }
         }
-        (SOL_SOCKET, SO_SNDBUF | SO_RCVBUF) => {
+        (SOL_SOCKET, SO_SNDBUF | SO_RCVBUF | SO_REUSEADDR) => {
             // let len = core::mem::size_of::<u32>();
             let socket = get_socket!(sockfd);
 
@@ -300,11 +293,24 @@ pub fn sys_getsockopt(
                         *(optlen as *mut u32) = 4;
                     }
                 }
-                _ => {}
+                SO_REUSEADDR => {
+                    let enabled = match socket.reuse_addr() {
+                        Ok(enabled) => enabled,
+                        Err(e) => return -(e as isize),
+                    };
+                    unsafe {
+                        *(optval_ptr as *mut u32) = enabled as u32;
+                        *(optlen as *mut u32) = 4;
+                    }
+                }
+                _ => {
+                    return -(SyscallErr::EINVAL as isize);
+                }
             }
         }
         _ => {
             log::warn!("[sys_getsockopt] level: {}, optname: {}", level, optname);
+            return -(SyscallErr::ENOPROTOOPT as isize);
         }
     }
     0 as isize
@@ -331,7 +337,9 @@ pub fn sys_setsockopt(
                 SO_RCVBUF => {
                     socket.set_recv_buf_size(size as usize);
                 }
-                _ => {}
+                _ => {
+                    return -(SyscallErr::EINVAL as isize);
+                }
             }
         }
         (SOL_TCP, TCP_NODELAY) => {
@@ -351,8 +359,21 @@ pub fn sys_setsockopt(
                 _ => socket.set_keep_alive(false),
             };
         }
+        (SOL_SOCKET, SO_REUSEADDR) => {
+            let enabled = unsafe { *(optval_ptr as *const u32) };
+            log::debug!("[sys_setsockopt] set socket REUSEADDR: {}", enabled);
+            let _ = match enabled {
+                0 => socket.set_reuse_addr(false),
+                _ => socket.set_reuse_addr(true),
+            };
+        }
         _ => {
-            log::warn!("[sys_setsockopt] level: {}, optname: {}", level, optname);
+            log::warn!(
+                "[sys_setsockopt] level: {}, optname: {} not supported",
+                level,
+                optname
+            );
+            return -(SyscallErr::ENOPROTOOPT as isize);
         }
     }
     0 as isize
