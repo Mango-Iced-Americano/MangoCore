@@ -2,6 +2,7 @@ use super::Mutex;
 use crate::drivers::NET_DEVICE;
 use crate::net::adapter::{RoutingDevice, SmoltcpDeviceAdapter};
 use crate::net::udp::dispatch_udp_packets;
+use crate::net::UDP_SOCKETS_TO_REMOVE;
 use crate::timer::current_time_duration;
 use alloc::collections::BTreeMap;
 use alloc::vec;
@@ -145,7 +146,7 @@ impl<'a> NetInterface<'a> {
         self.inner_handler(|inner| {
             {
                 // 使用 drain(..) 一次性清空队列并取出所有元素
-                let mut to_remove = crate::net::udp::UDP_SOCKETS_TO_REMOVE.lock();
+                let mut to_remove = UDP_SOCKETS_TO_REMOVE.lock();
                 for handle in to_remove.drain(..) {
                     inner.sockets.remove(handle);
                     log::info!(

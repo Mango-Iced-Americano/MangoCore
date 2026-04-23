@@ -5,11 +5,10 @@ use crate::{
     task::current_task,
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
 };
-use alloc::{collections::BTreeMap, sync::Arc};
-use log::info;
-use riscv::register;
-use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
+use alloc::{collections::BTreeMap, sync::Arc, sync::Weak, vec::Vec};
 
+use smoltcp::iface::SocketHandle;
+use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
 use spin::Mutex;
 
 pub mod adapter;
@@ -65,7 +64,11 @@ bitflags! {
 
 // pub const MAX_BUFFER_SIZE: usize = 1 << 15;
 // pub const MAX_BUFFER_SIZE: usize = 1 << 16;
-pub const MAX_BUFFER_SIZE: usize = 1024 * 1024;
+pub const MAX_BUFFER_SIZE: usize = 64 * 1024;
+
+// 定义全局的 UDP Sockets 集合
+pub static UDP_SOCKETS: Mutex<Vec<Weak<UdpSocket>>> = Mutex::new(Vec::new());
+pub static UDP_SOCKETS_TO_REMOVE: Mutex<Vec<SocketHandle>> = Mutex::new(Vec::new());
 
 pub trait Socket: File {
     fn bind(&self, addr: IpListenEndpoint) -> SyscallRet;

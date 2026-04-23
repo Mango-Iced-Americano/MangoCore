@@ -28,15 +28,12 @@ use crate::fs::SeekWhence;
 use crate::fs::Stat;
 use crate::mm::UserBuffer;
 use crate::net::config::NetInterfaceInner;
+use crate::net::{UDP_SOCKETS, UDP_SOCKETS_TO_REMOVE};
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::sync::Weak;
 use alloc::vec::Vec;
-
-// 定义全局的 UDP Sockets 集合
-pub static UDP_SOCKETS: Mutex<Vec<Weak<UdpSocket>>> = Mutex::new(Vec::new());
-pub static UDP_SOCKETS_TO_REMOVE: Mutex<Vec<SocketHandle>> = Mutex::new(Vec::new());
 
 pub struct UdpSocket {
     inner: Mutex<UdpSocketInner>,
