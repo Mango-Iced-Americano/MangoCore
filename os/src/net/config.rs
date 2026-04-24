@@ -2,10 +2,12 @@ use super::Mutex;
 use crate::drivers::NET_DEVICE;
 use crate::net::adapter::{RoutingDevice, SmoltcpDeviceAdapter};
 use crate::net::udp::dispatch_udp_packets;
+use crate::net::TCP_SOCKETS_TO_REMOVE;
 use crate::net::UDP_SOCKETS_TO_REMOVE;
 use crate::timer::current_time_duration;
 use alloc::collections::BTreeMap;
 use alloc::vec;
+use alloc::vec::Vec;
 use downcast_rs::Downcast;
 use smoltcp::{
     iface::{Config, Interface, SocketHandle, SocketSet},
@@ -155,11 +157,34 @@ impl<'a> NetInterface<'a> {
                     );
                 }
             }
+            // poll 必须在删除 TCP socket 之前，这样 drop 时 close() 触发的
+            // FIN/ACK 握手能在这个 poll 周期内完成（loopback 下一次 poll 即可完成）
             inner.iface.poll(
                 Instant::from_millis(current_time_duration().as_millis() as i64),
                 &mut inner.device,
                 &mut inner.sockets,
             );
+            {
+                let mut to_remove = TCP_SOCKETS_TO_REMOVE.lock();
+                let ready: Vec<SocketHandle> = to_remove
+                    .iter()
+                    .filter(|&&h| {
+                        let socket = inner.sockets.get::<tcp::Socket>(h);
+                        socket.state() == tcp::State::Closed
+                            || socket.state() == tcp::State::TimeWait
+                    })
+                    .copied()
+                    .collect();
+                for &h in &ready {
+                    inner.sockets.remove(h);
+                    log::info!(
+                        "[NetInterface] Successfully removed underlying TCP socket {}",
+                        h
+                    );
+                }
+                to_remove.retain(|h| !ready.contains(h));
+            }
+
             dispatch_udp_packets(inner);
         });
     }

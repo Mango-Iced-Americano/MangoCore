@@ -1,5 +1,6 @@
 use crate::hal::{console_flush, console_putchar};
 use crate::task::current_task;
+use crate::timer::get_time_ms;
 use core::fmt::{self, Write};
 use log::{self, Level, LevelFilter, Log, Metadata, Record};
 
@@ -53,7 +54,7 @@ pub fn log_init() {
         Some("trace") => LevelFilter::Trace,
         _ => LevelFilter::Off,
     });
-    println!("[kernel] logger inited, level= {:?}",log::max_level());
+    println!("[kernel] logger inited, level= {:?}", log::max_level());
 }
 
 struct Logger;
@@ -67,10 +68,20 @@ impl Log for Logger {
             return;
         }
 
+        let ms = get_time_ms();
+        let sec = ms / 1000;
+        let msec = ms % 1000;
+
         print!("\x1b[{}m", level_to_color_code(record.level()));
         match current_task() {
-            Some(task) => println!("pid {}: {}", task.pid.0, record.args()),
-            None => println!("kernel: {}", record.args()),
+            Some(task) => println!(
+                "[{}.{:03}] pid {}: {}",
+                sec,
+                msec,
+                task.pid.0,
+                record.args()
+            ),
+            None => println!("[{}.{:03}] kernel: {}", sec, msec, record.args()),
         }
         print!("\x1b[0m")
     }

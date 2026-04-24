@@ -6,7 +6,7 @@ use crate::{
     fs::FileDescriptor,
     net::{
         address::{self, SocketAddrv4},
-        make_unix_socket_pair, Socket, SocketType, TCP_MSS,
+        make_unix_socket_pair, Socket, SocketType, TcpInfo, TCP_MSS,
     },
     task::current_task,
 };
@@ -27,10 +27,17 @@ const TCP_MAXSEG: u32 = 2;
 #[allow(unused)]
 const TCP_INFO: u32 = 11;
 const TCP_CONGESTION: u32 = 13;
+
+const SO_DEBUG: u32 = 1;
+const SO_REUSEADDR: u32 = 2;
+const SO_TYPE: u32 = 3;
+const SO_ERROR: u32 = 4;
+const SO_DONTROUTE: u32 = 5;
+const SO_BROADCAST: u32 = 6;
 const SO_SNDBUF: u32 = 7;
 const SO_RCVBUF: u32 = 8;
 const SO_KEEPALIVE: u32 = 9;
-const SO_REUSEADDR: u32 = 2;
+const SO_OOBINLINE: u32 = 10;
 const SO_REUSEPORT: u32 = 15;
 
 pub fn sys_socket(domain: u32, socket_type: u32, protocol: u32) -> isize {
@@ -84,10 +91,34 @@ pub fn sys_listen(sockfd: u32, _backlog: u32) -> isize {
 
 pub fn sys_accept(sockfd: u32, addr: usize, addrlen: usize) -> isize {
     let socket = get_socket!(sockfd);
-    // socket.accept(sockfd, addr, addrlen).unwrap() as isize
-    match socket.accept(sockfd, addr, addrlen) {
-        Ok(s) => s as isize,
-        Err(err) => -(err as isize),
+    let task = current_task().unwrap();
+    let socket_file = match task.files.lock().get_ref(sockfd as usize) {
+        Ok(file) => file.clone(),
+        Err(e) => return e,
+    };
+    let is_nonblock = socket_file.get_nonblock();
+
+    // match socket.accept(sockfd, addr, addrlen) {
+    //     Ok(s) => s as isize,
+    //     Err(err) => -(err as isize),
+    // }
+    loop {
+        match socket.accept(sockfd, addr, addrlen) {
+            Ok(s) => return s as isize,
+            Err(SyscallErr::EAGAIN) => {
+                if is_nonblock {
+                    return -(SyscallErr::EAGAIN as isize);
+                } else {
+                    suspend_current_and_run_next();
+                    task.acquire_inner_lock().refresh_real_timer();
+                    if !task.acquire_inner_lock().sigpending.is_empty() {
+                        return -(SyscallErr::EINTR as isize);
+                    }
+                    continue;
+                }
+            }
+            Err(err) => return -(err as isize),
+        }
     }
 }
 
@@ -190,14 +221,11 @@ pub fn sys_recvfrom(
     src_addr: usize,
     addrlen: usize,
 ) -> isize {
-    let socket_file = current_task()
-        .unwrap()
-        .files
-        .lock()
-        .get_ref(sockfd as usize)
-        .unwrap()
-        .clone();
     let task = current_task().unwrap();
+    let socket_file = match task.files.lock().get_ref(sockfd as usize) {
+        Ok(file) => file.clone(),
+        Err(e) => return e,
+    };
     //info!("[sys_recvfrom] file filags: {:?}", socket_file.flags);
     let socket = get_socket!(sockfd);
 
@@ -213,9 +241,10 @@ pub fn sys_recvfrom(
 
     info!("[sys_recvfrom] get socket sockfd: {}", sockfd);
     log::info!("[sys_recvfrom] is nonblock:{:?}", is_nonblock);
+    let buf_addr = buf;
     loop {
         let token = task.get_user_token();
-        let buf = translated_refmut(token, buf as *mut u8).unwrap();
+        let buf = translated_refmut(token, buf_addr as *mut u8).unwrap();
         let buf = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
         let mut offset = 0 as usize;
         let ret = match socket.socket_type() {
@@ -232,8 +261,16 @@ pub fn sys_recvfrom(
             if is_nonblock {
                 return ret;
             } else {
-                // wait_interruptible();
                 suspend_current_and_run_next();
+                // 先尝试重新读一次，避免数据已到却被信号抢断返回 EINTR
+                let buf2 = translated_refmut(token, buf_addr as *mut u8).unwrap();
+                let buf2 =
+                    unsafe { core::slice::from_raw_parts_mut(buf2 as *mut u8, len as usize) };
+                let mut offset2 = 0 as usize;
+                let ret2 = file_descriptor.file.read(Some(&mut offset2), buf2) as isize;
+                if ret2 != -(SyscallErr::EAGAIN as isize) {
+                    return ret2;
+                }
                 if !task.acquire_inner_lock().sigpending.is_empty() {
                     return -(SyscallErr::EINTR as isize);
                 }
@@ -251,6 +288,7 @@ pub fn sys_getsockopt(
     optval_ptr_: usize,
     optlen: usize,
 ) -> isize {
+    let socket = get_socket!(sockfd); // 检查socket存不存在
     let task = current_task().unwrap();
     let token = task.get_user_token();
     let optval_ptr = translated_refmut(token, optval_ptr_ as *mut u32).unwrap();
@@ -262,6 +300,23 @@ pub fn sys_getsockopt(
             unsafe {
                 *(optval_ptr as *mut u32) = TCP_MSS;
                 *(optlen as *mut u32) = len as u32;
+            }
+        }
+        (SOL_TCP, TCP_INFO) => {
+            let state = socket.tcp_state().unwrap_or(7); // default Closed
+            let info = TcpInfo::new(state, TCP_MSS);
+            let info_len = core::mem::size_of::<TcpInfo>();
+            let buf = translated_refmut(token, optval_ptr_ as *mut u8).unwrap();
+            let buf = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, info_len) };
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    &info as *const TcpInfo as *const u8,
+                    buf.as_mut_ptr(),
+                    info_len,
+                );
+            }
+            unsafe {
+                *(optlen as *mut u32) = info_len as u32;
             }
         }
         (SOL_TCP, TCP_CONGESTION) => {
@@ -367,6 +422,12 @@ pub fn sys_setsockopt(
                 _ => socket.set_reuse_addr(true),
             };
         }
+        (SOL_SOCKET, SO_DONTROUTE) => {
+            // do noting, just return success
+            log::warn!("[sys_setsockopt] set socket DONTROUTE: {}", unsafe {
+                *(optval_ptr as *const u32)
+            });
+        }
         _ => {
             log::warn!(
                 "[sys_setsockopt] level: {}, optname: {} not supported",
@@ -382,8 +443,11 @@ pub fn sys_setsockopt(
 pub fn sys_sock_shutdown(sockfd: u32, how: u32) -> isize {
     log::info!("[sys_shutdown] sockfd {}, how {}", sockfd, how);
     let socket = get_socket!(sockfd);
-    let _ = socket.shutdown(how);
-    0 as isize
+    let ret = socket.shutdown(how);
+    match ret {
+        Ok(_) => 0 as isize,
+        Err(errno) => -(errno as isize),
+    }
 }
 
 pub fn sys_socketpair(domain: u32, socket_type: u32, protocol: u32, sv: usize) -> isize {

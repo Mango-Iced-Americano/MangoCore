@@ -6,7 +6,7 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::String;
 use user_lib::{
-    chdir, close, exec, exit, fork, open, println, read, shutdown, wait, waitpid, OpenFlags,
+    chdir, close, exec, exit, fork, open, println, read, shutdown, sleep, wait, waitpid, OpenFlags,
 };
 
 fn run_bash_cmd(cmd: &str, environ: &[*const u8]) -> i32 {
@@ -27,7 +27,14 @@ fn run_bash_cmd(cmd: &str, environ: &[*const u8]) -> i32 {
     }
     if pid > 0 {
         let mut code = 0;
-        waitpid(pid as usize, &mut code);
+        // waitpid(pid as usize, &mut code);
+        loop {
+            let ret = waitpid(pid as usize, &mut code);
+            if ret == pid as isize || ret == -1 {
+                break;
+            }
+            sleep(10);
+        }
         return code;
     }
     -1
@@ -206,6 +213,18 @@ fn enter_shell(path: &str, environ: &[*const u8]) {
     }
 }
 
+fn reap_zombies() {
+    loop {
+        let mut dummy_code = 0;
+        // 假设你的 waitpid 支持非阻塞 (可以通过传入特定 flag 或内核默认不阻塞)
+        // 如果不支持非阻塞，这一步可以跳过，或者只在必要时清理
+        let child = waitpid(0, &mut dummy_code);
+        if child <= 0 {
+            break;
+        }
+    }
+}
+
 fn run_group_in_dir(environ: &[*const u8], dir: &str, script: &str) {
     let pid = fork();
     if pid < 0 {
@@ -226,9 +245,21 @@ fn run_group_in_dir(environ: &[*const u8], dir: &str, script: &str) {
             exit(126);
         }
         println!("[initproc] entered {}", dir);
-        let mut cmd = String::from("./");
+        // --- 核心看门狗机制（非常通用、优雅的解法） ---
+        let mut cmd = String::new();
+        // 1. 启动定时炸弹：放入后台，静默休眠 15 秒。时间一到，不分青红皂白把服务端全杀了！
+        // （15秒足够跑完一整个 iperf 脚本，如果15秒还没跑完，绝对是卡死了）
+        cmd.push_str("(busybox sleep 15; busybox pkill -9 iperf3; busybox pkill -9 iperf) & ");
+
+        // 2. 运行真正的测试脚本
+        cmd.push_str("./");
         cmd.push_str(script);
+
+        // 3. 拆弹逻辑：如果脚本正常跑完，立刻杀掉刚才后台休眠的 sleep 进程（拆弹）
+        // 并主动清理掉可能残留的 iperf，让 bash 安全退出
+        cmd.push_str("; busybox pkill -9 sleep; busybox pkill -9 iperf3; busybox pkill -9 iperf");
         cmd.push('\0');
+        // cmd.push_str("; wait");
         let shell = "/bash\0";
         let dash_c = "-c\0";
         let argv = [
@@ -247,6 +278,19 @@ fn run_group_in_dir(environ: &[*const u8], dir: &str, script: &str) {
         let mut exit_code: i32 = 0;
         println!("[initproc] waiting pid={} for {} in {}", pid, script, dir);
         waitpid(pid as usize, &mut exit_code);
+        // // --- 优雅的阻塞等待逻辑 ---
+        // loop {
+        //     // waitpid 会返回退出的进程 PID（或 -1 表示进程已不存在）
+        //     let ret = waitpid(pid as usize, &mut exit_code);
+
+        //     // 只有等到真正的目标 bash 进程退出，或者是抛出 ECHILD (-1) 找不到进程时才跳出
+        //     if ret == pid as isize || ret == -1 {
+        //         break;
+        //     }
+        //     // 否则（比如返回了被收割的孤儿进程 PID，或者 0/-2 非阻塞状态），继续等待！
+        //     sleep(50); // 避免空转
+        // }
+        // // ---------------------------
         println!(
             "[initproc] done {} in {} exit_code={}",
             script, dir, exit_code
@@ -262,7 +306,9 @@ fn run_selected_groups(environ: &[*const u8], mask: u16) {
         }
         println!("[initproc] select bit{} group={}", idx, group_name);
         run_group_in_dir(environ, "/musl\0", script);
+        reap_zombies(); // 收割可能的僵尸进程，保持环境干净
         run_group_in_dir(environ, "/glibc\0", script);
+        reap_zombies();
     }
     println!("[initproc] run_selected_groups done");
 }
@@ -332,10 +378,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
 
     let cfg = load_runtime_config();
 
-    run_bash_cmd(
-        "./musl/iperf3 -s -p 5001 -D & ./musl/iperf3 -c 127.0.0.1 -p 5001 -t 2 -i 0 ",
-        &environ,
-    );
+    run_bash_cmd("cd /musl && bash -c ./netperf_testcode.sh", &environ);
 
     // /debug_bash remains the highest-priority emergency switch.
     if should_enter_debug_shell() || cfg.mode == RunMode::Shell {

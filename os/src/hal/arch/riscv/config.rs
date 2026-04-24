@@ -1,6 +1,6 @@
 #![allow(unused)]
 
-pub const MEMORY_SIZE: usize = 0x8000_0000;
+pub const MEMORY_SIZE: usize = 0x4000_0000;
 pub const TASK_SIZE: usize = 0xc000_0000;
 pub const ELF_DYN_BASE: usize = TASK_SIZE / 3 * 2;
 pub const USER_STACK_BASE: usize = TASK_SIZE - PAGE_SIZE;
@@ -9,7 +9,7 @@ pub const USER_HEAP_SIZE: usize = PAGE_SIZE * 0x20;
 
 pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 0x20;
 #[cfg(feature = "board_rvqemu")]
-pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x4000;
+pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x8000;
 #[cfg(feature = "board_fu740")]
 pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x2000;
 #[cfg(feature = "board_cv1811h")]

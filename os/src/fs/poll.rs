@@ -1,6 +1,6 @@
 use crate::{
     mm::try_get_from_user, net::config::NET_INTERFACE, syscall::errno::EFAULT,
-    task::signal::Signals, timer::TimeSpec,
+    task::signal::Signals, timer::TimeSpec, utils::error::SyscallErr,
 };
 use alloc::vec::Vec;
 use core::ptr::null_mut;
@@ -328,6 +328,8 @@ pub fn pselect(
                     if fd.r_ready() {
                         done += 1;
                     }
+                } else {
+                    return -(SyscallErr::EBADF as isize);
                 }
             }
         }
@@ -341,6 +343,8 @@ pub fn pselect(
                     if fd.w_ready() {
                         done += 1;
                     }
+                } else {
+                    return -(SyscallErr::EBADF as isize);
                 }
             }
         }

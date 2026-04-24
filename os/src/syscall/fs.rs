@@ -567,11 +567,7 @@ pub fn sys_close(fd: usize) -> isize {
         Ok(_) => SUCCESS,
         Err(errno) => return errno,
     };
-    let ret2 = match task.socket_table.lock().take(fd) {
-        Some(_) => SUCCESS,
-        None => return EBADF,
-    };
-
+    task.socket_table.lock().take(fd);
     ret
 }
 

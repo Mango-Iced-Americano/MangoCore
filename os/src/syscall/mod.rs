@@ -90,6 +90,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_GETTID => "gettid",
         SYSCALL_SYSINFO => "sysinfo",
         SYSCALL_SOCKET => "socket",
+        SYSCALL_SOCK_SHUTDOWN => "sock_shutdown",
         SYSCALL_BIND => "bind",
         SYSCALL_LISTEN => "listen",
         SYSCALL_ACCEPT => "accept",

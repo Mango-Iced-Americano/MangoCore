@@ -1,4 +1,6 @@
 use super::{Mutex, Socket};
+use crate::net::TCP_SOCKETS_TO_REMOVE;
+use crate::task::{block_current_and_run_next, suspend_current_and_run_next};
 use crate::{
     fs::{file_trait::File, FileDescriptor, OpenFlags},
     net::{
@@ -42,11 +44,13 @@ pub const TCP_MSS: u32 = if TCP_MSS_DEFAULT > MAX_BUFFER_SIZE as u32 {
 } else {
     TCP_MSS_DEFAULT
 };
-const BACKLOG_SIZE: u32 = 8;
+const BACKLOG_SIZE: u32 = 16;
+const LISTEN_BUFFER_SIZE: usize = 2048;
 
 pub struct TcpSocket {
     inner: Mutex<TcpSocketInner>,
     is_listener: AtomicBool,
+    is_shutdown: AtomicBool,
     handlers: Mutex<VecDeque<SocketHandle>>,
 }
 
@@ -75,8 +79,8 @@ impl Socket for TcpSocket {
         NET_INTERFACE.tcp_socket(queue[0], |s| s.listen(local).unwrap());
 
         for _ in 1..BACKLOG_SIZE {
-            let tx_buf = socket::tcp::SocketBuffer::new(vec![0u8; MAX_BUFFER_SIZE]);
-            let rx_buf = socket::tcp::SocketBuffer::new(vec![0u8; MAX_BUFFER_SIZE]);
+            let tx_buf = socket::tcp::SocketBuffer::new(vec![0u8; LISTEN_BUFFER_SIZE]);
+            let rx_buf = socket::tcp::SocketBuffer::new(vec![0u8; LISTEN_BUFFER_SIZE]);
             let mut new_socket = socket::tcp::Socket::new(tx_buf, rx_buf);
             new_socket.listen(local).unwrap();
             queue.push_back(NET_INTERFACE.add_socket(new_socket));
@@ -118,6 +122,7 @@ impl Socket for TcpSocket {
         let connected_socket = Arc::new(TcpSocket {
             handlers: Mutex::new(new_handlers),
             is_listener: AtomicBool::new(false),
+            is_shutdown: AtomicBool::new(false),
             inner: Mutex::new(TcpSocketInner {
                 local_endpoint: local_ep,
                 remote_endpoint: Some(peer_endpoint),
@@ -158,6 +163,7 @@ impl Socket for TcpSocket {
         let remote_endpoint = address::endpoint(addr_buf)?;
         self._connect(remote_endpoint)?;
         loop {
+            NET_INTERFACE.poll();
             let handler = { *self.handlers.lock().front().ok_or(SyscallErr::EISCONN)? };
             let state = NET_INTERFACE.tcp_socket(handler, |socket| socket.state());
             match state {
@@ -220,6 +226,7 @@ impl Socket for TcpSocket {
             SHUT_WR => socket.close(),
             _ => socket.abort(),
         });
+        self.is_shutdown.store(true, Ordering::Release);
         NET_INTERFACE.poll();
         Ok(())
     }
@@ -237,8 +244,13 @@ impl Socket for TcpSocket {
             let handles: Vec<SocketHandle> = { self.handlers.lock().iter().copied().collect() };
             for handler in handles {
                 NET_INTERFACE.tcp_socket(handler, |socket| {
-                    socket.set_keep_alive(Some(Duration::from_secs(1).into()))
+                    socket.set_keep_alive(Some(Duration::from_secs(7200).into()))
                 });
+            }
+        } else {
+            let handles: Vec<SocketHandle> = { self.handlers.lock().iter().copied().collect() };
+            for handler in handles {
+                NET_INTERFACE.tcp_socket(handler, |socket| socket.set_keep_alive(None));
             }
         }
         Ok(0)
@@ -257,6 +269,175 @@ impl Socket for TcpSocket {
     fn send_to(&self, buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet {
         todo!();
     }
+
+    fn tcp_state(&self) -> Option<u8> {
+        use tcp::State::*;
+        let handler = self.handlers.lock().front().copied()?;
+        let state = NET_INTERFACE.tcp_socket(handler, |s| s.state());
+        let mapped = match state {
+            Established => 1,
+            SynSent => 2,
+            SynReceived => 3,
+            FinWait1 => 4,
+            FinWait2 => 5,
+            TimeWait => 6,
+            Closed => 7,
+            CloseWait => 8,
+            LastAck => 9,
+            Listen => 10,
+            Closing => 11,
+            _ => 7,
+        };
+        Some(mapped)
+    }
+}
+
+/// Linux struct tcp_info (from /usr/include/linux/tcp.h)
+/// 用于 getsockopt(TCP_INFO)，netperf 等程序通过 tcpi_state 判断连接状态。
+/// 所有字段必须填充或置零，否则未初始化的内存会误导用户程序。
+#[repr(C)]
+pub struct TcpInfo {
+    tcpi_state: u8,
+    tcpi_ca_state: u8,
+    tcpi_retransmits: u8,
+    tcpi_probes: u8,
+    tcpi_backoff: u8,
+    tcpi_options: u8,
+    tcpi_snd_wscale: u8,
+    tcpi_rcv_wscale: u8,
+
+    tcpi_rto: u32,
+    tcpi_ato: u32,
+    tcpi_snd_mss: u32,
+    tcpi_rcv_mss: u32,
+
+    tcpi_unacked: u32,
+    tcpi_sacked: u32,
+    tcpi_lost: u32,
+    tcpi_retrans: u32,
+    tcpi_fackets: u32,
+
+    /* Times */
+    tcpi_last_data_sent: u32,
+    tcpi_last_ack_sent: u32,
+    tcpi_last_data_recv: u32,
+    tcpi_last_ack_recv: u32,
+
+    /* Metrics */
+    tcpi_pmtu: u32,
+    tcpi_rcv_ssthresh: u32,
+    tcpi_rtt: u32,
+    tcpi_rttvar: u32,
+    tcpi_snd_ssthresh: u32,
+    tcpi_snd_cwnd: u32,
+    tcpi_advmss: u32,
+    tcpi_reordering: u32,
+
+    tcpi_rcv_rtt: u32,
+    tcpi_rcv_space: u32,
+
+    tcpi_total_retrans: u32,
+
+    tcpi_pacing_rate: u64,
+    tcpi_max_pacing_rate: u64,
+    tcpi_bytes_acked: u64,
+    tcpi_bytes_received: u64,
+    tcpi_segs_out: u32,
+    tcpi_segs_in: u32,
+
+    tcpi_notsent_bytes: u32,
+    tcpi_min_rtt: u32,
+    tcpi_data_segs_in: u32,
+    tcpi_data_segs_out: u32,
+    tcpi_delivery_rate: u64,
+
+    tcpi_busy_time: u64,
+    tcpi_rwnd_limited: u64,
+    tcpi_sndbuf_limited: u64,
+
+    tcpi_delivered: u32,
+    tcpi_delivered_ce: u32,
+
+    tcpi_bytes_sent: u64,
+    tcpi_bytes_retrans: u64,
+    tcpi_dsack_dups: u32,
+    tcpi_reord_seen: u32,
+
+    tcpi_rcv_ooopack: u32,
+    tcpi_snd_wnd: u32,
+}
+
+impl TcpInfo {
+    pub fn new(state: u8, mss: u32) -> Self {
+        Self {
+            tcpi_state: state,
+            tcpi_ca_state: 0,
+            tcpi_retransmits: 0,
+            tcpi_probes: 0,
+            tcpi_backoff: 0,
+            tcpi_options: 0,
+            tcpi_snd_wscale: 0,
+            tcpi_rcv_wscale: 0,
+
+            tcpi_rto: 0,
+            tcpi_ato: 0,
+            tcpi_snd_mss: mss,
+            tcpi_rcv_mss: mss,
+
+            tcpi_unacked: 0,
+            tcpi_sacked: 0,
+            tcpi_lost: 0,
+            tcpi_retrans: 0,
+            tcpi_fackets: 0,
+
+            tcpi_last_data_sent: 0,
+            tcpi_last_ack_sent: 0,
+            tcpi_last_data_recv: 0,
+            tcpi_last_ack_recv: 0,
+
+            tcpi_pmtu: 0,
+            tcpi_rcv_ssthresh: 0,
+            tcpi_rtt: 0,
+            tcpi_rttvar: 0,
+            tcpi_snd_ssthresh: 0,
+            tcpi_snd_cwnd: 0,
+            tcpi_advmss: mss,
+            tcpi_reordering: 0,
+
+            tcpi_rcv_rtt: 0,
+            tcpi_rcv_space: 0,
+
+            tcpi_total_retrans: 0,
+
+            tcpi_pacing_rate: 0,
+            tcpi_max_pacing_rate: 0,
+            tcpi_bytes_acked: 0,
+            tcpi_bytes_received: 0,
+            tcpi_segs_out: 0,
+            tcpi_segs_in: 0,
+
+            tcpi_notsent_bytes: 0,
+            tcpi_min_rtt: 0,
+            tcpi_data_segs_in: 0,
+            tcpi_data_segs_out: 0,
+            tcpi_delivery_rate: 0,
+
+            tcpi_busy_time: 0,
+            tcpi_rwnd_limited: 0,
+            tcpi_sndbuf_limited: 0,
+
+            tcpi_delivered: 0,
+            tcpi_delivered_ce: 0,
+
+            tcpi_bytes_sent: 0,
+            tcpi_bytes_retrans: 0,
+            tcpi_dsack_dups: 0,
+            tcpi_reord_seen: 0,
+
+            tcpi_rcv_ooopack: 0,
+            tcpi_snd_wnd: 0,
+        }
+    }
 }
 
 impl TcpSocket {
@@ -272,6 +453,7 @@ impl TcpSocket {
         Self {
             handlers: Mutex::new(handlers),
             is_listener: AtomicBool::new(false),
+            is_shutdown: AtomicBool::new(false),
             inner: Mutex::new(TcpSocketInner {
                 local_endpoint: IpListenEndpoint {
                     addr: None,
@@ -316,54 +498,131 @@ impl TcpSocket {
         Ok(())
     }
     fn _accept(&self, nonblock: bool) -> GeneralRet<(SocketHandle, IpEndpoint)> {
-        loop {
-            NET_INTERFACE.poll();
-
-            let mut found_handler = None;
-            let mut peer_endpoint = None;
-
-            let handlers: Vec<SocketHandle> = { self.handlers.lock().iter().copied().collect() };
-
-            for handler in handlers {
-                let (state, remote) =
-                    NET_INTERFACE.tcp_socket(handler, |s| (s.state(), s.remote_endpoint()));
-                if state == tcp::State::SynReceived || state == tcp::State::Established {
-                    found_handler = Some(handler);
-                    peer_endpoint = remote;
-                }
-            }
-
-            if let Some(handler_to_remove) = found_handler {
-                // 移除监听池中已经连接的socket
-                let mut queue = self.handlers.lock();
-                if let Some(pos) = queue.iter().position(|&h| h == handler_to_remove) {
-                    queue.remove(pos);
-                }
-
-                //补充新的listener
-                let local_ep = self.inner.lock().local_endpoint;
-                let tx_buf = socket::tcp::SocketBuffer::new(vec![0u8; MAX_BUFFER_SIZE]);
-                let rx_buf = socket::tcp::SocketBuffer::new(vec![0u8; MAX_BUFFER_SIZE]);
-                let mut new_socket = socket::tcp::Socket::new(rx_buf, tx_buf);
-                new_socket.listen(local_ep).unwrap(); //如果unwrap失败说明底层有问题
-                let new_handler = NET_INTERFACE.add_socket(new_socket);
-                queue.push_back(new_handler);
-                return GeneralRet::Ok((handler_to_remove, peer_endpoint.unwrap()));
-            }
-
-            if nonblock {
-                return GeneralRet::Err(SyscallErr::EAGAIN);
-            }
-            suspend_current_and_run_next();
+        if self.is_shutdown.load(Ordering::Acquire) {
+            log::info!("[TcpSocket::_accept] socket is shutdown, cannot accept new connections");
+            return Err(SyscallErr::ENOTCONN);
         }
+
+        NET_INTERFACE.poll();
+        let mut found_handler = None;
+        let mut peer_endpoint = None;
+
+        let handlers: Vec<SocketHandle> = { self.handlers.lock().iter().copied().collect() };
+        for handler in handlers {
+            let (state, remote) =
+                NET_INTERFACE.tcp_socket(handler, |s| (s.state(), s.remote_endpoint()));
+            if state == tcp::State::SynReceived || state == tcp::State::Established {
+                found_handler = Some(handler);
+                peer_endpoint = remote;
+                break;
+            }
+        }
+
+        if let Some(handler_to_remove) = found_handler {
+            log::info!(
+                "[Socket::accept] found new connection {}, peer {:?}",
+                handler_to_remove,
+                peer_endpoint
+            );
+            // 移除监听池中已经连接的socket
+            let mut queue = self.handlers.lock();
+            if let Some(pos) = queue.iter().position(|&h| h == handler_to_remove) {
+                queue.remove(pos);
+            }
+
+            //补充新的listener
+            let local_ep = self.inner.lock().local_endpoint;
+            let tx_buf = socket::tcp::SocketBuffer::new(vec![0u8; LISTEN_BUFFER_SIZE]);
+            let rx_buf = socket::tcp::SocketBuffer::new(vec![0u8; LISTEN_BUFFER_SIZE]);
+            let mut new_socket = socket::tcp::Socket::new(rx_buf, tx_buf);
+            new_socket.listen(local_ep).unwrap(); //如果unwrap失败说明底层有问题
+            let new_handler = NET_INTERFACE.add_socket(new_socket);
+            queue.push_back(new_handler);
+            return Ok((handler_to_remove, peer_endpoint.unwrap()));
+        } else {
+            // 连接建立后由上层循环调用 accept，直到 accept 成功或发生错误
+            return Err(SyscallErr::EAGAIN);
+        }
+        // /* const MAX_IDLE_LOOPS: u32 = 2000;
+        // let mut idle_loops = 0; */
+        // loop {
+        //     if self.is_shutdown.load(Ordering::Acquire) {
+        //         log::info!(
+        //             "[TcpSocket::_accept] socket is shutdown, cannot accept new connections"
+        //         );
+        //         return Err(SyscallErr::ENOTCONN);
+        //     }
+        //     /* if idle_loops >= MAX_IDLE_LOOPS {
+        //        log::warn!(
+        //            "[TcpSocket::_accept] no incoming connections after {} loops, giving up",
+        //            idle_loops
+        //        );
+        //        return Err(SyscallErr::ETIMEDOUT); // 或其他合适的错误码
+        //     }*/
+        //     log::info!("[TcpSocket::_accept] polling for new connections...");
+        //     NET_INTERFACE.poll();
+
+        //     let mut found_handler = None;
+        //     let mut peer_endpoint = None;
+
+        //     let handlers: Vec<SocketHandle> = { self.handlers.lock().iter().copied().collect() };
+
+        //     for handler in handlers {
+        //         let (state, remote) =
+        //             NET_INTERFACE.tcp_socket(handler, |s| (s.state(), s.remote_endpoint()));
+        //         if state == tcp::State::SynReceived || state == tcp::State::Established {
+        //             found_handler = Some(handler);
+        //             peer_endpoint = remote;
+        //         }
+        //     }
+
+        //     if let Some(handler_to_remove) = found_handler {
+        //         // 移除监听池中已经连接的socket
+        //         let mut queue = self.handlers.lock();
+        //         if let Some(pos) = queue.iter().position(|&h| h == handler_to_remove) {
+        //             queue.remove(pos);
+        //         }
+
+        //         //补充新的listener
+        //         let local_ep = self.inner.lock().local_endpoint;
+        //         let tx_buf = socket::tcp::SocketBuffer::new(vec![0u8; LISTEN_BUFFER_SIZE]);
+        //         let rx_buf = socket::tcp::SocketBuffer::new(vec![0u8; LISTEN_BUFFER_SIZE]);
+        //         let mut new_socket = socket::tcp::Socket::new(rx_buf, tx_buf);
+        //         new_socket.listen(local_ep).unwrap(); //如果unwrap失败说明底层有问题
+        //         let new_handler = NET_INTERFACE.add_socket(new_socket);
+        //         queue.push_back(new_handler);
+        //         return GeneralRet::Ok((handler_to_remove, peer_endpoint.unwrap()));
+        //     }
+
+        //     if nonblock {
+        //         return GeneralRet::Err(SyscallErr::EAGAIN);
+        //     }
+        //     // wait_interruptible();
+        //     suspend_current_and_run_next();
+        //     current_task()
+        //         .unwrap()
+        //         .acquire_inner_lock()
+        //         .refresh_real_timer();
+        //     /* idle_loops += 1 */
+        //     if !current_task()
+        //         .unwrap()
+        //         .acquire_inner_lock()
+        //         .sigpending
+        //         .is_empty()
+        //     {
+        //         return GeneralRet::Err(SyscallErr::EINTR);
+        //     }
+        // }
     }
 }
-use crate::task::suspend_current_and_run_next;
 impl Drop for TcpSocket {
     fn drop(&mut self) {
         let handlers = self.handlers.lock();
         for &h in handlers.iter() {
-            NET_INTERFACE.remove(h);
+            NET_INTERFACE.tcp_socket(h, |s| s.close());
+            TCP_SOCKETS_TO_REMOVE.lock().push(h);
+            self.is_shutdown.store(true, Ordering::Release);
+            log::info!("[TcpSocket::drop] marked TCP socket {} to remove", h);
         }
     }
 }
@@ -438,7 +697,7 @@ impl File for TcpSocket {
                     }
                 });
                 if ret {
-                    log::info!("[TcpSocket::r_ready] socket {}, r_ready: {}", handler, ret);
+                    log::trace!("[TcpSocket::r_ready] socket {}, r_ready: {}", handler, ret);
                     break;
                 }
             }
@@ -451,7 +710,7 @@ impl File for TcpSocket {
                         && socket.state() != tcp::State::SynSent
                         && socket.state() != tcp::State::SynReceived;
                     ret = can_recv || is_eof_or_error;
-                    log::info!(
+                    log::trace!(
                         "[TcpSocket::r_ready] socket {}, r_ready: {}",
                         handlers[0],
                         ret
@@ -488,22 +747,12 @@ impl File for TcpSocket {
         ret
     }
     fn read_user(&self, _offset: Option<usize>, buf: UserBuffer) -> usize {
-        // let mut buffers = buf.buffers;
-        // let buf = unsafe {
-        //     core::slice::from_raw_parts_mut(buffers[0].as_mut_ptr() as *mut u8, buf.len as usize)
-        // };
-        // let ret = self._read(buf);
-        // match ret {
-        //     Ok(s) => return s,
-        //     Err(err) => return err.as_errno_ret(),
-        // }
         let mut data = vec![0u8; buf.len];
         let ret = self._read(&mut data);
         match ret {
             Ok(s) => {
                 let mut offset = 0;
                 let mut remain = s;
-                // 安全地将数据分布写回到分散的物理页切片中
                 for b in buf.buffers.into_iter() {
                     let copy_len = remain.min(b.len());
                     b[..copy_len].copy_from_slice(&data[offset..offset + copy_len]);
@@ -519,13 +768,8 @@ impl File for TcpSocket {
         }
     }
     fn write_user(&self, _offset: Option<usize>, buf: UserBuffer) -> usize {
-        // let mut buffers = buf.buffers;
-        // let buf = unsafe {
-        //     core::slice::from_raw_parts_mut(buffers[0].as_mut_ptr() as *mut u8, buf.len as usize)
-        // };
         let mut data = vec![0u8; buf.len];
         let mut offset = 0;
-        // 安全地从分散的物理页切片中收集数据
         for b in buf.buffers.into_iter() {
             data[offset..offset + b.len()].copy_from_slice(&b);
             offset += b.len();
@@ -629,44 +873,24 @@ impl TcpSocket {
             *queue.front().ok_or(SyscallErr::ENOTCONN)?
         };
         let ret = NET_INTERFACE.tcp_socket(handler, |socket| {
-            if socket.state() == tcp::State::CloseWait
-                || socket.state() == tcp::State::TimeWait
-                || socket.state() == tcp::State::FinWait2
-            {
-                log::info!("[TcpRecvFuture::poll] state become {:?}", socket.state());
+            // 1. 只要缓冲区里有数据，不管 Socket 处在什么关闭状态，都必须先读出来！
+            if socket.can_recv() {
+                match socket.recv_slice(buf) {
+                    Ok(nbytes) => {
+                        log::info!("[TcpRecvFuture::poll] recv {} bytes", nbytes);
+                        return Ok(nbytes);
+                    }
+                    Err(_) => return Err(SyscallErr::ENOTCONN),
+                }
+            }
+            // 2. 缓冲区空了，且收到 FIN (may_recv 返回 false)，此时才是真正的 EOF
+            else if !socket.may_recv() {
+                log::info!("[TcpRecvFuture::poll] EOF, state {:?}", socket.state());
                 return Ok(0);
             }
-            if !socket.may_recv() {
-                log::info!(
-                    "[TcpRecvFuture::poll] err when recv, state {:?}",
-                    socket.state()
-                );
-                return Err(SyscallErr::ENOTCONN);
-            }
-            log::trace!("[TcpRecvFuture::poll] state {:?}", socket.state());
-            if !socket.can_recv() {
-                // panic!();
-                log::trace!("[TcpRecvFuture::poll] cannot recv yet");
-                log::debug!(
-                    "[TcpDebug] RecvQueue: {} bytes, State: {:?}, MayRecv: {}",
-                    socket.recv_queue(), // 看看这里到底是不是 0
-                    socket.state(),
-                    socket.may_recv()
-                );
+            // 3. 缓冲区空了，但连接正常，那就挂起等待 EAGAIN
+            else {
                 return Err(SyscallErr::EAGAIN);
-            }
-            log::info!("[TcpRecvFuture::poll] start to recv...");
-            info!(
-                "[TcpRecvFuture::poll] {:?} <- {:?}",
-                socket.local_endpoint(),
-                socket.remote_endpoint()
-            );
-            match socket.recv_slice(buf) {
-                Ok(nbytes) => {
-                    info!("[TcpRecvFuture::poll] recv {} bytes", nbytes);
-                    Ok(nbytes)
-                }
-                Err(_) => return Err(SyscallErr::ENOTCONN),
             }
         });
         if let Ok(_) = ret {

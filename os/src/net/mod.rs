@@ -21,6 +21,7 @@ mod unix;
 
 pub type Fd = usize;
 
+pub use tcp::TcpInfo;
 pub use tcp::TCP_MSS;
 pub use unix::make_unix_socket_pair;
 // pub use unix::UNIX_SOCKET_BUF_MANAGER;
@@ -70,6 +71,9 @@ pub const MAX_BUFFER_SIZE: usize = 64 * 1024;
 pub static UDP_SOCKETS: Mutex<Vec<Weak<UdpSocket>>> = Mutex::new(Vec::new());
 pub static UDP_SOCKETS_TO_REMOVE: Mutex<Vec<SocketHandle>> = Mutex::new(Vec::new());
 
+// tcp
+pub static TCP_SOCKETS_TO_REMOVE: Mutex<Vec<SocketHandle>> = Mutex::new(Vec::new());
+
 pub trait Socket: File {
     fn bind(&self, addr: IpListenEndpoint) -> SyscallRet;
     fn listen(&self) -> SyscallRet;
@@ -88,6 +92,10 @@ pub trait Socket: File {
     fn reuse_addr(&self) -> SyscallRet;
     fn set_reuse_addr(&self, enabled: bool) -> SyscallRet;
     fn send_to(&self, buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet;
+    /// 获取 TCP 状态 (Linux TCP_* 枚举值)，非 TCP socket 返回 None
+    fn tcp_state(&self) -> Option<u8> {
+        None
+    }
 }
 
 impl dyn Socket {
