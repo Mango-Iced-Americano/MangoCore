@@ -123,6 +123,10 @@ impl<const N: usize> Socket for UnixSocket<N> {
             })
         }
     }
+
+    fn deep_clone_socket(&self) -> Arc<dyn File> {
+        todo!()
+    }
 }
 
 impl<const N: usize> UnixSocket<N> {

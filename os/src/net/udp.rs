@@ -1,5 +1,6 @@
 use super::{config::NET_INTERFACE, Mutex, Socket, MAX_BUFFER_SIZE};
 use crate::net::config::lookup_source_ip;
+use crate::net::macros::impl_file_for_socket;
 use crate::utils::random::RNG;
 use crate::{
     fs::{file_trait::File, OpenFlags},
@@ -194,7 +195,11 @@ impl Socket for UdpSocket {
     }
 
     fn try_send(&self, buf: &[u8]) -> Result<isize, SyscallErr> {
-        let remote = self.inner.lock().remote_endpoint.ok_or(SyscallErr::ENOTCONN)?;
+        let remote = self
+            .inner
+            .lock()
+            .remote_endpoint
+            .ok_or(SyscallErr::ENOTCONN)?;
         let meta = UdpMetadata {
             endpoint: remote,
             meta: PacketMeta::default(),
@@ -210,6 +215,23 @@ impl Socket for UdpSocket {
                 Err(_) => Err(SyscallErr::ENOBUFS),
             }
         })
+    }
+
+    fn socket_r_ready(&self) -> bool {
+        NET_INTERFACE.poll();
+        !self.inner.lock().rx_queue.is_empty()
+    }
+
+    fn socket_w_ready(&self) -> bool {
+        NET_INTERFACE.udp_socket(self.socket_handler, |socket| socket.can_send())
+    }
+
+    fn socket_hang_up(&self) -> bool {
+        false
+    }
+
+    fn deep_clone_socket(&self) -> Arc<dyn File> {
+        todo!()
     }
 }
 
@@ -261,218 +283,8 @@ impl Drop for UdpSocket {
         UDP_SOCKETS_TO_REMOVE.lock().push(self.socket_handler);
     }
 }
-impl File for UdpSocket {
-    fn deep_clone(&self) -> Arc<dyn File> {
-        todo!();
-    }
-    fn readable(&self) -> bool {
-        true
-    }
-    fn writable(&self) -> bool {
-        true
-    }
-    fn read(&self, _offset: Option<&mut usize>, buf: &mut [u8]) -> usize {
-        match self._read(buf) {
-            Ok(ret) => ret,
-            Err(err) => err.as_errno_ret(),
-        }
-    }
-    fn write(&self, _offset: Option<&mut usize>, buf: &[u8]) -> usize {
-        NET_INTERFACE.poll();
-        // const MAX_UDP_PAYLOAD: usize = 1472; // 1500 - 20(IP) - 8(UDP)
-        // if buf.len() > MAX_UDP_PAYLOAD {
-        //     log::error!(
-        //         "[UdpSocket] packet too large: {} > {}",
-        //         buf.len(),
-        //         MAX_UDP_PAYLOAD
-        //     );
-        //     return (SyscallErr::EMSGSIZE).as_errno_ret(); //暂时先检查包大小，不然跑测试直接会卡死
-        // }
-        let ret = NET_INTERFACE.udp_socket(self.socket_handler, |socket| {
-            if !socket.can_send() {
-                log::info!("[UdpSendFuture::poll] cannot send yet");
-                return (SyscallErr::EAGAIN).as_errno_ret();
-            }
-            log::info!("[UdpSendFuture::poll] start to send...");
-            let remote = self.inner.lock().remote_endpoint;
-            let meta = UdpMetadata {
-                endpoint: remote.unwrap(),
-                meta: PacketMeta::default(),
-            };
-            info!(
-                "[UdpSendFuture::poll] {:?} -> {:?}",
-                socket.endpoint(),
-                remote
-            );
-            let len = buf.len();
-            let ret = socket.send_slice(buf, meta);
-            if let Some(err) = ret.err() {
-                if err == SendError::Unaddressable {
-                    return (SyscallErr::ENOTCONN).as_errno_ret();
-                } else {
-                    return (SyscallErr::ENOBUFS).as_errno_ret();
-                }
-            } else {
-                log::debug!("[UdpSendFuture::poll] send {} bytes", len);
-                return len;
-            }
-        });
-        NET_INTERFACE.poll();
-        ret
-    }
-    fn r_ready(&self) -> bool {
-        NET_INTERFACE.poll();
-        let ret = NET_INTERFACE.udp_socket(self.socket_handler, |socket| {
-            // socket.can_recv() // 只有真正有包了才返回 true
-            !self.inner.lock().rx_queue.is_empty()
-        });
-        log::info!(
-            "[UdpSocket::r_ready] socket {}, r_ready: {}",
-            self.socket_handler,
-            ret
-        );
-        ret
-    }
-    fn w_ready(&self) -> bool {
-        NET_INTERFACE.poll();
-        let ret = NET_INTERFACE.udp_socket(self.socket_handler, |socket| socket.can_send());
-        log::info!(
-            "[UdpSocket::w_ready] socket {}, w_ready: {}",
-            self.socket_handler,
-            ret
-        );
-        ret
-    }
-    fn read_user(&self, _offset: Option<usize>, buf: UserBuffer) -> usize {
-        // let mut buffers = buf.buffers;
-        // let buf = unsafe {
-        //     core::slice::from_raw_parts_mut(buffers[0].as_mut_ptr() as *mut u8, buf.len as usize)
-        // };
-        // let ret = self._read(buf);
-        // match ret {
-        //     Ok(s) => s,
-        //     Err(err) => err.as_errno_ret(),
-        // }
-        let mut data = vec![0u8; buf.len];
-        let ret = self._read(&mut data);
-        match ret {
-            Ok(s) => {
-                let mut offset = 0;
-                let mut remain = s;
-                // 安全地将数据分布写回到分散的物理页切片中
-                for b in buf.buffers.into_iter() {
-                    let copy_len = remain.min(b.len());
-                    b[..copy_len].copy_from_slice(&data[offset..offset + copy_len]);
-                    offset += copy_len;
-                    remain -= copy_len;
-                    if remain == 0 {
-                        break;
-                    }
-                }
-                s
-            }
-            Err(err) => err.as_errno_ret(),
-        }
-    }
-    fn write_user(&self, _offset: Option<usize>, buf: UserBuffer) -> usize {
-        let mut data = vec![0u8; buf.len];
-        let mut offset = 0;
-        // 安全地从分散的物理页切片中收集数据
-        for b in buf.buffers.into_iter() {
-            data[offset..offset + b.len()].copy_from_slice(&b);
-            offset += b.len();
-        }
-        // let mut buffers = buf.buffers;
-        // let buf = unsafe {
-        //     core::slice::from_raw_parts_mut(buffers[0].as_mut_ptr() as *mut u8, buf.len as usize)
-        // };
-        self.write(None, &data)
-    }
-    fn get_size(&self) -> usize {
-        todo!();
-    }
-    fn get_stat(&self) -> Stat {
-        todo!();
-    }
-    fn get_file_type(&self) -> DiskInodeType {
-        todo!();
-    }
-    fn is_dir(&self) -> bool {
-        todo!();
-    }
-    fn is_file(&self) -> bool {
-        todo!();
-    }
-    fn info_dirtree_node(&self, _dirnode_ptr: Weak<DirectoryTreeNode>) {
-        todo!();
-    }
-    fn get_dirtree_node(&self) -> Option<Arc<DirectoryTreeNode>> {
-        todo!();
-    }
-    /// open
-    fn open(&self, _flags: OpenFlags, _special_use: bool) -> Arc<dyn File> {
-        todo!();
-    }
-    fn open_subfile(&self) -> Result<Vec<(String, Arc<dyn File>)>, isize> {
-        todo!();
-    }
-    /// create
-    fn create(&self, _name: &str, _file_type: DiskInodeType) -> Result<Arc<dyn File>, isize> {
-        todo!();
-    }
-    fn link_child(&self, _name: &str, _child: &Self) -> Result<(), isize> {
-        todo!();
-    }
-    /// delete(unlink)
-    fn unlink(&self, _delete: bool) -> Result<(), isize> {
-        todo!();
-    }
-    /// dirent
-    fn get_dirent(&self, _count: usize) -> Vec<Dirent> {
-        todo!();
-    }
-    /// offset
-    fn get_offset(&self) -> usize {
-        todo!();
-    }
-    fn lseek(&self, _offset: isize, _whence: SeekWhence) -> Result<usize, isize> {
-        todo!();
-    }
-    /// size
-    fn modify_size(&self, _diff: isize) -> Result<(), isize> {
-        todo!();
-    }
-    fn truncate_size(&self, _new_size: usize) -> Result<(), isize> {
-        todo!();
-    }
-    // time
-    fn set_timestamp(&self, _ctime: Option<usize>, _atime: Option<usize>, _mtime: Option<usize>) {
-        todo!();
-    }
-    /// cache
-    fn get_single_cache(&self, _offset: usize) -> Result<Arc<Mutex<PageCache>>, ()> {
-        todo!();
-    }
-    fn get_all_caches(&self) -> Result<Vec<Arc<Mutex<PageCache>>>, ()> {
-        todo!();
-    }
-    /// memory related
-    fn oom(&self) -> usize {
-        todo!();
-    }
-    /// poll, select related
-    fn hang_up(&self) -> bool {
-        false
-    }
-    /// iotcl
-    fn ioctl(&self, _cmd: u32, _argp: usize) -> isize {
-        todo!();
-    }
-    /// fcntl
-    fn fcntl(&self, _cmd: u32, _arg: u32) -> isize {
-        todo!();
-    }
-}
+
+impl_file_for_socket!(UdpSocket);
 
 impl UdpSocket {
     fn _read<'a>(&'a self, buf: &'a mut [u8]) -> GeneralRet<usize> {

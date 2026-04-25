@@ -6,10 +6,8 @@ use crate::mm::{
     translated_byte_buffer, translated_byte_buffer_append_to_existing_vec, translated_refmut,
     translated_str, try_get_from_user, MapPermission, UserBuffer, VirtAddr,
 };
-use crate::net::config::NET_INTERFACE;
-use crate::task::{
-    current_task, current_user_token, signal, suspend_current_and_run_next, wait_interruptible,
-};
+use crate::syscall::utils::wait_io_core;
+use crate::task::{current_task, current_user_token, signal};
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
 use alloc::boxed::Box;
@@ -229,46 +227,20 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
     if !file_descriptor.readable() {
         return EBADF;
     }
-    // let token = task.get_user_token();
-    // file_descriptor.read_user(
-    //     None,
-    //     UserBuffer::new({
-    //         match translated_byte_buffer(token, buf as *const u8, count) {
-    //             Ok(buffer) => buffer,
-    //             Err(errno) => return errno,
-    //         }
-    //     }),
-    // ) as isize
     let is_nonblock = file_descriptor.get_nonblock();
     log::info!("[sys_read] is nonblock:{:?}", is_nonblock);
-    loop {
-        log::info!("[sys_read] looping...");
-        NET_INTERFACE.poll();
-        let token = task.get_user_token();
-        let user_buf = match translated_byte_buffer(token, buf as *const u8, count) {
-            Ok(buffer) => UserBuffer::new(buffer),
-            Err(errno) => return errno as isize,
-        };
 
-        let ret = file_descriptor.read_user(None, user_buf) as isize;
-
-        if ret == -(SyscallErr::EAGAIN as isize) {
-            if is_nonblock {
-                return ret;
-            } else {
-                // wait_interruptible();
-                suspend_current_and_run_next();
-                if !task.acquire_inner_lock().sigpending.is_empty() {
-                    let signal = task.acquire_inner_lock().sigpending.complement();
-                    log::info!("[sys_read] interrupted by signal: {:?}", signal);
-                    return -(SyscallErr::EINTR as isize);
-                }
-                continue;
-            }
-        }
-
-        return ret;
-    }
+    let token = task.get_user_token();
+    wait_io_core(
+        || {
+            let user_buf = match translated_byte_buffer(token, buf as *const u8, count) {
+                Ok(buffer) => UserBuffer::new(buffer),
+                Err(errno) => return errno as isize,
+            };
+            file_descriptor.read_user(None, user_buf) as isize
+        },
+        is_nonblock,
+    )
 }
 
 pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
@@ -295,33 +267,17 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
     // ) as isize
     let is_nonblock = file_descriptor.get_nonblock();
     log::info!("[sys_write] is nonblock {:?}", is_nonblock);
-    loop {
-        log::info!("[sys_write] looping...");
-        NET_INTERFACE.poll();
-        let token = task.get_user_token();
-        let user_buf = match translated_byte_buffer(token, buf as *const u8, count) {
-            Ok(buffer) => UserBuffer::new(buffer),
-            Err(errno) => return errno as isize,
-        };
-
-        let ret = file_descriptor.write_user(None, user_buf) as isize;
-        if ret == -(SyscallErr::EAGAIN as isize) {
-            if is_nonblock {
-                return ret;
-            } else {
-                // wait_interruptible();
-                suspend_current_and_run_next();
-                if !task.acquire_inner_lock().sigpending.is_empty() {
-                    let signal = task.acquire_inner_lock().sigpending.complement();
-                    log::info!("[sys_read] interrupted by signal: {:?}", signal);
-                    return -(SyscallErr::EINTR as isize);
-                }
-                continue;
-            }
-        }
-
-        return ret;
-    }
+    let token = task.get_user_token();
+    wait_io_core(
+        || {
+            let user_buf = match translated_byte_buffer(token, buf as *const u8, count) {
+                Ok(buffer) => UserBuffer::new(buffer),
+                Err(errno) => return errno as isize,
+            };
+            file_descriptor.write_user(None, user_buf) as isize
+        },
+        is_nonblock,
+    )
 }
 
 pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
@@ -695,6 +651,11 @@ pub fn sys_dup(oldfd: usize) -> isize {
         Ok(fd) => fd,
         Err(errno) => return errno,
     };
+    // 如果是 socket，同步复制到 socket_table
+    let old_socket = task.socket_table.lock().get_ref(oldfd).cloned();
+    if let Some(sock) = old_socket {
+        task.socket_table.lock().insert(newfd, sock);
+    }
     info!("[sys_dup] oldfd: {}, newfd: {}", oldfd, newfd);
     newfd as isize
 }
@@ -762,10 +723,17 @@ pub fn sys_dup3(oldfd: usize, newfd: usize, flags: u32) -> isize {
         Err(errno) => return errno,
     };
     file_descriptor.set_cloexec(is_cloexec);
-    match fd_table.insert_at(file_descriptor, newfd) {
+    let ret = match fd_table.insert_at(file_descriptor, newfd) {
         Ok(fd) => fd as isize,
         Err(errno) => errno,
+    };
+    if ret >= 0 {
+        let old_socket = task.socket_table.lock().get_ref(oldfd).cloned();
+        if let Some(sock) = old_socket {
+            task.socket_table.lock().insert(newfd, sock);
+        }
     }
+    ret
 }
 
 // This syscall is not complete at all, only /read proc/self/exe

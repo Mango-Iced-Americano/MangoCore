@@ -378,7 +378,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
 
     let cfg = load_runtime_config();
 
-    run_bash_cmd("cd /musl && bash -c ./netperf_testcode.sh", &environ);
+    // run_bash_cmd("cd /musl && bash -c ./netperf_testcode.sh", &environ);
 
     // /debug_bash remains the highest-priority emergency switch.
     if should_enter_debug_shell() || cfg.mode == RunMode::Shell {

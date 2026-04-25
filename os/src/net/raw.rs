@@ -25,6 +25,7 @@ use alloc::{
     vec::Vec,
 };
 use log::info;
+use crate::net::macros::impl_file_for_socket;
 use smoltcp::{
     iface::SocketHandle,
     socket::{self, raw, raw::PacketMetadata},
@@ -198,6 +199,10 @@ impl Socket for RawSocket {
             }
         })
     }
+
+    fn deep_clone_socket(&self) -> Arc<dyn File> {
+        todo!()
+    }
 }
 
 impl RawSocket {
@@ -235,185 +240,5 @@ impl RawSocket {
     }
 }
 
-impl File for RawSocket {
-    fn deep_clone(&self) -> Arc<dyn File> {
-        todo!()
-    }
+impl_file_for_socket!(RawSocket);
 
-    fn readable(&self) -> bool {
-        true
-    }
-
-    fn writable(&self) -> bool {
-        true
-    }
-
-    fn read(&self, _offset: Option<&mut usize>, buf: &mut [u8]) -> usize {
-        match self._read(buf) {
-            Ok(ret) => ret,
-            //权衡写法，将正数err转为负数错误类型
-            Err(err) => err.as_errno_ret(),
-        }
-    }
-
-    fn write(&self, _offset: Option<&mut usize>, buf: &[u8]) -> usize {
-        NET_INTERFACE.poll();
-        let ret = NET_INTERFACE.raw_socket(self.socket_handler, |socket| {
-            if !socket.can_send() {
-                log::info!("[RawSendFuture::poll] cannot send yet");
-                suspend_current_and_run_next();
-                return (SyscallErr::EAGAIN).as_errno_ret();
-            }
-            log::info!("[RawSendFuture::poll] start to send...");
-            match socket.send_slice(buf) {
-                Ok(()) => buf.len(),
-                Err(_) => (SyscallErr::ENOBUFS).as_errno_ret(),
-            }
-        });
-        NET_INTERFACE.poll();
-        ret
-    }
-
-    fn r_ready(&self) -> bool {
-        NET_INTERFACE.poll();
-        NET_INTERFACE.udp_socket(self.socket_handler, |socket| {
-            socket.can_recv() // 只有真正有包了才返回 true
-        })
-    }
-    fn w_ready(&self) -> bool {
-        NET_INTERFACE.poll();
-        NET_INTERFACE.udp_socket(self.socket_handler, |socket| socket.can_send())
-    }
-
-    fn read_user(&self, _offset: Option<usize>, _buf: UserBuffer) -> usize {
-        todo!()
-    }
-
-    fn write_user(&self, _offset: Option<usize>, _buf: UserBuffer) -> usize {
-        todo!()
-    }
-
-    fn get_size(&self) -> usize {
-        todo!()
-    }
-
-    fn get_stat(&self) -> Stat {
-        todo!()
-    }
-
-    fn get_file_type(&self) -> DiskInodeType {
-        todo!()
-    }
-
-    fn info_dirtree_node(&self, _dirnode_ptr: Weak<DirectoryTreeNode>) {
-        todo!()
-    }
-
-    fn get_dirtree_node(&self) -> Option<Arc<DirectoryTreeNode>> {
-        todo!()
-    }
-
-    fn open(&self, _flags: OpenFlags, _special_use: bool) -> Arc<dyn File> {
-        todo!()
-    }
-
-    fn open_subfile(&self) -> Result<Vec<(String, Arc<dyn File>)>, isize> {
-        todo!()
-    }
-
-    fn create(&self, _name: &str, _file_type: DiskInodeType) -> Result<Arc<dyn File>, isize> {
-        todo!()
-    }
-
-    fn link_child(&self, _name: &str, _child: &Self) -> Result<(), isize>
-    where
-        Self: Sized,
-    {
-        todo!()
-    }
-
-    fn unlink(&self, _delete: bool) -> Result<(), isize> {
-        todo!()
-    }
-
-    fn get_dirent(&self, _count: usize) -> Vec<Dirent> {
-        todo!()
-    }
-
-    fn lseek(&self, _offset: isize, _whence: SeekWhence) -> Result<usize, isize> {
-        todo!()
-    }
-
-    fn modify_size(&self, _diff: isize) -> Result<(), isize> {
-        todo!()
-    }
-
-    fn truncate_size(&self, _new_size: usize) -> Result<(), isize> {
-        todo!()
-    }
-
-    fn set_timestamp(&self, _ctime: Option<usize>, _atime: Option<usize>, _mtime: Option<usize>) {
-        todo!()
-    }
-
-    fn get_single_cache(&self, _offset: usize) -> Result<Arc<Mutex<PageCache>>, ()> {
-        todo!()
-    }
-
-    fn get_all_caches(&self) -> Result<Vec<Arc<Mutex<PageCache>>>, ()> {
-        todo!()
-    }
-
-    fn oom(&self) -> usize {
-        todo!()
-    }
-
-    fn hang_up(&self) -> bool {
-        todo!()
-    }
-
-    fn ioctl(&self, _cmd: u32, _argp: usize) -> isize {
-        todo!()
-    }
-
-    fn fcntl(&self, _cmd: u32, _arg: u32) -> isize {
-        todo!()
-    }
-}
-
-impl RawSocket {
-    fn _read<'a>(&'a self, buf: &'a mut [u8]) -> GeneralRet<usize> {
-        NET_INTERFACE.poll();
-        let ret = NET_INTERFACE.raw_socket(self.socket_handler, |socket| {
-            if !socket.can_recv() {
-                // panic!();
-                log::trace!("[RawRecvFuture::poll] cannot recv yet");
-                return Err(SyscallErr::EAGAIN);
-            }
-            log::info!("[RawRecvFuture::poll] start to recv...");
-
-            match socket.recv_slice(buf) {
-                Ok(nbytes) => {
-                    info!("[RawRecvFuture::poll] recv {} bytes", nbytes);
-                    let packet = smoltcp::wire::Ipv4Packet::new_unchecked(&buf[..nbytes]);
-                    let src_addr = packet.src_addr();
-                    let mut inner = self.inner.lock();
-                    inner.remote_endpoint = Some(IpEndpoint::new(src_addr.into(), 0));
-                    Ok(nbytes)
-                }
-                Err(_) => return Err(SyscallErr::ENOTCONN),
-            }
-        });
-
-        NET_INTERFACE.poll();
-
-        match ret {
-            Ok(result) => {
-                return GeneralRet::Ok(result);
-            }
-            Err(err) => {
-                return GeneralRet::Err(err);
-            }
-        }
-    }
-}

@@ -14,6 +14,7 @@ use spin::Mutex;
 pub mod adapter;
 pub mod address;
 pub mod config;
+mod macros;
 mod raw;
 mod tcp;
 mod udp;
@@ -105,6 +106,24 @@ pub trait Socket: File {
     /// 尝试发送数据，不阻塞。
     /// 不会调用 poll、不会睡眠、不会调度。成功时返回发送的字节数 (isize)。
     fn try_send(&self, buf: &[u8]) -> Result<isize, SyscallErr>;
+
+    /// poll/select 相关：是否可读（不阻塞）
+    fn socket_r_ready(&self) -> bool {
+        true
+    }
+
+    /// poll/select 相关：是否可写（不阻塞）
+    fn socket_w_ready(&self) -> bool {
+        true
+    }
+
+    /// poll/select 相关：是否挂起
+    fn socket_hang_up(&self) -> bool {
+        false
+    }
+
+    /// deep clone，返回 Arc<dyn File>
+    fn deep_clone_socket(&self) -> Arc<dyn File>;
 
     /// 获取 TCP 状态 (Linux TCP_* 枚举值)，非 TCP socket 返回 None
     fn tcp_state(&self) -> Option<u8> {
