@@ -17,6 +17,7 @@ use crate::task::{
     wake_interruptible, Rusage, TaskStatus, TimerAction,
 };
 use crate::timer::{get_time_ms, get_time_sec, ITimerVal, TimeSpec, TimeVal, TimeZone, Times};
+use crate::utils::error::SyscallErr;
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -406,11 +407,11 @@ pub fn sys_setpgid(pid: usize, pgid: usize) -> isize {
     };
 
     let real_pgid = if pgid == 0 { task.tgid } else { pgid };
-    
+
     task.setpgid(real_pgid)
 }
 
-pub fn sys_getpgid(pid: usize) -> isize  {
+pub fn sys_getpgid(pid: usize) -> isize {
     if (pid as isize) < 0 {
         return EINVAL;
     }
@@ -1263,10 +1264,15 @@ pub fn sys_sched_getaffinity(pid: usize, cpusetsize: usize, mask: *mut u8) -> is
             Some(task) => task,
             None => return ESRCH,
         }
-    };   
+    };
     let token = current_task().unwrap().get_user_token();
     match copy_to_user(token, &(1 as usize), mask as *mut usize) {
         Ok(()) => core::mem::size_of::<usize>() as isize,
-        Err(_) => EFAULT
+        Err(_) => EFAULT,
     }
+}
+
+pub fn sys_madvise(_addr: usize, _length: usize, _advice: usize) -> isize {
+    // 暂时返回 EINVAL
+    -(SyscallErr::EINVAL as isize)
 }

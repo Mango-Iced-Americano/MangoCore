@@ -356,13 +356,16 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     ];
 
     let porgrams = [
-        "ls", "cat", "echo", "mkdir", "rmdir", "chown", "chmod", "ln", "basename", "dirname",
-        "sleep", // 文本处理
+        "ls", "cat", "echo", "mkdir", "rmdir", "chown", "chmod", "ln", "basename", "dirname", "rm",
+        "file", "sleep", // 文本处理
         "sed", "awk", "head", "tail", // 系统工具
-        "ps", "top", "kill", "free", "df", "du", "mount", "umount", // 网络工具
-        "ping", "netstat", "ifconfig", "ip", "ss", "nc",
+        "ps", "top", "kill", "free", "df", "du", "mount", "umount", "ping", "netstat", "ifconfig",
+        "ip", "ss", "nc", "mktemp", "tr",
     ];
-
+    println!(
+        "[initproc] preparing busybox \"symlinks\" for programs: {}",
+        porgrams.join(", ")
+    );
     let program_str = porgrams.join(" ");
 
     let cmd = format!(
@@ -377,9 +380,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     run_bash_cmd(&cmd, &environ); // prepare busybox "symlinks" for test scripts
 
     let cfg = load_runtime_config();
-
-    // run_bash_cmd("cd /musl && bash -c ./netperf_testcode.sh", &environ);
-
+    run_bash_cmd("cd /musl/ltp && ./runltp -N", &environ);
     // /debug_bash remains the highest-priority emergency switch.
     if should_enter_debug_shell() || cfg.mode == RunMode::Shell {
         println!("[initproc] entering shell mode");

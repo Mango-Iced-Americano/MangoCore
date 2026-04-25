@@ -99,6 +99,7 @@ pub const SYSCALL_GETRANDOM: usize = 278;
 pub const SYSCALL_MEMBARRIER: usize = 283;
 pub const SYSCALL_STATX: usize = 291;
 pub const SYSCALL_FACCESSAT2: usize = 439;
+pub const SYSCALL_MADVISE: usize = 233;
 // Not standard POSIX sys_call
 pub const SYSCALL_LS: usize = 500;
 pub const SYSCALL_SHUTDOWN: usize = 501;

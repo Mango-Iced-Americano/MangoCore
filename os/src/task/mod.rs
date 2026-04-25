@@ -188,6 +188,15 @@ pub fn do_exit(task: Arc<TaskControlBlock>, exit_code: u32) {
     if Arc::strong_count(&task.vm) == 1 {
         task.vm.lock().recycle_data_pages();
     }
+    // 关闭所有文件描述符，释放管道/Socket等的 Arc 引用，
+    // 确保读端能收到 EOF（all_write_ends_closed() == true）。
+    {
+        let mut fd_table = task.files.lock();
+        for fd_opt in fd_table.iter_mut() {
+            *fd_opt = None;
+        }
+    }
+    task.socket_table.lock().clear();
     drop(inner);
     // **** release current PCB lock
     // drop task manually to maintain rc correctly

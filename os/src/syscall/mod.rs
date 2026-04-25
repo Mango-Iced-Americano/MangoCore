@@ -117,6 +117,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_MEMBARRIER => "membarrier",
         SYSCALL_STATX => "statx",
         SYSCALL_GETRANDOM => "getrandom",
+        SYSCALL_MADVISE => "madvise",
         // non-standard
         SYSCALL_LS => "ls",
         SYSCALL_SHUTDOWN => "shutdown",
@@ -396,6 +397,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_GETRANDOM => sys_getrandom(args[0] as usize, args[1] as usize, args[2] as u32),
         SYSCALL_SHUTDOWN => sys_shutdown(),
         SYSCALL_SCHED_GETAFFINITY => sys_sched_getaffinity(args[0], args[1], args[2] as *mut u8),
+        SYSCALL_MADVISE => sys_madvise(args[0], args[1], args[2]),
         _ => {
             println!(
                 "[syscall] Unsupported syscall: {} ({}), calling over arguments: {:?}",
