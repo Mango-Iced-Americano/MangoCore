@@ -21,7 +21,7 @@ impl SocketAddrv4 {
         let addr = Self {
             sin_port: buf[2..4].try_into().expect("ipv4 port len err"),
             sin_addr: buf[4..8].try_into().expect("ipv4 addr len err"),
-            sin_zero: [0u8;8]
+            sin_zero: [0u8; 8],
         };
         log::info!("[SocketAddrv4::new] new addr: {:?}", addr);
         addr
@@ -40,7 +40,6 @@ impl SocketAddrv4 {
 
 impl From<IpEndpoint> for SocketAddrv4 {
     fn from(value: IpEndpoint) -> Self {
-        
         Self {
             sin_port: value.port.to_be_bytes(),
             sin_addr: value
@@ -48,14 +47,13 @@ impl From<IpEndpoint> for SocketAddrv4 {
                 .as_bytes()
                 .try_into()
                 .expect("ipv4 addr len error"),
-            sin_zero:[0u8;8]
+            sin_zero: [0u8; 8],
         }
     }
 }
 
 impl From<SocketAddrv4> for IpEndpoint {
     fn from(value: SocketAddrv4) -> Self {
-        
         // big end
         let port = u16::from_be_bytes(value.sin_port);
         Self::new(IpAddress::Ipv4(Ipv4Address(value.sin_addr)), port)
@@ -64,8 +62,6 @@ impl From<SocketAddrv4> for IpEndpoint {
 
 impl From<SocketAddrv4> for IpListenEndpoint {
     fn from(value: SocketAddrv4) -> Self {
-        
-
         // big end
         let port = u16::from_be_bytes(value.sin_port);
         let addr = Ipv4Address(value.sin_addr);
@@ -99,7 +95,6 @@ pub struct SocketAddrv6 {
 impl SocketAddrv6 {
     /// user check first
     pub fn new(buf: &[u8]) -> Self {
-        
         log::debug!("[SocketAddrv6::new] buf: {:?}", buf);
         let addr = Self {
             sin6_port: buf[2..4].try_into().expect("ipv6 port len err"),
@@ -123,7 +118,6 @@ impl SocketAddrv6 {
 
 impl From<IpEndpoint> for SocketAddrv6 {
     fn from(value: IpEndpoint) -> Self {
-        
         Self {
             sin6_port: value.port.to_be_bytes(),
             sin6_flowinfo: [0 as u8; 4],
@@ -138,7 +132,6 @@ impl From<IpEndpoint> for SocketAddrv6 {
 
 impl From<SocketAddrv6> for IpEndpoint {
     fn from(value: SocketAddrv6) -> Self {
-        
         // big end
         let port = u16::from_be_bytes(value.sin6_port);
         Self::new(IpAddress::Ipv6(Ipv6Address(value.sin6_addr)), port)
@@ -147,7 +140,6 @@ impl From<SocketAddrv6> for IpEndpoint {
 
 impl From<SocketAddrv6> for IpListenEndpoint {
     fn from(value: SocketAddrv6) -> Self {
-        
         // big end
         let port = u16::from_be_bytes(value.sin6_port);
         let addr = Ipv6Address(value.sin6_addr);
@@ -179,7 +171,6 @@ pub fn endpoint(addr_buf: &[u8]) -> GeneralRet<IpEndpoint> {
 }
 
 pub fn _to_endpoint(listen_endpoint: IpListenEndpoint) -> IpEndpoint {
-    
     let addr = if listen_endpoint.addr.is_none() {
         IpAddress::v4(127, 0, 0, 1)
     } else {
@@ -198,8 +189,8 @@ pub fn _endpoint(addr_buf: &[u8]) -> GeneralRet<IpEndpoint> {
     };
     Ok(IpEndpoint::new(addr, listen_endpoint.port))
 }
-use crate::net::current_task;
 use crate::mm::translated_refmut;
+use crate::net::current_task;
 pub fn fill_with_endpoint(endpoint: IpEndpoint, addr: usize, addrlen: usize) -> SyscallRet {
     _fill_with_endpoint(endpoint, addr, addrlen)
 }
@@ -222,7 +213,7 @@ pub fn _fill_with_endpoint(endpoint: IpEndpoint, addr: usize, addrlen: usize) ->
             let len = mem::size_of::<u16>() + mem::size_of::<SocketAddrv4>();
             let addr_buf = unsafe { slice::from_raw_parts_mut(addr as *mut u8, len) };
             SocketAddrv4::from(endpoint).fill(addr_buf);
-            *addrlen= 16;
+            *addrlen = 16;
         }
         IpAddress::Ipv6(_) => {
             let len = mem::size_of::<u16>() + mem::size_of::<SocketAddrv6>();
@@ -239,10 +230,18 @@ pub fn _listen_endpoint(addr_buf: &[u8]) -> GeneralRet<IpListenEndpoint> {
     log::info!("[address::listen_enpoint] addr family {}", family);
     match family {
         AF_INET => {
+            if addr_buf.len() < 8 {
+                // 2(family) + 2(port) + 4(addr) = 8
+                return Err(SyscallErr::EINVAL);
+            }
             let ipv4 = SocketAddrv4::new(addr_buf);
             Ok(IpListenEndpoint::from(ipv4))
         }
         AF_INET6 => {
+            if addr_buf.len() < 24 {
+                // 2(family) + 2(port) + 4(addr) = 8
+                return Err(SyscallErr::EINVAL);
+            }
             let ipv6 = SocketAddrv6::new(addr_buf);
             Ok(IpListenEndpoint::from(ipv6))
         }

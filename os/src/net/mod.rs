@@ -78,6 +78,11 @@ pub trait Socket: File {
     fn bind(&self, addr: IpListenEndpoint) -> SyscallRet;
     fn listen(&self) -> SyscallRet;
     fn connect<'a>(&'a self, addr_buf: &'a [u8]) -> SyscallRet;
+    /// 尝试建立连接一次（不阻塞），检查一次握手状态。
+    /// 返回 Ok(0) 表示已建立，Err(EAGAIN) 表示尚在握手/需重试。
+    fn try_connect(&self) -> Result<isize, SyscallErr> {
+        Err(SyscallErr::EOPNOTSUPP)
+    }
     fn accept(&self, sockfd: u32, addr: usize, addrlen: usize) -> SyscallRet;
     fn socket_type(&self) -> SocketType;
     fn recv_buf_size(&self) -> usize;
@@ -92,6 +97,15 @@ pub trait Socket: File {
     fn reuse_addr(&self) -> SyscallRet;
     fn set_reuse_addr(&self, enabled: bool) -> SyscallRet;
     fn send_to(&self, buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet;
+
+    /// 尝试接收数据，不阻塞。
+    /// 不会调用 poll、不会睡眠、不会调度。成功时返回收到的字节数 (isize)。
+    fn try_recv(&self, buf: &mut [u8]) -> Result<isize, SyscallErr>;
+
+    /// 尝试发送数据，不阻塞。
+    /// 不会调用 poll、不会睡眠、不会调度。成功时返回发送的字节数 (isize)。
+    fn try_send(&self, buf: &[u8]) -> Result<isize, SyscallErr>;
+
     /// 获取 TCP 状态 (Linux TCP_* 枚举值)，非 TCP socket 返回 None
     fn tcp_state(&self) -> Option<u8> {
         None

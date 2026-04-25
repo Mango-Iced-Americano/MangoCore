@@ -6,6 +6,7 @@ pub mod fs;
 mod net;
 mod process;
 mod syscall_id;
+pub mod utils;
 
 use core::convert::TryFrom;
 use fs::*;

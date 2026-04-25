@@ -166,6 +166,38 @@ impl Socket for RawSocket {
             }
         }
     }
+
+    fn try_recv(&self, buf: &mut [u8]) -> Result<isize, SyscallErr> {
+        // 不调用 poll，只做一次尝试
+        NET_INTERFACE.raw_socket(self.socket_handler, |socket| {
+            if !socket.can_recv() {
+                return Err(SyscallErr::EAGAIN);
+            }
+            match socket.recv_slice(buf) {
+                Ok(nbytes) => {
+                    let packet = smoltcp::wire::Ipv4Packet::new_unchecked(&buf[..nbytes]);
+                    let src_addr = packet.src_addr();
+                    self.inner.lock().remote_endpoint =
+                        Some(IpEndpoint::new(src_addr.into(), 0));
+                    Ok(nbytes as isize)
+                }
+                Err(_) => Err(SyscallErr::ENOTCONN),
+            }
+        })
+    }
+
+    fn try_send(&self, buf: &[u8]) -> Result<isize, SyscallErr> {
+        // 不调用 poll，只做一次尝试
+        NET_INTERFACE.raw_socket(self.socket_handler, |socket| {
+            if !socket.can_send() {
+                return Err(SyscallErr::EAGAIN);
+            }
+            match socket.send_slice(buf) {
+                Ok(()) => Ok(buf.len() as isize),
+                Err(_) => Err(SyscallErr::ENOBUFS),
+            }
+        })
+    }
 }
 
 impl RawSocket {

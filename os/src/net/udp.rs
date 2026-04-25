@@ -177,6 +177,40 @@ impl Socket for UdpSocket {
     fn send_to(&self, buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet {
         todo!();
     }
+
+    fn try_recv(&self, buf: &mut [u8]) -> Result<isize, SyscallErr> {
+        // 从 rx_queue 非阻塞取一包数据
+        let mut inner = self.inner.lock();
+        if let Some((data, remote)) = inner.rx_queue.pop_front() {
+            let copy_len = data.len().min(buf.len());
+            buf[..copy_len].copy_from_slice(&data[..copy_len]);
+            if inner.remote_endpoint.is_none() {
+                inner.remote_endpoint = Some(remote);
+            }
+            Ok(copy_len as isize)
+        } else {
+            Err(SyscallErr::EAGAIN)
+        }
+    }
+
+    fn try_send(&self, buf: &[u8]) -> Result<isize, SyscallErr> {
+        let remote = self.inner.lock().remote_endpoint.ok_or(SyscallErr::ENOTCONN)?;
+        let meta = UdpMetadata {
+            endpoint: remote,
+            meta: PacketMeta::default(),
+        };
+        // 不调用 poll，只做一次尝试
+        NET_INTERFACE.udp_socket(self.socket_handler, |socket| {
+            if !socket.can_send() {
+                return Err(SyscallErr::EAGAIN);
+            }
+            match socket.send_slice(buf, meta) {
+                Ok(()) => Ok(buf.len() as isize),
+                Err(SendError::Unaddressable) => Err(SyscallErr::ENOTCONN),
+                Err(_) => Err(SyscallErr::ENOBUFS),
+            }
+        })
+    }
 }
 
 impl UdpSocket {

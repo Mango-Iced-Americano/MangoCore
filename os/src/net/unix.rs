@@ -99,6 +99,30 @@ impl<const N: usize> Socket for UnixSocket<N> {
     fn send_to(&self, buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet {
         todo!();
     }
+
+    fn try_recv(&self, buf: &mut [u8]) -> Result<isize, SyscallErr> {
+        let n = self.read_end.read(None, buf) as isize;
+        if n >= 0 {
+            Ok(n)
+        } else {
+            Err(match n {
+                x if x == -(SyscallErr::EAGAIN as isize) => SyscallErr::EAGAIN,
+                _ => SyscallErr::EIO,
+            })
+        }
+    }
+
+    fn try_send(&self, buf: &[u8]) -> Result<isize, SyscallErr> {
+        let n = self.write_end.write(None, buf) as isize;
+        if n >= 0 {
+            Ok(n)
+        } else {
+            Err(match n {
+                x if x == -(SyscallErr::EAGAIN as isize) => SyscallErr::EAGAIN,
+                _ => SyscallErr::EIO,
+            })
+        }
+    }
 }
 
 impl<const N: usize> UnixSocket<N> {

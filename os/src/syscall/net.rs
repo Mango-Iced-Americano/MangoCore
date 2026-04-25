@@ -1,5 +1,4 @@
 use super::errno::*;
-use crate::hal::get_bad_addr;
 use crate::mm::{translated_ref, translated_refmut};
 use crate::{
     config::PAGE_SIZE,
@@ -11,10 +10,9 @@ use crate::{
     task::current_task,
 };
 
-use crate::task::{suspend_current_and_run_next, wait_interruptible};
 use crate::utils::error::SyscallErr;
 
-use alloc::task;
+use crate::syscall::utils::wait_io;
 use log::info;
 use smoltcp::wire::IpListenEndpoint;
 
@@ -98,38 +96,33 @@ pub fn sys_accept(sockfd: u32, addr: usize, addrlen: usize) -> isize {
     };
     let is_nonblock = socket_file.get_nonblock();
 
-    // match socket.accept(sockfd, addr, addrlen) {
-    //     Ok(s) => s as isize,
-    //     Err(err) => -(err as isize),
-    // }
-    loop {
-        match socket.accept(sockfd, addr, addrlen) {
-            Ok(s) => return s as isize,
-            Err(SyscallErr::EAGAIN) => {
-                if is_nonblock {
-                    return -(SyscallErr::EAGAIN as isize);
-                } else {
-                    suspend_current_and_run_next();
-                    task.acquire_inner_lock().refresh_real_timer();
-                    if !task.acquire_inner_lock().sigpending.is_empty() {
-                        return -(SyscallErr::EINTR as isize);
-                    }
-                    continue;
-                }
-            }
-            Err(err) => return -(err as isize),
-        }
-    }
+    wait_io(
+        || socket.accept(sockfd, addr, addrlen).map(|s| s as isize),
+        is_nonblock,
+    )
 }
 
 pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
     let addr_buf = trans_ref!(addr, addrlen);
     let socket = get_socket!(sockfd);
-    //socket.connect(addr_buf).unwrap() as isize
+    let task = current_task().unwrap();
+
+    let is_nonblock = task
+        .files
+        .lock()
+        .get_ref(sockfd as usize)
+        .map(|fd| fd.get_nonblock())
+        .unwrap_or(false);
+
+    // 先尝试初始化连接（只做一次）
     match socket.connect(addr_buf) {
-        Ok(s) => s as isize,
-        Err(err) => -(err as isize),
+        Ok(n) => return n as isize,
+        Err(SyscallErr::EAGAIN) => {} // 需要 wait_io
+        Err(e) => return -(e as isize),
     }
+
+    // 握手未完成，进入 wait_io 等待
+    wait_io(|| socket.try_connect(), is_nonblock)
 }
 
 pub fn sys_getsockname(sockfd: u32, addr: usize, addrlen: usize) -> isize {
@@ -166,14 +159,10 @@ pub fn sys_sendto(
     let buf = trans_ref!(buf, len);
     let socket = get_socket!(sockfd);
     log::info!("[sys_sendto] get socket sockfd: {}", sockfd);
-    let mut offset = 0 as usize;
     let is_nonblock = socket_file.get_nonblock() || (_flags & 0x40) != 0;
+
     match socket.socket_type() {
-        SocketType::SOCK_STREAM => {
-            info!("[sys_sendto] socket is tcp");
-        }
         SocketType::SOCK_DGRAM => {
-            info!("[sys_sendto] socket is udp");
             if socket.loacl_endpoint().port == 0 {
                 let addr = SocketAddrv4::new([0; 16].as_slice());
                 let endpoint = IpListenEndpoint::from(addr);
@@ -181,35 +170,19 @@ pub fn sys_sendto(
             }
             let dest_addr = trans_ref!(dest_addr, addrlen);
             let _ = socket.connect(dest_addr);
-            // socket_file.file.write(Some(&mut offset), buf)
+            wait_io(|| socket.try_send(buf), is_nonblock)
         }
+        SocketType::SOCK_STREAM => wait_io(|| socket.try_send(buf), is_nonblock),
         SocketType::SOCK_RAW => {
             info!("[sys_sendto] socket is raw");
             let dest_addr = trans_ref!(dest_addr, addrlen);
             let endpoint = address::endpoint(dest_addr).unwrap();
-
-            match socket.send_to(buf, endpoint) {
-                Ok(bytes_sent) => return bytes_sent as isize, // 返回正数长度
-                Err(e) => return e as isize,
-            }
+            wait_io(
+                || socket.send_to(buf, endpoint).map(|n| n as isize),
+                is_nonblock,
+            )
         }
         _ => todo!(),
-    };
-    log::info!("[sys_sendto]is nonblock:{:?}", is_nonblock);
-    loop {
-        let write_ret = socket_file.write(Some(&mut offset), buf) as isize;
-        if write_ret == -(SyscallErr::EAGAIN as isize) {
-            if is_nonblock {
-                return -(write_ret as isize);
-            } else {
-                suspend_current_and_run_next();
-                if !task.acquire_inner_lock().sigpending.is_empty() {
-                    return -(SyscallErr::EINTR as isize);
-                }
-                continue;
-            }
-        }
-        return write_ret;
     }
 }
 
@@ -229,56 +202,34 @@ pub fn sys_recvfrom(
     //info!("[sys_recvfrom] file filags: {:?}", socket_file.flags);
     let socket = get_socket!(sockfd);
 
-    let file_descriptor = {
+    let is_nonblock = {
         let fd_table = task.files.lock();
-        match fd_table.get_ref(sockfd as usize) {
-            Ok(fd) => fd.clone(),
-            Err(errno) => return errno as isize,
-        }
-    };
-
-    let is_nonblock = file_descriptor.get_nonblock() || (_flags & 0x40) != 0;
+        fd_table
+            .get_ref(sockfd as usize)
+            .map(|fd| fd.get_nonblock())
+            .unwrap_or(false)
+    } || (_flags & 0x40) != 0;
 
     info!("[sys_recvfrom] get socket sockfd: {}", sockfd);
     log::info!("[sys_recvfrom] is nonblock:{:?}", is_nonblock);
-    let buf_addr = buf;
-    loop {
-        let token = task.get_user_token();
-        let buf = translated_refmut(token, buf_addr as *mut u8).unwrap();
-        let buf = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
-        let mut offset = 0 as usize;
-        let ret = match socket.socket_type() {
+    // 页表转换提到外面，避免 wait_io 循环中重复翻译
+    let token = task.get_user_token();
+    let buf_ptr = translated_refmut(token, buf as *mut u8).unwrap();
+    let buf_slice = unsafe { core::slice::from_raw_parts_mut(buf_ptr, len as usize) };
+
+    wait_io(
+        || match socket.socket_type() {
             SocketType::SOCK_STREAM | SocketType::SOCK_DGRAM | SocketType::SOCK_RAW => {
-                let read_ret = file_descriptor.file.read(Some(&mut offset), buf) as isize;
-                if read_ret > 0 && src_addr != 0 {
+                let ret = socket.try_recv(buf_slice)?;
+                if ret > 0 && src_addr != 0 {
                     let _ = socket.peer_addr(src_addr, addrlen);
                 }
-                read_ret
+                Ok(ret)
             }
             _ => todo!(),
-        };
-        if ret == -(SyscallErr::EAGAIN as isize) {
-            if is_nonblock {
-                return ret;
-            } else {
-                suspend_current_and_run_next();
-                // 先尝试重新读一次，避免数据已到却被信号抢断返回 EINTR
-                let buf2 = translated_refmut(token, buf_addr as *mut u8).unwrap();
-                let buf2 =
-                    unsafe { core::slice::from_raw_parts_mut(buf2 as *mut u8, len as usize) };
-                let mut offset2 = 0 as usize;
-                let ret2 = file_descriptor.file.read(Some(&mut offset2), buf2) as isize;
-                if ret2 != -(SyscallErr::EAGAIN as isize) {
-                    return ret2;
-                }
-                if !task.acquire_inner_lock().sigpending.is_empty() {
-                    return -(SyscallErr::EINTR as isize);
-                }
-                continue;
-            }
-        }
-        return ret;
-    }
+        },
+        is_nonblock,
+    )
 }
 
 pub fn sys_getsockopt(

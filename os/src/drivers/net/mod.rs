@@ -1,4 +1,4 @@
-#[cfg(feature= "block_virt")]
+#[cfg(feature = "block_virt")]
 pub mod virtio_net;
 
 pub trait NetDevice: Send + Sync {
