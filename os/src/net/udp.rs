@@ -118,7 +118,7 @@ impl Socket for UdpSocket {
         _addr: usize,
         _addrlen: usize,
     ) -> crate::utils::error::SyscallRet {
-        todo!();
+        Err(SyscallErr::EOPNOTSUPP)
     }
 
     fn socket_type(&self) -> super::SocketType {
