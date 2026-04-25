@@ -393,21 +393,37 @@ pub fn sys_getegid() -> isize {
 // So it just pretend to do this work.
 // Fortunately, that won't make difference when we just try to run busybox sh so far.
 pub fn sys_setpgid(pid: usize, pgid: usize) -> isize {
-    /* An attempt.*/
-    let task = crate::task::find_task_by_tgid(pid);
-    match task {
-        Some(task) => task.setpgid(pgid),
-        None => ESRCH,
+    if (pid as isize) < 0 || (pgid as isize) < 0 {
+        return EINVAL;
     }
+    let task = if pid == 0 {
+        current_task().unwrap()
+    } else {
+        match find_task_by_tgid(pid) {
+            Some(task) => task,
+            None => return ESRCH,
+        }
+    };
+
+    let real_pgid = if pgid == 0 { task.tgid } else { pgid };
+    
+    task.setpgid(real_pgid)
 }
 
-pub fn sys_getpgid(pid: usize) -> isize {
-    /* An attempt.*/
-    let task = crate::task::find_task_by_tgid(pid);
-    match task {
-        Some(task) => task.getpgid() as isize,
-        None => ESRCH,
+pub fn sys_getpgid(pid: usize) -> isize  {
+    if (pid as isize) < 0 {
+        return EINVAL;
     }
+    let task = if pid == 0 {
+        current_task().unwrap()
+    } else {
+        match find_task_by_tgid(pid) {
+            Some(task) => task,
+            None => return ESRCH,
+        }
+    };
+
+    task.getpgid() as isize
 }
 /// creates a new session if the calling process is not a process group leader.
 /// The calling process is the leader of the new session
@@ -1229,4 +1245,28 @@ pub fn sys_getrusage(who: isize, usage: *mut Rusage) -> isize {
     };
     //info!("[sys_getrusage] who: RUSAGE_SELF, usage: {:?}", inner.rusage);
     SUCCESS
+}
+
+//获得进程pid允许运行在哪些cpu上，对mask进行相应位置位，pid为0默认为当前task
+pub fn sys_sched_getaffinity(pid: usize, cpusetsize: usize, mask: *mut u8) -> isize {
+    //qemu上目前只有单核，对于所有进程都只能对mask0bit置位
+    if mask.is_null() {
+        return EFAULT;
+    }
+    if cpusetsize < core::mem::size_of::<usize>() {
+        return EINVAL;
+    }
+    let task = if pid == 0 {
+        current_task().unwrap()
+    } else {
+        match find_task_by_pid(pid) {
+            Some(task) => task,
+            None => return ESRCH,
+        }
+    };   
+    let token = current_task().unwrap().get_user_token();
+    match copy_to_user(token, &(1 as usize), mask as *mut usize) {
+        Ok(()) => core::mem::size_of::<usize>() as isize,
+        Err(_) => EFAULT
+    }
 }

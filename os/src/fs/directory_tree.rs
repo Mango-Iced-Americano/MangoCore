@@ -781,7 +781,37 @@ fn init_proc_directory() {
         _ => {}
     }
     println!("[kernel] init_proc_directory successfully!");
-    match ROOT.open("/proc/meminfo", OpenFlags::O_CREAT, false) {
+    match ROOT.open(
+        "/proc/meminfo",
+        OpenFlags::O_CREAT | OpenFlags::O_RDWR | OpenFlags::O_TRUNC,
+        false,
+    ) {
+        Ok(meminfo) => {
+            let mut offset = 0usize;
+            let data = b"MemTotal:        786432 kB\n\
+MemFree:         700000 kB\n\
+MemAvailable:   700000 kB\n\
+Buffers:              0 kB\n\
+Cached:               0 kB\n\
+SwapCached:           0 kB\n\
+Active:               0 kB\n\
+Inactive:             0 kB\n\
+SwapTotal:            0 kB\n\
+SwapFree:             0 kB\n\
+Dirty:                0 kB\n\
+Writeback:            0 kB\n\
+AnonPages:            0 kB\n\
+Mapped:               0 kB\n\
+Shmem:                0 kB\n\
+Slab:                 0 kB\n\
+SReclaimable:         0 kB\n\
+SUnreclaim:           0 kB\n\
+KernelStack:          0 kB\n\
+PageTables:           0 kB\n\
+CommitLimit:     786432 kB\n\
+Committed_AS:         0 kB\n";
+            meminfo.write(Some(&mut offset), data);
+        }
         _ => {}
     }
     println!("[kernel] init_proc_meminfo_directory successfully!");

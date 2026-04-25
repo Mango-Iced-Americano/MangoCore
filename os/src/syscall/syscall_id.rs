@@ -105,3 +105,4 @@ pub const SYSCALL_SHUTDOWN: usize = 501;
 pub const SYSCALL_CLEAR: usize = 502;
 pub const SYSCALL_OPEN: usize = 506; //where?
 pub const SYSCALL_GET_TIME: usize = 1690; //you mean get time of day by 169?
+pub const SYSCALL_SCHED_GETAFFINITY: usize = 123;
