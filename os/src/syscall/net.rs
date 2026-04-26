@@ -213,9 +213,7 @@ pub fn sys_recvfrom(
     info!("[sys_recvfrom] get socket sockfd: {}", sockfd);
     log::info!("[sys_recvfrom] is nonblock:{:?}", is_nonblock);
     // 页表转换提到外面，避免 wait_io 循环中重复翻译
-    let token = task.get_user_token();
-    let buf_ptr = translated_refmut(token, buf as *mut u8).unwrap();
-    let buf_slice = unsafe { core::slice::from_raw_parts_mut(buf_ptr, len as usize) };
+    let buf_slice = trans_refmut!(buf, len);
 
     wait_io(
         || match socket.socket_type() {
@@ -242,42 +240,49 @@ pub fn sys_getsockopt(
     let socket = get_socket!(sockfd); // 检查socket存不存在
     let task = current_task().unwrap();
     let token = task.get_user_token();
-    let optval_ptr = translated_refmut(token, optval_ptr_ as *mut u32).unwrap();
-    let optlen = translated_refmut(token, optlen as *mut u32).unwrap();
+    let optval_ptr = match translated_refmut(token, optval_ptr_ as *mut u32) {
+        Ok(p) => p as *mut u32,
+        Err(_) => return -(SyscallErr::EFAULT as isize),
+    };
+    let optlen = match translated_refmut(token, optlen as *mut u32) {
+        Ok(p) => p as *mut u32,
+        Err(_) => return -(SyscallErr::EFAULT as isize),
+    };
     match (level, optname) {
         (SOL_TCP, TCP_MAXSEG) => {
             // return max tcp fregment size (MSS)
             let len = core::mem::size_of::<u32>();
             unsafe {
-                *(optval_ptr as *mut u32) = TCP_MSS;
-                *(optlen as *mut u32) = len as u32;
+                *optval_ptr = TCP_MSS;
+                *optlen = len as u32;
             }
         }
         (SOL_TCP, TCP_INFO) => {
             let state = socket.tcp_state().unwrap_or(7); // default Closed
             let info = TcpInfo::new(state, TCP_MSS);
             let info_len = core::mem::size_of::<TcpInfo>();
-            let buf = translated_refmut(token, optval_ptr_ as *mut u8).unwrap();
-            let buf = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, info_len) };
+            let buf = match translated_refmut(token, optval_ptr_ as *mut u8) {
+                Ok(p) => unsafe { core::slice::from_raw_parts_mut(p as *mut u8, info_len) },
+                Err(_) => return -(SyscallErr::EFAULT as isize),
+            };
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     &info as *const TcpInfo as *const u8,
                     buf.as_mut_ptr(),
                     info_len,
                 );
-            }
-            unsafe {
-                *(optlen as *mut u32) = info_len as u32;
+                *optlen = info_len as u32;
             }
         }
         (SOL_TCP, TCP_CONGESTION) => {
-            let optval_ptr = translated_refmut(token, optval_ptr_ as *mut u8).unwrap();
             let congestion = "reno";
-            let buf =
-                unsafe { core::slice::from_raw_parts_mut(optval_ptr as *mut u8, congestion.len()) };
-            buf.copy_from_slice(congestion.as_bytes());
+            let optval_ptr = match translated_refmut(token, optval_ptr_ as *mut u8) {
+                Ok(p) => unsafe { core::slice::from_raw_parts_mut(p as *mut u8, congestion.len()) },
+                Err(_) => return -(SyscallErr::EFAULT as isize),
+            };
+            optval_ptr.copy_from_slice(congestion.as_bytes());
             unsafe {
-                *(optlen as *mut u32) = congestion.len() as u32;
+                *optlen = congestion.len() as u32;
             }
         }
         (SOL_SOCKET, SO_SNDBUF | SO_RCVBUF | SO_REUSEADDR) => {
@@ -332,7 +337,10 @@ pub fn sys_setsockopt(
     let socket = get_socket!(sockfd);
     let task = current_task().unwrap();
     let token = task.get_user_token();
-    let optval_ptr = translated_refmut(token, optval_ptr as *mut u32).unwrap();
+    let optval_ptr = match translated_refmut(token, optval_ptr as *mut u32) {
+        Ok(p) => p as *mut u32,
+        Err(_) => return -(SyscallErr::EFAULT as isize),
+    };
     match (level, optname) {
         (SOL_SOCKET, SO_SNDBUF | SO_RCVBUF) => {
             let size = unsafe { *(optval_ptr as *mut u32) };

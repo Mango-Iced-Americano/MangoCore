@@ -76,13 +76,17 @@ impl Socket for TcpSocket {
         let local = self.inner.lock().local_endpoint;
         let mut queue = self.handlers.lock();
 
-        NET_INTERFACE.tcp_socket(queue[0], |s| s.listen(local).unwrap());
+        NET_INTERFACE
+            .tcp_socket(queue[0], |s| s.listen(local))
+            .map_err(|_| SyscallErr::EINVAL)?;
 
         for _ in 1..BACKLOG_SIZE {
             let tx_buf = socket::tcp::SocketBuffer::new(vec![0u8; LISTEN_BUFFER_SIZE]);
             let rx_buf = socket::tcp::SocketBuffer::new(vec![0u8; LISTEN_BUFFER_SIZE]);
             let mut new_socket = socket::tcp::Socket::new(tx_buf, rx_buf);
-            new_socket.listen(local).unwrap();
+            new_socket
+                .listen(local)
+                .map_err(|_| SyscallErr::EADDRINUSE)?;
             queue.push_back(NET_INTERFACE.add_socket(new_socket));
         }
 
@@ -176,15 +180,12 @@ impl Socket for TcpSocket {
                 Ok(0)
             }
             tcp::State::Closed => {
-                // 连接被关闭，重新发起握手
-                info!("[Tcp::try_connect] {} closed, retry connect", handler);
-                let remote = self
-                    .inner
-                    .lock()
-                    .remote_endpoint
-                    .ok_or(SyscallErr::ENOTCONN)?;
-                self._connect(remote)?;
-                Err(SyscallErr::EAGAIN)
+                // 连接被主动拒绝（RST）或对端无法到达，不再重试
+                info!(
+                    "[Tcp::try_connect] {} closed (RST), connection refused",
+                    handler
+                );
+                Err(SyscallErr::ECONNREFUSED)
             }
             _ => {
                 log::trace!(
@@ -670,8 +671,11 @@ impl TcpSocket {
 }
 impl Drop for TcpSocket {
     fn drop(&mut self) {
-        let handlers = self.handlers.lock();
-        for &h in handlers.iter() {
+        // Collect handles under the lock, then release it.
+        let handles: Vec<SocketHandle> = { self.handlers.lock().iter().copied().collect() };
+
+        for &h in handles.iter() {
+            // Now we no longer hold the handlers lock, so locking `inner` is safe.
             NET_INTERFACE.tcp_socket(h, |s| s.close());
             TCP_SOCKETS_TO_REMOVE.lock().push(h);
             self.is_shutdown.store(true, Ordering::Release);

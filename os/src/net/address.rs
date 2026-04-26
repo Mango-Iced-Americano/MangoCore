@@ -206,8 +206,14 @@ pub fn _fill_with_endpoint(endpoint: IpEndpoint, addr: usize, addrlen: usize) ->
     );
     let task = current_task().unwrap();
     let token = task.get_user_token();
-    let addr = translated_refmut(token, addr as *mut u8).unwrap();
-    let addrlen = translated_refmut(token, addrlen as *mut u32).unwrap();
+    let addr = match translated_refmut(token, addr as *mut u8) {
+        Ok(p) => p,
+        Err(_) => return Err(SyscallErr::EFAULT),
+    };
+    let addrlen = match translated_refmut(token, addrlen as *mut u32) {
+        Ok(p) => p,
+        Err(_) => return Err(SyscallErr::EFAULT),
+    };
     match endpoint.addr {
         IpAddress::Ipv4(_) => {
             let len = mem::size_of::<u16>() + mem::size_of::<SocketAddrv4>();
@@ -226,7 +232,11 @@ pub fn _fill_with_endpoint(endpoint: IpEndpoint, addr: usize, addrlen: usize) ->
 }
 
 pub fn _listen_endpoint(addr_buf: &[u8]) -> GeneralRet<IpListenEndpoint> {
-    let family = u16::from_ne_bytes(addr_buf[0..2].try_into().expect("family size wrong"));
+    if addr_buf.len() < 2 {
+        return Err(SyscallErr::EINVAL);
+    }
+    let family =
+        u16::from_ne_bytes(addr_buf[0..2].try_into().map_err(|_| SyscallErr::EINVAL)?);
     log::info!("[address::listen_enpoint] addr family {}", family);
     match family {
         AF_INET => {
@@ -239,12 +249,12 @@ pub fn _listen_endpoint(addr_buf: &[u8]) -> GeneralRet<IpListenEndpoint> {
         }
         AF_INET6 => {
             if addr_buf.len() < 24 {
-                // 2(family) + 2(port) + 4(addr) = 8
+                // 2(family) + 2(port) + 16(addr) = 24
                 return Err(SyscallErr::EINVAL);
             }
             let ipv6 = SocketAddrv6::new(addr_buf);
             Ok(IpListenEndpoint::from(ipv6))
         }
-        _ => return Err(SyscallErr::EINVAL),
+        _ => return Err(SyscallErr::EAFNOSUPPORT),
     }
 }

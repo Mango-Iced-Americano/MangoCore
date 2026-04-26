@@ -24,13 +24,47 @@ macro_rules! get_socket {
 macro_rules! trans_ref {
     ($addr:expr, $addrlen:expr) => {{
         let token = current_task().unwrap().get_user_token();
-        match translated_ref(token, $addr as *const u8) {
-            Ok(addr) => unsafe {
-                core::slice::from_raw_parts(addr as *const u8, $addrlen as usize)
-            },
-            Err(errno) => {
-                return errno;
-            }
+        // access_ok: 用户地址必须在 [0, TASK_SIZE) 范围内，且不溢出
+        // 防止地址 0xFFFFFFFFFFFFFFFF 等非法值绕过 translated_byte_buffer 的整数溢出
+        let addr_val = $addr as usize;
+        let len_val = $addrlen as usize;
+        if addr_val >= crate::hal::config::TASK_SIZE
+            || len_val > crate::hal::config::TASK_SIZE
+            || addr_val.checked_add(len_val).is_none()
+            || addr_val + len_val > crate::hal::config::TASK_SIZE
+        {
+            return crate::syscall::errno::EFAULT;
         }
+        // 校验整个 [addr, addr+addrlen) 范围：translated_byte_buffer 逐页遍历，
+        // 任一页缺页/越权都通过 check_page_fault → EFAULT
+        if crate::mm::translated_byte_buffer(token, $addr as *const u8, $addrlen as usize).is_err()
+        {
+            return crate::syscall::errno::EFAULT;
+        }
+        // 校验通过后 translated_ref 不会失败，直接 unwrap
+        let addr = crate::mm::translated_ref(token, $addr as *const u8).unwrap();
+        unsafe { core::slice::from_raw_parts(addr as *const u8, $addrlen as usize) }
+    }};
+}
+
+/// trans_ref! 的可变引用版本，返回 &mut [u8]
+macro_rules! trans_refmut {
+    ($addr:expr, $addrlen:expr) => {{
+        let token = current_task().unwrap().get_user_token();
+        let addr_val = $addr as usize;
+        let len_val = $addrlen as usize;
+        if addr_val >= crate::hal::config::TASK_SIZE
+            || len_val > crate::hal::config::TASK_SIZE
+            || addr_val.checked_add(len_val).is_none()
+            || addr_val + len_val > crate::hal::config::TASK_SIZE
+        {
+            return crate::syscall::errno::EFAULT;
+        }
+        if crate::mm::translated_byte_buffer(token, $addr as *const u8, $addrlen as usize).is_err()
+        {
+            return crate::syscall::errno::EFAULT;
+        }
+        let addr = crate::mm::translated_refmut(token, $addr as *mut u8).unwrap();
+        unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, $addrlen as usize) }
     }};
 }

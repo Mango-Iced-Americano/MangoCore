@@ -313,6 +313,75 @@ fn run_selected_groups(environ: &[*const u8], mask: u16) {
     println!("[initproc] run_selected_groups done");
 }
 
+fn run_ltp_network_tests(environ: &[*const u8]) {
+    // LTP testcases/bin 中与网络/Socket 相关的测例。
+    // 只选独立的 ELF 二进制（不含 .sh 脚本，不含需外部网络服务的测例）。
+    let net_cases = [
+        // ---- Socket 基础 ----
+        "accept01",
+        "accept02",
+        "accept03",
+        "accept4_01",
+        "bind01",
+        "bind02",
+        "bind03",
+        "bind04",
+        "bind05",
+        "bind06",
+        "connect01",
+        "connect02",
+        "listen01",
+        // ---- 收发数据 ----
+        "recv01",
+        "recvfrom01",
+        "recvmmsg01",
+        "recvmsg01",
+        "recvmsg02",
+        "recvmsg03",
+        "send01",
+        "send02",
+        "sendmmsg01",
+        "sendmmsg02",
+        "sendmsg01",
+        "sendmsg02",
+        "sendmsg03",
+        "sendto01",
+        "sendto02",
+        "sendto03",
+        // ---- Socket 选项 / 名称 ----
+        "getsockname01",
+        "getsockopt01",
+        "getsockopt02",
+        "setsockopt01",
+        "setsockopt02",
+        "setsockopt03",
+        "setsockopt04",
+        "setsockopt05",
+        // ---- 网络工具 ----
+        "add_ipv6addr",
+        "check_icmpv4_connectivity",
+        "check_icmpv6_connectivity",
+    ];
+
+    let testdir = "/musl/ltp/testcases/bin";
+
+    println!(
+        "[initproc] LTP network tests begin ({} cases)",
+        net_cases.len()
+    );
+
+    for &name in &net_cases {
+        let cmd = format!(
+            "cd {} && echo '=== LTP-NET: {} ===' && ./{}; echo '=== LTP-NET: {} exit=$? ==='",
+            testdir, name, name, name
+        );
+        let ret = run_bash_cmd(&cmd, environ);
+        println!("[initproc] LTP network test '{}' returned {}", name, ret);
+    }
+
+    println!("[initproc] LTP network tests done");
+}
+
 fn should_enter_debug_shell() -> bool {
     let fd = open("/debug_bash\0", OpenFlags::RDONLY);
     if fd >= 0 {
@@ -357,10 +426,9 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
 
     let porgrams = [
         "ls", "cat", "echo", "mkdir", "rmdir", "chown", "chmod", "ln", "basename", "dirname", "rm",
-        "file", "sleep", // 文本处理
-        "sed", "awk", "head", "tail", // 系统工具
-        "ps", "top", "kill", "free", "df", "du", "mount", "umount", "ping", "netstat", "ifconfig",
-        "ip", "ss", "nc", "mktemp", "tr",
+        "grep", "touch", "file", "sleep", "sed", "awk", "head", "tail", "ps", "top", "kill", "cut",
+        "free", "df", "du", "mount", "umount", "ping", "netstat", "ifconfig", "ip", "ss", "nc",
+        "mktemp", "tr",
     ];
     println!(
         "[initproc] preparing busybox \"symlinks\" for programs: {}",
@@ -380,7 +448,11 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     run_bash_cmd(&cmd, &environ); // prepare busybox "symlinks" for test scripts
 
     let cfg = load_runtime_config();
-    run_bash_cmd("cd /musl/ltp && ./runltp -N", &environ);
+    // ============================================================
+    // 直接跑 LTP 网络相关测例（独立 ELF 二进制，跳过 runltp 脚本框架）
+    // ============================================================
+    run_ltp_network_tests(&environ);
+
     // /debug_bash remains the highest-priority emergency switch.
     if should_enter_debug_shell() || cfg.mode == RunMode::Shell {
         println!("[initproc] entering shell mode");
