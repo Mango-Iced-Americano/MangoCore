@@ -214,6 +214,14 @@ pub fn _fill_with_endpoint(endpoint: IpEndpoint, addr: usize, addrlen: usize) ->
         Ok(p) => p,
         Err(_) => return Err(SyscallErr::EFAULT),
     };
+    // 校验 *addrlen 是否足够容纳 sockaddr 结构
+    let required = match endpoint.addr {
+        IpAddress::Ipv4(_) => 16,
+        IpAddress::Ipv6(_) => 24,
+    };
+    if *addrlen < required {
+        return Err(SyscallErr::EINVAL);
+    }
     match endpoint.addr {
         IpAddress::Ipv4(_) => {
             let len = mem::size_of::<u16>() + mem::size_of::<SocketAddrv4>();
@@ -235,8 +243,7 @@ pub fn _listen_endpoint(addr_buf: &[u8]) -> GeneralRet<IpListenEndpoint> {
     if addr_buf.len() < 2 {
         return Err(SyscallErr::EINVAL);
     }
-    let family =
-        u16::from_ne_bytes(addr_buf[0..2].try_into().map_err(|_| SyscallErr::EINVAL)?);
+    let family = u16::from_ne_bytes(addr_buf[0..2].try_into().map_err(|_| SyscallErr::EINVAL)?);
     log::info!("[address::listen_enpoint] addr family {}", family);
     match family {
         AF_INET => {

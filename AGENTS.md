@@ -699,5 +699,32 @@ qemu-system-riscv64 -d int -no-reboot -serial stdio -kernel kernel-rv
 - 新的验证步骤 → 更新**编译与验证**
 - 新模块或重构 → 更新**模块地图** / **架构详解**
 - 编码规范 → 更新**编码规范**
+- 代码修改 → 记录到 `WORK_LOG.md`
+
+### 工作日志（`WORK_LOG.md`）
+
+`WORK_LOG.md` 是**仅本地可见的 AI 工作日志**（已加入 `.gitignore`，不会被提交）。
+
+**每次 AI 助手完成修改后，必须：**
+1. 在 `WORK_LOG.md` 的日期分区下，记录本次修改的内容
+2. 每个条目至少包含：
+   - **日期**（按年月日分区）
+   - **修改摘要**（1-2 句话说明做了什么）
+   - **涉及文件**（文件路径列表）
+   - **验证结果**（编译是否通过、QEMU 测试情况等）
+
+**示例：**
+```markdown
+## 2026-04-26
+
+### MSG flag 校验 & bitflags 重构
+
+**涉及文件：** `os/src/syscall/net.rs`
+
+- 将 MSG 标志改用 `bitflags!` 类型，添加 `validate_for_recv/send` 方法
+- 修复 LTP recv01/recvfrom01 中 MSG_OOB/MSG_ERRQUEUE 返回 0 而非 -1 的问题
+
+**验证：** `make rv64-kernel-build-only` ✅
+```
 
 保持条目简洁实用。使用代码库中的真实文件路径和函数名。

@@ -4,8 +4,14 @@ macro_rules! get_socket {
         let task = current_task().unwrap();
         let fd_table = task.files.lock();
         // 1. 先查是不是一个有效打开的 fd
-        if fd_table.get_ref($sockfd as usize).is_err() {
-            return -(SyscallErr::EBADF as isize);
+        match fd_table.get_ref($sockfd as usize) {
+            Err(e) => return e,
+            Ok(fd) => {
+                // O_PATH 打开的 fd 视为 inoperable，应返回 EBADF
+                if fd.get_flags().contains(crate::fs::OpenFlags::O_PATH) {
+                    return -(SyscallErr::EBADF as isize);
+                }
+            }
         }
         // 2. 再查它是不是 socket
         match current_task()
@@ -35,6 +41,10 @@ macro_rules! trans_ref {
         {
             return crate::syscall::errno::EFAULT;
         }
+        // NULL 指针（addr=0）且 len>0 直接返回 EFAULT
+        if addr_val == 0 && len_val > 0 {
+            return crate::syscall::errno::EFAULT;
+        }
         // 校验整个 [addr, addr+addrlen) 范围：translated_byte_buffer 逐页遍历，
         // 任一页缺页/越权都通过 check_page_fault → EFAULT
         if crate::mm::translated_byte_buffer(token, $addr as *const u8, $addrlen as usize).is_err()
@@ -58,6 +68,10 @@ macro_rules! trans_refmut {
             || addr_val.checked_add(len_val).is_none()
             || addr_val + len_val > crate::hal::config::TASK_SIZE
         {
+            return crate::syscall::errno::EFAULT;
+        }
+        // NULL 指针（addr=0）且 len>0 直接返回 EFAULT
+        if addr_val == 0 && len_val > 0 {
             return crate::syscall::errno::EFAULT;
         }
         if crate::mm::translated_byte_buffer(token, $addr as *const u8, $addrlen as usize).is_err()

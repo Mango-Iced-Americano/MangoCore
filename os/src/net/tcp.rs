@@ -328,6 +328,10 @@ impl Socket for TcpSocket {
     }
 
     fn try_send(&self, buf: &[u8]) -> Result<isize, SyscallErr> {
+        // 已 shutdown 的 socket 返回 EPIPE 而非 ENOTCONN
+        if self.is_shutdown.load(Ordering::Acquire) {
+            return Err(SyscallErr::EPIPE);
+        }
         if self.is_listener.load(Ordering::Acquire) {
             return Err(SyscallErr::EINVAL);
         }

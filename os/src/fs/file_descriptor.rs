@@ -20,6 +20,7 @@ use super::layout::{OpenFlags, SeekWhence, Stat};
 pub struct FileDescriptor {
     cloexec: bool,
     nonblock: bool,
+    flags: OpenFlags,
     pub file: Arc<dyn File>,
 }
 
@@ -29,8 +30,15 @@ impl FileDescriptor {
         Self {
             cloexec,
             nonblock,
+            flags: OpenFlags::empty(),
             file,
         }
+    }
+    pub fn get_flags(&self) -> OpenFlags {
+        self.flags
+    }
+    pub fn set_flags(&mut self, flags: OpenFlags) {
+        self.flags = flags;
     }
     pub fn set_cloexec(&mut self, flag: bool) {
         self.cloexec = flag;
@@ -122,7 +130,9 @@ impl FileDescriptor {
             Err(errno) => return Err(errno),
         };
         let cloexec = flags.contains(OpenFlags::O_CLOEXEC);
-        Ok(Self::new(cloexec, false, file))
+        let mut fd = Self::new(cloexec, false, file);
+        fd.flags = flags;
+        Ok(fd)
     }
     pub fn mkdir(&self, path: &str) -> Result<(), isize> {
         if self.file.is_file() && !path.starts_with('/') {

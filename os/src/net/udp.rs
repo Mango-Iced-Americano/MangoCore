@@ -195,6 +195,10 @@ impl Socket for UdpSocket {
     }
 
     fn try_send(&self, buf: &[u8]) -> Result<isize, SyscallErr> {
+        // EMSGSIZE: UDP 最大负载 65535 - 20(IP头) - 8(UDP头) = 65507
+        if buf.len() > 65507 {
+            return Err(SyscallErr::EMSGSIZE);
+        }
         let remote = self
             .inner
             .lock()

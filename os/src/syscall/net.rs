@@ -38,6 +38,51 @@ const SO_KEEPALIVE: u32 = 9;
 const SO_OOBINLINE: u32 = 10;
 const SO_REUSEPORT: u32 = 15;
 
+bitflags! {
+    /// MSG flags for send/recv syscalls.
+    pub struct MsgFlags: u32 {
+        const MSG_OOB       = 0x0001;
+        const MSG_PEEK      = 0x0002;
+        const MSG_DONTROUTE = 0x0004;
+        const MSG_CTRUNC    = 0x0008;
+        const MSG_PROXY     = 0x0010;
+        const MSG_TRUNC     = 0x0020;
+        const MSG_DONTWAIT  = 0x0040;
+        const MSG_EOR       = 0x0080;
+        const MSG_WAITALL   = 0x0100;
+        const MSG_FIN       = 0x0200;
+        const MSG_SYN       = 0x0400;
+        const MSG_CONFIRM   = 0x0800;
+        const MSG_RST       = 0x1000;
+        const MSG_ERRQUEUE  = 0x2000;
+        const MSG_NOSIGNAL  = 0x4000;
+        const MSG_MORE      = 0x8000;
+    }
+}
+
+impl MsgFlags {
+    /// Validate flags for recv syscalls (recvfrom, recvmsg, etc.).
+    ///
+    /// Returns `Ok(is_nonblock)` if flags are acceptable, or `Err(errno)`
+    /// when an unsupported flag is set (e.g. `MSG_OOB`, `MSG_ERRQUEUE`).
+    pub fn validate_for_recv(self) -> Result<bool, SyscallErr> {
+        match () {
+            _ if self.contains(MsgFlags::MSG_OOB) => Err(SyscallErr::EINVAL),
+            _ if self.contains(MsgFlags::MSG_ERRQUEUE) => Err(SyscallErr::EAGAIN),
+            _ => Ok(self.contains(MsgFlags::MSG_DONTWAIT)),
+        }
+    }
+
+    /// Validate flags for send syscalls (sendto, sendmsg, etc.).
+    pub fn validate_for_send(self) -> Result<bool, SyscallErr> {
+        match () {
+            _ if self.contains(MsgFlags::MSG_OOB) => Err(SyscallErr::EOPNOTSUPP),
+            _ if self.contains(MsgFlags::MSG_ERRQUEUE) => Err(SyscallErr::EOPNOTSUPP),
+            _ => Ok(self.contains(MsgFlags::MSG_DONTWAIT)),
+        }
+    }
+}
+
 pub fn sys_socket(domain: u32, socket_type: u32, protocol: u32) -> isize {
     info!(
         "[sys_socket] domain: {}, type: {}, protocol: {}",
@@ -147,10 +192,15 @@ pub fn sys_sendto(
     sockfd: u32,
     buf: usize,
     len: usize,
-    _flags: u32,
+    flags: u32,
     dest_addr: usize,
     addrlen: u32,
 ) -> isize {
+    let msg_dontwait = match MsgFlags::from_bits_truncate(flags).validate_for_send() {
+        Ok(nb) => nb,
+        Err(e) => return -(e as isize),
+    };
+
     let task = current_task().unwrap();
     let socket_file = match task.files.lock().get_ref(sockfd as usize) {
         Ok(file) => file.clone(),
@@ -159,7 +209,7 @@ pub fn sys_sendto(
     let buf = trans_ref!(buf, len);
     let socket = get_socket!(sockfd);
     log::info!("[sys_sendto] get socket sockfd: {}", sockfd);
-    let is_nonblock = socket_file.get_nonblock() || (_flags & 0x40) != 0;
+    let is_nonblock = socket_file.get_nonblock() || msg_dontwait;
 
     match socket.socket_type() {
         SocketType::SOCK_DGRAM => {
@@ -190,10 +240,15 @@ pub fn sys_recvfrom(
     sockfd: u32,
     buf: usize,
     len: u32,
-    _flags: u32,
+    flags: u32,
     src_addr: usize,
     addrlen: usize,
 ) -> isize {
+    let msg_dontwait = match MsgFlags::from_bits_truncate(flags).validate_for_recv() {
+        Ok(nb) => nb,
+        Err(e) => return -(e as isize),
+    };
+
     let task = current_task().unwrap();
     let socket_file = match task.files.lock().get_ref(sockfd as usize) {
         Ok(file) => file.clone(),
@@ -202,13 +257,26 @@ pub fn sys_recvfrom(
     //info!("[sys_recvfrom] file filags: {:?}", socket_file.flags);
     let socket = get_socket!(sockfd);
 
+    // 在 syscall 入口校验 src_addr 对应的 *addrlen 值
+    if src_addr != 0 {
+        let token = task.get_user_token();
+        match crate::mm::translated_ref(token, addrlen as *const u32) {
+            Ok(addrlen_val) => {
+                if *addrlen_val < 16 {
+                    return -(SyscallErr::EINVAL as isize);
+                }
+            }
+            Err(_) => return -(SyscallErr::EFAULT as isize),
+        }
+    }
+
     let is_nonblock = {
         let fd_table = task.files.lock();
         fd_table
             .get_ref(sockfd as usize)
             .map(|fd| fd.get_nonblock())
             .unwrap_or(false)
-    } || (_flags & 0x40) != 0;
+    } || msg_dontwait;
 
     info!("[sys_recvfrom] get socket sockfd: {}", sockfd);
     log::info!("[sys_recvfrom] is nonblock:{:?}", is_nonblock);
