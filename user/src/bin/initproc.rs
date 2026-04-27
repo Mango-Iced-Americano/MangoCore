@@ -447,6 +447,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     );
     run_bash_cmd(&cmd, &environ); // prepare busybox "symlinks" for test scripts
 
+    run_bash_cmd("cd musl && bash ./netperf_testcode.sh", &environ);
     let cfg = load_runtime_config();
     // ============================================================
     // 直接跑 LTP 网络相关测例（独立 ELF 二进制，跳过 runltp 脚本框架）

@@ -39,9 +39,11 @@ use alloc::vec::Vec;
 pub struct UdpSocket {
     inner: Mutex<UdpSocketInner>,
     socket_handler: SocketHandle,
+    recv_waiters: Mutex<WaitQueue>,
 }
 
-#[allow(unused)]
+use crate::task::manager::WaitQueue;
+
 struct UdpSocketInner {
     remote_endpoint: Option<IpEndpoint>,
     local_endpoint: Option<IpListenEndpoint>,
@@ -58,7 +60,7 @@ impl Socket for UdpSocket {
         NET_INTERFACE.poll();
         NET_INTERFACE.udp_socket(self.socket_handler, |socket| {
             socket.bind(addr).ok().ok_or(SyscallErr::EINVAL)
-        })?;
+        }).ok_or(SyscallErr::EAGAIN)??;
         NET_INTERFACE.poll();
         Ok(0)
     }
@@ -106,7 +108,7 @@ impl Socket for UdpSocket {
             } else {
                 Ok(local)
             }
-        })?;
+        }).ok_or(SyscallErr::EAGAIN)??;
         self.inner.lock().local_endpoint = Some(local_ep);
         NET_INTERFACE.poll();
         Ok(0)
@@ -145,7 +147,7 @@ impl Socket for UdpSocket {
         NET_INTERFACE.poll();
         let local = NET_INTERFACE.udp_socket(self.socket_handler, |socket| socket.endpoint());
         NET_INTERFACE.poll();
-        local
+        local.unwrap_or(IpListenEndpoint { addr: None, port: 0 })
     }
 
     fn remote_endpoint(&self) -> Option<IpEndpoint> {
@@ -218,7 +220,7 @@ impl Socket for UdpSocket {
                 Err(SendError::Unaddressable) => Err(SyscallErr::ENOTCONN),
                 Err(_) => Err(SyscallErr::ENOBUFS),
             }
-        })
+        }).unwrap_or(Err(SyscallErr::EAGAIN))
     }
 
     fn socket_r_ready(&self) -> bool {
@@ -227,7 +229,7 @@ impl Socket for UdpSocket {
     }
 
     fn socket_w_ready(&self) -> bool {
-        NET_INTERFACE.udp_socket(self.socket_handler, |socket| socket.can_send())
+        NET_INTERFACE.udp_socket(self.socket_handler, |socket| socket.can_send()).unwrap_or(false)
     }
 
     fn socket_hang_up(&self) -> bool {
@@ -236,6 +238,10 @@ impl Socket for UdpSocket {
 
     fn deep_clone_socket(&self) -> Arc<dyn File> {
         todo!()
+    }
+
+    fn recv_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(&self.recv_waiters)
     }
 }
 
@@ -250,7 +256,7 @@ impl UdpSocket {
             vec![0 as u8; MAX_BUFFER_SIZE],
         );
         let socket = socket::udp::Socket::new(rx_buf, tx_buf);
-        let socket_handler = NET_INTERFACE.add_socket(socket);
+        let socket_handler = NET_INTERFACE.add_socket(socket).unwrap();
         log::info!("[UdpSocket::new] new {}", socket_handler);
         NET_INTERFACE.poll();
         Self {
@@ -262,6 +268,7 @@ impl UdpSocket {
                 sendbuf_size: MAX_BUFFER_SIZE,
                 reuse_addr: false,
             }),
+            recv_waiters: Mutex::new(WaitQueue::new()),
             socket_handler,
         }
     }
@@ -358,6 +365,7 @@ pub fn dispatch_udp_packets(inner: &mut NetInterfaceInner) {
                             .lock()
                             .rx_queue
                             .push_back((buf, meta.endpoint));
+                        target_os_sock.recv_waiters.lock().wake_at_most(1);
                     } else {
                         // 如果没人认领这个包（比如 iperf3 已经关了），就丢弃
                         log::warn!(

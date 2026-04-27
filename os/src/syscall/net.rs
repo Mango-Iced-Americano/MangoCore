@@ -12,7 +12,7 @@ use crate::{
 
 use crate::utils::error::SyscallErr;
 
-use crate::syscall::utils::wait_io;
+use crate::syscall::utils::{wait_io, wait_socket_io};
 use log::info;
 use smoltcp::wire::IpListenEndpoint;
 
@@ -141,8 +141,9 @@ pub fn sys_accept(sockfd: u32, addr: usize, addrlen: usize) -> isize {
     };
     let is_nonblock = socket_file.get_nonblock();
 
-    wait_io(
+    wait_socket_io(
         || socket.accept(sockfd, addr, addrlen).map(|s| s as isize),
+        socket.accept_wait_queue(),
         is_nonblock,
     )
 }
@@ -166,8 +167,8 @@ pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
         Err(e) => return -(e as isize),
     }
 
-    // 握手未完成，进入 wait_io 等待
-    wait_io(|| socket.try_connect(), is_nonblock)
+    // 握手未完成，进入 wait_socket_io 等待
+    wait_socket_io(|| socket.try_connect(), socket.connect_wait_queue(), is_nonblock)
 }
 
 pub fn sys_getsockname(sockfd: u32, addr: usize, addrlen: usize) -> isize {
@@ -211,6 +212,23 @@ pub fn sys_sendto(
     log::info!("[sys_sendto] get socket sockfd: {}", sockfd);
     let is_nonblock = socket_file.get_nonblock() || msg_dontwait;
 
+    // Validate dest_addr/addrlen for connection-mode sockets
+    if dest_addr != 0 {
+        match socket.socket_type() {
+            SocketType::SOCK_STREAM => {
+                // Linux: sendto on a SOCK_STREAM with non-NULL dest_addr returns EISCONN
+                return -(SyscallErr::EISCONN as isize);
+            }
+            SocketType::SOCK_DGRAM => {
+                // Validate addrlen: must be at least sizeof(sockaddr_in) = 16, at most 128
+                if addrlen < 16 || addrlen > 128 {
+                    return -(SyscallErr::EINVAL as isize);
+                }
+            }
+            _ => {}
+        }
+    }
+
     match socket.socket_type() {
         SocketType::SOCK_DGRAM => {
             if socket.loacl_endpoint().port == 0 {
@@ -222,7 +240,7 @@ pub fn sys_sendto(
             let _ = socket.connect(dest_addr);
             wait_io(|| socket.try_send(buf), is_nonblock)
         }
-        SocketType::SOCK_STREAM => wait_io(|| socket.try_send(buf), is_nonblock),
+        SocketType::SOCK_STREAM => wait_socket_io(|| socket.try_send(buf), socket.send_wait_queue(), is_nonblock),
         SocketType::SOCK_RAW => {
             info!("[sys_sendto] socket is raw");
             let dest_addr = trans_ref!(dest_addr, addrlen);
@@ -283,7 +301,7 @@ pub fn sys_recvfrom(
     // 页表转换提到外面，避免 wait_io 循环中重复翻译
     let buf_slice = trans_refmut!(buf, len);
 
-    wait_io(
+    wait_socket_io(
         || match socket.socket_type() {
             SocketType::SOCK_STREAM | SocketType::SOCK_DGRAM | SocketType::SOCK_RAW => {
                 let ret = socket.try_recv(buf_slice)?;
@@ -294,6 +312,7 @@ pub fn sys_recvfrom(
             }
             _ => todo!(),
         },
+        socket.recv_wait_queue(),
         is_nonblock,
     )
 }

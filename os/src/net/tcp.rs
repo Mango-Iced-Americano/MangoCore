@@ -47,11 +47,17 @@ pub const TCP_MSS: u32 = if TCP_MSS_DEFAULT > MAX_BUFFER_SIZE as u32 {
 const BACKLOG_SIZE: u32 = 16;
 const LISTEN_BUFFER_SIZE: usize = 2048;
 
+use crate::task::manager::WaitQueue;
+
 pub struct TcpSocket {
     inner: Mutex<TcpSocketInner>,
     is_listener: AtomicBool,
     is_shutdown: AtomicBool,
     handlers: Mutex<VecDeque<SocketHandle>>,
+    recv_waiters: Mutex<WaitQueue>,
+    send_waiters: Mutex<WaitQueue>,
+    connect_waiters: Mutex<WaitQueue>,
+    accept_waiters: Mutex<WaitQueue>,
 }
 
 #[allow(unused)]
@@ -78,6 +84,7 @@ impl Socket for TcpSocket {
 
         NET_INTERFACE
             .tcp_socket(queue[0], |s| s.listen(local))
+            .ok_or(SyscallErr::EAGAIN)?
             .map_err(|_| SyscallErr::EINVAL)?;
 
         for _ in 1..BACKLOG_SIZE {
@@ -87,7 +94,7 @@ impl Socket for TcpSocket {
             new_socket
                 .listen(local)
                 .map_err(|_| SyscallErr::EADDRINUSE)?;
-            queue.push_back(NET_INTERFACE.add_socket(new_socket));
+            queue.push_back(NET_INTERFACE.add_socket(new_socket).ok_or(SyscallErr::EAGAIN)?);
         }
 
         self.is_listener.store(true, Ordering::Release);
@@ -135,7 +142,12 @@ impl Socket for TcpSocket {
                 sendbuf_size: tx_sz,
                 reuse_addr: reuse,
             }),
+            recv_waiters: Mutex::new(WaitQueue::new()),
+            send_waiters: Mutex::new(WaitQueue::new()),
+            connect_waiters: Mutex::new(WaitQueue::new()),
+            accept_waiters: Mutex::new(WaitQueue::new()),
         });
+        TcpSocket::register_tcp_socket(&connected_socket);
 
         let mut fd_table = task.files.lock();
         let mut socket_table = task.socket_table.lock();
@@ -173,7 +185,8 @@ impl Socket for TcpSocket {
     fn try_connect(&self) -> Result<isize, SyscallErr> {
         NET_INTERFACE.poll();
         let handler = { *self.handlers.lock().front().ok_or(SyscallErr::ENOTCONN)? };
-        let state = NET_INTERFACE.tcp_socket(handler, |socket| socket.state());
+        let state = NET_INTERFACE.tcp_socket(handler, |socket| socket.state())
+            .unwrap_or(tcp::State::Closed);
         match state {
             tcp::State::Established => {
                 info!("[Tcp::try_connect] connected");
@@ -223,9 +236,7 @@ impl Socket for TcpSocket {
         }
         NET_INTERFACE.poll();
         let handler = { self.handlers.lock().front().copied()? };
-        let ret = NET_INTERFACE.tcp_socket(handler, |socket| socket.remote_endpoint());
-        NET_INTERFACE.poll();
-        ret
+        NET_INTERFACE.tcp_socket(handler, |socket| socket.remote_endpoint())?
     }
 
     fn shutdown(&self, how: u32) -> GeneralRet<()> {
@@ -282,7 +293,7 @@ impl Socket for TcpSocket {
     fn tcp_state(&self) -> Option<u8> {
         use tcp::State::*;
         let handler = self.handlers.lock().front().copied()?;
-        let state = NET_INTERFACE.tcp_socket(handler, |s| s.state());
+        let state = NET_INTERFACE.tcp_socket(handler, |s| s.state())?;
         let mapped = match state {
             Established => 1,
             SynSent => 2,
@@ -319,9 +330,10 @@ impl Socket for TcpSocket {
             } else {
                 Err(SyscallErr::EAGAIN)
             }
-        });
+        }).unwrap_or(Err(SyscallErr::EAGAIN));
         if let Ok(_) = ret {
-            let state = NET_INTERFACE.tcp_socket(handler, |s| s.state());
+            let state = NET_INTERFACE.tcp_socket(handler, |s| s.state())
+                .unwrap_or(tcp::State::Closed);
             self.inner.lock().last_state = state;
         }
         ret
@@ -344,7 +356,7 @@ impl Socket for TcpSocket {
         };
         NET_INTERFACE.tcp_socket(handler, |socket| {
             if !socket.may_send() {
-                Err(SyscallErr::ENOTCONN)
+                Err(SyscallErr::EPIPE)
             } else if !socket.can_send() {
                 Err(SyscallErr::EAGAIN)
             } else {
@@ -353,7 +365,7 @@ impl Socket for TcpSocket {
                     Err(_) => Err(SyscallErr::ENOTCONN),
                 }
             }
-        })
+        }).unwrap_or(Err(SyscallErr::EAGAIN))
     }
 
     fn socket_r_ready(&self) -> bool {
@@ -408,7 +420,7 @@ impl Socket for TcpSocket {
             } else {
                 socket.can_send() && socket.may_send()
             }
-        })
+        }).unwrap_or(false)
     }
 
     fn socket_hang_up(&self) -> bool {
@@ -417,6 +429,22 @@ impl Socket for TcpSocket {
 
     fn deep_clone_socket(&self) -> Arc<dyn File> {
         todo!()
+    }
+
+    fn recv_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(&self.recv_waiters)
+    }
+
+    fn send_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(&self.send_waiters)
+    }
+
+    fn connect_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(&self.connect_waiters)
+    }
+
+    fn accept_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(&self.accept_waiters)
     }
 }
 
@@ -573,7 +601,7 @@ impl TcpSocket {
         let tx_buf = socket::tcp::SocketBuffer::new(vec![0 as u8; MAX_BUFFER_SIZE]);
         let rx_buf = socket::tcp::SocketBuffer::new(vec![0 as u8; MAX_BUFFER_SIZE]);
         let socket = socket::tcp::Socket::new(rx_buf, tx_buf);
-        let socket_handler = NET_INTERFACE.add_socket(socket);
+        let socket_handler = NET_INTERFACE.add_socket(socket).unwrap();
         let mut handlers = VecDeque::new();
         handlers.push_back(socket_handler);
         log::info!("[TcpSocket::new] new {}", socket_handler);
@@ -593,7 +621,27 @@ impl TcpSocket {
                 sendbuf_size: MAX_BUFFER_SIZE,
                 reuse_addr: false,
             }),
+            recv_waiters: Mutex::new(WaitQueue::new()),
+            send_waiters: Mutex::new(WaitQueue::new()),
+            connect_waiters: Mutex::new(WaitQueue::new()),
+            accept_waiters: Mutex::new(WaitQueue::new()),
         }
+    }
+
+    /// 注册 TCP socket 到全局表，供 wake_tcp_waiters 使用
+    pub fn register_tcp_socket(socket: &Arc<Self>) {
+        let handler = *socket.handlers.lock().front().unwrap();
+        crate::net::TCP_SOCKETS
+            .lock()
+            .push((handler, Arc::downgrade(socket)));
+    }
+
+    /// 唤醒此 socket 上所有等待队列（由 wake_tcp_waiters 在 poll 后调用）
+    pub fn wake_wait_queues(&self) {
+        self.recv_waiters.lock().wake_all();
+        self.send_waiters.lock().wake_all();
+        self.connect_waiters.lock().wake_all();
+        self.accept_waiters.lock().wake_all();
     }
 
     fn _connect(&self, remote_endpoint: IpEndpoint) -> GeneralRet<()> {
@@ -622,7 +670,7 @@ impl TcpSocket {
             }
             info!("berfore poll socket state: {}", socket.state());
             Ok(())
-        })?;
+        }).ok_or(SyscallErr::EAGAIN)??;
         Ok(())
     }
     fn _accept(&self, nonblock: bool) -> GeneralRet<(SocketHandle, IpEndpoint)> {
@@ -638,7 +686,8 @@ impl TcpSocket {
         let handlers: Vec<SocketHandle> = { self.handlers.lock().iter().copied().collect() };
         for handler in handlers {
             let (state, remote) =
-                NET_INTERFACE.tcp_socket(handler, |s| (s.state(), s.remote_endpoint()));
+                NET_INTERFACE.tcp_socket(handler, |s| (s.state(), s.remote_endpoint()))
+                    .unwrap_or((tcp::State::Closed, None));
             if state == tcp::State::SynReceived || state == tcp::State::Established {
                 found_handler = Some(handler);
                 peer_endpoint = remote;
@@ -664,7 +713,7 @@ impl TcpSocket {
             let rx_buf = socket::tcp::SocketBuffer::new(vec![0u8; LISTEN_BUFFER_SIZE]);
             let mut new_socket = socket::tcp::Socket::new(rx_buf, tx_buf);
             new_socket.listen(local_ep).unwrap(); //如果unwrap失败说明底层有问题
-            let new_handler = NET_INTERFACE.add_socket(new_socket);
+            let new_handler = NET_INTERFACE.add_socket(new_socket).unwrap();
             queue.push_back(new_handler);
             return Ok((handler_to_remove, peer_endpoint.unwrap()));
         } else {

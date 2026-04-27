@@ -119,6 +119,7 @@ pub fn rust_main() -> ! {
     // use crate::drivers::block::block_device_test;
     // block_device_test();
     fs::directory_tree::init_fs();
+    drivers::init_net_device();
     net::config::init();
     #[cfg(feature = "block_virt")]
     println!("[kernel] block in virt mode!");

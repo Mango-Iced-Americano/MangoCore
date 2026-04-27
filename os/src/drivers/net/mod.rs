@@ -12,8 +12,17 @@ pub trait NetDevice: Send + Sync {
 
 use alloc::sync::Arc;
 use lazy_static::*;
+use spin::Mutex;
 
-#[cfg(feature = "block_virt")]
 lazy_static! {
-    pub static ref NET_DEVICE: Arc<dyn NetDevice> = Arc::new(virtio_net::VirtIONetWrapper::new());
+    pub static ref NET_DEVICE: Mutex<Option<Arc<dyn NetDevice>>> = Mutex::new(None);
+}
+
+pub fn init_net_device() {
+    #[cfg(feature = "block_virt")]
+    {
+        let net_dev = virtio_net::VirtIONetWrapper::new();
+        *NET_DEVICE.lock() = Some(Arc::new(net_dev));
+    }
+    // on la64 (block_virt_pci): NET_DEVICE stays None, virtio_net is not compiled
 }

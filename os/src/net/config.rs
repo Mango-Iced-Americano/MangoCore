@@ -2,8 +2,8 @@ use super::Mutex;
 use crate::drivers::NET_DEVICE;
 use crate::net::adapter::{RoutingDevice, SmoltcpDeviceAdapter};
 use crate::net::udp::dispatch_udp_packets;
-use crate::net::TCP_SOCKETS_TO_REMOVE;
-use crate::net::UDP_SOCKETS_TO_REMOVE;
+use crate::net::{GATEWAY, UDP_SOCKETS_TO_REMOVE};
+use crate::net::{LOCAL_IP, TCP_SOCKETS_TO_REMOVE};
 use crate::timer::current_time_duration;
 use alloc::collections::BTreeMap;
 use alloc::vec;
@@ -21,14 +21,20 @@ use smoltcp::{
 pub static NET_INTERFACE: NetInterface = NetInterface::new();
 
 pub fn init() {
-    NET_INTERFACE.init();
-    //初始化网卡
-    let mac = NET_DEVICE.mac_address();
-    println!("[kernel] nic init sucess!");
-    println!(
-        "[kernel] MAC : {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-    );
+    // If NET_DEVICE exists: init NetInterface
+    if NET_DEVICE.lock().is_some() {
+        NET_INTERFACE.init();
+        let device = NET_DEVICE.lock();
+        let dev_ref = device.as_ref().unwrap();
+        let mac = dev_ref.mac_address();
+        println!("[kernel] nic init success!");
+        println!(
+            "[kernel] MAC : {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        );
+    } else {
+        println!("[kernel] nic init fail, network disabled");
+    }
 }
 
 pub struct NetInterface<'a> {
@@ -45,11 +51,13 @@ pub struct NetInterfaceInner<'a> {
 impl<'a> NetInterfaceInner<'a> {
     fn new() -> Self {
         // let mut device = Loopback::new(Medium::Ethernet);
-        let eth_device = SmoltcpDeviceAdapter::new(NET_DEVICE.clone());
+        // NET_DEVICE is guaranteed Some at this point (init() checks before calling)
+        let net_dev = NET_DEVICE.lock().as_ref().unwrap().clone();
+        let eth_device = SmoltcpDeviceAdapter::new(net_dev);
         let lo_device = Loopback::new(Medium::Ethernet);
         let mut device = RoutingDevice::new(eth_device, lo_device);
 
-        let mac = NET_DEVICE.mac_address();
+        let mac = device.hw_addr.0;
         let hw_addr = HardwareAddress::Ethernet(EthernetAddress(mac));
         let now = Instant::from_millis(current_time_duration().as_millis() as i64);
         let config = Config::new(hw_addr);
@@ -59,15 +67,16 @@ impl<'a> NetInterfaceInner<'a> {
             addrs
                 .push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8))
                 .unwrap();
-            addrs
-                .push(IpCidr::new(IpAddress::v4(10, 0, 2, 15), 24))
-                .unwrap();
+            addrs.push(IpCidr::new(LOCAL_IP, 24)).unwrap();
         });
 
         // 默认路由
         iface
             .routes_mut()
-            .add_default_ipv4_route(Ipv4Address([10, 0, 2, 2]))
+            .add_default_ipv4_route(match GATEWAY {
+                IpAddress::Ipv4(v4) => v4,
+                _ => unreachable!("GATEWAY is always IPv4"),
+            })
             .unwrap();
 
         Self {
@@ -83,7 +92,7 @@ impl<'a> NetInterface<'a> {
         self._init();
     }
 
-    pub fn add_socket<T>(&self, socket: T) -> SocketHandle
+    pub fn add_socket<T>(&self, socket: T) -> Option<SocketHandle>
     where
         T: AnySocket<'a>,
     {
@@ -99,48 +108,54 @@ impl<'a> NetInterface<'a> {
         }
     }
 
-    pub fn _add_socket<T>(&self, socket: T) -> SocketHandle
+    pub fn _add_socket<T>(&self, socket: T) -> Option<SocketHandle>
     where
         T: AnySocket<'a>,
     {
-        self.inner.lock().as_mut().unwrap().sockets.add(socket)
+        Some(self.inner.lock().as_mut()?.sockets.add(socket))
     }
 
-    pub fn tcp_socket<T>(&self, handler: SocketHandle, f: impl FnOnce(&mut tcp::Socket) -> T) -> T {
-        f(self
-            .inner
-            .lock()
-            .as_mut()
-            .unwrap()
-            .sockets
-            .get_mut::<tcp::Socket>(handler))
+    pub fn tcp_socket<T>(
+        &self,
+        handler: SocketHandle,
+        f: impl FnOnce(&mut tcp::Socket) -> T,
+    ) -> Option<T> {
+        let mut inner = self.inner.lock();
+        let inner_ref = inner.as_mut()?;
+        let socket = inner_ref.sockets.get_mut::<tcp::Socket>(handler);
+        Some(f(socket))
     }
 
-    pub fn udp_socket<T>(&self, handler: SocketHandle, f: impl FnOnce(&mut udp::Socket) -> T) -> T {
-        f(self
-            .inner
-            .lock()
-            .as_mut()
-            .unwrap()
-            .sockets
-            .get_mut::<udp::Socket>(handler))
+    pub fn udp_socket<T>(
+        &self,
+        handler: SocketHandle,
+        f: impl FnOnce(&mut udp::Socket) -> T,
+    ) -> Option<T> {
+        let mut inner = self.inner.lock();
+        let inner_ref = inner.as_mut()?;
+        let socket = inner_ref.sockets.get_mut::<udp::Socket>(handler);
+        Some(f(socket))
     }
 
-    pub fn raw_socket<T>(&self, handler: SocketHandle, f: impl FnOnce(&mut raw::Socket) -> T) -> T {
-        f(self
-            .inner
-            .lock()
-            .as_mut()
-            .unwrap()
-            .sockets
-            .get_mut::<raw::Socket>(handler))
+    pub fn raw_socket<T>(
+        &self,
+        handler: SocketHandle,
+        f: impl FnOnce(&mut raw::Socket) -> T,
+    ) -> Option<T> {
+        let mut inner = self.inner.lock();
+        let inner_ref = inner.as_mut()?;
+        let socket = inner_ref.sockets.get_mut::<raw::Socket>(handler);
+        Some(f(socket))
     }
 
-    pub fn inner_handler<T>(&self, f: impl FnOnce(&mut NetInterfaceInner<'a>) -> T) -> T {
-        f(&mut self.inner.lock().as_mut().unwrap())
+    pub fn inner_handler<T>(&self, f: impl FnOnce(&mut NetInterfaceInner<'a>) -> T) -> Option<T> {
+        Some(f(self.inner.lock().as_mut()?))
     }
 
     pub fn poll(&self) {
+        if self.inner.lock().is_none() {
+            return;
+        }
         self._poll()
     }
     pub fn _poll(&self) {
@@ -187,14 +202,17 @@ impl<'a> NetInterface<'a> {
 
             dispatch_udp_packets(inner);
         });
+        // poll 结束后唤醒所有 TCP/RAW socket 的等待队列
+        crate::net::wake_tcp_waiters();
+        crate::net::wake_raw_waiters();
     }
     pub fn remove(&self, handler: SocketHandle) {
         self._remove(handler)
     }
     pub fn _remove(&self, handler: SocketHandle) {
-        self.inner_handler(|inner| {
+        if let Some(inner) = self.inner.lock().as_mut() {
             inner.sockets.remove(handler);
-        });
+        }
     }
 }
 

@@ -5,7 +5,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 // use riscv::addr::Address;
 use crate::drivers::net::NetDevice;
-use crate::drivers::NET_DEVICE;
 use smoltcp::phy::{Device, DeviceCapabilities, Loopback, Medium, RxToken, TxToken};
 use smoltcp::time::Instant;
 use smoltcp::wire::{
@@ -17,11 +16,14 @@ static mut ROUTING_BUF: [u8; 65536] = [0u8; 65536];
 pub struct RoutingDevice {
     pub eth: SmoltcpDeviceAdapter,
     pub lo: Loopback,
+    pub hw_addr: EthernetAddress,
 }
 
 impl RoutingDevice {
     pub fn new(eth: SmoltcpDeviceAdapter, lo: Loopback) -> Self {
-        Self { eth, lo }
+        let mac = eth.inner.mac_address();
+        let hw_addr = EthernetAddress(mac);
+        Self { eth, lo, hw_addr }
     }
 }
 
@@ -52,6 +54,7 @@ impl Device for RoutingDevice {
         Some(RoutingTxToken::Mixed {
             eth_tx: self.eth.transmit(timestamp)?,
             lo_tx: self.lo.transmit(timestamp)?,
+            hw_addr: self.hw_addr,
         })
     }
 }
@@ -79,6 +82,7 @@ pub enum RoutingTxToken<'a> {
     Mixed {
         eth_tx: <SmoltcpDeviceAdapter as Device>::TxToken<'a>,
         lo_tx: <Loopback as Device>::TxToken<'a>,
+        hw_addr: EthernetAddress,
     },
 }
 
@@ -90,7 +94,11 @@ impl<'a> TxToken for RoutingTxToken<'a> {
         match self {
             Self::Eth(t) => t.consume(len, f),
             Self::Lo(t) => t.consume(len, f),
-            Self::Mixed { eth_tx, lo_tx } => {
+            Self::Mixed {
+                eth_tx,
+                lo_tx,
+                hw_addr,
+            } => {
                 let local_ip = &[10, 0, 2, 15]; //先硬编码
                                                 // let mut buf = vec![0u8; len];
                 let mut buf = unsafe { &mut ROUTING_BUF[..len] };
@@ -105,7 +113,7 @@ impl<'a> TxToken for RoutingTxToken<'a> {
                     let dst_mac = frame.dst_addr();
                     let is_broadcast = dst_mac.is_broadcast();
 
-                    let hw_addr = EthernetAddress(NET_DEVICE.mac_address());
+                    let hw_addr = hw_addr;
 
                     if dst_mac == hw_addr {
                         // 单播给自己的 MAC，只走环回

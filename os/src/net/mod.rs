@@ -1,15 +1,21 @@
+use core::net::IpAddr;
+
 #[allow(unused)]
 use crate::{
     fs::{file_descriptor::FileDescriptor, file_trait::File, OpenFlags},
     net::{raw::RawSocket, tcp::TcpSocket, udp::UdpSocket},
     task::current_task,
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
+    drivers::NET_DEVICE,
 };
+use alloc::collections::VecDeque;
 use alloc::{collections::BTreeMap, sync::Arc, sync::Weak, vec::Vec};
 
 use smoltcp::iface::SocketHandle;
-use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
+use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint};
 use spin::Mutex;
+
+use crate::task::manager::WaitQueue;
 
 pub mod adapter;
 pub mod address;
@@ -73,7 +79,15 @@ pub static UDP_SOCKETS: Mutex<Vec<Weak<UdpSocket>>> = Mutex::new(Vec::new());
 pub static UDP_SOCKETS_TO_REMOVE: Mutex<Vec<SocketHandle>> = Mutex::new(Vec::new());
 
 // tcp
+pub static TCP_SOCKETS: Mutex<Vec<(SocketHandle, Weak<TcpSocket>)>> = Mutex::new(Vec::new());
 pub static TCP_SOCKETS_TO_REMOVE: Mutex<Vec<SocketHandle>> = Mutex::new(Vec::new());
+
+// raw
+pub static RAW_SOCKETS: Mutex<Vec<(SocketHandle, Weak<RawSocket>)>> = Mutex::new(Vec::new());
+pub static RAW_SOCKETS_TO_REMOVE: Mutex<Vec<SocketHandle>> = Mutex::new(Vec::new());
+
+pub static GATEWAY: IpAddress = IpAddress::v4(10, 0, 2, 2);
+pub static LOCAL_IP: IpAddress = IpAddress::v4(10, 0, 2, 15);
 
 pub trait Socket: File {
     fn bind(&self, addr: IpListenEndpoint) -> SyscallRet;
@@ -125,6 +139,26 @@ pub trait Socket: File {
     /// deep clone，返回 Arc<dyn File>
     fn deep_clone_socket(&self) -> Arc<dyn File>;
 
+    /// 获取接收等待队列引用（用于事件驱动阻塞）
+    fn recv_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        None
+    }
+
+    /// 获取发送等待队列引用
+    fn send_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        None
+    }
+
+    /// 获取连接等待队列引用
+    fn connect_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        None
+    }
+
+    /// 获取 accept 等待队列引用
+    fn accept_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        None
+    }
+
     /// 获取 TCP 状态 (Linux TCP_* 枚举值)，非 TCP socket 返回 None
     fn tcp_state(&self) -> Option<u8> {
         None
@@ -137,7 +171,13 @@ impl dyn Socket {
         let pure_type = socket_type & SOCK_TYPE_MASK;
         if domain == AF_INET6 as u32 {
             log::warn!("[Socket::alloc] AF_INET6 is not supported yet!");
-            return Err(SyscallErr::EAFNOSUPPORT); // 或者写成 Err(SyscallErr::EPFNOSUPPORT)
+            return Err(SyscallErr::EAFNOSUPPORT);
+        }
+
+        // Reject all network requests when no NIC is present
+        if NET_DEVICE.lock().is_none() {
+            log::warn!("[Socket::alloc] no network device, rejecting socket creation");
+            return Err(SyscallErr::ENETDOWN);
         }
 
         match domain as u16 {
@@ -172,6 +212,7 @@ impl dyn Socket {
                 } else if pure_type == SocketType::SOCK_STREAM.bits() {
                     let socket = TcpSocket::new();
                     let socket = Arc::new(socket);
+                    TcpSocket::register_tcp_socket(&socket);
                     // current_process().inner_handler(|proc| {
                     //     let fd = proc.fd_table.alloc_fd()?;
                     //     proc.fd_table.put(fd, FdInfo::new(socket.clone(), flags));
@@ -189,6 +230,7 @@ impl dyn Socket {
                 } else if pure_type == SocketType::SOCK_RAW.bits() {
                     let socket = RawSocket::new(protocol);
                     let socket = Arc::new(socket);
+                    RawSocket::register_raw_socket(&socket);
                     let current_tcb = current_task().unwrap();
                     let fd = current_tcb
                         .files
@@ -202,8 +244,8 @@ impl dyn Socket {
                 }
             }
             AF_UNIX => {
-                Ok(4)
-                // todo!()
+                // Ok(4)
+                todo!()
                 // let socket = UnixSocket::new();
                 // let socket = Arc::new(Socket::UnixSocket(socket));
                 // current_process().inner_handler(|proc| {
@@ -322,5 +364,55 @@ impl SocketTable {
             }
         }
         None
+    }
+}
+
+/// 在每次 poll 后，遍历所有 TCP_SOCKETS，唤醒其等待队列
+pub fn wake_tcp_waiters() {
+    let mut remove_indices = Vec::new();
+    let sockets = TCP_SOCKETS.lock();
+    for (i, (_handle, weak_socket)) in sockets.iter().enumerate() {
+        if let Some(socket) = weak_socket.upgrade() {
+            socket.wake_wait_queues();
+        } else {
+            remove_indices.push(i);
+        }
+    }
+    // 不能在持有 sockets 锁时修改，所以先收集再处理
+    drop(sockets);
+    if !remove_indices.is_empty() {
+        let mut sockets = TCP_SOCKETS.lock();
+        for &i in remove_indices.iter().rev() {
+            if i < sockets.len() {
+                sockets.remove(i);
+            }
+        }
+    }
+}
+
+/// 在每次 poll 后，遍历所有 RAW_SOCKETS，唤醒其 recv_waiters
+pub fn wake_raw_waiters() {
+    let mut remove_indices = Vec::new();
+    let sockets = RAW_SOCKETS.lock();
+    for (i, (handler, weak_socket)) in sockets.iter().enumerate() {
+        if let Some(socket) = weak_socket.upgrade() {
+            let can_recv = crate::net::config::NET_INTERFACE.raw_socket(*handler, |s| s.can_recv())
+                .unwrap_or(false);
+            if can_recv {
+                socket.recv_waiters.lock().wake_at_most(1);
+            }
+        } else {
+            remove_indices.push(i);
+        }
+    }
+    // 不能在持有 sockets 锁时修改，所以先收集再处理
+    drop(sockets);
+    if !remove_indices.is_empty() {
+        let mut sockets = RAW_SOCKETS.lock();
+        for &i in remove_indices.iter().rev() {
+            if i < sockets.len() {
+                sockets.remove(i);
+            }
+        }
     }
 }

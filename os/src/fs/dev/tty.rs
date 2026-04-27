@@ -175,7 +175,7 @@ impl File for Teletype {
                     return count;
                 }
                 //we read no char, suspend the procedure
-                crate::task::suspend_current_and_run_next;
+                crate::task::suspend_current_and_run_next();
                 inner.last_char = console_getchar() as u8;
             }
             //we can guarantee last_char isn't a illegal char
