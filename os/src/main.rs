@@ -37,6 +37,7 @@ mod net;
 mod syscall;
 mod task;
 mod timer;
+mod trace;
 mod utils;
 
 #[cfg(feature = "block_mem")]
@@ -106,6 +107,7 @@ pub fn rust_main() -> ! {
     #[cfg(all(feature = "block_mem"))]
     move_to_high_address();
     console::log_init();
+    trace::init();
     println!("[kernel] Console initialized.");
     mm::init();
     println!("[kernel] Hello, world!");

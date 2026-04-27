@@ -133,6 +133,7 @@ use crate::{
 };
 
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
+    crate::trace_event!(syscall_id, args[0], args[1], args[2], args[3], args[4], args[5]);
     let mut show_info = false;
     if option_env!("LOG").is_some()
         && ![
