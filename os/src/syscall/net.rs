@@ -1,16 +1,23 @@
 use super::errno::*;
-use crate::mm::{translated_ref, translated_refmut};
+use crate::fs::iov::IOVec;
+use crate::mm::{
+    copy_from_user_array, translated_byte_buffer_append_to_existing_vec, translated_ref,
+    translated_refmut, UserBuffer,
+};
 use crate::{
     config::PAGE_SIZE,
     fs::FileDescriptor,
     net::{
         address::{self, SocketAddrv4},
-        make_unix_socket_pair, Socket, SocketType, TcpInfo, TCP_MSS,
+        make_unix_socket_pair,
+        posix::MsgHdr,
+        Socket, SocketType, TcpInfo, TCP_MSS,
     },
     task::current_task,
 };
 
 use crate::utils::error::SyscallErr;
+use alloc::vec::Vec;
 
 use crate::syscall::utils::{wait_io, wait_socket_io};
 use log::info;
@@ -526,4 +533,178 @@ pub fn sys_socketpair(domain: u32, socket_type: u32, protocol: u32, sv: usize) -
     sv[1] = fd2.unwrap() as u32;
     info!("[sys_socketpair] new sv: {:?}", sv);
     0 as isize
+}
+
+pub fn sys_sendmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
+    let msgdontwait = match MsgFlags::from_bits_truncate(flags).validate_for_send() {
+        Ok(nb) => nb,
+        Err(e) => return -(e as isize),
+    };
+    let task = current_task().unwrap();
+    let socket_file = match task.files.lock().get_ref(sockfd as usize) {
+        Ok(f) => f.clone(),
+        Err(e) => return e,
+    };
+    let is_nonblock = socket_file.get_nonblock() || msgdontwait;
+
+    let token = task.get_user_token();
+    let msg = match translated_ref(token, msg_ptr as *const MsgHdr) {
+        Ok(m) => *m,
+        Err(_) => return -(SyscallErr::EFAULT as isize),
+    };
+
+    // 读取 iovec 数组
+    let iov_cnt = msg.msg_iovlen;
+    let mut iovecs = alloc::vec![IOVec {iov_base: core::ptr::null(), iov_len: 0}; iov_cnt];
+    if copy_from_user_array(token, msg.msg_iov, iovecs.as_mut_ptr(), iov_cnt).is_err() {
+        return -(SyscallErr::EFAULT as isize);
+    }
+
+    // 从用户 iovec 读取数据到内核 flat buffer
+    let total_len: usize = iovecs.iter().map(|iov| iov.iov_len).sum();
+    let mut buf_parts = Vec::new();
+    for iov in &iovecs {
+        if iov.iov_len == 0 {
+            continue;
+        }
+        match translated_byte_buffer_append_to_existing_vec(
+            &mut buf_parts,
+            token,
+            iov.iov_base,
+            iov.iov_len,
+        ) {
+            Ok(_) => {}
+            Err(e) => return e,
+        }
+    }
+    let mut buf = alloc::vec![0u8; total_len];
+    {
+        let user_buf = UserBuffer::new(buf_parts);
+        user_buf.read(&mut buf);
+    }
+
+    // 解析目标地址（msg_name）
+    let dest_addr = if !msg.msg_name.is_null() && msg.msg_namelen >= 16 {
+        let copy_len = (msg.msg_namelen as usize).min(128);
+        let mut addr_parts = Vec::new();
+        match translated_byte_buffer_append_to_existing_vec(
+            &mut addr_parts,
+            token,
+            msg.msg_name,
+            copy_len,
+        ) {
+            Ok(_) => {
+                let mut addr_buf = [0u8; 128];
+                let addr_user_buf = UserBuffer::new(addr_parts);
+                addr_user_buf.read(&mut addr_buf[..copy_len]);
+                match address::endpoint(&addr_buf[..copy_len]) {
+                    Ok(ep) => Some(ep),
+                    Err(_) => return -(SyscallErr::EINVAL as isize),
+                }
+            }
+            Err(e) => return e,
+        }
+    } else {
+        None
+    };
+
+    let socket = get_socket!(sockfd);
+    match socket.socket_type() {
+        SocketType::SOCK_DGRAM => wait_io(|| socket.try_sendmsg(&buf, dest_addr), is_nonblock),
+        SocketType::SOCK_STREAM => wait_socket_io(
+            || socket.try_sendmsg(&buf, None),
+            socket.send_wait_queue(),
+            is_nonblock,
+        ),
+        SocketType::SOCK_RAW => wait_io(|| socket.try_sendmsg(&buf, dest_addr), is_nonblock),
+        _ => wait_socket_io(
+            || socket.try_sendmsg(&buf, dest_addr),
+            socket.send_wait_queue(),
+            is_nonblock,
+        ),
+    }
+}
+
+pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
+    let msgdontwait = match MsgFlags::from_bits_truncate(flags).validate_for_recv() {
+        Ok(nb) => nb,
+        Err(e) => return -(e as isize),
+    };
+    let task = current_task().unwrap();
+    let token = task.get_user_token();
+
+    let socket_file = match task.files.lock().get_ref(sockfd as usize) {
+        Ok(f) => f.clone(),
+        Err(e) => return e,
+    };
+    let is_nonblock = socket_file.get_nonblock() || msgdontwait;
+
+    // 读取 MsgHdr
+    let msg = match translated_ref(token, msg_ptr as *const MsgHdr) {
+        Ok(m) => *m,
+        Err(_) => return -(SyscallErr::EFAULT as isize),
+    };
+
+    // 读取 iovec 数组
+    let iov_cnt = msg.msg_iovlen;
+    let mut iovecs = alloc::vec![IOVec {iov_base: core::ptr::null(), iov_len: 0}; iov_cnt];
+    if copy_from_user_array(token, msg.msg_iov, iovecs.as_mut_ptr(), iov_cnt).is_err() {
+        return -(SyscallErr::EFAULT as isize);
+    }
+
+    // 分配接收缓冲区
+    let total_len: usize = iovecs.iter().map(|iov| iov.iov_len).sum();
+    let mut buf = alloc::vec![0u8; total_len];
+
+    let socket = get_socket!(sockfd);
+    let ret = wait_socket_io(
+        || socket.try_recvmsg(&mut buf).map(|(n, _)| n),
+        socket.recv_wait_queue(),
+        is_nonblock,
+    );
+
+    if ret < 0 {
+        return ret;
+    }
+    let nbytes = ret as usize;
+
+    // 将接收到的数据分散写入用户 iovec
+    let mut write_parts = Vec::new();
+    for iov in &iovecs {
+        if iov.iov_len == 0 {
+            continue;
+        }
+        match translated_byte_buffer_append_to_existing_vec(
+            &mut write_parts,
+            token,
+            iov.iov_base,
+            iov.iov_len,
+        ) {
+            Ok(_) => {}
+            Err(e) => return e,
+        }
+    }
+    {
+        let mut write_buf = UserBuffer::new(write_parts);
+        write_buf.write(&buf[..nbytes]);
+    }
+
+    // 写回源地址（msg_name）
+    if !msg.msg_name.is_null() && msg.msg_namelen >= 16 {
+        if let Some(src_addr) = socket.last_recv_addr() {
+            let namelen_field_offset = msg_ptr + core::mem::offset_of!(MsgHdr, msg_namelen);
+            let _ =
+                address::fill_with_endpoint(src_addr, msg.msg_name as usize, namelen_field_offset);
+        }
+    }
+
+    // 写回 msg_controllen = 0, msg_flags = 0
+    let write_back = match translated_refmut(token, msg_ptr as *mut MsgHdr) {
+        Ok(m) => m,
+        Err(_) => return -(SyscallErr::EFAULT as isize),
+    };
+    write_back.msg_controllen = 0;
+    write_back.msg_flags = 0;
+
+    nbytes as isize
 }

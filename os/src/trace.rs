@@ -111,6 +111,17 @@ fn tag_name(tag: u64) -> &'static str {
         0xC003 => "connect:ok",
         0xC004 => "try_connect:CLOSED",
         0xC005 => "try_connect:ESTAB",
+        // pselect/accept/connect debug (0xB range)
+        0xB000 => "pselect:loop",
+        0xB001 => "rdy:enter",
+        0xB002 => "rdy:handler",
+        0xB003 => "rdy:connected",
+        0xB004 => "rdy:result",
+        0xB010 => "accept:scan",
+        0xB011 => "accept:sstate",
+        0xB012 => "accept:found",
+        0xB020 => "conn:connect",
+        0xB030 => "conn:trycn",
         _ => "?",
     }
 }

@@ -265,3 +265,23 @@ pub fn _listen_endpoint(addr_buf: &[u8]) -> GeneralRet<IpListenEndpoint> {
         _ => return Err(SyscallErr::EAFNOSUPPORT),
     }
 }
+
+/// 从用户空间 sockaddr 缓冲区解析出 IpEndpoint。
+/// ptr 必须指向至少 len 字节的可读内存。
+pub fn read_sockaddr(ptr: *const u8, len: u32) -> GeneralRet<IpEndpoint> {
+    if len < 2 {
+        return Err(SyscallErr::EINVAL);
+    }
+    let buf = unsafe { core::slice::from_raw_parts(ptr, len as usize) };
+    match listen_endpoint(buf) {
+        Ok(listen_endpoint) => Ok(to_endpoint(listen_endpoint)),
+        Err(e) => Err(e),
+    }
+}
+
+/// 将端点信息写回用户空间 sockaddr 缓冲区，并更新 addrlen。
+pub fn write_sockaddr(endpoint: IpEndpoint, addr: *mut u8, addrlen: *mut u32) -> SyscallRet {
+    // 直接复用已有的 fill_with_endpoint
+    // 但它接受 usize 参数，我们需要转换
+    _fill_with_endpoint(endpoint, addr as usize, addrlen as usize)
+}

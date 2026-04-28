@@ -21,6 +21,7 @@ pub mod adapter;
 pub mod address;
 pub mod config;
 mod macros;
+pub mod posix;
 mod raw;
 mod tcp;
 mod udp;
@@ -112,6 +113,28 @@ pub trait Socket: File {
     fn reuse_addr(&self) -> SyscallRet;
     fn set_reuse_addr(&self, enabled: bool) -> SyscallRet;
     fn send_to(&self, buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet;
+
+    /// 尝试接收消息（recvmsg 用）。
+    /// 成功时返回 (字节数, 可选的源地址)。
+    /// 源地址仅 UDP/RAW 有意义，TCP/Unix 返回 None。
+    fn try_recvmsg(&self, buf: &mut [u8]) -> Result<(isize, Option<IpEndpoint>), SyscallErr> {
+        // 默认实现：委托 try_recv，不返回地址
+        let n = self.try_recv(buf)?;
+        Ok((n, None))
+    }
+
+    /// 尝试发送消息（sendmsg 用）。
+    /// dest 为 None 时使用 socket 已连接的远程端点。
+    fn try_sendmsg(&self, buf: &[u8], dest: Option<IpEndpoint>) -> Result<isize, SyscallErr> {
+        // UDP RawSocket 子类会重写此方法
+        let _ = dest;
+        self.try_send(buf)
+    }
+
+    /// 获取最近一次接收到的源地址（仅 UDP 有意义）。
+    fn last_recv_addr(&self) -> Option<IpEndpoint> {
+        None
+    }
 
     /// 尝试接收数据，不阻塞。
     /// 不会调用 poll、不会睡眠、不会调度。成功时返回收到的字节数 (isize)。

@@ -1,3 +1,5 @@
+use super::errno::*;
+use crate::fs::iov::IOVec;
 use crate::fs::poll::{ppoll, pselect, FdSet, PollFd};
 use crate::fs::*;
 use crate::hal::BLOCK_SZ;
@@ -18,8 +20,6 @@ use core::panic;
 use log::{debug, info, trace, warn};
 use num_enum::FromPrimitive;
 use smoltcp::socket;
-
-use super::errno::*;
 
 pub const AT_FDCWD: usize = 100usize.wrapping_neg();
 
@@ -324,13 +324,6 @@ pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
             }
         }),
     ) as isize
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct IOVec {
-    iov_base: *const u8, /* Starting address */
-    iov_len: usize,      /* Number of bytes to transfer */
 }
 
 pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {

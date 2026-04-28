@@ -5,6 +5,7 @@ mod ext4;
 pub mod fat32;
 pub mod file_trait;
 mod filesystem;
+pub mod iov;
 mod layout;
 pub mod poll;
 #[cfg(feature = "swap")]
@@ -15,7 +16,6 @@ pub mod file_descriptor;
 mod inode;
 mod timestamp;
 mod vfs;
-
 
 pub use self::dev::{
     hwclock::*,
@@ -30,10 +30,7 @@ pub use self::fat32::DiskInodeType;
 pub use crate::drivers::block::BlockDevice;
 
 use self::cache::PageCache;
-use alloc::{
-    string::String,
-    sync::Arc,
-};
+use alloc::{string::String, sync::Arc};
 pub use dirent::Dirent;
 pub use file_descriptor::FileDescriptor;
 use lazy_static::*;
@@ -86,10 +83,7 @@ pub fn flush_preload() {
     }
     let busybox = ROOT_FD.open("busybox", OpenFlags::O_CREAT, false).unwrap();
     busybox.write(None, unsafe {
-        core::slice::from_raw_parts(
-            sbusybox as *const u8,
-            ebusybox as usize - sbusybox as usize,
-        )
+        core::slice::from_raw_parts(sbusybox as *const u8, ebusybox as usize - sbusybox as usize)
     });
     for ppn in crate::mm::PPNRange::new(
         crate::mm::PhysAddr::from(sbusybox as usize).floor(),

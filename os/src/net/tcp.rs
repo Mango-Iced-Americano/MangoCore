@@ -33,10 +33,29 @@ use crate::fs::SeekWhence;
 use crate::fs::Stat;
 use crate::mm::UserBuffer;
 use crate::net::macros::impl_file_for_socket;
+use crate::trace_event;
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::sync::Weak;
 use alloc::vec::Vec;
+
+/// Convert smoltcp tcp::State to a stable u64 code for trace_event.
+fn tcp_state_code(state: &tcp::State) -> u64 {
+    use tcp::State::*;
+    match state {
+        Closed => 0,
+        Listen => 1,
+        SynSent => 2,
+        SynReceived => 3,
+        Established => 4,
+        FinWait1 => 5,
+        FinWait2 => 6,
+        CloseWait => 7,
+        Closing => 8,
+        LastAck => 9,
+        TimeWait => 10,
+    }
+}
 
 pub const TCP_MSS_DEFAULT: u32 = 1 << 15;
 pub const TCP_MSS: u32 = if TCP_MSS_DEFAULT > MAX_BUFFER_SIZE as u32 {
@@ -189,9 +208,15 @@ impl Socket for TcpSocket {
     fn try_connect(&self) -> Result<isize, SyscallErr> {
         NET_INTERFACE.poll();
         let handler = { *self.handlers.lock().front().ok_or(SyscallErr::ENOTCONN)? };
+        let mut state_code = 99u64;
         let state = NET_INTERFACE
-            .tcp_socket(handler, |socket| socket.state())
+            .tcp_socket(handler, |socket| {
+                let s = socket.state();
+                state_code = tcp_state_code(&s);
+                s
+            })
             .unwrap_or(tcp::State::Closed);
+        trace_event!(0xB030, handler.as_usize() as u64, state_code, 0, 0, 0, 0);
         match state {
             tcp::State::Established => {
                 info!("[Tcp::try_connect] connected");
@@ -378,36 +403,85 @@ impl Socket for TcpSocket {
             .unwrap_or(Err(SyscallErr::EAGAIN))
     }
 
+    fn try_recvmsg(&self, buf: &mut [u8]) -> Result<(isize, Option<IpEndpoint>), SyscallErr> {
+        self.try_recv(buf).map(|n| (n, None))
+    }
+
+    fn try_sendmsg(&self, buf: &[u8], _dest: Option<IpEndpoint>) -> Result<isize, SyscallErr> {
+        // TCP 忽略 dest
+        self.try_send(buf)
+    }
     fn socket_r_ready(&self) -> bool {
         NET_INTERFACE.poll();
         let is_listener = self.is_listener.load(Ordering::Acquire);
         let handlers: Vec<SocketHandle> = { self.handlers.lock().iter().copied().collect() };
         let mut ret = false;
 
+        trace_event!(
+            0xB001,
+            is_listener as u64,
+            handlers.len() as u64,
+            0,
+            0,
+            0,
+            0
+        );
+
         if is_listener {
-            for handler in handlers {
+            for (idx, &handler) in handlers.iter().enumerate() {
+                let mut state_code = 99u64;
                 NET_INTERFACE.tcp_socket(handler, |s| {
-                    if s.state() == tcp::State::SynReceived || s.state() == tcp::State::Established
-                    {
+                    let state = s.state();
+                    state_code = tcp_state_code(&state);
+                    if state == tcp::State::SynReceived || state == tcp::State::Established {
                         ret = true;
                     }
                 });
+                trace_event!(
+                    0xB002,
+                    idx as u64,
+                    handler.as_usize() as u64,
+                    state_code,
+                    0,
+                    0,
+                    0
+                );
                 if ret {
                     break;
                 }
             }
         } else {
             if let Some(&handler) = handlers.first() {
+                let mut state_code = 99u64;
+                let mut can_recv = 0u64;
+                let mut may_recv = 0u64;
+                let mut is_eof = 0u64;
                 NET_INTERFACE.tcp_socket(handler, |socket| {
-                    let can_recv = socket.can_recv();
+                    let state = socket.state();
+                    state_code = tcp_state_code(&state);
+                    can_recv = socket.can_recv() as u64;
+                    may_recv = socket.may_recv() as u64;
                     let is_eof_or_error = !socket.may_recv()
-                        && socket.state() != tcp::State::Listen
-                        && socket.state() != tcp::State::SynSent
-                        && socket.state() != tcp::State::SynReceived;
-                    ret = can_recv || is_eof_or_error;
+                        && state != tcp::State::Listen
+                        && state != tcp::State::SynSent
+                        && state != tcp::State::SynReceived;
+                    is_eof = is_eof_or_error as u64;
+                    ret = can_recv != 0 || is_eof_or_error;
                 });
+                trace_event!(
+                    0xB003,
+                    handler.as_usize() as u64,
+                    state_code,
+                    can_recv,
+                    may_recv,
+                    is_eof,
+                    ret as u64
+                );
+            } else {
+                trace_event!(0xB001, 0xFF, 0, 0, 0, 0, 0);
             }
         }
+        trace_event!(0xB004, ret as u64, 0, 0, 0, 0, 0);
         ret
     }
 
@@ -738,7 +812,19 @@ impl TcpSocket {
         NET_INTERFACE
             .inner_handler(|inner| {
                 let socket = inner.sockets.get_mut::<tcp::Socket>(handler);
+                let before_state = tcp_state_code(&socket.state());
                 let ret = socket.connect(inner.iface.context(), remote_endpoint, local);
+                let after_state = tcp_state_code(&socket.state());
+                let ret_ok = ret.is_ok() as u64;
+                trace_event!(
+                    0xB020,
+                    handler.as_usize() as u64,
+                    before_state,
+                    after_state,
+                    ret_ok,
+                    0,
+                    0
+                );
                 if ret.is_err() {
                     log::info!("[Tcp::connect] {} connect error occur", handler);
                     match ret.err().unwrap() {
@@ -767,13 +853,25 @@ impl TcpSocket {
         let mut queue = self.handlers.lock();
         let mut found_idx = None;
         let mut peer_endpoint = None;
+        trace_event!(0xB010, queue.len() as u64, 0, 0, 0, 0, 0);
         for (i, &handler) in queue.iter().enumerate() {
             let (state, remote) = NET_INTERFACE
                 .tcp_socket(handler, |s| (s.state(), s.remote_endpoint()))
                 .unwrap_or((tcp::State::Closed, None));
+            let state_code = tcp_state_code(&state);
+            trace_event!(
+                0xB011,
+                i as u64,
+                handler.as_usize() as u64,
+                state_code,
+                0,
+                0,
+                0
+            );
             if state == tcp::State::SynReceived || state == tcp::State::Established {
                 found_idx = Some(i);
                 peer_endpoint = remote;
+                trace_event!(0xB012, i as u64, handler.as_usize() as u64, 0, 0, 0, 0);
                 break;
             }
         }

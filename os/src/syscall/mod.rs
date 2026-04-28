@@ -395,6 +395,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[4] as usize,
         ),
         SYSCALL_SOCK_SHUTDOWN => sys_sock_shutdown(args[0] as u32, args[1] as u32),
+        SYSCALL_SENDMSG => sys_sendmsg(args[0] as u32, args[1], args[2] as u32),
+        SYSCALL_RECVMSG => sys_recvmsg(args[0] as u32, args[1], args[2] as u32),
         SYSCALL_GETRANDOM => sys_getrandom(args[0] as usize, args[1] as usize, args[2] as u32),
         SYSCALL_SHUTDOWN => sys_shutdown(),
         SYSCALL_SCHED_GETAFFINITY => sys_sched_getaffinity(args[0], args[1], args[2] as *mut u8),

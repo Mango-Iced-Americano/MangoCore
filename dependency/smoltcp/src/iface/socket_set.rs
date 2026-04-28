@@ -29,6 +29,13 @@ pub(crate) struct Item<'a> {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct SocketHandle(usize);
 
+impl SocketHandle {
+    /// Returns the underlying raw `usize` identifier.
+    pub fn as_usize(self) -> usize {
+        self.0
+    }
+}
+
 impl fmt::Display for SocketHandle {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "#{}", self.0)

@@ -48,6 +48,7 @@ struct UdpSocketInner {
     remote_endpoint: Option<IpEndpoint>,
     local_endpoint: Option<IpListenEndpoint>,
     rx_queue: VecDeque<(alloc::vec::Vec<u8>, IpEndpoint)>,
+    last_recv_addr: Option<IpEndpoint>,
     recvbuf_size: usize,
     sendbuf_size: usize,
     reuse_addr: bool,
@@ -189,18 +190,7 @@ impl Socket for UdpSocket {
     }
 
     fn try_recv(&self, buf: &mut [u8]) -> Result<isize, SyscallErr> {
-        // 从 rx_queue 非阻塞取一包数据
-        let mut inner = self.inner.lock();
-        if let Some((data, remote)) = inner.rx_queue.pop_front() {
-            let copy_len = data.len().min(buf.len());
-            buf[..copy_len].copy_from_slice(&data[..copy_len]);
-            if inner.remote_endpoint.is_none() {
-                inner.remote_endpoint = Some(remote);
-            }
-            Ok(copy_len as isize)
-        } else {
-            Err(SyscallErr::EAGAIN)
-        }
+        self.try_recvmsg(buf).map(|(size, _)| size)
     }
 
     fn try_send(&self, buf: &[u8]) -> Result<isize, SyscallErr> {
@@ -230,6 +220,58 @@ impl Socket for UdpSocket {
                 }
             })
             .unwrap_or(Err(SyscallErr::EAGAIN))
+    }
+
+    fn try_recvmsg(&self, buf: &mut [u8]) -> Result<(isize, Option<IpEndpoint>), SyscallErr> {
+        // 从 rx_queue 非阻塞取一包数据 + 源地址
+        let mut inner = self.inner.lock();
+        if let Some((data, remote)) = inner.rx_queue.pop_front() {
+            let copy_len = data.len().min(buf.len());
+            buf[..copy_len].copy_from_slice(&data[..copy_len]);
+            // 如果未 connect，将 remote 更新到 inner（与现有 try_recv 行为一致）
+            if inner.remote_endpoint.is_none() {
+                inner.remote_endpoint = Some(remote);
+            }
+            inner.last_recv_addr = Some(remote);
+            Ok((copy_len as isize, Some(remote)))
+        } else {
+            Err(SyscallErr::EAGAIN)
+        }
+    }
+
+    fn try_sendmsg(&self, buf: &[u8], dest: Option<IpEndpoint>) -> Result<isize, SyscallErr> {
+        // EMSGSIZE check
+        if buf.len() > 65507 {
+            return Err(SyscallErr::EMSGSIZE);
+        }
+        // 确定目标地址：优先使用 dest 参数，否则用已连接的 remote_endpoint
+        let remote = match dest {
+            Some(ep) => ep,
+            None => self
+                .inner
+                .lock()
+                .remote_endpoint
+                .ok_or(SyscallErr::ENOTCONN)?,
+        };
+        let meta = UdpMetadata {
+            endpoint: remote,
+            meta: PacketMeta::default(),
+        };
+        NET_INTERFACE
+            .udp_socket(self.socket_handler, |socket| {
+                if !socket.can_send() {
+                    return Err(SyscallErr::EAGAIN);
+                }
+                match socket.send_slice(buf, meta) {
+                    Ok(()) => Ok(buf.len() as isize),
+                    Err(SendError::Unaddressable) => Err(SyscallErr::ENOTCONN),
+                    Err(_) => Err(SyscallErr::ENOBUFS),
+                }
+            })
+            .unwrap_or(Err(SyscallErr::EAGAIN))
+    }
+    fn last_recv_addr(&self) -> Option<IpEndpoint> {
+        self.inner.lock().last_recv_addr.take()
     }
 
     fn socket_r_ready(&self) -> bool {
@@ -275,6 +317,7 @@ impl UdpSocket {
                 remote_endpoint: None,
                 local_endpoint: None,
                 rx_queue: VecDeque::new(),
+                last_recv_addr: None,
                 recvbuf_size: MAX_BUFFER_SIZE,
                 sendbuf_size: MAX_BUFFER_SIZE,
                 reuse_addr: false,
