@@ -388,6 +388,7 @@ pub fn wake_tcp_waiters() {
     for (i, (_handle, weak_socket)) in sockets.iter().enumerate() {
         if let Some(socket) = weak_socket.upgrade() {
             socket.wake_wait_queues();
+            //socket.wake_if_ready();
         } else {
             remove_indices.push(i);
         }

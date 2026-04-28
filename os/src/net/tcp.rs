@@ -490,6 +490,10 @@ impl Socket for TcpSocket {
         if self.is_listener.load(Ordering::Acquire) {
             return false;
         }
+        // 如果本地已经 shutdown 了写端，依据 POSIX，写也会立即返回 EPIPE，所以属于 writable 状态
+        if self.is_shutdown.load(Ordering::Acquire) {
+            return true;
+        }
         let handler = {
             let queue = self.handlers.lock();
             match queue.front() {
@@ -501,10 +505,14 @@ impl Socket for TcpSocket {
             .tcp_socket(handler, |socket| {
                 let state = socket.state();
                 if state == tcp::State::Closed {
-                    true
-                } else {
-                    socket.can_send() && socket.may_send()
+                    return true;
                 }
+                // 【核心修复】：正在三次握手期间，POSIX 语义下属于“不可写”，需阻塞等待
+                if state == tcp::State::SynSent || state == tcp::State::SynReceived {
+                    return false;
+                }
+
+                socket.can_send() && socket.may_send()
             })
             .unwrap_or(false)
     }
@@ -733,7 +741,9 @@ impl TcpSocket {
             }
             for handler in handlers {
                 let has_new = NET_INTERFACE
-                    .tcp_socket(handler, |s| s.state() == tcp::State::Established)
+                    .tcp_socket(handler, |s| {
+                        s.state() == tcp::State::Established || s.state() == tcp::State::SynReceived
+                    })
                     .unwrap_or(false);
                 if has_new {
                     log::info!("[TcpSocket::wake_if_ready] listener {} has new connection, waking accept waiters", handler);
@@ -757,7 +767,7 @@ impl TcpSocket {
                     self.recv_waiters.lock().wake_at_most(1);
                 }
             }
-
+            /*
             // send：发送窗口有空 或 连接已关闭
             if !self.send_waiters.lock().is_empty() {
                 if self.is_shutdown.load(Ordering::Acquire) {
@@ -771,7 +781,31 @@ impl TcpSocket {
                     }
                 }
             }
+            */
+            // send：发送窗口有空 或 连接已关闭/建立
+            if !self.send_waiters.lock().is_empty() {
+                if self.is_shutdown.load(Ordering::Acquire) {
+                    self.send_waiters.lock().wake_at_most(1);
+                } else {
+                    let ready = NET_INTERFACE
+                        .tcp_socket(handler, |s| {
+                            let state = s.state();
+                            if state == tcp::State::Closed {
+                                return true;
+                            }
+                            // 正在连接期间，不满足发数据条件，不应唤醒 write 等待队列
+                            if state == tcp::State::SynSent || state == tcp::State::SynReceived {
+                                return false;
+                            }
+                            s.can_send() && s.may_send()
+                        })
+                        .unwrap_or(true); // 出错保守唤醒
 
+                    if ready {
+                        self.send_waiters.lock().wake_at_most(1);
+                    }
+                }
+            }
             // connect：连接建立 或 被拒绝
             if !self.connect_waiters.lock().is_empty() {
                 let state = NET_INTERFACE
