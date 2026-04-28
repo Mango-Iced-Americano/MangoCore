@@ -168,7 +168,11 @@ pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
     }
 
     // 握手未完成，进入 wait_socket_io 等待
-    wait_socket_io(|| socket.try_connect(), socket.connect_wait_queue(), is_nonblock)
+    wait_socket_io(
+        || socket.try_connect(),
+        socket.connect_wait_queue(),
+        is_nonblock,
+    )
 }
 
 pub fn sys_getsockname(sockfd: u32, addr: usize, addrlen: usize) -> isize {
@@ -231,7 +235,7 @@ pub fn sys_sendto(
 
     match socket.socket_type() {
         SocketType::SOCK_DGRAM => {
-            if socket.loacl_endpoint().port == 0 {
+            if socket.local_endpoint().port == 0 {
                 let addr = SocketAddrv4::new([0; 16].as_slice());
                 let endpoint = IpListenEndpoint::from(addr);
                 let _ = socket.bind(endpoint);
@@ -240,7 +244,11 @@ pub fn sys_sendto(
             let _ = socket.connect(dest_addr);
             wait_io(|| socket.try_send(buf), is_nonblock)
         }
-        SocketType::SOCK_STREAM => wait_socket_io(|| socket.try_send(buf), socket.send_wait_queue(), is_nonblock),
+        SocketType::SOCK_STREAM => wait_socket_io(
+            || socket.try_send(buf),
+            socket.send_wait_queue(),
+            is_nonblock,
+        ),
         SocketType::SOCK_RAW => {
             info!("[sys_sendto] socket is raw");
             let dest_addr = trans_ref!(dest_addr, addrlen);

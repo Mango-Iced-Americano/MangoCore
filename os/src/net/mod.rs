@@ -2,11 +2,11 @@ use core::net::IpAddr;
 
 #[allow(unused)]
 use crate::{
+    drivers::NET_DEVICE,
     fs::{file_descriptor::FileDescriptor, file_trait::File, OpenFlags},
     net::{raw::RawSocket, tcp::TcpSocket, udp::UdpSocket},
     task::current_task,
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
-    drivers::NET_DEVICE,
 };
 use alloc::collections::VecDeque;
 use alloc::{collections::BTreeMap, sync::Arc, sync::Weak, vec::Vec};
@@ -104,7 +104,7 @@ pub trait Socket: File {
     fn send_buf_size(&self) -> usize;
     fn set_recv_buf_size(&self, size: usize);
     fn set_send_buf_size(&self, size: usize);
-    fn loacl_endpoint(&self) -> IpListenEndpoint;
+    fn local_endpoint(&self) -> IpListenEndpoint;
     fn remote_endpoint(&self) -> Option<IpEndpoint>;
     fn shutdown(&self, how: u32) -> GeneralRet<()>;
     fn set_nagle_enabled(&self, enabled: bool) -> SyscallRet;
@@ -259,7 +259,7 @@ impl dyn Socket {
         }
     }
     pub fn addr(self: &Arc<Self>, addr: usize, addrlen: usize) -> SyscallRet {
-        let local_endpoint = self.loacl_endpoint();
+        let local_endpoint = self.local_endpoint();
         let local_endpoint = address::to_endpoint(local_endpoint);
         address::fill_with_endpoint(local_endpoint, addr, addrlen)
     }
@@ -303,15 +303,6 @@ impl SocketTable {
         endpoint: IpListenEndpoint,
         target_sock: &Arc<dyn Socket>,
     ) -> Option<(Fd, Arc<dyn Socket>)> {
-        // for (sockfd, socket) in self.0.clone() {
-        //     if socket.socket_type().contains(SocketType::SOCK_DGRAM) {
-        //         if socket.loacl_endpoint().eq(&endpoint) {
-        //             log::info!("[SockTable::can_bind] find port exist");
-        //             return Some((sockfd, socket));
-        //         }
-        //     }
-        // }
-        // None
         log::info!(
             "[SockTable::can_bind] check bind for endpoint {:?} with type {:?}",
             endpoint,
@@ -320,7 +311,7 @@ impl SocketTable {
         let target_pure_type = target_sock.socket_type().bits() & SOCK_TYPE_MASK;
         for (sockfd, socket) in self.0.iter() {
             let pure_type = socket.socket_type().bits() & SOCK_TYPE_MASK;
-            let local = socket.loacl_endpoint();
+            let local = socket.local_endpoint();
             if pure_type != target_pure_type {
                 log::info!(
                     "[SockTable::can_bind] skip socket with different type: {:?}",
@@ -396,7 +387,8 @@ pub fn wake_raw_waiters() {
     let sockets = RAW_SOCKETS.lock();
     for (i, (handler, weak_socket)) in sockets.iter().enumerate() {
         if let Some(socket) = weak_socket.upgrade() {
-            let can_recv = crate::net::config::NET_INTERFACE.raw_socket(*handler, |s| s.can_recv())
+            let can_recv = crate::net::config::NET_INTERFACE
+                .raw_socket(*handler, |s| s.can_recv())
                 .unwrap_or(false);
             if can_recv {
                 socket.recv_waiters.lock().wake_at_most(1);

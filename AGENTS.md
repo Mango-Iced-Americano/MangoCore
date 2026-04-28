@@ -12,6 +12,11 @@ oskernel2026-mango 是一个**基于 Rust 的裸机 OS 内核**，支持 **riscv
 | 测试   | 内置 initproc 读取 `os_test.conf`，运行分组测试（musl/glibc）                                                   |
 | 功能   | ext4/fat32 文件系统、smoltcp TCP/UDP/RAW 网络、virtio 块/网卡、多任务、SV39 虚拟内存、zram 交换、POSIX 系统调用 |
 | 代码量 | ~35,000+ 行（仅内核，不含 vendor/依赖）                                                                         |
+## 设计思想
+
+- Linux兼容性：系统调用接口/procfs/sysfs/devfs等的行为应当符合Linux语义。参考Linux 6.6的行为进行实现。
+- 轻量：简化复杂的抽象设计，保留合理的、简洁、符合Rust开发最佳实践的的抽象，提升系统性能。
+- 安全：注重内存安全、并发安全
 
 ---
 

@@ -88,7 +88,7 @@ impl Socket for RawSocket {
         self.inner.lock().sendbuf_size = size;
     }
 
-    fn loacl_endpoint(&self) -> IpListenEndpoint {
+    fn local_endpoint(&self) -> IpListenEndpoint {
         todo!()
     }
 
@@ -150,17 +150,19 @@ impl Socket for RawSocket {
                 ip_pkg.fill_checksum();
 
                 NET_INTERFACE.poll();
-                let ret = NET_INTERFACE.raw_socket(self.socket_handler, |socket| {
-                    log::info!(
-                        "[RawSocket] Sending {} bytes to {}",
-                        user_buf.len(),
-                        target_ip
-                    );
-                    match socket.send_slice(ip_pkg.into_inner()) {
-                        Ok(_) => Ok(user_buf.len()),
-                        Err(_) => Err(SyscallErr::ENOBUFS),
-                    }
-                }).ok_or(SyscallErr::EAGAIN)?;
+                let ret = NET_INTERFACE
+                    .raw_socket(self.socket_handler, |socket| {
+                        log::info!(
+                            "[RawSocket] Sending {} bytes to {}",
+                            user_buf.len(),
+                            target_ip
+                        );
+                        match socket.send_slice(ip_pkg.into_inner()) {
+                            Ok(_) => Ok(user_buf.len()),
+                            Err(_) => Err(SyscallErr::ENOBUFS),
+                        }
+                    })
+                    .ok_or(SyscallErr::EAGAIN)?;
                 NET_INTERFACE.poll();
                 ret
             }
@@ -172,33 +174,38 @@ impl Socket for RawSocket {
 
     fn try_recv(&self, buf: &mut [u8]) -> Result<isize, SyscallErr> {
         // 不调用 poll，只做一次尝试
-        NET_INTERFACE.raw_socket(self.socket_handler, |socket| {
-            if !socket.can_recv() {
-                return Err(SyscallErr::EAGAIN);
-            }
-            match socket.recv_slice(buf) {
-                Ok(nbytes) => {
-                    let packet = smoltcp::wire::Ipv4Packet::new_unchecked(&buf[..nbytes]);
-                    let src_addr = packet.src_addr();
-                    self.inner.lock().remote_endpoint = Some(IpEndpoint::new(src_addr.into(), 0));
-                    Ok(nbytes as isize)
+        NET_INTERFACE
+            .raw_socket(self.socket_handler, |socket| {
+                if !socket.can_recv() {
+                    return Err(SyscallErr::EAGAIN);
                 }
-                Err(_) => Err(SyscallErr::ENOTCONN),
-            }
-        }).unwrap_or(Err(SyscallErr::EAGAIN))
+                match socket.recv_slice(buf) {
+                    Ok(nbytes) => {
+                        let packet = smoltcp::wire::Ipv4Packet::new_unchecked(&buf[..nbytes]);
+                        let src_addr = packet.src_addr();
+                        self.inner.lock().remote_endpoint =
+                            Some(IpEndpoint::new(src_addr.into(), 0));
+                        Ok(nbytes as isize)
+                    }
+                    Err(_) => Err(SyscallErr::ENOTCONN),
+                }
+            })
+            .unwrap_or(Err(SyscallErr::EAGAIN))
     }
 
     fn try_send(&self, buf: &[u8]) -> Result<isize, SyscallErr> {
         // 不调用 poll，只做一次尝试
-        NET_INTERFACE.raw_socket(self.socket_handler, |socket| {
-            if !socket.can_send() {
-                return Err(SyscallErr::EAGAIN);
-            }
-            match socket.send_slice(buf) {
-                Ok(()) => Ok(buf.len() as isize),
-                Err(_) => Err(SyscallErr::ENOBUFS),
-            }
-        }).unwrap_or(Err(SyscallErr::EAGAIN))
+        NET_INTERFACE
+            .raw_socket(self.socket_handler, |socket| {
+                if !socket.can_send() {
+                    return Err(SyscallErr::EAGAIN);
+                }
+                match socket.send_slice(buf) {
+                    Ok(()) => Ok(buf.len() as isize),
+                    Err(_) => Err(SyscallErr::ENOBUFS),
+                }
+            })
+            .unwrap_or(Err(SyscallErr::EAGAIN))
     }
 
     fn deep_clone_socket(&self) -> Arc<dyn File> {

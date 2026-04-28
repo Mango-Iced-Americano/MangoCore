@@ -58,9 +58,11 @@ impl Socket for UdpSocket {
         log::info!("[Udp::bind] bind to {:?}", addr);
         self.inner.lock().local_endpoint = Some(addr);
         NET_INTERFACE.poll();
-        NET_INTERFACE.udp_socket(self.socket_handler, |socket| {
-            socket.bind(addr).ok().ok_or(SyscallErr::EINVAL)
-        }).ok_or(SyscallErr::EAGAIN)??;
+        NET_INTERFACE
+            .udp_socket(self.socket_handler, |socket| {
+                socket.bind(addr).ok().ok_or(SyscallErr::EINVAL)
+            })
+            .ok_or(SyscallErr::EAGAIN)??;
         NET_INTERFACE.poll();
         Ok(0)
     }
@@ -77,38 +79,40 @@ impl Socket for UdpSocket {
             inner.remote_endpoint = Some(remote_endpoint);
         }
         NET_INTERFACE.poll();
-        let local_ep = NET_INTERFACE.udp_socket(self.socket_handler, |socket| {
-            let local = socket.endpoint();
-            info!("[Udp::connect] local: {:?}", local);
-            if local.port == 0 {
-                info!("[Udp::connect] don't have local");
-                let src_ip = lookup_source_ip(remote_endpoint.addr);
-                let port = (unsafe { RNG.positive_u32() } % 16384 + 49152) as u16;
+        let local_ep = NET_INTERFACE
+            .udp_socket(self.socket_handler, |socket| {
+                let local = socket.endpoint();
+                info!("[Udp::connect] local: {:?}", local);
+                if local.port == 0 {
+                    info!("[Udp::connect] don't have local");
+                    let src_ip = lookup_source_ip(remote_endpoint.addr);
+                    let port = (unsafe { RNG.positive_u32() } % 16384 + 49152) as u16;
 
-                let endpoint = IpListenEndpoint {
-                    addr: Some(src_ip),
-                    port,
-                };
+                    let endpoint = IpListenEndpoint {
+                        addr: Some(src_ip),
+                        port,
+                    };
 
-                let ret = socket.bind(endpoint);
-                if ret.is_err() {
-                    match ret.err().unwrap() {
-                        socket::udp::BindError::Unaddressable => {
-                            info!("[Udp::bind] unaddr");
-                            return Err(SyscallErr::EINVAL);
-                        }
-                        socket::udp::BindError::InvalidState => {
-                            info!("[Udp::bind] invaild state");
-                            return Err(SyscallErr::EINVAL);
+                    let ret = socket.bind(endpoint);
+                    if ret.is_err() {
+                        match ret.err().unwrap() {
+                            socket::udp::BindError::Unaddressable => {
+                                info!("[Udp::bind] unaddr");
+                                return Err(SyscallErr::EINVAL);
+                            }
+                            socket::udp::BindError::InvalidState => {
+                                info!("[Udp::bind] invaild state");
+                                return Err(SyscallErr::EINVAL);
+                            }
                         }
                     }
+                    log::info!("[Udp::bind] bind to {:?}", endpoint);
+                    Ok(endpoint)
+                } else {
+                    Ok(local)
                 }
-                log::info!("[Udp::bind] bind to {:?}", endpoint);
-                Ok(endpoint)
-            } else {
-                Ok(local)
-            }
-        }).ok_or(SyscallErr::EAGAIN)??;
+            })
+            .ok_or(SyscallErr::EAGAIN)??;
         self.inner.lock().local_endpoint = Some(local_ep);
         NET_INTERFACE.poll();
         Ok(0)
@@ -143,11 +147,14 @@ impl Socket for UdpSocket {
         self.inner.lock().sendbuf_size = size;
     }
 
-    fn loacl_endpoint(&self) -> IpListenEndpoint {
+    fn local_endpoint(&self) -> IpListenEndpoint {
         NET_INTERFACE.poll();
         let local = NET_INTERFACE.udp_socket(self.socket_handler, |socket| socket.endpoint());
         NET_INTERFACE.poll();
-        local.unwrap_or(IpListenEndpoint { addr: None, port: 0 })
+        local.unwrap_or(IpListenEndpoint {
+            addr: None,
+            port: 0,
+        })
     }
 
     fn remote_endpoint(&self) -> Option<IpEndpoint> {
@@ -211,16 +218,18 @@ impl Socket for UdpSocket {
             meta: PacketMeta::default(),
         };
         // 不调用 poll，只做一次尝试
-        NET_INTERFACE.udp_socket(self.socket_handler, |socket| {
-            if !socket.can_send() {
-                return Err(SyscallErr::EAGAIN);
-            }
-            match socket.send_slice(buf, meta) {
-                Ok(()) => Ok(buf.len() as isize),
-                Err(SendError::Unaddressable) => Err(SyscallErr::ENOTCONN),
-                Err(_) => Err(SyscallErr::ENOBUFS),
-            }
-        }).unwrap_or(Err(SyscallErr::EAGAIN))
+        NET_INTERFACE
+            .udp_socket(self.socket_handler, |socket| {
+                if !socket.can_send() {
+                    return Err(SyscallErr::EAGAIN);
+                }
+                match socket.send_slice(buf, meta) {
+                    Ok(()) => Ok(buf.len() as isize),
+                    Err(SendError::Unaddressable) => Err(SyscallErr::ENOTCONN),
+                    Err(_) => Err(SyscallErr::ENOBUFS),
+                }
+            })
+            .unwrap_or(Err(SyscallErr::EAGAIN))
     }
 
     fn socket_r_ready(&self) -> bool {
@@ -229,7 +238,9 @@ impl Socket for UdpSocket {
     }
 
     fn socket_w_ready(&self) -> bool {
-        NET_INTERFACE.udp_socket(self.socket_handler, |socket| socket.can_send()).unwrap_or(false)
+        NET_INTERFACE
+            .udp_socket(self.socket_handler, |socket| socket.can_send())
+            .unwrap_or(false)
     }
 
     fn socket_hang_up(&self) -> bool {

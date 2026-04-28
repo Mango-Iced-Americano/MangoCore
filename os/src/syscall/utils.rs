@@ -81,6 +81,7 @@ pub fn wait_socket_io(
                     wq.lock().add_task(Arc::downgrade(&task));
                     drop(task);
                 }
+                
                 // 真阻塞——由 wake_one / wake_all 或定时器超时唤醒
                 block_current_and_run_next();
                 // 醒来后检查是否有待处理信号

@@ -67,7 +67,7 @@ impl<const N: usize> Socket for UnixSocket<N> {
         todo!()
     }
 
-    fn loacl_endpoint(&self) -> smoltcp::wire::IpListenEndpoint {
+    fn local_endpoint(&self) -> smoltcp::wire::IpListenEndpoint {
         todo!()
     }
 
