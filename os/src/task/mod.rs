@@ -1,6 +1,8 @@
 mod context;
 mod elf;
 mod manager;
+pub use manager::WaitQueue;
+use spin::MutexGuard;
 pub mod pid;
 mod processor;
 pub mod signal;
@@ -77,6 +79,26 @@ pub fn block_current_and_run_next() {
 
     // push to interruptible queue of scheduler, so that it won't be scheduled.
     sleep_interruptible(task);
+    // jump to scheduling cycle
+    schedule(task_cx_ptr);
+}
+
+// 带释放锁的阻塞调度，确保任务真正进入 interruptible_queue 后再丢锁，
+// 避免在丢锁到睡眠之间丢失唤醒。
+// 注意不要重复丢锁。
+pub fn block_current_and_run_next_with_lock<T>(lock: MutexGuard<'_, T>) {
+    // There must be an application running.
+    let task = take_current_task().unwrap();
+
+    // ---- hold current PCB lock
+    let mut task_inner = task.acquire_inner_lock();
+    let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
+    drop(task_inner);
+    // ---- release current PCB lock
+
+    // push to interruptible queue of scheduler, so that it won't be scheduled.
+    sleep_interruptible(task);
+    drop(lock);
     // jump to scheduling cycle
     schedule(task_cx_ptr);
 }

@@ -4,10 +4,9 @@ use crate::fs::layout::Stat;
 use crate::fs::DiskInodeType;
 use crate::fs::StatMode;
 use crate::syscall::errno::*;
-use crate::task::block_current_and_run_next;
+use crate::task::block_current_and_run_next_with_lock;
 use crate::task::current_task;
-use crate::task::wait_with_timeout;
-use crate::timer::TimeSpec;
+use crate::task::WaitQueue;
 use crate::{fs::file_trait::File, mm::UserBuffer};
 use alloc::boxed::Box;
 use alloc::sync::{Arc, Weak};
@@ -18,6 +17,18 @@ pub struct Pipe {
     readable: bool,
     writable: bool,
     buffer: Arc<Mutex<PipeRingBuffer>>,
+}
+
+impl Drop for Pipe {
+    fn drop(&mut self) {
+        let mut ring = self.buffer.lock();
+        if self.readable {
+            ring.write_wait.wake_all();
+        }
+        if self.writable {
+            ring.read_wait.wake_all();
+        }
+    }
 }
 
 impl Pipe {
@@ -56,6 +67,9 @@ pub struct PipeRingBuffer {
     status: RingBufferStatus,
     write_end: Option<Weak<Pipe>>,
     read_end: Option<Weak<Pipe>>,
+    //加入pipe读写等待队列，实现基于读写数据的pipe唤醒
+    write_wait: WaitQueue,
+    read_wait: WaitQueue,
 }
 
 impl PipeRingBuffer {
@@ -71,6 +85,8 @@ impl PipeRingBuffer {
             status: RingBufferStatus::EMPTY,
             write_end: None,
             read_end: None,
+            write_wait: WaitQueue::new(),
+            read_wait: WaitQueue::new(),
         }
     }
     #[allow(unused)]
@@ -175,6 +191,9 @@ impl File for Pipe {
         if offset.is_some() {
             return ESPIPE as usize;
         }
+        if buf.is_empty() {
+            return 0;
+        }
         let mut read_size = 0usize;
         loop {
             let task = current_task().unwrap();
@@ -189,12 +208,13 @@ impl File for Pipe {
                 if ring.all_write_ends_closed() {
                     return read_size;
                 }
-                drop(ring);
                 let task = current_task().unwrap();
-                wait_with_timeout(Arc::downgrade(&task), TimeSpec::now());
+                ring.read_wait.prepare_to_wait(Arc::downgrade(&task));
                 drop(task);
-                block_current_and_run_next();
-                // suspend_current_and_run_next();
+                block_current_and_run_next_with_lock(ring);
+                //阻塞唤醒后会到此处
+                let task = current_task().unwrap();
+                self.buffer.lock().read_wait.finish_wait(&task);
                 continue;
             }
             // We guarantee that this operation will read at least one byte
@@ -203,11 +223,12 @@ impl File for Pipe {
                 read_size += read_bytes;
                 if ring.head == ring.tail {
                     ring.status = RingBufferStatus::EMPTY;
+                    ring.write_wait.wake_at_most(1);
                     return read_size;
                 }
             }
-
             ring.status = RingBufferStatus::NORMAL;
+            ring.write_wait.wake_at_most(1);
             return read_size;
         }
     }
@@ -215,6 +236,9 @@ impl File for Pipe {
     fn write(&self, offset: Option<&mut usize>, buf: &[u8]) -> usize {
         if offset.is_some() {
             return ESPIPE as usize;
+        }
+        if buf.is_empty() {
+            return 0;
         }
         let mut write_size = 0usize;
 
@@ -231,25 +255,26 @@ impl File for Pipe {
                 if ring.all_read_ends_closed() {
                     return write_size;
                 }
-                drop(ring);
                 let task = current_task().unwrap();
-                wait_with_timeout(Arc::downgrade(&task), TimeSpec::now());
+                ring.write_wait.prepare_to_wait(Arc::downgrade(&task));
                 drop(task);
-                block_current_and_run_next();
-                // suspend_current_and_run_next();
+                block_current_and_run_next_with_lock(ring);
+                let task = current_task().unwrap();
+                self.buffer.lock().write_wait.finish_wait(&task);
                 continue;
             }
             // We guarantee that this operation will write at least one byte
-            // So we modify status first
             while write_size < buf.len() {
                 let write_bytes = ring.buffer_write(&buf[write_size..]);
                 write_size += write_bytes;
                 if ring.head == ring.tail {
                     ring.status = RingBufferStatus::FULL;
+                    ring.read_wait.wake_at_most(1);
                     return write_size;
                 }
             }
             ring.status = RingBufferStatus::NORMAL;
+            ring.read_wait.wake_at_most(1);
             return write_size;
         }
     }
@@ -268,6 +293,9 @@ impl File for Pipe {
         if offset.is_some() {
             return ESPIPE as usize;
         }
+        if buf.buffers.iter().all(|buf| buf.is_empty()) {
+            return 0;
+        }
         let mut read_size = 0usize;
         loop {
             let task = current_task().unwrap();
@@ -283,12 +311,12 @@ impl File for Pipe {
                 if ring.all_write_ends_closed() {
                     return read_size;
                 }
-                drop(ring);
                 let task = current_task().unwrap();
-                wait_with_timeout(Arc::downgrade(&task), TimeSpec::now());
+                ring.read_wait.prepare_to_wait(Arc::downgrade(&task));
                 drop(task);
-                block_current_and_run_next();
-                // suspend_current_and_run_next();
+                block_current_and_run_next_with_lock(ring);
+                let task = current_task().unwrap();
+                self.buffer.lock().read_wait.finish_wait(&task);
                 continue;
             }
             // We guarantee that this operation will read at least one byte
@@ -301,12 +329,14 @@ impl File for Pipe {
                     if ring.head == ring.tail {
                         ring.status = RingBufferStatus::EMPTY;
                         read_size += buf_start;
+                        ring.write_wait.wake_at_most(1);
                         return read_size;
                     }
                 }
                 read_size += buf_start;
             }
             ring.status = RingBufferStatus::NORMAL;
+            ring.write_wait.wake_at_most(1);
             return read_size;
         }
     }
@@ -314,6 +344,9 @@ impl File for Pipe {
     fn write_user(&self, offset: Option<usize>, buf: UserBuffer) -> usize {
         if offset.is_some() {
             return ESPIPE as usize;
+        }
+        if buf.buffers.iter().all(|buf| buf.is_empty()) {
+            return 0;
         }
         let mut write_size = 0usize;
         loop {
@@ -329,12 +362,12 @@ impl File for Pipe {
                 if ring.all_read_ends_closed() {
                     return write_size;
                 }
-                drop(ring);
                 let task = current_task().unwrap();
-                wait_with_timeout(Arc::downgrade(&task), TimeSpec::now());
+                ring.write_wait.prepare_to_wait(Arc::downgrade(&task));
                 drop(task);
-                block_current_and_run_next();
-                // suspend_current_and_run_next();
+                block_current_and_run_next_with_lock(ring);
+                let task = current_task().unwrap();
+                self.buffer.lock().write_wait.finish_wait(&task);
                 continue;
             }
             // We guarantee that this operation will write at least one byte
@@ -347,12 +380,14 @@ impl File for Pipe {
                     if ring.head == ring.tail {
                         ring.status = RingBufferStatus::FULL;
                         write_size += buf_start;
+                        ring.read_wait.wake_at_most(1);
                         return write_size;
                     }
                 }
                 write_size += buf_start;
             }
             ring.status = RingBufferStatus::NORMAL;
+            ring.read_wait.wake_at_most(1);
             return write_size;
         }
     }
