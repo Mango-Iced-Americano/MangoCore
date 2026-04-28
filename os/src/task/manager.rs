@@ -39,21 +39,37 @@ impl ActiveTracker {
         bitmap.resize(len, 0);
         Self { bitmap }
     }
+    /// 确保位图可以容纳指定 pid
+    pub fn ensure_capacity(&mut self, pid: usize) {
+        let word = pid / 64;
+        if word >= self.bitmap.len() {
+            self.bitmap.resize(word + 1, 0);
+        }
+    }
     /// 检查制定pid的任务是否处于激活状态
     pub fn check_active(&self, pid: usize) -> bool {
-        (self.bitmap[pid / 64] & (1 << (pid % 64))) != 0
+        let word = pid / 64;
+        if word >= self.bitmap.len() {
+            return false;
+        }
+        (self.bitmap[word] & (1 << (pid % 64))) != 0
     }
     /// 检查制定pid的任务是否处于非激活状态
     pub fn check_inactive(&self, pid: usize) -> bool {
-        (self.bitmap[pid / 64] & (1 << (pid % 64))) == 0
+        !self.check_active(pid)
     }
     /// 标记指定pid的任务为激活状态
     pub fn mark_active(&mut self, pid: usize) {
+        self.ensure_capacity(pid);
         self.bitmap[pid / 64] |= 1 << (pid % 64)
     }
     /// 标记指定pid的任务为非激活状态
     pub fn mark_inactive(&mut self, pid: usize) {
-        self.bitmap[pid / 64] &= !(1 << (pid % 64))
+        let word = pid / 64;
+        if word >= self.bitmap.len() {
+            return;
+        }
+        self.bitmap[word] &= !(1 << (pid % 64))
     }
 }
 
