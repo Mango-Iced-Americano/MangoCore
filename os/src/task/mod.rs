@@ -190,13 +190,13 @@ pub fn do_exit(task: Arc<TaskControlBlock>, exit_code: u32) {
     }
     // 关闭所有文件描述符，释放管道/Socket等的 Arc 引用，
     // 确保读端能收到 EOF（all_write_ends_closed() == true）。
+    // SocketFile 通过 fd_table 管理，无需额外清理。
     {
         let mut fd_table = task.files.lock();
         for fd_opt in fd_table.iter_mut() {
             *fd_opt = None;
         }
     }
-    task.socket_table.lock().clear();
     drop(inner);
     // **** release current PCB lock
     // drop task manually to maintain rc correctly

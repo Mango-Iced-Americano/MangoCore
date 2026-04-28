@@ -11,12 +11,13 @@ use crate::{
         address::{self, SocketAddrv4},
         make_unix_socket_pair,
         posix::MsgHdr,
-        Socket, SocketType, TcpInfo, TCP_MSS,
+        Socket, SocketFile, SocketType, TcpInfo, TCP_MSS,
     },
     task::current_task,
 };
 
 use crate::utils::error::SyscallErr;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::syscall::utils::{wait_io, wait_socket_io};
@@ -116,10 +117,7 @@ pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize {
         Err(e) => return -(e as isize),
     };
     let task = current_task().unwrap();
-    let is_confilct = {
-        let table = task.socket_table.lock();
-        table.can_bind(endpoint, &socket).is_some()
-    };
+    let is_confilct = crate::net::check_port_conflict(&task, endpoint, &socket);
     if is_confilct {
         log::warn!("[sys_bind] port {} already in use", endpoint.port);
         return -(SyscallErr::EADDRINUSE as isize);
@@ -519,16 +517,18 @@ pub fn sys_socketpair(domain: u32, socket_type: u32, protocol: u32, sv: usize) -
     let len = 2 * core::mem::size_of::<u32>();
     let sv = unsafe { core::slice::from_raw_parts_mut(sv as *mut u32, len) };
     let (socket1, socket2) = make_unix_socket_pair::<PAGE_SIZE>();
+    let socket_file1 = Arc::new(SocketFile::new(socket1));
+    let socket_file2 = Arc::new(SocketFile::new(socket2));
     let fd1 = current_task()
         .unwrap()
         .files
         .lock()
-        .insert(FileDescriptor::new(false, false, socket1));
+        .insert(FileDescriptor::new(false, false, socket_file1));
     let fd2 = current_task()
         .unwrap()
         .files
         .lock()
-        .insert(FileDescriptor::new(false, false, socket2));
+        .insert(FileDescriptor::new(false, false, socket_file2));
     sv[0] = fd1.unwrap() as u32;
     sv[1] = fd2.unwrap() as u32;
     info!("[sys_socketpair] new sv: {:?}", sv);

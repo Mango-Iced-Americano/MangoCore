@@ -4,23 +4,11 @@ use crate::{
     fs::{
         dev::pipe::{make_pipe, Pipe},
         file_trait::File,
-        OpenFlags,
     },
     utils::error::{SyscallErr, SyscallRet},
 };
 use alloc::sync::Arc;
 use smoltcp::wire::IpEndpoint;
-
-use crate::fs::directory_tree::DirectoryTreeNode;
-use crate::fs::fat32::PageCache;
-use crate::fs::Dirent;
-use crate::fs::DiskInodeType;
-use crate::fs::SeekWhence;
-use crate::fs::Stat;
-use crate::mm::UserBuffer;
-use alloc::string::String;
-use alloc::sync::Weak;
-use alloc::vec::Vec;
 #[allow(unused)]
 pub struct UnixSocket<const N: usize> {
     //file_meta: FileMeta,
@@ -124,9 +112,6 @@ impl<const N: usize> Socket for UnixSocket<N> {
         }
     }
 
-    fn deep_clone_socket(&self) -> Arc<dyn File> {
-        todo!()
-    }
 }
 
 impl<const N: usize> UnixSocket<N> {
@@ -139,120 +124,9 @@ impl<const N: usize> UnixSocket<N> {
         }
     }
 }
-impl<const N: usize> File for UnixSocket<N> {
-    fn deep_clone(&self) -> Arc<dyn File> {
-        todo!();
-    }
-    fn readable(&self) -> bool {
-        todo!();
-    }
-    fn writable(&self) -> bool {
-        todo!();
-    }
-    fn read(&self, _offset: Option<&mut usize>, _buf: &mut [u8]) -> usize {
-        todo!();
-    }
-    fn write(&self, _offset: Option<&mut usize>, _buf: &[u8]) -> usize {
-        todo!();
-    }
-    fn r_ready(&self) -> bool {
-        todo!();
-    }
-    fn w_ready(&self) -> bool {
-        todo!();
-    }
-    fn read_user(&self, _offset: Option<usize>, _buf: UserBuffer) -> usize {
-        todo!();
-    }
-    fn write_user(&self, _offset: Option<usize>, _buf: UserBuffer) -> usize {
-        todo!();
-    }
-    fn get_size(&self) -> usize {
-        todo!();
-    }
-    fn get_stat(&self) -> Stat {
-        todo!();
-    }
-    fn get_file_type(&self) -> DiskInodeType {
-        todo!();
-    }
-    fn is_dir(&self) -> bool {
-        todo!();
-    }
-    fn is_file(&self) -> bool {
-        todo!();
-    }
-    fn info_dirtree_node(&self, _dirnode_ptr: Weak<DirectoryTreeNode>) {
-        todo!();
-    }
-    fn get_dirtree_node(&self) -> Option<Arc<DirectoryTreeNode>> {
-        todo!();
-    }
-    /// open
-    fn open(&self, _flags: OpenFlags, _special_use: bool) -> Arc<dyn File> {
-        todo!();
-    }
-    fn open_subfile(&self) -> Result<Vec<(String, Arc<dyn File>)>, isize> {
-        todo!();
-    }
-    /// create
-    fn create(&self, _name: &str, _file_type: DiskInodeType) -> Result<Arc<dyn File>, isize> {
-        todo!();
-    }
-    fn link_child(&self, _name: &str, _child: &Self) -> Result<(), isize> {
-        todo!();
-    }
-    /// delete(unlink)
-    fn unlink(&self, _delete: bool) -> Result<(), isize> {
-        todo!();
-    }
-    /// dirent
-    fn get_dirent(&self, _count: usize) -> Vec<Dirent> {
-        todo!();
-    }
-    /// offset
-    fn get_offset(&self) -> usize {
-        todo!();
-    }
-    fn lseek(&self, _offset: isize, _whence: SeekWhence) -> Result<usize, isize> {
-        todo!();
-    }
-    /// size
-    fn modify_size(&self, _diff: isize) -> Result<(), isize> {
-        todo!();
-    }
-    fn truncate_size(&self, _new_size: usize) -> Result<(), isize> {
-        todo!();
-    }
-    // time
-    fn set_timestamp(&self, _ctime: Option<usize>, _atime: Option<usize>, _mtime: Option<usize>) {
-        todo!();
-    }
-    /// cache
-    fn get_single_cache(&self, _offset: usize) -> Result<Arc<Mutex<PageCache>>, ()> {
-        todo!();
-    }
-    fn get_all_caches(&self) -> Result<Vec<Arc<Mutex<PageCache>>>, ()> {
-        todo!();
-    }
-    /// memory related
-    fn oom(&self) -> usize {
-        todo!();
-    }
-    /// poll, select related
-    fn hang_up(&self) -> bool {
-        todo!();
-    }
-    /// iotcl
-    fn ioctl(&self, _cmd: u32, _argp: usize) -> isize {
-        todo!();
-    }
-    /// fcntl
-    fn fcntl(&self, _cmd: u32, _arg: u32) -> isize {
-        todo!();
-    }
-}
 
+/// 创建一个 Unix socket 对（双向管道）。
+/// 注意：调用者需要将返回的 UnixSocket 包装进 SocketFile 后再插入 fd_table。
 pub fn make_unix_socket_pair<const N: usize>() -> (Arc<UnixSocket<N>>, Arc<UnixSocket<N>>) {
     let (read1, write1) = make_pipe();
     let (read2, write2) = make_pipe();

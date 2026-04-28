@@ -14,7 +14,6 @@ use crate::hal::{kstack_alloc, KernelStack};
 use crate::hal::{trap_handler, TrapContext};
 use crate::mm::PageTableImpl;
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
-use crate::net::SocketTable;
 use crate::syscall::CloneFlags;
 use crate::timer::{ITimerVal, TimeSpec, TimeVal};
 use alloc::boxed::Box;
@@ -57,8 +56,6 @@ pub struct TaskControlBlock {
     pub tid_allocator: Arc<Mutex<RecycleAllocator>>,
     /// 文件描述符表
     pub files: Arc<Mutex<FdTable>>,
-    /// Socket表
-    pub socket_table: Arc<Mutex<SocketTable>>,
     /// 文件系统状态
     pub fs: Arc<Mutex<FsStatus>>,
     /// 虚拟内存空间
@@ -387,7 +384,6 @@ impl TaskControlBlock {
                 vec.resize(3, tty);
                 vec
             }))),
-            socket_table: Arc::new(Mutex::new(SocketTable::new())),
             fs: Arc::new(Mutex::new(FsStatus {
                 working_inode: Arc::new(
                     ROOT_FD
@@ -616,9 +612,6 @@ impl TaskControlBlock {
             } else {
                 Arc::new(Mutex::new(self.files.lock().clone()))
             },
-            socket_table: Arc::new(Mutex::new(
-                SocketTable::from_another(&self.socket_table.clone().lock()).unwrap(),
-            )),
             fs: if flags.contains(CloneFlags::CLONE_FS) {
                 self.fs.clone()
             } else {

@@ -1,17 +1,8 @@
 #![allow(unused)]
 
 use super::{Mutex, Socket};
-use crate::net::macros::impl_file_for_socket;
 use crate::task::manager::WaitQueue;
 use crate::{
-    fs::{
-        directory_tree::DirectoryTreeNode,
-        dirent::Dirent,
-        fat32::{DiskInodeType, PageCache},
-        file_trait::File,
-        OpenFlags, SeekWhence, Stat,
-    },
-    mm::UserBuffer,
     net::{config::NET_INTERFACE, MAX_BUFFER_SIZE, SHUT_WR},
     task::{
         block_current_and_run_next, suspend_current_and_run_next, wait_interruptible,
@@ -21,7 +12,6 @@ use crate::{
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
 };
 use alloc::{
-    string::String,
     sync::{Arc, Weak},
     vec,
     vec::Vec,
@@ -208,10 +198,6 @@ impl Socket for RawSocket {
             .unwrap_or(Err(SyscallErr::EAGAIN))
     }
 
-    fn deep_clone_socket(&self) -> Arc<dyn File> {
-        todo!()
-    }
-
     fn recv_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
         Some(&self.recv_waiters)
     }
@@ -261,5 +247,3 @@ impl RawSocket {
             .push((socket.socket_handler, Arc::downgrade(socket)));
     }
 }
-
-impl_file_for_socket!(RawSocket);

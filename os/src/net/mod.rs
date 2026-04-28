@@ -1,15 +1,21 @@
-use core::net::IpAddr;
-
-#[allow(unused)]
 use crate::{
     drivers::NET_DEVICE,
-    fs::{file_descriptor::FileDescriptor, file_trait::File, OpenFlags},
+    fs::{
+        directory_tree::DirectoryTreeNode, fat32::DiskInodeType, file_descriptor::FileDescriptor,
+        file_trait::File, Dirent, OpenFlags, PageCache, SeekWhence, Stat,
+    },
+    mm::UserBuffer,
     net::{raw::RawSocket, tcp::TcpSocket, udp::UdpSocket},
     task::current_task,
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
 };
 use alloc::collections::VecDeque;
-use alloc::{collections::BTreeMap, sync::Arc, sync::Weak, vec::Vec};
+use alloc::{
+    string::{String, ToString},
+    sync::{Arc, Weak},
+    vec,
+    vec::Vec,
+};
 
 use smoltcp::iface::SocketHandle;
 use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint};
@@ -90,7 +96,7 @@ pub static RAW_SOCKETS_TO_REMOVE: Mutex<Vec<SocketHandle>> = Mutex::new(Vec::new
 pub static GATEWAY: IpAddress = IpAddress::v4(10, 0, 2, 2);
 pub static LOCAL_IP: IpAddress = IpAddress::v4(10, 0, 2, 15);
 
-pub trait Socket: File {
+pub trait Socket: Send + Sync {
     fn bind(&self, addr: IpListenEndpoint) -> SyscallRet;
     fn listen(&self) -> SyscallRet;
     fn connect<'a>(&'a self, addr_buf: &'a [u8]) -> SyscallRet;
@@ -159,9 +165,6 @@ pub trait Socket: File {
         false
     }
 
-    /// deep clone，返回 Arc<dyn File>
-    fn deep_clone_socket(&self) -> Arc<dyn File>;
-
     /// 获取接收等待队列引用（用于事件驱动阻塞）
     fn recv_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
         None
@@ -185,6 +188,175 @@ pub trait Socket: File {
     /// 获取 TCP 状态 (Linux TCP_* 枚举值)，非 TCP socket 返回 None
     fn tcp_state(&self) -> Option<u8> {
         None
+    }
+}
+
+/// 统一的 Socket 文件包装类。
+/// 所有 TcpSocket/UdpSocket/RawSocket 都通过此结构体对外体现为 File。
+pub struct SocketFile {
+    pub inner: Arc<dyn Socket>,
+}
+
+impl SocketFile {
+    pub fn new(socket: Arc<dyn Socket>) -> Self {
+        Self { inner: socket }
+    }
+}
+
+impl File for SocketFile {
+    fn deep_clone(&self) -> Arc<dyn File> {
+        Arc::new(SocketFile {
+            inner: self.inner.clone(),
+        })
+    }
+
+    fn readable(&self) -> bool {
+        true
+    }
+
+    fn writable(&self) -> bool {
+        true
+    }
+
+    fn read(&self, _offset: Option<&mut usize>, buf: &mut [u8]) -> usize {
+        match self.inner.try_recv(buf) {
+            Ok(n) => n as usize,
+            Err(e) => e.as_errno_ret(),
+        }
+    }
+
+    fn write(&self, _offset: Option<&mut usize>, buf: &[u8]) -> usize {
+        match self.inner.try_send(buf) {
+            Ok(n) => n as usize,
+            Err(e) => e.as_errno_ret(),
+        }
+    }
+
+    fn r_ready(&self) -> bool {
+        self.inner.socket_r_ready()
+    }
+
+    fn w_ready(&self) -> bool {
+        self.inner.socket_w_ready()
+    }
+
+    fn read_user(&self, _offset: Option<usize>, buf: UserBuffer) -> usize {
+        let mut data = vec![0u8; buf.len];
+        match self.inner.try_recv(&mut data) {
+            Ok(s) => {
+                let mut offset = 0usize;
+                let mut remain = s as usize;
+                for b in buf.buffers.into_iter() {
+                    let copy_len = remain.min(b.len());
+                    b[..copy_len].copy_from_slice(&data[offset..offset + copy_len]);
+                    offset += copy_len;
+                    remain -= copy_len;
+                    if remain == 0 {
+                        break;
+                    }
+                }
+                s as usize
+            }
+            Err(e) => e.as_errno_ret(),
+        }
+    }
+
+    fn write_user(&self, _offset: Option<usize>, buf: UserBuffer) -> usize {
+        let mut data = vec![0u8; buf.len];
+        let mut offset = 0;
+        for b in buf.buffers.into_iter() {
+            data[offset..offset + b.len()].copy_from_slice(&b);
+            offset += b.len();
+        }
+        self.write(None, &data)
+    }
+
+    fn get_size(&self) -> usize {
+        0
+    }
+
+    fn get_stat(&self) -> Stat {
+        unsafe { core::mem::zeroed() }
+    }
+
+    fn get_file_type(&self) -> DiskInodeType {
+        DiskInodeType::Socket
+    }
+
+    fn is_dir(&self) -> bool {
+        false
+    }
+
+    fn is_file(&self) -> bool {
+        false
+    }
+
+    fn info_dirtree_node(&self, _dirnode_ptr: Weak<DirectoryTreeNode>) {}
+
+    fn get_dirtree_node(&self) -> Option<Arc<DirectoryTreeNode>> {
+        None
+    }
+
+    fn open(&self, _flags: OpenFlags, _special_use: bool) -> Arc<dyn File> {
+        panic!("socket open should not be called");
+    }
+
+    fn open_subfile(&self) -> Result<Vec<(String, Arc<dyn File>)>, isize> {
+        Err(-(crate::syscall::errno::EISDIR as isize))
+    }
+
+    fn create(&self, _name: &str, _file_type: DiskInodeType) -> Result<Arc<dyn File>, isize> {
+        Err(-(crate::syscall::errno::EISDIR as isize))
+    }
+
+    fn link_child(&self, _name: &str, _child: &Self) -> Result<(), isize> {
+        Err(-(crate::syscall::errno::EISDIR as isize))
+    }
+
+    fn unlink(&self, _delete: bool) -> Result<(), isize> {
+        Err(-(crate::syscall::errno::EISDIR as isize))
+    }
+
+    fn get_dirent(&self, _count: usize) -> Vec<Dirent> {
+        Vec::new()
+    }
+
+    fn lseek(&self, _offset: isize, _whence: SeekWhence) -> Result<usize, isize> {
+        Err(-(crate::syscall::errno::ESPIPE as isize))
+    }
+
+    fn modify_size(&self, _diff: isize) -> Result<(), isize> {
+        Err(-(crate::syscall::errno::EPERM as isize))
+    }
+
+    fn truncate_size(&self, _new_size: usize) -> Result<(), isize> {
+        Err(-(crate::syscall::errno::EPERM as isize))
+    }
+
+    fn set_timestamp(&self, _ctime: Option<usize>, _atime: Option<usize>, _mtime: Option<usize>) {}
+
+    fn get_single_cache(&self, _offset: usize) -> Result<Arc<Mutex<PageCache>>, ()> {
+        Err(())
+    }
+
+    fn get_all_caches(&self) -> Result<Vec<Arc<Mutex<PageCache>>>, ()> {
+        Err(())
+    }
+
+    fn oom(&self) -> usize {
+        0
+    }
+
+    fn hang_up(&self) -> bool {
+        self.inner.socket_hang_up()
+    }
+
+    fn ioctl(&self, _cmd: u32, _argp: usize) -> isize {
+        crate::syscall::errno::ENOTTY
+    }
+
+    fn fcntl(&self, _cmd: u32, _arg: u32) -> isize {
+        0
     }
 }
 
@@ -218,49 +390,37 @@ impl dyn Socket {
                     let socket = UdpSocket::new();
                     let socket = Arc::new(socket);
                     UdpSocket::register_udp_socket(&socket);
-                    // current_process().inner_handler(|proc| {
-                    //     let fd = proc.fd_table.alloc_fd()?;
-                    //     proc.fd_table.put(fd, FdInfo::new(socket.clone(), flags));
-                    //     proc.socket_table.insert(fd, socket);
-                    //     Ok(fd)
-                    // })
+                    let socket_file = Arc::new(SocketFile::new(socket));
                     let current_tcb = current_task().unwrap();
                     let fd = current_tcb
                         .files
                         .lock()
-                        .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket.clone()))
+                        .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket_file))
                         .unwrap();
-                    current_tcb.socket_table.lock().insert(fd, socket);
                     Ok(fd)
                 } else if pure_type == SocketType::SOCK_STREAM.bits() {
                     let socket = TcpSocket::new();
                     let socket = Arc::new(socket);
                     TcpSocket::register_tcp_socket(&socket);
-                    // current_process().inner_handler(|proc| {
-                    //     let fd = proc.fd_table.alloc_fd()?;
-                    //     proc.fd_table.put(fd, FdInfo::new(socket.clone(), flags));
-                    //     proc.socket_table.insert(fd, socket);
-                    //     Ok(fd)
-                    // })
+                    let socket_file = Arc::new(SocketFile::new(socket));
                     let current_tcb = current_task().unwrap();
                     let fd = current_tcb
                         .files
                         .lock()
-                        .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket.clone()))
+                        .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket_file))
                         .unwrap();
-                    current_tcb.socket_table.lock().insert(fd, socket);
                     Ok(fd)
                 } else if pure_type == SocketType::SOCK_RAW.bits() {
                     let socket = RawSocket::new(protocol);
                     let socket = Arc::new(socket);
                     RawSocket::register_raw_socket(&socket);
+                    let socket_file = Arc::new(SocketFile::new(socket));
                     let current_tcb = current_task().unwrap();
                     let fd = current_tcb
                         .files
                         .lock()
-                        .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket.clone()))
+                        .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket_file))
                         .unwrap();
-                    current_tcb.socket_table.lock().insert(fd, socket);
                     Ok(fd)
                 } else {
                     Err(SyscallErr::EINVAL)
@@ -295,90 +455,76 @@ impl dyn Socket {
     }
 }
 
-pub struct SocketTable(BTreeMap<Fd, Arc<dyn Socket>>);
-
-impl SocketTable {
-    pub const fn new() -> Self {
-        Self(BTreeMap::new())
-    }
-    pub fn insert(&mut self, key: Fd, value: Arc<dyn Socket>) {
-        self.0.insert(key, value);
-    }
-    pub fn get_ref(&self, fd: Fd) -> Option<&Arc<dyn Socket>> {
-        self.0.get(&fd)
-    }
-    #[allow(unused)]
-    pub fn take(&mut self, fd: Fd) -> Option<Arc<dyn Socket>> {
-        self.0.remove(&fd)
-    }
-    pub fn clear(&mut self) {
-        self.0.clear();
-    }
-    pub fn from_another(socket_table: &SocketTable) -> GeneralRet<Self> {
-        let mut ret = BTreeMap::new();
-        for (sockfd, socket) in socket_table.0.iter() {
-            ret.insert(*sockfd, socket.clone());
+/// 检查 fd_table 中是否有其他 socket 与目标 endpoint 冲突（端口已占用）。
+/// 替代旧的 SocketTable::can_bind。
+pub fn check_port_conflict(
+    task: &crate::task::TaskControlBlock,
+    endpoint: IpListenEndpoint,
+    target_sock: &Arc<dyn Socket>,
+) -> bool {
+    log::info!(
+        "[check_port_conflict] check bind for endpoint {:?} with type {:?}",
+        endpoint,
+        target_sock.socket_type()
+    );
+    let target_pure_type = target_sock.socket_type().bits() & SOCK_TYPE_MASK;
+    let fd_table = task.files.lock();
+    for fd_opt in fd_table.iter() {
+        let fd_ref = match fd_opt {
+            Some(fd) => fd,
+            None => continue,
+        };
+        // 尝试 downcast 为 SocketFile
+        let socket_file = match fd_ref.file.clone().downcast_arc::<SocketFile>() {
+            Ok(sf) => sf,
+            Err(_) => continue,
+        };
+        let socket = socket_file.inner.clone();
+        let pure_type = socket.socket_type().bits() & SOCK_TYPE_MASK;
+        if pure_type != target_pure_type {
+            log::info!(
+                "[check_port_conflict] skip socket with different type: {:?}",
+                socket.socket_type()
+            );
+            continue;
         }
-        Ok(Self(ret))
-    }
-    pub fn can_bind(
-        &self,
-        endpoint: IpListenEndpoint,
-        target_sock: &Arc<dyn Socket>,
-    ) -> Option<(Fd, Arc<dyn Socket>)> {
-        log::info!(
-            "[SockTable::can_bind] check bind for endpoint {:?} with type {:?}",
-            endpoint,
-            target_sock.socket_type()
-        );
-        let target_pure_type = target_sock.socket_type().bits() & SOCK_TYPE_MASK;
-        for (sockfd, socket) in self.0.iter() {
-            let pure_type = socket.socket_type().bits() & SOCK_TYPE_MASK;
-            let local = socket.local_endpoint();
-            if pure_type != target_pure_type {
-                log::info!(
-                    "[SockTable::can_bind] skip socket with different type: {:?}",
-                    socket.socket_type()
-                );
-                continue;
-            }
-            if local.port != endpoint.port || endpoint.port == 0 {
-                continue;
-            }
+        let local = socket.local_endpoint();
+        if local.port != endpoint.port || endpoint.port == 0 {
+            continue;
+        }
 
-            let addr_confilct = match (local.addr, endpoint.addr) {
-                (Some(local_addr), Some(endpoint_addr)) => local_addr == endpoint_addr,
-                (None, _) | (_, None) => true,
-            };
-            if addr_confilct {
-                if pure_type == SocketType::SOCK_DGRAM.bits() {
-                    let reuse_enabled_on_exist = match socket.reuse_addr() {
-                        Ok(enabled) => true,
-                        Err(_) => false,
-                    };
-                    let reuse_enabled_on_target = match target_sock.reuse_addr() {
-                        Ok(enabled) => true,
-                        Err(_) => false,
-                    };
-                    if reuse_enabled_on_exist && reuse_enabled_on_target {
-                        log::info!("[SockTable::can_bind] Bypass conflict because both sockets have SO_REUSEADDR enabled");
-                        continue;
-                    }
-                    if socket.remote_endpoint().is_some() {
-                        log::info!("[SockTable::can_bind] Bypass conflict because existing UDP socket is already connected to a remote");
-                        continue;
-                    }
+        let addr_confilct = match (local.addr, endpoint.addr) {
+            (Some(local_addr), Some(endpoint_addr)) => local_addr == endpoint_addr,
+            (None, _) | (_, None) => true,
+        };
+        if addr_confilct {
+            if pure_type == SocketType::SOCK_DGRAM.bits() {
+                let reuse_enabled_on_exist = match socket.reuse_addr() {
+                    Ok(_enabled) => true,
+                    Err(_) => false,
+                };
+                let reuse_enabled_on_target = match target_sock.reuse_addr() {
+                    Ok(_enabled) => true,
+                    Err(_) => false,
+                };
+                if reuse_enabled_on_exist && reuse_enabled_on_target {
+                    log::info!("[check_port_conflict] Bypass conflict because both sockets have SO_REUSEADDR enabled");
+                    continue;
                 }
-                log::info!(
-                    "[SockTable::can_bind] Confilct local {:?} with endpoint {:?}",
-                    local,
-                    endpoint
-                );
-                return Some((*sockfd, socket.clone()));
+                if socket.remote_endpoint().is_some() {
+                    log::info!("[check_port_conflict] Bypass conflict because existing UDP socket is already connected to a remote");
+                    continue;
+                }
             }
+            log::info!(
+                "[check_port_conflict] Confilct local {:?} with endpoint {:?}",
+                local,
+                endpoint
+            );
+            return true;
         }
-        None
     }
+    false
 }
 
 /// 在每次 poll 后，遍历所有 TCP_SOCKETS，唤醒其等待队列

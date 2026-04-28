@@ -516,7 +516,6 @@ pub fn sys_close(fd: usize) -> isize {
         Ok(_) => SUCCESS,
         Err(errno) => return errno,
     };
-    task.socket_table.lock().take(fd);
     ret
 }
 
@@ -644,11 +643,7 @@ pub fn sys_dup(oldfd: usize) -> isize {
         Ok(fd) => fd,
         Err(errno) => return errno,
     };
-    // 如果是 socket，同步复制到 socket_table
-    let old_socket = task.socket_table.lock().get_ref(oldfd).cloned();
-    if let Some(sock) = old_socket {
-        task.socket_table.lock().insert(newfd, sock);
-    }
+    // SocketFile 通过 fd_table 自动管理，socket_table 不再需要
     info!("[sys_dup] oldfd: {}, newfd: {}", oldfd, newfd);
     newfd as isize
 }
@@ -675,11 +670,7 @@ pub fn sys_dup2(oldfd: usize, newfd: usize) -> isize {
     if ret < 0 {
         return ret;
     }
-    let mut socket_table = task.socket_table.lock();
-    let old_socket = socket_table.get_ref(oldfd).cloned();
-    if let Some(sock) = old_socket {
-        socket_table.insert(newfd, sock);
-    }
+    // SocketFile 通过 fd_table 自动管理，socket_table 不再需要
     info!("[sys_dup2] oldfd: {}, newfd: {}", oldfd, newfd);
     newfd as isize
 }
@@ -720,12 +711,7 @@ pub fn sys_dup3(oldfd: usize, newfd: usize, flags: u32) -> isize {
         Ok(fd) => fd as isize,
         Err(errno) => errno,
     };
-    if ret >= 0 {
-        let old_socket = task.socket_table.lock().get_ref(oldfd).cloned();
-        if let Some(sock) = old_socket {
-            task.socket_table.lock().insert(newfd, sock);
-        }
-    }
+    // SocketFile 通过 fd_table 自动管理，socket_table 不再需要
     ret
 }
 

@@ -25,17 +25,9 @@ use smoltcp::{
     wire::{IpEndpoint, IpListenEndpoint},
 };
 
-use crate::fs::directory_tree::DirectoryTreeNode;
-use crate::fs::dirent::Dirent;
-use crate::fs::fat32::PageCache;
-use crate::fs::DiskInodeType;
-use crate::fs::SeekWhence;
-use crate::fs::Stat;
-use crate::mm::UserBuffer;
-use crate::net::macros::impl_file_for_socket;
+use crate::net::SocketFile;
 use crate::trace_event;
 use alloc::collections::VecDeque;
-use alloc::string::String;
 use alloc::sync::Weak;
 use alloc::vec::Vec;
 
@@ -172,19 +164,14 @@ impl Socket for TcpSocket {
         });
         TcpSocket::register_tcp_socket(&connected_socket);
 
+        let socket_file = Arc::new(SocketFile::new(connected_socket));
+
         let mut fd_table = task.files.lock();
-        let mut socket_table = task.socket_table.lock();
 
         let old_cloexec = fd_table.get_ref(sockfd as usize).unwrap().get_cloexec();
         let new_fd = fd_table
-            .insert(FileDescriptor::new(
-                old_cloexec,
-                old_nonblock,
-                connected_socket.clone(),
-            ))
+            .insert(FileDescriptor::new(old_cloexec, old_nonblock, socket_file))
             .map_err(|_| SyscallErr::EMFILE)?;
-
-        socket_table.insert(new_fd, connected_socket);
 
         address::fill_with_endpoint(peer_endpoint, addr, addrlen)?;
 
@@ -519,10 +506,6 @@ impl Socket for TcpSocket {
 
     fn socket_hang_up(&self) -> bool {
         false
-    }
-
-    fn deep_clone_socket(&self) -> Arc<dyn File> {
-        todo!()
     }
 
     fn recv_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
@@ -946,5 +929,3 @@ impl Drop for TcpSocket {
         }
     }
 }
-
-impl_file_for_socket!(TcpSocket);

@@ -29,7 +29,7 @@ pub use self::layout::*;
 pub use self::fat32::DiskInodeType;
 pub use crate::drivers::block::BlockDevice;
 
-use self::cache::PageCache;
+pub use self::cache::PageCache;
 use alloc::{string::String, sync::Arc};
 pub use dirent::Dirent;
 pub use file_descriptor::FileDescriptor;

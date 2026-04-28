@@ -3,25 +3,20 @@ macro_rules! get_socket {
     ($sockfd:expr) => {{
         let task = current_task().unwrap();
         let fd_table = task.files.lock();
-        // 1. 先查是不是一个有效打开的 fd
-        match fd_table.get_ref($sockfd as usize) {
+        let fd_ref = match fd_table.get_ref($sockfd as usize) {
             Err(e) => return e,
             Ok(fd) => {
                 // O_PATH 打开的 fd 视为 inoperable，应返回 EBADF
                 if fd.get_flags().contains(crate::fs::OpenFlags::O_PATH) {
                     return -(SyscallErr::EBADF as isize);
                 }
+                fd
             }
-        }
-        // 2. 再查它是不是 socket
-        match current_task()
-            .unwrap()
-            .socket_table
-            .lock()
-            .get_ref($sockfd as usize)
-        {
-            Some(socket) => socket.clone(),
-            None => return ENOTSOCK,
+        };
+        // downcast File → SocketFile → 取 .inner 拿到 Arc<dyn Socket>
+        match fd_ref.file.clone().downcast_arc::<crate::net::SocketFile>() {
+            Ok(socket_file) => socket_file.inner.clone(),
+            Err(_) => return ENOTSOCK,
         }
     }};
 }

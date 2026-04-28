@@ -1,14 +1,15 @@
 use super::{config::NET_INTERFACE, Mutex, Socket, MAX_BUFFER_SIZE};
 use crate::net::config::lookup_source_ip;
-use crate::net::macros::impl_file_for_socket;
 use crate::utils::random::RNG;
 use crate::{
-    fs::{file_trait::File, OpenFlags},
     net::address,
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
 };
 
 use alloc::vec;
+use alloc::collections::VecDeque;
+use alloc::string::String;
+use alloc::sync::Arc;
 use log::info;
 use smoltcp::{
     iface::SocketHandle,
@@ -21,18 +22,8 @@ use smoltcp::{
     wire::{IpAddress, IpEndpoint, IpListenEndpoint},
 };
 
-use crate::fs::directory_tree::DirectoryTreeNode;
-use crate::fs::fat32::PageCache;
-use crate::fs::Dirent;
-use crate::fs::DiskInodeType;
-use crate::fs::SeekWhence;
-use crate::fs::Stat;
-use crate::mm::UserBuffer;
 use crate::net::config::NetInterfaceInner;
 use crate::net::{UDP_SOCKETS, UDP_SOCKETS_TO_REMOVE};
-use alloc::collections::VecDeque;
-use alloc::string::String;
-use alloc::sync::Arc;
 use alloc::sync::Weak;
 use alloc::vec::Vec;
 
@@ -289,10 +280,6 @@ impl Socket for UdpSocket {
         false
     }
 
-    fn deep_clone_socket(&self) -> Arc<dyn File> {
-        todo!()
-    }
-
     fn recv_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
         Some(&self.recv_waiters)
     }
@@ -348,8 +335,6 @@ impl Drop for UdpSocket {
         UDP_SOCKETS_TO_REMOVE.lock().push(self.socket_handler);
     }
 }
-
-impl_file_for_socket!(UdpSocket);
 
 impl UdpSocket {
     fn _read<'a>(&'a self, buf: &'a mut [u8]) -> GeneralRet<usize> {
