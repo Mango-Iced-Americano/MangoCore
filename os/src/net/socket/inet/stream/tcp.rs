@@ -1,4 +1,4 @@
-use super::{Mutex, Socket};
+use crate::net::{Mutex, Socket};
 use crate::net::TCP_SOCKETS_TO_REMOVE;
 use crate::{
     fs::{file_trait::File, FileDescriptor, OpenFlags},
@@ -10,12 +10,11 @@ use crate::{
     task::current_task,
     utils::{
         error::{GeneralRet, SyscallErr, SyscallRet},
-        random::RNG,
     },
 };
 use alloc::{sync::Arc, vec};
 use core::{
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     time::Duration,
 };
 use log::info;
@@ -26,10 +25,47 @@ use smoltcp::{
 };
 
 use crate::net::SocketFile;
+use crate::net::socket::inet::common::PortManager;
 use crate::trace_event;
 use alloc::collections::VecDeque;
 use alloc::sync::Weak;
 use alloc::vec::Vec;
+
+/// TCP 连接状态枚举，对标 DragonOS inner::Inner 子状态。
+/// 屏蔽 smoltcp 内部 tcp::State，集中管理状态判断逻辑。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TcpConnState {
+    Closed,
+    Listen,
+    SynSent,
+    SynReceived,
+    Established,
+    FinWait1,
+    FinWait2,
+    CloseWait,
+    Closing,
+    LastAck,
+    TimeWait,
+}
+
+impl From<tcp::State> for TcpConnState {
+    fn from(s: tcp::State) -> Self {
+        use tcp::State::*;
+        match s {
+            Closed => Self::Closed,
+            Listen => Self::Listen,
+            SynSent => Self::SynSent,
+            SynReceived => Self::SynReceived,
+            Established => Self::Established,
+            FinWait1 => Self::FinWait1,
+            FinWait2 => Self::FinWait2,
+            CloseWait => Self::CloseWait,
+            Closing => Self::Closing,
+            LastAck => Self::LastAck,
+            TimeWait => Self::TimeWait,
+        }
+    }
+}
 
 /// Convert smoltcp tcp::State to a stable u64 code for trace_event.
 fn tcp_state_code(state: &tcp::State) -> u64 {
@@ -58,6 +94,13 @@ pub const TCP_MSS: u32 = if TCP_MSS_DEFAULT > MAX_BUFFER_SIZE as u32 {
 const BACKLOG_SIZE: u32 = 16;
 const LISTEN_BUFFER_SIZE: usize = 2048;
 
+// EPOLL 事件常量，用于 pollee 缓存 IO 就绪状态
+const EPOLLIN: usize = 0x001;
+const EPOLLOUT: usize = 0x004;
+const EPOLLHUP: usize = 0x010;
+const EPOLLERR: usize = 0x008;
+const EPOLLRDHUP: usize = 0x2000;
+
 use crate::task::manager::WaitQueue;
 
 pub struct TcpSocket {
@@ -65,6 +108,7 @@ pub struct TcpSocket {
     is_listener: AtomicBool,
     is_shutdown: AtomicBool,
     handlers: Mutex<VecDeque<SocketHandle>>,
+    pollee: AtomicUsize, // 缓存 IO 就绪事件位 (EPOLLIN/OUT/HUP/RDHUP)
     recv_waiters: Mutex<WaitQueue>,
     send_waiters: Mutex<WaitQueue>,
     connect_waiters: Mutex<WaitQueue>,
@@ -149,6 +193,7 @@ impl Socket for TcpSocket {
             handlers: Mutex::new(new_handlers),
             is_listener: AtomicBool::new(false),
             is_shutdown: AtomicBool::new(false),
+            pollee: AtomicUsize::new(0),
             inner: Mutex::new(TcpSocketInner {
                 local_endpoint: local_ep,
                 remote_endpoint: Some(peer_endpoint),
@@ -178,8 +223,8 @@ impl Socket for TcpSocket {
         Ok(new_fd)
     }
 
-    fn socket_type(&self) -> super::SocketType {
-        super::SocketType::SOCK_STREAM
+    fn socket_type(&self) -> crate::net::SocketType {
+        crate::net::SocketType::SOCK_STREAM
     }
 
     fn connect<'a>(&'a self, addr_buf: &'a [u8]) -> crate::utils::error::SyscallRet {
@@ -200,16 +245,16 @@ impl Socket for TcpSocket {
             .tcp_socket(handler, |socket| {
                 let s = socket.state();
                 state_code = tcp_state_code(&s);
-                s
+                TcpConnState::from(s)
             })
-            .unwrap_or(tcp::State::Closed);
+            .unwrap_or(TcpConnState::Closed);
         trace_event!(0xB030, handler.as_usize() as u64, state_code, 0, 0, 0, 0);
         match state {
-            tcp::State::Established => {
+            TcpConnState::Established => {
                 info!("[Tcp::try_connect] connected");
                 Ok(0)
             }
-            tcp::State::Closed => {
+            TcpConnState::Closed => {
                 // 连接被主动拒绝（RST）或对端无法到达，不再重试
                 info!(
                     "[Tcp::try_connect] {} closed (RST), connection refused",
@@ -308,21 +353,20 @@ impl Socket for TcpSocket {
     }
 
     fn tcp_state(&self) -> Option<u8> {
-        use tcp::State::*;
         let handler = self.handlers.lock().front().copied()?;
-        let state = NET_INTERFACE.tcp_socket(handler, |s| s.state())?;
+        let state: TcpConnState = NET_INTERFACE.tcp_socket(handler, |s| s.state().into())?;
         let mapped = match state {
-            Established => 1,
-            SynSent => 2,
-            SynReceived => 3,
-            FinWait1 => 4,
-            FinWait2 => 5,
-            TimeWait => 6,
-            Closed => 7,
-            CloseWait => 8,
-            LastAck => 9,
-            Listen => 10,
-            Closing => 11,
+            TcpConnState::Established => 1,
+            TcpConnState::SynSent => 2,
+            TcpConnState::SynReceived => 3,
+            TcpConnState::FinWait1 => 4,
+            TcpConnState::FinWait2 => 5,
+            TcpConnState::TimeWait => 6,
+            TcpConnState::Closed => 7,
+            TcpConnState::CloseWait => 8,
+            TcpConnState::LastAck => 9,
+            TcpConnState::Listen => 10,
+            TcpConnState::Closing => 11,
             _ => 7,
         };
         Some(mapped)
@@ -398,116 +442,23 @@ impl Socket for TcpSocket {
         // TCP 忽略 dest
         self.try_send(buf)
     }
+
     fn socket_r_ready(&self) -> bool {
+        // poll 在前，update_io_events 在后，确保状态同步
         NET_INTERFACE.poll();
-        let is_listener = self.is_listener.load(Ordering::Acquire);
-        let handlers: Vec<SocketHandle> = { self.handlers.lock().iter().copied().collect() };
-        let mut ret = false;
-
-        trace_event!(
-            0xB001,
-            is_listener as u64,
-            handlers.len() as u64,
-            0,
-            0,
-            0,
-            0
-        );
-
-        if is_listener {
-            for (idx, &handler) in handlers.iter().enumerate() {
-                let mut state_code = 99u64;
-                NET_INTERFACE.tcp_socket(handler, |s| {
-                    let state = s.state();
-                    state_code = tcp_state_code(&state);
-                    if state == tcp::State::SynReceived || state == tcp::State::Established {
-                        ret = true;
-                    }
-                });
-                trace_event!(
-                    0xB002,
-                    idx as u64,
-                    handler.as_usize() as u64,
-                    state_code,
-                    0,
-                    0,
-                    0
-                );
-                if ret {
-                    break;
-                }
-            }
-        } else {
-            if let Some(&handler) = handlers.first() {
-                let mut state_code = 99u64;
-                let mut can_recv = 0u64;
-                let mut may_recv = 0u64;
-                let mut is_eof = 0u64;
-                NET_INTERFACE.tcp_socket(handler, |socket| {
-                    let state = socket.state();
-                    state_code = tcp_state_code(&state);
-                    can_recv = socket.can_recv() as u64;
-                    may_recv = socket.may_recv() as u64;
-                    let is_eof_or_error = !socket.may_recv()
-                        && state != tcp::State::Listen
-                        && state != tcp::State::SynSent
-                        && state != tcp::State::SynReceived;
-                    is_eof = is_eof_or_error as u64;
-                    ret = can_recv != 0 || is_eof_or_error;
-                });
-                trace_event!(
-                    0xB003,
-                    handler.as_usize() as u64,
-                    state_code,
-                    can_recv,
-                    may_recv,
-                    is_eof,
-                    ret as u64
-                );
-            } else {
-                trace_event!(0xB001, 0xFF, 0, 0, 0, 0, 0);
-            }
-        }
-        trace_event!(0xB004, ret as u64, 0, 0, 0, 0, 0);
-        ret
+        self.update_io_events();
+        self.pollee.load(Ordering::Acquire) & EPOLLIN != 0
     }
 
     fn socket_w_ready(&self) -> bool {
         NET_INTERFACE.poll();
-        if self.is_listener.load(Ordering::Acquire) {
-            return false;
-        }
-        // 如果本地已经 shutdown 了写端，依据 POSIX，写也会立即返回 EPIPE，所以属于 writable 状态
-        if self.is_shutdown.load(Ordering::Acquire) {
-            return true;
-        }
-        let handler = {
-            let queue = self.handlers.lock();
-            match queue.front() {
-                Some(&h) => h,
-                None => return false,
-            }
-        };
-        NET_INTERFACE
-            .tcp_socket(handler, |socket| {
-                let state = socket.state();
-                if state == tcp::State::Closed {
-                    return true;
-                }
-                // 【核心修复】：正在三次握手期间，POSIX 语义下属于“不可写”，需阻塞等待
-                if state == tcp::State::SynSent || state == tcp::State::SynReceived {
-                    return false;
-                }
-
-                socket.can_send() && socket.may_send()
-            })
-            .unwrap_or(false)
+        self.update_io_events();
+        self.pollee.load(Ordering::Acquire) & EPOLLOUT != 0
     }
 
     fn socket_hang_up(&self) -> bool {
-        false
+        self.pollee.load(Ordering::Acquire) & EPOLLHUP != 0
     }
-
     fn recv_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
         Some(&self.recv_waiters)
     }
@@ -687,10 +638,11 @@ impl TcpSocket {
             handlers: Mutex::new(handlers),
             is_listener: AtomicBool::new(false),
             is_shutdown: AtomicBool::new(false),
+            pollee: AtomicUsize::new(0),
             inner: Mutex::new(TcpSocketInner {
                 local_endpoint: IpListenEndpoint {
                     addr: None,
-                    port: unsafe { RNG.positive_u32() as u16 },
+                    port: PortManager::alloc_ephemeral_port(),
                 },
                 remote_endpoint: None,
                 last_state: tcp::State::Closed,
@@ -713,6 +665,65 @@ impl TcpSocket {
             .push((handler, Arc::downgrade(socket)));
     }
 
+    /// 查询 smoltcp 实际状态，更新 pollee 缓存（对标 DragonOS events.rs update_events + do_poll）。
+    /// 在 NET_INTERFACE.poll() 之后调用。
+    pub fn update_io_events(&self) {
+        let mut events = 0usize;
+        let is_listener = self.is_listener.load(Ordering::Acquire);
+
+        if is_listener {
+            // listener: 遍历 handlers，有 SynReceived/Established → EPOLLIN
+            let handlers: Vec<SocketHandle> = { self.handlers.lock().iter().copied().collect() };
+            for &h in &handlers {
+                let has_new = NET_INTERFACE
+                    .tcp_socket(h, |s| {
+                        let state: TcpConnState = s.state().into();
+                        matches!(state, TcpConnState::SynReceived | TcpConnState::Established)
+                    })
+                    .unwrap_or(false);
+                if has_new {
+                    events |= EPOLLIN;
+                    break;
+                }
+            }
+        } else if let Some(handler) = { self.handlers.lock().front().copied() } {
+            NET_INTERFACE.tcp_socket(handler, |s| {
+                let state: TcpConnState = s.state().into();
+
+                // EPOLLIN: 有数据可读 或 对端关闭（EOF）
+                if s.can_recv() || !s.may_recv() {
+                    events |= EPOLLIN;
+                }
+
+                // EPOLLOUT: 可发送 且 不在握手中
+                if s.can_send() && s.may_send()
+                    && !matches!(state, TcpConnState::SynSent | TcpConnState::SynReceived)
+                {
+                    events |= EPOLLOUT;
+                }
+
+                // EPOLLHUP: 连接已关闭
+                if matches!(state, TcpConnState::Closed) {
+                    events |= EPOLLHUP | EPOLLOUT;
+                }
+
+                // EPOLLRDHUP: 对端关闭写端
+                if !s.may_recv() && !matches!(state,
+                    TcpConnState::Listen | TcpConnState::SynSent | TcpConnState::SynReceived)
+                {
+                    events |= EPOLLRDHUP;
+                }
+            });
+        }
+
+        // 已 shutdown 的 socket 始终可写（返回 EPIPE）
+        if self.is_shutdown.load(Ordering::Acquire) {
+            events |= EPOLLOUT;
+        }
+
+        self.pollee.store(events, Ordering::Release);
+    }
+
     ///
     pub fn wake_if_ready(&self) {
         let is_listener = self.is_listener.load(Ordering::Acquire);
@@ -725,7 +736,8 @@ impl TcpSocket {
             for handler in handlers {
                 let has_new = NET_INTERFACE
                     .tcp_socket(handler, |s| {
-                        s.state() == tcp::State::Established || s.state() == tcp::State::SynReceived
+                        let state: TcpConnState = s.state().into();
+                        matches!(state, TcpConnState::Established | TcpConnState::SynReceived)
                     })
                     .unwrap_or(false);
                 if has_new {
@@ -750,21 +762,6 @@ impl TcpSocket {
                     self.recv_waiters.lock().wake_at_most(1);
                 }
             }
-            /*
-            // send：发送窗口有空 或 连接已关闭
-            if !self.send_waiters.lock().is_empty() {
-                if self.is_shutdown.load(Ordering::Acquire) {
-                    self.send_waiters.lock().wake_at_most(1);
-                } else {
-                    let ready = NET_INTERFACE
-                        .tcp_socket(handler, |s| s.can_send() || s.state() == tcp::State::Closed)
-                        .unwrap_or(true);
-                    if ready {
-                        self.send_waiters.lock().wake_at_most(1);
-                    }
-                }
-            }
-            */
             // send：发送窗口有空 或 连接已关闭/建立
             if !self.send_waiters.lock().is_empty() {
                 if self.is_shutdown.load(Ordering::Acquire) {
@@ -772,12 +769,12 @@ impl TcpSocket {
                 } else {
                     let ready = NET_INTERFACE
                         .tcp_socket(handler, |s| {
-                            let state = s.state();
-                            if state == tcp::State::Closed {
+                            let state: TcpConnState = s.state().into();
+                            if matches!(state, TcpConnState::Closed) {
                                 return true;
                             }
                             // 正在连接期间，不满足发数据条件，不应唤醒 write 等待队列
-                            if state == tcp::State::SynSent || state == tcp::State::SynReceived {
+                            if matches!(state, TcpConnState::SynSent | TcpConnState::SynReceived) {
                                 return false;
                             }
                             s.can_send() && s.may_send()
@@ -791,11 +788,11 @@ impl TcpSocket {
             }
             // connect：连接建立 或 被拒绝
             if !self.connect_waiters.lock().is_empty() {
-                let state = NET_INTERFACE
-                    .tcp_socket(handler, |s| s.state())
-                    .unwrap_or(tcp::State::Closed);
+                let state: TcpConnState = NET_INTERFACE
+                    .tcp_socket(handler, |s| s.state().into())
+                    .unwrap_or(TcpConnState::Closed);
                 match state {
-                    tcp::State::Established | tcp::State::Closed => {
+                    TcpConnState::Established | TcpConnState::Closed => {
                         self.connect_waiters.lock().wake_at_most(1);
                     }
                     _ => {}
@@ -872,10 +869,11 @@ impl TcpSocket {
         let mut peer_endpoint = None;
         trace_event!(0xB010, queue.len() as u64, 0, 0, 0, 0, 0);
         for (i, &handler) in queue.iter().enumerate() {
-            let (state, remote) = NET_INTERFACE
+            let (smol_state, remote) = NET_INTERFACE
                 .tcp_socket(handler, |s| (s.state(), s.remote_endpoint()))
                 .unwrap_or((tcp::State::Closed, None));
-            let state_code = tcp_state_code(&state);
+            let state_code = tcp_state_code(&smol_state);
+            let state: TcpConnState = smol_state.into();
             trace_event!(
                 0xB011,
                 i as u64,
@@ -885,7 +883,7 @@ impl TcpSocket {
                 0,
                 0
             );
-            if state == tcp::State::SynReceived || state == tcp::State::Established {
+            if matches!(state, TcpConnState::SynReceived | TcpConnState::Established) {
                 found_idx = Some(i);
                 peer_endpoint = remote;
                 trace_event!(0xB012, i as u64, handler.as_usize() as u64, 0, 0, 0, 0);

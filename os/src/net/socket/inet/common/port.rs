@@ -1,0 +1,104 @@
+use crate::net::{Socket, SocketFile, SocketType, SOCK_TYPE_MASK};
+use alloc::sync::Arc;
+use smoltcp::wire::IpListenEndpoint;
+
+/// 全局端口管理器，对标 DragonOS `PortManager`。
+/// 本项目单网卡，使用全局单例（静态方法集合）。
+pub struct PortManager;
+
+impl PortManager {
+    /// 分配一个临时端口（ephemeral port），范围 49152..65535。
+    /// 不检查冲突（当前行为与原来一致：TcpSocket::new() 直接用 RNG 分配）。
+    pub fn alloc_ephemeral_port() -> u16 {
+        // 沿用原来的逻辑：不做冲突检查，直接随机
+        let rng = unsafe { crate::utils::random::RNG.positive_u32() };
+        (rng % 16384 + 49152) as u16
+    }
+
+    /// 检查 fd_table 中是否有其他 socket 与目标 endpoint 冲突（端口已占用）。
+    /// 从 `crate::net::check_port_conflict` 移动而来。
+    pub fn check_bind_conflict(
+        task: &crate::task::TaskControlBlock,
+        endpoint: IpListenEndpoint,
+        target_sock: &Arc<dyn Socket>,
+    ) -> bool {
+        log::info!(
+            "[PortManager::check_bind_conflict] check bind for endpoint {:?} with type {:?}",
+            endpoint,
+            target_sock.socket_type()
+        );
+        let target_pure_type = target_sock.socket_type().bits() & SOCK_TYPE_MASK;
+        let fd_table = task.files.lock();
+        for fd_opt in fd_table.iter() {
+            let fd_ref = match fd_opt {
+                Some(fd) => fd,
+                None => continue,
+            };
+            let socket_file = match fd_ref.file.clone().downcast_arc::<SocketFile>() {
+                Ok(sf) => sf,
+                Err(_) => continue,
+            };
+            let socket = socket_file.inner.clone();
+            let pure_type = socket.socket_type().bits() & SOCK_TYPE_MASK;
+            if pure_type != target_pure_type {
+                log::info!(
+                    "[PortManager::check_bind_conflict] skip socket with different type: {:?}",
+                    socket.socket_type()
+                );
+                continue;
+            }
+            let local = socket.local_endpoint();
+            if local.port != endpoint.port || endpoint.port == 0 {
+                continue;
+            }
+
+            let addr_confilct = match (local.addr, endpoint.addr) {
+                (Some(local_addr), Some(endpoint_addr)) => local_addr == endpoint_addr,
+                (None, _) | (_, None) => true,
+            };
+            if addr_confilct {
+                if pure_type == SocketType::SOCK_DGRAM.bits() {
+                    let reuse_enabled_on_exist = match socket.reuse_addr() {
+                        Ok(_enabled) => true,
+                        Err(_) => false,
+                    };
+                    let reuse_enabled_on_target = match target_sock.reuse_addr() {
+                        Ok(_enabled) => true,
+                        Err(_) => false,
+                    };
+                    if reuse_enabled_on_exist && reuse_enabled_on_target {
+                        log::info!("[PortManager::check_bind_conflict] Bypass conflict because both sockets have SO_REUSEADDR enabled");
+                        continue;
+                    }
+                    if socket.remote_endpoint().is_some() {
+                        log::info!("[PortManager::check_bind_conflict] Bypass conflict because existing UDP socket is already connected to a remote");
+                        continue;
+                    }
+                }
+                log::info!(
+                    "[PortManager::check_bind_conflict] Confilct local {:?} with endpoint {:?}",
+                    local,
+                    endpoint
+                );
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 绑定端口：先检查冲突，无冲突则调用 socket.bind()。
+    /// `sys_bind` 应使用此方法替代手动 `check_port_conflict + socket.bind()`。
+    pub fn bind_port(
+        task: &crate::task::TaskControlBlock,
+        socket: &Arc<dyn Socket>,
+        endpoint: IpListenEndpoint,
+    ) -> crate::utils::error::SyscallRet {
+        if endpoint.port == 0 {
+            return Err(crate::utils::error::SyscallErr::EINVAL);
+        }
+        if Self::check_bind_conflict(task, endpoint, socket) {
+            return Err(crate::utils::error::SyscallErr::EADDRINUSE);
+        }
+        socket.bind(endpoint)
+    }
+}

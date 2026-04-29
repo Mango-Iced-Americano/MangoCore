@@ -1,6 +1,6 @@
 #![allow(unused)]
 
-use super::{Mutex, Socket};
+use crate::net::{Mutex, Socket};
 use crate::task::manager::WaitQueue;
 use crate::{
     net::{config::NET_INTERFACE, MAX_BUFFER_SIZE, SHUT_WR},
@@ -58,8 +58,8 @@ impl Socket for RawSocket {
         todo!()
     }
 
-    fn socket_type(&self) -> super::SocketType {
-        super::SocketType::SOCK_RAW
+    fn socket_type(&self) -> crate::net::SocketType {
+        crate::net::SocketType::SOCK_RAW
     }
 
     fn recv_buf_size(&self) -> usize {

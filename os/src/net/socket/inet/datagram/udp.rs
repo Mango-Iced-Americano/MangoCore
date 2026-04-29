@@ -1,6 +1,5 @@
-use super::{config::NET_INTERFACE, Mutex, Socket, MAX_BUFFER_SIZE};
+use crate::net::{config::NET_INTERFACE, Mutex, Socket, MAX_BUFFER_SIZE};
 use crate::net::config::lookup_source_ip;
-use crate::utils::random::RNG;
 use crate::{
     net::address,
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
@@ -78,7 +77,7 @@ impl Socket for UdpSocket {
                 if local.port == 0 {
                     info!("[Udp::connect] don't have local");
                     let src_ip = lookup_source_ip(remote_endpoint.addr);
-                    let port = (unsafe { RNG.positive_u32() } % 16384 + 49152) as u16;
+                    let port = crate::net::socket::inet::common::PortManager::alloc_ephemeral_port();
 
                     let endpoint = IpListenEndpoint {
                         addr: Some(src_ip),
@@ -119,8 +118,8 @@ impl Socket for UdpSocket {
         Err(SyscallErr::EOPNOTSUPP)
     }
 
-    fn socket_type(&self) -> super::SocketType {
-        super::SocketType::SOCK_DGRAM
+    fn socket_type(&self) -> crate::net::SocketType {
+        crate::net::SocketType::SOCK_DGRAM
     }
 
     fn recv_buf_size(&self) -> usize {

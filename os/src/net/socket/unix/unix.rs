@@ -1,5 +1,4 @@
-use super::Mutex;
-use super::Socket;
+use crate::net::{Mutex, Socket};
 use crate::{
     fs::{
         dev::pipe::{make_pipe, Pipe},
@@ -35,7 +34,7 @@ impl<const N: usize> Socket for UnixSocket<N> {
         todo!();
     }
 
-    fn socket_type(&self) -> super::SocketType {
+    fn socket_type(&self) -> crate::net::SocketType {
         todo!()
     }
 
@@ -111,7 +110,6 @@ impl<const N: usize> Socket for UnixSocket<N> {
             })
         }
     }
-
 }
 
 impl<const N: usize> UnixSocket<N> {

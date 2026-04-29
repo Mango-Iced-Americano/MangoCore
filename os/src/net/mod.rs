@@ -5,7 +5,9 @@ use crate::{
         file_trait::File, Dirent, OpenFlags, PageCache, SeekWhence, Stat,
     },
     mm::UserBuffer,
-    net::{raw::RawSocket, tcp::TcpSocket, udp::UdpSocket},
+    net::socket::inet::datagram::udp::UdpSocket,
+    net::socket::inet::raw::raw::RawSocket,
+    net::socket::inet::stream::tcp::TcpSocket,
     task::current_task,
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
 };
@@ -28,16 +30,13 @@ pub mod address;
 pub mod config;
 mod macros;
 pub mod posix;
-mod raw;
-mod tcp;
-mod udp;
-mod unix;
+pub mod socket;
 
 pub type Fd = usize;
 
-pub use tcp::TcpInfo;
-pub use tcp::TCP_MSS;
-pub use unix::make_unix_socket_pair;
+pub use crate::net::socket::inet::stream::tcp::TcpInfo;
+pub use crate::net::socket::inet::stream::tcp::TCP_MSS;
+pub use crate::net::socket::unix::unix::make_unix_socket_pair;
 // pub use unix::UNIX_SOCKET_BUF_MANAGER;
 
 /// domain
@@ -453,78 +452,6 @@ impl dyn Socket {
         }
         address::fill_with_endpoint(remote_endpoint.unwrap(), addr, addrlen)
     }
-}
-
-/// 检查 fd_table 中是否有其他 socket 与目标 endpoint 冲突（端口已占用）。
-/// 替代旧的 SocketTable::can_bind。
-pub fn check_port_conflict(
-    task: &crate::task::TaskControlBlock,
-    endpoint: IpListenEndpoint,
-    target_sock: &Arc<dyn Socket>,
-) -> bool {
-    log::info!(
-        "[check_port_conflict] check bind for endpoint {:?} with type {:?}",
-        endpoint,
-        target_sock.socket_type()
-    );
-    let target_pure_type = target_sock.socket_type().bits() & SOCK_TYPE_MASK;
-    let fd_table = task.files.lock();
-    for fd_opt in fd_table.iter() {
-        let fd_ref = match fd_opt {
-            Some(fd) => fd,
-            None => continue,
-        };
-        // 尝试 downcast 为 SocketFile
-        let socket_file = match fd_ref.file.clone().downcast_arc::<SocketFile>() {
-            Ok(sf) => sf,
-            Err(_) => continue,
-        };
-        let socket = socket_file.inner.clone();
-        let pure_type = socket.socket_type().bits() & SOCK_TYPE_MASK;
-        if pure_type != target_pure_type {
-            log::info!(
-                "[check_port_conflict] skip socket with different type: {:?}",
-                socket.socket_type()
-            );
-            continue;
-        }
-        let local = socket.local_endpoint();
-        if local.port != endpoint.port || endpoint.port == 0 {
-            continue;
-        }
-
-        let addr_confilct = match (local.addr, endpoint.addr) {
-            (Some(local_addr), Some(endpoint_addr)) => local_addr == endpoint_addr,
-            (None, _) | (_, None) => true,
-        };
-        if addr_confilct {
-            if pure_type == SocketType::SOCK_DGRAM.bits() {
-                let reuse_enabled_on_exist = match socket.reuse_addr() {
-                    Ok(_enabled) => true,
-                    Err(_) => false,
-                };
-                let reuse_enabled_on_target = match target_sock.reuse_addr() {
-                    Ok(_enabled) => true,
-                    Err(_) => false,
-                };
-                if reuse_enabled_on_exist && reuse_enabled_on_target {
-                    log::info!("[check_port_conflict] Bypass conflict because both sockets have SO_REUSEADDR enabled");
-                    continue;
-                }
-                if socket.remote_endpoint().is_some() {
-                    log::info!("[check_port_conflict] Bypass conflict because existing UDP socket is already connected to a remote");
-                    continue;
-                }
-            }
-            log::info!(
-                "[check_port_conflict] Confilct local {:?} with endpoint {:?}",
-                local,
-                endpoint
-            );
-            return true;
-        }
-    }
-    false
 }
 
 /// 在每次 poll 后，遍历所有 TCP_SOCKETS，唤醒其等待队列

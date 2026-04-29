@@ -117,12 +117,7 @@ pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize {
         Err(e) => return -(e as isize),
     };
     let task = current_task().unwrap();
-    let is_confilct = crate::net::check_port_conflict(&task, endpoint, &socket);
-    if is_confilct {
-        log::warn!("[sys_bind] port {} already in use", endpoint.port);
-        return -(SyscallErr::EADDRINUSE as isize);
-    }
-    match socket.bind(endpoint) {
+    match crate::net::socket::inet::common::PortManager::bind_port(&task, &socket, endpoint) {
         Ok(_) => 0 as isize,
         Err(e) => -(e as isize),
     }

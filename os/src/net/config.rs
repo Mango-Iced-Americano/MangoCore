@@ -1,7 +1,7 @@
 use super::Mutex;
 use crate::drivers::NET_DEVICE;
 use crate::net::adapter::{RoutingDevice, SmoltcpDeviceAdapter};
-use crate::net::udp::dispatch_udp_packets;
+use crate::net::socket::inet::datagram::udp::dispatch_udp_packets;
 use crate::net::{GATEWAY, UDP_SOCKETS_TO_REMOVE};
 use crate::net::{LOCAL_IP, TCP_SOCKETS_TO_REMOVE};
 use crate::timer::current_time_duration;
@@ -202,6 +202,15 @@ impl<'a> NetInterface<'a> {
 
             dispatch_udp_packets(inner);
         });
+        // poll 结束后同步所有 TCP socket 的 IO 事件到 pollee（对标 DragonOS on_iface_events）
+        {
+            let sockets = crate::net::TCP_SOCKETS.lock();
+            for (_handle, weak) in sockets.iter() {
+                if let Some(socket) = weak.upgrade() {
+                    socket.update_io_events();
+                }
+            }
+        }
         // poll 结束后唤醒所有 TCP/RAW socket 的等待队列
         crate::net::wake_tcp_waiters();
         crate::net::wake_raw_waiters();
