@@ -131,6 +131,7 @@ pub fn trap_handler() -> ! {
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
             do_wake_expired();
+            NET_INTERFACE.try_poll();
             unsafe {
                 TIMER_INTERRUPT += 1;
                 // if TIMER_INTERRUPT % 100_000 == 0 {

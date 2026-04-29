@@ -1,5 +1,4 @@
 use crate::{
-    drivers::NET_DEVICE,
     fs::{
         directory_tree::DirectoryTreeNode, fat32::DiskInodeType, file_descriptor::FileDescriptor,
         file_trait::File, Dirent, OpenFlags, PageCache, SeekWhence, Stat,
@@ -7,7 +6,7 @@ use crate::{
     mm::UserBuffer,
     net::socket::inet::datagram::udp::UdpSocket,
     net::socket::inet::raw::raw::RawSocket,
-    net::socket::inet::stream::tcp::TcpSocket,
+    net::socket::inet::stream::TcpStreamSocket,
     task::current_task,
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
 };
@@ -25,7 +24,7 @@ use spin::Mutex;
 
 use crate::task::manager::WaitQueue;
 
-pub mod adapter;
+// pub mod adapter; // 已禁用：纯 loopback 模式，无需物理网卡适配器
 pub mod address;
 pub mod config;
 mod macros;
@@ -34,8 +33,8 @@ pub mod socket;
 
 pub type Fd = usize;
 
-pub use crate::net::socket::inet::stream::tcp::TcpInfo;
-pub use crate::net::socket::inet::stream::tcp::TCP_MSS;
+pub use crate::net::socket::inet::stream::TcpInfo;
+pub use crate::net::socket::inet::stream::TCP_MSS;
 pub use crate::net::socket::unix::unix::make_unix_socket_pair;
 // pub use unix::UNIX_SOCKET_BUF_MANAGER;
 
@@ -85,7 +84,7 @@ pub static UDP_SOCKETS: Mutex<Vec<Weak<UdpSocket>>> = Mutex::new(Vec::new());
 pub static UDP_SOCKETS_TO_REMOVE: Mutex<Vec<SocketHandle>> = Mutex::new(Vec::new());
 
 // tcp
-pub static TCP_SOCKETS: Mutex<Vec<(SocketHandle, Weak<TcpSocket>)>> = Mutex::new(Vec::new());
+pub static TCP_SOCKETS: Mutex<Vec<Weak<TcpStreamSocket>>> = Mutex::new(Vec::new());
 pub static TCP_SOCKETS_TO_REMOVE: Mutex<Vec<SocketHandle>> = Mutex::new(Vec::new());
 
 // raw
@@ -191,7 +190,7 @@ pub trait Socket: Send + Sync {
 }
 
 /// 统一的 Socket 文件包装类。
-/// 所有 TcpSocket/UdpSocket/RawSocket 都通过此结构体对外体现为 File。
+/// 所有 TcpStreamSocket/UdpSocket/RawSocket 都通过此结构体对外体现为 File。
 pub struct SocketFile {
     pub inner: Arc<dyn Socket>,
 }
@@ -368,12 +367,6 @@ impl dyn Socket {
             return Err(SyscallErr::EAFNOSUPPORT);
         }
 
-        // Reject all network requests when no NIC is present
-        if NET_DEVICE.lock().is_none() {
-            log::warn!("[Socket::alloc] no network device, rejecting socket creation");
-            return Err(SyscallErr::ENETDOWN);
-        }
-
         match domain as u16 {
             AF_INET => {
                 let socket_type = SocketType::from_bits(socket_type).ok_or(SyscallErr::EINVAL)?;
@@ -398,9 +391,9 @@ impl dyn Socket {
                         .unwrap();
                     Ok(fd)
                 } else if pure_type == SocketType::SOCK_STREAM.bits() {
-                    let socket = TcpSocket::new();
+                    let socket = TcpStreamSocket::new();
                     let socket = Arc::new(socket);
-                    TcpSocket::register_tcp_socket(&socket);
+                    TcpStreamSocket::register_tcp_socket(&socket);
                     let socket_file = Arc::new(SocketFile::new(socket));
                     let current_tcb = current_task().unwrap();
                     let fd = current_tcb
@@ -458,7 +451,7 @@ impl dyn Socket {
 pub fn wake_tcp_waiters() {
     let mut remove_indices = Vec::new();
     let sockets = TCP_SOCKETS.lock();
-    for (i, (_handle, weak_socket)) in sockets.iter().enumerate() {
+    for (i, weak_socket) in sockets.iter().enumerate() {
         if let Some(socket) = weak_socket.upgrade() {
             socket.wake_wait_queues();
             //socket.wake_if_ready();

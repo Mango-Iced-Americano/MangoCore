@@ -1,7 +1,3 @@
-use isomorphic_drivers::block;
-
-// 放在 net/utils.rs 或 syscall/net.rs 顶部
-use crate::drivers::NET_DEVICE;
 use crate::net::config::NET_INTERFACE;
 use crate::task::manager::WaitQueue;
 use crate::task::{block_current_and_run_next, current_task, suspend_current_and_run_next};
@@ -43,9 +39,7 @@ pub fn wait_io<T: Into<isize>>(
 ) -> isize {
     wait_io_core(
         || {
-            if NET_DEVICE.lock().is_some() {
-                NET_INTERFACE.poll();
-            }
+            NET_INTERFACE.poll();
             match f() {
                 Ok(v) => v.into(),
                 Err(e) => -(e as isize),
@@ -64,9 +58,7 @@ pub fn wait_socket_io(
     nonblock: bool,
 ) -> isize {
     loop {
-        if NET_DEVICE.lock().is_some() {
-            NET_INTERFACE.poll();
-        }
+        NET_INTERFACE.poll();
         match f() {
             Ok(v) => return v,
             Err(SyscallErr::EAGAIN) => {

@@ -121,7 +121,7 @@ pub fn rust_main() -> ! {
     // use crate::drivers::block::block_device_test;
     // block_device_test();
     fs::directory_tree::init_fs();
-    drivers::init_net_device();
+    // drivers::init_net_device(); // 已禁用：纯 loopback 模式，无需物理网卡
     net::config::init();
     #[cfg(feature = "block_virt")]
     println!("[kernel] block in virt mode!");

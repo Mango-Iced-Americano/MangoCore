@@ -30,7 +30,7 @@ fn run_bash_cmd(cmd: &str, environ: &[*const u8]) -> i32 {
         // waitpid(pid as usize, &mut code);
         loop {
             let ret = waitpid(pid as usize, &mut code);
-            if ret == pid as isize || ret == -1 {
+            if ret == pid as isize || ret < 0 {
                 break;
             }
             sleep(10);
@@ -213,18 +213,6 @@ fn enter_shell(path: &str, environ: &[*const u8]) {
     }
 }
 
-fn reap_zombies() {
-    loop {
-        let mut dummy_code = 0;
-        // 假设你的 waitpid 支持非阻塞 (可以通过传入特定 flag 或内核默认不阻塞)
-        // 如果不支持非阻塞，这一步可以跳过，或者只在必要时清理
-        let child = waitpid(0, &mut dummy_code);
-        if child <= 0 {
-            break;
-        }
-    }
-}
-
 fn run_group_in_dir(environ: &[*const u8], dir: &str, script: &str) {
     let pid = fork();
     if pid < 0 {
@@ -306,9 +294,7 @@ fn run_selected_groups(environ: &[*const u8], mask: u16) {
         }
         println!("[initproc] select bit{} group={}", idx, group_name);
         run_group_in_dir(environ, "/musl\0", script);
-        reap_zombies(); // 收割可能的僵尸进程，保持环境干净
         run_group_in_dir(environ, "/glibc\0", script);
-        reap_zombies();
     }
     println!("[initproc] run_selected_groups done");
 }
@@ -446,7 +432,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         program_str
     );
     run_bash_cmd(&cmd, &environ); // prepare busybox "symlinks" for test scripts
-
+                                  // run_bash_cmd("cd musl && bash ./iperf_testcode.sh", &environ); // prepare test scripts (chmod +x etc)
     run_bash_cmd("cd musl && bash ./netperf_testcode.sh", &environ);
     let cfg = load_runtime_config();
     // ============================================================

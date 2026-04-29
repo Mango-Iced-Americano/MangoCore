@@ -10,6 +10,7 @@ use crate::hal::arch::loongarch64::register::{CrMd, ECfg, LineBasedInterrupt, Pr
 use crate::hal::arch::loongarch64::trap::mem_access::Instruction;
 use crate::hal::arch::TICKS_PER_SEC;
 use crate::mm::{copy_from_user, copy_to_user, frame_reserve, MemoryError, PageTable, VirtAddr};
+use crate::net::config::NET_INTERFACE;
 use crate::syscall::syscall;
 use crate::task::{
     current_task, current_trap_cx, current_user_token, do_signal, do_wake_expired,
@@ -242,6 +243,7 @@ pub fn trap_handler() -> ! {
         }
         Trap::Interrupt(Interrupt::Timer) => {
             do_wake_expired();
+            NET_INTERFACE.try_poll();
             TIClr::read().clear_timer().write();
             enable_timer_interrupt();
             suspend_current_and_run_next();

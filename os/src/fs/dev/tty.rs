@@ -121,7 +121,12 @@ impl File for Teletype {
             true
         // peek next char
         } else {
-            inner.last_char = console_getchar() as u8;
+            // Try stash first (from scheduler), then console
+            inner.last_char =
+                crate::trace::pop_stashed().unwrap_or_else(|| console_getchar() as u8);
+            // Check magic key (Ctrl+T → trace dump + shutdown).
+            // If it's magic, dump_from() calls shutdown() and never returns.
+            crate::trace::check_magic_key(inner.last_char, "tty:r_ready");
             inner.last_char != 255
         }
     }
@@ -176,7 +181,11 @@ impl File for Teletype {
                 }
                 //we read no char, suspend the procedure
                 crate::task::suspend_current_and_run_next();
-                inner.last_char = console_getchar() as u8;
+                // Try stash first (from scheduler), then console
+                inner.last_char =
+                    crate::trace::pop_stashed().unwrap_or_else(|| console_getchar() as u8);
+                // Check magic key (Ctrl+T → trace dump + shutdown).
+                crate::trace::check_magic_key(inner.last_char, "tty:read");
             }
             //we can guarantee last_char isn't a illegal char
             unsafe {
@@ -189,7 +198,11 @@ impl File for Teletype {
                     print!("{}", inner.last_char as char);
                 }
             }
-            inner.last_char = console_getchar() as u8;
+            // Try stash first (from scheduler), then console
+            inner.last_char =
+                crate::trace::pop_stashed().unwrap_or_else(|| console_getchar() as u8);
+            // Check magic key (Ctrl+T → trace dump + shutdown).
+            crate::trace::check_magic_key(inner.last_char, "tty:read");
             count += 1;
         }
         count

@@ -403,5 +403,11 @@ pub fn pselect(
             null_mut::<Signals>(),
         );
     }
+    log::debug!(
+        "[pselect] read_fds: {:?}, write_fds: {:?}, exception_fds: {:?}",
+        read_fds,
+        write_fds,
+        exception_fds
+    );
     done as isize
 }

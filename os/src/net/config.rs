@@ -1,40 +1,23 @@
 use super::Mutex;
-use crate::drivers::NET_DEVICE;
-use crate::net::adapter::{RoutingDevice, SmoltcpDeviceAdapter};
 use crate::net::socket::inet::datagram::udp::dispatch_udp_packets;
-use crate::net::{GATEWAY, UDP_SOCKETS_TO_REMOVE};
-use crate::net::{LOCAL_IP, TCP_SOCKETS_TO_REMOVE};
+use crate::net::{TCP_SOCKETS_TO_REMOVE, UDP_SOCKETS_TO_REMOVE};
 use crate::timer::current_time_duration;
-use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
-use downcast_rs::Downcast;
 use smoltcp::{
     iface::{Config, Interface, SocketHandle, SocketSet},
     phy::{Device, Loopback, Medium},
-    socket::dhcpv4::{Event as Dhcpv4Event, Socket as Dhcpv4Socket},
     socket::{raw, tcp, udp, AnySocket},
     time::Instant,
-    wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Address},
+    wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr},
 };
 
 pub static NET_INTERFACE: NetInterface = NetInterface::new();
 
 pub fn init() {
-    // If NET_DEVICE exists: init NetInterface
-    if NET_DEVICE.lock().is_some() {
-        NET_INTERFACE.init();
-        let device = NET_DEVICE.lock();
-        let dev_ref = device.as_ref().unwrap();
-        let mac = dev_ref.mac_address();
-        println!("[kernel] nic init success!");
-        println!(
-            "[kernel] MAC : {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-        );
-    } else {
-        println!("[kernel] nic init fail, network disabled");
-    }
+    // Loopback-only mode: always initialize without physical NIC
+    NET_INTERFACE.init();
+    println!("[kernel] loopback-only mode (NIC disabled)");
 }
 
 pub struct NetInterface<'a> {
@@ -42,42 +25,28 @@ pub struct NetInterface<'a> {
 }
 
 pub struct NetInterfaceInner<'a> {
-    pub device: RoutingDevice,
-    // pub device: Loopback,
+    // pub device: RoutingDevice,
+    pub device: Loopback,
     pub iface: Interface,
     pub sockets: SocketSet<'a>,
 }
 
 impl<'a> NetInterfaceInner<'a> {
     fn new() -> Self {
-        // let mut device = Loopback::new(Medium::Ethernet);
-        // NET_DEVICE is guaranteed Some at this point (init() checks before calling)
-        let net_dev = NET_DEVICE.lock().as_ref().unwrap().clone();
-        let eth_device = SmoltcpDeviceAdapter::new(net_dev);
-        let lo_device = Loopback::new(Medium::Ethernet);
-        let mut device = RoutingDevice::new(eth_device, lo_device);
+        let mut device = Loopback::new(Medium::Ethernet);
 
-        let mac = device.hw_addr.0;
-        let hw_addr = HardwareAddress::Ethernet(EthernetAddress(mac));
         let now = Instant::from_millis(current_time_duration().as_millis() as i64);
-        let config = Config::new(hw_addr);
+        let config = Config::new(HardwareAddress::Ethernet(EthernetAddress([
+            0, 0, 0, 0, 0, 0,
+        ])));
         let mut iface = Interface::new(config, &mut device, now);
 
+        // Only 127.0.0.1/8 — no physical NIC, no default route
         iface.update_ip_addrs(|addrs| {
             addrs
                 .push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8))
                 .unwrap();
-            addrs.push(IpCidr::new(LOCAL_IP, 24)).unwrap();
         });
-
-        // 默认路由
-        iface
-            .routes_mut()
-            .add_default_ipv4_route(match GATEWAY {
-                IpAddress::Ipv4(v4) => v4,
-                _ => unreachable!("GATEWAY is always IPv4"),
-            })
-            .unwrap();
 
         Self {
             device,
@@ -156,7 +125,91 @@ impl<'a> NetInterface<'a> {
         if self.inner.lock().is_none() {
             return;
         }
-        self._poll()
+        self.poll_once();
+    }
+
+    /// Non-blocking poll: skip if the inner lock is already held
+    /// (e.g., a syscall handler is already polling).
+    /// Safe for use in interrupt contexts — never spins.
+    pub fn try_poll(&self) {
+        let guard = self.inner.try_lock();
+        match guard {
+            Some(inner) if inner.is_some() => {
+                drop(inner);
+                self.poll_once();
+            }
+            _ => {} // lock held by another context, or NetInterface not yet initialized
+        }
+    }
+    fn poll_once(&self) -> bool {
+        let mut progressed = false;
+        self.inner_handler(|inner| {
+            // 1. 先清理标记删除的 UDP sockets
+            let mut to_remove = UDP_SOCKETS_TO_REMOVE.lock();
+            for handle in to_remove.drain(..) {
+                inner.sockets.remove(handle);
+            }
+            drop(to_remove);
+
+            // 2. 驱动协议栈
+            let timestamp = Instant::from_millis(current_time_duration().as_millis() as i64);
+            progressed = inner
+                .iface
+                .poll(timestamp, &mut inner.device, &mut inner.sockets);
+
+            // 3. 清理符合条件的 TCP sockets
+            let mut to_remove = TCP_SOCKETS_TO_REMOVE.lock();
+            let pending = to_remove.len();
+            let ready: Vec<SocketHandle> = to_remove
+                .iter()
+                .filter(|&&h| {
+                    let socket = inner.sockets.get::<tcp::Socket>(h);
+                    let state = socket.state();
+                    let can_remove =
+                        state == tcp::State::Closed || state == tcp::State::TimeWait;
+                    if !can_remove {
+                        log::debug!(
+                            "[NetInterface::poll_once] TCP handle {} not ready yet (state={:?}), deferring",
+                            h, state
+                        );
+                    }
+                    can_remove
+                })
+                .copied()
+                .collect();
+            if !ready.is_empty() {
+                log::info!(
+                    "[NetInterface::poll_once] removing {} of {} pending TCP sockets",
+                    ready.len(),
+                    pending
+                );
+            }
+            for h in &ready {
+                inner.sockets.remove(*h);
+                log::info!("[NetInterface::poll_once] TCP socket {} fully removed from SocketSet", h);
+            }
+            to_remove.retain(|h| !ready.contains(h));
+            if to_remove.len() > 0 {
+                log::debug!("[NetInterface::poll_once] {} TCP handles still pending removal", to_remove.len());
+            }
+            drop(to_remove);
+
+            // 4. 分发 UDP 包（必须在每次 poll 后立刻做）
+            dispatch_udp_packets(inner);
+        });
+
+        // 5. 更新所有 TCP/RAW socket 事件并唤醒等待者
+        crate::net::wake_tcp_waiters();
+        crate::net::wake_raw_waiters();
+
+        progressed
+    }
+
+    pub fn poll_until_quiescent(&self) {
+        while self.poll_once() {
+            // 继续推进，直到没有数据可处理
+            crate::task::suspend_current_and_run_next(); // 可选：避免占着 CPU 不放
+        }
     }
     pub fn _poll(&self) {
         log::trace!("[NetInterface::poll] poll...");
@@ -205,7 +258,7 @@ impl<'a> NetInterface<'a> {
         // poll 结束后同步所有 TCP socket 的 IO 事件到 pollee（对标 DragonOS on_iface_events）
         {
             let sockets = crate::net::TCP_SOCKETS.lock();
-            for (_handle, weak) in sockets.iter() {
+            for weak in sockets.iter() {
                 if let Some(socket) = weak.upgrade() {
                     socket.update_io_events();
                 }
@@ -225,16 +278,7 @@ impl<'a> NetInterface<'a> {
     }
 }
 
-pub fn lookup_source_ip(dest_ip: IpAddress) -> IpAddress {
-    let is_loopback = match dest_ip {
-        IpAddress::Ipv4(ipv4) => ipv4.0[0] == 127,
-        _ => false, // 暂时忽略 IPv6
-    };
-    if is_loopback {
-        // 如果目标是回环，网络层推荐使用回环地址
-        IpAddress::v4(127, 0, 0, 1)
-    } else {
-        // 否则走默认路由，网络层推荐使用以太网网卡地址
-        IpAddress::v4(10, 0, 2, 15)
-    }
+pub fn lookup_source_ip(_dest_ip: IpAddress) -> IpAddress {
+    // Loopback-only mode: always return 127.0.0.1
+    IpAddress::v4(127, 0, 0, 1)
 }

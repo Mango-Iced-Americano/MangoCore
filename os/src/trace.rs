@@ -8,6 +8,56 @@ const TRACE_SIZE: usize = 2048;
 /// Magic key: Ctrl+T (0x14). Pressing this key triggers a trace dump.
 pub const MAGIC_KEY: u8 = 0x14;
 
+/// ── Character stash: non-magic chars consumed by scheduler get stored here ──
+/// TTY reads from stash first, then falls back to console_getchar().
+/// This prevents the scheduler loop from swallowing user input.
+
+/// A simple ring buffer for stashing characters read by the scheduler.
+struct CharStash {
+    buf: [u8; 128],
+    head: usize,
+    tail: usize,
+}
+
+impl CharStash {
+    fn push(&mut self, ch: u8) {
+        let next = (self.head + 1) % self.buf.len();
+        self.buf[self.head] = ch;
+        self.head = next;
+        if next == self.tail {
+            // buffer full — advance tail to drop oldest char
+            self.tail = (self.tail + 1) % self.buf.len();
+        }
+    }
+
+    fn pop(&mut self) -> Option<u8> {
+        if self.head == self.tail {
+            None
+        } else {
+            let ch = self.buf[self.tail];
+            self.tail = (self.tail + 1) % self.buf.len();
+            Some(ch)
+        }
+    }
+}
+
+/// Global character stash. Chars read by try_dump_from go here if not magic.
+static CHAR_STASH: Mutex<CharStash> = Mutex::new(CharStash {
+    buf: [0; 128],
+    head: 0,
+    tail: 0,
+});
+
+/// Pop a stashed character (consumed by TTY).
+pub fn pop_stashed() -> Option<u8> {
+    CHAR_STASH.lock().pop()
+}
+
+/// Stash a character for TTY to consume later.
+pub fn stash_char(ch: u8) {
+    CHAR_STASH.lock().push(ch);
+}
+
 /// Bit mask for syscall return trace events.
 /// A trace entry with `tag & TRACE_RET_MASK != 0` is a return event;
 /// the syscall ID is `tag & !TRACE_RET_MASK`.
@@ -96,9 +146,10 @@ fn inner_event(tag: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64, 
 
 /// Decode a tag to a human-readable short label.
 fn tag_name(tag: u64) -> &'static str {
-    // Syscall IDs (0..300) — look up by syscall name table
-    if tag < 300 {
-        return crate::syscall::syscall_name(tag as usize);
+    // Syscall IDs — try the syscall name table first (works for any ID range)
+    let name = crate::syscall::syscall_name(tag as usize);
+    if name != "unknown" {
+        return name;
     }
     // Custom trace tags
     match tag {
@@ -247,12 +298,18 @@ pub fn check_magic_key(ch: u8, source: &str) -> bool {
 
 /// Poll the console for a magic key byte (non-blocking).
 /// If found, dumps the trace buffer with the given source label.
+/// If NOT found, stashes the char so TTY can consume it later.
 pub fn try_dump_from(source: &str) -> bool {
     let ch = crate::hal::console_getchar() as u8;
     if ch == 0xFF {
         return false;
     }
-    check_magic_key(ch, source)
+    if check_magic_key(ch, source) {
+        return true;
+    }
+    // Not magic — stash it so TTY can pick it up later.
+    stash_char(ch);
+    false
 }
 
 #[macro_export]

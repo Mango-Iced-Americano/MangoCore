@@ -76,10 +76,11 @@ pub fn run_tasks() {
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
             }
         } else {
-            // 如果没有任务
-            // 释放处理器的锁
+            // 没有就绪的任务 → CPU idle
             drop(processor);
-            // 没有就绪的任务，尝试唤醒一些任务
+            // 在网络空闲时推进 smoltcp 协议栈（处理重传定时器、keepalive 等）
+            crate::net::config::NET_INTERFACE.poll();
+            // 尝试唤醒一些任务
             do_wake_expired();
         }
     }
