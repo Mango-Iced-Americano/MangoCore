@@ -1,4 +1,7 @@
-use crate::fs::{directory_tree::GLOBAL_BLOCK_SIZE, ext4::{block_group::Ext4BlockGroup, BLOCK_SIZE}};
+use crate::fs::{
+    directory_tree::GLOBAL_BLOCK_SIZE,
+    ext4::{block_group::Ext4BlockGroup, BLOCK_SIZE},
+};
 use alloc::vec;
 
 use super::{
@@ -97,6 +100,13 @@ impl Ext4FileSystem {
     }
 
     pub fn ialloc_free_inode(&self, index: u32, is_dir: bool) {
+        log::debug!(
+            "[ext4:debug] ialloc_free_inode ENTER: index={}, is_dir={}, inodes_per_group={}, fs_ptr={:p}",
+            index,
+            is_dir,
+            self.superblock.inodes_per_group(),
+            self as *const _,
+        );
         // Compute index of block group
         let bgid = self.get_bgid_of_inode(index);
         let block_device = self.block_device.clone();

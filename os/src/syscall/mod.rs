@@ -96,6 +96,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_LISTEN => "listen",
         SYSCALL_ACCEPT => "accept",
         SYSCALL_CONNECT => "connect",
+        SYSCALL_ACCEPT4 => "accept4",
         SYSCALL_GETSOCKNAME => "getsockname",
         SYSCALL_GETPEERNAME => "getpeername",
         SYSCALL_SENDTO => "sendto",
@@ -361,6 +362,12 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_BIND => sys_bind(args[0] as u32, args[1] as usize, args[2] as u32),
         SYSCALL_LISTEN => sys_listen(args[0] as u32, args[1] as u32),
         SYSCALL_ACCEPT => sys_accept(args[0] as u32, args[1] as usize, args[2] as usize),
+        SYSCALL_ACCEPT4 => sys_accept4(
+            args[0] as u32,
+            args[1] as usize,
+            args[2] as usize,
+            args[3] as u32,
+        ),
         SYSCALL_CONNECT => sys_connect(args[0] as u32, args[1] as usize, args[2] as u32),
         SYSCALL_GETSOCKNAME => sys_getsockname(args[0] as u32, args[1] as usize, args[2] as usize),
         SYSCALL_GETPEERNAME => sys_getpeername(args[0] as u32, args[1] as usize, args[2] as usize),
@@ -402,6 +409,17 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SCHED_GETAFFINITY => sys_sched_getaffinity(args[0], args[1], args[2] as *mut u8),
         SYSCALL_MADVISE => sys_madvise(args[0], args[1], args[2]),
         _ => {
+            if syscall_id == 242 {
+                crate::trace_event!(
+                    0xB042,
+                    args[0] as u64,
+                    args[1] as u64,
+                    args[2] as u64,
+                    args[3] as u64,
+                    0,
+                    0
+                );
+            }
             println!(
                 "[syscall] Unsupported syscall: {} ({}), calling over arguments: {:?}",
                 syscall_name(syscall_id),

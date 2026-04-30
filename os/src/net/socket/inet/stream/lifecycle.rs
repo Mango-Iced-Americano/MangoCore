@@ -113,6 +113,15 @@ impl Inner {
                     local,
                     remote_endpoint
                 );
+                trace_event!(
+                    0xB021,
+                    handle.as_usize() as u64,
+                    local.port as u64,
+                    remote_endpoint.port as u64,
+                    0,
+                    0,
+                    0
+                );
                 Ok(Connecting::new(handle, local, remote_endpoint))
             }
             Err(err) => Err((Inner::Init(Init::Bound { handle, local }), err)),
@@ -252,10 +261,16 @@ impl Inner {
     pub fn shutdown(&self, how: u32) -> GeneralRet<()> {
         match self {
             Inner::Established(e) => {
-                log::info!("[Inner::shutdown] Established handle {}, how={}", e.handle, how);
+                log::info!(
+                    "[Inner::shutdown] Established handle {}, how={}",
+                    e.handle,
+                    how
+                );
                 with_tcp_mut(e.handle, |socket| match how {
                     1 => {
-                        log::info!("[Inner::shutdown] SHUT_WR: calling socket.close() (half-close)");
+                        log::info!(
+                            "[Inner::shutdown] SHUT_WR: calling socket.close() (half-close)"
+                        );
                         socket.close();
                     }
                     _ => {

@@ -435,7 +435,8 @@ impl dyn Socket {
     }
     pub fn addr(self: &Arc<Self>, addr: usize, addrlen: usize) -> SyscallRet {
         let local_endpoint = self.local_endpoint();
-        let local_endpoint = address::to_endpoint(local_endpoint);
+        // let local_endpoint = address::to_endpoint(local_endpoint);
+        let local_endpoint = address::listen_to_ip_endpoint_preserve(local_endpoint);
         address::fill_with_endpoint(local_endpoint, addr, addrlen)
     }
     pub fn peer_addr(self: &Arc<Self>, addr: usize, addrlen: usize) -> SyscallRet {
@@ -453,8 +454,8 @@ pub fn wake_tcp_waiters() {
     let sockets = TCP_SOCKETS.lock();
     for (i, weak_socket) in sockets.iter().enumerate() {
         if let Some(socket) = weak_socket.upgrade() {
+            // socket.wake_if_ready();
             socket.wake_wait_queues();
-            //socket.wake_if_ready();
         } else {
             remove_indices.push(i);
         }

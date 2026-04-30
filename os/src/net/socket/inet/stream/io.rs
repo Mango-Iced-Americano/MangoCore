@@ -1,13 +1,13 @@
 //! TCP I/O 操作 —— 收发数据
 
 use alloc::vec::Vec;
+use smoltcp::socket::tcp;
 
 use crate::mm::UserBuffer;
 use crate::utils::error::SyscallErr;
 
-use crate::net::config::NET_INTERFACE;
-
 use super::inner::{with_tcp_mut, Established, Init, Inner};
+use crate::net::config::NET_INTERFACE;
 
 impl Inner {
     /// 非阻塞发送数据（适配 try_send 接口）
@@ -39,6 +39,17 @@ impl Inner {
             Inner::Listening(_) => Err(SyscallErr::EINVAL),
             Inner::Established(e) => {
                 with_tcp_mut(e.handle, |socket| {
+                    let state = socket.state();
+                    // 对端已关闭写端（收到 FIN），或连接已完全关闭 → 返回 EOF
+                    if state == tcp::State::CloseWait
+                        || state == tcp::State::Closing
+                        || state == tcp::State::LastAck
+                        || state == tcp::State::TimeWait
+                        || state == tcp::State::Closed
+                    {
+                        return Ok(0);
+                    }
+
                     if socket.can_recv() {
                         socket
                             .recv_slice(buf)

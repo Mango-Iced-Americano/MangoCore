@@ -32,11 +32,11 @@ use crate::{
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
 };
 
-use crate::net::socket::inet::common::PortManager;
-
 use self::inner::{
     with_tcp_mut, Connecting, EPollEvent, Established, Init, Listening, SelfConnected, BACKLOG_SIZE,
 };
+use crate::net::socket::inet::common::PortManager;
+use crate::trace_event;
 
 /// TCP Stream Socket —— 对外表现为 Socket trait
 pub struct TcpStreamSocket {
@@ -80,12 +80,76 @@ impl TcpStreamSocket {
         inner.update_io_events(&self.pollee);
     }
 
-    /// 唤醒所有等待队列
+    /// 唤醒所有等待队列（无差别，仅在 shutdown/close 时使用）
     pub fn wake_wait_queues(&self) {
         self.recv_waiters.lock().wake_all();
         self.send_waiters.lock().wake_all();
         self.connect_waiters.lock().wake_all();
         self.accept_waiters.lock().wake_all();
+    }
+
+    /// 条件唤醒等待队列：仅当 smoltcp 状态表明对应的 I/O 操作可执行时才唤醒。
+    /// 用于 poll 后的批量唤醒，避免无差别唤醒造成的活锁（connect 在 SynSent 被反复唤醒）。
+    pub fn wake_if_ready(&self) {
+        // 先同步 pollee 缓存的 IO 事件
+        self.update_io_events();
+        let events = self.pollee.load(Ordering::Acquire);
+
+        // accept 等待者：Listening 收到了新连接
+        if !self.accept_waiters.lock().is_empty() {
+            if events & (EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM).bits() != 0 {
+                self.accept_waiters.lock().wake_all();
+            }
+        }
+
+        // connect 等待者：连接已建立（EPOLLOUT）或被拒绝（EPOLLERR / EPOLLHUP）
+        if !self.connect_waiters.lock().is_empty() {
+            if events & (EPollEvent::EPOLLOUT | EPollEvent::EPOLLERR | EPollEvent::EPOLLHUP).bits()
+                != 0
+            {
+                self.connect_waiters.lock().wake_all();
+            }
+        }
+
+        // recv 等待者：有数据可读或对端关闭
+        if !self.recv_waiters.lock().is_empty() {
+            if events
+                & (EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM | EPollEvent::EPOLLRDHUP).bits()
+                != 0
+            {
+                self.recv_waiters.lock().wake_at_most(1);
+            }
+        }
+
+        // send 等待者：可发送或写端已 shutdown（shutdown 时 send 会返回 EPIPE）
+        if !self.send_waiters.lock().is_empty() {
+            if events & (EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM).bits() != 0
+                || self.write_shutdown.load(Ordering::Acquire)
+            {
+                self.send_waiters.lock().wake_at_most(1);
+            }
+        }
+    }
+
+    /// 从 Inner 中提取 Connecting 状态并最终化（通过 `Connecting::into_result`）。
+    /// - 连接成功 → 转为 `Inner::Established`，返回 `Ok(0)`
+    /// - 连接被拒 → 转为 `Inner::Init`（清理 smoltcp handle），返回 `Err(ECONNREFUSED)`
+    /// - 仍在连接中 → 恢复原状态，返回 `Err(EAGAIN)`
+    fn finish_connecting(&self) -> SyscallRet {
+        let mut inner = self.inner.lock();
+        let tmp = core::mem::replace(
+            &mut *inner,
+            Inner::Closed(Closed::new(smoltcp::wire::IpVersion::Ipv4)),
+        );
+        if let Inner::Connecting(connecting) = tmp {
+            let (new_state, result) = connecting.into_result();
+            *inner = new_state;
+            result.map(|_| 0usize)
+        } else {
+            // 不是 Connecting 状态，恢复
+            *inner = tmp;
+            Err(SyscallErr::EAGAIN)
+        }
     }
 }
 
@@ -143,25 +207,10 @@ impl Socket for TcpStreamSocket {
                 match &*inner {
                     Inner::Connecting(c) => {
                         c.update_io_events(&self.pollee);
-                        if c.is_connected() {
+                        // 连接已建立、连接被拒绝 → 都通过 finish_connecting 做状态转换
+                        if c.is_connected() || c.failure_reason().is_some() {
                             drop(inner);
-                            let mut inner = self.inner.lock();
-                            let c_inner = core::mem::replace(
-                                &mut *inner,
-                                Inner::Closed(Closed::new(smoltcp::wire::IpVersion::Ipv4)),
-                            );
-                            if let Inner::Connecting(connecting) = c_inner {
-                                let (new_state, result) = connecting.into_result();
-                                *inner = new_state;
-                                match result {
-                                    Ok(()) => Ok(0),
-                                    Err(e) => Err(e),
-                                }
-                            } else {
-                                Err(SyscallErr::EAGAIN)
-                            }
-                        } else if c.failure_reason().is_some() {
-                            Err(SyscallErr::ECONNREFUSED)
+                            self.finish_connecting()
                         } else {
                             Err(SyscallErr::EAGAIN)
                         }
@@ -179,35 +228,20 @@ impl Socket for TcpStreamSocket {
     fn try_connect(&self) -> Result<isize, SyscallErr> {
         NET_INTERFACE.poll();
         let inner = self.inner.lock();
-        match &*inner {
+        let ret = match &*inner {
             Inner::Connecting(c) => {
                 let ready = c.update_io_events(&self.pollee);
-                if c.is_connected() {
+                if c.is_connected() || (ready && c.failure_reason().is_some()) {
                     drop(inner);
-                    let mut inner = self.inner.lock();
-                    let c_inner = core::mem::replace(
-                        &mut *inner,
-                        Inner::Closed(Closed::new(smoltcp::wire::IpVersion::Ipv4)),
-                    );
-                    if let Inner::Connecting(connecting) = c_inner {
-                        let (new_state, result) = connecting.into_result();
-                        *inner = new_state;
-                        match result {
-                            Ok(()) => Ok(0),
-                            Err(e) => Err(e),
-                        }
-                    } else {
-                        Err(SyscallErr::EAGAIN)
-                    }
-                } else if ready && c.failure_reason().is_some() {
-                    Err(SyscallErr::ECONNREFUSED)
+                    self.finish_connecting().map(|v| v as isize)
                 } else {
                     Err(SyscallErr::EAGAIN)
                 }
             }
             Inner::Established(_) => Ok(0),
             _ => Err(SyscallErr::EAGAIN),
-        }
+        };
+        ret
     }
 
     fn accept(&self, sockfd: u32, addr: usize, addrlen: usize) -> SyscallRet {

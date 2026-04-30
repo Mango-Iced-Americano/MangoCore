@@ -289,11 +289,35 @@ impl Connecting {
     /// 握手完成时调用，消耗 Connecting，返回对应状态
     pub fn into_result(self) -> (super::Inner, Result<(), SyscallErr>) {
         let result = *self.result.lock();
+        let result_code: u64 = match result {
+            ConnectResult::Connected => 1,
+            ConnectResult::Connecting => 0,
+            ConnectResult::Refused | ConnectResult::RefusedConsumed => 2,
+        };
+        trace_event!(
+            0xB032,
+            self.handle.as_usize() as u64,
+            result_code,
+            0,
+            0,
+            0,
+            0
+        );
         match result {
-            ConnectResult::Connected => (
-                super::Inner::Established(Established::new(self.handle, self.local, self.remote)),
-                Ok(()),
-            ),
+            ConnectResult::Connected => {
+                log::info!(
+                    "[Connecting::into_result] handle {} -> Established",
+                    self.handle
+                );
+                (
+                    super::Inner::Established(Established::new(
+                        self.handle,
+                        self.local,
+                        self.remote,
+                    )),
+                    Ok(()),
+                )
+            }
             ConnectResult::Connecting => (super::Inner::Connecting(self), Err(SyscallErr::EAGAIN)),
             ConnectResult::Refused | ConnectResult::RefusedConsumed => {
                 log::info!(
@@ -333,10 +357,15 @@ impl Connecting {
     }
 
     /// 查询 smoltcp 的握手状态，同步更新 `result` 和 pollee
+    ///
+    /// 只有当 was_established 为 true（即曾经进入过 Established 或 CloseWait 状态）
+    /// 才认为连接成功建立。收到 RST 直接进入 Closed 但 was_established 为 false，
+    /// 此时判定为连接被拒绝（ECONNREFUSED）。
     pub fn update_io_events(&self, pollee: &AtomicUsize) -> bool {
         let ready = with_tcp_mut(self.handle, |socket| {
             let mut result = self.result.lock();
             let state = socket.state();
+            let state_code = tcp_state_code(&state);
 
             // 记录是否到达过 Established
             if matches!(state, tcp::State::Established | tcp::State::CloseWait) {
@@ -344,10 +373,6 @@ impl Connecting {
             }
 
             let was_established = self.was_established.load(Ordering::Relaxed);
-            let endpoints_valid =
-                socket.local_endpoint().is_some() && socket.remote_endpoint().is_some();
-            let likely_was_established =
-                was_established || (matches!(state, tcp::State::Closed) && endpoints_valid);
 
             if !matches!(
                 *result,
@@ -357,12 +382,28 @@ impl Connecting {
                     *result = ConnectResult::Connected;
                 } else if socket.is_open() {
                     *result = ConnectResult::Connecting;
-                } else if likely_was_established {
+                } else if was_established {
                     *result = ConnectResult::Connected;
                 } else {
                     *result = ConnectResult::Refused;
                 }
             }
+
+            let result_code: u64 = match *result {
+                ConnectResult::Connecting => 0,
+                ConnectResult::Connected => 1,
+                ConnectResult::Refused => 2,
+                ConnectResult::RefusedConsumed => 3,
+            };
+            trace_event!(
+                0xB031,
+                self.handle.as_usize() as u64,
+                state_code,
+                result_code,
+                was_established as u64,
+                socket.may_recv() as u64,
+                socket.may_send() as u64
+            );
 
             match *result {
                 ConnectResult::Connected => {
@@ -428,6 +469,18 @@ pub struct Listening {
 
 impl Listening {
     pub fn new(handles: Vec<SocketHandle>, listen_addr: IpListenEndpoint) -> Self {
+        // Trace: record all listen handles and port
+        for (i, h) in handles.iter().enumerate() {
+            trace_event!(
+                0xB034,
+                h.as_usize() as u64,
+                i as u64,
+                listen_addr.port as u64,
+                0,
+                0,
+                0
+            );
+        }
         Self {
             handles,
             connect: AtomicUsize::new(0),

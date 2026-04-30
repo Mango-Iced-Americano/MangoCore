@@ -2,14 +2,14 @@ use core::cmp::min;
 use core::mem::size_of;
 use core::panic;
 
-use alloc::string::String;
-use alloc::vec;
-use alloc::{sync::Arc, vec::Vec};
-use spin::{Mutex, MutexGuard, RwLockReadGuard, RwLockWriteGuard};
 use crate::fs::directory_tree::{FILE_SYSTEM, GLOBAL_BLOCK_SIZE};
 use crate::fs::inode::{InodeLock, InodeTime};
 use crate::fs::DiskInodeType;
 use crate::fs::{inode::InodeTrait, vfs::VFS};
+use alloc::string::String;
+use alloc::vec;
+use alloc::{sync::Arc, vec::Vec};
+use spin::{Mutex, MutexGuard, RwLockReadGuard, RwLockWriteGuard};
 
 use super::*;
 use super::{
@@ -564,17 +564,11 @@ impl InodeTrait for Ext4Inode {
         self.size() as u32
     }
 
-    fn get_file_size_rlock(
-        &self,
-        _inode_lock: &RwLockReadGuard<InodeLock>,
-    ) -> u32 {
+    fn get_file_size_rlock(&self, _inode_lock: &RwLockReadGuard<InodeLock>) -> u32 {
         todo!()
     }
 
-    fn get_file_size_wlock(
-        &self,
-        _inode_lock: &RwLockWriteGuard<InodeLock>,
-    ) -> u32 {
+    fn get_file_size_wlock(&self, _inode_lock: &RwLockWriteGuard<InodeLock>) -> u32 {
         todo!()
     }
 
@@ -636,10 +630,7 @@ impl InodeTrait for Ext4Inode {
         todo!()
     }
 
-    fn get_single_cache(
-        &self,
-        inner_cache_id: usize,
-    ) -> Arc<Mutex<PageCache>> {
+    fn get_single_cache(&self, inner_cache_id: usize) -> Arc<Mutex<PageCache>> {
         todo!()
     }
 
@@ -658,11 +649,7 @@ impl InodeTrait for Ext4Inode {
     fn get_all_files_lock(
         &self,
         inode_lock: &RwLockWriteGuard<InodeLock>,
-    ) -> Vec<(
-        String,
-        crate::fs::fat32::layout::FATShortDirEnt,
-        u32,
-    )> {
+    ) -> Vec<(String, crate::fs::fat32::layout::FATShortDirEnt, u32)> {
         todo!()
     }
 
@@ -695,10 +682,7 @@ impl InodeTrait for Ext4Inode {
         todo!()
     }
 
-    fn stat_lock(
-        &self,
-        _inode_lock: &RwLockReadGuard<InodeLock>,
-    ) -> (i64, i64, i64, i64, u64) {
+    fn stat_lock(&self, _inode_lock: &RwLockReadGuard<InodeLock>) -> (i64, i64, i64, i64, u64) {
         todo!()
     }
 
@@ -710,19 +694,11 @@ impl InodeTrait for Ext4Inode {
         todo!()
     }
 
-    fn modify_size_lock(
-        &self,
-        inode_lock: &RwLockWriteGuard<InodeLock>,
-        diff: isize,
-        clear: bool,
-    ) {
+    fn modify_size_lock(&self, inode_lock: &RwLockWriteGuard<InodeLock>, diff: isize, clear: bool) {
         todo!()
     }
 
-    fn is_empty_dir_lock(
-        &self,
-        inode_lock: &RwLockWriteGuard<InodeLock>,
-    ) -> bool {
+    fn is_empty_dir_lock(&self, inode_lock: &RwLockWriteGuard<InodeLock>) -> bool {
         todo!()
     }
 
@@ -801,7 +777,17 @@ impl InodeTrait for Ext4Inode {
 
 impl Ext4FileSystem {
     pub fn get_bgid_of_inode(&self, inode_num: u32) -> u32 {
-        inode_num / self.superblock.inodes_per_group()
+        let ipg = self.superblock.inodes_per_group();
+        if ipg == 0 {
+            log::warn!(
+                "[ext4:debug] FATAL: get_bgid_of_inode: inode={}, inodes_per_group=0 !!! \
+                 fs_ptr={:p}, sb_ptr={:p}",
+                inode_num,
+                self as *const _,
+                &self.superblock as *const _,
+            );
+        }
+        inode_num / ipg
     }
 
     pub fn inode_to_bgidx(&self, inode_num: u32) -> u32 {
@@ -818,6 +804,11 @@ impl Ext4FileSystem {
         let super_block = self.superblock;
         // 每个块组中包含的inode数量
         let inodes_per_group = super_block.inodes_per_group;
+        log::debug!(
+            "[ext4:debug] inode_disk_pos: inode={}, inodes_per_group={}",
+            inode_num,
+            inodes_per_group
+        );
         // inode大小
         let inode_size = super_block.inode_size as u64;
         // 组号
@@ -854,8 +845,7 @@ impl Ext4FileSystem {
         let mut ext4block = Block::load_offset(self.block_device.clone(), offset);
 
         let inode: &mut Ext4Inode = ext4block.read_offset_as_mut(offset % self.block_size);
-        Arc::new(
-        Ext4InodeRef {
+        Arc::new(Ext4InodeRef {
             inode_num: inode_num,
             inode: *inode,
         })

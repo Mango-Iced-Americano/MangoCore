@@ -171,10 +171,10 @@ pub fn endpoint(addr_buf: &[u8]) -> GeneralRet<IpEndpoint> {
 }
 
 pub fn _to_endpoint(listen_endpoint: IpListenEndpoint) -> IpEndpoint {
-    let addr = if listen_endpoint.addr.is_none() {
-        IpAddress::v4(127, 0, 0, 1)
-    } else {
-        listen_endpoint.addr.unwrap()
+    let addr = match listen_endpoint.addr {
+        Some(addr) if addr.is_unspecified() => IpAddress::v4(127, 0, 0, 1),
+        Some(addr) => addr,
+        None => IpAddress::v4(127, 0, 0, 1),
     };
     IpEndpoint::new(addr, listen_endpoint.port)
 }
@@ -197,7 +197,14 @@ pub fn fill_with_endpoint(endpoint: IpEndpoint, addr: usize, addrlen: usize) -> 
 pub fn listen_endpoint(addr_buf: &[u8]) -> GeneralRet<IpListenEndpoint> {
     _listen_endpoint(addr_buf)
 }
-
+/// 将 IpListenEndpoint 转为 IpEndpoint，**保留未指定地址**（用于 getsockname）
+pub fn listen_to_ip_endpoint_preserve(listen: IpListenEndpoint) -> IpEndpoint {
+    let addr = match listen.addr {
+        Some(addr) => addr,
+        None => IpAddress::Ipv4(smoltcp::wire::Ipv4Address::UNSPECIFIED),
+    };
+    IpEndpoint::new(addr, listen.port)
+}
 pub fn _fill_with_endpoint(endpoint: IpEndpoint, addr: usize, addrlen: usize) -> SyscallRet {
     log::debug!(
         "[address::fill_with_endpoint] fill addr {} with endpoint {:?}",

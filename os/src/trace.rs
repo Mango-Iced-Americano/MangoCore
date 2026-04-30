@@ -172,7 +172,17 @@ fn tag_name(tag: u64) -> &'static str {
         0xB011 => "accept:sstate",
         0xB012 => "accept:found",
         0xB020 => "conn:connect",
+        0xB021 => "conn:inited",
         0xB030 => "conn:trycn",
+        0xB031 => "conn:state",
+        0xB032 => "conn:result",
+        0xB033 => "conn:poll",
+        0xB034 => "conn:lsten",
+        0xB035 => "conn:sset",
+        0xB036 => "poll:progressed",
+        0xB040 => "a4:enter",
+        0xB041 => "a4:ret",
+        0xB042 => "a4:dispatched",
         _ => "?",
     }
 }

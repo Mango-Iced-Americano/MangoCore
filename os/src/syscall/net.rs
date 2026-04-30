@@ -148,6 +148,37 @@ pub fn sys_accept(sockfd: u32, addr: usize, addrlen: usize) -> isize {
     )
 }
 
+/// accept4(fd, addr, addrlen, flags)
+///
+/// `flags` can include `SOCK_CLOEXEC` and/or `SOCK_NONBLOCK`.
+pub fn sys_accept4(sockfd: u32, addr: usize, addrlen: usize, flags: u32) -> isize {
+    const SOCK_CLOEXEC: u32 = 1 << 19;
+    const SOCK_NONBLOCK: u32 = 0x800;
+
+    crate::trace_event!(0xB040, sockfd as u64, flags as u64, 0, 0, 0, 0);
+
+    let ret = sys_accept(sockfd, addr, addrlen);
+
+    crate::trace_event!(0xB041, ret as u64, 0, 0, 0, 0, 0);
+
+    if ret < 0 {
+        return ret;
+    }
+    let new_fd = ret as usize;
+
+    let task = current_task().unwrap();
+    if let Ok(fd) = task.files.lock().get_refmut(new_fd) {
+        if flags & SOCK_CLOEXEC != 0 {
+            fd.set_cloexec(true);
+        }
+        if flags & SOCK_NONBLOCK != 0 {
+            fd.set_nonblock(true);
+        }
+    }
+
+    ret
+}
+
 pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
     let addr_buf = trans_ref!(addr, addrlen);
     let socket = get_socket!(sockfd);
@@ -166,7 +197,10 @@ pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
         Err(SyscallErr::EAGAIN) => {} // 需要 wait_io
         Err(e) => return -(e as isize),
     }
-
+    // 非阻塞 connect：POSIX 要求返回 EINPROGRESS，而非 EAGAIN
+    if is_nonblock {
+        return -(SyscallErr::EINPROGRESS as isize);
+    }
     // 握手未完成，进入 wait_socket_io 等待
     wait_socket_io(
         || socket.try_connect(),

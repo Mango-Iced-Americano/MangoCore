@@ -82,6 +82,7 @@ pub const SYSCALL_SENDTO: usize = 206;
 pub const SYSCALL_RECVFROM: usize = 207;
 pub const SYSCALL_SETSOCKOPT: usize = 208;
 pub const SYSCALL_GETSOCKOPT: usize = 209;
+pub const SYSCALL_ACCEPT4: usize = 242;
 pub const SYSCALL_SOCK_SHUTDOWN: usize = 210;
 pub const SYSCALL_SENDMSG: usize = 211;
 pub const SYSCALL_RECVMSG: usize = 212;
