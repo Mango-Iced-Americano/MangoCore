@@ -8,7 +8,7 @@ use log::*;
 use num_enum::FromPrimitive;
 
 use super::{
-    block_current_and_run_next,
+    block_current_and_run_next, has_actionable_signal,
     manager::{wait_with_timeout, WaitQueue},
 };
 
@@ -132,11 +132,16 @@ pub fn do_futex_wait(futex_word: &mut u32, val: u32, timeout: Option<TimeSpec>) 
         let task = current_task().unwrap();
 
         // 获取任务内部锁，以便检查信号。
-        let inner = task.acquire_inner_lock();
-        // 检查是否有未屏蔽的信号挂起
-        if !inner.sigpending.difference(inner.sigmask).is_empty() {
-            // 有未屏蔽的信号，返回 `EINTR` 错误。
-            return EINTR;
+        {
+            let inner = task.acquire_inner_lock();
+            let pending = inner.sigpending.difference(inner.sigmask);
+            if !pending.is_empty() {
+                drop(inner);
+                // 只有当存在可操作信号时才返回 EINTR
+                if has_actionable_signal(&task) {
+                    return EINTR;
+                }
+            }
         }
 
         // 如果没有信号中断，返回成功。

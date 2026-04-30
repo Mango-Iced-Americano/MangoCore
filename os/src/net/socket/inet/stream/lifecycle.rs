@@ -278,7 +278,6 @@ impl Inner {
                         socket.abort();
                     }
                 });
-                NET_INTERFACE.poll();
                 Ok(())
             }
             Inner::SelfConnected(sc) => {

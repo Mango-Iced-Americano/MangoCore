@@ -1,7 +1,7 @@
 use crate::net::config::NET_INTERFACE;
 use crate::task::{
-    block_current_and_run_next_with_lock, current_task, suspend_current_and_run_next,
-    wait_with_timeout, WaitQueue,
+    block_current_and_run_next_with_lock, current_task, has_actionable_signal,
+    suspend_current_and_run_next, wait_with_timeout, WaitQueue,
 };
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
@@ -26,12 +26,18 @@ pub fn wait_io_core(mut f: impl FnMut() -> isize, nonblock: bool) -> isize {
                 }
                 suspend_current_and_run_next();
                 let task = current_task().unwrap();
-                let mut inner = task.acquire_inner_lock();
-                if !inner.sigpending.is_empty() {
-                    return -(SyscallErr::EINTR as isize);
+                {
+                    let inner = task.acquire_inner_lock();
+                    if !inner.sigpending.is_empty() {
+                        drop(inner);
+                        if has_actionable_signal(&task) {
+                            return -(SyscallErr::EINTR as isize);
+                        }
+                    } else {
+                        drop(inner);
+                    }
                 }
-                inner.refresh_real_timer();
-                drop(inner);
+                task.acquire_inner_lock().refresh_real_timer();
             }
             v => return v,
         }
@@ -57,8 +63,14 @@ pub fn wait_io_core_with_queue(
                 let task = current_task().unwrap();
                 {
                     let inner = task.acquire_inner_lock();
-                    if !inner.sigpending.difference(inner.sigmask).is_empty() {
-                        return -(SyscallErr::EINTR as isize);
+                    let pending = inner.sigpending.difference(inner.sigmask);
+                    if !pending.is_empty() {
+                        drop(inner);
+                        if has_actionable_signal(&task) {
+                            return -(SyscallErr::EINTR as isize);
+                        }
+                    } else {
+                        drop(inner);
                     }
                 }
                 let mut wait = wait_queue.lock();
@@ -83,11 +95,19 @@ pub fn wait_io_core_with_queue(
                 let task = current_task().unwrap();
                 //结束等待
                 wait_queue.lock().finish_wait(&task);
-                let mut inner = task.acquire_inner_lock();
-                if !inner.sigpending.difference(inner.sigmask).is_empty() {
-                    return -(SyscallErr::EINTR as isize);
+                {
+                    let inner = task.acquire_inner_lock();
+                    let pending = inner.sigpending.difference(inner.sigmask);
+                    if !pending.is_empty() {
+                        drop(inner);
+                        if has_actionable_signal(&task) {
+                            return -(SyscallErr::EINTR as isize);
+                        }
+                    } else {
+                        drop(inner);
+                    }
                 }
-                inner.refresh_real_timer();
+                task.acquire_inner_lock().refresh_real_timer();
             }
             v => return v,
         }

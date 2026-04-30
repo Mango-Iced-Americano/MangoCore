@@ -27,7 +27,6 @@ impl Inner {
             Inner::SelfConnected(sc) => sc.send_slice(buf).map(|n| n as isize),
             Inner::Closed(_) => Err(SyscallErr::EPIPE),
         };
-        NET_INTERFACE.poll_until_quiescent();
         ret
     }
 
@@ -66,7 +65,6 @@ impl Inner {
             Inner::SelfConnected(sc) => sc.recv_into(buf, false).map(|n| n as isize),
             Inner::Closed(_) => Ok(0),
         };
-        NET_INTERFACE.poll_until_quiescent();
         ret
     }
 

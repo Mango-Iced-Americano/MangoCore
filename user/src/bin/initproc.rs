@@ -295,54 +295,54 @@ fn run_selected_groups(environ: &[*const u8], mask: u16) {
 fn run_ltp_network_tests(environ: &[*const u8]) {
     // LTP testcases/bin 中与网络/Socket 相关的测例。
     // 只选独立的 ELF 二进制（不含 .sh 脚本，不含需外部网络服务的测例）。
-    // let net_cases = [
-    //     // ---- Socket 基础 ----
-    //     "accept01",
-    //     "accept02",
-    //     "accept03",
-    //     "accept4_01",
-    //     "bind01",
-    //     "bind02",
-    //     "bind03",
-    //     "bind04",
-    //     "bind05",
-    //     "bind06",
-    //     "connect01",
-    //     "connect02",
-    //     "listen01",
-    //     // ---- 收发数据 ----
-    //     "recv01",
-    //     "recvfrom01",
-    //     "recvmmsg01",
-    //     "recvmsg01",
-    //     "recvmsg02",
-    //     "recvmsg03",
-    //     "send01",
-    //     "send02",
-    //     "sendmmsg01",
-    //     "sendmmsg02",
-    //     "sendmsg01",
-    //     "sendmsg02",
-    //     "sendmsg03",
-    //     "sendto01",
-    //     "sendto02",
-    //     "sendto03",
-    //     // ---- Socket 选项 / 名称 ----
-    //     "getsockname01",
-    //     "getsockopt01",
-    //     "getsockopt02",
-    //     "setsockopt01",
-    //     "setsockopt02",
-    //     "setsockopt03",
-    //     "setsockopt04",
-    //     "setsockopt05",
-    //     // ---- 网络工具 ----
-    //     "add_ipv6addr",
-    //     "check_icmpv4_connectivity",
-    //     "check_icmpv6_connectivity",
-    // ];
+    let net_cases = [
+        // ---- Socket 基础 ----
+        "accept01",
+        "accept02",
+        "accept03",
+        "accept4_01",
+        "bind01",
+        "bind02",
+        "bind03",
+        "bind04",
+        "bind05",
+        "bind06",
+        "connect01",
+        "connect02",
+        "listen01",
+        // ---- 收发数据 ----
+        "recv01",
+        "recvfrom01",
+        "recvmmsg01",
+        "recvmsg01",
+        "recvmsg02",
+        "recvmsg03",
+        "send01",
+        "send02",
+        "sendmmsg01",
+        "sendmmsg02",
+        "sendmsg01",
+        "sendmsg02",
+        "sendmsg03",
+        "sendto01",
+        "sendto02",
+        "sendto03",
+        // ---- Socket 选项 / 名称 ----
+        "getsockname01",
+        "getsockopt01",
+        "getsockopt02",
+        "setsockopt01",
+        "setsockopt02",
+        "setsockopt03",
+        "setsockopt04",
+        "setsockopt05",
+        // ---- 网络工具 ----
+        "add_ipv6addr",
+        "check_icmpv4_connectivity",
+        "check_icmpv6_connectivity",
+    ];
 
-    let net_cases = ["accept4_01"];
+    // let net_cases = ["accept4_01"];
     let testdir = "/musl/ltp/testcases/bin";
 
     println!(
@@ -428,12 +428,12 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     run_bash_cmd(&cmd, &environ); // prepare busybox "symlinks" for test scripts
 
     // run_bash_cmd("cd musl && bash ./iperf_testcode.sh", &environ); // prepare test scripts (chmod +x etc)
-    // run_bash_cmd("cd musl && bash ./netperf_testcode.sh", &environ);
+    run_bash_cmd("cd musl && bash ./netperf_testcode.sh", &environ);
     let cfg = load_runtime_config();
     // ============================================================
     // 直接跑 LTP 网络相关测例（独立 ELF 二进制，跳过 runltp 脚本框架）
     // ============================================================
-    run_ltp_network_tests(&environ);
+    // run_ltp_network_tests(&environ);
 
     // /debug_bash remains the highest-priority emergency switch.
     if cfg.mode == RunMode::Shell {

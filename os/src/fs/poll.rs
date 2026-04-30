@@ -1,3 +1,4 @@
+use crate::task::signal::has_actionable_signal;
 use crate::{
     mm::try_get_from_user, syscall::errno::EFAULT, task::signal::Signals, timer::TimeSpec,
     utils::error::SyscallErr,
@@ -373,14 +374,22 @@ pub fn pselect(
 
         drop(fd_table);
         let task = current_task().unwrap();
-        let inner = task.acquire_inner_lock();
-        if !inner.sigpending.difference(inner.sigmask).is_empty() {
-            interrupted = true;
-            drop(inner);
-            drop(task);
-            break;
+        {
+            let inner = task.acquire_inner_lock();
+            let pending = inner.sigpending.difference(inner.sigmask);
+            if !pending.is_empty() {
+                drop(inner);
+                if has_actionable_signal(&task) {
+                    interrupted = true;
+                    drop(task);
+                    break;
+                }
+                // Pending signal(s) exist but none are actionable (all SIG_IGN/ignore-default)
+                // Don't return EINTR; continue polling.
+            } else {
+                drop(inner);
+            }
         }
-        drop(inner);
         drop(task);
         suspend_current_and_run_next();
     }

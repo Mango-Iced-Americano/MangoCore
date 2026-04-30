@@ -488,6 +488,7 @@ impl Listening {
             .position(|&h| {
                 with_tcp_mut(h, |socket| {
                     socket.state() == smoltcp::socket::tcp::State::Established
+                        || socket.state() == smoltcp::socket::tcp::State::CloseWait
                 })
                 .unwrap_or(false)
             })
@@ -536,10 +537,10 @@ impl Listening {
                 Ordering::Relaxed,
             );
         } else {
-            // pollee.fetch_and(
-            //     !(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM).bits(),
-            //     Ordering::Relaxed,
-            // );
+            pollee.fetch_and(
+                !(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM).bits(),
+                Ordering::Relaxed,
+            );
         }
     }
 

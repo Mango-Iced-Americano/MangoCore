@@ -103,10 +103,10 @@ pub fn block_current_and_run_next_with_lock<T>(lock: MutexGuard<'_, T>) {
     schedule(task_cx_ptr);
 }
 
-//判断该task的sigpending中是否已经有未遮蔽信号
+// 判断该task的sigpending中是否已经有可操作的未遮蔽信号
+// 被忽略的信号（SIG_IGN）或默认动作是忽略的信号（如SIGCHLD）不算
 fn has_unblocked_signal(task: &Arc<TaskControlBlock>) -> bool {
-    let inner = task.acquire_inner_lock();
-    !inner.sigpending.difference(inner.sigmask).is_empty()
+    has_actionable_signal(task)
 }
 
 //等待一段时间直到达到deadline

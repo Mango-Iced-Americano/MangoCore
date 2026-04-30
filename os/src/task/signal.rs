@@ -20,6 +20,7 @@ use crate::task::{block_current_and_run_next, exit_current_and_run_next, exit_gr
 use crate::timer::TimeSpec;
 
 use super::current_task;
+use super::task::TaskControlBlock;
 
 bitflags! {
     /// Signals 枚举
@@ -289,11 +290,13 @@ pub fn sigaction(signum: usize, act: *const SigAction, oldact: *mut SigAction) -
                     return EFAULT;
                 }
                 sigact.mask.remove(Signals::CAN_NOT_BE_MASKED);
-                if !(sigact.handler == SigHandler::SIG_DFL || sigact.handler == SigHandler::SIG_IGN)
-                {
+                if sigact.handler == SigHandler::SIG_IGN {
+                    // Store SIG_IGN explicitly so we can distinguish from SIG_DFL
                     task.sighand.lock()[signum - 1] = Some(Box::new(sigact));
-                } else {
+                } else if sigact.handler == SigHandler::SIG_DFL {
                     task.sighand.lock()[signum - 1] = None;
+                } else {
+                    task.sighand.lock()[signum - 1] = Some(Box::new(sigact));
                 }
                 trace!("[sigaction] *act: {:?}", sigact);
             }
@@ -328,6 +331,58 @@ impl SignalStack {
     }
 }
 
+/// Signals whose SIG_DFL action is to ignore the signal.
+/// These signals should NOT cause EINTR in pselect/ppoll/wait/etc.
+const SIG_DFL_IGNORE: Signals = Signals::from_bits_truncate(
+    Signals::SIGCHLD.bits()
+        | Signals::SIGCONT.bits()
+        | Signals::SIGURG.bits()
+        | Signals::SIGWINCH.bits(),
+);
+
+/// Check whether any pending-unblocked signal has an actionable disposition.
+/// A signal is actionable only if:
+///   - it has a user-registered custom handler, OR
+///   - its SIG_DFL action is NOT "ignore" (i.e. not SIGCHLD/SIGCONT/SIGURG/SIGWINCH)
+/// Signals with SIG_IGN disposition are NOT actionable.
+///
+/// This function is used by pselect/ppoll/wait_io_core/has_unblocked_signal etc.
+/// to decide whether a pending signal should trigger EINTR.
+pub fn has_actionable_signal(task: &TaskControlBlock) -> bool {
+    let inner = task.acquire_inner_lock();
+    let pending = inner.sigpending.difference(inner.sigmask);
+    if pending.is_empty() {
+        return false;
+    }
+    drop(inner);
+
+    let sighand = task.sighand.lock();
+    for signum in 1..=64usize {
+        let signal_bit = match Signals::from_signum(signum) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if !pending.contains(signal_bit) {
+            continue;
+        }
+        match &sighand[signum - 1] {
+            // Registered handler → actionable (unless it's SIG_IGN)
+            Some(act) => {
+                if act.handler != SigHandler::SIG_IGN {
+                    return true;
+                }
+            }
+            // SIG_DFL
+            None => {
+                if !SIG_DFL_IGNORE.contains(signal_bit) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// 执行信号处理
 /// 在从内核返回到用户空间前调用
 pub fn do_signal() {
@@ -345,6 +400,11 @@ pub fn do_signal() {
         let mut sighand = task.sighand.lock();
         // user-defined handler
         if let Some(act) = &sighand[signum - 1] {
+            // SIG_IGN → discard this signal (POSIX: ignored signals are not delivered)
+            if act.handler == SigHandler::SIG_IGN {
+                trace!("[do_signal] Ignore {:?} (SIG_IGN)", signal);
+                continue;
+            }
             let trap_cx = inner.get_trap_cx();
             // if this syscall wants to restart
             if get_exception_cause().is_syscall() && trap_cx.gp.a0 == ERESTART as usize {

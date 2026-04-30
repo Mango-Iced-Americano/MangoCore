@@ -206,7 +206,8 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
     let now = TimeSpec::now();
     // this is a little different with manual (do not consider sigmask)
     // but now we have to compromise
-    if inner.sigpending.is_empty() {
+    // 过滤不可操作的信号（SIG_IGN/SIG_DFL-ignore），避免被忽略信号打断
+    if !has_actionable_signal(&task) && inner.sigpending.is_empty() {
         assert!(end <= now);
         if !rem.is_null() {
             copy_to_user(token, &TimeSpec::new(), rem).unwrap();
