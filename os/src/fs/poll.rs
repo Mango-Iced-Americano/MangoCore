@@ -1,6 +1,6 @@
 use crate::{
-    mm::try_get_from_user, net::config::NET_INTERFACE, syscall::errno::EFAULT,
-    task::signal::Signals, timer::TimeSpec, utils::error::SyscallErr,
+    mm::try_get_from_user, syscall::errno::EFAULT, task::signal::Signals, timer::TimeSpec,
+    utils::error::SyscallErr,
 };
 use alloc::vec::Vec;
 use core::ptr::null_mut;
@@ -9,7 +9,6 @@ use crate::{
     mm::{copy_from_user_array, copy_to_user_array},
     task::{current_task, sigprocmask, suspend_current_and_run_next, SigMaskHow},
 };
-
 ///  A scheduling  scheme  whereby  the  local  process  periodically  checks  until  the  pre-specified events (for example, read, write) have occurred.
 /// The PollFd struct in 32-bit style.
 #[repr(C)]
@@ -314,6 +313,8 @@ pub fn pselect(
     }
 
     let mut done = 0;
+    let mut interrupted = false;
+    let mut error: Option<isize> = None;
     loop {
         let task = current_task().unwrap();
         let fd_table = task.files.lock();
@@ -329,8 +330,13 @@ pub fn pselect(
                         done += 1;
                     }
                 } else {
-                    return -(SyscallErr::EBADF as isize);
+                    error = Some(-(SyscallErr::EBADF as isize));
+                    break;
                 }
+            }
+            if error.is_some() {
+                drop(fd_table);
+                break;
             }
         }
         // check write
@@ -344,8 +350,13 @@ pub fn pselect(
                         done += 1;
                     }
                 } else {
-                    return -(SyscallErr::EBADF as isize);
+                    error = Some(-(SyscallErr::EBADF as isize));
+                    break;
                 }
+            }
+            if error.is_some() {
+                drop(fd_table);
+                break;
             }
         }
         // check exception
@@ -361,9 +372,45 @@ pub fn pselect(
         }
 
         drop(fd_table);
+        let task = current_task().unwrap();
+        let inner = task.acquire_inner_lock();
+        if !inner.sigpending.difference(inner.sigmask).is_empty() {
+            interrupted = true;
+            drop(inner);
+            drop(task);
+            break;
+        }
+        drop(inner);
         drop(task);
         suspend_current_and_run_next();
     }
+
+    // ============================================================
+    // Step 1: Always restore sigmask first, regardless of outcome
+    // ============================================================
+    if !sigmask.is_null() {
+        sigprocmask(
+            SigMaskHow::SIG_SETMASK.bits(),
+            oldsig,
+            null_mut::<Signals>(),
+        );
+    }
+
+    // ============================================================
+    // Step 2: Priority-based result dispatch
+    // ============================================================
+
+    // 1. EBADF / other errors
+    if let Some(err_code) = error {
+        return err_code;
+    }
+
+    // 2. Signal interruption
+    if interrupted {
+        return -(SyscallErr::EINTR as isize);
+    }
+
+    // 3. Normal FD counting
     let task = current_task().unwrap();
     let fd_table = task.files.lock();
     // count read
@@ -395,13 +442,6 @@ pub fn pselect(
     // count exception
     if let Some(exception_fds) = exception_fds {
         *exception_fds = FdSet::empty();
-    }
-    if !sigmask.is_null() {
-        sigprocmask(
-            SigMaskHow::SIG_SETMASK.bits(),
-            oldsig,
-            null_mut::<Signals>(),
-        );
     }
     log::debug!(
         "[pselect] read_fds: {:?}, write_fds: {:?}, exception_fds: {:?}",

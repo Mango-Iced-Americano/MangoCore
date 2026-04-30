@@ -1,7 +1,11 @@
-use super::{AF_INET, AF_INET6};
+use super::PortManager;
+use crate::mm::translated_refmut;
+use crate::net::AF_INET;
+use crate::net::AF_INET6;
+use crate::task::current_task;
+use crate::utils::error::GeneralRet;
 use crate::utils::error::SyscallErr;
 use crate::utils::error::SyscallRet;
-use crate::utils::{error::GeneralRet, random::RNG};
 use core::convert::TryInto;
 use core::mem;
 use core::slice;
@@ -71,8 +75,7 @@ impl From<SocketAddrv4> for IpListenEndpoint {
             } else {
                 IpListenEndpoint {
                     addr: None,
-                    // port: unsafe { RNG.positive_u32() } as u16,
-                    port: (unsafe { RNG.positive_u32() } % 16384 + 49152) as u16,
+                    port: PortManager::alloc_ephemeral_port(),
                 }
             }
         } else {
@@ -149,8 +152,7 @@ impl From<SocketAddrv6> for IpListenEndpoint {
             } else {
                 IpListenEndpoint {
                     addr: None,
-                    // port: unsafe { RNG.positive_u32() as u16 },
-                    port: (unsafe { RNG.positive_u32() } % 16384 + 49152) as u16,
+                    port: PortManager::alloc_ephemeral_port(),
                 }
             }
         } else {
@@ -189,8 +191,7 @@ pub fn _endpoint(addr_buf: &[u8]) -> GeneralRet<IpEndpoint> {
     };
     Ok(IpEndpoint::new(addr, listen_endpoint.port))
 }
-use crate::mm::translated_refmut;
-use crate::net::current_task;
+
 pub fn fill_with_endpoint(endpoint: IpEndpoint, addr: usize, addrlen: usize) -> SyscallRet {
     _fill_with_endpoint(endpoint, addr, addrlen)
 }

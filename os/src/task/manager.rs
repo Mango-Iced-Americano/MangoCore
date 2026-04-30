@@ -3,6 +3,7 @@
     内容与RISCV版本相同，无需修改
 */
 use core::cmp::Ordering;
+use core::sync::atomic::Ordering as AtomicOrdering;
 
 #[cfg(feature = "oom_handler")]
 use crate::config::SYSTEM_TASK_LIMIT;
@@ -537,15 +538,19 @@ impl KernelTimerQueue {
                 generation: _,
             } => {
                 if let Some(task) = task.upgrade() {
+                    // Option A：无条件清除 pending 标志。
+                    // 无论任务是否已被提前唤醒，定时器既已触发，槽位即释放。
+                    task.wait_io_timer_pending.store(false, AtomicOrdering::Release);
+
                     let mut inner = task.acquire_inner_lock();
-                    match inner.task_status {
-                        super::TaskStatus::Interruptible => {
-                            inner.task_status = super::task::TaskStatus::Ready
-                        }
-                        _ => return,
+                    let should_wake = inner.task_status == super::TaskStatus::Interruptible;
+                    if should_wake {
+                        inner.task_status = super::task::TaskStatus::Ready;
                     }
                     drop(inner);
-                    wake_interruptible(task);
+                    if should_wake {
+                        wake_interruptible(task);
+                    }
                 }
             }
             TimerAction::SendSignal {

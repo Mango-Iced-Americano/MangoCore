@@ -24,20 +24,15 @@ use smoltcp::{
 use crate::net::config::NetInterfaceInner;
 use crate::net::{UDP_SOCKETS, UDP_SOCKETS_TO_REMOVE};
 use crate::task::WaitQueue;
-use alloc::collections::VecDeque;
-use alloc::string::String;
-use alloc::sync::Arc;
 use alloc::sync::Weak;
 use alloc::vec::Vec;
 
 pub struct UdpSocket {
     inner: Mutex<UdpSocketInner>,
     socket_handler: SocketHandle,
-    recv_wait: Mutex<WaitQueue>,
-    send_wait: Mutex<WaitQueue>,
+    recv_waiters: Mutex<WaitQueue>,
+    send_waiters: Mutex<WaitQueue>,
 }
-
-use crate::task::manager::WaitQueue;
 
 struct UdpSocketInner {
     remote_endpoint: Option<IpEndpoint>,
@@ -286,41 +281,19 @@ impl Socket for UdpSocket {
     }
 
     fn recv_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
-        Some(&self.recv_wait)
-    }
-
-    fn send_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
-        Some(&self.send_wait)
-    }
-
-    fn recv_ready(&self) -> bool {
-        !self.inner.lock().rx_queue.is_empty()
-    }
-
-    fn send_ready(&self) -> bool {
-        // NET_INTERFACE.udp_socket(self.socket_handler, |socket| socket.can_send())
-        todo!()
-    }
-
-    fn recv_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
-        Some(&self.recv_wait)
-    }
-
-    fn send_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
-        Some(&self.send_wait)
-    }
-
-    fn recv_ready(&self) -> bool {
-        !self.inner.lock().rx_queue.is_empty()
-    }
-
-    fn send_ready(&self) -> bool {
-        // NET_INTERFACE.udp_socket(self.socket_handler, |socket| socket.can_send())
-        todo!()
-    }
-
-    fn recv_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
         Some(&self.recv_waiters)
+    }
+
+    fn send_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(&self.send_waiters)
+    }
+
+    fn recv_ready(&self) -> bool {
+        !self.inner.lock().rx_queue.is_empty()
+    }
+
+    fn send_ready(&self) -> bool {
+        self.socket_w_ready()
     }
 }
 
@@ -349,8 +322,8 @@ impl UdpSocket {
                 reuse_addr: false,
             }),
             socket_handler,
-            recv_wait: Mutex::new(WaitQueue::new()),
-            send_wait: Mutex::new(WaitQueue::new()),
+            recv_waiters: Mutex::new(WaitQueue::new()),
+            send_waiters: Mutex::new(WaitQueue::new()),
         }
     }
     pub fn register_udp_socket(socket: &Arc<Self>) {
@@ -444,7 +417,7 @@ pub fn dispatch_udp_packets(inner: &mut NetInterfaceInner) {
                             .lock()
                             .rx_queue
                             .push_back((buf, meta.endpoint));
-                        target_os_sock.recv_wait.lock().wake_at_most(1);
+                        target_os_sock.recv_waiters.lock().wake_at_most(1);
                     } else {
                         // 如果没人认领这个包（比如 iperf3 已经关了），就丢弃
                         log::warn!(

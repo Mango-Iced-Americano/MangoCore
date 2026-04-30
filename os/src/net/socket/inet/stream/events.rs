@@ -28,5 +28,10 @@ impl Inner {
             }
             Inner::Closed(_) => {}
         }
+        log::info!(
+            "Updated IO events for state: {:?}, pollee: {}",
+            self,
+            pollee.load(core::sync::atomic::Ordering::Relaxed)
+        );
     }
 }

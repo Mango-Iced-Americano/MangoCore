@@ -1,18 +1,30 @@
 use crate::net::{Socket, SocketFile, SocketType, SOCK_TYPE_MASK};
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicU16, Ordering};
 use smoltcp::wire::IpListenEndpoint;
+
+/// 全局端口管理器，对标 Linux 内核的临时端口分配。
+/// 使用全局原子递增计数器，而非 RNG，避免 fork() 后父子进程端口碰撞。
+/// 范围: 49152..=65534（Linux 默认临时端口范围）。
+static NEXT_EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(49152);
+const EPHEMERAL_PORT_MIN: u16 = 49152;
+const EPHEMERAL_PORT_MAX: u16 = 65534;
 
 /// 全局端口管理器，对标 DragonOS `PortManager`。
 /// 本项目单网卡，使用全局单例（静态方法集合）。
 pub struct PortManager;
 
 impl PortManager {
-    /// 分配一个临时端口（ephemeral port），范围 49152..65535。
-    /// 不检查冲突（当前行为与原来一致：TcpSocket::new() 直接用 RNG 分配）。
+    /// 分配一个临时端口（ephemeral port），范围 49152..65534。
+    /// 使用全局原子递增，绕过 fork() 克隆 RNG 状态导致端口碰撞的问题。
     pub fn alloc_ephemeral_port() -> u16 {
-        // 沿用原来的逻辑：不做冲突检查，直接随机
-        let rng = unsafe { crate::utils::random::RNG.positive_u32() };
-        (rng % 16384 + 49152) as u16
+        let port = NEXT_EPHEMERAL_PORT.fetch_add(1, Ordering::Relaxed);
+        if port > EPHEMERAL_PORT_MAX {
+            NEXT_EPHEMERAL_PORT.store(EPHEMERAL_PORT_MIN, Ordering::Relaxed);
+            EPHEMERAL_PORT_MIN
+        } else {
+            port
+        }
     }
 
     /// 检查 fd_table 中是否有其他 socket 与目标 endpoint 冲突（端口已占用）。

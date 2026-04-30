@@ -35,12 +35,13 @@ pub struct NetInterfaceInner<'a> {
 
 impl<'a> NetInterfaceInner<'a> {
     fn new() -> Self {
-        let mut device = Loopback::new(Medium::Ethernet);
+        let mut device = Loopback::new(Medium::Ip);
 
         let now = Instant::from_millis(current_time_duration().as_millis() as i64);
-        let config = Config::new(HardwareAddress::Ethernet(EthernetAddress([
+        /* let config = Config::new(HardwareAddress::Ethernet(EthernetAddress([
             0, 0, 0, 0, 0, 0,
-        ])));
+        ]))); */
+        let config = Config::new(HardwareAddress::Ip);
         let mut iface = Interface::new(config, &mut device, now);
 
         // Only 127.0.0.1/8 — no physical NIC, no default route
@@ -133,14 +134,15 @@ impl<'a> NetInterface<'a> {
     /// Non-blocking poll: skip if the inner lock is already held
     /// (e.g., a syscall handler is already polling).
     /// Safe for use in interrupt contexts — never spins.
-    pub fn try_poll(&self) {
+    pub fn try_poll(&self) -> bool {
         let guard = self.inner.try_lock();
         match guard {
             Some(inner) if inner.is_some() => {
                 drop(inner);
                 self.poll_once();
+                true
             }
-            _ => {} // lock held by another context, or NetInterface not yet initialized
+            _ => false, // lock held by another context, or NetInterface not yet initialized
         }
     }
     fn poll_once(&self) -> bool {
@@ -231,9 +233,9 @@ impl<'a> NetInterface<'a> {
     }
 
     pub fn poll_until_quiescent(&self) {
-        while self.poll_once() {
+        while self.try_poll() {
             // 继续推进，直到没有数据可处理
-            crate::task::suspend_current_and_run_next(); // 可选：避免占着 CPU 不放
+            crate::task::try_yield(); // 可选：避免占着 CPU 不放
         }
     }
     pub fn _poll(&self) {
@@ -299,118 +301,6 @@ impl<'a> NetInterface<'a> {
     pub fn _remove(&self, handler: SocketHandle) {
         if let Some(inner) = self.inner.lock().as_mut() {
             inner.sockets.remove(handler);
-        }
-    }
-}
-
-fn wake_ready_socket_waiters() {
-    {
-        let mut sockets = UDP_SOCKETS.lock();
-        sockets.retain(|socket| socket.strong_count() > 0);
-        for socket in sockets.iter().filter_map(|socket| socket.upgrade()) {
-            if socket.recv_ready() {
-                if let Some(wait) = socket.recv_wait_queue() {
-                    wait.lock().wake_at_most(1);
-                }
-            }
-            if socket.send_ready() {
-                if let Some(wait) = socket.send_wait_queue() {
-                    wait.lock().wake_at_most(1);
-                }
-            }
-        }
-    }
-    {
-        let mut sockets = TCP_SOCKETS.lock();
-        sockets.retain(|socket| socket.strong_count() > 0);
-        for socket in sockets.iter().filter_map(|socket| socket.upgrade()) {
-            if socket.recv_ready() {
-                if let Some(wait) = socket.recv_wait_queue() {
-                    wait.lock().wake_at_most(1);
-                }
-            }
-            if socket.send_ready() {
-                if let Some(wait) = socket.send_wait_queue() {
-                    wait.lock().wake_at_most(1);
-                }
-            }
-            if socket.accept_ready() || socket.connect_ready() {
-                if let Some(wait) = socket.state_wait_queue() {
-                    wait.lock().wake_at_most(1);
-                }
-            }
-        }
-    }
-    {
-        let mut sockets = RAW_SOCKETS.lock();
-        sockets.retain(|socket| socket.strong_count() > 0);
-        for socket in sockets.iter().filter_map(|socket| socket.upgrade()) {
-            if socket.recv_ready() {
-                if let Some(wait) = socket.recv_wait_queue() {
-                    wait.lock().wake_at_most(1);
-                }
-            }
-            if socket.send_ready() {
-                if let Some(wait) = socket.send_wait_queue() {
-                    wait.lock().wake_at_most(1);
-                }
-            }
-        }
-    }
-}
-
-fn wake_ready_socket_waiters() {
-    {
-        let mut sockets = UDP_SOCKETS.lock();
-        sockets.retain(|socket| socket.strong_count() > 0);
-        for socket in sockets.iter().filter_map(|socket| socket.upgrade()) {
-            if socket.recv_ready() {
-                if let Some(wait) = socket.recv_wait_queue() {
-                    wait.lock().wake_at_most(1);
-                }
-            }
-            if socket.send_ready() {
-                if let Some(wait) = socket.send_wait_queue() {
-                    wait.lock().wake_at_most(1);
-                }
-            }
-        }
-    }
-    {
-        let mut sockets = TCP_SOCKETS.lock();
-        sockets.retain(|socket| socket.strong_count() > 0);
-        for socket in sockets.iter().filter_map(|socket| socket.upgrade()) {
-            if socket.recv_ready() {
-                if let Some(wait) = socket.recv_wait_queue() {
-                    wait.lock().wake_at_most(1);
-                }
-            }
-            if socket.send_ready() {
-                if let Some(wait) = socket.send_wait_queue() {
-                    wait.lock().wake_at_most(1);
-                }
-            }
-            if socket.accept_ready() || socket.connect_ready() {
-                if let Some(wait) = socket.state_wait_queue() {
-                    wait.lock().wake_at_most(1);
-                }
-            }
-        }
-    }
-    {
-        let mut sockets = RAW_SOCKETS.lock();
-        sockets.retain(|socket| socket.strong_count() > 0);
-        for socket in sockets.iter().filter_map(|socket| socket.upgrade()) {
-            if socket.recv_ready() {
-                if let Some(wait) = socket.recv_wait_queue() {
-                    wait.lock().wake_at_most(1);
-                }
-            }
-            if socket.send_ready() {
-                if let Some(wait) = socket.send_wait_queue() {
-                    wait.lock().wake_at_most(1);
-                }
-            }
         }
     }
 }

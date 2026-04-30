@@ -28,7 +28,7 @@ use spin::Mutex;
 use crate::net::{address, config::NET_INTERFACE, Socket, SocketFile, SocketType};
 use crate::{
     fs::FileDescriptor,
-    task::{current_task, manager::WaitQueue},
+    task::{current_task, WaitQueue},
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
 };
 
@@ -36,8 +36,8 @@ use self::inner::{
     with_tcp_mut, Connecting, EPollEvent, Established, Init, Listening, SelfConnected, BACKLOG_SIZE,
 };
 use crate::net::socket::inet::common::PortManager;
+use crate::net::socket::inet::stream::inner::ConnectResult;
 use crate::trace_event;
-
 /// TCP Stream Socket —— 对外表现为 Socket trait
 pub struct TcpStreamSocket {
     pub inner: Mutex<Inner>,
@@ -76,6 +76,7 @@ impl TcpStreamSocket {
 
     /// 在 NET_INTERFACE.poll() 之后刷新各状态的事件
     pub fn update_io_events(&self) {
+        // NET_INTERFACE.try_poll();
         let inner = self.inner.lock();
         inner.update_io_events(&self.pollee);
     }
@@ -230,10 +231,33 @@ impl Socket for TcpStreamSocket {
         let inner = self.inner.lock();
         let ret = match &*inner {
             Inner::Connecting(c) => {
+                let state = NET_INTERFACE
+                    .tcp_socket(c.handle, |s| s.state())
+                    .unwrap_or(smoltcp::socket::tcp::State::Closed);
                 let ready = c.update_io_events(&self.pollee);
-                if c.is_connected() || (ready && c.failure_reason().is_some()) {
+                if c.is_connected()
+                    || (ready && c.failure_reason().is_some())
+                    || matches!(
+                        state,
+                        smoltcp::socket::tcp::State::Established
+                            | smoltcp::socket::tcp::State::CloseWait
+                    )
+                {
+                    // 如果 state 已经是已连接状态，但 result 还是 Connecting，强制修正
+                    if matches!(
+                        state,
+                        smoltcp::socket::tcp::State::Established
+                            | smoltcp::socket::tcp::State::CloseWait
+                    ) && !c.is_connected()
+                    {
+                        *c.result.lock() = ConnectResult::Connected;
+                    }
                     drop(inner);
                     self.finish_connecting().map(|v| v as isize)
+                } else if state == smoltcp::socket::tcp::State::Closed {
+                    drop(inner);
+                    let _ = self.finish_connecting(); // 转换状态以触发正确的事件
+                    Err(SyscallErr::ECONNREFUSED)
                 } else {
                     Err(SyscallErr::EAGAIN)
                 }
@@ -401,14 +425,20 @@ impl Socket for TcpStreamSocket {
     }
 
     fn socket_r_ready(&self) -> bool {
-        NET_INTERFACE.poll();
         self.update_io_events();
+        log::info!(
+            "[TcpStreamSocket]Checking if socket is ready for reading, pollee: {}",
+            self.pollee.load(Ordering::Acquire)
+        );
         self.pollee.load(Ordering::Acquire) & EPollEvent::EPOLLIN.bits() != 0
     }
 
     fn socket_w_ready(&self) -> bool {
-        NET_INTERFACE.poll();
         self.update_io_events();
+        log::info!(
+            "[TcpStreamSocket]Checking if socket is ready for writing, pollee: {}",
+            self.pollee.load(Ordering::Acquire)
+        );
         self.pollee.load(Ordering::Acquire) & EPollEvent::EPOLLOUT.bits() != 0
     }
 
@@ -442,16 +472,19 @@ unsafe impl Sync for TcpStreamSocket {}
 
 impl Drop for TcpStreamSocket {
     fn drop(&mut self) {
-        let inner = self.inner.lock();
-        let state_name = match &*inner {
-            Inner::Init(_) => "Init",
-            Inner::Connecting(_) => "Connecting",
-            Inner::Listening(_) => "Listening",
-            Inner::Established(_) => "Established",
-            Inner::SelfConnected(_) => "SelfConnected",
-            Inner::Closed(_) => "Closed",
-        };
-        log::info!("[TcpStreamSocket::drop] state={}", state_name);
-        inner.close();
+        {
+            let inner = self.inner.lock();
+            let state_name = match &*inner {
+                Inner::Init(_) => "Init",
+                Inner::Connecting(_) => "Connecting",
+                Inner::Listening(_) => "Listening",
+                Inner::Established(_) => "Established",
+                Inner::SelfConnected(_) => "SelfConnected",
+                Inner::Closed(_) => "Closed",
+            };
+            log::info!("[TcpStreamSocket::drop] state={}", state_name);
+            inner.close();
+        }
+        NET_INTERFACE.try_poll();
     }
 }

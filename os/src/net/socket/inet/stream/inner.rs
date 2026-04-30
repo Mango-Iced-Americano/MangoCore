@@ -21,8 +21,8 @@ use smoltcp::{
     wire::{IpAddress, IpEndpoint, IpListenEndpoint, IpVersion},
 };
 
+use crate::net::socket::inet::stream::inner::ConnectResult::{Connected, Refused, RefusedConsumed};
 use crate::utils::error::{GeneralRet, SyscallErr};
-
 use spin::Mutex;
 
 // ── TCP Socket 大小常量 ──────────────────────────────────────────────
@@ -363,95 +363,69 @@ impl Connecting {
     /// 此时判定为连接被拒绝（ECONNREFUSED）。
     pub fn update_io_events(&self, pollee: &AtomicUsize) -> bool {
         let ready = with_tcp_mut(self.handle, |socket| {
-            let mut result = self.result.lock();
             let state = socket.state();
-            let state_code = tcp_state_code(&state);
 
-            // 记录是否到达过 Established
+            // 记录“是否曾经进入过 Established/CloseWait”
             if matches!(state, tcp::State::Established | tcp::State::CloseWait) {
                 self.was_established.store(true, Ordering::Relaxed);
             }
-
             let was_established = self.was_established.load(Ordering::Relaxed);
 
-            if !matches!(
-                *result,
-                ConnectResult::Refused | ConnectResult::Connected | ConnectResult::RefusedConsumed
-            ) {
-                if matches!(state, tcp::State::Established | tcp::State::CloseWait) {
-                    *result = ConnectResult::Connected;
-                } else if socket.is_open() {
-                    *result = ConnectResult::Connecting;
-                } else if was_established {
-                    *result = ConnectResult::Connected;
-                } else {
-                    *result = ConnectResult::Refused;
-                }
+            // ── 根据真实状态计算“理想结果” ──
+            let ideal = if matches!(state, tcp::State::Established | tcp::State::CloseWait) {
+                ConnectResult::Connected
+            } else if socket.is_open() {
+                // 注意：is_open() 在 SynSent/FinWait 等状态为 true，这些阶段仍为 Connecting
+                ConnectResult::Connecting
+            } else if was_established {
+                // 曾经建立过，后来关闭（非拒绝）
+                ConnectResult::Connected
+            } else {
+                ConnectResult::Refused
+            };
+
+            // ── 更新 result（唯一例外：不把 RefusedConsumed 降级为 Refused） ──
+            let mut result = self.result.lock();
+            let old = *result;
+            if matches!(old, ConnectResult::RefusedConsumed) && ideal == ConnectResult::Refused {
+                // 已经消费过错误，保持 RefusedConsumed，不要再触发新的错误事件
+            } else {
+                *result = ideal;
             }
 
-            let result_code: u64 = match *result {
-                ConnectResult::Connecting => 0,
-                ConnectResult::Connected => 1,
-                ConnectResult::Refused => 2,
-                ConnectResult::RefusedConsumed => 3,
-            };
-            trace_event!(
-                0xB031,
-                self.handle.as_usize() as u64,
-                state_code,
-                result_code,
-                was_established as u64,
-                socket.may_recv() as u64,
-                socket.may_send() as u64
-            );
-
-            match *result {
+            // ── 根据新的 result 设置 pollee ──
+            let events = match *result {
                 ConnectResult::Connected => {
-                    pollee.fetch_or(
-                        (EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM).bits(),
-                        Ordering::Relaxed,
-                    );
-                    pollee.fetch_and(
-                        !(EPollEvent::EPOLLIN
-                            | EPollEvent::EPOLLERR
-                            | EPollEvent::EPOLLHUP
-                            | EPollEvent::EPOLLRDHUP
-                            | EPollEvent::EPOLLRDNORM)
-                            .bits(),
-                        Ordering::Relaxed,
-                    );
+                    EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM // 可写，无 IN/ERR/HUP
                 }
-                ConnectResult::Refused | ConnectResult::RefusedConsumed => {
-                    let events = (EPollEvent::EPOLLIN
+                ConnectResult::Connecting => {
+                    EPollEvent::empty() // 握手期间所有事件清零
+                }
+                ConnectResult::Refused => {
+                    EPollEvent::EPOLLIN
                         | EPollEvent::EPOLLRDNORM
                         | EPollEvent::EPOLLOUT
                         | EPollEvent::EPOLLWRNORM
                         | EPollEvent::EPOLLHUP
-                        | EPollEvent::EPOLLRDHUP)
-                        .bits();
-                    pollee.fetch_or(events, Ordering::Relaxed);
-                    if matches!(*result, ConnectResult::Refused) {
-                        pollee.fetch_or(EPollEvent::EPOLLERR.bits(), Ordering::Relaxed);
-                    } else {
-                        pollee.fetch_and(!EPollEvent::EPOLLERR.bits(), Ordering::Relaxed);
-                    }
+                        | EPollEvent::EPOLLRDHUP
+                        | EPollEvent::EPOLLERR
                 }
-                ConnectResult::Connecting => {
-                    pollee.fetch_and(
-                        !(EPollEvent::EPOLLIN
-                            | EPollEvent::EPOLLOUT
-                            | EPollEvent::EPOLLERR
-                            | EPollEvent::EPOLLHUP
-                            | EPollEvent::EPOLLRDHUP)
-                            .bits(),
-                        Ordering::Relaxed,
-                    );
+                ConnectResult::RefusedConsumed => {
+                    EPollEvent::EPOLLIN
+                        | EPollEvent::EPOLLRDNORM
+                        | EPollEvent::EPOLLOUT
+                        | EPollEvent::EPOLLWRNORM
+                        | EPollEvent::EPOLLHUP
+                        | EPollEvent::EPOLLRDHUP
+                    // 没有 EPOLLERR，因为错误已经被消费过
                 }
-            }
-            matches!(
-                *result,
-                ConnectResult::Refused | ConnectResult::Connected | ConnectResult::RefusedConsumed
-            )
+            };
+
+            // 原子地替换整个事件集（简单可靠，不依赖旧的位）
+            pollee.store(events.bits(), Ordering::Relaxed);
+
+            // 返回 true 表示当前已经终结（可唤醒等待者）
+            matches!(*result, Connected | Refused | RefusedConsumed)
         });
         ready.unwrap_or(false)
     }
@@ -511,10 +485,15 @@ impl Listening {
         let connected_idx = self
             .handles
             .iter()
-            .position(|&h| with_tcp_mut(h, |socket| socket.is_active()).unwrap_or(false))
+            .position(|&h| {
+                with_tcp_mut(h, |socket| {
+                    socket.state() == smoltcp::socket::tcp::State::Established
+                })
+                .unwrap_or(false)
+            })
             .ok_or(SyscallErr::EAGAIN)?;
         log::info!(
-            "[TCP::accept] found active connection on listen socket handle {}, retrieving remote endpoint",
+            "[TCP::accept] found established connection on listen socket handle {}, retrieving remote endpoint",
             self.handles[connected_idx]
         );
         let connected = &mut self.handles[connected_idx];
@@ -557,10 +536,10 @@ impl Listening {
                 Ordering::Relaxed,
             );
         } else {
-            pollee.fetch_and(
-                !(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM).bits(),
-                Ordering::Relaxed,
-            );
+            // pollee.fetch_and(
+            //     !(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM).bits(),
+            //     Ordering::Relaxed,
+            // );
         }
     }
 

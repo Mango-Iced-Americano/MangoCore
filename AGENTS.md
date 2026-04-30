@@ -658,10 +658,21 @@ impl NetworkDevice for MyNetDev { ... }
 
 ## 调试与性能分析
 
+### ⚠️ 前置说明
+
+**宿主机上工具链不全**（缺少 riscv64/larch64 gcc、QEMU、GDB 等），所有编译、运行、调试操作**必须在 Docker 容器内进行**。
+
+```bash
+# 在项目根目录进入 Docker 容器
+make docker
+```
+
+进入容器后默认在 `/os` 工作目录，可直接执行以下所有命令。
+
 ### 日志级别
 
 ```bash
-# 用不同日志级别编译
+# 在 Docker 容器内用不同日志级别编译内核
 cd os && LOG=info  make rv64-kernel-build-only
 cd os && LOG=debug make rv64-kernel-build-only
 cd os && LOG=trace make rv64-kernel-build-only
@@ -670,7 +681,7 @@ cd os && LOG=trace make rv64-kernel-build-only
 ### 分析 Syscall 追踪
 
 ```bash
-# 以 LOG=info 运行，用 grep 过滤 syscall 模式
+# 在 Docker 容器内以 LOG=info 运行，用 grep 过滤 syscall 模式
 cd os && LOG=info make rv64-run 2>&1 | grep "\[syscall\]" | head -100
 
 # 聚焦特定 PID
@@ -679,18 +690,20 @@ cd os && LOG=info make rv64-run 2>&1 | grep "pid 4:"
 
 ### QEMU 调试
 
+> QEMU 和 GDB 只在 Docker 容器内可用，以下命令需在容器内执行。
+
 ```bash
-# Debug 编译
+# Debug 编译（容器内）
 cd os && make rv64-debug
 
-# 配合 gdb
+# 配合 gdb（容器内）
 cd os && make rv64-gdb
 
-# QEMU monitor
+# QEMU monitor — 手动启动调试会话
 qemu-system-riscv64 -machine virt -kernel kernel-rv -S -s &
 riscv64-unknown-elf-gdb kernel-rv -ex "target remote :1234"
 
-# IRQ 追踪
+# IRQ 追踪（容器内）
 qemu-system-riscv64 -d int -no-reboot -serial stdio -kernel kernel-rv
 ```
 
@@ -705,6 +718,7 @@ qemu-system-riscv64 -d int -no-reboot -serial stdio -kernel kernel-rv
 - 新模块或重构 → 更新**模块地图** / **架构详解**
 - 编码规范 → 更新**编码规范**
 - 代码修改 → 记录到 `WORK_LOG.md`
+- 经验教训 → 记录到 `EXPERIENCE.md`
 
 ### 工作日志（`WORK_LOG.md`）
 
@@ -733,3 +747,24 @@ qemu-system-riscv64 -d int -no-reboot -serial stdio -kernel kernel-rv
 ```
 
 保持条目简洁实用。使用代码库中的真实文件路径和函数名。
+
+### 经验档案（`EXPERIENCE.md`）
+
+`EXPERIENCE.md` 是**AI 助手的跨对话经验档案**（已加入 `.gitignore`，不会被提交），用于累积每次工作中发现的重要经验、教训和最佳实践。
+
+**AI 助手每次工作完成后，必须检视本次工作是否有值得记录的通用经验：**
+1. 有则追加到 `EXPERIENCE.md` 对应分类下
+2. 分类包括：编译、网络栈、内存管理、文件系统、任务/进程、调试技巧、架构决策等
+3. 条目格式：`[问题/现象] → [根因] → [解决方案/教训]`
+4. 定期去重、合并同类条目
+
+**示例：**
+```markdown
+## 网络栈
+
+- 在 `wait_io` 外调用 `try_recv` 返回 EAGAIN → 因为缺少 `NET_INTERFACE.poll()` → 确保 `wait_io` 或 `socket_r_ready` 负责调用 `poll()`
+```
+
+与 `WORK_LOG.md` 的区别：
+- `WORK_LOG.md` 按日期记录「本次改了啥」
+- `EXPERIENCE.md` 按主题记录「学到了啥」，供将来复用

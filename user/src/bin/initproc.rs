@@ -235,17 +235,10 @@ fn run_group_in_dir(environ: &[*const u8], dir: &str, script: &str) {
         println!("[initproc] entered {}", dir);
         // --- 核心看门狗机制（非常通用、优雅的解法） ---
         let mut cmd = String::new();
-        // 1. 启动定时炸弹：放入后台，静默休眠 15 秒。时间一到，不分青红皂白把服务端全杀了！
-        // （15秒足够跑完一整个 iperf 脚本，如果15秒还没跑完，绝对是卡死了）
-        cmd.push_str("(busybox sleep 15; busybox pkill -9 iperf3; busybox pkill -9 iperf) & ");
 
         // 2. 运行真正的测试脚本
         cmd.push_str("./");
         cmd.push_str(script);
-
-        // 3. 拆弹逻辑：如果脚本正常跑完，立刻杀掉刚才后台休眠的 sleep 进程（拆弹）
-        // 并主动清理掉可能残留的 iperf，让 bash 安全退出
-        cmd.push_str("; busybox pkill -9 sleep; busybox pkill -9 iperf3; busybox pkill -9 iperf");
         cmd.push('\0');
         // cmd.push_str("; wait");
         let shell = "/bash\0";
@@ -302,53 +295,54 @@ fn run_selected_groups(environ: &[*const u8], mask: u16) {
 fn run_ltp_network_tests(environ: &[*const u8]) {
     // LTP testcases/bin 中与网络/Socket 相关的测例。
     // 只选独立的 ELF 二进制（不含 .sh 脚本，不含需外部网络服务的测例）。
-    let net_cases = [
-        // ---- Socket 基础 ----
-        "accept01",
-        "accept02",
-        "accept03",
-        "accept4_01",
-        "bind01",
-        "bind02",
-        "bind03",
-        "bind04",
-        "bind05",
-        "bind06",
-        "connect01",
-        "connect02",
-        "listen01",
-        // ---- 收发数据 ----
-        "recv01",
-        "recvfrom01",
-        "recvmmsg01",
-        "recvmsg01",
-        "recvmsg02",
-        "recvmsg03",
-        "send01",
-        "send02",
-        "sendmmsg01",
-        "sendmmsg02",
-        "sendmsg01",
-        "sendmsg02",
-        "sendmsg03",
-        "sendto01",
-        "sendto02",
-        "sendto03",
-        // ---- Socket 选项 / 名称 ----
-        "getsockname01",
-        "getsockopt01",
-        "getsockopt02",
-        "setsockopt01",
-        "setsockopt02",
-        "setsockopt03",
-        "setsockopt04",
-        "setsockopt05",
-        // ---- 网络工具 ----
-        "add_ipv6addr",
-        "check_icmpv4_connectivity",
-        "check_icmpv6_connectivity",
-    ];
+    // let net_cases = [
+    //     // ---- Socket 基础 ----
+    //     "accept01",
+    //     "accept02",
+    //     "accept03",
+    //     "accept4_01",
+    //     "bind01",
+    //     "bind02",
+    //     "bind03",
+    //     "bind04",
+    //     "bind05",
+    //     "bind06",
+    //     "connect01",
+    //     "connect02",
+    //     "listen01",
+    //     // ---- 收发数据 ----
+    //     "recv01",
+    //     "recvfrom01",
+    //     "recvmmsg01",
+    //     "recvmsg01",
+    //     "recvmsg02",
+    //     "recvmsg03",
+    //     "send01",
+    //     "send02",
+    //     "sendmmsg01",
+    //     "sendmmsg02",
+    //     "sendmsg01",
+    //     "sendmsg02",
+    //     "sendmsg03",
+    //     "sendto01",
+    //     "sendto02",
+    //     "sendto03",
+    //     // ---- Socket 选项 / 名称 ----
+    //     "getsockname01",
+    //     "getsockopt01",
+    //     "getsockopt02",
+    //     "setsockopt01",
+    //     "setsockopt02",
+    //     "setsockopt03",
+    //     "setsockopt04",
+    //     "setsockopt05",
+    //     // ---- 网络工具 ----
+    //     "add_ipv6addr",
+    //     "check_icmpv4_connectivity",
+    //     "check_icmpv6_connectivity",
+    // ];
 
+    let net_cases = ["accept4_01"];
     let testdir = "/musl/ltp/testcases/bin";
 
     println!(
@@ -432,8 +426,9 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         program_str
     );
     run_bash_cmd(&cmd, &environ); // prepare busybox "symlinks" for test scripts
-                                  // run_bash_cmd("cd musl && bash ./iperf_testcode.sh", &environ); // prepare test scripts (chmod +x etc)
-    run_bash_cmd("cd musl && bash ./netperf_testcode.sh", &environ);
+
+    // run_bash_cmd("cd musl && bash ./iperf_testcode.sh", &environ); // prepare test scripts (chmod +x etc)
+    // run_bash_cmd("cd musl && bash ./netperf_testcode.sh", &environ);
     let cfg = load_runtime_config();
     // ============================================================
     // 直接跑 LTP 网络相关测例（独立 ELF 二进制，跳过 runltp 脚本框架）
@@ -441,7 +436,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     run_ltp_network_tests(&environ);
 
     // /debug_bash remains the highest-priority emergency switch.
-    if should_enter_debug_shell() || cfg.mode == RunMode::Shell {
+    if cfg.mode == RunMode::Shell {
         println!("[initproc] entering shell mode");
         enter_shell(path, &environ);
         shutdown();

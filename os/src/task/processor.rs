@@ -56,6 +56,7 @@ lazy_static! {
 pub fn run_tasks() {
     loop {
         crate::trace::try_dump_from("schedule");
+        NET_INTERFACE.try_poll();
         // 获取全局处理器对象
         let mut processor = PROCESSOR.lock();
         // 尝试从全局变量 TASK_MANAGER 中取出一个任务

@@ -269,6 +269,8 @@ pub fn sys_setitimer(
                         inner.real_timer_deadline = Some(deadline);
                         register_timer = Some((deadline, inner.real_timer_generation));
                     }
+                    // 更新锚点，防止 refresh_real_timer() 用陈旧锚点误触发 SIGALRM
+                    inner.clock.last_real_timer_update = TimeVal::now();
                 }
             }
             if let Some((deadline, generation)) = register_timer {

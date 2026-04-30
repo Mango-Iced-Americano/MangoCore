@@ -19,11 +19,13 @@ use crate::{
 use crate::utils::error::SyscallErr;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use smoltcp::socket;
 
 use crate::syscall::utils::{wait_io, wait_io_with_queue};
 use log::info;
 use smoltcp::wire::IpListenEndpoint;
 
+const MAX_ADDR_LEN: usize = 512; // sockaddr 通常很小，512 已经极度宽容了
 /// level
 const SOL_SOCKET: u32 = 1;
 const SOL_TCP: u32 = 6;
@@ -91,6 +93,14 @@ impl MsgFlags {
     }
 }
 
+fn check_addrlen(addrlen: u32) -> Result<(), SyscallErr> {
+    if addrlen > MAX_ADDR_LEN as u32 {
+        Err(SyscallErr::EINVAL)
+    } else {
+        Ok(())
+    }
+}
+
 pub fn sys_socket(domain: u32, socket_type: u32, protocol: u32) -> isize {
     info!(
         "[sys_socket] domain: {}, type: {}, protocol: {}",
@@ -110,6 +120,10 @@ pub fn sys_socket(domain: u32, socket_type: u32, protocol: u32) -> isize {
 }
 
 pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize {
+    match check_addrlen(addrlen) {
+        Ok(_) => {}
+        Err(e) => return -(e as isize),
+    }
     let addr_buf = trans_ref!(addr, addrlen);
     let socket = get_socket!(sockfd);
     let endpoint = match address::listen_endpoint(addr_buf) {
@@ -141,7 +155,7 @@ pub fn sys_accept(sockfd: u32, addr: usize, addrlen: usize) -> isize {
     };
     let is_nonblock = socket_file.get_nonblock();
 
-    if let Some(wait_queue) = socket.state_wait_queue() {
+    if let Some(wait_queue) = socket.accept_wait_queue() {
         wait_io_with_queue(
             || socket.accept(sockfd, addr, addrlen).map(|s| s as isize),
             is_nonblock,
@@ -188,6 +202,10 @@ pub fn sys_accept4(sockfd: u32, addr: usize, addrlen: usize, flags: u32) -> isiz
 }
 
 pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
+    match check_addrlen(addrlen) {
+        Ok(_) => {}
+        Err(e) => return -(e as isize),
+    }
     let addr_buf = trans_ref!(addr, addrlen);
     let socket = get_socket!(sockfd);
     let task = current_task().unwrap();
@@ -207,7 +225,7 @@ pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
     }
 
     // 握手未完成，进入等待队列等待状态变化
-    if let Some(wait_queue) = socket.state_wait_queue() {
+    if let Some(wait_queue) = socket.connect_wait_queue() {
         wait_io_with_queue(
             || socket.try_connect(),
             is_nonblock,
@@ -676,17 +694,17 @@ pub fn sys_sendmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
     let socket = get_socket!(sockfd);
     match socket.socket_type() {
         SocketType::SOCK_DGRAM => wait_io(|| socket.try_sendmsg(&buf, dest_addr), is_nonblock),
-        SocketType::SOCK_STREAM => wait_socket_io(
-            || socket.try_sendmsg(&buf, None),
-            socket.send_wait_queue(),
-            is_nonblock,
-        ),
+        SocketType::SOCK_STREAM => {
+            let wq = socket.send_wait_queue().unwrap();
+            wait_io_with_queue(
+                || socket.try_sendmsg(&buf, None),
+                is_nonblock,
+                wq,
+                || socket.send_ready(),
+            )
+        }
         SocketType::SOCK_RAW => wait_io(|| socket.try_sendmsg(&buf, dest_addr), is_nonblock),
-        _ => wait_socket_io(
-            || socket.try_sendmsg(&buf, dest_addr),
-            socket.send_wait_queue(),
-            is_nonblock,
-        ),
+        _ => wait_io(|| socket.try_sendmsg(&buf, dest_addr), is_nonblock),
     }
 }
 
@@ -722,11 +740,16 @@ pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
     let mut buf = alloc::vec![0u8; total_len];
 
     let socket = get_socket!(sockfd);
-    let ret = wait_socket_io(
-        || socket.try_recvmsg(&mut buf).map(|(n, _)| n),
-        socket.recv_wait_queue(),
-        is_nonblock,
-    );
+    let ret = if let Some(wq) = socket.recv_wait_queue() {
+        wait_io_with_queue(
+            || socket.try_recvmsg(&mut buf).map(|(n, _)| n),
+            is_nonblock,
+            wq,
+            || socket.recv_ready(),
+        )
+    } else {
+        wait_io(|| socket.try_recvmsg(&mut buf).map(|(n, _)| n), is_nonblock)
+    };
 
     if ret < 0 {
         return ret;

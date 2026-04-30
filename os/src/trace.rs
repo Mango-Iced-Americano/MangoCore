@@ -141,7 +141,13 @@ fn inner_event(tag: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64, 
         arg5,
         arg6,
     };
-    TRACE.lock().push(entry);
+    match TRACE.try_lock() {
+        Some(mut ring) => ring.push(entry),
+        None => {
+            // If we can't acquire the lock, it means a dump is in progress.
+            // We can safely skip recording this event since the dump will read the old entries anyway.
+        }
+    }
 }
 
 /// Decode a tag to a human-readable short label.
@@ -243,7 +249,13 @@ fn inner_dump() {
 }
 
 fn inner_clear() {
-    TRACE.lock().clear();
+    match TRACE.try_lock() {
+        Some(mut ring) => ring.clear(),
+        None => {
+            // If we can't acquire the lock, it means a dump is in progress.
+            // We can safely skip clearing since the dump will read the old entries anyway.
+        }
+    }
 }
 
 // ── Public API ────────────────────────────────────────────────

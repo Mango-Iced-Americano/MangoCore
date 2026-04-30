@@ -21,6 +21,7 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
+use core::sync::atomic::{AtomicBool, Ordering};
 use log::trace;
 use spin::{Mutex, MutexGuard};
 
@@ -64,6 +65,12 @@ pub struct TaskControlBlock {
     pub sighand: Arc<Mutex<Vec<Option<Box<SigAction>>>>>,
     /// 快速用户空间互斥锁
     pub futex: Arc<Mutex<Futex>>,
+
+    /// I/O 等待定时器是否已挂入 KERNEL_TIMER_QUEUE。
+    /// 为 true 时，wait_io_core_with_queue 不再添加第二个定时器（Option B），
+    /// 防止在 log=off 的高频 loopback accept/connect 循环中 KERNEL_TIMER_QUEUE 无限增长。
+    /// 定时器触发后，run_timer 会无条件清回 false（Option A）。
+    pub wait_io_timer_pending: AtomicBool,
 }
 
 /// 任务控制块内部状态
@@ -308,8 +315,7 @@ impl TaskControlBlockInner {
         log::debug!("real_timer refreshing...");
         self.update_itimer_real_if_exists(diff);
         // 更新锚点，防止重复计算
-        self.clock.last_real_timer_update = now; 
-        
+        self.clock.last_real_timer_update = now;
     }
 }
 
@@ -398,6 +404,7 @@ impl TaskControlBlock {
                 vec
             })),
             futex: Arc::new(Mutex::new(Futex::new())),
+            wait_io_timer_pending: AtomicBool::new(false),
             inner: Mutex::new(TaskControlBlockInner {
                 sigmask: Signals::empty(),
                 sigpending: Signals::empty(),
@@ -447,20 +454,20 @@ impl TaskControlBlock {
         log::trace!("[load_elf] ELF file mapped");
 
         // 为 glibc 分配用户 heap 空间（0x1c0000 ~ 0x1c4000）
-        use crate::mm::{VirtAddr, MapPermission};
+        use crate::mm::{MapPermission, VirtAddr};
 
         let page_size = 0x1000;
         let heap_start = align_up(program_break, page_size);
         let heap_end = heap_start + 0x20000; // 64KiB
         memory_set.insert_framed_area(
-    VirtAddr::from(heap_start),
-    VirtAddr::from(heap_end),
-    MapPermission::R | MapPermission::W | MapPermission::U,
+            VirtAddr::from(heap_start),
+            VirtAddr::from(heap_end),
+            MapPermission::R | MapPermission::W | MapPermission::U,
         );
         log::info!(
-        "[load_elf] mapped user heap from program_break: {:#x} ~ {:#x}",
-        heap_start,
-        heap_end
+            "[load_elf] mapped user heap from program_break: {:#x} ~ {:#x}",
+            heap_start,
+            heap_end
         );
 
         // 清除临时映射
@@ -629,6 +636,7 @@ impl TaskControlBlock {
                 // maybe should do clone here?
                 Arc::new(Mutex::new(Futex::new()))
             },
+            wait_io_timer_pending: AtomicBool::new(false),
             inner: Mutex::new(TaskControlBlockInner {
                 // inherited
                 pgid: parent_inner.pgid,
