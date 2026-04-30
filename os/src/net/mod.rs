@@ -87,6 +87,7 @@ pub static UDP_SOCKETS_TO_REMOVE: Mutex<Vec<SocketHandle>> = Mutex::new(Vec::new
 pub static TCP_SOCKETS: Mutex<Vec<Weak<TcpStreamSocket>>> = Mutex::new(Vec::new());
 pub static TCP_SOCKETS_TO_REMOVE: Mutex<Vec<SocketHandle>> = Mutex::new(Vec::new());
 
+
 // raw
 pub static RAW_SOCKETS: Mutex<Vec<(SocketHandle, Weak<RawSocket>)>> = Mutex::new(Vec::new());
 pub static RAW_SOCKETS_TO_REMOVE: Mutex<Vec<SocketHandle>> = Mutex::new(Vec::new());
@@ -161,6 +162,62 @@ pub trait Socket: Send + Sync {
     /// poll/select 相关：是否挂起
     fn socket_hang_up(&self) -> bool {
         false
+    }
+
+    fn recv_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        None
+    }
+
+    fn send_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        None
+    }
+
+    fn state_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        None
+    }
+
+    fn recv_ready(&self) -> bool {
+        self.socket_r_ready()
+    }
+
+    fn send_ready(&self) -> bool {
+        self.socket_w_ready()
+    }
+
+    fn accept_ready(&self) -> bool {
+        self.socket_r_ready()
+    }
+
+    fn connect_ready(&self) -> bool {
+        self.socket_w_ready()
+    }
+
+    fn recv_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        None
+    }
+
+    fn send_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        None
+    }
+
+    fn state_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        None
+    }
+
+    fn recv_ready(&self) -> bool {
+        self.socket_r_ready()
+    }
+
+    fn send_ready(&self) -> bool {
+        self.socket_w_ready()
+    }
+
+    fn accept_ready(&self) -> bool {
+        self.socket_r_ready()
+    }
+
+    fn connect_ready(&self) -> bool {
+        self.socket_w_ready()
     }
 
     /// 获取接收等待队列引用（用于事件驱动阻塞）

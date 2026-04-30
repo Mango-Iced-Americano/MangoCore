@@ -39,21 +39,37 @@ impl ActiveTracker {
         bitmap.resize(len, 0);
         Self { bitmap }
     }
+    /// 确保位图可以容纳指定 pid
+    pub fn ensure_capacity(&mut self, pid: usize) {
+        let word = pid / 64;
+        if word >= self.bitmap.len() {
+            self.bitmap.resize(word + 1, 0);
+        }
+    }
     /// 检查制定pid的任务是否处于激活状态
     pub fn check_active(&self, pid: usize) -> bool {
-        (self.bitmap[pid / 64] & (1 << (pid % 64))) != 0
+        let word = pid / 64;
+        if word >= self.bitmap.len() {
+            return false;
+        }
+        (self.bitmap[word] & (1 << (pid % 64))) != 0
     }
     /// 检查制定pid的任务是否处于非激活状态
     pub fn check_inactive(&self, pid: usize) -> bool {
-        (self.bitmap[pid / 64] & (1 << (pid % 64))) == 0
+        !self.check_active(pid)
     }
     /// 标记指定pid的任务为激活状态
     pub fn mark_active(&mut self, pid: usize) {
+        self.ensure_capacity(pid);
         self.bitmap[pid / 64] |= 1 << (pid % 64)
     }
     /// 标记指定pid的任务为非激活状态
     pub fn mark_inactive(&mut self, pid: usize) {
-        self.bitmap[pid / 64] &= !(1 << (pid % 64))
+        let word = pid / 64;
+        if word >= self.bitmap.len() {
+            return;
+        }
+        self.bitmap[word] &= !(1 << (pid % 64))
     }
 }
 
@@ -342,6 +358,11 @@ impl WaitQueue {
         // 将task添加到back端
         self.inner.push_back(task);
     }
+    fn contains_task(&self, task: &Arc<TaskControlBlock>) -> bool {
+        self.inner
+            .iter()
+            .any(|task_in_queue| Weak::as_ptr(task_in_queue) == Arc::as_ptr(task))
+    }
     /// 这个函数会尝试从`WaitQueue`中弹出一个`task`，但是不会唤醒它
     pub fn pop_task(&mut self) -> Option<Weak<TaskControlBlock>> {
         // 将front端的任务弹出
@@ -411,6 +432,28 @@ impl WaitQueue {
             }
         }
         cnt
+    }
+    pub fn prepare_to_wait(&mut self, task: Weak<TaskControlBlock>) {
+        match task.upgrade() {
+            Some(task) => {
+                let mut task_inner = task.acquire_inner_lock();
+                task_inner.task_status = super::TaskStatus::Interruptible;
+                drop(task_inner);
+                if self.contains_task(&task) {
+                    return;
+                }
+            }
+            None => return, // 不会发生
+        }
+        self.add_task(task);
+    }
+    pub fn finish_wait(&mut self, task: &Arc<TaskControlBlock>) {
+        self.inner
+            .retain(|task_in_queue| Weak::as_ptr(task_in_queue) != Arc::as_ptr(task));
+        let mut task_inner = task.acquire_inner_lock();
+        if task_inner.task_status == super::TaskStatus::Interruptible {
+            task_inner.task_status = super::TaskStatus::Ready;
+        }
     }
 }
 

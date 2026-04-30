@@ -1,12 +1,19 @@
 #![allow(unused)]
 
-use crate::net::{Mutex, Socket};
-use crate::task::manager::WaitQueue;
+use super::{Mutex, Socket};
 use crate::{
-    net::{config::NET_INTERFACE, MAX_BUFFER_SIZE, SHUT_WR},
+    fs::{
+        directory_tree::DirectoryTreeNode,
+        dirent::Dirent,
+        fat32::{DiskInodeType, PageCache},
+        file_trait::File,
+        OpenFlags, SeekWhence, Stat,
+    },
+    mm::UserBuffer,
+    net::{config::NET_INTERFACE, MAX_BUFFER_SIZE, RAW_SOCKETS, SHUT_WR},
     task::{
         block_current_and_run_next, suspend_current_and_run_next, wait_interruptible,
-        wait_interruptible_timeout,
+        wait_interruptible_timeout, WaitQueue,
     },
     timer::TimeSpec,
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
@@ -26,7 +33,8 @@ use smoltcp::{
 pub struct RawSocket {
     inner: Mutex<RawSocketInner>,
     socket_handler: SocketHandle,
-    pub(crate) recv_waiters: Mutex<WaitQueue>,
+    recv_wait: Mutex<WaitQueue>,
+    send_wait: Mutex<WaitQueue>,
 }
 
 #[allow(unused)]
@@ -199,7 +207,21 @@ impl Socket for RawSocket {
     }
 
     fn recv_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
-        Some(&self.recv_waiters)
+        Some(&self.recv_wait)
+    }
+
+    fn send_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(&self.send_wait)
+    }
+
+    fn recv_ready(&self) -> bool {
+        //NET_INTERFACE.raw_socket(self.socket_handler, |socket| socket.can_recv())
+        todo!()
+    }
+
+    fn send_ready(&self) -> bool {
+        // NET_INTERFACE.raw_socket(self.socket_handler, |socket| socket.can_send())
+        todo!()
     }
 }
 
@@ -235,10 +257,17 @@ impl RawSocket {
             inner: Mutex::new(inner),
             recv_waiters: Mutex::new(WaitQueue::new()),
             socket_handler,
+            recv_wait: Mutex::new(WaitQueue::new()),
+            send_wait: Mutex::new(WaitQueue::new()),
         }
+    }
+
+    pub fn register_raw_socket(socket: &Arc<Self>) {
+        RAW_SOCKETS.lock().push(Arc::downgrade(socket));
     }
 }
 
+impl_file_for_socket!(RawSocket);
 impl RawSocket {
     /// 注册 raw socket 到全局表，供 wake_raw_waiters 使用
     pub fn register_raw_socket(socket: &Arc<Self>) {

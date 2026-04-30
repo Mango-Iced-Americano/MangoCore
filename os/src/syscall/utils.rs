@@ -1,9 +1,14 @@
 use crate::net::config::NET_INTERFACE;
-use crate::task::manager::WaitQueue;
-use crate::task::{block_current_and_run_next, current_task, suspend_current_and_run_next};
+use crate::task::{
+    block_current_and_run_next_with_lock, current_task, suspend_current_and_run_next,
+    wait_with_timeout, WaitQueue,
+};
+use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
 use alloc::sync::Arc;
 use spin::Mutex;
+
+const WAIT_IO_QUEUE_FALLBACK_MS: usize = 10;
 
 /// 通用的阻塞 I/O 等待循环核心（与具体设备无关）。
 /// `f` 返回 isize: >=0 表示成功字节数，<0 表示 -errno（as_errno_ret 编码）。
@@ -30,6 +35,152 @@ pub fn wait_io_core(mut f: impl FnMut() -> isize, nonblock: bool) -> isize {
             v => return v,
         }
     }
+}
+
+// 加入等待队列的阻塞唤醒
+// wait_queue: 传入的等待队列
+// cond：唤醒条件
+pub fn wait_io_core_with_queue(
+    mut f: impl FnMut() -> isize,
+    nonblock: bool,
+    wait_queue: &Mutex<WaitQueue>,
+    mut cond: impl FnMut() -> bool,
+) -> isize {
+    loop {
+        match f() {
+            v if v >= 0 => return v,
+            v if v == -(SyscallErr::EAGAIN as isize) => {
+                if nonblock {
+                    return v;
+                }
+                let task = current_task().unwrap();
+                {
+                    let inner = task.acquire_inner_lock();
+                    if !inner.sigpending.difference(inner.sigmask).is_empty() {
+                        return -(SyscallErr::EINTR as isize);
+                    }
+                }
+                let mut wait = wait_queue.lock();
+                wait.prepare_to_wait(Arc::downgrade(&task));
+                // 如果已经满足条件，就不睡了，回到loop重试f()
+                if cond() {
+                    wait.finish_wait(&task);
+                    continue;
+                }
+                // 兜底
+                wait_with_timeout(
+                    Arc::downgrade(&task),
+                    TimeSpec::now() + TimeSpec::from_ms(WAIT_IO_QUEUE_FALLBACK_MS),
+                );
+                drop(task);
+                block_current_and_run_next_with_lock(wait);
+                // 从wake_at_most()回来
+                let task = current_task().unwrap();
+                //结束等待
+                wait_queue.lock().finish_wait(&task);
+                let mut inner = task.acquire_inner_lock();
+                if !inner.sigpending.difference(inner.sigmask).is_empty() {
+                    return -(SyscallErr::EINTR as isize);
+                }
+                inner.refresh_real_timer();
+            }
+            v => return v,
+        }
+    }
+}
+
+/// 网络 I/O 等待循环，EAGAIN 时挂入指定等待队列。
+pub fn wait_io_with_queue<T: Into<isize>>(
+    mut f: impl FnMut() -> Result<T, SyscallErr>,
+    nonblock: bool,
+    wait_queue: &Mutex<WaitQueue>,
+    cond: impl FnMut() -> bool,
+) -> isize {
+    wait_io_core_with_queue(
+        || {
+            NET_INTERFACE.poll();
+            match f() {
+                Ok(v) => v.into(),
+                Err(e) => -(e as isize),
+            }
+        },
+        nonblock,
+        wait_queue,
+        cond,
+    )
+}
+
+/// 加入等待队列的阻塞唤醒
+/// wait_queue: 传入的等待队列
+/// cond：唤醒条件
+pub fn wait_io_core_with_queue(
+    mut f: impl FnMut() -> isize,
+    nonblock: bool,
+    wait_queue: &Mutex<WaitQueue>,
+    mut cond: impl FnMut() -> bool,
+) -> isize {
+    loop {
+        match f() {
+            v if v >= 0 => return v,
+            v if v == -(SyscallErr::EAGAIN as isize) => {
+                if nonblock {
+                    return v;
+                }
+                let task = current_task().unwrap();
+                {
+                    let inner = task.acquire_inner_lock();
+                    if !inner.sigpending.difference(inner.sigmask).is_empty() {
+                        return -(SyscallErr::EINTR as isize);
+                    }
+                }
+                let mut wait = wait_queue.lock();
+                wait.prepare_to_wait(Arc::downgrade(&task));
+                // 如果已经满足条件，就不睡了，回到loop重试f()
+                if cond() {
+                    wait.finish_wait(&task);
+                    continue;
+                }
+                // 兜底
+                wait_with_timeout(
+                    Arc::downgrade(&task),
+                    TimeSpec::now() + TimeSpec::from_ms(WAIT_IO_QUEUE_FALLBACK_MS),
+                );
+                drop(task);
+                block_current_and_run_next_with_lock(wait);
+                // 从wake_at_most()回来
+                let task = current_task().unwrap();
+                //结束等待
+                wait_queue.lock().finish_wait(&task);
+                let mut inner = task.acquire_inner_lock();
+                if !inner.sigpending.difference(inner.sigmask).is_empty() {
+                    return -(SyscallErr::EINTR as isize);
+                }
+                inner.refresh_real_timer();
+            }
+            v => return v,
+        }
+    }
+}
+
+/// 网络 I/O 等待循环，EAGAIN 时挂入指定等待队列。
+pub fn wait_io_with_queue<T: Into<isize>>(
+    mut f: impl FnMut() -> Result<T, SyscallErr>,
+    nonblock: bool,
+    wait_queue: &Mutex<WaitQueue>,
+    cond: impl FnMut() -> bool,
+) -> isize {
+    wait_io_core_with_queue(
+        || {
+            NET_INTERFACE.poll();
+            match f() {
+                Ok(v) => v.into(),
+                Err(e) => -(e as isize),
+            }
+        },
+        nonblock,
+        wait_queue,
+        cond,
+    )
 }
 
 /// 暂时先保留应急用，应该尽量不去调用

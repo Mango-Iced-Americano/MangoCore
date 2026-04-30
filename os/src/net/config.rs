@@ -303,6 +303,118 @@ impl<'a> NetInterface<'a> {
     }
 }
 
+fn wake_ready_socket_waiters() {
+    {
+        let mut sockets = UDP_SOCKETS.lock();
+        sockets.retain(|socket| socket.strong_count() > 0);
+        for socket in sockets.iter().filter_map(|socket| socket.upgrade()) {
+            if socket.recv_ready() {
+                if let Some(wait) = socket.recv_wait_queue() {
+                    wait.lock().wake_at_most(1);
+                }
+            }
+            if socket.send_ready() {
+                if let Some(wait) = socket.send_wait_queue() {
+                    wait.lock().wake_at_most(1);
+                }
+            }
+        }
+    }
+    {
+        let mut sockets = TCP_SOCKETS.lock();
+        sockets.retain(|socket| socket.strong_count() > 0);
+        for socket in sockets.iter().filter_map(|socket| socket.upgrade()) {
+            if socket.recv_ready() {
+                if let Some(wait) = socket.recv_wait_queue() {
+                    wait.lock().wake_at_most(1);
+                }
+            }
+            if socket.send_ready() {
+                if let Some(wait) = socket.send_wait_queue() {
+                    wait.lock().wake_at_most(1);
+                }
+            }
+            if socket.accept_ready() || socket.connect_ready() {
+                if let Some(wait) = socket.state_wait_queue() {
+                    wait.lock().wake_at_most(1);
+                }
+            }
+        }
+    }
+    {
+        let mut sockets = RAW_SOCKETS.lock();
+        sockets.retain(|socket| socket.strong_count() > 0);
+        for socket in sockets.iter().filter_map(|socket| socket.upgrade()) {
+            if socket.recv_ready() {
+                if let Some(wait) = socket.recv_wait_queue() {
+                    wait.lock().wake_at_most(1);
+                }
+            }
+            if socket.send_ready() {
+                if let Some(wait) = socket.send_wait_queue() {
+                    wait.lock().wake_at_most(1);
+                }
+            }
+        }
+    }
+}
+
+fn wake_ready_socket_waiters() {
+    {
+        let mut sockets = UDP_SOCKETS.lock();
+        sockets.retain(|socket| socket.strong_count() > 0);
+        for socket in sockets.iter().filter_map(|socket| socket.upgrade()) {
+            if socket.recv_ready() {
+                if let Some(wait) = socket.recv_wait_queue() {
+                    wait.lock().wake_at_most(1);
+                }
+            }
+            if socket.send_ready() {
+                if let Some(wait) = socket.send_wait_queue() {
+                    wait.lock().wake_at_most(1);
+                }
+            }
+        }
+    }
+    {
+        let mut sockets = TCP_SOCKETS.lock();
+        sockets.retain(|socket| socket.strong_count() > 0);
+        for socket in sockets.iter().filter_map(|socket| socket.upgrade()) {
+            if socket.recv_ready() {
+                if let Some(wait) = socket.recv_wait_queue() {
+                    wait.lock().wake_at_most(1);
+                }
+            }
+            if socket.send_ready() {
+                if let Some(wait) = socket.send_wait_queue() {
+                    wait.lock().wake_at_most(1);
+                }
+            }
+            if socket.accept_ready() || socket.connect_ready() {
+                if let Some(wait) = socket.state_wait_queue() {
+                    wait.lock().wake_at_most(1);
+                }
+            }
+        }
+    }
+    {
+        let mut sockets = RAW_SOCKETS.lock();
+        sockets.retain(|socket| socket.strong_count() > 0);
+        for socket in sockets.iter().filter_map(|socket| socket.upgrade()) {
+            if socket.recv_ready() {
+                if let Some(wait) = socket.recv_wait_queue() {
+                    wait.lock().wake_at_most(1);
+                }
+            }
+            if socket.send_ready() {
+                if let Some(wait) = socket.send_wait_queue() {
+                    wait.lock().wake_at_most(1);
+                }
+            }
+        }
+    }
+}
+
 pub fn lookup_source_ip(_dest_ip: IpAddress) -> IpAddress {
     // Loopback-only mode: always return 127.0.0.1
     IpAddress::v4(127, 0, 0, 1)

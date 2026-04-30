@@ -2,6 +2,7 @@ use super::{__switch, do_wake_expired};
 use super::{fetch_task, TaskStatus};
 use super::{TaskContext, TaskControlBlock};
 use crate::hal::TrapContext;
+use crate::net::config::NET_INTERFACE;
 use alloc::sync::Arc;
 use lazy_static::*;
 use spin::Mutex;
@@ -78,9 +79,8 @@ pub fn run_tasks() {
         } else {
             // 没有就绪的任务 → CPU idle
             drop(processor);
-            // 在网络空闲时推进 smoltcp 协议栈（处理重传定时器、keepalive 等）
-            crate::net::config::NET_INTERFACE.poll();
-            // 尝试唤醒一些任务
+            NET_INTERFACE.poll();
+            // 没有就绪的任务，尝试唤醒一些任务
             do_wake_expired();
         }
     }
