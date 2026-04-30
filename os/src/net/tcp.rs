@@ -1,5 +1,5 @@
 use super::{Mutex, Socket};
-use crate::net::TCP_SOCKETS_TO_REMOVE;
+use crate::net::{TCP_SOCKETS, TCP_SOCKETS_TO_REMOVE};
 use crate::{
     fs::{file_trait::File, FileDescriptor, OpenFlags},
     net::{
@@ -7,7 +7,7 @@ use crate::{
         config::{lookup_source_ip, NET_INTERFACE},
         MAX_BUFFER_SIZE, SHUT_WR,
     },
-    task::current_task,
+    task::{current_task, WaitQueue},
     utils::{
         error::{GeneralRet, SyscallErr, SyscallRet},
         random::RNG,
@@ -52,6 +52,9 @@ pub struct TcpSocket {
     is_listener: AtomicBool,
     is_shutdown: AtomicBool,
     handlers: Mutex<VecDeque<SocketHandle>>,
+    recv_wait: Mutex<WaitQueue>,
+    send_wait: Mutex<WaitQueue>,
+    state_wait: Mutex<WaitQueue>,
 }
 
 #[allow(unused)]
@@ -131,7 +134,11 @@ impl Socket for TcpSocket {
                 sendbuf_size: tx_sz,
                 reuse_addr: reuse,
             }),
+            recv_wait: Mutex::new(WaitQueue::new()),
+            send_wait: Mutex::new(WaitQueue::new()),
+            state_wait: Mutex::new(WaitQueue::new()),
         });
+        TcpSocket::register_tcp_socket(&connected_socket);
 
         let mut fd_table = task.files.lock();
         let mut socket_table = task.socket_table.lock();
@@ -410,6 +417,34 @@ impl Socket for TcpSocket {
         false
     }
 
+    fn recv_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(&self.recv_wait)
+    }
+
+    fn send_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(&self.send_wait)
+    }
+
+    fn state_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(&self.state_wait)
+    }
+
+    fn recv_ready(&self) -> bool {
+        self.tcp_recv_ready()
+    }
+
+    fn send_ready(&self) -> bool {
+        self.tcp_send_ready()
+    }
+
+    fn accept_ready(&self) -> bool {
+        self.tcp_accept_ready()
+    }
+
+    fn connect_ready(&self) -> bool {
+        self.tcp_connect_ready()
+    }
+
     fn deep_clone_socket(&self) -> Arc<dyn File> {
         todo!()
     }
@@ -588,7 +623,69 @@ impl TcpSocket {
                 sendbuf_size: MAX_BUFFER_SIZE,
                 reuse_addr: false,
             }),
+            recv_wait: Mutex::new(WaitQueue::new()),
+            send_wait: Mutex::new(WaitQueue::new()),
+            state_wait: Mutex::new(WaitQueue::new()),
         }
+    }
+
+    pub fn register_tcp_socket(socket: &Arc<Self>) {
+        TCP_SOCKETS.lock().push(Arc::downgrade(socket));
+    }
+
+    fn tcp_accept_ready(&self) -> bool {
+        if !self.is_listener.load(Ordering::Acquire) {
+            return false;
+        }
+        let handlers: Vec<SocketHandle> = { self.handlers.lock().iter().copied().collect() };
+        handlers.into_iter().any(|handler| {
+            NET_INTERFACE.tcp_socket(handler, |s| {
+                s.state() == tcp::State::SynReceived || s.state() == tcp::State::Established
+            })
+        })
+    }
+
+    fn tcp_connect_ready(&self) -> bool {
+        if self.is_listener.load(Ordering::Acquire) {
+            return false;
+        }
+        let handler = match self.handlers.lock().front().copied() {
+            Some(handler) => handler,
+            None => return true,
+        };
+        NET_INTERFACE.tcp_socket(handler, |socket| {
+            matches!(socket.state(), tcp::State::Established | tcp::State::Closed)
+        })
+    }
+
+    fn tcp_recv_ready(&self) -> bool {
+        if self.is_listener.load(Ordering::Acquire) {
+            return self.tcp_accept_ready();
+        }
+        let handler = match self.handlers.lock().front().copied() {
+            Some(handler) => handler,
+            None => return true,
+        };
+        NET_INTERFACE.tcp_socket(handler, |socket| {
+            socket.can_recv()
+                || (!socket.may_recv()
+                    && socket.state() != tcp::State::Listen
+                    && socket.state() != tcp::State::SynSent
+                    && socket.state() != tcp::State::SynReceived)
+        })
+    }
+
+    fn tcp_send_ready(&self) -> bool {
+        if self.is_listener.load(Ordering::Acquire) {
+            return false;
+        }
+        let handler = match self.handlers.lock().front().copied() {
+            Some(handler) => handler,
+            None => return true,
+        };
+        NET_INTERFACE.tcp_socket(handler, |socket| {
+            socket.state() == tcp::State::Closed || (socket.can_send() && socket.may_send())
+        })
     }
 
     fn _connect(&self, remote_endpoint: IpEndpoint) -> GeneralRet<()> {

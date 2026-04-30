@@ -2,7 +2,7 @@
 use crate::{
     fs::{file_descriptor::FileDescriptor, file_trait::File, OpenFlags},
     net::{raw::RawSocket, tcp::TcpSocket, udp::UdpSocket},
-    task::current_task,
+    task::{current_task, WaitQueue},
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
 };
 use alloc::{collections::BTreeMap, sync::Arc, sync::Weak, vec::Vec};
@@ -73,7 +73,11 @@ pub static UDP_SOCKETS: Mutex<Vec<Weak<UdpSocket>>> = Mutex::new(Vec::new());
 pub static UDP_SOCKETS_TO_REMOVE: Mutex<Vec<SocketHandle>> = Mutex::new(Vec::new());
 
 // tcp
+pub static TCP_SOCKETS: Mutex<Vec<Weak<TcpSocket>>> = Mutex::new(Vec::new());
 pub static TCP_SOCKETS_TO_REMOVE: Mutex<Vec<SocketHandle>> = Mutex::new(Vec::new());
+
+// raw
+pub static RAW_SOCKETS: Mutex<Vec<Weak<RawSocket>>> = Mutex::new(Vec::new());
 
 pub trait Socket: File {
     fn bind(&self, addr: IpListenEndpoint) -> SyscallRet;
@@ -120,6 +124,34 @@ pub trait Socket: File {
     /// poll/select 相关：是否挂起
     fn socket_hang_up(&self) -> bool {
         false
+    }
+
+    fn recv_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        None
+    }
+
+    fn send_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        None
+    }
+
+    fn state_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        None
+    }
+
+    fn recv_ready(&self) -> bool {
+        self.socket_r_ready()
+    }
+
+    fn send_ready(&self) -> bool {
+        self.socket_w_ready()
+    }
+
+    fn accept_ready(&self) -> bool {
+        self.socket_r_ready()
+    }
+
+    fn connect_ready(&self) -> bool {
+        self.socket_w_ready()
     }
 
     /// deep clone，返回 Arc<dyn File>
@@ -172,6 +204,7 @@ impl dyn Socket {
                 } else if pure_type == SocketType::SOCK_STREAM.bits() {
                     let socket = TcpSocket::new();
                     let socket = Arc::new(socket);
+                    TcpSocket::register_tcp_socket(&socket);
                     // current_process().inner_handler(|proc| {
                     //     let fd = proc.fd_table.alloc_fd()?;
                     //     proc.fd_table.put(fd, FdInfo::new(socket.clone(), flags));
@@ -189,6 +222,7 @@ impl dyn Socket {
                 } else if pure_type == SocketType::SOCK_RAW.bits() {
                     let socket = RawSocket::new(protocol);
                     let socket = Arc::new(socket);
+                    RawSocket::register_raw_socket(&socket);
                     let current_tcb = current_task().unwrap();
                     let fd = current_tcb
                         .files

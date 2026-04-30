@@ -12,7 +12,7 @@ use crate::{
 
 use crate::utils::error::SyscallErr;
 
-use crate::syscall::utils::wait_io;
+use crate::syscall::utils::{wait_io, wait_io_with_queue};
 use log::info;
 use smoltcp::wire::IpListenEndpoint;
 
@@ -96,10 +96,19 @@ pub fn sys_accept(sockfd: u32, addr: usize, addrlen: usize) -> isize {
     };
     let is_nonblock = socket_file.get_nonblock();
 
-    wait_io(
-        || socket.accept(sockfd, addr, addrlen).map(|s| s as isize),
-        is_nonblock,
-    )
+    if let Some(wait_queue) = socket.state_wait_queue() {
+        wait_io_with_queue(
+            || socket.accept(sockfd, addr, addrlen).map(|s| s as isize),
+            is_nonblock,
+            wait_queue,
+            || socket.accept_ready(),
+        )
+    } else {
+        wait_io(
+            || socket.accept(sockfd, addr, addrlen).map(|s| s as isize),
+            is_nonblock,
+        )
+    }
 }
 
 pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
@@ -121,8 +130,17 @@ pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
         Err(e) => return -(e as isize),
     }
 
-    // 握手未完成，进入 wait_io 等待
-    wait_io(|| socket.try_connect(), is_nonblock)
+    // 握手未完成，进入等待队列等待状态变化
+    if let Some(wait_queue) = socket.state_wait_queue() {
+        wait_io_with_queue(
+            || socket.try_connect(),
+            is_nonblock,
+            wait_queue,
+            || socket.connect_ready(),
+        )
+    } else {
+        wait_io(|| socket.try_connect(), is_nonblock)
+    }
 }
 
 pub fn sys_getsockname(sockfd: u32, addr: usize, addrlen: usize) -> isize {
@@ -170,17 +188,46 @@ pub fn sys_sendto(
             }
             let dest_addr = trans_ref!(dest_addr, addrlen);
             let _ = socket.connect(dest_addr);
-            wait_io(|| socket.try_send(buf), is_nonblock)
+            if let Some(wait_queue) = socket.send_wait_queue() {
+                wait_io_with_queue(
+                    || socket.try_send(buf),
+                    is_nonblock,
+                    wait_queue,
+                    || socket.send_ready(),
+                )
+            } else {
+                wait_io(|| socket.try_send(buf), is_nonblock)
+            }
         }
-        SocketType::SOCK_STREAM => wait_io(|| socket.try_send(buf), is_nonblock),
+        SocketType::SOCK_STREAM => {
+            if let Some(wait_queue) = socket.send_wait_queue() {
+                wait_io_with_queue(
+                    || socket.try_send(buf),
+                    is_nonblock,
+                    wait_queue,
+                    || socket.send_ready(),
+                )
+            } else {
+                wait_io(|| socket.try_send(buf), is_nonblock)
+            }
+        }
         SocketType::SOCK_RAW => {
             info!("[sys_sendto] socket is raw");
             let dest_addr = trans_ref!(dest_addr, addrlen);
             let endpoint = address::endpoint(dest_addr).unwrap();
-            wait_io(
-                || socket.send_to(buf, endpoint).map(|n| n as isize),
-                is_nonblock,
-            )
+            if let Some(wait_queue) = socket.send_wait_queue() {
+                wait_io_with_queue(
+                    || socket.send_to(buf, endpoint).map(|n| n as isize),
+                    is_nonblock,
+                    wait_queue,
+                    || socket.send_ready(),
+                )
+            } else {
+                wait_io(
+                    || socket.send_to(buf, endpoint).map(|n| n as isize),
+                    is_nonblock,
+                )
+            }
         }
         _ => todo!(),
     }
@@ -217,19 +264,21 @@ pub fn sys_recvfrom(
     let buf_ptr = translated_refmut(token, buf as *mut u8).unwrap();
     let buf_slice = unsafe { core::slice::from_raw_parts_mut(buf_ptr, len as usize) };
 
-    wait_io(
-        || match socket.socket_type() {
-            SocketType::SOCK_STREAM | SocketType::SOCK_DGRAM | SocketType::SOCK_RAW => {
-                let ret = socket.try_recv(buf_slice)?;
-                if ret > 0 && src_addr != 0 {
-                    let _ = socket.peer_addr(src_addr, addrlen);
-                }
-                Ok(ret)
+    let recv = || match socket.socket_type() {
+        SocketType::SOCK_STREAM | SocketType::SOCK_DGRAM | SocketType::SOCK_RAW => {
+            let ret = socket.try_recv(buf_slice)?;
+            if ret > 0 && src_addr != 0 {
+                let _ = socket.peer_addr(src_addr, addrlen);
             }
-            _ => todo!(),
-        },
-        is_nonblock,
-    )
+            Ok(ret)
+        }
+        _ => todo!(),
+    };
+    if let Some(wait_queue) = socket.recv_wait_queue() {
+        wait_io_with_queue(recv, is_nonblock, wait_queue, || socket.recv_ready())
+    } else {
+        wait_io(recv, is_nonblock)
+    }
 }
 
 pub fn sys_getsockopt(

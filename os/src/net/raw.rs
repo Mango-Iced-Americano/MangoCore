@@ -1,6 +1,7 @@
 #![allow(unused)]
 
 use super::{Mutex, Socket};
+use crate::net::macros::impl_file_for_socket;
 use crate::{
     fs::{
         directory_tree::DirectoryTreeNode,
@@ -10,10 +11,10 @@ use crate::{
         OpenFlags, SeekWhence, Stat,
     },
     mm::UserBuffer,
-    net::{config::NET_INTERFACE, MAX_BUFFER_SIZE, SHUT_WR},
+    net::{config::NET_INTERFACE, MAX_BUFFER_SIZE, RAW_SOCKETS, SHUT_WR},
     task::{
         block_current_and_run_next, suspend_current_and_run_next, wait_interruptible,
-        wait_interruptible_timeout,
+        wait_interruptible_timeout, WaitQueue,
     },
     timer::TimeSpec,
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
@@ -25,7 +26,6 @@ use alloc::{
     vec::Vec,
 };
 use log::info;
-use crate::net::macros::impl_file_for_socket;
 use smoltcp::{
     iface::SocketHandle,
     socket::{self, raw, raw::PacketMetadata},
@@ -35,6 +35,8 @@ use smoltcp::{
 pub struct RawSocket {
     inner: Mutex<RawSocketInner>,
     socket_handler: SocketHandle,
+    recv_wait: Mutex<WaitQueue>,
+    send_wait: Mutex<WaitQueue>,
 }
 
 #[allow(unused)]
@@ -178,8 +180,7 @@ impl Socket for RawSocket {
                 Ok(nbytes) => {
                     let packet = smoltcp::wire::Ipv4Packet::new_unchecked(&buf[..nbytes]);
                     let src_addr = packet.src_addr();
-                    self.inner.lock().remote_endpoint =
-                        Some(IpEndpoint::new(src_addr.into(), 0));
+                    self.inner.lock().remote_endpoint = Some(IpEndpoint::new(src_addr.into(), 0));
                     Ok(nbytes as isize)
                 }
                 Err(_) => Err(SyscallErr::ENOTCONN),
@@ -198,6 +199,22 @@ impl Socket for RawSocket {
                 Err(_) => Err(SyscallErr::ENOBUFS),
             }
         })
+    }
+
+    fn recv_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(&self.recv_wait)
+    }
+
+    fn send_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(&self.send_wait)
+    }
+
+    fn recv_ready(&self) -> bool {
+        NET_INTERFACE.raw_socket(self.socket_handler, |socket| socket.can_recv())
+    }
+
+    fn send_ready(&self) -> bool {
+        NET_INTERFACE.raw_socket(self.socket_handler, |socket| socket.can_send())
     }
 
     fn deep_clone_socket(&self) -> Arc<dyn File> {
@@ -236,9 +253,14 @@ impl RawSocket {
         Self {
             inner: Mutex::new(inner),
             socket_handler,
+            recv_wait: Mutex::new(WaitQueue::new()),
+            send_wait: Mutex::new(WaitQueue::new()),
         }
+    }
+
+    pub fn register_raw_socket(socket: &Arc<Self>) {
+        RAW_SOCKETS.lock().push(Arc::downgrade(socket));
     }
 }
 
 impl_file_for_socket!(RawSocket);
-

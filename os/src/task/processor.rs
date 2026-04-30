@@ -2,6 +2,7 @@ use super::{__switch, do_wake_expired};
 use super::{fetch_task, TaskStatus};
 use super::{TaskContext, TaskControlBlock};
 use crate::hal::TrapContext;
+use crate::net::config::NET_INTERFACE;
 use alloc::sync::Arc;
 use lazy_static::*;
 use spin::Mutex;
@@ -78,6 +79,7 @@ pub fn run_tasks() {
             // 如果没有任务
             // 释放处理器的锁
             drop(processor);
+            NET_INTERFACE.poll();
             // 没有就绪的任务，尝试唤醒一些任务
             do_wake_expired();
         }

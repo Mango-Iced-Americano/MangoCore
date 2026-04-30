@@ -2,8 +2,9 @@ use super::Mutex;
 use crate::drivers::NET_DEVICE;
 use crate::net::adapter::{RoutingDevice, SmoltcpDeviceAdapter};
 use crate::net::udp::dispatch_udp_packets;
-use crate::net::TCP_SOCKETS_TO_REMOVE;
-use crate::net::UDP_SOCKETS_TO_REMOVE;
+use crate::net::{
+    Socket, RAW_SOCKETS, TCP_SOCKETS, TCP_SOCKETS_TO_REMOVE, UDP_SOCKETS, UDP_SOCKETS_TO_REMOVE,
+};
 use crate::timer::current_time_duration;
 use alloc::collections::BTreeMap;
 use alloc::vec;
@@ -187,6 +188,7 @@ impl<'a> NetInterface<'a> {
 
             dispatch_udp_packets(inner);
         });
+        wake_ready_socket_waiters();
     }
     pub fn remove(&self, handler: SocketHandle) {
         self._remove(handler)
@@ -195,6 +197,62 @@ impl<'a> NetInterface<'a> {
         self.inner_handler(|inner| {
             inner.sockets.remove(handler);
         });
+    }
+}
+
+fn wake_ready_socket_waiters() {
+    {
+        let mut sockets = UDP_SOCKETS.lock();
+        sockets.retain(|socket| socket.strong_count() > 0);
+        for socket in sockets.iter().filter_map(|socket| socket.upgrade()) {
+            if socket.recv_ready() {
+                if let Some(wait) = socket.recv_wait_queue() {
+                    wait.lock().wake_at_most(1);
+                }
+            }
+            if socket.send_ready() {
+                if let Some(wait) = socket.send_wait_queue() {
+                    wait.lock().wake_at_most(1);
+                }
+            }
+        }
+    }
+    {
+        let mut sockets = TCP_SOCKETS.lock();
+        sockets.retain(|socket| socket.strong_count() > 0);
+        for socket in sockets.iter().filter_map(|socket| socket.upgrade()) {
+            if socket.recv_ready() {
+                if let Some(wait) = socket.recv_wait_queue() {
+                    wait.lock().wake_at_most(1);
+                }
+            }
+            if socket.send_ready() {
+                if let Some(wait) = socket.send_wait_queue() {
+                    wait.lock().wake_at_most(1);
+                }
+            }
+            if socket.accept_ready() || socket.connect_ready() {
+                if let Some(wait) = socket.state_wait_queue() {
+                    wait.lock().wake_at_most(1);
+                }
+            }
+        }
+    }
+    {
+        let mut sockets = RAW_SOCKETS.lock();
+        sockets.retain(|socket| socket.strong_count() > 0);
+        for socket in sockets.iter().filter_map(|socket| socket.upgrade()) {
+            if socket.recv_ready() {
+                if let Some(wait) = socket.recv_wait_queue() {
+                    wait.lock().wake_at_most(1);
+                }
+            }
+            if socket.send_ready() {
+                if let Some(wait) = socket.send_wait_queue() {
+                    wait.lock().wake_at_most(1);
+                }
+            }
+        }
     }
 }
 

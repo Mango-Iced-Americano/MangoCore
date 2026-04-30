@@ -30,6 +30,7 @@ use crate::fs::Stat;
 use crate::mm::UserBuffer;
 use crate::net::config::NetInterfaceInner;
 use crate::net::{UDP_SOCKETS, UDP_SOCKETS_TO_REMOVE};
+use crate::task::WaitQueue;
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -39,6 +40,8 @@ use alloc::vec::Vec;
 pub struct UdpSocket {
     inner: Mutex<UdpSocketInner>,
     socket_handler: SocketHandle,
+    recv_wait: Mutex<WaitQueue>,
+    send_wait: Mutex<WaitQueue>,
 }
 
 #[allow(unused)]
@@ -230,6 +233,22 @@ impl Socket for UdpSocket {
         false
     }
 
+    fn recv_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(&self.recv_wait)
+    }
+
+    fn send_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(&self.send_wait)
+    }
+
+    fn recv_ready(&self) -> bool {
+        !self.inner.lock().rx_queue.is_empty()
+    }
+
+    fn send_ready(&self) -> bool {
+        NET_INTERFACE.udp_socket(self.socket_handler, |socket| socket.can_send())
+    }
+
     fn deep_clone_socket(&self) -> Arc<dyn File> {
         todo!()
     }
@@ -259,6 +278,8 @@ impl UdpSocket {
                 reuse_addr: false,
             }),
             socket_handler,
+            recv_wait: Mutex::new(WaitQueue::new()),
+            send_wait: Mutex::new(WaitQueue::new()),
         }
     }
     pub fn register_udp_socket(socket: &Arc<Self>) {
@@ -354,6 +375,7 @@ pub fn dispatch_udp_packets(inner: &mut NetInterfaceInner) {
                             .lock()
                             .rx_queue
                             .push_back((buf, meta.endpoint));
+                        target_os_sock.recv_wait.lock().wake_at_most(1);
                     } else {
                         // 如果没人认领这个包（比如 iperf3 已经关了），就丢弃
                         log::warn!(
