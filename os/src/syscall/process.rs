@@ -202,23 +202,35 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
 
     block_current_and_run_next();
     let task = current_task().unwrap();
-    let inner = task.acquire_inner_lock();
     let now = TimeSpec::now();
-    // this is a little different with manual (do not consider sigmask)
-    // but now we have to compromise
-    // 过滤不可操作的信号（SIG_IGN/SIG_DFL-ignore），避免被忽略信号打断
-    if !has_actionable_signal(&task) && inner.sigpending.is_empty() {
-        assert!(end <= now);
-        if !rem.is_null() {
-            copy_to_user(token, &TimeSpec::new(), rem).unwrap();
+
+    // 先释放 inner 锁再检查信号，避免与 has_actionable_signal 死锁
+    // 参考 pselect/ppoll 的信号检查模式
+    {
+        let inner = task.acquire_inner_lock();
+        let pending = inner.sigpending.difference(inner.sigmask);
+        if !pending.is_empty() {
+            drop(inner);
+            if has_actionable_signal(&task) {
+                // 被可操作信号打断 → 返回剩余时间 + EINTR
+                if !rem.is_null() {
+                    copy_to_user(token, &(end - now), rem).unwrap();
+                }
+                return EINTR;
+            }
+            // 不可操作的 pending 信号（被屏蔽/忽略）：清除它们
+            // 避免残留信号导致后续 syscall 误判
+            let mut inner = task.acquire_inner_lock();
+            inner.sigpending = inner.sigpending.difference(pending);
+            drop(inner);
         }
-        SUCCESS
-    } else {
-        if !rem.is_null() {
-            copy_to_user(token, &(end - now), rem).unwrap();
-        }
-        EINTR
     }
+
+    // 正常超时返回
+    if !rem.is_null() {
+        copy_to_user(token, &TimeSpec::new(), rem).unwrap();
+    }
+    SUCCESS
 }
 
 pub fn sys_setitimer(
