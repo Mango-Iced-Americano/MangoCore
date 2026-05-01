@@ -3,7 +3,6 @@ mod syscall_macro;
 
 pub mod errno;
 pub mod fs;
-mod net;
 mod process;
 mod syscall_id;
 pub mod utils;
@@ -11,7 +10,7 @@ pub mod utils;
 use core::convert::TryFrom;
 use fs::*;
 use log::{error, info};
-use net::*;
+use crate::net::syscall::*;
 pub use process::CloneFlags;
 use process::*;
 use syscall_id::*;

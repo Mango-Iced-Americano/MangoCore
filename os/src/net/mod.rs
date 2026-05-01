@@ -3,6 +3,7 @@ pub mod config;
 mod macros;
 pub mod posix;
 pub mod socket;
+pub mod syscall;
 
 pub use spin::Mutex;
 

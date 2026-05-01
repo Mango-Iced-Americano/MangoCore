@@ -1,0 +1,80 @@
+use crate::mm::translated_refmut;
+use crate::task::current_task;
+use crate::utils::error::SyscallErr;
+
+use super::common::{SOL_SOCKET, SOL_TCP, TCP_NODELAY};
+use super::common::{
+    SO_DONTROUTE, SO_KEEPALIVE, SO_RCVBUF, SO_REUSEADDR, SO_SNDBUF,
+};
+
+pub fn sys_setsockopt(
+    sockfd: u32,
+    level: u32,
+    optname: u32,
+    optval_ptr: usize,
+    _optlen: u32,
+) -> isize {
+    let socket = crate::get_socket!(sockfd);
+    let task = current_task().unwrap();
+    let token = task.get_user_token();
+    let optval_ptr = match translated_refmut(token, optval_ptr as *mut u32) {
+        Ok(p) => p as *mut u32,
+        Err(_) => return -(SyscallErr::EFAULT as isize),
+    };
+    match (level, optname) {
+        (SOL_SOCKET, SO_SNDBUF | SO_RCVBUF) => {
+            let size = unsafe { *(optval_ptr as *mut u32) };
+            match optname {
+                SO_SNDBUF => {
+                    socket.set_send_buf_size(size as usize);
+                }
+                SO_RCVBUF => {
+                    socket.set_recv_buf_size(size as usize);
+                }
+                _ => {
+                    return -(SyscallErr::EINVAL as isize);
+                }
+            }
+        }
+        (SOL_TCP, TCP_NODELAY) => {
+            // close Nagle’s Algorithm
+            let enabled = unsafe { *(optval_ptr as *const u32) };
+            log::debug!("[sys_setsockopt] set TCPNODELY: {}", enabled);
+            let _ = match enabled {
+                0 => socket.set_nagle_enabled(true),
+                _ => socket.set_nagle_enabled(false),
+            };
+        }
+        (SOL_SOCKET, SO_KEEPALIVE) => {
+            let enabled = unsafe { *(optval_ptr as *const u32) };
+            log::debug!("[sys_setsockopt] set socket KEEPALIVE: {}", enabled);
+            let _ = match enabled {
+                1 => socket.set_keep_alive(true),
+                _ => socket.set_keep_alive(false),
+            };
+        }
+        (SOL_SOCKET, SO_REUSEADDR) => {
+            let enabled = unsafe { *(optval_ptr as *const u32) };
+            log::debug!("[sys_setsockopt] set socket REUSEADDR: {}", enabled);
+            let _ = match enabled {
+                0 => socket.set_reuse_addr(false),
+                _ => socket.set_reuse_addr(true),
+            };
+        }
+        (SOL_SOCKET, SO_DONTROUTE) => {
+            // do noting, just return success
+            log::warn!("[sys_setsockopt] set socket DONTROUTE: {}", unsafe {
+                *(optval_ptr as *const u32)
+            });
+        }
+        _ => {
+            log::warn!(
+                "[sys_setsockopt] level: {}, optname: {} not supported",
+                level,
+                optname
+            );
+            return -(SyscallErr::ENOPROTOOPT as isize);
+        }
+    }
+    0 as isize
+}

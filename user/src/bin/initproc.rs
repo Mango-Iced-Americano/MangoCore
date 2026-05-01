@@ -478,10 +478,10 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     let program_str = porgrams.join(" ");
 
     let cmd = format!(
-        "busybox mkdir -p /bin; \
+        "/musl/busybox mkdir -p /bin; \
         for c in {} ; do \
            echo '#!/bash' >/bin/$c; \
-           echo \"busybox $c \\\"\\$@\\\"\" >> /bin/$c; \
+           echo \"/musl/busybox $c \\\"\\$@\\\"\" >> /bin/$c; \
      done; \
      hash -r",
         program_str
