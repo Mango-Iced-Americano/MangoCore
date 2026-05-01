@@ -21,7 +21,7 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::AtomicBool;
 use log::trace;
 use spin::{Mutex, MutexGuard};
 
@@ -279,6 +279,7 @@ impl TaskControlBlockInner {
             if self.timer[0].it_value.is_zero() {
                 // 添加信号
                 self.add_signal(Signals::SIGALRM);
+                log::info!("Task's real timer expired, sending SIGALRM");
                 // 重置定时器
                 self.timer[0].it_value = self.timer[0].it_interval;
             }
@@ -568,7 +569,11 @@ impl TaskControlBlock {
         };
 
         // 复制线程ID分配器
-        let tid_allocator = if flags.contains(CloneFlags::CLONE_THREAD) {
+        // CLONE_VFORK child shares VM with parent and must use parent's tid_allocator
+        // to avoid tid=0 conflict (both would map trap_cx at TRAP_CONTEXT_BASE).
+        let tid_allocator = if flags.contains(CloneFlags::CLONE_THREAD)
+            || flags.contains(CloneFlags::CLONE_VFORK)
+        {
             self.tid_allocator.clone()
         } else {
             Arc::new(Mutex::new(RecycleAllocator::new()))
@@ -587,9 +592,14 @@ impl TaskControlBlock {
         let kstack = kstack_alloc();
         let kstack_top = kstack.get_top();
 
-        // 如果是线程，分配用户空间资源
-        if flags.contains(CloneFlags::CLONE_THREAD) {
-            memory_set.lock().alloc_user_res(tid, stack.is_null());
+        // 如果是线程或vfork子进程（共享VM），分配用户空间资源
+        // CLONE_VFORK: child needs its own trap_cx at a unique VA (tid != 0),
+        // but uses parent's stack (alloc_stack=false).
+        if flags.contains(CloneFlags::CLONE_THREAD) || flags.contains(CloneFlags::CLONE_VFORK) {
+            memory_set.lock().alloc_user_res(
+                tid,
+                stack.is_null() && !flags.contains(CloneFlags::CLONE_VFORK),
+            );
         }
         // 获取陷阱上下文的物理页号
         let trap_cx_ppn = memory_set
@@ -684,8 +694,9 @@ impl TaskControlBlock {
         }
         // 初始化陷阱上下文
         let trap_cx = task_control_block.acquire_inner_lock().get_trap_cx();
-        // 如果是线程，复制陷阱上下文
-        if flags.contains(CloneFlags::CLONE_THREAD) {
+        // 如果是线程或vfork子进程，复制陷阱上下文
+        // CLONE_VFORK: child continues from parent's register state
+        if flags.contains(CloneFlags::CLONE_THREAD) || flags.contains(CloneFlags::CLONE_VFORK) {
             *trap_cx = *parent_inner.get_trap_cx();
         }
         // we also do not need to prepare parameters on stack, musl has done it for us

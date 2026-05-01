@@ -27,8 +27,8 @@ use spin::Mutex;
 
 // ── TCP Socket 大小常量 ──────────────────────────────────────────────
 
-pub const DEFAULT_RX_BUF_SIZE: usize = 128 * 1024;
-pub const DEFAULT_TX_BUF_SIZE: usize = 128 * 1024;
+pub const DEFAULT_RX_BUF_SIZE: usize = 64 * 1024;
+pub const DEFAULT_TX_BUF_SIZE: usize = 64 * 1024;
 pub const TCP_MSS_DEFAULT: u32 = 1 << 15;
 /// TCP maximum segment size
 pub const TCP_MSS: u32 = if TCP_MSS_DEFAULT > 65536 {

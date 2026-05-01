@@ -21,6 +21,7 @@ use crate::timer::TimeSpec;
 
 use super::current_task;
 use super::task::TaskControlBlock;
+use crate::utils::error::SyscallErr;
 
 bitflags! {
     /// Signals 枚举
@@ -354,8 +355,13 @@ pub fn has_actionable_signal(task: &TaskControlBlock) -> bool {
     if pending.is_empty() {
         return false;
     }
+    log::debug!(
+        "Task {} has pending: {:x}, mask: {:x}",
+        task.pid.0,
+        inner.sigpending.bits(),
+        inner.sigmask.bits()
+    );
     drop(inner);
-
     let sighand = task.sighand.lock();
     for signum in 1..=64usize {
         let signal_bit = match Signals::from_signum(signum) {
@@ -406,8 +412,9 @@ pub fn do_signal() {
                 continue;
             }
             let trap_cx = inner.get_trap_cx();
+            let a0_isize = trap_cx.gp.a0 as isize;
             // if this syscall wants to restart
-            if get_exception_cause().is_syscall() && trap_cx.gp.a0 == ERESTART as usize {
+            if get_exception_cause().is_syscall() && a0_isize == -(SyscallErr::ERESTART as isize) {
                 // and if `SA_RESTART` is set
                 if act.flags.contains(SigActionFlags::SA_RESTART) {
                     debug!("[do_signal] syscall will restart after sigreturn");

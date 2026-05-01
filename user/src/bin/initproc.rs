@@ -362,6 +362,67 @@ fn run_ltp_network_tests(environ: &[*const u8]) {
     println!("[initproc] LTP network tests done");
 }
 
+fn run_ltp_signal_tests(environ: &[*const u8]) {
+    // LTP testcases/bin 中与信号（Signal）处理相关的测例。
+    // 目的：作为控制变量，先验证信号系统（SA_RESTART/EINTR/sigprocmask/定时器）
+    // 是否正确，再排查网络栈的阻塞/唤醒问题。
+    //
+    // 测例名核对自 LTP 上游（https://github.com/linux-test-project/ltp）：
+    //   - sigaction/ 只有 01, 02（没有 sigaction16）
+    //   - sigprocmask/ 只有 01（没有 02）
+    //   - pselect/ 有 01/02/03（没有 pselect01_sig）
+    //   - 没有 interrupt/ 目录
+    let signal_cases = [
+        // ---- 核心：sigaction（SA_RESTART + 系统调用重启） ----
+        "sigaction01", // 基础 sigaction：设置信号处理器
+        "sigaction02", // 测试 SA_RESTART 标志：被中断的 read/write 能否自动重启
+        // ---- 基础 signal 函数 ----
+        "signal01", // ANSI C signal() 函数基础
+        "signal02", // signal() 返回值
+        "signal03", // signal() SIG_IGN/SIG_DFL
+        "signal04", // signal() 可重入性
+        "signal05", // signal() 多次设置
+        "signal06", // signal() 综合场景
+        // ---- 信号屏蔽字 ----
+        "sigprocmask01", // sigprocmask 基础功能：屏蔽/解除屏蔽
+        // ---- 未决信号 ----
+        "sigpending02", // 测试未决信号集（sigpending 系统调用）
+        // ---- 实时信号 ----
+        "rt_sigaction01", // rt_sigaction 基础逻辑 + SA_SIGINFO
+        "rt_sigaction02", // rt_sigaction 信号掩码继承
+        "rt_sigaction03", // rt_sigaction 综合场景
+        // ---- 定时器信号 ----
+        "setitimer01", // ITIMER_REAL 定时器能否准时产生 SIGALRM
+        "setitimer02", // setitimer 边界情况（0 值停止定时器）
+        "getitimer01", // 定时器剩余时间计算
+        "getitimer02", // getitimer 边界情况
+        // ---- clock_getres（setitimer/getitimer 的依赖） ----
+        "clock_getres01", // clock_getres 系统调用精度查询
+        // ---- pselect 专题 ----
+        "pselect01", // 基础 pselect 功能
+        "pselect02", // pselect + 信号掩码原子性
+        "pselect03", // pselect 超时行为
+    ];
+
+    let testdir = "/musl/ltp/testcases/bin";
+
+    println!(
+        "[initproc] LTP signal tests begin ({} cases)",
+        signal_cases.len()
+    );
+
+    for &name in &signal_cases {
+        let cmd = format!(
+            "cd {} && echo '=== LTP-SIG: {} ===' && ./{}; echo '=== LTP-SIG: {} exit=$? ==='",
+            testdir, name, name, name
+        );
+        let ret = run_bash_cmd(&cmd, environ);
+        println!("[initproc] LTP signal test '{}' returned {}", name, ret);
+    }
+
+    println!("[initproc] LTP signal tests done");
+}
+
 fn should_enter_debug_shell() -> bool {
     let fd = open("/debug_bash\0", OpenFlags::RDONLY);
     if fd >= 0 {
@@ -425,17 +486,29 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
      hash -r",
         program_str
     );
-    run_bash_cmd(&cmd, &environ); // prepare busybox "symlinks" for test scripts
+    // run_bash_cmd(&cmd, &environ); // prepare busybox "symlinks" for test scripts
 
-    // run_bash_cmd("cd musl && bash ./iperf_testcode.sh", &environ); // prepare test scripts (chmod +x etc)
-    run_bash_cmd("cd musl && bash ./netperf_testcode.sh", &environ);
     let cfg = load_runtime_config();
     // ============================================================
-    // 直接跑 LTP 网络相关测例（独立 ELF 二进制，跳过 runltp 脚本框架）
+    // LTP 信号系统测试（控制变量：先验证信号基础，再测网络）
+    // ============================================================
+    // run_ltp_signal_tests(&environ);
+
+    // ============================================================
+    // LTP 网络相关测例（独立 ELF 二进制，跳过 runltp 脚本框架）
     // ============================================================
     // run_ltp_network_tests(&environ);
 
-    // /debug_bash remains the highest-priority emergency switch.
+    // run_bash_cmd(
+    //     "cd musl && ./netserver -D -L 127.0.0.1 -p 12865 &",
+    //     &environ,
+    // );
+    // sleep(100);
+    // run_bash_cmd("cd musl && ./netperf -H 127.0.0.1 -p 12865 -t TCP_CRR -l 1 -- -s 16k -S 16k -m 1k -M 1k -r 64,64 -R 1", &environ);
+
+    // run_bash_cmd("cd musl && bash ./netperf_testcode.sh", &environ);
+    run_bash_cmd("cd musl && bash ./iperf_testcode.sh", &environ); // prepare test scripts (chmod +x etc)
+                                                                   // /debug_bash remains the highest-priority emergency switch.
     if cfg.mode == RunMode::Shell {
         println!("[initproc] entering shell mode");
         enter_shell(path, &environ);

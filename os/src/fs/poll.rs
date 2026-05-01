@@ -1,3 +1,4 @@
+use crate::net::config::NET_INTERFACE;
 use crate::task::signal::has_actionable_signal;
 use crate::{
     mm::try_get_from_user, syscall::errno::EFAULT, task::signal::Signals, timer::TimeSpec,
@@ -170,6 +171,28 @@ pub fn ppoll(
                 }
             }
             drop(fd_table);
+            // 推送网络栈状态，确保下一步 r_ready()/w_ready() 能检测到新数据
+            NET_INTERFACE.poll();
+            // 信号检查
+            let task = current_task().unwrap();
+            {
+                let inner = task.acquire_inner_lock();
+                let pending = inner.sigpending.difference(inner.sigmask);
+                if !pending.is_empty() {
+                    drop(inner);
+                    if has_actionable_signal(&task) {
+                        break;
+                    }
+                    // 无actionable信号：清除它们，避免在 suspend 循环中重复检查。
+                    // do_signal() 在 trap_return 中调用，但 suspend_current_and_run_next
+                    // 可能永不进 trap（就绪队列为空时立即取回同一任务）。
+                    let mut inner = task.acquire_inner_lock();
+                    inner.sigpending = inner.sigpending.difference(pending);
+                    drop(inner);
+                } else {
+                    drop(inner);
+                }
+            }
             drop(task);
             suspend_current_and_run_next();
         }
@@ -373,19 +396,27 @@ pub fn pselect(
         }
 
         drop(fd_table);
+        // 推送网络栈状态，确保下一步 r_ready()/w_ready() 能检测到新数据
+        NET_INTERFACE.poll();
         let task = current_task().unwrap();
         {
-            let inner = task.acquire_inner_lock();
+            let mut inner = task.acquire_inner_lock();
+            inner.refresh_real_timer();
             let pending = inner.sigpending.difference(inner.sigmask);
             if !pending.is_empty() {
                 drop(inner);
                 if has_actionable_signal(&task) {
                     interrupted = true;
                     drop(task);
+                    log::info!("[pselect] Interrupted by signal(s) {:?}", pending);
                     break;
                 }
-                // Pending signal(s) exist but none are actionable (all SIG_IGN/ignore-default)
-                // Don't return EINTR; continue polling.
+                // 无actionable信号：清除它们，避免在 suspend 循环中重复检查。
+                // do_signal() 在 trap_return 中调用，但 suspend_current_and_run_next
+                // 可能永不进 trap（就绪队列为空时立即取回同一任务）。
+                let mut inner = task.acquire_inner_lock();
+                inner.sigpending = inner.sigpending.difference(pending);
+                drop(inner);
             } else {
                 drop(inner);
             }
@@ -415,8 +446,12 @@ pub fn pselect(
     }
 
     // 2. Signal interruption
+    // NOTE: Must return ERESTART(-85) instead of EINTR(-4) so that do_signal
+    // can detect this interrupted syscall and apply SA_RESTART logic.
+    // do_signal() converts ERESTART→restart(if SA_RESTART) or ERESTART→EINTR(if not).
     if interrupted {
-        return -(SyscallErr::EINTR as isize);
+        log::info!("[pselect] Interrupted by signal(s), returning ERESTART");
+        return -(SyscallErr::ERESTART as isize);
     }
 
     // 3. Normal FD counting
@@ -458,5 +493,6 @@ pub fn pselect(
         write_fds,
         exception_fds
     );
+    // sigmask already restored at Step 1 above (before dispatch)
     done as isize
 }

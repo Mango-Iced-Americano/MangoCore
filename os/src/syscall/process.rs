@@ -237,7 +237,9 @@ pub fn sys_setitimer(
     let token = task.get_user_token();
     let new_timer = if new_value as usize != 0 {
         let mut value = ITimerVal::new();
-        copy_from_user(token, new_value, &mut value).unwrap();
+        if let Err(e) = copy_from_user(token, new_value, &mut value) {
+            return e;
+        }
         Some(value)
     } else {
         None
@@ -255,7 +257,9 @@ pub fn sys_setitimer(
                         Some(deadline) => timespec_to_timeval(deadline - now),
                         None => TimeVal::new(),
                     };
-                    copy_to_user(token, &inner.timer[0], old_value).unwrap();
+                    if let Err(e) = copy_to_user(token, &inner.timer[0], old_value) {
+                        return e;
+                    }
                     trace!("[sys_setitimer] *old_value: {:?}", inner.timer[0]);
                 }
                 if let Some(value) = new_timer {
@@ -290,7 +294,9 @@ pub fn sys_setitimer(
         1 | 2 => {
             let mut inner = task.acquire_inner_lock();
             if old_value as usize != 0 {
-                copy_to_user(token, &inner.timer[which], old_value).unwrap();
+                if let Err(e) = copy_to_user(token, &inner.timer[which], old_value) {
+                    return e;
+                }
                 trace!("[sys_setitimer] *old_value: {:?}", inner.timer[which]);
             }
             if let Some(value) = new_timer {
@@ -1178,6 +1184,31 @@ pub fn sys_sigprocmask(how: u32, set: usize, oldset: usize) -> isize {
         how, set, oldset
     );
     sigprocmask(how, set as *const Signals, oldset as *mut Signals)
+}
+
+/// rt_sigpending(sigset_t *set, size_t sigsetsize)
+/// Copy the set of pending signals to user-space `set`.
+/// sigsetsize must equal sizeof(sigset_t) (= 8 on riscv64).
+pub fn sys_rt_sigpending(set: usize, sigsetsize: usize) -> isize {
+    let sigset_size = size_of::<Signals>();
+    if sigsetsize != sigset_size {
+        return -(SyscallErr::EINVAL as isize);
+    }
+    let task = current_task().unwrap();
+    let token = task.get_user_token();
+    let inner = task.acquire_inner_lock();
+    trace!(
+        "[sys_rt_sigpending] pid: {}, pending: {:?}",
+        task.pid.0,
+        inner.sigpending
+    );
+    match translated_refmut(token, set as *mut Signals) {
+        Ok(pending) => {
+            *pending = inner.sigpending;
+            SUCCESS
+        }
+        Err(errno) => errno,
+    }
 }
 
 pub fn sys_sigtimedwait(set: usize, info: usize, timeout: usize) -> isize {

@@ -31,7 +31,7 @@ pub fn wait_io_core(mut f: impl FnMut() -> isize, nonblock: bool) -> isize {
                     if !inner.sigpending.is_empty() {
                         drop(inner);
                         if has_actionable_signal(&task) {
-                            return -(SyscallErr::EINTR as isize);
+                            return -(SyscallErr::ERESTART as isize);
                         }
                     } else {
                         drop(inner);
@@ -67,7 +67,7 @@ pub fn wait_io_core_with_queue(
                     if !pending.is_empty() {
                         drop(inner);
                         if has_actionable_signal(&task) {
-                            return -(SyscallErr::EINTR as isize);
+                            return -(SyscallErr::ERESTART as isize);
                         }
                     } else {
                         drop(inner);
@@ -101,7 +101,7 @@ pub fn wait_io_core_with_queue(
                     if !pending.is_empty() {
                         drop(inner);
                         if has_actionable_signal(&task) {
-                            return -(SyscallErr::EINTR as isize);
+                            return -(SyscallErr::ERESTART as isize);
                         }
                     } else {
                         drop(inner);

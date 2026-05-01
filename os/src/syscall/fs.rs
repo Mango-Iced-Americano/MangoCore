@@ -5,8 +5,8 @@ use crate::fs::*;
 use crate::hal::BLOCK_SZ;
 use crate::mm::{
     copy_from_user, copy_from_user_array, copy_to_user, copy_to_user_array, copy_to_user_string,
-    translated_byte_buffer, translated_byte_buffer_append_to_existing_vec, translated_refmut,
-    translated_str, try_get_from_user, MapPermission, UserBuffer, VirtAddr,
+    translated_byte_buffer, translated_byte_buffer_append_to_existing_vec, translated_ref,
+    translated_refmut, translated_str, try_get_from_user, MapPermission, UserBuffer, VirtAddr,
 };
 use crate::syscall::utils::wait_io_core;
 use crate::task::{current_task, current_user_token, signal};
@@ -1436,11 +1436,33 @@ pub fn sys_pselect(
     write_fds: *mut FdSet,
     exception_fds: *mut FdSet,
     timeout: *mut TimeSpec,
-    sigmask: *const crate::task::signal::Signals,
+    sigmask_args: usize,
 ) -> isize {
     if (nfds as isize) < 0 {
         return EINVAL;
     }
+
+    // pselect6 syscall (SYS_PSELECT6=72) passes sigmask via a {ss, ss_len} structure:
+    //   struct { const sigset_t *ss; size_t ss_len; };
+    // args[5] points to this structure in user space, NOT directly to a sigset_t.
+    // The musl wrapper builds it as: long data[2] = { (long)&mask, sizeof(sigset_t) }.
+    let sigmask: *const crate::task::signal::Signals = if sigmask_args != 0 {
+        let token = current_user_token();
+        match translated_ref(token, sigmask_args as *const usize) {
+            Ok(ss_ptr) => {
+                let ptr = *ss_ptr;
+                if ptr != 0 {
+                    ptr as *const crate::task::signal::Signals
+                } else {
+                    core::ptr::null()
+                }
+            }
+            Err(errno) => return errno,
+        }
+    } else {
+        core::ptr::null()
+    };
+
     log::info!(
         "PID {} calls pselect: nfds: {}, read_fds: {:?}, write_fds: {:?}, exception_fds: {:?}, timeout: {:?}, sigmask: {:?}",
         current_task().unwrap().pid.0,

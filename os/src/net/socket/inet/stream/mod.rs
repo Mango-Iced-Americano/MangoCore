@@ -426,7 +426,7 @@ impl Socket for TcpStreamSocket {
 
     fn socket_r_ready(&self) -> bool {
         self.update_io_events();
-        log::info!(
+        log::debug!(
             "[TcpStreamSocket]Checking if socket is ready for reading, pollee: {}",
             self.pollee.load(Ordering::Acquire)
         );
@@ -435,7 +435,7 @@ impl Socket for TcpStreamSocket {
 
     fn socket_w_ready(&self) -> bool {
         self.update_io_events();
-        log::info!(
+        log::debug!(
             "[TcpStreamSocket]Checking if socket is ready for writing, pollee: {}",
             self.pollee.load(Ordering::Acquire)
         );
@@ -485,6 +485,17 @@ impl Drop for TcpStreamSocket {
             log::info!("[TcpStreamSocket::drop] state={}", state_name);
             inner.close();
         }
-        NET_INTERFACE.try_poll();
+        // 设置 pollee 为对端关闭/错误事件，让 epoll/select 立即可读并报 HUP
+        self.pollee.store(
+            (EPollEvent::EPOLLIN
+                | EPollEvent::EPOLLRDNORM
+                | EPollEvent::EPOLLHUP
+                | EPollEvent::EPOLLRDHUP)
+                .bits(),
+            Ordering::Release,
+        );
+
+        // 唤醒所有阻塞在该 socket 上的系统调用（recvfrom/accept/connect/pselect）
+        self.wake_wait_queues();
     }
 }

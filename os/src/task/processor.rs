@@ -56,6 +56,12 @@ lazy_static! {
 pub fn run_tasks() {
     loop {
         crate::trace::try_dump_from("schedule");
+        // 处理到期内核定时器（SIGALRM 等），防止忙等待/轮询任务阻塞定时器投递。
+        // 此前 do_wake_expired 仅在就绪队列为空时调用，但 pselect/ppoll/wait_io_core
+        // 使用 suspend_current_and_run_next() 忙等待，导致就绪队列永不为空，
+        // 令 KERNEL_TIMER_QUEUE 中的定时器（如服务端 setitimer 的 SIGALRM）无法投递，
+        // 造成长达 120 秒的死锁。现改为每次调度迭代都处理，确保定时器及时触发。
+        do_wake_expired();
         NET_INTERFACE.try_poll();
         // 获取全局处理器对象
         let mut processor = PROCESSOR.lock();
@@ -81,8 +87,6 @@ pub fn run_tasks() {
             // 没有就绪的任务 → CPU idle
             drop(processor);
             NET_INTERFACE.poll();
-            // 没有就绪的任务，尝试唤醒一些任务
-            do_wake_expired();
         }
     }
 }

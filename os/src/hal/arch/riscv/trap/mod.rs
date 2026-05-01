@@ -85,16 +85,21 @@ pub fn trap_handler() -> ! {
             // jump to next instruction anyway
             let mut cx = current_trap_cx();
             cx.gp.pc += 4;
+            cx.origin_a0 = cx.gp.a0; // 保存重启参数
             let syscall_id = cx.gp.a7; //debug 用
             log::debug!(">>> Syscall ID: {}", syscall_id);
             // get system call return value
             let result = syscall(
-                cx.gp.a7,
+                syscall_id,
                 [cx.gp.a0, cx.gp.a1, cx.gp.a2, cx.gp.a3, cx.gp.a4, cx.gp.a5],
             );
-            // cx is changed during sys_exec, so we have to call it again
+            // cx is changed during sys_exec (or restored by sigreturn), so we have to call it again
             cx = current_trap_cx();
-            cx.gp.a0 = result as usize;
+            // sigreturn(139) already restored the full trap context (including a0) from the signal frame.
+            // Overwriting a0 here would corrupt the restored value — skip it.
+            if syscall_id != 139 {
+                cx.gp.a0 = result as usize;
+            }
         }
         Trap::Exception(Exception::StoreFault)
         | Trap::Exception(Exception::StorePageFault)
