@@ -227,7 +227,7 @@ impl Socket for TcpStreamSocket {
     }
 
     fn try_connect(&self) -> Result<isize, SyscallErr> {
-        NET_INTERFACE.poll();
+        // NET_INTERFACE.poll();
         let inner = self.inner.lock();
         let ret = match &*inner {
             Inner::Connecting(c) => {
@@ -269,7 +269,7 @@ impl Socket for TcpStreamSocket {
     }
 
     fn accept(&self, sockfd: u32, addr: usize, addrlen: usize) -> SyscallRet {
-        NET_INTERFACE.poll();
+        // NET_INTERFACE.poll();
         let mut inner = self.inner.lock();
         if !matches!(&*inner, Inner::Listening(_)) {
             return Err(SyscallErr::EINVAL);

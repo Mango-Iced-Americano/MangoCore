@@ -9,11 +9,13 @@ use crate::{
     fs::FileDescriptor,
     net::{
         address::{self, SocketAddrv4},
+        config::NET_INTERFACE,
         make_unix_socket_pair,
         posix::MsgHdr,
         Socket, SocketFile, SocketType, TcpInfo, TCP_MSS,
     },
     task::current_task,
+    task::WaitQueue,
 };
 
 use crate::utils::error::SyscallErr;
@@ -21,7 +23,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use smoltcp::socket;
 
-use crate::syscall::utils::{wait_io, wait_io_with_queue};
+use crate::syscall::utils::wait_io;
 use log::info;
 use smoltcp::wire::IpListenEndpoint;
 
@@ -156,12 +158,21 @@ pub fn sys_accept(sockfd: u32, addr: usize, addrlen: usize) -> isize {
     let is_nonblock = socket_file.get_nonblock();
 
     if let Some(wait_queue) = socket.accept_wait_queue() {
-        wait_io_with_queue(
-            || socket.accept(sockfd, addr, addrlen).map(|s| s as isize),
-            is_nonblock,
-            wait_queue,
-            || socket.accept_ready(),
-        )
+        if is_nonblock {
+            match socket.accept(sockfd, addr, addrlen) {
+                Ok(n) => n as isize,
+                Err(e) => -(e as isize),
+            }
+        } else {
+            WaitQueue::wait_until_interruptible(wait_queue, || {
+                match socket.accept(sockfd, addr, addrlen) {
+                    Ok(n) => Some(n as isize),
+                    Err(SyscallErr::EAGAIN) => None,
+                    Err(e) => Some(-(e as isize)),
+                }
+            })
+            .unwrap_or_else(|e| e)
+        }
     } else {
         wait_io(
             || socket.accept(sockfd, addr, addrlen).map(|s| s as isize),
@@ -226,12 +237,19 @@ pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
 
     // 握手未完成，进入等待队列等待状态变化
     if let Some(wait_queue) = socket.connect_wait_queue() {
-        wait_io_with_queue(
-            || socket.try_connect(),
-            is_nonblock,
-            wait_queue,
-            || socket.connect_ready(),
-        )
+        if is_nonblock {
+            match socket.try_connect() {
+                Ok(n) => n as isize,
+                Err(e) => -(e as isize),
+            }
+        } else {
+            WaitQueue::wait_until_interruptible(wait_queue, || match socket.try_connect() {
+                Ok(n) => Some(n as isize),
+                Err(SyscallErr::EAGAIN) => None,
+                Err(e) => Some(-(e as isize)),
+            })
+            .unwrap_or_else(|e| e)
+        }
     } else {
         wait_io(|| socket.try_connect(), is_nonblock)
     }
@@ -305,24 +323,38 @@ pub fn sys_sendto(
             let dest_addr = trans_ref!(dest_addr, addrlen);
             let _ = socket.connect(dest_addr);
             if let Some(wait_queue) = socket.send_wait_queue() {
-                wait_io_with_queue(
-                    || socket.try_send(buf),
-                    is_nonblock,
-                    wait_queue,
-                    || socket.send_ready(),
-                )
+                if is_nonblock {
+                    match socket.try_send(buf) {
+                        Ok(n) => n as isize,
+                        Err(e) => -(e as isize),
+                    }
+                } else {
+                    WaitQueue::wait_until_interruptible(wait_queue, || match socket.try_send(buf) {
+                        Ok(n) => Some(n as isize),
+                        Err(SyscallErr::EAGAIN) => None,
+                        Err(e) => Some(-(e as isize)),
+                    })
+                    .unwrap_or_else(|e| e)
+                }
             } else {
                 wait_io(|| socket.try_send(buf), is_nonblock)
             }
         }
         SocketType::SOCK_STREAM => {
             if let Some(wait_queue) = socket.send_wait_queue() {
-                wait_io_with_queue(
-                    || socket.try_send(buf),
-                    is_nonblock,
-                    wait_queue,
-                    || socket.send_ready(),
-                )
+                if is_nonblock {
+                    match socket.try_send(buf) {
+                        Ok(n) => n as isize,
+                        Err(e) => -(e as isize),
+                    }
+                } else {
+                    WaitQueue::wait_until_interruptible(wait_queue, || match socket.try_send(buf) {
+                        Ok(n) => Some(n as isize),
+                        Err(SyscallErr::EAGAIN) => None,
+                        Err(e) => Some(-(e as isize)),
+                    })
+                    .unwrap_or_else(|e| e)
+                }
             } else {
                 wait_io(|| socket.try_send(buf), is_nonblock)
             }
@@ -332,12 +364,21 @@ pub fn sys_sendto(
             let dest_addr = trans_ref!(dest_addr, addrlen);
             let endpoint = address::endpoint(dest_addr).unwrap();
             if let Some(wait_queue) = socket.send_wait_queue() {
-                wait_io_with_queue(
-                    || socket.send_to(buf, endpoint).map(|n| n as isize),
-                    is_nonblock,
-                    wait_queue,
-                    || socket.send_ready(),
-                )
+                if is_nonblock {
+                    match socket.send_to(buf, endpoint) {
+                        Ok(n) => n as isize,
+                        Err(e) => -(e as isize),
+                    }
+                } else {
+                    WaitQueue::wait_until_interruptible(wait_queue, || {
+                        match socket.send_to(buf, endpoint) {
+                            Ok(n) => Some(n as isize),
+                            Err(SyscallErr::EAGAIN) => None,
+                            Err(e) => Some(-(e as isize)),
+                        }
+                    })
+                    .unwrap_or_else(|e| e)
+                }
             } else {
                 wait_io(
                     || socket.send_to(buf, endpoint).map(|n| n as isize),
@@ -396,7 +437,7 @@ pub fn sys_recvfrom(
     // 页表转换提到外面，避免 wait_io 循环中重复翻译
     let buf_slice = trans_refmut!(buf, len);
 
-    let recv = || match socket.socket_type() {
+    let mut recv = || match socket.socket_type() {
         SocketType::SOCK_STREAM | SocketType::SOCK_DGRAM | SocketType::SOCK_RAW => {
             let ret = socket.try_recv(buf_slice)?;
             if ret > 0 && src_addr != 0 {
@@ -407,7 +448,19 @@ pub fn sys_recvfrom(
         _ => todo!(),
     };
     if let Some(wait_queue) = socket.recv_wait_queue() {
-        wait_io_with_queue(recv, is_nonblock, wait_queue, || socket.recv_ready())
+        if is_nonblock {
+            match recv() {
+                Ok(n) => n as isize,
+                Err(e) => -(e as isize),
+            }
+        } else {
+            WaitQueue::wait_until_interruptible(wait_queue, || match recv() {
+                Ok(n) => Some(n as isize),
+                Err(SyscallErr::EAGAIN) => None,
+                Err(e) => Some(-(e as isize)),
+            })
+            .unwrap_or_else(|e| e)
+        }
     } else {
         wait_io(recv, is_nonblock)
     }
@@ -696,12 +749,19 @@ pub fn sys_sendmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
         SocketType::SOCK_DGRAM => wait_io(|| socket.try_sendmsg(&buf, dest_addr), is_nonblock),
         SocketType::SOCK_STREAM => {
             let wq = socket.send_wait_queue().unwrap();
-            wait_io_with_queue(
-                || socket.try_sendmsg(&buf, None),
-                is_nonblock,
-                wq,
-                || socket.send_ready(),
-            )
+            if is_nonblock {
+                match socket.try_sendmsg(&buf, None) {
+                    Ok(n) => n as isize,
+                    Err(e) => -(e as isize),
+                }
+            } else {
+                WaitQueue::wait_until_interruptible(wq, || match socket.try_sendmsg(&buf, None) {
+                    Ok(n) => Some(n as isize),
+                    Err(SyscallErr::EAGAIN) => None,
+                    Err(e) => Some(-(e as isize)),
+                })
+                .unwrap_or_else(|e| e)
+            }
         }
         SocketType::SOCK_RAW => wait_io(|| socket.try_sendmsg(&buf, dest_addr), is_nonblock),
         _ => wait_io(|| socket.try_sendmsg(&buf, dest_addr), is_nonblock),
@@ -741,12 +801,19 @@ pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
 
     let socket = get_socket!(sockfd);
     let ret = if let Some(wq) = socket.recv_wait_queue() {
-        wait_io_with_queue(
-            || socket.try_recvmsg(&mut buf).map(|(n, _)| n),
-            is_nonblock,
-            wq,
-            || socket.recv_ready(),
-        )
+        if is_nonblock {
+            match socket.try_recvmsg(&mut buf) {
+                Ok((n, _)) => n as isize,
+                Err(e) => -(e as isize),
+            }
+        } else {
+            WaitQueue::wait_until_interruptible(wq, || match socket.try_recvmsg(&mut buf) {
+                Ok((n, _)) => Some(n as isize),
+                Err(SyscallErr::EAGAIN) => None,
+                Err(e) => Some(-(e as isize)),
+            })
+            .unwrap_or_else(|e| e)
+        }
     } else {
         wait_io(|| socket.try_recvmsg(&mut buf).map(|(n, _)| n), is_nonblock)
     };

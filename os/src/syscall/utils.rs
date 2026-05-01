@@ -44,9 +44,12 @@ pub fn wait_io_core(mut f: impl FnMut() -> isize, nonblock: bool) -> isize {
     }
 }
 
-// 加入等待队列的阻塞唤醒
-// wait_queue: 传入的等待队列
-// cond：唤醒条件
+/// 加入等待队列的阻塞唤醒
+/// wait_queue: 传入的等待队列
+/// cond：唤醒条件
+///
+/// # 已废弃
+/// 请使用 `WaitQueue::wait_until_interruptible` 或 `WaitQueue::wait_until` 替代。
 pub fn wait_io_core_with_queue(
     mut f: impl FnMut() -> isize,
     nonblock: bool,
@@ -115,6 +118,9 @@ pub fn wait_io_core_with_queue(
 }
 
 /// 网络 I/O 等待循环，EAGAIN 时挂入指定等待队列。
+///
+/// # 已废弃
+/// 请使用 `WaitQueue::wait_until_interruptible`（将 `NET_INTERFACE.poll()` 放在条件闭包内）替代。
 pub fn wait_io_with_queue<T: Into<isize>>(
     mut f: impl FnMut() -> Result<T, SyscallErr>,
     nonblock: bool,
@@ -136,6 +142,9 @@ pub fn wait_io_with_queue<T: Into<isize>>(
 }
 
 /// 暂时先保留应急用，应该尽量不去调用
+///
+/// # 已废弃
+/// 请使用 `WaitQueue::wait_until_interruptible`（将 `NET_INTERFACE.poll()` 放在条件闭包内）替代。
 pub fn wait_io<T: Into<isize>>(
     mut f: impl FnMut() -> Result<T, SyscallErr>,
     nonblock: bool,

@@ -12,11 +12,16 @@ use alloc::vec::Vec;
 
 use crate::timer::{TimeSpec, TimeVal};
 
-use super::{current_task, signal::Signals, TaskControlBlock};
+use super::{
+    block_current_and_run_next_with_lock, current_task, has_actionable_signal, signal::Signals,
+    TaskControlBlock,
+};
+use crate::utils::error::SyscallErr;
 use alloc::collections::{BinaryHeap, VecDeque};
 use alloc::sync::{Arc, Weak};
 use lazy_static::*;
 use spin::Mutex;
+use spin::MutexGuard;
 
 #[cfg(feature = "oom_handler")]
 /// 任务的激活状态跟踪器
@@ -456,6 +461,138 @@ impl WaitQueue {
             task_inner.task_status = super::TaskStatus::Ready;
         }
     }
+
+    // ==================== wait_until 方法族（DragonOS 架构） ====================
+
+    /// 兜底定时器的超时毫秒数，防止丢失唤醒导致永久阻塞。
+    const WAIT_IO_FALLBACK_MS: usize = 10;
+
+    /// Core `wait_until` 实现（参照 DragonOS 架构）。
+    ///
+    /// `cond` 返回 `None` 表示继续等待，`Some(v)` 表示条件满足返回 `v`。
+    /// `signal_check` 为 true 时在等待前检查信号（interruptible 变体）。
+    /// `is_io` 为 true 时正确标记 iowait（用于 CPU iowait 统计）。
+    ///
+    /// ## 关键设计
+    /// 在检查条件前先通过 `prepare_to_wait` 注册 waker，确保不会丢失唤醒。
+    /// 调用者将 `poll()` 等准备工作放在 `cond` 闭包中（文件和网络 IO 通用）。
+    ///
+    /// ## 返回值
+    /// - `>= 0`：条件满足，返回 `cond()` 提供的值
+    /// - `< 0`：被信号中断（`-ERESTART`）
+    fn wait_until_impl<F>(wq: &Mutex<Self>, cond: &mut F, signal_check: bool, is_io: bool) -> isize
+    where
+        F: FnMut() -> Option<isize>,
+    {
+        // 快路径：先检查一次条件
+        if let Some(res) = cond() {
+            return res;
+        }
+
+        loop {
+            let task = current_task().unwrap();
+
+            // 1. 信号检查（仅 interruptible 变体）
+            if signal_check {
+                let inner = task.acquire_inner_lock();
+                let pending = inner.sigpending.difference(inner.sigmask);
+                let has_pending = !pending.is_empty();
+                drop(inner);
+                if has_pending && has_actionable_signal(&task) {
+                    return -(SyscallErr::ERESTART as isize);
+                }
+            }
+
+            // 2. 注册 waker（DragonOS 关键模式：注册后再检查条件）
+            let mut guard = wq.lock();
+            guard.prepare_to_wait(Arc::downgrade(&task));
+
+            // 3. 注册后检查条件（调用者的闭包里包含 poll 等准备工作）
+            if let Some(res) = cond() {
+                guard.finish_wait(&task);
+                return res;
+            }
+
+            // 4. 设置兜底定时器（Option B）
+            if !task
+                .wait_io_timer_pending
+                .swap(true, AtomicOrdering::AcqRel)
+            {
+                wait_with_timeout(
+                    Arc::downgrade(&task),
+                    TimeSpec::now() + TimeSpec::from_ms(Self::WAIT_IO_FALLBACK_MS),
+                );
+            }
+            drop(task);
+
+            // 5. 阻塞 — 丢弃 MutexGuard，调度其他任务
+            block_current_and_run_next_with_lock(guard);
+
+            // 6. 唤醒后：重新加锁并完成等待
+            let task = current_task().unwrap();
+            wq.lock().finish_wait(&task);
+
+            // 7. 刷新 real timer
+            task.acquire_inner_lock().refresh_real_timer();
+        }
+    }
+
+    /// 不可中断等待，条件满足前一直阻塞。
+    ///
+    /// 等价于 DragonOS 的 `wait_until`（Uninterruptible）。
+    /// 适用于内核内部确定性等待（无需信号检查的场景）。
+    /// 文件和网络 IO 通用——`NET_INTERFACE.poll()` 等操作由调用者在 `cond` 闭包中处理。
+    pub fn wait_until<F>(wq: &Mutex<Self>, mut cond: F) -> isize
+    where
+        F: FnMut() -> Option<isize>,
+    {
+        Self::wait_until_impl(wq, &mut cond, false, false)
+    }
+
+    /// 可中断等待，条件满足或收到信号时返回。
+    ///
+    /// 等价于 DragonOS 的 `wait_until_interruptible`。
+    /// 文件和网络 IO 通用。
+    /// - `Ok(v)`：条件满足
+    /// - `Err(-ERESTART)`：被信号中断
+    pub fn wait_until_interruptible<F>(wq: &Mutex<Self>, mut cond: F) -> Result<isize, isize>
+    where
+        F: FnMut() -> Option<isize>,
+    {
+        let ret = Self::wait_until_impl(wq, &mut cond, true, false);
+        if ret < 0 {
+            Err(ret)
+        } else {
+            Ok(ret)
+        }
+    }
+
+    /// IO 等待（不可中断），正确标记 iowait 以用于 CPU iowait 统计。
+    ///
+    /// 等价于 DragonOS 的 `wait_until_io`。
+    pub fn wait_until_io<F>(wq: &Mutex<Self>, mut cond: F) -> isize
+    where
+        F: FnMut() -> Option<isize>,
+    {
+        Self::wait_until_impl(wq, &mut cond, false, true)
+    }
+
+    /// IO 等待（可中断），正确标记 iowait。
+    ///
+    /// 等价于 DragonOS 的 `wait_until_io_interruptible`。
+    /// - `Ok(v)`：条件满足
+    /// - `Err(-ERESTART)`：被信号中断
+    pub fn wait_until_io_interruptible<F>(wq: &Mutex<Self>, mut cond: F) -> Result<isize, isize>
+    where
+        F: FnMut() -> Option<isize>,
+    {
+        let ret = Self::wait_until_impl(wq, &mut cond, true, true);
+        if ret < 0 {
+            Err(ret)
+        } else {
+            Ok(ret)
+        }
+    }
 }
 
 /// 表示一个等待超时的任务
@@ -540,7 +677,8 @@ impl KernelTimerQueue {
                 if let Some(task) = task.upgrade() {
                     // Option A：无条件清除 pending 标志。
                     // 无论任务是否已被提前唤醒，定时器既已触发，槽位即释放。
-                    task.wait_io_timer_pending.store(false, AtomicOrdering::Release);
+                    task.wait_io_timer_pending
+                        .store(false, AtomicOrdering::Release);
 
                     let mut inner = task.acquire_inner_lock();
                     let should_wake = inner.task_status == super::TaskStatus::Interruptible;
