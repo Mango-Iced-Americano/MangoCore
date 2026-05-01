@@ -177,7 +177,9 @@ pub fn translated_str(token: usize, ptr: *const u8) -> Result<String, isize> {
 pub fn translated_ref<T>(token: usize, ptr: *const T) -> Result<&'static T, isize> {
     let page_table = super::PageTableImpl::from_token(token);
     let va = VirtAddr::from(ptr as usize);
-    if va.0 >= crate::hal::config::TASK_SIZE {
+    if va.0 < crate::hal::config::USER_VA_BASE
+        || va.0 >= crate::hal::config::USER_VA_END
+    {
         return Err(crate::syscall::errno::EFAULT);
     }
     let pa = match page_table.translate_va(va) {
@@ -193,7 +195,9 @@ pub fn translated_ref<T>(token: usize, ptr: *const T) -> Result<&'static T, isiz
 pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> Result<&'static mut T, isize> {
     let page_table = super::PageTableImpl::from_token(token);
     let va = VirtAddr::from(ptr as usize);
-    if va.0 >= crate::hal::config::TASK_SIZE {
+    if va.0 < crate::hal::config::USER_VA_BASE
+        || va.0 >= crate::hal::config::USER_VA_END
+    {
         return Err(crate::syscall::errno::EFAULT);
     }
     let pa = match page_table.translate_va(va) {

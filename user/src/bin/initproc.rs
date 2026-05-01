@@ -213,6 +213,10 @@ fn enter_shell(path: &str, environ: &[*const u8]) {
     }
 }
 
+fn is_iperf_script(script: &str) -> bool {
+    script.contains("iperf")
+}
+
 fn run_group_in_dir(environ: &[*const u8], dir: &str, script: &str) {
     let pid = fork();
     if pid < 0 {
@@ -257,21 +261,20 @@ fn run_group_in_dir(environ: &[*const u8], dir: &str, script: &str) {
         exit(127);
     } else {
         let mut exit_code: i32 = 0;
-        println!("[initproc] waiting pid={} for {} in {}", pid, script, dir);
-        waitpid(pid as usize, &mut exit_code);
-        // // --- 优雅的阻塞等待逻辑 ---
-        // loop {
-        //     // waitpid 会返回退出的进程 PID（或 -1 表示进程已不存在）
-        //     let ret = waitpid(pid as usize, &mut exit_code);
-
-        //     // 只有等到真正的目标 bash 进程退出，或者是抛出 ECHILD (-1) 找不到进程时才跳出
-        //     if ret == pid as isize || ret == -1 {
-        //         break;
-        //     }
-        //     // 否则（比如返回了被收割的孤儿进程 PID，或者 0/-2 非阻塞状态），继续等待！
-        //     sleep(50); // 避免空转
-        // }
-        // // ---------------------------
+        if is_iperf_script(script) {
+            // iperf 测试以守护进程方式运行，waitpid 无法等到其结束。
+            // 直接计时 15 秒（musl 和 glibc 都是 15 秒）后继续。
+            println!(
+                "[initproc] iperf detected, using timer (15s) for {} in {}",
+                script, dir
+            );
+            sleep(15000);
+            // 尝试收割子进程，不阻塞等待
+            let _ = waitpid(pid as usize, &mut exit_code);
+        } else {
+            println!("[initproc] waiting pid={} for {} in {}", pid, script, dir);
+            waitpid(pid as usize, &mut exit_code);
+        }
         println!(
             "[initproc] done {} in {} exit_code={}",
             script, dir, exit_code
@@ -489,6 +492,17 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     run_bash_cmd(&cmd, &environ); // prepare busybox "symlinks" for test scripts
 
     let cfg = load_runtime_config();
+    
+                                                                   // /debug_bash remains the highest-priority emergency switch.
+    if cfg.mode == RunMode::Shell {
+        println!("[initproc] entering shell mode");
+        enter_shell(path, &environ);
+        shutdown();
+        return 0;
+    }
+
+    run_selected_groups(&environ, cfg.mask);
+
     // ============================================================
     // LTP 信号系统测试（控制变量：先验证信号基础，再测网络）
     // ============================================================
@@ -508,15 +522,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
 
     run_bash_cmd("cd musl && bash ./netperf_testcode.sh", &environ);
     run_bash_cmd("cd musl && bash ./iperf_testcode.sh", &environ); // prepare test scripts (chmod +x etc)
-                                                                   // /debug_bash remains the highest-priority emergency switch.
-    if cfg.mode == RunMode::Shell {
-        println!("[initproc] entering shell mode");
-        enter_shell(path, &environ);
-        shutdown();
-        return 0;
-    }
-
-    run_selected_groups(&environ, cfg.mask);
+    
 
     if cfg.mode == RunMode::RunThenShell {
         println!("[initproc] run_then_shell -> shell");
