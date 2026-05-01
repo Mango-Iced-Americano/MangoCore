@@ -403,8 +403,15 @@ pub fn dispatch_udp_packets(inner: &mut NetInterfaceInner) {
         if let Some(udp_sock) = smoltcp::socket::udp::Socket::downcast_mut(socket) {
             // 只要这个底层缓冲区里有包，就全部抽干
             while udp_sock.can_recv() {
-                let mut buf = vec![0u8; 2048];
+                // 获取下一个数据报的真实长度
+                let payload_len = if let Ok((payload, _metadata)) = udp_sock.peek() {
+                    payload.len()
+                } else {
+                    break;
+                };
+                let mut buf = vec![0u8; payload_len];
                 if let Ok((size, meta)) = udp_sock.recv_slice(&mut buf) {
+                    debug_assert_eq!(size, payload_len); // 确保一次读完
                     buf.truncate(size);
 
                     // 3. 拿到包了，调用我们写的打分函数，找到它在 OS 层对应的 UdpSocket
