@@ -177,9 +177,9 @@ pub fn translated_str(token: usize, ptr: *const u8) -> Result<String, isize> {
 pub fn translated_ref<T>(token: usize, ptr: *const T) -> Result<&'static T, isize> {
     let page_table = super::PageTableImpl::from_token(token);
     let va = VirtAddr::from(ptr as usize);
-    if va.0 < crate::hal::config::USER_VA_BASE
-        || va.0 >= crate::hal::config::USER_VA_END
-    {
+    // 仅保留上界检查；PIE 二进制可能在 USER_VA_BASE 之下（如 VA 0x0）有合法映射，
+    // 下界检查会错误拒绝；未映射地址由 translate_va + check_page_fault 处理。
+    if va.0 >= crate::hal::config::USER_VA_END {
         return Err(crate::syscall::errno::EFAULT);
     }
     let pa = match page_table.translate_va(va) {
@@ -195,9 +195,9 @@ pub fn translated_ref<T>(token: usize, ptr: *const T) -> Result<&'static T, isiz
 pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> Result<&'static mut T, isize> {
     let page_table = super::PageTableImpl::from_token(token);
     let va = VirtAddr::from(ptr as usize);
-    if va.0 < crate::hal::config::USER_VA_BASE
-        || va.0 >= crate::hal::config::USER_VA_END
-    {
+    // 仅保留上界检查；PIE 二进制可能在 USER_VA_BASE 之下（如 VA 0x0）有合法映射，
+    // 下界检查会错误拒绝；未映射地址由 translate_va + check_page_fault 处理。
+    if va.0 >= crate::hal::config::USER_VA_END {
         return Err(crate::syscall::errno::EFAULT);
     }
     let pa = match page_table.translate_va(va) {

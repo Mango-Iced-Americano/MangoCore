@@ -27,14 +27,13 @@ macro_rules! get_socket {
 macro_rules! trans_ref {
     ($addr:expr, $addrlen:expr) => {{
         let token = crate::task::current_task().unwrap().get_user_token();
-        // access_ok: 用户地址必须在 [USER_VA_BASE, USER_VA_BASE + TASK_SIZE) 范围内，且不溢出
+        // access_ok: 用户地址必须在 [0, USER_VA_END) 范围内，且不溢出
         // 防止地址 0xFFFFFFFFFFFFFFFF 等非法值绕过 translated_byte_buffer 的整数溢出
+        // PIE 二进制可能在 USER_VA_BASE 之下有合法映射，故仅保留上界检查。
         let addr_val = $addr as usize;
         let len_val = $addrlen as usize;
-        let user_va_base = crate::hal::config::USER_VA_BASE;
         let user_va_end = crate::hal::config::USER_VA_END;
-        if addr_val < user_va_base
-            || addr_val >= user_va_end
+        if addr_val >= user_va_end
             || len_val > crate::hal::config::TASK_SIZE
             || addr_val.checked_add(len_val).is_none()
             || addr_val + len_val > user_va_end
@@ -64,10 +63,8 @@ macro_rules! trans_refmut {
         let token = crate::task::current_task().unwrap().get_user_token();
         let addr_val = $addr as usize;
         let len_val = $addrlen as usize;
-        let user_va_base = crate::hal::config::USER_VA_BASE;
         let user_va_end = crate::hal::config::USER_VA_END;
-        if addr_val < user_va_base
-            || addr_val >= user_va_end
+        if addr_val >= user_va_end
             || len_val > crate::hal::config::TASK_SIZE
             || addr_val.checked_add(len_val).is_none()
             || addr_val + len_val > user_va_end

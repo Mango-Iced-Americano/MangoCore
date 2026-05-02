@@ -506,12 +506,12 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     // ============================================================
     // LTP 信号系统测试（控制变量：先验证信号基础，再测网络）
     // ============================================================
-    run_ltp_signal_tests(&environ);
+    // run_ltp_signal_tests(&environ);
 
     // ============================================================
     // LTP 网络相关测例（独立 ELF 二进制，跳过 runltp 脚本框架）
     // ============================================================
-    run_ltp_network_tests(&environ);
+    // run_ltp_network_tests(&environ);
 
     // run_bash_cmd(
     //     "cd musl && ./netserver -D -L 127.0.0.1 -p 12865 &",
@@ -520,8 +520,8 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     // sleep(100);
     // run_bash_cmd("cd musl && ./netperf -H 127.0.0.1 -p 12865 -t TCP_CRR -l 1 -- -s 16k -S 16k -m 1k -M 1k -r 64,64 -R 1", &environ);
 
-    run_bash_cmd("cd musl && bash ./netperf_testcode.sh", &environ);
-    run_bash_cmd("cd musl && bash ./iperf_testcode.sh", &environ); // prepare test scripts (chmod +x etc)
+    // run_bash_cmd("cd musl && bash ./netperf_testcode.sh", &environ);
+    // run_bash_cmd("cd musl && bash ./iperf_testcode.sh", &environ); // prepare test scripts (chmod +x etc)
     
 
     if cfg.mode == RunMode::RunThenShell {

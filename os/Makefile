@@ -133,4 +133,16 @@ docker:
 	docker compose exec -it os-dev bash
 
 conf-inject:
+	@case "$(CONF_ARCH)" in \
+		la|la64) \
+			rustup override set nightly-2024-05-01-x86_64-unknown-linux-gnu; \
+			cp ./src/lang_items.rs.la ./src/lang_items.rs; \
+			cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs; \
+			;; \
+		rv|rv64) \
+			rustup override set nightly-2025-01-18-x86_64-unknown-linux-gnu; \
+			cp ./src/lang_items.rs.rv ./src/lang_items.rs; \
+			cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs; \
+			;; \
+	esac
 	ARCH=$(CONF_ARCH) BLK_MODE=$(CONF_BLK_MODE) CONF_FILE=$(CONF_FILE) IMAGE_PATH=$(CONF_IMAGE) AUTO_REBUILD_MEM=$(AUTO_REBUILD_MEM) MODE=$(MODE) LOG=$(LOG) ./inject_os_test_conf.sh
