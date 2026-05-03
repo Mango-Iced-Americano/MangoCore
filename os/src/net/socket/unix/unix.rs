@@ -1,4 +1,5 @@
 use crate::net::{Mutex, Socket};
+use crate::net::syscall::common::MsgFlags;
 use crate::{
     fs::{
         dev::pipe::{make_pipe, Pipe},
@@ -99,7 +100,7 @@ impl<const N: usize> Socket for UnixSocket<N> {
         }
     }
 
-    fn try_send(&self, buf: &[u8]) -> Result<isize, SyscallErr> {
+    fn try_send(&self, buf: &[u8], _flags: MsgFlags) -> Result<isize, SyscallErr> {
         let n = self.write_end.write(None, buf) as isize;
         if n >= 0 {
             Ok(n)

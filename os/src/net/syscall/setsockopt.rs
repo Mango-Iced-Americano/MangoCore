@@ -6,15 +6,27 @@ use super::common::{SOL_SOCKET, SOL_TCP, TCP_NODELAY};
 use super::common::{
     SO_DONTROUTE, SO_KEEPALIVE, SO_RCVBUF, SO_REUSEADDR, SO_SNDBUF,
 };
+use super::common::is_known_sockopt_level;
 
 pub fn sys_setsockopt(
     sockfd: u32,
     level: u32,
     optname: u32,
     optval_ptr: usize,
-    _optlen: u32,
+    optlen: u32,
 ) -> isize {
     let socket = crate::get_socket!(sockfd);
+
+    // NULL 指针检查：optval_ptr == 0 时返回 EFAULT
+    if optval_ptr == 0 {
+        return -(SyscallErr::EFAULT as isize);
+    }
+
+    // optlen 为 0 时无法读取任何选项数据，返回 EINVAL
+    if optlen == 0 {
+        return -(SyscallErr::EINVAL as isize);
+    }
+
     let task = current_task().unwrap();
     let token = task.get_user_token();
     let optval_ptr = match translated_refmut(token, optval_ptr as *mut u32) {
@@ -73,7 +85,11 @@ pub fn sys_setsockopt(
                 level,
                 optname
             );
-            return -(SyscallErr::ENOPROTOOPT as isize);
+            if is_known_sockopt_level(level) {
+                return -(SyscallErr::ENOPROTOOPT as isize);
+            } else {
+                return -(SyscallErr::EOPNOTSUPP as isize);
+            }
         }
     }
     0 as isize

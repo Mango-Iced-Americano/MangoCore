@@ -11,6 +11,7 @@ use crate::{
     net::socket::inet::datagram::udp::UdpSocket,
     net::socket::inet::raw::raw::RawSocket,
     net::socket::inet::stream::TcpStreamSocket,
+    net::syscall::common::MsgFlags,
     task::current_task,
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
 };
@@ -127,10 +128,10 @@ pub trait Socket: Send + Sync {
 
     /// 尝试发送消息（sendmsg 用）。
     /// dest 为 None 时使用 socket 已连接的远程端点。
-    fn try_sendmsg(&self, buf: &[u8], dest: Option<IpEndpoint>) -> Result<isize, SyscallErr> {
+    fn try_sendmsg(&self, buf: &[u8], dest: Option<IpEndpoint>, _flags: MsgFlags) -> Result<isize, SyscallErr> {
         // UDP RawSocket 子类会重写此方法
         let _ = dest;
-        self.try_send(buf)
+        self.try_send(buf, _flags)
     }
 
     /// 获取最近一次接收到的源地址（仅 UDP 有意义）。
@@ -144,7 +145,7 @@ pub trait Socket: Send + Sync {
 
     /// 尝试发送数据，不阻塞。
     /// 不会调用 poll、不会睡眠、不会调度。成功时返回发送的字节数 (isize)。
-    fn try_send(&self, buf: &[u8]) -> Result<isize, SyscallErr>;
+    fn try_send(&self, buf: &[u8], _flags: MsgFlags) -> Result<isize, SyscallErr>;
 
     /// poll/select 相关：是否可读（不阻塞）
     fn socket_r_ready(&self) -> bool {
@@ -238,7 +239,7 @@ impl File for SocketFile {
     }
 
     fn write(&self, _offset: Option<&mut usize>, buf: &[u8]) -> usize {
-        match self.inner.try_send(buf) {
+        match self.inner.try_send(buf, MsgFlags::empty()) {
             Ok(n) => n as usize,
             Err(e) => e.as_errno_ret(),
         }

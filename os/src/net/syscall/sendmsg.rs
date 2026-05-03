@@ -6,6 +6,7 @@ use crate::mm::{
     translated_refmut, UserBuffer,
 };
 use crate::net::address;
+use crate::net::config::NET_INTERFACE;
 use crate::net::posix::MsgHdr;
 use crate::net::SocketType;
 use crate::syscall::utils::wait_io;
@@ -14,9 +15,11 @@ use crate::task::WaitQueue;
 use crate::utils::error::SyscallErr;
 
 use super::common::MsgFlags;
+use smoltcp::wire::IpListenEndpoint;
 
 pub fn sys_sendmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
-    let msgdontwait = match MsgFlags::from_bits_truncate(flags).validate_for_send() {
+    let msg_flags = MsgFlags::from_bits_truncate(flags);
+    let msgdontwait = match msg_flags.validate_for_send() {
         Ok(nb) => nb,
         Err(e) => return -(e as isize),
     };
@@ -90,16 +93,29 @@ pub fn sys_sendmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
 
     let socket = crate::get_socket!(sockfd);
     match socket.socket_type() {
-        SocketType::SOCK_DGRAM => wait_io(|| socket.try_sendmsg(&buf, dest_addr), is_nonblock),
+        SocketType::SOCK_DGRAM => {
+            // Auto-bind if not bound (same as sys_sendto)
+            if socket.local_endpoint().port == 0 {
+                let addr = address::SocketAddrv4::new([0; 16].as_slice());
+                let endpoint = IpListenEndpoint::from(addr);
+                let _ = socket.bind(endpoint);
+            }
+            // sendmsg without msg_name on unconnected DGRAM → EDESTADDRREQ
+            if dest_addr.is_none() && socket.remote_endpoint().is_none() {
+                return -(SyscallErr::EDESTADDRREQ as isize);
+            }
+            wait_io(|| socket.try_sendmsg(&buf, dest_addr, msg_flags), is_nonblock)
+        }
         SocketType::SOCK_STREAM => {
             let wq = socket.send_wait_queue().unwrap();
             if is_nonblock {
-                match socket.try_sendmsg(&buf, None) {
+                NET_INTERFACE.try_poll();
+                match socket.try_sendmsg(&buf, None, msg_flags) {
                     Ok(n) => n as isize,
                     Err(e) => -(e as isize),
                 }
             } else {
-                WaitQueue::wait_until_interruptible(wq, || match socket.try_sendmsg(&buf, None) {
+                WaitQueue::wait_until_interruptible(wq, || match socket.try_sendmsg(&buf, None, msg_flags) {
                     Ok(n) => Some(n as isize),
                     Err(SyscallErr::EAGAIN) => None,
                     Err(e) => Some(-(e as isize)),
@@ -107,7 +123,7 @@ pub fn sys_sendmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
                 .unwrap_or_else(|e| e)
             }
         }
-        SocketType::SOCK_RAW => wait_io(|| socket.try_sendmsg(&buf, dest_addr), is_nonblock),
-        _ => wait_io(|| socket.try_sendmsg(&buf, dest_addr), is_nonblock),
+        SocketType::SOCK_RAW => wait_io(|| socket.try_sendmsg(&buf, dest_addr, msg_flags), is_nonblock),
+        _ => wait_io(|| socket.try_sendmsg(&buf, dest_addr, msg_flags), is_nonblock),
     }
 }

@@ -5,9 +5,11 @@ extern crate alloc;
 
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 use user_lib::{
     chdir, close, exec, exit, fork, open, println, read, shutdown, sleep, wait, waitpid, OpenFlags,
 };
+use alloc::vec;
 
 fn run_bash_cmd(cmd: &str, environ: &[*const u8]) -> i32 {
     let pid = fork();
@@ -296,56 +298,129 @@ fn run_selected_groups(environ: &[*const u8], mask: u16) {
 }
 
 fn run_ltp_network_tests(environ: &[*const u8]) {
-    // LTP testcases/bin 中与网络/Socket 相关的测例。
-    // 只选独立的 ELF 二进制（不含 .sh 脚本，不含需外部网络服务的测例）。
-    let net_cases = [
-        // ---- Socket 基础 ----
-        "accept01",
-        "accept02",
-        "accept03",
-        "accept4_01",
-        "bind01",
-        "bind02",
-        "bind03",
-        "bind04",
-        "bind05",
-        "bind06",
-        "connect01",
-        "connect02",
+    // LTP testcases/bin 中与网络/Socket 相关的独立 ELF 测例。
+    // 分为多个子列表，按功能分类。
+    // 注意：部分测例可能因内核缺少对应功能而返回 TCONF（跳过），属正常行为。
+
+    // ============ 1. Socket 系统调用基础 ============
+    let socket_syscall_cases = [
+        "socket01",           // socket() 系统调用基础
+        "socket02",           // socket() with SOCK_CLOEXEC/SOCK_NONBLOCK
+        "socketpair01",       // socketpair() 基础
+        "socketpair02",       // socketpair() with close-on-exec/nonblock
+        "socketcall01",       // socketcall(2) raw syscall 基础 (TCP/UDP/RAW/UNIX)
+        "socketcall02",       // socketcall(2) 错误测试
+        "socketcall03",       // socketcall(2) bind+listen 测试
+        "bind01", "bind02", "bind03", "bind04", "bind05", "bind06",
+        "connect01", "connect02",
         "listen01",
-        // ---- 收发数据 ----
+        "accept01", "accept02", "accept03",
+        "accept4_01",
+        "shutdown01",         // shutdown() SHUT_RD/SHUT_WR/SHUT_RDWR
+        "shutdown02",         // shutdown() 错误测试
+    ];
+
+    // ============ 2. 数据收发 ============
+    let data_io_cases = [
+        "send01", "send02",
+        "sendto01", "sendto02", "sendto03",
+        "sendmsg01", "sendmsg02", "sendmsg03",
+        "sendmmsg01", "sendmmsg02",
         "recv01",
         "recvfrom01",
+        "recvmsg01", "recvmsg02", "recvmsg03",
         "recvmmsg01",
-        "recvmsg01",
-        "recvmsg02",
-        "recvmsg03",
-        "send01",
-        "send02",
-        "sendmmsg01",
-        "sendmmsg02",
-        "sendmsg01",
-        "sendmsg02",
-        "sendmsg03",
-        "sendto01",
-        "sendto02",
-        "sendto03",
-        // ---- Socket 选项 / 名称 ----
+        "sendfile01", "sendfile02", "sendfile03", "sendfile04", "sendfile05",
+        "sendfile06", "sendfile07", "sendfile08", "sendfile09",
+    ];
+
+    // ============ 3. Socket 选项 / 名称 ============
+    let socket_opt_cases = [
         "getsockname01",
-        "getsockopt01",
-        "getsockopt02",
-        "setsockopt01",
-        "setsockopt02",
-        "setsockopt03",
-        "setsockopt04",
-        "setsockopt05",
-        // ---- 网络工具 ----
+        "getpeername01",
+        "getsockopt01", "getsockopt02",
+        "setsockopt01", "setsockopt02", "setsockopt03",
+        "setsockopt04", "setsockopt05", "setsockopt06", "setsockopt07",
+        "sockioctl01",       // socket ioctl 测试
+    ];
+
+    // ============ 4. 网络工具 / 诊断 ============
+    let net_tool_cases = [
         "add_ipv6addr",
         "check_icmpv4_connectivity",
         "check_icmpv6_connectivity",
+        "vsock01",           // AF_VSOCK 测试
     ];
 
-    // let net_cases = ["accept4_01"];
+    // ============ 5. 网络栈高级特性（独立 ELF） ============
+    let net_adv_cases = [
+        // packet(7) / AF_PACKET
+        "fanout01",          // AF_PACKET fanout 测试
+        // tcp_fastopen
+        "tcp_fastopen01",    // TCP Fast Open 基础
+        // TCP 拥塞控制
+        "dctcp01",           // DCTCP 拥塞控制
+        "bbr01", "bbr02",    // BBR 拥塞控制
+    ];
+
+    // ============ 6. 多路 I/O 复用（与网络密切相关） ============
+    let io_multiplex_cases = [
+        "poll01", "poll02",
+        "ppoll01", "ppoll02",
+        "select01", "select02", "select03", "select04",
+        "pselect01", "pselect02", "pselect03",
+        "epoll01", "epoll02", "epoll03", "epoll04", "epoll05",
+        "epoll_ctl01", "epoll_wait01",
+    ];
+
+    // ============ 7. IPv6 / 地址解析 ============
+    let ipv6_cases = [
+        "getaddrinfo01",
+        "in6_01", "in6_02",
+        "asapi_01", "asapi_02", "asapi_03",
+    ];
+
+    // ============ 8. 网络 Shell 脚本（需要网络基础设施，仅尝试） ============
+    // let net_shell_cases = [
+    //     // busy_poll（Busy Poll 轮询）
+    //     // "busy_poll01.sh", "busy_poll02.sh", "busy_poll03.sh",
+    //     // iptables 防火墙
+    //     // "iptables01.sh",
+    //     // nftables
+    //     // "nft01.sh",
+    //     // MPLS
+    //     // "mpls01.sh", "mpls02.sh", "mpls03.sh", "mpls04.sh",
+    //     // IP 路由
+    //     // "ip_tests.sh",
+    //     // 网络命名空间 / 虚拟化
+    //     // "ipvlan01.sh",
+    //     // MACsec 加密
+    //     // "macsec01.sh", "macsec02.sh", "macsec03.sh",
+    //     // 隧道协议
+    //     // "gre01.sh", "gre02.sh",
+    //     // "geneve01.sh", "geneve02.sh",
+    //     // "fou01.sh",
+    //     // SCTP / DCCP
+    //     // "sctp01.sh",
+    //     // "dccp01.sh",
+    //     // TCP Fast Open shell wrapper
+    //     // "tcp_fastopen_run.sh",
+    // ];
+
+    // 将所有子列表合并
+    let net_cases: Vec<&str> = socket_syscall_cases.iter()
+        .chain(data_io_cases.iter())
+        .chain(socket_opt_cases.iter())
+        .chain(net_tool_cases.iter())
+        .chain(net_adv_cases.iter())
+        .chain(io_multiplex_cases.iter())
+        .chain(ipv6_cases.iter())
+    //    .chain(net_shell_cases.iter())
+        .copied()
+        .collect();
+    
+    // let net_cases: Vec<&str> = vec!["send02"];
+
     let testdir = "/musl/ltp/testcases/bin";
 
     println!(
@@ -493,16 +568,6 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
 
     let cfg = load_runtime_config();
     
-                                                                   // /debug_bash remains the highest-priority emergency switch.
-    if cfg.mode == RunMode::Shell {
-        println!("[initproc] entering shell mode");
-        enter_shell(path, &environ);
-        shutdown();
-        return 0;
-    }
-
-    run_selected_groups(&environ, cfg.mask);
-
     // ============================================================
     // LTP 信号系统测试（控制变量：先验证信号基础，再测网络）
     // ============================================================
@@ -511,7 +576,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     // ============================================================
     // LTP 网络相关测例（独立 ELF 二进制，跳过 runltp 脚本框架）
     // ============================================================
-    // run_ltp_network_tests(&environ);
+    run_ltp_network_tests(&environ);
 
     // run_bash_cmd(
     //     "cd musl && ./netserver -D -L 127.0.0.1 -p 12865 &",
@@ -522,7 +587,15 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
 
     // run_bash_cmd("cd musl && bash ./netperf_testcode.sh", &environ);
     // run_bash_cmd("cd musl && bash ./iperf_testcode.sh", &environ); // prepare test scripts (chmod +x etc)
+
+    if cfg.mode == RunMode::Shell {
+        println!("[initproc] entering shell mode");
+        enter_shell(path, &environ);
+        shutdown();
+        return 0;
+    }
     
+    run_selected_groups(&environ, cfg.mask);
 
     if cfg.mode == RunMode::RunThenShell {
         println!("[initproc] run_then_shell -> shell");

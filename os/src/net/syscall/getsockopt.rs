@@ -3,8 +3,9 @@ use crate::net::{TcpInfo, TCP_MSS};
 use crate::task::current_task;
 use crate::utils::error::SyscallErr;
 
-use super::common::{SOL_SOCKET, SOL_TCP, TCP_CONGESTION, TCP_INFO, TCP_MAXSEG};
+use super::common::{SOL_SOCKET, SOL_TCP, SOL_IP, TCP_CONGESTION, TCP_INFO, TCP_MAXSEG};
 use super::common::{SO_RCVBUF, SO_REUSEADDR, SO_SNDBUF};
+use super::common::is_known_sockopt_level;
 
 pub fn sys_getsockopt(
     sockfd: u32,
@@ -14,6 +15,12 @@ pub fn sys_getsockopt(
     optlen: usize,
 ) -> isize {
     let socket = crate::get_socket!(sockfd); // 检查socket存不存在
+
+    // NULL 指针检查：optval_ptr_ == 0 或 optlen == 0 时返回 EFAULT
+    if optval_ptr_ == 0 || optlen == 0 {
+        return -(SyscallErr::EFAULT as isize);
+    }
+
     let task = current_task().unwrap();
     let token = task.get_user_token();
     let optval_ptr = match translated_refmut(token, optval_ptr_ as *mut u32) {
@@ -62,7 +69,11 @@ pub fn sys_getsockopt(
             }
         }
         (SOL_SOCKET, SO_SNDBUF | SO_RCVBUF | SO_REUSEADDR) => {
-            // let len = core::mem::size_of::<u32>();
+            // 对于需要写入 u32 的选项，检查 optlen 是否够大
+            let optlen_val = unsafe { *optlen };
+            if optlen_val < 4 {
+                return -(SyscallErr::EINVAL as isize);
+            }
             let socket = crate::get_socket!(sockfd);
 
             match optname {
@@ -97,7 +108,11 @@ pub fn sys_getsockopt(
         }
         _ => {
             log::warn!("[sys_getsockopt] level: {}, optname: {}", level, optname);
-            return -(SyscallErr::ENOPROTOOPT as isize);
+            if is_known_sockopt_level(level) {
+                return -(SyscallErr::ENOPROTOOPT as isize);
+            } else {
+                return -(SyscallErr::EOPNOTSUPP as isize);
+            }
         }
     }
     0 as isize

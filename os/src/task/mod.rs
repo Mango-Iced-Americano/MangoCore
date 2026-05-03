@@ -93,6 +93,9 @@ pub fn block_current_and_run_next_with_lock<T>(lock: MutexGuard<'_, T>) {
     // ---- hold current PCB lock
     let mut task_inner = task.acquire_inner_lock();
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
+
+    task_inner.task_status = TaskStatus::Interruptible;
+
     drop(task_inner);
     // ---- release current PCB lock
 

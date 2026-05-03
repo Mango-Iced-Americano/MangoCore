@@ -184,10 +184,10 @@ pub fn _to_endpoint(listen_endpoint: IpListenEndpoint) -> IpEndpoint {
 #[allow(unused)]
 pub fn _endpoint(addr_buf: &[u8]) -> GeneralRet<IpEndpoint> {
     let listen_endpoint = listen_endpoint(addr_buf)?;
-    let addr = if listen_endpoint.addr.is_none() {
-        IpAddress::v4(127, 0, 0, 1)
-    } else {
-        listen_endpoint.addr.unwrap()
+    let addr = match listen_endpoint.addr {
+        Some(addr) if addr.is_unspecified() => IpAddress::v4(127, 0, 0, 1),
+        Some(addr) => addr,
+        None => IpAddress::v4(127, 0, 0, 1),
     };
     Ok(IpEndpoint::new(addr, listen_endpoint.port))
 }
@@ -212,6 +212,10 @@ pub fn _fill_with_endpoint(endpoint: IpEndpoint, addr: usize, addrlen: usize) ->
         addr,
         endpoint
     );
+    // NULL 指针检查：addr == 0 或 addrlen == 0 时直接返回 EFAULT
+    if addr == 0 || addrlen == 0 {
+        return Err(SyscallErr::EFAULT);
+    }
     let task = current_task().unwrap();
     let token = task.get_user_token();
     let addr = match translated_refmut(token, addr as *mut u8) {

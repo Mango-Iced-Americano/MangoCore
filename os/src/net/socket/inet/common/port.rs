@@ -105,9 +105,6 @@ impl PortManager {
         socket: &Arc<dyn Socket>,
         endpoint: IpListenEndpoint,
     ) -> crate::utils::error::SyscallRet {
-        if endpoint.port == 0 {
-            return Err(crate::utils::error::SyscallErr::EINVAL);
-        }
         if Self::check_bind_conflict(task, endpoint, socket) {
             return Err(crate::utils::error::SyscallErr::EADDRINUSE);
         }

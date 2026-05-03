@@ -129,7 +129,8 @@ pub fn trap_handler() -> ! {
                 }
             };
         }
-        Trap::Exception(Exception::IllegalInstruction) => {
+        Trap::Exception(Exception::IllegalInstruction)
+        | Trap::Exception(Exception::InstructionMisaligned) => {
             let task = current_task().unwrap();
             let mut inner = task.acquire_inner_lock();
             inner.add_signal(Signals::SIGILL);

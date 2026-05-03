@@ -6,6 +6,7 @@ use crate::mm::{
     translated_refmut, UserBuffer,
 };
 use crate::net::address;
+use crate::net::config::NET_INTERFACE;
 use crate::net::posix::MsgHdr;
 use crate::syscall::utils::wait_io;
 use crate::task::current_task;
@@ -48,6 +49,8 @@ pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
     let socket = crate::get_socket!(sockfd);
     let ret = if let Some(wq) = socket.recv_wait_queue() {
         if is_nonblock {
+            // Non-blocking: poll before recv to prevent tight-loop starvation
+            NET_INTERFACE.try_poll();
             match socket.try_recvmsg(&mut buf) {
                 Ok((n, _)) => n as isize,
                 Err(e) => -(e as isize),

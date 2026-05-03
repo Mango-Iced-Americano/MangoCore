@@ -19,7 +19,8 @@ pub fn sys_sendto(
     dest_addr: usize,
     addrlen: u32,
 ) -> isize {
-    let msg_dontwait = match MsgFlags::from_bits_truncate(flags).validate_for_send() {
+    let msg_flags = MsgFlags::from_bits_truncate(flags);
+    let msg_dontwait = match msg_flags.validate_for_send() {
         Ok(nb) => nb,
         Err(e) => return -(e as isize),
     };
@@ -38,8 +39,9 @@ pub fn sys_sendto(
     if dest_addr != 0 {
         match socket.socket_type() {
             SocketType::SOCK_STREAM => {
-                // Linux: sendto on a SOCK_STREAM with non-NULL dest_addr returns EISCONN
-                return -(SyscallErr::EISCONN as isize);
+                // POSIX: sendto on a SOCK_STREAM ignores dest_addr,
+                // but we still validate the pointer for EFAULT.
+                let _ = crate::trans_ref!(dest_addr, addrlen);
             }
             SocketType::SOCK_DGRAM => {
                 // Validate addrlen: must be at least sizeof(sockaddr_in) = 16, at most 128
@@ -58,43 +60,58 @@ pub fn sys_sendto(
                 let endpoint = IpListenEndpoint::from(addr);
                 let _ = socket.bind(endpoint);
             }
-            let dest_addr = crate::trans_ref!(dest_addr, addrlen);
-            let _ = socket.connect(dest_addr);
+            if dest_addr != 0 {
+                let dest_addr = crate::trans_ref!(dest_addr, addrlen);
+                let _ = socket.connect(dest_addr);
+            } else if socket.remote_endpoint().is_none() {
+                // send() without destination on unconnected DGRAM → EDESTADDRREQ
+                return -(SyscallErr::EDESTADDRREQ as isize);
+            }
             if let Some(wait_queue) = socket.send_wait_queue() {
                 if is_nonblock {
-                    match socket.try_send(buf) {
+                    NET_INTERFACE.try_poll();
+                    let ret = match socket.try_send(buf, msg_flags) {
                         Ok(n) => n as isize,
                         Err(e) => -(e as isize),
-                    }
+                    };
+                    NET_INTERFACE.try_poll();
+                    ret
                 } else {
-                    WaitQueue::wait_until_interruptible(wait_queue, || match socket.try_send(buf) {
+                    let ret = WaitQueue::wait_until_interruptible(wait_queue, || match socket.try_send(buf, msg_flags) {
                         Ok(n) => Some(n as isize),
                         Err(SyscallErr::EAGAIN) => None,
                         Err(e) => Some(-(e as isize)),
                     })
-                    .unwrap_or_else(|e| e)
+                    .unwrap_or_else(|e| e);
+                    NET_INTERFACE.try_poll();
+                    ret
                 }
             } else {
-                wait_io(|| socket.try_send(buf), is_nonblock)
+                wait_io(|| socket.try_send(buf, msg_flags), is_nonblock)
             }
         }
         SocketType::SOCK_STREAM => {
             if let Some(wait_queue) = socket.send_wait_queue() {
                 if is_nonblock {
-                    match socket.try_send(buf) {
+                    NET_INTERFACE.try_poll();
+                    let ret = match socket.try_send(buf, msg_flags) {
                         Ok(n) => n as isize,
                         Err(e) => -(e as isize),
-                    }
+                    };
+                    NET_INTERFACE.try_poll();
+                    ret
                 } else {
-                    WaitQueue::wait_until_interruptible(wait_queue, || match socket.try_send(buf) {
+                    let ret = WaitQueue::wait_until_interruptible(wait_queue, || match socket.try_send(buf, msg_flags) {
                         Ok(n) => Some(n as isize),
                         Err(SyscallErr::EAGAIN) => None,
                         Err(e) => Some(-(e as isize)),
                     })
-                    .unwrap_or_else(|e| e)
+                    .unwrap_or_else(|e| e);
+                    NET_INTERFACE.try_poll();
+                    ret
                 }
             } else {
-                wait_io(|| socket.try_send(buf), is_nonblock)
+                wait_io(|| socket.try_send(buf, msg_flags), is_nonblock)
             }
         }
         SocketType::SOCK_RAW => {
@@ -103,19 +120,24 @@ pub fn sys_sendto(
             let endpoint = address::endpoint(dest_addr).unwrap();
             if let Some(wait_queue) = socket.send_wait_queue() {
                 if is_nonblock {
-                    match socket.send_to(buf, endpoint) {
+                    NET_INTERFACE.try_poll();
+                    let ret = match socket.send_to(buf, endpoint) {
                         Ok(n) => n as isize,
                         Err(e) => -(e as isize),
-                    }
+                    };
+                    NET_INTERFACE.try_poll();
+                    ret
                 } else {
-                    WaitQueue::wait_until_interruptible(wait_queue, || {
+                    let ret = WaitQueue::wait_until_interruptible(wait_queue, || {
                         match socket.send_to(buf, endpoint) {
                             Ok(n) => Some(n as isize),
                             Err(SyscallErr::EAGAIN) => None,
                             Err(e) => Some(-(e as isize)),
                         }
                     })
-                    .unwrap_or_else(|e| e)
+                    .unwrap_or_else(|e| e);
+                    NET_INTERFACE.try_poll();
+                    ret
                 }
             } else {
                 wait_io(

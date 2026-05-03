@@ -804,8 +804,8 @@ impl Ext4FileSystem {
         let super_block = self.superblock;
         // 每个块组中包含的inode数量
         let inodes_per_group = super_block.inodes_per_group;
-        log::debug!(
-            "[ext4:debug] inode_disk_pos: inode={}, inodes_per_group={}",
+        log::trace!(
+            "[ext4:trace] inode_disk_pos: inode={}, inodes_per_group={}",
             inode_num,
             inodes_per_group
         );

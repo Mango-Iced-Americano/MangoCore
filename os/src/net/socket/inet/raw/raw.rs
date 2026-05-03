@@ -1,4 +1,5 @@
 use crate::net::{config::NET_INTERFACE, MAX_BUFFER_SIZE, RAW_SOCKETS, SHUT_WR, Mutex, Socket};
+use crate::net::syscall::common::MsgFlags;
 use crate::task::WaitQueue;
 use crate::utils::error::{GeneralRet, SyscallErr, SyscallRet};
 use alloc::{
@@ -174,7 +175,7 @@ impl Socket for RawSocket {
             .unwrap_or(Err(SyscallErr::EAGAIN))
     }
 
-    fn try_send(&self, buf: &[u8]) -> Result<isize, SyscallErr> {
+    fn try_send(&self, buf: &[u8], _flags: MsgFlags) -> Result<isize, SyscallErr> {
         // 不调用 poll，只做一次尝试
         NET_INTERFACE
             .raw_socket(self.socket_handler, |socket| {

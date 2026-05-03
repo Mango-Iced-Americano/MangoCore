@@ -13,7 +13,7 @@ impl Inner {
     /// 非阻塞发送数据（适配 try_send 接口）
     pub fn try_send(&self, buf: &[u8]) -> Result<isize, SyscallErr> {
         let ret = match self {
-            Inner::Init(_) => Err(SyscallErr::EINVAL),
+            Inner::Init(_) => Err(SyscallErr::EPIPE),
             Inner::Connecting(c) => {
                 // 握手未完成，不可发送
                 if c.is_connected() {

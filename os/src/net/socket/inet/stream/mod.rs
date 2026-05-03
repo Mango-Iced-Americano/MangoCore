@@ -26,6 +26,7 @@ use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint};
 use spin::Mutex;
 
 use crate::net::{address, config::NET_INTERFACE, Socket, SocketFile, SocketType};
+use crate::net::syscall::common::MsgFlags;
 use crate::{
     fs::FileDescriptor,
     task::{current_task, WaitQueue},
@@ -306,7 +307,10 @@ impl Socket for TcpStreamSocket {
             .insert(FileDescriptor::new(old_cloexec, false, socket_file))
             .map_err(|_| SyscallErr::EMFILE)?;
 
-        address::fill_with_endpoint(peer_endpoint, addr, addrlen)?;
+        // addr == 0 means user doesn't care about peer address (POSIX allows this)
+        if addr != 0 {
+            address::fill_with_endpoint(peer_endpoint, addr, addrlen)?;
+        }
 
         Ok(new_fd)
     }
@@ -409,6 +413,7 @@ impl Socket for TcpStreamSocket {
     }
 
     fn try_recv(&self, buf: &mut [u8]) -> Result<isize, SyscallErr> {
+        NET_INTERFACE.try_poll();
         if self.read_shutdown.load(Ordering::Acquire) {
             return Ok(0); // EOF after read shutdown
         }
@@ -416,7 +421,8 @@ impl Socket for TcpStreamSocket {
         inner.try_recv(buf)
     }
 
-    fn try_send(&self, buf: &[u8]) -> Result<isize, SyscallErr> {
+    fn try_send(&self, buf: &[u8], _flags: MsgFlags) -> Result<isize, SyscallErr> {
+        NET_INTERFACE.try_poll();
         if self.write_shutdown.load(Ordering::Acquire) {
             return Err(SyscallErr::EPIPE);
         }

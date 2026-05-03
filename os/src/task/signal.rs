@@ -414,7 +414,7 @@ pub fn do_signal() {
             let trap_cx = inner.get_trap_cx();
             let a0_isize = trap_cx.gp.a0 as isize;
             // if this syscall wants to restart
-            if get_exception_cause().is_syscall() && a0_isize == -(SyscallErr::ERESTART as isize) {
+            if a0_isize == -(SyscallErr::ERESTART as isize) {
                 // and if `SA_RESTART` is set
                 if act.flags.contains(SigActionFlags::SA_RESTART) {
                     debug!("[do_signal] syscall will restart after sigreturn");

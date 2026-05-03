@@ -1,6 +1,7 @@
 use log::info;
 
 use crate::mm::{translated_ref, translated_refmut};
+use crate::net::config::NET_INTERFACE;
 use crate::net::SocketType;
 use crate::syscall::utils::wait_io;
 use crate::task::current_task;
@@ -34,7 +35,9 @@ pub fn sys_recvfrom(
         let token = task.get_user_token();
         match crate::mm::translated_ref(token, addrlen as *const u32) {
             Ok(addrlen_val) => {
-                if *addrlen_val < 16 {
+                let len = *addrlen_val;
+                // addrlen 过小（< sizeof(struct sockaddr_in)=16）或过大（不合理）都返回 EINVAL
+                if len < 16 || len > 512 {
                     return -(SyscallErr::EINVAL as isize);
                 }
             }
@@ -56,10 +59,18 @@ pub fn sys_recvfrom(
     let buf_slice = crate::trans_refmut!(buf, len);
 
     let mut recv = || match socket.socket_type() {
-        SocketType::SOCK_STREAM | SocketType::SOCK_DGRAM | SocketType::SOCK_RAW => {
+        SocketType::SOCK_STREAM => {
+            // TCP (SOCK_STREAM): recvfrom behaves like recv, ignores from/addrlen
             let ret = socket.try_recv(buf_slice)?;
-            if ret > 0 && src_addr != 0 {
-                let _ = socket.peer_addr(src_addr, addrlen);
+            Ok(ret)
+        }
+        SocketType::SOCK_DGRAM | SocketType::SOCK_RAW => {
+            let (ret, src_ep) = socket.try_recvmsg(buf_slice)?;
+            // 注意这里是 >= 0，因为 UDP 允许发送 0 字节的空包
+            if ret >= 0 && src_addr != 0 {
+                if let Some(ep) = src_ep {
+                    let _ = crate::net::address::fill_with_endpoint(ep, src_addr, addrlen);
+                }
             }
             Ok(ret)
         }
@@ -67,6 +78,10 @@ pub fn sys_recvfrom(
     };
     if let Some(wait_queue) = socket.recv_wait_queue() {
         if is_nonblock {
+            // Non-blocking: poll once before trying to recv, so smoltcp can
+            // advance TCP state (handshake, data delivery). Without this, a
+            // tight non-blocking recv loop can starve the timer interrupt.
+            NET_INTERFACE.try_poll();
             match recv() {
                 Ok(n) => n as isize,
                 Err(e) => -(e as isize),
