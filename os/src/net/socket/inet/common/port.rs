@@ -1,4 +1,4 @@
-use crate::net::{Endpoint, Socket, SocketFile, SocketType, SOCK_TYPE_MASK};
+use crate::net::{Endpoint, PSOCK, Socket, SocketFile};
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU16, Ordering};
 use smoltcp::wire::IpListenEndpoint;
@@ -39,7 +39,7 @@ impl PortManager {
             endpoint,
             target_sock.socket_type()
         );
-        let target_pure_type = target_sock.socket_type().bits() & SOCK_TYPE_MASK;
+        let target_pure_type = target_sock.socket_type();
         let fd_table = task.files.lock();
         for fd_opt in fd_table.iter() {
             let fd_ref = match fd_opt {
@@ -51,7 +51,7 @@ impl PortManager {
                 Err(_) => continue,
             };
             let socket = socket_file.inner.clone();
-            let pure_type = socket.socket_type().bits() & SOCK_TYPE_MASK;
+            let pure_type = socket.socket_type();
             if pure_type != target_pure_type {
                 log::info!(
                     "[PortManager::check_bind_conflict] skip socket with different type: {:?}",
@@ -75,7 +75,7 @@ impl PortManager {
                 (None, _) | (_, None) => true,
             };
             if addr_confilct {
-                if pure_type == SocketType::SOCK_DGRAM.bits() {
+                if pure_type == PSOCK::Datagram {
                     let reuse_enabled_on_exist = match socket.reuse_addr() {
                         Ok(_enabled) => true,
                         Err(_) => false,

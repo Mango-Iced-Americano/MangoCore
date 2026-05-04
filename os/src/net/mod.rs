@@ -9,7 +9,7 @@ pub use spin::Mutex;
 
 // ——— 从 socket 子模块重新导出关键类型，以保持外部引用路径 backward compatibility ———
 //
-// 例如 `crate::net::Socket`, `crate::net::SocketType`, `crate::net::AF_INET` 等
+// 例如 `crate::net::Socket`, `crate::net::PSOCK`, `crate::net::AF_INET` 等
 // 依然有效，无需修改全域的 import 路径。
 
 // 地址解析模块：实际位于 socket::inet::common::address
@@ -19,7 +19,7 @@ pub use socket::inet::common::address;
 pub use socket::{
     AF_INET, AF_INET6, AF_UNIX, AF_UNSPEC,
     SHUT_RD, SHUT_RDWR, SHUT_WR,
-    SOCK_TYPE_MASK, SocketType,
+    PSOCK,
     MAX_BUFFER_SIZE,
     UDP_SOCKETS, UDP_SOCKETS_TO_REMOVE,
     TCP_SOCKETS, TCP_SOCKETS_TO_REMOVE,
@@ -31,4 +31,4 @@ pub use socket::{
     make_unix_socket_pair,
     wake_tcp_waiters, wake_raw_waiters,
 };
-// SOCK_TYPE_MASK is pub(crate), re-exported above works
+// PSOCK replaces the old SocketType bitflags (which mixed type + SOCK_NONBLOCK/SOCK_CLOEXEC)

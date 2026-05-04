@@ -48,8 +48,8 @@ impl Socket for RawSocket {
         todo!()
     }
 
-    fn socket_type(&self) -> crate::net::SocketType {
-        crate::net::SocketType::SOCK_RAW
+    fn socket_type(&self) -> crate::net::PSOCK {
+        crate::net::PSOCK::Raw
     }
 
     fn recv_buf_size(&self) -> usize {

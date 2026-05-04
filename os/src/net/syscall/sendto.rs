@@ -1,7 +1,7 @@
 use log::info;
 
 use crate::net::config::NET_INTERFACE;
-use crate::net::{Endpoint, SocketType};
+use crate::net::{Endpoint, PSOCK};
 use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address};
 use crate::syscall::utils::wait_io;
 use crate::task::current_task;
@@ -38,12 +38,12 @@ pub fn sys_sendto(
     // Validate dest_addr/addrlen for connection-mode sockets
     if dest_addr != 0 {
         match socket.socket_type() {
-            SocketType::SOCK_STREAM => {
+            PSOCK::Stream => {
                 // POSIX: sendto on a SOCK_STREAM ignores dest_addr,
                 // but we still validate the pointer for EFAULT.
                 let _ = crate::trans_ref!(dest_addr, addrlen);
             }
-            SocketType::SOCK_DGRAM => {
+            PSOCK::Datagram => {
                 // Validate addrlen: must be at least sizeof(sockaddr_in) = 16, at most 128
                 if addrlen < 16 || addrlen > 128 {
                     return -(SyscallErr::EINVAL as isize);
@@ -54,7 +54,7 @@ pub fn sys_sendto(
     }
 
     match socket.socket_type() {
-        SocketType::SOCK_DGRAM => {
+        PSOCK::Datagram => {
             if socket.local_endpoint().map(|ep| ep.port() == 0).unwrap_or(true) {
                 // 构造 AF_INET:port=0:addr=0 的 sockaddr_in 用于自动绑定
                 let auto_bind = Endpoint::Ip(IpEndpoint::new(
@@ -95,7 +95,7 @@ pub fn sys_sendto(
                 wait_io(|| socket.try_send(buf, msg_flags), is_nonblock)
             }
         }
-        SocketType::SOCK_STREAM => {
+        PSOCK::Stream => {
             if let Some(wait_queue) = socket.send_wait_queue() {
                 if is_nonblock {
                     NET_INTERFACE.try_poll();
@@ -119,7 +119,7 @@ pub fn sys_sendto(
                 wait_io(|| socket.try_send(buf, msg_flags), is_nonblock)
             }
         }
-        SocketType::SOCK_RAW => {
+        PSOCK::Raw => {
             info!("[sys_sendto] socket is raw");
             let dest_buf = crate::trans_ref!(dest_addr, addrlen);
             let dest_endpoint = match Endpoint::from_sockaddr(dest_buf) {

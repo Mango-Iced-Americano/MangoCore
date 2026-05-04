@@ -7,7 +7,7 @@ use crate::mm::{
 };
 use crate::net::config::NET_INTERFACE;
 use crate::net::posix::MsgHdr;
-use crate::net::{Endpoint, SocketType};
+use crate::net::{Endpoint, PSOCK};
 use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address};
 use crate::syscall::utils::wait_io;
 use crate::task::current_task;
@@ -93,7 +93,7 @@ pub fn sys_sendmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
 
     let socket = crate::get_socket!(sockfd);
     match socket.socket_type() {
-        SocketType::SOCK_DGRAM => {
+        PSOCK::Datagram => {
             // Auto-bind if not bound (same as sys_sendto)
             if socket.local_endpoint().map(|ep| ep.port() == 0).unwrap_or(true) {
                 let auto_bind = Endpoint::Ip(IpEndpoint::new(
@@ -108,7 +108,7 @@ pub fn sys_sendmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
             }
             wait_io(|| socket.try_sendmsg(&buf, dest_endpoint, msg_flags), is_nonblock)
         }
-        SocketType::SOCK_STREAM => {
+        PSOCK::Stream => {
             let wq = socket.send_wait_queue().unwrap();
             if is_nonblock {
                 NET_INTERFACE.try_poll();
@@ -125,7 +125,7 @@ pub fn sys_sendmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
                 .unwrap_or_else(|e| e)
             }
         }
-        SocketType::SOCK_RAW => wait_io(|| socket.try_sendmsg(&buf, dest_endpoint, msg_flags), is_nonblock),
+        PSOCK::Raw => wait_io(|| socket.try_sendmsg(&buf, dest_endpoint, msg_flags), is_nonblock),
         _ => wait_io(|| socket.try_sendmsg(&buf, dest_endpoint, msg_flags), is_nonblock),
     }
 }

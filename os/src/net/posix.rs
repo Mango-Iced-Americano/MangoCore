@@ -2,6 +2,44 @@
 // posix.rs 记录了系统调用时用到的结构
 //
 
+use bitflags::bitflags;
+
+/// POSIX socket() 系统调用的 type 参数解析器。
+/// 纯类型位（低 4 位）与控制标志（NONBLOCK / CLOEXEC）共存在同一个 u32 中，
+/// 此 bitflags 用于在 syscall 入口处一次性解析，提取出纯类型后转换为 `PSOCK` 枚举。
+bitflags! {
+    pub struct PosixArgsSocketType: u32 {
+        const STREAM    = 1;
+        const DGRAM     = 2;
+        const RAW       = 3;
+        const RDM       = 4;
+        const SEQPACKET = 5;
+        const DCCP      = 6;
+        const PACKET    = 10;
+
+        const NONBLOCK  = 0x800;
+        const CLOEXEC   = 1 << 19;
+    }
+}
+
+impl PosixArgsSocketType {
+    /// 仅保留低 4 位的纯类型位，去除控制标志。
+    #[inline(always)]
+    pub fn types(&self) -> PosixArgsSocketType {
+        PosixArgsSocketType::from_bits(self.bits() & 0xF).unwrap()
+    }
+
+    #[inline(always)]
+    pub fn is_nonblock(&self) -> bool {
+        self.contains(PosixArgsSocketType::NONBLOCK)
+    }
+
+    #[inline(always)]
+    pub fn is_cloexec(&self) -> bool {
+        self.contains(PosixArgsSocketType::CLOEXEC)
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 

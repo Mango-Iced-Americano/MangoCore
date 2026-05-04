@@ -35,7 +35,7 @@ impl<const N: usize> Socket for UnixSocket<N> {
         todo!();
     }
 
-    fn socket_type(&self) -> crate::net::SocketType {
+    fn socket_type(&self) -> crate::net::PSOCK {
         todo!()
     }
 

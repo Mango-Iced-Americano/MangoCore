@@ -8,6 +8,7 @@ use crate::{
         file_trait::File, Dirent, OpenFlags, PageCache, SeekWhence, Stat,
     },
     mm::{translated_byte_buffer, translated_refmut, UserBuffer},
+    net::posix::PosixArgsSocketType,
     net::socket::inet::datagram::udp::UdpSocket,
     net::socket::inet::raw::raw::RawSocket,
     net::socket::inet::stream::TcpSocket,
@@ -22,6 +23,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
+use core::convert::TryFrom;
 
 use smoltcp::iface::SocketHandle;
 use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint, Ipv4Address, Ipv6Address};
@@ -48,30 +50,46 @@ pub const SHUT_WR: u32 = 1;
 #[allow(unused)]
 pub const SHUT_RDWR: u32 = 2;
 
-pub const SOCK_TYPE_MASK: u32 = 0xF;
-bitflags! {
-    /// socket type
-    pub struct SocketType: u32 {
-        /// for TCP
-        const SOCK_STREAM = 1 ;
-        /// for UDP
-        const SOCK_DGRAM = 2;
-        //
-        const SOCK_RAW = 3;
+/// POSIX socket 纯类型枚举（仅包含类型，不包含 NONBLOCK / CLOEXEC 等控制标志）。
+/// 对标 DragonOS `kernel/src/net/socket/posix/types.rs` 的 `PSOCK`。
+/// 用于全内核的 socket 类型匹配，取代旧的 `SocketType` bitflags。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PSOCK {
+    /// SOCK_STREAM（对应 TCP）
+    Stream = 1,
+    /// SOCK_DGRAM（对应 UDP）
+    Datagram = 2,
+    /// SOCK_RAW
+    Raw = 3,
+    /// SOCK_RDM
+    RDM = 4,
+    /// SOCK_SEQPACKET
+    SeqPacket = 5,
+    /// SOCK_DCCP
+    DCCP = 6,
+    /// SOCK_PACKET
+    Packet = 10,
+}
 
-        const SOCK_RDM = 4;
-
-        const SOCK_SEQPACKET = 5;
-
-        const SOCK_DCCP = 6;
-
-        const SOCK_PACKET = 10;
-
-        const SOCK_CLOEXEC = 1 << 19;
-
-        const SOCK_NONBLOCK = 0x800;
+impl TryFrom<PosixArgsSocketType> for PSOCK {
+    type Error = SyscallErr;
+    fn try_from(x: PosixArgsSocketType) -> Result<Self, Self::Error> {
+        match x.types().bits() {
+            1 => Ok(PSOCK::Stream),
+            2 => Ok(PSOCK::Datagram),
+            3 => Ok(PSOCK::Raw),
+            4 => Ok(PSOCK::RDM),
+            5 => Ok(PSOCK::SeqPacket),
+            6 => Ok(PSOCK::DCCP),
+            10 => Ok(PSOCK::Packet),
+            _ => Err(SyscallErr::EINVAL),
+        }
     }
 }
+
+/// POSIX SOCK_TYPE 掩码，仅用于 `PosixArgsSocketType` 类型解析。
+/// 新代码应直接使用 `PSOCK` 枚举，无需手动 mask。
+pub(crate) const SOCK_TYPE_MASK: u32 = 0xF;
 
 // pub const MAX_BUFFER_SIZE: usize = 1 << 15;
 // pub const MAX_BUFFER_SIZE: usize = 1 << 16;
@@ -204,7 +222,7 @@ pub trait Socket: Send + Sync {
         Err(SyscallErr::EOPNOTSUPP)
     }
     fn accept(&self, sockfd: u32, addr: usize, addrlen: usize) -> SyscallRet;
-    fn socket_type(&self) -> SocketType;
+    fn socket_type(&self) -> PSOCK;
     fn recv_buf_size(&self) -> usize;
     fn send_buf_size(&self) -> usize;
     fn set_recv_buf_size(&self, size: usize);
@@ -485,9 +503,8 @@ impl File for SocketFile {
 }
 
 impl dyn Socket {
-    pub fn alloc(domain: u32, socket_type: u32, protocol: u32) -> GeneralRet<usize> {
-        log::info!("[Socket::new] domain: {}", domain);
-        let pure_type = socket_type & SOCK_TYPE_MASK;
+    pub fn alloc(domain: u32, psock: PSOCK, protocol: u32, is_nonblock: bool, is_cloexec: bool) -> GeneralRet<usize> {
+        log::info!("[Socket::new] domain: {}, psock: {:?}", domain, psock);
         if domain == AF_INET6 as u32 {
             log::warn!("[Socket::alloc] AF_INET6 is not supported yet!");
             return Err(SyscallErr::EAFNOSUPPORT);
@@ -496,47 +513,47 @@ impl dyn Socket {
         match domain as u16 {
             AF_INET | AF_UNSPEC => {
                 log::info!("[Socket::new] domain: {} -> treating as AF_INET", domain);
-                let socket_type = SocketType::from_bits(socket_type).ok_or(SyscallErr::EINVAL)?;
-                let is_nonblock = socket_type.contains(SocketType::SOCK_NONBLOCK);
-                let is_cloexec = socket_type.contains(SocketType::SOCK_CLOEXEC);
-                if pure_type == SocketType::SOCK_DGRAM.bits() {
-                    let socket = UdpSocket::new();
-                    let socket = Arc::new(socket);
-                    UdpSocket::register_udp_socket(&socket);
-                    let socket_file = Arc::new(SocketFile::new(socket));
-                    let current_tcb = current_task().unwrap();
-                    let fd = current_tcb
-                        .files
-                        .lock()
-                        .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket_file))
-                        .unwrap();
-                    Ok(fd)
-                } else if pure_type == SocketType::SOCK_STREAM.bits() {
-                    let socket = TcpSocket::new();
-                    let socket = Arc::new(socket);
-                    TcpSocket::register_tcp_socket(&socket);
-                    let socket_file = Arc::new(SocketFile::new(socket));
-                    let current_tcb = current_task().unwrap();
-                    let fd = current_tcb
-                        .files
-                        .lock()
-                        .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket_file))
-                        .unwrap();
-                    Ok(fd)
-                } else if pure_type == SocketType::SOCK_RAW.bits() {
-                    let socket = RawSocket::new(protocol);
-                    let socket = Arc::new(socket);
-                    RawSocket::register_raw_socket(&socket);
-                    let socket_file = Arc::new(SocketFile::new(socket));
-                    let current_tcb = current_task().unwrap();
-                    let fd = current_tcb
-                        .files
-                        .lock()
-                        .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket_file))
-                        .unwrap();
-                    Ok(fd)
-                } else {
-                    Err(SyscallErr::EINVAL)
+                match psock {
+                    PSOCK::Datagram => {
+                        let socket = UdpSocket::new();
+                        let socket = Arc::new(socket);
+                        UdpSocket::register_udp_socket(&socket);
+                        let socket_file = Arc::new(SocketFile::new(socket));
+                        let current_tcb = current_task().unwrap();
+                        let fd = current_tcb
+                            .files
+                            .lock()
+                            .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket_file))
+                            .unwrap();
+                        Ok(fd)
+                    }
+                    PSOCK::Stream => {
+                        let socket = TcpSocket::new();
+                        let socket = Arc::new(socket);
+                        TcpSocket::register_tcp_socket(&socket);
+                        let socket_file = Arc::new(SocketFile::new(socket));
+                        let current_tcb = current_task().unwrap();
+                        let fd = current_tcb
+                            .files
+                            .lock()
+                            .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket_file))
+                            .unwrap();
+                        Ok(fd)
+                    }
+                    PSOCK::Raw => {
+                        let socket = RawSocket::new(protocol);
+                        let socket = Arc::new(socket);
+                        RawSocket::register_raw_socket(&socket);
+                        let socket_file = Arc::new(SocketFile::new(socket));
+                        let current_tcb = current_task().unwrap();
+                        let fd = current_tcb
+                            .files
+                            .lock()
+                            .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket_file))
+                            .unwrap();
+                        Ok(fd)
+                    }
+                    _ => Err(SyscallErr::EINVAL),
                 }
             }
             AF_UNIX => {

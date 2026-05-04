@@ -1,9 +1,11 @@
 use alloc::sync::Arc;
+use core::convert::TryFrom;
 use log::info;
 
 use crate::config::PAGE_SIZE;
 use crate::fs::FileDescriptor;
-use crate::net::{make_unix_socket_pair, SocketFile, AF_UNIX, AF_UNSPEC};
+use crate::net::posix::PosixArgsSocketType;
+use crate::net::{make_unix_socket_pair, PSOCK, SocketFile, AF_UNIX, AF_UNSPEC};
 use crate::task::current_task;
 use crate::utils::error::SyscallErr;
 
@@ -12,6 +14,15 @@ pub fn sys_socketpair(domain: u32, socket_type: u32, protocol: u32, sv: usize) -
         "[sys_socketpair] domain {}, type {}, protocol {}, sv {}",
         domain, socket_type, protocol, sv
     );
+
+    // 在 syscall 入口处解析 raw u32 → PSOCK + bool flags
+    let type_arg = PosixArgsSocketType::from_bits_truncate(socket_type);
+    let _psock = match PSOCK::try_from(type_arg) {
+        Ok(s) => s,
+        Err(e) => return -(e as isize),
+    };
+    let _is_nonblock = type_arg.is_nonblock();
+    let _is_cloexec = type_arg.is_cloexec();
 
     // Linux socketpair() only supports AF_UNIX/AF_LOCAL
     match domain as u16 {

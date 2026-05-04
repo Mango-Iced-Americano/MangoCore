@@ -25,7 +25,7 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint};
 use spin::Mutex;
 
-use crate::net::{config::NET_INTERFACE, Endpoint, Socket, SocketFile, SocketType};
+use crate::net::{config::NET_INTERFACE, Endpoint, PSOCK, Socket, SocketFile};
 use crate::net::syscall::common::MsgFlags;
 use crate::{
     fs::FileDescriptor,
@@ -337,8 +337,8 @@ impl Socket for TcpSocket {
         Ok(new_fd)
     }
 
-    fn socket_type(&self) -> SocketType {
-        SocketType::SOCK_STREAM
+    fn socket_type(&self) -> PSOCK {
+        PSOCK::Stream
     }
 
     fn recv_buf_size(&self) -> usize {

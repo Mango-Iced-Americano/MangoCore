@@ -151,8 +151,8 @@ impl Socket for UdpSocket {
         Err(SyscallErr::EOPNOTSUPP)
     }
 
-    fn socket_type(&self) -> crate::net::SocketType {
-        crate::net::SocketType::SOCK_DGRAM
+    fn socket_type(&self) -> crate::net::PSOCK {
+        crate::net::PSOCK::Datagram
     }
 
     fn recv_buf_size(&self) -> usize {

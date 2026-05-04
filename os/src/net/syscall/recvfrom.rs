@@ -2,7 +2,7 @@ use log::info;
 
 use crate::mm::{translated_ref, translated_refmut};
 use crate::net::config::NET_INTERFACE;
-use crate::net::{Endpoint, SocketType};
+use crate::net::{Endpoint, PSOCK};
 use crate::syscall::utils::wait_io;
 use crate::task::current_task;
 use crate::task::WaitQueue;
@@ -59,12 +59,12 @@ pub fn sys_recvfrom(
     let buf_slice = crate::trans_refmut!(buf, len);
 
     let mut recv = || match socket.socket_type() {
-        SocketType::SOCK_STREAM => {
+        PSOCK::Stream => {
             // TCP (SOCK_STREAM): recvfrom behaves like recv, ignores from/addrlen
             let ret = socket.try_recv(buf_slice)?;
             Ok(ret)
         }
-        SocketType::SOCK_DGRAM | SocketType::SOCK_RAW => {
+        PSOCK::Datagram | PSOCK::Raw => {
             let (ret, src_ep) = socket.try_recvmsg(buf_slice)?;
             // 注意这里是 >= 0，因为 UDP 允许发送 0 字节的空包
             if ret >= 0 && src_addr != 0 {
