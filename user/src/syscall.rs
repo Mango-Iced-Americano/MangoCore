@@ -102,6 +102,55 @@ fn syscall(id: usize, args: [usize; 3]) -> isize {
     }
 }
 
+/// 4-argument syscall (用于 socketpair 等需要4个参数的调用)
+fn syscall4(id: usize, args: [usize; 4]) -> isize {
+    #[cfg(target_arch = "riscv64")]
+    {
+        let mut ret: isize;
+        unsafe {
+            core::arch::asm!(
+                "ecall",
+                inlateout("x10") args[0] => ret,
+                in("x11") args[1],
+                in("x12") args[2],
+                in("x13") args[3],
+                in("x17") id
+            );
+        }
+        ret
+    }
+    #[cfg(target_arch = "loongarch64")]
+    {
+        syscall(id, [args[0], args[1], args[2]])
+    }
+}
+
+/// 6-argument syscall (用于 sendto/recvfrom/setsockopt 等需要超过3个参数的 socket 调用)
+fn syscall6(id: usize, args: [usize; 6]) -> isize {
+    #[cfg(target_arch = "riscv64")]
+    {
+        let mut ret: isize;
+        unsafe {
+            core::arch::asm!(
+                "ecall",
+                inlateout("x10") args[0] => ret,
+                in("x11") args[1],
+                in("x12") args[2],
+                in("x13") args[3],
+                in("x14") args[4],
+                in("x15") args[5],
+                in("x17") id
+            );
+        }
+        ret
+    }
+    #[cfg(target_arch = "loongarch64")]
+    {
+        // loongarch64 目前只有3参数版本
+        syscall(id, [args[0], args[1], args[2]])
+    }
+}
+
 pub fn sys_dup(fd: usize) -> isize {
     syscall(SYSCALL_DUP, [fd, 0, 0])
 }
@@ -163,14 +212,7 @@ pub fn sys_exec(path: &str, args: &[*const u8], envp: &[*const u8]) -> isize {
 }
 
 pub fn sys_chdir(path: &str) -> isize {
-    syscall(
-        SYSCALL_CHDIR,
-        [
-            path.as_ptr() as usize,
-            0,
-            0,
-        ],
-    )
+    syscall(SYSCALL_CHDIR, [path.as_ptr() as usize, 0, 0])
 }
 
 pub fn sys_waitpid(pid: isize, exit_code: *mut i32) -> isize {
@@ -178,4 +220,133 @@ pub fn sys_waitpid(pid: isize, exit_code: *mut i32) -> isize {
 }
 pub fn sys_shutdown() -> isize {
     syscall(SYSCALL_SHUTDOWN, [0, 0, 0])
+}
+
+// === Socket syscall wrappers ===
+// 系统调用号定义（与内核 os/src/syscall/syscall_id.rs 保持一致）
+pub const SYSCALL_SOCKET: usize = 198;
+pub const SYSCALL_SOCKETPAIR: usize = 199;
+pub const SYSCALL_BIND: usize = 200;
+pub const SYSCALL_LISTEN: usize = 201;
+pub const SYSCALL_ACCEPT: usize = 202;
+pub const SYSCALL_CONNECT: usize = 203;
+pub const SYSCALL_GETSOCKNAME: usize = 204;
+pub const SYSCALL_GETPEERNAME: usize = 205;
+pub const SYSCALL_SENDTO: usize = 206;
+pub const SYSCALL_RECVFROM: usize = 207;
+pub const SYSCALL_SETSOCKOPT: usize = 208;
+pub const SYSCALL_GETSOCKOPT: usize = 209;
+pub const SYSCALL_SOCK_SHUTDOWN: usize = 210;
+pub const SYSCALL_SENDMSG: usize = 211;
+pub const SYSCALL_RECVMSG: usize = 212;
+pub const SYSCALL_ACCEPT4: usize = 242;
+
+pub fn sys_socket(domain: usize, type_: usize, protocol: usize) -> isize {
+    syscall(SYSCALL_SOCKET, [domain, type_, protocol])
+}
+
+pub fn sys_socketpair(domain: usize, type_: usize, protocol: usize, sv: *mut i32) -> isize {
+    syscall4(SYSCALL_SOCKETPAIR, [domain, type_, protocol, sv as usize])
+}
+
+pub fn sys_bind(sockfd: usize, addr: *const u8, addrlen: usize) -> isize {
+    syscall(SYSCALL_BIND, [sockfd, addr as usize, addrlen])
+}
+
+pub fn sys_listen(sockfd: usize, backlog: usize) -> isize {
+    syscall(SYSCALL_LISTEN, [sockfd, backlog, 0])
+}
+
+pub fn sys_accept(sockfd: usize, addr: *mut u8, addrlen: *mut usize) -> isize {
+    syscall(SYSCALL_ACCEPT, [sockfd, addr as usize, addrlen as usize])
+}
+
+pub fn sys_connect(sockfd: usize, addr: *const u8, addrlen: usize) -> isize {
+    syscall(SYSCALL_CONNECT, [sockfd, addr as usize, addrlen])
+}
+
+pub fn sys_getsockname(sockfd: usize, addr: *mut u8, addrlen: *mut usize) -> isize {
+    syscall(
+        SYSCALL_GETSOCKNAME,
+        [sockfd, addr as usize, addrlen as usize],
+    )
+}
+
+pub fn sys_getpeername(sockfd: usize, addr: *mut u8, addrlen: *mut usize) -> isize {
+    syscall(
+        SYSCALL_GETPEERNAME,
+        [sockfd, addr as usize, addrlen as usize],
+    )
+}
+
+pub fn sys_sendto(
+    sockfd: usize,
+    buf: *const u8,
+    len: usize,
+    flags: usize,
+    dest_addr: *const u8,
+    addrlen: usize,
+) -> isize {
+    syscall6(
+        SYSCALL_SENDTO,
+        [
+            sockfd,
+            buf as usize,
+            len,
+            flags,
+            dest_addr as usize,
+            addrlen,
+        ],
+    )
+}
+
+pub fn sys_recvfrom(
+    sockfd: usize,
+    buf: *mut u8,
+    len: usize,
+    flags: usize,
+    src_addr: *mut u8,
+    addrlen: *mut usize,
+) -> isize {
+    syscall6(
+        SYSCALL_RECVFROM,
+        [
+            sockfd,
+            buf as usize,
+            len,
+            flags,
+            src_addr as usize,
+            addrlen as usize,
+        ],
+    )
+}
+
+pub fn sys_setsockopt(
+    sockfd: usize,
+    level: usize,
+    optname: usize,
+    optval: *const u8,
+    optlen: usize,
+) -> isize {
+    syscall6(
+        SYSCALL_SETSOCKOPT,
+        [sockfd, level, optname, optval as usize, optlen, 0],
+    )
+}
+
+pub fn sys_getsockopt(
+    sockfd: usize,
+    level: usize,
+    optname: usize,
+    optval: *mut u8,
+    optlen: *mut usize,
+) -> isize {
+    syscall6(
+        SYSCALL_GETSOCKOPT,
+        [sockfd, level, optname, optval as usize, optlen as usize, 0],
+    )
+}
+
+pub fn sys_sock_shutdown(sockfd: usize, how: usize) -> isize {
+    syscall(SYSCALL_SOCK_SHUTDOWN, [sockfd, how, 0])
 }

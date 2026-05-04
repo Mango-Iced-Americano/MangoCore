@@ -10,7 +10,7 @@ pub mod console;
 #[cfg(target_arch = "loongarch64")]
 mod la_libc_import;
 mod lang_items;
-mod syscall;
+pub mod syscall;
 mod usr_call;
 
 extern crate alloc;

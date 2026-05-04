@@ -8,11 +8,13 @@ use crate::{
         file_trait::File, Dirent, OpenFlags, PageCache, SeekWhence, Stat,
     },
     mm::{translated_byte_buffer, translated_refmut, UserBuffer},
-    net::posix::PosixArgsSocketType,
-    net::socket::inet::datagram::udp::UdpSocket,
-    net::socket::inet::raw::raw::RawSocket,
-    net::socket::inet::stream::TcpSocket,
-    net::syscall::common::MsgFlags,
+    net::{
+        posix::PosixArgsSocketType,
+        socket::{
+            inet::{datagram::udp::UdpSocket, raw::raw::RawSocket, stream::TcpSocket},
+        },
+        syscall::common::MsgFlags,
+    },
     task::{current_task, WaitQueue},
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
 };
@@ -35,8 +37,10 @@ pub type Fd = usize;
 
 pub use crate::net::socket::inet::stream::TcpInfo;
 pub use crate::net::socket::inet::stream::TCP_MSS;
-pub use crate::net::socket::unix::unix::make_unix_socket_pair;
-
+pub use crate::net::socket::unix::datagram::UnixDatagramSocket;
+pub use crate::net::socket::unix::stream::UnixStreamSocket;
+pub use crate::net::socket::unix::make_unix_socket_pair;
+pub use crate::net::socket::unix::UnixEndpoint;
 /// domain
 pub const AF_UNSPEC: u16 = 0;
 pub const AF_UNIX: u16 = 1;
@@ -115,12 +119,12 @@ pub static LOCAL_IP: IpAddress = IpAddress::v4(10, 0, 2, 15);
 /// 统一的 socket 端点抽象，覆盖所有地址族。
 /// 对标 DragonOS `kernel/src/net/socket/endpoint.rs` 的 `Endpoint` 枚举，
 /// 当前仅实现了 IP 和 Unix 两种变体。
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Endpoint {
     /// AF_INET / AF_INET6 端点
     Ip(IpEndpoint),
     /// AF_UNIX 端点
-    Unix,
+    Unix(UnixEndpoint),
     /// 未指定（AF_UNSPEC）
     Unspecified,
 }
@@ -131,47 +135,50 @@ impl Endpoint {
         if addr_buf.len() < 2 {
             return Err(SyscallErr::EINVAL);
         }
-        let family = u16::from_ne_bytes([
-            addr_buf[0],
-            addr_buf[1],
-        ]);
+        let family = u16::from_ne_bytes([addr_buf[0], addr_buf[1]]);
         match family {
             AF_INET => {
                 if addr_buf.len() < 8 {
                     return Err(SyscallErr::EINVAL);
                 }
-                let port = u16::from_be_bytes([
-                    addr_buf[2],
-                    addr_buf[3],
-                ]);
-                let ip = Ipv4Address::from_bytes(&[
-                    addr_buf[4],
-                    addr_buf[5],
-                    addr_buf[6],
-                    addr_buf[7],
-                ]);
-                Ok(Endpoint::Ip(IpEndpoint::new(
-                    IpAddress::Ipv4(ip),
-                    port,
-                )))
+                let port = u16::from_be_bytes([addr_buf[2], addr_buf[3]]);
+                let ip =
+                    Ipv4Address::from_bytes(&[addr_buf[4], addr_buf[5], addr_buf[6], addr_buf[7]]);
+                Ok(Endpoint::Ip(IpEndpoint::new(IpAddress::Ipv4(ip), port)))
             }
             AF_INET6 => {
                 if addr_buf.len() < 24 {
                     return Err(SyscallErr::EINVAL);
                 }
-                let port = u16::from_be_bytes([
-                    addr_buf[2],
-                    addr_buf[3],
-                ]);
+                let port = u16::from_be_bytes([addr_buf[2], addr_buf[3]]);
                 let mut ip_bytes = [0u8; 16];
                 ip_bytes.copy_from_slice(&addr_buf[8..24]);
                 let ip = Ipv6Address(ip_bytes);
-                Ok(Endpoint::Ip(IpEndpoint::new(
-                    IpAddress::Ipv6(ip),
-                    port,
-                )))
+                Ok(Endpoint::Ip(IpEndpoint::new(IpAddress::Ipv6(ip), port)))
             }
-            AF_UNIX => Ok(Endpoint::Unix),
+            AF_UNIX => {
+                let path_bytes = &addr_buf[2..];
+                if path_bytes.is_empty() || path_bytes[0] == 0 {
+                    if path_bytes.len() > 1 {
+                        Ok(Endpoint::Unix(UnixEndpoint::Abstract(
+                            path_bytes[1..].to_vec(),
+                        )))
+                    } else {
+                        Ok(Endpoint::Unix(UnixEndpoint::Unnamed))
+                    }
+                } else {
+                    // 文件系统路径（以 \0 截断）
+                    let len = path_bytes
+                        .iter()
+                        .position(|&b| b == 0)
+                        .unwrap_or(path_bytes.len());
+                    let path_str =
+                        core::str::from_utf8(&path_bytes[..len]).map_err(|_| SyscallErr::EINVAL)?;
+                    Ok(Endpoint::Unix(UnixEndpoint::Path(
+                        String::from_utf8_lossy(path_bytes).into_owned(),
+                    )))
+                }
+            }
             AF_UNSPEC => Ok(Endpoint::Unspecified),
             _ => Err(SyscallErr::EAFNOSUPPORT),
         }
@@ -189,7 +196,45 @@ impl Endpoint {
     pub fn fill_sockaddr(&self, addr: usize, addrlen: usize) -> SyscallRet {
         match self {
             Endpoint::Ip(ep) => address::fill_with_endpoint(*ep, addr, addrlen),
-            Endpoint::Unix => Err(SyscallErr::EOPNOTSUPP),
+            Endpoint::Unix(unix_ep) => {
+                if addr == 0 || addrlen < 2 {
+                    return Err(SyscallErr::EFAULT);
+                }
+                let task = current_task().unwrap();
+                let token = task.get_user_token();
+                let buf = translated_byte_buffer(token, addr as *const u8, addrlen)
+                    .map_err(|_| SyscallErr::EFAULT)?;
+                let mut user_buf = UserBuffer::new(buf);
+                let af_unix: u16 = AF_UNIX;
+                let mut data = Vec::new();
+                // sa_family (2 bytes)
+                data.extend_from_slice(&af_unix.to_ne_bytes());
+                match unix_ep {
+                    UnixEndpoint::Path(path) => {
+                        // sun_path: 文件系统路径
+                        let max_path_len = addrlen.saturating_sub(2).min(path.len());
+                        data.extend_from_slice(&path.as_bytes()[..max_path_len]);
+                        // 如果空间足够，补 NUL
+                        if data.len() < addrlen {
+                            data.push(0);
+                        }
+                    }
+                    UnixEndpoint::Abstract(name) => {
+                        // sun_path[0] = NUL, 然后是抽象名称
+                        data.push(0);
+                        let max_name_len = addrlen.saturating_sub(3).min(name.len());
+                        data.extend_from_slice(&name[..max_name_len]);
+                    }
+                    UnixEndpoint::Unnamed => {
+                        // 只有 sa_family，sun_path 全零
+                    }
+                }
+                // 用 0 填充剩余空间
+                let write_len = data.len().min(addrlen);
+                user_buf.write(&data[..write_len]);
+                // 更新实际的 addrlen (由用户态传递，不在内核侧修改)
+                Ok(write_len)
+            }
             Endpoint::Unspecified => {
                 if addr == 0 || addrlen == 0 {
                     return Err(SyscallErr::EFAULT);
@@ -257,7 +302,12 @@ pub trait Socket: Send + Sync {
 
     /// 尝试发送消息（sendmsg 用）。
     /// dest 为 None 时使用 socket 已连接的远程端点。
-    fn try_sendmsg(&self, buf: &[u8], dest: Option<Endpoint>, _flags: MsgFlags) -> Result<isize, SyscallErr> {
+    fn try_sendmsg(
+        &self,
+        buf: &[u8],
+        dest: Option<Endpoint>,
+        _flags: MsgFlags,
+    ) -> Result<isize, SyscallErr> {
         // UDP RawSocket 子类会重写此方法
         let _ = dest;
         self.try_send(buf, _flags)
@@ -503,13 +553,18 @@ impl File for SocketFile {
 }
 
 impl dyn Socket {
-    pub fn alloc(domain: u32, psock: PSOCK, protocol: u32, is_nonblock: bool, is_cloexec: bool) -> GeneralRet<usize> {
+    pub fn alloc(
+        domain: u32,
+        psock: PSOCK,
+        protocol: u32,
+        is_nonblock: bool,
+        is_cloexec: bool,
+    ) -> GeneralRet<usize> {
         log::info!("[Socket::new] domain: {}, psock: {:?}", domain, psock);
         if domain == AF_INET6 as u32 {
             log::warn!("[Socket::alloc] AF_INET6 is not supported yet!");
             return Err(SyscallErr::EAFNOSUPPORT);
         }
-
         match domain as u16 {
             AF_INET | AF_UNSPEC => {
                 log::info!("[Socket::new] domain: {} -> treating as AF_INET", domain);
@@ -557,8 +612,33 @@ impl dyn Socket {
                 }
             }
             AF_UNIX => {
-                log::warn!("[Socket::alloc] AF_UNIX is not fully supported yet!");
-                Err(SyscallErr::EAFNOSUPPORT)
+                log::info!("[Socket::new] domain: AF_UNIX");
+                match psock {
+                    PSOCK::Stream => {
+                        let socket: Arc<dyn Socket> = Arc::new(UnixStreamSocket::new(is_nonblock));
+                        let socket_file = Arc::new(SocketFile::new(socket));
+                        let current_tcb = current_task().unwrap();
+                        let fd = current_tcb
+                            .files
+                            .lock()
+                            .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket_file))
+                            .unwrap();
+                        Ok(fd)
+                    }
+                    PSOCK::Datagram | PSOCK::Raw => {
+                        let socket = UnixDatagramSocket::new(is_nonblock);
+                        let socket: Arc<dyn Socket> = socket;
+                        let socket_file = Arc::new(SocketFile::new(socket));
+                        let current_tcb = current_task().unwrap();
+                        let fd = current_tcb
+                            .files
+                            .lock()
+                            .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket_file))
+                            .unwrap();
+                        Ok(fd)
+                    }
+                    _ => return Err(SyscallErr::EINVAL),
+                }
             }
             _ => Err(SyscallErr::EINVAL),
         }

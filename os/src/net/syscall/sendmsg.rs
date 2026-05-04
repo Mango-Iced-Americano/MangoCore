@@ -106,7 +106,7 @@ pub fn sys_sendmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
             if dest_endpoint.is_none() && socket.remote_endpoint().is_none() {
                 return -(SyscallErr::EDESTADDRREQ as isize);
             }
-            wait_io(|| socket.try_sendmsg(&buf, dest_endpoint, msg_flags), is_nonblock)
+            wait_io(|| socket.try_sendmsg(&buf, dest_endpoint.clone(), msg_flags), is_nonblock)
         }
         PSOCK::Stream => {
             let wq = socket.send_wait_queue().unwrap();
@@ -125,7 +125,7 @@ pub fn sys_sendmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
                 .unwrap_or_else(|e| e)
             }
         }
-        PSOCK::Raw => wait_io(|| socket.try_sendmsg(&buf, dest_endpoint, msg_flags), is_nonblock),
-        _ => wait_io(|| socket.try_sendmsg(&buf, dest_endpoint, msg_flags), is_nonblock),
+        PSOCK::Raw => wait_io(|| socket.try_sendmsg(&buf, dest_endpoint.clone(), msg_flags), is_nonblock),
+        _ => wait_io(|| socket.try_sendmsg(&buf, dest_endpoint.clone(), msg_flags), is_nonblock),
     }
 }

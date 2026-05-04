@@ -137,7 +137,7 @@ pub fn sys_sendto(
                     ret
                 } else {
                     let ret = WaitQueue::wait_until_interruptible(wait_queue, || {
-                        match socket.send_to(buf, dest_endpoint) {
+                        match socket.send_to(buf, dest_endpoint.clone()) {
                             Ok(n) => Some(n as isize),
                             Err(SyscallErr::EAGAIN) => None,
                             Err(e) => Some(-(e as isize)),
@@ -149,7 +149,7 @@ pub fn sys_sendto(
                 }
             } else {
                 wait_io(
-                    || socket.send_to(buf, dest_endpoint).map(|n| n as isize),
+                    || socket.send_to(buf, dest_endpoint.clone()).map(|n| n as isize),
                     is_nonblock,
                 )
             }

@@ -60,3 +60,61 @@ pub fn sleep(period_ms: usize) {
 pub fn shutdown() -> isize{
     sys_shutdown()
 }
+
+// === Socket API ===
+// AF_UNIX (Linux 值)
+pub const AF_UNIX: usize = 1;
+pub const SOCK_STREAM: usize = 1;
+pub const SOCK_DGRAM: usize = 2;
+pub const SOCK_CLOEXEC: usize = 0o2000000;
+pub const SOCK_NONBLOCK: usize = 0o4000;
+
+pub const SHUT_RD: usize = 0;
+pub const SHUT_WR: usize = 1;
+pub const SHUT_RDWR: usize = 2;
+
+pub fn socket(domain: usize, type_: usize, protocol: usize) -> isize {
+    sys_socket(domain, type_, protocol)
+}
+
+pub fn socketpair(domain: usize, type_: usize, protocol: usize, sv: &mut [i32]) -> isize {
+    sys_socketpair(domain, type_, protocol, sv.as_mut_ptr())
+}
+
+pub fn bind(sockfd: usize, addr: *const u8, addrlen: usize) -> isize {
+    sys_bind(sockfd, addr, addrlen)
+}
+
+pub fn listen(sockfd: usize, backlog: usize) -> isize {
+    sys_listen(sockfd, backlog)
+}
+
+pub fn accept(sockfd: usize, addr: *mut u8, addrlen: *mut usize) -> isize {
+    sys_accept(sockfd, addr, addrlen)
+}
+
+pub fn connect(sockfd: usize, addr: *const u8, addrlen: usize) -> isize {
+    sys_connect(sockfd, addr, addrlen)
+}
+
+pub fn sendto(sockfd: usize, buf: *const u8, len: usize, flags: usize,
+              dest_addr: *const u8, addrlen: usize) -> isize {
+    sys_sendto(sockfd, buf, len, flags, dest_addr, addrlen)
+}
+
+pub fn recvfrom(sockfd: usize, buf: *mut u8, len: usize, flags: usize,
+                src_addr: *mut u8, addrlen: *mut usize) -> isize {
+    sys_recvfrom(sockfd, buf, len, flags, src_addr, addrlen)
+}
+
+pub fn getsockname(sockfd: usize, addr: *mut u8, addrlen: *mut usize) -> isize {
+    sys_getsockname(sockfd, addr, addrlen)
+}
+
+pub fn getpeername(sockfd: usize, addr: *mut u8, addrlen: *mut usize) -> isize {
+    sys_getpeername(sockfd, addr, addrlen)
+}
+
+pub fn sock_shutdown(sockfd: usize, how: usize) -> isize {
+    sys_sock_shutdown(sockfd, how)
+}

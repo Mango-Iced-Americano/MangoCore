@@ -3,13 +3,15 @@
 // use user_lib::{exit, exec, fork, waitpid, shutdown, sleep};
 extern crate alloc;
 
+use core::net;
+
 use alloc::format;
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 use user_lib::{
     chdir, close, exec, exit, fork, open, println, read, shutdown, sleep, wait, waitpid, OpenFlags,
 };
-use alloc::vec;
 
 fn run_bash_cmd(cmd: &str, environ: &[*const u8]) -> i32 {
     let pid = fork();
@@ -297,6 +299,22 @@ fn run_selected_groups(environ: &[*const u8], mask: u16) {
     println!("[initproc] run_selected_groups done");
 }
 
+fn run_unix_standalone_tests(environ: &[*const u8]) {
+    // 独立的 Unix Domain Socket 测试程序（完全不依赖 LTP 框架）
+    // 编译自 user/src/bin/unix_test.rs
+    let testdir = "/";
+    let name = "unix_test";
+    let cmd = format!(
+        "cd {} && echo '=== STANDALONE UNIX TEST: {} ===' && ./{}; echo '=== STANDALONE UNIX TEST: {} exit=$? ==='",
+        testdir, name, name, name
+    );
+    let ret = run_bash_cmd(&cmd, environ);
+    println!(
+        "[initproc] standalone unix test '{}' returned {}",
+        name, ret
+    );
+}
+
 fn run_ltp_network_tests(environ: &[*const u8]) {
     // LTP testcases/bin 中与网络/Socket 相关的独立 ELF 测例。
     // 分为多个子列表，按功能分类。
@@ -304,44 +322,73 @@ fn run_ltp_network_tests(environ: &[*const u8]) {
 
     // ============ 1. Socket 系统调用基础 ============
     let socket_syscall_cases = [
-        "socket01",           // socket() 系统调用基础
-        "socket02",           // socket() with SOCK_CLOEXEC/SOCK_NONBLOCK
-        "socketpair01",       // socketpair() 基础
-        "socketpair02",       // socketpair() with close-on-exec/nonblock
-        "socketcall01",       // socketcall(2) raw syscall 基础 (TCP/UDP/RAW/UNIX)
-        "socketcall02",       // socketcall(2) 错误测试
-        "socketcall03",       // socketcall(2) bind+listen 测试
-        "bind01", "bind02", "bind03", "bind04", "bind05", "bind06",
-        "connect01", "connect02",
+        "socket01",     // socket() 系统调用基础
+        "socket02",     // socket() with SOCK_CLOEXEC/SOCK_NONBLOCK
+        "socketpair01", // socketpair() 基础
+        "socketpair02", // socketpair() with close-on-exec/nonblock
+        "socketcall01", // socketcall(2) raw syscall 基础 (TCP/UDP/RAW/UNIX)
+        "socketcall02", // socketcall(2) 错误测试
+        "socketcall03", // socketcall(2) bind+listen 测试
+        "bind01",
+        "bind02",
+        "bind03",
+        "bind04",
+        "bind05",
+        "bind06",
+        "connect01",
+        "connect02",
         "listen01",
-        "accept01", "accept02", "accept03",
+        "accept01",
+        "accept02",
+        "accept03",
         "accept4_01",
-        "shutdown01",         // shutdown() SHUT_RD/SHUT_WR/SHUT_RDWR
-        "shutdown02",         // shutdown() 错误测试
+        "shutdown01", // shutdown() SHUT_RD/SHUT_WR/SHUT_RDWR
+        "shutdown02", // shutdown() 错误测试
     ];
 
     // ============ 2. 数据收发 ============
     let data_io_cases = [
-        "send01", "send02",
-        "sendto01", "sendto02", "sendto03",
-        "sendmsg01", "sendmsg02", "sendmsg03",
-        "sendmmsg01", "sendmmsg02",
+        "send01",
+        "send02",
+        "sendto01",
+        "sendto02",
+        "sendto03",
+        "sendmsg01",
+        "sendmsg02",
+        "sendmsg03",
+        "sendmmsg01",
+        "sendmmsg02",
         "recv01",
         "recvfrom01",
-        "recvmsg01", "recvmsg02", "recvmsg03",
+        "recvmsg01",
+        "recvmsg02",
+        "recvmsg03",
         "recvmmsg01",
-        "sendfile01", "sendfile02", "sendfile03", "sendfile04", "sendfile05",
-        "sendfile06", "sendfile07", "sendfile08", "sendfile09",
+        "sendfile01",
+        "sendfile02",
+        "sendfile03",
+        "sendfile04",
+        "sendfile05",
+        "sendfile06",
+        "sendfile07",
+        "sendfile08",
+        "sendfile09",
     ];
 
     // ============ 3. Socket 选项 / 名称 ============
     let socket_opt_cases = [
         "getsockname01",
         "getpeername01",
-        "getsockopt01", "getsockopt02",
-        "setsockopt01", "setsockopt02", "setsockopt03",
-        "setsockopt04", "setsockopt05", "setsockopt06", "setsockopt07",
-        "sockioctl01",       // socket ioctl 测试
+        "getsockopt01",
+        "getsockopt02",
+        "setsockopt01",
+        "setsockopt02",
+        "setsockopt03",
+        "setsockopt04",
+        "setsockopt05",
+        "setsockopt06",
+        "setsockopt07",
+        "sockioctl01", // socket ioctl 测试
     ];
 
     // ============ 4. 网络工具 / 诊断 ============
@@ -349,38 +396,97 @@ fn run_ltp_network_tests(environ: &[*const u8]) {
         "add_ipv6addr",
         "check_icmpv4_connectivity",
         "check_icmpv6_connectivity",
-        "vsock01",           // AF_VSOCK 测试
+        "vsock01", // AF_VSOCK 测试
     ];
 
     // ============ 5. 网络栈高级特性（独立 ELF） ============
     let net_adv_cases = [
         // packet(7) / AF_PACKET
-        "fanout01",          // AF_PACKET fanout 测试
+        "fanout01", // AF_PACKET fanout 测试
         // tcp_fastopen
-        "tcp_fastopen01",    // TCP Fast Open 基础
+        "tcp_fastopen01", // TCP Fast Open 基础
         // TCP 拥塞控制
-        "dctcp01",           // DCTCP 拥塞控制
-        "bbr01", "bbr02",    // BBR 拥塞控制
+        "dctcp01", // DCTCP 拥塞控制
+        "bbr01",
+        "bbr02", // BBR 拥塞控制
     ];
 
     // ============ 6. 多路 I/O 复用（与网络密切相关） ============
     let io_multiplex_cases = [
-        "poll01", "poll02",
-        "ppoll01", "ppoll02",
-        "select01", "select02", "select03", "select04",
-        "pselect01", "pselect02", "pselect03",
-        "epoll01", "epoll02", "epoll03", "epoll04", "epoll05",
-        "epoll_ctl01", "epoll_wait01",
+        "poll01",
+        "poll02",
+        "ppoll01",
+        "ppoll02",
+        "select01",
+        "select02",
+        "select03",
+        "select04",
+        "pselect01",
+        "pselect02",
+        "pselect03",
+        "epoll01",
+        "epoll02",
+        "epoll03",
+        "epoll04",
+        "epoll05",
+        "epoll_ctl01",
+        "epoll_wait01",
     ];
 
     // ============ 7. IPv6 / 地址解析 ============
     let ipv6_cases = [
         "getaddrinfo01",
-        "in6_01", "in6_02",
-        "asapi_01", "asapi_02", "asapi_03",
+        "in6_01",
+        "in6_02",
+        "asapi_01",
+        "asapi_02",
+        "asapi_03",
     ];
 
-    // ============ 8. 网络 Shell 脚本（需要网络基础设施，仅尝试） ============
+    // ============ 8. Unix Domain Socket 专项测试 ============
+    // 以下测例经在 LTP 仓库 (linux-test-project/ltp) 中逐一查证确认存在，
+    // 它们专门或主要在 AF_UNIX domain socket 上运行，是验证 Unix socket
+    // 实现正确性的核心测试集。
+    //
+    // 分类说明：
+    //   [专用] = 该测例专门为 AF_UNIX 设计（如 bind03 测试 UNIX rebind）
+    //   [包含] = 该测例将 PF_UNIX/AF_UNIX 作为 test domain 之一
+    //
+    //  注意：部分测例已在前面分类中出现，此处单独列出以便聚焦 Unix socket 调试。
+    //  重复运行无害（测例均包含完善的 cleanup 逻辑）。
+    let unix_socket_cases = [
+        // ---- AF_UNIX 专用测例（仅对 Unix socket 有意义） ----
+        "bind03",       // [专用] AF_UNIX STREAM rebind → EINVAL
+        "bind04",       // [专用] AF_UNIX pathname/abstract stream + seqpacket
+        "bind05",       // [专用] AF_UNIX pathname/abstract dgram
+        "getsockopt02", // [专用] SO_PEERCRED 获取对端凭证 (AF_UNIX-only)
+        "shutdown01",   // [专用] AF_UNIX shutdown SHUT_RD/SHUT_WR/SHUT_RDWR
+        // ---- 核心 socket 创建/绑定（包含 PF_UNIX） ----
+        "socket01",     // [包含] PF_UNIX SOCK_DGRAM 创建
+        "socket02",     // [包含] socket() + SOCK_CLOEXEC/SOCK_NONBLOCK
+        "socketpair01", // [包含] PF_UNIX socketpair dgram + stream
+        "socketpair02", // [包含] PF_UNIX socketpair + close-on-exec/nonblock
+        "socketcall01", // [包含] socketcall raw: unix domain dgram
+        // ---- 地址绑定与连接 ----
+        "bind01",    // [包含] AF_UNIX sockaddr 绑定到错误 socket (EAFNOSUPPORT)
+        "connect01", // [包含] PF_UNIX connect 测试
+        "listen01",  // [包含] PF_UNIX listen 测试
+        "accept01",  // [包含] PF_UNIX accept 测试
+        // ---- 数据收发（包含 PF_UNIX 域） ----
+        "send01",     // [包含] PF_UNIX send 测试
+        "sendto01",   // [包含] PF_UNIX sendto 测试
+        "recv01",     // [包含] PF_UNIX recv 测试
+        "recvfrom01", // [包含] PF_UNIX recvfrom 测试
+        "sendmsg01",  // [包含] PF_UNIX SOCK_DGRAM sendmsg (rights passing)
+        "recvmsg01",  // [包含] AF_UNIX SOCK_STREAM recvmsg
+        // ---- socket 选项 / 名称 ----
+        "getsockname01", // [包含] PF_UNIX getsockname
+        "getpeername01", // [包含] PF_UNIX socketpair getpeername
+        "setsockopt01",  // [包含] PF_UNIX setsockopt
+        "sockioctl01",   // [包含] PF_UNIX sockioctl
+    ];
+
+    // ============ 9. 网络 Shell 脚本（需要网络基础设施，仅尝试） ============
     // let net_shell_cases = [
     //     // busy_poll（Busy Poll 轮询）
     //     // "busy_poll01.sh", "busy_poll02.sh", "busy_poll03.sh",
@@ -408,19 +514,22 @@ fn run_ltp_network_tests(environ: &[*const u8]) {
     // ];
 
     // 将所有子列表合并
-    let net_cases: Vec<&str> = socket_syscall_cases.iter()
-        .chain(data_io_cases.iter())
-        .chain(socket_opt_cases.iter())
-        .chain(net_tool_cases.iter())
-        .chain(net_adv_cases.iter())
-        .chain(io_multiplex_cases.iter())
-        .chain(ipv6_cases.iter())
-    //    .chain(net_shell_cases.iter())
-        .copied()
-        .collect();
-    
+    // let net_cases: Vec<&str> = socket_syscall_cases
+    //     .iter()
+    //     .chain(data_io_cases.iter())
+    //     .chain(socket_opt_cases.iter())
+    //     .chain(net_tool_cases.iter())
+    //     .chain(net_adv_cases.iter())
+    //     .chain(io_multiplex_cases.iter())
+    //     .chain(ipv6_cases.iter())
+    //     // .chain(unix_socket_cases.iter())
+    //     //    .chain(net_shell_cases.iter())
+    //     .copied()
+    //     .collect();
+
     // let net_cases: Vec<&str> = vec!["send02"];
 
+    let net_cases: Vec<&str> = unix_socket_cases.iter().copied().collect();
     let testdir = "/musl/ltp/testcases/bin";
 
     println!(
@@ -567,7 +676,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     run_bash_cmd(&cmd, &environ); // prepare busybox "symlinks" for test scripts
 
     let cfg = load_runtime_config();
-    
+
     // ============================================================
     // LTP 信号系统测试（控制变量：先验证信号基础，再测网络）
     // ============================================================
@@ -576,7 +685,13 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     // ============================================================
     // LTP 网络相关测例（独立 ELF 二进制，跳过 runltp 脚本框架）
     // ============================================================
-    run_ltp_network_tests(&environ);
+    // run_ltp_network_tests(&environ);
+
+    // ============================================================
+    // Unix Domain Socket 独立测试（不依赖 LTP 框架）
+    // 编译自 user/src/bin/unix_test.rs
+    // ============================================================
+    run_unix_standalone_tests(&environ);
 
     // run_bash_cmd(
     //     "cd musl && ./netserver -D -L 127.0.0.1 -p 12865 &",
@@ -594,7 +709,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         shutdown();
         return 0;
     }
-    
+
     run_selected_groups(&environ, cfg.mask);
 
     if cfg.mode == RunMode::RunThenShell {
