@@ -5,17 +5,17 @@ use crate::mm::{
     copy_from_user_array, translated_byte_buffer_append_to_existing_vec, translated_ref,
     translated_refmut, UserBuffer,
 };
-use crate::net::address;
 use crate::net::config::NET_INTERFACE;
 use crate::net::posix::MsgHdr;
-use crate::net::SocketType;
+use crate::net::{Endpoint, SocketType};
+use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address};
 use crate::syscall::utils::wait_io;
 use crate::task::current_task;
 use crate::task::WaitQueue;
 use crate::utils::error::SyscallErr;
 
 use super::common::MsgFlags;
-use smoltcp::wire::IpListenEndpoint;
+
 
 pub fn sys_sendmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
     let msg_flags = MsgFlags::from_bits_truncate(flags);
@@ -66,8 +66,8 @@ pub fn sys_sendmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
         user_buf.read(&mut buf);
     }
 
-    // 解析目标地址（msg_name）
-    let dest_addr = if !msg.msg_name.is_null() && msg.msg_namelen >= 16 {
+    // 解析目标地址（msg_name）为 Endpoint
+    let dest_endpoint = if !msg.msg_name.is_null() && msg.msg_namelen >= 16 {
         let copy_len = (msg.msg_namelen as usize).min(128);
         let mut addr_parts = Vec::new();
         match translated_byte_buffer_append_to_existing_vec(
@@ -80,7 +80,7 @@ pub fn sys_sendmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
                 let mut addr_buf = [0u8; 128];
                 let addr_user_buf = UserBuffer::new(addr_parts);
                 addr_user_buf.read(&mut addr_buf[..copy_len]);
-                match address::endpoint(&addr_buf[..copy_len]) {
+                match Endpoint::from_sockaddr(&addr_buf[..copy_len]) {
                     Ok(ep) => Some(ep),
                     Err(_) => return -(SyscallErr::EINVAL as isize),
                 }
@@ -95,16 +95,18 @@ pub fn sys_sendmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
     match socket.socket_type() {
         SocketType::SOCK_DGRAM => {
             // Auto-bind if not bound (same as sys_sendto)
-            if socket.local_endpoint().port == 0 {
-                let addr = address::SocketAddrv4::new([0; 16].as_slice());
-                let endpoint = IpListenEndpoint::from(addr);
-                let _ = socket.bind(endpoint);
+            if socket.local_endpoint().map(|ep| ep.port() == 0).unwrap_or(true) {
+                let auto_bind = Endpoint::Ip(IpEndpoint::new(
+                    IpAddress::Ipv4(Ipv4Address::UNSPECIFIED),
+                    0,
+                ));
+                let _ = socket.bind(&auto_bind);
             }
             // sendmsg without msg_name on unconnected DGRAM → EDESTADDRREQ
-            if dest_addr.is_none() && socket.remote_endpoint().is_none() {
+            if dest_endpoint.is_none() && socket.remote_endpoint().is_none() {
                 return -(SyscallErr::EDESTADDRREQ as isize);
             }
-            wait_io(|| socket.try_sendmsg(&buf, dest_addr, msg_flags), is_nonblock)
+            wait_io(|| socket.try_sendmsg(&buf, dest_endpoint, msg_flags), is_nonblock)
         }
         SocketType::SOCK_STREAM => {
             let wq = socket.send_wait_queue().unwrap();
@@ -123,7 +125,7 @@ pub fn sys_sendmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
                 .unwrap_or_else(|e| e)
             }
         }
-        SocketType::SOCK_RAW => wait_io(|| socket.try_sendmsg(&buf, dest_addr, msg_flags), is_nonblock),
-        _ => wait_io(|| socket.try_sendmsg(&buf, dest_addr, msg_flags), is_nonblock),
+        SocketType::SOCK_RAW => wait_io(|| socket.try_sendmsg(&buf, dest_endpoint, msg_flags), is_nonblock),
+        _ => wait_io(|| socket.try_sendmsg(&buf, dest_endpoint, msg_flags), is_nonblock),
     }
 }

@@ -1,3 +1,4 @@
+use crate::net::Endpoint;
 use crate::syscall::utils::wait_io;
 use crate::task::current_task;
 use crate::task::WaitQueue;
@@ -11,6 +12,10 @@ pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
         Err(e) => return -(e as isize),
     }
     let addr_buf = crate::trans_ref!(addr, addrlen);
+    let endpoint = match Endpoint::from_sockaddr(addr_buf) {
+        Ok(ep) => ep,
+        Err(e) => return -(e as isize),
+    };
     let socket = crate::get_socket!(sockfd);
     let task = current_task().unwrap();
 
@@ -22,7 +27,7 @@ pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
         .unwrap_or(false);
 
     // 先尝试初始化连接（只做一次）
-    match socket.connect(addr_buf) {
+    match socket.connect(&endpoint) {
         Ok(n) => return n as isize,
         Err(SyscallErr::EAGAIN) => {} // 需要 wait_io
         Err(e) => return -(e as isize),

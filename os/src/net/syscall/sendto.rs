@@ -1,15 +1,15 @@
 use log::info;
 
-use crate::net::address::{self, SocketAddrv4};
 use crate::net::config::NET_INTERFACE;
-use crate::net::SocketType;
+use crate::net::{Endpoint, SocketType};
+use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address};
 use crate::syscall::utils::wait_io;
 use crate::task::current_task;
 use crate::task::WaitQueue;
 use crate::utils::error::SyscallErr;
 
 use super::common::MsgFlags;
-use smoltcp::wire::IpListenEndpoint;
+
 
 pub fn sys_sendto(
     sockfd: u32,
@@ -55,14 +55,19 @@ pub fn sys_sendto(
 
     match socket.socket_type() {
         SocketType::SOCK_DGRAM => {
-            if socket.local_endpoint().port == 0 {
-                let addr = SocketAddrv4::new([0; 16].as_slice());
-                let endpoint = IpListenEndpoint::from(addr);
-                let _ = socket.bind(endpoint);
+            if socket.local_endpoint().map(|ep| ep.port() == 0).unwrap_or(true) {
+                // 构造 AF_INET:port=0:addr=0 的 sockaddr_in 用于自动绑定
+                let auto_bind = Endpoint::Ip(IpEndpoint::new(
+                    IpAddress::Ipv4(smoltcp::wire::Ipv4Address::UNSPECIFIED),
+                    0,
+                ));
+                let _ = socket.bind(&auto_bind);
             }
             if dest_addr != 0 {
-                let dest_addr = crate::trans_ref!(dest_addr, addrlen);
-                let _ = socket.connect(dest_addr);
+                let dest_addr_buf = crate::trans_ref!(dest_addr, addrlen);
+                if let Ok(ep) = Endpoint::from_sockaddr(dest_addr_buf) {
+                    let _ = socket.connect(&ep);
+                }
             } else if socket.remote_endpoint().is_none() {
                 // send() without destination on unconnected DGRAM → EDESTADDRREQ
                 return -(SyscallErr::EDESTADDRREQ as isize);
@@ -116,12 +121,15 @@ pub fn sys_sendto(
         }
         SocketType::SOCK_RAW => {
             info!("[sys_sendto] socket is raw");
-            let dest_addr = crate::trans_ref!(dest_addr, addrlen);
-            let endpoint = address::endpoint(dest_addr).unwrap();
+            let dest_buf = crate::trans_ref!(dest_addr, addrlen);
+            let dest_endpoint = match Endpoint::from_sockaddr(dest_buf) {
+                Ok(ep) => ep,
+                Err(e) => return -(e as isize),
+            };
             if let Some(wait_queue) = socket.send_wait_queue() {
                 if is_nonblock {
                     NET_INTERFACE.try_poll();
-                    let ret = match socket.send_to(buf, endpoint) {
+                    let ret = match socket.send_to(buf, dest_endpoint) {
                         Ok(n) => n as isize,
                         Err(e) => -(e as isize),
                     };
@@ -129,7 +137,7 @@ pub fn sys_sendto(
                     ret
                 } else {
                     let ret = WaitQueue::wait_until_interruptible(wait_queue, || {
-                        match socket.send_to(buf, endpoint) {
+                        match socket.send_to(buf, dest_endpoint) {
                             Ok(n) => Some(n as isize),
                             Err(SyscallErr::EAGAIN) => None,
                             Err(e) => Some(-(e as isize)),
@@ -141,7 +149,7 @@ pub fn sys_sendto(
                 }
             } else {
                 wait_io(
-                    || socket.send_to(buf, endpoint).map(|n| n as isize),
+                    || socket.send_to(buf, dest_endpoint).map(|n| n as isize),
                     is_nonblock,
                 )
             }

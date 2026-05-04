@@ -7,12 +7,12 @@ use crate::{
         directory_tree::DirectoryTreeNode, fat32::DiskInodeType, file_descriptor::FileDescriptor,
         file_trait::File, Dirent, OpenFlags, PageCache, SeekWhence, Stat,
     },
-    mm::UserBuffer,
+    mm::{translated_byte_buffer, translated_refmut, UserBuffer},
     net::socket::inet::datagram::udp::UdpSocket,
     net::socket::inet::raw::raw::RawSocket,
-    net::socket::inet::stream::TcpStreamSocket,
+    net::socket::inet::stream::TcpSocket,
     net::syscall::common::MsgFlags,
-    task::current_task,
+    task::{current_task, WaitQueue},
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
 };
 use alloc::collections::VecDeque;
@@ -24,11 +24,10 @@ use alloc::{
 };
 
 use smoltcp::iface::SocketHandle;
-use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint};
+use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint, Ipv4Address, Ipv6Address};
 use spin::Mutex;
 
 use crate::net::socket::inet::common::address;
-use crate::task::WaitQueue;
 
 pub type Fd = usize;
 
@@ -83,7 +82,7 @@ pub static UDP_SOCKETS: Mutex<Vec<Weak<UdpSocket>>> = Mutex::new(Vec::new());
 pub static UDP_SOCKETS_TO_REMOVE: Mutex<Vec<SocketHandle>> = Mutex::new(Vec::new());
 
 // tcp
-pub static TCP_SOCKETS: Mutex<Vec<Weak<TcpStreamSocket>>> = Mutex::new(Vec::new());
+pub static TCP_SOCKETS: Mutex<Vec<Weak<TcpSocket>>> = Mutex::new(Vec::new());
 pub static TCP_SOCKETS_TO_REMOVE: Mutex<Vec<SocketHandle>> = Mutex::new(Vec::new());
 
 // raw
@@ -93,10 +92,112 @@ pub static RAW_SOCKETS_TO_REMOVE: Mutex<Vec<SocketHandle>> = Mutex::new(Vec::new
 pub static GATEWAY: IpAddress = IpAddress::v4(10, 0, 2, 2);
 pub static LOCAL_IP: IpAddress = IpAddress::v4(10, 0, 2, 15);
 
+// ── Endpoint 枚举 ─────────────────────────────────────────────────────
+
+/// 统一的 socket 端点抽象，覆盖所有地址族。
+/// 对标 DragonOS `kernel/src/net/socket/endpoint.rs` 的 `Endpoint` 枚举，
+/// 当前仅实现了 IP 和 Unix 两种变体。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Endpoint {
+    /// AF_INET / AF_INET6 端点
+    Ip(IpEndpoint),
+    /// AF_UNIX 端点
+    Unix,
+    /// 未指定（AF_UNSPEC）
+    Unspecified,
+}
+
+impl Endpoint {
+    /// 从原始 sockaddr 字节解析为 Endpoint（根据 sa_family 自动分发）。
+    pub fn from_sockaddr(addr_buf: &[u8]) -> Result<Self, SyscallErr> {
+        if addr_buf.len() < 2 {
+            return Err(SyscallErr::EINVAL);
+        }
+        let family = u16::from_ne_bytes([
+            addr_buf[0],
+            addr_buf[1],
+        ]);
+        match family {
+            AF_INET => {
+                if addr_buf.len() < 8 {
+                    return Err(SyscallErr::EINVAL);
+                }
+                let port = u16::from_be_bytes([
+                    addr_buf[2],
+                    addr_buf[3],
+                ]);
+                let ip = Ipv4Address::from_bytes(&[
+                    addr_buf[4],
+                    addr_buf[5],
+                    addr_buf[6],
+                    addr_buf[7],
+                ]);
+                Ok(Endpoint::Ip(IpEndpoint::new(
+                    IpAddress::Ipv4(ip),
+                    port,
+                )))
+            }
+            AF_INET6 => {
+                if addr_buf.len() < 24 {
+                    return Err(SyscallErr::EINVAL);
+                }
+                let port = u16::from_be_bytes([
+                    addr_buf[2],
+                    addr_buf[3],
+                ]);
+                let mut ip_bytes = [0u8; 16];
+                ip_bytes.copy_from_slice(&addr_buf[8..24]);
+                let ip = Ipv6Address(ip_bytes);
+                Ok(Endpoint::Ip(IpEndpoint::new(
+                    IpAddress::Ipv6(ip),
+                    port,
+                )))
+            }
+            AF_UNIX => Ok(Endpoint::Unix),
+            AF_UNSPEC => Ok(Endpoint::Unspecified),
+            _ => Err(SyscallErr::EAFNOSUPPORT),
+        }
+    }
+
+    /// 获取端口的便捷方法（非 IP 端点返回 0）。
+    pub fn port(&self) -> u16 {
+        match self {
+            Endpoint::Ip(ep) => ep.port,
+            _ => 0,
+        }
+    }
+
+    /// 将 Endpoint 写入用户空间 sockaddr 缓冲区，并更新 addrlen。
+    pub fn fill_sockaddr(&self, addr: usize, addrlen: usize) -> SyscallRet {
+        match self {
+            Endpoint::Ip(ep) => address::fill_with_endpoint(*ep, addr, addrlen),
+            Endpoint::Unix => Err(SyscallErr::EOPNOTSUPP),
+            Endpoint::Unspecified => {
+                if addr == 0 || addrlen == 0 {
+                    return Err(SyscallErr::EFAULT);
+                }
+                let task = current_task().unwrap();
+                let token = task.get_user_token();
+                let buf = translated_byte_buffer(token, addr as *const u8, addrlen as usize)
+                    .map_err(|_| SyscallErr::EFAULT)?;
+                let mut user_buf = UserBuffer::new(buf);
+                let mut data = [0u8; 16];
+                data[0..2].copy_from_slice(&u16::to_ne_bytes(AF_UNSPEC));
+                user_buf.write(&data);
+                // update addrlen
+                if let Ok(ptr) = translated_refmut(token, addrlen as *mut u32) {
+                    *ptr = 2;
+                }
+                Ok(0)
+            }
+        }
+    }
+}
+
 pub trait Socket: Send + Sync {
-    fn bind(&self, addr: IpListenEndpoint) -> SyscallRet;
+    fn bind(&self, endpoint: &Endpoint) -> SyscallRet;
     fn listen(&self) -> SyscallRet;
-    fn connect<'a>(&'a self, addr_buf: &'a [u8]) -> SyscallRet;
+    fn connect(&self, endpoint: &Endpoint) -> SyscallRet;
     /// 尝试建立连接一次（不阻塞），检查一次握手状态。
     /// 返回 Ok(0) 表示已建立，Err(EAGAIN) 表示尚在握手/需重试。
     fn try_connect(&self) -> Result<isize, SyscallErr> {
@@ -108,19 +209,29 @@ pub trait Socket: Send + Sync {
     fn send_buf_size(&self) -> usize;
     fn set_recv_buf_size(&self, size: usize);
     fn set_send_buf_size(&self, size: usize);
-    fn local_endpoint(&self) -> IpListenEndpoint;
-    fn remote_endpoint(&self) -> Option<IpEndpoint>;
+    fn local_endpoint(&self) -> Option<Endpoint>;
+    fn remote_endpoint(&self) -> Option<Endpoint>;
     fn shutdown(&self, how: u32) -> GeneralRet<()>;
-    fn set_nagle_enabled(&self, enabled: bool) -> SyscallRet;
-    fn set_keep_alive(&self, enabled: bool) -> SyscallRet;
-    fn reuse_addr(&self) -> SyscallRet;
-    fn set_reuse_addr(&self, enabled: bool) -> SyscallRet;
-    fn send_to(&self, buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet;
+    fn set_nagle_enabled(&self, _enabled: bool) -> SyscallRet {
+        Err(SyscallErr::EOPNOTSUPP)
+    }
+    fn set_keep_alive(&self, _enabled: bool) -> SyscallRet {
+        Err(SyscallErr::EOPNOTSUPP)
+    }
+    fn reuse_addr(&self) -> SyscallRet {
+        Err(SyscallErr::EOPNOTSUPP)
+    }
+    fn set_reuse_addr(&self, _enabled: bool) -> SyscallRet {
+        Err(SyscallErr::EOPNOTSUPP)
+    }
+    fn send_to(&self, _buf: &[u8], _dest: Endpoint) -> SyscallRet {
+        Err(SyscallErr::EOPNOTSUPP)
+    }
 
     /// 尝试接收消息（recvmsg 用）。
     /// 成功时返回 (字节数, 可选的源地址)。
     /// 源地址仅 UDP/RAW 有意义，TCP/Unix 返回 None。
-    fn try_recvmsg(&self, buf: &mut [u8]) -> Result<(isize, Option<IpEndpoint>), SyscallErr> {
+    fn try_recvmsg(&self, buf: &mut [u8]) -> Result<(isize, Option<Endpoint>), SyscallErr> {
         // 默认实现：委托 try_recv，不返回地址
         let n = self.try_recv(buf)?;
         Ok((n, None))
@@ -128,14 +239,14 @@ pub trait Socket: Send + Sync {
 
     /// 尝试发送消息（sendmsg 用）。
     /// dest 为 None 时使用 socket 已连接的远程端点。
-    fn try_sendmsg(&self, buf: &[u8], dest: Option<IpEndpoint>, _flags: MsgFlags) -> Result<isize, SyscallErr> {
+    fn try_sendmsg(&self, buf: &[u8], dest: Option<Endpoint>, _flags: MsgFlags) -> Result<isize, SyscallErr> {
         // UDP RawSocket 子类会重写此方法
         let _ = dest;
         self.try_send(buf, _flags)
     }
 
     /// 获取最近一次接收到的源地址（仅 UDP 有意义）。
-    fn last_recv_addr(&self) -> Option<IpEndpoint> {
+    fn last_recv_addr(&self) -> Option<Endpoint> {
         None
     }
 
@@ -401,9 +512,9 @@ impl dyn Socket {
                         .unwrap();
                     Ok(fd)
                 } else if pure_type == SocketType::SOCK_STREAM.bits() {
-                    let socket = TcpStreamSocket::new();
+                    let socket = TcpSocket::new();
                     let socket = Arc::new(socket);
-                    TcpStreamSocket::register_tcp_socket(&socket);
+                    TcpSocket::register_tcp_socket(&socket);
                     let socket_file = Arc::new(SocketFile::new(socket));
                     let current_tcb = current_task().unwrap();
                     let fd = current_tcb
@@ -436,16 +547,12 @@ impl dyn Socket {
         }
     }
     pub fn addr(self: &Arc<Self>, addr: usize, addrlen: usize) -> SyscallRet {
-        let local_endpoint = self.local_endpoint();
-        let local_endpoint = address::listen_to_ip_endpoint_preserve(local_endpoint);
-        address::fill_with_endpoint(local_endpoint, addr, addrlen)
+        let endpoint = self.local_endpoint().ok_or(SyscallErr::ENOTCONN)?;
+        endpoint.fill_sockaddr(addr, addrlen)
     }
     pub fn peer_addr(self: &Arc<Self>, addr: usize, addrlen: usize) -> SyscallRet {
-        let remote_endpoint = self.remote_endpoint();
-        if remote_endpoint.is_none() {
-            return Err(SyscallErr::ENOTCONN);
-        }
-        address::fill_with_endpoint(remote_endpoint.unwrap(), addr, addrlen)
+        let endpoint = self.remote_endpoint().ok_or(SyscallErr::ENOTCONN)?;
+        endpoint.fill_sockaddr(addr, addrlen)
     }
 }
 

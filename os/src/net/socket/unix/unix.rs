@@ -1,4 +1,4 @@
-use crate::net::{Mutex, Socket};
+use crate::net::{Endpoint, Mutex, Socket};
 use crate::net::syscall::common::MsgFlags;
 use crate::{
     fs::{
@@ -19,7 +19,7 @@ pub struct UnixSocket<const N: usize> {
 }
 
 impl<const N: usize> Socket for UnixSocket<N> {
-    fn bind(&self, _addr: smoltcp::wire::IpListenEndpoint) -> crate::utils::error::SyscallRet {
+    fn bind(&self, _endpoint: &Endpoint) -> SyscallRet {
         todo!();
     }
 
@@ -27,7 +27,7 @@ impl<const N: usize> Socket for UnixSocket<N> {
         todo!();
     }
 
-    fn connect(&self, _addr_buf: &[u8]) -> SyscallRet {
+    fn connect(&self, _endpoint: &Endpoint) -> SyscallRet {
         todo!();
     }
 
@@ -55,11 +55,11 @@ impl<const N: usize> Socket for UnixSocket<N> {
         todo!()
     }
 
-    fn local_endpoint(&self) -> smoltcp::wire::IpListenEndpoint {
-        todo!()
+    fn local_endpoint(&self) -> Option<Endpoint> {
+        None
     }
 
-    fn remote_endpoint(&self) -> Option<IpEndpoint> {
+    fn remote_endpoint(&self) -> Option<Endpoint> {
         None
     }
 
@@ -68,25 +68,7 @@ impl<const N: usize> Socket for UnixSocket<N> {
         Ok(())
     }
 
-    fn set_nagle_enabled(&self, _enabled: bool) -> crate::utils::error::SyscallRet {
-        Err(SyscallErr::EOPNOTSUPP)
-    }
 
-    fn set_keep_alive(&self, _enabled: bool) -> crate::utils::error::SyscallRet {
-        Err(SyscallErr::EOPNOTSUPP)
-    }
-
-    fn reuse_addr(&self) -> SyscallRet {
-        todo!()
-    }
-
-    fn set_reuse_addr(&self, enabled: bool) -> SyscallRet {
-        todo!()
-    }
-
-    fn send_to(&self, buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet {
-        todo!();
-    }
 
     fn try_recv(&self, buf: &mut [u8]) -> Result<isize, SyscallErr> {
         let n = self.read_end.read(None, buf) as isize;

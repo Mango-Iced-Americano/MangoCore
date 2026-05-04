@@ -1,4 +1,4 @@
-use crate::net::{config::NET_INTERFACE, MAX_BUFFER_SIZE, RAW_SOCKETS, SHUT_WR, Mutex, Socket};
+use crate::net::{config::NET_INTERFACE, Endpoint, MAX_BUFFER_SIZE, RAW_SOCKETS, SHUT_WR, Mutex, Socket};
 use crate::net::syscall::common::MsgFlags;
 use crate::task::WaitQueue;
 use crate::utils::error::{GeneralRet, SyscallErr, SyscallRet};
@@ -32,9 +32,7 @@ struct RawSocketInner {
 }
 
 impl Socket for RawSocket {
-    fn bind(&self, addr: IpListenEndpoint) -> SyscallRet {
-        log::info!("[Raw::bind] bind to {:?}", addr);
-        NET_INTERFACE.poll();
+    fn bind(&self, _endpoint: &Endpoint) -> SyscallRet {
         todo!()
     }
 
@@ -42,7 +40,7 @@ impl Socket for RawSocket {
         todo!()
     }
 
-    fn connect<'a>(&'a self, _addr_buf: &'a [u8]) -> SyscallRet {
+    fn connect(&self, _endpoint: &Endpoint) -> SyscallRet {
         todo!()
     }
 
@@ -70,12 +68,12 @@ impl Socket for RawSocket {
         self.inner.lock().sendbuf_size = size;
     }
 
-    fn local_endpoint(&self) -> IpListenEndpoint {
+    fn local_endpoint(&self) -> Option<Endpoint> {
         todo!()
     }
 
-    fn remote_endpoint(&self) -> Option<IpEndpoint> {
-        self.inner.lock().remote_endpoint
+    fn remote_endpoint(&self) -> Option<Endpoint> {
+        self.inner.lock().remote_endpoint.map(Endpoint::Ip)
     }
 
     fn shutdown(&self, how: u32) -> GeneralRet<()> {
@@ -83,23 +81,12 @@ impl Socket for RawSocket {
         todo!()
     }
 
-    fn set_nagle_enabled(&self, _enabled: bool) -> SyscallRet {
-        todo!()
-    }
 
-    fn set_keep_alive(&self, _enabled: bool) -> SyscallRet {
-        todo!()
-    }
 
-    fn reuse_addr(&self) -> SyscallRet {
-        todo!()
-    }
-
-    fn set_reuse_addr(&self, enabled: bool) -> SyscallRet {
-        todo!()
-    }
-
-    fn send_to(&self, user_buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet {
+    fn send_to(&self, user_buf: &[u8], dest: Endpoint) -> SyscallRet {
+        let Endpoint::Ip(dest_addr) = dest else {
+            return Err(SyscallErr::EINVAL);
+        };
         let (version, protocol) = {
             let inner = self.inner.lock();
             (inner.ip_version, inner.ip_protocol)

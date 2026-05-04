@@ -1,6 +1,6 @@
 use crate::net::config::lookup_source_ip;
 use crate::net::syscall::common::MsgFlags;
-use crate::net::{config::NET_INTERFACE, Mutex, Socket, MAX_BUFFER_SIZE};
+use crate::net::{config::NET_INTERFACE, Endpoint, Mutex, Socket, MAX_BUFFER_SIZE};
 use crate::{
     net::address,
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
@@ -19,7 +19,7 @@ use smoltcp::{
         udp::{PacketMetadata, SendError, UdpMetadata},
         AnySocket,
     },
-    wire::{IpAddress, IpEndpoint, IpListenEndpoint},
+    wire::{IpAddress, IpEndpoint, IpListenEndpoint, Ipv4Address},
 };
 
 use crate::net::config::NetInterfaceInner;
@@ -48,7 +48,21 @@ struct UdpSocketInner {
 }
 
 impl Socket for UdpSocket {
-    fn bind(&self, addr: IpListenEndpoint) -> SyscallRet {
+    fn bind(&self, endpoint: &Endpoint) -> SyscallRet {
+        let Endpoint::Ip(ep) = endpoint else {
+            return Err(SyscallErr::EINVAL);
+        };
+        let addr = if ep.addr.is_unspecified() {
+            IpListenEndpoint {
+                addr: None,
+                port: ep.port,
+            }
+        } else {
+            IpListenEndpoint {
+                addr: Some(ep.addr),
+                port: ep.port,
+            }
+        };
         log::info!("[Udp::bind] bind to {:?}", addr);
         // 处理 port=0：分配临时端口，与 TCP Inner::bind 语义一致
         let bind_addr = if addr.port == 0 {
@@ -72,8 +86,16 @@ impl Socket for UdpSocket {
         Err(SyscallErr::EOPNOTSUPP)
     }
 
-    fn connect<'a>(&'a self, addr_buf: &'a [u8]) -> crate::utils::error::SyscallRet {
-        let remote_endpoint = address::endpoint(addr_buf)?;
+    fn connect(&self, endpoint: &Endpoint) -> SyscallRet {
+        let Endpoint::Ip(ep) = endpoint else {
+            return Err(SyscallErr::EINVAL);
+        };
+        // Linux: connect() to INADDR_ANY is treated as localhost
+        let remote_endpoint = if ep.addr.is_unspecified() {
+            IpEndpoint::new(smoltcp::wire::IpAddress::v4(127, 0, 0, 1), ep.port)
+        } else {
+            *ep
+        };
         log::info!("[Udp::connect] connect to {:?}", remote_endpoint);
         {
             let mut inner = self.inner.lock();
@@ -149,18 +171,18 @@ impl Socket for UdpSocket {
         self.inner.lock().sendbuf_size = size;
     }
 
-    fn local_endpoint(&self) -> IpListenEndpoint {
+    fn local_endpoint(&self) -> Option<Endpoint> {
         NET_INTERFACE.poll();
-        let local = NET_INTERFACE.udp_socket(self.socket_handler, |socket| socket.endpoint());
+        let local: Option<IpListenEndpoint> = NET_INTERFACE.udp_socket(self.socket_handler, |socket| socket.endpoint());
         NET_INTERFACE.poll();
-        local.unwrap_or(IpListenEndpoint {
-            addr: None,
-            port: 0,
+        local.map(|ep| {
+            let addr = ep.addr.unwrap_or(IpAddress::Ipv4(Ipv4Address::UNSPECIFIED));
+            Endpoint::Ip(IpEndpoint::new(addr, ep.port))
         })
     }
 
-    fn remote_endpoint(&self) -> Option<IpEndpoint> {
-        self.inner.lock().remote_endpoint
+    fn remote_endpoint(&self) -> Option<Endpoint> {
+        self.inner.lock().remote_endpoint.map(Endpoint::Ip)
     }
 
     fn shutdown(&self, how: u32) -> GeneralRet<()> {
@@ -186,7 +208,11 @@ impl Socket for UdpSocket {
         Ok(0)
     }
 
-    fn send_to(&self, buf: &[u8], dest_addr: IpEndpoint) -> SyscallRet {
+    fn send_to(&self, buf: &[u8], dest: Endpoint) -> SyscallRet {
+        let Endpoint::Ip(ep) = dest else {
+            return Err(SyscallErr::EINVAL);
+        };
+        let _ = ep;
         todo!();
     }
 
@@ -233,24 +259,20 @@ impl Socket for UdpSocket {
             .unwrap_or(Err(SyscallErr::EAGAIN))
     }
 
-    fn try_recvmsg(&self, buf: &mut [u8]) -> Result<(isize, Option<IpEndpoint>), SyscallErr> {
+    fn try_recvmsg(&self, buf: &mut [u8]) -> Result<(isize, Option<Endpoint>), SyscallErr> {
         // 从 rx_queue 非阻塞取一包数据 + 源地址
         let mut inner = self.inner.lock();
         if let Some((data, remote)) = inner.rx_queue.pop_front() {
             let copy_len = data.len().min(buf.len());
             buf[..copy_len].copy_from_slice(&data[..copy_len]);
-            // 如果未 connect，将 remote 更新到 inner（与现有 try_recv 行为一致）
-            // if inner.remote_endpoint.is_none() {
-            //     inner.remote_endpoint = Some(remote);
-            // }
             inner.last_recv_addr = Some(remote);
-            Ok((copy_len as isize, Some(remote)))
+            Ok((copy_len as isize, Some(Endpoint::Ip(remote))))
         } else {
             Err(SyscallErr::EAGAIN)
         }
     }
 
-    fn try_sendmsg(&self, buf: &[u8], dest: Option<IpEndpoint>, flags: MsgFlags) -> Result<isize, SyscallErr> {
+    fn try_sendmsg(&self, buf: &[u8], dest: Option<Endpoint>, flags: MsgFlags) -> Result<isize, SyscallErr> {
         // EMSGSIZE check
         if buf.len() > 65507 {
             return Err(SyscallErr::EMSGSIZE);
@@ -259,7 +281,8 @@ impl Socket for UdpSocket {
         // MSG_MORE: 缓冲数据；非 MSG_MORE: 合并缓冲后发送
         let (remote, send_buf) = {
             let res = match dest {
-                Some(ep) => Ok(ep),
+                Some(Endpoint::Ip(ep)) => Ok(ep),
+                Some(_) => Err(SyscallErr::EINVAL),
                 None => self.inner.lock().remote_endpoint.ok_or(SyscallErr::ENOTCONN),
             };
             let remote = res?;
@@ -292,8 +315,8 @@ impl Socket for UdpSocket {
             })
             .unwrap_or(Err(SyscallErr::EAGAIN))
     }
-    fn last_recv_addr(&self) -> Option<IpEndpoint> {
-        self.inner.lock().last_recv_addr.take()
+    fn last_recv_addr(&self) -> Option<Endpoint> {
+        self.inner.lock().last_recv_addr.take().map(Endpoint::Ip)
     }
 
     fn socket_r_ready(&self) -> bool {

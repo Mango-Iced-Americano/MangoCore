@@ -5,7 +5,6 @@ use crate::mm::{
     copy_from_user_array, translated_byte_buffer_append_to_existing_vec, translated_ref,
     translated_refmut, UserBuffer,
 };
-use crate::net::address;
 use crate::net::config::NET_INTERFACE;
 use crate::net::posix::MsgHdr;
 use crate::syscall::utils::wait_io;
@@ -97,8 +96,7 @@ pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
     if !msg.msg_name.is_null() && msg.msg_namelen >= 16 {
         if let Some(src_addr) = socket.last_recv_addr() {
             let namelen_field_offset = msg_ptr + core::mem::offset_of!(MsgHdr, msg_namelen);
-            let _ =
-                address::fill_with_endpoint(src_addr, msg.msg_name as usize, namelen_field_offset);
+            let _ = src_addr.fill_sockaddr(msg.msg_name as usize, namelen_field_offset);
         }
     }
 

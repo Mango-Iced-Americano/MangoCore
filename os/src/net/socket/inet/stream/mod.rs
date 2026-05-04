@@ -1,10 +1,10 @@
-//! TCP Stream Socket —— TcpStreamSocket
+//! TCP Socket —— TcpSocket
 //!
 //! 架构对标 DragonOS `net/socket/inet/stream/mod.rs`。
 //! 使用 6 状态 Inner 枚举管理 TCP 状态机：
 //!   Init / Connecting / Listening / Established / SelfConnected / Closed
 //!
-//! TcpStreamSocket 包装：
+//! TcpSocket 包装：
 //!   - inner: Mutex<Inner>        — 状态机
 //!   - pollee: AtomicUsize        — 缓存 EPOLL 事件
 //!   - recv/send/connect/accept waiters — 等待队列
@@ -25,7 +25,7 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint};
 use spin::Mutex;
 
-use crate::net::{address, config::NET_INTERFACE, Socket, SocketFile, SocketType};
+use crate::net::{config::NET_INTERFACE, Endpoint, Socket, SocketFile, SocketType};
 use crate::net::syscall::common::MsgFlags;
 use crate::{
     fs::FileDescriptor,
@@ -39,8 +39,8 @@ use self::inner::{
 use crate::net::socket::inet::common::PortManager;
 use crate::net::socket::inet::stream::inner::ConnectResult;
 use crate::trace_event;
-/// TCP Stream Socket —— 对外表现为 Socket trait
-pub struct TcpStreamSocket {
+/// TCP Socket —— 对外表现为 Socket trait
+pub struct TcpSocket {
     pub inner: Mutex<Inner>,
     pub pollee: AtomicUsize,
     /// 读端已关闭（SHUT_RD）
@@ -54,7 +54,7 @@ pub struct TcpStreamSocket {
     pub accept_waiters: Mutex<WaitQueue>,
 }
 
-impl TcpStreamSocket {
+impl TcpSocket {
     /// 创建一个新的 TCP socket（默认 IPv4）
     pub fn new() -> Self {
         Self {
@@ -155,14 +155,28 @@ impl TcpStreamSocket {
     }
 }
 
-impl Socket for TcpStreamSocket {
-    fn bind(&self, addr: IpListenEndpoint) -> SyscallRet {
+impl Socket for TcpSocket {
+    fn bind(&self, endpoint: &Endpoint) -> SyscallRet {
+        let Endpoint::Ip(ep) = endpoint else {
+            return Err(SyscallErr::EINVAL);
+        };
+        let listen_ep = if ep.addr.is_unspecified() {
+            IpListenEndpoint {
+                addr: None,
+                port: ep.port,
+            }
+        } else {
+            IpListenEndpoint {
+                addr: Some(ep.addr),
+                port: ep.port,
+            }
+        };
         let mut inner = self.inner.lock();
         let new_inner = core::mem::replace(
             &mut *inner,
             Inner::Closed(Closed::new(smoltcp::wire::IpVersion::Ipv4)),
         );
-        match new_inner.bind(addr) {
+        match new_inner.bind(listen_ep) {
             Ok(bound) => {
                 *inner = bound;
                 Ok(0)
@@ -192,8 +206,16 @@ impl Socket for TcpStreamSocket {
         }
     }
 
-    fn connect<'a>(&'a self, addr_buf: &'a [u8]) -> SyscallRet {
-        let remote_endpoint = address::endpoint(addr_buf)?;
+    fn connect(&self, endpoint: &Endpoint) -> SyscallRet {
+        let Endpoint::Ip(ep) = endpoint else {
+            return Err(SyscallErr::EINVAL);
+        };
+        // Linux: connect() to INADDR_ANY is treated as localhost
+        let remote_endpoint = if ep.addr.is_unspecified() {
+            IpEndpoint::new(smoltcp::wire::IpAddress::v4(127, 0, 0, 1), ep.port)
+        } else {
+            *ep
+        };
         let mut inner = self.inner.lock();
         let new_inner = core::mem::replace(
             &mut *inner,
@@ -280,7 +302,7 @@ impl Socket for TcpStreamSocket {
             Err(e) => return Err(e),
         };
 
-        let connected_socket = Arc::new(TcpStreamSocket {
+        let connected_socket = Arc::new(TcpSocket {
             inner: Mutex::new(connected_inner),
             pollee: AtomicUsize::new(0),
             read_shutdown: AtomicBool::new(false),
@@ -309,7 +331,7 @@ impl Socket for TcpStreamSocket {
 
         // addr == 0 means user doesn't care about peer address (POSIX allows this)
         if addr != 0 {
-            address::fill_with_endpoint(peer_endpoint, addr, addrlen)?;
+            Endpoint::Ip(peer_endpoint).fill_sockaddr(addr, addrlen)?;
         }
 
         Ok(new_fd)
@@ -364,13 +386,12 @@ impl Socket for TcpStreamSocket {
         }
     }
 
-    fn local_endpoint(&self) -> IpListenEndpoint {
-        let ep = self.inner.lock().local_endpoint();
-        IpListenEndpoint::from(ep)
+    fn local_endpoint(&self) -> Option<Endpoint> {
+        Some(Endpoint::Ip(self.inner.lock().local_endpoint()))
     }
 
-    fn remote_endpoint(&self) -> Option<IpEndpoint> {
-        self.inner.lock().remote_endpoint()
+    fn remote_endpoint(&self) -> Option<Endpoint> {
+        self.inner.lock().remote_endpoint().map(Endpoint::Ip)
     }
 
     fn shutdown(&self, how: u32) -> GeneralRet<()> {
@@ -408,7 +429,7 @@ impl Socket for TcpStreamSocket {
         Ok(0)
     }
 
-    fn send_to(&self, _buf: &[u8], _dest_addr: IpEndpoint) -> SyscallRet {
+    fn send_to(&self, _buf: &[u8], _dest: Endpoint) -> SyscallRet {
         Err(SyscallErr::EOPNOTSUPP)
     }
 
@@ -433,7 +454,7 @@ impl Socket for TcpStreamSocket {
     fn socket_r_ready(&self) -> bool {
         self.update_io_events();
         log::debug!(
-            "[TcpStreamSocket]Checking if socket is ready for reading, pollee: {}",
+            "[TcpSocket]Checking if socket is ready for reading, pollee: {}",
             self.pollee.load(Ordering::Acquire)
         );
         self.pollee.load(Ordering::Acquire) & EPollEvent::EPOLLIN.bits() != 0
@@ -442,7 +463,7 @@ impl Socket for TcpStreamSocket {
     fn socket_w_ready(&self) -> bool {
         self.update_io_events();
         log::debug!(
-            "[TcpStreamSocket]Checking if socket is ready for writing, pollee: {}",
+            "[TcpSocket]Checking if socket is ready for writing, pollee: {}",
             self.pollee.load(Ordering::Acquire)
         );
         self.pollee.load(Ordering::Acquire) & EPollEvent::EPOLLOUT.bits() != 0
@@ -473,10 +494,10 @@ impl Socket for TcpStreamSocket {
     }
 }
 
-unsafe impl Send for TcpStreamSocket {}
-unsafe impl Sync for TcpStreamSocket {}
+unsafe impl Send for TcpSocket {}
+unsafe impl Sync for TcpSocket {}
 
-impl Drop for TcpStreamSocket {
+impl Drop for TcpSocket {
     fn drop(&mut self) {
         {
             let inner = self.inner.lock();
@@ -488,7 +509,7 @@ impl Drop for TcpStreamSocket {
                 Inner::SelfConnected(_) => "SelfConnected",
                 Inner::Closed(_) => "Closed",
             };
-            log::info!("[TcpStreamSocket::drop] state={}", state_name);
+            log::info!("[TcpSocket::drop] state={}", state_name);
             inner.close();
         }
         // 设置 pollee 为对端关闭/错误事件，让 epoll/select 立即可读并报 HUP

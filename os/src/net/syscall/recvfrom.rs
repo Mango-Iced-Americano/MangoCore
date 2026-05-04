@@ -2,7 +2,7 @@ use log::info;
 
 use crate::mm::{translated_ref, translated_refmut};
 use crate::net::config::NET_INTERFACE;
-use crate::net::SocketType;
+use crate::net::{Endpoint, SocketType};
 use crate::syscall::utils::wait_io;
 use crate::task::current_task;
 use crate::task::WaitQueue;
@@ -69,7 +69,7 @@ pub fn sys_recvfrom(
             // 注意这里是 >= 0，因为 UDP 允许发送 0 字节的空包
             if ret >= 0 && src_addr != 0 {
                 if let Some(ep) = src_ep {
-                    let _ = crate::net::address::fill_with_endpoint(ep, src_addr, addrlen);
+                    let _ = ep.fill_sockaddr(src_addr, addrlen);
                 }
             }
             Ok(ret)

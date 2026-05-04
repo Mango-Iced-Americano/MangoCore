@@ -25,7 +25,7 @@ pub use socket::{
     TCP_SOCKETS, TCP_SOCKETS_TO_REMOVE,
     RAW_SOCKETS, RAW_SOCKETS_TO_REMOVE,
     GATEWAY, LOCAL_IP,
-    Socket, SocketFile,
+    Socket, SocketFile, Endpoint,
     TcpInfo, TCP_MSS,
     Fd,
     make_unix_socket_pair,

@@ -1,4 +1,4 @@
-use crate::net::{Socket, SocketFile, SocketType, SOCK_TYPE_MASK};
+use crate::net::{Endpoint, Socket, SocketFile, SocketType, SOCK_TYPE_MASK};
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU16, Ordering};
 use smoltcp::wire::IpListenEndpoint;
@@ -59,7 +59,13 @@ impl PortManager {
                 );
                 continue;
             }
-            let local = socket.local_endpoint();
+            let local = match socket.local_endpoint() {
+                Some(Endpoint::Ip(ep)) => IpListenEndpoint {
+                    addr: if ep.addr.is_unspecified() { None } else { Some(ep.addr) },
+                    port: ep.port,
+                },
+                _ => continue, // 非 INET socket 不参与端口冲突检查
+            };
             if local.port != endpoint.port || endpoint.port == 0 {
                 continue;
             }
@@ -103,9 +109,25 @@ impl PortManager {
     pub fn bind_port(
         task: &crate::task::TaskControlBlock,
         socket: &Arc<dyn Socket>,
-        endpoint: IpListenEndpoint,
+        endpoint: &Endpoint,
     ) -> crate::utils::error::SyscallRet {
-        if Self::check_bind_conflict(task, endpoint, socket) {
+        // 对于非 IP 端点（如 Unix），跳过端口冲突检查直接 bind
+        let Endpoint::Ip(ep) = endpoint else {
+            return socket.bind(endpoint);
+        };
+        // 转换为 IpListenEndpoint 进行冲突检查
+        let listen_ep = if ep.addr.is_unspecified() {
+            IpListenEndpoint {
+                addr: None,
+                port: ep.port,
+            }
+        } else {
+            IpListenEndpoint {
+                addr: Some(ep.addr),
+                port: ep.port,
+            }
+        };
+        if Self::check_bind_conflict(task, listen_ep, socket) {
             return Err(crate::utils::error::SyscallErr::EADDRINUSE);
         }
         socket.bind(endpoint)
