@@ -941,6 +941,11 @@ pub fn sys_fchmodat() -> isize {
     0
 }
 
+pub fn sys_fchownat() -> isize {
+    // 内核暂无权限系统，假装返回成功
+    0
+}
+
 pub fn sys_chdir(path: *const u8) -> isize {
     let task = current_task().unwrap();
     let token = task.get_user_token();

@@ -7,10 +7,10 @@ mod process;
 mod syscall_id;
 pub mod utils;
 
+use crate::net::syscall::*;
 use core::convert::TryFrom;
 use fs::*;
 use log::{error, info};
-use crate::net::syscall::*;
 pub use process::CloneFlags;
 use process::*;
 use syscall_id::*;
@@ -32,6 +32,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_FACCESSAT => "faccessat",
         SYSCALL_CHDIR => "chdir",
         SYSCALL_FCHMODAT => "fchmodat",
+        SYSCALL_FCHOWNAT => "fchownat",
         SYSCALL_OPENAT => "openat",
         SYSCALL_CLOSE => "close",
         SYSCALL_PIPE2 => "pipe2",
@@ -188,6 +189,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_FACCESSAT => sys_faccessat2(args[0], args[1] as *const u8, args[2] as u32, 0u32),
         SYSCALL_CHDIR => sys_chdir(args[0] as *const u8),
         SYSCALL_FCHMODAT => sys_fchmodat(),
+        SYSCALL_FCHOWNAT => sys_fchownat(),
         SYSCALL_OPEN => sys_openat(AT_FDCWD, args[0] as *const u8, args[1] as u32, 0o777u32),
         SYSCALL_OPENAT => sys_openat(
             args[0],

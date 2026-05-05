@@ -14,6 +14,7 @@ pub const SYSCALL_FTRUNCATE: usize = 46;
 pub const SYSCALL_FACCESSAT: usize = 48;
 pub const SYSCALL_CHDIR: usize = 49;
 pub const SYSCALL_FCHMODAT: usize = 53;
+pub const SYSCALL_FCHOWNAT: usize = 54;
 pub const SYSCALL_OPENAT: usize = 56;
 pub const SYSCALL_CLOSE: usize = 57;
 pub const SYSCALL_PIPE2: usize = 59;

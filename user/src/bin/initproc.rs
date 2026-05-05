@@ -685,13 +685,13 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     // ============================================================
     // LTP 网络相关测例（独立 ELF 二进制，跳过 runltp 脚本框架）
     // ============================================================
-    // run_ltp_network_tests(&environ);
+    run_ltp_network_tests(&environ);
 
     // ============================================================
     // Unix Domain Socket 独立测试（不依赖 LTP 框架）
     // 编译自 user/src/bin/unix_test.rs
     // ============================================================
-    run_unix_standalone_tests(&environ);
+    // run_unix_standalone_tests(&environ);
 
     // run_bash_cmd(
     //     "cd musl && ./netserver -D -L 127.0.0.1 -p 12865 &",

@@ -638,15 +638,18 @@ pub fn sys_clone(
         };
     }
     // todo: CLONE_CHILD_SETTID标志被设置，但是ctid指针为零，会出现地址错误，干脆全注释掉
-    // if flags.contains(CloneFlags::CLONE_CHILD_SETTID) {
-    //     match translated_refmut(child.get_user_token(), ctid) {
-    //         Ok(word) => *word = child.pid.0 as u32,
-    //         Err(errno) => return errno,
-    //     };
-    // }
-    // if flags.contains(CloneFlags::CLONE_CHILD_CLEARTID) {
-    //     child.acquire_inner_lock().clear_child_tid = ctid as usize;
-    // }
+    if flags.contains(CloneFlags::CLONE_CHILD_SETTID) {
+        match translated_refmut(child.get_user_token(), ctid) {
+            Ok(word) => *word = child.pid.0 as u32,
+            Err(errno) => log::warn!(
+                "[sys_clone] Failed to set child_tid at {:?} with errno {}, but still create the thread",
+                ctid, errno
+            ),
+        };
+    }
+    if flags.contains(CloneFlags::CLONE_CHILD_CLEARTID) {
+        child.acquire_inner_lock().clear_child_tid = ctid as usize;
+    }
     // add new task to scheduler
     add_task(child);
     new_pid as isize
@@ -833,10 +836,23 @@ pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) ->
                 return found_pid as isize;
             }
         } else {
+            // 在释放锁之前先拷贝需要用到的值
+            let pending_set = inner.sigpending;
+            let mask_set = inner.sigmask;
+            let has_pending = !pending_set.difference(mask_set).is_empty();
             drop(inner);
             if option.contains(WaitOption::WNOHANG) {
                 return SUCCESS;
             } else {
+                if has_pending {
+                    if has_actionable_signal(&task) {
+                        return -(ERESTART as isize);
+                    }
+                    // 如果是不可操作的信号（被忽略），清除它避免死循环
+                    let mut inner = task.acquire_inner_lock();
+                    inner.sigpending = inner.sigpending.difference(pending_set);
+                    drop(inner);
+                }
                 block_current_and_run_next();
                 debug!("[sys_wait4] --resumed--");
             }

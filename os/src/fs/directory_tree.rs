@@ -92,7 +92,7 @@ pub struct DirectoryTreeNode {
     spe_usage: Mutex<usize>,
     pub name: String,
     // 文件系统实例
-    filesystem: Arc<FileSystem>,
+    pub filesystem: Arc<FileSystem>,
     // 文件
     pub file: Arc<dyn File>,
     // 指向自己的弱引用
@@ -100,7 +100,7 @@ pub struct DirectoryTreeNode {
     // 指向父节点的弱引用
     father: Mutex<Weak<Self>>,
     // 子节点
-    children: RwLock<Option<BTreeMap<String, Arc<Self>>>>,
+    pub children: RwLock<Option<BTreeMap<String, Arc<Self>>>>,
 }
 
 // 实现 Drop 特征，当一个 DirectoryTreeNode 被销毁时，会调用 delete_directory_vec 函数
@@ -237,7 +237,7 @@ impl DirectoryTreeNode {
     }
 
     // 尝试获取子文件
-    fn try_to_open_subfile(
+    pub fn try_to_open_subfile(
         &self,
         name: &str,
         lock: &mut RwLockWriteGuard<Option<BTreeMap<String, Arc<Self>>>>,
