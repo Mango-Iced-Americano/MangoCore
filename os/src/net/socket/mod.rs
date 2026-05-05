@@ -172,9 +172,7 @@ impl Endpoint {
                         .unwrap_or(path_bytes.len());
                     let path_str =
                         core::str::from_utf8(&path_bytes[..len]).map_err(|_| SyscallErr::EINVAL)?;
-                    Ok(Endpoint::Unix(UnixEndpoint::Path(
-                        String::from_utf8_lossy(path_bytes).into_owned(),
-                    )))
+                    Ok(Endpoint::Unix(UnixEndpoint::Path(path_str.to_string())))
                 }
             }
             AF_UNSPEC => Ok(Endpoint::Unspecified),

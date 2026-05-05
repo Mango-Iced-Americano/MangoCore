@@ -4,10 +4,10 @@
 //! 当前为骨架阶段，所有方法已签名但核心逻辑用 `todo!()` 占位。
 
 pub mod inner;
-
 use self::inner::Connected;
 use crate::fs::FileDescriptor;
 use crate::net::socket::unix::ns::{ABSTRACT_TABLE, UNIX_PATH_MAX};
+use crate::net::socket::unix::PATH_TABLE;
 use crate::net::socket::unix::{UnixEndpoint, UnixEndpointBound};
 use crate::net::syscall::common::MsgFlags;
 use crate::net::{Endpoint, Socket, PSOCK, SHUT_RD};
@@ -111,9 +111,12 @@ impl Socket for UnixStreamSocket {
                         init.addr = Some(UnixEndpointBound::Abstract(name.clone()));
                         Ok(0)
                     }
-                    _ => {
-                        // TODO: 实现文件系统路径和抽象命名空间 bind
-                        Err(SyscallErr::EOPNOTSUPP)
+                    UnixEndpoint::Path(ref path) => {
+                        if init.addr.is_some() {
+                            return Err(SyscallErr::EINVAL); // 已绑定过地址
+                        }
+                        init.addr = Some(UnixEndpointBound::Path(path.clone()));
+                        Ok(0)
                     }
                 }
             }
@@ -191,6 +194,32 @@ impl Socket for UnixStreamSocket {
                 match &mut *self_inner {
                     Inner::Init(init) => {
                         client_conn.addr = init.addr.take(); // ★ take 不 move
+                        *self_inner = Inner::Connected(client_conn);
+                        Ok(0)
+                    }
+                    _ => Err(SyscallErr::EISCONN),
+                }
+            }
+
+            UnixEndpoint::Path(path) => {
+                let server_socket = PATH_TABLE
+                    .lock()
+                    .get(path)
+                    .and_then(|w| w.upgrade())
+                    .ok_or(SyscallErr::ECONNREFUSED)?;
+
+                let (mut client_conn, server_conn) =
+                    Connected::new_pair(UNIX_STREAM_DEFAULT_BUF_SIZE);
+                client_conn.peer_addr = Some(UnixEndpointBound::Path(path.clone()));
+                server_socket.push_pending_connected(server_conn)?;
+                if let Some(wq) = server_socket.accept_wait_queue() {
+                    wq.lock().wake_all();
+                }
+
+                let mut self_inner = self.inner.lock();
+                match &mut *self_inner {
+                    Inner::Init(init) => {
+                        client_conn.addr = init.addr.take();
                         *self_inner = Inner::Connected(client_conn);
                         Ok(0)
                     }
@@ -421,34 +450,67 @@ impl Socket for UnixStreamSocket {
 
 impl Drop for UnixStreamSocket {
     fn drop(&mut self) {
-        let abstract_name = {
-            let inner = self.inner.lock();
-            match &*inner {
-                Inner::Init(init) => init.addr.as_ref().and_then(|a| {
-                    if let UnixEndpointBound::Abstract(name) = a {
-                        Some(name.clone())
-                    } else {
-                        None
-                    }
-                }),
-                Inner::Connected(conn) => conn.addr.as_ref().and_then(|a| {
-                    if let UnixEndpointBound::Abstract(name) = a {
-                        Some(name.clone())
-                    } else {
-                        None
-                    }
-                }),
-                Inner::Listener(listener) => {
-                    if let UnixEndpointBound::Abstract(name) = &listener.local_addr {
-                        Some(name.clone())
-                    } else {
-                        None
+        let (abstract_name, path_name) = {
+            let abstract_name = {
+                let inner = self.inner.lock();
+                match &*inner {
+                    Inner::Init(init) => init.addr.as_ref().and_then(|a| {
+                        if let UnixEndpointBound::Abstract(name) = a {
+                            Some(name.clone())
+                        } else {
+                            None
+                        }
+                    }),
+                    Inner::Connected(conn) => conn.addr.as_ref().and_then(|a| {
+                        if let UnixEndpointBound::Abstract(name) = a {
+                            Some(name.clone())
+                        } else {
+                            None
+                        }
+                    }),
+                    Inner::Listener(listener) => {
+                        if let UnixEndpointBound::Abstract(name) = &listener.local_addr {
+                            Some(name.clone())
+                        } else {
+                            None
+                        }
                     }
                 }
-            }
+            };
+            let path_name = {
+                let inner = self.inner.lock();
+                match &*inner {
+                    Inner::Init(init) => init.addr.as_ref().and_then(|a| {
+                        if let UnixEndpointBound::Path(name) = a {
+                            Some(name.clone())
+                        } else {
+                            None
+                        }
+                    }),
+                    Inner::Connected(conn) => conn.addr.as_ref().and_then(|a| {
+                        if let UnixEndpointBound::Path(name) = a {
+                            Some(name.clone())
+                        } else {
+                            None
+                        }
+                    }),
+                    Inner::Listener(listener) => {
+                        if let UnixEndpointBound::Path(name) = &listener.local_addr {
+                            Some(name.clone())
+                        } else {
+                            None
+                        }
+                    }
+                }
+            };
+            (abstract_name, path_name)
         };
+
         if let Some(name) = abstract_name {
             ABSTRACT_TABLE.remove_abstract_name_bytes(&name);
+        }
+        if let Some(name) = path_name {
+            PATH_TABLE.lock().remove(&name);
         }
     }
 }

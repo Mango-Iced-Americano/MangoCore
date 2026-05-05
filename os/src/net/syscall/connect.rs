@@ -1,10 +1,11 @@
+use super::common::check_addrlen;
+use crate::net::socket::UnixEndpoint;
 use crate::net::Endpoint;
 use crate::syscall::utils::wait_io;
 use crate::task::current_task;
 use crate::task::WaitQueue;
 use crate::utils::error::SyscallErr;
-
-use super::common::check_addrlen;
+use alloc::format;
 
 pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
     match check_addrlen(addrlen) {
@@ -16,6 +17,32 @@ pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
         Ok(ep) => ep,
         Err(e) => return -(e as isize),
     };
+    log::info!("[sys_connect] endpoint from sockaddr: {:?}", endpoint);
+
+    let endpoint = match endpoint {
+        Endpoint::Unix(UnixEndpoint::Path(ref path)) => {
+            let task = current_task().unwrap();
+
+            let abs_path = if path.starts_with('/') {
+                path.clone()
+            } else {
+                let cwd = task.fs.lock().working_inode.get_cwd();
+                match cwd {
+                    Some(cwd_str) => {
+                        if cwd_str == "/" {
+                            format!("/{}", path)
+                        } else {
+                            format!("{}/{}", cwd_str, path)
+                        }
+                    }
+                    None => return -(SyscallErr::ENOENT as isize),
+                }
+            };
+            Endpoint::Unix(UnixEndpoint::Path(abs_path))
+        }
+        other => other,
+    };
+
     let socket = crate::get_socket!(sockfd);
     let task = current_task().unwrap();
 

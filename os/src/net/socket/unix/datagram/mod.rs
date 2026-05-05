@@ -3,19 +3,20 @@
 //! 参照 DragonOS `kernel/src/net/socket/unix/datagram/mod.rs` 设计。
 //! 当前为骨架阶段，核心逻辑用 `todo!()` 占位。
 
-use alloc::collections::BTreeMap;
-use alloc::collections::VecDeque;
-use alloc::sync::Arc;
-use alloc::sync::Weak;
-use alloc::vec::Vec;
-use core::sync::atomic::AtomicBool;
-use spin::Mutex;
-
 use crate::net::socket::unix::{UnixEndpoint, UnixEndpointBound};
 use crate::net::syscall::common::MsgFlags;
 use crate::net::{Endpoint, Socket, PSOCK};
 use crate::task::WaitQueue;
 use crate::utils::error::{GeneralRet, SyscallErr, SyscallRet};
+use alloc::collections::BTreeMap;
+use alloc::collections::VecDeque;
+use alloc::format;
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::sync::Weak;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use spin::Mutex;
 
 // ── 常量 ─────────────────────────────────────────────────────────────
 
@@ -28,12 +29,14 @@ const DEFAULT_BUF_SIZE: usize = 64 * 1024;
 
 struct AbstractTable {
     inner: Mutex<BTreeMap<Arc<[u8]>, Weak<UnixDatagramSocket>>>,
+    next_abstract_id: AtomicUsize,
 }
 
 impl AbstractTable {
     fn new() -> Self {
         Self {
             inner: Mutex::new(BTreeMap::new()),
+            next_abstract_id: AtomicUsize::new(0),
         }
     }
 
@@ -51,11 +54,16 @@ impl AbstractTable {
             .get(&Arc::from(name))
             .and_then(|w| w.upgrade())
     }
+
+    fn allocate_abstract_name(&self) -> Arc<[u8]> {
+        let id = self.next_abstract_id.fetch_add(1, Ordering::Relaxed);
+        Arc::from(format!("__abstract_{}", id).into_bytes())
+    }
 }
 
 struct BindTable {
     // path
-    // path_table
+    path_table: Mutex<BTreeMap<String, Weak<UnixDatagramSocket>>>,
 
     // abstract
     abstract_table: AbstractTable,
@@ -64,15 +72,17 @@ struct BindTable {
 impl BindTable {
     pub fn new() -> Self {
         Self {
-            // path_table: PathTable::new(),
+            path_table: Mutex::new(BTreeMap::new()),
             abstract_table: AbstractTable::new(),
         }
     }
 
     pub fn register(&self, addr: &UnixEndpointBound, socket: &Arc<UnixDatagramSocket>) {
         match addr {
-            UnixEndpointBound::Path(_) => {
-                todo!()
+            UnixEndpointBound::Path(path) => {
+                self.path_table
+                    .lock()
+                    .insert(path.clone(), Arc::downgrade(socket));
             }
             UnixEndpointBound::Abstract(name) => {
                 self.abstract_table
@@ -83,8 +93,8 @@ impl BindTable {
     }
     pub fn unregister(&self, addr: &UnixEndpointBound) {
         match addr {
-            UnixEndpointBound::Path(_) => {
-                todo!()
+            UnixEndpointBound::Path(path) => {
+                self.path_table.lock().remove(path);
             }
             UnixEndpointBound::Abstract(name) => {
                 self.abstract_table.remove(name.as_slice());
@@ -95,12 +105,16 @@ impl BindTable {
 
     pub fn lookup(&self, addr: &UnixEndpointBound) -> Option<Arc<UnixDatagramSocket>> {
         match addr {
-            UnixEndpointBound::Path(_) => {
-                todo!()
+            UnixEndpointBound::Path(path) => {
+                self.path_table.lock().get(path).and_then(|w| w.upgrade())
             }
             UnixEndpointBound::Abstract(name) => self.abstract_table.get(name.as_slice()),
             _ => None,
         }
+    }
+
+    pub fn allocate_abstract_name(&self) -> Arc<[u8]> {
+        self.abstract_table.allocate_abstract_name()
     }
 }
 
@@ -208,13 +222,19 @@ impl UnixDatagramSocket {
     pub fn new_pair(is_nonblock: bool) -> (Arc<Self>, Arc<Self>) {
         let socket_a = Self::new(is_nonblock);
         let socket_b = Self::new(is_nonblock);
-        // 直接通过内部状态连接两者
+
+        let addr_a = BIND_TABLE.allocate_abstract_name().to_vec();
+        let addr_b = BIND_TABLE.allocate_abstract_name().to_vec();
+        BIND_TABLE.register(&UnixEndpointBound::Abstract(addr_a.clone()), &socket_a);
+        BIND_TABLE.register(&UnixEndpointBound::Abstract(addr_b.clone()), &socket_b);
+
         {
             let mut inner_a = socket_a.inner.lock();
             let mut inner_b = socket_b.inner.lock();
-            inner_a.peer_addr = Some(UnixEndpointBound::Unnamed);
-            inner_b.peer_addr = Some(UnixEndpointBound::Unnamed);
+            inner_a.peer_addr = Some(UnixEndpointBound::Abstract(addr_b.clone()));
+            inner_b.peer_addr = Some(UnixEndpointBound::Abstract(addr_a.clone()));
         }
+
         (socket_a, socket_b)
     }
 }
@@ -229,7 +249,7 @@ impl Socket for UnixDatagramSocket {
         if inner.local_addr.is_some() {
             return Err(SyscallErr::EINVAL);
         }
-        // 当前仅支持 unnamed bind
+
         match unix_ep {
             UnixEndpoint::Unnamed => {
                 inner.local_addr = Some(UnixEndpointBound::Unnamed);
@@ -248,9 +268,17 @@ impl Socket for UnixDatagramSocket {
                 inner.local_addr = Some(bound);
                 Ok(0)
             }
-            _ => {
-                // TODO: 实现文件系统路径和抽象命名空间 bind
-                Err(SyscallErr::EOPNOTSUPP)
+            UnixEndpoint::Path(path) => {
+                let bound = UnixEndpointBound::Path(path.clone());
+                let self_arc = self
+                    .self_ref
+                    .lock()
+                    .as_ref()
+                    .and_then(Weak::upgrade)
+                    .ok_or(SyscallErr::EIO)?;
+                BIND_TABLE.register(&bound, &self_arc);
+                inner.local_addr = Some(bound);
+                Ok(0)
             }
         }
     }
@@ -281,9 +309,15 @@ impl Socket for UnixDatagramSocket {
                     Err(SyscallErr::ECONNREFUSED)
                 }
             }
-            _ => {
-                // TODO: 查找对端 socket 并建立关联
-                Err(SyscallErr::EOPNOTSUPP)
+            UnixEndpoint::Path(path) => {
+                let bound = UnixEndpointBound::Path(path.clone());
+                if let Some(peer_socket) = BIND_TABLE.lookup(&bound) {
+                    inner.peer_addr = Some(bound);
+                    Ok(0)
+                } else {
+                    // 对端地址不存在
+                    Err(SyscallErr::ECONNREFUSED)
+                }
             }
         }
     }
@@ -346,27 +380,21 @@ impl Socket for UnixDatagramSocket {
     fn try_send(&self, buf: &[u8], _flags: MsgFlags) -> Result<isize, SyscallErr> {
         let inner = self.inner.lock();
         let peer_addr = inner.peer_addr.clone().ok_or(SyscallErr::ENOTCONN)?;
-        let peer_addr = match peer_addr {
-            UnixEndpointBound::Abstract(name) => name,
-            _ => return Err(SyscallErr::EOPNOTSUPP),
-        };
-        if let Some(peer_socket) =
-            BIND_TABLE.lookup(&UnixEndpointBound::Abstract(peer_addr.clone()))
-        {
-            let mut peer_inner = peer_socket.inner.lock();
-            if peer_inner.recv_queue.len() >= peer_inner.recv_queue_capacity {
-                return Err(SyscallErr::EAGAIN);
-            }
-            peer_inner.recv_queue.push_back(DatagramMessage {
-                data: buf.to_vec(),
-                src_addr: inner.local_addr.clone(),
-            });
-            // 唤醒对端的接收等待者
-            peer_socket.recv_waiters.lock().wake_all();
-            Ok(buf.len() as isize)
-        } else {
-            Err(SyscallErr::ECONNREFUSED)
+        let peer_socket = BIND_TABLE
+            .lookup(&peer_addr)
+            .ok_or(SyscallErr::ECONNREFUSED)?;
+
+        let mut peer_inner = peer_socket.inner.lock();
+        if peer_inner.recv_queue.len() >= peer_inner.recv_queue_capacity {
+            return Err(SyscallErr::EAGAIN);
         }
+        peer_inner.recv_queue.push_back(DatagramMessage {
+            data: buf.to_vec(),
+            src_addr: inner.local_addr.clone(),
+        });
+        // 唤醒对端的接收等待者
+        peer_socket.recv_waiters.lock().wake_all();
+        Ok(buf.len() as isize)
     }
 
     fn try_recvmsg(&self, buf: &mut [u8]) -> Result<(isize, Option<Endpoint>), SyscallErr> {

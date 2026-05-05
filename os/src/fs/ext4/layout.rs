@@ -259,14 +259,14 @@ impl File for Ext4OSInode {
             old_size = inode_ref.inode.get_file_size() as usize;
         }
 
-
         match offset {
             Some(offset) => {
                 let mut start = *offset;
                 let diff_len = buf.len() as isize + start as isize - old_size as isize;
 
                 if diff_len > 0 {
-                    self.truncate_size((old_size as isize + diff_len) as usize).unwrap();
+                    self.truncate_size((old_size as isize + diff_len) as usize)
+                        .unwrap();
                 }
 
                 let inode_ref = self.inode.lock().clone();
@@ -279,7 +279,8 @@ impl File for Ext4OSInode {
                 let diff_len = buf.len() as isize + start as isize - old_size as isize;
 
                 if diff_len > 0 {
-                    self.truncate_size((old_size as isize + diff_len) as usize).unwrap();
+                    self.truncate_size((old_size as isize + diff_len) as usize)
+                        .unwrap();
                 }
 
                 let inode_ref = self.inode.lock().clone();
@@ -507,6 +508,7 @@ impl File for Ext4OSInode {
         let inode_mode = match file_type {
             DiskInodeType::File => InodeFileType::S_IFREG.bits(),
             DiskInodeType::Directory => InodeFileType::S_IFDIR.bits(),
+            DiskInodeType::Socket => InodeFileType::S_IFSOCK.bits(),
             _ => todo!(),
         };
 
@@ -567,7 +569,7 @@ impl File for Ext4OSInode {
                 ext4fs: self.ext4fs.clone(),
                 // maybe wrong
                 file_cache_manager: Arc::new(PageCacheManager::new()),
-            }))
+            }));
         } else {
             panic!()
         }
@@ -579,7 +581,9 @@ impl File for Ext4OSInode {
     {
         let mut parent_inode_ref = self.inode.lock();
         let mut child_inode_ref = child.inode.lock();
-        self.ext4fs.dir_add_entry(&mut parent_inode_ref, &child_inode_ref, name).map(|_|())
+        self.ext4fs
+            .dir_add_entry(&mut parent_inode_ref, &child_inode_ref, name)
+            .map(|_| ())
     }
 
     // remove file
@@ -603,8 +607,7 @@ impl File for Ext4OSInode {
         let father_inode = dir_node.father_arc();
         let parent_osinode = &father_inode.file;
         // println!("[kernel in unlink] parent osinode: {:?}", parent_osinode.get_file_type());
-        let parent = Arc::downcast::<Ext4OSInode>(parent_osinode.clone())
-            .map_err(|_| ENOTEMPTY)?;
+        let parent = Arc::downcast::<Ext4OSInode>(parent_osinode.clone()).map_err(|_| ENOTEMPTY)?;
         let mut parent_inode_ref = parent.inode.lock();
 
         // 拿到要删除的 child inode 引用
@@ -638,7 +641,6 @@ impl File for Ext4OSInode {
 
         Ok(())
     }
-
 
     /// 获取目录项
     /// # 参数
@@ -677,7 +679,7 @@ impl File for Ext4OSInode {
             // 映射 ext4 条目到通用 Dirent
             let d_type = match DirEntryType::from_bits(entry.get_de_type()) {
                 Some(dt) => match dt {
-                    DirEntryType::EXT4_DE_DIR      => DT_DIR,
+                    DirEntryType::EXT4_DE_DIR => DT_DIR,
                     DirEntryType::EXT4_DE_REG_FILE => DT_REG,
                     _ => DT_UNKNOWN,
                 },
@@ -956,7 +958,7 @@ impl Ext4OSInode {
         let inner_cache_id = offset >> 12;
         let result = self.file_cache_manager.get_cache(
             inner_cache_id,
-            || -> Vec<usize> {self.get_neighboring_blk(inner_cache_id, inode_ref.clone())},
+            || -> Vec<usize> { self.get_neighboring_blk(inner_cache_id, inode_ref.clone()) },
             &self.ext4fs.block_device,
         );
         Ok(result)

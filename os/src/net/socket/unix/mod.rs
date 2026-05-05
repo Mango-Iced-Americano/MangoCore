@@ -10,15 +10,25 @@ pub mod ns;
 pub mod ring_buffer;
 pub mod stream;
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+use spin::Mutex;
 
 use crate::fs::FileDescriptor;
 use crate::mm::{translated_byte_buffer, translated_refmut, UserBuffer};
 use crate::net::{Endpoint, Socket, SocketFile, PSOCK};
 use crate::task::current_task;
 use crate::utils::error::{SyscallErr, SyscallRet};
+
+lazy_static::lazy_static! {
+    /// 存放命名地址 Unix Socket 的全局映射。
+    /// Key: 绝对路径（如 `/tmp/my.sock`）
+    /// Value: 指向 Socket 的弱引用
+    pub static ref PATH_TABLE: Mutex<BTreeMap<String, Weak<dyn Socket>>> =
+        Mutex::new(BTreeMap::new());
+}
 
 // ── UnixEndpoint ────────────────────────────────────────────────────
 
@@ -130,7 +140,7 @@ pub fn make_unix_socket_pair(
         }
         PSOCK::Datagram => {
             let (socket_a, socket_b) = datagram::UnixDatagramSocket::new_pair(is_nonblock);
-            (socket_a, socket_b)
+            (socket_a as Arc<dyn Socket>, socket_b as Arc<dyn Socket>)
         }
         _ => {
             // 目前仅支持 SOCK_STREAM 的 socketpair，其他类型返回错误

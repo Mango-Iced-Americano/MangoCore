@@ -294,7 +294,7 @@ impl DirectoryTreeNode {
 
     // // 创建一个子文件，文件名和文件类型由参数提供
     // // file_type: 文件是常规文件还是目录
-    fn create(&self, name: &str, file_type: DiskInodeType) -> Result<Arc<dyn File>, isize> {
+    pub fn create(&self, name: &str, file_type: DiskInodeType) -> Result<Arc<dyn File>, isize> {
         // if name == "" || !self.file.is_dir() {
         //     debug_assert!(false);
         // }
@@ -304,14 +304,14 @@ impl DirectoryTreeNode {
     // pub fn path_exists(&self, path: &str) -> bool {
     //     // 解析路径
     //     let components = Self::parse_dir_path(path);
-        
+
     //     // 如果路径以 `/` 开头，表示从根目录开始查找
     //     let inode = if path.starts_with("/") {
     //         &**ROOT
     //     } else {
     //         &self
     //     };
-        
+
     //     // 解析路径
     //     match inode.cd_comp(&components) {
     //         Ok(parent_inode) => {
@@ -340,7 +340,6 @@ impl DirectoryTreeNode {
     ) -> Result<Arc<dyn File>, isize> {
         log::debug!("[open]: cwd: {}, path: {}", self.get_cwd(), path);
         // println!("open file in dtn: cwd: {} name: {}",self.get_cwd(), path );
-
 
         // 重定向链接库
         let path = match path {
@@ -453,8 +452,6 @@ impl DirectoryTreeNode {
 
         Ok(inode.file.open(flags, special_use))
     }
-
-
 
     // 创建一个文件夹
     pub fn mkdir(&self, path: &str) -> Result<(), isize> {
@@ -748,7 +745,9 @@ fn init_device_directory() {
     lock.as_mut().unwrap().insert("null".to_string(), null_dev);
     lock.as_mut().unwrap().insert("zero".to_string(), zero_dev);
     lock.as_mut().unwrap().insert("tty".to_string(), tty_dev);
-    lock.as_mut().unwrap().insert("urandom".to_string(), urandom_dev);
+    lock.as_mut()
+        .unwrap()
+        .insert("urandom".to_string(), urandom_dev);
     drop(lock);
 
     let misc_inode = match dev_inode.cd_path("./misc") {
