@@ -10,7 +10,8 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use user_lib::{
-    chdir, close, exec, exit, fork, open, println, read, shutdown, sleep, wait, waitpid, OpenFlags,
+    chdir, close, exec, exit, fork, open, println, read, shutdown, sleep, wait, waitpid,
+    waitpid_wnohang, OpenFlags,
 };
 
 fn run_bash_cmd(cmd: &str, environ: &[*const u8]) -> i32 {
@@ -31,17 +32,43 @@ fn run_bash_cmd(cmd: &str, environ: &[*const u8]) -> i32 {
     }
     if pid > 0 {
         let mut code = 0;
-        // waitpid(pid as usize, &mut code);
         loop {
+            // 非阻塞收割孤儿僵尸，避免 stdout 延迟输出
+            reap_orphans();
             let ret = waitpid(pid as usize, &mut code);
             if ret == pid as isize || ret < 0 {
                 break;
             }
             sleep(10);
         }
+        drain_children();
         return code;
     }
     -1
+}
+
+// 非阻塞收割所有僵尸孤儿（WNOHANG = 1）
+fn reap_orphans() {
+    loop {
+        let mut status = 0i32;
+        let ret = waitpid_wnohang(-1, &mut status);
+        if ret <= 0 {
+            break;
+        }
+    }
+}
+
+/// 阻塞等待所有子进程退出并回收（直到 ECHILD）
+fn drain_children() {
+    // 先非阻塞快速收一轮
+    reap_orphans();
+    // 再阻塞等待剩余还在运行的子进程
+    loop {
+        let mut status = 0i32;
+        if waitpid(!0, &mut status) < 0 {
+            break; // ECHILD — 真的没有子进程了
+        }
+    }
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -304,11 +331,10 @@ fn run_unix_standalone_tests(environ: &[*const u8]) {
     // 编译自 user/src/bin/unix_test.rs
     let testdir = "/";
     let name = "unix_test";
-    let cmd = format!(
-        "cd {} && echo '=== STANDALONE UNIX TEST: {} ===' && ./{}; echo '=== STANDALONE UNIX TEST: {} exit=$? ==='",
-        testdir, name, name, name
-    );
+    println!("=== STANDALONE UNIX TEST: {} ===", name);
+    let cmd = format!("cd {} && ./{}", testdir, name);
     let ret = run_bash_cmd(&cmd, environ);
+    println!("=== STANDALONE UNIX TEST: {} exit={} ===", name, ret);
     println!(
         "[initproc] standalone unix test '{}' returned {}",
         name, ret
@@ -415,7 +441,7 @@ fn run_ltp_network_tests(environ: &[*const u8]) {
     let io_multiplex_cases = [
         "poll01",
         "poll02",
-        "ppoll01",
+        //    "ppoll01",
         "ppoll02",
         "select01",
         "select02",
@@ -514,22 +540,22 @@ fn run_ltp_network_tests(environ: &[*const u8]) {
     // ];
 
     // 将所有子列表合并
-    // let net_cases: Vec<&str> = socket_syscall_cases
-    //     .iter()
-    //     .chain(data_io_cases.iter())
-    //     .chain(socket_opt_cases.iter())
-    //     .chain(net_tool_cases.iter())
-    //     .chain(net_adv_cases.iter())
-    //     .chain(io_multiplex_cases.iter())
-    //     .chain(ipv6_cases.iter())
-    //     // .chain(unix_socket_cases.iter())
-    //     //    .chain(net_shell_cases.iter())
-    //     .copied()
-    //     .collect();
+    let net_cases: Vec<&str> = socket_syscall_cases
+        .iter()
+        .chain(data_io_cases.iter())
+        .chain(socket_opt_cases.iter())
+        .chain(net_tool_cases.iter())
+        .chain(net_adv_cases.iter())
+        // .chain(io_multiplex_cases.iter())
+        .chain(ipv6_cases.iter())
+        // .chain(unix_socket_cases.iter())
+        // .chain(net_shell_cases.iter())
+        .copied()
+        .collect();
 
-    // let net_cases: Vec<&str> = vec!["send02"];
+    // let net_cases: Vec<&str> = vec!["getsockopt02"];
 
-    let net_cases: Vec<&str> = unix_socket_cases.iter().copied().collect();
+    // let net_cases: Vec<&str> = unix_socket_cases.iter().copied().collect();
     let testdir = "/musl/ltp/testcases/bin";
 
     println!(
@@ -538,11 +564,10 @@ fn run_ltp_network_tests(environ: &[*const u8]) {
     );
 
     for &name in &net_cases {
-        let cmd = format!(
-            "cd {} && echo '=== LTP-NET: {} ===' && ./{}; echo '=== LTP-NET: {} exit=$? ==='",
-            testdir, name, name, name
-        );
+        println!("=== LTP-NET: {} ===", name);
+        let cmd = format!("cd {} && ./{}", testdir, name);
         let ret = run_bash_cmd(&cmd, environ);
+        println!("=== LTP-NET: {} exit={} ===", name, ret);
         println!("[initproc] LTP network test '{}' returned {}", name, ret);
     }
 
@@ -599,11 +624,10 @@ fn run_ltp_signal_tests(environ: &[*const u8]) {
     );
 
     for &name in &signal_cases {
-        let cmd = format!(
-            "cd {} && echo '=== LTP-SIG: {} ===' && ./{}; echo '=== LTP-SIG: {} exit=$? ==='",
-            testdir, name, name, name
-        );
+        println!("=== LTP-SIG: {} ===", name);
+        let cmd = format!("cd {} && ./{}", testdir, name);
         let ret = run_bash_cmd(&cmd, environ);
+        println!("=== LTP-SIG: {} exit={} ===", name, ret);
         println!("[initproc] LTP signal test '{}' returned {}", name, ret);
     }
 

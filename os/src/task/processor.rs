@@ -72,6 +72,10 @@ pub fn run_tasks() {
             // 独占地访问即将运行的任务的 TCB
             let next_task_cx_ptr = {
                 let mut task_inner = task.acquire_inner_lock();
+                if task_inner.task_status == TaskStatus::Zombie {
+                    drop(task_inner);
+                    continue;
+                }
                 task_inner.task_status = TaskStatus::Running;
                 &task_inner.task_cx as *const TaskContext
             };

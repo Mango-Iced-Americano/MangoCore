@@ -218,6 +218,11 @@ pub fn sys_chdir(path: &str) -> isize {
 pub fn sys_waitpid(pid: isize, exit_code: *mut i32) -> isize {
     syscall(SYSCALL_WAIT4, [pid as usize, exit_code as usize, 0])
 }
+
+pub fn sys_waitpid_flags(pid: isize, exit_code: *mut i32, options: usize) -> isize {
+    syscall(SYSCALL_WAIT4, [pid as usize, exit_code as usize, options])
+}
+
 pub fn sys_shutdown() -> isize {
     syscall(SYSCALL_SHUTDOWN, [0, 0, 0])
 }

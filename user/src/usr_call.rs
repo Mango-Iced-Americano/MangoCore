@@ -51,6 +51,12 @@ pub fn wait(exit_code: &mut i32) -> isize {
 pub fn waitpid(pid: usize, exit_code: &mut i32) -> isize {
     sys_waitpid(pid as isize, exit_code as *mut _)
 }
+
+pub fn waitpid_wnohang(pid: isize, exit_code: &mut i32) -> isize {
+    const WNOHANG: usize = 1;
+    sys_waitpid_flags(pid, exit_code as *mut _, WNOHANG)
+}
+
 pub fn sleep(period_ms: usize) {
     let start = sys_get_time();
     while sys_get_time() < start + period_ms as isize {

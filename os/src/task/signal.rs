@@ -706,26 +706,51 @@ pub fn sigtimedwait(set: *const Signals, info: *mut SigInfo, timeout: *const Tim
         Ok(set) => *set,
         Err(errno) => return errno,
     };
+    // timeout == NULL → infinite wait (POSIX sigwaitinfo semantics)
     let timeout = match try_get_from_user(token, timeout) {
-        Ok(timeout) => match timeout {
-            Some(timeout) => timeout,
-            None => return EINVAL,
-        },
+        Ok(timeout) => timeout,
         Err(errno) => return errno,
     };
     debug!("[sigtimedwait] set: {:?}, timeout: {:?}", set, timeout);
 
+    {
+        let mut inner = task.acquire_inner_lock();
+        if !inner.sigpending.is_empty() {
+            if let Some(signum) = (inner.sigpending & set).peek_front() {
+                // 消费该信号：从 pending 中移除，防止异步再进入 handler
+                let signal = Signals::from_signum(signum).unwrap();
+                inner.sigpending.remove(signal);
+                drop(inner);
+                if !info.is_null() {
+                    if copy_to_user(token, &SigInfo::new(signum, 0, 0), info).is_err() {
+                        log::error!("[sys_sigtimedwait] Error copying to info {:?} ", info);
+                        return EFAULT;
+                    };
+                }
+                return signum as isize;
+            }
+            // pending 里没有匹配的信号，继续正常阻塞流程
+        }
+        drop(inner);
+    }
+
     let start = TimeSpec::now();
-    wait_with_timeout(Arc::downgrade(&task), start + timeout);
+    if let Some(timeout) = timeout {
+        wait_with_timeout(Arc::downgrade(&task), start + timeout);
+    }
     drop(task);
 
     block_current_and_run_next();
     let task = current_task().unwrap();
-    let inner = task.acquire_inner_lock();
+    let mut inner = task.acquire_inner_lock();
     // interrupted by signal(s)
     if !inner.sigpending.is_empty() {
         match (inner.sigpending & set).peek_front() {
             Some(signum) => {
+                // 消费该信号
+                let signal = Signals::from_signum(signum).unwrap();
+                inner.sigpending.remove(signal);
+                drop(inner);
                 if !info.is_null() {
                     if copy_to_user(token, &SigInfo::new(signum, 0, 0), info).is_err() {
                         log::error!("[sys_sigtimedwait] Error copying to info {:?} ", info);
@@ -740,7 +765,9 @@ pub fn sigtimedwait(set: *const Signals, info: *mut SigInfo, timeout: *const Tim
         }
     // reach timeout
     } else {
-        assert!(start + timeout <= TimeSpec::now());
+        if let Some(timeout) = timeout {
+            assert!(start + timeout <= TimeSpec::now());
+        }
         EAGAIN
     }
 }

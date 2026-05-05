@@ -4,6 +4,7 @@
 */
 use crate::{syscall::errno::*, task::current_task, timer::TimeSpec};
 use alloc::{collections::BTreeMap, sync::Arc};
+use lazy_static::lazy_static;
 use log::*;
 use num_enum::FromPrimitive;
 
@@ -55,6 +56,12 @@ pub enum FutexCmd {
     Invalid,
 }
 
+lazy_static! {
+    /// 进程间共享 futex 的全局等待表，key = 物理地址
+    pub static ref PROCESS_SHARED_FUTEX: spin::Mutex<BTreeMap<usize, WaitQueue>> =
+        spin::Mutex::new(BTreeMap::new());
+}
+
 /// Fast Userspace Mutex
 /// 快速用户空间互斥锁
 /// # 作用
@@ -85,68 +92,130 @@ pub fn do_futex_wait(futex_word: &mut u32, val: u32, timeout: Option<TimeSpec>) 
     // 获取 Futex 变量的地址（转换为 usize 以便作为键使用）
     let futex_word_addr = futex_word as *const u32 as usize;
 
-    // 检查 Futex 变量的当前值是否等于期望值 `val`
+    // 获取当前任务的引用。
+    let task = current_task().unwrap();
+
+    // 获取 Futex 的锁，以便修改等待队列。
+    let mut futex = task.futex.lock();
+
+    // 【修复 TOCTOU】：必须在持有锁之后重新读取 *futex_word 并检查匹配性，
+    // 避免「检查通过 → 空窗期被 Wake → 入队后无人唤醒 → 永久睡眠」的丢失唤醒。
     if *futex_word != val {
-        // 不匹配，记录日志并返回`EAGAIN`错误
+        drop(futex);
         trace!(
             "[futex] --wait-- **not match** futex: {:X}, val: {:X}",
             *futex_word,
             val
         );
         return EAGAIN;
+    }
+
+    // 从 Futex 的等待队列中移除当前地址对应的队列（如果存在），否则创建一个新的等待队列。
+    let mut wait_queue = if let Some(wait_queue) = futex.inner.remove(&futex_word_addr) {
+        wait_queue
     } else {
-        // 获取当前任务的引用。
-        let task = current_task().unwrap();
+        WaitQueue::new()
+    };
 
-        // 获取 Futex 的锁，以便修改等待队列。
-        let mut futex = task.futex.lock();
+    // 将当前任务添加到等待队列中
+    // 使用 `Arc::downgrade` 将任务的强引用转换为弱引用，避免循环利用
+    wait_queue.add_task(Arc::downgrade(&task));
 
-        // 从 Futex 的等待队列中移除当前地址对应的队列（如果存在），否则创建一个新的等待队列。
-        let mut wait_queue = if let Some(wait_queue) = futex.inner.remove(&futex_word_addr) {
-            wait_queue
-        } else {
-            WaitQueue::new()
-        };
+    // 将更新后的等待队列重新插入到 Futex 的等待队列中。
+    futex.inner.insert(futex_word_addr, wait_queue);
 
-        // 将当前任务添加到等待队列中
-        // 使用 `Arc::downgrade` 将任务的强引用转换为弱引用，避免循环利用
-        wait_queue.add_task(Arc::downgrade(&task));
+    // 如果指定了超时时间，将任务添加到超时等待队列中
+    if let Some(timeout) = timeout {
+        trace!("[do_futex_wait] sleep with timeout: {:?}", timeout);
+        wait_with_timeout(Arc::downgrade(&task), timeout);
+    }
 
-        // 将更新后的等待队列重新插入到 Futex 的等待队列中。
-        futex.inner.insert(futex_word_addr, wait_queue);
+    // 释放 Futex 锁和任务引用，避免死锁
+    drop(futex);
+    drop(task);
 
-        // 如果指定了超时时间，将任务添加到超时等待队列中
-        if let Some(timeout) = timeout {
-            trace!("[do_futex_wait] sleep with timeout: {:?}", timeout);
-            wait_with_timeout(Arc::downgrade(&task), timeout);
-        }
+    // 阻塞当前任务并切换到下一个任务。
+    block_current_and_run_next();
 
-        // 释放 Futex 锁和任务引用，避免死锁
-        drop(futex);
-        drop(task);
+    // 当前任务被唤醒后，重新获取当前任务的引用。
+    let task = current_task().unwrap();
 
-        // 阻塞当前任务并切换到下一个任务。
-        block_current_and_run_next();
-
-        // 当前任务被唤醒后，重新获取当前任务的引用。
-        let task = current_task().unwrap();
-
-        // 获取任务内部锁，以便检查信号。
-        {
-            let inner = task.acquire_inner_lock();
-            let pending = inner.sigpending.difference(inner.sigmask);
-            if !pending.is_empty() {
-                drop(inner);
-                // 只有当存在可操作信号时才返回 EINTR
-                if has_actionable_signal(&task) {
-                    return EINTR;
-                }
+    // 获取任务内部锁，以便检查信号。
+    {
+        let inner = task.acquire_inner_lock();
+        let pending = inner.sigpending.difference(inner.sigmask);
+        if !pending.is_empty() {
+            drop(inner);
+            // 只有当存在可操作信号时才返回 EINTR
+            if has_actionable_signal(&task) {
+                return EINTR;
             }
         }
-
-        // 如果没有信号中断，返回成功。
-        SUCCESS
     }
+
+    // 如果没有信号中断，返回成功。
+    SUCCESS
+}
+
+/// 唤醒等待在全局 process-shared futex（物理地址 key）上的最多 val 个任务
+pub fn futex_wake_shared(phys_key: usize, val: u32) -> isize {
+    let mut shared = PROCESS_SHARED_FUTEX.lock();
+    if let Some(mut wait_queue) = shared.remove(&phys_key) {
+        let ret = wait_queue.wake_at_most(val as usize);
+        if !wait_queue.is_empty() {
+            shared.insert(phys_key, wait_queue);
+        }
+        ret as isize
+    } else {
+        0
+    }
+}
+
+/// Process-shared futex wait — 使用全局物理地址表
+pub fn do_futex_wait_shared(
+    futex_word: &mut u32,
+    val: u32,
+    timeout: Option<TimeSpec>,
+    phys_key: usize,
+) -> isize {
+    let timeout = timeout.map(|t| t + TimeSpec::now());
+    let task = current_task().unwrap();
+    let mut shared = PROCESS_SHARED_FUTEX.lock();
+
+    // 【修复 TOCTOU】：必须在持有全局锁之后重新读取 *futex_word
+    if *futex_word != val {
+        drop(shared);
+        trace!(
+            "[futex-shared] --wait-- **not match** futex: {:X}, val: {:X}",
+            *futex_word,
+            val
+        );
+        return EAGAIN;
+    }
+
+    let mut wait_queue = shared.remove(&phys_key).unwrap_or_else(WaitQueue::new);
+    wait_queue.add_task(Arc::downgrade(&task));
+    shared.insert(phys_key, wait_queue);
+    if let Some(timeout) = timeout {
+        trace!("[do_futex_wait_shared] sleep with timeout: {:?}", timeout);
+        wait_with_timeout(Arc::downgrade(&task), timeout);
+    }
+    drop(shared);
+    drop(task);
+    block_current_and_run_next();
+    // 唤醒后检查信号
+    let task = current_task().unwrap();
+    {
+        let inner = task.acquire_inner_lock();
+        let pending = inner.sigpending.difference(inner.sigmask);
+        if !pending.is_empty() {
+            drop(inner);
+            if has_actionable_signal(&task) {
+                return EINTR;
+            }
+        }
+    }
+    SUCCESS
 }
 
 // Futex的方法实现

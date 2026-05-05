@@ -101,11 +101,9 @@ impl<T: PageTable> MemorySet<T> {
         end_va: VirtAddr,
         permission: MapPermission,
     ) {
-        self.push(
-            MapArea::new(start_va, end_va, MapType::Framed, permission, None),
-            None,
-        )
-        .unwrap();
+        let mut area = MapArea::new(start_va, end_va, MapType::Framed, permission, None);
+        area.flags = MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS;
+        self.push(area, None).unwrap();
     }
     /// 插入一个匿名段，包含从start_va.floor()到end_va.ceil()之间的空间
     /// 该空间被分配并被添加到当前的 MemorySet.
@@ -595,6 +593,7 @@ impl<T: PageTable> MemorySet<T> {
                     }
                     let mut map_area =
                         MapArea::new(start_va, end_va, MapType::Framed, map_perm, None);
+                    map_area.flags = MapFlags::MAP_PRIVATE;
                     // Virtual addr is 4K-aligned
                     if (start_va_page_offset & (PAGE_SIZE - 1)) == 0
                     // Physical addr is 4K-aligned
@@ -865,6 +864,7 @@ impl<T: PageTable> MemorySet<T> {
             prot,
             None,
         );
+        new_area.flags = flags;
         if !flags.contains(MapFlags::MAP_ANONYMOUS) {
             warn!("[mmap] file-backed map!");
             let fd_table = task.files.lock();

@@ -408,6 +408,8 @@ pub struct MapArea {
     /// Permissions which are the or of RWXU, where U stands for user.
     pub map_perm: MapPermission,
     pub map_file: Option<Arc<dyn File>>,
+
+    pub flags: MapFlags,
 }
 
 impl MapArea {
@@ -432,6 +434,7 @@ impl MapArea {
             map_type,
             map_perm,
             map_file,
+            flags: MapFlags::empty(),
         }
     }
     /// Copier, but the physical pages are not allocated,
@@ -445,6 +448,7 @@ impl MapArea {
             map_type: another.map_type,
             map_perm: another.map_perm,
             map_file: another.map_file.clone(),
+            flags: another.flags,
         }
     }
     /// Create `MapArea` from `Vec<Arc<FrameTracker>>`. This function should only be used to
@@ -474,6 +478,7 @@ impl MapArea {
             map_type,
             map_perm,
             map_file: None,
+            flags: MapFlags::empty(),
         }
     }
 
@@ -552,7 +557,12 @@ impl MapArea {
         dst_page_table: &mut T,
         src_page_table: &mut T,
     ) -> Result<(), ()> {
-        let map_perm = self.map_perm.difference(MapPermission::W);
+        let is_shared = self.flags.contains(MapFlags::MAP_SHARED);
+        let map_perm = if is_shared {
+            self.map_perm
+        } else {
+            self.map_perm.difference(MapPermission::W)
+        };
         for vpn in self.inner.vpn_range {
             if let Some(ppn) = src_page_table.block_and_ret_mut(vpn) {
                 if !dst_page_table.is_mapped(vpn) {
@@ -774,6 +784,7 @@ impl MapArea {
             map_type: self.map_type,
             map_perm: self.map_perm,
             map_file: second_file,
+            flags: self.flags,
         })
     }
     pub fn into_three(
@@ -792,12 +803,14 @@ impl MapArea {
                 map_type: self.map_type,
                 map_perm: self.map_perm,
                 map_file: None,
+                flags: self.flags,
             },
             MapArea {
                 inner: third_frames,
                 map_type: self.map_type,
                 map_perm: self.map_perm,
                 map_file: None,
+                flags: self.flags,
             },
         ))
     }
