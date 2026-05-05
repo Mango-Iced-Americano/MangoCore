@@ -6,6 +6,7 @@
 //! 参照 DragonOS `kernel/src/net/socket/unix/mod.rs` 设计。
 
 pub mod datagram;
+pub mod ns;
 pub mod ring_buffer;
 pub mod stream;
 
@@ -14,6 +15,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::fs::FileDescriptor;
+use crate::mm::{translated_byte_buffer, translated_refmut, UserBuffer};
 use crate::net::{Endpoint, Socket, SocketFile, PSOCK};
 use crate::task::current_task;
 use crate::utils::error::{SyscallErr, SyscallRet};
@@ -105,23 +107,97 @@ pub fn create_unix_socket(
     }
 }
 
-/// 创建一对已连接的 Unix stream socket（用于 `socketpair` 系统调用）。
+/// 创建一对已连接的 Unix socket（用于 `socketpair` 系统调用）。
 ///
 /// 返回 `(socket_a, socket_b)`，两者通过环形缓冲区双向连接。
 pub fn make_unix_socket_pair(
     is_nonblock: bool,
-) -> (Arc<stream::UnixStreamSocket>, Arc<stream::UnixStreamSocket>) {
-    let (inner_a, inner_b) =
-        stream::inner::Connected::new_pair(stream::inner::UNIX_STREAM_DEFAULT_BUF_SIZE);
-    let socket_a = Arc::new(stream::UnixStreamSocket::new_connected(
-        inner_a,
-        is_nonblock,
-    ));
-    let socket_b = Arc::new(stream::UnixStreamSocket::new_connected(
-        inner_b,
-        is_nonblock,
-    ));
-    (socket_a, socket_b)
+    socket_type: PSOCK,
+) -> (Arc<dyn Socket>, Arc<dyn Socket>) {
+    match socket_type {
+        PSOCK::Stream => {
+            let (inner_a, inner_b) =
+                stream::inner::Connected::new_pair(stream::inner::UNIX_STREAM_DEFAULT_BUF_SIZE);
+            let socket_a = Arc::new(stream::UnixStreamSocket::new_connected(
+                inner_a,
+                is_nonblock,
+            ));
+            let socket_b = Arc::new(stream::UnixStreamSocket::new_connected(
+                inner_b,
+                is_nonblock,
+            ));
+            (socket_a, socket_b)
+        }
+        PSOCK::Datagram => {
+            let (socket_a, socket_b) = datagram::UnixDatagramSocket::new_pair(is_nonblock);
+            (socket_a, socket_b)
+        }
+        _ => {
+            // 目前仅支持 SOCK_STREAM 的 socketpair，其他类型返回错误
+            panic!("Unsupported socket type for socketpair: {:?}", socket_type);
+        }
+    }
+}
+
+// ── fill_with_endpoint ──────────────────────────────────────────────
+
+/// 将 UnixEndpoint 写入用户空间 sockaddr_un 缓冲区，并回写 addrlen。
+///
+/// 对标 `address::_fill_with_endpoint` 的签名与职责分离模式。
+/// `addr` 和 `addrlen` 是用户空间原始指针值（`usize`）。
+pub fn fill_with_endpoint(ep: &UnixEndpoint, addr: usize, addrlen: usize) -> SyscallRet {
+    // NULL 指针检查
+    if addr == 0 || addrlen == 0 {
+        return Err(SyscallErr::EFAULT);
+    }
+    let task = current_task().unwrap();
+    let token = task.get_user_token();
+
+    // 解引用 addrlen，拿到用户缓冲区的实际容量
+    let addrlen_ptr = match translated_refmut(token, addrlen as *mut u32) {
+        Ok(p) => p,
+        Err(_) => return Err(SyscallErr::EFAULT),
+    };
+    let capacity = *addrlen_ptr as usize;
+
+    // 构建 sockaddr_un 字节 (sa_family + sun_path)
+    let mut data = Vec::new();
+    data.extend_from_slice(&super::AF_UNIX.to_ne_bytes()); // sa_family = AF_UNIX
+
+    let actual_len = match ep {
+        UnixEndpoint::Path(path) => {
+            // 文件系统路径：拷贝尽量多的字节，末尾补 NUL
+            let path_bytes = path.as_bytes();
+            let n = capacity.saturating_sub(2).min(path_bytes.len());
+            data.extend_from_slice(&path_bytes[..n]);
+            if data.len() < capacity {
+                data.push(0); // NUL terminator
+            }
+            data.len()
+        }
+        UnixEndpoint::Abstract(name) => {
+            // sun_path[0] = NUL, 后面跟抽象名称字节
+            data.push(0);
+            let n = capacity.saturating_sub(3).min(name.len());
+            data.extend_from_slice(&name[..n]);
+            data.len()
+        }
+        UnixEndpoint::Unnamed => {
+            // 只有 sa_family（2 字节），sun_path 全零
+            data.len() // = 2
+        }
+    };
+
+    // 写入用户空间缓冲区
+    let write_len = actual_len.min(capacity);
+    let buf = translated_byte_buffer(token, addr as *const u8, write_len)
+        .map_err(|_| SyscallErr::EFAULT)?;
+    let mut user_buf = UserBuffer::new(buf);
+    user_buf.write(&data[..write_len]);
+
+    // 回写实际需要的地址长度
+    *addrlen_ptr = actual_len as u32;
+    Ok(0)
 }
 
 /// 将 socket 包装为 SocketFile 并分配 fd。

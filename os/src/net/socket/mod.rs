@@ -10,9 +10,7 @@ use crate::{
     mm::{translated_byte_buffer, translated_refmut, UserBuffer},
     net::{
         posix::PosixArgsSocketType,
-        socket::{
-            inet::{datagram::udp::UdpSocket, raw::raw::RawSocket, stream::TcpSocket},
-        },
+        socket::inet::{datagram::udp::UdpSocket, raw::raw::RawSocket, stream::TcpSocket},
         syscall::common::MsgFlags,
     },
     task::{current_task, WaitQueue},
@@ -38,8 +36,8 @@ pub type Fd = usize;
 pub use crate::net::socket::inet::stream::TcpInfo;
 pub use crate::net::socket::inet::stream::TCP_MSS;
 pub use crate::net::socket::unix::datagram::UnixDatagramSocket;
-pub use crate::net::socket::unix::stream::UnixStreamSocket;
 pub use crate::net::socket::unix::make_unix_socket_pair;
+pub use crate::net::socket::unix::stream::UnixStreamSocket;
 pub use crate::net::socket::unix::UnixEndpoint;
 /// domain
 pub const AF_UNSPEC: u16 = 0;
@@ -196,61 +194,33 @@ impl Endpoint {
     pub fn fill_sockaddr(&self, addr: usize, addrlen: usize) -> SyscallRet {
         match self {
             Endpoint::Ip(ep) => address::fill_with_endpoint(*ep, addr, addrlen),
-            Endpoint::Unix(unix_ep) => {
-                if addr == 0 || addrlen < 2 {
-                    return Err(SyscallErr::EFAULT);
-                }
-                let task = current_task().unwrap();
-                let token = task.get_user_token();
-                let buf = translated_byte_buffer(token, addr as *const u8, addrlen)
-                    .map_err(|_| SyscallErr::EFAULT)?;
-                let mut user_buf = UserBuffer::new(buf);
-                let af_unix: u16 = AF_UNIX;
-                let mut data = Vec::new();
-                // sa_family (2 bytes)
-                data.extend_from_slice(&af_unix.to_ne_bytes());
-                match unix_ep {
-                    UnixEndpoint::Path(path) => {
-                        // sun_path: 文件系统路径
-                        let max_path_len = addrlen.saturating_sub(2).min(path.len());
-                        data.extend_from_slice(&path.as_bytes()[..max_path_len]);
-                        // 如果空间足够，补 NUL
-                        if data.len() < addrlen {
-                            data.push(0);
-                        }
-                    }
-                    UnixEndpoint::Abstract(name) => {
-                        // sun_path[0] = NUL, 然后是抽象名称
-                        data.push(0);
-                        let max_name_len = addrlen.saturating_sub(3).min(name.len());
-                        data.extend_from_slice(&name[..max_name_len]);
-                    }
-                    UnixEndpoint::Unnamed => {
-                        // 只有 sa_family，sun_path 全零
-                    }
-                }
-                // 用 0 填充剩余空间
-                let write_len = data.len().min(addrlen);
-                user_buf.write(&data[..write_len]);
-                // 更新实际的 addrlen (由用户态传递，不在内核侧修改)
-                Ok(write_len)
-            }
+            Endpoint::Unix(unix_ep) => unix::fill_with_endpoint(unix_ep, addr, addrlen),
             Endpoint::Unspecified => {
+                // NULL 指针检查
                 if addr == 0 || addrlen == 0 {
                     return Err(SyscallErr::EFAULT);
                 }
                 let task = current_task().unwrap();
                 let token = task.get_user_token();
-                let buf = translated_byte_buffer(token, addr as *const u8, addrlen as usize)
+
+                // 解引用 addrlen，检查缓冲区大小
+                let addrlen_ptr = match translated_refmut(token, addrlen as *mut u32) {
+                    Ok(p) => p,
+                    Err(_) => return Err(SyscallErr::EFAULT),
+                };
+                let capacity = *addrlen_ptr as usize;
+                if capacity < 2 {
+                    return Err(SyscallErr::EINVAL);
+                }
+
+                // 写入 AF_UNSPEC（2 字节）
+                let write_len = 2;
+                let buf = translated_byte_buffer(token, addr as *const u8, write_len)
                     .map_err(|_| SyscallErr::EFAULT)?;
                 let mut user_buf = UserBuffer::new(buf);
-                let mut data = [0u8; 16];
-                data[0..2].copy_from_slice(&u16::to_ne_bytes(AF_UNSPEC));
-                user_buf.write(&data);
-                // update addrlen
-                if let Ok(ptr) = translated_refmut(token, addrlen as *mut u32) {
-                    *ptr = 2;
-                }
+                user_buf.write(&AF_UNSPEC.to_ne_bytes());
+                // 回写 addrlen
+                *addrlen_ptr = 2;
                 Ok(0)
             }
         }
@@ -380,6 +350,15 @@ pub trait Socket: Send + Sync {
 
     fn connect_ready(&self) -> bool {
         self.socket_w_ready()
+    }
+
+    /// Unix stream 专用：把新建立的 Connected 推入 listener 的 incoming 队列。
+    /// 默认返回 EOPNOTSUPP（非 Unix stream socket 不支持此操作）。
+    fn push_pending_connected(
+        &self,
+        _conn: crate::net::socket::unix::stream::inner::Connected,
+    ) -> SyscallRet {
+        Err(SyscallErr::EOPNOTSUPP)
     }
 }
 

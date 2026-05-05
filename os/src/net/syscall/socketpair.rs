@@ -34,23 +34,19 @@ pub fn sys_socketpair(domain: u32, socket_type: u32, protocol: u32, sv: usize) -
                 "[sys_socketpair] domain {} not supported, only AF_UNIX is allowed",
                 domain
             );
-            return SyscallErr::EAFNOSUPPORT as isize;
+            return -(SyscallErr::EAFNOSUPPORT as isize);
         }
     }
 
     // 仅支持 SOCK_STREAM 和 SOCK_DGRAM 的 socketpair
     let (socket1, socket2): (Arc<dyn crate::net::Socket>, Arc<dyn crate::net::Socket>) = match psock
     {
-        PSOCK::Stream | PSOCK::SeqPacket => {
-            let (s1, s2) = make_unix_socket_pair(is_nonblock);
+        PSOCK::Stream | PSOCK::Datagram => {
+            let (s1, s2) = make_unix_socket_pair(is_nonblock, psock);
             (s1, s2)
         }
-        PSOCK::Datagram => {
-            // TODO: 实现 Unix datagram socket pair
-            return SyscallErr::EOPNOTSUPP as isize;
-        }
         _ => {
-            return SyscallErr::ESOCKTNOSUPPORT as isize;
+            return -(SyscallErr::ESOCKTNOSUPPORT as isize);
         }
     };
 

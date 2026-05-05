@@ -5,16 +5,17 @@
 
 pub mod inner;
 
+use self::inner::Connected;
+use crate::fs::FileDescriptor;
+use crate::net::socket::unix::ns::{ABSTRACT_TABLE, UNIX_PATH_MAX};
+use crate::net::socket::unix::{UnixEndpoint, UnixEndpointBound};
+use crate::net::syscall::common::MsgFlags;
+use crate::net::{Endpoint, Socket, PSOCK, SHUT_RD};
+use crate::task::WaitQueue;
+use crate::utils::error::{GeneralRet, SyscallErr, SyscallRet};
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::Mutex;
-
-use self::inner::Connected;
-use crate::net::socket::unix::UnixEndpointBound;
-use crate::net::syscall::common::MsgFlags;
-use crate::net::{Endpoint, Socket, PSOCK};
-use crate::task::WaitQueue;
-use crate::utils::error::{GeneralRet, SyscallErr, SyscallRet};
 
 use self::inner::{Init, Inner, Listener, UNIX_STREAM_DEFAULT_BUF_SIZE};
 
@@ -95,10 +96,19 @@ impl Socket for UnixStreamSocket {
                     Endpoint::Unix(ep) => ep,
                     _ => return Err(SyscallErr::EINVAL),
                 };
-                // 当前仅支持 unnamed bind；文件系统路径和抽象路径尚未实现
                 match unix_ep {
                     crate::net::socket::unix::UnixEndpoint::Unnamed => {
                         init.addr = Some(UnixEndpointBound::Unnamed);
+                        Ok(0)
+                    }
+                    UnixEndpoint::Abstract(name) => {
+                        if init.addr.is_some() {
+                            return Err(SyscallErr::EINVAL); // 已绑定过地址
+                        }
+                        if name.is_empty() || name.len() > UNIX_PATH_MAX - 1 {
+                            return Err(SyscallErr::EINVAL);
+                        }
+                        init.addr = Some(UnixEndpointBound::Abstract(name.clone()));
                         Ok(0)
                     }
                     _ => {
@@ -114,10 +124,11 @@ impl Socket for UnixStreamSocket {
                     _ => return Err(SyscallErr::EINVAL),
                 };
                 match unix_ep {
-                    crate::net::socket::unix::UnixEndpoint::Unnamed => {
+                    UnixEndpoint::Unnamed => {
                         conn.addr = Some(UnixEndpointBound::Unnamed);
                         Ok(0)
                     }
+
                     _ => Err(SyscallErr::EOPNOTSUPP),
                 }
             }
@@ -144,12 +155,50 @@ impl Socket for UnixStreamSocket {
     }
 
     fn connect(&self, endpoint: &Endpoint) -> SyscallRet {
-        let _unix_ep = match endpoint {
+        let unix_ep = match endpoint {
             Endpoint::Unix(ep) => ep,
             _ => return Err(SyscallErr::EAFNOSUPPORT),
         };
-        // TODO: 实现通过 backlog 表查找监听 socket 并建立连接
-        Err(SyscallErr::EOPNOTSUPP)
+        match unix_ep {
+            UnixEndpoint::Abstract(name) => {
+                if name.is_empty() || name.len() > UNIX_PATH_MAX - 1 {
+                    return Err(SyscallErr::EINVAL);
+                }
+
+                // 1. 从抽象表找到监听 socket
+                let server_socket = ABSTRACT_TABLE
+                    .lookup_abstract_name_bytes(name)
+                    .ok_or(SyscallErr::ECONNREFUSED)?;
+
+                // 2. 创建一对 Connected（client_conn 给本端，server_conn 给 listener）
+                let (mut client_conn, server_conn) =
+                    Connected::new_pair(UNIX_STREAM_DEFAULT_BUF_SIZE);
+
+                // 3. 设置对端地址
+                client_conn.peer_addr = Some(UnixEndpointBound::Abstract(name.clone()));
+
+                // 4. 通过 trait 方法把 server_conn 推入 listener 队列
+                //    不再需要直接访问 server_socket.inner（dyn Socket 上访问不到）
+                server_socket.push_pending_connected(server_conn)?;
+
+                // 5. 唤醒 acceptor
+                if let Some(wq) = server_socket.accept_wait_queue() {
+                    wq.lock().wake_all();
+                }
+
+                // 6. 本端变为 Connected
+                let mut self_inner = self.inner.lock();
+                match &mut *self_inner {
+                    Inner::Init(init) => {
+                        client_conn.addr = init.addr.take(); // ★ take 不 move
+                        *self_inner = Inner::Connected(client_conn);
+                        Ok(0)
+                    }
+                    _ => Err(SyscallErr::EISCONN),
+                }
+            }
+            _ => Err(SyscallErr::EOPNOTSUPP),
+        }
     }
 
     fn try_connect(&self) -> Result<isize, SyscallErr> {
@@ -158,14 +207,35 @@ impl Socket for UnixStreamSocket {
         Err(SyscallErr::EOPNOTSUPP)
     }
 
-    fn accept(&self, _sockfd: u32, _addr: usize, _addrlen: usize) -> SyscallRet {
+    fn accept(&self, _sockfd: u32, addr: usize, addrlen: usize) -> SyscallRet {
         let inner = self.inner.lock();
         match &*inner {
             Inner::Listener(listener) => {
                 let conn = listener.pop_incoming().ok_or(SyscallErr::EAGAIN)?;
-                // TODO: 将 conn 包装为 SocketFile 并分配 fd，同时填充 addr/addrlen
-                let _ = conn;
-                Err(SyscallErr::EOPNOTSUPP)
+
+                // 在对端地址（在包装前取出，因为 conn 即将被 move）
+                let peer_addr = conn.peer_endpoint();
+
+                // 把 Connected 包成 UnixStreamSocket（← 现场造，不再提前造）
+                let server_socket = UnixStreamSocket::new_connected(conn, false);
+                let socket: Arc<dyn Socket> = Arc::new(server_socket);
+                let socket_file = Arc::new(crate::net::SocketFile::new(socket));
+
+                let task = crate::task::current_task().ok_or(SyscallErr::ESRCH)?;
+                let fd = task
+                    .files
+                    .lock()
+                    .insert(FileDescriptor::new(false, false, socket_file))
+                    .map_err(|_| SyscallErr::ENFILE)?;
+
+                // 填充对端地址
+                if addr != 0 && addrlen >= 2 {
+                    if let Some(ep) = peer_addr {
+                        let _ = ep.fill_sockaddr(addr, addrlen);
+                    }
+                }
+
+                Ok(fd)
             }
             _ => Err(SyscallErr::EOPNOTSUPP),
         }
@@ -208,9 +278,27 @@ impl Socket for UnixStreamSocket {
         }
     }
 
-    fn shutdown(&self, _how: u32) -> GeneralRet<()> {
-        // TODO: 根据 how (SHUT_RD/SHUT_WR/SHUT_RDWR) 设置对应的 shutdown 标志
-        Err(SyscallErr::EOPNOTSUPP)
+    fn shutdown(&self, how: u32) -> GeneralRet<()> {
+        let inner = self.inner.lock();
+        if let Inner::Connected(conn) = &*inner {
+            match how {
+                SHUT_RD => {
+                    conn.rx.lock().set_recv_shutdown();
+                }
+                SHUT_WR => {
+                    conn.peer_rx.lock().set_send_shutdown();
+                }
+                SHUT_RDWR => {
+                    conn.rx.lock().set_recv_shutdown();
+                    conn.peer_rx.lock().set_send_shutdown();
+                }
+                _ => return Err(SyscallErr::EINVAL),
+            }
+            self.wake_wait_queues();
+            Ok(())
+        } else {
+            Err(SyscallErr::ENOTCONN)
+        }
     }
 
     fn try_recv(&self, buf: &mut [u8]) -> Result<isize, SyscallErr> {
@@ -311,5 +399,56 @@ impl Socket for UnixStreamSocket {
         // Unix stream 连接即刻完成
         let inner = self.inner.lock();
         matches!(&*inner, Inner::Connected(_))
+    }
+
+    fn push_pending_connected(
+        &self,
+        conn: crate::net::socket::unix::stream::inner::Connected,
+    ) -> SyscallRet {
+        let inner = self.inner.lock();
+        match &*inner {
+            Inner::Listener(listener) => {
+                if listener.incoming.lock().len() >= listener.backlog {
+                    return Err(SyscallErr::EAGAIN);
+                }
+                listener.push_incoming(conn);
+                Ok(0)
+            }
+            _ => Err(SyscallErr::EOPNOTSUPP),
+        }
+    }
+}
+
+impl Drop for UnixStreamSocket {
+    fn drop(&mut self) {
+        let abstract_name = {
+            let inner = self.inner.lock();
+            match &*inner {
+                Inner::Init(init) => init.addr.as_ref().and_then(|a| {
+                    if let UnixEndpointBound::Abstract(name) = a {
+                        Some(name.clone())
+                    } else {
+                        None
+                    }
+                }),
+                Inner::Connected(conn) => conn.addr.as_ref().and_then(|a| {
+                    if let UnixEndpointBound::Abstract(name) = a {
+                        Some(name.clone())
+                    } else {
+                        None
+                    }
+                }),
+                Inner::Listener(listener) => {
+                    if let UnixEndpointBound::Abstract(name) = &listener.local_addr {
+                        Some(name.clone())
+                    } else {
+                        None
+                    }
+                }
+            }
+        };
+        if let Some(name) = abstract_name {
+            ABSTRACT_TABLE.remove_abstract_name_bytes(&name);
+        }
     }
 }

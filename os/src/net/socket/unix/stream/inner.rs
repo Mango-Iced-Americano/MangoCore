@@ -108,13 +108,15 @@ impl Connected {
     /// 尝试写入数据
     pub fn try_send(&self, buf: &[u8]) -> Option<usize> {
         let mut peer_rx = self.peer_rx.lock();
-        if peer_rx.free_len() < buf.len() {
+        let free = peer_rx.free_len();
+        if free == 0 {
             return None;
         }
+        let n = buf.len().min(free);
         for &b in buf {
             peer_rx.push(b);
         }
-        Some(buf.len())
+        Some(n)
     }
 
     /// 接收缓冲区是否可读
@@ -151,8 +153,8 @@ pub struct Listener {
     pub local_addr: UnixEndpointBound,
     /// backlog（待 accept 的最大连接数）
     pub backlog: usize,
-    /// 待 accept 的连接队列
-    pub incoming: Mutex<VecDeque<Arc<super::UnixStreamSocket>>>,
+    /// 待 accept 的连接队列（存 Connected，accept 时现场包成 UnixStreamSocket）
+    pub incoming: Mutex<VecDeque<Connected>>,
 }
 
 impl Listener {
@@ -165,15 +167,15 @@ impl Listener {
     }
 
     /// 添加一个待处理的连接
-    pub fn push_incoming(&self, socket: Arc<super::UnixStreamSocket>) {
+    pub fn push_incoming(&self, conn: Connected) {
         let mut incoming = self.incoming.lock();
         if incoming.len() < self.backlog {
-            incoming.push_back(socket);
+            incoming.push_back(conn);
         }
     }
 
     /// 取出一个待处理的连接
-    pub fn pop_incoming(&self) -> Option<Arc<super::UnixStreamSocket>> {
+    pub fn pop_incoming(&self) -> Option<Connected> {
         self.incoming.lock().pop_front()
     }
 
