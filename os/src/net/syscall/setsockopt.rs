@@ -3,10 +3,7 @@ use crate::task::current_task;
 use crate::utils::error::SyscallErr;
 
 use super::common::{SOL_SOCKET, SOL_TCP, TCP_NODELAY};
-use super::common::{
-    SO_DONTROUTE, SO_KEEPALIVE, SO_RCVBUF, SO_REUSEADDR, SO_SNDBUF,
-};
-use super::common::is_known_sockopt_level;
+use super::common::{SO_DONTROUTE, SO_KEEPALIVE, SO_RCVBUF, SO_REUSEADDR, SO_SNDBUF};
 
 pub fn sys_setsockopt(
     sockfd: u32,
@@ -85,11 +82,8 @@ pub fn sys_setsockopt(
                 level,
                 optname
             );
-            if is_known_sockopt_level(level) {
-                return -(SyscallErr::ENOPROTOOPT as isize);
-            } else {
-                return -(SyscallErr::EOPNOTSUPP as isize);
-            }
+            // Linux 语义：无论 level 是否已知，未知的 level/optname 组合都返回 ENOPROTOOPT
+            return -(SyscallErr::ENOPROTOOPT as isize);
         }
     }
     0 as isize

@@ -614,19 +614,64 @@ impl dyn Socket {
                             .unwrap();
                         Ok(fd)
                     }
-                    _ => return Err(SyscallErr::EINVAL),
+                    _ => return Err(SyscallErr::EAFNOSUPPORT),
                 }
             }
-            _ => Err(SyscallErr::EINVAL),
+            _ => Err(SyscallErr::EAFNOSUPPORT),
         }
     }
+
+    /// 检查 addr/addrlen 用户指针的有效性，返回 (addr_ptr, addrlen_ptr)。
+    /// 符合 Linux 语义：在检查连接状态前先验证参数。
+    fn prevalidate_sockaddr(addr: usize, addrlen: usize) -> Result<(), SyscallErr> {
+        // NULL 指针 → EFAULT
+        if addr == 0 || addrlen == 0 {
+            return Err(SyscallErr::EFAULT);
+        }
+        // 未对齐的 addrlen 指针 → EFAULT（RISC-V 未对齐访问可能静默成功）
+        if addrlen % 4 != 0 {
+            return Err(SyscallErr::EFAULT);
+        }
+        Ok(())
+    }
+
     pub fn addr(self: &Arc<Self>, addr: usize, addrlen: usize) -> SyscallRet {
+        // Linux: 先验证参数有效性，再检查连接状态
+        Self::prevalidate_sockaddr(addr, addrlen)?;
+        // 在检查连接状态前，先读取并验证 *addrlen，确保无效的 socklen 值
+        // 不会被 ENOTCONN 掩盖（getpeername01 期望 EINVAL 优先于 ENOTCONN）
+        Self::prevalidate_socklen_value(addrlen)?;
         let endpoint = self.local_endpoint().ok_or(SyscallErr::ENOTCONN)?;
         endpoint.fill_sockaddr(addr, addrlen)
     }
     pub fn peer_addr(self: &Arc<Self>, addr: usize, addrlen: usize) -> SyscallRet {
+        // Linux: 先验证参数有效性，再检查连接状态
+        Self::prevalidate_sockaddr(addr, addrlen)?;
+        // 在检查连接状态前，先读取并验证 *addrlen
+        Self::prevalidate_socklen_value(addrlen)?;
         let endpoint = self.remote_endpoint().ok_or(SyscallErr::ENOTCONN)?;
         endpoint.fill_sockaddr(addr, addrlen)
+    }
+
+    /// 读取并验证用户空间的 socklen_t 值，优先于连接状态检查。
+    /// Linux 上 socklen_t 是 signed int，负值为无效 → EINVAL。
+    fn prevalidate_socklen_value(addrlen: usize) -> Result<(), SyscallErr> {
+        let task = current_task().ok_or(SyscallErr::EINVAL)?;
+        let token = task.get_user_token();
+        let addrlen_ptr = match translated_refmut(token, addrlen as *mut u32) {
+            Ok(p) => p,
+            Err(_) => return Err(SyscallErr::EFAULT),
+        };
+        let val = *addrlen_ptr;
+        // socklen_t 在 Linux 上是 signed int，负值 → EINVAL
+        if (val as i32) < 0 {
+            return Err(SyscallErr::EINVAL);
+        }
+        // 太小（至少需要 sa_family 的 2 字节）→ EINVAL
+        if val < 2 {
+            return Err(SyscallErr::EINVAL);
+        }
+        Ok(())
     }
 }
 

@@ -216,6 +216,10 @@ pub fn _fill_with_endpoint(endpoint: IpEndpoint, addr: usize, addrlen: usize) ->
     if addr == 0 || addrlen == 0 {
         return Err(SyscallErr::EFAULT);
     }
+    // 对齐检查：addrlen 指针必须 4 字节对齐（RISC-V 未对齐访问可能静默成功）
+    if addrlen % 4 != 0 {
+        return Err(SyscallErr::EFAULT);
+    }
     let task = current_task().unwrap();
     let token = task.get_user_token();
     let addr = match translated_refmut(token, addr as *mut u8) {
@@ -226,6 +230,14 @@ pub fn _fill_with_endpoint(endpoint: IpEndpoint, addr: usize, addrlen: usize) ->
         Ok(p) => p,
         Err(_) => return Err(SyscallErr::EFAULT),
     };
+    // 校验 addrlen 至少能容纳 sa_family 字段（2 字节）
+    if *addrlen < 2 {
+        return Err(SyscallErr::EINVAL);
+    }
+    // socklen_t 在 Linux 上是 signed int，负值表示无效 → EINVAL
+    if (*addrlen as i32) < 0 {
+        return Err(SyscallErr::EINVAL);
+    }
     // 校验 *addrlen 是否足够容纳 sockaddr 结构
     let required = match endpoint.addr {
         IpAddress::Ipv4(_) => 16,

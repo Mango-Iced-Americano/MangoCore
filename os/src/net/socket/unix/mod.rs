@@ -160,6 +160,10 @@ pub fn fill_with_endpoint(ep: &UnixEndpoint, addr: usize, addrlen: usize) -> Sys
     if addr == 0 || addrlen == 0 {
         return Err(SyscallErr::EFAULT);
     }
+    // 对齐检查：addrlen 指针必须 4 字节对齐（RISC-V 未对齐访问可能静默成功）
+    if addrlen % 4 != 0 {
+        return Err(SyscallErr::EFAULT);
+    }
     let task = current_task().unwrap();
     let token = task.get_user_token();
 
@@ -169,6 +173,15 @@ pub fn fill_with_endpoint(ep: &UnixEndpoint, addr: usize, addrlen: usize) -> Sys
         Err(_) => return Err(SyscallErr::EFAULT),
     };
     let capacity = *addrlen_ptr as usize;
+
+    // addrlen 太小（至少需要 2 字节容纳 sa_family）→ EINVAL
+    if capacity < 2 {
+        return Err(SyscallErr::EINVAL);
+    }
+    // socklen_t 在 Linux 上是 signed int，负值表示无效 → EINVAL
+    if (capacity as i32) < 0 {
+        return Err(SyscallErr::EINVAL);
+    }
 
     // 构建 sockaddr_un 字节 (sa_family + sun_path)
     let mut data = Vec::new();

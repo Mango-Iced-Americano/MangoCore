@@ -35,6 +35,29 @@ pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize {
         }
         Endpoint::Unix(ep) => {
             let socket = crate::get_socket!(sockfd);
+
+            // Domain 兼容性检查：AF_INET/AF_INET6 socket 绑定 Unix 路径应返回 EAFNOSUPPORT。
+            // 检查 socket 是否能处理 Unix 端点：IP socket 在 bind(Unix) 上返回 EINVAL，
+            // 但 Linux 语义要求非 AF_UNIX socket 绑定 Unix 地址时返回 EAFNOSUPPORT。
+            // 这里通过预检查快速检测：如果 socket 的 socket_type() 能区分，但 Unix 和 IP
+            // 的 Stream/Datagram 共用相同的 PSOCK 值，因此直接查询类型不够。
+            // 安全做法：先轻量检查 local_endpoint 的模式（仅已绑定 socket 有值），
+            // 再通过尝试 bind 来检测兼容性。
+            let is_compat = match socket.local_endpoint() {
+                // 如果已有绑定的 endpoint，检查其 domain 是否匹配 Unix
+                Some(Endpoint::Unix(_)) | None => {
+                    // 未绑定或已绑定 Unix → 可能兼容
+                    true
+                }
+                Some(_) => {
+                    // 已绑定 IP endpoint → 不兼容 Unix
+                    false
+                }
+            };
+            if !is_compat {
+                return -(SyscallErr::EAFNOSUPPORT as isize);
+            }
+
             let task = current_task().unwrap();
             match ep {
                 UnixEndpoint::Unnamed => {

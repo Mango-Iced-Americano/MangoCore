@@ -34,7 +34,7 @@ pub fn sys_socketpair(domain: u32, socket_type: u32, protocol: u32, sv: usize) -
                 "[sys_socketpair] domain {} not supported, only AF_UNIX is allowed",
                 domain
             );
-            return -(SyscallErr::EAFNOSUPPORT as isize);
+            return -(SyscallErr::EPROTONOSUPPORT as isize);
         }
     }
 
