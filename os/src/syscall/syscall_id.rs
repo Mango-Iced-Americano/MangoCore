@@ -11,6 +11,7 @@ pub const SYSCALL_UMOUNT2: usize = 39;
 pub const SYSCALL_MOUNT: usize = 40;
 pub const SYSCALL_STATFS: usize = 43;
 pub const SYSCALL_FTRUNCATE: usize = 46;
+pub const SYSCALL_FALLOCATE: usize = 47;
 pub const SYSCALL_FACCESSAT: usize = 48;
 pub const SYSCALL_CHDIR: usize = 49;
 pub const SYSCALL_FCHMODAT: usize = 53;
