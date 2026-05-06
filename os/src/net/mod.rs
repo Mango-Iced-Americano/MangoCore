@@ -1,4 +1,4 @@
-// pub mod adapter; // 已禁用：纯 loopback 模式，无需物理网卡适配器
+pub mod adapter;
 pub mod config;
 mod macros;
 pub mod posix;
@@ -17,18 +17,9 @@ pub use socket::inet::common::address;
 
 // Socket 核心类型
 pub use socket::{
-    AF_INET, AF_INET6, AF_UNIX, AF_UNSPEC,
-    SHUT_RD, SHUT_RDWR, SHUT_WR,
-    PSOCK,
-    MAX_BUFFER_SIZE,
-    UDP_SOCKETS, UDP_SOCKETS_TO_REMOVE,
-    TCP_SOCKETS, TCP_SOCKETS_TO_REMOVE,
-    RAW_SOCKETS, RAW_SOCKETS_TO_REMOVE,
-    GATEWAY, LOCAL_IP,
-    Socket, SocketFile, Endpoint,
-    TcpInfo, TCP_MSS,
-    Fd,
-    make_unix_socket_pair,
-    wake_tcp_waiters, wake_raw_waiters,
+    make_unix_socket_pair, wake_raw_waiters, wake_tcp_waiters, Endpoint, Fd, Socket, SocketFile,
+    TcpInfo, AF_INET, AF_INET6, AF_UNIX, AF_UNSPEC, GATEWAY, LOCAL_IP, MAX_BUFFER_SIZE, PSOCK,
+    RAW_SOCKETS, RAW_SOCKETS_TO_REMOVE, SHUT_RD, SHUT_RDWR, SHUT_WR, TCP_MSS, TCP_SOCKETS,
+    TCP_SOCKETS_TO_REMOVE, UDP_SOCKETS, UDP_SOCKETS_TO_REMOVE,
 };
 // PSOCK replaces the old SocketType bitflags (which mixed type + SOCK_NONBLOCK/SOCK_CLOEXEC)

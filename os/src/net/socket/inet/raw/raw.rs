@@ -1,5 +1,7 @@
-use crate::net::{config::NET_INTERFACE, Endpoint, MAX_BUFFER_SIZE, RAW_SOCKETS, SHUT_WR, Mutex, Socket};
 use crate::net::syscall::common::MsgFlags;
+use crate::net::{
+    config::NET_INTERFACE, Endpoint, Mutex, Socket, MAX_BUFFER_SIZE, RAW_SOCKETS, SHUT_WR,
+};
 use crate::task::WaitQueue;
 use crate::utils::error::{GeneralRet, SyscallErr, SyscallRet};
 use alloc::{
@@ -81,8 +83,6 @@ impl Socket for RawSocket {
         todo!()
     }
 
-
-
     fn send_to(&self, user_buf: &[u8], dest: Endpoint) -> SyscallRet {
         let Endpoint::Ip(dest_addr) = dest else {
             return Err(SyscallErr::EINVAL);
@@ -139,6 +139,12 @@ impl Socket for RawSocket {
                 todo!()
             }
         }
+    }
+
+    fn try_recvmsg(&self, buf: &mut [u8]) -> Result<(isize, Option<Endpoint>), SyscallErr> {
+        let n = self.try_recv(buf)?;
+        let ep = self.inner.lock().remote_endpoint.map(Endpoint::Ip);
+        Ok((n, ep))
     }
 
     fn try_recv(&self, buf: &mut [u8]) -> Result<isize, SyscallErr> {
