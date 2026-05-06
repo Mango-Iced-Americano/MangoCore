@@ -41,7 +41,7 @@ fn run_bash_cmd(cmd: &str, environ: &[*const u8]) -> i32 {
             }
             sleep(10);
         }
-        drain_children();
+        // drain_children();
         return code;
     }
     -1
@@ -709,7 +709,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     // ============================================================
     // LTP 网络相关测例（独立 ELF 二进制，跳过 runltp 脚本框架）
     // ============================================================
-    // run_ltp_network_tests(&environ);
+    run_ltp_network_tests(&environ);
 
     // ============================================================
     // Unix Domain Socket 独立测试（不依赖 LTP 框架）
@@ -727,7 +727,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     // run_bash_cmd("cd musl && bash ./netperf_testcode.sh", &environ);
     // run_bash_cmd("cd musl && bash ./iperf_testcode.sh", &environ); // prepare test scripts (chmod +x etc)
 
-    run_bash_cmd("cd musl/ltp/testcases/bin && ./send02", &environ);
+    // run_bash_cmd("cd musl/ltp/testcases/bin && ./send02", &environ);
     if cfg.mode == RunMode::Shell {
         println!("[initproc] entering shell mode");
         enter_shell(path, &environ);

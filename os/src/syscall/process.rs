@@ -857,7 +857,7 @@ pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) ->
                     drop(inner);
                     // 临时解锁判断是否 Actionable
                     if has_actionable_signal(&task) {
-                        return -(ERESTART as isize);
+                        return ERESTART;
                     }
 
                     // 清除无用信号，并重新进入 loop 循环
