@@ -246,6 +246,7 @@ pub fn _fill_with_endpoint(endpoint: IpEndpoint, addr: usize, addrlen: usize) ->
     if *addrlen < required {
         return Err(SyscallErr::EINVAL);
     }
+    // let mut buf = [0u8; 24]; // ipv6最大24字节
     match endpoint.addr {
         IpAddress::Ipv4(_) => {
             let len = mem::size_of::<u16>() + mem::size_of::<SocketAddrv4>();

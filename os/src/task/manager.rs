@@ -14,7 +14,7 @@ use crate::timer::{TimeSpec, TimeVal};
 
 use super::{
     block_current_and_run_next_with_lock, current_task, has_actionable_signal, signal::Signals,
-    TaskControlBlock,
+    TaskControlBlock, TaskStatus,
 };
 use crate::utils::error::SyscallErr;
 use alloc::collections::{BinaryHeap, VecDeque};
@@ -336,6 +336,35 @@ pub fn find_task_by_tgid(tgid: usize) -> Option<Arc<TaskControlBlock>> {
 pub fn procs_count() -> u16 {
     let manager = TASK_MANAGER.lock();
     manager.ready_count() + manager.interruptible_count()
+}
+
+/// Send a signal to all interruptible tasks EXCEPT initproc (tgid=1).
+/// Returns true if at least one task received the signal.
+pub fn send_signal_to_interruptible(signal: Signals) -> bool {
+    let manager = TASK_MANAGER.lock();
+    let tasks: Vec<_> = manager
+        .interruptible_queue
+        .iter()
+        .filter(|t| t.tgid != 1) // never signal initproc via Ctrl+C
+        .cloned()
+        .collect();
+    drop(manager);
+    if tasks.is_empty() {
+        return false;
+    }
+    let mut sent = false;
+    for task in &tasks {
+        let mut inner = task.acquire_inner_lock();
+        inner.add_signal(signal);
+        if inner.task_status == TaskStatus::Interruptible {
+            inner.task_status = TaskStatus::Ready;
+        }
+        sent = true;
+    }
+    for task in &tasks {
+        wake_interruptible(task.clone());
+    }
+    sent
 }
 
 /// 等待队列错误类型

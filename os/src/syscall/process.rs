@@ -449,17 +449,22 @@ pub fn sys_getpgid(pid: usize) -> isize {
     task.getpgid() as isize
 }
 /// creates a new session if the calling process is not a process group leader.
-/// The calling process is the leader of the new session
+/// The calling process is the leader of the new session, and its pgid is set to its pid.
 /// 当前进程脱离父进程，从父进程的子进程列表中移除当前进程，当前进程的父进程设置为空。
 pub fn sys_setsid() -> isize {
     let task = current_task().unwrap();
+    // Detach from parent process.
     if let Some(parent) = task.acquire_inner_lock().parent.as_ref().unwrap().upgrade() {
         parent
             .acquire_inner_lock()
             .children
             .retain(|x| x.tid != task.tid);
     }
-    task.acquire_inner_lock().parent = None;
+    let mut inner = task.acquire_inner_lock();
+    inner.parent = None;
+    // Make this process a session leader and process group leader.
+    inner.pgid = task.tgid;
+    drop(inner);
     SUCCESS
 }
 
