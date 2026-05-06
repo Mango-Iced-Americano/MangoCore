@@ -884,7 +884,7 @@ pub struct RLimit {
     rlim_max: usize, /* Hard limit (ceiling for rlim_cur) */
 }
 
-#[derive(Debug, Eq, PartialEq, FromPrimitive)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, FromPrimitive)]
 #[repr(u32)]
 pub enum Resource {
     CPU = 0,
@@ -908,6 +908,43 @@ pub enum Resource {
     ILLEAGAL,
 }
 
+fn rlimit_value_for(resource: Resource, nofile: Option<RLimit>) -> Option<RLimit> {
+    let unlimited = RLimit {
+        rlim_cur: usize::MAX,
+        rlim_max: usize::MAX,
+    };
+
+    let limit = match resource {
+        Resource::CPU
+        | Resource::FSIZE
+        | Resource::DATA
+        | Resource::RSS
+        | Resource::AS
+        | Resource::LOCKS
+        | Resource::SIGPENDING
+        | Resource::MSGQUEUE
+        | Resource::NICE
+        | Resource::RTPRIO
+        | Resource::RTTIME
+        | Resource::MEMLOCK => unlimited,
+        Resource::CORE => RLimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        },
+        Resource::STACK => RLimit {
+            rlim_cur: USER_STACK_SIZE,
+            rlim_max: USER_STACK_SIZE,
+        },
+        Resource::NPROC => RLimit {
+            rlim_cur: SYSTEM_TASK_LIMIT,
+            rlim_max: SYSTEM_TASK_LIMIT,
+        },
+        Resource::NOFILE => nofile?,
+        Resource::NLIMITS | Resource::ILLEAGAL => return None,
+    };
+    Some(limit)
+}
+
 /// It can be used to both set and get the resource limits of an arbitrary process.
 /// # WARNING
 /// Partial implementation
@@ -917,90 +954,85 @@ pub fn sys_prlimit(
     new_limit: *const RLimit,
     old_limit: *mut RLimit,
 ) -> isize {
-    if pid == 0 {
-        let task = current_task().unwrap();
-        let inner = task.acquire_inner_lock();
-        let token = task.get_user_token();
-        let resource = Resource::from_primitive(resource);
-        info!("[sys_prlimit] pid: {}, resource: {:?}", pid, resource);
+    let task = current_task().unwrap();
+    if pid != 0 && pid != task.tgid {
+        return ESRCH;
+    }
 
-        drop(inner);
-        if !old_limit.is_null() {
-            match resource {
-                Resource::STACK => {
-                    if copy_to_user(
-                        token,
-                        &(RLimit {
-                            rlim_cur: USER_STACK_SIZE,
-                            rlim_max: USER_STACK_SIZE,
-                        }),
-                        old_limit,
-                    )
-                    .is_err()
-                    {
-                        log::error!("[sys_prlimit] Failed to copy to {:?}", old_limit);
-                        return EFAULT;
-                    }
-                }
-                Resource::NPROC => {
-                    if copy_to_user(
-                        token,
-                        &(RLimit {
-                            rlim_cur: SYSTEM_TASK_LIMIT,
-                            rlim_max: SYSTEM_TASK_LIMIT,
-                        }),
-                        old_limit,
-                    )
-                    .is_err()
-                    {
-                        log::error!("[sys_prlimit] Failed to copy to {:?}", old_limit);
-                        return EFAULT;
-                    }
-                }
-                Resource::NOFILE => {
-                    let lock = task.files.lock();
-                    if copy_to_user(
-                        token,
-                        &(RLimit {
-                            rlim_cur: lock.get_soft_limit(),
-                            rlim_max: lock.get_hard_limit(),
-                        }),
-                        old_limit,
-                    )
-                    .is_err()
-                    {
-                        log::error!("[sys_prlimit] Failed to copy to {:?}", old_limit);
-                        return EFAULT;
-                    }
-                }
-                Resource::ILLEAGAL => return EINVAL,
-                _ => todo!(),
-            }
+    let token = task.get_user_token();
+    let resource = Resource::from_primitive(resource);
+    info!(
+        "[sys_prlimit] pid: {}, resource: {:?}, new_limit: {:?}, old_limit: {:?}",
+        pid, resource, new_limit, old_limit
+    );
+
+    if resource == Resource::ILLEAGAL || resource == Resource::NLIMITS {
+        return EINVAL;
+    }
+
+    if !old_limit.is_null() {
+        let nofile_limit = if resource == Resource::NOFILE {
+            let lock = task.files.lock();
+            Some(RLimit {
+                rlim_cur: lock.get_soft_limit(),
+                rlim_max: lock.get_hard_limit(),
+            })
+        } else {
+            None
+        };
+        let Some(limit) = rlimit_value_for(resource, nofile_limit) else {
+            return EINVAL;
+        };
+        if copy_to_user(token, &limit, old_limit).is_err() {
+            log::error!("[sys_prlimit] Failed to copy to {:?}", old_limit);
+            return EFAULT;
         }
-        if !new_limit.is_null() {
-            let rlimit = &mut RLimit {
-                rlim_cur: 0,
-                rlim_max: 0,
-            };
-            if copy_from_user(token, new_limit, rlimit).is_err() {
-                log::error!("[sys_prlimit] Failed to copy from {:?}", new_limit);
-                return EFAULT;
-            };
-            match resource {
-                Resource::NOFILE => {
-                    task.files.lock().set_soft_limit(rlimit.rlim_cur);
-                    task.files.lock().set_hard_limit(rlimit.rlim_max);
-                }
-                Resource::STACK => {
-                    warn!("[prlimit] Unsupported modification stack");
-                    assert!(rlimit.rlim_cur <= USER_STACK_SIZE);
-                }
-                Resource::ILLEAGAL => return EINVAL,
-                _ => todo!(),
-            }
+    }
+
+    if !new_limit.is_null() {
+        let rlimit = &mut RLimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if copy_from_user(token, new_limit, rlimit).is_err() {
+            log::error!("[sys_prlimit] Failed to copy from {:?}", new_limit);
+            return EFAULT;
+        };
+        if rlimit.rlim_cur > rlimit.rlim_max {
+            return EINVAL;
         }
-    } else {
-        todo!();
+        match resource {
+            Resource::NOFILE => {
+                task.files.lock().set_soft_limit(rlimit.rlim_cur);
+                task.files.lock().set_hard_limit(rlimit.rlim_max);
+            }
+            Resource::STACK => {
+                warn!("[prlimit] Unsupported modification stack");
+                if rlimit.rlim_cur > USER_STACK_SIZE {
+                    return EINVAL;
+                }
+            }
+            Resource::CPU
+            | Resource::FSIZE
+            | Resource::DATA
+            | Resource::CORE
+            | Resource::RSS
+            | Resource::NPROC
+            | Resource::MEMLOCK
+            | Resource::AS
+            | Resource::LOCKS
+            | Resource::SIGPENDING
+            | Resource::MSGQUEUE
+            | Resource::NICE
+            | Resource::RTPRIO
+            | Resource::RTTIME => {
+                warn!(
+                    "[prlimit] Ignore unsupported modification for {:?}: {:?}",
+                    resource, rlimit
+                );
+            }
+            Resource::NLIMITS | Resource::ILLEAGAL => return EINVAL,
+        }
     }
     SUCCESS
 }
