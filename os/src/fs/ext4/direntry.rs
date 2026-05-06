@@ -232,8 +232,7 @@ impl Ext4DirEntry {
     }
 }
 
-impl Ext4DirEntry {
-}
+impl Ext4DirEntry {}
 
 impl Ext4DirEntryTail {
     pub fn new() -> Self {
@@ -312,8 +311,10 @@ impl Ext4FileSystem {
                 fblock = path.pblock;
 
                 // load physical block
-                let mut ext4block =
-                    Block::load_offset(self.block_device.clone(), fblock as usize * self.block_size);
+                let mut ext4block = Block::load_offset(
+                    self.block_device.clone(),
+                    fblock as usize * self.block_size,
+                );
 
                 // find entry in block
                 let r = self.dir_find_in_block(&ext4block, name, result);
@@ -363,7 +364,11 @@ impl Ext4FileSystem {
 
             prev_de_offset = offset;
             // go to next entry
-            offset = offset + de.entry_len() as usize;
+            let entry_len = de.entry_len() as usize;
+            if entry_len == 0 {
+                break; // 非法目录项
+            }
+            offset += entry_len;
         }
         //println!("[kernel direntry] dir find in block failed");
         return Err(Errno::ENOENT as isize);
@@ -404,8 +409,10 @@ impl Ext4FileSystem {
                 let fblock = path.pblock;
 
                 // 加载物理块
-                let ext4block =
-                    Block::load_offset(self.block_device.clone(), fblock as usize * self.block_size);
+                let ext4block = Block::load_offset(
+                    self.block_device.clone(),
+                    fblock as usize * self.block_size,
+                );
                 let mut offset = 0;
 
                 // 遍历块内所有项
@@ -414,7 +421,11 @@ impl Ext4FileSystem {
                     if !de.unused() {
                         entries.push(de);
                     }
-                    offset += de.entry_len() as usize;
+                    let entry_len = de.entry_len() as usize;
+                    if entry_len == 0 {
+                        break; // 非法目录项，避免死循环
+                    }
+                    offset += entry_len;
                 }
             }
 
@@ -424,7 +435,10 @@ impl Ext4FileSystem {
         entries
     }
 
-    pub fn dir_get_entries_from_inode_ref(&self, inode_ref: Arc<Ext4InodeRef>) -> Vec<Ext4DirEntry> {
+    pub fn dir_get_entries_from_inode_ref(
+        &self,
+        inode_ref: Arc<Ext4InodeRef>,
+    ) -> Vec<Ext4DirEntry> {
         let mut entries = Vec::new();
 
         // 加载inode
@@ -450,8 +464,10 @@ impl Ext4FileSystem {
                 let fblock = path.pblock;
 
                 // 加载物理块
-                let ext4block =
-                    Block::load_offset(self.block_device.clone(), fblock as usize * self.block_size);
+                let ext4block = Block::load_offset(
+                    self.block_device.clone(),
+                    fblock as usize * self.block_size,
+                );
                 let mut offset = 0;
 
                 // 遍历块内所有项
@@ -529,8 +545,10 @@ impl Ext4FileSystem {
         let new_block = self.append_inode_pblk(parent)?;
 
         // load new block
-        let mut new_ext4block =
-            Block::load_offset(self.block_device.clone(), new_block as usize * self.block_size);
+        let mut new_ext4block = Block::load_offset(
+            self.block_device.clone(),
+            new_block as usize * self.block_size,
+        );
 
         // write new entry to the new block
         // must succeed, as we just allocated the block
@@ -651,8 +669,10 @@ impl Ext4FileSystem {
         // let r = self.dir_find_entry(parent.inode_num, path, &mut result)?;
         let r = self.dir_find_entry(parent.inode_num, path, &mut result);
 
-        let mut ext4block =
-            Block::load_offset(self.block_device.clone(), result.pblock_id * self.block_size);
+        let mut ext4block = Block::load_offset(
+            self.block_device.clone(),
+            result.pblock_id * self.block_size,
+        );
 
         let de_del_entry_len = result.dentry.entry_len();
 
@@ -697,8 +717,10 @@ impl Ext4FileSystem {
                 fblock = path.pblock;
 
                 // load physical block
-                let ext4block =
-                    Block::load_offset(self.block_device.clone(), fblock as usize * self.block_size);
+                let ext4block = Block::load_offset(
+                    self.block_device.clone(),
+                    fblock as usize * self.block_size,
+                );
 
                 // start from the first entry
                 let mut offset = 0;

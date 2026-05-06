@@ -210,25 +210,25 @@ impl<'a> NetInterface<'a> {
             dispatch_udp_packets(inner);
 
             // Trace: dump all TCP socket states AFTER poll
-            for (handle, sock) in inner.sockets.iter() {
-                if let smoltcp::socket::Socket::Tcp(tcp_sock) = sock {
-                    let sc = tcp_state_code(&tcp_sock.state());
-                    trace_event!(0xB035, handle.as_usize() as u64, sc, 1, 0, 0, 0);
-                }
-            }
+            // for (handle, sock) in inner.sockets.iter() {
+            //     if let smoltcp::socket::Socket::Tcp(tcp_sock) = sock {
+            //         let sc = tcp_state_code(&tcp_sock.state());
+            //         trace_event!(0xB035, handle.as_usize() as u64, sc, 1, 0, 0, 0);
+            //     }
+            // }
         });
 
         // 5. 更新所有 TCP/RAW socket 事件并唤醒等待者
-        crate::net::wake_tcp_waiters();
-        crate::net::wake_raw_waiters();
+        // crate::net::wake_tcp_waiters();
+        // crate::net::wake_raw_waiters();
 
         // Trace: 记录 poll 后仍在连接中的 TCP socket 数
-        {
-            let sockets = TCP_SOCKETS.lock();
-            trace_event!(0xB033, sockets.len() as u64, 0, 0, 0, 0, 0);
-        }
+        // {
+        //     let sockets = TCP_SOCKETS.lock();
+        //     trace_event!(0xB033, sockets.len() as u64, 0, 0, 0, 0, 0);
+        // }
         // config.rs poll_once() 中，在 poll 调用后加：
-        trace_event!(0xB036, progressed as u64, 0, 0, 0, 0, 0); // 5. 更新所有 TCP/RAW socket 事件并唤醒等待者
+        // trace_event!(0xB036, progressed as u64, 0, 0, 0, 0, 0); // 5. 更新所有 TCP/RAW socket 事件并唤醒等待者
         progressed
     }
 
