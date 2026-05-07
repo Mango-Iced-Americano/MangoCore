@@ -29,6 +29,7 @@ pub struct NetInterface<'a> {
 
 pub struct NetInterfaceInner<'a> {
     pub device: RoutingDevice,
+    // pub device: SmoltcpDeviceAdapter,
     pub iface: Interface,
     pub sockets: SocketSet<'a>,
 }
@@ -39,8 +40,9 @@ impl<'a> NetInterfaceInner<'a> {
             .lock()
             .take()
             .expect("NET_DEVICE not initialized before net::config::init()");
-        let eth = SmoltcpDeviceAdapter::new(net_device);
+        let mut eth = SmoltcpDeviceAdapter::new(net_device);
         let lo = Loopback::new(Medium::Ip);
+        // let lo = Loopback::new(Medium::Ethernet);
         let mut device = RoutingDevice::new(eth, lo);
 
         let now = Instant::from_millis(current_time_duration().as_millis() as i64);
@@ -48,7 +50,7 @@ impl<'a> NetInterfaceInner<'a> {
             0, 0, 0, 0, 0, 0,
         ])));
         let mut iface = Interface::new(config, &mut device, now);
-
+        // let mut iface = Interface::new(config, &mut eth, now);
         // 双 IP: loopback + 物理网卡
         iface.update_ip_addrs(|addrs| {
             addrs
@@ -67,6 +69,7 @@ impl<'a> NetInterfaceInner<'a> {
 
         Self {
             device,
+            // device: eth,
             iface,
             sockets: SocketSet::new(vec![]),
         }
@@ -221,6 +224,7 @@ impl<'a> NetInterface<'a> {
             drop(to_remove);
 
             // 4. 分发 UDP 包（必须在每次 poll 后立刻做）
+            log::debug!("[poll_once] about to dispatch_udp_packets");
             dispatch_udp_packets(inner);
 
             // Trace: dump all TCP socket states AFTER poll

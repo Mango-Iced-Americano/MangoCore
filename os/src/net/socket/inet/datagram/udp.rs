@@ -173,7 +173,8 @@ impl Socket for UdpSocket {
 
     fn local_endpoint(&self) -> Option<Endpoint> {
         NET_INTERFACE.poll();
-        let local: Option<IpListenEndpoint> = NET_INTERFACE.udp_socket(self.socket_handler, |socket| socket.endpoint());
+        let local: Option<IpListenEndpoint> =
+            NET_INTERFACE.udp_socket(self.socket_handler, |socket| socket.endpoint());
         NET_INTERFACE.poll();
         local.map(|ep| {
             let addr = ep.addr.unwrap_or(IpAddress::Ipv4(Ipv4Address::UNSPECIFIED));
@@ -253,6 +254,7 @@ impl Socket for UdpSocket {
                 match socket.send_slice(&send_buf, meta) {
                     Ok(()) => Ok(buf.len() as isize),
                     Err(SendError::Unaddressable) => Err(SyscallErr::ENOTCONN),
+                    Err(SendError::BufferFull) => Err(SyscallErr::EAGAIN),
                     Err(_) => Err(SyscallErr::ENOBUFS),
                 }
             })
@@ -263,6 +265,12 @@ impl Socket for UdpSocket {
         // 从 rx_queue 非阻塞取一包数据 + 源地址
         let mut inner = self.inner.lock();
         if let Some((data, remote)) = inner.rx_queue.pop_front() {
+            log::info!(
+                "[try_recvmsg] popped {} bytes from {:?}, remaining in rx_queue={}",
+                data.len(),
+                remote,
+                inner.rx_queue.len()
+            );
             let copy_len = data.len().min(buf.len());
             buf[..copy_len].copy_from_slice(&data[..copy_len]);
             inner.last_recv_addr = Some(remote);
@@ -272,7 +280,12 @@ impl Socket for UdpSocket {
         }
     }
 
-    fn try_sendmsg(&self, buf: &[u8], dest: Option<Endpoint>, flags: MsgFlags) -> Result<isize, SyscallErr> {
+    fn try_sendmsg(
+        &self,
+        buf: &[u8],
+        dest: Option<Endpoint>,
+        flags: MsgFlags,
+    ) -> Result<isize, SyscallErr> {
         // EMSGSIZE check
         if buf.len() > 65507 {
             return Err(SyscallErr::EMSGSIZE);
@@ -283,7 +296,11 @@ impl Socket for UdpSocket {
             let res = match dest {
                 Some(Endpoint::Ip(ep)) => Ok(ep),
                 Some(_) => Err(SyscallErr::EINVAL),
-                None => self.inner.lock().remote_endpoint.ok_or(SyscallErr::ENOTCONN),
+                None => self
+                    .inner
+                    .lock()
+                    .remote_endpoint
+                    .ok_or(SyscallErr::ENOTCONN),
             };
             let remote = res?;
             let mut inner = self.inner.lock();
@@ -310,6 +327,7 @@ impl Socket for UdpSocket {
                 match socket.send_slice(&send_buf, meta) {
                     Ok(()) => Ok(buf.len() as isize),
                     Err(SendError::Unaddressable) => Err(SyscallErr::ENOTCONN),
+                    Err(SendError::BufferFull) => Err(SyscallErr::EAGAIN),
                     Err(_) => Err(SyscallErr::ENOBUFS),
                 }
             })
@@ -382,6 +400,8 @@ impl UdpSocket {
         }
     }
     pub fn register_udp_socket(socket: &Arc<Self>) {
+        let local = socket.inner.lock().local_endpoint;
+        log::info!("[register_udp_socket] local={:?}", local);
         UDP_SOCKETS.lock().push(Arc::downgrade(socket));
     }
 }
@@ -407,7 +427,7 @@ impl Drop for UdpSocket {
 impl UdpSocket {
     fn _read<'a>(&'a self, buf: &'a mut [u8]) -> GeneralRet<usize> {
         NET_INTERFACE.poll();
-        
+
         let mut inner = self.inner.lock();
         if let Some((data, remote)) = inner.rx_queue.pop_front() {
             let copy_len = data.len().min(buf.len());
@@ -431,39 +451,51 @@ pub fn dispatch_udp_packets(inner: &mut NetInterfaceInner) {
     // 顺便清理一下已经被 drop 掉的 socket
     os_socks.retain(|w| w.strong_count() > 0);
 
+    log::debug!(
+        "[dispatch_udp_packets] scanning {} os socks, {} smoltcp sockets",
+        os_socks.len(),
+        inner.sockets.iter().count()
+    );
+
     for (handle, socket) in inner.sockets.iter_mut() {
         // 尝试把这个 socket 识别为 UDP 类型
         if let Some(udp_sock) = smoltcp::socket::udp::Socket::downcast_mut(socket) {
             // 只要这个底层缓冲区里有包，就全部抽干
             while udp_sock.can_recv() {
-                // 获取下一个数据报的真实长度
-                let payload_len = if let Ok((payload, _metadata)) = udp_sock.peek() {
-                    payload.len()
-                } else {
-                    break;
-                };
-                let mut buf = vec![0u8; payload_len];
-                if let Ok((size, meta)) = udp_sock.recv_slice(&mut buf) {
-                    debug_assert_eq!(size, payload_len); // 确保一次读完
-                    buf.truncate(size);
-
-                    // 3. 拿到包了，调用我们写的打分函数，找到它在 OS 层对应的 UdpSocket
-                    // 注意：这里的 local 信息直接从当前遍历到的 udp_sock 拿
-                    if let Some(target_os_sock) =
-                        find_best_match(&os_socks, udp_sock.endpoint(), meta.endpoint)
-                    {
-                        target_os_sock
-                            .inner
-                            .lock()
-                            .rx_queue
-                            .push_back((buf, meta.endpoint));
-                        target_os_sock.recv_waiters.lock().wake_at_most(1);
-                    } else {
-                        // 如果没人认领这个包（比如 iperf3 已经关了），就丢弃
-                        log::warn!(
-                            "[UDP Dispatch] No OS Socket matched packet from {:?}, dropping",
-                            meta.endpoint
+                // recv() 返回 Result<(&[u8], UdpMetadata), RecvError>
+                match udp_sock.recv() {
+                    Ok((data, meta)) => {
+                        let remote = meta.endpoint;
+                        let buf = data.to_vec();
+                        log::debug!(
+                            "[dispatch_udp_packets] recv {} bytes from {:?} on socket {}",
+                            buf.len(),
+                            remote,
+                            handle
                         );
+                        // 找到最匹配的 OS UdpSocket，放入它的 rx_queue
+                        if let Some(os_sock) =
+                            find_best_match(&os_socks, udp_sock.endpoint(), remote)
+                        {
+                            let mut inner = os_sock.inner.lock();
+                            inner.rx_queue.push_back((buf, remote));
+                            // 唤醒等待这个 socket 的任务
+                            os_sock.recv_waiters.lock().wake_all();
+                        } else {
+                            log::warn!(
+                                "[dispatch_udp_packets] no match for {:?}, local={:?}",
+                                remote,
+                                udp_sock.endpoint()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "[dispatch_udp_packets] error receiving from socket {}: {:?}",
+                            handle,
+                            e
+                        );
+                        break; // 这个 socket 可能出问题了，先跳过它
                     }
                 }
             }
@@ -497,6 +529,13 @@ fn find_best_match(
                     // 3. 备胎/监听者：没有 connect 任何地址，可以接纳新来的包
                     None => 1,
                 };
+                log::debug!(
+                    "[find_best_match] remote={:?} local_port={} remote_ep={:?} score={}",
+                    remote,
+                    local.port,
+                    inner.remote_endpoint,
+                    score
+                );
                 if score > best_score {
                     best_score = score;
                     best_match = Some(sock.clone());

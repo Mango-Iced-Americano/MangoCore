@@ -1382,6 +1382,11 @@ impl InterfaceInner {
             .filter_map(|i| udp::Socket::downcast_mut(&mut i.socket))
         {
             if udp_socket.accepts(self, &ip_repr, &udp_repr) {
+                net_debug!(
+                    "process_udp: delivering {} bytes to smoltcp udp socket (dst_port={})",
+                    udp_payload.len(),
+                    udp_repr.dst_port
+                );
                 udp_socket.process(self, meta, &ip_repr, &udp_repr, udp_payload);
                 return None;
             }

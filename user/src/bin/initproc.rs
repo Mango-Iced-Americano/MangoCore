@@ -717,6 +717,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     // ============================================================
     // run_unix_standalone_tests(&environ);
 
+    // run_bash_cmd("cd musl && ./iperf3 -s &", &environ);
     // run_bash_cmd(
     //     "cd musl && ./netserver -D -L 127.0.0.1 -p 12865 &",
     //     &environ,
@@ -728,7 +729,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     // run_bash_cmd("cd musl && bash ./iperf_testcode.sh", &environ); // prepare test scripts (chmod +x etc)
 
     // run_bash_cmd("cd musl/ltp/testcases/bin && ./send02", &environ);
-    run_bash_cmd("./inet_test", &environ);
+    // run_bash_cmd("./inet_test", &environ);
     if cfg.mode == RunMode::Shell {
         println!("[initproc] entering shell mode");
         enter_shell(path, &environ);

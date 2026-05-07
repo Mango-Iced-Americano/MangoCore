@@ -55,8 +55,17 @@ impl InterfaceInner {
                 // recomputed, as well as the checksum. However, we don't really use
                 // the IPv4 header after the packet is reassembled.
                 match f.assemble() {
-                    Some(payload) => payload,
-                    None => return None,
+                    Some(payload) => {
+                        net_debug!(
+                            "process_ipv4: got reassembled payload, len={}",
+                            payload.len()
+                        );
+                        payload
+                    }
+                    None => {
+                        net_debug!("process_ipv4: reassembly not yet complete");
+                        return None;
+                    }
                 }
             } else {
                 ipv4_packet.payload()

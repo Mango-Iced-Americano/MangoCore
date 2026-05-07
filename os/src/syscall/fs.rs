@@ -1468,7 +1468,7 @@ pub fn sys_pselect(
         core::ptr::null()
     };
 
-    log::info!(
+    /* log::info!(
         "PID {} calls pselect: nfds: {}, read_fds: {:?}, write_fds: {:?}, exception_fds: {:?}, timeout: {:?}, sigmask: {:?}",
         current_task().unwrap().pid.0,
         nfds,
@@ -1477,7 +1477,7 @@ pub fn sys_pselect(
         exception_fds,
         timeout,
         sigmask
-    );
+    ) */;
     let token = current_user_token();
     let mut kread_fds = match try_get_from_user(token, read_fds) {
         Ok(fds) => fds,
@@ -1532,14 +1532,14 @@ pub fn sys_pselect(
         };
     }
 
-    log::info!(
+    /* log::info!(
         "PID {} pselect returns {}, ReadMask: {:?}, WriteMask: {:?}, ExceptMask: {:?}",
         current_task().unwrap().pid.0,
         ret,
         kread_fds,
         kwrite_fds,
         kexception_fds
-    );
+    ) */;
     ret
 }
 

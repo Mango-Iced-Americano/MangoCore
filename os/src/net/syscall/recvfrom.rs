@@ -66,6 +66,7 @@ pub fn sys_recvfrom(
         }
         PSOCK::Datagram | PSOCK::Raw => {
             let (ret, src_ep) = socket.try_recvmsg(buf_slice)?;
+            log::info!("[sys_recvfrom] Datagram try_recvmsg returned {} bytes", ret);
             // 注意这里是 >= 0，因为 UDP 允许发送 0 字节的空包
             if ret >= 0 && src_addr != 0 {
                 if let Some(ep) = src_ep {
@@ -82,6 +83,7 @@ pub fn sys_recvfrom(
             // advance TCP state (handshake, data delivery). Without this, a
             // tight non-blocking recv loop can starve the timer interrupt.
             NET_INTERFACE.try_poll();
+            log::info!("[sys_recvfrom] after try_poll, calling recv()");
             match recv() {
                 Ok(n) => n as isize,
                 Err(e) => -(e as isize),
@@ -89,7 +91,10 @@ pub fn sys_recvfrom(
         } else {
             WaitQueue::wait_until_interruptible(wait_queue, || match recv() {
                 Ok(n) => Some(n as isize),
-                Err(SyscallErr::EAGAIN) => None,
+                Err(SyscallErr::EAGAIN) => {
+                    log::debug!("[sys_recvfrom] EAGAIN, will sleep");
+                    None
+                }
                 Err(e) => Some(-(e as isize)),
             })
             .unwrap_or_else(|e| e)
