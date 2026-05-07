@@ -543,7 +543,11 @@ pub fn sys_brk(brk_addr: usize) -> isize {
         inner.heap_pt = memory_set.sbrk(inner.heap_pt, inner.heap_bottom, 0);
     } else {
         let former_addr = memory_set.sbrk(inner.heap_pt, inner.heap_bottom, 0);
-        let grow_size: isize = (brk_addr - former_addr) as isize;
+        let grow_size: isize = if brk_addr < former_addr {
+            -((former_addr - brk_addr) as isize)
+        } else {
+            (brk_addr - former_addr) as isize
+        };
         inner.heap_pt = memory_set.sbrk(inner.heap_pt, inner.heap_bottom, grow_size);
     }
 
