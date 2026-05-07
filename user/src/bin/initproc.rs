@@ -679,8 +679,8 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     let porgrams = [
         "ls", "cat", "echo", "mkdir", "rmdir", "chown", "chmod", "ln", "basename", "dirname", "rm",
         "grep", "touch", "file", "sleep", "sed", "awk", "head", "tail", "ps", "top", "kill", "cut",
-        "free", "df", "du", "mount", "umount", "ping", "netstat", "ifconfig", "ip", "ss", "nc",
-        "mktemp", "tr",
+        "free", "df", "du", "mount", "umount", "ping", "netstat", "wget", "curl", "ifconfig", "ip",
+        "ss", "nc", "mktemp", "tr",
     ];
     println!(
         "[initproc] preparing busybox \"symlinks\" for programs: {}",
@@ -728,6 +728,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     // run_bash_cmd("cd musl && bash ./iperf_testcode.sh", &environ); // prepare test scripts (chmod +x etc)
 
     // run_bash_cmd("cd musl/ltp/testcases/bin && ./send02", &environ);
+    run_bash_cmd("./inet_test", &environ);
     if cfg.mode == RunMode::Shell {
         println!("[initproc] entering shell mode");
         enter_shell(path, &environ);
