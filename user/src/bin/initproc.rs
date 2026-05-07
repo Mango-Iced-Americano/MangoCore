@@ -299,7 +299,7 @@ fn run_group_in_dir(environ: &[*const u8], dir: &str, script: &str) {
                 "[initproc] iperf detected, using timer (15s) for {} in {}",
                 script, dir
             );
-            sleep(15000);
+            sleep(20000);
             // 尝试收割子进程，不阻塞等待
             let _ = waitpid(pid as usize, &mut exit_code);
         } else {

@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 use smoltcp::{
     socket::tcp::{self, SocketBuffer},
+    time::Duration,
     wire::{IpAddress, IpEndpoint, IpListenEndpoint, IpVersion},
 };
 
@@ -89,6 +90,7 @@ impl Inner {
             .inner_handler(|inner| {
                 let socket = inner.sockets.get_mut::<tcp::Socket>(handle);
                 let before_state = tcp_state_code(&socket.state());
+                socket.set_timeout(Some(Duration::from_secs(20)));
                 let ret = socket.connect(inner.iface.context(), remote_endpoint, local);
                 let after_state = tcp_state_code(&socket.state());
                 let ret_ok = ret.is_ok() as u64;

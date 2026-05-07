@@ -1017,11 +1017,315 @@ fn test_udp_giant_loopback() -> i32 {
     0
 }
 
-// --- HTTPS placeholder (busybox wget 没有 TLS) ---
-fn test_https_placeholder() -> i32 {
-    println!("=== inet_test: HTTPS (wget) — SKIPPED ===");
-    println!("  busybox wget needs TLS (OpenSSL/gnutls cross-compiled)");
-    println!("  — skip for now.");
+// --- HTTPS test (embedded-tls, pure Rust) ---
+
+use embedded_io::{ErrorType, Read, Write};
+use embedded_tls::{blocking::TlsConnection, Aes128GcmSha256, NoVerify, TlsConfig, TlsContext};
+use rand_core::{CryptoRng, RngCore};
+
+/// 包装内核 socket fd，实现 embedded_io::Read + Write
+struct TlsSocket {
+    fd: usize,
+}
+
+impl ErrorType for TlsSocket {
+    type Error = embedded_io::ErrorKind;
+}
+
+impl Read for TlsSocket {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        let ret = tcp_recv(self.fd, buf);
+        if ret > 0 {
+            Ok(ret as usize)
+        } else if ret == 0 {
+            Err(embedded_io::ErrorKind::ConnectionAborted)
+        } else {
+            Err(embedded_io::ErrorKind::Other)
+        }
+    }
+}
+
+impl Write for TlsSocket {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        let ret = tcp_send(self.fd, buf);
+        if ret > 0 {
+            Ok(ret as usize)
+        } else {
+            Err(embedded_io::ErrorKind::Other)
+        }
+    }
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+/// 极简 RNG — 用时间 + 计数器糊一个，仅测试用
+struct SimpleRng {
+    state: u64,
+}
+
+impl SimpleRng {
+    fn new() -> Self {
+        SimpleRng {
+            state: user_lib::get_time() as u64,
+        }
+    }
+}
+
+impl RngCore for SimpleRng {
+    fn next_u32(&mut self) -> u32 {
+        self.state = self
+            .state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.state >> 32) as u32 ^ (self.state as u32)
+    }
+    fn next_u64(&mut self) -> u64 {
+        let lo = self.next_u32() as u64;
+        let hi = self.next_u32() as u64;
+        (hi << 32) | lo
+    }
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        for chunk in dest.chunks_mut(8) {
+            let val = self.next_u64();
+            let len = chunk.len();
+            chunk.copy_from_slice(&val.to_le_bytes()[..len]);
+        }
+    }
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.fill_bytes(dest);
+        Ok(())
+    }
+}
+
+impl CryptoRng for SimpleRng {}
+
+fn test_https_tls() -> i32 {
+    println!("=== inet_test: HTTPS (embedded-tls) ===");
+
+    // DNS resolve cloudflare.com（确认支持 TLS 1.3）
+    let ip = match dns_lookup("cloudflare.com") {
+        Some(ip) => {
+            println!(
+                "  DNS resolved cloudflare.com -> {}.{}.{}.{}",
+                ip[0], ip[1], ip[2], ip[3]
+            );
+            ip
+        }
+        None => {
+            println!("  FAIL: DNS lookup failed for cloudflare.com");
+            return 1;
+        }
+    };
+
+    let fd = sys_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if fd < 0 {
+        println!("  FAIL: socket returned {}", fd);
+        return 1;
+    }
+    let fd = fd as usize;
+    println!("  socket fd={}", fd);
+
+    let addr = sockaddr_in::new(ip, 443);
+    let ret = sys_connect(fd, addr.as_ptr(), sockaddr_in::len());
+    if ret < 0 {
+        println!(
+            "  FAIL: connect {}:{}:{}.{}:443 returned {} (errno={})",
+            ip[0], ip[1], ip[2], ip[3], ret, -ret
+        );
+        sys_close(fd);
+        return 1;
+    }
+    println!(
+        "  TCP connected to {}.{}.{}.{}:443",
+        ip[0], ip[1], ip[2], ip[3]
+    );
+
+    // TLS record buffers (max TLS record = 16640 bytes)
+    let mut read_buf = [0u8; 16640];
+    let mut write_buf = [0u8; 4096];
+
+    let socket = TlsSocket { fd };
+
+    let config = TlsConfig::new().with_server_name("cloudflare.com");
+
+    let mut tls: TlsConnection<TlsSocket, Aes128GcmSha256> =
+        TlsConnection::new(socket, &mut read_buf, &mut write_buf);
+
+    let mut rng = SimpleRng::new();
+
+    // open() — 同步阻塞握手，NoVerify 跳过证书验证
+    match tls.open::<SimpleRng, NoVerify>(TlsContext::new(&config, &mut rng)) {
+        Ok(()) => {
+            println!("  TLS handshake OK");
+        }
+        Err(e) => {
+            println!("  FAIL: TLS handshake error: {:?}", e);
+            sys_close(fd);
+            return 1;
+        }
+    }
+
+    // HTTP GET over TLS — /cdn-cgi/trace 是 Cloudflare 调试端点，直接返回纯文本
+    let http_req =
+        b"GET /cdn-cgi/trace HTTP/1.1\r\nHost: cloudflare.com\r\nConnection: close\r\n\r\n";
+    match tls.write(http_req) {
+        Ok(n) => println!("  TLS write {} bytes (HTTP GET)", n),
+        Err(e) => {
+            println!("  FAIL: TLS write error: {:?}", e);
+            sys_close(fd);
+            return 1;
+        }
+    }
+    let _ = tls.flush();
+
+    // 读取响应
+    let mut rx = [0u8; 4096];
+    match tls.read(&mut rx) {
+        Ok(n) => {
+            if n > 0 {
+                // 只打印前 200 字节
+                let show = if n > 200 { 200 } else { n };
+                let resp_str = core::str::from_utf8(&rx[..show]).unwrap_or("(non-utf8)");
+                println!("  TLS read {} bytes, first {} bytes:", n, show);
+                for line in resp_str.lines().take(8) {
+                    println!("    | {}", line);
+                }
+                if n > show {
+                    println!("    ... (truncated)");
+                }
+                println!("  PASS");
+            } else {
+                println!("  FAIL: TLS read returned 0 bytes");
+                sys_close(fd);
+                return 1;
+            }
+        }
+        Err(e) => {
+            println!("  FAIL: TLS read error: {:?}", e);
+            sys_close(fd);
+            return 1;
+        }
+    }
+
+    sys_close(fd);
+    0
+}
+
+/// 重型 HTTPS 下载测试：从 cloudflare.com 反复 GET 累计 32KB
+fn test_https_download() -> i32 {
+    println!("=== inet_test: HTTPS download (32KB via cloudflare.com) ===");
+
+    let host = "cloudflare.com";
+    let ip = match dns_lookup(host) {
+        Some(ip) => {
+            println!(
+                "  DNS resolved {} -> {}.{}.{}.{}",
+                host, ip[0], ip[1], ip[2], ip[3]
+            );
+            ip
+        }
+        None => {
+            println!("  SKIP: DNS lookup failed for {}", host);
+            return 0;
+        }
+    };
+
+    let fd = sys_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if fd < 0 {
+        println!("  FAIL: socket returned {}", fd);
+        return 1;
+    }
+    let fd = fd as usize;
+
+    let addr = sockaddr_in::new(ip, 443);
+    let ret = sys_connect(fd, addr.as_ptr(), sockaddr_in::len());
+    if ret < 0 {
+        println!(
+            "  FAIL: connect {}:443 returned {} (errno={})",
+            host, ret, -ret
+        );
+        sys_close(fd);
+        return 1;
+    }
+    println!("  TCP connected to {}:443", host);
+
+    let t0 = user_lib::get_time();
+    let mut total = 0usize;
+    let target = 32768usize;
+
+    for round in 0.. {
+        // 每次 GET /cdn-cgi/trace（~500 字节纯文本）
+        let fd2 = sys_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if fd2 < 0 {
+            break;
+        }
+        let fd2 = fd2 as usize;
+
+        let ret = sys_connect(fd2, addr.as_ptr(), sockaddr_in::len());
+        if ret < 0 {
+            sys_close(fd2);
+            break;
+        }
+
+        let mut read_buf = [0u8; 16640];
+        let mut write_buf = [0u8; 4096];
+        let socket = TlsSocket { fd: fd2 };
+        let config = TlsConfig::new().with_server_name(host);
+
+        let mut tls: TlsConnection<TlsSocket, Aes128GcmSha256> =
+            TlsConnection::new(socket, &mut read_buf, &mut write_buf);
+
+        let mut rng = SimpleRng::new();
+        if tls
+            .open::<SimpleRng, NoVerify>(TlsContext::new(&config, &mut rng))
+            .is_err()
+        {
+            sys_close(fd2);
+            break;
+        }
+
+        let http_req = alloc::format!(
+            "GET /cdn-cgi/trace HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            host
+        );
+        if tls.write(http_req.as_bytes()).is_err() {
+            sys_close(fd2);
+            break;
+        }
+        let _ = tls.flush();
+
+        let mut rx = [0u8; 4096];
+        loop {
+            match tls.read(&mut rx) {
+                Ok(0) => break,
+                Ok(n) => total += n,
+                Err(_) => break,
+            }
+        }
+        sys_close(fd2);
+
+        if total >= target {
+            break;
+        }
+        if round == 0 {
+            println!("  round {}: {} bytes total", round, total);
+        }
+    }
+
+    let dt = user_lib::get_time() - t0;
+    println!("  final: {} bytes in {} ms", total, dt);
+    if dt > 0 && total > 0 {
+        let kbps = (total as isize * 1000 / dt) as f64 / 1024.0;
+        println!("  throughput: {:.1} KB/s", kbps);
+    }
+
+    if total < target / 2 {
+        println!("  FAIL: too few bytes ({}/{})", total, target);
+        return 1;
+    }
+
+    println!("  PASS");
     0
 }
 
@@ -1035,7 +1339,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     println!("  INET (AF_INET) Connectivity Test Suite");
     println!("============================================");
 
-    let tests: [(&str, fn() -> i32); 9] = [
+    let tests: [(&str, fn() -> i32); 11] = [
         ("tcp_connect", test_tcp_connect_all),
         ("tcp_send_recv", || {
             test_tcp_send_recv("cloudflare", [1, 1, 1, 1])
@@ -1047,6 +1351,8 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         ("udp_loopback_pair", test_udp_loopback_pair),
         ("udp_external_dns", test_udp_external_dns),
         ("udp_giant_loopback", test_udp_giant_loopback),
+        ("https_tls", test_https_tls),
+        ("https_download_8k", test_https_download),
     ];
 
     let total = tests.len();
