@@ -558,7 +558,8 @@ impl TaskControlBlock {
         // ---- 保持父PCB锁
         let mut parent_inner = self.acquire_inner_lock();
         // 复制用户空间（包括陷阱上下文）
-        let memory_set = if flags.contains(CloneFlags::CLONE_VM) {
+        let share_vm = flags.contains(CloneFlags::CLONE_VM);
+        let memory_set = if share_vm {
             self.vm.clone() // 共享虚拟内存空间（线程）
         } else {
             // 复制地址空间（进程）
@@ -568,12 +569,8 @@ impl TaskControlBlock {
             )))
         };
 
-        // 复制线程ID分配器
-        // CLONE_VFORK child shares VM with parent and must use parent's tid_allocator
-        // to avoid tid=0 conflict (both would map trap_cx at TRAP_CONTEXT_BASE).
-        let tid_allocator = if flags.contains(CloneFlags::CLONE_THREAD)
-            || flags.contains(CloneFlags::CLONE_VFORK)
-        {
+        // 共享地址空间时，trap context 的虚拟地址也共享，必须复用同一个 tid 分配器。
+        let tid_allocator = if share_vm {
             self.tid_allocator.clone()
         } else {
             Arc::new(Mutex::new(RecycleAllocator::new()))
@@ -592,10 +589,8 @@ impl TaskControlBlock {
         let kstack = kstack_alloc();
         let kstack_top = kstack.get_top();
 
-        // 如果是线程或vfork子进程（共享VM），分配用户空间资源
-        // CLONE_VFORK: child needs its own trap_cx at a unique VA (tid != 0),
-        // but uses parent's stack (alloc_stack=false).
-        if flags.contains(CloneFlags::CLONE_THREAD) || flags.contains(CloneFlags::CLONE_VFORK) {
+        // 共享 VM 的任务需要独立 trap context；用户栈只在未指定 child stack 时分配。
+        if share_vm {
             memory_set.lock().alloc_user_res(
                 tid,
                 stack.is_null() && !flags.contains(CloneFlags::CLONE_VFORK),
@@ -694,9 +689,8 @@ impl TaskControlBlock {
         }
         // 初始化陷阱上下文
         let trap_cx = task_control_block.acquire_inner_lock().get_trap_cx();
-        // 如果是线程或vfork子进程，复制陷阱上下文
-        // CLONE_VFORK: child continues from parent's register state
-        if flags.contains(CloneFlags::CLONE_THREAD) || flags.contains(CloneFlags::CLONE_VFORK) {
+        // 共享 VM 时新分配的 trap context 为空，需要从父任务当前上下文复制。
+        if share_vm {
             *trap_cx = *parent_inner.get_trap_cx();
         }
         // we also do not need to prepare parameters on stack, musl has done it for us
