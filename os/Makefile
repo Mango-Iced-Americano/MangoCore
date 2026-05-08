@@ -67,7 +67,7 @@ la64-kernel-build-only:
 	@rustup override set nightly-2024-05-01-x86_64-unknown-linux-gnu
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	make -f make/la64o.mk build MODE=${MODE} LOG=${LOG}
+	make -f make/la64o.mk build BLK_MODE=${BLK_MODE} MODE=${MODE} LOG=${LOG}
 
 la64-debug:
 	@rustup override set nightly-2024-05-01-x86_64-unknown-linux-gnu
@@ -146,6 +146,25 @@ conf-inject:
 			;; \
 	esac
 	ARCH=$(CONF_ARCH) BLK_MODE=$(CONF_BLK_MODE) CONF_FILE=$(CONF_FILE) IMAGE_PATH=$(CONF_IMAGE) AUTO_REBUILD_MEM=$(AUTO_REBUILD_MEM) MODE=$(MODE) LOG=$(LOG) ./inject_os_test_conf.sh
+
+la64-inject-runtime:
+	@rustup override set nightly-2024-05-01-x86_64-unknown-linux-gnu
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	@cd ../user && make rust-user BOARD=laqemu MODE=$(MODE)
+	@cmd_file=$$(mktemp); \
+	printf '%s\n' \
+		'rm /initproc' \
+		'rm /bash' \
+		'rm /busybox' \
+		'write ../user/target/loongarch64-unknown-linux-gnu/$(MODE)/initproc /initproc' \
+		'write ./bash-la /bash' \
+		'write ./busybox-la /busybox' \
+		'stat /initproc' \
+		'stat /bash' \
+		'stat /busybox' > $$cmd_file; \
+	debugfs -w -f $$cmd_file ../sdcard-la.img; \
+	rm -f $$cmd_file
 
 # 将所有用户态测试程序（user/src/bin/*.rs）注入到 sdcard-rv.img
 inject-test:

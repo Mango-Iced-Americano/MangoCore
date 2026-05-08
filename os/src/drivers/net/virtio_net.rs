@@ -1,22 +1,33 @@
 use super::NetDevice;
+#[cfg(feature = "block_virt")]
 // 借用 block 里的 VirtioHal！
 use crate::drivers::block::virtio_blk::VirtioHal;
+#[cfg(feature = "block_virt_pci")]
+use crate::drivers::block::virtio_blk_pci::{enumerate_virtio_pci, VirtioHal};
 
-use alloc::vec::Vec;
+#[cfg(feature = "block_virt")]
 use core::ptr::NonNull;
 use spin::Mutex;
-use virtio_drivers::device::net::{VirtIONet,TxBuffer,RxBuffer};
+use virtio_drivers::device::net::{TxBuffer, VirtIONet};
+#[cfg(feature = "block_virt")]
 use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
+#[cfg(feature = "block_virt_pci")]
+use virtio_drivers::transport::{pci::PciTransport, DeviceType};
 
 // 网卡需要额外的缓冲区大小，通常 2048 足够容纳以太网最大帧
 const NET_BUF_SIZE: usize = 2048;
 
+#[cfg(feature = "block_virt")]
 const VIRTIO_NET_BASE: usize = 0x10008000;
 // 网卡接收队列的大小
 const QUEUE_SIZE: usize = 16;
 
+#[cfg(feature = "block_virt")]
 pub struct VirtIONetWrapper(Mutex<VirtIONet<VirtioHal, MmioTransport<'static>, QUEUE_SIZE>>);
+#[cfg(feature = "block_virt_pci")]
+pub struct VirtIONetWrapper(Mutex<VirtIONet<VirtioHal, PciTransport, QUEUE_SIZE>>);
 
+#[cfg(feature = "block_virt")]
 impl VirtIONetWrapper {
     pub fn new() -> Self {
         unsafe {
@@ -33,6 +44,17 @@ impl VirtIONetWrapper {
 
             Self(Mutex::new(net))
         }
+    }
+}
+
+#[cfg(feature = "block_virt_pci")]
+impl VirtIONetWrapper {
+    pub fn new() -> Self {
+        let transport = enumerate_virtio_pci(DeviceType::Network).expect("No VirtIO network device");
+        let net = VirtIONet::<VirtioHal, PciTransport, QUEUE_SIZE>::new(transport, NET_BUF_SIZE)
+            .expect("virtio net device initialization failed");
+
+        Self(Mutex::new(net))
     }
 }
 

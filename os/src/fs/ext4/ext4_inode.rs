@@ -556,7 +556,11 @@ impl InodeTrait for Ext4Inode {
             InodeFileType::S_IFIFO => crate::fs::DiskInodeType::FIFO,
             InodeFileType::S_IFSOCK => crate::fs::DiskInodeType::Socket,
             InodeFileType::S_IFLNK => crate::fs::DiskInodeType::Link,
-            _ => panic!("[kernel fs error] Unknown disk type"),
+            _ => panic!(
+                "[kernel fs error] Unknown disk type: mode={:#x}, file_type={:#x}",
+                self.mode,
+                file_type.bits()
+            ),
         }
     }
 

@@ -5,6 +5,7 @@
 use core::{
     fmt::{self, Debug, Formatter},
     marker::PhantomData,
+    mem::size_of,
 };
 
 /// The physical instance of some device's MMIO space.

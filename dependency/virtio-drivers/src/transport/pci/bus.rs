@@ -5,12 +5,12 @@ use core::{
     array,
     convert::TryFrom,
     fmt::{self, Display, Formatter},
+    mem::size_of,
     ops::Deref,
     ptr::NonNull,
 };
 use log::warn;
 use safe_mmio::{fields::ReadPureWrite, UniqueMmioPointer};
-use thiserror::Error;
 
 const INVALID_READ: u32 = 0xffffffff;
 
@@ -86,10 +86,9 @@ bitflags! {
 }
 
 /// Errors accessing a PCI device.
-#[derive(Copy, Clone, Debug, Eq, Error, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PciError {
     /// The device reported an invalid BAR type.
-    #[error("Invalid PCI BAR type")]
     InvalidBarType,
 }
 
