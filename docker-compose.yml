@@ -2,6 +2,7 @@ services:
   os-dev:
     image: zhouzhouyi/os-contest:20260104
     pull_policy: missing
+    network_mode: host
     command: ["sleep", "infinity"]
     privileged: true
     devices:

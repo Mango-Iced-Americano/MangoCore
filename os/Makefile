@@ -147,12 +147,14 @@ conf-inject:
 	esac
 	ARCH=$(CONF_ARCH) BLK_MODE=$(CONF_BLK_MODE) CONF_FILE=$(CONF_FILE) IMAGE_PATH=$(CONF_IMAGE) AUTO_REBUILD_MEM=$(AUTO_REBUILD_MEM) MODE=$(MODE) LOG=$(LOG) ./inject_os_test_conf.sh
 
-# 将用户态测试程序 unix_test 注入到 sdcard-rv.img
-inject-unix-test:
+# 将所有用户态测试程序（user/src/bin/*.rs）注入到 sdcard-rv.img
+inject-test:
 	@rustup override set nightly-2025-01-18-x86_64-unknown-linux-gnu
 	@cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
 	@cd ../user && make rust-user MODE=release BOARD=rvqemu 2>&1 | tail -5
-	@echo "[inject] Writing unix_test to ../sdcard-rv.img..."
-	@debugfs -w -R "rm unix_test" ../sdcard-rv.img 2>/dev/null || true
-	@debugfs -w -R "write ../user/target/riscv64gc-unknown-none-elf/release/unix_test unix_test" ../sdcard-rv.img 2>&1
+	@echo "[inject] Updating test binaries in ../sdcard-rv.img..."
+	@for testname in $$(ls ../user/src/bin/*.rs | xargs -n1 basename | sed 's/\.rs$$//'); do \
+		debugfs -w -R "rm $$testname" ../sdcard-rv.img 2>/dev/null || true; \
+		debugfs -w -R "write ../user/target/riscv64gc-unknown-none-elf/release/$$testname $$testname" ../sdcard-rv.img 2>&1; \
+	done
 	@echo "[inject] Done."

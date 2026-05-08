@@ -5,6 +5,7 @@ use crate::hal::TrapContext;
 use crate::net::config::NET_INTERFACE;
 use alloc::sync::Arc;
 use lazy_static::*;
+use log;
 use spin::Mutex;
 
 /// 处理器对象
@@ -55,19 +56,25 @@ lazy_static! {
 /// 运行任务调度器，不断从任务队列中取出任务并运行
 pub fn run_tasks() {
     loop {
-        crate::trace::try_dump_from("schedule");
+        // Read one character from UART per iteration. Handle in priority order:
+        // 1. Magic key (Ctrl+T) → trace dump + shutdown
+        // 2. VINTR (Ctrl+C) → SIGINT to foreground/blocked task
+        // 3. Normal character → stash for TTY
+        let ch = crate::hal::console_getchar() as u8;
+        if ch != 0xFF {
+            if crate::trace::check_magic_key(ch, "schedule") {
+                // check_magic_key → dump_from → shutdown, never returns.
+            } else if crate::fs::dev::tty::Teletype::handle_vintr(ch) {
+                log::info!("[vintr-poll] SIGINT sent! ch={:#x}", ch);
+            } else {
+                crate::trace::stash_char(ch);
+            }
+        }
         // 处理到期内核定时器（SIGALRM 等），防止忙等待/轮询任务阻塞定时器投递。
-        // 此前 do_wake_expired 仅在就绪队列为空时调用，但 pselect/ppoll/wait_io_core
-        // 使用 suspend_current_and_run_next() 忙等待，导致就绪队列永不为空，
-        // 令 KERNEL_TIMER_QUEUE 中的定时器（如服务端 setitimer 的 SIGALRM）无法投递，
-        // 造成长达 120 秒的死锁。现改为每次调度迭代都处理，确保定时器及时触发。
         do_wake_expired();
         NET_INTERFACE.try_poll();
-        // 获取全局处理器对象
         let mut processor = PROCESSOR.lock();
-        // 尝试从全局变量 TASK_MANAGER 中取出一个任务
         if let Some(task) = fetch_task() {
-            // 获取当前空闲任务的上下文指针
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
             // 独占地访问即将运行的任务的 TCB
             let next_task_cx_ptr = {

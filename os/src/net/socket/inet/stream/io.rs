@@ -38,6 +38,12 @@ impl Inner {
             Inner::Listening(_) => Err(SyscallErr::EINVAL),
             Inner::Established(e) => {
                 with_tcp_mut(e.handle, |socket| {
+                    if socket.can_recv() {
+                        return socket
+                            .recv_slice(buf)
+                            .map(|n| n as isize)
+                            .map_err(|_| SyscallErr::ENOTCONN);
+                    }
                     let state = socket.state();
                     // 对端已关闭写端（收到 FIN），或连接已完全关闭 → 返回 EOF
                     if state == tcp::State::CloseWait
@@ -49,13 +55,8 @@ impl Inner {
                         return Ok(0);
                     }
 
-                    if socket.can_recv() {
-                        socket
-                            .recv_slice(buf)
-                            .map(|n| n as isize)
-                            .map_err(|_| SyscallErr::ENOTCONN)
-                    } else if !socket.may_recv() {
-                        Ok(0) // EOF
+                    if !socket.may_recv() {
+                        Ok(0)
                     } else {
                         Err(SyscallErr::EAGAIN)
                     }

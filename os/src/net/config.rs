@@ -1,4 +1,6 @@
 use super::Mutex;
+use crate::drivers::NET_DEVICE;
+use crate::net::adapter::{RoutingDevice, SmoltcpDeviceAdapter};
 use crate::net::socket::inet::datagram::udp::dispatch_udp_packets;
 use crate::net::socket::inet::stream::inner::tcp_state_code;
 use crate::net::{TCP_SOCKETS, TCP_SOCKETS_TO_REMOVE, UDP_SOCKETS_TO_REMOVE};
@@ -11,15 +13,14 @@ use smoltcp::{
     phy::{Device, Loopback, Medium},
     socket::{raw, tcp, udp, AnySocket},
     time::Instant,
-    wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr},
+    wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Address},
 };
 
 pub static NET_INTERFACE: NetInterface = NetInterface::new();
 
 pub fn init() {
-    // Loopback-only mode: always initialize without physical NIC
     NET_INTERFACE.init();
-    println!("[kernel] loopback-only mode (NIC disabled)");
+    println!("[kernel] net interface initialized (RoutingDevice: lo + eth)");
 }
 
 pub struct NetInterface<'a> {
@@ -27,32 +28,48 @@ pub struct NetInterface<'a> {
 }
 
 pub struct NetInterfaceInner<'a> {
-    // pub device: RoutingDevice,
-    pub device: Loopback,
+    pub device: RoutingDevice,
+    // pub device: SmoltcpDeviceAdapter,
     pub iface: Interface,
     pub sockets: SocketSet<'a>,
 }
 
 impl<'a> NetInterfaceInner<'a> {
     fn new() -> Self {
-        let mut device = Loopback::new(Medium::Ip);
+        let net_device = NET_DEVICE
+            .lock()
+            .take()
+            .expect("NET_DEVICE not initialized before net::config::init()");
+        let mut eth = SmoltcpDeviceAdapter::new(net_device);
+        let lo = Loopback::new(Medium::Ip);
+        // let lo = Loopback::new(Medium::Ethernet);
+        let mut device = RoutingDevice::new(eth, lo);
 
         let now = Instant::from_millis(current_time_duration().as_millis() as i64);
-        /* let config = Config::new(HardwareAddress::Ethernet(EthernetAddress([
+        let config = Config::new(HardwareAddress::Ethernet(EthernetAddress([
             0, 0, 0, 0, 0, 0,
-        ]))); */
-        let config = Config::new(HardwareAddress::Ip);
+        ])));
         let mut iface = Interface::new(config, &mut device, now);
-
-        // Only 127.0.0.1/8 — no physical NIC, no default route
+        // let mut iface = Interface::new(config, &mut eth, now);
+        // 双 IP: loopback + 物理网卡
         iface.update_ip_addrs(|addrs| {
             addrs
                 .push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8))
                 .unwrap();
+            addrs
+                .push(IpCidr::new(IpAddress::v4(10, 0, 2, 15), 24))
+                .unwrap();
         });
+
+        // 默认路由: 0.0.0.0/0 via 10.0.2.2
+        iface
+            .routes_mut()
+            .add_default_ipv4_route(Ipv4Address::new(10, 0, 2, 2))
+            .unwrap();
 
         Self {
             device,
+            // device: eth,
             iface,
             sockets: SocketSet::new(vec![]),
         }
@@ -207,28 +224,29 @@ impl<'a> NetInterface<'a> {
             drop(to_remove);
 
             // 4. 分发 UDP 包（必须在每次 poll 后立刻做）
+            log::debug!("[poll_once] about to dispatch_udp_packets");
             dispatch_udp_packets(inner);
 
             // Trace: dump all TCP socket states AFTER poll
-            for (handle, sock) in inner.sockets.iter() {
-                if let smoltcp::socket::Socket::Tcp(tcp_sock) = sock {
-                    let sc = tcp_state_code(&tcp_sock.state());
-                    trace_event!(0xB035, handle.as_usize() as u64, sc, 1, 0, 0, 0);
-                }
-            }
+            // for (handle, sock) in inner.sockets.iter() {
+            //     if let smoltcp::socket::Socket::Tcp(tcp_sock) = sock {
+            //         let sc = tcp_state_code(&tcp_sock.state());
+            //         trace_event!(0xB035, handle.as_usize() as u64, sc, 1, 0, 0, 0);
+            //     }
+            // }
         });
 
         // 5. 更新所有 TCP/RAW socket 事件并唤醒等待者
-        crate::net::wake_tcp_waiters();
-        crate::net::wake_raw_waiters();
+        // crate::net::wake_tcp_waiters();
+        // crate::net::wake_raw_waiters();
 
         // Trace: 记录 poll 后仍在连接中的 TCP socket 数
-        {
-            let sockets = TCP_SOCKETS.lock();
-            trace_event!(0xB033, sockets.len() as u64, 0, 0, 0, 0, 0);
-        }
+        // {
+        //     let sockets = TCP_SOCKETS.lock();
+        //     trace_event!(0xB033, sockets.len() as u64, 0, 0, 0, 0, 0);
+        // }
         // config.rs poll_once() 中，在 poll 调用后加：
-        trace_event!(0xB036, progressed as u64, 0, 0, 0, 0, 0); // 5. 更新所有 TCP/RAW socket 事件并唤醒等待者
+        // trace_event!(0xB036, progressed as u64, 0, 0, 0, 0, 0); // 5. 更新所有 TCP/RAW socket 事件并唤醒等待者
         progressed
     }
 
@@ -305,7 +323,10 @@ impl<'a> NetInterface<'a> {
     }
 }
 
-pub fn lookup_source_ip(_dest_ip: IpAddress) -> IpAddress {
-    // Loopback-only mode: always return 127.0.0.1
-    IpAddress::v4(127, 0, 0, 1)
+pub fn lookup_source_ip(dest_ip: IpAddress) -> IpAddress {
+    // 环回目标走 127.0.0.1，其他走物理网卡 IP
+    match dest_ip {
+        IpAddress::Ipv4(addr) if addr.0[0] == 127 => IpAddress::v4(127, 0, 0, 1),
+        _ => IpAddress::v4(10, 0, 2, 15),
+    }
 }

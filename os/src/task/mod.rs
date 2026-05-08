@@ -24,7 +24,8 @@ use log::warn;
 use manager::fetch_task;
 pub use manager::{
     add_kernel_timer, add_task, do_oom, do_wake_expired, find_task_by_pid, find_task_by_tgid,
-    procs_count, sleep_interruptible, wait_with_timeout, wake_interruptible, TimerAction,
+    procs_count, send_signal_to_interruptible, sleep_interruptible, wait_with_timeout,
+    wake_interruptible, TimerAction,
 };
 // pub use pid::RecycleAllocator;
 pub use pid::{pid_alloc, trap_cx_bottom_from_tid, ustack_bottom_from_tid, PidHandle};

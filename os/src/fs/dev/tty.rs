@@ -8,6 +8,7 @@ use crate::hal::console_getchar;
 use crate::mm::{copy_from_user, copy_to_user};
 use crate::mm::{translated_ref, translated_refmut, UserBuffer};
 use crate::syscall::errno::*;
+use crate::task::signal::Signals;
 
 use alloc::sync::Arc;
 use lazy_static::lazy_static;
@@ -65,6 +66,66 @@ pub struct Teletype {
 impl Teletype {
     pub fn new() -> Self {
         Default::default()
+    }
+}
+
+/// If ISIG is set and `ch` is VINTR (default Ctrl-C, cc[0]), send SIGINT
+/// to the foreground process group. Falls back to sending to all interruptible
+/// tasks if fg_pgid is 0.
+fn vintr_send_sigint(inner: &TeletypeInner, ch: u8) -> bool {
+    if inner.termios.lflag & LocalModes::ISIG.bits() == 0
+        || inner.termios.cc[0] == 255
+        || ch != inner.termios.cc[0]
+    {
+        return false;
+    }
+    let fg_pgid = inner.foreground_pgid;
+    let target = if fg_pgid != 0 {
+        crate::task::find_task_by_tgid(fg_pgid as usize)
+    } else {
+        crate::task::current_task()
+    };
+    if let Some(task) = target {
+        let mut task_inner = task.acquire_inner_lock();
+        task_inner.add_signal(Signals::SIGINT);
+        if task_inner.task_status == crate::task::TaskStatus::Interruptible {
+            task_inner.task_status = crate::task::TaskStatus::Ready;
+            drop(task_inner);
+            crate::task::wake_interruptible(task);
+        }
+        true
+    } else if fg_pgid == 0 {
+        // Fallback: fg_pgid not set and no current task (scheduler loop).
+        // Send SIGINT to all interruptible tasks (the actual foreground job).
+        crate::task::send_signal_to_interruptible(Signals::SIGINT)
+    } else {
+        false
+    }
+}
+
+impl Teletype {
+    /// Called from the scheduler loop. Checks whether `ch` is VINTR and
+    /// sends SIGINT to the appropriate task(s). Returns true if consumed.
+    pub fn handle_vintr(ch: u8) -> bool {
+        let inner = TTY.inner.lock();
+        let result = vintr_send_sigint(&inner, ch);
+        if result {
+            let fg = inner.foreground_pgid;
+            log::info!(
+                "[vintr] ch={:#x} VINTR={:#x} ISIG={} fg_pgid={} sigint_sent=true",
+                ch,
+                inner.termios.cc[0],
+                inner.termios.lflag & LocalModes::ISIG.bits() != 0,
+                fg,
+            );
+        }
+        drop(inner);
+        result
+    }
+
+    /// Read foreground_pgid for debugging.
+    pub fn foreground_pgid() -> u32 {
+        TTY.inner.lock().foreground_pgid
     }
 }
 
@@ -127,6 +188,11 @@ impl File for Teletype {
             // Check magic key (Ctrl+T → trace dump + shutdown).
             // If it's magic, dump_from() calls shutdown() and never returns.
             crate::trace::check_magic_key(inner.last_char, "tty:r_ready");
+            // Check VINTR (Ctrl+C → SIGINT to foreground process group).
+            if vintr_send_sigint(&inner, inner.last_char) {
+                inner.last_char = 255;
+                return false;
+            }
             inner.last_char != 255
         }
     }
@@ -186,6 +252,15 @@ impl File for Teletype {
                     crate::trace::pop_stashed().unwrap_or_else(|| console_getchar() as u8);
                 // Check magic key (Ctrl+T → trace dump + shutdown).
                 crate::trace::check_magic_key(inner.last_char, "tty:read");
+                // Check VINTR (Ctrl+C → SIGINT to foreground process group).
+                if vintr_send_sigint(&inner, inner.last_char) {
+                    inner.last_char = 255;
+                }
+            }
+            // VINTR was detected and consumed above; if last_char was reset to 255,
+            // loop back to wait for the next character.
+            if inner.last_char == 255 {
+                continue;
             }
             //we can guarantee last_char isn't a illegal char
             unsafe {
@@ -203,6 +278,10 @@ impl File for Teletype {
                 crate::trace::pop_stashed().unwrap_or_else(|| console_getchar() as u8);
             // Check magic key (Ctrl+T → trace dump + shutdown).
             crate::trace::check_magic_key(inner.last_char, "tty:read");
+            // Check VINTR (Ctrl+C → SIGINT to foreground process group).
+            if vintr_send_sigint(&inner, inner.last_char) {
+                inner.last_char = 255;
+            }
             count += 1;
         }
         count
@@ -255,6 +334,11 @@ impl File for Teletype {
     }
 
     fn open(&self, flags: crate::fs::layout::OpenFlags, special_use: bool) -> Arc<dyn File> {
+        // Do NOT auto-assign foreground_pgid here. The shell (bash/ash) must
+        // explicitly set it via TIOCSPGRP (tcsetpgrp) when putting a job in
+        // the foreground. Auto-assigning would incorrectly give the terminal
+        // to initproc, preventing the shell from taking control.
+        let _ = flags;
         TTY.clone()
     }
 
@@ -328,10 +412,17 @@ impl File for Teletype {
                 copy_to_user(token, &inner.termios, argp as *mut Termios);
                 SUCCESS
             }
-            TeletypeCommand::TCSETS | TeletypeCommand::TCSETSW | TeletypeCommand::TCSETSF => {
+            TeletypeCommand::TCSETS
+            | TeletypeCommand::TCSETSW
+            | TeletypeCommand::TCSETSF
+            | TeletypeCommand::TCSETA
+            | TeletypeCommand::TCSETAW
+            | TeletypeCommand::TCSETAF => {
                 copy_from_user(token, argp as *const Termios, &mut inner.termios);
                 SUCCESS
             }
+            // TCXONC (0x540A) — software flow control. No-op for virtual terminal.
+            TeletypeCommand::TCXONC => SUCCESS,
             TeletypeCommand::TIOCGPGRP => match translated_refmut(token, argp as *mut u32) {
                 Ok(word) => {
                     *word = inner.foreground_pgid;
@@ -341,6 +432,7 @@ impl File for Teletype {
             },
             TeletypeCommand::TIOCSPGRP => match translated_ref(token, argp as *const u32) {
                 Ok(word) => {
+                    log::info!("[tty-ioctl] TIOCSPGRP: set foreground_pgid to {}", *word);
                     inner.foreground_pgid = *word;
                     SUCCESS
                 }
@@ -386,6 +478,9 @@ pub enum TeletypeCommand {
     TCSETAW = 0x5407,
     /// Sets the serial port settings after flushing the input and output buffers.
     TCSETAF = 0x5408,
+
+    /// Software flow control (tcflow).
+    TCXONC = 0x540A,
 
     /// Get the process group ID of the foreground process group on this terminal.
     TIOCGPGRP = 0x540F,

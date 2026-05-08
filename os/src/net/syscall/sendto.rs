@@ -2,14 +2,13 @@ use log::info;
 
 use crate::net::config::NET_INTERFACE;
 use crate::net::{Endpoint, PSOCK};
-use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address};
 use crate::syscall::utils::wait_io;
 use crate::task::current_task;
 use crate::task::WaitQueue;
 use crate::utils::error::SyscallErr;
+use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address};
 
 use super::common::MsgFlags;
-
 
 pub fn sys_sendto(
     sockfd: u32,
@@ -55,7 +54,11 @@ pub fn sys_sendto(
 
     match socket.socket_type() {
         PSOCK::Datagram => {
-            if socket.local_endpoint().map(|ep| ep.port() == 0).unwrap_or(true) {
+            if socket
+                .local_endpoint()
+                .map(|ep| ep.port() == 0)
+                .unwrap_or(true)
+            {
                 // 构造 AF_INET:port=0:addr=0 的 sockaddr_in 用于自动绑定
                 let auto_bind = Endpoint::Ip(IpEndpoint::new(
                     IpAddress::Ipv4(smoltcp::wire::Ipv4Address::UNSPECIFIED),
@@ -63,36 +66,46 @@ pub fn sys_sendto(
                 ));
                 let _ = socket.bind(&auto_bind);
             }
-            if dest_addr != 0 {
-                let dest_addr_buf = crate::trans_ref!(dest_addr, addrlen);
-                if let Ok(ep) = Endpoint::from_sockaddr(dest_addr_buf) {
-                    let _ = socket.connect(&ep);
+            let dest_endpoint = if dest_addr != 0 {
+                let dest_buf = crate::trans_ref!(dest_addr, addrlen);
+                match Endpoint::from_sockaddr(dest_buf) {
+                    Ok(ep) => Some(ep),
+                    Err(e) => None,
                 }
-            } else if socket.remote_endpoint().is_none() {
-                // send() without destination on unconnected DGRAM → EDESTADDRREQ
+            } else {
+                None
+            };
+
+            if dest_endpoint.is_none() && socket.remote_endpoint().is_none() {
+                // 无目的地址且未 connect → EDESTADDRREQ
                 return -(SyscallErr::EDESTADDRREQ as isize);
             }
             if let Some(wait_queue) = socket.send_wait_queue() {
                 if is_nonblock {
                     NET_INTERFACE.try_poll();
-                    let ret = match socket.try_send(buf, msg_flags) {
+                    let ret = match socket.try_sendmsg(buf, dest_endpoint, msg_flags) {
                         Ok(n) => n as isize,
                         Err(e) => -(e as isize),
                     };
                     NET_INTERFACE.try_poll();
                     ret
                 } else {
-                    let ret = WaitQueue::wait_until_interruptible(wait_queue, || match socket.try_send(buf, msg_flags) {
-                        Ok(n) => Some(n as isize),
-                        Err(SyscallErr::EAGAIN) => None,
-                        Err(e) => Some(-(e as isize)),
+                    let ret = WaitQueue::wait_until_interruptible(wait_queue, || {
+                        match socket.try_sendmsg(buf, dest_endpoint.clone(), msg_flags) {
+                            Ok(n) => Some(n as isize),
+                            Err(SyscallErr::EAGAIN) => None,
+                            Err(e) => Some(-(e as isize)),
+                        }
                     })
                     .unwrap_or_else(|e| e);
                     NET_INTERFACE.try_poll();
                     ret
                 }
             } else {
-                wait_io(|| socket.try_send(buf, msg_flags), is_nonblock)
+                wait_io(
+                    || socket.try_sendmsg(buf, dest_endpoint.clone(), msg_flags),
+                    is_nonblock,
+                )
             }
         }
         PSOCK::Stream => {
@@ -106,10 +119,12 @@ pub fn sys_sendto(
                     NET_INTERFACE.try_poll();
                     ret
                 } else {
-                    let ret = WaitQueue::wait_until_interruptible(wait_queue, || match socket.try_send(buf, msg_flags) {
-                        Ok(n) => Some(n as isize),
-                        Err(SyscallErr::EAGAIN) => None,
-                        Err(e) => Some(-(e as isize)),
+                    let ret = WaitQueue::wait_until_interruptible(wait_queue, || {
+                        match socket.try_send(buf, msg_flags) {
+                            Ok(n) => Some(n as isize),
+                            Err(SyscallErr::EAGAIN) => None,
+                            Err(e) => Some(-(e as isize)),
+                        }
                     })
                     .unwrap_or_else(|e| e);
                     NET_INTERFACE.try_poll();
@@ -149,7 +164,11 @@ pub fn sys_sendto(
                 }
             } else {
                 wait_io(
-                    || socket.send_to(buf, dest_endpoint.clone()).map(|n| n as isize),
+                    || {
+                        socket
+                            .send_to(buf, dest_endpoint.clone())
+                            .map(|n| n as isize)
+                    },
                     is_nonblock,
                 )
             }

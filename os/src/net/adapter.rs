@@ -34,7 +34,11 @@ impl Device for RoutingDevice {
     fn capabilities(&self) -> DeviceCapabilities {
         let mut caps = self.eth.capabilities();
         caps.medium = Medium::Ethernet;
-        caps.max_transmission_unit = 1500;
+        // caps.max_transmission_unit = 65535; // 支持更大的 MTU 以适应环回接口
+
+        //一定得是1514,别问为什么
+        caps.max_transmission_unit = 1514; // 以太网 MTU，环回接口也遵循这个限制
+
         caps
     }
 
@@ -162,17 +166,17 @@ impl<'a> TxToken for RoutingTxToken<'a> {
                     });
                 }
                 if send_to_eth {
-                    if len > 1500 {
-                        log::warn!(
-                            "[Routing] Packet too large for eth ({}), dropping instead of crashing",
-                            len
-                        );
-                    } else {
-                        log::info!("[RoutingTxToken] send to eth");
-                        eth_tx.consume(len, |b| {
-                            b.copy_from_slice(&buf);
-                        });
-                    }
+                    // if len > 1500 {
+                    //     log::warn!(
+                    //         "[Routing] Packet too large for eth ({}), dropping instead of crashing",
+                    //         len
+                    //     );
+                    //     return res;
+                    // }
+                    log::info!("[RoutingTxToken] send to eth");
+                    eth_tx.consume(len, |b| {
+                        b.copy_from_slice(&buf);
+                    });
                 }
 
                 res

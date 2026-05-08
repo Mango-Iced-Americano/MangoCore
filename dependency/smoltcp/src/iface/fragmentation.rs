@@ -156,6 +156,12 @@ impl<K> PacketAssembler<K> {
         );
 
         self.assembler.add(offset, data.len());
+        net_debug!(
+            "frag assembler: after add({}, {}), assembler state: {}",
+            offset,
+            data.len(),
+            self.assembler
+        );
         Ok(())
     }
 
@@ -168,6 +174,10 @@ impl<K> PacketAssembler<K> {
 
         // NOTE: we can unwrap because `is_complete` already checks this.
         let total_size = self.total_size.unwrap();
+        net_debug!(
+            "frag assembler: REASSEMBLY COMPLETE, total_size={}",
+            total_size
+        );
         self.reset();
         Some(&self.buffer[..total_size])
     }

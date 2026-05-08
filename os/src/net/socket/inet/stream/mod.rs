@@ -25,8 +25,8 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint};
 use spin::Mutex;
 
-use crate::net::{config::NET_INTERFACE, Endpoint, PSOCK, Socket, SocketFile};
 use crate::net::syscall::common::MsgFlags;
+use crate::net::{config::NET_INTERFACE, Endpoint, Socket, SocketFile, PSOCK};
 use crate::{
     fs::FileDescriptor,
     task::{current_task, WaitQueue},

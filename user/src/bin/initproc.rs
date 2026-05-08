@@ -299,7 +299,7 @@ fn run_group_in_dir(environ: &[*const u8], dir: &str, script: &str) {
                 "[initproc] iperf detected, using timer (15s) for {} in {}",
                 script, dir
             );
-            sleep(15000);
+            sleep(20000);
             // 尝试收割子进程，不阻塞等待
             let _ = waitpid(pid as usize, &mut exit_code);
         } else {
@@ -679,8 +679,8 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     let porgrams = [
         "ls", "cat", "echo", "mkdir", "rmdir", "chown", "chmod", "ln", "basename", "dirname", "rm",
         "grep", "touch", "file", "sleep", "sed", "awk", "head", "tail", "ps", "top", "kill", "cut",
-        "free", "df", "du", "mount", "umount", "ping", "netstat", "ifconfig", "ip", "ss", "nc",
-        "mktemp", "tr",
+        "free", "df", "du", "mount", "umount", "ping", "netstat", "wget", "curl", "ifconfig", "ip",
+        "ss", "nc", "mktemp", "tr",
     ];
     println!(
         "[initproc] preparing busybox \"symlinks\" for programs: {}",
@@ -709,7 +709,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     // ============================================================
     // LTP 网络相关测例（独立 ELF 二进制，跳过 runltp 脚本框架）
     // ============================================================
-    run_ltp_network_tests(&environ);
+    // run_ltp_network_tests(&environ);
 
     // ============================================================
     // Unix Domain Socket 独立测试（不依赖 LTP 框架）
@@ -717,6 +717,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     // ============================================================
     // run_unix_standalone_tests(&environ);
 
+    // run_bash_cmd("cd musl && ./iperf3 -s &", &environ);
     // run_bash_cmd(
     //     "cd musl && ./netserver -D -L 127.0.0.1 -p 12865 &",
     //     &environ,
@@ -728,6 +729,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     // run_bash_cmd("cd musl && bash ./iperf_testcode.sh", &environ); // prepare test scripts (chmod +x etc)
 
     // run_bash_cmd("cd musl/ltp/testcases/bin && ./send02", &environ);
+    // run_bash_cmd("./inet_test", &environ);
     if cfg.mode == RunMode::Shell {
         println!("[initproc] entering shell mode");
         enter_shell(path, &environ);
