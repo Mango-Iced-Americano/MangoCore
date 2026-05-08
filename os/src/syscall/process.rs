@@ -392,7 +392,12 @@ pub fn sys_getpid() -> isize {
 pub fn sys_getppid() -> isize {
     let task = current_task().unwrap();
     let inner = task.acquire_inner_lock();
-    let ppid = inner.parent.as_ref().unwrap().upgrade().unwrap().tgid;
+    let parent = match inner.parent.as_ref().and_then(|p| p.upgrade()) {
+        Some(parent) => parent,
+        None => return 0, // No parent process
+    };
+    let ppid = parent.tgid;
+    // let ppid = inner.parent.as_ref().unwrap().upgrade().unwrap().tgid;
     ppid as isize
 }
 
@@ -979,7 +984,7 @@ pub fn sys_prlimit(
                     }
                 }
                 Resource::ILLEAGAL => return EINVAL,
-                _ => todo!(),
+                _ => return EINVAL,
             }
         }
         if !new_limit.is_null() {
@@ -1001,7 +1006,7 @@ pub fn sys_prlimit(
                     assert!(rlimit.rlim_cur <= USER_STACK_SIZE);
                 }
                 Resource::ILLEAGAL => return EINVAL,
-                _ => todo!(),
+                _ => return EINVAL,
             }
         }
     } else {
@@ -1156,7 +1161,7 @@ pub fn sys_futex(
             }
         }
         FutexCmd::Invalid => EINVAL,
-        _ => todo!(),
+        _ => EINVAL, // Unsupported command
     }
 }
 

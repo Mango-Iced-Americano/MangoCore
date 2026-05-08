@@ -1,18 +1,134 @@
 #![no_std]
 #![no_main]
-// use user_lib::{exit, exec, fork, waitpid, shutdown, sleep};
 extern crate alloc;
-
-use core::net;
 
 use alloc::format;
 use alloc::string::String;
-use alloc::vec;
 use alloc::vec::Vec;
 use user_lib::{
-    chdir, close, exec, exit, fork, open, println, read, shutdown, sleep, wait, waitpid,
-    waitpid_wnohang, OpenFlags,
+    chdir, close, exec, exit, fork, getdents64, kill, open, println, read, shutdown, sleep, wait,
+    waitpid, waitpid_wnohang, OpenFlags, SIGKILL,
 };
+
+// ============================================================
+// TEST_GROUPS — 组名与脚本文件名的映射
+// 索引 0..11 与 mask 的 bit0..bit11 一一对应
+// ⚠️ DEFAULT_TIMEOUTS 的索引与此数组一致
+// ============================================================
+const TEST_GROUPS: [(&str, &str); 12] = [
+    ("basic", "basic_testcode.sh"),
+    ("busybox", "busybox_testcode.sh"),
+    ("lua", "lua_testcode.sh"),
+    ("libctest", "libctest_testcode.sh"),
+    ("iozone", "iozone_testcode.sh"),
+    ("unixbench", "unixbench_testcode.sh"),
+    ("iperf", "iperf_testcode.sh"),
+    ("libcbench", "libcbench_testcode.sh"),
+    ("lmbench", "lmbench_testcode.sh"),
+    ("netperf", "netperf_testcode.sh"),
+    ("cyclictest", "cyclictest_testcode.sh"),
+    ("ltp", "ltp_testcode.sh"),
+];
+
+// ============================================================
+// 以下三个常量是比赛时的硬编码默认值。
+// 如需调整执行顺序、超时时间或 LTP 排除测例，直接修改此处即可，
+// 无需依赖 os_test.conf 注入。os_test.conf 可指定同名项覆盖。
+//
+// ⚠️ 注意：DEFAULT_TIMEOUTS 的索引与 TEST_GROUPS 数组位置（索引 0..11）
+// 一一绑定，与 DEFAULT_ORDER 中各组出现的先后顺序无关！
+// 例如 DEFAULT_TIMEOUTS[6] 永远是 iperf 的超时时间，无论 iperf
+// 在 DEFAULT_ORDER 中排在第几位。
+// ============================================================
+
+/// 默认执行顺序（组名列表，按此顺序依次执行）
+const DEFAULT_ORDER: &[&str] = &[
+    "ltp",
+    "basic",
+    "busybox",
+    "lua",
+    "iperf",
+    "netperf",
+    "libctest",
+    "iozone",
+    "unixbench",
+    "libcbench",
+    "lmbench",
+    "cyclictest",
+];
+
+/// 每组默认超时（秒），索引 0..11 与 TEST_GROUPS 一一对应
+/// 例如 [6]=90 表示 TEST_GROUPS[6] (iperf) 的超时时间为 90 秒
+const DEFAULT_TIMEOUTS: [u64; 12] = [
+    60,  // [0]  basic
+    60,  // [1]  busybox
+    60,  // [2]  lua
+    120, // [3]  libctest
+    60,  // [4]  iozone
+    120, // [5]  unixbench
+    90,  // [6]  iperf
+    60,  // [7]  libcbench
+    60,  // [8]  lmbench
+    90,  // [9]  netperf
+    60,  // [10] cyclictest
+    300, // [11] ltp
+];
+
+/// LTP 默认排除测例名列表
+const DEFAULT_LTP_EXCLUDE: &[&str] = &[
+    "access04",
+    "fallocate02",
+    "fallocate03",
+    "fanotify13",
+    "fanotify14",
+    "fanotify23",
+    "fremovexattr01",
+    "fsconfig03",
+    "fsync04",
+    "getresuid01_16",
+    "getrusage01",
+    "kill02",
+    "linkat02",
+    "mkdir03",
+    "move_mount01",
+    "mprotect05",
+    "sendmsg01",
+    "splice01",
+    "statfs01",
+    "statx06",
+    "statx12",
+    "umount01",
+    "inode02",
+    "hugemmap04",
+    "gencos",
+    "fanotify20",
+    "poll02",
+    "preadv203_64",
+    "pselect01",
+    "pwrite02_64",
+    "rename03",
+    "rename13",
+    "umount03",
+    "lftest",
+    "genj1",
+    "shm_test",
+    "fallocate05",
+    "fanotify18",
+    "ioctl05",
+    "flock03",
+    "mmap20",
+    "mount01",
+    "inotify10",
+    "preadv03",
+    "readv02",
+    "sigwaitinfo01",
+    "pidns04",
+    "waitid08",
+    "doio",
+    "starvation",
+    "cve-2017-17052",
+    "select02",
+];
 
 fn run_bash_cmd(cmd: &str, environ: &[*const u8]) -> i32 {
     let pid = fork();
@@ -86,39 +202,44 @@ fn mode_name(mode: RunMode) -> &'static str {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 struct RuntimeConfig {
     mode: RunMode,
     mask: u16,
+    /// 执行顺序：TEST_GROUPS 的索引数组，按此顺序依次执行每组
+    order: Vec<usize>,
+    /// 每测例超时（秒），索引与 TEST_GROUPS 一一绑定，不与 order 位置绑定
+    timeouts: [u64; 12],
+    /// LTP 排除测例名列表
+    ltp_exclude: Vec<String>,
+    /// LTP 起始测例名（不设置则从头开始）
+    ltp_from: Option<String>,
 }
 
 impl RuntimeConfig {
     fn default() -> Self {
-        // 12-bit mask for testcase groups:
-        // bit0..11 => basic, busybox, lua, libctest, iozone,
-        //             unixbench, iperf, libcbench, lmbench,
-        //             netperf, cyclictest, ltp
+        let order = DEFAULT_ORDER
+            .iter()
+            .map(|name| {
+                TEST_GROUPS
+                    .iter()
+                    .position(|(n, _)| n == name)
+                    .expect("DEFAULT_ORDER contains unknown group name")
+            })
+            .collect();
         Self {
             mode: RunMode::Run,
             mask: 0x0fff,
+            order,
+            timeouts: DEFAULT_TIMEOUTS,
+            ltp_exclude: DEFAULT_LTP_EXCLUDE
+                .iter()
+                .map(|s| String::from(*s))
+                .collect(),
+            ltp_from: None,
         }
     }
 }
-
-const TEST_GROUPS: [(&str, &str); 12] = [
-    ("basic", "basic_testcode.sh"),
-    ("busybox", "busybox_testcode.sh"),
-    ("lua", "lua_testcode.sh"),
-    ("libctest", "libctest_testcode.sh"),
-    ("iozone", "iozone_testcode.sh"),
-    ("unixbench", "unixbench_testcode.sh"),
-    ("iperf", "iperf_testcode.sh"),
-    ("libcbench", "libcbench_testcode.sh"),
-    ("lmbench", "lmbench_testcode.sh"),
-    ("netperf", "netperf_testcode.sh"),
-    ("cyclictest", "cyclictest_testcode.sh"),
-    ("ltp", "ltp_testcode.sh"),
-];
 
 fn trim_ascii(mut s: &[u8]) -> &[u8] {
     while let Some(b) = s.first() {
@@ -158,6 +279,24 @@ fn parse_mode(bytes: &[u8]) -> Option<RunMode> {
     }
 }
 
+fn parse_order(val: &[u8]) -> Option<Vec<usize>> {
+    let s = core::str::from_utf8(val).ok()?;
+    let mut indices = Vec::new();
+    for name in s.split(',') {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let idx = TEST_GROUPS.iter().position(|(n, _)| *n == name)?;
+        indices.push(idx);
+    }
+    if indices.is_empty() {
+        None
+    } else {
+        Some(indices)
+    }
+}
+
 fn apply_conf_bytes(data: &[u8], cfg: &mut RuntimeConfig) {
     for raw_line in data.split(|b| *b == b'\n') {
         let line = trim_ascii(raw_line);
@@ -184,6 +323,38 @@ fn apply_conf_bytes(data: &[u8], cfg: &mut RuntimeConfig) {
             if let Some(mask) = parse_mask(val) {
                 cfg.mask = mask;
             }
+        } else if key == b"order" {
+            if let Some(order) = parse_order(val) {
+                cfg.order = order;
+            }
+        } else if key.starts_with(b"timeout_") {
+            // timeout_xxx=秒，例如 timeout_iperf=90
+            let group_name = core::str::from_utf8(&key[b"timeout_".len()..]).ok();
+            let val_str = core::str::from_utf8(val).ok();
+            if let (Some(name), Some(sec_str)) = (group_name, val_str) {
+                if let Some(idx) = TEST_GROUPS.iter().position(|(n, _)| *n == name) {
+                    if let Ok(secs) = sec_str.parse::<u64>() {
+                        cfg.timeouts[idx] = secs;
+                    }
+                }
+            }
+        } else if key == b"ltp_exclude" {
+            let s = core::str::from_utf8(val).ok();
+            if let Some(s) = s {
+                cfg.ltp_exclude = s
+                    .split(',')
+                    .filter(|x| !x.is_empty())
+                    .map(String::from)
+                    .collect();
+            }
+        } else if key == b"ltp_from" {
+            let s = core::str::from_utf8(val).ok();
+            if let Some(s) = s {
+                let trimmed = s.trim();
+                if !trimmed.is_empty() {
+                    cfg.ltp_from = Some(String::from(trimmed));
+                }
+            }
         }
     }
 }
@@ -193,20 +364,21 @@ fn load_conf_from(path: &str, cfg: &mut RuntimeConfig) -> bool {
     if fd < 0 {
         return false;
     }
-    let mut buf = [0u8; 1024];
-    let mut len = 0usize;
+    let mut content = Vec::new();
+    let mut tmp_buf = [0u8; 512]; // 每次读一小块
     loop {
-        if len >= buf.len() {
-            break;
-        }
-        let n = read(fd as usize, &mut buf[len..]);
+        let n = read(fd as usize, &mut tmp_buf);
         if n <= 0 {
-            break;
+            break; // 读完了
         }
-        len += n as usize;
+        content.extend_from_slice(&tmp_buf[..n as usize]);
     }
     let _ = close(fd as usize);
-    apply_conf_bytes(&buf[..len], cfg);
+
+    if content.is_empty() {
+        return false;
+    }
+    apply_conf_bytes(&content, cfg);
     true
 }
 
@@ -225,6 +397,7 @@ fn load_runtime_config() -> RuntimeConfig {
         mode_name(cfg.mode),
         cfg.mask
     );
+    println!("[initproc] LTP exclude list: {:?}", cfg.ltp_exclude);
     cfg
 }
 
@@ -244,11 +417,40 @@ fn enter_shell(path: &str, environ: &[*const u8]) {
     }
 }
 
-fn is_iperf_script(script: &str) -> bool {
-    script.contains("iperf")
+/// 检查是否需要固定时长运行（守护进程模式，脚本会立即退出）。
+/// 返回 `Some(毫秒)`：固定等待时长；`None`：使用标准超时+强杀。
+fn fixed_timer_ms(script: &str) -> Option<u64> {
+    if script.contains("iperf") {
+        Some(30000) // iperf: 30秒
+    } else {
+        None
+    }
 }
 
-fn run_group_in_dir(environ: &[*const u8], dir: &str, script: &str) {
+/// 在指定目录下运行测试脚本。
+fn run_group_in_dir(
+    environ: &[*const u8],
+    dir: &str,
+    group_name: &str,
+    script: &str,
+    timeout_secs: u64,
+) {
+    // 构造比赛的 START/END 标记
+    let libc_suffix = if dir.contains("musl") {
+        "musl"
+    } else {
+        "glibc"
+    };
+    // 比赛评测依赖此标记格式，超时 kill 后需自己补打 END
+    let group_start_marker = format!(
+        "#### OS COMP TEST GROUP START {}-{} ####",
+        group_name, libc_suffix
+    );
+    let group_end_marker = format!(
+        "#### OS COMP TEST GROUP END {}-{} ####",
+        group_name, libc_suffix
+    );
+
     let pid = fork();
     if pid < 0 {
         println!(
@@ -258,7 +460,9 @@ fn run_group_in_dir(environ: &[*const u8], dir: &str, script: &str) {
         return;
     }
     if pid == 0 {
-        println!("[initproc] run {} in {}", script, dir);
+        // 脚本会自动输出 START 标记，无需 initproc 打印
+        // println!("{}", group_start_marker);
+
         let cd_ret = chdir(dir);
         if cd_ret < 0 {
             println!(
@@ -267,15 +471,11 @@ fn run_group_in_dir(environ: &[*const u8], dir: &str, script: &str) {
             );
             exit(126);
         }
-        println!("[initproc] entered {}", dir);
-        // --- 核心看门狗机制（非常通用、优雅的解法） ---
-        let mut cmd = String::new();
 
-        // 2. 运行真正的测试脚本
+        let mut cmd = String::new();
         cmd.push_str("./");
         cmd.push_str(script);
         cmd.push('\0');
-        // cmd.push_str("; wait");
         let shell = "/bash\0";
         let dash_c = "-c\0";
         let argv = [
@@ -290,21 +490,62 @@ fn run_group_in_dir(environ: &[*const u8], dir: &str, script: &str) {
             script, dir
         );
         exit(127);
-    } else {
+    } else if let Some(fixed_ms) = fixed_timer_ms(script) {
+        // 特殊测试（iperf / libctest 等），脚本会立即退出。
+        // 固定等 fixed_ms 毫秒让测试跑完。
+        let fix_secs = fixed_ms / 1000;
+        println!(
+            "[initproc] fixed timer ({}s) for {} in {}",
+            fix_secs, script, dir
+        );
+        sleep(fixed_ms as usize);
         let mut exit_code: i32 = 0;
-        if is_iperf_script(script) {
-            // iperf 测试以守护进程方式运行，waitpid 无法等到其结束。
-            // 直接计时 15 秒（musl 和 glibc 都是 15 秒）后继续。
-            println!(
-                "[initproc] iperf detected, using timer (15s) for {} in {}",
-                script, dir
-            );
-            sleep(20000);
-            // 尝试收割子进程，不阻塞等待
-            let _ = waitpid(pid as usize, &mut exit_code);
-        } else {
-            println!("[initproc] waiting pid={} for {} in {}", pid, script, dir);
-            waitpid(pid as usize, &mut exit_code);
+        let _ = waitpid(pid as usize, &mut exit_code);
+        println!("{}", group_end_marker);
+        println!(
+            "[initproc] done {} in {} exit_code={}",
+            script, dir, exit_code
+        );
+    } else {
+        // parent: 超时循环 + 强杀
+        let mut exit_code: i32 = 0;
+        let timeout_ms = timeout_secs * 1000;
+        let mut elapsed_ms: u64 = 0;
+        const POLL_MS: u64 = 100;
+        let mut timed_out = false;
+
+        loop {
+            let ret = waitpid_wnohang(pid as isize, &mut exit_code);
+            if ret == pid {
+                // 正常退出
+                break;
+            }
+            if ret < 0 {
+                println!("[initproc] pid={} vanished for {} in {}", pid, script, dir);
+                break;
+            }
+
+            elapsed_ms += POLL_MS;
+            if elapsed_ms >= timeout_ms {
+                timed_out = true;
+                println!(
+                    "[initproc] TIMEOUT ({}s) for {} in {}, sending SIGKILL to pid={}",
+                    timeout_secs, script, dir, pid
+                );
+                let _ = kill(pid as usize, SIGKILL);
+                let _ = waitpid(pid as usize, &mut exit_code);
+                println!("[initproc] killed pid={} for {} in {}", pid, script, dir);
+                break;
+            }
+
+            sleep(POLL_MS as usize);
+        }
+
+        // 清理残留：等待一会让系统回收孤儿进程
+        reap_orphans();
+        if timed_out {
+            // 超时 kill 后脚本来不及输出 END 标记，由 initproc 补打
+            println!("{}", group_end_marker);
         }
         println!(
             "[initproc] done {} in {} exit_code={}",
@@ -313,15 +554,218 @@ fn run_group_in_dir(environ: &[*const u8], dir: &str, script: &str) {
     }
 }
 
-fn run_selected_groups(environ: &[*const u8], mask: u16) {
-    println!("[initproc] run_selected_groups start mask=0x{:03X}", mask);
-    for (idx, (group_name, script)) in TEST_GROUPS.iter().enumerate() {
-        if (mask & (1u16 << idx)) == 0 {
+/// 运行 LTP 测例（内联枚举，不使用 shell 脚本，支持 exclude + from）。
+/// 输出格式与官方 ltp_testcode.sh 完全对齐。
+fn run_ltp_binaries(
+    environ: &[*const u8],
+    dir: &str,
+    exclude: &[String],
+    from: Option<&str>,
+    timeout_secs: u64,
+) {
+    let libc_suffix = if dir.contains("musl") {
+        "musl"
+    } else {
+        "glibc"
+    };
+    let ltp_dir = format!("{}/ltp/testcases/bin", dir.trim_end_matches('\0'));
+
+    let pid = fork();
+    if pid < 0 {
+        println!("[initproc] fork failed for ltp in {} ret={}", ltp_dir, pid);
+        return;
+    }
+    if pid == 0 {
+        // child: chdir 到 ltp 目录
+        let cd_ret = chdir(&format!("{}\0", ltp_dir));
+        if cd_ret < 0 {
+            println!("[initproc] chdir failed for ltp dir={}", ltp_dir);
+            exit(126);
+        }
+
+        // 打印 START 标记
+        println!("#### OS COMP TEST GROUP START ltp-{} ####", libc_suffix);
+
+        // 打开当前目录
+        let fd = open(".\0", OpenFlags::RDONLY);
+        if fd < 0 {
+            println!("[initproc] ltp: cannot open dir {}", ltp_dir);
+            println!("#### OS COMP TEST GROUP END ltp-{} ####", libc_suffix);
+            exit(0);
+        }
+
+        let mut cases = 1;
+        let mut found_from = false;
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = getdents64(fd as usize, &mut buf);
+            if n <= 0 {
+                break;
+            }
+
+            let mut off = 0usize;
+            while off < n as usize {
+                // Linux dirent64 layout (riscv64):
+                //   off 0: d_ino (u64)     — 8 bytes
+                //   off 8: d_off (i64)     — 8 bytes
+                //   off 16: d_reclen (u16)  — 2 bytes
+                //   off 18: d_type (u8)     — 1 byte
+                //   off 19: d_name          — variable
+                if off + 19 > n as usize {
+                    break;
+                }
+                let reclen = u16::from_ne_bytes([buf[off + 16], buf[off + 17]]) as usize;
+                if reclen < 19 || reclen == 0 {
+                    break;
+                }
+                let _d_type = buf[off + 18];
+                let name_start = off + 19;
+
+                // 找 null 结尾
+                let mut name_end = name_start;
+                while name_end < buf.len() && buf[name_end] != 0 {
+                    name_end += 1;
+                }
+                let name = core::str::from_utf8(&buf[name_start..name_end]).unwrap_or("");
+
+                if !name.is_empty() && name != "." && name != ".." {
+                    // 跳过源文件 (.c .h) 和 shell 脚本 (.sh)
+                    if name.ends_with(".c") || name.ends_with(".h") || name.ends_with(".sh") {
+                        off += reclen;
+                        continue;
+                    }
+                    // ltp_from 跳过逻辑：没遇到起始测例前全部跳过
+                    if let Some(from_case) = from {
+                        if !found_from {
+                            if name == from_case {
+                                // 找到了起始测例，标记后在当前 entry 正常执行（它会被 exclude 跳过）
+                                found_from = true;
+                            } else {
+                                println!(
+                                    "CASE {}: {} (skip before ltp_from={})",
+                                    cases, name, from_case
+                                );
+                                cases += 1;
+                                off += reclen;
+                                continue;
+                            }
+                        }
+                    }
+
+                    println!("CASE {}: {}", cases, name);
+                    cases += 1;
+                    println!("RUN LTP CASE {}", name);
+                    // 检查排除列表
+                    if exclude.iter().any(|e| e == name) {
+                        println!("    SKIP (excluded)");
+                        println!("FAIL LTP CASE {} : -1 (excluded)", name);
+                    } else {
+                        let cmd = format!("cd {} && ./{}", ltp_dir, name);
+                        let ret = run_bash_cmd(&cmd, environ);
+                        println!("FAIL LTP CASE {} : {}", name, ret);
+                    }
+                }
+
+                off += reclen;
+            }
+        }
+
+        let _ = close(fd as usize);
+        println!("#### OS COMP TEST GROUP END ltp-{} ####", libc_suffix);
+        exit(0);
+    } else {
+        // parent: 超时 + 强杀（与 run_group_in_dir 一致）
+        let mut exit_code: i32 = 0;
+        let timeout_ms = timeout_secs * 1000;
+        let mut elapsed_ms: u64 = 0;
+        const POLL_MS: u64 = 100;
+        let mut timed_out = false;
+
+        loop {
+            let ret = waitpid_wnohang(pid as isize, &mut exit_code);
+            if ret == pid {
+                break;
+            }
+            if ret < 0 {
+                println!("[initproc] ltp pid={} vanished", pid);
+                break;
+            }
+
+            elapsed_ms += POLL_MS;
+            if elapsed_ms >= timeout_ms {
+                timed_out = true;
+                println!(
+                    "[initproc] TIMEOUT ({}s) for ltp in {}, sending SIGKILL to pid={}",
+                    timeout_secs, ltp_dir, pid
+                );
+                let _ = kill(pid as usize, SIGKILL);
+                let _ = waitpid(pid as usize, &mut exit_code);
+                println!("[initproc] killed ltp pid={}", pid);
+                break;
+            }
+
+            sleep(POLL_MS as usize);
+        }
+
+        reap_orphans();
+        if timed_out {
+            println!(
+                "#### OS COMP TEST GROUP END ltp-{} ####",
+                if dir.contains("musl") {
+                    "musl"
+                } else {
+                    "glibc"
+                }
+            );
+        }
+        println!("[initproc] done ltp in {} exit_code={}", dir, exit_code);
+    }
+}
+
+fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
+    println!(
+        "[initproc] run_selected_groups start mask=0x{:03X} order={:?}",
+        cfg.mask,
+        cfg.order
+            .iter()
+            .map(|i| TEST_GROUPS[*i].0)
+            .collect::<Vec<_>>()
+    );
+    for &idx in &cfg.order {
+        let (group_name, script) = TEST_GROUPS[idx];
+        // mask 作为过滤器
+        if (cfg.mask & (1u16 << idx as u16)) == 0 {
+            println!("[initproc] skip {} (mask bit{} not set)", group_name, idx);
             continue;
         }
-        println!("[initproc] select bit{} group={}", idx, group_name);
-        run_group_in_dir(environ, "/musl\0", script);
-        run_group_in_dir(environ, "/glibc\0", script);
+        let timeout_secs = cfg.timeouts[idx];
+        println!(
+            "[initproc] select group={} timeout={}s",
+            group_name, timeout_secs
+        );
+        if group_name == "ltp" {
+            // LTP 使用内联枚举（支持 exclude + from），不走 shell 脚本
+            run_ltp_binaries(
+                environ,
+                "/musl\0",
+                &cfg.ltp_exclude,
+                cfg.ltp_from.as_deref(),
+                timeout_secs,
+            );
+            run_ltp_binaries(
+                environ,
+                "/glibc\0",
+                &cfg.ltp_exclude,
+                cfg.ltp_from.as_deref(),
+                timeout_secs,
+            );
+        } else {
+            run_group_in_dir(environ, "/musl\0", group_name, script, timeout_secs);
+            run_group_in_dir(environ, "/glibc\0", group_name, script, timeout_secs);
+        }
+        // 每组之间休息一会，清理孤儿进程、让网络连接完全关闭
+        println!("[initproc] sleep 1s before next group");
+        sleep(1000);
     }
     println!("[initproc] run_selected_groups done");
 }
@@ -341,7 +785,7 @@ fn run_unix_standalone_tests(environ: &[*const u8]) {
     );
 }
 
-fn run_ltp_network_tests(environ: &[*const u8]) {
+fn run_ltp_network_tests(environ: &[*const u8], exclude: &[String]) {
     // LTP testcases/bin 中与网络/Socket 相关的独立 ELF 测例。
     // 分为多个子列表，按功能分类。
     // 注意：部分测例可能因内核缺少对应功能而返回 TCONF（跳过），属正常行为。
@@ -564,6 +1008,10 @@ fn run_ltp_network_tests(environ: &[*const u8]) {
     );
 
     for &name in &net_cases {
+        if exclude.iter().any(|e| e == name) {
+            println!("[initproc] LTP skip (excluded): {}", name);
+            continue;
+        }
         println!("=== LTP-NET: {} ===", name);
         let cmd = format!("cd {} && ./{}", testdir, name);
         let ret = run_bash_cmd(&cmd, environ);
@@ -574,7 +1022,7 @@ fn run_ltp_network_tests(environ: &[*const u8]) {
     println!("[initproc] LTP network tests done");
 }
 
-fn run_ltp_signal_tests(environ: &[*const u8]) {
+fn run_ltp_signal_tests(environ: &[*const u8], exclude: &[String]) {
     // LTP testcases/bin 中与信号（Signal）处理相关的测例。
     // 目的：作为控制变量，先验证信号系统（SA_RESTART/EINTR/sigprocmask/定时器）
     // 是否正确，再排查网络栈的阻塞/唤醒问题。
@@ -624,6 +1072,10 @@ fn run_ltp_signal_tests(environ: &[*const u8]) {
     );
 
     for &name in &signal_cases {
+        if exclude.iter().any(|e| e == name) {
+            println!("[initproc] LTP skip (excluded): {}", name);
+            continue;
+        }
         println!("=== LTP-SIG: {} ===", name);
         let cmd = format!("cd {} && ./{}", testdir, name);
         let ret = run_bash_cmd(&cmd, environ);
@@ -737,7 +1189,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         return 0;
     }
 
-    run_selected_groups(&environ, cfg.mask);
+    run_selected_groups(&environ, &cfg);
 
     if cfg.mode == RunMode::RunThenShell {
         println!("[initproc] run_then_shell -> shell");

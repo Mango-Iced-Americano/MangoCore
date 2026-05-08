@@ -43,7 +43,7 @@ pub fn ext4_bmap_bit_find_clr(bmap: &[u8], sbit: u32, ebit: u32, bit_id: &mut u3
         }
 
         if ext4_bmap_is_bit_clr(bmap, i) {
-            *bit_id = sbit;
+            *bit_id = i;
             return true;
         }
 

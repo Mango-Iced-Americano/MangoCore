@@ -245,14 +245,8 @@ impl File for Ext4OSInode {
     }
 
     fn write(&self, offset: Option<&mut usize>, buf: &[u8]) -> usize {
-        // println!("into here!!!");
-        // println!("buf is :{:?}", buf);
         let mut total_write_size = 0usize;
-
-        // 获取写锁
         let inode_lock = self.inode_lock.write();
-
-        // 获取 inode 的文件大小
         let old_size;
         {
             let inode_ref = self.inode.lock();
@@ -263,12 +257,20 @@ impl File for Ext4OSInode {
             Some(offset) => {
                 let mut start = *offset;
                 let diff_len = buf.len() as isize + start as isize - old_size as isize;
-
                 if diff_len > 0 {
                     self.truncate_size((old_size as isize + diff_len) as usize)
                         .unwrap();
                 }
-
+                {
+                    let post_trunc_size = self.inode.lock().inode.get_file_size() as usize;
+                    log::debug!(
+                        "[ext4::write] offset={} len={} old_size={} post_trunc_size={}",
+                        start,
+                        buf.len(),
+                        old_size,
+                        post_trunc_size
+                    );
+                }
                 let inode_ref = self.inode.lock().clone();
                 total_write_size = self.update_block_cache(start, buf, Arc::new(inode_ref.clone()));
                 *offset += total_write_size;
@@ -283,6 +285,16 @@ impl File for Ext4OSInode {
                         .unwrap();
                 }
 
+                {
+                    let post_trunc_size = self.inode.lock().inode.get_file_size() as usize;
+                    log::debug!(
+                        "[ext4::write] offset={} len={} old_size={} post_trunc_size={}",
+                        start,
+                        buf.len(),
+                        old_size,
+                        post_trunc_size
+                    );
+                }
                 let inode_ref = self.inode.lock().clone();
                 total_write_size = self.update_block_cache(start, buf, Arc::new(inode_ref.clone()));
                 *offset += total_write_size;
@@ -969,7 +981,6 @@ impl Ext4OSInode {
     fn update_block_cache(&self, offset: usize, buf: &[u8], inode_ref: Arc<Ext4InodeRef>) -> usize {
         let mut start = offset;
         let old_size = inode_ref.inode.get_file_size() as usize;
-        let diff_len = buf.len() as isize + offset as isize - old_size as isize;
         let end = (offset + buf.len()).min(old_size as usize);
 
         debug_assert!(start <= end);

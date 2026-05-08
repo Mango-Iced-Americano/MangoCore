@@ -59,12 +59,16 @@ pub fn flush_preload() {
         sinitproc as usize, einitproc as usize, sbash as usize, ebash as usize, sbusybox as usize, ebusybox as usize,
     );
     let initproc = ROOT_FD.open("initproc", OpenFlags::O_CREAT, false).unwrap();
-    initproc.write(None, unsafe {
-        core::slice::from_raw_parts(
-            sinitproc as *const u8,
-            einitproc as usize - sinitproc as usize,
-        )
+    let initproc_len = einitproc as usize - sinitproc as usize;
+    let written = initproc.write(None, unsafe {
+        core::slice::from_raw_parts(sinitproc as *const u8, initproc_len)
     });
+    log::debug!(
+        "[kernel] flush_preload: initproc write len={} => written={} size_after={}",
+        initproc_len,
+        written,
+        initproc.get_size()
+    );
     for ppn in crate::mm::PPNRange::new(
         crate::mm::PhysAddr::from(sinitproc as usize).floor(),
         crate::mm::PhysAddr::from(einitproc as usize).floor(),

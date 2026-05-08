@@ -345,6 +345,11 @@ impl TaskControlBlock {
     pub fn new(elf: FileDescriptor) -> Self {
         // 将ELF文件映射到内核空间
         let elf_data = elf.map_to_kernel_space(MMAP_BASE);
+        log::debug!(
+            "[TCB::new] elf_data.len() = {} (first 16 bytes: {:02X?})",
+            elf_data.len(),
+            &elf_data[..16.min(elf_data.len())]
+        );
         // 带有ELF程序头/跳板的内存集（MemorySet）
         // 解析ELF文件，初始化内存映射
         let (mut memory_set, user_heap, elf_info) = MemorySet::from_elf(elf_data).unwrap();

@@ -63,7 +63,12 @@ pub fn sleep(period_ms: usize) {
         sys_yield();
     }
 }
-pub fn shutdown() -> isize{
+pub fn kill(pid: usize, sig: usize) -> isize {
+    sys_kill(pid, sig)
+}
+pub const SIGKILL: usize = 9;
+
+pub fn shutdown() -> isize {
     sys_shutdown()
 }
 
@@ -103,13 +108,25 @@ pub fn connect(sockfd: usize, addr: *const u8, addrlen: usize) -> isize {
     sys_connect(sockfd, addr, addrlen)
 }
 
-pub fn sendto(sockfd: usize, buf: *const u8, len: usize, flags: usize,
-              dest_addr: *const u8, addrlen: usize) -> isize {
+pub fn sendto(
+    sockfd: usize,
+    buf: *const u8,
+    len: usize,
+    flags: usize,
+    dest_addr: *const u8,
+    addrlen: usize,
+) -> isize {
     sys_sendto(sockfd, buf, len, flags, dest_addr, addrlen)
 }
 
-pub fn recvfrom(sockfd: usize, buf: *mut u8, len: usize, flags: usize,
-                src_addr: *mut u8, addrlen: *mut usize) -> isize {
+pub fn recvfrom(
+    sockfd: usize,
+    buf: *mut u8,
+    len: usize,
+    flags: usize,
+    src_addr: *mut u8,
+    addrlen: *mut usize,
+) -> isize {
     sys_recvfrom(sockfd, buf, len, flags, src_addr, addrlen)
 }
 
@@ -123,4 +140,8 @@ pub fn getpeername(sockfd: usize, addr: *mut u8, addrlen: *mut usize) -> isize {
 
 pub fn sock_shutdown(sockfd: usize, how: usize) -> isize {
     sys_sock_shutdown(sockfd, how)
+}
+
+pub fn getdents64(fd: usize, buf: &mut [u8]) -> isize {
+    sys_getdents64(fd, buf)
 }

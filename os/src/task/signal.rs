@@ -463,12 +463,24 @@ pub fn do_signal() {
                                                   // In this case, signal handler only have one parameter (a0 <- signum), so only copy something necessary
                                                   // To simplify the implementation of sigreturn, here we keep the same layout as above...
                 } else {
-                    *translated_refmut(
+                    // push sigmask into user stack
+                    match translated_refmut(
                         token,
                         (ucontext_addr + 2 * size_of::<usize>() + size_of::<SignalStack>())
                             as *mut Signals,
-                    )
-                    .unwrap() = inner.sigmask; // push sigmask into user stack
+                    ) {
+                        Ok(sigmask_ref) => *sigmask_ref = inner.sigmask,
+                        Err(_) => {
+                            error!(
+                                "[do_signal] Failed to write sigmask to user stack! Send SIGSEGV."
+                            );
+                            drop(inner);
+                            drop(sighand);
+                            drop(task);
+                            exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
+                        }
+                    }
+
                     copy_to_user(
                         token,
                         (trap_cx as *const TrapContext).cast::<MachineContext>(),

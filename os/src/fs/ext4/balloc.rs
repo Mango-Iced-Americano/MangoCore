@@ -1,7 +1,7 @@
 use core::cmp::min;
 
-use alloc::vec::Vec;
 use alloc::vec;
+use alloc::vec::Vec;
 
 use crate::fs::directory_tree::GLOBAL_BLOCK_SIZE;
 use crate::fs::ext4::bitmap::{ext4_bmap_bit_find_clr, ext4_bmap_bit_set, ext4_bmap_is_bit_clr};
@@ -136,8 +136,10 @@ impl Ext4FileSystem {
 
             // Load block with bitmap
             let bmp_blk_adr = block_group.get_block_bitmap_block(super_block);
-            let mut bitmap_block =
-                Block::load_offset(self.block_device.clone(), bmp_blk_adr as usize * self.block_size);
+            let mut bitmap_block = Block::load_offset(
+                self.block_device.clone(),
+                bmp_blk_adr as usize * self.block_size,
+            );
 
             // Check if goal is free
             if ext4_bmap_is_bit_clr(&bitmap_block.data, idx_in_bg) {
@@ -160,8 +162,7 @@ impl Ext4FileSystem {
             for tmp_idx in (idx_in_bg + 1)..end_idx {
                 if ext4_bmap_is_bit_clr(&bitmap_block.data, tmp_idx) {
                     ext4_bmap_bit_set(&mut bitmap_block.data, tmp_idx);
-                    block_group
-                        .set_block_group_balloc_bitmap_csum(super_block, &bitmap_block.data);
+                    block_group.set_block_group_balloc_bitmap_csum(super_block, &bitmap_block.data);
                     // 此处不需要考虑对齐
                     self.block_device
                         .write_block(bmp_blk_adr as usize, &bitmap_block.data);
@@ -244,8 +245,10 @@ impl Ext4FileSystem {
 
             // Load block with bitmap
             let bmp_blk_adr = block_group.get_block_bitmap_block(super_block);
-            let mut bitmap_block =
-                Block::load_offset(self.block_device.clone(), bmp_blk_adr as usize * self.block_size);
+            let mut bitmap_block = Block::load_offset(
+                self.block_device.clone(),
+                bmp_blk_adr as usize * self.block_size,
+            );
 
             // Check if goal is free
             if ext4_bmap_is_bit_clr(&bitmap_block.data, idx_in_bg) {
@@ -270,8 +273,7 @@ impl Ext4FileSystem {
             for tmp_idx in (idx_in_bg + 1)..end_idx {
                 if ext4_bmap_is_bit_clr(&bitmap_block.data, tmp_idx) {
                     ext4_bmap_bit_set(&mut bitmap_block.data, tmp_idx);
-                    block_group
-                        .set_block_group_balloc_bitmap_csum(super_block, &bitmap_block.data);
+                    block_group.set_block_group_balloc_bitmap_csum(super_block, &bitmap_block.data);
                     // 此处不需要考虑对齐
                     self.block_device
                         .write_block(bmp_blk_adr as usize, &bitmap_block.data);
@@ -346,7 +348,7 @@ impl Ext4FileSystem {
 
         let blocks_per_group = super_block.blocks_per_group();
 
-        let bgid = start / blocks_per_group as u64;
+        let mut bgid = start / blocks_per_group as u64;
 
         let mut bg_first = start / blocks_per_group as u64;
         let mut bg_last = (start + count as u64 - 1) / blocks_per_group as u64;
@@ -370,8 +372,9 @@ impl Ext4FileSystem {
                 free_cnt = count;
             }
 
-            ext4_bmap_bits_free(data, idx_in_bg as u32, free_cnt as u32);
-
+            if free_cnt > 0 {
+                ext4_bmap_bits_free(data, idx_in_bg as u32, free_cnt as u32 - 1);
+            }
             count -= free_cnt;
             start += free_cnt as u64;
 
@@ -391,7 +394,8 @@ impl Ext4FileSystem {
             let mut inode_blocks = inode_ref.inode.blocks_count();
             // let ext4_inode_block_size = self.superblock.inode_size() as usize;
             // inode_blocks -= (free_cnt * (self.block_size / EXT4_INODE_BLOCK_SIZE)) as u64;
-            inode_blocks -= (free_cnt * (self.block_size / self.superblock.inode_size as usize)) as u64;
+            inode_blocks -=
+                (free_cnt * (self.block_size / self.superblock.inode_size as usize)) as u64;
             inode_ref.inode.set_blocks_count(inode_blocks);
             self.write_back_inode(inode_ref);
 
@@ -402,6 +406,7 @@ impl Ext4FileSystem {
             bg.sync_to_disk_with_csum(self.block_device.clone(), bgid as usize, &super_block);
 
             bg_first += 1;
+            bgid = bg_first;
         }
     }
 }

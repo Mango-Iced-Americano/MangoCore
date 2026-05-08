@@ -223,6 +223,10 @@ pub fn sys_waitpid_flags(pid: isize, exit_code: *mut i32, options: usize) -> isi
     syscall(SYSCALL_WAIT4, [pid as usize, exit_code as usize, options])
 }
 
+pub fn sys_kill(pid: usize, sig: usize) -> isize {
+    syscall(SYSCALL_KILL, [pid, sig, 0])
+}
+
 pub fn sys_shutdown() -> isize {
     syscall(SYSCALL_SHUTDOWN, [0, 0, 0])
 }
@@ -354,4 +358,8 @@ pub fn sys_getsockopt(
 
 pub fn sys_sock_shutdown(sockfd: usize, how: usize) -> isize {
     syscall(SYSCALL_SOCK_SHUTDOWN, [sockfd, how, 0])
+}
+
+pub fn sys_getdents64(fd: usize, buf: &mut [u8]) -> isize {
+    syscall(SYSCALL_GETDENTS64, [fd, buf.as_mut_ptr() as usize, buf.len()])
 }

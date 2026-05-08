@@ -1,13 +1,13 @@
 use crate::fs::directory_tree::{FILE_SYSTEM, GLOBAL_BLOCK_SIZE};
 
 use super::*;
-use alloc::vec::Vec;
+use crate::timer::get_time_sec;
 use alloc::vec;
+use alloc::vec::Vec;
 use block_group::Block;
 use ext4fs::Ext4FileSystem;
 use path::path_check;
 use spin::RwLock;
-use crate::timer::get_time_sec;
 
 pub struct Ext4FileContent {
     /// The size of the file.
@@ -257,7 +257,7 @@ impl Ext4FileSystem {
     /// + `Result<Ext4InodeRef>` - 新文件的inode
     pub fn create(&self, parent: u32, name: &str, inode_mode: u16) -> Result<Ext4InodeRef, isize> {
         //println!("in1, parent:{:?}", parent);
-        let a = 1+2+parent;
+        let a = 1 + 2 + parent;
         //println!("a = {:?}", a);
         // Ext4FileSystem被锁了？
         let dummy = self.get_inode_ref(a);
@@ -518,8 +518,10 @@ impl Ext4FileSystem {
                 self.append_inode_pblk_from(&mut inode_ref, &mut start_bgid)?
             };
 
-            let mut block =
-                Block::load_offset(self.block_device.clone(), pblock_idx as usize * self.block_size);
+            let mut block = Block::load_offset(
+                self.block_device.clone(),
+                pblock_idx as usize * self.block_size,
+            );
 
             block.write_offset(unaligned, &write_buf[..len], len);
             block.sync_blk_to_disk(self.block_device.clone());
@@ -556,10 +558,14 @@ impl Ext4FileSystem {
             }
 
             // Write contiguous blocks at once
-            let len = min(fblock_count as usize * self.block_size, write_buf_len - written);
+            let len = min(
+                fblock_count as usize * self.block_size,
+                write_buf_len - written,
+            );
 
             for i in 0..fblock_count {
-                let block_offset = fblock_start as usize * self.block_size + i as usize * self.block_size;
+                let block_offset =
+                    fblock_start as usize * self.block_size + i as usize * self.block_size;
                 let mut block = Block::load_offset(self.block_device.clone(), block_offset);
                 let write_size = min(self.block_size, write_buf_len - written);
                 block.write_offset(0, &write_buf[written..written + write_size], write_size);
@@ -583,8 +589,10 @@ impl Ext4FileSystem {
                 self.append_inode_pblk(&mut inode_ref)?
             };
 
-            let mut block =
-                Block::load_offset(self.block_device.clone(), pblock_idx as usize * self.block_size);
+            let mut block = Block::load_offset(
+                self.block_device.clone(),
+                pblock_idx as usize * self.block_size,
+            );
             block.write_offset(0, &write_buf[written..], len);
             block.sync_blk_to_disk(self.block_device.clone());
             drop(block);
@@ -631,11 +639,7 @@ impl Ext4FileSystem {
         // load parent
         let mut parent_inode_ref = self.get_inode_ref(parent_inode_num);
 
-        let r = self.unlink(
-            &mut parent_inode_ref,
-            &mut child_inode_ref,
-            &p[..len],
-        )?;
+        let r = self.unlink(&mut parent_inode_ref, &mut child_inode_ref, &p[..len])?;
 
         Ok(EOK)
     }
@@ -653,10 +657,11 @@ impl Ext4FileSystem {
     ) -> Result<usize, isize> {
         let old_size = inode_ref.inode.size();
 
-        // assert!(old_size > new_size);
-        if old_size > new_size{
-            // println!("[kernel] this may need to be changed");
-            return Ok(EOK)
+        // 文件扩展或不变：只更新 size 后返回（block 分配由 write 路径按需触发）
+        if old_size < new_size {
+            inode_ref.inode.set_size(new_size);
+            self.write_back_inode(inode_ref);
+            return Ok(EOK);
         }
 
         if old_size == new_size {
@@ -666,7 +671,7 @@ impl Ext4FileSystem {
         let block_size = self.block_size as u64;
         let new_blocks_cnt = ((new_size + block_size - 1) / block_size) as u32;
         let old_blocks_cnt = ((old_size + block_size - 1) / block_size) as u32;
-        let diff_blocks_cnt = old_blocks_cnt - new_blocks_cnt;
+        let diff_blocks_cnt = old_blocks_cnt.saturating_sub(new_blocks_cnt); // 防止下溢
 
         if diff_blocks_cnt > 0 {
             self.extent_remove_space(inode_ref, new_blocks_cnt, EXT_MAX_BLOCKS)?;
