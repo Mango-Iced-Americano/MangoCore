@@ -33,7 +33,7 @@ else ifeq ($(BOARD), K210)
 endif
 
 # 块设备类型
-BLK_MODE ?= mem
+BLK_MODE ?= virt_pci
 
 # Binutils
 OBJCOPY := loongarch64-linux-gnu-objcopy
@@ -163,6 +163,8 @@ endif
 
 # 生成根文件系统镜像并编译内核
 all: fs-img uimage mv
+
+build: kernel mv
 
 mv:
 	cp -f $(KERNEL_ELF) ../kernel-la

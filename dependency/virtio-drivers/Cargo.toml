@@ -20,7 +20,6 @@ bitflags = "2.9.0"
 enumn = "0.1.14"
 embedded-io = { version = "0.6.1", optional = true }
 safe-mmio = "0.2.4"
-thiserror = { version = "2.0.12", default-features = false }
 zerocopy = { version = "0.8.24", features = ["derive"] }
 
 [features]

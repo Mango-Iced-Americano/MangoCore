@@ -5,6 +5,10 @@
 //! Types for safe MMIO device access, especially in systems with an MMU.
 
 #![no_std]
+#![feature(const_mut_refs)]
+#![feature(const_nonnull_new)]
+#![feature(const_option)]
+#![feature(raw_ref_op)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 #![deny(unsafe_op_in_unsafe_fn)]
 

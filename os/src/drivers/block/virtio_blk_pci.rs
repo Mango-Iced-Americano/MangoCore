@@ -14,7 +14,7 @@ use virtio_drivers::transport::pci::{PciTransport, virtio_device_type};
 use virtio_drivers::device::blk::VirtIOBlk;
 use virtio_drivers::transport::DeviceType;
 const VIRT_IO_BLOCK_SZ: usize = 512;
-use crate::hal::config::{BLOCK_SZ, PAGE_SIZE, PAGE_SIZE_BITS};
+use crate::hal::{BLOCK_SZ, config::{PAGE_SIZE, PAGE_SIZE_BITS}};
 const BLOCK_RATIO: usize = BLOCK_SZ / VIRT_IO_BLOCK_SZ;
 const PCI_ECAM_BASE: usize = 0x2000_0000;
 const VIRT_PCI_BASE: usize = 0x4000_0000;

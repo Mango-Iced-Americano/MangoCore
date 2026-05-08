@@ -52,19 +52,15 @@ impl From<MmioVersion> for u32 {
 }
 
 /// An error encountered initialising a VirtIO MMIO transport.
-#[derive(Clone, Debug, Eq, Error, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MmioError {
     /// The header doesn't start with the expected magic value 0x74726976.
-    #[error("Invalid magic value {0:#010x} (expected 0x74726976)")]
     BadMagic(u32),
     /// The header reports a version number that is neither 1 (legacy) nor 2 (modern).
-    #[error("Unsupported Virtio MMIO version {0}")]
     UnsupportedVersion(u32),
     /// The header reports a device ID of 0.
-    #[error("Invalid or unknown device ID: {0}")]
     InvalidDeviceID(DeviceTypeError),
     /// The MMIO region size was smaller than the header size we expect.
-    #[error("MMIO region too small")]
     MmioRegionTooSmall,
 }
 
@@ -493,7 +489,7 @@ impl Transport for MmioTransport<'_> {
         field_shared!(self.header, config_generation).read()
     }
 
-    fn read_config_space<T: FromBytes + IntoBytes>(&self, offset: usize) -> Result<T, Error> {
+    fn read_config_space<T: FromBytes + IntoBytes>(&self, offset: usize) -> crate::Result<T> {
         assert!(align_of::<T>() <= 4,
             "Driver expected config space alignment of {} bytes, but VirtIO only guarantees 4 byte alignment.",
             align_of::<T>());
@@ -521,7 +517,7 @@ impl Transport for MmioTransport<'_> {
         &mut self,
         offset: usize,
         value: T,
-    ) -> Result<(), Error> {
+    ) -> crate::Result<()> {
         assert!(align_of::<T>() <= 4,
             "Driver expected config space alignment of {} bytes, but VirtIO only guarantees 4 byte alignment.",
             align_of::<T>());

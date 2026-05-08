@@ -16,7 +16,6 @@ use core::{
 };
 use log::debug;
 pub use some::SomeTransport;
-use thiserror::Error;
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 /// A VirtIO transport layer.
@@ -206,10 +205,9 @@ pub enum DeviceType {
 }
 
 /// Errors converting a number to a virtio device type.
-#[derive(Copy, Clone, Debug, Eq, Error, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DeviceTypeError {
     /// Invalid or unknown virtio device type.
-    #[error("Invalid or unknown virtio device type {0}")]
     InvalidDeviceType(u32),
 }
 
