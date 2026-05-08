@@ -5,7 +5,7 @@ BLK_MODE ?= virt
 MODE ?= release
 CONF_FILE ?= ../os_test.conf
 CONF_ARCH ?= $(CURR_ARCH)
-CONF_BLK_MODE ?= $(BLK_MODE)
+CONF_BLK_MODE ?= $(if $(filter la la64,$(CONF_ARCH)),virt_pci,$(BLK_MODE))
 CONF_IMAGE ?=
 AUTO_REBUILD_MEM ?= 1
 

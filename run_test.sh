@@ -41,7 +41,7 @@ resolve_blk_mode() {
     if [[ -n "${blk_mode_la}" ]]; then
       echo "${blk_mode_la}"
     else
-      echo "mem"
+      echo "virt_pci"
     fi
   fi
 }
