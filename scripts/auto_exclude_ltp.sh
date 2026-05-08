@@ -93,6 +93,26 @@ read_from() {
     echo "${line#ltp_from=}"
 }
 
+read_excludes_musl() {
+    local line
+    line=$(grep -E '^ltp_exclude_musl=' "${CONF_FILE}" | tail -n 1 || true)
+    if [[ -z "${line}" ]]; then
+        echo ""
+        return
+    fi
+    echo "${line#ltp_exclude_musl=}"
+}
+
+read_excludes_glibc() {
+    local line
+    line=$(grep -E '^ltp_exclude_glibc=' "${CONF_FILE}" | tail -n 1 || true)
+    if [[ -z "${line}" ]]; then
+        echo ""
+        return
+    fi
+    echo "${line#ltp_exclude_glibc=}"
+}
+
 unique_list() {
     local raw="$1"
     declare -A seen=()
@@ -161,13 +181,47 @@ update_conf_from() {
     mv "${tmp}" "${CONF_FILE}"
 }
 
+update_conf_exclude_musl() {
+    local list="$1"
+    local tmp
+    tmp=$(mktemp)
+    if grep -qE '^ltp_exclude_musl=' "${CONF_FILE}"; then
+        awk -v v="${list}" 'BEGIN{done=0} {if ($0 ~ /^ltp_exclude_musl=/) {print "ltp_exclude_musl=" v; done=1} else {print}} END{if (!done) print "ltp_exclude_musl=" v}' "${CONF_FILE}" > "${tmp}"
+    else
+        cat "${CONF_FILE}" > "${tmp}"
+        echo "" >> "${tmp}"
+        echo "ltp_exclude_musl=${list}" >> "${tmp}"
+    fi
+    mv "${tmp}" "${CONF_FILE}"
+}
+
+update_conf_exclude_glibc() {
+    local list="$1"
+    local tmp
+    tmp=$(mktemp)
+    if grep -qE '^ltp_exclude_glibc=' "${CONF_FILE}"; then
+        awk -v v="${list}" 'BEGIN{done=0} {if ($0 ~ /^ltp_exclude_glibc=/) {print "ltp_exclude_glibc=" v; done=1} else {print}} END{if (!done) print "ltp_exclude_glibc=" v}' "${CONF_FILE}" > "${tmp}"
+    else
+        cat "${CONF_FILE}" > "${tmp}"
+        echo "" >> "${tmp}"
+        echo "ltp_exclude_glibc=${list}" >> "${tmp}"
+    fi
+    mv "${tmp}" "${CONF_FILE}"
+}
+
 write_temp_conf() {
     local list="$1"
     local from_case="$2"
-    awk -v mask="${MASK_OVERRIDE}" -v ltp="${list}" -v from="${from_case}" '
-        BEGIN{mask_done=0; ltp_done=0; from_done=0}
+    local musl_list
+    local glibc_list
+    musl_list=$(unique_list "$(read_excludes_musl)")
+    glibc_list=$(unique_list "$(read_excludes_glibc)")
+    awk -v mask="${MASK_OVERRIDE}" -v ltp="${list}" -v from="${from_case}" -v musl="${musl_list}" -v glibc="${glibc_list}" '
+        BEGIN{mask_done=0; ltp_done=0; from_done=0; musl_done=0; glibc_done=0}
         {
             if ($0 ~ /^mask=/) {print "mask=" mask; mask_done=1; next}
+            if ($0 ~ /^ltp_exclude_glibc=/) {print "ltp_exclude_glibc=" glibc; glibc_done=1; next}
+            if ($0 ~ /^ltp_exclude_musl=/) {print "ltp_exclude_musl=" musl; musl_done=1; next}
             if ($0 ~ /^ltp_exclude=/) {print "ltp_exclude=" ltp; ltp_done=1; next}
             if ($0 ~ /^ltp_from=/) {print "ltp_from=" from; from_done=1; next}
             print
@@ -175,6 +229,8 @@ write_temp_conf() {
         END{
             if (!mask_done) print "mask=" mask
             if (!ltp_done) print "ltp_exclude=" ltp
+            if (musl != "" && !musl_done) print "ltp_exclude_musl=" musl
+            if (glibc != "" && !glibc_done) print "ltp_exclude_glibc=" glibc
             if (from != "" && !from_done) print "ltp_from=" from
         }
     ' "${CONF_FILE}" > "${TEMP_CONF}"
@@ -249,6 +305,7 @@ while [[ "${round}" -le "${MAX_ROUNDS}" ]]; do
     run_pid=$!
 
     current_case=""
+    current_libc=""
     panic=0
     timed_out=0
 
@@ -269,6 +326,14 @@ while [[ "${round}" -le "${MAX_ROUNDS}" ]]; do
                     RUN\ LTP\ CASE\ *)
                         current_case="${line#RUN LTP CASE }"
                         ;;
+                    *START\ ltp-musl*)
+                        # 标记当前在 musl 轮
+                        current_libc="musl"
+                        ;;
+                    *START\ ltp-glibc*)
+                        # 标记当前在 glibc 轮
+                        current_libc="glibc"
+                        ;;
                 esac
                 if [[ "${line}" == *"panicked at"* ]]; then
                     panic=1
@@ -287,15 +352,27 @@ while [[ "${round}" -le "${MAX_ROUNDS}" ]]; do
 
     if (( panic || timed_out )); then
         if (( panic )); then
-            log "panic detected, case=${current_case}"
+            log "panic detected, case=${current_case} libc=${current_libc}"
         else
-            log "timeout detected (${TIMEOUT_SEC}s), case=${current_case}"
+            log "timeout detected (${TIMEOUT_SEC}s), case=${current_case} libc=${current_libc}"
         fi
 
         if [[ -n "${current_case}" ]]; then
-            excludes_csv=$(append_exclude "${excludes_csv}" "${current_case}")
-            excludes_csv=$(unique_list "${excludes_csv}")
-            update_conf_exclude "${excludes_csv}"
+            # 写入对应 libc 的专属排除列表
+            if [[ "${current_libc}" == "musl" ]]; then
+                mlist=$(unique_list "$(read_excludes_musl)")
+                mlist=$(append_exclude "${mlist}" "${current_case}")
+                update_conf_exclude_musl "${mlist}"
+            elif [[ "${current_libc}" == "glibc" ]]; then
+                glist=$(unique_list "$(read_excludes_glibc)")
+                glist=$(append_exclude "${glist}" "${current_case}")
+                update_conf_exclude_glibc "${glist}"
+            else
+                # libc 不确定，写入共用列表兜底
+                excludes_csv=$(append_exclude "${excludes_csv}" "${current_case}")
+                excludes_csv=$(unique_list "${excludes_csv}")
+                update_conf_exclude "${excludes_csv}"
+            fi
             # 下一轮从当前失败的 case 开始跑（跳过前面已通过的）
             ltp_from="${current_case}"
             update_conf_from "${ltp_from}"

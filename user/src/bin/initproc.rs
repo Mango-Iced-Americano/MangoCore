@@ -43,18 +43,18 @@ const TEST_GROUPS: [(&str, &str); 12] = [
 
 /// 默认执行顺序（组名列表，按此顺序依次执行）
 const DEFAULT_ORDER: &[&str] = &[
-    "ltp",
     "basic",
     "busybox",
     "lua",
     "iperf",
     "netperf",
-    "libctest",
-    "iozone",
-    "unixbench",
+    "ltp",
     "libcbench",
     "lmbench",
     "cyclictest",
+    "unixbench",
+    "libctest",
+    "iozone",
 ];
 
 /// 每组默认超时（秒），索引 0..11 与 TEST_GROUPS 一一对应
@@ -129,6 +129,11 @@ const DEFAULT_LTP_EXCLUDE: &[&str] = &[
     "cve-2017-17052",
     "select02",
 ];
+
+/// LTP musl 专属排除测例（额外追加）
+const DEFAULT_LTP_EXCLUDE_MUSL: &[&str] = &[];
+/// LTP glibc 专属排除测例（额外追加）
+const DEFAULT_LTP_EXCLUDE_GLIBC: &[&str] = &[];
 
 fn run_bash_cmd(cmd: &str, environ: &[*const u8]) -> i32 {
     let pid = fork();
@@ -210,10 +215,23 @@ struct RuntimeConfig {
     order: Vec<usize>,
     /// 每测例超时（秒），索引与 TEST_GROUPS 一一绑定，不与 order 位置绑定
     timeouts: [u64; 12],
-    /// LTP 排除测例名列表
+    /// LTP 排除测例名列表（musl 和 glibc 共用）
     ltp_exclude: Vec<String>,
+    /// LTP musl 专属排除测例
+    ltp_exclude_musl: Vec<String>,
+    /// LTP glibc 专属排除测例
+    ltp_exclude_glibc: Vec<String>,
     /// LTP 起始测例名（不设置则从头开始）
     ltp_from: Option<String>,
+    /// LTP 只跑哪个 libc：musl | glibc | both（默认）
+    ltp_libc: LtpLibc,
+}
+
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum LtpLibc {
+    Musl,
+    Glibc,
+    Both,
 }
 
 impl RuntimeConfig {
@@ -236,7 +254,16 @@ impl RuntimeConfig {
                 .iter()
                 .map(|s| String::from(*s))
                 .collect(),
+            ltp_exclude_musl: DEFAULT_LTP_EXCLUDE_MUSL
+                .iter()
+                .map(|s| String::from(*s))
+                .collect(),
+            ltp_exclude_glibc: DEFAULT_LTP_EXCLUDE_GLIBC
+                .iter()
+                .map(|s| String::from(*s))
+                .collect(),
             ltp_from: None,
+            ltp_libc: LtpLibc::Both,
         }
     }
 }
@@ -346,6 +373,30 @@ fn apply_conf_bytes(data: &[u8], cfg: &mut RuntimeConfig) {
                     .filter(|x| !x.is_empty())
                     .map(String::from)
                     .collect();
+            }
+        } else if key == b"ltp_exclude_musl" {
+            let s = core::str::from_utf8(val).ok();
+            if let Some(s) = s {
+                cfg.ltp_exclude_musl = s
+                    .split(',')
+                    .filter(|x| !x.is_empty())
+                    .map(String::from)
+                    .collect();
+            }
+        } else if key == b"ltp_exclude_glibc" {
+            let s = core::str::from_utf8(val).ok();
+            if let Some(s) = s {
+                cfg.ltp_exclude_glibc = s
+                    .split(',')
+                    .filter(|x| !x.is_empty())
+                    .map(String::from)
+                    .collect();
+            }
+        } else if key == b"ltp_libc" {
+            match val {
+                b"musl" => cfg.ltp_libc = LtpLibc::Musl,
+                b"glibc" => cfg.ltp_libc = LtpLibc::Glibc,
+                _ => {}
             }
         } else if key == b"ltp_from" {
             let s = core::str::from_utf8(val).ok();
@@ -501,7 +552,7 @@ fn run_group_in_dir(
         sleep(fixed_ms as usize);
         let mut exit_code: i32 = 0;
         let _ = waitpid(pid as usize, &mut exit_code);
-        println!("{}", group_end_marker);
+        // 脚本自身会输出 START/END 标记，initproc 不再重复打印
         println!(
             "[initproc] done {} in {} exit_code={}",
             script, dir, exit_code
@@ -745,20 +796,37 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
         );
         if group_name == "ltp" {
             // LTP 使用内联枚举（支持 exclude + from），不走 shell 脚本
-            run_ltp_binaries(
-                environ,
-                "/musl\0",
-                &cfg.ltp_exclude,
-                cfg.ltp_from.as_deref(),
-                timeout_secs,
-            );
-            run_ltp_binaries(
-                environ,
-                "/glibc\0",
-                &cfg.ltp_exclude,
-                cfg.ltp_from.as_deref(),
-                timeout_secs,
-            );
+            let libc = cfg.ltp_libc;
+            if libc == LtpLibc::Musl || libc == LtpLibc::Both {
+                let exclude_musl: Vec<String> = cfg
+                    .ltp_exclude
+                    .iter()
+                    .chain(&cfg.ltp_exclude_musl)
+                    .cloned()
+                    .collect();
+                run_ltp_binaries(
+                    environ,
+                    "/musl\0",
+                    &exclude_musl,
+                    cfg.ltp_from.as_deref(),
+                    timeout_secs,
+                );
+            }
+            if libc == LtpLibc::Glibc || libc == LtpLibc::Both {
+                let exclude_glibc: Vec<String> = cfg
+                    .ltp_exclude
+                    .iter()
+                    .chain(&cfg.ltp_exclude_glibc)
+                    .cloned()
+                    .collect();
+                run_ltp_binaries(
+                    environ,
+                    "/glibc\0",
+                    &exclude_glibc,
+                    cfg.ltp_from.as_deref(),
+                    timeout_secs,
+                );
+            }
         } else {
             run_group_in_dir(environ, "/musl\0", group_name, script, timeout_secs);
             run_group_in_dir(environ, "/glibc\0", group_name, script, timeout_secs);
