@@ -3,6 +3,7 @@ use super::{fetch_task, TaskStatus};
 use super::{TaskContext, TaskControlBlock};
 use crate::hal::TrapContext;
 use crate::net::config::NET_INTERFACE;
+use crate::task::signal::Signals;
 use alloc::sync::Arc;
 use lazy_static::*;
 use log;
@@ -135,6 +136,24 @@ pub fn current_syscall_name() -> &'static str {
 /// 设置当前系统调用 ID
 pub fn set_current_syscall_id(id: Option<usize>) {
     PROCESSOR.lock().set_syscall_id(id);
+}
+
+/// 检查当前任务是否有 OOM kill pending 标志。
+/// 若有，立即发送 SIGKILL 并清除标志。
+/// 这个函数在 trap_return() 中、do_signal() 之前调用，
+/// 确保在当前上下文中无锁（除 task inner lock 外）的安全点处理 OOM。
+pub fn check_oom_kill() {
+    if let Some(task) = current_task() {
+        let mut inner = task.acquire_inner_lock();
+        if inner.pending_oom_kill {
+            inner.pending_oom_kill = false;
+            inner.add_signal(Signals::SIGKILL);
+            log::warn!(
+                "[OOM killer] PID {} marked for OOM kill, sending SIGKILL",
+                task.pid.0
+            );
+        }
+    }
 }
 
 /// 获取当前正在运行的任务的用户态页表令牌

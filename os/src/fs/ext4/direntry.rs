@@ -379,6 +379,7 @@ impl Ext4FileSystem {
     /// + `Vec<Ext4DirEntry>` - 目录项列表
     pub fn dir_get_entries(&self, inode: u32) -> Vec<Ext4DirEntry> {
         let mut entries = Vec::new();
+        let mut oom_aborted = false;
 
         // 加载inode
         let inode_ref = self.get_inode_ref(inode);
@@ -390,12 +391,21 @@ impl Ext4FileSystem {
         // 计算总块数
         let inode_size = inode_ref.inode.size();
         let total_blocks = inode_size / self.block_size as u64;
+        // 安全限制：最多读取 4096 个目录块（约 16MB 目录数据），防止超大目录 OOM
+        let max_blocks = core::cmp::min(total_blocks, 4096);
+        if max_blocks < total_blocks {
+            log::warn!(
+                "[dir_get_entries] inode={} has {} blocks, limiting to 4096 to prevent OOM",
+                inode,
+                total_blocks,
+            );
+        }
 
         // 从第一个逻辑块开始
         let mut iblock = 0;
 
         // 遍历所有块
-        while iblock < total_blocks {
+        while iblock < max_blocks {
             if let Ok(fblock) = self.get_pblock_idx(&inode_ref, iblock as u32) {
                 // 加载物理块
                 let ext4block = Block::load_offset(
@@ -408,6 +418,17 @@ impl Ext4FileSystem {
                 while offset < self.block_size - core::mem::size_of::<Ext4DirEntryTail>() {
                     let de = Ext4DirEntry::try_from(&ext4block.data[offset..]).unwrap();
                     if !de.unused() {
+                        // 使用 try_reserve 进行 fallible 分配
+                        if entries.try_reserve(1).is_err() {
+                            log::warn!(
+                                "[dir_get_entries] OOM at inode={}, block={}, entries_found={}",
+                                inode,
+                                iblock,
+                                entries.len(),
+                            );
+                            oom_aborted = true;
+                            break;
+                        }
                         entries.push(de);
                     }
                     let entry_len = de.entry_len() as usize;
@@ -416,10 +437,20 @@ impl Ext4FileSystem {
                     }
                     offset += entry_len;
                 }
+                if oom_aborted {
+                    break;
+                }
             }
 
             // 前往下一个逻辑块
             iblock += 1;
+        }
+        if oom_aborted {
+            log::warn!(
+                "[dir_get_entries] OOM abort at inode={}, returning partial {} entries",
+                inode,
+                entries.len(),
+            );
         }
         entries
     }
@@ -429,6 +460,7 @@ impl Ext4FileSystem {
         inode_ref: Arc<Ext4InodeRef>,
     ) -> Vec<Ext4DirEntry> {
         let mut entries = Vec::new();
+        let mut oom_aborted = false;
 
         // 加载inode
         assert!(inode_ref.inode.is_dir());
@@ -436,12 +468,21 @@ impl Ext4FileSystem {
         // 计算总块数
         let inode_size = inode_ref.inode.size();
         let total_blocks = inode_size / self.block_size as u64;
+        // 安全限制：最多读取 4096 个目录块
+        let max_blocks = core::cmp::min(total_blocks, 4096);
+        if max_blocks < total_blocks {
+            log::warn!(
+                "[dir_get_entries_from_inode_ref] inode={} has {} blocks, limiting to 4096",
+                inode_ref.inode_num,
+                total_blocks,
+            );
+        }
 
         // 从第一个逻辑块开始
         let mut iblock = 0;
 
         // 遍历所有块
-        while iblock < total_blocks {
+        while iblock < max_blocks {
             if let Ok(fblock) = self.get_pblock_idx(&inode_ref, iblock as u32) {
                 // 加载物理块
                 let ext4block = Block::load_offset(
@@ -454,6 +495,15 @@ impl Ext4FileSystem {
                 while offset < self.block_size - core::mem::size_of::<Ext4DirEntryTail>() {
                     let de = Ext4DirEntry::try_from(&ext4block.data[offset..]).unwrap();
                     if !de.unused() {
+                        if entries.try_reserve(1).is_err() {
+                            log::warn!(
+                                "[dir_get_entries_from_inode_ref] OOM at inode={}, block={}",
+                                inode_ref.inode_num,
+                                iblock,
+                            );
+                            oom_aborted = true;
+                            break;
+                        }
                         entries.push(de);
                     }
                     let entry_len = de.entry_len() as usize;
@@ -462,17 +512,27 @@ impl Ext4FileSystem {
                     }
                     offset += entry_len;
                 }
+                if oom_aborted {
+                    break;
+                }
             }
 
             // 前往下一个逻辑块
             iblock += 1;
         }
         log::info!(
-            "[dir_get_entries_from_inode_ref] inode={}, total_blocks={}, entries_found={}",
+            "[dir_get_entries_from_inode_ref] inode={}, total_blocks={} (limited to {}), entries_found={}",
             inode_ref.inode_num,
             total_blocks,
+            max_blocks,
             entries.len(),
         );
+        if oom_aborted {
+            log::warn!(
+                "[dir_get_entries_from_inode_ref] OOM abort, returning partial {} entries",
+                entries.len(),
+            );
+        }
         entries
     }
 

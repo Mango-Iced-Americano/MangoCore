@@ -697,6 +697,14 @@ impl File for Ext4OSInode {
                 },
                 None => panic!("unknown entry type"),
             };
+            // 使用 try_reserve 进行 fallible 分配：若 OOM 则截断，放弃剩余目录项
+            if result.try_reserve(1).is_err() {
+                log::warn!(
+                    "[get_dirent] OOM while gathering dirents, returning {} entries",
+                    result.len()
+                );
+                break;
+            }
             result.push(Dirent::new(
                 entry.inode as usize,
                 entry.entry_len as isize,

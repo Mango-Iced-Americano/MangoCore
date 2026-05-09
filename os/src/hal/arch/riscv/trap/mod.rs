@@ -10,8 +10,8 @@ use crate::mm::{frame_reserve, MemoryError, VirtAddr};
 use crate::net::config::NET_INTERFACE;
 use crate::syscall::syscall;
 use crate::task::{
-    current_task, current_trap_cx, do_signal, do_wake_expired, suspend_current_and_run_next,
-    Signals,
+    check_oom_kill, current_task, current_trap_cx, do_signal, do_wake_expired,
+    suspend_current_and_run_next, Signals,
 };
 use crate::timer::{ITimerVal, TimeVal};
 use alloc::format;
@@ -169,6 +169,9 @@ pub fn trap_handler() -> ! {
 
 #[no_mangle]
 pub fn trap_return() -> ! {
+    // 检查 OOM kill pending：若分配器耗尽时本进程被标记，在此发送 SIGKILL，
+    // do_signal 将干净地杀掉本进程（释放所有锁、文件、内存），不会有死锁问题。
+    check_oom_kill();
     do_signal();
     set_user_trap_entry();
     let task = current_task().unwrap();

@@ -111,6 +111,8 @@ pub struct TaskControlBlockInner {
     pub real_timer_deadline: Option<TimeSpec>,
     /// ITIMER_REAL 的版本号，用于让旧TimerQueue节点失效
     pub real_timer_generation: usize,
+    /// OOM killer pending 标志：分配器已耗尽，本进程将在 trap_return 时被杀死
+    pub pending_oom_kill: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -430,6 +432,7 @@ impl TaskControlBlock {
                 timer: [ITimerVal::new(); 3],
                 real_timer_deadline: None,
                 real_timer_generation: 0,
+                pending_oom_kill: false,
             }),
         };
         // 准备用户空间的陷阱上下文
@@ -673,6 +676,7 @@ impl TaskControlBlock {
                 // constants
                 task_status: TaskStatus::Ready,
                 exit_code: 0,
+                pending_oom_kill: false,
             }),
         });
         // 添加到父进程或者祖父进程的子进程列表

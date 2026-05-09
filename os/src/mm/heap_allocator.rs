@@ -72,7 +72,13 @@ unsafe impl GlobalAlloc for OomAwareAllocator {
                 }
             }
         }
-        // 所有尝试均失败，触发 alloc_error_handler → shutdown
+        // 所有尝试均失败 — 设置当前任务的 OOM kill pending 标志
+        // 该标志将在 trap_return 中被检查，然后 SIGKILL 发送给本进程
+        if let Some(task) = crate::task::current_task() {
+            task.acquire_inner_lock().pending_oom_kill = true;
+            // drop task Arc 引用，避免 refcount 泄漏
+            drop(task);
+        }
         core::ptr::null_mut()
     }
 
