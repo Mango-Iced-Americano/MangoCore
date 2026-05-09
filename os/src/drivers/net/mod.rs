@@ -1,4 +1,4 @@
-#[cfg(feature = "block_virt")]
+#[cfg(any(feature = "block_virt", feature = "block_virt_pci"))]
 pub mod virtio_net;
 
 pub trait NetDevice: Send + Sync {
@@ -19,10 +19,9 @@ lazy_static! {
 }
 
 pub fn init_net_device() {
-    #[cfg(feature = "block_virt")]
+    #[cfg(any(feature = "block_virt", feature = "block_virt_pci"))]
     {
         let net_dev = virtio_net::VirtIONetWrapper::new();
         *NET_DEVICE.lock() = Some(Arc::new(net_dev));
     }
-    // on la64 (block_virt_pci): NET_DEVICE stays None, virtio_net is not compiled
 }

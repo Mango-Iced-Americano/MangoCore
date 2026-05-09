@@ -311,7 +311,7 @@ impl Transport for PciTransport {
             .into()
     }
 
-    fn read_config_space<T: FromBytes + IntoBytes>(&self, offset: usize) -> Result<T, Error> {
+    fn read_config_space<T: FromBytes + IntoBytes>(&self, offset: usize) -> crate::Result<T> {
         assert!(align_of::<T>() <= 4,
             "Driver expected config space alignment of {} bytes, but VirtIO only guarantees 4 byte alignment.",
             align_of::<T>());
@@ -341,7 +341,7 @@ impl Transport for PciTransport {
         &mut self,
         offset: usize,
         value: T,
-    ) -> Result<(), Error> {
+    ) -> crate::Result<()> {
         assert!(align_of::<T>() <= 4,
             "Driver expected config space alignment of {} bytes, but VirtIO only guarantees 4 byte alignment.",
             align_of::<T>());
@@ -457,38 +457,28 @@ fn get_bar_region_slice<H: Hal, T, C: ConfigurationAccess>(
 }
 
 /// An error encountered initialising a VirtIO PCI transport.
-#[derive(Clone, Debug, Eq, Error, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VirtioPciError {
     /// PCI device ID was not a valid VirtIO device ID.
-    #[error("PCI device ID {0:#06x} was not a valid VirtIO device ID.")]
     InvalidDeviceId(u16),
     /// PCI device vender ID was not the VirtIO vendor ID.
-    #[error("PCI device vender ID {0:#06x} was not the VirtIO vendor ID {VIRTIO_VENDOR_ID:#06x}.")]
     InvalidVendorId(u16),
     /// No valid `VIRTIO_PCI_CAP_COMMON_CFG` capability was found.
-    #[error("No valid `VIRTIO_PCI_CAP_COMMON_CFG` capability was found.")]
     MissingCommonConfig,
     /// No valid `VIRTIO_PCI_CAP_NOTIFY_CFG` capability was found.
-    #[error("No valid `VIRTIO_PCI_CAP_NOTIFY_CFG` capability was found.")]
     MissingNotifyConfig,
     /// `VIRTIO_PCI_CAP_NOTIFY_CFG` capability has a `notify_off_multiplier` that is not a multiple
     /// of 2.
-    #[error("`VIRTIO_PCI_CAP_NOTIFY_CFG` capability has a `notify_off_multiplier` that is not a multiple of 2: {0}")]
     InvalidNotifyOffMultiplier(u32),
     /// No valid `VIRTIO_PCI_CAP_ISR_CFG` capability was found.
-    #[error("No valid `VIRTIO_PCI_CAP_ISR_CFG` capability was found.")]
     MissingIsrConfig,
     /// An IO BAR was provided rather than a memory BAR.
-    #[error("Unexpected IO BAR (expected memory BAR).")]
     UnexpectedIoBar,
     /// A BAR which we need was not allocated an address.
-    #[error("Bar {0} not allocated.")]
     BarNotAllocated(u8),
     /// The offset for some capability was greater than the length of the BAR.
-    #[error("Capability offset greater than BAR length.")]
     BarOffsetOutOfRange,
     /// The address was not aligned as expected.
-    #[error("Address {address:#018} was not aligned to a {alignment} byte boundary as expected.")]
     Misaligned {
         /// The address in question.
         address: usize,
@@ -496,7 +486,6 @@ pub enum VirtioPciError {
         alignment: usize,
     },
     /// A generic PCI error,
-    #[error(transparent)]
     Pci(PciError),
 }
 

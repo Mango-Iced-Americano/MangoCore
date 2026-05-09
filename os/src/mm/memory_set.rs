@@ -816,8 +816,14 @@ impl<T: PageTable> MemorySet<T> {
             // attention that if the process never call sbrk before, it would have no heap area
             // we only do shrinking when it does have a heap area
             } else {
-                self.munmap(old_pt, increment as usize).unwrap();
-                trace!("[sbrk] heap area shrinked to {:X}", new_pt);
+                let start_va: usize = VirtAddr::from(new_pt).ceil().into();
+                let end_va: usize = VirtAddr::from(old_pt).ceil().into();
+                match self.munmap(start_va, end_va - start_va) {
+                    Ok(()) => {}
+                    Err(EINVAL) => {}   // 消除以前从未sbrk导致上述注释no heap
+                                        // area触发panic情况。请确保此处start_va必须对齐
+                    Err(err) => panic!("[sbrk] 堆收缩释放失败, err={}", err),
+                }
             }
             // we need to adjust `heap_pt` if it's not out of bound
             // in spite of whether the process has a heap area

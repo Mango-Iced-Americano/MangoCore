@@ -23,6 +23,7 @@ rlibc = "1.0.0"
 volatile = "0.3.0"
 rand_core = "0.6.4"
 managed = { version = "0.8", default-features = false, features = ["map"] }
+virtio-drivers = { path = "../dependency/virtio-drivers", default-features = false, features = ["alloc"] }
 
 rustsbi = { path = "../dependency/rustsbi" }
 
@@ -49,7 +50,6 @@ smoltcp = { version = "0.10.0", default-features = false, features = [
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 riscv = { path = "../dependency/riscv", features = ["inline-asm"] }
-virtio-drivers = { path = "../dependency/virtio-drivers" }
 
 [features]
 zero_init = []

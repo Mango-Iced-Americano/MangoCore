@@ -42,6 +42,7 @@
 //! ```
 
 #![cfg_attr(not(test), no_std)]
+#![feature(raw_ref_op)]
 #![deny(unused_must_use, missing_docs, clippy::undocumented_unsafe_blocks)]
 #![allow(clippy::identity_op)]
 #![allow(dead_code)]
@@ -58,7 +59,6 @@ mod queue;
 pub mod transport;
 
 use device::socket::SocketError;
-use thiserror::Error;
 
 pub use self::hal::{BufferDirection, Hal, PhysAddr};
 pub use safe_mmio::UniqueMmioPointer;
@@ -70,41 +70,42 @@ pub const PAGE_SIZE: usize = 0x1000;
 pub type Result<T = ()> = core::result::Result<T, Error>;
 
 /// The error type of VirtIO drivers.
-#[derive(Copy, Clone, Debug, Eq, Error, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Error {
     /// There are not enough descriptors available in the virtqueue, try again later.
-    #[error("Virtqueue is full")]
     QueueFull,
     /// The device is not ready.
-    #[error("Device not ready")]
     NotReady,
     /// The device used a different descriptor chain to the one we were expecting.
-    #[error("Device used a different descriptor chain to the one we were expecting")]
     WrongToken,
     /// The queue is already in use.
-    #[error("Virtqueue is already in use")]
     AlreadyUsed,
     /// Invalid parameter.
-    #[error("Invalid parameter")]
     InvalidParam,
     /// Failed to allocate DMA memory.
-    #[error("Failed to allocate DMA memory")]
     DmaError,
     /// I/O error
-    #[error("I/O error")]
     IoError,
     /// The request was not supported by the device.
-    #[error("Request not supported by device")]
     Unsupported,
     /// The config space advertised by the device is smaller than the driver expected.
-    #[error("Config space advertised by the device is smaller than expected")]
     ConfigSpaceTooSmall,
     /// The device doesn't have any config space, but the driver expects some.
-    #[error("The device doesn't have any config space, but the driver expects some")]
     ConfigSpaceMissing,
     /// Error from the socket device.
-    #[error("Error from the socket device: {0}")]
-    SocketDeviceError(#[from] SocketError),
+    SocketDeviceError(SocketError),
+}
+
+impl From<SocketError> for Error {
+    fn from(error: SocketError) -> Self {
+        Self::SocketDeviceError(error)
+    }
+}
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 #[cfg(feature = "alloc")]

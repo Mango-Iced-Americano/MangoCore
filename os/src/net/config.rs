@@ -19,6 +19,10 @@ use smoltcp::{
 pub static NET_INTERFACE: NetInterface = NetInterface::new();
 
 pub fn init() {
+    if NET_DEVICE.lock().is_none() {
+        println!("[kernel] net device unavailable, skipping net interface initialization");
+        return;
+    }
     NET_INTERFACE.init();
     println!("[kernel] net interface initialized (RoutingDevice: lo + eth)");
 }

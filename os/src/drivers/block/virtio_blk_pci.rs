@@ -10,11 +10,11 @@ use lazy_static::*;
 use core::ptr::NonNull;
 use virtio_drivers::{BufferDirection, Hal};
 use virtio_drivers::transport::pci::bus::{BarInfo, Cam, Command, DeviceFunction, MemoryBarType, PciRoot, MmioCam};
-use virtio_drivers::transport::pci::{PciTransport, virtio_device_type};
+use virtio_drivers::transport::pci::{virtio_device_type, PciTransport};
 use virtio_drivers::device::blk::VirtIOBlk;
 use virtio_drivers::transport::DeviceType;
 const VIRT_IO_BLOCK_SZ: usize = 512;
-use crate::hal::config::{BLOCK_SZ, PAGE_SIZE, PAGE_SIZE_BITS};
+use crate::hal::{BLOCK_SZ, config::{PAGE_SIZE, PAGE_SIZE_BITS}};
 const BLOCK_RATIO: usize = BLOCK_SZ / VIRT_IO_BLOCK_SZ;
 const PCI_ECAM_BASE: usize = 0x2000_0000;
 const VIRT_PCI_BASE: usize = 0x4000_0000;
@@ -24,6 +24,8 @@ pub struct VirtIOBlock(Mutex<VirtIOBlk<VirtioHal, PciTransport>>);
 
 lazy_static! {
     static ref QUEUE_FRAMES: Mutex<Vec<Arc<FrameTracker>>> = Mutex::new(Vec::new());
+    static ref PCI_RANGE_ALLOCATOR: Mutex<PciRangeAllocator> =
+        Mutex::new(PciRangeAllocator::new(VIRT_PCI_BASE, VIRT_PCI_SIZE));
 }
 
 impl BlockDevice for VirtIOBlock {
@@ -67,7 +69,7 @@ const fn align_up(addr: usize, align: usize) -> usize {
     (addr + align - 1) & !(align - 1)
 }
 
-fn enumerate_pci() -> Option<PciTransport> {
+pub fn enumerate_virtio_pci(device_type: DeviceType) -> Option<PciTransport> {
     let mmconfig_base = PCI_ECAM_BASE as *mut u8;
     println!("[PCI] ECAM base: {:#x}", mmconfig_base as usize);
 
@@ -79,16 +81,16 @@ fn enumerate_pci() -> Option<PciTransport> {
         println!("[PCI] Device {:?}: vendor={:#x} device={:#x}", device_function, info.vendor_id, info.device_id);
         if let Some(virtio_type) = virtio_device_type(&info) {
             println!("[PCI] VirtIO device: {:?}", virtio_type);
-            if virtio_type != DeviceType::Block { continue; }
+            if virtio_type != device_type { continue; }
 
             println!("[PCI] Configuring BARs...");
-            let mut allocator = PciRangeAllocator::new(VIRT_PCI_BASE, VIRT_PCI_SIZE);
             let mut bar_index = 0;
             while bar_index < 6 {
                 if let Some(bar) = pci_root.bar_info(device_function, bar_index).unwrap() {
                     if let BarInfo::Memory { address_type, address, size, .. } = bar {
                         println!("[PCI] BAR{}: {:?}, addr={:#x}, size={:#x}", bar_index, address_type, address, size);
                         if address == 0 && size != 0 {
+                            let mut allocator = PCI_RANGE_ALLOCATOR.lock();
                             if let Some(alloc_addr) = allocator.alloc_pci_mem(size as usize) {
                                 match address_type {
                                     MemoryBarType::Width64 => pci_root.set_bar_64(device_function, bar_index, alloc_addr as u64),
@@ -119,7 +121,7 @@ impl VirtIOBlock {
     pub fn new() -> Self {
         Self(Mutex::new(
             VirtIOBlk::<VirtioHal, PciTransport>::new(
-                enumerate_pci().expect("No VirtIO block device")
+                enumerate_virtio_pci(DeviceType::Block).expect("No VirtIO block device")
             ).expect("Invalid VirtIO device")
         ))
     }

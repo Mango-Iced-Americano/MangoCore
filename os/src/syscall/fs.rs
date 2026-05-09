@@ -1682,3 +1682,37 @@ pub fn sys_ftruncate(fd: usize, length: isize) -> isize {
         Err(errno) => errno,
     }
 }
+
+pub fn sys_fallocate(fd: usize, mode: u32, offset: isize, len: isize) -> isize {
+    if offset < 0 || len <= 0 {
+        return EINVAL;
+    }
+    if mode != 0 {
+        warn!("[sys_fallocate] unsupported mode: {:#x}", mode);
+        return EOPNOTSUPP;
+    }
+
+    let end = match offset.checked_add(len) {
+        Some(end) => end,
+        None => return EFBIG,
+    };
+
+    let task = current_task().unwrap();
+    let fd_table = task.files.lock();
+    let file_descriptor = match fd_table.get_ref(fd) {
+        Ok(file_descriptor) => file_descriptor,
+        Err(errno) => return errno,
+    };
+    info!(
+        "[sys_fallocate] fd: {}, mode: {:#x}, offset: {}, len: {}, end: {}",
+        fd, mode, offset, len, end
+    );
+
+    if file_descriptor.get_size() >= end as usize {
+        return SUCCESS;
+    }
+    match file_descriptor.truncate_size(end) {
+        Ok(()) => SUCCESS,
+        Err(errno) => errno,
+    }
+}
