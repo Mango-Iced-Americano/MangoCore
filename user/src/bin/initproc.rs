@@ -221,6 +221,8 @@ struct RuntimeConfig {
     ltp_exclude_musl: Vec<String>,
     /// LTP glibc 专属排除测例
     ltp_exclude_glibc: Vec<String>,
+    /// LTP include 白名单（非空时只跑这些测例）
+    ltp_include: Vec<String>,
     /// LTP 起始测例名（不设置则从头开始）
     ltp_from: Option<String>,
     /// LTP 只跑哪个 libc：musl | glibc | both（默认）
@@ -262,6 +264,7 @@ impl RuntimeConfig {
                 .iter()
                 .map(|s| String::from(*s))
                 .collect(),
+            ltp_include: Vec::new(),
             ltp_from: None,
             ltp_libc: LtpLibc::Both,
         }
@@ -392,6 +395,15 @@ fn apply_conf_bytes(data: &[u8], cfg: &mut RuntimeConfig) {
                     .map(String::from)
                     .collect();
             }
+        } else if key == b"ltp_include" {
+            let s = core::str::from_utf8(val).ok();
+            if let Some(s) = s {
+                cfg.ltp_include = s
+                    .split(',')
+                    .filter(|x| !x.is_empty())
+                    .map(String::from)
+                    .collect();
+            }
         } else if key == b"ltp_libc" {
             match val {
                 b"musl" => cfg.ltp_libc = LtpLibc::Musl,
@@ -449,6 +461,9 @@ fn load_runtime_config() -> RuntimeConfig {
         cfg.mask
     );
     println!("[initproc] LTP exclude list: {:?}", cfg.ltp_exclude);
+    if !cfg.ltp_include.is_empty() {
+        println!("[initproc] LTP include list: {:?}", cfg.ltp_include);
+    }
     cfg
 }
 
@@ -611,6 +626,7 @@ fn run_ltp_binaries(
     environ: &[*const u8],
     dir: &str,
     exclude: &[String],
+    include: &[String],
     from: Option<&str>,
     timeout_secs: u64,
 ) {
@@ -689,7 +705,6 @@ fn run_ltp_binaries(
                     if let Some(from_case) = from {
                         if !found_from {
                             if name == from_case {
-                                // 找到了起始测例，标记后在当前 entry 正常执行（它会被 exclude 跳过）
                                 found_from = true;
                             } else {
                                 println!(
@@ -701,6 +716,14 @@ fn run_ltp_binaries(
                                 continue;
                             }
                         }
+                    }
+
+                    // include 白名单过滤：非空时只跑列表中的测例
+                    if !include.is_empty() && !include.iter().any(|e| e == name) {
+                        println!("CASE {}: {} (not in include)", cases, name);
+                        cases += 1;
+                        off += reclen;
+                        continue;
                     }
 
                     println!("CASE {}: {}", cases, name);
@@ -808,6 +831,7 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
                     environ,
                     "/musl\0",
                     &exclude_musl,
+                    &cfg.ltp_include,
                     cfg.ltp_from.as_deref(),
                     timeout_secs,
                 );
@@ -823,6 +847,7 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
                     environ,
                     "/glibc\0",
                     &exclude_glibc,
+                    &cfg.ltp_include,
                     cfg.ltp_from.as_deref(),
                     timeout_secs,
                 );
