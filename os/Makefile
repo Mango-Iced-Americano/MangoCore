@@ -11,7 +11,7 @@ AUTO_REBUILD_MEM ?= 1
 
 .PHONY: all $(ARCHS) clean
 
-all: rv64_all la64_all
+all: conf-inject rv64_all la64_all
 
 rv64_all:
 	@echo "Building rv64"
