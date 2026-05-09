@@ -10,7 +10,7 @@
 #
 # 环境变量：
 #   ARCH        — rv64（默认）| la64
-#   TIMEOUT_SEC — 每轮无输超时秒数（默认 60，LTP 测例比普通 shell 脚本慢）
+#   TIMEOUT_SEC — 每轮无输超时秒数
 #   CONF_FILE   — os_test.conf 路径
 #   LOG_DIR     — 日志输出目录
 #   MAX_ROUNDS  — 最大轮次（默认 200）
@@ -22,7 +22,7 @@ REPO_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd)
 
 ARCH=${ARCH:-rv64}
 BLK_MODE=${BLK_MODE:-}
-TIMEOUT_SEC=${TIMEOUT_SEC:-60}
+TIMEOUT_SEC=${TIMEOUT_SEC:-15}
 CONF_FILE=${CONF_FILE:-"${REPO_ROOT}/os_test.conf"}
 LOG_DIR=${LOG_DIR:-"${REPO_ROOT}/testresult/auto_ltp"}
 MAX_ROUNDS=${MAX_ROUNDS:-200}

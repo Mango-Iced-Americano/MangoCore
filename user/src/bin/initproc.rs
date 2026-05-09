@@ -47,14 +47,14 @@ const DEFAULT_ORDER: &[&str] = &[
     "basic",
     "busybox",
     "lua",
-    "iperf",
     "netperf",
-    "libcbench",
-    "lmbench",
     "cyclictest",
-    "unixbench",
     "libctest",
     "iozone",
+    "lmbench",
+    "libcbench",
+    "unixbench",
+    "iperf",
 ];
 
 /// 每组默认超时（秒），索引 0..11 与 TEST_GROUPS 一一对应
@@ -65,8 +65,8 @@ const DEFAULT_TIMEOUTS: [u64; 12] = [
     60,  // [2]  lua
     120, // [3]  libctest
     60,  // [4]  iozone
-    120, // [5]  unixbench
-    90,  // [6]  iperf
+    90,  // [5]  unixbench
+    40,  // [6]  iperf
     60,  // [7]  libcbench
     60,  // [8]  lmbench
     90,  // [9]  netperf
@@ -75,60 +75,7 @@ const DEFAULT_TIMEOUTS: [u64; 12] = [
 ];
 
 /// LTP 默认排除测例名列表
-const DEFAULT_LTP_EXCLUDE: &[&str] = &[
-    "access04",
-    "fallocate02",
-    "fallocate03",
-    "fanotify13",
-    "fanotify14",
-    "fanotify23",
-    "fremovexattr01",
-    "fsconfig03",
-    "fsync04",
-    "getresuid01_16",
-    "getrusage01",
-    "kill02",
-    "linkat02",
-    "mkdir03",
-    "move_mount01",
-    "mprotect05",
-    "sendmsg01",
-    "splice01",
-    "statfs01",
-    "statx06",
-    "statx12",
-    "umount01",
-    "inode02",
-    "hugemmap04",
-    "gencos",
-    "fanotify20",
-    "poll02",
-    "preadv203_64",
-    "pselect01",
-    "pwrite02_64",
-    "rename03",
-    "rename13",
-    "umount03",
-    "lftest",
-    "genj1",
-    "shm_test",
-    "fallocate05",
-    "fanotify18",
-    "ioctl05",
-    "flock03",
-    "mmap20",
-    "mount01",
-    "inotify10",
-    "preadv03",
-    "readv02",
-    "sigwaitinfo01",
-    "pidns04",
-    "waitid08",
-    "doio",
-    "starvation",
-    "cve-2017-17052",
-    "select02",
-];
+const DEFAULT_LTP_EXCLUDE: &[&str] = &[];
 
 /// LTP musl 专属排除测例（额外追加）
 const DEFAULT_LTP_EXCLUDE_MUSL: &[&str] = &[];
@@ -665,6 +612,7 @@ fn run_ltp_binaries(
         let mut found_from = false;
         let mut buf = [0u8; 8192];
         loop {
+            // sleep(10); // 避免过快循环导致 CPU 占用过高
             let n = getdents64(fd as usize, &mut buf);
             if n <= 0 {
                 break;

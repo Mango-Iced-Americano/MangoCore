@@ -13,8 +13,8 @@ use crate::mm::{copy_from_user, copy_to_user, frame_reserve, MemoryError, PageTa
 use crate::net::config::NET_INTERFACE;
 use crate::syscall::syscall;
 use crate::task::{
-    check_oom_kill, current_task, current_trap_cx, current_user_token, do_signal,
-    do_wake_expired, suspend_current_and_run_next, Signals,
+    check_oom_kill, current_task, current_trap_cx, current_user_token, do_signal, do_wake_expired,
+    suspend_current_and_run_next, Signals,
 };
 use core::arch::{asm, global_asm};
 use core::ptr::{addr_of, addr_of_mut};
