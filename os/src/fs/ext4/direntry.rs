@@ -114,10 +114,15 @@ impl Default for Ext4DirEntry {
     }
 }
 
-impl<T> TryFrom<&[T]> for Ext4DirEntry {
+impl TryFrom<&[u8]> for Ext4DirEntry {
     type Error = u64;
-    fn try_from(data: &[T]) -> core::result::Result<Self, u64> {
-        Ok(unsafe { core::ptr::read(data.as_ptr() as *const _) })
+    fn try_from(data: &[u8]) -> core::result::Result<Self, u64> {
+        let mut entry = Ext4DirEntry::default();
+        let size = core::cmp::min(data.len(), core::mem::size_of::<Ext4DirEntry>());
+        unsafe {
+            core::ptr::copy_nonoverlapping(data.as_ptr(), &mut entry as *mut _ as *mut u8, size);
+        }
+        Ok(entry)
     }
 }
 
@@ -201,12 +206,9 @@ impl Ext4DirEntry {
         csum = ext4_crc32c(EXT4_CRC32_INIT, &uuid, uuid.len() as u32);
         csum = ext4_crc32c(csum, &ino_index.to_le_bytes(), 4);
         csum = ext4_crc32c(csum, &ino_gen.to_le_bytes(), 4);
-        let mut data = [0u8; 0xff4];
-        unsafe {
-            core::ptr::copy_nonoverlapping(blk_data.as_ptr(), data.as_mut_ptr(), blk_data.len());
-        }
 
-        csum = ext4_crc32c(csum, &data[..], 0xff4);
+        let tail_offset = blk_data.len() - core::mem::size_of::<Ext4DirEntryTail>();
+        csum = ext4_crc32c(csum, &blk_data[..tail_offset], tail_offset as u32);
         csum
     }
 
@@ -221,11 +223,15 @@ impl Ext4DirEntry {
         // assert_eq!(dst_blk.block_data[offset..offset + core::mem::size_of::<Ext4DirEntry>()], data[..]);
     }
 
-    /// Copy the directory entry to a slice.
+    /// Copy the directory entry to a slice, only copying the real used length.
     pub fn copy_to_slice(&self, array: &mut [u8], offset: usize) {
         let de_ptr = self as *const Ext4DirEntry as *const u8;
-        let array_ptr = array as *mut [u8] as *mut u8;
-        let count = core::mem::size_of::<Ext4DirEntry>() / core::mem::size_of::<u8>();
+        let array_ptr = array.as_mut_ptr();
+        let mut count = core::mem::size_of::<Ext4FakeDirEntry>() + self.name_len as usize;
+        if count % 4 != 0 {
+            count += 4 - (count % 4);
+        }
+        let count = core::cmp::max(count, core::mem::size_of::<Ext4FakeDirEntry>());
         unsafe {
             core::ptr::copy_nonoverlapping(de_ptr, array_ptr.add(offset), count);
         }
@@ -261,7 +267,7 @@ impl Ext4DirEntryTail {
         unsafe {
             let offset = block_size - core::mem::size_of::<Ext4DirEntryTail>();
             let de_ptr = self as *const Ext4DirEntryTail as *const u8;
-            let array_ptr = array as *mut [u8] as *mut u8;
+            let array_ptr = array.as_mut_ptr();
             let count = core::mem::size_of::<Ext4DirEntryTail>();
             core::ptr::copy_nonoverlapping(de_ptr, array_ptr.add(offset), count);
         }
@@ -292,8 +298,6 @@ impl Ext4FileSystem {
 
         // start from the first logical block
         let mut iblock = 0;
-        // physical block id
-        let mut fblock: Ext4Fsblk = 0;
 
         // calculate total blocks
         let inode_size: u64 = parent.inode.size();
@@ -301,15 +305,7 @@ impl Ext4FileSystem {
 
         // iterate all blocks
         while iblock < total_blocks {
-            let search_path = self.find_extent(&parent, iblock as u32);
-
-            if let Ok(path) = search_path {
-                // get the last path
-                let path = path.path.last().unwrap();
-
-                // get physical block id
-                fblock = path.pblock;
-
+            if let Ok(fblock) = self.get_pblock_idx(&parent, iblock as u32) {
                 // load physical block
                 let mut ext4block = Block::load_offset(
                     self.block_device.clone(),
@@ -323,15 +319,17 @@ impl Ext4FileSystem {
                     result.pblock_id = fblock as usize;
                     return Ok(EOK);
                 }
-            } else {
-                //println!("[kernel direntry] dir search fail");
-                return Err(Ext4Error::new(Errno::ENOENT));
             }
             // go to next block
             iblock += 1
         }
 
-        //println!("[kernel direntry] dir search fail");
+        log::info!(
+            "[dir_find_entry] FAILED: inode={}, name={}, total_blocks={}",
+            parent_inode,
+            name,
+            total_blocks,
+        );
         return Err(Ext4Error::new(Errno::ENOENT));
     }
 
@@ -354,7 +352,7 @@ impl Ext4FileSystem {
 
         // start from the first entry
         while offset < self.block_size - core::mem::size_of::<Ext4DirEntryTail>() {
-            let de: Ext4DirEntry = block.read_offset_as(offset);
+            let de = Ext4DirEntry::try_from(&block.data[offset..]).unwrap();
             if !de.unused() && de.compare_name(name) {
                 result.dentry = de;
                 result.offset = offset;
@@ -398,16 +396,7 @@ impl Ext4FileSystem {
 
         // 遍历所有块
         while iblock < total_blocks {
-            // 获取逻辑块号对应的物理块号(此处为路径，路径中包含有物理块号)
-            let search_path = self.find_extent(&inode_ref, iblock as u32);
-
-            if let Ok(path) = search_path {
-                // get the last path
-                let path = path.path.last().unwrap();
-
-                // 获取物理块号
-                let fblock = path.pblock;
-
+            if let Ok(fblock) = self.get_pblock_idx(&inode_ref, iblock as u32) {
                 // 加载物理块
                 let ext4block = Block::load_offset(
                     self.block_device.clone(),
@@ -417,13 +406,13 @@ impl Ext4FileSystem {
 
                 // 遍历块内所有项
                 while offset < self.block_size - core::mem::size_of::<Ext4DirEntryTail>() {
-                    let de: Ext4DirEntry = ext4block.read_offset_as(offset);
+                    let de = Ext4DirEntry::try_from(&ext4block.data[offset..]).unwrap();
                     if !de.unused() {
                         entries.push(de);
                     }
                     let entry_len = de.entry_len() as usize;
                     if entry_len == 0 {
-                        break; // 非法目录项，避免死循环
+                        break;
                     }
                     offset += entry_len;
                 }
@@ -453,16 +442,7 @@ impl Ext4FileSystem {
 
         // 遍历所有块
         while iblock < total_blocks {
-            // 获取逻辑块号对应的物理块号
-            let search_path = self.find_extent(&inode_ref, iblock as u32);
-
-            if let Ok(path) = search_path {
-                // get the last path
-                let path = path.path.last().unwrap();
-
-                // 获取物理块号
-                let fblock = path.pblock;
-
+            if let Ok(fblock) = self.get_pblock_idx(&inode_ref, iblock as u32) {
                 // 加载物理块
                 let ext4block = Block::load_offset(
                     self.block_device.clone(),
@@ -472,22 +452,32 @@ impl Ext4FileSystem {
 
                 // 遍历块内所有项
                 while offset < self.block_size - core::mem::size_of::<Ext4DirEntryTail>() {
-                    let de: Ext4DirEntry = ext4block.read_offset_as(offset);
+                    let de = Ext4DirEntry::try_from(&ext4block.data[offset..]).unwrap();
                     if !de.unused() {
                         entries.push(de);
                     }
-                    offset += de.entry_len() as usize;
+                    let entry_len = de.entry_len() as usize;
+                    if entry_len == 0 {
+                        break;
+                    }
+                    offset += entry_len;
                 }
             }
 
             // 前往下一个逻辑块
             iblock += 1;
         }
+        log::info!(
+            "[dir_get_entries_from_inode_ref] inode={}, total_blocks={}, entries_found={}",
+            inode_ref.inode_num,
+            total_blocks,
+            entries.len(),
+        );
         entries
     }
 
     pub fn dir_set_csum(&self, dst_blk: &mut Block, ino_gen: u32) {
-        let parent_de: Ext4DirEntry = dst_blk.read_offset_as(0);
+        let parent_de = Ext4DirEntry::try_from(&dst_blk.data[0..]).unwrap();
 
         let tail_offset = self.block_size - size_of::<Ext4DirEntryTail>();
         let mut tail: Ext4DirEntryTail = *dst_blk.read_offset_as_mut(tail_offset);
@@ -520,29 +510,37 @@ impl Ext4FileSystem {
         // iterate all blocks
         let mut iblock = 0;
         while iblock < total_blocks {
-            // get physical block id of a logical block id
-            let pblock = self.get_pblock_idx(parent, iblock as u32)?;
+            if let Ok(pblock) = self.get_pblock_idx(parent, iblock as u32) {
+                // load physical block
+                let mut ext4block = Block::load_offset(
+                    self.block_device.clone(),
+                    pblock as usize * self.block_size,
+                );
 
-            // load physical block
-            let mut ext4block =
-                Block::load_offset(self.block_device.clone(), pblock as usize * self.block_size);
+                let result =
+                    self.try_insert_to_existing_block(&mut ext4block, name, child.inode_num);
 
-            let result = self.try_insert_to_existing_block(&mut ext4block, name, child.inode_num);
+                if result.is_ok() {
+                    // set checksum
+                    self.dir_set_csum(&mut ext4block, parent.inode.generation());
+                    ext4block.sync_blk_to_disk(self.block_device.clone());
 
-            if result.is_ok() {
-                // set checksum
-                self.dir_set_csum(&mut ext4block, parent.inode.generation());
-                ext4block.sync_blk_to_disk(self.block_device.clone());
-
-                return Ok(EOK);
+                    return Ok(EOK);
+                }
             }
-
             // go ot next block
             iblock += 1;
         }
 
         // no space in existing blocks, need to add new block
-        let new_block = self.append_inode_pblk(parent)?;
+        log::info!(
+            "[dir_add_entry] adding new block: parent_inode={}, name={}, child_inode={}, iblock={}",
+            parent.inode_num,
+            name,
+            child.inode_num,
+            iblock,
+        );
+        let new_block = self.insert_inode_pblk(parent, iblock as u32)?;
 
         // load new block
         let mut new_ext4block = Block::load_offset(
@@ -579,7 +577,7 @@ impl Ext4FileSystem {
     ) -> Result<usize, isize> {
         // required length aligned to 4 bytes
         let required_len = {
-            let mut len = size_of::<Ext4DirEntry>() + name.len();
+            let mut len = core::mem::size_of::<Ext4FakeDirEntry>() + name.len();
             if len % 4 != 0 {
                 len += 4 - (len % 4);
             }
@@ -591,45 +589,55 @@ impl Ext4FileSystem {
         // Start from the first entry
         while offset < self.block_size - size_of::<Ext4DirEntryTail>() {
             let mut de = Ext4DirEntry::try_from(&block.data[offset..]).unwrap();
+            let rec_len = de.entry_len as usize;
+            if rec_len == 0 {
+                break;
+            }
 
             if de.unused() {
+                if rec_len >= required_len {
+                    let mut new_entry = Ext4DirEntry::default();
+                    let de_type = DirEntryType::EXT4_DE_DIR;
+                    new_entry.write_entry(rec_len as u16, child_inode, name, de_type);
+                    new_entry.copy_to_slice(&mut block.data, offset);
+                    block.sync_blk_to_disk(self.block_device.clone());
+                    return Ok(EOK);
+                }
+                offset += rec_len;
                 continue;
             }
 
-            let inode = de.inode;
-            let rec_len = de.entry_len;
-
             let used_len = de.name_len as usize;
             let mut sz = core::mem::size_of::<Ext4FakeDirEntry>() + used_len;
-            if used_len % 4 != 0 {
-                sz += 4 - used_len % 4;
+            if sz % 4 != 0 {
+                sz += 4 - (sz % 4);
             }
 
-            let free_space = rec_len as usize - sz;
+            if rec_len >= sz {
+                let free_space = rec_len - sz;
+                if free_space >= required_len {
+                    // Create new directory entry
+                    let mut new_entry = Ext4DirEntry::default();
 
-            // If there is enough free space
-            if free_space >= required_len {
-                // Create new directory entry
-                let mut new_entry = Ext4DirEntry::default();
+                    // Update existing entry length and copy both entries back to block data
+                    de.entry_len = sz as u16;
 
-                // Update existing entry length and copy both entries back to block data
-                de.entry_len = sz as u16;
+                    let de_type = DirEntryType::EXT4_DE_DIR;
+                    new_entry.write_entry(free_space as u16, child_inode, name, de_type);
 
-                let de_type = DirEntryType::EXT4_DE_DIR;
-                new_entry.write_entry(free_space as u16, child_inode, name, de_type);
+                    // update parent_de and new_de to blk_data
+                    de.copy_to_slice(&mut block.data, offset);
+                    new_entry.copy_to_slice(&mut block.data, offset + sz);
 
-                // update parent_de and new_de to blk_data
-                de.copy_to_slice(&mut block.data, offset);
-                new_entry.copy_to_slice(&mut block.data, offset + sz);
+                    // Sync to disk
+                    block.sync_blk_to_disk(self.block_device.clone());
 
-                // Sync to disk
-                block.sync_blk_to_disk(self.block_device.clone());
-
-                return Ok(EOK);
+                    return Ok(EOK);
+                }
             }
 
             // Move to the next entry
-            offset += de.entry_len() as usize;
+            offset += rec_len;
         }
 
         println!("[kernel direntry] No space in block for new entry");
@@ -655,8 +663,6 @@ impl Ext4FileSystem {
         new_entry.write_entry(el as u16, inode, name, de_type);
         new_entry.copy_to_slice(&mut block.data, 0);
 
-        copy_dir_entry_to_array(&new_entry, &mut block.data, 0);
-
         // init tail for new block
         let tail = Ext4DirEntryTail::new();
         tail.copy_to_slice(&mut block.data);
@@ -677,13 +683,19 @@ impl Ext4FileSystem {
         let de_del_entry_len = result.dentry.entry_len();
 
         // prev entry
-        let pde: &mut Ext4DirEntry = ext4block.read_offset_as_mut(result.prev_offset);
+        let pde_entry_len_offset = result.prev_offset + 4; // entry_len is at offset 4
+        let current_len = u16::from_le_bytes([
+            ext4block.data[pde_entry_len_offset],
+            ext4block.data[pde_entry_len_offset + 1],
+        ]);
+        let new_len = current_len + de_del_entry_len;
+        ext4block.data[pde_entry_len_offset..pde_entry_len_offset + 2]
+            .copy_from_slice(&new_len.to_le_bytes());
 
-        pde.entry_len += de_del_entry_len;
-
-        let de_del: &mut Ext4DirEntry = ext4block.read_offset_as_mut(result.offset);
-
-        de_del.inode = 0;
+        // de_del
+        let de_del_inode_offset = result.offset;
+        ext4block.data[de_del_inode_offset..de_del_inode_offset + 4]
+            .copy_from_slice(&0u32.to_le_bytes());
 
         self.dir_set_csum(&mut ext4block, parent.inode.generation());
         ext4block.sync_blk_to_disk(self.block_device.clone());
@@ -698,8 +710,6 @@ impl Ext4FileSystem {
 
         // start from the first logical block
         let mut iblock = 0;
-        // physical block id
-        let mut fblock: Ext4Fsblk = 0;
 
         // calculate total blocks
         let inode_size: u64 = parent.inode.size();
@@ -707,15 +717,7 @@ impl Ext4FileSystem {
 
         // iterate all blocks
         while iblock < total_blocks {
-            let search_path = self.find_extent(&parent, iblock as u32);
-
-            if let Ok(path) = search_path {
-                // get the last path
-                let path = path.path.last().unwrap();
-
-                // get physical block id
-                fblock = path.pblock;
-
+            if let Ok(fblock) = self.get_pblock_idx(&parent, iblock as u32) {
                 // load physical block
                 let ext4block = Block::load_offset(
                     self.block_device.clone(),
@@ -725,8 +727,12 @@ impl Ext4FileSystem {
                 // start from the first entry
                 let mut offset = 0;
                 while offset < self.block_size - core::mem::size_of::<Ext4DirEntryTail>() {
-                    let de: Ext4DirEntry = ext4block.read_offset_as(offset);
-                    offset = offset + de.entry_len as usize;
+                    let de = Ext4DirEntry::try_from(&ext4block.data[offset..]).unwrap();
+                    let entry_len = de.entry_len() as usize;
+                    if entry_len == 0 {
+                        break;
+                    }
+                    offset += entry_len;
                     if de.inode == 0 {
                         continue;
                     }
@@ -774,10 +780,5 @@ impl Ext4FileSystem {
 }
 
 pub fn copy_dir_entry_to_array(header: &Ext4DirEntry, array: &mut [u8], offset: usize) {
-    unsafe {
-        let de_ptr = header as *const Ext4DirEntry as *const u8;
-        let array_ptr = array as *mut [u8] as *mut u8;
-        let count = core::mem::size_of::<Ext4DirEntry>() / core::mem::size_of::<u8>();
-        core::ptr::copy_nonoverlapping(de_ptr, array_ptr.add(offset), count);
-    }
+    header.copy_to_slice(array, offset);
 }

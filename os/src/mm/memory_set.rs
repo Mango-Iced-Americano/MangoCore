@@ -378,10 +378,16 @@ impl<T: PageTable> MemorySet<T> {
             } else {
                 // mapped before the assignment
                 if area.map_perm.contains(MapPermission::W) {
-                    // Whoever triggers this fault shall cause the area to be copied into a new area.
-                    let allocated_ppn = area.copy_on_write(&mut self.page_table, vpn)?;
-                    debug!("[do_page_fault] addr: {:?}, solution: copy on write", addr);
-                    Ok(allocated_ppn.offset(addr.page_offset()))
+                    if area.flags.contains(MapFlags::MAP_SHARED) {
+                        self.page_table.set_pte_flags(vpn, area.map_perm).unwrap();
+                        let ppn = self.page_table.translate(vpn).unwrap();
+                        Ok(ppn.offset(addr.page_offset()))
+                    } else {
+                        // Whoever triggers this fault shall cause the area to be copied into a new area.
+                        let allocated_ppn = area.copy_on_write(&mut self.page_table, vpn)?;
+                        debug!("[do_page_fault] addr: {:?}, solution: copy on write", addr);
+                        Ok(allocated_ppn.offset(addr.page_offset()))
+                    }
                 } else {
                     // Write without permission
                     error!(
@@ -827,6 +833,13 @@ impl<T: PageTable> MemorySet<T> {
             return EINVAL;
         }
         let len = if len == 0 { PAGE_SIZE } else { len };
+        // Limit max mmap size to 1GB to prevent kernel heap OOM in creating MapArea.
+        if len > 1024 * 1024 * 1024 {
+            return ENOMEM;
+        }
+        if start.checked_add(len).is_none() {
+            return EINVAL;
+        }
         let task = current_task().unwrap();
         let idx = self.last_mmap_area_idx();
         let start_va: VirtAddr = if flags.contains(MapFlags::MAP_FIXED) {
@@ -880,6 +893,37 @@ impl<T: PageTable> MemorySet<T> {
                 Err(errno) => return errno,
             }
         }
+
+        if flags.contains(MapFlags::MAP_SHARED) {
+            let map_file = new_area.map_file.clone();
+            let area_start_va = VirtAddr::from(new_area.get_start::<T>()).0;
+            let vpn_range = new_area.inner.vpn_range;
+            if let Some(file) = &map_file {
+                let old_offset = file.get_offset();
+                let file_size = file.get_size();
+                for vpn in vpn_range {
+                    let page_start_va = VirtAddr::from(vpn).0;
+                    let offset_in_area = page_start_va - area_start_va;
+                    if old_offset + offset_in_area <= (file_size + PAGE_SIZE - 1) & !0xfff {
+                        if let Ok(cache) = file.get_single_cache(old_offset + offset_in_area) {
+                            let cache_phys_page = cache.try_lock().unwrap().get_tracker();
+                            let cache_ppn = cache_phys_page.ppn;
+                            self.page_table.map(vpn, cache_ppn, new_area.map_perm);
+                            new_area.inner.alloc_in_memory(vpn, cache_phys_page);
+                        } else {
+                            new_area.map_one_zeroed_unchecked(&mut self.page_table, vpn);
+                        }
+                    } else {
+                        new_area.map_one_zeroed_unchecked(&mut self.page_table, vpn);
+                    }
+                }
+            } else {
+                for vpn in vpn_range {
+                    new_area.map_one_zeroed_unchecked(&mut self.page_table, vpn);
+                }
+            }
+        }
+
         // insert MapArea and keep the order
         #[cfg(feature = "loongarch64")]
         if let Some((idx, _)) = self
@@ -1025,10 +1069,15 @@ impl<T: PageTable> MemorySet<T> {
                 };
                 let page_table = &mut self.page_table;
                 let mut has_unmapped_page = false;
+                let actual_prot = if area.flags.contains(MapFlags::MAP_SHARED) {
+                    prot
+                } else {
+                    prot - MapPermission::W
+                };
                 for vpn in area.inner.vpn_range {
                     // Clear W prot, or CoW pages may be written unexpectedly.
                     // And those pages will gain W prot by CoW.
-                    if let Err(_) = page_table.set_pte_flags(vpn, prot - MapPermission::W) {
+                    if let Err(_) = page_table.set_pte_flags(vpn, actual_prot) {
                         has_unmapped_page = true;
                     }
                 }

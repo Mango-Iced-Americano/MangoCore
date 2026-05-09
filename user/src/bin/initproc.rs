@@ -43,10 +43,10 @@ const TEST_GROUPS: [(&str, &str); 12] = [
 
 /// 默认执行顺序（组名列表，按此顺序依次执行）
 const DEFAULT_ORDER: &[&str] = &[
+    "ltp",
     "basic",
     "busybox",
     "lua",
-    "ltp",
     "iperf",
     "netperf",
     "libcbench",

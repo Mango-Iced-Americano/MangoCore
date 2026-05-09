@@ -17,6 +17,7 @@ use super::{
     block_group::{Block, Ext4BlockGroup},
     crc::{ext4_crc32c, EXT4_CRC32_INIT},
     direntry::DirEntryType,
+    error::Errno,
     ext4fs::Ext4FileSystem,
     extent::{Ext4Extent, Ext4ExtentHeader, Ext4ExtentIndex},
     superblock::Ext4Superblock,
@@ -887,17 +888,31 @@ impl Ext4FileSystem {
     ) -> Result<Ext4Fsblk, isize> {
         let search_path = self.find_extent(inode_ref, lblock);
         if let Ok(path) = search_path {
-            // get the last path
-            let path = path.path.last().unwrap();
-
-            // 获取物理块号
-            let fblock = path.pblock;
-
-            return Ok(fblock);
+            if let Some(node) = path.path.last() {
+                if let Some(extent) = node.extent {
+                    let ext_first = extent.get_first_block();
+                    let ext_len = extent.get_actual_len() as u32;
+                    if lblock >= ext_first && lblock < ext_first + ext_len {
+                        return Ok(node.pblock);
+                    } else {
+                        log::info!(
+                            "[get_pblock_idx] HOLE: inode={}, lblock={}, ext_first={}, ext_len={}",
+                            inode_ref.inode_num,
+                            lblock,
+                            ext_first,
+                            ext_len,
+                        );
+                    }
+                } else {
+                    log::info!(
+                        "[get_pblock_idx] no extent: inode={}, lblock={}",
+                        inode_ref.inode_num,
+                        lblock,
+                    );
+                }
+            }
         }
-
-        panic!("search extent fail!");
-        // Err(Errno::EIO as isize)
+        Err(Errno::ENOENT as isize)
     }
 
     /// 分配一个新的块
@@ -1012,6 +1027,66 @@ impl Ext4FileSystem {
         inode_ref.inode.set_size(inode_size);
         self.write_back_inode(inode_ref);
 
+        Ok(new_block)
+    }
+
+    /// Insert a new block at a specific logical block index (not necessarily at EOF).
+    /// Used for writing to holes (sparse file blocks) that are before the current file size.
+    pub fn insert_inode_pblk(
+        &self,
+        inode_ref: &mut Ext4InodeRef,
+        iblock: u32,
+    ) -> Result<Ext4Fsblk, isize> {
+        let mut newex: Ext4Extent = Ext4Extent::default();
+        let new_block = self.balloc_alloc_block(inode_ref, None)?;
+        newex.first_block = iblock;
+        newex.store_pblock(new_block);
+        newex.block_count = 1;
+        self.insert_extent(inode_ref, &mut newex)?;
+
+        let inode_size = inode_ref.inode.size();
+        let required_size = (iblock as u64 + 1) * self.block_size as u64;
+        if required_size > inode_size {
+            inode_ref.inode.set_size(required_size);
+        }
+        self.write_back_inode(inode_ref);
+        log::info!(
+            "[insert_inode_pblk] inode={}, iblock={}, pblock={}, new_size={}",
+            inode_ref.inode_num,
+            iblock,
+            new_block,
+            required_size,
+        );
+        Ok(new_block)
+    }
+
+    /// Insert a new block at a specific logical block index, from a starting bgid.
+    pub fn insert_inode_pblk_from(
+        &self,
+        inode_ref: &mut Ext4InodeRef,
+        iblock: u32,
+        start_bgid: &mut u32,
+    ) -> Result<Ext4Fsblk, isize> {
+        let mut newex: Ext4Extent = Ext4Extent::default();
+        let new_block = self.balloc_alloc_block_from(inode_ref, start_bgid)?;
+        newex.first_block = iblock;
+        newex.store_pblock(new_block);
+        newex.block_count = 1;
+        self.insert_extent(inode_ref, &mut newex)?;
+
+        let inode_size = inode_ref.inode.size();
+        let required_size = (iblock as u64 + 1) * self.block_size as u64;
+        if required_size > inode_size {
+            inode_ref.inode.set_size(required_size);
+        }
+        self.write_back_inode(inode_ref);
+        log::info!(
+            "[insert_inode_pblk_from] inode={}, iblock={}, pblock={}, new_size={}",
+            inode_ref.inode_num,
+            iblock,
+            new_block,
+            required_size,
+        );
         Ok(new_block)
     }
 

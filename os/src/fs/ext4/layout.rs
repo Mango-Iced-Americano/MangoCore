@@ -892,11 +892,9 @@ impl Ext4OSInode {
             }
             // 获取物理块号
             // TODO: 此处可能有问题
-            let start_block_id = self
-                .ext4fs
-                .get_pblock_idx(&inode_ref, blk_id as u32)
-                .unwrap();
-            block_ids.push(start_block_id as usize);
+            if let Ok(start_block_id) = self.ext4fs.get_pblock_idx(&inode_ref, blk_id as u32) {
+                block_ids.push(start_block_id as usize);
+            }
             blk_id += 1;
         }
         // println!("[kernel in get_neighboring_blk] block_ids: {:?}", block_ids);

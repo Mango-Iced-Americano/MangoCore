@@ -427,16 +427,19 @@ impl Ext4FileSystem {
             let adjust_read_size = min(self.block_size - unaligned_start_offset, size_to_read);
 
             // 获取逻辑块号对应的物理块号
-            let pblock_idx = self.get_pblock_idx(&inode_ref, iblock as u32)?;
-
-            // 读取数据
-            let mut data = [0u8; BLOCK_SIZE];
-            self.block_device.read_block(pblock_idx as usize, &mut data);
-
-            // 将数据复制到read_buf中
-            read_buf[cursor..cursor + adjust_read_size].copy_from_slice(
-                &data[unaligned_start_offset..unaligned_start_offset + adjust_read_size],
-            );
+            match self.get_pblock_idx(&inode_ref, iblock as u32) {
+                Ok(pblock_idx) => {
+                    let mut data = vec![0u8; *GLOBAL_BLOCK_SIZE];
+                    self.block_device.read_block(pblock_idx as usize, &mut data);
+                    read_buf[cursor..cursor + adjust_read_size].copy_from_slice(
+                        &data[unaligned_start_offset..unaligned_start_offset + adjust_read_size],
+                    );
+                }
+                Err(_) => {
+                    // sparse hole: fill with zeros
+                    read_buf[cursor..cursor + adjust_read_size].fill(0);
+                }
+            }
 
             // 更新 cursor 以及 total_bytes_read
             cursor += adjust_read_size;
@@ -450,14 +453,17 @@ impl Ext4FileSystem {
             let read_length = core::cmp::min(self.block_size, size_to_read - total_bytes_read);
 
             // 获取逻辑块号对应的物理块号
-            let pblock_idx = self.get_pblock_idx(&inode_ref, iblock as u32)?;
-
-            // 读取数据
-            let mut data = vec![0u8; *GLOBAL_BLOCK_SIZE];
-            self.block_device.read_block(pblock_idx as usize, &mut data);
-
-            // 将读取到的数据复制到read_buf中
-            read_buf[cursor..cursor + read_length].copy_from_slice(&data[..read_length]);
+            match self.get_pblock_idx(&inode_ref, iblock as u32) {
+                Ok(pblock_idx) => {
+                    let mut data = vec![0u8; *GLOBAL_BLOCK_SIZE];
+                    self.block_device.read_block(pblock_idx as usize, &mut data);
+                    read_buf[cursor..cursor + read_length].copy_from_slice(&data[..read_length]);
+                }
+                Err(_) => {
+                    // sparse hole: fill with zeros
+                    read_buf[cursor..cursor + read_length].fill(0);
+                }
+            }
 
             // 更新 cursor 以及 total_bytes_read
             cursor += read_length;
@@ -496,7 +502,6 @@ impl Ext4FileSystem {
 
         // start block index
         let mut iblk_idx = iblock_start;
-        let ifile_blocks = (file_size + self.block_size as u64 - 1) / self.block_size as u64;
 
         // Calculate the unaligned size
         let unaligned = offset % self.block_size;
@@ -510,12 +515,12 @@ impl Ext4FileSystem {
         // Unaligned write
         if unaligned > 0 {
             let len = min(write_buf_len, self.block_size - unaligned);
-            // Get the physical block id, if the block is not present, append a new block
-            let pblock_idx = if iblk_idx < ifile_blocks as usize {
-                self.get_pblock_idx(&inode_ref, iblk_idx as u32)?
-            } else {
-                // physical block not exist, append a new block
-                self.append_inode_pblk_from(&mut inode_ref, &mut start_bgid)?
+            // Get the physical block id, allocate a new block if it's a hole
+            let pblock_idx = match self.get_pblock_idx(&inode_ref, iblk_idx as u32) {
+                Ok(p) => p,
+                Err(_) => {
+                    self.insert_inode_pblk_from(&mut inode_ref, iblk_idx as u32, &mut start_bgid)?
+                }
             };
 
             let mut block = Block::load_offset(
@@ -537,12 +542,14 @@ impl Ext4FileSystem {
 
         while written < write_buf_len {
             while iblk_idx < iblock_last && written < write_buf_len {
-                // Get the physical block id, if the block is not present, append a new block
-                let pblock_idx = if iblk_idx < ifile_blocks as usize {
-                    self.get_pblock_idx(&inode_ref, iblk_idx as u32)?
-                } else {
-                    // physical block not exist, append a new block
-                    self.append_inode_pblk_from(&mut inode_ref, &mut start_bgid)?
+                // Get the physical block id, allocate a new block if it's a hole
+                let pblock_idx = match self.get_pblock_idx(&inode_ref, iblk_idx as u32) {
+                    Ok(p) => p,
+                    Err(_) => self.insert_inode_pblk_from(
+                        &mut inode_ref,
+                        iblk_idx as u32,
+                        &mut start_bgid,
+                    )?,
                 };
                 if fblock_start == 0 {
                     fblock_start = pblock_idx;
@@ -581,12 +588,10 @@ impl Ext4FileSystem {
         // Final unaligned write if any
         if written < write_buf_len {
             let len = write_buf_len - written;
-            // Get the physical block id, if the block is not present, append a new block
-            let pblock_idx = if iblk_idx < ifile_blocks as usize {
-                self.get_pblock_idx(&inode_ref, iblk_idx as u32)?
-            } else {
-                // physical block not exist, append a new block
-                self.append_inode_pblk(&mut inode_ref)?
+            // Get the physical block id, allocate a new block if it's a hole
+            let pblock_idx = match self.get_pblock_idx(&inode_ref, iblk_idx as u32) {
+                Ok(p) => p,
+                Err(_) => self.insert_inode_pblk(&mut inode_ref, iblk_idx as u32)?,
             };
 
             let mut block = Block::load_offset(

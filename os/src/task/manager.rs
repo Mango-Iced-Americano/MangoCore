@@ -167,6 +167,20 @@ impl TaskManager {
     pub fn interruptible_count(&self) -> u16 {
         self.interruptible_queue.len() as u16
     }
+    /// 僵尸任务数量（遍历就绪+可中断队列）
+    pub fn zombie_count(&self) -> u16 {
+        let mut count = 0u16;
+        for t in self
+            .ready_queue
+            .iter()
+            .chain(self.interruptible_queue.iter())
+        {
+            if t.acquire_inner_lock().is_zombie() {
+                count += 1;
+            }
+        }
+        count
+    }
     /// 这个函数会将`task`从`interruptible_queue`中删除，并加入`ready_queue`。
     /// 如果一切正常的话，这个`task`将会被加入`ready_queue`。如果`task`已经被唤醒，那么什么也不会发生。
     /// # 注意
@@ -335,6 +349,12 @@ pub fn find_task_by_tgid(tgid: usize) -> Option<Arc<TaskControlBlock>> {
 pub fn procs_count() -> u16 {
     let manager = TASK_MANAGER.lock();
     manager.ready_count() + manager.interruptible_count()
+}
+
+/// 返回僵尸任务数量
+pub fn zombie_count() -> u16 {
+    let manager = TASK_MANAGER.lock();
+    manager.zombie_count()
 }
 
 /// Send a signal to all interruptible tasks EXCEPT initproc (tgid=1).

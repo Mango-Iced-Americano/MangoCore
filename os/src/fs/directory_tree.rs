@@ -689,6 +689,12 @@ pub fn oom() -> usize {
     }
 }
 
+/// 返回目录树中存活的节点数（诊断用）
+pub fn directory_node_count() -> usize {
+    let lock = DIRECTORY_VEC.lock();
+    lock.0.iter().filter(|w| w.upgrade().is_some()).count()
+}
+
 // 初始化文件系统
 pub fn init_fs() {
     init_device_directory();

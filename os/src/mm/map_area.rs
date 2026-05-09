@@ -508,7 +508,7 @@ impl MapArea {
                 page_table.map_identical(vpn, ppn, self.map_perm);
             }
             MapType::Framed => {
-                let frame = unsafe { frame_alloc_uninit().unwrap() };
+                let frame = unsafe { frame_alloc().unwrap() };
                 ppn = frame.ppn;
                 self.inner.alloc_in_memory(vpn, frame);
                 page_table.map(vpn, ppn, self.map_perm);
@@ -569,6 +569,9 @@ impl MapArea {
                     dst_page_table.map(vpn, ppn, map_perm);
                 } else {
                     return Err(());
+                }
+                if is_shared && self.map_perm.contains(MapPermission::W) {
+                    let _ = src_page_table.set_pte_flags(vpn, self.map_perm);
                 }
             }
         }

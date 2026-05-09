@@ -25,7 +25,7 @@ use manager::fetch_task;
 pub use manager::{
     add_kernel_timer, add_task, do_oom, do_wake_expired, find_task_by_pid, find_task_by_tgid,
     kernel_timer_queue_len, procs_count, send_signal_to_interruptible, sleep_interruptible,
-    task_manager_counts, wait_with_timeout, wake_interruptible, TimerAction,
+    task_manager_counts, wait_with_timeout, wake_interruptible, zombie_count, TimerAction,
 };
 // pub use pid::RecycleAllocator;
 pub use pid::{pid_alloc, trap_cx_bottom_from_tid, ustack_bottom_from_tid, PidHandle};
@@ -227,6 +227,9 @@ pub fn do_exit(task: Arc<TaskControlBlock>, exit_code: u32) {
     // **** release current PCB lock
     // drop task manually to maintain rc correctly
     log::info!("[do_exit] Pid {} exited with {}", task.pid.0, exit_code);
+
+    // 打印资源统计诊断信息
+    crate::utils::stats::print_resource_stats();
 }
 
 pub fn exit_current_and_run_next(exit_code: u32) -> ! {
