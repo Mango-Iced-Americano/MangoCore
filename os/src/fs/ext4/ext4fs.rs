@@ -204,7 +204,68 @@ impl Ext4FileSystem {
             })
     }
     pub fn alloc_blocks(&self, blocks: usize) -> Vec<usize> {
-        todo!()
+        if blocks == 0 {
+            return Vec::new();
+        }
+
+        let sblk = &self.superblock;
+        let blocks_per_group = sblk.blocks_per_group() as usize;
+        let bg_count = sblk.block_group_count() as usize;
+
+        for bgid in 0..bg_count {
+            let mut bg = Ext4BlockGroup::load_new(self.block_device.clone(), sblk, bgid);
+            let free = bg.get_free_blocks_count() as usize;
+            if free < blocks {
+                continue;
+            }
+
+            let bmp_blk = bg.get_block_bitmap_block(sblk) as usize;
+            let bmp = Block::load_offset(self.block_device.clone(), bmp_blk * self.block_size);
+            let bit_cnt = blocks_per_group.min(bmp.data.len() * 8);
+
+            // Find a contiguous range of free blocks
+            let mut run_start: Option<usize> = None;
+            let mut run_len = 0;
+            for idx in 0..bit_cnt {
+                if crate::fs::ext4::bitmap::ext4_bmap_is_bit_clr(&bmp.data, idx as u32) {
+                    if run_start.is_none() {
+                        run_start = Some(idx);
+                    }
+                    run_len += 1;
+                    if run_len >= blocks {
+                        let start = run_start.unwrap();
+                        // Mark blocks as used in bitmap
+                        let mut data = bmp.data.clone();
+                        for i in start..start + blocks {
+                            crate::fs::ext4::bitmap::ext4_bmap_bit_set(&mut data, i as u32);
+                        }
+                        // Update csum & write bitmap back
+                        bg.set_block_group_balloc_bitmap_csum(sblk, &data);
+                        self.block_device.write_block(bmp_blk, &data);
+
+                        // Update block group free count
+                        bg.set_free_blocks_count((free - blocks) as u32);
+                        let mut sb = *sblk;
+                        let sb_free = sb.free_blocks_count();
+                        sb.set_free_blocks_count(sb_free - blocks as u64);
+                        sb.sync_to_disk_with_csum(self.block_device.clone());
+                        bg.sync_to_disk_with_csum(self.block_device.clone(), bgid, &sb);
+
+                        let base = self.get_block_of_bgid(bgid as u32) as usize + start;
+                        return (base..base + blocks).collect();
+                    }
+                } else {
+                    run_start = None;
+                    run_len = 0;
+                }
+            }
+        }
+
+        println!(
+            "[ext4 alloc_blocks] Cannot find {} contiguous free blocks, returning empty",
+            blocks
+        );
+        Vec::new()
     }
     fn root_inode(&self) -> Arc<dyn InodeTrait> {
         todo!();

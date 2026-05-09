@@ -7,7 +7,6 @@ use core::sync::atomic::Ordering as AtomicOrdering;
 
 #[cfg(feature = "oom_handler")]
 use crate::config::SYSTEM_TASK_LIMIT;
-#[cfg(feature = "oom_handler")]
 use alloc::vec::Vec;
 
 use crate::timer::{TimeSpec, TimeVal};
@@ -679,14 +678,85 @@ pub struct KernelTimerQueue {
     inner: BinaryHeap<KernelTimer>,
 }
 
+/// 判断两个 TimerAction 是否指向同一个"槽位"（用于去重）：
+/// - WakeTask：比较 task 指针
+/// - SendSignal：比较 task 指针 + 信号类型
+fn same_action_slot(a: &TimerAction, b: &TimerAction) -> bool {
+    match (a, b) {
+        (TimerAction::WakeTask { task: ta, .. }, TimerAction::WakeTask { task: tb, .. }) => {
+            Weak::as_ptr(ta) == Weak::as_ptr(tb)
+        }
+        (
+            TimerAction::SendSignal {
+                task: ta,
+                signal: sa,
+                ..
+            },
+            TimerAction::SendSignal {
+                task: tb,
+                signal: sb,
+                ..
+            },
+        ) => Weak::as_ptr(ta) == Weak::as_ptr(tb) && *sa == *sb,
+        _ => false,
+    }
+}
+
 impl KernelTimerQueue {
+    /// 最大定时器数量，防止内存耗尽
+    const MAX_TIMERS: usize = 4096;
+
     pub fn new() -> Self {
         Self {
             inner: BinaryHeap::new(),
         }
     }
+
+    /// 返回当前队列中的定时器数量
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
     pub fn add_action(&mut self, action: TimerAction, deadline: TimeSpec) {
-        self.inner.push(KernelTimer { action, deadline });
+        // 去重：扫描已有条目，相同 slot 只保留 deadline 最早的
+        // 用 Option 包装 action，避免 borrow checker 的移动语义问题
+        let old_entries: Vec<KernelTimer> = self.inner.drain().collect();
+        let mut action = Some(action);
+        for entry in old_entries {
+            if let Some(ref new_action) = action {
+                if same_action_slot(&entry.action, new_action) {
+                    // 相同 slot，保留 deadline 更早的
+                    if deadline < entry.deadline {
+                        // 新的更早：替换旧的
+                        self.inner.push(KernelTimer {
+                            action: action.take().unwrap(),
+                            deadline,
+                        });
+                    } else {
+                        // 旧得更早：保留旧的，丢弃新的
+                        self.inner.push(entry);
+                        action = None;
+                    }
+                    continue;
+                }
+            }
+            self.inner.push(entry);
+        }
+        // action 未被消耗 → 没有匹配的 slot，直接加入
+        if let Some(action) = action {
+            self.inner.push(KernelTimer { action, deadline });
+        }
+
+        // 容量上限：丢弃 deadline 最远的条目
+        while self.inner.len() > Self::MAX_TIMERS {
+            if let Some(t) = self.inner.pop() {
+                log::warn!(
+                    "[KernelTimerQueue] capacity limit ({}) reached, discarding deadline={:?}",
+                    Self::MAX_TIMERS,
+                    t.deadline
+                );
+            }
+        }
     }
     pub fn wake_expired(&mut self, now: TimeSpec) {
         while let Some(timer) = self.inner.pop() {
@@ -906,4 +976,16 @@ pub fn do_wake_expired() {
     let now = crate::timer::TimeSpec::now();
     TIMEOUT_WAITQUEUE.lock().wake_expired(now);
     KERNEL_TIMER_QUEUE.lock().wake_expired(now);
+}
+
+/// 获取内核计时器队列长度（诊断用，尝试获取锁）
+pub fn kernel_timer_queue_len() -> Option<usize> {
+    KERNEL_TIMER_QUEUE.try_lock().map(|q| q.len())
+}
+
+/// 获取任务管理器中就绪和可中断任务数量（诊断用，尝试获取锁）
+pub fn task_manager_counts() -> Option<(u16, u16)> {
+    TASK_MANAGER
+        .try_lock()
+        .map(|m| (m.ready_count(), m.interruptible_count()))
 }
