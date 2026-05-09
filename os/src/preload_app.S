@@ -3,7 +3,7 @@
     .global einitproc
     .align 12
 sinitproc:
-    .incbin "../user/target/loongarch64-unknown-none/release/initproc"
+    .incbin "../user/target/loongarch64-unknown-linux-gnu/release/initproc"
 einitproc:
     .align 12
 
