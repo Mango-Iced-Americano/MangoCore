@@ -30,7 +30,8 @@ pub use manager::{
 // pub use pid::RecycleAllocator;
 pub use pid::{pid_alloc, trap_cx_bottom_from_tid, ustack_bottom_from_tid, PidHandle};
 pub use processor::{
-    current_task, current_trap_cx, current_user_token, run_tasks, schedule, take_current_task,
+    current_syscall_name, current_task, current_trap_cx, current_user_token, run_tasks, schedule,
+    set_current_syscall_id, take_current_task,
 };
 pub use signal::*;
 pub use task::{RobustList, Rusage, TaskControlBlock, TaskStatus};

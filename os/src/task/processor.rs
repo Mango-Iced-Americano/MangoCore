@@ -14,6 +14,8 @@ pub struct Processor {
     current: Option<Arc<TaskControlBlock>>,
     /// 空闲任务的上下文，用于在任务切换时保存和恢复状态
     idle_task_cx: TaskContext,
+    /// 当前正在执行的系统调用 ID（用于 OOM 诊断追踪）
+    current_syscall_id: Option<usize>,
 }
 
 impl Processor {
@@ -24,6 +26,7 @@ impl Processor {
             current: None,
             // 空闲任务的上下文
             idle_task_cx: TaskContext::zero_init(),
+            current_syscall_id: None,
         }
     }
     /// 获取空闲任务的上下文指针
@@ -38,6 +41,14 @@ impl Processor {
     /// 获取当前正在运行的任务的克隆
     pub fn current(&self) -> Option<Arc<TaskControlBlock>> {
         self.current.as_ref().map(Arc::clone)
+    }
+    /// 获取当前系统调用 ID
+    pub fn get_syscall_id(&self) -> Option<usize> {
+        self.current_syscall_id
+    }
+    /// 设置当前系统调用 ID
+    pub fn set_syscall_id(&mut self, id: Option<usize>) {
+        self.current_syscall_id = id;
     }
     /// 检查当前 Processor 是否为空闲
     pub fn is_vacant(&self) -> bool {
@@ -110,6 +121,20 @@ pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
 /// 获取当前正在运行的任务
 pub fn current_task() -> Option<Arc<TaskControlBlock>> {
     PROCESSOR.lock().current()
+}
+
+/// 获取当前系统调用名称（用于 OOM 诊断）
+pub fn current_syscall_name() -> &'static str {
+    let id = PROCESSOR.lock().get_syscall_id();
+    match id {
+        Some(id) => crate::syscall::syscall_name(id),
+        None => "<none>",
+    }
+}
+
+/// 设置当前系统调用 ID
+pub fn set_current_syscall_id(id: Option<usize>) {
+    PROCESSOR.lock().set_syscall_id(id);
 }
 
 /// 获取当前正在运行的任务的用户态页表令牌

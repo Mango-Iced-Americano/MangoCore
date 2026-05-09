@@ -630,6 +630,8 @@ pub fn sys_pipe2(pipefd: usize, flags: u32) -> isize {
 /// + 成功：返回获取的目录项数量
 /// + 失败：返回错误码
 pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> isize {
+    // 防御性限制：单次 getdents64 最多返回 128KB 的目录项，防止超大 Vec 分配导致内核堆 OOM
+    let count = count.min(128 * 1024);
     let task = current_task().unwrap();
     let token = task.get_user_token();
 

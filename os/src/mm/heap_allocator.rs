@@ -55,19 +55,25 @@ impl OomAwareAllocator {
 
 unsafe impl GlobalAlloc for OomAwareAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // 第一次尝试
-        if let Ok(ptr) = self.inner.lock().alloc(layout) {
-            return ptr.as_ptr();
-        }
-        // 第一次失败了，尝试 OOM recovery
-        if self.try_oom_recovery(layout) {
-            match self.inner.lock().alloc(layout) {
-                Ok(ptr) => ptr.as_ptr(),
-                Err(_) => core::ptr::null_mut(),
+        // 多次尝试：每次失败后触发 OOM recovery，最多 3 轮
+        for attempt in 0..3 {
+            if let Ok(ptr) = self.inner.lock().alloc(layout) {
+                return ptr.as_ptr();
             }
-        } else {
-            core::ptr::null_mut()
+            if attempt < 2 {
+                log::warn!(
+                    "[OomAwareAllocator] alloc attempt {} failed (size={}, align={}), retrying...",
+                    attempt + 1,
+                    layout.size(),
+                    layout.align(),
+                );
+                if self.try_oom_recovery(layout) {
+                    continue;
+                }
+            }
         }
+        // 所有尝试均失败，触发 alloc_error_handler → shutdown
+        core::ptr::null_mut()
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -83,26 +89,40 @@ static HEAP_ALLOCATOR: OomAwareAllocator = OomAwareAllocator::empty();
 
 // 标记为全局分配错误处理器
 #[alloc_error_handler]
-/// 分配错误处理（带诊断信息）
+/// 分配错误处理（带诊断信息 + 安全 shutdown）
+///
+/// 行为：
+/// - 打印完整诊断信息（syscall 名、堆统计）
+/// - 直接 shutdown 内核
+///
+/// 注意：绝不能在这里调用 exit_current_and_run_next！因为 handle_alloc_error 是
+/// `-> !` 发散函数，无法 unwinding 调用栈。如果从内核代码中（syscall handler 内部）
+/// 调用 exit_current_and_run_next 调度走，被杀死任务栈上的锁守卫（Mutex/RwLock 等）
+/// 永远得不到释放，导致后续任务死锁或文件系统损坏。
+/// 正确的做法是：在 alloc() 中做好多次重试+OOM recovery，只有在万不得已时才 shutdown。
 pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
-    // 收集诊断信息（注意：log 走 UART 直出，不会再次分配）
+    // 收集诊断信息（注意：print 走 UART 直出，不会再次分配）
     let timer_queue_size = crate::task::kernel_timer_queue_len();
     let task_info = crate::task::task_manager_counts();
+    let syscall_name = crate::task::current_syscall_name();
 
-    log::error!("=== HEAP ALLOCATION FAILED ===");
-    log::error!("layout: size={}, align={}", layout.size(), layout.align());
+    println!("=== HEAP ALLOCATION FAILED (FATAL) ===");
+    println!("layout: size={}, align={}", layout.size(), layout.align());
+    println!("current syscall: {}", syscall_name);
     match timer_queue_size {
-        Some(sz) => log::error!("KERNEL_TIMER_QUEUE entries: {}", sz),
-        None => log::error!("KERNEL_TIMER_QUEUE: locked"),
+        Some(sz) => println!("KERNEL_TIMER_QUEUE entries: {}", sz),
+        None => println!("KERNEL_TIMER_QUEUE: locked"),
     }
     match task_info {
-        Some((r, i)) => log::error!("tasks: ready={}, interruptible={}", r, i),
-        None => log::error!("TASK_MANAGER: locked"),
+        Some((r, i)) => println!("tasks: ready={}, interruptible={}", r, i),
+        None => println!("TASK_MANAGER: locked"),
     }
-    log::error!("KERNEL_HEAP_SIZE: {} bytes", KERNEL_HEAP_SIZE);
-    log::error!("=============================");
+    println!("KERNEL_HEAP_SIZE: {} bytes", KERNEL_HEAP_SIZE);
+    println!("=============================");
+    println!("Shutting down due to unrecoverable heap exhaustion.");
+    println!("=============================");
 
-    panic!("Heap allocation failed, layout = {:?}", layout);
+    crate::hal::shutdown()
 }
 
 /// 全局堆内存空间
