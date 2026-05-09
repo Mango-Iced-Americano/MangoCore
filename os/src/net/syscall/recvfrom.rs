@@ -18,6 +18,7 @@ pub fn sys_recvfrom(
     src_addr: usize,
     addrlen: usize,
 ) -> isize {
+    let len = (len as usize).min(64 * 1024 * 1024) as u32;
     let msg_dontwait = match MsgFlags::from_bits_truncate(flags).validate_for_recv() {
         Ok(nb) => nb,
         Err(e) => return -(e as isize),

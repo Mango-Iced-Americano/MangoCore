@@ -18,6 +18,7 @@ pub fn sys_sendto(
     dest_addr: usize,
     addrlen: u32,
 ) -> isize {
+    let len = len.min(64 * 1024 * 1024);
     let msg_flags = MsgFlags::from_bits_truncate(flags);
     let msg_dontwait = match msg_flags.validate_for_send() {
         Ok(nb) => nb,

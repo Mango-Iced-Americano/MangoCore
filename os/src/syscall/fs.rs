@@ -178,13 +178,15 @@ pub fn sys_getcwd(buf: usize, size: usize) -> isize {
         return ERANGE;
     }
     let token = task.get_user_token();
-    UserBuffer::new({
-        match translated_byte_buffer(token, buf as *const u8, size) {
+    let write_len = working_dir.len() + 1;
+    let mut user_buf = UserBuffer::new({
+        match translated_byte_buffer(token, buf as *const u8, write_len) {
             Ok(buffer) => buffer,
             Err(errno) => return errno,
         }
-    })
-    .write(working_dir.as_bytes());
+    });
+    user_buf.write(working_dir.as_bytes());
+    user_buf.write_at(working_dir.len(), b"\0");
     buf as isize
 }
 
@@ -214,6 +216,7 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: u32) -> isize {
 }
 
 pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
+    let count = count.min(64 * 1024 * 1024);
     let task = current_task().unwrap();
     let file_descriptor = {
         let fd_table = task.files.lock();
@@ -244,6 +247,7 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
 }
 
 pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
+    let count = count.min(64 * 1024 * 1024);
     let task = current_task().unwrap();
     let file_descriptor = {
         let fd_table = task.files.lock();
@@ -281,6 +285,7 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
 }
 
 pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
+    let count = count.min(64 * 1024 * 1024);
     let task = current_task().unwrap();
     let fd_table = task.files.lock();
     let file_descriptor = match fd_table.get_ref(fd) {
@@ -304,6 +309,7 @@ pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
 }
 
 pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
+    let count = count.min(64 * 1024 * 1024);
     let task = current_task().unwrap();
     let fd_table = task.files.lock();
     let file_descriptor = match fd_table.get_ref(fd) {
@@ -327,6 +333,9 @@ pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
 }
 
 pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
+    if iovcnt > 1024 {
+        return EINVAL;
+    }
     let task = current_task().unwrap();
     let fd_table = task.files.lock();
     let file_descriptor = match fd_table.get_ref(fd) {
@@ -349,14 +358,25 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
         None,
         UserBuffer::new({
             let mut vec = Vec::with_capacity(32);
+            let mut total_len = 0;
             for iovec in iovecs.iter() {
+                let mut iov_len = iovec.iov_len;
+                if total_len + iov_len > 64 * 1024 * 1024 {
+                    iov_len = 64 * 1024 * 1024 - total_len;
+                }
+                if iov_len == 0 {
+                    continue;
+                }
                 match translated_byte_buffer_append_to_existing_vec(
                     &mut vec,
                     token,
                     iovec.iov_base,
-                    iovec.iov_len,
+                    iov_len,
                 ) {
-                    Ok(_) => continue,
+                    Ok(_) => {
+                        total_len += iov_len;
+                        continue;
+                    }
                     Err(errno) => return errno,
                 }
             }
@@ -366,6 +386,9 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
 }
 
 pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
+    if iovcnt > 1024 {
+        return EINVAL;
+    }
     let task = current_task().unwrap();
     let fd_table = task.files.lock();
     let file_descriptor = match fd_table.get_ref(fd) {
@@ -387,14 +410,25 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
         None,
         UserBuffer::new({
             let mut vec = Vec::with_capacity(32);
+            let mut total_len = 0;
             for iovec in iovecs.iter() {
+                let mut iov_len = iovec.iov_len;
+                if total_len + iov_len > 64 * 1024 * 1024 {
+                    iov_len = 64 * 1024 * 1024 - total_len;
+                }
+                if iov_len == 0 {
+                    continue;
+                }
                 match translated_byte_buffer_append_to_existing_vec(
                     &mut vec,
                     token,
                     iovec.iov_base,
-                    iovec.iov_len,
+                    iov_len,
                 ) {
-                    Ok(_) => continue,
+                    Ok(_) => {
+                        total_len += iov_len;
+                        continue;
+                    }
                     Err(errno) => return errno,
                 }
             }
@@ -418,6 +452,7 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
 /// If offset is NULL, then data will be read from in_fd starting at
 /// the file offset, and the file offset will be updated by the call.
 pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset: *mut usize, count: usize) -> isize {
+    let count = count.min(64 * 1024 * 1024);
     let task = current_task().unwrap();
     let fd_table = task.files.lock();
     let in_file = match fd_table.get_ref(in_fd) {
@@ -1467,7 +1502,6 @@ pub fn sys_pselect(
     } else {
         core::ptr::null()
     };
-
     /* log::info!(
         "PID {} calls pselect: nfds: {}, read_fds: {:?}, write_fds: {:?}, exception_fds: {:?}, timeout: {:?}, sigmask: {:?}",
         current_task().unwrap().pid.0,
@@ -1477,7 +1511,7 @@ pub fn sys_pselect(
         exception_fds,
         timeout,
         sigmask
-    ) */;
+    ) */
     let token = current_user_token();
     let mut kread_fds = match try_get_from_user(token, read_fds) {
         Ok(fds) => fds,

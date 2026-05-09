@@ -105,6 +105,9 @@ pub fn ppoll(
     tmo_p: *const TimeSpec,
     sigmask: *const Signals,
 ) -> isize {
+    if nfds > 4096 {
+        return crate::syscall::errno::EINVAL;
+    }
     let task = current_task().unwrap();
     let token = task.get_user_token();
     let timeout: Option<TimeSpec> = match try_get_from_user(token, tmo_p) {

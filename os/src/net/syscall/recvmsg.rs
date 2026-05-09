@@ -36,6 +36,9 @@ pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
 
     // 读取 iovec 数组
     let iov_cnt = msg.msg_iovlen;
+    if iov_cnt > 1024 {
+        return -(SyscallErr::EINVAL as isize);
+    }
     let mut iovecs = alloc::vec![IOVec {iov_base: core::ptr::null(), iov_len: 0}; iov_cnt];
     if copy_from_user_array(token, msg.msg_iov, iovecs.as_mut_ptr(), iov_cnt).is_err() {
         return -(SyscallErr::EFAULT as isize);
@@ -43,6 +46,9 @@ pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
 
     // 分配接收缓冲区
     let total_len: usize = iovecs.iter().map(|iov| iov.iov_len).sum();
+    if total_len > 64 * 1024 * 1024 {
+        return -(SyscallErr::ENOBUFS as isize);
+    }
     let mut buf = alloc::vec![0u8; total_len];
 
     let socket = crate::get_socket!(sockfd);

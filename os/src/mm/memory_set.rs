@@ -588,6 +588,11 @@ impl<T: PageTable> MemorySet<T> {
             // Map only when the sections that is to be loaded.
             match ph.get_type().unwrap() {
                 xmas_elf::program::Type::Load => {
+                    // 防御性检查：拒绝超大段（> 1GB），防止分配超大 MapArea 导致 OOM
+                    if ph.mem_size() as usize > 1024 * 1024 * 1024 {
+                        log::error!("[map_elf] Segment too large: {} bytes", ph.mem_size());
+                        return Err(ENOMEM);
+                    }
                     let start_va: VirtAddr = (ph.virtual_addr() as usize + bias).into();
                     let end_va: VirtAddr =
                         ((ph.virtual_addr() + ph.mem_size()) as usize + bias).into();
@@ -853,10 +858,13 @@ impl<T: PageTable> MemorySet<T> {
                     && prot == area.map_perm
                     && area.map_file.is_none()
                 {
-                    debug!("[mmap] merge with previous area, call expand_to");
                     let end_va: VirtAddr = area.get_end::<T>().into();
-                    area.expand_to::<T>(VirtAddr::from(end_va.0 + len)).unwrap();
-                    return end_va.0 as isize;
+                    // 防止合并后过大导致内核堆 OOM (限制单个 MapArea 不超过 1GB)
+                    if end_va.0 + len - area.get_start::<T>().0 <= 1024 * 1024 * 1024 {
+                        debug!("[mmap] merge with previous area, call expand_to");
+                        area.expand_to::<T>(VirtAddr::from(end_va.0 + len)).unwrap();
+                        return end_va.0 as isize;
+                    }
                 }
                 area.get_end::<T>().into()
             } else {
