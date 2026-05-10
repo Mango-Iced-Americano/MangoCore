@@ -440,6 +440,10 @@ fn fixed_timer_ms(script: &str) -> Option<u64> {
     }
 }
 
+fn display_path(path: &str) -> &str {
+    path.trim_end_matches('\0')
+}
+
 /// 在指定目录下运行测试脚本。
 fn run_group_in_dir(
     environ: &[*const u8],
@@ -448,8 +452,9 @@ fn run_group_in_dir(
     script: &str,
     timeout_secs: u64,
 ) {
+    let log_dir = display_path(dir);
     // 构造比赛的 START/END 标记
-    let libc_suffix = if dir.contains("musl") {
+    let libc_suffix = if log_dir.contains("musl") {
         "musl"
     } else {
         "glibc"
@@ -468,7 +473,7 @@ fn run_group_in_dir(
     if pid < 0 {
         println!(
             "[initproc] fork failed for {} in {} ret={}",
-            script, dir, pid
+            script, log_dir, pid
         );
         return;
     }
@@ -480,7 +485,7 @@ fn run_group_in_dir(
         if cd_ret < 0 {
             println!(
                 "[initproc] chdir failed dir={} ret={} when running {}",
-                dir, cd_ret, script
+                log_dir, cd_ret, script
             );
             exit(126);
         }
@@ -500,7 +505,7 @@ fn run_group_in_dir(
         exec(shell, &argv, environ);
         println!(
             "[initproc] exec failed for {} in {} via /bash -c",
-            script, dir
+            script, log_dir
         );
         exit(127);
     } else if let Some(fixed_ms) = fixed_timer_ms(script) {
@@ -509,7 +514,7 @@ fn run_group_in_dir(
         let fix_secs = fixed_ms / 1000;
         println!(
             "[initproc] fixed timer ({}s) for {} in {}",
-            fix_secs, script, dir
+            fix_secs, script, log_dir
         );
         sleep(fixed_ms as usize);
         let mut exit_code: i32 = 0;
@@ -519,7 +524,7 @@ fn run_group_in_dir(
         println!("{}", group_end_marker);
         println!(
             "[initproc] done {} in {} exit_code={}",
-            script, dir, exit_code
+            script, log_dir, exit_code
         );
     } else {
         // parent: 超时循环 + 强杀
@@ -536,7 +541,10 @@ fn run_group_in_dir(
                 break;
             }
             if ret < 0 {
-                println!("[initproc] pid={} vanished for {} in {}", pid, script, dir);
+                println!(
+                    "[initproc] pid={} vanished for {} in {}",
+                    pid, script, log_dir
+                );
                 break;
             }
 
@@ -545,11 +553,14 @@ fn run_group_in_dir(
                 timed_out = true;
                 println!(
                     "[initproc] TIMEOUT ({}s) for {} in {}, sending SIGKILL to pid={}",
-                    timeout_secs, script, dir, pid
+                    timeout_secs, script, log_dir, pid
                 );
                 let _ = kill(pid as usize, SIGKILL);
                 let _ = waitpid(pid as usize, &mut exit_code);
-                println!("[initproc] killed pid={} for {} in {}", pid, script, dir);
+                println!(
+                    "[initproc] killed pid={} for {} in {}",
+                    pid, script, log_dir
+                );
                 break;
             }
 
@@ -564,7 +575,7 @@ fn run_group_in_dir(
         }
         println!(
             "[initproc] done {} in {} exit_code={}",
-            script, dir, exit_code
+            script, log_dir, exit_code
         );
     }
 }
@@ -579,12 +590,13 @@ fn run_ltp_binaries(
     from: Option<&str>,
     timeout_secs: u64,
 ) {
-    let libc_suffix = if dir.contains("musl") {
+    let log_dir = display_path(dir);
+    let libc_suffix = if log_dir.contains("musl") {
         "musl"
     } else {
         "glibc"
     };
-    let ltp_dir = format!("{}/ltp/testcases/bin", dir.trim_end_matches('\0'));
+    let ltp_dir = format!("{}/ltp/testcases/bin", log_dir);
 
     let pid = fork();
     if pid < 0 {
@@ -733,16 +745,9 @@ fn run_ltp_binaries(
 
         reap_orphans();
         if timed_out {
-            println!(
-                "#### OS COMP TEST GROUP END ltp-{} ####",
-                if dir.contains("musl") {
-                    "musl"
-                } else {
-                    "glibc"
-                }
-            );
+            println!("#### OS COMP TEST GROUP END ltp-{} ####", libc_suffix);
         }
-        println!("[initproc] done ltp in {} exit_code={}", dir, exit_code);
+        println!("[initproc] done ltp in {} exit_code={}", log_dir, exit_code);
     }
 }
 
