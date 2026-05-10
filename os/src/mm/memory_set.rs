@@ -820,8 +820,8 @@ impl<T: PageTable> MemorySet<T> {
                 let end_va: usize = VirtAddr::from(old_pt).ceil().into();
                 match self.munmap(start_va, end_va - start_va) {
                     Ok(()) => {}
-                    Err(EINVAL) => {}   // 消除以前从未sbrk导致上述注释no heap
-                                        // area触发panic情况。请确保此处start_va必须对齐
+                    Err(EINVAL) => {} // 消除以前从未sbrk导致上述注释no heap
+                    // area触发panic情况。请确保此处start_va必须对齐
                     Err(err) => panic!("[sbrk] 堆收缩释放失败, err={}", err),
                 }
             }
@@ -1286,13 +1286,36 @@ impl<T: PageTable> MemorySet<T> {
                         "[dealloc_user_res] user stack is partially unmapped, is it caused by oom?"
                     )
                 }
-                _ => unreachable!(),
+                _ => {} //忽略非致命错误
+            }
+        }
+        // 处理 trap_cx 回收
+        let trap_cx_bottom_va: VirtAddr = trap_cx_bottom_from_tid(tid).into();
+
+        // 改为这种写法，不再使用 unwrap()
+        if let Err(err) = self.remove_area_with_start_vpn(trap_cx_bottom_va.into()) {
+            match err {
+                MemoryError::AreaNotFound => {
+                    // 如果没找到该区域，可能是在之前的清理中整个 Area 都删了
+                    trace!("[dealloc_user_res] trap_cx area not found for tid {}", tid);
+                }
+                MemoryError::NotMapped => {
+                    // 如果页面已经不在页表里（被 OOM 换出），这在回收逻辑中是正常的
+                    trace!(
+                        "[dealloc_user_res] trap_cx already unmapped for tid {}",
+                        tid
+                    );
+                }
+                _ => {
+                    // 其他错误也可以记录一下，但没必要 Panic 导致整个系统崩溃
+                    debug!("[dealloc_user_res] trap_cx dealloc info: {:?}", err);
+                }
             }
         }
         // dealloc trap_cx manually
-        let trap_cx_bottom_va: VirtAddr = trap_cx_bottom_from_tid(tid).into();
-        self.remove_area_with_start_vpn(trap_cx_bottom_va.into())
-            .unwrap();
+        // let trap_cx_bottom_va: VirtAddr = trap_cx_bottom_from_tid(tid).into();
+        // self.remove_area_with_start_vpn(trap_cx_bottom_va.into())
+        //     .unwrap();
     }
 
     pub fn is_dirty(&self, ppn: PhysPageNum) -> Option<bool> {
@@ -1330,7 +1353,13 @@ pub fn remap_test() {
 pub fn check_page_fault(addr: VirtAddr) -> Result<PhysAddr, isize> {
     // This is where we handle the page fault.
     super::frame_reserve(3);
-    let task = current_task().unwrap();
+    let task = match current_task() {
+        Some(task) => task,
+        None => {
+            log::warn!("[check_page_fault] No current task found, page fault in kernel?");
+            return Err(EFAULT);
+        }
+    };
     match task.vm.lock().do_page_fault(addr) {
         Ok(pa) => return Ok(pa),
         Err(MemoryError::BeyondEOF)

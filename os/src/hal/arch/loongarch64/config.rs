@@ -1,6 +1,6 @@
 // Sizes
 /// 内存大小改为如下，即768MB
-pub const MEMORY_SIZE: usize = 0x3000_0000;
+pub const MEMORY_SIZE: usize = 0x4000_0000;
 pub const USER_STACK_SIZE: usize = PAGE_SIZE * 0x40;
 pub const USER_HEAP_SIZE: usize = PAGE_SIZE * 0x20;
 pub const SYSTEM_TASK_LIMIT: usize = 128;
@@ -17,7 +17,7 @@ pub const KSTACK_PG_NUM_SHIFT: usize = 16usize.trailing_zeros() as usize;
 pub const KSTACK_PG_NUM_SHIFT: usize = 16usize.trailing_zeros() as usize;
 
 pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 0x20;
-pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x3000;
+pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x6000;
 
 // Addresses
 /// Maximum length of a physical address

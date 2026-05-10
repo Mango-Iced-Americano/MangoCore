@@ -53,10 +53,13 @@ pub fn flush_preload() {
         fn ebash();
         fn sbusybox();
         fn ebusybox();
+        fn sosconfig();
+        fn eosconfig();
     }
     println!(
-        "sinitproc: {:X}, einitproc: {:X}, sbash: {:X}, ebash: {:X}, sbusybox: {:X}, ebusybox: {:X}",
+        "sinitproc: {:X}, einitproc: {:X}, sbash: {:X}, ebash: {:X}, sbusybox: {:X}, ebusybox: {:X}, sosconfig: {:X}, eosconfig: {:X}",
         sinitproc as usize, einitproc as usize, sbash as usize, ebash as usize, sbusybox as usize, ebusybox as usize,
+        sosconfig as usize, eosconfig as usize,
     );
     let initproc = ROOT_FD.open("initproc", OpenFlags::O_CREAT, false).unwrap();
     let initproc_len = einitproc as usize - sinitproc as usize;
@@ -92,6 +95,21 @@ pub fn flush_preload() {
     for ppn in crate::mm::PPNRange::new(
         crate::mm::PhysAddr::from(sbusybox as usize).floor(),
         crate::mm::PhysAddr::from(ebusybox as usize).floor(),
+    ) {
+        crate::mm::frame_dealloc(ppn);
+    }
+    let osconfig = ROOT_FD
+        .open("os_test.conf", OpenFlags::O_CREAT, false)
+        .unwrap();
+    osconfig.write(None, unsafe {
+        core::slice::from_raw_parts(
+            sosconfig as *const u8,
+            eosconfig as usize - sosconfig as usize,
+        )
+    });
+    for ppn in crate::mm::PPNRange::new(
+        crate::mm::PhysAddr::from(sosconfig as usize).floor(),
+        crate::mm::PhysAddr::from(eosconfig as usize).floor(),
     ) {
         crate::mm::frame_dealloc(ppn);
     }

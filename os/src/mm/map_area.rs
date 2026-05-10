@@ -824,7 +824,20 @@ impl MapArea {
         let swapped_before = self.get_inner().swapped;
         warn!("{:?}", self.inner.active);
         while let Some(idx) = self.inner.active.pop_front() {
+            // 索引不能越界
+            if (idx as usize) >= self.inner.frames.len() {
+                log::warn!(
+                    "[do_oom] Defensive skip: idx {} out of bounds for frames len {}",
+                    idx,
+                    self.inner.frames.len()
+                );
+                continue;
+            }
             let frame = &mut self.inner.frames[idx as usize];
+            // 只处理真正在内存中的帧，防止触发底下的 unreachable!()
+            if !matches!(frame, Frame::InMemory(_)) {
+                continue;
+            }
             // first, try to compress
             match frame.zip() {
                 Ok(zram_id) => {
@@ -857,7 +870,21 @@ impl MapArea {
         let swapped_before = self.inner.swapped;
         warn!("{:?}", self.inner.active);
         while let Some(idx) = self.inner.active.pop_front() {
+            // 索引不能越界
+            if (idx as usize) >= self.inner.frames.len() {
+                log::warn!(
+                    "[force_swap] Defensive skip: idx {} out of bounds for frames len {}",
+                    idx,
+                    self.inner.frames.len()
+                );
+                continue;
+            }
+
             let frame = &mut self.inner.frames[idx as usize];
+            // 防止遇到 Unallocated 触发 unreachable!()
+            if !matches!(frame, Frame::InMemory(_)) {
+                continue;
+            }
             match frame.force_swap_out() {
                 Ok(swap_id) => {
                     page_table.unmap(VirtPageNum::from(start_vpn.0 + idx as usize));

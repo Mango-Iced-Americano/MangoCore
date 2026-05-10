@@ -195,15 +195,8 @@ pub fn trap_return() -> ! {
 pub fn trap_from_kernel() -> ! {
     panic!(
         "a trap {:?} from kernel! bad addr = {:#x}, bad instruction = {:#x}",
-        scause::read().cause(),
-        stval::read(),
-        match current_task() {
-            Some(task) => {
-                task.acquire_inner_lock().get_trap_cx().gp.pc
-            }
-            None => {
-                sepc::read()
-            }
-        }
+        riscv::register::scause::read().cause(),
+        riscv::register::stval::read(),
+        riscv::register::sepc::read(),
     );
 }

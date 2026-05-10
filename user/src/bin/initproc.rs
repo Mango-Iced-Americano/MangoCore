@@ -46,7 +46,6 @@ const DEFAULT_ORDER: &[&str] = &[
     "busybox",
     "basic",
     "lua",
-    "iperf",
     "netperf",
     "ltp",
     "libctest",
@@ -55,6 +54,7 @@ const DEFAULT_ORDER: &[&str] = &[
     "lmbench",
     "libcbench",
     "unixbench",
+    "iperf",
 ];
 
 /// 每组默认超时（秒），索引 0..11 与 TEST_GROUPS 一一对应
@@ -434,7 +434,7 @@ fn enter_shell(path: &str, environ: &[*const u8]) {
 /// 返回 `Some(毫秒)`：固定等待时长；`None`：使用标准超时+强杀。
 fn fixed_timer_ms(script: &str) -> Option<u64> {
     if script.contains("iperf") {
-        Some(30000) // iperf: 30秒
+        Some(20000) // iperf: 20秒
     } else {
         None
     }
@@ -514,7 +514,9 @@ fn run_group_in_dir(
         sleep(fixed_ms as usize);
         let mut exit_code: i32 = 0;
         let _ = waitpid(pid as usize, &mut exit_code);
-        // 脚本自身会输出 START/END 标记，initproc 不再重复打印
+        // 打印 END 标记。脚本自身也可能输出，但若脚本提前退出
+        // （如 iperf PARALLEL_TCP 意外终止），确保标记不丢失。
+        println!("{}", group_end_marker);
         println!(
             "[initproc] done {} in {} exit_code={}",
             script, dir, exit_code

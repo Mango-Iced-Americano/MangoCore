@@ -21,6 +21,9 @@ use log::{debug, info, trace, warn};
 use num_enum::FromPrimitive;
 use smoltcp::socket;
 
+// 防止用户传入过大参数导致内核 OOM 或者长时间阻塞
+const MAX_SYSCALL_BUFFER_SIZE: usize = 2 * 1024 * 1024; // 限制为 2 MiB
+
 pub const AT_FDCWD: usize = 100usize.wrapping_neg();
 
 // todo
@@ -216,7 +219,7 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: u32) -> isize {
 }
 
 pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
-    let count = count.min(64 * 1024 * 1024);
+    let count = count.min(MAX_SYSCALL_BUFFER_SIZE);
     let task = current_task().unwrap();
     let file_descriptor = {
         let fd_table = task.files.lock();
@@ -247,7 +250,7 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
 }
 
 pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
-    let count = count.min(64 * 1024 * 1024);
+    let count = count.min(MAX_SYSCALL_BUFFER_SIZE);
     let task = current_task().unwrap();
     let file_descriptor = {
         let fd_table = task.files.lock();
@@ -285,7 +288,7 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
 }
 
 pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
-    let count = count.min(64 * 1024 * 1024);
+    let count = count.min(MAX_SYSCALL_BUFFER_SIZE);
     let task = current_task().unwrap();
     let fd_table = task.files.lock();
     let file_descriptor = match fd_table.get_ref(fd) {
@@ -309,7 +312,7 @@ pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
 }
 
 pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
-    let count = count.min(64 * 1024 * 1024);
+    let count = count.min(MAX_SYSCALL_BUFFER_SIZE);
     let task = current_task().unwrap();
     let fd_table = task.files.lock();
     let file_descriptor = match fd_table.get_ref(fd) {
@@ -361,8 +364,8 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
             let mut total_len = 0;
             for iovec in iovecs.iter() {
                 let mut iov_len = iovec.iov_len;
-                if total_len + iov_len > 64 * 1024 * 1024 {
-                    iov_len = 64 * 1024 * 1024 - total_len;
+                if total_len + iov_len > MAX_SYSCALL_BUFFER_SIZE {
+                    iov_len = MAX_SYSCALL_BUFFER_SIZE - total_len;
                 }
                 if iov_len == 0 {
                     continue;
@@ -413,8 +416,8 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
             let mut total_len = 0;
             for iovec in iovecs.iter() {
                 let mut iov_len = iovec.iov_len;
-                if total_len + iov_len > 64 * 1024 * 1024 {
-                    iov_len = 64 * 1024 * 1024 - total_len;
+                if total_len + iov_len > MAX_SYSCALL_BUFFER_SIZE {
+                    iov_len = MAX_SYSCALL_BUFFER_SIZE - total_len;
                 }
                 if iov_len == 0 {
                     continue;

@@ -24,3 +24,12 @@ sbusybox:
     .incbin "./busybox-la"
 ebusybox:
     .align 12
+
+    .section .data
+    .global sosconfig
+    .global eosconfig
+    .align 12
+sosconfig:
+    .incbin "../os_test.conf"
+eosconfig:
+    .align 12    

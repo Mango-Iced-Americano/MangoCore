@@ -544,6 +544,20 @@ impl TaskControlBlock {
         // 检查当前任务是否是多线程任务
         if self.tid_allocator.lock().get_allocated() > 1 {
             let mut manager = TASK_MANAGER.lock();
+
+            for task in manager
+                .ready_queue
+                .iter()
+                .chain(manager.interruptible_queue.iter())
+            {
+                if task.tgid == self.tgid && task.tid != self.tid {
+                    // 发送 SIGKILL 信号给同一线程组的其他任务
+                    let mut inner = task.acquire_inner_lock();
+                    inner.add_signal(Signals::SIGKILL);
+                    inner.task_status = TaskStatus::Zombie;
+                    inner.exit_code = 0;
+                }
+            }
             // 销毁所有其他同一线程组的任务
             manager
                 .ready_queue

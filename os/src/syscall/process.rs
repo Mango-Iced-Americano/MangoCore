@@ -621,6 +621,21 @@ pub fn sys_clone(
     tls: usize,
     ctid: *mut u32,
 ) -> isize {
+    // ---- 防御性检查 1：进程总量限制 ----
+    if procs_count() >= SYSTEM_TASK_LIMIT as u16 {
+        warn!(
+            "[sys_clone] Total process limit reached ({})",
+            SYSTEM_TASK_LIMIT
+        );
+        return -(SyscallErr::EAGAIN as isize); // Linux 语义：资源暂时不可用
+    }
+    // ---- 防御性检查 2：堆内存剩余预警 ----
+    if crate::mm::unallocated_frames() < 32 {
+        // 预留一点物理页给基本运作
+        warn!("[sys_clone] Low physical memory, rejecting clone");
+        return -(SyscallErr::ENOMEM as isize);
+    }
+
     let parent = current_task().unwrap();
     // This signal will be sent to its parent when it exits
     // we need to add a field in TCB to support this feature, but not now.

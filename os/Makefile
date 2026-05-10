@@ -13,7 +13,7 @@ LA_TOOLCHAIN ?= nightly-2024-05-01
 
 .PHONY: all $(ARCHS) clean
 
-all: conf-inject rv64_all la64_all
+all: rv64_all la64_all
 
 rv64_all:
 	@echo "Building rv64"

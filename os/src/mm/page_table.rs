@@ -5,6 +5,9 @@ use super::{MapPermission, PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageN
 use alloc::string::String;
 use alloc::vec::Vec;
 
+// 防止用户一次性传入过大参数导致oom
+const MAX_BUFFER_SIZE: usize = 1024 * 1024 * 8;
+
 #[allow(unused)]
 pub trait PageTable {
     /// 基本映射操作
@@ -115,6 +118,10 @@ pub fn translated_byte_buffer(
     ptr: *const u8,
     len: usize,
 ) -> Result<Vec<&'static mut [u8]>, isize> {
+    if len > MAX_BUFFER_SIZE {
+        log::warn!("[kernel] translated_byte_buffer: requested length {} exceeds maximum {}, returning EFAULT", len, MAX_BUFFER_SIZE);
+        return Err(crate::syscall::errno::EFAULT);
+    }
     let page_table = super::PageTableImpl::from_token(token);
     let mut start = ptr as usize;
     let end = start + len;
