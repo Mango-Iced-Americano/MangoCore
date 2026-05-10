@@ -16,7 +16,7 @@ use crate::{
     },
     lang_items::Bytes,
     mm::UserBuffer,
-    syscall::errno::{EINVAL, ENOTDIR, ENOTEMPTY},
+    syscall::errno::{EINVAL, ENOMEM, ENOTDIR, ENOTEMPTY},
 };
 use alloc::{
     format,
@@ -462,7 +462,7 @@ impl File for Ext4OSInode {
         if inode_ref.inode.get_file_type() != DiskInodeType::Directory {
             return Err(ENOTDIR);
         }
-        let entries = self.ext4fs.dir_get_entries(inode_ref.inode_num);
+        let entries = self.ext4fs.dir_get_entries(inode_ref.inode_num)?;
         // for entry in entries.iter() {
         //     println!("[kernel get subfile test] {:?}", entry.get_name());
         // }
@@ -484,12 +484,13 @@ impl File for Ext4OSInode {
             })
         };
 
-        // let vec: Vec<(String, Arc<dyn File>)> = entries.iter().map(|entry| (entry.get_name(), get_dyn_file(entry))).collect();
-        // Ok(vec)
-        Ok(entries
-            .into_iter()
-            .map(|entry| (entry.get_name(), get_dyn_file(&entry)))
-            .collect())
+        let mut result = Vec::new();
+        for entry in entries {
+            result.try_reserve(1).map_err(|_| ENOMEM)?;
+            let name = entry.try_get_name()?;
+            result.push((name, get_dyn_file(&entry)));
+        }
+        Ok(result)
     }
 
     /// 创建文件
@@ -647,7 +648,7 @@ impl File for Ext4OSInode {
     /// + count：要获取的目录项数量
     /// # 返回值
     /// + 获取到的目录项数组/向量
-    fn get_dirent(&self, count: usize) -> Vec<Dirent> {
+    fn get_dirent(&self, count: usize) -> Result<Vec<Dirent>, isize> {
         const DT_UNKNOWN: u8 = 0;
         const DT_DIR: u8 = 4;
         const DT_REG: u8 = 8;
@@ -660,22 +661,19 @@ impl File for Ext4OSInode {
         let inode_ref = self.inode.lock().clone();
         assert!(inode_ref.inode.get_file_type() == DiskInodeType::Directory);
 
-        // 从 ext4fs 读取整个目录项列表
-        let entries = self.ext4fs.dir_get_entries(inode_ref.inode_num);
-
         // 计算每次最多返回的目录项数
         let max_items = count / mem::size_of::<Dirent>();
         let old_index = *offset;
-        let mut result = Vec::new();
-        let mut new_index = old_index;
+        let (entries, new_index) = self.ext4fs.dir_get_entries_from_inode_ref(
+            Arc::new(inode_ref),
+            old_index,
+            max_items,
+        )?;
 
         // 遍历 entries，从 old_index 开始，最多收集 max_items 条
-        for (idx, entry) in entries.iter().enumerate().skip(old_index) {
-            if result.len() >= max_items {
-                break;
-            }
-            new_index = idx + 1;
-
+        let mut result = Vec::new();
+        result.try_reserve(entries.len()).map_err(|_| ENOMEM)?;
+        for entry in entries.iter() {
             // 映射 ext4 条目到通用 Dirent
             let d_type = match DirEntryType::from_bits(entry.get_de_type()) {
                 Some(dt) => match dt {
@@ -685,17 +683,17 @@ impl File for Ext4OSInode {
                 },
                 None => panic!("unknown entry type"),
             };
-            result.push(Dirent::new(
+            result.push(Dirent::new_from_bytes(
                 entry.inode as usize,
                 entry.entry_len as isize,
                 d_type,
-                &entry.get_name().as_str(),
+                entry.get_name_bytes(),
             ));
         }
 
         // 更新偏移，下次从 new_index 开始读取
         *offset = new_index;
-        result
+        Ok(result)
     }
 
     fn lseek(&self, offset: isize, whence: crate::fs::SeekWhence) -> Result<usize, isize> {

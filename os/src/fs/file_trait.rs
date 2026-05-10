@@ -42,7 +42,7 @@ pub trait File: DowncastSync {
     /// delete(unlink)
     fn unlink(&self, delete: bool) -> Result<(), isize>;
     /// dirent
-    fn get_dirent(&self, count: usize) -> Vec<Dirent>;
+    fn get_dirent(&self, count: usize) -> Result<Vec<Dirent>, isize>;
     /// offset
     fn get_offset(&self) -> usize {
         self.lseek(0, SeekWhence::SEEK_CUR).unwrap()

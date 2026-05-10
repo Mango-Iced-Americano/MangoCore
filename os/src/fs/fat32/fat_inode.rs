@@ -1288,7 +1288,8 @@ impl InodeTrait for FatInode {
         // 设置迭代器起始偏移量
         walker.iter.set_iter_offset(offset);
         // 初始化存储目录项的向量
-        let mut v = Vec::with_capacity(length);
+        let mut v = Vec::new();
+        v.try_reserve(length).map_err(|_| ())?;
 
         // 读取第一个目录项
         let (mut last_name, mut last_short_ent) = match walker.next() {

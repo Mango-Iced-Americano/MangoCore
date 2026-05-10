@@ -1,15 +1,106 @@
-use crate::hal::KERNEL_HEAP_SIZE;
-use buddy_system_allocator::LockedHeap;
+use crate::{config::PAGE_SIZE, hal::KERNEL_HEAP_SIZE};
+use buddy_system_allocator::Heap;
+use core::alloc::{GlobalAlloc, Layout};
+use core::sync::atomic::{AtomicBool, Ordering};
+use spin::Mutex;
+
+/// 全局堆分配器。
+///
+/// 这里不用 `LockedHeap`，而是包一层 `GlobalAlloc`，这样普通内核堆分配失败时
+/// 还能先尝试释放 cache / user page tracker 等可回收对象，再决定是否交给
+/// `alloc_error_handler` 处理。
+pub struct OomAwareAllocator {
+    inner: Mutex<Heap<32>>,
+}
+
+static OOM_RECOVERY_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+impl OomAwareAllocator {
+    pub const fn empty() -> Self {
+        Self {
+            inner: Mutex::new(Heap::empty()),
+        }
+    }
+
+    pub unsafe fn init(&self, start: usize, size: usize) {
+        self.inner.lock().init(start, size);
+    }
+
+    fn recover_for(&self, layout: Layout) -> bool {
+        // 确保回收原子化，防止多次或递归回收
+        if OOM_RECOVERY_IN_PROGRESS
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return false;
+        }
+
+        let recovered = self.recover_for_inner(layout);
+        OOM_RECOVERY_IN_PROGRESS.store(false, Ordering::Release);
+        recovered
+    }
+
+    fn recover_for_inner(&self, layout: Layout) -> bool {
+        #[cfg(feature = "oom_handler")]
+        {
+            let pages = layout.size().saturating_add(PAGE_SIZE - 1) / PAGE_SIZE;
+            let pages = pages.max(1);
+            log::warn!(
+                "[heap_alloc] alloc failed: size={}, align={}, try oom recovery for {} pages",
+                layout.size(),
+                layout.align(),
+                pages
+            );
+            if crate::mm::frame_allocator::oom_handler(pages).is_ok() {
+                return true;
+            }
+            log::warn!("[heap_alloc] oom recovery did not release enough memory");
+        }
+        #[cfg(not(feature = "oom_handler"))]
+        {
+            log::warn!(
+                "[heap_alloc] alloc failed: size={}, align={}, oom_handler disabled",
+                layout.size(),
+                layout.align()
+            );
+        }
+        false
+    }
+}
+
+unsafe impl GlobalAlloc for OomAwareAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        for _ in 0..3 {
+            if let Ok(ptr) = self.inner.lock().alloc(layout) {
+                return ptr.as_ptr();
+            }
+            if !self.recover_for(layout) {
+                break;
+            }
+        }
+        core::ptr::null_mut()
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        if let Some(ptr) = core::ptr::NonNull::new(ptr) {
+            self.inner.lock().dealloc(ptr, layout);
+        }
+    }
+}
 
 #[global_allocator]
 /// 全局堆分配器
-static HEAP_ALLOCATOR: LockedHeap<32> = LockedHeap::empty();
+static HEAP_ALLOCATOR: OomAwareAllocator = OomAwareAllocator::empty();
 
 // 标记为全局分配错误处理器
 #[alloc_error_handler]
 /// 分配错误处理
 pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
-    panic!("Heap allocation error, layout = {:?}", layout);
+    println!("=== HEAP ALLOCATION FAILED (FATAL) ===");
+    println!("layout: size={}, align={}", layout.size(), layout.align());
+    println!("KERNEL_HEAP_SIZE: {} bytes", KERNEL_HEAP_SIZE);
+    println!("======================================");
+    crate::hal::shutdown()
 }
 
 /// 全局堆内存空间
@@ -18,10 +109,8 @@ static mut HEAP_SPACE: [u8; KERNEL_HEAP_SIZE] = [0; KERNEL_HEAP_SIZE];
 /// 初始化用于内核加载开始时的堆
 pub fn init_heap() {
     unsafe {
-        HEAP_ALLOCATOR
-            .lock()
-            // 起始地址和大小
-            .init(HEAP_SPACE.as_ptr() as usize, KERNEL_HEAP_SIZE);
+        // 起始地址和大小
+        HEAP_ALLOCATOR.init(HEAP_SPACE.as_ptr() as usize, KERNEL_HEAP_SIZE);
     }
 }
 

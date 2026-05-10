@@ -475,30 +475,29 @@ impl PageCacheManager {
     {
         let mut lock = self.cache_pool.lock();
         let mut dropped = 0;
-        let mut new_allocated_cache = Vec::<usize>::new();
+        let mut allocated_cache = self.allocated_cache.lock();
 
-        for inner_cache_id in self.allocated_cache.lock().iter() {
+        allocated_cache.retain(|inner_cache_id| {
             let inner_cache_id = *inner_cache_id;
             let inner = lock[inner_cache_id].as_ref().unwrap();
             if Arc::strong_count(inner) > 1 {
-                new_allocated_cache.push(inner_cache_id);
-                continue;
+                return true;
             }
             let mut inner_lock = inner.lock();
             if Arc::strong_count(&inner_lock.tracker) > 1 {
-                new_allocated_cache.push(inner_cache_id);
+                true
             } else if inner_lock.priority > 0 {
                 inner_lock.priority -= 1;
-                new_allocated_cache.push(inner_cache_id);
+                true
             } else {
                 let block_ids = neighbor(inner_cache_id);
                 inner_lock.sync(block_ids, block_device);
                 dropped += 1;
                 drop(inner_lock);
                 lock[inner_cache_id] = None;
+                false
             }
-        }
-        *self.allocated_cache.lock() = new_allocated_cache;
+        });
         dropped
     }
 

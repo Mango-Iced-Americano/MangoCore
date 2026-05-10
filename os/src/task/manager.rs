@@ -7,9 +7,6 @@ use core::sync::atomic::Ordering as AtomicOrdering;
 
 #[cfg(feature = "oom_handler")]
 use crate::config::SYSTEM_TASK_LIMIT;
-#[cfg(feature = "oom_handler")]
-use alloc::vec::Vec;
-
 use crate::timer::{TimeSpec, TimeVal};
 
 use super::{
@@ -19,6 +16,7 @@ use super::{
 use crate::utils::error::SyscallErr;
 use alloc::collections::{BinaryHeap, VecDeque};
 use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
 use lazy_static::*;
 use spin::Mutex;
 use spin::MutexGuard;
@@ -234,43 +232,40 @@ pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
 /// 尝试释放所有任务的内存空间，直到释放`req`页。
 #[cfg(feature = "oom_handler")]
 pub fn do_oom(req: usize) -> Result<(), ()> {
-    let mut manager = TASK_MANAGER.lock();
-    let mut cleaned = Vec::with_capacity(16);
+    let mut manager = match TASK_MANAGER.try_lock() {
+        Some(manager) => manager,
+        None => return Err(()),
+    };
     let mut total_released = 0;
-    for task in manager
-        .interruptible_queue
-        .iter()
-        .filter(|task| manager.active_tracker.check_active(task.pid.0))
-    {
+    let interruptible_len = manager.interruptible_queue.len();
+    for idx in 0..interruptible_len {
+        let task = manager.interruptible_queue[idx].clone();
+        if !manager.active_tracker.check_active(task.pid.0) {
+            continue;
+        }
         let released = task.vm.lock().do_deep_clean();
         log::warn!("deep clean on task: {}, released: {}", task.tgid, released);
-        cleaned.push(task.pid.0);
+        manager.active_tracker.mark_inactive(task.pid.0);
         total_released += released;
         if total_released >= req {
-            while let Some(pid) = cleaned.pop() {
-                manager.active_tracker.mark_inactive(pid)
-            }
             return Ok(());
         };
     }
-    for task in manager
-        .ready_queue
-        .iter()
-        .rev()
-        .filter(|task| manager.active_tracker.check_active(task.pid.0))
-    {
+    let ready_len = manager.ready_queue.len();
+    for idx in (0..ready_len).rev() {
+        let task = manager.ready_queue[idx].clone();
+        if !manager.active_tracker.check_active(task.pid.0) {
+            continue;
+        }
         let released = task.vm.lock().do_shallow_clean();
         log::warn!(
             "shallow clean on task: {}, released: {}",
             task.tgid,
             released
         );
-        cleaned.push(task.pid.0);
+        manager.active_tracker.mark_inactive(task.pid.0);
         total_released += released;
         if total_released >= req {
-            while let Some(pid) = cleaned.pop() {
-                manager.active_tracker.mark_inactive(pid)
-            }
             return Ok(());
         };
     }
