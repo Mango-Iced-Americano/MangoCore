@@ -193,7 +193,7 @@ impl FileDescriptor {
             return Err(ENOTDIR);
         }
         // 调用file的get_dirent方法
-        Ok(self.file.get_dirent(count))
+        self.file.get_dirent(count)
     }
     pub fn get_offset(&self) -> usize {
         self.lseek(0, SeekWhence::SEEK_CUR).unwrap()

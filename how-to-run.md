@@ -39,9 +39,9 @@ cd os && make la64-run
 
 2) 注入到目标镜像
 
-la64 + mem 模式（写入 rootfs 镜像）:
+la64 + PCI 模式（写入 sdcard 镜像，默认推荐）:
 ```
-make -C os conf-inject CONF_ARCH=la64 CONF_BLK_MODE=mem CONF_FILE=../os_test.conf
+make -C os conf-inject CONF_ARCH=la64 CONF_BLK_MODE=virt_pci CONF_FILE=../os_test.conf
 ```
 rv64 + virt 模式（写入 sdcard 镜像）:
 ```
@@ -61,7 +61,7 @@ make -C os conf-inject CONF_ARCH=la64 CONF_BLK_MODE=virt CONF_FILE=../os_test.co
 常用参数（通过环境变量传入）:
 - `TEST_ARCH`: `rv64` / `la64` / `both`（`both` 会按 `la64 -> rv64` 顺序连续跑）
 - `TEST_BLK_MODE`: 全局块设备模式（可选）
-- `TEST_BLK_MODE_LA`: 仅 la64 的块设备模式（未设置时默认 `mem`）
+- `TEST_BLK_MODE_LA`: 仅 la64 的块设备模式（未设置时默认 `virt_pci`）
 - `TEST_BLK_MODE_RV`: 仅 rv64 的块设备模式（未设置时默认 `virt`）
 - `GROUP_TIMEOUT_SEC`: 每个分组的超时时间（秒）
 
@@ -86,4 +86,3 @@ TEST_ARCH=both GROUP_TIMEOUT_SEC=300 bash run_test.sh
 - 结果日志目录: `testresult/la`（la64）和 `testresult/rv`（rv64）。
 - 脚本会在超时后强制结束当前组并继续下一组。
 - PASS 判定不仅看命令返回码，还会校验 initproc 日志中 musl+glibc 两侧对应组都 `exit_code=0`。
-

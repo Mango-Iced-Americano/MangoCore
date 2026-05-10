@@ -193,7 +193,13 @@ pub fn frame_reserve(num: usize) {
     // 获取还可分配的帧数量
     let remain = FRAME_ALLOCATOR.read().unallocated_frames();
     if remain < num {
-        oom_handler(num - remain).unwrap()
+        if oom_handler(num - remain).is_err() {
+            log::warn!(
+                "[frame_reserve] unable to reserve {} frames, remain {}",
+                num,
+                remain
+            );
+        }
     }
 }
 
@@ -209,10 +215,12 @@ pub fn frame_alloc() -> Option<Arc<FrameTracker>> {
     match result {
         Some(frame_tracker) => Some(Arc::new(frame_tracker)),
         None => {
-            crate::show_frame_consumption! {
-                "GC";
-                oom_handler(1).unwrap();
-            };
+            let before = unallocated_frames();
+            if oom_handler(1).is_err() {
+                log::warn!("[frame_alloc] oom recovery failed");
+                return None;
+            }
+            crate::show_frame_consumption!("GC", before);
             FRAME_ALLOCATOR
                 .write()
                 .alloc()
@@ -222,7 +230,10 @@ pub fn frame_alloc() -> Option<Arc<FrameTracker>> {
 }
 
 pub fn frames_alloc(num: usize) -> Option<Vec<Arc<FrameTracker>>> {
-    let mut frames = Vec::with_capacity(num);
+    let mut frames = Vec::new();
+    if frames.try_reserve(num).is_err() {
+        return None;
+    }
     for _ in 0..num {
         if let Some(frame_tracker) = frame_alloc() {
             frames.push(frame_tracker);
@@ -248,10 +259,12 @@ pub unsafe fn frame_alloc_uninit() -> Option<Arc<FrameTracker>> {
     match result {
         Some(frame_tracker) => Some(Arc::new(frame_tracker)),
         None => {
-            crate::show_frame_consumption! {
-                "GC";
-                oom_handler(1).unwrap();
-            };
+            let before = unallocated_frames();
+            if oom_handler(1).is_err() {
+                log::warn!("[frame_alloc_uninit] oom recovery failed");
+                return None;
+            }
+            crate::show_frame_consumption!("GC", before);
             FRAME_ALLOCATOR
                 .write()
                 .alloc_uninit()

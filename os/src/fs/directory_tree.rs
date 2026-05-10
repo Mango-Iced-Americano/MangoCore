@@ -69,16 +69,9 @@ fn delete_directory_vec() {
 
 // 优化 DIRECTORY_VEC，在计数器达到节点数一半时触发
 fn update_directory_vec(lock: &mut MutexGuard<(Vec<Weak<DirectoryTreeNode>>, usize)>) {
-    // 初始化一个新的 DIRECTORY_VEC
-    let mut new_vec: Vec<Weak<DirectoryTreeNode>> = Vec::new();
-    // 遍历原来的 DIRECTORY_VEC，如果 inode 存在，添加到新的 DIRECTORY_VEC中
-    for inode in &lock.0 {
-        if inode.upgrade().is_some() {
-            new_vec.push(inode.clone());
-        }
-    }
-    // 赋值给 DIRECTORY_VEC，同时将计数器置为0
-    **lock = (new_vec, 0);
+    // OOM 回收路径也会调用这里，必须原地压缩，避免在堆紧张时再分配新 Vec。
+    lock.0.retain(|inode| inode.upgrade().is_some());
+    lock.1 = 0;
 }
 
 pub struct DirectoryTreeNode {

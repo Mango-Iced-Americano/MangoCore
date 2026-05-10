@@ -2,6 +2,7 @@ MODE ?= release
 FS_MODE ?= fat32
 BLK_MODE ?= virt
 DOCKER_IMAGE ?= docker.educg.net/cg/os-contest:20250614
+LA_TOOLCHAIN ?= nightly-2024-05-01
 
 QEMU_TAR := qemu-2k1000-static.20240526.tar.xz
 QEMU_URL := https://gitlab.educg.net/wangmingjian/os-contest-2024-image/-/raw/master/$(QEMU_TAR)
@@ -12,7 +13,7 @@ all: clean
 	make -C os all
 
 env:
-	rustup default nightly-2024-05-01-x86_64-unknown-linux-gnu
+	rustup default $(LA_TOOLCHAIN)
 
 kernel:
 	cd os && make kernel

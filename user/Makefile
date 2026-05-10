@@ -1,6 +1,8 @@
 TARGET := riscv64gc-unknown-none-elf
 MODE := debug
 COMP ?= yes
+RV_TOOLCHAIN ?= nightly-2025-01-18
+LA_TOOLCHAIN ?= nightly-2024-05-01
 
 ifeq ($(BOARD), 2k1000)
 	TARGET := loongarch64-unknown-linux-gnu
@@ -22,9 +24,9 @@ build: rust-user
 env:
 ifeq ($(TARGET), riscv64gc-unknown-none-elf)
 	echo "a"
-	@rustup override set nightly-2025-01-18-x86_64-unknown-linux-gnu
+	@rustup override set $(RV_TOOLCHAIN)
 else ifeq ($(TARGET), loongarch64-unknown-linux-gnu)
-	@rustup override set nightly-2024-05-01-x86_64-unknown-linux-gnu
+	@rustup override set $(LA_TOOLCHAIN)
 endif
 	-(rustup target list | grep "$(TARGET) (installed)") || rustup target add $(TARGET)
 	-cargo install --list |grep cargo-binutils |grep "v0.2.0">/dev/null || cargo install cargo-binutils --vers ~0.2

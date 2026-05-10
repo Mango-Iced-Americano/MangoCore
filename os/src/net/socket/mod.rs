@@ -486,8 +486,8 @@ impl File for SocketFile {
         Err(-(crate::syscall::errno::EISDIR as isize))
     }
 
-    fn get_dirent(&self, _count: usize) -> Vec<Dirent> {
-        Vec::new()
+    fn get_dirent(&self, _count: usize) -> Result<Vec<Dirent>, isize> {
+        Ok(Vec::new())
     }
 
     fn lseek(&self, _offset: isize, _whence: SeekWhence) -> Result<usize, isize> {

@@ -362,7 +362,7 @@ impl File for FatOSInode {
     /// + count：要获取的目录项数量
     /// # 返回值
     /// + 获取到的目录项数组/向量
-    fn get_dirent(&self, count: usize) -> Vec<Dirent> {
+    fn get_dirent(&self, count: usize) -> Result<Vec<Dirent>, isize> {
         // 定义三个Dirent常量
         const DT_UNKNOWN: u8 = 0;
         const DT_DIR: u8 = 4;
@@ -394,21 +394,24 @@ impl File for FatOSInode {
             *offset = *next_offset;
         }
         // 迭代vec来获取需要的目录项
-        vec.iter()
-            .map(|(name, offset, first_clus, type_)| {
-                let d_type = match type_ {
-                    FATDiskInodeType::AttrDirectory | FATDiskInodeType::AttrVolumeID => DT_DIR,
-                    FATDiskInodeType::AttrArchive => DT_REG,
-                    _ => DT_UNKNOWN,
-                };
-                Dirent::new(
-                    *first_clus as usize,
-                    *offset as isize,
-                    d_type,
-                    name.as_str(),
-                )
-            })
-            .collect()
+        let mut result = Vec::new();
+        result
+            .try_reserve(vec.len())
+            .map_err(|_| crate::syscall::errno::ENOMEM)?;
+        for (name, offset, first_clus, type_) in vec.iter() {
+            let d_type = match type_ {
+                FATDiskInodeType::AttrDirectory | FATDiskInodeType::AttrVolumeID => DT_DIR,
+                FATDiskInodeType::AttrArchive => DT_REG,
+                _ => DT_UNKNOWN,
+            };
+            result.push(Dirent::new(
+                *first_clus as usize,
+                *offset as isize,
+                d_type,
+                name.as_str(),
+            ));
+        }
+        Ok(result)
     }
     fn lseek(&self, offset: isize, whence: SeekWhence) -> Result<usize, isize> {
         let inode_lock = self.inner.write();

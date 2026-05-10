@@ -447,8 +447,8 @@ impl File for Pipe {
         todo!()
     }
 
-    fn get_dirent(&self, count: usize) -> alloc::vec::Vec<Dirent> {
-        todo!()
+    fn get_dirent(&self, _count: usize) -> Result<alloc::vec::Vec<Dirent>, isize> {
+        Ok(alloc::vec::Vec::new())
     }
 
     fn lseek(&self, offset: isize, whence: crate::fs::SeekWhence) -> Result<usize, isize> {

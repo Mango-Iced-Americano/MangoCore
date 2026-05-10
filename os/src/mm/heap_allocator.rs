@@ -1,52 +1,67 @@
-use crate::hal::KERNEL_HEAP_SIZE;
+use crate::{config::PAGE_SIZE, hal::KERNEL_HEAP_SIZE};
 use buddy_system_allocator::Heap;
 use core::alloc::{GlobalAlloc, Layout};
+use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
-/// 具备 OOM recovery 能力的全局堆分配器
+/// 全局堆分配器。
+///
+/// 这里不用 `LockedHeap`，而是包一层 `GlobalAlloc`，这样普通内核堆分配失败时
+/// 还能先尝试释放 cache / user page tracker 等可回收对象，再决定是否交给
+/// `alloc_error_handler` 处理。
 pub struct OomAwareAllocator {
     inner: Mutex<Heap<32>>,
 }
 
+static OOM_RECOVERY_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
 impl OomAwareAllocator {
-    /// 创建一个空的分配器
     pub const fn empty() -> Self {
         Self {
             inner: Mutex::new(Heap::empty()),
         }
     }
 
-    /// 初始化堆内存
-    pub fn init(&self, start: usize, size: usize) {
-        unsafe {
-            self.inner.lock().init(start, size);
-        }
+    pub unsafe fn init(&self, start: usize, size: usize) {
+        self.inner.lock().init(start, size);
     }
 
-    /// 尝试 OOM recovery
-    fn try_oom_recovery(&self, layout: Layout) -> bool {
+    fn recover_for(&self, layout: Layout) -> bool {
+        // 确保回收原子化，防止多次或递归回收
+        if OOM_RECOVERY_IN_PROGRESS
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return false;
+        }
+
+        let recovered = self.recover_for_inner(layout);
+        OOM_RECOVERY_IN_PROGRESS.store(false, Ordering::Release);
+        recovered
+    }
+
+    fn recover_for_inner(&self, layout: Layout) -> bool {
         #[cfg(feature = "oom_handler")]
         {
-            let page_size = 0x1000usize;
-            let pages = (layout.size() + page_size - 1) / page_size;
+            let pages = layout.size().saturating_add(PAGE_SIZE - 1) / PAGE_SIZE;
+            let pages = pages.max(1);
             log::warn!(
-                "[OomAwareAllocator] alloc failed (size={}, align={}), triggering OOM recovery ({} pages)...",
+                "[heap_alloc] alloc failed: size={}, align={}, try oom recovery for {} pages",
                 layout.size(),
                 layout.align(),
-                pages,
+                pages
             );
-            if crate::task::do_oom(pages).is_ok() {
-                log::info!("[OomAwareAllocator] OOM recovery succeeded, retrying allocation");
+            if crate::mm::frame_allocator::oom_handler(pages).is_ok() {
                 return true;
             }
-            log::error!("[OomAwareAllocator] OOM recovery failed (no memory released)");
+            log::warn!("[heap_alloc] oom recovery did not release enough memory");
         }
         #[cfg(not(feature = "oom_handler"))]
         {
             log::warn!(
-                "[OomAwareAllocator] heap exhausted (size={}, align={}), enable `oom_handler` feature for recovery",
+                "[heap_alloc] alloc failed: size={}, align={}, oom_handler disabled",
                 layout.size(),
-                layout.align(),
+                layout.align()
             );
         }
         false
@@ -55,36 +70,20 @@ impl OomAwareAllocator {
 
 unsafe impl GlobalAlloc for OomAwareAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // 多次尝试：每次失败后触发 OOM recovery，最多 3 轮
-        for attempt in 0..3 {
+        for _ in 0..3 {
             if let Ok(ptr) = self.inner.lock().alloc(layout) {
                 return ptr.as_ptr();
             }
-            if attempt < 2 {
-                log::warn!(
-                    "[OomAwareAllocator] alloc attempt {} failed (size={}, align={}), retrying...",
-                    attempt + 1,
-                    layout.size(),
-                    layout.align(),
-                );
-                if self.try_oom_recovery(layout) {
-                    continue;
-                }
+            if !self.recover_for(layout) {
+                break;
             }
-        }
-        // 所有尝试均失败 — 设置当前任务的 OOM kill pending 标志
-        // 该标志将在 trap_return 中被检查，然后 SIGKILL 发送给本进程
-        if let Some(task) = crate::task::current_task() {
-            task.acquire_inner_lock().pending_oom_kill = true;
-            // drop task Arc 引用，避免 refcount 泄漏
-            drop(task);
         }
         core::ptr::null_mut()
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        if let Some(non_null) = core::ptr::NonNull::new(ptr) {
-            self.inner.lock().dealloc(non_null, layout);
+        if let Some(ptr) = core::ptr::NonNull::new(ptr) {
+            self.inner.lock().dealloc(ptr, layout);
         }
     }
 }
@@ -107,27 +106,10 @@ static HEAP_ALLOCATOR: OomAwareAllocator = OomAwareAllocator::empty();
 /// 永远得不到释放，导致后续任务死锁或文件系统损坏。
 /// 正确的做法是：在 alloc() 中做好多次重试+OOM recovery，只有在万不得已时才 shutdown。
 pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
-    // 收集诊断信息（注意：print 走 UART 直出，不会再次分配）
-    let timer_queue_size = crate::task::kernel_timer_queue_len();
-    let task_info = crate::task::task_manager_counts();
-    let syscall_name = crate::task::current_syscall_name();
-
     println!("=== HEAP ALLOCATION FAILED (FATAL) ===");
     println!("layout: size={}, align={}", layout.size(), layout.align());
-    println!("current syscall: {}", syscall_name);
-    match timer_queue_size {
-        Some(sz) => println!("KERNEL_TIMER_QUEUE entries: {}", sz),
-        None => println!("KERNEL_TIMER_QUEUE: locked"),
-    }
-    match task_info {
-        Some((r, i)) => println!("tasks: ready={}, interruptible={}", r, i),
-        None => println!("TASK_MANAGER: locked"),
-    }
     println!("KERNEL_HEAP_SIZE: {} bytes", KERNEL_HEAP_SIZE);
-    println!("=============================");
-    println!("Shutting down due to unrecoverable heap exhaustion.");
-    println!("=============================");
-
+    println!("======================================");
     crate::hal::shutdown()
 }
 
@@ -137,6 +119,7 @@ static mut HEAP_SPACE: [u8; KERNEL_HEAP_SIZE] = [0; KERNEL_HEAP_SIZE];
 /// 初始化用于内核加载开始时的堆
 pub fn init_heap() {
     unsafe {
+        // 起始地址和大小
         HEAP_ALLOCATOR.init(HEAP_SPACE.as_ptr() as usize, KERNEL_HEAP_SIZE);
     }
 }
