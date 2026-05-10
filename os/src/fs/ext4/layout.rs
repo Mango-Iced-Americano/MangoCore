@@ -9,8 +9,9 @@ use crate::{
             direntry::{DirEntryType, Ext4DirEntryTail},
             InodeFileType, PageCache,
         },
+        file_descriptor::FdTable,
         file_trait::File,
-        inode::{InodeLock, InodeTrait},
+        inode::{self, InodeLock, InodeTrait},
         vfs::VFS,
         DiskInodeType, OpenFlags, SeekWhence, Stat, StatMode,
     },
@@ -18,6 +19,7 @@ use crate::{
     mm::UserBuffer,
     net::socket::inet::stream::inner,
     syscall::errno::{EINVAL, ENOMEM, ENOTDIR, ENOTEMPTY},
+    utils::error::SyscallErr,
 };
 use alloc::{
     format,
@@ -194,7 +196,7 @@ impl File for Ext4OSInode {
                     start_cache += 1;
                     start = end_current_block;
                 }
-                *offset = read_size;
+                *offset += read_size;
                 read_size
             }
             None => {
@@ -697,57 +699,59 @@ impl File for Ext4OSInode {
             }
 
             // 获取物理块索引
-            if let Ok(fblock) = self.ext4fs.get_pblock_idx(&inode_ref, iblock) {
-                let ext4block = Block::load_offset(
-                    self.ext4fs.block_device.clone(),
-                    fblock as usize * self.ext4fs.block_size,
-                );
+            let fblock_res = self.ext4fs.get_pblock_idx(&inode_ref, iblock);
+            if fblock_res.is_err() {
+                // 如果块不存在（稀疏空洞），跳过这一整个逻辑块
+                current_offset = ((current_offset / self.ext4fs.block_size as usize) + 1)
+                    * self.ext4fs.block_size as usize;
+                continue;
+            }
 
-                let mut inner_offset = block_offset;
+            let fblock = fblock_res.unwrap();
+            let ext4block = Block::load_offset(
+                self.ext4fs.block_device.clone(),
+                fblock as usize * self.ext4fs.block_size,
+            );
 
-                //遍历块内目录项
-                while inner_offset
-                    < self.ext4fs.block_size - core::mem::size_of::<Ext4DirEntryTail>()
-                {
-                    let de = Ext4DirEntry::try_from(&ext4block.data[inner_offset..]).unwrap();
-                    let entry_len = de.entry_len() as usize;
+            let mut inner_offset = block_offset;
 
-                    // 防御性检查
-                    if entry_len < 8 {
-                        current_offset = ((current_offset / self.ext4fs.block_size as usize) + 1)
-                            * self.ext4fs.block_size as usize;
+            // 遍历块内目录项
+            while inner_offset < self.ext4fs.block_size - core::mem::size_of::<Ext4DirEntryTail>() {
+                let de = Ext4DirEntry::try_from(&ext4block.data[inner_offset..]).unwrap();
+                let entry_len = de.entry_len() as usize;
+
+                // 防御性检查：目录项长度非法
+                if entry_len < 8 {
+                    current_offset = ((current_offset / self.ext4fs.block_size as usize) + 1)
+                        * self.ext4fs.block_size as usize;
+                    break;
+                }
+
+                if !de.unused() {
+                    let d_type = match DirEntryType::from_bits(de.get_de_type()) {
+                        Some(DirEntryType::EXT4_DE_DIR) => DT_DIR,
+                        Some(DirEntryType::EXT4_DE_REG_FILE) => DT_REG,
+                        _ => DT_UNKNOWN,
+                    };
+
+                    // 尝试分配，防止堆panic
+                    if result.try_reserve(1).is_err() {
                         break;
                     }
 
-                    if !de.unused() {
-                        let d_type = match DirEntryType::from_bits(de.get_de_type()) {
-                            Some(DirEntryType::EXT4_DE_DIR) => DT_DIR,
-                            Some(DirEntryType::EXT4_DE_REG_FILE) => DT_REG,
-                            _ => DT_UNKNOWN,
-                        };
+                    result.push(Dirent::new(
+                        de.inode as usize,
+                        (current_offset + entry_len) as isize,
+                        d_type,
+                        &de.get_name(),
+                    ));
+                }
 
-                        // 尝试分配，防止堆panic
-                        if result.try_reserve(1).is_err() {
-                            break;
-                        }
-
-                        result.push(Dirent::new(
-                            de.inode as usize,
-                            (current_offset + entry_len) as isize,
-                            d_type,
-                            &de.get_name(),
-                        ));
-
-                        inner_offset += entry_len;
-                        current_offset += entry_len;
-                        if result.len() >= max_items {
-                            break;
-                        }
-                    } else {
-                        // 有空洞，下一块
-                        current_offset = ((current_offset / self.ext4fs.block_size as usize) + 1)
-                            * self.ext4fs.block_size as usize;
-                    }
+                // 无论是 unused 还是 normal entry，都直接累加 entry_len 推进 offset
+                inner_offset += entry_len;
+                current_offset += entry_len;
+                if result.len() >= max_items {
+                    break;
                 }
             }
         }
@@ -886,19 +890,30 @@ impl File for Ext4OSInode {
         Ok(cache_list)
     }
 
-    /// 这个先不考虑实现
+    /// OOM回调函数，返回需要淘汰的缓存页数量
     fn oom(&self) -> usize {
-        todo!()
+        // 用try lock防止死锁
+        if let Some(inode_guard) = self.inode.try_lock() {
+            let inode_ref = Arc::new(inode_guard.clone());
+            drop(inode_guard);
+
+            let neighbour =
+                |inner_cache_id| self.get_neighboring_blk(inner_cache_id, inode_ref.clone());
+            self.file_cache_manager
+                .oom(neighbour, &self.ext4fs.block_device)
+        } else {
+            0
+        }
     }
 
-    /// 这个也一样
+    /// socket,pipe之类的才会hang up，普通文件不应该hang up，所以先返回false
     fn hang_up(&self) -> bool {
-        todo!()
+        false
     }
 
-    /// 这个也一样
+    /// fcntl先不考虑实现，直接返回EINVAL
     fn fcntl(&self, cmd: u32, arg: u32) -> isize {
-        todo!()
+        SyscallErr::EINVAL as isize
     }
 }
 

@@ -46,15 +46,15 @@ const DEFAULT_ORDER: &[&str] = &[
     "busybox",
     "basic",
     "lua",
+    "iperf",
     "netperf",
-    "cyclictest",
     "ltp",
     "libctest",
+    "cyclictest",
     "iozone",
     "lmbench",
     "libcbench",
     "unixbench",
-    "iperf",
 ];
 
 /// 每组默认超时（秒），索引 0..11 与 TEST_GROUPS 一一对应

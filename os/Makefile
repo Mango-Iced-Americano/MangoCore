@@ -135,19 +135,22 @@ docker:
 	docker compose exec -it os-dev bash
 
 conf-inject:
-	@case "$(CONF_ARCH)" in \
-		la|la64) \
-			rustup override set $(LA_TOOLCHAIN); \
-			cp ./src/lang_items.rs.la ./src/lang_items.rs; \
-			cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs; \
-			;; \
-		rv|rv64) \
-			rustup override set $(RV_TOOLCHAIN); \
-			cp ./src/lang_items.rs.rv ./src/lang_items.rs; \
-			cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs; \
-			;; \
-	esac
-	ARCH=$(CONF_ARCH) BLK_MODE=$(CONF_BLK_MODE) CONF_FILE=$(CONF_FILE) IMAGE_PATH=$(CONF_IMAGE) AUTO_REBUILD_MEM=$(AUTO_REBUILD_MEM) MODE=$(MODE) LOG=$(LOG) ./inject_os_test_conf.sh
+	@arch_list="$(if $(filter file default,$(origin CONF_ARCH)),rv64 la64,$(CONF_ARCH))"; \
+	for arch in $$arch_list; do \
+		case "$$arch" in \
+			la|la64) \
+				rustup override set $(LA_TOOLCHAIN); \
+				cp ./src/lang_items.rs.la ./src/lang_items.rs; \
+				cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs; \
+				;; \
+			rv|rv64) \
+				rustup override set $(RV_TOOLCHAIN); \
+				cp ./src/lang_items.rs.rv ./src/lang_items.rs; \
+				cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs; \
+				;; \
+		esac; \
+		ARCH=$$arch BLK_MODE=$(CONF_BLK_MODE) CONF_FILE=$(CONF_FILE) IMAGE_PATH=$(CONF_IMAGE) AUTO_REBUILD_MEM=$(AUTO_REBUILD_MEM) MODE=$(MODE) LOG=$(LOG) ./inject_os_test_conf.sh; \
+	done
 
 la64-inject-runtime:
 	@rustup override set $(LA_TOOLCHAIN)

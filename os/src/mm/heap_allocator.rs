@@ -107,6 +107,8 @@ static HEAP_ALLOCATOR: OomAwareAllocator = OomAwareAllocator::empty();
 /// 正确的做法是：在 alloc() 中做好多次重试+OOM recovery，只有在万不得已时才 shutdown。
 pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
     println!("=== HEAP ALLOCATION FAILED (FATAL) ===");
+    let syscall_name = crate::task::current_syscall_name();
+    println!("triggered by syscall: {}", syscall_name);
     println!("layout: size={}, align={}", layout.size(), layout.align());
     println!("KERNEL_HEAP_SIZE: {} bytes", KERNEL_HEAP_SIZE);
     println!("======================================");
