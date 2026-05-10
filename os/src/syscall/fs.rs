@@ -663,7 +663,7 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> isize {
         log::error!("[sys_getdents64] Failed to copy to {:?}", dirp);
         return EFAULT;
     };
-    // info!("[sys_getdents64] fd: {}, count: {}", fd, count);
+    info!("[sys_getdents64] fd: {}, count: {}", fd, count);
     // println!("dirent count: {}", count / size_of::<Dirent>());
     // 返回获取的目录项数量
     dirent_vec.len() as isize * size_of::<Dirent>() as isize

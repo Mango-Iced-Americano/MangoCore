@@ -174,7 +174,7 @@ impl Ext4DirEntry {
     pub fn get_name_str(&self) -> &str {
         let name_len = self.name_len as usize;
         let name = &self.name[..name_len];
-        core::str::from_utf8(name).unwrap()
+        core::str::from_utf8(name).unwrap_or("INVALID_NAME")
     }
 
     pub fn get_name_bytes(&self) -> &[u8] {
@@ -379,7 +379,7 @@ impl Ext4FileSystem {
             prev_de_offset = offset;
             // go to next entry
             let entry_len = de.entry_len() as usize;
-            if entry_len == 0 {
+            if entry_len < 8 {
                 break; // 非法目录项
             }
             offset += entry_len;
@@ -466,7 +466,7 @@ impl Ext4FileSystem {
                         valid_index += 1;
                     }
                     let entry_len = de.entry_len() as usize;
-                    if entry_len == 0 {
+                    if entry_len < 8 {
                         break;
                     }
                     offset += entry_len;
@@ -593,7 +593,7 @@ impl Ext4FileSystem {
         while offset < self.block_size - size_of::<Ext4DirEntryTail>() {
             let mut de = Ext4DirEntry::try_from(&block.data[offset..]).unwrap();
             let rec_len = de.entry_len as usize;
-            if rec_len == 0 {
+            if rec_len < 8 {
                 break;
             }
 
@@ -732,7 +732,7 @@ impl Ext4FileSystem {
                 while offset < self.block_size - core::mem::size_of::<Ext4DirEntryTail>() {
                     let de = Ext4DirEntry::try_from(&ext4block.data[offset..]).unwrap();
                     let entry_len = de.entry_len() as usize;
-                    if entry_len == 0 {
+                    if entry_len < 8 {
                         break;
                     }
                     offset += entry_len;

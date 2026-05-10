@@ -16,6 +16,7 @@ use crate::{
     },
     lang_items::Bytes,
     mm::UserBuffer,
+    net::socket::inet::stream::inner,
     syscall::errno::{EINVAL, ENOMEM, ENOTDIR, ENOTEMPTY},
 };
 use alloc::{
@@ -27,7 +28,7 @@ use alloc::{
 use spin::{Mutex, RwLock};
 
 use core::{
-    convert::TryInto,
+    convert::{TryFrom, TryInto},
     fmt::Debug,
     mem, panic,
     ptr::{addr_of, addr_of_mut, read},
@@ -675,36 +676,82 @@ impl File for Ext4OSInode {
 
         // 计算每次最多返回的目录项数
         let max_items = count / mem::size_of::<Dirent>();
-        let old_index = *offset;
-        let (entries, new_index) = self.ext4fs.dir_get_entries_from_inode_ref(
-            Arc::new(inode_ref),
-            old_index,
-            max_items,
-        )?;
-
-        // 遍历 entries，从 old_index 开始，最多收集 max_items 条
-        let mut result = Vec::new();
-        result.try_reserve(entries.len()).map_err(|_| ENOMEM)?;
-        for entry in entries.iter() {
-            // 映射 ext4 条目到通用 Dirent
-            let d_type = match DirEntryType::from_bits(entry.get_de_type()) {
-                Some(dt) => match dt {
-                    DirEntryType::EXT4_DE_DIR => DT_DIR,
-                    DirEntryType::EXT4_DE_REG_FILE => DT_REG,
-                    _ => DT_UNKNOWN,
-                },
-                None => panic!("unknown entry type"),
-            };
-            result.push(Dirent::new_from_bytes(
-                entry.inode as usize,
-                entry.entry_len as isize,
-                d_type,
-                entry.get_name_bytes(),
-            ));
+        if max_items == 0 {
+            return Ok(Vec::new());
         }
 
-        // 更新偏移，下次从 new_index 开始读取
-        *offset = new_index;
+        let mut result: Vec<Dirent> = Vec::new();
+        let inode_size = inode_ref.inode.size();
+
+        let mut current_offset = *offset;
+
+        while result.len() < max_items && current_offset < inode_size as usize {
+            let iblock = (current_offset / self.ext4fs.block_size) as u32;
+            let block_offset = current_offset % self.ext4fs.block_size as usize;
+
+            // 如果到达或超过了该块内有效的目录项区域（如到了尾部校验和），则跳到下一块
+            if block_offset >= self.ext4fs.block_size - core::mem::size_of::<Ext4DirEntryTail>() {
+                current_offset = ((current_offset / self.ext4fs.block_size as usize) + 1)
+                    * self.ext4fs.block_size as usize;
+                continue;
+            }
+
+            // 获取物理块索引
+            if let Ok(fblock) = self.ext4fs.get_pblock_idx(&inode_ref, iblock) {
+                let ext4block = Block::load_offset(
+                    self.ext4fs.block_device.clone(),
+                    fblock as usize * self.ext4fs.block_size,
+                );
+
+                let mut inner_offset = block_offset;
+
+                //遍历块内目录项
+                while inner_offset
+                    < self.ext4fs.block_size - core::mem::size_of::<Ext4DirEntryTail>()
+                {
+                    let de = Ext4DirEntry::try_from(&ext4block.data[inner_offset..]).unwrap();
+                    let entry_len = de.entry_len() as usize;
+
+                    // 防御性检查
+                    if entry_len < 8 {
+                        current_offset = ((current_offset / self.ext4fs.block_size as usize) + 1)
+                            * self.ext4fs.block_size as usize;
+                        break;
+                    }
+
+                    if !de.unused() {
+                        let d_type = match DirEntryType::from_bits(de.get_de_type()) {
+                            Some(DirEntryType::EXT4_DE_DIR) => DT_DIR,
+                            Some(DirEntryType::EXT4_DE_REG_FILE) => DT_REG,
+                            _ => DT_UNKNOWN,
+                        };
+
+                        // 尝试分配，防止堆panic
+                        if result.try_reserve(1).is_err() {
+                            break;
+                        }
+
+                        result.push(Dirent::new(
+                            de.inode as usize,
+                            (current_offset + entry_len) as isize,
+                            d_type,
+                            &de.get_name(),
+                        ));
+
+                        inner_offset += entry_len;
+                        current_offset += entry_len;
+                        if result.len() >= max_items {
+                            break;
+                        }
+                    } else {
+                        // 有空洞，下一块
+                        current_offset = ((current_offset / self.ext4fs.block_size as usize) + 1)
+                            * self.ext4fs.block_size as usize;
+                    }
+                }
+            }
+        }
+        *offset = current_offset;
         Ok(result)
     }
 

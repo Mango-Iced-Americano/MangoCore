@@ -23,7 +23,16 @@ pub struct Dirent {
 impl Dirent {
     /// Offset to next `linux_dirent`
     pub fn new(d_ino: usize, d_off: isize, d_type: u8, d_name: &str) -> Self {
-        Self::new_from_bytes(d_ino, d_off, d_type, d_name.as_bytes())
+        let mut dirent = Self {
+            d_ino,
+            d_off,
+            d_reclen: size_of::<Self>() as u16,
+            d_type,
+            d_name: [0; NAME_LIMIT],
+        };
+        let copy_len = d_name.len().min(NAME_LIMIT - 1);
+        dirent.d_name[0..copy_len].copy_from_slice(&d_name.as_bytes()[..copy_len]);
+        dirent
     }
 
     pub fn new_from_bytes(d_ino: usize, d_off: isize, d_type: u8, d_name: &[u8]) -> Self {

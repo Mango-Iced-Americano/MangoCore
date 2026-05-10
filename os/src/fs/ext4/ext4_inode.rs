@@ -897,7 +897,8 @@ impl Ext4FileSystem {
                     let ext_first = extent.get_first_block();
                     let ext_len = extent.get_actual_len() as u32;
                     if lblock >= ext_first && lblock < ext_first + ext_len {
-                        return Ok(node.pblock);
+                        let offset_in_ext = lblock - ext_first;
+                        return Ok(extent.get_pblock() + offset_in_ext as u64);
                     } else {
                         log::info!(
                             "[get_pblock_idx] HOLE: inode={}, lblock={}, ext_first={}, ext_len={}",
