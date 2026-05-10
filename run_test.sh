@@ -2,12 +2,37 @@
 
 set -o pipefail
 
-groups=(basic busybox lua libctest iozone unixbench iperf libcbench lmbench netperf cyclictest ltp)
+all_groups=(basic busybox lua libctest iozone unixbench iperf libcbench lmbench netperf cyclictest ltp)
+groups=("${all_groups[@]}")
 group_timeout_sec="${GROUP_TIMEOUT_SEC:-300}"
 requested_arch="${TEST_ARCH:-rv64}"
+requested_groups="${TEST_GROUPS:-}"
 blk_mode_global="${TEST_BLK_MODE:-}"
 blk_mode_rv="${TEST_BLK_MODE_RV:-}"
 blk_mode_la="${TEST_BLK_MODE_LA:-}"
+
+if [[ -n "${requested_groups}" ]]; then
+  groups=()
+  for requested_group in ${requested_groups//,/ }; do
+    found_group=false
+    for known_group in "${all_groups[@]}"; do
+      if [[ "${requested_group}" == "${known_group}" ]]; then
+        groups+=("${requested_group}")
+        found_group=true
+        break
+      fi
+    done
+    if [[ "${found_group}" == false ]]; then
+      echo "[run_test] unsupported TEST_GROUPS entry=${requested_group}"
+      echo "[run_test] supported groups: ${all_groups[*]}"
+      exit 1
+    fi
+  done
+  if [[ "${#groups[@]}" -eq 0 ]]; then
+    echo "[run_test] TEST_GROUPS did not contain any runnable group"
+    exit 1
+  fi
+fi
 
 case "${requested_arch}" in
   rv|rv64)
@@ -64,6 +89,17 @@ resolve_result_dir() {
   fi
 }
 
+group_bit_index() {
+  local group="$1"
+  for i in "${!all_groups[@]}"; do
+    if [[ "${all_groups[$i]}" == "${group}" ]]; then
+      echo "${i}"
+      return 0
+    fi
+  done
+  return 1
+}
+
 on_interrupt() {
   echo
   echo "[run_test] interrupted, cleaning child processes..."
@@ -90,20 +126,31 @@ validate_group_log() {
   local group="$1"
   local log_file="$2"
   local script_name="${group}_testcode.sh"
+  local normalized_log
+
+  normalized_log="$(mktemp "${TMPDIR:-/tmp}/run_test_log.XXXXXX")" || return 1
+  if ! LC_ALL=C tr -d '\000' < "${log_file}" > "${normalized_log}"; then
+    rm -f "${normalized_log}"
+    return 1
+  fi
 
   # Hard failure signatures that should never be considered PASS.
-  if grep -Eq "No such file or directory|exec failed for" "${log_file}"; then
+  if grep -Eq "No such file or directory|exec failed for" "${normalized_log}"; then
+    rm -f "${normalized_log}"
     return 1
   fi
 
   # A group is PASS only when both musl and glibc runs finish with exit_code=0.
-  if ! grep -Fq "[initproc] done ${script_name} in /musl exit_code=0" "${log_file}"; then
+  if ! grep -Fq "[initproc] done ${script_name} in /musl exit_code=0" "${normalized_log}"; then
+    rm -f "${normalized_log}"
     return 1
   fi
-  if ! grep -Fq "[initproc] done ${script_name} in /glibc exit_code=0" "${log_file}"; then
+  if ! grep -Fq "[initproc] done ${script_name} in /glibc exit_code=0" "${normalized_log}"; then
+    rm -f "${normalized_log}"
     return 1
   fi
 
+  rm -f "${normalized_log}"
   return 0
 }
 
@@ -122,7 +169,8 @@ for arch in "${arch_list[@]}"; do
 
   for i in "${!groups[@]}"; do
     g="${groups[$i]}"
-    mask=$(printf "0x%03X" $((1 << i)))
+    group_bit="$(group_bit_index "${g}")"
+    mask=$(printf "0x%03X" $((1 << group_bit)))
     conf="/tmp/os_test_${arch}_${blk_mode}_${g}.conf"
     log="${result_dir}/${g}.log"
 
