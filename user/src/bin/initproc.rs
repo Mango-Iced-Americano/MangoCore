@@ -174,6 +174,8 @@ struct RuntimeConfig {
     ltp_from: Option<String>,
     /// LTP 只跑哪个 libc：musl | glibc | both（默认）
     ltp_libc: LtpLibc,
+    /// LTP runner: script 使用镜像内官方脚本；inline 使用 initproc 内联枚举。
+    ltp_runner: LtpRunner,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -181,6 +183,19 @@ enum LtpLibc {
     Musl,
     Glibc,
     Both,
+}
+
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum LtpRunner {
+    Script,
+    Inline,
+}
+
+fn ltp_runner_name(runner: LtpRunner) -> &'static str {
+    match runner {
+        LtpRunner::Script => "script",
+        LtpRunner::Inline => "inline",
+    }
 }
 
 impl RuntimeConfig {
@@ -214,6 +229,7 @@ impl RuntimeConfig {
             ltp_include: Vec::new(),
             ltp_from: None,
             ltp_libc: LtpLibc::Both,
+            ltp_runner: LtpRunner::Script,
         }
     }
 }
@@ -355,6 +371,13 @@ fn apply_conf_bytes(data: &[u8], cfg: &mut RuntimeConfig) {
             match val {
                 b"musl" => cfg.ltp_libc = LtpLibc::Musl,
                 b"glibc" => cfg.ltp_libc = LtpLibc::Glibc,
+                b"both" => cfg.ltp_libc = LtpLibc::Both,
+                _ => {}
+            }
+        } else if key == b"ltp_runner" {
+            match val {
+                b"script" => cfg.ltp_runner = LtpRunner::Script,
+                b"inline" => cfg.ltp_runner = LtpRunner::Inline,
                 _ => {}
             }
         } else if key == b"ltp_from" {
@@ -402,10 +425,11 @@ fn load_runtime_config() -> RuntimeConfig {
         "<default>"
     };
     println!(
-        "[initproc] config source={} mode={} mask=0x{:03X}",
+        "[initproc] config source={} mode={} mask=0x{:03X} ltp_runner={}",
         source,
         mode_name(cfg.mode),
-        cfg.mask
+        cfg.mask,
+        ltp_runner_name(cfg.ltp_runner)
     );
     println!("[initproc] LTP exclude list: {:?}", cfg.ltp_exclude);
     if !cfg.ltp_include.is_empty() {
@@ -772,8 +796,8 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
             "[initproc] select group={} timeout={}s",
             group_name, timeout_secs
         );
-        if group_name == "ltp" {
-            // LTP 使用内联枚举（支持 exclude + from），不走 shell 脚本
+        if group_name == "ltp" && cfg.ltp_runner == LtpRunner::Inline {
+            // 本地调试路径：LTP 使用内联枚举，支持 include/exclude/from。
             let libc = cfg.ltp_libc;
             if libc == LtpLibc::Musl || libc == LtpLibc::Both {
                 let exclude_musl: Vec<String> = cfg
@@ -806,6 +830,15 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
                     cfg.ltp_from.as_deref(),
                     timeout_secs,
                 );
+            }
+        } else if group_name == "ltp" {
+            // 提交默认路径：运行镜像内官方 ltp_testcode.sh，保持评测器期望的串口协议。
+            let libc = cfg.ltp_libc;
+            if libc == LtpLibc::Musl || libc == LtpLibc::Both {
+                run_group_in_dir(environ, "/musl\0", group_name, script, timeout_secs);
+            }
+            if libc == LtpLibc::Glibc || libc == LtpLibc::Both {
+                run_group_in_dir(environ, "/glibc\0", group_name, script, timeout_secs);
             }
         } else {
             run_group_in_dir(environ, "/musl\0", group_name, script, timeout_secs);

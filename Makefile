@@ -9,8 +9,16 @@ QEMU_URL := https://gitlab.educg.net/wangmingjian/os-contest-2024-image/-/raw/ma
 QEMU_DIR := util/qemu-2k1000/tmp
 QEMU_TAR_PATH := $(QEMU_DIR)/$(QEMU_TAR)
 
-all: clean
-	make -C os all
+all:
+	$(MAKE) prepare-cargo-config
+	$(MAKE) clean
+	$(MAKE) -C os all
+
+prepare-cargo-config:
+	@sh scripts/restore-cargo-vendor-checksums.sh restore .
+	mkdir -p os/.cargo user/.cargo
+	test -f os/.cargo/config.toml || cp -f cargo-config/os/config.toml os/.cargo/config.toml
+	test -f user/.cargo/config.toml || cp -f cargo-config/user/config.toml user/.cargo/config.toml
 
 env:
 	rustup default $(LA_TOOLCHAIN)
@@ -40,7 +48,7 @@ print-logo:
 	@echo "                \|_________|                                                "
 	@echo "                                                                            "
 	@echo "                                                                            "
-.PHONY: all clean print-logo run run-simple qemu-download
+.PHONY: all clean print-logo run run-simple qemu-download prepare-cargo-config
 
 qemu-download: $(QEMU_DIR)/.extracted
 	chmod +x util/mkimage

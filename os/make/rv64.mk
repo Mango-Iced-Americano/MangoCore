@@ -52,9 +52,12 @@ else ifeq ($(BOARD), vf2)
 	KERNEL_ENTRY_PA := 0x80020000
 endif
 
-# Binutils
-OBJDUMP := rust-objdump --arch-name=riscv64
-OBJCOPY := rust-objcopy --binary-architecture=riscv64
+# Binutils from rustup's llvm-tools-preview component. This avoids depending on
+# the cargo-binutils wrapper being preinstalled or downloaded during grading.
+HOST_TRIPLE := $(shell rustc -vV | sed -n 's/^host: //p')
+LLVM_TOOLS_DIR := $(shell rustc --print sysroot)/lib/rustlib/$(HOST_TRIPLE)/bin
+OBJDUMP := $(LLVM_TOOLS_DIR)/rust-objdump --arch-name=riscv64
+OBJCOPY := $(LLVM_TOOLS_DIR)/rust-objcopy --binary-architecture=riscv64
 
 # Disassembly
 DISASM ?= -x
@@ -64,7 +67,7 @@ all: fs-img build
 debug: build mv-debug
 
 mv:
-	cp -f $(KERNEL_BIN) ../kernel-rv
+	cp -f $(KERNEL_ELF) ../kernel-rv
 
 mv-debug:
 	cp -f $(KERNEL_ELF) ../kernel-rv

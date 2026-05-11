@@ -228,6 +228,20 @@ impl LinearMap {
             _ => None,
         }
     }
+    pub fn frame_state_name(&self, key: &VirtPageNum) -> &'static str {
+        let Some(idx) = key.0.checked_sub(self.vpn_range.get_start().0) else {
+            return "OutOfRange";
+        };
+        match self.frames.get(idx) {
+            Some(Frame::InMemory(_)) => "InMemory",
+            #[cfg(feature = "oom_handler")]
+            Some(Frame::Compressed(_)) => "Compressed",
+            #[cfg(feature = "oom_handler")]
+            Some(Frame::SwappedOut(_)) => "SwappedOut",
+            Some(Frame::Unallocated) => "Unallocated",
+            None => "OutOfRange",
+        }
+    }
     /// # Warning
     /// a key which exceeds the end of `vpn_range` would cause panic
     pub fn alloc_in_memory(&mut self, key: VirtPageNum, value: Arc<FrameTracker>) {
@@ -634,22 +648,83 @@ impl MapArea {
             Ok(())
         }
     }
+    fn take_cow_source_frame<T: PageTable>(
+        &mut self,
+        page_table: &mut T,
+        vpn: VirtPageNum,
+    ) -> Result<Arc<FrameTracker>, MemoryError> {
+        let Some(idx) = vpn.0.checked_sub(self.inner.vpn_range.get_start().0) else {
+            return Err(MemoryError::BadAddress);
+        };
+        if idx >= self.inner.frames.len() {
+            return Err(MemoryError::BadAddress);
+        }
+
+        #[cfg(feature = "oom_handler")]
+        {
+            {
+                let frame = &mut self.inner.frames[idx];
+                match frame {
+                    Frame::InMemory(_) => {}
+                    Frame::Compressed(_) => {
+                        let ppn = frame.unzip()?;
+                        let set_ppn_result = page_table.set_ppn(vpn, ppn);
+                        self.inner.active.push_back(idx as u16);
+                        self.inner.compressed = self.inner.compressed.saturating_sub(1);
+                        set_ppn_result.map_err(|_| MemoryError::NotMapped)?;
+                    }
+                    Frame::SwappedOut(_) => {
+                        let ppn = frame.swap_in()?;
+                        let set_ppn_result = page_table.set_ppn(vpn, ppn);
+                        self.inner.active.push_back(idx as u16);
+                        self.inner.swapped = self.inner.swapped.saturating_sub(1);
+                        set_ppn_result.map_err(|_| MemoryError::NotMapped)?;
+                    }
+                    Frame::Unallocated => return Err(MemoryError::NotMapped),
+                }
+            };
+        }
+
+        self.inner
+            .remove_in_memory(&vpn)
+            .ok_or(MemoryError::BadAddress)
+    }
     pub fn copy_on_write<T: PageTable>(
         &mut self,
         page_table: &mut T,
         vpn: VirtPageNum,
     ) -> Result<PhysPageNum, MemoryError> {
-        let old_frame = self.inner.remove_in_memory(&vpn).unwrap();
+        let old_frame = match self.take_cow_source_frame(page_table, vpn) {
+            Ok(frame) => frame,
+            Err(err) => {
+                warn!(
+                    "[copy_on_write] mapped COW page has no resident frame: vpn={:?}, state={}, area={:?}",
+                    vpn,
+                    self.inner.frame_state_name(&vpn),
+                    self
+                );
+                return Err(err);
+            }
+        };
         if Arc::strong_count(&old_frame) == 1 {
             let old_ppn = old_frame.ppn;
             self.inner.alloc_in_memory(vpn, old_frame);
-            page_table.set_pte_flags(vpn, self.map_perm).unwrap();
+            page_table
+                .set_ppn(vpn, old_ppn)
+                .map_err(|_| MemoryError::NotMapped)?;
+            page_table
+                .set_pte_flags(vpn, self.map_perm)
+                .map_err(|_| MemoryError::NotMapped)?;
 
             trace!("[copy_on_write] no copy occurred");
             Ok(old_ppn)
         } else {
             // do copy in this case
             let old_ppn = old_frame.ppn;
+            if !page_table.is_mapped(vpn) {
+                self.inner.alloc_in_memory(vpn, old_frame);
+                return Err(MemoryError::NotMapped);
+            }
             page_table.unmap(vpn);
             // alloc new frame
             let new_frame = unsafe { frame_alloc_uninit().unwrap() };

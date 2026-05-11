@@ -98,15 +98,25 @@ pub fn flush_preload() {
     ) {
         crate::mm::frame_dealloc(ppn);
     }
-    let osconfig = ROOT_FD
-        .open("os_test.conf", OpenFlags::O_CREAT, false)
-        .unwrap();
-    osconfig.write(None, unsafe {
-        core::slice::from_raw_parts(
-            sosconfig as *const u8,
-            eosconfig as usize - sosconfig as usize,
-        )
-    });
+    match ROOT_FD.open("os_test.conf", OpenFlags::O_RDONLY, false) {
+        Ok(osconfig) => {
+            log::info!(
+                "[kernel] flush_preload: keep existing /os_test.conf size={}",
+                osconfig.get_size()
+            );
+        }
+        Err(_) => {
+            let osconfig = ROOT_FD
+                .open("os_test.conf", OpenFlags::O_CREAT, false)
+                .unwrap();
+            osconfig.write(None, unsafe {
+                core::slice::from_raw_parts(
+                    sosconfig as *const u8,
+                    eosconfig as usize - sosconfig as usize,
+                )
+            });
+        }
+    }
     for ppn in crate::mm::PPNRange::new(
         crate::mm::PhysAddr::from(sosconfig as usize).floor(),
         crate::mm::PhysAddr::from(eosconfig as usize).floor(),
