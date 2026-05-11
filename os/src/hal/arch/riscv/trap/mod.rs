@@ -122,7 +122,9 @@ pub fn trap_handler() -> ! {
                     MemoryError::BeyondEOF => {
                         inner.add_signal(Signals::SIGBUS);
                     }
-                    MemoryError::NoPermission | MemoryError::BadAddress => {
+                    MemoryError::NoPermission
+                    | MemoryError::BadAddress
+                    | MemoryError::NotMapped => {
                         inner.add_signal(Signals::SIGSEGV);
                     }
                     _ => unreachable!(),

@@ -11,7 +11,10 @@ use virtio_drivers::device::blk::VirtIOBlk;
 use virtio_drivers::transport::mmio::{VirtIOHeader,MmioTransport}; 
 use virtio_drivers::{BufferDirection, Hal};
 const VIRT_IO_BLOCK_SZ: usize = 512;
-use crate::hal::config::{BLOCK_SZ, PAGE_SIZE, PAGE_SIZE_BITS};
+use crate::hal::{
+    config::{PAGE_SIZE, PAGE_SIZE_BITS},
+    BLOCK_SZ,
+};
 const BLOCK_RATIO: usize = BLOCK_SZ / VIRT_IO_BLOCK_SZ;
 #[allow(unused)]
 const VIRTIO0: usize = 0x10001000;
