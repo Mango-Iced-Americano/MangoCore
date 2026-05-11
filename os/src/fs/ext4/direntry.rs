@@ -680,12 +680,23 @@ impl Ext4FileSystem {
     }
 
     pub fn dir_remove_entry(&self, parent: &mut Ext4InodeRef, path: &str) -> Result<usize, isize> {
+        log::debug!(
+            "[dir_remove_entry] dir_remove_entry enter. Parent Ino: {}, Mode: {:#o}, Addr: {:p}",
+            parent.inode_num,
+            parent.inode.mode,
+            parent
+        );
         // get remove_entry pos in parent and its prev entry
         let mut result = Ext4DirSearchResult::new(Ext4DirEntry::default());
 
+        log::debug!(
+            "[dir_remove_entry] Before dir_find_entry. Mode: {:#o}",
+            parent.inode.mode
+        );
         // let r = self.dir_find_entry(parent.inode_num, path, &mut result)?;
         let r = self.dir_find_entry(parent.inode_num, path, &mut result);
 
+        log::debug!("[dir_remove_entry] After dir_find_entry. r: {:?}", r);
         let mut ext4block = Block::load_offset(
             self.block_device.clone(),
             result.pblock_id * self.block_size,

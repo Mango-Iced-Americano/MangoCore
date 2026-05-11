@@ -51,6 +51,8 @@ impl Ext4FileSystem {
 
                 // update bitmap in disk
                 // 此处因为是直接进行块单位的写入，所以不需要考虑对齐
+                log::warn!("[WRITE_CALLER] ialloc_alloc_inode: write inode_bitmap block={}, idx_in_bg={}, new_ino={}",
+                    inode_bitmap_block, idx_in_bg, bgid * super_block.inodes_per_group() + (idx_in_bg + 1));
                 self.block_device
                     .write_block(inode_bitmap_block as usize, bitmap_data);
 
@@ -89,6 +91,11 @@ impl Ext4FileSystem {
                 let inodes_per_group = super_block.inodes_per_group();
                 let inode_num = bgid * inodes_per_group + (idx_in_bg + 1);
 
+                log::debug!(
+                    "[ALLOC_TRACE] Ino: {}, is_dir: {}, caller: generic_open",
+                    inode_num,
+                    is_dir
+                );
                 return Ok(inode_num);
             }
 
@@ -128,6 +135,8 @@ impl Ext4FileSystem {
         // Set new checksum after modification
         // update bitmap in disk
         // 此处与上面的ialloc_alloc_inode函数一样，不需要考虑对齐
+        log::warn!("[WRITE_CALLER] ialloc_free_inode: write inode_bitmap block={}, free_ino={}",
+            inode_bitmap_block, index);
         self.block_device
             .write_block(inode_bitmap_block as usize, &bitmap_data);
         bg.set_block_group_ialloc_bitmap_csum(&super_block, &bitmap_data);
@@ -144,7 +153,7 @@ impl Ext4FileSystem {
 
         bg.sync_to_disk_with_csum(block_device.clone(), bgid as usize, &super_block);
 
-        super_block.decrease_free_inodes_count();
+        super_block.increase_free_inodes_count();
         super_block.sync_to_disk_with_csum(self.block_device.clone());
     }
 }

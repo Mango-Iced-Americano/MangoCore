@@ -510,7 +510,16 @@ impl Ext4Inode {
         block_device: Arc<dyn BlockDevice>,
         inode_pos: usize,
         on_disk_size: usize,
+        inode_num: u32,
     ) {
+        if inode_num == 3266 {
+            log::warn!(
+                "[WRITE_TRACE] Writing Ino 3266! Mode: 0o{:o}, Size: {}, FirstBlock: {}",
+                self.mode,
+                self.size,
+                self.block[0]
+            );
+        }
         let block_size = *GLOBAL_BLOCK_SIZE;
 
         // 【关键修改】取 Rust 结构体大小和磁盘 Inode 大小的最小值
@@ -521,6 +530,11 @@ impl Ext4Inode {
 
         let block_id = inode_pos / block_size;
         let offset = inode_pos % block_size;
+
+        log::warn!(
+            "[WRITE_CALLER] sync_inode_to_disk: ino={}, block_id={}, offset={}, mode=0o{:o}, size={}",
+            inode_num, block_id, offset, self.mode, self.size()
+        );
 
         let mut buf = vec![0u8; *GLOBAL_BLOCK_SIZE];
         block_device.read_block(block_id, &mut buf);
@@ -791,11 +805,11 @@ impl Ext4FileSystem {
                 &self.superblock as *const _,
             );
         }
-        inode_num / ipg
+        (inode_num - 1) / ipg
     }
 
     pub fn inode_to_bgidx(&self, inode_num: u32) -> u32 {
-        inode_num % self.superblock.inodes_per_group()
+        (inode_num - 1) % self.superblock.inodes_per_group()
     }
 
     /// 获取Inode的地址
@@ -836,7 +850,7 @@ impl Ext4FileSystem {
         // println!("[kernel] ext4block.data is {:?}", ext4block.data);
         let blk_offset = offset % self.block_size;
         let inode: &mut Ext4Inode = ext4block.read_offset_as_mut(offset % self.block_size);
-        log::trace!(
+        log::debug!(
             "[Inode Read] Ino: {}, DiskPos: {}, ReadMode: 0o{:o}",
             inode_num,
             offset,
@@ -872,7 +886,7 @@ impl Ext4FileSystem {
             .set_inode_checksum(&self.superblock, inode_ref.inode_num);
         inode_ref
             .inode
-            .sync_inode_to_disk(self.block_device.clone(), inode_pos, on_disk_size);
+            .sync_inode_to_disk(self.block_device.clone(), inode_pos, on_disk_size, inode_ref.inode_num);
     }
 
     /// 不带校验和回写inode信息
@@ -882,7 +896,7 @@ impl Ext4FileSystem {
         let on_disk_size = self.superblock.inode_size as usize;
         inode_ref
             .inode
-            .sync_inode_to_disk(self.block_device.clone(), inode_pos, on_disk_size);
+            .sync_inode_to_disk(self.block_device.clone(), inode_pos, on_disk_size, inode_ref.inode_num);
     }
 
     /// 获取逻辑块号对应的物理块号

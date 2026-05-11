@@ -208,6 +208,10 @@ impl Ext4Superblock {
         self.free_inodes_count -= 1;
     }
 
+    pub fn increase_free_inodes_count(&mut self) {
+        self.free_inodes_count += 1;
+    }
+
     pub fn free_blocks_count(&self) -> u64 {
         self.free_blocks_count_lo as u64 | ((self.free_blocks_count_hi as u64) << 32).to_le()
     }
@@ -230,6 +234,7 @@ impl Ext4Superblock {
         block_device.read_block(superblk_id, &mut buf);
         // 然后更改的超级块写到对应的位置中（后1024个字节）
         buf[1024..2048].copy_from_slice(data);
+        log::warn!("[WRITE_CALLER] superblock::sync_to_disk: block={}", superblk_id);
         block_device.write_block(superblk_id, &buf);
     }
 
@@ -250,6 +255,7 @@ impl Ext4Superblock {
         block_device.read_block(superblk_id, &mut buf);
         // 然后更改的超级块写到对应的位置中（后1024个字节）
         buf[1024..2048].copy_from_slice(data);
+        log::warn!("[WRITE_CALLER] superblock::sync_to_disk_with_csum: block={}", superblk_id);
         block_device.write_block(superblk_id, &buf);
     }
 

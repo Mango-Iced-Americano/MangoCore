@@ -39,6 +39,20 @@ impl BlockDevice for VirtIOBlock {
 
     fn write_block(&self, block_id: usize, buf: &[u8]) {
         assert!(buf.len() % BLOCK_SZ == 0);
+        // == INODE 3266 CORRUPTION WATCH ==
+        const WATCH_INODE_TABLE_BLOCK: usize = 749;
+        if block_id == WATCH_INODE_TABLE_BLOCK && buf.len() > 256 + 2 {
+            let mode = u16::from_le_bytes([buf[256], buf[257]]);
+            let size = u32::from_le_bytes([buf[256+4], buf[256+5], buf[256+6], buf[256+7]]);
+            let block0 = u32::from_le_bytes([buf[256+40], buf[256+41], buf[256+42], buf[256+43]]);
+            log::warn!(
+                "[WRITE_WATCH] block=749(inode_table): ino@256 mode=0o{:o} size={} block[0]={:#x}",
+                mode, size, block0
+            );
+        }
+        if block_id <= 10 {
+            log::warn!("[WRITE_WATCH] block={}(metadata): len={}", block_id, buf.len());
+        }
         for (i, chunk) in buf.chunks(VIRT_IO_BLOCK_SZ).enumerate() {
             let virtio_block_id = block_id * BLOCK_RATIO + i;
             self.0.lock().write_blocks(virtio_block_id, chunk).expect("write error");
