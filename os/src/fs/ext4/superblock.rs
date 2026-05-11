@@ -1,8 +1,9 @@
-use crate::fs::{directory_tree::GLOBAL_BLOCK_SIZE, timestamp::format_time};
 use crate::fs::BlockDevice;
+use crate::fs::{directory_tree::GLOBAL_BLOCK_SIZE, timestamp::format_time};
 use alloc::string::String;
 #[allow(unused)]
 use alloc::sync::Arc;
+use alloc::vec;
 use crc::{ext4_crc32c, EXT4_CRC32_INIT};
 
 use super::*;
@@ -12,14 +13,14 @@ pub const SUPERBLOCK_OFFSET: usize = 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ext4Superblock {
     pub inodes_count: u32,         // 节点数
-    pub blocks_count_lo: u32,          // 块数
+    pub blocks_count_lo: u32,      // 块数
     reserved_blocks_count_lo: u32, // 保留块数
     free_blocks_count_lo: u32,     // 空闲块数
     free_inodes_count: u32,        // 空闲节点数
     pub first_data_block: u32,     // 第一个数据块
-    pub log_block_size: u32,           // 块大小
+    pub log_block_size: u32,       // 块大小
     log_cluster_size: u32,         // 废弃的片段大小
-    pub blocks_per_group: u32,         // 每组块数
+    pub blocks_per_group: u32,     // 每组块数
     frags_per_group: u32,          // 废弃的每组片段数
     pub inodes_per_group: u32,     // 每组节点数
     mount_time: u32,               // 挂载时间
@@ -224,7 +225,7 @@ impl Ext4Superblock {
         };
         let superblk_id = SUPERBLOCK_OFFSET / BLOCK_SIZE;
         // let superblk_id = SUPERBLOCK_OFFSET / *GLOBAL_BLOCK_SIZE;
-        let mut buf = [0u8; BLOCK_SIZE];
+        let mut buf = vec![0u8; BLOCK_SIZE];
         // 先读取第一个块
         block_device.read_block(superblk_id, &mut buf);
         // 然后更改的超级块写到对应的位置中（后1024个字节）
@@ -244,7 +245,7 @@ impl Ext4Superblock {
         };
         let superblk_id = SUPERBLOCK_OFFSET / BLOCK_SIZE;
         // let superblk_id = SUPERBLOCK_OFFSET / *GLOBAL_BLOCK_SIZE;
-        let mut buf = [0u8; BLOCK_SIZE];
+        let mut buf = vec![0u8; BLOCK_SIZE];
         // 先读取第一个块
         block_device.read_block(superblk_id, &mut buf);
         // 然后更改的超级块写到对应的位置中（后1024个字节）

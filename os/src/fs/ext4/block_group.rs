@@ -1,7 +1,10 @@
 use core::panic;
 
 use super::{
-    crc::{ext4_crc32c, EXT4_CRC32_INIT}, superblock::Ext4Superblock, BlockDevice, BLOCK_SIZE, EXT4_MAX_BLOCK_GROUP_DESCRIPTOR_SIZE, EXT4_MIN_BLOCK_GROUP_DESCRIPTOR_SIZE
+    crc::{ext4_crc32c, EXT4_CRC32_INIT},
+    superblock::Ext4Superblock,
+    BlockDevice, BLOCK_SIZE, EXT4_MAX_BLOCK_GROUP_DESCRIPTOR_SIZE,
+    EXT4_MIN_BLOCK_GROUP_DESCRIPTOR_SIZE,
 };
 use crate::fs::directory_tree::{FILE_SYSTEM, GLOBAL_BLOCK_SIZE};
 use crate::math::is_power_of;
@@ -95,7 +98,11 @@ pub fn print_hex(data: &[u8]) {
         // 打印ASCII部分
         print!(" |");
         for &b in line {
-            let c = if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' };
+            let c = if b.is_ascii_graphic() || b == b' ' {
+                b as char
+            } else {
+                '.'
+            };
             print!("{}", c);
         }
         println!("|");
@@ -103,7 +110,6 @@ pub fn print_hex(data: &[u8]) {
         offset += 16;
     }
 }
-
 
 impl Ext4BlockGroup {
     /// 获取块组的块位图块号
@@ -254,7 +260,7 @@ impl Ext4BlockGroup {
 
         // 因为是块组描述符，所以不会超过一个块
         // 先获取要写入的块
-        let mut origin_block_data = [0u8; BLOCK_SIZE];
+        let mut origin_block_data = vec![0u8; BLOCK_SIZE];
         block_device.read_block(block_id, &mut origin_block_data);
         // 然后按偏移量将数据覆写到读取的块数据
         for i in offset..offset + data.len() {
@@ -350,9 +356,9 @@ impl Block {
         let block_size = 4096;
         let block_id = offset / block_size;
         // Self::load_id(block_device, block_id, offset)
-        let mut buf = [0u8; 4096];
+        let mut buf = vec![0u8; 4096];
         block_device.read_block(block_id, &mut buf);
-        let data = buf.to_vec();
+        let data = buf;
         Block {
             disk_offset: offset,
             data,

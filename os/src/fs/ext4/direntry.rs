@@ -310,6 +310,14 @@ impl Ext4FileSystem {
         // 加载父目录Inode
         let parent = self.get_inode_ref(parent_inode);
         // println!("[kernel dir_find_entry] Get Parent InodeRef: {:#?}", parent);
+        if !parent.inode.is_dir() {
+            log::error!(
+                "[Panic Context] Parent Ino: {}, Actual Mode: 0o{:o}, is_dir: {}",
+                parent.inode_num,
+                parent.inode.mode,
+                parent.inode.is_dir()
+            );
+        }
         assert!(parent.inode.is_dir());
 
         // start from the first logical block

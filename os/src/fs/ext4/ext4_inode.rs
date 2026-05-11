@@ -504,30 +504,29 @@ impl Ext4Inode {
         }
     }
 
-    pub fn sync_inode_to_disk(&self, block_device: Arc<dyn BlockDevice>, inode_pos: usize) {
+    //
+    pub fn sync_inode_to_disk(
+        &self,
+        block_device: Arc<dyn BlockDevice>,
+        inode_pos: usize,
+        on_disk_size: usize,
+    ) {
         let block_size = *GLOBAL_BLOCK_SIZE;
-        let data = unsafe {
-            core::slice::from_raw_parts(self as *const _ as *const u8, size_of::<Ext4Inode>())
-        };
-        // println!("data is {:?}", data);
-        // 因为写入的是inode的大小，不大可能越界。
-        // 所以先读取一个块，再覆写，再写入
-        // println!("[kernel sync to disk] Ext4Inode is {:#?}", self);
-        // println!("[kernel] data len is {} inode_pos is {}",data.len(), inode_pos);
-        // 计算要写入的块号
+
+        // 【关键修改】取 Rust 结构体大小和磁盘 Inode 大小的最小值
+        // 即使结构体定义了 156 字节，如果磁盘只给每个 Inode 留了 128 字节，我们也只写前 128 字节
+        let write_len = core::cmp::min(core::mem::size_of::<Ext4Inode>(), on_disk_size);
+
+        let data = unsafe { core::slice::from_raw_parts(self as *const _ as *const u8, write_len) };
+
         let block_id = inode_pos / block_size;
-        // println!("[kernel] block_id is {}", block_id);
-        // 计算在一个块上的偏移量
         let offset = inode_pos % block_size;
-        // println!("[kernel] offset is {}", offset);
+
         let mut buf = vec![0u8; *GLOBAL_BLOCK_SIZE];
-        // 读取一个块
         block_device.read_block(block_id, &mut buf);
-        // 偏移量加上数据长度不能超过块大小
-        if offset + data.len() > block_size {
-            panic!("[kernel fs error] over border");
-        }
-        buf[offset..offset + data.len()].copy_from_slice(&data);
+
+        // 拷贝时使用 write_len，确保不越界覆盖邻居
+        buf[offset..offset + write_len].copy_from_slice(&data);
         block_device.write_block(block_id, &buf);
     }
 }
@@ -837,6 +836,12 @@ impl Ext4FileSystem {
         // println!("[kernel] ext4block.data is {:?}", ext4block.data);
         let blk_offset = offset % self.block_size;
         let inode: &mut Ext4Inode = ext4block.read_offset_as_mut(offset % self.block_size);
+        log::trace!(
+            "[Inode Read] Ino: {}, DiskPos: {}, ReadMode: 0o{:o}",
+            inode_num,
+            offset,
+            inode.mode
+        );
         Ext4InodeRef {
             inode_num,
             inode: *inode,
@@ -860,23 +865,24 @@ impl Ext4FileSystem {
     pub fn write_back_inode(&self, inode_ref: &mut Ext4InodeRef) {
         let inode_pos = self.inode_disk_pos(inode_ref.inode_num);
 
+        let on_disk_size = self.superblock.inode_size as usize;
         // make sure self.superblock is up-to-date
         inode_ref
             .inode
             .set_inode_checksum(&self.superblock, inode_ref.inode_num);
         inode_ref
             .inode
-            .sync_inode_to_disk(self.block_device.clone(), inode_pos);
+            .sync_inode_to_disk(self.block_device.clone(), inode_pos, on_disk_size);
     }
 
     /// 不带校验和回写inode信息
     pub fn write_back_inode_without_csum(&self, inode_ref: &Ext4InodeRef) {
         let inode_pos = self.inode_disk_pos(inode_ref.inode_num);
         //println!("[kernel write_back_inode_without_csum] inode_pos: {:?}, inode_num: {}", inode_pos, inode_ref.inode_num);
-
+        let on_disk_size = self.superblock.inode_size as usize;
         inode_ref
             .inode
-            .sync_inode_to_disk(self.block_device.clone(), inode_pos);
+            .sync_inode_to_disk(self.block_device.clone(), inode_pos, on_disk_size);
     }
 
     /// 获取逻辑块号对应的物理块号
@@ -890,6 +896,19 @@ impl Ext4FileSystem {
         inode_ref: &Ext4InodeRef,
         lblock: Ext4Lblk,
     ) -> Result<Ext4Fsblk, isize> {
+        // 检查标志位
+        let flags = inode_ref.inode.flags();
+        if (flags & crate::fs::ext4::EXT4_INODE_FLAG_EXTENTS as u32) == 0 {
+            // 如果没有 Extents 标志，说明它是 Fast Symlink 或者旧的 Indirect Block 格式
+            let is_link = inode_ref.inode.get_file_type() == DiskInodeType::Link;
+            if is_link && inode_ref.inode.size() <= 60 {
+                // Fast Symlink 没有数据块，逻辑块 0 也不存在
+                return Err(Errno::ENOENT as isize);
+            }
+            // 如果是普通文件但没有 extents 标志，说明是 Indirect Block 格式，暂不支持
+            log::warn!("[ext4] Inode {} does not use extents!", inode_ref.inode_num);
+            return Err(Errno::ENOTSUP as isize);
+        }
         let search_path = self.find_extent(inode_ref, lblock);
         if let Ok(path) = search_path {
             if let Some(node) = path.path.last() {
@@ -900,7 +919,7 @@ impl Ext4FileSystem {
                         let offset_in_ext = lblock - ext_first;
                         return Ok(extent.get_pblock() + offset_in_ext as u64);
                     } else {
-                        log::info!(
+                        log::debug!(
                             "[get_pblock_idx] HOLE: inode={}, lblock={}, ext_first={}, ext_len={}",
                             inode_ref.inode_num,
                             lblock,
@@ -933,7 +952,7 @@ impl Ext4FileSystem {
 
         let block_bitmap_block = block_group.get_block_bitmap_block(&super_block);
 
-        let mut block_bmap_raw_data = [0u8; BLOCK_SIZE];
+        let mut block_bmap_raw_data = vec![0u8; BLOCK_SIZE];
         self.block_device
             .read_block(block_bitmap_block as usize, &mut block_bmap_raw_data);
         let data: &mut Vec<u8> = &mut block_bmap_raw_data.to_vec();

@@ -821,6 +821,7 @@ pub fn sys_fstatat(dirfd: usize, path: *const u8, buf: *mut u8, flags: u32) -> i
         dirfd as isize, path, flags,
     );
 
+    let no_follow = flags.contains(FstatatFlags::AT_SYMLINK_NOFOLLOW);
     let task = current_task().unwrap();
     let file_descriptor = match dirfd {
         AT_FDCWD => task.fs.lock().working_inode.as_ref().clone(),
@@ -833,15 +834,33 @@ pub fn sys_fstatat(dirfd: usize, path: *const u8, buf: *mut u8, flags: u32) -> i
         }
     };
 
-    match file_descriptor.open(&path, OpenFlags::O_RDONLY, false) {
-        Ok(file_descriptor) => {
-            if copy_to_user(token, &file_descriptor.get_stat(), buf as *mut Stat).is_err() {
-                log::error!("[sys_fstatat] Failed to copy to {:?}", buf);
-                return EFAULT;
-            };
-            SUCCESS
+    if no_follow {
+        // 使用 cd_comp 拿到未追踪的原始节点
+        let components = crate::fs::directory_tree::DirectoryTreeNode::parse_dir_path(&path);
+        let dir_node = match file_descriptor.file.get_dirtree_node() {
+            Some(node) => node,
+            None => return ENOTDIR,
+        };
+        match dir_node.cd_comp(&components) {
+            Ok(inode) => {
+                if copy_to_user(token, &inode.file.get_stat(), buf as *mut Stat).is_err() {
+                    return EFAULT;
+                }
+                SUCCESS
+            }
+            Err(errno) => errno,
         }
-        Err(errno) => errno,
+    } else {
+        match file_descriptor.open(&path, OpenFlags::O_RDONLY, false) {
+            Ok(file_descriptor) => {
+                if copy_to_user(token, &file_descriptor.get_stat(), buf as *mut Stat).is_err() {
+                    log::error!("[sys_fstatat] Failed to copy to {:?}", buf);
+                    return EFAULT;
+                };
+                SUCCESS
+            }
+            Err(errno) => errno,
+        }
     }
 }
 /// warning: 此函数没有完全实现，没有实现根据mask来填充statx的值，并且没有直接维护statx结构体，通过stat结构体间接实现
@@ -1716,6 +1735,57 @@ pub fn sys_fallocate(fd: usize, mode: u32, offset: isize, len: isize) -> isize {
     }
     match file_descriptor.truncate_size(end) {
         Ok(()) => SUCCESS,
+        Err(errno) => errno,
+    }
+}
+
+pub fn sys_symlinkat(target: *const u8, newdirfd: usize, linkpath: *const u8) -> isize {
+    let task = current_task().unwrap();
+    let token = task.get_user_token();
+
+    // 翻译目标字符串
+    let target_str = match translated_str(token, target) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+
+    // 翻译链接名称
+    let linkpath_str = match translated_str(token, linkpath) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+
+    log::info!(
+        "[sys_symlinkat] target: {}, newdirfd: {}, linkpath: {}",
+        target_str,
+        newdirfd as isize,
+        linkpath_str
+    );
+
+    // 获取父目录的节点
+    let file_descriptor = match newdirfd {
+        AT_FDCWD => task.fs.lock().working_inode.as_ref().clone(),
+        fd => {
+            let fd_table = task.files.lock();
+            match fd_table.get_ref(fd) {
+                Ok(file_descriptor) => file_descriptor.clone(),
+                Err(errno) => return errno,
+            }
+        }
+    };
+
+    let dir_node = match file_descriptor.file.get_dirtree_node() {
+        Some(node) => node,
+        None => return ENOTDIR,
+    };
+
+    if !dir_node.file.is_dir() {
+        return ENOTDIR;
+    }
+
+    // 调用我们在 DirectoryTreeNode 中写好的方法
+    match dir_node.symlink(&target_str, &linkpath_str) {
+        Ok(_) => SUCCESS,
         Err(errno) => errno,
     }
 }

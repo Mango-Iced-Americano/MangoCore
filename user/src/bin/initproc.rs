@@ -1199,6 +1199,41 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     );
     run_bash_cmd(&cmd, &environ); // prepare busybox "symlinks" for test scripts
 
+    // ============================================================
+    // 链接 musl/glibc 动态链接库到 /lib
+    // 动态链接的 ELF（如 ld-linux-riscv64-lp64d.so.1）依赖此目录
+    // ============================================================
+    println!("[initproc] linking musl/glibc libs to /lib ...");
+    // run_bash_cmd("/musl/busybox mkdir -p /lib", &environ);
+    // run_bash_cmd(
+    //     "/musl/busybox cp -r -L /musl/lib/* /lib/ 2>/dev/null; \
+    //      /musl/busybox cp -r -L /glibc/lib/* /lib/ 2>/dev/null; \
+    //      echo done",
+    //     &environ,
+    // );
+    run_bash_cmd(
+        "
+        mkdir -p /lib /lib64 /usr/lib &&
+        rm -rf /lib64 && ln -s /lib /lib64 &&
+        rm -rf /usr/lib && ln -s /lib /usr/lib &&
+
+        ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64-sf.so.1 &&
+        ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64.so.1 &&
+        ln -sf /musl/lib/libc.so /lib/libc.so &&
+
+        ln -sf /glibc/lib/ld-linux-riscv64-lp64d.so.1 /lib/ld-linux-riscv64-lp64d.so.1 &&
+        ln -sf /glibc/lib/libc.so.6 /lib/libc.so.6 &&
+        ln -sf /glibc/lib/libm.so.6 /lib/libm.so.6 &&
+
+        ln -sf /glibc/lib/ld-linux-loongarch-lp64d.so.1 /lib/ld-linux-loongarch-lp64d.so.1 &&
+        ln -sf /musl/lib/libc.so /lib/ld-musl-loongarch-lp64d.so.1 &&
+
+        ln -sf /glibc/lib/tls_get_new-dtv_dso.so /lib/tls_get_new-dtv_dso.so &&
+        ln -sf /glibc/lib/tls_get_new-dtv_dso.so ./libtls_get_new-dtv_dso.so
+    ",
+        &environ,
+    );
+
     let cfg = load_runtime_config();
 
     // ============================================================

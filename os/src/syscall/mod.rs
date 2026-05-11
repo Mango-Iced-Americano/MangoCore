@@ -27,6 +27,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_MKDIRAT => "mkdirat",
         SYSCALL_UNLINKAT => "unlinkat",
         SYSCALL_LINKAT => "linkat",
+        SYSCALL_SYMLINKAT => "symlinkat",
         SYSCALL_UMOUNT2 => "umount2",
         SYSCALL_MOUNT => "mount",
         SYSCALL_FACCESSAT => "faccessat",
@@ -181,6 +182,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_IOCTL => sys_ioctl(args[0], args[1] as u32, args[2]),
         SYSCALL_MKDIRAT => sys_mkdirat(args[0], args[1] as *const u8, args[2] as u32),
         SYSCALL_UNLINKAT => sys_unlinkat(args[0], args[1] as *const u8, args[2] as u32),
+        SYSCALL_SYMLINKAT => sys_symlinkat(args[0] as *const u8, args[1], args[2] as *const u8),
         SYSCALL_UMOUNT2 => sys_umount2(args[0] as *const u8, args[1] as u32),
         SYSCALL_MOUNT => sys_mount(
             args[0] as *const u8,

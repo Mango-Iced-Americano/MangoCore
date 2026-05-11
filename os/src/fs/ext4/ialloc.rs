@@ -36,7 +36,7 @@ impl Ext4FileSystem {
             if free_inodes > 0 {
                 let inode_bitmap_block = bg.get_inode_bitmap_block(&super_block);
 
-                let mut raw_data = [0u8; BLOCK_SIZE];
+                let mut raw_data = vec![0u8; BLOCK_SIZE];
                 self.block_device
                     .read_block(inode_bitmap_block as usize, &mut raw_data);
 
@@ -117,7 +117,7 @@ impl Ext4FileSystem {
 
         // Load inode bitmap block
         let inode_bitmap_block = bg.get_inode_bitmap_block(&self.superblock);
-        let mut bitmap_data = [0u8; BLOCK_SIZE];
+        let mut bitmap_data = vec![0u8; BLOCK_SIZE];
         self.block_device
             .read_block(inode_bitmap_block as usize, &mut bitmap_data);
 
