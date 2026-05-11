@@ -617,6 +617,13 @@ fn run_ltp_binaries(
     let log_dir = display_path(dir);
     let ltp_dir = format!("{}/ltp/testcases/bin", log_dir);
 
+    // 确定 libc 后缀（与 run_group_in_dir 一致，评测机依赖此格式）
+    let libc_suffix = if log_dir.contains("musl") {
+        "musl"
+    } else {
+        "glibc"
+    };
+
     let pid = fork();
     if pid < 0 {
         println!("[initproc] fork failed for ltp in {} ret={}", ltp_dir, pid);
@@ -631,13 +638,13 @@ fn run_ltp_binaries(
         }
 
         // 打印 START 标记
-        println!("#### OS COMP TEST GROUP START ltp ####");
+        println!("#### OS COMP TEST GROUP START ltp-{} ####", libc_suffix);
 
         // 打开当前目录
         let fd = open(".\0", OpenFlags::RDONLY);
         if fd < 0 {
             println!("[initproc] ltp: cannot open dir {}", ltp_dir);
-            println!("#### OS COMP TEST GROUP END ltp ####");
+            println!("#### OS COMP TEST GROUP END ltp-{} ####", libc_suffix);
             exit(0);
         }
 
@@ -715,7 +722,7 @@ fn run_ltp_binaries(
         }
 
         let _ = close(fd as usize);
-        println!("#### OS COMP TEST GROUP END ltp ####");
+        println!("#### OS COMP TEST GROUP END ltp-{} ####", libc_suffix);
         exit(0);
     } else {
         // parent: 超时 + 强杀（与 run_group_in_dir 一致）
@@ -753,7 +760,7 @@ fn run_ltp_binaries(
 
         reap_orphans();
         if timed_out {
-            println!("#### OS COMP TEST GROUP END ltp ####");
+            println!("#### OS COMP TEST GROUP END ltp-{} ####", libc_suffix);
         }
         println!("[initproc] done ltp in {} exit_code={}", log_dir, exit_code);
     }
