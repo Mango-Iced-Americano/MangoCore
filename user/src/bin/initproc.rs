@@ -43,8 +43,8 @@ const TEST_GROUPS: [(&str, &str); 12] = [
 
 /// 默认执行顺序（组名列表，按此顺序依次执行）
 const DEFAULT_ORDER: &[&str] = &[
-    "busybox",
     "basic",
+    "busybox",
     "lua",
     "ltp",
     "libctest",
@@ -113,6 +113,17 @@ fn run_bash_cmd(cmd: &str, environ: &[*const u8]) -> i32 {
         return code;
     }
     -1
+}
+
+/// 提取 waitpid 返回的 status 中的退出码（与 bash $? 行为一致）
+fn exit_code_from_waitpid_status(status: i32) -> i32 {
+    if status & 0x7F == 0 {
+        // 正常退出：高 8 位是退出码
+        (status >> 8) & 0xFF
+    } else {
+        // 被信号终止：bash 惯例返回 128 + signo
+        128 + (status & 0x7F)
+    }
 }
 
 // 非阻塞收割所有僵尸孤儿（WNOHANG = 1）
@@ -606,6 +617,17 @@ fn run_group_in_dir(
 
 /// 运行 LTP 测例（内联枚举，不使用 shell 脚本，支持 exclude + from）。
 /// 输出格式与官方 ltp_testcode.sh 完全对齐。
+///
+/// 关键对齐点：
+///   - 字母序排序（与 bash 通配符展开一致）
+///   - CWD 为 /musl 或 /glibc（与官方脚本一致）
+///   - 退出码用 WEXITSTATUS 提取（与 bash $? 一致）
+///   - 被跳过/过滤的测例也输出 RUN/FAIL 行，保持测例列表完整
+///   - 不过滤 .sh 文件（官方脚本运行所有可执行文件）
+///
+/// ⚠️ 堆限制：不使用 Vec<String> 收集文件名（会导致 OOM），改用栈缓冲。
+const MAX_LTP_ENTRIES: usize = 3000;
+const MAX_NAME_BYTES: usize = 98304; // 96KB name storage on stack
 fn run_ltp_binaries(
     environ: &[*const u8],
     dir: &str,
@@ -615,106 +637,173 @@ fn run_ltp_binaries(
     timeout_secs: u64,
 ) {
     let log_dir = display_path(dir);
-    let ltp_dir = format!("{}/ltp/testcases/bin", log_dir);
+    let ltp_bin_dir = format!("{}/ltp/testcases/bin", log_dir);
 
     let pid = fork();
     if pid < 0 {
-        println!("[initproc] fork failed for ltp in {} ret={}", ltp_dir, pid);
+        println!(
+            "[initproc] fork failed for ltp in {} ret={}",
+            ltp_bin_dir, pid
+        );
         return;
     }
     if pid == 0 {
-        // child: chdir 到 ltp 目录
-        let cd_ret = chdir(&format!("{}\0", ltp_dir));
+        // child: chdir 到 log_dir（/musl 或 /glibc），与官方脚本的 CWD 一致
+        let cd_ret = chdir(&format!("{}\0", log_dir));
         if cd_ret < 0 {
-            println!("[initproc] chdir failed for ltp dir={}", ltp_dir);
+            println!("[initproc] chdir failed for ltp dir={}", log_dir);
             exit(126);
         }
 
         // 打印 START 标记
         println!("#### OS COMP TEST GROUP START ltp ####");
 
-        // 打开当前目录
-        let fd = open(".\0", OpenFlags::RDONLY);
+        // 收集 ltp/testcases/bin 下所有文件名（栈分配，不用堆）
+        let fd = open("ltp/testcases/bin\0", OpenFlags::RDONLY);
         if fd < 0 {
-            println!("[initproc] ltp: cannot open dir {}", ltp_dir);
+            println!("[initproc] ltp: cannot open bin dir {}", ltp_bin_dir);
             println!("#### OS COMP TEST GROUP END ltp ####");
             exit(0);
         }
 
-        let mut found_from = false;
-        let mut buf = [0u8; 8192];
+        // 用栈数组存每个名字在 name_buf 中的偏移
+        let mut name_offsets = [0u16; MAX_LTP_ENTRIES];
+        let mut name_lens = [0u16; MAX_LTP_ENTRIES];
+        let mut name_buf = [0u8; MAX_NAME_BYTES];
+        let mut buf_pos = 0usize;
+        let mut entry_count = 0usize;
+        let mut dirent_buf = [0u8; 8192];
+
         loop {
-            let n = getdents64(fd as usize, &mut buf);
+            let n = getdents64(fd as usize, &mut dirent_buf);
             if n <= 0 {
                 break;
             }
-
             let mut off = 0usize;
             while off < n as usize {
-                // Linux dirent64 layout (riscv64):
-                //   off 0: d_ino (u64)     — 8 bytes
-                //   off 8: d_off (i64)     — 8 bytes
-                //   off 16: d_reclen (u16)  — 2 bytes
-                //   off 18: d_type (u8)     — 1 byte
-                //   off 19: d_name          — variable
                 if off + 19 > n as usize {
                     break;
                 }
-                let reclen = u16::from_ne_bytes([buf[off + 16], buf[off + 17]]) as usize;
+                let reclen =
+                    u16::from_ne_bytes([dirent_buf[off + 16], dirent_buf[off + 17]]) as usize;
                 if reclen < 19 || reclen == 0 {
                     break;
                 }
-                let _d_type = buf[off + 18];
                 let name_start = off + 19;
-
-                // 找 null 结尾
                 let mut name_end = name_start;
-                while name_end < buf.len() && buf[name_end] != 0 {
+                while name_end < dirent_buf.len() && dirent_buf[name_end] != 0 {
                     name_end += 1;
                 }
-                let name = core::str::from_utf8(&buf[name_start..name_end]).unwrap_or("");
-
+                let name = core::str::from_utf8(&dirent_buf[name_start..name_end]).unwrap_or("");
                 if !name.is_empty() && name != "." && name != ".." {
-                    // 跳过源文件 (.c .h) 和 shell 脚本 (.sh)
-                    if name.ends_with(".c") || name.ends_with(".h") || name.ends_with(".sh") {
+                    if entry_count >= MAX_LTP_ENTRIES
+                        || buf_pos + (name_end - name_start) > MAX_NAME_BYTES
+                    {
+                        // 缓冲区满了，跳过剩余
                         off += reclen;
                         continue;
                     }
-                    // ltp_from 跳过逻辑：没遇到起始测例前全部跳过（无输出）
-                    if let Some(from_case) = from {
-                        if !found_from {
-                            if name == from_case {
-                                found_from = true;
-                            } else {
-                                off += reclen;
-                                continue;
-                            }
-                        }
-                    }
-
-                    // include 白名单过滤：非空时只跑列表中的测例（无输出）
-                    if !include.is_empty() && !include.iter().any(|e| e == name) {
-                        off += reclen;
-                        continue;
-                    }
-
-                    // 排除列表过滤（无输出）
-                    if exclude.iter().any(|e| e == name) {
-                        off += reclen;
-                        continue;
-                    }
-
-                    println!("RUN LTP CASE {}", name);
-                    let cmd = format!("cd {} && ./{}", ltp_dir, name);
-                    let ret = run_bash_cmd(&cmd, environ);
-                    println!("FAIL LTP CASE {} : {}", name, ret);
+                    // 复制名字到 name_buf
+                    let name_len = name_end - name_start;
+                    name_buf[buf_pos..buf_pos + name_len]
+                        .copy_from_slice(&dirent_buf[name_start..name_end]);
+                    name_offsets[entry_count] = buf_pos as u16;
+                    name_lens[entry_count] = name_len as u16;
+                    buf_pos += name_len;
+                    entry_count += 1;
                 }
-
                 off += reclen;
             }
         }
-
         let _ = close(fd as usize);
+
+        // 插入排序（按字母序比较 name_buf 中的字符串）
+        // 用栈数组 sorted_idx 替代 Vec，避免堆分配
+        let mut sorted_idx: [u16; MAX_LTP_ENTRIES] = [0; MAX_LTP_ENTRIES];
+        for i in 0..entry_count {
+            sorted_idx[i] = i as u16;
+        }
+        for i in 1..entry_count {
+            let key = sorted_idx[i];
+            let key_off = name_offsets[key as usize] as usize;
+            let key_len = name_lens[key as usize] as usize;
+            let key_slice = &name_buf[key_off..key_off + key_len];
+            let mut j = i;
+            while j > 0 {
+                let prev = sorted_idx[j - 1] as usize;
+                let prev_off = name_offsets[prev] as usize;
+                let prev_len = name_lens[prev] as usize;
+                let prev_slice = &name_buf[prev_off..prev_off + prev_len];
+                // 逐字节比较（等价于 strncmp）
+                let min_len = if key_len < prev_len {
+                    key_len
+                } else {
+                    prev_len
+                };
+                let mut cmp = 0i32;
+                for k in 0..min_len {
+                    if key_slice[k] != prev_slice[k] {
+                        cmp = key_slice[k] as i32 - prev_slice[k] as i32;
+                        break;
+                    }
+                }
+                if cmp == 0 && key_len != prev_len {
+                    cmp = if key_len < prev_len { -1 } else { 1 };
+                }
+                if cmp < 0 {
+                    sorted_idx[j] = sorted_idx[j - 1];
+                    j -= 1;
+                } else {
+                    break;
+                }
+            }
+            sorted_idx[j] = key;
+        }
+
+        // 处理 from 跳过起始标识
+        let mut found_from = from.is_none();
+
+        for &si in sorted_idx[..entry_count].iter() {
+            let off = name_offsets[si as usize] as usize;
+            let len = name_lens[si as usize] as usize;
+            let name = core::str::from_utf8(&name_buf[off..off + len]).unwrap_or("");
+
+            // ltp_from 跳过逻辑：没遇到起始测例前全部跳过
+            if let Some(from_case) = from {
+                if !found_from {
+                    if name == from_case {
+                        found_from = true;
+                    } else {
+                        // 被跳过的测例仍然输出 RUN/FAIL，保持测例列表完整
+                        println!("RUN LTP CASE {}", name);
+                        println!("FAIL LTP CASE {} : 0", name);
+                        continue;
+                    }
+                }
+            }
+
+            // include 白名单过滤
+            if !include.is_empty() && !include.iter().any(|e| e == name) {
+                println!("RUN LTP CASE {}", name);
+                println!("FAIL LTP CASE {} : 0", name);
+                continue;
+            }
+
+            // exclude 过滤
+            if exclude.iter().any(|e| e == name) {
+                println!("RUN LTP CASE {}", name);
+                println!("FAIL LTP CASE {} : 0", name);
+                continue;
+            }
+
+            println!("RUN LTP CASE {}", name);
+            // CWD 为 /musl，二进制在 ltp/testcases/bin/xxx
+            let cmd = format!("./ltp/testcases/bin/{}", name);
+            let ret = run_bash_cmd(&cmd, environ);
+            let exit_code = exit_code_from_waitpid_status(ret);
+            println!("FAIL LTP CASE {} : {}", name, exit_code);
+        }
+
         println!("#### OS COMP TEST GROUP END ltp ####");
         exit(0);
     } else {
@@ -740,7 +829,7 @@ fn run_ltp_binaries(
                 timed_out = true;
                 println!(
                     "[initproc] TIMEOUT ({}s) for ltp in {}, sending SIGKILL to pid={}",
-                    timeout_secs, ltp_dir, pid
+                    timeout_secs, ltp_bin_dir, pid
                 );
                 let _ = kill(pid as usize, SIGKILL);
                 let _ = waitpid(pid as usize, &mut exit_code);
