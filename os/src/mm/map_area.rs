@@ -327,12 +327,21 @@ impl LinearMap {
         first_cut: VirtPageNum,
         second_cut: VirtPageNum,
     ) -> Result<(Self, Self), ()> {
-        if let Ok(mut second) = self.into_two(first_cut) {
-            if let Ok(third) = second.into_two(second_cut) {
-                return Ok((second, third));
-            }
-        }
-        return Err(());
+        // if let Ok(mut second) = self.into_two(first_cut) {
+        //     if let Ok(third) = second.into_two(second_cut) {
+        //         return Ok((second, third));
+        //     }
+        // }
+        // return Err(());
+        // 1. 先把当前区域从 first_cut 处切开，得到前半部分(self)和后半部分(second)
+        // into_two 已经处理了 self.map_file 的 deep_clone 和 offset 调整
+        let mut second = self.into_two(first_cut)?;
+
+        // 2. 再把刚才得到的后半部分(second)从 second_cut 处切开，得到中间部分(second)和最后部分(third)
+        let third = second.into_two(second_cut)?;
+
+        // 3. 返回切出来的第二和第三部分
+        Ok((second, third))
     }
 }
 #[cfg(feature = "oom_handler")]
@@ -870,27 +879,39 @@ impl MapArea {
         first_cut: VirtPageNum,
         second_cut: VirtPageNum,
     ) -> Result<(Self, Self), ()> {
-        if self.map_file.is_some() {
-            warn!("[into_three] break apart file-back MapArea!");
-            return Err(());
-        }
-        let (second_frames, third_frames) = self.inner.into_three(first_cut, second_cut)?;
-        Ok((
-            MapArea {
-                inner: second_frames,
-                map_type: self.map_type,
-                map_perm: self.map_perm,
-                map_file: None,
-                flags: self.flags,
-            },
-            MapArea {
-                inner: third_frames,
-                map_type: self.map_type,
-                map_perm: self.map_perm,
-                map_file: None,
-                flags: self.flags,
-            },
-        ))
+        // if self.map_file.is_some() {
+        //     warn!("[into_three] break apart file-back MapArea!");
+        //     return Err(());
+        // }
+        // let (second_frames, third_frames) = self.inner.into_three(first_cut, second_cut)?;
+        // Ok((
+        //     MapArea {
+        //         inner: second_frames,
+        //         map_type: self.map_type,
+        //         map_perm: self.map_perm,
+        //         map_file: None,
+        //         flags: self.flags,
+        //     },
+        //     MapArea {
+        //         inner: third_frames,
+        //         map_type: self.map_type,
+        //         map_perm: self.map_perm,
+        //         map_file: None,
+        //         flags: self.flags,
+        //     },
+        // ))
+
+        // 第一次切分：把 [Start, End] 切成 [Start, first_cut] 和 [first_cut, End]
+        // into_two 会自动处理文件的 deep_clone 和偏移量计算
+        let mut second_area = self.into_two(first_cut)?;
+
+        // 第二次切分：把刚才得到的后半段 [first_cut, End] 再次切分
+        // 切成 [first_cut, second_cut] 和 [second_cut, End]
+        let third_area = second_area.into_two(second_cut)?;
+
+        // 返回 (中间段, 最后段)
+        // 此时 self 变成了第一段
+        Ok((second_area, third_area))
     }
     #[cfg(feature = "oom_handler")]
     pub fn do_oom<T: PageTable>(&mut self, page_table: &mut T) -> usize {

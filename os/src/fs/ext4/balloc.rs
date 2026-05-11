@@ -360,7 +360,7 @@ impl Ext4FileSystem {
                 Ext4BlockGroup::load_new(self.block_device.clone(), &super_block, bgid as usize);
 
             let block_bitmap_block = bg.get_block_bitmap_block(&super_block);
-            let mut raw_data = [0u8; BLOCK_SIZE];
+            let mut raw_data = vec![0u8; BLOCK_SIZE];
             self.block_device
                 .read_block(block_bitmap_block as usize, &mut raw_data);
             let mut data: &mut Vec<u8> = &mut raw_data.to_vec();
@@ -380,6 +380,10 @@ impl Ext4FileSystem {
 
             bg.set_block_group_balloc_bitmap_csum(&super_block, data);
             // 此处不需要考虑对齐
+            log::warn!(
+                "[WRITE_CALLER] balloc_free_blocks: write block_bitmap block={}",
+                block_bitmap_block
+            );
             self.block_device
                 .write_block(block_bitmap_block as usize, data);
 

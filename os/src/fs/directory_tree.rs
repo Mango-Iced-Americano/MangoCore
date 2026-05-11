@@ -10,6 +10,7 @@ use super::{
 };
 use crate::fs::dev::urandom::Urandom;
 use crate::fs::fat32::FatOSInode;
+use crate::fs::inode;
 #[cfg(feature = "oom_handler")]
 use crate::mm::tlb_invalidate;
 use crate::syscall::errno::*;
@@ -179,7 +180,7 @@ impl DirectoryTreeNode {
     /// 比如路径是“/lib/a/.././d/c”
     /// 那么存入的内容就是
     /// ["a", "d", "c"]
-    fn parse_dir_path(path: &str) -> Vec<&str> {
+    pub fn parse_dir_path(path: &str) -> Vec<&str> {
         path.split('/').fold(Vec::with_capacity(8), |mut v, s| {
             match s {
                 // 去掉空字符串和当前目录
@@ -249,6 +250,9 @@ impl DirectoryTreeNode {
     pub fn cd_comp(&self, components: &Vec<&str>) -> Result<Arc<Self>, isize> {
         let mut current_inode = self.get_arc();
         for component in components {
+            if !current_inode.file.is_dir() {
+                return Err(ENOTDIR);
+            }
             if *component == ".." {
                 let lock = current_inode.father.lock();
                 let par_inode = lock.upgrade();
@@ -269,6 +273,42 @@ impl DirectoryTreeNode {
                     current_inode = child_inode.clone()
                 }
                 Err(errno) => return Err(errno),
+            }
+            // 跟随中间路径组件中的符号链接
+            // 例如 lib64 → /lib ，这样后续组件才能在目标目录中查找
+            let mut link_depth = 0;
+            while current_inode.file.get_file_type() == DiskInodeType::Link {
+                if link_depth >= 8 {
+                    return Err(ELOOP);
+                }
+                let target_path = current_inode.file.read_link();
+                let start_inode = if target_path.starts_with('/') {
+                    ROOT.clone()
+                } else {
+                    current_inode.father_arc()
+                };
+                let comps = Self::parse_dir_path(&target_path);
+                let mut current = start_inode;
+                for comp in comps.iter() {
+                    if *comp == ".." {
+                        let maybe_parent = current.father.lock().upgrade();
+                        if let Some(par) = maybe_parent {
+                            current = par;
+                        }
+                        continue;
+                    }
+                    let mut child_lock = current.children.write();
+                    match current.try_to_open_subfile(comp, &mut child_lock) {
+                        Ok(child) => {
+                            let child = child.clone();
+                            drop(child_lock);
+                            current = child;
+                        }
+                        Err(errno) => return Err(errno),
+                    }
+                }
+                current_inode = current;
+                link_depth += 1;
             }
         }
         Ok(current_inode)
@@ -331,32 +371,32 @@ impl DirectoryTreeNode {
         flags: OpenFlags,
         special_use: bool,
     ) -> Result<Arc<dyn File>, isize> {
-        log::debug!("[open]: cwd: {}, path: {}", self.get_cwd(), path);
+        log::info!("[open]: cwd: {}, path: {}", self.get_cwd(), path);
         // println!("open file in dtn: cwd: {} name: {}",self.get_cwd(), path );
 
         // 重定向链接库
         let path = match path {
-            "/lib/ld-linux-riscv64-lp64.so.1" => "/musl/lib/libc.so",
+            /* "/lib/ld-linux-riscv64-lp64.so.1" => "/musl/lib/libc.so",
             "/lib/ld-linux-riscv64-lp64d.so.1" => "/musl/lib/libc.so",
             "/lib/ld-musl-riscv64.so.1" | "/lib/ld-musl-riscv64-sf.so.1" => "/musl/lib/libc.so",
             "/lib64/ld-linux-loongarch-lp64d.so.1" => "/glibc/lib/ld-linux-loongarch-lp64d.so.1",
             "libm.so.6" => "/glibc/lib/libm.so.6",
             "/lib64/ld-musl-loongarch-lp64d.so.1" => "/musl/lib/libc.so",
-            "/usr/lib/tls_get_new-dtv_dso.so" => "./libtls_get_new-dtv_dso.so",
+            "/usr/lib/tls_get_new-dtv_dso.so" => "./libtls_get_new-dtv_dso.so", */
             _ => path,
         };
 
         // 获取目录树根节点
-        let inode = if path.starts_with("/") {
+        let mut inode = if path.starts_with("/") {
             &**ROOT
         } else {
             &self
         };
-
+        log::info!("[open]: origin file type {:?}", inode.file.get_file_type());
         // 获取路径缓存
         let mut path_cache_lock = PATH_CACHE.lock();
         // 如果路径以 '/' 开头，且路径等于缓存路径，且缓存路径的弱引用存在
-        let inode = if path.starts_with('/')
+        let mut inode = if path.starts_with('/')
             && path == path_cache_lock.0
             && path_cache_lock.1.upgrade().is_some()
         {
@@ -371,6 +411,47 @@ impl DirectoryTreeNode {
             let inode = match inode.cd_comp(&components) {
                 Ok(inode) => inode,
                 Err(errno) => return Err(errno),
+            };
+            // 跟随中间路径组件中的符号链接（例如 lib64 → /lib）
+            // 如果父目录 inode 本身是软链接，需要解析到实际目录
+            // 然后再用这个实际目录去查找最后一个路径组件
+            let inode = {
+                let mut resolved = inode;
+                let mut link_depth = 0;
+                while resolved.file.get_file_type() == DiskInodeType::Link {
+                    if link_depth >= 8 {
+                        return Err(ELOOP);
+                    }
+                    let target_path = resolved.file.read_link();
+                    let start_inode = if target_path.starts_with('/') {
+                        ROOT.clone()
+                    } else {
+                        resolved.father_arc()
+                    };
+                    let comps = Self::parse_dir_path(&target_path);
+                    let mut current = start_inode;
+                    for comp in comps.iter() {
+                        if *comp == ".." {
+                            let maybe_parent = current.father.lock().upgrade();
+                            if let Some(par) = maybe_parent {
+                                current = par;
+                            }
+                            continue;
+                        }
+                        let mut lock = current.children.write();
+                        match current.try_to_open_subfile(comp, &mut lock) {
+                            Ok(child) => {
+                                let child = child.clone();
+                                drop(lock);
+                                current = child;
+                            }
+                            Err(errno) => return Err(errno),
+                        }
+                    }
+                    resolved = current;
+                    link_depth += 1;
+                }
+                resolved
             };
             // 若最后一个组件存在，则进行处理
             if let Some(last_comp) = last_comp {
@@ -411,6 +492,63 @@ impl DirectoryTreeNode {
             }
         };
 
+        // 软链接追踪逻辑
+        let mut final_inode = inode.clone();
+        let mut link_depth = 0;
+
+        while final_inode.file.get_file_type() == DiskInodeType::Link {
+            if link_depth >= 8 {
+                return Err(ELOOP);
+            }
+
+            let target_path = final_inode.file.read_link();
+            log::info!("[open]: link target path: {}", target_path);
+
+            // 决定起始查找起点，绝对路径从root,相对路径从父目录
+            let start_inode = if target_path.starts_with('/') {
+                ROOT.clone()
+            } else {
+                final_inode.father_arc()
+            };
+
+            // 解析链接目标路径
+            let components = Self::parse_dir_path(&target_path);
+            let mut current_inode = start_inode;
+
+            for comp in components.iter() {
+                if *comp == ".." {
+                    let maybe_parent = {
+                        let guard = current_inode.father.lock();
+                        guard.upgrade()
+                    };
+
+                    if let Some(par) = maybe_parent {
+                        current_inode = par;
+                    }
+                    continue;
+                }
+
+                let mut lock = current_inode.children.write();
+                match current_inode.try_to_open_subfile(comp, &mut lock) {
+                    Ok(child_inode) => {
+                        let child_inode = child_inode.clone();
+                        drop(lock);
+                        current_inode = child_inode;
+                    }
+                    Err(errno) => return Err(errno),
+                }
+            }
+            final_inode = current_inode;
+            link_depth += 1;
+        }
+        let final_file_type = final_inode.file.get_file_type();
+        inode = final_inode;
+
+        log::info!(
+            "[open] final file type of {} is {:?} ",
+            path,
+            final_file_type,
+        );
         if flags.contains(OpenFlags::O_TRUNC) {
             match inode.file.truncate_size(0) {
                 Ok(_) => {}
@@ -649,6 +787,47 @@ impl DirectoryTreeNode {
         }
         *value.father.lock() = Arc::downgrade(&new_par_inode.get_arc());
         new_lock.lock().as_mut().unwrap().insert(new_key, value);
+
+        Ok(())
+    }
+
+    // 创建一个符号链接
+    pub fn symlink(&self, target: &str, linkpath: &str) -> Result<(), isize> {
+        // 1. 解析要创建链接的父目录
+        let inode = if linkpath.starts_with("/") {
+            &**ROOT
+        } else {
+            &self
+        };
+        let mut components = Self::parse_dir_path(linkpath);
+        let link_name = components.pop().ok_or(crate::syscall::errno::ENOENT)?;
+
+        let parent_inode = inode.cd_comp(&components)?;
+
+        // 2. 检查该名字是否已存在
+        let mut lock = parent_inode.children.write();
+        if parent_inode
+            .try_to_open_subfile(link_name, &mut lock)
+            .is_ok()
+        {
+            return Err(crate::syscall::errno::EEXIST); // 文件已存在
+        }
+
+        // 3. 在底层创建文件，类型指定为 Link
+        let new_file = parent_inode.create(link_name, DiskInodeType::Link)?;
+
+        // 4. 将目标路径（target）写入这个新文件
+        new_file.write_link(target)?;
+
+        // 5. 更新 VFS 缓存
+        let key = link_name.to_string();
+        let value = Self::new(
+            key.clone(),
+            parent_inode.filesystem.clone(),
+            new_file,
+            Arc::downgrade(&parent_inode.get_arc()),
+        );
+        lock.as_mut().unwrap().insert(key, value);
 
         Ok(())
     }

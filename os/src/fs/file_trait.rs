@@ -39,6 +39,12 @@ pub trait File: DowncastSync {
     fn link_child(&self, name: &str, child: &Self) -> Result<(), isize>
     where
         Self: Sized;
+    fn read_link(&self) -> alloc::string::String {
+        alloc::string::String::new()
+    }
+    fn write_link(&self, target: &str) -> Result<(), isize> {
+        Err(crate::syscall::errno::ENOSYS) // 默认不支持
+    }
     /// delete(unlink)
     fn unlink(&self, delete: bool) -> Result<(), isize>;
     /// dirent

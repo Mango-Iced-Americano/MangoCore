@@ -408,14 +408,17 @@ impl File for Ext4OSInode {
         let ctime = inode_ref.inode.ctime();
         // let now = get_time() / CLOCK_FREQ;
 
-        let st_mod: u32 = {
-            if inode_ref.inode.get_file_type() == DiskInodeType::Directory {
+        let st_mod: u32 = match inode_ref.inode.get_file_type() {
+            DiskInodeType::Directory => {
                 (StatMode::S_IFDIR | StatMode::S_IRWXU | StatMode::S_IRWXG | StatMode::S_IRWXO)
                     .bits()
-            } else {
-                (StatMode::S_IFREG | StatMode::S_IRWXU | StatMode::S_IRWXG | StatMode::S_IRWXO)
+            }
+            DiskInodeType::Link => {
+                (StatMode::S_IFLNK | StatMode::S_IRWXU | StatMode::S_IRWXG | StatMode::S_IRWXO)
                     .bits()
             }
+            _ => (StatMode::S_IFREG | StatMode::S_IRWXU | StatMode::S_IRWXG | StatMode::S_IRWXO)
+                .bits(),
         };
         Stat::new(
             // 下面的时间用i64有点逆天了
@@ -519,12 +522,16 @@ impl File for Ext4OSInode {
         name: &str,
         file_type: crate::fs::DiskInodeType,
     ) -> Result<Arc<dyn File>, isize> {
+        if self.get_file_type() != crate::fs::DiskInodeType::Directory {
+            return Err(crate::syscall::errno::ENOTDIR);
+        }
         let inode_lock = self.inode_lock.write();
         // 获取inode_mode
         let inode_mode = match file_type {
             DiskInodeType::File => InodeFileType::S_IFREG.bits(),
             DiskInodeType::Directory => InodeFileType::S_IFDIR.bits(),
             DiskInodeType::Socket => InodeFileType::S_IFSOCK.bits(),
+            DiskInodeType::Link => InodeFileType::S_IFLNK.bits(),
             _ => todo!(),
         };
 
@@ -587,7 +594,8 @@ impl File for Ext4OSInode {
                 file_cache_manager: Arc::new(PageCacheManager::new()),
             }));
         } else {
-            panic!()
+            // panic!()
+            return Err(crate::syscall::errno::ENOSPC);
         }
     }
 
@@ -600,6 +608,81 @@ impl File for Ext4OSInode {
         self.ext4fs
             .dir_add_entry(&mut parent_inode_ref, &child_inode_ref, name)
             .map(|_| ())
+    }
+
+    fn read_link(&self) -> String {
+        let inode_ref = self.inode.lock();
+        let size = inode_ref.inode.size() as usize;
+        // 检查 inode 是否使用了 Extent 树
+        let uses_extents =
+            (inode_ref.inode.flags() & crate::fs::ext4::EXT4_INODE_FLAG_EXTENTS as u32) != 0;
+
+        if size <= 60 && !uses_extents {
+            // Fast symlink: 数据直接存在 block 数组中
+            let bytes = unsafe {
+                core::slice::from_raw_parts(inode_ref.inode.block.as_ptr() as *const u8, size)
+            };
+            String::from_utf8_lossy(bytes).into_owned()
+        } else {
+            // Slow symlink: 存在独立数据块中
+            drop(inode_ref);
+            let mut buf = alloc::vec![0u8; size];
+            self.read(Some(&mut 0), &mut buf);
+            String::from_utf8_lossy(&buf).into_owned()
+        }
+    }
+
+    fn write_link(&self, target: &str) -> Result<(), isize> {
+        let mut inode_ref = self.inode.lock();
+        let target_bytes = target.as_bytes();
+        let len = target_bytes.len();
+        let old_flags = inode_ref.inode.flags();
+
+        if len <= 60 {
+            // 1. 强制清除 EXTENTS 标志
+            inode_ref
+                .inode
+                .set_flags(old_flags & !crate::fs::ext4::EXT4_INODE_FLAG_EXTENTS as u32);
+            // Fast Symlink：存入 i_block 数组（前 15 个 32位 整数）
+            unsafe {
+                let block_ptr = inode_ref.inode.block.as_mut_ptr() as *mut u8;
+                core::ptr::copy_nonoverlapping(target_bytes.as_ptr(), block_ptr, len);
+
+                // 可选：将剩余字节清零
+                if len < 60 {
+                    core::ptr::write_bytes(block_ptr.add(len), 0, 60 - len);
+                }
+            }
+            inode_ref.inode.set_size(len as u64);
+            // 这里一定要加上 EXT4_INODE_FLAG_EXTENTS 标志清理
+            // 因为如果是 Fast Symlink，不能使用 Extent Tree
+            let flags = inode_ref.inode.flags();
+            inode_ref
+                .inode
+                .set_flags(flags & !crate::fs::ext4::EXT4_INODE_FLAG_EXTENTS as u32);
+
+            self.ext4fs.write_back_inode(&mut inode_ref);
+            Ok(())
+        } else {
+            // 1. 检查如果之前没有 EXTENTS 标志（从 Fast 变成 Slow），需要初始化
+            if (old_flags & crate::fs::ext4::EXT4_INODE_FLAG_EXTENTS as u32) == 0 {
+                inode_ref
+                    .inode
+                    .set_flags(old_flags | crate::fs::ext4::EXT4_INODE_FLAG_EXTENTS as u32);
+                // 关键：清空之前的字符串内容，并初始化 Extent 树的 Header
+                inode_ref.inode.extent_tree_init();
+            }
+            // Slow Symlink: 当作普通文件写入数据块
+            // 先释放锁，因为 self.write 会重新拿锁
+            drop(inode_ref);
+            // 写入内容
+            let written = self.write(Some(&mut 0), target_bytes);
+            if written == len {
+                Ok(())
+            } else {
+                Err(crate::syscall::errno::ENOSPC)
+            }
+        }
     }
 
     // remove file

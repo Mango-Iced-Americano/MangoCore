@@ -2,6 +2,7 @@
     此文件用于解析ELF文件
     内容与RISCV版本相同，无需修改
 */
+use crate::fs::DiskInodeType;
 use alloc::boxed::Box;
 
 use crate::{
@@ -94,9 +95,20 @@ pub struct ELFInfo {
 
 /// 加载ELF解释器
 pub fn load_elf_interp(path: &str) -> Result<&'static [u8], isize> {
+    log::info!("[load_elf_interp]Loading ELF interpreter: {}", path);
     // 只读方式打开指定path的文件
     match ROOT_FD.open(path, OpenFlags::O_RDONLY, false) {
         Ok(file) => {
+            // 增加一层防护：解释器必须是普通文件
+            if file.file.get_file_type() != DiskInodeType::File {
+                // 如果是 Link，说明open 函数没能自动展开它
+                log::warn!(
+                    "[load_elf_interp] Interpreter {} is a {:?}, not a Regular File!",
+                    path,
+                    file.file.get_file_type()
+                );
+                return Err(ENOEXEC); // 或者返回 ENOENT
+            }
             // 文件大小小于ELF文件头大小
             if file.get_size() < 4 {
                 return Err(ELIBBAD);

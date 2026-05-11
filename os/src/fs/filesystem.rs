@@ -1,5 +1,6 @@
 use crate::fs::ext4::BLOCK_SIZE;
 use alloc::sync::Arc;
+use alloc::vec;
 use core::ops::AddAssign;
 use lazy_static::*;
 use spin::Mutex;
@@ -39,7 +40,7 @@ pub fn pre_mount() -> FS_Type {
     // 否则尝试获取超级块的魔数，如果是0xEF53，返回FS_Type::Ext4
     // 否则返回FS_Type::Null
     let block_device = BLOCK_DEVICE.clone();
-    let mut buf = [0u8; BLOCK_SIZE];
+    let mut buf = vec![0u8; BLOCK_SIZE];
     block_device.read_block(0, &mut buf);
     // 判断第512个字节是不是0x55AA
     if buf[510] == 0x55 && buf[511] == 0xAA {

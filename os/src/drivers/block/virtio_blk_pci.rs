@@ -1,20 +1,25 @@
 use super::BlockDevice;
 use crate::mm::{
-    frame_alloc, frames_alloc, frame_dealloc, kernel_token, FrameTracker, PageTable, PageTableImpl, PhysAddr,
-    PhysPageNum, StepByOne, VirtAddr,
+    frame_alloc, frame_dealloc, frames_alloc, kernel_token, FrameTracker, PageTable, PageTableImpl,
+    PhysAddr, PhysPageNum, StepByOne, VirtAddr,
 };
-use spin::Mutex;
-use alloc::vec::Vec;
 use alloc::sync::Arc;
-use lazy_static::*;
+use alloc::vec::Vec;
 use core::ptr::NonNull;
-use virtio_drivers::{BufferDirection, Hal};
-use virtio_drivers::transport::pci::bus::{BarInfo, Cam, Command, DeviceFunction, MemoryBarType, PciRoot, MmioCam};
-use virtio_drivers::transport::pci::{virtio_device_type, PciTransport};
+use lazy_static::*;
+use spin::Mutex;
 use virtio_drivers::device::blk::VirtIOBlk;
+use virtio_drivers::transport::pci::bus::{
+    BarInfo, Cam, Command, DeviceFunction, MemoryBarType, MmioCam, PciRoot,
+};
+use virtio_drivers::transport::pci::{virtio_device_type, PciTransport};
 use virtio_drivers::transport::DeviceType;
+use virtio_drivers::{BufferDirection, Hal};
 const VIRT_IO_BLOCK_SZ: usize = 512;
-use crate::hal::{BLOCK_SZ, config::{PAGE_SIZE, PAGE_SIZE_BITS}};
+use crate::hal::{
+    config::{PAGE_SIZE, PAGE_SIZE_BITS},
+    BLOCK_SZ,
+};
 const BLOCK_RATIO: usize = BLOCK_SZ / VIRT_IO_BLOCK_SZ;
 const PCI_ECAM_BASE: usize = 0x2000_0000;
 const VIRT_PCI_BASE: usize = 0x4000_0000;
@@ -33,15 +38,42 @@ impl BlockDevice for VirtIOBlock {
         assert!(buf.len() % BLOCK_SZ == 0);
         for (i, chunk) in buf.chunks_mut(VIRT_IO_BLOCK_SZ).enumerate() {
             let virtio_block_id = block_id * BLOCK_RATIO + i;
-            self.0.lock().read_blocks(virtio_block_id, chunk).expect("read error");
+            self.0
+                .lock()
+                .read_blocks(virtio_block_id, chunk)
+                .expect("read error");
         }
     }
 
     fn write_block(&self, block_id: usize, buf: &[u8]) {
         assert!(buf.len() % BLOCK_SZ == 0);
+        // == INODE 3266 CORRUPTION WATCH ==
+        const WATCH_INODE_TABLE_BLOCK: usize = 749;
+        if block_id == WATCH_INODE_TABLE_BLOCK && buf.len() > 256 + 2 {
+            let mode = u16::from_le_bytes([buf[256], buf[257]]);
+            let size = u32::from_le_bytes([buf[256 + 4], buf[256 + 5], buf[256 + 6], buf[256 + 7]]);
+            let block0 =
+                u32::from_le_bytes([buf[256 + 40], buf[256 + 41], buf[256 + 42], buf[256 + 43]]);
+            log::warn!(
+                "[WRITE_WATCH] block=749(inode_table): ino@256 mode=0o{:o} size={} block[0]={:#x}",
+                mode,
+                size,
+                block0
+            );
+        }
+        if block_id <= 10 {
+            log::warn!(
+                "[WRITE_WATCH] block={}(metadata): len={}",
+                block_id,
+                buf.len()
+            );
+        }
         for (i, chunk) in buf.chunks(VIRT_IO_BLOCK_SZ).enumerate() {
             let virtio_block_id = block_id * BLOCK_RATIO + i;
-            self.0.lock().write_blocks(virtio_block_id, chunk).expect("write error");
+            self.0
+                .lock()
+                .write_blocks(virtio_block_id, chunk)
+                .expect("write error");
         }
     }
 }
@@ -53,13 +85,20 @@ pub struct PciRangeAllocator {
 
 impl PciRangeAllocator {
     pub const fn new(pci_base: usize, pci_size: usize) -> Self {
-        Self { current: pci_base, end: pci_base + pci_size }
+        Self {
+            current: pci_base,
+            end: pci_base + pci_size,
+        }
     }
 
     pub fn alloc_pci_mem(&mut self, size: usize) -> Option<usize> {
-        if !size.is_power_of_two() { return None; }
+        if !size.is_power_of_two() {
+            return None;
+        }
         let ret = align_up(self.current, size);
-        if ret + size > self.end { return None; }
+        if ret + size > self.end {
+            return None;
+        }
         self.current = ret + size;
         Some(ret & !0xf)
     }
@@ -78,23 +117,45 @@ pub fn enumerate_virtio_pci(device_type: DeviceType) -> Option<PciTransport> {
     let mut transport = None;
 
     for (device_function, info) in pci_root.enumerate_bus(0) {
-        println!("[PCI] Device {:?}: vendor={:#x} device={:#x}", device_function, info.vendor_id, info.device_id);
+        println!(
+            "[PCI] Device {:?}: vendor={:#x} device={:#x}",
+            device_function, info.vendor_id, info.device_id
+        );
         if let Some(virtio_type) = virtio_device_type(&info) {
             println!("[PCI] VirtIO device: {:?}", virtio_type);
-            if virtio_type != device_type { continue; }
+            if virtio_type != device_type {
+                continue;
+            }
 
             println!("[PCI] Configuring BARs...");
             let mut bar_index = 0;
             while bar_index < 6 {
                 if let Some(bar) = pci_root.bar_info(device_function, bar_index).unwrap() {
-                    if let BarInfo::Memory { address_type, address, size, .. } = bar {
-                        println!("[PCI] BAR{}: {:?}, addr={:#x}, size={:#x}", bar_index, address_type, address, size);
+                    if let BarInfo::Memory {
+                        address_type,
+                        address,
+                        size,
+                        ..
+                    } = bar
+                    {
+                        println!(
+                            "[PCI] BAR{}: {:?}, addr={:#x}, size={:#x}",
+                            bar_index, address_type, address, size
+                        );
                         if address == 0 && size != 0 {
                             let mut allocator = PCI_RANGE_ALLOCATOR.lock();
                             if let Some(alloc_addr) = allocator.alloc_pci_mem(size as usize) {
                                 match address_type {
-                                    MemoryBarType::Width64 => pci_root.set_bar_64(device_function, bar_index, alloc_addr as u64),
-                                    MemoryBarType::Width32 => pci_root.set_bar_32(device_function, bar_index, alloc_addr as u32),
+                                    MemoryBarType::Width64 => pci_root.set_bar_64(
+                                        device_function,
+                                        bar_index,
+                                        alloc_addr as u64,
+                                    ),
+                                    MemoryBarType::Width32 => pci_root.set_bar_32(
+                                        device_function,
+                                        bar_index,
+                                        alloc_addr as u32,
+                                    ),
                                     _ => {}
                                 }
                             }
@@ -108,9 +169,14 @@ pub fn enumerate_virtio_pci(device_type: DeviceType) -> Option<PciTransport> {
                 bar_index += 1;
             }
 
-            pci_root.set_command(device_function, Command::IO_SPACE | Command::MEMORY_SPACE | Command::BUS_MASTER);
+            pci_root.set_command(
+                device_function,
+                Command::IO_SPACE | Command::MEMORY_SPACE | Command::BUS_MASTER,
+            );
             println!("[PCI] Device enabled.");
-            transport = Some(PciTransport::new::<VirtioHal, MmioCam>(&mut pci_root, device_function).unwrap());
+            transport = Some(
+                PciTransport::new::<VirtioHal, MmioCam>(&mut pci_root, device_function).unwrap(),
+            );
             break;
         }
     }
@@ -121,8 +187,9 @@ impl VirtIOBlock {
     pub fn new() -> Self {
         Self(Mutex::new(
             VirtIOBlk::<VirtioHal, PciTransport>::new(
-                enumerate_virtio_pci(DeviceType::Block).expect("No VirtIO block device")
-            ).expect("Invalid VirtIO device")
+                enumerate_virtio_pci(DeviceType::Block).expect("No VirtIO block device"),
+            )
+            .expect("Invalid VirtIO device"),
         ))
     }
 }
@@ -152,7 +219,8 @@ unsafe impl Hal for VirtioHal {
         let frames = frames_alloc(pages).unwrap();
         if matches!(dir, BufferDirection::DriverToDevice | BufferDirection::Both) {
             let pa_start = frames[0].ppn.start_addr().0;
-            core::slice::from_raw_parts_mut(pa_start as *mut u8, buffer.len()).copy_from_slice(buffer);
+            core::slice::from_raw_parts_mut(pa_start as *mut u8, buffer.len())
+                .copy_from_slice(buffer);
         }
         let pa = frames[0].ppn.start_addr().0;
         QUEUE_FRAMES.lock().extend(frames);
@@ -178,7 +246,9 @@ pub fn virtio_dma_alloc(pages: usize) -> PhysAddr {
     let mut ppn_base = PhysPageNum(0);
     for i in 0..pages {
         let frame = frame_alloc().unwrap();
-        if i == 0 { ppn_base = frame.ppn; }
+        if i == 0 {
+            ppn_base = frame.ppn;
+        }
         assert_eq!(frame.ppn.0, ppn_base.0 + i);
         QUEUE_FRAMES.lock().push(frame);
     }
@@ -203,5 +273,7 @@ lazy_static! {
 }
 
 pub fn virtio_virt_to_phys(vaddr: VirtAddr) -> PhysAddr {
-    PageTableImpl::from_token(*KERNEL_TOKEN).translate_va(vaddr).unwrap()
+    PageTableImpl::from_token(*KERNEL_TOKEN)
+        .translate_va(vaddr)
+        .unwrap()
 }
