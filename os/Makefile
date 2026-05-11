@@ -11,25 +11,31 @@ AUTO_REBUILD_MEM ?= 1
 RV_TOOLCHAIN ?= nightly-2025-01-18
 LA_TOOLCHAIN ?= nightly-2024-05-01
 
-.PHONY: all $(ARCHS) clean
+.PHONY: all $(ARCHS) clean prepare-cargo-config
 
-all: rv64_all la64_all
+all: prepare-cargo-config rv64_all la64_all
 
-rv64_all:
+prepare-cargo-config:
+	@sh ../scripts/restore-cargo-vendor-checksums.sh restore ..
+	@mkdir -p .cargo ../user/.cargo
+	@test -f .cargo/config.toml || cp -f ../cargo-config/os/config.toml .cargo/config.toml
+	@test -f ../user/.cargo/config.toml || cp -f ../cargo-config/user/config.toml ../user/.cargo/config.toml
+
+rv64_all: prepare-cargo-config
 	@echo "Building rv64"
 	@rustup override set $(RV_TOOLCHAIN)
 	cp ./src/lang_items.rs.rv ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
 	make ARCH=rv64 -f make/rv64.mk all MODE=${MODE}
 
-la64_all:
+la64_all: prepare-cargo-config
 	@echo "Building la64"
 	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
 	make ARCH=la64 -f make/la64o.mk all MODE=${MODE} LOG=${LOG}
 
-rv64-kernel-build-only:
+rv64-kernel-build-only: prepare-cargo-config
 	@rustup override set $(RV_TOOLCHAIN)
 	cp ./src/lang_items.rs.rv ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
@@ -41,7 +47,7 @@ rv64-debug:
 	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
 	make -f make/rv64.mk debug BLK_MODE=${BLK_MODE} MODE=debug
 
-rv64-only:
+rv64-only: prepare-cargo-config
 	@rustup override set $(RV_TOOLCHAIN)
 	cp ./src/lang_items.rs.rv ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
@@ -53,19 +59,19 @@ rv64-run-only:
 	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
 	make -f make/rv64.mk runsimple
 
-rv64-run:
+rv64-run: prepare-cargo-config
 	@rustup override set $(RV_TOOLCHAIN)
 	cp ./src/lang_items.rs.rv ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
 	make -f make/rv64.mk comp
 
-la64-only:
+la64-only: prepare-cargo-config
 	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
 	make -f make/la64o.mk all 
 
-la64-kernel-build-only:
+la64-kernel-build-only: prepare-cargo-config
 	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
@@ -83,7 +89,7 @@ la64-run-only:
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
 	make -f make/la64o.mk runsimple
 
-la64-run:
+la64-run: prepare-cargo-config
 	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
@@ -134,7 +140,7 @@ docker:
 	docker compose up -d
 	docker compose exec -it os-dev bash
 
-conf-inject:
+conf-inject: prepare-cargo-config
 	@arch_list="$(if $(filter file default,$(origin CONF_ARCH)),rv64 la64,$(CONF_ARCH))"; \
 	for arch in $$arch_list; do \
 		case "$$arch" in \
