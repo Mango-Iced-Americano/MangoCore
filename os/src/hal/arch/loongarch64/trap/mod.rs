@@ -172,7 +172,7 @@ pub fn trap_handler() -> ! {
     let cause = get_exception_cause();
     let stval = get_bad_addr();
     let badi = get_bad_instruction();
-    log::info!("[trap_handler]Cause:{:?}", cause);
+    log::debug!("[trap_handler]Cause:{:?}", cause);
     match cause {
         Trap::Exception(Exception::Syscall) => {
             // jump to next instruction anyway
@@ -242,7 +242,12 @@ pub fn trap_handler() -> ! {
             };
         }
         Trap::Exception(Exception::InstructionNonDefined)
+        | Trap::Exception(Exception::Exception10)
+        | Trap::Exception(Exception::Exception11)
+        | Trap::Exception(Exception::Exception12)
+        | Trap::Exception(Exception::FloatingPointUnavailable)
         | Trap::Exception(Exception::InstructionPrivilegeIllegal) => {
+            log::info!("[trap] trigger SIGILL/FPU from exception {:?}", cause);
             let task = current_task().unwrap();
             let mut inner = task.acquire_inner_lock();
             inner.add_signal(Signals::SIGILL);

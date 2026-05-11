@@ -408,14 +408,17 @@ impl File for Ext4OSInode {
         let ctime = inode_ref.inode.ctime();
         // let now = get_time() / CLOCK_FREQ;
 
-        let st_mod: u32 = {
-            if inode_ref.inode.get_file_type() == DiskInodeType::Directory {
+        let st_mod: u32 = match inode_ref.inode.get_file_type() {
+            DiskInodeType::Directory => {
                 (StatMode::S_IFDIR | StatMode::S_IRWXU | StatMode::S_IRWXG | StatMode::S_IRWXO)
                     .bits()
-            } else {
-                (StatMode::S_IFREG | StatMode::S_IRWXU | StatMode::S_IRWXG | StatMode::S_IRWXO)
+            }
+            DiskInodeType::Link => {
+                (StatMode::S_IFLNK | StatMode::S_IRWXU | StatMode::S_IRWXG | StatMode::S_IRWXO)
                     .bits()
             }
+            _ => (StatMode::S_IFREG | StatMode::S_IRWXU | StatMode::S_IRWXG | StatMode::S_IRWXO)
+                .bits(),
         };
         Stat::new(
             // 下面的时间用i64有点逆天了

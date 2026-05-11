@@ -160,8 +160,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         ]
         .contains(&syscall_id)
     {
-        show_info = true;
-        info!(
+        show_info = false;
+        log::debug!(
             "[syscall] {}({}) args: [{:X}, {:X}, {:X}, {:X}, {:X}, {:X}]",
             syscall_name(syscall_id),
             syscall_id,

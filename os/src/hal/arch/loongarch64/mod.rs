@@ -5,8 +5,8 @@ pub mod laflex;
 #[macro_use]
 mod mem_reg_macro;
 mod acpi;
-mod sbi;
 mod boot;
+mod sbi;
 pub mod switch;
 pub mod time;
 pub mod trap;
@@ -70,7 +70,11 @@ pub fn bootstrap_init() {
     ECfg::empty()
         .set_line_based_interrupt_vector(LineBasedInterrupt::TIMER)
         .write();
-    EUEn::read().set_float_point_stat(true).write();
+    EUEn::read()
+        .set_float_point_stat(true)
+        .set_simd_extension_enabled(true)
+        .set_advanced_simd_extension_enabled(true)
+        .write();
     // Timer & other Interrupts
     TIClr::read().clear_timer().write();
     TCfg::read().set_enable(false).write();

@@ -766,32 +766,71 @@ pub fn sys_readlinkat(dirfd: usize, pathname: *const u8, buf: *mut u8, bufsiz: u
     let real_path = if path.as_str() == "/proc/self/exe" {
         task.exe.lock().get_cwd().unwrap()
     } else {
-        match __openat(dirfd, &path) {
-            Ok(_) => {
-                // we don't implement symbolic link, so if we found it...
-                warn!(
-                    "[sys_readlinkat] not a symbolic link! dirfd: {}, path: {}",
-                    dirfd as isize, path
-                );
-                // The file of `pathname` is not a symbolic link
-                return EINVAL;
+        use crate::fs::directory_tree::DirectoryTreeNode;
+
+        let file_descriptor = match dirfd {
+            AT_FDCWD => task.fs.lock().working_inode.as_ref().clone(),
+            fd => {
+                let fd_table = task.files.lock();
+                match fd_table.get_ref(fd) {
+                    Ok(file_descriptor) => file_descriptor.clone(),
+                    Err(errno) => return errno,
+                }
             }
+        };
+
+        let mut components = DirectoryTreeNode::parse_dir_path(&path);
+        let last_comp = components.pop();
+        let dir_node = if path.starts_with('/') {
+            crate::fs::directory_tree::ROOT.clone()
+        } else {
+            match file_descriptor.file.get_dirtree_node() {
+                Some(node) => node,
+                None => return ENOTDIR,
+            }
+        };
+        let parent = match dir_node.cd_comp(&components) {
+            Ok(parent) => parent,
             Err(errno) => return errno,
+        };
+        let file = match last_comp {
+            Some(name) => {
+                let mut lock = parent.children.write();
+                match parent.try_to_open_subfile(name, &mut lock) {
+                    Ok(inode) => inode.file.clone(),
+                    Err(errno) => return errno,
+                }
+            }
+            None => dir_node.file.clone(),
+        };
+
+        if file.get_file_type() != crate::fs::DiskInodeType::Link {
+            warn!(
+                "[sys_readlinkat] not a symbolic link! dirfd: {}, path: {}",
+                dirfd as isize, path
+            );
+            return EINVAL;
         }
+        file.read_link()
     };
-    let len = real_path.len().min(bufsiz - 1);
-    // `copy_to_user_string` will add '\0' in the end, so written length is `len + 1`
-    if copy_to_user_string(token, &real_path[0..len], buf).is_err() {
-        log::error!("[sys_readlinkat] Failed to copy to {:?}", buf);
-        return EFAULT;
-    };
+
+    let len = real_path.len().min(bufsiz);
+    // readlink does not add a null byte
+    let bytes = real_path.as_bytes();
+    for i in 0..len {
+        let ptr = buf as usize + i;
+        if crate::mm::copy_to_user(token, &bytes[i], ptr as *mut u8).is_err() {
+            log::error!("[sys_readlinkat] Failed to copy to {:?}", buf);
+            return EFAULT;
+        }
+    }
 
     debug!(
         "[sys_readlinkat] dirfd: {}, pathname: {}, buf: {:?}, bufsiz: {}, written: {}",
         dirfd as isize, path, buf, bufsiz, real_path
     );
 
-    (len + 1) as isize
+    len as isize
 }
 
 bitflags! {
@@ -835,20 +874,41 @@ pub fn sys_fstatat(dirfd: usize, path: *const u8, buf: *mut u8, flags: u32) -> i
     };
 
     if no_follow {
-        // 使用 cd_comp 拿到未追踪的原始节点
-        let components = crate::fs::directory_tree::DirectoryTreeNode::parse_dir_path(&path);
-        let dir_node = match file_descriptor.file.get_dirtree_node() {
-            Some(node) => node,
-            None => return ENOTDIR,
+        // AT_SYMLINK_NOFOLLOW: 中间组件跟随软链接，但最后一个组件不跟随
+        let mut components = crate::fs::directory_tree::DirectoryTreeNode::parse_dir_path(&path);
+        let last_comp = components.pop();
+        let dir_node = if path.starts_with('/') {
+            crate::fs::directory_tree::ROOT.clone()
+        } else {
+            match file_descriptor.file.get_dirtree_node() {
+                Some(node) => node,
+                None => return ENOTDIR,
+            }
         };
-        match dir_node.cd_comp(&components) {
-            Ok(inode) => {
-                if copy_to_user(token, &inode.file.get_stat(), buf as *mut Stat).is_err() {
+        let parent = match dir_node.cd_comp(&components) {
+            Ok(parent) => parent,
+            Err(errno) => return errno,
+        };
+        match last_comp {
+            Some(name) => {
+                let mut lock = parent.children.write();
+                match parent.try_to_open_subfile(name, &mut lock) {
+                    Ok(inode) => {
+                        if copy_to_user(token, &inode.file.get_stat(), buf as *mut Stat).is_err() {
+                            return EFAULT;
+                        }
+                        SUCCESS
+                    }
+                    Err(errno) => errno,
+                }
+            }
+            None => {
+                // path 就是 dir_node 本身（例如 "." 或根路径）
+                if copy_to_user(token, &dir_node.file.get_stat(), buf as *mut Stat).is_err() {
                     return EFAULT;
                 }
                 SUCCESS
             }
-            Err(errno) => errno,
         }
     } else {
         match file_descriptor.open(&path, OpenFlags::O_RDONLY, false) {
@@ -895,16 +955,76 @@ pub fn sys_statx(dirfd: usize, path: *const u8, flags: u32, mask: u32, buf: *mut
         }
     };
 
-    match file_descriptor.open(&path, OpenFlags::O_RDONLY, false) {
-        Ok(file_descriptor) => {
-            if copy_to_user(token, &file_descriptor.get_statx(mask), buf as *mut Statx).is_err() {
-                log::error!("[sys_statx] Failed to copy to {:?}", buf);
-                return EFAULT;
-            };
-            log::debug!("[sys_statx] statx:\n{:?}", file_descriptor.get_statx(mask));
-            SUCCESS
+    let no_follow = flags.contains(FstatatFlags::AT_SYMLINK_NOFOLLOW);
+    if no_follow {
+        // AT_SYMLINK_NOFOLLOW: 中间组件跟随软链接，最后一个组件不跟随
+        use crate::fs::directory_tree::DirectoryTreeNode;
+        let mut components = DirectoryTreeNode::parse_dir_path(&path);
+        let last_comp = components.pop();
+        let dir_node = if path.starts_with('/') {
+            crate::fs::directory_tree::ROOT.clone()
+        } else {
+            match file_descriptor.file.get_dirtree_node() {
+                Some(node) => node,
+                None => return ENOTDIR,
+            }
+        };
+        let parent = match dir_node.cd_comp(&components) {
+            Ok(parent) => parent,
+            Err(errno) => return errno,
+        };
+        let statx_from_node = |node: &DirectoryTreeNode| {
+            let stat = node.file.get_stat();
+            Statx::new(
+                mask,
+                stat.get_nlink(),
+                stat.get_mode() as u16,
+                stat.get_ino() as u64,
+                stat.get_size() as u64,
+                stat.get_atime() as i64,
+                stat.get_ctime() as i64,
+                stat.get_mtime() as i64,
+                (stat.get_rdev() & 0xffff_00) >> 8 as u32,
+                (stat.get_rdev() & 0xff) as u32,
+                (stat.get_dev() & 0xffff_00) >> 8 as u32,
+                (stat.get_dev() & 0xff) as u32,
+            )
+        };
+        match last_comp {
+            Some(name) => {
+                let mut lock = parent.children.write();
+                match parent.try_to_open_subfile(name, &mut lock) {
+                    Ok(inode) => {
+                        let statx = statx_from_node(&inode);
+                        if copy_to_user(token, &statx, buf as *mut Statx).is_err() {
+                            return EFAULT;
+                        }
+                        SUCCESS
+                    }
+                    Err(errno) => errno,
+                }
+            }
+            None => {
+                let statx = statx_from_node(&dir_node);
+                if copy_to_user(token, &statx, buf as *mut Statx).is_err() {
+                    return EFAULT;
+                }
+                SUCCESS
+            }
         }
-        Err(errno) => errno,
+    } else {
+        match file_descriptor.open(&path, OpenFlags::O_RDONLY, false) {
+            Ok(file_descriptor) => {
+                if copy_to_user(token, &file_descriptor.get_statx(mask), buf as *mut Statx).is_err()
+                {
+                    log::error!("[sys_statx] Failed to copy to {:?}", buf);
+                    return EFAULT;
+                };
+                log::debug!("[sys_statx] statx:\n{:?}", file_descriptor.get_statx(mask));
+                SUCCESS
+            }
+            Err(errno) => errno,
+        }
     }
 }
 

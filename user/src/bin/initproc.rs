@@ -43,11 +43,11 @@ const TEST_GROUPS: [(&str, &str); 12] = [
 
 /// 默认执行顺序（组名列表，按此顺序依次执行）
 const DEFAULT_ORDER: &[&str] = &[
+    "ltp",
     "busybox",
     "basic",
     "lua",
     "netperf",
-    "ltp",
     "libctest",
     "cyclictest",
     "iozone",
@@ -1213,9 +1213,10 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     // );
     run_bash_cmd(
         "
-        mkdir -p /lib /lib64 /usr/lib &&
-        rm -rf /lib64 && ln -s /lib /lib64 &&
-        rm -rf /usr/lib && ln -s /lib /usr/lib &&
+        mkdir -p /lib /lib64 /usr/lib /usr/lib64 &&
+        rm -rf /lib64 && ln -sf /lib /lib64 &&
+        rm -rf /usr/lib && ln -sf /lib /usr/lib &&
+        rm -rf /usr/lib64 && ln -sf /lib /usr/lib64 &&
 
         ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64-sf.so.1 &&
         ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64.so.1 &&

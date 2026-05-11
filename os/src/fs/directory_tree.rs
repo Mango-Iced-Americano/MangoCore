@@ -274,6 +274,42 @@ impl DirectoryTreeNode {
                 }
                 Err(errno) => return Err(errno),
             }
+            // 跟随中间路径组件中的符号链接
+            // 例如 lib64 → /lib ，这样后续组件才能在目标目录中查找
+            let mut link_depth = 0;
+            while current_inode.file.get_file_type() == DiskInodeType::Link {
+                if link_depth >= 8 {
+                    return Err(ELOOP);
+                }
+                let target_path = current_inode.file.read_link();
+                let start_inode = if target_path.starts_with('/') {
+                    ROOT.clone()
+                } else {
+                    current_inode.father_arc()
+                };
+                let comps = Self::parse_dir_path(&target_path);
+                let mut current = start_inode;
+                for comp in comps.iter() {
+                    if *comp == ".." {
+                        let maybe_parent = current.father.lock().upgrade();
+                        if let Some(par) = maybe_parent {
+                            current = par;
+                        }
+                        continue;
+                    }
+                    let mut child_lock = current.children.write();
+                    match current.try_to_open_subfile(comp, &mut child_lock) {
+                        Ok(child) => {
+                            let child = child.clone();
+                            drop(child_lock);
+                            current = child;
+                        }
+                        Err(errno) => return Err(errno),
+                    }
+                }
+                current_inode = current;
+                link_depth += 1;
+            }
         }
         Ok(current_inode)
     }
@@ -335,7 +371,7 @@ impl DirectoryTreeNode {
         flags: OpenFlags,
         special_use: bool,
     ) -> Result<Arc<dyn File>, isize> {
-        log::debug!("[open]: cwd: {}, path: {}", self.get_cwd(), path);
+        log::info!("[open]: cwd: {}, path: {}", self.get_cwd(), path);
         // println!("open file in dtn: cwd: {} name: {}",self.get_cwd(), path );
 
         // 重定向链接库
@@ -356,7 +392,7 @@ impl DirectoryTreeNode {
         } else {
             &self
         };
-
+        log::info!("[open]: origin file type {:?}", inode.file.get_file_type());
         // 获取路径缓存
         let mut path_cache_lock = PATH_CACHE.lock();
         // 如果路径以 '/' 开头，且路径等于缓存路径，且缓存路径的弱引用存在
@@ -375,6 +411,47 @@ impl DirectoryTreeNode {
             let inode = match inode.cd_comp(&components) {
                 Ok(inode) => inode,
                 Err(errno) => return Err(errno),
+            };
+            // 跟随中间路径组件中的符号链接（例如 lib64 → /lib）
+            // 如果父目录 inode 本身是软链接，需要解析到实际目录
+            // 然后再用这个实际目录去查找最后一个路径组件
+            let inode = {
+                let mut resolved = inode;
+                let mut link_depth = 0;
+                while resolved.file.get_file_type() == DiskInodeType::Link {
+                    if link_depth >= 8 {
+                        return Err(ELOOP);
+                    }
+                    let target_path = resolved.file.read_link();
+                    let start_inode = if target_path.starts_with('/') {
+                        ROOT.clone()
+                    } else {
+                        resolved.father_arc()
+                    };
+                    let comps = Self::parse_dir_path(&target_path);
+                    let mut current = start_inode;
+                    for comp in comps.iter() {
+                        if *comp == ".." {
+                            let maybe_parent = current.father.lock().upgrade();
+                            if let Some(par) = maybe_parent {
+                                current = par;
+                            }
+                            continue;
+                        }
+                        let mut lock = current.children.write();
+                        match current.try_to_open_subfile(comp, &mut lock) {
+                            Ok(child) => {
+                                let child = child.clone();
+                                drop(lock);
+                                current = child;
+                            }
+                            Err(errno) => return Err(errno),
+                        }
+                    }
+                    resolved = current;
+                    link_depth += 1;
+                }
+                resolved
             };
             // 若最后一个组件存在，则进行处理
             if let Some(last_comp) = last_comp {
@@ -419,11 +496,6 @@ impl DirectoryTreeNode {
         let mut final_inode = inode.clone();
         let mut link_depth = 0;
 
-        log::info!(
-            "[open] file: {}, type: {:?}",
-            path,
-            final_inode.file.get_file_type()
-        );
         while final_inode.file.get_file_type() == DiskInodeType::Link {
             if link_depth >= 8 {
                 return Err(ELOOP);
@@ -469,8 +541,14 @@ impl DirectoryTreeNode {
             final_inode = current_inode;
             link_depth += 1;
         }
+        let final_file_type = final_inode.file.get_file_type();
         inode = final_inode;
 
+        log::info!(
+            "[open] final file type of {} is {:?} ",
+            path,
+            final_file_type,
+        );
         if flags.contains(OpenFlags::O_TRUNC) {
             match inode.file.truncate_size(0) {
                 Ok(_) => {}

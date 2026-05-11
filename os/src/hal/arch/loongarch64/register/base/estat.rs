@@ -96,6 +96,9 @@ or ADdress error Exception for Memory access instructions (ADEM) will be trigger
     InstructionNonDefined = 0xD,       //指令不合规
     InstructionPrivilegeIllegal = 0xE, //特权指令不合规
     FloatingPointUnavailable = 0xF,
+    Exception10 = 0x10,
+    Exception11 = 0x11,
+    Exception12 = 0x12,
 }
 
 // 中断类型
