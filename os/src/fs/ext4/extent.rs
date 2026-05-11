@@ -6,6 +6,7 @@ use super::ext4fs::Ext4FileSystem;
 use super::*;
 use crate::fs::directory_tree::{FILE_SYSTEM, GLOBAL_BLOCK_SIZE};
 use crate::syscall::errno::SUCCESS;
+use crate::utils::error::SyscallErr;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -308,6 +309,11 @@ impl ExtentNode {
     /// Binary search for the closest index of the given block.
     /// 二分查找
     pub fn binsearch_idx(&self, lblock: Ext4Lblk) -> Option<usize> {
+        if self.header.entries_count == 0 || self.header.entries_count > 500 {
+            // 增加异常值过滤
+            return None;
+        }
+
         if self.header.entries_count == 0 {
             return None;
         }
@@ -556,6 +562,11 @@ impl Ext4FileSystem {
         inode_ref: &Ext4InodeRef,
         lblock: Ext4Lblk,
     ) -> Result<SearchPath, isize> {
+        if (inode_ref.inode.flags() & crate::fs::ext4::EXT4_INODE_FLAG_EXTENTS as u32) == 0 {
+            // 如果不是 Extent 格式（可能是 Fast Symlink），不应该进入此函数
+            return Err(-(SyscallErr::ENOENT as isize));
+        }
+
         let mut search_path = SearchPath::new();
 
         // Load the root node
@@ -592,7 +603,8 @@ impl Ext4FileSystem {
                 pblock_of_node = next_block as usize;
             } else {
                 // return_errno_with_message(Errno::ENOENT, "Extentindex not found");
-                panic!("Extentindex not found");
+                // panic!("Extentindex not found");
+                return Err(-(SyscallErr::ENOENT as isize));
             }
         }
 
@@ -779,7 +791,8 @@ impl Ext4FileSystem {
             let block = node.pblock_of_node;
             let new_ex_offset = core::mem::size_of::<Ext4ExtentHeader>()
                 + core::mem::size_of::<Ext4Extent>() * (node.position);
-            let mut ext4block = Block::load_offset(self.block_device.clone(), block * self.block_size);
+            let mut ext4block =
+                Block::load_offset(self.block_device.clone(), block * self.block_size);
             let left_ext: &mut Ext4Extent = ext4block.read_offset_as_mut(new_ex_offset);
             let unwritten = left_ext.is_unwritten();
             let len = left_ext.get_actual_len() + right_ext.get_actual_len();
@@ -882,8 +895,10 @@ impl Ext4FileSystem {
         let new_block = self.balloc_alloc_block(inode_ref, None)?;
 
         // load new block
-        let mut new_ext4block =
-            Block::load_offset(self.block_device.clone(), new_block as usize * self.block_size);
+        let mut new_ext4block = Block::load_offset(
+            self.block_device.clone(),
+            new_block as usize * self.block_size,
+        );
 
         // move top-level index/leaf into new block
         let data_to_copy = &inode_ref.inode.block;
@@ -1286,6 +1301,19 @@ impl Ext4FileSystem {
             path.path[depth as usize - 1].position += 1;
         }
 
+        // 在 ext_remove_leaf 完成修改后
+        if node_disk_pos == 0 {
+            log::info!(
+                "[debug_extent] syncing extent root back to inode {}",
+                inode_ref.inode_num
+            );
+            // 将修改后的数据重新写回 inode 结构体
+            let new_block_data: [u32; 15] = unsafe {
+                let ptr = ext4block.data.as_ptr() as *const [u32; 15];
+                *ptr
+            };
+            inode_ref.inode.block = new_block_data;
+        }
         Ok(EOK)
     }
 

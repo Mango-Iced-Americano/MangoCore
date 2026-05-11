@@ -459,7 +459,19 @@ impl TaskControlBlock {
         // 将ELF文件映射到内核空间
         let elf_data = elf.map_to_kernel_space(MMAP_BASE);
         // 带有ELF程序头/跳板/陷阱上下文/用户栈的内存集（MemorySet）
-        let (mut memory_set, program_break, elf_info) = MemorySet::from_elf(elf_data)?;
+        // let (mut memory_set, program_break, elf_info) = MemorySet::from_elf(elf_data)?;
+        let load_result = MemorySet::from_elf(elf_data);
+
+        // 清除临时映射
+        crate::mm::KERNEL_SPACE
+            .lock()
+            .remove_area_with_start_vpn(VirtAddr::from(MMAP_BASE).floor())
+            .unwrap();
+
+        let (mut memory_set, program_break, elf_info) = match load_result {
+            Ok(result) => result,
+            Err(e) => return Err(e),
+        };
         log::trace!("[load_elf] ELF file mapped");
 
         // 为 glibc 分配用户 heap 空间（0x1c0000 ~ 0x1c4000）
@@ -479,11 +491,6 @@ impl TaskControlBlock {
             heap_end
         );
 
-        // 清除临时映射
-        crate::mm::KERNEL_SPACE
-            .lock()
-            .remove_area_with_start_vpn(VirtAddr::from(MMAP_BASE).floor())
-            .unwrap();
         // 为当前线程分配用户资源
         memory_set.alloc_user_res(self.tid, true);
         // 创建ELF参数表

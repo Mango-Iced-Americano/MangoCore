@@ -46,9 +46,9 @@ const DEFAULT_ORDER: &[&str] = &[
     "busybox",
     "basic",
     "lua",
-    "netperf",
     "ltp",
     "libctest",
+    "netperf",
     "cyclictest",
     "iozone",
     "lmbench",
@@ -229,7 +229,7 @@ impl RuntimeConfig {
             ltp_include: Vec::new(),
             ltp_from: None,
             ltp_libc: LtpLibc::Both,
-            ltp_runner: LtpRunner::Script,
+            ltp_runner: LtpRunner::Inline,
         }
     }
 }
@@ -615,11 +615,6 @@ fn run_ltp_binaries(
     timeout_secs: u64,
 ) {
     let log_dir = display_path(dir);
-    let libc_suffix = if log_dir.contains("musl") {
-        "musl"
-    } else {
-        "glibc"
-    };
     let ltp_dir = format!("{}/ltp/testcases/bin", log_dir);
 
     let pid = fork();
@@ -636,21 +631,19 @@ fn run_ltp_binaries(
         }
 
         // 打印 START 标记
-        println!("#### OS COMP TEST GROUP START ltp-{} ####", libc_suffix);
+        println!("#### OS COMP TEST GROUP START ltp ####");
 
         // 打开当前目录
         let fd = open(".\0", OpenFlags::RDONLY);
         if fd < 0 {
             println!("[initproc] ltp: cannot open dir {}", ltp_dir);
-            println!("#### OS COMP TEST GROUP END ltp-{} ####", libc_suffix);
+            println!("#### OS COMP TEST GROUP END ltp ####");
             exit(0);
         }
 
-        let mut cases = 1;
         let mut found_from = false;
         let mut buf = [0u8; 8192];
         loop {
-            // sleep(10); // 避免过快循环导致 CPU 占用过高
             let n = getdents64(fd as usize, &mut buf);
             if n <= 0 {
                 break;
@@ -687,43 +680,34 @@ fn run_ltp_binaries(
                         off += reclen;
                         continue;
                     }
-                    // ltp_from 跳过逻辑：没遇到起始测例前全部跳过
+                    // ltp_from 跳过逻辑：没遇到起始测例前全部跳过（无输出）
                     if let Some(from_case) = from {
                         if !found_from {
                             if name == from_case {
                                 found_from = true;
                             } else {
-                                println!(
-                                    "CASE {}: {} (skip before ltp_from={})",
-                                    cases, name, from_case
-                                );
-                                cases += 1;
                                 off += reclen;
                                 continue;
                             }
                         }
                     }
 
-                    // include 白名单过滤：非空时只跑列表中的测例
+                    // include 白名单过滤：非空时只跑列表中的测例（无输出）
                     if !include.is_empty() && !include.iter().any(|e| e == name) {
-                        println!("CASE {}: {} (not in include)", cases, name);
-                        cases += 1;
                         off += reclen;
                         continue;
                     }
 
-                    println!("CASE {}: {}", cases, name);
-                    cases += 1;
-                    println!("RUN LTP CASE {}", name);
-                    // 检查排除列表
+                    // 排除列表过滤（无输出）
                     if exclude.iter().any(|e| e == name) {
-                        println!("    SKIP (excluded)");
-                        println!("FAIL LTP CASE {} : -1 (excluded)", name);
-                    } else {
-                        let cmd = format!("cd {} && ./{}", ltp_dir, name);
-                        let ret = run_bash_cmd(&cmd, environ);
-                        println!("FAIL LTP CASE {} : {}", name, ret);
+                        off += reclen;
+                        continue;
                     }
+
+                    println!("RUN LTP CASE {}", name);
+                    let cmd = format!("cd {} && ./{}", ltp_dir, name);
+                    let ret = run_bash_cmd(&cmd, environ);
+                    println!("FAIL LTP CASE {} : {}", name, ret);
                 }
 
                 off += reclen;
@@ -731,7 +715,7 @@ fn run_ltp_binaries(
         }
 
         let _ = close(fd as usize);
-        println!("#### OS COMP TEST GROUP END ltp-{} ####", libc_suffix);
+        println!("#### OS COMP TEST GROUP END ltp ####");
         exit(0);
     } else {
         // parent: 超时 + 强杀（与 run_group_in_dir 一致）
@@ -769,7 +753,7 @@ fn run_ltp_binaries(
 
         reap_orphans();
         if timed_out {
-            println!("#### OS COMP TEST GROUP END ltp-{} ####", libc_suffix);
+            println!("#### OS COMP TEST GROUP END ltp ####");
         }
         println!("[initproc] done ltp in {} exit_code={}", log_dir, exit_code);
     }
@@ -1231,6 +1215,42 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         program_str
     );
     run_bash_cmd(&cmd, &environ); // prepare busybox "symlinks" for test scripts
+
+    // ============================================================
+    // 链接 musl/glibc 动态链接库到 /lib
+    // 动态链接的 ELF（如 ld-linux-riscv64-lp64d.so.1）依赖此目录
+    // ============================================================
+    println!("[initproc] linking musl/glibc libs to /lib ...");
+    // run_bash_cmd("/musl/busybox mkdir -p /lib", &environ);
+    // run_bash_cmd(
+    //     "/musl/busybox cp -r -L /musl/lib/* /lib/ 2>/dev/null; \
+    //      /musl/busybox cp -r -L /glibc/lib/* /lib/ 2>/dev/null; \
+    //      echo done",
+    //     &environ,
+    // );
+    run_bash_cmd(
+        "
+        mkdir -p /lib /lib64 /usr/lib /usr/lib64 &&
+        rm -rf /lib64 && ln -sf /lib /lib64 &&
+        rm -rf /usr/lib && ln -sf /lib /usr/lib &&
+        rm -rf /usr/lib64 && ln -sf /lib /usr/lib64 &&
+
+        ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64-sf.so.1 &&
+        ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64.so.1 &&
+        ln -sf /musl/lib/libc.so /lib/libc.so &&
+
+        ln -sf /glibc/lib/ld-linux-riscv64-lp64d.so.1 /lib/ld-linux-riscv64-lp64d.so.1 &&
+        ln -sf /glibc/lib/libc.so.6 /lib/libc.so.6 &&
+        ln -sf /glibc/lib/libm.so.6 /lib/libm.so.6 &&
+
+        ln -sf /glibc/lib/ld-linux-loongarch-lp64d.so.1 /lib/ld-linux-loongarch-lp64d.so.1 &&
+        ln -sf /musl/lib/libc.so /lib/ld-musl-loongarch-lp64d.so.1 &&
+
+        ln -sf /glibc/lib/tls_get_new-dtv_dso.so /lib/tls_get_new-dtv_dso.so &&
+        ln -sf /glibc/lib/tls_get_new-dtv_dso.so ./libtls_get_new-dtv_dso.so
+    ",
+        &environ,
+    );
 
     let cfg = load_runtime_config();
 

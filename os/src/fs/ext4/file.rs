@@ -1,6 +1,8 @@
 use crate::fs::directory_tree::{FILE_SYSTEM, GLOBAL_BLOCK_SIZE};
 
 use super::*;
+use crate::fs::inode::InodeTrait;
+use crate::fs::DiskInodeType;
 use crate::timer::get_time_sec;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -660,6 +662,12 @@ impl Ext4FileSystem {
         inode_ref: &mut Ext4InodeRef,
         new_size: u64,
     ) -> Result<usize, isize> {
+        log::info!(
+            "[debug_truncate] before: ino: {}, mode: {:#o}, size: {}",
+            inode_ref.inode_num,
+            inode_ref.inode.mode,
+            inode_ref.inode.size()
+        );
         let old_size = inode_ref.inode.size();
 
         // 文件扩展或不变：只更新 size 后返回（block 分配由 write 路径按需触发）
@@ -670,6 +678,34 @@ impl Ext4FileSystem {
         }
 
         if old_size == new_size {
+            return Ok(EOK);
+        }
+
+        // 如果是 Fast Symlink，它没有分配任何数据块，
+        // 它的数据全存在 inode.block 数组里，因此不需要释放任何物理块。
+        // 直接清零 inode.block 并更新 size 即可。
+        let is_symlink = inode_ref.inode.get_file_type() == DiskInodeType::Link;
+        let uses_extents =
+            (inode_ref.inode.flags() & crate::fs::ext4::EXT4_INODE_FLAG_EXTENTS as u32) != 0;
+
+        if is_symlink && !uses_extents {
+            // Fast Symlink 的截断逻辑
+            if new_size == 0 {
+                // 清零 block 数组
+                inode_ref.inode.set_block([0u32; 15]);
+            } else {
+                // 如果截断到特定大小，清零超出部分
+                unsafe {
+                    let block_ptr = inode_ref.inode.block.as_mut_ptr() as *mut u8;
+                    core::ptr::write_bytes(
+                        block_ptr.add(new_size as usize),
+                        0,
+                        old_size as usize - new_size as usize,
+                    );
+                }
+            }
+            inode_ref.inode.set_size(new_size);
+            self.write_back_inode(inode_ref);
             return Ok(EOK);
         }
 
@@ -685,6 +721,12 @@ impl Ext4FileSystem {
         inode_ref.inode.set_size(new_size);
         self.write_back_inode(inode_ref);
 
+        log::info!(
+            "[debug_truncate] after: ino: {}, mode: {:#o}, size: {}",
+            inode_ref.inode_num,
+            inode_ref.inode.mode,
+            inode_ref.inode.size()
+        );
         Ok(EOK)
     }
 }

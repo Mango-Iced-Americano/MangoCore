@@ -241,6 +241,7 @@ impl Ext4FileSystem {
                         }
                         // Update csum & write bitmap back
                         bg.set_block_group_balloc_bitmap_csum(sblk, &data);
+                        log::warn!("[WRITE_CALLER] alloc_blocks: write block_bitmap block={}, start={}, len={}", bmp_blk, run_start.unwrap(), blocks);
                         self.block_device.write_block(bmp_blk, &data);
 
                         // Update block group free count
@@ -290,6 +291,17 @@ impl Ext4FileSystem {
         child: &mut Ext4InodeRef,
         name: &str,
     ) -> Result<usize, isize> {
+        log::debug!(
+            "[debug_low_unlink] entering: parent_ino={}, child_ino={}, name={}",
+            parent.inode_num,
+            child.inode_num,
+            name
+        );
+        log::debug!(
+            "[debug_low_unlink] parent_mode={:#o}, child_mode={:#o}",
+            parent.inode.mode,
+            child.inode.mode
+        );
         self.dir_remove_entry(parent, name)?;
 
         let is_dir = child.inode.is_dir();
