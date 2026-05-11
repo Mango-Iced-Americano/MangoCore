@@ -135,8 +135,11 @@ impl Ext4FileSystem {
         // Set new checksum after modification
         // update bitmap in disk
         // 此处与上面的ialloc_alloc_inode函数一样，不需要考虑对齐
-        log::warn!("[WRITE_CALLER] ialloc_free_inode: write inode_bitmap block={}, free_ino={}",
-            inode_bitmap_block, index);
+        log::warn!(
+            "[WRITE_CALLER] ialloc_free_inode: write inode_bitmap block={}, free_ino={}",
+            inode_bitmap_block,
+            index
+        );
         self.block_device
             .write_block(inode_bitmap_block as usize, &bitmap_data);
         bg.set_block_group_ialloc_bitmap_csum(&super_block, &bitmap_data);

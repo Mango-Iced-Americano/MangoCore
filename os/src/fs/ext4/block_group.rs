@@ -260,7 +260,11 @@ impl Ext4BlockGroup {
 
         // 因为是块组描述符，所以不会超过一个块
         // 先获取要写入的块
-        log::warn!("[WRITE_CALLER] sync_block_group_to_disk: bgid={}, block_id={}", bgid, block_id);
+        log::warn!(
+            "[WRITE_CALLER] sync_block_group_to_disk: bgid={}, block_id={}",
+            bgid,
+            block_id
+        );
         let mut origin_block_data = vec![0u8; BLOCK_SIZE];
         block_device.read_block(block_id, &mut origin_block_data);
         // 然后按偏移量将数据覆写到读取的块数据
@@ -469,7 +473,12 @@ impl Block {
             )
         }
         let block_id = self.disk_offset / block_size;
-        log::warn!("[WRITE_CALLER] Block::sync_blk_to_disk: block_id={}, disk_offset={}, len={}", block_id, self.disk_offset, self.data.len());
+        log::warn!(
+            "[WRITE_CALLER] Block::sync_blk_to_disk: block_id={}, disk_offset={}, len={}",
+            block_id,
+            self.disk_offset,
+            self.data.len()
+        );
         block_device.write_block(block_id, &self.data);
     }
 }

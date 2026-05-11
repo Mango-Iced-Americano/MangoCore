@@ -884,9 +884,12 @@ impl Ext4FileSystem {
         inode_ref
             .inode
             .set_inode_checksum(&self.superblock, inode_ref.inode_num);
-        inode_ref
-            .inode
-            .sync_inode_to_disk(self.block_device.clone(), inode_pos, on_disk_size, inode_ref.inode_num);
+        inode_ref.inode.sync_inode_to_disk(
+            self.block_device.clone(),
+            inode_pos,
+            on_disk_size,
+            inode_ref.inode_num,
+        );
     }
 
     /// 不带校验和回写inode信息
@@ -894,9 +897,12 @@ impl Ext4FileSystem {
         let inode_pos = self.inode_disk_pos(inode_ref.inode_num);
         //println!("[kernel write_back_inode_without_csum] inode_pos: {:?}, inode_num: {}", inode_pos, inode_ref.inode_num);
         let on_disk_size = self.superblock.inode_size as usize;
-        inode_ref
-            .inode
-            .sync_inode_to_disk(self.block_device.clone(), inode_pos, on_disk_size, inode_ref.inode_num);
+        inode_ref.inode.sync_inode_to_disk(
+            self.block_device.clone(),
+            inode_pos,
+            on_disk_size,
+            inode_ref.inode_num,
+        );
     }
 
     /// 获取逻辑块号对应的物理块号
