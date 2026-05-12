@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use crate::fs::iov::IOVec;
 use crate::mm::{
     copy_from_user_array, translated_byte_buffer_append_to_existing_vec, translated_ref,
-    translated_refmut, UserBuffer,
+    UserAccess, UserBuffer,
 };
 use crate::net::config::NET_INTERFACE;
 use crate::net::posix::MsgHdr;
@@ -60,6 +60,7 @@ pub fn sys_sendmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
             token,
             iov.iov_base,
             iov.iov_len,
+            UserAccess::Read,
         ) {
             Ok(_) => {}
             Err(e) => return e,
@@ -80,6 +81,7 @@ pub fn sys_sendmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
             token,
             msg.msg_name,
             copy_len,
+            UserAccess::Read,
         ) {
             Ok(_) => {
                 let mut addr_buf = [0u8; 128];

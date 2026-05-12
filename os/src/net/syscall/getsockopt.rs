@@ -1,4 +1,4 @@
-use crate::mm::translated_refmut;
+use crate::mm::{translated_byte_buffer, translated_ref_write, translated_refmut, UserAccess, UserBuffer};
 use crate::net::{TcpInfo, TCP_MSS};
 use crate::task::current_task;
 use crate::utils::error::SyscallErr;
@@ -23,7 +23,7 @@ pub fn sys_getsockopt(
 
     let task = current_task().unwrap();
     let token = task.get_user_token();
-    let optval_ptr = match translated_refmut(token, optval_ptr_ as *mut u32) {
+    let optval_ptr = match translated_ref_write(token, optval_ptr_ as *mut u32) {
         Ok(p) => p as *mut u32,
         Err(_) => return -(SyscallErr::EFAULT as isize),
     };
@@ -44,26 +44,35 @@ pub fn sys_getsockopt(
             let state = socket.tcp_state().unwrap_or(7); // default Closed
             let info = TcpInfo::new(state, TCP_MSS);
             let info_len = core::mem::size_of::<TcpInfo>();
-            let buf = match translated_refmut(token, optval_ptr_ as *mut u8) {
-                Ok(p) => unsafe { core::slice::from_raw_parts_mut(p as *mut u8, info_len) },
+            let mut buf = match translated_byte_buffer(
+                token,
+                optval_ptr_ as *const u8,
+                info_len,
+                UserAccess::Write,
+            ) {
+                Ok(p) => UserBuffer::new(p),
                 Err(_) => return -(SyscallErr::EFAULT as isize),
             };
+            let info_bytes = unsafe {
+                core::slice::from_raw_parts(&info as *const TcpInfo as *const u8, info_len)
+            };
+            buf.write(info_bytes);
             unsafe {
-                core::ptr::copy_nonoverlapping(
-                    &info as *const TcpInfo as *const u8,
-                    buf.as_mut_ptr(),
-                    info_len,
-                );
                 *optlen = info_len as u32;
             }
         }
         (SOL_TCP, TCP_CONGESTION) => {
             let congestion = "reno";
-            let optval_ptr = match translated_refmut(token, optval_ptr_ as *mut u8) {
-                Ok(p) => unsafe { core::slice::from_raw_parts_mut(p as *mut u8, congestion.len()) },
+            let mut optval_buf = match translated_byte_buffer(
+                token,
+                optval_ptr_ as *const u8,
+                congestion.len(),
+                UserAccess::Write,
+            ) {
+                Ok(p) => UserBuffer::new(p),
                 Err(_) => return -(SyscallErr::EFAULT as isize),
             };
-            optval_ptr.copy_from_slice(congestion.as_bytes());
+            optval_buf.write(congestion.as_bytes());
             unsafe {
                 *optlen = congestion.len() as u32;
             }

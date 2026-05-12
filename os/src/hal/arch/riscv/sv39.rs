@@ -1,4 +1,4 @@
-use crate::mm::{address::*, frame_alloc, FrameTracker, MapPermission, PageTable};
+use crate::mm::{address::*, frame_alloc, FrameTracker, MapPermission, PageTable, UserAccess};
 use alloc::{sync::Arc, vec::Vec};
 use bitflags::*;
 use core::arch::asm;
@@ -355,5 +355,14 @@ impl PageTable for Sv39PageTable {
     }
     fn executable(&self, vpn: VirtPageNum) -> Option<bool> {
         self.find_pte(vpn).map(|pte| pte.executable())
+    }
+    fn user_access_ok(&self, vpn: VirtPageNum, access: UserAccess) -> Option<bool> {
+        self.find_pte(vpn).map(|pte| {
+            let flags = pte.flags();
+            if !pte.is_valid() || !flags.contains(PTEFlags::U) {
+                return false;
+            }
+            (!access.needs_read() || pte.readable()) && (!access.needs_write() || pte.writable())
+        })
     }
 }

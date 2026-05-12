@@ -12,7 +12,7 @@ use crate::hal::TrapContext;
 
 use crate::config::*;
 use crate::mm::{
-    copy_from_user, copy_to_user, translated_ref, translated_refmut, try_get_from_user,
+    copy_from_user, copy_to_user, translated_ref, translated_ref_write, try_get_from_user,
 };
 use crate::syscall::errno::*;
 use crate::task::manager::wait_with_timeout;
@@ -464,7 +464,7 @@ pub fn do_signal() {
                                                   // To simplify the implementation of sigreturn, here we keep the same layout as above...
                 } else {
                     // push sigmask into user stack
-                    match translated_refmut(
+                    match translated_ref_write(
                         token,
                         (ucontext_addr + 2 * size_of::<usize>() + size_of::<SignalStack>())
                             as *mut Signals,
@@ -607,7 +607,7 @@ pub fn sigprocmask(how: u32, set: *const Signals, oldset: *mut Signals) -> isize
     let token = task.get_user_token();
     // If oldset is non-NULL, the previous value of the signal mask is stored in oldset
     if oldset as usize != 0 {
-        match translated_refmut(token, oldset) {
+        match translated_ref_write(token, oldset) {
             Ok(oldset) => *oldset = inner.sigmask,
             Err(errno) => return errno,
         }

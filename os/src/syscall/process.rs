@@ -4,8 +4,8 @@ use crate::hal::shutdown;
 use crate::hal::{MachineContext, TrapContext};
 use crate::mm::{
     copy_from_user, copy_to_user, copy_to_user_string, get_from_user, translated_byte_buffer,
-    translated_ref, translated_refmut, translated_str, try_get_from_user, MapFlags, MapPermission,
-    UserBuffer, VirtAddr,
+    translated_ref, translated_ref_write, translated_str, try_get_from_user, MapFlags,
+    MapPermission, UserAccess, UserBuffer, VirtAddr,
 };
 use crate::show_frame_consumption;
 use crate::syscall::errno::*;
@@ -362,7 +362,7 @@ pub struct UTSName {
 pub fn sys_uname(buf: *mut u8) -> isize {
     let token = current_user_token();
     let mut buffer = UserBuffer::new(
-        match translated_byte_buffer(token, buf, size_of::<UTSName>()) {
+        match translated_byte_buffer(token, buf, size_of::<UTSName>(), UserAccess::Write) {
             Ok(buffer) => buffer,
             Err(errno) => return errno,
         },
@@ -662,14 +662,14 @@ pub fn sys_clone(
     }
     let new_pid = child.pid.0;
     if flags.contains(CloneFlags::CLONE_PARENT_SETTID) {
-        match translated_refmut(parent.get_user_token(), ptid) {
+        match translated_ref_write(parent.get_user_token(), ptid) {
             Ok(word) => *word = child.pid.0 as u32,
             Err(errno) => return errno,
         };
     }
     // todo: CLONE_CHILD_SETTID标志被设置，但是ctid指针为零，会出现地址错误，干脆全注释掉
     if flags.contains(CloneFlags::CLONE_CHILD_SETTID) {
-        match translated_refmut(child.get_user_token(), ctid) {
+        match translated_ref_write(child.get_user_token(), ctid) {
             Ok(word) => *word = child.pid.0 as u32,
             Err(errno) => log::warn!(
                 "[sys_clone] Failed to set child_tid at {:?} with errno {}, but still create the thread",
@@ -881,7 +881,7 @@ pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) ->
             let found_tgid = child.tgid;
             let exit_code = child.acquire_inner_lock().exit_code;
             if !status.is_null() {
-                match translated_refmut(token, status) {
+                match translated_ref_write(token, status) {
                     Ok(word) => *word = exit_code,
                     Err(errno) => return errno,
                 }
@@ -1119,7 +1119,7 @@ pub fn sys_futex(
     if uaddr.is_null() || uaddr.align_offset(4) != 0 {
         return EINVAL;
     }
-    let futex_word = match translated_refmut(token, uaddr) {
+    let futex_word = match translated_ref(token, uaddr as *const u32) {
         Ok(futex_word) => futex_word,
         Err(errno) => return errno,
     };
@@ -1184,7 +1184,7 @@ pub fn sys_futex(
             if uaddr2.is_null() || uaddr2.align_offset(4) != 0 {
                 return EINVAL;
             }
-            let futex_word_2 = match translated_refmut(token, uaddr2) {
+            let futex_word_2 = match translated_ref(token, uaddr2 as *const u32) {
                 Ok(futex_word_2) => futex_word_2,
                 Err(errno) => return errno,
             };
@@ -1379,7 +1379,7 @@ pub fn sys_rt_sigpending(set: usize, sigsetsize: usize) -> isize {
         task.pid.0,
         inner.sigpending
     );
-    match translated_refmut(token, set as *mut Signals) {
+    match translated_ref_write(token, set as *mut Signals) {
         Ok(pending) => {
             *pending = inner.sigpending;
             SUCCESS

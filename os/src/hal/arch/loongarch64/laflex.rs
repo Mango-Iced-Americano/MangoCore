@@ -4,7 +4,7 @@ use crate::{
         MEMORY_HIGH_BASE, MEMORY_HIGH_BASE_VPN, MEMORY_SIZE, PAGE_SIZE, PAGE_SIZE_BITS, PALEN,
         VA_MASK, VPN_SEG_MASK,
     },
-    mm::{address::*, frame_alloc, FrameTracker, MapPermission, PageTable},
+    mm::{address::*, frame_alloc, FrameTracker, MapPermission, PageTable, UserAccess},
 };
 use _core::convert::TryFrom;
 use alloc::{sync::Arc, vec::Vec};
@@ -496,6 +496,15 @@ impl PageTable for LAFlexPageTable {
     }
     fn executable(&self, vpn: VirtPageNum) -> Option<bool> {
         self.find_pte(vpn).map(|pte| pte.executable())
+    }
+    fn user_access_ok(&self, vpn: VirtPageNum, access: UserAccess) -> Option<bool> {
+        self.find_pte(vpn).map(|pte| {
+            let flags = pte.flags();
+            if !pte.is_valid() || flags.get_privilege_level() != 3 {
+                return false;
+            }
+            (!access.needs_read() || pte.readable()) && (!access.needs_write() || pte.writable())
+        })
     }
 
     fn unmap_identical(&mut self, vpn: VirtPageNum) {

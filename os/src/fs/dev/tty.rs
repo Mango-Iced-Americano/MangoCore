@@ -6,7 +6,7 @@ use crate::fs::DiskInodeType;
 use crate::fs::StatMode;
 use crate::hal::console_getchar;
 use crate::mm::{copy_from_user, copy_to_user};
-use crate::mm::{translated_ref, translated_refmut, UserBuffer};
+use crate::mm::{translated_ref, translated_ref_write, UserBuffer};
 use crate::syscall::errno::*;
 use crate::task::signal::Signals;
 
@@ -423,7 +423,7 @@ impl File for Teletype {
             }
             // TCXONC (0x540A) — software flow control. No-op for virtual terminal.
             TeletypeCommand::TCXONC => SUCCESS,
-            TeletypeCommand::TIOCGPGRP => match translated_refmut(token, argp as *mut u32) {
+            TeletypeCommand::TIOCGPGRP => match translated_ref_write(token, argp as *mut u32) {
                 Ok(word) => {
                     *word = inner.foreground_pgid;
                     SUCCESS

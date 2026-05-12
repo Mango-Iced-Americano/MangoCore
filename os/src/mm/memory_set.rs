@@ -1,5 +1,5 @@
 use super::map_area::*;
-use super::page_table::PageTable;
+use super::page_table::{FaultAccess, PageTable};
 use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use crate::config::*;
 use crate::fs::SeekWhence;
@@ -284,13 +284,29 @@ impl<T: PageTable> MemorySet<T> {
     /// The REAL handler to page fault.
     /// Handles all types of page fault:(In regex:) "(Store|Load|Instruction)(Page)?Fault"
     /// Checks the permission to decide whether to copy.
-    pub fn do_page_fault(&mut self, addr: VirtAddr) -> Result<PhysAddr, MemoryError> {
+    pub fn do_page_fault(
+        &mut self,
+        addr: VirtAddr,
+        access: FaultAccess,
+    ) -> Result<PhysAddr, MemoryError> {
         let vpn = addr.floor();
         if let Some(area) = self.areas.iter_mut().find(|area| {
-            area.map_perm.contains(MapPermission::R | MapPermission::U)// If there is such a page in user space
+            area.map_perm.contains(MapPermission::U)// If there is such a page in user space
                 && area.get_start::<T>() <= vpn// ...and the addr is in the vpn range
                 && vpn < area.get_end::<T>()
         }) {
+            let required = match access {
+                FaultAccess::Load => MapPermission::R,
+                FaultAccess::Store => MapPermission::W,
+                FaultAccess::Execute => MapPermission::X,
+            };
+            if !area.map_perm.contains(required) {
+                error!(
+                    "[do_page_fault] addr: {:?}, access: {:?}, result: no permission",
+                    addr, access
+                );
+                return Err(MemoryError::NoPermission);
+            }
             if !self.page_table.is_mapped(vpn) {
                 // lazy alloc file-backed page
                 if let Some(file) = area.map_file.clone() {
@@ -302,7 +318,7 @@ impl<T: PageTable> MemorySet<T> {
                     if old_offset + offset_in_area > (file.get_size() + PAGE_SIZE - 1) & !0xfff {
                         return Err(MemoryError::BeyondEOF);
                     }
-                    if area.map_perm.contains(MapPermission::W) {
+                    if access == FaultAccess::Store {
                         let allocated_ppn =
                             area.map_one_zeroed_unchecked(&mut self.page_table, vpn);
                         file.lseek(offset_in_area as isize, SeekWhence::SEEK_CUR)
@@ -377,7 +393,7 @@ impl<T: PageTable> MemorySet<T> {
                 }
             } else {
                 // mapped before the assignment
-                if area.map_perm.contains(MapPermission::W) {
+                if access == FaultAccess::Store {
                     if area.flags.contains(MapFlags::MAP_SHARED) {
                         self.page_table.set_pte_flags(vpn, area.map_perm).unwrap();
                         let ppn = self.page_table.translate(vpn).unwrap();
@@ -389,12 +405,11 @@ impl<T: PageTable> MemorySet<T> {
                         Ok(allocated_ppn.offset(addr.page_offset()))
                     }
                 } else {
-                    // Write without permission
-                    error!(
-                        "[do_page_fault] addr: {:?}, result: write no permission",
-                        addr
-                    );
-                    Err(MemoryError::NoPermission)
+                    let ppn = self
+                        .page_table
+                        .translate(vpn)
+                        .ok_or(MemoryError::NotMapped)?;
+                    Ok(ppn.offset(addr.page_offset()))
                 }
             }
         } else {
@@ -1350,7 +1365,7 @@ pub fn remap_test() {
     info!("remap_test passed!");
 }
 
-pub fn check_page_fault(addr: VirtAddr) -> Result<PhysAddr, isize> {
+pub fn check_page_fault(addr: VirtAddr, access: FaultAccess) -> Result<PhysAddr, isize> {
     // This is where we handle the page fault.
     super::frame_reserve(3);
     let task = match current_task() {
@@ -1360,7 +1375,7 @@ pub fn check_page_fault(addr: VirtAddr) -> Result<PhysAddr, isize> {
             return Err(EFAULT);
         }
     };
-    match task.vm.lock().do_page_fault(addr) {
+    match task.vm.lock().do_page_fault(addr, access) {
         Ok(pa) => return Ok(pa),
         Err(MemoryError::BeyondEOF)
         | Err(MemoryError::NoPermission)

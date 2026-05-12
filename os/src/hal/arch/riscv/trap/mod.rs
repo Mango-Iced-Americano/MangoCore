@@ -6,7 +6,7 @@ use crate::config::TRAMPOLINE;
 use crate::fs::directory_tree::ROOT;
 use crate::fs::OpenFlags;
 use crate::hal::arch::riscv::time::set_next_trigger;
-use crate::mm::{frame_reserve, MemoryError, VirtAddr};
+use crate::mm::{frame_reserve, FaultAccess, MemoryError, VirtAddr};
 use crate::net::config::NET_INTERFACE;
 use crate::syscall::syscall;
 use crate::task::{
@@ -117,7 +117,14 @@ pub fn trap_handler() -> ! {
             );
             // This is where we handle the page fault.
             frame_reserve(3);
-            if let Err(error) = task.vm.lock().do_page_fault(addr) {
+            let access = match scause.cause() {
+                Trap::Exception(Exception::StoreFault)
+                | Trap::Exception(Exception::StorePageFault) => FaultAccess::Store,
+                Trap::Exception(Exception::InstructionFault)
+                | Trap::Exception(Exception::InstructionPageFault) => FaultAccess::Execute,
+                _ => FaultAccess::Load,
+            };
+            if let Err(error) = task.vm.lock().do_page_fault(addr, access) {
                 match error {
                     MemoryError::BeyondEOF => {
                         inner.add_signal(Signals::SIGBUS);

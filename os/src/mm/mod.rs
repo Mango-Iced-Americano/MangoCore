@@ -28,9 +28,13 @@ pub use page_table::{
     translated_byte_buffer_append_to_existing_vec,
     translated_ref,
     translated_refmut,
+    translated_ref_write,
     translated_str,
+    translate_user_va_checked,
     try_get_from_user,
+    FaultAccess,
     PageTable,
+    UserAccess,
     UserBuffer,
     // UserBufferIterator,
 };

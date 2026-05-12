@@ -1,8 +1,7 @@
 use log::info;
 
-use crate::mm::{translated_ref, translated_refmut};
 use crate::net::config::NET_INTERFACE;
-use crate::net::{Endpoint, PSOCK};
+use crate::net::PSOCK;
 use crate::syscall::utils::wait_io;
 use crate::task::current_task;
 use crate::task::WaitQueue;
