@@ -603,7 +603,10 @@ impl<T: PageTable> MemorySet<T> {
                         load_addr = Some(start_va.into());
                     }
                     let mut map_area =
-                        MapArea::new(start_va, end_va, MapType::Framed, map_perm, None);
+                        match MapArea::try_new(start_va, end_va, MapType::Framed, map_perm, None) {
+                            Ok(area) => area,
+                            Err(e) => return Err(e),
+                        };
                     map_area.flags = MapFlags::MAP_PRIVATE;
                     // Virtual addr is 4K-aligned
                     if (start_va_page_offset & (PAGE_SIZE - 1)) == 0
@@ -699,7 +702,7 @@ impl<T: PageTable> MemorySet<T> {
 
         Ok((memory_set, program_break, elf_info))
     }
-    pub fn from_existing_user(user_space: &mut MemorySet<T>) -> MemorySet<T> {
+    pub fn from_existing_user(user_space: &mut MemorySet<T>) -> Result<MemorySet<T>, isize> {
         let mut memory_set = Self::new_bare();
         // map trampoline
         if should_map_trampoline!() {
@@ -708,15 +711,22 @@ impl<T: PageTable> MemorySet<T> {
         // map signaltrampoline
         memory_set.map_signaltrampoline();
         // map data sections/user heap/mmap area/user stack
+        if memory_set
+            .areas
+            .try_reserve(user_space.areas.len())
+            .is_err()
+        {
+            return Err(crate::syscall::errno::ENOMEM);
+        }
         for i in 0..user_space.areas.len() - 1 {
             // user_space.areas[i]
-            let mut new_area = user_space.areas[i].clone();
+            let mut new_area = user_space.areas[i].try_clone()?;
             new_area
                 .map_from_existing_page_table(
                     &mut memory_set.page_table,
                     &mut user_space.page_table,
                 )
-                .unwrap();
+                .map_err(|_| crate::syscall::errno::ENOMEM)?;
             memory_set.areas.push(new_area);
             debug!(
                 "[fork] map shared area: {:?}",
@@ -744,7 +754,7 @@ impl<T: PageTable> MemorySet<T> {
             "[fork] copy trap_cx area: {:?}",
             trap_cx_area.inner.vpn_range
         );
-        memory_set
+        Ok(memory_set)
     }
     pub fn activate(&self) {
         self.page_table.activate()
@@ -868,7 +878,9 @@ impl<T: PageTable> MemorySet<T> {
                     // 防止合并后过大导致内核堆 OOM (限制单个 MapArea 不超过 1GB)
                     if end_va.0 + len - area.get_start::<T>().0 <= 1024 * 1024 * 1024 {
                         debug!("[mmap] merge with previous area, call expand_to");
-                        area.expand_to::<T>(VirtAddr::from(end_va.0 + len)).unwrap();
+                        if let Err(e) = area.expand_to::<T>(VirtAddr::from(end_va.0 + len)) {
+                            return e;
+                        }
                         return end_va.0 as isize;
                     }
                 }
@@ -884,13 +896,16 @@ impl<T: PageTable> MemorySet<T> {
                 }
             }
         };
-        let mut new_area = MapArea::new(
+        let mut new_area = match MapArea::try_new(
             start_va,
             VirtAddr::from(start_va.0 + len),
             MapType::Framed,
             prot,
             None,
-        );
+        ) {
+            Ok(area) => area,
+            Err(e) => return e,
+        };
         new_area.flags = flags;
         if !flags.contains(MapFlags::MAP_ANONYMOUS) {
             warn!("[mmap] file-backed map!");
@@ -1114,7 +1129,7 @@ impl<T: PageTable> MemorySet<T> {
         argv_vec: &Vec<String>,
         envp_vec: &Vec<String>,
         elf_info: &ELFInfo,
-    ) -> usize {
+    ) -> Result<usize, isize> {
         // go down to the stack page (important!) and align
         user_sp -= 2 * core::mem::size_of::<usize>();
         // because size of parameters is almost never more than PAGE_SIZE,
@@ -1138,6 +1153,12 @@ impl<T: PageTable> MemorySet<T> {
 
         // we don't care about the order of env...
         let mut envp_user = Vec::<*const u8>::new();
+        if envp_user
+            .try_reserve(envp_vec.len().saturating_add(1))
+            .is_err()
+        {
+            return Err(crate::syscall::errno::ENOMEM);
+        }
         for env in envp_vec.iter() {
             phys_user_sp -= env.len() + 1;
             envp_user.push((phys_user_sp + virt_phys_offset) as *const u8);
@@ -1147,6 +1168,12 @@ impl<T: PageTable> MemorySet<T> {
 
         // we don't care about the order of arg, too...
         let mut argv_user = Vec::<*const u8>::new();
+        if argv_user
+            .try_reserve(argv_vec.len().saturating_add(1))
+            .is_err()
+        {
+            return Err(crate::syscall::errno::ENOMEM);
+        }
         for arg in argv_vec.iter() {
             phys_user_sp -= arg.len() + 1;
             argv_user.push((phys_user_sp + virt_phys_offset) as *const u8);
@@ -1235,7 +1262,7 @@ impl<T: PageTable> MemorySet<T> {
         //     );
         //     phys_addr += 2 * core::mem::size_of::<usize>();
         // }
-        user_sp
+        Ok(user_sp)
     }
     pub fn alloc_user_res(&mut self, tid: usize, alloc_stack: bool) {
         if alloc_stack {

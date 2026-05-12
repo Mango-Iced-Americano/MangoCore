@@ -12,9 +12,9 @@ use crate::syscall::errno::*;
 use crate::task::threads::{do_futex_wait, do_futex_wait_shared, futex_wake_shared, FutexCmd};
 use crate::task::{
     add_kernel_timer, add_task, block_current_and_run_next, current_task, current_user_token,
-    exit_current_and_run_next, exit_group_and_run_next, find_task_by_pid, find_task_by_tgid, pid,
+    exit_current_and_run_next, exit_group_and_run_next, find_task_by_pid, find_task_by_tgid,
     procs_count, signal::*, suspend_current_and_run_next, threads, wait_with_timeout,
-    wake_interruptible, Rusage, TaskStatus, TimerAction,
+    wake_interruptible, Rusage, TaskControlBlock, TaskStatus, TimerAction,
 };
 use crate::timer::{get_time_ms, get_time_sec, ITimerVal, TimeSpec, TimeVal, TimeZone, Times};
 use crate::utils::error::SyscallErr;
@@ -22,7 +22,6 @@ use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::f32::consts::E;
 use core::mem::size_of;
 use log::{debug, error, info, trace, warn};
 use num_enum::FromPrimitive;
@@ -656,10 +655,18 @@ pub fn sys_clone(
         "[sys_clone] flags: {:?}, stack: {:?}, exit_signal: {:?}, ptid: {:?}, tls: {:?}, ctid: {:?}",
         flags, stack, exit_signal, ptid, tls, ctid
     );
+    let mut child: Option<Arc<TaskControlBlock>> = None;
     show_frame_consumption! {
         "clone";
-        let child = parent.sys_clone(flags, stack, tls, exit_signal);
+        child = Some(match parent.sys_clone(flags, stack, tls, exit_signal) {
+            Ok(task) => task,
+            Err(errno) => return errno,
+        });
     }
+    let child = match child {
+        Some(task) => task,
+        None => return ENOMEM,
+    };
     let new_pid = child.pid.0;
     if flags.contains(CloneFlags::CLONE_PARENT_SETTID) {
         match translated_refmut(parent.get_user_token(), ptid) {
@@ -707,9 +714,15 @@ pub fn sys_execve(
         Err(errno) => return errno,
     };
     // 解析参数列表
-    let mut argv_vec: Vec<String> = Vec::with_capacity(16);
+    let mut argv_vec: Vec<String> = Vec::new();
+    if argv_vec.try_reserve(16).is_err() {
+        return ENOMEM;
+    }
     // 解析环境变量列表
-    let mut envp_vec: Vec<String> = Vec::with_capacity(16);
+    let mut envp_vec: Vec<String> = Vec::new();
+    if envp_vec.try_reserve(16).is_err() {
+        return ENOMEM;
+    }
     if !argv.is_null() {
         loop {
             let arg_ptr = match translated_ref(token, argv) {
@@ -718,6 +731,9 @@ pub fn sys_execve(
             };
             if arg_ptr.is_null() {
                 break;
+            }
+            if argv_vec.try_reserve(1).is_err() {
+                return ENOMEM;
             }
             argv_vec.push(match translated_str(token, arg_ptr) {
                 Ok(arg) => arg,
@@ -736,6 +752,9 @@ pub fn sys_execve(
             };
             if env_ptr.is_null() {
                 break;
+            }
+            if envp_vec.try_reserve(1).is_err() {
+                return ENOMEM;
             }
             envp_vec.push(match translated_str(token, env_ptr) {
                 Ok(env) => env,
@@ -777,6 +796,9 @@ pub fn sys_execve(
                     let shell_file = working_inode
                         .open(DEFAULT_SHELL, OpenFlags::O_RDONLY, false)
                         .unwrap();
+                    if argv_vec.try_reserve(1).is_err() {
+                        return ENOMEM;
+                    }
                     argv_vec.insert(0, DEFAULT_SHELL.to_string());
                     shell_file
                 }
@@ -788,7 +810,9 @@ pub fn sys_execve(
             show_frame_consumption! {
                 "load_elf";
                 if let Err(errno) = task.load_elf(elf, &argv_vec, &envp_vec) {
-                    return errno;
+                    // load_elf 前已经调用了 recycle_data_pages() 释放旧数据页，
+                    // 此时进程已无法回到原来的用户态，直接退出而非返回错误。
+                    exit_current_and_run_next(127);
                 };
             }
             // should return 0 in success

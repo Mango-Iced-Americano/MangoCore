@@ -844,6 +844,11 @@ pub fn oom() -> usize {
     log::warn!("[oom] start oom");
     let mut lock = DIRECTORY_VEC.lock();
     update_directory_vec(&mut lock);
+    // 先执行 VFS 剪枝，回收仅作缓存的目录节点（strong_count == 1）
+    // 这通常能释放大量内核堆内存
+    drop(lock);
+    shrink();
+    let mut lock = DIRECTORY_VEC.lock();
     loop {
         let mut dropped = 0;
         for inode in &lock.0 {
@@ -858,6 +863,69 @@ pub fn oom() -> usize {
         if fail_time >= MAX_FAIL_TIME {
             return dropped;
         }
+    }
+}
+
+/// VFS 剪枝器（Shrinker）：剔除 strong_count == 1 的缓存目录节点。
+///
+/// strong_count == 1 意味着唯一的强引用来自父节点的 `children` BTreeMap，
+/// 没有被任何进程的 FD、cwd 或 mmap 持有。这些节点可以安全移除，
+/// 释放它们占用的内核堆内存（String、BTreeMap 节点等）。
+///
+/// 为避免在堆紧张时分配新 Vec，该函数原地遍历 DIRECTORY_VEC。
+#[cfg(feature = "oom_handler")]
+pub fn shrink() {
+    let mut lock = DIRECTORY_VEC.lock();
+    update_directory_vec(&mut lock);
+
+    let mut pruned = 0usize;
+    // 收集要剪枝的节点信息（只存 father Weak 和 name，不在堆紧张时分配 String）
+    // 分两阶段：先找到可剪节点索引，再执行剪枝
+    let len = lock.0.len();
+    let mut to_prune: [Option<(usize, u64)>; 256] = [None; 256]; // (idx, name_hash)
+    let mut to_prune_count = 0usize;
+
+    for (i, weak_node) in lock.0.iter().enumerate() {
+        if to_prune_count >= 256 {
+            break;
+        }
+        if let Some(node) = weak_node.upgrade() {
+            let count = Arc::strong_count(&node);
+            // ROOT 节点的 spe_usage >= 1，永远不剪
+            if count == 1 {
+                // 用 name 地址的简单哈希标记（不分配堆内存）
+                let name_ptr = node.name.as_ptr() as u64;
+                to_prune[to_prune_count] = Some((i, name_ptr));
+                to_prune_count += 1;
+            }
+        }
+    }
+
+    // 阶段二：逐一从父节点的 children 中移除
+    for entry in to_prune.iter().take(to_prune_count) {
+        if let Some((idx, _name_tag)) = entry {
+            if let Some(node) = lock.0[*idx].upgrade() {
+                if Arc::strong_count(&node) != 1 {
+                    continue; // 状态变了，跳过
+                }
+                // 从父节点的 children 中移除自己
+                if let Some(parent) = node.father.lock().upgrade() {
+                    let mut children_lock = parent.children.write();
+                    if let Some(ref mut map) = *children_lock {
+                        map.remove(&node.name);
+                        pruned += 1;
+                        // 如果父目录变空，也把 BTreeMap 回收掉
+                        if map.is_empty() {
+                            *children_lock = None;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if pruned > 0 {
+        log::warn!("[vfs-shrink] pruned {} unused directory tree nodes", pruned);
     }
 }
 

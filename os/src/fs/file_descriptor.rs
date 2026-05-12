@@ -286,6 +286,26 @@ impl FdTable {
             hard_limit: FdTable::SYSTEM_FD_LIMIT,
         }
     }
+    pub fn try_clone(&self) -> Result<Self, isize> {
+        let mut inner: Vec<Option<FileDescriptor>> = Vec::new();
+        if inner.try_reserve(self.inner.len()).is_err() {
+            return Err(ENOMEM);
+        }
+        inner.extend(self.inner.iter().cloned());
+
+        let mut recycled: Vec<u8> = Vec::new();
+        if recycled.try_reserve(self.recycled.len()).is_err() {
+            return Err(ENOMEM);
+        }
+        recycled.extend(self.recycled.iter().copied());
+
+        Ok(Self {
+            inner,
+            recycled,
+            soft_limit: self.soft_limit,
+            hard_limit: self.hard_limit,
+        })
+    }
     pub fn get_soft_limit(&self) -> usize {
         self.soft_limit
     }

@@ -28,10 +28,11 @@ prepare-cargo-config:
 
 env:
 ifeq ($(TARGET), riscv64gc-unknown-none-elf)
-	echo "a"
 	@rustup override set $(RV_TOOLCHAIN)
+	@cp ./src/lang_items.rs.rv ./src/lang_items.rs
 else ifeq ($(TARGET), loongarch64-unknown-linux-gnu)
 	@rustup override set $(LA_TOOLCHAIN)
+	@cp ./src/lang_items.rs.la ./src/lang_items.rs
 endif
 	-(rustup target list | grep "$(TARGET) (installed)") || rustup target add $(TARGET)
 	-rustup component add rust-src

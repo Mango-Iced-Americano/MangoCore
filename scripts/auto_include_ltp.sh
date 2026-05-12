@@ -9,11 +9,13 @@
 #   bash scripts/auto_include_ltp.sh
 #
 # 环境变量：
-#   ARCH        — rv64（默认）| la64
-#   TIMEOUT_SEC — 每轮无输超时秒数
-#   CONF_FILE   — os_test.conf 路径
-#   LOG_DIR     — 日志输出目录
-#   MAX_ROUNDS  — 最大轮次（默认 200）
+#   ARCH            — rv64（默认）| la64
+#   TIMEOUT_SEC          — 无输出超时秒数（默认 15）
+#   HARD_TIMEOUT_SEC     — 单测例硬超时秒数（默认 30），超时即强杀
+#   HARD_ROUND_TIMEOUT_SEC — 整轮硬超时秒数（默认 120），不管有没有输出
+#   CONF_FILE       — os_test.conf 路径
+#   LOG_DIR         — 日志输出目录
+#   MAX_ROUNDS      — 最大轮次（默认 200）
 
 set -euo pipefail
 
@@ -23,6 +25,8 @@ REPO_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd)
 ARCH=${ARCH:-rv64}
 BLK_MODE=${BLK_MODE:-}
 TIMEOUT_SEC=${TIMEOUT_SEC:-15}
+HARD_TIMEOUT_SEC=${HARD_TIMEOUT_SEC:-30}
+HARD_ROUND_TIMEOUT_SEC=${HARD_ROUND_TIMEOUT_SEC:-120}
 CONF_FILE=${CONF_FILE:-"${REPO_ROOT}/os_test.conf"}
 LOG_DIR=${LOG_DIR:-"${REPO_ROOT}/testresult/auto_ltp"}
 MAX_ROUNDS=${MAX_ROUNDS:-200}
@@ -71,7 +75,7 @@ resolve_blk_mode() {
     if [[ "${ARCH}" == "rv64" ]]; then
         echo "virt"
     else
-        echo "mem"
+        echo "virt-pci"
     fi
 }
 
@@ -263,15 +267,16 @@ while [[ "${round}" -le "${MAX_ROUNDS}" ]]; do
     case_ran=false
 
     last_line=0
-    last_activity=${SECONDS}
-    SECONDS=0
+    last_activity=$(date +%s)
+    case_start_time=0
+    round_start=$(date +%s)
     while kill -0 "${run_pid}" >/dev/null 2>&1; do
         sleep 0.1
         total_lines=$(wc -l < "${log_file}" 2>/dev/null | tr -d ' ' || echo 0)
         if [[ -z "${total_lines}" ]]; then total_lines=0; fi
 
         if (( total_lines > last_line )); then
-            last_activity=${SECONDS}
+            last_activity=$(date +%s)
             new_lines=$(tail -n +"$((last_line + 1))" "${log_file}" 2>/dev/null || true)
             last_line=${total_lines}
             while IFS= read -r line; do
@@ -285,6 +290,7 @@ while [[ "${round}" -le "${MAX_ROUNDS}" ]]; do
                         current_case="${line#RUN LTP CASE }"
                         case_has_tpass=false
                         case_ran=true  # 跑到 RUN LTP CASE 说明确实被执行了
+                        case_start_time=$(date +%s)
                         ;;
                     *START\ ltp-musl*)
                         current_libc="musl"
@@ -295,7 +301,7 @@ while [[ "${round}" -le "${MAX_ROUNDS}" ]]; do
                     *TPASS*)
                         case_has_tpass=true
                         ;;
-                    *panicked\ at*)
+                    *panicked\ at*|*HEAP\ ALLOCATION\ FAILED*)
                         panic=1
                         log "PANIC detected, case=${current_case}"
                         break 2
@@ -304,13 +310,58 @@ while [[ "${round}" -le "${MAX_ROUNDS}" ]]; do
             done <<< "${new_lines}"
         fi
 
-        if (( SECONDS - last_activity >= TIMEOUT_SEC )); then
+        # 硬超时：单个测例跑超过 HARD_TIMEOUT_SEC 秒就强杀
+        _now=$(date +%s)
+        if (( case_start_time > 0 && _now - case_start_time >= HARD_TIMEOUT_SEC )); then
+            timed_out=1
+            log "hard timeout (${HARD_TIMEOUT_SEC}s) for case=${current_case}"
+            break
+        fi
+
+        # 总轮次硬超时：整轮跑超过 HARD_ROUND_TIMEOUT_SEC 秒就强杀
+        if (( _now - round_start >= HARD_ROUND_TIMEOUT_SEC )); then
+            timed_out=1
+            log "hard round timeout (${HARD_ROUND_TIMEOUT_SEC}s), case=${current_case}"
+            break
+        fi
+
+        if (( _now - last_activity >= TIMEOUT_SEC )); then
             timed_out=1
             break
         fi
     done
 
     kill_run
+
+    # ---- 补读 kill_run 后可能遗漏的日志行（tee 退出前刷盘） ----
+    # 注意：必须用 here-string 而非管道，否则变量赋值在子 shell 中丢失
+    {
+        total_lines=$(wc -l < "${log_file}" 2>/dev/null | tr -d ' ' || echo 0)
+        if [[ -n "${total_lines}" ]] && (( total_lines > last_line )); then
+            remaining=$(tail -n +"$((last_line + 1))" "${log_file}" 2>/dev/null || true)
+            while IFS= read -r line; do
+                case "${line}" in
+                    *RUN\ LTP\ CASE\ *)
+                        current_case="${line#*RUN LTP CASE }"
+                        case_ran=true
+                        case_has_tpass=false
+                        ;;
+                    *TPASS*)  case_has_tpass=true ;;
+                    *panicked\ at*|*HEAP\ ALLOCATION\ FAILED*) panic=1 ;;  # 补读区域不 break（已 kill），仅标记
+                esac
+            done <<< "${remaining}"
+            last_line=${total_lines}
+        fi
+    } || true
+
+    # ---- 如果 current_case 仍为空，从日志中捞最后一个 RUN LTP CASE ----
+    if [[ -z "${current_case}" ]]; then
+        current_case=$(grep -oP 'RUN LTP CASE \K.*' "${log_file}" 2>/dev/null | tail -n 1 || echo "")
+        if [[ -n "${current_case}" ]]; then
+            case_ran=true
+            log "recovered current_case from log: ${current_case}"
+        fi
+    fi
 
     # ---- 处理本轮最后一个测例 ----
     if [[ -n "${current_case}" ]] && ${case_ran} && ${case_has_tpass}; then
@@ -340,11 +391,14 @@ while [[ "${round}" -le "${MAX_ROUNDS}" ]]; do
 
             ltp_from="${current_case}"
             update_ltp_from "${ltp_from}"
+            # 将更新后的 os_test.conf 注入镜像
+            make -C "${REPO_ROOT}/os" conf-inject CONF_ARCH="${ARCH}" CONF_BLK_MODE="${BLK_MODE}" CONF_FILE="${CONF_FILE}"
             round=$((round + 1))
             continue
         fi
 
-        log "no case captured, image may be corrupted, restoring..."
+        log "no RUN LTP CASE line found in log, cannot determine current case"
+        log "image may be corrupted or log was empty — restoring image and retrying"
         restore_image
         round=$((round + 1))
         continue
@@ -359,6 +413,9 @@ done
 include_accum=$(unique_list "${include_accum}")
 update_conf "ltp_include" "${include_accum}"
 update_ltp_from ""
+
+# 将最终 os_test.conf 注入镜像
+make -C "${REPO_ROOT}/os" conf-inject CONF_ARCH="${ARCH}" CONF_BLK_MODE="${BLK_MODE}" CONF_FILE="${CONF_FILE}"
 
 log "===== Final Results ====="
 log "ltp_include (${include_accum//[!,]}) = ${include_accum}"

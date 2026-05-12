@@ -4,12 +4,12 @@
 //! 顶部 `STATS_ENABLED` 改为 `false` 即可一行关闭所有诊断输出。
 
 use crate::fs::directory_tree::directory_node_count;
-use crate::mm::unallocated_frames;
+use crate::mm::{heap_stats, unallocated_frames};
 use crate::task::{current_task, procs_count, task_manager_counts, zombie_count};
 
 /// 是否启用资源统计输出
 /// 改为 false 即可一行关闭
-const STATS_ENABLED: bool = false;
+const STATS_ENABLED: bool = true;
 
 /// 打印当前内核资源统计信息
 ///
@@ -32,6 +32,7 @@ pub fn print_resource_stats() {
     let procs = procs_count();
     let zombies = zombie_count();
     let dir_nodes = directory_node_count();
+    let (heap_free, heap_total) = heap_stats();
 
     // 当前进程 FD 数
     let cur_fds = match current_task() {
@@ -42,7 +43,7 @@ pub fn print_resource_stats() {
     let (ready, int_count) = task_manager_counts().unwrap_or((0, 0));
 
     println!(
-        "[kernel] [stats] free_frames={} ready={} int={} zombie={} dir_nodes={} cur_fds={}",
-        free, ready, int_count, zombies, dir_nodes, cur_fds
+        "[kernel] [stats] free_frames={} ready={} int={} zombie={} dir_nodes={} cur_fds={} heap_free={}K heap_total={}K",
+        free, ready, int_count, zombies, dir_nodes, cur_fds, heap_free >> 10, heap_total >> 10
     );
 }

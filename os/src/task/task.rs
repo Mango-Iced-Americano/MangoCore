@@ -456,6 +456,12 @@ impl TaskControlBlock {
         argv_vec: &Vec<String>,
         envp_vec: &Vec<String>,
     ) -> Result<(), isize> {
+        // 在加载新 ELF 前先释放旧的用户数据页（物理帧），避免新旧内存集
+        // 同时存在导致双倍内存压力触发 OOM。
+        // 注意：调用者必须理解，如果 load_elf 返回 Err，旧数据页已被清除，
+        // 进程无法回到原来的用户态，调用者应当直接 exit。
+        self.vm.lock().recycle_data_pages();
+
         // 将ELF文件映射到内核空间
         let elf_data = elf.map_to_kernel_space(MMAP_BASE);
         // 带有ELF程序头/跳板/陷阱上下文/用户栈的内存集（MemorySet）
@@ -495,7 +501,7 @@ impl TaskControlBlock {
         memory_set.alloc_user_res(self.tid, true);
         // 创建ELF参数表
         let user_sp =
-            memory_set.create_elf_tables(self.ustack_bottom_va(), argv_vec, envp_vec, &elf_info);
+            memory_set.create_elf_tables(self.ustack_bottom_va(), argv_vec, envp_vec, &elf_info)?;
         log::trace!("[load_elf] user sp after pushing parameters: {:X}", user_sp);
         // 初始化陷阱上下文
         let trap_cx = TrapContext::app_init_context(
@@ -583,7 +589,7 @@ impl TaskControlBlock {
         stack: *const u8,
         tls: usize,
         exit_signal: Signals,
-    ) -> Arc<TaskControlBlock> {
+    ) -> Result<Arc<TaskControlBlock>, isize> {
         // ---- 保持父PCB锁
         let mut parent_inner = self.acquire_inner_lock();
         // 复制用户空间（包括陷阱上下文）
@@ -595,7 +601,7 @@ impl TaskControlBlock {
             crate::mm::frame_reserve(16);
             Arc::new(Mutex::new(MemorySet::from_existing_user(
                 &mut self.vm.lock(),
-            )))
+            )?))
         };
 
         // 共享地址空间时，trap context 的虚拟地址也共享，必须复用同一个 tid 分配器。
@@ -632,6 +638,27 @@ impl TaskControlBlock {
             .unwrap();
 
         // 创建任务控制块
+        let files = if flags.contains(CloneFlags::CLONE_FILES) {
+            self.files.clone()
+        } else {
+            Arc::new(Mutex::new(self.files.lock().try_clone()?))
+        };
+        let fs = if flags.contains(CloneFlags::CLONE_FS) {
+            self.fs.clone()
+        } else {
+            Arc::new(Mutex::new(self.fs.lock().clone()))
+        };
+        let sighand = if flags.contains(CloneFlags::CLONE_SIGHAND) {
+            self.sighand.clone()
+        } else {
+            let lock = self.sighand.lock();
+            let mut vec: Vec<Option<Box<SigAction>>> = Vec::new();
+            if vec.try_reserve(lock.len()).is_err() {
+                return Err(crate::syscall::errno::ENOMEM);
+            }
+            vec.extend(lock.iter().cloned());
+            Arc::new(Mutex::new(vec))
+        };
         let task_control_block = Arc::new(TaskControlBlock {
             // 基础标识信息
             pid: pid_handle,
@@ -648,22 +675,10 @@ impl TaskControlBlock {
             // 资源共享控制
             exe: self.exe.clone(),
             tid_allocator,
-            files: if flags.contains(CloneFlags::CLONE_FILES) {
-                self.files.clone()
-            } else {
-                Arc::new(Mutex::new(self.files.lock().clone()))
-            },
-            fs: if flags.contains(CloneFlags::CLONE_FS) {
-                self.fs.clone()
-            } else {
-                Arc::new(Mutex::new(self.fs.lock().clone()))
-            },
+            files,
+            fs,
             vm: memory_set,
-            sighand: if flags.contains(CloneFlags::CLONE_SIGHAND) {
-                self.sighand.clone()
-            } else {
-                Arc::new(Mutex::new(self.sighand.lock().clone()))
-            },
+            sighand,
             futex: if flags.contains(CloneFlags::CLONE_SYSVSEM) {
                 self.futex.clone()
             } else {
@@ -707,14 +722,17 @@ impl TaskControlBlock {
         // 添加到父进程或者祖父进程的子进程列表
         if flags.contains(CloneFlags::CLONE_PARENT) || flags.contains(CloneFlags::CLONE_THREAD) {
             if let Some(grandparent) = &parent_inner.parent {
-                grandparent
-                    .upgrade()
-                    .unwrap()
-                    .acquire_inner_lock()
-                    .children
-                    .push(task_control_block.clone());
+                let grandparent = grandparent.upgrade().unwrap();
+                let mut grandparent_inner = grandparent.acquire_inner_lock();
+                if grandparent_inner.children.try_reserve(1).is_err() {
+                    return Err(crate::syscall::errno::ENOMEM);
+                }
+                grandparent_inner.children.push(task_control_block.clone());
             }
         } else {
+            if parent_inner.children.try_reserve(1).is_err() {
+                return Err(crate::syscall::errno::ENOMEM);
+            }
             parent_inner.children.push(task_control_block.clone());
         }
         // 初始化陷阱上下文
@@ -739,7 +757,7 @@ impl TaskControlBlock {
         // 修改陷阱上下文中的内核栈指针
         trap_cx.kernel_sp = kstack_top;
         // 返回
-        task_control_block
+        Ok(task_control_block)
         // ---- 释放父PCB锁
     }
     /// 获取进程ID

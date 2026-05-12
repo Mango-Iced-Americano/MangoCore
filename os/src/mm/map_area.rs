@@ -183,6 +183,35 @@ impl Debug for LinearMap {
     }
 }
 impl LinearMap {
+    pub fn try_clone(&self) -> Result<Self, isize> {
+        let mut frames = Vec::new();
+        if frames.try_reserve(self.frames.len()).is_err() {
+            return Err(crate::syscall::errno::ENOMEM);
+        }
+        frames.extend(self.frames.iter().cloned());
+        #[cfg(feature = "oom_handler")]
+        {
+            let mut active = VecDeque::new();
+            if active.try_reserve(self.active.len()).is_err() {
+                return Err(crate::syscall::errno::ENOMEM);
+            }
+            active.extend(self.active.iter().copied());
+            Ok(Self {
+                vpn_range: self.vpn_range,
+                frames,
+                active,
+                compressed: self.compressed,
+                swapped: self.swapped,
+            })
+        }
+        #[cfg(not(feature = "oom_handler"))]
+        {
+            Ok(Self {
+                vpn_range: self.vpn_range,
+                frames,
+            })
+        }
+    }
     pub fn gen_dict(&self, vpn_range: VPNRange) -> LinearMap {
         let new_dict = Self {
             vpn_range,
@@ -203,19 +232,25 @@ impl LinearMap {
         self.vpn_range.get_end()
     }
     pub fn new(vpn_range: VPNRange) -> Self {
+        Self::try_new(vpn_range).unwrap()
+    }
+    pub fn try_new(vpn_range: VPNRange) -> Result<Self, isize> {
         let len = vpn_range.get_end().0 - vpn_range.get_start().0;
-        let mut new_dict = Self {
+        let mut frames = Vec::new();
+        if frames.try_reserve(len).is_err() {
+            return Err(crate::syscall::errno::ENOMEM);
+        }
+        frames.resize(len, Frame::Unallocated);
+        Ok(Self {
             vpn_range,
-            frames: Vec::with_capacity(len),
+            frames,
             #[cfg(feature = "oom_handler")]
             active: VecDeque::new(),
             #[cfg(feature = "oom_handler")]
             compressed: 0,
             #[cfg(feature = "oom_handler")]
             swapped: 0,
-        };
-        new_dict.frames.resize(len, Frame::Unallocated);
-        new_dict
+        })
     }
     pub fn get_mut(&mut self, key: &VirtPageNum) -> &mut Frame {
         &mut self.frames[key.0 - self.vpn_range.get_start().0]
@@ -282,8 +317,13 @@ impl LinearMap {
         if vpn_start > new_vpn_end {
             return Err(());
         }
-        self.frames
-            .resize(new_vpn_end.0 - vpn_start.0, Frame::Unallocated);
+        let len = new_vpn_end.0 - vpn_start.0;
+        if self.frames.capacity() < len {
+            if self.frames.try_reserve(len - self.frames.len()).is_err() {
+                return Err(());
+            }
+        }
+        self.frames.resize(len, Frame::Unallocated);
         Ok(())
     }
     #[inline(always)]
@@ -436,6 +476,16 @@ pub struct MapArea {
 }
 
 impl MapArea {
+    pub fn try_clone(&self) -> Result<Self, isize> {
+        let inner = self.inner.try_clone()?;
+        Ok(Self {
+            inner,
+            map_type: self.map_type,
+            map_perm: self.map_perm,
+            map_file: self.map_file.clone(),
+            flags: self.flags,
+        })
+    }
     /// Construct a new segment without without allocating memory
     pub fn new(
         start_va: VirtAddr,
@@ -444,6 +494,15 @@ impl MapArea {
         map_perm: MapPermission,
         map_file: Option<Arc<dyn File>>,
     ) -> Self {
+        Self::try_new(start_va, end_va, map_type, map_perm, map_file).unwrap()
+    }
+    pub fn try_new(
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        map_type: MapType,
+        map_perm: MapPermission,
+        map_file: Option<Arc<dyn File>>,
+    ) -> Result<Self, isize> {
         let start_vpn: VirtPageNum = start_va.floor();
         let end_vpn: VirtPageNum = end_va.ceil();
         trace!(
@@ -452,13 +511,14 @@ impl MapArea {
             end_vpn.0,
             map_perm
         );
-        Self {
-            inner: LinearMap::new(VPNRange::new(start_vpn, end_vpn)),
+        let inner = LinearMap::try_new(VPNRange::new(start_vpn, end_vpn))?;
+        Ok(Self {
+            inner,
             map_type,
             map_perm,
             map_file,
             flags: MapFlags::empty(),
-        }
+        })
     }
     /// Copier, but the physical pages are not allocated,
     /// thus leaving `data_frames` empty.
@@ -749,7 +809,7 @@ impl MapArea {
         }
     }
     /// If `new_end` is equal to the current end of area, do nothing and return `Ok(())`.
-    pub fn expand_to<T: PageTable>(&mut self, new_end: VirtAddr) -> Result<(), ()> {
+    pub fn expand_to<T: PageTable>(&mut self, new_end: VirtAddr) -> Result<(), isize> {
         let new_end_vpn: VirtPageNum = new_end.ceil();
         let old_end_vpn = self.inner.vpn_range.get_end();
         if new_end_vpn < old_end_vpn {
@@ -757,12 +817,14 @@ impl MapArea {
                 "[expand_to] new_end_vpn: {:?} is lower than old_end_vpn: {:?}",
                 new_end_vpn, old_end_vpn
             );
-            return Err(());
+            return Err(crate::syscall::errno::EINVAL);
         }
         // `set_end` must be done before calling `map_one`
         // because `map_one` will insert frames into `data_frames`
         // if we don't `set_end` in advance, this insertion is out of bound
-        self.inner.set_end(new_end_vpn)?;
+        self.inner
+            .set_end(new_end_vpn)
+            .map_err(|_| crate::syscall::errno::ENOMEM)?;
         Ok(())
     }
     /// If `new_end` is equal to the current end of area, do nothing and return `Ok(())`.

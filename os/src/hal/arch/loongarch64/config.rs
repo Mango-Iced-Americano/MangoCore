@@ -17,7 +17,7 @@ pub const KSTACK_PG_NUM_SHIFT: usize = 16usize.trailing_zeros() as usize;
 pub const KSTACK_PG_NUM_SHIFT: usize = 16usize.trailing_zeros() as usize;
 
 pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 0x20;
-pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x6000;
+pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x10000;
 
 // Addresses
 /// Maximum length of a physical address

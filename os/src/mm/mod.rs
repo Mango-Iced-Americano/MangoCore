@@ -11,8 +11,10 @@ pub use address::PPNRange;
 use address::VPNRange;
 pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 pub use frame_allocator::{
-    frame_alloc, frames_alloc, frame_alloc_uninit, frame_dealloc, frame_reserve, unallocated_frames, FrameTracker,
+    frame_alloc, frame_alloc_uninit, frame_dealloc, frame_reserve, frames_alloc,
+    unallocated_frames, FrameTracker,
 };
+pub use heap_allocator::heap_stats;
 pub use map_area::{Frame, MapFlags, MapPermission};
 pub use memory_set::kernel_token;
 pub use memory_set::MemoryError;

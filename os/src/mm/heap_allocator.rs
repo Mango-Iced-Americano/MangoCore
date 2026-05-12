@@ -51,6 +51,10 @@ impl OomAwareAllocator {
                 layout.align(),
                 pages
             );
+            // 内核堆紧张的根因往往是 VFS DirectoryTreeNode 过多，而不是物理帧不足。
+            // 插入一次 VFS 剪枝：剔除 strong_count==1（仅缓存在父节点 children 中）的节点。
+            crate::fs::directory_tree::shrink();
+
             if crate::mm::frame_allocator::oom_handler(pages).is_ok() {
                 return true;
             }
@@ -113,6 +117,14 @@ pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
     println!("KERNEL_HEAP_SIZE: {} bytes", KERNEL_HEAP_SIZE);
     println!("======================================");
     crate::hal::shutdown()
+}
+
+/// 返回 (free_bytes, total_bytes) 用于诊断
+pub fn heap_stats() -> (usize, usize) {
+    let heap = HEAP_ALLOCATOR.inner.lock();
+    let total = heap.stats_total_bytes();
+    let allocated = heap.stats_alloc_actual();
+    (total.saturating_sub(allocated), total)
 }
 
 /// 全局堆内存空间

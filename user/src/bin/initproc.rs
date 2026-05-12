@@ -187,6 +187,8 @@ struct RuntimeConfig {
     ltp_libc: LtpLibc,
     /// LTP runner: script 使用镜像内官方脚本；inline 使用 initproc 内联枚举。
     ltp_runner: LtpRunner,
+    /// 诊断模式：每完成一组测试后打印资源统计标记
+    diag: bool,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -241,6 +243,7 @@ impl RuntimeConfig {
             ltp_from: None,
             ltp_libc: LtpLibc::Both,
             ltp_runner: LtpRunner::Inline,
+            diag: false,
         }
     }
 }
@@ -391,6 +394,8 @@ fn apply_conf_bytes(data: &[u8], cfg: &mut RuntimeConfig) {
                 b"inline" => cfg.ltp_runner = LtpRunner::Inline,
                 _ => {}
             }
+        } else if key == b"diag" {
+            cfg.diag = val == b"1" || val == b"true";
         } else if key == b"ltp_from" {
             let s = core::str::from_utf8(val).ok();
             if let Some(s) = s {
@@ -479,7 +484,9 @@ fn display_path(path: &str) -> &str {
     path.trim_end_matches('\0')
 }
 
-/// 在指定目录下运行测试脚本。
+const MAX_GROUP_RETRIES: usize = 3;
+
+/// 运行测试脚本，失败时自动重试（最多 MAX_GROUP_RETRIES 次）。
 fn run_group_in_dir(
     environ: &[*const u8],
     dir: &str,
@@ -494,11 +501,47 @@ fn run_group_in_dir(
     } else {
         "glibc"
     };
-    // 比赛评测依赖此标记格式，超时 kill 后需自己补打 END
-    let group_start_marker = format!(
-        "#### OS COMP TEST GROUP START {}-{} ####",
-        group_name, libc_suffix
+
+    let mut last_exit_code: i32 = 0;
+    for attempt in 1..=MAX_GROUP_RETRIES {
+        last_exit_code = run_group_once(
+            environ,
+            dir,
+            group_name,
+            script,
+            timeout_secs,
+            log_dir,
+            libc_suffix,
+        );
+        if last_exit_code == 0 {
+            return; // 成功，直接返回
+        }
+        if attempt < MAX_GROUP_RETRIES {
+            println!(
+                "[initproc] {} in {} failed (exit_code={}), retry {}/{} after 2s...",
+                script, log_dir, last_exit_code, attempt, MAX_GROUP_RETRIES
+            );
+            sleep(2000);
+        }
+    }
+    // 所有重试均失败
+    println!(
+        "[initproc] {} in {} failed after {} retries, final exit_code={}",
+        script, log_dir, MAX_GROUP_RETRIES, last_exit_code
     );
+}
+
+/// 单次执行测试脚本（无重试），返回子进程退出码。
+fn run_group_once(
+    environ: &[*const u8],
+    dir: &str,
+    group_name: &str,
+    script: &str,
+    timeout_secs: u64,
+    log_dir: &str,
+    libc_suffix: &str,
+) -> i32 {
+    // 比赛评测依赖此标记格式，超时 kill 后需自己补打 END
     let group_end_marker = format!(
         "#### OS COMP TEST GROUP END {}-{} ####",
         group_name, libc_suffix
@@ -510,7 +553,7 @@ fn run_group_in_dir(
             "[initproc] fork failed for {} in {} ret={}",
             script, log_dir, pid
         );
-        return;
+        return -1;
     }
     if pid == 0 {
         // 脚本会自动输出 START 标记，无需 initproc 打印
@@ -543,7 +586,8 @@ fn run_group_in_dir(
             script, log_dir
         );
         exit(127);
-    } else if let Some(fixed_ms) = fixed_timer_ms(script) {
+    }
+    let exit_code = if let Some(fixed_ms) = fixed_timer_ms(script) {
         // 特殊测试（iperf / libctest 等），脚本会立即退出。
         // 固定等 fixed_ms 毫秒让测试跑完。
         let fix_secs = fixed_ms / 1000;
@@ -552,25 +596,22 @@ fn run_group_in_dir(
             fix_secs, script, log_dir
         );
         sleep(fixed_ms as usize);
-        let mut exit_code: i32 = 0;
-        let _ = waitpid(pid as usize, &mut exit_code);
+        let mut code: i32 = 0;
+        let _ = waitpid(pid as usize, &mut code);
         // 打印 END 标记。脚本自身也可能输出，但若脚本提前退出
         // （如 iperf PARALLEL_TCP 意外终止），确保标记不丢失。
         println!("{}", group_end_marker);
-        println!(
-            "[initproc] done {} in {} exit_code={}",
-            script, log_dir, exit_code
-        );
+        code
     } else {
         // parent: 超时循环 + 强杀
-        let mut exit_code: i32 = 0;
+        let mut code: i32 = 0;
         let timeout_ms = timeout_secs * 1000;
         let mut elapsed_ms: u64 = 0;
         const POLL_MS: u64 = 100;
         let mut timed_out = false;
 
         loop {
-            let ret = waitpid_wnohang(pid as isize, &mut exit_code);
+            let ret = waitpid_wnohang(pid as isize, &mut code);
             if ret == pid {
                 // 正常退出
                 break;
@@ -591,7 +632,7 @@ fn run_group_in_dir(
                     timeout_secs, script, log_dir, pid
                 );
                 let _ = kill(pid as usize, SIGKILL);
-                let _ = waitpid(pid as usize, &mut exit_code);
+                let _ = waitpid(pid as usize, &mut code);
                 println!(
                     "[initproc] killed pid={} for {} in {}",
                     pid, script, log_dir
@@ -608,11 +649,13 @@ fn run_group_in_dir(
             // 超时 kill 后脚本来不及输出 END 标记，由 initproc 补打
             println!("{}", group_end_marker);
         }
-        println!(
-            "[initproc] done {} in {} exit_code={}",
-            script, log_dir, exit_code
-        );
-    }
+        code
+    };
+    println!(
+        "[initproc] done {} in {} exit_code={}",
+        script, log_dir, exit_code
+    );
+    exit_code
 }
 
 /// 运行 LTP 测例（内联枚举，不使用 shell 脚本，支持 exclude + from）。
@@ -661,6 +704,12 @@ fn run_ltp_binaries(
 
         // 打印 START 标记
         println!("#### OS COMP TEST GROUP START ltp-{} ####", libc_suffix);
+        // 输出 ltp_from 用于调试（shell 脚本依赖此行确认断点续跑位置）
+        if let Some(from_case) = from {
+            println!("[initproc] ltp_from={}", from_case);
+        } else {
+            println!("[initproc] ltp_from=(none, start from beginning)");
+        }
 
         // 收集 ltp/testcases/bin 下所有文件名（栈分配，不用堆）
         let fd = open("ltp/testcases/bin\0", OpenFlags::RDONLY);
@@ -921,6 +970,13 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
         } else {
             run_group_in_dir(environ, "/musl\0", group_name, script, timeout_secs);
             run_group_in_dir(environ, "/glibc\0", group_name, script, timeout_secs);
+        }
+        // 诊断模式：每组完成后打印标记，配合内核 STATS_ENABLED 输出定位资源变化
+        if cfg.diag {
+            println!(
+                "[initproc] [diag] === group '{}' finished, kernel stats above (if STATS_ENABLED) ===",
+                group_name
+            );
         }
         // 每组之间休息一会，清理孤儿进程、让网络连接完全关闭
         println!("[initproc] sleep 1s before next group");

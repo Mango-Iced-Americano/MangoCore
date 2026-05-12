@@ -7,6 +7,8 @@ REPO_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd)
 ARCH=${ARCH:-rv64}
 BLK_MODE=${BLK_MODE:-}
 TIMEOUT_SEC=${TIMEOUT_SEC:-20}
+HARD_TIMEOUT_SEC=${HARD_TIMEOUT_SEC:-30}
+HARD_ROUND_TIMEOUT_SEC=${HARD_ROUND_TIMEOUT_SEC:-120}
 CONF_FILE=${CONF_FILE:-"${REPO_ROOT}/os_test.conf"}
 LOG_DIR=${LOG_DIR:-"${REPO_ROOT}/testresult/auto_ltp"}
 MAX_ROUNDS=${MAX_ROUNDS:-200}
@@ -310,21 +312,23 @@ while [[ "${round}" -le "${MAX_ROUNDS}" ]]; do
     timed_out=0
 
     last_line=0
-    last_activity=${SECONDS}
-    SECONDS=0
+    last_activity=$(date +%s)
+    case_start_time=0
+    round_start=$(date +%s)
     while kill -0 "${run_pid}" >/dev/null 2>&1; do
         sleep 0.1
         total_lines=$(wc -l < "${log_file}" 2>/dev/null | tr -d ' ' || echo 0)
         if [[ -z "${total_lines}" ]]; then total_lines=0; fi
 
         if (( total_lines > last_line )); then
-            last_activity=${SECONDS}
+            last_activity=$(date +%s)
             new_lines=$(tail -n +"$((last_line + 1))" "${log_file}" 2>/dev/null || true)
             last_line=${total_lines}
             while IFS= read -r line; do
                 case "${line}" in
                     RUN\ LTP\ CASE\ *)
                         current_case="${line#RUN LTP CASE }"
+                        case_start_time=$(date +%s)
                         ;;
                     *START\ ltp-musl*)
                         # 标记当前在 musl 轮
@@ -335,14 +339,29 @@ while [[ "${round}" -le "${MAX_ROUNDS}" ]]; do
                         current_libc="glibc"
                         ;;
                 esac
-                if [[ "${line}" == *"panicked at"* ]]; then
+                if [[ "${line}" == *"panicked at"* || "${line}" == *"HEAP ALLOCATION FAILED"* ]]; then
                     panic=1
                     break 2
                 fi
             done <<< "${new_lines}"
         fi
 
-        if (( SECONDS - last_activity >= TIMEOUT_SEC )); then
+        # 硬超时：单个测例跑超过 HARD_TIMEOUT_SEC 秒就强杀
+        _now=$(date +%s)
+        if (( case_start_time > 0 && _now - case_start_time >= HARD_TIMEOUT_SEC )); then
+            timed_out=1
+            log "hard timeout (${HARD_TIMEOUT_SEC}s) for case=${current_case}"
+            break
+        fi
+
+        # 总轮次硬超时：整轮跑超过 HARD_ROUND_TIMEOUT_SEC 秒就强杀
+        if (( _now - round_start >= HARD_ROUND_TIMEOUT_SEC )); then
+            timed_out=1
+            log "hard round timeout (${HARD_ROUND_TIMEOUT_SEC}s), case=${current_case}"
+            break
+        fi
+
+        if (( _now - last_activity >= TIMEOUT_SEC )); then
             timed_out=1
             break
         fi
