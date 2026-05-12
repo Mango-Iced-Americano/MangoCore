@@ -1,7 +1,7 @@
 use core::ops::IndexMut;
 
 pub use super::memory_set::check_page_fault;
-use super::{MapPermission, PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
+use super::{MapPermission, MemoryError, PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -45,7 +45,15 @@ pub trait PageTable {
     /// Allocation should be done elsewhere.
     /// # 特例
     /// Panics if the `vpn` is mapped.
-    fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: MapPermission);
+    fn try_map(
+        &mut self,
+        vpn: VirtPageNum,
+        ppn: PhysPageNum,
+        flags: MapPermission,
+    ) -> Result<(), MemoryError>;
+    fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: MapPermission) {
+        self.try_map(vpn, ppn, flags).unwrap();
+    }
     #[inline(always)]
     fn map_identical(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: MapPermission) {
         self.map(vpn, ppn, flags)

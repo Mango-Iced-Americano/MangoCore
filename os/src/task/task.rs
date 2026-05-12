@@ -13,7 +13,7 @@ use crate::hal::TrapImpl;
 use crate::hal::{kstack_alloc, KernelStack};
 use crate::hal::{trap_handler, TrapContext};
 use crate::mm::PageTableImpl;
-use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
+use crate::mm::{MemoryError, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::syscall::CloneFlags;
 use crate::timer::{ITimerVal, TimeSpec, TimeVal};
 use alloc::boxed::Box;
@@ -583,7 +583,7 @@ impl TaskControlBlock {
         stack: *const u8,
         tls: usize,
         exit_signal: Signals,
-    ) -> Arc<TaskControlBlock> {
+    ) -> Result<Arc<TaskControlBlock>, MemoryError> {
         // ---- 保持父PCB锁
         let mut parent_inner = self.acquire_inner_lock();
         // 复制用户空间（包括陷阱上下文）
@@ -593,9 +593,7 @@ impl TaskControlBlock {
         } else {
             // 复制地址空间（进程）
             crate::mm::frame_reserve(16);
-            Arc::new(Mutex::new(MemorySet::from_existing_user(
-                &mut self.vm.lock(),
-            )))
+            Arc::new(Mutex::new(MemorySet::from_existing_user(&mut self.vm.lock())?))
         };
 
         // 共享地址空间时，trap context 的虚拟地址也共享，必须复用同一个 tid 分配器。
@@ -739,7 +737,7 @@ impl TaskControlBlock {
         // 修改陷阱上下文中的内核栈指针
         trap_cx.kernel_sp = kstack_top;
         // 返回
-        task_control_block
+        Ok(task_control_block)
         // ---- 释放父PCB锁
     }
     /// 获取进程ID

@@ -658,7 +658,14 @@ pub fn sys_clone(
     );
     show_frame_consumption! {
         "clone";
-        let child = parent.sys_clone(flags, stack, tls, exit_signal);
+        let child = match parent.sys_clone(flags, stack, tls, exit_signal) {
+            Ok(child) => child,
+            Err(crate::mm::MemoryError::OutOfMemory) => return -(SyscallErr::ENOMEM as isize),
+            Err(err) => {
+                warn!("[sys_clone] failed to clone address space: {:?}", err);
+                return -(SyscallErr::EAGAIN as isize);
+            }
+        };
     }
     let new_pid = child.pid.0;
     if flags.contains(CloneFlags::CLONE_PARENT_SETTID) {

@@ -57,6 +57,8 @@ pub enum MemoryError {
     ZramIsFull,
     SwapIsFull,
     BeyondEOF,
+    OutOfMemory,
+    BackingStoreFailure,
 }
 
 /// The memory "space" as in user space or kernel space
@@ -223,7 +225,8 @@ impl<T: PageTable> MemorySet<T> {
             if !self.page_table.is_mapped(vpn) {
                 //if not mapped
                 self.page_table
-                    .map(vpn, frame.ppn.clone(), map_area.map_perm);
+                    .try_map(vpn, frame.ppn.clone(), map_area.map_perm)
+                    .map_err(|_| ())?;
             } else {
                 return Err(());
             }
@@ -325,7 +328,7 @@ impl<T: PageTable> MemorySet<T> {
                     }
                     if access == FaultAccess::Store {
                         let allocated_ppn =
-                            area.map_one_zeroed_unchecked(&mut self.page_table, vpn);
+                            area.map_one_zeroed_unchecked(&mut self.page_table, vpn)?;
                         if file_offset > isize::MAX as usize
                             || old_offset > isize::MAX as usize
                             || file
@@ -351,8 +354,11 @@ impl<T: PageTable> MemorySet<T> {
                             .lock()
                             .get_tracker();
                         let cache_ppn = cache_phys_page.ppn;
-                        self.page_table.map(vpn, cache_ppn, area.map_perm);
-                        area.inner.alloc_in_memory(vpn, cache_phys_page);
+                        area.inner.alloc_in_memory(vpn, cache_phys_page)?;
+                        if let Err(err) = self.page_table.try_map(vpn, cache_ppn, area.map_perm) {
+                            area.inner.remove_in_memory(&vpn);
+                            return Err(err);
+                        }
                         Ok(cache_ppn.offset(addr.page_offset()))
                     }
                 } else {
@@ -364,11 +370,11 @@ impl<T: PageTable> MemorySet<T> {
                                 "[Frame InMemory] addr: {:?}, vpn: {:?}, frame: {:?}",
                                 addr, vpn, frame
                             );
-                            unreachable!();
+                            return Err(MemoryError::NotMapped);
                         }
                         Frame::Unallocated => {
                             debug!("[do_page_fault] addr: {:?}, solution: lazy alloc", addr);
-                            let ppn = area.map_one_zeroed_unchecked(&mut self.page_table, vpn);
+                            let ppn = area.map_one_zeroed_unchecked(&mut self.page_table, vpn)?;
                             let frame = area.inner.get_mut(&vpn);
                             debug!(
                                 "[do_page_fault map_one] addr: {:?}, vpn: {:?}, frame: {:?}",
@@ -378,22 +384,30 @@ impl<T: PageTable> MemorySet<T> {
                         }
                         #[cfg(feature = "oom_handler")]
                         Frame::Compressed(_) => {
-                            let ppn = frame.unzip().unwrap();
-                            self.page_table.map(vpn, ppn, area.map_perm);
+                            let ppn = frame.unzip()?;
+                            self.page_table.try_map(vpn, ppn, area.map_perm)?;
                             area.inner
                                 .active
-                                .push_back((vpn.0 - area.get_start::<T>().0) as u16);
+                                .try_reserve(1)
+                                .map_err(|_| MemoryError::OutOfMemory)?;
+                            area.inner
+                                .active
+                                .push_back(vpn.0 - area.get_start::<T>().0);
                             area.inner.compressed -= 1;
                             debug!("[do_page_fault] addr: {:?}, solution: decompress", addr);
                             ppn
                         }
                         #[cfg(feature = "oom_handler")]
                         Frame::SwappedOut(_) => {
-                            let ppn = frame.swap_in().unwrap();
-                            self.page_table.map(vpn, ppn, area.map_perm);
+                            let ppn = frame.swap_in()?;
+                            self.page_table.try_map(vpn, ppn, area.map_perm)?;
                             area.inner
                                 .active
-                                .push_back((vpn.0 - area.get_start::<T>().0) as u16);
+                                .try_reserve(1)
+                                .map_err(|_| MemoryError::OutOfMemory)?;
+                            area.inner
+                                .active
+                                .push_back(vpn.0 - area.get_start::<T>().0);
                             area.inner.swapped -= 1;
                             debug!("[do_page_fault] addr: {:?}, solution: swap in", addr);
                             ppn
@@ -423,7 +437,7 @@ impl<T: PageTable> MemorySet<T> {
                             area.clear_stale_pte(&mut self.page_table, vpn);
                             if area.map_file.is_none() {
                                 let allocated_ppn =
-                                    area.map_one_zeroed_unchecked(&mut self.page_table, vpn);
+                                    area.map_one_zeroed_unchecked(&mut self.page_table, vpn)?;
                                 debug!("[do_page_fault] addr: {:?}, solution: lazy alloc", addr);
                                 return Ok(allocated_ppn.offset(addr.page_offset()));
                             }
@@ -457,7 +471,7 @@ impl<T: PageTable> MemorySet<T> {
             .filter(|area| {
                 let start_vpn = area.get_start::<T>();
                 start_vpn.0 >= (USR_MMAP_BASE >> PAGE_SIZE_BITS)
-                    && start_vpn.0 < (TASK_SIZE >> PAGE_SIZE_BITS)
+                    && start_vpn.0 < (USR_MMAP_END >> PAGE_SIZE_BITS)
                     && area.map_file.is_none()
             })
             .map(|area| area.do_oom(page_table))
@@ -485,7 +499,8 @@ impl<T: PageTable> MemorySet<T> {
         self.areas
             .iter_mut()
             .filter(|area| {
-                area.get_start::<T>().0 < (TASK_SIZE >> PAGE_SIZE_BITS) && area.map_file.is_none()
+                area.get_start::<T>().0 < (USER_VA_END >> PAGE_SIZE_BITS)
+                    && area.map_file.is_none()
             })
             .map(|area| {
                 if area.get_start::<T>().0 < USR_MMAP_BASE >> PAGE_SIZE_BITS {
@@ -744,7 +759,7 @@ impl<T: PageTable> MemorySet<T> {
 
         Ok((memory_set, program_break, elf_info))
     }
-    pub fn from_existing_user(user_space: &mut MemorySet<T>) -> MemorySet<T> {
+    pub fn from_existing_user(user_space: &mut MemorySet<T>) -> Result<MemorySet<T>, MemoryError> {
         let mut memory_set = Self::new_bare();
         // map trampoline
         if should_map_trampoline!() {
@@ -760,8 +775,7 @@ impl<T: PageTable> MemorySet<T> {
                 .map_from_existing_page_table(
                     &mut memory_set.page_table,
                     &mut user_space.page_table,
-                )
-                .unwrap();
+                )?;
             memory_set.areas.push(new_area);
             debug!(
                 "[fork] map shared area: {:?}",
@@ -789,7 +803,7 @@ impl<T: PageTable> MemorySet<T> {
             "[fork] copy trap_cx area: {:?}",
             trap_cx_area.inner.vpn_range
         );
-        memory_set
+        Ok(memory_set)
     }
     pub fn activate(&self) {
         self.page_table.activate()
@@ -1182,18 +1196,52 @@ impl<T: PageTable> MemorySet<T> {
                         if let Ok(cache) = file.get_single_cache(file_offset) {
                             let cache_phys_page = cache.lock().get_tracker();
                             let cache_ppn = cache_phys_page.ppn;
-                            self.page_table.map(vpn, cache_ppn, new_area.map_perm);
-                            new_area.inner.alloc_in_memory(vpn, cache_phys_page);
+                            if let Err(err) =
+                                new_area.inner.alloc_in_memory(vpn, cache_phys_page)
+                            {
+                                return match err {
+                                    MemoryError::OutOfMemory => ENOMEM,
+                                    _ => EINVAL,
+                                };
+                            }
+                            if let Err(err) =
+                                self.page_table.try_map(vpn, cache_ppn, new_area.map_perm)
+                            {
+                                new_area.inner.remove_in_memory(&vpn);
+                                return match err {
+                                    MemoryError::OutOfMemory => ENOMEM,
+                                    _ => EINVAL,
+                                };
+                            }
                         } else {
-                            new_area.map_one_zeroed_unchecked(&mut self.page_table, vpn);
+                            if let Err(err) =
+                                new_area.map_one_zeroed_unchecked(&mut self.page_table, vpn)
+                            {
+                                return match err {
+                                    MemoryError::OutOfMemory => ENOMEM,
+                                    _ => EINVAL,
+                                };
+                            }
                         }
                     } else {
-                        new_area.map_one_zeroed_unchecked(&mut self.page_table, vpn);
+                        if let Err(err) =
+                            new_area.map_one_zeroed_unchecked(&mut self.page_table, vpn)
+                        {
+                            return match err {
+                                MemoryError::OutOfMemory => ENOMEM,
+                                _ => EINVAL,
+                            };
+                        }
                     }
                 }
             } else {
                 for vpn in vpn_range {
-                    new_area.map_one_zeroed_unchecked(&mut self.page_table, vpn);
+                    if let Err(err) = new_area.map_one_zeroed_unchecked(&mut self.page_table, vpn) {
+                        return match err {
+                            MemoryError::OutOfMemory => ENOMEM,
+                            _ => EINVAL,
+                        };
+                    }
                 }
             }
         }
@@ -1515,9 +1563,11 @@ pub fn check_page_fault(addr: VirtAddr, access: FaultAccess) -> Result<PhysAddr,
         Err(MemoryError::BeyondEOF)
         | Err(MemoryError::NoPermission)
         | Err(MemoryError::BadAddress)
-        | Err(MemoryError::NotMapped) => {
+        | Err(MemoryError::NotMapped)
+        | Err(MemoryError::BackingStoreFailure) => {
             return Err(EFAULT);
         }
+        Err(MemoryError::OutOfMemory) => return Err(ENOMEM),
         Err(err) => {
             warn!(
                 "[check_page_fault] unexpected error: {:?}, addr={:?}, access={:?}",

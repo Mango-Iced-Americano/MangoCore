@@ -126,7 +126,7 @@ pub fn trap_handler() -> ! {
             };
             if let Err(error) = task.vm.lock().do_page_fault(addr, access) {
                 match error {
-                    MemoryError::BeyondEOF => {
+                    MemoryError::BeyondEOF | MemoryError::BackingStoreFailure => {
                         inner.add_signal(Signals::SIGBUS);
                     }
                     MemoryError::NoPermission
@@ -134,7 +134,16 @@ pub fn trap_handler() -> ! {
                     | MemoryError::NotMapped => {
                         inner.add_signal(Signals::SIGSEGV);
                     }
-                    _ => unreachable!(),
+                    MemoryError::OutOfMemory => {
+                        inner.pending_oom_kill = true;
+                    }
+                    other => {
+                        log::warn!(
+                            "[page_fault] unexpected memory error {:?}, send SIGSEGV",
+                            other
+                        );
+                        inner.add_signal(Signals::SIGSEGV);
+                    }
                 }
             };
         }

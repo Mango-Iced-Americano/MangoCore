@@ -4,7 +4,7 @@ use crate::{
         MEMORY_HIGH_BASE, MEMORY_HIGH_BASE_VPN, MEMORY_SIZE, PAGE_SIZE, PAGE_SIZE_BITS, PALEN,
         VA_MASK, VPN_SEG_MASK,
     },
-    mm::{address::*, frame_alloc, FrameTracker, MapPermission, PageTable, UserAccess},
+    mm::{address::*, frame_alloc, FrameTracker, MapPermission, MemoryError, PageTable, UserAccess},
 };
 use _core::convert::TryFrom;
 use alloc::{sync::Arc, vec::Vec};
@@ -202,7 +202,10 @@ impl LAFlexPageTable {
     }
     /// Find the page in the page table, creating the page on the way if not exists.
     /// Note: It does NOT create the terminal node. The caller must verify its validity and create according to his own needs.
-    fn find_pte_create(&mut self, vpn: VirtPageNum) -> Option<&mut LAFlexPageTableEntry> {
+    fn find_pte_create(
+        &mut self,
+        vpn: VirtPageNum,
+    ) -> Result<&mut LAFlexPageTableEntry, MemoryError> {
         //trace!("[find_pte_create] {:?}", vpn);
         let idxs = vpn.indexes::<3>();
         //log::trace!("[find_pte_create] idxs:{:?}", idxs);
@@ -210,20 +213,26 @@ impl LAFlexPageTable {
         let mut pte = &mut ppn.get_pte_array::<LAFlexPageTableEntry>()[idxs[0]];
 
         if !pte.is_valid() {
-            let frame = frame_alloc().unwrap();
+            self.frames
+                .try_reserve(1)
+                .map_err(|_| MemoryError::OutOfMemory)?;
+            let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
             *pte = LAFlexPageTableEntry::new(frame.ppn, LAPTEFlagBits::V);
             self.frames.push(frame);
         }
         ppn = PhysAddr::from((pte.ppn().0 << 12) | MEMORY_HIGH_BASE).floor();
         pte = &mut ppn.get_pte_array::<LAFlexPageTableEntry>()[idxs[1]];
         if !pte.is_valid() {
-            let frame = frame_alloc().unwrap();
+            self.frames
+                .try_reserve(1)
+                .map_err(|_| MemoryError::OutOfMemory)?;
+            let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
             *pte = LAFlexPageTableEntry::new(frame.ppn, LAPTEFlagBits::V);
             self.frames.push(frame);
         }
         ppn = PhysAddr::from((pte.ppn().0 << 12) | MEMORY_HIGH_BASE).floor();
         pte = &mut ppn.get_pte_array::<LAFlexPageTableEntry>()[idxs[2]];
-        Some(pte)
+        Ok(pte)
     }
     /// Find and return reference the page table entry denoted by `vpn`, `None` if not found or invalid.
     fn find_pte_refmut(&self, vpn: VirtPageNum) -> Option<&mut LAFlexPageTableEntry> {
@@ -335,10 +344,17 @@ impl PageTable for LAFlexPageTable {
     /// # Exceptions
     /// Panics if the `vpn` is mapped.
     #[allow(unused)]
-    fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: MapPermission) {
-        let pte = self.find_pte_create(vpn).unwrap();
+    fn try_map(
+        &mut self,
+        vpn: VirtPageNum,
+        ppn: PhysPageNum,
+        flags: MapPermission,
+    ) -> Result<(), MemoryError> {
+        let pte = self.find_pte_create(vpn)?;
         //log::trace!("[laflex::map] vpn: {:?}, ppn:{:?}", vpn, ppn);
-        debug_assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
+        if pte.is_valid() {
+            return Err(MemoryError::AlreadyMapped);
+        }
         let mut flag = LAPTEFlagBits::V | LAPTEFlagBits::MAT_CC;
         if !flags.contains(MapPermission::R) {
             flag |= LAPTEFlagBits::NR;
@@ -357,6 +373,7 @@ impl PageTable for LAFlexPageTable {
         //log::trace!("[laflex::map] pre_wr");
         *pte = pte_new;
         tlb_invalidate();
+        Ok(())
     }
     #[allow(unused)]
     /// Unmap the `vpn` to `ppn` with the `flags`.
