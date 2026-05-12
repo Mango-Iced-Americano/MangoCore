@@ -26,3 +26,8 @@ sdcard-rv.img
 WORK_LOG.md
 EXPERIENCE.md
 .aider*
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo

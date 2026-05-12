@@ -451,6 +451,7 @@ fn load_runtime_config() -> RuntimeConfig {
     if !cfg.ltp_include.is_empty() {
         println!("[initproc] LTP include list: {:?}", cfg.ltp_include);
     }
+    println!("[initproc] LTP exclude musl: {:?}, glibc: {:?}", cfg.ltp_exclude_musl, cfg.ltp_exclude_glibc);
     cfg
 }
 
@@ -850,8 +851,16 @@ fn run_ltp_binaries(
             }
 
             println!("RUN LTP CASE {}", name);
-            // CWD 为 /musl，二进制在 ltp/testcases/bin/xxx
-            let cmd = format!("./ltp/testcases/bin/{}", name);
+            // CWD 为 /musl 或 /glibc，二进制在 ltp/testcases/bin/xxx
+            // LTP shell 脚本（如 gzip_tests.sh）通过 `. tst_test.sh` 引入
+            // LTP 核心库。POSIX 规定 dot 无斜杠时在 PATH 中搜索，因此必须
+            // 将 ltp/testcases/bin 加入 PATH。同时设置 LTPROOT 以兼容 LTP
+            // 内部路径解析逻辑。musl/glibc 使用各自目录下的 ltp，自然不同。
+            let ltp_root_abs = format!("{}/ltp", log_dir);
+            let cmd = format!(
+                "export LTPROOT=\"{}\" && export PATH=\"{}/testcases/bin:$PATH\" && ./ltp/testcases/bin/{}",
+                ltp_root_abs, ltp_root_abs, name
+            );
             let ret = run_bash_cmd(&cmd, environ);
             let exit_code = exit_code_from_waitpid_status(ret);
             println!("FAIL LTP CASE {} : {}", name, exit_code);

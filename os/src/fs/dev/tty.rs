@@ -302,7 +302,7 @@ impl File for Teletype {
     }
 
     fn get_size(&self) -> usize {
-        todo!()
+        0
     }
 
     fn get_stat(&self) -> Stat {
@@ -330,7 +330,7 @@ impl File for Teletype {
     }
 
     fn get_dirtree_node(&self) -> Option<Arc<DirectoryTreeNode>> {
-        todo!()
+        None
     }
 
     fn open(&self, flags: crate::fs::layout::OpenFlags, special_use: bool) -> Arc<dyn File> {
@@ -349,18 +349,18 @@ impl File for Teletype {
     }
 
     fn create(&self, name: &str, file_type: DiskInodeType) -> Result<Arc<dyn File>, isize> {
-        todo!()
+        Err(ENOTDIR)
     }
 
     fn link_child(&self, name: &str, child: &Self) -> Result<(), isize>
     where
         Self: Sized,
     {
-        todo!()
+        Err(ENOTDIR)
     }
 
     fn unlink(&self, delete: bool) -> Result<(), isize> {
-        todo!()
+        Err(ENOTDIR)
     }
 
     fn get_dirent(&self, _count: usize) -> Result<alloc::vec::Vec<Dirent>, isize> {
@@ -372,23 +372,23 @@ impl File for Teletype {
     }
 
     fn modify_size(&self, diff: isize) -> Result<(), isize> {
-        todo!()
+        Ok(())
     }
 
     fn truncate_size(&self, new_size: usize) -> Result<(), isize> {
-        todo!()
+        Err(EINVAL)
     }
 
     fn set_timestamp(&self, ctime: Option<usize>, atime: Option<usize>, mtime: Option<usize>) {
-        todo!()
+        // TTY is a character device, timestamps are not meaningful.
     }
 
     fn get_single_cache(&self, offset: usize) -> Result<Arc<Mutex<crate::fs::PageCache>>, ()> {
-        todo!()
+        Err(())
     }
 
     fn get_all_caches(&self) -> Result<alloc::vec::Vec<Arc<Mutex<crate::fs::PageCache>>>, ()> {
-        todo!()
+        Err(())
     }
 
     fn oom(&self) -> usize {
@@ -446,12 +446,15 @@ impl File for Teletype {
                 copy_from_user(token, argp as *mut WinSize, &mut inner.winsize);
                 SUCCESS
             }
-            _ => todo!(),
+            _ => {
+                warn!("[tty_ioctl] unsupported ioctl cmd: {:?} ({:#X})", TeletypeCommand::from_primitive(cmd), cmd);
+                ENOTTY
+            }
         }
     }
 
     fn fcntl(&self, cmd: u32, arg: u32) -> isize {
-        todo!()
+        EINVAL
     }
 }
 

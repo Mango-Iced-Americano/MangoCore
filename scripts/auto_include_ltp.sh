@@ -299,11 +299,16 @@ while [[ "${round}" -le "${MAX_ROUNDS}" ]]; do
                         current_libc="glibc"
                         ;;
                     *TPASS*)
-                        case_has_tpass=true
+                        # 延迟 TPASS 可能属于上一个 case（如 growfiles 的 TPASS
+                        # 出现在 gzip_tests.sh 的 RUN 之后），必须按 case 名匹配
+                        tpass_case="${line%%[[:space:]]*}"
+                        if [[ "${tpass_case}" == "${current_case}" ]]; then
+                            case_has_tpass=true
+                        fi
                         ;;
-                    *panicked\ at*|*HEAP\ ALLOCATION\ FAILED*)
+                    *panicked\ at*|*HEAP\ ALLOCATION\ FAILED*|*Exception*)
                         panic=1
-                        log "PANIC detected, case=${current_case}"
+                        log "PANIC/KERNEL EXCEPTION detected, case=${current_case}"
                         break 2
                         ;;
                 esac
@@ -334,20 +339,15 @@ while [[ "${round}" -le "${MAX_ROUNDS}" ]]; do
     kill_run
 
     # ---- 补读 kill_run 后可能遗漏的日志行（tee 退出前刷盘） ----
-    # 注意：必须用 here-string 而非管道，否则变量赋值在子 shell 中丢失
+    # 注意：必须用 here-string 而非管道，否则变量赋值在 sub shell 中丢失
+    # 补读区域只检测 panic/exception，不修改 case_has_tpass / current_case
     {
         total_lines=$(wc -l < "${log_file}" 2>/dev/null | tr -d ' ' || echo 0)
         if [[ -n "${total_lines}" ]] && (( total_lines > last_line )); then
             remaining=$(tail -n +"$((last_line + 1))" "${log_file}" 2>/dev/null || true)
             while IFS= read -r line; do
                 case "${line}" in
-                    *RUN\ LTP\ CASE\ *)
-                        current_case="${line#*RUN LTP CASE }"
-                        case_ran=true
-                        case_has_tpass=false
-                        ;;
-                    *TPASS*)  case_has_tpass=true ;;
-                    *panicked\ at*|*HEAP\ ALLOCATION\ FAILED*) panic=1 ;;  # 补读区域不 break（已 kill），仅标记
+                    *panicked\ at*|*HEAP\ ALLOCATION\ FAILED*|*Exception*) panic=1 ;;
                 esac
             done <<< "${remaining}"
             last_line=${total_lines}

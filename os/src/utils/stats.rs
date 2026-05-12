@@ -9,7 +9,7 @@ use crate::task::{current_task, procs_count, task_manager_counts, zombie_count};
 
 /// 是否启用资源统计输出
 /// 改为 false 即可一行关闭
-const STATS_ENABLED: bool = true;
+const STATS_ENABLED: bool = false;
 
 /// 打印当前内核资源统计信息
 ///
