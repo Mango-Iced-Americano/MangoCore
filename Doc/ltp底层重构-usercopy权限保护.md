@@ -360,7 +360,148 @@ let preserved = read_exact_stack(fds[0], &mut got) && got[0] == 88;
 173585b9966cd42a044d71f9ab4b3dde5826508ff77370bead8041d653f56bed  /app/sdcard-la.img
 ```
 
-## 9. 完整测试代码
+## 9. la64 COW/Lazy Panic 补丁补充
+
+### 9.1 问题现象
+
+在 user-copy 权限重构之后，双架构全量测试中发现 la64 `libcbench` 会触发一个新的内核 panic。关键日志如下：
+
+```text
+[mprotect] addr: 1FFFFFD000, len: 40000, prot: R | W | U
+[mprotect] Some pages are not mapped, is it caused by lazy alloc?
+[copy_on_write] mapped COW page has no resident frame: vpn=VPN(0x200003C), state=Unallocated, area=MapArea { interval: LinearMap { vpn_range: SimpleRange { l: VPN(0x1FFFFFD), r: VPN(0x200003D) }, active: 1, compressed: 0, swapped: 0 }, map_type: Framed, map_perm: R | W | U, map_file: "no" }
+[kernel] panicked at 'internal error: entered unreachable code', src/mm/memory_set.rs:1385:14
+```
+
+这不是普通 user-copy 权限检查失败，而是 VM 内部不变量被破坏后，`check_page_fault` 又把这种状态当成“不可能”处理，最终升级成 kernel panic。
+
+### 9.2 被破坏的不变量
+
+对匿名 private `MapArea`，页表和 `MapArea.inner.frames` 应该满足以下关系：
+
+| frame 状态 | 页表状态 | 后续 fault 行为 |
+| --- | --- | --- |
+| `Frame::Unallocated` | 不应有有效 leaf PTE | 走 lazy zero allocation |
+| `Frame::InMemory` | 可以有有效 PTE | Store fault 可走 COW |
+| `Compressed/SwappedOut` | PTE 应能配合恢复路径 | 走 decompress/swap-in |
+
+出问题时的状态是：
+
+```text
+page_table.is_mapped(vpn) == true
+area.inner.frames[vpn] == Frame::Unallocated
+```
+
+旧 `do_page_fault(Store)` 只看 `page_table.is_mapped(vpn)`。只要页表里有有效 PTE，它就认为这是“已经有 resident frame 的 private 页”，然后进入 `copy_on_write()`。但当前 `MapArea` 里没有 COW 源 frame，于是 `copy_on_write()` 返回 `MemoryError::NotMapped`，再被 `check_page_fault` 的 `_ => unreachable!()` 放大成 panic。
+
+### 9.3 触发链路
+
+这次 la64 更容易触发，与 la64 用户地址布局和 libcbench/glibc pthread 栈路径有关：
+
+```text
+la64:
+USR_MMAP_BASE = 0x1c00000000
+USR_MMAP_END  = 0x1fffffd000
+TRAP_CONTEXT_BASE = 0x1fffffe000
+trap_cx_bottom_from_tid(1) = 0x1fffffd000
+```
+
+旧日志里的异常区域是：
+
+```text
+mprotect addr=0x1fffffd000 len=0x40000
+fault vpn=0x200003c
+area range=[0x1fffffd, 0x200003d)
+```
+
+也就是说，异常区域从 la64 mmap 顶部附近开始，贴近甚至越过 trap context/signal trampoline 相邻区域。`libcbench` 的 glibc pthread 用例会反复走线程栈、`mprotect` 和 clone 相关路径，因此更容易把这个布局问题放大出来。
+
+rv64 当前没有触发同样 panic，并不代表没有同类风险。rv64 `libcbench` 中对应 pthread/clone 参数主要落在 `0x6010xxxx/0x6014xxxx`，处于普通 `MMAP_BASE=0x60000000..0x80000000` 区间，没有走到 la64 高端 mmap/trap context 交界路径。
+
+### 9.4 本次补丁内容
+
+本次补丁主要是补强 VM 的防线，避免同类不一致状态继续进入 COW 和 kernel panic：
+
+1. `check_page_fault`
+   - `MemoryError::NotMapped` 不再进入 `unreachable!`
+   - syscall/user-copy fault 路径统一返回 `-EFAULT`
+   - 其他非预期 `MemoryError` 打 warn 后返回 `-EFAULT`
+
+2. `MapArea` / `LinearMap`
+   - 新增 `is_unallocated`
+   - 新增 `frame_is_unallocated`
+   - 新增 `clear_stale_pte`
+   - 用于显式识别和清理 “lazy 元数据仍是 `Unallocated`，但页表残留有效 PTE” 的状态
+
+3. `mprotect`
+   - 对 `Unallocated` lazy 页不再强行修改 PTE flags
+   - 如果发现 lazy 页残留有效 PTE，则清掉 stale PTE
+   - 避免 `mprotect(PROT_WRITE)` 后把 lazy 页伪装成可 COW 的 resident 页
+
+4. `do_page_fault(Store)`
+   - private 匿名页如果出现 `PTE valid + Frame::Unallocated`
+   - 先清掉 stale PTE
+   - 对匿名页重新走 lazy zero allocation
+   - 对 file-backed 页不粗暴补零，返回 `NotMapped`，因为文件映射需要按 offset、EOF 和 page cache 语义处理
+
+这段逻辑的目的不是让所有异常状态都“静默成功”，而是把匿名 lazy 页恢复到可解释的状态：没有 resident frame 就不能走 COW，只能重新按 lazy 页分配。
+
+### 9.5 补丁验证
+
+补丁后重新验证了双架构构建：
+
+```text
+make -C /app/os rv64-kernel-build-only MODE=release LOG=off
+make -C /app/os la64-kernel-build-only MODE=release LOG=off BLK_MODE=virt_pci
+```
+
+结果：
+
+| 项目 | 结果 |
+| --- | --- |
+| rv64 release kernel build | 通过 |
+| la64 release kernel build | 通过 |
+| rv64 libcbench | `PASS=1 FAIL=0` |
+| la64 libcbench | 不再出现 `copy_on_write ... Unallocated` 后接 kernel panic |
+| rv64 user-copy 临时回归 | musl/glibc 两次 `USERCOPY_ACCESS PASS` |
+| la64 user-copy 临时回归 | musl/glibc 两次 `USERCOPY_ACCESS PASS` |
+
+la64 `libcbench` 仍被 `run_test` 判 fail，但失败点已经不是这次的内核 panic，而是既有的 musl 60 秒 timeout 和若干用户态异常日志。这个问题需要单独分析，不应和本次 COW/lazy panic 混在一起。
+
+### 9.6 仍然存在的不足
+
+本次补丁是必要的防御性修复，但还不是完整根治。当前内核对 “MapArea 元数据与页表 PTE 一致性” 的维护仍存在结构性漏洞：
+
+1. la64 mmap 顶部和多线程 trap context 区域靠得太近
+   - `USR_MMAP_END` 与 `trap_cx_bottom_from_tid(1)` 相邻
+   - 多线程场景中 trap context 会向下分配，和高端 mmap 区域存在边界设计风险
+
+2. `mmap` 缺少架构上界检查
+   - 非 `MAP_FIXED` 合并已有匿名 private area 时，只检查单个 `MapArea` 不超过 1GB
+   - 没有强制 `start_va + len <= USR_MMAP_END`
+
+3. `mmap` / `insert_framed_area` 缺少统一 overlap 校验
+   - 代码注释假设没有冲突
+   - 新 `MapArea` 只按起始地址插入 `areas`
+   - 没有证明新区间不覆盖 trap context、signal trampoline 或已有 `MapArea`
+
+4. `mprotect` 假设目标 range 完全落在单个非重叠 `MapArea`
+   - 它只找包含 `start_vpn` 的第一个 area
+   - 如果此前已经存在重叠区域，就可能继续放大页表和元数据不一致
+
+5. `do_page_fault` 旧逻辑过度信任 PTE
+   - 以前把 `PTE valid` 等同于“当前 `MapArea` 拥有 resident frame”
+   - 这在重叠区域或 stale PTE 场景下不成立
+
+后续更彻底的修复方向应该是：
+
+1. 明确 la64 用户 mmap、用户栈、trap context、signal trampoline 的边界和 guard gap
+2. `mmap` 对所有非 `MAP_FIXED` 区域做上界检查和全局 overlap 检查
+3. `MAP_FIXED` 的 `munmap + insert` 必须确认目标范围完整释放
+4. `mprotect` 支持跨多个 `MapArea` 或在遇到跨区间时返回符合 Linux 语义的错误
+5. 在 debug/log 模式下增加 VM invariant check，尽早发现 `Frame::Unallocated + valid PTE`
+
+## 10. 完整测试代码
 
 临时测试文件：`user/src/bin/usercopy_access.rs`
 
@@ -901,8 +1042,10 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
 }
 ```
 
-## 10. 结论
+## 11. 结论
 
 这次重构修复的不是单个 syscall 的局部 bug，而是 user-copy 模型的权限边界问题。旧模型把“地址能翻译”误当成“访问合法”，因此所有通过物理页切片写用户页的路径都可能绕过 `mprotect`、COW 和 PTE 权限保护。新模型把访问方向显式传入翻译层，并在返回物理地址前统一做范围、PTE 用户权限、读写权限和 fault/COW 检查。
 
 同一份回归测试在修改后 rv64/la64、musl/glibc 全部通过；在原始 HEAD 旧内核上双架构都会卡死在第一个只读页输出用例，直接证明了旧实现会写穿只读保护并消费 pipe 数据。
+
+补充的 la64 COW/lazy panic 修复说明了另一个层面的风险：user-copy 权限模型正确之后，底层 VM 仍必须维护 `MapArea` 元数据和页表 PTE 的一致性。本次补丁已经避免 stale PTE 误入 COW 并触发 kernel panic，但 mmap/mprotect 的边界和 overlap 校验仍需要后续继续收紧。

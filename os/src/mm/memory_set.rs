@@ -399,6 +399,21 @@ impl<T: PageTable> MemorySet<T> {
                         let ppn = self.page_table.translate(vpn).unwrap();
                         Ok(ppn.offset(addr.page_offset()))
                     } else {
+                        // 修复lazy元数据和pte不一致
+                        if area.frame_is_unallocated(vpn) {
+                            warn!(
+                                "[do_page_fault] clear stale lazy pte: addr={:?}, vpn={:?}, area={:?}",
+                                addr, vpn, area
+                            );
+                            area.clear_stale_pte(&mut self.page_table, vpn);
+                            if area.map_file.is_none() {
+                                let allocated_ppn =
+                                    area.map_one_zeroed_unchecked(&mut self.page_table, vpn);
+                                debug!("[do_page_fault] addr: {:?}, solution: lazy alloc", addr);
+                                return Ok(allocated_ppn.offset(addr.page_offset()));
+                            }
+                            return Err(MemoryError::NotMapped);
+                        }
                         // Whoever triggers this fault shall cause the area to be copied into a new area.
                         let allocated_ppn = area.copy_on_write(&mut self.page_table, vpn)?;
                         debug!("[do_page_fault] addr: {:?}, solution: copy on write", addr);
@@ -1104,6 +1119,16 @@ impl<T: PageTable> MemorySet<T> {
                     prot - MapPermission::W
                 };
                 for vpn in area.inner.vpn_range {
+                    if area.frame_is_unallocated(vpn) {
+                        if area.clear_stale_pte(page_table, vpn) {
+                            warn!(
+                                "[mprotect] clear stale lazy pte: vpn={:?}, area={:?}",
+                                vpn, area
+                            );
+                        }
+                        has_unmapped_page = true;
+                        continue;
+                    }
                     // Clear W prot, or CoW pages may be written unexpectedly.
                     // And those pages will gain W prot by CoW.
                     if let Err(_) = page_table.set_pte_flags(vpn, actual_prot) {
@@ -1379,9 +1404,16 @@ pub fn check_page_fault(addr: VirtAddr, access: FaultAccess) -> Result<PhysAddr,
         Ok(pa) => return Ok(pa),
         Err(MemoryError::BeyondEOF)
         | Err(MemoryError::NoPermission)
-        | Err(MemoryError::BadAddress) => {
+        | Err(MemoryError::BadAddress)
+        | Err(MemoryError::NotMapped) => {
             return Err(EFAULT);
         }
-        _ => unreachable!(),
+        Err(err) => {
+            warn!(
+                "[check_page_fault] unexpected error: {:?}, addr={:?}, access={:?}",
+                err, addr, access
+            );
+            return Err(EFAULT);
+        }
     };
 }

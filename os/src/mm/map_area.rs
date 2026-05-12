@@ -242,6 +242,12 @@ impl LinearMap {
             None => "OutOfRange",
         }
     }
+    pub fn is_unallocated(&self, key: &VirtPageNum) -> bool {
+        let Some(idx) = key.0.checked_sub(self.vpn_range.get_start().0) else {
+            return false;
+        };
+        matches!(self.frames.get(idx), Some(Frame::Unallocated))
+    }
     /// # Warning
     /// a key which exceeds the end of `vpn_range` would cause panic
     pub fn alloc_in_memory(&mut self, key: VirtPageNum, value: Arc<FrameTracker>) {
@@ -472,6 +478,22 @@ impl MapArea {
             map_perm: another.map_perm,
             map_file: another.map_file.clone(),
             flags: another.flags,
+        }
+    }
+    pub fn frame_is_unallocated(&self, vpn: VirtPageNum) -> bool {
+        self.inner.is_unallocated(&vpn)
+    }
+    pub fn clear_stale_pte<T: PageTable>(
+        &self,
+        page_table: &mut T,
+        vpn: VirtPageNum,
+    ) -> bool {
+        // lazy页不应该保留有效pte
+        if page_table.is_mapped(vpn) {
+            page_table.unmap(vpn);
+            true
+        } else {
+            false
         }
     }
     /// Create `MapArea` from `Vec<Arc<FrameTracker>>`. This function should only be used to
