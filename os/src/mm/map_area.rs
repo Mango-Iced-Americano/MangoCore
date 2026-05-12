@@ -875,14 +875,23 @@ impl MapArea {
     pub fn into_two(&mut self, cut: VirtPageNum) -> Result<Self, ()> {
         let second_file = if let Some(file) = &self.map_file {
             let new_file = file.deep_clone();
+            let old_offset = file
+                .lseek(0, SeekWhence::SEEK_CUR)
+                .map_err(|_| ())?;
+            let new_offset = old_offset
+                .checked_add(
+                    VirtAddr::from(cut).0 - VirtAddr::from(self.inner.vpn_range.get_start()).0,
+                )
+                .ok_or(())?;
+            if new_offset > isize::MAX as usize {
+                return Err(());
+            }
             new_file
                 .lseek(
-                    (file.get_offset() + VirtAddr::from(cut).0
-                        - VirtAddr::from(self.inner.vpn_range.get_start()).0)
-                        as isize,
+                    new_offset as isize,
                     SeekWhence::SEEK_SET,
                 )
-                .unwrap();
+                .map_err(|_| ())?;
             Some(new_file)
         } else {
             None

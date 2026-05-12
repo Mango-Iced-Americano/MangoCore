@@ -1261,6 +1261,40 @@ pub fn sys_get_robust_list(pid: u32, head_ptr: *mut usize, len_ptr: *mut usize) 
     SUCCESS
 }
 
+fn parse_mmap_prot(prot: usize) -> Result<MapPermission, isize> {
+    const PROT_READ: usize = 0x1;
+    const PROT_WRITE: usize = 0x2;
+    const PROT_EXEC: usize = 0x4;
+    const PROT_ALLOWED: usize = PROT_READ | PROT_WRITE | PROT_EXEC;
+    if prot & !PROT_ALLOWED != 0 {
+        return Err(EINVAL);
+    }
+    let mut map_perm = MapPermission::U;
+    if prot & PROT_READ != 0 {
+        map_perm |= MapPermission::R;
+    }
+    if prot & PROT_WRITE != 0 {
+        // 写权限在页表里需要带读权限，否则部分架构会反复页故障
+        map_perm |= MapPermission::R | MapPermission::W;
+    }
+    if prot & PROT_EXEC != 0 {
+        map_perm |= MapPermission::X;
+    }
+    Ok(map_perm)
+}
+
+fn parse_mmap_flags(flags: usize) -> Result<MapFlags, isize> {
+    let flags = MapFlags::from_bits(flags).ok_or(EINVAL)?;
+    let type_bits = flags.bits() & MapFlags::MAP_TYPE.bits();
+    if type_bits != MapFlags::MAP_SHARED.bits()
+        && type_bits != MapFlags::MAP_PRIVATE.bits()
+        && type_bits != MapFlags::MAP_SHARED_VALIDATE.bits()
+    {
+        return Err(EINVAL);
+    }
+    Ok(flags)
+}
+
 pub fn sys_mmap(
     start: usize,
     len: usize,
@@ -1271,8 +1305,14 @@ pub fn sys_mmap(
 ) -> isize {
     let task = current_task().unwrap();
     let mut memory_set = task.vm.lock();
-    let prot = MapPermission::from_bits(((prot as u8) << 1) | (1 << 4)).unwrap();
-    let flags = MapFlags::from_bits(flags).unwrap();
+    let prot = match parse_mmap_prot(prot) {
+        Ok(prot) => prot,
+        Err(errno) => return errno,
+    };
+    let flags = match parse_mmap_flags(flags) {
+        Ok(flags) => flags,
+        Err(errno) => return errno,
+    };
     info!(
         "[mmap] start:{:X}; len:{:X}; prot:{:?}; flags:{:?}; fd:{}; offset:{:X}",
         start, len, prot, flags, fd as isize, offset
@@ -1304,6 +1344,10 @@ pub fn sys_munmap(start: usize, len: usize) -> isize {
 
 pub fn sys_mprotect(addr: usize, len: usize, prot: usize) -> isize {
     let task = current_task().unwrap();
+    let prot = match parse_mmap_prot(prot) {
+        Ok(prot) => prot,
+        Err(errno) => return errno,
+    };
     let result = task.vm.lock().mprotect(addr, len, prot);
     match result {
         Ok(_) => SUCCESS,
