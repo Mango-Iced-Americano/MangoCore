@@ -12,6 +12,8 @@ testsuits
 
 testresult
 
+.parallel-test
+
 kernel-la
 
 kernel-rv

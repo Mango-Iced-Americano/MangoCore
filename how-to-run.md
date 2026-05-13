@@ -184,3 +184,46 @@ TEST_ARCH=both TEST_GROUPS=basic,busybox GROUP_TIMEOUT_SEC=300 bash run_test.sh
 - 脚本超时后会强制结束当前组并继续下一组。
 - PASS 判定不仅看 QEMU 返回码，还会校验 initproc 日志中 musl 和 glibc 对应组都 `exit_code=0`。
 - `run_test.sh` 会临时改镜像里的 `/os_test.conf`。跑完本地分组后，如果要准备提交，请按第 5 节重新注入根目录的提交默认配置。
+
+## 8. 双 Docker 并行跑双架构测试
+
+`TEST_ARCH=both bash run_test.sh` 仍然是在同一个工作目录里串行跑。由于构建和运行目标会切换 `rustup override`，并复制架构相关的 `lang_items.rs`，不要在同一个工作目录里直接后台并发跑 `rv64-run` 和 `la64-run`。
+
+需要并行跑双架构时，在宿主机项目根目录执行：
+
+```bash
+make docker-test-parallel
+```
+
+或直接执行脚本：
+
+```bash
+bash scripts/run_test_docker_parallel.sh
+```
+
+这个脚本会：
+
+1. 把当前仓库源码同步到 `.parallel-test/rv64` 和 `.parallel-test/la64` 两个隔离工作目录。
+2. 默认把根目录挂到容器 `/repo`，并在 `/app` 中用 symlink 指向 `sdcard-rv.img` / `sdcard-la.img` 和 `kernel-rv` / `kernel-la`，避免复制 4G 镜像。
+3. 启动两个 Docker 容器，并分别执行 `TEST_ARCH=rv64 bash run_test.sh` 与 `TEST_ARCH=la64 bash run_test.sh`。
+4. 将控制台日志和分组日志汇总到 `testresult/docker-parallel/<timestamp>/`。
+
+常用示例：
+
+```bash
+# 全量 12 组，双架构并行；建议给慢组更长超时
+GROUP_TIMEOUT_SEC=1800 make docker-test-parallel
+
+# 只并行跑部分组
+TEST_GROUPS=basic,busybox GROUP_TIMEOUT_SEC=300 make docker-test-parallel
+
+# 每个容器先编译当前架构内核，再跑测试
+PARALLEL_BUILD=1 GROUP_TIMEOUT_SEC=1800 make docker-test-parallel
+```
+
+说明：
+
+- 默认 Docker 镜像与 `docker-compose.yml` 保持一致：`zhouzhouyi/os-contest:20260104`。可用 `DOCKER_IMAGE=...` 覆盖。
+- `.parallel-test/` 会保留以便复用；需要清理时直接删除该目录即可。
+- 默认 `PARALLEL_IMAGE_MODE=bind`，不会复制 4G sdcard 镜像；测试会像普通 `run_test.sh` 一样直接修改根目录镜像里的 `/os_test.conf`。
+- 如需完全隔离根目录镜像，可设置 `PARALLEL_IMAGE_MODE=copy`，脚本会给两个工作目录各复制对应架构的镜像和 kernel。

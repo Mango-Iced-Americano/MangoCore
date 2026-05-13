@@ -222,3 +222,7 @@ done
 
 echo "=== SUMMARY ALL ARCH ==="
 echo "PASS=${total_pass_count} FAIL=${total_fail_count} TIMEOUT=${total_timeout_count} TOTAL=$(( ${#groups[@]} * ${#arch_list[@]} ))"
+
+if [[ "${total_fail_count}" -ne 0 || "${total_timeout_count}" -ne 0 ]]; then
+  exit 1
+fi
