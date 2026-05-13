@@ -236,35 +236,31 @@ impl<T: PageTable> MemorySet<T> {
     }
     #[cfg(feature = "loongarch64")]
     pub fn last_mmap_area_idx(&self) -> Option<usize> {
-        for (idx, area) in self.areas.iter().enumerate().rev().skip(SKIP_NUM) {
-            let start_vpn = area.get_start::<T>();
-            if start_vpn >= VirtAddr::from(USR_MMAP_END).into() {
-                continue;
-            } else if start_vpn >= VirtAddr::from(USR_MMAP_BASE).into()
-                && start_vpn < VirtAddr::from(USR_MMAP_END).into()
-            {
-                return Some(idx);
-            } else {
-                return None;
-            }
-        }
-        unreachable!();
+        let mmap_base = VirtAddr::from(USR_MMAP_BASE).floor();
+        let mmap_end = VirtAddr::from(USR_MMAP_END).floor();
+        self.areas
+            .iter()
+            .enumerate()
+            .filter(|(_, area)| {
+                let start_vpn = area.get_start::<T>();
+                start_vpn >= mmap_base && start_vpn < mmap_end
+            })
+            .max_by_key(|(_, area)| area.get_end::<T>().0)
+            .map(|(idx, _)| idx)
     }
     #[cfg(feature = "riscv")]
     pub fn last_mmap_area_idx(&self) -> Option<usize> {
-        for (idx, area) in self.areas.iter().enumerate().rev().skip(SKIP_NUM) {
-            let start_vpn = area.get_start::<T>();
-            if start_vpn >= VirtAddr::from(MMAP_END).into() {
-                continue;
-            } else if start_vpn >= VirtAddr::from(MMAP_BASE).into()
-                && start_vpn < VirtAddr::from(MMAP_END).into()
-            {
-                return Some(idx);
-            } else {
-                return None;
-            }
-        }
-        unreachable!();
+        let mmap_base = VirtAddr::from(MMAP_BASE).floor();
+        let mmap_end = VirtAddr::from(MMAP_END).floor();
+        self.areas
+            .iter()
+            .enumerate()
+            .filter(|(_, area)| {
+                let start_vpn = area.get_start::<T>();
+                start_vpn >= mmap_base && start_vpn < mmap_end
+            })
+            .max_by_key(|(_, area)| area.get_end::<T>().0)
+            .map(|(idx, _)| idx)
     }
 
     /// 返回最高处地址
@@ -841,52 +837,108 @@ impl<T: PageTable> MemorySet<T> {
             );
         })
     }
+    fn page_round_up_addr(addr: usize) -> Option<usize> {
+        addr.checked_add(PAGE_SIZE - 1)
+            .map(|addr| addr & !(PAGE_SIZE - 1))
+    }
+
     pub fn sbrk(&mut self, heap_pt: usize, heap_bottom: usize, increment: isize) -> usize {
-        let old_pt: usize = heap_pt;
-        let new_pt: usize = old_pt + increment as usize;
-        if increment > 0 {
-            let limit = heap_bottom + USER_HEAP_SIZE;
-            if new_pt > limit {
+        let old_pt = heap_pt;
+        let Some(limit) = heap_bottom.checked_add(USER_HEAP_SIZE) else {
+            warn!(
+                "[sbrk] heap limit overflow! heap_bottom: {:X}, heap_size: {:X}",
+                heap_bottom, USER_HEAP_SIZE
+            );
+            return old_pt;
+        };
+        let new_pt = if increment > 0 {
+            match old_pt.checked_add(increment as usize) {
+                Some(new_pt) => new_pt,
+                None => {
+                    warn!(
+                        "[sbrk] grow overflow! old_pt: {:X}, increment: {:X}",
+                        old_pt, increment
+                    );
+                    return old_pt;
+                }
+            }
+        } else if increment < 0 {
+            let Some(delta) = increment.checked_neg().map(|delta| delta as usize) else {
                 warn!(
-                    "[sbrk] out of the upperbound! upperbound: {:X}, old_pt: {:X}, new_pt: {:X}",
-                    limit, old_pt, new_pt
+                    "[sbrk] shrink overflow! old_pt: {:X}, increment: {:X}",
+                    old_pt, increment
                 );
                 return old_pt;
-            } else {
-                self.mmap(
-                    old_pt,
-                    increment as usize,
+            };
+            match old_pt.checked_sub(delta) {
+                Some(new_pt) => new_pt,
+                None => {
+                    warn!(
+                        "[sbrk] shrink underflow! old_pt: {:X}, decrement: {:X}",
+                        old_pt, delta
+                    );
+                    return old_pt;
+                }
+            }
+        } else {
+            return old_pt;
+        };
+
+        if new_pt < heap_bottom {
+            warn!(
+                "[sbrk] out of the lowerbound! lowerbound: {:X}, old_pt: {:X}, new_pt: {:X}",
+                heap_bottom, old_pt, new_pt
+            );
+            return old_pt;
+        }
+        if new_pt > limit {
+            warn!(
+                "[sbrk] out of the upperbound! upperbound: {:X}, old_pt: {:X}, new_pt: {:X}",
+                limit, old_pt, new_pt
+            );
+            return old_pt;
+        }
+
+        let Some(old_page_end) = Self::page_round_up_addr(old_pt) else {
+            warn!("[sbrk] old break round-up overflow! old_pt: {:X}", old_pt);
+            return old_pt;
+        };
+        let Some(new_page_end) = Self::page_round_up_addr(new_pt) else {
+            warn!("[sbrk] new break round-up overflow! new_pt: {:X}", new_pt);
+            return old_pt;
+        };
+
+        if new_pt > old_pt {
+            if new_page_end > old_page_end {
+                let len = new_page_end - old_page_end;
+                let ret = self.mmap(
+                    old_page_end,
+                    len,
                     MapPermission::R | MapPermission::W | MapPermission::U,
                     MapFlags::MAP_ANONYMOUS | MapFlags::MAP_FIXED | MapFlags::MAP_PRIVATE,
                     1usize.wrapping_neg(),
                     0,
                 );
-                trace!("[sbrk] heap area expanded to {:X}", new_pt);
-            }
-        } else if increment < 0 {
-            // shrink to `heap_bottom` would cause duplicated insertion of heap area in future
-            // so we simply reject it here
-            if new_pt <= heap_bottom {
-                warn!(
-                    "[sbrk] out of the lowerbound! lowerbound: {:X}, old_pt: {:X}, new_pt: {:X}",
-                    heap_bottom, old_pt, new_pt
-                );
-                return old_pt;
-            // attention that if the process never call sbrk before, it would have no heap area
-            // we only do shrinking when it does have a heap area
-            } else {
-                let start_va: usize = VirtAddr::from(new_pt).ceil().into();
-                let end_va: usize = VirtAddr::from(old_pt).ceil().into();
-                match self.munmap(start_va, end_va - start_va) {
-                    Ok(()) => {}
-                    Err(EINVAL) => {} // 消除以前从未sbrk导致上述注释no heap
-                    // area触发panic情况。请确保此处start_va必须对齐
-                    Err(err) => panic!("[sbrk] 堆收缩释放失败, err={}", err),
+                if ret < 0 {
+                    warn!(
+                        "[sbrk] heap grow mmap failed: start={:X}, len={:X}, err={}",
+                        old_page_end, len, ret
+                    );
+                    return old_pt;
                 }
             }
-            // we need to adjust `heap_pt` if it's not out of bound
-            // in spite of whether the process has a heap area
+            trace!("[sbrk] heap area expanded to {:X}", new_pt);
+        } else if old_page_end > new_page_end {
+            let len = old_page_end - new_page_end;
+            if let Err(err) = self.munmap(new_page_end, len) {
+                warn!(
+                    "[sbrk] heap shrink munmap failed: start={:X}, len={:X}, err={}",
+                    new_page_end, len, err
+                );
+                return old_pt;
+            }
         }
+
         new_pt
     }
     #[cfg(feature = "loongarch64")]

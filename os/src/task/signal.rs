@@ -127,7 +127,7 @@ bitflags! {
 impl Signals {
     // SIGILL | SIGKILL | SIGSEGV | SIGSTOP
     /// 不能被处理的信号
-    const CAN_NOT_BE_MASKED: Signals =
+    pub const CAN_NOT_BE_MASKED: Signals =
         Signals::from_bits_truncate(1 << 3 | 1 << 8 | 1 << 10 | 1 << 18);
     const EMPTY: Signals = Signals::empty();
     /// if 0 <= signum < 64, return `Ok(Signals)`, else return `Err()` (illeagal)
@@ -323,6 +323,19 @@ pub struct SignalStack {
 }
 
 impl SignalStack {
+    #[cfg(feature = "riscv")]
+    pub const MIN_SIZE: usize = 2048;
+    #[cfg(feature = "loongarch64")]
+    pub const MIN_SIZE: usize = 4096;
+
+    pub const fn disabled() -> Self {
+        SignalStack {
+            sp: 0,
+            flags: SignalStackFlags::DISABLE.bits,
+            size: 0,
+        }
+    }
+
     fn new(sp: usize, size: usize) -> Self {
         SignalStack {
             sp,
@@ -330,6 +343,55 @@ impl SignalStack {
             size,
         }
     }
+
+    pub fn is_disabled(&self) -> bool {
+        SignalStackFlags::from_bits_truncate(self.flags).contains(SignalStackFlags::DISABLE)
+    }
+
+    pub fn contains_sp(&self, sp: usize) -> bool {
+        if self.is_disabled() {
+            return false;
+        }
+        match self.sp.checked_add(self.size) {
+            Some(end) => self.sp <= sp && sp < end,
+            None => false,
+        }
+    }
+
+    pub fn top(&self) -> Option<usize> {
+        if self.is_disabled() {
+            None
+        } else {
+            self.sp.checked_add(self.size)
+        }
+    }
+
+    pub fn with_runtime_flags(mut self, current_sp: usize) -> Self {
+        if self.is_disabled() {
+            self.flags = SignalStackFlags::DISABLE.bits;
+        } else if self.contains_sp(current_sp) {
+            self.flags = SignalStackFlags::ONSTACK.bits;
+        } else {
+            self.flags &= !SignalStackFlags::ONSTACK.bits;
+            self.flags &= !SignalStackFlags::DISABLE.bits;
+        }
+        self
+    }
+}
+
+fn exit_current_with_sigsegv() -> ! {
+    exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
+}
+
+fn signal_frame_layout(base_sp: usize, stack_bottom: usize) -> Option<(usize, usize, usize, usize)> {
+    let ucontext_addr = base_sp.checked_sub(size_of::<UserContext>())? & !0x7;
+    let siginfo_addr = ucontext_addr.checked_sub(size_of::<SigInfo>())? & !0x7;
+    if siginfo_addr < stack_bottom {
+        return None;
+    }
+    let sig_sp = siginfo_addr;
+    let sig_size = sig_sp - stack_bottom;
+    Some((ucontext_addr, siginfo_addr, sig_sp, sig_size))
 }
 
 /// Signals whose SIG_DFL action is to ignore the signal.
@@ -411,54 +473,91 @@ pub fn do_signal() {
                 trace!("[do_signal] Ignore {:?} (SIG_IGN)", signal);
                 continue;
             }
-            let trap_cx = inner.get_trap_cx();
-            let a0_isize = trap_cx.gp.a0 as isize;
-            // if this syscall wants to restart
-            if a0_isize == -(SyscallErr::ERESTART as isize) {
-                // and if `SA_RESTART` is set
-                if act.flags.contains(SigActionFlags::SA_RESTART) {
-                    debug!("[do_signal] syscall will restart after sigreturn");
-                    // back to `ecall`
-                    trap_cx.gp.pc -= 4;
-                    // restore syscall parameter `a0`
-                    trap_cx.gp.a0 = trap_cx.origin_a0;
-                } else {
-                    debug!("[do_signal] syscall was interrupted");
-                    // will return EINTR after sigreturn
-                    trap_cx.gp.a0 = EINTR as usize;
+            {
+                let trap_cx = inner.get_trap_cx();
+                let a0_isize = trap_cx.gp.a0 as isize;
+                // if this syscall wants to restart
+                if a0_isize == -(SyscallErr::ERESTART as isize) {
+                    // and if `SA_RESTART` is set
+                    if act.flags.contains(SigActionFlags::SA_RESTART) {
+                        debug!("[do_signal] syscall will restart after sigreturn");
+                        // back to `ecall`
+                        trap_cx.gp.pc -= 4;
+                        // restore syscall parameter `a0`
+                        trap_cx.gp.a0 = trap_cx.origin_a0;
+                    } else {
+                        debug!("[do_signal] syscall was interrupted");
+                        // will return EINTR after sigreturn
+                        trap_cx.gp.a0 = EINTR as usize;
+                    }
                 }
             }
-            let ucontext_addr = (trap_cx.gp.sp - size_of::<UserContext>()) & !0x7;
-            let siginfo_addr = (ucontext_addr - size_of::<SigInfo>()) & !0x7;
-            // check if we have enough space on user stack
-            let sig_sp = siginfo_addr;
-            let sig_size = sig_sp.checked_sub(task.ustack_base - USER_STACK_SIZE);
-            if let Some(sig_size) = sig_size {
+            let current_sp = inner.get_trap_cx().gp.sp;
+            let alt_stack = inner.signal_stack;
+            let use_alt_stack = act.flags.contains(SigActionFlags::SA_ONSTACK)
+                && !alt_stack.is_disabled()
+                && !alt_stack.contains_sp(current_sp);
+            let (frame_base_sp, stack_bottom) = if use_alt_stack {
+                match alt_stack.top() {
+                    Some(top) => (top, alt_stack.sp),
+                    None => (current_sp, task.ustack_base - USER_STACK_SIZE),
+                }
+            } else {
+                (current_sp, task.ustack_base - USER_STACK_SIZE)
+            };
+            // check if we have enough space on selected user stack
+            if let Some((ucontext_addr, siginfo_addr, sig_sp, sig_size)) =
+                signal_frame_layout(frame_base_sp, stack_bottom)
+            {
                 let token = task.get_user_token();
+                let saved_sigmask = inner.sigmask;
+                let mcontext =
+                    unsafe { *(inner.get_trap_cx() as *const TrapContext).cast::<MachineContext>() };
+                let mut frame_stack = if use_alt_stack {
+                    alt_stack.with_runtime_flags(sig_sp)
+                } else {
+                    SignalStack::new(sig_sp, sig_size)
+                };
+                if use_alt_stack {
+                    frame_stack.flags = SignalStackFlags::ONSTACK.bits;
+                }
                 // In this case, signal hander have three parameters
                 if act.flags.contains(SigActionFlags::SA_SIGINFO) {
-                    copy_to_user(
+                    if copy_to_user(
                         token,
                         &UserContext {
                             flags: 0,
                             link: 0,
-                            stack: SignalStack::new(sig_sp, sig_size),
-                            sigmask: inner.sigmask,
+                            stack: frame_stack,
+                            sigmask: saved_sigmask,
                             __pad: [0; UserContext::PADDING_SIZE],
-                            mcontext: unsafe {
-                                *(trap_cx as *const TrapContext).cast::<MachineContext>()
-                            },
+                            mcontext,
                         },
                         ucontext_addr as *mut UserContext,
                     ) // push UserContext into user stack
-                    .unwrap(); //(This Result was NOT checked and may be usable if left unchecked.)
-                    trap_cx.gp.a2 = ucontext_addr; // a2 <- *UserContext
-                    copy_to_user(
+                    .is_err()
+                    {
+                        error!("[do_signal] Failed to write UserContext to user stack. Send SIGSEGV.");
+                        drop(inner);
+                        drop(sighand);
+                        drop(task);
+                        exit_current_with_sigsegv();
+                    }
+                    if copy_to_user(
                         token,
                         &SigInfo::new(signum, 0, 0),
                         siginfo_addr as *mut SigInfo,
                     ) // push SigInfo into user stack
-                    .unwrap(); //(This Result was NOT checked and may be usable if left unchecked.)
+                    .is_err()
+                    {
+                        error!("[do_signal] Failed to write SigInfo to user stack. Send SIGSEGV.");
+                        drop(inner);
+                        drop(sighand);
+                        drop(task);
+                        exit_current_with_sigsegv();
+                    }
+                    let trap_cx = inner.get_trap_cx();
+                    trap_cx.gp.a2 = ucontext_addr; // a2 <- *UserContext
                     trap_cx.gp.a1 = siginfo_addr; // a1 <- *SigInfo
                                                   // In this case, signal handler only have one parameter (a0 <- signum), so only copy something necessary
                                                   // To simplify the implementation of sigreturn, here we keep the same layout as above...
@@ -469,7 +568,7 @@ pub fn do_signal() {
                         (ucontext_addr + 2 * size_of::<usize>() + size_of::<SignalStack>())
                             as *mut Signals,
                     ) {
-                        Ok(sigmask_ref) => *sigmask_ref = inner.sigmask,
+                        Ok(sigmask_ref) => *sigmask_ref = saved_sigmask,
                         Err(_) => {
                             error!(
                                 "[do_signal] Failed to write sigmask to user stack! Send SIGSEGV."
@@ -477,13 +576,13 @@ pub fn do_signal() {
                             drop(inner);
                             drop(sighand);
                             drop(task);
-                            exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
+                            exit_current_with_sigsegv();
                         }
                     }
 
-                    copy_to_user(
+                    if copy_to_user(
                         token,
-                        (trap_cx as *const TrapContext).cast::<MachineContext>(),
+                        &mcontext,
                         (ucontext_addr
                             + 2 * size_of::<usize>()
                             + size_of::<SignalStack>()
@@ -491,8 +590,18 @@ pub fn do_signal() {
                             + UserContext::PADDING_SIZE)
                             as *mut MachineContext,
                     ) // push MachineContext into user stack
-                    .unwrap(); //(This Result was NOT checked and may be usable if left unchecked.)
+                    .is_err()
+                    {
+                        error!(
+                            "[do_signal] Failed to write MachineContext to user stack. Send SIGSEGV."
+                        );
+                        drop(inner);
+                        drop(sighand);
+                        drop(task);
+                        exit_current_with_sigsegv();
+                    }
                 }
+                let trap_cx = inner.get_trap_cx();
                 trap_cx.gp.a0 = signum; // a0 <- signum
                 trap_cx.set_sp(sig_sp); // update sp, because we've pushed something into stack
                 trap_cx.gp.ra = if act.flags.contains(SigActionFlags::SA_RESTORER) {
@@ -508,15 +617,19 @@ pub fn do_signal() {
                 drop(inner);
                 drop(sighand);
                 drop(task);
-                exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
+                exit_current_with_sigsegv();
             }
+            let (trace_ra, trace_sp) = {
+                let trap_cx = inner.get_trap_cx();
+                (trap_cx.gp.ra, trap_cx.gp.sp)
+            };
             trace!(
                 "[do_signal] signal: {:?}, signum: {:?}, handler: {:?} (ra: 0x{:X}, sp: 0x{:X})",
                 signal,
                 signum,
                 act.handler,
-                trap_cx.gp.ra,
-                trap_cx.gp.sp
+                trace_ra,
+                trace_sp
             );
             // mask some signals
             inner.sigmask |= if act.flags.contains(SigActionFlags::SA_NODEFER) {
@@ -587,6 +700,50 @@ pub fn do_signal() {
             }
         }
     }
+}
+
+pub fn sigaltstack(ss: *const SignalStack, old_ss: *mut SignalStack) -> isize {
+    let task = current_task().unwrap();
+    let token = task.get_user_token();
+    let new_stack = match try_get_from_user(token, ss) {
+        Ok(stack) => stack,
+        Err(errno) => return errno,
+    };
+    let mut inner = task.acquire_inner_lock();
+    let current_sp = inner.get_trap_cx().gp.sp;
+    let old_stack = inner.signal_stack.with_runtime_flags(current_sp);
+
+    if !old_ss.is_null() {
+        if copy_to_user(token, &old_stack, old_ss).is_err() {
+            return crate::syscall::errno::EFAULT;
+        }
+    }
+
+    if let Some(mut stack) = new_stack {
+        let flags = SignalStackFlags::from_bits_truncate(stack.flags);
+        let allowed = SignalStackFlags::DISABLE | SignalStackFlags::AUTODISARM;
+        if stack.flags & !allowed.bits != 0 || flags.contains(SignalStackFlags::ONSTACK) {
+            return crate::syscall::errno::EINVAL;
+        }
+        if inner.signal_stack.contains_sp(current_sp) {
+            return crate::syscall::errno::EPERM;
+        }
+        if flags.contains(SignalStackFlags::DISABLE) {
+            inner.signal_stack = SignalStack::disabled();
+        } else {
+            if stack.size < SignalStack::MIN_SIZE {
+                return crate::syscall::errno::ENOMEM;
+            }
+            if stack.sp.checked_add(stack.size).is_none() {
+                return crate::syscall::errno::ENOMEM;
+            }
+            stack.flags &= allowed.bits;
+            stack.flags &= !SignalStackFlags::DISABLE.bits;
+            stack.flags &= !SignalStackFlags::ONSTACK.bits;
+            inner.signal_stack = stack;
+        }
+    }
+    crate::syscall::errno::SUCCESS
 }
 
 bitflags! {

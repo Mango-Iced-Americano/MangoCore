@@ -553,10 +553,28 @@ pub fn sys_brk(brk_addr: usize) -> isize {
         inner.heap_pt = memory_set.sbrk(inner.heap_pt, inner.heap_bottom, 0);
     } else {
         let former_addr = memory_set.sbrk(inner.heap_pt, inner.heap_bottom, 0);
-        let grow_size: isize = if brk_addr < former_addr {
-            -((former_addr - brk_addr) as isize)
+        let grow_size = if brk_addr < former_addr {
+            let delta = former_addr - brk_addr;
+            if delta > isize::MAX as usize {
+                warn!(
+                    "[sys_brk] shrink delta too large: brk_addr={:X}, former_addr={:X}",
+                    brk_addr, former_addr
+                );
+                0
+            } else {
+                -(delta as isize)
+            }
         } else {
-            (brk_addr - former_addr) as isize
+            let delta = brk_addr - former_addr;
+            if delta > isize::MAX as usize {
+                warn!(
+                    "[sys_brk] grow delta too large: brk_addr={:X}, former_addr={:X}",
+                    brk_addr, former_addr
+                );
+                0
+            } else {
+                delta as isize
+            }
         };
         inner.heap_pt = memory_set.sbrk(inner.heap_pt, inner.heap_bottom, grow_size);
     }
@@ -821,7 +839,13 @@ bitflags! {
 ///   pid == 0  → wait for any child in the same process group (pgid)
 ///   pid < -1 → wait for any child whose pgid == |pid|
 pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) -> isize {
-    let option = WaitOption::from_bits(option).unwrap();
+    let option = match WaitOption::from_bits(option) {
+        Some(option) => option,
+        None => return EINVAL,
+    };
+    if option.bits() & !WaitOption::WNOHANG.bits() != 0 {
+        return EINVAL;
+    }
     info!("[sys_wait4] pid: {}, option: {:?}", pid, option);
     let task = current_task().unwrap();
     let token = task.get_user_token();
@@ -1447,6 +1471,10 @@ pub fn sys_sigtimedwait(set: usize, info: usize, timeout: usize) -> isize {
     )
 }
 
+pub fn sys_sigaltstack(ss: usize, old_ss: usize) -> isize {
+    sigaltstack(ss as *const SignalStack, old_ss as *mut SignalStack)
+}
+
 pub fn sys_sigreturn() -> isize {
     // mark not processing signal handler
     let task = current_task().unwrap();
@@ -1454,26 +1482,68 @@ pub fn sys_sigreturn() -> isize {
     let token = task.get_user_token();
     info!("[sys_sigreturn] pid: {}", task.pid.0);
 
-    let trap_cx = inner.get_trap_cx();
+    let sp = inner.get_trap_cx().gp.sp;
     // restore sigmask & trap context
-    let ucontext_addr = (trap_cx.gp.sp + size_of::<SigInfo>() + 0x7) & !0x7;
-    inner.sigmask = *translated_ref(
+    let ucontext_addr = match sp
+        .checked_add(size_of::<SigInfo>())
+        .and_then(|addr| addr.checked_add(0x7))
+    {
+        Some(addr) => addr & !0x7,
+        None => {
+            error!("[sys_sigreturn] invalid signal frame address, send SIGSEGV");
+            drop(inner);
+            drop(task);
+            exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
+        }
+    };
+    let sigmask_addr = match ucontext_addr
+        .checked_add(2 * size_of::<usize>())
+        .and_then(|addr| addr.checked_add(size_of::<SignalStack>()))
+    {
+        Some(addr) => addr,
+        None => {
+            error!("[sys_sigreturn] invalid sigmask address, send SIGSEGV");
+            drop(inner);
+            drop(task);
+            exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
+        }
+    };
+    let mcontext_addr = match sigmask_addr
+        .checked_add(size_of::<Signals>())
+        .and_then(|addr| addr.checked_add(crate::hal::UserContext::PADDING_SIZE))
+    {
+        Some(addr) => addr,
+        None => {
+            error!("[sys_sigreturn] invalid machine context address, send SIGSEGV");
+            drop(inner);
+            drop(task);
+            exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
+        }
+    };
+    let restored_sigmask = match translated_ref(token, sigmask_addr as *mut Signals) {
+        Ok(sigmask) => *sigmask - Signals::CAN_NOT_BE_MASKED,
+        Err(_) => {
+            error!("[sys_sigreturn] bad sigmask in signal frame, send SIGSEGV");
+            drop(inner);
+            drop(task);
+            exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
+        }
+    };
+    let trap_cx_ptr = inner.get_trap_cx() as *mut TrapContext;
+    if copy_from_user(
         token,
-        (ucontext_addr + 2 * size_of::<usize>() + size_of::<SignalStack>()) as *mut Signals,
+        mcontext_addr as *mut MachineContext,
+        trap_cx_ptr.cast::<MachineContext>(),
     )
-    .unwrap(); // restore sigmask
-    copy_from_user(
-        token,
-        (ucontext_addr
-            + 2 * size_of::<usize>()
-            + size_of::<SignalStack>()
-            + size_of::<Signals>()
-            + crate::hal::UserContext::PADDING_SIZE) as *mut MachineContext,
-        (trap_cx as *mut TrapContext).cast::<MachineContext>(),
-    )
-    .unwrap(); // restore trap_cx
-               // This should be `Ok(())`.
-    return trap_cx.gp.a0 as isize; // return a0: not modify any of trap_cx
+    .is_err()
+    {
+        error!("[sys_sigreturn] bad machine context in signal frame, send SIGSEGV");
+        drop(inner);
+        drop(task);
+        exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
+    }
+    inner.sigmask = restored_sigmask;
+    inner.get_trap_cx().gp.a0 as isize // return a0: not modify any of trap_cx
 }
 
 /// Get process times

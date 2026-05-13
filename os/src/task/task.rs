@@ -79,6 +79,8 @@ pub struct TaskControlBlockInner {
     pub sigmask: Signals,
     /// 待处理信号
     pub sigpending: Signals,
+    /// 备用信号栈，每线程独立
+    pub signal_stack: SignalStack,
     /// 陷阱上下文的物理页号
     pub trap_cx_ppn: PhysPageNum,
     /// 任务上下文
@@ -416,6 +418,7 @@ impl TaskControlBlock {
             inner: Mutex::new(TaskControlBlockInner {
                 sigmask: Signals::empty(),
                 sigpending: Signals::empty(),
+                signal_stack: SignalStack::disabled(),
                 trap_cx_ppn,
                 task_cx: TaskContext::goto_trap_return(kstack_top),
                 task_status: TaskStatus::Ready,
@@ -525,6 +528,8 @@ impl TaskControlBlock {
         inner.clear_child_tid = 0;
         // 重置robust_list
         inner.robust_list = RobustList::default();
+        // execve disables the alternate signal stack.
+        inner.signal_stack = SignalStack::disabled();
         // 更新堆指针
         inner.heap_bottom = program_break;
         inner.heap_pt = program_break;
@@ -676,6 +681,11 @@ impl TaskControlBlock {
                 heap_pt: parent_inner.heap_pt,
                 // clone
                 sigpending: parent_inner.sigpending.clone(),
+                signal_stack: if share_vm {
+                    SignalStack::disabled()
+                } else {
+                    parent_inner.signal_stack
+                },
                 // new
                 children: Vec::new(),
                 rusage: Rusage::new(),
