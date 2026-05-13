@@ -9,8 +9,9 @@ use log::*;
 use num_enum::FromPrimitive;
 
 use super::{
-    block_current_and_run_next, has_actionable_signal,
+    block_current_and_run_next_with_lock, has_actionable_signal,
     manager::{wait_with_timeout, WaitQueue},
+    TaskControlBlock,
 };
 
 #[allow(unused)]
@@ -74,18 +75,21 @@ pub struct Futex {
 }
 
 // Futex wait 只读用户 word
-pub fn do_futex_wait(futex_word: &u32, val: u32, timeout: Option<TimeSpec>) -> isize {
+pub fn do_futex_wait(
+    futex_word: &u32,
+    futex_key: usize,
+    val: u32,
+    timeout: Option<TimeSpec>,
+) -> isize {
     // 超时时间换成绝对时间
     let timeout = timeout.map(|t| t + TimeSpec::now());
 
-    // 地址当作等待队列 key
-    let futex_word_addr = futex_word as *const u32 as usize;
-
     // 拿当前任务
     let task = current_task().unwrap();
+    let futex_table = task.futex.clone();
 
     // 拿 futex 锁准备改等待队列
-    let mut futex = task.futex.lock();
+    let mut futex = futex_table.lock();
 
     // 持锁后再读一次，避免丢 wake
     if *futex_word != val {
@@ -99,7 +103,7 @@ pub fn do_futex_wait(futex_word: &u32, val: u32, timeout: Option<TimeSpec>) -> i
     }
 
     // 取出这个地址对应的等待队列
-    let mut wait_queue = if let Some(wait_queue) = futex.inner.remove(&futex_word_addr) {
+    let mut wait_queue = if let Some(wait_queue) = futex.inner.remove(&futex_key) {
         wait_queue
     } else {
         WaitQueue::new()
@@ -110,7 +114,7 @@ pub fn do_futex_wait(futex_word: &u32, val: u32, timeout: Option<TimeSpec>) -> i
     wait_queue.add_task(Arc::downgrade(&task));
 
     // 等待队列放回去
-    futex.inner.insert(futex_word_addr, wait_queue);
+    futex.inner.insert(futex_key, wait_queue);
 
     // 有超时就挂到定时队列
     if let Some(timeout) = timeout {
@@ -118,15 +122,14 @@ pub fn do_futex_wait(futex_word: &u32, val: u32, timeout: Option<TimeSpec>) -> i
         wait_with_timeout(Arc::downgrade(&task), timeout);
     }
 
-    // 睡前先放锁
-    drop(futex);
     drop(task);
 
-    // 阻塞当前任务并切走
-    block_current_and_run_next();
+    // 阻塞当前任务并切走；切为 Interruptible 并进入调度器队列后再释放 futex 锁。
+    block_current_and_run_next_with_lock(futex);
 
     // 醒来后重新拿当前任务
     let task = current_task().unwrap();
+    let timed_out = task.futex.lock().finish_wait(futex_key, &task);
 
     // 检查有没有信号打断
     {
@@ -141,7 +144,10 @@ pub fn do_futex_wait(futex_word: &u32, val: u32, timeout: Option<TimeSpec>) -> i
         }
     }
 
-    // 没有信号打断就成功
+    if timed_out {
+        return ETIMEDOUT;
+    }
+
     SUCCESS
 }
 
@@ -188,11 +194,25 @@ pub fn do_futex_wait_shared(
         trace!("[do_futex_wait_shared] sleep with timeout: {:?}", timeout);
         wait_with_timeout(Arc::downgrade(&task), timeout);
     }
-    drop(shared);
     drop(task);
-    block_current_and_run_next();
+    block_current_and_run_next_with_lock(shared);
     // 唤醒后检查信号
     let task = current_task().unwrap();
+    let timed_out = {
+        let mut shared = PROCESS_SHARED_FUTEX.lock();
+        let (removed_from_wait_queue, remove_wait_queue) = if let Some(wait_queue) =
+            shared.get_mut(&phys_key)
+        {
+            let removed = wait_queue.finish_wait(&task);
+            (removed, wait_queue.is_empty())
+        } else {
+            (false, false)
+        };
+        if remove_wait_queue {
+            shared.remove(&phys_key);
+        }
+        removed_from_wait_queue
+    };
     {
         let inner = task.acquire_inner_lock();
         let pending = inner.sigpending.difference(inner.sigmask);
@@ -203,6 +223,10 @@ pub fn do_futex_wait_shared(
             }
         }
     }
+    if timed_out {
+        return ETIMEDOUT;
+    }
+
     SUCCESS
 }
 
@@ -216,11 +240,11 @@ impl Futex {
     }
 
     /// 唤醒等待在指定 Futex 地址上的最多 val 个任务
-    pub fn wake(&mut self, futex_word_addr: usize, val: u32) -> isize {
-        if let Some(mut wait_queue) = self.inner.remove(&futex_word_addr) {
+    pub fn wake(&mut self, futex_key: usize, val: u32) -> isize {
+        if let Some(mut wait_queue) = self.inner.remove(&futex_key) {
             let ret = wait_queue.wake_at_most(val as usize);
             if !wait_queue.is_empty() {
-                self.inner.insert(futex_word_addr, wait_queue);
+                self.inner.insert(futex_key, wait_queue);
             }
             ret as isize
         } else {
@@ -228,17 +252,29 @@ impl Futex {
         }
     }
 
+    pub fn finish_wait(&mut self, futex_key: usize, task: &Arc<TaskControlBlock>) -> bool {
+        let mut removed_from_wait_queue = false;
+        let remove_wait_queue = if let Some(wait_queue) = self.inner.get_mut(&futex_key) {
+            removed_from_wait_queue = wait_queue.finish_wait(task);
+            wait_queue.is_empty()
+        } else {
+            false
+        };
+        if remove_wait_queue {
+            self.inner.remove(&futex_key);
+        }
+        removed_from_wait_queue
+    }
+
     /// 重新排列
-    pub fn requeue(&mut self, futex_word: &u32, futex_word_2: &u32, val: u32, val2: u32) -> isize {
-        let futex_word_addr = futex_word as *const u32 as usize;
-        let futex_word_addr_2 = futex_word_2 as *const u32 as usize;
+    pub fn requeue(&mut self, futex_key: usize, futex_key_2: usize, val: u32, val2: u32) -> isize {
         let wake_cnt = if val != 0 {
-            self.wake(futex_word_addr, val)
+            self.wake(futex_key, val)
         } else {
             0
         };
-        if let Some(mut wait_queue) = self.inner.remove(&futex_word_addr) {
-            let mut wait_queue_2 = if let Some(wait_queue) = self.inner.remove(&futex_word_addr_2) {
+        if let Some(mut wait_queue) = self.inner.remove(&futex_key) {
+            let mut wait_queue_2 = if let Some(wait_queue) = self.inner.remove(&futex_key_2) {
                 wait_queue
             } else {
                 WaitQueue::new()
@@ -254,10 +290,10 @@ impl Futex {
                 }
             }
             if !wait_queue.is_empty() {
-                self.inner.insert(futex_word_addr, wait_queue);
+                self.inner.insert(futex_key, wait_queue);
             }
             if !wait_queue_2.is_empty() {
-                self.inner.insert(futex_word_addr_2, wait_queue_2);
+                self.inner.insert(futex_key_2, wait_queue_2);
             }
             wake_cnt + requeue_cnt
         } else {

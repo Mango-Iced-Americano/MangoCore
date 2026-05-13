@@ -22,7 +22,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
 use core::sync::atomic::AtomicBool;
-use log::trace;
+use log::{trace, warn};
 use spin::{Mutex, MutexGuard};
 
 #[derive(Clone)]
@@ -590,7 +590,7 @@ impl TaskControlBlock {
         exit_signal: Signals,
     ) -> Result<Arc<TaskControlBlock>, MemoryError> {
         // ---- 保持父PCB锁
-        let mut parent_inner = self.acquire_inner_lock();
+        let parent_inner = self.acquire_inner_lock();
         // 复制用户空间（包括陷阱上下文）
         let share_vm = flags.contains(CloneFlags::CLONE_VM);
         let memory_set = if share_vm {
@@ -667,10 +667,9 @@ impl TaskControlBlock {
             } else {
                 Arc::new(Mutex::new(self.sighand.lock().clone()))
             },
-            futex: if flags.contains(CloneFlags::CLONE_SYSVSEM) {
+            futex: if share_vm {
                 self.futex.clone()
             } else {
-                // maybe should do clone here?
                 Arc::new(Mutex::new(Futex::new()))
             },
             wait_io_timer_pending: AtomicBool::new(false),
@@ -712,19 +711,6 @@ impl TaskControlBlock {
                 pending_oom_kill: false,
             }),
         });
-        // 添加到父进程或者祖父进程的子进程列表
-        if flags.contains(CloneFlags::CLONE_PARENT) || flags.contains(CloneFlags::CLONE_THREAD) {
-            if let Some(grandparent) = &parent_inner.parent {
-                grandparent
-                    .upgrade()
-                    .unwrap()
-                    .acquire_inner_lock()
-                    .children
-                    .push(task_control_block.clone());
-            }
-        } else {
-            parent_inner.children.push(task_control_block.clone());
-        }
         // 初始化陷阱上下文
         let trap_cx = task_control_block.acquire_inner_lock().get_trap_cx();
         // 共享 VM 时新分配的 trap context 为空，需要从父任务当前上下文复制。
@@ -750,6 +736,38 @@ impl TaskControlBlock {
         Ok(task_control_block)
         // ---- 释放父PCB锁
     }
+    /// Publish a successfully initialized clone into the waitable child tree.
+    /// `CLONE_THREAD` tasks are not waitable children and are only scheduled.
+    pub fn publish_clone_child(
+        self: &Arc<TaskControlBlock>,
+        child: Arc<TaskControlBlock>,
+        flags: CloneFlags,
+    ) {
+        if flags.contains(CloneFlags::CLONE_THREAD) {
+            return;
+        }
+        if flags.contains(CloneFlags::CLONE_PARENT) {
+            let parent = {
+                let child_inner = child.acquire_inner_lock();
+                child_inner.parent.as_ref().and_then(|parent| parent.upgrade())
+            };
+            if let Some(parent) = parent {
+                parent.acquire_inner_lock().children.push(child);
+            } else {
+                warn!("[publish_clone_child] CLONE_PARENT target parent is gone");
+            }
+        } else {
+            self.acquire_inner_lock().children.push(child);
+        }
+    }
+
+    /// Drop resources allocated for a clone that has not been published.
+    pub fn cleanup_unpublished_clone(&self, shared_vm: bool) {
+        if shared_vm {
+            self.vm.lock().dealloc_user_res(self.tid);
+        }
+    }
+
     /// 获取进程ID
     pub fn getpid(&self) -> usize {
         self.pid.0

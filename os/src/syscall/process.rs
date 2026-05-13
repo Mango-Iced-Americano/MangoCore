@@ -689,7 +689,10 @@ pub fn sys_clone(
     if flags.contains(CloneFlags::CLONE_PARENT_SETTID) {
         match translated_ref_write(parent.get_user_token(), ptid) {
             Ok(word) => *word = child.pid.0 as u32,
-            Err(errno) => return errno,
+            Err(errno) => {
+                child.cleanup_unpublished_clone(flags.contains(CloneFlags::CLONE_VM));
+                return errno;
+            }
         };
     }
     // todo: CLONE_CHILD_SETTID标志被设置，但是ctid指针为零，会出现地址错误，干脆全注释掉
@@ -705,6 +708,7 @@ pub fn sys_clone(
     if flags.contains(CloneFlags::CLONE_CHILD_CLEARTID) {
         child.acquire_inner_lock().clear_child_tid = ctid as usize;
     }
+    parent.publish_clone_child(child.clone(), flags);
     // add new task to scheduler
     add_task(child);
     new_pid as isize
@@ -1157,6 +1161,7 @@ pub fn sys_futex(
     let cmd = threads::FutexCmd::from_primitive(futex_op & 0x7fu32);
     let option = FutexOption::from_bits_truncate(futex_op);
     let is_private = option.contains(FutexOption::PRIVATE);
+    let private_key = uaddr as usize;
     if !is_private {
         trace!("[futex] process-shared futex, cmd={:?}", cmd);
     }
@@ -1194,13 +1199,12 @@ pub fn sys_futex(
                 do_futex_wait_shared(futex_word, val, timeout, phys_key)
             } else {
                 drop(task);
-                do_futex_wait(futex_word, val, timeout)
+                do_futex_wait(futex_word, private_key, val, timeout)
             }
         }
         FutexCmd::Wake => {
             if is_private {
-                let futex_word_addr = futex_word as *const u32 as usize;
-                task.futex.lock().wake(futex_word_addr, val)
+                task.futex.lock().wake(private_key, val)
             } else {
                 let vm = task.vm.lock();
                 let phys_key = match va_to_phys_key(&vm, uaddr as usize) {
@@ -1215,14 +1219,14 @@ pub fn sys_futex(
             if uaddr2.is_null() || uaddr2.align_offset(4) != 0 {
                 return EINVAL;
             }
-            let futex_word_2 = match translated_ref(token, uaddr2 as *const u32) {
+            let _futex_word_2 = match translated_ref(token, uaddr2 as *const u32) {
                 Ok(futex_word_2) => futex_word_2,
                 Err(errno) => return errno,
             };
             if is_private {
                 task.futex
                     .lock()
-                    .requeue(futex_word, futex_word_2, val, timeout as u32)
+                    .requeue(private_key, uaddr2 as usize, val, timeout as u32)
             } else {
                 let phys_key = {
                     let vm = task.vm.lock();
