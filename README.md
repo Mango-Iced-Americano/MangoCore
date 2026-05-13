@@ -79,8 +79,10 @@ rustup default nightly
 3. 切换 rust 版本
 
 ```bash
-rustup toolchain install nightly-2025-01-18-x86_64-unknown-linux-gnu
-rustup override set nightly-2025-01-18-x86_64-unknown-linux-gnu
+# 不指定 host，让 rustup 在 macOS 开发机上使用 macOS 工具链，
+# 在 Docker/Linux 中使用 Linux 工具链。
+rustup toolchain install nightly-2025-01-18
+rustup override set nightly-2025-01-18
 ```
 
 4. 安装相关软件包

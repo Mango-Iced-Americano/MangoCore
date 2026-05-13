@@ -6,7 +6,8 @@ use crate::hal::BLOCK_SZ;
 use crate::mm::{
     copy_from_user, copy_from_user_array, copy_to_user, copy_to_user_array, copy_to_user_string,
     translated_byte_buffer, translated_byte_buffer_append_to_existing_vec, translated_ref,
-    translated_refmut, translated_str, try_get_from_user, MapPermission, UserBuffer, VirtAddr,
+    translated_refmut, translated_str, try_get_from_user, MapPermission, UserAccess, UserBuffer,
+    VirtAddr,
 };
 use crate::syscall::utils::wait_io_core;
 use crate::task::{current_task, current_user_token, signal};
@@ -183,7 +184,7 @@ pub fn sys_getcwd(buf: usize, size: usize) -> isize {
     let token = task.get_user_token();
     let write_len = working_dir.len() + 1;
     let mut user_buf = UserBuffer::new({
-        match translated_byte_buffer(token, buf as *const u8, write_len) {
+        match translated_byte_buffer(token, buf as *const u8, write_len, UserAccess::Write) {
             Ok(buffer) => buffer,
             Err(errno) => return errno,
         }
@@ -239,7 +240,7 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
     let token = task.get_user_token();
     wait_io_core(
         || {
-            let user_buf = match translated_byte_buffer(token, buf as *const u8, count) {
+            let user_buf = match translated_byte_buffer(token, buf as *const u8, count, UserAccess::Write) {
                 Ok(buffer) => UserBuffer::new(buffer),
                 Err(errno) => return errno as isize,
             };
@@ -277,7 +278,7 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
     let token = task.get_user_token();
     wait_io_core(
         || {
-            let user_buf = match translated_byte_buffer(token, buf as *const u8, count) {
+            let user_buf = match translated_byte_buffer(token, buf as *const u8, count, UserAccess::Read) {
                 Ok(buffer) => UserBuffer::new(buffer),
                 Err(errno) => return errno as isize,
             };
@@ -303,7 +304,7 @@ pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
     file_descriptor.read_user(
         Some(offset),
         UserBuffer::new({
-            match translated_byte_buffer(token, buf as *const u8, count) {
+            match translated_byte_buffer(token, buf as *const u8, count, UserAccess::Write) {
                 Ok(buffer) => buffer,
                 Err(errno) => return errno,
             }
@@ -327,7 +328,7 @@ pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
     file_descriptor.write_user(
         Some(offset),
         UserBuffer::new({
-            match translated_byte_buffer(token, buf as *const u8, count) {
+            match translated_byte_buffer(token, buf as *const u8, count, UserAccess::Read) {
                 Ok(buffer) => buffer,
                 Err(errno) => return errno,
             }
@@ -357,6 +358,9 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
         return EFAULT;
     };
     unsafe { iovecs.set_len(iovcnt) };
+    if validate_iovec_total_len(&iovecs).is_err() {
+        return EINVAL;
+    }
     file_descriptor.read_user(
         None,
         UserBuffer::new({
@@ -375,6 +379,7 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
                     token,
                     iovec.iov_base,
                     iov_len,
+                    UserAccess::Write,
                 ) {
                     Ok(_) => {
                         total_len += iov_len;
@@ -409,6 +414,9 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
         return EFAULT;
     };
     unsafe { iovecs.set_len(iovcnt) };
+    if validate_iovec_total_len(&iovecs).is_err() {
+        return EINVAL;
+    }
     file_descriptor.write_user(
         None,
         UserBuffer::new({
@@ -427,6 +435,7 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
                     token,
                     iovec.iov_base,
                     iov_len,
+                    UserAccess::Read,
                 ) {
                     Ok(_) => {
                         total_len += iov_len;
@@ -438,6 +447,18 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
             vec
         }),
     ) as isize
+}
+
+fn validate_iovec_total_len(iovecs: &[IOVec]) -> Result<(), ()> {
+    let mut total_len = 0usize;
+    for iovec in iovecs {
+        // 先按 Linux 语义查长度溢出
+        total_len = total_len
+            .checked_add(iovec.iov_len)
+            .filter(|len| *len <= isize::MAX as usize)
+            .ok_or(())?;
+    }
+    Ok(())
 }
 
 /// If offset is not NULL, then it points to a variable holding the

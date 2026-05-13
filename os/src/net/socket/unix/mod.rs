@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 use crate::fs::FileDescriptor;
-use crate::mm::{translated_byte_buffer, translated_refmut, UserBuffer};
+use crate::mm::{translated_byte_buffer, translated_refmut, UserAccess, UserBuffer};
 use crate::net::{Endpoint, Socket, SocketFile, PSOCK};
 use crate::task::current_task;
 use crate::utils::error::{SyscallErr, SyscallRet};
@@ -213,7 +213,7 @@ pub fn fill_with_endpoint(ep: &UnixEndpoint, addr: usize, addrlen: usize) -> Sys
 
     // 写入用户空间缓冲区
     let write_len = actual_len.min(capacity);
-    let buf = translated_byte_buffer(token, addr as *const u8, write_len)
+    let buf = translated_byte_buffer(token, addr as *const u8, write_len, UserAccess::Write)
         .map_err(|_| SyscallErr::EFAULT)?;
     let mut user_buf = UserBuffer::new(buf);
     user_buf.write(&data[..write_len]);

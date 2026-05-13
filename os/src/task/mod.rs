@@ -12,7 +12,7 @@ pub mod threads;
 use crate::hal::__switch;
 use crate::{
     fs::{OpenFlags, ROOT_FD},
-    mm::translated_refmut,
+    mm::translated_ref_write,
     timer::TimeSpec,
     utils::error::{GeneralRet, SyscallErr},
 };
@@ -195,15 +195,16 @@ pub fn do_exit(task: Arc<TaskControlBlock>, exit_code: u32) {
 
     inner.children.clear();
     if inner.clear_child_tid != 0 {
+        let clear_child_tid = inner.clear_child_tid;
         log::debug!(
             "[do_exit] do futex wake on clear_child_tid: {:X}",
-            inner.clear_child_tid
+            clear_child_tid
         );
         //let phys_ref =
-        match translated_refmut(task.get_user_token(), inner.clear_child_tid as *mut u32) {
+        match translated_ref_write(task.get_user_token(), clear_child_tid as *mut u32) {
             Ok(phys_ref) => {
                 *phys_ref = 0;
-                task.futex.lock().wake(phys_ref as *const u32 as usize, 1);
+                task.futex.lock().wake(clear_child_tid, 1);
             }
             Err(_) => log::warn!("invalid clear_child_tid"),
         };

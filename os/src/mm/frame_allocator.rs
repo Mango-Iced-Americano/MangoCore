@@ -1,6 +1,7 @@
 #[cfg(feature = "oom_handler")]
 use super::super::fs;
 use super::{PhysAddr, PhysPageNum};
+use crate::config::MEMORY_START;
 use crate::hal::MEMORY_END;
 #[cfg(feature = "oom_handler")]
 use crate::task::current_task;
@@ -126,11 +127,24 @@ impl FrameAllocator for StackFrameAllocator {
     fn dealloc(&mut self, ppn: PhysPageNum) {
         log::trace!("[frame_dealloc] {:?}", ppn);
         let ppn = ppn.0;
+        let alloc_start = PhysAddr::from(MEMORY_START).floor().0;
+        if ppn < alloc_start || ppn >= self.end || ppn >= self.current {
+            log::warn!(
+                "[frame_dealloc] ignore invalid ppn={:#x}, valid=[{:#x}, {:#x}), current={:#x}",
+                ppn,
+                alloc_start,
+                self.end,
+                self.current
+            );
+            return;
+        }
         // 验证帧的有效性（DEBUG模式下），RELEASE中这个检查不必要，并且这个检查可能会显著降低回收速度
-        if option_env!("MODE") == Some("debug") && ppn >= self.current
-            || self.recycled.iter().find(|&v| *v == ppn).is_some()
-        {
-            panic!("Frame ppn={:#x} has not been allocated!", ppn);
+        if self.recycled.iter().find(|&v| *v == ppn).is_some() {
+            if option_env!("MODE") == Some("debug") {
+                panic!("Frame ppn={:#x} has not been allocated!", ppn);
+            }
+            log::warn!("[frame_dealloc] ignore duplicate ppn={:#x}", ppn);
+            return;
         }
         // recycle
         self.recycled.push(ppn);

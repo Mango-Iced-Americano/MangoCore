@@ -7,7 +7,7 @@ pub const USER_VA_END: usize = TASK_SIZE;
 pub const ELF_DYN_BASE: usize = TASK_SIZE / 3 * 2;
 pub const USER_STACK_BASE: usize = TASK_SIZE - PAGE_SIZE;
 pub const USER_STACK_SIZE: usize = PAGE_SIZE * 0x40;
-pub const USER_HEAP_SIZE: usize = PAGE_SIZE * 0x20;
+pub const USER_HEAP_SIZE: usize = PAGE_SIZE * 0x100;
 
 pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 0x20;
 #[cfg(feature = "board_rvqemu")]

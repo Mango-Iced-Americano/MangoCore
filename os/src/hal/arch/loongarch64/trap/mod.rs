@@ -9,7 +9,9 @@ use crate::hal::arch::loongarch64::laflex::LAFlexPageTable;
 use crate::hal::arch::loongarch64::register::{CrMd, ECfg, LineBasedInterrupt, PrMd, TCfg, TIClr};
 use crate::hal::arch::loongarch64::trap::mem_access::Instruction;
 use crate::hal::arch::TICKS_PER_SEC;
-use crate::mm::{copy_from_user, copy_to_user, frame_reserve, MemoryError, PageTable, VirtAddr};
+use crate::mm::{
+    copy_from_user, copy_to_user, frame_reserve, FaultAccess, MemoryError, PageTable, VirtAddr,
+};
 use crate::net::config::NET_INTERFACE;
 use crate::syscall::syscall;
 use crate::task::{
@@ -217,9 +219,16 @@ pub fn trap_handler() -> ! {
             // This is where we handle the page fault.
             frame_reserve(3);
             let mut mset_lock = task.vm.lock();
-            match mset_lock.do_page_fault(addr) {
+            let access = match cause {
+                Trap::Exception(Exception::PageInvalidStore)
+                | Trap::Exception(Exception::PageModifyFault) => FaultAccess::Store,
+                Trap::Exception(Exception::PageInvalidFetch)
+                | Trap::Exception(Exception::PageNonExecutableFault) => FaultAccess::Execute,
+                _ => FaultAccess::Load,
+            };
+            match mset_lock.do_page_fault(addr, access) {
                 Err(error) => match error {
-                    MemoryError::BeyondEOF => {
+                    MemoryError::BeyondEOF | MemoryError::BackingStoreFailure => {
                         inner.add_signal(Signals::SIGBUS);
                     }
                     MemoryError::NoPermission
@@ -227,7 +236,16 @@ pub fn trap_handler() -> ! {
                     | MemoryError::NotMapped => {
                         inner.add_signal(Signals::SIGSEGV);
                     }
-                    _ => unreachable!(),
+                    MemoryError::OutOfMemory => {
+                        inner.pending_oom_kill = true;
+                    }
+                    other => {
+                        log::warn!(
+                            "[page_fault] unexpected memory error {:?}, send SIGSEGV",
+                            other
+                        );
+                        inner.add_signal(Signals::SIGSEGV);
+                    }
                 },
                 Ok(_) => {
                     //tlb_addr_allow_write(addr.floor(), _paddr.floor()).unwrap();

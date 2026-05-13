@@ -1,4 +1,4 @@
-/// 根据给出的 sockfd，返回 socket，找不到则返回 ENOTSOCK
+// 根据 fd 拿 socket
 #[macro_export]
 macro_rules! get_socket {
     ($sockfd:expr) => {{
@@ -22,64 +22,100 @@ macro_rules! get_socket {
     }};
 }
 
-/// 根据给出的 addr 和 addrlen，将用户空间的虚拟地址转化为物理地址buf，地址不合法返回错误
+// 用户输入 buffer 转成切片
 #[macro_export]
 macro_rules! trans_ref {
     ($addr:expr, $addrlen:expr) => {{
         let token = crate::task::current_task().unwrap().get_user_token();
         // access_ok: 用户地址必须在 [0, USER_VA_END) 范围内，且不溢出
         // 防止地址 0xFFFFFFFFFFFFFFFF 等非法值绕过 translated_byte_buffer 的整数溢出
-        // PIE 二进制可能在 USER_VA_BASE 之下有合法映射，故仅保留上界检查。
+        // PIE 程序可能有低地址映射，这里只查上界
         let addr_val = $addr as usize;
         let len_val = $addrlen as usize;
-        let user_va_end = crate::hal::config::USER_VA_END;
-        if addr_val >= user_va_end
-            || len_val > crate::hal::config::TASK_SIZE
-            || addr_val.checked_add(len_val).is_none()
-            || addr_val + len_val > user_va_end
-        {
-            return crate::syscall::errno::EFAULT;
+        // 长度为 0 就不碰用户地址
+        if len_val == 0 {
+            unsafe { core::slice::from_raw_parts(core::ptr::NonNull::<u8>::dangling().as_ptr(), 0) }
+        } else {
+            let user_va_end = crate::hal::config::USER_VA_END;
+            if addr_val >= user_va_end
+                || len_val > crate::hal::config::TASK_SIZE
+                || addr_val.checked_add(len_val).is_none()
+                || addr_val + len_val > user_va_end
+            {
+                return crate::syscall::errno::EFAULT;
+            }
+            // NULL 指针（addr=0）且 len>0 直接返回 EFAULT
+            if addr_val == 0 {
+                return crate::syscall::errno::EFAULT;
+            }
+            // 跨页逐页检查
+            // 有坏页就返回 EFAULT
+            if crate::mm::translated_byte_buffer(
+                token,
+                $addr as *const u8,
+                $addrlen as usize,
+                crate::mm::UserAccess::Read,
+            )
+            .is_err()
+            {
+                return crate::syscall::errno::EFAULT;
+            }
+            // 范围查过后再拿首地址做切片
+            let addr = crate::mm::translate_user_va_checked(
+                token,
+                crate::mm::VirtAddr::from($addr as usize),
+                crate::mm::UserAccess::Read,
+            )
+            .unwrap()
+            .get_ref::<u8>();
+            unsafe { core::slice::from_raw_parts(addr as *const u8, $addrlen as usize) }
         }
-        // NULL 指针（addr=0）且 len>0 直接返回 EFAULT
-        if addr_val == 0 && len_val > 0 {
-            return crate::syscall::errno::EFAULT;
-        }
-        // 校验整个 [addr, addr+addrlen) 范围：translated_byte_buffer 逐页遍历，
-        // 任一页缺页/越权都通过 check_page_fault → EFAULT
-        if crate::mm::translated_byte_buffer(token, $addr as *const u8, $addrlen as usize).is_err()
-        {
-            return crate::syscall::errno::EFAULT;
-        }
-        // 校验通过后 translated_ref 不会失败，直接 unwrap
-        let addr = crate::mm::translated_ref(token, $addr as *const u8).unwrap();
-        unsafe { core::slice::from_raw_parts(addr as *const u8, $addrlen as usize) }
     }};
 }
 
-/// trans_ref! 的可变引用版本，返回 &mut [u8]
+// 用户输出 buffer 转成可写切片
 #[macro_export]
 macro_rules! trans_refmut {
     ($addr:expr, $addrlen:expr) => {{
         let token = crate::task::current_task().unwrap().get_user_token();
         let addr_val = $addr as usize;
         let len_val = $addrlen as usize;
-        let user_va_end = crate::hal::config::USER_VA_END;
-        if addr_val >= user_va_end
-            || len_val > crate::hal::config::TASK_SIZE
-            || addr_val.checked_add(len_val).is_none()
-            || addr_val + len_val > user_va_end
-        {
-            return crate::syscall::errno::EFAULT;
+        // 长度为 0 就不碰用户地址
+        if len_val == 0 {
+            unsafe {
+                core::slice::from_raw_parts_mut(core::ptr::NonNull::<u8>::dangling().as_ptr(), 0)
+            }
+        } else {
+            let user_va_end = crate::hal::config::USER_VA_END;
+            if addr_val >= user_va_end
+                || len_val > crate::hal::config::TASK_SIZE
+                || addr_val.checked_add(len_val).is_none()
+                || addr_val + len_val > user_va_end
+            {
+                return crate::syscall::errno::EFAULT;
+            }
+            // NULL 指针（addr=0）且 len>0 直接返回 EFAULT
+            if addr_val == 0 {
+                return crate::syscall::errno::EFAULT;
+            }
+            if crate::mm::translated_byte_buffer(
+                token,
+                $addr as *const u8,
+                $addrlen as usize,
+                crate::mm::UserAccess::Write,
+            )
+            .is_err()
+            {
+                return crate::syscall::errno::EFAULT;
+            }
+            let addr = crate::mm::translate_user_va_checked(
+                token,
+                crate::mm::VirtAddr::from($addr as usize),
+                crate::mm::UserAccess::Write,
+            )
+            .unwrap()
+            .get_mut::<u8>();
+            unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, $addrlen as usize) }
         }
-        // NULL 指针（addr=0）且 len>0 直接返回 EFAULT
-        if addr_val == 0 && len_val > 0 {
-            return crate::syscall::errno::EFAULT;
-        }
-        if crate::mm::translated_byte_buffer(token, $addr as *const u8, $addrlen as usize).is_err()
-        {
-            return crate::syscall::errno::EFAULT;
-        }
-        let addr = crate::mm::translated_refmut(token, $addr as *mut u8).unwrap();
-        unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, $addrlen as usize) }
     }};
 }

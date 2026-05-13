@@ -53,6 +53,7 @@ pub const SYSCALL_YIELD: usize = 124;
 pub const SYSCALL_KILL: usize = 129;
 pub const SYSCALL_TKILL: usize = 130;
 pub const SYSCALL_TGKILL: usize = 131;
+pub const SYSCALL_SIGALTSTACK: usize = 132;
 pub const SYSCALL_RT_SIGSUSPEND: usize = 133;
 pub const SYSCALL_SIGACTION: usize = 134;
 pub const SYSCALL_SIGPROCMASK: usize = 135;

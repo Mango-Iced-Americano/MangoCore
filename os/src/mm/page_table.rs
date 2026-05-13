@@ -1,12 +1,40 @@
 use core::ops::IndexMut;
 
 pub use super::memory_set::check_page_fault;
-use super::{MapPermission, PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
+use super::{MapPermission, MemoryError, PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 use alloc::string::String;
 use alloc::vec::Vec;
 
 // 防止用户一次性传入过大参数导致oom
 const MAX_BUFFER_SIZE: usize = 1024 * 1024 * 8;
+
+// user-copy 方向，读是从用户拿，写是往用户填
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UserAccess {
+    Read,
+    Write,
+    ReadWrite,
+}
+
+impl UserAccess {
+    #[inline(always)]
+    pub fn needs_read(self) -> bool {
+        matches!(self, UserAccess::Read | UserAccess::ReadWrite)
+    }
+
+    #[inline(always)]
+    pub fn needs_write(self) -> bool {
+        matches!(self, UserAccess::Write | UserAccess::ReadWrite)
+    }
+}
+
+// 缺页时区分读写取指
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FaultAccess {
+    Load,
+    Store,
+    Execute,
+}
 
 #[allow(unused)]
 pub trait PageTable {
@@ -17,7 +45,15 @@ pub trait PageTable {
     /// Allocation should be done elsewhere.
     /// # 特例
     /// Panics if the `vpn` is mapped.
-    fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: MapPermission);
+    fn try_map(
+        &mut self,
+        vpn: VirtPageNum,
+        ppn: PhysPageNum,
+        flags: MapPermission,
+    ) -> Result<(), MemoryError>;
+    fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: MapPermission) {
+        self.try_map(vpn, ppn, flags).unwrap();
+    }
     #[inline(always)]
     fn map_identical(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: MapPermission) {
         self.map(vpn, ppn, flags)
@@ -67,6 +103,8 @@ pub trait PageTable {
     fn readable(&self, vpn: VirtPageNum) -> Option<bool>;
     fn writable(&self, vpn: VirtPageNum) -> Option<bool>;
     fn executable(&self, vpn: VirtPageNum) -> Option<bool>;
+    // 只看 PTE 用户位和读写位
+    fn user_access_ok(&self, vpn: VirtPageNum, access: UserAccess) -> Option<bool>;
 }
 
 #[allow(unused)]
@@ -74,70 +112,93 @@ pub fn gen_start_end(start: VirtAddr, end: VirtAddr) -> (VirtPageNum, VirtPageNu
     (start.floor(), end.ceil())
 }
 
-/// if `existing_vec == None`, a empty `Vec` will be created.
-pub fn translated_byte_buffer_append_to_existing_vec(
-    existing_vec: &mut Vec<&'static mut [u8]>,
-    token: usize,
-    ptr: *const u8,
-    len: usize,
-) -> Result<(), isize> {
-    let page_table = super::PageTableImpl::from_token(token);
-    let mut start = ptr as usize;
-    let end = start + len;
-    while start < end {
-        let start_va = VirtAddr::from(start);
-        let mut vpn = start_va.floor();
-        let ppn = match page_table.translate(vpn) {
-            Some(pte) => pte,
-            None => {
-                let pa = check_page_fault(vpn.into())?;
-                pa.floor()
-            }
-        };
-        vpn.step();
-        let mut end_va: VirtAddr = vpn.into();
-        end_va = end_va.min(VirtAddr::from(end));
-        if end_va.page_offset() == 0 {
-            existing_vec.push(&mut ppn.get_bytes_array()[start_va.page_offset()..]);
-        } else {
-            existing_vec
-                .push(&mut ppn.get_bytes_array()[start_va.page_offset()..end_va.page_offset()]);
-        }
-        start = end_va.into();
+// 只查用户地址范围和溢出
+pub fn check_user_range(ptr: usize, len: usize) -> Result<usize, isize> {
+    if len == 0 {
+        return Ok(ptr);
     }
-    Ok(())
-}
-
-/// this is unused
-pub fn ptf_ok(ptf: usize) -> bool {
-    ptf & 1 == 1
-}
-
-pub fn translated_byte_buffer(
-    token: usize,
-    ptr: *const u8,
-    len: usize,
-) -> Result<Vec<&'static mut [u8]>, isize> {
-    if len > MAX_BUFFER_SIZE {
-        log::warn!("[kernel] translated_byte_buffer: requested length {} exceeds maximum {}, returning EFAULT", len, MAX_BUFFER_SIZE);
+    let end = ptr
+        .checked_add(len)
+        .ok_or(crate::syscall::errno::EFAULT)?;
+    if ptr >= crate::hal::config::USER_VA_END || end > crate::hal::config::USER_VA_END {
         return Err(crate::syscall::errno::EFAULT);
     }
-    let page_table = super::PageTableImpl::from_token(token);
+    Ok(end)
+}
+
+fn is_current_user_token(token: usize) -> bool {
+    crate::task::current_task()
+        .map(|task| task.get_user_token() == token)
+        .unwrap_or(false)
+}
+
+fn handle_user_page_fault(token: usize, va: VirtAddr, access: UserAccess) -> Result<(), isize> {
+    // 只有当前任务能补 lazy/COW
+    if !is_current_user_token(token) {
+        return Err(crate::syscall::errno::EFAULT);
+    }
+    // ReadWrite 先按读查再按写查
+    match access {
+        UserAccess::Read => check_page_fault(va, FaultAccess::Load).map(|_| ()),
+        UserAccess::Write => check_page_fault(va, FaultAccess::Store).map(|_| ()),
+        UserAccess::ReadWrite => {
+            check_page_fault(va, FaultAccess::Load)?;
+            check_page_fault(va, FaultAccess::Store).map(|_| ())
+        }
+    }
+}
+
+// 查完用户地址后拿物理地址
+pub fn translate_user_va_checked(
+    token: usize,
+    va: VirtAddr,
+    access: UserAccess,
+) -> Result<PhysAddr, isize> {
+    check_user_range(va.0, 1)?;
+    let vpn = va.floor();
+    let mut page_table = super::PageTableImpl::from_token(token);
+    if page_table.translate_va(va).is_none() {
+        handle_user_page_fault(token, va, access)?;
+        page_table = super::PageTableImpl::from_token(token);
+    }
+    let mut ok = page_table.user_access_ok(vpn, access).unwrap_or(false);
+    if !ok && access.needs_write() {
+        handle_user_page_fault(token, va, access)?;
+        page_table = super::PageTableImpl::from_token(token);
+        ok = page_table.user_access_ok(vpn, access).unwrap_or(false);
+    }
+    if !ok {
+        return Err(crate::syscall::errno::EFAULT);
+    }
+    page_table
+        .translate_va(va)
+        .ok_or(crate::syscall::errno::EFAULT)
+}
+
+// 按页拆用户 buffer
+pub fn translate_user_buffer_checked(
+    token: usize,
+    ptr: *const u8,
+    len: usize,
+    access: UserAccess,
+) -> Result<Vec<&'static mut [u8]>, isize> {
+    if len > MAX_BUFFER_SIZE {
+        log::warn!("[kernel] translate_user_buffer_checked: requested length {} exceeds maximum {}, returning EFAULT", len, MAX_BUFFER_SIZE);
+        return Err(crate::syscall::errno::EFAULT);
+    }
+    if len == 0 {
+        return Ok(Vec::new());
+    }
     let mut start = ptr as usize;
-    let end = start + len;
+    let end = check_user_range(start, len)?;
     let mut v = Vec::with_capacity(32);
     while start < end {
         let start_va = VirtAddr::from(start);
-        let mut vpn = start_va.floor();
-        let ppn = match page_table.translate(vpn) {
-            Some(pte) => pte,
-            None => {
-                let pa = check_page_fault(vpn.into())?;
-                pa.floor()
-            }
-        };
-        vpn.step();
-        let mut end_va: VirtAddr = vpn.into();
+        let pa = translate_user_va_checked(token, start_va, access)?;
+        let ppn = pa.floor();
+        let mut next_vpn = start_va.floor();
+        next_vpn.step();
+        let mut end_va: VirtAddr = next_vpn.into();
         end_va = end_va.min(VirtAddr::from(end));
         if end_va.page_offset() == 0 {
             v.push(&mut ppn.get_bytes_array()[start_va.page_offset()..]);
@@ -149,7 +210,33 @@ pub fn translated_byte_buffer(
     Ok(v)
 }
 
-/// this is unused
+// 把拆好的用户 buffer 追加进去
+pub fn translated_byte_buffer_append_to_existing_vec(
+    existing_vec: &mut Vec<&'static mut [u8]>,
+    token: usize,
+    ptr: *const u8,
+    len: usize,
+    access: UserAccess,
+) -> Result<(), isize> {
+    existing_vec.extend(translate_user_buffer_checked(token, ptr, len, access)?);
+    Ok(())
+}
+
+// 老工具函数先留着
+pub fn ptf_ok(ptf: usize) -> bool {
+    ptf & 1 == 1
+}
+
+pub fn translated_byte_buffer(
+    token: usize,
+    ptr: *const u8,
+    len: usize,
+    access: UserAccess,
+) -> Result<Vec<&'static mut [u8]>, isize> {
+    translate_user_buffer_checked(token, ptr, len, access)
+}
+
+// 老工具函数先留着
 pub fn get_right_aligned_bytes<T>(ptr: *const T) -> usize {
     let ptr = ptr as usize;
     let align = core::mem::align_of::<T>();
@@ -157,60 +244,82 @@ pub fn get_right_aligned_bytes<T>(ptr: *const T) -> usize {
     (align - (ptr & mask)) & mask
 }
 
-/// Load a string from other address spaces into kernel space without an end `\0`.
+// 从用户空间读 C 字符串
 pub fn translated_str(token: usize, ptr: *const u8) -> Result<String, isize> {
-    let page_table = super::PageTableImpl::from_token(token);
     let mut string = String::new();
     let mut cur = ptr as usize;
+    let max_len = MAX_BUFFER_SIZE;
     loop {
+        if string.len() >= max_len {
+            return Err(crate::syscall::errno::EFAULT);
+        }
         let ch: u8 = *({
             let va = VirtAddr::from(cur);
-            let pa = match page_table.translate_va(va) {
-                Some(pa) => pa,
-                None => check_page_fault(va)?,
-            };
-            pa.get_mut()
+            let pa = translate_user_va_checked(token, va, UserAccess::Read)?;
+            pa.get_ref()
         });
         if ch == 0 {
             break;
         }
         string.push(ch as char);
-        cur += 1;
+        cur = cur
+            .checked_add(1)
+            .ok_or(crate::syscall::errno::EFAULT)?;
     }
     Ok(string)
 }
 
-/// Translate the user space pointer `ptr` into a reference in user space through page table `token`
+// 用户对象只读
 pub fn translated_ref<T>(token: usize, ptr: *const T) -> Result<&'static T, isize> {
-    let page_table = super::PageTableImpl::from_token(token);
+    let size = core::mem::size_of::<T>();
     let va = VirtAddr::from(ptr as usize);
-    // 仅保留上界检查；PIE 二进制可能在 USER_VA_BASE 之下（如 VA 0x0）有合法映射，
-    // 下界检查会错误拒绝；未映射地址由 translate_va + check_page_fault 处理。
-    if va.0 >= crate::hal::config::USER_VA_END {
-        return Err(crate::syscall::errno::EFAULT);
+    check_user_range(va.0, size)?;
+    if size > 0 {
+        let last = VirtAddr::from(
+            va.0.checked_add(size - 1)
+                .ok_or(crate::syscall::errno::EFAULT)?,
+        );
+        if va.floor() != last.floor() {
+            return Err(crate::syscall::errno::EFAULT);
+        }
     }
-    let pa = match page_table.translate_va(va) {
-        Some(pa) => pa,
-        None => check_page_fault(va)?,
-    };
+    let pa = translate_user_va_checked(token, va, UserAccess::Read)?;
     Ok(pa.get_ref())
 }
 
-/// Translate the user space pointer `ptr` into a mutable reference in user space through page table `token`
-/// # Implementation Information
-/// * Get the pagetable from token
+// 用户对象读写
 pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> Result<&'static mut T, isize> {
-    let page_table = super::PageTableImpl::from_token(token);
+    let size = core::mem::size_of::<T>();
     let va = VirtAddr::from(ptr as usize);
-    // 仅保留上界检查；PIE 二进制可能在 USER_VA_BASE 之下（如 VA 0x0）有合法映射，
-    // 下界检查会错误拒绝；未映射地址由 translate_va + check_page_fault 处理。
-    if va.0 >= crate::hal::config::USER_VA_END {
-        return Err(crate::syscall::errno::EFAULT);
+    check_user_range(va.0, size)?;
+    if size > 0 {
+        let last = VirtAddr::from(
+            va.0.checked_add(size - 1)
+                .ok_or(crate::syscall::errno::EFAULT)?,
+        );
+        if va.floor() != last.floor() {
+            return Err(crate::syscall::errno::EFAULT);
+        }
     }
-    let pa = match page_table.translate_va(va) {
-        Some(pa) => pa,
-        None => check_page_fault(va)?,
-    };
+    let pa = translate_user_va_checked(token, va, UserAccess::ReadWrite)?;
+    Ok(pa.get_mut())
+}
+
+// 用户对象纯写
+pub fn translated_ref_write<T>(token: usize, ptr: *mut T) -> Result<&'static mut T, isize> {
+    let size = core::mem::size_of::<T>();
+    let va = VirtAddr::from(ptr as usize);
+    check_user_range(va.0, size)?;
+    if size > 0 {
+        let last = VirtAddr::from(
+            va.0.checked_add(size - 1)
+                .ok_or(crate::syscall::errno::EFAULT)?,
+        );
+        if va.floor() != last.floor() {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+    }
+    let pa = translate_user_va_checked(token, va, UserAccess::Write)?;
     Ok(pa.get_mut())
 }
 
@@ -415,14 +524,16 @@ pub fn copy_from_user<T: 'static + Copy>(
     dst: *mut T,
 ) -> Result<(), isize> {
     let size = core::mem::size_of::<T>();
-    // if all data of `*src` is in the same page, read directly
-    if VirtAddr::from(src as usize).floor() == VirtAddr::from(src as usize + size - 1).floor() {
-        unsafe { core::ptr::copy_nonoverlapping(translated_ref(token, src)?, dst, 1) };
-    // or we should use UserBuffer to read across user space pages
-    } else {
-        UserBuffer::new(translated_byte_buffer(token, src as *const u8, size)?)
-            .read(unsafe { core::slice::from_raw_parts_mut(dst as *mut u8, size) });
+    if size == 0 {
+        return Ok(());
     }
+    UserBuffer::new(translated_byte_buffer(
+        token,
+        src as *const u8,
+        size,
+        UserAccess::Read,
+    )?)
+    .read(unsafe { core::slice::from_raw_parts_mut(dst as *mut u8, size) });
     Ok(())
 }
 // pub fn copy_right_aligned<T: Copy>(token: usize, src: *const T, dst: *mut T) -> Result<(), isize> {
@@ -447,26 +558,19 @@ pub fn copy_from_user_array<T: 'static + Copy>(
     dst: *mut T,
     len: usize,
 ) -> Result<(), isize> {
-    let size = core::mem::size_of::<T>() * len;
-    // if all data of `*src` is in the same page, read directly
-    if VirtAddr::from(src as usize).floor() == VirtAddr::from(src as usize + size - 1).floor() {
-        let page_table = super::PageTableImpl::from_token(token);
-        let src_va = VirtAddr::from(src as usize);
-        let src_pa = match page_table.translate_va(src_va) {
-            Some(pa) => pa,
-            None => {
-                let pa = check_page_fault(src_va)?;
-                pa
-            }
-        };
-        unsafe {
-            core::ptr::copy_nonoverlapping(src_pa.0 as *const T, dst, len);
-        }
-    // or we should use UserBuffer to read across user space pages
-    } else {
-        UserBuffer::new(translated_byte_buffer(token, src as *const u8, size)?)
-            .read(unsafe { core::slice::from_raw_parts_mut(dst as *mut u8, size) });
+    let size = core::mem::size_of::<T>()
+        .checked_mul(len)
+        .ok_or(crate::syscall::errno::EFAULT)?;
+    if size == 0 {
+        return Ok(());
     }
+    UserBuffer::new(translated_byte_buffer(
+        token,
+        src as *const u8,
+        size,
+        UserAccess::Read,
+    )?)
+    .read(unsafe { core::slice::from_raw_parts_mut(dst as *mut u8, size) });
     Ok(())
 }
 
@@ -478,15 +582,16 @@ pub fn copy_to_user<T: 'static + Copy>(
     dst: *mut T,
 ) -> Result<(), isize> {
     let size = core::mem::size_of::<T>();
-    // A nice predicate. Well done!
-    // Re: Thanks!
-    if VirtAddr::from(dst as usize).floor() == VirtAddr::from(dst as usize + size - 1).floor() {
-        unsafe { core::ptr::copy_nonoverlapping(src, translated_refmut(token, dst)?, 1) };
-    // use UserBuffer to write across user space pages
-    } else {
-        UserBuffer::new(translated_byte_buffer(token, dst as *mut u8, size)?)
-            .write(unsafe { core::slice::from_raw_parts(src as *const u8, size) });
+    if size == 0 {
+        return Ok(());
     }
+    UserBuffer::new(translated_byte_buffer(
+        token,
+        dst as *const u8,
+        size,
+        UserAccess::Write,
+    )?)
+    .write(unsafe { core::slice::from_raw_parts(src as *const u8, size) });
     Ok(())
 }
 
@@ -495,9 +600,9 @@ pub fn copy_to_user<T: 'static + Copy>(
 #[inline(always)]
 pub fn get_from_user<T: 'static + Copy>(token: usize, src: *const T) -> Result<T, isize> {
     unsafe {
-        let mut dst: T = core::mem::MaybeUninit::uninit().assume_init();
-        copy_from_user(token, src, &mut dst)?;
-        return Ok(dst);
+        let mut dst = core::mem::MaybeUninit::<T>::uninit();
+        copy_from_user(token, src, dst.as_mut_ptr())?;
+        return Ok(dst.assume_init());
     }
 }
 
@@ -521,26 +626,19 @@ pub fn copy_to_user_array<T: 'static + Copy>(
     dst: *mut T,
     len: usize,
 ) -> Result<(), isize> {
-    let size = core::mem::size_of::<T>() * len;
-    // if all data of `*dst` is in the same page, write directly
-    if VirtAddr::from(dst as usize).floor() == VirtAddr::from(dst as usize + size - 1).floor() {
-        let page_table = super::PageTableImpl::from_token(token);
-        let dst_va = VirtAddr::from(dst as usize);
-        let dst_pa = match page_table.translate_va(dst_va) {
-            Some(pa) => pa,
-            None => {
-                let pa = check_page_fault(dst_va)?;
-                pa
-            }
-        };
-        unsafe {
-            core::ptr::copy_nonoverlapping(src, dst_pa.0 as *mut T, len);
-        };
-    // or we should use UserBuffer to write across user space pages
-    } else {
-        UserBuffer::new(translated_byte_buffer(token, dst as *mut u8, size)?)
-            .write(unsafe { core::slice::from_raw_parts(src as *const u8, size) });
+    let size = core::mem::size_of::<T>()
+        .checked_mul(len)
+        .ok_or(crate::syscall::errno::EFAULT)?;
+    if size == 0 {
+        return Ok(());
     }
+    UserBuffer::new(translated_byte_buffer(
+        token,
+        dst as *const u8,
+        size,
+        UserAccess::Write,
+    )?)
+    .write(unsafe { core::slice::from_raw_parts(src as *const u8, size) });
     Ok(())
 }
 
@@ -549,30 +647,17 @@ pub fn copy_to_user_array<T: 'static + Copy>(
 /// # Warning
 /// Caller should ensure `src` is not too large, or this function will write out of bound.
 pub fn copy_to_user_string(token: usize, src: &str, dst: *mut u8) -> Result<(), isize> {
-    let size = src.len();
-    let page_table = super::PageTableImpl::from_token(token);
-    let dst_va = VirtAddr::from(dst as usize);
-    let dst_pa = match page_table.translate_va(dst_va) {
-        Some(pa) => pa,
-        None => {
-            let pa = check_page_fault(dst_va)?;
-            pa
-        }
-    };
-    let dst_ptr = dst_pa.0 as *mut u8;
-    // if all data of `*dst` is in the same page, write directly
-    if VirtAddr::from(dst as usize).floor() == VirtAddr::from(dst as usize + size).floor() {
-        unsafe {
-            core::ptr::copy_nonoverlapping(src.as_ptr(), dst_ptr, size);
-            dst_ptr.add(size).write(b'\0');
-        }
-    // or we should use UserBuffer to write across user space pages
-    } else {
-        UserBuffer::new(translated_byte_buffer(token, dst as *mut u8, size)?)
-            .write(unsafe { core::slice::from_raw_parts(src.as_ptr(), size) });
-        unsafe {
-            dst_ptr.add(size).write(b'\0');
-        }
-    }
+    let size = src
+        .len()
+        .checked_add(1)
+        .ok_or(crate::syscall::errno::EFAULT)?;
+    let mut user_buf = UserBuffer::new(translated_byte_buffer(
+        token,
+        dst as *const u8,
+        size,
+        UserAccess::Write,
+    )?);
+    user_buf.write(unsafe { core::slice::from_raw_parts(src.as_ptr(), src.len()) });
+    user_buf.write_at(src.len(), b"\0");
     Ok(())
 }

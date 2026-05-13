@@ -1,4 +1,6 @@
-use crate::mm::{address::*, frame_alloc, FrameTracker, MapPermission, PageTable};
+use crate::mm::{
+    address::*, frame_alloc, FrameTracker, MapPermission, MemoryError, PageTable, UserAccess,
+};
 use alloc::{sync::Arc, vec::Vec};
 use bitflags::*;
 use core::arch::asm;
@@ -101,20 +103,21 @@ pub struct Sv39PageTable {
 impl Sv39PageTable {
     /// Find the page in the page table, creating the page on the way if not exists.
     /// Note: It does NOT create the terminal node. The caller must verify its validity and create according to his own needs.
-    fn find_pte_create(&mut self, vpn: VirtPageNum) -> Option<&mut Sv39PageTableEntry> {
+    fn find_pte_create(&mut self, vpn: VirtPageNum) -> Result<&mut Sv39PageTableEntry, MemoryError> {
         let idxs: [usize; 3] = vpn.indexes();
         let mut ppn = self.root_ppn;
-        let mut result: Option<&mut Sv39PageTableEntry> = None;
         for i in 0..3 {
             let pte = &mut ppn.get_pte_array()[idxs[i]];
             if i == 2 {
                 // this condition is used to make sure the
                 //returning predication is put before validity to quit before creating the terminal page entry.
-                result = Some(pte);
-                break;
+                return Ok(pte);
             }
             if !pte.is_valid() {
-                let frame = frame_alloc().unwrap();
+                self.frames
+                    .try_reserve(1)
+                    .map_err(|_| MemoryError::OutOfMemory)?;
+                let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
                 // xein TODO:
                 // 这里有问题
                 // *pte = Sv39PageTableEntry::new(frame.ppn, PTEFlags::V | PTEFlags::A | PTEFlags::D);
@@ -123,7 +126,7 @@ impl Sv39PageTable {
             }
             ppn = pte.ppn();
         }
-        result
+        Err(MemoryError::BadAddress)
     }
     /// Find the page table entry denoted by vpn, returning Some(&_) if found or None if not.
     pub fn find_pte(&self, vpn: VirtPageNum) -> Option<&Sv39PageTableEntry> {
@@ -218,9 +221,16 @@ impl PageTable for Sv39PageTable {
     /// Allocation should be done elsewhere.
     /// # Exceptions
     /// Panics if the `vpn` is mapped.
-    fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: MapPermission) {
-        let pte = self.find_pte_create(vpn).unwrap();
-        assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
+    fn try_map(
+        &mut self,
+        vpn: VirtPageNum,
+        ppn: PhysPageNum,
+        flags: MapPermission,
+    ) -> Result<(), MemoryError> {
+        let pte = self.find_pte_create(vpn)?;
+        if pte.is_valid() {
+            return Err(MemoryError::AlreadyMapped);
+        }
         *pte = Sv39PageTableEntry::new(
             ppn,
             // xein TODO:
@@ -228,6 +238,7 @@ impl PageTable for Sv39PageTable {
             // PTEFlags::from_bits(flags.bits()).unwrap() | PTEFlags::V,
         );
         tlb_invalidate();
+        Ok(())
     }
     #[allow(unused)]
     /// Unmap the `vpn` to `ppn` with the `flags`.
@@ -355,5 +366,14 @@ impl PageTable for Sv39PageTable {
     }
     fn executable(&self, vpn: VirtPageNum) -> Option<bool> {
         self.find_pte(vpn).map(|pte| pte.executable())
+    }
+    fn user_access_ok(&self, vpn: VirtPageNum, access: UserAccess) -> Option<bool> {
+        self.find_pte(vpn).map(|pte| {
+            let flags = pte.flags();
+            if !pte.is_valid() || !flags.contains(PTEFlags::U) {
+                return false;
+            }
+            (!access.needs_read() || pte.readable()) && (!access.needs_write() || pte.writable())
+        })
     }
 }

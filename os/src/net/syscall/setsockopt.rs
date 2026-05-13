@@ -1,4 +1,4 @@
-use crate::mm::translated_refmut;
+use crate::mm::get_from_user;
 use crate::task::current_task;
 use crate::utils::error::SyscallErr;
 
@@ -26,13 +26,13 @@ pub fn sys_setsockopt(
 
     let task = current_task().unwrap();
     let token = task.get_user_token();
-    let optval_ptr = match translated_refmut(token, optval_ptr as *mut u32) {
-        Ok(p) => p as *mut u32,
+    let optval = match get_from_user::<u32>(token, optval_ptr as *const u32) {
+        Ok(v) => v,
         Err(_) => return -(SyscallErr::EFAULT as isize),
     };
     match (level, optname) {
         (SOL_SOCKET, SO_SNDBUF | SO_RCVBUF) => {
-            let size = unsafe { *(optval_ptr as *mut u32) };
+            let size = optval;
             match optname {
                 SO_SNDBUF => {
                     socket.set_send_buf_size(size as usize);
@@ -47,7 +47,7 @@ pub fn sys_setsockopt(
         }
         (SOL_TCP, TCP_NODELAY) => {
             // close Nagle’s Algorithm
-            let enabled = unsafe { *(optval_ptr as *const u32) };
+            let enabled = optval;
             log::debug!("[sys_setsockopt] set TCPNODELY: {}", enabled);
             let _ = match enabled {
                 0 => socket.set_nagle_enabled(true),
@@ -55,7 +55,7 @@ pub fn sys_setsockopt(
             };
         }
         (SOL_SOCKET, SO_KEEPALIVE) => {
-            let enabled = unsafe { *(optval_ptr as *const u32) };
+            let enabled = optval;
             log::debug!("[sys_setsockopt] set socket KEEPALIVE: {}", enabled);
             let _ = match enabled {
                 1 => socket.set_keep_alive(true),
@@ -63,7 +63,7 @@ pub fn sys_setsockopt(
             };
         }
         (SOL_SOCKET, SO_REUSEADDR) => {
-            let enabled = unsafe { *(optval_ptr as *const u32) };
+            let enabled = optval;
             log::debug!("[sys_setsockopt] set socket REUSEADDR: {}", enabled);
             let _ = match enabled {
                 0 => socket.set_reuse_addr(false),
@@ -72,9 +72,7 @@ pub fn sys_setsockopt(
         }
         (SOL_SOCKET, SO_DONTROUTE) => {
             // do noting, just return success
-            log::warn!("[sys_setsockopt] set socket DONTROUTE: {}", unsafe {
-                *(optval_ptr as *const u32)
-            });
+            log::warn!("[sys_setsockopt] set socket DONTROUTE: {}", optval);
         }
         _ => {
             log::warn!(

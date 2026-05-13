@@ -1,5 +1,5 @@
 use super::PortManager;
-use crate::mm::translated_refmut;
+use crate::mm::{translated_byte_buffer, translated_refmut, UserAccess, UserBuffer};
 use crate::net::AF_INET;
 use crate::net::AF_INET6;
 use crate::task::current_task;
@@ -8,7 +8,6 @@ use crate::utils::error::SyscallErr;
 use crate::utils::error::SyscallRet;
 use core::convert::TryInto;
 use core::mem;
-use core::slice;
 use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint, Ipv4Address, Ipv6Address};
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Eq, Ord)]
@@ -222,10 +221,6 @@ pub fn _fill_with_endpoint(endpoint: IpEndpoint, addr: usize, addrlen: usize) ->
     }
     let task = current_task().unwrap();
     let token = task.get_user_token();
-    let addr = match translated_refmut(token, addr as *mut u8) {
-        Ok(p) => p,
-        Err(_) => return Err(SyscallErr::EFAULT),
-    };
     let addrlen = match translated_refmut(token, addrlen as *mut u32) {
         Ok(p) => p,
         Err(_) => return Err(SyscallErr::EFAULT),
@@ -246,18 +241,26 @@ pub fn _fill_with_endpoint(endpoint: IpEndpoint, addr: usize, addrlen: usize) ->
     if *addrlen < required {
         return Err(SyscallErr::EINVAL);
     }
-    // let mut buf = [0u8; 24]; // ipv6最大24字节
+    let mut out = [0u8; 24]; // ipv6最大24字节
     match endpoint.addr {
         IpAddress::Ipv4(_) => {
             let len = mem::size_of::<u16>() + mem::size_of::<SocketAddrv4>();
-            let addr_buf = unsafe { slice::from_raw_parts_mut(addr as *mut u8, len) };
-            SocketAddrv4::from(endpoint).fill(addr_buf);
+            SocketAddrv4::from(endpoint).fill(&mut out[..len]);
+            let mut user_buf = UserBuffer::new(
+                translated_byte_buffer(token, addr as *const u8, len, UserAccess::Write)
+                    .map_err(|_| SyscallErr::EFAULT)?,
+            );
+            user_buf.write(&out[..len]);
             *addrlen = 16;
         }
         IpAddress::Ipv6(_) => {
             let len = mem::size_of::<u16>() + mem::size_of::<SocketAddrv6>();
-            let addr_buf = unsafe { slice::from_raw_parts_mut(addr as *mut u8, len) };
-            SocketAddrv6::from(endpoint).fill(addr_buf);
+            SocketAddrv6::from(endpoint).fill(&mut out[..len]);
+            let mut user_buf = UserBuffer::new(
+                translated_byte_buffer(token, addr as *const u8, len, UserAccess::Write)
+                    .map_err(|_| SyscallErr::EFAULT)?,
+            );
+            user_buf.write(&out[..len]);
             *addrlen = 24;
         }
     }
