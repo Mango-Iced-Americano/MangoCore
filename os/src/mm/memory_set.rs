@@ -290,168 +290,15 @@ impl<T: PageTable> MemorySet<T> {
         access: FaultAccess,
     ) -> Result<PhysAddr, MemoryError> {
         let vpn = addr.floor();
-        if let Some(area) = self.areas.iter_mut().find(|area| {
-            area.map_perm.contains(MapPermission::U)// If there is such a page in user space
-                && area.get_start::<T>() <= vpn// ...and the addr is in the vpn range
+        if let Some(area_idx) = self.areas.iter().position(|area| {
+            area.map_perm.contains(MapPermission::U)
+                && area.get_start::<T>() <= vpn
                 && vpn < area.get_end::<T>()
         }) {
-            let required = match access {
-                FaultAccess::Load => MapPermission::R,
-                FaultAccess::Store => MapPermission::W,
-                FaultAccess::Execute => MapPermission::X,
-            };
-            if !area.map_perm.contains(required) {
-                error!(
-                    "[do_page_fault] addr: {:?}, access: {:?}, result: no permission",
-                    addr, access
-                );
-                return Err(MemoryError::NoPermission);
-            }
-            if !PageMapper::new(&mut self.page_table).is_mapped(vpn) {
-                // lazy alloc file-backed page
-                if let Some(file) = area.map_file.clone() {
-                    let old_offset = file
-                        .lseek(0, SeekWhence::SEEK_CUR)
-                        .map_err(|_| MemoryError::BadAddress)?;
-                    let page_start_va = VirtAddr::from(vpn).0;
-                    let area_start_va = VirtAddr::from(area.get_start::<T>()).0;
-                    let offset_in_area = page_start_va - area_start_va;
-                    let file_offset = old_offset
-                        .checked_add(offset_in_area)
-                        .ok_or(MemoryError::BeyondEOF)?;
-                    // if offset exceed EOF, SIGBUS should be sent
-                    if file_offset > file.get_size().saturating_add(PAGE_SIZE - 1) & !0xfff {
-                        return Err(MemoryError::BeyondEOF);
-                    }
-                    if access == FaultAccess::Store {
-                        let allocated_ppn =
-                            area.map_one_zeroed_unchecked(&mut self.page_table, vpn)?;
-                        if file_offset > isize::MAX as usize
-                            || old_offset > isize::MAX as usize
-                            || file
-                                .lseek(file_offset as isize, SeekWhence::SEEK_SET)
-                                .is_err()
-                        {
-                            return Err(MemoryError::BadAddress);
-                        }
-                        file.read(None, unsafe {
-                            core::slice::from_raw_parts_mut(
-                                PhysAddr::from(allocated_ppn).0 as *mut u8,
-                                PAGE_SIZE,
-                            )
-                        });
-                        file.lseek(old_offset as isize, SeekWhence::SEEK_SET)
-                            .map_err(|_| MemoryError::BadAddress)?;
-                        Ok(allocated_ppn.offset(addr.page_offset()))
-                    // map to phys page directly
-                    } else {
-                        let cache_phys_page = file
-                            .get_single_cache(file_offset)
-                            .map_err(|_| MemoryError::BeyondEOF)?
-                            .lock()
-                            .get_tracker();
-                        let cache_ppn = cache_phys_page.ppn;
-                        area.inner.alloc_in_memory(vpn, cache_phys_page)?;
-                        if let Err(err) =
-                            PageMapper::new(&mut self.page_table).map(vpn, cache_ppn, area.map_perm)
-                        {
-                            area.inner.remove_in_memory(&vpn);
-                            return Err(err);
-                        }
-                        Ok(cache_ppn.offset(addr.page_offset()))
-                    }
-                } else {
-                    let frame = area.inner.get_mut(&vpn);
-                    let allocated_ppn = match frame {
-                        // Page table is not mapped, but frame is in memory.
-                        Frame::InMemory(_) => {
-                            info!(
-                                "[Frame InMemory] addr: {:?}, vpn: {:?}, frame: {:?}",
-                                addr, vpn, frame
-                            );
-                            return Err(MemoryError::NotMapped);
-                        }
-                        Frame::Unallocated => {
-                            debug!("[do_page_fault] addr: {:?}, solution: lazy alloc", addr);
-                            let ppn = area.map_one_zeroed_unchecked(&mut self.page_table, vpn)?;
-                            let frame = area.inner.get_mut(&vpn);
-                            debug!(
-                                "[do_page_fault map_one] addr: {:?}, vpn: {:?}, frame: {:?}",
-                                addr, vpn, frame
-                            );
-                            ppn
-                        }
-                        #[cfg(feature = "oom_handler")]
-                        Frame::Compressed(_) => {
-                            let ppn = frame.unzip()?;
-                            PageMapper::new(&mut self.page_table).map(vpn, ppn, area.map_perm)?;
-                            area.inner
-                                .active
-                                .try_reserve(1)
-                                .map_err(|_| MemoryError::OutOfMemory)?;
-                            area.inner
-                                .active
-                                .push_back(vpn.0 - area.get_start::<T>().0);
-                            area.inner.compressed -= 1;
-                            debug!("[do_page_fault] addr: {:?}, solution: decompress", addr);
-                            ppn
-                        }
-                        #[cfg(feature = "oom_handler")]
-                        Frame::SwappedOut(_) => {
-                            let ppn = frame.swap_in()?;
-                            PageMapper::new(&mut self.page_table).map(vpn, ppn, area.map_perm)?;
-                            area.inner
-                                .active
-                                .try_reserve(1)
-                                .map_err(|_| MemoryError::OutOfMemory)?;
-                            area.inner
-                                .active
-                                .push_back(vpn.0 - area.get_start::<T>().0);
-                            area.inner.swapped -= 1;
-                            debug!("[do_page_fault] addr: {:?}, solution: swap in", addr);
-                            ppn
-                        }
-                    };
-                    Ok(allocated_ppn.offset(addr.page_offset()))
-                }
-            } else {
-                // mapped before the assignment
-                if access == FaultAccess::Store {
-                    if area.flags.contains(MapFlags::MAP_SHARED) {
-                        let mut mapper = PageMapper::new(&mut self.page_table);
-                        mapper.set_flags(vpn, area.map_perm)?;
-                        let ppn = mapper
-                            .translate(vpn)
-                            .ok_or(MemoryError::NotMapped)?;
-                        Ok(ppn.offset(addr.page_offset()))
-                    } else {
-                        // 修复lazy元数据和pte不一致
-                        if area.frame_is_unallocated(vpn) {
-                            warn!(
-                                "[do_page_fault] clear stale lazy pte: addr={:?}, vpn={:?}, area={:?}",
-                                addr, vpn, area
-                            );
-                            area.clear_stale_pte(&mut self.page_table, vpn);
-                            if area.map_file.is_none() {
-                                let allocated_ppn =
-                                    area.map_one_zeroed_unchecked(&mut self.page_table, vpn)?;
-                                debug!("[do_page_fault] addr: {:?}, solution: lazy alloc", addr);
-                                return Ok(allocated_ppn.offset(addr.page_offset()));
-                            }
-                            return Err(MemoryError::NotMapped);
-                        }
-                        // Whoever triggers this fault shall cause the area to be copied into a new area.
-                        let allocated_ppn = area.copy_on_write(&mut self.page_table, vpn)?;
-                        debug!("[do_page_fault] addr: {:?}, solution: copy on write", addr);
-                        Ok(allocated_ppn.offset(addr.page_offset()))
-                    }
-                } else {
-                    let ppn = PageMapper::new(&mut self.page_table)
-                        .translate(vpn)
-                        .ok_or(MemoryError::NotMapped)?;
-                    Ok(ppn.offset(addr.page_offset()))
-                }
-            }
+            let ctx = super::page_fault::FaultContext::new(addr, access);
+            let page_table = &mut self.page_table;
+            let area = &mut self.areas[area_idx];
+            super::page_fault::handle_page_fault(area, page_table, ctx)
         } else {
             // In all segments, nothing matches the requirements. Throws.
             error!("[do_page_fault] addr: {:?}, result: bad addr", addr);
@@ -495,8 +342,7 @@ impl<T: PageTable> MemorySet<T> {
         self.areas
             .iter_mut()
             .filter(|area| {
-                area.get_start::<T>().0 < (USER_VA_END >> PAGE_SIZE_BITS)
-                    && area.map_file.is_none()
+                area.get_start::<T>().0 < (USER_VA_END >> PAGE_SIZE_BITS) && area.map_file.is_none()
             })
             .map(|area| {
                 if area.get_start::<T>().0 < USR_MMAP_BASE >> PAGE_SIZE_BITS {
@@ -1143,13 +989,12 @@ impl<T: PageTable> MemorySet<T> {
         }
         let task = current_task().unwrap();
         let idx = self.last_mmap_area_idx();
-        let fixed = flags.contains(MapFlags::MAP_FIXED)
-            || flags.contains(MapFlags::MAP_FIXED_NOREPLACE);
+        let fixed =
+            flags.contains(MapFlags::MAP_FIXED) || flags.contains(MapFlags::MAP_FIXED_NOREPLACE);
         let start_va: VirtAddr = if fixed {
             let start_vpn = start_hint.floor();
             let end_vpn = requested_end.ceil();
-            if flags.contains(MapFlags::MAP_FIXED_NOREPLACE)
-                && self.has_overlap(start_vpn, end_vpn)
+            if flags.contains(MapFlags::MAP_FIXED_NOREPLACE) && self.has_overlap(start_vpn, end_vpn)
             {
                 return EEXIST;
             }
@@ -1210,13 +1055,7 @@ impl<T: PageTable> MemorySet<T> {
         if self.has_overlap(start_vpn, end_vpn) {
             return EINVAL;
         }
-        let mut new_area = match MapArea::try_new(
-            start_va,
-            end_va,
-            MapType::Framed,
-            prot,
-            None,
-        ) {
+        let mut new_area = match MapArea::try_new(start_va, end_va, MapType::Framed, prot, None) {
             Ok(area) => area,
             Err(e) => return e,
         };
@@ -1242,10 +1081,7 @@ impl<T: PageTable> MemorySet<T> {
                         return EINVAL;
                     }
                     let file = file_descriptor.file.deep_clone();
-                    if file
-                        .lseek(offset as isize, SeekWhence::SEEK_SET)
-                        .is_err()
-                    {
+                    if file.lseek(offset as isize, SeekWhence::SEEK_SET).is_err() {
                         return EINVAL;
                     }
                     new_area.map_file = Some(file);
@@ -1275,9 +1111,7 @@ impl<T: PageTable> MemorySet<T> {
                         if let Ok(cache) = file.get_single_cache(file_offset) {
                             let cache_phys_page = cache.lock().get_tracker();
                             let cache_ppn = cache_phys_page.ppn;
-                            if let Err(err) =
-                                new_area.inner.alloc_in_memory(vpn, cache_phys_page)
-                            {
+                            if let Err(err) = new_area.inner.alloc_in_memory(vpn, cache_phys_page) {
                                 return match err {
                                     MemoryError::OutOfMemory => ENOMEM,
                                     _ => EINVAL,
@@ -1342,12 +1176,7 @@ impl<T: PageTable> MemorySet<T> {
         let end_vpn = end_va.ceil();
         self.unmap_range(start_vpn, end_vpn, true).map(|_| ())
     }
-    pub fn mprotect(
-        &mut self,
-        addr: usize,
-        len: usize,
-        prot: MapPermission,
-    ) -> Result<(), isize> {
+    pub fn mprotect(&mut self, addr: usize, len: usize, prot: MapPermission) -> Result<(), isize> {
         if len == 0 {
             return Ok(());
         }
@@ -1379,7 +1208,11 @@ impl<T: PageTable> MemorySet<T> {
                 return Err(ENOMEM);
             };
             let area_end = self.areas[idx].get_end::<T>();
-            let protect_end = if area_end < end_vpn { area_end } else { end_vpn };
+            let protect_end = if area_end < end_vpn {
+                area_end
+            } else {
+                end_vpn
+            };
             // 跨 VMA 时每段单独拆，遇到洞就返回 ENOMEM
             let target_idx = self.split_area_for_range(idx, cursor, protect_end)?;
             self.protect_area(target_idx, prot);

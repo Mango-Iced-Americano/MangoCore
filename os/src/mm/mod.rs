@@ -2,15 +2,18 @@ pub mod addr;
 pub mod address;
 mod arch;
 mod error;
+mod filemap;
 mod frame_allocator;
 mod heap_allocator;
 mod layout;
-mod mapper;
 mod map_area;
+mod mapper;
 mod memory_set;
 pub mod page;
+mod page_fault;
 mod page_table;
 mod uaccess;
+mod vma;
 #[cfg(feature = "zram")]
 mod zram;
 pub use crate::hal::{KernelPageTableImpl, PageTableImpl};
@@ -30,9 +33,9 @@ pub use frame_allocator::{
 pub use heap_allocator::heap_stats;
 #[allow(unused_imports)]
 pub use layout::{KernelLayout, UserLayout};
+pub use map_area::{Frame, MapFlags, MapPermission};
 #[allow(unused_imports)]
 pub use mapper::PageMapper;
-pub use map_area::{Frame, MapFlags, MapPermission};
 pub use memory_set::kernel_token;
 pub use memory_set::MemoryError;
 pub use memory_set::{MemorySet, KERNEL_SPACE};
@@ -48,13 +51,13 @@ pub use uaccess::{
     copy_to_user_array,
     copy_to_user_string,
     get_from_user,
+    translate_user_va_checked,
     translated_byte_buffer,
     translated_byte_buffer_append_to_existing_vec,
     translated_ref,
-    translated_refmut,
     translated_ref_write,
+    translated_refmut,
     translated_str,
-    translate_user_va_checked,
     try_get_from_user,
     UserBuffer,
     // UserBufferIterator,

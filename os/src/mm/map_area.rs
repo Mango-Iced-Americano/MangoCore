@@ -3,10 +3,10 @@ use core::fmt::Debug;
 use super::page_table::PageTable;
 #[cfg(feature = "zram")]
 use super::zram::{ZramTracker, ZRAM_DEVICE};
-use super::{MemoryError, PageMapper};
 use super::VPNRange;
 use super::KERNEL_SPACE;
 use super::{frame_alloc, FrameTracker};
+use super::{MemoryError, PageMapper};
 use super::{PhysPageNum, VirtAddr, VirtPageNum};
 use crate::fs::file_trait::File;
 #[cfg(feature = "swap")]
@@ -551,11 +551,7 @@ impl MapArea {
     pub fn frame_is_unallocated(&self, vpn: VirtPageNum) -> bool {
         self.inner.is_unallocated(&vpn)
     }
-    pub fn clear_stale_pte<T: PageTable>(
-        &self,
-        page_table: &mut T,
-        vpn: VirtPageNum,
-    ) -> bool {
+    pub fn clear_stale_pte<T: PageTable>(&self, page_table: &mut T, vpn: VirtPageNum) -> bool {
         // lazy页不应该保留有效pte
         matches!(PageMapper::new(page_table).unmap_if_mapped(vpn), Ok(true))
     }
@@ -970,9 +966,7 @@ impl MapArea {
     pub fn into_two(&mut self, cut: VirtPageNum) -> Result<Self, ()> {
         let second_file = if let Some(file) = &self.map_file {
             let new_file = file.deep_clone();
-            let old_offset = file
-                .lseek(0, SeekWhence::SEEK_CUR)
-                .map_err(|_| ())?;
+            let old_offset = file.lseek(0, SeekWhence::SEEK_CUR).map_err(|_| ())?;
             let new_offset = old_offset
                 .checked_add(
                     VirtAddr::from(cut).0 - VirtAddr::from(self.inner.vpn_range.get_start()).0,
@@ -982,10 +976,7 @@ impl MapArea {
                 return Err(());
             }
             new_file
-                .lseek(
-                    new_offset as isize,
-                    SeekWhence::SEEK_SET,
-                )
+                .lseek(new_offset as isize, SeekWhence::SEEK_SET)
                 .map_err(|_| ())?;
             Some(new_file)
         } else {

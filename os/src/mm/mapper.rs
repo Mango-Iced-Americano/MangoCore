@@ -33,12 +33,7 @@ impl<'a, T: PageTable> PageMapper<'a, T> {
         self.page_table.try_map(vpn, ppn, flags)
     }
 
-    pub fn map_identical(
-        &mut self,
-        vpn: VirtPageNum,
-        ppn: PhysPageNum,
-        flags: MapPermission,
-    ) {
+    pub fn map_identical(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: MapPermission) {
         self.page_table.map_identical(vpn, ppn, flags)
     }
 

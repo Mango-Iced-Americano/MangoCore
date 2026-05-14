@@ -13,9 +13,7 @@ pub fn check_user_range(ptr: usize, len: usize) -> Result<usize, isize> {
     if len == 0 {
         return Ok(ptr);
     }
-    let end = ptr
-        .checked_add(len)
-        .ok_or(crate::syscall::errno::EFAULT)?;
+    let end = ptr.checked_add(len).ok_or(crate::syscall::errno::EFAULT)?;
     if !uaccess_user_range_ok(ptr, end) {
         return Err(crate::syscall::errno::EFAULT);
     }
@@ -172,9 +170,7 @@ pub fn translated_str(token: usize, ptr: *const u8) -> Result<String, isize> {
             break;
         }
         string.push(ch as char);
-        cur = cur
-            .checked_add(1)
-            .ok_or(crate::syscall::errno::EFAULT)?;
+        cur = cur.checked_add(1).ok_or(crate::syscall::errno::EFAULT)?;
     }
     Ok(string)
 }

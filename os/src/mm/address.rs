@@ -256,10 +256,7 @@ impl PhysPageNum {
         let entry_size = core::mem::size_of::<T>();
         assert!(entry_size != 0, "page table entry must not be zero-sized");
         unsafe {
-            core::slice::from_raw_parts_mut(
-                pa.direct_map_addr() as *mut T,
-                PAGE_SIZE / entry_size,
-            )
+            core::slice::from_raw_parts_mut(pa.direct_map_addr() as *mut T, PAGE_SIZE / entry_size)
         }
     }
     /// 获取整个页的字节数组
