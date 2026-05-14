@@ -1,6 +1,7 @@
 use super::map_area::*;
+use super::mapper::translate_page;
 use super::page_table::{FaultAccess, PageTable};
-use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
+use super::{PageMapper, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use crate::config::*;
 use crate::fs::SeekWhence;
 use crate::hal::TrapContext;
@@ -222,10 +223,10 @@ impl<T: PageTable> MemorySet<T> {
     pub fn push_no_alloc(&mut self, map_area: MapArea) -> Result<(), ()> {
         for vpn in map_area.inner.vpn_range {
             let frame = map_area.inner.get_in_memory(&vpn).unwrap();
-            if !self.page_table.is_mapped(vpn) {
+            if !PageMapper::new(&mut self.page_table).is_mapped(vpn) {
                 //if not mapped
-                self.page_table
-                    .try_map(vpn, frame.ppn.clone(), map_area.map_perm)
+                PageMapper::new(&mut self.page_table)
+                    .map(vpn, frame.ppn.clone(), map_area.map_perm)
                     .map_err(|_| ())?;
             } else {
                 return Err(());
@@ -306,7 +307,7 @@ impl<T: PageTable> MemorySet<T> {
                 );
                 return Err(MemoryError::NoPermission);
             }
-            if !self.page_table.is_mapped(vpn) {
+            if !PageMapper::new(&mut self.page_table).is_mapped(vpn) {
                 // lazy alloc file-backed page
                 if let Some(file) = area.map_file.clone() {
                     let old_offset = file
@@ -351,7 +352,9 @@ impl<T: PageTable> MemorySet<T> {
                             .get_tracker();
                         let cache_ppn = cache_phys_page.ppn;
                         area.inner.alloc_in_memory(vpn, cache_phys_page)?;
-                        if let Err(err) = self.page_table.try_map(vpn, cache_ppn, area.map_perm) {
+                        if let Err(err) =
+                            PageMapper::new(&mut self.page_table).map(vpn, cache_ppn, area.map_perm)
+                        {
                             area.inner.remove_in_memory(&vpn);
                             return Err(err);
                         }
@@ -381,7 +384,7 @@ impl<T: PageTable> MemorySet<T> {
                         #[cfg(feature = "oom_handler")]
                         Frame::Compressed(_) => {
                             let ppn = frame.unzip()?;
-                            self.page_table.try_map(vpn, ppn, area.map_perm)?;
+                            PageMapper::new(&mut self.page_table).map(vpn, ppn, area.map_perm)?;
                             area.inner
                                 .active
                                 .try_reserve(1)
@@ -396,7 +399,7 @@ impl<T: PageTable> MemorySet<T> {
                         #[cfg(feature = "oom_handler")]
                         Frame::SwappedOut(_) => {
                             let ppn = frame.swap_in()?;
-                            self.page_table.try_map(vpn, ppn, area.map_perm)?;
+                            PageMapper::new(&mut self.page_table).map(vpn, ppn, area.map_perm)?;
                             area.inner
                                 .active
                                 .try_reserve(1)
@@ -415,11 +418,9 @@ impl<T: PageTable> MemorySet<T> {
                 // mapped before the assignment
                 if access == FaultAccess::Store {
                     if area.flags.contains(MapFlags::MAP_SHARED) {
-                        self.page_table
-                            .set_pte_flags(vpn, area.map_perm)
-                            .map_err(|_| MemoryError::NotMapped)?;
-                        let ppn = self
-                            .page_table
+                        let mut mapper = PageMapper::new(&mut self.page_table);
+                        mapper.set_flags(vpn, area.map_perm)?;
+                        let ppn = mapper
                             .translate(vpn)
                             .ok_or(MemoryError::NotMapped)?;
                         Ok(ppn.offset(addr.page_offset()))
@@ -445,8 +446,7 @@ impl<T: PageTable> MemorySet<T> {
                         Ok(allocated_ppn.offset(addr.page_offset()))
                     }
                 } else {
-                    let ppn = self
-                        .page_table
+                    let ppn = PageMapper::new(&mut self.page_table)
                         .translate(vpn)
                         .ok_or(MemoryError::NotMapped)?;
                     Ok(ppn.offset(addr.page_offset()))
@@ -527,19 +527,23 @@ impl<T: PageTable> MemorySet<T> {
     }
     /// Mention that trampoline is not collected by areas.
     fn map_trampoline(&mut self) {
-        self.page_table.map(
-            VirtAddr::from(TRAMPOLINE).into(),
-            PhysAddr::from(strampoline as usize).into(),
-            MapPermission::R | MapPermission::X,
-        );
+        PageMapper::new(&mut self.page_table)
+            .map(
+                VirtAddr::from(TRAMPOLINE).into(),
+                PhysAddr::from(strampoline as usize).into(),
+                MapPermission::R | MapPermission::X,
+            )
+            .unwrap();
     }
     /// Can be accessed in user mode.
     fn map_signaltrampoline(&mut self) {
-        self.page_table.map(
-            VirtAddr::from(SIGNAL_TRAMPOLINE).into(),
-            PhysAddr::from(ssignaltrampoline as usize).into(),
-            MapPermission::R | MapPermission::X | MapPermission::U,
-        );
+        PageMapper::new(&mut self.page_table)
+            .map(
+                VirtAddr::from(SIGNAL_TRAMPOLINE).into(),
+                PhysAddr::from(ssignaltrampoline as usize).into(),
+                MapPermission::R | MapPermission::X | MapPermission::U,
+            )
+            .unwrap();
     }
     /// 创建一个空的内核空间
     /// Without kernel stacks. (Is it done with .bss?)
@@ -818,19 +822,25 @@ impl<T: PageTable> MemorySet<T> {
     /// Translate the `vpn` into its corresponding `Some(PageTableEntry)` in the current memory set if exists
     /// `None` is returned if nothing is found.
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PhysPageNum> {
-        self.page_table.translate(vpn)
+        translate_page(&self.page_table, vpn)
     }
     #[allow(unused)]
     pub fn set_pte_flags(&mut self, vpn: VirtPageNum, flags: MapPermission) -> Result<(), ()> {
-        self.page_table.set_pte_flags(vpn, flags)
+        PageMapper::new(&mut self.page_table)
+            .set_flags(vpn, flags)
+            .map_err(|_| ())
     }
     #[allow(unused)]
     pub fn clear_access_bit(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
-        self.page_table.clear_access_bit(vpn)
+        PageMapper::new(&mut self.page_table)
+            .clear_access_bit(vpn)
+            .map_err(|_| ())
     }
     #[allow(unused)]
     pub fn clear_dirty_bit(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
-        self.page_table.clear_dirty_bit(vpn)
+        PageMapper::new(&mut self.page_table)
+            .clear_dirty_bit(vpn)
+            .map_err(|_| ())
     }
     pub fn recycle_data_pages(&mut self) {
         //*self = Self::new_bare();
@@ -1097,7 +1107,10 @@ impl<T: PageTable> MemorySet<T> {
                 continue;
             }
             // private 可写页先去掉 W，后续写入再走 COW
-            if let Err(_) = page_table.set_pte_flags(vpn, actual_prot) {
+            if PageMapper::new(page_table)
+                .set_flags(vpn, actual_prot)
+                .is_err()
+            {
                 has_unmapped_page = true;
             }
         }
@@ -1270,9 +1283,11 @@ impl<T: PageTable> MemorySet<T> {
                                     _ => EINVAL,
                                 };
                             }
-                            if let Err(err) =
-                                self.page_table.try_map(vpn, cache_ppn, new_area.map_perm)
-                            {
+                            if let Err(err) = PageMapper::new(&mut self.page_table).map(
+                                vpn,
+                                cache_ppn,
+                                new_area.map_perm,
+                            ) {
                                 new_area.inner.remove_in_memory(&vpn);
                                 return match err {
                                     MemoryError::OutOfMemory => ENOMEM,

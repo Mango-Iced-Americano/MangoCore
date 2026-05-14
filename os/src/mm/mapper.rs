@@ -8,6 +8,13 @@ pub struct PageMapper<'a, T: PageTable> {
     page_table: &'a mut T,
 }
 
+pub(super) fn translate_page<T: PageTable>(
+    page_table: &T,
+    vpn: VirtPageNum,
+) -> Option<PhysPageNum> {
+    page_table.translate(vpn)
+}
+
 impl<'a, T: PageTable> PageMapper<'a, T> {
     pub fn new(page_table: &'a mut T) -> Self {
         Self { page_table }
@@ -26,12 +33,29 @@ impl<'a, T: PageTable> PageMapper<'a, T> {
         self.page_table.try_map(vpn, ppn, flags)
     }
 
+    pub fn map_identical(
+        &mut self,
+        vpn: VirtPageNum,
+        ppn: PhysPageNum,
+        flags: MapPermission,
+    ) {
+        self.page_table.map_identical(vpn, ppn, flags)
+    }
+
     pub fn unmap(&mut self, vpn: VirtPageNum) -> MmResult<()> {
-        if self.page_table.translate(vpn).is_none() {
+        if !self.page_table.is_mapped(vpn) {
             return Err(MemoryError::NotMapped);
         }
         self.page_table.unmap(vpn);
         Ok(())
+    }
+
+    pub fn unmap_if_mapped(&mut self, vpn: VirtPageNum) -> MmResult<bool> {
+        if !self.page_table.is_mapped(vpn) {
+            return Ok(false);
+        }
+        self.page_table.unmap(vpn);
+        Ok(true)
     }
 
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PhysPageNum> {

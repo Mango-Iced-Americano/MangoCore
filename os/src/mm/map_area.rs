@@ -3,7 +3,7 @@ use core::fmt::Debug;
 use super::page_table::PageTable;
 #[cfg(feature = "zram")]
 use super::zram::{ZramTracker, ZRAM_DEVICE};
-use super::MemoryError;
+use super::{MemoryError, PageMapper};
 use super::VPNRange;
 use super::KERNEL_SPACE;
 use super::{frame_alloc, FrameTracker};
@@ -557,12 +557,7 @@ impl MapArea {
         vpn: VirtPageNum,
     ) -> bool {
         // lazy页不应该保留有效pte
-        if page_table.is_mapped(vpn) {
-            page_table.unmap(vpn);
-            true
-        } else {
-            false
-        }
+        matches!(PageMapper::new(page_table).unmap_if_mapped(vpn), Ok(true))
     }
     /// Create `MapArea` from `Vec<Arc<FrameTracker>>`. This function should only be used to
     /// generate a `MapArea` in `KERNEL_SPACE`. \
@@ -600,7 +595,8 @@ impl MapArea {
         page_table: &mut T,
         vpn: VirtPageNum,
     ) -> Result<PhysPageNum, (MemoryError, VirtPageNum)> {
-        if self.map_type == MapType::Identical || !page_table.is_mapped(vpn) {
+        let is_mapped = PageMapper::new(page_table).is_mapped(vpn);
+        if self.map_type == MapType::Identical || !is_mapped {
             //if not mapped
             self.map_one_unchecked(page_table, vpn)
                 .map_err(|err| (err, vpn))
@@ -619,13 +615,13 @@ impl MapArea {
         match self.map_type {
             MapType::Identical => {
                 ppn = PhysPageNum(vpn.0);
-                page_table.map_identical(vpn, ppn, self.map_perm);
+                PageMapper::new(page_table).map_identical(vpn, ppn, self.map_perm);
             }
             MapType::Framed => {
                 let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
                 ppn = frame.ppn;
                 self.inner.alloc_in_memory(vpn, frame)?;
-                if let Err(err) = page_table.try_map(vpn, ppn, self.map_perm) {
+                if let Err(err) = PageMapper::new(page_table).map(vpn, ppn, self.map_perm) {
                     self.inner.remove_in_memory(&vpn);
                     return Err(err);
                 }
@@ -642,7 +638,7 @@ impl MapArea {
         let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
         let ppn = frame.ppn;
         self.inner.alloc_in_memory(vpn, frame)?;
-        if let Err(err) = page_table.try_map(vpn, ppn, self.map_perm) {
+        if let Err(err) = PageMapper::new(page_table).map(vpn, ppn, self.map_perm) {
             self.inner.remove_in_memory(&vpn);
             return Err(err);
         }
@@ -658,13 +654,13 @@ impl MapArea {
         page_table: &mut T,
         vpn: VirtPageNum,
     ) -> Result<(), MemoryError> {
-        if !page_table.is_mapped(vpn) {
+        if !PageMapper::new(page_table).is_mapped(vpn) {
             return Err(MemoryError::NotMapped);
         }
         match self.map_type {
             MapType::Framed => {
                 self.inner.remove_in_memory(&vpn);
-                page_table.unmap(vpn);
+                PageMapper::new(page_table).unmap(vpn)?;
             }
             _ => {}
         }
@@ -685,15 +681,13 @@ impl MapArea {
         };
         for vpn in self.inner.vpn_range {
             if let Some(ppn) = src_page_table.block_and_ret_mut(vpn) {
-                if !dst_page_table.is_mapped(vpn) {
-                    dst_page_table
-                        .try_map(vpn, ppn, map_perm)
-                        .map_err(|err| err)?;
+                if !PageMapper::new(dst_page_table).is_mapped(vpn) {
+                    PageMapper::new(dst_page_table).map(vpn, ppn, map_perm)?;
                 } else {
                     return Err(MemoryError::AlreadyMapped);
                 }
                 if is_shared && self.map_perm.contains(MapPermission::W) {
-                    let _ = src_page_table.set_pte_flags(vpn, self.map_perm);
+                    let _ = PageMapper::new(src_page_table).set_flags(vpn, self.map_perm);
                 }
             }
         }
@@ -725,11 +719,11 @@ impl MapArea {
         for vpn in self.get_inner().vpn_range {
             if let Some(frame) = kernel_area.inner.get_in_memory(&src_vpn) {
                 let ppn = frame.ppn;
-                if !page_table.is_mapped(vpn) {
+                if !PageMapper::new(page_table).is_mapped(vpn) {
                     self.inner
                         .alloc_in_memory(vpn, frame.clone())
                         .map_err(|_| ())?;
-                    if let Err(_) = page_table.try_map(vpn, ppn, self.map_perm) {
+                    if let Err(_) = PageMapper::new(page_table).map(vpn, ppn, self.map_perm) {
                         self.inner.remove_in_memory(&vpn);
                         return Err(());
                     }
@@ -781,17 +775,17 @@ impl MapArea {
                     Frame::InMemory(_) => {}
                     Frame::Compressed(_) => {
                         let ppn = frame.unzip()?;
-                        let set_ppn_result = page_table.set_ppn(vpn, ppn);
+                        let set_ppn_result = PageMapper::new(page_table).set_ppn(vpn, ppn);
                         self.inner.active.push_back(idx);
                         self.inner.compressed = self.inner.compressed.saturating_sub(1);
-                        set_ppn_result.map_err(|_| MemoryError::NotMapped)?;
+                        set_ppn_result?;
                     }
                     Frame::SwappedOut(_) => {
                         let ppn = frame.swap_in()?;
-                        let set_ppn_result = page_table.set_ppn(vpn, ppn);
+                        let set_ppn_result = PageMapper::new(page_table).set_ppn(vpn, ppn);
                         self.inner.active.push_back(idx);
                         self.inner.swapped = self.inner.swapped.saturating_sub(1);
-                        set_ppn_result.map_err(|_| MemoryError::NotMapped)?;
+                        set_ppn_result?;
                     }
                     Frame::Unallocated => return Err(MemoryError::NotMapped),
                 }
@@ -822,16 +816,14 @@ impl MapArea {
         };
         if Arc::strong_count(&old_frame) == 1 {
             let old_ppn = old_frame.ppn;
-            page_table
-                .set_pte_flags(vpn, self.map_perm)
-                .map_err(|_| MemoryError::NotMapped)?;
+            PageMapper::new(page_table).set_flags(vpn, self.map_perm)?;
 
             trace!("[copy_on_write] no copy occurred");
             Ok(old_ppn)
         } else {
             // do copy in this case
             let old_ppn = old_frame.ppn;
-            if !page_table.is_mapped(vpn) {
+            if !PageMapper::new(page_table).is_mapped(vpn) {
                 return Err(MemoryError::NotMapped);
             }
             // alloc new frame
@@ -849,15 +841,18 @@ impl MapArea {
                 let _ = self.inner.alloc_in_memory(vpn, old_frame);
                 return Err(err);
             }
-            if page_table.set_ppn(vpn, new_ppn).is_err() {
+            if PageMapper::new(page_table).set_ppn(vpn, new_ppn).is_err() {
                 if let Some(new_frame) = self.inner.remove_in_memory(&vpn) {
                     drop(new_frame);
                 }
                 let _ = self.inner.alloc_in_memory(vpn, old_frame);
                 return Err(MemoryError::NotMapped);
             }
-            if page_table.set_pte_flags(vpn, self.map_perm).is_err() {
-                let _ = page_table.set_ppn(vpn, old_ppn);
+            if PageMapper::new(page_table)
+                .set_flags(vpn, self.map_perm)
+                .is_err()
+            {
+                let _ = PageMapper::new(page_table).set_ppn(vpn, old_ppn);
                 if let Some(new_frame) = self.inner.remove_in_memory(&vpn) {
                     drop(new_frame);
                 }
@@ -1068,7 +1063,10 @@ impl MapArea {
             // first, try to compress
             match frame.zip() {
                 Ok(zram_id) => {
-                    page_table.unmap(VirtPageNum::from(start_vpn.0 + idx));
+                    let vpn = VirtPageNum::from(start_vpn.0 + idx);
+                    if PageMapper::new(page_table).unmap(vpn).is_err() {
+                        log::warn!("[do_oom] compressed frame has no mapped pte: vpn={:?}", vpn);
+                    }
                     self.inner.compressed += 1;
                     trace!("[do_oom] compress frame: {:?}, zram_id: {}", frame, zram_id);
                     continue;
@@ -1080,7 +1078,10 @@ impl MapArea {
             // zram is full, try to swap out
             match frame.swap_out() {
                 Ok(swap_id) => {
-                    page_table.unmap(VirtPageNum::from(start_vpn.0 + idx));
+                    let vpn = VirtPageNum::from(start_vpn.0 + idx);
+                    if PageMapper::new(page_table).unmap(vpn).is_err() {
+                        log::warn!("[do_oom] swapped frame has no mapped pte: vpn={:?}", vpn);
+                    }
                     self.inner.swapped += 1;
                     trace!("[do_oom] swap out frame: {:?}, swap_id: {}", frame, swap_id);
                     continue;
@@ -1114,7 +1115,13 @@ impl MapArea {
             }
             match frame.force_swap_out() {
                 Ok(swap_id) => {
-                    page_table.unmap(VirtPageNum::from(start_vpn.0 + idx));
+                    let vpn = VirtPageNum::from(start_vpn.0 + idx);
+                    if PageMapper::new(page_table).unmap(vpn).is_err() {
+                        log::warn!(
+                            "[force_swap] swapped frame has no mapped pte: vpn={:?}",
+                            vpn
+                        );
+                    }
                     self.inner.swapped += 1;
                     trace!(
                         "[force_swap] swap out frame: {:?}, swap_id: {}",
