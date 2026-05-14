@@ -3,7 +3,7 @@ use core::convert::TryFrom;
 use log::info;
 
 use crate::fs::FileDescriptor;
-use crate::mm::{translated_byte_buffer, translated_refmut, UserBuffer};
+use crate::mm::{translated_byte_buffer, UserAccess, UserBuffer};
 use crate::net::posix::PosixArgsSocketType;
 use crate::net::{make_unix_socket_pair, SocketFile, AF_UNIX, AF_UNSPEC, PSOCK};
 use crate::task::current_task;
@@ -67,7 +67,7 @@ pub fn sys_socketpair(domain: u32, socket_type: u32, protocol: u32, sv: usize) -
 
     // 将两个 fd 写入用户空间的 sv 数组（sv[0] = fd1, sv[1] = fd2）
     let token = task.get_user_token();
-    let sv_buf = match translated_byte_buffer(token, sv as *const u8, 8) {
+    let sv_buf = match translated_byte_buffer(token, sv as *const u8, 8, UserAccess::Write) {
         Ok(buf) => buf,
         Err(_) => return -(SyscallErr::EFAULT as isize),
     };

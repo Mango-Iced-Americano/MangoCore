@@ -4,8 +4,8 @@ use crate::hal::shutdown;
 use crate::hal::{MachineContext, TrapContext};
 use crate::mm::{
     copy_from_user, copy_to_user, copy_to_user_string, get_from_user, translated_byte_buffer,
-    translated_ref, translated_refmut, translated_str, try_get_from_user, MapFlags, MapPermission,
-    UserBuffer, VirtAddr,
+    translated_ref, translated_ref_write, translated_str, try_get_from_user, MapFlags,
+    MapPermission, UserAccess, UserBuffer, VirtAddr,
 };
 use crate::show_frame_consumption;
 use crate::syscall::errno::*;
@@ -361,7 +361,7 @@ pub struct UTSName {
 pub fn sys_uname(buf: *mut u8) -> isize {
     let token = current_user_token();
     let mut buffer = UserBuffer::new(
-        match translated_byte_buffer(token, buf, size_of::<UTSName>()) {
+        match translated_byte_buffer(token, buf, size_of::<UTSName>(), UserAccess::Write) {
             Ok(buffer) => buffer,
             Err(errno) => return errno,
         },
@@ -552,10 +552,28 @@ pub fn sys_brk(brk_addr: usize) -> isize {
         inner.heap_pt = memory_set.sbrk(inner.heap_pt, inner.heap_bottom, 0);
     } else {
         let former_addr = memory_set.sbrk(inner.heap_pt, inner.heap_bottom, 0);
-        let grow_size: isize = if brk_addr < former_addr {
-            -((former_addr - brk_addr) as isize)
+        let grow_size = if brk_addr < former_addr {
+            let delta = former_addr - brk_addr;
+            if delta > isize::MAX as usize {
+                warn!(
+                    "[sys_brk] shrink delta too large: brk_addr={:X}, former_addr={:X}",
+                    brk_addr, former_addr
+                );
+                0
+            } else {
+                -(delta as isize)
+            }
         } else {
-            (brk_addr - former_addr) as isize
+            let delta = brk_addr - former_addr;
+            if delta > isize::MAX as usize {
+                warn!(
+                    "[sys_brk] grow delta too large: brk_addr={:X}, former_addr={:X}",
+                    brk_addr, former_addr
+                );
+                0
+            } else {
+                delta as isize
+            }
         };
         inner.heap_pt = memory_set.sbrk(inner.heap_pt, inner.heap_bottom, grow_size);
     }
@@ -669,14 +687,17 @@ pub fn sys_clone(
     };
     let new_pid = child.pid.0;
     if flags.contains(CloneFlags::CLONE_PARENT_SETTID) {
-        match translated_refmut(parent.get_user_token(), ptid) {
+        match translated_ref_write(parent.get_user_token(), ptid) {
             Ok(word) => *word = child.pid.0 as u32,
-            Err(errno) => return errno,
+            Err(errno) => {
+                child.cleanup_unpublished_clone(flags.contains(CloneFlags::CLONE_VM));
+                return errno;
+            }
         };
     }
     // todo: CLONE_CHILD_SETTID标志被设置，但是ctid指针为零，会出现地址错误，干脆全注释掉
     if flags.contains(CloneFlags::CLONE_CHILD_SETTID) {
-        match translated_refmut(child.get_user_token(), ctid) {
+        match translated_ref_write(child.get_user_token(), ctid) {
             Ok(word) => *word = child.pid.0 as u32,
             Err(errno) => log::warn!(
                 "[sys_clone] Failed to set child_tid at {:?} with errno {}, but still create the thread",
@@ -686,6 +707,10 @@ pub fn sys_clone(
     }
     if flags.contains(CloneFlags::CLONE_CHILD_CLEARTID) {
         child.acquire_inner_lock().clear_child_tid = ctid as usize;
+    }
+    if let Err(errno) = parent.publish_clone_child(child.clone(), flags) {
+        child.cleanup_unpublished_clone(flags.contains(CloneFlags::CLONE_VM));
+        return errno;
     }
     // add new task to scheduler
     add_task(child);
@@ -838,7 +863,13 @@ bitflags! {
 ///   pid == 0  → wait for any child in the same process group (pgid)
 ///   pid < -1 → wait for any child whose pgid == |pid|
 pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) -> isize {
-    let option = WaitOption::from_bits(option).unwrap();
+    let option = match WaitOption::from_bits(option) {
+        Some(option) => option,
+        None => return EINVAL,
+    };
+    if option.bits() & !WaitOption::WNOHANG.bits() != 0 {
+        return EINVAL;
+    }
     info!("[sys_wait4] pid: {}, option: {:?}", pid, option);
     let task = current_task().unwrap();
     let token = task.get_user_token();
@@ -905,7 +936,7 @@ pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) ->
             let found_tgid = child.tgid;
             let exit_code = child.acquire_inner_lock().exit_code;
             if !status.is_null() {
-                match translated_refmut(token, status) {
+                match translated_ref_write(token, status) {
                     Ok(word) => *word = exit_code,
                     Err(errno) => return errno,
                 }
@@ -1143,13 +1174,14 @@ pub fn sys_futex(
     if uaddr.is_null() || uaddr.align_offset(4) != 0 {
         return EINVAL;
     }
-    let futex_word = match translated_refmut(token, uaddr) {
+    let futex_word = match translated_ref(token, uaddr as *const u32) {
         Ok(futex_word) => futex_word,
         Err(errno) => return errno,
     };
     let cmd = threads::FutexCmd::from_primitive(futex_op & 0x7fu32);
     let option = FutexOption::from_bits_truncate(futex_op);
     let is_private = option.contains(FutexOption::PRIVATE);
+    let private_key = uaddr as usize;
     if !is_private {
         trace!("[futex] process-shared futex, cmd={:?}", cmd);
     }
@@ -1187,13 +1219,12 @@ pub fn sys_futex(
                 do_futex_wait_shared(futex_word, val, timeout, phys_key)
             } else {
                 drop(task);
-                do_futex_wait(futex_word, val, timeout)
+                do_futex_wait(futex_word, private_key, val, timeout)
             }
         }
         FutexCmd::Wake => {
             if is_private {
-                let futex_word_addr = futex_word as *const u32 as usize;
-                task.futex.lock().wake(futex_word_addr, val)
+                task.futex.lock().wake(private_key, val)
             } else {
                 let vm = task.vm.lock();
                 let phys_key = match va_to_phys_key(&vm, uaddr as usize) {
@@ -1208,14 +1239,14 @@ pub fn sys_futex(
             if uaddr2.is_null() || uaddr2.align_offset(4) != 0 {
                 return EINVAL;
             }
-            let futex_word_2 = match translated_refmut(token, uaddr2) {
+            let _futex_word_2 = match translated_ref(token, uaddr2 as *const u32) {
                 Ok(futex_word_2) => futex_word_2,
                 Err(errno) => return errno,
             };
             if is_private {
                 task.futex
                     .lock()
-                    .requeue(futex_word, futex_word_2, val, timeout as u32)
+                    .requeue(private_key, uaddr2 as usize, val, timeout as u32)
             } else {
                 let phys_key = {
                     let vm = task.vm.lock();
@@ -1285,6 +1316,40 @@ pub fn sys_get_robust_list(pid: u32, head_ptr: *mut usize, len_ptr: *mut usize) 
     SUCCESS
 }
 
+fn parse_mmap_prot(prot: usize) -> Result<MapPermission, isize> {
+    const PROT_READ: usize = 0x1;
+    const PROT_WRITE: usize = 0x2;
+    const PROT_EXEC: usize = 0x4;
+    const PROT_ALLOWED: usize = PROT_READ | PROT_WRITE | PROT_EXEC;
+    if prot & !PROT_ALLOWED != 0 {
+        return Err(EINVAL);
+    }
+    let mut map_perm = MapPermission::U;
+    if prot & PROT_READ != 0 {
+        map_perm |= MapPermission::R;
+    }
+    if prot & PROT_WRITE != 0 {
+        // 写权限在页表里需要带读权限，否则部分架构会反复页故障
+        map_perm |= MapPermission::R | MapPermission::W;
+    }
+    if prot & PROT_EXEC != 0 {
+        map_perm |= MapPermission::X;
+    }
+    Ok(map_perm)
+}
+
+fn parse_mmap_flags(flags: usize) -> Result<MapFlags, isize> {
+    let flags = MapFlags::from_bits(flags).ok_or(EINVAL)?;
+    let type_bits = flags.bits() & MapFlags::MAP_TYPE.bits();
+    if type_bits != MapFlags::MAP_SHARED.bits()
+        && type_bits != MapFlags::MAP_PRIVATE.bits()
+        && type_bits != MapFlags::MAP_SHARED_VALIDATE.bits()
+    {
+        return Err(EINVAL);
+    }
+    Ok(flags)
+}
+
 pub fn sys_mmap(
     start: usize,
     len: usize,
@@ -1295,8 +1360,14 @@ pub fn sys_mmap(
 ) -> isize {
     let task = current_task().unwrap();
     let mut memory_set = task.vm.lock();
-    let prot = MapPermission::from_bits(((prot as u8) << 1) | (1 << 4)).unwrap();
-    let flags = MapFlags::from_bits(flags).unwrap();
+    let prot = match parse_mmap_prot(prot) {
+        Ok(prot) => prot,
+        Err(errno) => return errno,
+    };
+    let flags = match parse_mmap_flags(flags) {
+        Ok(flags) => flags,
+        Err(errno) => return errno,
+    };
     info!(
         "[mmap] start:{:X}; len:{:X}; prot:{:?}; flags:{:?}; fd:{}; offset:{:X}",
         start, len, prot, flags, fd as isize, offset
@@ -1328,6 +1399,10 @@ pub fn sys_munmap(start: usize, len: usize) -> isize {
 
 pub fn sys_mprotect(addr: usize, len: usize, prot: usize) -> isize {
     let task = current_task().unwrap();
+    let prot = match parse_mmap_prot(prot) {
+        Ok(prot) => prot,
+        Err(errno) => return errno,
+    };
     let result = task.vm.lock().mprotect(addr, len, prot);
     match result {
         Ok(_) => SUCCESS,
@@ -1403,7 +1478,7 @@ pub fn sys_rt_sigpending(set: usize, sigsetsize: usize) -> isize {
         task.pid.0,
         inner.sigpending
     );
-    match translated_refmut(token, set as *mut Signals) {
+    match translated_ref_write(token, set as *mut Signals) {
         Ok(pending) => {
             *pending = inner.sigpending;
             SUCCESS
@@ -1425,6 +1500,10 @@ pub fn sys_sigtimedwait(set: usize, info: usize, timeout: usize) -> isize {
     )
 }
 
+pub fn sys_sigaltstack(ss: usize, old_ss: usize) -> isize {
+    sigaltstack(ss as *const SignalStack, old_ss as *mut SignalStack)
+}
+
 pub fn sys_sigreturn() -> isize {
     // mark not processing signal handler
     let task = current_task().unwrap();
@@ -1432,26 +1511,68 @@ pub fn sys_sigreturn() -> isize {
     let token = task.get_user_token();
     info!("[sys_sigreturn] pid: {}", task.pid.0);
 
-    let trap_cx = inner.get_trap_cx();
+    let sp = inner.get_trap_cx().gp.sp;
     // restore sigmask & trap context
-    let ucontext_addr = (trap_cx.gp.sp + size_of::<SigInfo>() + 0x7) & !0x7;
-    inner.sigmask = *translated_ref(
+    let ucontext_addr = match sp
+        .checked_add(size_of::<SigInfo>())
+        .and_then(|addr| addr.checked_add(0x7))
+    {
+        Some(addr) => addr & !0x7,
+        None => {
+            error!("[sys_sigreturn] invalid signal frame address, send SIGSEGV");
+            drop(inner);
+            drop(task);
+            exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
+        }
+    };
+    let sigmask_addr = match ucontext_addr
+        .checked_add(2 * size_of::<usize>())
+        .and_then(|addr| addr.checked_add(size_of::<SignalStack>()))
+    {
+        Some(addr) => addr,
+        None => {
+            error!("[sys_sigreturn] invalid sigmask address, send SIGSEGV");
+            drop(inner);
+            drop(task);
+            exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
+        }
+    };
+    let mcontext_addr = match sigmask_addr
+        .checked_add(size_of::<Signals>())
+        .and_then(|addr| addr.checked_add(crate::hal::UserContext::PADDING_SIZE))
+    {
+        Some(addr) => addr,
+        None => {
+            error!("[sys_sigreturn] invalid machine context address, send SIGSEGV");
+            drop(inner);
+            drop(task);
+            exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
+        }
+    };
+    let restored_sigmask = match translated_ref(token, sigmask_addr as *mut Signals) {
+        Ok(sigmask) => *sigmask - Signals::CAN_NOT_BE_MASKED,
+        Err(_) => {
+            error!("[sys_sigreturn] bad sigmask in signal frame, send SIGSEGV");
+            drop(inner);
+            drop(task);
+            exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
+        }
+    };
+    let trap_cx_ptr = inner.get_trap_cx() as *mut TrapContext;
+    if copy_from_user(
         token,
-        (ucontext_addr + 2 * size_of::<usize>() + size_of::<SignalStack>()) as *mut Signals,
+        mcontext_addr as *mut MachineContext,
+        trap_cx_ptr.cast::<MachineContext>(),
     )
-    .unwrap(); // restore sigmask
-    copy_from_user(
-        token,
-        (ucontext_addr
-            + 2 * size_of::<usize>()
-            + size_of::<SignalStack>()
-            + size_of::<Signals>()
-            + crate::hal::UserContext::PADDING_SIZE) as *mut MachineContext,
-        (trap_cx as *mut TrapContext).cast::<MachineContext>(),
-    )
-    .unwrap(); // restore trap_cx
-               // This should be `Ok(())`.
-    return trap_cx.gp.a0 as isize; // return a0: not modify any of trap_cx
+    .is_err()
+    {
+        error!("[sys_sigreturn] bad machine context in signal frame, send SIGSEGV");
+        drop(inner);
+        drop(task);
+        exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
+    }
+    inner.sigmask = restored_sigmask;
+    inner.get_trap_cx().gp.a0 as isize // return a0: not modify any of trap_cx
 }
 
 /// Get process times

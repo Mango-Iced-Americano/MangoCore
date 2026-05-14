@@ -94,6 +94,9 @@ docker:
 	docker compose up -d && \
 	docker compose exec -it os-dev bash
 
+docker-test-parallel:
+	bash scripts/run_test_docker_parallel.sh
+
 testsuits-download:
 	cd fs-img-dir && \
 	wget -O sdcard-la.img.xz https://github.com/oscomp/testsuits-for-oskernel/releases/download/pre-20250615/sdcard-la.img.xz && \
@@ -101,4 +104,4 @@ testsuits-download:
 
 	
 
-.PHONY: all kernel run clean testsuits-download docker
+.PHONY: all kernel run clean testsuits-download docker docker-test-parallel

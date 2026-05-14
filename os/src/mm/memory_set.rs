@@ -1,5 +1,5 @@
 use super::map_area::*;
-use super::page_table::PageTable;
+use super::page_table::{FaultAccess, PageTable};
 use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use crate::config::*;
 use crate::fs::SeekWhence;
@@ -57,6 +57,8 @@ pub enum MemoryError {
     ZramIsFull,
     SwapIsFull,
     BeyondEOF,
+    OutOfMemory,
+    BackingStoreFailure,
 }
 
 /// The memory "space" as in user space or kernel space
@@ -223,7 +225,8 @@ impl<T: PageTable> MemorySet<T> {
             if !self.page_table.is_mapped(vpn) {
                 //if not mapped
                 self.page_table
-                    .map(vpn, frame.ppn.clone(), map_area.map_perm);
+                    .try_map(vpn, frame.ppn.clone(), map_area.map_perm)
+                    .map_err(|_| ())?;
             } else {
                 return Err(());
             }
@@ -233,35 +236,31 @@ impl<T: PageTable> MemorySet<T> {
     }
     #[cfg(feature = "loongarch64")]
     pub fn last_mmap_area_idx(&self) -> Option<usize> {
-        for (idx, area) in self.areas.iter().enumerate().rev().skip(SKIP_NUM) {
-            let start_vpn = area.get_start::<T>();
-            if start_vpn >= VirtAddr::from(USR_MMAP_END).into() {
-                continue;
-            } else if start_vpn >= VirtAddr::from(USR_MMAP_BASE).into()
-                && start_vpn < VirtAddr::from(USR_MMAP_END).into()
-            {
-                return Some(idx);
-            } else {
-                return None;
-            }
-        }
-        unreachable!();
+        let mmap_base = VirtAddr::from(USR_MMAP_BASE).floor();
+        let mmap_end = VirtAddr::from(USR_MMAP_END).floor();
+        self.areas
+            .iter()
+            .enumerate()
+            .filter(|(_, area)| {
+                let start_vpn = area.get_start::<T>();
+                start_vpn >= mmap_base && start_vpn < mmap_end
+            })
+            .max_by_key(|(_, area)| area.get_end::<T>().0)
+            .map(|(idx, _)| idx)
     }
     #[cfg(feature = "riscv")]
     pub fn last_mmap_area_idx(&self) -> Option<usize> {
-        for (idx, area) in self.areas.iter().enumerate().rev().skip(SKIP_NUM) {
-            let start_vpn = area.get_start::<T>();
-            if start_vpn >= VirtAddr::from(MMAP_END).into() {
-                continue;
-            } else if start_vpn >= VirtAddr::from(MMAP_BASE).into()
-                && start_vpn < VirtAddr::from(MMAP_END).into()
-            {
-                return Some(idx);
-            } else {
-                return None;
-            }
-        }
-        unreachable!();
+        let mmap_base = VirtAddr::from(MMAP_BASE).floor();
+        let mmap_end = VirtAddr::from(MMAP_END).floor();
+        self.areas
+            .iter()
+            .enumerate()
+            .filter(|(_, area)| {
+                let start_vpn = area.get_start::<T>();
+                start_vpn >= mmap_base && start_vpn < mmap_end
+            })
+            .max_by_key(|(_, area)| area.get_end::<T>().0)
+            .map(|(idx, _)| idx)
     }
 
     /// 返回最高处地址
@@ -284,29 +283,56 @@ impl<T: PageTable> MemorySet<T> {
     /// The REAL handler to page fault.
     /// Handles all types of page fault:(In regex:) "(Store|Load|Instruction)(Page)?Fault"
     /// Checks the permission to decide whether to copy.
-    pub fn do_page_fault(&mut self, addr: VirtAddr) -> Result<PhysAddr, MemoryError> {
+    pub fn do_page_fault(
+        &mut self,
+        addr: VirtAddr,
+        access: FaultAccess,
+    ) -> Result<PhysAddr, MemoryError> {
         let vpn = addr.floor();
         if let Some(area) = self.areas.iter_mut().find(|area| {
-            area.map_perm.contains(MapPermission::R | MapPermission::U)// If there is such a page in user space
+            area.map_perm.contains(MapPermission::U)// If there is such a page in user space
                 && area.get_start::<T>() <= vpn// ...and the addr is in the vpn range
                 && vpn < area.get_end::<T>()
         }) {
+            let required = match access {
+                FaultAccess::Load => MapPermission::R,
+                FaultAccess::Store => MapPermission::W,
+                FaultAccess::Execute => MapPermission::X,
+            };
+            if !area.map_perm.contains(required) {
+                error!(
+                    "[do_page_fault] addr: {:?}, access: {:?}, result: no permission",
+                    addr, access
+                );
+                return Err(MemoryError::NoPermission);
+            }
             if !self.page_table.is_mapped(vpn) {
                 // lazy alloc file-backed page
                 if let Some(file) = area.map_file.clone() {
-                    let old_offset = file.get_offset();
+                    let old_offset = file
+                        .lseek(0, SeekWhence::SEEK_CUR)
+                        .map_err(|_| MemoryError::BadAddress)?;
                     let page_start_va = VirtAddr::from(vpn).0;
                     let area_start_va = VirtAddr::from(area.get_start::<T>()).0;
                     let offset_in_area = page_start_va - area_start_va;
+                    let file_offset = old_offset
+                        .checked_add(offset_in_area)
+                        .ok_or(MemoryError::BeyondEOF)?;
                     // if offset exceed EOF, SIGBUS should be sent
-                    if old_offset + offset_in_area > (file.get_size() + PAGE_SIZE - 1) & !0xfff {
+                    if file_offset > file.get_size().saturating_add(PAGE_SIZE - 1) & !0xfff {
                         return Err(MemoryError::BeyondEOF);
                     }
-                    if area.map_perm.contains(MapPermission::W) {
+                    if access == FaultAccess::Store {
                         let allocated_ppn =
-                            area.map_one_zeroed_unchecked(&mut self.page_table, vpn);
-                        file.lseek(offset_in_area as isize, SeekWhence::SEEK_CUR)
-                            .unwrap();
+                            area.map_one_zeroed_unchecked(&mut self.page_table, vpn)?;
+                        if file_offset > isize::MAX as usize
+                            || old_offset > isize::MAX as usize
+                            || file
+                                .lseek(file_offset as isize, SeekWhence::SEEK_SET)
+                                .is_err()
+                        {
+                            return Err(MemoryError::BadAddress);
+                        }
                         file.read(None, unsafe {
                             core::slice::from_raw_parts_mut(
                                 PhysAddr::from(allocated_ppn).0 as *mut u8,
@@ -314,19 +340,21 @@ impl<T: PageTable> MemorySet<T> {
                             )
                         });
                         file.lseek(old_offset as isize, SeekWhence::SEEK_SET)
-                            .unwrap();
+                            .map_err(|_| MemoryError::BadAddress)?;
                         Ok(allocated_ppn.offset(addr.page_offset()))
                     // map to phys page directly
                     } else {
                         let cache_phys_page = file
-                            .get_single_cache(old_offset + offset_in_area)
-                            .unwrap()
-                            .try_lock()
-                            .unwrap()
+                            .get_single_cache(file_offset)
+                            .map_err(|_| MemoryError::BeyondEOF)?
+                            .lock()
                             .get_tracker();
                         let cache_ppn = cache_phys_page.ppn;
-                        self.page_table.map(vpn, cache_ppn, area.map_perm);
-                        area.inner.alloc_in_memory(vpn, cache_phys_page);
+                        area.inner.alloc_in_memory(vpn, cache_phys_page)?;
+                        if let Err(err) = self.page_table.try_map(vpn, cache_ppn, area.map_perm) {
+                            area.inner.remove_in_memory(&vpn);
+                            return Err(err);
+                        }
                         Ok(cache_ppn.offset(addr.page_offset()))
                     }
                 } else {
@@ -338,11 +366,11 @@ impl<T: PageTable> MemorySet<T> {
                                 "[Frame InMemory] addr: {:?}, vpn: {:?}, frame: {:?}",
                                 addr, vpn, frame
                             );
-                            unreachable!();
+                            return Err(MemoryError::NotMapped);
                         }
                         Frame::Unallocated => {
                             debug!("[do_page_fault] addr: {:?}, solution: lazy alloc", addr);
-                            let ppn = area.map_one_zeroed_unchecked(&mut self.page_table, vpn);
+                            let ppn = area.map_one_zeroed_unchecked(&mut self.page_table, vpn)?;
                             let frame = area.inner.get_mut(&vpn);
                             debug!(
                                 "[do_page_fault map_one] addr: {:?}, vpn: {:?}, frame: {:?}",
@@ -352,22 +380,30 @@ impl<T: PageTable> MemorySet<T> {
                         }
                         #[cfg(feature = "oom_handler")]
                         Frame::Compressed(_) => {
-                            let ppn = frame.unzip().unwrap();
-                            self.page_table.map(vpn, ppn, area.map_perm);
+                            let ppn = frame.unzip()?;
+                            self.page_table.try_map(vpn, ppn, area.map_perm)?;
                             area.inner
                                 .active
-                                .push_back((vpn.0 - area.get_start::<T>().0) as u16);
+                                .try_reserve(1)
+                                .map_err(|_| MemoryError::OutOfMemory)?;
+                            area.inner
+                                .active
+                                .push_back(vpn.0 - area.get_start::<T>().0);
                             area.inner.compressed -= 1;
                             debug!("[do_page_fault] addr: {:?}, solution: decompress", addr);
                             ppn
                         }
                         #[cfg(feature = "oom_handler")]
                         Frame::SwappedOut(_) => {
-                            let ppn = frame.swap_in().unwrap();
-                            self.page_table.map(vpn, ppn, area.map_perm);
+                            let ppn = frame.swap_in()?;
+                            self.page_table.try_map(vpn, ppn, area.map_perm)?;
                             area.inner
                                 .active
-                                .push_back((vpn.0 - area.get_start::<T>().0) as u16);
+                                .try_reserve(1)
+                                .map_err(|_| MemoryError::OutOfMemory)?;
+                            area.inner
+                                .active
+                                .push_back(vpn.0 - area.get_start::<T>().0);
                             area.inner.swapped -= 1;
                             debug!("[do_page_fault] addr: {:?}, solution: swap in", addr);
                             ppn
@@ -377,24 +413,43 @@ impl<T: PageTable> MemorySet<T> {
                 }
             } else {
                 // mapped before the assignment
-                if area.map_perm.contains(MapPermission::W) {
+                if access == FaultAccess::Store {
                     if area.flags.contains(MapFlags::MAP_SHARED) {
-                        self.page_table.set_pte_flags(vpn, area.map_perm).unwrap();
-                        let ppn = self.page_table.translate(vpn).unwrap();
+                        self.page_table
+                            .set_pte_flags(vpn, area.map_perm)
+                            .map_err(|_| MemoryError::NotMapped)?;
+                        let ppn = self
+                            .page_table
+                            .translate(vpn)
+                            .ok_or(MemoryError::NotMapped)?;
                         Ok(ppn.offset(addr.page_offset()))
                     } else {
+                        // 修复lazy元数据和pte不一致
+                        if area.frame_is_unallocated(vpn) {
+                            warn!(
+                                "[do_page_fault] clear stale lazy pte: addr={:?}, vpn={:?}, area={:?}",
+                                addr, vpn, area
+                            );
+                            area.clear_stale_pte(&mut self.page_table, vpn);
+                            if area.map_file.is_none() {
+                                let allocated_ppn =
+                                    area.map_one_zeroed_unchecked(&mut self.page_table, vpn)?;
+                                debug!("[do_page_fault] addr: {:?}, solution: lazy alloc", addr);
+                                return Ok(allocated_ppn.offset(addr.page_offset()));
+                            }
+                            return Err(MemoryError::NotMapped);
+                        }
                         // Whoever triggers this fault shall cause the area to be copied into a new area.
                         let allocated_ppn = area.copy_on_write(&mut self.page_table, vpn)?;
                         debug!("[do_page_fault] addr: {:?}, solution: copy on write", addr);
                         Ok(allocated_ppn.offset(addr.page_offset()))
                     }
                 } else {
-                    // Write without permission
-                    error!(
-                        "[do_page_fault] addr: {:?}, result: write no permission",
-                        addr
-                    );
-                    Err(MemoryError::NoPermission)
+                    let ppn = self
+                        .page_table
+                        .translate(vpn)
+                        .ok_or(MemoryError::NotMapped)?;
+                    Ok(ppn.offset(addr.page_offset()))
                 }
             }
         } else {
@@ -412,7 +467,7 @@ impl<T: PageTable> MemorySet<T> {
             .filter(|area| {
                 let start_vpn = area.get_start::<T>();
                 start_vpn.0 >= (USR_MMAP_BASE >> PAGE_SIZE_BITS)
-                    && start_vpn.0 < (TASK_SIZE >> PAGE_SIZE_BITS)
+                    && start_vpn.0 < (USR_MMAP_END >> PAGE_SIZE_BITS)
                     && area.map_file.is_none()
             })
             .map(|area| area.do_oom(page_table))
@@ -440,7 +495,8 @@ impl<T: PageTable> MemorySet<T> {
         self.areas
             .iter_mut()
             .filter(|area| {
-                area.get_start::<T>().0 < (TASK_SIZE >> PAGE_SIZE_BITS) && area.map_file.is_none()
+                area.get_start::<T>().0 < (USER_VA_END >> PAGE_SIZE_BITS)
+                    && area.map_file.is_none()
             })
             .map(|area| {
                 if area.get_start::<T>().0 < USR_MMAP_BASE >> PAGE_SIZE_BITS {
@@ -792,54 +848,265 @@ impl<T: PageTable> MemorySet<T> {
             );
         })
     }
+    fn page_round_up_addr(addr: usize) -> Option<usize> {
+        addr.checked_add(PAGE_SIZE - 1)
+            .map(|addr| addr & !(PAGE_SIZE - 1))
+    }
+
     pub fn sbrk(&mut self, heap_pt: usize, heap_bottom: usize, increment: isize) -> usize {
-        let old_pt: usize = heap_pt;
-        let new_pt: usize = old_pt + increment as usize;
-        if increment > 0 {
-            let limit = heap_bottom + USER_HEAP_SIZE;
-            if new_pt > limit {
+        let old_pt = heap_pt;
+        let Some(limit) = heap_bottom.checked_add(USER_HEAP_SIZE) else {
+            warn!(
+                "[sbrk] heap limit overflow! heap_bottom: {:X}, heap_size: {:X}",
+                heap_bottom, USER_HEAP_SIZE
+            );
+            return old_pt;
+        };
+        let new_pt = if increment > 0 {
+            match old_pt.checked_add(increment as usize) {
+                Some(new_pt) => new_pt,
+                None => {
+                    warn!(
+                        "[sbrk] grow overflow! old_pt: {:X}, increment: {:X}",
+                        old_pt, increment
+                    );
+                    return old_pt;
+                }
+            }
+        } else if increment < 0 {
+            let Some(delta) = increment.checked_neg().map(|delta| delta as usize) else {
                 warn!(
-                    "[sbrk] out of the upperbound! upperbound: {:X}, old_pt: {:X}, new_pt: {:X}",
-                    limit, old_pt, new_pt
+                    "[sbrk] shrink overflow! old_pt: {:X}, increment: {:X}",
+                    old_pt, increment
                 );
                 return old_pt;
-            } else {
-                self.mmap(
-                    old_pt,
-                    increment as usize,
+            };
+            match old_pt.checked_sub(delta) {
+                Some(new_pt) => new_pt,
+                None => {
+                    warn!(
+                        "[sbrk] shrink underflow! old_pt: {:X}, decrement: {:X}",
+                        old_pt, delta
+                    );
+                    return old_pt;
+                }
+            }
+        } else {
+            return old_pt;
+        };
+
+        if new_pt < heap_bottom {
+            warn!(
+                "[sbrk] out of the lowerbound! lowerbound: {:X}, old_pt: {:X}, new_pt: {:X}",
+                heap_bottom, old_pt, new_pt
+            );
+            return old_pt;
+        }
+        if new_pt > limit {
+            warn!(
+                "[sbrk] out of the upperbound! upperbound: {:X}, old_pt: {:X}, new_pt: {:X}",
+                limit, old_pt, new_pt
+            );
+            return old_pt;
+        }
+
+        let Some(old_page_end) = Self::page_round_up_addr(old_pt) else {
+            warn!("[sbrk] old break round-up overflow! old_pt: {:X}", old_pt);
+            return old_pt;
+        };
+        let Some(new_page_end) = Self::page_round_up_addr(new_pt) else {
+            warn!("[sbrk] new break round-up overflow! new_pt: {:X}", new_pt);
+            return old_pt;
+        };
+
+        if new_pt > old_pt {
+            if new_page_end > old_page_end {
+                let len = new_page_end - old_page_end;
+                let ret = self.mmap(
+                    old_page_end,
+                    len,
                     MapPermission::R | MapPermission::W | MapPermission::U,
                     MapFlags::MAP_ANONYMOUS | MapFlags::MAP_FIXED | MapFlags::MAP_PRIVATE,
                     1usize.wrapping_neg(),
                     0,
                 );
-                trace!("[sbrk] heap area expanded to {:X}", new_pt);
-            }
-        } else if increment < 0 {
-            // shrink to `heap_bottom` would cause duplicated insertion of heap area in future
-            // so we simply reject it here
-            if new_pt <= heap_bottom {
-                warn!(
-                    "[sbrk] out of the lowerbound! lowerbound: {:X}, old_pt: {:X}, new_pt: {:X}",
-                    heap_bottom, old_pt, new_pt
-                );
-                return old_pt;
-            // attention that if the process never call sbrk before, it would have no heap area
-            // we only do shrinking when it does have a heap area
-            } else {
-                let start_va: usize = VirtAddr::from(new_pt).ceil().into();
-                let end_va: usize = VirtAddr::from(old_pt).ceil().into();
-                match self.munmap(start_va, end_va - start_va) {
-                    Ok(()) => {}
-                    Err(EINVAL) => {} // 消除以前从未sbrk导致上述注释no heap
-                    // area触发panic情况。请确保此处start_va必须对齐
-                    Err(err) => panic!("[sbrk] 堆收缩释放失败, err={}", err),
+                if ret < 0 {
+                    warn!(
+                        "[sbrk] heap grow mmap failed: start={:X}, len={:X}, err={}",
+                        old_page_end, len, ret
+                    );
+                    return old_pt;
                 }
             }
-            // we need to adjust `heap_pt` if it's not out of bound
-            // in spite of whether the process has a heap area
+            trace!("[sbrk] heap area expanded to {:X}", new_pt);
+        } else if old_page_end > new_page_end {
+            let len = old_page_end - new_page_end;
+            if let Err(err) = self.munmap(new_page_end, len) {
+                warn!(
+                    "[sbrk] heap shrink munmap failed: start={:X}, len={:X}, err={}",
+                    new_page_end, len, err
+                );
+                return old_pt;
+            }
         }
+
         new_pt
     }
+    #[cfg(feature = "loongarch64")]
+    fn user_mmap_bounds() -> (usize, usize) {
+        (USR_MMAP_BASE, USR_MMAP_END)
+    }
+
+    #[cfg(feature = "riscv")]
+    fn user_mmap_bounds() -> (usize, usize) {
+        (MMAP_BASE, MMAP_END)
+    }
+
+    fn checked_user_range(start: usize, len: usize) -> Result<(VirtAddr, VirtAddr), isize> {
+        if len == 0 {
+            return Err(EINVAL);
+        }
+        let end = start.checked_add(len).ok_or(EINVAL)?;
+        if start >= USER_VA_END || end > USER_VA_END {
+            return Err(EINVAL);
+        }
+        Ok((VirtAddr::from(start), VirtAddr::from(end)))
+    }
+
+    fn area_overlaps_range(area: &MapArea, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> bool {
+        start_vpn < area.get_end::<T>() && end_vpn > area.get_start::<T>()
+    }
+
+    fn has_overlap(&self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> bool {
+        self.areas
+            .iter()
+            .any(|area| Self::area_overlaps_range(area, start_vpn, end_vpn))
+    }
+
+    fn insert_area_ordered(&mut self, new_area: MapArea) {
+        let start_vpn = new_area.get_start::<T>();
+        if let Some(idx) = self
+            .areas
+            .iter()
+            .position(|area| area.get_start::<T>() >= start_vpn)
+        {
+            self.areas.insert(idx, new_area);
+        } else {
+            self.areas.push(new_area);
+        }
+    }
+
+    fn split_area_for_range(
+        &mut self,
+        idx: usize,
+        start_vpn: VirtPageNum,
+        end_vpn: VirtPageNum,
+    ) -> Result<usize, isize> {
+        let area_start_vpn = self.areas[idx].get_start::<T>();
+        let area_end_vpn = self.areas[idx].get_end::<T>();
+        if start_vpn < area_start_vpn || end_vpn > area_end_vpn || start_vpn >= end_vpn {
+            return Err(EINVAL);
+        }
+        if start_vpn == area_start_vpn && end_vpn == area_end_vpn {
+            Ok(idx)
+        } else if start_vpn == area_start_vpn {
+            let second = self.areas[idx].into_two(end_vpn).map_err(|_| EINVAL)?;
+            self.areas.insert(idx + 1, second);
+            Ok(idx)
+        } else if end_vpn == area_end_vpn {
+            let second = self.areas[idx].into_two(start_vpn).map_err(|_| EINVAL)?;
+            self.areas.insert(idx + 1, second);
+            Ok(idx + 1)
+        } else {
+            // 中间拆分会留下左右两段，只操作中间目标段
+            let (second, third) = self.areas[idx]
+                .into_three(start_vpn, end_vpn)
+                .map_err(|_| EINVAL)?;
+            self.areas.insert(idx + 1, second);
+            self.areas.insert(idx + 2, third);
+            Ok(idx + 1)
+        }
+    }
+
+    fn unmap_range(
+        &mut self,
+        start_vpn: VirtPageNum,
+        end_vpn: VirtPageNum,
+        allow_empty: bool,
+    ) -> Result<bool, isize> {
+        let mut found_area = false;
+        let mut idx = 0usize;
+        while idx < self.areas.len() {
+            if !Self::area_overlaps_range(&self.areas[idx], start_vpn, end_vpn) {
+                idx += 1;
+                continue;
+            }
+            if !self.areas[idx].map_perm.contains(MapPermission::U) {
+                return Err(EINVAL);
+            }
+            found_area = true;
+            let area_start_vpn = self.areas[idx].get_start::<T>();
+            let area_end_vpn = self.areas[idx].get_end::<T>();
+            let overlap_start = if start_vpn > area_start_vpn {
+                start_vpn
+            } else {
+                area_start_vpn
+            };
+            let overlap_end = if end_vpn < area_end_vpn {
+                end_vpn
+            } else {
+                area_end_vpn
+            };
+            let target_idx = self.split_area_for_range(idx, overlap_start, overlap_end)?;
+            {
+                let page_table = &mut self.page_table;
+                let area = &mut self.areas[target_idx];
+                if let Err(_) = area.unmap(page_table) {
+                    warn!("[munmap] Some pages are already unmapped, is it caused by lazy alloc?");
+                }
+            }
+            self.areas.remove(target_idx);
+            idx = target_idx;
+        }
+        if found_area || allow_empty {
+            Ok(found_area)
+        } else {
+            Err(EINVAL)
+        }
+    }
+
+    fn protect_area(&mut self, idx: usize, prot: MapPermission) {
+        let page_table = &mut self.page_table;
+        let area = &mut self.areas[idx];
+        let mut has_unmapped_page = false;
+        let actual_prot = if area.flags.contains(MapFlags::MAP_SHARED) {
+            prot
+        } else {
+            prot - MapPermission::W
+        };
+        for vpn in area.inner.vpn_range {
+            if area.frame_is_unallocated(vpn) {
+                if area.clear_stale_pte(page_table, vpn) {
+                    warn!(
+                        "[mprotect] clear stale lazy pte: vpn={:?}, area={:?}",
+                        vpn, area
+                    );
+                }
+                // lazy 页还没有实体帧，不能为了改权限强行造 PTE
+                has_unmapped_page = true;
+                continue;
+            }
+            // private 可写页先去掉 W，后续写入再走 COW
+            if let Err(_) = page_table.set_pte_flags(vpn, actual_prot) {
+                has_unmapped_page = true;
+            }
+        }
+        if has_unmapped_page {
+            warn!("[mprotect] Some pages are not mapped, is it caused by lazy alloc?");
+        }
+        area.map_perm = prot;
+    }
+
     pub fn mmap(
         &mut self,
         start: usize,
@@ -853,20 +1120,31 @@ impl<T: PageTable> MemorySet<T> {
         if start & 0xfff != 0 {
             return EINVAL;
         }
-        let len = if len == 0 { PAGE_SIZE } else { len };
+        let (start_hint, requested_end) = match Self::checked_user_range(start, len) {
+            Ok(range) => range,
+            Err(errno) => return errno,
+        };
         // Limit max mmap size to 1GB to prevent kernel heap OOM in creating MapArea.
         if len > 1024 * 1024 * 1024 {
             return ENOMEM;
         }
-        if start.checked_add(len).is_none() {
-            return EINVAL;
-        }
         let task = current_task().unwrap();
         let idx = self.last_mmap_area_idx();
-        let start_va: VirtAddr = if flags.contains(MapFlags::MAP_FIXED) {
-            // unmap if exists
-            unsafe { self.munmap(start, len).unwrap_unchecked() };
-            start.into()
+        let fixed = flags.contains(MapFlags::MAP_FIXED)
+            || flags.contains(MapFlags::MAP_FIXED_NOREPLACE);
+        let start_va: VirtAddr = if fixed {
+            let start_vpn = start_hint.floor();
+            let end_vpn = requested_end.ceil();
+            if flags.contains(MapFlags::MAP_FIXED_NOREPLACE)
+                && self.has_overlap(start_vpn, end_vpn)
+            {
+                return EEXIST;
+            }
+            // MAP_FIXED 允许覆盖空洞，空洞不是错误
+            if let Err(errno) = self.unmap_range(start_vpn, end_vpn, true) {
+                return errno;
+            }
+            start_hint
         } else {
             if let Some(idx) = idx {
                 let area = &mut self.areas[idx];
@@ -875,10 +1153,17 @@ impl<T: PageTable> MemorySet<T> {
                     && area.map_file.is_none()
                 {
                     let end_va: VirtAddr = area.get_end::<T>().into();
-                    // 防止合并后过大导致内核堆 OOM (限制单个 MapArea 不超过 1GB)
-                    if end_va.0 + len - area.get_start::<T>().0 <= 1024 * 1024 * 1024 {
+                    let new_end = match end_va.0.checked_add(len) {
+                        Some(new_end) => new_end,
+                        None => return EINVAL,
+                    };
+                    let (_, mmap_end) = Self::user_mmap_bounds();
+                    // 防止合并后越过 mmap 边界或导致内核堆 OOM
+                    if new_end <= mmap_end
+                        && new_end - area.get_start::<T>().0 <= 1024 * 1024 * 1024
+                    {
                         debug!("[mmap] merge with previous area, call expand_to");
-                        if let Err(e) = area.expand_to::<T>(VirtAddr::from(end_va.0 + len)) {
+                        if let Err(e) = area.expand_to::<T>(VirtAddr::from(new_end)) {
                             return e;
                         }
                         return end_va.0 as isize;
@@ -896,9 +1181,25 @@ impl<T: PageTable> MemorySet<T> {
                 }
             }
         };
+        let end = match start_va.0.checked_add(len) {
+            Some(end) => end,
+            None => return EINVAL,
+        };
+        if !fixed {
+            let (_, mmap_end) = Self::user_mmap_bounds();
+            if end > mmap_end {
+                return ENOMEM;
+            }
+        }
+        let end_va = VirtAddr::from(end);
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        if self.has_overlap(start_vpn, end_vpn) {
+            return EINVAL;
+        }
         let mut new_area = match MapArea::try_new(
             start_va,
-            VirtAddr::from(start_va.0 + len),
+            end_va,
             MapType::Framed,
             prot,
             None,
@@ -908,16 +1209,19 @@ impl<T: PageTable> MemorySet<T> {
         };
         new_area.flags = flags;
         if !flags.contains(MapFlags::MAP_ANONYMOUS) {
-            warn!("[mmap] file-backed map! (NOT YET SUPPORTED in new VFS)");
+            if offset & (PAGE_SIZE - 1) != 0 || offset > isize::MAX as usize {
+                return EINVAL;
+            }
+            warn!("[mmap] file-backed map!");
             let fd_table = task.files.lock();
             match fd_table.get_ref(fd) {
                 Ok(file_descriptor) => {
                     if !file_descriptor.readable() {
                         return EACCES;
                     }
-                    // FIXME: 文件支持的 mmap 需要桥接 Arc<dyn IndexNode> → Arc<dyn File>
-                    // 在新 VFS 迁移完成后，应将 map_file 类型改为 Arc<dyn IndexNode>
-                    new_area.map_file = None;
+                    let file = file_descriptor.file.deep_clone();
+                    file.lseek(offset as isize, SeekWhence::SEEK_SET).unwrap();
+                    new_area.map_file = Some(file);
                 }
                 Err(errno) => return errno,
             }
@@ -928,198 +1232,129 @@ impl<T: PageTable> MemorySet<T> {
             let area_start_va = VirtAddr::from(new_area.get_start::<T>()).0;
             let vpn_range = new_area.inner.vpn_range;
             if let Some(file) = &map_file {
-                let old_offset = file.get_offset();
+                let old_offset = match file.lseek(0, SeekWhence::SEEK_CUR) {
+                    Ok(offset) => offset,
+                    Err(_) => return EINVAL,
+                };
                 let file_size = file.get_size();
                 for vpn in vpn_range {
                     let page_start_va = VirtAddr::from(vpn).0;
                     let offset_in_area = page_start_va - area_start_va;
-                    if old_offset + offset_in_area <= (file_size + PAGE_SIZE - 1) & !0xfff {
-                        if let Ok(cache) = file.get_single_cache(old_offset + offset_in_area) {
-                            let cache_phys_page = cache.try_lock().unwrap().get_tracker();
+                    let Some(file_offset) = old_offset.checked_add(offset_in_area) else {
+                        return EINVAL;
+                    };
+                    let file_page_end = file_size.saturating_add(PAGE_SIZE - 1) & !0xfff;
+                    if file_offset <= file_page_end {
+                        if let Ok(cache) = file.get_single_cache(file_offset) {
+                            let cache_phys_page = cache.lock().get_tracker();
                             let cache_ppn = cache_phys_page.ppn;
-                            self.page_table.map(vpn, cache_ppn, new_area.map_perm);
-                            new_area.inner.alloc_in_memory(vpn, cache_phys_page);
+                            if let Err(err) =
+                                new_area.inner.alloc_in_memory(vpn, cache_phys_page)
+                            {
+                                return match err {
+                                    MemoryError::OutOfMemory => ENOMEM,
+                                    _ => EINVAL,
+                                };
+                            }
+                            if let Err(err) =
+                                self.page_table.try_map(vpn, cache_ppn, new_area.map_perm)
+                            {
+                                new_area.inner.remove_in_memory(&vpn);
+                                return match err {
+                                    MemoryError::OutOfMemory => ENOMEM,
+                                    _ => EINVAL,
+                                };
+                            }
                         } else {
-                            new_area.map_one_zeroed_unchecked(&mut self.page_table, vpn);
+                            if let Err(err) =
+                                new_area.map_one_zeroed_unchecked(&mut self.page_table, vpn)
+                            {
+                                return match err {
+                                    MemoryError::OutOfMemory => ENOMEM,
+                                    _ => EINVAL,
+                                };
+                            }
                         }
                     } else {
-                        new_area.map_one_zeroed_unchecked(&mut self.page_table, vpn);
+                        if let Err(err) =
+                            new_area.map_one_zeroed_unchecked(&mut self.page_table, vpn)
+                        {
+                            return match err {
+                                MemoryError::OutOfMemory => ENOMEM,
+                                _ => EINVAL,
+                            };
+                        }
                     }
                 }
             } else {
                 for vpn in vpn_range {
-                    new_area.map_one_zeroed_unchecked(&mut self.page_table, vpn);
+                    if let Err(err) = new_area.map_one_zeroed_unchecked(&mut self.page_table, vpn) {
+                        return match err {
+                            MemoryError::OutOfMemory => ENOMEM,
+                            _ => EINVAL,
+                        };
+                    }
                 }
             }
         }
 
         // insert MapArea and keep the order
-        #[cfg(feature = "loongarch64")]
-        if let Some((idx, _)) = self
-            .areas
-            .iter()
-            .enumerate()
-            .skip_while(|(_, area)| area.get_start::<T>() >= VirtAddr::from(USR_MMAP_END).into())
-            .find(|(_, area)| area.get_start::<T>() >= start_va.into())
-        {
-            self.areas.insert(idx, new_area);
-        } else {
-            error!("[MemorySet::mmap] No area found higher than new_area {:?} in beginning address. TRAMPOLINES may have been mapped to wrong places!",new_area);
-            self.areas.push(new_area);
-        }
-        #[cfg(feature = "riscv")]
-        // 2023 NPUcore+版本直接使用的unwrap
-        if let Some((idx, _)) = self
-            .areas
-            .iter()
-            .enumerate()
-            .skip_while(|(_, area)| area.get_start::<T>() >= VirtAddr::from(MMAP_END).into())
-            .find(|(_, area)| area.get_start::<T>() >= start_va.into())
-        {
-            self.areas.insert(idx, new_area);
-        } else {
-            error!("[MemorySet::mmap] No area found higher than new_area {:?} in beginning address. TRAMPOLINES may have been mapped to wrong places!",new_area);
-            self.areas.push(new_area);
-        }
+        self.insert_area_ordered(new_area);
 
         start_va.0 as isize
     }
     pub fn munmap(&mut self, start: usize, len: usize) -> Result<(), isize> {
-        let start_va = VirtAddr::from(start);
-        let end_va = VirtAddr::from(start + len);
+        let (start_va, end_va) = Self::checked_user_range(start, len)?;
         if !start_va.aligned() {
             warn!("[munmap] Not aligned");
             return Err(EINVAL);
         }
         let start_vpn = start_va.floor();
         let end_vpn = end_va.ceil();
-        let page_table = &mut self.page_table;
-        let mut found_area = false;
-        let mut delete: Vec<usize> = Vec::new();
-        let mut break_apart_idx: Option<usize> = None;
-        self.areas.iter_mut().enumerate().for_each(|(idx, area)| {
-            if let Some((overlap_start, overlap_end)) = area.check_overlapping(start_vpn, end_vpn) {
-                found_area = true;
-                let area_start_vpn: VirtPageNum = area.get_start::<T>();
-                let area_end_vpn = area.get_end::<T>();
-                if overlap_start == area_start_vpn && overlap_end == area_end_vpn {
-                    trace!("[munmap] unmap whole area, idx: {}", idx);
-                    if let Err(_) = area.unmap(page_table) {
-                        warn!(
-                            "[munmap] Some pages are already unmapped, is it caused by lazy alloc?"
-                        );
-                    }
-                    delete.push(idx);
-                } else if overlap_start == area_start_vpn {
-                    trace!("[munmap] unmap lower part, call rshrink_to");
-                    if let Err(_) = area.rshrink_to(page_table, VirtAddr::from(overlap_end)) {
-                        warn!(
-                            "[munmap] Some pages are already unmapped, is it caused by lazy alloc?"
-                        );
-                    }
-                } else if overlap_end == area_end_vpn {
-                    trace!("[munmap] unmap higher part, call shrink_to");
-                    if let Err(_) = area.shrink_to(page_table, VirtAddr::from(overlap_start)) {
-                        warn!(
-                            "[munmap] Some pages are already unmapped, is it caused by lazy alloc?"
-                        );
-                    }
-                } else {
-                    trace!("[munmap] unmap internal part, call into_three");
-                    break_apart_idx = Some(idx);
-                }
-            }
-        });
-        for idx in delete.into_iter().rev() {
-            self.areas.remove(idx);
-        }
-        if let Some(idx) = break_apart_idx {
-            let (mut second, third) = self.areas[idx].into_three(start_vpn, end_vpn).unwrap();
-            if let Err(_) = second.unmap(page_table) {
-                warn!("[munmap] Some pages are already unmapped, is it caused by lazy alloc?");
-            }
-            self.areas.insert(idx + 1, third);
-        }
-        if found_area {
-            Ok(())
-        } else {
-            Err(EINVAL)
-        }
+        self.unmap_range(start_vpn, end_vpn, true).map(|_| ())
     }
-    pub fn mprotect(&mut self, addr: usize, len: usize, prot: usize) -> Result<(), isize> {
-        let start_va = VirtAddr::from(addr);
-        let end_va = VirtAddr::from(addr + len);
+    pub fn mprotect(
+        &mut self,
+        addr: usize,
+        len: usize,
+        prot: MapPermission,
+    ) -> Result<(), isize> {
+        if len == 0 {
+            return Ok(());
+        }
+        let (start_va, end_va) = Self::checked_user_range(addr, len)?;
         // addr is not a multiple of the system page size.
         if !start_va.aligned() {
             warn!("[mprotect] Not aligned");
             return Err(EINVAL);
         }
-        // here (prot << 1) is identical to BitFlags of X/W/R in pte flags
-        let prot = MapPermission::from_bits(((prot as u8) << 1) | (1 << 4)).unwrap();
         warn!(
             "[mprotect] addr: {:X}, len: {:X}, prot: {:?}",
             addr, len, prot
         );
         let start_vpn = start_va.floor();
         let end_vpn = end_va.ceil();
-        let result = self.areas.iter().enumerate().find(|(_, area)| {
-            area.get_start::<T>() <= start_vpn && start_vpn < area.get_end::<T>()
-        });
-        match result {
-            Some((idx, _)) => {
-                let area_start_vpn = self.areas[idx].get_start::<T>();
-                let area_end_vpn = self.areas[idx].get_end::<T>();
-                // Addresses in the range [addr, addr+len-1] are invalid for the address space of the process,
-                // or specify one or more pages that are not mapped.
-                if end_vpn > area_end_vpn {
-                    warn!("[mprotect] addr: {:X} is not in any MapArea", addr);
-                    return Err(ENOMEM);
-                }
-                let area: &mut MapArea = if start_vpn == area_start_vpn && end_vpn == area_end_vpn {
-                    trace!("[mprotect] change prot of whole area, idx: {}", idx);
-                    &mut self.areas[idx]
-                } else if start_vpn == area_start_vpn {
-                    trace!("[mprotect] change prot of lower part");
-                    let second = self.areas[idx].into_two(end_vpn).unwrap();
-                    self.areas.insert(idx + 1, second);
-                    // important, keep the order of areas
-                    &mut self.areas[idx]
-                } else if end_vpn == area_end_vpn {
-                    trace!("[mprotect] change prot of higher part");
-                    let second = self.areas[idx].into_two(start_vpn).unwrap();
-                    self.areas.insert(idx + 1, second);
-                    &mut self.areas[idx + 1]
+        let mut cursor = start_vpn;
+        while cursor < end_vpn {
+            let Some(idx) = self.areas.iter().enumerate().find_map(|(idx, area)| {
+                if area.map_perm.contains(MapPermission::U)
+                    && area.get_start::<T>() <= cursor
+                    && cursor < area.get_end::<T>()
+                {
+                    Some(idx)
                 } else {
-                    trace!("[mprotect] change prot of internal part, call into_three");
-                    let (second, third) = self.areas[idx].into_three(start_vpn, end_vpn).unwrap();
-                    self.areas.insert(idx + 1, second);
-                    self.areas.insert(idx + 2, third);
-                    &mut self.areas[idx + 1]
-                };
-                let page_table = &mut self.page_table;
-                let mut has_unmapped_page = false;
-                let actual_prot = if area.flags.contains(MapFlags::MAP_SHARED) {
-                    prot
-                } else {
-                    prot - MapPermission::W
-                };
-                for vpn in area.inner.vpn_range {
-                    // Clear W prot, or CoW pages may be written unexpectedly.
-                    // And those pages will gain W prot by CoW.
-                    if let Err(_) = page_table.set_pte_flags(vpn, actual_prot) {
-                        has_unmapped_page = true;
-                    }
+                    None
                 }
-                if has_unmapped_page {
-                    warn!("[mprotect] Some pages are not mapped, is it caused by lazy alloc?");
-                }
-                // If `prot` contains W, store page fault & CoW will occur.
-                area.map_perm = prot;
-            }
-            None => {
-                warn!("[mprotect] addr is not a valid pointer");
-                return Err(EINVAL);
-            }
+            }) else {
+                warn!("[mprotect] addr: {:?} is not in any user MapArea", cursor);
+                return Err(ENOMEM);
+            };
+            let area_end = self.areas[idx].get_end::<T>();
+            let protect_end = if area_end < end_vpn { area_end } else { end_vpn };
+            // 跨 VMA 时每段单独拆，遇到洞就返回 ENOMEM
+            let target_idx = self.split_area_for_range(idx, cursor, protect_end)?;
+            self.protect_area(target_idx, prot);
+            cursor = protect_end;
         }
         Ok(())
     }
@@ -1377,7 +1612,7 @@ pub fn remap_test() {
     info!("remap_test passed!");
 }
 
-pub fn check_page_fault(addr: VirtAddr) -> Result<PhysAddr, isize> {
+pub fn check_page_fault(addr: VirtAddr, access: FaultAccess) -> Result<PhysAddr, isize> {
     // This is where we handle the page fault.
     super::frame_reserve(3);
     let task = match current_task() {
@@ -1387,13 +1622,22 @@ pub fn check_page_fault(addr: VirtAddr) -> Result<PhysAddr, isize> {
             return Err(EFAULT);
         }
     };
-    match task.vm.lock().do_page_fault(addr) {
+    match task.vm.lock().do_page_fault(addr, access) {
         Ok(pa) => return Ok(pa),
         Err(MemoryError::BeyondEOF)
         | Err(MemoryError::NoPermission)
-        | Err(MemoryError::BadAddress) => {
+        | Err(MemoryError::BadAddress)
+        | Err(MemoryError::NotMapped)
+        | Err(MemoryError::BackingStoreFailure) => {
             return Err(EFAULT);
         }
-        _ => unreachable!(),
+        Err(MemoryError::OutOfMemory) => return Err(ENOMEM),
+        Err(err) => {
+            warn!(
+                "[check_page_fault] unexpected error: {:?}, addr={:?}, access={:?}",
+                err, addr, access
+            );
+            return Err(EFAULT);
+        }
     };
 }

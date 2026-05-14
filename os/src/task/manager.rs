@@ -498,13 +498,16 @@ impl WaitQueue {
         }
         self.add_task(task);
     }
-    pub fn finish_wait(&mut self, task: &Arc<TaskControlBlock>) {
+    pub fn finish_wait(&mut self, task: &Arc<TaskControlBlock>) -> bool {
+        let old_len = self.inner.len();
         self.inner
             .retain(|task_in_queue| Weak::as_ptr(task_in_queue) != Arc::as_ptr(task));
+        let removed = self.inner.len() != old_len;
         let mut task_inner = task.acquire_inner_lock();
         if task_inner.task_status == super::TaskStatus::Interruptible {
             task_inner.task_status = super::TaskStatus::Ready;
         }
+        removed
     }
 
     // ==================== wait_until 方法族（DragonOS 架构） ====================

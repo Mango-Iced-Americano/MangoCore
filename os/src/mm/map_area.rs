@@ -102,7 +102,7 @@ impl Frame {
     pub fn swap_in(&mut self) -> Result<PhysPageNum, MemoryError> {
         match self {
             Frame::SwappedOut(swap_tracker) => {
-                let frame = frame_alloc().unwrap();
+                let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
                 let ppn = frame.ppn;
                 SWAP_DEVICE
                     .lock()
@@ -139,12 +139,12 @@ impl Frame {
     pub fn unzip(&mut self) -> Result<PhysPageNum, MemoryError> {
         match self {
             Frame::Compressed(zram_tracker) => {
-                let frame = frame_alloc().unwrap();
+                let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
                 let ppn = frame.ppn;
                 ZRAM_DEVICE
                     .lock()
                     .read(zram_tracker.0, ppn.get_bytes_array())
-                    .unwrap();
+                    .map_err(|_| MemoryError::BackingStoreFailure)?;
                 *self = Frame::InMemory(frame);
                 Ok(ppn)
             }
@@ -158,7 +158,7 @@ pub struct LinearMap {
     pub vpn_range: VPNRange,
     pub frames: Vec<Frame>,
     #[cfg(feature = "oom_handler")]
-    pub active: VecDeque<u16>,
+    pub active: VecDeque<usize>,
     #[cfg(feature = "oom_handler")]
     pub compressed: usize,
     #[cfg(feature = "oom_handler")]
@@ -277,20 +277,34 @@ impl LinearMap {
             None => "OutOfRange",
         }
     }
+    pub fn is_unallocated(&self, key: &VirtPageNum) -> bool {
+        let Some(idx) = key.0.checked_sub(self.vpn_range.get_start().0) else {
+            return false;
+        };
+        matches!(self.frames.get(idx), Some(Frame::Unallocated))
+    }
     /// # Warning
     /// a key which exceeds the end of `vpn_range` would cause panic
-    pub fn alloc_in_memory(&mut self, key: VirtPageNum, value: Arc<FrameTracker>) {
+    pub fn alloc_in_memory(
+        &mut self,
+        key: VirtPageNum,
+        value: Arc<FrameTracker>,
+    ) -> Result<(), MemoryError> {
         let idx = key.0 - self.vpn_range.get_start().0;
         #[cfg(feature = "oom_handler")]
-        self.active.push_back(idx as u16);
-        self.frames[idx].insert_in_memory(value).unwrap()
+        self.active
+            .try_reserve(1)
+            .map_err(|_| MemoryError::OutOfMemory)?;
+        #[cfg(feature = "oom_handler")]
+        self.active.push_back(idx);
+        self.frames[idx].insert_in_memory(value)
     }
     /// # Warning
     /// a key which exceeds the end of `vpn_range` would cause panic
     pub fn remove_in_memory(&mut self, key: &VirtPageNum) -> Option<Arc<FrameTracker>> {
         let idx = key.0 - self.vpn_range.get_start().0;
         #[cfg(feature = "oom_handler")]
-        self.active.retain(|&elem| elem as usize != idx);
+        self.active.retain(|&elem| elem != idx);
         self.frames[idx].take_in_memory()
     }
     // /// # Warning
@@ -401,19 +415,19 @@ impl LinearMap {
         }
     }
     fn split_active_into_two(
-        active: &VecDeque<u16>,
+        active: &VecDeque<usize>,
         cut_idx: usize,
-    ) -> (VecDeque<u16>, VecDeque<u16>) {
+    ) -> (VecDeque<usize>, VecDeque<usize>) {
         if active.is_empty() {
             (VecDeque::new(), VecDeque::new())
         } else {
             active.iter().fold(
                 (VecDeque::new(), VecDeque::new()),
                 |(mut first_active, mut second_active), &idx| {
-                    if (idx as usize) < cut_idx {
+                    if idx < cut_idx {
                         first_active.push_back(idx);
                     } else {
-                        second_active.push_back(idx - cut_idx as u16);
+                        second_active.push_back(idx - cut_idx);
                     }
                     (first_active, second_active)
                 },
@@ -422,10 +436,10 @@ impl LinearMap {
     }
     #[allow(unused)]
     fn split_active_into_three(
-        active: &VecDeque<u16>,
+        active: &VecDeque<usize>,
         first_cut_idx: usize,
         second_cut_idx: usize,
-    ) -> (VecDeque<u16>, VecDeque<u16>, VecDeque<u16>) {
+    ) -> (VecDeque<usize>, VecDeque<usize>, VecDeque<usize>) {
         assert!(first_cut_idx < second_cut_idx);
         if active.is_empty() {
             (VecDeque::new(), VecDeque::new(), VecDeque::new())
@@ -433,12 +447,12 @@ impl LinearMap {
             active.iter().fold(
                 (VecDeque::new(), VecDeque::new(), VecDeque::new()),
                 |(mut first_active, mut second_active, mut third_active), &idx| {
-                    if (idx as usize) < first_cut_idx {
+                    if idx < first_cut_idx {
                         first_active.push_back(idx);
-                    } else if (idx as usize) < second_cut_idx {
-                        second_active.push_back(idx - first_cut_idx as u16);
+                    } else if idx < second_cut_idx {
+                        second_active.push_back(idx - first_cut_idx);
                     } else {
-                        third_active.push_back(idx - second_cut_idx as u16)
+                        third_active.push_back(idx - second_cut_idx)
                     }
                     (first_active, second_active, third_active)
                 },
@@ -534,6 +548,22 @@ impl MapArea {
             flags: another.flags,
         }
     }
+    pub fn frame_is_unallocated(&self, vpn: VirtPageNum) -> bool {
+        self.inner.is_unallocated(&vpn)
+    }
+    pub fn clear_stale_pte<T: PageTable>(
+        &self,
+        page_table: &mut T,
+        vpn: VirtPageNum,
+    ) -> bool {
+        // lazy页不应该保留有效pte
+        if page_table.is_mapped(vpn) {
+            page_table.unmap(vpn);
+            true
+        } else {
+            false
+        }
+    }
     /// Create `MapArea` from `Vec<Arc<FrameTracker>>`. This function should only be used to
     /// generate a `MapArea` in `KERNEL_SPACE`. \
     /// # NOTE
@@ -572,7 +602,8 @@ impl MapArea {
     ) -> Result<PhysPageNum, (MemoryError, VirtPageNum)> {
         if self.map_type == MapType::Identical || !page_table.is_mapped(vpn) {
             //if not mapped
-            Ok(self.map_one_unchecked(page_table, vpn))
+            self.map_one_unchecked(page_table, vpn)
+                .map_err(|err| (err, vpn))
         } else {
             //mapped
             Err((MemoryError::AlreadyMapped, vpn))
@@ -583,7 +614,7 @@ impl MapArea {
         &mut self,
         page_table: &mut T,
         vpn: VirtPageNum,
-    ) -> PhysPageNum {
+    ) -> Result<PhysPageNum, MemoryError> {
         let ppn: PhysPageNum;
         match self.map_type {
             MapType::Identical => {
@@ -591,25 +622,31 @@ impl MapArea {
                 page_table.map_identical(vpn, ppn, self.map_perm);
             }
             MapType::Framed => {
-                let frame = unsafe { frame_alloc().unwrap() };
+                let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
                 ppn = frame.ppn;
-                self.inner.alloc_in_memory(vpn, frame);
-                page_table.map(vpn, ppn, self.map_perm);
+                self.inner.alloc_in_memory(vpn, frame)?;
+                if let Err(err) = page_table.try_map(vpn, ppn, self.map_perm) {
+                    self.inner.remove_in_memory(&vpn);
+                    return Err(err);
+                }
             }
         }
-        ppn
+        Ok(ppn)
     }
 
     pub fn map_one_zeroed_unchecked<T: PageTable>(
         &mut self,
         page_table: &mut T,
         vpn: VirtPageNum,
-    ) -> PhysPageNum {
-        let frame = frame_alloc().unwrap();
+    ) -> Result<PhysPageNum, MemoryError> {
+        let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
         let ppn = frame.ppn;
-        self.inner.alloc_in_memory(vpn, frame);
-        page_table.map(vpn, ppn, self.map_perm);
-        ppn
+        self.inner.alloc_in_memory(vpn, frame)?;
+        if let Err(err) = page_table.try_map(vpn, ppn, self.map_perm) {
+            self.inner.remove_in_memory(&vpn);
+            return Err(err);
+        }
+        Ok(ppn)
     }
     /// Unmap a page in current area.
     /// If it is framed, then the physical pages will be removed from the `data_frames` Btree.
@@ -639,7 +676,7 @@ impl MapArea {
         &mut self,
         dst_page_table: &mut T,
         src_page_table: &mut T,
-    ) -> Result<(), ()> {
+    ) -> Result<(), MemoryError> {
         let is_shared = self.flags.contains(MapFlags::MAP_SHARED);
         let map_perm = if is_shared {
             self.map_perm
@@ -649,9 +686,11 @@ impl MapArea {
         for vpn in self.inner.vpn_range {
             if let Some(ppn) = src_page_table.block_and_ret_mut(vpn) {
                 if !dst_page_table.is_mapped(vpn) {
-                    dst_page_table.map(vpn, ppn, map_perm);
+                    dst_page_table
+                        .try_map(vpn, ppn, map_perm)
+                        .map_err(|err| err)?;
                 } else {
-                    return Err(());
+                    return Err(MemoryError::AlreadyMapped);
                 }
                 if is_shared && self.map_perm.contains(MapPermission::W) {
                     let _ = src_page_table.set_pte_flags(vpn, self.map_perm);
@@ -687,8 +726,13 @@ impl MapArea {
             if let Some(frame) = kernel_area.inner.get_in_memory(&src_vpn) {
                 let ppn = frame.ppn;
                 if !page_table.is_mapped(vpn) {
-                    self.inner.alloc_in_memory(vpn, frame.clone());
-                    page_table.map(vpn, ppn, self.map_perm);
+                    self.inner
+                        .alloc_in_memory(vpn, frame.clone())
+                        .map_err(|_| ())?;
+                    if let Err(_) = page_table.try_map(vpn, ppn, self.map_perm) {
+                        self.inner.remove_in_memory(&vpn);
+                        return Err(());
+                    }
                 } else {
                     error!("[map_from_kernel_area] user vpn already mapped!");
                     return Err(());
@@ -717,7 +761,7 @@ impl MapArea {
             Ok(())
         }
     }
-    fn take_cow_source_frame<T: PageTable>(
+    fn cow_source_frame<T: PageTable>(
         &mut self,
         page_table: &mut T,
         vpn: VirtPageNum,
@@ -738,14 +782,14 @@ impl MapArea {
                     Frame::Compressed(_) => {
                         let ppn = frame.unzip()?;
                         let set_ppn_result = page_table.set_ppn(vpn, ppn);
-                        self.inner.active.push_back(idx as u16);
+                        self.inner.active.push_back(idx);
                         self.inner.compressed = self.inner.compressed.saturating_sub(1);
                         set_ppn_result.map_err(|_| MemoryError::NotMapped)?;
                     }
                     Frame::SwappedOut(_) => {
                         let ppn = frame.swap_in()?;
                         let set_ppn_result = page_table.set_ppn(vpn, ppn);
-                        self.inner.active.push_back(idx as u16);
+                        self.inner.active.push_back(idx);
                         self.inner.swapped = self.inner.swapped.saturating_sub(1);
                         set_ppn_result.map_err(|_| MemoryError::NotMapped)?;
                     }
@@ -755,7 +799,8 @@ impl MapArea {
         }
 
         self.inner
-            .remove_in_memory(&vpn)
+            .get_in_memory(&vpn)
+            .cloned()
             .ok_or(MemoryError::BadAddress)
     }
     pub fn copy_on_write<T: PageTable>(
@@ -763,7 +808,7 @@ impl MapArea {
         page_table: &mut T,
         vpn: VirtPageNum,
     ) -> Result<PhysPageNum, MemoryError> {
-        let old_frame = match self.take_cow_source_frame(page_table, vpn) {
+        let old_frame = match self.cow_source_frame(page_table, vpn) {
             Ok(frame) => frame,
             Err(err) => {
                 warn!(
@@ -777,10 +822,6 @@ impl MapArea {
         };
         if Arc::strong_count(&old_frame) == 1 {
             let old_ppn = old_frame.ppn;
-            self.inner.alloc_in_memory(vpn, old_frame);
-            page_table
-                .set_ppn(vpn, old_ppn)
-                .map_err(|_| MemoryError::NotMapped)?;
             page_table
                 .set_pte_flags(vpn, self.map_perm)
                 .map_err(|_| MemoryError::NotMapped)?;
@@ -791,19 +832,38 @@ impl MapArea {
             // do copy in this case
             let old_ppn = old_frame.ppn;
             if !page_table.is_mapped(vpn) {
-                self.inner.alloc_in_memory(vpn, old_frame);
                 return Err(MemoryError::NotMapped);
             }
-            page_table.unmap(vpn);
             // alloc new frame
-            let new_frame = unsafe { frame_alloc_uninit().unwrap() };
+            let new_frame = unsafe { frame_alloc_uninit().ok_or(MemoryError::OutOfMemory)? };
             let new_ppn = new_frame.ppn;
-            self.inner.alloc_in_memory(vpn, new_frame);
-            page_table.map(vpn, new_ppn, self.map_perm);
             // copy data
             new_ppn
                 .get_bytes_array()
                 .copy_from_slice(old_ppn.get_bytes_array());
+            let old_frame = self
+                .inner
+                .remove_in_memory(&vpn)
+                .ok_or(MemoryError::BadAddress)?;
+            if let Err(err) = self.inner.alloc_in_memory(vpn, new_frame) {
+                let _ = self.inner.alloc_in_memory(vpn, old_frame);
+                return Err(err);
+            }
+            if page_table.set_ppn(vpn, new_ppn).is_err() {
+                if let Some(new_frame) = self.inner.remove_in_memory(&vpn) {
+                    drop(new_frame);
+                }
+                let _ = self.inner.alloc_in_memory(vpn, old_frame);
+                return Err(MemoryError::NotMapped);
+            }
+            if page_table.set_pte_flags(vpn, self.map_perm).is_err() {
+                let _ = page_table.set_ppn(vpn, old_ppn);
+                if let Some(new_frame) = self.inner.remove_in_memory(&vpn) {
+                    drop(new_frame);
+                }
+                let _ = self.inner.alloc_in_memory(vpn, old_frame);
+                return Err(MemoryError::NotMapped);
+            }
             trace!("[copy_on_write] copy occurred");
             Ok(new_ppn)
         }
@@ -915,14 +975,23 @@ impl MapArea {
     pub fn into_two(&mut self, cut: VirtPageNum) -> Result<Self, ()> {
         let second_file = if let Some(file) = &self.map_file {
             let new_file = file.deep_clone();
+            let old_offset = file
+                .lseek(0, SeekWhence::SEEK_CUR)
+                .map_err(|_| ())?;
+            let new_offset = old_offset
+                .checked_add(
+                    VirtAddr::from(cut).0 - VirtAddr::from(self.inner.vpn_range.get_start()).0,
+                )
+                .ok_or(())?;
+            if new_offset > isize::MAX as usize {
+                return Err(());
+            }
             new_file
                 .lseek(
-                    (file.get_offset() + VirtAddr::from(cut).0
-                        - VirtAddr::from(self.inner.vpn_range.get_start()).0)
-                        as isize,
+                    new_offset as isize,
                     SeekWhence::SEEK_SET,
                 )
-                .unwrap();
+                .map_err(|_| ())?;
             Some(new_file)
         } else {
             None
@@ -983,7 +1052,7 @@ impl MapArea {
         warn!("{:?}", self.inner.active);
         while let Some(idx) = self.inner.active.pop_front() {
             // 索引不能越界
-            if (idx as usize) >= self.inner.frames.len() {
+            if idx >= self.inner.frames.len() {
                 log::warn!(
                     "[do_oom] Defensive skip: idx {} out of bounds for frames len {}",
                     idx,
@@ -991,7 +1060,7 @@ impl MapArea {
                 );
                 continue;
             }
-            let frame = &mut self.inner.frames[idx as usize];
+            let frame = &mut self.inner.frames[idx];
             // 只处理真正在内存中的帧，防止触发底下的 unreachable!()
             if !matches!(frame, Frame::InMemory(_)) {
                 continue;
@@ -999,7 +1068,7 @@ impl MapArea {
             // first, try to compress
             match frame.zip() {
                 Ok(zram_id) => {
-                    page_table.unmap(VirtPageNum::from(start_vpn.0 + idx as usize));
+                    page_table.unmap(VirtPageNum::from(start_vpn.0 + idx));
                     self.inner.compressed += 1;
                     trace!("[do_oom] compress frame: {:?}, zram_id: {}", frame, zram_id);
                     continue;
@@ -1011,7 +1080,7 @@ impl MapArea {
             // zram is full, try to swap out
             match frame.swap_out() {
                 Ok(swap_id) => {
-                    page_table.unmap(VirtPageNum::from(start_vpn.0 + idx as usize));
+                    page_table.unmap(VirtPageNum::from(start_vpn.0 + idx));
                     self.inner.swapped += 1;
                     trace!("[do_oom] swap out frame: {:?}, swap_id: {}", frame, swap_id);
                     continue;
@@ -1029,7 +1098,7 @@ impl MapArea {
         warn!("{:?}", self.inner.active);
         while let Some(idx) = self.inner.active.pop_front() {
             // 索引不能越界
-            if (idx as usize) >= self.inner.frames.len() {
+            if idx >= self.inner.frames.len() {
                 log::warn!(
                     "[force_swap] Defensive skip: idx {} out of bounds for frames len {}",
                     idx,
@@ -1038,14 +1107,14 @@ impl MapArea {
                 continue;
             }
 
-            let frame = &mut self.inner.frames[idx as usize];
+            let frame = &mut self.inner.frames[idx];
             // 防止遇到 Unallocated 触发 unreachable!()
             if !matches!(frame, Frame::InMemory(_)) {
                 continue;
             }
             match frame.force_swap_out() {
                 Ok(swap_id) => {
-                    page_table.unmap(VirtPageNum::from(start_vpn.0 + idx as usize));
+                    page_table.unmap(VirtPageNum::from(start_vpn.0 + idx));
                     self.inner.swapped += 1;
                     trace!(
                         "[force_swap] swap out frame: {:?}, swap_id: {}",

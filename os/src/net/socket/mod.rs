@@ -7,7 +7,7 @@ use crate::{
         directory_tree::DirectoryTreeNode, fat32::DiskInodeType, file_descriptor::FileDescriptor,
         file_trait::File, Dirent, OpenFlags, PageCache, SeekWhence, Stat,
     },
-    mm::{translated_byte_buffer, translated_refmut, UserBuffer},
+    mm::{translated_byte_buffer, translated_ref, translated_refmut, UserAccess, UserBuffer},
     net::{
         posix::PosixArgsSocketType,
         socket::inet::{datagram::udp::UdpSocket, raw::raw::RawSocket, stream::TcpSocket},
@@ -241,7 +241,7 @@ impl Endpoint {
 
                 // 写入 AF_UNSPEC（2 字节）
                 let write_len = 2;
-                let buf = translated_byte_buffer(token, addr as *const u8, write_len)
+                let buf = translated_byte_buffer(token, addr as *const u8, write_len, UserAccess::Write)
                     .map_err(|_| SyscallErr::EFAULT)?;
                 let mut user_buf = UserBuffer::new(buf);
                 user_buf.write(&AF_UNSPEC.to_ne_bytes());
@@ -771,7 +771,7 @@ impl dyn Socket {
     fn prevalidate_socklen_value(addrlen: usize) -> Result<(), SyscallErr> {
         let task = current_task().ok_or(SyscallErr::EINVAL)?;
         let token = task.get_user_token();
-        let addrlen_ptr = match translated_refmut(token, addrlen as *mut u32) {
+        let addrlen_ptr = match translated_ref(token, addrlen as *const u32) {
             Ok(p) => p,
             Err(_) => return Err(SyscallErr::EFAULT),
         };

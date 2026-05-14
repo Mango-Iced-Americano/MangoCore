@@ -22,7 +22,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
 use core::sync::atomic::AtomicBool;
-use log::trace;
+use log::{trace, warn};
 use spin::{Mutex, MutexGuard};
 
 #[derive(Clone)]
@@ -79,6 +79,8 @@ pub struct TaskControlBlockInner {
     pub sigmask: Signals,
     /// 待处理信号
     pub sigpending: Signals,
+    /// 备用信号栈，每线程独立
+    pub signal_stack: SignalStack,
     /// 陷阱上下文的物理页号
     pub trap_cx_ppn: PhysPageNum,
     /// 任务上下文
@@ -429,6 +431,7 @@ impl TaskControlBlock {
             inner: Mutex::new(TaskControlBlockInner {
                 sigmask: Signals::empty(),
                 sigpending: Signals::empty(),
+                signal_stack: SignalStack::disabled(),
                 trap_cx_ppn,
                 task_cx: TaskContext::goto_trap_return(kstack_top),
                 task_status: TaskStatus::Ready,
@@ -544,6 +547,8 @@ impl TaskControlBlock {
         inner.clear_child_tid = 0;
         // 重置robust_list
         inner.robust_list = RobustList::default();
+        // execve disables the alternate signal stack.
+        inner.signal_stack = SignalStack::disabled();
         // 更新堆指针
         inner.heap_bottom = program_break;
         inner.heap_pt = program_break;
@@ -596,7 +601,7 @@ impl TaskControlBlock {
         exit_signal: Signals,
     ) -> Result<Arc<TaskControlBlock>, isize> {
         // ---- 保持父PCB锁
-        let mut parent_inner = self.acquire_inner_lock();
+        let parent_inner = self.acquire_inner_lock();
         // 复制用户空间（包括陷阱上下文）
         let share_vm = flags.contains(CloneFlags::CLONE_VM);
         let memory_set = if share_vm {
@@ -684,10 +689,9 @@ impl TaskControlBlock {
             fs,
             vm: memory_set,
             sighand,
-            futex: if flags.contains(CloneFlags::CLONE_SYSVSEM) {
+            futex: if share_vm {
                 self.futex.clone()
             } else {
-                // maybe should do clone here?
                 Arc::new(Mutex::new(Futex::new()))
             },
             wait_io_timer_pending: AtomicBool::new(false),
@@ -698,6 +702,11 @@ impl TaskControlBlock {
                 heap_pt: parent_inner.heap_pt,
                 // clone
                 sigpending: parent_inner.sigpending.clone(),
+                signal_stack: if share_vm {
+                    SignalStack::disabled()
+                } else {
+                    parent_inner.signal_stack
+                },
                 // new
                 children: Vec::new(),
                 rusage: Rusage::new(),
@@ -724,22 +733,6 @@ impl TaskControlBlock {
                 pending_oom_kill: false,
             }),
         });
-        // 添加到父进程或者祖父进程的子进程列表
-        if flags.contains(CloneFlags::CLONE_PARENT) || flags.contains(CloneFlags::CLONE_THREAD) {
-            if let Some(grandparent) = &parent_inner.parent {
-                let grandparent = grandparent.upgrade().unwrap();
-                let mut grandparent_inner = grandparent.acquire_inner_lock();
-                if grandparent_inner.children.try_reserve(1).is_err() {
-                    return Err(crate::syscall::errno::ENOMEM);
-                }
-                grandparent_inner.children.push(task_control_block.clone());
-            }
-        } else {
-            if parent_inner.children.try_reserve(1).is_err() {
-                return Err(crate::syscall::errno::ENOMEM);
-            }
-            parent_inner.children.push(task_control_block.clone());
-        }
         // 初始化陷阱上下文
         let trap_cx = task_control_block.acquire_inner_lock().get_trap_cx();
         // 共享 VM 时新分配的 trap context 为空，需要从父任务当前上下文复制。
@@ -765,6 +758,47 @@ impl TaskControlBlock {
         Ok(task_control_block)
         // ---- 释放父PCB锁
     }
+    /// Publish a successfully initialized clone into the waitable child tree.
+    /// `CLONE_THREAD` tasks are not waitable children and are only scheduled.
+    pub fn publish_clone_child(
+        self: &Arc<TaskControlBlock>,
+        child: Arc<TaskControlBlock>,
+        flags: CloneFlags,
+    ) -> Result<(), isize> {
+        if flags.contains(CloneFlags::CLONE_THREAD) {
+            return Ok(());
+        }
+        if flags.contains(CloneFlags::CLONE_PARENT) {
+            let parent = {
+                let child_inner = child.acquire_inner_lock();
+                child_inner.parent.as_ref().and_then(|parent| parent.upgrade())
+            };
+            if let Some(parent) = parent {
+                let mut parent_inner = parent.acquire_inner_lock();
+                if parent_inner.children.try_reserve(1).is_err() {
+                    return Err(crate::syscall::errno::ENOMEM);
+                }
+                parent_inner.children.push(child);
+            } else {
+                warn!("[publish_clone_child] CLONE_PARENT target parent is gone");
+            }
+        } else {
+            let mut inner = self.acquire_inner_lock();
+            if inner.children.try_reserve(1).is_err() {
+                return Err(crate::syscall::errno::ENOMEM);
+            }
+            inner.children.push(child);
+        }
+        Ok(())
+    }
+
+    /// Drop resources allocated for a clone that has not been published.
+    pub fn cleanup_unpublished_clone(&self, shared_vm: bool) {
+        if shared_vm {
+            self.vm.lock().dealloc_user_res(self.tid);
+        }
+    }
+
     /// 获取进程ID
     pub fn getpid(&self) -> usize {
         self.pid.0
