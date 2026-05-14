@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
-use super::map_area::{Frame, MapArea, MapFlags, MapPermission};
+use super::frame_store::{Frame, FrameState};
+use super::map_area::{MapArea, MapFlags, MapPermission};
 use super::{FaultAccess, MemoryError, PageTable, PhysPageNum, VirtPageNum};
 use crate::fs::file_trait::File;
 use alloc::sync::Arc;
@@ -44,6 +45,10 @@ impl MapArea {
         }
     }
 
+    pub(super) fn vm_mapping(&self) -> VmAreaMapping {
+        self.vm_mapping_type()
+    }
+
     pub(super) fn vm_perm(&self) -> MapPermission {
         self.map_perm
     }
@@ -57,15 +62,18 @@ impl MapArea {
         self.vm_perm().contains(required)
     }
 
+    pub(super) fn vm_allows(&self, access: FaultAccess) -> bool {
+        self.vm_access_allows(access)
+    }
+
     pub(super) fn vm_page_state(&self, vpn: VirtPageNum) -> Result<VmPageState, MemoryError> {
-        let idx = self.vm_frame_index(vpn)?;
-        Ok(match &self.inner.frames[idx] {
-            Frame::InMemory(_) => VmPageState::InMemory,
-            Frame::Unallocated => VmPageState::Unallocated,
+        Ok(match self.inner.frame_state(vpn)? {
+            FrameState::InMemory => VmPageState::InMemory,
+            FrameState::Unallocated => VmPageState::Unallocated,
             #[cfg(feature = "oom_handler")]
-            Frame::Compressed(_) => VmPageState::Compressed,
+            FrameState::Compressed => VmPageState::Compressed,
             #[cfg(feature = "oom_handler")]
-            Frame::SwappedOut(_) => VmPageState::SwappedOut,
+            FrameState::SwappedOut => VmPageState::SwappedOut,
         })
     }
 
@@ -95,45 +103,21 @@ impl MapArea {
         &mut self,
         vpn: VirtPageNum,
     ) -> Result<(), MemoryError> {
-        let idx = vpn
-            .0
-            .checked_sub(self.get_start::<T>().0)
-            .ok_or(MemoryError::BadAddress)?;
-        if idx >= self.inner.frames.len() {
-            return Err(MemoryError::BadAddress);
-        }
-        self.inner
-            .active
-            .try_reserve(1)
-            .map_err(|_| MemoryError::OutOfMemory)?;
-        self.inner.active.push_back(idx);
-        Ok(())
+        self.inner.record_active(vpn)
     }
 
     #[cfg(feature = "oom_handler")]
     pub(super) fn vm_dec_compressed(&mut self) {
-        self.inner.compressed -= 1;
+        self.inner.dec_compressed();
     }
 
     #[cfg(feature = "oom_handler")]
     pub(super) fn vm_dec_swapped(&mut self) {
-        self.inner.swapped -= 1;
-    }
-
-    fn vm_frame_index(&self, vpn: VirtPageNum) -> Result<usize, MemoryError> {
-        let idx = vpn
-            .0
-            .checked_sub(self.inner.vpn_range.get_start().0)
-            .ok_or(MemoryError::BadAddress)?;
-        if idx >= self.inner.frames.len() {
-            return Err(MemoryError::BadAddress);
-        }
-        Ok(idx)
+        self.inner.dec_swapped();
     }
 
     #[cfg(feature = "oom_handler")]
     fn vm_frame_mut(&mut self, vpn: VirtPageNum) -> Result<&mut Frame, MemoryError> {
-        let idx = self.vm_frame_index(vpn)?;
-        Ok(&mut self.inner.frames[idx])
+        self.inner.frame_mut_if_present(vpn)
     }
 }

@@ -1,7 +1,7 @@
 use super::map_area::*;
 use super::mapper::translate_page;
 use super::page_table::{FaultAccess, PageTable};
-use super::{PageMapper, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
+use super::{Frame, PageMapper, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use crate::config::*;
 use crate::fs::SeekWhence;
 use crate::hal::TrapContext;
@@ -61,6 +61,8 @@ pub enum MemoryError {
     OutOfMemory,
     BackingStoreFailure,
 }
+
+const MAX_EAGER_MMAP_SIZE: usize = 1024 * 1024 * 1024;
 
 /// The memory "space" as in user space or kernel space
 pub struct MemorySet<T: PageTable> {
@@ -983,8 +985,8 @@ impl<T: PageTable> MemorySet<T> {
             Ok(range) => range,
             Err(errno) => return errno,
         };
-        // Limit max mmap size to 1GB to prevent kernel heap OOM in creating MapArea.
-        if len > 1024 * 1024 * 1024 {
+        // MAP_SHARED still maps pages eagerly in this compatibility layer.
+        if flags.contains(MapFlags::MAP_SHARED) && len > MAX_EAGER_MMAP_SIZE {
             return ENOMEM;
         }
         let task = current_task().unwrap();
@@ -1016,10 +1018,8 @@ impl<T: PageTable> MemorySet<T> {
                         None => return EINVAL,
                     };
                     let (_, mmap_end) = Self::user_mmap_bounds();
-                    // 防止合并后越过 mmap 边界或导致内核堆 OOM
-                    if new_end <= mmap_end
-                        && new_end - area.get_start::<T>().0 <= 1024 * 1024 * 1024
-                    {
+                    // Lazy private mappings no longer allocate per-page metadata here.
+                    if new_end <= mmap_end {
                         debug!("[mmap] merge with previous area, call expand_to");
                         if let Err(e) = area.expand_to::<T>(VirtAddr::from(new_end)) {
                             return e;

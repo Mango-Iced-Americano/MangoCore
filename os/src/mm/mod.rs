@@ -3,6 +3,7 @@ pub mod address;
 mod arch;
 mod error;
 mod filemap;
+mod frame_store;
 mod frame_allocator;
 mod heap_allocator;
 mod layout;
@@ -33,7 +34,8 @@ pub use frame_allocator::{
 pub use heap_allocator::heap_stats;
 #[allow(unused_imports)]
 pub use layout::{KernelLayout, UserLayout};
-pub use map_area::{Frame, MapFlags, MapPermission};
+pub use frame_store::Frame;
+pub use map_area::{MapFlags, MapPermission};
 #[allow(unused_imports)]
 pub use mapper::PageMapper;
 pub use memory_set::kernel_token;
