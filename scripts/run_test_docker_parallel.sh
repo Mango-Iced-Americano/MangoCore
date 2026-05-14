@@ -174,17 +174,27 @@ docker_run_arch() {
   local arch_result_dir="${RESULT_ROOT}/${arch}"
   local console_log="${arch_result_dir}/console.log"
   local build_target
+  local user_board
+  local build_blk_mode
   local inner_cmd
   local docker_args
 
   if [[ "${arch}" == "rv64" ]]; then
     build_target="rv64-kernel-build-only"
+    user_board="rvqemu"
+    build_blk_mode="${TEST_BLK_MODE_RV:-virt}"
   else
     build_target="la64-kernel-build-only"
+    user_board="laqemu"
+    build_blk_mode="${TEST_BLK_MODE_LA:-virt_pci}"
+  fi
+
+  if [[ -n "${TEST_BLK_MODE:-}" ]]; then
+    build_blk_mode="${TEST_BLK_MODE}"
   fi
 
   if [[ "${PARALLEL_BUILD}" == "1" ]]; then
-    inner_cmd="make -C os ${build_target} && bash run_test.sh"
+    inner_cmd="make -C user rust-user BOARD=${user_board} MODE=${MODE} && make -C os ${build_target} BLK_MODE=${build_blk_mode} MODE=${MODE} && bash run_test.sh"
   else
     inner_cmd="bash run_test.sh"
   fi
