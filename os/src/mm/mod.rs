@@ -5,10 +5,12 @@ mod error;
 mod frame_allocator;
 mod heap_allocator;
 mod layout;
+mod mapper;
 mod map_area;
 mod memory_set;
 pub mod page;
 mod page_table;
+mod uaccess;
 #[cfg(feature = "zram")]
 mod zram;
 pub use crate::hal::{KernelPageTableImpl, PageTableImpl};
@@ -28,13 +30,18 @@ pub use frame_allocator::{
 pub use heap_allocator::heap_stats;
 #[allow(unused_imports)]
 pub use layout::{KernelLayout, UserLayout};
+#[allow(unused_imports)]
+pub use mapper::PageMapper;
 pub use map_area::{Frame, MapFlags, MapPermission};
 pub use memory_set::kernel_token;
 pub use memory_set::MemoryError;
 pub use memory_set::{MemorySet, KERNEL_SPACE};
 #[allow(unused_imports)]
 pub use page::{MemAttr, PageFaultKind, PageProt};
-pub use page_table::{
+pub use page_table::{FaultAccess, PageTable, UserAccess};
+#[allow(unused_imports)]
+pub use uaccess::{
+    check_user_range,
     copy_from_user,
     copy_from_user_array,
     copy_to_user,
@@ -49,9 +56,6 @@ pub use page_table::{
     translated_str,
     translate_user_va_checked,
     try_get_from_user,
-    FaultAccess,
-    PageTable,
-    UserAccess,
     UserBuffer,
     // UserBufferIterator,
 };
