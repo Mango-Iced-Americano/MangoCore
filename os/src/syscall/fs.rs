@@ -148,11 +148,11 @@ pub fn sys_splice(
 fn __openat(dirfd: usize, path: &str) -> Result<FileDescriptor, isize> {
     let task = current_task().unwrap();
     let file_descriptor = match dirfd {
-        AT_FDCWD => task.fs.lock().working_inode.as_ref().clone(),
+        AT_FDCWD => FileDescriptor::new(false, false, task.fs.lock().working_inode.inode.clone()),
         fd => {
             let fd_table = task.files.lock();
             match fd_table.get_ref(fd) {
-                Ok(file_descriptor) => file_descriptor.clone(),
+                Ok(file_descriptor) => file_descriptor,
                 Err(errno) => return Err(errno),
             }
         }
@@ -640,11 +640,11 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> isize {
 
     // 获取文件描述符
     let file_descriptor = match fd {
-        AT_FDCWD => task.fs.lock().working_inode.as_ref().clone(),
+        AT_FDCWD => FileDescriptor::new(false, false, task.fs.lock().working_inode.inode.clone()),
         fd => {
             let fd_table = task.files.lock();
             match fd_table.get_ref(fd) {
-                Ok(file_descriptor) => file_descriptor.clone(),
+                Ok(file_descriptor) => file_descriptor,
                 Err(errno) => return errno,
             }
         }
@@ -676,7 +676,7 @@ pub fn sys_dup(oldfd: usize) -> isize {
     let task = current_task().unwrap();
     let mut fd_table = task.files.lock();
     let old_file_descriptor = match fd_table.get_ref(oldfd) {
-        Ok(file_descriptor) => file_descriptor.clone(),
+        Ok(file_descriptor) => file_descriptor,
         Err(errno) => return errno,
     };
     let newfd = match fd_table.insert(old_file_descriptor) {
@@ -697,7 +697,7 @@ pub fn sys_dup2(oldfd: usize, newfd: usize) -> isize {
     let ret = {
         let mut fd_table = task.files.lock();
         let mut file_descriptor = match fd_table.get_ref(oldfd) {
-            Ok(file_descriptor) => file_descriptor.clone(),
+            Ok(file_descriptor) => file_descriptor,
             Err(errno) => return errno,
         };
 
@@ -743,7 +743,7 @@ pub fn sys_dup3(oldfd: usize, newfd: usize, flags: u32) -> isize {
     let mut fd_table = task.files.lock();
 
     let mut file_descriptor = match fd_table.get_ref(oldfd) {
-        Ok(file_descriptor) => file_descriptor.clone(),
+        Ok(file_descriptor) => file_descriptor,
         Err(errno) => return errno,
     };
     file_descriptor.set_cloexec(is_cloexec);
@@ -766,52 +766,50 @@ pub fn sys_readlinkat(dirfd: usize, pathname: *const u8, buf: *mut u8, bufsiz: u
     let real_path = if path.as_str() == "/proc/self/exe" {
         task.exe.lock().get_cwd().unwrap()
     } else {
-        use crate::fs::directory_tree::DirectoryTreeNode;
-
         let file_descriptor = match dirfd {
-            AT_FDCWD => task.fs.lock().working_inode.as_ref().clone(),
+            AT_FDCWD => FileDescriptor::new(false, false, task.fs.lock().working_inode.inode.clone()),
             fd => {
                 let fd_table = task.files.lock();
                 match fd_table.get_ref(fd) {
-                    Ok(file_descriptor) => file_descriptor.clone(),
+                    Ok(file_descriptor) => file_descriptor,
                     Err(errno) => return errno,
                 }
             }
         };
 
-        let mut components = DirectoryTreeNode::parse_dir_path(&path);
-        let last_comp = components.pop();
-        let dir_node = if path.starts_with('/') {
-            crate::fs::directory_tree::ROOT.clone()
-        } else {
-            match file_descriptor.file.get_dirtree_node() {
-                Some(node) => node,
-                None => return ENOTDIR,
-            }
-        };
-        let parent = match dir_node.cd_comp(&components) {
-            Ok(parent) => parent,
+        // 使用新 VFS 路径解析 (不跟随最终符号链接)
+        let inode = match vfs_lookup(&file_descriptor.file, &path, false) {
+            Ok(inode) => inode,
             Err(errno) => return errno,
         };
-        let file = match last_comp {
-            Some(name) => {
-                let mut lock = parent.children.write();
-                match parent.try_to_open_subfile(name, &mut lock) {
-                    Ok(inode) => inode.file.clone(),
-                    Err(errno) => return errno,
-                }
-            }
-            None => dir_node.file.clone(),
+        let md = match inode.metadata() {
+            Ok(md) => md,
+            Err(_) => return EINVAL,
         };
-
-        if file.get_file_type() != crate::fs::DiskInodeType::Link {
+        if md.file_type != vfs::FileType::SymLink {
             warn!(
                 "[sys_readlinkat] not a symbolic link! dirfd: {}, path: {}",
                 dirfd as isize, path
             );
             return EINVAL;
         }
-        file.read_link()
+        // 读取符号链接目标内容
+        let link_len = (md.size.max(0) as usize).min(4096);
+        let mut link_buf = alloc::vec![0u8; link_len];
+        let n = match inode.read_at(
+            0,
+            link_buf.len(),
+            &mut link_buf,
+            spin::Mutex::new(vfs::FilePrivateData::Unused).lock(),
+        ) {
+            Ok(n) => n,
+            Err(_) => return EINVAL,
+        };
+        unsafe { link_buf.set_len(n) };
+        match String::from_utf8(link_buf) {
+            Ok(s) => alloc::string::String::from(s.trim_end_matches('\0')),
+            Err(_) => return EINVAL,
+        }
     };
 
     let len = real_path.len().min(bufsiz);
@@ -863,53 +861,27 @@ pub fn sys_fstatat(dirfd: usize, path: *const u8, buf: *mut u8, flags: u32) -> i
     let no_follow = flags.contains(FstatatFlags::AT_SYMLINK_NOFOLLOW);
     let task = current_task().unwrap();
     let file_descriptor = match dirfd {
-        AT_FDCWD => task.fs.lock().working_inode.as_ref().clone(),
+        AT_FDCWD => FileDescriptor::new(false, false, task.fs.lock().working_inode.inode.clone()),
         fd => {
             let fd_table = task.files.lock();
             match fd_table.get_ref(fd) {
-                Ok(file_descriptor) => file_descriptor.clone(),
+                Ok(file_descriptor) => file_descriptor,
                 Err(errno) => return errno,
             }
         }
     };
 
     if no_follow {
-        // AT_SYMLINK_NOFOLLOW: 中间组件跟随软链接，但最后一个组件不跟随
-        let mut components = crate::fs::directory_tree::DirectoryTreeNode::parse_dir_path(&path);
-        let last_comp = components.pop();
-        let dir_node = if path.starts_with('/') {
-            crate::fs::directory_tree::ROOT.clone()
-        } else {
-            match file_descriptor.file.get_dirtree_node() {
-                Some(node) => node,
-                None => return ENOTDIR,
-            }
-        };
-        let parent = match dir_node.cd_comp(&components) {
-            Ok(parent) => parent,
+        // AT_SYMLINK_NOFOLLOW: 使用新 VFS 路径解析
+        let inode = match vfs_lookup(&file_descriptor.file, &path, false) {
+            Ok(inode) => inode,
             Err(errno) => return errno,
         };
-        match last_comp {
-            Some(name) => {
-                let mut lock = parent.children.write();
-                match parent.try_to_open_subfile(name, &mut lock) {
-                    Ok(inode) => {
-                        if copy_to_user(token, &inode.file.get_stat(), buf as *mut Stat).is_err() {
-                            return EFAULT;
-                        }
-                        SUCCESS
-                    }
-                    Err(errno) => errno,
-                }
-            }
-            None => {
-                // path 就是 dir_node 本身（例如 "." 或根路径）
-                if copy_to_user(token, &dir_node.file.get_stat(), buf as *mut Stat).is_err() {
-                    return EFAULT;
-                }
-                SUCCESS
-            }
+        let stat = FileDescriptor::new(false, false, inode).get_stat();
+        if copy_to_user(token, &stat, buf as *mut Stat).is_err() {
+            return EFAULT;
         }
+        SUCCESS
     } else {
         match file_descriptor.open(&path, OpenFlags::O_RDONLY, false) {
             Ok(file_descriptor) => {
@@ -945,11 +917,11 @@ pub fn sys_statx(dirfd: usize, path: *const u8, flags: u32, mask: u32, buf: *mut
 
     let task = current_task().unwrap();
     let file_descriptor = match dirfd {
-        AT_FDCWD => task.fs.lock().working_inode.as_ref().clone(),
+        AT_FDCWD => FileDescriptor::new(false, false, task.fs.lock().working_inode.inode.clone()),
         fd => {
             let fd_table = task.files.lock();
             match fd_table.get_ref(fd) {
-                Ok(file_descriptor) => file_descriptor.clone(),
+                Ok(file_descriptor) => file_descriptor,
                 Err(errno) => return errno,
             }
         }
@@ -957,61 +929,16 @@ pub fn sys_statx(dirfd: usize, path: *const u8, flags: u32, mask: u32, buf: *mut
 
     let no_follow = flags.contains(FstatatFlags::AT_SYMLINK_NOFOLLOW);
     if no_follow {
-        // AT_SYMLINK_NOFOLLOW: 中间组件跟随软链接，最后一个组件不跟随
-        use crate::fs::directory_tree::DirectoryTreeNode;
-        let mut components = DirectoryTreeNode::parse_dir_path(&path);
-        let last_comp = components.pop();
-        let dir_node = if path.starts_with('/') {
-            crate::fs::directory_tree::ROOT.clone()
-        } else {
-            match file_descriptor.file.get_dirtree_node() {
-                Some(node) => node,
-                None => return ENOTDIR,
-            }
-        };
-        let parent = match dir_node.cd_comp(&components) {
-            Ok(parent) => parent,
+        // AT_SYMLINK_NOFOLLOW: 使用新 VFS 路径解析
+        let inode = match vfs_lookup(&file_descriptor.file, &path, false) {
+            Ok(inode) => inode,
             Err(errno) => return errno,
         };
-        let statx_from_node = |node: &DirectoryTreeNode| {
-            let stat = node.file.get_stat();
-            Statx::new(
-                mask,
-                stat.get_nlink(),
-                stat.get_mode() as u16,
-                stat.get_ino() as u64,
-                stat.get_size() as u64,
-                stat.get_atime() as i64,
-                stat.get_ctime() as i64,
-                stat.get_mtime() as i64,
-                (stat.get_rdev() & 0xffff_00) >> 8 as u32,
-                (stat.get_rdev() & 0xff) as u32,
-                (stat.get_dev() & 0xffff_00) >> 8 as u32,
-                (stat.get_dev() & 0xff) as u32,
-            )
-        };
-        match last_comp {
-            Some(name) => {
-                let mut lock = parent.children.write();
-                match parent.try_to_open_subfile(name, &mut lock) {
-                    Ok(inode) => {
-                        let statx = statx_from_node(&inode);
-                        if copy_to_user(token, &statx, buf as *mut Statx).is_err() {
-                            return EFAULT;
-                        }
-                        SUCCESS
-                    }
-                    Err(errno) => errno,
-                }
-            }
-            None => {
-                let statx = statx_from_node(&dir_node);
-                if copy_to_user(token, &statx, buf as *mut Statx).is_err() {
-                    return EFAULT;
-                }
-                SUCCESS
-            }
+        let statx = FileDescriptor::new(false, false, inode).get_statx(mask);
+        if copy_to_user(token, &statx, buf as *mut Statx).is_err() {
+            return EFAULT;
         }
+        SUCCESS
     } else {
         match file_descriptor.open(&path, OpenFlags::O_RDONLY, false) {
             Ok(file_descriptor) => {
@@ -1034,11 +961,11 @@ pub fn sys_fstat(fd: usize, statbuf: *mut u8) -> isize {
 
     info!("[sys_fstat] fd: {}", fd);
     let file_descriptor = match fd {
-        AT_FDCWD => task.fs.lock().working_inode.as_ref().clone(),
+        AT_FDCWD => FileDescriptor::new(false, false, task.fs.lock().working_inode.inode.clone()),
         fd => {
             let fd_table = task.files.lock();
             match fd_table.get_ref(fd) {
-                Ok(file_descriptor) => file_descriptor.clone(),
+                Ok(file_descriptor) => file_descriptor,
                 Err(errno) => return errno,
             }
         }
@@ -1166,9 +1093,9 @@ pub fn sys_openat(dirfd: usize, path: *const u8, flags: u32, mode: u32) -> isize
     );
     let mut fd_table = task.files.lock();
     let file_descriptor = match dirfd {
-        AT_FDCWD => task.fs.lock().working_inode.as_ref().clone(),
+        AT_FDCWD => FileDescriptor::new(false, false, task.fs.lock().working_inode.inode.clone()),
         fd => match fd_table.get_ref(fd) {
-            Ok(file_descriptor) => file_descriptor.clone(),
+            Ok(file_descriptor) => file_descriptor,
             Err(errno) => return errno,
         },
     };
@@ -1208,21 +1135,21 @@ pub fn sys_renameat2(
     );
 
     let old_file_descriptor = match olddirfd {
-        AT_FDCWD => task.fs.lock().working_inode.as_ref().clone(),
+        AT_FDCWD => FileDescriptor::new(false, false, task.fs.lock().working_inode.inode.clone()),
         fd => {
             let fd_table = task.files.lock();
             match fd_table.get_ref(fd) {
-                Ok(file_descriptor) => file_descriptor.clone(),
+                Ok(file_descriptor) => file_descriptor,
                 Err(errno) => return errno,
             }
         }
     };
     let new_file_descriptor = match newdirfd {
-        AT_FDCWD => task.fs.lock().working_inode.as_ref().clone(),
+        AT_FDCWD => FileDescriptor::new(false, false, task.fs.lock().working_inode.inode.clone()),
         fd => {
             let fd_table = task.files.lock();
             match fd_table.get_ref(fd) {
-                Ok(file_descriptor) => file_descriptor.clone(),
+                Ok(file_descriptor) => file_descriptor,
                 Err(errno) => return errno,
             }
         }
@@ -1272,11 +1199,11 @@ pub fn sys_mkdirat(dirfd: usize, path: *const u8, mode: u32) -> isize {
         StatMode::from_bits(mode)
     );
     let file_descriptor = match dirfd {
-        AT_FDCWD => task.fs.lock().working_inode.as_ref().clone(),
+        AT_FDCWD => FileDescriptor::new(false, false, task.fs.lock().working_inode.inode.clone()),
         fd => {
             let fd_table = task.files.lock();
             match fd_table.get_ref(fd) {
-                Ok(file_descriptor) => file_descriptor.clone(),
+                Ok(file_descriptor) => file_descriptor,
                 Err(errno) => return errno,
             }
         }
@@ -1315,11 +1242,11 @@ pub fn sys_unlinkat(dirfd: usize, path: *const u8, flags: u32) -> isize {
     );
 
     let file_descriptor = match dirfd {
-        AT_FDCWD => task.fs.lock().working_inode.as_ref().clone(),
+        AT_FDCWD => FileDescriptor::new(false, false, task.fs.lock().working_inode.inode.clone()),
         fd => {
             let fd_table = task.files.lock();
             match fd_table.get_ref(fd) {
-                Ok(file_descriptor) => file_descriptor.clone(),
+                Ok(file_descriptor) => file_descriptor,
                 Err(errno) => return errno,
             }
         }
@@ -1545,7 +1472,7 @@ pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
     match Fcntl_Command::from_primitive(cmd) {
         Fcntl_Command::DUPFD => {
             let new_file_descriptor = match fd_table.get_ref(fd) {
-                Ok(file_descriptor) => file_descriptor.clone(),
+                Ok(file_descriptor) => file_descriptor,
                 Err(errno) => return errno,
             };
             match fd_table.try_insert_at(new_file_descriptor, arg) {
@@ -1555,7 +1482,7 @@ pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
         }
         Fcntl_Command::DUPFD_CLOEXEC => {
             let mut new_file_descriptor = match fd_table.get_ref(fd) {
-                Ok(file_descriptor) => file_descriptor.clone(),
+                Ok(file_descriptor) => file_descriptor,
                 Err(errno) => return errno,
             };
             new_file_descriptor.set_cloexec(true);
@@ -1572,7 +1499,7 @@ pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
             file_descriptor.get_cloexec() as isize
         }
         Fcntl_Command::SETFD => {
-            let file_descriptor = match fd_table.get_refmut(fd) {
+            let mut file_descriptor = match fd_table.get_refmut(fd) {
                 Ok(file_descriptor) => file_descriptor,
                 Err(errno) => return errno,
             };
@@ -1583,7 +1510,7 @@ pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
             SUCCESS
         }
         Fcntl_Command::SETFL => {
-            let file_descriptor = match fd_table.get_refmut(fd) {
+            let mut file_descriptor = match fd_table.get_refmut(fd) {
                 Ok(file_descriptor) => file_descriptor,
                 Err(errno) => return errno,
             };
@@ -1884,28 +1811,28 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: usize, linkpath: *const u8) ->
 
     // 获取父目录的节点
     let file_descriptor = match newdirfd {
-        AT_FDCWD => task.fs.lock().working_inode.as_ref().clone(),
+        AT_FDCWD => FileDescriptor::new(false, false, task.fs.lock().working_inode.inode.clone()),
         fd => {
             let fd_table = task.files.lock();
             match fd_table.get_ref(fd) {
-                Ok(file_descriptor) => file_descriptor.clone(),
+                Ok(file_descriptor) => file_descriptor,
                 Err(errno) => return errno,
             }
         }
     };
 
-    let dir_node = match file_descriptor.file.get_dirtree_node() {
-        Some(node) => node,
-        None => return ENOTDIR,
+    let dir_inode = file_descriptor.file.clone();
+    let is_dir = match dir_inode.metadata() {
+        Ok(md) => md.file_type == vfs::FileType::Dir,
+        Err(_) => false,
     };
-
-    if !dir_node.file.is_dir() {
+    if !is_dir {
         return ENOTDIR;
     }
 
-    // 调用我们在 DirectoryTreeNode 中写好的方法
-    match dir_node.symlink(&target_str, &linkpath_str) {
+    // 使用新 VFS IndexNode::symlink
+    match dir_inode.symlink(&linkpath_str, &target_str) {
         Ok(_) => SUCCESS,
-        Err(errno) => errno,
+        Err(e) => -(e as isize),
     }
 }

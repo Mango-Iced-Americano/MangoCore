@@ -1387,25 +1387,37 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     //      echo done",
     //     &environ,
     // );
+    // 用 ; 而非 && 串联，防止 ext4 rmdir 的 bug 导致整条脚本短路。
+    // 同时在 /lib 和 /lib64 下都建好 symlink，不再依赖 rm -rf +
+    // ln -sf 把 /lib64 转成软链接的方式（该路径也会触发 ext4 unlink bug）。
     run_bash_cmd(
         "
-        mkdir -p /lib /lib64 /usr/lib /usr/lib64 &&
-        rm -rf /lib64 && ln -sf /lib /lib64 &&
-        rm -rf /usr/lib && ln -sf /lib /usr/lib &&
-        rm -rf /usr/lib64 && ln -sf /lib /usr/lib64 &&
+        mkdir -p /lib /lib64 /usr/lib /usr/lib64;
 
-        ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64-sf.so.1 &&
-        ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64.so.1 &&
-        ln -sf /musl/lib/libc.so /lib/libc.so &&
+        ln -sf /lib /lib64;
+        ln -sf /lib /usr/lib;
+        ln -sf /lib /usr/lib64;
 
-        ln -sf /glibc/lib/ld-linux-riscv64-lp64d.so.1 /lib/ld-linux-riscv64-lp64d.so.1 &&
-        ln -sf /glibc/lib/libc.so.6 /lib/libc.so.6 &&
-        ln -sf /glibc/lib/libm.so.6 /lib/libm.so.6 &&
+        ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64-sf.so.1;
+        ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64.so.1;
+        ln -sf /musl/lib/libc.so /lib/libc.so;
 
-        ln -sf /glibc/lib/ld-linux-loongarch-lp64d.so.1 /lib/ld-linux-loongarch-lp64d.so.1 &&
-        ln -sf /musl/lib/libc.so /lib/ld-musl-loongarch-lp64d.so.1 &&
+        ln -sf /glibc/lib/ld-linux-riscv64-lp64d.so.1 /lib/ld-linux-riscv64-lp64d.so.1;
+        ln -sf /glibc/lib/ld-linux-riscv64-lp64d.so.1 /lib64/ld-linux-riscv64-lp64d.so.1;
 
-        ln -sf /glibc/lib/tls_get_new-dtv_dso.so /lib/tls_get_new-dtv_dso.so &&
+        ln -sf /glibc/lib/libc.so.6 /lib/libc.so.6;
+        ln -sf /glibc/lib/libc.so.6 /lib64/libc.so.6;
+
+        ln -sf /glibc/lib/libm.so.6 /lib/libm.so.6;
+        ln -sf /glibc/lib/libm.so.6 /lib64/libm.so.6;
+
+        ln -sf /glibc/lib/ld-linux-loongarch-lp64d.so.1 /lib/ld-linux-loongarch-lp64d.so.1;
+        ln -sf /glibc/lib/ld-linux-loongarch-lp64d.so.1 /lib64/ld-linux-loongarch-lp64d.so.1;
+
+        ln -sf /musl/lib/libc.so /lib/ld-musl-loongarch-lp64d.so.1;
+        ln -sf /musl/lib/libc.so /lib64/ld-musl-loongarch-lp64d.so.1;
+
+        ln -sf /glibc/lib/tls_get_new-dtv_dso.so /lib/tls_get_new-dtv_dso.so;
         ln -sf /glibc/lib/tls_get_new-dtv_dso.so ./libtls_get_new-dtv_dso.so
     ",
         &environ,

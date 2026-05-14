@@ -11,12 +11,12 @@ pub mod threads;
 
 use crate::hal::__switch;
 use crate::{
-    fs::{OpenFlags, ROOT_FD},
+    fs::{self, vfs_lookup_absolute},
     mm::translated_refmut,
     timer::TimeSpec,
     utils::error::{GeneralRet, SyscallErr},
 };
-use alloc::{collections::VecDeque, sync::Arc};
+use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 pub use context::TaskContext;
 pub use elf::{load_elf_interp, AuxvEntry, AuxvType, ELFInfo};
 use lazy_static::*;
@@ -220,8 +220,9 @@ pub fn do_exit(task: Arc<TaskControlBlock>, exit_code: u32) {
     // SocketFile 通过 fd_table 管理，无需额外清理。
     {
         let mut fd_table = task.files.lock();
-        for fd_opt in fd_table.iter_mut() {
-            *fd_opt = None;
+        let open_fds: Vec<usize> = fd_table.iter().map(|(i, _f)| i).collect();
+        for fd in open_fds {
+            let _ = fd_table.drop_fd(fd);
         }
     }
     drop(inner);
@@ -289,7 +290,8 @@ pub fn exit_group_and_run_next(exit_code: u32) -> ! {
 
 lazy_static! {
     pub static ref INITPROC: Arc<TaskControlBlock> = Arc::new({
-        let elf = ROOT_FD.open("initproc", OpenFlags::O_RDONLY, true).unwrap();
+        let inode = vfs_lookup_absolute("/initproc").unwrap();
+        let elf = fs::vfs::File::new(inode, fs::vfs::FileFlags::O_RDONLY).unwrap();
         TaskControlBlock::new(elf)
     });
 }

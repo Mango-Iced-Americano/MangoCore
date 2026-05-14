@@ -12,13 +12,13 @@ use crate::{
         file_descriptor::FdTable,
         file_trait::File,
         inode::{self, InodeLock, InodeTrait},
-        vfs::VFS,
+        directory_tree::VFS,
         DiskInodeType, OpenFlags, SeekWhence, Stat, StatMode,
     },
     lang_items::Bytes,
     mm::UserBuffer,
     net::socket::inet::stream::inner,
-    syscall::errno::{EINVAL, ENOMEM, ENOTDIR, ENOTEMPTY},
+    syscall::errno::{EINVAL, EIO, ENOENT, ENOMEM, ENOTDIR, ENOTEMPTY},
     utils::error::SyscallErr,
 };
 use alloc::{
@@ -56,25 +56,33 @@ pub enum ExtType {
 // 对Ext4Inode的一层封装，用于构成与OSInode同级别的结构体
 pub struct Ext4OSInode {
     /// 是否可读
-    readable: bool,
+    pub(super) readable: bool,
     /// 是否可写
-    writable: bool,
+    pub(super) writable: bool,
     /// 被进程使用的计数
-    special_use: bool,
+    pub(super) special_use: bool,
     /// 是否追加
-    append: bool,
+    pub(super) append: bool,
     /// 具体的Inode
-    inode: Arc<Mutex<Ext4InodeRef>>,
+    pub(super) inode: Arc<Mutex<Ext4InodeRef>>,
     /// 文件偏移
-    offset: Mutex<usize>,
+    pub(super) offset: Mutex<usize>,
     /// 目录树节点指针
-    dirnode_ptr: Arc<Mutex<Weak<DirectoryTreeNode>>>,
+    pub(super) dirnode_ptr: Arc<Mutex<Weak<DirectoryTreeNode>>>,
     /// ext4fs实例
-    ext4fs: Arc<Ext4FileSystem>,
+    pub(super) ext4fs: Arc<Ext4FileSystem>,
     /// inode锁
-    inode_lock: Arc<RwLock<InodeLock>>,
+    pub(super) inode_lock: Arc<RwLock<InodeLock>>,
     /// 文件缓存
-    file_cache_manager: Arc<PageCacheManager>,
+    pub(super) file_cache_manager: Arc<PageCacheManager>,
+}
+
+impl core::fmt::Debug for Ext4OSInode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Ext4OSInode")
+            .field("inode_num", &self.inode.lock().inode_num)
+            .finish()
+    }
 }
 
 impl Ext4OSInode {
@@ -702,41 +710,62 @@ impl File for Ext4OSInode {
 
         // 找到自己在目录树中的节点，以及父目录 inode
         let dir_node_weak = self.dirnode_ptr.lock().clone();
-        let dir_node = dir_node_weak.upgrade().ok_or(ENOTEMPTY)?;
-        let father_inode = dir_node.father_arc();
-        let parent_osinode = &father_inode.file;
-        // println!("[kernel in unlink] parent osinode: {:?}", parent_osinode.get_file_type());
-        let parent = Arc::downcast::<Ext4OSInode>(parent_osinode.clone()).map_err(|_| ENOTEMPTY)?;
-        let mut parent_inode_ref = parent.inode.lock();
+        if let Some(dir_node) = dir_node_weak.upgrade() {
+            // 老 VFS：通过 DirectoryTreeNode 获取父目录和名字
+            let father_inode = dir_node.father_arc();
+            let parent_osinode = &father_inode.file;
+            let parent =
+                Arc::downcast::<Ext4OSInode>(parent_osinode.clone()).map_err(|_| ENOTEMPTY)?;
+            let name = dir_node.name.clone();
 
-        // 拿到要删除的 child inode 引用
-        let mut child_inode_ref = self.ext4fs.get_inode_ref(ino);
+            let mut parent_inode_ref = parent.inode.lock();
+            let mut child_inode_ref = self.ext4fs.get_inode_ref(ino);
 
-        // 如果需要释放数据块，就先把大小截断到 0
-        if delete {
-            self.ext4fs.truncate_inode(&mut child_inode_ref, 0)?;
+            if delete {
+                self.ext4fs.truncate_inode(&mut child_inode_ref, 0)?;
+            }
+
+            self.ext4fs.unlink(
+                &mut parent_inode_ref,
+                &mut child_inode_ref,
+                name.as_str(),
+            );
+
+            self.ext4fs.write_back_inode(&mut parent_inode_ref);
+            if delete {
+                self.ext4fs.write_back_inode(&mut child_inode_ref);
+            }
+        } else {
+            // 新 VFS / dirnode_ptr 缺失：从 ext4 目录结构反查父 inode 和名字
+            let (parent_ino, name) = self
+                .ext4fs
+                .lookup_parent_and_name(ino, is_dir)
+                .map_err(|e| {
+                    if e == crate::syscall::errno::ENOENT {
+                        ENOENT
+                    } else {
+                        EIO
+                    }
+                })?;
+
+            let mut parent_inode_ref = self.ext4fs.get_inode_ref(parent_ino);
+            let mut child_inode_ref = self.ext4fs.get_inode_ref(ino);
+
+            if delete {
+                self.ext4fs.truncate_inode(&mut child_inode_ref, 0)?;
+            }
+
+            self.ext4fs.unlink(
+                &mut parent_inode_ref,
+                &mut child_inode_ref,
+                name.as_str(),
+            );
+
+            self.ext4fs.write_back_inode(&mut parent_inode_ref);
+            if delete {
+                self.ext4fs.write_back_inode(&mut child_inode_ref);
+            }
         }
-
-        // 打印日志，执行 unlink（删除目录项并更新 link_count）
-        // println!(
-        //     "[kernel in unlink] removing {} {:?}",
-        //     dir_node.name,
-        //     if is_dir { "directory" } else { "file" }
-        // );
-        self.ext4fs.unlink(
-            &mut parent_inode_ref,
-            &mut child_inode_ref,
-            dir_node.name.as_str(),
-        );
-
-        // 写回父 inode
-        self.ext4fs.write_back_inode(&mut parent_inode_ref);
-        // 若释放了数据块，也要写回子 inode
-        if delete {
-            self.ext4fs.write_back_inode(&mut child_inode_ref);
-        }
-
-        // println!("unlink done");
 
         Ok(())
     }

@@ -144,18 +144,18 @@ pub fn ppoll(
                 match fd_table.get_ref(fd) {
                     Ok(file_descriptor) => {
                         let mut trigger = 0;
-                        if file_descriptor.file.hang_up() {
+                        if file_descriptor.hang_up() {
                             poll_fd.revents |= PollEvent::POLLHUP;
                             trigger = 1;
                         }
                         if poll_fd.events.contains(PollEvent::POLLIN)
-                            && file_descriptor.file.r_ready()
+                            && file_descriptor.r_ready()
                         {
                             poll_fd.revents |= PollEvent::POLLIN;
                             trigger = 1;
                         }
                         if poll_fd.events.contains(PollEvent::POLLOUT)
-                            && file_descriptor.file.w_ready()
+                            && file_descriptor.w_ready()
                         {
                             poll_fd.revents |= PollEvent::POLLOUT;
                             trigger = 1;

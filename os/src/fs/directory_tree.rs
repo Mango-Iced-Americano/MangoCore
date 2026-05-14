@@ -1,5 +1,4 @@
 use super::inode::DiskInodeType;
-use super::vfs::VFS;
 use super::{
     cache::BlockCacheManager,
     dev::{null::Null, tty::Teletype, zero::Zero},
@@ -11,6 +10,73 @@ use super::{
 use crate::fs::dev::urandom::Urandom;
 use crate::fs::fat32::FatOSInode;
 use crate::fs::inode;
+
+// ── 旧 VFS trait 定义（待 FAT32 迁移后删除） ─────────────────────────
+
+use crate::fs::cache::BlockCacheManager as BCM;
+use crate::fs::BlockDevice;
+use downcast_rs::{impl_downcast, DowncastSync};
+
+/// 旧 VFS trait — 仅 FAT32 和目录树仍在使用
+/// ext4 已迁移到新的 `FileSystem` trait，FAT32 迁移完成后此 trait 将被删除
+pub trait VFS: DowncastSync {
+    fn close(&self) -> () {
+        todo!();
+    }
+    fn read(&self) -> alloc::vec::Vec<u8> {
+        todo!();
+    }
+    fn write(&self, _data: alloc::vec::Vec<u8>) -> usize {
+        todo!();
+    }
+    fn get_direcotry(&self) -> ROOT {
+        todo!();
+    }
+    fn alloc_blocks(&self, blocks: usize) -> alloc::vec::Vec<usize>;
+    fn get_filesystem_type(&self) -> super::filesystem::FS_Type;
+    fn block_size(&self) -> usize;
+}
+impl_downcast!(sync VFS);
+
+impl VFS {
+    pub fn open_fs(
+        block_device: alloc::sync::Arc<dyn BlockDevice>,
+        index_cache_mgr: alloc::sync::Arc<spin::Mutex<BCM>>,
+    ) -> alloc::sync::Arc<Self> {
+        let fs_type = super::filesystem::pre_mount();
+        match fs_type {
+            super::filesystem::FS_Type::Fat32 => {
+                super::fat32::EasyFileSystem::open(block_device, index_cache_mgr)
+            }
+            super::filesystem::FS_Type::Ext4 => {
+                super::ext4::ext4fs::Ext4FileSystem::open_ext4rs(block_device, index_cache_mgr)
+            }
+            super::filesystem::FS_Type::Null => panic!("no filesystem found"),
+        }
+    }
+    pub fn root_osinode(vfs: &alloc::sync::Arc<dyn VFS>) -> alloc::sync::Arc<dyn File> {
+        match vfs.get_filesystem_type() {
+            super::filesystem::FS_Type::Fat32 => {
+                super::fat32::FatOSInode::new(super::fat32::FatInode::root_inode(vfs))
+            }
+            super::filesystem::FS_Type::Ext4 => {
+                use super::ext4::ROOT_INODE;
+                use alloc::sync::Arc as A;
+                let vfs_concrete = A::downcast::<super::ext4::ext4fs::Ext4FileSystem>(vfs.clone())
+                    .unwrap();
+                let root_inode = vfs_concrete.get_inode_ref(ROOT_INODE);
+                super::ext4::layout::Ext4OSInode::new(root_inode, vfs_concrete)
+            }
+            super::filesystem::FS_Type::Null => panic!("Null filesystem type does not have a root inode"),
+        }
+    }
+}
+
+/// 对不同类型文件系统文件的封装（仅 FAT32 使用）
+pub trait VFSFileContent {}
+
+/// 对不同类型文件系统目录的封装（仅 FAT32 使用）
+pub trait VFSDirEnt {}
 #[cfg(feature = "oom_handler")]
 use crate::mm::tlb_invalidate;
 use crate::syscall::errno::*;
@@ -236,14 +302,52 @@ impl DirectoryTreeNode {
         name: &str,
         lock: &mut RwLockWriteGuard<Option<BTreeMap<String, Arc<Self>>>>,
     ) -> Result<Arc<Self>, isize> {
-        match self.cache_all_subfile(lock) {
-            Ok(_) => {}
-            Err(errno) => return Err(errno),
-        };
-        match lock.as_ref().unwrap().get(&name.to_string()) {
-            Some(child) => Ok(child.clone()),
-            None => Err(ENOENT),
+        // 查缓存 — 注意缓存可能因 shrink 缺失条目
+        if let Some(ref map) = **lock {
+            if let Some(child) = map.get(&name.to_string()) {
+                return Ok(child.clone());
+            }
         }
+        // 缓存 miss：从磁盘只读目标文件，追加到缓存（不替换已有条目，
+        // 否则会丢弃已缓存条目持有的未回写脏数据）
+        let vec = self.file.open_subfile().map_err(|e| {
+            if e == crate::syscall::errno::ENOENT { crate::syscall::errno::ENOENT }
+            else { crate::syscall::errno::EIO }
+        })?;
+        let target_name = name.to_string();
+        for (fname, file) in vec {
+            // 跳过已存在的条目
+            if let Some(ref map) = **lock {
+                if map.contains_key(&fname) {
+                    continue;
+                }
+            }
+            let new_child = Self::new(
+                fname.clone(),
+                self.filesystem.clone(),
+                file,
+                Arc::downgrade(&self.get_arc()),
+            );
+            if fname == target_name {
+                let result = new_child.clone();
+                if let Some(ref mut map) = **lock {
+                    map.insert(fname, new_child);
+                } else {
+                    let mut map = BTreeMap::new();
+                    map.insert(fname, new_child);
+                    **lock = Some(map);
+                }
+                return Ok(result);
+            }
+            if let Some(ref mut map) = **lock {
+                map.insert(fname, new_child);
+            } else {
+                let mut map = BTreeMap::new();
+                map.insert(fname, new_child);
+                **lock = Some(map);
+            }
+        }
+        Err(ENOENT)
     }
 
     // 通过一个动态数组 components 来进入某个目录
@@ -844,16 +948,17 @@ pub fn oom() -> usize {
     log::warn!("[oom] start oom");
     let mut lock = DIRECTORY_VEC.lock();
     update_directory_vec(&mut lock);
-    // 先执行 VFS 剪枝，回收仅作缓存的目录节点（strong_count == 1）
-    // 这通常能释放大量内核堆内存
+    // 先执行 VFS 剪枝，回收仅作缓存的目录节点（strong_count == 2 且 spe_usage == 0）
+    // 这能释放大量内核堆内存
     drop(lock);
     shrink();
     let mut lock = DIRECTORY_VEC.lock();
     loop {
         let mut dropped = 0;
-        for inode in &lock.0 {
-            let inode = inode.upgrade().unwrap();
-            dropped += inode.file.oom();
+        for weak_inode in &lock.0 {
+            if let Some(inode) = weak_inode.upgrade() {
+                dropped += inode.file.oom();
+            }
         }
         if dropped > 0 {
             log::warn!("[oom] recycle pages: {}", dropped);
@@ -866,60 +971,83 @@ pub fn oom() -> usize {
     }
 }
 
-/// VFS 剪枝器（Shrinker）：剔除 strong_count == 1 的缓存目录节点。
+/// VFS 剪枝器（Shrinker）：剔除 strong_count == 2 且 spe_usage == 0 的缓存目录节点。
 ///
-/// strong_count == 1 意味着唯一的强引用来自父节点的 `children` BTreeMap，
-/// 没有被任何进程的 FD、cwd 或 mmap 持有。这些节点可以安全移除，
-/// 释放它们占用的内核堆内存（String、BTreeMap 节点等）。
+/// strong_count == 2 意味着唯一的强引用来自父节点的 `children` BTreeMap
+/// 以及 upgrade() 产生的临时 Arc。这些节点没有被任何进程的 FD、cwd 或 mmap 持有。
+/// 可以安全移除，释放它们占用的内核堆内存（String、BTreeMap 节点等）。
 ///
 /// 为避免在堆紧张时分配新 Vec，该函数原地遍历 DIRECTORY_VEC。
-#[cfg(feature = "oom_handler")]
 pub fn shrink() {
-    let mut lock = DIRECTORY_VEC.lock();
-    update_directory_vec(&mut lock);
-
-    let mut pruned = 0usize;
-    // 收集要剪枝的节点信息（只存 father Weak 和 name，不在堆紧张时分配 String）
-    // 分两阶段：先找到可剪节点索引，再执行剪枝
-    let len = lock.0.len();
-    let mut to_prune: [Option<(usize, u64)>; 256] = [None; 256]; // (idx, name_hash)
+    log::info!("[vfs-shrink] start shrinking directory tree nodes");
+    // OOM 场景下调用栈可能很深，批次大小控制在 64（~1KB 栈）减小栈溢出风险。
+    // 若仍有待回收节点，oom() 的循环会再次调用本函数，小步快跑更安全。
+    const BATCH_SIZE: usize = 64;
+    let mut to_prune: [Option<Weak<DirectoryTreeNode>>; BATCH_SIZE] =
+        core::array::from_fn(|_| None);
     let mut to_prune_count = 0usize;
 
-    for (i, weak_node) in lock.0.iter().enumerate() {
-        if to_prune_count >= 256 {
-            break;
-        }
-        if let Some(node) = weak_node.upgrade() {
-            let count = Arc::strong_count(&node);
-            // ROOT 节点的 spe_usage >= 1，永远不剪
-            if count == 1 {
-                // 用 name 地址的简单哈希标记（不分配堆内存）
-                let name_ptr = node.name.as_ptr() as u64;
-                to_prune[to_prune_count] = Some((i, name_ptr));
-                to_prune_count += 1;
+    {
+        // 阶段一：扫描全局树节点数组（加锁）
+        let mut lock = DIRECTORY_VEC.lock();
+        update_directory_vec(&mut lock);
+
+        for weak_node in lock.0.iter() {
+            if to_prune_count >= BATCH_SIZE {
+                break;
+            }
+            if let Some(node) = weak_node.upgrade() {
+                // 不剪枝根目录的直接子节点 — 它们是真实文件系统上的目录
+                // （/musl, /glibc, /proc, /dev, /tmp 等），不是路径遍历产生的缓存。
+                let is_root_child = {
+                    node.father.lock().upgrade()
+                        .map_or(false, |father| father.father.lock().upgrade().is_none())
+                };
+                if is_root_child {
+                    continue;
+                }
+                // count == 2：只有 parent.children 和 upgrade() 产生的临时 Arc 持有
+                // spe_usage == 0：当前没有作为 CWD 或被打开的文件正在使用
+                if Arc::strong_count(&node) == 2 && *node.spe_usage.lock() == 0 {
+                    to_prune[to_prune_count] = Some(weak_node.clone());
+                    to_prune_count += 1;
+                }
             }
         }
-    }
+    } // [关键] 扫描完毕，释放 DIRECTORY_VEC 锁
 
-    // 阶段二：逐一从父节点的 children 中移除
+    let mut pruned = 0usize;
+
+    // 阶段二：安全执行剪枝操作。
+    // 关键锁顺序：先获取 father（短暂持有，仅取 Arc），释放 father 锁，
+    // 再获取 parent.children。避免与自上而下（children→child）路径形成 ABBA 死锁。
     for entry in to_prune.iter().take(to_prune_count) {
-        if let Some((idx, _name_tag)) = entry {
-            if let Some(node) = lock.0[*idx].upgrade() {
-                if Arc::strong_count(&node) != 1 {
-                    continue; // 状态变了，跳过
+        if let Some(weak) = entry {
+            if let Some(node) = weak.upgrade() {
+                // Double check，因为锁释放期间状态可能发生变化
+                if *node.spe_usage.lock() != 0 {
+                    continue;
                 }
-                // 从父节点的 children 中移除自己
-                if let Some(parent) = node.father.lock().upgrade() {
+                // 关键：不在持有 node.father 锁的情况下去拿 parent.children 锁
+                let parent_arc = node.father.lock().upgrade();
+                // node.father 的 MutexGuard 已释放
+
+                if let Some(parent) = parent_arc {
                     let mut children_lock = parent.children.write();
-                    if let Some(ref mut map) = *children_lock {
-                        map.remove(&node.name);
-                        pruned += 1;
-                        // 如果父目录变空，也把 BTreeMap 回收掉
-                        if map.is_empty() {
-                            *children_lock = None;
+                    // <= 3：父目录 map + 当前 node + 可能的短暂引用（非 spe_usage 路径）
+                    if Arc::strong_count(&node) <= 3 && *node.spe_usage.lock() == 0 {
+                        if let Some(ref mut map) = *children_lock {
+                            if map.remove(&node.name).is_some() {
+                                pruned += 1;
+                            }
+                            if map.is_empty() {
+                                *children_lock = None;
+                            }
                         }
                     }
                 }
+                // node (Arc) 在此释放；若为最后一个强引用，触发 Drop →
+                // delete_directory_vec()，此时不持有任何锁，可安全获取 DIRECTORY_VEC。
             }
         }
     }

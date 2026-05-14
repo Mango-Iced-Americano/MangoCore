@@ -15,6 +15,7 @@ oskernel2026-mango 是一个**基于 Rust 的裸机 OS 内核**，支持 **riscv
 ## 设计思想
 
 - Linux兼容性：系统调用接口/procfs/sysfs/devfs等的行为应当符合Linux语义。参考Linux 6.6的行为进行实现。
+- DragonOS 蓝本：本项目以 [DragonOS](https://github.com/DragonOS-Community/DragonOS) 为设计蓝本。VFS 三层抽象（File/IndexNode/FileSystem）、MountFS 挂载层、Endpoint 统一地址类型、PSOCK 纯枚举等核心架构均参照 DragonOS。写代码时务必先查阅 DragonOS 对应模块，保持设计一致。
 - 轻量：简化复杂的抽象设计，保留合理的、简洁、符合Rust开发最佳实践的的抽象，提升系统性能。
 - 安全：注重内存安全、并发安全
 
@@ -123,10 +124,17 @@ make -C os conf-inject CONF_ARCH=rv64 CONF_BLK_MODE=virt CONF_FILE=../os_test.co
 ```bash
 cd os && make rv64-run
 cd os && make la64-run
-
-# 分组批量运行（项目根目录，会按分组顺序依次跑）
-TEST_ARCH=rv64 bash run_test.sh
 ```
+
+### 全量测试（一键）
+
+```bash
+# 在 Docker 容器内，项目根目录执行：
+# 自动完成：make all → 解压镜像 → 串行 rv64/la64 QEMU（各 10min 超时）→ 评分 → 存档
+python3 scripts/run_full_test.py
+```
+
+该脚本是推荐的全量测试方式，替代之前的 `run_test.sh`。结果存档在 `testresult/archive_{timestamp}/`。
 
 ### 详细日志
 
@@ -215,39 +223,64 @@ os/src/
 │   ├── process.rs             #   clone/execve/exit/wait4/signal/...（30+ 个）
 │   └── utils.rs               #   wait_io / wait_io_core —— 阻塞 I/O 循环
 │
-├── fs/                        # 文件系统
-│   ├── layout.rs              #   Stat、OpenFlags、SeekWhence、StatMode
-│   ├── file_trait.rs          #   File trait（read/write/r_ready/lseek/...）
+├── fs/                        # 文件系统（VFS 重构中 — 新旧共存）
+│   ├── mod.rs                 #   VFS 路径解析入口、ROOT_FD/VFS_ROOT、parse_path
+│   ├── vfs/                   #   新 VFS 抽象层（DragonOS 风格，逐步迁移中）
+│   │   ├── mod.rs             #     FileType、InodeMode、Metadata、IndexNode trait
+│   │   ├── file.rs            #     File 结构体（fd 层：offset/flags/mode）
+│   │   ├── index_node.rs      #     IndexNode trait（inode 操作）
+│   │   ├── file_system.rs     #     FileSystem trait（具体 FS 接口）
+│   │   ├── mount.rs           #     MountFS/MountFSInode/MountList 挂载层
+│   │   ├── adapters.rs        #     OldFileIndexNode 适配器（包装旧 File trait）
+│   │   └── placeholder.rs     #     PlaceholderFS（桥接旧 FS → 新 FileSystem trait）
+│   ├── vfs_old.rs             #   旧 vfs.rs 重命名，保持向后兼容
+│   ├── page_cache.rs          #   新 PageCache（状态机：Loading→UpToDate↔Dirty→Writeback）
+│   ├── cache.rs               #   旧 PageCache/块设备缓存层
+│   ├── file_trait.rs          #   旧 File trait（read/write/r_ready/lseek/...）
 │   ├── file_descriptor.rs     #   FileDescriptor 包装（cloexec、nonblock）
-│   ├── dirent.rs              #   目录项结构体
-│   ├── directory_tree.rs      #   虚拟文件系统树（VFS 层）
-│   ├── ext4/                  #   ext4 文件系统实现
-│   ├── fat32/                 #   FAT32 文件系统 + DiskInode
-│   ├── cache.rs               #   PageCache（块设备缓存层）
 │   ├── inode.rs               #   Inode 抽象
-│   ├── poll.rs                #   pselect/ppoll/select 实现
-│   ├── vfs.rs                 #   Mount/umount/statfs
 │   ├── filesystem.rs          #   文件系统 trait
+│   ├── directory_tree.rs      #   虚拟文件系统树（目录项缓存）
+│   ├── dirent.rs              #   目录项结构体
+│   ├── layout.rs              #   Stat、OpenFlags、SeekWhence、StatMode
+│   ├── poll.rs                #   pselect/ppoll/select 实现
 │   ├── timestamp.rs           #   文件时间戳更新
+│   ├── iov.rs                 #   iovec 操作
+│   ├── ext4/                  #   ext4 文件系统实现
+│   ├── fat32/                 #   FAT32 文件系统实现
 │   └── dev/                   #   设备文件
 │       ├── tty.rs             #     控制台/TTY（stdin/stdout/stderr）
 │       ├── null.rs            #     /dev/null
 │       ├── zero.rs            #     /dev/zero
 │       ├── urandom.rs         #     /dev/urandom
-│       ├── pipe.rs            #     管道（被 UnixSocket 使用）
-│       ├── hwclock.rs         #     /dev/hwclock（用于 adjtimex）
+│       ├── pipe.rs            #     管道
+│       ├── hwclock.rs         #     /dev/hwclock
 │       └── socket.rs          #     后备 socket 文件（已被 net/ 替代）
 │
 ├── net/                       # 网络栈（smoltcp 包装）
 │   ├── mod.rs                 #   Socket trait、SocketTable、alloc()
 │   ├── macros.rs              #   impl_file_for_socket! 宏
-│   ├── tcp.rs                 #   TcpSocket（listen/connect/accept + try_recv/try_send）
-│   ├── udp.rs                 #   UdpSocket（connect + rx_queue 分发）
-│   ├── raw.rs                 #   RawSocket（IPv4 原始 socket）
-│   ├── unix.rs                #   UnixSocket（基于管道的 unix 域 socket 对）
-│   ├── address.rs             #   SocketAddrv4、endpoint 解析、IP 地址辅助
+│   ├── posix.rs               #   PosixArgsSocketType bitflags（socket() 入口解析）
 │   ├── config.rs              #   NET_INTERFACE 单例、smoltcp 初始化、poll 循环
-│   └── adapter.rs             #   SmoltcpDeviceAdapter（NetworkDevice → smoltcp）
+│   ├── adapter.rs             #   SmoltcpDeviceAdapter（NetworkDevice → smoltcp）
+│   ├── socket/                #   Socket 类型实现
+│   │   ├── mod.rs             #     Socket trait + Endpoint 枚举
+│   │   ├── inet/              #     IPv4 socket（TCP/UDP/Raw）
+│   │   │   ├── common/        #       地址解析、端口管理
+│   │   │   ├── stream/        #       TcpSocket（events/inner/io/lifecycle/tcp_info）
+│   │   │   ├── datagram/      #       UdpSocket
+│   │   │   └── raw/           #       RawSocket
+│   │   └── unix/              #     Unix domain socket
+│   │       ├── stream/        #       UnixStreamSocket（状态机 + RingBuffer）
+│   │       ├── datagram/      #       UnixDatagramSocket
+│   │       ├── ns/            #       抽象命名空间
+│   │       └── ring_buffer.rs #       通用环形缓冲区
+│   └── syscall/               #   网络 syscall 实现（每个 syscall 独立文件）
+│       ├── socket.rs / bind.rs / connect.rs / listen.rs / accept.rs
+│       ├── sendto.rs / recvfrom.rs / sendmsg.rs / recvmsg.rs
+│       ├── getsockname.rs / getpeername.rs / getsockopt.rs / setsockopt.rs
+│       ├── shutdown.rs / socketpair.rs
+│       └── common.rs
 │
 ├── mm/                        # 内存管理
 │   ├── mod.rs                 #   公开 re-export、init()
@@ -360,7 +393,7 @@ syscall 分发函数 `syscall(id, args)` 位于 `syscall/mod.rs`。它是一个�
 | 分组     | Syscall ID                                                                                               | 模块                                 |
 | -------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------ |
 | 文件 I/O | `read(63)`、`write(64)`、`openat(56)`、`close(57)`、`lseek(62)`                                          | `syscall/fs.rs`                      |
-| 网络     | `socket(198)`、`bind(200)`、`connect(203)`、`sendto(206)`、`recvfrom(207)`、`accept(202)`、`listen(201)` | `syscall/net.rs`                     |
+| 网络     | `socket(198)`、`bind(200)`、`connect(203)`、`sendto(206)`、`recvfrom(207)`、`accept(202)`、`listen(201)` | `net/syscall/*.rs`                   |
 | 进程     | `clone(220)`、`execve(221)`、`exit(93)`、`wait4(260)`、`kill(129)`                                       | `syscall/process.rs`                 |
 | 内存     | `mmap(222)`、`munmap(215)`、`brk(214)`、`mprotect(226)`                                                  | `syscall/process.rs`                 |
 | 信号     | `sigaction(13)`、`sigprocmask(14)`、`sigtimedwait(137)`、`sigreturn(139)`                                | `syscall/process.rs`                 |
@@ -376,7 +409,7 @@ syscall 分发函数 `syscall(id, args)` 位于 `syscall/mod.rs`。它是一个�
         │  syscall（sendto / recvfrom / connect / accept / ...）
         ▼
 ┌─────────────────────────────────────────────────────────┐
-│                  syscall/net.rs                          │
+│              net/syscall/{sendto,recvfrom,connect,...}.rs │
 │  wait_io(|| socket.try_recv(buf), nonblock)              │
 │  wait_io(|| socket.try_send(buf), nonblock)              │
 │  wait_io(|| socket.try_connect(), nonblock)              │
@@ -385,16 +418,15 @@ syscall 分发函数 `syscall(id, args)` 位于 `syscall/mod.rs`。它是一个�
                            │ Socket trait
                            ▼
 ┌─────────────────────────────────────────────────────────┐
-│                  net/mod.rs（Socket trait）               │
+│            net/socket/mod.rs（Socket trait + Endpoint）   │
 │  + SocketTable（BTreeMap<Fd, Arc<dyn Socket>>）          │
 │  + alloc() — 创建 Tcp/Udp/Raw socket，注册 FD           │
 └──────┬──────────┬──────────┬────────────────────────────┘
        │          │          │
        ▼          ▼          ▼
-   tcp.rs      udp.rs     raw.rs
-   try_recv    try_recv   try_recv
-   try_send    try_send   try_send
-   try_connect            send_to（IP 头）
+  socket/inet/  socket/inet/  socket/inet/
+  stream/       datagram/     raw/
+  TcpSocket     UdpSocket     RawSocket
        │          │          │
        └──────────┴──────────┘
                    │ smoltcp socket API
@@ -600,7 +632,9 @@ wait_io(f, nonblock)
 // 第 1 步：在 syscall/syscall_id.rs 中添加常量
 pub const SYSCALL_MY_FEATURE: usize = 300;
 
-// 第 2 步：在对应的 syscall/*.rs 中添加处理函数
+// 第 2 步：在对应的模块中添加处理函数
+//   文件/进程/时间相关 → syscall/fs.rs 或 syscall/process.rs
+//   网络相关 → net/syscall/<name>.rs（每个 syscall 独立文件）
 pub fn sys_my_feature(arg1: usize, arg2: usize) -> isize {
     // 成功返回 >= 0，失败返回负 errno
     0
@@ -616,11 +650,11 @@ dispatch 匹配：
 ### 2) 新增 Socket 类型
 
 ```rust
-// 第 1 步：实现 Socket trait
+// 第 1 步：实现 Socket trait（net/socket/mod.rs）
 impl Socket for MySocket {
     fn try_recv(&self, buf: &mut [u8]) -> Result<isize, SyscallErr> { ... }
     fn try_send(&self, buf: &[u8]) -> Result<isize, SyscallErr> { ... }
-    fn socket_type(&self) -> SocketType { SocketType::SOCK_MY }
+    fn socket_type(&self) -> PSOCK { PSOCK::Stream }  // 或 Datagram/Raw
     // ... 其他必需方法
     fn deep_clone_socket(&self) -> Arc<dyn File> { Arc::new(Self { ... }) }
 }
@@ -768,3 +802,15 @@ qemu-system-riscv64 -d int -no-reboot -serial stdio -kernel kernel-rv
 与 `WORK_LOG.md` 的区别：
 - `WORK_LOG.md` 按日期记录「本次改了啥」
 - `EXPERIENCE.md` 按主题记录「学到了啥」，供将来复用
+
+---
+
+## 代码审查
+
+编辑代码后，定期调用 `kernel-code-reviewer` subagent 对变更进行审查。该 agent 会检查代码质量、潜在 bug、架构一致性和安全风险。
+
+---
+
+## 交流语言
+
+AI 助手必须使用**中文**与用户交流。代码、注释、commit message 使用英文或中文均可，但面向用户的对话输出始终用中文。

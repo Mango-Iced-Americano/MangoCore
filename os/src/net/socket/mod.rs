@@ -23,11 +23,39 @@ use alloc::{
     vec,
     vec::Vec,
 };
+use core::any::Any;
 use core::convert::TryFrom;
 
 use smoltcp::iface::SocketHandle;
 use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint, Ipv4Address, Ipv6Address};
 use spin::Mutex;
+
+use crate::fs::vfs::{
+    FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata,
+};
+use crate::fs::vfs::file_system::FileSystem as NewFileSystem;
+use crate::fs::vfs::file_system::{FileSystem, FsInfo, SuperBlock};
+use crate::timer::TimeSpec;
+
+/// Socket 虚拟文件系统（用于 IndexNode::fs()）
+#[derive(Debug)]
+struct SocketFS;
+
+impl FileSystem for SocketFS {
+    fn root_inode(&self) -> Arc<dyn IndexNode> {
+        panic!("SocketFS has no root inode")
+    }
+    fn info(&self) -> FsInfo {
+        FsInfo { blk_dev_id: 0, max_name_len: 0, features: vec!["socketfs"] }
+    }
+    fn name(&self) -> &str { "socketfs" }
+    fn super_block(&self) -> SuperBlock { SuperBlock::default() }
+    fn as_any_ref(&self) -> &dyn Any { self }
+}
+
+lazy_static::lazy_static! {
+    static ref SOCKET_FS: Arc<SocketFS> = Arc::new(SocketFS);
+}
 
 use crate::net::socket::inet::common::address;
 
@@ -366,6 +394,12 @@ pub struct SocketFile {
     pub inner: Arc<dyn Socket>,
 }
 
+impl core::fmt::Debug for SocketFile {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SocketFile").finish()
+    }
+}
+
 impl SocketFile {
     pub fn new(socket: Arc<dyn Socket>) -> Self {
         Self { inner: socket }
@@ -526,6 +560,85 @@ impl File for SocketFile {
 
     fn fcntl(&self, _cmd: u32, _arg: u32) -> isize {
         0
+    }
+}
+
+impl IndexNode for SocketFile {
+    fn read_at(
+        &self,
+        _offset: usize,
+        _len: usize,
+        buf: &mut [u8],
+        _data: spin::MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        self.inner.try_recv(buf).map(|n| n as usize)
+    }
+
+    fn write_at(
+        &self,
+        _offset: usize,
+        _len: usize,
+        buf: &[u8],
+        _data: spin::MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        self.inner
+            .try_send(buf, MsgFlags::empty())
+            .map(|n| n as usize)
+    }
+
+    fn metadata(&self) -> Result<Metadata, SyscallErr> {
+        Ok(Metadata {
+            dev_id: 0,
+            inode_id: 0,
+            size: 0,
+            blk_size: 0,
+            blocks: 0,
+            atime: TimeSpec::new(),
+            mtime: TimeSpec::new(),
+            ctime: TimeSpec::new(),
+            file_type: FileType::Socket,
+            mode: InodeMode::S_IFSOCK | InodeMode::from_bits_truncate(0o777),
+            nlinks: 1,
+            uid: 0,
+            gid: 0,
+            flags: InodeFlags::empty(),
+            raw_dev: 0,
+        })
+    }
+
+    fn is_stream(&self) -> bool {
+        true
+    }
+
+    fn poll(&self, _private_data: &FilePrivateData) -> Result<usize, SyscallErr> {
+        let mut revents: usize = 0;
+        if self.inner.socket_r_ready() {
+            revents |= 1; // POLLIN
+        }
+        if self.inner.socket_w_ready() {
+            revents |= 0x4; // POLLOUT
+        }
+        if self.inner.socket_hang_up() {
+            revents |= 0x10; // POLLHUP
+        }
+        Ok(revents)
+    }
+
+    fn ioctl(
+        &self,
+        _cmd: u32,
+        _argp: usize,
+        _private_data: spin::MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        Err(SyscallErr::ENOTTY)
+    }
+
+    fn fs(&self) -> Arc<dyn NewFileSystem> {
+        SOCKET_FS.clone()
+    }
+
+    fn as_any_ref(&self) -> &dyn Any {
+        self
     }
 }
 

@@ -1,0 +1,608 @@
+//! MountFS — VFS 挂载层
+//!
+//! 对标 DragonOS `kernel/src/filesystem/vfs/mount.rs` 的 `MountFS` / `MountFSInode`。
+//!
+//! 设计思想：
+//! - `MountFS` 包装一个 `Arc<dyn FileSystem>`，同时维护子挂载点表
+//! - `MountFSInode` 包装一个 `Arc<dyn IndexNode>`，实现 `IndexNode` trait，
+//!   所有操作委托给 `inner_inode`，在路径解析时跨越挂载点边界
+//! - 全局 `MountList` 管理所有挂载关系（路径 → 挂载点映射）
+//!
+//! 路径解析流程示例（"/mnt/ext4/file"）：
+//!   根 MountFSInode.find("mnt")
+//!     → inner_inode.find("mnt") → 返回 mnt inode
+//!     → 检查 mountpoints 表：mnt 是挂载点 → 返回 ext4 的根 MountFSInode
+//!       → ext4根.find("file") → 返回目标 inode
+
+use crate::utils::error::SyscallErr;
+use alloc::{
+    collections::BTreeMap,
+    string::{String, ToString},
+    sync::{Arc, Weak},
+    vec::Vec,
+};
+use core::fmt::Debug;
+use spin::{Mutex, MutexGuard};
+
+use super::{
+    file::FileFlags, file_system::FileSystem, FilePrivateData, FileType, IndexNode, InodeId,
+    InodeMode,
+};
+
+// ── MountFlags ──────────────────────────────────────────────────────────
+
+bitflags! {
+    /// 挂载标志，对标 Linux mount.h
+    pub struct MountFlags: u32 {
+        /// 只读挂载
+        const RDONLY = 0x1;
+        /// 忽略 suid/sgid
+        const NOSUID = 0x2;
+        /// 禁止设备特殊文件
+        const NODEV = 0x4;
+        /// 禁止执行
+        const NOEXEC = 0x8;
+        /// 同步写入
+        const SYNCHRONOUS = 0x10;
+        /// 重新挂载
+        const REMOUNT = 0x20;
+        /// 允许强制锁
+        const MANDLOCK = 0x40;
+        /// 目录修改同步
+        const DIRSYNC = 0x80;
+        /// 不更新访问时间
+        const NOATIME = 0x400;
+        /// 不更新目录访问时间
+        const NODIRATIME = 0x800;
+        /// bind mount
+        const BIND = 0x1000;
+        /// 重新递归 bind mount
+        const REC = 0x4000;
+    }
+}
+
+// ── MountPath ────────────────────────────────────────────────────────────
+
+/// 挂载路径，用于全局挂载表
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MountPath(pub String);
+
+impl From<&str> for MountPath {
+    fn from(value: &str) -> Self {
+        MountPath(String::from(value))
+    }
+}
+
+impl From<String> for MountPath {
+    fn from(value: String) -> Self {
+        MountPath(value)
+    }
+}
+
+impl AsRef<str> for MountPath {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Ord for MountPath {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.0.cmp(&other.0)
+    }
+}
+
+impl PartialOrd for MountPath {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+// ── MountFSInode ────────────────────────────────────────────────────────
+
+/// MountFSInode — 挂载感知的 inode 包装器
+///
+/// 包装内层 inode，所有 `IndexNode` 方法委托给 `inner_inode`。
+/// 在 `find()` 中检查子挂载点表，实现跨文件系统路径解析。
+#[derive(Debug)]
+pub struct MountFSInode {
+    /// 内层 inode
+    pub inner_inode: Arc<dyn IndexNode>,
+    /// 所属的 MountFS
+    pub mount_fs: Arc<MountFS>,
+    /// 指向自身的弱引用
+    self_ref: Mutex<Weak<MountFSInode>>,
+}
+
+impl MountFSInode {
+    /// 创建新 MountFSInode
+    pub fn new(inner_inode: Arc<dyn IndexNode>, mount_fs: Arc<MountFS>) -> Arc<Self> {
+        Arc::new_cyclic(|self_ref| MountFSInode {
+            inner_inode,
+            mount_fs,
+            self_ref: Mutex::new(self_ref.clone()),
+        })
+    }
+
+    /// 获取自身的强引用
+    fn self_arc(&self) -> Arc<Self> {
+        self.self_ref.lock().upgrade().unwrap()
+    }
+
+    /// 检查挂载是否可写
+    fn ensure_mount_writable(&self) -> Result<(), SyscallErr> {
+        if self.mount_fs.mount_flags().contains(MountFlags::RDONLY) {
+            return Err(SyscallErr::EROFS);
+        }
+        Ok(())
+    }
+
+    /// 判断当前 inode 是否为挂载点根
+    pub fn is_mountpoint_root(&self) -> bool {
+        let self_arc = self.self_arc();
+        let root_inode = self.mount_fs.mountpoint_root_inode();
+        Arc::ptr_eq(&self_arc, &root_inode)
+    }
+
+    /// 解析路径时，跨越挂载点边界
+    ///
+    /// 如果在当前 inode 的子挂载表中找到了匹配的 inode_id，
+    /// 返回子文件系统的根 inode。
+    fn overlaid_inode(self_inode: Arc<MountFSInode>) -> Arc<MountFSInode> {
+        let inode_id = match self_inode.inner_inode.metadata() {
+            Ok(md) => md.inode_id,
+            Err(_) => return self_inode,
+        };
+        let sub_mountfs = {
+            let lock = self_inode.mount_fs.mountpoints.lock();
+            lock.get(&inode_id).cloned()
+        };
+        match sub_mountfs {
+            Some(sub) => sub.mountpoint_root_inode(),
+            None => self_inode,
+        }
+    }
+
+    /// 逐级查找子项（带挂载点交叉）
+    fn do_find(&self, name: &str) -> Result<Arc<MountFSInode>, SyscallErr> {
+        let inner_inode = self.inner_inode.find(name)?;
+        Ok(MountFSInode::overlaid_inode(MountFSInode::new(
+            inner_inode,
+            self.mount_fs.clone(),
+        )))
+    }
+
+    /// 查找父目录
+    fn do_parent(&self) -> Result<Arc<MountFSInode>, SyscallErr> {
+        if self.is_mountpoint_root() {
+            // 如果当前是挂载点根，父目录在其父文件系统的挂载点
+            if let Some(mountpoint) = self.mount_fs.self_mountpoint() {
+                return Ok(mountpoint);
+            }
+            // 没有挂载点，返回自己（全局根）
+            return Ok(self.self_arc());
+        }
+        // 向 inner_inode 请求父目录
+        let parent_inner = self.inner_inode.find("..")?;
+        Ok(MountFSInode::new(parent_inner, self.mount_fs.clone()))
+    }
+}
+
+impl IndexNode for MountFSInode {
+    fn read_at(
+        &self,
+        offset: usize,
+        len: usize,
+        buf: &mut [u8],
+        data: MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        self.inner_inode.read_at(offset, len, buf, data)
+    }
+
+    fn write_at(
+        &self,
+        offset: usize,
+        len: usize,
+        buf: &[u8],
+        data: MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        self.ensure_mount_writable()?;
+        self.inner_inode.write_at(offset, len, buf, data)
+    }
+
+    fn read_direct(
+        &self,
+        offset: usize,
+        len: usize,
+        buf: &mut [u8],
+        data: MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        self.inner_inode.read_direct(offset, len, buf, data)
+    }
+
+    fn write_direct(
+        &self,
+        offset: usize,
+        len: usize,
+        buf: &[u8],
+        data: MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        self.ensure_mount_writable()?;
+        self.inner_inode.write_direct(offset, len, buf, data)
+    }
+
+    fn read_sync(&self, offset: usize, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+        self.inner_inode.read_sync(offset, buf)
+    }
+
+    fn write_sync(&self, offset: usize, buf: &[u8]) -> Result<usize, SyscallErr> {
+        self.ensure_mount_writable()?;
+        self.inner_inode.write_sync(offset, buf)
+    }
+
+    fn open(&self, data: MutexGuard<FilePrivateData>, flags: &FileFlags) -> Result<(), SyscallErr> {
+        self.inner_inode.open(data, flags)
+    }
+
+    fn close(&self, data: MutexGuard<FilePrivateData>) -> Result<(), SyscallErr> {
+        self.inner_inode.close(data)
+    }
+
+    fn find(&self, name: &str) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+        self.do_find(name)
+            .map(|mnt_inode| mnt_inode as Arc<dyn IndexNode>)
+    }
+
+    fn list(&self) -> Result<Vec<String>, SyscallErr> {
+        self.inner_inode.list()
+    }
+
+    fn create(
+        &self,
+        name: &str,
+        file_type: FileType,
+        mode: InodeMode,
+    ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+        self.ensure_mount_writable()?;
+        let inner_inode = self.inner_inode.create(name, file_type, mode)?;
+        Ok(MountFSInode::new(inner_inode, self.mount_fs.clone()))
+    }
+
+    fn symlink(&self, name: &str, target: &str) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+        self.ensure_mount_writable()?;
+        let inner_inode = self.inner_inode.symlink(name, target)?;
+        Ok(MountFSInode::new(inner_inode, self.mount_fs.clone()))
+    }
+
+    fn link(&self, name: &str, other: &Arc<dyn IndexNode>) -> Result<(), SyscallErr> {
+        self.ensure_mount_writable()?;
+        self.inner_inode.link(name, other)
+    }
+
+    fn unlink(&self, name: &str) -> Result<(), SyscallErr> {
+        self.ensure_mount_writable()?;
+        // 检查是否为挂载点
+        if let Ok(inode) = self.inner_inode.find(name) {
+            let inode_id = inode.metadata()?.inode_id;
+            if self.mount_fs.mountpoints.lock().contains_key(&inode_id) {
+                return Err(SyscallErr::EBUSY);
+            }
+        }
+        self.inner_inode.unlink(name)
+    }
+
+    fn rmdir(&self, name: &str) -> Result<(), SyscallErr> {
+        self.ensure_mount_writable()?;
+        // 检查是否为挂载点
+        if let Ok(inode) = self.inner_inode.find(name) {
+            let inode_id = inode.metadata()?.inode_id;
+            if self.mount_fs.mountpoints.lock().contains_key(&inode_id) {
+                return Err(SyscallErr::EBUSY);
+            }
+        }
+        self.inner_inode.rmdir(name)
+    }
+
+    fn metadata(&self) -> Result<super::Metadata, SyscallErr> {
+        self.inner_inode.metadata()
+    }
+
+    fn set_metadata(&self, metadata: &super::Metadata) -> Result<(), SyscallErr> {
+        self.ensure_mount_writable()?;
+        self.inner_inode.set_metadata(metadata)
+    }
+
+    fn resize(&self, len: usize) -> Result<(), SyscallErr> {
+        self.ensure_mount_writable()?;
+        self.inner_inode.resize(len)
+    }
+
+    fn truncate(&self, len: usize) -> Result<(), SyscallErr> {
+        self.ensure_mount_writable()?;
+        self.inner_inode.truncate(len)
+    }
+
+    fn fs(&self) -> Arc<dyn FileSystem> {
+        self.mount_fs.clone()
+    }
+
+    fn page_cache(&self) -> Option<Arc<super::super::page_cache::PageCache>> {
+        self.inner_inode.page_cache()
+    }
+
+    fn ioctl(
+        &self,
+        cmd: u32,
+        data: usize,
+        private_data: MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        self.inner_inode.ioctl(cmd, data, private_data)
+    }
+
+    fn poll(&self, private_data: &FilePrivateData) -> Result<usize, SyscallErr> {
+        self.inner_inode.poll(private_data)
+    }
+
+    fn is_stream(&self) -> bool {
+        self.inner_inode.is_stream()
+    }
+
+    fn as_any_ref(&self) -> &dyn core::any::Any {
+        self
+    }
+
+    fn absolute_path(&self) -> Result<String, SyscallErr> {
+        let mut current = self.self_arc();
+        let mut path_parts: Vec<String> = Vec::new();
+
+        loop {
+            if current.is_mountpoint_root() && current.mount_fs.self_mountpoint().is_none() {
+                break;
+            }
+
+            let name = current
+                .inner_inode
+                .get_entry_name(current.metadata()?.inode_id)
+                .unwrap_or_else(|_| alloc::string::String::from("?"));
+            path_parts.push(name);
+
+            if path_parts.len() > 1024 {
+                return Err(SyscallErr::ELOOP);
+            }
+
+            let parent = current.do_parent()?;
+            if Arc::ptr_eq(&parent, &current) {
+                break;
+            }
+            current = parent;
+        }
+
+        path_parts.reverse();
+        let mut absolute_path = String::with_capacity(
+            path_parts.iter().map(|s| s.len()).sum::<usize>() + path_parts.len(),
+        );
+        for part in path_parts {
+            absolute_path.push('/');
+            absolute_path.push_str(&part);
+        }
+        if absolute_path.is_empty() {
+            absolute_path.push('/');
+        }
+        Ok(absolute_path)
+    }
+}
+
+// ── MountFS ─────────────────────────────────────────────────────────────
+
+/// MountFS — 挂载感知的文件系统包装器
+///
+/// 包装一个具体的 `FileSystem`，附加挂载点管理。
+/// 对标 DragonOS `kernel/src/filesystem/vfs/mount.rs` 的 `MountFS`。
+#[derive(Debug)]
+pub struct MountFS {
+    /// 内层文件系统
+    inner_filesystem: Arc<dyn FileSystem>,
+    /// 根 inode
+    root_inner_inode: Option<Arc<dyn IndexNode>>,
+    /// 子挂载点表: parent_inode_id → mounted fs
+    mountpoints: Mutex<BTreeMap<InodeId, Arc<MountFS>>>,
+    /// 自身挂载到父文件系统上的 inode（如果是根则 None）
+    self_mountpoint: Mutex<Option<Arc<MountFSInode>>>,
+    /// 挂载标志
+    mount_flags: Mutex<MountFlags>,
+    /// 挂载源
+    mount_source: Mutex<Option<String>>,
+    /// 指向自身的弱引用
+    self_ref: Mutex<Weak<MountFS>>,
+}
+
+impl MountFS {
+    /// 创建新的 MountFS
+    pub fn new(inner_filesystem: Arc<dyn FileSystem>, mount_flags: MountFlags) -> Arc<Self> {
+        Arc::new_cyclic(|self_ref| MountFS {
+            root_inner_inode: None,
+            inner_filesystem,
+            mountpoints: Mutex::new(BTreeMap::new()),
+            self_mountpoint: Mutex::new(None),
+            mount_flags: Mutex::new(mount_flags),
+            mount_source: Mutex::new(None),
+            self_ref: Mutex::new(self_ref.clone()),
+        })
+    }
+
+    /// 获取挂载点根 inode（穿过子挂载表找最底层）
+    pub fn mountpoint_root_inode(&self) -> Arc<MountFSInode> {
+        let root_inner = self
+            .root_inner_inode
+            .clone()
+            .unwrap_or_else(|| self.inner_filesystem.root_inode());
+
+        let self_arc = self.self_ref.lock().upgrade().unwrap();
+        let root_mount_inode = MountFSInode::new(root_inner, self_arc);
+        MountFSInode::overlaid_inode(root_mount_inode)
+    }
+
+    /// 添加子挂载点
+    pub fn add_mount(&self, inode_id: InodeId, mount_fs: Arc<MountFS>) -> Result<(), SyscallErr> {
+        let mut mountpoints = self.mountpoints.lock();
+        if mountpoints.contains_key(&inode_id) {
+            return Err(SyscallErr::EEXIST);
+        }
+        mountpoints.insert(inode_id, mount_fs);
+        Ok(())
+    }
+
+    /// 移除子挂载点
+    pub fn remove_mount(&self, inode_id: InodeId) -> Option<Arc<MountFS>> {
+        self.mountpoints.lock().remove(&inode_id)
+    }
+
+    /// 卸载当前文件系统
+    pub fn umount(self: &Arc<Self>) -> Result<(), SyscallErr> {
+        // 检查是否还有子挂载点
+        if !self.mountpoints.lock().is_empty() {
+            return Err(SyscallErr::EBUSY);
+        }
+        // 从父文件系统的挂载表中移除
+        if let Some(mountpoint) = self.self_mountpoint.lock().take() {
+            let _ = mountpoint
+                .mount_fs
+                .remove_mount(mountpoint.inner_inode.metadata()?.inode_id);
+        }
+        self.inner_filesystem.on_umount();
+        Ok(())
+    }
+
+    // ── 属性访问 ───────────────────────────────────────────────────
+
+    pub fn inner_filesystem(&self) -> Arc<dyn FileSystem> {
+        self.inner_filesystem.clone()
+    }
+
+    pub fn root_inner_inode(&self) -> Arc<dyn IndexNode> {
+        self.root_inner_inode
+            .clone()
+            .unwrap_or_else(|| self.inner_filesystem.root_inode())
+    }
+
+    pub fn mount_flags(&self) -> MountFlags {
+        *self.mount_flags.lock()
+    }
+
+    pub fn set_mount_flags(&self, flags: MountFlags) {
+        *self.mount_flags.lock() = flags;
+    }
+
+    pub fn self_mountpoint(&self) -> Option<Arc<MountFSInode>> {
+        self.self_mountpoint.lock().clone()
+    }
+
+    pub fn set_self_mountpoint(&self, mp: Option<Arc<MountFSInode>>) {
+        *self.self_mountpoint.lock() = mp;
+    }
+
+    pub fn mount_source(&self) -> Option<String> {
+        self.mount_source.lock().clone()
+    }
+
+    pub fn set_mount_source(&self, source: Option<String>) {
+        *self.mount_source.lock() = source;
+    }
+}
+
+impl FileSystem for MountFS {
+    fn root_inode(&self) -> Arc<dyn IndexNode> {
+        self.mountpoint_root_inode()
+    }
+
+    fn info(&self) -> super::file_system::FsInfo {
+        self.inner_filesystem.info()
+    }
+
+    fn name(&self) -> &str {
+        self.inner_filesystem.name()
+    }
+
+    fn super_block(&self) -> super::file_system::SuperBlock {
+        let mut sb = self.inner_filesystem.super_block();
+        sb.flags = self.mount_flags().bits() as u64;
+        sb
+    }
+
+    fn support_readahead(&self) -> bool {
+        self.inner_filesystem.support_readahead()
+    }
+
+    fn as_any_ref(&self) -> &dyn core::any::Any {
+        self
+    }
+}
+
+// ── MountList ────────────────────────────────────────────────────────────
+
+/// 全局挂载列表
+///
+/// 管理所有挂载关系（路径 → MountFS），用于路径到挂载点的解析。
+#[derive(Debug)]
+pub struct MountList {
+    /// 挂载路径 → (挂载记录列表，支持 stackable mounts)
+    mounts: Mutex<BTreeMap<Arc<MountPath>, Vec<MountRecord>>>,
+}
+
+/// 单条挂载记录
+#[derive(Debug, Clone)]
+struct MountRecord {
+    /// 挂载的文件系统
+    fs: Arc<MountFS>,
+    /// 挂载目标的 inode ID
+    ino: Option<InodeId>,
+}
+
+impl MountList {
+    /// 创建空挂载列表
+    pub const fn new() -> Self {
+        MountList {
+            mounts: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// 添加挂载点
+    pub fn insert<T: Into<MountPath>>(&self, path: T, fs: Arc<MountFS>, ino: Option<InodeId>) {
+        let mut inner = self.mounts.lock();
+        let path: Arc<MountPath> = Arc::new(path.into());
+        let entry = inner.entry(path).or_default();
+        entry.push(MountRecord { fs, ino });
+    }
+
+    /// 按路径查找挂载点
+    /// 返回 `(MountPath, 剩余路径, 挂载的 MountFS)`
+    pub fn lookup<T: AsRef<str>>(&self, path: T) -> Option<(Arc<MountPath>, String, Arc<MountFS>)> {
+        let inner = self.mounts.lock();
+        for (key, stack) in inner.iter().rev() {
+            let strkey: &str = &key.0;
+            if let Some(rest) = path.as_ref().strip_prefix(strkey) {
+                if rest.is_empty() || rest.starts_with('/') {
+                    if let Some(rec) = stack.last() {
+                        let rest_trimmed = rest.trim_start_matches('/');
+                        return Some((key.clone(), rest_trimmed.to_string(), rec.fs.clone()));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// 按路径移除挂载
+    pub fn remove<T: Into<MountPath>>(&self, path: T) -> Option<Arc<MountFS>> {
+        let mut inner = self.mounts.lock();
+        let path: MountPath = path.into();
+        if let Some(stack) = inner.get_mut(&path) {
+            if let Some(rec) = stack.pop() {
+                if stack.is_empty() {
+                    inner.remove(&path);
+                }
+                return Some(rec.fs);
+            }
+        }
+        None
+    }
+}

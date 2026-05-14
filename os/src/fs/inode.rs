@@ -2,15 +2,13 @@ use crate::fs::*;
 use core::any::Any;
 
 use crate::fs::fat32::layout::FATDiskInodeType;
-use crate::fs::vfs::VFS;
+use crate::fs::directory_tree::{VFS, VFSDirEnt};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use downcast_rs::*;
 use fat32::fat_inode::FileContent;
 use fat32::layout::FATShortDirEnt;
 use spin::{Mutex, MutexGuard, RwLockReadGuard, RwLockWriteGuard};
-#[allow(unused)]
-use vfs::VFSDirEnt;
 
 pub struct InodeLock;
 

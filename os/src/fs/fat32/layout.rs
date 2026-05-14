@@ -1,9 +1,9 @@
 #![allow(unused)]
 use super::DiskInodeType;
-use crate::fs::vfs::VFSDirEnt;
+use crate::fs::directory_tree::VFSDirEnt;
+use crate::lang_items::Bytes;
 #[cfg(feature = "loongarch64")]
 use crate::{copy_from_name1, copy_to_name1};
-use crate::{lang_items::Bytes};
 use alloc::{
     format,
     string::{String, ToString},

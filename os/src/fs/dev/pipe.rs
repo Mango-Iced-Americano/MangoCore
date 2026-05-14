@@ -10,13 +10,144 @@ use crate::task::WaitQueue;
 use crate::{fs::file_trait::File, mm::UserBuffer};
 use alloc::boxed::Box;
 use alloc::sync::{Arc, Weak};
+use core::any::Any;
 use core::ptr::copy_nonoverlapping;
 use spin::Mutex;
+
+use crate::fs::vfs::{
+    FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata,
+};
+use crate::fs::vfs::file_system::FileSystem as NewFileSystem;
+use crate::fs::dev::DEV_FS;
+use crate::timer::TimeSpec;
+use crate::utils::error::SyscallErr;
 
 pub struct Pipe {
     readable: bool,
     writable: bool,
     buffer: Arc<Mutex<PipeRingBuffer>>,
+}
+
+impl core::fmt::Debug for Pipe {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Pipe")
+            .field("readable", &self.readable)
+            .field("writable", &self.writable)
+            .finish()
+    }
+}
+
+impl IndexNode for Pipe {
+    fn read_at(
+        &self,
+        _offset: usize,
+        _len: usize,
+        buf: &mut [u8],
+        _data: spin::MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        if !self.readable {
+            return Err(SyscallErr::EBADF);
+        }
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let mut ring = self.buffer.lock();
+        if ring.status == RingBufferStatus::EMPTY {
+            if ring.all_write_ends_closed() {
+                return Ok(0); // EOF
+            }
+            return Err(SyscallErr::EAGAIN);
+        }
+        let read_bytes = ring.buffer_read(buf);
+        ring.status = if ring.head == ring.tail {
+            RingBufferStatus::EMPTY
+        } else {
+            RingBufferStatus::NORMAL
+        };
+        ring.write_wait.wake_at_most(1);
+        Ok(read_bytes)
+    }
+
+    fn write_at(
+        &self,
+        _offset: usize,
+        _len: usize,
+        buf: &[u8],
+        _data: spin::MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        if !self.writable {
+            return Err(SyscallErr::EBADF);
+        }
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let mut ring = self.buffer.lock();
+        if ring.status == RingBufferStatus::FULL {
+            if ring.all_read_ends_closed() {
+                return Err(SyscallErr::EPIPE); // Broken pipe
+            }
+            return Err(SyscallErr::EAGAIN);
+        }
+        let write_bytes = ring.buffer_write(buf);
+        ring.status = if ring.head == ring.tail {
+            RingBufferStatus::FULL
+        } else {
+            RingBufferStatus::NORMAL
+        };
+        ring.read_wait.wake_at_most(1);
+        Ok(write_bytes)
+    }
+
+    fn metadata(&self) -> Result<Metadata, SyscallErr> {
+        Ok(Metadata {
+            dev_id: 0,
+            inode_id: 0,
+            size: 0,
+            blk_size: 0,
+            blocks: 0,
+            atime: TimeSpec::new(),
+            mtime: TimeSpec::new(),
+            ctime: TimeSpec::new(),
+            file_type: FileType::Pipe,
+            mode: InodeMode::S_IFIFO | InodeMode::from_bits_truncate(0o666),
+            nlinks: 1,
+            uid: 0,
+            gid: 0,
+            flags: InodeFlags::empty(),
+            raw_dev: 0,
+        })
+    }
+
+    fn is_stream(&self) -> bool {
+        true
+    }
+
+    fn poll(&self, _private_data: &FilePrivateData) -> Result<usize, SyscallErr> {
+        let ring = self.buffer.lock();
+        let mut revents: usize = 0;
+        if self.readable {
+            if ring.status != RingBufferStatus::EMPTY || ring.all_write_ends_closed() {
+                revents |= 1; // POLLIN
+            }
+        }
+        if self.writable {
+            if ring.status != RingBufferStatus::FULL || ring.all_read_ends_closed() {
+                revents |= 0x4; // POLLOUT
+            }
+        }
+        if ring.all_write_ends_closed() && ring.all_read_ends_closed() {
+            revents |= 0x10; // POLLHUP
+        }
+        Ok(revents)
+    }
+
+    fn fs(&self) -> Arc<dyn NewFileSystem> {
+        DEV_FS.clone()
+    }
+
+    fn as_any_ref(&self) -> &dyn Any {
+        self
+    }
 }
 
 impl Drop for Pipe {

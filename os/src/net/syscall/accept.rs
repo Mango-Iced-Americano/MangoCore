@@ -55,7 +55,7 @@ pub fn sys_accept4(sockfd: u32, addr: usize, addrlen: usize, flags: u32) -> isiz
     let new_fd = ret as usize;
 
     let task = current_task().unwrap();
-    if let Ok(fd) = task.files.lock().get_refmut(new_fd) {
+    if let Ok(mut fd) = task.files.lock().get_refmut(new_fd) {
         if flags & SOCK_CLOEXEC != 0 {
             fd.set_cloexec(true);
         }

@@ -26,6 +26,7 @@ sdcard-rv.img
 WORK_LOG.md
 EXPERIENCE.md
 .aider*
+.claude
 
 # Python cache
 __pycache__/

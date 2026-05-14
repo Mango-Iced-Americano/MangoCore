@@ -5,7 +5,7 @@ use core::panic;
 use crate::fs::directory_tree::{FILE_SYSTEM, GLOBAL_BLOCK_SIZE};
 use crate::fs::inode::{InodeLock, InodeTime};
 use crate::fs::DiskInodeType;
-use crate::fs::{inode::InodeTrait, vfs::VFS};
+use crate::fs::{inode::InodeTrait, directory_tree::VFS};
 use alloc::string::String;
 use alloc::vec;
 use alloc::{sync::Arc, vec::Vec};

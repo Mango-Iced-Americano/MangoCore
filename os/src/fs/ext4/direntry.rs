@@ -772,6 +772,86 @@ impl Ext4FileSystem {
         false
     }
 
+    /// 从子 inode 反查父 inode 号和目录项名称。
+    /// 用于新 VFS（无 DirectoryTreeNode）场景。
+    pub fn lookup_parent_and_name(
+        &self,
+        child_ino: u32,
+        is_dir: bool,
+    ) -> Result<(u32, String), isize> {
+        let child_ref = self.get_inode_ref(child_ino);
+
+        let parent_ino = if is_dir {
+            self.dir_find_dotdot(&child_ref)?
+        } else {
+            return Err(Errno::ENOENT as isize);
+        };
+
+        // 在父目录中查找指向 child_ino 的目录项
+        let parent_ref = self.get_inode_ref(parent_ino);
+        let mut iblock: u64 = 0;
+        let inode_size: u64 = parent_ref.inode.size();
+        let total_blocks: u64 = inode_size / self.block_size as u64;
+
+        while iblock < total_blocks {
+            if let Ok(fblock) = self.get_pblock_idx(&parent_ref, iblock as u32) {
+                let ext4block = Block::load_offset(
+                    self.block_device.clone(),
+                    fblock as usize * self.block_size,
+                );
+                let mut offset = 0;
+                while offset < self.block_size - core::mem::size_of::<Ext4DirEntryTail>() {
+                    let de = Ext4DirEntry::try_from(&ext4block.data[offset..]).unwrap();
+                    let entry_len = de.entry_len() as usize;
+                    if entry_len < 8 {
+                        break;
+                    }
+                    offset += entry_len;
+                    if de.inode == child_ino {
+                        return Ok((parent_ino, de.get_name()));
+                    }
+                }
+            }
+            iblock += 1;
+        }
+
+        Err(Errno::ENOENT as isize)
+    }
+
+    /// 从目录的 .. 条目读取父 inode 号
+    fn dir_find_dotdot(&self, dir_ref: &Ext4InodeRef) -> Result<u32, isize> {
+        let mut iblock: u64 = 0;
+        let inode_size: u64 = dir_ref.inode.size();
+        let total_blocks: u64 = inode_size / self.block_size as u64;
+
+        while iblock < total_blocks {
+            if let Ok(fblock) = self.get_pblock_idx(dir_ref, iblock as u32) {
+                let ext4block = Block::load_offset(
+                    self.block_device.clone(),
+                    fblock as usize * self.block_size,
+                );
+                let mut offset = 0;
+                while offset < self.block_size - core::mem::size_of::<Ext4DirEntryTail>() {
+                    let de = Ext4DirEntry::try_from(&ext4block.data[offset..]).unwrap();
+                    let entry_len = de.entry_len() as usize;
+                    if entry_len < 8 {
+                        break;
+                    }
+                    offset += entry_len;
+                    if de.inode == 0 {
+                        continue;
+                    }
+                    if de.get_name() == ".." {
+                        return Ok(de.inode);
+                    }
+                }
+            }
+            iblock += 1;
+        }
+
+        Err(Errno::ENOENT as isize)
+    }
+
     pub fn dir_remove(&self, parent: u32, path: &str) -> Result<usize, isize> {
         let mut search_result = Ext4DirSearchResult::new(Ext4DirEntry::default());
 

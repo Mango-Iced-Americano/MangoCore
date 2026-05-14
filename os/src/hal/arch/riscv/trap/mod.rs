@@ -142,12 +142,10 @@ pub fn trap_handler() -> ! {
             NET_INTERFACE.try_poll();
             unsafe {
                 TIMER_INTERRUPT += 1;
-                // if TIMER_INTERRUPT % 100_000 == 0 {
-                let f = ROOT
-                    .open("/proc/interrupts", OpenFlags::O_CREAT, false)
-                    .unwrap();
-                f.write(None, format!("5: {}", TIMER_INTERRUPT).as_bytes());
-                // }
+                // 中断上下文中 open 可能失败，不能 unwrap
+                if let Ok(f) = ROOT.open("/proc/interrupts", OpenFlags::O_CREAT, false) {
+                    f.write(None, format!("5: {}", TIMER_INTERRUPT).as_bytes());
+                }
             }
             set_next_trigger();
             suspend_current_and_run_next();

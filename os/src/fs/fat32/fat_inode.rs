@@ -7,9 +7,15 @@ use crate::fs::fat32::{BlockCacheManager, Cache, PageCache, PageCacheManager};
 use crate::fs::inode::InodeLock;
 use crate::fs::inode::InodeTime;
 use crate::fs::inode::InodeTrait;
-use crate::fs::vfs::VFSFileContent;
-use crate::fs::vfs::VFS;
-use alloc::string::String;
+use crate::fs::page_cache::{FatPageCacheBackend, PageCache as NewPageCache, PageCacheBackend};
+use crate::fs::directory_tree::{VFSFileContent, VFS};
+use crate::fs::vfs::{
+    FilePrivateData, FileType, IndexNode, InodeFlags, InodeId, InodeMode, Metadata,
+};
+use crate::fs::vfs::file_system::FileSystem as NewFileSystem;
+use crate::utils::error::SyscallErr;
+use crate::timer::TimeSpec;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
@@ -23,9 +29,9 @@ use spin::*;
 pub struct FileContent {
     /// 对于FAT32，size 需要从FAT计算
     /// 所以需要遍历FAT32来获取size
-    size: u32,
+    pub(crate) size: u32,
     /// 簇列表
-    clus_list: Vec<u32>,
+    pub(crate) clus_list: Vec<u32>,
     /// 如果该文件是个目录，那么
     /// hint 会记录最后一个目录项的位置（第一个字节为0x00）
     hint: u32,
@@ -59,9 +65,14 @@ pub struct FatInode {
     /// inode 锁: for normal operation
     inode_lock: RwLock<InodeLock>,
     /// 文件内容
-    file_content: RwLock<FileContent>,
+    pub(crate) file_content: RwLock<FileContent>,
     /// 与该Inode对应的文件缓存管理器
     file_cache_mgr: PageCacheManager,
+    /// 新页面缓存（替代旧 file_cache_mgr，逐步迁移）
+    /// 用 Option 做懒初始化，首次使用前需要调用 init_new_page_cache
+    new_page_cache: Mutex<Option<Arc<NewPageCache>>>,
+    /// 指向自身的弱引用（用于 FatPageCacheBackend）
+    self_weak: Mutex<Option<alloc::sync::Weak<FatInode>>>,
     /// 文件类型
     file_type: Mutex<DiskInodeType>,
     /// 父目录的inode
@@ -74,9 +85,80 @@ pub struct FatInode {
     deleted: Mutex<bool>,
 }
 
+impl core::fmt::Debug for FatInode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let inode_num = self
+            .get_inode_num_lock(&self.file_content.read())
+            .unwrap_or(0);
+        f.debug_struct("FatInode")
+            .field("inode_num", &inode_num)
+            .field("file_type", &self.get_file_type())
+            .field("size", &self.get_file_size())
+            .finish()
+    }
+}
+
+/// 将 VFS FileType 转换为 FAT32 DiskInodeType
+fn vfs_type_to_fat_disk_type(ft: FileType) -> DiskInodeType {
+    match ft {
+        FileType::File => DiskInodeType::File,
+        FileType::Dir => DiskInodeType::Directory,
+        FileType::SymLink => DiskInodeType::Link,
+        FileType::CharDevice => DiskInodeType::Character,
+        FileType::BlockDevice => DiskInodeType::Block,
+        FileType::Socket => DiskInodeType::Socket,
+        FileType::Pipe => DiskInodeType::FIFO,
+        _ => DiskInodeType::File,
+    }
+}
+
+/// 将 FAT32 DiskInodeType 转换为 VFS FileType
+fn fat_disk_type_to_vfs_type(dt: DiskInodeType) -> FileType {
+    match dt {
+        DiskInodeType::File => FileType::File,
+        DiskInodeType::Directory => FileType::Dir,
+        DiskInodeType::Link => FileType::SymLink,
+        DiskInodeType::Character => FileType::CharDevice,
+        DiskInodeType::Block => FileType::BlockDevice,
+        DiskInodeType::Socket => FileType::Socket,
+        DiskInodeType::FIFO => FileType::Pipe,
+    }
+}
+
+impl FatInode {
+    /// 初始化 self_weak（在 Arc 构造完成后调用）
+    pub fn init_self_weak(self: &Arc<Self>) {
+        *self.self_weak.lock() = Some(Arc::downgrade(self));
+    }
+
+    /// 获取或初始化新 PageCache（懒初始化，线程安全）
+    fn get_new_page_cache(&self) -> Arc<NewPageCache> {
+        let mut cache_opt = self.new_page_cache.lock();
+        if let Some(ref pc) = *cache_opt {
+            return pc.clone();
+        }
+        let backend = Arc::new(FatPageCacheBackend::new(
+            self.fs.clone(),
+            self.self_weak
+                .lock()
+                .as_ref()
+                .expect("FatInode::init_self_weak must be called before get_new_page_cache"),
+        ));
+        let pc = NewPageCache::new();
+        pc.set_backend(backend);
+        *cache_opt = Some(pc.clone());
+        pc
+    }
+}
+
 impl Drop for FatInode {
-    /// 在删除该inode之前，文件信息需要写回父目录
+    /// 在删除该inode之前，写回脏页并更新父目录
     fn drop(&mut self) {
+        // 写回新 PageCache 的所有脏页（简单且正确：直接写回全部）
+        if let Some(ref pc) = *self.new_page_cache.lock() {
+            let _ = pc.writeback_all();
+        }
+
         if *self.deleted.lock() {
             // Clear size
             let mut lock = self.file_content.write();
@@ -148,12 +230,16 @@ impl FatInode {
             inode_lock: RwLock::new(InodeLock {}),
             file_content,
             file_cache_mgr,
+            new_page_cache: Mutex::new(None),
+            self_weak: Mutex::new(None),
             file_type: Mutex::new(file_type),
             parent_dir,
             fs,
             time: Mutex::new(time),
             deleted: Mutex::new(false),
         });
+        // Arc 构造完成后，初始化 self_weak
+        inode.init_self_weak();
 
         // 初始化 hint
         if file_type == DiskInodeType::Directory {
@@ -189,6 +275,12 @@ impl FatInode {
         let clus_sz = self.fs.clus_size();
         div_ceil!(size, clus_sz)
         //(size - 1 + clus_sz) / clus_sz
+    }
+
+    /// 用于新 PageCache 后端：通过闭包访问簇列表（持读锁期间）
+    pub(crate) fn with_clus_list<R>(&self, f: impl FnOnce(&[u32]) -> R) -> R {
+        let lock = self.file_content.read();
+        f(&lock.clus_list)
     }
 
     /// 获取由给定缓存索引表示的块ID(实际存入起始块号)列表
@@ -966,47 +1058,17 @@ impl InodeTrait for FatInode {
         offset: usize,
         buf: &mut [u8],
     ) -> usize {
-        let mut start = offset;
         let size = self.file_content.read().size as usize;
         let end = (offset + buf.len()).min(size);
-        if start >= end {
+        if offset >= end {
             return 0;
         }
-        let mut start_cache = start / PageCacheManager::CACHE_SZ;
-        let mut read_size = 0;
-        loop {
-            // calculate end of current block
-            // 计算当前块的结束位置
-            let mut end_current_block =
-                (start / PageCacheManager::CACHE_SZ + 1) * PageCacheManager::CACHE_SZ;
-            end_current_block = end_current_block.min(end);
-            // 读取并更新读取长度
-            let lock = self.file_content.read();
-            let block_read_size = end_current_block - start;
-            self.file_cache_mgr
-                .get_cache(
-                    start_cache,
-                    || -> Vec<usize> { self.get_neighboring_sec(&lock.clus_list, start_cache) },
-                    &self.fs.block_device,
-                )
-                .lock()
-                // I know hardcoding 4096 in is bad, but I can't get around Rust's syntax checking...
-                .read(0, |data_block: &[u8; 4096]| {
-                    let dst = &mut buf[read_size..read_size + block_read_size];
-                    let src = &data_block[start % PageCacheManager::CACHE_SZ
-                        ..start % PageCacheManager::CACHE_SZ + block_read_size];
-                    dst.copy_from_slice(src);
-                });
-            drop(lock);
-            read_size += block_read_size;
-            // move to next block
-            if end_current_block == end {
-                break;
-            }
-            start_cache += 1;
-            start = end_current_block;
+        let read_len = end - offset;
+        let pc = self.get_new_page_cache();
+        match pc.read(offset, &mut buf[..read_len]) {
+            Ok(n) => n,
+            Err(_) => 0,
         }
-        read_size
     }
     /// do same thing but params different
     fn read_at_block_cache_wlock(
@@ -1015,46 +1077,17 @@ impl InodeTrait for FatInode {
         offset: usize,
         buf: &mut [u8],
     ) -> usize {
-        let mut start = offset;
         let size = self.file_content.read().size as usize;
         let end = (offset + buf.len()).min(size);
-        if start >= end {
+        if offset >= end {
             return 0;
         }
-        let mut start_cache = start / PageCacheManager::CACHE_SZ;
-        let mut read_size = 0;
-        loop {
-            // calculate end of current block
-            let mut end_current_block =
-                (start / PageCacheManager::CACHE_SZ + 1) * PageCacheManager::CACHE_SZ;
-            end_current_block = end_current_block.min(end);
-            // read and update read size
-            let lock = self.file_content.read();
-            let block_read_size = end_current_block - start;
-            self.file_cache_mgr
-                .get_cache(
-                    start_cache,
-                    || -> Vec<usize> { self.get_neighboring_sec(&lock.clus_list, start_cache) },
-                    &self.fs.block_device,
-                )
-                .lock()
-                // I know hardcoding 4096 in is bad, but I can't get around Rust's syntax checking...
-                .read(0, |data_block: &[u8; 4096]| {
-                    let dst = &mut buf[read_size..read_size + block_read_size];
-                    let src = &data_block[start % PageCacheManager::CACHE_SZ
-                        ..start % PageCacheManager::CACHE_SZ + block_read_size];
-                    dst.copy_from_slice(src);
-                });
-            drop(lock);
-            read_size += block_read_size;
-            // move to next block
-            if end_current_block == end {
-                break;
-            }
-            start_cache += 1;
-            start = end_current_block;
+        let read_len = end - offset;
+        let pc = self.get_new_page_cache();
+        match pc.read(offset, &mut buf[..read_len]) {
+            Ok(n) => n,
+            Err(_) => 0,
         }
-        read_size
     }
     /// Read file content into buffer.
     /// It will read from `offset` until the end of the file or buffer can't read more
@@ -1088,51 +1121,21 @@ impl InodeTrait for FatInode {
         offset: usize,
         buf: &[u8],
     ) -> usize {
-        let mut start = offset;
         let old_size = self.get_file_size() as usize;
         let diff_len = buf.len() as isize + offset as isize - old_size as isize;
         if diff_len > 0 as isize {
-            // allocate as many clusters as possible.
             self.modify_size_lock(inode_lock, diff_len, false);
         }
-        let end = (offset + buf.len()).min(self.get_file_size() as usize);
-
-        debug_assert!(start <= end);
-
-        let mut start_cache = start / PageCacheManager::CACHE_SZ;
-        let mut write_size = 0;
-        loop {
-            // calculate end of current block
-            let mut end_current_block =
-                (start / PageCacheManager::CACHE_SZ + 1) * PageCacheManager::CACHE_SZ;
-            end_current_block = end_current_block.min(end);
-            // write and update write size
-            let lock = self.file_content.read();
-            let block_write_size = end_current_block - start;
-            self.file_cache_mgr
-                .get_cache(
-                    start_cache,
-                    || -> Vec<usize> { self.get_neighboring_sec(&lock.clus_list, start_cache) },
-                    &self.fs.block_device,
-                )
-                .lock()
-                // I know hardcoding 4096 in is bad, but I can't get around Rust's syntax checking...
-                .modify(0, |data_block: &mut [u8; 4096]| {
-                    let src = &buf[write_size..write_size + block_write_size];
-                    let dst = &mut data_block[start % PageCacheManager::CACHE_SZ
-                        ..start % PageCacheManager::CACHE_SZ + block_write_size];
-                    dst.copy_from_slice(src);
-                });
-            drop(lock);
-            write_size += block_write_size;
-            // move to next block
-            if end_current_block == end {
-                break;
-            }
-            start_cache += 1;
-            start = end_current_block;
+        let write_end = (offset + buf.len()).min(self.get_file_size() as usize);
+        if offset >= write_end {
+            return 0;
         }
-        write_size
+        let write_len = write_end - offset;
+        let pc = self.get_new_page_cache();
+        match pc.write(offset, &buf[..write_len]) {
+            Ok(n) => n,
+            Err(_) => 0,
+        }
     }
 
     /// Write buffer into file content.
@@ -1669,5 +1672,258 @@ impl InodeTrait for FatInode {
 
     fn root_inode(efs: &Arc<dyn VFS>) -> Arc<Self> {
         FatInode::root_inode(efs)
+    }
+}
+
+// ── 新 VFS 辅助方法 ──────────────────────────────────────────────────────
+
+/// 在指定父目录下创建新文件/目录（内部辅助函数）
+fn fat_do_create(
+    parent: &Arc<FatInode>,
+    name: &str,
+    file_type: FileType,
+) -> Result<Arc<FatInode>, ()> {
+    let disk_type = vfs_type_to_fat_disk_type(file_type);
+
+    if !parent.is_dir() || name.len() >= 256 {
+        return Err(());
+    }
+
+    // 先获取 inode 锁（遵循锁顺序：inode_lock → FAT lock）
+    let parent_inode_lock = parent.write();
+
+    // 为目录分配首簇（inode_lock 已持有，FAT 锁在 fat.alloc 内部获取）
+    let fst_clus = if disk_type == DiskInodeType::Directory {
+        let clus = parent.fs.fat.alloc(&parent.fs.block_device, 1, None);
+        if clus.is_empty() {
+            return Err(());
+        }
+        clus[0]
+    } else {
+        0
+    };
+
+    let (short_ent, long_ents) = FatInode::gen_dir_ent(
+        parent,
+        &parent_inode_lock,
+        &name.to_string(),
+        fst_clus,
+        disk_type,
+    );
+
+    let short_ent_offset =
+        parent.create_dir_ent(&parent_inode_lock, short_ent, long_ents)?;
+
+    let current_file = FatInode::from_fat_ent(parent, &short_ent, short_ent_offset);
+
+    if disk_type == DiskInodeType::Directory {
+        current_file.file_content.write().hint =
+            2 * core::mem::size_of::<FATDirEnt>() as u32;
+        FatInode::fill_empty_dir(parent, &current_file, fst_clus);
+    }
+
+    log::debug!(
+        "[fat_do_create] parent_inode: {:?}, name: {:?}, file_type: {:?}",
+        parent.get_inode_num_lock(&parent.file_content.read()),
+        name,
+        disk_type
+    );
+
+    Ok(current_file)
+}
+
+// ── IndexNode trait 实现 ─────────────────────────────────────────────────
+
+impl IndexNode for FatInode {
+    fn read_at(
+        &self,
+        offset: usize,
+        len: usize,
+        buf: &mut [u8],
+        _data: MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        let file_size = self.get_file_size() as usize;
+        let end = (offset + len).min(file_size);
+        if offset >= end {
+            return Ok(0);
+        }
+        let read_len = end - offset;
+        let pc = self.get_new_page_cache();
+        pc.read(offset, &mut buf[..read_len]).map_err(|_| SyscallErr::EIO)
+    }
+
+    fn write_at(
+        &self,
+        offset: usize,
+        len: usize,
+        buf: &[u8],
+        _data: MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        let write_len = len.min(buf.len());
+        if write_len == 0 {
+            return Ok(0);
+        }
+        let old_size = self.get_file_size() as usize;
+        let diff = write_len as isize + offset as isize - old_size as isize;
+        if diff > 0 {
+            let inode_lock = self.write();
+            self.modify_size_lock(&inode_lock, diff, false);
+        }
+        let write_end = (offset + write_len).min(self.get_file_size() as usize);
+        if offset >= write_end {
+            return Ok(0);
+        }
+        let actual_len = write_end - offset;
+        let pc = self.get_new_page_cache();
+        pc.write(offset, &buf[..actual_len]).map_err(|_| SyscallErr::EIO)
+    }
+
+    fn metadata(&self) -> Result<Metadata, SyscallErr> {
+        let file_type = self.get_file_type();
+        let ft = fat_disk_type_to_vfs_type(file_type);
+        let time = self.time.lock();
+        Ok(Metadata {
+            dev_id: 0,
+            inode_id: self
+                .get_inode_num_lock(&self.file_content.read())
+                .unwrap_or(0) as InodeId,
+            size: self.get_file_size() as i64,
+            blk_size: self.fs.byts_per_sec as usize,
+            blocks: self.get_file_size() as usize / self.fs.byts_per_sec as usize,
+            atime: TimeSpec {
+                tv_sec: *time.access_time() as usize,
+                tv_nsec: 0,
+            },
+            mtime: TimeSpec {
+                tv_sec: *time.modify_time() as usize,
+                tv_nsec: 0,
+            },
+            ctime: TimeSpec {
+                tv_sec: *time.create_time() as usize,
+                tv_nsec: 0,
+            },
+            file_type: ft,
+            mode: InodeMode::S_IRWXUGO,
+            nlinks: 1,
+            uid: 0,
+            gid: 0,
+            flags: InodeFlags::empty(),
+            raw_dev: 0,
+        })
+    }
+
+    fn find(&self, name: &str) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+        if !self.is_dir() {
+            return Err(SyscallErr::ENOTDIR);
+        }
+        let self_arc = self
+            .self_weak
+            .lock()
+            .as_ref()
+            .and_then(|w| w.upgrade())
+            .ok_or(SyscallErr::EIO)?;
+        let inode_lock = self_arc.write();
+        match self.find_local_lock(&inode_lock, name.to_string()) {
+            Ok(Some((_, short_ent, offset))) => {
+                let child = FatInode::from_fat_ent(&self_arc, &short_ent, offset);
+                Ok(child)
+            }
+            _ => Err(SyscallErr::ENOENT),
+        }
+    }
+
+    fn list(&self) -> Result<alloc::vec::Vec<String>, SyscallErr> {
+        if !self.is_dir() {
+            return Err(SyscallErr::ENOTDIR);
+        }
+        let inode_lock = self.write();
+        self.ls_lock(&inode_lock)
+            .map(|entries| entries.into_iter().map(|(name, _)| name).collect())
+            .map_err(|_| SyscallErr::EIO)
+    }
+
+    fn create(
+        &self,
+        name: &str,
+        file_type: FileType,
+        _mode: InodeMode,
+    ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+        let self_arc = self
+            .self_weak
+            .lock()
+            .as_ref()
+            .and_then(|w| w.upgrade())
+            .ok_or(SyscallErr::EIO)?;
+        fat_do_create(&self_arc, name, file_type)
+            .map(|child| child as Arc<dyn IndexNode>)
+            .map_err(|_| SyscallErr::EIO)
+    }
+
+    fn unlink(&self, name: &str) -> Result<(), SyscallErr> {
+        let child = self.find(name)?;
+        let child_fat = child
+            .as_any_ref()
+            .downcast_ref::<FatInode>()
+            .ok_or(SyscallErr::EIO)?;
+        let child_arc = child_fat
+            .self_weak
+            .lock()
+            .as_ref()
+            .and_then(|w| w.upgrade())
+            .ok_or(SyscallErr::EIO)?;
+        let inode_lock = child_arc.write();
+        child_arc
+            .unlink_lock(&inode_lock, true)
+            .map_err(|_| SyscallErr::EIO)
+    }
+
+    fn rmdir(&self, name: &str) -> Result<(), SyscallErr> {
+        let child = self.find(name)?;
+        let child_fat = child
+            .as_any_ref()
+            .downcast_ref::<FatInode>()
+            .ok_or(SyscallErr::EIO)?;
+        let md = child.metadata()?;
+        if md.file_type != FileType::Dir {
+            return Err(SyscallErr::ENOTDIR);
+        }
+        let child_arc = child_fat
+            .self_weak
+            .lock()
+            .as_ref()
+            .and_then(|w| w.upgrade())
+            .ok_or(SyscallErr::EIO)?;
+        let inode_lock = child_arc.write();
+        if !child_arc.is_empty_dir_lock(&inode_lock) {
+            return Err(SyscallErr::ENOTEMPTY);
+        }
+        child_arc
+            .unlink_lock(&inode_lock, true)
+            .map_err(|_| SyscallErr::EIO)
+    }
+
+    fn resize(&self, len: usize) -> Result<(), SyscallErr> {
+        let old_size = self.get_file_size() as usize;
+        if len == old_size {
+            return Ok(());
+        }
+        let diff = len as isize - old_size as isize;
+        let inode_lock = self.write();
+        self.modify_size_lock(&inode_lock, diff, false);
+        // 截断新 PageCache 超出新大小的页面
+        if len < old_size {
+            if let Some(ref pc) = *self.new_page_cache.lock() {
+                let _ = pc.truncate(len);
+            }
+        }
+        Ok(())
+    }
+
+    fn fs(&self) -> Arc<dyn NewFileSystem> {
+        self.fs.clone()
+    }
+
+    fn as_any_ref(&self) -> &dyn Any {
+        self
     }
 }

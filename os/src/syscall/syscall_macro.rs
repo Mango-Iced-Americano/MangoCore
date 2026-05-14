@@ -14,10 +14,11 @@ macro_rules! get_socket {
                 fd
             }
         };
-        // downcast File → SocketFile → 取 .inner 拿到 Arc<dyn Socket>
-        match fd_ref.file.clone().downcast_arc::<crate::net::SocketFile>() {
-            Ok(socket_file) => socket_file.inner.clone(),
-            Err(_) => return crate::syscall::errno::ENOTSOCK,
+        // downcast IndexNode → SocketFile → 取 .inner 拿到 Arc<dyn Socket>
+        let any_ref = fd_ref.file.as_any_ref();
+        match any_ref.downcast_ref::<crate::net::SocketFile>() {
+            Some(socket_file) => socket_file.inner.clone(),
+            None => return crate::syscall::errno::ENOTSOCK,
         }
     }};
 }

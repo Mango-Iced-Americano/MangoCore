@@ -11,10 +11,19 @@ use crate::syscall::errno::*;
 use crate::task::signal::Signals;
 
 use alloc::sync::Arc;
+use core::any::Any;
 use lazy_static::lazy_static;
 use log::{info, warn};
 use num_enum::FromPrimitive;
 use spin::Mutex;
+
+use crate::fs::vfs::{
+    FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata,
+};
+use crate::fs::vfs::file_system::FileSystem as NewFileSystem;
+use crate::fs::dev::DEV_FS;
+use crate::timer::TimeSpec;
+use crate::utils::error::SyscallErr;
 
 lazy_static! {
     pub static ref TTY: Arc<Teletype> = Arc::new(Teletype::default());
@@ -61,6 +70,12 @@ impl Default for TeletypeInner {
 #[derive(Default)]
 pub struct Teletype {
     inner: Mutex<TeletypeInner>,
+}
+
+impl core::fmt::Debug for Teletype {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Teletype").finish()
+    }
 }
 
 impl Teletype {
@@ -126,6 +141,177 @@ impl Teletype {
     /// Read foreground_pgid for debugging.
     pub fn foreground_pgid() -> u32 {
         TTY.inner.lock().foreground_pgid
+    }
+}
+
+impl IndexNode for Teletype {
+    fn read_at(
+        &self,
+        _offset: usize,
+        _len: usize,
+        buf: &mut [u8],
+        _data: spin::MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let mut inner = self.inner.lock();
+        // 尝试从 stash 或 console 读取字符
+        if inner.last_char == 255 {
+            inner.last_char =
+                crate::trace::pop_stashed().unwrap_or_else(|| console_getchar() as u8);
+            crate::trace::check_magic_key(inner.last_char, "tty:read_at");
+            if vintr_send_sigint(&inner, inner.last_char) {
+                inner.last_char = 255;
+                return Err(SyscallErr::EAGAIN);
+            }
+        }
+        if inner.last_char == 255 {
+            return Err(SyscallErr::EAGAIN);
+        }
+        buf[0] = inner.last_char;
+        if inner.termios.lflag & LocalModes::ECHO.bits() != 0 {
+            if inner.last_char == b'\r' {
+                print!("\n");
+            } else {
+                print!("{}", inner.last_char as char);
+            }
+        }
+        inner.last_char = 255;
+        Ok(1)
+    }
+
+    fn write_at(
+        &self,
+        _offset: usize,
+        _len: usize,
+        buf: &[u8],
+        _data: spin::MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        let _inner = self.inner.lock();
+        match core::str::from_utf8(buf) {
+            Ok(content) => print!("{}", content),
+            Err(_) => warn!("[tty_write] Non-UTF8 characters: {:?}", buf),
+        }
+        Ok(buf.len())
+    }
+
+    fn metadata(&self) -> Result<Metadata, SyscallErr> {
+        Ok(Metadata {
+            dev_id: 0,
+            inode_id: 0,
+            size: 0,
+            blk_size: 0,
+            blocks: 0,
+            atime: TimeSpec::new(),
+            mtime: TimeSpec::new(),
+            ctime: TimeSpec::new(),
+            file_type: FileType::CharDevice,
+            mode: InodeMode::S_IFCHR | InodeMode::from_bits_truncate(0o666),
+            nlinks: 1,
+            uid: 0,
+            gid: 0,
+            flags: InodeFlags::empty(),
+            raw_dev: crate::makedev!(0x88, 0),
+        })
+    }
+
+    fn is_stream(&self) -> bool {
+        true
+    }
+
+    fn poll(&self, _private_data: &FilePrivateData) -> Result<usize, SyscallErr> {
+        let mut inner = self.inner.lock();
+        let has_data = if inner.last_char != 255 {
+            true
+        } else {
+            inner.last_char =
+                crate::trace::pop_stashed().unwrap_or_else(|| console_getchar() as u8);
+            crate::trace::check_magic_key(inner.last_char, "tty:poll");
+            if vintr_send_sigint(&inner, inner.last_char) {
+                inner.last_char = 255;
+                false
+            } else {
+                inner.last_char != 255
+            }
+        };
+        drop(inner);
+        let mut revents: usize = 0;
+        if has_data {
+            revents |= 1; // POLLIN
+        }
+        revents |= 0x4; // POLLOUT (always writable)
+        Ok(revents)
+    }
+
+    fn ioctl(
+        &self,
+        cmd: u32,
+        argp: usize,
+        _private_data: spin::MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        info!(
+            "[tty_ioctl] cmd: {:?}, arg: {:X}",
+            TeletypeCommand::from_primitive(cmd),
+            argp
+        );
+        let mut inner = self.inner.lock();
+        let token = crate::task::current_user_token();
+        match TeletypeCommand::from_primitive(cmd) {
+            TeletypeCommand::TCGETS | TeletypeCommand::TCGETA => {
+                copy_to_user(token, &inner.termios, argp as *mut Termios);
+                Ok(SUCCESS as usize)
+            }
+            TeletypeCommand::TCSETS
+            | TeletypeCommand::TCSETSW
+            | TeletypeCommand::TCSETSF
+            | TeletypeCommand::TCSETA
+            | TeletypeCommand::TCSETAW
+            | TeletypeCommand::TCSETAF => {
+                copy_from_user(token, argp as *const Termios, &mut inner.termios);
+                Ok(SUCCESS as usize)
+            }
+            TeletypeCommand::TCXONC => Ok(SUCCESS as usize),
+            TeletypeCommand::TIOCGPGRP => match translated_refmut(token, argp as *mut u32) {
+                Ok(word) => {
+                    *word = inner.foreground_pgid;
+                    Ok(0)
+                }
+                Err(_errno) => Err(SyscallErr::EFAULT),
+            },
+            TeletypeCommand::TIOCSPGRP => match translated_ref(token, argp as *const u32) {
+                Ok(word) => {
+                    log::info!("[tty-ioctl] TIOCSPGRP: set foreground_pgid to {}", *word);
+                    inner.foreground_pgid = *word;
+                    Ok(0)
+                }
+                Err(_errno) => Err(SyscallErr::EFAULT),
+            },
+            TeletypeCommand::TIOCGWINSZ => {
+                copy_to_user(token, &inner.winsize, argp as *mut WinSize);
+                Ok(SUCCESS as usize)
+            }
+            TeletypeCommand::TIOCSWINSZ => {
+                copy_from_user(token, argp as *mut WinSize, &mut inner.winsize);
+                Ok(SUCCESS as usize)
+            }
+            _ => {
+                warn!(
+                    "[tty_ioctl] unsupported ioctl cmd: {:?} ({:#X})",
+                    TeletypeCommand::from_primitive(cmd),
+                    cmd
+                );
+                Err(SyscallErr::ENOTTY)
+            }
+        }
+    }
+
+    fn fs(&self) -> Arc<dyn NewFileSystem> {
+        DEV_FS.clone()
+    }
+
+    fn as_any_ref(&self) -> &dyn Any {
+        self
     }
 }
 

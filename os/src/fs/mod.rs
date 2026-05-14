@@ -7,6 +7,7 @@ pub mod file_trait;
 mod filesystem;
 pub mod iov;
 mod layout;
+mod page_cache;
 pub mod poll;
 #[cfg(feature = "swap")]
 pub mod swap;
@@ -15,7 +16,7 @@ pub mod dirent;
 pub mod file_descriptor;
 mod inode;
 mod timestamp;
-mod vfs;
+pub mod vfs;
 
 pub use self::dev::{
     hwclock::*,
@@ -36,14 +37,248 @@ pub use file_descriptor::FileDescriptor;
 use lazy_static::*;
 
 lazy_static! {
-    pub static ref ROOT_FD: Arc<FileDescriptor> = Arc::new(FileDescriptor::new(
-        false,
-        false,
-        self::directory_tree::ROOT
-            .open(".", OpenFlags::O_RDONLY | OpenFlags::O_DIRECTORY, true)
-            .unwrap()
-    ));
+    /// 新 VFS 根 — 基于 MountFS + 具体文件系统，已全面替代旧 ROOT_FD
+    pub static ref VFS_ROOT: Arc<self::vfs::MountFS> = {
+        let fs_type = self::directory_tree::FILE_SYSTEM.get_filesystem_type();
+        let inner_fs: Arc<dyn self::vfs::FileSystem> = match fs_type {
+            self::filesystem::FS_Type::Fat32 => {
+                let efs = alloc::sync::Arc::downcast::<self::fat32::EasyFileSystem>(
+                    self::directory_tree::FILE_SYSTEM.clone()
+                ).unwrap();
+                efs
+            }
+            self::filesystem::FS_Type::Ext4 => {
+                let ext4 = alloc::sync::Arc::downcast::<self::ext4::ext4fs::Ext4FileSystem>(
+                    self::directory_tree::FILE_SYSTEM.clone()
+                ).unwrap();
+                ext4
+            }
+            self::filesystem::FS_Type::Null => {
+                panic!("no filesystem found");
+            }
+        };
+        self::vfs::MountFS::new(inner_fs, self::vfs::MountFlags::empty())
+    };
 }
+
+/// 返回新的 VFS 根（MountFS 实例）的共享引用。
+pub fn vfs_root() -> Arc<self::vfs::MountFS> {
+    VFS_ROOT.clone()
+}
+
+/// 路径规范化：按 '/' 分割，处理 '.' 和 '..'
+pub fn parse_path(path: &str) -> alloc::vec::Vec<alloc::string::String> {
+    path.split('/')
+        .fold(alloc::vec::Vec::with_capacity(8), |mut v, s| {
+            match s {
+                "" | "." => {}
+                ".." => {
+                    if v.last().map_or(true, |s| s == "..") {
+                        v.push(String::from(s));
+                    } else {
+                        v.pop();
+                    }
+                }
+                _ => v.push(String::from(s)),
+            }
+            v
+        })
+}
+
+/// 符号链接最大跟随层数
+const MAX_SYMLINK_FOLLOW: usize = 8;
+
+/// 核心路径查找 — 支持符号链接跟随。
+///
+/// 对标 DragonOS `IndexNode::do_lookup_follow_symlink`。
+///
+/// - `start`: 查找起点（对于绝对路径传入 `vfs_root().root_inode()`）
+/// - `path`: 待解析的路径（可为绝对路径或相对路径）
+/// - `follow_final`: 是否跟随最后一个路径组件的符号链接
+pub fn vfs_lookup(
+    start: &Arc<dyn self::vfs::IndexNode>,
+    path: &str,
+    follow_final: bool,
+) -> Result<Arc<dyn self::vfs::IndexNode>, isize> {
+    use self::vfs::{FileType, FilePrivateData, IndexNode as _};
+    let root_inode: Arc<dyn self::vfs::IndexNode> = vfs_root().mountpoint_root_inode();
+
+    let (mut current, mut components) = if let Some(rest) = path.strip_prefix('/') {
+        (root_inode.clone(), parse_path(rest))
+    } else {
+        (start.clone(), parse_path(path))
+    };
+
+    let mut symlink_count = 0;
+    let mut comp_idx = 0;
+
+    while comp_idx < components.len() {
+        let name = &components[comp_idx];
+        let is_last = comp_idx == components.len() - 1;
+
+        let cur_type = current.metadata().map_err(|e| e as isize)?.file_type;
+        if cur_type != FileType::Dir {
+            return Err(crate::syscall::errno::ENOTDIR);
+        }
+
+        // ".." 解析：先尝试 find("..")，失败后通过 absolute_path() 回退
+        if name == ".." {
+            if let Ok(parent) = current.find("..") {
+                current = parent;
+            } else if let Ok(abs) = current.absolute_path() {
+                let parent_path = if let Some(pos) = abs.rfind('/') {
+                    if pos == 0 { "/" } else { &abs[..pos] }
+                } else {
+                    "/"
+                };
+                current = vfs_lookup(&root_inode, parent_path, true)?;
+            }
+            comp_idx += 1;
+            continue;
+        }
+
+        let next = current.find(name).map_err(|e| e as isize)?;
+        let file_type = next.metadata().map_err(|e| e as isize)?.file_type;
+
+        if is_last && !follow_final && file_type == FileType::SymLink {
+            return Ok(next);
+        }
+
+        if file_type == FileType::SymLink {
+            if symlink_count >= MAX_SYMLINK_FOLLOW {
+                return Err(crate::syscall::errno::ELOOP);
+            }
+            symlink_count += 1;
+
+            // 读取符号链接内容（所有 inode 现在都原生实现 IndexNode）
+            let target: String = {
+                let md = next.metadata().map_err(|e| e as isize)?;
+                let link_len = md.size.max(0) as usize;
+                let mut link_buf = alloc::vec![0u8; link_len.min(4096)];
+                let n = next
+                    .read_at(
+                        0,
+                        link_buf.len(),
+                        &mut link_buf,
+                        spin::Mutex::new(FilePrivateData::Unused).lock(),
+                    )
+                    .map_err(|e| e as isize)?;
+                unsafe { link_buf.set_len(n) };
+                let s = core::str::from_utf8(&link_buf[..n])
+                    .map_err(|_| crate::syscall::errno::EINVAL)?;
+                String::from(s.trim_end_matches('\0'))
+            };
+
+            // 组装新路径：符号链接目标 + 剩余组件
+            let remaining: alloc::vec::Vec<&str> =
+                components[comp_idx + 1..].iter().map(|s| s.as_str()).collect();
+            let new_path = if remaining.is_empty() {
+                String::from(target)
+            } else {
+                alloc::format!("{}/{}", target, remaining.join("/"))
+            };
+
+            // 将符号链接目标 + 剩余组件组装为最终查找路径
+            if new_path.starts_with('/') {
+                // 绝对符号链接目标：从根重新开始
+                components = parse_path(if let Some(rest) = new_path.strip_prefix('/') {
+                    rest
+                } else {
+                    &new_path
+                });
+                current = root_inode.clone();
+                comp_idx = 0;
+                continue;
+            } else if let Ok(cur_abs) = current.absolute_path() {
+                // 相对目标 + 可获取绝对路径：拼接后从根重新开始
+                let look_path = if cur_abs == "/" {
+                    alloc::format!("/{}", new_path)
+                } else {
+                    alloc::format!("{}/{}", cur_abs, new_path)
+                };
+                components = parse_path(if let Some(rest) = look_path.strip_prefix('/') {
+                    rest
+                } else {
+                    &look_path
+                });
+                current = root_inode.clone();
+                comp_idx = 0;
+                continue;
+            } else {
+                // 相对目标 + 无法获取绝对路径：
+                // 从 symlink 所在父目录（current）开始解析相对路径。
+                components = parse_path(&new_path);
+                // current 保持为 symlink 的父目录，comp_idx 归零继续
+                comp_idx = 0;
+                continue;
+            };
+        } else {
+            current = next;
+            comp_idx += 1;
+        }
+    }
+
+    Ok(current)
+}
+
+/// 使用新 VFS 解析绝对路径，跟随所有符号链接，返回目标 IndexNode。
+pub fn vfs_lookup_absolute(path: &str) -> Result<Arc<dyn self::vfs::IndexNode>, isize> {
+    let root: Arc<dyn self::vfs::IndexNode> = vfs_root().mountpoint_root_inode();
+    vfs_lookup(&root, path, true)
+}
+
+/// 使用新 VFS 解析路径，返回 (父目录 IndexNode, 最后一级文件名)。
+///
+/// 用于需要修改目录结构的操作（mkdir/unlink/rename/symlink/open 创建模式）。
+/// 中间路径组件的符号链接会被跟随。
+pub fn vfs_lookup_parent(path: &str) -> Result<(Arc<dyn self::vfs::IndexNode>, String), isize> {
+    let components = parse_path(path);
+    let leaf = components.last().ok_or(0isize)?;
+    let leaf_name = leaf.clone();
+
+    // 构建父目录路径（不含最后一级）
+    let parent_path = if components.len() == 1 {
+        if path.starts_with('/') {
+            String::from("/")
+        } else {
+            String::from(".")
+        }
+    } else {
+        let parent_comps = &components[..components.len() - 1];
+        let joined = parent_comps
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<alloc::vec::Vec<&str>>()
+            .join("/");
+        if path.starts_with('/') {
+            alloc::format!("/{}", joined)
+        } else {
+            joined
+        }
+    };
+
+    let root: Arc<dyn self::vfs::IndexNode> = vfs_root().mountpoint_root_inode();
+    vfs_lookup(&root, &parent_path, true).map(|parent| (parent, leaf_name))
+}
+/// 使用新 VFS 创建或打开文件，返回 vfs::File
+fn create_or_open_file(path: &str) -> Result<self::vfs::File, isize> {
+    use self::vfs::{FileType, InodeMode};
+    let (parent, name) = vfs_lookup_parent(path)?;
+    let inode = match parent.find(&name) {
+        Ok(existing) => existing,
+        Err(_) => parent
+            .create(&name, FileType::File, InodeMode::S_IRWXU)
+            .map_err(|e| e as isize)?,
+    };
+    self::vfs::File::new(inode, self::vfs::FileFlags::O_RDWR).map_err(|e| e as isize)
+}
+
+/// 使用新 VFS 查找文件并返回 metadata size
+fn file_size(path: &str) -> Result<usize, isize> {
+    let inode = vfs_lookup_absolute(path)?;
+    Ok(inode.metadata().map_err(|e| e as isize)?.size.max(0) as usize)
+}
+
 #[allow(unused)]
 pub fn flush_preload() {
     extern "C" {
@@ -61,16 +296,16 @@ pub fn flush_preload() {
         sinitproc as usize, einitproc as usize, sbash as usize, ebash as usize, sbusybox as usize, ebusybox as usize,
         sosconfig as usize, eosconfig as usize,
     );
-    let initproc = ROOT_FD.open("initproc", OpenFlags::O_CREAT, false).unwrap();
+    let initproc = create_or_open_file("initproc").unwrap();
     let initproc_len = einitproc as usize - sinitproc as usize;
-    let written = initproc.write(None, unsafe {
+    let written = initproc.write(unsafe {
         core::slice::from_raw_parts(sinitproc as *const u8, initproc_len)
-    });
+    }).unwrap();
     log::debug!(
         "[kernel] flush_preload: initproc write len={} => written={} size_after={}",
         initproc_len,
         written,
-        initproc.get_size()
+        file_size("initproc").unwrap_or(0)
     );
     for ppn in crate::mm::PPNRange::new(
         crate::mm::PhysAddr::from(sinitproc as usize).floor(),
@@ -78,43 +313,41 @@ pub fn flush_preload() {
     ) {
         crate::mm::frame_dealloc(ppn);
     }
-    let bash = ROOT_FD.open("bash", OpenFlags::O_CREAT, false).unwrap();
-    bash.write(None, unsafe {
+    let bash = create_or_open_file("bash").unwrap();
+    bash.write(unsafe {
         core::slice::from_raw_parts(sbash as *const u8, ebash as usize - sbash as usize)
-    });
+    }).unwrap();
     for ppn in crate::mm::PPNRange::new(
         crate::mm::PhysAddr::from(sbash as usize).floor(),
         crate::mm::PhysAddr::from(ebash as usize).floor(),
     ) {
         crate::mm::frame_dealloc(ppn);
     }
-    let busybox = ROOT_FD.open("busybox", OpenFlags::O_CREAT, false).unwrap();
-    busybox.write(None, unsafe {
+    let busybox = create_or_open_file("busybox").unwrap();
+    busybox.write(unsafe {
         core::slice::from_raw_parts(sbusybox as *const u8, ebusybox as usize - sbusybox as usize)
-    });
+    }).unwrap();
     for ppn in crate::mm::PPNRange::new(
         crate::mm::PhysAddr::from(sbusybox as usize).floor(),
         crate::mm::PhysAddr::from(ebusybox as usize).floor(),
     ) {
         crate::mm::frame_dealloc(ppn);
     }
-    match ROOT_FD.open("os_test.conf", OpenFlags::O_RDONLY, false) {
-        Ok(osconfig) => {
+    match file_size("os_test.conf") {
+        Ok(size) => {
             log::info!(
                 "[kernel] flush_preload: keep existing /os_test.conf size={}",
-                osconfig.get_size()
+                size
             );
         }
         Err(_) => {
-            let osconfig = ROOT_FD
-                .open("os_test.conf", OpenFlags::O_CREAT, false)
-                .unwrap();
-            osconfig.write(None, unsafe {
+            let osconfig = create_or_open_file("os_test.conf").unwrap();
+            osconfig.write(unsafe {
                 core::slice::from_raw_parts(
                     sosconfig as *const u8,
                     eosconfig as usize - sosconfig as usize,
                 )
-            });
+            }).unwrap();
         }
     }
     for ppn in crate::mm::PPNRange::new(

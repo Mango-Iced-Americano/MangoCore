@@ -908,16 +908,16 @@ impl<T: PageTable> MemorySet<T> {
         };
         new_area.flags = flags;
         if !flags.contains(MapFlags::MAP_ANONYMOUS) {
-            warn!("[mmap] file-backed map!");
+            warn!("[mmap] file-backed map! (NOT YET SUPPORTED in new VFS)");
             let fd_table = task.files.lock();
             match fd_table.get_ref(fd) {
                 Ok(file_descriptor) => {
                     if !file_descriptor.readable() {
                         return EACCES;
                     }
-                    let file = file_descriptor.file.deep_clone();
-                    file.lseek(offset as isize, SeekWhence::SEEK_SET).unwrap();
-                    new_area.map_file = Some(file);
+                    // FIXME: 文件支持的 mmap 需要桥接 Arc<dyn IndexNode> → Arc<dyn File>
+                    // 在新 VFS 迁移完成后，应将 map_file 类型改为 Arc<dyn IndexNode>
+                    new_area.map_file = None;
                 }
                 Err(errno) => return errno,
             }

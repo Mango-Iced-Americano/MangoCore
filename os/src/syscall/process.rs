@@ -658,10 +658,10 @@ pub fn sys_clone(
     let mut child: Option<Arc<TaskControlBlock>> = None;
     show_frame_consumption! {
         "clone";
-        child = Some(match parent.sys_clone(flags, stack, tls, exit_signal) {
-            Ok(task) => task,
+        child = match parent.sys_clone(flags, stack, tls, exit_signal) {
+            Ok(task) => Some(task),
             Err(errno) => return errno,
-        });
+        };
     }
     let child = match child {
         Some(task) => task,
@@ -775,7 +775,7 @@ pub fn sys_execve(
     // 获取当前工作目录的文件描述符
     let working_inode = &task.fs.lock().working_inode;
 
-    match working_inode.open(&path, OpenFlags::O_RDONLY, false) {
+    match working_inode.open_path(&path, OpenFlags::O_RDONLY) {
         // 检查打开的文件
         Ok(file) => {
             // 若文件大小小于4，则返回ENOEXEC
@@ -786,7 +786,7 @@ pub fn sys_execve(
             // 看前四个字节是否是可执行文件魔数
             let mut magic_number = Box::<[u8; 4]>::new([0; 4]);
             // this operation may be expensive... I'm not sure
-            file.read(Some(&mut 0usize), magic_number.as_mut_slice());
+            let _ = file.pread(0, magic_number.as_mut_slice());
             let elf = match magic_number.as_slice() {
                 // ELF可执行文件
                 b"\x7fELF" => file,
@@ -794,7 +794,7 @@ pub fn sys_execve(
                 // 用默认Shell即bash加载
                 b"#!" => {
                     let shell_file = working_inode
-                        .open(DEFAULT_SHELL, OpenFlags::O_RDONLY, false)
+                        .open_path(DEFAULT_SHELL, OpenFlags::O_RDONLY)
                         .unwrap();
                     if argv_vec.try_reserve(1).is_err() {
                         return ENOMEM;
@@ -1410,6 +1410,11 @@ pub fn sys_rt_sigpending(set: usize, sigsetsize: usize) -> isize {
         }
         Err(errno) => errno,
     }
+}
+
+pub fn sys_rt_sigsuspend(mask: usize, sigsetsize: usize) -> isize {
+    // 暂不实现完整语义，返回 ENOSYS 让调用者 fallback
+    ENOSYS
 }
 
 pub fn sys_sigtimedwait(set: usize, info: usize, timeout: usize) -> isize {

@@ -157,7 +157,21 @@ la64：
 cd os && make la64-run
 ```
 
-## 7. 分组批量测试脚本 run_test.sh
+## 7. 全量测试脚本（推荐）
+
+推荐使用 `scripts/run_full_test.py` 进行全量测试，它会自动完成：编译 → 解压镜像 → 串行 QEMU → 评分 → 存档。
+
+```bash
+python3 scripts/run_full_test.py
+```
+
+结果存档在 `testresult/archive_{timestamp}/`，包含 QEMU 输出和评分汇总。
+
+---
+
+## 7-bis. 旧版分组批量测试脚本 run_test.sh（已弃用）
+
+> 以下内容保留供参考，日常测试请使用 `scripts/run_full_test.py`。
 
 仓库根目录提供 `run_test.sh`，会按分组生成临时配置、注入镜像、运行 QEMU，并记录日志。
 
