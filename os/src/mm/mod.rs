@@ -1,24 +1,39 @@
+pub mod addr;
 pub mod address;
+mod arch;
+mod error;
 mod frame_allocator;
 mod heap_allocator;
+mod layout;
 mod map_area;
 mod memory_set;
+pub mod page;
 mod page_table;
 #[cfg(feature = "zram")]
 mod zram;
 pub use crate::hal::{KernelPageTableImpl, PageTableImpl};
+#[allow(unused_imports)]
+pub use addr::{PhysRegion, VirtRegion};
 pub use address::PPNRange;
 use address::VPNRange;
 pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
+#[allow(unused_imports)]
+pub use arch::{CurrentMmArch, MemoryManagementArch};
+#[allow(unused_imports)]
+pub use error::{MmError, MmResult};
 pub use frame_allocator::{
     frame_alloc, frame_alloc_uninit, frame_dealloc, frame_reserve, frames_alloc,
     unallocated_frames, FrameTracker,
 };
 pub use heap_allocator::heap_stats;
+#[allow(unused_imports)]
+pub use layout::{KernelLayout, UserLayout};
 pub use map_area::{Frame, MapFlags, MapPermission};
 pub use memory_set::kernel_token;
 pub use memory_set::MemoryError;
 pub use memory_set::{MemorySet, KERNEL_SPACE};
+#[allow(unused_imports)]
+pub use page::{MemAttr, PageFaultKind, PageProt};
 pub use page_table::{
     copy_from_user,
     copy_from_user_array,
