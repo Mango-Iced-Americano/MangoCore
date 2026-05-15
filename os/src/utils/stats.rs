@@ -3,7 +3,6 @@
 //! 用 `println!` 直接输出（不依赖 LOG 宏），方便在 QEMU 串口看到。
 //! 顶部 `STATS_ENABLED` 改为 `false` 即可一行关闭所有诊断输出。
 
-use crate::fs::directory_tree::directory_node_count;
 use crate::mm::{heap_stats, unallocated_frames};
 use crate::task::{current_task, procs_count, task_manager_counts, zombie_count};
 
@@ -31,7 +30,7 @@ pub fn print_resource_stats() {
     let free = unallocated_frames();
     let procs = procs_count();
     let zombies = zombie_count();
-    let dir_nodes = directory_node_count();
+    let dir_nodes = 0usize;
     let (heap_free, heap_total) = heap_stats();
 
     // 当前进程 FD 数

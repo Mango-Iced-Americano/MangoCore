@@ -4,7 +4,7 @@ use core::panic;
 
 use crate::fs::inode::{InodeLock, InodeTime};
 use crate::fs::DiskInodeType;
-use crate::fs::{directory_tree::VFS};
+use crate::fs::vfs::FileSystem;
 use alloc::string::String;
 use alloc::vec;
 use alloc::{sync::Arc, vec::Vec};
@@ -90,8 +90,7 @@ pub struct Linux2 {
 
 #[allow(unused)]
 impl Ext4Inode {
-    pub fn root_inode(ext4fs: &Arc<dyn VFS>) -> Arc<Self> {
-        let ext4fs = Arc::downcast::<Ext4FileSystem>(ext4fs.clone()).unwrap();
+    pub fn root_inode(ext4fs: &Arc<Ext4FileSystem>) -> Arc<Self> {
         // 尝试获取根目录的Inode节点
         let root_inode = ext4fs.get_inode_ref(ROOT_INODE);
         // root_inode.inode.clone()

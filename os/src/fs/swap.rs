@@ -3,7 +3,6 @@ use spin::Mutex;
 
 use crate::{config::PAGE_SIZE, drivers::BLOCK_DEVICE, hal::BLOCK_SZ};
 
-use super::directory_tree::FILE_SYSTEM;
 use lazy_static::*;
 
 lazy_static! {
@@ -35,7 +34,7 @@ impl Swap {
         let blocks = size * (SWAP_SIZE / BLOCK_SZ); // 1MiB = 512B * 2048
         Self {
             bitmap,
-            block_ids: FILE_SYSTEM.alloc_blocks(blocks),
+            block_ids: Vec::new(), // TODO: implement block alloc without old VFS
         }
     }
     fn read_page(block_ids: &[usize], buf: &mut [u8]) {

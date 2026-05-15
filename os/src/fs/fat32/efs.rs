@@ -3,12 +3,10 @@ use core::arch::asm;
 use core::ptr::addr_of;
 
 use crate::fs::fat32::FatInode;
-use crate::fs::filesystem::FS_Type;
 use crate::hal::{self, BLOCK_SZ};
 
 use super::{layout::BPB, Cache};
 use super::{BlockCacheManager, BlockDevice, DiskInodeType, Fat};
-use crate::fs::directory_tree::VFS;
 use crate::fs::vfs::file_system::{FileSystem, FsInfo, SuperBlock};
 use crate::fs::vfs::IndexNode;
 use alloc::{sync::Arc, vec::Vec};
@@ -137,19 +135,6 @@ impl core::fmt::Debug for EasyFileSystem {
             .field("byts_per_sec", &self.byts_per_sec)
             .field("sec_per_clus", &self.sec_per_clus)
             .finish()
-    }
-}
-
-// Old VFS trait impl — kept for directory_tree.rs compatibility (Phase 5 will remove)
-impl VFS for EasyFileSystem {
-    fn alloc_blocks(&self, blocks: usize) -> Vec<usize> {
-        self.alloc_blocks(blocks)
-    }
-    fn get_filesystem_type(&self) -> FS_Type {
-        FS_Type::Fat32
-    }
-    fn block_size(&self) -> usize {
-        BLOCK_SZ
     }
 }
 

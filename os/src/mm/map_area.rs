@@ -8,11 +8,11 @@ use super::VPNRange;
 use super::KERNEL_SPACE;
 use super::{frame_alloc, FrameTracker};
 use super::{PhysPageNum, VirtAddr, VirtPageNum};
-use crate::fs::file_trait::File;
+use crate::fs::SeekWhence;
 #[cfg(feature = "swap")]
 use crate::fs::swap::{SwapTracker, SWAP_DEVICE};
-use crate::fs::SeekWhence;
 use crate::mm::frame_allocator::frame_alloc_uninit;
+use core::any::Any;
 
 #[cfg(feature = "oom_handler")]
 use alloc::collections::VecDeque;
@@ -484,7 +484,7 @@ pub struct MapArea {
     map_type: MapType,
     /// Permissions which are the or of RWXU, where U stands for user.
     pub map_perm: MapPermission,
-    pub map_file: Option<Arc<dyn File>>,
+    pub map_file: Option<Arc<dyn Any + Send + Sync>>,
 
     pub flags: MapFlags,
 }
@@ -506,7 +506,7 @@ impl MapArea {
         end_va: VirtAddr,
         map_type: MapType,
         map_perm: MapPermission,
-        map_file: Option<Arc<dyn File>>,
+        map_file: Option<Arc<dyn Any + Send + Sync>>,
     ) -> Self {
         Self::try_new(start_va, end_va, map_type, map_perm, map_file).unwrap()
     }
@@ -515,7 +515,7 @@ impl MapArea {
         end_va: VirtAddr,
         map_type: MapType,
         map_perm: MapPermission,
-        map_file: Option<Arc<dyn File>>,
+        map_file: Option<Arc<dyn Any + Send + Sync>>,
     ) -> Result<Self, isize> {
         let start_vpn: VirtPageNum = start_va.floor();
         let end_vpn: VirtPageNum = end_va.ceil();
@@ -973,29 +973,7 @@ impl MapArea {
         }
     }
     pub fn into_two(&mut self, cut: VirtPageNum) -> Result<Self, ()> {
-        let second_file = if let Some(file) = &self.map_file {
-            let new_file = file.deep_clone();
-            let old_offset = file
-                .lseek(0, SeekWhence::SEEK_CUR)
-                .map_err(|_| ())?;
-            let new_offset = old_offset
-                .checked_add(
-                    VirtAddr::from(cut).0 - VirtAddr::from(self.inner.vpn_range.get_start()).0,
-                )
-                .ok_or(())?;
-            if new_offset > isize::MAX as usize {
-                return Err(());
-            }
-            new_file
-                .lseek(
-                    new_offset as isize,
-                    SeekWhence::SEEK_SET,
-                )
-                .map_err(|_| ())?;
-            Some(new_file)
-        } else {
-            None
-        };
+        let second_file = self.map_file.clone();
         let second_frames = self.inner.into_two(cut)?;
         Ok(MapArea {
             inner: second_frames,

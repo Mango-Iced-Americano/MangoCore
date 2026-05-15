@@ -339,20 +339,6 @@ impl Ext4FileSystem {
     }
 }
 
-// ── 旧 VFS trait（过渡用，FAT32 迁移后删除） ──────────────────────────
-
-impl crate::fs::directory_tree::VFS for Ext4FileSystem {
-    fn alloc_blocks(&self, blocks: usize) -> alloc::vec::Vec<usize> {
-        self.alloc_blocks(blocks)
-    }
-    fn get_filesystem_type(&self) -> FS_Type {
-        FS_Type::Ext4
-    }
-    fn block_size(&self) -> usize {
-        self.block_size
-    }
-}
-
 // ── 新 VFS trait 实现 ────────────────────────────────────────────────
 
 use crate::fs::inode::InodeLock;

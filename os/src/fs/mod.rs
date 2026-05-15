@@ -1,9 +1,7 @@
 mod cache;
 pub mod dev;
-pub mod directory_tree;
 mod ext4;
 pub mod fat32;
-pub mod file_trait;
 mod filesystem;
 pub mod iov;
 mod layout;
@@ -27,9 +25,11 @@ pub use self::layout::*;
 
 pub use self::fat32::DiskInodeType;
 pub use crate::drivers::block::BlockDevice;
+use crate::drivers::BLOCK_DEVICE;
 
 pub use self::cache::PageCache;
 use alloc::{string::String, sync::Arc};
+use self::cache::BlockCacheManager;
 use core::sync::atomic::{AtomicBool, Ordering};
 pub use dirent::Dirent;
 use lazy_static::*;
@@ -55,15 +55,17 @@ lazy_static! {
         };
         match fs_type {
             self::filesystem::FS_Type::Fat32 => {
-                let efs = alloc::sync::Arc::downcast::<self::fat32::EasyFileSystem>(
-                    self::directory_tree::FILE_SYSTEM.clone()
-                ).unwrap();
+                let efs = self::fat32::EasyFileSystem::open(
+                    BLOCK_DEVICE.clone(),
+                    Arc::new(spin::Mutex::new(BlockCacheManager::new()))
+                );
                 self::vfs::MountFS::new(efs, self::vfs::MountFlags::empty())
             }
             self::filesystem::FS_Type::Ext4 => {
-                let ext4 = alloc::sync::Arc::downcast::<self::ext4::ext4fs::Ext4FileSystem>(
-                    self::directory_tree::FILE_SYSTEM.clone()
-                ).unwrap();
+                let ext4 = self::ext4::ext4fs::Ext4FileSystem::open_ext4rs(
+                    BLOCK_DEVICE.clone(),
+                    Arc::new(spin::Mutex::new(BlockCacheManager::new()))
+                );
                 self::vfs::MountFS::new(ext4, self::vfs::MountFlags::empty())
             }
             self::filesystem::FS_Type::Null => {
