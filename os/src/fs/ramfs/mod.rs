@@ -1,7 +1,8 @@
 //! RamFS — 纯内存文件系统
 //!
 //! 参照 DragonOS `kernel/src/filesystem/ramfs/mod.rs` 实现。
-//! 所有数据存储在 `Vec<u8>` 中，目录结构用 `BTreeMap`。
+//! 数据以页为单位存储，使用 `BTreeMap<usize, Arc<FrameTracker>>` 管理物理页。
+//! 目录结构用 `BTreeMap`。
 //! 用于 VFS 层调试，不依赖任何块设备。
 
 use alloc::{
@@ -13,6 +14,8 @@ use alloc::{
 use core::any::Any;
 use spin::{Mutex, MutexGuard};
 
+use crate::config::PAGE_SIZE;
+use crate::mm::FrameTracker;
 use crate::utils::error::SyscallErr;
 
 use super::vfs::{
@@ -39,6 +42,10 @@ pub struct LockedRamFSInode(pub Mutex<RamFSInode>);
 pub struct RamFS {
     root_inode: Arc<LockedRamFSInode>,
     self_ref: Mutex<Weak<RamFS>>,
+    /// 整个文件系统的最大页数（0 = 不限制）
+    max_pages: usize,
+    /// 当前已分配的页数
+    page_count: Mutex<usize>,
 }
 
 // ── RamFSInode ────────────────────────────────────────────────────────
@@ -52,8 +59,10 @@ pub struct RamFSInode {
     self_ref: Weak<LockedRamFSInode>,
     /// 子项 B 树
     children: BTreeMap<String, Arc<LockedRamFSInode>>,
-    /// 文件数据
-    data: Vec<u8>,
+    /// 文件数据 — 页索引 → 物理帧
+    pages: BTreeMap<usize, Arc<FrameTracker>>,
+    /// 逻辑文件大小（字节）
+    file_size: usize,
     /// 元数据
     metadata: Metadata,
     /// 所属文件系统弱引用
@@ -66,7 +75,8 @@ impl RamFSInode {
             parent: Weak::default(),
             self_ref: Weak::default(),
             children: BTreeMap::new(),
-            data: Vec::new(),
+            pages: BTreeMap::new(),
+            file_size: 0,
             metadata: Metadata {
                 dev_id: 0,
                 inode_id: generate_inode_id(),
@@ -87,6 +97,27 @@ impl RamFSInode {
             fs: Weak::default(),
         }
     }
+}
+
+// ── 页操作辅助函数 ───────────────────────────────────────────────────
+
+/// 分配一个物理页，返回 FrameTracker
+fn alloc_page() -> Option<Arc<FrameTracker>> {
+    crate::mm::frame_alloc()
+}
+
+/// 从 FrameTracker 获取页内偏移处的只读物理地址
+fn page_ptr(frame: &Arc<FrameTracker>, offset_within_page: usize) -> *const u8 {
+    let ppn = frame.ppn;
+    let phys_addr = ppn.0 * PAGE_SIZE + offset_within_page;
+    phys_addr as *const u8
+}
+
+/// 从 FrameTracker 获取页内偏移处的可写物理地址
+fn page_ptr_mut(frame: &Arc<FrameTracker>, offset_within_page: usize) -> *mut u8 {
+    let ppn = frame.ppn;
+    let phys_addr = ppn.0 * PAGE_SIZE + offset_within_page;
+    phys_addr as *mut u8
 }
 
 // ── FileSystem impl for RamFS ─────────────────────────────────────────
@@ -126,12 +157,23 @@ impl FileSystem for RamFS {
 
 impl RamFS {
     pub fn new() -> Arc<Self> {
+        Self::new_inner(0)
+    }
+
+    /// 创建带页数配额的 RamFS（max_pages = 0 表示不限制）
+    pub fn new_with_quota(max_pages: usize) -> Arc<Self> {
+        Self::new_inner(max_pages)
+    }
+
+    fn new_inner(max_pages: usize) -> Arc<Self> {
         let root: Arc<LockedRamFSInode> =
             Arc::new(LockedRamFSInode(Mutex::new(RamFSInode::new())));
 
         let result: Arc<RamFS> = Arc::new(RamFS {
             root_inode: root,
             self_ref: Mutex::new(Weak::new()),
+            max_pages,
+            page_count: Mutex::new(0),
         });
 
         // 设置自引用
@@ -182,14 +224,46 @@ impl IndexNode for LockedRamFSInode {
         if inode.metadata.file_type == FileType::Dir {
             return Err(SyscallErr::EISDIR);
         }
-        let start = inode.data.len().min(offset);
-        let end = inode.data.len().min(offset + len);
-        if start >= end {
+
+        // 超出文件末尾 → 返回 0
+        if offset >= inode.file_size {
             return Ok(0);
         }
-        let src = &inode.data[start..end];
-        buf[..src.len()].copy_from_slice(src);
-        Ok(src.len())
+
+        let effective_len = len.min(inode.file_size - offset);
+        let first_page = offset / PAGE_SIZE;
+        let last_page = (offset + effective_len - 1) / PAGE_SIZE;
+        let mut buf_offset: usize = 0;
+
+        for page_idx in first_page..=last_page {
+            let start_in_page = if page_idx == first_page {
+                offset % PAGE_SIZE
+            } else {
+                0
+            };
+            let page_end = if page_idx == last_page {
+                (offset + effective_len - 1) % PAGE_SIZE + 1
+            } else {
+                PAGE_SIZE
+            };
+            let bytes_in_page = page_end - start_in_page;
+
+            if let Some(frame) = inode.pages.get(&page_idx) {
+                // 页存在 → 从物理内存拷贝到 buf
+                let src = page_ptr(frame, start_in_page);
+                let dst = buf.as_mut_ptr().wrapping_add(buf_offset);
+                unsafe {
+                    core::ptr::copy_nonoverlapping(src, dst, bytes_in_page);
+                }
+            } else {
+                // 空洞 → 填零
+                buf[buf_offset..buf_offset + bytes_in_page].fill(0);
+            }
+
+            buf_offset += bytes_in_page;
+        }
+
+        Ok(effective_len)
     }
 
     fn write_at(
@@ -202,23 +276,85 @@ impl IndexNode for LockedRamFSInode {
         if buf.len() < len {
             return Err(SyscallErr::EINVAL);
         }
+        if len == 0 {
+            return Ok(0);
+        }
+
         let mut inode: MutexGuard<RamFSInode> = self.0.lock();
         if inode.metadata.file_type == FileType::Dir {
             return Err(SyscallErr::EISDIR);
         }
-        let data: &mut Vec<u8> = &mut inode.data;
-        if offset + len > data.len() {
-            data.resize(offset + len, 0);
+
+        // 获取 RamFS 引用（用于配额检查）
+        let ramfs: Arc<RamFS> = inode.fs.upgrade().ok_or(SyscallErr::EINVAL)?;
+
+        let first_page = offset / PAGE_SIZE;
+        let last_page = (offset + len - 1) / PAGE_SIZE;
+        let mut buf_offset: usize = 0;
+
+        for page_idx in first_page..=last_page {
+            let start_in_page = if page_idx == first_page {
+                offset % PAGE_SIZE
+            } else {
+                0
+            };
+            let page_end = if page_idx == last_page {
+                (offset + len - 1) % PAGE_SIZE + 1
+            } else {
+                PAGE_SIZE
+            };
+            let bytes_in_page = page_end - start_in_page;
+
+            // 按需分配页
+            if !inode.pages.contains_key(&page_idx) {
+                // 配额检查
+                if ramfs.max_pages > 0 {
+                    let mut page_count: MutexGuard<usize> = ramfs.page_count.lock();
+                    if *page_count >= ramfs.max_pages {
+                        return Err(SyscallErr::ENOSPC);
+                    }
+                    *page_count += 1;
+                }
+
+                let frame: Arc<FrameTracker> = match alloc_page() {
+                    Some(f) => f,
+                    None => {
+                        // 分配失败，回滚配额计数
+                        if ramfs.max_pages > 0 {
+                            let mut page_count = ramfs.page_count.lock();
+                            *page_count = page_count.saturating_sub(1);
+                        }
+                        return Err(SyscallErr::ENOMEM);
+                    }
+                };
+
+                inode.pages.insert(page_idx, frame);
+            }
+
+            // 从 buf 拷贝到物理页
+            let frame: &Arc<FrameTracker> = inode.pages.get(&page_idx).unwrap();
+            let dst: *mut u8 = page_ptr_mut(frame, start_in_page);
+            let src: *const u8 = buf.as_ptr().wrapping_add(buf_offset);
+            unsafe {
+                core::ptr::copy_nonoverlapping(src, dst, bytes_in_page);
+            }
+
+            buf_offset += bytes_in_page;
         }
-        let target = &mut data[offset..offset + len];
-        target.copy_from_slice(&buf[..len]);
+
+        // 更新文件大小
+        let new_size: usize = offset + len;
+        if new_size > inode.file_size {
+            inode.file_size = new_size;
+        }
+
         Ok(len)
     }
 
     fn metadata(&self) -> Result<Metadata, SyscallErr> {
         let inode = self.0.lock();
         let mut meta = inode.metadata.clone();
-        meta.size = inode.data.len() as i64;
+        meta.size = inode.file_size as i64;
         Ok(meta)
     }
 
@@ -300,7 +436,8 @@ impl IndexNode for LockedRamFSInode {
             parent: inode.self_ref.clone(),
             self_ref: Weak::default(),
             children: BTreeMap::new(),
-            data: Vec::new(),
+            pages: BTreeMap::new(),
+            file_size: 0,
             metadata: Metadata {
                 dev_id: 0,
                 inode_id: generate_inode_id(),
@@ -439,23 +576,87 @@ impl IndexNode for LockedRamFSInode {
 
     fn resize(&self, len: usize) -> Result<(), SyscallErr> {
         let mut inode = self.0.lock();
-        if inode.metadata.file_type == FileType::File {
-            inode.data.resize(len, 0);
-            Ok(())
-        } else {
-            Err(SyscallErr::EINVAL)
+        if inode.metadata.file_type != FileType::File {
+            return Err(SyscallErr::EINVAL);
         }
+
+        if len < inode.file_size {
+            // 缩容：释放超出新大小的页，清零最后一页的尾部
+            let ramfs_opt: Option<Arc<RamFS>> = inode.fs.upgrade();
+            let last_keep_page = if len == 0 {
+                // 删除所有页
+                let to_remove: Vec<usize> = inode.pages.keys().cloned().collect();
+                for idx in &to_remove {
+                    inode.pages.remove(idx);
+                    if let Some(ref ramfs) = ramfs_opt {
+                        if ramfs.max_pages > 0 {
+                            let mut page_count = ramfs.page_count.lock();
+                            *page_count = page_count.saturating_sub(1);
+                        }
+                    }
+                }
+                // last_keep_page 在 len==0 时不使用，设为 0 占位
+                0
+            } else {
+                (len - 1) / PAGE_SIZE
+            };
+
+            if len > 0 {
+                // 移除完全超出范围的页
+                let to_remove: Vec<usize> = inode
+                    .pages
+                    .keys()
+                    .filter(|&&k| k > last_keep_page)
+                    .cloned()
+                    .collect();
+                for idx in &to_remove {
+                    inode.pages.remove(idx);
+                    if let Some(ref ramfs) = ramfs_opt {
+                        if ramfs.max_pages > 0 {
+                            let mut page_count = ramfs.page_count.lock();
+                            *page_count = page_count.saturating_sub(1);
+                        }
+                    }
+                }
+
+                // 清零最后一页中超出新大小的部分
+                let start_zero = len % PAGE_SIZE;
+                if start_zero > 0 {
+                    let last_page_idx = (len - 1) / PAGE_SIZE;
+                    if let Some(frame) = inode.pages.get(&last_page_idx) {
+                        let ptr: *mut u8 = page_ptr_mut(frame, start_zero);
+                        let count: usize = PAGE_SIZE - start_zero;
+                        unsafe {
+                            core::ptr::write_bytes(ptr, 0, count);
+                        }
+                    }
+                }
+            }
+        }
+        // 扩容：只更新 file_size，页在 write_at 中按需分配
+
+        inode.file_size = len;
+        Ok(())
     }
 
     fn truncate(&self, len: usize) -> Result<(), SyscallErr> {
-        let mut inode = self.0.lock();
-        if inode.metadata.file_type == FileType::Dir {
-            return Err(SyscallErr::EINVAL);
+        // 目录不可 truncate（保留原有检查，行为委托给 resize）
+        {
+            let inode = self.0.lock();
+            if inode.metadata.file_type == FileType::Dir {
+                return Err(SyscallErr::EINVAL);
+            }
+            // 扩容只更新 file_size
+            if len >= inode.file_size {
+                drop(inode);
+                // 只更新大小，不分配页
+                let mut inode2 = self.0.lock();
+                inode2.file_size = len;
+                return Ok(());
+            }
         }
-        if inode.data.len() > len {
-            inode.data.resize(len, 0);
-        }
-        Ok(())
+        // 缩容委托给 resize
+        self.resize(len)
     }
 
     fn get_entry_name(&self, ino: InodeId) -> Result<String, SyscallErr> {
