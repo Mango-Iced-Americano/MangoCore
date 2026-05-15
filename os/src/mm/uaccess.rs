@@ -1,4 +1,4 @@
-use core::ops::IndexMut;
+use core::{marker::PhantomData, ops::IndexMut};
 
 use super::page_table::{FaultAccess, PageTable, UserAccess};
 use super::{PhysAddr, StepByOne, VirtAddr};
@@ -7,6 +7,196 @@ use alloc::vec::Vec;
 
 // Cap a single user buffer translation to avoid kernel OOM.
 const MAX_BUFFER_SIZE: usize = 1024 * 1024 * 8;
+
+#[derive(Clone, Copy)]
+pub struct UserPtr<T> {
+    ptr: *const T,
+    _marker: PhantomData<T>,
+}
+
+impl<T> UserPtr<T> {
+    pub const fn new(ptr: *const T) -> Self {
+        Self {
+            ptr,
+            _marker: PhantomData,
+        }
+    }
+
+    pub const fn from_addr(addr: usize) -> Self {
+        Self::new(addr as *const T)
+    }
+
+    pub fn is_null(&self) -> bool {
+        self.ptr.is_null()
+    }
+
+    pub fn addr(&self) -> usize {
+        self.ptr as usize
+    }
+
+    pub fn read(self, token: usize) -> Result<T, isize>
+    where
+        T: 'static + Copy,
+    {
+        if self.is_null() {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+        get_from_user(token, self.ptr)
+    }
+
+    pub fn read_optional(self, token: usize) -> Result<Option<T>, isize>
+    where
+        T: 'static + Copy,
+    {
+        if self.is_null() {
+            Ok(None)
+        } else {
+            self.read(token).map(Some)
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct UserPtrMut<T> {
+    ptr: *mut T,
+    _marker: PhantomData<T>,
+}
+
+impl<T> UserPtrMut<T> {
+    pub const fn new(ptr: *mut T) -> Self {
+        Self {
+            ptr,
+            _marker: PhantomData,
+        }
+    }
+
+    pub const fn from_addr(addr: usize) -> Self {
+        Self::new(addr as *mut T)
+    }
+
+    pub fn is_null(&self) -> bool {
+        self.ptr.is_null()
+    }
+
+    pub fn addr(&self) -> usize {
+        self.ptr as usize
+    }
+
+    pub fn read(self, token: usize) -> Result<T, isize>
+    where
+        T: 'static + Copy,
+    {
+        if self.is_null() {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+        get_from_user(token, self.ptr as *const T)
+    }
+
+    pub fn write(self, token: usize, value: &T) -> Result<(), isize>
+    where
+        T: 'static + Copy,
+    {
+        if self.is_null() {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+        copy_to_user(token, value, self.ptr)
+    }
+
+    pub fn write_optional(self, token: usize, value: Option<&T>) -> Result<(), isize>
+    where
+        T: 'static + Copy,
+    {
+        match (self.is_null(), value) {
+            (true, None) => Ok(()),
+            (true, Some(_)) => Err(crate::syscall::errno::EFAULT),
+            (false, None) => Ok(()),
+            (false, Some(value)) => self.write(token, value),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct UserSlice<T> {
+    ptr: *const T,
+    len: usize,
+    _marker: PhantomData<T>,
+}
+
+impl<T> UserSlice<T> {
+    pub const fn new(ptr: *const T, len: usize) -> Self {
+        Self {
+            ptr,
+            len,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    fn checked_byte_len(&self) -> Result<usize, isize> {
+        let byte_len = core::mem::size_of::<T>()
+            .checked_mul(self.len)
+            .ok_or(crate::syscall::errno::EFAULT)?;
+        if byte_len > MAX_BUFFER_SIZE {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+        Ok(byte_len)
+    }
+
+    pub fn read_array_into(self, token: usize, dst: &mut [T]) -> Result<(), isize>
+    where
+        T: 'static + Copy,
+    {
+        if dst.len() < self.len {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+        self.checked_byte_len()?;
+        copy_from_user_array(token, self.ptr, dst.as_mut_ptr(), self.len)
+    }
+
+    pub fn write_array_from(self, token: usize, src: &[T]) -> Result<(), isize>
+    where
+        T: 'static + Copy,
+    {
+        if src.len() < self.len {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+        self.checked_byte_len()?;
+        copy_to_user_array(token, src.as_ptr(), self.ptr as *mut T, self.len)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct UserCString {
+    ptr: *const u8,
+}
+
+impl UserCString {
+    pub const fn new(ptr: *const u8) -> Self {
+        Self { ptr }
+    }
+
+    pub const fn from_addr(addr: usize) -> Self {
+        Self::new(addr as *const u8)
+    }
+
+    pub fn is_null(&self) -> bool {
+        self.ptr.is_null()
+    }
+
+    pub fn read(self, token: usize) -> Result<String, isize> {
+        if self.is_null() {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+        translated_str(token, self.ptr)
+    }
+}
 
 // Check only user range bounds and arithmetic overflow.
 pub fn check_user_range(ptr: usize, len: usize) -> Result<usize, isize> {

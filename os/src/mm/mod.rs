@@ -72,6 +72,10 @@ pub use uaccess::{
     translated_str,
     try_get_from_user,
     UserBuffer,
+    UserCString,
+    UserPtr,
+    UserPtrMut,
+    UserSlice,
     // UserBufferIterator,
 };
 

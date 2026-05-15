@@ -2,7 +2,7 @@
     此文件内容用于
     内容与RISCV版本相同，无需修改
 */
-use crate::{syscall::errno::*, task::current_task, timer::TimeSpec};
+use crate::{mm::UserPtr, syscall::errno::*, task::current_task, timer::TimeSpec};
 use alloc::{collections::BTreeMap, sync::Arc};
 use lazy_static::lazy_static;
 use log::*;
@@ -76,7 +76,8 @@ pub struct Futex {
 
 // Futex wait 只读用户 word
 pub fn do_futex_wait(
-    futex_word: &u32,
+    futex_word: UserPtr<u32>,
+    token: usize,
     futex_key: usize,
     val: u32,
     timeout: Option<TimeSpec>,
@@ -92,11 +93,18 @@ pub fn do_futex_wait(
     let mut futex = futex_table.lock();
 
     // 持锁后再读一次，避免丢 wake
-    if *futex_word != val {
+    let futex_value = match futex_word.read(token) {
+        Ok(value) => value,
+        Err(errno) => {
+            drop(futex);
+            return errno;
+        }
+    };
+    if futex_value != val {
         drop(futex);
         trace!(
             "[futex] --wait-- **not match** futex: {:X}, val: {:X}",
-            *futex_word,
+            futex_value,
             val
         );
         return EAGAIN;
@@ -167,7 +175,8 @@ pub fn futex_wake_shared(phys_key: usize, val: u32) -> isize {
 
 /// Process-shared futex wait — 使用全局物理地址表
 pub fn do_futex_wait_shared(
-    futex_word: &u32,
+    futex_word: UserPtr<u32>,
+    token: usize,
     val: u32,
     timeout: Option<TimeSpec>,
     phys_key: usize,
@@ -177,11 +186,18 @@ pub fn do_futex_wait_shared(
     let mut shared = PROCESS_SHARED_FUTEX.lock();
 
     // 【修复 TOCTOU】：必须在持有全局锁之后重新读取 *futex_word
-    if *futex_word != val {
+    let futex_value = match futex_word.read(token) {
+        Ok(value) => value,
+        Err(errno) => {
+            drop(shared);
+            return errno;
+        }
+    };
+    if futex_value != val {
         drop(shared);
         trace!(
             "[futex-shared] --wait-- **not match** futex: {:X}, val: {:X}",
-            *futex_word,
+            futex_value,
             val
         );
         return EAGAIN;
