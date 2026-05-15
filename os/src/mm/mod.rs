@@ -6,6 +6,7 @@ mod filemap;
 mod frame_store;
 mod frame_allocator;
 mod heap_allocator;
+mod kernel_mapper;
 mod layout;
 mod vma;
 mod mapper;

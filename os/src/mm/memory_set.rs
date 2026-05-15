@@ -1,6 +1,7 @@
-use super::vma::*;
+use super::kernel_mapper::KernelMapper;
 use super::mapper::translate_page;
 use super::page_table::{FaultAccess, PageTable};
+use super::vma::*;
 use super::vma_set::VmaSet;
 use super::{Frame, PageMapper, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use crate::config::*;
@@ -240,7 +241,10 @@ impl<T: PageTable> MemorySet<T> {
     }
     /// 返回最高处地址
     pub fn highest_addr(&self) -> VirtAddr {
-        self.vmas.last().unwrap().get_end::<T>().into()
+        self.vmas
+            .last()
+            .map(|area| area.get_end::<T>().into())
+            .unwrap_or_else(|| VirtAddr::from(MMAP_BASE))
     }
     pub fn contains_valid_buffer(&self, buf: usize, size: usize, perm: MapPermission) -> bool {
         let start_vpn = VirtAddr::from(buf).floor();
@@ -343,8 +347,8 @@ impl<T: PageTable> MemorySet<T> {
     }
     /// Mention that trampoline is not collected by areas.
     fn map_trampoline(&mut self) {
-        PageMapper::new(&mut self.page_table)
-            .map(
+        KernelMapper::new(&mut self.page_table)
+            .map_page(
                 VirtAddr::from(TRAMPOLINE).into(),
                 PhysAddr::from(strampoline as usize).into(),
                 MapPermission::R | MapPermission::X,
@@ -353,8 +357,8 @@ impl<T: PageTable> MemorySet<T> {
     }
     /// Can be accessed in user mode.
     fn map_signaltrampoline(&mut self) {
-        PageMapper::new(&mut self.page_table)
-            .map(
+        KernelMapper::new(&mut self.page_table)
+            .map_page(
                 VirtAddr::from(SIGNAL_TRAMPOLINE).into(),
                 PhysAddr::from(ssignaltrampoline as usize).into(),
                 MapPermission::R | MapPermission::X | MapPermission::U,
@@ -378,46 +382,41 @@ impl<T: PageTable> MemorySet<T> {
             ".bss [{:#x}, {:#x})",
             sbss_with_stack as usize, ebss as usize
         );
-        macro_rules! anonymous_identical_map {
+        macro_rules! kernel_identical_map {
             ($begin:expr,$end:expr,$permission:expr) => {
-                memory_set
-                    .push(
-                        Vma::new(
-                            ($begin as usize).into(),
-                            ($end as usize).into(),
-                            MapType::Identical,
-                            $permission,
-                            None,
-                        ),
-                        None,
+                KernelMapper::new(&mut memory_set.page_table)
+                    .map_identical_range(
+                        ($begin as usize).into(),
+                        ($end as usize).into(),
+                        $permission,
                     )
                     .unwrap();
             };
             ($name:literal,$begin:expr,$end:expr,$permission:expr) => {
                 println!("mapping {}", $name);
-                anonymous_identical_map!($begin, $end, $permission);
+                kernel_identical_map!($begin, $end, $permission);
             };
         }
-        anonymous_identical_map!(
+        kernel_identical_map!(
             ".text section",
             stext,
             etext,
             MapPermission::R | MapPermission::X
         );
-        anonymous_identical_map!(".rodata section", srodata, erodata, MapPermission::R); // read only section
-        anonymous_identical_map!(
+        kernel_identical_map!(".rodata section", srodata, erodata, MapPermission::R); // read only section
+        kernel_identical_map!(
             ".data section",
             sdata,
             edata,
             MapPermission::R | MapPermission::W
         );
-        anonymous_identical_map!(
+        kernel_identical_map!(
             ".bss section",
             sbss_with_stack,
             ebss,
             MapPermission::R | MapPermission::W
         );
-        anonymous_identical_map!(
+        kernel_identical_map!(
             "physical memory",
             ekernel,
             MEMORY_END,
@@ -426,7 +425,7 @@ impl<T: PageTable> MemorySet<T> {
 
         println!("mapping memory-mapped registers");
         for pair in MMIO {
-            anonymous_identical_map!(
+            kernel_identical_map!(
                 (*pair).0,
                 ((*pair).0 + (*pair).1),
                 MapPermission::R | MapPermission::W

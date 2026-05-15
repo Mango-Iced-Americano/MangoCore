@@ -90,4 +90,8 @@ impl<'a, T: PageTable> PageMapper<'a, T> {
             .clear_dirty_bit(vpn)
             .map_err(|_| MemoryError::NotMapped)
     }
+
+    pub fn is_dirty(&self, vpn: VirtPageNum) -> Option<bool> {
+        self.page_table.is_dirty(vpn)
+    }
 }
