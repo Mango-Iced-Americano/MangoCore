@@ -150,7 +150,7 @@ impl Frame {
 }
 
 #[derive(Clone)]
-pub struct LinearMap {
+pub struct VmPageStore {
     pub vpn_range: VPNRange,
     // Frame改为BTree存储，避免使用Vec导致大量写入时直接写满堆内存
     frames: BTreeMap<VirtPageNum, Frame>,
@@ -162,11 +162,11 @@ pub struct LinearMap {
     swapped: usize,
 }
 
-impl Debug for LinearMap {
+impl Debug for VmPageStore {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         #[cfg(feature = "oom_handler")]
         return f
-            .debug_struct("LinearMap")
+            .debug_struct("VmPageStore")
             .field("vpn_range", &self.vpn_range)
             .field("resident_entries", &self.frames.len())
             .field("active", &self.active.len())
@@ -175,19 +175,19 @@ impl Debug for LinearMap {
             .finish();
         #[cfg(not(feature = "oom_handler"))]
         return f
-            .debug_struct("LinearMap")
+            .debug_struct("VmPageStore")
             .field("vpn_range", &self.vpn_range)
             .field("resident_entries", &self.frames.len())
             .finish();
     }
 }
 
-impl LinearMap {
+impl VmPageStore {
     pub fn try_clone(&self) -> Result<Self, isize> {
         Ok(self.clone())
     }
 
-    pub fn gen_dict(&self, vpn_range: VPNRange) -> LinearMap {
+    pub fn gen_dict(&self, vpn_range: VPNRange) -> VmPageStore {
         Self::new(vpn_range)
     }
 
@@ -217,13 +217,13 @@ impl LinearMap {
     }
 
     pub fn from_existing_frames(vpn_range: VPNRange, frames: Vec<Frame>) -> Self {
-        let mut linear = Self::new(vpn_range);
-        let start = linear.vpn_range.get_start();
+        let mut store = Self::new(vpn_range);
+        let start = store.vpn_range.get_start();
         for (offset, frame) in frames.into_iter().enumerate() {
             let vpn = VirtPageNum(start.0 + offset);
-            linear.insert_existing_frame(vpn, frame);
+            store.insert_existing_frame(vpn, frame);
         }
-        linear
+        store
     }
 
     pub fn contains_vpn(&self, key: VirtPageNum) -> bool {
@@ -372,7 +372,7 @@ impl LinearMap {
         #[cfg(feature = "oom_handler")]
         let (first_active, second_active) = Self::split_active_into_two(&self.active, cut);
 
-        let mut second = LinearMap {
+        let mut second = VmPageStore {
             vpn_range: VPNRange::new(cut, vpn_end),
             frames: second_frames,
             #[cfg(feature = "oom_handler")]
@@ -446,7 +446,7 @@ impl LinearMap {
 }
 
 #[cfg(feature = "oom_handler")]
-impl LinearMap {
+impl VmPageStore {
     pub(super) fn record_active(&mut self, vpn: VirtPageNum) -> Result<(), MemoryError> {
         if !self.contains_vpn(vpn) {
             return Err(MemoryError::BadAddress);

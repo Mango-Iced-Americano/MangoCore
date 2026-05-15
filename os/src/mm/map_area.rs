@@ -1,6 +1,6 @@
 use core::fmt::Debug;
 
-use super::frame_store::{Frame, LinearMap};
+use super::frame_store::{Frame, VmPageStore};
 use super::page_table::PageTable;
 use super::VPNRange;
 use super::KERNEL_SPACE;
@@ -33,7 +33,7 @@ pub struct MapArea {
     /// Range of the mapped virtual page numbers.
     /// Page aligned.
     /// Map physical page frame tracker to virtual pages for RAII & lookup.
-    pub inner: LinearMap,
+    pub inner: VmPageStore,
     /// Direct or framed(virtual) mapping?
     map_type: MapType,
     /// Permissions which are the or of RWXU, where U stands for user.
@@ -79,7 +79,7 @@ impl MapArea {
             end_vpn.0,
             map_perm
         );
-        let inner = LinearMap::try_new(VPNRange::new(start_vpn, end_vpn))?;
+        let inner = VmPageStore::try_new(VPNRange::new(start_vpn, end_vpn))?;
         Ok(Self {
             inner,
             map_type,
@@ -92,7 +92,7 @@ impl MapArea {
     /// thus leaving `data_frames` empty.
     pub fn from_another(another: &MapArea) -> Self {
         Self {
-            inner: LinearMap::new(VPNRange::new(
+            inner: VmPageStore::new(VPNRange::new(
                 another.inner.vpn_range.get_start(),
                 another.inner.vpn_range.get_end(),
             )),
@@ -125,7 +125,7 @@ impl MapArea {
         let start_vpn = start_va.floor();
         let end_vpn = VirtPageNum::from(start_vpn.0 + frames.len());
         Self {
-            inner: LinearMap::from_existing_frames(VPNRange::new(start_vpn, end_vpn), frames),
+            inner: VmPageStore::from_existing_frames(VPNRange::new(start_vpn, end_vpn), frames),
             map_type,
             map_perm,
             map_file: None,
@@ -236,7 +236,7 @@ impl MapArea {
         }
         Ok(())
     }
-    pub fn get_inner(&self) -> &LinearMap {
+    pub fn get_inner(&self) -> &VmPageStore {
         &self.inner
     }
     pub fn get_start<T: PageTable>(&self) -> VirtPageNum {
@@ -246,7 +246,7 @@ impl MapArea {
         self.get_inner().vpn_range.get_end()
     }
 
-    pub fn get_lock(&self) -> &LinearMap {
+    pub fn get_lock(&self) -> &VmPageStore {
         &self.inner
     }
     pub fn map_from_kernel_area<T: PageTable>(

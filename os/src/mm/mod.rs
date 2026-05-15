@@ -15,6 +15,7 @@ mod page_fault;
 mod page_table;
 mod uaccess;
 mod vma;
+mod vm_area_set;
 #[cfg(feature = "zram")]
 mod zram;
 pub use crate::hal::{KernelPageTableImpl, PageTableImpl};

@@ -1,6 +1,7 @@
 use super::map_area::*;
 use super::mapper::translate_page;
 use super::page_table::{FaultAccess, PageTable};
+use super::vm_area_set::VmAreaSet;
 use super::{Frame, PageMapper, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use crate::config::*;
 use crate::fs::SeekWhence;
@@ -71,7 +72,7 @@ pub struct MemorySet<T: PageTable> {
     /// 映射的区域向量
     /// 段是使用这种机制实现的，换句话说，它们可以被认为是MapArea的一个子集
     /// 但是，这个结构体中可能存在其他用途，比如说文件映射
-    areas: Vec<MapArea>,
+    areas: VmAreaSet,
 }
 
 impl<T: PageTable> MemorySet<T> {
@@ -80,14 +81,14 @@ impl<T: PageTable> MemorySet<T> {
     pub fn new_bare_kern() -> Self {
         Self {
             page_table: T::new_kern_space(),
-            areas: Vec::with_capacity(16),
+            areas: VmAreaSet::with_capacity(16),
         }
     }
     /// Create a new struct with no information at all.
     pub fn new_bare() -> Self {
         Self {
             page_table: T::new(),
-            areas: Vec::with_capacity(16),
+            areas: VmAreaSet::with_capacity(16),
         }
     }
     /// Getter to the token of current memory space, or "this" page table.
@@ -130,18 +131,8 @@ impl<T: PageTable> MemorySet<T> {
         &mut self,
         start_vpn: VirtPageNum,
     ) -> Result<(), MemoryError> {
-        if let Some((idx, area)) = self
-            .areas
-            .iter_mut()
-            .enumerate()
-            .find(|(_, area)| area.get_start::<T>() == start_vpn)
-        {
-            let result = area.unmap(&mut self.page_table);
-            self.areas.remove(idx);
-            result
-        } else {
-            Err(MemoryError::AreaNotFound)
-        }
+        self.areas
+            .remove_area_with_start(&mut self.page_table, start_vpn)
     }
     /// Push a not-yet-mapped map_area into current MemorySet and copy the data into it if any, allocating the needed memory for the map.
     fn push(
@@ -149,6 +140,10 @@ impl<T: PageTable> MemorySet<T> {
         mut map_area: MapArea,
         data: Option<&[u8]>,
     ) -> Result<(), (MemoryError, VirtPageNum)> {
+        let start_vpn = map_area.inner.vpn_range.get_start();
+        self.areas
+            .try_reserve(1)
+            .map_err(|_| (MemoryError::OutOfMemory, start_vpn))?;
         match data {
             Some(data) => {
                 let mut start = 0;
@@ -167,7 +162,9 @@ impl<T: PageTable> MemorySet<T> {
                 }
             }
         }
-        self.areas.push(map_area);
+        self.areas
+            .push(map_area)
+            .map_err(|_| (MemoryError::OutOfMemory, start_vpn))?;
         Ok(())
     }
     /// other parts will be zeroed
@@ -177,6 +174,10 @@ impl<T: PageTable> MemorySet<T> {
         offset: usize,
         data: &[u8],
     ) -> Result<(), (MemoryError, VirtPageNum)> {
+        let start_vpn = map_area.inner.vpn_range.get_start();
+        self.areas
+            .try_reserve(1)
+            .map_err(|_| (MemoryError::OutOfMemory, start_vpn))?;
         let len = data.len();
         let mut vpn_iter = map_area.inner.vpn_range.into_iter();
         if let Some(vpn) = vpn_iter.next() {
@@ -207,7 +208,9 @@ impl<T: PageTable> MemorySet<T> {
                 start = end;
             }
         }
-        self.areas.push(map_area);
+        self.areas
+            .push(map_area)
+            .map_err(|_| (MemoryError::OutOfMemory, start_vpn))?;
         Ok(())
     }
 
@@ -223,6 +226,7 @@ impl<T: PageTable> MemorySet<T> {
 
     /// Push the map area into the memory set without copying or allocation.
     pub fn push_no_alloc(&mut self, map_area: MapArea) -> Result<(), ()> {
+        self.areas.try_reserve(1).map_err(|_| ())?;
         for vpn in map_area.inner.vpn_range {
             let frame = map_area.inner.get_in_memory(&vpn).unwrap();
             if !PageMapper::new(&mut self.page_table).is_mapped(vpn) {
@@ -234,38 +238,9 @@ impl<T: PageTable> MemorySet<T> {
                 return Err(());
             }
         }
-        self.areas.push(map_area);
+        self.areas.push(map_area).map_err(|_| ())?;
         Ok(())
     }
-    #[cfg(feature = "loongarch64")]
-    pub fn last_mmap_area_idx(&self) -> Option<usize> {
-        let mmap_base = VirtAddr::from(USR_MMAP_BASE).floor();
-        let mmap_end = VirtAddr::from(USR_MMAP_END).floor();
-        self.areas
-            .iter()
-            .enumerate()
-            .filter(|(_, area)| {
-                let start_vpn = area.get_start::<T>();
-                start_vpn >= mmap_base && start_vpn < mmap_end
-            })
-            .max_by_key(|(_, area)| area.get_end::<T>().0)
-            .map(|(idx, _)| idx)
-    }
-    #[cfg(feature = "riscv")]
-    pub fn last_mmap_area_idx(&self) -> Option<usize> {
-        let mmap_base = VirtAddr::from(MMAP_BASE).floor();
-        let mmap_end = VirtAddr::from(MMAP_END).floor();
-        self.areas
-            .iter()
-            .enumerate()
-            .filter(|(_, area)| {
-                let start_vpn = area.get_start::<T>();
-                start_vpn >= mmap_base && start_vpn < mmap_end
-            })
-            .max_by_key(|(_, area)| area.get_end::<T>().0)
-            .map(|(idx, _)| idx)
-    }
-
     /// 返回最高处地址
     pub fn highest_addr(&self) -> VirtAddr {
         self.areas.last().unwrap().get_end::<T>().into()
@@ -292,14 +267,10 @@ impl<T: PageTable> MemorySet<T> {
         access: FaultAccess,
     ) -> Result<PhysAddr, MemoryError> {
         let vpn = addr.floor();
-        if let Some(area_idx) = self.areas.iter().position(|area| {
-            area.map_perm.contains(MapPermission::U)
-                && area.get_start::<T>() <= vpn
-                && vpn < area.get_end::<T>()
-        }) {
+        if let Some(area_idx) = self.areas.find_user_index(vpn) {
             let ctx = super::page_fault::FaultContext::new(addr, access);
             let page_table = &mut self.page_table;
-            let area = &mut self.areas[area_idx];
+            let area = self.areas.get_mut(area_idx).unwrap();
             super::page_fault::handle_page_fault(area, page_table, ctx)
         } else {
             // In all segments, nothing matches the requirements. Throws.
@@ -535,7 +506,7 @@ impl<T: PageTable> MemorySet<T> {
                         map_area
                             .map_from_kernel_area(&mut self.page_table, kernel_start_vpn)
                             .unwrap();
-                        self.areas.push(map_area);
+                        self.areas.push(map_area).map_err(|_| ENOMEM)?;
                     } else {
                         if let Err(_) = self.push_with_offset(
                             map_area,
@@ -635,7 +606,7 @@ impl<T: PageTable> MemorySet<T> {
                     &mut user_space.page_table,
                 )
                 .map_err(|_| crate::syscall::errno::ENOMEM)?;
-            memory_set.areas.push(new_area);
+            memory_set.areas.push(new_area)?;
             debug!(
                 "[fork] map shared area: {:?}",
                 user_space.areas[i].inner.vpn_range
@@ -831,143 +802,6 @@ impl<T: PageTable> MemorySet<T> {
         Ok((VirtAddr::from(start), VirtAddr::from(end)))
     }
 
-    fn area_overlaps_range(area: &MapArea, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> bool {
-        start_vpn < area.get_end::<T>() && end_vpn > area.get_start::<T>()
-    }
-
-    fn has_overlap(&self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> bool {
-        self.areas
-            .iter()
-            .any(|area| Self::area_overlaps_range(area, start_vpn, end_vpn))
-    }
-
-    fn insert_area_ordered(&mut self, new_area: MapArea) {
-        let start_vpn = new_area.get_start::<T>();
-        if let Some(idx) = self
-            .areas
-            .iter()
-            .position(|area| area.get_start::<T>() >= start_vpn)
-        {
-            self.areas.insert(idx, new_area);
-        } else {
-            self.areas.push(new_area);
-        }
-    }
-
-    fn split_area_for_range(
-        &mut self,
-        idx: usize,
-        start_vpn: VirtPageNum,
-        end_vpn: VirtPageNum,
-    ) -> Result<usize, isize> {
-        let area_start_vpn = self.areas[idx].get_start::<T>();
-        let area_end_vpn = self.areas[idx].get_end::<T>();
-        if start_vpn < area_start_vpn || end_vpn > area_end_vpn || start_vpn >= end_vpn {
-            return Err(EINVAL);
-        }
-        if start_vpn == area_start_vpn && end_vpn == area_end_vpn {
-            Ok(idx)
-        } else if start_vpn == area_start_vpn {
-            let second = self.areas[idx].into_two(end_vpn).map_err(|_| EINVAL)?;
-            self.areas.insert(idx + 1, second);
-            Ok(idx)
-        } else if end_vpn == area_end_vpn {
-            let second = self.areas[idx].into_two(start_vpn).map_err(|_| EINVAL)?;
-            self.areas.insert(idx + 1, second);
-            Ok(idx + 1)
-        } else {
-            // 中间拆分会留下左右两段，只操作中间目标段
-            let (second, third) = self.areas[idx]
-                .into_three(start_vpn, end_vpn)
-                .map_err(|_| EINVAL)?;
-            self.areas.insert(idx + 1, second);
-            self.areas.insert(idx + 2, third);
-            Ok(idx + 1)
-        }
-    }
-
-    fn unmap_range(
-        &mut self,
-        start_vpn: VirtPageNum,
-        end_vpn: VirtPageNum,
-        allow_empty: bool,
-    ) -> Result<bool, isize> {
-        let mut found_area = false;
-        let mut idx = 0usize;
-        while idx < self.areas.len() {
-            if !Self::area_overlaps_range(&self.areas[idx], start_vpn, end_vpn) {
-                idx += 1;
-                continue;
-            }
-            if !self.areas[idx].map_perm.contains(MapPermission::U) {
-                return Err(EINVAL);
-            }
-            found_area = true;
-            let area_start_vpn = self.areas[idx].get_start::<T>();
-            let area_end_vpn = self.areas[idx].get_end::<T>();
-            let overlap_start = if start_vpn > area_start_vpn {
-                start_vpn
-            } else {
-                area_start_vpn
-            };
-            let overlap_end = if end_vpn < area_end_vpn {
-                end_vpn
-            } else {
-                area_end_vpn
-            };
-            let target_idx = self.split_area_for_range(idx, overlap_start, overlap_end)?;
-            {
-                let page_table = &mut self.page_table;
-                let area = &mut self.areas[target_idx];
-                if let Err(_) = area.unmap(page_table) {
-                    warn!("[munmap] Some pages are already unmapped, is it caused by lazy alloc?");
-                }
-            }
-            self.areas.remove(target_idx);
-            idx = target_idx;
-        }
-        if found_area || allow_empty {
-            Ok(found_area)
-        } else {
-            Err(EINVAL)
-        }
-    }
-
-    fn protect_area(&mut self, idx: usize, prot: MapPermission) {
-        let page_table = &mut self.page_table;
-        let area = &mut self.areas[idx];
-        let mut has_unmapped_page = false;
-        let actual_prot = if area.flags.contains(MapFlags::MAP_SHARED) {
-            prot
-        } else {
-            prot - MapPermission::W
-        };
-        for vpn in area.inner.vpn_range {
-            if area.frame_is_unallocated(vpn) {
-                if area.clear_stale_pte(page_table, vpn) {
-                    warn!(
-                        "[mprotect] clear stale lazy pte: vpn={:?}, area={:?}",
-                        vpn, area
-                    );
-                }
-                // lazy 页还没有实体帧，不能为了改权限强行造 PTE
-                has_unmapped_page = true;
-                continue;
-            }
-            // private 可写页先去掉 W，后续写入再走 COW
-            if PageMapper::new(page_table)
-                .set_flags(vpn, actual_prot)
-                .is_err()
-            {
-                has_unmapped_page = true;
-            }
-        }
-        if has_unmapped_page {
-            warn!("[mprotect] Some pages are not mapped, is it caused by lazy alloc?");
-        }
-        area.map_perm = prot;
-    }
-
     pub fn mmap(
         &mut self,
         start: usize,
@@ -990,44 +824,40 @@ impl<T: PageTable> MemorySet<T> {
             return ENOMEM;
         }
         let task = current_task().unwrap();
-        let idx = self.last_mmap_area_idx();
+        let (mmap_base, mmap_end) = Self::user_mmap_bounds();
+        let idx = self.areas.last_mmap_index(
+            VirtAddr::from(mmap_base).floor(),
+            VirtAddr::from(mmap_end).floor(),
+        );
         let fixed =
             flags.contains(MapFlags::MAP_FIXED) || flags.contains(MapFlags::MAP_FIXED_NOREPLACE);
         let start_va: VirtAddr = if fixed {
             let start_vpn = start_hint.floor();
             let end_vpn = requested_end.ceil();
-            if flags.contains(MapFlags::MAP_FIXED_NOREPLACE) && self.has_overlap(start_vpn, end_vpn)
+            if flags.contains(MapFlags::MAP_FIXED_NOREPLACE)
+                && self.areas.has_overlap(start_vpn, end_vpn)
             {
                 return EEXIST;
             }
             // MAP_FIXED 允许覆盖空洞，空洞不是错误
-            if let Err(errno) = self.unmap_range(start_vpn, end_vpn, true) {
+            if let Err(errno) =
+                self.areas
+                    .unmap_range(&mut self.page_table, start_vpn, end_vpn, true)
+            {
                 return errno;
             }
             start_hint
         } else {
             if let Some(idx) = idx {
-                let area = &mut self.areas[idx];
-                if flags.contains(MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS)
-                    && prot == area.map_perm
-                    && area.map_file.is_none()
+                match self
+                    .areas
+                    .try_merge_lazy_private_mmap::<T>(idx, len, prot, flags, mmap_end)
                 {
-                    let end_va: VirtAddr = area.get_end::<T>().into();
-                    let new_end = match end_va.0.checked_add(len) {
-                        Some(new_end) => new_end,
-                        None => return EINVAL,
-                    };
-                    let (_, mmap_end) = Self::user_mmap_bounds();
-                    // Lazy private mappings no longer allocate per-page metadata here.
-                    if new_end <= mmap_end {
-                        debug!("[mmap] merge with previous area, call expand_to");
-                        if let Err(e) = area.expand_to::<T>(VirtAddr::from(new_end)) {
-                            return e;
-                        }
-                        return end_va.0 as isize;
-                    }
+                    Ok(Some(end_va)) => return end_va.0 as isize,
+                    Ok(None) => {}
+                    Err(errno) => return errno,
                 }
-                area.get_end::<T>().into()
+                self.areas.get(idx).unwrap().get_end::<T>().into()
             } else {
                 #[cfg(feature = "loongarch64")]
                 {
@@ -1044,7 +874,6 @@ impl<T: PageTable> MemorySet<T> {
             None => return EINVAL,
         };
         if !fixed {
-            let (_, mmap_end) = Self::user_mmap_bounds();
             if end > mmap_end {
                 return ENOMEM;
             }
@@ -1052,8 +881,11 @@ impl<T: PageTable> MemorySet<T> {
         let end_va = VirtAddr::from(end);
         let start_vpn = start_va.floor();
         let end_vpn = end_va.ceil();
-        if self.has_overlap(start_vpn, end_vpn) {
+        if self.areas.has_overlap(start_vpn, end_vpn) {
             return EINVAL;
+        }
+        if let Err(errno) = self.areas.try_reserve(1) {
+            return errno;
         }
         let mut new_area = match MapArea::try_new(start_va, end_va, MapType::Framed, prot, None) {
             Ok(area) => area,
@@ -1161,8 +993,9 @@ impl<T: PageTable> MemorySet<T> {
             }
         }
 
-        // insert MapArea and keep the order
-        self.insert_area_ordered(new_area);
+        if let Err(errno) = self.areas.insert_ordered(new_area) {
+            return errno;
+        }
 
         start_va.0 as isize
     }
@@ -1174,7 +1007,9 @@ impl<T: PageTable> MemorySet<T> {
         }
         let start_vpn = start_va.floor();
         let end_vpn = end_va.ceil();
-        self.unmap_range(start_vpn, end_vpn, true).map(|_| ())
+        self.areas
+            .unmap_range(&mut self.page_table, start_vpn, end_vpn, true)
+            .map(|_| ())
     }
     pub fn mprotect(&mut self, addr: usize, len: usize, prot: MapPermission) -> Result<(), isize> {
         if len == 0 {
@@ -1192,33 +1027,8 @@ impl<T: PageTable> MemorySet<T> {
         );
         let start_vpn = start_va.floor();
         let end_vpn = end_va.ceil();
-        let mut cursor = start_vpn;
-        while cursor < end_vpn {
-            let Some(idx) = self.areas.iter().enumerate().find_map(|(idx, area)| {
-                if area.map_perm.contains(MapPermission::U)
-                    && area.get_start::<T>() <= cursor
-                    && cursor < area.get_end::<T>()
-                {
-                    Some(idx)
-                } else {
-                    None
-                }
-            }) else {
-                warn!("[mprotect] addr: {:?} is not in any user MapArea", cursor);
-                return Err(ENOMEM);
-            };
-            let area_end = self.areas[idx].get_end::<T>();
-            let protect_end = if area_end < end_vpn {
-                area_end
-            } else {
-                end_vpn
-            };
-            // 跨 VMA 时每段单独拆，遇到洞就返回 ENOMEM
-            let target_idx = self.split_area_for_range(idx, cursor, protect_end)?;
-            self.protect_area(target_idx, prot);
-            cursor = protect_end;
-        }
-        Ok(())
+        self.areas
+            .protect_range(&mut self.page_table, start_vpn, end_vpn, prot)
     }
     pub fn create_elf_tables(
         &self,

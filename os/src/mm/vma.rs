@@ -29,6 +29,26 @@ pub(super) enum VmPageState {
 }
 
 impl MapArea {
+    pub(super) fn vm_start(&self) -> VirtPageNum {
+        self.inner.vpn_range.get_start()
+    }
+
+    pub(super) fn vm_end(&self) -> VirtPageNum {
+        self.inner.vpn_range.get_end()
+    }
+
+    pub(super) fn vm_contains(&self, vpn: VirtPageNum) -> bool {
+        self.vm_start() <= vpn && vpn < self.vm_end()
+    }
+
+    pub(super) fn vm_overlaps(&self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> bool {
+        start_vpn < self.vm_end() && end_vpn > self.vm_start()
+    }
+
+    pub(super) fn vm_is_user(&self) -> bool {
+        self.map_perm.contains(MapPermission::U)
+    }
+
     pub(super) fn vm_kind(&self) -> VmAreaKind {
         if self.map_file.is_some() {
             VmAreaKind::FileBacked
@@ -47,6 +67,16 @@ impl MapArea {
 
     pub(super) fn vm_mapping(&self) -> VmAreaMapping {
         self.vm_mapping_type()
+    }
+
+    pub(super) fn vm_can_merge_lazy_private(
+        &self,
+        prot: MapPermission,
+        flags: MapFlags,
+    ) -> bool {
+        flags.contains(MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS)
+            && prot == self.map_perm
+            && self.map_file.is_none()
     }
 
     pub(super) fn vm_perm(&self) -> MapPermission {
