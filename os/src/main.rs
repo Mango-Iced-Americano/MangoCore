@@ -121,7 +121,7 @@ pub fn rust_main() -> ! {
     // use crate::drivers::block::block_device_test;
     // block_device_test();
     // 调试：强制 ramfs 启动，跳过块设备检测
-    fs::force_ramfs();
+    // fs::force_ramfs();  // 注释掉以允许真磁盘文件系统检测
     drivers::init_net_device();
     net::config::init();
     #[cfg(feature = "block_virt")]

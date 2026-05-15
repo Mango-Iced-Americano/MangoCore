@@ -36,7 +36,7 @@ use lazy_static::*;
 use self::vfs::IndexNode;
 
 /// 强制使用 ramfs，跳过块设备检测（用于 VFS 层调试）
-static FORCE_RAMFS: AtomicBool = AtomicBool::new(true);
+static FORCE_RAMFS: AtomicBool = AtomicBool::new(false);
 
 /// 在 BLOCK_DEVICE 初始化之前调用此函数，可跳过块设备检测，直接使用 ramfs 启动
 pub fn force_ramfs() {
@@ -53,7 +53,7 @@ lazy_static! {
         } else {
             self::filesystem::pre_mount()
         };
-        match fs_type {
+        let mfs = match fs_type {
             self::filesystem::FS_Type::Fat32 => {
                 let efs = self::fat32::EasyFileSystem::open(
                     BLOCK_DEVICE.clone(),
@@ -83,11 +83,11 @@ lazy_static! {
                 let devfs = crate::fs::dev::DevFS::new();
                 devfs.add_dev("tty", crate::fs::dev::tty::TTY.clone() as Arc<dyn self::vfs::IndexNode>)
                     .expect("devfs: failed to register /dev/tty");
-                devfs.add_dev("null", alloc::sync::Arc::new(crate::fs::dev::null::Null {}) as Arc<dyn self::vfs::IndexNode>)
+                devfs.add_dev("null", alloc::sync::Arc::new(crate::fs::dev::null::Null) as Arc<dyn self::vfs::IndexNode>)
                     .expect("devfs: failed to register /dev/null");
-                devfs.add_dev("zero", alloc::sync::Arc::new(crate::fs::dev::zero::Zero {}) as Arc<dyn self::vfs::IndexNode>)
+                devfs.add_dev("zero", alloc::sync::Arc::new(crate::fs::dev::zero::Zero) as Arc<dyn self::vfs::IndexNode>)
                     .expect("devfs: failed to register /dev/zero");
-                devfs.add_dev("urandom", alloc::sync::Arc::new(crate::fs::dev::urandom::Urandom {}) as Arc<dyn self::vfs::IndexNode>)
+                devfs.add_dev("urandom", alloc::sync::Arc::new(crate::fs::dev::urandom::Urandom) as Arc<dyn self::vfs::IndexNode>)
                     .expect("devfs: failed to register /dev/urandom");
 
                 // 将 DevFS 挂载到 /dev
@@ -98,7 +98,27 @@ lazy_static! {
 
                 mfs
             }
+        };
+        // 为磁盘文件系统 (Fat32/Ext4) 挂载 DevFS 到 /dev
+        if fs_type != self::filesystem::FS_Type::Null {
+            let root = mfs.mountpoint_root_inode();
+            let dev_inode = if let Ok(existing) = root.find("dev") {
+                existing
+            } else {
+                root.create("dev", self::vfs::FileType::Dir, self::vfs::InodeMode::from_bits_truncate(0o755))
+                    .expect("failed to create /dev")
+            };
+            let devfs = crate::fs::dev::DevFS::new();
+            devfs.add_dev("tty", crate::fs::dev::tty::TTY.clone() as Arc<dyn self::vfs::IndexNode>).unwrap();
+            devfs.add_dev("null", alloc::sync::Arc::new(crate::fs::dev::null::Null) as Arc<dyn self::vfs::IndexNode>).unwrap();
+            devfs.add_dev("zero", alloc::sync::Arc::new(crate::fs::dev::zero::Zero) as Arc<dyn self::vfs::IndexNode>).unwrap();
+            devfs.add_dev("urandom", alloc::sync::Arc::new(crate::fs::dev::urandom::Urandom) as Arc<dyn self::vfs::IndexNode>).unwrap();
+            let dev_inode_id = dev_inode.metadata().expect("dev_inode metadata failed").inode_id;
+            let devfs_mnt = self::vfs::MountFS::new(devfs, self::vfs::MountFlags::empty());
+            mfs.add_mount(dev_inode_id, devfs_mnt)
+                .expect("failed to mount devfs at /dev");
         }
+        mfs
     };
 }
 
