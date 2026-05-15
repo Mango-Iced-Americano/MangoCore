@@ -832,6 +832,7 @@ pub fn sys_execve(
             };
 
             let task = current_task().unwrap();
+            *task.exe_path.lock() = path.clone();
             show_frame_consumption! {
                 "load_elf";
                 if let Err(errno) = task.load_elf(elf, &argv_vec, &envp_vec) {

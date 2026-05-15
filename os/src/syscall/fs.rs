@@ -773,8 +773,9 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> isize {
             }
         }
     };
-    // 获取目录项向量
-    let dirent_vec = match file.get_dirent(count) {
+    // 获取目录项向量 — count 是字节数，需要转换为最大条目数
+    let max_entries = count / size_of::<Dirent>();
+    let dirent_vec = match file.get_dirent(max_entries) {
         Ok(vec) => vec,
         Err(errno) => return errno,
     };
@@ -880,7 +881,11 @@ pub fn sys_readlinkat(dirfd: usize, pathname: *const u8, buf: *mut u8, bufsiz: u
         Err(errno) => return errno,
     };
     let real_path = if path.as_str() == "/proc/self/exe" {
-        task.exe.lock().get_cwd().unwrap()
+        let exe_path = task.exe_path.lock().clone();
+        if exe_path.is_empty() {
+            return ENOENT;
+        }
+        exe_path
     } else {
         let start = match resolve_start_inode(dirfd) { Ok(s) => s, Err(e) => return e, };
 

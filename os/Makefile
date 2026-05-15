@@ -166,14 +166,14 @@ la64-inject-runtime:
 	@cmd_file=$$(mktemp); \
 	printf '%s\n' \
 		'rm /initproc' \
-		'rm /bash' \
-		'rm /busybox' \
+		'rm /bin/bash' \
+		'rm /bin/busybox' \
 		'write ../user/target/loongarch64-unknown-linux-gnu/$(MODE)/initproc /initproc' \
-		'write ./bash-la /bash' \
-		'write ./busybox-la /busybox' \
+		'write ./bash-la /bin/bash' \
+		'write ./busybox-la /bin/busybox' \
 		'stat /initproc' \
-		'stat /bash' \
-		'stat /busybox' > $$cmd_file; \
+		'stat /bin/bash' \
+		'stat /bin/busybox' > $$cmd_file; \
 	debugfs -w -f $$cmd_file ../sdcard-la.img; \
 	rm -f $$cmd_file
 

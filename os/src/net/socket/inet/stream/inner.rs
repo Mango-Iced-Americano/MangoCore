@@ -39,26 +39,8 @@ pub const TCP_MSS: u32 = if TCP_MSS_DEFAULT > 65536 {
 pub const BACKLOG_SIZE: u32 = 16;
 pub const LISTEN_BUFFER_SIZE: usize = 2048;
 
-// ── EPOLL 事件位 ─────────────────────────────────────────────────────
-
-bitflags! {
-    /// Epoll 事件位 —— 用于 AtomicUsize pollee 缓存。
-    /// 值与 Linux include/uapi/asm-generic/poll.h 一致。
-    /// 参考 DragonOS `net/socket/inet/common.rs` 的 `EPollEventType` 设计。
-    pub struct EPollEvent: usize {
-        const EPOLLIN       = 0x001;
-        const EPOLLPRI      = 0x002;
-        const EPOLLOUT      = 0x004;
-        const EPOLLERR      = 0x008;
-        const EPOLLHUP      = 0x010;
-        const EPOLLRDNORM   = 0x040;
-        const EPOLLRDBAND   = 0x080;
-        const EPOLLWRNORM   = 0x100;
-        const EPOLLWRBAND   = 0x200;
-        const EPOLLMSG      = 0x400;
-        const EPOLLRDHUP    = 0x2000;
-    }
-}
+// EPollEvent 已移至 fs/vfs/event.rs，全内核统一使用该定义。
+pub use crate::fs::vfs::event::EPollEvent;
 
 // ── 连接结果枚举 ──────────────────────────────────────────────────────
 

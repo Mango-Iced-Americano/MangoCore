@@ -33,8 +33,9 @@ use crate::{
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
 };
 
+use crate::fs::vfs::event::EPollEvent;
 use self::inner::{
-    with_tcp_mut, Connecting, EPollEvent, Established, Init, Listening, SelfConnected, BACKLOG_SIZE,
+    with_tcp_mut, Connecting, Established, Init, Listening, SelfConnected, BACKLOG_SIZE,
 };
 use crate::net::socket::inet::common::PortManager;
 use crate::net::socket::inet::stream::inner::ConnectResult;

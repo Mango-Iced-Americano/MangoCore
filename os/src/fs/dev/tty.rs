@@ -2,6 +2,7 @@ use crate::fs::directory_tree::DirectoryTreeNode;
 use crate::fs::dirent::Dirent;
 use crate::fs::file_trait::File;
 use crate::fs::layout::Stat;
+use crate::fs::vfs::event::EPollEvent;
 use crate::fs::DiskInodeType;
 use crate::fs::StatMode;
 use crate::hal::console_getchar;
@@ -174,6 +175,7 @@ impl IndexNode for Teletype {
             if inner.last_char == b'\r' {
                 print!("\n");
             } else {
+                log::info!("[tty] echo '{}' (0x{:02x})", inner.last_char as char, inner.last_char);
                 print!("{}", inner.last_char as char);
             }
         }
@@ -238,9 +240,9 @@ impl IndexNode for Teletype {
         drop(inner);
         let mut revents: usize = 0;
         if has_data {
-            revents |= 1; // POLLIN
+            revents |= EPollEvent::EPOLLIN.bits();
         }
-        revents |= 0x4; // POLLOUT (always writable)
+        revents |= EPollEvent::EPOLLOUT.bits(); // TTY always writable
         Ok(revents)
     }
 

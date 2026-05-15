@@ -33,6 +33,7 @@ use spin::Mutex;
 use crate::fs::vfs::{
     FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata,
 };
+use crate::fs::vfs::event::EPollEvent;
 use crate::fs::vfs::file_system::FileSystem as NewFileSystem;
 use crate::fs::vfs::file_system::{FileSystem, FsInfo, SuperBlock};
 use crate::timer::TimeSpec;
@@ -613,13 +614,13 @@ impl IndexNode for SocketFile {
     fn poll(&self, _private_data: &FilePrivateData) -> Result<usize, SyscallErr> {
         let mut revents: usize = 0;
         if self.inner.socket_r_ready() {
-            revents |= 1; // POLLIN
+            revents |= EPollEvent::EPOLLIN.bits();
         }
         if self.inner.socket_w_ready() {
-            revents |= 0x4; // POLLOUT
+            revents |= EPollEvent::EPOLLOUT.bits();
         }
         if self.inner.socket_hang_up() {
-            revents |= 0x10; // POLLHUP
+            revents |= EPollEvent::EPOLLHUP.bits();
         }
         Ok(revents)
     }

@@ -1,6 +1,7 @@
 use crate::fs::directory_tree::DirectoryTreeNode;
 use crate::fs::dirent::Dirent;
 use crate::fs::layout::Stat;
+use crate::fs::vfs::event::EPollEvent;
 use crate::fs::DiskInodeType;
 use crate::fs::StatMode;
 use crate::syscall::errno::*;
@@ -127,16 +128,16 @@ impl IndexNode for Pipe {
         let mut revents: usize = 0;
         if self.readable {
             if ring.status != RingBufferStatus::EMPTY || ring.all_write_ends_closed() {
-                revents |= 1; // POLLIN
+                revents |= EPollEvent::EPOLLIN.bits();
             }
         }
         if self.writable {
             if ring.status != RingBufferStatus::FULL || ring.all_read_ends_closed() {
-                revents |= 0x4; // POLLOUT
+                revents |= EPollEvent::EPOLLOUT.bits();
             }
         }
         if ring.all_write_ends_closed() && ring.all_read_ends_closed() {
-            revents |= 0x10; // POLLHUP
+            revents |= EPollEvent::EPOLLHUP.bits();
         }
         Ok(revents)
     }

@@ -53,6 +53,8 @@ pub struct TaskControlBlock {
     // 可共享&可变字段
     /// 可执行文件描述符（新 VFS）
     pub exe: Arc<Mutex<vfs::File>>,
+    /// 可执行文件路径（用于 /proc/self/exe）
+    pub exe_path: Mutex<String>,
     /// 线程ID分配器
     pub tid_allocator: Arc<Mutex<RecycleAllocator>>,
     /// 文件描述符表（新 VFS）
@@ -415,6 +417,7 @@ impl TaskControlBlock {
             ustack_base: ustack_bottom_from_tid(tid),
             exit_signal: Signals::empty(),
             exe: Arc::new(Mutex::new(elf)),
+            exe_path: Mutex::new(String::new()),
             tid_allocator,
             files: Arc::new(Mutex::new(fd_table)),
             fs: Arc::new(Mutex::new(FsStatus {
@@ -684,6 +687,7 @@ impl TaskControlBlock {
 
             // 资源共享控制
             exe: self.exe.clone(),
+            exe_path: Mutex::new(self.exe_path.lock().clone()),
             tid_allocator,
             files,
             fs,

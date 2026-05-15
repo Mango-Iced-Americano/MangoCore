@@ -654,14 +654,18 @@ impl File {
 
     /// 读就绪检查（poll 用）
     pub fn r_ready(&self) -> bool {
-        // 默认: 总是可读（具体类型应在 IndexNode::poll 中提供）
-        true
+        match self.inode.poll(&*self.private_data.lock()) {
+            Ok(revents) => (revents & super::event::EPollEvent::EPOLLIN.bits()) != 0,
+            Err(_) => true, // ENOSYS fallback: 不支持 poll 的普通文件默认可读
+        }
     }
 
     /// 写就绪检查（poll 用）
     pub fn w_ready(&self) -> bool {
-        // 默认: 总是可写
-        true
+        match self.inode.poll(&*self.private_data.lock()) {
+            Ok(revents) => (revents & super::event::EPollEvent::EPOLLOUT.bits()) != 0,
+            Err(_) => true,
+        }
     }
 
     // ── 属性访问 ───────────────────────────────────────────────────
@@ -873,29 +877,50 @@ impl File {
             .inode
             .list()
             .map_err(|_| crate::syscall::errno::ENOSYS)?;
-        let dirents: Vec<crate::fs::dirent::Dirent> = names
+
+        let dirent_size = core::mem::size_of::<crate::fs::dirent::Dirent>();
+        let offset = self.offset.load(Ordering::SeqCst);
+        let start_index = offset / dirent_size;
+
+        if start_index >= names.len() {
+            return Ok(Vec::new());
+        }
+
+        let mut dirents: Vec<crate::fs::dirent::Dirent> = names
             .iter()
+            .skip(start_index)
             .take(count)
-            .map(|name| {
-                let d_type = match self.inode.find(name) {
+            .enumerate()
+            .map(|(i, name)| {
+                let (d_type, d_ino) = match self.inode.find(name) {
                     Ok(child) => match child.metadata() {
-                        Ok(m) => match m.file_type {
-                            FileType::Dir => 4,       // DT_DIR
-                            FileType::File => 8,       // DT_REG
-                            FileType::SymLink => 10,   // DT_LNK
-                            FileType::CharDevice => 2, // DT_CHR
-                            FileType::BlockDevice => 6,// DT_BLK
-                            FileType::Pipe => 5,       // DT_FIFO
-                            FileType::Socket => 12,    // DT_SOCK
-                            _ => 0,                    // DT_UNKNOWN
-                        },
-                        Err(_) => 0,
+                        Ok(m) => {
+                            let dt = match m.file_type {
+                                FileType::Dir => 4,       // DT_DIR
+                                FileType::File => 8,       // DT_REG
+                                FileType::SymLink => 10,   // DT_LNK
+                                FileType::CharDevice => 2, // DT_CHR
+                                FileType::BlockDevice => 6,// DT_BLK
+                                FileType::Pipe => 5,       // DT_FIFO
+                                FileType::Socket => 12,    // DT_SOCK
+                                _ => 0,                    // DT_UNKNOWN
+                            };
+                            (dt, m.inode_id)
+                        }
+                        Err(_) => (0, 0),
                     },
-                    Err(_) => 0,
+                    Err(_) => (0, 0),
                 };
-                crate::fs::dirent::Dirent::new(0, 0, d_type, name)
+                // d_off = 下一个条目的偏移量，Linux 语义
+                let d_off = ((start_index + i + 1) * dirent_size) as isize;
+                crate::fs::dirent::Dirent::new(d_ino, d_off, d_type, name)
             })
             .collect();
+
+        // 更新文件偏移量，确保下一次 getdents64 从正确位置继续
+        let new_offset = (start_index + dirents.len()) * dirent_size;
+        self.offset.store(new_offset, Ordering::SeqCst);
+
         Ok(dirents)
     }
 

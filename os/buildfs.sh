@@ -72,7 +72,7 @@ mkdir -p ${U_FS_DIR}/fs/lib
 mkdir -p ${U_FS_DIR}/fs/etc
 mkdir -p ${U_FS_DIR}/fs/bin
 mkdir -p ${U_FS_DIR}/fs/root
-printf 'root:x:0:0:root:/root:/bash\n' > ${U_FS_DIR}/fs/etc/passwd
+printf 'root:x:0:0:root:/root:/bin/bash\n' > ${U_FS_DIR}/fs/etc/passwd
 touch ${U_FS_DIR}/fs/root/.bash_history
 
 # 只能copy一个文件夹下所有内容，无法copy单文件
@@ -98,15 +98,16 @@ fi
 if [ "$2" = "laqemu" ]; then
     cp -r ../user/LaTest/* ${U_FS_DIR}/fs/
     cp -r ../user/fs/* ${U_FS_DIR}/fs/
-    cp ./bash-la ${U_FS_DIR}/fs/bash
-    cp ./busybox-la ${U_FS_DIR}/fs/busybox
+    cp ./bash-la ${U_FS_DIR}/fs/bin/bash
+    cp ./busybox-la ${U_FS_DIR}/fs/bin/busybox
     cp ../user/target/loongarch64-unknown-linux-gnu/release/initproc ${U_FS_DIR}/fs/
 fi
 
 if [ "$2" = "rvqemu" ]; then
-    try_copy cp -r ./bash-rv ${U_FS_DIR}/fs/bin/bash
-    try_copy cp -r ../user/target/riscv64gc-unknown-none-elf/release/initproc ${U_FS_DIR}/fs/
-    try_copy cp -r ../1.txt ${U_FS_DIR}/fs/
+    cp ./bash-rv ${U_FS_DIR}/fs/bin/bash
+    cp ./busybox-rv ${U_FS_DIR}/fs/bin/busybox
+    cp ../user/target/riscv64gc-unknown-none-elf/release/initproc ${U_FS_DIR}/fs/
+    cp ../1.txt ${U_FS_DIR}/fs/ 2>/dev/null || true
 fi
 
 umount ${U_FS_DIR}/fs

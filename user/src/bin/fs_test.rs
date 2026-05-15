@@ -804,5 +804,43 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     if test_getdents64() { passed += 1; } else { failed += 1; }
 
     println!("=== FS Test: {}/{} passed ===", passed, passed + failed);
+
+    /*
+    // ── TTY diagnostics (comment in to debug echo) ─────────────────
+    println!("=== TTY Diagnostics ===");
+    tty_diag();
+    */
+
     0
 }
+
+/*
+fn tty_diag() {
+    use user_lib::syscall::{sys_ioctl, sys_open, sys_close, sys_write, TCGETS, Termios};
+    let mut t = Termios { iflag: 0, oflag: 0, cflag: 0, lflag: 0, line: 0, cc: [0; 19] };
+    let fd = sys_open("/dev/tty\0", 0);
+    if fd < 0 {
+        println!("  TTY open failed: {}", fd);
+        return;
+    }
+    let ret = sys_ioctl(fd as usize, TCGETS, &mut t as *mut Termios as usize);
+    if ret < 0 {
+        println!("  TCGETS failed: {}", ret);
+    } else {
+        println!("  termios lflag=0o{:o} ECHO={} ICANON={} ISIG={} cc[VEOF]={} cc[VEOL]={}",
+            t.lflag, t.has_echo(), t.has_icanon(), t.has_isig(), t.cc[4], t.cc[11]);
+    }
+    sys_close(fd as usize);
+
+    let mut t2 = Termios { iflag: 0, oflag: 0, cflag: 0, lflag: 0, line: 0, cc: [0; 19] };
+    let ret = sys_ioctl(0, TCGETS, &mut t2 as *mut Termios as usize);
+    if ret < 0 {
+        println!("  TCGETS on fd 0 failed: {}", ret);
+    } else {
+        println!("  fd0 termios lflag=0o{:o} ECHO={} ICANON={} ISIG={}",
+            t2.lflag, t2.has_echo(), t2.has_icanon(), t2.has_isig());
+    }
+
+    println!("=== TTY Diagnostics Done ===");
+}
+*/

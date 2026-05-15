@@ -145,7 +145,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     crate::trace_event!(syscall_id, args[0], args[1], args[2], args[3], args[4], args[5]);
     // 记录当前系统调用 ID，供 OOM 诊断使用
     crate::task::set_current_syscall_id(Some(syscall_id));
-    let mut show_info = false;
+    let mut show_info = true;
     if option_env!("LOG").is_some()
         && ![
             //black list
@@ -165,7 +165,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         .contains(&syscall_id)
     {
         show_info = false;
-        log::debug!(
+        log::info!(
             "[syscall] {}({}) args: [{:X}, {:X}, {:X}, {:X}, {:X}, {:X}]",
             syscall_name(syscall_id),
             syscall_id,
