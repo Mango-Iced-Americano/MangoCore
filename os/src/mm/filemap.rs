@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use super::page_fault::FaultContext;
 use super::user_mapper::UserMapper;
 use super::vma::Vma;
@@ -99,5 +97,5 @@ fn rounded_file_page_end(file_size: usize) -> usize {
 }
 
 fn page_bytes_mut(ppn: PhysPageNum) -> &'static mut [u8] {
-    unsafe { core::slice::from_raw_parts_mut(PhysAddr::from(ppn).0 as *mut u8, PAGE_SIZE) }
+    ppn.get_bytes_array()
 }

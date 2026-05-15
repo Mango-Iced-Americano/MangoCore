@@ -1,9 +1,6 @@
-#![allow(dead_code)]
-
 use super::kernel_mapper::KernelMapper;
-use super::memory_set::MemoryError;
 use super::{
-    frame_alloc, FrameTracker, MapPermission, PageTable, PhysAddr, PhysPageNum, VirtAddr,
+    frame_alloc, FrameTracker, MapPermission, MemoryError, PageTable, PhysAddr, PhysPageNum, VirtAddr,
     VirtPageNum, VPNRange,
 };
 use crate::config::*;
@@ -27,7 +24,6 @@ extern "C" {
     fn ebss();
     fn ekernel();
     fn strampoline();
-    fn ssignaltrampoline();
 }
 
 lazy_static! {
@@ -138,7 +134,6 @@ impl<T: PageTable> KernelSpace<T> {
             kernel_mappings: KernelMappingSet::new(),
         };
         // map trampoline
-        // TODO: 这里两者不一样，是为什么？
         if should_map_trampoline!() {
             kernel_space.map_trampoline();
         }
@@ -209,17 +204,6 @@ impl<T: PageTable> KernelSpace<T> {
                 VirtAddr::from(TRAMPOLINE).into(),
                 PhysAddr::from(strampoline as usize).into(),
                 MapPermission::R | MapPermission::X,
-            )
-            .unwrap();
-    }
-
-    /// Can be accessed in user mode.
-    fn map_signaltrampoline(&mut self) {
-        KernelMapper::new(&mut self.page_table)
-            .map_page(
-                VirtAddr::from(SIGNAL_TRAMPOLINE).into(),
-                PhysAddr::from(ssignaltrampoline as usize).into(),
-                MapPermission::R | MapPermission::X | MapPermission::U,
             )
             .unwrap();
     }

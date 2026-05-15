@@ -1,8 +1,5 @@
-#![allow(dead_code)]
-
 use super::{
-    MapPermission, MemoryError, MmResult, PageMapper, PageTable, PhysAddr, PhysPageNum, VirtAddr,
-    VirtPageNum,
+    mapper::PageMapper, MapPermission, MemoryError, MmResult, PageTable, PhysPageNum, VirtPageNum,
 };
 
 pub(super) struct UserMapper<'a, T: PageTable> {
@@ -59,10 +56,6 @@ impl<'a, T: PageTable> UserMapper<'a, T> {
         self.mapper.translate(vpn)
     }
 
-    pub(super) fn translate_addr(&self, va: VirtAddr) -> Option<PhysAddr> {
-        self.mapper.translate_addr(va)
-    }
-
     pub(super) fn set_user_flags(
         &mut self,
         vpn: VirtPageNum,
@@ -74,17 +67,5 @@ impl<'a, T: PageTable> UserMapper<'a, T> {
 
     pub(super) fn set_ppn(&mut self, vpn: VirtPageNum, ppn: PhysPageNum) -> MmResult<()> {
         self.mapper.set_ppn(vpn, ppn)
-    }
-
-    pub(super) fn revoke_write(&mut self, vpn: VirtPageNum) -> MmResult<()> {
-        self.mapper.revoke_write(vpn)
-    }
-
-    pub(super) fn clear_access_bit(&mut self, vpn: VirtPageNum) -> MmResult<()> {
-        self.mapper.clear_access_bit(vpn)
-    }
-
-    pub(super) fn clear_dirty_bit(&mut self, vpn: VirtPageNum) -> MmResult<()> {
-        self.mapper.clear_dirty_bit(vpn)
     }
 }

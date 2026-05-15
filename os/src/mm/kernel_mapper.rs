@@ -1,7 +1,5 @@
-#![allow(dead_code)]
-
 use super::{
-    MapPermission, MmResult, PageMapper, PageTable, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum,
+    mapper::PageMapper, MapPermission, MmResult, PageTable, PhysPageNum, VirtAddr, VirtPageNum,
     VPNRange,
 };
 
@@ -50,26 +48,7 @@ impl<'a, T: PageTable> KernelMapper<'a, T> {
         self.mapper.unmap_if_mapped(vpn)
     }
 
-    pub(super) fn unmap_range(
-        &mut self,
-        start_va: VirtAddr,
-        end_va: VirtAddr,
-    ) -> MmResult<()> {
-        for vpn in VPNRange::new(start_va.floor(), end_va.ceil()) {
-            self.unmap_page_if_mapped(vpn)?;
-        }
-        Ok(())
-    }
-
-    pub(super) fn translate(&self, va: VirtAddr) -> Option<PhysAddr> {
-        self.mapper.translate_addr(va)
-    }
-
     pub(super) fn clear_dirty_bit(&mut self, vpn: VirtPageNum) -> MmResult<()> {
         self.mapper.clear_dirty_bit(vpn)
-    }
-
-    pub(super) fn is_dirty(&self, vpn: VirtPageNum) -> Option<bool> {
-        self.mapper.is_dirty(vpn)
     }
 }

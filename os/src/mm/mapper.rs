@@ -1,8 +1,4 @@
-#![allow(dead_code)]
-
-use super::{
-    MapPermission, MemoryError, MmResult, PageTable, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum,
-};
+use super::{MapPermission, MemoryError, MmResult, PageTable, PhysPageNum, VirtPageNum};
 
 pub struct PageMapper<'a, T: PageTable> {
     page_table: &'a mut T,
@@ -57,10 +53,6 @@ impl<'a, T: PageTable> PageMapper<'a, T> {
         self.page_table.translate(vpn)
     }
 
-    pub fn translate_addr(&self, va: VirtAddr) -> Option<PhysAddr> {
-        self.page_table.translate_va(va)
-    }
-
     pub fn set_ppn(&mut self, vpn: VirtPageNum, ppn: PhysPageNum) -> MmResult<()> {
         self.page_table
             .set_ppn(vpn, ppn)
@@ -73,25 +65,9 @@ impl<'a, T: PageTable> PageMapper<'a, T> {
             .map_err(|_| MemoryError::NotMapped)
     }
 
-    pub fn revoke_write(&mut self, vpn: VirtPageNum) -> MmResult<()> {
-        self.page_table
-            .revoke_write(vpn)
-            .map_err(|_| MemoryError::NotMapped)
-    }
-
-    pub fn clear_access_bit(&mut self, vpn: VirtPageNum) -> MmResult<()> {
-        self.page_table
-            .clear_access_bit(vpn)
-            .map_err(|_| MemoryError::NotMapped)
-    }
-
     pub fn clear_dirty_bit(&mut self, vpn: VirtPageNum) -> MmResult<()> {
         self.page_table
             .clear_dirty_bit(vpn)
             .map_err(|_| MemoryError::NotMapped)
-    }
-
-    pub fn is_dirty(&self, vpn: VirtPageNum) -> Option<bool> {
-        self.page_table.is_dirty(vpn)
     }
 }

@@ -1,20 +1,14 @@
-pub mod addr;
 pub mod address;
-mod arch;
 mod address_space;
-mod error;
 mod filemap;
 mod frame_store;
 mod frame_allocator;
 mod heap_allocator;
 mod kernel_mapper;
 mod kernel_space;
-mod layout;
 mod vma;
 mod mapper;
-mod memory_set;
 mod mmap;
-pub mod page;
 mod page_fault;
 mod page_table;
 mod uaccess;
@@ -23,37 +17,19 @@ mod vma_set;
 #[cfg(feature = "zram")]
 mod zram;
 pub use crate::hal::{KernelPageTableImpl, PageTableImpl};
-#[allow(unused_imports)]
-pub use addr::{PhysRegion, VirtRegion};
 pub use address::PPNRange;
 use address::VPNRange;
 pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
-#[allow(unused_imports)]
-pub use arch::{CurrentMmArch, MemoryManagementArch};
-#[allow(unused_imports)]
-pub use error::{MmError, MmResult};
 pub use frame_allocator::{
     frame_alloc, frame_alloc_uninit, frame_dealloc, frame_reserve, frames_alloc,
     unallocated_frames, FrameTracker,
 };
 pub use heap_allocator::heap_stats;
-#[allow(unused_imports)]
-pub use layout::{KernelLayout, UserLayout};
-#[allow(unused_imports)]
-pub use frame_store::Frame;
 pub use vma::{MapFlags, MapPermission};
-#[allow(unused_imports)]
-pub use mapper::PageMapper;
-#[allow(unused_imports)]
+pub use address_space::{AddressSpace, MemoryError};
 pub use kernel_space::{kernel_token, KernelSpace, KERNEL_SPACE};
-#[allow(unused_imports)]
-pub use memory_set::AddressSpace;
-pub use memory_set::MemoryError;
-#[allow(unused_imports)]
-pub use memory_set::MemorySet;
-#[allow(unused_imports)]
-pub use page::{MemAttr, PageFaultKind, PageProt};
 pub use page_table::{FaultAccess, PageTable, UserAccess};
+type MmResult<T> = Result<T, MemoryError>;
 #[allow(unused_imports)]
 pub use uaccess::{
     check_user_range,
@@ -88,43 +64,3 @@ pub fn init() {
     KERNEL_SPACE.lock().activate();
 }
 pub use crate::hal::tlb_invalidate;
-
-#[macro_export]
-/// Convert user pointer trg to `Some(*trg)` or `None` if null.
-macro_rules! move_ptr_to_opt {
-    ($trg:ident) => {
-        if $trg != null() {
-            let t = *translated_ref(current_user_token(), $trg);
-            Some(t)
-        } else {
-            None
-        }
-    };
-    ($token:ident,$trg:ident) => {
-        if $trg != null() {
-            let t = *translated_ref($token, $trg);
-            Some(t)
-        } else {
-            None
-        }
-    };
-}
-
-#[macro_export]
-/// Convert user pointer `trg:*const T` to `Some(trg as & T)` or `None` if null.
-macro_rules! ptr_to_opt_ref {
-    ($trg:ident) => {
-        if $trg != null() {
-            Some(translated_ref(current_user_token(), $trg))
-        } else {
-            None
-        }
-    };
-    ($token:ident,$trg:ident) => {
-        if $trg != null() {
-            Some(translated_ref($token, $trg))
-        } else {
-            None
-        }
-    };
-}

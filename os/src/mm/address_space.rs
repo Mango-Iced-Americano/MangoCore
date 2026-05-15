@@ -45,9 +45,7 @@ pub enum MemoryError {
 pub struct AddressSpace<T: PageTable> {
     /// 页表实现
     pub(super) page_table: T,
-    /// 映射的区域向量
-    /// 段是使用这种机制实现的，换句话说，它们可以被认为是MapArea的一个子集
-    /// 但是，这个结构体中可能存在其他用途，比如说文件映射
+    /// 用户 VMA 集合，负责用户区间查找、插入、拆分和空洞管理。
     pub(super) vmas: VmaSet,
 }
 
@@ -63,11 +61,11 @@ impl<T: PageTable> AddressSpace<T> {
     pub fn token(&self) -> usize {
         self.page_table.token()
     }
-    /// Insert an anonymous segment containing the space between `start_va.floor()` to `end_va.ceil()`
-    /// The space is allocated and added to the current MemorySet.
+    /// Insert an anonymous segment containing the space between `start_va.floor()` to `end_va.ceil()`.
+    /// The space is allocated and added to the current address space.
     /// # Prerequisite
     /// Assuming no conflicts. In other words, the space is NOT checked for space validity or overlap.
-    /// It is merely mapped, pushed into the current memory set.
+    /// It is merely mapped, pushed into the current address space.
     /// Since CoW is implemented, the space is NOT allocated until a page fault is triggered.
     pub fn insert_framed_area(
         &mut self,
@@ -75,7 +73,7 @@ impl<T: PageTable> AddressSpace<T> {
         end_va: VirtAddr,
         permission: MapPermission,
     ) {
-        let mut area = Vma::new(start_va, end_va, MapType::Framed, permission, None);
+        let mut area = Vma::new(start_va, end_va, permission, None);
         area.flags = MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS;
         self.push(area, None).unwrap();
     }
@@ -86,7 +84,7 @@ impl<T: PageTable> AddressSpace<T> {
         self.vmas
             .remove_area_with_start(&mut self.page_table, start_vpn)
     }
-    /// Push a not-yet-mapped map_area into current MemorySet and copy the data into it if any, allocating the needed memory for the map.
+    /// Push a not-yet-mapped VMA into current address space and copy the data into it if any.
     fn push(
         &mut self,
         mut vma: Vma,
@@ -185,8 +183,11 @@ impl<T: PageTable> AddressSpace<T> {
         Ok(())
     }
     pub fn contains_valid_buffer(&self, buf: usize, size: usize, perm: MapPermission) -> bool {
+        let Some(end) = buf.checked_add(size) else {
+            return false;
+        };
         let start_vpn = VirtAddr::from(buf).floor();
-        let end_vpn = VirtAddr::from(buf + size).ceil();
+        let end_vpn = VirtAddr::from(end).ceil();
         self.vmas
             .iter()
             .find(|area| {
@@ -335,7 +336,7 @@ impl<T: PageTable> AddressSpace<T> {
             // Map only when the sections that is to be loaded.
             match ph.get_type().unwrap() {
                 xmas_elf::program::Type::Load => {
-                    // 防御性检查：拒绝超大段（> 1GB），防止分配超大 MapArea 导致 OOM
+                    // 防御性检查：拒绝超大段（> 1GB），避免 ELF 加载路径一次性映射过大。
                     if ph.mem_size() as usize > 1024 * 1024 * 1024 {
                         log::error!("[map_elf] Segment too large: {} bytes", ph.mem_size());
                         return Err(ENOMEM);
@@ -350,7 +351,7 @@ impl<T: PageTable> AddressSpace<T> {
                         load_addr = Some(start_va.into());
                     }
                     let mut vma =
-                        match Vma::try_new(start_va, end_va, MapType::Framed, map_perm, None) {
+                        match Vma::try_new(start_va, end_va, map_perm, None) {
                             Ok(area) => area,
                             Err(e) => return Err(e),
                         };
@@ -437,28 +438,28 @@ impl<T: PageTable> AddressSpace<T> {
     /// Include sections in elf and trampoline and TrapContext and user stack,
     /// also returns user_sp and entry point.
     pub fn from_elf(elf_data: &[u8]) -> Result<(Self, usize, ELFInfo), isize> {
-        let mut memory_set = Self::new_bare();
+        let mut address_space = Self::new_bare();
         // map trampoline
         if should_map_trampoline!() {
-            memory_set.map_trampoline();
+            address_space.map_trampoline();
         }
         // map signaltrampoline
-        memory_set.map_signaltrampoline();
+        address_space.map_signaltrampoline();
         let elf = xmas_elf::ElfFile::new(elf_data).unwrap();
-        let (program_break, elf_info) = memory_set.map_elf(&elf)?;
+        let (program_break, elf_info) = address_space.map_elf(&elf)?;
 
-        Ok((memory_set, program_break, elf_info))
+        Ok((address_space, program_break, elf_info))
     }
     pub fn from_existing_user(user_space: &mut AddressSpace<T>) -> Result<AddressSpace<T>, isize> {
-        let mut memory_set = Self::new_bare();
+        let mut address_space = Self::new_bare();
         // map trampoline
         if should_map_trampoline!() {
-            memory_set.map_trampoline();
+            address_space.map_trampoline();
         }
         // map signaltrampoline
-        memory_set.map_signaltrampoline();
+        address_space.map_signaltrampoline();
         // map data sections/user heap/mmap area/user stack
-        if memory_set
+        if address_space
             .vmas
             .try_reserve(user_space.vmas.len())
             .is_err()
@@ -469,11 +470,11 @@ impl<T: PageTable> AddressSpace<T> {
             let mut new_area = area.try_clone()?;
             new_area
                 .map_from_existing_page_table(
-                    &mut memory_set.page_table,
+                    &mut address_space.page_table,
                     &mut user_space.page_table,
                 )
                 .map_err(|_| crate::syscall::errno::ENOMEM)?;
-            memory_set.vmas.push(new_area)?;
+            address_space.vmas.push(new_area)?;
             debug!(
                 "[fork] map shared area: {:?}",
                 area.inner.vpn_range
@@ -486,7 +487,7 @@ impl<T: PageTable> AddressSpace<T> {
             .ok_or(crate::syscall::errno::EINVAL)?;
         let area = Vma::from_another(trap_cx_area);
         let vpn = trap_cx_area.get_start::<T>();
-        memory_set
+        address_space
             .push(
                 area,
                 Some(
@@ -503,7 +504,7 @@ impl<T: PageTable> AddressSpace<T> {
             "[fork] copy trap_cx area: {:?}",
             trap_cx_area.inner.vpn_range
         );
-        Ok(memory_set)
+        Ok(address_space)
     }
     pub fn activate(&self) {
         self.page_table.activate()
@@ -513,39 +514,9 @@ impl<T: PageTable> AddressSpace<T> {
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PhysPageNum> {
         translate_page(&self.page_table, vpn)
     }
-    #[allow(unused)]
-    pub fn set_pte_flags(&mut self, vpn: VirtPageNum, flags: MapPermission) -> Result<(), ()> {
-        UserMapper::new(&mut self.page_table)
-            .set_user_flags(vpn, flags)
-            .map_err(|_| ())
-    }
-    #[allow(unused)]
-    pub fn clear_access_bit(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
-        UserMapper::new(&mut self.page_table)
-            .clear_access_bit(vpn)
-            .map_err(|_| ())
-    }
-    #[allow(unused)]
-    pub fn clear_dirty_bit(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
-        UserMapper::new(&mut self.page_table)
-            .clear_dirty_bit(vpn)
-            .map_err(|_| ())
-    }
     pub fn recycle_data_pages(&mut self) {
         //*self = Self::new_bare();
         self.vmas.clear();
-    }
-    #[allow(unused)]
-    // debug use only
-    pub fn show_areas(&self) {
-        self.vmas.iter().for_each(|area| {
-            let start_vpn = area.get_start::<T>();
-            let end_vpn = area.get_end::<T>();
-            error!(
-                "[show_areas] start_vpn: {:?}, end_vpn: {:?}, map_perm: {:?}",
-                start_vpn, end_vpn, area.map_perm
-            );
-        })
     }
     pub fn sbrk(&mut self, heap_pt: usize, heap_bottom: usize, increment: isize) -> usize {
         super::mmap::do_sbrk(self, heap_pt, heap_bottom, increment)
@@ -795,7 +766,7 @@ impl<T: PageTable> AddressSpace<T> {
 
 }
 
-pub fn check_page_fault(addr: VirtAddr, access: FaultAccess) -> Result<PhysAddr, isize> {
+pub(super) fn check_page_fault(addr: VirtAddr, access: FaultAccess) -> Result<PhysAddr, isize> {
     // This is where we handle the page fault.
     super::frame_reserve(3);
     let task = match current_task() {

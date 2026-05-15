@@ -9,7 +9,6 @@ use alloc::collections::BTreeMap;
 #[cfg(feature = "oom_handler")]
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 
 #[cfg(feature = "oom_handler")]
 #[derive(Clone, Debug)]
@@ -38,30 +37,6 @@ pub(super) enum FrameState {
 }
 
 impl Frame {
-    pub fn insert_in_memory(
-        &mut self,
-        frame_tracker: Arc<FrameTracker>,
-    ) -> Result<(), MemoryError> {
-        match self {
-            Frame::Unallocated => {
-                *self = Frame::InMemory(frame_tracker);
-                Ok(())
-            }
-            _ => Err(MemoryError::AlreadyAllocated),
-        }
-    }
-
-    pub fn take_in_memory(&mut self) -> Option<Arc<FrameTracker>> {
-        match self {
-            Frame::InMemory(frame_ref) => {
-                let frame = unsafe { core::ptr::read(frame_ref) };
-                unsafe { core::ptr::write(self, Frame::Unallocated) };
-                Some(frame)
-            }
-            _ => None,
-        }
-    }
-
     #[cfg(feature = "oom_handler")]
     pub fn swap_out(&mut self) -> Result<usize, MemoryError> {
         match self {
@@ -187,18 +162,6 @@ impl VmPageStore {
         Ok(self.clone())
     }
 
-    pub fn gen_dict(&self, vpn_range: VPNRange) -> VmPageStore {
-        Self::new(vpn_range)
-    }
-
-    pub fn get_start(&self) -> VirtPageNum {
-        self.vpn_range.get_start()
-    }
-
-    pub fn get_end(&self) -> VirtPageNum {
-        self.vpn_range.get_end()
-    }
-
     pub fn new(vpn_range: VPNRange) -> Self {
         Self::try_new(vpn_range).unwrap()
     }
@@ -214,16 +177,6 @@ impl VmPageStore {
             #[cfg(feature = "oom_handler")]
             swapped: 0,
         })
-    }
-
-    pub fn from_existing_frames(vpn_range: VPNRange, frames: Vec<Frame>) -> Self {
-        let mut store = Self::new(vpn_range);
-        let start = store.vpn_range.get_start();
-        for (offset, frame) in frames.into_iter().enumerate() {
-            let vpn = VirtPageNum(start.0 + offset);
-            store.insert_existing_frame(vpn, frame);
-        }
-        store
     }
 
     pub fn contains_vpn(&self, key: VirtPageNum) -> bool {
@@ -316,29 +269,6 @@ impl VmPageStore {
         self.frames.get_mut(&key).ok_or(MemoryError::NotMapped)
     }
 
-    pub(super) fn set_frame(
-        &mut self,
-        key: VirtPageNum,
-        frame: Frame,
-    ) -> Result<Option<Frame>, MemoryError> {
-        if !self.contains_vpn(key) {
-            return Err(MemoryError::BadAddress);
-        }
-        Ok(self.set_frame_unchecked(key, frame))
-    }
-
-    pub(super) fn take_frame(&mut self, key: VirtPageNum) -> Result<Option<Frame>, MemoryError> {
-        if !self.contains_vpn(key) {
-            return Err(MemoryError::BadAddress);
-        }
-        #[cfg(feature = "oom_handler")]
-        self.active.retain(|&elem| elem != key);
-        let removed = self.frames.remove(&key);
-        #[cfg(feature = "oom_handler")]
-        self.recount_oom_counters();
-        Ok(removed)
-    }
-
     pub fn set_start(&mut self, new_vpn_start: VirtPageNum) -> Result<(), ()> {
         let vpn_end = self.vpn_range.get_end();
         if new_vpn_start > vpn_end {
@@ -395,16 +325,6 @@ impl VmPageStore {
         Ok(second)
     }
 
-    pub fn into_three(
-        &mut self,
-        first_cut: VirtPageNum,
-        second_cut: VirtPageNum,
-    ) -> Result<(Self, Self), ()> {
-        let mut second = self.into_two(first_cut)?;
-        let third = second.into_two(second_cut)?;
-        Ok((second, third))
-    }
-
     fn insert_existing_frame(&mut self, key: VirtPageNum, frame: Frame) {
         if !self.contains_vpn(key) {
             return;
@@ -421,16 +341,6 @@ impl VmPageStore {
                 self.frames.insert(key, frame);
             }
         }
-    }
-
-    fn set_frame_unchecked(&mut self, key: VirtPageNum, frame: Frame) -> Option<Frame> {
-        let old = match frame {
-            Frame::Unallocated => self.frames.remove(&key),
-            frame => self.frames.insert(key, frame),
-        };
-        #[cfg(feature = "oom_handler")]
-        self.recount_oom_counters();
-        old
     }
 
     fn prune_out_of_range(&mut self) {

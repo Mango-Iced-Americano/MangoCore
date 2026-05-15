@@ -207,7 +207,7 @@ impl VirtPageNum {
 
 /// 如下方法提供了从物理地址访问内存的能力
 impl PhysAddr {
-    // 兼容层，为以后可能的高半区映射留下接口。现在MEMORY_HIGH_BASE双架构下都是0，即恒等映射pa
+    // 物理地址通过内核直映区访问，具体偏移由架构配置给出。
     #[inline(always)]
     fn direct_map_addr(&self) -> usize {
         self.0 | MEMORY_HIGH_BASE

@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use super::filemap::{filemap_private_fault, filemap_read_fault};
 use super::user_mapper::UserMapper;
 use super::vma::Vma;

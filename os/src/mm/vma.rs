@@ -13,13 +13,11 @@ use crate::fs::SeekWhence;
 use crate::mm::frame_allocator::frame_alloc_uninit;
 
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 use log::{error, trace, warn};
 impl Debug for Vma {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Vma")
             .field("interval", &self.inner)
-            .field("map_type", &self.map_type)
             .field("map_perm", &self.map_perm)
             .field(
                 "map_file",
@@ -29,14 +27,12 @@ impl Debug for Vma {
     }
 }
 #[derive(Clone)]
-/// Map area for different segments or a chunk of memory for memory mapped file access.
+/// A user virtual memory area, covering ELF segments, heap, stack and mmap regions.
 pub struct Vma {
     /// Range of the mapped virtual page numbers.
     /// Page aligned.
     /// Map physical page frame tracker to virtual pages for RAII & lookup.
     pub inner: VmPageStore,
-    /// Direct or framed(virtual) mapping?
-    map_type: MapType,
     /// Permissions which are the or of RWXU, where U stands for user.
     pub map_perm: MapPermission,
     pub map_file: Option<Arc<dyn File>>,
@@ -49,7 +45,6 @@ impl Vma {
         let inner = self.inner.try_clone()?;
         Ok(Self {
             inner,
-            map_type: self.map_type,
             map_perm: self.map_perm,
             map_file: self.map_file.clone(),
             flags: self.flags,
@@ -59,16 +54,14 @@ impl Vma {
     pub fn new(
         start_va: VirtAddr,
         end_va: VirtAddr,
-        map_type: MapType,
         map_perm: MapPermission,
         map_file: Option<Arc<dyn File>>,
     ) -> Self {
-        Self::try_new(start_va, end_va, map_type, map_perm, map_file).unwrap()
+        Self::try_new(start_va, end_va, map_perm, map_file).unwrap()
     }
     pub fn try_new(
         start_va: VirtAddr,
         end_va: VirtAddr,
-        map_type: MapType,
         map_perm: MapPermission,
         map_file: Option<Arc<dyn File>>,
     ) -> Result<Self, isize> {
@@ -83,7 +76,6 @@ impl Vma {
         let inner = VmPageStore::try_new(VPNRange::new(start_vpn, end_vpn))?;
         Ok(Self {
             inner,
-            map_type,
             map_perm,
             map_file,
             flags: MapFlags::empty(),
@@ -97,7 +89,6 @@ impl Vma {
                 another.inner.vpn_range.get_start(),
                 another.inner.vpn_range.get_end(),
             )),
-            map_type: another.map_type,
             map_perm: another.map_perm,
             map_file: another.map_file.clone(),
             flags: another.flags,
@@ -127,37 +118,13 @@ impl Vma {
             Ok(true)
         )
     }
-    /// Create `MapArea` from `Vec<Arc<FrameTracker>>`. This function should only be used to
-    /// generate a `MapArea` in `KERNEL_SPACE`. \
-    /// # NOTE
-    /// `start_vpn` will be set to `start_va.floor()`,
-    /// `end_vpn` will be set to `start_vpn + frames.len()`,
-    /// `map_file` will be set to `None`.
-    #[cfg(feature = "oom_handler")]
-    pub fn from_existing_frame(
-        start_va: VirtAddr,
-        map_type: MapType,
-        map_perm: MapPermission,
-        frames: Vec<Frame>,
-    ) -> Self {
-        let start_vpn = start_va.floor();
-        let end_vpn = VirtPageNum::from(start_vpn.0 + frames.len());
-        Self {
-            inner: VmPageStore::from_existing_frames(VPNRange::new(start_vpn, end_vpn), frames),
-            map_type,
-            map_perm,
-            map_file: None,
-            flags: MapFlags::empty(),
-        }
-    }
-
     pub fn map_one<T: PageTable>(
         &mut self,
         page_table: &mut T,
         vpn: VirtPageNum,
     ) -> Result<PhysPageNum, (MemoryError, VirtPageNum)> {
         let is_mapped = UserMapper::new(page_table).is_mapped(vpn);
-        if self.map_type == MapType::Identical || !is_mapped {
+        if !is_mapped {
             //if not mapped
             self.map_one_unchecked(page_table, vpn)
                 .map_err(|err| (err, vpn))
@@ -172,21 +139,12 @@ impl Vma {
         page_table: &mut T,
         vpn: VirtPageNum,
     ) -> Result<PhysPageNum, MemoryError> {
-        let ppn: PhysPageNum;
-        match self.map_type {
-            MapType::Identical => {
-                ppn = PhysPageNum(vpn.0);
-                self.map_page_with_perm(page_table, vpn, ppn, self.map_perm)?;
-            }
-            MapType::Framed => {
-                let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
-                ppn = frame.ppn;
-                self.inner.alloc_in_memory(vpn, frame)?;
-                if let Err(err) = self.map_page_with_perm(page_table, vpn, ppn, self.map_perm) {
-                    self.inner.remove_in_memory(&vpn);
-                    return Err(err);
-                }
-            }
+        let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
+        let ppn = frame.ppn;
+        self.inner.alloc_in_memory(vpn, frame)?;
+        if let Err(err) = self.map_page_with_perm(page_table, vpn, ppn, self.map_perm) {
+            self.inner.remove_in_memory(&vpn);
+            return Err(err);
         }
         Ok(ppn)
     }
@@ -218,17 +176,11 @@ impl Vma {
         if !UserMapper::new(page_table).is_mapped(vpn) {
             return Err(MemoryError::NotMapped);
         }
-        match self.map_type {
-            MapType::Framed => {
-                self.inner.remove_in_memory(&vpn);
-                UserMapper::new(page_table).unmap_user_page(vpn)?;
-            }
-            _ => {}
-        }
+        self.inner.remove_in_memory(&vpn);
+        UserMapper::new(page_table).unmap_user_page(vpn)?;
         Ok(())
     }
 
-    // xein TODO:
     pub fn map_from_existing_page_table<T: PageTable>(
         &mut self,
         dst_page_table: &mut T,
@@ -264,9 +216,6 @@ impl Vma {
         self.get_inner().vpn_range.get_end()
     }
 
-    pub fn get_lock(&self) -> &VmPageStore {
-        &self.inner
-    }
     pub fn map_from_kernel_area<T: PageTable>(
         &mut self,
         page_table: &mut T,
@@ -517,29 +466,6 @@ impl Vma {
             Ok(())
         }
     }
-    pub fn check_overlapping(
-        &self,
-        start_vpn: VirtPageNum,
-        end_vpn: VirtPageNum,
-    ) -> Option<(VirtPageNum, VirtPageNum)> {
-        let area_start_vpn = self.get_inner().vpn_range.get_start();
-        let area_end_vpn = self.get_inner().vpn_range.get_end();
-        if end_vpn <= area_start_vpn || start_vpn >= area_end_vpn {
-            return None;
-        } else {
-            let start = if start_vpn > area_start_vpn {
-                start_vpn
-            } else {
-                area_start_vpn
-            };
-            let end = if end_vpn < area_end_vpn {
-                end_vpn
-            } else {
-                area_end_vpn
-            };
-            return Some((start, end));
-        }
-    }
     pub fn into_two(&mut self, cut: VirtPageNum) -> Result<Self, ()> {
         let second_file = if let Some(file) = &self.map_file {
             let new_file = file.deep_clone();
@@ -562,7 +488,6 @@ impl Vma {
         let second_frames = self.inner.into_two(cut)?;
         Ok(Vma {
             inner: second_frames,
-            map_type: self.map_type,
             map_perm: self.map_perm,
             map_file: second_file,
             flags: self.flags,
@@ -573,28 +498,6 @@ impl Vma {
         first_cut: VirtPageNum,
         second_cut: VirtPageNum,
     ) -> Result<(Self, Self), ()> {
-        // if self.map_file.is_some() {
-        //     warn!("[into_three] break apart file-back MapArea!");
-        //     return Err(());
-        // }
-        // let (second_frames, third_frames) = self.inner.into_three(first_cut, second_cut)?;
-        // Ok((
-        //     MapArea {
-        //         inner: second_frames,
-        //         map_type: self.map_type,
-        //         map_perm: self.map_perm,
-        //         map_file: None,
-        //         flags: self.flags,
-        //     },
-        //     MapArea {
-        //         inner: third_frames,
-        //         map_type: self.map_type,
-        //         map_perm: self.map_perm,
-        //         map_file: None,
-        //         flags: self.flags,
-        //     },
-        // ))
-
         // 第一次切分：把 [Start, End] 切成 [Start, first_cut] 和 [first_cut, End]
         // into_two 会自动处理文件的 deep_clone 和偏移量计算
         let mut second_area = self.into_two(first_cut)?;
@@ -859,12 +762,6 @@ impl Vma {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Debug)]
-pub enum MapType {
-    Identical,
-    Framed,
-}
-
 bitflags! {
     pub struct MapPermission: u8 {
         const R = 1 << 1;
@@ -912,26 +809,3 @@ bitflags! {
         const MAP_FILE              =   0;
     }
 }
-
-// #[derive(Debug)]
-// pub struct VPNRange {
-// 	start: VirtPageNum,
-// 	end: VirtPageNum,
-// }
-// impl VPNRange {
-// 	pub fn get_start(&self) -> VirtPageNum {
-// 		self.start
-// 	}
-// 	pub fn get_end(&self) -> VirtPageNum {
-// 		self.end
-// 	}
-// 	pub fn new(start: VirtPageNum, end: VirtPageNum) -> Self {
-// 		Self { start, end }
-// 	}
-// 	pub fn len(&self) -> usize {
-// 		self.end.0 - self.start.0
-// 	}
-// 	pub fn contains(&self, vpn: VirtPageNum) -> bool {
-// 		vpn >= self.start && vpn < self.end
-// 	}
-// }

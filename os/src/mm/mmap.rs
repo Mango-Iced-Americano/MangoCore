@@ -1,7 +1,7 @@
 use super::address_space::{AddressSpace, MemoryError};
 use super::page_table::PageTable;
 use super::user_mapper::UserMapper;
-use super::vma::{MapFlags, MapPermission, MapType, Vma};
+use super::vma::{MapFlags, MapPermission, Vma};
 use super::VirtAddr;
 use crate::config::*;
 use crate::fs::SeekWhence;
@@ -28,7 +28,7 @@ fn checked_user_range(start: usize, len: usize) -> Result<(VirtAddr, VirtAddr), 
 }
 
 pub(super) fn do_sbrk<T: PageTable>(
-    memory_set: &mut AddressSpace<T>,
+    address_space: &mut AddressSpace<T>,
     heap_pt: usize,
     heap_bottom: usize,
     increment: isize,
@@ -102,7 +102,7 @@ pub(super) fn do_sbrk<T: PageTable>(
         if new_page_end > old_page_end {
             let len = new_page_end - old_page_end;
             let ret = do_mmap(
-                memory_set,
+                address_space,
                 old_page_end,
                 len,
                 MapPermission::R | MapPermission::W | MapPermission::U,
@@ -121,7 +121,7 @@ pub(super) fn do_sbrk<T: PageTable>(
         trace!("[sbrk] heap area expanded to {:X}", new_pt);
     } else if old_page_end > new_page_end {
         let len = old_page_end - new_page_end;
-        if let Err(err) = do_munmap(memory_set, new_page_end, len) {
+        if let Err(err) = do_munmap(address_space, new_page_end, len) {
             warn!(
                 "[sbrk] heap shrink munmap failed: start={:X}, len={:X}, err={}",
                 new_page_end, len, err
@@ -134,7 +134,7 @@ pub(super) fn do_sbrk<T: PageTable>(
 }
 
 pub(super) fn do_mmap<T: PageTable>(
-    memory_set: &mut AddressSpace<T>,
+    address_space: &mut AddressSpace<T>,
     start: usize,
     len: usize,
     prot: MapPermission,
@@ -150,7 +150,7 @@ pub(super) fn do_mmap<T: PageTable>(
         Ok(range) => range,
         Err(errno) => return errno,
     };
-    // MAP_SHARED still maps pages eagerly in this compatibility layer.
+    // MAP_SHARED still maps pages eagerly.
     if flags.contains(MapFlags::MAP_SHARED) && len > MAX_EAGER_MMAP_SIZE {
         return ENOMEM;
     }
@@ -161,23 +161,23 @@ pub(super) fn do_mmap<T: PageTable>(
         let start_vpn = start_hint.floor();
         let end_vpn = requested_end.ceil();
         if flags.contains(MapFlags::MAP_FIXED_NOREPLACE)
-            && memory_set.vmas.has_overlap(start_vpn, end_vpn)
+            && address_space.vmas.has_overlap(start_vpn, end_vpn)
         {
             return EEXIST;
         }
         // MAP_FIXED 允许覆盖空洞，空洞不是错误
         if let Err(errno) =
-            memory_set
+            address_space
                 .vmas
-                .unmap_range(&mut memory_set.page_table, start_vpn, end_vpn, true)
+                .unmap_range(&mut address_space.page_table, start_vpn, end_vpn, true)
         {
             return errno;
         }
         start_hint
     } else {
-        match memory_set.vmas.find_free_mmap_range(len, PAGE_SIZE) {
+        match address_space.vmas.find_free_mmap_range(len, PAGE_SIZE) {
             Ok(start_va) => {
-                match memory_set
+                match address_space
                     .vmas
                     .try_merge_lazy_private_mmap::<T>(start_va, len, prot, flags)
                 {
@@ -197,13 +197,13 @@ pub(super) fn do_mmap<T: PageTable>(
     let end_va = VirtAddr::from(end);
     let start_vpn = start_va.floor();
     let end_vpn = end_va.ceil();
-    if memory_set.vmas.has_overlap(start_vpn, end_vpn) {
+    if address_space.vmas.has_overlap(start_vpn, end_vpn) {
         return EINVAL;
     }
-    if let Err(errno) = memory_set.vmas.try_reserve(1) {
+    if let Err(errno) = address_space.vmas.try_reserve(1) {
         return errno;
     }
-    let mut new_area = match Vma::try_new(start_va, end_va, MapType::Framed, prot, None) {
+    let mut new_area = match Vma::try_new(start_va, end_va, prot, None) {
         Ok(area) => area,
         Err(e) => return e,
     };
@@ -266,7 +266,7 @@ pub(super) fn do_mmap<T: PageTable>(
                             };
                         }
                         if let Err(err) =
-                            UserMapper::new(&mut memory_set.page_table).map_user_page(
+                            UserMapper::new(&mut address_space.page_table).map_user_page(
                                 vpn,
                                 cache_ppn,
                                 new_area.map_perm,
@@ -280,7 +280,7 @@ pub(super) fn do_mmap<T: PageTable>(
                         }
                     } else {
                         if let Err(err) =
-                            new_area.map_one_zeroed_unchecked(&mut memory_set.page_table, vpn)
+                            new_area.map_one_zeroed_unchecked(&mut address_space.page_table, vpn)
                         {
                             return match err {
                                 MemoryError::OutOfMemory => ENOMEM,
@@ -290,7 +290,7 @@ pub(super) fn do_mmap<T: PageTable>(
                     }
                 } else {
                     if let Err(err) =
-                        new_area.map_one_zeroed_unchecked(&mut memory_set.page_table, vpn)
+                        new_area.map_one_zeroed_unchecked(&mut address_space.page_table, vpn)
                     {
                         return match err {
                             MemoryError::OutOfMemory => ENOMEM,
@@ -302,7 +302,7 @@ pub(super) fn do_mmap<T: PageTable>(
         } else {
             for vpn in vpn_range {
                 if let Err(err) =
-                    new_area.map_one_zeroed_unchecked(&mut memory_set.page_table, vpn)
+                    new_area.map_one_zeroed_unchecked(&mut address_space.page_table, vpn)
                 {
                     return match err {
                         MemoryError::OutOfMemory => ENOMEM,
@@ -313,7 +313,7 @@ pub(super) fn do_mmap<T: PageTable>(
         }
     }
 
-    if let Err(errno) = memory_set.vmas.insert_vma(new_area) {
+    if let Err(errno) = address_space.vmas.insert_vma(new_area) {
         return errno;
     }
 
@@ -321,7 +321,7 @@ pub(super) fn do_mmap<T: PageTable>(
 }
 
 pub(super) fn do_munmap<T: PageTable>(
-    memory_set: &mut AddressSpace<T>,
+    address_space: &mut AddressSpace<T>,
     start: usize,
     len: usize,
 ) -> Result<(), isize> {
@@ -332,14 +332,14 @@ pub(super) fn do_munmap<T: PageTable>(
     }
     let start_vpn = start_va.floor();
     let end_vpn = end_va.ceil();
-    memory_set
+    address_space
         .vmas
-        .unmap_range(&mut memory_set.page_table, start_vpn, end_vpn, true)
+        .unmap_range(&mut address_space.page_table, start_vpn, end_vpn, true)
         .map(|_| ())
 }
 
 pub(super) fn do_mprotect<T: PageTable>(
-    memory_set: &mut AddressSpace<T>,
+    address_space: &mut AddressSpace<T>,
     addr: usize,
     len: usize,
     prot: MapPermission,
@@ -359,7 +359,7 @@ pub(super) fn do_mprotect<T: PageTable>(
     );
     let start_vpn = start_va.floor();
     let end_vpn = end_va.ceil();
-    memory_set
+    address_space
         .vmas
-        .protect_range(&mut memory_set.page_table, start_vpn, end_vpn, prot)
+        .protect_range(&mut address_space.page_table, start_vpn, end_vpn, prot)
 }

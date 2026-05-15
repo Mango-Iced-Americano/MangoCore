@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use super::user_mapper::UserMapper;
 use super::vma::{MapFlags, MapPermission, Vma};
 use super::{MemoryError, PageTable, VirtAddr, VirtPageNum};

@@ -353,15 +353,9 @@ pub fn check_user_range(ptr: usize, len: usize) -> Result<usize, isize> {
     Ok(end)
 }
 
-#[cfg(feature = "loongarch64")]
 fn uaccess_user_range_ok(ptr: usize, end: usize) -> bool {
-    // 不检查起始地址合法性，la64架构兼容写法，通俗来讲就是屎山懒得修
-    ptr < crate::hal::config::USER_VA_END && end <= crate::hal::config::USER_VA_END
-}
-
-#[cfg(feature = "riscv")]
-fn uaccess_user_range_ok(ptr: usize, end: usize) -> bool {
-    super::layout::UserLayout::checked_user_region(VirtAddr::from(ptr), end - ptr).is_some()
+    // la64 可能传入低地址用户指针；真实合法性由后续页表权限检查决定。
+    ptr < crate::config::USER_VA_END && end <= crate::config::USER_VA_END
 }
 
 fn is_current_user_token(token: usize) -> bool {
@@ -380,13 +374,13 @@ fn handle_user_page_fault(token: usize, va: VirtAddr, access: UserAccess) -> Res
     }
     // ReadWrite first resolves read access, then write access.
     match access {
-        UserAccess::Read => super::memory_set::check_page_fault(va, FaultAccess::Load).map(|_| ()),
+        UserAccess::Read => super::address_space::check_page_fault(va, FaultAccess::Load).map(|_| ()),
         UserAccess::Write => {
-            super::memory_set::check_page_fault(va, FaultAccess::Store).map(|_| ())
+            super::address_space::check_page_fault(va, FaultAccess::Store).map(|_| ())
         }
         UserAccess::ReadWrite => {
-            super::memory_set::check_page_fault(va, FaultAccess::Load)?;
-            super::memory_set::check_page_fault(va, FaultAccess::Store).map(|_| ())
+            super::address_space::check_page_fault(va, FaultAccess::Load)?;
+            super::address_space::check_page_fault(va, FaultAccess::Store).map(|_| ())
         }
     }
 }
@@ -746,10 +740,6 @@ impl Iterator for UserBufferIterator {
         }
         Some(r)
     }
-}
-
-pub fn get_add_one<T: StepByOne>(_ptr: *const T) {
-    //TODO!
 }
 
 /// Copy `*src: T` to kernel space.
