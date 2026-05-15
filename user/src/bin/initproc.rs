@@ -1385,13 +1385,34 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     // ============================================================
     // 链接 musl/glibc 动态链接库到 /lib
     // ============================================================
-    // lib link section skipped: busybox mkdir -p bug
-    println!("[initproc] lib linking skipped (busybox mkdir -p /lib bug)");
-    // let mkdir_cmd = "/bin/busybox mkdir -p /lib /lib64 /usr/lib /usr/lib64";
-    // let mkdir_ret = run_bash_cmd(mkdir_cmd, &environ);
-    // println!("[initproc] lib mkdir returned exit_code={}", mkdir_ret);
-    // if mkdir_ret == 0 { ... ln -sf ... }
-    // (busybox mkdir -p bug prevents this from working)
+    println!("[initproc] linking musl/glibc libs to /lib ...");
+
+    // Create directories one-by-one to avoid busybox mkdir -p bug
+    let mkdir_cmds = [
+        "/bin/busybox mkdir /lib",
+        "/bin/busybox mkdir /usr",
+        "/bin/busybox mkdir /usr/lib",
+    ];
+    for cmd in &mkdir_cmds {
+        let r = run_bash_cmd(cmd, &environ);
+        println!("[initproc]   {} -> exit={}", cmd, r);
+    }
+
+    // ln -sf: create symlinks (ignore errors from pre-existing dirs)
+    let ln_cmds = [
+        "/bin/busybox ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64-sf.so.1",
+        "/bin/busybox ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64.so.1",
+        "/bin/busybox ln -sf /musl/lib/libc.so /lib/libc.so",
+        "/bin/busybox ln -sf /glibc/lib/ld-linux-riscv64-lp64d.so.1 /lib/ld-linux-riscv64-lp64d.so.1",
+        "/bin/busybox ln -sf /glibc/lib/libc.so.6 /lib/libc.so.6",
+        "/bin/busybox ln -sf /glibc/lib/libm.so.6 /lib/libm.so.6",
+        "/bin/busybox ln -sf /glibc/lib/tls_get_new-dtv_dso.so /lib/tls_get_new-dtv_dso.so",
+    ];
+    for cmd in &ln_cmds {
+        let r = run_bash_cmd(cmd, &environ);
+        println!("[initproc]   {} -> exit={}", cmd, r);
+    }
+    println!("[initproc] lib linking done");
 
     let cfg = load_runtime_config();
 

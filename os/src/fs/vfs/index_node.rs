@@ -181,15 +181,8 @@ pub trait IndexNode: Any + Send + Sync + Debug {
 
     /// 创建目录
     fn mkdir(&self, name: &str, mode: InodeMode) -> Result<Arc<dyn IndexNode>, SyscallErr> {
-        // 默认实现：先 find 再 create
         match self.find(name) {
-            Ok(inode) => {
-                if inode.metadata()?.file_type == FileType::Dir {
-                    Ok(inode)
-                } else {
-                    Err(SyscallErr::EEXIST)
-                }
-            }
+            Ok(inode) => Err(SyscallErr::EEXIST),
             Err(SyscallErr::ENOENT) => self.create(name, FileType::Dir, mode),
             Err(err) => Err(err),
         }
