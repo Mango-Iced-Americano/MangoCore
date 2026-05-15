@@ -1,9 +1,10 @@
 #![allow(dead_code)]
 
 use super::filemap::{filemap_private_fault, filemap_read_fault};
+use super::user_mapper::UserMapper;
 use super::vma::Vma;
 use super::vma::{VmAreaKind, VmAreaMapping, VmPageState};
-use super::{FaultAccess, MemoryError, PageMapper, PageTable, PhysAddr, VirtAddr, VirtPageNum};
+use super::{FaultAccess, MemoryError, PageTable, PhysAddr, VirtAddr, VirtPageNum};
 use log::{debug, error, info, warn};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -98,7 +99,7 @@ impl PageFaultHandler {
         page_table: &mut T,
         ctx: FaultContext,
     ) -> Result<FaultAction, MemoryError> {
-        if PageMapper::new(page_table).is_mapped(ctx.vpn) {
+        if UserMapper::new(page_table).is_mapped(ctx.vpn) {
             return Ok(match ctx.access {
                 FaultAccess::Load | FaultAccess::Execute => FaultAction::MappedRead,
                 FaultAccess::Store if area.vm_mapping() == VmAreaMapping::Shared => {
@@ -174,7 +175,7 @@ fn finish_decompress_page<T: PageTable>(
     ctx: FaultContext,
 ) -> Result<super::PhysPageNum, MemoryError> {
     let ppn = area.vm_decompress_page(ctx.vpn)?;
-    PageMapper::new(page_table).map(ctx.vpn, ppn, area.vm_perm())?;
+    UserMapper::new(page_table).map_user_page(ctx.vpn, ppn, area.vm_perm())?;
     area.vm_record_resident_page::<T>(ctx.vpn)?;
     area.vm_dec_compressed();
     debug!("[do_page_fault] addr: {:?}, solution: decompress", ctx.addr);
@@ -188,7 +189,7 @@ fn finish_swap_in_page<T: PageTable>(
     ctx: FaultContext,
 ) -> Result<super::PhysPageNum, MemoryError> {
     let ppn = area.vm_swap_in_page(ctx.vpn)?;
-    PageMapper::new(page_table).map(ctx.vpn, ppn, area.vm_perm())?;
+    UserMapper::new(page_table).map_user_page(ctx.vpn, ppn, area.vm_perm())?;
     area.vm_record_resident_page::<T>(ctx.vpn)?;
     area.vm_dec_swapped();
     debug!("[do_page_fault] addr: {:?}, solution: swap in", ctx.addr);
@@ -200,8 +201,8 @@ fn restore_shared_write<T: PageTable>(
     page_table: &mut T,
     ctx: FaultContext,
 ) -> Result<PhysAddr, MemoryError> {
-    let mut mapper = PageMapper::new(page_table);
-    mapper.set_flags(ctx.vpn, area.vm_perm())?;
+    let mut mapper = UserMapper::new(page_table);
+    mapper.set_user_flags(ctx.vpn, area.vm_perm())?;
     let ppn = mapper.translate(ctx.vpn).ok_or(MemoryError::NotMapped)?;
     Ok(ctx.offset_phys(ppn))
 }
@@ -243,7 +244,7 @@ fn translate_mapped_page<T: PageTable>(
     page_table: &mut T,
     ctx: FaultContext,
 ) -> Result<PhysAddr, MemoryError> {
-    let ppn = PageMapper::new(page_table)
+    let ppn = UserMapper::new(page_table)
         .translate(ctx.vpn)
         .ok_or(MemoryError::NotMapped)?;
     Ok(ctx.offset_phys(ppn))

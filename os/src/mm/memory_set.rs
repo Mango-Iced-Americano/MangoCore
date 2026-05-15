@@ -1,8 +1,9 @@
 use super::mapper::translate_page;
 use super::page_table::{FaultAccess, PageTable};
+use super::user_mapper::UserMapper;
 use super::vma::*;
 use super::vma_set::VmaSet;
-use super::{PageMapper, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum, KERNEL_SPACE};
+use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum, KERNEL_SPACE};
 use crate::config::*;
 use crate::hal::TrapContext;
 use crate::hal::TICKS_PER_SEC;
@@ -168,12 +169,13 @@ impl<T: PageTable> MemorySet<T> {
     /// Push the map area into the memory set without copying or allocation.
     pub fn push_no_alloc(&mut self, vma: Vma) -> Result<(), ()> {
         self.vmas.try_reserve(1).map_err(|_| ())?;
+        let mut mapper = UserMapper::new(&mut self.page_table);
         for vpn in vma.inner.vpn_range {
             let frame = vma.inner.get_in_memory(&vpn).unwrap();
-            if !PageMapper::new(&mut self.page_table).is_mapped(vpn) {
+            if !mapper.is_mapped(vpn) {
                 //if not mapped
-                PageMapper::new(&mut self.page_table)
-                    .map(vpn, frame.ppn.clone(), vma.map_perm)
+                mapper
+                    .map_user_page(vpn, frame.ppn.clone(), vma.map_perm)
                     .map_err(|_| ())?;
             } else {
                 return Err(());
@@ -283,8 +285,8 @@ impl<T: PageTable> MemorySet<T> {
     }
     /// Mention that trampoline is not collected by areas.
     fn map_trampoline(&mut self) {
-        PageMapper::new(&mut self.page_table)
-            .map(
+        UserMapper::new(&mut self.page_table)
+            .map_privileged_user_page(
                 VirtAddr::from(TRAMPOLINE).into(),
                 PhysAddr::from(strampoline as usize).into(),
                 MapPermission::R | MapPermission::X,
@@ -294,8 +296,8 @@ impl<T: PageTable> MemorySet<T> {
 
     /// Can be accessed in user mode.
     fn map_signaltrampoline(&mut self) {
-        PageMapper::new(&mut self.page_table)
-            .map(
+        UserMapper::new(&mut self.page_table)
+            .map_user_page(
                 VirtAddr::from(SIGNAL_TRAMPOLINE).into(),
                 PhysAddr::from(ssignaltrampoline as usize).into(),
                 MapPermission::R | MapPermission::X | MapPermission::U,
@@ -511,19 +513,19 @@ impl<T: PageTable> MemorySet<T> {
     }
     #[allow(unused)]
     pub fn set_pte_flags(&mut self, vpn: VirtPageNum, flags: MapPermission) -> Result<(), ()> {
-        PageMapper::new(&mut self.page_table)
-            .set_flags(vpn, flags)
+        UserMapper::new(&mut self.page_table)
+            .set_user_flags(vpn, flags)
             .map_err(|_| ())
     }
     #[allow(unused)]
     pub fn clear_access_bit(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
-        PageMapper::new(&mut self.page_table)
+        UserMapper::new(&mut self.page_table)
             .clear_access_bit(vpn)
             .map_err(|_| ())
     }
     #[allow(unused)]
     pub fn clear_dirty_bit(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
-        PageMapper::new(&mut self.page_table)
+        UserMapper::new(&mut self.page_table)
             .clear_dirty_bit(vpn)
             .map_err(|_| ())
     }

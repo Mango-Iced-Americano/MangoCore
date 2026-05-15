@@ -5,7 +5,8 @@ use super::page_table::PageTable;
 use super::VPNRange;
 use super::KERNEL_SPACE;
 use super::{frame_alloc, FrameTracker};
-use super::{FaultAccess, MemoryError, PageMapper};
+use super::user_mapper::UserMapper;
+use super::{FaultAccess, MemoryError};
 use super::{PhysPageNum, VirtAddr, VirtPageNum};
 use crate::fs::file_trait::File;
 use crate::fs::SeekWhence;
@@ -105,9 +106,26 @@ impl Vma {
     pub fn frame_is_unallocated(&self, vpn: VirtPageNum) -> bool {
         self.inner.is_unallocated(&vpn)
     }
+    fn map_page_with_perm<T: PageTable>(
+        &self,
+        page_table: &mut T,
+        vpn: VirtPageNum,
+        ppn: PhysPageNum,
+        perm: MapPermission,
+    ) -> Result<(), MemoryError> {
+        let mut mapper = UserMapper::new(page_table);
+        if perm.contains(MapPermission::U) {
+            mapper.map_user_page(vpn, ppn, perm)
+        } else {
+            mapper.map_privileged_user_page(vpn, ppn, perm)
+        }
+    }
     pub fn clear_stale_pte<T: PageTable>(&self, page_table: &mut T, vpn: VirtPageNum) -> bool {
         // lazy页不应该保留有效pte
-        matches!(PageMapper::new(page_table).unmap_if_mapped(vpn), Ok(true))
+        matches!(
+            UserMapper::new(page_table).unmap_user_page_if_mapped(vpn),
+            Ok(true)
+        )
     }
     /// Create `MapArea` from `Vec<Arc<FrameTracker>>`. This function should only be used to
     /// generate a `MapArea` in `KERNEL_SPACE`. \
@@ -138,7 +156,7 @@ impl Vma {
         page_table: &mut T,
         vpn: VirtPageNum,
     ) -> Result<PhysPageNum, (MemoryError, VirtPageNum)> {
-        let is_mapped = PageMapper::new(page_table).is_mapped(vpn);
+        let is_mapped = UserMapper::new(page_table).is_mapped(vpn);
         if self.map_type == MapType::Identical || !is_mapped {
             //if not mapped
             self.map_one_unchecked(page_table, vpn)
@@ -158,13 +176,13 @@ impl Vma {
         match self.map_type {
             MapType::Identical => {
                 ppn = PhysPageNum(vpn.0);
-                PageMapper::new(page_table).map_identical(vpn, ppn, self.map_perm);
+                self.map_page_with_perm(page_table, vpn, ppn, self.map_perm)?;
             }
             MapType::Framed => {
                 let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
                 ppn = frame.ppn;
                 self.inner.alloc_in_memory(vpn, frame)?;
-                if let Err(err) = PageMapper::new(page_table).map(vpn, ppn, self.map_perm) {
+                if let Err(err) = self.map_page_with_perm(page_table, vpn, ppn, self.map_perm) {
                     self.inner.remove_in_memory(&vpn);
                     return Err(err);
                 }
@@ -181,7 +199,7 @@ impl Vma {
         let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
         let ppn = frame.ppn;
         self.inner.alloc_in_memory(vpn, frame)?;
-        if let Err(err) = PageMapper::new(page_table).map(vpn, ppn, self.map_perm) {
+        if let Err(err) = self.map_page_with_perm(page_table, vpn, ppn, self.map_perm) {
             self.inner.remove_in_memory(&vpn);
             return Err(err);
         }
@@ -197,13 +215,13 @@ impl Vma {
         page_table: &mut T,
         vpn: VirtPageNum,
     ) -> Result<(), MemoryError> {
-        if !PageMapper::new(page_table).is_mapped(vpn) {
+        if !UserMapper::new(page_table).is_mapped(vpn) {
             return Err(MemoryError::NotMapped);
         }
         match self.map_type {
             MapType::Framed => {
                 self.inner.remove_in_memory(&vpn);
-                PageMapper::new(page_table).unmap(vpn)?;
+                UserMapper::new(page_table).unmap_user_page(vpn)?;
             }
             _ => {}
         }
@@ -224,13 +242,13 @@ impl Vma {
         };
         for vpn in self.inner.vpn_range {
             if let Some(ppn) = src_page_table.block_and_ret_mut(vpn) {
-                if !PageMapper::new(dst_page_table).is_mapped(vpn) {
-                    PageMapper::new(dst_page_table).map(vpn, ppn, map_perm)?;
+                if !UserMapper::new(dst_page_table).is_mapped(vpn) {
+                    self.map_page_with_perm(dst_page_table, vpn, ppn, map_perm)?;
                 } else {
                     return Err(MemoryError::AlreadyMapped);
                 }
                 if is_shared && self.map_perm.contains(MapPermission::W) {
-                    let _ = PageMapper::new(src_page_table).set_flags(vpn, self.map_perm);
+                    let _ = UserMapper::new(src_page_table).set_user_flags(vpn, self.map_perm);
                 }
             }
         }
@@ -259,11 +277,13 @@ impl Vma {
         for vpn in self.get_inner().vpn_range {
             if let Some(frame) = kernel_space.mapped_frame(src_vpn) {
                 let ppn = frame.ppn;
-                if !PageMapper::new(page_table).is_mapped(vpn) {
+                if !UserMapper::new(page_table).is_mapped(vpn) {
                     self.inner
                         .alloc_in_memory(vpn, frame.clone())
                         .map_err(|_| ())?;
-                    if let Err(_) = PageMapper::new(page_table).map(vpn, ppn, self.map_perm) {
+                    if let Err(_) =
+                        UserMapper::new(page_table).map_user_page(vpn, ppn, self.map_perm)
+                    {
                         self.inner.remove_in_memory(&vpn);
                         return Err(());
                     }
@@ -331,13 +351,13 @@ impl Vma {
             match restored {
                 RestoredPage::None => {}
                 RestoredPage::Compressed(ppn) => {
-                    let set_ppn_result = PageMapper::new(page_table).set_ppn(vpn, ppn);
+                    let set_ppn_result = UserMapper::new(page_table).set_ppn(vpn, ppn);
                     self.inner.record_active(vpn)?;
                     self.inner.dec_compressed();
                     set_ppn_result?;
                 }
                 RestoredPage::Swapped(ppn) => {
-                    let set_ppn_result = PageMapper::new(page_table).set_ppn(vpn, ppn);
+                    let set_ppn_result = UserMapper::new(page_table).set_ppn(vpn, ppn);
                     self.inner.record_active(vpn)?;
                     self.inner.dec_swapped();
                     set_ppn_result?;
@@ -369,14 +389,14 @@ impl Vma {
         };
         if Arc::strong_count(&old_frame) == 1 {
             let old_ppn = old_frame.ppn;
-            PageMapper::new(page_table).set_flags(vpn, self.map_perm)?;
+            UserMapper::new(page_table).set_user_flags(vpn, self.map_perm)?;
 
             trace!("[copy_on_write] no copy occurred");
             Ok(old_ppn)
         } else {
             // do copy in this case
             let old_ppn = old_frame.ppn;
-            if !PageMapper::new(page_table).is_mapped(vpn) {
+            if !UserMapper::new(page_table).is_mapped(vpn) {
                 return Err(MemoryError::NotMapped);
             }
             // alloc new frame
@@ -394,18 +414,18 @@ impl Vma {
                 let _ = self.inner.alloc_in_memory(vpn, old_frame);
                 return Err(err);
             }
-            if PageMapper::new(page_table).set_ppn(vpn, new_ppn).is_err() {
+            if UserMapper::new(page_table).set_ppn(vpn, new_ppn).is_err() {
                 if let Some(new_frame) = self.inner.remove_in_memory(&vpn) {
                     drop(new_frame);
                 }
                 let _ = self.inner.alloc_in_memory(vpn, old_frame);
                 return Err(MemoryError::NotMapped);
             }
-            if PageMapper::new(page_table)
-                .set_flags(vpn, self.map_perm)
+            if UserMapper::new(page_table)
+                .set_user_flags(vpn, self.map_perm)
                 .is_err()
             {
-                let _ = PageMapper::new(page_table).set_ppn(vpn, old_ppn);
+                let _ = UserMapper::new(page_table).set_ppn(vpn, old_ppn);
                 if let Some(new_frame) = self.inner.remove_in_memory(&vpn) {
                     drop(new_frame);
                 }
@@ -610,7 +630,7 @@ impl Vma {
 
             match zip_result {
                 Ok(zram_id) => {
-                    if PageMapper::new(page_table).unmap(vpn).is_err() {
+                    if UserMapper::new(page_table).unmap_user_page(vpn).is_err() {
                         log::warn!("[do_oom] compressed frame has no mapped pte: vpn={:?}", vpn);
                     }
                     self.inner.inc_compressed();
@@ -634,7 +654,7 @@ impl Vma {
 
             match swap_result {
                 Ok(swap_id) => {
-                    if PageMapper::new(page_table).unmap(vpn).is_err() {
+                    if UserMapper::new(page_table).unmap_user_page(vpn).is_err() {
                         log::warn!("[do_oom] swapped frame has no mapped pte: vpn={:?}", vpn);
                     }
                     self.inner.inc_swapped();
@@ -671,7 +691,7 @@ impl Vma {
 
             match swap_result {
                 Ok(swap_id) => {
-                    if PageMapper::new(page_table).unmap(vpn).is_err() {
+                    if UserMapper::new(page_table).unmap_user_page(vpn).is_err() {
                         log::warn!(
                             "[force_swap] swapped frame has no mapped pte: vpn={:?}",
                             vpn

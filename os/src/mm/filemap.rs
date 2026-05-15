@@ -1,8 +1,9 @@
 #![allow(dead_code)]
 
-use super::vma::Vma;
 use super::page_fault::FaultContext;
-use super::{MemoryError, PageMapper, PageTable, PhysAddr, PhysPageNum, VirtAddr};
+use super::user_mapper::UserMapper;
+use super::vma::Vma;
+use super::{MemoryError, PageTable, PhysAddr, PhysPageNum, VirtAddr};
 use crate::config::PAGE_SIZE;
 use crate::fs::{file_trait::File, SeekWhence};
 use alloc::sync::Arc;
@@ -83,7 +84,9 @@ pub(super) fn filemap_read_fault<T: PageTable>(
     let cache_ppn = cache_phys_page.ppn;
 
     area.inner.alloc_in_memory(ctx.vpn, cache_phys_page)?;
-    if let Err(err) = PageMapper::new(page_table).map(ctx.vpn, cache_ppn, area.vm_perm()) {
+    if let Err(err) =
+        UserMapper::new(page_table).map_user_page(ctx.vpn, cache_ppn, area.vm_perm())
+    {
         area.inner.remove_in_memory(&ctx.vpn);
         return Err(err);
     }

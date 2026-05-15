@@ -1,7 +1,8 @@
 #![allow(dead_code)]
 
-use super::vma::{Vma, MapFlags, MapPermission};
-use super::{MemoryError, PageMapper, PageTable, VirtAddr, VirtPageNum};
+use super::user_mapper::UserMapper;
+use super::vma::{MapFlags, MapPermission, Vma};
+use super::{MemoryError, PageTable, VirtAddr, VirtPageNum};
 use crate::syscall::errno::{EINVAL, ENOMEM};
 use alloc::vec::Vec;
 use core::ops::{Index, IndexMut};
@@ -303,8 +304,8 @@ impl VmaSet {
                 has_unmapped_page = true;
                 continue;
             }
-            if PageMapper::new(page_table)
-                .set_flags(vpn, actual_prot)
+            if UserMapper::new(page_table)
+                .set_user_flags(vpn, actual_prot)
                 .is_err()
             {
                 has_unmapped_page = true;

@@ -17,6 +17,7 @@ pub mod page;
 mod page_fault;
 mod page_table;
 mod uaccess;
+mod user_mapper;
 mod vma_set;
 #[cfg(feature = "zram")]
 mod zram;

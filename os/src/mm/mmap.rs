@@ -1,7 +1,8 @@
 use super::memory_set::{MemoryError, MemorySet};
 use super::page_table::PageTable;
+use super::user_mapper::UserMapper;
 use super::vma::{MapFlags, MapPermission, MapType, Vma};
-use super::{PageMapper, VirtAddr};
+use super::VirtAddr;
 use crate::config::*;
 use crate::fs::SeekWhence;
 use crate::syscall::errno::*;
@@ -290,11 +291,13 @@ pub(super) fn do_mmap<T: PageTable>(
                                 _ => EINVAL,
                             };
                         }
-                        if let Err(err) = PageMapper::new(&mut memory_set.page_table).map(
-                            vpn,
-                            cache_ppn,
-                            new_area.map_perm,
-                        ) {
+                        if let Err(err) =
+                            UserMapper::new(&mut memory_set.page_table).map_user_page(
+                                vpn,
+                                cache_ppn,
+                                new_area.map_perm,
+                            )
+                        {
                             new_area.inner.remove_in_memory(&vpn);
                             return match err {
                                 MemoryError::OutOfMemory => ENOMEM,
