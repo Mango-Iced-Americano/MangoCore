@@ -17,11 +17,13 @@ impl IndexNode for Urandom {
         &self,
         _offset: usize,
         _len: usize,
-        _buf: &mut [u8],
+        buf: &mut [u8],
         _data: spin::MutexGuard<FilePrivateData>,
     ) -> Result<usize, SyscallErr> {
         // TODO: 实现真正的随机数生成
-        Ok(0)
+        // 暂填零 (避免返回 0=EOF, 会破坏依赖 urandom 的代码)
+        buf.fill(0);
+        Ok(buf.len())
     }
 
     fn write_at(

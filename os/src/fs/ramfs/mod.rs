@@ -565,10 +565,15 @@ impl IndexNode for LockedRamFSInode {
             return Err(SyscallErr::ENOTDIR);
         }
         let to_delete = inode.children.get(name).ok_or(SyscallErr::ENOENT)?;
-        if to_delete.0.lock().metadata.file_type != FileType::Dir {
+        let mut child_locked = to_delete.0.lock();
+        if child_locked.metadata.file_type != FileType::Dir {
             return Err(SyscallErr::ENOTDIR);
         }
-        to_delete.0.lock().metadata.nlinks -= 1;
+        if !child_locked.children.is_empty() {
+            return Err(SyscallErr::ENOTEMPTY);
+        }
+        child_locked.metadata.nlinks -= 1;
+        drop(child_locked);
         inode.children.remove(name);
         inode.metadata.nlinks -= 1;
         Ok(())
@@ -640,21 +645,16 @@ impl IndexNode for LockedRamFSInode {
     }
 
     fn truncate(&self, len: usize) -> Result<(), SyscallErr> {
-        // 目录不可 truncate（保留原有检查，行为委托给 resize）
-        {
-            let inode = self.0.lock();
-            if inode.metadata.file_type == FileType::Dir {
-                return Err(SyscallErr::EINVAL);
-            }
-            // 扩容只更新 file_size
-            if len >= inode.file_size {
-                drop(inode);
-                // 只更新大小，不分配页
-                let mut inode2 = self.0.lock();
-                inode2.file_size = len;
-                return Ok(());
-            }
+        let mut inode = self.0.lock();
+        if inode.metadata.file_type == FileType::Dir {
+            return Err(SyscallErr::EINVAL);
         }
+        if len >= inode.file_size {
+            // 扩容：只更新大小，页在 write_at 中按需分配
+            inode.file_size = len;
+            return Ok(());
+        }
+        drop(inode);
         // 缩容委托给 resize
         self.resize(len)
     }
