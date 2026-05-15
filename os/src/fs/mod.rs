@@ -20,10 +20,7 @@ mod timestamp;
 pub mod vfs;
 
 pub use self::dev::{
-    hwclock::*,
-    // null::*,
     pipe::*,
-    // socket::*, tty::*, zero::*
 };
 
 pub use self::layout::*;
@@ -88,6 +85,8 @@ lazy_static! {
                     .expect("devfs: failed to register /dev/null");
                 devfs.add_dev("zero", alloc::sync::Arc::new(crate::fs::dev::zero::Zero {}) as Arc<dyn self::vfs::IndexNode>)
                     .expect("devfs: failed to register /dev/zero");
+                devfs.add_dev("urandom", alloc::sync::Arc::new(crate::fs::dev::urandom::Urandom {}) as Arc<dyn self::vfs::IndexNode>)
+                    .expect("devfs: failed to register /dev/urandom");
 
                 // 将 DevFS 挂载到 /dev
                 let dev_inode_id = dev_inode.metadata().expect("dev_inode metadata failed").inode_id;

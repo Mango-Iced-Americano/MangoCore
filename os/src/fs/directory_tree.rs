@@ -1,13 +1,10 @@
 use super::inode::DiskInodeType;
 use super::{
     cache::BlockCacheManager,
-    dev::{null::Null, tty::Teletype, zero::Zero},
     file_trait::File,
     filesystem::FileSystem,
     layout::OpenFlags,
-    Hwclock,
 };
-use crate::fs::dev::urandom::Urandom;
 use crate::fs::fat32::FatOSInode;
 use crate::fs::inode;
 
@@ -1080,81 +1077,8 @@ pub fn init_fs() {
         println!("[kernel] No filesystem found, skipping old VFS init (ramfs fallback)");
         return;
     }
-    init_device_directory();
     init_tmp_directory();
     init_proc_directory();
-}
-#[allow(unused)]
-// 初始化设备目录
-fn init_device_directory() {
-    ROOT.mkdir("/dev");
-
-    let dev_inode = match ROOT.cd_path("/dev") {
-        Ok(inode) => inode,
-        Err(_) => panic!("dev directory doesn't exist"),
-    };
-
-    println!("[kernel] /dev init Successfully!");
-
-    dev_inode.mkdir("shm");
-    dev_inode.mkdir("misc");
-
-    println!("[kernel] shm and misc init Successfully!");
-
-    let null_dev = DirectoryTreeNode::new(
-        "null".to_string(),
-        Arc::new(FileSystem::new(FS_Type::Null)),
-        Arc::new(Null {}),
-        Arc::downgrade(&dev_inode.get_arc()),
-    );
-    println!("[kernel] null_dev init successfully!");
-    let zero_dev = DirectoryTreeNode::new(
-        "zero".to_string(),
-        Arc::new(FileSystem::new(FS_Type::Null)),
-        Arc::new(Zero {}),
-        Arc::downgrade(&dev_inode.get_arc()),
-    );
-    println!("[kernel] zero_dev init successfully!");
-    let urandom_dev = DirectoryTreeNode::new(
-        "urandom".to_string(),
-        Arc::new(FileSystem::new(FS_Type::Null)),
-        Arc::new(Urandom {}),
-        Arc::downgrade(&dev_inode.get_arc()),
-    );
-    println!("[kernel] urandom_dev init successfully!");
-    let tty_dev = DirectoryTreeNode::new(
-        "tty".to_string(),
-        Arc::new(FileSystem::new(FS_Type::Null)),
-        Arc::new(Teletype::new()),
-        Arc::downgrade(&dev_inode.get_arc()),
-    );
-
-    println!("[kernel] tty_dev init successfully!");
-    let mut lock = dev_inode.children.write();
-    lock.as_mut().unwrap().insert("null".to_string(), null_dev);
-    lock.as_mut().unwrap().insert("zero".to_string(), zero_dev);
-    lock.as_mut().unwrap().insert("tty".to_string(), tty_dev);
-    lock.as_mut()
-        .unwrap()
-        .insert("urandom".to_string(), urandom_dev);
-    drop(lock);
-
-    let misc_inode = match dev_inode.cd_path("./misc") {
-        Ok(inode) => inode,
-        Err(_) => panic!("misc directory doesn't exist"),
-    };
-    let hwclock_dev = DirectoryTreeNode::new(
-        "rtc".to_string(),
-        Arc::new(FileSystem::new(FS_Type::Null)),
-        Arc::new(Hwclock {}),
-        Arc::downgrade(&misc_inode.get_arc()),
-    );
-    let mut lock = misc_inode.children.write();
-    misc_inode.cache_all_subfile(&mut lock);
-    lock.as_mut()
-        .unwrap()
-        .insert("rtc".to_string(), hwclock_dev);
-    drop(lock);
 }
 // 初始化临时文件目录
 fn init_tmp_directory() {
