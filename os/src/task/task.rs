@@ -354,7 +354,7 @@ impl TaskControlBlock {
             elf_data.len(),
             &elf_data[..16.min(elf_data.len())]
         );
-        // 带有ELF程序头/跳板的内存集（MemorySet）
+        // 带有ELF程序头/跳板的用户地址空间（AddressSpace）
         // 解析ELF文件，初始化内存映射
         let (mut memory_set, user_heap, elf_info) = AddressSpace::from_elf(elf_data).unwrap();
         // 在内核空间中删除ELF区域
@@ -467,8 +467,7 @@ impl TaskControlBlock {
 
         // 将ELF文件映射到内核空间
         let elf_data = elf.map_to_kernel_space(MMAP_BASE);
-        // 带有ELF程序头/跳板/陷阱上下文/用户栈的内存集（MemorySet）
-        // let (mut memory_set, program_break, elf_info) = MemorySet::from_elf(elf_data)?;
+        // 带有ELF程序头/跳板/陷阱上下文/用户栈的用户地址空间（AddressSpace）
         let load_result = AddressSpace::from_elf(elf_data);
 
         // 清除临时映射
