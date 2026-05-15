@@ -34,3 +34,5 @@ EXPERIENCE.md
 __pycache__/
 *.pyc
 *.pyo
+.sisyphus/
+tools/
