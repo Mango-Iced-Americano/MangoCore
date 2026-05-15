@@ -3,7 +3,6 @@ use super::{
     FatInode,
 };
 use crate::fs::inode::InodeLock;
-use crate::fs::inode::InodeTrait;
 use alloc::string::String;
 use spin::*;
 

@@ -5,7 +5,6 @@ use super::{
     filesystem::FileSystem,
     layout::OpenFlags,
 };
-use crate::fs::fat32::FatOSInode;
 use crate::fs::inode;
 
 // ── 旧 VFS trait 定义（待 FAT32 迁移后删除） ─────────────────────────
@@ -55,7 +54,7 @@ impl VFS {
     pub fn root_osinode(vfs: &alloc::sync::Arc<dyn VFS>) -> alloc::sync::Arc<dyn File> {
         match vfs.get_filesystem_type() {
             super::filesystem::FS_Type::Fat32 => {
-                super::fat32::FatOSInode::new(super::fat32::FatInode::root_inode(vfs))
+                panic!("old VFS: root_osinode for Fat32 is deprecated, use vfs::VFS_ROOT")
             }
             super::filesystem::FS_Type::Ext4 => {
                 use super::ext4::ROOT_INODE;
@@ -881,9 +880,7 @@ impl DirectoryTreeNode {
         };
         match old_inode.filesystem.fs_type {
             FS_Type::Fat32 => {
-                let old_file = old_inode.file.downcast_ref::<FatOSInode>().unwrap();
-                let new_par_file = new_par_inode.file.downcast_ref::<FatOSInode>().unwrap();
-                new_par_file.link_child(old_last_comp, old_file)?;
+                panic!("old VFS: rename for Fat32 is deprecated, use vfs::VFS_ROOT")
             }
             FS_Type::Ext4 => {
                 use crate::fs::ext4::layout::Ext4OSInode;

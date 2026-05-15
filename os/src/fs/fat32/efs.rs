@@ -140,6 +140,7 @@ impl core::fmt::Debug for EasyFileSystem {
     }
 }
 
+// Old VFS trait impl — kept for directory_tree.rs compatibility (Phase 5 will remove)
 impl VFS for EasyFileSystem {
     fn alloc_blocks(&self, blocks: usize) -> Vec<usize> {
         self.alloc_blocks(blocks)
