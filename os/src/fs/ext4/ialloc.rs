@@ -1,5 +1,4 @@
 use crate::fs::{
-    directory_tree::GLOBAL_BLOCK_SIZE,
     ext4::{block_group::Ext4BlockGroup, BLOCK_SIZE},
 };
 use alloc::vec;
@@ -29,7 +28,7 @@ impl Ext4FileSystem {
 
             // 获取块组
             let mut bg =
-                Ext4BlockGroup::load_new(self.block_device.clone(), &super_block, bgid as usize);
+                Ext4BlockGroup::load_new(self.block_device.clone(), &super_block, bgid as usize, self.block_size);
 
             let mut free_inodes = bg.get_free_inodes_count();
 
@@ -77,13 +76,13 @@ impl Ext4FileSystem {
                 }
 
                 // 同步块组内容
-                bg.sync_to_disk_with_csum(self.block_device.clone(), bgid as usize, &super_block);
+                bg.sync_to_disk_with_csum(self.block_device.clone(), bgid as usize, &super_block, self.block_size);
 
                 // 更新超级块
                 super_block.decrease_free_inodes_count();
                 super_block.sync_to_disk_with_csum(self.block_device.clone());
                 // 看是否写入成功
-                let mut test_super_block = vec![0u8; *GLOBAL_BLOCK_SIZE];
+                let mut test_super_block = vec![0u8; self.block_size];
                 self.block_device.read_block(0, &mut test_super_block);
 
                 /* Compute the absolute i-nodex number */
@@ -120,7 +119,7 @@ impl Ext4FileSystem {
 
         let mut super_block = self.superblock;
         let mut bg =
-            Ext4BlockGroup::load_new(self.block_device.clone(), &super_block, bgid as usize);
+            Ext4BlockGroup::load_new(self.block_device.clone(), &super_block, bgid as usize, self.block_size);
 
         // Load inode bitmap block
         let inode_bitmap_block = bg.get_inode_bitmap_block(&self.superblock);
@@ -154,7 +153,7 @@ impl Ext4FileSystem {
             bg.set_used_dirs_count(&self.superblock, used_dirs);
         }
 
-        bg.sync_to_disk_with_csum(block_device.clone(), bgid as usize, &super_block);
+        bg.sync_to_disk_with_csum(block_device.clone(), bgid as usize, &super_block, self.block_size);
 
         super_block.increase_free_inodes_count();
         super_block.sync_to_disk_with_csum(self.block_device.clone());

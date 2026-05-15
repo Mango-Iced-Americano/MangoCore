@@ -4,7 +4,6 @@ use core::{convert::TryInto, intrinsics::size_of};
 use super::block_group::Block;
 use super::ext4fs::Ext4FileSystem;
 use super::*;
-use crate::fs::directory_tree::{FILE_SYSTEM, GLOBAL_BLOCK_SIZE};
 use crate::syscall::errno::SUCCESS;
 use crate::utils::error::SyscallErr;
 use alloc::vec;
@@ -177,7 +176,7 @@ impl Ext4Extent {
 
 impl ExtentNode {
     /// Load the extent node from the data.
-    pub fn load_from_data(data: &[u8], is_root: bool) -> Self {
+    pub fn load_from_data(data: &[u8], is_root: bool, block_size: usize) -> Self {
         if is_root {
             if data.len() != 15 * 4 {
                 // return_errno_with_message(Errno::EINVAL, "Invalid data length for root node");
@@ -197,7 +196,6 @@ impl ExtentNode {
                 is_root,
             }
         } else {
-            let block_size = *GLOBAL_BLOCK_SIZE;
             if data.len() != block_size {
                 // return_errno_with_message(Errno::EINVAL, "Invalid data length for root node");
                 panic!("Invalid data length for root node");
@@ -212,7 +210,7 @@ impl ExtentNode {
     }
 
     /// Load the extent node from the data mutably.
-    pub fn load_from_data_mut(data: &mut [u8], is_root: bool) -> Self {
+    pub fn load_from_data_mut(data: &mut [u8], is_root: bool, block_size: usize) -> Self {
         if is_root {
             if data.len() != 15 * 4 {
                 // return_errno_with_message(Errno::EINVAL, "Invalid data length for root node");
@@ -232,7 +230,6 @@ impl ExtentNode {
                 is_root,
             }
         } else {
-            let block_size = *GLOBAL_BLOCK_SIZE;
             if data.len() != block_size {
                 panic!("Invalid data length for root node")
             }
@@ -572,7 +569,7 @@ impl Ext4FileSystem {
         // Load the root node
         let root_data: &[u8; 60] =
             unsafe { core::mem::transmute::<&[u32; 15], &[u8; 60]>(&inode_ref.inode.block) };
-        let mut node = ExtentNode::load_from_data(root_data, true);
+        let mut node = ExtentNode::load_from_data(root_data, true, self.block_size);
 
         let mut depth = node.header.depth;
 
@@ -594,10 +591,10 @@ impl Ext4FileSystem {
                 });
 
                 let next_block = search_path.path.last().unwrap().index.unwrap().leaf_lo;
-                let mut next_data = vec![0u8; *GLOBAL_BLOCK_SIZE];
+                let mut next_data = vec![0u8; self.block_size];
                 self.block_device
                     .read_block(next_block as usize, &mut next_data);
-                node = ExtentNode::load_from_data_mut(&mut next_data, false);
+                node = ExtentNode::load_from_data_mut(&mut next_data, false, self.block_size);
                 depth -= 1;
                 search_path.depth += 1;
                 pblock_of_node = next_block as usize;
@@ -735,10 +732,10 @@ impl Ext4FileSystem {
 
     /// Get extent from the node at the given position.
     fn get_extent_from_node(&self, node: &ExtentPathNode, pos: usize) -> Option<Ext4Extent> {
-        let mut data = vec![0u8; *GLOBAL_BLOCK_SIZE];
+        let mut data = vec![0u8; self.block_size];
         self.block_device
             .read_block(node.pblock as usize, &mut data);
-        let extent_node = ExtentNode::load_from_data(&data, false);
+        let extent_node = ExtentNode::load_from_data(&data, false, self.block_size);
 
         extent_node.get_extent(pos)
     }
@@ -792,7 +789,7 @@ impl Ext4FileSystem {
             let new_ex_offset = core::mem::size_of::<Ext4ExtentHeader>()
                 + core::mem::size_of::<Ext4Extent>() * (node.position);
             let mut ext4block =
-                Block::load_offset(self.block_device.clone(), block * self.block_size);
+                Block::load_offset(self.block_device.clone(), block * self.block_size, self.block_size);
             let left_ext: &mut Ext4Extent = ext4block.read_offset_as_mut(new_ex_offset);
             let unwritten = left_ext.is_unwritten();
             let len = left_ext.get_actual_len() + right_ext.get_actual_len();
@@ -849,7 +846,7 @@ impl Ext4FileSystem {
             // load block
             let node_block = node.pblock_of_node;
             let mut ext4block =
-                Block::load_offset(self.block_device.clone(), node_block * self.block_size);
+                Block::load_offset(self.block_device.clone(), node_block * self.block_size, self.block_size);
             let new_ex_offset = core::mem::size_of::<Ext4ExtentHeader>()
                 + core::mem::size_of::<Ext4Extent>() * (node.position + 1);
 
@@ -898,6 +895,7 @@ impl Ext4FileSystem {
         let mut new_ext4block = Block::load_offset(
             self.block_device.clone(),
             new_block as usize * self.block_size,
+            self.block_size,
         );
 
         // move top-level index/leaf into new block
@@ -1051,7 +1049,7 @@ impl Ext4FileSystem {
                     continue;
                 }
                 let ext4block =
-                    Block::load_offset(self.block_device.clone(), node_pblock * self.block_size);
+                    Block::load_offset(self.block_device.clone(), node_pblock * self.block_size, self.block_size);
 
                 let header = search_path.path[i as usize].header;
                 let entries_count = header.entries_count;
@@ -1177,7 +1175,7 @@ impl Ext4FileSystem {
             // we are at root
             Block::load_inode_root_block(&inode_ref.inode.block)
         } else {
-            Block::load_offset(self.block_device.clone(), node_disk_pos)
+            Block::load_offset(self.block_device.clone(), node_disk_pos, self.block_size)
         };
 
         // depth 2 (leaf nodes)
@@ -1367,7 +1365,7 @@ impl Ext4FileSystem {
                 + (header.entries_count as usize) * size_of::<Ext4ExtentIndex>();
 
             let node_disk_pos = path.path[i].pblock_of_node * self.block_size;
-            let mut ext4block = Block::load_offset(self.block_device.clone(), node_disk_pos);
+            let mut ext4block = Block::load_offset(self.block_device.clone(), node_disk_pos, self.block_size);
 
             let remaining_indexes: Vec<u8> =
                 ext4block.data[start_pos + size_of::<Ext4ExtentIndex>()..end_pos].to_vec();
@@ -1496,7 +1494,7 @@ impl Ext4FileSystem {
         if let Some(index) = path.index {
             let last_index_pos = header.entries_count as usize - 1;
             let node_disk_pos = path.pblock_of_node * self.block_size;
-            let ext4block = Block::load_offset(self.block_device.clone(), node_disk_pos);
+            let ext4block = Block::load_offset(self.block_device.clone(), node_disk_pos, self.block_size);
             let last_index: Ext4ExtentIndex =
                 ext4block.read_offset_as(size_of::<Ext4ExtentIndex>() * last_index_pos);
 

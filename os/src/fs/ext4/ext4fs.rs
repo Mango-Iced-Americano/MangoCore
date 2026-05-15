@@ -11,9 +11,7 @@ use super::{superblock::Ext4Superblock, BlockCacheManager, BlockDevice, Cache};
 use crate::drivers::BLOCK_DEVICE;
 use crate::fs::cache::BufferCache;
 use crate::fs::ext4::error::{Errno, Ext4Error};
-use crate::fs::file_trait::File;
 use crate::fs::filesystem::FS_Type;
-use crate::fs::inode::InodeTrait;
 use crate::hal::BLOCK_SZ;
 use alloc::{sync::Arc, vec::Vec};
 use layout::Ext4OSInode;
@@ -35,11 +33,6 @@ pub struct Ext4FileSystem {
 }
 
 impl Ext4FileSystem {
-    // 获取根 Inode
-    pub fn get_root_inode(&self) -> Arc<dyn File> {
-        let root_inode_ref = self.get_inode_ref(ROOT_INODE);
-        todo!()
-    }
     // Opens and loads an Ext4 from the `block_device`.
     // 针对ext4rs原有的方法的方法，可能需要修改
     pub fn open_ext4rs(
@@ -205,14 +198,14 @@ impl Ext4FileSystem {
         let bg_count = sblk.block_group_count() as usize;
 
         for bgid in 0..bg_count {
-            let mut bg = Ext4BlockGroup::load_new(self.block_device.clone(), sblk, bgid);
+            let mut bg = Ext4BlockGroup::load_new(self.block_device.clone(), sblk, bgid, self.block_size);
             let free = bg.get_free_blocks_count() as usize;
             if free < blocks {
                 continue;
             }
 
             let bmp_blk = bg.get_block_bitmap_block(sblk) as usize;
-            let bmp = Block::load_offset(self.block_device.clone(), bmp_blk * self.block_size);
+            let bmp = Block::load_offset(self.block_device.clone(), bmp_blk * self.block_size, self.block_size);
             let bit_cnt = blocks_per_group.min(bmp.data.len() * 8);
 
             // Find a contiguous range of free blocks
@@ -242,7 +235,7 @@ impl Ext4FileSystem {
                         let sb_free = sb.free_blocks_count();
                         sb.set_free_blocks_count(sb_free - blocks as u64);
                         sb.sync_to_disk_with_csum(self.block_device.clone());
-                        bg.sync_to_disk_with_csum(self.block_device.clone(), bgid, &sb);
+                        bg.sync_to_disk_with_csum(self.block_device.clone(), bgid, &sb, self.block_size);
 
                         let base = self.get_block_of_bgid(bgid as u32) as usize + start;
                         return (base..base + blocks).collect();
@@ -259,9 +252,6 @@ impl Ext4FileSystem {
             blocks
         );
         Vec::new()
-    }
-    fn root_inode(&self) -> Arc<dyn InodeTrait> {
-        todo!();
     }
     #[allow(unused)]
     pub fn dir_mk(&self, path: &str) -> Result<usize, isize> {
@@ -306,7 +296,7 @@ impl Ext4FileSystem {
 
 impl Ext4FileSystem {
     pub fn get_superblock_test(block_device: Arc<dyn BlockDevice>) -> Ext4Superblock {
-        let superblock_pre = Block::load_offset(block_device, 0);
+        let superblock_pre = Block::load_offset(block_device, 0, 4096);
         let superblock: Ext4Superblock = superblock_pre.read_offset_as(1024);
         superblock
     }
@@ -317,7 +307,7 @@ impl Ext4FileSystem {
 
     pub fn get_block_group(&self, blk_grp_idx: usize) -> Ext4BlockGroup {
         let block_device = self.block_device.clone();
-        Ext4BlockGroup::load_new(block_device, &self.superblock, blk_grp_idx)
+        Ext4BlockGroup::load_new(block_device, &self.superblock, blk_grp_idx, self.block_size)
     }
 
     pub fn print_block_group(&self, blk_grp_idx: usize) {
@@ -389,7 +379,6 @@ impl layout::Ext4OSInode {
             append: false,
             inode: inode_ref,
             offset: spin::Mutex::new(0),
-            dirnode_ptr: alloc::sync::Arc::new(spin::Mutex::new(alloc::sync::Weak::new())),
             ext4fs,
             file_cache_manager: alloc::sync::Arc::new(PageCacheManager::new()),
         })

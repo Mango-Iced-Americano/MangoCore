@@ -1,7 +1,4 @@
-use crate::fs::directory_tree::{FILE_SYSTEM, GLOBAL_BLOCK_SIZE};
-
 use super::*;
-use crate::fs::inode::InodeTrait;
 use crate::fs::DiskInodeType;
 use crate::timer::get_time_sec;
 use alloc::vec;
@@ -100,10 +97,9 @@ impl Default for FileAttr {
 
 #[allow(unused)]
 impl FileAttr {
-    pub fn from_inode_ref(inode_ref: &Ext4InodeRef) -> FileAttr {
+    pub fn from_inode_ref(inode_ref: &Ext4InodeRef, block_size: usize) -> FileAttr {
         let inode_num = inode_ref.inode_num;
         let inode = inode_ref.inode;
-        let block_size = *GLOBAL_BLOCK_SIZE;
         FileAttr {
             ino: inode_num as u64,
             size: inode.size(),
@@ -431,7 +427,7 @@ impl Ext4FileSystem {
             // 获取逻辑块号对应的物理块号
             match self.get_pblock_idx(&inode_ref, iblock as u32) {
                 Ok(pblock_idx) => {
-                    let mut data = vec![0u8; *GLOBAL_BLOCK_SIZE];
+                    let mut data = vec![0u8; self.block_size];
                     self.block_device.read_block(pblock_idx as usize, &mut data);
                     read_buf[cursor..cursor + adjust_read_size].copy_from_slice(
                         &data[unaligned_start_offset..unaligned_start_offset + adjust_read_size],
@@ -457,7 +453,7 @@ impl Ext4FileSystem {
             // 获取逻辑块号对应的物理块号
             match self.get_pblock_idx(&inode_ref, iblock as u32) {
                 Ok(pblock_idx) => {
-                    let mut data = vec![0u8; *GLOBAL_BLOCK_SIZE];
+                    let mut data = vec![0u8; self.block_size];
                     self.block_device.read_block(pblock_idx as usize, &mut data);
                     read_buf[cursor..cursor + read_length].copy_from_slice(&data[..read_length]);
                 }
@@ -528,6 +524,7 @@ impl Ext4FileSystem {
             let mut block = Block::load_offset(
                 self.block_device.clone(),
                 pblock_idx as usize * self.block_size,
+                self.block_size,
             );
 
             block.write_offset(unaligned, &write_buf[..len], len);
@@ -575,7 +572,7 @@ impl Ext4FileSystem {
             for i in 0..fblock_count {
                 let block_offset =
                     fblock_start as usize * self.block_size + i as usize * self.block_size;
-                let mut block = Block::load_offset(self.block_device.clone(), block_offset);
+                let mut block = Block::load_offset(self.block_device.clone(), block_offset, self.block_size);
                 let write_size = min(self.block_size, write_buf_len - written);
                 block.write_offset(0, &write_buf[written..written + write_size], write_size);
                 block.sync_blk_to_disk(self.block_device.clone());
@@ -599,6 +596,7 @@ impl Ext4FileSystem {
             let mut block = Block::load_offset(
                 self.block_device.clone(),
                 pblock_idx as usize * self.block_size,
+                self.block_size,
             );
             block.write_offset(0, &write_buf[written..], len);
             block.sync_blk_to_disk(self.block_device.clone());

@@ -1,5 +1,5 @@
 use crate::fs::BlockDevice;
-use crate::fs::{directory_tree::GLOBAL_BLOCK_SIZE, timestamp::format_time};
+use crate::fs::timestamp::format_time;
 use alloc::string::String;
 #[allow(unused)]
 use alloc::sync::Arc;
@@ -228,7 +228,6 @@ impl Ext4Superblock {
             core::slice::from_raw_parts(self as *const _ as *const u8, core::mem::size_of::<Self>())
         };
         let superblk_id = SUPERBLOCK_OFFSET / BLOCK_SIZE;
-        // let superblk_id = SUPERBLOCK_OFFSET / *GLOBAL_BLOCK_SIZE;
         let mut buf = vec![0u8; BLOCK_SIZE];
         // 先读取第一个块
         block_device.read_block(superblk_id, &mut buf);
@@ -252,7 +251,6 @@ impl Ext4Superblock {
             core::slice::from_raw_parts(self as *const _ as *const u8, core::mem::size_of::<Self>())
         };
         let superblk_id = SUPERBLOCK_OFFSET / BLOCK_SIZE;
-        // let superblk_id = SUPERBLOCK_OFFSET / *GLOBAL_BLOCK_SIZE;
         let mut buf = vec![0u8; BLOCK_SIZE];
         // 先读取第一个块
         block_device.read_block(superblk_id, &mut buf);

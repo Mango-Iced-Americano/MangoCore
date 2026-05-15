@@ -6,7 +6,6 @@ use super::{
     BlockDevice, BLOCK_SIZE, EXT4_MAX_BLOCK_GROUP_DESCRIPTOR_SIZE,
     EXT4_MIN_BLOCK_GROUP_DESCRIPTOR_SIZE,
 };
-use crate::fs::directory_tree::{FILE_SYSTEM, GLOBAL_BLOCK_SIZE};
 use crate::math::is_power_of;
 use alloc::vec;
 use alloc::{sync::Arc, vec::Vec};
@@ -50,8 +49,8 @@ impl Ext4BlockGroup {
         block_device: Arc<dyn BlockDevice>,
         super_block: &Ext4Superblock,
         block_group_idx: usize,
+        block_size: usize,
     ) -> Self {
-        let block_size = *GLOBAL_BLOCK_SIZE;
         let dsc_cnt = block_size / super_block.desc_size as usize;
         // 计算块组描述符在第几个块
         let dsc_id = block_group_idx / dsc_cnt;
@@ -65,7 +64,7 @@ impl Ext4BlockGroup {
         // 块组中的偏移量 = (块组中的索引 % 每个块的块组描述符数量) * 块组描述符大小
         let offset = (block_group_idx % dsc_cnt) * super_block.desc_size as usize;
         // 从块设备读取块
-        let ext4block = Block::load_offset(block_device, block_id * block_size);
+        let ext4block = Block::load_offset(block_device, block_id * block_size, block_size);
         //print_hex(&ext4block.data);
         // 使用Block的read_offset_as方法将数据读取为Ext4BlockGroup
         let bg: Ext4BlockGroup = ext4block.read_offset_as(offset);
@@ -232,8 +231,8 @@ impl Ext4BlockGroup {
         block_device: Arc<dyn BlockDevice>,
         bgid: usize,
         super_block: &Ext4Superblock,
+        block_size: usize,
     ) {
-        let block_size = *GLOBAL_BLOCK_SIZE;
         // 获取每块上组描述符的数量
         let dsc_cnt = block_size / super_block.desc_size as usize;
         // let dsc_per_block = dsc_cnt;
@@ -289,11 +288,12 @@ impl Ext4BlockGroup {
         block_device: Arc<dyn BlockDevice>,
         bgid: usize,
         super_block: &Ext4Superblock,
+        block_size: usize,
     ) {
         // 设置校验和
         self.set_block_group_checksum(bgid as u32, super_block);
         // 同步块组描述符到磁盘
-        self.sync_block_group_to_disk(block_device, bgid, super_block)
+        self.sync_block_group_to_disk(block_device, bgid, super_block, block_size)
     }
 
     /// Set the block allocation bitmap checksum for this block group.
@@ -352,6 +352,8 @@ pub struct Block {
     pub disk_offset: usize,
     // 数据，大小为BLOCK_SIZE
     pub data: Vec<u8>,
+    /// 块大小
+    pub block_size: usize,
 }
 
 #[allow(dead_code)]
@@ -367,28 +369,38 @@ impl Block {
         Block {
             disk_offset: offset,
             data,
+            block_size,
         }
     }
 
     /// 使用块号加载一个块
     #[no_mangle]
-    pub fn load_id(block_device: Arc<dyn BlockDevice>, block_id: usize, offset: usize) -> Self {
-        let mut buf = vec![0u8; *GLOBAL_BLOCK_SIZE];
+    pub fn load_id(
+        block_device: Arc<dyn BlockDevice>,
+        block_id: usize,
+        offset: usize,
+        block_size: usize,
+    ) -> Self {
+        let mut buf = vec![0u8; block_size];
         block_device.read_block(block_id, &mut buf);
         let data = buf.to_vec();
         Block {
             disk_offset: offset,
             data,
+            block_size,
         }
     }
     /// 使用偏移量加载一个块
     /// # 说明
-    /// + 通过 offset/BLOCK_SIZE 获取 block_id 也即块号
+    /// + 通过 offset/block_size 获取 block_id 也即块号
     /// + 然后调用load_id
-    pub fn load_offset(block_device: Arc<dyn BlockDevice>, offset: usize) -> Self {
-        let block_size = *GLOBAL_BLOCK_SIZE;
+    pub fn load_offset(
+        block_device: Arc<dyn BlockDevice>,
+        offset: usize,
+        block_size: usize,
+    ) -> Self {
         let block_id = offset / block_size;
-        Self::load_id(block_device, block_id, offset)
+        Self::load_id(block_device, block_id, offset, block_size)
     }
 
     // 从inode块读取块
@@ -397,6 +409,7 @@ impl Block {
         Block {
             disk_offset: 0,
             data: data_bytes.to_vec(),
+            block_size: 60,
         }
     }
 
@@ -410,7 +423,7 @@ impl Block {
 
     // 将读到的块作为指定的类型，同时附带一个偏移量
     pub fn read_offset_as<T>(&self, offset: usize) -> T {
-        let block_size = *GLOBAL_BLOCK_SIZE;
+        let block_size = self.block_size;
         let offset = offset % block_size;
         assert!(
             offset + core::mem::size_of::<T>() <= self.data.len(),
@@ -457,7 +470,7 @@ impl Block {
 
     // 将读到的块作为指定的类型，同时附带一个偏移量，并且返回一个可变引用
     pub fn read_offset_as_mut<T>(&mut self, offset: usize) -> &mut T {
-        let block_size = *GLOBAL_BLOCK_SIZE;
+        let block_size = self.block_size;
         let offset = offset % block_size;
         assert!(
             offset + core::mem::size_of::<T>() <= self.data.len(),
@@ -487,7 +500,7 @@ impl Block {
     /// 考虑根据len找到最后一个块，读取最后一个块之后，再分批次写入
     /// 同时也需要读取第一个块
     pub fn sync_blk_to_disk(&self, block_device: Arc<dyn BlockDevice>) {
-        let block_size = *GLOBAL_BLOCK_SIZE;
+        let block_size = self.block_size;
         if self.data.len() % block_size != 0 {
             panic!(
                 "[todo fix the write_offset function] write_length is not a multiple of BLOCK_SIZE"

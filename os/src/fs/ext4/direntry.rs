@@ -1,6 +1,5 @@
 use core::{convert::TryFrom, fmt::Debug, intrinsics::size_of};
 
-use crate::fs::directory_tree::{FILE_SYSTEM, GLOBAL_BLOCK_SIZE};
 use crate::syscall::errno::ENOMEM;
 
 use super::block_group::Block;
@@ -279,7 +278,7 @@ impl Ext4DirEntryTail {
     }
 
     pub fn copy_to_slice(&self, array: &mut [u8]) {
-        let block_size = *GLOBAL_BLOCK_SIZE;
+        let block_size = array.len();
         unsafe {
             let offset = block_size - core::mem::size_of::<Ext4DirEntryTail>();
             let de_ptr = self as *const Ext4DirEntryTail as *const u8;
@@ -334,6 +333,7 @@ impl Ext4FileSystem {
                 let mut ext4block = Block::load_offset(
                     self.block_device.clone(),
                     fblock as usize * self.block_size,
+                    self.block_size,
                 );
 
                 // find entry in block
@@ -450,6 +450,7 @@ impl Ext4FileSystem {
                 let ext4block = Block::load_offset(
                     self.block_device.clone(),
                     fblock as usize * self.block_size,
+                    self.block_size,
                 );
                 let mut offset = 0;
 
@@ -526,6 +527,7 @@ impl Ext4FileSystem {
                 let mut ext4block = Block::load_offset(
                     self.block_device.clone(),
                     pblock as usize * self.block_size,
+                    self.block_size,
                 );
 
                 let result =
@@ -557,6 +559,7 @@ impl Ext4FileSystem {
         let mut new_ext4block = Block::load_offset(
             self.block_device.clone(),
             new_block as usize * self.block_size,
+            self.block_size,
         );
 
         // write new entry to the new block
@@ -700,6 +703,7 @@ impl Ext4FileSystem {
         let mut ext4block = Block::load_offset(
             self.block_device.clone(),
             result.pblock_id * self.block_size,
+            self.block_size,
         );
 
         let de_del_entry_len = result.dentry.entry_len();
@@ -744,6 +748,7 @@ impl Ext4FileSystem {
                 let ext4block = Block::load_offset(
                     self.block_device.clone(),
                     fblock as usize * self.block_size,
+                    self.block_size,
                 );
 
                 // start from the first entry
@@ -798,6 +803,7 @@ impl Ext4FileSystem {
                 let ext4block = Block::load_offset(
                     self.block_device.clone(),
                     fblock as usize * self.block_size,
+                    self.block_size,
                 );
                 let mut offset = 0;
                 while offset < self.block_size - core::mem::size_of::<Ext4DirEntryTail>() {
@@ -829,6 +835,7 @@ impl Ext4FileSystem {
                 let ext4block = Block::load_offset(
                     self.block_device.clone(),
                     fblock as usize * self.block_size,
+                    self.block_size,
                 );
                 let mut offset = 0;
                 while offset < self.block_size - core::mem::size_of::<Ext4DirEntryTail>() {
