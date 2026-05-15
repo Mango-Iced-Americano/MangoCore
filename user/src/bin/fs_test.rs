@@ -1273,21 +1273,24 @@ fn test_stress_getdents() -> bool {
         sys_close(fd as usize);
     }
     let fd = sys_open("/tmp38\0", 0x200000 | 0);
-    let mut buf = [0u8; 2048];
-    let n = sys_getdents64(fd as usize, &mut buf);
-    sys_close(fd as usize);
-    let bytes = &buf[..n as usize];
+    let mut buf = [0u8; 512]; // small buffer — forces multiple getdents64 calls
     let mut entries = 0usize;
-    let mut pos = 0;
-    while pos + 19 <= bytes.len() {
-        let d_reclen = u16::from_le_bytes([bytes[pos + 16], bytes[pos + 17]]) as usize;
-        if d_reclen == 0 { break; }
-        let name_start = pos + 19;
-        let name_end = bytes[name_start..].iter().position(|&b| b == 0).map(|j| name_start + j).unwrap_or(bytes.len());
-        let name = core::str::from_utf8(&bytes[name_start..name_end]).unwrap_or("???");
-        if name != "." && name != ".." { entries += 1; }
-        pos += d_reclen;
+    loop {
+        let n = sys_getdents64(fd as usize, &mut buf);
+        if n <= 0 { break; }
+        let bytes = &buf[..n as usize];
+        let mut pos = 0;
+        while pos + 19 <= bytes.len() {
+            let d_reclen = u16::from_le_bytes([bytes[pos + 16], bytes[pos + 17]]) as usize;
+            if d_reclen == 0 { break; }
+            let name_start = pos + 19;
+            let name_end = bytes[name_start..].iter().position(|&b| b == 0).map(|j| name_start + j).unwrap_or(bytes.len());
+            let name = core::str::from_utf8(&bytes[name_start..name_end]).unwrap_or("???");
+            if name != "." && name != ".." { entries += 1; }
+            pos += d_reclen;
+        }
     }
+    sys_close(fd as usize);
     if entries != nfiles as usize { println!("  FAIL: getdents counted {} files (expected {})", entries, nfiles); return false; }
     println!("  PASS: getdents counts {} files OK", nfiles);
     for i in 0..nfiles {

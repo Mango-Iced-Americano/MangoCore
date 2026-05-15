@@ -604,6 +604,9 @@ impl File {
     /// 调整文件偏移量
     pub fn lseek(&self, whence: SeekFrom) -> Result<usize, SyscallErr> {
         let mode = *self.mode.lock();
+        if mode.contains(FileMode::FMODE_STREAM) {
+            return Err(SyscallErr::ESPIPE);
+        }
         if !mode.contains(FileMode::FMODE_LSEEK) {
             return Err(SyscallErr::ESPIPE);
         }
