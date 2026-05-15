@@ -896,7 +896,7 @@ fn test_write_overwrite_middle() -> bool {
     let mut buf = [0u8; 16];
     let n = sys_read(fd as usize, &mut buf);
     sys_close(fd as usize);
-    if &buf[..n as usize] != b"abXYfgh" { println!("  FAIL: overwrite content: {:?}", &buf[..n as usize]); return false; }
+    if &buf[..n as usize] != b"abXYefgh" { println!("  FAIL: overwrite content: {:?}", &buf[..n as usize]); return false; }
     println!("  PASS: overwrite middle -> abXYfgh OK");
     sys_unlinkat(AT_FDCWD, "/tmp23/over\0", 0);
     sys_unlinkat(AT_FDCWD, "/tmp23\0", 0x200);
