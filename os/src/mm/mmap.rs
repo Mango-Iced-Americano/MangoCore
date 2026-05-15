@@ -16,16 +16,6 @@ fn page_round_up_addr(addr: usize) -> Option<usize> {
         .map(|addr| addr & !(PAGE_SIZE - 1))
 }
 
-#[cfg(feature = "loongarch64")]
-fn user_mmap_bounds() -> (usize, usize) {
-    (USR_MMAP_BASE, USR_MMAP_END)
-}
-
-#[cfg(feature = "riscv")]
-fn user_mmap_bounds() -> (usize, usize) {
-    (MMAP_BASE, MMAP_END)
-}
-
 fn checked_user_range(start: usize, len: usize) -> Result<(VirtAddr, VirtAddr), isize> {
     if len == 0 {
         return Err(EINVAL);
@@ -165,11 +155,6 @@ pub(super) fn do_mmap<T: PageTable>(
         return ENOMEM;
     }
     let task = current_task().unwrap();
-    let (mmap_base, mmap_end) = user_mmap_bounds();
-    let idx = memory_set.vmas.last_mmap_index(
-        VirtAddr::from(mmap_base).floor(),
-        VirtAddr::from(mmap_end).floor(),
-    );
     let fixed =
         flags.contains(MapFlags::MAP_FIXED) || flags.contains(MapFlags::MAP_FIXED_NOREPLACE);
     let start_va: VirtAddr = if fixed {
@@ -190,36 +175,25 @@ pub(super) fn do_mmap<T: PageTable>(
         }
         start_hint
     } else {
-        if let Some(idx) = idx {
-            match memory_set
-                .vmas
-                .try_merge_lazy_private_mmap::<T>(idx, len, prot, flags, mmap_end)
-            {
-                Ok(Some(end_va)) => return end_va.0 as isize,
-                Ok(None) => {}
-                Err(errno) => return errno,
+        match memory_set.vmas.find_free_mmap_range(len, PAGE_SIZE) {
+            Ok(start_va) => {
+                match memory_set
+                    .vmas
+                    .try_merge_lazy_private_mmap::<T>(start_va, len, prot, flags)
+                {
+                    Ok(Some(end_va)) => return end_va.0 as isize,
+                    Ok(None) => {}
+                    Err(errno) => return errno,
+                }
+                start_va
             }
-            memory_set.vmas.get(idx).unwrap().get_end::<T>().into()
-        } else {
-            #[cfg(feature = "loongarch64")]
-            {
-                USR_MMAP_BASE.into()
-            }
-            #[cfg(feature = "riscv")]
-            {
-                MMAP_BASE.into()
-            }
+            Err(errno) => return errno,
         }
     };
     let end = match start_va.0.checked_add(len) {
         Some(end) => end,
         None => return EINVAL,
     };
-    if !fixed {
-        if end > mmap_end {
-            return ENOMEM;
-        }
-    }
     let end_va = VirtAddr::from(end);
     let start_vpn = start_va.floor();
     let end_vpn = end_va.ceil();
@@ -339,7 +313,7 @@ pub(super) fn do_mmap<T: PageTable>(
         }
     }
 
-    if let Err(errno) = memory_set.vmas.insert_ordered(new_area) {
+    if let Err(errno) = memory_set.vmas.insert_vma(new_area) {
         return errno;
     }
 

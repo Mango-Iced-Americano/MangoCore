@@ -779,7 +779,9 @@ impl Vma {
         prot: MapPermission,
         flags: MapFlags,
     ) -> bool {
-        flags.contains(MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS)
+        self.flags
+            .contains(MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS)
+            && flags.contains(MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS)
             && prot == self.map_perm
             && self.map_file.is_none()
     }

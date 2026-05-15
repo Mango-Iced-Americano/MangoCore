@@ -1,6 +1,7 @@
 pub mod addr;
 pub mod address;
 mod arch;
+mod address_space;
 mod error;
 mod filemap;
 mod frame_store;
@@ -45,6 +46,8 @@ pub use vma::{MapFlags, MapPermission};
 pub use mapper::PageMapper;
 #[allow(unused_imports)]
 pub use kernel_space::{kernel_token, KernelSpace, KERNEL_SPACE};
+#[allow(unused_imports)]
+pub use memory_set::AddressSpace;
 pub use memory_set::MemoryError;
 pub use memory_set::MemorySet;
 #[allow(unused_imports)]
