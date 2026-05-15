@@ -50,10 +50,12 @@ impl VmaSet {
         let (mmap_start, mmap_end) = mmap_bounds();
         let mut mmap_holes = BTreeMap::new();
         mmap_holes.insert(mmap_start, mmap_end);
-        Self {
+        let set = Self {
             vmas: BTreeMap::new(),
             mmap_holes,
-        }
+        };
+        set.debug_assert_invariants();
+        set
     }
 
     pub(super) fn len(&self) -> usize {
@@ -94,6 +96,7 @@ impl VmaSet {
         self.mmap_holes.clear();
         let (mmap_start, mmap_end) = mmap_bounds();
         self.mmap_holes.insert(mmap_start, mmap_end);
+        self.debug_assert_invariants();
     }
 
     pub(super) fn try_reserve(&mut self, additional: usize) -> Result<(), isize> {
@@ -162,6 +165,7 @@ impl VmaSet {
         self.try_reserve(1)?;
         self.reserve_mmap_range(start, end)?;
         self.vmas.insert(start, new_area);
+        self.debug_assert_invariants();
         Ok(())
     }
 
@@ -175,6 +179,7 @@ impl VmaSet {
             let end = area.vm_end();
             let result = area.unmap(page_table);
             let _ = self.release_mmap_range(start, end);
+            self.debug_assert_invariants();
             result
         } else {
             Err(MemoryError::AreaNotFound)
@@ -204,6 +209,7 @@ impl VmaSet {
         let mut area = self.vmas.remove(&area_start).ok_or(EINVAL)?;
         if start_vpn == area_start_vpn && end_vpn == area_end_vpn {
             self.vmas.insert(area_start_vpn, area);
+            self.debug_assert_invariants();
             Ok(area_start_vpn)
         } else if start_vpn == area_start_vpn {
             let second = match area.into_two(end_vpn) {
@@ -216,6 +222,7 @@ impl VmaSet {
             let target_start = area.vm_start();
             self.insert_split_piece(area);
             self.insert_split_piece(second);
+            self.debug_assert_invariants();
             Ok(target_start)
         } else if end_vpn == area_end_vpn {
             let second = match area.into_two(start_vpn) {
@@ -228,6 +235,7 @@ impl VmaSet {
             let target_start = second.vm_start();
             self.insert_split_piece(area);
             self.insert_split_piece(second);
+            self.debug_assert_invariants();
             Ok(target_start)
         } else {
             let (second, third) = match area.into_three(start_vpn, end_vpn) {
@@ -241,6 +249,7 @@ impl VmaSet {
             self.insert_split_piece(area);
             self.insert_split_piece(second);
             self.insert_split_piece(third);
+            self.debug_assert_invariants();
             Ok(target_start)
         }
     }
@@ -280,6 +289,7 @@ impl VmaSet {
             }
             self.release_mmap_range(released_start, released_end)?;
         }
+        self.debug_assert_invariants();
         if found_area || allow_empty {
             Ok(found_area)
         } else {
@@ -310,6 +320,7 @@ impl VmaSet {
             self.protect_area(page_table, target_start, prot)?;
             cursor = protect_end;
         }
+        self.debug_assert_invariants();
         Ok(())
     }
 
@@ -341,6 +352,7 @@ impl VmaSet {
         end_vpn: VirtPageNum,
     ) -> Result<(), isize> {
         let Some((start_vpn, end_vpn)) = self.clip_mmap_range(start_vpn, end_vpn) else {
+            self.debug_assert_invariants();
             return Ok(());
         };
         let overlapping: Vec<(VirtPageNum, VirtPageNum)> = self
@@ -358,6 +370,7 @@ impl VmaSet {
                 self.mmap_holes.insert(end_vpn, hole_end);
             }
         }
+        self.debug_assert_invariants();
         Ok(())
     }
 
@@ -367,6 +380,7 @@ impl VmaSet {
         end_vpn: VirtPageNum,
     ) -> Result<(), isize> {
         let Some((mut start_vpn, mut end_vpn)) = self.clip_mmap_range(start_vpn, end_vpn) else {
+            self.debug_assert_invariants();
             return Ok(());
         };
         if let Some((prev_start, prev_end)) = self
@@ -401,6 +415,7 @@ impl VmaSet {
             self.mmap_holes.remove(&next_start);
         }
         self.mmap_holes.insert(start_vpn, end_vpn);
+        self.debug_assert_invariants();
         Ok(())
     }
 
@@ -436,6 +451,7 @@ impl VmaSet {
             return Err(errno);
         }
         debug!("[mmap] merge with previous area, call expand_to");
+        self.debug_assert_invariants();
         Ok(Some(start_va))
     }
 
@@ -555,5 +571,65 @@ impl VmaSet {
             };
         }
         true
+    }
+
+    #[inline(always)]
+    fn debug_assert_invariants(&self) {
+        #[cfg(debug_assertions)]
+        self.check_invariants();
+    }
+
+    fn check_invariants(&self) {
+        let mut prev_vma_end = None;
+        for (key, area) in self.vmas.iter() {
+            let start = area.vm_start();
+            let end = area.vm_end();
+            debug_assert_eq!(*key, start, "VmaSet key must match VMA start");
+            debug_assert!(start < end, "VMA must be non-empty: {:?}", area);
+            if let Some(prev_end) = prev_vma_end {
+                debug_assert!(
+                    prev_end <= start,
+                    "VMA ranges must not overlap: prev_end={:?}, start={:?}",
+                    prev_end,
+                    start
+                );
+            }
+            prev_vma_end = Some(end);
+        }
+
+        let (mmap_start, mmap_end) = mmap_bounds();
+        let mut prev_hole_end = None;
+        for (hole_start, hole_end) in self.mmap_holes.iter() {
+            debug_assert!(
+                *hole_start < *hole_end,
+                "mmap hole must be non-empty: {:?}..{:?}",
+                hole_start,
+                hole_end
+            );
+            debug_assert!(
+                *hole_start >= mmap_start && *hole_end <= mmap_end,
+                "mmap hole out of arena: {:?}..{:?}",
+                hole_start,
+                hole_end
+            );
+            if let Some(prev_end) = prev_hole_end {
+                debug_assert!(
+                    prev_end < *hole_start,
+                    "mmap holes must be disjoint and merged: prev_end={:?}, start={:?}",
+                    prev_end,
+                    hole_start
+                );
+            }
+            for area in self.vmas.values() {
+                debug_assert!(
+                    !area.vm_overlaps(*hole_start, *hole_end),
+                    "mmap hole overlaps VMA: hole={:?}..{:?}, area={:?}",
+                    hole_start,
+                    hole_end,
+                    area
+                );
+            }
+            prev_hole_end = Some(*hole_end);
+        }
     }
 }

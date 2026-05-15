@@ -1,4 +1,4 @@
-use super::memory_set::{MemoryError, MemorySet};
+use super::address_space::{AddressSpace, MemoryError};
 use super::page_table::PageTable;
 use super::user_mapper::UserMapper;
 use super::vma::{MapFlags, MapPermission, MapType, Vma};
@@ -28,7 +28,7 @@ fn checked_user_range(start: usize, len: usize) -> Result<(VirtAddr, VirtAddr), 
 }
 
 pub(super) fn do_sbrk<T: PageTable>(
-    memory_set: &mut MemorySet<T>,
+    memory_set: &mut AddressSpace<T>,
     heap_pt: usize,
     heap_bottom: usize,
     increment: isize,
@@ -134,7 +134,7 @@ pub(super) fn do_sbrk<T: PageTable>(
 }
 
 pub(super) fn do_mmap<T: PageTable>(
-    memory_set: &mut MemorySet<T>,
+    memory_set: &mut AddressSpace<T>,
     start: usize,
     len: usize,
     prot: MapPermission,
@@ -321,7 +321,7 @@ pub(super) fn do_mmap<T: PageTable>(
 }
 
 pub(super) fn do_munmap<T: PageTable>(
-    memory_set: &mut MemorySet<T>,
+    memory_set: &mut AddressSpace<T>,
     start: usize,
     len: usize,
 ) -> Result<(), isize> {
@@ -339,7 +339,7 @@ pub(super) fn do_munmap<T: PageTable>(
 }
 
 pub(super) fn do_mprotect<T: PageTable>(
-    memory_set: &mut MemorySet<T>,
+    memory_set: &mut AddressSpace<T>,
     addr: usize,
     len: usize,
     prot: MapPermission,

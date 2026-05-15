@@ -49,6 +49,7 @@ pub use kernel_space::{kernel_token, KernelSpace, KERNEL_SPACE};
 #[allow(unused_imports)]
 pub use memory_set::AddressSpace;
 pub use memory_set::MemoryError;
+#[allow(unused_imports)]
 pub use memory_set::MemorySet;
 #[allow(unused_imports)]
 pub use page::{MemAttr, PageFaultKind, PageProt};

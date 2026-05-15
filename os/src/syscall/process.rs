@@ -1193,7 +1193,7 @@ pub fn sys_futex(
     // 计算用户地址对应的物理地址 key（用于 process-shared futex）
     // 分解为独立函数避免闭包捕获 task 的借用问题
     fn va_to_phys_key(
-        vm: &crate::mm::MemorySet<crate::mm::KernelPageTableImpl>,
+        vm: &crate::mm::AddressSpace<crate::mm::KernelPageTableImpl>,
         va: usize,
     ) -> Option<usize> {
         let va = VirtAddr::from(va);
