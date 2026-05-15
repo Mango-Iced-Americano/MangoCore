@@ -272,7 +272,7 @@ impl IndexNode for Teletype {
                 Ok(SUCCESS as usize)
             }
             TeletypeCommand::TCXONC => Ok(SUCCESS as usize),
-            TeletypeCommand::TIOCGPGRP => match translated_refmut(token, argp as *mut u32) {
+            TeletypeCommand::TIOCGPGRP => match translated_ref_write(token, argp as *mut u32) {
                 Ok(word) => {
                     *word = inner.foreground_pgid;
                     Ok(0)

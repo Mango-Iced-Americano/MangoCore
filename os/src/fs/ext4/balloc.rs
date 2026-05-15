@@ -380,10 +380,10 @@ impl Ext4FileSystem {
 
             bg.set_block_group_balloc_bitmap_csum(&super_block, data);
             // 此处不需要考虑对齐
-            log::warn!(
-                "[WRITE_CALLER] balloc_free_blocks: write block_bitmap block={}",
-                block_bitmap_block
-            );
+            // log::warn!(
+            //     "[WRITE_CALLER] balloc_free_blocks: write block_bitmap block={}",
+            //     block_bitmap_block
+            // );
             self.block_device
                 .write_block(block_bitmap_block as usize, data);
 

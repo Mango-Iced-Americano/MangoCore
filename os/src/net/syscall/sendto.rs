@@ -26,14 +26,16 @@ pub fn sys_sendto(
     };
 
     let task = current_task().unwrap();
-    let socket_file = match task.files.lock().get_ref(sockfd as usize) {
-        Ok(file) => file.clone(),
-        Err(e) => return e,
-    };
     let buf = crate::trans_ref!(buf, len);
     let socket = crate::get_socket!(sockfd);
     log::info!("[sys_sendto] get socket sockfd: {}", sockfd);
-    let is_nonblock = socket_file.get_nonblock() || msg_dontwait;
+    let is_nonblock = {
+        let fd_table = task.files.lock();
+        fd_table
+            .get_file(sockfd as usize)
+            .map(|f| f.is_nonblock())
+            .unwrap_or(false)
+    } || msg_dontwait;
 
     // Validate dest_addr/addrlen for connection-mode sockets
     if dest_addr != 0 {

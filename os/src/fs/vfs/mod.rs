@@ -34,7 +34,7 @@ use core::any::Any;
 use core::fmt::Debug;
 
 pub use file::{FdTable, File, FileFlags, FileMode, SeekFrom};
-pub use file_system::{FileSystem, FsInfo};
+pub use file_system::{FileSystem, FsInfo, SuperBlock};
 pub use index_node::IndexNode;
 pub use mount::{MountFS, MountFSInode, MountFlags, MountList, MountPath};
 

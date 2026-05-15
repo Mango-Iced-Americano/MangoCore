@@ -371,51 +371,34 @@ impl FdTable {
         self.next_fd = 0;
     }
 
-    // ── 旧 FdTable 桥接（syscall 迁移期间保留）────────────────
+    // ── 过渡桥接（syscall 迁移期间使用 vfs::File）────────────────
 
-    pub fn get_ref(&self, fd: usize) -> Result<crate::fs::FileDescriptor, isize> {
-        let vf = self.get_file(fd).map_err(|e| e as isize)?;
-        Ok(crate::fs::FileDescriptor::new(
-            self.get_cloexec(fd),
-            vf.is_nonblock(),
-            vf.inode.clone(),
-        ))
+    pub fn get_ref(&self, fd: usize) -> Result<&File, isize> {
+        self.get_file(fd).map_err(|e| -(e as isize))
     }
 
-    pub fn get_refmut(&mut self, fd: usize) -> Result<crate::fs::FileDescriptor, isize> {
-        self.get_ref(fd)
+    pub fn get_refmut(&mut self, fd: usize) -> Result<&mut File, isize> {
+        self.get_file_mut(fd).map_err(|e| -(e as isize))
     }
 
-    pub fn remove(&mut self, fd: usize) -> Result<crate::fs::FileDescriptor, isize> {
-        let vf = self.drop_fd(fd).map_err(|e| e as isize)?;
-        Ok(crate::fs::FileDescriptor::new(
-            false,
-            vf.is_nonblock(),
-            vf.inode.clone(),
-        ))
+    pub fn remove(&mut self, fd: usize) -> Result<File, isize> {
+        self.drop_fd(fd).map_err(|e| -(e as isize))
     }
 
-    pub fn insert(&mut self, fd_obj: crate::fs::FileDescriptor) -> Result<usize, isize> {
-        let cloexec = fd_obj.get_cloexec();
-        let ft = fd_obj.file.metadata().map(|m| m.file_type).unwrap_or(super::FileType::File);
-        let flags = FileFlags::O_RDWR;
-        let vf = File::new_without_open(fd_obj.file.clone(), flags, ft);
-        self.alloc_fd(vf, cloexec).map_err(|e| e as isize)
+    pub fn insert(&mut self, file: File) -> Result<usize, isize> {
+        self.alloc_fd(file, false).map_err(|e| -(e as isize))
     }
 
-    pub fn insert_at(&mut self, fd_obj: crate::fs::FileDescriptor, pos: usize) -> Result<usize, isize> {
-        let cloexec = fd_obj.get_cloexec();
-        let ft = fd_obj.file.metadata().map(|m| m.file_type).unwrap_or(super::FileType::File);
-        let vf = File::new_without_open(fd_obj.file.clone(), FileFlags::O_RDWR, ft);
-        self.alloc_fd_at(pos, vf, cloexec).map_err(|e| e as isize)
+    pub fn insert_at(&mut self, file: File, pos: usize) -> Result<usize, isize> {
+        self.alloc_fd_at(pos, file, false).map_err(|e| -(e as isize))
     }
 
-    pub fn try_insert_at(&mut self, fd_obj: crate::fs::FileDescriptor, hint: usize) -> Result<usize, isize> {
-        self.insert_at(fd_obj, hint)
+    pub fn try_insert_at(&mut self, file: File, hint: usize) -> Result<usize, isize> {
+        self.insert_at(file, hint)
     }
 
     pub fn check(&self, fd: usize) -> Result<(), isize> {
-        self.get_file(fd).map(|_| ()).map_err(|e| e as isize)
+        self.get_file(fd).map(|_| ()).map_err(|e| -(e as isize))
     }
 
     pub fn get_soft_limit(&self) -> usize { self.soft_limit }
@@ -778,15 +761,49 @@ impl File {
 
     /// 将文件页缓存映射到内核虚拟地址空间，返回对整个文件的切片引用。
     /// 对标旧 `FileDescriptor::map_to_kernel_space`。用于 ELF 加载。
+    ///
+    /// 当 inode 有 page_cache 时直接使用页缓存物理帧；
+    /// 否则（如 ramfs）手动分配帧并从文件读取数据。
     pub fn map_to_kernel_space(&self, base: usize) -> &'static [u8] {
-        use crate::mm::{Frame, MapPermission, KERNEL_SPACE};
+        use crate::mm::{frame_alloc, Frame, FrameTracker, MapPermission, KERNEL_SPACE};
+        use crate::config::PAGE_SIZE;
         use core::convert::TryInto;
 
-        let frames: Vec<Frame> = self
-            .inode
-            .page_cache()
-            .map(|pc| pc.frame_trackers())
-            .unwrap_or_default();
+        let frames: Vec<Frame> = if let Some(pc) = self.inode.page_cache() {
+            log::trace!("[map_to_kernel_space] using page_cache frames");
+            pc.frame_trackers()
+        } else {
+            log::trace!("[map_to_kernel_space] no page_cache, allocating frames from heap");
+            let size = self.get_size();
+            if size == 0 {
+                Vec::new()
+            } else {
+                let need_pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+                let mut trackers: Vec<Arc<FrameTracker>> = Vec::with_capacity(need_pages);
+                for _ in 0..need_pages {
+                    trackers.push(frame_alloc().expect("map_to_kernel_space: frame_alloc failed"));
+                }
+                let mut buf = alloc::vec![0u8; size];
+                let n = self
+                    .pread(0, &mut buf)
+                    .expect("map_to_kernel_space: pread failed");
+                if n != size {
+                    log::warn!(
+                        "[map_to_kernel_space] pread returned {} bytes, expected {}",
+                        n,
+                        size
+                    );
+                }
+                let mut offset = 0;
+                for tracker in &trackers {
+                    let dst = tracker.ppn.get_bytes_array();
+                    let chunk = (size - offset).min(PAGE_SIZE);
+                    dst[..chunk].copy_from_slice(&buf[offset..offset + chunk]);
+                    offset += chunk;
+                }
+                trackers.into_iter().map(Frame::InMemory).collect()
+            }
+        };
 
         KERNEL_SPACE
             .lock()
@@ -959,7 +976,6 @@ impl File {
                 Ok(file)
             }
             Err(e) if e == crate::syscall::errno::ENOENT => {
-                // 文件不存在，尝试创建
                 if !flags.contains(crate::fs::OpenFlags::O_CREAT)
                     || flags.contains(crate::fs::OpenFlags::O_DIRECTORY)
                 {
@@ -982,6 +998,11 @@ impl File {
     /// 创建目录（桥接旧 FileDescriptor::mkdir）
     pub fn mkdir_path(&self, path: &str) -> Result<(), isize> {
         use super::IndexNode as _;
+
+        // 根路径 "/" 已存在，不创建
+        if path == "/" || path == "." {
+            return Err(crate::syscall::errno::EEXIST);
+        }
 
         let start: Arc<dyn IndexNode> = self.inode.clone();
         let components = crate::fs::parse_path(path);
@@ -1053,6 +1074,25 @@ impl File {
                 __unused: 0,
             },
         }
+    }
+
+    /// 获取 Statx（桥接旧接口）
+    pub fn get_statx_old(&self, mask: u32) -> crate::fs::layout::Statx {
+        let stat = self.get_stat_old();
+        crate::fs::layout::Statx::new(
+            mask,
+            stat.get_nlink(),
+            stat.get_mode() as u16,
+            stat.get_ino() as u64,
+            stat.get_size() as u64,
+            stat.get_atime() as i64,
+            stat.get_ctime() as i64,
+            stat.get_mtime() as i64,
+            (stat.get_rdev() & 0xffff_00) >> 8 as u32,
+            (stat.get_rdev() & 0xff) as u32,
+            (stat.get_dev() & 0xffff_00) >> 8 as u32,
+            (stat.get_dev() & 0xff) as u32,
+        )
     }
 
     /// 获取页缓存（桥接旧接口）

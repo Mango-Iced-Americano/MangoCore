@@ -9,7 +9,6 @@ use crate::{
             direntry::{DirEntryType, Ext4DirEntryTail},
             InodeFileType, PageCache,
         },
-        file_descriptor::FdTable,
         file_trait::File,
         inode::{self, InodeLock, InodeTrait},
         directory_tree::VFS,

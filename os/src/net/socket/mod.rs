@@ -4,8 +4,8 @@ pub mod unix;
 
 use crate::{
     fs::{
-        directory_tree::DirectoryTreeNode, fat32::DiskInodeType, file_descriptor::FileDescriptor,
-        file_trait::File, Dirent, OpenFlags, PageCache, SeekWhence, Stat,
+        directory_tree::DirectoryTreeNode, fat32::DiskInodeType,
+        file_trait::File, vfs, vfs::FileFlags, Dirent, OpenFlags, PageCache, SeekWhence, Stat,
     },
     mm::{translated_byte_buffer, translated_ref, translated_refmut, UserAccess, UserBuffer},
     net::{
@@ -655,6 +655,12 @@ impl dyn Socket {
             log::warn!("[Socket::alloc] AF_INET6 is not supported yet!");
             return Err(SyscallErr::EAFNOSUPPORT);
         }
+        let alloc_socket_fd = |socket_file: Arc<dyn crate::fs::vfs::IndexNode>| -> GeneralRet<usize> {
+            let mut flags = FileFlags::O_RDWR;
+            if is_nonblock { flags.insert(FileFlags::O_NONBLOCK); }
+            let vf = vfs::File::new_without_open(socket_file, flags, vfs::FileType::Socket);
+            current_task().unwrap().files.lock().alloc_fd(vf, is_cloexec)
+        };
         match domain as u16 {
             AF_INET | AF_UNSPEC => {
                 log::info!("[Socket::new] domain: {} -> treating as AF_INET", domain);
@@ -664,39 +670,21 @@ impl dyn Socket {
                         let socket = Arc::new(socket);
                         UdpSocket::register_udp_socket(&socket);
                         let socket_file = Arc::new(SocketFile::new(socket));
-                        let current_tcb = current_task().unwrap();
-                        let fd = current_tcb
-                            .files
-                            .lock()
-                            .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket_file))
-                            .unwrap();
-                        Ok(fd)
+                        alloc_socket_fd(socket_file)
                     }
                     PSOCK::Stream => {
                         let socket = TcpSocket::new();
                         let socket = Arc::new(socket);
                         TcpSocket::register_tcp_socket(&socket);
                         let socket_file = Arc::new(SocketFile::new(socket));
-                        let current_tcb = current_task().unwrap();
-                        let fd = current_tcb
-                            .files
-                            .lock()
-                            .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket_file))
-                            .unwrap();
-                        Ok(fd)
+                        alloc_socket_fd(socket_file)
                     }
                     PSOCK::Raw => {
                         let socket = RawSocket::new(protocol);
                         let socket = Arc::new(socket);
                         RawSocket::register_raw_socket(&socket);
                         let socket_file = Arc::new(SocketFile::new(socket));
-                        let current_tcb = current_task().unwrap();
-                        let fd = current_tcb
-                            .files
-                            .lock()
-                            .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket_file))
-                            .unwrap();
-                        Ok(fd)
+                        alloc_socket_fd(socket_file)
                     }
                     _ => Err(SyscallErr::EINVAL),
                 }
@@ -707,25 +695,13 @@ impl dyn Socket {
                     PSOCK::Stream => {
                         let socket: Arc<dyn Socket> = Arc::new(UnixStreamSocket::new(is_nonblock));
                         let socket_file = Arc::new(SocketFile::new(socket));
-                        let current_tcb = current_task().unwrap();
-                        let fd = current_tcb
-                            .files
-                            .lock()
-                            .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket_file))
-                            .unwrap();
-                        Ok(fd)
+                        alloc_socket_fd(socket_file)
                     }
                     PSOCK::Datagram | PSOCK::Raw => {
                         let socket = UnixDatagramSocket::new(is_nonblock);
                         let socket: Arc<dyn Socket> = socket;
                         let socket_file = Arc::new(SocketFile::new(socket));
-                        let current_tcb = current_task().unwrap();
-                        let fd = current_tcb
-                            .files
-                            .lock()
-                            .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket_file))
-                            .unwrap();
-                        Ok(fd)
+                        alloc_socket_fd(socket_file)
                     }
                     _ => return Err(SyscallErr::EAFNOSUPPORT),
                 }

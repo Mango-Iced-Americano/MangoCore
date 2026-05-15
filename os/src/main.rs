@@ -120,6 +120,8 @@ pub fn rust_main() -> ! {
     //machine independent initialization
     // use crate::drivers::block::block_device_test;
     // block_device_test();
+    // 调试：强制 ramfs 启动，跳过块设备检测
+    fs::force_ramfs();
     fs::directory_tree::init_fs();
     drivers::init_net_device();
     net::config::init();

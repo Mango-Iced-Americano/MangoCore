@@ -234,10 +234,10 @@ impl Ext4Superblock {
         block_device.read_block(superblk_id, &mut buf);
         // 然后更改的超级块写到对应的位置中（后1024个字节）
         buf[1024..2048].copy_from_slice(data);
-        log::warn!(
-            "[WRITE_CALLER] superblock::sync_to_disk: block={}",
-            superblk_id
-        );
+        // log::warn!(
+        //     "[WRITE_CALLER] superblock::sync_to_disk: block={}",
+        //     superblk_id
+        // );
         block_device.write_block(superblk_id, &buf);
     }
 
@@ -258,10 +258,10 @@ impl Ext4Superblock {
         block_device.read_block(superblk_id, &mut buf);
         // 然后更改的超级块写到对应的位置中（后1024个字节）
         buf[1024..2048].copy_from_slice(data);
-        log::warn!(
-            "[WRITE_CALLER] superblock::sync_to_disk_with_csum: block={}",
-            superblk_id
-        );
+        // log::warn!(
+        //     "[WRITE_CALLER] superblock::sync_to_disk_with_csum: block={}",
+        //     superblk_id
+        // );
         block_device.write_block(superblk_id, &buf);
     }
 

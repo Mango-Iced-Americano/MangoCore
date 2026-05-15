@@ -835,15 +835,16 @@ pub fn sys_execve(
             show_frame_consumption! {
                 "load_elf";
                 if let Err(errno) = task.load_elf(elf, &argv_vec, &envp_vec) {
-                    // load_elf 前已经调用了 recycle_data_pages() 释放旧数据页，
-                    // 此时进程已无法回到原来的用户态，直接退出而非返回错误。
                     exit_current_and_run_next(127);
                 };
             }
             // should return 0 in success
             SUCCESS
         }
-        Err(errno) => errno,
+        Err(errno) => {
+            info!("[sys_execve] open_path(\"{}\") failed: errno={}", path, errno);
+            errno
+        },
     }
 }
 

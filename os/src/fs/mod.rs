@@ -9,11 +9,12 @@ pub mod iov;
 mod layout;
 mod page_cache;
 pub mod poll;
+pub mod ramfs;
 #[cfg(feature = "swap")]
 pub mod swap;
 // Xein add this
 pub mod dirent;
-pub mod file_descriptor;
+// file_descriptor module removed — migrated to vfs::File
 mod inode;
 mod timestamp;
 pub mod vfs;
@@ -32,32 +33,71 @@ pub use crate::drivers::block::BlockDevice;
 
 pub use self::cache::PageCache;
 use alloc::{string::String, sync::Arc};
+use core::sync::atomic::{AtomicBool, Ordering};
 pub use dirent::Dirent;
-pub use file_descriptor::FileDescriptor;
 use lazy_static::*;
+use self::vfs::IndexNode;
+
+/// 强制使用 ramfs，跳过块设备检测（用于 VFS 层调试）
+static FORCE_RAMFS: AtomicBool = AtomicBool::new(true);
+
+/// 在 BLOCK_DEVICE 初始化之前调用此函数，可跳过块设备检测，直接使用 ramfs 启动
+pub fn force_ramfs() {
+    FORCE_RAMFS.store(true, Ordering::Relaxed);
+    crate::drivers::block::disable_block_device();
+}
 
 lazy_static! {
-    /// 新 VFS 根 — 基于 MountFS + 具体文件系统，已全面替代旧 ROOT_FD
+    /// 新 VFS 根 — 基于 MountFS + 具体文件系统。
+    /// 若未检测到有效文件系统，自动 fallback 到 ramfs（兜底内存文件系统）。
     pub static ref VFS_ROOT: Arc<self::vfs::MountFS> = {
-        let fs_type = self::directory_tree::FILE_SYSTEM.get_filesystem_type();
-        let inner_fs: Arc<dyn self::vfs::FileSystem> = match fs_type {
+        let fs_type = if FORCE_RAMFS.load(Ordering::Relaxed) {
+            self::filesystem::FS_Type::Null
+        } else {
+            self::filesystem::pre_mount()
+        };
+        match fs_type {
             self::filesystem::FS_Type::Fat32 => {
                 let efs = alloc::sync::Arc::downcast::<self::fat32::EasyFileSystem>(
                     self::directory_tree::FILE_SYSTEM.clone()
                 ).unwrap();
-                efs
+                self::vfs::MountFS::new(efs, self::vfs::MountFlags::empty())
             }
             self::filesystem::FS_Type::Ext4 => {
                 let ext4 = alloc::sync::Arc::downcast::<self::ext4::ext4fs::Ext4FileSystem>(
                     self::directory_tree::FILE_SYSTEM.clone()
                 ).unwrap();
-                ext4
+                self::vfs::MountFS::new(ext4, self::vfs::MountFlags::empty())
             }
             self::filesystem::FS_Type::Null => {
-                panic!("no filesystem found");
+                println!("[kernel] No filesystem found, falling back to ramfs");
+                let ramfs = self::ramfs::RamFS::new();
+                let mfs = self::vfs::MountFS::new(ramfs, self::vfs::MountFlags::empty());
+                let root = mfs.mountpoint_root_inode();
+
+                // 创建 /dev 目录
+                let dev_inode = root
+                    .create("dev", self::vfs::FileType::Dir, self::vfs::InodeMode::from_bits_truncate(0o755))
+                    .expect("ramfs: failed to create /dev");
+
+                // 构建 DevFS 并注册设备 inode
+                let devfs = crate::fs::dev::DevFS::new();
+                devfs.add_dev("tty", crate::fs::dev::tty::TTY.clone() as Arc<dyn self::vfs::IndexNode>)
+                    .expect("devfs: failed to register /dev/tty");
+                devfs.add_dev("null", alloc::sync::Arc::new(crate::fs::dev::null::Null {}) as Arc<dyn self::vfs::IndexNode>)
+                    .expect("devfs: failed to register /dev/null");
+                devfs.add_dev("zero", alloc::sync::Arc::new(crate::fs::dev::zero::Zero {}) as Arc<dyn self::vfs::IndexNode>)
+                    .expect("devfs: failed to register /dev/zero");
+
+                // 将 DevFS 挂载到 /dev
+                let dev_inode_id = dev_inode.metadata().expect("dev_inode metadata failed").inode_id;
+                let devfs_mnt = self::vfs::MountFS::new(devfs, self::vfs::MountFlags::empty());
+                mfs.add_mount(dev_inode_id, devfs_mnt)
+                    .expect("ramfs: failed to mount devfs at /dev");
+
+                mfs
             }
-        };
-        self::vfs::MountFS::new(inner_fs, self::vfs::MountFlags::empty())
+        }
     };
 }
 
@@ -116,7 +156,7 @@ pub fn vfs_lookup(
         let name = &components[comp_idx];
         let is_last = comp_idx == components.len() - 1;
 
-        let cur_type = current.metadata().map_err(|e| e as isize)?.file_type;
+        let cur_type = current.metadata().map_err(|e| -(e as isize))?.file_type;
         if cur_type != FileType::Dir {
             return Err(crate::syscall::errno::ENOTDIR);
         }
@@ -137,8 +177,8 @@ pub fn vfs_lookup(
             continue;
         }
 
-        let next = current.find(name).map_err(|e| e as isize)?;
-        let file_type = next.metadata().map_err(|e| e as isize)?.file_type;
+        let next = current.find(name).map_err(|e| -(e as isize))?;
+        let file_type = next.metadata().map_err(|e| -(e as isize))?.file_type;
 
         if is_last && !follow_final && file_type == FileType::SymLink {
             return Ok(next);
@@ -152,7 +192,7 @@ pub fn vfs_lookup(
 
             // 读取符号链接内容（所有 inode 现在都原生实现 IndexNode）
             let target: String = {
-                let md = next.metadata().map_err(|e| e as isize)?;
+                let md = next.metadata().map_err(|e| -(e as isize))?;
                 let link_len = md.size.max(0) as usize;
                 let mut link_buf = alloc::vec![0u8; link_len.min(4096)];
                 let n = next
@@ -162,7 +202,7 @@ pub fn vfs_lookup(
                         &mut link_buf,
                         spin::Mutex::new(FilePrivateData::Unused).lock(),
                     )
-                    .map_err(|e| e as isize)?;
+                    .map_err(|e| -(e as isize))?;
                 unsafe { link_buf.set_len(n) };
                 let s = core::str::from_utf8(&link_buf[..n])
                     .map_err(|_| crate::syscall::errno::EINVAL)?;
@@ -233,7 +273,7 @@ pub fn vfs_lookup_absolute(path: &str) -> Result<Arc<dyn self::vfs::IndexNode>, 
 /// 中间路径组件的符号链接会被跟随。
 pub fn vfs_lookup_parent(path: &str) -> Result<(Arc<dyn self::vfs::IndexNode>, String), isize> {
     let components = parse_path(path);
-    let leaf = components.last().ok_or(0isize)?;
+    let leaf = components.last().ok_or(crate::syscall::errno::ENOENT)?;
     let leaf_name = leaf.clone();
 
     // 构建父目录路径（不含最后一级）
@@ -290,6 +330,8 @@ pub fn flush_preload() {
         fn ebusybox();
         fn sosconfig();
         fn eosconfig();
+        fn sfstest();
+        fn efstest();
     }
     println!(
         "sinitproc: {:X}, einitproc: {:X}, sbash: {:X}, ebash: {:X}, sbusybox: {:X}, ebusybox: {:X}, sosconfig: {:X}, eosconfig: {:X}",
@@ -333,6 +375,22 @@ pub fn flush_preload() {
     ) {
         crate::mm::frame_dealloc(ppn);
     }
+    // 复制 busybox 到 /bin/busybox（initproc 期望的路径）
+    {
+        let (parent, _) = vfs_lookup_parent("/bin/busybox").unwrap_or_else(|_| {
+            // /bin 不存在，先创建
+            let root = vfs_root().mountpoint_root_inode();
+            root.create("bin", self::vfs::FileType::Dir, self::vfs::InodeMode::S_IRWXUGO)
+                .expect("ramfs: failed to create /bin");
+            vfs_lookup_parent("/bin/busybox").unwrap()
+        });
+        let bin_busybox = parent.create("busybox", self::vfs::FileType::File, self::vfs::InodeMode::S_IRWXUGO)
+            .expect("ramfs: failed to create /bin/busybox");
+        let bin_file = self::vfs::File::new(bin_busybox, self::vfs::FileFlags::O_RDWR).unwrap();
+        bin_file.write(unsafe {
+            core::slice::from_raw_parts(sbusybox as *const u8, ebusybox as usize - sbusybox as usize)
+        }).unwrap();
+    }
     match file_size("os_test.conf") {
         Ok(size) => {
             log::info!(
@@ -355,5 +413,31 @@ pub fn flush_preload() {
         crate::mm::PhysAddr::from(eosconfig as usize).floor(),
     ) {
         crate::mm::frame_dealloc(ppn);
+    }
+    {
+        let fstest = create_or_open_file("fs_test").unwrap();
+        fstest.write(unsafe {
+            core::slice::from_raw_parts(sfstest as *const u8, efstest as usize - sfstest as usize)
+        }).unwrap();
+        for ppn in crate::mm::PPNRange::new(
+            crate::mm::PhysAddr::from(sfstest as usize).floor(),
+            crate::mm::PhysAddr::from(efstest as usize).floor(),
+        ) {
+            crate::mm::frame_dealloc(ppn);
+        }
+    }
+    // 创建 /etc/termcap（空文件），防止 bash 卡在 termcap 读取
+    match vfs_lookup_parent("/etc/termcap") {
+        Ok((parent, name)) => {
+            if parent.find(&name).is_err() {
+                let _ = parent.create(&name, self::vfs::FileType::File, self::vfs::InodeMode::S_IRWXUGO);
+            }
+        }
+        Err(_) => {
+            let root = vfs_root().mountpoint_root_inode();
+            let etc = root.create("etc", self::vfs::FileType::Dir, self::vfs::InodeMode::S_IRWXUGO)
+                .unwrap_or_else(|_| root.find("etc").unwrap());
+            let _ = etc.create("termcap", self::vfs::FileType::File, self::vfs::InodeMode::S_IRWXUGO);
+        }
     }
 }

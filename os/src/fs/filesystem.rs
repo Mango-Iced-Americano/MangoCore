@@ -8,7 +8,7 @@ use spin::Mutex;
 use crate::drivers::BLOCK_DEVICE;
 
 #[allow(unused, non_camel_case_types)]
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum FS_Type {
     Null,
     Fat32,
@@ -34,11 +34,11 @@ impl FileSystem {
 }
 
 pub fn pre_mount() -> FS_Type {
-    // 先读取块设备的第512个字节看是不是0x55AA
-    // 来判断是不是fat32
-    // 如果是fat32，返回FS_Type::Fat32
-    // 否则尝试获取超级块的魔数，如果是0xEF53，返回FS_Type::Ext4
-    // 否则返回FS_Type::Null
+    // 如果设置了强制 ramfs 标志，跳过块设备检测
+    if super::FORCE_RAMFS.load(core::sync::atomic::Ordering::Relaxed) {
+        println!("[fs] ramfs forced, skipping block device detection");
+        return FS_Type::Null;
+    }
     let block_device = BLOCK_DEVICE.clone();
     let mut buf = vec![0u8; BLOCK_SIZE];
     block_device.read_block(0, &mut buf);

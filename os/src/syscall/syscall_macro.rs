@@ -4,18 +4,18 @@ macro_rules! get_socket {
     ($sockfd:expr) => {{
         let task = crate::task::current_task().unwrap();
         let fd_table = task.files.lock();
-        let fd_ref = match fd_table.get_ref($sockfd as usize) {
-            Err(e) => return e,
-            Ok(fd) => {
+        let file = match fd_table.get_file($sockfd as usize) {
+            Err(e) => return -(e as isize),
+            Ok(f) => {
                 // O_PATH 打开的 fd 视为 inoperable，应返回 EBADF
-                if fd.get_flags().contains(crate::fs::OpenFlags::O_PATH) {
+                if f.flags().contains(crate::fs::vfs::FileFlags::O_PATH) {
                     return -(crate::utils::error::SyscallErr::EBADF as isize);
                 }
-                fd
+                f
             }
         };
         // downcast IndexNode → SocketFile → 取 .inner 拿到 Arc<dyn Socket>
-        let any_ref = fd_ref.file.as_any_ref();
+        let any_ref = file.inode.as_any_ref();
         match any_ref.downcast_ref::<crate::net::SocketFile>() {
             Some(socket_file) => socket_file.inner.clone(),
             None => return crate::syscall::errno::ENOTSOCK,

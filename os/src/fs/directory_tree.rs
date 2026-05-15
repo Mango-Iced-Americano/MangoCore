@@ -19,6 +19,7 @@ use downcast_rs::{impl_downcast, DowncastSync};
 
 /// 旧 VFS trait — 仅 FAT32 和目录树仍在使用
 /// ext4 已迁移到新的 `FileSystem` trait，FAT32 迁移完成后此 trait 将被删除
+#[deprecated(note = "old VFS, migrate to vfs::MountFS + vfs::IndexNode")]
 pub trait VFS: DowncastSync {
     fn close(&self) -> () {
         todo!();
@@ -73,9 +74,11 @@ impl VFS {
 }
 
 /// 对不同类型文件系统文件的封装（仅 FAT32 使用）
+#[deprecated(note = "old VFS, remove after migration")]
 pub trait VFSFileContent {}
 
 /// 对不同类型文件系统目录的封装（仅 FAT32 使用）
+#[deprecated(note = "old VFS, remove after migration")]
 pub trait VFSDirEnt {}
 #[cfg(feature = "oom_handler")]
 use crate::mm::tlb_invalidate;
@@ -92,9 +95,11 @@ use spin::{Mutex, MutexGuard, RwLock, RwLockWriteGuard};
 
 lazy_static! {
     // 文件系统实例
+    #[deprecated(note = "old VFS, use vfs::VFS_ROOT instead")]
     pub static ref FILE_SYSTEM: Arc<dyn VFS> =
         <dyn VFS>::open_fs(BLOCK_DEVICE.clone(), Arc::new(Mutex::new(BlockCacheManager::new())));
     // 目录树根节点
+    #[deprecated(note = "old VFS, use vfs::VFS_ROOT instead")]
     pub static ref ROOT: Arc<DirectoryTreeNode> = {
         let curr_fs_type = FILE_SYSTEM.get_filesystem_type();
         let inode = DirectoryTreeNode::new(
@@ -110,6 +115,7 @@ lazy_static! {
         inode.add_special_use();
         inode
     };
+    #[deprecated(note = "old VFS block size, remove after migration")]
     pub static ref GLOBAL_BLOCK_SIZE: usize = FILE_SYSTEM.block_size();
     static ref DIRECTORY_VEC: Mutex<(Vec<Weak<DirectoryTreeNode>>, usize)> =
         Mutex::new((Vec::new(), 0));
@@ -141,6 +147,7 @@ fn update_directory_vec(lock: &mut MutexGuard<(Vec<Weak<DirectoryTreeNode>>, usi
     lock.1 = 0;
 }
 
+#[deprecated(note = "old VFS directory tree, remove after migration")]
 pub struct DirectoryTreeNode {
     /// 如果这是个目录
     /// 1. cwd 当前工作目录
@@ -941,6 +948,7 @@ impl DirectoryTreeNode {
 // 会调用 tlb_invalidate 函数，在 arch/la64中实现
 // 会调用 update_directory_vec 函数
 #[cfg(feature = "oom_handler")]
+#[deprecated(note = "old VFS, remove after migration")]
 pub fn oom() -> usize {
     tlb_invalidate();
     const MAX_FAIL_TIME: usize = 3;
@@ -978,6 +986,7 @@ pub fn oom() -> usize {
 /// 可以安全移除，释放它们占用的内核堆内存（String、BTreeMap 节点等）。
 ///
 /// 为避免在堆紧张时分配新 Vec，该函数原地遍历 DIRECTORY_VEC。
+#[deprecated(note = "old VFS, remove after migration")]
 pub fn shrink() {
     log::info!("[vfs-shrink] start shrinking directory tree nodes");
     // OOM 场景下调用栈可能很深，批次大小控制在 64（~1KB 栈）减小栈溢出风险。
@@ -1058,13 +1067,19 @@ pub fn shrink() {
 }
 
 /// 返回目录树中存活的节点数（诊断用）
+#[deprecated(note = "old VFS, remove after migration")]
 pub fn directory_node_count() -> usize {
     let lock = DIRECTORY_VEC.lock();
     lock.0.iter().filter(|w| w.upgrade().is_some()).count()
 }
 
 // 初始化文件系统
+#[deprecated(note = "old VFS init, use new vfs::VFS_ROOT ramfs fallback")]
 pub fn init_fs() {
+    if super::filesystem::pre_mount() == super::filesystem::FS_Type::Null {
+        println!("[kernel] No filesystem found, skipping old VFS init (ramfs fallback)");
+        return;
+    }
     init_device_directory();
     init_tmp_directory();
     init_proc_directory();

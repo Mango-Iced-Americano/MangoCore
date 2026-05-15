@@ -9,6 +9,7 @@ const SYSCALL_FCNTL: usize = 25;
 const SYSCALL_IOCTL: usize = 29;
 const SYSCALL_MKDIRAT: usize = 34;
 const SYSCALL_UNLINKAT: usize = 35;
+const SYSCALL_SYMLINKAT: usize = 36;
 const SYSCALL_LINKAT: usize = 37;
 const SYSCALL_UMOUNT2: usize = 39;
 const SYSCALL_MOUNT: usize = 40;
@@ -362,4 +363,23 @@ pub fn sys_sock_shutdown(sockfd: usize, how: usize) -> isize {
 
 pub fn sys_getdents64(fd: usize, buf: &mut [u8]) -> isize {
     syscall(SYSCALL_GETDENTS64, [fd, buf.as_mut_ptr() as usize, buf.len()])
+}
+
+/// AT_FDCWD — use current working directory
+pub const AT_FDCWD: isize = -100;
+
+pub fn sys_mkdirat(dirfd: isize, path: &str, mode: u32) -> isize {
+    syscall(SYSCALL_MKDIRAT, [dirfd as usize, path.as_ptr() as usize, mode as usize])
+}
+
+pub fn sys_symlinkat(target: &str, newdirfd: isize, linkpath: &str) -> isize {
+    syscall(SYSCALL_SYMLINKAT, [target.as_ptr() as usize, newdirfd as usize, linkpath.as_ptr() as usize])
+}
+
+pub fn sys_readlinkat(dirfd: isize, path: &str, buf: &mut [u8]) -> isize {
+    syscall4(SYSCALL_READLINKAT, [dirfd as usize, path.as_ptr() as usize, buf.as_mut_ptr() as usize, buf.len()])
+}
+
+pub fn sys_unlinkat(dirfd: isize, path: &str, flags: u32) -> isize {
+    syscall(SYSCALL_UNLINKAT, [dirfd as usize, path.as_ptr() as usize, flags as usize])
 }

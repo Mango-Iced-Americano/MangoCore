@@ -3,8 +3,6 @@ use core::arch::{asm, global_asm};
 
 use super::TrapImpl;
 use crate::config::TRAMPOLINE;
-use crate::fs::directory_tree::ROOT;
-use crate::fs::OpenFlags;
 use crate::hal::arch::riscv::time::set_next_trigger;
 use crate::mm::{frame_reserve, FaultAccess, MemoryError, VirtAddr};
 use crate::net::config::NET_INTERFACE;
@@ -158,10 +156,6 @@ pub fn trap_handler() -> ! {
             NET_INTERFACE.try_poll();
             unsafe {
                 TIMER_INTERRUPT += 1;
-                // 中断上下文中 open 可能失败，不能 unwrap
-                if let Ok(f) = ROOT.open("/proc/interrupts", OpenFlags::O_CREAT, false) {
-                    f.write(None, format!("5: {}", TIMER_INTERRUPT).as_bytes());
-                }
             }
             set_next_trigger();
             suspend_current_and_run_next();

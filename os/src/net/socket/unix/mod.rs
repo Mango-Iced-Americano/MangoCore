@@ -16,7 +16,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use crate::fs::FileDescriptor;
+use crate::fs::vfs::{self, FileFlags};
 use crate::mm::{translated_byte_buffer, translated_refmut, UserAccess, UserBuffer};
 use crate::net::{Endpoint, Socket, SocketFile, PSOCK};
 use crate::task::current_task;
@@ -229,12 +229,11 @@ pub fn alloc_socket_fd(
     is_nonblock: bool,
     is_cloexec: bool,
 ) -> Result<usize, SyscallErr> {
-    let socket_file = Arc::new(SocketFile::new(socket));
+    let socket_file: Arc<dyn crate::fs::vfs::IndexNode> = Arc::new(SocketFile::new(socket));
+    let mut flags = FileFlags::O_RDWR;
+    if is_nonblock { flags.insert(FileFlags::O_NONBLOCK); }
+    let vf = vfs::File::new_without_open(socket_file, flags, vfs::FileType::Socket);
     let task = current_task().ok_or(SyscallErr::ESRCH)?;
-    let fd = task
-        .files
-        .lock()
-        .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket_file))
-        .map_err(|_| SyscallErr::ENFILE)?;
-    Ok(fd)
+    let mut fd_table = task.files.lock();
+    fd_table.alloc_fd(vf, is_cloexec)
 }

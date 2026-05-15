@@ -233,7 +233,7 @@ impl Ext4FileSystem {
                         }
                         // Update csum & write bitmap back
                         bg.set_block_group_balloc_bitmap_csum(sblk, &data);
-                        log::warn!("[WRITE_CALLER] alloc_blocks: write block_bitmap block={}, start={}, len={}", bmp_blk, run_start.unwrap(), blocks);
+                        // log::warn!("[WRITE_CALLER] alloc_blocks: write block_bitmap block={}, start={}, len={}", bmp_blk, run_start.unwrap(), blocks);
                         self.block_device.write_block(bmp_blk, &data);
 
                         // Update block group free count

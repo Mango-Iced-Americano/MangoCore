@@ -49,8 +49,8 @@ pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
     let is_nonblock = task
         .files
         .lock()
-        .get_ref(sockfd as usize)
-        .map(|fd| fd.get_nonblock())
+        .get_file(sockfd as usize)
+        .map(|f| f.is_nonblock())
         .unwrap_or(false);
 
     // 先尝试初始化连接（只做一次）

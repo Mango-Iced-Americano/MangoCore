@@ -33,3 +33,12 @@ sosconfig:
     .incbin "../os_test.conf"
 eosconfig:
     .align 12
+
+    .section .data
+    .global sfstest
+    .global efstest
+    .align 12
+sfstest:
+    .incbin "../user/target/riscv64gc-unknown-none-elf/release/fs_test"
+efstest:
+    .align 12

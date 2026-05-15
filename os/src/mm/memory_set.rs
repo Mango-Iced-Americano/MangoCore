@@ -1209,22 +1209,11 @@ impl<T: PageTable> MemorySet<T> {
         };
         new_area.flags = flags;
         if !flags.contains(MapFlags::MAP_ANONYMOUS) {
-            if offset & (PAGE_SIZE - 1) != 0 || offset > isize::MAX as usize {
-                return EINVAL;
-            }
-            warn!("[mmap] file-backed map!");
-            let fd_table = task.files.lock();
-            match fd_table.get_ref(fd) {
-                Ok(file_descriptor) => {
-                    if !file_descriptor.readable() {
-                        return EACCES;
-                    }
-                    let file = file_descriptor.file.deep_clone();
-                    file.lseek(offset as isize, SeekWhence::SEEK_SET).unwrap();
-                    new_area.map_file = Some(file);
-                }
-                Err(errno) => return errno,
-            }
+            // TODO: 文件映射 mmap 在新 VFS 重构后需重新实现
+            // 旧 VFS 的 deep_clone/lseek/get_size/get_single_cache 方法已移除
+            // 需基于 IndexNode + vfs::File 重新设计 file-backed mmap
+            warn!("[mmap] file-backed map not yet supported on new VFS");
+            return ENOSYS;
         }
 
         if flags.contains(MapFlags::MAP_SHARED) {
