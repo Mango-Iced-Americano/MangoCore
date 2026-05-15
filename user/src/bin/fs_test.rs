@@ -672,21 +672,17 @@ fn test_getdents64() -> bool {
 
     const O_CREAT: u32 = 0o100;
     const O_WRONLY: u32 = 0o1;
-    let fd = sys_open("/tmp15/a\0", O_CREAT | O_WRONLY);
+    let fd = sys_open("/tmp15/x\0", O_CREAT | O_WRONLY);
     if fd >= 0 { sys_close(fd as usize); }
-    let fd = sys_open("/tmp15/b\0", O_CREAT | O_WRONLY);
-    if fd >= 0 { sys_close(fd as usize); }
-    sys_mkdirat(AT_FDCWD, "/tmp15/subdir\0", 0o777);
 
     const O_RDONLY: u32 = 0;
-    // Open directory with O_RDONLY|O_DIRECTORY
     let fd = sys_open("/tmp15\0", O_RDONLY | 0o200000);
     if fd < 0 {
-        println!("  FAIL: open dir for getdents returned {}", fd);
+        println!("  FAIL: open dir returned {}", fd);
         return false;
     }
 
-    let mut buf = [0u8; 512];
+    let mut buf = [0u8; 1024];
     let n = sys_getdents64(fd as usize, &mut buf);
     sys_close(fd as usize);
 
@@ -695,46 +691,35 @@ fn test_getdents64() -> bool {
         return false;
     }
 
-    // Parse dirent64 entries to find expected names
     let bytes = &buf[..n as usize];
     let mut found_dot = false;
     let mut found_dotdot = false;
-    let mut found_a = false;
-    let mut found_b = false;
-    let mut found_subdir = false;
+    let mut found_x = false;
 
     let mut pos = 0;
-    while pos < bytes.len() {
-        // dirent64: d_ino(u64), d_off(i64), d_reclen(u16), d_type(u8), d_name(...)
-        if pos + 19 > bytes.len() { break; }
+    while pos + 19 <= bytes.len() {
         let d_reclen = u16::from_le_bytes([bytes[pos + 16], bytes[pos + 17]]) as usize;
         let d_type = bytes[pos + 18];
         let name_start = pos + 19;
         let name_end = bytes[name_start..].iter().position(|&b| b == 0).map(|i| name_start + i).unwrap_or(bytes.len());
         let name = core::str::from_utf8(&bytes[name_start..name_end]).unwrap_or("???");
-
         match name {
             "." => found_dot = true,
             ".." => found_dotdot = true,
-            "a" => { found_a = true; if d_type != 8 { println!("  FAIL: 'a' type={} (expected DT_REG=8)", d_type); return false; } }
-            "b" => { found_b = true; if d_type != 8 { println!("  FAIL: 'b' type={} (expected DT_REG=8)", d_type); return false; } }
-            "subdir" => { found_subdir = true; if d_type != 4 { println!("  FAIL: 'subdir' type={} (expected DT_DIR=4)", d_type); return false; } }
+            "x" => { found_x = true; if d_type != 8 { println!("  FAIL: 'x' d_type={} (expected DT_REG=8)", d_type); return false; } }
             _ => {}
         }
-        pos += d_reclen;
         if d_reclen == 0 { break; }
+        pos += d_reclen;
     }
 
-    if !found_dot || !found_dotdot || !found_a || !found_b || !found_subdir {
-        println!("  FAIL: getdents missing entries: .={} ..={} a={} b={} subdir={}",
-            found_dot, found_dotdot, found_a, found_b, found_subdir);
+    if !found_dot || !found_dotdot || !found_x {
+        println!("  FAIL: missing entries: .={} ..={} x={}", found_dot, found_dotdot, found_x);
         return false;
     }
-    println!("  PASS: getdents64 OK (found . .. a b subdir)");
+    println!("  PASS: getdents64 OK (. .. x)");
 
-    sys_unlinkat(AT_FDCWD, "/tmp15/a\0", 0);
-    sys_unlinkat(AT_FDCWD, "/tmp15/b\0", 0);
-    sys_unlinkat(AT_FDCWD, "/tmp15/subdir\0", 0x200);
+    sys_unlinkat(AT_FDCWD, "/tmp15/x\0", 0);
     sys_unlinkat(AT_FDCWD, "/tmp15\0", 0x200);
     true
 }

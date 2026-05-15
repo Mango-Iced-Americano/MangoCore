@@ -875,15 +875,25 @@ impl File {
             .map_err(|_| crate::syscall::errno::ENOSYS)?;
         let dirents: Vec<crate::fs::dirent::Dirent> = names
             .iter()
-            .enumerate()
             .take(count)
-            .map(|(i, name)| {
-                crate::fs::dirent::Dirent::new(
-                    0,
-                    (i + 1) as isize,
-                    0, // DT_UNKNOWN
-                    name,
-                )
+            .map(|name| {
+                let d_type = match self.inode.find(name) {
+                    Ok(child) => match child.metadata() {
+                        Ok(m) => match m.file_type {
+                            FileType::Dir => 4,       // DT_DIR
+                            FileType::File => 8,       // DT_REG
+                            FileType::SymLink => 10,   // DT_LNK
+                            FileType::CharDevice => 2, // DT_CHR
+                            FileType::BlockDevice => 6,// DT_BLK
+                            FileType::Pipe => 5,       // DT_FIFO
+                            FileType::Socket => 12,    // DT_SOCK
+                            _ => 0,                    // DT_UNKNOWN
+                        },
+                        Err(_) => 0,
+                    },
+                    Err(_) => 0,
+                };
+                crate::fs::dirent::Dirent::new(0, 0, d_type, name)
             })
             .collect();
         Ok(dirents)
