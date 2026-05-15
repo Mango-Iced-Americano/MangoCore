@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use super::map_area::MapArea;
+use super::vma::Vma;
 use super::page_fault::FaultContext;
 use super::{MemoryError, PageMapper, PageTable, PhysAddr, PhysPageNum, VirtAddr};
 use crate::config::PAGE_SIZE;
@@ -14,7 +14,7 @@ struct FileMapFault {
 }
 
 impl FileMapFault {
-    fn new<T: PageTable>(area: &MapArea, ctx: FaultContext) -> Result<Self, MemoryError> {
+    fn new<T: PageTable>(area: &Vma, ctx: FaultContext) -> Result<Self, MemoryError> {
         let file = area.vm_file().ok_or(MemoryError::NotMapped)?;
         let old_offset = file
             .lseek(0, SeekWhence::SEEK_CUR)
@@ -56,7 +56,7 @@ impl FileMapFault {
 }
 
 pub(super) fn filemap_private_fault<T: PageTable>(
-    area: &mut MapArea,
+    area: &mut Vma,
     page_table: &mut T,
     ctx: FaultContext,
 ) -> Result<PhysAddr, MemoryError> {
@@ -69,7 +69,7 @@ pub(super) fn filemap_private_fault<T: PageTable>(
 }
 
 pub(super) fn filemap_read_fault<T: PageTable>(
-    area: &mut MapArea,
+    area: &mut Vma,
     page_table: &mut T,
     ctx: FaultContext,
 ) -> Result<PhysAddr, MemoryError> {

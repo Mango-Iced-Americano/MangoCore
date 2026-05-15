@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-pub type PageProt = super::map_area::MapPermission;
+pub type PageProt = super::vma::MapPermission;
 #[allow(unused_imports)]
 pub use super::page_table::{FaultAccess, UserAccess};
 

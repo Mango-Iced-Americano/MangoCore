@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use super::filemap::{filemap_private_fault, filemap_read_fault};
-use super::map_area::MapArea;
+use super::vma::Vma;
 use super::vma::{VmAreaKind, VmAreaMapping, VmPageState};
 use super::{FaultAccess, MemoryError, PageMapper, PageTable, PhysAddr, VirtAddr, VirtPageNum};
 use log::{debug, error, info, warn};
@@ -46,7 +46,7 @@ pub(super) enum FaultAction {
 struct PageFaultHandler;
 
 pub(super) fn handle_page_fault<T: PageTable>(
-    area: &mut MapArea,
+    area: &mut Vma,
     page_table: &mut T,
     ctx: FaultContext,
 ) -> Result<PhysAddr, MemoryError> {
@@ -55,7 +55,7 @@ pub(super) fn handle_page_fault<T: PageTable>(
 
 impl PageFaultHandler {
     fn handle<T: PageTable>(
-        area: &mut MapArea,
+        area: &mut Vma,
         page_table: &mut T,
         ctx: FaultContext,
     ) -> Result<PhysAddr, MemoryError> {
@@ -94,7 +94,7 @@ impl PageFaultHandler {
     }
 
     fn classify<T: PageTable>(
-        area: &mut MapArea,
+        area: &mut Vma,
         page_table: &mut T,
         ctx: FaultContext,
     ) -> Result<FaultAction, MemoryError> {
@@ -126,7 +126,7 @@ impl PageFaultHandler {
     }
 }
 
-fn check_area_permission(area: &MapArea, ctx: FaultContext) -> Result<(), MemoryError> {
+fn check_area_permission(area: &Vma, ctx: FaultContext) -> Result<(), MemoryError> {
     if area.vm_allows(ctx.access) {
         Ok(())
     } else {
@@ -139,7 +139,7 @@ fn check_area_permission(area: &MapArea, ctx: FaultContext) -> Result<(), Memory
 }
 
 fn reject_resident_frame_without_pte(
-    area: &MapArea,
+    area: &Vma,
     ctx: FaultContext,
 ) -> Result<PhysAddr, MemoryError> {
     info!(
@@ -152,7 +152,7 @@ fn reject_resident_frame_without_pte(
 }
 
 fn map_lazy_zero_page<T: PageTable>(
-    area: &mut MapArea,
+    area: &mut Vma,
     page_table: &mut T,
     ctx: FaultContext,
 ) -> Result<super::PhysPageNum, MemoryError> {
@@ -169,7 +169,7 @@ fn map_lazy_zero_page<T: PageTable>(
 
 #[cfg(feature = "oom_handler")]
 fn finish_decompress_page<T: PageTable>(
-    area: &mut MapArea,
+    area: &mut Vma,
     page_table: &mut T,
     ctx: FaultContext,
 ) -> Result<super::PhysPageNum, MemoryError> {
@@ -183,7 +183,7 @@ fn finish_decompress_page<T: PageTable>(
 
 #[cfg(feature = "oom_handler")]
 fn finish_swap_in_page<T: PageTable>(
-    area: &mut MapArea,
+    area: &mut Vma,
     page_table: &mut T,
     ctx: FaultContext,
 ) -> Result<super::PhysPageNum, MemoryError> {
@@ -196,7 +196,7 @@ fn finish_swap_in_page<T: PageTable>(
 }
 
 fn restore_shared_write<T: PageTable>(
-    area: &mut MapArea,
+    area: &mut Vma,
     page_table: &mut T,
     ctx: FaultContext,
 ) -> Result<PhysAddr, MemoryError> {
@@ -207,7 +207,7 @@ fn restore_shared_write<T: PageTable>(
 }
 
 fn repair_stale_lazy_pte<T: PageTable>(
-    area: &mut MapArea,
+    area: &mut Vma,
     page_table: &mut T,
     ctx: FaultContext,
 ) -> Result<PhysAddr, MemoryError> {
@@ -227,7 +227,7 @@ fn repair_stale_lazy_pte<T: PageTable>(
 }
 
 fn copy_private_page<T: PageTable>(
-    area: &mut MapArea,
+    area: &mut Vma,
     page_table: &mut T,
     ctx: FaultContext,
 ) -> Result<PhysAddr, MemoryError> {

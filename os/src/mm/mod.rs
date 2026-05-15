@@ -7,15 +7,15 @@ mod frame_store;
 mod frame_allocator;
 mod heap_allocator;
 mod layout;
-mod map_area;
+mod vma;
 mod mapper;
 mod memory_set;
+mod mmap;
 pub mod page;
 mod page_fault;
 mod page_table;
 mod uaccess;
-mod vma;
-mod vm_area_set;
+mod vma_set;
 #[cfg(feature = "zram")]
 mod zram;
 pub use crate::hal::{KernelPageTableImpl, PageTableImpl};
@@ -36,7 +36,7 @@ pub use heap_allocator::heap_stats;
 #[allow(unused_imports)]
 pub use layout::{KernelLayout, UserLayout};
 pub use frame_store::Frame;
-pub use map_area::{MapFlags, MapPermission};
+pub use vma::{MapFlags, MapPermission};
 #[allow(unused_imports)]
 pub use mapper::PageMapper;
 pub use memory_set::kernel_token;
