@@ -1,46 +1,23 @@
-use super::kernel_mapper::KernelMapper;
 use super::mapper::translate_page;
 use super::page_table::{FaultAccess, PageTable};
 use super::vma::*;
 use super::vma_set::VmaSet;
-use super::{Frame, PageMapper, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
+use super::{PageMapper, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum, KERNEL_SPACE};
 use crate::config::*;
 use crate::hal::TrapContext;
-use crate::hal::{MMIO, TICKS_PER_SEC};
+use crate::hal::TICKS_PER_SEC;
 use crate::should_map_trampoline;
 use crate::syscall::errno::*;
 use crate::task::{
     current_task, trap_cx_bottom_from_tid, ustack_bottom_from_tid, AuxvEntry, AuxvType, ELFInfo,
 };
 use alloc::string::String;
-use alloc::sync::Arc;
 use alloc::vec::Vec;
-use lazy_static::*;
-use log::{debug, error, info, trace, warn};
-use spin::Mutex;
+use log::{debug, error, trace, warn};
+
 extern "C" {
-    fn stext();
-    fn etext();
-    fn srodata();
-    fn erodata();
-    fn sdata();
-    fn edata();
-    fn sbss_with_stack();
-    fn ebss();
-    fn ekernel();
     fn strampoline();
     fn ssignaltrampoline();
-}
-
-lazy_static! {
-    /// 内核空间
-    pub static ref KERNEL_SPACE: Arc<Mutex<MemorySet<crate::mm::KernelPageTableImpl>>> =
-        Arc::new(Mutex::new(MemorySet::new_kernel()));
-}
-
-/// Return the root PPN of kernel space
-pub fn kernel_token() -> usize {
-    KERNEL_SPACE.lock().token()
 }
 
 #[allow(unused)]
@@ -63,7 +40,7 @@ pub enum MemoryError {
     BackingStoreFailure,
 }
 
-/// The memory "space" as in user space or kernel space
+/// The user memory address space.
 pub struct MemorySet<T: PageTable> {
     /// 页表实现
     pub(super) page_table: T,
@@ -74,14 +51,6 @@ pub struct MemorySet<T: PageTable> {
 }
 
 impl<T: PageTable> MemorySet<T> {
-    /// Create a new struct with no information at all.
-    /// 创建一个新的内核空间内存集，使用内核页表
-    pub fn new_bare_kern() -> Self {
-        Self {
-            page_table: T::new_kern_space(),
-            vmas: VmaSet::with_capacity(16),
-        }
-    }
     /// Create a new struct with no information at all.
     pub fn new_bare() -> Self {
         Self {
@@ -108,22 +77,6 @@ impl<T: PageTable> MemorySet<T> {
         let mut area = Vma::new(start_va, end_va, MapType::Framed, permission, None);
         area.flags = MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS;
         self.push(area, None).unwrap();
-    }
-    /// 插入一个匿名段，包含从start_va.floor()到end_va.ceil()之间的空间
-    /// 该空间被分配并被添加到当前的 MemorySet.
-    /// # 前提条件
-    /// 假设没有冲突，或者说，该空间不会检查空间有效性或者重叠
-    /// 它只是被映射并推入到当前 memory set中
-    /// 由于实现了写时复制（CoW），该空间不会在插入时分配，直到触发页面错误时才会进行分配。
-    pub fn insert_program_area(
-        &mut self,
-        start_va: VirtAddr,        // 起始虚拟地址
-        permission: MapPermission, // 内存区域访问权限
-        frames: Vec<Frame>,        // 内存帧状态
-    ) -> Result<(), ()> {
-        let vma = Vma::from_existing_frame(start_va, MapType::Framed, permission, frames);
-        self.push_no_alloc(vma)?;
-        Ok(())
     }
     pub fn remove_area_with_start_vpn(
         &mut self,
@@ -212,16 +165,6 @@ impl<T: PageTable> MemorySet<T> {
         Ok(())
     }
 
-    pub fn get_area_by_vpn_range(
-        &mut self,
-        start_vpn_in_kernel_area: VirtPageNum,
-    ) -> Option<&Vma> {
-        self.vmas.iter().rev().find(|area| {
-            area.get_start::<T>() <= start_vpn_in_kernel_area
-                && start_vpn_in_kernel_area < area.get_end::<T>()
-        })
-    }
-
     /// Push the map area into the memory set without copying or allocation.
     pub fn push_no_alloc(&mut self, vma: Vma) -> Result<(), ()> {
         self.vmas.try_reserve(1).map_err(|_| ())?;
@@ -238,13 +181,6 @@ impl<T: PageTable> MemorySet<T> {
         }
         self.vmas.push(vma).map_err(|_| ())?;
         Ok(())
-    }
-    /// 返回最高处地址
-    pub fn highest_addr(&self) -> VirtAddr {
-        self.vmas
-            .last()
-            .map(|area| area.get_end::<T>().into())
-            .unwrap_or_else(|| VirtAddr::from(MMAP_BASE))
     }
     pub fn contains_valid_buffer(&self, buf: usize, size: usize, perm: MapPermission) -> bool {
         let start_vpn = VirtAddr::from(buf).floor();
@@ -347,92 +283,26 @@ impl<T: PageTable> MemorySet<T> {
     }
     /// Mention that trampoline is not collected by areas.
     fn map_trampoline(&mut self) {
-        KernelMapper::new(&mut self.page_table)
-            .map_page(
+        PageMapper::new(&mut self.page_table)
+            .map(
                 VirtAddr::from(TRAMPOLINE).into(),
                 PhysAddr::from(strampoline as usize).into(),
                 MapPermission::R | MapPermission::X,
             )
             .unwrap();
     }
+
     /// Can be accessed in user mode.
     fn map_signaltrampoline(&mut self) {
-        KernelMapper::new(&mut self.page_table)
-            .map_page(
+        PageMapper::new(&mut self.page_table)
+            .map(
                 VirtAddr::from(SIGNAL_TRAMPOLINE).into(),
                 PhysAddr::from(ssignaltrampoline as usize).into(),
                 MapPermission::R | MapPermission::X | MapPermission::U,
             )
             .unwrap();
     }
-    /// 创建一个空的内核空间
-    /// Without kernel stacks. (Is it done with .bss?)
-    pub fn new_kernel() -> Self {
-        let mut memory_set = Self::new_bare_kern();
-        // map trampoline
-        // TODO: 这里两者不一样，是为什么？
-        if should_map_trampoline!() {
-            memory_set.map_trampoline();
-        }
-        // map kernel sections
-        println!(".text [{:#x}, {:#x})", stext as usize, etext as usize);
-        println!(".rodata [{:#x}, {:#x})", srodata as usize, erodata as usize);
-        println!(".data [{:#x}, {:#x})", sdata as usize, edata as usize);
-        println!(
-            ".bss [{:#x}, {:#x})",
-            sbss_with_stack as usize, ebss as usize
-        );
-        macro_rules! kernel_identical_map {
-            ($begin:expr,$end:expr,$permission:expr) => {
-                KernelMapper::new(&mut memory_set.page_table)
-                    .map_identical_range(
-                        ($begin as usize).into(),
-                        ($end as usize).into(),
-                        $permission,
-                    )
-                    .unwrap();
-            };
-            ($name:literal,$begin:expr,$end:expr,$permission:expr) => {
-                println!("mapping {}", $name);
-                kernel_identical_map!($begin, $end, $permission);
-            };
-        }
-        kernel_identical_map!(
-            ".text section",
-            stext,
-            etext,
-            MapPermission::R | MapPermission::X
-        );
-        kernel_identical_map!(".rodata section", srodata, erodata, MapPermission::R); // read only section
-        kernel_identical_map!(
-            ".data section",
-            sdata,
-            edata,
-            MapPermission::R | MapPermission::W
-        );
-        kernel_identical_map!(
-            ".bss section",
-            sbss_with_stack,
-            ebss,
-            MapPermission::R | MapPermission::W
-        );
-        kernel_identical_map!(
-            "physical memory",
-            ekernel,
-            MEMORY_END,
-            MapPermission::R | MapPermission::W
-        );
 
-        println!("mapping memory-mapped registers");
-        for pair in MMIO {
-            kernel_identical_map!(
-                (*pair).0,
-                ((*pair).0 + (*pair).1),
-                MapPermission::R | MapPermission::W
-            );
-        }
-        memory_set
-    }
     pub fn map_elf(&mut self, elf: &xmas_elf::ElfFile) -> Result<(usize, ELFInfo), isize> {
         let bias = match elf.header.pt2.type_().as_type() {
             // static
@@ -919,36 +789,6 @@ impl<T: PageTable> MemorySet<T> {
         //     .unwrap();
     }
 
-    pub fn is_dirty(&self, ppn: PhysPageNum) -> Option<bool> {
-        self.page_table.is_dirty((ppn.0).into())
-    }
-}
-
-#[allow(unused)]
-pub fn remap_test() {
-    let mut kernel_space = KERNEL_SPACE.lock();
-    let mid_text: VirtAddr = ((stext as usize + etext as usize) / 2).into();
-    let mid_rodata: VirtAddr = ((srodata as usize + erodata as usize) / 2).into();
-    let mid_data: VirtAddr = ((sdata as usize + edata as usize) / 2).into();
-    assert_eq!(
-        kernel_space.page_table.writable(mid_text.floor()).unwrap(),
-        false
-    );
-    assert_eq!(
-        kernel_space
-            .page_table
-            .writable(mid_rodata.floor())
-            .unwrap(),
-        false,
-    );
-    assert_eq!(
-        kernel_space
-            .page_table
-            .executable(mid_data.floor())
-            .unwrap(),
-        false,
-    );
-    info!("remap_test passed!");
 }
 
 pub fn check_page_fault(addr: VirtAddr, access: FaultAccess) -> Result<PhysAddr, isize> {

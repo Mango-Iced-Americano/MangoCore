@@ -7,7 +7,7 @@ use alloc::boxed::Box;
 
 use crate::{
     fs::{OpenFlags, ROOT_FD},
-    mm::{Frame, KERNEL_SPACE},
+    mm::KERNEL_SPACE,
     syscall::errno::*,
 };
 
@@ -133,7 +133,7 @@ pub fn load_elf_interp(path: &str) -> Result<&'static [u8], isize> {
                     // 将缓存内容映射到frame中
                     let frames = caches
                         .iter()
-                        .map(|cache| Frame::InMemory(cache.try_lock().unwrap().get_tracker()))
+                        .map(|cache| cache.try_lock().unwrap().get_tracker())
                         .collect();
 
                     // 将文件内容映射到内核空间

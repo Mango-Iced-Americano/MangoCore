@@ -7,6 +7,7 @@ mod frame_store;
 mod frame_allocator;
 mod heap_allocator;
 mod kernel_mapper;
+mod kernel_space;
 mod layout;
 mod vma;
 mod mapper;
@@ -36,13 +37,15 @@ pub use frame_allocator::{
 pub use heap_allocator::heap_stats;
 #[allow(unused_imports)]
 pub use layout::{KernelLayout, UserLayout};
+#[allow(unused_imports)]
 pub use frame_store::Frame;
 pub use vma::{MapFlags, MapPermission};
 #[allow(unused_imports)]
 pub use mapper::PageMapper;
-pub use memory_set::kernel_token;
+#[allow(unused_imports)]
+pub use kernel_space::{kernel_token, KernelSpace, KERNEL_SPACE};
 pub use memory_set::MemoryError;
-pub use memory_set::{MemorySet, KERNEL_SPACE};
+pub use memory_set::MemorySet;
 #[allow(unused_imports)]
 pub use page::{MemAttr, PageFaultKind, PageProt};
 pub use page_table::{FaultAccess, PageTable, UserAccess};

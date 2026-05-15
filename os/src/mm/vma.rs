@@ -254,13 +254,10 @@ impl Vma {
         page_table: &mut T,
         start_vpn_in_kernel_area: VirtPageNum,
     ) -> Result<(), ()> {
-        let mut kernel_space = KERNEL_SPACE.lock();
-        let kernel_area = kernel_space
-            .get_area_by_vpn_range(start_vpn_in_kernel_area)
-            .unwrap();
+        let kernel_space = KERNEL_SPACE.lock();
         let mut src_vpn = start_vpn_in_kernel_area;
         for vpn in self.get_inner().vpn_range {
-            if let Some(frame) = kernel_area.inner.get_in_memory(&src_vpn) {
+            if let Some(frame) = kernel_space.mapped_frame(src_vpn) {
                 let ppn = frame.ppn;
                 if !PageMapper::new(page_table).is_mapped(vpn) {
                     self.inner

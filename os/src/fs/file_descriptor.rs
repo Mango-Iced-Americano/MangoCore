@@ -3,7 +3,7 @@ use super::{
 };
 use crate::{
     config::SYSTEM_FD_LIMIT,
-    mm::{Frame, UserBuffer},
+    mm::UserBuffer,
     syscall::errno::*,
 };
 use alloc::{
@@ -247,7 +247,7 @@ impl FileDescriptor {
         // 获取内存帧
         let frames = caches
             .iter()
-            .map(|cache| Frame::InMemory(cache.try_lock().unwrap().get_tracker()))
+            .map(|cache| cache.try_lock().unwrap().get_tracker())
             .collect();
 
         // 映射到内核空间
