@@ -128,6 +128,15 @@ impl MountFSInode {
         self.self_ref.lock().upgrade().unwrap()
     }
 
+    /// 如果是 MountFSInode 包装，解包到内层 inode；否则原样返回
+    pub fn unwrap_inode(inode: &Arc<dyn IndexNode>) -> Arc<dyn IndexNode> {
+        if let Some(mnt) = inode.as_any_ref().downcast_ref::<MountFSInode>() {
+            mnt.inner_inode.clone()
+        } else {
+            inode.clone()
+        }
+    }
+
     /// 检查挂载是否可写
     fn ensure_mount_writable(&self) -> Result<(), SyscallErr> {
         if self.mount_fs.mount_flags().contains(MountFlags::RDONLY) {
@@ -275,7 +284,19 @@ impl IndexNode for MountFSInode {
 
     fn link(&self, name: &str, other: &Arc<dyn IndexNode>) -> Result<(), SyscallErr> {
         self.ensure_mount_writable()?;
-        self.inner_inode.link(name, other)
+        let other = MountFSInode::unwrap_inode(other);
+        self.inner_inode.link(name, &other)
+    }
+
+    fn rename(
+        &self,
+        old_name: &str,
+        new_parent: &Arc<dyn IndexNode>,
+        new_name: &str,
+    ) -> Result<(), SyscallErr> {
+        self.ensure_mount_writable()?;
+        let new_parent = MountFSInode::unwrap_inode(new_parent);
+        self.inner_inode.rename(old_name, &new_parent, new_name)
     }
 
     fn unlink(&self, name: &str) -> Result<(), SyscallErr> {

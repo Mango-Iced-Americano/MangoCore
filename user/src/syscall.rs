@@ -13,6 +13,7 @@ const SYSCALL_SYMLINKAT: usize = 36;
 const SYSCALL_LINKAT: usize = 37;
 const SYSCALL_UMOUNT2: usize = 39;
 const SYSCALL_MOUNT: usize = 40;
+const SYSCALL_FTRUNCATE: usize = 46;
 const SYSCALL_FACCESSAT: usize = 48;
 const SYSCALL_CHDIR: usize = 49;
 const SYSCALL_OPENAT: usize = 56;
@@ -368,6 +369,45 @@ pub fn sys_getdents64(fd: usize, buf: &mut [u8]) -> isize {
 /// AT_FDCWD — use current working directory
 pub const AT_FDCWD: isize = -100;
 
+// ── Stat struct (must match kernel fs/layout.rs:Stat exactly) ────────────
+
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct TimeSpec {
+    pub tv_sec: usize,
+    pub tv_nsec: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct Stat {
+    pub st_dev: u64,
+    pub st_ino: u64,
+    pub st_mode: u32,
+    pub st_nlink: u32,
+    pub st_uid: u32,
+    pub st_gid: u32,
+    pub st_rdev: u64,
+    pub __pad: u64,
+    pub st_size: i64,
+    pub st_blksize: u32,
+    pub __pad2: i32,
+    pub st_blocks: u64,
+    pub st_atime: TimeSpec,
+    pub st_mtime: TimeSpec,
+    pub st_ctime: TimeSpec,
+    pub __unused: u64,
+}
+
+pub const SEEK_SET: u32 = 0;
+pub const SEEK_CUR: u32 = 1;
+pub const SEEK_END: u32 = 2;
+
+pub const AT_EMPTY_PATH: u32 = 0x1000;
+pub const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+
+// ── Wrappers ────────────────────────────────────────────────────────────
+
 pub fn sys_mkdirat(dirfd: isize, path: &str, mode: u32) -> isize {
     syscall(SYSCALL_MKDIRAT, [dirfd as usize, path.as_ptr() as usize, mode as usize])
 }
@@ -382,4 +422,62 @@ pub fn sys_readlinkat(dirfd: isize, path: &str, buf: &mut [u8]) -> isize {
 
 pub fn sys_unlinkat(dirfd: isize, path: &str, flags: u32) -> isize {
     syscall(SYSCALL_UNLINKAT, [dirfd as usize, path.as_ptr() as usize, flags as usize])
+}
+
+pub fn sys_linkat(olddirfd: isize, oldpath: &str, newdirfd: isize, newpath: &str, flags: u32) -> isize {
+    syscall6(
+        SYSCALL_LINKAT,
+        [
+            olddirfd as usize,
+            oldpath.as_ptr() as usize,
+            newdirfd as usize,
+            newpath.as_ptr() as usize,
+            flags as usize,
+            0,
+        ],
+    )
+}
+
+pub fn sys_renameat2(
+    olddirfd: isize,
+    oldpath: &str,
+    newdirfd: isize,
+    newpath: &str,
+    flags: u32,
+) -> isize {
+    syscall6(
+        SYSCALL_RENAMEAT2,
+        [
+            olddirfd as usize,
+            oldpath.as_ptr() as usize,
+            newdirfd as usize,
+            newpath.as_ptr() as usize,
+            flags as usize,
+            0,
+        ],
+    )
+}
+
+pub fn sys_lseek(fd: usize, offset: isize, whence: u32) -> isize {
+    syscall(SYSCALL_LSEEK, [fd, offset as usize, whence as usize])
+}
+
+pub fn sys_fstatat(dirfd: isize, path: &str, buf: &mut Stat, flags: u32) -> isize {
+    syscall4(
+        SYSCALL_NEW_FSTATAT,
+        [
+            dirfd as usize,
+            path.as_ptr() as usize,
+            buf as *mut Stat as usize,
+            flags as usize,
+        ],
+    )
+}
+
+pub fn sys_fstat(fd: usize, buf: &mut Stat) -> isize {
+    syscall(SYSCALL_FSTAT, [fd, buf as *mut Stat as usize, 0])
+}
+
+pub fn sys_ftruncate(fd: usize, length: isize) -> isize {
+    syscall(SYSCALL_FTRUNCATE, [fd, length as usize, 0])
 }

@@ -284,12 +284,10 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: u32) -> isize {
         Ok(file) => file,
         Err(e) => return -(e as isize),
     };
-    let seek_from = if whence.contains(SeekWhence::SEEK_SET) {
-        SeekFrom::SeekSet(offset as i64)
-    } else if whence.contains(SeekWhence::SEEK_END) {
-        SeekFrom::SeekEnd(offset as i64)
-    } else {
-        SeekFrom::SeekCurrent(offset as i64)
+    let seek_from = match whence.bits() {
+        0 => SeekFrom::SeekSet(offset as i64),
+        2 => SeekFrom::SeekEnd(offset as i64),
+        _ => SeekFrom::SeekCurrent(offset as i64),
     };
     match file.lseek(seek_from) {
         Ok(pos) => pos as isize,
@@ -1236,21 +1234,21 @@ pub fn sys_renameat2(
     oldpath: *const u8,
     newdirfd: usize,
     newpath: *const u8,
-    flags: u32,
+    _flags: u32,
 ) -> isize {
     let task = current_task().unwrap();
     let token = task.get_user_token();
-    let oldpath = match translated_str(token, oldpath) {
+    let oldpath_str = match translated_str(token, oldpath) {
         Ok(path) => path,
         Err(errno) => return errno,
     };
-    let newpath = match translated_str(token, newpath) {
+    let newpath_str = match translated_str(token, newpath) {
         Ok(path) => path,
         Err(errno) => return errno,
     };
     info!(
-        "[sys_renameat2] olddirfd: {}, oldpath: {}, newdirfd: {}, newpath: {}, flags: {}",
-        olddirfd as isize, oldpath, newdirfd as isize, newpath, flags
+        "[sys_renameat2] old: dirfd={} path={}, new: dirfd={} path={}",
+        olddirfd as isize, oldpath_str, newdirfd as isize, newpath_str
     );
 
     let old_start = match resolve_start_inode(olddirfd) {
@@ -1262,17 +1260,21 @@ pub fn sys_renameat2(
         Err(errno) => return errno,
     };
 
-    let old_abs = match old_start.absolute_path() {
-        Ok(d) => alloc::format!("{}/{}", d, &oldpath),
-        Err(_) => return ENOENT,
+    // 解析 oldpath: 获取父目录 + 叶子名
+    let (old_parent, old_leaf) = match vfs_lookup_parent_for_start(&old_start, &oldpath_str) {
+        Ok(pair) => pair,
+        Err(errno) => return errno,
     };
-    let new_abs = match new_start.absolute_path() {
-        Ok(d) => alloc::format!("{}/{}", d, &newpath),
-        Err(_) => return ENOENT,
+
+    // 解析 newpath: 获取父目录 + 叶子名
+    let (new_parent, new_leaf) = match vfs_lookup_parent_for_start(&new_start, &newpath_str) {
+        Ok(pair) => pair,
+        Err(errno) => return errno,
     };
-    match crate::fs::directory_tree::DirectoryTreeNode::rename(&old_abs, &new_abs) {
+
+    match old_parent.rename(&old_leaf, &new_parent, &new_leaf) {
         Ok(_) => SUCCESS,
-        Err(errno) => errno,
+        Err(e) => -(e as isize),
     }
 }
 
@@ -1918,6 +1920,103 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: usize, linkpath: *const u8) ->
     };
 
     match parent_dir.symlink(&leaf, &target_str) {
+        Ok(_) => SUCCESS,
+        Err(e) => -(e as isize),
+    }
+}
+
+/// sys_linkat — 创建硬链接
+///
+/// int linkat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath, int flags);
+pub fn sys_linkat(
+    olddirfd: usize,
+    oldpath: *const u8,
+    newdirfd: usize,
+    newpath: *const u8,
+    _flags: u32,
+) -> isize {
+    let task = current_task().unwrap();
+    let token = task.get_user_token();
+
+    let oldpath_str = match translated_str(token, oldpath) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let newpath_str = match translated_str(token, newpath) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+
+    log::info!(
+        "[sys_linkat] old: dirfd={} path={}, new: dirfd={} path={}",
+        olddirfd as isize,
+        oldpath_str,
+        newdirfd as isize,
+        newpath_str
+    );
+
+    let old_start = match resolve_start_inode(olddirfd) {
+        Ok(inode) => inode,
+        Err(errno) => return errno,
+    };
+
+    // 查找已存在的 inode
+    let existing = match crate::fs::vfs_lookup(&old_start, &oldpath_str, true) {
+        Ok(inode) => inode,
+        Err(errno) => return errno,
+    };
+
+    // 禁止创建目录的硬链接（POSIX 不允许，除 root 外）
+    let meta = match existing.metadata() {
+        Ok(m) => m,
+        Err(e) => return -(e as isize),
+    };
+    if meta.file_type == crate::fs::vfs::FileType::Dir {
+        return -(SyscallErr::EISDIR as isize);
+    }
+
+    // 解析新路径：获取父目录 + 叶子名
+    let new_start = match resolve_start_inode(newdirfd) {
+        Ok(inode) => inode,
+        Err(errno) => return errno,
+    };
+
+    let components = crate::fs::parse_path(&newpath_str);
+    let leaf = if let Some(n) = components.last() {
+        n.clone()
+    } else {
+        return ENOENT;
+    };
+
+    let parent_dir = if components.len() == 1 {
+        if newpath_str.starts_with('/') {
+            crate::fs::vfs_root().mountpoint_root_inode()
+        } else {
+            new_start
+        }
+    } else {
+        let parent_comps = &components[..components.len() - 1];
+        let joined = parent_comps
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<&str>>()
+            .join("/");
+        let parent_path = if newpath_str.starts_with('/') {
+            if joined.is_empty() {
+                String::from("/")
+            } else {
+                alloc::format!("/{}", joined)
+            }
+        } else {
+            joined
+        };
+        match crate::fs::vfs_lookup(&new_start, &parent_path, true) {
+            Ok(parent) => parent,
+            Err(errno) => return errno,
+        }
+    };
+
+    match parent_dir.link(&leaf, &existing) {
         Ok(_) => SUCCESS,
         Err(e) => -(e as isize),
     }

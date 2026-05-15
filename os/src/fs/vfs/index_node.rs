@@ -169,6 +169,22 @@ pub trait IndexNode: Any + Send + Sync + Debug {
         Err(SyscallErr::ENOSYS)
     }
 
+    /// 重命名/移动文件或目录到另一个位置
+    /// - `old_name`: 当前目录下的源文件名
+    /// - `new_parent`: 目标目录
+    /// - `new_name`: 目标目录下的新文件名
+    fn rename(
+        &self,
+        old_name: &str,
+        new_parent: &Arc<dyn IndexNode>,
+        new_name: &str,
+    ) -> Result<(), SyscallErr> {
+        // 默认实现：link + unlink
+        let old_inode = self.find(old_name)?;
+        new_parent.link(new_name, &old_inode)?;
+        self.unlink(old_name)
+    }
+
     /// 在当前目录下删除名为 `name` 的硬链接
     fn unlink(&self, _name: &str) -> Result<(), SyscallErr> {
         Err(SyscallErr::ENOSYS)

@@ -300,6 +300,44 @@ pub fn vfs_lookup_parent(path: &str) -> Result<(Arc<dyn self::vfs::IndexNode>, S
     let root: Arc<dyn self::vfs::IndexNode> = vfs_root().mountpoint_root_inode();
     vfs_lookup(&root, &parent_path, true).map(|parent| (parent, leaf_name))
 }
+
+/// `vfs_lookup_parent` 的变体：支持指定起始 inode（用于相对路径+dirfd 场景）
+pub fn vfs_lookup_parent_for_start(
+    start: &Arc<dyn self::vfs::IndexNode>,
+    path: &str,
+) -> Result<(Arc<dyn self::vfs::IndexNode>, String), isize> {
+    let components = parse_path(path);
+    let leaf = components.last().ok_or(crate::syscall::errno::ENOENT)?;
+    let leaf_name = leaf.clone();
+
+    let parent_dir = if components.len() == 1 {
+        if path.starts_with('/') {
+            vfs_root().mountpoint_root_inode()
+        } else {
+            start.clone()
+        }
+    } else {
+        let parent_comps = &components[..components.len() - 1];
+        let joined = parent_comps
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<alloc::vec::Vec<&str>>()
+            .join("/");
+        let parent_path = if path.starts_with('/') {
+            if joined.is_empty() {
+                String::from("/")
+            } else {
+                alloc::format!("/{}", joined)
+            }
+        } else {
+            joined
+        };
+        vfs_lookup(start, &parent_path, true)?
+    };
+
+    Ok((parent_dir, leaf_name))
+}
+
 /// 使用新 VFS 创建或打开文件，返回 vfs::File
 fn create_or_open_file(path: &str) -> Result<self::vfs::File, isize> {
     use self::vfs::{FileType, InodeMode};

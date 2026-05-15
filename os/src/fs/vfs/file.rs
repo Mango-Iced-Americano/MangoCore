@@ -423,8 +423,8 @@ impl Drop for FdTable {
 pub struct File {
     /// 对应的 inode
     pub inode: Arc<dyn IndexNode>,
-    /// 文件偏移量
-    offset: AtomicUsize,
+    /// 文件偏移量（Arc 确保 clone/dup 后与源文件共享偏移量）
+    offset: Arc<AtomicUsize>,
     /// 打开标志
     flags: Mutex<FileFlags>,
     /// 文件访问模式
@@ -482,7 +482,7 @@ impl File {
         let private_data = FilePrivateData::default();
         let file = File {
             inode,
-            offset: AtomicUsize::new(0),
+            offset: Arc::new(AtomicUsize::new(0)),
             flags: Mutex::new(flags),
             mode: Mutex::new(mode),
             file_type,
@@ -513,7 +513,7 @@ impl File {
 
         File {
             inode,
-            offset: AtomicUsize::new(0),
+            offset: Arc::new(AtomicUsize::new(0)),
             flags: Mutex::new(flags),
             mode: Mutex::new(mode),
             file_type,
@@ -729,7 +729,7 @@ impl File {
         }
         Some(File {
             inode,
-            offset: AtomicUsize::new(self.offset.load(Ordering::SeqCst)),
+            offset: Arc::clone(&self.offset),
             flags: Mutex::new(flags),
             mode: Mutex::new(*self.mode.lock()),
             file_type: self.file_type,
@@ -1040,7 +1040,7 @@ impl File {
             Ok(meta) => Stat {
                 st_dev: meta.dev_id as u64,
                 st_ino: meta.inode_id as u64,
-                st_mode: meta.mode.bits(),
+                st_mode: meta.mode.bits() | crate::fs::vfs::InodeMode::from(meta.file_type).bits(),
                 st_nlink: meta.nlinks as u32,
                 st_uid: meta.uid,
                 st_gid: meta.gid,

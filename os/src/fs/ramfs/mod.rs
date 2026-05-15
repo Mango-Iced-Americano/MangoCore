@@ -364,15 +364,61 @@ impl IndexNode for LockedRamFSInode {
         if inode.metadata.file_type != FileType::Dir {
             return Err(SyscallErr::ENOTDIR);
         }
-        if name == "." || name == ".." {
-            return Err(SyscallErr::ENOTEMPTY);
+        let child = inode
+            .children
+            .remove(name)
+            .ok_or(SyscallErr::ENOENT)?;
+        let child_inode: &LockedRamFSInode = child
+            .as_any_ref()
+            .downcast_ref::<LockedRamFSInode>()
+            .ok_or(SyscallErr::EINVAL)?;
+        let mut child_locked = child_inode.0.lock();
+        child_locked.metadata.nlinks -= 1;
+        Ok(())
+    }
+
+    fn rename(
+        &self,
+        old_name: &str,
+        new_parent: &Arc<dyn IndexNode>,
+        new_name: &str,
+    ) -> Result<(), SyscallErr> {
+        let new_parent_inode: &LockedRamFSInode = new_parent
+            .as_any_ref()
+            .downcast_ref::<LockedRamFSInode>()
+            .ok_or(SyscallErr::EINVAL)?;
+
+        // Phase 1: remove child from old parent (under old lock)
+        let (child, is_dir) = {
+            let mut old_locked = self.0.lock();
+            let child = old_locked
+                .children
+                .remove(old_name)
+                .ok_or(SyscallErr::ENOENT)?;
+            let is_dir = child.0.lock().metadata.file_type == FileType::Dir;
+            if is_dir {
+                old_locked.metadata.nlinks -= 1;
+            }
+            (child, is_dir)
+        };
+
+        // Phase 2: insert into new parent (under new lock)
+        {
+            let mut new_locked = new_parent_inode.0.lock();
+            if new_locked.children.contains_key(new_name) {
+                // Roll back: re-insert into old parent
+                let mut old_locked = self.0.lock();
+                old_locked.children.insert(String::from(old_name), child);
+                if is_dir {
+                    old_locked.metadata.nlinks += 1;
+                }
+                return Err(SyscallErr::EEXIST);
+            }
+            if is_dir {
+                new_locked.metadata.nlinks += 1;
+            }
+            new_locked.children.insert(String::from(new_name), child);
         }
-        let to_delete = inode.children.get(name).ok_or(SyscallErr::ENOENT)?;
-        if to_delete.0.lock().metadata.file_type == FileType::Dir {
-            return Err(SyscallErr::EPERM);
-        }
-        to_delete.0.lock().metadata.nlinks -= 1;
-        inode.children.remove(name);
         Ok(())
     }
 
