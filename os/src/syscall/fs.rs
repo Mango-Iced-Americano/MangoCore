@@ -1,16 +1,13 @@
 use super::errno::*;
-use crate::fs::iov::IOVec;
 use crate::fs::poll::{ppoll, pselect, FdSet, PollFd};
 use crate::fs::*;
 use crate::hal::BLOCK_SZ;
 use crate::mm::{
-    copy_from_user, copy_from_user_array, copy_to_user, copy_to_user_array, copy_to_user_string,
-    translated_byte_buffer, translated_byte_buffer_append_to_existing_vec, translated_ref,
-    translated_refmut, translated_str, try_get_from_user, MapPermission, UserAccess, UserBuffer,
-    VirtAddr,
+    translated_refmut, translated_str, MapPermission, UserBufferReader, UserBufferWriter,
+    UserIoVec, UserPtr, UserPtrMut, UserSlice, VirtAddr,
 };
 use crate::syscall::utils::wait_io_core;
-use crate::task::{current_task, current_user_token, signal};
+use crate::task::{current_task, current_user_token};
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
 use alloc::boxed::Box;
@@ -20,7 +17,6 @@ use core::mem::size_of;
 use core::panic;
 use log::{debug, info, trace, warn};
 use num_enum::FromPrimitive;
-use smoltcp::socket;
 
 // 防止用户传入过大参数导致内核 OOM 或者长时间阻塞
 const MAX_SYSCALL_BUFFER_SIZE: usize = 2 * 1024 * 1024; // 限制为 2 MiB
@@ -183,12 +179,10 @@ pub fn sys_getcwd(buf: usize, size: usize) -> isize {
     }
     let token = task.get_user_token();
     let write_len = working_dir.len() + 1;
-    let mut user_buf = UserBuffer::new({
-        match translated_byte_buffer(token, buf as *const u8, write_len, UserAccess::Write) {
-            Ok(buffer) => buffer,
-            Err(errno) => return errno,
-        }
-    });
+    let mut user_buf = match UserBufferWriter::new(token, buf as *mut u8, write_len) {
+        Ok(writer) => writer.into_user_buffer(),
+        Err(errno) => return errno,
+    };
     user_buf.write(working_dir.as_bytes());
     user_buf.write_at(working_dir.len(), b"\0");
     buf as isize
@@ -240,8 +234,8 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
     let token = task.get_user_token();
     wait_io_core(
         || {
-            let user_buf = match translated_byte_buffer(token, buf as *const u8, count, UserAccess::Write) {
-                Ok(buffer) => UserBuffer::new(buffer),
+            let user_buf = match UserBufferWriter::new(token, buf as *mut u8, count) {
+                Ok(buffer) => buffer.into_user_buffer(),
                 Err(errno) => return errno as isize,
             };
             file_descriptor.read_user(None, user_buf) as isize
@@ -278,8 +272,8 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
     let token = task.get_user_token();
     wait_io_core(
         || {
-            let user_buf = match translated_byte_buffer(token, buf as *const u8, count, UserAccess::Read) {
-                Ok(buffer) => UserBuffer::new(buffer),
+            let user_buf = match UserBufferReader::new(token, buf as *const u8, count) {
+                Ok(buffer) => buffer.into_user_buffer(),
                 Err(errno) => return errno as isize,
             };
             file_descriptor.write_user(None, user_buf) as isize
@@ -301,14 +295,13 @@ pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
         return EBADF;
     }
     let token = task.get_user_token();
+    let user_buf = match UserBufferWriter::new(token, buf as *mut u8, count) {
+        Ok(buffer) => buffer.into_user_buffer(),
+        Err(errno) => return errno,
+    };
     file_descriptor.read_user(
         Some(offset),
-        UserBuffer::new({
-            match translated_byte_buffer(token, buf as *const u8, count, UserAccess::Write) {
-                Ok(buffer) => buffer,
-                Err(errno) => return errno,
-            }
-        }),
+        user_buf,
     ) as isize
 }
 
@@ -325,21 +318,17 @@ pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
         return EBADF;
     }
     let token = task.get_user_token();
+    let user_buf = match UserBufferReader::new(token, buf as *const u8, count) {
+        Ok(buffer) => buffer.into_user_buffer(),
+        Err(errno) => return errno,
+    };
     file_descriptor.write_user(
         Some(offset),
-        UserBuffer::new({
-            match translated_byte_buffer(token, buf as *const u8, count, UserAccess::Read) {
-                Ok(buffer) => buffer,
-                Err(errno) => return errno,
-            }
-        }),
+        user_buf,
     ) as isize
 }
 
 pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
-    if iovcnt > 1024 {
-        return EINVAL;
-    }
     let task = current_task().unwrap();
     let fd_table = task.files.lock();
     let file_descriptor = match fd_table.get_ref(fd) {
@@ -351,52 +340,23 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
         return EBADF;
     }
     let token = task.get_user_token();
-    let mut iovecs = Vec::<IOVec>::with_capacity(iovcnt);
-    if copy_from_user_array(token, iov as *const IOVec, iovecs.as_mut_ptr(), iovcnt).is_err() {
-        // See read(2), which the ERRORS section of readv is written in addition to.
-        log::error!("[readv] Failed to copy from {:?}", iov);
-        return EFAULT;
+    let user_iov = match UserIoVec::read_user_iovecs(
+        token,
+        iov as *const crate::fs::iov::IOVec,
+        iovcnt,
+        MAX_SYSCALL_BUFFER_SIZE,
+    ) {
+        Ok(iov) => iov,
+        Err(errno) => return errno,
     };
-    unsafe { iovecs.set_len(iovcnt) };
-    if validate_iovec_total_len(&iovecs).is_err() {
-        return EINVAL;
-    }
-    file_descriptor.read_user(
-        None,
-        UserBuffer::new({
-            let mut vec = Vec::with_capacity(32);
-            let mut total_len = 0;
-            for iovec in iovecs.iter() {
-                let mut iov_len = iovec.iov_len;
-                if total_len + iov_len > MAX_SYSCALL_BUFFER_SIZE {
-                    iov_len = MAX_SYSCALL_BUFFER_SIZE - total_len;
-                }
-                if iov_len == 0 {
-                    continue;
-                }
-                match translated_byte_buffer_append_to_existing_vec(
-                    &mut vec,
-                    token,
-                    iovec.iov_base,
-                    iov_len,
-                    UserAccess::Write,
-                ) {
-                    Ok(_) => {
-                        total_len += iov_len;
-                        continue;
-                    }
-                    Err(errno) => return errno,
-                }
-            }
-            vec
-        }),
-    ) as isize
+    let user_buf = match user_iov.writer_buffer() {
+        Ok(buffer) => buffer,
+        Err(errno) => return errno,
+    };
+    file_descriptor.read_user(None, user_buf) as isize
 }
 
 pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
-    if iovcnt > 1024 {
-        return EINVAL;
-    }
     let task = current_task().unwrap();
     let fd_table = task.files.lock();
     let file_descriptor = match fd_table.get_ref(fd) {
@@ -408,57 +368,20 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
         return EBADF;
     }
     let token = task.get_user_token();
-    let mut iovecs = Vec::<IOVec>::with_capacity(iovcnt);
-    if copy_from_user_array(token, iov as *const IOVec, iovecs.as_mut_ptr(), iovcnt).is_err() {
-        log::error!("[writev] Failed to copy from {:?}", iov);
-        return EFAULT;
+    let user_iov = match UserIoVec::read_user_iovecs(
+        token,
+        iov as *const crate::fs::iov::IOVec,
+        iovcnt,
+        MAX_SYSCALL_BUFFER_SIZE,
+    ) {
+        Ok(iov) => iov,
+        Err(errno) => return errno,
     };
-    unsafe { iovecs.set_len(iovcnt) };
-    if validate_iovec_total_len(&iovecs).is_err() {
-        return EINVAL;
-    }
-    file_descriptor.write_user(
-        None,
-        UserBuffer::new({
-            let mut vec = Vec::with_capacity(32);
-            let mut total_len = 0;
-            for iovec in iovecs.iter() {
-                let mut iov_len = iovec.iov_len;
-                if total_len + iov_len > MAX_SYSCALL_BUFFER_SIZE {
-                    iov_len = MAX_SYSCALL_BUFFER_SIZE - total_len;
-                }
-                if iov_len == 0 {
-                    continue;
-                }
-                match translated_byte_buffer_append_to_existing_vec(
-                    &mut vec,
-                    token,
-                    iovec.iov_base,
-                    iov_len,
-                    UserAccess::Read,
-                ) {
-                    Ok(_) => {
-                        total_len += iov_len;
-                        continue;
-                    }
-                    Err(errno) => return errno,
-                }
-            }
-            vec
-        }),
-    ) as isize
-}
-
-fn validate_iovec_total_len(iovecs: &[IOVec]) -> Result<(), ()> {
-    let mut total_len = 0usize;
-    for iovec in iovecs {
-        // 先按 Linux 语义查长度溢出
-        total_len = total_len
-            .checked_add(iovec.iov_len)
-            .filter(|len| *len <= isize::MAX as usize)
-            .ok_or(())?;
-    }
-    Ok(())
+    let user_buf = match user_iov.reader_buffer() {
+        Ok(buffer) => buffer,
+        Err(errno) => return errno,
+    };
+    file_descriptor.write_user(None, user_buf) as isize
 }
 
 /// If offset is not NULL, then it points to a variable holding the
@@ -625,13 +548,10 @@ pub fn sys_pipe2(pipefd: usize, flags: u32) -> isize {
     };
 
     let token = task.get_user_token();
-    if copy_to_user_array(
-        token,
-        [read_fd as u32, write_fd as u32].as_ptr(),
-        pipefd as *mut u32,
-        2,
-    )
-    .is_err()
+    let fds = [read_fd as u32, write_fd as u32];
+    if UserSlice::new(pipefd as *const u32, 2)
+        .write_array_from(token, &fds)
+        .is_err()
     {
         log::error!("[sys_pipe2] Failed to copy to {:?}", pipefd);
         return EFAULT;
@@ -676,13 +596,9 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> isize {
         Err(errno) => return errno,
     };
     // 将结果复制到用户态的数组中
-    if copy_to_user_array(
-        token,
-        dirent_vec.as_ptr(),
-        dirp as *mut Dirent,
-        dirent_vec.len(),
-    )
-    .is_err()
+    if UserSlice::new(dirp as *const Dirent, dirent_vec.len())
+        .write_array_from(token, &dirent_vec)
+        .is_err()
     {
         log::error!("[sys_getdents64] Failed to copy to {:?}", dirp);
         return EFAULT;
@@ -838,12 +754,13 @@ pub fn sys_readlinkat(dirfd: usize, pathname: *const u8, buf: *mut u8, bufsiz: u
     let len = real_path.len().min(bufsiz);
     // readlink does not add a null byte
     let bytes = real_path.as_bytes();
-    for i in 0..len {
-        let ptr = buf as usize + i;
-        if crate::mm::copy_to_user(token, &bytes[i], ptr as *mut u8).is_err() {
-            log::error!("[sys_readlinkat] Failed to copy to {:?}", buf);
-            return EFAULT;
-        }
+    let mut user_buf = match UserBufferWriter::new(token, buf, len) {
+        Ok(writer) => writer,
+        Err(_) => return EFAULT,
+    };
+    if user_buf.write_from(&bytes[..len]).is_err() {
+        log::error!("[sys_readlinkat] Failed to copy to {:?}", buf);
+        return EFAULT;
     }
 
     debug!(
@@ -915,7 +832,10 @@ pub fn sys_fstatat(dirfd: usize, path: *const u8, buf: *mut u8, flags: u32) -> i
                 let mut lock = parent.children.write();
                 match parent.try_to_open_subfile(name, &mut lock) {
                     Ok(inode) => {
-                        if copy_to_user(token, &inode.file.get_stat(), buf as *mut Stat).is_err() {
+                        if UserPtrMut::new(buf as *mut Stat)
+                            .write(token, &inode.file.get_stat())
+                            .is_err()
+                        {
                             return EFAULT;
                         }
                         SUCCESS
@@ -925,7 +845,10 @@ pub fn sys_fstatat(dirfd: usize, path: *const u8, buf: *mut u8, flags: u32) -> i
             }
             None => {
                 // path 就是 dir_node 本身（例如 "." 或根路径）
-                if copy_to_user(token, &dir_node.file.get_stat(), buf as *mut Stat).is_err() {
+                if UserPtrMut::new(buf as *mut Stat)
+                    .write(token, &dir_node.file.get_stat())
+                    .is_err()
+                {
                     return EFAULT;
                 }
                 SUCCESS
@@ -934,7 +857,10 @@ pub fn sys_fstatat(dirfd: usize, path: *const u8, buf: *mut u8, flags: u32) -> i
     } else {
         match file_descriptor.open(&path, OpenFlags::O_RDONLY, false) {
             Ok(file_descriptor) => {
-                if copy_to_user(token, &file_descriptor.get_stat(), buf as *mut Stat).is_err() {
+                if UserPtrMut::new(buf as *mut Stat)
+                    .write(token, &file_descriptor.get_stat())
+                    .is_err()
+                {
                     log::error!("[sys_fstatat] Failed to copy to {:?}", buf);
                     return EFAULT;
                 };
@@ -1017,7 +943,10 @@ pub fn sys_statx(dirfd: usize, path: *const u8, flags: u32, mask: u32, buf: *mut
                 match parent.try_to_open_subfile(name, &mut lock) {
                     Ok(inode) => {
                         let statx = statx_from_node(&inode);
-                        if copy_to_user(token, &statx, buf as *mut Statx).is_err() {
+                        if UserPtrMut::new(buf as *mut Statx)
+                            .write(token, &statx)
+                            .is_err()
+                        {
                             return EFAULT;
                         }
                         SUCCESS
@@ -1027,7 +956,10 @@ pub fn sys_statx(dirfd: usize, path: *const u8, flags: u32, mask: u32, buf: *mut
             }
             None => {
                 let statx = statx_from_node(&dir_node);
-                if copy_to_user(token, &statx, buf as *mut Statx).is_err() {
+                if UserPtrMut::new(buf as *mut Statx)
+                    .write(token, &statx)
+                    .is_err()
+                {
                     return EFAULT;
                 }
                 SUCCESS
@@ -1036,7 +968,9 @@ pub fn sys_statx(dirfd: usize, path: *const u8, flags: u32, mask: u32, buf: *mut
     } else {
         match file_descriptor.open(&path, OpenFlags::O_RDONLY, false) {
             Ok(file_descriptor) => {
-                if copy_to_user(token, &file_descriptor.get_statx(mask), buf as *mut Statx).is_err()
+                if UserPtrMut::new(buf as *mut Statx)
+                    .write(token, &file_descriptor.get_statx(mask))
+                    .is_err()
                 {
                     log::error!("[sys_statx] Failed to copy to {:?}", buf);
                     return EFAULT;
@@ -1064,7 +998,10 @@ pub fn sys_fstat(fd: usize, statbuf: *mut u8) -> isize {
             }
         }
     };
-    if copy_to_user(token, &file_descriptor.get_stat(), statbuf as *mut Stat).is_err() {
+    if UserPtrMut::new(statbuf as *mut Stat)
+        .write(token, &file_descriptor.get_stat())
+        .is_err()
+    {
         log::error!("[sys_fstat] Failed to copy to {:?}", statbuf);
         return EFAULT;
     };
@@ -1117,7 +1054,7 @@ pub fn sys_statfs(_path: *const u8, buf: *mut Statfs) -> isize {
         f_spare: [0; 4],
     });
     let token = current_task().unwrap().get_user_token();
-    if copy_to_user(token, statfs.as_ref(), buf).is_err() {
+    if UserPtrMut::new(buf).write(token, statfs.as_ref()).is_err() {
         log::error!("[sys_statfs] Failed to copy to {:?}", buf);
         return EFAULT;
     };
@@ -1487,14 +1424,20 @@ pub fn sys_utimensat(
     };
 
     let now = TimeSpec::now();
-    let timespec = &mut [now; 2];
+    let timespec = if !times.is_null() {
+        match UserPtr::new(times).read(token) {
+            Ok(timespec) => timespec,
+            Err(_) => {
+                log::error!("[sys_utimensat] Failed to copy from {:?}", times);
+                return EFAULT;
+            }
+        }
+    } else {
+        [now; 2]
+    };
     let mut atime = Some(now.tv_sec);
     let mut mtime = Some(now.tv_sec);
     if !times.is_null() {
-        if copy_from_user(token, times, timespec).is_err() {
-            log::error!("[sys_utimensat] Failed to copy from {:?}", times);
-            return EFAULT;
-        };
         match timespec[0].tv_nsec {
             UTIME_NOW => (),
             UTIME_OMIT => atime = None,
@@ -1653,9 +1596,8 @@ pub fn sys_pselect(
     // The musl wrapper builds it as: long data[2] = { (long)&mask, sizeof(sigset_t) }.
     let sigmask: *const crate::task::signal::Signals = if sigmask_args != 0 {
         let token = current_user_token();
-        match translated_ref(token, sigmask_args as *const usize) {
-            Ok(ss_ptr) => {
-                let ptr = *ss_ptr;
+        match UserPtr::<usize>::from_addr(sigmask_args).read(token) {
+            Ok(ptr) => {
                 if ptr != 0 {
                     ptr as *const crate::task::signal::Signals
                 } else {
@@ -1678,19 +1620,19 @@ pub fn sys_pselect(
         sigmask
     ) */
     let token = current_user_token();
-    let mut kread_fds = match try_get_from_user(token, read_fds) {
+    let mut kread_fds = match UserPtr::new(read_fds as *const FdSet).read_optional(token) {
         Ok(fds) => fds,
         Err(errno) => return errno,
     };
-    let mut kwrite_fds = match try_get_from_user(token, write_fds) {
+    let mut kwrite_fds = match UserPtr::new(write_fds as *const FdSet).read_optional(token) {
         Ok(fds) => fds,
         Err(errno) => return errno,
     };
-    let mut kexception_fds = match try_get_from_user(token, exception_fds) {
+    let mut kexception_fds = match UserPtr::new(exception_fds as *const FdSet).read_optional(token) {
         Ok(fds) => fds,
         Err(errno) => return errno,
     };
-    let ktimeout = match try_get_from_user(token, timeout) {
+    let ktimeout = match UserPtr::new(timeout as *const TimeSpec).read_optional(token) {
         Ok(timeout) => timeout,
         Err(errno) => return errno,
     };
@@ -1708,21 +1650,24 @@ pub fn sys_pselect(
      */
     if let Some(kread_fds) = &kread_fds {
         trace!("[pselect] read_fds: {:?}", kread_fds);
-        if copy_to_user(token, kread_fds, read_fds).is_err() {
+        if UserPtrMut::new(read_fds).write(token, kread_fds).is_err() {
             log::error!("[sys_pselect] Error copying to read_fds {:?}", read_fds);
             ret = EFAULT;
         };
     }
     if let Some(kwrite_fds) = &kwrite_fds {
         trace!("[pselect] write_fds: {:?}", kwrite_fds);
-        if copy_to_user(token, kwrite_fds, write_fds).is_err() {
+        if UserPtrMut::new(write_fds).write(token, kwrite_fds).is_err() {
             log::error!("[sys_pselect] Error copying to write_fds {:?}", write_fds);
             ret = EFAULT;
         };
     }
     if let Some(kexception_fds) = &kexception_fds {
         trace!("[pselect] exception_fds: {:?}", kexception_fds);
-        if copy_to_user(token, kexception_fds, exception_fds).is_err() {
+        if UserPtrMut::new(exception_fds)
+            .write(token, kexception_fds)
+            .is_err()
+        {
             log::error!(
                 "[sys_pselect] Error copying to exception_fds {:?}",
                 exception_fds

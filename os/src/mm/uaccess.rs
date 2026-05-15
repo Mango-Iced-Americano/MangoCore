@@ -1,5 +1,6 @@
 use core::{marker::PhantomData, ops::IndexMut};
 
+use crate::fs::iov::IOVec;
 use super::page_table::{FaultAccess, PageTable, UserAccess};
 use super::{PhysAddr, StepByOne, VirtAddr};
 use alloc::string::String;
@@ -7,6 +8,7 @@ use alloc::vec::Vec;
 
 // Cap a single user buffer translation to avoid kernel OOM.
 const MAX_BUFFER_SIZE: usize = 1024 * 1024 * 8;
+const MAX_IOVEC_COUNT: usize = 1024;
 
 #[derive(Clone, Copy)]
 pub struct UserPtr<T> {
@@ -195,6 +197,147 @@ impl UserCString {
             return Err(crate::syscall::errno::EFAULT);
         }
         translated_str(token, self.ptr)
+    }
+}
+
+pub struct UserBufferReader {
+    buffer: UserBuffer,
+}
+
+impl UserBufferReader {
+    pub fn new(token: usize, ptr: *const u8, len: usize) -> Result<Self, isize> {
+        Ok(Self {
+            buffer: UserBuffer::new(translated_byte_buffer(token, ptr, len, UserAccess::Read)?),
+        })
+    }
+
+    pub fn into_user_buffer(self) -> UserBuffer {
+        self.buffer
+    }
+
+    pub fn read_to_vec(&self, cap: usize) -> Result<Vec<u8>, isize> {
+        if self.buffer.len() > cap {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+        let mut dst = Vec::new();
+        dst.try_reserve(self.buffer.len())
+            .map_err(|_| crate::syscall::errno::ENOMEM)?;
+        unsafe {
+            dst.set_len(self.buffer.len());
+        }
+        self.buffer.read(&mut dst);
+        Ok(dst)
+    }
+
+    pub fn read_into(&self, dst: &mut [u8]) -> Result<usize, isize> {
+        Ok(self.buffer.read(dst))
+    }
+}
+
+pub struct UserBufferWriter {
+    buffer: UserBuffer,
+}
+
+impl UserBufferWriter {
+    pub fn new(token: usize, ptr: *mut u8, len: usize) -> Result<Self, isize> {
+        Ok(Self {
+            buffer: UserBuffer::new(translated_byte_buffer(
+                token,
+                ptr as *const u8,
+                len,
+                UserAccess::Write,
+            )?),
+        })
+    }
+
+    pub fn into_user_buffer(self) -> UserBuffer {
+        self.buffer
+    }
+
+    pub fn write_from(&mut self, src: &[u8]) -> Result<usize, isize> {
+        Ok(self.buffer.write(src))
+    }
+}
+
+pub struct UserIoVec {
+    token: usize,
+    iovecs: Vec<IOVec>,
+    total_len: usize,
+    total_cap: usize,
+}
+
+impl UserIoVec {
+    pub fn read_user_iovecs(
+        token: usize,
+        iov: *const IOVec,
+        iovcnt: usize,
+        total_cap: usize,
+    ) -> Result<Self, isize> {
+        if iovcnt > MAX_IOVEC_COUNT {
+            return Err(crate::syscall::errno::EINVAL);
+        }
+        let mut iovecs = Vec::<IOVec>::new();
+        iovecs
+            .try_reserve(iovcnt)
+            .map_err(|_| crate::syscall::errno::ENOMEM)?;
+        if iovcnt != 0 {
+            copy_from_user_array(token, iov, iovecs.as_mut_ptr(), iovcnt)?;
+        }
+        unsafe {
+            iovecs.set_len(iovcnt);
+        }
+        let mut total_len = 0usize;
+        for iovec in iovecs.iter() {
+            total_len = total_len
+                .checked_add(iovec.iov_len)
+                .filter(|len| *len <= isize::MAX as usize)
+                .ok_or(crate::syscall::errno::EINVAL)?;
+        }
+        Ok(Self {
+            token,
+            iovecs,
+            total_len,
+            total_cap,
+        })
+    }
+
+    pub fn total_len(&self) -> usize {
+        self.total_len
+    }
+
+    pub fn capped_len(&self) -> usize {
+        self.total_len.min(self.total_cap)
+    }
+
+    pub fn reader_buffer(&self) -> Result<UserBuffer, isize> {
+        self.build_user_buffer(UserAccess::Read)
+    }
+
+    pub fn writer_buffer(&self) -> Result<UserBuffer, isize> {
+        self.build_user_buffer(UserAccess::Write)
+    }
+
+    fn build_user_buffer(&self, access: UserAccess) -> Result<UserBuffer, isize> {
+        let mut buffers = Vec::with_capacity(32);
+        let mut total_len = 0usize;
+        for iovec in self.iovecs.iter() {
+            if total_len >= self.total_cap {
+                break;
+            }
+            let iov_len = iovec.iov_len.min(self.total_cap - total_len);
+            if iov_len == 0 {
+                continue;
+            }
+            translated_byte_buffer_append_to_existing_vec(
+                &mut buffers,
+                self.token,
+                iovec.iov_base,
+                iov_len,
+                access,
+            )?;
+            total_len += iov_len;
+        }
+        Ok(UserBuffer::new(buffers))
     }
 }
 

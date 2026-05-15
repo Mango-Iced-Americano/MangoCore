@@ -7,7 +7,7 @@ use crate::{
         directory_tree::DirectoryTreeNode, fat32::DiskInodeType, file_descriptor::FileDescriptor,
         file_trait::File, Dirent, OpenFlags, PageCache, SeekWhence, Stat,
     },
-    mm::{translated_byte_buffer, translated_ref, translated_refmut, UserAccess, UserBuffer},
+    mm::{UserBuffer, UserBufferWriter, UserPtr, UserPtrMut},
     net::{
         posix::PosixArgsSocketType,
         socket::inet::{datagram::udp::UdpSocket, raw::raw::RawSocket, stream::TcpSocket},
@@ -202,23 +202,27 @@ impl Endpoint {
                 let token = task.get_user_token();
 
                 // 解引用 addrlen，检查缓冲区大小
-                let addrlen_ptr = match translated_refmut(token, addrlen as *mut u32) {
-                    Ok(p) => p,
+                let addrlen_ptr = UserPtrMut::<u32>::from_addr(addrlen);
+                let capacity = match addrlen_ptr.read(token) {
+                    Ok(len) => len as usize,
                     Err(_) => return Err(SyscallErr::EFAULT),
                 };
-                let capacity = *addrlen_ptr as usize;
                 if capacity < 2 {
                     return Err(SyscallErr::EINVAL);
                 }
 
                 // 写入 AF_UNSPEC（2 字节）
                 let write_len = 2;
-                let buf = translated_byte_buffer(token, addr as *const u8, write_len, UserAccess::Write)
+                let mut user_buf =
+                    UserBufferWriter::new(token, addr as *mut u8, write_len)
+                        .map_err(|_| SyscallErr::EFAULT)?;
+                user_buf
+                    .write_from(&AF_UNSPEC.to_ne_bytes())
                     .map_err(|_| SyscallErr::EFAULT)?;
-                let mut user_buf = UserBuffer::new(buf);
-                user_buf.write(&AF_UNSPEC.to_ne_bytes());
                 // 回写 addrlen
-                *addrlen_ptr = 2;
+                addrlen_ptr
+                    .write(token, &2u32)
+                    .map_err(|_| SyscallErr::EFAULT)?;
                 Ok(0)
             }
         }
@@ -658,11 +662,10 @@ impl dyn Socket {
     fn prevalidate_socklen_value(addrlen: usize) -> Result<(), SyscallErr> {
         let task = current_task().ok_or(SyscallErr::EINVAL)?;
         let token = task.get_user_token();
-        let addrlen_ptr = match translated_ref(token, addrlen as *const u32) {
-            Ok(p) => p,
+        let val = match UserPtr::<u32>::from_addr(addrlen).read(token) {
+            Ok(val) => val,
             Err(_) => return Err(SyscallErr::EFAULT),
         };
-        let val = *addrlen_ptr;
         // socklen_t 在 Linux 上是 signed int，负值 → EINVAL
         if (val as i32) < 0 {
             return Err(SyscallErr::EINVAL);

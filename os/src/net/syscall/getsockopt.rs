@@ -1,4 +1,4 @@
-use crate::mm::{translated_byte_buffer, translated_ref_write, translated_refmut, UserAccess, UserBuffer};
+use crate::mm::{UserBufferWriter, UserPtrMut};
 use crate::net::{TcpInfo, TCP_MSS};
 use crate::task::current_task;
 use crate::utils::error::SyscallErr;
@@ -23,63 +23,54 @@ pub fn sys_getsockopt(
 
     let task = current_task().unwrap();
     let token = task.get_user_token();
-    let optval_ptr = match translated_ref_write(token, optval_ptr_ as *mut u32) {
-        Ok(p) => p as *mut u32,
-        Err(_) => return -(SyscallErr::EFAULT as isize),
-    };
-    let optlen = match translated_refmut(token, optlen as *mut u32) {
-        Ok(p) => p as *mut u32,
-        Err(_) => return -(SyscallErr::EFAULT as isize),
-    };
+    let optval_ptr = UserPtrMut::<u32>::from_addr(optval_ptr_);
+    let optlen_ptr = UserPtrMut::<u32>::from_addr(optlen);
     match (level, optname) {
         (SOL_TCP, TCP_MAXSEG) => {
             // return max tcp fregment size (MSS)
             let len = core::mem::size_of::<u32>();
-            unsafe {
-                *optval_ptr = TCP_MSS;
-                *optlen = len as u32;
+            if optval_ptr.write(token, &TCP_MSS).is_err()
+                || optlen_ptr.write(token, &(len as u32)).is_err()
+            {
+                return -(SyscallErr::EFAULT as isize);
             }
         }
         (SOL_TCP, TCP_INFO) => {
             let state = socket.tcp_state().unwrap_or(7); // default Closed
             let info = TcpInfo::new(state, TCP_MSS);
             let info_len = core::mem::size_of::<TcpInfo>();
-            let mut buf = match translated_byte_buffer(
-                token,
-                optval_ptr_ as *const u8,
-                info_len,
-                UserAccess::Write,
-            ) {
-                Ok(p) => UserBuffer::new(p),
+            let mut buf = match UserBufferWriter::new(token, optval_ptr_ as *mut u8, info_len) {
+                Ok(writer) => writer,
                 Err(_) => return -(SyscallErr::EFAULT as isize),
             };
             let info_bytes = unsafe {
                 core::slice::from_raw_parts(&info as *const TcpInfo as *const u8, info_len)
             };
-            buf.write(info_bytes);
-            unsafe {
-                *optlen = info_len as u32;
+            if buf.write_from(info_bytes).is_err()
+                || optlen_ptr.write(token, &(info_len as u32)).is_err()
+            {
+                return -(SyscallErr::EFAULT as isize);
             }
         }
         (SOL_TCP, TCP_CONGESTION) => {
             let congestion = "reno";
-            let mut optval_buf = match translated_byte_buffer(
-                token,
-                optval_ptr_ as *const u8,
-                congestion.len(),
-                UserAccess::Write,
-            ) {
-                Ok(p) => UserBuffer::new(p),
-                Err(_) => return -(SyscallErr::EFAULT as isize),
-            };
-            optval_buf.write(congestion.as_bytes());
-            unsafe {
-                *optlen = congestion.len() as u32;
+            let mut optval_buf =
+                match UserBufferWriter::new(token, optval_ptr_ as *mut u8, congestion.len()) {
+                    Ok(writer) => writer,
+                    Err(_) => return -(SyscallErr::EFAULT as isize),
+                };
+            if optval_buf.write_from(congestion.as_bytes()).is_err()
+                || optlen_ptr.write(token, &(congestion.len() as u32)).is_err()
+            {
+                return -(SyscallErr::EFAULT as isize);
             }
         }
         (SOL_SOCKET, SO_SNDBUF | SO_RCVBUF | SO_REUSEADDR) => {
             // 对于需要写入 u32 的选项，检查 optlen 是否够大
-            let optlen_val = unsafe { *optlen };
+            let optlen_val = match optlen_ptr.read(token) {
+                Ok(len) => len,
+                Err(_) => return -(SyscallErr::EFAULT as isize),
+            };
             if optlen_val < 4 {
                 return -(SyscallErr::EINVAL as isize);
             }
@@ -88,16 +79,18 @@ pub fn sys_getsockopt(
             match optname {
                 SO_SNDBUF => {
                     let size = socket.send_buf_size();
-                    unsafe {
-                        *(optval_ptr as *mut u32) = size as u32;
-                        *(optlen as *mut u32) = 4;
+                    if optval_ptr.write(token, &(size as u32)).is_err()
+                        || optlen_ptr.write(token, &4).is_err()
+                    {
+                        return -(SyscallErr::EFAULT as isize);
                     }
                 }
                 SO_RCVBUF => {
                     let size = socket.recv_buf_size();
-                    unsafe {
-                        *(optval_ptr as *mut u32) = size as u32;
-                        *(optlen as *mut u32) = 4;
+                    if optval_ptr.write(token, &(size as u32)).is_err()
+                        || optlen_ptr.write(token, &4).is_err()
+                    {
+                        return -(SyscallErr::EFAULT as isize);
                     }
                 }
                 SO_REUSEADDR => {
@@ -105,9 +98,10 @@ pub fn sys_getsockopt(
                         Ok(enabled) => enabled,
                         Err(e) => return -(e as isize),
                     };
-                    unsafe {
-                        *(optval_ptr as *mut u32) = enabled as u32;
-                        *(optlen as *mut u32) = 4;
+                    if optval_ptr.write(token, &(enabled as u32)).is_err()
+                        || optlen_ptr.write(token, &4).is_err()
+                    {
+                        return -(SyscallErr::EFAULT as isize);
                     }
                 }
                 _ => {
