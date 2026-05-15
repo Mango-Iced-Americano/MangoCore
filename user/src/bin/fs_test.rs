@@ -724,6 +724,693 @@ fn test_getdents64() -> bool {
     true
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Phase B: LTP-inspired advanced tests
+// ═══════════════════════════════════════════════════════════════════════
+
+// ── A组: 高级 read/write 测试 ───────────────────────────────────────────
+
+fn test_read_empty() -> bool {
+    sys_mkdirat(AT_FDCWD, "/tmp16\0", 0o777);
+    const O_CREAT: u32 = 0o100;
+    const O_RDONLY: u32 = 0;
+    let fd = sys_open("/tmp16/empty\0", O_CREAT);
+    sys_close(fd as usize);
+    let fd = sys_open("/tmp16/empty\0", O_RDONLY);
+    if fd < 0 { println!("  FAIL: open empty returned {}", fd); return false; }
+    let mut buf = [1u8; 64];
+    let n = sys_read(fd as usize, &mut buf);
+    sys_close(fd as usize);
+    if n != 0 {
+        println!("  FAIL: read empty file got {} bytes (expected 0)", n);
+        return false;
+    }
+    println!("  PASS: read empty file -> 0 bytes OK");
+    sys_unlinkat(AT_FDCWD, "/tmp16/empty\0", 0);
+    sys_unlinkat(AT_FDCWD, "/tmp16\0", 0x200);
+    true
+}
+
+fn test_read_past_eof() -> bool {
+    sys_mkdirat(AT_FDCWD, "/tmp17\0", 0o777);
+    const O_CREAT: u32 = 0o100; const O_RDWR: u32 = 0o2; const O_RDONLY: u32 = 0;
+    let fd = sys_open("/tmp17/short\0", O_CREAT | O_RDWR);
+    sys_write(fd as usize, b"hello");
+    sys_close(fd as usize);
+    let fd = sys_open("/tmp17/short\0", O_RDONLY);
+    let mut buf = [0u8; 100];
+    let n = sys_read(fd as usize, &mut buf);
+    sys_close(fd as usize);
+    if n != 5 { println!("  FAIL: read past EOF got {} (expected 5)", n); return false; }
+    println!("  PASS: read past EOF returns 5 OK");
+    sys_unlinkat(AT_FDCWD, "/tmp17/short\0", 0);
+    sys_unlinkat(AT_FDCWD, "/tmp17\0", 0x200);
+    true
+}
+
+fn test_read_data_integrity() -> bool {
+    sys_mkdirat(AT_FDCWD, "/tmp18\0", 0o777);
+    const O_CREAT: u32 = 0o100; const O_RDWR: u32 = 0o2; const O_RDONLY: u32 = 0;
+    let fd = sys_open("/tmp18/pat\0", O_CREAT | O_RDWR);
+    let mut pat = [0u8; 256];
+    for i in 0usize..256 { pat[i] = i as u8; }
+    let n = sys_write(fd as usize, &pat);
+    if n != 256 { println!("  FAIL: write 256 bytes returned {}", n); return false; }
+    sys_close(fd as usize);
+    let fd = sys_open("/tmp18/pat\0", O_RDONLY);
+    let mut buf = [0u8; 256];
+    let n = sys_read(fd as usize, &mut buf);
+    if n != 256 { println!("  FAIL: read integrity got {}", n); return false; }
+    for i in 0..256usize { if buf[i] != i as u8 { println!("  FAIL: byte {} mismatch: {} != {}", i, buf[i], i as u8); return false; } }
+    // partial read from middle
+    let pos = sys_lseek(fd as usize, 100, SEEK_SET);
+    if pos != 100 { println!("  FAIL: seek to 100 got {}", pos); return false; }
+    let n = sys_read(fd as usize, &mut buf[..50]);
+    if n != 50 { println!("  FAIL: partial read got {}", n); return false; }
+    for i in 0..50usize { if buf[i] != (100 + i) as u8 { println!("  FAIL: partial byte {} mismatch", i); return false; } }
+    sys_close(fd as usize);
+    println!("  PASS: data integrity 256B + partial read OK");
+    sys_unlinkat(AT_FDCWD, "/tmp18/pat\0", 0);
+    sys_unlinkat(AT_FDCWD, "/tmp18\0", 0x200);
+    true
+}
+
+fn test_read_bad_fd() -> bool {
+    let mut buf = [0u8; 16];
+    let n = sys_read(99999, &mut buf);
+    if n != -9 { println!("  FAIL: read bad fd got {} (expected -9/EBADF)", n); return false; }
+    println!("  PASS: read bad fd -> EBADF OK");
+    true
+}
+
+fn test_read_dir() -> bool {
+    sys_mkdirat(AT_FDCWD, "/tmp19\0", 0o777);
+    let fd = sys_open("/tmp19\0", 0);
+    if fd < 0 { println!("  FAIL: open tmp19 returned {}", fd); return false; }
+    let mut buf = [0u8; 16];
+    let n = sys_read(fd as usize, &mut buf);
+    sys_close(fd as usize);
+    if n != -21 { println!("  FAIL: read dir got {} (expected -21/EISDIR)", n); return false; }
+    println!("  PASS: read on dir fd -> EISDIR OK");
+    sys_unlinkat(AT_FDCWD, "/tmp19\0", 0x200);
+    true
+}
+
+fn test_write_readonly() -> bool {
+    sys_mkdirat(AT_FDCWD, "/tmp20\0", 0o777);
+    const O_CREAT: u32 = 0o100; const O_WRONLY: u32 = 0o1; const O_RDONLY: u32 = 0;
+    let fd = sys_open("/tmp20/ro\0", O_CREAT | O_WRONLY);
+    sys_write(fd as usize, b"data");
+    sys_close(fd as usize);
+    let fd = sys_open("/tmp20/ro\0", O_RDONLY);
+    let n = sys_write(fd as usize, b"X");
+    sys_close(fd as usize);
+    if n != -9 { println!("  FAIL: write to readonly fd got {} (expected -9/EBADF)", n); return false; }
+    println!("  PASS: write to readonly fd -> EBADF OK");
+    sys_unlinkat(AT_FDCWD, "/tmp20/ro\0", 0);
+    sys_unlinkat(AT_FDCWD, "/tmp20\0", 0x200);
+    true
+}
+
+fn test_write_append() -> bool {
+    sys_mkdirat(AT_FDCWD, "/tmp21\0", 0o777);
+    const O_CREAT: u32 = 0o100; const O_RDWR: u32 = 0o2; const O_RDONLY: u32 = 0;
+    const O_APPEND: u32 = 0o2000;
+    let fd = sys_open("/tmp21/afile\0", O_CREAT | O_RDWR);
+    sys_write(fd as usize, b"hello");
+    sys_close(fd as usize);
+    let fd = sys_open("/tmp21/afile\0", O_RDWR | O_APPEND);
+    let pos = sys_lseek(fd as usize, 0, SEEK_SET);
+    if pos != 0 { println!("  FAIL: lseek to 0 got {}", pos); return false; }
+    sys_write(fd as usize, b"world");
+    let end = sys_lseek(fd as usize, 0, SEEK_END);
+    if end != 10 { println!("  FAIL: SEEK_END after append got {} (expected 10)", end); return false; }
+    sys_lseek(fd as usize, 0, SEEK_SET);
+    let mut buf = [0u8; 16];
+    let n = sys_read(fd as usize, &mut buf);
+    sys_close(fd as usize);
+    if &buf[..n as usize] != b"helloworld" {
+        println!("  FAIL: append content mismatch: {:?}", &buf[..n as usize]);
+        return false;
+    }
+    println!("  PASS: O_APPEND write after lseek OK");
+    sys_unlinkat(AT_FDCWD, "/tmp21/afile\0", 0);
+    sys_unlinkat(AT_FDCWD, "/tmp21\0", 0x200);
+    true
+}
+
+fn test_write_varying_sizes() -> bool {
+    sys_mkdirat(AT_FDCWD, "/tmp22\0", 0o777);
+    const O_CREAT: u32 = 0o100; const O_RDWR: u32 = 0o2; const O_TRUNC: u32 = 0o1000;
+    let fd = sys_open("/tmp22/vary\0", O_CREAT | O_RDWR | O_TRUNC);
+    if fd < 0 { println!("  FAIL: create vary returned {}", fd); return false; }
+    let mut size: u32 = 1;
+    while size <= 4096 {
+        let mut data = [0u8; 4096];
+        for i in 0..size as usize { data[i] = (size as u8).wrapping_add(i as u8); }
+        let n = sys_write(fd as usize, &data[..size as usize]);
+        if n != size as isize { println!("  FAIL: write size={} returned {}", size, n); return false; }
+        sys_lseek(fd as usize, -(size as isize), SEEK_CUR);
+        let mut rbuf = [0u8; 4096];
+        let n = sys_read(fd as usize, &mut rbuf[..size as usize]);
+        if n != size as isize { println!("  FAIL: read back size={} got {}", size, n); return false; }
+        for i in 0..size as usize { if rbuf[i] != data[i] { println!("  FAIL: verify size={} byte {}", size, i); return false; } }
+        size <<= 1;
+    }
+    sys_close(fd as usize);
+    println!("  PASS: write varying 1..4096 bytes OK");
+    sys_unlinkat(AT_FDCWD, "/tmp22/vary\0", 0);
+    sys_unlinkat(AT_FDCWD, "/tmp22\0", 0x200);
+    true
+}
+
+fn test_write_overwrite_middle() -> bool {
+    sys_mkdirat(AT_FDCWD, "/tmp23\0", 0o777);
+    const O_CREAT: u32 = 0o100; const O_RDWR: u32 = 0o2;
+    let fd = sys_open("/tmp23/over\0", O_CREAT | O_RDWR);
+    sys_write(fd as usize, b"abcdefgh");
+    sys_lseek(fd as usize, 2, SEEK_SET);
+    let n = sys_write(fd as usize, b"XY");
+    if n != 2 { println!("  FAIL: overwrite write returned {}", n); return false; }
+    sys_lseek(fd as usize, 0, SEEK_SET);
+    let mut buf = [0u8; 16];
+    let n = sys_read(fd as usize, &mut buf);
+    sys_close(fd as usize);
+    if &buf[..n as usize] != b"abXYfgh" { println!("  FAIL: overwrite content: {:?}", &buf[..n as usize]); return false; }
+    println!("  PASS: overwrite middle -> abXYfgh OK");
+    sys_unlinkat(AT_FDCWD, "/tmp23/over\0", 0);
+    sys_unlinkat(AT_FDCWD, "/tmp23\0", 0x200);
+    true
+}
+
+fn test_write_bad_fd() -> bool {
+    let n = sys_write(99999, b"X");
+    if n != -9 { println!("  FAIL: write bad fd got {} (expected -9/EBADF)", n); return false; }
+    println!("  PASS: write bad fd -> EBADF OK");
+    true
+}
+
+// ── B组: 高级 lseek 测试 ────────────────────────────────────────────────
+
+fn test_lseek_seek_end() -> bool {
+    sys_mkdirat(AT_FDCWD, "/tmp24\0", 0o777);
+    const O_CREAT: u32 = 0o100; const O_RDWR: u32 = 0o2;
+    let fd = sys_open("/tmp24/end\0", O_CREAT | O_RDWR);
+    sys_write(fd as usize, b"ABCDEFGHIJ"); // 10 bytes
+    let pos = sys_lseek(fd as usize, 0, SEEK_END);
+    if pos != 10 { println!("  FAIL: SEEK_END got {} expected 10", pos); return false; }
+    let pos = sys_lseek(fd as usize, -4, SEEK_END);
+    if pos != 6 { println!("  FAIL: SEEK_END(-4) got {} expected 6", pos); return false; }
+    let mut buf = [0u8; 4];
+    let n = sys_read(fd as usize, &mut buf);
+    sys_close(fd as usize);
+    if &buf[..n as usize] != b"GHIJ" { println!("  FAIL: SEEK_END(-4) read got {:?}", &buf[..n as usize]); return false; }
+    println!("  PASS: SEEK_END + negative offset OK");
+    sys_unlinkat(AT_FDCWD, "/tmp24/end\0", 0);
+    sys_unlinkat(AT_FDCWD, "/tmp24\0", 0x200);
+    true
+}
+
+fn test_lseek_bad_whence() -> bool {
+    sys_mkdirat(AT_FDCWD, "/tmp25\0", 0o777);
+    const O_CREAT: u32 = 0o100; const O_RDWR: u32 = 0o2;
+    let fd = sys_open("/tmp25/f\0", O_CREAT | O_RDWR);
+    sys_write(fd as usize, b"data");
+    let pos = sys_lseek(fd as usize, 0, 99);
+    sys_close(fd as usize);
+    if pos != -22 { println!("  FAIL: bad whence=99 got {} (expected -22/EINVAL)", pos); return false; }
+    println!("  PASS: lseek bad whence -> EINVAL OK");
+    sys_unlinkat(AT_FDCWD, "/tmp25/f\0", 0);
+    sys_unlinkat(AT_FDCWD, "/tmp25\0", 0x200);
+    true
+}
+
+fn test_lseek_pipe() -> bool {
+    let mut fds = [0i32; 2];
+    let ret = sys_pipe(&mut fds);
+    if ret < 0 { println!("  FAIL: pipe created returned {}", ret); return false; }
+    let pos = sys_lseek(fds[0] as usize, 0, SEEK_SET);
+    sys_close(fds[0] as usize); sys_close(fds[1] as usize);
+    if pos != -29 { println!("  FAIL: lseek on pipe got {} (expected -29/ESPIPE)", pos); return false; }
+    println!("  PASS: lseek on pipe -> ESPIPE OK");
+    true
+}
+
+fn test_lseek_hole_read() -> bool {
+    sys_mkdirat(AT_FDCWD, "/tmp26\0", 0o777);
+    const O_CREAT: u32 = 0o100; const O_RDWR: u32 = 0o2;
+    let fd = sys_open("/tmp26/hole\0", O_CREAT | O_RDWR);
+    sys_write(fd as usize, b"0123456789"); // 10 bytes at offset 0
+    let pos = sys_lseek(fd as usize, 50, SEEK_SET);
+    if pos != 50 { println!("  FAIL: seek to 50 got {}", pos); return false; }
+    sys_write(fd as usize, b"DATA_AT_50");
+    sys_lseek(fd as usize, 0, SEEK_SET);
+    let mut buf = [0u8; 70];
+    let n = sys_read(fd as usize, &mut buf);
+    sys_close(fd as usize);
+    // first 10 = "0123456789", 10..50 = 40 zeros (hole), 50..60 = "DATA_AT_50"
+    if n < 60 { println!("  FAIL: hole read only got {} bytes", n); return false; }
+    if &buf[0..10] != b"0123456789" { println!("  FAIL: hole: data start mismatch"); return false; }
+    let zeros: [u8; 40] = [0u8; 40];
+    if &buf[10..50] != &zeros[..] { println!("  FAIL: hole not zero-filled"); return false; }
+    if &buf[50..60] != b"DATA_AT_50" { println!("  FAIL: hole: data at 50 mismatch"); return false; }
+    println!("  PASS: lseek beyond EOF + hole read OK");
+    sys_unlinkat(AT_FDCWD, "/tmp26/hole\0", 0);
+    sys_unlinkat(AT_FDCWD, "/tmp26\0", 0x200);
+    true
+}
+
+fn test_lseek_chain() -> bool {
+    sys_mkdirat(AT_FDCWD, "/tmp27\0", 0o777);
+    const O_CREAT: u32 = 0o100; const O_RDWR: u32 = 0o2;
+    let fd = sys_open("/tmp27/chain\0", O_CREAT | O_RDWR);
+    sys_write(fd as usize, b"ABCDEFGHIJKLMNOPQRSTUVWXYZ"); // 26 bytes
+    let pos = sys_lseek(fd as usize, 5, SEEK_SET);
+    if pos != 5 { println!("  FAIL: chain SET(5) got {}", pos); return false; }
+    let mut c = [0u8; 1];
+    sys_read(fd as usize, &mut c);
+    if c[0] != b'F' { println!("  FAIL: chain step1 expected F got {}", c[0]); return false; }
+    let pos = sys_lseek(fd as usize, -3, SEEK_CUR);
+    if pos != 3 { println!("  FAIL: chain CUR(-3) got {}", pos); return false; }
+    sys_read(fd as usize, &mut c);
+    if c[0] != b'D' { println!("  FAIL: chain step2 expected D got {}", c[0]); return false; }
+    let pos = sys_lseek(fd as usize, -10, SEEK_END);
+    if pos != 16 { println!("  FAIL: chain END(-10) got {}", pos); return false; }
+    sys_read(fd as usize, &mut c);
+    if c[0] != b'Q' { println!("  FAIL: chain step3 expected Q got {}", c[0]); return false; }
+    sys_close(fd as usize);
+    println!("  PASS: lseek chain SEEK_SET→CUR→END OK");
+    sys_unlinkat(AT_FDCWD, "/tmp27/chain\0", 0);
+    sys_unlinkat(AT_FDCWD, "/tmp27\0", 0x200);
+    true
+}
+
+// ── C组: open/close 错误路径测试 ─────────────────────────────────────────
+
+fn test_open_noent() -> bool {
+    const O_RDONLY: u32 = 0;
+    let fd = sys_open("/nonexistent_file_xyz_test\0", O_RDONLY);
+    if fd != -2 { println!("  FAIL: open nonexistent got {} (expected -2/ENOENT)", fd); return false; }
+    println!("  PASS: open nonexistent -> ENOENT OK");
+    true
+}
+
+fn test_open_dir_as_file() -> bool {
+    sys_mkdirat(AT_FDCWD, "/tmp28\0", 0o777);
+    const O_RDWR: u32 = 0o2;
+    let fd = sys_open("/tmp28\0", O_RDWR);
+    if fd != -21 { println!("  FAIL: open dir with O_RDWR got {} (expected -21/EISDIR)", fd); return false; }
+    println!("  PASS: open dir as file -> EISDIR OK");
+    sys_unlinkat(AT_FDCWD, "/tmp28\0", 0x200);
+    true
+}
+
+fn test_open_trunc() -> bool {
+    sys_mkdirat(AT_FDCWD, "/tmp29\0", 0o777);
+    const O_CREAT: u32 = 0o100; const O_RDWR: u32 = 0o2;
+    const O_TRUNC: u32 = 0o1000; const O_RDONLY: u32 = 0;
+    let fd = sys_open("/tmp29/tr\0", O_CREAT | O_RDWR);
+    sys_write(fd as usize, b"important data here"); // 19 bytes
+    sys_close(fd as usize);
+    let fd = sys_open("/tmp29/tr\0", O_RDWR | O_TRUNC);
+    let mut st = Stat { st_dev:0, st_ino:0, st_mode:0, st_nlink:0, st_uid:0, st_gid:0, st_rdev:0, __pad:0, st_size:0, st_blksize:0, __pad2:0, st_blocks:0, st_atime: TimeSpec { tv_sec: 0, tv_nsec: 0 }, st_mtime: TimeSpec { tv_sec: 0, tv_nsec: 0 }, st_ctime: TimeSpec { tv_sec: 0, tv_nsec: 0 }, __unused: 0 };
+    let ret = sys_fstat(fd as usize, &mut st);
+    if ret < 0 { println!("  FAIL: fstat after trunc returned {}", ret); return false; }
+    if st.st_size != 0 { println!("  FAIL: trunc size {} != 0", st.st_size); return false; }
+    sys_write(fd as usize, b"new");
+    sys_close(fd as usize);
+    let fd = sys_open("/tmp29/tr\0", O_RDONLY);
+    let mut buf = [0u8; 16];
+    let n = sys_read(fd as usize, &mut buf);
+    sys_close(fd as usize);
+    if &buf[..n as usize] != b"new" { println!("  FAIL: trunc lost new data: {:?}", &buf[..n as usize]); return false; }
+    println!("  PASS: O_TRUNC (size=0 + write new) OK");
+    sys_unlinkat(AT_FDCWD, "/tmp29/tr\0", 0);
+    sys_unlinkat(AT_FDCWD, "/tmp29\0", 0x200);
+    true
+}
+
+fn test_close_twice() -> bool {
+    sys_mkdirat(AT_FDCWD, "/tmp30\0", 0o777);
+    const O_CREAT: u32 = 0o100; const O_RDWR: u32 = 0o2;
+    let fd = sys_open("/tmp30/c\0", O_CREAT | O_RDWR);
+    sys_write(fd as usize, b"x");
+    let r1 = sys_close(fd as usize);
+    let r2 = sys_close(fd as usize);
+    if r1 != 0 { println!("  FAIL: first close returned {}", r1); return false; }
+    if r2 != -9 { println!("  FAIL: double close got {} (expected -9/EBADF)", r2); return false; }
+    println!("  PASS: double close -> EBADF OK");
+    sys_unlinkat(AT_FDCWD, "/tmp30/c\0", 0);
+    sys_unlinkat(AT_FDCWD, "/tmp30\0", 0x200);
+    true
+}
+
+fn test_open_close_many() -> bool {
+    sys_mkdirat(AT_FDCWD, "/tmp31\0", 0o777);
+    const O_CREAT: u32 = 0o100; const O_RDWR: u32 = 0o2; const O_RDONLY: u32 = 0;
+    let fd0 = sys_open("/tmp31/many\0", O_CREAT | O_RDWR);
+    sys_write(fd0 as usize, b"x");
+    sys_close(fd0 as usize);
+    let mut ok = true;
+    for i in 0..32 {
+        let fd = sys_open("/tmp31/many\0", O_RDONLY);
+        if fd < 0 { println!("  FAIL: open #{} in loop returned {}", i, fd); ok = false; break; }
+        let r = sys_close(fd as usize);
+        if r < 0 { println!("  FAIL: close #{} in loop returned {}", i, r); ok = false; break; }
+    }
+    if !ok { return false; }
+    println!("  PASS: open/close 32 times OK");
+    sys_unlinkat(AT_FDCWD, "/tmp31/many\0", 0);
+    sys_unlinkat(AT_FDCWD, "/tmp31\0", 0x200);
+    true
+}
+
+fn test_open_create_existing() -> bool {
+    sys_mkdirat(AT_FDCWD, "/tmp32\0", 0o777);
+    const O_CREAT: u32 = 0o100; const O_RDWR: u32 = 0o2; const O_RDONLY: u32 = 0;
+    let fd = sys_open("/tmp32/exist\0", O_CREAT | O_RDWR);
+    sys_write(fd as usize, b"original content");
+    sys_close(fd as usize);
+    let fd = sys_open("/tmp32/exist\0", O_RDONLY); // no O_CREAT, no O_TRUNC
+    if fd < 0 { println!("  FAIL: open existing without O_CREAT returned {}", fd); return false; }
+    let mut buf = [0u8; 32];
+    let n = sys_read(fd as usize, &mut buf);
+    sys_close(fd as usize);
+    if &buf[..n as usize] != b"original content" { println!("  FAIL: existing content changed: {:?}", &buf[..n as usize]); return false; }
+    println!("  PASS: open existing without O_CREAT OK");
+    sys_unlinkat(AT_FDCWD, "/tmp32/exist\0", 0);
+    sys_unlinkat(AT_FDCWD, "/tmp32\0", 0x200);
+    true
+}
+
+// ── D组: 压力/边界测试 ──────────────────────────────────────────────────
+
+fn test_stress_create_many() -> bool {
+    sys_mkdirat(AT_FDCWD, "/tmp33\0", 0o777);
+    const O_CREAT: u32 = 0o100; const O_WRONLY: u32 = 0o1; const O_RDONLY: u32 = 0;
+    let count = 50u8;
+    // create files
+    for i in 0..count {
+        let fname = [b'/',b't',b'm',b'p',b'3',b'3',b'/',b'f',b'0'+(i/10),b'0'+(i%10),b'\0'];
+        let fd = sys_open(unsafe { core::str::from_utf8_unchecked(&fname[..11]) }, O_CREAT | O_WRONLY);
+        if fd < 0 { println!("  FAIL: create file {} returned {}", i, fd); return false; }
+        sys_write(fd as usize, b"X");
+        sys_close(fd as usize);
+    }
+    // verify all exist
+    for i in 0..count {
+        let fname = [b'/',b't',b'm',b'p',b'3',b'3',b'/',b'f',b'0'+(i/10),b'0'+(i%10),b'\0'];
+        let fd = sys_open(unsafe { core::str::from_utf8_unchecked(&fname[..11]) }, O_RDONLY);
+        if fd < 0 { println!("  FAIL: verify file {} returned {}", i, fd); return false; }
+        sys_close(fd as usize);
+    }
+    println!("  PASS: create {} files + verify OK", count);
+    // cleanup
+    for i in 0..count {
+        let fname = [b'/',b't',b'm',b'p',b'3',b'3',b'/',b'f',b'0'+(i/10),b'0'+(i%10),b'\0'];
+        sys_unlinkat(AT_FDCWD, unsafe { core::str::from_utf8_unchecked(&fname[..11]) }, 0);
+    }
+    sys_unlinkat(AT_FDCWD, "/tmp33\0", 0x200);
+    true
+}
+
+fn test_stress_read_many() -> bool {
+    sys_mkdirat(AT_FDCWD, "/tmp34\0", 0o777);
+    const O_CREAT: u32 = 0o100; const O_RDWR: u32 = 0o2; const O_RDONLY: u32 = 0;
+    let count = 30u8;
+    for i in 0..count {
+        let fname = [b'/',b't',b'm',b'p',b'3',b'4',b'/',b'r',b'0'+(i/10),b'0'+(i%10),b'\0'];
+        let fd = sys_open(unsafe { core::str::from_utf8_unchecked(&fname[..11]) }, O_CREAT | O_RDWR);
+        let content = [b'f', b'i', b'l', b'e', b'_', b'0'+(i/10), b'0'+(i%10)];
+        sys_write(fd as usize, &content);
+        sys_close(fd as usize);
+    }
+    // read all back
+    for i in 0..count {
+        let fname = [b'/',b't',b'm',b'p',b'3',b'4',b'/',b'r',b'0'+(i/10),b'0'+(i%10),b'\0'];
+        let fd = sys_open(unsafe { core::str::from_utf8_unchecked(&fname[..11]) }, O_RDONLY);
+        let mut buf = [0u8; 16];
+        let n = sys_read(fd as usize, &mut buf);
+        sys_close(fd as usize);
+        let expected = [b'f', b'i', b'l', b'e', b'_', b'0'+(i/10), b'0'+(i%10)];
+        if &buf[..n as usize] != &expected { println!("  FAIL: read back file {} mismatch", i); return false; }
+    }
+    println!("  PASS: read {} files with unique content OK", count);
+    for i in 0..count {
+        let fname = [b'/',b't',b'm',b'p',b'3',b'4',b'/',b'r',b'0'+(i/10),b'0'+(i%10),b'\0'];
+        sys_unlinkat(AT_FDCWD, unsafe { core::str::from_utf8_unchecked(&fname[..11]) }, 0);
+    }
+    sys_unlinkat(AT_FDCWD, "/tmp34\0", 0x200);
+    true
+}
+
+fn test_stress_unlink_loop() -> bool {
+    sys_mkdirat(AT_FDCWD, "/tmp35\0", 0o777);
+    const O_CREAT: u32 = 0o100; const O_WRONLY: u32 = 0o1;
+    let count = 30u8;
+    for i in 0..count {
+        let fname = [b'/',b't',b'm',b'p',b'3',b'5',b'/',b'u',b'0'+(i/10),b'0'+(i%10),b'\0'];
+        let fd = sys_open(unsafe { core::str::from_utf8_unchecked(&fname[..11]) }, O_CREAT | O_WRONLY);
+        sys_write(fd as usize, b"x");
+        sys_close(fd as usize);
+    }
+    for i in 0..count {
+        let fname = [b'/',b't',b'm',b'p',b'3',b'5',b'/',b'u',b'0'+(i/10),b'0'+(i%10),b'\0'];
+        let r = sys_unlinkat(AT_FDCWD, unsafe { core::str::from_utf8_unchecked(&fname[..11]) }, 0);
+        if r < 0 { println!("  FAIL: unlink file {} returned {}", i, r); return false; }
+    }
+    // verify empty via getdents64
+    let fd = sys_open("/tmp35\0", 0x200000 | 0);
+    let mut buf = [0u8; 512];
+    let n = sys_getdents64(fd as usize, &mut buf);
+    sys_close(fd as usize);
+    let mut entries = 0usize;
+    let bytes = &buf[..n as usize];
+    let mut pos = 0;
+    while pos + 19 <= bytes.len() {
+        let d_reclen = u16::from_le_bytes([bytes[pos + 16], bytes[pos + 17]]) as usize;
+        if d_reclen == 0 { break; }
+        let name_start = pos + 19;
+        let name_end = bytes[name_start..].iter().position(|&b| b == 0).map(|j| name_start + j).unwrap_or(bytes.len());
+        let name = core::str::from_utf8(&bytes[name_start..name_end]).unwrap_or("???");
+        if name != "." && name != ".." { entries += 1; }
+        pos += d_reclen;
+    }
+    if entries > 0 { println!("  FAIL: {} entries remain after unlink_all", entries); return false; }
+    println!("  PASS: create+unlink {} files -> empty dir OK", count);
+    sys_unlinkat(AT_FDCWD, "/tmp35\0", 0x200);
+    true
+}
+
+fn test_stress_rename_loop() -> bool {
+    sys_mkdirat(AT_FDCWD, "/tmp36\0", 0o777);
+    const O_CREAT: u32 = 0o100; const O_RDWR: u32 = 0o2; const O_RDONLY: u32 = 0;
+    let fd = sys_open("/tmp36/a\0", O_CREAT | O_RDWR);
+    sys_write(fd as usize, b"rename_loop_content");
+    sys_close(fd as usize);
+    for _i in 0..10 {
+        let r = sys_renameat2(AT_FDCWD, "/tmp36/a\0", AT_FDCWD, "/tmp36/b\0", 0);
+        if r < 0 { println!("  FAIL: rename a->b iteration {} returned {}", _i, r); return false; }
+        let r = sys_renameat2(AT_FDCWD, "/tmp36/b\0", AT_FDCWD, "/tmp36/a\0", 0);
+        if r < 0 { println!("  FAIL: rename b->a iteration {} returned {}", _i, r); return false; }
+    }
+    let fd = sys_open("/tmp36/a\0", O_RDONLY);
+    if fd < 0 { println!("  FAIL: file 'a' missing after rename loop"); return false; }
+    let mut buf = [0u8; 32];
+    let n = sys_read(fd as usize, &mut buf);
+    sys_close(fd as usize);
+    if &buf[..n as usize] != b"rename_loop_content" { println!("  FAIL: content changed after rename loop"); return false; }
+    println!("  PASS: rename a↔b loop x10 OK");
+    sys_unlinkat(AT_FDCWD, "/tmp36/a\0", 0);
+    sys_unlinkat(AT_FDCWD, "/tmp36\0", 0x200);
+    true
+}
+
+fn test_stress_large_file() -> bool {
+    sys_mkdirat(AT_FDCWD, "/tmp37\0", 0o777);
+    const O_CREAT: u32 = 0o100; const O_RDWR: u32 = 0o2; const O_RDONLY: u32 = 0;
+    let fd = sys_open("/tmp37/big\0", O_CREAT | O_RDWR);
+    if fd < 0 { println!("  FAIL: create big file returned {}", fd); return false; }
+    let total_kb = 64usize; // 64KB
+    let chunk = [0u8; 1024];
+    let mut chunk_buf = chunk;
+    for kb in 0..total_kb {
+        chunk_buf[0] = (kb & 0xFF) as u8;
+        chunk_buf[1] = ((kb >> 8) & 0xFF) as u8;
+        let n = sys_write(fd as usize, &chunk_buf);
+        if n != 1024 { println!("  FAIL: write KB {} returned {}", kb, n); return false; }
+    }
+    sys_close(fd as usize);
+    // verify first, middle, last chunks
+    let fd = sys_open("/tmp37/big\0", O_RDONLY);
+    let mut buf = [0u8; 1024];
+    // first
+    let n = sys_read(fd as usize, &mut buf);
+    if n != 1024 || buf[0] != 0 || buf[1] != 0 { println!("  FAIL: first chunk verification"); return false; }
+    // middle (32KB)
+    sys_lseek(fd as usize, 32 * 1024, SEEK_SET);
+    let n = sys_read(fd as usize, &mut buf);
+    if n != 1024 || buf[0] != 32 || buf[1] != 0 { println!("  FAIL: middle chunk verification (KB 32)"); return false; }
+    // last (63KB)
+    sys_lseek(fd as usize, 63 * 1024, SEEK_SET);
+    let n = sys_read(fd as usize, &mut buf);
+    if n != 1024 || buf[0] != 63 || buf[1] != 0 { println!("  FAIL: last chunk verification (KB 63)"); return false; }
+    sys_close(fd as usize);
+    println!("  PASS: large file 64KB write+read OK");
+    sys_unlinkat(AT_FDCWD, "/tmp37/big\0", 0);
+    sys_unlinkat(AT_FDCWD, "/tmp37\0", 0x200);
+    true
+}
+
+fn test_stress_getdents() -> bool {
+    sys_mkdirat(AT_FDCWD, "/tmp38\0", 0o777);
+    const O_CREAT: u32 = 0o100; const O_WRONLY: u32 = 0o1;
+    let nfiles = 20u8;
+    for i in 0..nfiles {
+        let fname = [b'/',b't',b'm',b'p',b'3',b'8',b'/',b'd',b'0'+(i/10),b'0'+(i%10),b'\0'];
+        let fd = sys_open(unsafe { core::str::from_utf8_unchecked(&fname[..11]) }, O_CREAT | O_WRONLY);
+        sys_write(fd as usize, b".");
+        sys_close(fd as usize);
+    }
+    let fd = sys_open("/tmp38\0", 0x200000 | 0);
+    let mut buf = [0u8; 2048];
+    let n = sys_getdents64(fd as usize, &mut buf);
+    sys_close(fd as usize);
+    let bytes = &buf[..n as usize];
+    let mut entries = 0usize;
+    let mut pos = 0;
+    while pos + 19 <= bytes.len() {
+        let d_reclen = u16::from_le_bytes([bytes[pos + 16], bytes[pos + 17]]) as usize;
+        if d_reclen == 0 { break; }
+        let name_start = pos + 19;
+        let name_end = bytes[name_start..].iter().position(|&b| b == 0).map(|j| name_start + j).unwrap_or(bytes.len());
+        let name = core::str::from_utf8(&bytes[name_start..name_end]).unwrap_or("???");
+        if name != "." && name != ".." { entries += 1; }
+        pos += d_reclen;
+    }
+    if entries != nfiles as usize { println!("  FAIL: getdents counted {} files (expected {})", entries, nfiles); return false; }
+    println!("  PASS: getdents counts {} files OK", nfiles);
+    for i in 0..nfiles {
+        let fname = [b'/',b't',b'm',b'p',b'3',b'8',b'/',b'd',b'0'+(i/10),b'0'+(i%10),b'\0'];
+        sys_unlinkat(AT_FDCWD, unsafe { core::str::from_utf8_unchecked(&fname[..11]) }, 0);
+    }
+    sys_unlinkat(AT_FDCWD, "/tmp38\0", 0x200);
+    true
+}
+
+fn test_stress_truncate() -> bool {
+    sys_mkdirat(AT_FDCWD, "/tmp39\0", 0o777);
+    const O_CREAT: u32 = 0o100; const O_RDWR: u32 = 0o2; const O_RDONLY: u32 = 0;
+    let fd = sys_open("/tmp39/trunc\0", O_CREAT | O_RDWR);
+    let data = [0xAAu8; 100];
+    sys_write(fd as usize, &data);
+    // truncate to 50
+    sys_ftruncate(fd as usize, 50);
+    let mut st = Stat { st_dev:0, st_ino:0, st_mode:0, st_nlink:0, st_uid:0, st_gid:0, st_rdev:0, __pad:0, st_size:0, st_blksize:0, __pad2:0, st_blocks:0, st_atime: TimeSpec { tv_sec: 0, tv_nsec: 0 }, st_mtime: TimeSpec { tv_sec: 0, tv_nsec: 0 }, st_ctime: TimeSpec { tv_sec: 0, tv_nsec: 0 }, __unused: 0 };
+    sys_fstat(fd as usize, &mut st);
+    if st.st_size != 50 { println!("  FAIL: truncate to 50 got size {}", st.st_size); return false; }
+    sys_lseek(fd as usize, 0, SEEK_SET);
+    let mut buf = [0u8; 64];
+    let n = sys_read(fd as usize, &mut buf);
+    if n != 50 { println!("  FAIL: read after truncate to 50 got {}", n); return false; }
+    // extend to 200
+    sys_ftruncate(fd as usize, 200);
+    sys_fstat(fd as usize, &mut st);
+    if st.st_size != 200 { println!("  FAIL: extend to 200 got size {}", st.st_size); return false; }
+    sys_lseek(fd as usize, 100, SEEK_SET);
+    let n = sys_read(fd as usize, &mut buf[..32]);
+    sys_close(fd as usize);
+    // bytes 100..132 should be zeros (hole from extension)
+    let zeros = [0u8; 32];
+    if &buf[..n as usize] != &zeros[..] { println!("  FAIL: extend hole not zero-filled"); return false; }
+    println!("  PASS: truncate 100→50→200 with hole OK");
+    sys_unlinkat(AT_FDCWD, "/tmp39/trunc\0", 0);
+    sys_unlinkat(AT_FDCWD, "/tmp39\0", 0x200);
+    true
+}
+
+// ── E组: 并发测试 (fork) ────────────────────────────────────────────────
+
+fn test_fork_read_same_fd() -> bool {
+    sys_mkdirat(AT_FDCWD, "/tmp40\0", 0o777);
+    const O_CREAT: u32 = 0o100; const O_RDWR: u32 = 0o2;
+    let fd = sys_open("/tmp40/shared\0", O_CREAT | O_RDWR);
+    sys_write(fd as usize, b"PARENTCHILD");
+    let pid = sys_fork();
+    if pid == 0 {
+        // CHILD: read second half
+        sys_lseek(fd as usize, 6, SEEK_SET);
+        let mut buf = [0u8; 5];
+        let n = sys_read(fd as usize, &mut buf);
+        if n != 5 || &buf[..5] != b"CHILD" { sys_exit(1); }
+        sys_exit(0);
+    } else if pid > 0 {
+        // PARENT: read first half
+        sys_lseek(fd as usize, 0, SEEK_SET);
+        let mut buf = [0u8; 6];
+        let n = sys_read(fd as usize, &mut buf);
+        if n != 6 || &buf[..6] != b"PARENT" {
+            println!("  FAIL: parent read got {:?}", &buf[..n as usize]);
+            return false;
+        }
+        let mut child_code: i32 = 0;
+        sys_waitpid(pid, &mut child_code);
+        if child_code != 0 { println!("  FAIL: child exited with {}", child_code); return false; }
+        sys_close(fd as usize);
+        println!("  PASS: fork read same fd (parent+child) OK");
+        sys_unlinkat(AT_FDCWD, "/tmp40/shared\0", 0);
+        sys_unlinkat(AT_FDCWD, "/tmp40\0", 0x200);
+        true
+    } else {
+        println!("  FAIL: fork returned {}", pid);
+        false
+    }
+}
+
+fn test_fork_create() -> bool {
+    sys_mkdirat(AT_FDCWD, "/tmp41\0", 0o777);
+    let pid = sys_fork();
+    if pid == 0 {
+        // CHILD
+        const O_CREATc: u32 = 0o100; const O_WRONLYc: u32 = 0o1;
+        let fd = sys_open("/tmp41/child_file\0", O_CREATc | O_WRONLYc);
+        if fd < 0 { sys_exit(2); }
+        sys_write(fd as usize, b"child");
+        sys_close(fd as usize);
+        sys_exit(0);
+    } else if pid > 0 {
+        // PARENT
+        const O_CREATp: u32 = 0o100; const O_WRONLYp: u32 = 0o1;
+        let fd = sys_open("/tmp41/parent_file\0", O_CREATp | O_WRONLYp);
+        sys_write(fd as usize, b"parent");
+        sys_close(fd as usize);
+        let mut child_code: i32 = 0;
+        sys_waitpid(pid, &mut child_code);
+        if child_code != 0 { println!("  FAIL: fork create child exited {}", child_code); return false; }
+        // verify both files exist
+        const O_RDONLY: u32 = 0;
+        let fd = sys_open("/tmp41/parent_file\0", O_RDONLY);
+        if fd < 0 { println!("  FAIL: parent file missing"); return false; }
+        let mut buf = [0u8; 16];
+        let n = sys_read(fd as usize, &mut buf);
+        sys_close(fd as usize);
+        if &buf[..n as usize] != b"parent" { println!("  FAIL: parent content mismatch"); return false; }
+        let fd = sys_open("/tmp41/child_file\0", O_RDONLY);
+        if fd < 0 { println!("  FAIL: child file missing"); return false; }
+        let n = sys_read(fd as usize, &mut buf);
+        sys_close(fd as usize);
+        if &buf[..n as usize] != b"child" { println!("  FAIL: child content mismatch"); return false; }
+        println!("  PASS: fork create (parent+child) OK");
+        sys_unlinkat(AT_FDCWD, "/tmp41/parent_file\0", 0);
+        sys_unlinkat(AT_FDCWD, "/tmp41/child_file\0", 0);
+        sys_unlinkat(AT_FDCWD, "/tmp41\0", 0x200);
+        true
+    } else {
+        println!("  FAIL: fork returned {}", pid);
+        false
+    }
+}
+
 #[no_mangle]
 #[link_section = ".text.entry"]
 pub extern "C" fn _start() -> ! {
@@ -740,68 +1427,168 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     let mut passed = 0;
     let mut failed = 0;
 
-    println!("[1/21] mkdir");
+    println!("[1/51] mkdir");
     if test_mkdir() { passed += 1; } else { failed += 1; }
 
-    println!("[2/21] file create + write");
+    println!("[2/51] file create + write");
     if test_create_and_write() { passed += 1; } else { failed += 1; }
 
-    println!("[3/21] file read");
+    println!("[3/51] file read");
     if test_read() { passed += 1; } else { failed += 1; }
 
-    println!("[4/21] symlink");
+    println!("[4/51] symlink");
     if test_symlink() { passed += 1; } else { failed += 1; }
 
-    println!("[5/21] readlink");
+    println!("[5/51] readlink");
     if test_readlink() { passed += 1; } else { failed += 1; }
 
-    println!("[6/21] read via symlink");
+    println!("[6/51] read via symlink");
     if test_read_via_symlink() { passed += 1; } else { failed += 1; }
 
-    println!("[7/21] unlink + rmdir");
+    println!("[7/51] unlink + rmdir");
     if test_unlink() && test_rmdir() { passed += 1; } else { failed += 1; }
 
-    println!("[8/21] dangling symlink");
+    println!("[8/51] dangling symlink");
     if test_dangling_symlink() { passed += 1; } else { failed += 1; }
 
-    println!("[9/21] ELOOP detection");
+    println!("[9/51] ELOOP detection");
     if test_eloop() { passed += 1; } else { failed += 1; }
 
-    println!("[10/21] symlink chain");
+    println!("[10/51] symlink chain");
     if test_symlink_chain() { passed += 1; } else { failed += 1; }
 
-    println!("[11/21] O_CREAT|O_EXCL");
+    println!("[11/51] O_CREAT|O_EXCL");
     if test_excl_create() { passed += 1; } else { failed += 1; }
 
-    println!("[12/21] readlink on regular file");
+    println!("[12/51] readlink on regular file");
     if test_readlink_on_regular() { passed += 1; } else { failed += 1; }
 
-    println!("[13/21] unlink symlink preserves target");
+    println!("[13/51] unlink symlink preserves target");
     if test_unlink_symlink_preserves_target() { passed += 1; } else { failed += 1; }
 
-    println!("[14/21] hard link");
+    println!("[14/51] hard link");
     if test_hard_link() { passed += 1; } else { failed += 1; }
 
-    println!("[15/21] hard link to dir rejected");
+    println!("[15/51] hard link to dir rejected");
     if test_hard_link_dir_rejected() { passed += 1; } else { failed += 1; }
 
-    println!("[16/21] lseek");
+    println!("[16/51] lseek");
     if test_lseek() { passed += 1; } else { failed += 1; }
 
-    println!("[17/21] rename file");
+    println!("[17/51] rename file");
     if test_rename_file() { passed += 1; } else { failed += 1; }
 
-    println!("[18/21] rename directory");
+    println!("[18/51] rename directory");
     if test_rename_dir() { passed += 1; } else { failed += 1; }
 
-    println!("[19/21] fstatat");
+    println!("[19/51] fstatat");
     if test_fstatat() { passed += 1; } else { failed += 1; }
 
-    println!("[20/21] ftruncate");
+    println!("[20/51] ftruncate");
     if test_ftruncate() { passed += 1; } else { failed += 1; }
 
-    println!("[21/21] getdents64");
+    println!("[21/51] getdents64");
     if test_getdents64() { passed += 1; } else { failed += 1; }
+
+    // ── A组: 高级 read/write 测试 ──────────────────────────
+
+    println!("[22/51] read empty file");
+    if test_read_empty() { passed += 1; } else { failed += 1; }
+
+    println!("[23/51] read past EOF");
+    if test_read_past_eof() { passed += 1; } else { failed += 1; }
+
+    println!("[24/51] read data integrity (256B + partial)");
+    if test_read_data_integrity() { passed += 1; } else { failed += 1; }
+
+    println!("[25/51] read bad fd -> EBADF");
+    if test_read_bad_fd() { passed += 1; } else { failed += 1; }
+
+    println!("[26/51] read on dir -> EISDIR");
+    if test_read_dir() { passed += 1; } else { failed += 1; }
+
+    println!("[27/51] write readonly fd -> EBADF");
+    if test_write_readonly() { passed += 1; } else { failed += 1; }
+
+    println!("[28/51] O_APPEND + lseek atomicity");
+    if test_write_append() { passed += 1; } else { failed += 1; }
+
+    println!("[29/51] write varying sizes 1..4096");
+    if test_write_varying_sizes() { passed += 1; } else { failed += 1; }
+
+    println!("[30/51] overwrite middle of file");
+    if test_write_overwrite_middle() { passed += 1; } else { failed += 1; }
+
+    println!("[31/51] write bad fd -> EBADF");
+    if test_write_bad_fd() { passed += 1; } else { failed += 1; }
+
+    // ── B组: 高级 lseek 测试 ──────────────────────────────
+
+    println!("[32/51] lseek SEEK_END + negative offset");
+    if test_lseek_seek_end() { passed += 1; } else { failed += 1; }
+
+    println!("[33/51] lseek bad whence -> EINVAL");
+    if test_lseek_bad_whence() { passed += 1; } else { failed += 1; }
+
+    println!("[34/51] lseek on pipe -> ESPIPE");
+    if test_lseek_pipe() { passed += 1; } else { failed += 1; }
+
+    println!("[35/51] lseek beyond EOF + hole read");
+    if test_lseek_hole_read() { passed += 1; } else { failed += 1; }
+
+    println!("[36/51] lseek chain: SET→CUR→END");
+    if test_lseek_chain() { passed += 1; } else { failed += 1; }
+
+    // ── C组: open/close 错误路径 ───────────────────────────
+
+    println!("[37/51] open nonexistent -> ENOENT");
+    if test_open_noent() { passed += 1; } else { failed += 1; }
+
+    println!("[38/51] open dir as file -> EISDIR");
+    if test_open_dir_as_file() { passed += 1; } else { failed += 1; }
+
+    println!("[39/51] O_TRUNC (size=0 + data lost)");
+    if test_open_trunc() { passed += 1; } else { failed += 1; }
+
+    println!("[40/51] close twice -> EBADF");
+    if test_close_twice() { passed += 1; } else { failed += 1; }
+
+    println!("[41/51] open/close 32 times");
+    if test_open_close_many() { passed += 1; } else { failed += 1; }
+
+    println!("[42/51] open existing file (no O_CREAT)");
+    if test_open_create_existing() { passed += 1; } else { failed += 1; }
+
+    // ── D组: 压力/边界测试 ─────────────────────────────────
+
+    println!("[43/51] stress: create 50 files + verify");
+    if test_stress_create_many() { passed += 1; } else { failed += 1; }
+
+    println!("[44/51] stress: read 30 files with unique content");
+    if test_stress_read_many() { passed += 1; } else { failed += 1; }
+
+    println!("[45/51] stress: unlink 30 files -> empty dir");
+    if test_stress_unlink_loop() { passed += 1; } else { failed += 1; }
+
+    println!("[46/51] stress: rename A↔B loop x10");
+    if test_stress_rename_loop() { passed += 1; } else { failed += 1; }
+
+    println!("[47/51] stress: large file 64KB write+read");
+    if test_stress_large_file() { passed += 1; } else { failed += 1; }
+
+    println!("[48/51] stress: getdents counts 20 files");
+    if test_stress_getdents() { passed += 1; } else { failed += 1; }
+
+    println!("[49/51] stress: truncate 100→50→200 with hole");
+    if test_stress_truncate() { passed += 1; } else { failed += 1; }
+
+    // ── E组: 并发测试 (fork) ──────────────────────────────
+
+    println!("[50/51] fork: read same fd (parent+child)");
+    if test_fork_read_same_fd() { passed += 1; } else { failed += 1; }
+
+    println!("[51/51] fork: create files (parent+child)");
+    if test_fork_create() { passed += 1; } else { failed += 1; }
 
     println!("=== FS Test: {}/{} passed ===", passed, passed + failed);
 
