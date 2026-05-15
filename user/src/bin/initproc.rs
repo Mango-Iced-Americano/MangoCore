@@ -1384,57 +1384,14 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
 
     // ============================================================
     // 链接 musl/glibc 动态链接库到 /lib
-    // 动态链接的 ELF（如 ld-linux-riscv64-lp64d.so.1）依赖此目录
     // ============================================================
-    println!("[initproc] linking musl/glibc libs to /lib ...");
-    // run_bash_cmd("/musl/busybox mkdir -p /lib", &environ);
-    // run_bash_cmd(
-    //     "/musl/busybox cp -r -L /musl/lib/* /lib/ 2>/dev/null; \
-    //      /musl/busybox cp -r -L /glibc/lib/* /lib/ 2>/dev/null; \
-    //      echo done",
-    //     &environ,
-    // );
-    // 用 ; 而非 && 串联，防止 ext4 rmdir 的 bug 导致整条脚本短路。
-    // 同时在 /lib 和 /lib64 下都建好 symlink，不再依赖 rm -rf +
-    // ln -sf 把 /lib64 转成软链接的方式（该路径也会触发 ext4 unlink bug）。
-    // ============================================================
-    // TODO: lib linking disabled for debugging
-    // ============================================================
-    // let lib_ret = run_bash_cmd(
-    //     "
-    //     mkdir -p /lib /lib64 /usr/lib /usr/lib64;
-    //     ...
-    //     ...
-    //
-    //     ln -sf /lib /lib64;
-    //     ln -sf /lib /usr/lib;
-    //     ln -sf /lib /usr/lib64;
-    //
-    //     ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64-sf.so.1;
-    //     ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64.so.1;
-    //     ln -sf /musl/lib/libc.so /lib/libc.so;
-    //
-    //     ln -sf /glibc/lib/ld-linux-riscv64-lp64d.so.1 /lib/ld-linux-riscv64-lp64d.so.1;
-    //     ln -sf /glibc/lib/ld-linux-riscv64-lp64d.so.1 /lib64/ld-linux-riscv64-lp64d.so.1;
-    //
-    //     ln -sf /glibc/lib/libc.so.6 /lib/libc.so.6;
-    //     ln -sf /glibc/lib/libc.so.6 /lib64/libc.so.6;
-    //
-    //     ln -sf /glibc/lib/libm.so.6 /lib/libm.so.6;
-    //     ln -sf /glibc/lib/libm.so.6 /lib64/libm.so.6;
-    //
-    //     ln -sf /glibc/lib/ld-linux-loongarch-lp64d.so.1 /lib/ld-linux-loongarch-lp64d.so.1;
-    //     ln -sf /glibc/lib/ld-linux-loongarch-lp64d.so.1 /lib64/ld-linux-loongarch-lp64d.so.1;
-    //
-    //     ln -sf /musl/lib/libc.so /lib/ld-musl-loongarch-lp64d.so.1;
-    //     ln -sf /musl/lib/libc.so /lib64/ld-musl-loongarch-lp64d.so.1;
-    //
-    //     ln -sf /glibc/lib/tls_get_new-dtv_dso.so /lib/tls_get_new-dtv_dso.so;
-    //     ln -sf /glibc/lib/tls_get_new-dtv_dso.so ./libtls_get_new-dtv_dso.so
-    // ",
-    //     &environ,
-    // );
-    // println!("[initproc] lib linking setup returned exit_code={}", lib_ret);
+    // lib link section skipped: busybox mkdir -p bug
+    println!("[initproc] lib linking skipped (busybox mkdir -p /lib bug)");
+    // let mkdir_cmd = "/bin/busybox mkdir -p /lib /lib64 /usr/lib /usr/lib64";
+    // let mkdir_ret = run_bash_cmd(mkdir_cmd, &environ);
+    // println!("[initproc] lib mkdir returned exit_code={}", mkdir_ret);
+    // if mkdir_ret == 0 { ... ln -sf ... }
+    // (busybox mkdir -p bug prevents this from working)
 
     let cfg = load_runtime_config();
 
