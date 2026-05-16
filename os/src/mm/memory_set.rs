@@ -1159,11 +1159,34 @@ impl<T: PageTable> MemorySet<T> {
         };
         new_area.flags = flags;
         if !flags.contains(MapFlags::MAP_ANONYMOUS) {
-            // TODO: 文件映射 mmap 在新 VFS 重构后需重新实现
-            // 旧 VFS 的 deep_clone/lseek/get_size/get_single_cache 方法已移除
-            // 需基于 IndexNode + vfs::File 重新设计 file-backed mmap
-            warn!("[mmap] file-backed map not yet supported on new VFS");
-            return ENOSYS;
+            // Allocate anonymous backing pages for the mapping
+            let vpn_range = new_area.inner.vpn_range;
+            for vpn in vpn_range {
+                if let Err(err) = new_area.map_one_zeroed_unchecked(&mut self.page_table, vpn) {
+                    return match err {
+                        MemoryError::OutOfMemory => ENOMEM,
+                        _ => EINVAL,
+                    };
+                }
+            }
+            self.insert_area_ordered(new_area);
+            // Eager read: copy file content into the user mapping
+            let read_len = core::cmp::min(len, 1024 * 1024 * 1024);
+            let mut tmp = alloc::vec![0u8; read_len];
+            let n = {
+                let guard = task.files.lock();
+                match guard.get_ref(fd as usize) {
+                    Ok(file) => file.pread(offset, &mut tmp).unwrap_or(0),
+                    Err(_) => return EBADF,
+                }
+            };
+            if n > 0 {
+                let token = task.get_user_token();
+                if let Err(e) = crate::mm::page_table::copy_to_user_array(token, tmp.as_ptr(), start_va.0 as *mut u8, n) {
+                    return e;
+                }
+            }
+            return start_va.0 as isize;
         }
 
         if flags.contains(MapFlags::MAP_SHARED) {
