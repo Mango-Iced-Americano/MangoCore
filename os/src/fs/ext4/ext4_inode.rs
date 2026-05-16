@@ -440,6 +440,16 @@ impl Ext4Inode {
         }
     }
 
+    /// View the 15-element block array as &[u8; 60] — used for fast symlink targets
+    pub fn block_as_bytes(&self) -> &[u8; 60] {
+        unsafe { &*(self.block.as_ptr() as *const [u8; 60]) }
+    }
+
+    /// Mutable view of the 15-element block array as &mut [u8; 60] — for writing fast symlink targets
+    pub fn block_mut_as_bytes(&mut self) -> &mut [u8; 60] {
+        unsafe { &mut *(self.block.as_mut_ptr() as *mut [u8; 60]) }
+    }
+
     fn get_checksum(&self, super_block: &Ext4Superblock) -> u32 {
         let inode_size = super_block.inode_size;
         let mut v: u32 = self.osd2.l_i_checksum_lo as u32;

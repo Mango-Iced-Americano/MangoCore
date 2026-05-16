@@ -524,15 +524,26 @@ impl IndexNode for layout::Ext4OSInode {
     ) -> Result<alloc::sync::Arc<dyn IndexNode>, SyscallErr> {
         let parent = self.inode.lock().inode_num;
         let inode_mode = InodeFileType::S_IFLNK.bits();
-        let new_ref = self
+        let mut new_ref = self
             .ext4fs
             .create(parent, name, inode_mode)
             .map_err(|_| SyscallErr::ENOSYS)?;
-        // 写入符号链接目标
+
         let target_bytes = target.as_bytes();
-        self.ext4fs
-            .write_at(new_ref.inode_num, 0, target_bytes)
-            .map_err(|_| SyscallErr::EIO)?;
+        if target_bytes.len() <= 60 {
+            // Fast symlink: store target directly in i_block, no data block allocation
+            new_ref.inode.flags &= !(crate::fs::ext4::EXT4_INODE_FLAG_EXTENTS as u32);
+            let block_bytes = new_ref.inode.block_mut_as_bytes();
+            block_bytes[..target_bytes.len()].copy_from_slice(target_bytes);
+            block_bytes[target_bytes.len()..60].fill(0);
+            new_ref.inode.set_size(target_bytes.len() as u64);
+            self.ext4fs.write_back_inode(&mut new_ref);
+        } else {
+            // Long symlink: use data blocks
+            self.ext4fs
+                .write_at(new_ref.inode_num, 0, target_bytes)
+                .map_err(|_| SyscallErr::EIO)?;
+        }
         Ok(layout::Ext4OSInode::new_vfs(
             alloc::sync::Arc::new(spin::Mutex::new(new_ref)),
             self.ext4fs.clone(),
