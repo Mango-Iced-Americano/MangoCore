@@ -519,9 +519,26 @@ impl Ext4FileSystem {
         let block_size = self.superblock.block_size();
         let total_blocks: u64 = inode_size / block_size as u64;
 
-        // iterate all blocks
-        let mut iblock = 0;
-        while iblock < total_blocks {
+        // Try last block first (O(1) for append-heavy workloads like busybox --install)
+        if total_blocks > 0 {
+            let last_iblock = (total_blocks - 1) as u32;
+            if let Ok(pblock) = self.get_pblock_idx(parent, last_iblock) {
+                let mut ext4block = Block::load_offset(
+                    self.block_device.clone(),
+                    pblock as usize * self.block_size,
+                    self.block_size,
+                );
+                if self.try_insert_to_existing_block(&mut ext4block, name, child.inode_num).is_ok() {
+                    self.dir_set_csum(&mut ext4block, parent.inode.generation());
+                    ext4block.sync_blk_to_disk(self.block_device.clone());
+                    return Ok(EOK);
+                }
+            }
+        }
+
+        // Full scan (skip last block since already tried)
+        let mut iblock: u64 = 0;
+        while iblock < total_blocks.saturating_sub(1) {
             if let Ok(pblock) = self.get_pblock_idx(parent, iblock as u32) {
                 // load physical block
                 let mut ext4block = Block::load_offset(

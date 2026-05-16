@@ -405,24 +405,22 @@ impl IndexNode for layout::Ext4OSInode {
         buf: &mut [u8],
         _data: spin::MutexGuard<FilePrivateData>,
     ) -> Result<usize, SyscallErr> {
-        let ino_ref = self.inode.lock();
-        if ino_ref.inode.is_dir() {
+        let inode_lock = self.inode.lock();
+        if inode_lock.inode.is_dir() {
             return Err(SyscallErr::EISDIR);
         }
-        let file_size = ino_ref.inode.size() as usize;
+        let inode_num = inode_lock.inode_num;
+        let file_size = inode_lock.inode.size() as usize;
         if offset >= file_size {
             return Ok(0);
         }
-        let inode_num = ino_ref.inode_num;
-        drop(ino_ref);
         let read_len = len.min(buf.len()).min(file_size - offset);
+        drop(inode_lock);
 
         if let Some(pc) = self.get_new_page_cache() {
-            return pc
-                .read(offset, &mut buf[..read_len])
-                .map_err(|_| SyscallErr::EIO);
+            return pc.read(offset, &mut buf[..read_len]).map_err(|_| SyscallErr::EIO);
         }
-        // fallback to direct I/O
+        // direct I/O fallback
         self.ext4fs
             .read_at(inode_num, offset, &mut buf[..read_len])
             .map_err(|_| SyscallErr::EIO)
