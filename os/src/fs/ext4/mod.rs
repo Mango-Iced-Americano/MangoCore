@@ -3,6 +3,7 @@ mod bitmap;
 mod block_group;
 mod crc;
 mod direntry;
+pub mod dirty_block_device;
 mod error;
 mod ext4_inode;
 pub mod ext4fs;

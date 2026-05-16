@@ -3,6 +3,7 @@ use core::arch::asm;
 use core::ptr::addr_of;
 
 use super::block_group::{Block, Ext4BlockGroup};
+use super::dirty_block_device::DirtyBlockDevice;
 use super::direntry::{Ext4DirEntry, Ext4DirSearchResult};
 use super::path::path_check;
 use super::superblock::SUPERBLOCK_OFFSET;
@@ -22,6 +23,8 @@ type SuperBlock = Ext4Superblock;
 pub struct Ext4FileSystem {
     /// 块设备
     pub block_device: Arc<dyn BlockDevice>,
+    /// 脏块设备包装器（用于延迟写回）
+    dirty_bd: Arc<DirtyBlockDevice>,
     /// 超级块信息
     pub superblock: SuperBlock,
     /// 块大小
@@ -39,18 +42,27 @@ impl Ext4FileSystem {
         block_device: Arc<dyn BlockDevice>,
         index_cache_mgr: Arc<Mutex<BlockCacheManager>>,
     ) -> Arc<Self> {
+        // 包装为脏块设备（延迟写回，消除 metadata 写放大）
+        let dirty_bd = Arc::new(DirtyBlockDevice::new(block_device.clone()));
+
         // 读取超级块
         let block = Block::load_superblock(block_device.clone(), 0);
         let superblock = block.read_offset_as_superblock(SUPERBLOCK_OFFSET);
         let block_size = superblock.clone().block_size() as usize;
         let cache_mgr = index_cache_mgr.clone();
         Arc::new_cyclic(|weak| Ext4FileSystem {
-            block_device,
+            block_device: dirty_bd.clone(),
+            dirty_bd,
             superblock,
             block_size,
             cache_mgr,
             __self_ref: spin::Mutex::new(weak.clone()),
         })
+    }
+
+    /// 刷所有脏元数据块到磁盘
+    pub fn flush_dirty_blocks(&self) {
+        self.dirty_bd.flush_dirty_blocks();
     }
     /// with dir result search path offset
     /// # 参数
@@ -157,36 +169,6 @@ impl Ext4FileSystem {
         }
 
         Ok(dir_search_result.dentry.inode)
-    }
-    pub fn open_old(
-        block_device: Arc<dyn BlockDevice>,
-        index_cache_mgr: Arc<Mutex<BlockCacheManager>>,
-    ) -> Arc<Self> {
-        // 块缓存管理器
-        // 读取的数据会被缓存，也就是说放在内存中
-        // 这样下次再读取的时候就不用再从磁盘中读取了
-        // 速度会快很多
-        let ext4_cache_mgr = index_cache_mgr.clone();
-        index_cache_mgr
-            .lock()
-            // 获取第0块的缓存
-            .get_block_cache(0, &block_device)
-            .lock()
-            // 获取超级块
-            .read(SUPERBLOCK_OFFSET, |super_block: &SuperBlock| {
-                // 创建ext4实例
-                let ext4fs = Self {
-                    block_device,
-                    superblock: super_block.clone(),
-                    block_size: super_block.block_size() as usize,
-                    cache_mgr: ext4_cache_mgr,
-                    __self_ref: spin::Mutex::new(alloc::sync::Weak::new()),
-                };
-                ext4fs.test_info();
-                let ext4_arc = Arc::new(ext4fs);
-                *ext4_arc.__self_ref.lock() = Arc::downgrade(&ext4_arc);
-                ext4_arc
-            })
     }
     pub fn alloc_blocks(&self, blocks: usize) -> Vec<usize> {
         if blocks == 0 {
