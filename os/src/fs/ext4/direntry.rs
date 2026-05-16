@@ -354,6 +354,23 @@ impl Ext4FileSystem {
             name,
             total_blocks,
         );
+
+        // Debug: dump directory blocks when /bin/bash lookup fails
+        if parent_inode == 3217 || name == "bash" {
+            let mut dump_iblock = 0u64;
+            while dump_iblock < total_blocks {
+                if let Ok(fblock) = self.get_pblock_idx(&parent, dump_iblock as u32) {
+                    let ext4block = Block::load_offset(
+                        self.block_device.clone(),
+                        fblock as usize * self.block_size,
+                        self.block_size,
+                    );
+                    self.debug_dump_dir_block(&ext4block, parent_inode, dump_iblock, name);
+                }
+                dump_iblock += 1;
+            }
+        }
+
         return Err(Ext4Error::new(Errno::ENOENT));
     }
 
@@ -631,7 +648,6 @@ impl Ext4FileSystem {
                     let de_type = DirEntryType::EXT4_DE_DIR;
                     new_entry.write_entry(rec_len as u16, child_inode, name, de_type);
                     new_entry.copy_to_slice(&mut block.data, offset);
-                    block.sync_blk_to_disk(self.block_device.clone());
                     return Ok(EOK);
                 }
                 offset += rec_len;
@@ -659,9 +675,6 @@ impl Ext4FileSystem {
                     // update parent_de and new_de to blk_data
                     de.copy_to_slice(&mut block.data, offset);
                     new_entry.copy_to_slice(&mut block.data, offset + sz);
-
-                    // Sync to disk
-                    block.sync_blk_to_disk(self.block_device.clone());
 
                     return Ok(EOK);
                 }
@@ -873,7 +886,56 @@ impl Ext4FileSystem {
             iblock += 1;
         }
 
-        Err(Errno::ENOENT as isize)
+            Err(Errno::ENOENT as isize)
+    }
+
+    /// Debug dump of all directory entries in a block
+    /// Used to diagnose dir_find_entry failures
+    fn debug_dump_dir_block(&self, block: &Block, parent_inode: u32, iblock: u64, target: &str) {
+        let mut offset = 0usize;
+        log::warn!(
+            "[dir_dump] parent={} iblock={} target={} block_size={}",
+            parent_inode,
+            iblock,
+            target,
+            self.block_size
+        );
+
+        while offset < self.block_size - core::mem::size_of::<Ext4DirEntryTail>() {
+            let de = Ext4DirEntry::try_from(&block.data[offset..]).unwrap();
+            let entry_len = de.entry_len() as usize;
+            let name_len = de.name_len as usize;
+
+            let name = if entry_len >= 8 && name_len <= entry_len.saturating_sub(8) {
+                core::str::from_utf8(&block.data[offset + 8..offset + 8 + name_len])
+                    .unwrap_or("<bad-utf8>")
+            } else {
+                "<bad-name>"
+            };
+
+            log::warn!(
+                "[dir_dump] off={} ino={} rec_len={} name_len={} file_type={} name={}",
+                offset,
+                de.inode,
+                entry_len,
+                name_len,
+                de.get_de_type(),
+                name
+            );
+
+            if entry_len < 8 || offset + entry_len > self.block_size {
+                log::error!(
+                    "[dir_dump] BAD ENTRY parent={} iblock={} off={} rec_len={}",
+                    parent_inode,
+                    iblock,
+                    offset,
+                    entry_len
+                );
+                break;
+            }
+
+            offset += entry_len;
+        }
     }
 
     pub fn dir_remove(&self, parent: u32, path: &str) -> Result<usize, isize> {

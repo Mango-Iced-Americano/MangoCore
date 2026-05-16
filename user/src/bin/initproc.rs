@@ -578,17 +578,23 @@ fn run_group_once(
         cmd.push_str("./");
         cmd.push_str(script);
         cmd.push('\0');
-        let shell = "/bin/bash\0";
         let dash_c = "-c\0";
-        let argv = [
-            shell.as_ptr(),
-            dash_c.as_ptr(),
-            cmd.as_ptr(),
-            core::ptr::null(),
-        ];
-        exec(shell, &argv, environ);
+        let argv = |shell: &str| -> [*const u8; 4] {
+            [
+                shell.as_ptr(),
+                dash_c.as_ptr(),
+                cmd.as_ptr(),
+                core::ptr::null(),
+            ]
+        };
+        exec("/bin/bash\0", &argv("/bin/bash\0"), environ);
         println!(
-            "[initproc] exec failed for {} in {} via /bin/bash -c",
+            "[initproc] /bin/bash failed for {} in {}, fallback /bash",
+            script, log_dir
+        );
+        exec("/bash\0", &argv("/bash\0"), environ);
+        println!(
+            "[initproc] exec failed for {} in {} via both /bin/bash and /bash",
             script, log_dir
         );
         exit(127);
@@ -1395,6 +1401,11 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     ];
 
     prepare_symlink(&environ);
+
+    // Self-check: verify /bin/bash is usable after prepare_symlink
+    let bash_check = "test -x /bin/bash && echo BIN_BASH_OK || echo BIN_BASH_BAD\0";
+    let bash_ret = run_bash_cmd(bash_check, &environ);
+    println!("[initproc] post-prepare /bin/bash check exit={}", bash_ret);
 
     println!("[initproc] running fs_test...");
     let fs_test_cmd = "cd / && ./fs_test\0";
