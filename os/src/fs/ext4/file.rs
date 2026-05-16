@@ -395,6 +395,20 @@ impl Ext4FileSystem {
         // 获取文件大小
         let file_size = inode_ref.inode.size();
 
+        // Fast symlink: target stored in i_block (no data blocks, no extents)
+        {
+            let is_symlink = inode_ref.inode.get_file_type() == DiskInodeType::Link;
+            let uses_extents = (inode_ref.inode.flags()
+                & crate::fs::ext4::EXT4_INODE_FLAG_EXTENTS as u32) != 0;
+            if is_symlink && !uses_extents && file_size <= 60 {
+                let size = file_size as usize;
+                let to_read = core::cmp::min(size, read_buf.len());
+                let block_bytes = inode_ref.inode.block_as_bytes();
+                read_buf[..to_read].copy_from_slice(&block_bytes[..to_read]);
+                return Ok(to_read);
+            }
+        }
+
         // 如果偏移量大于文件大小，返回 0
         if offset >= file_size as usize {
             return Ok(0);
