@@ -366,7 +366,7 @@ impl layout::Ext4OSInode {
             inode: inode_ref,
             offset: spin::Mutex::new(0),
             ext4fs,
-            file_cache_manager: alloc::sync::Arc::new(PageCacheManager::new()),
+            new_page_cache: spin::Mutex::new(None),
         })
     }
 }
@@ -405,13 +405,24 @@ impl IndexNode for layout::Ext4OSInode {
         buf: &mut [u8],
         _data: spin::MutexGuard<FilePrivateData>,
     ) -> Result<usize, SyscallErr> {
-        let inode_lock = self.inode.lock();
-        if inode_lock.inode.is_dir() {
+        let ino_ref = self.inode.lock();
+        if ino_ref.inode.is_dir() {
             return Err(SyscallErr::EISDIR);
         }
-        let inode_num = inode_lock.inode_num;
-        drop(inode_lock);
-        let read_len = len.min(buf.len());
+        let file_size = ino_ref.inode.size() as usize;
+        if offset >= file_size {
+            return Ok(0);
+        }
+        let inode_num = ino_ref.inode_num;
+        drop(ino_ref);
+        let read_len = len.min(buf.len()).min(file_size - offset);
+
+        if let Some(pc) = self.get_new_page_cache() {
+            return pc
+                .read(offset, &mut buf[..read_len])
+                .map_err(|_| SyscallErr::EIO);
+        }
+        // fallback to direct I/O
         self.ext4fs
             .read_at(inode_num, offset, &mut buf[..read_len])
             .map_err(|_| SyscallErr::EIO)
@@ -429,6 +440,13 @@ impl IndexNode for layout::Ext4OSInode {
         self.ext4fs
             .write_at(inode_num, offset, &buf[..write_len])
             .map_err(|_| SyscallErr::EIO)?;
+        // Invalidate page cache for the written range so subsequent reads see fresh data
+        if let Some(pc) = self.get_new_page_cache() {
+            let start_page = offset >> crate::config::PAGE_SIZE_BITS;
+            let end_page = (offset + write_len).saturating_sub(1) >> crate::config::PAGE_SIZE_BITS;
+            let _ = pc.invalidate_range(start_page, end_page + 1);
+        }
+        // Refresh inode metadata after write
         let fresh = self.ext4fs.get_inode_ref(inode_num);
         let mut inode_lock = self.inode.lock();
         inode_lock.inode = fresh.inode;

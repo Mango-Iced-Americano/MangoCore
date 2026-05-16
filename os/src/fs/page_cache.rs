@@ -702,3 +702,90 @@ impl PageCacheBackend for FatPageCacheBackend {
         (total_blocks + self.blocks_per_page - 1) / self.blocks_per_page
     }
 }
+
+// ── Ext4PageCacheBackend ─────────────────────────────────────────────────
+
+/// EXT4 文件系统专用 PageCache 后端
+///
+/// 通过弱引用访问 Ext4FileSystem + inode_num，将页面偏移动态映射为物理块号。
+/// 仅用于普通文件数据，不用于元数据（目录/bitmap/inode table）。
+pub struct Ext4PageCacheBackend {
+    ext4fs: alloc::sync::Weak<crate::fs::ext4::ext4fs::Ext4FileSystem>,
+    inode_num: u32,
+    block_size: usize,
+    blocks_per_page: usize,
+}
+
+impl Ext4PageCacheBackend {
+    pub fn new(
+        ext4fs: alloc::sync::Weak<crate::fs::ext4::ext4fs::Ext4FileSystem>,
+        inode_num: u32,
+    ) -> Self {
+        let fs = ext4fs.upgrade().expect("Ext4PageCacheBackend: ext4fs dropped");
+        let block_size = fs.block_size;
+        let blocks_per_page = crate::config::PAGE_SIZE / block_size;
+        Ext4PageCacheBackend {
+            ext4fs: ext4fs.clone(),
+            inode_num,
+            block_size,
+            blocks_per_page,
+        }
+    }
+
+    fn block_id_for_offset(&self, page_index: usize, block_off: usize) -> Option<usize> {
+        let fs = self.ext4fs.upgrade()?;
+        let ino_ref = fs.get_inode_ref(self.inode_num);
+        let lblock = (page_index * self.blocks_per_page + block_off) as u32;
+        match fs.get_pblock_idx(&ino_ref, lblock) {
+            Ok(pblock) => Some(pblock as usize),
+            Err(_) => None, // hole
+        }
+    }
+}
+
+impl PageCacheBackend for Ext4PageCacheBackend {
+    fn read_page(&self, index: usize, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+        if buf.len() < crate::config::PAGE_SIZE {
+            return Err(SyscallErr::ENOBUFS);
+        }
+        let fs = self.ext4fs.upgrade().ok_or(SyscallErr::EIO)?;
+        for block_off in 0..self.blocks_per_page {
+            let start = block_off * self.block_size;
+            match self.block_id_for_offset(index, block_off) {
+                Some(block_id) => {
+                    fs.block_device
+                        .read_block(block_id, &mut buf[start..start + self.block_size]);
+                }
+                None => {
+                    buf[start..start + self.block_size].fill(0);
+                }
+            }
+        }
+        Ok(crate::config::PAGE_SIZE)
+    }
+
+    fn write_page(&self, index: usize, buf: &[u8]) -> Result<usize, SyscallErr> {
+        if buf.len() < crate::config::PAGE_SIZE {
+            return Err(SyscallErr::ENOBUFS);
+        }
+        let fs = self.ext4fs.upgrade().ok_or(SyscallErr::EIO)?;
+        for block_off in 0..self.blocks_per_page {
+            let start = block_off * self.block_size;
+            if let Some(block_id) = self.block_id_for_offset(index, block_off) {
+                fs.block_device
+                    .write_block(block_id, &buf[start..start + self.block_size]);
+            }
+        }
+        Ok(crate::config::PAGE_SIZE)
+    }
+
+    fn npages(&self) -> usize {
+        let fs = match self.ext4fs.upgrade() {
+            Some(fs) => fs,
+            None => return 0,
+        };
+        let ino_ref = fs.get_inode_ref(self.inode_num);
+        let file_size = ino_ref.inode.size() as usize;
+        (file_size + crate::config::PAGE_SIZE - 1) / crate::config::PAGE_SIZE
+    }
+}

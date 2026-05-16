@@ -6,7 +6,7 @@ use crate::{
         ext4::{
             block_group::Block,
             direntry::{DirEntryType, Ext4DirEntryTail},
-            InodeFileType, PageCache,
+            InodeFileType,
         },
         inode::{self, InodeLock},
     },
@@ -35,8 +35,9 @@ use super::{
     direntry::Ext4DirEntry,
     ext4fs::Ext4FileSystem,
     file::{Ext4FileContent, Ext4FileContentWrapper},
-    Cache, Ext4Inode, Ext4InodeRef, InodePerm, PageCacheManager,
+    Cache, Ext4Inode, Ext4InodeRef, InodePerm,
 };
+use crate::fs::page_cache::{Ext4PageCacheBackend, PageCache as NewPageCache, PageCacheBackend};
 
 // use crate::timer::get_time;
 // use crate::hal::arch::riscv::rv_board::CLOCK_FREQ;
@@ -66,8 +67,8 @@ pub struct Ext4OSInode {
     pub(super) ext4fs: Arc<Ext4FileSystem>,
     /// inode锁
     pub(super) inode_lock: Arc<RwLock<InodeLock>>,
-    /// 文件缓存
-    pub(super) file_cache_manager: Arc<PageCacheManager>,
+    /// 新 PageCache（懒初始化，仅用于普通文件数据）
+    pub(super) new_page_cache: Mutex<Option<Arc<NewPageCache>>>,
 }
 
 impl core::fmt::Debug for Ext4OSInode {
@@ -80,7 +81,35 @@ impl core::fmt::Debug for Ext4OSInode {
 
 impl Drop for Ext4OSInode {
     fn drop(&mut self) {
-        // special_use reference counting removed along with dirnode_ptr
+        if let Some(ref pc) = *self.new_page_cache.lock() {
+            let _ = pc.writeback_all();
+        }
+    }
+}
+
+impl Ext4OSInode {
+    /// 获取或初始化新 PageCache（懒初始化，线程安全）
+    /// 仅用于普通文件，目录返回 None
+    pub fn get_new_page_cache(&self) -> Option<Arc<NewPageCache>> {
+        {
+            let ino_ref = self.inode.lock();
+            if ino_ref.inode.is_dir() {
+                return None;
+            }
+        }
+        let mut cache_opt = self.new_page_cache.lock();
+        if let Some(ref pc) = *cache_opt {
+            return Some(pc.clone());
+        }
+        let inode_num = self.inode.lock().inode_num;
+        let backend = Arc::new(Ext4PageCacheBackend::new(
+            Arc::downgrade(&self.ext4fs),
+            inode_num,
+        ));
+        let pc = NewPageCache::new();
+        pc.set_backend(backend);
+        *cache_opt = Some(pc.clone());
+        Some(pc)
     }
 }
 
