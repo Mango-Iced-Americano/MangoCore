@@ -397,12 +397,17 @@ impl IndexNode for layout::Ext4OSInode {
             return Ok(0);
         }
         let read_len = len.min(buf.len()).min(file_size - offset);
+        let is_symlink = inode_lock.inode.is_link();
         drop(inode_lock);
 
-        if let Some(pc) = self.get_new_page_cache() {
-            return pc.read(offset, &mut buf[..read_len]).map_err(|_| SyscallErr::EIO);
+        // Fast symlinks (target ≤ 60B stored in i_block) have no data pages —
+        // skip the page cache so the direct I/O fallback reads from i_block.
+        if !is_symlink {
+            if let Some(pc) = self.get_new_page_cache() {
+                return pc.read(offset, &mut buf[..read_len]).map_err(|_| SyscallErr::EIO);
+            }
         }
-        // direct I/O fallback
+        // direct I/O fallback (and fast symlink reads)
         self.ext4fs
             .read_at(inode_num, offset, &mut buf[..read_len])
             .map_err(|_| SyscallErr::EIO)

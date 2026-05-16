@@ -531,10 +531,14 @@ impl Ext4FileSystem {
         child: &Ext4InodeRef,
         name: &str,
     ) -> Result<usize, isize> {
-        // calculate total blocks
+        // calculate total blocks (ceiling division)
         let inode_size: u64 = parent.inode.size();
-        let block_size = self.superblock.block_size();
-        let total_blocks: u64 = inode_size / block_size as u64;
+        let block_size = self.superblock.block_size() as u64;
+        let total_blocks: u64 = if inode_size == 0 {
+            0
+        } else {
+            (inode_size + block_size - 1) / block_size
+        };
 
         // Try last block first (O(1) for append-heavy workloads like busybox --install)
         if total_blocks > 0 {
@@ -581,6 +585,17 @@ impl Ext4FileSystem {
 
         // no space in existing blocks, need to add new block
         let new_iblock = total_blocks as u32;
+
+        // Guard: refuse to overwrite an existing logical block
+        if self.get_pblock_idx(parent, new_iblock).is_ok() {
+            log::error!(
+                "[dir_add_entry] refusing to overwrite existing logical block {} of dir inode {}",
+                new_iblock,
+                parent.inode_num
+            );
+            return Err(Errno::EIO as isize);
+        }
+
         log::info!(
             "[dir_add_entry] adding new block: parent_inode={}, name={}, child_inode={}, new_iblock={}",
             parent.inode_num,
