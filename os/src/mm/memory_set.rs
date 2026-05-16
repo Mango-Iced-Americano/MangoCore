@@ -879,6 +879,7 @@ impl<T: PageTable> MemorySet<T> {
                     MapFlags::MAP_ANONYMOUS | MapFlags::MAP_FIXED | MapFlags::MAP_PRIVATE,
                     1usize.wrapping_neg(),
                     0,
+                    0,
                 );
                 if ret < 0 {
                     warn!(
@@ -1065,6 +1066,7 @@ impl<T: PageTable> MemorySet<T> {
         flags: MapFlags,
         fd: usize,
         offset: usize,
+        token: usize,
     ) -> isize {
         // not aligned on a page boundary
         if start & 0xfff != 0 {
@@ -1181,7 +1183,6 @@ impl<T: PageTable> MemorySet<T> {
                 }
             };
             if n > 0 {
-                let token = task.get_user_token();
                 if let Err(e) = crate::mm::page_table::copy_to_user_array(token, tmp.as_ptr(), start_va.0 as *mut u8, n) {
                     return e;
                 }

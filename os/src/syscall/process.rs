@@ -1361,6 +1361,7 @@ pub fn sys_mmap(
     offset: usize,
 ) -> isize {
     let task = current_task().unwrap();
+    let token = task.get_user_token();
     let mut memory_set = task.vm.lock();
     let prot = match parse_mmap_prot(prot) {
         Ok(prot) => prot,
@@ -1374,7 +1375,7 @@ pub fn sys_mmap(
         "[mmap] start:{:X}; len:{:X}; prot:{:?}; flags:{:?}; fd:{}; offset:{:X}",
         start, len, prot, flags, fd as isize, offset
     );
-    memory_set.mmap(start, len, prot, flags, fd, offset)
+    memory_set.mmap(start, len, prot, flags, fd, offset, token)
 }
 
 /// # Versions
