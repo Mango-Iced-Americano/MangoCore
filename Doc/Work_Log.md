@@ -487,3 +487,37 @@ Phase 4-6 (适配具体FS / syscall层 / QEMU测试) 待后续完成。
 
 - 新增 `Doc/vfs-migration-plan.md` — Phase 1-5 详细迁移计划
 
+
+---
+
+## 2026-05-16
+
+### 文件 I/O 等待队列 — 替代忙轮询 (140d2f0)
+
+**涉及文件：** `os/src/fs/vfs/index_node.rs`, `os/src/fs/dev/pipe.rs`, `os/src/fs/dev/tty.rs`, `os/src/syscall/fs.rs`
+
+**背景：** `sys_read`/`sys_write` 使用 `wait_io_core` 做忙轮询（EAGAIN → suspend → 重试），Pipe 虽有 `read_wait`/`write_wait` 等待队列但未被用于阻塞。
+
+**参照 DragonOS 模式：** WaitQueue 挂在具体 inode 实现上（不在 VFS 通用层），使用 `WaitQueue::wait_until_interruptible` 做条件阻塞。
+
+**改动：**
+- `IndexNode` trait 新增 `read_wait_queue()` / `write_wait_queue()` 方法（默认 `None`），参照 Socket trait 的 `recv_wait_queue`/`send_wait_queue` 模式
+- Pipe 等待队列重构：`read_wait`/`write_wait` 从 `PipeRingBuffer` 移至 `Pipe` 结构体（`Mutex<WaitQueue>`），锁顺序 ring→wait_queue 单向
+- TTY 新增 `read_waiters: Mutex<WaitQueue>`，`read_at` 成功时 `wake_at_most(1)`
+- `sys_read`/`sys_write` 三路径：非阻塞→单次尝试 / 有 wait queue→`wait_until_interruptible` / 无 wait queue→回退 `wait_io_core`
+
+**验证：** rv64 ✅ la64 ✅ | QEMU 43/51 通过（8 失败为预存 ext4 问题）
+
+### ext4 IndexNode 完善 — rename/read_dir/getdents/inode_size (bb953e8)
+
+**涉及文件：** `os/src/fs/ext4/ext4fs.rs`
+
+**QEMU ext4 测试从 42→50/51：**
+
+1. **rename 实现** — 同目录重命名（`dir_add_entry` + `dir_remove_entry`）+ 跨目录重命名（nlink 更新 + `..` 条目重定向）
+2. **read_at 拒绝目录** — 开头 `is_dir()` 检查，目录返回 `EISDIR`
+3. **getdents 包含 . 和 ..** — `list()` 移除目录项过滤器
+4. **write_at 后刷新 inode size** — 写入后从磁盘重载 inode，确保 `lseek SEEK_END` 和 `O_APPEND` 正确
+
+**验证：** rv64 ✅ la64 ✅ | QEMU ext4: 50/51（仅 hard link ENOSYS 预期保留）
+
