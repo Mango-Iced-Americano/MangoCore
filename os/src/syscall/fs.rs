@@ -1269,7 +1269,6 @@ pub fn sys_openat(dirfd: usize, path: *const u8, flags: u32, mode: u32) -> isize
         "[sys_openat] dirfd: {}, path: {}, flags: {:?}, mode: {:?}",
         dirfd as isize, path, flags, mode
     );
-    let mut fd_table = task.files.lock();
     let start = match resolve_start_inode(dirfd) {
         Ok(inode) => inode,
         Err(errno) => return errno,
@@ -1282,6 +1281,7 @@ pub fn sys_openat(dirfd: usize, path: *const u8, flags: u32, mode: u32) -> isize
         Err(errno) => return errno,
     };
 
+    let mut fd_table = task.files.lock();
     let new_fd = match fd_table.alloc_fd(new_file, flags.contains(OpenFlags::O_CLOEXEC)) {
         Ok(fd) => fd,
         Err(e) => return -(e as isize),
