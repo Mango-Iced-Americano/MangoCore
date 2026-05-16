@@ -871,7 +871,7 @@ impl Ext4FileSystem {
     }
 
     /// 从目录的 .. 条目读取父 inode 号
-    fn dir_find_dotdot(&self, dir_ref: &Ext4InodeRef) -> Result<u32, isize> {
+    pub fn dir_find_dotdot(&self, dir_ref: &Ext4InodeRef) -> Result<u32, isize> {
         let mut iblock: u64 = 0;
         let inode_size: u64 = dir_ref.inode.size();
         let total_blocks: u64 = inode_size / self.block_size as u64;

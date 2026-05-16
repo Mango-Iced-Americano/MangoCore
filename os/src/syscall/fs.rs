@@ -246,7 +246,13 @@ pub fn sys_getcwd(buf: usize, size: usize) -> isize {
         // The size argument is zero and buf is not a NULL pointer.
         return EINVAL;
     }
-    let working_dir = task.fs.lock().working_inode.get_cwd().unwrap();
+    let working_dir = match task.fs.lock().working_inode.get_cwd() {
+        Some(s) => s,
+        None => {
+            log::error!("[sys_getcwd] failed to resolve cwd absolute path");
+            return ENOENT;
+        }
+    };
     if working_dir.len() >= size {
         // The size argument is less than the length of the absolute pathname of the working directory,
         // including the terminating null byte.

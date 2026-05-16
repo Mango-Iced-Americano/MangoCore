@@ -472,6 +472,28 @@ impl IndexNode for layout::Ext4OSInode {
 
     fn find(&self, name: &str) -> Result<alloc::sync::Arc<dyn IndexNode>, SyscallErr> {
         let inode_num = self.inode.lock().inode_num;
+
+        if name == "." {
+            let self_ref = self.ext4fs.get_inode_ref(inode_num);
+            return Ok(layout::Ext4OSInode::new_vfs(
+                alloc::sync::Arc::new(spin::Mutex::new(self_ref)),
+                self.ext4fs.clone(),
+            ));
+        }
+
+        if name == ".." {
+            let cur_ref = self.ext4fs.get_inode_ref(inode_num);
+            let parent_ino = self
+                .ext4fs
+                .dir_find_dotdot(&cur_ref)
+                .map_err(|_| SyscallErr::ENOENT)?;
+            let parent_ref = self.ext4fs.get_inode_ref(parent_ino);
+            return Ok(layout::Ext4OSInode::new_vfs(
+                alloc::sync::Arc::new(spin::Mutex::new(parent_ref)),
+                self.ext4fs.clone(),
+            ));
+        }
+
         let mut result = Ext4DirSearchResult::new(Ext4DirEntry::default());
         self.ext4fs
             .dir_find_entry(inode_num, name, &mut result)
