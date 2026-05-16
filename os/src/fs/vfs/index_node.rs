@@ -263,6 +263,18 @@ pub trait IndexNode: Any + Send + Sync + Debug {
         Err(SyscallErr::ENOSYS)
     }
 
+    /// 返回读端等待队列（可选）
+    /// 仅需要阻塞读的设备（Pipe、TTY、Socket 等）需要实现此方法。
+    fn read_wait_queue(&self) -> Option<&spin::Mutex<crate::task::WaitQueue>> {
+        None
+    }
+
+    /// 返回写端等待队列（可选）
+    /// 仅需要阻塞写的设备（Pipe、Socket 等）需要实现此方法。
+    fn write_wait_queue(&self) -> Option<&spin::Mutex<crate::task::WaitQueue>> {
+        None
+    }
+
     /// 轮询（poll/select/epoll）
     fn poll(&self, _private_data: &FilePrivateData) -> Result<usize, SyscallErr> {
         Err(SyscallErr::ENOSYS)

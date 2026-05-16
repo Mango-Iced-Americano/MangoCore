@@ -3,6 +3,7 @@ use crate::mm::{copy_from_user, copy_to_user};
 use crate::mm::{translated_ref, translated_ref_write};
 use crate::syscall::errno::*;
 use crate::task::signal::Signals;
+use crate::task::WaitQueue;
 
 use alloc::sync::Arc;
 use core::any::Any;
@@ -62,9 +63,18 @@ impl Default for TeletypeInner {
     }
 }
 
-#[derive(Default)]
 pub struct Teletype {
     inner: Mutex<TeletypeInner>,
+    read_waiters: Mutex<WaitQueue>,
+}
+
+impl Default for Teletype {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::new(TeletypeInner::default()),
+            read_waiters: Mutex::new(WaitQueue::new()),
+        }
+    }
 }
 
 impl core::fmt::Debug for Teletype {
@@ -150,31 +160,35 @@ impl IndexNode for Teletype {
         if buf.is_empty() {
             return Ok(0);
         }
-        let mut inner = self.inner.lock();
-        // 尝试从 stash 或 console 读取字符
-        if inner.last_char == 255 {
-            inner.last_char =
-                crate::trace::pop_stashed().unwrap_or_else(|| console_getchar() as u8);
-            crate::trace::check_magic_key(inner.last_char, "tty:read_at");
-            if vintr_send_sigint(&inner, inner.last_char) {
-                inner.last_char = 255;
+        let result;
+        {
+            let mut inner = self.inner.lock();
+            if inner.last_char == 255 {
+                inner.last_char =
+                    crate::trace::pop_stashed().unwrap_or_else(|| console_getchar() as u8);
+                crate::trace::check_magic_key(inner.last_char, "tty:read_at");
+                if vintr_send_sigint(&inner, inner.last_char) {
+                    inner.last_char = 255;
+                    return Err(SyscallErr::EAGAIN);
+                }
+            }
+            if inner.last_char == 255 {
                 return Err(SyscallErr::EAGAIN);
             }
-        }
-        if inner.last_char == 255 {
-            return Err(SyscallErr::EAGAIN);
-        }
-        buf[0] = inner.last_char;
-        if inner.termios.lflag & LocalModes::ECHO.bits() != 0 {
-            if inner.last_char == b'\r' {
-                print!("\n");
-            } else {
-                log::info!("[tty] echo '{}' (0x{:02x})", inner.last_char as char, inner.last_char);
-                print!("{}", inner.last_char as char);
+            buf[0] = inner.last_char;
+            if inner.termios.lflag & LocalModes::ECHO.bits() != 0 {
+                if inner.last_char == b'\r' {
+                    print!("\n");
+                } else {
+                    log::info!("[tty] echo '{}' (0x{:02x})", inner.last_char as char, inner.last_char);
+                    print!("{}", inner.last_char as char);
+                }
             }
+            inner.last_char = 255;
+            result = Ok(1);
         }
-        inner.last_char = 255;
-        Ok(1)
+        self.read_waiters.lock().wake_at_most(1);
+        result
     }
 
     fn write_at(
@@ -235,8 +249,9 @@ impl IndexNode for Teletype {
         let mut revents: usize = 0;
         if has_data {
             revents |= EPollEvent::EPOLLIN.bits();
+            self.read_waiters.lock().wake_at_most(1);
         }
-        revents |= EPollEvent::EPOLLOUT.bits(); // TTY always writable
+        revents |= EPollEvent::EPOLLOUT.bits();
         Ok(revents)
     }
 
@@ -300,6 +315,10 @@ impl IndexNode for Teletype {
                 Err(SyscallErr::ENOTTY)
             }
         }
+    }
+
+    fn read_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(&self.read_waiters)
     }
 
     fn fs(&self) -> Arc<dyn NewFileSystem> {

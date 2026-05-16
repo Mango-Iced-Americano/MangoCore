@@ -18,6 +18,8 @@ pub struct Pipe {
     readable: bool,
     writable: bool,
     buffer: Arc<Mutex<PipeRingBuffer>>,
+    read_wait: Mutex<WaitQueue>,
+    write_wait: Mutex<WaitQueue>,
 }
 
 impl core::fmt::Debug for Pipe {
@@ -43,21 +45,27 @@ impl IndexNode for Pipe {
         if buf.is_empty() {
             return Ok(0);
         }
-        let mut ring = self.buffer.lock();
-        if ring.status == RingBufferStatus::EMPTY {
-            if ring.all_write_ends_closed() {
-                return Ok(0); // EOF
+        let result = {
+            let mut ring = self.buffer.lock();
+            if ring.status == RingBufferStatus::EMPTY {
+                if ring.all_write_ends_closed() {
+                    return Ok(0); // EOF
+                }
+                return Err(SyscallErr::EAGAIN);
             }
-            return Err(SyscallErr::EAGAIN);
-        }
-        let read_bytes = ring.buffer_read(buf);
-        ring.status = if ring.head == ring.tail {
-            RingBufferStatus::EMPTY
-        } else {
-            RingBufferStatus::NORMAL
+            let read_bytes = ring.buffer_read(buf);
+            ring.status = if ring.head == ring.tail {
+                RingBufferStatus::EMPTY
+            } else {
+                RingBufferStatus::NORMAL
+            };
+            Ok(read_bytes)
         };
-        ring.write_wait.wake_at_most(1);
-        Ok(read_bytes)
+        // Drop ring lock before acquiring write_wait lock to avoid deadlock
+        if let Ok(_n) = &result {
+            self.write_wait.lock().wake_at_most(1);
+        }
+        result
     }
 
     fn write_at(
@@ -73,21 +81,26 @@ impl IndexNode for Pipe {
         if buf.is_empty() {
             return Ok(0);
         }
-        let mut ring = self.buffer.lock();
-        if ring.status == RingBufferStatus::FULL {
-            if ring.all_read_ends_closed() {
-                return Err(SyscallErr::EPIPE); // Broken pipe
+        let result = {
+            let mut ring = self.buffer.lock();
+            if ring.status == RingBufferStatus::FULL {
+                if ring.all_read_ends_closed() {
+                    return Err(SyscallErr::EPIPE); // Broken pipe
+                }
+                return Err(SyscallErr::EAGAIN);
             }
-            return Err(SyscallErr::EAGAIN);
-        }
-        let write_bytes = ring.buffer_write(buf);
-        ring.status = if ring.head == ring.tail {
-            RingBufferStatus::FULL
-        } else {
-            RingBufferStatus::NORMAL
+            let write_bytes = ring.buffer_write(buf);
+            ring.status = if ring.head == ring.tail {
+                RingBufferStatus::FULL
+            } else {
+                RingBufferStatus::NORMAL
+            };
+            Ok(write_bytes)
         };
-        ring.read_wait.wake_at_most(1);
-        Ok(write_bytes)
+        if let Ok(_n) = &result {
+            self.read_wait.lock().wake_at_most(1);
+        }
+        result
     }
 
     fn metadata(&self) -> Result<Metadata, SyscallErr> {
@@ -133,6 +146,14 @@ impl IndexNode for Pipe {
         Ok(revents)
     }
 
+    fn read_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(&self.read_wait)
+    }
+
+    fn write_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(&self.write_wait)
+    }
+
     fn fs(&self) -> Arc<dyn NewFileSystem> {
         DEV_FS.clone()
     }
@@ -144,12 +165,12 @@ impl IndexNode for Pipe {
 
 impl Drop for Pipe {
     fn drop(&mut self) {
-        let mut ring = self.buffer.lock();
+        let _ring = self.buffer.lock();
         if self.readable {
-            ring.write_wait.wake_all();
+            self.write_wait.lock().wake_all();
         }
         if self.writable {
-            ring.read_wait.wake_all();
+            self.read_wait.lock().wake_all();
         }
     }
 }
@@ -160,6 +181,8 @@ impl Pipe {
             readable: true,
             writable: false,
             buffer,
+            read_wait: Mutex::new(WaitQueue::new()),
+            write_wait: Mutex::new(WaitQueue::new()),
         }
     }
     pub fn write_end_with_buffer(buffer: Arc<Mutex<PipeRingBuffer>>) -> Self {
@@ -167,6 +190,8 @@ impl Pipe {
             readable: false,
             writable: true,
             buffer,
+            read_wait: Mutex::new(WaitQueue::new()),
+            write_wait: Mutex::new(WaitQueue::new()),
         }
     }
 }
@@ -190,9 +215,6 @@ pub struct PipeRingBuffer {
     status: RingBufferStatus,
     write_end: Option<Weak<Pipe>>,
     read_end: Option<Weak<Pipe>>,
-    //加入pipe读写等待队列，实现基于读写数据的pipe唤醒
-    write_wait: WaitQueue,
-    read_wait: WaitQueue,
 }
 
 impl PipeRingBuffer {
@@ -204,8 +226,6 @@ impl PipeRingBuffer {
             status: RingBufferStatus::EMPTY,
             write_end: None,
             read_end: None,
-            write_wait: WaitQueue::new(),
-            read_wait: WaitQueue::new(),
         }
     }
     #[allow(unused)]

@@ -11,7 +11,7 @@ use crate::mm::{
     VirtAddr,
 };
 use crate::syscall::utils::wait_io_core;
-use crate::task::{current_task, current_user_token, signal};
+use crate::task::{current_task, current_user_token, signal, WaitQueue};
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
 use alloc::boxed::Box;
@@ -305,28 +305,51 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
             Err(e) => return -(e as isize),
         }
     };
-
-    // fd is not open for reading
     if file.readable().is_err() {
         return EBADF;
     }
     let is_nonblock = file.is_nonblock();
-    // log::info!("[sys_read] is nonblock:{:?}", is_nonblock);
-
     let token = task.get_user_token();
-    wait_io_core(
-        || {
+
+    if is_nonblock {
+        let user_buf = match translated_byte_buffer(token, buf as *const u8, count, UserAccess::Write) {
+            Ok(buffer) => UserBuffer::new(buffer),
+            Err(errno) => return errno as isize,
+        };
+        match file.read_user(None, user_buf) {
+            Ok(n) => n as isize,
+            Err(e) => -(e as isize),
+        }
+    } else if let Some(wq) = file.inode.read_wait_queue() {
+        match WaitQueue::wait_until_interruptible(wq, || {
             let user_buf = match translated_byte_buffer(token, buf as *const u8, count, UserAccess::Write) {
                 Ok(buffer) => UserBuffer::new(buffer),
-                Err(errno) => return errno as isize,
+                Err(errno) => return Some(errno as isize),
             };
             match file.read_user(None, user_buf) {
-                Ok(n) => n as isize,
-                Err(e) => -(e as isize),
+                Ok(n) => Some(n as isize),
+                Err(SyscallErr::EAGAIN) => None,
+                Err(e) => Some(-(e as isize)),
             }
-        },
-        is_nonblock,
-    )
+        }) {
+            Ok(n) => n,
+            Err(n) => n,
+        }
+    } else {
+        wait_io_core(
+            || {
+                let user_buf = match translated_byte_buffer(token, buf as *const u8, count, UserAccess::Write) {
+                    Ok(buffer) => UserBuffer::new(buffer),
+                    Err(errno) => return errno as isize,
+                };
+                match file.read_user(None, user_buf) {
+                    Ok(n) => n as isize,
+                    Err(e) => -(e as isize),
+                }
+            },
+            is_nonblock,
+        )
+    }
 }
 
 pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
@@ -343,21 +366,47 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
         return EBADF;
     }
     let is_nonblock = file.is_nonblock();
-    // log::info!("[sys_write] is nonblock {:?}", is_nonblock);
     let token = task.get_user_token();
-    wait_io_core(
-        || {
+
+    if is_nonblock {
+        let user_buf = match translated_byte_buffer(token, buf as *const u8, count, UserAccess::Read) {
+            Ok(buffer) => UserBuffer::new(buffer),
+            Err(errno) => return errno as isize,
+        };
+        match file.write_user(None, user_buf) {
+            Ok(n) => n as isize,
+            Err(e) => -(e as isize),
+        }
+    } else if let Some(wq) = file.inode.write_wait_queue() {
+        match WaitQueue::wait_until_interruptible(wq, || {
             let user_buf = match translated_byte_buffer(token, buf as *const u8, count, UserAccess::Read) {
                 Ok(buffer) => UserBuffer::new(buffer),
-                Err(errno) => return errno as isize,
+                Err(errno) => return Some(errno as isize),
             };
             match file.write_user(None, user_buf) {
-                Ok(n) => n as isize,
-                Err(e) => -(e as isize),
+                Ok(n) => Some(n as isize),
+                Err(SyscallErr::EAGAIN) => None,
+                Err(e) => Some(-(e as isize)),
             }
-        },
-        is_nonblock,
-    )
+        }) {
+            Ok(n) => n,
+            Err(n) => n,
+        }
+    } else {
+        wait_io_core(
+            || {
+                let user_buf = match translated_byte_buffer(token, buf as *const u8, count, UserAccess::Read) {
+                    Ok(buffer) => UserBuffer::new(buffer),
+                    Err(errno) => return errno as isize,
+                };
+                match file.write_user(None, user_buf) {
+                    Ok(n) => n as isize,
+                    Err(e) => -(e as isize),
+                }
+            },
+            is_nonblock,
+        )
+    }
 }
 
 pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
