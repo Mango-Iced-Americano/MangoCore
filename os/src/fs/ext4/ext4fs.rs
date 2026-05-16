@@ -405,7 +405,12 @@ impl IndexNode for layout::Ext4OSInode {
         buf: &mut [u8],
         _data: spin::MutexGuard<FilePrivateData>,
     ) -> Result<usize, SyscallErr> {
-        let inode_num = self.inode.lock().inode_num;
+        let inode_lock = self.inode.lock();
+        if inode_lock.inode.is_dir() {
+            return Err(SyscallErr::EISDIR);
+        }
+        let inode_num = inode_lock.inode_num;
+        drop(inode_lock);
         let read_len = len.min(buf.len());
         self.ext4fs
             .read_at(inode_num, offset, &mut buf[..read_len])
@@ -424,6 +429,9 @@ impl IndexNode for layout::Ext4OSInode {
         self.ext4fs
             .write_at(inode_num, offset, &buf[..write_len])
             .map_err(|_| SyscallErr::EIO)?;
+        let fresh = self.ext4fs.get_inode_ref(inode_num);
+        let mut inode_lock = self.inode.lock();
+        inode_lock.inode = fresh.inode;
         Ok(write_len)
     }
 
@@ -481,7 +489,6 @@ impl IndexNode for layout::Ext4OSInode {
         let names: alloc::vec::Vec<alloc::string::String> = entries
             .iter()
             .map(|e| e.get_name())
-            .filter(|n| n != "." && n != "..")
             .collect();
         Ok(names)
     }
@@ -532,6 +539,81 @@ impl IndexNode for layout::Ext4OSInode {
             alloc::sync::Arc::new(spin::Mutex::new(new_ref)),
             self.ext4fs.clone(),
         ))
+    }
+
+    fn rename(
+        &self,
+        old_name: &str,
+        new_parent: &alloc::sync::Arc<dyn IndexNode>,
+        new_name: &str,
+    ) -> Result<(), SyscallErr> {
+        let new_parent_ext4 = new_parent
+            .as_any_ref()
+            .downcast_ref::<layout::Ext4OSInode>()
+            .ok_or(SyscallErr::EXDEV)?;
+
+        if !alloc::sync::Arc::ptr_eq(&self.ext4fs, &new_parent_ext4.ext4fs) {
+            return Err(SyscallErr::EXDEV);
+        }
+
+        let old_parent_num = self.inode.lock().inode_num;
+        let new_parent_num = new_parent_ext4.inode.lock().inode_num;
+
+        let mut result = Ext4DirSearchResult::new(Ext4DirEntry::default());
+        self.ext4fs
+            .dir_find_entry(old_parent_num, old_name, &mut result)
+            .map_err(|_| SyscallErr::ENOENT)?;
+        let child_inode_num = result.dentry.inode;
+        let child_ref = self.ext4fs.get_inode_ref(child_inode_num);
+        let is_dir = child_ref.inode.is_dir();
+
+        if old_parent_num == new_parent_num {
+            let mut parent_ref = self.ext4fs.get_inode_ref(old_parent_num);
+            self.ext4fs
+                .dir_add_entry(&mut parent_ref, &child_ref, new_name)
+                .map_err(|_| SyscallErr::ENOSPC)?;
+            let mut parent_ref2 = self.ext4fs.get_inode_ref(old_parent_num);
+            self.ext4fs
+                .dir_remove_entry(&mut parent_ref2, old_name)
+                .map_err(|_| SyscallErr::EIO)?;
+            Ok(())
+        } else {
+            let mut new_parent_ref = self.ext4fs.get_inode_ref(new_parent_num);
+            self.ext4fs
+                .dir_add_entry(&mut new_parent_ref, &child_ref, new_name)
+                .map_err(|_| SyscallErr::ENOSPC)?;
+
+            let mut old_parent_ref = self.ext4fs.get_inode_ref(old_parent_num);
+            self.ext4fs
+                .dir_remove_entry(&mut old_parent_ref, old_name)
+                .map_err(|_| SyscallErr::EIO)?;
+
+            if is_dir {
+                let mut old_p_ref = self.ext4fs.get_inode_ref(old_parent_num);
+                let links = old_p_ref.inode.links_count();
+                if links > 1 {
+                    old_p_ref.inode.set_links_count(links - 1);
+                    self.ext4fs.write_back_inode(&mut old_p_ref);
+                }
+
+                let mut new_p_ref = self.ext4fs.get_inode_ref(new_parent_num);
+                let links = new_p_ref.inode.links_count() + 1;
+                new_p_ref.inode.set_links_count(links);
+                self.ext4fs.write_back_inode(&mut new_p_ref);
+
+                let mut child_ref_mut = self.ext4fs.get_inode_ref(child_inode_num);
+                self.ext4fs
+                    .dir_remove_entry(&mut child_ref_mut, "..")
+                    .map_err(|_| SyscallErr::EIO)?;
+
+                let new_parent_for_dotdot = self.ext4fs.get_inode_ref(new_parent_num);
+                let mut child_ref_mut2 = self.ext4fs.get_inode_ref(child_inode_num);
+                self.ext4fs
+                    .dir_add_entry(&mut child_ref_mut2, &new_parent_for_dotdot, "..")
+                    .map_err(|_| SyscallErr::EIO)?;
+            }
+            Ok(())
+        }
     }
 
     fn link(
