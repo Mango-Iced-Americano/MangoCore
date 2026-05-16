@@ -580,14 +580,15 @@ impl Ext4FileSystem {
         }
 
         // no space in existing blocks, need to add new block
+        let new_iblock = total_blocks as u32;
         log::info!(
-            "[dir_add_entry] adding new block: parent_inode={}, name={}, child_inode={}, iblock={}",
+            "[dir_add_entry] adding new block: parent_inode={}, name={}, child_inode={}, new_iblock={}",
             parent.inode_num,
             name,
             child.inode_num,
-            iblock,
+            new_iblock,
         );
-        let new_block = self.insert_inode_pblk(parent, iblock as u32)?;
+        let new_block = self.insert_inode_pblk(parent, new_iblock)?;
 
         // load new block
         let mut new_ext4block = Block::load_offset(
