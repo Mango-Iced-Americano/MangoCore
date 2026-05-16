@@ -654,7 +654,7 @@ impl Ext4FileSystem {
             offset += rec_len;
         }
 
-        println!("[kernel direntry] No space in block for new entry");
+        log::trace!("[kernel direntry] No space in block for new entry");
         return Err(Errno::ENOSPC as isize);
     }
 

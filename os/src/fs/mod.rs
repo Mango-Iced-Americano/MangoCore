@@ -443,8 +443,11 @@ pub fn flush_preload() {
                 .expect("ramfs: failed to create /bin");
             vfs_lookup_parent("/bin/busybox").unwrap()
         });
-        let bin_busybox = parent.create("busybox", self::vfs::FileType::File, self::vfs::InodeMode::S_IRWXUGO)
-            .expect("ramfs: failed to create /bin/busybox");
+        let bin_busybox = match parent.find("busybox") {
+            Ok(existing) => existing,
+            Err(_) => parent.create("busybox", self::vfs::FileType::File, self::vfs::InodeMode::S_IRWXUGO)
+                .expect("ramfs: failed to create /bin/busybox"),
+        };
         let bin_file = self::vfs::File::new(bin_busybox, self::vfs::FileFlags::O_RDWR).unwrap();
         bin_file.write(unsafe {
             core::slice::from_raw_parts(sbusybox as *const u8, ebusybox as usize - sbusybox as usize)
