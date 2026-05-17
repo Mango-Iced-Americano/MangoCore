@@ -22,6 +22,23 @@ use super::vfs::IndexNode;
 use crate::config::{PAGE_SIZE, PAGE_SIZE_BITS};
 use crate::mm::{frame_alloc, FrameTracker};
 
+static PAGE_CACHE_REGISTRY: Mutex<Vec<Weak<PageCache>>> = Mutex::new(Vec::new());
+
+pub fn register_page_cache(pc: &Arc<PageCache>) {
+    PAGE_CACHE_REGISTRY.lock().push(Arc::downgrade(pc));
+}
+
+pub fn flush_all_page_caches() {
+    PAGE_CACHE_REGISTRY.lock().retain(|weak| {
+        if let Some(pc) = weak.upgrade() {
+            let _ = pc.writeback_all();
+            true
+        } else {
+            false
+        }
+    });
+}
+
 // ── PageState ────────────────────────────────────────────────────────────
 
 /// 页面状态，对标 Linux 的 `PG_*` 标志组合
@@ -163,12 +180,14 @@ pub struct PageCache {
 impl PageCache {
     /// 创建新的 PageCache
     pub fn new() -> Arc<Self> {
-        Arc::new(PageCache {
+        let pc = Arc::new(PageCache {
             inner: Mutex::new(InnerPageCache::new()),
             backend: Mutex::new(None),
             inode: Mutex::new(None),
             entries: Mutex::new(Vec::new()),
-        })
+        });
+        register_page_cache(&pc);
+        pc
     }
 
     /// 设置后端
@@ -189,6 +208,41 @@ impl PageCache {
     /// 获取页数
     pub fn page_count(&self) -> usize {
         self.inner.lock().page_count()
+    }
+
+    /// 检查页面是否在缓存中
+    pub fn contains_page(&self, page_index: usize) -> bool {
+        let entries = self.entries.lock();
+        page_index < entries.len() && entries[page_index].is_some()
+    }
+
+    /// 检查页面是否为脏
+    pub fn is_dirty(&self, page_index: usize) -> bool {
+        self.inner.lock().dirty_pages.contains(&page_index)
+    }
+
+    /// 获取脏页数量
+    pub fn dirty_count(&self) -> usize {
+        self.inner.lock().dirty_pages.len()
+    }
+
+    /// 获取缓存中的页面数量
+    pub fn cached_page_count(&self) -> usize {
+        self.entries.lock().iter().filter(|e| e.is_some()).count()
+    }
+
+    /// 获取页面状态
+    pub fn state_of(&self, page_index: usize) -> Option<PageState> {
+        let entries = self.entries.lock();
+        if page_index >= entries.len() {
+            return None;
+        }
+        entries[page_index].as_ref().map(|e| e.state())
+    }
+
+    /// 获取所有脏页索引的快照
+    pub fn dirty_pages_snapshot(&self) -> alloc::vec::Vec<usize> {
+        self.inner.lock().dirty_pages.iter().copied().collect()
     }
 
     // ── 页面获取 ────────────────────────────────────────────────────
@@ -405,7 +459,8 @@ impl PageCache {
                     Ok(())
                 }
                 Err(e) => {
-                    entry.set_state(PageState::Error);
+                    // Writeback failed: keep page Dirty so it can be retried
+                    entry.set_state(PageState::Dirty);
                     Err(e)
                 }
             }
@@ -485,11 +540,22 @@ impl PageCache {
     }
 
     /// 失效指定范围内的页面
+    /// 如果范围内存在脏页，返回错误而不静默丢弃数据
     pub fn invalidate_range(
         &self,
         start_index: usize,
         end_index: usize,
     ) -> Result<usize, SyscallErr> {
+        // 先检查范围内是否有脏页
+        {
+            let inner = self.inner.lock();
+            for page_index in start_index..end_index {
+                if inner.dirty_pages.contains(&page_index) {
+                    return Err(SyscallErr::EBUSY);
+                }
+            }
+        }
+
         let mut entries = self.entries.lock();
         let mut inner = self.inner.lock();
         let mut invalidated = 0;
@@ -660,13 +726,20 @@ impl PageCacheBackend for FatPageCacheBackend {
         if buf.len() < crate::config::PAGE_SIZE {
             return Err(SyscallErr::ENOBUFS);
         }
+        let ratio = crate::config::PAGE_SIZE / self.block_size;
         for block_off in 0..self.blocks_per_page {
             let start = block_off * self.block_size;
             match self.block_id_for_offset(index, block_off) {
-                Some(block_id) => {
+                Some(sec_id) => {
+                    // FAT32 sector 是 512 字节，BlockDevice 以 PAGE_SIZE/BLOCK_SZ(4096) 为单位
+                    let blk_id = sec_id / ratio;
+                    let blk_off = (sec_id % ratio) * self.block_size;
+                    let mut blk_buf = alloc::vec![0u8; crate::config::PAGE_SIZE];
                     self.fs
                         .block_device
-                        .read_block(block_id, &mut buf[start..start + self.block_size]);
+                        .read_block(blk_id, &mut blk_buf);
+                    buf[start..start + self.block_size]
+                        .copy_from_slice(&blk_buf[blk_off..blk_off + self.block_size]);
                 }
                 None => {
                     buf[start..start + self.block_size].fill(0);
@@ -680,12 +753,21 @@ impl PageCacheBackend for FatPageCacheBackend {
         if buf.len() < crate::config::PAGE_SIZE {
             return Err(SyscallErr::ENOBUFS);
         }
+        let ratio = crate::config::PAGE_SIZE / self.block_size;
         for block_off in 0..self.blocks_per_page {
             let start = block_off * self.block_size;
-            if let Some(block_id) = self.block_id_for_offset(index, block_off) {
+            if let Some(sec_id) = self.block_id_for_offset(index, block_off) {
+                let blk_id = sec_id / ratio;
+                let blk_off = (sec_id % ratio) * self.block_size;
+                let mut blk_buf = alloc::vec![0u8; crate::config::PAGE_SIZE];
                 self.fs
                     .block_device
-                    .write_block(block_id, &buf[start..start + self.block_size]);
+                    .read_block(blk_id, &mut blk_buf);
+                blk_buf[blk_off..blk_off + self.block_size]
+                    .copy_from_slice(&buf[start..start + self.block_size]);
+                self.fs
+                    .block_device
+                    .write_block(blk_id, &blk_buf);
             }
         }
         Ok(crate::config::PAGE_SIZE)
@@ -771,9 +853,15 @@ impl PageCacheBackend for Ext4PageCacheBackend {
         let fs = self.ext4fs.upgrade().ok_or(SyscallErr::EIO)?;
         for block_off in 0..self.blocks_per_page {
             let start = block_off * self.block_size;
-            if let Some(block_id) = self.block_id_for_offset(index, block_off) {
-                fs.block_device
-                    .write_block(block_id, &buf[start..start + self.block_size]);
+            match self.block_id_for_offset(index, block_off) {
+                Some(block_id) => {
+                    fs.block_device
+                        .write_block(block_id, &buf[start..start + self.block_size]);
+                }
+                None => {
+                    // Unmapped block — cannot write; keep page dirty for retry
+                    return Err(SyscallErr::EIO);
+                }
             }
         }
         Ok(crate::config::PAGE_SIZE)

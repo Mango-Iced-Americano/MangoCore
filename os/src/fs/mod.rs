@@ -1,11 +1,12 @@
-mod cache;
 pub mod dev;
-mod ext4;
+pub mod ext4;
 pub mod fat32;
 mod filesystem;
 pub mod iov;
 mod layout;
 mod page_cache;
+pub mod page_cache_test;
+pub use page_cache::flush_all_page_caches;
 pub mod poll;
 pub mod ramfs;
 #[cfg(feature = "swap")]
@@ -27,9 +28,7 @@ pub use self::fat32::DiskInodeType;
 pub use crate::drivers::block::BlockDevice;
 use crate::drivers::BLOCK_DEVICE;
 
-pub use self::cache::PageCache;
 use alloc::{string::String, sync::Arc};
-use self::cache::BlockCacheManager;
 use core::sync::atomic::{AtomicBool, Ordering};
 pub use dirent::Dirent;
 use lazy_static::*;
@@ -57,14 +56,12 @@ lazy_static! {
             self::filesystem::FS_Type::Fat32 => {
                 let efs = self::fat32::EasyFileSystem::open(
                     BLOCK_DEVICE.clone(),
-                    Arc::new(spin::Mutex::new(BlockCacheManager::new()))
                 );
                 self::vfs::MountFS::new(efs, self::vfs::MountFlags::empty())
             }
             self::filesystem::FS_Type::Ext4 => {
                 let ext4 = self::ext4::ext4fs::Ext4FileSystem::open_ext4rs(
                     BLOCK_DEVICE.clone(),
-                    Arc::new(spin::Mutex::new(BlockCacheManager::new()))
                 );
                 self::vfs::MountFS::new(ext4, self::vfs::MountFlags::empty())
             }
@@ -147,7 +144,7 @@ pub fn parse_path(path: &str) -> alloc::vec::Vec<alloc::string::String> {
 }
 
 /// 符号链接最大跟随层数
-const MAX_SYMLINK_FOLLOW: usize = 8;
+const MAX_SYMLINK_FOLLOW: usize = 40;
 
 /// 核心路径查找 — 支持符号链接跟随。
 ///
@@ -414,60 +411,47 @@ pub fn flush_preload() {
     ) {
         crate::mm::frame_dealloc(ppn);
     }
-    let bash = create_or_open_file("bash").unwrap();
-    bash.write(unsafe {
-        core::slice::from_raw_parts(sbash as *const u8, ebash as usize - sbash as usize)
-    }).unwrap();
+    // bash/busybox/os_test.conf/fs_test: 失败不阻塞启动
+    let _ = create_or_open_file("bash").map(|f| {
+        let _ = f.write(unsafe { core::slice::from_raw_parts(sbash as *const u8, ebash as usize - sbash as usize) });
+    });
     for ppn in crate::mm::PPNRange::new(
         crate::mm::PhysAddr::from(sbash as usize).floor(),
         crate::mm::PhysAddr::from(ebash as usize).floor(),
     ) {
         crate::mm::frame_dealloc(ppn);
     }
-    let busybox = create_or_open_file("busybox").unwrap();
-    busybox.write(unsafe {
-        core::slice::from_raw_parts(sbusybox as *const u8, ebusybox as usize - sbusybox as usize)
-    }).unwrap();
+    let _ = create_or_open_file("busybox").map(|f| {
+        let _ = f.write(unsafe { core::slice::from_raw_parts(sbusybox as *const u8, ebusybox as usize - sbusybox as usize) });
+    });
     for ppn in crate::mm::PPNRange::new(
         crate::mm::PhysAddr::from(sbusybox as usize).floor(),
         crate::mm::PhysAddr::from(ebusybox as usize).floor(),
     ) {
         crate::mm::frame_dealloc(ppn);
     }
-    // 复制 busybox 到 /bin/busybox（initproc 期望的路径）
+    // /bin/busybox: 可能失败，忽略
     {
-        let (parent, _) = vfs_lookup_parent("/bin/busybox").unwrap_or_else(|_| {
-            // /bin 不存在，先创建
+        let _ = vfs_lookup_parent("/bin/busybox").or_else(|_| {
             let root = vfs_root().mountpoint_root_inode();
-            root.create("bin", self::vfs::FileType::Dir, self::vfs::InodeMode::S_IRWXUGO)
-                .expect("ramfs: failed to create /bin");
-            vfs_lookup_parent("/bin/busybox").unwrap()
+            let _ = root.create("bin", self::vfs::FileType::Dir, self::vfs::InodeMode::S_IRWXUGO);
+            vfs_lookup_parent("/bin/busybox")
+        }).map(|(parent, _)| {
+            if parent.find("busybox").is_err() {
+                let _ = parent.create("busybox", self::vfs::FileType::File, self::vfs::InodeMode::S_IRWXUGO);
+            }
         });
-        let bin_busybox = match parent.find("busybox") {
-            Ok(existing) => existing,
-            Err(_) => parent.create("busybox", self::vfs::FileType::File, self::vfs::InodeMode::S_IRWXUGO)
-                .expect("ramfs: failed to create /bin/busybox"),
-        };
-        let bin_file = self::vfs::File::new(bin_busybox, self::vfs::FileFlags::O_RDWR).unwrap();
-        bin_file.write(unsafe {
-            core::slice::from_raw_parts(sbusybox as *const u8, ebusybox as usize - sbusybox as usize)
-        }).unwrap();
     }
     match file_size("os_test.conf") {
         Ok(size) => {
-            log::info!(
-                "[kernel] flush_preload: keep existing /os_test.conf size={}",
-                size
-            );
+            log::info!("[kernel] flush_preload: keep existing /os_test.conf size={}", size);
         }
         Err(_) => {
-            let osconfig = create_or_open_file("os_test.conf").unwrap();
-            osconfig.write(unsafe {
-                core::slice::from_raw_parts(
-                    sosconfig as *const u8,
-                    eosconfig as usize - sosconfig as usize,
-                )
-            }).unwrap();
+            let _ = create_or_open_file("os_test.conf").map(|f| {
+                let _ = f.write(unsafe {
+                    core::slice::from_raw_parts(sosconfig as *const u8, eosconfig as usize - sosconfig as usize)
+                });
+            });
         }
     }
     for ppn in crate::mm::PPNRange::new(
@@ -477,10 +461,9 @@ pub fn flush_preload() {
         crate::mm::frame_dealloc(ppn);
     }
     {
-        let fstest = create_or_open_file("fs_test").unwrap();
-        fstest.write(unsafe {
-            core::slice::from_raw_parts(sfstest as *const u8, efstest as usize - sfstest as usize)
-        }).unwrap();
+        let _ = create_or_open_file("fs_test").map(|f| {
+            let _ = f.write(unsafe { core::slice::from_raw_parts(sfstest as *const u8, efstest as usize - sfstest as usize) });
+        });
         for ppn in crate::mm::PPNRange::new(
             crate::mm::PhysAddr::from(sfstest as usize).floor(),
             crate::mm::PhysAddr::from(efstest as usize).floor(),

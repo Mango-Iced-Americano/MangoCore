@@ -35,6 +35,20 @@ bitflags! {
     }
 }
 
+impl InodeFileType {
+    pub fn to_dir_entry_type(&self) -> crate::fs::ext4::direntry::DirEntryType {
+        use crate::fs::ext4::direntry::DirEntryType;
+        if self.contains(InodeFileType::S_IFREG) { DirEntryType::EXT4_DE_REG_FILE }
+        else if self.contains(InodeFileType::S_IFDIR) { DirEntryType::EXT4_DE_DIR }
+        else if self.contains(InodeFileType::S_IFLNK) { DirEntryType::EXT4_DE_SYMLINK }
+        else if self.contains(InodeFileType::S_IFCHR) { DirEntryType::EXT4_DE_CHRDEV }
+        else if self.contains(InodeFileType::S_IFBLK) { DirEntryType::EXT4_DE_BLKDEV }
+        else if self.contains(InodeFileType::S_IFIFO) { DirEntryType::EXT4_DE_FIFO }
+        else if self.contains(InodeFileType::S_IFSOCK) { DirEntryType::EXT4_DE_SOCK }
+        else { DirEntryType::EXT4_DE_UNKNOWN }
+    }
+}
+
 bitflags! {
     pub struct InodePerm: u16 {
         const S_IREAD = 0x0100;
@@ -388,6 +402,49 @@ impl Ext4InodeRef {
     }
 }
 
+// ── Phase 4: CachedExt4Inode ──────────────────────────────────────────────
+//
+// DragonOS 底层是 another_ext4 库（可能有内部缓存），当前内核自己实现 ext4
+// 磁盘逻辑，因此需要此层缓存来减少 get_inode_ref 的磁盘 I/O。
+//
+// 当前策略:
+//   - 缓存 inode 数据 + inode table 位置，支持原地修改后写回
+//   - write_back_inode 不再绕过缓存直接写盘
+
+/// 带缓存的 ext4 inode，记录其在 inode table 中的位置，支持原地写回
+#[derive(Debug, Clone)]
+pub struct CachedExt4Inode {
+    pub ino: u32,
+    pub inode: Ext4Inode,
+    /// inode table block 起始位置（字节偏移）
+    pub inode_table_block: usize,
+    /// inode 在 block 内的偏移
+    pub offset_in_block: usize,
+    /// 是否有未写回的变更
+    pub dirty: bool,
+}
+
+impl CachedExt4Inode {
+    /// 从 Ext4InodeRef 创建，但需要额外提供 inode table 位置信息
+    pub fn from_ref(inode_ref: &Ext4InodeRef, table_block: usize, offset: usize) -> Self {
+        Self {
+            ino: inode_ref.inode_num,
+            inode: inode_ref.inode,
+            inode_table_block: table_block,
+            offset_in_block: offset,
+            dirty: false,
+        }
+    }
+
+    /// 返回 Ext4InodeRef 快照（不包含位置信息）
+    pub fn to_ref(&self) -> Ext4InodeRef {
+        Ext4InodeRef {
+            inode_num: self.ino,
+            inode: self.inode,
+        }
+    }
+}
+
 impl Ext4Inode {
     /// Get the depth of the extent tree from an inode.
     pub fn root_header_depth(&self) -> u16 {
@@ -559,10 +616,13 @@ impl Ext4Inode {
 
         let mut buf = vec![0u8; block_size];
         block_device.read_block(block_id, &mut buf);
+        super::counters::inc_counter!(super::counters::BLOCK_READ_TOTAL);
+        super::counters::inc_counter!(super::counters::INODE_TABLE_READ);
 
-        // 拷贝时使用 write_len，确保不越界覆盖邻居
         buf[offset..offset + write_len].copy_from_slice(&data);
         block_device.write_block(block_id, &buf);
+        super::counters::inc_counter!(super::counters::BLOCK_WRITE_TOTAL);
+        super::counters::inc_counter!(super::counters::INODE_TABLE_WRITE);
     }
 }
 
@@ -615,14 +675,15 @@ impl Ext4FileSystem {
         inode_table_blk_num as usize * self.block_size + index as usize * inode_size as usize
     }
 
-    /// 从磁盘加载inoderef对象
-    pub fn get_inode_ref(&self, inode_num: u32) -> Ext4InodeRef {
+    /// 直接从磁盘读取 inode，不走 cache。仅用于 get_inode_cached miss 路径。
+    pub(crate) fn read_inode_from_disk_uncached(&self, inode_num: u32) -> Ext4InodeRef {
+        super::counters::inc_counter!(super::counters::INODE_TABLE_READ);
+        debug_assert!(self.block_size == crate::hal::BLOCK_SZ || self.block_size == 1024 || self.block_size == 2048,
+            "block_size corrupted: {}", self.block_size);
         let offset = self.inode_disk_pos(inode_num);
         let mut ext4block = Block::load_offset(self.block_device.clone(), offset, self.block_size);
-        // println!("[kernel] ext4block.diskoffset is {:?}", ext4block.disk_offset);
-        // println!("[kernel] ext4block.data is {:?}", ext4block.data);
         let blk_offset = offset % self.block_size;
-        let inode: &mut Ext4Inode = ext4block.read_offset_as_mut(offset % self.block_size);
+        let inode: &mut Ext4Inode = ext4block.read_offset_as_mut(blk_offset);
         log::debug!(
             "[Inode Read] Ino: {}, DiskPos: {}, ReadMode: 0o{:o}",
             inode_num,
@@ -635,49 +696,97 @@ impl Ext4FileSystem {
         }
     }
 
-    /// 从磁盘加载带Arc包装的inoderef对象
+    /// 从磁盘加载 inode ref 对象
+    ///
+    /// Phase 4: 现在是 legacy snapshot wrapper。
+    /// 内部委托给 get_inode_snapshot（使用 inode_cache）。
+    pub fn get_inode_ref(&self, inode_num: u32) -> Ext4InodeRef {
+        self.get_inode_snapshot(inode_num)
+    }
+
+    /// 从磁盘加载带 Arc 包装的 inoderef 对象
+    ///
+    /// Phase 4: 委托给 get_inode_snapshot (走 cache)。
     pub fn get_inode_ref_arc(&self, inode_num: u32) -> Arc<Ext4InodeRef> {
-        let offset = self.inode_disk_pos(inode_num);
-
-        let mut ext4block = Block::load_offset(self.block_device.clone(), offset, self.block_size);
-
-        let inode: &mut Ext4Inode = ext4block.read_offset_as_mut(offset % self.block_size);
-        Arc::new(Ext4InodeRef {
-            inode_num: inode_num,
-            inode: *inode,
-        })
+        Arc::new(self.get_inode_snapshot(inode_num))
     }
 
-    /// 带校验和回写inode信息
+    /// 带校验和回写 inode 信息
+    ///
+    /// Phase 4: 先更新 inode_cache，再 mark dirty 并 flush。
+    /// 不再直接写盘绕过 cache。
     pub fn write_back_inode(&self, inode_ref: &mut Ext4InodeRef) {
-        let inode_pos = self.inode_disk_pos(inode_ref.inode_num);
-
-        let on_disk_size = self.superblock.inode_size as usize;
-        // make sure self.superblock is up-to-date
-        inode_ref
-            .inode
-            .set_inode_checksum(&self.superblock, inode_ref.inode_num);
-        inode_ref.inode.sync_inode_to_disk(
-            self.block_device.clone(),
-            inode_pos,
-            on_disk_size,
-            inode_ref.inode_num,
-            self.block_size,
-        );
+        let ino = inode_ref.inode_num;
+        {
+            let mut cache = self.inode_cache.lock();
+            if let Some(cached) = cache.get(&ino) {
+                let mut guard = cached.lock();
+                guard.inode = inode_ref.inode;
+                guard.dirty = true;
+            } else {
+                let offset = self.inode_disk_pos(ino);
+                let table_block = offset / self.block_size * self.block_size;
+                let blk_offset = offset % self.block_size;
+                let cached = CachedExt4Inode {
+                    ino,
+                    inode: inode_ref.inode,
+                    inode_table_block: table_block,
+                    offset_in_block: blk_offset,
+                    dirty: true,
+                };
+                cache.insert(ino, alloc::sync::Arc::new(spin::Mutex::new(cached)));
+            }
+        }
+        let _ = self.flush_inode(ino);
     }
 
-    /// 不带校验和回写inode信息
+    /// 不带校验和回写 inode 信息
+    ///
+    /// Phase 4: 先更新 inode_cache 再 flush（跳过 checksum）。
     pub fn write_back_inode_without_csum(&self, inode_ref: &Ext4InodeRef) {
-        let inode_pos = self.inode_disk_pos(inode_ref.inode_num);
-        //println!("[kernel write_back_inode_without_csum] inode_pos: {:?}, inode_num: {}", inode_pos, inode_ref.inode_num);
+        let ino = inode_ref.inode_num;
+        {
+            let mut cache = self.inode_cache.lock();
+            if let Some(cached) = cache.get(&ino) {
+                let mut guard = cached.lock();
+                guard.inode = inode_ref.inode;
+                guard.dirty = true;
+            } else {
+                let offset = self.inode_disk_pos(ino);
+                let table_block = offset / self.block_size * self.block_size;
+                let blk_offset = offset % self.block_size;
+                let cached = CachedExt4Inode {
+                    ino,
+                    inode: inode_ref.inode,
+                    inode_table_block: table_block,
+                    offset_in_block: blk_offset,
+                    dirty: true,
+                };
+                cache.insert(ino, alloc::sync::Arc::new(spin::Mutex::new(cached)));
+            }
+        }
+        let cached = match self.inode_cache.lock().get(&ino).cloned() {
+            Some(c) => c,
+            None => return,
+        };
+        let guard = cached.lock();
+        if !guard.dirty {
+            return;
+        }
+        let inode_pos = guard.inode_table_block + guard.offset_in_block;
         let on_disk_size = self.superblock.inode_size as usize;
-        inode_ref.inode.sync_inode_to_disk(
+        guard.inode.sync_inode_to_disk(
             self.block_device.clone(),
             inode_pos,
             on_disk_size,
-            inode_ref.inode_num,
+            guard.ino,
             self.block_size,
         );
+        drop(guard);
+        if let Some(cached) = self.inode_cache.lock().get(&ino) {
+            cached.lock().dirty = false;
+        }
+        super::counters::inc_counter!(super::counters::INODE_TABLE_WRITE);
     }
 
     /// 获取逻辑块号对应的物理块号
@@ -916,13 +1025,7 @@ impl Ext4FileSystem {
     /// # 返回值
     /// + `Result<u32>` - inode 号
     pub fn alloc_inode(&self, is_dir: bool) -> Result<u32, isize> {
-        // 分配inode号
-        let inode_num = self.ialloc_alloc_inode(is_dir);
-        if let Ok(inode_num) = inode_num {
-            Ok(inode_num)
-        } else {
-            panic!("alloc_inode failed:{:?}", inode_num);
-        }
+        self.ialloc_alloc_inode(is_dir)
     }
 
     pub fn correspond_inode_mode(&self, filetype: u8) -> u16 {

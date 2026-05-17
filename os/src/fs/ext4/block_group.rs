@@ -65,6 +65,7 @@ impl Ext4BlockGroup {
         let offset = (block_group_idx % dsc_cnt) * super_block.desc_size as usize;
         // 从块设备读取块
         let ext4block = Block::load_offset(block_device, block_id * block_size, block_size);
+        super::counters::inc_counter!(super::counters::GROUP_DESC_READ);
         //print_hex(&ext4block.data);
         // 使用Block的read_offset_as方法将数据读取为Ext4BlockGroup
         let bg: Ext4BlockGroup = ext4block.read_offset_as(offset);
@@ -266,6 +267,8 @@ impl Ext4BlockGroup {
         // );
         let mut origin_block_data = vec![0u8; BLOCK_SIZE];
         block_device.read_block(block_id, &mut origin_block_data);
+        super::counters::inc_counter!(super::counters::BLOCK_READ_TOTAL);
+        super::counters::inc_counter!(super::counters::GROUP_DESC_READ);
         // 然后按偏移量将数据覆写到读取的块数据
         for i in offset..offset + data.len() {
             origin_block_data[i] = data[i - offset];
@@ -273,6 +276,8 @@ impl Ext4BlockGroup {
         // origin_block_data[offset..offset + data.len()].copy_from_slice(data);
         // 最后写入块
         block_device.write_block(block_id, &origin_block_data);
+        super::counters::inc_counter!(super::counters::BLOCK_WRITE_TOTAL);
+        super::counters::inc_counter!(super::counters::GROUP_DESC_WRITE);
         // block_device.write_block(block_id, buf);
     }
 
@@ -381,6 +386,7 @@ impl Block {
         offset: usize,
         block_size: usize,
     ) -> Self {
+        super::counters::inc_counter!(super::counters::BLOCK_READ_TOTAL);
         let mut buf = vec![0u8; block_size];
         block_device.read_block(block_id, &mut buf);
         let data = buf.to_vec();
@@ -519,6 +525,7 @@ impl Block {
         //     self.data.len()
         // );
         block_device.write_block(block_id, &self.data);
+        super::counters::inc_counter!(super::counters::BLOCK_WRITE_TOTAL);
     }
 }
 

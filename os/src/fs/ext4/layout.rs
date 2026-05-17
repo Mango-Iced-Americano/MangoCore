@@ -17,9 +17,11 @@ use crate::{
     utils::error::SyscallErr,
 };
 use alloc::{
+    collections::BTreeMap,
     format,
     string::{String, ToString},
     sync::Arc,
+    sync::Weak,
     vec::Vec,
 };
 use spin::{Mutex, RwLock};
@@ -29,13 +31,14 @@ use core::{
     fmt::Debug,
     mem, panic,
     ptr::{addr_of, addr_of_mut, read},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use super::{
     direntry::Ext4DirEntry,
     ext4fs::Ext4FileSystem,
     file::{Ext4FileContent, Ext4FileContentWrapper},
-    Cache, Ext4Inode, Ext4InodeRef, InodePerm,
+    Ext4Inode, Ext4InodeRef, InodePerm,
 };
 use crate::fs::page_cache::{Ext4PageCacheBackend, PageCache as NewPageCache, PageCacheBackend};
 
@@ -49,7 +52,17 @@ pub enum ExtType {
     Ext4,
 }
 
-// 对Ext4Inode的一层封装，用于构成与OSInode同级别的结构体
+// ── Ext4OSInode: VFS-facing ext4 inode object ──
+//
+// 设计参考 DragonOS kernel/src/filesystem/ext4/inode.rs:
+//   - LockedExt4Inode(Mutex<Ext4Inode>)
+//   - children: BTreeMap<DName, Arc<LockedExt4Inode>>  (强引用)
+//   - cached_file_size, metadata_dirty
+//
+// MangoCore 差异:
+//   - children 使用 Weak<dyn IndexNode> 避免循环引用
+//   - inode data 使用 Arc<Mutex<Ext4InodeRef>> (底层磁盘快照)
+//   - DragonOS 底层是 another_ext4, 当前内核自己实现 ext4 磁盘逻辑
 pub struct Ext4OSInode {
     /// 是否可读
     pub(super) readable: bool,
@@ -69,6 +82,23 @@ pub struct Ext4OSInode {
     pub(super) inode_lock: Arc<RwLock<InodeLock>>,
     /// 新 PageCache（懒初始化，仅用于普通文件数据）
     pub(super) new_page_cache: Mutex<Option<Arc<NewPageCache>>>,
+
+    // ── Phase 2: children cache (reference: DragonOS Ext4Inode.children) ──
+    //
+    // 目录 inode 维护的子项缓存，加速同目录 repeated lookup/find/readlink。
+    // 使用 Weak<dyn IndexNode> 避免循环引用（parent → child → parent）。
+    // 所有目录修改操作（create/symlink/mkdir/unlink/rmdir/rename）必须维护一致性。
+    //
+    // 非目录 inode 此字段为空且不使用。
+    pub(super) children: Mutex<BTreeMap<String, alloc::sync::Arc<dyn crate::fs::vfs::IndexNode>>>,
+
+    // ── Phase 3: per-inode metadata cache ──
+    // DragonOS 参考: Ext4Inode.cached_file_size / metadata_dirty
+    // cached_symlink_target: MangoCore 针对 fast symlink 的增强
+    // cached_file_size: u64::MAX = unset sentinel
+    pub(super) cached_file_size: AtomicU64,
+    pub(super) cached_symlink_target: Mutex<Option<alloc::string::String>>,
+    pub(super) metadata_dirty: AtomicBool,
 }
 
 impl core::fmt::Debug for Ext4OSInode {
@@ -102,12 +132,27 @@ impl Ext4OSInode {
             return Some(pc.clone());
         }
         let inode_num = self.inode.lock().inode_num;
+
+        {
+            let registry = self.ext4fs.page_caches.lock();
+            if let Some(weak) = registry.get(&inode_num) {
+                if let Some(pc) = weak.upgrade() {
+                    *cache_opt = Some(pc.clone());
+                    return Some(pc);
+                }
+            }
+        }
+
         let backend = Arc::new(Ext4PageCacheBackend::new(
             Arc::downgrade(&self.ext4fs),
             inode_num,
         ));
         let pc = NewPageCache::new();
         pc.set_backend(backend);
+        self.ext4fs
+            .page_caches
+            .lock()
+            .insert(inode_num, Arc::downgrade(&pc));
         *cache_opt = Some(pc.clone());
         Some(pc)
     }

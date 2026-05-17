@@ -73,6 +73,7 @@ const SYSCALL_STATX: usize = 291;
 const SYSCALL_LS: usize = 500;
 const SYSCALL_SHUTDOWN: usize = 501;
 const SYSCALL_CLEAR: usize = 502;
+const SYSCALL_EXT4_COUNTERS: usize = 503;
 const SYSCALL_OPEN: usize = 506; //where?
 const SYSCALL_GET_TIME: usize = 1690; //you mean get time of day by 169?
 
@@ -480,4 +481,8 @@ pub fn sys_fstat(fd: usize, buf: &mut Stat) -> isize {
 
 pub fn sys_ftruncate(fd: usize, length: isize) -> isize {
     syscall(SYSCALL_FTRUNCATE, [fd, length as usize, 0])
+}
+
+pub fn sys_ext4_counters(cmd: usize, arg1: usize, arg2: usize) -> isize {
+    syscall(SYSCALL_EXT4_COUNTERS, [cmd, arg1, arg2])
 }

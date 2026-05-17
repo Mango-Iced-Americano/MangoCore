@@ -1424,174 +1424,191 @@ pub extern "C" fn _start() -> ! {
 }
 
 #[no_mangle]
+fn run_test(label: &str, test_fn: fn() -> bool) -> bool {
+    sys_ext4_counters(2, 0, 0);  // reset counters
+    let ok = test_fn();
+    // dump with label (need null-terminated for kernel's translated_str)
+    let mut label_buf = [0u8; 64];
+    let copy_len = label.len().min(63);
+    label_buf[..copy_len].copy_from_slice(&label.as_bytes()[..copy_len]);
+    sys_ext4_counters(3, label_buf.as_ptr() as usize, copy_len);
+    ok
+}
+
+#[no_mangle]
 fn main(_argc: usize, _argv: &[&str]) -> i32 {
     println!("=== FS Test Suite ===");
+    sys_ext4_counters(0, 0, 0);  // enable counters
 
     let mut passed = 0;
     let mut failed = 0;
 
     println!("[1/51] mkdir");
-    if test_mkdir() { passed += 1; } else { failed += 1; }
+    if run_test("mkdir", test_mkdir) { passed += 1; } else { failed += 1; }
 
     println!("[2/51] file create + write");
-    if test_create_and_write() { passed += 1; } else { failed += 1; }
+    if run_test("create_and_write", test_create_and_write) { passed += 1; } else { failed += 1; }
 
     println!("[3/51] file read");
-    if test_read() { passed += 1; } else { failed += 1; }
+    if run_test("read", test_read) { passed += 1; } else { failed += 1; }
 
     println!("[4/51] symlink");
-    if test_symlink() { passed += 1; } else { failed += 1; }
+    if run_test("symlink", test_symlink) { passed += 1; } else { failed += 1; }
 
     println!("[5/51] readlink");
-    if test_readlink() { passed += 1; } else { failed += 1; }
+    if run_test("readlink", test_readlink) { passed += 1; } else { failed += 1; }
 
     println!("[6/51] read via symlink");
-    if test_read_via_symlink() { passed += 1; } else { failed += 1; }
+    if run_test("read_via_symlink", test_read_via_symlink) { passed += 1; } else { failed += 1; }
 
     println!("[7/51] unlink + rmdir");
-    if test_unlink() && test_rmdir() { passed += 1; } else { failed += 1; }
+    sys_ext4_counters(2, 0, 0);
+    let ok = test_unlink() && test_rmdir();
+    let label = "unlink+rmdir\0";
+    sys_ext4_counters(3, label.as_ptr() as usize, 12);
+    if ok { passed += 1; } else { failed += 1; }
 
     println!("[8/51] dangling symlink");
-    if test_dangling_symlink() { passed += 1; } else { failed += 1; }
+    if run_test("dangling_symlink", test_dangling_symlink) { passed += 1; } else { failed += 1; }
 
     println!("[9/51] ELOOP detection");
-    if test_eloop() { passed += 1; } else { failed += 1; }
+    if run_test("eloop", test_eloop) { passed += 1; } else { failed += 1; }
 
     println!("[10/51] symlink chain");
-    if test_symlink_chain() { passed += 1; } else { failed += 1; }
+    if run_test("symlink_chain", test_symlink_chain) { passed += 1; } else { failed += 1; }
 
     println!("[11/51] O_CREAT|O_EXCL");
-    if test_excl_create() { passed += 1; } else { failed += 1; }
+    if run_test("excl_create", test_excl_create) { passed += 1; } else { failed += 1; }
 
     println!("[12/51] readlink on regular file");
-    if test_readlink_on_regular() { passed += 1; } else { failed += 1; }
+    if run_test("readlink_on_regular", test_readlink_on_regular) { passed += 1; } else { failed += 1; }
 
     println!("[13/51] unlink symlink preserves target");
-    if test_unlink_symlink_preserves_target() { passed += 1; } else { failed += 1; }
+    if run_test("unlink_symlink_preserves_target", test_unlink_symlink_preserves_target) { passed += 1; } else { failed += 1; }
 
     println!("[14/51] hard link");
-    if test_hard_link() { passed += 1; } else { failed += 1; }
+    if run_test("hard_link", test_hard_link) { passed += 1; } else { failed += 1; }
 
     println!("[15/51] hard link to dir rejected");
-    if test_hard_link_dir_rejected() { passed += 1; } else { failed += 1; }
+    if run_test("hard_link_dir_rejected", test_hard_link_dir_rejected) { passed += 1; } else { failed += 1; }
 
     println!("[16/51] lseek");
-    if test_lseek() { passed += 1; } else { failed += 1; }
+    if run_test("lseek", test_lseek) { passed += 1; } else { failed += 1; }
 
     println!("[17/51] rename file");
-    if test_rename_file() { passed += 1; } else { failed += 1; }
+    if run_test("rename_file", test_rename_file) { passed += 1; } else { failed += 1; }
 
     println!("[18/51] rename directory");
-    if test_rename_dir() { passed += 1; } else { failed += 1; }
+    if run_test("rename_dir", test_rename_dir) { passed += 1; } else { failed += 1; }
 
     println!("[19/51] fstatat");
-    if test_fstatat() { passed += 1; } else { failed += 1; }
+    if run_test("fstatat", test_fstatat) { passed += 1; } else { failed += 1; }
 
     println!("[20/51] ftruncate");
-    if test_ftruncate() { passed += 1; } else { failed += 1; }
+    if run_test("ftruncate", test_ftruncate) { passed += 1; } else { failed += 1; }
 
     println!("[21/51] getdents64");
-    if test_getdents64() { passed += 1; } else { failed += 1; }
+    if run_test("getdents64", test_getdents64) { passed += 1; } else { failed += 1; }
 
     // ── A组: 高级 read/write 测试 ──────────────────────────
 
     println!("[22/51] read empty file");
-    if test_read_empty() { passed += 1; } else { failed += 1; }
+    if run_test("read_empty", test_read_empty) { passed += 1; } else { failed += 1; }
 
     println!("[23/51] read past EOF");
-    if test_read_past_eof() { passed += 1; } else { failed += 1; }
+    if run_test("read_past_eof", test_read_past_eof) { passed += 1; } else { failed += 1; }
 
     println!("[24/51] read data integrity (256B + partial)");
-    if test_read_data_integrity() { passed += 1; } else { failed += 1; }
+    if run_test("read_data_integrity", test_read_data_integrity) { passed += 1; } else { failed += 1; }
 
     println!("[25/51] read bad fd -> EBADF");
-    if test_read_bad_fd() { passed += 1; } else { failed += 1; }
+    if run_test("read_bad_fd", test_read_bad_fd) { passed += 1; } else { failed += 1; }
 
     println!("[26/51] read on dir -> EISDIR");
-    if test_read_dir() { passed += 1; } else { failed += 1; }
+    if run_test("read_dir", test_read_dir) { passed += 1; } else { failed += 1; }
 
     println!("[27/51] write readonly fd -> EBADF");
-    if test_write_readonly() { passed += 1; } else { failed += 1; }
+    if run_test("write_readonly", test_write_readonly) { passed += 1; } else { failed += 1; }
 
     println!("[28/51] O_APPEND + lseek atomicity");
-    if test_write_append() { passed += 1; } else { failed += 1; }
+    if run_test("write_append", test_write_append) { passed += 1; } else { failed += 1; }
 
     println!("[29/51] write varying sizes 1..4096");
-    if test_write_varying_sizes() { passed += 1; } else { failed += 1; }
+    if run_test("write_varying_sizes", test_write_varying_sizes) { passed += 1; } else { failed += 1; }
 
     println!("[30/51] overwrite middle of file");
-    if test_write_overwrite_middle() { passed += 1; } else { failed += 1; }
+    if run_test("write_overwrite_middle", test_write_overwrite_middle) { passed += 1; } else { failed += 1; }
 
     println!("[31/51] write bad fd -> EBADF");
-    if test_write_bad_fd() { passed += 1; } else { failed += 1; }
+    if run_test("write_bad_fd", test_write_bad_fd) { passed += 1; } else { failed += 1; }
 
     // ── B组: 高级 lseek 测试 ──────────────────────────────
 
     println!("[32/51] lseek SEEK_END + negative offset");
-    if test_lseek_seek_end() { passed += 1; } else { failed += 1; }
+    if run_test("lseek_seek_end", test_lseek_seek_end) { passed += 1; } else { failed += 1; }
 
     println!("[33/51] lseek bad whence -> EINVAL");
-    if test_lseek_bad_whence() { passed += 1; } else { failed += 1; }
+    if run_test("lseek_bad_whence", test_lseek_bad_whence) { passed += 1; } else { failed += 1; }
 
     println!("[34/51] lseek on pipe -> ESPIPE");
-    if test_lseek_pipe() { passed += 1; } else { failed += 1; }
+    if run_test("lseek_pipe", test_lseek_pipe) { passed += 1; } else { failed += 1; }
 
     println!("[35/51] lseek beyond EOF + hole read");
-    if test_lseek_hole_read() { passed += 1; } else { failed += 1; }
+    if run_test("lseek_hole_read", test_lseek_hole_read) { passed += 1; } else { failed += 1; }
 
     println!("[36/51] lseek chain: SET→CUR→END");
-    if test_lseek_chain() { passed += 1; } else { failed += 1; }
+    if run_test("lseek_chain", test_lseek_chain) { passed += 1; } else { failed += 1; }
 
     // ── C组: open/close 错误路径 ───────────────────────────
 
     println!("[37/51] open nonexistent -> ENOENT");
-    if test_open_noent() { passed += 1; } else { failed += 1; }
+    if run_test("open_noent", test_open_noent) { passed += 1; } else { failed += 1; }
 
     println!("[38/51] open dir as file -> EISDIR");
-    if test_open_dir_as_file() { passed += 1; } else { failed += 1; }
+    if run_test("open_dir_as_file", test_open_dir_as_file) { passed += 1; } else { failed += 1; }
 
     println!("[39/51] O_TRUNC (size=0 + data lost)");
-    if test_open_trunc() { passed += 1; } else { failed += 1; }
+    if run_test("open_trunc", test_open_trunc) { passed += 1; } else { failed += 1; }
 
     println!("[40/51] close twice -> EBADF");
-    if test_close_twice() { passed += 1; } else { failed += 1; }
+    if run_test("close_twice", test_close_twice) { passed += 1; } else { failed += 1; }
 
     println!("[41/51] open/close 32 times");
-    if test_open_close_many() { passed += 1; } else { failed += 1; }
+    if run_test("open_close_many", test_open_close_many) { passed += 1; } else { failed += 1; }
 
     println!("[42/51] open existing file (no O_CREAT)");
-    if test_open_create_existing() { passed += 1; } else { failed += 1; }
+    if run_test("open_create_existing", test_open_create_existing) { passed += 1; } else { failed += 1; }
 
     // ── D组: 压力/边界测试 ─────────────────────────────────
 
     println!("[43/51] stress: create 50 files + verify");
-    if test_stress_create_many() { passed += 1; } else { failed += 1; }
+    if run_test("stress_create_many", test_stress_create_many) { passed += 1; } else { failed += 1; }
 
     println!("[44/51] stress: read 30 files with unique content");
-    if test_stress_read_many() { passed += 1; } else { failed += 1; }
+    if run_test("stress_read_many", test_stress_read_many) { passed += 1; } else { failed += 1; }
 
     println!("[45/51] stress: unlink 30 files -> empty dir");
-    if test_stress_unlink_loop() { passed += 1; } else { failed += 1; }
+    if run_test("stress_unlink_loop", test_stress_unlink_loop) { passed += 1; } else { failed += 1; }
 
     println!("[46/51] stress: rename A↔B loop x10");
-    if test_stress_rename_loop() { passed += 1; } else { failed += 1; }
+    if run_test("stress_rename_loop", test_stress_rename_loop) { passed += 1; } else { failed += 1; }
 
     println!("[47/51] stress: large file 64KB write+read");
-    if test_stress_large_file() { passed += 1; } else { failed += 1; }
+    if run_test("stress_large_file", test_stress_large_file) { passed += 1; } else { failed += 1; }
 
     println!("[48/51] stress: getdents counts 20 files");
-    if test_stress_getdents() { passed += 1; } else { failed += 1; }
+    if run_test("stress_getdents", test_stress_getdents) { passed += 1; } else { failed += 1; }
 
     println!("[49/51] stress: truncate 100→50→200 with hole");
-    if test_stress_truncate() { passed += 1; } else { failed += 1; }
+    if run_test("stress_truncate", test_stress_truncate) { passed += 1; } else { failed += 1; }
 
     // ── E组: 并发测试 (fork) ──────────────────────────────
 
     println!("[50/51] fork: read same fd (parent+child)");
-    if test_fork_read_same_fd() { passed += 1; } else { failed += 1; }
+    if run_test("fork_read_same_fd", test_fork_read_same_fd) { passed += 1; } else { failed += 1; }
 
     println!("[51/51] fork: create files (parent+child)");
-    if test_fork_create() { passed += 1; } else { failed += 1; }
+    if run_test("fork_create", test_fork_create) { passed += 1; } else { failed += 1; }
 
     println!("=== FS Test: {}/{} passed ===", passed, passed + failed);
 

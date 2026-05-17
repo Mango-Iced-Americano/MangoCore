@@ -228,8 +228,12 @@ impl Ext4FileSystem {
             // at this point child need a new block
             self.dir_add_entry(child, &new_child_ref, ".")?;
 
-            // at this point should insert to existing block
-            self.dir_add_entry(child, &new_child_ref, "..")?;
+            // .. should point to parent, not child
+            let parent_ref = Ext4InodeRef {
+                inode_num: parent.inode_num,
+                inode: parent.inode,
+            };
+            self.dir_add_entry(child, &parent_ref, "..")?;
 
             child.inode.set_links_count(2);
             let link_cnt = parent.inode.links_count() + 1;
@@ -254,33 +258,64 @@ impl Ext4FileSystem {
     /// # 返回值:
     /// + `Result<Ext4InodeRef>` - 新文件的inode
     pub fn create(&self, parent: u32, name: &str, inode_mode: u16) -> Result<Ext4InodeRef, isize> {
-        //println!("in1, parent:{:?}", parent);
-        let a = 1 + 2 + parent;
-        //println!("a = {:?}", a);
-        // Ext4FileSystem被锁了？
-        let dummy = self.get_inode_ref(a);
-        // println!("dummy = {:#?}", dummy);
-        // 获取父目录的inode
         let mut parent_inode_ref = self.get_inode_ref(parent);
-        // println!("in2");
-        // 创建一个新inode
         let init_child_ref = self.create_inode(inode_mode)?;
-
-        // println!("in3");
-        // 写回inode
-        // TODO: 在使用LoongsonNand的时候读和写的数据不一样
         self.write_back_inode_without_csum(&init_child_ref);
         let mut child_inode_ref = self.get_inode_ref(init_child_ref.inode_num);
-        // println!("in4");
-        // 链接新 inode 到父目录
         self.link(&mut parent_inode_ref, &mut child_inode_ref, name)?;
-
-        // 写回父目录 inode
         self.write_back_inode(&mut parent_inode_ref);
-        // 写回新 inode
         self.write_back_inode(&mut child_inode_ref);
-
         Ok(child_inode_ref)
+    }
+
+    /// 创建 fast symlink（target ≤ 60 字节，存入 i_block 而非分配 data block）。
+    ///
+    /// Phase 3 优化：避免 create() 的先写空 inode 再读回再写 target 的冗余路径。
+    /// 一次初始化 child inode，一次 write_back_inode，一次 write parent。
+    pub fn create_fast_symlink(
+        &self,
+        parent: u32,
+        name: &str,
+        target: &[u8],
+        uid: u16,
+        gid: u16,
+    ) -> Result<Ext4InodeRef, isize> {
+        assert!(target.len() <= 60, "create_fast_symlink: target too long for fast symlink");
+
+        // 1. Allocate inode number
+        let ino = self.ialloc_alloc_inode(false)?;
+
+        // 2. Initialize child inode with all fields + target in i_block
+        let now = crate::timer::current_time_safe() as u32;
+        let mut inode = Ext4Inode::default();
+        inode.set_mode(InodeFileType::S_IFLNK.bits() | 0o777);
+        inode.set_uid(uid);
+        inode.set_gid(gid);
+        inode.set_size(target.len() as u64);
+        inode.set_atime(now);
+        inode.set_mtime(now);
+        inode.set_ctime(now);
+        inode.set_links_count(1);
+        // No EXT4_INODE_FLAG_EXTENTS — fast symlink uses i_block directly
+        let block_bytes = inode.block_mut_as_bytes();
+        block_bytes[..target.len()].copy_from_slice(target);
+        block_bytes[target.len()..60].fill(0);
+
+        let child_ref = Ext4InodeRef { inode_num: ino, inode };
+
+        // 3. Add directory entry and link
+        let mut parent_ref = self.get_inode_ref(parent);
+        let mut child_mut = child_ref.clone();
+        self.link(&mut parent_ref, &mut child_mut, name)?;
+        self.write_back_inode(&mut parent_ref);
+
+        // 4. Write child inode once (target already in i_block)
+        let mut final_ref = child_ref.clone();
+        self.write_back_inode(&mut final_ref);
+        super::counters::inc_counter!(super::counters::SYMLINK_INODE_WRITE_COUNT);
+        super::counters::inc_counter!(super::counters::SYMLINK_PARENT_INODE_WRITE_COUNT);
+
+        Ok(final_ref)
     }
 
     /// 创建inode
@@ -325,9 +360,15 @@ impl Ext4FileSystem {
             inode.set_i_extra_isize(extra_size);
         }
 
-        // set extent
-        inode.set_flags(EXT4_INODE_FLAG_EXTENTS as u32);
-        inode.extent_tree_init();
+        // set extent — only for regular files and directories
+        // symlinks use i_block directly (fast) or data blocks (long);
+        // device files / fifos / sockets don't need extents
+        let needs_extents = inode_file_type == InodeFileType::S_IFREG
+            || inode_file_type == InodeFileType::S_IFDIR;
+        if needs_extents {
+            inode.set_flags(EXT4_INODE_FLAG_EXTENTS as u32);
+            inode.extent_tree_init();
+        }
 
         let inode_ref = Ext4InodeRef {
             inode_num: inode_num.unwrap(),

@@ -130,6 +130,7 @@ pub fn rust_main() -> ! {
     println!("[kernel] oom_handler is enabled!");
     // #[cfg(feature = "riscv")]
     fs::flush_preload();
+    // crate::fs::ext4::smoke::run_boot_smoke();  // 需要时取消注释
     task::add_initproc();
     // note that in run_tasks(), there is yet *another* pre_start_init(),
     // which is used to turn on interrupts in some archs like LoongArch.
