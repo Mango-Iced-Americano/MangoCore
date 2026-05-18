@@ -794,7 +794,10 @@ pub fn sys_execve(
         envp_vec.len()
     );
     // 获取当前工作目录的文件描述符
-    let working_inode = &task.fs.lock().working_inode;
+    let (working_inode, working_path) = {
+        let lock = task.fs.lock();
+        (lock.working_inode.clone(), lock.working_path.clone())
+    };
     let cwd_inode: Arc<dyn vfs::IndexNode> = working_inode.inode.clone();
 
     let open_exec = |path: &str| -> Result<vfs::File, isize> {
@@ -836,7 +839,7 @@ pub fn sys_execve(
             let abs_path = if path.starts_with('/') {
                 path.clone()
             } else {
-                let cwd = task.fs.lock().working_path.clone();
+                let cwd = working_path.clone();
                 if cwd == "/" {
                     alloc::format!("/{}", path)
                 } else {

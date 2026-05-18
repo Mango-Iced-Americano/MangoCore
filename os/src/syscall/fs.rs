@@ -1408,15 +1408,18 @@ pub fn sys_mkdirat(dirfd: usize, path: *const u8, mode: u32) -> isize {
         Ok(inode) => inode,
         Err(errno) => return errno,
     };
-    let parent = match vfs_lookup_parent_for_start(&start, &path) {
-        Ok((parent, leaf)) => {
-            match parent.mkdir(&leaf, vfs::InodeMode::S_IRWXUGO) {
-                Ok(_) => return SUCCESS,
-                Err(e) => return -(e as isize),
-            }
-        }
+    // Root directory "/" already exists
+    if path == "/" || path == "." {
+        return EEXIST;
+    }
+    let (parent, leaf) = match vfs_lookup_parent_for_start(&start, &path) {
+        Ok(result) => result,
         Err(errno) => return errno,
     };
+    match parent.mkdir(&leaf, vfs::InodeMode::S_IRWXUGO) {
+        Ok(_) => SUCCESS,
+        Err(e) => -(e as isize),
+    }
 }
 
 bitflags! {
