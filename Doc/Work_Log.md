@@ -636,3 +636,41 @@ fn list(&self) -> Result<Vec<String>, SyscallErr> {
 - la64 kernel-build-only ✅
 - 内核启动正常（ext4 检测 + initproc 启动）
 - QEMU 全量 FS test 可在有完整镜像环境下运行验证
+
+---
+
+## 2026-05-18 (Session 2)
+
+### BusyBox cwd / getcwd / relative path 修复
+
+**问题现象：**
+- `busybox pwd` 输出 `"/?"` — `getcwd()` 调用 `absolute_path()` → `get_entry_name()` 未实现
+- `touch test.txt` 在非根 cwd 下创建文件错位 — `open_path` O_CREAT 分支用 `vfs_lookup_parent(path)` 而非 `vfs_lookup_parent_for_start(&start, path)`，导致从 root 查找父目录
+- `rm test.txt` 同样问题 — `delete_path` 用 root-relative parent lookup
+
+**Oracle 定位两个具体 bug：**
+1. `os/src/fs/vfs/file.rs:1051` — `open_path` O_CREAT 使用 `vfs_lookup_parent(path)` 丢失 start inode
+2. `os/src/fs/vfs/file.rs:1093` — `delete_path` 同样问题
+
+**修复（6 个改动，Oracle 审查通过）：**
+
+| # | 改动 | 文件 |
+|---|------|------|
+| 1 | `FsStatus` 新增 `working_path: String`，初始化 `"/"`，`#[derive(Clone)]` 自动 fork 继承 | `os/src/task/task.rs` |
+| 2 | 新增 `normalize_cwd(old, new)` — 处理 `.` `..` `//` trailing `/`，不越根 | `os/src/syscall/fs.rs` |
+| 3 | `sys_getcwd` 改用 `fs_lock.working_path.clone()`，不再依赖 broken `absolute_path()` | `os/src/syscall/fs.rs` |
+| 4 | `sys_chdir` 更新 `working_path`；clone-Arc+String 后释放锁 → `cd()` → 重锁原子更新；空路径返回 `ENOENT` | `os/src/syscall/fs.rs` |
+| 5 | `open_path` O_CREAT → `vfs_lookup_parent_for_start(&start, path)` | `os/src/fs/vfs/file.rs` |
+| 6 | `delete_path` → 加 `start` + `vfs_lookup_parent_for_start(&start, path)` | `os/src/fs/vfs/file.rs` |
+
+**Oracle 指出的必须修复项：**
+- `chdir("")` 应返回 ENOENT（已加空路径检查）
+- 移除 `normalize_cwd` 中未使用变量 `start`
+
+**已知限制（Oracle 标记）：**
+- `working_path` 是逻辑路径缓存（logical pwd），不反映 symlink physical path
+- cwd 被其他进程 rename/unlink 后路径过期
+
+**验证：**
+- rv64 ✅ la64 ✅ 编译通过
+- 预期修复：`pwd` → `/`，`touch/cat/rm` 相对路径正确，`echo > test.txt` redirection 正确
