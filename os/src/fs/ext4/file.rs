@@ -249,6 +249,38 @@ impl Ext4FileSystem {
         Ok(EOK)
     }
 
+    /// link() 但不 flush parent inode — caller 负责最后统一 flush
+    pub fn link_no_parent_flush(
+        &self,
+        parent: &mut Ext4InodeRef,
+        child: &mut Ext4InodeRef,
+        name: &str,
+    ) -> Result<usize, isize> {
+        self.dir_add_entry(parent, child, name)?;
+        // skip write_back_inode_without_csum(parent)
+
+        if child.inode.is_dir() {
+            let new_child_ref = Ext4InodeRef {
+                inode_num: child.inode_num,
+                inode: child.inode,
+            };
+            self.dir_add_entry(child, &new_child_ref, ".")?;
+            let parent_ref = Ext4InodeRef {
+                inode_num: parent.inode_num,
+                inode: parent.inode,
+            };
+            self.dir_add_entry(child, &parent_ref, "..")?;
+            child.inode.set_links_count(2);
+            let link_cnt = parent.inode.links_count() + 1;
+            parent.inode.set_links_count(link_cnt);
+            return Ok(EOK);
+        }
+
+        let link_cnt = child.inode.links_count() + 1;
+        child.inode.set_links_count(link_cnt);
+        Ok(EOK)
+    }
+
     /// 创建一个新inode并将其链接到其父目录
     /// # 参数
     /// + parent: u32 - 父目录的inode号
@@ -263,6 +295,7 @@ impl Ext4FileSystem {
         self.write_back_inode_without_csum(&init_child_ref);
         let mut child_inode_ref = self.get_inode_ref(init_child_ref.inode_num);
         self.link(&mut parent_inode_ref, &mut child_inode_ref, name)?;
+        super::counters::inc_counter!(super::counters::SYMLINK_DIR_BLOCK_WRITE_COUNT);
         self.write_back_inode(&mut parent_inode_ref);
         self.write_back_inode(&mut child_inode_ref);
         Ok(child_inode_ref)
@@ -303,17 +336,19 @@ impl Ext4FileSystem {
 
         let child_ref = Ext4InodeRef { inode_num: ino, inode };
 
-        // 3. Add directory entry and link
+        // 3. Add directory entry and link (no parent flush — done in step 4)
         let mut parent_ref = self.get_inode_ref(parent);
         let mut child_mut = child_ref.clone();
-        self.link(&mut parent_ref, &mut child_mut, name)?;
-        self.write_back_inode(&mut parent_ref);
+        self.link_no_parent_flush(&mut parent_ref, &mut child_mut, name)?;
+        super::counters::inc_counter!(super::counters::SYMLINK_DIR_BLOCK_WRITE_COUNT);
 
-        // 4. Write child inode once (target already in i_block)
+        // 4. Flush parent once, child once
+        self.write_back_inode(&mut parent_ref);
+        super::counters::inc_counter!(super::counters::SYMLINK_PARENT_INODE_WRITE_COUNT);
+
         let mut final_ref = child_ref.clone();
         self.write_back_inode(&mut final_ref);
         super::counters::inc_counter!(super::counters::SYMLINK_INODE_WRITE_COUNT);
-        super::counters::inc_counter!(super::counters::SYMLINK_PARENT_INODE_WRITE_COUNT);
 
         Ok(final_ref)
     }
@@ -584,6 +619,7 @@ impl Ext4FileSystem {
 
             block.write_offset(unaligned, &write_buf[..len], len);
             block.sync_blk_to_disk(self.block_device.clone());
+            super::counters::inc_counter!(super::counters::DATA_BLOCK_WRITE);
             drop(block);
 
             written += len;
@@ -631,6 +667,7 @@ impl Ext4FileSystem {
                 let write_size = min(self.block_size, write_buf_len - written);
                 block.write_offset(0, &write_buf[written..written + write_size], write_size);
                 block.sync_blk_to_disk(self.block_device.clone());
+                super::counters::inc_counter!(super::counters::DATA_BLOCK_WRITE);
                 drop(block);
                 written += write_size;
             }
@@ -655,6 +692,7 @@ impl Ext4FileSystem {
             );
             block.write_offset(0, &write_buf[written..], len);
             block.sync_blk_to_disk(self.block_device.clone());
+            super::counters::inc_counter!(super::counters::DATA_BLOCK_WRITE);
             drop(block);
 
             written += len;

@@ -4,7 +4,6 @@ mod efs;
 pub mod fat_inode;
 pub mod layout;
 
-pub use super::cache::{BlockCacheManager, Cache};
 pub use super::inode::DiskInodeType;
 pub use crate::drivers::block::BlockDevice;
 use bitmap::Fat;

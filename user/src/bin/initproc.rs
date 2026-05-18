@@ -10,6 +10,10 @@ use user_lib::{
     waitpid, waitpid_wnohang, OpenFlags, SIGKILL,
 };
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
+/// /bin/bash 是否可用（由 prepare_symlink 后检查决定）
+static HAS_BIN_BASH: AtomicBool = AtomicBool::new(true);
 // ============================================================
 // TEST_GROUPS — 组名与脚本文件名的映射
 // 索引 0..11 与 mask 的 bit0..bit11 一一对应
@@ -98,7 +102,9 @@ fn run_bash_cmd(cmd: &str, environ: &[*const u8]) -> i32 {
                 core::ptr::null(),
             ]
         };
-        exec(shell_new, &argv(shell_new), environ);
+        if HAS_BIN_BASH.load(Ordering::Relaxed) {
+            exec(shell_new, &argv(shell_new), environ);
+        }
         exec(shell_old, &argv(shell_old), environ);
         exit(127);
     }
@@ -1405,7 +1411,9 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     // Self-check: verify /bin/bash is usable after prepare_symlink
     let bash_check = "test -x /bin/bash && echo BIN_BASH_OK || echo BIN_BASH_BAD\0";
     let bash_ret = run_bash_cmd(bash_check, &environ);
-    println!("[initproc] post-prepare /bin/bash check exit={}", bash_ret);
+    let has_bin_bash = bash_ret == 0;
+    HAS_BIN_BASH.store(has_bin_bash, Ordering::Relaxed);
+    println!("[initproc] post-prepare /bin/bash check exit={} has_bin_bash={}", bash_ret, has_bin_bash);
 
     println!("[initproc] running fs_test...");
     let fs_test_cmd = "cd / && ./fs_test\0";

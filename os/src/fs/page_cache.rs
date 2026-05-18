@@ -837,6 +837,8 @@ impl PageCacheBackend for Ext4PageCacheBackend {
                 Some(block_id) => {
                     fs.block_device
                         .read_block(block_id, &mut buf[start..start + self.block_size]);
+                    crate::fs::ext4::counters::inc_counter!(crate::fs::ext4::counters::DATA_BLOCK_READ);
+                    crate::fs::ext4::counters::inc_counter!(crate::fs::ext4::counters::BLOCK_READ_TOTAL);
                 }
                 None => {
                     buf[start..start + self.block_size].fill(0);
@@ -857,6 +859,8 @@ impl PageCacheBackend for Ext4PageCacheBackend {
                 Some(block_id) => {
                     fs.block_device
                         .write_block(block_id, &buf[start..start + self.block_size]);
+                    crate::fs::ext4::counters::inc_counter!(crate::fs::ext4::counters::DATA_BLOCK_WRITE);
+                    crate::fs::ext4::counters::inc_counter!(crate::fs::ext4::counters::BLOCK_WRITE_TOTAL);
                 }
                 None => {
                     // Unmapped block — cannot write; keep page dirty for retry

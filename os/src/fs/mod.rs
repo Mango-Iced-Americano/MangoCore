@@ -247,24 +247,8 @@ pub fn vfs_lookup(
                 current = root_inode.clone();
                 comp_idx = 0;
                 continue;
-            } else if let Ok(cur_abs) = current.absolute_path() {
-                // 相对目标 + 可获取绝对路径：拼接后从根重新开始
-                let look_path = if cur_abs == "/" {
-                    alloc::format!("/{}", new_path)
-                } else {
-                    alloc::format!("{}/{}", cur_abs, new_path)
-                };
-                components = parse_path(if let Some(rest) = look_path.strip_prefix('/') {
-                    rest
-                } else {
-                    &look_path
-                });
-                current = root_inode.clone();
-                comp_idx = 0;
-                continue;
             } else {
-                // 相对目标 + 无法获取绝对路径：
-                // 从 symlink 所在父目录（current）开始解析相对路径。
+                // 相对符号链接目标：POSIX 语义 — 以 symlink 所在父目录为起点解析
                 components = parse_path(&new_path);
                 // current 保持为 symlink 的父目录，comp_idx 归零继续
                 comp_idx = 0;

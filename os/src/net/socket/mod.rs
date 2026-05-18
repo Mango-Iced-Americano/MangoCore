@@ -5,7 +5,7 @@ pub mod unix;
 use crate::{
     fs::{
         fat32::DiskInodeType,
-        vfs, vfs::FileFlags, Dirent, OpenFlags, PageCache, SeekWhence, Stat,
+        vfs, vfs::FileFlags, Dirent, OpenFlags, SeekWhence, Stat,
     },
     mm::{translated_byte_buffer, translated_ref, translated_refmut, UserAccess, UserBuffer},
     net::{

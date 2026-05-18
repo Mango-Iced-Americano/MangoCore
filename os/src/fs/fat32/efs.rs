@@ -5,8 +5,8 @@ use core::ptr::addr_of;
 use crate::fs::fat32::FatInode;
 use crate::hal::{self, BLOCK_SZ};
 
-use super::{layout::BPB, Cache};
-use super::{BlockCacheManager, BlockDevice, DiskInodeType, Fat};
+use super::{layout::BPB};
+use super::{BlockDevice, DiskInodeType, Fat};
 use crate::fs::vfs::file_system::{FileSystem, FsInfo, SuperBlock};
 use crate::fs::vfs::IndexNode;
 use alloc::{sync::Arc, vec::Vec};
@@ -66,33 +66,22 @@ impl EasyFileSystem {
     /// 打开文件系统对象
     /// # 参数
     /// + `block_device`: 指向硬件设备（存储设备）的指针
-    /// + `index_cache_mgr`: fat cache manager
     pub fn open(
         block_device: Arc<dyn BlockDevice>,
-        index_cache_mgr: Arc<spin::Mutex<BlockCacheManager>>,
     ) -> Arc<Self> {
-        let fat_cache_mgr = index_cache_mgr.clone();
+        // 直接读取 BPB 获取文件系统参数
+        let mut bpb_buf = alloc::vec![0u8; BLOCK_SZ];
+        block_device.read_block(0, &mut bpb_buf);
+        let super_block = unsafe { &*(bpb_buf.as_ptr() as *const BPB) };
+        debug_assert!(super_block.byts_per_sec as usize == hal::BLOCK_SZ);
+        debug_assert!(super_block.is_valid(), "Error loading EFS!");
 
-        // 先读取 BPB 获取文件系统参数
-        let (root_clus, sec_per_clus, byts_per_sec, data_area_start_block,
-             rsvd_sec_cnt, data_sector_count) =
-            index_cache_mgr
-                .lock()
-                .get_block_cache(0, &block_device)
-                .lock()
-                .read(0, |super_block: &BPB| {
-                    debug_assert!(super_block.byts_per_sec as usize == hal::BLOCK_SZ);
-                    debug_assert!(BlockCacheManager::CACHE_SZ % super_block.byts_per_sec as usize == 0);
-                    debug_assert!(super_block.is_valid(), "Error loading EFS!");
-                    (
-                        super_block.root_clus,
-                        super_block.sec_per_clus,
-                        super_block.byts_per_sec,
-                        super_block.first_data_sector(),
-                        super_block.rsvd_sec_cnt as usize,
-                        super_block.data_sector_count(),
-                    )
-                });
+        let root_clus = super_block.root_clus;
+        let sec_per_clus = super_block.sec_per_clus;
+        let byts_per_sec = super_block.byts_per_sec;
+        let data_area_start_block = super_block.first_data_sector();
+        let rsvd_sec_cnt = super_block.rsvd_sec_cnt as usize;
+        let data_sector_count = super_block.data_sector_count();
 
         // 用 Arc::new_cyclic 初始化 __self_ref
         Arc::new_cyclic(|weak| {
@@ -102,7 +91,6 @@ impl EasyFileSystem {
                     rsvd_sec_cnt,
                     byts_per_sec as usize,
                     (data_sector_count / sec_per_clus as u32) as usize,
-                    fat_cache_mgr,
                 ),
                 root_clus,
                 sec_per_clus,

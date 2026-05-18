@@ -335,6 +335,17 @@ pub fn current_time() -> u64 {
     uptime() + BOOT_TIME_OFFSET.load(core::sync::atomic::Ordering::Relaxed)
 }
 
+/// 当前 Unix 时间戳（安全版本，TimeSource 未初始化时返回 0）
+pub fn current_time_safe() -> u64 {
+    let offset = BOOT_TIME_OFFSET.load(core::sync::atomic::Ordering::Relaxed);
+    unsafe {
+        match &TIME_SOURCE {
+            Some(ts) => ts.uptime() + offset,
+            None => 0,
+        }
+    }
+}
+
 /// 获取系统启动以来的时间（秒）
 pub fn uptime() -> u64 {
     unsafe {

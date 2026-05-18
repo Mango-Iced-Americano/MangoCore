@@ -1223,6 +1223,40 @@ impl IndexNode for FatInode {
         }
     }
 
+    fn get_entry_name(&self, ino: InodeId) -> Result<String, SyscallErr> {
+        if !self.is_dir() {
+            return Err(SyscallErr::ENOTDIR);
+        }
+        // Check "." — the directory's own inode_id
+        let self_ino = self
+            .get_inode_num_lock(&self.file_content.read())
+            .unwrap_or(0) as InodeId;
+        if self_ino == ino {
+            return Ok(alloc::string::String::from("."));
+        }
+        // Iterate directory entries and match by inode_id
+        let inode_lock = self.write();
+        for (name, short_ent) in self
+            .dir_iter(&inode_lock, None, DirIterMode::Used, FORWARD)
+            .walk()
+        {
+            let child_ino = self.fs.first_sector_of_cluster(short_ent.get_first_clus()) as InodeId;
+            if child_ino == ino {
+                return Ok(name);
+            }
+        }
+        // Check ".." — parent's inode_id
+        let parent_ino = self
+            .find("..")
+            .and_then(|p| p.metadata())
+            .map(|m| m.inode_id)
+            .unwrap_or(0);
+        if parent_ino == ino {
+            return Ok(alloc::string::String::from(".."));
+        }
+        Err(SyscallErr::ENOENT)
+    }
+
     fn list(&self) -> Result<alloc::vec::Vec<String>, SyscallErr> {
         if !self.is_dir() {
             return Err(SyscallErr::ENOTDIR);

@@ -731,11 +731,16 @@ fn test_getdents64() -> bool {
 // ── A组: 高级 read/write 测试 ───────────────────────────────────────────
 
 fn test_read_empty() -> bool {
+    // ── setup ──
     sys_mkdirat(AT_FDCWD, "/tmp16\0", 0o777);
     const O_CREAT: u32 = 0o100;
-    const O_RDONLY: u32 = 0;
     let fd = sys_open("/tmp16/empty\0", O_CREAT);
     sys_close(fd as usize);
+    dump_sub_profile("read_empty_setup");
+    sys_ext4_counters(2, 0, 0); // reset
+
+    // ── op ──
+    const O_RDONLY: u32 = 0;
     let fd = sys_open("/tmp16/empty\0", O_RDONLY);
     if fd < 0 { println!("  FAIL: open empty returned {}", fd); return false; }
     let mut buf = [1u8; 64];
@@ -746,25 +751,41 @@ fn test_read_empty() -> bool {
         return false;
     }
     println!("  PASS: read empty file -> 0 bytes OK");
+    dump_sub_profile("read_empty_op");
+    sys_ext4_counters(2, 0, 0); // reset
+
+    // ── cleanup ──
     sys_unlinkat(AT_FDCWD, "/tmp16/empty\0", 0);
     sys_unlinkat(AT_FDCWD, "/tmp16\0", 0x200);
+    dump_sub_profile("read_empty_cleanup");
     true
 }
 
 fn test_read_past_eof() -> bool {
+    // ── setup ──
     sys_mkdirat(AT_FDCWD, "/tmp17\0", 0o777);
-    const O_CREAT: u32 = 0o100; const O_RDWR: u32 = 0o2; const O_RDONLY: u32 = 0;
+    const O_CREAT: u32 = 0o100; const O_RDWR: u32 = 0o2;
     let fd = sys_open("/tmp17/short\0", O_CREAT | O_RDWR);
     sys_write(fd as usize, b"hello");
     sys_close(fd as usize);
+    dump_sub_profile("read_past_eof_setup");
+    sys_ext4_counters(2, 0, 0);
+
+    // ── op ──
+    const O_RDONLY: u32 = 0;
     let fd = sys_open("/tmp17/short\0", O_RDONLY);
     let mut buf = [0u8; 100];
     let n = sys_read(fd as usize, &mut buf);
     sys_close(fd as usize);
     if n != 5 { println!("  FAIL: read past EOF got {} (expected 5)", n); return false; }
     println!("  PASS: read past EOF returns 5 OK");
+    dump_sub_profile("read_past_eof_op");
+    sys_ext4_counters(2, 0, 0);
+
+    // ── cleanup ──
     sys_unlinkat(AT_FDCWD, "/tmp17/short\0", 0);
     sys_unlinkat(AT_FDCWD, "/tmp17\0", 0x200);
+    dump_sub_profile("read_past_eof_cleanup");
     true
 }
 
@@ -817,18 +838,29 @@ fn test_read_dir() -> bool {
 }
 
 fn test_write_readonly() -> bool {
+    // ── setup ──
     sys_mkdirat(AT_FDCWD, "/tmp20\0", 0o777);
-    const O_CREAT: u32 = 0o100; const O_WRONLY: u32 = 0o1; const O_RDONLY: u32 = 0;
+    const O_CREAT: u32 = 0o100; const O_WRONLY: u32 = 0o1;
     let fd = sys_open("/tmp20/ro\0", O_CREAT | O_WRONLY);
     sys_write(fd as usize, b"data");
     sys_close(fd as usize);
+    dump_sub_profile("write_readonly_setup");
+    sys_ext4_counters(2, 0, 0);
+
+    // ── op ──
+    const O_RDONLY: u32 = 0;
     let fd = sys_open("/tmp20/ro\0", O_RDONLY);
     let n = sys_write(fd as usize, b"X");
     sys_close(fd as usize);
     if n != -9 { println!("  FAIL: write to readonly fd got {} (expected -9/EBADF)", n); return false; }
     println!("  PASS: write to readonly fd -> EBADF OK");
+    dump_sub_profile("write_readonly_op");
+    sys_ext4_counters(2, 0, 0);
+
+    // ── cleanup ──
     sys_unlinkat(AT_FDCWD, "/tmp20/ro\0", 0);
     sys_unlinkat(AT_FDCWD, "/tmp20\0", 0x200);
+    dump_sub_profile("write_readonly_cleanup");
     true
 }
 
@@ -932,16 +964,26 @@ fn test_lseek_seek_end() -> bool {
 }
 
 fn test_lseek_bad_whence() -> bool {
+    // ── setup ──
     sys_mkdirat(AT_FDCWD, "/tmp25\0", 0o777);
     const O_CREAT: u32 = 0o100; const O_RDWR: u32 = 0o2;
     let fd = sys_open("/tmp25/f\0", O_CREAT | O_RDWR);
     sys_write(fd as usize, b"data");
+    dump_sub_profile("lseek_bad_whence_setup");
+    sys_ext4_counters(2, 0, 0);
+
+    // ── op ──
     let pos = sys_lseek(fd as usize, 0, 99);
     sys_close(fd as usize);
     if pos != -22 { println!("  FAIL: bad whence=99 got {} (expected -22/EINVAL)", pos); return false; }
     println!("  PASS: lseek bad whence -> EINVAL OK");
+    dump_sub_profile("lseek_bad_whence_op");
+    sys_ext4_counters(2, 0, 0);
+
+    // ── cleanup ──
     sys_unlinkat(AT_FDCWD, "/tmp25/f\0", 0);
     sys_unlinkat(AT_FDCWD, "/tmp25\0", 0x200);
+    dump_sub_profile("lseek_bad_whence_cleanup");
     true
 }
 
@@ -1016,12 +1058,22 @@ fn test_open_noent() -> bool {
 }
 
 fn test_open_dir_as_file() -> bool {
+    // ── setup ──
     sys_mkdirat(AT_FDCWD, "/tmp28\0", 0o777);
+    dump_sub_profile("open_dir_as_file_setup");
+    sys_ext4_counters(2, 0, 0);
+
+    // ── op ──
     const O_RDWR: u32 = 0o2;
     let fd = sys_open("/tmp28\0", O_RDWR);
     if fd != -21 { println!("  FAIL: open dir with O_RDWR got {} (expected -21/EISDIR)", fd); return false; }
     println!("  PASS: open dir as file -> EISDIR OK");
+    dump_sub_profile("open_dir_as_file_op");
+    sys_ext4_counters(2, 0, 0);
+
+    // ── cleanup ──
     sys_unlinkat(AT_FDCWD, "/tmp28\0", 0x200);
+    dump_sub_profile("open_dir_as_file_cleanup");
     true
 }
 
@@ -1051,17 +1103,27 @@ fn test_open_trunc() -> bool {
 }
 
 fn test_close_twice() -> bool {
+    // ── setup ──
     sys_mkdirat(AT_FDCWD, "/tmp30\0", 0o777);
     const O_CREAT: u32 = 0o100; const O_RDWR: u32 = 0o2;
     let fd = sys_open("/tmp30/c\0", O_CREAT | O_RDWR);
     sys_write(fd as usize, b"x");
+    dump_sub_profile("close_twice_setup");
+    sys_ext4_counters(2, 0, 0);
+
+    // ── op ──
     let r1 = sys_close(fd as usize);
     let r2 = sys_close(fd as usize);
     if r1 != 0 { println!("  FAIL: first close returned {}", r1); return false; }
     if r2 != -9 { println!("  FAIL: double close got {} (expected -9/EBADF)", r2); return false; }
     println!("  PASS: double close -> EBADF OK");
+    dump_sub_profile("close_twice_op");
+    sys_ext4_counters(2, 0, 0);
+
+    // ── cleanup ──
     sys_unlinkat(AT_FDCWD, "/tmp30/c\0", 0);
     sys_unlinkat(AT_FDCWD, "/tmp30\0", 0x200);
+    dump_sub_profile("close_twice_cleanup");
     true
 }
 
@@ -1086,20 +1148,31 @@ fn test_open_close_many() -> bool {
 }
 
 fn test_open_create_existing() -> bool {
+    // ── setup ──
     sys_mkdirat(AT_FDCWD, "/tmp32\0", 0o777);
-    const O_CREAT: u32 = 0o100; const O_RDWR: u32 = 0o2; const O_RDONLY: u32 = 0;
+    const O_CREAT: u32 = 0o100; const O_RDWR: u32 = 0o2;
     let fd = sys_open("/tmp32/exist\0", O_CREAT | O_RDWR);
     sys_write(fd as usize, b"original content");
     sys_close(fd as usize);
-    let fd = sys_open("/tmp32/exist\0", O_RDONLY); // no O_CREAT, no O_TRUNC
+    dump_sub_profile("open_create_existing_setup");
+    sys_ext4_counters(2, 0, 0);
+
+    // ── op ──
+    const O_RDONLY: u32 = 0;
+    let fd = sys_open("/tmp32/exist\0", O_RDONLY);
     if fd < 0 { println!("  FAIL: open existing without O_CREAT returned {}", fd); return false; }
     let mut buf = [0u8; 32];
     let n = sys_read(fd as usize, &mut buf);
     sys_close(fd as usize);
     if &buf[..n as usize] != b"original content" { println!("  FAIL: existing content changed: {:?}", &buf[..n as usize]); return false; }
     println!("  PASS: open existing without O_CREAT OK");
+    dump_sub_profile("open_create_existing_op");
+    sys_ext4_counters(2, 0, 0);
+
+    // ── cleanup ──
     sys_unlinkat(AT_FDCWD, "/tmp32/exist\0", 0);
     sys_unlinkat(AT_FDCWD, "/tmp32\0", 0x200);
+    dump_sub_profile("open_create_existing_cleanup");
     true
 }
 
@@ -1184,6 +1257,11 @@ fn test_stress_unlink_loop() -> bool {
     let mut buf = [0u8; 512];
     let n = sys_getdents64(fd as usize, &mut buf);
     sys_close(fd as usize);
+    if n < 0 {
+        println!("  FAIL: getdents64 returned {}", n);
+        sys_unlinkat(AT_FDCWD, "/tmp35\0", 0x200);
+        return false;
+    }
     let mut entries = 0usize;
     let bytes = &buf[..n as usize];
     let mut pos = 0;
@@ -1423,6 +1501,21 @@ pub extern "C" fn _start() -> ! {
     unsafe { _parameter(0, 0) }
 }
 
+fn dump_sub_profile(label: &str) {
+    let mut label_buf = [0u8; 64];
+    let copy_len = label.len().min(63);
+    label_buf[..copy_len].copy_from_slice(&label.as_bytes()[..copy_len]);
+    sys_ext4_counters(3, label_buf.as_ptr() as usize, copy_len);
+}
+
+#[no_mangle]
+fn run_split_test(label: &str, test_fn: fn() -> bool) -> bool {
+    sys_ext4_counters(2, 0, 0);  // reset counters
+    let ok = test_fn();
+    // Don't dump — split tests do their own sub-profile dumps
+    ok
+}
+
 #[no_mangle]
 fn run_test(label: &str, test_fn: fn() -> bool) -> bool {
     sys_ext4_counters(2, 0, 0);  // reset counters
@@ -1513,10 +1606,10 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     // ── A组: 高级 read/write 测试 ──────────────────────────
 
     println!("[22/51] read empty file");
-    if run_test("read_empty", test_read_empty) { passed += 1; } else { failed += 1; }
+    if run_split_test("read_empty", test_read_empty) { passed += 1; } else { failed += 1; }
 
     println!("[23/51] read past EOF");
-    if run_test("read_past_eof", test_read_past_eof) { passed += 1; } else { failed += 1; }
+    if run_split_test("read_past_eof", test_read_past_eof) { passed += 1; } else { failed += 1; }
 
     println!("[24/51] read data integrity (256B + partial)");
     if run_test("read_data_integrity", test_read_data_integrity) { passed += 1; } else { failed += 1; }
@@ -1528,7 +1621,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     if run_test("read_dir", test_read_dir) { passed += 1; } else { failed += 1; }
 
     println!("[27/51] write readonly fd -> EBADF");
-    if run_test("write_readonly", test_write_readonly) { passed += 1; } else { failed += 1; }
+    if run_split_test("write_readonly", test_write_readonly) { passed += 1; } else { failed += 1; }
 
     println!("[28/51] O_APPEND + lseek atomicity");
     if run_test("write_append", test_write_append) { passed += 1; } else { failed += 1; }
@@ -1548,7 +1641,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     if run_test("lseek_seek_end", test_lseek_seek_end) { passed += 1; } else { failed += 1; }
 
     println!("[33/51] lseek bad whence -> EINVAL");
-    if run_test("lseek_bad_whence", test_lseek_bad_whence) { passed += 1; } else { failed += 1; }
+    if run_split_test("lseek_bad_whence", test_lseek_bad_whence) { passed += 1; } else { failed += 1; }
 
     println!("[34/51] lseek on pipe -> ESPIPE");
     if run_test("lseek_pipe", test_lseek_pipe) { passed += 1; } else { failed += 1; }
@@ -1565,19 +1658,19 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     if run_test("open_noent", test_open_noent) { passed += 1; } else { failed += 1; }
 
     println!("[38/51] open dir as file -> EISDIR");
-    if run_test("open_dir_as_file", test_open_dir_as_file) { passed += 1; } else { failed += 1; }
+    if run_split_test("open_dir_as_file", test_open_dir_as_file) { passed += 1; } else { failed += 1; }
 
     println!("[39/51] O_TRUNC (size=0 + data lost)");
     if run_test("open_trunc", test_open_trunc) { passed += 1; } else { failed += 1; }
 
     println!("[40/51] close twice -> EBADF");
-    if run_test("close_twice", test_close_twice) { passed += 1; } else { failed += 1; }
+    if run_split_test("close_twice", test_close_twice) { passed += 1; } else { failed += 1; }
 
     println!("[41/51] open/close 32 times");
     if run_test("open_close_many", test_open_close_many) { passed += 1; } else { failed += 1; }
 
     println!("[42/51] open existing file (no O_CREAT)");
-    if run_test("open_create_existing", test_open_create_existing) { passed += 1; } else { failed += 1; }
+    if run_split_test("open_create_existing", test_open_create_existing) { passed += 1; } else { failed += 1; }
 
     // ── D组: 压力/边界测试 ─────────────────────────────────
 
@@ -1611,6 +1704,10 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     if run_test("fork_create", test_fork_create) { passed += 1; } else { failed += 1; }
 
     println!("=== FS Test: {}/{} passed ===", passed, passed + failed);
+
+    // ── Phase 4: metadata write amplification audit ──
+    // 仅在显式开启时运行（set PROFILE_AUDIT=1）
+    run_profile_audit();
 
     /*
     // ── TTY diagnostics (comment in to debug echo) ─────────────────
@@ -1651,3 +1748,181 @@ fn tty_diag() {
     println!("=== TTY Diagnostics Done ===");
 }
 */
+
+// ── Phase 4: metadata write amplification audit profiles ───────────────────
+
+fn prof_reset() { sys_ext4_counters(2, 0, 0); }
+fn prof_dump(label: &str) { dump_sub_profile(label); }
+
+fn run_profile_audit() {
+    // Gate: only run when explicitly enabled to avoid affecting 51/51 timing
+    // Can be enabled by setting an env var or flag, but for now: always skip
+    // Uncomment to enable profiling:
+    // profile_audit_real();
+}
+
+#[allow(dead_code)]
+fn profile_audit_real() {
+    println!("=== Ext4 Metadata Write Amplification Audit ===");
+    sys_ext4_counters(0, 0, 0); // enable counters
+    profile_create_fast_symlink_1();
+    profile_create_fast_symlink_100();
+    profile_busybox_like_300_symlinks();
+    profile_create_regular_100();
+    profile_unlink_100();
+    profile_large_file_64k();
+    profile_rename_loop_100();
+    println!("=== Audit Done ===");
+}
+
+// 1. Single fast symlink
+fn profile_create_fast_symlink_1() {
+    sys_mkdirat(AT_FDCWD, "/tmp_audit1\0", 0o777);
+    prof_reset();
+    let r = sys_symlinkat("/nonexistent_target\0", AT_FDCWD, "/tmp_audit1/s1\0");
+    if r < 0 { println!("  audit: create_fast_symlink_1 FAILED {}", r); }
+    prof_dump("audit_create_fast_symlink_1");
+    sys_unlinkat(AT_FDCWD, "/tmp_audit1/s1\0", 0);
+    sys_unlinkat(AT_FDCWD, "/tmp_audit1\0", 0x200);
+}
+
+// 2. 100 fast symlinks
+fn profile_create_fast_symlink_100() {
+    sys_mkdirat(AT_FDCWD, "/tmp_audit2\0", 0o777);
+    prof_reset();
+    for i in 0u8..100u8 {
+        let name = [b's', b'0' + (i / 10), b'0' + (i % 10), b'\0'];
+        let _ = sys_symlinkat("/t\0", AT_FDCWD, unsafe {
+            core::str::from_utf8_unchecked(
+                &[b'/', b't', b'm', b'p', b'_', b'a', b'u', b'd', b'i', b't', b'2', b'/', name[0], name[1], name[2], b'\0']
+            )
+        });
+    }
+    prof_dump("audit_create_fast_symlink_100");
+    for i in 0u8..100u8 {
+        let name = [b's', b'0' + (i / 10), b'0' + (i % 10), b'\0'];
+        let _ = sys_unlinkat(AT_FDCWD, unsafe {
+            core::str::from_utf8_unchecked(
+                &[b'/', b't', b'm', b'p', b'_', b'a', b'u', b'd', b'i', b't', b'2', b'/', name[0], name[1], name[2], b'\0']
+            )
+        }, 0);
+    }
+    sys_unlinkat(AT_FDCWD, "/tmp_audit2\0", 0x200);
+}
+
+// 3. 300 symlinks (busybox --install -s like)
+fn profile_busybox_like_300_symlinks() {
+    sys_mkdirat(AT_FDCWD, "/tmp_audit3\0", 0o777);
+    prof_reset();
+    for i in 0u16..300u16 {
+        let hi = (i / 100) as u8;
+        let mid = ((i / 10) % 10) as u8;
+        let lo = (i % 10) as u8;
+        let name = [b'l', b'0' + hi, b'0' + mid, b'0' + lo, b'\0'];
+        let _ = sys_symlinkat("/bin/busybox\0", AT_FDCWD, unsafe {
+            core::str::from_utf8_unchecked(
+                &[b'/', b't', b'm', b'p', b'_', b'a', b'u', b'd', b'i', b't', b'3', b'/', name[0], name[1], name[2], name[3], b'\0']
+            )
+        });
+    }
+    prof_dump("audit_busybox_like_300_symlinks");
+    for i in 0u16..300u16 {
+        let hi = (i / 100) as u8;
+        let mid = ((i / 10) % 10) as u8;
+        let lo = (i % 10) as u8;
+        let name = [b'l', b'0' + hi, b'0' + mid, b'0' + lo, b'\0'];
+        let _ = sys_unlinkat(AT_FDCWD, unsafe {
+            core::str::from_utf8_unchecked(
+                &[b'/', b't', b'm', b'p', b'_', b'a', b'u', b'd', b'i', b't', b'3', b'/', name[0], name[1], name[2], name[3], b'\0']
+            )
+        }, 0);
+    }
+    sys_unlinkat(AT_FDCWD, "/tmp_audit3\0", 0x200);
+}
+
+// 4. 100 regular files
+fn profile_create_regular_100() {
+    sys_mkdirat(AT_FDCWD, "/tmp_audit4\0", 0o777);
+    prof_reset();
+    const O_CREAT_WR: u32 = 0o100 | 0o1;
+    for i in 0u8..100u8 {
+        let name = [b'f', b'0' + (i / 10), b'0' + (i % 10), b'\0'];
+        let fd = sys_open(unsafe {
+            core::str::from_utf8_unchecked(
+                &[b'/', b't', b'm', b'p', b'_', b'a', b'u', b'd', b'i', b't', b'4', b'/', name[0], name[1], name[2], b'\0']
+            )
+        }, O_CREAT_WR);
+        sys_write(fd as usize, b"hello");
+        sys_close(fd as usize);
+    }
+    prof_dump("audit_create_regular_100");
+    for i in 0u8..100u8 {
+        let name = [b'f', b'0' + (i / 10), b'0' + (i % 10), b'\0'];
+        let _ = sys_unlinkat(AT_FDCWD, unsafe {
+            core::str::from_utf8_unchecked(
+                &[b'/', b't', b'm', b'p', b'_', b'a', b'u', b'd', b'i', b't', b'4', b'/', name[0], name[1], name[2], b'\0']
+            )
+        }, 0);
+    }
+    sys_unlinkat(AT_FDCWD, "/tmp_audit4\0", 0x200);
+}
+
+// 5. unlink 100 files
+fn profile_unlink_100() {
+    sys_mkdirat(AT_FDCWD, "/tmp_audit5\0", 0o777);
+    const O_CREAT_WR: u32 = 0o100 | 0o1;
+    for i in 0u8..100u8 {
+        let name = [b'u', b'0' + (i / 10), b'0' + (i % 10), b'\0'];
+        let fd = sys_open(unsafe {
+            core::str::from_utf8_unchecked(
+                &[b'/', b't', b'm', b'p', b'_', b'a', b'u', b'd', b'i', b't', b'5', b'/', name[0], name[1], name[2], b'\0']
+            )
+        }, O_CREAT_WR);
+        sys_write(fd as usize, b"x");
+        sys_close(fd as usize);
+    }
+    prof_reset();
+    for i in 0u8..100u8 {
+        let name = [b'u', b'0' + (i / 10), b'0' + (i % 10), b'\0'];
+        let _ = sys_unlinkat(AT_FDCWD, unsafe {
+            core::str::from_utf8_unchecked(
+                &[b'/', b't', b'm', b'p', b'_', b'a', b'u', b'd', b'i', b't', b'5', b'/', name[0], name[1], name[2], b'\0']
+            )
+        }, 0);
+    }
+    prof_dump("audit_unlink_100");
+    sys_unlinkat(AT_FDCWD, "/tmp_audit5\0", 0x200);
+}
+
+// 6. Large file 64KB write
+fn profile_large_file_64k() {
+    sys_mkdirat(AT_FDCWD, "/tmp_audit6\0", 0o777);
+    const O_CREAT_RDWR: u32 = 0o100 | 0o2;
+    prof_reset();
+    let fd = sys_open("/tmp_audit6/big\0", O_CREAT_RDWR);
+    let buf = [0x41u8; 1024]; // 1KB of 'A'
+    for _ in 0..64 {
+        sys_write(fd as usize, &buf);
+    }
+    sys_close(fd as usize);
+    prof_dump("audit_large_file_64k");
+    sys_unlinkat(AT_FDCWD, "/tmp_audit6/big\0", 0);
+    sys_unlinkat(AT_FDCWD, "/tmp_audit6\0", 0x200);
+}
+
+// 7. Rename loop 100
+fn profile_rename_loop_100() {
+    sys_mkdirat(AT_FDCWD, "/tmp_audit7\0", 0o777);
+    const O_CREAT_WR: u32 = 0o100 | 0o1;
+    let fd = sys_open("/tmp_audit7/a\0", O_CREAT_WR);
+    sys_write(fd as usize, b"rename content");
+    sys_close(fd as usize);
+    prof_reset();
+    for _ in 0..50 {
+        let _ = sys_renameat2(AT_FDCWD, "/tmp_audit7/a\0", AT_FDCWD, "/tmp_audit7/b\0", 0);
+        let _ = sys_renameat2(AT_FDCWD, "/tmp_audit7/b\0", AT_FDCWD, "/tmp_audit7/a\0", 0);
+    }
+    prof_dump("audit_rename_loop_100");
+    sys_unlinkat(AT_FDCWD, "/tmp_audit7/a\0", 0);
+    sys_unlinkat(AT_FDCWD, "/tmp_audit7\0", 0x200);
+}

@@ -776,40 +776,69 @@ impl File {
         use crate::config::PAGE_SIZE;
         use core::convert::TryInto;
 
-        let frames: Vec<Frame> = if let Some(pc) = self.inode.page_cache() {
-            log::trace!("[map_to_kernel_space] using page_cache frames");
-            pc.frame_trackers()
-        } else {
-            log::trace!("[map_to_kernel_space] no page_cache, allocating frames from heap");
-            let size = self.get_size();
-            if size == 0 {
-                Vec::new()
-            } else {
-                let need_pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
-                let mut trackers: Vec<Arc<FrameTracker>> = Vec::with_capacity(need_pages);
-                for _ in 0..need_pages {
-                    trackers.push(frame_alloc().expect("map_to_kernel_space: frame_alloc failed"));
-                }
-                let mut buf = alloc::vec![0u8; size];
-                let n = self
-                    .pread(0, &mut buf)
-                    .expect("map_to_kernel_space: pread failed");
-                if n != size {
-                    log::warn!(
-                        "[map_to_kernel_space] pread returned {} bytes, expected {}",
-                        n,
-                        size
-                    );
-                }
-                let mut offset = 0;
-                for tracker in &trackers {
-                    let dst = tracker.ppn.get_bytes_array();
-                    let chunk = (size - offset).min(PAGE_SIZE);
-                    dst[..chunk].copy_from_slice(&buf[offset..offset + chunk]);
-                    offset += chunk;
-                }
-                trackers.into_iter().map(Frame::InMemory).collect()
+        let size = self.get_size();
+        let need_pages = if size == 0 { 0 } else { (size + PAGE_SIZE - 1) / PAGE_SIZE };
+
+        // Helper: allocate frames + pread full file content into them
+        let alloc_and_pread = |size: usize, need_pages: usize| -> Vec<Frame> {
+            log::debug!(
+                "[map_to_kernel_space] allocating {} frames + pread {} bytes",
+                need_pages,
+                size
+            );
+            let mut trackers: Vec<Arc<FrameTracker>> = Vec::with_capacity(need_pages);
+            for _ in 0..need_pages {
+                trackers.push(frame_alloc().expect("map_to_kernel_space: frame_alloc failed"));
             }
+            let mut buf = alloc::vec![0u8; size];
+            let n = self
+                .pread(0, &mut buf)
+                .expect("map_to_kernel_space: pread failed");
+            if n != size {
+                log::warn!(
+                    "[map_to_kernel_space] pread returned {} bytes, expected {}",
+                    n,
+                    size
+                );
+            }
+            let mut offset = 0;
+            for tracker in &trackers {
+                let dst = tracker.ppn.get_bytes_array();
+                let chunk = (size - offset).min(PAGE_SIZE);
+                dst[..chunk].copy_from_slice(&buf[offset..offset + chunk]);
+                offset += chunk;
+            }
+            trackers.into_iter().map(Frame::InMemory).collect()
+        };
+
+        let frames: Vec<Frame> = if need_pages == 0 {
+            Vec::new()
+        } else if let Some(pc) = self.inode.page_cache() {
+            let cached_frames = pc.frame_trackers();
+            let cached_count = pc.cached_page_count();
+            log::debug!(
+                "[map_to_kernel_space] page_cache: {}/{} pages cached, {} frames tracked",
+                cached_count,
+                need_pages,
+                cached_frames.len()
+            );
+            if cached_frames.len() >= need_pages {
+                log::trace!("[map_to_kernel_space] using page_cache frames directly");
+                cached_frames
+            } else {
+                // PageCache has insufficient frames — fall back to pread path.
+                // This handles the case where a freshly created ext4 PageCache
+                // has zero populated pages (lazy-init in get_new_page_cache).
+                log::warn!(
+                    "[map_to_kernel_space] page_cache only {}/{} frames, falling back to pread",
+                    cached_frames.len(),
+                    need_pages
+                );
+                alloc_and_pread(size, need_pages)
+            }
+        } else {
+            log::trace!("[map_to_kernel_space] no page_cache, allocating from heap");
+            alloc_and_pread(size, need_pages)
         };
 
         KERNEL_SPACE
@@ -821,7 +850,6 @@ impl File {
             )
             .unwrap();
 
-        let size = self.get_size();
         unsafe { core::slice::from_raw_parts_mut(base as *mut u8, size) }
     }
 
@@ -1131,24 +1159,6 @@ impl File {
             (stat.get_dev() & 0xffff_00) >> 8 as u32,
             (stat.get_dev() & 0xff) as u32,
         )
-    }
-
-    /// 获取页缓存（桥接旧接口）
-    pub fn get_single_cache(
-        &self,
-        _offset: usize,
-    ) -> Result<Arc<spin::Mutex<crate::fs::PageCache>>, ()> {
-        // 委托给底层 inode 的 page_cache()
-        let _pc = self.inode.page_cache().ok_or(())?;
-        Err(()) // TODO: 桥接新的 PageCache 到旧的 PageCache 类型
-    }
-
-    /// 获取所有页缓存（桥接旧接口）
-    pub fn get_all_caches(
-        &self,
-    ) -> Result<alloc::vec::Vec<Arc<spin::Mutex<crate::fs::PageCache>>>, ()> {
-        let _pc = self.inode.page_cache().ok_or(())?;
-        Err(()) // TODO: 桥接新的 PageCache 到旧的 PageCache 类型
     }
 
     /// 设置时间戳（桥接旧 FileDescriptor::set_timestamp）

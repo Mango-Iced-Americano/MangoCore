@@ -60,7 +60,7 @@ pub enum ExtType {
 //   - cached_file_size, metadata_dirty
 //
 // MangoCore 差异:
-//   - children 使用 Weak<dyn IndexNode> 避免循环引用
+//   - children 使用 Arc<dyn IndexNode> 加速 lookup；通过 ext4fs Weak 避免循环引用
 //   - inode data 使用 Arc<Mutex<Ext4InodeRef>> (底层磁盘快照)
 //   - DragonOS 底层是 another_ext4, 当前内核自己实现 ext4 磁盘逻辑
 pub struct Ext4OSInode {

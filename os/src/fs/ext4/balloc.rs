@@ -140,6 +140,7 @@ impl Ext4FileSystem {
                 bmp_blk_adr as usize * self.block_size,
                 self.block_size,
             );
+            super::counters::inc_counter!(super::counters::BLOCK_BITMAP_READ);
 
             // Check if goal is free
             if ext4_bmap_is_bit_clr(&bitmap_block.data, idx_in_bg) {
@@ -148,6 +149,7 @@ impl Ext4FileSystem {
                 // 此处不需要考虑对齐
                 self.block_device
                     .write_block(bmp_blk_adr as usize, &bitmap_block.data);
+                super::counters::inc_counter!(super::counters::BLOCK_BITMAP_WRITE);
                 alloc = self.bg_idx_to_addr(idx_in_bg, bgid);
 
                 /* Update free block counts */
@@ -166,6 +168,7 @@ impl Ext4FileSystem {
                     // 此处不需要考虑对齐
                     self.block_device
                         .write_block(bmp_blk_adr as usize, &bitmap_block.data);
+                    super::counters::inc_counter!(super::counters::BLOCK_BITMAP_WRITE);
                     alloc = self.bg_idx_to_addr(tmp_idx, bgid);
                     self.update_free_block_counts(inode_ref, &mut block_group, bgid as usize)?;
                     return Ok(alloc);
@@ -180,6 +183,7 @@ impl Ext4FileSystem {
                 // 此处不需要考虑对齐
                 self.block_device
                     .write_block(bmp_blk_adr as usize, &bitmap_block.data);
+                super::counters::inc_counter!(super::counters::BLOCK_BITMAP_WRITE);
                 alloc = self.bg_idx_to_addr(rel_blk_idx, bgid);
                 self.update_free_block_counts(inode_ref, &mut block_group, bgid as usize)?;
                 return Ok(alloc);
@@ -250,6 +254,7 @@ impl Ext4FileSystem {
                 bmp_blk_adr as usize * self.block_size,
                 self.block_size,
             );
+            super::counters::inc_counter!(super::counters::BLOCK_BITMAP_READ);
 
             // Check if goal is free
             if ext4_bmap_is_bit_clr(&bitmap_block.data, idx_in_bg) {
@@ -258,6 +263,7 @@ impl Ext4FileSystem {
                 // 此处不需要考虑对齐
                 self.block_device
                     .write_block(bmp_blk_adr as usize, &bitmap_block.data);
+                super::counters::inc_counter!(super::counters::BLOCK_BITMAP_WRITE);
                 alloc = self.bg_idx_to_addr(idx_in_bg, bgid);
 
                 /* Update free block counts */
@@ -278,6 +284,7 @@ impl Ext4FileSystem {
                     // 此处不需要考虑对齐
                     self.block_device
                         .write_block(bmp_blk_adr as usize, &bitmap_block.data);
+                    super::counters::inc_counter!(super::counters::BLOCK_BITMAP_WRITE);
                     alloc = self.bg_idx_to_addr(tmp_idx, bgid);
                     self.update_free_block_counts(inode_ref, &mut block_group, bgid as usize)?;
 
@@ -294,6 +301,7 @@ impl Ext4FileSystem {
                 // 此处不需要考虑对齐
                 self.block_device
                     .write_block(bmp_blk_adr as usize, &bitmap_block.data);
+                super::counters::inc_counter!(super::counters::BLOCK_BITMAP_WRITE);
                 alloc = self.bg_idx_to_addr(rel_blk_idx, bgid);
                 self.update_free_block_counts(inode_ref, &mut block_group, bgid as usize)?;
 
@@ -363,6 +371,8 @@ impl Ext4FileSystem {
             let mut raw_data = vec![0u8; BLOCK_SIZE];
             self.block_device
                 .read_block(block_bitmap_block as usize, &mut raw_data);
+            super::counters::inc_counter!(super::counters::BLOCK_BITMAP_READ);
+            super::counters::inc_counter!(super::counters::BLOCK_READ_TOTAL);
             let mut data: &mut Vec<u8> = &mut raw_data.to_vec();
 
             let mut free_cnt = self.block_size * 8 - idx_in_bg as usize;
@@ -386,6 +396,8 @@ impl Ext4FileSystem {
             // );
             self.block_device
                 .write_block(block_bitmap_block as usize, data);
+            super::counters::inc_counter!(super::counters::BLOCK_BITMAP_WRITE);
+            super::counters::inc_counter!(super::counters::BLOCK_WRITE_TOTAL);
 
             /* Update superblock free blocks count */
             let mut super_blk_free_blocks = super_block.free_blocks_count();

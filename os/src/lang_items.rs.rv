@@ -1,5 +1,5 @@
-use crate::hal::shutdown;
 use core::fmt::Write;
+use crate::hal::shutdown;
 use core::panic::PanicInfo;
 
 #[panic_handler]

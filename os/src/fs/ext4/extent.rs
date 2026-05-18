@@ -247,6 +247,14 @@ impl ExtentNode {
 impl ExtentNode {
     /// Binary search for the extent that contains the given block.
     pub fn binsearch_extent(&mut self, lblock: Ext4Lblk) -> Option<(Ext4Extent, usize)> {
+        // 校验 header：magic 必须匹配，entries_count 必须在合理范围
+        if self.header.magic != EXT4_EXTENT_MAGIC
+            || self.header.entries_count == 0
+            || self.header.entries_count > 500
+        {
+            return None;
+        }
+
         // 空节点
         if self.header.entries_count == 0 {
             match &self.data {
@@ -571,6 +579,11 @@ impl Ext4FileSystem {
             unsafe { core::mem::transmute::<&[u32; 15], &[u8; 60]>(&inode_ref.inode.block) };
         let mut node = ExtentNode::load_from_data(root_data, true, self.block_size);
 
+        // 防御：depth 超出合理范围说明 extent tree 数据损坏
+        if node.header.magic != EXT4_EXTENT_MAGIC || node.header.depth > 5 {
+            return Err(-(SyscallErr::EIO as isize));
+        }
+
         let mut depth = node.header.depth;
 
         // Traverse down the tree if depth > 0
@@ -595,6 +608,10 @@ impl Ext4FileSystem {
                 self.block_device
                     .read_block(next_block as usize, &mut next_data);
                 node = ExtentNode::load_from_data_mut(&mut next_data, false, self.block_size);
+
+                if node.header.magic != EXT4_EXTENT_MAGIC || node.header.depth != depth - 1 {
+                    return Err(-(SyscallErr::EIO as isize));
+                }
                 depth -= 1;
                 search_path.depth += 1;
                 pblock_of_node = next_block as usize;
@@ -799,6 +816,7 @@ impl Ext4FileSystem {
             }
 
             ext4block.sync_blk_to_disk(self.block_device.clone());
+            super::counters::inc_counter!(super::counters::OTHER_META_WRITE);
         }
 
         Ok(())
@@ -860,6 +878,7 @@ impl Ext4FileSystem {
 
             // sync to disk
             ext4block.sync_blk_to_disk(self.block_device.clone());
+            super::counters::inc_counter!(super::counters::OTHER_META_WRITE);
 
             return Ok(());
         }
@@ -877,7 +896,7 @@ impl Ext4FileSystem {
         // log::info!("search path {:x?}", search_path);
 
         // tree is full, time to grow in depth
-        self.ext_grow_indepth(inode_ref);
+        self.ext_grow_indepth(inode_ref)?;
 
         // insert again
         self.insert_extent(inode_ref, new_extent)
@@ -917,6 +936,7 @@ impl Ext4FileSystem {
 
         // Update top-level index: num,max,pointer
         let root_header = inode_ref.inode.root_extent_header_mut();
+        let old_depth = root_header.depth;
         root_header.set_entries_count(1);
         root_header.add_depth();
 
@@ -924,12 +944,13 @@ impl Ext4FileSystem {
         let root_first_extent_block = inode_ref.inode.root_extent_at(0).first_block;
         let root_first_index = inode_ref.inode.root_first_index_mut();
         root_first_index.store_pblock(new_block);
-        if root_depth == 0 {
+        if old_depth == 0 {
             // Root extent block becomes index block
             root_first_index.first_block = root_first_extent_block;
         }
 
         new_ext4block.sync_blk_to_disk(self.block_device.clone());
+        super::counters::inc_counter!(super::counters::OTHER_META_WRITE);
         self.write_back_inode(inode_ref);
 
         Ok(())

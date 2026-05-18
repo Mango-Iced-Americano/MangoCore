@@ -147,9 +147,10 @@ impl MountFSInode {
 
     /// 判断当前 inode 是否为挂载点根
     pub fn is_mountpoint_root(&self) -> bool {
-        let self_arc = self.self_arc();
-        let root_inode = self.mount_fs.mountpoint_root_inode();
-        Arc::ptr_eq(&self_arc, &root_inode)
+        let Ok(cur_md) = self.inner_inode.metadata() else { return false };
+        let root_inner = self.mount_fs.root_inner_inode();
+        let Ok(root_md) = root_inner.metadata() else { return false };
+        cur_md.inode_id == root_md.inode_id
     }
 
     /// 解析路径时，跨越挂载点边界
@@ -166,7 +167,10 @@ impl MountFSInode {
             lock.get(&inode_id).cloned()
         };
         match sub_mountfs {
-            Some(sub) => sub.mountpoint_root_inode(),
+            Some(sub) => {
+                sub.set_self_mountpoint(Some(self_inode));
+                sub.mountpoint_root_inode()
+            }
             None => self_inode,
         }
     }
@@ -346,8 +350,32 @@ impl IndexNode for MountFSInode {
         self.mount_fs.clone()
     }
 
+    fn umount(&self) -> Result<Arc<MountFS>, SyscallErr> {
+        if self.is_mountpoint_root() {
+            self.mount_fs.umount()?;
+            return Ok(self.mount_fs.clone());
+        }
+
+        let inode_id = self.inner_inode.metadata()?.inode_id;
+        let mounted = {
+            let mountpoints = self.mount_fs.mountpoints.lock();
+            mountpoints.get(&inode_id).cloned()
+        }
+        .ok_or(SyscallErr::EINVAL)?;
+        mounted.umount()?;
+        Ok(mounted)
+    }
+
     fn page_cache(&self) -> Option<Arc<super::super::page_cache::PageCache>> {
         self.inner_inode.page_cache()
+    }
+
+    fn sync(&self) -> Result<(), SyscallErr> {
+        self.inner_inode.sync()
+    }
+
+    fn datasync(&self) -> Result<(), SyscallErr> {
+        self.inner_inode.datasync()
     }
 
     fn ioctl(
@@ -380,20 +408,22 @@ impl IndexNode for MountFSInode {
                 break;
             }
 
-            let name = current
+            let parent = current.do_parent()?;
+            if Arc::ptr_eq(&parent, &current) {
+                break;
+            }
+
+            // 在 parent 中查找 current 的名称
+            let name = parent
                 .inner_inode
                 .get_entry_name(current.metadata()?.inode_id)
                 .unwrap_or_else(|_| alloc::string::String::from("?"));
             path_parts.push(name);
 
-            if path_parts.len() > 1024 {
+            if path_parts.len() > 64 {
                 return Err(SyscallErr::ELOOP);
             }
 
-            let parent = current.do_parent()?;
-            if Arc::ptr_eq(&parent, &current) {
-                break;
-            }
             current = parent;
         }
 

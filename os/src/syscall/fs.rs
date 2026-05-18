@@ -1213,10 +1213,24 @@ pub fn sys_fsync(fd: usize) -> isize {
 
     info!("[sys_fsync] fd: {}", fd);
     let fd_table = task.files.lock();
-    match fd_table.get_file(fd) {
-        Ok(_) => SUCCESS,
+    let inode = match fd_table.get_file(fd) {
+        Ok(file) => file.inode.clone(),
         Err(e) => return -(e as isize),
+    };
+    drop(fd_table);
+    match inode.sync() {
+        Ok(()) => SUCCESS,
+        Err(e) => -(e as isize),
     }
+}
+
+pub fn sys_sync() -> isize {
+    crate::fs::flush_all_page_caches();
+    SUCCESS
+}
+
+pub fn sys_syncfs(_fd: usize) -> isize {
+    ENOSYS
 }
 
 pub fn sys_fchmodat() -> isize {
@@ -1442,8 +1456,15 @@ pub fn sys_umount2(target: *const u8, flags: u32) -> isize {
         None => return EINVAL,
     };
     info!("[sys_umount2] target: {}, flags: {:?}", target, flags);
-    warn!("[sys_umount2] fake implementation!");
-    SUCCESS
+    let root: Arc<dyn vfs::IndexNode> = crate::fs::vfs_root().mountpoint_root_inode();
+    let inode = match vfs_lookup(&root, &target, false) {
+        Ok(inode) => inode,
+        Err(errno) => return errno,
+    };
+    match inode.umount() {
+        Ok(_) => SUCCESS,
+        Err(e) => -(e as isize),
+    }
 }
 
 bitflags! {

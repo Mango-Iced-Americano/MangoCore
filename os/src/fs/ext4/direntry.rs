@@ -335,6 +335,7 @@ impl Ext4FileSystem {
                     fblock as usize * self.block_size,
                     self.block_size,
                 );
+                super::counters::inc_counter!(super::counters::DIR_BLOCK_READ);
 
                 // find entry in block
                 let r = self.dir_find_in_block(&ext4block, name, result);
@@ -365,6 +366,7 @@ impl Ext4FileSystem {
                         fblock as usize * self.block_size,
                         self.block_size,
                     );
+                    super::counters::inc_counter!(super::counters::DIR_BLOCK_READ);
                     self.debug_dump_dir_block(&ext4block, parent_inode, dump_iblock, name);
                 }
                 dump_iblock += 1;
@@ -469,6 +471,7 @@ impl Ext4FileSystem {
                     fblock as usize * self.block_size,
                     self.block_size,
                 );
+                super::counters::inc_counter!(super::counters::DIR_BLOCK_READ);
                 let mut offset = 0;
 
                 // 遍历块内所有项
@@ -520,7 +523,7 @@ impl Ext4FileSystem {
     ///
     /// Params:
     /// parent: &mut Ext4InodeRef - parent directory inode reference
-    /// child: &mut Ext4InodeRef - child inode reference
+    /// child: &Ext4InodeRef - child inode reference
     /// path: &str - path of the new entry
     ///
     /// Returns:
@@ -531,6 +534,7 @@ impl Ext4FileSystem {
         child: &Ext4InodeRef,
         name: &str,
     ) -> Result<usize, isize> {
+        let de_type = child.inode.file_type().to_dir_entry_type();
         // calculate total blocks (ceiling division)
         let inode_size: u64 = parent.inode.size();
         let block_size = self.superblock.block_size() as u64;
@@ -549,9 +553,11 @@ impl Ext4FileSystem {
                     pblock as usize * self.block_size,
                     self.block_size,
                 );
-                if self.try_insert_to_existing_block(&mut ext4block, name, child.inode_num).is_ok() {
+                super::counters::inc_counter!(super::counters::DIR_BLOCK_READ);
+                if self.try_insert_to_existing_block(&mut ext4block, name, child.inode_num, de_type).is_ok() {
                     self.dir_set_csum(&mut ext4block, parent.inode.generation());
                     ext4block.sync_blk_to_disk(self.block_device.clone());
+                    super::counters::inc_counter!(super::counters::DIR_BLOCK_WRITE);
                     return Ok(EOK);
                 }
             }
@@ -567,14 +573,16 @@ impl Ext4FileSystem {
                     pblock as usize * self.block_size,
                     self.block_size,
                 );
+                super::counters::inc_counter!(super::counters::DIR_BLOCK_READ);
 
                 let result =
-                    self.try_insert_to_existing_block(&mut ext4block, name, child.inode_num);
+                    self.try_insert_to_existing_block(&mut ext4block, name, child.inode_num, de_type);
 
                 if result.is_ok() {
                     // set checksum
                     self.dir_set_csum(&mut ext4block, parent.inode.generation());
                     ext4block.sync_blk_to_disk(self.block_device.clone());
+                    super::counters::inc_counter!(super::counters::DIR_BLOCK_WRITE);
 
                     return Ok(EOK);
                 }
@@ -611,15 +619,16 @@ impl Ext4FileSystem {
             new_block as usize * self.block_size,
             self.block_size,
         );
+        super::counters::inc_counter!(super::counters::DIR_BLOCK_READ);
 
         // write new entry to the new block
         // must succeed, as we just allocated the block
-        let de_type = DirEntryType::EXT4_DE_DIR;
         self.insert_to_new_block(&mut new_ext4block, child.inode_num, name, de_type);
 
         // set checksum
         self.dir_set_csum(&mut new_ext4block, parent.inode.generation());
         new_ext4block.sync_blk_to_disk(self.block_device.clone());
+        super::counters::inc_counter!(super::counters::DIR_BLOCK_WRITE);
 
         Ok(EOK)
     }
@@ -638,6 +647,7 @@ impl Ext4FileSystem {
         block: &mut Block,
         name: &str,
         child_inode: u32,
+        de_type: DirEntryType,
     ) -> Result<usize, isize> {
         // required length aligned to 4 bytes
         let required_len = {
@@ -661,7 +671,6 @@ impl Ext4FileSystem {
             if de.unused() {
                 if rec_len >= required_len {
                     let mut new_entry = Ext4DirEntry::default();
-                    let de_type = DirEntryType::EXT4_DE_DIR;
                     new_entry.write_entry(rec_len as u16, child_inode, name, de_type);
                     new_entry.copy_to_slice(&mut block.data, offset);
                     return Ok(EOK);
@@ -685,7 +694,6 @@ impl Ext4FileSystem {
                     // Update existing entry length and copy both entries back to block data
                     de.entry_len = sz as u16;
 
-                    let de_type = DirEntryType::EXT4_DE_DIR;
                     new_entry.write_entry(free_space as u16, child_inode, name, de_type);
 
                     // update parent_de and new_de to blk_data
@@ -751,6 +759,7 @@ impl Ext4FileSystem {
             result.pblock_id * self.block_size,
             self.block_size,
         );
+        super::counters::inc_counter!(super::counters::DIR_BLOCK_READ);
 
         let de_del_entry_len = result.dentry.entry_len();
 
@@ -771,6 +780,7 @@ impl Ext4FileSystem {
 
         self.dir_set_csum(&mut ext4block, parent.inode.generation());
         ext4block.sync_blk_to_disk(self.block_device.clone());
+        super::counters::inc_counter!(super::counters::DIR_BLOCK_WRITE);
 
         Ok(EOK)
     }
@@ -796,6 +806,7 @@ impl Ext4FileSystem {
                     fblock as usize * self.block_size,
                     self.block_size,
                 );
+                super::counters::inc_counter!(super::counters::DIR_BLOCK_READ);
 
                 // start from the first entry
                 let mut offset = 0;
@@ -851,6 +862,7 @@ impl Ext4FileSystem {
                     fblock as usize * self.block_size,
                     self.block_size,
                 );
+                super::counters::inc_counter!(super::counters::DIR_BLOCK_READ);
                 let mut offset = 0;
                 while offset < self.block_size - core::mem::size_of::<Ext4DirEntryTail>() {
                     let de = Ext4DirEntry::try_from(&ext4block.data[offset..]).unwrap();
@@ -883,6 +895,7 @@ impl Ext4FileSystem {
                     fblock as usize * self.block_size,
                     self.block_size,
                 );
+                super::counters::inc_counter!(super::counters::DIR_BLOCK_READ);
                 let mut offset = 0;
                 while offset < self.block_size - core::mem::size_of::<Ext4DirEntryTail>() {
                     let de = Ext4DirEntry::try_from(&ext4block.data[offset..]).unwrap();

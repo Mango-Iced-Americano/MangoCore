@@ -35,6 +35,19 @@ pub static DIR_CHILDREN_REMOVE: AtomicU64 = AtomicU64::new(0);
 pub static DIR_CHILDREN_INVALIDATE: AtomicU64 = AtomicU64::new(0);
 pub static DIR_CHILDREN_STALE_WEAK: AtomicU64 = AtomicU64::new(0);
 
+// ── Cache lifecycle counters (Phase 2+) ──────────────────────────────────
+
+pub static INODE_OBJ_STALE: AtomicU64 = AtomicU64::new(0);
+pub static PAGE_CACHE_STALE: AtomicU64 = AtomicU64::new(0);
+
+// ── Inode cache capacity (Phase 3) ────────────────────────────────────────
+
+pub static INODE_CACHE_INSERT: AtomicU64 = AtomicU64::new(0);
+pub static INODE_CACHE_EVICT_CLEAN: AtomicU64 = AtomicU64::new(0);
+pub static INODE_CACHE_EVICT_DIRTY_FLUSH: AtomicU64 = AtomicU64::new(0);
+pub static INODE_CACHE_EVICT_FAILED_DIRTY: AtomicU64 = AtomicU64::new(0);
+pub static INODE_CACHE_REMOVE_UNLINKED: AtomicU64 = AtomicU64::new(0);
+
 // ── Per-inode metadata cache ────────────────────────────────────────────
 
 pub static INODE_META_CACHE_HIT: AtomicU64 = AtomicU64::new(0);
@@ -61,10 +74,23 @@ pub static BLOCK_BITMAP_READ: AtomicU64 = AtomicU64::new(0);
 pub static BLOCK_BITMAP_WRITE: AtomicU64 = AtomicU64::new(0);
 pub static DIR_BLOCK_READ: AtomicU64 = AtomicU64::new(0);
 pub static DIR_BLOCK_WRITE: AtomicU64 = AtomicU64::new(0);
+pub static READDIR_DIR_BLOCK_READ: AtomicU64 = AtomicU64::new(0);
 pub static GROUP_DESC_READ: AtomicU64 = AtomicU64::new(0);
 pub static GROUP_DESC_WRITE: AtomicU64 = AtomicU64::new(0);
 pub static SUPERBLOCK_READ: AtomicU64 = AtomicU64::new(0);
 pub static SUPERBLOCK_WRITE: AtomicU64 = AtomicU64::new(0);
+
+// ── Data block I/O 分类 ──────────────────────────────────────────────────
+// 仅在物理 I/O 层计数（PageCacheBackend / direct block write），不在逻辑层双计
+
+pub static DATA_BLOCK_READ: AtomicU64 = AtomicU64::new(0);
+pub static DATA_BLOCK_WRITE: AtomicU64 = AtomicU64::new(0);
+
+// ── 未分类 metadata I/O ──────────────────────────────────────────────────
+// 用于 extent tree block、checksum block、xattr 等尚未单独分类的路径
+
+pub static OTHER_META_READ: AtomicU64 = AtomicU64::new(0);
+pub static OTHER_META_WRITE: AtomicU64 = AtomicU64::new(0);
 
 // ── Symlink-specific ─────────────────────────────────────────────────────
 
@@ -96,6 +122,10 @@ pub fn reset_counters() {
         &INODE_OBJ_REMOVE, &INODE_OBJ_INVALIDATE,
         &DIR_CHILDREN_CACHE_HIT, &DIR_CHILDREN_CACHE_MISS, &DIR_CHILDREN_INSERT,
         &DIR_CHILDREN_REMOVE, &DIR_CHILDREN_INVALIDATE, &DIR_CHILDREN_STALE_WEAK,
+        &INODE_OBJ_STALE, &PAGE_CACHE_STALE,
+        &INODE_CACHE_INSERT, &INODE_CACHE_EVICT_CLEAN,
+        &INODE_CACHE_EVICT_DIRTY_FLUSH, &INODE_CACHE_EVICT_FAILED_DIRTY,
+        &INODE_CACHE_REMOVE_UNLINKED,
         &INODE_META_CACHE_HIT, &INODE_META_CACHE_MISS,
         &SYMLINK_TARGET_CACHE_HIT, &SYMLINK_TARGET_CACHE_MISS,
         &METADATA_DIRTY_MARK, &METADATA_FLUSH_COUNT, &METADATA_FLUSH_ERROR,
@@ -104,8 +134,11 @@ pub fn reset_counters() {
         &INODE_BITMAP_READ, &INODE_BITMAP_WRITE,
         &BLOCK_BITMAP_READ, &BLOCK_BITMAP_WRITE,
         &DIR_BLOCK_READ, &DIR_BLOCK_WRITE,
+        &READDIR_DIR_BLOCK_READ,
         &GROUP_DESC_READ, &GROUP_DESC_WRITE,
         &SUPERBLOCK_READ, &SUPERBLOCK_WRITE,
+        &DATA_BLOCK_READ, &DATA_BLOCK_WRITE,
+        &OTHER_META_READ, &OTHER_META_WRITE,
         &SYMLINK_CREATE_COUNT, &FAST_SYMLINK_CREATE_COUNT,
         &SYMLINK_READLINK_COUNT, &FAST_SYMLINK_READ_INLINE_COUNT,
         &SYMLINK_INODE_WRITE_COUNT, &SYMLINK_PARENT_INODE_WRITE_COUNT,
@@ -130,6 +163,10 @@ pub fn dump_scenario(label: &str) {
         DIR_BLOCK_READ.load(Ordering::Relaxed), DIR_BLOCK_WRITE.load(Ordering::Relaxed),
         GROUP_DESC_READ.load(Ordering::Relaxed), GROUP_DESC_WRITE.load(Ordering::Relaxed),
         SUPERBLOCK_READ.load(Ordering::Relaxed), SUPERBLOCK_WRITE.load(Ordering::Relaxed));
+    println!("data r={} w={}",
+        DATA_BLOCK_READ.load(Ordering::Relaxed), DATA_BLOCK_WRITE.load(Ordering::Relaxed));
+    println!("readdir_dir r={}",
+        READDIR_DIR_BLOCK_READ.load(Ordering::Relaxed));
     println!("inode_obj hit={} miss={} | children hit={} miss={} stale_weak={}",
         INODE_OBJ_CACHE_HIT.load(Ordering::Relaxed), INODE_OBJ_CACHE_MISS.load(Ordering::Relaxed),
         DIR_CHILDREN_CACHE_HIT.load(Ordering::Relaxed), DIR_CHILDREN_CACHE_MISS.load(Ordering::Relaxed),
@@ -151,27 +188,69 @@ pub fn dump_scenario(label: &str) {
 // ── syscall 接口 ──────────────────────────────────────────────────────────
 
 /// sys_ext4_counters(cmd, label_ptr, label_len):
-///   cmd=0: enable,  cmd=1: disable,  cmd=2: reset,  cmd=3: dump
-///   cmd=4: begin_meta_batch,  cmd=5: end_meta_batch_and_flush
+///   cmd=0: enable,  cmd=1: disable,  cmd=2: reset,  cmd=3: dump I/O profile
+///   cmd=4: begin_meta_batch, cmd=5: end_meta_batch_and_flush, cmd=7: abort_meta_batch
 pub fn sys_ext4_counters(cmd: usize, label_ptr: usize, label_len: usize) -> isize {
     match cmd {
         0 => { enable_counters(); 0 }
         1 => { disable_counters(); 0 }
         2 => { reset_counters(); 0 }
         3 => {
-            let label = if label_ptr != 0 && label_len > 0 && label_len <= 64 {
-                let token = crate::task::current_user_token();
-                crate::mm::translated_str(
-                    token,
-                    label_ptr as *const u8,
-                ).unwrap_or_else(|_| alloc::string::String::from("unknown"))
-            } else {
-                alloc::string::String::from("unknown")
-            };
+            let label = read_label(label_ptr, label_len);
             dump_scenario(&label);
             0
         }
+        4 | 5 | 7 => {
+            // DISABLED: meta_batch has known cumulative accounting issue
+            // (ialloc_alloc_inode reloads bg from disk, batch only writes -1 not -N)
+            // Re-enable after fixing cumulative bg/sb state tracking
+            -38 // ENOSYS
+        }
+        6 => {
+            let guard = crate::fs::ext4::ext4fs::GLOBAL_EXT4FS.lock();
+            let fs = match guard.as_ref().and_then(|w| w.upgrade()) {
+                Some(fs) => fs,
+                None => return -6, // ENXIO
+            };
+            drop(guard);
+            let label = read_label(label_ptr, label_len);
+            fs.dump_cache_memory_profile(&label);
+            0
+        }
+        8 => {
+            // prune_stale_weak_entries: clean inode_objects dead weak + stale page_caches
+            let guard = crate::fs::ext4::ext4fs::GLOBAL_EXT4FS.lock();
+            let fs = match guard.as_ref().and_then(|w| w.upgrade()) {
+                Some(fs) => fs,
+                None => return -6,
+            };
+            drop(guard);
+            let (io, pc) = fs.prune_stale_weak_entries();
+            io as isize + pc as isize
+        }
+        9 => {
+            // clear_all_children_caches
+            let guard = crate::fs::ext4::ext4fs::GLOBAL_EXT4FS.lock();
+            let fs = match guard.as_ref().and_then(|w| w.upgrade()) {
+                Some(fs) => fs,
+                None => return -6,
+            };
+            drop(guard);
+            fs.clear_all_children_caches() as isize
+        }
         _ => -22, // EINVAL
+    }
+}
+
+fn read_label(label_ptr: usize, label_len: usize) -> alloc::string::String {
+    if label_ptr != 0 && label_len > 0 && label_len <= 64 {
+        let token = crate::task::current_user_token();
+        crate::mm::translated_str(
+            token,
+            label_ptr as *const u8,
+        ).unwrap_or_else(|_| alloc::string::String::from("unknown"))
+    } else {
+        alloc::string::String::from("unknown")
     }
 }
 

@@ -859,6 +859,8 @@ impl Ext4FileSystem {
         let mut block_bmap_raw_data = vec![0u8; BLOCK_SIZE];
         self.block_device
             .read_block(block_bitmap_block as usize, &mut block_bmap_raw_data);
+        super::counters::inc_counter!(super::counters::BLOCK_BITMAP_READ);
+        super::counters::inc_counter!(super::counters::BLOCK_READ_TOTAL);
         let data: &mut Vec<u8> = &mut block_bmap_raw_data.to_vec();
         let mut rel_blk_idx = 0;
 
@@ -869,6 +871,8 @@ impl Ext4FileSystem {
         // todo!();
         self.block_device
             .write_block(block_bitmap_block as usize, data);
+        super::counters::inc_counter!(super::counters::BLOCK_BITMAP_WRITE);
+        super::counters::inc_counter!(super::counters::BLOCK_WRITE_TOTAL);
 
         /* Update superblock free blocks count */
         let mut super_blk_free_blocks = super_block.free_blocks_count();

@@ -832,7 +832,18 @@ pub fn sys_execve(
             };
 
             let task = current_task().unwrap();
-            *task.exe_path.lock() = path.clone();
+            // 确保 exe_path 是绝对路径（glibc _dl_get_origin 要求以 '/' 开头）
+            let abs_path = if path.starts_with('/') {
+                path.clone()
+            } else {
+                let cwd = working_inode.inode.absolute_path().unwrap_or_default();
+                if cwd == "/" {
+                    alloc::format!("/{}", path)
+                } else {
+                    alloc::format!("{}/{}", cwd, path)
+                }
+            };
+            *task.exe_path.lock() = abs_path;
             show_frame_consumption! {
                 "load_elf";
                 if let Err(errno) = task.load_elf(elf, &argv_vec, &envp_vec) {

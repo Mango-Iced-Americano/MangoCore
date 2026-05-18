@@ -3,6 +3,7 @@ use crate::mm::{
     frame_alloc, frame_dealloc, frames_alloc, kernel_token, FrameTracker, PageTable, PageTableImpl,
     PhysAddr, PhysPageNum, StepByOne, VirtAddr,
 };
+use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ptr::NonNull;
@@ -28,7 +29,7 @@ const VIRT_PCI_SIZE: usize = 0x0002_0000;
 pub struct VirtIOBlock(Mutex<VirtIOBlk<VirtioHal, PciTransport>>);
 
 lazy_static! {
-    static ref QUEUE_FRAMES: Mutex<Vec<Arc<FrameTracker>>> = Mutex::new(Vec::new());
+    static ref QUEUE_FRAMES: Mutex<BTreeMap<usize, Vec<Arc<FrameTracker>>>> = Mutex::new(BTreeMap::new());
     static ref PCI_RANGE_ALLOCATOR: Mutex<PciRangeAllocator> =
         Mutex::new(PciRangeAllocator::new(VIRT_PCI_BASE, VIRT_PCI_SIZE));
 }
@@ -36,43 +37,18 @@ lazy_static! {
 impl BlockDevice for VirtIOBlock {
     fn read_block(&self, block_id: usize, buf: &mut [u8]) {
         assert!(buf.len() % BLOCK_SZ == 0);
+        let mut dev = self.0.lock();
         for (i, chunk) in buf.chunks_mut(VIRT_IO_BLOCK_SZ).enumerate() {
-            let virtio_block_id = block_id * BLOCK_RATIO + i;
-            self.0
-                .lock()
-                .read_blocks(virtio_block_id, chunk)
+            dev.read_blocks(block_id * BLOCK_RATIO + i, chunk)
                 .expect("read error");
         }
     }
 
     fn write_block(&self, block_id: usize, buf: &[u8]) {
         assert!(buf.len() % BLOCK_SZ == 0);
-        // == INODE 3266 CORRUPTION WATCH ==
-        const WATCH_INODE_TABLE_BLOCK: usize = 749;
-        if block_id == WATCH_INODE_TABLE_BLOCK && buf.len() > 256 + 2 {
-            let mode = u16::from_le_bytes([buf[256], buf[257]]);
-            let size = u32::from_le_bytes([buf[256 + 4], buf[256 + 5], buf[256 + 6], buf[256 + 7]]);
-            let block0 =
-                u32::from_le_bytes([buf[256 + 40], buf[256 + 41], buf[256 + 42], buf[256 + 43]]);
-            log::warn!(
-                "[WRITE_WATCH] block=749(inode_table): ino@256 mode=0o{:o} size={} block[0]={:#x}",
-                mode,
-                size,
-                block0
-            );
-        }
-        if block_id <= 10 {
-            log::warn!(
-                "[WRITE_WATCH] block={}(metadata): len={}",
-                block_id,
-                buf.len()
-            );
-        }
+        let mut dev = self.0.lock();
         for (i, chunk) in buf.chunks(VIRT_IO_BLOCK_SZ).enumerate() {
-            let virtio_block_id = block_id * BLOCK_RATIO + i;
-            self.0
-                .lock()
-                .write_blocks(virtio_block_id, chunk)
+            dev.write_blocks(block_id * BLOCK_RATIO + i, chunk)
                 .expect("write error");
         }
     }
@@ -223,44 +199,47 @@ unsafe impl Hal for VirtioHal {
                 .copy_from_slice(buffer);
         }
         let pa = frames[0].ppn.start_addr().0;
-        QUEUE_FRAMES.lock().extend(frames);
+        let old = QUEUE_FRAMES.lock().insert(pa, frames);
+        assert!(old.is_none(), "[virtio-pci] DMA frame key collision pa=0x{:x}", pa);
         pa
     }
 
     unsafe fn unshare(paddr: usize, mut buffer: NonNull<[u8]>, dir: BufferDirection) {
-        let buffer = buffer.as_mut();
+        let frames = QUEUE_FRAMES.lock()
+            .remove(&paddr)
+            .unwrap_or_else(|| panic!("[virtio-pci] unshare unknown paddr=0x{:x}", paddr));
+
         if matches!(dir, BufferDirection::DeviceToDriver | BufferDirection::Both) {
+            let buffer = buffer.as_mut();
             let src = paddr as *const u8;
             buffer.copy_from_slice(core::slice::from_raw_parts(src, buffer.len()));
         }
-        let mut ppn = PhysAddr(paddr).floor();
-        let end = PhysAddr(paddr + buffer.len()).ceil();
-        while ppn != end {
-            frame_dealloc(ppn);
-            ppn.step();
-        }
+
+        drop(frames);
     }
 }
 
 pub fn virtio_dma_alloc(pages: usize) -> PhysAddr {
     let mut ppn_base = PhysPageNum(0);
+    let mut frames = Vec::with_capacity(pages);
     for i in 0..pages {
         let frame = frame_alloc().unwrap();
         if i == 0 {
             ppn_base = frame.ppn;
         }
         assert_eq!(frame.ppn.0, ppn_base.0 + i);
-        QUEUE_FRAMES.lock().push(frame);
+        frames.push(frame);
     }
+    let pa = PhysAddr::from(ppn_base).0;
+    let old = QUEUE_FRAMES.lock().insert(pa, frames);
+    assert!(old.is_none(), "[virtio-pci] dma_alloc key collision pa=0x{:x}", pa);
     ppn_base.into()
 }
 
-pub fn virtio_dma_dealloc(pa: PhysAddr, pages: usize) -> i32 {
-    let mut ppn = pa.into();
-    for _ in 0..pages {
-        frame_dealloc(ppn);
-        ppn.step();
-    }
+pub fn virtio_dma_dealloc(pa: PhysAddr, _pages: usize) -> i32 {
+    let frames = QUEUE_FRAMES.lock().remove(&pa.0);
+    assert!(frames.is_some(), "[virtio-pci] dma_dealloc unknown pa=0x{:x}", pa.0);
+    drop(frames);
     0
 }
 
