@@ -212,7 +212,7 @@ impl Ext4FileSystem {
         for lblock in start_lblock..end_lblock {
             if self.get_pblock_idx(inode_ref, lblock).is_err() {
                 // Block not yet mapped — allocate and insert extent
-                self.insert_inode_pblk(inode_ref, lblock)?;
+                self.insert_inode_pblk_deferred(inode_ref, lblock)?;
                 allocated.push(lblock);
             }
         }
@@ -571,10 +571,11 @@ impl IndexNode for layout::Ext4OSInode {
 
         // Write data through PageCache; physical blocks are already mapped.
         let pc = self.get_new_page_cache().ok_or(SyscallErr::EIO)?;
-        pc.write(offset, &buf[..write_len]).map_err(|_| SyscallErr::EIO)?;
+        let write_result = pc.write(offset, &buf[..write_len]);
 
-        // Persist metadata changes (mtime/ctime/size) — extent tree was
-        // already written by insert_inode_pblk inside ensure_blocks_allocated.
+        // Persist metadata changes (mtime/ctime/size/extent) — flush once
+        // after all data + allocation work, even if data write partially failed.
+        // This ensures allocated blocks are reflected in the inode extent tree.
         let mut fresh2 = self.ext4fs.get_inode_ref(inode_num);
         {
             let inode_lock = self.inode.lock();
@@ -584,7 +585,7 @@ impl IndexNode for layout::Ext4OSInode {
         self.metadata_dirty.store(false, core::sync::atomic::Ordering::Relaxed);
         super::counters::inc_counter!(super::counters::METADATA_FLUSH_COUNT);
 
-        Ok(write_len)
+        write_result.map(|_| write_len).map_err(|_| SyscallErr::EIO)
     }
 
     fn page_cache(&self) -> Option<alloc::sync::Arc<crate::fs::page_cache::PageCache>> {
@@ -756,6 +757,7 @@ impl IndexNode for layout::Ext4OSInode {
         } else {
             let inode_mode = InodeFileType::S_IFLNK.bits();
             let mut new_ref = self.ext4fs.create(parent, name, inode_mode).map_err(|e| map_create_error(e))?;
+            super::counters::inc_counter!(super::counters::SYMLINK_DIR_BLOCK_WRITE_COUNT);
             self.ext4fs.write_at(new_ref.inode_num, 0, target_bytes).map_err(|_| SyscallErr::EIO)?;
             new_ref
         };

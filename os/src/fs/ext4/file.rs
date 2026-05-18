@@ -292,13 +292,11 @@ impl Ext4FileSystem {
     pub fn create(&self, parent: u32, name: &str, inode_mode: u16) -> Result<Ext4InodeRef, isize> {
         let mut parent_inode_ref = self.get_inode_ref(parent);
         let init_child_ref = self.create_inode(inode_mode)?;
-        self.write_back_inode_without_csum(&init_child_ref);
-        let mut child_inode_ref = self.get_inode_ref(init_child_ref.inode_num);
-        self.link(&mut parent_inode_ref, &mut child_inode_ref, name)?;
-        super::counters::inc_counter!(super::counters::SYMLINK_DIR_BLOCK_WRITE_COUNT);
+        let mut child_mut = init_child_ref.clone();
+        self.link_no_parent_flush(&mut parent_inode_ref, &mut child_mut, name)?;
         self.write_back_inode(&mut parent_inode_ref);
-        self.write_back_inode(&mut child_inode_ref);
-        Ok(child_inode_ref)
+        self.write_back_inode(&mut child_mut);
+        Ok(child_mut)
     }
 
     /// 创建 fast symlink（target ≤ 60 字节，存入 i_block 而非分配 data block）。
@@ -432,23 +430,14 @@ impl Ext4FileSystem {
         gid: u16,
     ) -> Result<Ext4InodeRef, isize> {
         let mut parent_inode_ref = self.get_inode_ref(parent);
-
-        // let mut child_inode_ref = self.create_inode(inode_mode)?;
         let mut init_child_ref = self.create_inode(inode_mode)?;
-
         init_child_ref.inode.set_uid(uid);
         init_child_ref.inode.set_gid(gid);
-
-        self.write_back_inode_without_csum(&init_child_ref);
-        // load new
-        let mut child_inode_ref = self.get_inode_ref(init_child_ref.inode_num);
-
-        self.link(&mut parent_inode_ref, &mut child_inode_ref, name)?;
-
+        let mut child_mut = init_child_ref.clone();
+        self.link_no_parent_flush(&mut parent_inode_ref, &mut child_mut, name)?;
         self.write_back_inode(&mut parent_inode_ref);
-        self.write_back_inode(&mut child_inode_ref);
-
-        Ok(child_inode_ref)
+        self.write_back_inode(&mut child_mut);
+        Ok(child_mut)
     }
 
     /// 从指定文件的某个偏移位置开始读取数据

@@ -336,7 +336,6 @@ impl Ext4FileSystem {
         // inode_blocks += block_size / EXT4_INODE_BLOCK_SIZE as u64;
         inode_blocks += (self.block_size / self.superblock.inode_size as usize) as u64;
         inode_ref.inode.set_blocks_count(inode_blocks);
-        self.write_back_inode(inode_ref);
 
         // Update block group free blocks count
         let mut fb_cnt = block_group.get_free_blocks_count();

@@ -786,7 +786,6 @@ impl Ext4FileSystem {
         if let Some(cached) = self.inode_cache.lock().get(&ino) {
             cached.lock().dirty = false;
         }
-        super::counters::inc_counter!(super::counters::INODE_TABLE_WRITE);
     }
 
     /// 获取逻辑块号对应的物理块号
@@ -989,6 +988,30 @@ impl Ext4FileSystem {
             new_block,
             required_size,
         );
+        Ok(new_block)
+    }
+
+    /// Deferred variant of insert_inode_pblk: skips the final write_back_inode.
+    /// Caller MUST flush the inode later (e.g. write_at's final flush after all
+    /// blocks are allocated). Used only by ensure_blocks_allocated → write_at.
+    pub fn insert_inode_pblk_deferred(
+        &self,
+        inode_ref: &mut Ext4InodeRef,
+        iblock: u32,
+    ) -> Result<Ext4Fsblk, isize> {
+        let mut newex: Ext4Extent = Ext4Extent::default();
+        let new_block = self.balloc_alloc_block(inode_ref, None)?;
+        newex.first_block = iblock;
+        newex.store_pblock(new_block);
+        newex.block_count = 1;
+        self.insert_extent(inode_ref, &mut newex)?;
+
+        let inode_size = inode_ref.inode.size();
+        let required_size = (iblock as u64 + 1) * self.block_size as u64;
+        if required_size > inode_size {
+            inode_ref.inode.set_size(required_size);
+        }
+        // defer: no write_back_inode — caller flushes once at end
         Ok(new_block)
     }
 
