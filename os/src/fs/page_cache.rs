@@ -305,6 +305,40 @@ impl PageCache {
         Ok(entry)
     }
 
+    /// 获取页帧用于文件映射读（如 MAP_PRIVATE file-backed page fault）。
+    /// 返回 PageCache 中的 `Arc<FrameTracker>`，不标记脏。
+    /// 只允许 UpToDate 或 Dirty 状态的页帧。
+    pub fn frame_for_read(&self, page_index: usize) -> Result<Arc<FrameTracker>, SyscallErr> {
+        let entry = self.get_or_create_entry(page_index, true)?;
+        let state = entry.state();
+        match state {
+            PageState::UpToDate | PageState::Dirty => Ok(entry.page.clone()),
+            PageState::Error => Err(SyscallErr::EIO),
+            PageState::Loading | PageState::Writeback => Err(SyscallErr::EAGAIN),
+        }
+    }
+
+    /// 获取页帧用于文件映射写（如 MAP_SHARED file-backed page fault）。
+    /// 返回 PageCache 中的 `Arc<FrameTracker>`，自动标记脏页。
+    /// 只允许 UpToDate 或 Dirty 状态的页帧。
+    pub fn frame_for_write(&self, page_index: usize) -> Result<Arc<FrameTracker>, SyscallErr> {
+        let entry = self.get_or_create_entry(page_index, true)?;
+        let state = entry.state();
+        if state != PageState::UpToDate && state != PageState::Dirty {
+            return match state {
+                PageState::Error => Err(SyscallErr::EIO),
+                PageState::Loading | PageState::Writeback => Err(SyscallErr::EAGAIN),
+                _ => Err(SyscallErr::EIO),
+            };
+        }
+        let mut inner = self.inner.lock();
+        inner.mark_dirty(page_index);
+        if state == PageState::UpToDate {
+            entry.set_state(PageState::Dirty);
+        }
+        Ok(entry.page.clone())
+    }
+
     // ── 读取 ─────────────────────────────────────────────────────────
 
     /// 从指定偏移量读取数据

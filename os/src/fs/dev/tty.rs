@@ -1,6 +1,5 @@
 use crate::hal::console_getchar;
-use crate::mm::{copy_from_user, copy_to_user};
-use crate::mm::{translated_ref, translated_ref_write};
+use crate::mm::{UserPtr, UserPtrMut};
 use crate::syscall::errno::*;
 use crate::task::signal::Signals;
 use crate::task::WaitQueue;
@@ -270,8 +269,10 @@ impl IndexNode for Teletype {
         let token = crate::task::current_user_token();
         match TeletypeCommand::from_primitive(cmd) {
             TeletypeCommand::TCGETS | TeletypeCommand::TCGETA => {
-                copy_to_user(token, &inner.termios, argp as *mut Termios);
-                Ok(SUCCESS as usize)
+                match UserPtrMut::from_addr(argp).write(token, &inner.termios) {
+                    Ok(()) => Ok(0),
+                    Err(_) => Err(SyscallErr::EFAULT),
+                }
             }
             TeletypeCommand::TCSETS
             | TeletypeCommand::TCSETSW
@@ -279,32 +280,44 @@ impl IndexNode for Teletype {
             | TeletypeCommand::TCSETA
             | TeletypeCommand::TCSETAW
             | TeletypeCommand::TCSETAF => {
-                copy_from_user(token, argp as *const Termios, &mut inner.termios);
-                Ok(SUCCESS as usize)
-            }
-            TeletypeCommand::TCXONC => Ok(SUCCESS as usize),
-            TeletypeCommand::TIOCGPGRP => match translated_ref_write(token, argp as *mut u32) {
-                Ok(word) => {
-                    *word = inner.foreground_pgid;
-                    Ok(0)
+                match UserPtr::from_addr(argp).read(token) {
+                    Ok(termios) => {
+                        inner.termios = termios;
+                        Ok(0)
+                    }
+                    Err(_) => Err(SyscallErr::EFAULT),
                 }
-                Err(_errno) => Err(SyscallErr::EFAULT),
-            },
-            TeletypeCommand::TIOCSPGRP => match translated_ref(token, argp as *const u32) {
+            }
+            // TCXONC (0x540A) — software flow control. No-op for virtual terminal.
+            TeletypeCommand::TCXONC => Ok(0),
+            TeletypeCommand::TIOCGPGRP => {
+                match UserPtrMut::from_addr(argp).write(token, &inner.foreground_pgid) {
+                    Ok(()) => Ok(0),
+                    Err(_) => Err(SyscallErr::EFAULT),
+                }
+            }
+            TeletypeCommand::TIOCSPGRP => match UserPtr::<u32>::from_addr(argp).read(token) {
                 Ok(word) => {
-                    log::info!("[tty-ioctl] TIOCSPGRP: set foreground_pgid to {}", *word);
-                    inner.foreground_pgid = *word;
+                    log::info!("[tty-ioctl] TIOCSPGRP: set foreground_pgid to {}", word);
+                    inner.foreground_pgid = word;
                     Ok(0)
                 }
                 Err(_errno) => Err(SyscallErr::EFAULT),
             },
             TeletypeCommand::TIOCGWINSZ => {
-                copy_to_user(token, &inner.winsize, argp as *mut WinSize);
-                Ok(SUCCESS as usize)
+                match UserPtrMut::from_addr(argp).write(token, &inner.winsize) {
+                    Ok(()) => Ok(0),
+                    Err(_) => Err(SyscallErr::EFAULT),
+                }
             }
             TeletypeCommand::TIOCSWINSZ => {
-                copy_from_user(token, argp as *mut WinSize, &mut inner.winsize);
-                Ok(SUCCESS as usize)
+                match UserPtr::from_addr(argp).read(token) {
+                    Ok(winsize) => {
+                        inner.winsize = winsize;
+                        Ok(0)
+                    }
+                    Err(_) => Err(SyscallErr::EFAULT),
+                }
             }
             _ => {
                 warn!(

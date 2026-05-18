@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 use crate::fs::vfs::{self, FileFlags};
-use crate::mm::{translated_byte_buffer, translated_refmut, UserAccess, UserBuffer};
+use crate::mm::{UserBufferWriter, UserPtrMut};
 use crate::net::{Endpoint, Socket, SocketFile, PSOCK};
 use crate::task::current_task;
 use crate::utils::error::{SyscallErr, SyscallRet};
@@ -168,11 +168,11 @@ pub fn fill_with_endpoint(ep: &UnixEndpoint, addr: usize, addrlen: usize) -> Sys
     let token = task.get_user_token();
 
     // 解引用 addrlen，拿到用户缓冲区的实际容量
-    let addrlen_ptr = match translated_refmut(token, addrlen as *mut u32) {
-        Ok(p) => p,
+    let addrlen_ptr = UserPtrMut::<u32>::from_addr(addrlen);
+    let capacity = match addrlen_ptr.read(token) {
+        Ok(len) => len as usize,
         Err(_) => return Err(SyscallErr::EFAULT),
     };
-    let capacity = *addrlen_ptr as usize;
 
     // addrlen 太小（至少需要 2 字节容纳 sa_family）→ EINVAL
     if capacity < 2 {
@@ -213,13 +213,16 @@ pub fn fill_with_endpoint(ep: &UnixEndpoint, addr: usize, addrlen: usize) -> Sys
 
     // 写入用户空间缓冲区
     let write_len = actual_len.min(capacity);
-    let buf = translated_byte_buffer(token, addr as *const u8, write_len, UserAccess::Write)
+    let mut user_buf = UserBufferWriter::new(token, addr as *mut u8, write_len)
         .map_err(|_| SyscallErr::EFAULT)?;
-    let mut user_buf = UserBuffer::new(buf);
-    user_buf.write(&data[..write_len]);
+    user_buf
+        .write_from(&data[..write_len])
+        .map_err(|_| SyscallErr::EFAULT)?;
 
     // 回写实际需要的地址长度
-    *addrlen_ptr = actual_len as u32;
+    addrlen_ptr
+        .write(token, &(actual_len as u32))
+        .map_err(|_| SyscallErr::EFAULT)?;
     Ok(0)
 }
 

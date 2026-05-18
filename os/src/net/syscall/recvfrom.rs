@@ -1,5 +1,6 @@
 use log::info;
 
+use crate::mm::UserPtr;
 use crate::net::config::NET_INTERFACE;
 use crate::net::PSOCK;
 use crate::syscall::utils::wait_io;
@@ -29,9 +30,8 @@ pub fn sys_recvfrom(
     // 在 syscall 入口校验 src_addr 对应的 *addrlen 值
     if src_addr != 0 {
         let token = task.get_user_token();
-        match crate::mm::translated_ref(token, addrlen as *const u32) {
-            Ok(addrlen_val) => {
-                let len = *addrlen_val;
+        match UserPtr::<u32>::from_addr(addrlen).read(token) {
+            Ok(len) => {
                 // addrlen 过小（< sizeof(struct sockaddr_in)=16）或过大（不合理）都返回 EINVAL
                 if len < 16 || len > 512 {
                     return -(SyscallErr::EINVAL as isize);

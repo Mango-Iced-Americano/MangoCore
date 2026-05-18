@@ -3,9 +3,8 @@ use crate::fs::OpenFlags;
 use crate::hal::shutdown;
 use crate::hal::{MachineContext, TrapContext};
 use crate::mm::{
-    copy_from_user, copy_to_user, copy_to_user_string, get_from_user, translated_byte_buffer,
-    translated_ref, translated_ref_write, translated_str, try_get_from_user, MapFlags,
-    MapPermission, UserAccess, UserBuffer, VirtAddr,
+    copy_from_user, copy_to_user, copy_to_user_string, translated_byte_buffer, MapFlags,
+    MapPermission, UserAccess, UserBuffer, UserCString, UserPtr, UserPtrMut, VirtAddr,
 };
 use crate::show_frame_consumption;
 use crate::syscall::errno::*;
@@ -191,7 +190,7 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
     }
     let task = current_task().unwrap();
     let token = task.get_user_token();
-    let req = match get_from_user(token, req) {
+    let req = match UserPtr::new(req).read(token) {
         Ok(req) => req,
         Err(errno) => return errno,
     };
@@ -214,7 +213,7 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
             if has_actionable_signal(&task) {
                 // 被可操作信号打断 → 返回剩余时间 + EINTR
                 if !rem.is_null() {
-                    copy_to_user(token, &(end - now), rem).unwrap();
+                    UserPtrMut::new(rem).write(token, &(end - now)).unwrap();
                 }
                 return EINTR;
             }
@@ -228,7 +227,7 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
 
     // 正常超时返回
     if !rem.is_null() {
-        copy_to_user(token, &TimeSpec::new(), rem).unwrap();
+        UserPtrMut::new(rem).write(token, &TimeSpec::new()).unwrap();
     }
     SUCCESS
 }
@@ -247,14 +246,11 @@ pub fn sys_setitimer(
     }
     let task = current_task().unwrap();
     let token = task.get_user_token();
-    let new_timer = if new_value as usize != 0 {
-        let mut value = ITimerVal::new();
-        if let Err(e) = copy_from_user(token, new_value, &mut value) {
+    let new_timer = match UserPtr::new(new_value).read_optional(token) {
+        Ok(value) => value,
+        Err(e) => {
             return e;
         }
-        Some(value)
-    } else {
-        None
     };
     match which {
         //实时计时器走KernelTimer
@@ -269,7 +265,7 @@ pub fn sys_setitimer(
                         Some(deadline) => timespec_to_timeval(deadline - now),
                         None => TimeVal::new(),
                     };
-                    if let Err(e) = copy_to_user(token, &inner.timer[0], old_value) {
+                    if let Err(e) = UserPtrMut::new(old_value).write(token, &inner.timer[0]) {
                         return e;
                     }
                     trace!("[sys_setitimer] *old_value: {:?}", inner.timer[0]);
@@ -306,7 +302,7 @@ pub fn sys_setitimer(
         1 | 2 => {
             let mut inner = task.acquire_inner_lock();
             if old_value as usize != 0 {
-                if let Err(e) = copy_to_user(token, &inner.timer[which], old_value) {
+                if let Err(e) = UserPtrMut::new(old_value).write(token, &inner.timer[which]) {
                     return e;
                 }
                 trace!("[sys_setitimer] *old_value: {:?}", inner.timer[which]);
@@ -335,7 +331,7 @@ pub fn sys_gettimeofday(tv: *mut TimeVal, _tz: *mut TimeZone) -> isize {
     if !tv.is_null() {
         let token = current_user_token();
         let timeval = &TimeVal::now();
-        if copy_to_user(token, timeval, tv).is_err() {
+        if UserPtrMut::new(tv).write(token, timeval).is_err() {
             log::error!("[sys_gettimeofday] Failed to copy to {:?}", tv);
             return EFAULT;
         }
@@ -687,8 +683,8 @@ pub fn sys_clone(
     };
     let new_pid = child.pid.0;
     if flags.contains(CloneFlags::CLONE_PARENT_SETTID) {
-        match translated_ref_write(parent.get_user_token(), ptid) {
-            Ok(word) => *word = child.pid.0 as u32,
+        match UserPtrMut::new(ptid).write(parent.get_user_token(), &(child.pid.0 as u32)) {
+            Ok(()) => {}
             Err(errno) => {
                 child.cleanup_unpublished_clone(flags.contains(CloneFlags::CLONE_VM));
                 return errno;
@@ -697,8 +693,8 @@ pub fn sys_clone(
     }
     // todo: CLONE_CHILD_SETTID标志被设置，但是ctid指针为零，会出现地址错误，干脆全注释掉
     if flags.contains(CloneFlags::CLONE_CHILD_SETTID) {
-        match translated_ref_write(child.get_user_token(), ctid) {
-            Ok(word) => *word = child.pid.0 as u32,
+        match UserPtrMut::new(ctid).write(child.get_user_token(), &(child.pid.0 as u32)) {
+            Ok(()) => {}
             Err(errno) => log::warn!(
                 "[sys_clone] Failed to set child_tid at {:?} with errno {}, but still create the thread",
                 ctid, errno
@@ -734,7 +730,7 @@ pub fn sys_execve(
     // 获取当前进程的用户态内存访问权限
     let token = task.get_user_token();
     // 获取可执行文件的路径
-    let path = match translated_str(token, pathname) {
+    let path = match UserCString::new(pathname).read(token) {
         Ok(path) => path,
         Err(errno) => return errno,
     };
@@ -750,8 +746,8 @@ pub fn sys_execve(
     }
     if !argv.is_null() {
         loop {
-            let arg_ptr = match translated_ref(token, argv) {
-                Ok(argv) => *argv,
+            let arg_ptr = match UserPtr::new(argv).read(token) {
+                Ok(argv) => argv,
                 Err(errno) => return errno,
             };
             if arg_ptr.is_null() {
@@ -760,7 +756,7 @@ pub fn sys_execve(
             if argv_vec.try_reserve(1).is_err() {
                 return ENOMEM;
             }
-            argv_vec.push(match translated_str(token, arg_ptr) {
+            argv_vec.push(match UserCString::new(arg_ptr).read(token) {
                 Ok(arg) => arg,
                 Err(errno) => return errno,
             });
@@ -771,8 +767,8 @@ pub fn sys_execve(
     }
     if !envp.is_null() {
         loop {
-            let env_ptr = match translated_ref(token, envp) {
-                Ok(envp) => *envp,
+            let env_ptr = match UserPtr::new(envp).read(token) {
+                Ok(envp) => envp,
                 Err(errno) => return errno,
             };
             if env_ptr.is_null() {
@@ -781,7 +777,7 @@ pub fn sys_execve(
             if envp_vec.try_reserve(1).is_err() {
                 return ENOMEM;
             }
-            envp_vec.push(match translated_str(token, env_ptr) {
+            envp_vec.push(match UserCString::new(env_ptr).read(token) {
                 Ok(env) => env,
                 Err(errno) => return errno,
             });
@@ -949,9 +945,8 @@ pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) ->
             let found_tgid = child.tgid;
             let exit_code = child.acquire_inner_lock().exit_code;
             if !status.is_null() {
-                match translated_ref_write(token, status) {
-                    Ok(word) => *word = exit_code,
-                    Err(errno) => return errno,
+                if let Err(errno) = UserPtrMut::new(status).write(token, &exit_code) {
+                    return errno;
                 }
             }
             return found_tgid as isize;
@@ -1092,20 +1087,19 @@ pub fn sys_prlimit(
         let Some(limit) = rlimit_value_for(resource, nofile_limit) else {
             return EINVAL;
         };
-        if copy_to_user(token, &limit, old_limit).is_err() {
+        if UserPtrMut::new(old_limit).write(token, &limit).is_err() {
             log::error!("[sys_prlimit] Failed to copy to {:?}", old_limit);
             return EFAULT;
         }
     }
 
     if !new_limit.is_null() {
-        let rlimit = &mut RLimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        if copy_from_user(token, new_limit, rlimit).is_err() {
-            log::error!("[sys_prlimit] Failed to copy from {:?}", new_limit);
-            return EFAULT;
+        let rlimit = match UserPtr::new(new_limit).read(token) {
+            Ok(rlimit) => rlimit,
+            Err(_) => {
+                log::error!("[sys_prlimit] Failed to copy from {:?}", new_limit);
+                return EFAULT;
+            }
         };
         if rlimit.rlim_cur > rlimit.rlim_max {
             return EINVAL;
@@ -1187,8 +1181,9 @@ pub fn sys_futex(
     if uaddr.is_null() || uaddr.align_offset(4) != 0 {
         return EINVAL;
     }
-    let futex_word = match translated_ref(token, uaddr as *const u32) {
-        Ok(futex_word) => futex_word,
+    let futex_word = UserPtr::new(uaddr as *const u32);
+    match futex_word.read(token) {
+        Ok(_) => {}
         Err(errno) => return errno,
     };
     let cmd = threads::FutexCmd::from_primitive(futex_op & 0x7fu32);
@@ -1206,7 +1201,7 @@ pub fn sys_futex(
     // 计算用户地址对应的物理地址 key（用于 process-shared futex）
     // 分解为独立函数避免闭包捕获 task 的借用问题
     fn va_to_phys_key(
-        vm: &crate::mm::MemorySet<crate::mm::KernelPageTableImpl>,
+        vm: &crate::mm::AddressSpace<crate::mm::KernelPageTableImpl>,
         va: usize,
     ) -> Option<usize> {
         let va = VirtAddr::from(va);
@@ -1217,7 +1212,7 @@ pub fn sys_futex(
 
     match cmd {
         FutexCmd::Wait => {
-            let timeout = match try_get_from_user(token, timeout) {
+            let timeout = match UserPtr::new(timeout).read_optional(token) {
                 Ok(timeout) => timeout,
                 Err(errno) => return errno,
             };
@@ -1229,10 +1224,10 @@ pub fn sys_futex(
                 };
                 drop(vm);
                 drop(task);
-                do_futex_wait_shared(futex_word, val, timeout, phys_key)
+                do_futex_wait_shared(futex_word, token, val, timeout, phys_key)
             } else {
                 drop(task);
-                do_futex_wait(futex_word, private_key, val, timeout)
+                do_futex_wait(futex_word, token, private_key, val, timeout)
             }
         }
         FutexCmd::Wake => {
@@ -1252,8 +1247,8 @@ pub fn sys_futex(
             if uaddr2.is_null() || uaddr2.align_offset(4) != 0 {
                 return EINVAL;
             }
-            let _futex_word_2 = match translated_ref(token, uaddr2 as *const u32) {
-                Ok(futex_word_2) => futex_word_2,
+            match UserPtr::new(uaddr2 as *const u32).read(token) {
+                Ok(_) => {}
                 Err(errno) => return errno,
             };
             if is_private {
@@ -1372,7 +1367,6 @@ pub fn sys_mmap(
     offset: usize,
 ) -> isize {
     let task = current_task().unwrap();
-    let token = task.get_user_token();
     let mut memory_set = task.vm.lock();
     let prot = match parse_mmap_prot(prot) {
         Ok(prot) => prot,
@@ -1386,7 +1380,7 @@ pub fn sys_mmap(
         "[mmap] start:{:X}; len:{:X}; prot:{:?}; flags:{:?}; fd:{}; offset:{:X}",
         start, len, prot, flags, fd as isize, offset
     );
-    memory_set.mmap(start, len, prot, flags, fd, offset, token)
+    memory_set.mmap(start, len, prot, flags, fd, offset)
 }
 
 /// # Versions
@@ -1428,7 +1422,7 @@ pub fn sys_clock_gettime(clk_id: usize, tp: *mut TimeSpec) -> isize {
     if !tp.is_null() {
         let token = current_user_token();
         let timespec = &TimeSpec::now();
-        if copy_to_user(token, timespec, tp).is_err() {
+        if UserPtrMut::new(tp).write(token, timespec).is_err() {
             log::error!("[sys_clock_gettime] Failed to copy to {:?}", tp);
             return EFAULT;
         };
@@ -1444,7 +1438,7 @@ pub fn sys_clock_nanosleep(
 ) -> isize {
     if !rqtp.is_null() {
         let token = current_user_token();
-        let timespec = match translated_ref(token, rqtp) {
+        let timespec = match UserPtr::new(rqtp).read(token) {
             Ok(timespec) => timespec,
             Err(errno) => return errno,
         };
@@ -1492,11 +1486,8 @@ pub fn sys_rt_sigpending(set: usize, sigsetsize: usize) -> isize {
         task.pid.0,
         inner.sigpending
     );
-    match translated_ref_write(token, set as *mut Signals) {
-        Ok(pending) => {
-            *pending = inner.sigpending;
-            SUCCESS
-        }
+    match UserPtrMut::from_addr(set).write(token, &inner.sigpending) {
+        Ok(()) => SUCCESS,
         Err(errno) => errno,
     }
 }
@@ -1563,8 +1554,8 @@ pub fn sys_sigreturn() -> isize {
             exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
         }
     };
-    let restored_sigmask = match translated_ref(token, sigmask_addr as *mut Signals) {
-        Ok(sigmask) => *sigmask - Signals::CAN_NOT_BE_MASKED,
+    let restored_sigmask = match UserPtr::<Signals>::from_addr(sigmask_addr).read(token) {
+        Ok(sigmask) => sigmask - Signals::CAN_NOT_BE_MASKED,
         Err(_) => {
             error!("[sys_sigreturn] bad sigmask in signal frame, send SIGSEGV");
             drop(inner);
@@ -1600,7 +1591,7 @@ pub fn sys_times(buf: *mut Times) -> isize {
         tms_cutime: 0,
         tms_cstime: 0,
     };
-    if copy_to_user(token, &times, buf).is_err() {
+    if UserPtrMut::new(buf).write(token, &times).is_err() {
         log::error!("[sys_times] Failed to copy to {:?}", buf);
         return EFAULT;
     };
@@ -1615,7 +1606,7 @@ pub fn sys_getrusage(who: isize, usage: *mut Rusage) -> isize {
     let task = current_task().unwrap();
     let inner = task.acquire_inner_lock();
     let token = task.get_user_token();
-    if copy_to_user(token, &inner.rusage, usage).is_err() {
+    if UserPtrMut::new(usage).write(token, &inner.rusage).is_err() {
         log::error!("[sys_getrusage] Failed to copy to {:?}", usage);
         return EFAULT;
     };
@@ -1641,7 +1632,7 @@ pub fn sys_sched_getaffinity(pid: usize, cpusetsize: usize, mask: *mut u8) -> is
         }
     };
     let token = current_task().unwrap().get_user_token();
-    match copy_to_user(token, &(1 as usize), mask as *mut usize) {
+    match UserPtrMut::from_addr(mask as usize).write(token, &(1 as usize)) {
         Ok(()) => core::mem::size_of::<usize>() as isize,
         Err(_) => EFAULT,
     }

@@ -1,10 +1,6 @@
 use alloc::vec::Vec;
 
-use crate::fs::iov::IOVec;
-use crate::mm::{
-    copy_from_user_array, translated_byte_buffer_append_to_existing_vec, translated_ref,
-    UserAccess, UserBuffer,
-};
+use crate::mm::{UserBufferReader, UserIoVec, UserPtr};
 use crate::net::config::NET_INTERFACE;
 use crate::net::posix::MsgHdr;
 use crate::net::{Endpoint, PSOCK};
@@ -15,6 +11,8 @@ use crate::utils::error::SyscallErr;
 use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address};
 
 use super::common::MsgFlags;
+
+const MAX_MSG_IO_SIZE: usize = 64 * 1024 * 1024;
 
 pub fn sys_sendmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
     let msg_flags = MsgFlags::from_bits_truncate(flags);
@@ -32,69 +30,53 @@ pub fn sys_sendmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
     } || msgdontwait;
 
     let token = task.get_user_token();
-    let msg = match translated_ref(token, msg_ptr as *const MsgHdr) {
-        Ok(m) => *m,
+    let msg = match UserPtr::<MsgHdr>::from_addr(msg_ptr).read(token) {
+        Ok(m) => m,
         Err(_) => return -(SyscallErr::EFAULT as isize),
     };
 
-    // 读取 iovec 数组
-    let iov_cnt = msg.msg_iovlen;
-    if iov_cnt > 1024 {
-        return -(SyscallErr::EINVAL as isize);
-    }
-    let mut iovecs = alloc::vec![IOVec {iov_base: core::ptr::null(), iov_len: 0}; iov_cnt];
-    if copy_from_user_array(token, msg.msg_iov, iovecs.as_mut_ptr(), iov_cnt).is_err() {
-        return -(SyscallErr::EFAULT as isize);
-    }
-
     // 从用户 iovec 读取数据到内核 flat buffer
-    let total_len: usize = iovecs.iter().map(|iov| iov.iov_len).sum();
-    if total_len > 64 * 1024 * 1024 {
+    let user_iov = match UserIoVec::read_user_iovecs(
+        token,
+        msg.msg_iov as *const crate::fs::iov::IOVec,
+        msg.msg_iovlen,
+        MAX_MSG_IO_SIZE,
+    ) {
+        Ok(iov) => iov,
+        Err(errno) => return errno,
+    };
+    if user_iov.total_len() > MAX_MSG_IO_SIZE {
         return -(SyscallErr::ENOBUFS as isize);
     }
-    let mut buf_parts = Vec::new();
-    for iov in &iovecs {
-        if iov.iov_len == 0 {
-            continue;
-        }
-        match translated_byte_buffer_append_to_existing_vec(
-            &mut buf_parts,
-            token,
-            iov.iov_base,
-            iov.iov_len,
-            UserAccess::Read,
-        ) {
-            Ok(_) => {}
-            Err(e) => return e,
-        }
+    let user_buf = match user_iov.reader_buffer() {
+        Ok(buffer) => buffer,
+        Err(errno) => return errno,
+    };
+    let mut buf = Vec::new();
+    if buf.try_reserve(user_iov.total_len()).is_err() {
+        return -(SyscallErr::ENOBUFS as isize);
     }
-    let mut buf = alloc::vec![0u8; total_len];
-    {
-        let user_buf = UserBuffer::new(buf_parts);
-        user_buf.read(&mut buf);
+    unsafe {
+        buf.set_len(user_iov.total_len());
     }
+    user_buf.read(&mut buf);
 
     // 解析目标地址（msg_name）为 Endpoint
     let dest_endpoint = if !msg.msg_name.is_null() && msg.msg_namelen >= 16 {
         let copy_len = (msg.msg_namelen as usize).min(128);
-        let mut addr_parts = Vec::new();
-        match translated_byte_buffer_append_to_existing_vec(
-            &mut addr_parts,
-            token,
-            msg.msg_name,
-            copy_len,
-            UserAccess::Read,
-        ) {
-            Ok(_) => {
-                let mut addr_buf = [0u8; 128];
-                let addr_user_buf = UserBuffer::new(addr_parts);
-                addr_user_buf.read(&mut addr_buf[..copy_len]);
-                match Endpoint::from_sockaddr(&addr_buf[..copy_len]) {
-                    Ok(ep) => Some(ep),
-                    Err(_) => return -(SyscallErr::EINVAL as isize),
-                }
+        let addr_reader = match UserBufferReader::new(token, msg.msg_name as *const u8, copy_len) {
+            Ok(reader) => reader,
+            Err(errno) => return errno,
+        };
+        let mut addr_buf = [0u8; 128];
+        if let Err(errno) = addr_reader.read_into(&mut addr_buf[..copy_len]) {
+            return errno;
+        }
+        match Endpoint::from_sockaddr(&addr_buf[..copy_len]) {
+            Ok(ep) => Some(ep),
+            Err(_) => {
+                return -(SyscallErr::EINVAL as isize);
             }
-            Err(e) => return e,
         }
     } else {
         None

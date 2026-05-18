@@ -202,7 +202,7 @@ impl PageTable for Sv39PageTable {
         }
     }
     /// Predicate for the valid bit.
-    fn is_mapped(&mut self, vpn: VirtPageNum) -> bool {
+    fn is_mapped(&self, vpn: VirtPageNum) -> bool {
         if let Some(i) = self.find_pte(vpn) {
             if i.is_valid() {
                 true

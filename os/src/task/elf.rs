@@ -106,7 +106,6 @@ pub fn load_elf_interp(path: &str) -> Result<&'static [u8], isize> {
         );
         return Err(ENOEXEC);
     }
-    // 文件大小小于ELF文件头大小
     let size = file.get_size();
     if size < 4 {
         return Err(ELIBBAD);

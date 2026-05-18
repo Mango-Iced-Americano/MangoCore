@@ -780,7 +780,7 @@ impl File {
         let need_pages = if size == 0 { 0 } else { (size + PAGE_SIZE - 1) / PAGE_SIZE };
 
         // Helper: allocate frames + pread full file content into them
-        let alloc_and_pread = |size: usize, need_pages: usize| -> Vec<Frame> {
+        let alloc_and_pread = |size: usize, need_pages: usize| -> Vec<Arc<FrameTracker>> {
             log::debug!(
                 "[map_to_kernel_space] allocating {} frames + pread {} bytes",
                 need_pages,
@@ -808,13 +808,18 @@ impl File {
                 dst[..chunk].copy_from_slice(&buf[offset..offset + chunk]);
                 offset += chunk;
             }
-            trackers.into_iter().map(Frame::InMemory).collect()
+            trackers
         };
 
-        let frames: Vec<Frame> = if need_pages == 0 {
+        let frames: Vec<Arc<FrameTracker>> = if need_pages == 0 {
             Vec::new()
         } else if let Some(pc) = self.inode.page_cache() {
-            let cached_frames = pc.frame_trackers();
+            let cached_frames: Vec<Arc<FrameTracker>> = pc.frame_trackers().into_iter()
+                .filter_map(|f| match f {
+                    Frame::InMemory(t) => Some(t),
+                    _ => None,
+                })
+                .collect();
             let cached_count = pc.cached_page_count();
             log::debug!(
                 "[map_to_kernel_space] page_cache: {}/{} pages cached, {} frames tracked",

@@ -1,8 +1,8 @@
 use super::{tlb::tlb_invalidate, tlb_global_invalidate};
 use crate::{
     config::{
-        MEMORY_HIGH_BASE, MEMORY_HIGH_BASE_VPN, MEMORY_SIZE, PAGE_SIZE, PAGE_SIZE_BITS, PALEN,
-        VA_MASK, VPN_SEG_MASK,
+        MEMORY_HIGH_BASE_VPN, MEMORY_SIZE, PAGE_SIZE, PAGE_SIZE_BITS, PALEN, VA_MASK,
+        VPN_SEG_MASK,
     },
     mm::{address::*, frame_alloc, FrameTracker, MapPermission, MemoryError, PageTable, UserAccess},
 };
@@ -12,8 +12,14 @@ use bitflags::*;
 use log::trace;
 // todo: 因之前默认vpn从0开始，所以DIRTY数组相当于vpn从零到size，但是移到高地址启动后，DIRTY位有偏移
 // todo: 相当于低位无效，这里粗暴的增大整个数组长度
-static mut DIRTY: [bool; MEMORY_SIZE * 10 / PAGE_SIZE] = [false; MEMORY_SIZE * 10 / PAGE_SIZE];
+const DIRTY_LEN: usize = MEMORY_SIZE * 10 / PAGE_SIZE;
+static mut DIRTY: [bool; DIRTY_LEN] = [false; DIRTY_LEN];
 use super::register::MemoryAccessType;
+
+fn dirty_index(vpn: VirtPageNum) -> Option<usize> {
+    let idx = vpn.0 & VA_MASK;
+    (idx < DIRTY_LEN).then_some(idx)
+}
 
 bitflags! {
     /// Page Table Entry flags
@@ -84,9 +90,7 @@ impl LAFlexPageTableEntry {
     #[allow(unused)]
     #[inline(always)]
     pub fn empty() -> Self {
-        LAFlexPageTableEntry {
-            bits: (LAPTEFlagBits::NR & LAPTEFlagBits::NX).bits(),
-        }
+        LAFlexPageTableEntry { bits: 0 }
     }
     #[inline(always)]
     pub fn ppn(&self) -> PhysPageNum {
@@ -220,7 +224,7 @@ impl LAFlexPageTable {
             *pte = LAFlexPageTableEntry::new(frame.ppn, LAPTEFlagBits::V);
             self.frames.push(frame);
         }
-        ppn = PhysAddr::from((pte.ppn().0 << 12) | MEMORY_HIGH_BASE).floor();
+        ppn = pte.ppn();
         pte = &mut ppn.get_pte_array::<LAFlexPageTableEntry>()[idxs[1]];
         if !pte.is_valid() {
             self.frames
@@ -230,7 +234,7 @@ impl LAFlexPageTable {
             *pte = LAFlexPageTableEntry::new(frame.ppn, LAPTEFlagBits::V);
             self.frames.push(frame);
         }
-        ppn = PhysAddr::from((pte.ppn().0 << 12) | MEMORY_HIGH_BASE).floor();
+        ppn = pte.ppn();
         pte = &mut ppn.get_pte_array::<LAFlexPageTableEntry>()[idxs[2]];
         Ok(pte)
     }
@@ -243,12 +247,12 @@ impl LAFlexPageTable {
         if !pte.is_valid() {
             return None;
         }
-        ppn = PhysAddr::from((pte.ppn().0 << 12) | MEMORY_HIGH_BASE).floor();
+        ppn = pte.ppn();
         pte = &mut ppn.get_pte_array::<LAFlexPageTableEntry>()[idxs[1]];
         if !pte.is_valid() {
             return None;
         }
-        ppn = PhysAddr::from((pte.ppn().0 << 12) | MEMORY_HIGH_BASE).floor();
+        ppn = pte.ppn();
         pte = &mut ppn.get_pte_array::<LAFlexPageTableEntry>()[idxs[2]];
         if pte.is_valid() {
             Some(pte)
@@ -265,10 +269,13 @@ impl LAFlexPageTable {
     pub fn set_dirty_bit(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
         tlb_invalidate();
         if self.is_ident_map(vpn) {
-            unsafe {
-                DIRTY[vpn.0 & VA_MASK] = true;
+            if let Some(idx) = dirty_index(vpn) {
+                unsafe {
+                    DIRTY[idx] = true;
+                }
+                return Ok(());
             }
-            return Ok(());
+            return Err(());
         }
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.set_dirty();
@@ -317,7 +324,7 @@ impl PageTable for LAFlexPageTable {
         }
     }
     /// Predicate for the valid bit.
-    fn is_mapped(&mut self, vpn: VirtPageNum) -> bool {
+    fn is_mapped(&self, vpn: VirtPageNum) -> bool {
         let ret = {
             if self.is_ident_map(vpn) {
                 true
@@ -475,10 +482,13 @@ impl PageTable for LAFlexPageTable {
     fn clear_dirty_bit(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
         tlb_invalidate();
         if self.is_ident_map(vpn) {
-            unsafe {
-                DIRTY[vpn.0 & VA_MASK] = false;
+            if let Some(idx) = dirty_index(vpn) {
+                unsafe {
+                    DIRTY[idx] = false;
+                }
+                return Ok(());
             }
-            return Ok(());
+            return Err(());
         }
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.clear_dirty();
@@ -500,7 +510,7 @@ impl PageTable for LAFlexPageTable {
     }
     fn is_dirty(&self, vpn: VirtPageNum) -> Option<bool> {
         if self.is_ident_map(vpn) {
-            Some(unsafe { DIRTY[vpn.0 & VA_MASK] })
+            dirty_index(vpn).map(|idx| unsafe { DIRTY[idx] })
         } else {
             self.find_pte(vpn).map(|pte| pte.is_dirty())
         }

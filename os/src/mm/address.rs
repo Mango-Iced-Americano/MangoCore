@@ -1,4 +1,4 @@
-use crate::config::{PAGE_SIZE, PAGE_SIZE_BITS};
+use crate::config::{MEMORY_HIGH_BASE, PAGE_SIZE, PAGE_SIZE_BITS};
 use core::fmt::{self, Debug, Formatter};
 
 #[repr(C)]
@@ -104,8 +104,11 @@ impl VirtAddr {
     }
     /// 计算地址所在的页号（向上取整）
     pub fn ceil(&self) -> VirtPageNum {
-        let b = (self.0 - 1 + PAGE_SIZE) / PAGE_SIZE;
-        VirtPageNum(b)
+        if self.0 == 0 {
+            VirtPageNum(0)
+        } else {
+            VirtPageNum((self.0 - 1) / PAGE_SIZE + 1)
+        }
     }
     /// 计算地址在页内的偏移量
     pub fn page_offset(&self) -> usize {
@@ -144,8 +147,11 @@ impl PhysAddr {
     }
     /// 计算地址所在的页号（向上取整）
     pub fn ceil(&self) -> PhysPageNum {
-        let f = (self.0 - 1 + PAGE_SIZE) / PAGE_SIZE;
-        PhysPageNum(f)
+        if self.0 == 0 {
+            PhysPageNum(0)
+        } else {
+            PhysPageNum((self.0 - 1) / PAGE_SIZE + 1)
+        }
     }
     /// 计算地址在页内的偏移量
     pub fn page_offset(&self) -> usize {
@@ -201,21 +207,37 @@ impl VirtPageNum {
 
 /// 如下方法提供了从物理地址访问内存的能力
 impl PhysAddr {
+    // 物理地址通过内核直映区访问，具体偏移由架构配置给出。
+    #[inline(always)]
+    fn direct_map_addr(&self) -> usize {
+        self.0 | MEMORY_HIGH_BASE
+    }
+
     /// 获取引用
     pub fn get_ref<T>(&self) -> &'static T {
-        unsafe { (self.0 as *const T).as_ref().unwrap() }
+        unsafe { (self.direct_map_addr() as *const T).as_ref().unwrap() }
     }
     /// 获取可变引用
     pub fn get_mut<T>(&self) -> &'static mut T {
-        unsafe { (self.0 as *mut T).as_mut().unwrap() }
+        unsafe { (self.direct_map_addr() as *mut T).as_mut().unwrap() }
     }
     /// 以字节数组形式获取引用
     pub fn get_bytes_ref<T>(&self) -> &'static [u8] {
-        unsafe { core::slice::from_raw_parts(self.0 as *const u8, core::mem::size_of::<T>()) }
+        unsafe {
+            core::slice::from_raw_parts(
+                self.direct_map_addr() as *const u8,
+                core::mem::size_of::<T>(),
+            )
+        }
     }
     /// 以字节数组形式获取可变引用
-    pub fn get_bytes_mut<T>(&self) -> &'static [u8] {
-        unsafe { core::slice::from_raw_parts_mut(self.0 as *mut u8, core::mem::size_of::<T>()) }
+    pub fn get_bytes_mut<T>(&self) -> &'static mut [u8] {
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                self.direct_map_addr() as *mut u8,
+                core::mem::size_of::<T>(),
+            )
+        }
     }
 }
 
@@ -231,17 +253,26 @@ impl PhysPageNum {
     /// 获取页表项数组
     pub fn get_pte_array<T>(&self) -> &'static mut [T] {
         let pa: PhysAddr = self.clone().into();
-        unsafe { core::slice::from_raw_parts_mut((pa.0) as *mut T, 512) }
+        let entry_size = core::mem::size_of::<T>();
+        assert!(entry_size != 0, "page table entry must not be zero-sized");
+        unsafe {
+            core::slice::from_raw_parts_mut(pa.direct_map_addr() as *mut T, PAGE_SIZE / entry_size)
+        }
     }
     /// 获取整个页的字节数组
     pub fn get_bytes_array(&self) -> &'static mut [u8] {
         let pa: PhysAddr = self.clone().into();
-        unsafe { core::slice::from_raw_parts_mut(pa.0 as *mut u8, 4096) }
+        unsafe { core::slice::from_raw_parts_mut(pa.direct_map_addr() as *mut u8, PAGE_SIZE) }
     }
     /// 获取双字数组
     pub fn get_dwords_array(&self) -> &'static mut [u64] {
         let pa: PhysAddr = self.clone().into();
-        unsafe { core::slice::from_raw_parts_mut(pa.0 as *mut u64, 512) }
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                pa.direct_map_addr() as *mut u64,
+                PAGE_SIZE / core::mem::size_of::<u64>(),
+            )
+        }
     }
     /// 获取指定类型的可变引用
     pub fn get_mut<T>(&self) -> &'static mut T {

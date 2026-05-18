@@ -1,5 +1,5 @@
 use super::PortManager;
-use crate::mm::{translated_byte_buffer, translated_refmut, UserAccess, UserBuffer};
+use crate::mm::{UserBufferWriter, UserPtrMut};
 use crate::net::AF_INET;
 use crate::net::AF_INET6;
 use crate::task::current_task;
@@ -221,16 +221,17 @@ pub fn _fill_with_endpoint(endpoint: IpEndpoint, addr: usize, addrlen: usize) ->
     }
     let task = current_task().unwrap();
     let token = task.get_user_token();
-    let addrlen = match translated_refmut(token, addrlen as *mut u32) {
-        Ok(p) => p,
+    let addrlen_ptr = UserPtrMut::<u32>::from_addr(addrlen);
+    let addrlen = match addrlen_ptr.read(token) {
+        Ok(len) => len,
         Err(_) => return Err(SyscallErr::EFAULT),
     };
     // 校验 addrlen 至少能容纳 sa_family 字段（2 字节）
-    if *addrlen < 2 {
+    if addrlen < 2 {
         return Err(SyscallErr::EINVAL);
     }
     // socklen_t 在 Linux 上是 signed int，负值表示无效 → EINVAL
-    if (*addrlen as i32) < 0 {
+    if (addrlen as i32) < 0 {
         return Err(SyscallErr::EINVAL);
     }
     // 校验 *addrlen 是否足够容纳 sockaddr 结构
@@ -238,7 +239,7 @@ pub fn _fill_with_endpoint(endpoint: IpEndpoint, addr: usize, addrlen: usize) ->
         IpAddress::Ipv4(_) => 16,
         IpAddress::Ipv6(_) => 24,
     };
-    if *addrlen < required {
+    if addrlen < required {
         return Err(SyscallErr::EINVAL);
     }
     let mut out = [0u8; 24]; // ipv6最大24字节
@@ -246,22 +247,26 @@ pub fn _fill_with_endpoint(endpoint: IpEndpoint, addr: usize, addrlen: usize) ->
         IpAddress::Ipv4(_) => {
             let len = mem::size_of::<u16>() + mem::size_of::<SocketAddrv4>();
             SocketAddrv4::from(endpoint).fill(&mut out[..len]);
-            let mut user_buf = UserBuffer::new(
-                translated_byte_buffer(token, addr as *const u8, len, UserAccess::Write)
-                    .map_err(|_| SyscallErr::EFAULT)?,
-            );
-            user_buf.write(&out[..len]);
-            *addrlen = 16;
+            let mut user_buf = UserBufferWriter::new(token, addr as *mut u8, len)
+                .map_err(|_| SyscallErr::EFAULT)?;
+            user_buf
+                .write_from(&out[..len])
+                .map_err(|_| SyscallErr::EFAULT)?;
+            addrlen_ptr
+                .write(token, &16u32)
+                .map_err(|_| SyscallErr::EFAULT)?;
         }
         IpAddress::Ipv6(_) => {
             let len = mem::size_of::<u16>() + mem::size_of::<SocketAddrv6>();
             SocketAddrv6::from(endpoint).fill(&mut out[..len]);
-            let mut user_buf = UserBuffer::new(
-                translated_byte_buffer(token, addr as *const u8, len, UserAccess::Write)
-                    .map_err(|_| SyscallErr::EFAULT)?,
-            );
-            user_buf.write(&out[..len]);
-            *addrlen = 24;
+            let mut user_buf = UserBufferWriter::new(token, addr as *mut u8, len)
+                .map_err(|_| SyscallErr::EFAULT)?;
+            user_buf
+                .write_from(&out[..len])
+                .map_err(|_| SyscallErr::EFAULT)?;
+            addrlen_ptr
+                .write(token, &24u32)
+                .map_err(|_| SyscallErr::EFAULT)?;
         }
     }
     Ok(0)

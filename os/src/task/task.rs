@@ -13,7 +13,7 @@ use crate::hal::TrapImpl;
 use crate::hal::{kstack_alloc, KernelStack};
 use crate::hal::{trap_handler, TrapContext};
 use crate::mm::PageTableImpl;
-use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
+use crate::mm::{AddressSpace, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::syscall::CloneFlags;
 use crate::timer::{ITimerVal, TimeSpec, TimeVal};
 use alloc::boxed::Box;
@@ -64,7 +64,7 @@ pub struct TaskControlBlock {
     /// 文件系统状态（新 VFS）
     pub fs: Arc<Mutex<FsStatus>>,
     /// 虚拟内存空间
-    pub vm: Arc<Mutex<MemorySet<PageTableImpl>>>,
+    pub vm: Arc<Mutex<AddressSpace<PageTableImpl>>>,
     /// 信号处理函数表
     pub sighand: Arc<Mutex<Vec<Option<Box<SigAction>>>>>,
     /// 快速用户空间互斥锁
@@ -358,9 +358,9 @@ impl TaskControlBlock {
             elf_data.len(),
             &elf_data[..16.min(elf_data.len())]
         );
-        // 带有ELF程序头/跳板的内存集（MemorySet）
+        // 带有ELF程序头/跳板的用户地址空间（AddressSpace）
         // 解析ELF文件，初始化内存映射
-        let (mut memory_set, user_heap, elf_info) = MemorySet::from_elf(elf_data).unwrap();
+        let (mut memory_set, user_heap, elf_info) = AddressSpace::from_elf(elf_data).unwrap();
         // 在内核空间中删除ELF区域
         crate::mm::KERNEL_SPACE
             .lock()
@@ -486,9 +486,8 @@ impl TaskControlBlock {
 
         // 将ELF文件映射到内核空间
         let elf_data = elf.map_to_kernel_space(MMAP_BASE);
-        // 带有ELF程序头/跳板/陷阱上下文/用户栈的内存集（MemorySet）
-        // let (mut memory_set, program_break, elf_info) = MemorySet::from_elf(elf_data)?;
-        let load_result = MemorySet::from_elf(elf_data);
+        // 带有ELF程序头/跳板/陷阱上下文/用户栈的用户地址空间（AddressSpace）
+        let load_result = AddressSpace::from_elf(elf_data);
 
         // 清除临时映射
         crate::mm::KERNEL_SPACE
@@ -615,7 +614,7 @@ impl TaskControlBlock {
         } else {
             // 复制地址空间（进程）
             crate::mm::frame_reserve(16);
-            Arc::new(Mutex::new(MemorySet::from_existing_user(
+            Arc::new(Mutex::new(AddressSpace::from_existing_user(
                 &mut self.vm.lock(),
             )?))
         };

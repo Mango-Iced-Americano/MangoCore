@@ -11,9 +11,7 @@ use log::{debug, error, trace, warn};
 use crate::hal::TrapContext;
 
 use crate::config::*;
-use crate::mm::{
-    copy_from_user, copy_to_user, translated_ref, translated_ref_write, try_get_from_user,
-};
+use crate::mm::{UserPtr, UserPtrMut};
 use crate::syscall::errno::*;
 use crate::task::manager::wait_with_timeout;
 use crate::task::{block_current_and_run_next, exit_current_and_run_next, exit_group_and_run_next};
@@ -274,22 +272,23 @@ pub fn sigaction(signum: usize, act: *const SigAction, oldact: *mut SigAction) -
             if !oldact.is_null() {
                 let suc = if let Some(sigact) = &task.sighand.lock()[signum - 1] {
                     trace!("[sigaction] *oldact: {:?}", sigact);
-                    copy_to_user(token, sigact.as_ref(), oldact)
+                    UserPtrMut::new(oldact).write(token, sigact.as_ref())
                 } else {
                     trace!("[sigaction] *oldact: not found");
-                    copy_to_user(token, &SigAction::new(), oldact)
+                    UserPtrMut::new(oldact).write(token, &SigAction::new())
                 };
                 if suc.is_err(){
                     log::error!("[sigaction] Error on copy_to_user(_,{:?},_)",oldact);
                     return EFAULT;
                 }
             }
-            if !act.is_null() {
-                let mut sigact=SigAction::new();
-                if copy_from_user(token, act, &mut sigact).is_err(){
+            if let Some(mut sigact) = match UserPtr::new(act).read_optional(token) {
+                Ok(sigact) => sigact,
+                Err(_) => {
                     log::error!("[sigaction] Failed to copy sigact {:?} from user.",act);
                     return EFAULT;
                 }
+            } {
                 sigact.mask.remove(Signals::CAN_NOT_BE_MASKED);
                 if sigact.handler == SigHandler::SIG_IGN {
                     // Store SIG_IGN explicitly so we can distinguish from SIG_DFL
@@ -523,19 +522,17 @@ pub fn do_signal() {
                 }
                 // In this case, signal hander have three parameters
                 if act.flags.contains(SigActionFlags::SA_SIGINFO) {
-                    if copy_to_user(
-                        token,
-                        &UserContext {
-                            flags: 0,
-                            link: 0,
-                            stack: frame_stack,
-                            sigmask: saved_sigmask,
-                            __pad: [0; UserContext::PADDING_SIZE],
-                            mcontext,
-                        },
-                        ucontext_addr as *mut UserContext,
-                    ) // push UserContext into user stack
-                    .is_err()
+                    let user_context = UserContext {
+                        flags: 0,
+                        link: 0,
+                        stack: frame_stack,
+                        sigmask: saved_sigmask,
+                        __pad: [0; UserContext::PADDING_SIZE],
+                        mcontext,
+                    };
+                    if UserPtrMut::from_addr(ucontext_addr)
+                        .write(token, &user_context) // push UserContext into user stack
+                        .is_err()
                     {
                         error!("[do_signal] Failed to write UserContext to user stack. Send SIGSEGV.");
                         drop(inner);
@@ -543,12 +540,9 @@ pub fn do_signal() {
                         drop(task);
                         exit_current_with_sigsegv();
                     }
-                    if copy_to_user(
-                        token,
-                        &SigInfo::new(signum, 0, 0),
-                        siginfo_addr as *mut SigInfo,
-                    ) // push SigInfo into user stack
-                    .is_err()
+                    if UserPtrMut::from_addr(siginfo_addr)
+                        .write(token, &SigInfo::new(signum, 0, 0)) // push SigInfo into user stack
+                        .is_err()
                     {
                         error!("[do_signal] Failed to write SigInfo to user stack. Send SIGSEGV.");
                         drop(inner);
@@ -563,12 +557,12 @@ pub fn do_signal() {
                                                   // To simplify the implementation of sigreturn, here we keep the same layout as above...
                 } else {
                     // push sigmask into user stack
-                    match translated_ref_write(
-                        token,
-                        (ucontext_addr + 2 * size_of::<usize>() + size_of::<SignalStack>())
-                            as *mut Signals,
-                    ) {
-                        Ok(sigmask_ref) => *sigmask_ref = saved_sigmask,
+                    match UserPtrMut::from_addr(
+                        ucontext_addr + 2 * size_of::<usize>() + size_of::<SignalStack>(),
+                    )
+                    .write(token, &saved_sigmask)
+                    {
+                        Ok(()) => {}
                         Err(_) => {
                             error!(
                                 "[do_signal] Failed to write sigmask to user stack! Send SIGSEGV."
@@ -580,16 +574,14 @@ pub fn do_signal() {
                         }
                     }
 
-                    if copy_to_user(
-                        token,
-                        &mcontext,
-                        (ucontext_addr
+                    if UserPtrMut::from_addr(
+                        ucontext_addr
                             + 2 * size_of::<usize>()
                             + size_of::<SignalStack>()
                             + size_of::<Signals>()
-                            + UserContext::PADDING_SIZE)
-                            as *mut MachineContext,
-                    ) // push MachineContext into user stack
+                            + UserContext::PADDING_SIZE,
+                    )
+                    .write(token, &mcontext) // push MachineContext into user stack
                     .is_err()
                     {
                         error!(
@@ -705,7 +697,7 @@ pub fn do_signal() {
 pub fn sigaltstack(ss: *const SignalStack, old_ss: *mut SignalStack) -> isize {
     let task = current_task().unwrap();
     let token = task.get_user_token();
-    let new_stack = match try_get_from_user(token, ss) {
+    let new_stack = match UserPtr::new(ss).read_optional(token) {
         Ok(stack) => stack,
         Err(errno) => return errno,
     };
@@ -714,7 +706,7 @@ pub fn sigaltstack(ss: *const SignalStack, old_ss: *mut SignalStack) -> isize {
     let old_stack = inner.signal_stack.with_runtime_flags(current_sp);
 
     if !old_ss.is_null() {
-        if copy_to_user(token, &old_stack, old_ss).is_err() {
+        if UserPtrMut::new(old_ss).write(token, &old_stack).is_err() {
             return crate::syscall::errno::EFAULT;
         }
     }
@@ -764,8 +756,8 @@ pub fn sigprocmask(how: u32, set: *const Signals, oldset: *mut Signals) -> isize
     let token = task.get_user_token();
     // If oldset is non-NULL, the previous value of the signal mask is stored in oldset
     if oldset as usize != 0 {
-        match translated_ref_write(token, oldset) {
-            Ok(oldset) => *oldset = inner.sigmask,
+        match UserPtrMut::new(oldset).write(token, &inner.sigmask) {
+            Ok(()) => {}
             Err(errno) => return errno,
         }
         trace!("[sigprocmask] *oldset: ({:?})", inner.sigmask);
@@ -773,8 +765,8 @@ pub fn sigprocmask(how: u32, set: *const Signals, oldset: *mut Signals) -> isize
     // If set is NULL, then the signal mask is unchanged
     if set as usize != 0 {
         let how = SigMaskHow::from_bits(how);
-        let signal_set = match translated_ref(token, set) {
-            Ok(set) => *set,
+        let signal_set = match UserPtr::new(set).read(token) {
+            Ok(set) => set,
             Err(errno) => return errno,
         };
         trace!("[sigprocmask] how: {:?}, *set: ({:?})", how, signal_set);
@@ -871,12 +863,12 @@ impl SigInfo {
 pub fn sigtimedwait(set: *const Signals, info: *mut SigInfo, timeout: *const TimeSpec) -> isize {
     let task = current_task().unwrap();
     let token = task.get_user_token();
-    let set = match translated_ref(token, set) {
-        Ok(set) => *set,
+    let set = match UserPtr::new(set).read(token) {
+        Ok(set) => set,
         Err(errno) => return errno,
     };
     // timeout == NULL → infinite wait (POSIX sigwaitinfo semantics)
-    let timeout = match try_get_from_user(token, timeout) {
+    let timeout = match UserPtr::new(timeout).read_optional(token) {
         Ok(timeout) => timeout,
         Err(errno) => return errno,
     };
@@ -891,7 +883,10 @@ pub fn sigtimedwait(set: *const Signals, info: *mut SigInfo, timeout: *const Tim
                 inner.sigpending.remove(signal);
                 drop(inner);
                 if !info.is_null() {
-                    if copy_to_user(token, &SigInfo::new(signum, 0, 0), info).is_err() {
+                    if UserPtrMut::new(info)
+                        .write(token, &SigInfo::new(signum, 0, 0))
+                        .is_err()
+                    {
                         log::error!("[sys_sigtimedwait] Error copying to info {:?} ", info);
                         return EFAULT;
                     };
@@ -921,7 +916,10 @@ pub fn sigtimedwait(set: *const Signals, info: *mut SigInfo, timeout: *const Tim
                 inner.sigpending.remove(signal);
                 drop(inner);
                 if !info.is_null() {
-                    if copy_to_user(token, &SigInfo::new(signum, 0, 0), info).is_err() {
+                    if UserPtrMut::new(info)
+                        .write(token, &SigInfo::new(signum, 0, 0))
+                        .is_err()
+                    {
                         log::error!("[sys_sigtimedwait] Error copying to info {:?} ", info);
                         return EFAULT;
                     };

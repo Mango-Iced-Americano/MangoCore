@@ -5,7 +5,6 @@ mod filesystem;
 pub mod iov;
 mod layout;
 mod page_cache;
-pub mod page_cache_test;
 pub use page_cache::flush_all_page_caches;
 pub mod poll;
 pub mod ramfs;

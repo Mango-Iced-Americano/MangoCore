@@ -1,16 +1,16 @@
 use crate::net::config::NET_INTERFACE;
 use crate::task::signal::has_actionable_signal;
 use crate::{
-    mm::try_get_from_user, syscall::errno::EFAULT, task::signal::Signals, timer::TimeSpec,
+    mm::{UserPtr, UserSlice},
+    syscall::errno::EFAULT,
+    task::signal::Signals,
+    timer::TimeSpec,
     utils::error::SyscallErr,
 };
 use alloc::vec::Vec;
 use core::ptr::null_mut;
 
-use crate::{
-    mm::{copy_from_user_array, copy_to_user_array},
-    task::{current_task, sigprocmask, suspend_current_and_run_next, SigMaskHow},
-};
+use crate::task::{current_task, sigprocmask, suspend_current_and_run_next, SigMaskHow};
 ///  A scheduling  scheme  whereby  the  local  process  periodically  checks  until  the  pre-specified events (for example, read, write) have occurred.
 /// The PollFd struct in 32-bit style.
 #[repr(C)]
@@ -110,7 +110,7 @@ pub fn ppoll(
     }
     let task = current_task().unwrap();
     let token = task.get_user_token();
-    let timeout: Option<TimeSpec> = match try_get_from_user(token, tmo_p) {
+    let timeout: Option<TimeSpec> = match UserPtr::new(tmo_p).read_optional(token) {
         Ok(tmo) => match tmo {
             Some(tmo) => Some(tmo + crate::timer::TimeSpec::now()),
             None => None,
@@ -125,12 +125,16 @@ pub fn ppoll(
     }
     drop(task);
 
-    let mut poll_fd = Vec::<PollFd>::with_capacity(nfds);
+    let mut poll_fd = alloc::vec![
+        PollFd {
+            fd: 0,
+            events: PollEvent::empty(),
+            revents: PollEvent::empty(),
+        };
+        nfds
+    ];
     let mut done: isize = 0;
-    if let Ok(_) = copy_from_user_array(token, fds, poll_fd.as_mut_ptr(), nfds) {
-        unsafe {
-            poll_fd.set_len(nfds);
-        }
+    if let Ok(_) = UserSlice::new(fds as *const PollFd, nfds).read_array_into(token, &mut poll_fd) {
         for poll_fd in poll_fd.iter_mut() {
             poll_fd.revents = PollEvent::empty();
         }
@@ -201,7 +205,9 @@ pub fn ppoll(
         }
 
         log::trace!("[ppoll] result: {:?}", poll_fd);
-        copy_to_user_array(token, &poll_fd[0], fds, nfds).unwrap();
+        UserSlice::new(fds as *const PollFd, nfds)
+            .write_array_from(token, &poll_fd)
+            .unwrap();
     } else {
         log::error!(
             "[ppoll] Error copy_from_user_array(_, fds: {:?}, poll_fd.as_mut_ptr():{:?}, _)",
