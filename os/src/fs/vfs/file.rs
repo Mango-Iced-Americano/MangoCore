@@ -1048,7 +1048,7 @@ impl File {
                     return Err(e);
                 }
 
-                let (parent, leaf) = crate::fs::vfs_lookup_parent(path)?;
+                let (parent, leaf) = crate::fs::vfs_lookup_parent_for_start(&start, path)?;
                 let new_inode = parent
                     .create(&leaf, FileType::File, super::InodeMode::S_IRWXUGO)
                     .map_err(|err| err as isize)?;
@@ -1090,7 +1090,8 @@ impl File {
     pub fn delete_path(&self, path: &str, delete_directory: bool) -> Result<(), isize> {
         use super::IndexNode as _;
 
-        let (parent, leaf) = crate::fs::vfs_lookup_parent(path)?;
+        let start: Arc<dyn IndexNode> = self.inode.clone();
+        let (parent, leaf) = crate::fs::vfs_lookup_parent_for_start(&start, path)?;
         if delete_directory {
             parent.rmdir(&leaf).map_err(|e| e as isize)
         } else {

@@ -30,6 +30,8 @@ use spin::{Mutex, MutexGuard};
 pub struct FsStatus {
     /// 当前工作目录的文件（新 VFS）
     pub working_inode: Arc<vfs::File>,
+    /// 当前工作目录的绝对路径字符串（用于 getcwd，避免依赖 broken 的 absolute_path()）
+    pub working_path: String,
 }
 
 /// 任务控制块
@@ -422,6 +424,7 @@ impl TaskControlBlock {
             files: Arc::new(Mutex::new(fd_table)),
             fs: Arc::new(Mutex::new(FsStatus {
                 working_inode: Arc::new(cwd),
+                working_path: String::from("/"),
             })),
             vm: Arc::new(Mutex::new(memory_set)),
             sighand: Arc::new(Mutex::new({

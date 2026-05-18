@@ -80,6 +80,33 @@ fn resolve_start_inode(dirfd: usize) -> Result<Arc<dyn vfs::IndexNode>, isize> {
     })
 }
 
+/// cwd 路径规范化：处理绝对/相对 chdir，处理 .  ..  //  trailing/
+fn normalize_cwd(old_path: &str, new_path: &str) -> alloc::string::String {
+    let mut parts: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+    if !new_path.starts_with('/') {
+        for p in old_path.split('/') {
+            if !p.is_empty() { parts.push(p); }
+        }
+    }
+    for p in new_path.split('/') {
+        match p {
+            "" | "." => {}
+            ".." => { parts.pop(); }
+            _ => parts.push(p),
+        }
+    }
+    if parts.is_empty() {
+        alloc::string::String::from("/")
+    } else {
+        let mut s = alloc::string::String::with_capacity(parts.iter().map(|p| p.len()).sum::<usize>() + parts.len());
+        for p in parts {
+            s.push('/');
+            s.push_str(p);
+        }
+        s
+    }
+}
+
 // todo
 pub fn sys_splice(
     fd_in: usize,
@@ -246,13 +273,9 @@ pub fn sys_getcwd(buf: usize, size: usize) -> isize {
         // The size argument is zero and buf is not a NULL pointer.
         return EINVAL;
     }
-    let working_dir = match task.fs.lock().working_inode.get_cwd() {
-        Some(s) => s,
-        None => {
-            log::error!("[sys_getcwd] failed to resolve cwd absolute path");
-            return ENOENT;
-        }
-    };
+    let fs_lock = task.fs.lock();
+    let working_dir = fs_lock.working_path.clone();
+    drop(fs_lock);
     if working_dir.len() >= size {
         // The size argument is less than the length of the absolute pathname of the working directory,
         // including the terminating null byte.
@@ -1252,12 +1275,21 @@ pub fn sys_chdir(path: *const u8) -> isize {
         Err(errno) => return errno,
     };
     info!("[sys_chdir] path: {}", path);
+    if path.is_empty() {
+        return ENOENT;
+    }
 
-    let mut lock = task.fs.lock();
+    // 克隆当前 cwd 状态后释放锁，避免在 find/open 持锁
+    let (cwd_inode, old_path) = {
+        let lock = task.fs.lock();
+        (lock.working_inode.clone(), lock.working_path.clone())
+    };
 
-    match lock.working_inode.cd(&path) {
+    match cwd_inode.cd(&path) {
         Ok(new_working_inode) => {
+            let mut lock = task.fs.lock();
             lock.working_inode = new_working_inode;
+            lock.working_path = normalize_cwd(&old_path, &path);
             SUCCESS
         }
         Err(errno) => errno,
