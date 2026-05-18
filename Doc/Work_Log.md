@@ -566,3 +566,73 @@ Phase 4-6 (适配具体FS / syscall层 / QEMU测试) 待后续完成。
 4. **write_at 后刷新 inode size** — 写入后从磁盘重载 inode，确保 `lseek SEEK_END` 和 `O_APPEND` 正确
 
 **验证：** rv64 ✅ la64 ✅ | QEMU ext4: 50/51（仅 hard link ENOSYS 预期保留）
+
+---
+
+## 2026-05-18
+
+### VFS/ext4 correctness fix + profile 分类 + 性能审计
+
+**Phase 0-2：两个根因修复（Oracle 定位 + Momus 审查）**
+
+**1. symlink 解析错误 → ENOENT 而非 ELOOP**
+
+根因：`os/src/fs/mod.rs` `vfs_lookup()` 第 250-264 行，相对 symlink target 走 `current.absolute_path()` 分支构造绝对路径再从根重启。但 `MountFSInode::absolute_path()` 内部依赖 `get_entry_name()` — Ext4OSInode 未实现此方法，fallback `"?"` 产出狗屎路径 `/?/loop` → ENOENT。
+
+修复：删除 `absolute_path()` 分支（-15 行），相对 target 直接走 POSIX 语义的 `parse_path(&new_path)` 从 symlink 父目录解析。`current` 始终是 symlink 父目录，self-loop 正确递增 `symlink_count` 至 40 返回 ELOOP。
+
+修复后预期：`ELOOP detection [9/51]` PASS，`symlink_chain [10/51]` PASS，`read_via_symlink` 继续 0 block I/O。
+
+涉及文件：
+- `os/src/fs/mod.rs:240-272` — 删除 `else if absolute_path()` 分支
+
+**2. getdents64 返回 ENOSYS(-38)**
+
+根因：`Ext4OSInode` 未实现 `IndexNode::list()`，trait 默认返回 `Err(SyscallErr::ENOSYS)`。dispatch 链：`sys_getdents64 → File::get_dirent() → IndexNode::list() → ENOSYS`。
+
+修复：在 `os/src/fs/ext4/ext4fs.rs` 的 `impl IndexNode for layout::Ext4OSInode` 末尾新增 `fn list()`：
+```rust
+fn list(&self) -> Result<Vec<String>, SyscallErr> {
+    let ino = self.inode.lock();
+    if !ino.inode.is_dir() { return Err(SyscallErr::ENOTDIR); }
+    let inode_num = ino.inode_num;
+    drop(ino);
+    let entries = self.ext4fs.dir_get_entries(inode_num).map_err(|_| SyscallErr::EIO)?;
+    Ok(entries.iter().map(|e| e.get_name()).collect())
+}
+```
+（Oracle 建议后收紧非目录返回 ENOTDIR，与 FAT32 对齐）
+
+修复后预期：`getdents64 [21/51]` PASS，`stress_unlink_loop [45/51]` PASS，`stress_getdents [48/51]` PASS。
+
+涉及文件：
+- `os/src/fs/ext4/ext4fs.rs:964-973` — 新增 `list()` 实现
+- `user/src/bin/fs_test.rs:1258-1265` — 新增 getdents64 错误检查，防止负数转 usize panic
+
+**Phase 3：Profile 分类补齐**
+
+- `os/src/fs/ext4/counters.rs` — 新增 `READDIR_DIR_BLOCK_READ` 计数器 + reset 数组 + dump 行
+- `os/src/fs/ext4/ext4fs.rs` — `list()` 内加 `READDIR_DIR_BLOCK_READ` 自增
+- `os/src/fs/ext4/file.rs` — fast path `create_fast_symlink` 加 `SYMLINK_DIR_BLOCK_WRITE_COUNT`；slow path `create` 加 `SYMLINK_DIR_BLOCK_WRITE_COUNT`；3 处 `write_at` 数据块写加 `DATA_BLOCK_WRITE`
+- `os/src/fs/ext4/extent.rs` — 3 处 extent 树块写加 `OTHER_META_WRITE`
+
+**Phase 6：prune syscall 接口**
+
+- `os/src/fs/ext4/counters.rs` — `sys_ext4_counters` 新增 cmd 8（prune_stale_weak_entries）和 cmd 9（clear_all_children_caches）
+
+**Phase 5：性能审计报告**
+
+写入 `.sisyphus/plans/perf-audit.md`，关键发现：
+- create 50 files：每个文件 ~10 inode table writes（放大 10×），~3 gd/sb writes
+- 64KB write：16 data blocks 但 104 inode cache flushes（每 block 写完都 flush 一次 inode metadata）
+- 建议：create/write 路径内做 operation-local coalescing，减少 inode flush；gd/sb 批量化
+
+**Oracle 审查：**
+- Change 1 (symlink)：✅ 正确，所有边界推导通过
+- Change 2 (getdents64)：✅ 正确，无死锁，建议收紧非目录错误码（已采纳）
+
+**验证：**
+- rv64 kernel-build-only ✅
+- la64 kernel-build-only ✅
+- 内核启动正常（ext4 检测 + initproc 启动）
+- QEMU 全量 FS test 可在有完整镜像环境下运行验证
