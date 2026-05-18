@@ -94,19 +94,19 @@ pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize {
                         None => (".", path.as_str()),
                     };
 
-                    // parent_node 是 vfs::File，用于底层 create
-                    let parent_node = match cwd_node.cd(parent_path) {
+                    let start = cwd_node.inode.clone();
+                    let parent_node = match crate::fs::vfs_lookup(&start, parent_path, true) {
                         Ok(node) => node,
                         Err(_) => return -(SyscallErr::ENOENT as isize),
                     };
 
                     // 检查文件是否已存在
-                    if parent_node.inode.find(file_name).is_ok() {
+                    if parent_node.find(file_name).is_ok() {
                         return -(SyscallErr::EADDRINUSE as isize);
                     }
 
                     // 在磁盘上创建 socket 文件（新 VFS API）
-                    let _new_inode = match parent_node.inode.create(
+                    let _new_inode = match parent_node.create(
                         file_name,
                         crate::fs::vfs::FileType::Socket,
                         crate::fs::vfs::InodeMode::S_IRWXUGO,
@@ -119,7 +119,7 @@ pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize {
                     };
 
                     // 生成绝对路径
-                    let parent_abs = parent_node.get_cwd().unwrap_or_default();
+                    let parent_abs = parent_node.absolute_path().unwrap_or_default();
                     let absolute_path = if parent_abs == "/" || parent_abs.is_empty() {
                         format!("/{}", file_name)
                     } else {

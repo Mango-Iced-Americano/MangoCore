@@ -26,16 +26,11 @@ pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
             let abs_path = if path.starts_with('/') {
                 path.clone()
             } else {
-                let cwd = task.fs.lock().working_inode.get_cwd();
-                match cwd {
-                    Some(cwd_str) => {
-                        if cwd_str == "/" {
-                            format!("/{}", path)
-                        } else {
-                            format!("{}/{}", cwd_str, path)
-                        }
-                    }
-                    None => return -(SyscallErr::ENOENT as isize),
+                let cwd = task.fs.lock().working_path.clone();
+                if cwd == "/" {
+                    format!("/{}", path)
+                } else {
+                    format!("{}/{}", cwd, path)
                 }
             };
             Endpoint::Unix(UnixEndpoint::Path(abs_path))

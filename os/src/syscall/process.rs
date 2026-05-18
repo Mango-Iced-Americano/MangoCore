@@ -1,5 +1,5 @@
 use crate::config::{PAGE_SIZE, SYSTEM_TASK_LIMIT, USER_STACK_SIZE};
-use crate::fs::OpenFlags;
+use crate::fs::{vfs, vfs_lookup};
 use crate::hal::shutdown;
 use crate::hal::{MachineContext, TrapContext};
 use crate::mm::{
@@ -795,8 +795,14 @@ pub fn sys_execve(
     );
     // 获取当前工作目录的文件描述符
     let working_inode = &task.fs.lock().working_inode;
+    let cwd_inode: Arc<dyn vfs::IndexNode> = working_inode.inode.clone();
 
-    match working_inode.open_path(&path, OpenFlags::O_RDONLY) {
+    let open_exec = |path: &str| -> Result<vfs::File, isize> {
+        let inode = vfs_lookup(&cwd_inode, path, true)?;
+        vfs::File::new(inode, vfs::FileFlags::O_RDONLY).map_err(|e| -(e as isize))
+    };
+
+    match open_exec(&path) {
         // 检查打开的文件
         Ok(file) => {
             // 若文件大小小于4，则返回ENOEXEC
@@ -814,9 +820,7 @@ pub fn sys_execve(
                 // 脚本文件
                 // 用默认Shell即bash加载
                 b"#!" => {
-                    let shell_file = working_inode
-                        .open_path(DEFAULT_SHELL, OpenFlags::O_RDONLY)
-                        .unwrap();
+                    let shell_file = open_exec(DEFAULT_SHELL).unwrap();
                     if argv_vec.try_reserve(1).is_err() {
                         return ENOMEM;
                     }
@@ -832,7 +836,7 @@ pub fn sys_execve(
             let abs_path = if path.starts_with('/') {
                 path.clone()
             } else {
-                let cwd = working_inode.inode.absolute_path().unwrap_or_default();
+                let cwd = task.fs.lock().working_path.clone();
                 if cwd == "/" {
                     alloc::format!("/{}", path)
                 } else {

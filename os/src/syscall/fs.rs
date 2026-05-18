@@ -1275,15 +1275,17 @@ pub fn sys_chdir(path: *const u8) -> isize {
         (lock.working_inode.clone(), lock.working_path.clone())
     };
 
-    match cwd_inode.cd(&path) {
-        Ok(new_working_inode) => {
-            let mut lock = task.fs.lock();
-            lock.working_inode = new_working_inode;
-            lock.working_path = normalize_cwd(&old_path, &path);
-            SUCCESS
-        }
-        Err(errno) => errno,
-    }
+    let target = match vfs_lookup(&cwd_inode.inode, &path, true) {
+        Ok(inode) => match vfs::File::new(inode, vfs::FileFlags::O_RDONLY) {
+            Ok(f) => f,
+            Err(e) => return -(e as isize),
+        },
+        Err(errno) => return errno,
+    };
+    let mut lock = task.fs.lock();
+    lock.working_inode = Arc::new(target);
+    lock.working_path = normalize_cwd(&old_path, &path);
+    SUCCESS
 }
 
 pub fn sys_openat(dirfd: usize, path: *const u8, flags: u32, mode: u32) -> isize {
@@ -1413,7 +1415,7 @@ pub fn sys_mkdirat(dirfd: usize, path: *const u8, mode: u32) -> isize {
                 Err(e) => return -(e as isize),
             }
         }
-        Err((errno, _)) => return errno,
+        Err(errno) => return errno,
     };
 }
 
@@ -1450,7 +1452,7 @@ pub fn sys_unlinkat(dirfd: usize, path: *const u8, flags: u32) -> isize {
     };
     let (parent, leaf) = match vfs_lookup_parent_for_start(&start, &path) {
         Ok(result) => result,
-        Err((errno, _)) => return errno,
+        Err(errno) => return errno,
     };
     let result = if flags.contains(UnlinkatFlags::AT_REMOVEDIR) {
         parent.rmdir(&leaf)
