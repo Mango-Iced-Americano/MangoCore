@@ -509,8 +509,18 @@ impl IndexNode for LockedRamFSInode {
             .as_any_ref()
             .downcast_ref::<LockedRamFSInode>()
             .ok_or(SyscallErr::EINVAL)?;
-        let mut child_locked = child_inode.0.lock();
-        child_locked.metadata.nlinks -= 1;
+        let child_pages: usize = {
+            let mut child_locked = child_inode.0.lock();
+            child_locked.metadata.nlinks -= 1;
+            child_locked.pages.len()
+        };
+        // 回退配额计数：释放文件占用的物理页
+        if let Some(ref ramfs) = inode.fs.upgrade() {
+            if ramfs.max_pages > 0 {
+                let mut page_count = ramfs.page_count.lock();
+                *page_count = page_count.saturating_sub(child_pages);
+            }
+        }
         Ok(())
     }
 

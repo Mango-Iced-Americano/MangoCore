@@ -1402,6 +1402,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         "PS1=\x1b[1m\x1b[32mNPUCore\x1b[0m:\x1b[1m\x1b[34m\\w\x1b[0m\\$ \0".as_ptr(),
         "_=/bin/bash\0".as_ptr(),
         "PATH=/:/bin\0".as_ptr(),
+        "KCONFIG_PATH=/proc/config\0".as_ptr(),
         "LD_LIBRARY_PATH=/\0".as_ptr(),
         core::ptr::null(),
     ];

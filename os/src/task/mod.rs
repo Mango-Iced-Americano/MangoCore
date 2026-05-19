@@ -1,7 +1,6 @@
 mod context;
 mod elf;
 mod manager;
-pub use manager::WaitQueue;
 use spin::MutexGuard;
 pub mod pid;
 mod processor;
@@ -23,9 +22,10 @@ use lazy_static::*;
 use log::warn;
 use manager::fetch_task;
 pub use manager::{
-    add_kernel_timer, add_task, do_oom, do_wake_expired, find_task_by_pid, find_task_by_tgid,
-    kernel_timer_queue_len, procs_count, send_signal_to_interruptible, sleep_interruptible,
-    task_manager_counts, wait_with_timeout, wake_interruptible, zombie_count, TimerAction,
+    all_pids, find_task_by_pid, find_task_by_tgid, kernel_timer_queue_len, procs_count,
+    send_signal_to_interruptible, sleep_interruptible, task_manager_counts, zombie_count,
+    do_oom, do_wake_expired, add_kernel_timer, add_task, wait_with_timeout, wake_interruptible,
+    TimerAction, WaitQueue,
 };
 // pub use pid::RecycleAllocator;
 pub use pid::{pid_alloc, trap_cx_bottom_from_tid, ustack_bottom_from_tid, PidHandle};

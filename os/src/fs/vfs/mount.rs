@@ -455,7 +455,7 @@ pub struct MountFS {
     /// 根 inode
     root_inner_inode: Option<Arc<dyn IndexNode>>,
     /// 子挂载点表: parent_inode_id → mounted fs
-    mountpoints: Mutex<BTreeMap<InodeId, Arc<MountFS>>>,
+    pub mountpoints: Mutex<BTreeMap<InodeId, Arc<MountFS>>>,
     /// 自身挂载到父文件系统上的 inode（如果是根则 None）
     self_mountpoint: Mutex<Option<Arc<MountFSInode>>>,
     /// 挂载标志

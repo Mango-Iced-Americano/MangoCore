@@ -1009,3 +1009,30 @@ pub fn task_manager_counts() -> Option<(u16, u16)> {
         .try_lock()
         .map(|m| (m.ready_count(), m.interruptible_count()))
 }
+
+/// 返回所有活跃的 PID 列表
+pub fn all_pids() -> alloc::vec::Vec<usize> {
+    let manager = TASK_MANAGER.lock();
+    let mut pids = alloc::vec::Vec::new();
+    for task in manager.ready_queue.iter() {
+        let pid = task.pid.0;
+        if !pids.contains(&pid) {
+            pids.push(pid);
+        }
+    }
+    for task in manager.interruptible_queue.iter() {
+        let pid = task.pid.0;
+        if !pids.contains(&pid) {
+            pids.push(pid);
+        }
+    }
+    drop(manager);
+    // Also include the currently running task (not in any queue)
+    if let Some(current) = crate::task::current_task() {
+        let pid = current.pid.0;
+        if !pids.contains(&pid) {
+            pids.push(pid);
+        }
+    }
+    pids
+}

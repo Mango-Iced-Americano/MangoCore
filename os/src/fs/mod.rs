@@ -7,6 +7,7 @@ mod layout;
 mod page_cache;
 pub use page_cache::flush_all_page_caches;
 pub mod poll;
+pub mod procfs;
 pub mod ramfs;
 #[cfg(feature = "swap")]
 pub mod swap;
@@ -32,6 +33,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 pub use dirent::Dirent;
 use lazy_static::*;
 use self::vfs::IndexNode;
+use self::vfs::FileSystem as _;
 
 /// 强制使用 ramfs，跳过块设备检测（用于 VFS 层调试）
 static FORCE_RAMFS: AtomicBool = AtomicBool::new(false);
@@ -67,55 +69,71 @@ lazy_static! {
             self::filesystem::FS_Type::Null => {
                 println!("[kernel] No filesystem found, falling back to ramfs");
                 let ramfs = self::ramfs::RamFS::new();
-                let mfs = self::vfs::MountFS::new(ramfs, self::vfs::MountFlags::empty());
-                let root = mfs.mountpoint_root_inode();
-
-                // 创建 /dev 目录
-                let dev_inode = root
-                    .create("dev", self::vfs::FileType::Dir, self::vfs::InodeMode::from_bits_truncate(0o755))
-                    .expect("ramfs: failed to create /dev");
-
-                // 构建 DevFS 并注册设备 inode
-                let devfs = crate::fs::dev::DevFS::new();
-                devfs.add_dev("tty", crate::fs::dev::tty::TTY.clone() as Arc<dyn self::vfs::IndexNode>)
-                    .expect("devfs: failed to register /dev/tty");
-                devfs.add_dev("null", alloc::sync::Arc::new(crate::fs::dev::null::Null) as Arc<dyn self::vfs::IndexNode>)
-                    .expect("devfs: failed to register /dev/null");
-                devfs.add_dev("zero", alloc::sync::Arc::new(crate::fs::dev::zero::Zero) as Arc<dyn self::vfs::IndexNode>)
-                    .expect("devfs: failed to register /dev/zero");
-                devfs.add_dev("urandom", alloc::sync::Arc::new(crate::fs::dev::urandom::Urandom) as Arc<dyn self::vfs::IndexNode>)
-                    .expect("devfs: failed to register /dev/urandom");
-
-                // 将 DevFS 挂载到 /dev
-                let dev_inode_id = dev_inode.metadata().expect("dev_inode metadata failed").inode_id;
-                let devfs_mnt = self::vfs::MountFS::new(devfs, self::vfs::MountFlags::empty());
-                mfs.add_mount(dev_inode_id, devfs_mnt)
-                    .expect("ramfs: failed to mount devfs at /dev");
-
-                mfs
+                self::vfs::MountFS::new(ramfs, self::vfs::MountFlags::empty())
             }
         };
-        // 为磁盘文件系统 (Fat32/Ext4) 挂载 DevFS 到 /dev
-        if fs_type != self::filesystem::FS_Type::Null {
-            let root = mfs.mountpoint_root_inode();
-            let dev_inode = if let Ok(existing) = root.find("dev") {
-                existing
-            } else {
-                root.create("dev", self::vfs::FileType::Dir, self::vfs::InodeMode::from_bits_truncate(0o755))
-                    .expect("failed to create /dev")
-            };
-            let devfs = crate::fs::dev::DevFS::new();
-            devfs.add_dev("tty", crate::fs::dev::tty::TTY.clone() as Arc<dyn self::vfs::IndexNode>).unwrap();
-            devfs.add_dev("null", alloc::sync::Arc::new(crate::fs::dev::null::Null) as Arc<dyn self::vfs::IndexNode>).unwrap();
-            devfs.add_dev("zero", alloc::sync::Arc::new(crate::fs::dev::zero::Zero) as Arc<dyn self::vfs::IndexNode>).unwrap();
-            devfs.add_dev("urandom", alloc::sync::Arc::new(crate::fs::dev::urandom::Urandom) as Arc<dyn self::vfs::IndexNode>).unwrap();
-            let dev_inode_id = dev_inode.metadata().expect("dev_inode metadata failed").inode_id;
-            let devfs_mnt = self::vfs::MountFS::new(devfs, self::vfs::MountFlags::empty());
-            mfs.add_mount(dev_inode_id, devfs_mnt)
-                .expect("failed to mount devfs at /dev");
-        }
+        mount_common_filesystems(&mfs);
         mfs
     };
+}
+
+/// 无论根文件系统类型，统一挂载 DevFS、ProcFS、tmpfs
+fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
+    let root = mfs.mountpoint_root_inode();
+
+    // ── /dev — 设备文件系统 ──
+    {
+        let dev_inode = root.find("dev").unwrap_or_else(|_| {
+            root.create("dev", self::vfs::FileType::Dir, self::vfs::InodeMode::from_bits_truncate(0o755))
+                .expect("failed to create /dev")
+        });
+        let devfs = crate::fs::dev::DevFS::new();
+        devfs.add_dev("tty", crate::fs::dev::tty::TTY.clone() as Arc<dyn self::vfs::IndexNode>)
+            .expect("devfs: failed to register /dev/tty");
+        devfs.add_dev("null", alloc::sync::Arc::new(crate::fs::dev::null::Null) as Arc<dyn self::vfs::IndexNode>)
+            .expect("devfs: failed to register /dev/null");
+        devfs.add_dev("zero", alloc::sync::Arc::new(crate::fs::dev::zero::Zero) as Arc<dyn self::vfs::IndexNode>)
+            .expect("devfs: failed to register /dev/zero");
+        devfs.add_dev("urandom", alloc::sync::Arc::new(crate::fs::dev::urandom::Urandom) as Arc<dyn self::vfs::IndexNode>)
+            .expect("devfs: failed to register /dev/urandom");
+        let dev_inode_id = dev_inode.metadata().expect("dev_inode metadata failed").inode_id;
+        let devfs_mnt = self::vfs::MountFS::new(devfs, self::vfs::MountFlags::empty());
+        mfs.add_mount(dev_inode_id, devfs_mnt)
+            .expect("failed to mount devfs at /dev");
+    }
+
+    // ── /proc — 进程信息文件系统 ──
+    {
+        let proc_inode = root.find("proc").unwrap_or_else(|_| {
+            root.create("proc", self::vfs::FileType::Dir, self::vfs::InodeMode::from_bits_truncate(0o555))
+                .expect("failed to create /proc")
+        });
+        let proc_inode_id = proc_inode.metadata().expect("proc_inode metadata failed").inode_id;
+        let procfs = crate::fs::procfs::ProcFS::new();
+        crate::fs::procfs::files::register_all(procfs.root())
+            .expect("procfs: failed to register root entries");
+        let procfs_mnt = self::vfs::MountFS::new(procfs, self::vfs::MountFlags::empty());
+        mfs.add_mount(proc_inode_id, procfs_mnt)
+            .expect("failed to mount procfs at /proc");
+    }
+
+    // ── /tmp — 临时文件系统（ramfs + 16MB 配额）──
+    {
+        let tmp_inode = root.find("tmp").unwrap_or_else(|_| {
+            root.create("tmp", self::vfs::FileType::Dir, self::vfs::InodeMode::from_bits_truncate(0o1777))
+                .expect("failed to create /tmp")
+        });
+        let tmp_inode_id = tmp_inode.metadata().expect("tmp_inode metadata failed").inode_id;
+        let tmpfs = crate::fs::ramfs::RamFS::new_with_quota(4096);
+        // 设置挂载后的根 inode 为 01777（sticky bit + 全局可读写）
+        if let Ok(mut meta) = tmpfs.root_inode().metadata() {
+            meta.mode = self::vfs::InodeMode::from_bits_truncate(0o1777);
+            tmpfs.root_inode().set_metadata(&meta).ok();
+        }
+        let tmpfs_mnt = self::vfs::MountFS::new(tmpfs, self::vfs::MountFlags::empty());
+        mfs.add_mount(tmp_inode_id, tmpfs_mnt)
+            .expect("failed to mount tmpfs at /tmp");
+    }
 }
 
 /// 返回新的 VFS 根（MountFS 实例）的共享引用。
