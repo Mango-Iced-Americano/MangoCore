@@ -18,7 +18,6 @@ use crate::mm::PageTableImpl;
 use crate::mm::{AddressSpace, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::syscall::CloneFlags;
 use crate::timer::{ITimerVal, TimeSpec, TimeVal};
-use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -64,7 +63,7 @@ pub struct TaskControlBlock {
     /// 虚拟内存空间
     pub vm: Arc<Mutex<AddressSpace<PageTableImpl>>>,
     /// 信号处理函数表
-    pub sighand: Arc<Mutex<Vec<Option<Box<SigAction>>>>>,
+    pub sighand: Arc<Mutex<Sighand>>,
     /// 快速用户空间互斥锁
     pub futex: Arc<Mutex<Futex>>,
 
@@ -79,8 +78,10 @@ pub struct TaskControlBlock {
 pub struct TaskControlBlockInner {
     /// 信号掩码
     pub sigmask: Signals,
+    /// sigsuspend 临时替换 mask 时保存的旧 mask，由 sigreturn 恢复。
+    pub sigmask_to_restore: Option<Signals>,
     /// 待处理信号
-    pub sigpending: Signals,
+    pub sigpending: SignalQueue,
     /// 备用信号栈，每线程独立
     pub signal_stack: SignalStack,
     /// 陷阱上下文的物理页号
@@ -240,7 +241,7 @@ impl TaskControlBlockInner {
     }
     /// 添加信号
     pub fn add_signal(&mut self, signal: Signals) {
-        self.sigpending.insert(signal);
+        let _ = self.sigpending.enqueue_signal(signal, 0);
     }
     /// 在进入陷阱时更新进程时间
     pub fn update_process_times_enter_trap(&mut self) {
@@ -401,16 +402,13 @@ impl TaskControlBlock {
                 ),
             })),
             vm: Arc::new(Mutex::new(memory_set)),
-            sighand: Arc::new(Mutex::new({
-                let mut vec = Vec::with_capacity(64);
-                vec.resize(64, None);
-                vec
-            })),
+            sighand: Arc::new(Mutex::new(Sighand::new())),
             futex: Arc::new(Mutex::new(Futex::new())),
             wait_io_timer_pending: AtomicBool::new(false),
             inner: Mutex::new(TaskControlBlockInner {
                 sigmask: Signals::empty(),
-                sigpending: Signals::empty(),
+                sigmask_to_restore: None,
+                sigpending: SignalQueue::empty(),
                 signal_stack: SignalStack::disabled(),
                 trap_cx_ppn,
                 task_cx: TaskContext::goto_trap_return(kstack_top),
@@ -545,9 +543,7 @@ impl TaskControlBlock {
         // 替换内存映射
         *self.vm.lock() = memory_set;
         // 清空信号处理函数表
-        for sigact in self.sighand.lock().iter_mut() {
-            *sigact = None;
-        }
+        self.sighand.lock().reset();
         // 清空futex
         self.futex.lock().clear();
         // 检查当前任务是否是多线程任务
@@ -657,12 +653,7 @@ impl TaskControlBlock {
             self.sighand.clone()
         } else {
             let lock = self.sighand.lock();
-            let mut vec: Vec<Option<Box<SigAction>>> = Vec::new();
-            if vec.try_reserve(lock.len()).is_err() {
-                return Err(crate::syscall::errno::ENOMEM);
-            }
-            vec.extend(lock.iter().cloned());
-            Arc::new(Mutex::new(vec))
+            Arc::new(Mutex::new(Sighand::from_existing(&lock)))
         };
         let task_control_block = Arc::new(TaskControlBlock {
             // 基础标识信息
@@ -695,7 +686,7 @@ impl TaskControlBlock {
                 heap_bottom: parent_inner.heap_bottom,
                 heap_pt: parent_inner.heap_pt,
                 // clone
-                sigpending: parent_inner.sigpending.clone(),
+                sigpending: SignalQueue::empty(),
                 signal_stack: if share_vm {
                     SignalStack::disabled()
                 } else {
@@ -710,6 +701,7 @@ impl TaskControlBlock {
                 real_timer_deadline: None,
                 real_timer_generation: 0,
                 sigmask: Signals::empty(),
+                sigmask_to_restore: None,
                 // compute
                 trap_cx_ppn,
                 task_cx: TaskContext::goto_trap_return(kstack_top),

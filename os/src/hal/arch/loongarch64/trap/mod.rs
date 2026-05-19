@@ -277,6 +277,12 @@ pub fn trap_handler() -> ! {
             let mut inner = task.acquire_inner_lock();
             inner.add_signal(Signals::SIGILL);
         }
+        Trap::Exception(Exception::AddressError) => {
+            log::info!("[trap] trigger SIGSEGV from address error");
+            let task = current_task().unwrap();
+            let mut inner = task.acquire_inner_lock();
+            inner.add_signal(Signals::SIGSEGV);
+        }
         Trap::Interrupt(Interrupt::Timer) => {
             do_wake_expired();
             NET_INTERFACE.try_poll();

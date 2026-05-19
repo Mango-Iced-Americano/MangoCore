@@ -1,4 +1,8 @@
-use super::{registry, signal::Signals, TaskControlBlock, TaskStatus};
+use super::{
+    registry,
+    signal::{PendingSignal, SignalQueue, Signals},
+    TaskControlBlock, TaskStatus,
+};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use spin::{Mutex, MutexGuard};
@@ -35,7 +39,7 @@ pub struct ProcessInner {
 
 pub struct ProcessSignalState {
     /// kill(pid) / killpg() 这类进程级投递产生的共享 pending signal。
-    pub shared_pending: Signals,
+    pub shared_pending: SignalQueue,
     /// exit_group() 设置的线程组退出码。
     pub group_exit_code: Option<u32>,
     /// 线程组是否已经进入 group exit。
@@ -61,7 +65,7 @@ impl ProcessControlBlock {
                 exit_code: 0,
             }),
             signal: Mutex::new(ProcessSignalState {
-                shared_pending: Signals::empty(),
+                shared_pending: SignalQueue::empty(),
                 group_exit_code: None,
                 group_exiting: false,
             }),
@@ -155,32 +159,20 @@ impl ProcessControlBlock {
         self.inner.lock().exit_code
     }
 
-    pub fn enqueue_process_signal(&self, signal: Signals) {
-        if !signal.is_empty() {
-            self.signal.lock().shared_pending.insert(signal);
-        }
+    pub fn enqueue_process_signal(&self, pending: PendingSignal) {
+        let _ = self.signal.lock().shared_pending.enqueue(pending);
     }
 
     pub fn shared_pending(&self) -> Signals {
-        self.signal.lock().shared_pending
+        self.signal.lock().shared_pending.pending()
     }
 
     pub fn take_shared_signal(&self, signal: Signals) -> bool {
-        let mut state = self.signal.lock();
-        if state.shared_pending.contains(signal) {
-            state.shared_pending.remove(signal);
-            true
-        } else {
-            false
-        }
+        self.signal.lock().shared_pending.remove_signal(signal)
     }
 
-    pub fn take_shared_matching(&self, set: Signals) -> Option<usize> {
-        let mut state = self.signal.lock();
-        let signum = (state.shared_pending & set).peek_front()?;
-        let signal = Signals::from_signum(signum).ok()?;
-        state.shared_pending.remove(signal);
-        Some(signum)
+    pub fn take_shared_matching(&self, set: Signals) -> Option<PendingSignal> {
+        self.signal.lock().shared_pending.dequeue_matching(set)
     }
 
     pub fn request_group_exit(&self, exit_code: u32) {

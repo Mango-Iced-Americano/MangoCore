@@ -2,8 +2,6 @@ use crate::hal::{
     get_bad_addr, get_bad_instruction, get_exception_cause, MachineContext, UserContext,
 };
 use crate::signal_type;
-use alloc::boxed::Box;
-use alloc::sync::Arc;
 use core::fmt::{self, Debug, Formatter};
 use core::mem::size_of;
 use log::{debug, error, trace, warn};
@@ -13,17 +11,25 @@ use crate::hal::TrapContext;
 use crate::config::*;
 use crate::mm::{UserPtr, UserPtrMut};
 use crate::syscall::errno::*;
-use crate::task::manager::wait_with_timeout;
 use crate::task::{
-    block_current_and_run_next, block_current_and_run_next_checked, exit_current_and_run_next,
-    exit_group_and_run_next,
-    wake_interruptible, ProcessControlBlock, TaskStatus,
+    block_current_and_run_next, exit_current_and_run_next, exit_group_and_run_next,
 };
-use crate::timer::TimeSpec;
 
 use super::current_task;
 use super::task::TaskControlBlock;
 use crate::utils::error::SyscallErr;
+
+mod action;
+mod delivery;
+mod frame;
+mod pending;
+mod wait;
+
+pub use action::Sighand;
+pub use delivery::{send_process_signal, send_thread_signal};
+use frame::signal_frame_layout;
+pub use pending::{PendingSignal, SignalQueue};
+pub use wait::{sigsuspend, sigtimedwait};
 
 bitflags! {
     /// Signals 枚举
@@ -127,6 +133,7 @@ bitflags! {
 }
 
 const SYSCALL_SIGTIMEDWAIT: usize = 137;
+const SYSCALL_RT_SIGSUSPEND: usize = 133;
 
 impl Signals {
     // SIGILL | SIGKILL | SIGSEGV | SIGSTOP
@@ -190,9 +197,9 @@ pub struct SigHandler(usize);
 
 impl SigHandler {
     /// 默认处理
-    const SIG_DFL: Self = Self(0);
+    pub(super) const SIG_DFL: Self = Self(0);
     /// 忽略信号
-    const SIG_IGN: Self = Self(1);
+    pub(super) const SIG_IGN: Self = Self(1);
     fn addr(&self) -> Option<usize> {
         match *self {
             Self::SIG_DFL | Self::SIG_IGN => None,
@@ -276,9 +283,10 @@ pub fn sigaction(signum: usize, act: *const SigAction, oldact: *mut SigAction) -
             trace!("[sigaction] signal: {:?}", Signals::from_signum(signum));
             let token = task.get_user_token();
             if !oldact.is_null() {
-                let suc = if let Some(sigact) = &task.sighand.lock()[signum - 1] {
+                let sighand = task.sighand.lock();
+                let suc = if let Some(sigact) = sighand.get(signum) {
                     trace!("[sigaction] *oldact: {:?}", sigact);
-                    UserPtrMut::new(oldact).write(token, sigact.as_ref())
+                    UserPtrMut::new(oldact).write(token, sigact)
                 } else {
                     trace!("[sigaction] *oldact: not found");
                     UserPtrMut::new(oldact).write(token, &SigAction::new())
@@ -296,13 +304,14 @@ pub fn sigaction(signum: usize, act: *const SigAction, oldact: *mut SigAction) -
                 }
             } {
                 sigact.mask.remove(Signals::CAN_NOT_BE_MASKED);
+                let mut sighand = task.sighand.lock();
                 if sigact.handler == SigHandler::SIG_IGN {
                     // Store SIG_IGN explicitly so we can distinguish from SIG_DFL
-                    task.sighand.lock()[signum - 1] = Some(Box::new(sigact));
+                    sighand.set(signum, Some(sigact));
                 } else if sigact.handler == SigHandler::SIG_DFL {
-                    task.sighand.lock()[signum - 1] = None;
+                    sighand.set(signum, None);
                 } else {
-                    task.sighand.lock()[signum - 1] = Some(Box::new(sigact));
+                    sighand.set(signum, Some(sigact));
                 }
                 trace!("[sigaction] *act: {:?}", sigact);
             }
@@ -388,20 +397,9 @@ fn exit_current_with_sigsegv() -> ! {
     exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
 }
 
-fn signal_frame_layout(base_sp: usize, stack_bottom: usize) -> Option<(usize, usize, usize, usize)> {
-    let ucontext_addr = base_sp.checked_sub(size_of::<UserContext>())? & !0x7;
-    let siginfo_addr = ucontext_addr.checked_sub(size_of::<SigInfo>())? & !0x7;
-    if siginfo_addr < stack_bottom {
-        return None;
-    }
-    let sig_sp = siginfo_addr;
-    let sig_size = sig_sp - stack_bottom;
-    Some((ucontext_addr, siginfo_addr, sig_sp, sig_size))
-}
-
 /// Signals whose SIG_DFL action is to ignore the signal.
 /// These signals should NOT cause EINTR in pselect/ppoll/wait/etc.
-const SIG_DFL_IGNORE: Signals = Signals::from_bits_truncate(
+pub(super) const SIG_DFL_IGNORE: Signals = Signals::from_bits_truncate(
     Signals::SIGCHLD.bits()
         | Signals::SIGCONT.bits()
         | Signals::SIGURG.bits()
@@ -411,16 +409,12 @@ const SIG_DFL_IGNORE: Signals = Signals::from_bits_truncate(
 fn pending_unblocked_signals(task: &TaskControlBlock) -> Signals {
     let inner = task.acquire_inner_lock();
     let sigmask = inner.sigmask;
-    let pending = inner.sigpending | task.process.shared_pending();
+    let pending = inner.sigpending.pending() | task.process.shared_pending();
     pending.difference(sigmask)
 }
 
-fn signal_is_actionable(
-    sighand: &[Option<Box<SigAction>>],
-    signum: usize,
-    signal: Signals,
-) -> bool {
-    match &sighand[signum - 1] {
+fn signal_is_actionable(sighand: &Sighand, signum: usize, signal: Signals) -> bool {
+    match sighand.get(signum) {
         Some(act) => act.handler != SigHandler::SIG_IGN,
         None => !SIG_DFL_IGNORE.contains(signal),
     }
@@ -429,63 +423,25 @@ fn signal_is_actionable(
 fn take_next_pending_signal(
     task: &TaskControlBlock,
     inner: &mut super::task::TaskControlBlockInner,
-) -> Option<(usize, Signals, bool)> {
-    if let Some(signum) = inner.sigpending.difference(inner.sigmask).peek_front() {
-        let signal = Signals::from_bits_truncate(1 << (signum - 1));
-        inner.sigpending.remove(signal);
-        return Some((signum, signal, false));
+) -> Option<(PendingSignal, bool)> {
+    let thread_pending = inner.sigpending.pending().difference(inner.sigmask);
+    if let Some(pending) = inner.sigpending.dequeue_matching(thread_pending) {
+        return Some((pending, false));
     }
 
     let shared_pending = task.process.shared_pending().difference(inner.sigmask);
-    let signum = shared_pending.peek_front()?;
-    let signal = Signals::from_bits_truncate(1 << (signum - 1));
-    if task.process.take_shared_signal(signal) {
-        Some((signum, signal, true))
-    } else {
-        None
-    }
-}
-
-fn process_signal_target(
-    process: &ProcessControlBlock,
-    signal: Signals,
-) -> Option<Arc<TaskControlBlock>> {
-    let mut interruptible = None;
-    for task in process.threads() {
-        let inner = task.acquire_inner_lock();
-        if inner.task_status == TaskStatus::Zombie {
-            continue;
-        }
-        if inner.task_status == TaskStatus::Interruptible && interruptible.is_none() {
-            interruptible = Some(task.clone());
-        }
-        if !signal.difference(inner.sigmask).is_empty() {
-            return Some(task.clone());
-        }
-    }
-    interruptible
-}
-
-pub fn send_process_signal(process: &ProcessControlBlock, signal: Signals) -> bool {
-    if signal.is_empty() {
-        return true;
-    }
-    process.enqueue_process_signal(signal);
-    if let Some(task) = process_signal_target(process, signal) {
-        let mut inner = task.acquire_inner_lock();
-        if inner.task_status == TaskStatus::Interruptible {
-            inner.task_status = TaskStatus::Ready;
-            drop(inner);
-            wake_interruptible(task);
-        }
-    }
-    true
+    task.process
+        .take_shared_matching(shared_pending)
+        .map(|pending| (pending, true))
 }
 
 pub fn discard_non_actionable_unblocked_signals(task: &TaskControlBlock) {
     let (thread_pending, sigmask) = {
         let inner = task.acquire_inner_lock();
-        (inner.sigpending.difference(inner.sigmask), inner.sigmask)
+        (
+            inner.sigpending.pending().difference(inner.sigmask),
+            inner.sigmask,
+        )
     };
     let shared_pending = task.process.shared_pending().difference(sigmask);
     let mut discard_thread = Signals::empty();
@@ -508,7 +464,9 @@ pub fn discard_non_actionable_unblocked_signals(task: &TaskControlBlock) {
     drop(sighand);
 
     if !discard_thread.is_empty() {
-        task.acquire_inner_lock().sigpending.remove(discard_thread);
+        task.acquire_inner_lock()
+            .sigpending
+            .remove_signals(discard_thread);
     }
     for signum in 1..=64usize {
         if let Ok(signal) = Signals::from_signum(signum) {
@@ -560,18 +518,20 @@ pub fn has_actionable_signal(task: &TaskControlBlock) -> bool {
 pub fn do_signal() {
     let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
-    while let Some((signum, signal, from_process)) = take_next_pending_signal(&task, &mut inner) {
+    while let Some((pending, from_process)) = take_next_pending_signal(&task, &mut inner) {
+        let signum = pending.signum();
+        let signal = pending.signal;
         trace!(
             "[do_signal] signal: {:?}, from_process: {}, thread_pending: {:?}, process_pending: {:?}, sigmask: {:?}",
             signal,
             from_process,
-            inner.sigpending,
+            inner.sigpending.pending(),
             task.process.shared_pending(),
             inner.sigmask
         );
         let mut sighand = task.sighand.lock();
         // user-defined handler
-        if let Some(act) = &sighand[signum - 1] {
+        if let Some(act) = sighand.get(signum).copied() {
             // SIG_IGN → discard this signal (POSIX: ignored signals are not delivered)
             if act.handler == SigHandler::SIG_IGN {
                 trace!("[do_signal] Ignore {:?} (SIG_IGN)", signal);
@@ -585,6 +545,7 @@ pub fn do_signal() {
                     // and if `SA_RESTART` is set
                     if act.flags.contains(SigActionFlags::SA_RESTART)
                         && trap_cx.gp.a7 != SYSCALL_SIGTIMEDWAIT
+                        && trap_cx.gp.a7 != SYSCALL_RT_SIGSUSPEND
                     {
                         debug!("[do_signal] syscall will restart after sigreturn");
                         // back to `ecall`
@@ -616,7 +577,7 @@ pub fn do_signal() {
                 signal_frame_layout(frame_base_sp, stack_bottom)
             {
                 let token = task.get_user_token();
-                let saved_sigmask = inner.sigmask;
+                let saved_sigmask = inner.sigmask_to_restore.take().unwrap_or(inner.sigmask);
                 let mcontext =
                     unsafe { *(inner.get_trap_cx() as *const TrapContext).cast::<MachineContext>() };
                 let mut frame_stack = if use_alt_stack {
@@ -648,7 +609,7 @@ pub fn do_signal() {
                         exit_current_with_sigsegv();
                     }
                     if UserPtrMut::from_addr(siginfo_addr)
-                        .write(token, &SigInfo::new(signum, 0, 0)) // push SigInfo into user stack
+                        .write(token, &pending.siginfo) // push SigInfo into user stack
                         .is_err()
                     {
                         error!("[do_signal] Failed to write SigInfo to user stack. Send SIGSEGV.");
@@ -737,7 +698,7 @@ pub fn do_signal() {
                 (signal | act.mask) - Signals::CAN_NOT_BE_MASKED
             };
             if act.flags.contains(SigActionFlags::SA_RESETHAND) {
-                sighand[signum - 1] = None;
+                sighand.set(signum, None);
             }
             // go back to `trap_return`
             return;
@@ -902,38 +863,53 @@ pub fn sigprocmask(how: u32, set: *const Signals, oldset: *mut Signals) -> isize
 }
 
 #[allow(unused)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 #[repr(C)] //UNSAFE! IS THIS CORRECT?
 pub struct SigInfo {
     si_signo: u32,
     si_errno: u32,
     si_code: u32,
+    __pad0: u32,
+    si_pid: u32,
+    si_uid: u32,
     // unsupported fields
-    __pad: [u8; 128 - 3 * core::mem::size_of::<u32>()],
+    __pad: [u8; 128 - 6 * core::mem::size_of::<u32>()],
 }
 
 impl SigInfo {
     pub fn new(si_signo: usize, si_errno: usize, si_code: usize) -> Self {
+        Self::new_with_sender(si_signo, si_errno, si_code, 0)
+    }
+
+    pub fn new_with_sender(
+        si_signo: usize,
+        si_errno: usize,
+        si_code: usize,
+        si_pid: usize,
+    ) -> Self {
         Self {
             si_signo: si_signo as u32,
             si_errno: si_errno as u32,
             si_code: si_code as u32,
-            __pad: [0; 128 - 3 * core::mem::size_of::<u32>()],
+            __pad0: 0,
+            si_pid: si_pid as u32,
+            si_uid: 0,
+            __pad: [0; 128 - 6 * core::mem::size_of::<u32>()],
         }
     }
 }
 
 #[allow(unused)]
 impl SigInfo {
-    const SI_ASYNCNL: u32 = 60u32.wrapping_neg();
-    const SI_TKILL: u32 = 6u32.wrapping_neg();
-    const SI_SIGIO: u32 = 5u32.wrapping_neg();
-    const SI_ASYNCIO: u32 = 4u32.wrapping_neg();
-    const SI_MESGQ: u32 = 3u32.wrapping_neg();
-    const SI_TIMER: u32 = 2u32.wrapping_neg();
-    const SI_QUEUE: u32 = 1u32.wrapping_neg();
-    const SI_USER: u32 = 0;
-    const SI_KERNEL: u32 = 128;
+    pub const SI_ASYNCNL: u32 = 60u32.wrapping_neg();
+    pub const SI_TKILL: u32 = 6u32.wrapping_neg();
+    pub const SI_SIGIO: u32 = 5u32.wrapping_neg();
+    pub const SI_ASYNCIO: u32 = 4u32.wrapping_neg();
+    pub const SI_MESGQ: u32 = 3u32.wrapping_neg();
+    pub const SI_TIMER: u32 = 2u32.wrapping_neg();
+    pub const SI_QUEUE: u32 = 1u32.wrapping_neg();
+    pub const SI_USER: u32 = 0;
+    pub const SI_KERNEL: u32 = 128;
     const FPE_INTDIV: u32 = 1;
     const FPE_INTOVF: u32 = 2;
     const FPE_FLTDIV: u32 = 3;
@@ -965,129 +941,4 @@ impl SigInfo {
     const CLD_TRAPPED: u32 = 4;
     const CLD_STOPPED: u32 = 5;
     const CLD_CONTINUED: u32 = 6;
-}
-
-fn take_pending_signal_matching(task: &TaskControlBlock, set: Signals) -> Option<usize> {
-    {
-        let mut inner = task.acquire_inner_lock();
-        if let Some(signum) = (inner.sigpending & set).peek_front() {
-            let signal = Signals::from_signum(signum).ok()?;
-            inner.sigpending.remove(signal);
-            return Some(signum);
-        }
-    }
-    task.process.take_shared_matching(set)
-}
-
-fn remove_one_pending_signal(task: &TaskControlBlock, signal: Signals) {
-    let mut inner = task.acquire_inner_lock();
-    if inner.sigpending.contains(signal) {
-        inner.sigpending.remove(signal);
-        return;
-    }
-    drop(inner);
-    task.process.take_shared_signal(signal);
-}
-
-fn take_sigtimedwait_interrupt(task: &TaskControlBlock, wait_set: Signals) -> bool {
-    let (thread_pending, sigmask) = {
-        let inner = task.acquire_inner_lock();
-        (inner.sigpending, inner.sigmask)
-    };
-    let pending = (thread_pending | task.process.shared_pending())
-        .difference(sigmask)
-        .difference(wait_set);
-    if pending.is_empty() {
-        return false;
-    }
-
-    let sighand = task.sighand.lock();
-    for signum in 1..=64usize {
-        let signal = match Signals::from_signum(signum) {
-            Ok(signal) => signal,
-            Err(_) => continue,
-        };
-        if !pending.contains(signal) {
-            continue;
-        }
-        match &sighand[signum - 1] {
-            Some(act) if act.handler == SigHandler::SIG_IGN => {
-                drop(sighand);
-                remove_one_pending_signal(task, signal);
-                return false;
-            }
-            Some(_) => {
-                return true;
-            }
-            None if SIG_DFL_IGNORE.contains(signal) => {
-                drop(sighand);
-                remove_one_pending_signal(task, signal);
-                return false;
-            }
-            None => return true,
-        }
-    }
-    false
-}
-
-fn has_sigtimedwait_wakeup(task: &TaskControlBlock, wait_set: Signals) -> bool {
-    let (thread_pending, sigmask) = {
-        let inner = task.acquire_inner_lock();
-        (inner.sigpending, inner.sigmask)
-    };
-    let pending = thread_pending | task.process.shared_pending();
-    !(pending & wait_set).is_empty()
-        || !pending.difference(sigmask).difference(wait_set).is_empty()
-}
-
-pub fn sigtimedwait(set: *const Signals, info: *mut SigInfo, timeout: *const TimeSpec) -> isize {
-    let mut task = current_task().unwrap();
-    let token = task.get_user_token();
-    let set = match UserPtr::new(set).read(token) {
-        Ok(set) => set,
-        Err(errno) => return errno,
-    };
-    // timeout == NULL → infinite wait (POSIX sigwaitinfo semantics)
-    let timeout = match UserPtr::new(timeout).read_optional(token) {
-        Ok(timeout) => timeout,
-        Err(errno) => return errno,
-    };
-    let start = TimeSpec::now();
-    let deadline = timeout.map(|timeout| start + timeout);
-
-    loop {
-        if let Some(signum) = take_pending_signal_matching(&task, set) {
-            if !info.is_null() {
-                if UserPtrMut::new(info)
-                    .write(token, &SigInfo::new(signum, 0, 0))
-                    .is_err()
-                {
-                    log::error!("[sys_sigtimedwait] Error copying to info {:?} ", info);
-                    return EFAULT;
-                };
-            }
-            return signum as isize;
-        }
-        if take_sigtimedwait_interrupt(&task, set) {
-            // Let do_signal() run the handler or default action. sigtimedwait is
-            // non-restartable, so do_signal() will force EINTR even with SA_RESTART.
-            return ERESTART;
-        }
-
-        if let Some(deadline) = deadline {
-            if deadline <= TimeSpec::now() {
-                return EAGAIN;
-            }
-            wait_with_timeout(Arc::downgrade(&task), deadline);
-        }
-
-        drop(task);
-        block_current_and_run_next_checked(|task| {
-            !has_sigtimedwait_wakeup(task, set)
-                && deadline
-                    .map(|deadline| TimeSpec::now() < deadline)
-                    .unwrap_or(true)
-        });
-        task = current_task().unwrap();
-    }
 }

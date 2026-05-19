@@ -13,8 +13,7 @@ use crate::task::{
     add_kernel_timer, add_task, all_processes, block_current_and_run_next, current_task,
     current_user_token, exit_current_and_run_next, exit_group_and_run_next, find_process_by_pid,
     find_processes_by_pgid, find_task_by_pid_tid, find_task_by_tid, procs_count, signal::*,
-    suspend_current_and_run_next, threads, wait_with_timeout, wake_interruptible, Rusage,
-    TaskControlBlock, TaskStatus, TimerAction,
+    suspend_current_and_run_next, threads, wait_with_timeout, Rusage, TaskControlBlock, TimerAction,
 };
 use crate::timer::{get_time_ms, get_time_sec, ITimerVal, TimeSpec, TimeVal, TimeZone, Times};
 use crate::utils::error::SyscallErr;
@@ -150,16 +149,7 @@ pub fn sys_tkill(tid: usize, sig: usize) -> isize {
         Err(_) => return EINVAL,
     };
     if let Some(task) = find_task_by_tid(tid) {
-        if !signal.is_empty() {
-            let mut inner = task.acquire_inner_lock();
-            inner.add_signal(signal);
-            // wake up target process if it is sleeping
-            if inner.task_status == TaskStatus::Interruptible {
-                inner.task_status = TaskStatus::Ready;
-                drop(inner);
-                wake_interruptible(task);
-            }
-        }
+        send_thread_signal(&task, signal);
         SUCCESS
     } else {
         ESRCH
@@ -175,16 +165,7 @@ pub fn sys_tgkill(pid: usize, tid: usize, sig: usize) -> isize {
         Err(_) => return EINVAL,
     };
     if let Some(task) = find_task_by_pid_tid(pid, tid) {
-        if !signal.is_empty() {
-            let mut inner = task.acquire_inner_lock();
-            inner.add_signal(signal);
-            // wake up target thread if it is sleeping
-            if inner.task_status == TaskStatus::Interruptible {
-                inner.task_status = TaskStatus::Ready;
-                drop(inner);
-                wake_interruptible(task);
-            }
-        }
+        send_thread_signal(&task, signal);
         SUCCESS
     } else {
         ESRCH
@@ -1415,25 +1396,30 @@ pub fn sys_sigprocmask(how: u32, set: usize, oldset: usize) -> isize {
     sigprocmask(how, set as *const Signals, oldset as *mut Signals)
 }
 
+fn valid_rt_sigset_size(sigsetsize: usize) -> bool {
+    sigsetsize >= size_of::<u64>()
+}
+
 /// rt_sigpending(sigset_t *set, size_t sigsetsize)
 /// Copy the set of pending signals to user-space `set`.
-/// sigsetsize must equal sizeof(sigset_t) (= 8 on riscv64).
+/// Only the low 64 signal bits are implemented; libc may pass a larger
+/// sigset_t storage size on some architectures.
 pub fn sys_rt_sigpending(set: usize, sigsetsize: usize) -> isize {
-    let sigset_size = size_of::<Signals>();
-    if sigsetsize != sigset_size {
+    if !valid_rt_sigset_size(sigsetsize) {
         return -(SyscallErr::EINVAL as isize);
     }
     let task = current_task().unwrap();
     let token = task.get_user_token();
     let inner = task.acquire_inner_lock();
-    let pending = inner.sigpending | task.process.shared_pending();
+    let pending = inner.sigpending.pending() | task.process.shared_pending();
+    let pending_bits = pending.bits() as u64;
     trace!(
         "[sys_rt_sigpending] tid: {}, pid: {}, pending: {:?}",
         task.tid.0,
         task.pid(),
         pending
     );
-    match UserPtrMut::from_addr(set).write(token, &pending) {
+    match UserPtrMut::from_addr(set).write(token, &pending_bits) {
         Ok(()) => SUCCESS,
         Err(errno) => errno,
     }
@@ -1445,6 +1431,13 @@ pub fn sys_sigtimedwait(set: usize, info: usize, timeout: usize) -> isize {
         info as *mut SigInfo,
         timeout as *const TimeSpec,
     )
+}
+
+pub fn sys_rt_sigsuspend(set: usize, sigsetsize: usize) -> isize {
+    if !valid_rt_sigset_size(sigsetsize) {
+        return EINVAL;
+    }
+    sigsuspend(set as *const Signals)
 }
 
 pub fn sys_sigaltstack(ss: usize, old_ss: usize) -> isize {

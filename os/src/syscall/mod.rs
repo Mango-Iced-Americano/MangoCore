@@ -263,6 +263,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SIGACTION => sys_sigaction(args[0], args[1], args[2]),
         SYSCALL_SIGPROCMASK => sys_sigprocmask(args[0] as u32, args[1], args[2]),
         SYSCALL_RT_SIGPENDING => sys_rt_sigpending(args[0], args[1]),
+        SYSCALL_RT_SIGSUSPEND => sys_rt_sigsuspend(args[0], args[1]),
         SYSCALL_SIGTIMEDWAIT => sys_sigtimedwait(args[0], args[1], args[2]),
         SYSCALL_SIGRETURN => sys_sigreturn(),
         SYSCALL_TIMES => sys_times(args[0] as *mut Times),
