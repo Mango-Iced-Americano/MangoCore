@@ -206,7 +206,12 @@ pub fn trap_handler() -> ! {
             let task = current_task().unwrap();
             let mut inner = task.acquire_inner_lock();
             let addr = VirtAddr::from(get_bad_addr());
-            log::debug!("[page_fault] pid: {}, type: {:?}", task.pid.0, cause);
+            log::debug!(
+                "[page_fault] tid: {}, pid: {}, type: {:?}",
+                task.tid.0,
+                task.pid,
+                cause
+            );
             log::debug!(
                 "[page_fault] {:?}, {:?}, {:?}, {:?}, {:?}, {:?}",
                 TLBRERA::read(),

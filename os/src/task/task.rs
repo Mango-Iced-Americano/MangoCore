@@ -3,12 +3,12 @@ use super::pid::RecycleAllocator;
 use super::signal::*;
 use super::threads::Futex;
 use super::TaskContext;
-use super::{pid_alloc, PidHandle};
+use super::{
+    tid_alloc, trap_cx_bottom_from_slot, ustack_bottom_from_slot, TidHandle,
+};
 use crate::config::MMAP_BASE;
 use crate::fs::file_descriptor::FdTable;
 use crate::fs::{FileDescriptor, OpenFlags, ROOT_FD};
-use crate::hal::trap_cx_bottom_from_tid;
-use crate::hal::ustack_bottom_from_tid;
 use crate::hal::TrapImpl;
 use crate::hal::{kstack_alloc, KernelStack};
 use crate::hal::{trap_handler, TrapContext};
@@ -35,12 +35,12 @@ pub struct FsStatus {
 /// 任务控制块
 pub struct TaskControlBlock {
     // 不可变字段
-    /// 进程ID
-    pub pid: PidHandle,
-    /// 线程ID
-    pub tid: usize,
-    /// 线程组ID
-    pub tgid: usize,
+    /// 用户可见线程 ID，即 gettid() 返回值
+    pub tid: TidHandle,
+    /// 同一地址空间内 trap context / 默认用户栈的资源槽位
+    pub user_res_slot: usize,
+    /// 用户可见进程 ID，即 getpid() 返回值
+    pub pid: usize,
     /// 内核栈
     pub kstack: KernelStack,
     /// 用户栈基址
@@ -53,8 +53,8 @@ pub struct TaskControlBlock {
     // 可共享&可变字段
     /// 可执行文件描述符
     pub exe: Arc<Mutex<FileDescriptor>>,
-    /// 线程ID分配器
-    pub tid_allocator: Arc<Mutex<RecycleAllocator>>,
+    /// 同一地址空间内的用户资源槽位分配器
+    pub user_res_slot_allocator: Arc<Mutex<RecycleAllocator>>,
     /// 文件描述符表
     pub files: Arc<Mutex<FdTable>>,
     /// 文件系统状态
@@ -335,13 +335,11 @@ impl TaskControlBlock {
     }
     /// 获取陷阱上下文的用户虚拟地址
     pub fn trap_cx_user_va(&self) -> usize {
-        // 从线程ID计算陷阱上下文的用户虚拟地址
-        trap_cx_bottom_from_tid(self.tid)
+        trap_cx_bottom_from_slot(self.user_res_slot)
     }
     /// 获取用户栈的用户虚拟地址
     pub fn ustack_bottom_va(&self) -> usize {
-        // 从线程ID计算用户栈的用户虚拟地址
-        ustack_bottom_from_tid(self.tid)
+        ustack_bottom_from_slot(self.user_res_slot)
     }
     /// !!!!!!!!!!!!!!!!WARNING!!!!!!!!!!!!!!!!!!!!!
     /// 当前仅用于initproc加载。如果在其他地方使用，必须更改bin_path。
@@ -363,37 +361,37 @@ impl TaskControlBlock {
             .remove_area_with_start_vpn(VirtAddr::from(MMAP_BASE).floor())
             .unwrap();
 
-        // 获取线程ID分配器
-        let tid_allocator = Arc::new(Mutex::new(RecycleAllocator::new()));
-        // 在内核空间中分配一个PID和一个内核栈
-        let pid_handle = pid_alloc();
-        // 分配线程ID
-        let tid = tid_allocator.lock().alloc();
-        // 线程组ID和线程ID相同
-        let tgid = pid_handle.0;
-        let pgid = pid_handle.0;
+        // 获取用户资源槽位分配器
+        let user_res_slot_allocator = Arc::new(Mutex::new(RecycleAllocator::new()));
+        // 在内核空间中分配一个用户可见 tid 和一个内核栈
+        let tid_handle = tid_alloc();
+        // 分配当前地址空间内的用户资源槽位
+        let user_res_slot = user_res_slot_allocator.lock().alloc();
+        // 初始进程的 pid/pgid 与主线程 tid 相同
+        let pid = tid_handle.0;
+        let pgid = tid_handle.0;
         // 分配内核栈
         let kstack = kstack_alloc();
         // 获取内核栈的顶部
         let kstack_top = kstack.get_top();
 
         // 为当前线程分配用户资源
-        memory_set.alloc_user_res(tid, true);
+        memory_set.alloc_user_res(user_res_slot, true);
         // 获取陷阱上下文的物理页号
         let trap_cx_ppn = memory_set
-            .translate(VirtAddr::from(trap_cx_bottom_from_tid(tid)).into())
+            .translate(VirtAddr::from(trap_cx_bottom_from_slot(user_res_slot)).into())
             .unwrap();
         log::trace!("[TCB::new]trap_cx_ppn{:?}", trap_cx_ppn);
         // 创建任务控制块
         let task_control_block = Self {
-            pid: pid_handle,
-            tid,
-            tgid,
+            tid: tid_handle,
+            user_res_slot,
+            pid,
             kstack,
-            ustack_base: ustack_bottom_from_tid(tid),
+            ustack_base: ustack_bottom_from_slot(user_res_slot),
             exit_signal: Signals::empty(),
             exe: Arc::new(Mutex::new(elf)),
-            tid_allocator,
+            user_res_slot_allocator,
             files: Arc::new(Mutex::new(FdTable::new({
                 let mut vec = Vec::with_capacity(144);
                 let tty = Some(ROOT_FD.open("/dev/tty", OpenFlags::O_RDWR, false).unwrap());
@@ -443,7 +441,7 @@ impl TaskControlBlock {
         // 初始化陷阱上下文
         *trap_cx = TrapContext::app_init_context(
             elf_info.entry,
-            ustack_bottom_from_tid(tid),
+            ustack_bottom_from_slot(user_res_slot),
             KERNEL_SPACE.lock().token(),
             kstack_top,
             trap_handler as usize,
@@ -500,7 +498,7 @@ impl TaskControlBlock {
         );
 
         // 为当前线程分配用户资源
-        memory_set.alloc_user_res(self.tid, true);
+        memory_set.alloc_user_res(self.user_res_slot, true);
         // 创建ELF参数表
         let user_sp =
             memory_set.create_elf_tables(self.ustack_bottom_va(), argv_vec, envp_vec, &elf_info)?;
@@ -559,7 +557,7 @@ impl TaskControlBlock {
         // 清空futex
         self.futex.lock().clear();
         // 检查当前任务是否是多线程任务
-        if self.tid_allocator.lock().get_allocated() > 1 {
+        if self.user_res_slot_allocator.lock().get_allocated() > 1 {
             let mut manager = TASK_MANAGER.lock();
 
             for task in manager
@@ -567,7 +565,7 @@ impl TaskControlBlock {
                 .iter()
                 .chain(manager.interruptible_queue.iter())
             {
-                if task.tgid == self.tgid && task.tid != self.tid {
+                if task.pid == self.pid && task.user_res_slot != self.user_res_slot {
                     // 发送 SIGKILL 信号给同一线程组的其他任务
                     let mut inner = task.acquire_inner_lock();
                     inner.add_signal(Signals::SIGKILL);
@@ -578,10 +576,10 @@ impl TaskControlBlock {
             // 销毁所有其他同一线程组的任务
             manager
                 .ready_queue
-                .retain(|task| (*task).tgid != (*self).tgid);
+                .retain(|task| (*task).pid != (*self).pid);
             manager
                 .interruptible_queue
-                .retain(|task| (*task).tgid != (*self).tgid);
+                .retain(|task| (*task).pid != (*self).pid);
         };
         Ok(())
         // **** 释放当前PCB锁
@@ -608,21 +606,21 @@ impl TaskControlBlock {
             )?))
         };
 
-        // 共享地址空间时，trap context 的虚拟地址也共享，必须复用同一个 tid 分配器。
-        let tid_allocator = if share_vm {
-            self.tid_allocator.clone()
+        // 共享地址空间时，trap context 的虚拟地址也共享，必须复用同一个用户资源槽位分配器。
+        let user_res_slot_allocator = if share_vm {
+            self.user_res_slot_allocator.clone()
         } else {
             Arc::new(Mutex::new(RecycleAllocator::new()))
         };
-        // 在内核空间分配一个PID和一个内核栈
-        let pid_handle = pid_alloc(); // 分配PID
-        let tid = tid_allocator.lock().alloc(); // 分配线程ID
-        let tgid = if flags.contains(CloneFlags::CLONE_THREAD) {
-            // 共享线程组ID
-            self.tgid
+        // 在内核空间分配一个用户可见 tid 和一个内核栈
+        let tid_handle = tid_alloc();
+        let user_res_slot = user_res_slot_allocator.lock().alloc();
+        let pid = if flags.contains(CloneFlags::CLONE_THREAD) {
+            // 共享进程 ID
+            self.pid
         } else {
-            // 新建线程组ID（进程）
-            pid_handle.0
+            // 新建进程 ID
+            tid_handle.0
         };
         // 分配内核栈
         let kstack = kstack_alloc();
@@ -631,14 +629,14 @@ impl TaskControlBlock {
         // 共享 VM 的任务需要独立 trap context；用户栈只在未指定 child stack 时分配。
         if share_vm {
             memory_set.lock().alloc_user_res(
-                tid,
+                user_res_slot,
                 stack.is_null() && !flags.contains(CloneFlags::CLONE_VFORK),
             );
         }
         // 获取陷阱上下文的物理页号
         let trap_cx_ppn = memory_set
             .lock()
-            .translate(VirtAddr::from(trap_cx_bottom_from_tid(tid)).into())
+            .translate(VirtAddr::from(trap_cx_bottom_from_slot(user_res_slot)).into())
             .unwrap();
 
         // 创建任务控制块
@@ -665,20 +663,20 @@ impl TaskControlBlock {
         };
         let task_control_block = Arc::new(TaskControlBlock {
             // 基础标识信息
-            pid: pid_handle,
-            tid,
-            tgid,
+            tid: tid_handle,
+            user_res_slot,
+            pid,
             kstack,
             ustack_base: if !stack.is_null() {
                 stack as usize
             } else {
-                ustack_bottom_from_tid(tid)
+                ustack_bottom_from_slot(user_res_slot)
             },
             exit_signal,
 
             // 资源共享控制
             exe: self.exe.clone(),
-            tid_allocator,
+            user_res_slot_allocator,
             files,
             fs,
             vm: memory_set,
@@ -789,13 +787,18 @@ impl TaskControlBlock {
     /// Drop resources allocated for a clone that has not been published.
     pub fn cleanup_unpublished_clone(&self, shared_vm: bool) {
         if shared_vm {
-            self.vm.lock().dealloc_user_res(self.tid);
+            self.vm.lock().dealloc_user_res(self.user_res_slot);
         }
     }
 
-    /// 获取进程ID
+    /// 获取用户可见线程 ID。
+    pub fn gettid(&self) -> usize {
+        self.tid.0
+    }
+
+    /// 获取用户可见进程 ID。
     pub fn getpid(&self) -> usize {
-        self.pid.0
+        self.pid
     }
     /// 设置进程组ID
     pub fn setpgid(&self, pgid: usize) -> isize {
@@ -819,9 +822,11 @@ impl TaskControlBlock {
 }
 
 impl Drop for TaskControlBlock {
-    /// 当任务控制块被销毁时，释放线程ID
+    /// 当任务控制块被销毁时，释放用户资源槽位
     fn drop(&mut self) {
-        self.tid_allocator.lock().dealloc(self.tid);
+        self.user_res_slot_allocator
+            .lock()
+            .dealloc(self.user_res_slot);
     }
 }
 

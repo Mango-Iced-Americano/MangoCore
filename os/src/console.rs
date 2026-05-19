@@ -75,10 +75,11 @@ impl Log for Logger {
         print!("\x1b[{}m", level_to_color_code(record.level()));
         match current_task() {
             Some(task) => println!(
-                "[{}.{:03}] pid {}: {}",
+                "[{}.{:03}] tid {} pid {}: {}",
                 sec,
                 msec,
-                task.pid.0,
+                task.tid.0,
+                task.pid,
                 record.args()
             ),
             None => println!("[{}.{:03}] kernel: {}", sec, msec, record.args()),

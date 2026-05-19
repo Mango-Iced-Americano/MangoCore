@@ -417,8 +417,9 @@ pub fn has_actionable_signal(task: &TaskControlBlock) -> bool {
         return false;
     }
     log::debug!(
-        "Task {} has pending: {:x}, mask: {:x}",
-        task.pid.0,
+        "Task tid {} pid {} has pending: {:x}, mask: {:x}",
+        task.tid.0,
+        task.pid,
         inner.sigpending.bits(),
         inner.sigmask.bits()
     );

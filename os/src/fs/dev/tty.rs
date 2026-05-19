@@ -80,7 +80,7 @@ fn vintr_send_sigint(inner: &TeletypeInner, ch: u8) -> bool {
     }
     let fg_pgid = inner.foreground_pgid;
     let target = if fg_pgid != 0 {
-        crate::task::find_task_by_tgid(fg_pgid as usize)
+        crate::task::find_any_task_by_pgid(fg_pgid as usize)
     } else {
         crate::task::current_task()
     };

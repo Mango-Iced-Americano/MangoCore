@@ -1,9 +1,9 @@
-pub use crate::hal::{trap_cx_bottom_from_tid, ustack_bottom_from_tid};
+use crate::hal::{trap_cx_bottom_from_tid, ustack_bottom_from_tid};
 use alloc::vec::Vec;
 use lazy_static::*;
 use spin::Mutex;
 
-/// 用于分配pid的结构体
+/// 用于分配可回收 id 的结构体
 pub struct RecycleAllocator {
     /// 当前分配的id
     current: usize,
@@ -54,21 +54,30 @@ impl RecycleAllocator {
 }
 
 lazy_static! {
-    /// 全局的PID分配器对象，使用Mutex进行包装保证线程安全
-    static ref PID_ALLOCATOR: Mutex<RecycleAllocator> = Mutex::new(RecycleAllocator::new());
+    /// 全局 tid 分配器对象，使用 Mutex 保证线程安全
+    static ref TID_ALLOCATOR: Mutex<RecycleAllocator> = Mutex::new(RecycleAllocator::new());
 }
 
-/// 表示一个pid的句柄
-/// 包装有一个pid号
-pub struct PidHandle(pub usize);
+/// 用户可见的线程 ID 句柄，即 gettid() 返回的值。
+pub struct TidHandle(pub usize);
 
-/// 分配一个pid
-pub fn pid_alloc() -> PidHandle {
-    PidHandle(PID_ALLOCATOR.lock().alloc())
+/// 分配一个用户可见 tid。
+pub fn tid_alloc() -> TidHandle {
+    TidHandle(TID_ALLOCATOR.lock().alloc())
 }
 
-impl Drop for PidHandle {
+impl Drop for TidHandle {
     fn drop(&mut self) {
-        PID_ALLOCATOR.lock().dealloc(self.0);
+        TID_ALLOCATOR.lock().dealloc(self.0);
     }
+}
+
+/// 根据地址空间内用户资源槽位计算 trap context 地址。
+pub fn trap_cx_bottom_from_slot(slot: usize) -> usize {
+    trap_cx_bottom_from_tid(slot)
+}
+
+/// 根据地址空间内用户资源槽位计算默认用户栈底地址。
+pub fn ustack_bottom_from_slot(slot: usize) -> usize {
+    ustack_bottom_from_tid(slot)
 }

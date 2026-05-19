@@ -1611,7 +1611,7 @@ pub fn sys_pselect(
     };
     /* log::info!(
         "PID {} calls pselect: nfds: {}, read_fds: {:?}, write_fds: {:?}, exception_fds: {:?}, timeout: {:?}, sigmask: {:?}",
-        current_task().unwrap().pid.0,
+        current_task().unwrap().tid.0,
         nfds,
         read_fds,
         write_fds,
@@ -1678,7 +1678,7 @@ pub fn sys_pselect(
 
     /* log::info!(
         "PID {} pselect returns {}, ReadMask: {:?}, WriteMask: {:?}, ExceptMask: {:?}",
-        current_task().unwrap().pid.0,
+        current_task().unwrap().tid.0,
         ret,
         kread_fds,
         kwrite_fds,

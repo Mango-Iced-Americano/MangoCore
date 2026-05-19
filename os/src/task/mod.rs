@@ -23,12 +23,16 @@ use lazy_static::*;
 use log::warn;
 use manager::fetch_task;
 pub use manager::{
-    add_kernel_timer, add_task, do_oom, do_wake_expired, find_task_by_pid, find_task_by_tgid,
-    kernel_timer_queue_len, procs_count, send_signal_to_interruptible, sleep_interruptible,
-    task_manager_counts, wait_with_timeout, wake_interruptible, zombie_count, TimerAction,
+    add_kernel_timer, add_task, do_oom, do_wake_expired, find_any_task_by_pgid,
+    find_any_task_by_pid,
+    find_task_by_pid_tid, find_task_by_tid, procs_count,
+    send_signal_to_interruptible, sleep_interruptible, task_manager_counts, wait_with_timeout,
+    wake_interruptible, zombie_count, TimerAction,
 };
 // pub use pid::RecycleAllocator;
-pub use pid::{pid_alloc, trap_cx_bottom_from_tid, ustack_bottom_from_tid, PidHandle};
+pub use pid::{
+    tid_alloc, trap_cx_bottom_from_slot, ustack_bottom_from_slot, TidHandle,
+};
 pub use processor::{
     check_oom_kill, current_syscall_name, current_task, current_trap_cx, current_user_token,
     run_tasks, schedule, set_current_syscall_id, take_current_task,
@@ -169,8 +173,9 @@ pub fn do_exit(task: Arc<TaskControlBlock>, exit_code: u32) {
         }
     }
     log::trace!(
-        "[do_exit] Trying to exit pid {} with {}",
-        task.pid.0,
+        "[do_exit] Trying to exit tid {} pid {} with {}",
+        task.tid.0,
+        task.pid,
         exit_code
     );
     // Change status to Zombie
@@ -209,7 +214,7 @@ pub fn do_exit(task: Arc<TaskControlBlock>, exit_code: u32) {
         };
     }
     // deallocate user resource (trap context and user stack)
-    task.vm.lock().dealloc_user_res(task.tid);
+    task.vm.lock().dealloc_user_res(task.user_res_slot);
     // deallocate whole user space in advance, or if its parent do not call wait,
     // this resource may not be recycled in a long period of time.
     if Arc::strong_count(&task.vm) == 1 {
@@ -227,7 +232,12 @@ pub fn do_exit(task: Arc<TaskControlBlock>, exit_code: u32) {
     drop(inner);
     // **** release current PCB lock
     // drop task manually to maintain rc correctly
-    log::info!("[do_exit] Pid {} exited with {}", task.pid.0, exit_code);
+    log::info!(
+        "[do_exit] tid {} pid {} exited with {}",
+        task.tid.0,
+        task.pid,
+        exit_code
+    );
 
     // 打印资源统计诊断信息
     crate::utils::stats::print_resource_stats();
@@ -236,7 +246,10 @@ pub fn do_exit(task: Arc<TaskControlBlock>, exit_code: u32) {
 pub fn exit_current_and_run_next(exit_code: u32) -> ! {
     // take from Processor
     let task = take_current_task().unwrap();
-    do_exit(task, exit_code);
+    do_exit(task.clone(), exit_code);
+    // 当前任务仍在自己的内核栈上运行，不能在切栈前释放最后一个 Arc。
+    // 放回调度队列后会因 Zombie 状态被 scheduler 在 idle 栈上丢弃。
+    add_task(task);
     // we do not have to save task context
     let mut _unused = TaskContext::zero_init();
     schedule(&mut _unused as *mut _);
@@ -246,15 +259,15 @@ pub fn exit_current_and_run_next(exit_code: u32) -> ! {
 pub fn exit_group_and_run_next(exit_code: u32) -> ! {
     // exit current, take from Processor
     let task = take_current_task().unwrap();
-    let tgid = task.tgid;
-    do_exit(task, exit_code);
+    let pid = task.pid;
+    do_exit(task.clone(), exit_code);
 
     let mut exit_list = VecDeque::new();
 
     let mut manager = manager::TASK_MANAGER.lock();
     let mut remain = manager.ready_queue.len();
     while let Some(task) = manager.ready_queue.pop_front() {
-        if task.tgid == tgid {
+        if task.pid == pid {
             exit_list.push_back(task);
         } else {
             manager.ready_queue.push_back(task);
@@ -266,7 +279,7 @@ pub fn exit_group_and_run_next(exit_code: u32) -> ! {
     }
     let mut remain = manager.interruptible_queue.len();
     while let Some(task) = manager.interruptible_queue.pop_front() {
-        if task.tgid == tgid {
+        if task.pid == pid {
             exit_list.push_back(task);
         } else {
             manager.interruptible_queue.push_back(task);
@@ -281,6 +294,8 @@ pub fn exit_group_and_run_next(exit_code: u32) -> ! {
     for task in exit_list.into_iter() {
         do_exit(task, exit_code);
     }
+    // 见 exit_current_and_run_next：当前任务的内核栈必须延迟到切栈后释放。
+    add_task(task);
     // we do not have to save task context
     let mut _unused = TaskContext::zero_init();
     schedule(&mut _unused as *mut _);

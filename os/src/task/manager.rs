@@ -20,7 +20,6 @@ use alloc::collections::{BinaryHeap, VecDeque};
 use alloc::sync::{Arc, Weak};
 use lazy_static::*;
 use spin::Mutex;
-use spin::MutexGuard;
 
 #[cfg(feature = "oom_handler")]
 /// 任务的激活状态跟踪器
@@ -44,37 +43,37 @@ impl ActiveTracker {
         bitmap.resize(len, 0);
         Self { bitmap }
     }
-    /// 确保位图可以容纳指定 pid
-    pub fn ensure_capacity(&mut self, pid: usize) {
-        let word = pid / 64;
+    /// 确保位图可以容纳指定 tid
+    pub fn ensure_capacity(&mut self, tid: usize) {
+        let word = tid / 64;
         if word >= self.bitmap.len() {
             self.bitmap.resize(word + 1, 0);
         }
     }
-    /// 检查制定pid的任务是否处于激活状态
-    pub fn check_active(&self, pid: usize) -> bool {
-        let word = pid / 64;
+    /// 检查指定 tid 的任务是否处于激活状态
+    pub fn check_active(&self, tid: usize) -> bool {
+        let word = tid / 64;
         if word >= self.bitmap.len() {
             return false;
         }
-        (self.bitmap[word] & (1 << (pid % 64))) != 0
+        (self.bitmap[word] & (1 << (tid % 64))) != 0
     }
-    /// 检查制定pid的任务是否处于非激活状态
-    pub fn check_inactive(&self, pid: usize) -> bool {
-        !self.check_active(pid)
+    /// 检查指定 tid 的任务是否处于非激活状态
+    pub fn check_inactive(&self, tid: usize) -> bool {
+        !self.check_active(tid)
     }
-    /// 标记指定pid的任务为激活状态
-    pub fn mark_active(&mut self, pid: usize) {
-        self.ensure_capacity(pid);
-        self.bitmap[pid / 64] |= 1 << (pid % 64)
+    /// 标记指定 tid 的任务为激活状态
+    pub fn mark_active(&mut self, tid: usize) {
+        self.ensure_capacity(tid);
+        self.bitmap[tid / 64] |= 1 << (tid % 64)
     }
-    /// 标记指定pid的任务为非激活状态
-    pub fn mark_inactive(&mut self, pid: usize) {
-        let word = pid / 64;
+    /// 标记指定 tid 的任务为非激活状态
+    pub fn mark_inactive(&mut self, tid: usize) {
+        let word = tid / 64;
         if word >= self.bitmap.len() {
             return;
         }
-        self.bitmap[word] &= !(1 << (pid % 64))
+        self.bitmap[word] &= !(1 << (tid % 64))
     }
 }
 
@@ -123,7 +122,7 @@ impl TaskManager {
         match self.ready_queue.pop_front() {
             Some(task) => {
                 // 标记任务为激活状态
-                self.active_tracker.mark_active(task.pid.0);
+                self.active_tracker.mark_active(task.tid.0);
                 Some(task)
             }
             None => None,
@@ -143,20 +142,28 @@ impl TaskManager {
             // 使用retain过滤掉与指定任务相同的任务
             .retain(|task_in_queue| Arc::as_ptr(task_in_queue) != Arc::as_ptr(task));
     }
-    /// 根据pid查找任务
-    pub fn find_by_pid(&self, pid: usize) -> Option<Arc<TaskControlBlock>> {
+    /// 根据用户可见 tid 精确查找任务
+    pub fn find_by_tid(&self, tid: usize) -> Option<Arc<TaskControlBlock>> {
         self.ready_queue
             .iter()
             .chain(self.interruptible_queue.iter())
-            .find(|task| task.pid.0 == pid)
+            .find(|task| task.tid.0 == tid)
             .cloned()
     }
-    /// 根据tgid(线程组id)查找任务
-    pub fn find_by_tgid(&self, tgid: usize) -> Option<Arc<TaskControlBlock>> {
+    /// 根据用户可见 pid 查找任意一个同进程任务
+    pub fn find_any_by_pid(&self, pid: usize) -> Option<Arc<TaskControlBlock>> {
         self.ready_queue
             .iter()
             .chain(self.interruptible_queue.iter())
-            .find(|task| task.tgid == tgid)
+            .find(|task| task.pid == pid)
+            .cloned()
+    }
+    /// 根据 pid + tid 精确查找同一进程内的目标线程
+    pub fn find_by_pid_tid(&self, pid: usize, tid: usize) -> Option<Arc<TaskControlBlock>> {
+        self.ready_queue
+            .iter()
+            .chain(self.interruptible_queue.iter())
+            .find(|task| task.pid == pid && task.tid.0 == tid)
             .cloned()
     }
     /// 就绪队列中任务数量
@@ -204,7 +211,7 @@ impl TaskManager {
         // 从可中断队列中删除指定任务
         self.drop_interruptible(&task);
         // 如果任务不在就绪队列中，将其加入就绪队列
-        if self.find_by_pid(task.pid.0).is_none() {
+        if self.find_by_tid(task.tid.0).is_none() {
             self.add(task);
             Ok(())
         } else {
@@ -216,7 +223,7 @@ impl TaskManager {
     /// 打印就绪队列中的任务ID
     pub fn show_ready(&self) {
         self.ready_queue.iter().for_each(|task| {
-            log::error!("[show_ready] pid: {}", task.pid.0);
+            log::error!("[show_ready] tid: {}, pid: {}", task.tid.0, task.pid);
         })
     }
     #[allow(unused)]
@@ -224,7 +231,11 @@ impl TaskManager {
     /// 打印可中断队列中的任务ID
     pub fn show_interruptible(&self) {
         self.interruptible_queue.iter().for_each(|task| {
-            log::error!("[show_interruptible] pid: {}", task.pid.0);
+            log::error!(
+                "[show_interruptible] tid: {}, pid: {}",
+                task.tid.0,
+                task.pid
+            );
         })
     }
 }
@@ -255,12 +266,17 @@ pub fn do_oom(req: usize) -> Result<(), ()> {
     let interruptible_len = manager.interruptible_queue.len();
     for idx in 0..interruptible_len {
         let task = manager.interruptible_queue[idx].clone();
-        if !manager.active_tracker.check_active(task.pid.0) {
+        if !manager.active_tracker.check_active(task.tid.0) {
             continue;
         }
         let released = task.vm.lock().do_deep_clean();
-        log::warn!("deep clean on task: {}, released: {}", task.tgid, released);
-        manager.active_tracker.mark_inactive(task.pid.0);
+        log::warn!(
+            "deep clean on task: tid {}, pid {}, released: {}",
+            task.tid.0,
+            task.pid,
+            released
+        );
+        manager.active_tracker.mark_inactive(task.tid.0);
         total_released += released;
         if total_released >= req {
             return Ok(());
@@ -269,16 +285,17 @@ pub fn do_oom(req: usize) -> Result<(), ()> {
     let ready_len = manager.ready_queue.len();
     for idx in (0..ready_len).rev() {
         let task = manager.ready_queue[idx].clone();
-        if !manager.active_tracker.check_active(task.pid.0) {
+        if !manager.active_tracker.check_active(task.tid.0) {
             continue;
         }
         let released = task.vm.lock().do_shallow_clean();
         log::warn!(
-            "shallow clean on task: {}, released: {}",
-            task.tgid,
+            "shallow clean on task: tid {}, pid {}, released: {}",
+            task.tid.0,
+            task.pid,
             released
         );
-        manager.active_tracker.mark_inactive(task.pid.0);
+        manager.active_tracker.mark_inactive(task.tid.0);
         total_released += released;
         if total_released >= req {
             return Ok(());
@@ -315,30 +332,57 @@ pub fn wake_interruptible(task: Arc<TaskControlBlock>) {
     TASK_MANAGER.lock().wake_interruptible(task)
 }
 
-/// # 警告
-/// 这里的`pid`是唯一的，用户会将其视为`tid`
-pub fn find_task_by_pid(pid: usize) -> Option<Arc<TaskControlBlock>> {
+/// 根据用户可见 tid 精确查找任务。
+pub fn find_task_by_tid(tid: usize) -> Option<Arc<TaskControlBlock>> {
     // 获取当前任务
     let task = current_task().unwrap();
-    // 如果当前任务的pid与指定的pid相同，返回当前任务
-    if task.pid.0 == pid {
+    if task.tid.0 == tid {
         Some(task)
     } else {
         // 否则从任务管理器中查找
-        TASK_MANAGER.lock().find_by_pid(pid)
+        TASK_MANAGER.lock().find_by_tid(tid)
     }
 }
 
-/// 返回线程组ID为`tgid`的任意任务。
-pub fn find_task_by_tgid(tgid: usize) -> Option<Arc<TaskControlBlock>> {
+/// 返回用户可见 pid 对应进程中的任意任务。
+pub fn find_any_task_by_pid(pid: usize) -> Option<Arc<TaskControlBlock>> {
     // 获取当前任务
     let task = current_task().unwrap();
-    // 如果当前任务的tgid与指定的tgid相同，返回当前任务
-    if task.tgid == tgid {
+    if task.pid == pid {
         Some(task)
     } else {
         // 否则从任务管理器中查找
-        TASK_MANAGER.lock().find_by_tgid(tgid)
+        TASK_MANAGER.lock().find_any_by_pid(pid)
+    }
+}
+
+/// 根据 pid + tid 精确查找同一进程内的目标线程。
+pub fn find_task_by_pid_tid(pid: usize, tid: usize) -> Option<Arc<TaskControlBlock>> {
+    let task = current_task().unwrap();
+    if task.pid == pid && task.tid.0 == tid {
+        Some(task)
+    } else {
+        TASK_MANAGER.lock().find_by_pid_tid(pid, tid)
+    }
+}
+
+/// 返回进程组 pgid 中的任意任务。
+pub fn find_any_task_by_pgid(pgid: usize) -> Option<Arc<TaskControlBlock>> {
+    let task = current_task().unwrap();
+    if task.acquire_inner_lock().pgid == pgid {
+        Some(task)
+    } else {
+        let manager = TASK_MANAGER.lock();
+        let tasks: Vec<_> = manager
+            .ready_queue
+            .iter()
+            .chain(manager.interruptible_queue.iter())
+            .cloned()
+            .collect();
+        drop(manager);
+        tasks
+            .into_iter()
+            .find(|task| task.acquire_inner_lock().pgid == pgid)
     }
 }
 
@@ -354,14 +398,14 @@ pub fn zombie_count() -> u16 {
     manager.zombie_count()
 }
 
-/// Send a signal to all interruptible tasks EXCEPT initproc (tgid=1).
+/// Send a signal to all interruptible tasks EXCEPT initproc (pid=1).
 /// Returns true if at least one task received the signal.
 pub fn send_signal_to_interruptible(signal: Signals) -> bool {
     let manager = TASK_MANAGER.lock();
     let tasks: Vec<_> = manager
         .interruptible_queue
         .iter()
-        .filter(|t| t.tgid != 1) // never signal initproc via Ctrl+C
+        .filter(|t| t.pid != 1) // never signal initproc via Ctrl+C
         .cloned()
         .collect();
     drop(manager);
@@ -945,8 +989,9 @@ impl TimeoutWaitQueue {
                         // 释放锁
                         drop(inner);
                         log::trace!(
-                            "[wake_expired] pid: {}, timeout: {:?}",
-                            task.pid.0,
+                            "[wake_expired] tid: {}, pid: {}, timeout: {:?}",
+                            task.tid.0,
+                            task.pid,
                             waiter.timeout
                         );
                         manager.wake_interruptible(task);

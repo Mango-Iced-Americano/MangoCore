@@ -111,8 +111,9 @@ pub fn trap_handler() -> ! {
             let mut inner = task.acquire_inner_lock();
             let addr = VirtAddr::from(stval);
             log::debug!(
-                "[page_fault] pid: {}, type: {:?}",
-                task.pid.0,
+                "[page_fault] tid: {}, pid: {}, type: {:?}",
+                task.tid.0,
+                task.pid,
                 scause.cause()
             );
             // This is where we handle the page fault.

@@ -10,7 +10,7 @@ use crate::hal::TICKS_PER_SEC;
 use crate::should_map_trampoline;
 use crate::syscall::errno::*;
 use crate::task::{
-    current_task, trap_cx_bottom_from_tid, ustack_bottom_from_tid, AuxvEntry, AuxvType, ELFInfo,
+    current_task, trap_cx_bottom_from_slot, ustack_bottom_from_slot, AuxvEntry, AuxvType, ELFInfo,
 };
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -683,12 +683,13 @@ impl<T: PageTable> AddressSpace<T> {
         // }
         Ok(user_sp)
     }
-    pub fn alloc_user_res(&mut self, tid: usize, alloc_stack: bool) {
+    pub fn alloc_user_res(&mut self, slot: usize, alloc_stack: bool) {
         if alloc_stack {
-            let ustack_bottom = ustack_bottom_from_tid(tid);
+            let ustack_bottom = ustack_bottom_from_slot(slot);
             let ustack_top = ustack_bottom - USER_STACK_SIZE;
             trace!(
-                "[alloc_user_res] user stack start_va: {:X}, end_va: {:X}",
+                "[alloc_user_res] slot {}, user stack start_va: {:X}, end_va: {:X}",
+                slot,
                 ustack_top,
                 ustack_bottom
             );
@@ -705,7 +706,7 @@ impl<T: PageTable> AddressSpace<T> {
             );
         }
         // alloc trap_cx
-        let trap_cx_bottom = trap_cx_bottom_from_tid(tid);
+        let trap_cx_bottom = trap_cx_bottom_from_slot(slot);
         let trap_cx_top = trap_cx_bottom + PAGE_SIZE;
         self.insert_framed_area(
             trap_cx_bottom.into(),
@@ -713,43 +714,48 @@ impl<T: PageTable> AddressSpace<T> {
             MapPermission::R | MapPermission::W,
         );
         trace!(
-            "[alloc_user_res] trap context start_va: {:X}, end_va: {:X}",
+            "[alloc_user_res] slot {}, trap context start_va: {:X}, end_va: {:X}",
+            slot,
             trap_cx_bottom,
             trap_cx_top
         );
     }
 
-    pub fn dealloc_user_res(&mut self, tid: usize) {
+    pub fn dealloc_user_res(&mut self, slot: usize) {
         // dealloc ustack manually
-        let ustack_top_va: VirtAddr = (ustack_bottom_from_tid(tid) - USER_STACK_SIZE).into();
+        let ustack_top_va: VirtAddr = (ustack_bottom_from_slot(slot) - USER_STACK_SIZE).into();
         if let Err(err) = self.remove_area_with_start_vpn(ustack_top_va.into()) {
             match err {
                 MemoryError::AreaNotFound => {
-                    warn!("[dealloc_user_res] user stack is not allocated")
+                    warn!("[dealloc_user_res] slot {}, user stack is not allocated", slot)
                 }
                 MemoryError::NotMapped => {
                     warn!(
-                        "[dealloc_user_res] user stack is partially unmapped, is it caused by oom?"
+                        "[dealloc_user_res] slot {}, user stack is partially unmapped, is it caused by oom?",
+                        slot
                     )
                 }
                 _ => {} //忽略非致命错误
             }
         }
         // 处理 trap_cx 回收
-        let trap_cx_bottom_va: VirtAddr = trap_cx_bottom_from_tid(tid).into();
+        let trap_cx_bottom_va: VirtAddr = trap_cx_bottom_from_slot(slot).into();
 
         // 改为这种写法，不再使用 unwrap()
         if let Err(err) = self.remove_area_with_start_vpn(trap_cx_bottom_va.into()) {
             match err {
                 MemoryError::AreaNotFound => {
                     // 如果没找到该区域，可能是在之前的清理中整个 Area 都删了
-                    trace!("[dealloc_user_res] trap_cx area not found for tid {}", tid);
+                    trace!(
+                        "[dealloc_user_res] trap_cx area not found for slot {}",
+                        slot
+                    );
                 }
                 MemoryError::NotMapped => {
                     // 如果页面已经不在页表里（被 OOM 换出），这在回收逻辑中是正常的
                     trace!(
-                        "[dealloc_user_res] trap_cx already unmapped for tid {}",
-                        tid
+                        "[dealloc_user_res] trap_cx already unmapped for slot {}",
+                        slot
                     );
                 }
                 _ => {
@@ -759,7 +765,7 @@ impl<T: PageTable> AddressSpace<T> {
             }
         }
         // dealloc trap_cx manually
-        // let trap_cx_bottom_va: VirtAddr = trap_cx_bottom_from_tid(tid).into();
+        // let trap_cx_bottom_va: VirtAddr = trap_cx_bottom_from_slot(slot).into();
         // self.remove_area_with_start_vpn(trap_cx_bottom_va.into())
         //     .unwrap();
     }
