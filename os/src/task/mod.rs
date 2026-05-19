@@ -39,7 +39,7 @@ pub use processor::{
 };
 pub use process::{ProcessControlBlock, ProcessState};
 pub use registry::{
-    find_any_task_by_pgid, find_any_task_by_pid, find_process_by_pid, find_task_by_pid_tid,
+    all_processes, find_process_by_pid, find_processes_by_pgid, find_task_by_pid_tid,
     find_task_by_tid,
 };
 pub use signal::*;
@@ -91,6 +91,31 @@ pub fn block_current_and_run_next() {
     // push to interruptible queue of scheduler, so that it won't be scheduled.
     sleep_interruptible(task);
     // jump to scheduling cycle
+    schedule(task_cx_ptr);
+}
+
+/// 先把当前任务放入 interruptible 队列，再执行一次调用方提供的阻塞条件检查。
+/// 这用于信号等待这类路径，避免信号在“检查 pending”和“进入睡眠队列”
+/// 之间到达时丢失唤醒。
+pub fn block_current_and_run_next_checked(
+    should_block: impl FnOnce(&Arc<TaskControlBlock>) -> bool,
+) {
+    let task = take_current_task().unwrap();
+
+    let mut task_inner = task.acquire_inner_lock();
+    let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
+    task_inner.task_status = TaskStatus::Interruptible;
+    drop(task_inner);
+
+    sleep_interruptible(task.clone());
+    if !should_block(&task) {
+        let mut task_inner = task.acquire_inner_lock();
+        if task_inner.task_status == TaskStatus::Interruptible {
+            task_inner.task_status = TaskStatus::Ready;
+            drop(task_inner);
+            wake_interruptible(task.clone());
+        }
+    }
     schedule(task_cx_ptr);
 }
 
@@ -157,9 +182,9 @@ pub fn wait_interruptible() -> GeneralRet<()> {
     }
 }
 
-pub fn do_exit(task: Arc<TaskControlBlock>, exit_code: u32) {
+pub(super) fn exit_thread(task: Arc<TaskControlBlock>, exit_code: u32) -> bool {
     log::trace!(
-        "[do_exit] Trying to exit tid {} pid {} with {}",
+        "[exit_thread] Trying to exit tid {} pid {} with {}",
         task.tid.0,
         task.pid(),
         exit_code
@@ -167,7 +192,7 @@ pub fn do_exit(task: Arc<TaskControlBlock>, exit_code: u32) {
     let clear_child_tid = {
         let mut inner = task.acquire_inner_lock();
         if inner.task_status == TaskStatus::Zombie {
-            return;
+            return false;
         }
         inner.task_status = TaskStatus::Zombie;
         inner.clear_child_tid
@@ -190,12 +215,8 @@ pub fn do_exit(task: Arc<TaskControlBlock>, exit_code: u32) {
     // deallocate thread-local user resource (trap context and default user stack)
     task.vm.lock().dealloc_user_res(task.user_res_slot);
 
-    if task.process.live_thread_count() == 0 {
-        finish_process_exit(&task, exit_code);
-    }
-
     log::info!(
-        "[do_exit] tid {} pid {} exited with {}",
+        "[exit_thread] tid {} pid {} exited with {}",
         task.tid.0,
         task.pid(),
         exit_code
@@ -203,6 +224,13 @@ pub fn do_exit(task: Arc<TaskControlBlock>, exit_code: u32) {
 
     // 打印资源统计诊断信息
     crate::utils::stats::print_resource_stats();
+    true
+}
+
+pub fn do_exit(task: Arc<TaskControlBlock>, exit_code: u32) {
+    if exit_thread(task.clone(), exit_code) && task.process.live_thread_count() == 0 {
+        finish_process_exit(&task, exit_code);
+    }
 }
 
 fn finish_process_exit(task: &Arc<TaskControlBlock>, exit_code: u32) {
@@ -282,6 +310,7 @@ pub fn exit_group_and_run_next(exit_code: u32) -> ! {
     // exit current, take from Processor
     let task = take_current_task().unwrap();
     let process = task.process.clone();
+    process.request_group_exit(exit_code);
     let exit_list: VecDeque<_> = process
         .threads()
         .into_iter()
@@ -301,7 +330,7 @@ pub fn exit_group_and_run_next(exit_code: u32) -> ! {
     drop(manager);
 
     for task in exit_list.into_iter() {
-        do_exit(task, exit_code);
+        exit_thread(task, exit_code);
     }
     do_exit(task.clone(), exit_code);
     // 见 exit_current_and_run_next：当前任务的内核栈必须延迟到切栈后释放。

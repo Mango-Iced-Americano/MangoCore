@@ -1,5 +1,5 @@
 use crate::net::config::NET_INTERFACE;
-use crate::task::signal::has_actionable_signal;
+use crate::task::signal::{discard_non_actionable_unblocked_signals, has_actionable_signal};
 use crate::{
     mm::{UserPtr, UserSlice},
     syscall::errno::EFAULT,
@@ -182,23 +182,13 @@ pub fn ppoll(
             NET_INTERFACE.poll();
             // 信号检查
             let task = current_task().unwrap();
-            {
-                let inner = task.acquire_inner_lock();
-                let pending = inner.sigpending.difference(inner.sigmask);
-                if !pending.is_empty() {
-                    drop(inner);
-                    if has_actionable_signal(&task) {
-                        break;
-                    }
-                    // 无actionable信号：清除它们，避免在 suspend 循环中重复检查。
-                    // do_signal() 在 trap_return 中调用，但 suspend_current_and_run_next
-                    // 可能永不进 trap（就绪队列为空时立即取回同一任务）。
-                    let mut inner = task.acquire_inner_lock();
-                    inner.sigpending = inner.sigpending.difference(pending);
-                    drop(inner);
-                } else {
-                    drop(inner);
-                }
+            if has_actionable_signal(&task) {
+                break;
+            } else {
+                // 无actionable信号：清除它们，避免在 suspend 循环中重复检查。
+                // do_signal() 在 trap_return 中调用，但 suspend_current_and_run_next
+                // 可能永不进 trap（就绪队列为空时立即取回同一任务）。
+                discard_non_actionable_unblocked_signals(&task);
             }
             drop(task);
             suspend_current_and_run_next();
@@ -408,27 +398,22 @@ pub fn pselect(
         // 推送网络栈状态，确保下一步 r_ready()/w_ready() 能检测到新数据
         NET_INTERFACE.poll();
         let task = current_task().unwrap();
-        {
+        if has_actionable_signal(&task) {
             let mut inner = task.acquire_inner_lock();
             inner.refresh_real_timer();
-            let pending = inner.sigpending.difference(inner.sigmask);
-            if !pending.is_empty() {
-                drop(inner);
-                if has_actionable_signal(&task) {
-                    interrupted = true;
-                    drop(task);
-                    log::info!("[pselect] Interrupted by signal(s) {:?}", pending);
-                    break;
-                }
-                // 无actionable信号：清除它们，避免在 suspend 循环中重复检查。
-                // do_signal() 在 trap_return 中调用，但 suspend_current_and_run_next
-                // 可能永不进 trap（就绪队列为空时立即取回同一任务）。
-                let mut inner = task.acquire_inner_lock();
-                inner.sigpending = inner.sigpending.difference(pending);
-                drop(inner);
-            } else {
-                drop(inner);
-            }
+            drop(inner);
+            interrupted = true;
+            drop(task);
+            log::info!("[pselect] Interrupted by signal(s)");
+            break;
+        } else {
+            let mut inner = task.acquire_inner_lock();
+            inner.refresh_real_timer();
+            drop(inner);
+            // 无actionable信号：清除它们，避免在 suspend 循环中重复检查。
+            // do_signal() 在 trap_return 中调用，但 suspend_current_and_run_next
+            // 可能永不进 trap（就绪队列为空时立即取回同一任务）。
+            discard_non_actionable_unblocked_signals(&task);
         }
         drop(task);
         suspend_current_and_run_next();

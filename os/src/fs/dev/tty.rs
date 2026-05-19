@@ -79,19 +79,15 @@ fn vintr_send_sigint(inner: &TeletypeInner, ch: u8) -> bool {
         return false;
     }
     let fg_pgid = inner.foreground_pgid;
-    let target = if fg_pgid != 0 {
-        crate::task::find_any_task_by_pgid(fg_pgid as usize)
-    } else {
-        crate::task::current_task()
-    };
-    if let Some(task) = target {
-        let mut task_inner = task.acquire_inner_lock();
-        task_inner.add_signal(Signals::SIGINT);
-        if task_inner.task_status == crate::task::TaskStatus::Interruptible {
-            task_inner.task_status = crate::task::TaskStatus::Ready;
-            drop(task_inner);
-            crate::task::wake_interruptible(task);
+    if fg_pgid != 0 {
+        let mut sent = false;
+        for process in crate::task::find_processes_by_pgid(fg_pgid as usize) {
+            crate::task::send_process_signal(&process, Signals::SIGINT);
+            sent = true;
         }
+        sent
+    } else if let Some(task) = crate::task::current_task() {
+        crate::task::send_process_signal(&task.process, Signals::SIGINT);
         true
     } else if fg_pgid == 0 {
         // Fallback: fg_pgid not set and no current task (scheduler loop).

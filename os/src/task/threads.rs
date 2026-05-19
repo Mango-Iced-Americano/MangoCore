@@ -9,7 +9,8 @@ use log::*;
 use num_enum::FromPrimitive;
 
 use super::{
-    block_current_and_run_next_with_lock, has_actionable_signal,
+    block_current_and_run_next_with_lock, discard_non_actionable_unblocked_signals,
+    has_actionable_signal,
     manager::{wait_with_timeout, WaitQueue},
     TaskControlBlock,
 };
@@ -140,16 +141,10 @@ pub fn do_futex_wait(
     let timed_out = task.futex.lock().finish_wait(futex_key, &task);
 
     // 检查有没有信号打断
-    {
-        let inner = task.acquire_inner_lock();
-        let pending = inner.sigpending.difference(inner.sigmask);
-        if !pending.is_empty() {
-            drop(inner);
-            // 只有真要处理的信号才返回 EINTR
-            if has_actionable_signal(&task) {
-                return EINTR;
-            }
-        }
+    if has_actionable_signal(&task) {
+        return EINTR;
+    } else {
+        discard_non_actionable_unblocked_signals(&task);
     }
 
     if timed_out {
@@ -229,15 +224,10 @@ pub fn do_futex_wait_shared(
         }
         removed_from_wait_queue
     };
-    {
-        let inner = task.acquire_inner_lock();
-        let pending = inner.sigpending.difference(inner.sigmask);
-        if !pending.is_empty() {
-            drop(inner);
-            if has_actionable_signal(&task) {
-                return EINTR;
-            }
-        }
+    if has_actionable_signal(&task) {
+        return EINTR;
+    } else {
+        discard_non_actionable_unblocked_signals(&task);
     }
     if timed_out {
         return ETIMEDOUT;

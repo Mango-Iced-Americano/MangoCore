@@ -10,9 +10,9 @@ use crate::show_frame_consumption;
 use crate::syscall::errno::*;
 use crate::task::threads::{do_futex_wait, do_futex_wait_shared, futex_wake_shared, FutexCmd};
 use crate::task::{
-    add_kernel_timer, add_task, block_current_and_run_next, current_task, current_user_token,
-    exit_current_and_run_next, exit_group_and_run_next, find_any_task_by_pid,
-    find_process_by_pid, find_task_by_pid_tid, find_task_by_tid, procs_count, signal::*,
+    add_kernel_timer, add_task, all_processes, block_current_and_run_next, current_task,
+    current_user_token, exit_current_and_run_next, exit_group_and_run_next, find_process_by_pid,
+    find_processes_by_pgid, find_task_by_pid_tid, find_task_by_tid, procs_count, signal::*,
     suspend_current_and_run_next, threads, wait_with_timeout, wake_interruptible, Rusage,
     TaskControlBlock, TaskStatus, TimerAction,
 };
@@ -92,34 +92,52 @@ pub fn sys_kill(pid: usize, sig: usize) -> isize {
         Ok(signal) => signal,
         Err(_) => return EINVAL,
     };
-    #[cfg(feature = "comp")]
-    if pid == 10 {
-        return SUCCESS;
-    }
-    if pid > 0 {
-        // 当前阶段仍把信号发给目标进程内的任意线程，后续交给 ThreadGroup 收敛。
-        if let Some(task) = find_any_task_by_pid(pid) {
-            if !signal.is_empty() {
-                let mut inner = task.acquire_inner_lock();
-                inner.add_signal(signal);
-                // wake up target process if it is sleeping
-                if inner.task_status == TaskStatus::Interruptible {
-                    inner.task_status = TaskStatus::Ready;
-                    drop(inner);
-                    wake_interruptible(task);
-                }
-            }
+    let pid_signed = pid as isize;
+    if pid_signed > 0 {
+        if let Some(process) = find_process_by_pid(pid) {
+            send_process_signal(&process, signal);
             SUCCESS
         } else {
             ESRCH
         }
-    } else if pid == 0 {
-        SUCCESS
-    } else if (pid as isize) == -1 {
-        todo!()
+    } else if pid_signed == 0 {
+        let current = current_task().unwrap();
+        let pgid = current.process.getpgid();
+        let targets = find_processes_by_pgid(pgid);
+        if targets.is_empty() {
+            ESRCH
+        } else {
+            for process in targets {
+                send_process_signal(&process, signal);
+            }
+            SUCCESS
+        }
+    } else if pid_signed == -1 {
+        let current_pid = current_task().map(|task| task.pid()).unwrap_or(0);
+        let mut sent = false;
+        for process in all_processes() {
+            if process.pid == 1 || process.pid == current_pid {
+                continue;
+            }
+            send_process_signal(&process, signal);
+            sent = true;
+        }
+        if sent {
+            SUCCESS
+        } else {
+            ESRCH
+        }
     } else {
-        // (pid as isize) < -1
-        todo!()
+        let pgid = (-pid_signed) as usize;
+        let targets = find_processes_by_pgid(pgid);
+        if targets.is_empty() {
+            ESRCH
+        } else {
+            for process in targets {
+                send_process_signal(&process, signal);
+            }
+            SUCCESS
+        }
     }
 }
 
@@ -194,24 +212,14 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
 
     // 先释放 inner 锁再检查信号，避免与 has_actionable_signal 死锁
     // 参考 pselect/ppoll 的信号检查模式
-    {
-        let inner = task.acquire_inner_lock();
-        let pending = inner.sigpending.difference(inner.sigmask);
-        if !pending.is_empty() {
-            drop(inner);
-            if has_actionable_signal(&task) {
-                // 被可操作信号打断 → 返回剩余时间 + EINTR
-                if !rem.is_null() {
-                    UserPtrMut::new(rem).write(token, &(end - now)).unwrap();
-                }
-                return EINTR;
-            }
-            // 不可操作的 pending 信号（被屏蔽/忽略）：清除它们
-            // 避免残留信号导致后续 syscall 误判
-            let mut inner = task.acquire_inner_lock();
-            inner.sigpending = inner.sigpending.difference(pending);
-            drop(inner);
+    if has_actionable_signal(&task) {
+        // 被可操作信号打断 → 返回剩余时间 + EINTR
+        if !rem.is_null() {
+            UserPtrMut::new(rem).write(token, &(end - now)).unwrap();
         }
+        return EINTR;
+    } else {
+        discard_non_actionable_unblocked_signals(&task);
     }
 
     // 正常超时返回
@@ -905,27 +913,11 @@ pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) ->
                 drop(process_inner);
                 return SUCCESS;
             } else {
-                // 在持有锁的情况下检查信号
-                let task_inner = task.acquire_inner_lock();
-                let pending = task_inner.sigpending.difference(task_inner.sigmask);
-                if !pending.is_empty() {
-                    drop(task_inner);
-                    drop(process_inner);
-                    // 临时解锁判断是否 Actionable
-                    if has_actionable_signal(&task) {
-                        return ERESTART;
-                    }
-
-                    // 清除无用信号，并重新进入 loop 循环
-                    let mut inner = task.acquire_inner_lock();
-                    let pending_now = inner.sigpending.difference(inner.sigmask);
-                    inner.sigpending = inner.sigpending.difference(pending_now);
-                    drop(inner);
-                    continue;
-                }
-
-                drop(task_inner);
                 drop(process_inner);
+                if has_actionable_signal(&task) {
+                    return ERESTART;
+                }
+                discard_non_actionable_unblocked_signals(&task);
                 crate::task::block_current_and_run_next();
                 debug!("[sys_wait4] --resumed--");
             }
@@ -1434,13 +1426,14 @@ pub fn sys_rt_sigpending(set: usize, sigsetsize: usize) -> isize {
     let task = current_task().unwrap();
     let token = task.get_user_token();
     let inner = task.acquire_inner_lock();
+    let pending = inner.sigpending | task.process.shared_pending();
     trace!(
         "[sys_rt_sigpending] tid: {}, pid: {}, pending: {:?}",
         task.tid.0,
         task.pid(),
-        inner.sigpending
+        pending
     );
-    match UserPtrMut::from_addr(set).write(token, &inner.sigpending) {
+    match UserPtrMut::from_addr(set).write(token, &pending) {
         Ok(()) => SUCCESS,
         Err(errno) => errno,
     }

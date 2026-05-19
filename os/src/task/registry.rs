@@ -79,15 +79,7 @@ pub fn find_process_by_pid(pid: usize) -> Option<Arc<ProcessControlBlock>> {
     }
 }
 
-pub fn find_any_task_by_pid(pid: usize) -> Option<Arc<TaskControlBlock>> {
-    find_process_by_pid(pid).and_then(|process| process.any_live_thread())
-}
-
-pub fn find_task_by_pid_tid(pid: usize, tid: usize) -> Option<Arc<TaskControlBlock>> {
-    find_task_by_tid(tid).filter(|task| task.pid() == pid)
-}
-
-pub fn find_any_task_by_pgid(pgid: usize) -> Option<Arc<TaskControlBlock>> {
+pub fn all_processes() -> Vec<Arc<ProcessControlBlock>> {
     let mut registry = TASK_REGISTRY.lock();
     let mut stale = Vec::new();
     let mut processes = Vec::new();
@@ -101,13 +93,16 @@ pub fn find_any_task_by_pgid(pgid: usize) -> Option<Arc<TaskControlBlock>> {
     for pid in stale {
         registry.processes.remove(&pid);
     }
-    drop(registry);
-    for process in processes {
-        if process.getpgid() == pgid {
-            if let Some(task) = process.any_live_thread() {
-                return Some(task);
-            }
-        }
-    }
-    None
+    processes
+}
+
+pub fn find_processes_by_pgid(pgid: usize) -> Vec<Arc<ProcessControlBlock>> {
+    all_processes()
+        .into_iter()
+        .filter(|process| process.getpgid() == pgid)
+        .collect()
+}
+
+pub fn find_task_by_pid_tid(pid: usize, tid: usize) -> Option<Arc<TaskControlBlock>> {
+    find_task_by_tid(tid).filter(|task| task.pid() == pid)
 }

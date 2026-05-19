@@ -560,10 +560,8 @@ impl TaskControlBlock {
                 .collect();
 
             for task in &other_threads {
-                // 发送 SIGKILL 信号给同一线程组的其他任务
-                let mut inner = task.acquire_inner_lock();
-                inner.add_signal(Signals::SIGKILL);
-                inner.task_status = TaskStatus::Zombie;
+                // execve 会杀掉同线程组的其他线程，但保留当前 process。
+                super::exit_thread(task.clone(), Signals::SIGKILL.to_signum().unwrap() as u32);
             }
             // 销毁所有其他同一线程组的任务
             let mut manager = TASK_MANAGER.lock();

@@ -1,4 +1,4 @@
-use super::{registry, TaskControlBlock, TaskStatus};
+use super::{registry, signal::Signals, TaskControlBlock, TaskStatus};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use spin::{Mutex, MutexGuard};
@@ -17,6 +17,7 @@ pub struct ProcessControlBlock {
     /// 属于该进程的线程列表。
     pub threads: Mutex<Vec<Weak<TaskControlBlock>>>,
     inner: Mutex<ProcessInner>,
+    signal: Mutex<ProcessSignalState>,
 }
 
 pub struct ProcessInner {
@@ -30,6 +31,15 @@ pub struct ProcessInner {
     pub state: ProcessState,
     /// wait4 可回收的进程退出码。
     pub exit_code: u32,
+}
+
+pub struct ProcessSignalState {
+    /// kill(pid) / killpg() 这类进程级投递产生的共享 pending signal。
+    pub shared_pending: Signals,
+    /// exit_group() 设置的线程组退出码。
+    pub group_exit_code: Option<u32>,
+    /// 线程组是否已经进入 group exit。
+    pub group_exiting: bool,
 }
 
 impl ProcessControlBlock {
@@ -49,6 +59,11 @@ impl ProcessControlBlock {
                 children: Vec::new(),
                 state: ProcessState::Running,
                 exit_code: 0,
+            }),
+            signal: Mutex::new(ProcessSignalState {
+                shared_pending: Signals::empty(),
+                group_exit_code: None,
+                group_exiting: false,
             }),
         }
     }
@@ -138,6 +153,48 @@ impl ProcessControlBlock {
 
     pub fn exit_code(&self) -> u32 {
         self.inner.lock().exit_code
+    }
+
+    pub fn enqueue_process_signal(&self, signal: Signals) {
+        if !signal.is_empty() {
+            self.signal.lock().shared_pending.insert(signal);
+        }
+    }
+
+    pub fn shared_pending(&self) -> Signals {
+        self.signal.lock().shared_pending
+    }
+
+    pub fn take_shared_signal(&self, signal: Signals) -> bool {
+        let mut state = self.signal.lock();
+        if state.shared_pending.contains(signal) {
+            state.shared_pending.remove(signal);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn take_shared_matching(&self, set: Signals) -> Option<usize> {
+        let mut state = self.signal.lock();
+        let signum = (state.shared_pending & set).peek_front()?;
+        let signal = Signals::from_signum(signum).ok()?;
+        state.shared_pending.remove(signal);
+        Some(signum)
+    }
+
+    pub fn request_group_exit(&self, exit_code: u32) {
+        let mut state = self.signal.lock();
+        state.group_exiting = true;
+        state.group_exit_code = Some(exit_code);
+    }
+
+    pub fn is_group_exiting(&self) -> bool {
+        self.signal.lock().group_exiting
+    }
+
+    pub fn group_exit_code(&self) -> Option<u32> {
+        self.signal.lock().group_exit_code
     }
 
     pub fn add_child(&self, child: Arc<ProcessControlBlock>) -> Result<(), isize> {

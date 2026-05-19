@@ -1,7 +1,7 @@
 use crate::net::config::NET_INTERFACE;
 use crate::task::{
-    block_current_and_run_next_with_lock, current_task, has_actionable_signal,
-    suspend_current_and_run_next, wait_with_timeout, WaitQueue,
+    block_current_and_run_next_with_lock, current_task, discard_non_actionable_unblocked_signals,
+    has_actionable_signal, suspend_current_and_run_next, wait_with_timeout, WaitQueue,
 };
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
@@ -26,16 +26,10 @@ pub fn wait_io_core(mut f: impl FnMut() -> isize, nonblock: bool) -> isize {
                 }
                 suspend_current_and_run_next();
                 let task = current_task().unwrap();
-                {
-                    let inner = task.acquire_inner_lock();
-                    if !inner.sigpending.is_empty() {
-                        drop(inner);
-                        if has_actionable_signal(&task) {
-                            return -(SyscallErr::ERESTART as isize);
-                        }
-                    } else {
-                        drop(inner);
-                    }
+                if has_actionable_signal(&task) {
+                    return -(SyscallErr::ERESTART as isize);
+                } else {
+                    discard_non_actionable_unblocked_signals(&task);
                 }
                 task.acquire_inner_lock().refresh_real_timer();
             }
@@ -64,17 +58,10 @@ pub fn wait_io_core_with_queue(
                     return v;
                 }
                 let task = current_task().unwrap();
-                {
-                    let inner = task.acquire_inner_lock();
-                    let pending = inner.sigpending.difference(inner.sigmask);
-                    if !pending.is_empty() {
-                        drop(inner);
-                        if has_actionable_signal(&task) {
-                            return -(SyscallErr::ERESTART as isize);
-                        }
-                    } else {
-                        drop(inner);
-                    }
+                if has_actionable_signal(&task) {
+                    return -(SyscallErr::ERESTART as isize);
+                } else {
+                    discard_non_actionable_unblocked_signals(&task);
                 }
                 let mut wait = wait_queue.lock();
                 wait.prepare_to_wait(Arc::downgrade(&task));
@@ -98,17 +85,10 @@ pub fn wait_io_core_with_queue(
                 let task = current_task().unwrap();
                 //结束等待
                 wait_queue.lock().finish_wait(&task);
-                {
-                    let inner = task.acquire_inner_lock();
-                    let pending = inner.sigpending.difference(inner.sigmask);
-                    if !pending.is_empty() {
-                        drop(inner);
-                        if has_actionable_signal(&task) {
-                            return -(SyscallErr::ERESTART as isize);
-                        }
-                    } else {
-                        drop(inner);
-                    }
+                if has_actionable_signal(&task) {
+                    return -(SyscallErr::ERESTART as isize);
+                } else {
+                    discard_non_actionable_unblocked_signals(&task);
                 }
                 task.acquire_inner_lock().refresh_real_timer();
             }

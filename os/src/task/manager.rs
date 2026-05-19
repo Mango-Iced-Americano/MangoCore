@@ -12,8 +12,8 @@ use alloc::vec::Vec;
 use crate::timer::{TimeSpec, TimeVal};
 
 use super::{
-    block_current_and_run_next_with_lock, current_task, has_actionable_signal, signal::Signals,
-    TaskControlBlock, TaskStatus,
+    block_current_and_run_next_with_lock, current_task, discard_non_actionable_unblocked_signals,
+    has_actionable_signal, signal::Signals, TaskControlBlock, TaskStatus,
 };
 use crate::utils::error::SyscallErr;
 use alloc::collections::{BinaryHeap, VecDeque};
@@ -512,12 +512,10 @@ impl WaitQueue {
 
             // 1. 信号检查（仅 interruptible 变体）
             if signal_check {
-                let inner = task.acquire_inner_lock();
-                let pending = inner.sigpending.difference(inner.sigmask);
-                let has_pending = !pending.is_empty();
-                drop(inner);
-                if has_pending && has_actionable_signal(&task) {
+                if has_actionable_signal(&task) {
                     return -(SyscallErr::ERESTART as isize);
+                } else {
+                    discard_non_actionable_unblocked_signals(&task);
                 }
             }
 
