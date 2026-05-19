@@ -113,7 +113,7 @@ pub fn trap_handler() -> ! {
             log::debug!(
                 "[page_fault] tid: {}, pid: {}, type: {:?}",
                 task.tid.0,
-                task.pid,
+                task.pid(),
                 scause.cause()
             );
             // This is where we handle the page fault.

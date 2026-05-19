@@ -151,7 +151,7 @@ pub fn check_oom_kill() {
             log::warn!(
                 "[OOM killer] tid {} pid {} marked for OOM kill, sending SIGKILL",
                 task.tid.0,
-                task.pid
+                task.pid()
             );
         }
     }

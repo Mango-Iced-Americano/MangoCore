@@ -209,7 +209,7 @@ pub fn trap_handler() -> ! {
             log::debug!(
                 "[page_fault] tid: {}, pid: {}, type: {:?}",
                 task.tid.0,
-                task.pid,
+                task.pid(),
                 cause
             );
             log::debug!(

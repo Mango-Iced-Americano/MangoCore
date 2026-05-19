@@ -79,7 +79,7 @@ impl Log for Logger {
                 sec,
                 msec,
                 task.tid.0,
-                task.pid,
+                task.pid(),
                 record.args()
             ),
             None => println!("[{}.{:03}] kernel: {}", sec, msec, record.args()),

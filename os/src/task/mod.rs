@@ -4,7 +4,9 @@ mod manager;
 pub use manager::WaitQueue;
 use spin::MutexGuard;
 pub mod pid;
+mod process;
 mod processor;
+mod registry;
 pub mod signal;
 mod task;
 pub mod threads;
@@ -23,9 +25,7 @@ use lazy_static::*;
 use log::warn;
 use manager::fetch_task;
 pub use manager::{
-    add_kernel_timer, add_task, do_oom, do_wake_expired, find_any_task_by_pgid,
-    find_any_task_by_pid,
-    find_task_by_pid_tid, find_task_by_tid, procs_count,
+    add_kernel_timer, add_task, do_oom, do_wake_expired, procs_count,
     send_signal_to_interruptible, sleep_interruptible, task_manager_counts, wait_with_timeout,
     wake_interruptible, zombie_count, TimerAction,
 };
@@ -36,6 +36,11 @@ pub use pid::{
 pub use processor::{
     check_oom_kill, current_syscall_name, current_task, current_trap_cx, current_user_token,
     run_tasks, schedule, set_current_syscall_id, take_current_task,
+};
+pub use process::{ProcessControlBlock, ProcessState};
+pub use registry::{
+    find_any_task_by_pgid, find_any_task_by_pid, find_process_by_pid, find_task_by_pid_tid,
+    find_task_by_tid,
 };
 pub use signal::*;
 pub use task::{RobustList, Rusage, TaskControlBlock, TaskStatus};
@@ -153,54 +158,22 @@ pub fn wait_interruptible() -> GeneralRet<()> {
 }
 
 pub fn do_exit(task: Arc<TaskControlBlock>, exit_code: u32) {
-    // **** hold current PCB lock
-    let mut inner = task.acquire_inner_lock();
-    if !task.exit_signal.is_empty() {
-        if let Some(parent) = inner.parent.as_ref() {
-            let parent_task = parent.upgrade().unwrap(); // this will acquire inner of current task
-            let mut parent_inner = parent_task.acquire_inner_lock();
-            parent_inner.add_signal(task.exit_signal);
-
-            if parent_inner.task_status == TaskStatus::Interruptible {
-                // wake up parent if parent is waiting.
-                parent_inner.task_status = TaskStatus::Ready;
-                drop(parent_inner);
-                // push back to ready queue.
-                wake_interruptible(parent_task);
-            }
-        } else {
-            warn!("[do_exit] parent is None");
-        }
-    }
     log::trace!(
         "[do_exit] Trying to exit tid {} pid {} with {}",
         task.tid.0,
-        task.pid,
+        task.pid(),
         exit_code
     );
-    // Change status to Zombie
-    inner.task_status = TaskStatus::Zombie;
-    // Record exit code
-    inner.exit_code = exit_code;
-
-    // move children to initproc
-    if !inner.children.is_empty() {
-        let mut initproc_inner = INITPROC.acquire_inner_lock();
-        while let Some(child) = inner.children.pop() {
-            child.acquire_inner_lock().parent = Some(Arc::downgrade(&INITPROC));
-            initproc_inner.children.push(child);
+    let clear_child_tid = {
+        let mut inner = task.acquire_inner_lock();
+        if inner.task_status == TaskStatus::Zombie {
+            return;
         }
-        if initproc_inner.task_status == TaskStatus::Interruptible {
-            // wake up initproc if initproc is waiting.
-            initproc_inner.task_status = TaskStatus::Ready;
-            // push back to ready queue.
-            wake_interruptible(INITPROC.clone());
-        }
-    }
+        inner.task_status = TaskStatus::Zombie;
+        inner.clear_child_tid
+    };
 
-    inner.children.clear();
-    if inner.clear_child_tid != 0 {
-        let clear_child_tid = inner.clear_child_tid;
+    if clear_child_tid != 0 {
         log::debug!(
             "[do_exit] do futex wake on clear_child_tid: {:X}",
             clear_child_tid
@@ -213,9 +186,70 @@ pub fn do_exit(task: Arc<TaskControlBlock>, exit_code: u32) {
             Err(_) => log::warn!("invalid clear_child_tid"),
         };
     }
-    // deallocate user resource (trap context and user stack)
+
+    // deallocate thread-local user resource (trap context and default user stack)
     task.vm.lock().dealloc_user_res(task.user_res_slot);
-    // deallocate whole user space in advance, or if its parent do not call wait,
+
+    if task.process.live_thread_count() == 0 {
+        finish_process_exit(&task, exit_code);
+    }
+
+    log::info!(
+        "[do_exit] tid {} pid {} exited with {}",
+        task.tid.0,
+        task.pid(),
+        exit_code
+    );
+
+    // 打印资源统计诊断信息
+    crate::utils::stats::print_resource_stats();
+}
+
+fn finish_process_exit(task: &Arc<TaskControlBlock>, exit_code: u32) {
+    let process = task.process.clone();
+    if !process.mark_zombie(exit_code) {
+        return;
+    }
+
+    if !task.exit_signal.is_empty() {
+        if let Some(parent_process) = process.parent() {
+            if let Some(parent_task) = parent_process.any_live_thread() {
+                let mut parent_inner = parent_task.acquire_inner_lock();
+                parent_inner.add_signal(task.exit_signal);
+
+                if parent_inner.task_status == TaskStatus::Interruptible {
+                    parent_inner.task_status = TaskStatus::Ready;
+                    drop(parent_inner);
+                    wake_interruptible(parent_task);
+                }
+            }
+        } else {
+            warn!("[finish_process_exit] parent is None");
+        }
+    }
+
+    let children = {
+        let mut inner = process.acquire_inner_lock();
+        core::mem::take(&mut inner.children)
+    };
+    if !children.is_empty() {
+        let mut initproc_inner = INITPROC.process.acquire_inner_lock();
+        for child in children {
+            child.set_parent(Some(Arc::downgrade(&INITPROC.process)));
+            initproc_inner.children.push(child);
+        }
+        drop(initproc_inner);
+        if let Some(init_task) = INITPROC.process.any_live_thread() {
+            let mut init_inner = init_task.acquire_inner_lock();
+            if init_inner.task_status == TaskStatus::Interruptible {
+                init_inner.task_status = TaskStatus::Ready;
+                drop(init_inner);
+                wake_interruptible(init_task);
+            }
+        }
+    }
+
+    // deallocate whole user space in advance, or if its parent does not call wait,
     // this resource may not be recycled in a long period of time.
     if Arc::strong_count(&task.vm) == 1 {
         task.vm.lock().recycle_data_pages();
@@ -229,18 +263,6 @@ pub fn do_exit(task: Arc<TaskControlBlock>, exit_code: u32) {
             *fd_opt = None;
         }
     }
-    drop(inner);
-    // **** release current PCB lock
-    // drop task manually to maintain rc correctly
-    log::info!(
-        "[do_exit] tid {} pid {} exited with {}",
-        task.tid.0,
-        task.pid,
-        exit_code
-    );
-
-    // 打印资源统计诊断信息
-    crate::utils::stats::print_resource_stats();
 }
 
 pub fn exit_current_and_run_next(exit_code: u32) -> ! {
@@ -259,41 +281,29 @@ pub fn exit_current_and_run_next(exit_code: u32) -> ! {
 pub fn exit_group_and_run_next(exit_code: u32) -> ! {
     // exit current, take from Processor
     let task = take_current_task().unwrap();
-    let pid = task.pid;
-    do_exit(task.clone(), exit_code);
-
-    let mut exit_list = VecDeque::new();
-
+    let process = task.process.clone();
+    let exit_list: VecDeque<_> = process
+        .threads()
+        .into_iter()
+        .filter(|thread| thread.tid.0 != task.tid.0)
+        .collect();
     let mut manager = manager::TASK_MANAGER.lock();
-    let mut remain = manager.ready_queue.len();
-    while let Some(task) = manager.ready_queue.pop_front() {
-        if task.pid == pid {
-            exit_list.push_back(task);
-        } else {
-            manager.ready_queue.push_back(task);
-        }
-        remain -= 1;
-        if remain == 0 {
-            break;
-        }
-    }
-    let mut remain = manager.interruptible_queue.len();
-    while let Some(task) = manager.interruptible_queue.pop_front() {
-        if task.pid == pid {
-            exit_list.push_back(task);
-        } else {
-            manager.interruptible_queue.push_back(task);
-        }
-        remain -= 1;
-        if remain == 0 {
-            break;
-        }
-    }
+    manager.ready_queue.retain(|queued| {
+        !exit_list
+            .iter()
+            .any(|exit_task| Arc::as_ptr(exit_task) == Arc::as_ptr(queued))
+    });
+    manager.interruptible_queue.retain(|queued| {
+        !exit_list
+            .iter()
+            .any(|exit_task| Arc::as_ptr(exit_task) == Arc::as_ptr(queued))
+    });
     drop(manager);
 
     for task in exit_list.into_iter() {
         do_exit(task, exit_code);
     }
+    do_exit(task.clone(), exit_code);
     // 见 exit_current_and_run_next：当前任务的内核栈必须延迟到切栈后释放。
     add_task(task);
     // we do not have to save task context
@@ -303,10 +313,10 @@ pub fn exit_group_and_run_next(exit_code: u32) -> ! {
 }
 
 lazy_static! {
-    pub static ref INITPROC: Arc<TaskControlBlock> = Arc::new({
+    pub static ref INITPROC: Arc<TaskControlBlock> = {
         let elf = ROOT_FD.open("initproc", OpenFlags::O_RDONLY, true).unwrap();
         TaskControlBlock::new(elf)
-    });
+    };
 }
 
 pub fn add_initproc() {

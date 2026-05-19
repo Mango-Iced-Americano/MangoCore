@@ -1,5 +1,7 @@
 use super::manager::TASK_MANAGER;
 use super::pid::RecycleAllocator;
+use super::process::ProcessControlBlock;
+use super::registry;
 use super::signal::*;
 use super::threads::Futex;
 use super::TaskContext;
@@ -18,7 +20,7 @@ use crate::syscall::CloneFlags;
 use crate::timer::{ITimerVal, TimeSpec, TimeVal};
 use alloc::boxed::Box;
 use alloc::string::String;
-use alloc::sync::{Arc, Weak};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
 use core::sync::atomic::AtomicBool;
@@ -39,8 +41,8 @@ pub struct TaskControlBlock {
     pub tid: TidHandle,
     /// 同一地址空间内 trap context / 默认用户栈的资源槽位
     pub user_res_slot: usize,
-    /// 用户可见进程 ID，即 getpid() 返回值
-    pub pid: usize,
+    /// 所属用户可见进程
+    pub process: Arc<ProcessControlBlock>,
     /// 内核栈
     pub kstack: KernelStack,
     /// 用户栈基址
@@ -87,12 +89,6 @@ pub struct TaskControlBlockInner {
     pub task_cx: TaskContext,
     /// 任务状态
     pub task_status: TaskStatus,
-    /// 父进程
-    pub parent: Option<Weak<TaskControlBlock>>,
-    /// 子进程
-    pub children: Vec<Arc<TaskControlBlock>>,
-    /// 退出码
-    pub exit_code: u32,
     /// 用于清理子进程的线程ID
     pub clear_child_tid: usize,
     /// 鲁棒列表，用于管理鲁棒互斥锁
@@ -101,8 +97,6 @@ pub struct TaskControlBlockInner {
     pub heap_bottom: usize,
     /// 堆页表
     pub heap_pt: usize,
-    /// 进程组ID
-    pub pgid: usize,
     /// 资源使用情况
     pub rusage: Rusage,
     /// 任务的时钟信息
@@ -344,7 +338,7 @@ impl TaskControlBlock {
     /// !!!!!!!!!!!!!!!!WARNING!!!!!!!!!!!!!!!!!!!!!
     /// 当前仅用于initproc加载。如果在其他地方使用，必须更改bin_path。
     /// 任务创建（仅用于initproc）
-    pub fn new(elf: FileDescriptor) -> Self {
+    pub fn new(elf: FileDescriptor) -> Arc<Self> {
         // 将ELF文件映射到内核空间
         let elf_data = elf.map_to_kernel_space(MMAP_BASE);
         log::debug!(
@@ -370,6 +364,7 @@ impl TaskControlBlock {
         // 初始进程的 pid/pgid 与主线程 tid 相同
         let pid = tid_handle.0;
         let pgid = tid_handle.0;
+        let process = Arc::new(ProcessControlBlock::new(pid, tid_handle.0, pgid, None));
         // 分配内核栈
         let kstack = kstack_alloc();
         // 获取内核栈的顶部
@@ -383,10 +378,10 @@ impl TaskControlBlock {
             .unwrap();
         log::trace!("[TCB::new]trap_cx_ppn{:?}", trap_cx_ppn);
         // 创建任务控制块
-        let task_control_block = Self {
+        let task_control_block = Arc::new(Self {
             tid: tid_handle,
             user_res_slot,
-            pid,
+            process,
             kstack,
             ustack_base: ustack_bottom_from_slot(user_res_slot),
             exit_signal: Signals::empty(),
@@ -420,14 +415,10 @@ impl TaskControlBlock {
                 trap_cx_ppn,
                 task_cx: TaskContext::goto_trap_return(kstack_top),
                 task_status: TaskStatus::Ready,
-                parent: None,
-                children: Vec::new(),
-                exit_code: 0,
                 clear_child_tid: 0,
                 robust_list: RobustList::default(),
                 heap_bottom: user_heap,
                 heap_pt: user_heap,
-                pgid,
                 rusage: Rusage::new(),
                 clock: ProcClock::new(),
                 timer: [ITimerVal::new(); 3],
@@ -435,7 +426,10 @@ impl TaskControlBlock {
                 real_timer_generation: 0,
                 pending_oom_kill: false,
             }),
-        };
+        });
+        task_control_block.process.add_thread(&task_control_block);
+        registry::register_process(&task_control_block.process);
+        registry::register_task(&task_control_block);
         // 准备用户空间的陷阱上下文
         let trap_cx = task_control_block.acquire_inner_lock().get_trap_cx();
         // 初始化陷阱上下文
@@ -558,28 +552,31 @@ impl TaskControlBlock {
         self.futex.lock().clear();
         // 检查当前任务是否是多线程任务
         if self.user_res_slot_allocator.lock().get_allocated() > 1 {
-            let mut manager = TASK_MANAGER.lock();
+            let other_threads: Vec<_> = self
+                .process
+                .threads()
+                .into_iter()
+                .filter(|task| task.tid.0 != self.tid.0)
+                .collect();
 
-            for task in manager
-                .ready_queue
-                .iter()
-                .chain(manager.interruptible_queue.iter())
-            {
-                if task.pid == self.pid && task.user_res_slot != self.user_res_slot {
-                    // 发送 SIGKILL 信号给同一线程组的其他任务
-                    let mut inner = task.acquire_inner_lock();
-                    inner.add_signal(Signals::SIGKILL);
-                    inner.task_status = TaskStatus::Zombie;
-                    inner.exit_code = 0;
-                }
+            for task in &other_threads {
+                // 发送 SIGKILL 信号给同一线程组的其他任务
+                let mut inner = task.acquire_inner_lock();
+                inner.add_signal(Signals::SIGKILL);
+                inner.task_status = TaskStatus::Zombie;
             }
             // 销毁所有其他同一线程组的任务
-            manager
-                .ready_queue
-                .retain(|task| (*task).pid != (*self).pid);
-            manager
-                .interruptible_queue
-                .retain(|task| (*task).pid != (*self).pid);
+            let mut manager = TASK_MANAGER.lock();
+            manager.ready_queue.retain(|task| {
+                !other_threads
+                    .iter()
+                    .any(|other| Arc::as_ptr(other) == Arc::as_ptr(task))
+            });
+            manager.interruptible_queue.retain(|task| {
+                !other_threads
+                    .iter()
+                    .any(|other| Arc::as_ptr(other) == Arc::as_ptr(task))
+            });
         };
         Ok(())
         // **** 释放当前PCB锁
@@ -615,12 +612,20 @@ impl TaskControlBlock {
         // 在内核空间分配一个用户可见 tid 和一个内核栈
         let tid_handle = tid_alloc();
         let user_res_slot = user_res_slot_allocator.lock().alloc();
-        let pid = if flags.contains(CloneFlags::CLONE_THREAD) {
-            // 共享进程 ID
-            self.pid
+        let process = if flags.contains(CloneFlags::CLONE_THREAD) {
+            self.process.clone()
         } else {
-            // 新建进程 ID
-            tid_handle.0
+            let parent_process = if flags.contains(CloneFlags::CLONE_PARENT) {
+                self.process.parent()
+            } else {
+                Some(self.process.clone())
+            };
+            Arc::new(ProcessControlBlock::new(
+                tid_handle.0,
+                tid_handle.0,
+                self.process.getpgid(),
+                parent_process.as_ref().map(Arc::downgrade),
+            ))
         };
         // 分配内核栈
         let kstack = kstack_alloc();
@@ -665,7 +670,7 @@ impl TaskControlBlock {
             // 基础标识信息
             tid: tid_handle,
             user_res_slot,
-            pid,
+            process,
             kstack,
             ustack_base: if !stack.is_null() {
                 stack as usize
@@ -689,7 +694,6 @@ impl TaskControlBlock {
             wait_io_timer_pending: AtomicBool::new(false),
             inner: Mutex::new(TaskControlBlockInner {
                 // inherited
-                pgid: parent_inner.pgid,
                 heap_bottom: parent_inner.heap_bottom,
                 heap_pt: parent_inner.heap_pt,
                 // clone
@@ -700,7 +704,6 @@ impl TaskControlBlock {
                     parent_inner.signal_stack
                 },
                 // new
-                children: Vec::new(),
                 rusage: Rusage::new(),
                 clock: ProcClock::new(),
                 clear_child_tid: 0,
@@ -712,16 +715,8 @@ impl TaskControlBlock {
                 // compute
                 trap_cx_ppn,
                 task_cx: TaskContext::goto_trap_return(kstack_top),
-                parent: if flags.contains(CloneFlags::CLONE_PARENT)
-                    | flags.contains(CloneFlags::CLONE_THREAD)
-                {
-                    parent_inner.parent.clone()
-                } else {
-                    Some(Arc::downgrade(self))
-                },
                 // constants
                 task_status: TaskStatus::Ready,
-                exit_code: 0,
                 pending_oom_kill: false,
             }),
         });
@@ -746,6 +741,11 @@ impl TaskControlBlock {
         trap_cx.gp.a0 = 0;
         // 修改陷阱上下文中的内核栈指针
         trap_cx.kernel_sp = kstack_top;
+        task_control_block.process.add_thread(&task_control_block);
+        if !flags.contains(CloneFlags::CLONE_THREAD) {
+            registry::register_process(&task_control_block.process);
+        }
+        registry::register_task(&task_control_block);
         // 返回
         Ok(task_control_block)
         // ---- 释放父PCB锁
@@ -761,25 +761,14 @@ impl TaskControlBlock {
             return Ok(());
         }
         if flags.contains(CloneFlags::CLONE_PARENT) {
-            let parent = {
-                let child_inner = child.acquire_inner_lock();
-                child_inner.parent.as_ref().and_then(|parent| parent.upgrade())
-            };
+            let parent = child.process.parent();
             if let Some(parent) = parent {
-                let mut parent_inner = parent.acquire_inner_lock();
-                if parent_inner.children.try_reserve(1).is_err() {
-                    return Err(crate::syscall::errno::ENOMEM);
-                }
-                parent_inner.children.push(child);
+                parent.add_child(child.process.clone())?;
             } else {
                 warn!("[publish_clone_child] CLONE_PARENT target parent is gone");
             }
         } else {
-            let mut inner = self.acquire_inner_lock();
-            if inner.children.try_reserve(1).is_err() {
-                return Err(crate::syscall::errno::ENOMEM);
-            }
-            inner.children.push(child);
+            self.process.add_child(child.process.clone())?;
         }
         Ok(())
     }
@@ -798,22 +787,19 @@ impl TaskControlBlock {
 
     /// 获取用户可见进程 ID。
     pub fn getpid(&self) -> usize {
-        self.pid
+        self.process.pid
+    }
+    /// 获取用户可见进程 ID。
+    pub fn pid(&self) -> usize {
+        self.process.pid
     }
     /// 设置进程组ID
     pub fn setpgid(&self, pgid: usize) -> isize {
-        if (pgid as isize) < 0 {
-            return -1;
-        }
-        let mut inner = self.acquire_inner_lock();
-        inner.pgid = pgid;
-        0
-        // 暂时挂起。因为“self”的类型是“Arc”，它不能作为可变引用借用。
+        self.process.setpgid(pgid)
     }
     // 获取进程组ID
     pub fn getpgid(&self) -> usize {
-        let inner = self.acquire_inner_lock();
-        inner.pgid
+        self.process.getpgid()
     }
     /// 获取用户空间的token
     pub fn get_user_token(&self) -> usize {
@@ -824,6 +810,8 @@ impl TaskControlBlock {
 impl Drop for TaskControlBlock {
     /// 当任务控制块被销毁时，释放用户资源槽位
     fn drop(&mut self) {
+        registry::unregister_task(self.tid.0);
+        self.process.remove_thread(self.tid.0);
         self.user_res_slot_allocator
             .lock()
             .dealloc(self.user_res_slot);

@@ -12,9 +12,9 @@ use crate::task::threads::{do_futex_wait, do_futex_wait_shared, futex_wake_share
 use crate::task::{
     add_kernel_timer, add_task, block_current_and_run_next, current_task, current_user_token,
     exit_current_and_run_next, exit_group_and_run_next, find_any_task_by_pid,
-    find_task_by_pid_tid, find_task_by_tid, procs_count, signal::*, suspend_current_and_run_next,
-    threads, wait_with_timeout, wake_interruptible, Rusage, TaskControlBlock, TaskStatus,
-    TimerAction,
+    find_process_by_pid, find_task_by_pid_tid, find_task_by_tid, procs_count, signal::*,
+    suspend_current_and_run_next, threads, wait_with_timeout, wake_interruptible, Rusage,
+    TaskControlBlock, TaskStatus, TimerAction,
 };
 use crate::timer::{get_time_ms, get_time_sec, ITimerVal, TimeSpec, TimeVal, TimeZone, Times};
 use crate::utils::error::SyscallErr;
@@ -124,37 +124,34 @@ pub fn sys_kill(pid: usize, sig: usize) -> isize {
 }
 
 pub fn sys_tkill(tid: usize, sig: usize) -> isize {
+    if tid == 0 || (tid as isize) < 0 {
+        return EINVAL;
+    }
     let signal = match Signals::from_signum(sig) {
         Ok(signal) => signal,
         Err(_) => return EINVAL,
     };
-    if tid > 0 {
-        if let Some(task) = find_task_by_tid(tid) {
-            if !signal.is_empty() {
-                let mut inner = task.acquire_inner_lock();
-                inner.add_signal(signal);
-                // wake up target process if it is sleeping
-                if inner.task_status == TaskStatus::Interruptible {
-                    inner.task_status = TaskStatus::Ready;
-                    drop(inner);
-                    wake_interruptible(task);
-                }
+    if let Some(task) = find_task_by_tid(tid) {
+        if !signal.is_empty() {
+            let mut inner = task.acquire_inner_lock();
+            inner.add_signal(signal);
+            // wake up target process if it is sleeping
+            if inner.task_status == TaskStatus::Interruptible {
+                inner.task_status = TaskStatus::Ready;
+                drop(inner);
+                wake_interruptible(task);
             }
-            SUCCESS
-        } else {
-            ESRCH
         }
-    } else if tid == 0 {
-        todo!()
-    } else if (tid as isize) == -1 {
-        todo!()
+        SUCCESS
     } else {
-        // (tid as isize) < -1
-        todo!()
+        ESRCH
     }
 }
 
 pub fn sys_tgkill(pid: usize, tid: usize, sig: usize) -> isize {
+    if pid == 0 || tid == 0 || (pid as isize) < 0 || (tid as isize) < 0 {
+        return EINVAL;
+    }
     let signal = match Signals::from_signum(sig) {
         Ok(signal) => signal,
         Err(_) => return EINVAL,
@@ -372,20 +369,13 @@ pub fn sys_uname(buf: *mut u8) -> isize {
 }
 
 pub fn sys_getpid() -> isize {
-    let pid = current_task().unwrap().pid;
+    let pid = current_task().unwrap().pid();
     pid as isize
 }
 
 pub fn sys_getppid() -> isize {
     let task = current_task().unwrap();
-    let inner = task.acquire_inner_lock();
-    let parent = match inner.parent.as_ref().and_then(|p| p.upgrade()) {
-        Some(parent) => parent,
-        None => return 0, // No parent process
-    };
-    let ppid = parent.pid;
-    // let ppid = inner.parent.as_ref().unwrap().upgrade().unwrap().pid;
-    ppid as isize
+    task.process.parent_pid() as isize
 }
 
 pub fn sys_getuid() -> isize {
@@ -411,52 +401,47 @@ pub fn sys_setpgid(pid: usize, pgid: usize) -> isize {
     if (pid as isize) < 0 || (pgid as isize) < 0 {
         return EINVAL;
     }
-    let task = if pid == 0 {
-        current_task().unwrap()
+    let process = if pid == 0 {
+        current_task().unwrap().process.clone()
     } else {
-        match find_any_task_by_pid(pid) {
-            Some(task) => task,
+        match find_process_by_pid(pid) {
+            Some(process) => process,
             None => return ESRCH,
         }
     };
 
-    let real_pgid = if pgid == 0 { task.pid } else { pgid };
+    let real_pgid = if pgid == 0 { process.pid } else { pgid };
 
-    task.setpgid(real_pgid)
+    process.setpgid(real_pgid)
 }
 
 pub fn sys_getpgid(pid: usize) -> isize {
     if (pid as isize) < 0 {
         return EINVAL;
     }
-    let task = if pid == 0 {
-        current_task().unwrap()
+    let process = if pid == 0 {
+        current_task().unwrap().process.clone()
     } else {
-        match find_any_task_by_pid(pid) {
-            Some(task) => task,
+        match find_process_by_pid(pid) {
+            Some(process) => process,
             None => return ESRCH,
         }
     };
 
-    task.getpgid() as isize
+    process.getpgid() as isize
 }
 /// creates a new session if the calling process is not a process group leader.
 /// The calling process is the leader of the new session, and its pgid is set to its pid.
 /// 当前进程脱离父进程，从父进程的子进程列表中移除当前进程，当前进程的父进程设置为空。
 pub fn sys_setsid() -> isize {
     let task = current_task().unwrap();
-    // Detach from parent process.
-    if let Some(parent) = task.acquire_inner_lock().parent.as_ref().unwrap().upgrade() {
-        parent
-            .acquire_inner_lock()
-            .children
-            .retain(|x| x.tid.0 != task.tid.0);
+    let process = task.process.clone();
+    if let Some(parent) = process.parent() {
+        parent.detach_child(process.pid);
     }
-    let mut inner = task.acquire_inner_lock();
-    inner.parent = None;
     // Make this process a session leader and process group leader.
-    inner.pgid = task.pid;
-    drop(inner);
+    process.set_parent(None);
+    process.setpgid(process.pid);
     SUCCESS
 }
 
@@ -881,52 +866,34 @@ pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) ->
     loop {
         // find a child process
 
-        // ---- hold current PCB lock
-        let mut inner = task.acquire_inner_lock();
-        let caller_pgid = inner.pgid;
+        let mut process_inner = task.process.acquire_inner_lock();
+        let caller_pgid = process_inner.pgid;
 
-        let has_child = inner.children.iter().any(|p| {
-            let child_inner = p.acquire_inner_lock();
-            child_matches_pid(p.pid, child_inner.pgid, caller_pgid, pid)
+        let has_child = process_inner.children.iter().any(|child| {
+            let child_inner = child.acquire_inner_lock();
+            child_matches_pid(child.pid, child_inner.pgid, caller_pgid, pid)
         });
         if !has_child {
             return ECHILD;
         }
-        // ---- release current PCB lock (implicitly by drop(inner))
 
         // Find a zombie
-        let pair = inner.children.iter().enumerate().find(|(_, p)| {
-            let child_inner = p.acquire_inner_lock();
-            child_inner.is_zombie() && child_matches_pid(p.pid, child_inner.pgid, caller_pgid, pid)
+        let pair = process_inner.children.iter().enumerate().find(|(_, child)| {
+            let child_inner = child.acquire_inner_lock();
+            child_inner.state == crate::task::ProcessState::Zombie
+                && child_matches_pid(child.pid, child_inner.pgid, caller_pgid, pid)
         });
 
         if let Some((idx, _)) = pair {
-            // drop last TCB of child
-            let child = inner.children.remove(idx);
+            let child = process_inner.children.remove(idx);
             trace!(
-                "[wait4] release zombie task, tid: {}, pid: {}",
-                child.tid.0,
+                "[wait4] release zombie process, leader_tid: {}, pid: {}",
+                child.leader_tid,
                 child.pid
             );
-            // confirm that child will be deallocated after being removed from children list
-            // 注意：如果 child 被 OOM killer 杀死（exit_current_and_run_next 从 handle_alloc_error 调用），
-            // 则 syscall handler 栈上的 current_task().unwrap() 仍有额外 Arc 引用，
-            // 此时 strong_count >= 2。这是可接受的：do_exit 已释放所有用户资源，
-            // 多出来的 Arc 只是让 TCB 多活一会，等栈 unwound 自然释放。
-            if Arc::strong_count(&child) != 1 {
-                log::debug!(
-                    "[wait4] child tid={} pid={} has extra ref (count={}), \
-                     likely OOM-killed from inside a syscall",
-                    child.tid.0,
-                    child.pid,
-                    Arc::strong_count(&child),
-                );
-            }
-
-            // if main thread exit
-
             let found_pid = child.pid;
-            let exit_code = child.acquire_inner_lock().exit_code;
+            let exit_code = child.exit_code();
+            drop(process_inner);
             if !status.is_null() {
                 if let Err(errno) = UserPtrMut::new(status).write(token, &exit_code) {
                     return errno;
@@ -935,13 +902,15 @@ pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) ->
             return found_pid as isize;
         } else {
             if option.contains(WaitOption::WNOHANG) {
-                drop(inner);
+                drop(process_inner);
                 return SUCCESS;
             } else {
                 // 在持有锁的情况下检查信号
-                let pending = inner.sigpending.difference(inner.sigmask);
+                let task_inner = task.acquire_inner_lock();
+                let pending = task_inner.sigpending.difference(task_inner.sigmask);
                 if !pending.is_empty() {
-                    drop(inner);
+                    drop(task_inner);
+                    drop(process_inner);
                     // 临时解锁判断是否 Actionable
                     if has_actionable_signal(&task) {
                         return ERESTART;
@@ -955,7 +924,8 @@ pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) ->
                     continue;
                 }
 
-                drop(inner);
+                drop(task_inner);
+                drop(process_inner);
                 crate::task::block_current_and_run_next();
                 debug!("[sys_wait4] --resumed--");
             }
@@ -1042,7 +1012,7 @@ pub fn sys_prlimit(
     old_limit: *mut RLimit,
 ) -> isize {
     let task = current_task().unwrap();
-    if pid != 0 && pid != task.pid {
+    if pid != 0 && pid != task.pid() {
         return ESRCH;
     }
 
@@ -1467,7 +1437,7 @@ pub fn sys_rt_sigpending(set: usize, sigsetsize: usize) -> isize {
     trace!(
         "[sys_rt_sigpending] tid: {}, pid: {}, pending: {:?}",
         task.tid.0,
-        task.pid,
+        task.pid(),
         inner.sigpending
     );
     match UserPtrMut::from_addr(set).write(token, &inner.sigpending) {
@@ -1493,7 +1463,7 @@ pub fn sys_sigreturn() -> isize {
     let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
     let token = task.get_user_token();
-    info!("[sys_sigreturn] tid: {}, pid: {}", task.tid.0, task.pid);
+    info!("[sys_sigreturn] tid: {}, pid: {}", task.tid.0, task.pid());
 
     let sp = inner.get_trap_cx().gp.sp;
     // restore sigmask & trap context
