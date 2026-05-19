@@ -10,10 +10,11 @@ use crate::show_frame_consumption;
 use crate::syscall::errno::*;
 use crate::task::threads::{do_futex_wait, do_futex_wait_shared, futex_wake_shared, FutexCmd};
 use crate::task::{
-    add_kernel_timer, add_task, all_processes, block_current_and_run_next, current_task,
+    add_kernel_timer, add_task, all_processes, current_task,
     current_user_token, exit_current_and_run_next, exit_group_and_run_next, find_process_by_pid,
     find_processes_by_pgid, find_task_by_pid_tid, find_task_by_tid, procs_count, signal::*,
-    suspend_current_and_run_next, threads, wait_with_timeout, Rusage, TaskControlBlock, TimerAction,
+    suspend_current_and_run_next, threads, Rusage, TaskControlBlock, TimerAction, WaitQueue,
+    WaitResult,
 };
 use crate::timer::{get_time_ms, get_time_sec, ITimerVal, TimeSpec, TimeVal, TimeZone, Times};
 use crate::utils::error::SyscallErr;
@@ -184,23 +185,19 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
     };
 
     let end = TimeSpec::now() + req;
-    wait_with_timeout(Arc::downgrade(&task), end);
-    drop(task);
-
-    block_current_and_run_next();
-    let task = current_task().unwrap();
+    let wait_queue = spin::Mutex::new(WaitQueue::new());
+    let wait_result =
+        WaitQueue::wait_event_interruptible_timeout(&wait_queue, || None::<isize>, end);
     let now = TimeSpec::now();
 
     // 先释放 inner 锁再检查信号，避免与 has_actionable_signal 死锁
     // 参考 pselect/ppoll 的信号检查模式
-    if has_actionable_signal(&task) {
+    if wait_result == WaitResult::Interrupted {
         // 被可操作信号打断 → 返回剩余时间 + EINTR
         if !rem.is_null() {
             UserPtrMut::new(rem).write(token, &(end - now)).unwrap();
         }
         return EINTR;
-    } else {
-        discard_non_actionable_unblocked_signals(&task);
     }
 
     // 正常超时返回
@@ -852,10 +849,9 @@ pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) ->
         }
     }
 
-    loop {
-        // find a child process
-
-        let mut process_inner = task.process.acquire_inner_lock();
+    let process = task.process.clone();
+    let try_reap_child = || -> Option<isize> {
+        let mut process_inner = process.acquire_inner_lock();
         let caller_pgid = process_inner.pgid;
 
         let has_child = process_inner.children.iter().any(|child| {
@@ -863,10 +859,9 @@ pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) ->
             child_matches_pid(child.pid, child_inner.pgid, caller_pgid, pid)
         });
         if !has_child {
-            return ECHILD;
+            return Some(ECHILD);
         }
 
-        // Find a zombie
         let pair = process_inner.children.iter().enumerate().find(|(_, child)| {
             let child_inner = child.acquire_inner_lock();
             child_inner.state == crate::task::ProcessState::Zombie
@@ -885,24 +880,23 @@ pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) ->
             drop(process_inner);
             if !status.is_null() {
                 if let Err(errno) = UserPtrMut::new(status).write(token, &exit_code) {
-                    return errno;
+                    return Some(errno);
                 }
             }
-            return found_pid as isize;
+            Some(found_pid as isize)
         } else {
-            if option.contains(WaitOption::WNOHANG) {
-                drop(process_inner);
-                return SUCCESS;
-            } else {
-                drop(process_inner);
-                if has_actionable_signal(&task) {
-                    return ERESTART;
-                }
-                discard_non_actionable_unblocked_signals(&task);
-                crate::task::block_current_and_run_next();
-                debug!("[sys_wait4] --resumed--");
-            }
+            None
         }
+    };
+
+    if option.contains(WaitOption::WNOHANG) {
+        return try_reap_child().unwrap_or(SUCCESS);
+    }
+
+    match WaitQueue::wait_event_interruptible(&process.child_exit_wait, || try_reap_child()) {
+        WaitResult::Ready(value) => value,
+        WaitResult::Interrupted => ERESTART,
+        WaitResult::TimedOut => SUCCESS,
     }
 }
 

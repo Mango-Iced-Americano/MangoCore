@@ -4,9 +4,8 @@ use crate::fs::layout::Stat;
 use crate::fs::DiskInodeType;
 use crate::fs::StatMode;
 use crate::syscall::errno::*;
-use crate::task::block_current_and_run_next_with_lock;
-use crate::task::current_task;
 use crate::task::WaitQueue;
+use crate::task::WaitResult;
 use crate::{fs::file_trait::File, mm::UserBuffer};
 use alloc::boxed::Box;
 use alloc::sync::{Arc, Weak};
@@ -196,25 +195,30 @@ impl File for Pipe {
         }
         let mut read_size = 0usize;
         loop {
-            let task = current_task().unwrap();
-            let inner = task.acquire_inner_lock();
-            // if !inner.sigpending.difference(inner.sigmask).is_empty() {
-            //     return ERESTART as usize;
-            // }
-            drop(inner);
-            drop(task);
             let mut ring = self.buffer.lock();
             if ring.status == RingBufferStatus::EMPTY {
                 if ring.all_write_ends_closed() {
                     return read_size;
                 }
-                let task = current_task().unwrap();
-                ring.read_wait.prepare_to_wait(Arc::downgrade(&task));
-                drop(task);
-                block_current_and_run_next_with_lock(ring);
-                //阻塞唤醒后会到此处
-                let task = current_task().unwrap();
-                self.buffer.lock().read_wait.finish_wait(&task);
+                drop(ring);
+                let wait_result = WaitQueue::wait_event_interruptible_locked(
+                    &self.buffer,
+                    |ring| &mut ring.read_wait,
+                    |ring| {
+                        if ring.status != RingBufferStatus::EMPTY || ring.all_write_ends_closed() {
+                            Some(SUCCESS)
+                        } else {
+                            None
+                        }
+                    },
+                );
+                if wait_result == WaitResult::Interrupted {
+                    return if read_size == 0 {
+                        ERESTART as usize
+                    } else {
+                        read_size
+                    };
+                }
                 continue;
             }
             // We guarantee that this operation will read at least one byte
@@ -243,24 +247,30 @@ impl File for Pipe {
         let mut write_size = 0usize;
 
         loop {
-            let task = current_task().unwrap();
-            let inner = task.acquire_inner_lock();
-            // if !inner.sigpending.difference(inner.sigmask).is_empty() {
-            //     return ERESTART as usize;
-            // }
-            drop(inner);
-            drop(task);
             let mut ring = self.buffer.lock();
             if ring.status == RingBufferStatus::FULL {
                 if ring.all_read_ends_closed() {
                     return write_size;
                 }
-                let task = current_task().unwrap();
-                ring.write_wait.prepare_to_wait(Arc::downgrade(&task));
-                drop(task);
-                block_current_and_run_next_with_lock(ring);
-                let task = current_task().unwrap();
-                self.buffer.lock().write_wait.finish_wait(&task);
+                drop(ring);
+                let wait_result = WaitQueue::wait_event_interruptible_locked(
+                    &self.buffer,
+                    |ring| &mut ring.write_wait,
+                    |ring| {
+                        if ring.status != RingBufferStatus::FULL || ring.all_read_ends_closed() {
+                            Some(SUCCESS)
+                        } else {
+                            None
+                        }
+                    },
+                );
+                if wait_result == WaitResult::Interrupted {
+                    return if write_size == 0 {
+                        ERESTART as usize
+                    } else {
+                        write_size
+                    };
+                }
                 continue;
             }
             // We guarantee that this operation will write at least one byte
@@ -298,25 +308,30 @@ impl File for Pipe {
         }
         let mut read_size = 0usize;
         loop {
-            let task = current_task().unwrap();
-            let inner = task.acquire_inner_lock();
-            // 注释掉下面内容，pipe测例通过，跟读出pipe内容有关
-            // if !inner.sigpending.difference(inner.sigmask).is_empty() {
-            //     return ERESTART as usize;
-            // }
-            drop(inner);
-            drop(task);
             let mut ring = self.buffer.lock();
             if ring.status == RingBufferStatus::EMPTY {
                 if ring.all_write_ends_closed() {
                     return read_size;
                 }
-                let task = current_task().unwrap();
-                ring.read_wait.prepare_to_wait(Arc::downgrade(&task));
-                drop(task);
-                block_current_and_run_next_with_lock(ring);
-                let task = current_task().unwrap();
-                self.buffer.lock().read_wait.finish_wait(&task);
+                drop(ring);
+                let wait_result = WaitQueue::wait_event_interruptible_locked(
+                    &self.buffer,
+                    |ring| &mut ring.read_wait,
+                    |ring| {
+                        if ring.status != RingBufferStatus::EMPTY || ring.all_write_ends_closed() {
+                            Some(SUCCESS)
+                        } else {
+                            None
+                        }
+                    },
+                );
+                if wait_result == WaitResult::Interrupted {
+                    return if read_size == 0 {
+                        ERESTART as usize
+                    } else {
+                        read_size
+                    };
+                }
                 continue;
             }
             // We guarantee that this operation will read at least one byte
@@ -350,24 +365,30 @@ impl File for Pipe {
         }
         let mut write_size = 0usize;
         loop {
-            let task = current_task().unwrap();
-            let inner = task.acquire_inner_lock();
-            // if !inner.sigpending.difference(inner.sigmask).is_empty() {
-            //     return ERESTART as usize;
-            // }
-            drop(inner);
-            drop(task);
             let mut ring = self.buffer.lock();
             if ring.status == RingBufferStatus::FULL {
                 if ring.all_read_ends_closed() {
                     return write_size;
                 }
-                let task = current_task().unwrap();
-                ring.write_wait.prepare_to_wait(Arc::downgrade(&task));
-                drop(task);
-                block_current_and_run_next_with_lock(ring);
-                let task = current_task().unwrap();
-                self.buffer.lock().write_wait.finish_wait(&task);
+                drop(ring);
+                let wait_result = WaitQueue::wait_event_interruptible_locked(
+                    &self.buffer,
+                    |ring| &mut ring.write_wait,
+                    |ring| {
+                        if ring.status != RingBufferStatus::FULL || ring.all_read_ends_closed() {
+                            Some(SUCCESS)
+                        } else {
+                            None
+                        }
+                    },
+                );
+                if wait_result == WaitResult::Interrupted {
+                    return if write_size == 0 {
+                        ERESTART as usize
+                    } else {
+                        write_size
+                    };
+                }
                 continue;
             }
             // We guarantee that this operation will write at least one byte

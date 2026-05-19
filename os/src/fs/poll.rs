@@ -10,7 +10,27 @@ use crate::{
 use alloc::vec::Vec;
 use core::ptr::null_mut;
 
-use crate::task::{current_task, sigprocmask, suspend_current_and_run_next, SigMaskHow};
+use crate::task::{current_task, sigprocmask, SigMaskHow, WaitQueue, WaitResult};
+
+const POLL_SLEEP_MS: usize = 10;
+
+fn poll_wait_deadline(timeout: Option<TimeSpec>) -> TimeSpec {
+    let now = TimeSpec::now();
+    let next_poll = now + TimeSpec::from_ms(POLL_SLEEP_MS);
+    match timeout {
+        Some(deadline) if deadline < next_poll => deadline,
+        _ => next_poll,
+    }
+}
+
+fn wait_poll_interval(timeout: Option<TimeSpec>) -> WaitResult {
+    let wait_queue = spin::Mutex::new(WaitQueue::new());
+    WaitQueue::wait_event_interruptible_timeout(
+        &wait_queue,
+        || -> Option<isize> { None },
+        poll_wait_deadline(timeout),
+    )
+}
 ///  A scheduling  scheme  whereby  the  local  process  periodically  checks  until  the  pre-specified events (for example, read, write) have occurred.
 /// The PollFd struct in 32-bit style.
 #[repr(C)]
@@ -134,6 +154,7 @@ pub fn ppoll(
         nfds
     ];
     let mut done: isize = 0;
+    let mut interrupted = false;
     if let Ok(_) = UserSlice::new(fds as *const PollFd, nfds).read_array_into(token, &mut poll_fd) {
         for poll_fd in poll_fd.iter_mut() {
             poll_fd.revents = PollEvent::empty();
@@ -183,15 +204,18 @@ pub fn ppoll(
             // 信号检查
             let task = current_task().unwrap();
             if has_actionable_signal(&task) {
+                interrupted = true;
                 break;
             } else {
                 // 无actionable信号：清除它们，避免在 suspend 循环中重复检查。
-                // do_signal() 在 trap_return 中调用，但 suspend_current_and_run_next
-                // 可能永不进 trap（就绪队列为空时立即取回同一任务）。
+                // do_signal() 在 trap_return 中调用，但这里可能很快重新取回同一任务。
                 discard_non_actionable_unblocked_signals(&task);
             }
             drop(task);
-            suspend_current_and_run_next();
+            if wait_poll_interval(timeout) == WaitResult::Interrupted {
+                interrupted = true;
+                break;
+            }
         }
 
         log::trace!("[ppoll] result: {:?}", poll_fd);
@@ -212,6 +236,9 @@ pub fn ppoll(
             oldsig,
             null_mut::<Signals>(),
         );
+    }
+    if interrupted {
+        return -(SyscallErr::ERESTART as isize);
     }
     done
 }
@@ -411,12 +438,15 @@ pub fn pselect(
             inner.refresh_real_timer();
             drop(inner);
             // 无actionable信号：清除它们，避免在 suspend 循环中重复检查。
-            // do_signal() 在 trap_return 中调用，但 suspend_current_and_run_next
-            // 可能永不进 trap（就绪队列为空时立即取回同一任务）。
+            // do_signal() 在 trap_return 中调用，但这里可能很快重新取回同一任务。
             discard_non_actionable_unblocked_signals(&task);
         }
         drop(task);
-        suspend_current_and_run_next();
+        if wait_poll_interval(timeout) == WaitResult::Interrupted {
+            interrupted = true;
+            log::info!("[pselect] Interrupted by signal(s)");
+            break;
+        }
     }
 
     // ============================================================

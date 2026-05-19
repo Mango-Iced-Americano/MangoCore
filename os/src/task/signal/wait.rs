@@ -1,17 +1,11 @@
-use alloc::sync::Arc;
-
 use crate::signal_type;
 use crate::config::PAGE_SIZE;
 use crate::mm::{UserPtr, UserPtrMut};
 use crate::syscall::errno::*;
-use crate::task::{
-    block_current_and_run_next_checked, current_task, wait_with_timeout, TaskControlBlock,
-};
+use crate::task::{current_task, TaskControlBlock, WaitQueue, WaitResult};
 use crate::timer::TimeSpec;
 
-use super::{
-    has_actionable_signal, PendingSignal, SigHandler, SigInfo, Signals, SIG_DFL_IGNORE,
-};
+use super::{PendingSignal, SigHandler, SigInfo, Signals, SIG_DFL_IGNORE};
 
 fn read_user_sigset(token: usize, set: *const Signals) -> Result<Signals, isize> {
     if (set as usize) < PAGE_SIZE {
@@ -96,18 +90,8 @@ fn take_sigtimedwait_interrupt(task: &TaskControlBlock, wait_set: Signals) -> bo
     false
 }
 
-fn has_sigtimedwait_wakeup(task: &TaskControlBlock, wait_set: Signals) -> bool {
-    let (thread_pending, sigmask) = {
-        let inner = task.acquire_inner_lock();
-        (inner.sigpending.pending(), inner.sigmask)
-    };
-    let pending = thread_pending | task.process.shared_pending();
-    !(pending & wait_set).is_empty()
-        || !pending.difference(sigmask).difference(wait_set).is_empty()
-}
-
 pub fn sigsuspend(set: *const Signals) -> isize {
-    let mut task = current_task().unwrap();
+    let task = current_task().unwrap();
     let token = task.get_user_token();
     let new_mask = match read_user_sigset(token, set) {
         Ok(mask) => {
@@ -122,18 +106,16 @@ pub fn sigsuspend(set: *const Signals) -> isize {
         inner.sigmask_to_restore = Some(old_mask);
     }
 
-    loop {
-        if has_actionable_signal(&task) {
-            return ERESTART;
-        }
-        drop(task);
-        block_current_and_run_next_checked(|task| !has_actionable_signal(task));
-        task = current_task().unwrap();
+    let wait_queue = spin::Mutex::new(WaitQueue::new());
+    match WaitQueue::wait_event_interruptible(&wait_queue, || None::<isize>) {
+        WaitResult::Ready(value) => value,
+        WaitResult::Interrupted => ERESTART,
+        WaitResult::TimedOut => EAGAIN,
     }
 }
 
 pub fn sigtimedwait(set: *const Signals, info: *mut SigInfo, timeout: *const TimeSpec) -> isize {
-    let mut task = current_task().unwrap();
+    let task = current_task().unwrap();
     let token = task.get_user_token();
     let set = match read_user_sigset(token, set) {
         Ok(set) => set,
@@ -146,7 +128,9 @@ pub fn sigtimedwait(set: *const Signals, info: *mut SigInfo, timeout: *const Tim
     let start = TimeSpec::now();
     let deadline = timeout.map(|timeout| start + timeout);
 
-    loop {
+    let wait_queue = spin::Mutex::new(WaitQueue::new());
+    let mut wait_condition = || -> Option<isize> {
+        let task = current_task().unwrap();
         if let Some(pending) = take_pending_signal_matching(&task, set) {
             if !info.is_null() {
                 if UserPtrMut::new(info)
@@ -154,29 +138,25 @@ pub fn sigtimedwait(set: *const Signals, info: *mut SigInfo, timeout: *const Tim
                     .is_err()
                 {
                     log::error!("[sys_sigtimedwait] Error copying to info {:?} ", info);
-                    return EFAULT;
+                    return Some(EFAULT);
                 };
             }
-            return pending.signum() as isize;
+            return Some(pending.signum() as isize);
         }
         if take_sigtimedwait_interrupt(&task, set) {
-            return EINTR;
+            return Some(EINTR);
         }
+        None
+    };
 
-        if let Some(deadline) = deadline {
-            if deadline <= TimeSpec::now() {
-                return EAGAIN;
-            }
-            wait_with_timeout(Arc::downgrade(&task), deadline);
-        }
-
-        drop(task);
-        block_current_and_run_next_checked(|task| {
-            !has_sigtimedwait_wakeup(task, set)
-                && deadline
-                    .map(|deadline| TimeSpec::now() < deadline)
-                    .unwrap_or(true)
-        });
-        task = current_task().unwrap();
+    let wait_result = if let Some(deadline) = deadline {
+        WaitQueue::wait_event_interruptible_timeout(&wait_queue, &mut wait_condition, deadline)
+    } else {
+        WaitQueue::wait_event_interruptible(&wait_queue, &mut wait_condition)
+    };
+    match wait_result {
+        WaitResult::Ready(value) => value,
+        WaitResult::Interrupted => EINTR,
+        WaitResult::TimedOut => EAGAIN,
     }
 }

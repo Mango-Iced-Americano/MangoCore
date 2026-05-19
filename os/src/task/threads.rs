@@ -3,17 +3,12 @@
     内容与RISCV版本相同，无需修改
 */
 use crate::{mm::UserPtr, syscall::errno::*, task::current_task, timer::TimeSpec};
-use alloc::{collections::BTreeMap, sync::Arc};
+use alloc::collections::BTreeMap;
 use lazy_static::lazy_static;
 use log::*;
 use num_enum::FromPrimitive;
 
-use super::{
-    block_current_and_run_next_with_lock, discard_non_actionable_unblocked_signals,
-    has_actionable_signal,
-    manager::{wait_with_timeout, WaitQueue},
-    TaskControlBlock,
-};
+use super::manager::{WaitQueue, WaitResult};
 
 #[allow(unused)]
 #[derive(Debug, Eq, PartialEq, FromPrimitive)]
@@ -75,6 +70,19 @@ pub struct Futex {
     inner: BTreeMap<usize, WaitQueue>,
 }
 
+fn wait_queue_for_key(map: &mut BTreeMap<usize, WaitQueue>, key: usize) -> &mut WaitQueue {
+    if !map.contains_key(&key) {
+        map.insert(key, WaitQueue::new());
+    }
+    map.get_mut(&key).unwrap()
+}
+
+fn remove_empty_wait_queue(map: &mut BTreeMap<usize, WaitQueue>, key: usize) {
+    if map.get(&key).map(|wait_queue| wait_queue.is_empty()).unwrap_or(false) {
+        map.remove(&key);
+    }
+}
+
 // Futex wait 只读用户 word
 pub fn do_futex_wait(
     futex_word: UserPtr<u32>,
@@ -86,72 +94,35 @@ pub fn do_futex_wait(
     // 超时时间换成绝对时间
     let timeout = timeout.map(|t| t + TimeSpec::now());
 
-    // 拿当前任务
     let task = current_task().unwrap();
     let futex_table = task.futex.clone();
-
-    // 拿 futex 锁准备改等待队列
-    let mut futex = futex_table.lock();
-
-    // 持锁后再读一次，避免丢 wake
-    let futex_value = match futex_word.read(token) {
-        Ok(value) => value,
-        Err(errno) => {
-            drop(futex);
-            return errno;
-        }
-    };
-    if futex_value != val {
-        drop(futex);
-        trace!(
-            "[futex] --wait-- **not match** futex: {:X}, val: {:X}",
-            futex_value,
-            val
-        );
-        return EAGAIN;
-    }
-
-    // 取出这个地址对应的等待队列
-    let mut wait_queue = if let Some(wait_queue) = futex.inner.remove(&futex_key) {
-        wait_queue
-    } else {
-        WaitQueue::new()
-    };
-
-    // 当前任务挂到等待队列里
-    // 用弱引用避免循环引用
-    wait_queue.add_task(Arc::downgrade(&task));
-
-    // 等待队列放回去
-    futex.inner.insert(futex_key, wait_queue);
-
-    // 有超时就挂到定时队列
-    if let Some(timeout) = timeout {
-        trace!("[do_futex_wait] sleep with timeout: {:?}", timeout);
-        wait_with_timeout(Arc::downgrade(&task), timeout);
-    }
-
     drop(task);
 
-    // 阻塞当前任务并切走；切为 Interruptible 并进入调度器队列后再释放 futex 锁。
-    block_current_and_run_next_with_lock(futex);
+    let wait_result = WaitQueue::wait_event_interruptible_timeout_locked_with_wake_result(
+        &futex_table,
+        |futex| futex.wait_queue_mut(futex_key),
+        |_: &mut Futex| match futex_word.read(token) {
+            Ok(value) if value == val => None,
+            Ok(value) => {
+                trace!(
+                    "[futex] --wait-- **not match** futex: {:X}, val: {:X}",
+                    value,
+                    val
+                );
+                Some(EAGAIN)
+            }
+            Err(errno) => Some(errno),
+        },
+        timeout,
+        SUCCESS,
+    );
+    futex_table.lock().remove_empty(futex_key);
 
-    // 醒来后重新拿当前任务
-    let task = current_task().unwrap();
-    let timed_out = task.futex.lock().finish_wait(futex_key, &task);
-
-    // 检查有没有信号打断
-    if has_actionable_signal(&task) {
-        return EINTR;
-    } else {
-        discard_non_actionable_unblocked_signals(&task);
+    match wait_result {
+        WaitResult::Ready(value) => value,
+        WaitResult::Interrupted => EINTR,
+        WaitResult::TimedOut => ETIMEDOUT,
     }
-
-    if timed_out {
-        return ETIMEDOUT;
-    }
-
-    SUCCESS
 }
 
 /// 唤醒等待在全局 process-shared futex（物理地址 key）上的最多 val 个任务
@@ -177,63 +148,31 @@ pub fn do_futex_wait_shared(
     phys_key: usize,
 ) -> isize {
     let timeout = timeout.map(|t| t + TimeSpec::now());
-    let task = current_task().unwrap();
-    let mut shared = PROCESS_SHARED_FUTEX.lock();
+    let wait_result = WaitQueue::wait_event_interruptible_timeout_locked_with_wake_result(
+        &PROCESS_SHARED_FUTEX,
+        |shared| wait_queue_for_key(shared, phys_key),
+        |_: &mut BTreeMap<usize, WaitQueue>| match futex_word.read(token) {
+            Ok(value) if value == val => None,
+            Ok(value) => {
+                trace!(
+                    "[futex-shared] --wait-- **not match** futex: {:X}, val: {:X}",
+                    value,
+                    val
+                );
+                Some(EAGAIN)
+            }
+            Err(errno) => Some(errno),
+        },
+        timeout,
+        SUCCESS,
+    );
+    remove_empty_wait_queue(&mut PROCESS_SHARED_FUTEX.lock(), phys_key);
 
-    // 【修复 TOCTOU】：必须在持有全局锁之后重新读取 *futex_word
-    let futex_value = match futex_word.read(token) {
-        Ok(value) => value,
-        Err(errno) => {
-            drop(shared);
-            return errno;
-        }
-    };
-    if futex_value != val {
-        drop(shared);
-        trace!(
-            "[futex-shared] --wait-- **not match** futex: {:X}, val: {:X}",
-            futex_value,
-            val
-        );
-        return EAGAIN;
+    match wait_result {
+        WaitResult::Ready(value) => value,
+        WaitResult::Interrupted => EINTR,
+        WaitResult::TimedOut => ETIMEDOUT,
     }
-
-    let mut wait_queue = shared.remove(&phys_key).unwrap_or_else(WaitQueue::new);
-    wait_queue.add_task(Arc::downgrade(&task));
-    shared.insert(phys_key, wait_queue);
-    if let Some(timeout) = timeout {
-        trace!("[do_futex_wait_shared] sleep with timeout: {:?}", timeout);
-        wait_with_timeout(Arc::downgrade(&task), timeout);
-    }
-    drop(task);
-    block_current_and_run_next_with_lock(shared);
-    // 唤醒后检查信号
-    let task = current_task().unwrap();
-    let timed_out = {
-        let mut shared = PROCESS_SHARED_FUTEX.lock();
-        let (removed_from_wait_queue, remove_wait_queue) = if let Some(wait_queue) =
-            shared.get_mut(&phys_key)
-        {
-            let removed = wait_queue.finish_wait(&task);
-            (removed, wait_queue.is_empty())
-        } else {
-            (false, false)
-        };
-        if remove_wait_queue {
-            shared.remove(&phys_key);
-        }
-        removed_from_wait_queue
-    };
-    if has_actionable_signal(&task) {
-        return EINTR;
-    } else {
-        discard_non_actionable_unblocked_signals(&task);
-    }
-    if timed_out {
-        return ETIMEDOUT;
-    }
-
-    SUCCESS
 }
 
 // Futex的方法实现
@@ -258,18 +197,12 @@ impl Futex {
         }
     }
 
-    pub fn finish_wait(&mut self, futex_key: usize, task: &Arc<TaskControlBlock>) -> bool {
-        let mut removed_from_wait_queue = false;
-        let remove_wait_queue = if let Some(wait_queue) = self.inner.get_mut(&futex_key) {
-            removed_from_wait_queue = wait_queue.finish_wait(task);
-            wait_queue.is_empty()
-        } else {
-            false
-        };
-        if remove_wait_queue {
-            self.inner.remove(&futex_key);
-        }
-        removed_from_wait_queue
+    fn wait_queue_mut(&mut self, futex_key: usize) -> &mut WaitQueue {
+        wait_queue_for_key(&mut self.inner, futex_key)
+    }
+
+    fn remove_empty(&mut self, futex_key: usize) {
+        remove_empty_wait_queue(&mut self.inner, futex_key);
     }
 
     /// 重新排列

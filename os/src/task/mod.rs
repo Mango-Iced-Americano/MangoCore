@@ -1,7 +1,7 @@
 mod context;
 mod elf;
 mod manager;
-pub use manager::WaitQueue;
+pub use manager::{WaitQueue, WaitResult};
 use spin::MutexGuard;
 pub mod pid;
 mod process;
@@ -142,6 +142,32 @@ pub fn block_current_and_run_next_with_lock<T>(lock: MutexGuard<'_, T>) {
     schedule(task_cx_ptr);
 }
 
+// 带释放锁和阻塞条件复查的调度入口。
+// WaitQueue 使用它保证“入队 -> 条件复查 -> 睡眠”之间不会丢失唤醒。
+pub(crate) fn block_current_and_run_next_with_lock_checked<T>(
+    lock: MutexGuard<'_, T>,
+    should_block: impl FnOnce(&Arc<TaskControlBlock>) -> bool,
+) {
+    let task = take_current_task().unwrap();
+
+    let mut task_inner = task.acquire_inner_lock();
+    let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
+    task_inner.task_status = TaskStatus::Interruptible;
+    drop(task_inner);
+
+    sleep_interruptible(task.clone());
+    if !should_block(&task) {
+        let mut task_inner = task.acquire_inner_lock();
+        if task_inner.task_status == TaskStatus::Interruptible {
+            task_inner.task_status = TaskStatus::Ready;
+            drop(task_inner);
+            wake_interruptible(task.clone());
+        }
+    }
+    drop(lock);
+    schedule(task_cx_ptr);
+}
+
 // 判断该task的sigpending中是否已经有可操作的未遮蔽信号
 // 被忽略的信号（SIG_IGN）或默认动作是忽略的信号（如SIGCHLD）不算
 fn has_unblocked_signal(task: &Arc<TaskControlBlock>) -> bool {
@@ -239,8 +265,9 @@ fn finish_process_exit(task: &Arc<TaskControlBlock>, exit_code: u32) {
         return;
     }
 
-    if !task.exit_signal.is_empty() {
-        if let Some(parent_process) = process.parent() {
+    if let Some(parent_process) = process.parent() {
+        parent_process.child_exit_wait.lock().wake_all();
+        if !task.exit_signal.is_empty() {
             if let Some(parent_task) = parent_process.any_live_thread() {
                 let mut parent_inner = parent_task.acquire_inner_lock();
                 parent_inner.add_signal(task.exit_signal);
@@ -251,9 +278,9 @@ fn finish_process_exit(task: &Arc<TaskControlBlock>, exit_code: u32) {
                     wake_interruptible(parent_task);
                 }
             }
-        } else {
-            warn!("[finish_process_exit] parent is None");
         }
+    } else {
+        warn!("[finish_process_exit] parent is None");
     }
 
     let children = {
@@ -267,6 +294,7 @@ fn finish_process_exit(task: &Arc<TaskControlBlock>, exit_code: u32) {
             initproc_inner.children.push(child);
         }
         drop(initproc_inner);
+        INITPROC.process.child_exit_wait.lock().wake_all();
         if let Some(init_task) = INITPROC.process.any_live_thread() {
             let mut init_inner = init_task.acquire_inner_lock();
             if init_inner.task_status == TaskStatus::Interruptible {

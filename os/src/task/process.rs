@@ -1,7 +1,7 @@
 use super::{
     registry,
     signal::{PendingSignal, SignalQueue, Signals},
-    TaskControlBlock, TaskStatus,
+    TaskControlBlock, TaskStatus, WaitQueue,
 };
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -20,6 +20,8 @@ pub struct ProcessControlBlock {
     pub leader_tid: usize,
     /// 属于该进程的线程列表。
     pub threads: Mutex<Vec<Weak<TaskControlBlock>>>,
+    /// 父进程 wait4() 等待子进程退出的等待队列。
+    pub child_exit_wait: Mutex<WaitQueue>,
     inner: Mutex<ProcessInner>,
     signal: Mutex<ProcessSignalState>,
 }
@@ -57,6 +59,7 @@ impl ProcessControlBlock {
             pid,
             leader_tid,
             threads: Mutex::new(Vec::new()),
+            child_exit_wait: Mutex::new(WaitQueue::new()),
             inner: Mutex::new(ProcessInner {
                 pgid,
                 parent,

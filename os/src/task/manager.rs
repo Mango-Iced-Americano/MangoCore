@@ -12,8 +12,9 @@ use alloc::vec::Vec;
 use crate::timer::{TimeSpec, TimeVal};
 
 use super::{
-    block_current_and_run_next_with_lock, current_task, discard_non_actionable_unblocked_signals,
-    has_actionable_signal, signal::Signals, TaskControlBlock, TaskStatus,
+    block_current_and_run_next_with_lock_checked, current_task,
+    discard_non_actionable_unblocked_signals, has_actionable_signal, signal::Signals,
+    TaskControlBlock, TaskStatus,
 };
 use crate::utils::error::SyscallErr;
 use alloc::collections::{BinaryHeap, VecDeque};
@@ -359,6 +360,23 @@ pub enum WaitQueueError {
     AlreadyWaken,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WaitResult {
+    Ready(isize),
+    Interrupted,
+    TimedOut,
+}
+
+impl WaitResult {
+    pub fn unwrap_or_else(self, f: impl FnOnce(isize) -> isize) -> isize {
+        match self {
+            WaitResult::Ready(value) => value,
+            WaitResult::Interrupted => f(-(SyscallErr::ERESTART as isize)),
+            WaitResult::TimedOut => f(-(SyscallErr::EAGAIN as isize)),
+        }
+    }
+}
+
 /// 等待队列
 /// 内部是一个存储任务控制块弱引用的双端队列
 pub struct WaitQueue {
@@ -485,71 +503,156 @@ impl WaitQueue {
     /// 兜底定时器的超时毫秒数，防止丢失唤醒导致永久阻塞。
     const WAIT_IO_FALLBACK_MS: usize = 10;
 
-    /// Core `wait_until` 实现（参照 DragonOS 架构）。
-    ///
-    /// `cond` 返回 `None` 表示继续等待，`Some(v)` 表示条件满足返回 `v`。
-    /// `signal_check` 为 true 时在等待前检查信号（interruptible 变体）。
-    /// `is_io` 为 true 时正确标记 iowait（用于 CPU iowait 统计）。
-    ///
-    /// ## 关键设计
-    /// 在检查条件前先通过 `prepare_to_wait` 注册 waker，确保不会丢失唤醒。
-    /// 调用者将 `poll()` 等准备工作放在 `cond` 闭包中（文件和网络 IO 通用）。
-    ///
-    /// ## 返回值
-    /// - `>= 0`：条件满足，返回 `cond()` 提供的值
-    /// - `< 0`：被信号中断（`-ERESTART`）
-    fn wait_until_impl<F>(wq: &Mutex<Self>, cond: &mut F, signal_check: bool, is_io: bool) -> isize
+    fn wait_event_impl<F>(
+        wq: &Mutex<Self>,
+        cond: &mut F,
+        signal_check: bool,
+        deadline: Option<TimeSpec>,
+        fallback_ms: Option<usize>,
+    ) -> WaitResult
     where
         F: FnMut() -> Option<isize>,
     {
-        // 快路径：先检查一次条件
-        if let Some(res) = cond() {
-            return res;
-        }
-
         loop {
-            let task = current_task().unwrap();
-
-            // 1. 信号检查（仅 interruptible 变体）
-            if signal_check {
-                if has_actionable_signal(&task) {
-                    return -(SyscallErr::ERESTART as isize);
-                } else {
-                    discard_non_actionable_unblocked_signals(&task);
-                }
+            if let Some(res) = cond() {
+                return WaitResult::Ready(res);
+            }
+            if deadline
+                .map(|deadline| TimeSpec::now() >= deadline)
+                .unwrap_or(false)
+            {
+                return WaitResult::TimedOut;
             }
 
-            // 2. 注册 waker（DragonOS 关键模式：注册后再检查条件）
+            let task = current_task().unwrap();
+            if signal_check {
+                if has_actionable_signal(&task) {
+                    return WaitResult::Interrupted;
+                }
+                discard_non_actionable_unblocked_signals(&task);
+            }
+
             let mut guard = wq.lock();
             guard.prepare_to_wait(Arc::downgrade(&task));
 
-            // 3. 注册后检查条件（调用者的闭包里包含 poll 等准备工作）
             if let Some(res) = cond() {
                 guard.finish_wait(&task);
-                return res;
+                return WaitResult::Ready(res);
+            }
+            if deadline
+                .map(|deadline| TimeSpec::now() >= deadline)
+                .unwrap_or(false)
+            {
+                guard.finish_wait(&task);
+                return WaitResult::TimedOut;
             }
 
-            // 4. 设置兜底定时器（Option B）
-            if !task
-                .wait_io_timer_pending
-                .swap(true, AtomicOrdering::AcqRel)
-            {
-                wait_with_timeout(
-                    Arc::downgrade(&task),
-                    TimeSpec::now() + TimeSpec::from_ms(Self::WAIT_IO_FALLBACK_MS),
-                );
+            if let Some(deadline) = deadline {
+                wait_with_timeout(Arc::downgrade(&task), deadline);
+            } else if let Some(ms) = fallback_ms {
+                if !task
+                    .wait_io_timer_pending
+                    .swap(true, AtomicOrdering::AcqRel)
+                {
+                    wait_with_timeout(
+                        Arc::downgrade(&task),
+                        TimeSpec::now() + TimeSpec::from_ms(ms),
+                    );
+                }
             }
             drop(task);
 
-            // 5. 阻塞 — 丢弃 MutexGuard，调度其他任务
-            block_current_and_run_next_with_lock(guard);
+            block_current_and_run_next_with_lock_checked(guard, |task| {
+                let no_signal = !signal_check || !has_actionable_signal(task);
+                let not_timed_out = deadline
+                    .map(|deadline| TimeSpec::now() < deadline)
+                    .unwrap_or(true);
+                no_signal && not_timed_out
+            });
 
-            // 6. 唤醒后：重新加锁并完成等待
             let task = current_task().unwrap();
             wq.lock().finish_wait(&task);
-
-            // 7. 刷新 real timer
             task.acquire_inner_lock().refresh_real_timer();
+        }
+    }
+
+    fn wait_event_locked_impl<T, Q, F>(
+        lock: &Mutex<T>,
+        mut queue_of: Q,
+        cond: &mut F,
+        signal_check: bool,
+        deadline: Option<TimeSpec>,
+        normal_wake_result: Option<isize>,
+    ) -> WaitResult
+    where
+        Q: for<'a> FnMut(&'a mut T) -> &'a mut WaitQueue,
+        F: FnMut(&mut T) -> Option<isize>,
+    {
+        loop {
+            let mut guard = lock.lock();
+            if let Some(res) = cond(&mut guard) {
+                return WaitResult::Ready(res);
+            }
+            if deadline
+                .map(|deadline| TimeSpec::now() >= deadline)
+                .unwrap_or(false)
+            {
+                return WaitResult::TimedOut;
+            }
+
+            let task = current_task().unwrap();
+            if signal_check {
+                if has_actionable_signal(&task) {
+                    return WaitResult::Interrupted;
+                }
+                discard_non_actionable_unblocked_signals(&task);
+            }
+
+            queue_of(&mut guard).prepare_to_wait(Arc::downgrade(&task));
+            if let Some(res) = cond(&mut guard) {
+                queue_of(&mut guard).finish_wait(&task);
+                return WaitResult::Ready(res);
+            }
+            if deadline
+                .map(|deadline| TimeSpec::now() >= deadline)
+                .unwrap_or(false)
+            {
+                queue_of(&mut guard).finish_wait(&task);
+                return WaitResult::TimedOut;
+            }
+            if let Some(deadline) = deadline {
+                wait_with_timeout(Arc::downgrade(&task), deadline);
+            }
+            drop(task);
+
+            block_current_and_run_next_with_lock_checked(guard, |task| {
+                let no_signal = !signal_check || !has_actionable_signal(task);
+                let not_timed_out = deadline
+                    .map(|deadline| TimeSpec::now() < deadline)
+                    .unwrap_or(true);
+                no_signal && not_timed_out
+            });
+
+            let task = current_task().unwrap();
+            let mut guard = lock.lock();
+            let removed = queue_of(&mut guard).finish_wait(&task);
+            drop(guard);
+            task.acquire_inner_lock().refresh_real_timer();
+
+            if signal_check && has_actionable_signal(&task) {
+                return WaitResult::Interrupted;
+            }
+            if deadline
+                .map(|deadline| TimeSpec::now() >= deadline)
+                .unwrap_or(false)
+            {
+                return WaitResult::TimedOut;
+            }
+            if !removed {
+                if let Some(res) = normal_wake_result {
+                    return WaitResult::Ready(res);
+                }
+            }
         }
     }
 
@@ -562,7 +665,11 @@ impl WaitQueue {
     where
         F: FnMut() -> Option<isize>,
     {
-        Self::wait_until_impl(wq, &mut cond, false, false)
+        match Self::wait_event_impl(wq, &mut cond, false, None, Some(Self::WAIT_IO_FALLBACK_MS)) {
+            WaitResult::Ready(value) => value,
+            WaitResult::Interrupted => -(SyscallErr::ERESTART as isize),
+            WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
+        }
     }
 
     /// 可中断等待，条件满足或收到信号时返回。
@@ -571,16 +678,11 @@ impl WaitQueue {
     /// 文件和网络 IO 通用。
     /// - `Ok(v)`：条件满足
     /// - `Err(-ERESTART)`：被信号中断
-    pub fn wait_until_interruptible<F>(wq: &Mutex<Self>, mut cond: F) -> Result<isize, isize>
+    pub fn wait_until_interruptible<F>(wq: &Mutex<Self>, mut cond: F) -> WaitResult
     where
         F: FnMut() -> Option<isize>,
     {
-        let ret = Self::wait_until_impl(wq, &mut cond, true, false);
-        if ret < 0 {
-            Err(ret)
-        } else {
-            Ok(ret)
-        }
+        Self::wait_event_impl(wq, &mut cond, true, None, Some(Self::WAIT_IO_FALLBACK_MS))
     }
 
     /// IO 等待（不可中断），正确标记 iowait 以用于 CPU iowait 统计。
@@ -590,7 +692,11 @@ impl WaitQueue {
     where
         F: FnMut() -> Option<isize>,
     {
-        Self::wait_until_impl(wq, &mut cond, false, true)
+        match Self::wait_event_impl(wq, &mut cond, false, None, Some(Self::WAIT_IO_FALLBACK_MS)) {
+            WaitResult::Ready(value) => value,
+            WaitResult::Interrupted => -(SyscallErr::ERESTART as isize),
+            WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
+        }
     }
 
     /// IO 等待（可中断），正确标记 iowait。
@@ -598,16 +704,86 @@ impl WaitQueue {
     /// 等价于 DragonOS 的 `wait_until_io_interruptible`。
     /// - `Ok(v)`：条件满足
     /// - `Err(-ERESTART)`：被信号中断
-    pub fn wait_until_io_interruptible<F>(wq: &Mutex<Self>, mut cond: F) -> Result<isize, isize>
+    pub fn wait_until_io_interruptible<F>(wq: &Mutex<Self>, mut cond: F) -> WaitResult
     where
         F: FnMut() -> Option<isize>,
     {
-        let ret = Self::wait_until_impl(wq, &mut cond, true, true);
-        if ret < 0 {
-            Err(ret)
-        } else {
-            Ok(ret)
-        }
+        Self::wait_event_impl(wq, &mut cond, true, None, Some(Self::WAIT_IO_FALLBACK_MS))
+    }
+
+    pub fn wait_event_interruptible<F>(wq: &Mutex<Self>, mut cond: F) -> WaitResult
+    where
+        F: FnMut() -> Option<isize>,
+    {
+        Self::wait_event_impl(wq, &mut cond, true, None, None)
+    }
+
+    pub fn wait_event_timeout<F>(
+        wq: &Mutex<Self>,
+        mut cond: F,
+        deadline: TimeSpec,
+    ) -> WaitResult
+    where
+        F: FnMut() -> Option<isize>,
+    {
+        Self::wait_event_impl(wq, &mut cond, false, Some(deadline), None)
+    }
+
+    pub fn wait_event_interruptible_timeout<F>(
+        wq: &Mutex<Self>,
+        mut cond: F,
+        deadline: TimeSpec,
+    ) -> WaitResult
+    where
+        F: FnMut() -> Option<isize>,
+    {
+        Self::wait_event_impl(wq, &mut cond, true, Some(deadline), None)
+    }
+
+    pub fn wait_event_interruptible_locked<T, Q, F>(
+        lock: &Mutex<T>,
+        queue_of: Q,
+        mut cond: F,
+    ) -> WaitResult
+    where
+        Q: for<'a> FnMut(&'a mut T) -> &'a mut WaitQueue,
+        F: FnMut(&mut T) -> Option<isize>,
+    {
+        Self::wait_event_locked_impl(lock, queue_of, &mut cond, true, None, None)
+    }
+
+    pub fn wait_event_interruptible_timeout_locked<T, Q, F>(
+        lock: &Mutex<T>,
+        queue_of: Q,
+        mut cond: F,
+        deadline: TimeSpec,
+    ) -> WaitResult
+    where
+        Q: for<'a> FnMut(&'a mut T) -> &'a mut WaitQueue,
+        F: FnMut(&mut T) -> Option<isize>,
+    {
+        Self::wait_event_locked_impl(lock, queue_of, &mut cond, true, Some(deadline), None)
+    }
+
+    pub fn wait_event_interruptible_timeout_locked_with_wake_result<T, Q, F>(
+        lock: &Mutex<T>,
+        queue_of: Q,
+        mut cond: F,
+        deadline: Option<TimeSpec>,
+        normal_wake_result: isize,
+    ) -> WaitResult
+    where
+        Q: for<'a> FnMut(&'a mut T) -> &'a mut WaitQueue,
+        F: FnMut(&mut T) -> Option<isize>,
+    {
+        Self::wait_event_locked_impl(
+            lock,
+            queue_of,
+            &mut cond,
+            true,
+            deadline,
+            Some(normal_wake_result),
+        )
     }
 }
 
