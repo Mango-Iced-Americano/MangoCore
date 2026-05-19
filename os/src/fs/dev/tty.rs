@@ -1,19 +1,24 @@
-use crate::fs::directory_tree::DirectoryTreeNode;
-use crate::fs::dirent::Dirent;
-use crate::fs::file_trait::File;
-use crate::fs::layout::Stat;
-use crate::fs::DiskInodeType;
-use crate::fs::StatMode;
 use crate::hal::console_getchar;
-use crate::mm::{UserBuffer, UserPtr, UserPtrMut};
+use crate::mm::{UserPtr, UserPtrMut};
 use crate::syscall::errno::*;
 use crate::task::signal::Signals;
+use crate::task::WaitQueue;
 
 use alloc::sync::Arc;
+use core::any::Any;
 use lazy_static::lazy_static;
 use log::{info, warn};
 use num_enum::FromPrimitive;
 use spin::Mutex;
+
+use crate::fs::vfs::{
+    FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata,
+};
+use crate::fs::vfs::event::EPollEvent;
+use crate::fs::vfs::file_system::FileSystem as NewFileSystem;
+use crate::fs::dev::DEV_FS;
+use crate::timer::TimeSpec;
+use crate::utils::error::SyscallErr;
 
 lazy_static! {
     pub static ref TTY: Arc<Teletype> = Arc::new(Teletype::default());
@@ -57,9 +62,24 @@ impl Default for TeletypeInner {
     }
 }
 
-#[derive(Default)]
 pub struct Teletype {
     inner: Mutex<TeletypeInner>,
+    read_waiters: Mutex<WaitQueue>,
+}
+
+impl Default for Teletype {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::new(TeletypeInner::default()),
+            read_waiters: Mutex::new(WaitQueue::new()),
+        }
+    }
+}
+
+impl core::fmt::Debug for Teletype {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Teletype").finish()
+    }
 }
 
 impl Teletype {
@@ -124,277 +144,118 @@ impl Teletype {
     }
 }
 
-// TODO: independ of rust sbi
-#[allow(unused)]
-impl File for Teletype {
-    fn deep_clone(&self) -> Arc<dyn File> {
-        TTY.clone()
-    }
-    fn readable(&self) -> bool {
-        true
-    }
-
-    fn writable(&self) -> bool {
-        true
-    }
-
-    fn read(&self, offset: Option<&mut usize>, buf: &mut [u8]) -> usize {
-        unimplemented!()
-    }
-
-    fn write(&self, offset: Option<&mut usize>, buffer: &[u8]) -> usize {
-        let _inner = self.inner.lock();
-        match offset {
-            Some(_) => ESPIPE as usize,
-            None => {
-                match core::str::from_utf8(buffer) {
-                    Ok(content) => print!("{}", content),
-                    Err(_) => warn!("[tty_kwrite] Non-UTF8 charaters: {:?}", buffer),
-                }
-                buffer.len()
-            }
+impl IndexNode for Teletype {
+    fn read_at(
+        &self,
+        _offset: usize,
+        _len: usize,
+        buf: &mut [u8],
+        _data: spin::MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        if buf.is_empty() {
+            return Ok(0);
         }
-    }
-
-    #[cfg(feature = "board_k210")]
-    fn r_ready(&self) -> bool {
-        let mut inner = self.inner.lock();
-        // in this case, user program call pselect() before, should return true
-        if inner.last_char == 0 {
-            true
-        // in this case, user program call read() before, should return false
-        } else {
-            inner.last_char = 0;
-            false
-        }
-    }
-
-    #[cfg(not(any(feature = "board_k210")))]
-    fn r_ready(&self) -> bool {
-        let mut inner = self.inner.lock();
-        // buffer has valid data
-        if inner.last_char != 255 {
-            true
-        // peek next char
-        } else {
-            // Try stash first (from scheduler), then console
-            inner.last_char =
-                crate::trace::pop_stashed().unwrap_or_else(|| console_getchar() as u8);
-            // Check magic key (Ctrl+T → trace dump + shutdown).
-            // If it's magic, dump_from() calls shutdown() and never returns.
-            crate::trace::check_magic_key(inner.last_char, "tty:r_ready");
-            // Check VINTR (Ctrl+C → SIGINT to foreground process group).
-            if vintr_send_sigint(&inner, inner.last_char) {
-                inner.last_char = 255;
-                return false;
-            }
-            inner.last_char != 255
-        }
-    }
-
-    fn w_ready(&self) -> bool {
-        true
-    }
-
-    #[cfg(feature = "board_k210")]
-    fn read_user(&self, offset: Option<usize>, mut buf: UserBuffer) -> usize {
-        if offset.is_some() {
-            return ESPIPE as usize;
-        }
-        let mut inner = self.inner.lock();
-        // block read here, infallible
-        unsafe {
-            buf.buffers[0]
-                .as_mut_ptr()
-                .write_volatile(console_getchar() as u8);
-        }
-        if inner.termios.lflag & LocalModes::ECHO.bits() != 0 {
-            if inner.last_char == '\r' as u8 {
-                print!("\n");
-            } else {
-                print!("{}", inner.last_char as char);
-            }
-        }
-        // fake failed reading to make pseudo non-block reading,
-        // in order to return properly in r_ready(),
-        // so that we could let bash echo what we input on k210.
-        inner.last_char = 255;
-        1
-    }
-
-    #[cfg(not(any(feature = "board_k210")))]
-    fn read_user(&self, offset: Option<usize>, buf: UserBuffer) -> usize {
-        if offset.is_some() {
-            return ESPIPE as usize;
-        }
-        let mut inner = self.inner.lock();
-        // todo: check foreground pgid
-        let mut count = 0;
-        for ptr in buf {
-            loop {
-                //we have read a legal char
-                if inner.last_char != 255 {
-                    break;
-                }
-                //if we have read some chars, we can return
-                if count > 0 {
-                    return count;
-                }
-                //we read no char, suspend the procedure
-                crate::task::suspend_current_and_run_next();
-                // Try stash first (from scheduler), then console
+        let result;
+        {
+            let mut inner = self.inner.lock();
+            if inner.last_char == 255 {
                 inner.last_char =
                     crate::trace::pop_stashed().unwrap_or_else(|| console_getchar() as u8);
-                // Check magic key (Ctrl+T → trace dump + shutdown).
-                crate::trace::check_magic_key(inner.last_char, "tty:read");
-                // Check VINTR (Ctrl+C → SIGINT to foreground process group).
+                crate::trace::check_magic_key(inner.last_char, "tty:read_at");
                 if vintr_send_sigint(&inner, inner.last_char) {
                     inner.last_char = 255;
+                    return Err(SyscallErr::EAGAIN);
                 }
             }
-            // VINTR was detected and consumed above; if last_char was reset to 255,
-            // loop back to wait for the next character.
             if inner.last_char == 255 {
-                continue;
+                return Err(SyscallErr::EAGAIN);
             }
-            //we can guarantee last_char isn't a illegal char
-            unsafe {
-                ptr.write_volatile(inner.last_char);
-            }
+            buf[0] = inner.last_char;
             if inner.termios.lflag & LocalModes::ECHO.bits() != 0 {
-                if inner.last_char == '\r' as u8 {
+                if inner.last_char == b'\r' {
                     print!("\n");
                 } else {
+                    log::info!("[tty] echo '{}' (0x{:02x})", inner.last_char as char, inner.last_char);
                     print!("{}", inner.last_char as char);
                 }
             }
-            // Try stash first (from scheduler), then console
+            inner.last_char = 255;
+            result = Ok(1);
+        }
+        self.read_waiters.lock().wake_at_most(1);
+        result
+    }
+
+    fn write_at(
+        &self,
+        _offset: usize,
+        _len: usize,
+        buf: &[u8],
+        _data: spin::MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        let _inner = self.inner.lock();
+        match core::str::from_utf8(buf) {
+            Ok(content) => print!("{}", content),
+            Err(_) => warn!("[tty_write] Non-UTF8 characters: {:?}", buf),
+        }
+        Ok(buf.len())
+    }
+
+    fn metadata(&self) -> Result<Metadata, SyscallErr> {
+        Ok(Metadata {
+            dev_id: 0,
+            inode_id: 0,
+            size: 0,
+            blk_size: 0,
+            blocks: 0,
+            atime: TimeSpec::new(),
+            mtime: TimeSpec::new(),
+            ctime: TimeSpec::new(),
+            file_type: FileType::CharDevice,
+            mode: InodeMode::S_IFCHR | InodeMode::from_bits_truncate(0o666),
+            nlinks: 1,
+            uid: 0,
+            gid: 0,
+            flags: InodeFlags::empty(),
+            raw_dev: crate::makedev!(0x88, 0),
+        })
+    }
+
+    fn is_stream(&self) -> bool {
+        true
+    }
+
+    fn poll(&self, _private_data: &FilePrivateData) -> Result<usize, SyscallErr> {
+        let mut inner = self.inner.lock();
+        let has_data = if inner.last_char != 255 {
+            true
+        } else {
             inner.last_char =
                 crate::trace::pop_stashed().unwrap_or_else(|| console_getchar() as u8);
-            // Check magic key (Ctrl+T → trace dump + shutdown).
-            crate::trace::check_magic_key(inner.last_char, "tty:read");
-            // Check VINTR (Ctrl+C → SIGINT to foreground process group).
+            crate::trace::check_magic_key(inner.last_char, "tty:poll");
             if vintr_send_sigint(&inner, inner.last_char) {
                 inner.last_char = 255;
+                false
+            } else {
+                inner.last_char != 255
             }
-            count += 1;
+        };
+        drop(inner);
+        let mut revents: usize = 0;
+        if has_data {
+            revents |= EPollEvent::EPOLLIN.bits();
+            self.read_waiters.lock().wake_at_most(1);
         }
-        count
+        revents |= EPollEvent::EPOLLOUT.bits();
+        Ok(revents)
     }
 
-    fn write_user(&self, offset: Option<usize>, user_buffer: UserBuffer) -> usize {
-        if offset.is_some() {
-            return ESPIPE as usize;
-        }
-        let _inner = self.inner.lock();
-        for buffer in user_buffer.buffers.iter() {
-            match core::str::from_utf8(*buffer) {
-                Ok(content) => print!("{}", content),
-                Err(_) => warn!("[tty_write] Non-UTF8 charaters: {:?}", *buffer),
-            }
-        }
-        user_buffer.len()
-    }
-
-    fn get_size(&self) -> usize {
-        0
-    }
-
-    fn get_stat(&self) -> Stat {
-        Stat::new(
-            crate::makedev!(0, 5),
-            1,
-            StatMode::S_IFCHR.bits() | 0o666,
-            1,
-            crate::makedev!(0x88, 0),
-            0,
-            0,
-            0,
-            0,
-        )
-    }
-
-    fn get_file_type(&self) -> DiskInodeType {
-        DiskInodeType::File
-    }
-
-    fn info_dirtree_node(
+    fn ioctl(
         &self,
-        dirnode_ptr: alloc::sync::Weak<crate::fs::directory_tree::DirectoryTreeNode>,
-    ) {
-    }
-
-    fn get_dirtree_node(&self) -> Option<Arc<DirectoryTreeNode>> {
-        None
-    }
-
-    fn open(&self, flags: crate::fs::layout::OpenFlags, special_use: bool) -> Arc<dyn File> {
-        // Do NOT auto-assign foreground_pgid here. The shell (bash/ash) must
-        // explicitly set it via TIOCSPGRP (tcsetpgrp) when putting a job in
-        // the foreground. Auto-assigning would incorrectly give the terminal
-        // to initproc, preventing the shell from taking control.
-        let _ = flags;
-        TTY.clone()
-    }
-
-    fn open_subfile(
-        &self,
-    ) -> Result<alloc::vec::Vec<(alloc::string::String, alloc::sync::Arc<dyn File>)>, isize> {
-        Err(ENOTDIR)
-    }
-
-    fn create(&self, name: &str, file_type: DiskInodeType) -> Result<Arc<dyn File>, isize> {
-        Err(ENOTDIR)
-    }
-
-    fn link_child(&self, name: &str, child: &Self) -> Result<(), isize>
-    where
-        Self: Sized,
-    {
-        Err(ENOTDIR)
-    }
-
-    fn unlink(&self, delete: bool) -> Result<(), isize> {
-        Err(ENOTDIR)
-    }
-
-    fn get_dirent(&self, _count: usize) -> Result<alloc::vec::Vec<Dirent>, isize> {
-        Ok(alloc::vec::Vec::new())
-    }
-
-    fn lseek(&self, offset: isize, whence: crate::fs::SeekWhence) -> Result<usize, isize> {
-        Err(ESPIPE)
-    }
-
-    fn modify_size(&self, diff: isize) -> Result<(), isize> {
-        Ok(())
-    }
-
-    fn truncate_size(&self, new_size: usize) -> Result<(), isize> {
-        Err(EINVAL)
-    }
-
-    fn set_timestamp(&self, ctime: Option<usize>, atime: Option<usize>, mtime: Option<usize>) {
-        // TTY is a character device, timestamps are not meaningful.
-    }
-
-    fn get_single_cache(&self, offset: usize) -> Result<Arc<Mutex<crate::fs::PageCache>>, ()> {
-        Err(())
-    }
-
-    fn get_all_caches(&self) -> Result<alloc::vec::Vec<Arc<Mutex<crate::fs::PageCache>>>, ()> {
-        Err(())
-    }
-
-    fn oom(&self) -> usize {
-        0
-    }
-
-    fn hang_up(&self) -> bool {
-        false
-    }
-
-    fn ioctl(&self, cmd: u32, argp: usize) -> isize {
+        cmd: u32,
+        argp: usize,
+        _private_data: spin::MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
         info!(
             "[tty_ioctl] cmd: {:?}, arg: {:X}",
             TeletypeCommand::from_primitive(cmd),
@@ -405,8 +266,8 @@ impl File for Teletype {
         match TeletypeCommand::from_primitive(cmd) {
             TeletypeCommand::TCGETS | TeletypeCommand::TCGETA => {
                 match UserPtrMut::from_addr(argp).write(token, &inner.termios) {
-                    Ok(()) => SUCCESS,
-                    Err(errno) => errno,
+                    Ok(()) => Ok(0),
+                    Err(_) => Err(SyscallErr::EFAULT),
                 }
             }
             TeletypeCommand::TCSETS
@@ -418,51 +279,63 @@ impl File for Teletype {
                 match UserPtr::from_addr(argp).read(token) {
                     Ok(termios) => {
                         inner.termios = termios;
-                        SUCCESS
+                        Ok(0)
                     }
-                    Err(errno) => errno,
+                    Err(_) => Err(SyscallErr::EFAULT),
                 }
             }
             // TCXONC (0x540A) — software flow control. No-op for virtual terminal.
-            TeletypeCommand::TCXONC => SUCCESS,
+            TeletypeCommand::TCXONC => Ok(0),
             TeletypeCommand::TIOCGPGRP => {
                 match UserPtrMut::from_addr(argp).write(token, &inner.foreground_pgid) {
-                    Ok(()) => SUCCESS,
-                    Err(errno) => errno,
+                    Ok(()) => Ok(0),
+                    Err(_) => Err(SyscallErr::EFAULT),
                 }
             }
             TeletypeCommand::TIOCSPGRP => match UserPtr::<u32>::from_addr(argp).read(token) {
                 Ok(word) => {
                     log::info!("[tty-ioctl] TIOCSPGRP: set foreground_pgid to {}", word);
                     inner.foreground_pgid = word;
-                    SUCCESS
+                    Ok(0)
                 }
-                Err(errno) => errno,
+                Err(_errno) => Err(SyscallErr::EFAULT),
             },
             TeletypeCommand::TIOCGWINSZ => {
                 match UserPtrMut::from_addr(argp).write(token, &inner.winsize) {
-                    Ok(()) => SUCCESS,
-                    Err(errno) => errno,
+                    Ok(()) => Ok(0),
+                    Err(_) => Err(SyscallErr::EFAULT),
                 }
             }
             TeletypeCommand::TIOCSWINSZ => {
                 match UserPtr::from_addr(argp).read(token) {
                     Ok(winsize) => {
                         inner.winsize = winsize;
-                        SUCCESS
+                        Ok(0)
                     }
-                    Err(errno) => errno,
+                    Err(_) => Err(SyscallErr::EFAULT),
                 }
             }
             _ => {
-                warn!("[tty_ioctl] unsupported ioctl cmd: {:?} ({:#X})", TeletypeCommand::from_primitive(cmd), cmd);
-                ENOTTY
+                warn!(
+                    "[tty_ioctl] unsupported ioctl cmd: {:?} ({:#X})",
+                    TeletypeCommand::from_primitive(cmd),
+                    cmd
+                );
+                Err(SyscallErr::ENOTTY)
             }
         }
     }
 
-    fn fcntl(&self, cmd: u32, arg: u32) -> isize {
-        EINVAL
+    fn read_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(&self.read_waiters)
+    }
+
+    fn fs(&self) -> Arc<dyn NewFileSystem> {
+        DEV_FS.clone()
+    }
+
+    fn as_any_ref(&self) -> &dyn Any {
+        self
     }
 }
 

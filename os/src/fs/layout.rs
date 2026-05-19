@@ -96,34 +96,34 @@ bitflags! {
 /// Store the file attributes from a supported file.
 pub struct Stat {
     /// ID of device containing file
-    st_dev: u64,
+    pub st_dev: u64,
     /// Inode number
-    st_ino: u64,
+    pub st_ino: u64,
     /// File type and mode
-    st_mode: u32,
+    pub st_mode: u32,
     /// Number of hard links
-    st_nlink: u32,
+    pub st_nlink: u32,
     /// User ID of the file's owner.
-    st_uid: u32,
+    pub st_uid: u32,
     /// Group ID of the file's group.
-    st_gid: u32,
+    pub st_gid: u32,
     /// Device ID (if special file)
-    st_rdev: u64,
-    __pad: u64,
+    pub st_rdev: u64,
+    pub __pad: u64,
     /// Size of file, in bytes.
-    st_size: i64,
+    pub st_size: i64,
     /// Optimal block size for I/O.
-    st_blksize: u32,
-    __pad2: i32,
+    pub st_blksize: u32,
+    pub __pad2: i32,
     /// Number 512-byte blocks allocated.
-    st_blocks: u64,
+    pub st_blocks: u64,
     /// Backward compatibility. Used for time of last access.
-    st_atime: TimeSpec,
+    pub st_atime: TimeSpec,
     /// Time of last modification.
-    st_mtime: TimeSpec,
+    pub st_mtime: TimeSpec,
     /// Time of last status change.
-    st_ctime: TimeSpec,
-    __unused: u64,
+    pub st_ctime: TimeSpec,
+    pub __unused: u64,
 }
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]

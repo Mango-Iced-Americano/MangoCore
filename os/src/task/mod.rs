@@ -1,7 +1,6 @@
 mod context;
 mod elf;
 mod manager;
-pub use manager::{WaitQueue, WaitResult};
 use spin::MutexGuard;
 pub mod pid;
 mod process;
@@ -13,21 +12,21 @@ pub mod threads;
 
 use crate::hal::__switch;
 use crate::{
-    fs::{OpenFlags, ROOT_FD},
+    fs::{self, vfs_lookup_absolute},
     mm::UserPtrMut,
     timer::TimeSpec,
     utils::error::{GeneralRet, SyscallErr},
 };
-use alloc::{collections::VecDeque, sync::Arc};
+use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 pub use context::TaskContext;
 pub use elf::{load_elf_interp, AuxvEntry, AuxvType, ELFInfo};
 use lazy_static::*;
 use log::warn;
 use manager::fetch_task;
 pub use manager::{
-    add_kernel_timer, add_task, do_oom, do_wake_expired, procs_count,
-    send_signal_to_interruptible, sleep_interruptible, task_manager_counts, wait_with_timeout,
-    wake_interruptible, zombie_count, TimerAction,
+    add_kernel_timer, add_task, all_pids, do_oom, do_wake_expired, kernel_timer_queue_len,
+    procs_count, send_signal_to_interruptible, sleep_interruptible, task_manager_counts,
+    wait_with_timeout, wake_interruptible, zombie_count, TimerAction, WaitQueue, WaitResult,
 };
 // pub use pid::RecycleAllocator;
 pub use pid::{
@@ -315,8 +314,9 @@ fn finish_process_exit(task: &Arc<TaskControlBlock>, exit_code: u32) {
     // SocketFile 通过 fd_table 管理，无需额外清理。
     {
         let mut fd_table = task.files.lock();
-        for fd_opt in fd_table.iter_mut() {
-            *fd_opt = None;
+        let open_fds: Vec<usize> = fd_table.iter().map(|(i, _f)| i).collect();
+        for fd in open_fds {
+            let _ = fd_table.drop_fd(fd);
         }
     }
 }
@@ -371,7 +371,8 @@ pub fn exit_group_and_run_next(exit_code: u32) -> ! {
 
 lazy_static! {
     pub static ref INITPROC: Arc<TaskControlBlock> = {
-        let elf = ROOT_FD.open("initproc", OpenFlags::O_RDONLY, true).unwrap();
+        let inode = vfs_lookup_absolute("/initproc").unwrap();
+        let elf = fs::vfs::File::new(inode, fs::vfs::FileFlags::O_RDONLY).unwrap();
         TaskControlBlock::new(elf)
     };
 }

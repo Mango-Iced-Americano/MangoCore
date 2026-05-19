@@ -1,56 +1,41 @@
 use super::page_fault::FaultContext;
 use super::user_mapper::UserMapper;
-use super::vma::Vma;
-use super::{MemoryError, PageTable, PhysAddr, PhysPageNum, VirtAddr};
-use crate::config::PAGE_SIZE;
-use crate::fs::{file_trait::File, SeekWhence};
+use super::vma::{Vma, VmAreaMapping};
+use super::{MapPermission, MemoryError, PageTable, PhysAddr, PhysPageNum, VirtAddr};
+use crate::config::{PAGE_SIZE, PAGE_SIZE_BITS};
+use crate::fs::vfs::IndexNode;
+use crate::utils::error::SyscallErr;
 use alloc::sync::Arc;
 
-struct FileMapFault {
-    file: Arc<dyn File>,
-    old_offset: usize,
-    file_offset: usize,
+fn round_up_page(size: usize) -> usize {
+    size.saturating_add(PAGE_SIZE - 1) & !(PAGE_SIZE - 1)
 }
 
-impl FileMapFault {
-    fn new<T: PageTable>(area: &Vma, ctx: FaultContext) -> Result<Self, MemoryError> {
-        let file = area.vm_file().ok_or(MemoryError::NotMapped)?;
-        let old_offset = file
-            .lseek(0, SeekWhence::SEEK_CUR)
-            .map_err(|_| MemoryError::BadAddress)?;
-        let page_start_va = VirtAddr::from(ctx.vpn).0;
-        let area_start_va = VirtAddr::from(area.get_start::<T>()).0;
-        let offset_in_area = page_start_va - area_start_va;
-        let file_offset = old_offset
-            .checked_add(offset_in_area)
-            .ok_or(MemoryError::BeyondEOF)?;
-
-        if file_offset > rounded_file_page_end(file.get_size()) {
-            return Err(MemoryError::BeyondEOF);
-        }
-
-        Ok(Self {
-            file,
-            old_offset,
-            file_offset,
-        })
+fn check_within_file(inode: &dyn IndexNode, file_offset: usize) -> Result<usize, MemoryError> {
+    let file_size = inode
+        .metadata()
+        .map(|m| m.size.max(0) as usize)
+        .map_err(|_| MemoryError::BackingStoreFailure)?;
+    if file_offset >= round_up_page(file_size) {
+        return Err(MemoryError::BeyondEOF);
     }
+    Ok(file_size)
+}
 
-    fn seek_to_fault_page(&self) -> Result<(), MemoryError> {
-        if self.file_offset > isize::MAX as usize || self.old_offset > isize::MAX as usize {
-            return Err(MemoryError::BadAddress);
-        }
-        self.file
-            .lseek(self.file_offset as isize, SeekWhence::SEEK_SET)
-            .map(|_| ())
-            .map_err(|_| MemoryError::BadAddress)
+fn zero_tail(file_size: usize, file_offset: usize, buf: &mut [u8]) {
+    let page_end = file_offset + PAGE_SIZE;
+    if page_end > file_size {
+        let valid = file_size.saturating_sub(file_offset);
+        let tail_start = valid.min(PAGE_SIZE);
+        buf[tail_start..].fill(0);
     }
+}
 
-    fn restore_old_offset(&self) -> Result<(), MemoryError> {
-        self.file
-            .lseek(self.old_offset as isize, SeekWhence::SEEK_SET)
-            .map(|_| ())
-            .map_err(|_| MemoryError::BadAddress)
+fn map_pc_error(e: SyscallErr) -> MemoryError {
+    match e {
+        SyscallErr::ENOMEM => MemoryError::OutOfMemory,
+        SyscallErr::EIO => MemoryError::BackingStoreFailure,
+        _ => MemoryError::BackingStoreFailure,
     }
 }
 
@@ -59,11 +44,23 @@ pub(super) fn filemap_private_fault<T: PageTable>(
     page_table: &mut T,
     ctx: FaultContext,
 ) -> Result<PhysAddr, MemoryError> {
-    let file_fault = FileMapFault::new::<T>(area, ctx)?;
+    let inode = area.vm_file().ok_or(MemoryError::NotMapped)?;
+    let file_offset = area.vm_file_offset(ctx.vpn)?;
+    let file_size = check_within_file(inode.as_ref(), file_offset)?;
+
+    let pc = inode
+        .page_cache()
+        .ok_or(MemoryError::BackingStoreFailure)?;
+    let cache_frame = pc
+        .frame_for_read(file_offset >> PAGE_SIZE_BITS)
+        .map_err(map_pc_error)?;
+
     let allocated_ppn = area.map_one_zeroed_unchecked(page_table, ctx.vpn)?;
-    file_fault.seek_to_fault_page()?;
-    file_fault.file.read(None, page_bytes_mut(allocated_ppn));
-    file_fault.restore_old_offset()?;
+    let src = cache_frame.ppn.get_bytes_array();
+    let dst = allocated_ppn.get_bytes_array();
+    dst.copy_from_slice(src);
+    zero_tail(file_size, file_offset, dst);
+
     Ok(ctx.offset_phys(allocated_ppn))
 }
 
@@ -72,16 +69,60 @@ pub(super) fn filemap_read_fault<T: PageTable>(
     page_table: &mut T,
     ctx: FaultContext,
 ) -> Result<PhysAddr, MemoryError> {
-    let file_fault = FileMapFault::new::<T>(area, ctx)?;
-    let cache_phys_page = file_fault
-        .file
-        .get_single_cache(file_fault.file_offset)
-        .map_err(|_| MemoryError::BeyondEOF)?
-        .lock()
-        .get_tracker();
-    let cache_ppn = cache_phys_page.ppn;
+    let inode = area.vm_file().ok_or(MemoryError::NotMapped)?;
+    let file_offset = area.vm_file_offset(ctx.vpn)?;
+    let file_size = check_within_file(inode.as_ref(), file_offset)?;
 
-    area.inner.alloc_in_memory(ctx.vpn, cache_phys_page)?;
+    let pc = inode
+        .page_cache()
+        .ok_or(MemoryError::BackingStoreFailure)?;
+    let page_index = file_offset >> PAGE_SIZE_BITS;
+    let cache_frame = pc.frame_for_read(page_index).map_err(map_pc_error)?;
+    let cache_ppn = cache_frame.ppn;
+
+    // Zero the tail beyond EOF for the last partial page (shared via page cache).
+    zero_tail(file_size, file_offset, cache_ppn.get_bytes_array());
+
+    // For both MAP_PRIVATE and MAP_SHARED with W: clear W so first store
+    // goes through a fault, triggering CoW (private) or dirty-mark (shared).
+    let map_perm = if area.vm_perm().contains(MapPermission::W) {
+        area.vm_perm().difference(MapPermission::W)
+    } else {
+        area.vm_perm()
+    };
+
+    area.inner
+        .alloc_in_memory(ctx.vpn, cache_frame)
+        .map_err(|_| MemoryError::AlreadyAllocated)?;
+
+    if let Err(err) = UserMapper::new(page_table).map_user_page(ctx.vpn, cache_ppn, map_perm) {
+        area.inner.remove_in_memory(&ctx.vpn);
+        return Err(err);
+    }
+
+    Ok(ctx.offset_phys(cache_ppn))
+}
+
+pub(super) fn filemap_shared_write_fault<T: PageTable>(
+    area: &mut Vma,
+    page_table: &mut T,
+    ctx: FaultContext,
+) -> Result<PhysAddr, MemoryError> {
+    let inode = area.vm_file().ok_or(MemoryError::NotMapped)?;
+    let file_offset = area.vm_file_offset(ctx.vpn)?;
+    let _file_size = check_within_file(inode.as_ref(), file_offset)?;
+
+    let pc = inode
+        .page_cache()
+        .ok_or(MemoryError::BackingStoreFailure)?;
+    let page_index = file_offset >> PAGE_SIZE_BITS;
+    let cache_frame = pc.frame_for_write(page_index).map_err(map_pc_error)?;
+    let cache_ppn = cache_frame.ppn;
+
+    area.inner
+        .alloc_in_memory(ctx.vpn, cache_frame)
+        .map_err(|_| MemoryError::AlreadyAllocated)?;
+
     if let Err(err) =
         UserMapper::new(page_table).map_user_page(ctx.vpn, cache_ppn, area.vm_perm())
     {
@@ -90,12 +131,4 @@ pub(super) fn filemap_read_fault<T: PageTable>(
     }
 
     Ok(ctx.offset_phys(cache_ppn))
-}
-
-fn rounded_file_page_end(file_size: usize) -> usize {
-    file_size.saturating_add(PAGE_SIZE - 1) & !(PAGE_SIZE - 1)
-}
-
-fn page_bytes_mut(ppn: PhysPageNum) -> &'static mut [u8] {
-    ppn.get_bytes_array()
 }

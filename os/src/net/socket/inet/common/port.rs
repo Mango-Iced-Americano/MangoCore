@@ -41,14 +41,10 @@ impl PortManager {
         );
         let target_pure_type = target_sock.socket_type();
         let fd_table = task.files.lock();
-        for fd_opt in fd_table.iter() {
-            let fd_ref = match fd_opt {
-                Some(fd) => fd,
+        for (_fd_num, file) in fd_table.iter() {
+            let socket_file = match file.inode.as_any_ref().downcast_ref::<SocketFile>() {
+                Some(sf) => sf,
                 None => continue,
-            };
-            let socket_file = match fd_ref.file.clone().downcast_arc::<SocketFile>() {
-                Ok(sf) => sf,
-                Err(_) => continue,
             };
             let socket = socket_file.inner.clone();
             let pure_type = socket.socket_type();

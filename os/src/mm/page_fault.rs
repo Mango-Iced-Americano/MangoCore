@@ -1,8 +1,9 @@
-use super::filemap::{filemap_private_fault, filemap_read_fault};
+use super::filemap::{filemap_private_fault, filemap_read_fault, filemap_shared_write_fault};
 use super::user_mapper::UserMapper;
 use super::vma::Vma;
 use super::vma::{VmAreaKind, VmAreaMapping, VmPageState};
 use super::{FaultAccess, MemoryError, PageTable, PhysAddr, VirtAddr, VirtPageNum};
+use crate::utils::error::SyscallErr;
 use log::{debug, error, info, warn};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -31,6 +32,7 @@ pub(super) enum FaultAction {
     LazyAlloc,
     FileBackedRead,
     FileBackedWrite,
+    FileBackedSharedWrite,
     #[cfg(feature = "oom_handler")]
     Decompress,
     #[cfg(feature = "oom_handler")]
@@ -67,7 +69,9 @@ impl PageFaultHandler {
             }
             // 文件映射页首次读取/执行: 直接映射文件页缓存。
             FaultAction::FileBackedRead => filemap_read_fault(area, page_table, ctx),
-            // 文件映射页首次写入: 分配私有物理页并从文件填充内容。
+            // 文件映射页首次写入共享映射: 映射 page cache 帧并标脏。
+            FaultAction::FileBackedSharedWrite => filemap_shared_write_fault(area, page_table, ctx),
+            // 文件映射页首次写入私有映射: 分配私有物理页并从文件填充内容。
             FaultAction::FileBackedWrite => filemap_private_fault(area, page_table, ctx),
             // 压缩匿名页再次访问: 解压后恢复页表映射。
             #[cfg(feature = "oom_handler")]
@@ -110,6 +114,9 @@ impl PageFaultHandler {
 
         match area.vm_kind() {
             VmAreaKind::FileBacked => Ok(match ctx.access {
+                FaultAccess::Store if area.vm_mapping() == VmAreaMapping::Shared => {
+                    FaultAction::FileBackedSharedWrite
+                }
                 FaultAccess::Store => FaultAction::FileBackedWrite,
                 FaultAccess::Load | FaultAccess::Execute => FaultAction::FileBackedRead,
             }),
@@ -199,6 +206,22 @@ fn restore_shared_write<T: PageTable>(
     page_table: &mut T,
     ctx: FaultContext,
 ) -> Result<PhysAddr, MemoryError> {
+    // For file-backed shared pages: mark dirty in page cache before restoring W.
+    if area.vm_kind() == VmAreaKind::FileBacked {
+        if let (Some(inode), Ok(file_offset)) =
+            (area.vm_file(), area.vm_file_offset(ctx.vpn))
+        {
+            if let Some(pc) = inode.page_cache() {
+                let page_index = file_offset >> crate::config::PAGE_SIZE_BITS;
+                if let Err(e) = pc.frame_for_write(page_index) {
+                    return Err(match e {
+                        SyscallErr::ENOMEM => MemoryError::OutOfMemory,
+                        _ => MemoryError::BackingStoreFailure,
+                    });
+                }
+            }
+        }
+    }
     let mut mapper = UserMapper::new(page_table);
     mapper.set_user_flags(ctx.vpn, area.vm_perm())?;
     let ppn = mapper.translate(ctx.vpn).ok_or(MemoryError::NotMapped)?;

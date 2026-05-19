@@ -2,11 +2,10 @@
     此文件用于解析ELF文件
     内容与RISCV版本相同，无需修改
 */
-use crate::fs::DiskInodeType;
 use alloc::boxed::Box;
 
 use crate::{
-    fs::{OpenFlags, ROOT_FD},
+    fs::{vfs, vfs_lookup_absolute},
     mm::KERNEL_SPACE,
     syscall::errno::*,
 };
@@ -93,65 +92,31 @@ pub struct ELFInfo {
     pub phdr: usize,
 }
 
-/// 加载ELF解释器
+/// 加载ELF解释器（使用新 VFS）
 pub fn load_elf_interp(path: &str) -> Result<&'static [u8], isize> {
     log::info!("[load_elf_interp]Loading ELF interpreter: {}", path);
-    // 只读方式打开指定path的文件
-    match ROOT_FD.open(path, OpenFlags::O_RDONLY, false) {
-        Ok(file) => {
-            // 增加一层防护：解释器必须是普通文件
-            if file.file.get_file_type() != DiskInodeType::File {
-                // 如果是 Link，说明open 函数没能自动展开它
-                log::warn!(
-                    "[load_elf_interp] Interpreter {} is a {:?}, not a Regular File!",
-                    path,
-                    file.file.get_file_type()
-                );
-                return Err(ENOEXEC); // 或者返回 ENOENT
-            }
-            // 文件大小小于ELF文件头大小
-            if file.get_size() < 4 {
-                return Err(ELIBBAD);
-            }
-            // 读取文件头的前4个字节，即魔数'\x7fELF'
-            let mut magic_number = Box::<[u8; 4]>::new([0; 4]);
-            // this operation may be expensive... I'm not sure
-            // 原作者注释：这个操作可能很昂贵...我不确定
-            file.read(Some(&mut 0usize), magic_number.as_mut_slice());
-            // 匹配魔数
-            match magic_number.as_slice() {
-                // 正确情况
-                b"\x7fELF" => {
-                    // 获取内核空间的最高地址
-                    let buffer_addr = KERNEL_SPACE.lock().highest_addr();
-                    // 在内核空间的最高地址来分配一个缓冲区
-                    let buffer = unsafe {
-                        core::slice::from_raw_parts_mut(buffer_addr.0 as *mut u8, file.get_size())
-                    };
-                    // 获取文件的所有缓存
-                    let caches = file.get_all_caches().unwrap();
-                    // 将缓存内容映射到frame中
-                    let frames = caches
-                        .iter()
-                        .map(|cache| cache.try_lock().unwrap().get_tracker())
-                        .collect();
-
-                    // 将文件内容映射到内核空间
-                    crate::mm::KERNEL_SPACE
-                        .lock()
-                        .insert_program_area(
-                            buffer_addr.into(),
-                            crate::mm::MapPermission::R | crate::mm::MapPermission::W,
-                            frames,
-                        )
-                        .unwrap();
-
-                    return Ok(buffer);
-                }
-                // 不是ELF文件
-                _ => Err(ELIBBAD),
-            }
-        }
-        Err(errno) => Err(errno),
+    // 使用新 VFS 查找并打开解释器文件
+    let inode = vfs_lookup_absolute(path)?;
+    let file = vfs::File::new(inode, vfs::FileFlags::O_RDONLY).map_err(|e| e as isize)?;
+    // 增加一层防护：解释器必须是普通文件
+    if file.file_type() != vfs::FileType::File {
+        log::warn!(
+            "[load_elf_interp] Interpreter {} is not a Regular File!",
+            path
+        );
+        return Err(ENOEXEC);
     }
+    let size = file.get_size();
+    if size < 4 {
+        return Err(ELIBBAD);
+    }
+    // 读取文件头的前4个字节，即魔数'\x7fELF'
+    let mut magic_number = [0u8; 4];
+    let n = file.pread(0, &mut magic_number).map_err(|e| e as isize)?;
+    if n < 4 || &magic_number != b"\x7fELF" {
+        return Err(ELIBBAD);
+    }
+    // 映射到内核空间（使用最高可用地址作为映射基址）
+    let buffer_addr = KERNEL_SPACE.lock().highest_addr();
+    Ok(file.map_to_kernel_space(buffer_addr.0))
 }

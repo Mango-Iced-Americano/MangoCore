@@ -73,7 +73,7 @@ impl<T: PageTable> AddressSpace<T> {
         end_va: VirtAddr,
         permission: MapPermission,
     ) {
-        let mut area = Vma::new(start_va, end_va, permission, None);
+        let mut area = Vma::new(start_va, end_va, permission, None, 0);
         area.flags = MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS;
         self.push(area, None).unwrap();
     }
@@ -351,7 +351,7 @@ impl<T: PageTable> AddressSpace<T> {
                         load_addr = Some(start_va.into());
                     }
                     let mut vma =
-                        match Vma::try_new(start_va, end_va, map_perm, None) {
+                        match Vma::try_new(start_va, end_va, map_perm, None, 0) {
                             Ok(area) => area,
                             Err(e) => return Err(e),
                         };

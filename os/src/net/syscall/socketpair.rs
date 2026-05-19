@@ -2,7 +2,7 @@ use alloc::sync::Arc;
 use core::convert::TryFrom;
 use log::info;
 
-use crate::fs::FileDescriptor;
+use crate::fs::vfs::{self, FileFlags};
 use crate::mm::UserSlice;
 use crate::net::posix::PosixArgsSocketType;
 use crate::net::{make_unix_socket_pair, SocketFile, AF_UNIX, AF_UNSPEC, PSOCK};
@@ -53,16 +53,28 @@ pub fn sys_socketpair(domain: u32, socket_type: u32, protocol: u32, sv: usize) -
     let socket_file1 = Arc::new(SocketFile::new(socket1));
     let socket_file2 = Arc::new(SocketFile::new(socket2));
 
+    let mut vfs_flags = FileFlags::O_RDWR;
+    if is_nonblock {
+        vfs_flags.insert(FileFlags::O_NONBLOCK);
+    }
+
     let task = current_task().unwrap();
+    let vf1 =
+        vfs::File::new_without_open(socket_file1, vfs_flags, vfs::FileType::Socket);
+    let vf2 =
+        vfs::File::new_without_open(socket_file2, vfs_flags, vfs::FileType::Socket);
+
     let fd1 = task
         .files
         .lock()
-        .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket_file1))
+        .alloc_fd(vf1, is_cloexec)
+        .map_err(|e| -(e as isize))
         .unwrap();
     let fd2 = task
         .files
         .lock()
-        .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket_file2))
+        .alloc_fd(vf2, is_cloexec)
+        .map_err(|e| -(e as isize))
         .unwrap();
 
     // 将两个 fd 写入用户空间的 sv 数组（sv[0] = fd1, sv[1] = fd2）

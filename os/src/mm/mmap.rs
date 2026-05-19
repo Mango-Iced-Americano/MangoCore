@@ -4,7 +4,7 @@ use super::user_mapper::UserMapper;
 use super::vma::{MapFlags, MapPermission, Vma};
 use super::VirtAddr;
 use crate::config::*;
-use crate::fs::SeekWhence;
+use crate::fs::vfs::{FileType, FdTable};
 use crate::syscall::errno::*;
 use crate::task::current_task;
 use log::{trace, warn};
@@ -150,10 +150,7 @@ pub(super) fn do_mmap<T: PageTable>(
         Ok(range) => range,
         Err(errno) => return errno,
     };
-    // MAP_SHARED still maps pages eagerly.
-    if flags.contains(MapFlags::MAP_SHARED) && len > MAX_EAGER_MMAP_SIZE {
-        return ENOMEM;
-    }
+    // 文件映射 MAP_SHARED 改为懒加载，不再需要提前拒绝大映射
     let task = current_task().unwrap();
     let fixed =
         flags.contains(MapFlags::MAP_FIXED) || flags.contains(MapFlags::MAP_FIXED_NOREPLACE);
@@ -203,7 +200,7 @@ pub(super) fn do_mmap<T: PageTable>(
     if let Err(errno) = address_space.vmas.try_reserve(1) {
         return errno;
     }
-    let mut new_area = match Vma::try_new(start_va, end_va, prot, None) {
+    let mut new_area = match Vma::try_new(start_va, end_va, prot, None, 0) {
         Ok(area) => area,
         Err(e) => return e,
     };
@@ -214,101 +211,41 @@ pub(super) fn do_mmap<T: PageTable>(
         }
         warn!("[mmap] file-backed map!");
         let fd_table = task.files.lock();
-        match fd_table.get_ref(fd) {
-            Ok(file_descriptor) => {
-                if !file_descriptor.readable() {
+        match fd_table.get_file(fd) {
+            Ok(file) => {
+                if file.readable().is_err() {
                     return EACCES;
                 }
                 if flags.contains(MapFlags::MAP_SHARED)
                     && prot.contains(MapPermission::W)
-                    && !file_descriptor.writable()
+                    && file.writable().is_err()
                 {
                     return EACCES;
                 }
-                if !file_descriptor.file.is_file() {
-                    return EINVAL;
+                if !matches!(file.file_type(), FileType::File) {
+                    return EACCES;
                 }
-                let file = file_descriptor.file.deep_clone();
-                if file.lseek(offset as isize, SeekWhence::SEEK_SET).is_err() {
-                    return EINVAL;
-                }
-                new_area.map_file = Some(file);
+                new_area.map_file = Some(file.inode.clone());
+                new_area.map_file_offset = offset;
             }
-            Err(errno) => return errno,
+            Err(_) => return EBADF,
         }
     }
 
-    if flags.contains(MapFlags::MAP_SHARED) {
-        let map_file = new_area.map_file.clone();
-        let area_start_va = VirtAddr::from(new_area.get_start::<T>()).0;
+    if flags.contains(MapFlags::MAP_SHARED) && new_area.map_file.is_none() {
+        // Anonymous MAP_SHARED still maps pages eagerly (with size limit).
+        if len > MAX_EAGER_MMAP_SIZE {
+            return ENOMEM;
+        }
         let vpn_range = new_area.inner.vpn_range;
-        if let Some(file) = &map_file {
-            let old_offset = match file.lseek(0, SeekWhence::SEEK_CUR) {
-                Ok(offset) => offset,
-                Err(_) => return EINVAL,
-            };
-            let file_size = file.get_size();
-            for vpn in vpn_range {
-                let page_start_va = VirtAddr::from(vpn).0;
-                let offset_in_area = page_start_va - area_start_va;
-                let Some(file_offset) = old_offset.checked_add(offset_in_area) else {
-                    return EINVAL;
+        for vpn in vpn_range {
+            if let Err(err) =
+                new_area.map_one_zeroed_unchecked(&mut address_space.page_table, vpn)
+            {
+                return match err {
+                    MemoryError::OutOfMemory => ENOMEM,
+                    _ => EINVAL,
                 };
-                let file_page_end = file_size.saturating_add(PAGE_SIZE - 1) & !0xfff;
-                if file_offset <= file_page_end {
-                    if let Ok(cache) = file.get_single_cache(file_offset) {
-                        let cache_phys_page = cache.lock().get_tracker();
-                        let cache_ppn = cache_phys_page.ppn;
-                        if let Err(err) = new_area.inner.alloc_in_memory(vpn, cache_phys_page) {
-                            return match err {
-                                MemoryError::OutOfMemory => ENOMEM,
-                                _ => EINVAL,
-                            };
-                        }
-                        if let Err(err) =
-                            UserMapper::new(&mut address_space.page_table).map_user_page(
-                                vpn,
-                                cache_ppn,
-                                new_area.map_perm,
-                            )
-                        {
-                            new_area.inner.remove_in_memory(&vpn);
-                            return match err {
-                                MemoryError::OutOfMemory => ENOMEM,
-                                _ => EINVAL,
-                            };
-                        }
-                    } else {
-                        if let Err(err) =
-                            new_area.map_one_zeroed_unchecked(&mut address_space.page_table, vpn)
-                        {
-                            return match err {
-                                MemoryError::OutOfMemory => ENOMEM,
-                                _ => EINVAL,
-                            };
-                        }
-                    }
-                } else {
-                    if let Err(err) =
-                        new_area.map_one_zeroed_unchecked(&mut address_space.page_table, vpn)
-                    {
-                        return match err {
-                            MemoryError::OutOfMemory => ENOMEM,
-                            _ => EINVAL,
-                        };
-                    }
-                }
-            }
-        } else {
-            for vpn in vpn_range {
-                if let Err(err) =
-                    new_area.map_one_zeroed_unchecked(&mut address_space.page_table, vpn)
-                {
-                    return match err {
-                        MemoryError::OutOfMemory => ENOMEM,
-                        _ => EINVAL,
-                    };
-                }
             }
         }
     }

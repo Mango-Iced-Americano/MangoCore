@@ -9,8 +9,8 @@ use super::{
     tid_alloc, trap_cx_bottom_from_slot, ustack_bottom_from_slot, TidHandle,
 };
 use crate::config::MMAP_BASE;
-use crate::fs::file_descriptor::FdTable;
-use crate::fs::{FileDescriptor, OpenFlags, ROOT_FD};
+use crate::fs::vfs;
+use crate::fs::{vfs_lookup_absolute, vfs_root};
 use crate::hal::TrapImpl;
 use crate::hal::{kstack_alloc, KernelStack};
 use crate::hal::{trap_handler, TrapContext};
@@ -29,8 +29,10 @@ use spin::{Mutex, MutexGuard};
 #[derive(Clone)]
 /// 任务的文件系统状态
 pub struct FsStatus {
-    /// 当前工作目录的文件描述符
-    pub working_inode: Arc<FileDescriptor>,
+    /// 当前工作目录的文件（新 VFS）
+    pub working_inode: Arc<vfs::File>,
+    /// 当前工作目录的绝对路径字符串（用于 getcwd，避免依赖 broken 的 absolute_path()）
+    pub working_path: String,
 }
 
 /// 任务控制块
@@ -52,13 +54,15 @@ pub struct TaskControlBlock {
     /// 任务内部状态，使用互斥锁保护
     inner: Mutex<TaskControlBlockInner>,
     // 可共享&可变字段
-    /// 可执行文件描述符
-    pub exe: Arc<Mutex<FileDescriptor>>,
+    /// 可执行文件描述符（新 VFS）
+    pub exe: Arc<Mutex<vfs::File>>,
+    /// 可执行文件路径（用于 /proc/self/exe）
+    pub exe_path: Mutex<String>,
     /// 同一地址空间内的用户资源槽位分配器
     pub user_res_slot_allocator: Arc<Mutex<RecycleAllocator>>,
-    /// 文件描述符表
-    pub files: Arc<Mutex<FdTable>>,
-    /// 文件系统状态
+    /// 文件描述符表（新 VFS）
+    pub files: Arc<Mutex<vfs::FdTable>>,
+    /// 文件系统状态（新 VFS）
     pub fs: Arc<Mutex<FsStatus>>,
     /// 虚拟内存空间
     pub vm: Arc<Mutex<AddressSpace<PageTableImpl>>>,
@@ -339,7 +343,7 @@ impl TaskControlBlock {
     /// !!!!!!!!!!!!!!!!WARNING!!!!!!!!!!!!!!!!!!!!!
     /// 当前仅用于initproc加载。如果在其他地方使用，必须更改bin_path。
     /// 任务创建（仅用于initproc）
-    pub fn new(elf: FileDescriptor) -> Arc<Self> {
+    pub fn new(elf: vfs::File) -> Arc<Self> {
         // 将ELF文件映射到内核空间
         let elf_data = elf.map_to_kernel_space(MMAP_BASE);
         log::debug!(
@@ -378,6 +382,28 @@ impl TaskControlBlock {
             .translate(VirtAddr::from(trap_cx_bottom_from_slot(user_res_slot)).into())
             .unwrap();
         log::trace!("[TCB::new]trap_cx_ppn{:?}", trap_cx_ppn);
+
+        // 初始化新 VFS 文件描述符表
+        let mut fd_table = vfs::FdTable::new();
+        // 打开 /dev/tty 并分配 stdin/stdout/stderr（fd 0, 1, 2）
+        let tty_inode = vfs_lookup_absolute("/dev/tty").unwrap();
+        let tty_file = vfs::File::new(tty_inode, vfs::FileFlags::O_RDWR).unwrap();
+        fd_table.alloc_fd(tty_file, false).unwrap();
+        let tty_inode = vfs_lookup_absolute("/dev/tty").unwrap();
+        let tty_file = vfs::File::new(tty_inode, vfs::FileFlags::O_RDWR).unwrap();
+        fd_table.alloc_fd(tty_file, false).unwrap();
+        let tty_inode = vfs_lookup_absolute("/dev/tty").unwrap();
+        let tty_file = vfs::File::new(tty_inode, vfs::FileFlags::O_RDWR).unwrap();
+        fd_table.alloc_fd(tty_file, false).unwrap();
+
+        // 初始化工作目录为根目录
+        let root_inode = vfs_root().mountpoint_root_inode();
+        let cwd = vfs::File::new(
+            root_inode,
+            vfs::FileFlags::O_RDONLY | vfs::FileFlags::O_DIRECTORY,
+        )
+        .unwrap();
+
         // 创建任务控制块
         let task_control_block = Arc::new(Self {
             tid: tid_handle,
@@ -388,18 +414,11 @@ impl TaskControlBlock {
             exit_signal: Signals::empty(),
             exe: Arc::new(Mutex::new(elf)),
             user_res_slot_allocator,
-            files: Arc::new(Mutex::new(FdTable::new({
-                let mut vec = Vec::with_capacity(144);
-                let tty = Some(ROOT_FD.open("/dev/tty", OpenFlags::O_RDWR, false).unwrap());
-                vec.resize(3, tty);
-                vec
-            }))),
+            exe_path: Mutex::new(String::new()),
+            files: Arc::new(Mutex::new(fd_table)),
             fs: Arc::new(Mutex::new(FsStatus {
-                working_inode: Arc::new(
-                    ROOT_FD
-                        .open(".", OpenFlags::O_RDONLY | OpenFlags::O_DIRECTORY, true)
-                        .unwrap(),
-                ),
+                working_inode: Arc::new(cwd),
+                working_path: String::from("/"),
             })),
             vm: Arc::new(Mutex::new(memory_set)),
             sighand: Arc::new(Mutex::new(Sighand::new())),
@@ -445,7 +464,7 @@ impl TaskControlBlock {
     /// 加载ELF文件
     pub fn load_elf(
         &self,
-        elf: FileDescriptor,
+        elf: vfs::File,
         argv_vec: &Vec<String>,
         envp_vec: &Vec<String>,
     ) -> Result<(), isize> {
@@ -530,16 +549,8 @@ impl TaskControlBlock {
         inner.heap_pt = program_break;
         // 更新可执行文件描述符
         *self.exe.lock() = elf;
-        // 清理资源
-        // 关闭原文件描述符
-        self.files.lock().iter_mut().for_each(|fd| match fd {
-            Some(file) => {
-                if file.get_cloexec() {
-                    *fd = None;
-                }
-            }
-            None => (),
-        });
+        // 清理资源 — 关闭所有 CLOEXEC 文件描述符
+        self.files.lock().close_cloexec();
         // 替换内存映射
         *self.vm.lock() = memory_set;
         // 清空信号处理函数表
@@ -642,7 +653,7 @@ impl TaskControlBlock {
         let files = if flags.contains(CloneFlags::CLONE_FILES) {
             self.files.clone()
         } else {
-            Arc::new(Mutex::new(self.files.lock().try_clone()?))
+            Arc::new(Mutex::new(self.files.lock().try_clone().map_err(|e| e as isize)?))
         };
         let fs = if flags.contains(CloneFlags::CLONE_FS) {
             self.fs.clone()
@@ -671,6 +682,7 @@ impl TaskControlBlock {
             // 资源共享控制
             exe: self.exe.clone(),
             user_res_slot_allocator,
+            exe_path: Mutex::new(self.exe_path.lock().clone()),
             files,
             fs,
             vm: memory_set,

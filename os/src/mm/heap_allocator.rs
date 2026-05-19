@@ -51,10 +51,6 @@ impl OomAwareAllocator {
                 layout.align(),
                 pages
             );
-            // 内核堆紧张的根因往往是 VFS DirectoryTreeNode 过多，而不是物理帧不足。
-            // 插入一次 VFS 剪枝：剔除 strong_count==1（仅缓存在父节点 children 中）的节点。
-            crate::fs::directory_tree::shrink();
-
             if crate::mm::frame_allocator::oom_handler(pages).is_ok() {
                 return true;
             }

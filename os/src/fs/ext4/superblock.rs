@@ -1,5 +1,5 @@
 use crate::fs::BlockDevice;
-use crate::fs::{directory_tree::GLOBAL_BLOCK_SIZE, timestamp::format_time};
+use crate::fs::timestamp::format_time;
 use alloc::string::String;
 #[allow(unused)]
 use alloc::sync::Arc;
@@ -228,17 +228,14 @@ impl Ext4Superblock {
             core::slice::from_raw_parts(self as *const _ as *const u8, core::mem::size_of::<Self>())
         };
         let superblk_id = SUPERBLOCK_OFFSET / BLOCK_SIZE;
-        // let superblk_id = SUPERBLOCK_OFFSET / *GLOBAL_BLOCK_SIZE;
         let mut buf = vec![0u8; BLOCK_SIZE];
-        // 先读取第一个块
         block_device.read_block(superblk_id, &mut buf);
-        // 然后更改的超级块写到对应的位置中（后1024个字节）
+        super::counters::inc_counter!(super::counters::BLOCK_READ_TOTAL);
+        super::counters::inc_counter!(super::counters::SUPERBLOCK_READ);
         buf[1024..2048].copy_from_slice(data);
-        log::warn!(
-            "[WRITE_CALLER] superblock::sync_to_disk: block={}",
-            superblk_id
-        );
         block_device.write_block(superblk_id, &buf);
+        super::counters::inc_counter!(super::counters::BLOCK_WRITE_TOTAL);
+        super::counters::inc_counter!(super::counters::SUPERBLOCK_WRITE);
     }
 
     /// 同步超级块到磁盘，同时带有校验值
@@ -252,17 +249,15 @@ impl Ext4Superblock {
             core::slice::from_raw_parts(self as *const _ as *const u8, core::mem::size_of::<Self>())
         };
         let superblk_id = SUPERBLOCK_OFFSET / BLOCK_SIZE;
-        // let superblk_id = SUPERBLOCK_OFFSET / *GLOBAL_BLOCK_SIZE;
         let mut buf = vec![0u8; BLOCK_SIZE];
         // 先读取第一个块
         block_device.read_block(superblk_id, &mut buf);
-        // 然后更改的超级块写到对应的位置中（后1024个字节）
+        super::counters::inc_counter!(super::counters::BLOCK_READ_TOTAL);
+        super::counters::inc_counter!(super::counters::SUPERBLOCK_READ);
         buf[1024..2048].copy_from_slice(data);
-        log::warn!(
-            "[WRITE_CALLER] superblock::sync_to_disk_with_csum: block={}",
-            superblk_id
-        );
         block_device.write_block(superblk_id, &buf);
+        super::counters::inc_counter!(super::counters::BLOCK_WRITE_TOTAL);
+        super::counters::inc_counter!(super::counters::SUPERBLOCK_WRITE);
     }
 
     /// xein add this, maybe wrong

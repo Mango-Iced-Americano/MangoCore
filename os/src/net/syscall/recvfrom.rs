@@ -25,10 +25,6 @@ pub fn sys_recvfrom(
     };
 
     let task = current_task().unwrap();
-    let socket_file = match task.files.lock().get_ref(sockfd as usize) {
-        Ok(file) => file.clone(),
-        Err(e) => return e,
-    };
     let socket = crate::get_socket!(sockfd);
 
     // 在 syscall 入口校验 src_addr 对应的 *addrlen 值
@@ -48,8 +44,8 @@ pub fn sys_recvfrom(
     let is_nonblock = {
         let fd_table = task.files.lock();
         fd_table
-            .get_ref(sockfd as usize)
-            .map(|fd| fd.get_nonblock())
+            .get_file(sockfd as usize)
+            .map(|f| f.is_nonblock())
             .unwrap_or(false)
     } || msg_dontwait;
 

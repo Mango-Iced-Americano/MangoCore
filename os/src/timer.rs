@@ -335,11 +335,16 @@ pub fn current_time() -> u64 {
     uptime() + BOOT_TIME_OFFSET.load(core::sync::atomic::Ordering::Relaxed)
 }
 
+/// 当前 Unix 时间戳（安全版本）
+pub fn current_time_safe() -> u64 {
+    let offset = BOOT_TIME_OFFSET.load(core::sync::atomic::Ordering::Relaxed);
+    get_time_sec() as u64 + offset
+}
+
 /// 获取系统启动以来的时间（秒）
+/// 直接使用 HAL 层 get_time() / get_clock_freq()，不依赖 TimeSource 初始化
 pub fn uptime() -> u64 {
-    unsafe {
-        TIME_SOURCE.expect("TimeSource not initialized").uptime()
-    }
+    get_time_sec() as u64
 }
 
 /// 解析启动参数，如 `now=1749900000`

@@ -5,7 +5,7 @@
 
 pub mod inner;
 use self::inner::Connected;
-use crate::fs::FileDescriptor;
+use crate::fs::vfs::{self, FileFlags};
 use crate::net::socket::unix::ns::{ABSTRACT_TABLE, UNIX_PATH_MAX};
 use crate::net::socket::unix::PATH_TABLE;
 use crate::net::socket::unix::{UnixEndpoint, UnixEndpointBound};
@@ -248,13 +248,17 @@ impl Socket for UnixStreamSocket {
                 // 把 Connected 包成 UnixStreamSocket（← 现场造，不再提前造）
                 let server_socket = UnixStreamSocket::new_connected(conn, false);
                 let socket: Arc<dyn Socket> = Arc::new(server_socket);
-                let socket_file = Arc::new(crate::net::SocketFile::new(socket));
+                let socket_file: Arc<dyn crate::fs::vfs::IndexNode> =
+                    Arc::new(crate::net::SocketFile::new(socket));
+                let vf = vfs::File::new_without_open(
+                    socket_file, FileFlags::O_RDWR, vfs::FileType::Socket,
+                );
 
                 let task = crate::task::current_task().ok_or(SyscallErr::ESRCH)?;
                 let fd = task
                     .files
                     .lock()
-                    .insert(FileDescriptor::new(false, false, socket_file))
+                    .alloc_fd(vf, false)
                     .map_err(|_| SyscallErr::ENFILE)?;
 
                 // 填充对端地址

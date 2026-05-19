@@ -1,7 +1,4 @@
-use crate::fs::directory_tree::{FILE_SYSTEM, GLOBAL_BLOCK_SIZE};
-
 use super::*;
-use crate::fs::inode::InodeTrait;
 use crate::fs::DiskInodeType;
 use crate::timer::get_time_sec;
 use alloc::vec;
@@ -100,10 +97,9 @@ impl Default for FileAttr {
 
 #[allow(unused)]
 impl FileAttr {
-    pub fn from_inode_ref(inode_ref: &Ext4InodeRef) -> FileAttr {
+    pub fn from_inode_ref(inode_ref: &Ext4InodeRef, block_size: usize) -> FileAttr {
         let inode_num = inode_ref.inode_num;
         let inode = inode_ref.inode;
-        let block_size = *GLOBAL_BLOCK_SIZE;
         FileAttr {
             ino: inode_num as u64,
             size: inode.size(),
@@ -232,8 +228,12 @@ impl Ext4FileSystem {
             // at this point child need a new block
             self.dir_add_entry(child, &new_child_ref, ".")?;
 
-            // at this point should insert to existing block
-            self.dir_add_entry(child, &new_child_ref, "..")?;
+            // .. should point to parent, not child
+            let parent_ref = Ext4InodeRef {
+                inode_num: parent.inode_num,
+                inode: parent.inode,
+            };
+            self.dir_add_entry(child, &parent_ref, "..")?;
 
             child.inode.set_links_count(2);
             let link_cnt = parent.inode.links_count() + 1;
@@ -249,6 +249,38 @@ impl Ext4FileSystem {
         Ok(EOK)
     }
 
+    /// link() 但不 flush parent inode — caller 负责最后统一 flush
+    pub fn link_no_parent_flush(
+        &self,
+        parent: &mut Ext4InodeRef,
+        child: &mut Ext4InodeRef,
+        name: &str,
+    ) -> Result<usize, isize> {
+        self.dir_add_entry(parent, child, name)?;
+        // skip write_back_inode_without_csum(parent)
+
+        if child.inode.is_dir() {
+            let new_child_ref = Ext4InodeRef {
+                inode_num: child.inode_num,
+                inode: child.inode,
+            };
+            self.dir_add_entry(child, &new_child_ref, ".")?;
+            let parent_ref = Ext4InodeRef {
+                inode_num: parent.inode_num,
+                inode: parent.inode,
+            };
+            self.dir_add_entry(child, &parent_ref, "..")?;
+            child.inode.set_links_count(2);
+            let link_cnt = parent.inode.links_count() + 1;
+            parent.inode.set_links_count(link_cnt);
+            return Ok(EOK);
+        }
+
+        let link_cnt = child.inode.links_count() + 1;
+        child.inode.set_links_count(link_cnt);
+        Ok(EOK)
+    }
+
     /// 创建一个新inode并将其链接到其父目录
     /// # 参数
     /// + parent: u32 - 父目录的inode号
@@ -258,33 +290,70 @@ impl Ext4FileSystem {
     /// # 返回值:
     /// + `Result<Ext4InodeRef>` - 新文件的inode
     pub fn create(&self, parent: u32, name: &str, inode_mode: u16) -> Result<Ext4InodeRef, isize> {
-        //println!("in1, parent:{:?}", parent);
-        let a = 1 + 2 + parent;
-        //println!("a = {:?}", a);
-        // Ext4FileSystem被锁了？
-        let dummy = self.get_inode_ref(a);
-        // println!("dummy = {:#?}", dummy);
-        // 获取父目录的inode
         let mut parent_inode_ref = self.get_inode_ref(parent);
-        // println!("in2");
-        // 创建一个新inode
         let init_child_ref = self.create_inode(inode_mode)?;
-
-        // println!("in3");
-        // 写回inode
-        // TODO: 在使用LoongsonNand的时候读和写的数据不一样
-        self.write_back_inode_without_csum(&init_child_ref);
-        let mut child_inode_ref = self.get_inode_ref(init_child_ref.inode_num);
-        // println!("in4");
-        // 链接新 inode 到父目录
-        self.link(&mut parent_inode_ref, &mut child_inode_ref, name)?;
-
-        // 写回父目录 inode
+        let mut child_mut = init_child_ref.clone();
+        self.link_no_parent_flush(&mut parent_inode_ref, &mut child_mut, name)?;
         self.write_back_inode(&mut parent_inode_ref);
-        // 写回新 inode
-        self.write_back_inode(&mut child_inode_ref);
+        self.write_back_inode(&mut child_mut);
+        Ok(child_mut)
+    }
 
-        Ok(child_inode_ref)
+    /// 创建 fast symlink（target ≤ 60 字节，存入 i_block 而非分配 data block）。
+    ///
+    /// Phase 3 优化：避免 create() 的先写空 inode 再读回再写 target 的冗余路径。
+    /// 一次初始化 child inode，一次 write_back_inode，一次 write parent。
+    pub fn create_fast_symlink(
+        &self,
+        parent: u32,
+        name: &str,
+        target: &[u8],
+        uid: u16,
+        gid: u16,
+    ) -> Result<Ext4InodeRef, isize> {
+        assert!(target.len() <= 60, "create_fast_symlink: target too long for fast symlink");
+
+        // 1. Allocate inode number
+        let ino = self.ialloc_alloc_inode(false)?;
+
+        // 2. Initialize child inode with all fields + target in i_block
+        let now = crate::timer::current_time_safe() as u32;
+        let mut inode = Ext4Inode::default();
+        inode.set_mode(InodeFileType::S_IFLNK.bits() | 0o777);
+        inode.set_uid(uid);
+        inode.set_gid(gid);
+        inode.set_size(target.len() as u64);
+        inode.set_atime(now);
+        inode.set_mtime(now);
+        inode.set_ctime(now);
+        // links_count is set by link_no_parent_flush (increments from 0 to 1)
+        // Initialize extra inode size for metadata_csum
+        let inode_size = self.superblock.inode_size();
+        if inode_size > EXT4_GOOD_OLD_INODE_SIZE {
+            inode.set_i_extra_isize(self.superblock.extra_size());
+        }
+        // No EXT4_INODE_FLAG_EXTENTS — fast symlink uses i_block directly
+        let block_bytes = inode.block_mut_as_bytes();
+        block_bytes[..target.len()].copy_from_slice(target);
+        block_bytes[target.len()..60].fill(0);
+
+        let child_ref = Ext4InodeRef { inode_num: ino, inode };
+
+        // 3. Add directory entry and link (no parent flush — done in step 4)
+        let mut parent_ref = self.get_inode_ref(parent);
+        let mut child_mut = child_ref.clone();
+        self.link_no_parent_flush(&mut parent_ref, &mut child_mut, name)?;
+        super::counters::inc_counter!(super::counters::SYMLINK_DIR_BLOCK_WRITE_COUNT);
+
+        // 4. Flush parent once, child once
+        self.write_back_inode(&mut parent_ref);
+        super::counters::inc_counter!(super::counters::SYMLINK_PARENT_INODE_WRITE_COUNT);
+
+        let mut final_ref = child_ref.clone();
+        self.write_back_inode(&mut final_ref);
+        super::counters::inc_counter!(super::counters::SYMLINK_INODE_WRITE_COUNT);
+
+        Ok(final_ref)
     }
 
     /// 创建inode
@@ -329,9 +398,15 @@ impl Ext4FileSystem {
             inode.set_i_extra_isize(extra_size);
         }
 
-        // set extent
-        inode.set_flags(EXT4_INODE_FLAG_EXTENTS as u32);
-        inode.extent_tree_init();
+        // set extent — only for regular files and directories
+        // symlinks use i_block directly (fast) or data blocks (long);
+        // device files / fifos / sockets don't need extents
+        let needs_extents = inode_file_type == InodeFileType::S_IFREG
+            || inode_file_type == InodeFileType::S_IFDIR;
+        if needs_extents {
+            inode.set_flags(EXT4_INODE_FLAG_EXTENTS as u32);
+            inode.extent_tree_init();
+        }
 
         let inode_ref = Ext4InodeRef {
             inode_num: inode_num.unwrap(),
@@ -360,23 +435,14 @@ impl Ext4FileSystem {
         gid: u16,
     ) -> Result<Ext4InodeRef, isize> {
         let mut parent_inode_ref = self.get_inode_ref(parent);
-
-        // let mut child_inode_ref = self.create_inode(inode_mode)?;
         let mut init_child_ref = self.create_inode(inode_mode)?;
-
         init_child_ref.inode.set_uid(uid);
         init_child_ref.inode.set_gid(gid);
-
-        self.write_back_inode_without_csum(&init_child_ref);
-        // load new
-        let mut child_inode_ref = self.get_inode_ref(init_child_ref.inode_num);
-
-        self.link(&mut parent_inode_ref, &mut child_inode_ref, name)?;
-
+        let mut child_mut = init_child_ref.clone();
+        self.link_no_parent_flush(&mut parent_inode_ref, &mut child_mut, name)?;
         self.write_back_inode(&mut parent_inode_ref);
-        self.write_back_inode(&mut child_inode_ref);
-
-        Ok(child_inode_ref)
+        self.write_back_inode(&mut child_mut);
+        Ok(child_mut)
     }
 
     /// 从指定文件的某个偏移位置开始读取数据
@@ -398,6 +464,20 @@ impl Ext4FileSystem {
 
         // 获取文件大小
         let file_size = inode_ref.inode.size();
+
+        // Fast symlink: target stored in i_block (no data blocks, no extents)
+        {
+            let is_symlink = inode_ref.inode.get_file_type() == DiskInodeType::Link;
+            let uses_extents = (inode_ref.inode.flags()
+                & crate::fs::ext4::EXT4_INODE_FLAG_EXTENTS as u32) != 0;
+            if is_symlink && !uses_extents && file_size <= 60 {
+                let size = file_size as usize;
+                let to_read = core::cmp::min(size, read_buf.len());
+                let block_bytes = inode_ref.inode.block_as_bytes();
+                read_buf[..to_read].copy_from_slice(&block_bytes[..to_read]);
+                return Ok(to_read);
+            }
+        }
 
         // 如果偏移量大于文件大小，返回 0
         if offset >= file_size as usize {
@@ -431,7 +511,7 @@ impl Ext4FileSystem {
             // 获取逻辑块号对应的物理块号
             match self.get_pblock_idx(&inode_ref, iblock as u32) {
                 Ok(pblock_idx) => {
-                    let mut data = vec![0u8; *GLOBAL_BLOCK_SIZE];
+                    let mut data = vec![0u8; self.block_size];
                     self.block_device.read_block(pblock_idx as usize, &mut data);
                     read_buf[cursor..cursor + adjust_read_size].copy_from_slice(
                         &data[unaligned_start_offset..unaligned_start_offset + adjust_read_size],
@@ -457,7 +537,7 @@ impl Ext4FileSystem {
             // 获取逻辑块号对应的物理块号
             match self.get_pblock_idx(&inode_ref, iblock as u32) {
                 Ok(pblock_idx) => {
-                    let mut data = vec![0u8; *GLOBAL_BLOCK_SIZE];
+                    let mut data = vec![0u8; self.block_size];
                     self.block_device.read_block(pblock_idx as usize, &mut data);
                     read_buf[cursor..cursor + read_length].copy_from_slice(&data[..read_length]);
                 }
@@ -528,10 +608,12 @@ impl Ext4FileSystem {
             let mut block = Block::load_offset(
                 self.block_device.clone(),
                 pblock_idx as usize * self.block_size,
+                self.block_size,
             );
 
             block.write_offset(unaligned, &write_buf[..len], len);
             block.sync_blk_to_disk(self.block_device.clone());
+            super::counters::inc_counter!(super::counters::DATA_BLOCK_WRITE);
             drop(block);
 
             written += len;
@@ -575,10 +657,11 @@ impl Ext4FileSystem {
             for i in 0..fblock_count {
                 let block_offset =
                     fblock_start as usize * self.block_size + i as usize * self.block_size;
-                let mut block = Block::load_offset(self.block_device.clone(), block_offset);
+                let mut block = Block::load_offset(self.block_device.clone(), block_offset, self.block_size);
                 let write_size = min(self.block_size, write_buf_len - written);
                 block.write_offset(0, &write_buf[written..written + write_size], write_size);
                 block.sync_blk_to_disk(self.block_device.clone());
+                super::counters::inc_counter!(super::counters::DATA_BLOCK_WRITE);
                 drop(block);
                 written += write_size;
             }
@@ -599,9 +682,11 @@ impl Ext4FileSystem {
             let mut block = Block::load_offset(
                 self.block_device.clone(),
                 pblock_idx as usize * self.block_size,
+                self.block_size,
             );
             block.write_offset(0, &write_buf[written..], len);
             block.sync_blk_to_disk(self.block_device.clone());
+            super::counters::inc_counter!(super::counters::DATA_BLOCK_WRITE);
             drop(block);
 
             written += len;

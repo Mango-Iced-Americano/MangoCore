@@ -6,11 +6,10 @@ use crate::utils::error::SyscallErr;
 pub fn sys_accept(sockfd: u32, addr: usize, addrlen: usize) -> isize {
     let socket = crate::get_socket!(sockfd);
     let task = current_task().unwrap();
-    let socket_file = match task.files.lock().get_ref(sockfd as usize) {
-        Ok(file) => file.clone(),
-        Err(e) => return e,
+    let is_nonblock = match task.files.lock().get_file(sockfd as usize) {
+        Ok(f) => f.is_nonblock(),
+        Err(e) => return -(e as isize),
     };
-    let is_nonblock = socket_file.get_nonblock();
 
     if let Some(wait_queue) = socket.accept_wait_queue() {
         if is_nonblock {
@@ -55,12 +54,13 @@ pub fn sys_accept4(sockfd: u32, addr: usize, addrlen: usize, flags: u32) -> isiz
     let new_fd = ret as usize;
 
     let task = current_task().unwrap();
-    if let Ok(fd) = task.files.lock().get_refmut(new_fd) {
-        if flags & SOCK_CLOEXEC != 0 {
-            fd.set_cloexec(true);
-        }
-        if flags & SOCK_NONBLOCK != 0 {
-            fd.set_nonblock(true);
+    let mut fd_table = task.files.lock();
+    if flags & SOCK_CLOEXEC != 0 {
+        let _ = fd_table.set_cloexec(new_fd, true);
+    }
+    if flags & SOCK_NONBLOCK != 0 {
+        if let Ok(f) = fd_table.get_file(new_fd) {
+            f.set_nonblock(true);
         }
     }
 

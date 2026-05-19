@@ -32,4 +32,13 @@ ebusybox:
 sosconfig:
     .incbin "../os_test.conf"
 eosconfig:
-    .align 12    
+    .align 12
+
+    .section .data
+    .global sfstest
+    .global efstest
+    .align 12
+sfstest:
+    .incbin "../user/target/loongarch64-unknown-linux-gnu/release/fs_test"
+efstest:
+    .align 12

@@ -1,5 +1,3 @@
-#[cfg(feature = "oom_handler")]
-use super::super::fs;
 use super::{PhysAddr, PhysPageNum};
 use crate::config::MEMORY_START;
 use crate::hal::MEMORY_END;
@@ -177,9 +175,7 @@ pub fn init_frame_allocator() {
 /// 成功返回Ok(())，失败返回Err(())
 #[cfg(feature = "oom_handler")]
 pub fn oom_handler(req: usize) -> Result<(), ()> {
-    // step 1: 清理文件系统缓存
     let mut released = 0;
-    released += fs::directory_tree::oom();
     if released >= req {
         return Ok(());
     }

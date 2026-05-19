@@ -17,10 +17,37 @@ type BlockDeviceImpl = virtio_blk_pci::VirtIOBlock;
 
 use crate::hal::BLOCK_SZ;
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicBool, Ordering};
 use lazy_static::*;
 
+/// 标志位：跳过块设备初始化（ramfs-only 模式时由 fs::force_ramfs() 设置）
+pub static SKIP_BLOCK_DEVICE: AtomicBool = AtomicBool::new(false);
+
+/// 在 ramfs 模式下调用，阻止 BLOCK_DEVICE 初始化
+pub fn disable_block_device() {
+    SKIP_BLOCK_DEVICE.store(true, Ordering::Relaxed);
+}
+
+/// 虚拟块设备 — 用于 ramfs-only 模式下 BLOCK_DEVICE 的占位
+struct DummyBlockDevice;
+impl BlockDevice for DummyBlockDevice {
+    fn read_block(&self, _block_id: usize, _buf: &mut [u8]) {
+        panic!("DummyBlockDevice::read_block called — block device is disabled (ramfs-only mode)");
+    }
+    fn write_block(&self, _block_id: usize, _buf: &[u8]) {
+        panic!("DummyBlockDevice::write_block called — block device is disabled (ramfs-only mode)");
+    }
+}
+
 lazy_static! {
-    pub static ref BLOCK_DEVICE: Arc<dyn BlockDevice> = Arc::new(BlockDeviceImpl::new());
+    pub static ref BLOCK_DEVICE: Arc<dyn BlockDevice> = {
+        if SKIP_BLOCK_DEVICE.load(Ordering::Relaxed) {
+            println!("[kernel] block device skipped (ramfs-only mode)");
+            Arc::new(DummyBlockDevice)
+        } else {
+            Arc::new(BlockDeviceImpl::new())
+        }
+    };
 }
 
 #[allow(unused)]

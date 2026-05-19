@@ -1,5 +1,4 @@
 use crate::fs::{
-    directory_tree::GLOBAL_BLOCK_SIZE,
     ext4::{block_group::Ext4BlockGroup, BLOCK_SIZE},
 };
 use alloc::vec;
@@ -29,7 +28,7 @@ impl Ext4FileSystem {
 
             // 获取块组
             let mut bg =
-                Ext4BlockGroup::load_new(self.block_device.clone(), &super_block, bgid as usize);
+                Ext4BlockGroup::load_new(self.block_device.clone(), &super_block, bgid as usize, self.block_size);
 
             let mut free_inodes = bg.get_free_inodes_count();
 
@@ -39,6 +38,8 @@ impl Ext4FileSystem {
                 let mut raw_data = vec![0u8; BLOCK_SIZE];
                 self.block_device
                     .read_block(inode_bitmap_block as usize, &mut raw_data);
+                super::counters::inc_counter!(super::counters::BLOCK_READ_TOTAL);
+                super::counters::inc_counter!(super::counters::INODE_BITMAP_READ);
 
                 let inodes_in_bg = super_block.get_inodes_in_group_cnt(bgid);
 
@@ -51,10 +52,12 @@ impl Ext4FileSystem {
 
                 // update bitmap in disk
                 // 此处因为是直接进行块单位的写入，所以不需要考虑对齐
-                log::warn!("[WRITE_CALLER] ialloc_alloc_inode: write inode_bitmap block={}, idx_in_bg={}, new_ino={}",
-                    inode_bitmap_block, idx_in_bg, bgid * super_block.inodes_per_group() + (idx_in_bg + 1));
+                // log::warn!("[WRITE_CALLER] ialloc_alloc_inode: write inode_bitmap block={}, idx_in_bg={}, new_ino={}",
+                //     inode_bitmap_block, idx_in_bg, bgid * super_block.inodes_per_group() + (idx_in_bg + 1));
                 self.block_device
                     .write_block(inode_bitmap_block as usize, bitmap_data);
+                super::counters::inc_counter!(super::counters::BLOCK_WRITE_TOTAL);
+                super::counters::inc_counter!(super::counters::INODE_BITMAP_WRITE);
 
                 bg.set_block_group_ialloc_bitmap_csum(&super_block, bitmap_data);
 
@@ -76,14 +79,11 @@ impl Ext4FileSystem {
                     bg.set_itable_unused(&super_block, unused);
                 }
 
-                // 同步块组内容
-                bg.sync_to_disk_with_csum(self.block_device.clone(), bgid as usize, &super_block);
-
-                // 更新超级块
-                super_block.decrease_free_inodes_count();
-                super_block.sync_to_disk_with_csum(self.block_device.clone());
+                // 同步块组内容和超级块（Phase 5: defer if batch mode）
+                self.defer_bg_write(&bg, bgid as u32, &super_block);
+                self.defer_superblock_write(&super_block);
                 // 看是否写入成功
-                let mut test_super_block = vec![0u8; *GLOBAL_BLOCK_SIZE];
+                let mut test_super_block = vec![0u8; self.block_size];
                 self.block_device.read_block(0, &mut test_super_block);
 
                 /* Compute the absolute i-nodex number */
@@ -120,28 +120,24 @@ impl Ext4FileSystem {
 
         let mut super_block = self.superblock;
         let mut bg =
-            Ext4BlockGroup::load_new(self.block_device.clone(), &super_block, bgid as usize);
+            Ext4BlockGroup::load_new(self.block_device.clone(), &super_block, bgid as usize, self.block_size);
 
         // Load inode bitmap block
         let inode_bitmap_block = bg.get_inode_bitmap_block(&self.superblock);
         let mut bitmap_data = vec![0u8; BLOCK_SIZE];
         self.block_device
             .read_block(inode_bitmap_block as usize, &mut bitmap_data);
+        super::counters::inc_counter!(super::counters::BLOCK_READ_TOTAL);
+        super::counters::inc_counter!(super::counters::INODE_BITMAP_READ);
 
         // Find index within group and clear bit
         let index_in_group = self.inode_to_bgidx(index);
         ext4_bmap_bit_clr(&mut bitmap_data, index_in_group);
 
-        // Set new checksum after modification
-        // update bitmap in disk
-        // 此处与上面的ialloc_alloc_inode函数一样，不需要考虑对齐
-        log::warn!(
-            "[WRITE_CALLER] ialloc_free_inode: write inode_bitmap block={}, free_ino={}",
-            inode_bitmap_block,
-            index
-        );
         self.block_device
             .write_block(inode_bitmap_block as usize, &bitmap_data);
+        super::counters::inc_counter!(super::counters::BLOCK_WRITE_TOTAL);
+        super::counters::inc_counter!(super::counters::INODE_BITMAP_WRITE);
         bg.set_block_group_ialloc_bitmap_csum(&super_block, &bitmap_data);
 
         // Update free inodes count in block group
@@ -154,9 +150,9 @@ impl Ext4FileSystem {
             bg.set_used_dirs_count(&self.superblock, used_dirs);
         }
 
-        bg.sync_to_disk_with_csum(block_device.clone(), bgid as usize, &super_block);
+        self.defer_bg_write(&bg, bgid as u32, &super_block);
 
         super_block.increase_free_inodes_count();
-        super_block.sync_to_disk_with_csum(self.block_device.clone());
+        self.defer_superblock_write(&super_block);
     }
 }

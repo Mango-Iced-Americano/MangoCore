@@ -28,8 +28,12 @@ sdcard-rv.img
 WORK_LOG.md
 EXPERIENCE.md
 .aider*
+.claude
 
 # Python cache
 __pycache__/
 *.pyc
 *.pyo
+.sisyphus/
+tools/
+sdcard-rv-noconf.img

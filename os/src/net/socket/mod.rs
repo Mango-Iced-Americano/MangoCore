@@ -4,8 +4,8 @@ pub mod unix;
 
 use crate::{
     fs::{
-        directory_tree::DirectoryTreeNode, fat32::DiskInodeType, file_descriptor::FileDescriptor,
-        file_trait::File, Dirent, OpenFlags, PageCache, SeekWhence, Stat,
+        fat32::DiskInodeType,
+        vfs, vfs::FileFlags, Dirent, OpenFlags, SeekWhence, Stat,
     },
     mm::{UserBuffer, UserBufferWriter, UserPtr, UserPtrMut},
     net::{
@@ -23,11 +23,40 @@ use alloc::{
     vec,
     vec::Vec,
 };
+use core::any::Any;
 use core::convert::TryFrom;
 
 use smoltcp::iface::SocketHandle;
 use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint, Ipv4Address, Ipv6Address};
 use spin::Mutex;
+
+use crate::fs::vfs::{
+    FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata,
+};
+use crate::fs::vfs::event::EPollEvent;
+use crate::fs::vfs::file_system::FileSystem as NewFileSystem;
+use crate::fs::vfs::file_system::{FileSystem, FsInfo, SuperBlock};
+use crate::timer::TimeSpec;
+
+/// Socket 虚拟文件系统（用于 IndexNode::fs()）
+#[derive(Debug)]
+struct SocketFS;
+
+impl FileSystem for SocketFS {
+    fn root_inode(&self) -> Arc<dyn IndexNode> {
+        panic!("SocketFS has no root inode")
+    }
+    fn info(&self) -> FsInfo {
+        FsInfo { blk_dev_id: 0, max_name_len: 0, features: vec!["socketfs"] }
+    }
+    fn name(&self) -> &str { "socketfs" }
+    fn super_block(&self) -> SuperBlock { SuperBlock::default() }
+    fn as_any_ref(&self) -> &dyn Any { self }
+}
+
+lazy_static::lazy_static! {
+    static ref SOCKET_FS: Arc<SocketFS> = Arc::new(SocketFS);
+}
 
 use crate::net::socket::inet::common::address;
 
@@ -370,166 +399,94 @@ pub struct SocketFile {
     pub inner: Arc<dyn Socket>,
 }
 
+impl core::fmt::Debug for SocketFile {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SocketFile").finish()
+    }
+}
+
 impl SocketFile {
     pub fn new(socket: Arc<dyn Socket>) -> Self {
         Self { inner: socket }
     }
 }
 
-impl File for SocketFile {
-    fn deep_clone(&self) -> Arc<dyn File> {
-        Arc::new(SocketFile {
-            inner: self.inner.clone(),
+impl IndexNode for SocketFile {
+    fn read_at(
+        &self,
+        _offset: usize,
+        _len: usize,
+        buf: &mut [u8],
+        _data: spin::MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        self.inner.try_recv(buf).map(|n| n as usize)
+    }
+
+    fn write_at(
+        &self,
+        _offset: usize,
+        _len: usize,
+        buf: &[u8],
+        _data: spin::MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        self.inner
+            .try_send(buf, MsgFlags::empty())
+            .map(|n| n as usize)
+    }
+
+    fn metadata(&self) -> Result<Metadata, SyscallErr> {
+        Ok(Metadata {
+            dev_id: 0,
+            inode_id: 0,
+            size: 0,
+            blk_size: 0,
+            blocks: 0,
+            atime: TimeSpec::new(),
+            mtime: TimeSpec::new(),
+            ctime: TimeSpec::new(),
+            file_type: FileType::Socket,
+            mode: InodeMode::S_IFSOCK | InodeMode::from_bits_truncate(0o777),
+            nlinks: 1,
+            uid: 0,
+            gid: 0,
+            flags: InodeFlags::empty(),
+            raw_dev: 0,
         })
     }
 
-    fn readable(&self) -> bool {
+    fn is_stream(&self) -> bool {
         true
     }
 
-    fn writable(&self) -> bool {
-        true
-    }
-
-    fn read(&self, _offset: Option<&mut usize>, buf: &mut [u8]) -> usize {
-        match self.inner.try_recv(buf) {
-            Ok(n) => n as usize,
-            Err(e) => e.as_errno_ret(),
+    fn poll(&self, _private_data: &FilePrivateData) -> Result<usize, SyscallErr> {
+        let mut revents: usize = 0;
+        if self.inner.socket_r_ready() {
+            revents |= EPollEvent::EPOLLIN.bits();
         }
-    }
-
-    fn write(&self, _offset: Option<&mut usize>, buf: &[u8]) -> usize {
-        match self.inner.try_send(buf, MsgFlags::empty()) {
-            Ok(n) => n as usize,
-            Err(e) => e.as_errno_ret(),
+        if self.inner.socket_w_ready() {
+            revents |= EPollEvent::EPOLLOUT.bits();
         }
-    }
-
-    fn r_ready(&self) -> bool {
-        self.inner.socket_r_ready()
-    }
-
-    fn w_ready(&self) -> bool {
-        self.inner.socket_w_ready()
-    }
-
-    fn read_user(&self, _offset: Option<usize>, buf: UserBuffer) -> usize {
-        let mut data = vec![0u8; buf.len];
-        match self.inner.try_recv(&mut data) {
-            Ok(s) => {
-                let mut offset = 0usize;
-                let mut remain = s as usize;
-                for b in buf.buffers.into_iter() {
-                    let copy_len = remain.min(b.len());
-                    b[..copy_len].copy_from_slice(&data[offset..offset + copy_len]);
-                    offset += copy_len;
-                    remain -= copy_len;
-                    if remain == 0 {
-                        break;
-                    }
-                }
-                s as usize
-            }
-            Err(e) => e.as_errno_ret(),
+        if self.inner.socket_hang_up() {
+            revents |= EPollEvent::EPOLLHUP.bits();
         }
+        Ok(revents)
     }
 
-    fn write_user(&self, _offset: Option<usize>, buf: UserBuffer) -> usize {
-        let mut data = vec![0u8; buf.len];
-        let mut offset = 0;
-        for b in buf.buffers.into_iter() {
-            data[offset..offset + b.len()].copy_from_slice(&b);
-            offset += b.len();
-        }
-        self.write(None, &data)
+    fn ioctl(
+        &self,
+        _cmd: u32,
+        _argp: usize,
+        _private_data: spin::MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        Err(SyscallErr::ENOTTY)
     }
 
-    fn get_size(&self) -> usize {
-        0
+    fn fs(&self) -> Arc<dyn NewFileSystem> {
+        SOCKET_FS.clone()
     }
 
-    fn get_stat(&self) -> Stat {
-        unsafe { core::mem::zeroed() }
-    }
-
-    fn get_file_type(&self) -> DiskInodeType {
-        DiskInodeType::Socket
-    }
-
-    fn is_dir(&self) -> bool {
-        false
-    }
-
-    fn is_file(&self) -> bool {
-        false
-    }
-
-    fn info_dirtree_node(&self, _dirnode_ptr: Weak<DirectoryTreeNode>) {}
-
-    fn get_dirtree_node(&self) -> Option<Arc<DirectoryTreeNode>> {
-        None
-    }
-
-    fn open(&self, _flags: OpenFlags, _special_use: bool) -> Arc<dyn File> {
-        panic!("socket open should not be called");
-    }
-
-    fn open_subfile(&self) -> Result<Vec<(String, Arc<dyn File>)>, isize> {
-        Err(-(crate::syscall::errno::EISDIR as isize))
-    }
-
-    fn create(&self, _name: &str, _file_type: DiskInodeType) -> Result<Arc<dyn File>, isize> {
-        Err(-(crate::syscall::errno::EISDIR as isize))
-    }
-
-    fn link_child(&self, _name: &str, _child: &Self) -> Result<(), isize> {
-        Err(-(crate::syscall::errno::EISDIR as isize))
-    }
-
-    fn unlink(&self, _delete: bool) -> Result<(), isize> {
-        Err(-(crate::syscall::errno::EISDIR as isize))
-    }
-
-    fn get_dirent(&self, _count: usize) -> Result<Vec<Dirent>, isize> {
-        Ok(Vec::new())
-    }
-
-    fn lseek(&self, _offset: isize, _whence: SeekWhence) -> Result<usize, isize> {
-        Err(-(crate::syscall::errno::ESPIPE as isize))
-    }
-
-    fn modify_size(&self, _diff: isize) -> Result<(), isize> {
-        Err(-(crate::syscall::errno::EPERM as isize))
-    }
-
-    fn truncate_size(&self, _new_size: usize) -> Result<(), isize> {
-        Err(-(crate::syscall::errno::EPERM as isize))
-    }
-
-    fn set_timestamp(&self, _ctime: Option<usize>, _atime: Option<usize>, _mtime: Option<usize>) {}
-
-    fn get_single_cache(&self, _offset: usize) -> Result<Arc<Mutex<PageCache>>, ()> {
-        Err(())
-    }
-
-    fn get_all_caches(&self) -> Result<Vec<Arc<Mutex<PageCache>>>, ()> {
-        Err(())
-    }
-
-    fn oom(&self) -> usize {
-        0
-    }
-
-    fn hang_up(&self) -> bool {
-        self.inner.socket_hang_up()
-    }
-
-    fn ioctl(&self, _cmd: u32, _argp: usize) -> isize {
-        crate::syscall::errno::ENOTTY
-    }
-
-    fn fcntl(&self, _cmd: u32, _arg: u32) -> isize {
-        0
+    fn as_any_ref(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -546,6 +503,12 @@ impl dyn Socket {
             log::warn!("[Socket::alloc] AF_INET6 is not supported yet!");
             return Err(SyscallErr::EAFNOSUPPORT);
         }
+        let alloc_socket_fd = |socket_file: Arc<dyn crate::fs::vfs::IndexNode>| -> GeneralRet<usize> {
+            let mut flags = FileFlags::O_RDWR;
+            if is_nonblock { flags.insert(FileFlags::O_NONBLOCK); }
+            let vf = vfs::File::new_without_open(socket_file, flags, vfs::FileType::Socket);
+            current_task().unwrap().files.lock().alloc_fd(vf, is_cloexec)
+        };
         match domain as u16 {
             AF_INET | AF_UNSPEC => {
                 log::info!("[Socket::new] domain: {} -> treating as AF_INET", domain);
@@ -555,39 +518,21 @@ impl dyn Socket {
                         let socket = Arc::new(socket);
                         UdpSocket::register_udp_socket(&socket);
                         let socket_file = Arc::new(SocketFile::new(socket));
-                        let current_tcb = current_task().unwrap();
-                        let fd = current_tcb
-                            .files
-                            .lock()
-                            .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket_file))
-                            .unwrap();
-                        Ok(fd)
+                        alloc_socket_fd(socket_file)
                     }
                     PSOCK::Stream => {
                         let socket = TcpSocket::new();
                         let socket = Arc::new(socket);
                         TcpSocket::register_tcp_socket(&socket);
                         let socket_file = Arc::new(SocketFile::new(socket));
-                        let current_tcb = current_task().unwrap();
-                        let fd = current_tcb
-                            .files
-                            .lock()
-                            .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket_file))
-                            .unwrap();
-                        Ok(fd)
+                        alloc_socket_fd(socket_file)
                     }
                     PSOCK::Raw => {
                         let socket = RawSocket::new(protocol);
                         let socket = Arc::new(socket);
                         RawSocket::register_raw_socket(&socket);
                         let socket_file = Arc::new(SocketFile::new(socket));
-                        let current_tcb = current_task().unwrap();
-                        let fd = current_tcb
-                            .files
-                            .lock()
-                            .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket_file))
-                            .unwrap();
-                        Ok(fd)
+                        alloc_socket_fd(socket_file)
                     }
                     _ => Err(SyscallErr::EINVAL),
                 }
@@ -598,25 +543,13 @@ impl dyn Socket {
                     PSOCK::Stream => {
                         let socket: Arc<dyn Socket> = Arc::new(UnixStreamSocket::new(is_nonblock));
                         let socket_file = Arc::new(SocketFile::new(socket));
-                        let current_tcb = current_task().unwrap();
-                        let fd = current_tcb
-                            .files
-                            .lock()
-                            .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket_file))
-                            .unwrap();
-                        Ok(fd)
+                        alloc_socket_fd(socket_file)
                     }
                     PSOCK::Datagram | PSOCK::Raw => {
                         let socket = UnixDatagramSocket::new(is_nonblock);
                         let socket: Arc<dyn Socket> = socket;
                         let socket_file = Arc::new(SocketFile::new(socket));
-                        let current_tcb = current_task().unwrap();
-                        let fd = current_tcb
-                            .files
-                            .lock()
-                            .insert(FileDescriptor::new(is_cloexec, is_nonblock, socket_file))
-                            .unwrap();
-                        Ok(fd)
+                        alloc_socket_fd(socket_file)
                     }
                     _ => return Err(SyscallErr::EAFNOSUPPORT),
                 }

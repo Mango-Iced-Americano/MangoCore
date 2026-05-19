@@ -8,8 +8,7 @@ use super::{frame_alloc, FrameTracker};
 use super::user_mapper::UserMapper;
 use super::{FaultAccess, MemoryError};
 use super::{PhysPageNum, VirtAddr, VirtPageNum};
-use crate::fs::file_trait::File;
-use crate::fs::SeekWhence;
+use crate::fs::vfs::IndexNode;
 use crate::mm::frame_allocator::frame_alloc_uninit;
 
 use alloc::sync::Arc;
@@ -35,7 +34,10 @@ pub struct Vma {
     pub inner: VmPageStore,
     /// Permissions which are the or of RWXU, where U stands for user.
     pub map_perm: MapPermission,
-    pub map_file: Option<Arc<dyn File>>,
+    pub map_file: Option<Arc<dyn IndexNode>>,
+    /// Offset into the file where this VMA starts (in bytes).
+    /// For anonymous mappings, this is always 0.
+    pub map_file_offset: usize,
 
     pub flags: MapFlags,
 }
@@ -47,6 +49,7 @@ impl Vma {
             inner,
             map_perm: self.map_perm,
             map_file: self.map_file.clone(),
+            map_file_offset: self.map_file_offset,
             flags: self.flags,
         })
     }
@@ -55,15 +58,17 @@ impl Vma {
         start_va: VirtAddr,
         end_va: VirtAddr,
         map_perm: MapPermission,
-        map_file: Option<Arc<dyn File>>,
+        map_file: Option<Arc<dyn IndexNode>>,
+        map_file_offset: usize,
     ) -> Self {
-        Self::try_new(start_va, end_va, map_perm, map_file).unwrap()
+        Self::try_new(start_va, end_va, map_perm, map_file, map_file_offset).unwrap()
     }
     pub fn try_new(
         start_va: VirtAddr,
         end_va: VirtAddr,
         map_perm: MapPermission,
-        map_file: Option<Arc<dyn File>>,
+        map_file: Option<Arc<dyn IndexNode>>,
+        map_file_offset: usize,
     ) -> Result<Self, isize> {
         let start_vpn: VirtPageNum = start_va.floor();
         let end_vpn: VirtPageNum = end_va.ceil();
@@ -78,6 +83,7 @@ impl Vma {
             inner,
             map_perm,
             map_file,
+            map_file_offset,
             flags: MapFlags::empty(),
         })
     }
@@ -91,6 +97,7 @@ impl Vma {
             )),
             map_perm: another.map_perm,
             map_file: another.map_file.clone(),
+            map_file_offset: another.map_file_offset,
             flags: another.flags,
         }
     }
@@ -187,7 +194,10 @@ impl Vma {
         src_page_table: &mut T,
     ) -> Result<(), MemoryError> {
         let is_shared = self.flags.contains(MapFlags::MAP_SHARED);
-        let map_perm = if is_shared {
+        let is_file_backed = self.map_file.is_some();
+        let map_perm = if is_shared && is_file_backed && self.map_perm.contains(MapPermission::W) {
+            self.map_perm.difference(MapPermission::W)
+        } else if is_shared {
             self.map_perm
         } else {
             self.map_perm.difference(MapPermission::W)
@@ -467,29 +477,20 @@ impl Vma {
         }
     }
     pub fn into_two(&mut self, cut: VirtPageNum) -> Result<Self, ()> {
-        let second_file = if let Some(file) = &self.map_file {
-            let new_file = file.deep_clone();
-            let old_offset = file.lseek(0, SeekWhence::SEEK_CUR).map_err(|_| ())?;
-            let new_offset = old_offset
-                .checked_add(
-                    VirtAddr::from(cut).0 - VirtAddr::from(self.inner.vpn_range.get_start()).0,
-                )
-                .ok_or(())?;
-            if new_offset > isize::MAX as usize {
-                return Err(());
-            }
-            new_file
-                .lseek(new_offset as isize, SeekWhence::SEEK_SET)
-                .map_err(|_| ())?;
-            Some(new_file)
+        let second_file = self.map_file.clone();
+        let second_offset = if self.map_file.is_some() {
+            self.map_file_offset.checked_add(
+                VirtAddr::from(cut).0 - VirtAddr::from(self.inner.vpn_range.get_start()).0,
+            ).ok_or(())?
         } else {
-            None
+            0
         };
         let second_frames = self.inner.into_two(cut)?;
         Ok(Vma {
             inner: second_frames,
             map_perm: self.map_perm,
             map_file: second_file,
+            map_file_offset: second_offset,
             flags: self.flags,
         })
     }
@@ -499,7 +500,7 @@ impl Vma {
         second_cut: VirtPageNum,
     ) -> Result<(Self, Self), ()> {
         // 第一次切分：把 [Start, End] 切成 [Start, first_cut] 和 [first_cut, End]
-        // into_two 会自动处理文件的 deep_clone 和偏移量计算
+        // into_two handles file clone and offset calculation automatically
         let mut second_area = self.into_two(first_cut)?;
 
         // 第二次切分：把刚才得到的后半段 [first_cut, End] 再次切分
@@ -721,8 +722,17 @@ impl Vma {
         matches!(self.vm_page_state(vpn), Ok(VmPageState::Unallocated))
     }
 
-    pub(super) fn vm_file(&self) -> Option<Arc<dyn File>> {
+    pub(super) fn vm_file(&self) -> Option<Arc<dyn IndexNode>> {
         self.map_file.clone()
+    }
+
+    pub(super) fn vm_file_offset(&self, vpn: VirtPageNum) -> Result<usize, MemoryError> {
+        if !self.vm_contains(vpn) {
+            return Err(MemoryError::BadAddress);
+        }
+        self.map_file_offset
+            .checked_add(VirtAddr::from(vpn).0 - VirtAddr::from(self.vm_start()).0)
+            .ok_or(MemoryError::BeyondEOF)
     }
 
     #[cfg(feature = "oom_handler")]

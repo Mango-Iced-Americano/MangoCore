@@ -1,9 +1,8 @@
 #![allow(unused)]
 use super::DiskInodeType;
-use crate::fs::vfs::VFSDirEnt;
+use crate::lang_items::Bytes;
 #[cfg(feature = "loongarch64")]
 use crate::{copy_from_name1, copy_to_name1};
-use crate::{lang_items::Bytes};
 use alloc::{
     format,
     string::{String, ToString},
@@ -238,8 +237,6 @@ pub union FATDirEnt {
     pub long_entry: FATLongDirEnt,
     pub empty: [u8; 32],
 }
-
-impl VFSDirEnt for FATDirEnt {}
 
 impl Debug for FATDirEnt {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

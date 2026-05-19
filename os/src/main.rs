@@ -120,7 +120,8 @@ pub fn rust_main() -> ! {
     //machine independent initialization
     // use crate::drivers::block::block_device_test;
     // block_device_test();
-    fs::directory_tree::init_fs();
+    // 调试：强制 ramfs 启动，跳过块设备检测
+    // fs::force_ramfs();
     drivers::init_net_device();
     net::config::init();
     #[cfg(feature = "block_virt")]
@@ -129,6 +130,7 @@ pub fn rust_main() -> ! {
     println!("[kernel] oom_handler is enabled!");
     // #[cfg(feature = "riscv")]
     fs::flush_preload();
+    // crate::fs::ext4::smoke::run_boot_smoke();  // 需要时取消注释
     task::add_initproc();
     // note that in run_tasks(), there is yet *another* pre_start_init(),
     // which is used to turn on interrupts in some archs like LoongArch.

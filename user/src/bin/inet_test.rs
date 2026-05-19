@@ -233,7 +233,7 @@ fn dns_lookup(domain: &str) -> Option<[u8; 4]> {
 fn run_bash_cmd(cmd: &str) -> i32 {
     let pid = sys_fork();
     if pid == 0 {
-        let shell = "/bash\0";
+        let shell = "/bin/bash\0";
         let dash_c = "-c\0";
         let mut cmd_buf = String::from(cmd);
         cmd_buf.push('\0');

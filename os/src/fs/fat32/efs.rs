@@ -3,13 +3,14 @@ use core::arch::asm;
 use core::ptr::addr_of;
 
 use crate::fs::fat32::FatInode;
-use crate::fs::filesystem::FS_Type;
 use crate::hal::{self, BLOCK_SZ};
 
-use super::{layout::BPB, Cache};
-use super::{BlockCacheManager, BlockDevice, DiskInodeType, Fat};
-use crate::fs::vfs::VFS;
+use super::{layout::BPB};
+use super::{BlockDevice, DiskInodeType, Fat};
+use crate::fs::vfs::file_system::{FileSystem, FsInfo, SuperBlock};
+use crate::fs::vfs::IndexNode;
 use alloc::{sync::Arc, vec::Vec};
+use core::any::Any;
 
 pub struct EasyFileSystem {
     /// 块设备，实际上是一个指向硬件设备的指针
@@ -25,6 +26,8 @@ pub struct EasyFileSystem {
     pub sec_per_clus: u8,
     /// 每扇区字节数，对于SD卡来说通常为512
     pub byts_per_sec: u16,
+    /// 自身弱引用，用于 FileSystem trait 的 root_inode 方法
+    __self_ref: spin::Mutex<Option<alloc::sync::Weak<EasyFileSystem>>>,
 }
 
 impl EasyFileSystem {
@@ -63,46 +66,39 @@ impl EasyFileSystem {
     /// 打开文件系统对象
     /// # 参数
     /// + `block_device`: 指向硬件设备（存储设备）的指针
-    /// + `index_cache_mgr`: fat cache manager
     pub fn open(
         block_device: Arc<dyn BlockDevice>,
-        index_cache_mgr: Arc<spin::Mutex<BlockCacheManager>>,
     ) -> Arc<Self> {
-        // 为fat_cache_mgr赋值
-        let fat_cache_mgr = index_cache_mgr.clone();
-        index_cache_mgr
-            .lock()
-            // 获取第0块的缓存
-            .get_block_cache(0, &block_device)
-            .lock()
-            // 将第0块映射为BPB结构体
-            .read(0, |super_block: &BPB| {
-                // ***************Do NOT change this LINE!****************
-                // 获取超级块（BPB）的每扇区字节数
-                let byts_per_sec = super_block.byts_per_sec;
-                // 如果每扇区字节数与预想的（la64模块内的设置为2048）不同，则触发panic
-                debug_assert!(byts_per_sec as usize == hal::BLOCK_SZ);
-                // 如果缓存单位不能被每扇区字节数整除，触发panic
-                debug_assert!(BlockCacheManager::CACHE_SZ % byts_per_sec as usize == 0);
-                // 如果超级块（BPB）非法，则报错
-                debug_assert!(super_block.is_valid(), "Error loading EFS!");
-                // 创建efs实例
-                let efs = Self {
-                    block_device,
-                    fat: Fat::new(
-                        super_block.rsvd_sec_cnt as usize,
-                        byts_per_sec as usize,
-                        (super_block.data_sector_count() / super_block.sec_per_clus as u32)
-                            as usize,
-                        fat_cache_mgr,
-                    ),
-                    root_clus: super_block.root_clus,
-                    sec_per_clus: super_block.sec_per_clus,
-                    byts_per_sec,
-                    data_area_start_block: super_block.first_data_sector(),
-                };
-                Arc::new(efs)
-            })
+        // 直接读取 BPB 获取文件系统参数
+        let mut bpb_buf = alloc::vec![0u8; BLOCK_SZ];
+        block_device.read_block(0, &mut bpb_buf);
+        let super_block = unsafe { &*(bpb_buf.as_ptr() as *const BPB) };
+        debug_assert!(super_block.byts_per_sec as usize == hal::BLOCK_SZ);
+        debug_assert!(super_block.is_valid(), "Error loading EFS!");
+
+        let root_clus = super_block.root_clus;
+        let sec_per_clus = super_block.sec_per_clus;
+        let byts_per_sec = super_block.byts_per_sec;
+        let data_area_start_block = super_block.first_data_sector();
+        let rsvd_sec_cnt = super_block.rsvd_sec_cnt as usize;
+        let data_sector_count = super_block.data_sector_count();
+
+        // 用 Arc::new_cyclic 初始化 __self_ref
+        Arc::new_cyclic(|weak| {
+            Self {
+                block_device,
+                fat: Fat::new(
+                    rsvd_sec_cnt,
+                    byts_per_sec as usize,
+                    (data_sector_count / sec_per_clus as u32) as usize,
+                ),
+                root_clus,
+                sec_per_clus,
+                byts_per_sec,
+                data_area_start_block,
+                __self_ref: spin::Mutex::new(Some(weak.clone())),
+            }
+        })
     }
     pub fn alloc_blocks(&self, blocks: usize) -> Vec<usize> {
         let sec_per_clus = self.sec_per_clus as usize;
@@ -120,14 +116,60 @@ impl EasyFileSystem {
     }
 }
 
-impl VFS for EasyFileSystem {
-    fn alloc_blocks(&self, blocks: usize) -> Vec<usize> {
-        self.alloc_blocks(blocks)
+impl core::fmt::Debug for EasyFileSystem {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("EasyFileSystem")
+            .field("root_clus", &self.root_clus)
+            .field("byts_per_sec", &self.byts_per_sec)
+            .field("sec_per_clus", &self.sec_per_clus)
+            .finish()
     }
-    fn get_filesystem_type(&self) -> FS_Type {
-        FS_Type::Fat32
+}
+
+impl FileSystem for EasyFileSystem {
+    fn root_inode(&self) -> Arc<dyn IndexNode> {
+        let arc_self = self.__self_ref.lock().as_ref()
+            .and_then(|w| w.upgrade())
+            .expect("EasyFileSystem: __self_ref not initialized");
+        FatInode::new(
+            self.root_clus,
+            DiskInodeType::Directory,
+            None,
+            None,
+            arc_self,
+        )
     }
-    fn block_size(&self) -> usize {
-        BLOCK_SZ
+
+    fn info(&self) -> FsInfo {
+        FsInfo {
+            blk_dev_id: 0,
+            max_name_len: 255,
+            features: alloc::vec!["fat32"],
+        }
+    }
+
+    fn name(&self) -> &str {
+        "fat32"
+    }
+
+    fn super_block(&self) -> SuperBlock {
+        SuperBlock {
+            f_type: 0x4d44,
+            f_bsize: self.byts_per_sec as u64,
+            f_blocks: 0,
+            f_bfree: 0,
+            f_bavail: 0,
+            f_files: 0,
+            f_ffree: 0,
+            f_fsid: [0; 2],
+            f_namelen: 255,
+            f_frsize: self.byts_per_sec as u64,
+            flags: 0,
+            f_spare: [0; 4],
+        }
+    }
+
+    fn as_any_ref(&self) -> &dyn Any {
+        self
     }
 }

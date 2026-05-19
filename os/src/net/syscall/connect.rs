@@ -26,16 +26,11 @@ pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
             let abs_path = if path.starts_with('/') {
                 path.clone()
             } else {
-                let cwd = task.fs.lock().working_inode.get_cwd();
-                match cwd {
-                    Some(cwd_str) => {
-                        if cwd_str == "/" {
-                            format!("/{}", path)
-                        } else {
-                            format!("{}/{}", cwd_str, path)
-                        }
-                    }
-                    None => return -(SyscallErr::ENOENT as isize),
+                let cwd = task.fs.lock().working_path.clone();
+                if cwd == "/" {
+                    format!("/{}", path)
+                } else {
+                    format!("{}/{}", cwd, path)
                 }
             };
             Endpoint::Unix(UnixEndpoint::Path(abs_path))
@@ -49,8 +44,8 @@ pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
     let is_nonblock = task
         .files
         .lock()
-        .get_ref(sockfd as usize)
-        .map(|fd| fd.get_nonblock())
+        .get_file(sockfd as usize)
+        .map(|f| f.is_nonblock())
         .unwrap_or(false);
 
     // 先尝试初始化连接（只做一次）

@@ -24,6 +24,7 @@ pub use frame_allocator::{
     frame_alloc, frame_alloc_uninit, frame_dealloc, frame_reserve, frames_alloc,
     unallocated_frames, FrameTracker,
 };
+pub use frame_store::Frame;
 pub use heap_allocator::heap_stats;
 pub use vma::{MapFlags, MapPermission};
 pub use address_space::{AddressSpace, MemoryError};

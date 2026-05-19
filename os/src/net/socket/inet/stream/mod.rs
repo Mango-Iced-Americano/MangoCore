@@ -28,13 +28,14 @@ use spin::Mutex;
 use crate::net::syscall::common::MsgFlags;
 use crate::net::{config::NET_INTERFACE, Endpoint, Socket, SocketFile, PSOCK};
 use crate::{
-    fs::FileDescriptor,
+    fs::vfs::{self, FileFlags},
     task::{current_task, WaitQueue},
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
 };
 
+use crate::fs::vfs::event::EPollEvent;
 use self::inner::{
-    with_tcp_mut, Connecting, EPollEvent, Established, Init, Listening, SelfConnected, BACKLOG_SIZE,
+    with_tcp_mut, Connecting, Established, Init, Listening, SelfConnected, BACKLOG_SIZE,
 };
 use crate::net::socket::inet::common::PortManager;
 use crate::net::socket::inet::stream::inner::ConnectResult;
@@ -317,16 +318,17 @@ impl Socket for TcpSocket {
         // 新 accept 的连接也必须注册到全局 TCP_SOCKETS，否则 pselect/epoll 永远等不到事件
         Self::register_tcp_socket(&connected_socket);
 
-        let socket_file = Arc::new(SocketFile::new(connected_socket));
+        let socket_file: Arc<dyn crate::fs::vfs::IndexNode> =
+            Arc::new(SocketFile::new(connected_socket));
 
         let task = current_task().unwrap();
         let mut fd_table = task.files.lock();
-        let old_cloexec = fd_table
-            .get_ref(sockfd as usize)
-            .map(|fd| fd.get_cloexec())
-            .unwrap_or(false);
+        let old_cloexec = fd_table.get_cloexec(sockfd as usize);
+        let vf = vfs::File::new_without_open(
+            socket_file, FileFlags::O_RDWR, vfs::FileType::Socket,
+        );
         let new_fd = fd_table
-            .insert(FileDescriptor::new(old_cloexec, false, socket_file))
+            .alloc_fd(vf, old_cloexec)
             .map_err(|_| SyscallErr::EMFILE)?;
 
         // addr == 0 means user doesn't care about peer address (POSIX allows this)

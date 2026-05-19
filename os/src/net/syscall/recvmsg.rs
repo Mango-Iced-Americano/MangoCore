@@ -20,11 +20,13 @@ pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
     let task = current_task().unwrap();
     let token = task.get_user_token();
 
-    let socket_file = match task.files.lock().get_ref(sockfd as usize) {
-        Ok(f) => f.clone(),
-        Err(e) => return e,
-    };
-    let is_nonblock = socket_file.get_nonblock() || msgdontwait;
+    let is_nonblock = {
+        let fd_table = task.files.lock();
+        fd_table
+            .get_file(sockfd as usize)
+            .map(|f| f.is_nonblock())
+            .unwrap_or(false)
+    } || msgdontwait;
 
     // 读取 MsgHdr
     let msg = match UserPtr::<MsgHdr>::from_addr(msg_ptr).read(token) {

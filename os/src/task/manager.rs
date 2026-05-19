@@ -1154,3 +1154,11 @@ pub fn task_manager_counts() -> Option<(u16, u16)> {
         .try_lock()
         .map(|m| (m.ready_count(), m.interruptible_count()))
 }
+
+/// 返回所有活跃的 PID 列表
+pub fn all_pids() -> alloc::vec::Vec<usize> {
+    super::registry::all_processes()
+        .into_iter()
+        .map(|process| process.pid)
+        .collect()
+}

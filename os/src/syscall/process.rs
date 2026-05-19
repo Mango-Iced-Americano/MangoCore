@@ -1,5 +1,5 @@
 use crate::config::{PAGE_SIZE, SYSTEM_TASK_LIMIT, USER_STACK_SIZE};
-use crate::fs::OpenFlags;
+use crate::fs::{vfs, vfs_lookup};
 use crate::hal::shutdown;
 use crate::hal::{MachineContext, TrapContext};
 use crate::mm::{
@@ -634,10 +634,10 @@ pub fn sys_clone(
     let mut child: Option<Arc<TaskControlBlock>> = None;
     show_frame_consumption! {
         "clone";
-        child = Some(match parent.sys_clone(flags, stack, tls, exit_signal) {
-            Ok(task) => task,
+        child = match parent.sys_clone(flags, stack, tls, exit_signal) {
+            Ok(task) => Some(task),
             Err(errno) => return errno,
-        });
+        };
     }
     let child = match child {
         Some(task) => task,
@@ -756,9 +756,18 @@ pub fn sys_execve(
         envp_vec.len()
     );
     // 获取当前工作目录的文件描述符
-    let working_inode = &task.fs.lock().working_inode;
+    let (working_inode, working_path) = {
+        let lock = task.fs.lock();
+        (lock.working_inode.clone(), lock.working_path.clone())
+    };
+    let cwd_inode: Arc<dyn vfs::IndexNode> = working_inode.inode.clone();
 
-    match working_inode.open(&path, OpenFlags::O_RDONLY, false) {
+    let open_exec = |path: &str| -> Result<vfs::File, isize> {
+        let inode = vfs_lookup(&cwd_inode, path, true)?;
+        vfs::File::new(inode, vfs::FileFlags::O_RDONLY).map_err(|e| -(e as isize))
+    };
+
+    match open_exec(&path) {
         // 检查打开的文件
         Ok(file) => {
             // 若文件大小小于4，则返回ENOEXEC
@@ -769,16 +778,14 @@ pub fn sys_execve(
             // 看前四个字节是否是可执行文件魔数
             let mut magic_number = Box::<[u8; 4]>::new([0; 4]);
             // this operation may be expensive... I'm not sure
-            file.read(Some(&mut 0usize), magic_number.as_mut_slice());
+            let _ = file.pread(0, magic_number.as_mut_slice());
             let elf = match magic_number.as_slice() {
                 // ELF可执行文件
                 b"\x7fELF" => file,
                 // 脚本文件
                 // 用默认Shell即bash加载
                 b"#!" => {
-                    let shell_file = working_inode
-                        .open(DEFAULT_SHELL, OpenFlags::O_RDONLY, false)
-                        .unwrap();
+                    let shell_file = open_exec(DEFAULT_SHELL).unwrap();
                     if argv_vec.try_reserve(1).is_err() {
                         return ENOMEM;
                     }
@@ -790,18 +797,31 @@ pub fn sys_execve(
             };
 
             let task = current_task().unwrap();
+            // 确保 exe_path 是绝对路径（glibc _dl_get_origin 要求以 '/' 开头）
+            let abs_path = if path.starts_with('/') {
+                path.clone()
+            } else {
+                let cwd = working_path.clone();
+                if cwd == "/" {
+                    alloc::format!("/{}", path)
+                } else {
+                    alloc::format!("{}/{}", cwd, path)
+                }
+            };
+            *task.exe_path.lock() = abs_path;
             show_frame_consumption! {
                 "load_elf";
                 if let Err(errno) = task.load_elf(elf, &argv_vec, &envp_vec) {
-                    // load_elf 前已经调用了 recycle_data_pages() 释放旧数据页，
-                    // 此时进程已无法回到原来的用户态，直接退出而非返回错误。
                     exit_current_and_run_next(127);
                 };
             }
             // should return 0 in success
             SUCCESS
         }
-        Err(errno) => errno,
+        Err(errno) => {
+            info!("[sys_execve] open_path(\"{}\") failed: errno={}", path, errno);
+            errno
+        },
     }
 }
 

@@ -9,9 +9,11 @@ const SYSCALL_FCNTL: usize = 25;
 const SYSCALL_IOCTL: usize = 29;
 const SYSCALL_MKDIRAT: usize = 34;
 const SYSCALL_UNLINKAT: usize = 35;
+const SYSCALL_SYMLINKAT: usize = 36;
 const SYSCALL_LINKAT: usize = 37;
 const SYSCALL_UMOUNT2: usize = 39;
 const SYSCALL_MOUNT: usize = 40;
+const SYSCALL_FTRUNCATE: usize = 46;
 const SYSCALL_FACCESSAT: usize = 48;
 const SYSCALL_CHDIR: usize = 49;
 const SYSCALL_OPENAT: usize = 56;
@@ -71,6 +73,7 @@ const SYSCALL_STATX: usize = 291;
 const SYSCALL_LS: usize = 500;
 const SYSCALL_SHUTDOWN: usize = 501;
 const SYSCALL_CLEAR: usize = 502;
+const SYSCALL_EXT4_COUNTERS: usize = 503;
 const SYSCALL_OPEN: usize = 506; //where?
 const SYSCALL_GET_TIME: usize = 1690; //you mean get time of day by 169?
 
@@ -78,13 +81,13 @@ const SYSCALL_GET_TIME: usize = 1690; //you mean get time of day by 169?
 global_asm!(include_str!("syscall.S"));
 #[cfg(target_arch = "loongarch64")]
 extern "C" {
-    pub fn __syscall(id: usize, args0: usize, args1: usize, args2: usize) -> isize;
+    pub fn __syscall(id: usize, args0: usize, args1: usize, args2: usize, args3: usize, args4: usize, args5: usize) -> isize;
 }
 
 fn syscall(id: usize, args: [usize; 3]) -> isize {
     #[cfg(target_arch = "loongarch64")]
     unsafe {
-        __syscall(id, args[0], args[1], args[2])
+        __syscall(id, args[0], args[1], args[2], 0, 0, 0)
     }
     #[cfg(target_arch = "riscv64")]
     {
@@ -120,8 +123,8 @@ fn syscall4(id: usize, args: [usize; 4]) -> isize {
         ret
     }
     #[cfg(target_arch = "loongarch64")]
-    {
-        syscall(id, [args[0], args[1], args[2]])
+    unsafe {
+        __syscall(id, args[0], args[1], args[2], args[3], 0, 0)
     }
 }
 
@@ -145,9 +148,8 @@ fn syscall6(id: usize, args: [usize; 6]) -> isize {
         ret
     }
     #[cfg(target_arch = "loongarch64")]
-    {
-        // loongarch64 目前只有3参数版本
-        syscall(id, [args[0], args[1], args[2]])
+    unsafe {
+        __syscall(id, args[0], args[1], args[2], args[3], args[4], args[5])
     }
 }
 
@@ -362,4 +364,124 @@ pub fn sys_sock_shutdown(sockfd: usize, how: usize) -> isize {
 
 pub fn sys_getdents64(fd: usize, buf: &mut [u8]) -> isize {
     syscall(SYSCALL_GETDENTS64, [fd, buf.as_mut_ptr() as usize, buf.len()])
+}
+
+/// AT_FDCWD — use current working directory
+pub const AT_FDCWD: isize = -100;
+
+// ── Stat struct (must match kernel fs/layout.rs:Stat exactly) ────────────
+
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct TimeSpec {
+    pub tv_sec: usize,
+    pub tv_nsec: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct Stat {
+    pub st_dev: u64,
+    pub st_ino: u64,
+    pub st_mode: u32,
+    pub st_nlink: u32,
+    pub st_uid: u32,
+    pub st_gid: u32,
+    pub st_rdev: u64,
+    pub __pad: u64,
+    pub st_size: i64,
+    pub st_blksize: u32,
+    pub __pad2: i32,
+    pub st_blocks: u64,
+    pub st_atime: TimeSpec,
+    pub st_mtime: TimeSpec,
+    pub st_ctime: TimeSpec,
+    pub __unused: u64,
+}
+
+pub const SEEK_SET: u32 = 0;
+pub const SEEK_CUR: u32 = 1;
+pub const SEEK_END: u32 = 2;
+
+pub const AT_EMPTY_PATH: u32 = 0x1000;
+pub const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+
+// ── Wrappers ────────────────────────────────────────────────────────────
+
+pub fn sys_mkdirat(dirfd: isize, path: &str, mode: u32) -> isize {
+    syscall(SYSCALL_MKDIRAT, [dirfd as usize, path.as_ptr() as usize, mode as usize])
+}
+
+pub fn sys_symlinkat(target: &str, newdirfd: isize, linkpath: &str) -> isize {
+    syscall(SYSCALL_SYMLINKAT, [target.as_ptr() as usize, newdirfd as usize, linkpath.as_ptr() as usize])
+}
+
+pub fn sys_readlinkat(dirfd: isize, path: &str, buf: &mut [u8]) -> isize {
+    syscall4(SYSCALL_READLINKAT, [dirfd as usize, path.as_ptr() as usize, buf.as_mut_ptr() as usize, buf.len()])
+}
+
+pub fn sys_unlinkat(dirfd: isize, path: &str, flags: u32) -> isize {
+    syscall(SYSCALL_UNLINKAT, [dirfd as usize, path.as_ptr() as usize, flags as usize])
+}
+
+pub fn sys_linkat(olddirfd: isize, oldpath: &str, newdirfd: isize, newpath: &str, flags: u32) -> isize {
+    syscall6(
+        SYSCALL_LINKAT,
+        [
+            olddirfd as usize,
+            oldpath.as_ptr() as usize,
+            newdirfd as usize,
+            newpath.as_ptr() as usize,
+            flags as usize,
+            0,
+        ],
+    )
+}
+
+pub fn sys_renameat2(
+    olddirfd: isize,
+    oldpath: &str,
+    newdirfd: isize,
+    newpath: &str,
+    flags: u32,
+) -> isize {
+    syscall6(
+        SYSCALL_RENAMEAT2,
+        [
+            olddirfd as usize,
+            oldpath.as_ptr() as usize,
+            newdirfd as usize,
+            newpath.as_ptr() as usize,
+            flags as usize,
+            0,
+        ],
+    )
+}
+
+pub fn sys_lseek(fd: usize, offset: isize, whence: u32) -> isize {
+    syscall(SYSCALL_LSEEK, [fd, offset as usize, whence as usize])
+}
+
+pub fn sys_fstatat(dirfd: isize, path: &str, buf: &mut Stat, flags: u32) -> isize {
+    syscall4(
+        SYSCALL_NEW_FSTATAT,
+        [
+            dirfd as usize,
+            path.as_ptr() as usize,
+            buf as *mut Stat as usize,
+            flags as usize,
+        ],
+    )
+}
+
+pub fn sys_fstat(fd: usize, buf: &mut Stat) -> isize {
+    syscall(SYSCALL_FSTAT, [fd, buf as *mut Stat as usize, 0])
+}
+
+pub fn sys_ftruncate(fd: usize, length: isize) -> isize {
+    syscall(SYSCALL_FTRUNCATE, [fd, length as usize, 0])
+}
+
+pub fn sys_ext4_counters(cmd: usize, arg1: usize, arg2: usize) -> isize {
+    syscall(SYSCALL_EXT4_COUNTERS, [cmd, arg1, arg2])
 }

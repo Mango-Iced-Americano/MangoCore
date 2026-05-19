@@ -90,13 +90,11 @@ def run_qemu_instance(cmd, output_path, timeout, result_key):
         stderr=subprocess.STDOUT,
         stdin=subprocess.PIPE,
         shell=True,
-        text=True,
-        bufsize=1,
     )
 
     # 发送回车让 QEMU 开始运行
     try:
-        p.stdin.write("\n")
+        p.stdin.write(b"\n")
         p.stdin.flush()
         p.stdin.close()
     except Exception:
@@ -105,16 +103,17 @@ def run_qemu_instance(cmd, output_path, timeout, result_key):
     timed_out = False
     killed = False
 
-    with open(output_path, "w", errors="ignore", buffering=1) as f:
-        f.write(f"# QEMU CMD: {cmd}\n")
-        f.write(f"# Started: {datetime.now().isoformat()}\n")
-        f.write("#" * 60 + "\n")
+    with open(output_path, "wb", buffering=1) as f:
+        f.write(f"# QEMU CMD: {cmd}\n".encode("utf-8", errors="replace"))
+        f.write(f"# Started: {datetime.now().isoformat()}\n".encode("utf-8", errors="replace"))
+        f.write(b"#" * 60 + b"\n")
         f.flush()
 
         try:
-            # 逐行读取输出并写入文件
-            for line in p.stdout:
-                f.write(line)
+            # 逐行读取二进制输出，解码失败时替换非法字节
+            for raw_line in p.stdout:
+                line = raw_line.decode("utf-8", errors="replace")
+                f.write(line.encode("utf-8"))
                 f.flush()
             p.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -122,10 +121,10 @@ def run_qemu_instance(cmd, output_path, timeout, result_key):
             log(f"QEMU [{result_key}] 超时 ({timeout}s)，正在 kill...", YELLOW)
             p.kill()
             killed = True
-            # 耗尽剩余输出
             try:
-                for line in p.stdout:
-                    f.write(line)
+                for raw_line in p.stdout:
+                    line = raw_line.decode("utf-8", errors="replace")
+                    f.write(line.encode("utf-8"))
                     f.flush()
             except Exception:
                 pass

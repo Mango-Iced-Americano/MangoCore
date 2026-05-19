@@ -10,6 +10,10 @@ use user_lib::{
     waitpid, waitpid_wnohang, OpenFlags, SIGKILL,
 };
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
+/// /bin/bash 是否可用（由 prepare_symlink 后检查决定）
+static HAS_BIN_BASH: AtomicBool = AtomicBool::new(true);
 // ============================================================
 // TEST_GROUPS — 组名与脚本文件名的映射
 // 索引 0..11 与 mask 的 bit0..bit11 一一对应
@@ -85,17 +89,23 @@ const DEFAULT_LTP_EXCLUDE_GLIBC: &[&str] = &[];
 fn run_bash_cmd(cmd: &str, environ: &[*const u8]) -> i32 {
     let pid = fork();
     if pid == 0 {
-        let shell = "/bash\0";
+        let shell_new = "/bin/bash\0";
+        let shell_old = "/bash\0";
         let dash_c = "-c\0";
         let mut cmd_buf = String::from(cmd);
         cmd_buf.push('\0');
-        let argv = [
-            shell.as_ptr(),
-            dash_c.as_ptr(),
-            cmd_buf.as_ptr(),
-            core::ptr::null(),
-        ];
-        exec(shell, &argv, environ);
+        let argv = |shell: &str| -> [*const u8; 4] {
+            [
+                shell.as_ptr(),
+                dash_c.as_ptr(),
+                cmd_buf.as_ptr(),
+                core::ptr::null(),
+            ]
+        };
+        if HAS_BIN_BASH.load(Ordering::Relaxed) {
+            exec(shell_new, &argv(shell_new), environ);
+        }
+        exec(shell_old, &argv(shell_old), environ);
         exit(127);
     }
     if pid > 0 {
@@ -451,7 +461,10 @@ fn load_runtime_config() -> RuntimeConfig {
     if !cfg.ltp_include.is_empty() {
         println!("[initproc] LTP include list: {:?}", cfg.ltp_include);
     }
-    println!("[initproc] LTP exclude musl: {:?}, glibc: {:?}", cfg.ltp_exclude_musl, cfg.ltp_exclude_glibc);
+    println!(
+        "[initproc] LTP exclude musl: {:?}, glibc: {:?}",
+        cfg.ltp_exclude_musl, cfg.ltp_exclude_glibc
+    );
     cfg
 }
 
@@ -459,6 +472,7 @@ fn enter_shell(path: &str, environ: &[*const u8]) {
     if fork() == 0 {
         chdir("/\0");
         exec(path, &[path.as_ptr(), core::ptr::null()], environ);
+        exec("/bash\0", &["/bash\0".as_ptr(), core::ptr::null()], environ);
         exit(127);
     } else {
         loop {
@@ -573,17 +587,23 @@ fn run_group_once(
         cmd.push_str("./");
         cmd.push_str(script);
         cmd.push('\0');
-        let shell = "/bash\0";
         let dash_c = "-c\0";
-        let argv = [
-            shell.as_ptr(),
-            dash_c.as_ptr(),
-            cmd.as_ptr(),
-            core::ptr::null(),
-        ];
-        exec(shell, &argv, environ);
+        let argv = |shell: &str| -> [*const u8; 4] {
+            [
+                shell.as_ptr(),
+                dash_c.as_ptr(),
+                cmd.as_ptr(),
+                core::ptr::null(),
+            ]
+        };
+        exec("/bin/bash\0", &argv("/bin/bash\0"), environ);
         println!(
-            "[initproc] exec failed for {} in {} via /bash -c",
+            "[initproc] /bin/bash failed for {} in {}, fallback /bash",
+            script, log_dir
+        );
+        exec("/bash\0", &argv("/bash\0"), environ);
+        println!(
+            "[initproc] exec failed for {} in {} via both /bin/bash and /bash",
             script, log_dir
         );
         exit(127);
@@ -1331,11 +1351,52 @@ pub extern "C" fn _start() -> ! {
     unsafe { _parameter(0, 0) }
 }
 
+/// 初始化所有符号链接:
+/// 1. busybox --install -s /bin — 把 busybox applet 装为 /bin 下的 symlink
+/// 2. musl/glibc 动态库链接到 /lib
+fn prepare_symlink(environ: &[*const u8]) {
+    // Step 1: busybox applet 安装到 /bin（用 PATH 查找 busybox，兼容旧镜像 /busybox）
+    println!("[initproc] installing busybox applets to /bin ...");
+    let install_cmd = "busybox mkdir -p /bin; busybox --install -s /bin\0";
+    let ret = run_bash_cmd(install_cmd, environ);
+    println!("[initproc] busybox --install -s /bin -> exit={}", ret);
+
+    // Step 2: musl/glibc 动态库 — 单次 shell 调用，用 && 串连，避免多次 bash 开销
+    println!("[initproc] linking musl/glibc libs to /lib ...");
+    let lib_cmd = "\
+        mkdir -p /lib /usr /lib64 /usr/lib /usr/lib64; \
+        rm -rf /lib64; ln -sf /lib /lib64; \
+        rm -rf /usr/lib; ln -sf /lib /usr/lib; \
+        rm -rf /usr/lib64; ln -sf /lib /usr/lib64; \
+        ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64-sf.so.1; \
+        ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64.so.1; \
+        ln -sf /musl/lib/libc.so /lib/libc.so; \
+        ln -sf /glibc/lib/ld-linux-riscv64-lp64d.so.1 /lib/ld-linux-riscv64-lp64d.so.1; \
+        ln -sf /glibc/lib/ld-linux-loongarch-lp64d.so.1 /lib/ld-linux-loongarch-lp64d.so.1; \
+        ln -sf /musl/lib/libc.so /lib/ld-musl-loongarch-lp64d.so.1; \
+        ln -sf /glibc/lib/libc.so.6 /lib/libc.so.6; \
+        ln -sf /glibc/lib/libm.so.6 /lib/libm.so.6; \
+        ln -sf /glibc/lib/tls_get_new-dtv_dso.so /lib/tls_get_new-dtv_dso.so; \
+        ln -sf /glibc/lib/tls_get_new-dtv_dso.so ./libtls_get_new-dtv_dso.so; \
+        for f in /musl/lib/*.so*; do ln -sf \"$f\" /lib/ 2>/dev/null; done; \
+        for f in /glibc/lib/*.so*; do ln -sf \"$f\" /lib/ 2>/dev/null; done \
+    \0";
+    let ret = run_bash_cmd(lib_cmd, environ);
+    println!("[initproc] lib linking done, exit={}", ret);
+
+    run_bash_cmd(
+        "
+        ln -sf /bash /bin/bash;
+    ",
+        environ,
+    );
+}
+
 #[no_mangle]
 fn main(_argc: usize, _argv: &[&str]) -> i32 {
-    let path = "/bash\0";
+    let path = "/bin/bash\0";
     let environ = [
-        "SHELL=/bash\0".as_ptr(),
+        "SHELL=/bin/bash\0".as_ptr(),
         "PWD=/\0".as_ptr(),
         "LOGNAME=root\0".as_ptr(),
         "MOTD_SHOWN=pam\0".as_ptr(),
@@ -1348,68 +1409,27 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         "PS1=\x1b[1m\x1b[32mNPUCore\x1b[0m:\x1b[1m\x1b[34m\\w\x1b[0m\\$ \0".as_ptr(),
         "_=/bin/bash\0".as_ptr(),
         "PATH=/:/bin\0".as_ptr(),
+        "KCONFIG_PATH=/proc/config\0".as_ptr(),
         "LD_LIBRARY_PATH=/\0".as_ptr(),
         core::ptr::null(),
     ];
 
-    let porgrams = [
-        "ls", "cat", "echo", "mkdir", "rmdir", "chown", "chmod", "ln", "basename", "dirname", "rm",
-        "grep", "touch", "file", "sleep", "sed", "awk", "head", "tail", "ps", "top", "kill", "cut",
-        "free", "df", "du", "mount", "umount", "ping", "netstat", "wget", "curl", "ifconfig", "ip",
-        "ss", "nc", "mktemp", "tr",
-    ];
+    prepare_symlink(&environ);
+
+    // Self-check: verify /bin/bash is usable after prepare_symlink
+    let bash_check = "test -x /bin/bash && echo BIN_BASH_OK || echo BIN_BASH_BAD\0";
+    let bash_ret = run_bash_cmd(bash_check, &environ);
+    let has_bin_bash = bash_ret == 0;
+    HAS_BIN_BASH.store(has_bin_bash, Ordering::Relaxed);
     println!(
-        "[initproc] preparing busybox \"symlinks\" for programs: {}",
-        porgrams.join(", ")
+        "[initproc] post-prepare /bin/bash check exit={} has_bin_bash={}",
+        bash_ret, has_bin_bash
     );
-    let program_str = porgrams.join(" ");
 
-    let cmd = format!(
-        "/musl/busybox mkdir -p /bin; \
-        for c in {} ; do \
-           echo '#!/bash' >/bin/$c; \
-           echo \"/musl/busybox $c \\\"\\$@\\\"\" >> /bin/$c; \
-     done; \
-     hash -r",
-        program_str
-    );
-    run_bash_cmd(&cmd, &environ); // prepare busybox "symlinks" for test scripts
-
-    // ============================================================
-    // 链接 musl/glibc 动态链接库到 /lib
-    // 动态链接的 ELF（如 ld-linux-riscv64-lp64d.so.1）依赖此目录
-    // ============================================================
-    println!("[initproc] linking musl/glibc libs to /lib ...");
-    // run_bash_cmd("/musl/busybox mkdir -p /lib", &environ);
-    // run_bash_cmd(
-    //     "/musl/busybox cp -r -L /musl/lib/* /lib/ 2>/dev/null; \
-    //      /musl/busybox cp -r -L /glibc/lib/* /lib/ 2>/dev/null; \
-    //      echo done",
-    //     &environ,
-    // );
-    run_bash_cmd(
-        "
-        mkdir -p /lib /lib64 /usr/lib /usr/lib64 &&
-        rm -rf /lib64 && ln -sf /lib /lib64 &&
-        rm -rf /usr/lib && ln -sf /lib /usr/lib &&
-        rm -rf /usr/lib64 && ln -sf /lib /usr/lib64 &&
-
-        ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64-sf.so.1 &&
-        ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64.so.1 &&
-        ln -sf /musl/lib/libc.so /lib/libc.so &&
-
-        ln -sf /glibc/lib/ld-linux-riscv64-lp64d.so.1 /lib/ld-linux-riscv64-lp64d.so.1 &&
-        ln -sf /glibc/lib/libc.so.6 /lib/libc.so.6 &&
-        ln -sf /glibc/lib/libm.so.6 /lib/libm.so.6 &&
-
-        ln -sf /glibc/lib/ld-linux-loongarch-lp64d.so.1 /lib/ld-linux-loongarch-lp64d.so.1 &&
-        ln -sf /musl/lib/libc.so /lib/ld-musl-loongarch-lp64d.so.1 &&
-
-        ln -sf /glibc/lib/tls_get_new-dtv_dso.so /lib/tls_get_new-dtv_dso.so &&
-        ln -sf /glibc/lib/tls_get_new-dtv_dso.so ./libtls_get_new-dtv_dso.so
-    ",
-        &environ,
-    );
+    // println!("[initproc] running fs_test...");
+    // let fs_test_cmd = "cd / && ./fs_test\0";
+    // let fs_test_ret = run_bash_cmd(fs_test_cmd, &environ);
+    // println!("[initproc] fs_test returned exit_code={}", fs_test_ret);
 
     let cfg = load_runtime_config();
 
@@ -1443,6 +1463,23 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     // run_bash_cmd("cd musl/ltp/testcases/bin && ./send02", &environ);
     // run_bash_cmd("./inet_test", &environ);
     if cfg.mode == RunMode::Shell {
+        /*
+        // Quick TTY diagnostic before shell — uncomment to debug echo
+        {
+            use user_lib::syscall::{sys_ioctl, sys_getdents64, sys_open, sys_close, TCGETS, Termios};
+            let mut t = Termios { iflag: 0, oflag: 0, cflag: 0, lflag: 0, line: 0, cc: [0; 19] };
+            let r = sys_ioctl(0, TCGETS, &mut t as *mut Termios as usize);
+            println!("[initproc] fd0 termios: ret={} lflag=0o{:o} ECHO={} ICANON={}",
+                r, t.lflag, t.lflag & 0o10 != 0, t.lflag & 0o2 != 0);
+            let fd = sys_open("/\0", 0);
+            if fd >= 0 {
+                let mut buf = [0u8; 1024];
+                let n = sys_getdents64(fd as usize, &mut buf);
+                println!("[initproc] getdents64('/') ret={}", n);
+                sys_close(fd as usize);
+            }
+        }
+        */
         println!("[initproc] entering shell mode");
         enter_shell(path, &environ);
         shutdown();

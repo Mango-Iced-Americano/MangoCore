@@ -51,6 +51,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_READLINKAT => "readlinkat",
         SYSCALL_FSTATAT => "fstatat",
         SYSCALL_FSTAT => "fstat",
+        SYSCALL_SYNC => "sync",
         SYSCALL_STATFS => "statfs",
         SYSCALL_FTRUNCATE => "ftruncate",
         SYSCALL_FALLOCATE => "fallocate",
@@ -77,6 +78,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_SIGACTION => "sigaction",
         SYSCALL_SIGPROCMASK => "sigprocmask",
         SYSCALL_RT_SIGPENDING => "rt_sigpending",
+        SYSCALL_RT_SIGSUSPEND => "rt_sigsuspend",
         SYSCALL_SIGTIMEDWAIT => "sigtimedwait",
         SYSCALL_RT_SIGQUEUEINFO => "rt_sigqueueinfo",
         SYSCALL_SIGRETURN => "sigreturn",
@@ -124,12 +126,14 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_FACCESSAT2 => "faccessat2",
         SYSCALL_MEMBARRIER => "membarrier",
         SYSCALL_STATX => "statx",
+        SYSCALL_SYNCFS => "syncfs",
         SYSCALL_GETRANDOM => "getrandom",
         SYSCALL_MADVISE => "madvise",
         // non-standard
         SYSCALL_LS => "ls",
         SYSCALL_SHUTDOWN => "shutdown",
         SYSCALL_CLEAR => "clear",
+        SYSCALL_EXT4_COUNTERS => "ext4_counters",
         _ => "unknown",
     }
 }
@@ -144,7 +148,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     crate::trace_event!(syscall_id, args[0], args[1], args[2], args[3], args[4], args[5]);
     // 记录当前系统调用 ID，供 OOM 诊断使用
     crate::task::set_current_syscall_id(Some(syscall_id));
-    let mut show_info = false;
+    let mut show_info = true;
     if option_env!("LOG").is_some()
         && ![
             //black list
@@ -164,7 +168,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         .contains(&syscall_id)
     {
         show_info = false;
-        log::debug!(
+        log::info!(
             "[syscall] {}({}) args: [{:X}, {:X}, {:X}, {:X}, {:X}, {:X}]",
             syscall_name(syscall_id),
             syscall_id,
@@ -186,6 +190,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_MKDIRAT => sys_mkdirat(args[0], args[1] as *const u8, args[2] as u32),
         SYSCALL_UNLINKAT => sys_unlinkat(args[0], args[1] as *const u8, args[2] as u32),
         SYSCALL_SYMLINKAT => sys_symlinkat(args[0] as *const u8, args[1], args[2] as *const u8),
+        SYSCALL_LINKAT => sys_linkat(args[0], args[1] as *const u8, args[2], args[3] as *const u8, args[4] as u32),
         SYSCALL_UMOUNT2 => sys_umount2(args[0] as *const u8, args[1] as u32),
         SYSCALL_MOUNT => sys_mount(
             args[0] as *const u8,
@@ -196,7 +201,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         ),
         SYSCALL_FACCESSAT => sys_faccessat2(args[0], args[1] as *const u8, args[2] as u32, 0u32),
         SYSCALL_CHDIR => sys_chdir(args[0] as *const u8),
-        SYSCALL_FCHMODAT => sys_fchmodat(),
+        SYSCALL_FCHMODAT => sys_fchmodat(args[0], args[1] as *const u8, args[2] as u32, args[3] as u32),
         SYSCALL_FCHOWNAT => sys_fchownat(),
         SYSCALL_OPEN => sys_openat(AT_FDCWD, args[0] as *const u8, args[1] as u32, 0o777u32),
         SYSCALL_OPENAT => sys_openat(
@@ -238,6 +243,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_FALLOCATE => {
             sys_fallocate(args[0], args[1] as u32, args[2] as isize, args[3] as isize)
         }
+        SYSCALL_SYNC => sys_sync(),
         SYSCALL_FSYNC => sys_fsync(args[0]),
         SYSCALL_UTIMENSAT => sys_utimensat(
             args[0],
@@ -369,6 +375,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         ),
         SYSCALL_MSYNC => sys_msync(args[0], args[1], args[2] as u32),
         SYSCALL_STATFS => sys_statfs(args[0] as *const u8, args[1] as *mut Statfs),
+        SYSCALL_SYNCFS => sys_syncfs(args[0]),
         SYSCALL_SOCKET => sys_socket(args[0] as u32, args[1] as u32, args[2] as u32),
         SYSCALL_SOCKETPAIR => sys_socketpair(
             args[0] as u32,
@@ -423,6 +430,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_RECVMSG => sys_recvmsg(args[0] as u32, args[1], args[2] as u32),
         SYSCALL_GETRANDOM => sys_getrandom(args[0] as usize, args[1] as usize, args[2] as u32),
         SYSCALL_SHUTDOWN => sys_shutdown(),
+        SYSCALL_EXT4_COUNTERS => crate::fs::ext4::counters::sys_ext4_counters(args[0], args[1], args[2]),
         SYSCALL_SCHED_GETAFFINITY => sys_sched_getaffinity(args[0], args[1], args[2] as *mut u8),
         SYSCALL_MADVISE => sys_madvise(args[0], args[1], args[2]),
         _ => {

@@ -1,6 +1,7 @@
 mod balloc;
 mod bitmap;
 mod block_group;
+pub mod counters;
 mod crc;
 mod direntry;
 mod error;
@@ -11,10 +12,9 @@ mod file;
 mod ialloc;
 pub mod layout;
 mod path;
+pub mod smoke;
 mod superblock;
 mod test;
-#[allow(unused)]
-pub use super::cache::{BlockCacheManager, BufferCache, Cache, PageCache, PageCacheManager};
 pub use crate::drivers::block::BlockDevice;
 pub use ext4_inode::*;
 
