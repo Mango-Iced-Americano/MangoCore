@@ -6,7 +6,11 @@ TARGET=riscv64gc-unknown-none-elf
 MODE="release"
 IMG_SZ="56"
 if [ $# -ge 2 ]; then
-    if [ "$2" = "2k1000" ] || [ "$2" = "laqemu" ]; then
+    if [ "$2" = "laqemu" ]; then
+        TARGET=loongarch64-unknown-linux-gnu
+        BLK_SZ="4096"
+        IMG_SZ="150"
+    elif [ "$2" = "2k1000" ]; then
         TARGET=loongarch64-unknown-linux-gnu
         BLK_SZ="2048"
         IMG_SZ="150"
