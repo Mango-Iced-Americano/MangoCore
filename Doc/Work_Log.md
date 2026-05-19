@@ -673,4 +673,53 @@ fn list(&self) -> Result<Vec<String>, SyscallErr> {
 
 **验证：**
 - rv64 ✅ la64 ✅ 编译通过
+
+---
+
+## 2026-05-19
+
+### 修复 LTP 评分 0 分问题（/dev/null ENOSYS + SIGBUS）+ ext4 延迟 inode 回收
+
+**问题背景：** LTP 测试全部 0 分，qemu.log 中无 Summary 输出。Oracle 分析后发现三个独立 bug 和两个架构问题。
+
+#### Bug 1: /dev/null "Function not implemented" (ENOSYS)
+
+**根因：** bash `>` 重定向带有 `O_TRUNC` 标志，`open_file_at` 调用 `inode.resize(0)`，Null 设备的默认实现返回 `ENOSYS`。
+
+**修复：** `os/src/fs/dev/null.rs` — 给 Null 加 `resize() → Ok(())` no-op。
+
+#### Bug 2: initproc 缺少软链接
+
+**根因：** `prepare_symlink()` 缺失 `ld-musl-loongarch-lp64d.so.1` 和根目录 `libtls_get_new-dtv_dso.so`，且多次 `run_bash_cmd` 效率低。
+
+**修复：** `user/src/bin/initproc.rs` — 单次 shell `;` 串联全部命令 + 批量 `for f in /musl/lib/*.so*; do ln -sf`，补全两个缺失的 symlink。
+
+#### Bug 3: LTP MAP_SHARED mmap → SIGBUS（核心问题）
+
+**根因链（Oracle 两次深度分析）：**
+1. LTP 框架 `setup_ipc()` 在 `/tmp/` 下创建 MAP_SHARED 共享内存文件（IPC results 缓冲）
+2. 流程：`open(O_CREAT) → ftruncate(4096) → mmap(MAP_SHARED) → close(fd) → unlink`
+3. version banner 后框架访问 `results` 指针 → **页面错误** → `filemap_shared_write_fault()` 调用 `inode.page_cache()` → RamFS 的 `IndexNode::page_cache()` 返回 `None`（未实现）→ `BackingStoreFailure` → trap handler 转成 `SIGBUS`
+
+**修复（4 个子修复）：**
+
+| # | 文件 | 修改 |
+|---|------|------|
+| 3a | `os/src/fs/ext4/ext4fs.rs:cleanup_inode_caches_on_unlink` | 不再重置 `cached_file_size = u64::MAX`（避免后续 metadata 读磁盘已释放的 inode） |
+| 3b | `os/src/fs/ext4/ext4fs.rs:Ext4FileSystem::unlink` | `ialloc_free_inode` 改为 `links_count--` + `write_back_inode`；向上传播 links_count 到活着的 `Ext4OSInode` |
+| 3c | `os/src/fs/ext4/layout.rs:Drop for Ext4OSInode` | 延迟回收：links_count==0 时 `truncate_inode(0)` → `ialloc_free_inode` → 清理缓存 |
+| 3d | **`os/src/fs/ramfs/mod.rs`** | **关键修复**：实现 `RamFsPageCacheBackend` + `page_cache()` 方法，让 RamFS 文件支持 MAP_SHARED 的 filemap 缺页处理 |
+
+**RamFS PageCache 设计：**
+- 新增 `RamFsPageCacheBackend` 结构体，持有 `Weak<LockedRamFSInode>` 避免循环引用
+- `read_page()`：从 `inode.pages` BTreeMap 读取已存在页，hole 填零
+- `write_page()`：写入已有页或分配新帧插入 BTreeMap，遵守 RamFS quota
+- `LockedRamFSInode::page_cache()`：懒初始化，非目录文件返回 `Arc<PageCache>`
+
+**ext4 延迟回收设计（Oracle 审查后改进）：**
+- `unlink` 路径分三种情况：① 无 live object → 立即回收；② 有 live object + links_count==0 → 仅 soft cleanup，硬回收等 Drop；③ links_count>0 (hard link) → 不清理任何缓存
+- `children.remove()` 先 clone Arc 出锁再 drop，避免 Drop 中持锁做磁盘 I/O
+- rmdir 路径同步修复
+
+**验证：** rv64 ✅ la64 ✅ 编译通过。basic test (mask=0x001) 全部通过，`/dev/null` 不再报错，无 SIGBUS。
 - 预期修复：`pwd` → `/`，`touch/cat/rm` 相对路径正确，`echo > test.txt` redirection 正确

@@ -1361,37 +1361,35 @@ fn prepare_symlink(environ: &[*const u8]) {
     let ret = run_bash_cmd(install_cmd, environ);
     println!("[initproc] busybox --install -s /bin -> exit={}", ret);
 
-    // Step 2: musl/glibc 动态库
+    // Step 2: musl/glibc 动态库 — 单次 shell 调用，用 && 串连，避免多次 bash 开销
     println!("[initproc] linking musl/glibc libs to /lib ...");
-    let mkdir_cmds = [
-        "busybox mkdir /lib\0",
-        // "busybox mkdir /lib64\0",
-        "busybox mkdir /usr\0",
-        // "busybox mkdir /usr/lib\0",
-        // "busybox mkdir /usr/lib64\0",
-        "busybox ln -sf /lib /lib64\0",
-        "busybox ln -sf /lib /usr/lib\0",
-        "busybox ln -sf /lib /usr/lib64\0",
-    ];
-    for cmd in &mkdir_cmds {
-        let r = run_bash_cmd(cmd, environ);
-        println!("[initproc]   {} -> exit={}", cmd, r);
-    }
-    let ln_cmds = [
-        "busybox ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64-sf.so.1\0",
-        "busybox ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64.so.1\0",
-        "busybox ln -sf /musl/lib/libc.so /lib/libc.so\0",
-        "busybox ln -sf /glibc/lib/ld-linux-riscv64-lp64d.so.1 /lib/ld-linux-riscv64-lp64d.so.1\0",
-        "busybox ln -sf /glibc/lib/ld-linux-loongarch-lp64d.so.1 /lib/ld-linux-loongarch-lp64d.so.1\0",
-        "busybox ln -sf /glibc/lib/libc.so.6 /lib/libc.so.6\0",
-        "busybox ln -sf /glibc/lib/libm.so.6 /lib/libm.so.6\0",
-        "busybox ln -sf /glibc/lib/tls_get_new-dtv_dso.so /lib/tls_get_new-dtv_dso.so\0",
-    ];
-    for cmd in &ln_cmds {
-        let r = run_bash_cmd(cmd, environ);
-        println!("[initproc]   {} -> exit={}", cmd, r);
-    }
-    println!("[initproc] lib linking done");
+    let lib_cmd = "\
+        mkdir -p /lib /usr /lib64 /usr/lib /usr/lib64; \
+        rm -rf /lib64; ln -sf /lib /lib64; \
+        rm -rf /usr/lib; ln -sf /lib /usr/lib; \
+        rm -rf /usr/lib64; ln -sf /lib /usr/lib64; \
+        ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64-sf.so.1; \
+        ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64.so.1; \
+        ln -sf /musl/lib/libc.so /lib/libc.so; \
+        ln -sf /glibc/lib/ld-linux-riscv64-lp64d.so.1 /lib/ld-linux-riscv64-lp64d.so.1; \
+        ln -sf /glibc/lib/ld-linux-loongarch-lp64d.so.1 /lib/ld-linux-loongarch-lp64d.so.1; \
+        ln -sf /musl/lib/libc.so /lib/ld-musl-loongarch-lp64d.so.1; \
+        ln -sf /glibc/lib/libc.so.6 /lib/libc.so.6; \
+        ln -sf /glibc/lib/libm.so.6 /lib/libm.so.6; \
+        ln -sf /glibc/lib/tls_get_new-dtv_dso.so /lib/tls_get_new-dtv_dso.so; \
+        ln -sf /glibc/lib/tls_get_new-dtv_dso.so ./libtls_get_new-dtv_dso.so; \
+        for f in /musl/lib/*.so*; do ln -sf \"$f\" /lib/ 2>/dev/null; done; \
+        for f in /glibc/lib/*.so*; do ln -sf \"$f\" /lib/ 2>/dev/null; done \
+    \0";
+    let ret = run_bash_cmd(lib_cmd, environ);
+    println!("[initproc] lib linking done, exit={}", ret);
+
+    run_bash_cmd(
+        "
+        ln -sf /bash /bin/bash;
+    ",
+        environ,
+    );
 }
 
 #[no_mangle]

@@ -319,9 +319,13 @@ impl Ext4FileSystem {
         );
         self.dir_remove_entry(parent, name)?;
 
-        let is_dir = child.inode.is_dir();
-
-        self.ialloc_free_inode(child.inode_num, is_dir);
+        // 不立即释放 inode：MAP_SHARED mmap / open fd 仍可能持有引用。
+        // 改为递减 links_count。当 links_count 归零时，最后一个引用释放
+        // 后由 Ext4OSInode::Drop 统一回收 inode 号和数据块。
+        let links = child.inode.links_count();
+        if links > 0 {
+            child.inode.set_links_count(links - 1);
+        }
 
         Ok(EOK)
     }
@@ -910,6 +914,7 @@ impl IndexNode for layout::Ext4OSInode {
             .map_err(|_| SyscallErr::EIO)?;
 
         let mut child_ref = self.ext4fs.get_inode_ref(child_num);
+        let old_links = child_ref.inode.links_count();
         self.ext4fs
             .unlink(
                 &mut self.inode.lock(),
@@ -917,19 +922,44 @@ impl IndexNode for layout::Ext4OSInode {
                 name,
             )
             .map_err(|_| SyscallErr::EIO)?;
+        let new_links = child_ref.inode.links_count(); // already decremented in Ext4FileSystem::unlink
+        self.ext4fs.write_back_inode(&mut child_ref);
 
-        // Phase 2: cleanup caches AFTER unlink
-        self.ext4fs.cleanup_inode_caches_on_unlink(child_num);
-        self.ext4fs.evict_inode_object_if_deleted(child_num);
-        self.ext4fs.unregister_page_cache(child_num);
-
-        // Phase 2: 从 parent.children 移除
-        {
-            let mut children = self.children.lock();
-            if children.remove(name).is_some() {
-                super::counters::inc_counter!(super::counters::DIR_CHILDREN_REMOVE);
+        // 传播 links_count 到活着的 Ext4OSInode（若存在），
+        // 确保 Drop 能检测到 links_count==0 并触发延迟回收
+        if let Some(child_obj) = self.ext4fs.lookup_inode_object(child_num) {
+            if let Some(osi) = child_obj.as_any_ref().downcast_ref::<layout::Ext4OSInode>() {
+                let mut guard = osi.inode.lock();
+                guard.inode.set_links_count(new_links);
             }
         }
+
+        // 没有活着的 Ext4OSInode（文件从未被打开/mmapped）：直接回收 inode 和数据块
+        let has_live_object = self.ext4fs.lookup_inode_object(child_num).is_some();
+        if new_links == 0 && !has_live_object {
+            self.ext4fs.cleanup_inode_caches_on_unlink(child_num);
+            let _ = self.ext4fs.truncate_inode(&mut child_ref, 0);
+            let is_dir = child_ref.inode.is_dir();
+            self.ext4fs.ialloc_free_inode(child_num, is_dir);
+            self.ext4fs.evict_inode_object_if_deleted(child_num);
+            self.ext4fs.unregister_page_cache(child_num);
+        } else if new_links == 0 {
+            // 有活着的 Ext4OSInode：仅清理 soft caches，硬回收由 Drop 负责
+            self.ext4fs.cleanup_inode_caches_on_unlink(child_num);
+            self.ext4fs.unregister_page_cache(child_num);
+            // 不调 evict_inode_object_if_deleted：inode_cache 仍需有效供缺页使用
+        }
+        // new_links > 0（hard link 场景）：不清理任何缓存，保留完整可用性
+
+        // 从 parent.children 移除（先 clone 出 Arc，释放锁后再 drop）
+        let _removed_child = {
+            let mut children = self.children.lock();
+            let removed = children.remove(name);
+            if removed.is_some() {
+                super::counters::inc_counter!(super::counters::DIR_CHILDREN_REMOVE);
+            }
+            removed
+        }; // lock released here; child Arc drops outside
 
         Ok(())
     }
@@ -940,13 +970,14 @@ impl IndexNode for layout::Ext4OSInode {
         self.ext4fs
             .dir_find_entry(parent_num, name, &mut result)
             .map_err(|_| SyscallErr::ENOENT)?;
-        let child_ref = self.ext4fs.get_inode_ref(result.dentry.inode);
+        let child_ino = result.dentry.inode;
+        let mut child_ref = self.ext4fs.get_inode_ref(child_ino);
         if !child_ref.inode.is_dir() {
             return Err(SyscallErr::ENOTDIR);
         }
         let entries = self
             .ext4fs
-            .dir_get_entries(result.dentry.inode)
+            .dir_get_entries(child_ino)
             .map_err(|_| SyscallErr::EIO)?;
         let non_dot = entries
             .iter()
@@ -958,27 +989,43 @@ impl IndexNode for layout::Ext4OSInode {
         if non_dot > 0 {
             return Err(SyscallErr::ENOTEMPTY);
         }
-        let child_ino = result.dentry.inode;
         self.ext4fs.flush_inode_pagecache_if_dirty(child_ino);
         self.ext4fs
             .unlink(
                 &mut self.inode.lock(),
-                &mut self.ext4fs.get_inode_ref(child_ino),
+                &mut child_ref,
                 name,
             )
             .map_err(|_| SyscallErr::EIO)?;
+        let new_links = child_ref.inode.links_count();
+        self.ext4fs.write_back_inode(&mut child_ref);
 
-        // Phase 2: cleanup caches + 从 parent.children 移除
-        {
-            let mut children = self.children.lock();
-            if children.remove(name).is_some() {
-                super::counters::inc_counter!(super::counters::DIR_CHILDREN_REMOVE);
+        // 传播 links_count 到活着的 Ext4OSInode
+        if let Some(child_obj) = self.ext4fs.lookup_inode_object(child_ino) {
+            if let Some(osi) = child_obj.as_any_ref().downcast_ref::<layout::Ext4OSInode>() {
+                let mut guard = osi.inode.lock();
+                guard.inode.set_links_count(new_links);
             }
-            drop(children);
+        }
+
+        // 目录被删除后直接回收（与普通文件不同，目录不能有 mmap/fd）
+        if new_links == 0 {
             self.ext4fs.cleanup_inode_caches_on_unlink(child_ino);
+            let _ = self.ext4fs.truncate_inode(&mut child_ref, 0);
+            self.ext4fs.ialloc_free_inode(child_ino, true);
             self.ext4fs.evict_inode_object_if_deleted(child_ino);
             self.ext4fs.unregister_page_cache(child_ino);
         }
+
+        // 从 parent.children 移除
+        let _removed = {
+            let mut children = self.children.lock();
+            let removed = children.remove(name);
+            if removed.is_some() {
+                super::counters::inc_counter!(super::counters::DIR_CHILDREN_REMOVE);
+            }
+            removed
+        };
 
         Ok(())
     }
@@ -1108,12 +1155,15 @@ impl Ext4FileSystem {
     }
 
     /// 在 unlink/rmdir 后清理 per-inode cache
-    /// 不清空 PageCache（文件可能仍被 fd 持有），不无条件清 metadata_dirty
+    /// 不清空 PageCache（文件可能仍被 fd/mmap 持有），不无条件清 metadata_dirty
+    /// 注意：不重置 cached_file_size，因为 VMA 仍可能 hold Arc<IndexNode>
+    /// 并通过 metadata() 查询文件大小触发缺页处理；
+    /// 若此时读磁盘 inode（已 unlink），可能得到 size=0 → BeyondEOF → SIGBUS
     pub(crate) fn cleanup_inode_caches_on_unlink(&self, ino: u32) {
         if let Some(arc) = self.lookup_inode_object(ino) {
             if let Some(osi) = arc.as_any_ref().downcast_ref::<layout::Ext4OSInode>() {
                 *osi.cached_symlink_target.lock() = None;
-                osi.cached_file_size.store(u64::MAX, core::sync::atomic::Ordering::Relaxed);
+                // 不重置 cached_file_size — unlink 后 VMA 仍可能引用此 inode
                 // metadata_dirty 已在 inode table write-back 路径处理，此处仅清标记
             }
         }

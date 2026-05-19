@@ -15,7 +15,8 @@ use core::any::Any;
 use spin::{Mutex, MutexGuard};
 
 use crate::config::PAGE_SIZE;
-use crate::mm::FrameTracker;
+use crate::fs::page_cache::{PageCache as NewPageCache, PageCacheBackend};
+use crate::mm::{frame_alloc, FrameTracker};
 use crate::utils::error::SyscallErr;
 
 use super::vfs::{
@@ -51,7 +52,6 @@ pub struct RamFS {
 // ── RamFSInode ────────────────────────────────────────────────────────
 
 /// RamFS inode 内部数据（不加锁）
-#[derive(Debug)]
 pub struct RamFSInode {
     /// 父目录弱引用
     parent: Weak<LockedRamFSInode>,
@@ -61,12 +61,25 @@ pub struct RamFSInode {
     children: BTreeMap<String, Arc<LockedRamFSInode>>,
     /// 文件数据 — 页索引 → 物理帧
     pages: BTreeMap<usize, Arc<FrameTracker>>,
+    /// PageCache（懒初始化，供 filemap shared fault 使用）
+    new_page_cache: Mutex<Option<Arc<NewPageCache>>>,
     /// 逻辑文件大小（字节）
     file_size: usize,
     /// 元数据
     metadata: Metadata,
     /// 所属文件系统弱引用
     fs: Weak<RamFS>,
+}
+
+impl core::fmt::Debug for RamFSInode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RamFSInode")
+            .field("file_size", &self.file_size)
+            .field("pages", &self.pages.len())
+            .field("children", &self.children.len())
+            .field("metadata", &self.metadata)
+            .finish()
+    }
 }
 
 impl RamFSInode {
@@ -76,6 +89,7 @@ impl RamFSInode {
             self_ref: Weak::default(),
             children: BTreeMap::new(),
             pages: BTreeMap::new(),
+            new_page_cache: Mutex::new(None),
             file_size: 0,
             metadata: Metadata {
                 dev_id: 0,
@@ -192,6 +206,57 @@ impl RamFS {
     /// 获取 RamFS 的 Weak 引用（用于创建子 inode 时传递）
     pub fn downgrade(self: &Arc<Self>) -> Weak<RamFS> {
         Arc::downgrade(self)
+    }
+}
+
+// ── RamFsPageCacheBackend ───────────────────────────────────────────────
+
+struct RamFsPageCacheBackend {
+    inode: Weak<LockedRamFSInode>,
+}
+
+impl PageCacheBackend for RamFsPageCacheBackend {
+    fn read_page(&self, index: usize, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+        let inode = self.inode.upgrade().ok_or(SyscallErr::EIO)?;
+        let inner = inode.0.lock();
+        if let Some(frame) = inner.pages.get(&index) {
+            let src = unsafe { &*(frame.ppn.0 as *const [u8; PAGE_SIZE]) };
+            buf[..PAGE_SIZE].copy_from_slice(&src[..PAGE_SIZE]);
+        } else {
+            buf[..PAGE_SIZE].fill(0);
+        }
+        Ok(PAGE_SIZE)
+    }
+
+    fn write_page(&self, index: usize, buf: &[u8]) -> Result<usize, SyscallErr> {
+        let inode = self.inode.upgrade().ok_or(SyscallErr::EIO)?;
+        let ramfs = {
+            let inner = inode.0.lock();
+            inner.fs.upgrade().ok_or(SyscallErr::EIO)?
+        };
+        let mut inner = inode.0.lock();
+        if let Some(frame) = inner.pages.get(&index) {
+            let dst = unsafe { &mut *(frame.ppn.0 as *mut [u8; PAGE_SIZE]) };
+            dst[..PAGE_SIZE].copy_from_slice(&buf[..PAGE_SIZE]);
+        } else {
+            let frame = frame_alloc().ok_or(SyscallErr::ENOMEM)?;
+            let dst = unsafe { &mut *(frame.ppn.0 as *mut [u8; PAGE_SIZE]) };
+            dst[..PAGE_SIZE].copy_from_slice(&buf[..PAGE_SIZE]);
+            inner.pages.insert(index, frame);
+            if ramfs.max_pages > 0 {
+                *ramfs.page_count.lock() += 1;
+            }
+        }
+        Ok(PAGE_SIZE)
+    }
+
+    fn npages(&self) -> usize {
+        let inode = match self.inode.upgrade() {
+            Some(i) => i,
+            None => return 0,
+        };
+        let inner = inode.0.lock();
+        (inner.file_size + PAGE_SIZE - 1) / PAGE_SIZE
     }
 }
 
@@ -437,6 +502,7 @@ impl IndexNode for LockedRamFSInode {
             self_ref: Weak::default(),
             children: BTreeMap::new(),
             pages: BTreeMap::new(),
+            new_page_cache: Mutex::new(None),
             file_size: 0,
             metadata: Metadata {
                 dev_id: 0,
@@ -690,6 +756,23 @@ impl IndexNode for LockedRamFSInode {
             1 => Ok(keys.remove(0)),
             _ => panic!("ramfs get_entry_name: multiple entries with same inode_id"),
         }
+    }
+
+    fn page_cache(&self) -> Option<Arc<NewPageCache>> {
+        let mut inner = self.0.lock();
+        if inner.metadata.file_type == FileType::Dir {
+            return None;
+        }
+        if let Some(ref pc) = *inner.new_page_cache.lock() {
+            return Some(pc.clone());
+        }
+        let backend = Arc::new(RamFsPageCacheBackend {
+            inode: inner.self_ref.clone(),
+        });
+        let pc: Arc<NewPageCache> = NewPageCache::new();
+        pc.set_backend(backend);
+        *inner.new_page_cache.lock() = Some(pc.clone());
+        Some(pc)
     }
 
     fn fs(&self) -> Arc<dyn FileSystem> {

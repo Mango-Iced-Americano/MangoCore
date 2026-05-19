@@ -36,6 +36,10 @@ impl IndexNode for Null {
         Ok(buf.len()) // 丢弃所有写入数据
     }
 
+    fn resize(&self, _len: usize) -> Result<(), SyscallErr> {
+        Ok(()) // /dev/null 无需实际截断，O_TRUNC 不报错即可
+    }
+
     fn metadata(&self) -> Result<Metadata, SyscallErr> {
         Ok(Metadata {
             dev_id: 0,
