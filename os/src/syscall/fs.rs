@@ -17,7 +17,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem::size_of;
 use core::panic;
-use log::{debug, info, trace, warn};
+use log::{debug, error, info, trace, warn};
 use num_enum::FromPrimitive;
 
 // 防止用户传入过大参数导致内核 OOM 或者长时间阻塞
@@ -199,8 +199,34 @@ fn read_into_user(file: &vfs::File, token: usize, buf: usize, count: usize) -> i
         Ok(writer) => writer,
         Err(errno) => return errno,
     };
+    // Temporary: check kernel_buf content before copy-out
+    if n >= 60 {
+        log::info!(
+            "[read_into_user] count={} n={} kbuf[50..60]={:02x?}",
+            count, n, &kernel_buf[50..60]
+        );
+    }
     match writer.write_from(&kernel_buf[..n]) {
-        Ok(_) => n as isize,
+        Ok(m) => {
+            if m != n {
+                warn!("read_into_user: copy-out {} bytes, expected {}", m, n);
+            }
+            // Temporary: read back user buffer to check for TLB incoherence
+            if n >= 60 {
+                if let Ok(reader) = UserBufferReader::new(token, buf as *const u8, n) {
+                    let readback = reader.read_to_vec(512).unwrap_or_default();
+                    if readback.len() >= 60 {
+                        log::info!(
+                            "[read_into_user] READBACK[50..60]={:02x?} kbuf[50..60]={:02x?} match={}",
+                            &readback[50..60],
+                            &kernel_buf[50..60],
+                            readback[50..60] == kernel_buf[50..60],
+                        );
+                    }
+                }
+            }
+            m as isize
+        }
         Err(errno) => errno,
     }
 }
@@ -216,7 +242,12 @@ fn pread_into_user(file: &vfs::File, token: usize, buf: usize, count: usize, off
         Err(errno) => return errno,
     };
     match writer.write_from(&kernel_buf[..n]) {
-        Ok(_) => n as isize,
+        Ok(m) => {
+            if m != n {
+                warn!("pread_into_user: copy-out {} bytes, expected {}", m, n);
+            }
+            m as isize
+        }
         Err(errno) => errno,
     }
 }
@@ -1523,14 +1554,31 @@ pub fn sys_umount2(target: *const u8, flags: u32) -> isize {
         None => return EINVAL,
     };
     info!("[sys_umount2] target: {}, flags: {:?}", target, flags);
-    let root: Arc<dyn vfs::IndexNode> = crate::fs::vfs_root().mountpoint_root_inode();
-    let inode = match vfs_lookup(&root, &target, false) {
+    let (lookup_inode, lookup_path) = {
+        let task = current_task().unwrap();
+        let fs = task.fs.lock();
+        if target.starts_with('/') {
+            let root: Arc<dyn vfs::IndexNode> = crate::fs::vfs_root().mountpoint_root_inode();
+            (root, target)
+        } else {
+            let cwd_inode: Arc<dyn vfs::IndexNode> = fs.working_inode.inode.clone();
+            let path = alloc::format!("{}/{}", fs.working_path, target);
+            (cwd_inode, path)
+        }
+    };
+    let inode = match vfs_lookup(&lookup_inode, &lookup_path, false) {
         Ok(inode) => inode,
-        Err(errno) => return errno,
+        Err(errno) => {
+            error!("[sys_umount2] vfs_lookup failed for path '{}': errno={}", lookup_path, errno);
+            return errno;
+        }
     };
     match inode.umount() {
         Ok(_) => SUCCESS,
-        Err(e) => -(e as isize),
+        Err(e) => {
+            error!("[sys_umount2] inode.umount() failed for '{}': errno={}", lookup_path, e as isize);
+            -(e as isize)
+        }
     }
 }
 
@@ -1591,14 +1639,64 @@ pub fn sys_mount(
         Ok(filesystemtype) => filesystemtype,
         Err(errno) => return errno,
     };
-    // infallible
     let mountflags = MountFlags::from_bits(mountflags).unwrap();
     info!(
         "[sys_mount] source: {}, target: {}, filesystemtype: {}, mountflags: {:?}, data: {:?}",
         source, target, filesystemtype, mountflags, data
     );
-    warn!("[sys_mount] fake implementation!");
-    SUCCESS
+
+    // Resolve target path (support CWD-relative)
+    let (lookup_inode, lookup_path) = {
+        let task = current_task().unwrap();
+        let fs = task.fs.lock();
+        if target.starts_with('/') {
+            let root: Arc<dyn vfs::IndexNode> = crate::fs::vfs_root().mountpoint_root_inode();
+            (root, target)
+        } else {
+            let cwd_inode: Arc<dyn vfs::IndexNode> = fs.working_inode.inode.clone();
+            let path = alloc::format!("{}/{}", fs.working_path, target);
+            (cwd_inode, path)
+        }
+    };
+
+    // Look up the target inode — must be a directory
+    let target_inode = match vfs_lookup(&lookup_inode, &lookup_path, false) {
+        Ok(inode) => inode,
+        Err(errno) => {
+            error!("[sys_mount] vfs_lookup failed for '{}': errno={}", lookup_path, errno);
+            return errno;
+        }
+    };
+
+    let md = match target_inode.metadata() {
+        Ok(md) => md,
+        Err(e) => return -(e as isize),
+    };
+    if md.file_type != FileType::Dir {
+        return ENOTDIR;
+    }
+    let inode_id = md.inode_id;
+
+    // Get the parent MountFS via downcast
+    let parent_mount_fs = if let Some(mfs_inode) =
+        (target_inode.as_any_ref().downcast_ref::<vfs::MountFSInode>())
+    {
+        mfs_inode.mount_fs.clone()
+    } else {
+        // fallback: use VFS root's mount_fs
+        crate::fs::vfs_root().clone()
+    };
+
+    // Create a tmpfs-backed MountFS and register it
+    let tmpfs = crate::fs::ramfs::RamFS::new_with_quota(4096);
+    let mnt_fs = vfs::MountFS::new(tmpfs, vfs::MountFlags::empty());
+
+    parent_mount_fs.add_mount(inode_id, mnt_fs)
+        .map(|_| SUCCESS)
+        .unwrap_or_else(|e| {
+            error!("[sys_mount] add_mount failed: errno={}", e as isize);
+            -(e as isize)
+        })
 }
 
 bitflags! {

@@ -488,6 +488,15 @@ impl IndexNode for layout::Ext4OSInode {
         // skip the page cache so the direct I/O fallback reads from i_block.
         if !is_symlink {
             if let Some(pc) = self.get_new_page_cache() {
+                if read_len <= 64 {
+                    let pg = offset >> crate::config::PAGE_SIZE_BITS;
+                    log::info!(
+                        "[read_at] ino={} offset={} len={} file_size={} page={} cached={} pc={:p}",
+                        inode_num, offset, read_len, file_size, pg,
+                        pc.contains_page(pg),
+                        Arc::as_ptr(&pc),
+                    );
+                }
                 return pc.read(offset, &mut buf[..read_len]).map_err(|_| SyscallErr::EIO);
             }
         }
@@ -571,7 +580,30 @@ impl IndexNode for layout::Ext4OSInode {
 
         // Write data through PageCache; physical blocks are already mapped.
         let pc = self.get_new_page_cache().ok_or(SyscallErr::EIO)?;
+
+        // Temporary diagnostic for hole-read debugging
+        if write_len <= 64 {
+            let pg = offset >> crate::config::PAGE_SIZE_BITS;
+            log::info!(
+                "[write_at] ino={} offset={} len={} old_size={} new_size={} blk={}..{} page={} cached={} pc={:p}",
+                inode_num, offset, write_len, old_size,
+                core::cmp::max(old_size, offset + write_len),
+                start_lblock, end_lblock, pg,
+                pc.contains_page(pg),
+                Arc::as_ptr(&pc),
+            );
+        }
         let write_result = pc.write(offset, &buf[..write_len]);
+
+        // Temporary: check if page data is corrupted after write
+        if old_size > 0 && offset > old_size {
+            let mut snap = [0u8; 64];
+            let _ = pc.read(0, &mut snap[..60]);
+            log::info!(
+                "[write_at] after_pc_write offset={} snap[50..60]={:02x?}",
+                offset, &snap[50..60]
+            );
+        }
 
         // Persist metadata changes (mtime/ctime/size/extent) — flush once
         // after all data + allocation work, even if data write partially failed.
@@ -584,6 +616,16 @@ impl IndexNode for layout::Ext4OSInode {
         self.ext4fs.write_back_inode(&mut fresh2);
         self.metadata_dirty.store(false, core::sync::atomic::Ordering::Relaxed);
         super::counters::inc_counter!(super::counters::METADATA_FLUSH_COUNT);
+
+        // Temporary: check if metadata flush corrupted page data
+        if old_size > 0 && offset > old_size {
+            let mut snap2 = [0u8; 64];
+            let _ = pc.read(0, &mut snap2[..60]);
+            log::info!(
+                "[write_at] after_flush offset={} snap2[50..60]={:02x?}",
+                offset, &snap2[50..60]
+            );
+        }
 
         write_result.map(|_| write_len).map_err(|_| SyscallErr::EIO)
     }

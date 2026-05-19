@@ -334,7 +334,7 @@ impl Ext4FileSystem {
         // Update inode blocks (different block size!) count
         let mut inode_blocks = inode_ref.inode.blocks_count();
         // inode_blocks += block_size / EXT4_INODE_BLOCK_SIZE as u64;
-        inode_blocks += (self.block_size / self.superblock.inode_size as usize) as u64;
+        inode_blocks += (self.block_size / 512) as u64;
         inode_ref.inode.set_blocks_count(inode_blocks);
 
         // Update block group free blocks count
@@ -409,8 +409,7 @@ impl Ext4FileSystem {
             let mut inode_blocks = inode_ref.inode.blocks_count();
             // let ext4_inode_block_size = self.superblock.inode_size() as usize;
             // inode_blocks -= (free_cnt * (self.block_size / EXT4_INODE_BLOCK_SIZE)) as u64;
-            inode_blocks -=
-                (free_cnt * (self.block_size / self.superblock.inode_size as usize)) as u64;
+            inode_blocks = inode_blocks.saturating_sub((free_cnt * (self.block_size / 512)) as u64);
             inode_ref.inode.set_blocks_count(inode_blocks);
             self.write_back_inode(inode_ref);
 

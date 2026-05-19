@@ -461,7 +461,10 @@ fn load_runtime_config() -> RuntimeConfig {
     if !cfg.ltp_include.is_empty() {
         println!("[initproc] LTP include list: {:?}", cfg.ltp_include);
     }
-    println!("[initproc] LTP exclude musl: {:?}, glibc: {:?}", cfg.ltp_exclude_musl, cfg.ltp_exclude_glibc);
+    println!(
+        "[initproc] LTP exclude musl: {:?}, glibc: {:?}",
+        cfg.ltp_exclude_musl, cfg.ltp_exclude_glibc
+    );
     cfg
 }
 
@@ -1362,8 +1365,13 @@ fn prepare_symlink(environ: &[*const u8]) {
     println!("[initproc] linking musl/glibc libs to /lib ...");
     let mkdir_cmds = [
         "busybox mkdir /lib\0",
+        // "busybox mkdir /lib64\0",
         "busybox mkdir /usr\0",
-        "busybox mkdir /usr/lib\0",
+        // "busybox mkdir /usr/lib\0",
+        // "busybox mkdir /usr/lib64\0",
+        "busybox ln -sf /lib /lib64\0",
+        "busybox ln -sf /lib /usr/lib\0",
+        "busybox ln -sf /lib /usr/lib64\0",
     ];
     for cmd in &mkdir_cmds {
         let r = run_bash_cmd(cmd, environ);
@@ -1374,6 +1382,7 @@ fn prepare_symlink(environ: &[*const u8]) {
         "busybox ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64.so.1\0",
         "busybox ln -sf /musl/lib/libc.so /lib/libc.so\0",
         "busybox ln -sf /glibc/lib/ld-linux-riscv64-lp64d.so.1 /lib/ld-linux-riscv64-lp64d.so.1\0",
+        "busybox ln -sf /glibc/lib/ld-linux-loongarch-lp64d.so.1 /lib/ld-linux-loongarch-lp64d.so.1\0",
         "busybox ln -sf /glibc/lib/libc.so.6 /lib/libc.so.6\0",
         "busybox ln -sf /glibc/lib/libm.so.6 /lib/libm.so.6\0",
         "busybox ln -sf /glibc/lib/tls_get_new-dtv_dso.so /lib/tls_get_new-dtv_dso.so\0",
@@ -1414,7 +1423,10 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     let bash_ret = run_bash_cmd(bash_check, &environ);
     let has_bin_bash = bash_ret == 0;
     HAS_BIN_BASH.store(has_bin_bash, Ordering::Relaxed);
-    println!("[initproc] post-prepare /bin/bash check exit={} has_bin_bash={}", bash_ret, has_bin_bash);
+    println!(
+        "[initproc] post-prepare /bin/bash check exit={} has_bin_bash={}",
+        bash_ret, has_bin_bash
+    );
 
     // println!("[initproc] running fs_test...");
     // let fs_test_cmd = "cd / && ./fs_test\0";

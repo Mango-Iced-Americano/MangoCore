@@ -326,7 +326,12 @@ impl Ext4FileSystem {
         inode.set_atime(now);
         inode.set_mtime(now);
         inode.set_ctime(now);
-        inode.set_links_count(1);
+        // links_count is set by link_no_parent_flush (increments from 0 to 1)
+        // Initialize extra inode size for metadata_csum
+        let inode_size = self.superblock.inode_size();
+        if inode_size > EXT4_GOOD_OLD_INODE_SIZE {
+            inode.set_i_extra_isize(self.superblock.extra_size());
+        }
         // No EXT4_INODE_FLAG_EXTENTS — fast symlink uses i_block directly
         let block_bytes = inode.block_mut_as_bytes();
         block_bytes[..target.len()].copy_from_slice(target);

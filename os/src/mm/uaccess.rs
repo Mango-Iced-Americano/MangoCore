@@ -255,6 +255,15 @@ impl UserBufferWriter {
     }
 
     pub fn write_from(&mut self, src: &[u8]) -> Result<usize, isize> {
+        let total_buf_len = self.buffer.len;
+        if src.len() >= 60 {
+            log::info!(
+                "[UserBufferWriter] write_from src_len={} buf_total_len={} n_bufs={}",
+                src.len(),
+                total_buf_len,
+                self.buffer.buffers.len(),
+            );
+        }
         Ok(self.buffer.write(src))
     }
 }

@@ -81,13 +81,13 @@ const SYSCALL_GET_TIME: usize = 1690; //you mean get time of day by 169?
 global_asm!(include_str!("syscall.S"));
 #[cfg(target_arch = "loongarch64")]
 extern "C" {
-    pub fn __syscall(id: usize, args0: usize, args1: usize, args2: usize) -> isize;
+    pub fn __syscall(id: usize, args0: usize, args1: usize, args2: usize, args3: usize, args4: usize, args5: usize) -> isize;
 }
 
 fn syscall(id: usize, args: [usize; 3]) -> isize {
     #[cfg(target_arch = "loongarch64")]
     unsafe {
-        __syscall(id, args[0], args[1], args[2])
+        __syscall(id, args[0], args[1], args[2], 0, 0, 0)
     }
     #[cfg(target_arch = "riscv64")]
     {
@@ -123,8 +123,8 @@ fn syscall4(id: usize, args: [usize; 4]) -> isize {
         ret
     }
     #[cfg(target_arch = "loongarch64")]
-    {
-        syscall(id, [args[0], args[1], args[2]])
+    unsafe {
+        __syscall(id, args[0], args[1], args[2], args[3], 0, 0)
     }
 }
 
@@ -148,9 +148,8 @@ fn syscall6(id: usize, args: [usize; 6]) -> isize {
         ret
     }
     #[cfg(target_arch = "loongarch64")]
-    {
-        // loongarch64 目前只有3参数版本
-        syscall(id, [args[0], args[1], args[2]])
+    unsafe {
+        __syscall(id, args[0], args[1], args[2], args[3], args[4], args[5])
     }
 }
 

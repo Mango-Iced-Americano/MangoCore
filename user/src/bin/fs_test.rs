@@ -6,12 +6,12 @@ use user_lib::syscall::*;
 use user_lib::{println};
 
 fn test_mkdir() -> bool {
-    let ret = sys_mkdirat(AT_FDCWD, "/tmp\0", 0o777);
+    let ret = sys_mkdirat(AT_FDCWD, "/tmp/fs_test\0", 0o777);
     if ret < 0 {
-        println!("  FAIL: mkdirat /tmp returned {}", ret);
+        println!("  FAIL: mkdirat /tmp/fs_test returned {}", ret);
         return false;
     }
-    println!("  PASS: mkdirat /tmp OK");
+    println!("  PASS: mkdirat /tmp/fs_test OK");
     true
 }
 
@@ -20,9 +20,9 @@ fn test_create_and_write() -> bool {
     const O_WRONLY: u32 = 0o1;
     const O_TRUNC: u32 = 0o1000;
 
-    let fd = sys_open("/tmp/testfile\0", O_CREAT | O_WRONLY | O_TRUNC);
+    let fd = sys_open("/tmp/fs_test/file\0", O_CREAT | O_WRONLY | O_TRUNC);
     if fd < 0 {
-        println!("  FAIL: open /tmp/testfile returned {}", fd);
+        println!("  FAIL: open /tmp/fs_test/file returned {}", fd);
         return false;
     }
 
@@ -34,14 +34,14 @@ fn test_create_and_write() -> bool {
         println!("  FAIL: write returned {} (expected {})", n, msg.len());
         return false;
     }
-    println!("  PASS: create+write /tmp/testfile OK ({} bytes)", n);
+    println!("  PASS: create+write /tmp/fs_test/file OK ({} bytes)", n);
     true
 }
 
 fn test_read() -> bool {
     const O_RDONLY: u32 = 0;
 
-    let fd = sys_open("/tmp/testfile\0", O_RDONLY);
+    let fd = sys_open("/tmp/fs_test/file\0", O_RDONLY);
     if fd < 0 {
         println!("  FAIL: open for read returned {}", fd);
         return false;
@@ -61,41 +61,41 @@ fn test_read() -> bool {
         println!("  FAIL: read data mismatch");
         return false;
     }
-    println!("  PASS: read /tmp/testfile OK");
+    println!("  PASS: read /tmp/fs_test/file OK");
     true
 }
 
 fn test_symlink() -> bool {
-    let ret = sys_symlinkat("/tmp/testfile\0", AT_FDCWD, "/tmp/testlink\0");
+    let ret = sys_symlinkat("/tmp/fs_test/file\0", AT_FDCWD, "/tmp/fs_test/link\0");
     if ret < 0 {
         println!("  FAIL: symlinkat returned {}", ret);
         return false;
     }
-    println!("  PASS: symlinkat /tmp/testlink -> /tmp/testfile OK");
+    println!("  PASS: symlinkat /tmp/fs_test/link -> /tmp/testfile OK");
     true
 }
 
 fn test_readlink() -> bool {
     let mut buf = [0u8; 256];
-    let n = sys_readlinkat(AT_FDCWD, "/tmp/testlink\0", &mut buf);
+    let n = sys_readlinkat(AT_FDCWD, "/tmp/fs_test/link\0", &mut buf);
     if n < 0 {
         println!("  FAIL: readlinkat returned {}", n);
         return false;
     }
 
     let target = core::str::from_utf8(&buf[..n as usize]).unwrap_or("???");
-    if target != "/tmp/testfile" {
-        println!("  FAIL: readlink target='{}' (expected '/tmp/testfile')", target);
+    if target != "/tmp/fs_test/file" {
+        println!("  FAIL: readlink target='{}' (expected '/tmp/fs_test/file')", target);
         return false;
     }
-    println!("  PASS: readlinkat /tmp/testlink -> '{}' OK", target);
+    println!("  PASS: readlinkat /tmp/fs_test/link -> '{}' OK", target);
     true
 }
 
 fn test_read_via_symlink() -> bool {
     const O_RDONLY: u32 = 0;
 
-    let fd = sys_open("/tmp/testlink\0", O_RDONLY);
+    let fd = sys_open("/tmp/fs_test/link\0", O_RDONLY);
     if fd < 0 {
         println!("  FAIL: open symlink returned {}", fd);
         return false;
@@ -120,13 +120,13 @@ fn test_read_via_symlink() -> bool {
 }
 
 fn test_unlink() -> bool {
-    let ret = sys_unlinkat(AT_FDCWD, "/tmp/testlink\0", 0);
+    let ret = sys_unlinkat(AT_FDCWD, "/tmp/fs_test/link\0", 0);
     if ret < 0 {
         println!("  FAIL: unlinkat testlink returned {}", ret);
         return false;
     }
 
-    let ret2 = sys_unlinkat(AT_FDCWD, "/tmp/testfile\0", 0);
+    let ret2 = sys_unlinkat(AT_FDCWD, "/tmp/fs_test/file\0", 0);
     if ret2 < 0 {
         println!("  FAIL: unlinkat testfile returned {}", ret2);
         return false;
@@ -137,12 +137,12 @@ fn test_unlink() -> bool {
 
 fn test_rmdir() -> bool {
     const AT_REMOVEDIR: u32 = 0x200;
-    let ret = sys_unlinkat(AT_FDCWD, "/tmp\0", AT_REMOVEDIR);
+    let ret = sys_unlinkat(AT_FDCWD, "/tmp/fs_test\0", AT_REMOVEDIR);
     if ret < 0 {
-        println!("  FAIL: rmdir /tmp returned {}", ret);
+        println!("  FAIL: rmdir /tmp/fs_test returned {}", ret);
         return false;
     }
-    println!("  PASS: rmdir /tmp OK");
+    println!("  PASS: rmdir /tmp/fs_test OK");
     true
 }
 
@@ -1005,7 +1005,8 @@ fn test_lseek_hole_read() -> bool {
     sys_write(fd as usize, b"0123456789"); // 10 bytes at offset 0
     let pos = sys_lseek(fd as usize, 50, SEEK_SET);
     if pos != 50 { println!("  FAIL: seek to 50 got {}", pos); return false; }
-    sys_write(fd as usize, b"DATA_AT_50");
+    let n2 = sys_write(fd as usize, b"DATA_AT_50");
+    if n2 != 10 { println!("  FAIL: second write returned {} (expected 10)", n2); return false; }
     sys_lseek(fd as usize, 0, SEEK_SET);
     let mut buf = [0u8; 70];
     let n = sys_read(fd as usize, &mut buf);
