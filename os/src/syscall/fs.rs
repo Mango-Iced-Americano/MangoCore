@@ -1246,10 +1246,42 @@ pub fn sys_syncfs(_fd: usize) -> isize {
     ENOSYS
 }
 
-pub fn sys_fchmodat() -> isize {
-    // baseline 未完成这个函数
-    println!("[kernel in sys_fchmodat] chmod is not supported for now!\n");
-    0
+pub fn sys_fchmodat(dirfd: usize, path: *const u8, mode: u32, _flags: u32) -> isize {
+    let task = current_task().unwrap();
+    let token = task.get_user_token();
+    let path_str = match UserCString::from_addr(path as usize).read(token) {
+        Ok(s) => s,
+        Err(_) => return -EFAULT,
+    };
+    let inode = if dirfd == AT_FDCWD || path_str.starts_with('/') {
+        match vfs_lookup_absolute(&path_str) {
+            Ok(inode) => inode,
+            Err(e) => return e,
+        }
+    } else {
+        let dir_inode = {
+            let fd_table = task.files.lock();
+            match fd_table.get_file(dirfd) {
+                Ok(f) => f.inode.clone(),
+                Err(_) => return -EBADF,
+            }
+        };
+        match vfs_lookup(&dir_inode, &path_str, true) {
+            Ok(inode) => inode,
+            Err(e) => return e,
+        }
+    };
+    let new_mode = vfs::InodeMode::from_bits_truncate(mode);
+    let mut meta = match inode.metadata() {
+        Ok(m) => m,
+        Err(e) => return -(e as isize),
+    };
+    let file_type = meta.mode & vfs::InodeMode::S_IFMT;
+    meta.mode = file_type | (new_mode & vfs::InodeMode::S_IALLUGO);
+    match inode.set_metadata(&meta) {
+        Ok(()) => 0,
+        Err(e) => -(e as isize),
+    }
 }
 
 pub fn sys_fchownat() -> isize {
