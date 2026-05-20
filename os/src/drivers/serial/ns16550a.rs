@@ -35,12 +35,12 @@ impl Read<u8> for Ns16550a {
 
 impl Write<u8> for Ns16550a {
     fn write(&mut self, word: u8) -> nb::Result<(), Self::Error> {
-        // 写，但是不刷新
-        unsafe { write_volatile((self.base + offsets::THR) as *mut u8, word) };
         if word == b'\n' {
-            // 如果是换行符，还要再写一个回车符
+            // 换行符前先写回车符，产生标准 \r\n 序列
+            // （旧代码先写 \n 再写 \r 产生 \n\r，会触发 Python universal newline 拆分 bug）
             unsafe { write_volatile((self.base + offsets::THR) as *mut u8, b'\r') };
         }
+        unsafe { write_volatile((self.base + offsets::THR) as *mut u8, word) };
         Ok(())
     }
 
