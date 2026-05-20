@@ -829,7 +829,8 @@ pub fn sigprocmask(how: u32, set: *const Signals, oldset: *mut Signals) -> isize
     let token = task.get_user_token();
     // If oldset is non-NULL, the previous value of the signal mask is stored in oldset
     if oldset as usize != 0 {
-        match UserPtrMut::new(oldset).write(token, &inner.sigmask) {
+        let old_bits = inner.sigmask.bits() as u64;
+        match UserPtrMut::new(oldset as *mut u64).write(token, &old_bits) {
             Ok(()) => {}
             Err(errno) => return errno,
         }
@@ -838,8 +839,8 @@ pub fn sigprocmask(how: u32, set: *const Signals, oldset: *mut Signals) -> isize
     // If set is NULL, then the signal mask is unchanged
     if set as usize != 0 {
         let how = SigMaskHow::from_bits(how);
-        let signal_set = match UserPtr::new(set).read(token) {
-            Ok(set) => set,
+        let signal_set = match UserPtr::new(set as *const u64).read(token) {
+            Ok(bits) => Signals::from_bits_truncate(bits as signal_type!()),
             Err(errno) => return errno,
         };
         trace!("[sigprocmask] how: {:?}, *set: ({:?})", how, signal_set);

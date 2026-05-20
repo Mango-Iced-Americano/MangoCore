@@ -3,13 +3,15 @@ use super::{
     registry,
     signal::{PendingSignal, SignalQueue, Sighand, Signals},
     threads::Futex,
-    FsStatus, TaskControlBlock, TaskStatus, WaitQueue, WaitResult,
+    wake_interruptible, Completion, FsStatus, TaskControlBlock, TaskStatus, WaitQueue, WaitResult,
+    INITPROC,
 };
 use crate::fs::vfs;
 use crate::mm::{AddressSpace, PageTableImpl};
 use alloc::sync::{Arc, Weak};
 use alloc::string::String;
 use alloc::vec::Vec;
+use log::warn;
 use spin::{Mutex, MutexGuard};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,18 +29,12 @@ pub struct ProcessControlBlock {
     pub threads: Mutex<Vec<Weak<TaskControlBlock>>>,
     /// 父进程 wait4() 等待子进程退出的等待队列。
     pub child_exit_wait: Mutex<WaitQueue>,
+    /// CLONE_VFORK 父线程。Some 表示当前进程来自 vfork，且尚未完成。
+    vfork_parent: Mutex<Option<Weak<TaskControlBlock>>>,
     /// CLONE_VFORK completion。父线程等待子进程 exec 成功或 exit。
-    vfork: Mutex<VforkState>,
+    vfork_done: Completion,
     inner: Mutex<ProcessInner>,
     signal: Mutex<ProcessSignalState>,
-}
-
-struct VforkState {
-    /// CLONE_VFORK 父线程。Some 表示当前进程来自 vfork，且尚未完成。
-    parent: Option<Weak<TaskControlBlock>>,
-    /// completion 状态。true 表示子进程已经 exec 成功或 exit。
-    done: bool,
-    wait_queue: WaitQueue,
 }
 
 pub struct ProcessInner {
@@ -99,11 +95,8 @@ impl ProcessControlBlock {
             leader_tid,
             threads: Mutex::new(Vec::new()),
             child_exit_wait: Mutex::new(WaitQueue::new()),
-            vfork: Mutex::new(VforkState {
-                parent: None,
-                done: false,
-                wait_queue: WaitQueue::new(),
-            }),
+            vfork_parent: Mutex::new(None),
+            vfork_done: Completion::new(),
             inner: Mutex::new(ProcessInner {
                 exe,
                 exe_path,
@@ -309,27 +302,21 @@ impl ProcessControlBlock {
     }
 
     pub fn set_vfork_parent(&self, parent: &Arc<TaskControlBlock>) {
-        let mut vfork = self.vfork.lock();
-        vfork.parent = Some(Arc::downgrade(parent));
-        vfork.done = false;
+        *self.vfork_parent.lock() = Some(Arc::downgrade(parent));
     }
 
     pub fn complete_vfork(&self) {
-        let mut vfork = self.vfork.lock();
-        if vfork.parent.is_none() || vfork.done {
+        let mut parent = self.vfork_parent.lock();
+        if parent.is_none() {
             return;
         }
-        vfork.parent = None;
-        vfork.done = true;
-        vfork.wait_queue.wake_all();
+        *parent = None;
+        drop(parent);
+        self.vfork_done.complete();
     }
 
     pub fn wait_vfork_done_interruptible(&self) -> WaitResult {
-        WaitQueue::wait_event_interruptible_locked(
-            &self.vfork,
-            |state| &mut state.wait_queue,
-            |state| state.done.then_some(0),
-        )
+        self.vfork_done.wait_interruptible()
     }
 
     pub fn take_children(&self) -> Vec<Arc<ProcessControlBlock>> {
@@ -344,6 +331,61 @@ impl ProcessControlBlock {
         for fd in open_fds {
             let _ = fd_table.drop_fd(fd);
         }
+    }
+
+    /// 完成进程级退出收尾。
+    ///
+    /// 线程级清理已经由 TaskControlBlock::exit_thread_resources() 完成；
+    /// 这里只负责进程 zombie、父进程 wait 唤醒、孤儿进程转交 initproc
+    /// 以及进程资源关闭。
+    pub fn finish_exit(&self, exit_task: &TaskControlBlock, exit_code: u32) {
+        self.complete_vfork();
+        if !self.mark_zombie(exit_code) {
+            return;
+        }
+
+        if let Some(parent_process) = self.parent() {
+            parent_process.child_exit_wait.lock().wake_all();
+            if !exit_task.exit_signal.is_empty() {
+                if let Some(parent_task) = parent_process.any_live_thread() {
+                    let mut parent_inner = parent_task.acquire_inner_lock();
+                    parent_inner.add_signal(exit_task.exit_signal);
+
+                    if parent_inner.task_status == TaskStatus::Interruptible {
+                        parent_inner.task_status = TaskStatus::Ready;
+                        drop(parent_inner);
+                        wake_interruptible(parent_task);
+                    }
+                }
+            }
+        } else {
+            warn!("[finish_process_exit] parent is None");
+        }
+
+        let children = self.take_children();
+        if !children.is_empty() {
+            let mut initproc_inner = INITPROC.process.acquire_inner_lock();
+            for child in children {
+                child.set_parent(Some(Arc::downgrade(&INITPROC.process)));
+                initproc_inner.children.push(child);
+            }
+            drop(initproc_inner);
+            INITPROC.process.child_exit_wait.lock().wake_all();
+            if let Some(init_task) = INITPROC.process.any_live_thread() {
+                let mut init_inner = init_task.acquire_inner_lock();
+                if init_inner.task_status == TaskStatus::Interruptible {
+                    init_inner.task_status = TaskStatus::Ready;
+                    drop(init_inner);
+                    wake_interruptible(init_task);
+                }
+            }
+        }
+
+        let vm = self.vm();
+        if Arc::strong_count(&vm) <= 2 {
+            vm.lock().recycle_data_pages();
+        }
+        self.close_files_on_exit();
     }
 }
 

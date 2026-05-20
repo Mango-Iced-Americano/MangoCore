@@ -14,7 +14,7 @@ use crate::hal::TrapImpl;
 use crate::hal::{kstack_alloc, KernelStack};
 use crate::hal::{trap_handler, TrapContext};
 use crate::mm::PageTableImpl;
-use crate::mm::{AddressSpace, PhysPageNum, VirtAddr, KERNEL_SPACE};
+use crate::mm::{AddressSpace, PhysPageNum, UserPtrMut, VirtAddr, KERNEL_SPACE};
 use crate::syscall::CloneFlags;
 use crate::syscall::errno::ENOMEM;
 use crate::timer::{ITimerVal, TimeSpec, TimeVal};
@@ -319,6 +319,55 @@ impl TaskControlBlock {
     pub fn ustack_bottom_va(&self) -> usize {
         ustack_bottom_from_slot(self.user_res_slot)
     }
+
+    /// 释放线程级资源，并把当前线程标记为 zombie。
+    ///
+    /// 这里不处理父子进程、进程 zombie、fd/vm 整体回收等进程级生命周期，
+    /// 那些属于 ProcessControlBlock 的退出收尾。
+    pub(crate) fn exit_thread_resources(&self, exit_code: u32) -> bool {
+        log::trace!(
+            "[exit_thread] Trying to exit tid {} pid {} with {}",
+            self.tid.0,
+            self.pid(),
+            exit_code
+        );
+        let clear_child_tid = {
+            let mut inner = self.acquire_inner_lock();
+            if inner.task_status == TaskStatus::Zombie {
+                return false;
+            }
+            inner.task_status = TaskStatus::Zombie;
+            inner.clear_child_tid
+        };
+
+        if clear_child_tid != 0 {
+            log::debug!(
+                "[do_exit] do futex wake on clear_child_tid: {:X}",
+                clear_child_tid
+            );
+            match UserPtrMut::from_addr(clear_child_tid).write(self.get_user_token(), &0u32) {
+                Ok(()) => {
+                    self.process.futex().lock().wake(clear_child_tid, 1);
+                }
+                Err(_) => log::warn!("invalid clear_child_tid"),
+            };
+        }
+
+        self.process
+            .vm()
+            .lock()
+            .dealloc_user_res(self.user_res_slot);
+
+        log::info!(
+            "[exit_thread] tid {} pid {} exited with {}",
+            self.tid.0,
+            self.pid(),
+            exit_code
+        );
+        crate::utils::stats::print_resource_stats();
+        true
+    }
+
     /// !!!!!!!!!!!!!!!!WARNING!!!!!!!!!!!!!!!!!!!!!
     /// 当前仅用于initproc加载。如果在其他地方使用，必须更改bin_path。
     /// 任务创建（仅用于initproc）
@@ -525,7 +574,7 @@ impl TaskControlBlock {
             .collect();
         for task in &other_threads {
             // execve 会杀掉同线程组的其他线程，但保留当前 process。
-            super::exit_thread(task.clone(), Signals::SIGKILL.to_signum().unwrap() as u32);
+            task.exit_thread_resources(Signals::SIGKILL.to_signum().unwrap() as u32);
         }
         super::remove_tasks_from_queues(&other_threads);
 

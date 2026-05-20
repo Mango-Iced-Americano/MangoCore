@@ -1450,10 +1450,13 @@ pub fn sys_sigaction(signum: usize, act: usize, oldact: usize) -> isize {
 }
 
 /// Note: code translation should be done in syscall rather than the call handler as the handler may be reused by kernel code which use kernel structs
-pub fn sys_sigprocmask(how: u32, set: usize, oldset: usize) -> isize {
+pub fn sys_sigprocmask(how: u32, set: usize, oldset: usize, sigsetsize: usize) -> isize {
+    if !valid_rt_sigset_size(sigsetsize) {
+        return EINVAL;
+    }
     info!(
-        "[sys_sigprocmask] how: {:?}; set: {:X}, oldset: {:X}",
-        how, set, oldset
+        "[sys_sigprocmask] how: {:?}; set: {:X}, oldset: {:X}, sigsetsize: {}",
+        how, set, oldset, sigsetsize
     );
     sigprocmask(how, set as *const Signals, oldset as *mut Signals)
 }
@@ -1487,7 +1490,10 @@ pub fn sys_rt_sigpending(set: usize, sigsetsize: usize) -> isize {
     }
 }
 
-pub fn sys_sigtimedwait(set: usize, info: usize, timeout: usize) -> isize {
+pub fn sys_sigtimedwait(set: usize, info: usize, timeout: usize, sigsetsize: usize) -> isize {
+    if !valid_rt_sigset_size(sigsetsize) {
+        return EINVAL;
+    }
     sigtimedwait(
         set as *const Signals,
         info as *mut SigInfo,

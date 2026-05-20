@@ -528,6 +528,7 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
             WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
         }
     } else {
+        // Fallback: regular files and legacy File implementations may not expose a WaitQueue yet.
         wait_io_core(|| read_into_user(&file, token, buf, count), is_nonblock)
     }
 }
@@ -560,6 +561,7 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
             WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
         }
     } else {
+        // Fallback: regular files and legacy File implementations may not expose a WaitQueue yet.
         wait_io_core(|| write_from_user(&file, token, buf, count), is_nonblock)
     }
 }

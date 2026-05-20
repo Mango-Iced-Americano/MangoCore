@@ -1,3 +1,4 @@
+mod completion;
 mod context;
 mod elf;
 mod manager;
@@ -11,18 +12,13 @@ mod task;
 pub mod threads;
 
 use crate::hal::__switch;
-use crate::{
-    fs::{self, vfs_lookup_absolute},
-    mm::UserPtrMut,
-    timer::TimeSpec,
-    utils::error::{GeneralRet, SyscallErr},
-};
+use crate::fs::{self, vfs_lookup_absolute};
 use alloc::{sync::Arc, vec::Vec};
 pub use context::TaskContext;
 pub use elf::{load_elf_interp, AuxvEntry, AuxvType, ELFInfo};
 use lazy_static::*;
-use log::warn;
 use manager::fetch_task;
+pub use completion::Completion;
 pub use manager::{
     add_kernel_timer, add_task, all_pids, do_oom, do_wake_expired, kernel_timer_queue_len,
     procs_count, remove_tasks_from_queues, send_signal_to_interruptible, sleep_interruptible,
@@ -76,7 +72,7 @@ pub fn suspend_current_and_run_next() {
     schedule(task_cx_ptr);
 }
 
-pub fn block_current_and_run_next() {
+pub(crate) fn block_current_and_run_next() {
     // There must be an application running.
     let task = take_current_task().unwrap();
 
@@ -97,7 +93,7 @@ pub fn block_current_and_run_next() {
 /// 先把当前任务放入 interruptible 队列，再执行一次调用方提供的阻塞条件检查。
 /// 这用于信号等待这类路径，避免信号在“检查 pending”和“进入睡眠队列”
 /// 之间到达时丢失唤醒。
-pub fn block_current_and_run_next_checked(
+pub(crate) fn block_current_and_run_next_checked(
     should_block: impl FnOnce(&Arc<TaskControlBlock>) -> bool,
 ) {
     let task = take_current_task().unwrap();
@@ -122,7 +118,7 @@ pub fn block_current_and_run_next_checked(
 // 带释放锁的阻塞调度，确保任务真正进入 interruptible_queue 后再丢锁，
 // 避免在丢锁到睡眠之间丢失唤醒。
 // 注意不要重复丢锁。
-pub fn block_current_and_run_next_with_lock<T>(lock: MutexGuard<'_, T>) {
+pub(crate) fn block_current_and_run_next_with_lock<T>(lock: MutexGuard<'_, T>) {
     // There must be an application running.
     let task = take_current_task().unwrap();
 
@@ -168,170 +164,23 @@ pub(crate) fn block_current_and_run_next_with_lock_checked<T>(
     schedule(task_cx_ptr);
 }
 
-// 判断该task的sigpending中是否已经有可操作的未遮蔽信号
-// 被忽略的信号（SIG_IGN）或默认动作是忽略的信号（如SIGCHLD）不算
-fn has_unblocked_signal(task: &Arc<TaskControlBlock>) -> bool {
-    has_actionable_signal(task)
-}
-
-//等待一段时间直到达到deadline
-pub fn wait_interruptible_timeout(deadline: TimeSpec) -> GeneralRet<()> {
-    let task = current_task().unwrap();
-    if has_unblocked_signal(&task) {
-        return Err(SyscallErr::ERESTART);
-    }
-    if TimeSpec::now() >= deadline {
-        return Ok(());
-    }
-    wait_with_timeout(Arc::downgrade(&task), deadline);
-    block_current_and_run_next();
-    if has_unblocked_signal(&task) {
-        Err(SyscallErr::ERESTART)
-    } else {
-        Ok(())
-    }
-}
-
-//等待直到下一个信号传来
-pub fn wait_interruptible() -> GeneralRet<()> {
-    let task = current_task().unwrap();
-    //有信号则直接抛错退出
-    if has_unblocked_signal(&task) {
-        return Err(SyscallErr::ERESTART);
-    }
-    block_current_and_run_next();
-    //醒后检查
-    if has_unblocked_signal(&task) {
-        Err(SyscallErr::ERESTART)
-    } else {
-        Ok(())
-    }
-}
-
-pub(super) fn exit_thread(task: Arc<TaskControlBlock>, exit_code: u32) -> bool {
-    log::trace!(
-        "[exit_thread] Trying to exit tid {} pid {} with {}",
-        task.tid.0,
-        task.pid(),
-        exit_code
-    );
-    let clear_child_tid = {
-        let mut inner = task.acquire_inner_lock();
-        if inner.task_status == TaskStatus::Zombie {
-            return false;
-        }
-        inner.task_status = TaskStatus::Zombie;
-        inner.clear_child_tid
-    };
-
-    if clear_child_tid != 0 {
-        log::debug!(
-            "[do_exit] do futex wake on clear_child_tid: {:X}",
-            clear_child_tid
-        );
-        //let phys_ref =
-        match UserPtrMut::from_addr(clear_child_tid).write(task.get_user_token(), &0u32) {
-            Ok(()) => {
-                task.process.futex().lock().wake(clear_child_tid, 1);
-            }
-            Err(_) => log::warn!("invalid clear_child_tid"),
-        };
-    }
-
-    // deallocate thread-local user resource (trap context and default user stack)
-    task.process.vm().lock().dealloc_user_res(task.user_res_slot);
-
-    log::info!(
-        "[exit_thread] tid {} pid {} exited with {}",
-        task.tid.0,
-        task.pid(),
-        exit_code
-    );
-
-    // 打印资源统计诊断信息
-    crate::utils::stats::print_resource_stats();
-    true
-}
-
-pub fn do_exit(task: Arc<TaskControlBlock>, exit_code: u32) {
-    if exit_thread(task.clone(), exit_code) && task.process.live_thread_count() == 0 {
-        finish_process_exit(&task, exit_code);
-    }
-}
-
-fn finish_process_exit(task: &Arc<TaskControlBlock>, exit_code: u32) {
-    let process = task.process.clone();
-    process.complete_vfork();
-    if !process.mark_zombie(exit_code) {
-        return;
-    }
-
-    if let Some(parent_process) = process.parent() {
-        parent_process.child_exit_wait.lock().wake_all();
-        if !task.exit_signal.is_empty() {
-            if let Some(parent_task) = parent_process.any_live_thread() {
-                let mut parent_inner = parent_task.acquire_inner_lock();
-                parent_inner.add_signal(task.exit_signal);
-
-                if parent_inner.task_status == TaskStatus::Interruptible {
-                    parent_inner.task_status = TaskStatus::Ready;
-                    drop(parent_inner);
-                    wake_interruptible(parent_task);
-                }
-            }
-        }
-    } else {
-        warn!("[finish_process_exit] parent is None");
-    }
-
-    let children = process.take_children();
-    if !children.is_empty() {
-        let mut initproc_inner = INITPROC.process.acquire_inner_lock();
-        for child in children {
-            child.set_parent(Some(Arc::downgrade(&INITPROC.process)));
-            initproc_inner.children.push(child);
-        }
-        drop(initproc_inner);
-        INITPROC.process.child_exit_wait.lock().wake_all();
-        if let Some(init_task) = INITPROC.process.any_live_thread() {
-            let mut init_inner = init_task.acquire_inner_lock();
-            if init_inner.task_status == TaskStatus::Interruptible {
-                init_inner.task_status = TaskStatus::Ready;
-                drop(init_inner);
-                wake_interruptible(init_task);
-            }
-        }
-    }
-
-    // deallocate whole user space in advance, or if its parent does not call wait,
-    // this resource may not be recycled in a long period of time.
-    let vm = task.process.vm();
-    if Arc::strong_count(&vm) <= 2 {
-        vm.lock().recycle_data_pages();
-    }
-    // 关闭所有文件描述符，释放管道/Socket等的 Arc 引用，
-    // 确保读端能收到 EOF（all_write_ends_closed() == true）。
-    // SocketFile 通过 fd_table 管理，无需额外清理。
-    {
-        task.process.close_files_on_exit();
+fn do_exit(task: Arc<TaskControlBlock>, exit_code: u32) {
+    if task.exit_thread_resources(exit_code) && task.process.live_thread_count() == 0 {
+        task.process.finish_exit(&task, exit_code);
     }
 }
 
 pub fn exit_current_and_run_next(exit_code: u32) -> ! {
-    // take from Processor
     let task = take_current_task().unwrap();
     do_exit(task.clone(), exit_code);
     // 当前任务仍在自己的内核栈上运行，不能在切栈前释放最后一个 Arc。
-    // 放回调度队列后会因 Zombie 状态被 scheduler 在 idle 栈上丢弃。
     add_task(task);
-    // we do not have to save task context
     let mut _unused = TaskContext::zero_init();
     schedule(&mut _unused as *mut _);
     panic!("Unreachable");
 }
 
 pub fn exit_group_and_run_next(exit_code: u32) -> ! {
-    // exit current, take from Processor
     let task = take_current_task().unwrap();
     let process = task.process.clone();
     process.request_group_exit(exit_code);
@@ -343,12 +192,11 @@ pub fn exit_group_and_run_next(exit_code: u32) -> ! {
     manager::remove_tasks_from_queues(&exit_list);
 
     for task in exit_list.into_iter() {
-        exit_thread(task, exit_code);
+        task.exit_thread_resources(exit_code);
     }
     do_exit(task.clone(), exit_code);
-    // 见 exit_current_and_run_next：当前任务的内核栈必须延迟到切栈后释放。
+    // 当前任务仍在自己的内核栈上运行，不能在切栈前释放最后一个 Arc。
     add_task(task);
-    // we do not have to save task context
     let mut _unused = TaskContext::zero_init();
     schedule(&mut _unused as *mut _);
     panic!("Unreachable");

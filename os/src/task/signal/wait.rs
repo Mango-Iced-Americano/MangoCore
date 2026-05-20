@@ -145,7 +145,7 @@ pub fn sigtimedwait(set: *const Signals, info: *mut SigInfo, timeout: *const Tim
             return Some(pending.signum() as isize);
         }
         if take_sigtimedwait_interrupt(&task, set) {
-            return Some(EINTR);
+            return Some(ERESTART);
         }
         None
     };
@@ -157,7 +157,7 @@ pub fn sigtimedwait(set: *const Signals, info: *mut SigInfo, timeout: *const Tim
     };
     match wait_result {
         WaitResult::Ready(value) => value,
-        WaitResult::Interrupted => EINTR,
+        WaitResult::Interrupted => ERESTART,
         WaitResult::TimedOut => EAGAIN,
     }
 }
