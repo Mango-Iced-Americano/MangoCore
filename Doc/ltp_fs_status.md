@@ -43,7 +43,7 @@
 
 | Testcase | Round | Arch | Libc | 运行结果 | 行动分类 | 回归集 | 失败层次 | 日志 | 备注 |
 |----------|-------|------|------|----------|----------|--------|----------|------|------|
-| open01 | 0 | — | — | NOT_RUN | — | NO | — | — | 待 Preflight 后运行 |
+| open01 | 0 | rv64 | musl+glibc | TFAIL: sticky bit | FIXABLE_LATER | NO | F | batch2 | Round-1 权限模型 |
 | open02 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
 | open03 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
 | open04 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
@@ -66,8 +66,8 @@
 
 | Testcase | Round | Arch | Libc | 运行结果 | 行动分类 | 回归集 | 失败层次 | 日志 | 备注 |
 |----------|-------|------|------|----------|----------|--------|----------|------|------|
-| close01 | 0 | — | — | NOT_RUN | — | NO | — | — | 之前在 ltp_include 中，需验证 |
-| close02 | 0 | — | — | NOT_RUN | — | NO | — | — | 之前在 ltp_include 中，需验证 |
+| close01 | 0 | rv64 | musl+glibc | TPASS (3/3×2) | PASS | YES | — | preflight r1/r2/r3 | ✅ 3轮连续稳定 |
+| close02 | 0 | — | — | NOT_RUN | — | NO | — | — | 待扩展 |
 | close_range01 | — | — | — | — | UNSUPPORTED | NO | K | — | 需要 Linux 5.9+ |
 | close_range02 | — | — | — | — | UNSUPPORTED | NO | K | — | 需要 Linux 5.9+ |
 
@@ -75,7 +75,7 @@
 
 | Testcase | Round | Arch | Libc | 运行结果 | 行动分类 | 回归集 | 失败层次 | 日志 | 备注 |
 |----------|-------|------|------|----------|----------|--------|----------|------|------|
-| read01 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
+| read01 | 0 | rv64 | musl+glibc | TPASS (1/1×2) | PASS | YES | — | batch2 | ✅ |
 | read02 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
 | read03 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
 | read04 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
@@ -84,7 +84,8 @@
 
 | Testcase | Round | Arch | Libc | 运行结果 | 行动分类 | 回归集 | 失败层次 | 日志 | 备注 |
 |----------|-------|------|------|----------|----------|--------|----------|------|------|
-| write01 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
+| write01 | 0 | rv64 | musl | TPASS (1/1) | PASS | YES | — | batch2 | ✅ |
+| write01 | 0 | rv64 | glibc | TFAIL: ENOSPC(28) | ENV_FAIL | NO | J | batch2 | glibc 镜像磁盘满 |
 | write02 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
 | write03 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
 | write04 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
@@ -95,14 +96,16 @@
 
 | Testcase | Round | Arch | Libc | 运行结果 | 行动分类 | 回归集 | 失败层次 | 日志 | 备注 |
 |----------|-------|------|------|----------|----------|--------|----------|------|------|
-| lseek01-10 | 0 | — | — | NOT_RUN | — | NO | — | — | 基础 SEEK_SET/CUR/END + 错误处理 |
+| lseek01 | 0 | rv64 | musl+glibc | TPASS (4/4×2) | PASS | YES | — | batch2 | SEEK_SET/CUR/END ✅ |
+| lseek02-10 | 0 | — | — | NOT_RUN | — | NO | — | — | 基础 SEEK_SET/CUR/END + 错误处理 |
 | lseek11 | 0 | — | — | NOT_RUN | — | NO | — | — | SEEK_DATA/SEEK_HOLE，可能 UNSUPPORTED |
 
 ### Family: stat/fstat/lstat (9 测例)
 
 | Testcase | Round | Arch | Libc | 运行结果 | 行动分类 | 回归集 | 失败层次 | 日志 | 备注 |
 |----------|-------|------|------|----------|----------|--------|----------|------|------|
-| stat01-04 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
+| stat01 | 0 | rv64 | musl+glibc | TBROK: getpwnam ENOENT | ENV_FAIL | NO | J | batch2 | /etc/passwd 缺 nobody |
+| stat02-04 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
 | fstat02-03 | 0 | — | — | NOT_RUN | — | NO | — | — | 注: 无 fstat01 |
 | lstat01-03 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
 | fstatat01 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
@@ -258,16 +261,17 @@
 
 ## Preflight 进度
 
-### FS-Preflight 状态: NOT_STARTED
+### FS-Preflight 状态: SMOKE_PASSED
 
 | 检查项 | 状态 | 备注 |
 |--------|------|------|
-| LTP inline runner 连续 3 轮无 panic | NOT_STARTED | — |
-| timeout case 正确 skip，后续不受影响 | NOT_STARTED | — |
-| ltp_include/exclude/from 配置机制生效 | NOT_STARTED | — |
-| 镜像恢复机制正常 | NOT_STARTED | — |
-| 清理 ltp_include 中的 DANGEROUS_STRESS | NOT_STARTED | diotest*, crash* 等待清理 |
-| no-panic 路径基本覆盖 | NOT_STARTED | 参考 LTP_BOTTOM_UP_GUIDE.md P0 |
+| LTP inline runner 连续 3 轮无 panic | ✅ PASS | close01/creat01/dup01 3轮 musl+glibc 全 PASS |
+| timeout case 正确 skip，后续不受影响 | ✅ PASS | 非 include 测例正确跳过，exit=0 |
+| ltp_include/exclude/from 配置机制生效 | ✅ PASS | include=["close01","creat01","dup01"] 过滤正确 |
+| 镜像恢复机制正常 | ✅ PASS | 每轮 xz -dkc 恢复 + conf-inject 正常 |
+| 扩展 batch 8 测例 | ✅ DONE | lseek01/read01 PASS, open01/stat01 ENV_FAIL/FIXABLE_LATER, write01 glibc ENV_FAIL |
+| P0 panic 扫描 | 🔄 IN_PROGRESS | explore agents 扫描 FS+VM panic 点 |
+| la64 编译验证 | 🔄 PENDING | — |
 
 ---
 
