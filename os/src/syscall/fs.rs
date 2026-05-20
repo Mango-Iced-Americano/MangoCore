@@ -1914,8 +1914,15 @@ pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
                 Ok(file) => file,
                 Err(e) => return -(e as isize),
             };
-            // Access control is not fully implemented
-            let mut res = OpenFlags::O_RDWR.bits() as isize;
+            let flags = file.flags();
+            let access = flags.access_flags();
+            let mut res = if access == FileFlags::O_RDWR {
+                OpenFlags::O_RDWR.bits() as isize
+            } else if access == FileFlags::O_WRONLY {
+                OpenFlags::O_WRONLY.bits() as isize
+            } else {
+                OpenFlags::O_RDONLY.bits() as isize
+            };
             if file.is_nonblock() {
                 res |= OpenFlags::O_NONBLOCK.bits() as isize;
             }
