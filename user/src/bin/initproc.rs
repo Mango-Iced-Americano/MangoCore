@@ -1386,6 +1386,10 @@ fn prepare_symlink(environ: &[*const u8]) {
 
     run_bash_cmd(
         "
+        mkdir -p /etc; \
+        echo 'root:x:0:0:root:/root:/bin/sh' > /etc/passwd; \
+        echo 'nobody:x:65534:65534:nobody:/nonexistent:/bin/false' >> /etc/passwd; \
+        echo 'root::0:0:root:/root:/bin/sh' > /etc/group; \
         ln -sf /bash /bin/bash;
     ",
         environ,

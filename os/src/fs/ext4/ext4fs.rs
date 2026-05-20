@@ -869,6 +869,18 @@ impl IndexNode for layout::Ext4OSInode {
         })
     }
 
+    fn set_metadata(&self, metadata: &Metadata) -> Result<(), SyscallErr> {
+        let ino = { self.inode.lock().inode_num };
+        let cached = self.ext4fs.get_inode_cached(ino);
+        cached.lock().inode.set_mode(metadata.mode.bits() as u16);
+        self.ext4fs.flush_inode(ino).map_err(|e| {
+            log::warn!("set_metadata: flush_inode failed for ino={}: {}", ino, e);
+            SyscallErr::EIO
+        })?;
+        super::counters::inc_counter!(super::counters::INODE_DIRTY_COUNT);
+        Ok(())
+    }
+
     fn find(&self, name: &str) -> Result<alloc::sync::Arc<dyn IndexNode>, SyscallErr> {
         super::counters::inc_counter!(super::counters::DENTRY_LOOKUP_COUNT);
         let inode_num = self.inode.lock().inode_num;
