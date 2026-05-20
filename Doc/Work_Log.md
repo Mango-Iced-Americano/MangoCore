@@ -4,6 +4,39 @@
 
 ## 2026-05-20
 
+### FS-LTP 分诊体系建设与 Round-0 适配
+
+**涉及文件：**
+- `Doc/ltp_fs_plan.md` — **新增**，FS-LTP 四阶段计划（Preflight→Round-0/1/2/3），硬门禁+评分选择规则，晋级条件
+- `Doc/ltp_fs_status.md` — **新增**，testcase 状态跟踪表（arch/libc/运行结果/行动分类/失败层次）
+- `os/src/syscall/fs.rs` — 修复 splice panic(log::error)、mount unwrap(match+EINVAL)、dup3 flags(位掩码)、getcwd ERANGE 检查顺序、fcntl F_GETFL(读取FileFlags)、chdir ENAMETOOLONG 路径长度检查、openat mode 传递
+- `os/src/fs/ext4/extent.rs` — 外科去 panic: load_from_data→try_load_from_data(Result)、消除 8 个 unwrap(ok_or_else)、find_extent 冗余路径移除、remove_space hole 场景处理
+- `os/src/fs/ext4/ext4_inode.rs` — get_file_type() panic→DiskInodeType::Unknown
+- `os/src/fs/inode.rs` — 新增 DiskInodeType::Unknown 变体
+- `os/src/fs/fat32/fat_inode.rs` — fat_disk_type_to_vfs_type 补齐 Unknown 分支
+- `os/src/fs/fat32/dir_iter.rs` — 7 处 unwrap/panic→安全处理(current_clone→if let Some、write_to_current_ent→bool+log::error、step unwrap→early return、DirWalker get_short_ent→let Some else)
+- `os_test.conf` — 整合 FS 回归集(26 PASS) + 移除 DANGEROUS_STRESS(8) + ENV_FAIL→musl exclude(6)，最终 ~105 测例
+
+**关键决策：**
+- Oracle 审查指导分批修复策略：低风险叶子→ext4底层局部→ext4会改调用链→FAT32→VM单独phase
+- block_group.rs 7处write-path改动回退：log::error+return 导致 ext4 mount 时 VirtIO I/O panic（元数据写路径静默返回→状态不一致→越界块请求）
+- direntry.rs 8处 unwrap 跳过：Oracle 判定 Ext4DirEntry::try_from 始终 Ok，无实际 panic 风险
+- FAT32 P0 降优先级：LTP 不走 FAT32 路径（镜像用 ext4），FAT32 代码路径为 dead code
+- la64 NULL deref 为预存问题（commit 27da465 原代码也崩），非本轮改动引入
+
+**Round-0 5个 FIXABLE_NOW 全部解决：**
+1. fcntl01: F_GETFL 硬编码 O_RDWR→读取 file.flags().access_flags()
+2. dup3_01: OpenFlags::from_bits→位掩码检查 O_CLOEXEC=0o2000000
+3. getcwd01: ERANGE 检查移至 buffer 验证之前，移除 size==0→EINVAL
+4. fstat02: open_file_at 接收 mode 参数（不再硬编码 S_IRWXUGO），连带 lstat02 通过
+5. chdir04: sys_chdir 添加 MAX_PATHLEN + NAME_MAX 检查→ENAMETOOLONG
+
+**LTP 测试结果：** rv64 0 panic, 124 TPASS, 26 testcase PASS, 剩余 FAIL 均为 ENV_FAIL(mkfifo/mknod/chmod/nobody)
+
+**验证：** `make rv64-kernel-build-only` ✅；`make la64-kernel-build-only` ✅；rv64 QEMU 3轮smoke+扩展32测例 0 panic；la64 QEMU 预存NULL deref(非本轮改动)
+
+---
+
 ### ext4 MetaBlockCache 元数据块脏写合并
 
 **涉及文件：**
