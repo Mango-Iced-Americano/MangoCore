@@ -5,6 +5,7 @@ mod manager;
 use spin::MutexGuard;
 pub mod pid;
 mod process;
+mod process_manager;
 mod processor;
 mod registry;
 pub mod signal;
@@ -34,6 +35,7 @@ pub use processor::{
     run_tasks, schedule, set_current_syscall_id, take_current_task,
 };
 pub use process::{ProcessControlBlock, ProcessState};
+pub use process_manager::ProcessManager;
 pub use registry::{
     all_processes, find_process_by_pid, find_processes_by_pgid, find_task_by_pid_tid,
     find_task_by_tid,
