@@ -431,25 +431,20 @@ fn __openat(dirfd: usize, path: &str) -> Result<vfs::File, isize> {
 
 pub fn sys_getcwd(buf: usize, size: usize) -> isize {
     let task = current_task().unwrap();
+    let fs_lock = task.fs.lock();
+    let working_dir = fs_lock.working_path.clone();
+    drop(fs_lock);
+    // ERANGE must be checked BEFORE buffer validation:
+    // Linux returns ERANGE if buffer is too small, even if buf is partially invalid
+    if working_dir.len() + 1 > size {
+        return ERANGE;
+    }
     if !task
         .vm
         .lock()
         .contains_valid_buffer(buf, size, MapPermission::W)
     {
-        // buf points to a bad address.
         return EFAULT;
-    }
-    if size == 0 && buf != 0 {
-        // The size argument is zero and buf is not a NULL pointer.
-        return EINVAL;
-    }
-    let fs_lock = task.fs.lock();
-    let working_dir = fs_lock.working_path.clone();
-    drop(fs_lock);
-    if working_dir.len() >= size {
-        // The size argument is less than the length of the absolute pathname of the working directory,
-        // including the terminating null byte.
-        return ERANGE;
     }
     let token = task.get_user_token();
     let write_len = working_dir.len() + 1;
