@@ -26,7 +26,7 @@ pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
             let abs_path = if path.starts_with('/') {
                 path.clone()
             } else {
-                let cwd = task.fs.lock().working_path.clone();
+                let cwd = task.process.fs().lock().working_path.clone();
                 if cwd == "/" {
                     format!("/{}", path)
                 } else {
@@ -41,8 +41,8 @@ pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
     let socket = crate::get_socket!(sockfd);
     let task = current_task().unwrap();
 
-    let is_nonblock = task
-        .files
+    let files_ref = task.process.files();
+    let is_nonblock = files_ref
         .lock()
         .get_file(sockfd as usize)
         .map(|f| f.is_nonblock())

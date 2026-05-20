@@ -283,7 +283,8 @@ pub fn sigaction(signum: usize, act: *const SigAction, oldact: *mut SigAction) -
             trace!("[sigaction] signal: {:?}", Signals::from_signum(signum));
             let token = task.get_user_token();
             if !oldact.is_null() {
-                let sighand = task.sighand.lock();
+                let sighand_ref = task.process.sighand();
+    let sighand = sighand_ref.lock();
                 let suc = if let Some(sigact) = sighand.get(signum) {
                     trace!("[sigaction] *oldact: {:?}", sigact);
                     UserPtrMut::new(oldact).write(token, sigact)
@@ -304,7 +305,8 @@ pub fn sigaction(signum: usize, act: *const SigAction, oldact: *mut SigAction) -
                 }
             } {
                 sigact.mask.remove(Signals::CAN_NOT_BE_MASKED);
-                let mut sighand = task.sighand.lock();
+                let sighand_ref = task.process.sighand();
+        let mut sighand = sighand_ref.lock();
                 if sigact.handler == SigHandler::SIG_IGN {
                     // Store SIG_IGN explicitly so we can distinguish from SIG_DFL
                     sighand.set(signum, Some(sigact));
@@ -446,7 +448,8 @@ pub fn discard_non_actionable_unblocked_signals(task: &TaskControlBlock) {
     let shared_pending = task.process.shared_pending().difference(sigmask);
     let mut discard_thread = Signals::empty();
     let mut discard_shared = Signals::empty();
-    let sighand = task.sighand.lock();
+    let sighand_ref = task.process.sighand();
+    let sighand = sighand_ref.lock();
     for signum in 1..=64usize {
         let signal = match Signals::from_signum(signum) {
             Ok(signal) => signal,
@@ -497,7 +500,8 @@ pub fn has_actionable_signal(task: &TaskControlBlock) -> bool {
         pending.bits(),
         task.acquire_inner_lock().sigmask.bits()
     );
-    let sighand = task.sighand.lock();
+    let sighand_ref = task.process.sighand();
+    let sighand = sighand_ref.lock();
     for signum in 1..=64usize {
         let signal_bit = match Signals::from_signum(signum) {
             Ok(s) => s,
@@ -529,7 +533,8 @@ pub fn do_signal() {
             task.process.shared_pending(),
             inner.sigmask
         );
-        let mut sighand = task.sighand.lock();
+        let sighand_ref = task.process.sighand();
+        let mut sighand = sighand_ref.lock();
         // user-defined handler
         if let Some(act) = sighand.get(signum).copied() {
             // SIG_IGN → discard this signal (POSIX: ignored signals are not delivered)

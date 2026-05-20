@@ -29,11 +29,10 @@ fn checked_user_range(start: usize, len: usize) -> Result<(VirtAddr, VirtAddr), 
 
 pub(super) fn do_sbrk<T: PageTable>(
     address_space: &mut AddressSpace<T>,
-    heap_pt: usize,
-    heap_bottom: usize,
     increment: isize,
 ) -> usize {
-    let old_pt = heap_pt;
+    let old_pt = address_space.heap_pt;
+    let heap_bottom = address_space.heap_bottom;
     let Some(limit) = heap_bottom.checked_add(USER_HEAP_SIZE) else {
         warn!(
             "[sbrk] heap limit overflow! heap_bottom: {:X}, heap_size: {:X}",
@@ -130,6 +129,7 @@ pub(super) fn do_sbrk<T: PageTable>(
         }
     }
 
+    address_space.heap_pt = new_pt;
     new_pt
 }
 
@@ -210,7 +210,8 @@ pub(super) fn do_mmap<T: PageTable>(
             return EINVAL;
         }
         warn!("[mmap] file-backed map!");
-        let fd_table = task.files.lock();
+        let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
         match fd_table.get_file(fd) {
             Ok(file) => {
                 if file.readable().is_err() {

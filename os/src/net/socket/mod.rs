@@ -507,7 +507,9 @@ impl dyn Socket {
             let mut flags = FileFlags::O_RDWR;
             if is_nonblock { flags.insert(FileFlags::O_NONBLOCK); }
             let vf = vfs::File::new_without_open(socket_file, flags, vfs::FileType::Socket);
-            current_task().unwrap().files.lock().alloc_fd(vf, is_cloexec)
+            let files_ref = current_task().unwrap().process.files();
+            let result = files_ref.lock().alloc_fd(vf, is_cloexec);
+            result
         };
         match domain as u16 {
             AF_INET | AF_UNSPEC => {

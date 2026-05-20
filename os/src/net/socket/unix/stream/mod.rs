@@ -255,8 +255,8 @@ impl Socket for UnixStreamSocket {
                 );
 
                 let task = crate::task::current_task().ok_or(SyscallErr::ESRCH)?;
-                let fd = task
-                    .files
+                let files_ref = task.process.files();
+                let fd = files_ref
                     .lock()
                     .alloc_fd(vf, false)
                     .map_err(|_| SyscallErr::ENFILE)?;

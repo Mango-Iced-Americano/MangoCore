@@ -40,13 +40,13 @@ pub fn pid_status_content(
     };
 
     let proc_name = {
-        let exe = task.exe_path.lock();
+        let exe = task.process.exe_path();
         if exe.is_empty() {
             String::from("initproc")
         } else if let Some(pos) = exe.rfind('/') {
             exe[pos + 1..].to_string()
         } else {
-            exe.clone()
+            exe
         }
     };
 

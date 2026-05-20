@@ -47,6 +47,10 @@ pub struct AddressSpace<T: PageTable> {
     pub(super) page_table: T,
     /// 用户 VMA 集合，负责用户区间查找、插入、拆分和空洞管理。
     pub(super) vmas: VmaSet,
+    /// 进程堆起始位置，由 ELF 加载阶段初始化。
+    pub(super) heap_bottom: usize,
+    /// 当前 program break。该状态属于地址空间，CLONE_VM 线程自然共享。
+    pub(super) heap_pt: usize,
 }
 
 impl<T: PageTable> AddressSpace<T> {
@@ -55,6 +59,8 @@ impl<T: PageTable> AddressSpace<T> {
         Self {
             page_table: T::new(),
             vmas: VmaSet::with_capacity(16),
+            heap_bottom: 0,
+            heap_pt: 0,
         }
     }
     /// Getter to the token of current memory space, or "this" page table.
@@ -447,6 +453,8 @@ impl<T: PageTable> AddressSpace<T> {
         address_space.map_signaltrampoline();
         let elf = xmas_elf::ElfFile::new(elf_data).unwrap();
         let (program_break, elf_info) = address_space.map_elf(&elf)?;
+        address_space.heap_bottom = program_break;
+        address_space.heap_pt = program_break;
 
         Ok((address_space, program_break, elf_info))
     }
@@ -458,6 +466,8 @@ impl<T: PageTable> AddressSpace<T> {
         }
         // map signaltrampoline
         address_space.map_signaltrampoline();
+        address_space.heap_bottom = user_space.heap_bottom;
+        address_space.heap_pt = user_space.heap_pt;
         // map data sections/user heap/mmap area/user stack
         if address_space
             .vmas
@@ -518,8 +528,8 @@ impl<T: PageTable> AddressSpace<T> {
         //*self = Self::new_bare();
         self.vmas.clear();
     }
-    pub fn sbrk(&mut self, heap_pt: usize, heap_bottom: usize, increment: isize) -> usize {
-        super::mmap::do_sbrk(self, heap_pt, heap_bottom, increment)
+    pub fn sbrk(&mut self, increment: isize) -> usize {
+        super::mmap::do_sbrk(self, increment)
     }
 
     pub fn mmap(
@@ -782,7 +792,7 @@ pub(super) fn check_page_fault(addr: VirtAddr, access: FaultAccess) -> Result<Ph
             return Err(EFAULT);
         }
     };
-    match task.vm.lock().do_page_fault(addr, access) {
+    match task.process.vm().lock().do_page_fault(addr, access) {
         Ok(pa) => return Ok(pa),
         Err(MemoryError::BeyondEOF)
         | Err(MemoryError::NoPermission)

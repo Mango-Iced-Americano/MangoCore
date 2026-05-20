@@ -1,8 +1,10 @@
 use core::{marker::PhantomData, ops::IndexMut};
 
-use crate::fs::iov::IOVec;
 use super::page_table::{FaultAccess, PageTable, UserAccess};
 use super::{PhysAddr, StepByOne, VirtAddr};
+use crate::config::MEMORY_START;
+use crate::fs::iov::IOVec;
+use crate::hal::MEMORY_END;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -419,9 +421,18 @@ pub fn translate_user_va_checked(
     if !ok {
         return Err(crate::syscall::errno::EFAULT);
     }
-    page_table
+    let pa = page_table
         .translate_va(va)
-        .ok_or(crate::syscall::errno::EFAULT)
+        .ok_or(crate::syscall::errno::EFAULT)?;
+    if pa.0 < MEMORY_START || pa.0 >= MEMORY_END {
+        log::warn!(
+            "[uaccess] translated user va {:#x} to invalid pa {:#x}",
+            va.0,
+            pa.0
+        );
+        return Err(crate::syscall::errno::EFAULT);
+    }
+    Ok(pa)
 }
 
 // Split a user buffer by page.

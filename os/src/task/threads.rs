@@ -95,7 +95,7 @@ pub fn do_futex_wait(
     let timeout = timeout.map(|t| t + TimeSpec::now());
 
     let task = current_task().unwrap();
-    let futex_table = task.futex.clone();
+    let futex_table = task.process.futex().clone();
     drop(task);
 
     let wait_result = WaitQueue::wait_event_interruptible_timeout_locked_with_wake_result(

@@ -42,7 +42,8 @@ pub fn sys_recvfrom(
     }
 
     let is_nonblock = {
-        let fd_table = task.files.lock();
+        let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
         fd_table
             .get_file(sockfd as usize)
             .map(|f| f.is_nonblock())

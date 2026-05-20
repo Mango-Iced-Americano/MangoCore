@@ -162,7 +162,8 @@ pub fn ppoll(
 
         loop {
             let task = current_task().unwrap();
-            let fd_table = task.files.lock();
+            let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
 
             for poll_fd in poll_fd.iter_mut() {
                 let fd = poll_fd.fd as usize;
@@ -367,7 +368,8 @@ pub fn pselect(
     let mut error: Option<isize> = None;
     loop {
         let task = current_task().unwrap();
-        let fd_table = task.files.lock();
+        let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
 
         // check read
         if let Some(ref read_fds) = read_fds {
@@ -480,7 +482,8 @@ pub fn pselect(
 
     // 3. Normal FD counting
     let task = current_task().unwrap();
-    let fd_table = task.files.lock();
+    let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
     // count read
     if let Some(read_fds) = read_fds.as_mut() {
         for i in 0..nfds {

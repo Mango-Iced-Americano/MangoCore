@@ -1,9 +1,14 @@
 use super::{
+    pid::RecycleAllocator,
     registry,
-    signal::{PendingSignal, SignalQueue, Signals},
-    TaskControlBlock, TaskStatus, WaitQueue,
+    signal::{PendingSignal, SignalQueue, Sighand, Signals},
+    threads::Futex,
+    FsStatus, TaskControlBlock, TaskStatus, WaitQueue,
 };
+use crate::fs::vfs;
+use crate::mm::{AddressSpace, PageTableImpl};
 use alloc::sync::{Arc, Weak};
+use alloc::string::String;
 use alloc::vec::Vec;
 use spin::{Mutex, MutexGuard};
 
@@ -27,6 +32,22 @@ pub struct ProcessControlBlock {
 }
 
 pub struct ProcessInner {
+    /// 可执行文件描述符（新 VFS）。
+    exe: Arc<Mutex<vfs::File>>,
+    /// 可执行文件路径（用于 /proc/self/exe）。
+    exe_path: String,
+    /// 文件描述符表（新 VFS）。
+    files: Arc<Mutex<vfs::FdTable>>,
+    /// 文件系统状态（cwd 等）。
+    fs: Arc<Mutex<FsStatus>>,
+    /// 虚拟内存空间。
+    vm: Arc<Mutex<AddressSpace<PageTableImpl>>>,
+    /// 信号处理函数表。
+    sighand: Arc<Mutex<Sighand>>,
+    /// private futex 等待表。
+    futex: Arc<Mutex<Futex>>,
+    /// 同一地址空间内的用户资源槽位分配器。
+    user_res_slot_allocator: Arc<Mutex<RecycleAllocator>>,
     /// 进程组 ID。
     pub pgid: usize,
     /// 父进程。
@@ -54,6 +75,14 @@ impl ProcessControlBlock {
         leader_tid: usize,
         pgid: usize,
         parent: Option<Weak<ProcessControlBlock>>,
+        exe: Arc<Mutex<vfs::File>>,
+        exe_path: String,
+        files: Arc<Mutex<vfs::FdTable>>,
+        fs: Arc<Mutex<FsStatus>>,
+        vm: Arc<Mutex<AddressSpace<PageTableImpl>>>,
+        sighand: Arc<Mutex<Sighand>>,
+        futex: Arc<Mutex<Futex>>,
+        user_res_slot_allocator: Arc<Mutex<RecycleAllocator>>,
     ) -> Self {
         Self {
             pid,
@@ -61,6 +90,14 @@ impl ProcessControlBlock {
             threads: Mutex::new(Vec::new()),
             child_exit_wait: Mutex::new(WaitQueue::new()),
             inner: Mutex::new(ProcessInner {
+                exe,
+                exe_path,
+                files,
+                fs,
+                vm,
+                sighand,
+                futex,
+                user_res_slot_allocator,
                 pgid,
                 parent,
                 children: Vec::new(),
@@ -77,6 +114,50 @@ impl ProcessControlBlock {
 
     pub fn acquire_inner_lock(&self) -> MutexGuard<ProcessInner> {
         self.inner.lock()
+    }
+
+    pub fn exe(&self) -> Arc<Mutex<vfs::File>> {
+        self.inner.lock().exe.clone()
+    }
+
+    pub fn exe_path(&self) -> String {
+        self.inner.lock().exe_path.clone()
+    }
+
+    pub fn set_exe_path(&self, exe_path: String) {
+        self.inner.lock().exe_path = exe_path;
+    }
+
+    pub fn replace_exe(&self, exe: vfs::File) {
+        *self.exe().lock() = exe;
+    }
+
+    pub fn files(&self) -> Arc<Mutex<vfs::FdTable>> {
+        self.inner.lock().files.clone()
+    }
+
+    pub fn fs(&self) -> Arc<Mutex<FsStatus>> {
+        self.inner.lock().fs.clone()
+    }
+
+    pub fn vm(&self) -> Arc<Mutex<AddressSpace<PageTableImpl>>> {
+        self.inner.lock().vm.clone()
+    }
+
+    pub fn replace_vm(&self, vm: AddressSpace<PageTableImpl>) {
+        *self.vm().lock() = vm;
+    }
+
+    pub fn sighand(&self) -> Arc<Mutex<Sighand>> {
+        self.inner.lock().sighand.clone()
+    }
+
+    pub fn futex(&self) -> Arc<Mutex<Futex>> {
+        self.inner.lock().futex.clone()
+    }
+
+    pub fn user_res_slot_allocator(&self) -> Arc<Mutex<RecycleAllocator>> {
+        self.inner.lock().user_res_slot_allocator.clone()
     }
 
     pub fn add_thread(&self, task: &Arc<TaskControlBlock>) {

@@ -223,7 +223,8 @@ pub fn trap_handler() -> ! {
             );
             // This is where we handle the page fault.
             frame_reserve(3);
-            let mut mset_lock = task.vm.lock();
+            let vm_ref = task.process.vm();
+            let mut mset_lock = vm_ref.lock();
             let access = match cause {
                 Trap::Exception(Exception::PageInvalidStore)
                 | Trap::Exception(Exception::PageModifyFault) => FaultAccess::Store,

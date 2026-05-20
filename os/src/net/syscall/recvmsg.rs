@@ -21,7 +21,8 @@ pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
     let token = task.get_user_token();
 
     let is_nonblock = {
-        let fd_table = task.files.lock();
+        let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
         fd_table
             .get_file(sockfd as usize)
             .map(|f| f.is_nonblock())

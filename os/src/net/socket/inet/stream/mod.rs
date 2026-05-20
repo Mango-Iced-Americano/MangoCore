@@ -322,7 +322,8 @@ impl Socket for TcpSocket {
             Arc::new(SocketFile::new(connected_socket));
 
         let task = current_task().unwrap();
-        let mut fd_table = task.files.lock();
+        let files_ref = task.process.files();
+    let mut fd_table = files_ref.lock();
         let old_cloexec = fd_table.get_cloexec(sockfd as usize);
         let vf = vfs::File::new_without_open(
             socket_file, FileFlags::O_RDWR, vfs::FileType::Socket,

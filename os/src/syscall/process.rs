@@ -496,20 +496,19 @@ pub fn sys_sysinfo(info: *mut Sysinfo) -> isize {
 
 pub fn sys_sbrk(increment: isize) -> isize {
     let task = current_task().unwrap();
-    let mut inner = task.acquire_inner_lock();
-    let mut memory_set = task.vm.lock();
-    inner.heap_pt = memory_set.sbrk(inner.heap_pt, inner.heap_bottom, increment);
-    inner.heap_pt as isize
+    let vm = task.process.vm();
+    let new_addr = vm.lock().sbrk(increment);
+    new_addr as isize
 }
 
 pub fn sys_brk(brk_addr: usize) -> isize {
     let task = current_task().unwrap();
-    let mut inner = task.acquire_inner_lock();
-    let mut memory_set = task.vm.lock();
-    if brk_addr == 0 {
-        inner.heap_pt = memory_set.sbrk(inner.heap_pt, inner.heap_bottom, 0);
+    let vm = task.process.vm();
+    let mut memory_set = vm.lock();
+    let new_addr = if brk_addr == 0 {
+        memory_set.sbrk(0)
     } else {
-        let former_addr = memory_set.sbrk(inner.heap_pt, inner.heap_bottom, 0);
+        let former_addr = memory_set.sbrk(0);
         let grow_size = if brk_addr < former_addr {
             let delta = former_addr - brk_addr;
             if delta > isize::MAX as usize {
@@ -533,14 +532,14 @@ pub fn sys_brk(brk_addr: usize) -> isize {
                 delta as isize
             }
         };
-        inner.heap_pt = memory_set.sbrk(inner.heap_pt, inner.heap_bottom, grow_size);
-    }
+        memory_set.sbrk(grow_size)
+    };
 
     info!(
         "[sys_brk] brk_addr: {:X}; new_addr: {:X}",
-        brk_addr, inner.heap_pt
+        brk_addr, new_addr
     );
-    inner.heap_pt as isize
+    new_addr as isize
 }
 
 bitflags! {
@@ -757,7 +756,8 @@ pub fn sys_execve(
     );
     // 获取当前工作目录的文件描述符
     let (working_inode, working_path) = {
-        let lock = task.fs.lock();
+        let fs_ref = task.process.fs();
+        let lock = fs_ref.lock();
         (lock.working_inode.clone(), lock.working_path.clone())
     };
     let cwd_inode: Arc<dyn vfs::IndexNode> = working_inode.inode.clone();
@@ -808,7 +808,7 @@ pub fn sys_execve(
                     alloc::format!("{}/{}", cwd, path)
                 }
             };
-            *task.exe_path.lock() = abs_path;
+            task.process.set_exe_path(abs_path);
             show_frame_consumption! {
                 "load_elf";
                 if let Err(errno) = task.load_elf(elf, &argv_vec, &envp_vec) {
@@ -1016,7 +1016,8 @@ pub fn sys_prlimit(
 
     if !old_limit.is_null() {
         let nofile_limit = if resource == Resource::NOFILE {
-            let lock = task.files.lock();
+            let files_ref = task.process.files();
+            let lock = files_ref.lock();
             Some(RLimit {
                 rlim_cur: lock.get_soft_limit(),
                 rlim_max: lock.get_hard_limit(),
@@ -1046,8 +1047,8 @@ pub fn sys_prlimit(
         }
         match resource {
             Resource::NOFILE => {
-                task.files.lock().set_soft_limit(rlimit.rlim_cur);
-                task.files.lock().set_hard_limit(rlimit.rlim_max);
+                task.process.files().lock().set_soft_limit(rlimit.rlim_cur);
+                task.process.files().lock().set_hard_limit(rlimit.rlim_max);
             }
             Resource::STACK => {
                 warn!("[prlimit] Unsupported modification stack");
@@ -1157,7 +1158,8 @@ pub fn sys_futex(
                 Err(errno) => return errno,
             };
             if !is_private {
-                let vm = task.vm.lock();
+                let vm_ref = task.process.vm();
+                let vm = vm_ref.lock();
                 let phys_key = match va_to_phys_key(&vm, uaddr as usize) {
                     Some(k) => k,
                     None => return EFAULT,
@@ -1172,9 +1174,10 @@ pub fn sys_futex(
         }
         FutexCmd::Wake => {
             if is_private {
-                task.futex.lock().wake(private_key, val)
+                task.process.futex().lock().wake(private_key, val)
             } else {
-                let vm = task.vm.lock();
+                let vm_ref = task.process.vm();
+                let vm = vm_ref.lock();
                 let phys_key = match va_to_phys_key(&vm, uaddr as usize) {
                     Some(k) => k,
                     None => return EFAULT,
@@ -1192,19 +1195,21 @@ pub fn sys_futex(
                 Err(errno) => return errno,
             };
             if is_private {
-                task.futex
+                task.process.futex()
                     .lock()
                     .requeue(private_key, uaddr2 as usize, val, timeout as u32)
             } else {
                 let phys_key = {
-                    let vm = task.vm.lock();
+                    let vm_ref = task.process.vm();
+                    let vm = vm_ref.lock();
                     match va_to_phys_key(&vm, uaddr as usize) {
                         Some(k) => k,
                         None => return EFAULT,
                     }
                 };
                 let phys_key2 = {
-                    let vm = task.vm.lock();
+                    let vm_ref = task.process.vm();
+                    let vm = vm_ref.lock();
                     match va_to_phys_key(&vm, uaddr2 as usize) {
                         Some(k) => k,
                         None => return EFAULT,
@@ -1307,7 +1312,8 @@ pub fn sys_mmap(
     offset: usize,
 ) -> isize {
     let task = current_task().unwrap();
-    let mut memory_set = task.vm.lock();
+    let vm_ref = task.process.vm();
+    let mut memory_set = vm_ref.lock();
     let prot = match parse_mmap_prot(prot) {
         Ok(prot) => prot,
         Err(errno) => return errno,
@@ -1338,7 +1344,7 @@ pub fn sys_memorybarrier(_cmd: usize, _flags: usize, _cpu_id: usize) -> isize {
 
 pub fn sys_munmap(start: usize, len: usize) -> isize {
     let task = current_task().unwrap();
-    let result = task.vm.lock().munmap(start, len);
+    let result = task.process.vm().lock().munmap(start, len);
     match result {
         Ok(_) => SUCCESS,
         Err(errno) => errno,
@@ -1351,7 +1357,7 @@ pub fn sys_mprotect(addr: usize, len: usize, prot: usize) -> isize {
         Ok(prot) => prot,
         Err(errno) => return errno,
     };
-    let result = task.vm.lock().mprotect(addr, len, prot);
+    let result = task.process.vm().lock().mprotect(addr, len, prot);
     match result {
         Ok(_) => SUCCESS,
         Err(errno) => errno,

@@ -237,6 +237,7 @@ pub fn alloc_socket_fd(
     if is_nonblock { flags.insert(FileFlags::O_NONBLOCK); }
     let vf = vfs::File::new_without_open(socket_file, flags, vfs::FileType::Socket);
     let task = current_task().ok_or(SyscallErr::ESRCH)?;
-    let mut fd_table = task.files.lock();
+    let files_ref = task.process.files();
+    let mut fd_table = files_ref.lock();
     fd_table.alloc_fd(vf, is_cloexec)
 }

@@ -61,7 +61,8 @@ fn take_sigtimedwait_interrupt(task: &TaskControlBlock, wait_set: Signals) -> bo
         return false;
     }
 
-    let sighand = task.sighand.lock();
+    let sighand_ref = task.process.sighand();
+    let sighand = sighand_ref.lock();
     for signum in 1..=64usize {
         let signal = match Signals::from_signum(signum) {
             Ok(signal) => signal,

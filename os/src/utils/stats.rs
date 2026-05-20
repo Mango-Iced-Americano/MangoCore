@@ -35,7 +35,7 @@ pub fn print_resource_stats() {
 
     // 当前进程 FD 数
     let cur_fds = match current_task() {
-        Some(task) => task.files.lock().fd_count(),
+        Some(task) => task.process.files().lock().fd_count(),
         None => 0,
     };
 

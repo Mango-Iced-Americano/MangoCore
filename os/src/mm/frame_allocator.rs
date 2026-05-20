@@ -181,7 +181,8 @@ pub fn oom_handler(req: usize) -> Result<(), ()> {
     }
     // step 2: 清理当前任务的内存
     let task = current_task().unwrap();
-    if let Some(mut address_space) = task.vm.try_lock() {
+    let vm_ref = task.process.vm();
+    if let Some(mut address_space) = vm_ref.try_lock() {
         released += address_space.do_shallow_clean();
         log::warn!("[oom_handler] current task released: {}", released);
     } else {

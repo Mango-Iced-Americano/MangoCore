@@ -250,7 +250,7 @@ pub fn do_oom(req: usize) -> Result<(), ()> {
         if !manager.active_tracker.check_active(task.tid.0) {
             continue;
         }
-        let released = task.vm.lock().do_deep_clean();
+        let released = task.process.vm().lock().do_deep_clean();
         log::warn!(
             "deep clean on task: tid {}, pid {}, released: {}",
             task.tid.0,
@@ -269,7 +269,7 @@ pub fn do_oom(req: usize) -> Result<(), ()> {
         if !manager.active_tracker.check_active(task.tid.0) {
             continue;
         }
-        let released = task.vm.lock().do_shallow_clean();
+        let released = task.process.vm().lock().do_shallow_clean();
         log::warn!(
             "shallow clean on task: tid {}, pid {}, released: {}",
             task.tid.0,

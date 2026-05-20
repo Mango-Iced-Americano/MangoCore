@@ -54,23 +54,6 @@ pub struct TaskControlBlock {
     /// 任务内部状态，使用互斥锁保护
     inner: Mutex<TaskControlBlockInner>,
     // 可共享&可变字段
-    /// 可执行文件描述符（新 VFS）
-    pub exe: Arc<Mutex<vfs::File>>,
-    /// 可执行文件路径（用于 /proc/self/exe）
-    pub exe_path: Mutex<String>,
-    /// 同一地址空间内的用户资源槽位分配器
-    pub user_res_slot_allocator: Arc<Mutex<RecycleAllocator>>,
-    /// 文件描述符表（新 VFS）
-    pub files: Arc<Mutex<vfs::FdTable>>,
-    /// 文件系统状态（新 VFS）
-    pub fs: Arc<Mutex<FsStatus>>,
-    /// 虚拟内存空间
-    pub vm: Arc<Mutex<AddressSpace<PageTableImpl>>>,
-    /// 信号处理函数表
-    pub sighand: Arc<Mutex<Sighand>>,
-    /// 快速用户空间互斥锁
-    pub futex: Arc<Mutex<Futex>>,
-
     /// I/O 等待定时器是否已挂入 KERNEL_TIMER_QUEUE。
     /// 为 true 时，wait_io_core_with_queue 不再添加第二个定时器（Option B），
     /// 防止在 log=off 的高频 loopback accept/connect 循环中 KERNEL_TIMER_QUEUE 无限增长。
@@ -98,10 +81,6 @@ pub struct TaskControlBlockInner {
     pub clear_child_tid: usize,
     /// 鲁棒列表，用于管理鲁棒互斥锁
     pub robust_list: RobustList,
-    /// 堆底
-    pub heap_bottom: usize,
-    /// 堆页表
-    pub heap_pt: usize,
     /// 资源使用情况
     pub rusage: Rusage,
     /// 任务的时钟信息
@@ -353,7 +332,8 @@ impl TaskControlBlock {
         );
         // 带有ELF程序头/跳板的用户地址空间（AddressSpace）
         // 解析ELF文件，初始化内存映射
-        let (mut memory_set, user_heap, elf_info) = AddressSpace::from_elf(elf_data).unwrap();
+        let (mut memory_set, _user_heap, elf_info) =
+            AddressSpace::<PageTableImpl>::from_elf(elf_data).unwrap();
         // 在内核空间中删除ELF区域
         crate::mm::KERNEL_SPACE
             .lock()
@@ -369,7 +349,6 @@ impl TaskControlBlock {
         // 初始进程的 pid/pgid 与主线程 tid 相同
         let pid = tid_handle.0;
         let pgid = tid_handle.0;
-        let process = Arc::new(ProcessControlBlock::new(pid, tid_handle.0, pgid, None));
         // 分配内核栈
         let kstack = kstack_alloc();
         // 获取内核栈的顶部
@@ -404,6 +383,24 @@ impl TaskControlBlock {
         )
         .unwrap();
 
+        let process = Arc::new(ProcessControlBlock::new(
+            pid,
+            tid_handle.0,
+            pgid,
+            None,
+            Arc::new(Mutex::new(elf)),
+            String::new(),
+            Arc::new(Mutex::new(fd_table)),
+            Arc::new(Mutex::new(FsStatus {
+                working_inode: Arc::new(cwd),
+                working_path: String::from("/"),
+            })),
+            Arc::new(Mutex::new(memory_set)),
+            Arc::new(Mutex::new(Sighand::new())),
+            Arc::new(Mutex::new(Futex::new())),
+            user_res_slot_allocator,
+        ));
+
         // 创建任务控制块
         let task_control_block = Arc::new(Self {
             tid: tid_handle,
@@ -412,17 +409,6 @@ impl TaskControlBlock {
             kstack,
             ustack_base: ustack_bottom_from_slot(user_res_slot),
             exit_signal: Signals::empty(),
-            exe: Arc::new(Mutex::new(elf)),
-            user_res_slot_allocator,
-            exe_path: Mutex::new(String::new()),
-            files: Arc::new(Mutex::new(fd_table)),
-            fs: Arc::new(Mutex::new(FsStatus {
-                working_inode: Arc::new(cwd),
-                working_path: String::from("/"),
-            })),
-            vm: Arc::new(Mutex::new(memory_set)),
-            sighand: Arc::new(Mutex::new(Sighand::new())),
-            futex: Arc::new(Mutex::new(Futex::new())),
             wait_io_timer_pending: AtomicBool::new(false),
             inner: Mutex::new(TaskControlBlockInner {
                 sigmask: Signals::empty(),
@@ -434,8 +420,6 @@ impl TaskControlBlock {
                 task_status: TaskStatus::Ready,
                 clear_child_tid: 0,
                 robust_list: RobustList::default(),
-                heap_bottom: user_heap,
-                heap_pt: user_heap,
                 rusage: Rusage::new(),
                 clock: ProcClock::new(),
                 timer: [ITimerVal::new(); 3],
@@ -472,7 +456,8 @@ impl TaskControlBlock {
         // 同时存在导致双倍内存压力触发 OOM。
         // 注意：调用者必须理解，如果 load_elf 返回 Err，旧数据页已被清除，
         // 进程无法回到原来的用户态，调用者应当直接 exit。
-        self.vm.lock().recycle_data_pages();
+        let current_vm = self.process.vm();
+        current_vm.lock().recycle_data_pages();
 
         // 将ELF文件映射到内核空间
         let elf_data = elf.map_to_kernel_space(MMAP_BASE);
@@ -544,21 +529,24 @@ impl TaskControlBlock {
         inner.robust_list = RobustList::default();
         // execve disables the alternate signal stack.
         inner.signal_stack = SignalStack::disabled();
-        // 更新堆指针
-        inner.heap_bottom = program_break;
-        inner.heap_pt = program_break;
         // 更新可执行文件描述符
-        *self.exe.lock() = elf;
+        self.process.replace_exe(elf);
         // 清理资源 — 关闭所有 CLOEXEC 文件描述符
-        self.files.lock().close_cloexec();
+        self.process.files().lock().close_cloexec();
         // 替换内存映射
-        *self.vm.lock() = memory_set;
+        self.process.replace_vm(memory_set);
         // 清空信号处理函数表
-        self.sighand.lock().reset();
+        self.process.sighand().lock().reset();
         // 清空futex
-        self.futex.lock().clear();
+        self.process.futex().lock().clear();
         // 检查当前任务是否是多线程任务
-        if self.user_res_slot_allocator.lock().get_allocated() > 1 {
+        if self
+            .process
+            .user_res_slot_allocator()
+            .lock()
+            .get_allocated()
+            > 1
+        {
             let other_threads: Vec<_> = self
                 .process
                 .threads()
@@ -598,19 +586,20 @@ impl TaskControlBlock {
         let parent_inner = self.acquire_inner_lock();
         // 复制用户空间（包括陷阱上下文）
         let share_vm = flags.contains(CloneFlags::CLONE_VM);
+        let parent_vm = self.process.vm();
         let memory_set = if share_vm {
-            self.vm.clone() // 共享虚拟内存空间（线程）
+            parent_vm.clone() // 共享虚拟内存空间（线程）
         } else {
             // 复制地址空间（进程）
             crate::mm::frame_reserve(16);
             Arc::new(Mutex::new(AddressSpace::from_existing_user(
-                &mut self.vm.lock(),
+                &mut parent_vm.lock(),
             )?))
         };
 
         // 共享地址空间时，trap context 的虚拟地址也共享，必须复用同一个用户资源槽位分配器。
         let user_res_slot_allocator = if share_vm {
-            self.user_res_slot_allocator.clone()
+            self.process.user_res_slot_allocator()
         } else {
             Arc::new(Mutex::new(RecycleAllocator::new()))
         };
@@ -625,11 +614,47 @@ impl TaskControlBlock {
             } else {
                 Some(self.process.clone())
             };
+            let files = if flags.contains(CloneFlags::CLONE_FILES) {
+                self.process.files()
+            } else {
+                Arc::new(Mutex::new(
+                    self.process
+                        .files()
+                        .lock()
+                        .try_clone()
+                        .map_err(|e| e as isize)?,
+                ))
+            };
+            let fs = if flags.contains(CloneFlags::CLONE_FS) {
+                self.process.fs()
+            } else {
+                Arc::new(Mutex::new(self.process.fs().lock().clone()))
+            };
+            let sighand = if flags.contains(CloneFlags::CLONE_SIGHAND) {
+                self.process.sighand()
+            } else {
+                let sighand = self.process.sighand();
+                let lock = sighand.lock();
+                Arc::new(Mutex::new(Sighand::from_existing(&lock)))
+            };
+            let futex = if share_vm {
+                self.process.futex()
+            } else {
+                Arc::new(Mutex::new(Futex::new()))
+            };
             Arc::new(ProcessControlBlock::new(
                 tid_handle.0,
                 tid_handle.0,
                 self.process.getpgid(),
                 parent_process.as_ref().map(Arc::downgrade),
+                self.process.exe(),
+                self.process.exe_path(),
+                files,
+                fs,
+                memory_set.clone(),
+                sighand,
+                futex,
+                user_res_slot_allocator.clone(),
             ))
         };
         // 分配内核栈
@@ -650,22 +675,6 @@ impl TaskControlBlock {
             .unwrap();
 
         // 创建任务控制块
-        let files = if flags.contains(CloneFlags::CLONE_FILES) {
-            self.files.clone()
-        } else {
-            Arc::new(Mutex::new(self.files.lock().try_clone().map_err(|e| e as isize)?))
-        };
-        let fs = if flags.contains(CloneFlags::CLONE_FS) {
-            self.fs.clone()
-        } else {
-            Arc::new(Mutex::new(self.fs.lock().clone()))
-        };
-        let sighand = if flags.contains(CloneFlags::CLONE_SIGHAND) {
-            self.sighand.clone()
-        } else {
-            let lock = self.sighand.lock();
-            Arc::new(Mutex::new(Sighand::from_existing(&lock)))
-        };
         let task_control_block = Arc::new(TaskControlBlock {
             // 基础标识信息
             tid: tid_handle,
@@ -678,25 +687,8 @@ impl TaskControlBlock {
                 ustack_bottom_from_slot(user_res_slot)
             },
             exit_signal,
-
-            // 资源共享控制
-            exe: self.exe.clone(),
-            user_res_slot_allocator,
-            exe_path: Mutex::new(self.exe_path.lock().clone()),
-            files,
-            fs,
-            vm: memory_set,
-            sighand,
-            futex: if share_vm {
-                self.futex.clone()
-            } else {
-                Arc::new(Mutex::new(Futex::new()))
-            },
             wait_io_timer_pending: AtomicBool::new(false),
             inner: Mutex::new(TaskControlBlockInner {
-                // inherited
-                heap_bottom: parent_inner.heap_bottom,
-                heap_pt: parent_inner.heap_pt,
                 // clone
                 sigpending: SignalQueue::empty(),
                 signal_stack: if share_vm {
@@ -778,7 +770,7 @@ impl TaskControlBlock {
     /// Drop resources allocated for a clone that has not been published.
     pub fn cleanup_unpublished_clone(&self, shared_vm: bool) {
         if shared_vm {
-            self.vm.lock().dealloc_user_res(self.user_res_slot);
+            self.process.vm().lock().dealloc_user_res(self.user_res_slot);
         }
     }
 
@@ -805,7 +797,7 @@ impl TaskControlBlock {
     }
     /// 获取用户空间的token
     pub fn get_user_token(&self) -> usize {
-        self.vm.lock().token()
+        self.process.vm().lock().token()
     }
 }
 
@@ -814,7 +806,8 @@ impl Drop for TaskControlBlock {
     fn drop(&mut self) {
         registry::unregister_task(self.tid.0);
         self.process.remove_thread(self.tid.0);
-        self.user_res_slot_allocator
+        self.process
+            .user_res_slot_allocator()
             .lock()
             .dealloc(self.user_res_slot);
     }

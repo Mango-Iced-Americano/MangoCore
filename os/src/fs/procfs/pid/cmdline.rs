@@ -22,7 +22,7 @@ pub fn pid_cmdline_content(
         None => return Err(SyscallErr::ENOENT),
     };
 
-    let exe_path = task.exe_path.lock().clone();
+    let exe_path = task.process.exe_path();
     let s = if exe_path.is_empty() {
         String::from("initproc")
     } else {

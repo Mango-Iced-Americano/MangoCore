@@ -42,7 +42,7 @@ pub use registry::{
     find_task_by_tid,
 };
 pub use signal::*;
-pub use task::{RobustList, Rusage, TaskControlBlock, TaskStatus};
+pub use task::{FsStatus, RobustList, Rusage, TaskControlBlock, TaskStatus};
 
 use self::processor::PROCESSOR;
 #[allow(unused)]
@@ -231,14 +231,14 @@ pub(super) fn exit_thread(task: Arc<TaskControlBlock>, exit_code: u32) -> bool {
         //let phys_ref =
         match UserPtrMut::from_addr(clear_child_tid).write(task.get_user_token(), &0u32) {
             Ok(()) => {
-                task.futex.lock().wake(clear_child_tid, 1);
+                task.process.futex().lock().wake(clear_child_tid, 1);
             }
             Err(_) => log::warn!("invalid clear_child_tid"),
         };
     }
 
     // deallocate thread-local user resource (trap context and default user stack)
-    task.vm.lock().dealloc_user_res(task.user_res_slot);
+    task.process.vm().lock().dealloc_user_res(task.user_res_slot);
 
     log::info!(
         "[exit_thread] tid {} pid {} exited with {}",
@@ -306,14 +306,16 @@ fn finish_process_exit(task: &Arc<TaskControlBlock>, exit_code: u32) {
 
     // deallocate whole user space in advance, or if its parent does not call wait,
     // this resource may not be recycled in a long period of time.
-    if Arc::strong_count(&task.vm) == 1 {
-        task.vm.lock().recycle_data_pages();
+    let vm = task.process.vm();
+    if Arc::strong_count(&vm) <= 2 {
+        vm.lock().recycle_data_pages();
     }
     // 关闭所有文件描述符，释放管道/Socket等的 Arc 引用，
     // 确保读端能收到 EOF（all_write_ends_closed() == true）。
     // SocketFile 通过 fd_table 管理，无需额外清理。
     {
-        let mut fd_table = task.files.lock();
+        let files_ref = task.process.files();
+    let mut fd_table = files_ref.lock();
         let open_fds: Vec<usize> = fd_table.iter().map(|(i, _f)| i).collect();
         for fd in open_fds {
             let _ = fd_table.drop_fd(fd);

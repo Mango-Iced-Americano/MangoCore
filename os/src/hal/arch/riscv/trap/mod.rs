@@ -123,7 +123,7 @@ pub fn trap_handler() -> ! {
                 | Trap::Exception(Exception::InstructionPageFault) => FaultAccess::Execute,
                 _ => FaultAccess::Load,
             };
-            if let Err(error) = task.vm.lock().do_page_fault(addr, access) {
+            if let Err(error) = task.process.vm().lock().do_page_fault(addr, access) {
                 match error {
                     MemoryError::BeyondEOF | MemoryError::BackingStoreFailure => {
                         inner.add_signal(Signals::SIGBUS);

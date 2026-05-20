@@ -81,7 +81,7 @@ pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize {
                 }
                 UnixEndpoint::Path(ref path) => {
                     let task = current_task().unwrap();
-                    let cwd_node = task.fs.lock().working_inode.clone();
+                    let cwd_node = task.process.fs().lock().working_inode.clone();
 
                     let (parent_path, file_name) = match path.rfind('/') {
                         Some(idx) => {
