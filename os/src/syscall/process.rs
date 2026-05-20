@@ -1312,8 +1312,6 @@ pub fn sys_mmap(
     offset: usize,
 ) -> isize {
     let task = current_task().unwrap();
-    let vm_ref = task.process.vm();
-    let mut memory_set = vm_ref.lock();
     let prot = match parse_mmap_prot(prot) {
         Ok(prot) => prot,
         Err(errno) => return errno,
@@ -1326,7 +1324,37 @@ pub fn sys_mmap(
         "[mmap] start:{:X}; len:{:X}; prot:{:?}; flags:{:?}; fd:{}; offset:{:X}",
         start, len, prot, flags, fd as isize, offset
     );
-    memory_set.mmap(start, len, prot, flags, fd, offset)
+
+    let map_file = if flags.contains(MapFlags::MAP_ANONYMOUS) {
+        None
+    } else {
+        if offset & (PAGE_SIZE - 1) != 0 || offset > isize::MAX as usize {
+            return EINVAL;
+        }
+        let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
+        let file = match fd_table.get_file(fd) {
+            Ok(file) => file,
+            Err(e) => return -(e as isize),
+        };
+        if file.readable().is_err() {
+            return EACCES;
+        }
+        if flags.contains(MapFlags::MAP_SHARED)
+            && prot.contains(MapPermission::W)
+            && file.writable().is_err()
+        {
+            return EACCES;
+        }
+        if !matches!(file.file_type(), vfs::FileType::File) {
+            return EACCES;
+        }
+        Some(file.inode.clone())
+    };
+
+    let vm_ref = task.process.vm();
+    let mut memory_set = vm_ref.lock();
+    memory_set.mmap(start, len, prot, flags, offset, map_file)
 }
 
 /// # Versions

@@ -15,7 +15,7 @@ use crate::utils::error::SyscallErr;
 use alloc::collections::BTreeSet;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU8, Ordering};
 use spin::Mutex;
 
 use super::vfs::IndexNode;
@@ -81,17 +81,13 @@ struct PageEntry {
     page: Arc<FrameTracker>,
     /// 页面状态
     state: AtomicU8,
-    /// 页面数据指针
-    data_ptr: usize,
 }
 
 impl PageEntry {
     fn new(page: Arc<FrameTracker>, state: PageState) -> Self {
-        let data_ptr = (page.ppn.0 << PAGE_SIZE_BITS) as usize;
         PageEntry {
             page,
             state: AtomicU8::new(state as u8),
-            data_ptr,
         }
     }
 
@@ -116,12 +112,12 @@ impl PageEntry {
 
     /// 获取指向页数据的指针
     fn as_slice(&self) -> &[u8] {
-        unsafe { core::slice::from_raw_parts(self.data_ptr as *const u8, PAGE_SIZE) }
+        self.page.ppn.get_bytes_array()
     }
 
     /// 获取指向页数据的可变指针
     fn as_slice_mut(&self) -> &mut [u8] {
-        unsafe { core::slice::from_raw_parts_mut(self.data_ptr as *mut u8, PAGE_SIZE) }
+        self.page.ppn.get_bytes_array()
     }
 }
 

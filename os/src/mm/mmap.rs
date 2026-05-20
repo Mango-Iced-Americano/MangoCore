@@ -1,12 +1,11 @@
 use super::address_space::{AddressSpace, MemoryError};
 use super::page_table::PageTable;
-use super::user_mapper::UserMapper;
 use super::vma::{MapFlags, MapPermission, Vma};
 use super::VirtAddr;
 use crate::config::*;
-use crate::fs::vfs::{FileType, FdTable};
+use crate::fs::vfs::IndexNode;
 use crate::syscall::errno::*;
-use crate::task::current_task;
+use alloc::sync::Arc;
 use log::{trace, warn};
 
 const MAX_EAGER_MMAP_SIZE: usize = 1024 * 1024 * 1024;
@@ -106,8 +105,8 @@ pub(super) fn do_sbrk<T: PageTable>(
                 len,
                 MapPermission::R | MapPermission::W | MapPermission::U,
                 MapFlags::MAP_ANONYMOUS | MapFlags::MAP_FIXED | MapFlags::MAP_PRIVATE,
-                1usize.wrapping_neg(),
                 0,
+                None,
             );
             if ret < 0 {
                 warn!(
@@ -139,8 +138,8 @@ pub(super) fn do_mmap<T: PageTable>(
     len: usize,
     prot: MapPermission,
     flags: MapFlags,
-    fd: usize,
     offset: usize,
+    map_file: Option<Arc<dyn IndexNode>>,
 ) -> isize {
     // not aligned on a page boundary
     if start & 0xfff != 0 {
@@ -151,7 +150,6 @@ pub(super) fn do_mmap<T: PageTable>(
         Err(errno) => return errno,
     };
     // 文件映射 MAP_SHARED 改为懒加载，不再需要提前拒绝大映射
-    let task = current_task().unwrap();
     let fixed =
         flags.contains(MapFlags::MAP_FIXED) || flags.contains(MapFlags::MAP_FIXED_NOREPLACE);
     let start_va: VirtAddr = if fixed {
@@ -209,28 +207,12 @@ pub(super) fn do_mmap<T: PageTable>(
         if offset & (PAGE_SIZE - 1) != 0 || offset > isize::MAX as usize {
             return EINVAL;
         }
-        warn!("[mmap] file-backed map!");
-        let files_ref = task.process.files();
-        let fd_table = files_ref.lock();
-        match fd_table.get_file(fd) {
-            Ok(file) => {
-                if file.readable().is_err() {
-                    return EACCES;
-                }
-                if flags.contains(MapFlags::MAP_SHARED)
-                    && prot.contains(MapPermission::W)
-                    && file.writable().is_err()
-                {
-                    return EACCES;
-                }
-                if !matches!(file.file_type(), FileType::File) {
-                    return EACCES;
-                }
-                new_area.map_file = Some(file.inode.clone());
-                new_area.map_file_offset = offset;
-            }
-            Err(_) => return EBADF,
-        }
+        trace!("[mmap] file-backed map!");
+        let Some(inode) = map_file else {
+            return EBADF;
+        };
+        new_area.map_file = Some(inode);
+        new_area.map_file_offset = offset;
     }
 
     if flags.contains(MapFlags::MAP_SHARED) && new_area.map_file.is_none() {
