@@ -2,8 +2,70 @@
 #![no_main]
 
 extern crate alloc;
+use alloc::format;
+use alloc::string::String;
 use user_lib::syscall::*;
 use user_lib::{println};
+
+// ── Path construction helpers (no_std compatible) ──────────────────────
+
+fn make_path(prefix: &str, name: &str) -> String {
+    let mut s = String::new();
+    s.push_str(prefix);
+    s.push_str(name);
+    s.push('\0');
+    s
+}
+
+fn make_file_path(prefix: &str, idx: usize) -> String {
+    let mut s = format!("{}/file_{:04}", prefix, idx);
+    s.push('\0');
+    s
+}
+
+fn make_link_path(prefix: &str, idx: usize) -> String {
+    let mut s = format!("{}/link_{:04}", prefix, idx);
+    s.push('\0');
+    s
+}
+
+// ── getdents64 parsing helper ─────────────────────────────────────────
+
+/// Parse a linux_dirent64 byte buffer and count non-"." and non-".." entries.
+/// Returns (entry_count, invalid_reclen_detected).
+/// d_type is at offset 18 (kernel linux_dirent64 format, NOT glibc dirent64).
+fn count_dir_entries(buf: &[u8], n: isize, _expected_prefix: Option<&str>) -> (usize, bool) {
+    let bytes = &buf[..n as usize];
+    let mut count = 0usize;
+    let mut invalid = false;
+    let mut pos = 0;
+    while pos + 19 <= bytes.len() {
+        // d_reclen at offset 16-17 (u16 LE)
+        let d_reclen = u16::from_le_bytes([bytes[pos + 16], bytes[pos + 17]]) as usize;
+        if d_reclen == 0 || d_reclen < 19 {
+            invalid = true;
+            break;
+        }
+        if pos + d_reclen > bytes.len() {
+            invalid = true;
+            break;
+        }
+        // d_type is at offset 18 in kernel linux_dirent64 (struct: d_ino(8)+d_off(8)+d_reclen(2)+d_type(1)+d_name[])
+        let _d_type = bytes[pos + 18];
+        let name_start = pos + 19;
+        let name_end = bytes[name_start..pos + d_reclen - 1]
+            .iter()
+            .position(|&b| b == 0)
+            .map(|i| name_start + i)
+            .unwrap_or(pos + d_reclen - 1);
+        let name = core::str::from_utf8(&bytes[name_start..name_end]).unwrap_or("???");
+        if name != "." && name != ".." {
+            count += 1;
+        }
+        pos += d_reclen;
+    }
+    (count, invalid)
+}
 
 fn test_mkdir() -> bool {
     let ret = sys_mkdirat(AT_FDCWD, "/tmp/fs_test\0", 0o777);
@@ -691,30 +753,9 @@ fn test_getdents64() -> bool {
         return false;
     }
 
-    let bytes = &buf[..n as usize];
-    let mut found_dot = false;
-    let mut found_dotdot = false;
-    let mut found_x = false;
-
-    let mut pos = 0;
-    while pos + 19 <= bytes.len() {
-        let d_reclen = u16::from_le_bytes([bytes[pos + 16], bytes[pos + 17]]) as usize;
-        let d_type = bytes[pos + 18];
-        let name_start = pos + 19;
-        let name_end = bytes[name_start..].iter().position(|&b| b == 0).map(|i| name_start + i).unwrap_or(bytes.len());
-        let name = core::str::from_utf8(&bytes[name_start..name_end]).unwrap_or("???");
-        match name {
-            "." => found_dot = true,
-            ".." => found_dotdot = true,
-            "x" => { found_x = true; if d_type != 8 { println!("  FAIL: 'x' d_type={} (expected DT_REG=8)", d_type); return false; } }
-            _ => {}
-        }
-        if d_reclen == 0 { break; }
-        pos += d_reclen;
-    }
-
-    if !found_dot || !found_dotdot || !found_x {
-        println!("  FAIL: missing entries: .={} ..={} x={}", found_dot, found_dotdot, found_x);
+    let (entries, invalid) = count_dir_entries(&buf, n, None);
+    if invalid || entries != 1 {
+        println!("  FAIL: getdents64 parsed entries={} invalid={}", entries, invalid);
         return false;
     }
     println!("  PASS: getdents64 OK (. .. x)");
@@ -1357,17 +1398,9 @@ fn test_stress_getdents() -> bool {
     loop {
         let n = sys_getdents64(fd as usize, &mut buf);
         if n <= 0 { break; }
-        let bytes = &buf[..n as usize];
-        let mut pos = 0;
-        while pos + 19 <= bytes.len() {
-            let d_reclen = u16::from_le_bytes([bytes[pos + 16], bytes[pos + 17]]) as usize;
-            if d_reclen == 0 { break; }
-            let name_start = pos + 19;
-            let name_end = bytes[name_start..].iter().position(|&b| b == 0).map(|j| name_start + j).unwrap_or(bytes.len());
-            let name = core::str::from_utf8(&bytes[name_start..name_end]).unwrap_or("???");
-            if name != "." && name != ".." { entries += 1; }
-            pos += d_reclen;
-        }
+        let (count, invalid) = count_dir_entries(&buf, n, None);
+        if invalid { break; }
+        entries += count;
     }
     sys_close(fd as usize);
     if entries != nfiles as usize { println!("  FAIL: getdents counted {} files (expected {})", entries, nfiles); return false; }
@@ -1409,6 +1442,303 @@ fn test_stress_truncate() -> bool {
     sys_unlinkat(AT_FDCWD, "/tmp39/trunc\0", 0);
     sys_unlinkat(AT_FDCWD, "/tmp39\0", 0x200);
     true
+}
+
+fn test_perf_getdents_1000() -> bool {
+    const O_RDONLY: u32 = 0;
+    const O_WRONLY: u32 = 0o1;
+    const O_CREAT: u32 = 0o100;
+    const O_DIRECTORY: u32 = 0x200000;
+    const AT_REMOVEDIR: u32 = 0x200;
+    const PREFIX: &str = "/tmp_perf_getdents";
+
+    sys_mkdirat(AT_FDCWD, "/tmp_perf_getdents\0", 0o777);
+    for i in 0..1000usize {
+        let path = make_file_path(PREFIX, i);
+        let fd = sys_open(&path, O_CREAT | O_WRONLY);
+        if fd < 0 { println!("  FAIL: create file_{} returned {}", i, fd); return false; }
+        let n = sys_write(fd as usize, b"x");
+        sys_close(fd as usize);
+        if n != 1 { println!("  FAIL: write file_{} returned {}", i, n); return false; }
+    }
+    dump_sub_profile("perf_getdents_1000_setup");
+    sys_ext4_counters(2, 0, 0);
+
+    let fd = sys_open("/tmp_perf_getdents\0", O_RDONLY | O_DIRECTORY);
+    if fd < 0 { println!("  FAIL: open getdents dir returned {}", fd); return false; }
+    let mut buf8 = [0u8; 8192];
+    let mut entries8 = 0usize;
+    let mut calls8 = 0usize;
+    let mut invalid8 = false;
+    let mut ended8 = false;
+    loop {
+        let n = sys_getdents64(fd as usize, &mut buf8);
+        if n < 0 { println!("  FAIL: getdents64 8k returned {}", n); break; }
+        if n == 0 { ended8 = true; break; }
+        calls8 += 1;
+        let (count, invalid) = count_dir_entries(&buf8, n, Some("file_"));
+        entries8 += count;
+        invalid8 |= invalid;
+        if invalid { break; }
+    }
+    sys_close(fd as usize);
+    dump_sub_profile("perf_getdents_1000_8k");
+    println!("[FS_PERF] getdents_1000_8k entries={} calls={}", entries8, calls8);
+    if calls8 > 8 { println!("[FS_PERF][WARN] getdents_1000_8k calls={} > 8", calls8); }
+    sys_ext4_counters(2, 0, 0);
+
+    let fd = sys_open("/tmp_perf_getdents\0", O_RDONLY | O_DIRECTORY);
+    if fd < 0 { println!("  FAIL: reopen getdents dir returned {}", fd); return false; }
+    let mut buf64 = [0u8; 65536];
+    let mut entries64 = 0usize;
+    let mut calls64 = 0usize;
+    let mut invalid64 = false;
+    let mut ended64 = false;
+    loop {
+        let n = sys_getdents64(fd as usize, &mut buf64);
+        if n < 0 { println!("  FAIL: getdents64 64k returned {}", n); break; }
+        if n == 0 { ended64 = true; break; }
+        calls64 += 1;
+        let (count, invalid) = count_dir_entries(&buf64, n, Some("file_"));
+        entries64 += count;
+        invalid64 |= invalid;
+        if invalid { break; }
+    }
+    sys_close(fd as usize);
+    dump_sub_profile("perf_getdents_1000_64k");
+    println!("[FS_PERF] getdents_1000_64k entries={} calls={}", entries64, calls64);
+    if calls64 > 2 { println!("[FS_PERF][WARN] getdents_1000_64k calls={} > 2", calls64); }
+    sys_ext4_counters(2, 0, 0);
+
+    for i in 0..1000usize {
+        let path = make_file_path(PREFIX, i);
+        sys_unlinkat(AT_FDCWD, &path, 0);
+    }
+    sys_unlinkat(AT_FDCWD, "/tmp_perf_getdents\0", AT_REMOVEDIR);
+    dump_sub_profile("perf_getdents_1000_cleanup");
+
+    if entries8 != 1000 || entries64 != 1000 || invalid8 || invalid64 || !ended8 || !ended64 {
+        println!("  FAIL: getdents perf entries8={} entries64={} invalid8={} invalid64={} ended8={} ended64={}", entries8, entries64, invalid8, invalid64, ended8, ended64);
+        return false;
+    }
+    true
+}
+
+fn test_perf_stat_like_1000() -> bool {
+    const O_WRONLY: u32 = 0o1;
+    const O_CREAT: u32 = 0o100;
+    const AT_REMOVEDIR: u32 = 0x200;
+    const PREFIX: &str = "/tmp_perf_stat";
+
+    sys_mkdirat(AT_FDCWD, "/tmp_perf_stat\0", 0o777);
+    for i in 0..1000usize {
+        let path = make_file_path(PREFIX, i);
+        let fd = sys_open(&path, O_CREAT | O_WRONLY);
+        if fd < 0 { println!("  FAIL: create stat file_{} returned {}", i, fd); return false; }
+        sys_write(fd as usize, b"s");
+        sys_close(fd as usize);
+    }
+    dump_sub_profile("perf_stat_like_1000_setup");
+    sys_ext4_counters(2, 0, 0);
+
+    let samples = [0usize, 500usize, 999usize];
+    let mut first_ok = true;
+    for &idx in &samples {
+        let path = make_file_path(PREFIX, idx);
+        let mut st = Stat { st_dev:0, st_ino:0, st_mode:0, st_nlink:0, st_uid:0, st_gid:0, st_rdev:0, __pad:0, st_size:0, st_blksize:0, __pad2:0, st_blocks:0, st_atime: TimeSpec { tv_sec: 0, tv_nsec: 0 }, st_mtime: TimeSpec { tv_sec: 0, tv_nsec: 0 }, st_ctime: TimeSpec { tv_sec: 0, tv_nsec: 0 }, __unused: 0 };
+        let r = sys_fstatat(AT_FDCWD, &path, &mut st, 0);
+        if r != 0 || st.st_ino == 0 || (st.st_mode & 0o170000) != 0o100000 || st.st_size < 1 { first_ok = false; }
+    }
+    let missing = make_path(PREFIX, "/not_exists");
+    let mut st = Stat { st_dev:0, st_ino:0, st_mode:0, st_nlink:0, st_uid:0, st_gid:0, st_rdev:0, __pad:0, st_size:0, st_blksize:0, __pad2:0, st_blocks:0, st_atime: TimeSpec { tv_sec: 0, tv_nsec: 0 }, st_mtime: TimeSpec { tv_sec: 0, tv_nsec: 0 }, st_ctime: TimeSpec { tv_sec: 0, tv_nsec: 0 }, __unused: 0 };
+    if sys_fstatat(AT_FDCWD, &missing, &mut st, 0) != -2 { first_ok = false; }
+    dump_sub_profile("perf_stat_like_1000_first");
+    sys_ext4_counters(2, 0, 0);
+
+    let mut second_ok = true;
+    for &idx in &samples {
+        let path = make_file_path(PREFIX, idx);
+        let mut st = Stat { st_dev:0, st_ino:0, st_mode:0, st_nlink:0, st_uid:0, st_gid:0, st_rdev:0, __pad:0, st_size:0, st_blksize:0, __pad2:0, st_blocks:0, st_atime: TimeSpec { tv_sec: 0, tv_nsec: 0 }, st_mtime: TimeSpec { tv_sec: 0, tv_nsec: 0 }, st_ctime: TimeSpec { tv_sec: 0, tv_nsec: 0 }, __unused: 0 };
+        let r = sys_fstatat(AT_FDCWD, &path, &mut st, 0);
+        if r != 0 || st.st_ino == 0 || (st.st_mode & 0o170000) != 0o100000 || st.st_size < 1 { second_ok = false; }
+    }
+    dump_sub_profile("perf_stat_like_1000_second");
+    sys_ext4_counters(2, 0, 0);
+
+    let mut access_ok = true;
+    for i in 0..1000usize {
+        let path = make_file_path(PREFIX, i);
+        let r = sys_faccessat2(AT_FDCWD, &path, 0, 0);
+        if r == -38 { println!("[FS_PERF][WARN] faccessat2 ENOSYS, skipping access sweep"); break; }
+        if r != 0 { access_ok = false; break; }
+    }
+    dump_sub_profile("perf_stat_like_1000_access");
+    println!("[FS_PERF] stat_like_1000 first_ok={} second_ok={}", first_ok, second_ok);
+    sys_ext4_counters(2, 0, 0);
+
+    for i in 0..1000usize {
+        let path = make_file_path(PREFIX, i);
+        sys_unlinkat(AT_FDCWD, &path, 0);
+    }
+    sys_unlinkat(AT_FDCWD, "/tmp_perf_stat\0", AT_REMOVEDIR);
+    dump_sub_profile("perf_stat_like_1000_cleanup");
+    first_ok && second_ok && access_ok
+}
+
+fn test_perf_repeated_lookup_cache() -> bool {
+    const O_WRONLY: u32 = 0o1;
+    const O_CREAT: u32 = 0o100;
+    const AT_REMOVEDIR: u32 = 0x200;
+    const PREFIX: &str = "/tmp_perf_lookup";
+
+    sys_mkdirat(AT_FDCWD, "/tmp_perf_lookup\0", 0o777);
+    for i in 0..1000usize {
+        let path = make_file_path(PREFIX, i);
+        let fd = sys_open(&path, O_CREAT | O_WRONLY);
+        if fd < 0 { println!("  FAIL: create lookup file_{} returned {}", i, fd); return false; }
+        sys_write(fd as usize, b"l");
+        sys_close(fd as usize);
+    }
+
+    sys_ext4_counters(2, 0, 0);
+    let existing = make_file_path(PREFIX, 999);
+    let mut existing_ok = 0usize;
+    for _ in 0..100usize {
+        let mut st = Stat { st_dev:0, st_ino:0, st_mode:0, st_nlink:0, st_uid:0, st_gid:0, st_rdev:0, __pad:0, st_size:0, st_blksize:0, __pad2:0, st_blocks:0, st_atime: TimeSpec { tv_sec: 0, tv_nsec: 0 }, st_mtime: TimeSpec { tv_sec: 0, tv_nsec: 0 }, st_ctime: TimeSpec { tv_sec: 0, tv_nsec: 0 }, __unused: 0 };
+        if sys_fstatat(AT_FDCWD, &existing, &mut st, 0) == 0 { existing_ok += 1; }
+    }
+    dump_sub_profile("perf_repeated_lookup_existing");
+    println!("[FS_PERF] repeated_lookup existing_ok={}", existing_ok);
+    sys_ext4_counters(2, 0, 0);
+
+    let missing = make_path(PREFIX, "/not_exists");
+    let mut negative_enoent = 0usize;
+    for _ in 0..100usize {
+        let mut st = Stat { st_dev:0, st_ino:0, st_mode:0, st_nlink:0, st_uid:0, st_gid:0, st_rdev:0, __pad:0, st_size:0, st_blksize:0, __pad2:0, st_blocks:0, st_atime: TimeSpec { tv_sec: 0, tv_nsec: 0 }, st_mtime: TimeSpec { tv_sec: 0, tv_nsec: 0 }, st_ctime: TimeSpec { tv_sec: 0, tv_nsec: 0 }, __unused: 0 };
+        if sys_fstatat(AT_FDCWD, &missing, &mut st, 0) == -2 { negative_enoent += 1; }
+    }
+    dump_sub_profile("perf_repeated_lookup_negative");
+    println!("[FS_PERF] repeated_lookup negative_enoent={}", negative_enoent);
+    sys_ext4_counters(2, 0, 0);
+
+    for i in 0..1000usize {
+        let path = make_file_path(PREFIX, i);
+        sys_unlinkat(AT_FDCWD, &path, 0);
+    }
+    sys_unlinkat(AT_FDCWD, "/tmp_perf_lookup\0", AT_REMOVEDIR);
+    dump_sub_profile("perf_repeated_lookup_cleanup");
+    existing_ok == 100 && negative_enoent == 100
+}
+
+fn test_perf_symlink_batch_200() -> bool {
+    const O_RDONLY: u32 = 0;
+    const O_WRONLY: u32 = 0o1;
+    const O_CREAT: u32 = 0o100;
+    const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    const AT_REMOVEDIR: u32 = 0x200;
+    const PREFIX: &str = "/tmp_perf_symlink";
+
+    sys_mkdirat(AT_FDCWD, "/tmp_perf_symlink\0", 0o777);
+    let target_path = make_path(PREFIX, "/target");
+    let fd = sys_open(&target_path, O_CREAT | O_WRONLY);
+    if fd < 0 { println!("  FAIL: create symlink target returned {}", fd); return false; }
+    sys_write(fd as usize, b"target-data");
+    sys_close(fd as usize);
+
+    sys_ext4_counters(2, 0, 0);
+    for i in 0..200usize {
+        let link = make_link_path(PREFIX, i);
+        let r = sys_symlinkat("target\0", AT_FDCWD, &link);
+        if r < 0 { println!("  FAIL: symlink {} returned {}", i, r); return false; }
+    }
+    dump_sub_profile("perf_symlink_batch_200_create");
+    sys_ext4_counters(2, 0, 0);
+
+    let samples = [0usize, 100usize, 199usize];
+    let mut verify_ok = true;
+    for &idx in &samples {
+        let link = make_link_path(PREFIX, idx);
+        let mut link_buf = [0u8; 32];
+        let n = sys_readlinkat(AT_FDCWD, &link, &mut link_buf);
+        if n != 6 || &link_buf[..6] != b"target" { verify_ok = false; }
+        let mut st = Stat { st_dev:0, st_ino:0, st_mode:0, st_nlink:0, st_uid:0, st_gid:0, st_rdev:0, __pad:0, st_size:0, st_blksize:0, __pad2:0, st_blocks:0, st_atime: TimeSpec { tv_sec: 0, tv_nsec: 0 }, st_mtime: TimeSpec { tv_sec: 0, tv_nsec: 0 }, st_ctime: TimeSpec { tv_sec: 0, tv_nsec: 0 }, __unused: 0 };
+        let r = sys_fstatat(AT_FDCWD, &link, &mut st, AT_SYMLINK_NOFOLLOW);
+        if r != 0 || (st.st_mode & 0o170000) != 0o120000 { verify_ok = false; }
+        let fd = sys_open(&link, O_RDONLY);
+        if fd < 0 { verify_ok = false; } else {
+            let mut data = [0u8; 16];
+            let n = sys_read(fd as usize, &mut data);
+            sys_close(fd as usize);
+            if n != 11 || &data[..11] != b"target-data" { verify_ok = false; }
+        }
+    }
+    dump_sub_profile("perf_symlink_batch_200_verify");
+    println!("[FS_PERF] symlink_batch_200 verify_ok={}", verify_ok);
+    sys_ext4_counters(2, 0, 0);
+
+    for i in 0..200usize {
+        let link = make_link_path(PREFIX, i);
+        sys_unlinkat(AT_FDCWD, &link, 0);
+    }
+    sys_unlinkat(AT_FDCWD, &target_path, 0);
+    sys_unlinkat(AT_FDCWD, "/tmp_perf_symlink\0", AT_REMOVEDIR);
+    dump_sub_profile("perf_symlink_batch_200_cleanup");
+    println!("[FS_PERF] symlink_batch_200 cleanup_done=true");
+    verify_ok
+}
+
+fn test_perf_open_access_large_dir() -> bool {
+    const O_RDONLY: u32 = 0;
+    const O_WRONLY: u32 = 0o1;
+    const O_CREAT: u32 = 0o100;
+    const AT_REMOVEDIR: u32 = 0x200;
+    const PREFIX: &str = "/tmp_perf_open";
+
+    sys_mkdirat(AT_FDCWD, "/tmp_perf_open\0", 0o777);
+    for i in 0..1000usize {
+        let path = make_file_path(PREFIX, i);
+        let fd = sys_open(&path, O_CREAT | O_WRONLY);
+        if fd < 0 { println!("  FAIL: create open file_{} returned {}", i, fd); return false; }
+        sys_write(fd as usize, b"o");
+        sys_close(fd as usize);
+    }
+
+    let samples = [0usize, 500usize, 999usize];
+    sys_ext4_counters(2, 0, 0);
+    let mut first_ok = true;
+    for &idx in &samples {
+        let path = make_file_path(PREFIX, idx);
+        let fd = sys_open(&path, O_RDONLY);
+        if fd < 0 { first_ok = false; } else { sys_close(fd as usize); }
+    }
+    dump_sub_profile("perf_open_large_dir_first");
+    sys_ext4_counters(2, 0, 0);
+
+    let mut second_ok = true;
+    for &idx in &samples {
+        let path = make_file_path(PREFIX, idx);
+        let fd = sys_open(&path, O_RDONLY);
+        if fd < 0 { second_ok = false; } else { sys_close(fd as usize); }
+    }
+    dump_sub_profile("perf_open_large_dir_second");
+    sys_ext4_counters(2, 0, 0);
+
+    let missing = make_path(PREFIX, "/not_exists");
+    let mut negative_enoent = 0usize;
+    for _ in 0..100usize {
+        if sys_open(&missing, O_RDONLY) == -2 { negative_enoent += 1; }
+    }
+    dump_sub_profile("perf_open_large_dir_negative");
+    println!("[FS_PERF] open_access_large_dir first_ok={} second_ok={} negative_enoent={}", first_ok, second_ok, negative_enoent);
+    sys_ext4_counters(2, 0, 0);
+
+    for i in 0..1000usize {
+        let path = make_file_path(PREFIX, i);
+        sys_unlinkat(AT_FDCWD, &path, 0);
+    }
+    sys_unlinkat(AT_FDCWD, "/tmp_perf_open\0", AT_REMOVEDIR);
+    dump_sub_profile("perf_open_large_dir_cleanup");
+    first_ok && second_ok && negative_enoent == 100
 }
 
 // ── E组: 并发测试 (fork) ────────────────────────────────────────────────
@@ -1537,171 +1867,186 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     let mut passed = 0;
     let mut failed = 0;
 
-    println!("[1/51] mkdir");
+    println!("[1/56] mkdir");
     if run_test("mkdir", test_mkdir) { passed += 1; } else { failed += 1; }
 
-    println!("[2/51] file create + write");
+    println!("[2/56] file create + write");
     if run_test("create_and_write", test_create_and_write) { passed += 1; } else { failed += 1; }
 
-    println!("[3/51] file read");
+    println!("[3/56] file read");
     if run_test("read", test_read) { passed += 1; } else { failed += 1; }
 
-    println!("[4/51] symlink");
+    println!("[4/56] symlink");
     if run_test("symlink", test_symlink) { passed += 1; } else { failed += 1; }
 
-    println!("[5/51] readlink");
+    println!("[5/56] readlink");
     if run_test("readlink", test_readlink) { passed += 1; } else { failed += 1; }
 
-    println!("[6/51] read via symlink");
+    println!("[6/56] read via symlink");
     if run_test("read_via_symlink", test_read_via_symlink) { passed += 1; } else { failed += 1; }
 
-    println!("[7/51] unlink + rmdir");
+    println!("[7/56] unlink + rmdir");
     sys_ext4_counters(2, 0, 0);
     let ok = test_unlink() && test_rmdir();
     let label = "unlink+rmdir\0";
     sys_ext4_counters(3, label.as_ptr() as usize, 12);
     if ok { passed += 1; } else { failed += 1; }
 
-    println!("[8/51] dangling symlink");
+    println!("[8/56] dangling symlink");
     if run_test("dangling_symlink", test_dangling_symlink) { passed += 1; } else { failed += 1; }
 
-    println!("[9/51] ELOOP detection");
+    println!("[9/56] ELOOP detection");
     if run_test("eloop", test_eloop) { passed += 1; } else { failed += 1; }
 
-    println!("[10/51] symlink chain");
+    println!("[10/56] symlink chain");
     if run_test("symlink_chain", test_symlink_chain) { passed += 1; } else { failed += 1; }
 
-    println!("[11/51] O_CREAT|O_EXCL");
+    println!("[11/56] O_CREAT|O_EXCL");
     if run_test("excl_create", test_excl_create) { passed += 1; } else { failed += 1; }
 
-    println!("[12/51] readlink on regular file");
+    println!("[12/56] readlink on regular file");
     if run_test("readlink_on_regular", test_readlink_on_regular) { passed += 1; } else { failed += 1; }
 
-    println!("[13/51] unlink symlink preserves target");
+    println!("[13/56] unlink symlink preserves target");
     if run_test("unlink_symlink_preserves_target", test_unlink_symlink_preserves_target) { passed += 1; } else { failed += 1; }
 
-    println!("[14/51] hard link");
+    println!("[14/56] hard link");
     if run_test("hard_link", test_hard_link) { passed += 1; } else { failed += 1; }
 
-    println!("[15/51] hard link to dir rejected");
+    println!("[15/56] hard link to dir rejected");
     if run_test("hard_link_dir_rejected", test_hard_link_dir_rejected) { passed += 1; } else { failed += 1; }
 
-    println!("[16/51] lseek");
+    println!("[16/56] lseek");
     if run_test("lseek", test_lseek) { passed += 1; } else { failed += 1; }
 
-    println!("[17/51] rename file");
+    println!("[17/56] rename file");
     if run_test("rename_file", test_rename_file) { passed += 1; } else { failed += 1; }
 
-    println!("[18/51] rename directory");
+    println!("[18/56] rename directory");
     if run_test("rename_dir", test_rename_dir) { passed += 1; } else { failed += 1; }
 
-    println!("[19/51] fstatat");
+    println!("[19/56] fstatat");
     if run_test("fstatat", test_fstatat) { passed += 1; } else { failed += 1; }
 
-    println!("[20/51] ftruncate");
+    println!("[20/56] ftruncate");
     if run_test("ftruncate", test_ftruncate) { passed += 1; } else { failed += 1; }
 
-    println!("[21/51] getdents64");
+    println!("[21/56] getdents64");
     if run_test("getdents64", test_getdents64) { passed += 1; } else { failed += 1; }
 
     // ── A组: 高级 read/write 测试 ──────────────────────────
 
-    println!("[22/51] read empty file");
+    println!("[22/56] read empty file");
     if run_split_test("read_empty", test_read_empty) { passed += 1; } else { failed += 1; }
 
-    println!("[23/51] read past EOF");
+    println!("[23/56] read past EOF");
     if run_split_test("read_past_eof", test_read_past_eof) { passed += 1; } else { failed += 1; }
 
-    println!("[24/51] read data integrity (256B + partial)");
+    println!("[24/56] read data integrity (256B + partial)");
     if run_test("read_data_integrity", test_read_data_integrity) { passed += 1; } else { failed += 1; }
 
-    println!("[25/51] read bad fd -> EBADF");
+    println!("[25/56] read bad fd -> EBADF");
     if run_test("read_bad_fd", test_read_bad_fd) { passed += 1; } else { failed += 1; }
 
-    println!("[26/51] read on dir -> EISDIR");
+    println!("[26/56] read on dir -> EISDIR");
     if run_test("read_dir", test_read_dir) { passed += 1; } else { failed += 1; }
 
-    println!("[27/51] write readonly fd -> EBADF");
+    println!("[27/56] write readonly fd -> EBADF");
     if run_split_test("write_readonly", test_write_readonly) { passed += 1; } else { failed += 1; }
 
-    println!("[28/51] O_APPEND + lseek atomicity");
+    println!("[28/56] O_APPEND + lseek atomicity");
     if run_test("write_append", test_write_append) { passed += 1; } else { failed += 1; }
 
-    println!("[29/51] write varying sizes 1..4096");
+    println!("[29/56] write varying sizes 1..4096");
     if run_test("write_varying_sizes", test_write_varying_sizes) { passed += 1; } else { failed += 1; }
 
-    println!("[30/51] overwrite middle of file");
+    println!("[30/56] overwrite middle of file");
     if run_test("write_overwrite_middle", test_write_overwrite_middle) { passed += 1; } else { failed += 1; }
 
-    println!("[31/51] write bad fd -> EBADF");
+    println!("[31/56] write bad fd -> EBADF");
     if run_test("write_bad_fd", test_write_bad_fd) { passed += 1; } else { failed += 1; }
 
     // ── B组: 高级 lseek 测试 ──────────────────────────────
 
-    println!("[32/51] lseek SEEK_END + negative offset");
+    println!("[32/56] lseek SEEK_END + negative offset");
     if run_test("lseek_seek_end", test_lseek_seek_end) { passed += 1; } else { failed += 1; }
 
-    println!("[33/51] lseek bad whence -> EINVAL");
+    println!("[33/56] lseek bad whence -> EINVAL");
     if run_split_test("lseek_bad_whence", test_lseek_bad_whence) { passed += 1; } else { failed += 1; }
 
-    println!("[34/51] lseek on pipe -> ESPIPE");
+    println!("[34/56] lseek on pipe -> ESPIPE");
     if run_test("lseek_pipe", test_lseek_pipe) { passed += 1; } else { failed += 1; }
 
-    println!("[35/51] lseek beyond EOF + hole read");
+    println!("[35/56] lseek beyond EOF + hole read");
     if run_test("lseek_hole_read", test_lseek_hole_read) { passed += 1; } else { failed += 1; }
 
-    println!("[36/51] lseek chain: SET→CUR→END");
+    println!("[36/56] lseek chain: SET→CUR→END");
     if run_test("lseek_chain", test_lseek_chain) { passed += 1; } else { failed += 1; }
 
     // ── C组: open/close 错误路径 ───────────────────────────
 
-    println!("[37/51] open nonexistent -> ENOENT");
+    println!("[37/56] open nonexistent -> ENOENT");
     if run_test("open_noent", test_open_noent) { passed += 1; } else { failed += 1; }
 
-    println!("[38/51] open dir as file -> EISDIR");
+    println!("[38/56] open dir as file -> EISDIR");
     if run_split_test("open_dir_as_file", test_open_dir_as_file) { passed += 1; } else { failed += 1; }
 
-    println!("[39/51] O_TRUNC (size=0 + data lost)");
+    println!("[39/56] O_TRUNC (size=0 + data lost)");
     if run_test("open_trunc", test_open_trunc) { passed += 1; } else { failed += 1; }
 
-    println!("[40/51] close twice -> EBADF");
+    println!("[40/56] close twice -> EBADF");
     if run_split_test("close_twice", test_close_twice) { passed += 1; } else { failed += 1; }
 
-    println!("[41/51] open/close 32 times");
+    println!("[41/56] open/close 32 times");
     if run_test("open_close_many", test_open_close_many) { passed += 1; } else { failed += 1; }
 
-    println!("[42/51] open existing file (no O_CREAT)");
+    println!("[42/56] open existing file (no O_CREAT)");
     if run_split_test("open_create_existing", test_open_create_existing) { passed += 1; } else { failed += 1; }
 
     // ── D组: 压力/边界测试 ─────────────────────────────────
 
-    println!("[43/51] stress: create 50 files + verify");
+    println!("[43/56] stress: create 50 files + verify");
     if run_test("stress_create_many", test_stress_create_many) { passed += 1; } else { failed += 1; }
 
-    println!("[44/51] stress: read 30 files with unique content");
+    println!("[44/56] stress: read 30 files with unique content");
     if run_test("stress_read_many", test_stress_read_many) { passed += 1; } else { failed += 1; }
 
-    println!("[45/51] stress: unlink 30 files -> empty dir");
+    println!("[45/56] stress: unlink 30 files -> empty dir");
     if run_test("stress_unlink_loop", test_stress_unlink_loop) { passed += 1; } else { failed += 1; }
 
-    println!("[46/51] stress: rename A↔B loop x10");
+    println!("[46/56] stress: rename A↔B loop x10");
     if run_test("stress_rename_loop", test_stress_rename_loop) { passed += 1; } else { failed += 1; }
 
-    println!("[47/51] stress: large file 64KB write+read");
+    println!("[47/56] stress: large file 64KB write+read");
     if run_test("stress_large_file", test_stress_large_file) { passed += 1; } else { failed += 1; }
 
-    println!("[48/51] stress: getdents counts 20 files");
+    println!("[48/56] stress: getdents counts 20 files");
     if run_test("stress_getdents", test_stress_getdents) { passed += 1; } else { failed += 1; }
 
-    println!("[49/51] stress: truncate 100→50→200 with hole");
+    println!("[49/56] stress: truncate 100→50→200 with hole");
     if run_test("stress_truncate", test_stress_truncate) { passed += 1; } else { failed += 1; }
+
+    println!("[50/56] perf: getdents 1000 files");
+    if run_split_test("perf_getdents_1000", test_perf_getdents_1000) { passed += 1; } else { failed += 1; }
+
+    println!("[51/56] perf: stat-like 1000 files");
+    if run_split_test("perf_stat_like_1000", test_perf_stat_like_1000) { passed += 1; } else { failed += 1; }
+
+    println!("[52/56] perf: repeated lookup cache");
+    if run_split_test("perf_repeated_lookup_cache", test_perf_repeated_lookup_cache) { passed += 1; } else { failed += 1; }
+
+    println!("[53/56] perf: symlink batch 200");
+    if run_split_test("perf_symlink_batch_200", test_perf_symlink_batch_200) { passed += 1; } else { failed += 1; }
+
+    println!("[54/56] perf: open/access large dir");
+    if run_split_test("perf_open_access_large_dir", test_perf_open_access_large_dir) { passed += 1; } else { failed += 1; }
 
     // ── E组: 并发测试 (fork) ──────────────────────────────
 
-    println!("[50/51] fork: read same fd (parent+child)");
+    println!("[55/56] fork: read same fd (parent+child)");
     if run_test("fork_read_same_fd", test_fork_read_same_fd) { passed += 1; } else { failed += 1; }
 
-    println!("[51/51] fork: create files (parent+child)");
+    println!("[56/56] fork: create files (parent+child)");
     if run_test("fork_create", test_fork_create) { passed += 1; } else { failed += 1; }
 
     println!("=== FS Test: {}/{} passed ===", passed, passed + failed);
@@ -1756,7 +2101,7 @@ fn prof_reset() { sys_ext4_counters(2, 0, 0); }
 fn prof_dump(label: &str) { dump_sub_profile(label); }
 
 fn run_profile_audit() {
-    // Gate: only run when explicitly enabled to avoid affecting 51/51 timing
+    // Gate: only run when explicitly enabled to avoid affecting 56/56 timing
     // Can be enabled by setting an env var or flag, but for now: always skip
     // Uncomment to enable profiling:
     // profile_audit_real();

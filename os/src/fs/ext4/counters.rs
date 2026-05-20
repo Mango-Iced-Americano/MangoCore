@@ -17,6 +17,8 @@ pub fn counters_enabled() -> bool { COUNTERS_ENABLED.load(Ordering::Relaxed) }
 
 pub static BLOCK_READ_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static BLOCK_WRITE_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static BLOCK_READ_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static BLOCK_WRITE_COUNT: AtomicU64 = AtomicU64::new(0);
 
 // ── VFS inode object cache ──────────────────────────────────────────────
 
@@ -58,11 +60,47 @@ pub static METADATA_DIRTY_MARK: AtomicU64 = AtomicU64::new(0);
 pub static METADATA_FLUSH_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static METADATA_FLUSH_ERROR: AtomicU64 = AtomicU64::new(0);
 
+// ── Metadata block cache ─────────────────────────────────────────────────
+
+pub static METADATA_BLOCK_READ_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static METADATA_BLOCK_WRITE_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static METADATA_BLOCK_CACHE_HIT: AtomicU64 = AtomicU64::new(0);
+pub static METADATA_BLOCK_CACHE_MISS: AtomicU64 = AtomicU64::new(0);
+pub static METADATA_DIRTY_BLOCK_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static METADATA_FLUSH_IMMEDIATE_COUNT: AtomicU64 = AtomicU64::new(0);
+
 // ── Inode table cache (Phase 4) ─────────────────────────────────────────
 
 pub static INODE_CACHE_HIT: AtomicU64 = AtomicU64::new(0);
 pub static INODE_CACHE_MISS: AtomicU64 = AtomicU64::new(0);
 pub static INODE_CACHE_FLUSH: AtomicU64 = AtomicU64::new(0);
+pub static INODE_LOAD_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static INODE_DIRTY_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static INODE_FLUSH_COUNT: AtomicU64 = AtomicU64::new(0);
+
+// ── Dentry/lookup ────────────────────────────────────────────────────────
+
+pub static DENTRY_LOOKUP_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static DENTRY_CACHE_HIT: AtomicU64 = AtomicU64::new(0);
+pub static DENTRY_CACHE_MISS: AtomicU64 = AtomicU64::new(0);
+pub static NEGATIVE_DENTRY_HIT: AtomicU64 = AtomicU64::new(0);
+pub static NEGATIVE_DENTRY_INSERT: AtomicU64 = AtomicU64::new(0);
+
+// ── Directory scan ───────────────────────────────────────────────────────
+
+pub static DIR_LOOKUP_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static DIR_FULL_SCAN_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static DIR_FULL_SCAN_ENTRIES: AtomicU64 = AtomicU64::new(0);
+pub static CACHE_ALL_SUBFILE_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static CACHE_ALL_SUBFILE_ENTRIES_LOADED: AtomicU64 = AtomicU64::new(0);
+pub static CACHE_ALL_SUBFILE_INODE_LOADS: AtomicU64 = AtomicU64::new(0);
+
+// ── Getdents ─────────────────────────────────────────────────────────────
+
+pub static GETDENTS_CALL_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static GETDENTS_RETURNED_ENTRIES: AtomicU64 = AtomicU64::new(0);
+pub static GETDENTS_RETURNED_BYTES: AtomicU64 = AtomicU64::new(0);
+pub static GETDENTS_INVALID_RECLEN_COUNT: AtomicU64 = AtomicU64::new(0);
 
 // ── 底层 metadata block I/O 分类 ────────────────────────────────────────
 
@@ -101,6 +139,7 @@ pub static FAST_SYMLINK_READ_INLINE_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static SYMLINK_INODE_WRITE_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static SYMLINK_PARENT_INODE_WRITE_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static SYMLINK_DIR_BLOCK_WRITE_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static SYMLINK_SLOW_COUNT: AtomicU64 = AtomicU64::new(0);
 
 // ── 辅助 ─────────────────────────────────────────────────────────────────
 
@@ -118,6 +157,7 @@ pub(crate) use inc_counter;
 pub fn reset_counters() {
     let all = [
         &BLOCK_READ_TOTAL, &BLOCK_WRITE_TOTAL,
+        &BLOCK_READ_COUNT, &BLOCK_WRITE_COUNT,
         &INODE_OBJ_CACHE_HIT, &INODE_OBJ_CACHE_MISS, &INODE_OBJ_INSERT,
         &INODE_OBJ_REMOVE, &INODE_OBJ_INVALIDATE,
         &DIR_CHILDREN_CACHE_HIT, &DIR_CHILDREN_CACHE_MISS, &DIR_CHILDREN_INSERT,
@@ -129,7 +169,18 @@ pub fn reset_counters() {
         &INODE_META_CACHE_HIT, &INODE_META_CACHE_MISS,
         &SYMLINK_TARGET_CACHE_HIT, &SYMLINK_TARGET_CACHE_MISS,
         &METADATA_DIRTY_MARK, &METADATA_FLUSH_COUNT, &METADATA_FLUSH_ERROR,
+        &METADATA_BLOCK_READ_COUNT, &METADATA_BLOCK_WRITE_COUNT,
+        &METADATA_BLOCK_CACHE_HIT, &METADATA_BLOCK_CACHE_MISS,
+        &METADATA_DIRTY_BLOCK_COUNT, &METADATA_FLUSH_IMMEDIATE_COUNT,
         &INODE_CACHE_HIT, &INODE_CACHE_MISS, &INODE_CACHE_FLUSH,
+        &INODE_LOAD_COUNT, &INODE_DIRTY_COUNT, &INODE_FLUSH_COUNT,
+        &DENTRY_LOOKUP_COUNT, &DENTRY_CACHE_HIT, &DENTRY_CACHE_MISS,
+        &NEGATIVE_DENTRY_HIT, &NEGATIVE_DENTRY_INSERT,
+        &DIR_LOOKUP_COUNT, &DIR_FULL_SCAN_COUNT, &DIR_FULL_SCAN_ENTRIES,
+        &CACHE_ALL_SUBFILE_COUNT, &CACHE_ALL_SUBFILE_ENTRIES_LOADED,
+        &CACHE_ALL_SUBFILE_INODE_LOADS,
+        &GETDENTS_CALL_COUNT, &GETDENTS_RETURNED_ENTRIES,
+        &GETDENTS_RETURNED_BYTES, &GETDENTS_INVALID_RECLEN_COUNT,
         &INODE_TABLE_READ, &INODE_TABLE_WRITE,
         &INODE_BITMAP_READ, &INODE_BITMAP_WRITE,
         &BLOCK_BITMAP_READ, &BLOCK_BITMAP_WRITE,
@@ -142,7 +193,7 @@ pub fn reset_counters() {
         &SYMLINK_CREATE_COUNT, &FAST_SYMLINK_CREATE_COUNT,
         &SYMLINK_READLINK_COUNT, &FAST_SYMLINK_READ_INLINE_COUNT,
         &SYMLINK_INODE_WRITE_COUNT, &SYMLINK_PARENT_INODE_WRITE_COUNT,
-        &SYMLINK_DIR_BLOCK_WRITE_COUNT,
+        &SYMLINK_DIR_BLOCK_WRITE_COUNT, &SYMLINK_SLOW_COUNT,
     ];
     for c in &all {
         c.store(0, Ordering::Relaxed);
@@ -183,6 +234,41 @@ pub fn dump_scenario(label: &str) {
         SYMLINK_INODE_WRITE_COUNT.load(Ordering::Relaxed),
         SYMLINK_PARENT_INODE_WRITE_COUNT.load(Ordering::Relaxed),
         SYMLINK_DIR_BLOCK_WRITE_COUNT.load(Ordering::Relaxed));
+    println!("block_read_count={} block_write_count={}",
+        BLOCK_READ_COUNT.load(Ordering::Relaxed),
+        BLOCK_WRITE_COUNT.load(Ordering::Relaxed));
+    println!("metadata_block_read_count={} metadata_block_write_count={} metadata_block_cache_hit={} metadata_block_cache_miss={} metadata_dirty_block_count={} metadata_flush_immediate_count={}",
+        METADATA_BLOCK_READ_COUNT.load(Ordering::Relaxed),
+        METADATA_BLOCK_WRITE_COUNT.load(Ordering::Relaxed),
+        METADATA_BLOCK_CACHE_HIT.load(Ordering::Relaxed),
+        METADATA_BLOCK_CACHE_MISS.load(Ordering::Relaxed),
+        METADATA_DIRTY_BLOCK_COUNT.load(Ordering::Relaxed),
+        METADATA_FLUSH_IMMEDIATE_COUNT.load(Ordering::Relaxed));
+    println!("inode_load_count={} inode_dirty_count={} inode_flush_count={}",
+        INODE_LOAD_COUNT.load(Ordering::Relaxed),
+        INODE_DIRTY_COUNT.load(Ordering::Relaxed),
+        INODE_FLUSH_COUNT.load(Ordering::Relaxed));
+    println!("dentry_lookup_count={} dentry_cache_hit={} dentry_cache_miss={} negative_dentry_hit={} negative_dentry_insert={}",
+        DENTRY_LOOKUP_COUNT.load(Ordering::Relaxed),
+        DENTRY_CACHE_HIT.load(Ordering::Relaxed),
+        DENTRY_CACHE_MISS.load(Ordering::Relaxed),
+        NEGATIVE_DENTRY_HIT.load(Ordering::Relaxed),
+        NEGATIVE_DENTRY_INSERT.load(Ordering::Relaxed));
+    println!("dir_lookup_count={} dir_full_scan_count={} dir_full_scan_entries={}",
+        DIR_LOOKUP_COUNT.load(Ordering::Relaxed),
+        DIR_FULL_SCAN_COUNT.load(Ordering::Relaxed),
+        DIR_FULL_SCAN_ENTRIES.load(Ordering::Relaxed));
+    println!("cache_all_subfile_count={} cache_all_subfile_entries_loaded={} cache_all_subfile_inode_loads={}",
+        CACHE_ALL_SUBFILE_COUNT.load(Ordering::Relaxed),
+        CACHE_ALL_SUBFILE_ENTRIES_LOADED.load(Ordering::Relaxed),
+        CACHE_ALL_SUBFILE_INODE_LOADS.load(Ordering::Relaxed));
+    println!("getdents_call_count={} getdents_returned_entries={} getdents_returned_bytes={} getdents_invalid_reclen_count={}",
+        GETDENTS_CALL_COUNT.load(Ordering::Relaxed),
+        GETDENTS_RETURNED_ENTRIES.load(Ordering::Relaxed),
+        GETDENTS_RETURNED_BYTES.load(Ordering::Relaxed),
+        GETDENTS_INVALID_RECLEN_COUNT.load(Ordering::Relaxed));
+    println!("symlink_slow_count={}",
+        SYMLINK_SLOW_COUNT.load(Ordering::Relaxed));
 }
 
 // ── syscall 接口 ──────────────────────────────────────────────────────────

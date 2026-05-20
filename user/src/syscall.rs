@@ -15,6 +15,7 @@ const SYSCALL_UMOUNT2: usize = 39;
 const SYSCALL_MOUNT: usize = 40;
 const SYSCALL_FTRUNCATE: usize = 46;
 const SYSCALL_FACCESSAT: usize = 48;
+const SYSCALL_FACCESSAT2: usize = 439;
 const SYSCALL_CHDIR: usize = 49;
 const SYSCALL_OPENAT: usize = 56;
 const SYSCALL_CLOSE: usize = 57;
@@ -484,4 +485,16 @@ pub fn sys_ftruncate(fd: usize, length: isize) -> isize {
 
 pub fn sys_ext4_counters(cmd: usize, arg1: usize, arg2: usize) -> isize {
     syscall(SYSCALL_EXT4_COUNTERS, [cmd, arg1, arg2])
+}
+
+pub fn sys_faccessat2(dirfd: isize, path: &str, mode: u32, flags: u32) -> isize {
+    syscall4(
+        SYSCALL_FACCESSAT2,
+        [
+            dirfd as usize,
+            path.as_ptr() as usize,
+            mode as usize,
+            flags as usize,
+        ],
+    )
 }

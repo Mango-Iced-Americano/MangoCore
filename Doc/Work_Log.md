@@ -2,6 +2,56 @@
 
 ---
 
+## 2026-05-20
+
+### ext4 MetaBlockCache 元数据块脏写合并
+
+**涉及文件：**
+- `os/src/fs/ext4/meta_cache.rs` — 新增 256 块容量的 `MetaBlockCache`，支持 metadata block 命中/未命中计数、dirty 标记、clean-only LRU 淘汰、superblock-last 的 `flush_all_dirty()`。
+- `os/src/fs/ext4/ext4fs.rs` — `Ext4FileSystem` 接入 `meta_block_cache`，新增 cached metadata block/group/inode/superblock 读写辅助与 `flush_metadata_cache()`，sync/umount/batch flush 时统一写回。
+- `os/src/fs/ext4/{ext4_inode,balloc,ialloc,direntry,extent}.rs` — inode table、block/inode bitmap、目录块、extent metadata 读路径改查 metadata cache；写路径改为更新 cache 并标脏，避免立即块设备写。
+- `os/src/fs/ext4/superblock.rs` — superblock checksum 字段开放给 ext4fs 缓存写回路径更新。
+
+**验证：** `lsp_diagnostics os/src/fs/ext4` 无 error；`make rv64-kernel-build-only` ✅；`make la64-kernel-build-only` ✅。
+
+---
+
+### ext4 negative dentry cache 与 inode cache 计数增强
+
+**涉及文件：**
+- `os/src/fs/ext4/layout.rs` — `Ext4OSInode` 新增 per-directory `negative_dentry` 与 `dir_version`，使用目录版本号做负 dentry 失效判定。
+- `os/src/fs/ext4/ext4fs.rs` — `find()` 增加 lookup/positive/negative dentry counter；命中版本匹配负 dentry 时返回 `ENOENT`；目录 miss 后插入负 dentry；`create/symlink/link/unlink/rmdir/rename` 维护源/目标目录版本、positive children cache 与 negative dentry。
+- `os/src/fs/ext4/ext4_inode.rs` — 复用现有 `Ext4FileSystem::inode_cache`，在 inode 写回标脏路径增加 `INODE_DIRTY_COUNT`。
+
+**验证：** `lsp_diagnostics os/src/fs/ext4` 无 error；`make rv64-kernel-build-only` ✅；`make la64-kernel-build-only` ✅；rv64 basic QEMU ✅；la64 basic QEMU ✅。
+
+---
+
+### getdents64 变长 linux_dirent64 打包与 ext4 单次目录扫描
+
+**涉及文件：**
+- `os/src/fs/vfs/index_node.rs` — `IndexNode` 新增 Vec 返回版 `list_dirents()` 默认实现，通过 `list()` + `find()` + `metadata()` 兼容旧文件系统。
+- `os/src/fs/vfs/mount.rs` — `MountFSInode` 转发 `list_dirents()`。
+- `os/src/fs/ext4/ext4fs.rs` — 覆盖 `list_dirents()`，直接复用 `dir_get_entries()` 一次扫描收集 name/inode/type，避免 getdents64 每项 find。
+- `os/src/fs/ramfs/mod.rs`、`os/src/fs/dev/mod.rs`、`os/src/fs/procfs/mod.rs` — 补齐 `list_dirents()` 兼容实现。
+- `os/src/fs/vfs/file.rs` — 保留旧 `get_dirent()`，新增 `get_dirent64()` 按 8 字节对齐打包变长 linux_dirent64，`d_type` 写在记录末字节。
+- `os/src/syscall/fs.rs` — `sys_getdents64()` 改用 `get_dirent64()` 生成内核缓冲后拷贝到用户态。
+- `user/src/bin/fs_test.rs` — 旧 getdents 测试改用统一 `count_dir_entries()` 解析 Linux 语义记录。
+
+**验证：** `lsp_diagnostics` 对上述 Rust 文件均无 error；`make rv64-kernel-build-only` ✅；`make la64-kernel-build-only` ✅。
+
+---
+
+### fs_test 性能测试扩展
+
+**涉及文件：**
+- `user/src/bin/fs_test.rs` — 在 D 组压力测试与 E 组 fork 测试之间新增 5 个性能测试：1000 文件 getdents、1000 文件 stat/access、重复 lookup cache、200 symlink 批量验证、1000 文件大目录 open/negative lookup；全部使用 `run_split_test()` + 子场景 `dump_sub_profile()`。
+- `Doc/Work_Log.md` — 记录本次测试扩展。
+
+**验证：** `lsp_diagnostics user/src/bin/fs_test.rs` 无 error；仅保留文件原有 rust-analyzer warning（unused braces、fork 测试局部 const 命名）。
+
+---
+
 ## 2026-05-17
 
 ### ext4 metadata/inode 缓存优化（DragonOS 参考设计）
@@ -723,3 +773,48 @@ fn list(&self) -> Result<Vec<String>, SyscallErr> {
 
 **验证：** rv64 ✅ la64 ✅ 编译通过。basic test (mask=0x001) 全部通过，`/dev/null` 不再报错，无 SIGBUS。
 - 预期修复：`pwd` → `/`，`touch/cat/rm` 相对路径正确，`echo > test.txt` redirection 正确
+
+---
+
+## 2026-05-20 (续)
+
+### FS 热路径优化最终集成：Oracle 终审修复 + procfs stat + 通用 ioctl
+
+**Oracle 终审指出的三个修复：**
+- `os/src/fs/ext4/ext4fs.rs` — `flush_metadata_cache()` 前置 `flush_dirty_inodes()`，确保 dirty inode 数据先落盘
+- `os/src/fs/ext4/ext4fs.rs` — `find()` positive dentry 插入前做 stable version recheck，防止并发 unlink/create 后缓存 stale 条目
+- `os/src/syscall/fs.rs` — `sys_sync()` 同时触发 `flush_metadata_cache()`，修复 dirty metadata batching 后的持久化语义缺口
+
+### /proc/<pid>/stat 新增
+- `os/src/fs/procfs/pid/stat.rs` — 新增，仿照 DragonOS 设计，24 字段 Linux procfs stat 兼容格式
+- `os/src/fs/procfs/pid/mod.rs` — 注册 stat 文件，权限 0o444
+
+### 通用 ioctl FIONREAD 实现
+- `os/src/syscall/fs.rs` — `sys_ioctl` 新增 `FIONREAD` 处理（命名常量 `const FIONREAD: u32 = 0x541B;`，参照 DragonOS 模式），计算 `文件大小 - 当前偏移` 写入用户态 i32 指针
+- TTY ioctl（TCGETS/TIOCGWINSZ/TIOCGPGRP/TIOCSPGRP/FIONBIO/TCXONC 等）已在 `os/src/fs/dev/tty.rs` 中原生支持，无需改动
+
+### busybox install 幂等
+- `user/src/bin/initproc.rs` — `prepare_symlink()` 增加 `/bin/sh` 存在检查，跳过重复 install
+
+**验证：** `make rv64-kernel-build-only` ✅；rv64 QEMU basic (mask=0x001) ✅
+
+---
+
+### 阶段总览（全部 7 阶段 + 追加）
+
+| 阶段 | 内容 | 状态 |
+|------|------|------|
+| P0 | 计划 + Oracle 审查 | ✅ |
+| P1 | 5 perf tests (56 total) + 27 new counters (81 total) + faccessat2 wrapper | ✅ |
+| P2 | Lightweight fstatat/statx/faccessat2 (no full open) | ✅ Oracle 审查 |
+| P3 | getdents64 变长打包 + list_dirents trait + d_type 修正 | ✅ Oracle 审查 |
+| P4 | Dentry cache (version-based negative) + inode cache 增强 | ✅ Oracle 审查 |
+| P5 | MetaBlockCache (256-block, ordered flush, 全部 metadata path) | ✅ Oracle 审查 |
+| P6 | Busybox 幂等 + symlink batching (被 MetaBlockCache 覆盖) | ✅ |
+| P7 | 终审修复 + /proc/<pid>/stat + FIONREAD ioctl | ✅ Oracle 终审 |
+| 追加 | hwclock/ioctl_ns07 分析：RTC 驱动缺失、namespace ioctl 不可行，skip | — |
+
+**修改文件总计：** 16 files
+**Oracle 审查：** 6 轮 (P2, P3, P4, P5, 终审, P7 嵌入)
+**编译：** rv64 ✅, la64 ✅
+**QEMU：** rv64 basic (mask=0x001) ✅

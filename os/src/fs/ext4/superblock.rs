@@ -108,7 +108,7 @@ pub struct Ext4Superblock {
     encrypt_pw_salt: [u8; 16], // 用于string2key算法的盐
     lpf_ino: u32,              // lost+found节点的位置
     padding: [u32; 100],       // 块的末尾的填充
-    checksum: u32,             // crc32c(superblock)
+    pub(crate) checksum: u32,  // crc32c(superblock)
 }
 
 impl Ext4Superblock {

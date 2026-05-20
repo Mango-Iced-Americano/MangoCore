@@ -477,6 +477,18 @@ impl IndexNode for LockedRamFSInode {
         Ok(keys)
     }
 
+    fn list_dirents(&self) -> Result<Vec<(String, InodeId, FileType)>, SyscallErr> {
+        let mut result = Vec::new();
+        for name in self.list()? {
+            if let Ok(child) = self.find(&name) {
+                if let Ok(meta) = child.metadata() {
+                    result.push((name, meta.inode_id, meta.file_type));
+                }
+            }
+        }
+        Ok(result)
+    }
+
     fn create(
         &self,
         name: &str,

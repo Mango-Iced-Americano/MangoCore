@@ -92,6 +92,10 @@ pub struct Ext4OSInode {
     // 非目录 inode 此字段为空且不使用。
     pub(super) children: Mutex<BTreeMap<String, alloc::sync::Arc<dyn crate::fs::vfs::IndexNode>>>,
 
+    // ── Phase 4: negative dentry cache (version-based invalidation) ──
+    pub(super) negative_dentry: Mutex<BTreeMap<String, u64>>,
+    pub(super) dir_version: AtomicU64,
+
     // ── Phase 3: per-inode metadata cache ──
     // DragonOS 参考: Ext4Inode.cached_file_size / metadata_dirty
     // cached_symlink_target: MangoCore 针对 fast symlink 的增强

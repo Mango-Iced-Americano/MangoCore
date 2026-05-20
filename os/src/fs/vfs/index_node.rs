@@ -133,6 +133,22 @@ pub trait IndexNode: Any + Send + Sync + Debug {
         Err(SyscallErr::ENOSYS)
     }
 
+    /// 列出当前目录下的所有子项名称、inode id 和文件类型。
+    ///
+    /// 默认实现通过 `list()` + `find()` + `metadata()` 兼容所有文件系统；
+    /// ext4 等能一次扫描拿到完整目录项信息的实现应覆盖该方法，避免 O(n) 次查找。
+    fn list_dirents(&self) -> Result<Vec<(String, InodeId, FileType)>, SyscallErr> {
+        let mut result = Vec::new();
+        for name in self.list()? {
+            if let Ok(child) = self.find(&name) {
+                if let Ok(meta) = child.metadata() {
+                    result.push((name, meta.inode_id, meta.file_type));
+                }
+            }
+        }
+        Ok(result)
+    }
+
     /// 在当前目录下创建普通文件
     fn create(
         &self,

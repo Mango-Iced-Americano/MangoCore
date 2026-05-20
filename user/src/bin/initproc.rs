@@ -1357,7 +1357,7 @@ pub extern "C" fn _start() -> ! {
 fn prepare_symlink(environ: &[*const u8]) {
     // Step 1: busybox applet 安装到 /bin（用 PATH 查找 busybox，兼容旧镜像 /busybox）
     println!("[initproc] installing busybox applets to /bin ...");
-    let install_cmd = "busybox mkdir -p /bin; busybox --install -s /bin\0";
+    let install_cmd = "busybox mkdir -p /bin; [ -f /bin/sh ] || busybox --install -s /bin\0";
     let ret = run_bash_cmd(install_cmd, environ);
     println!("[initproc] busybox --install -s /bin -> exit={}", ret);
 

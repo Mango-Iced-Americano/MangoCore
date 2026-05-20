@@ -667,8 +667,7 @@ impl Ext4FileSystem {
         // 块组内索引
         let index = (inode_num - 1) % inodes_per_group;
         // 加载块组描述符
-        let block_group =
-            Ext4BlockGroup::load_new(self.block_device.clone(), &super_block, group as usize, self.block_size);
+        let block_group = self.load_block_group_cached(&super_block, group as usize);
         // 获取inode表块号
         let inode_table_blk_num = block_group.get_inode_table_blk_num();
         // 计算字节偏移量
@@ -681,7 +680,7 @@ impl Ext4FileSystem {
         debug_assert!(self.block_size == crate::hal::BLOCK_SZ || self.block_size == 1024 || self.block_size == 2048,
             "block_size corrupted: {}", self.block_size);
         let offset = self.inode_disk_pos(inode_num);
-        let mut ext4block = Block::load_offset(self.block_device.clone(), offset, self.block_size);
+        let mut ext4block = self.load_metadata_block_offset(offset);
         let blk_offset = offset % self.block_size;
         let inode: &mut Ext4Inode = ext4block.read_offset_as_mut(blk_offset);
         log::debug!(
@@ -723,6 +722,7 @@ impl Ext4FileSystem {
                 let mut guard = cached.lock();
                 guard.inode = inode_ref.inode;
                 guard.dirty = true;
+                super::counters::inc_counter!(super::counters::INODE_DIRTY_COUNT);
             } else {
                 let offset = self.inode_disk_pos(ino);
                 let table_block = offset / self.block_size * self.block_size;
@@ -735,6 +735,7 @@ impl Ext4FileSystem {
                     dirty: true,
                 };
                 cache.insert(ino, alloc::sync::Arc::new(spin::Mutex::new(cached)));
+                super::counters::inc_counter!(super::counters::INODE_DIRTY_COUNT);
             }
         }
         let _ = self.flush_inode(ino);
@@ -751,6 +752,7 @@ impl Ext4FileSystem {
                 let mut guard = cached.lock();
                 guard.inode = inode_ref.inode;
                 guard.dirty = true;
+                super::counters::inc_counter!(super::counters::INODE_DIRTY_COUNT);
             } else {
                 let offset = self.inode_disk_pos(ino);
                 let table_block = offset / self.block_size * self.block_size;
@@ -763,6 +765,7 @@ impl Ext4FileSystem {
                     dirty: true,
                 };
                 cache.insert(ino, alloc::sync::Arc::new(spin::Mutex::new(cached)));
+                super::counters::inc_counter!(super::counters::INODE_DIRTY_COUNT);
             }
         }
         let cached = match self.inode_cache.lock().get(&ino).cloned() {
@@ -775,13 +778,7 @@ impl Ext4FileSystem {
         }
         let inode_pos = guard.inode_table_block + guard.offset_in_block;
         let on_disk_size = self.superblock.inode_size as usize;
-        guard.inode.sync_inode_to_disk(
-            self.block_device.clone(),
-            inode_pos,
-            on_disk_size,
-            guard.ino,
-            self.block_size,
-        );
+        self.sync_inode_to_metadata_cache(&guard.inode, inode_pos, on_disk_size, guard.ino);
         drop(guard);
         if let Some(cached) = self.inode_cache.lock().get(&ino) {
             cached.lock().dirty = false;
@@ -850,16 +847,12 @@ impl Ext4FileSystem {
         let index = (inode_ref.inode_num - 1) % inodes_per_group;
 
         // load block group
-        let mut block_group =
-            Ext4BlockGroup::load_new(self.block_device.clone(), &super_block, bgid as usize, self.block_size);
+        let mut block_group = self.load_block_group_cached(&super_block, bgid as usize);
 
         let block_bitmap_block = block_group.get_block_bitmap_block(&super_block);
 
-        let mut block_bmap_raw_data = vec![0u8; BLOCK_SIZE];
-        self.block_device
-            .read_block(block_bitmap_block as usize, &mut block_bmap_raw_data);
+        let mut block_bmap_raw_data = self.read_metadata_block(block_bitmap_block as usize);
         super::counters::inc_counter!(super::counters::BLOCK_BITMAP_READ);
-        super::counters::inc_counter!(super::counters::BLOCK_READ_TOTAL);
         let data: &mut Vec<u8> = &mut block_bmap_raw_data.to_vec();
         let mut rel_blk_idx = 0;
 
@@ -868,16 +861,14 @@ impl Ext4FileSystem {
 
         block_group.set_block_group_balloc_bitmap_csum(&super_block, data);
         // todo!();
-        self.block_device
-            .write_block(block_bitmap_block as usize, data);
+        self.store_metadata_block_dirty(block_bitmap_block as usize, data);
         super::counters::inc_counter!(super::counters::BLOCK_BITMAP_WRITE);
-        super::counters::inc_counter!(super::counters::BLOCK_WRITE_TOTAL);
 
         /* Update superblock free blocks count */
         let mut super_blk_free_blocks = super_block.free_blocks_count();
         super_blk_free_blocks -= 1;
         super_block.set_free_blocks_count(super_blk_free_blocks);
-        super_block.sync_to_disk_with_csum(self.block_device.clone());
+        self.defer_superblock_write(&super_block);
 
         /* Update inode blocks (different block size!) count */
         let mut inode_blocks = inode_ref.inode.blocks_count();
@@ -890,7 +881,7 @@ impl Ext4FileSystem {
         let mut fb_cnt = block_group.get_free_blocks_count();
         fb_cnt -= 1;
         block_group.set_free_blocks_count(fb_cnt as u32);
-        block_group.sync_to_disk_with_csum(self.block_device.clone(), bgid as usize, &super_block, self.block_size);
+        self.defer_bg_write(&block_group, bgid as u32, &super_block);
 
         Ok(rel_blk_idx as Ext4Fsblk)
     }

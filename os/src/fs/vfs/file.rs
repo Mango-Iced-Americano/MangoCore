@@ -924,6 +924,74 @@ impl File {
         Ok(dirents)
     }
 
+    /// 将目录项打包为变长 linux_dirent64 记录写入 `buf`。
+    ///
+    /// 布局：d_ino(u64) + d_off(i64) + d_reclen(u16) + d_name(NUL 结尾)，
+    /// d_type 按 Linux 语义写在记录最后一个字节，整体 8 字节对齐。
+    pub fn get_dirent64(&self, buf: &mut [u8]) -> Result<usize, isize> {
+        if !self.is_dir() {
+            return Err(crate::syscall::errno::ENOTDIR);
+        }
+
+        let dirents = self
+            .inode
+            .list_dirents()
+            .map_err(|e| -(e as isize))?;
+        let current_offset = self.offset.load(Ordering::SeqCst) as u64;
+        let mut source_offset = 0u64;
+        let mut new_offset = current_offset;
+        let mut written = 0usize;
+
+        for (name, ino, ft) in dirents {
+            let name_bytes = name.as_bytes();
+            let name_len = name_bytes.len().min(255);
+            let raw_size = 8 + 8 + 2 + 1 + name_len + 1;
+            let reclen = (raw_size + 7) & !7;
+            let next_offset = source_offset + reclen as u64;
+
+            if next_offset <= current_offset {
+                source_offset = next_offset;
+                continue;
+            }
+            if written + reclen > buf.len() {
+                if written == 0 {
+                    return Err(crate::syscall::errno::EINVAL);
+                }
+                break;
+            }
+
+            let pos = written;
+            for b in &mut buf[pos..pos + reclen] {
+                *b = 0;
+            }
+
+            let d_type = match ft {
+                FileType::Dir => 4u8,
+                FileType::File => 8u8,
+                FileType::SymLink => 10u8,
+                FileType::CharDevice => 2u8,
+                FileType::BlockDevice => 6u8,
+                FileType::Pipe => 5u8,
+                FileType::Socket => 12u8,
+                _ => 0u8,
+            };
+
+            buf[pos..pos + 8].copy_from_slice(&(ino as u64).to_le_bytes());
+            buf[pos + 8..pos + 16].copy_from_slice(&(next_offset as i64).to_le_bytes());
+            buf[pos + 16..pos + 18].copy_from_slice(&(reclen as u16).to_le_bytes());
+            buf[pos + 18] = d_type;
+            buf[pos + 19..pos + 19 + name_len].copy_from_slice(&name_bytes[..name_len]);
+            buf[pos + 19 + name_len] = 0;
+
+            written += reclen;
+            new_offset = next_offset;
+            source_offset = next_offset;
+        }
+
+        self.offset.store(new_offset as usize, Ordering::SeqCst);
+        Ok(written)
+    }
+
     /// 挂起检测
     pub fn hang_up(&self) -> bool {
         false

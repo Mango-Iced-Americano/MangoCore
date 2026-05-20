@@ -604,9 +604,7 @@ impl Ext4FileSystem {
                 });
 
                 let next_block = search_path.path.last().unwrap().index.unwrap().leaf_lo;
-                let mut next_data = vec![0u8; self.block_size];
-                self.block_device
-                    .read_block(next_block as usize, &mut next_data);
+                let mut next_data = self.read_metadata_block(next_block as usize);
                 node = ExtentNode::load_from_data_mut(&mut next_data, false, self.block_size);
 
                 if node.header.magic != EXT4_EXTENT_MAGIC || node.header.depth != depth - 1 {
@@ -749,9 +747,7 @@ impl Ext4FileSystem {
 
     /// Get extent from the node at the given position.
     fn get_extent_from_node(&self, node: &ExtentPathNode, pos: usize) -> Option<Ext4Extent> {
-        let mut data = vec![0u8; self.block_size];
-        self.block_device
-            .read_block(node.pblock as usize, &mut data);
+        let data = self.read_metadata_block(node.pblock as usize);
         let extent_node = ExtentNode::load_from_data(&data, false, self.block_size);
 
         extent_node.get_extent(pos)
@@ -805,8 +801,7 @@ impl Ext4FileSystem {
             let block = node.pblock_of_node;
             let new_ex_offset = core::mem::size_of::<Ext4ExtentHeader>()
                 + core::mem::size_of::<Ext4Extent>() * (node.position);
-            let mut ext4block =
-                Block::load_offset(self.block_device.clone(), block * self.block_size, self.block_size);
+            let mut ext4block = self.load_metadata_block(block);
             let left_ext: &mut Ext4Extent = ext4block.read_offset_as_mut(new_ex_offset);
             let unwritten = left_ext.is_unwritten();
             let len = left_ext.get_actual_len() + right_ext.get_actual_len();
@@ -815,7 +810,7 @@ impl Ext4FileSystem {
                 left_ext.mark_unwritten();
             }
 
-            ext4block.sync_blk_to_disk(self.block_device.clone());
+            self.store_metadata_block_dirty(block, &ext4block.data);
             super::counters::inc_counter!(super::counters::OTHER_META_WRITE);
         }
 
@@ -863,8 +858,7 @@ impl Ext4FileSystem {
 
             // load block
             let node_block = node.pblock_of_node;
-            let mut ext4block =
-                Block::load_offset(self.block_device.clone(), node_block * self.block_size, self.block_size);
+            let mut ext4block = self.load_metadata_block(node_block);
             let new_ex_offset = core::mem::size_of::<Ext4ExtentHeader>()
                 + core::mem::size_of::<Ext4Extent>() * (node.position + 1);
 
@@ -877,7 +871,7 @@ impl Ext4FileSystem {
             header.entries_count += 1;
 
             // sync to disk
-            ext4block.sync_blk_to_disk(self.block_device.clone());
+            self.store_metadata_block_dirty(node_block, &ext4block.data);
             super::counters::inc_counter!(super::counters::OTHER_META_WRITE);
 
             return Ok(());
@@ -911,11 +905,7 @@ impl Ext4FileSystem {
         let new_block = self.balloc_alloc_block(inode_ref, None)?;
 
         // load new block
-        let mut new_ext4block = Block::load_offset(
-            self.block_device.clone(),
-            new_block as usize * self.block_size,
-            self.block_size,
-        );
+        let mut new_ext4block = self.load_metadata_block(new_block as usize);
 
         // move top-level index/leaf into new block
         let data_to_copy = &inode_ref.inode.block;
@@ -949,7 +939,7 @@ impl Ext4FileSystem {
             root_first_index.first_block = root_first_extent_block;
         }
 
-        new_ext4block.sync_blk_to_disk(self.block_device.clone());
+        self.store_metadata_block_dirty(new_block as usize, &new_ext4block.data);
         super::counters::inc_counter!(super::counters::OTHER_META_WRITE);
         self.write_back_inode(inode_ref);
 
@@ -1069,8 +1059,7 @@ impl Ext4FileSystem {
                     i -= 1;
                     continue;
                 }
-                let ext4block =
-                    Block::load_offset(self.block_device.clone(), node_pblock * self.block_size, self.block_size);
+                let ext4block = self.load_metadata_block(node_pblock);
 
                 let header = search_path.path[i as usize].header;
                 let entries_count = header.entries_count;
@@ -1196,7 +1185,7 @@ impl Ext4FileSystem {
             // we are at root
             Block::load_inode_root_block(&inode_ref.inode.block)
         } else {
-            Block::load_offset(self.block_device.clone(), node_disk_pos, self.block_size)
+            self.load_metadata_block_offset(node_disk_pos)
         };
 
         // depth 2 (leaf nodes)
@@ -1332,6 +1321,9 @@ impl Ext4FileSystem {
                 *ptr
             };
             inode_ref.inode.block = new_block_data;
+            self.write_back_inode(inode_ref);
+        } else {
+            self.store_metadata_block_dirty(node_disk_pos / self.block_size, &ext4block.data);
         }
         Ok(EOK)
     }
@@ -1386,7 +1378,7 @@ impl Ext4FileSystem {
                 + (header.entries_count as usize) * size_of::<Ext4ExtentIndex>();
 
             let node_disk_pos = path.path[i].pblock_of_node * self.block_size;
-            let mut ext4block = Block::load_offset(self.block_device.clone(), node_disk_pos, self.block_size);
+            let mut ext4block = self.load_metadata_block_offset(node_disk_pos);
 
             let remaining_indexes: Vec<u8> =
                 ext4block.data[start_pos + size_of::<Ext4ExtentIndex>()..end_pos].to_vec();
@@ -1398,6 +1390,7 @@ impl Ext4FileSystem {
             let empty_start = start_pos + remaining_size;
             let empty_end = end_pos;
             ext4block.data[empty_start..empty_end].fill(0);
+            self.store_metadata_block_dirty(node_disk_pos / self.block_size, &ext4block.data);
         }
 
         // 更新头部的entries_count
@@ -1515,7 +1508,7 @@ impl Ext4FileSystem {
         if let Some(index) = path.index {
             let last_index_pos = header.entries_count as usize - 1;
             let node_disk_pos = path.pblock_of_node * self.block_size;
-            let ext4block = Block::load_offset(self.block_device.clone(), node_disk_pos, self.block_size);
+            let ext4block = self.load_metadata_block_offset(node_disk_pos);
             let last_index: Ext4ExtentIndex =
                 ext4block.read_offset_as(size_of::<Ext4ExtentIndex>() * last_index_pos);
 
