@@ -947,28 +947,19 @@ pub fn sys_dup2(oldfd: usize, newfd: usize) -> isize {
 
 pub fn sys_dup3(oldfd: usize, newfd: usize, flags: u32) -> isize {
     info!(
-        "[sys_dup3] oldfd: {}, newfd: {}, flags: {:?}",
-        oldfd,
-        newfd,
-        OpenFlags::from_bits(flags)
+        "[sys_dup3] oldfd: {}, newfd: {}, flags: {:X}",
+        oldfd, newfd, flags
     );
     if oldfd == newfd {
         return EINVAL;
     }
-    let is_cloexec = match OpenFlags::from_bits(flags) {
-        Some(OpenFlags::O_CLOEXEC) => true,
-        // `O_RDONLY == 0`, so it means *NO* cloexec in fact
-        Some(OpenFlags::O_RDONLY) => false,
-        // flags contain an invalid value
-        Some(flags) => {
-            warn!("[sys_dup3] invalid flags: {:?}", flags);
-            return EINVAL;
-        }
-        None => {
-            warn!("[sys_dup3] unknown flags");
-            return EINVAL;
-        }
-    };
+    // Only O_CLOEXEC is valid for dup3; use direct bit check
+    const O_CLOEXEC: u32 = 0o2000000;
+    if flags & !O_CLOEXEC != 0 {
+        warn!("[sys_dup3] invalid flags: {:X}", flags);
+        return EINVAL;
+    }
+    let is_cloexec = (flags & O_CLOEXEC) != 0;
     let task = current_task().unwrap();
     let mut fd_table = task.files.lock();
 
