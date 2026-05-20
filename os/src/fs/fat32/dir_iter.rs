@@ -93,11 +93,11 @@ impl<'a, 'b> DirIter<'a, 'b> {
     /// Otherwise, it will return None
     pub fn current_clone(&mut self) -> Option<FATDirEnt> {
         let mut dir_ent = FATDirEnt::empty();
-        if self.offset.is_some()
-            && self.offset.unwrap() < self.inode.get_file_size_wlock(self.inode_lock)
+        let off = self.offset?;
+        if off < self.inode.get_file_size_wlock(self.inode_lock)
             && self.inode.read_at_block_cache_wlock(
                 &self.inode_lock,
-                self.offset.unwrap() as usize,
+                off as usize,
                 dir_ent.as_bytes_mut(),
             ) != 0
         {
@@ -109,17 +109,23 @@ impl<'a, 'b> DirIter<'a, 'b> {
     /// Write `ent` to the directory entry corresponding to iterator.
     /// # Arguments
     /// + `ent`: The directory entry we want to write to
-    /// # Warning
-    /// If write failed, it will panic
-    pub fn write_to_current_ent(&mut self, ent: &FATDirEnt) {
+    /// # Return Value
+    /// Returns true on success, false on failure (logs error)
+    pub fn write_to_current_ent(&mut self, ent: &FATDirEnt) -> bool {
+        let Some(off) = self.offset else {
+            log::error!("write_to_current_ent: offset is None");
+            return false;
+        };
         if self.inode.write_at_block_cache_lock(
             &mut self.inode_lock,
-            self.offset.unwrap() as usize,
+            off as usize,
             ent.as_bytes(),
         ) != ent.as_bytes().len()
         {
-            panic!("failed!");
+            log::error!("write_to_current_ent: write failed at offset={}", off);
+            return false;
         }
+        true
     }
     /// Internal implementation of iterator
     /// Depending on the direction, the offset tries to move a `FATDirEnt` distance
@@ -152,17 +158,15 @@ impl<'a, 'b> DirIter<'a, 'b> {
             }
             self.offset = Some(offset);
         } else {
-            if self.offset.is_none() {
-                return None;
-            }
-            if self.offset.unwrap() == 0 {
+            let off = self.offset?;
+            if off == 0 {
                 self.offset = None;
                 return None;
             }
-            self.offset = self.offset.map(|offset| offset - STEP_SIZE);
+            self.offset = Some(off - STEP_SIZE);
             self.inode.read_at_block_cache_wlock(
                 &self.inode_lock,
-                self.offset.unwrap() as usize,
+                (off - STEP_SIZE) as usize,
                 dir_ent.as_bytes_mut(),
             );
         }
@@ -230,7 +234,11 @@ impl Iterator for DirWalker<'_, '_> {
                 if name.is_empty() {
                     name = dir_ent.get_name();
                 }
-                return Some((name, dir_ent.get_short_ent().unwrap().clone()));
+                let Some(short_ent) = dir_ent.get_short_ent() else {
+                    log::error!("DirWalker: expected short entry but get_short_ent returned None");
+                    continue;
+                };
+                return Some((name, short_ent.clone()));
             }
         }
         None
