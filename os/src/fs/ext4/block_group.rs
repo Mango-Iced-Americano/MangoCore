@@ -255,8 +255,7 @@ impl Ext4BlockGroup {
 
         // 确保数据不会超出块大小
         if offset + data.len() >= block_size {
-            log::error!("sync_block_group_to_disk: Data exceeds block size (offset={}, data_len={}, block_size={})", offset, data.len(), block_size);
-            return;
+            panic!("Data exceeds block size");
         }
 
         // 因为是块组描述符，所以不会超过一个块
@@ -432,19 +431,16 @@ impl Block {
     pub fn read_offset_as<T>(&self, offset: usize) -> T {
         let block_size = self.block_size;
         let offset = offset % block_size;
-        if offset + core::mem::size_of::<T>() > self.data.len() {
-            log::error!(
-                "read_offset_as: offset {} + size {} > block len {}",
-                offset,
-                core::mem::size_of::<T>(),
-                self.data.len()
-            );
-            // SAFETY: return zeroed memory to prevent panic; caller will get corrupted data
-            // but kernel stays alive. The root cause is disk metadata corruption.
-            unsafe { core::mem::zeroed() }
-        } else {
-            let ptr = self.data.as_ptr() as *const T;
-            unsafe { ptr.add(offset).read_unaligned() }
+        assert!(
+            offset + core::mem::size_of::<T>() <= self.data.len(),
+            "read_offset_as: offset {} + size {} > block len {}",
+            offset,
+            core::mem::size_of::<T>(),
+            self.data.len()
+        );
+        unsafe {
+            let ptr = self.data.as_ptr().add(offset) as *const T;
+            ptr.read_unaligned()
         }
     }
 
@@ -452,24 +448,21 @@ impl Block {
         // 暂时先使用2048
         let block_size = 4096;
         let offset = offset % block_size;
-        if offset + core::mem::size_of::<Ext4Superblock>() > 4096 {
-            log::error!(
-                "read_offset_as_superblock: offset {} + size {} > 4096",
-                offset,
-                core::mem::size_of::<Ext4Superblock>()
-            );
-            unsafe { core::mem::zeroed() }
-        } else {
-            unsafe {
-                let ptr = self.data.as_ptr().add(offset) as *const Ext4Superblock;
-                ptr.read_unaligned()
-            }
+        assert!(
+            offset + core::mem::size_of::<Ext4Superblock>() <= 4096,
+            "read_offset_as_superblock: offset {} + size {} > 4096",
+            offset,
+            core::mem::size_of::<Ext4Superblock>()
+        );
+        unsafe {
+            let ptr = self.data.as_ptr().add(offset) as *const Ext4Superblock;
+            ptr.read_unaligned()
         }
     }
 
     // 将读到的块作为指定的类型，并且返回一个可变引用
     pub fn read_as_mut<T>(&mut self) -> &mut T {
-        debug_assert!(
+        assert!(
             core::mem::size_of::<T>() <= self.data.len(),
             "read_as_mut: size {} > block len {}",
             core::mem::size_of::<T>(),
@@ -485,7 +478,7 @@ impl Block {
     pub fn read_offset_as_mut<T>(&mut self, offset: usize) -> &mut T {
         let block_size = self.block_size;
         let offset = offset % block_size;
-        debug_assert!(
+        assert!(
             offset + core::mem::size_of::<T>() <= self.data.len(),
             "read_offset_as_mut: offset {} + size {} > block len {}",
             offset,
@@ -505,8 +498,7 @@ impl Block {
             let slice_end = len.min(data.len());
             self.data[offset..end].copy_from_slice(&data[..slice_end]);
         } else {
-            log::error!("write_offset: Write would overflow the block buffer (offset={}, len={}, data_len={}, buf_len={})",
-                offset, len, data.len(), self.data.len());
+            panic!("Write would overflow the block buffer");
         }
     }
 
@@ -516,18 +508,14 @@ impl Block {
     pub fn sync_blk_to_disk(&self, block_device: Arc<dyn BlockDevice>) {
         let block_size = self.block_size;
         if self.data.len() % block_size != 0 {
-            log::error!(
-                "sync_blk_to_disk: data length {} is not a multiple of block_size {}",
-                self.data.len(), block_size
-            );
-            return;
+            panic!(
+                "[todo fix the write_offset function] write_length is not a multiple of BLOCK_SIZE"
+            )
         }
         if self.disk_offset % block_size != 0 {
-            log::error!(
-                "sync_blk_to_disk: disk_offset {} is not a multiple of block_size {}",
-                self.disk_offset, block_size
-            );
-            return;
+            panic!(
+                "[todo fix the write_offset function] write_offset is not a multiple of BLOCK_SIZE"
+            )
         }
         let block_id = self.disk_offset / block_size;
         // log::warn!(
