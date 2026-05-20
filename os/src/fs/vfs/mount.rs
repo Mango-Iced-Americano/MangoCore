@@ -269,6 +269,10 @@ impl IndexNode for MountFSInode {
         self.inner_inode.list()
     }
 
+    fn list_dirents(&self) -> Result<Vec<(String, InodeId, FileType)>, SyscallErr> {
+        self.inner_inode.list_dirents()
+    }
+
     fn create(
         &self,
         name: &str,

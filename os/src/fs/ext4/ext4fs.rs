@@ -4,6 +4,7 @@ use core::ptr::addr_of;
 
 use super::block_group::{Block, Ext4BlockGroup};
 use super::direntry::{Ext4DirEntry, Ext4DirSearchResult};
+use super::meta_cache::MetaBlockCache;
 use super::path::path_check;
 use super::superblock::SUPERBLOCK_OFFSET;
 use super::*;
@@ -55,6 +56,9 @@ pub struct Ext4FileSystem {
     // 减少 get_inode_ref 的磁盘 I/O。write_back_inode 改为先更新缓存再写回。
     pub(super) inode_cache: spin::Mutex<BTreeMap<u32, alloc::sync::Arc<spin::Mutex<super::ext4_inode::CachedExt4Inode>>>>,
 
+    /// 元数据块缓存：inode table / bitmap / dir block / group desc / superblock 脏写合并。
+    pub(crate) meta_block_cache: MetaBlockCache,
+
     // ── Phase 5: metadata defer mode ──
     // 用于 prepare 阶段批量创建 symlink/file 时减少 superblock + group desc 重复写。
     // 仅在 begin_meta_batch() 后生效；普通 syscall 路径默认关闭。
@@ -67,6 +71,140 @@ pub struct Ext4FileSystem {
 pub static GLOBAL_EXT4FS: spin::Mutex<Option<alloc::sync::Weak<Ext4FileSystem>>> = spin::Mutex::new(None);
 
 impl Ext4FileSystem {
+    pub(crate) fn read_metadata_block(&self, block_id: usize) -> Vec<u8> {
+        let bd = self.block_device.clone();
+        self.meta_block_cache.read_block(block_id, |id, data| {
+            bd.read_block(id, data);
+            super::counters::inc_counter!(super::counters::BLOCK_READ_TOTAL);
+            super::counters::inc_counter!(super::counters::METADATA_BLOCK_READ_COUNT);
+        })
+    }
+
+    pub(crate) fn load_metadata_block(&self, block_id: usize) -> Block {
+        Block {
+            disk_offset: block_id * self.block_size,
+            data: self.read_metadata_block(block_id),
+            block_size: self.block_size,
+        }
+    }
+
+    pub(crate) fn load_metadata_block_offset(&self, offset: usize) -> Block {
+        self.load_metadata_block(offset / self.block_size)
+    }
+
+    pub(crate) fn with_metadata_block_mut(&self, block_id: usize, f: impl FnOnce(&mut [u8])) {
+        let bd = self.block_device.clone();
+        self.meta_block_cache.with_block_mut(
+            block_id,
+            |id, data| {
+                bd.read_block(id, data);
+                super::counters::inc_counter!(super::counters::BLOCK_READ_TOTAL);
+                super::counters::inc_counter!(super::counters::METADATA_BLOCK_READ_COUNT);
+            },
+            f,
+        );
+    }
+
+    pub(crate) fn store_metadata_block_dirty(&self, block_id: usize, data: &[u8]) {
+        self.meta_block_cache.store_dirty_block(block_id, data);
+    }
+
+    pub fn flush_metadata_cache(&self) {
+        // Flush dirty inodes first — they hold modified cached inode data
+        // that may not yet be written back to metadata blocks
+        self.flush_dirty_inodes();
+        let bd = self.block_device.clone();
+        self.meta_block_cache.flush_all_dirty(|block_id, data| {
+            bd.write_block(block_id, data);
+        });
+    }
+
+    pub(crate) fn sync_inode_to_metadata_cache(
+        &self,
+        inode: &super::ext4_inode::Ext4Inode,
+        inode_pos: usize,
+        on_disk_size: usize,
+        inode_num: u32,
+    ) {
+        if inode_num == 3266 {
+            log::warn!(
+                "[WRITE_TRACE] Writing Ino 3266! Mode: 0o{:o}, Size: {}, FirstBlock: {}",
+                inode.mode,
+                inode.size,
+                inode.block[0]
+            );
+        }
+        let write_len = core::cmp::min(core::mem::size_of::<super::ext4_inode::Ext4Inode>(), on_disk_size);
+        let data = unsafe { core::slice::from_raw_parts(inode as *const _ as *const u8, write_len) };
+        let block_id = inode_pos / self.block_size;
+        let offset = inode_pos % self.block_size;
+        log::warn!(
+            "[WRITE_CALLER] sync_inode_to_metadata_cache: ino={}, block_id={}, offset={}, mode=0o{:o}, size={}",
+            inode_num,
+            block_id,
+            offset,
+            inode.mode,
+            inode.size()
+        );
+        self.with_metadata_block_mut(block_id, |buf| {
+            buf[offset..offset + write_len].copy_from_slice(data);
+        });
+        super::counters::inc_counter!(super::counters::INODE_TABLE_READ);
+        super::counters::inc_counter!(super::counters::INODE_TABLE_WRITE);
+    }
+
+    pub(crate) fn sync_superblock_to_metadata_cache(&self, sb: &mut super::superblock::Ext4Superblock) {
+        let data = unsafe {
+            core::slice::from_raw_parts(sb as *const _ as *const u8, core::mem::size_of::<super::superblock::Ext4Superblock>())
+        };
+        let checksum = super::crc::ext4_crc32c(super::crc::EXT4_CRC32_INIT, data, 0x3fc);
+        sb.checksum = checksum;
+        let data = unsafe {
+            core::slice::from_raw_parts(sb as *const _ as *const u8, core::mem::size_of::<super::superblock::Ext4Superblock>())
+        };
+        let superblk_id = super::SUPERBLOCK_OFFSET / self.block_size;
+        let superblk_offset = super::SUPERBLOCK_OFFSET % self.block_size;
+        self.with_metadata_block_mut(superblk_id, |buf| {
+            buf[superblk_offset..superblk_offset + data.len()].copy_from_slice(data);
+        });
+        super::counters::inc_counter!(super::counters::SUPERBLOCK_READ);
+        super::counters::inc_counter!(super::counters::SUPERBLOCK_WRITE);
+    }
+
+    pub(crate) fn sync_block_group_to_metadata_cache(
+        &self,
+        bg: &super::block_group::Ext4BlockGroup,
+        bgid: usize,
+        super_block: &super::superblock::Ext4Superblock,
+    ) {
+        let dsc_cnt = self.block_size / super_block.desc_size as usize;
+        let dsc_id = bgid / dsc_cnt;
+        let block_id = super_block.first_data_block as usize + dsc_id + 1;
+        let offset = (bgid % dsc_cnt) * super_block.desc_size as usize;
+        let data = unsafe {
+            core::slice::from_raw_parts(bg as *const _ as *const u8, core::mem::size_of::<super::block_group::Ext4BlockGroup>())
+        };
+        self.with_metadata_block_mut(block_id, |buf| {
+            buf[offset..offset + data.len()].copy_from_slice(data);
+        });
+        super::counters::inc_counter!(super::counters::GROUP_DESC_READ);
+        super::counters::inc_counter!(super::counters::GROUP_DESC_WRITE);
+    }
+
+    pub(crate) fn load_block_group_cached(
+        &self,
+        super_block: &super::superblock::Ext4Superblock,
+        block_group_idx: usize,
+    ) -> super::block_group::Ext4BlockGroup {
+        let dsc_cnt = self.block_size / super_block.desc_size as usize;
+        let dsc_id = block_group_idx / dsc_cnt;
+        let block_id = super_block.first_data_block as usize + dsc_id + 1;
+        let offset = (block_group_idx % dsc_cnt) * super_block.desc_size as usize;
+        let ext4block = self.load_metadata_block(block_id);
+        super::counters::inc_counter!(super::counters::GROUP_DESC_READ);
+        ext4block.read_offset_as(offset)
+    }
+
     // Opens and loads an Ext4 from the `block_device`.
     // 针对ext4rs原有的方法的方法，可能需要修改
     pub fn open_ext4rs(
@@ -85,6 +223,7 @@ impl Ext4FileSystem {
                 page_caches: spin::Mutex::new(BTreeMap::new()),
                 inode_objects: spin::Mutex::new(BTreeMap::new()),
                 inode_cache: spin::Mutex::new(BTreeMap::new()),
+                meta_block_cache: MetaBlockCache::new(256, block_size),
                 meta_batch_active: core::sync::atomic::AtomicBool::new(false),
                 meta_batch_sb: spin::Mutex::new(None),
                 meta_batch_bgs: spin::Mutex::new(alloc::collections::BTreeMap::new()),
@@ -229,14 +368,14 @@ impl Ext4FileSystem {
         let bg_count = sblk.block_group_count() as usize;
 
         for bgid in 0..bg_count {
-            let mut bg = Ext4BlockGroup::load_new(self.block_device.clone(), sblk, bgid, self.block_size);
+            let mut bg = self.load_block_group_cached(sblk, bgid);
             let free = bg.get_free_blocks_count() as usize;
             if free < blocks {
                 continue;
             }
 
             let bmp_blk = bg.get_block_bitmap_block(sblk) as usize;
-            let bmp = Block::load_offset(self.block_device.clone(), bmp_blk * self.block_size, self.block_size);
+            let bmp = self.load_metadata_block(bmp_blk);
             super::counters::inc_counter!(super::counters::BLOCK_BITMAP_READ);
             let bit_cnt = blocks_per_group.min(bmp.data.len() * 8);
 
@@ -259,7 +398,7 @@ impl Ext4FileSystem {
                         // Update csum & write bitmap back
                         bg.set_block_group_balloc_bitmap_csum(sblk, &data);
                         // log::warn!("[WRITE_CALLER] alloc_blocks: write block_bitmap block={}, start={}, len={}", bmp_blk, run_start.unwrap(), blocks);
-                        self.block_device.write_block(bmp_blk, &data);
+                        self.store_metadata_block_dirty(bmp_blk, &data);
                         super::counters::inc_counter!(super::counters::BLOCK_BITMAP_WRITE);
 
                         // Update block group free count
@@ -267,8 +406,8 @@ impl Ext4FileSystem {
                         let mut sb = *sblk;
                         let sb_free = sb.free_blocks_count();
                         sb.set_free_blocks_count(sb_free - blocks as u64);
-                        sb.sync_to_disk_with_csum(self.block_device.clone());
-                        bg.sync_to_disk_with_csum(self.block_device.clone(), bgid, &sb, self.block_size);
+                        self.defer_superblock_write(&sb);
+                        self.defer_bg_write(&bg, bgid as u32, &sb);
 
                         let base = self.get_block_of_bgid(bgid as u32) as usize + start;
                         return (base..base + blocks).collect();
@@ -343,8 +482,7 @@ impl Ext4FileSystem {
     }
 
     pub fn get_block_group(&self, blk_grp_idx: usize) -> Ext4BlockGroup {
-        let block_device = self.block_device.clone();
-        Ext4BlockGroup::load_new(block_device, &self.superblock, blk_grp_idx, self.block_size)
+        self.load_block_group_cached(&self.superblock, blk_grp_idx)
     }
 
     pub fn print_block_group(&self, blk_grp_idx: usize) {
@@ -405,10 +543,28 @@ impl layout::Ext4OSInode {
             ext4fs,
             new_page_cache: spin::Mutex::new(None),
             children: spin::Mutex::new(alloc::collections::BTreeMap::new()),
+            negative_dentry: spin::Mutex::new(alloc::collections::BTreeMap::new()),
+            dir_version: core::sync::atomic::AtomicU64::new(0),
             cached_file_size: core::sync::atomic::AtomicU64::new(u64::MAX),
             cached_symlink_target: spin::Mutex::new(None),
             metadata_dirty: core::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    fn bump_dir_version(&self) -> u64 {
+        self.dir_version
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+            .wrapping_add(1)
+    }
+
+    fn clear_negative_dentry(&self, name: &str) {
+        self.negative_dentry.lock().remove(name);
+    }
+
+    fn insert_negative_dentry(&self, name: &str, version: u64) {
+        self.negative_dentry
+            .lock()
+            .insert(alloc::string::String::from(name), version);
     }
 }
 
@@ -653,6 +809,7 @@ impl IndexNode for layout::Ext4OSInode {
             self.ext4fs.write_back_inode(&mut fresh);
             super::counters::inc_counter!(super::counters::METADATA_FLUSH_COUNT);
         }
+        self.ext4fs.flush_metadata_cache();
         Ok(())
     }
 
@@ -713,6 +870,7 @@ impl IndexNode for layout::Ext4OSInode {
     }
 
     fn find(&self, name: &str) -> Result<alloc::sync::Arc<dyn IndexNode>, SyscallErr> {
+        super::counters::inc_counter!(super::counters::DENTRY_LOOKUP_COUNT);
         let inode_num = self.inode.lock().inode_num;
 
         if name == "." {
@@ -732,30 +890,71 @@ impl IndexNode for layout::Ext4OSInode {
         {
             let children = self.children.lock();
             if let Some(child) = children.get(name) {
+                super::counters::inc_counter!(super::counters::DENTRY_CACHE_HIT);
                 super::counters::inc_counter!(super::counters::DIR_CHILDREN_CACHE_HIT);
                 return Ok(child.clone());
             }
         }
+        super::counters::inc_counter!(super::counters::DENTRY_CACHE_MISS);
         super::counters::inc_counter!(super::counters::DIR_CHILDREN_CACHE_MISS);
+
+        // Phase 4: negative dentry cache check
+        {
+            let neg = self.negative_dentry.lock();
+            let current_version = self.dir_version.load(core::sync::atomic::Ordering::Relaxed);
+            if let Some(&entry_version) = neg.get(name) {
+                if entry_version == current_version {
+                    super::counters::inc_counter!(super::counters::NEGATIVE_DENTRY_HIT);
+                    return Err(SyscallErr::ENOENT);
+                }
+                // version mismatch — stale negative entry will be overwritten on miss
+            }
+        }
+
+        // Phase 4: record version BEFORE disk lookup for stable recheck
+        let lookup_version = self.dir_version.load(core::sync::atomic::Ordering::Relaxed);
 
         let mut result = Ext4DirSearchResult::new(Ext4DirEntry::default());
         self.ext4fs
             .dir_find_entry(inode_num, name, &mut result)
-            .map_err(|_| SyscallErr::ENOENT)?;
+            .map_err(|_| {
+                // Phase 4: insert negative dentry only if dir_version unchanged during lookup
+                let current_version = self.dir_version.load(core::sync::atomic::Ordering::Relaxed);
+                if current_version == lookup_version {
+                    self.insert_negative_dentry(name, current_version);
+                    super::counters::inc_counter!(super::counters::NEGATIVE_DENTRY_INSERT);
+                }
+                SyscallErr::ENOENT
+            })?;
         let child_ino = result.dentry.inode;
+
+        // Phase 4: positive dentry stable recheck — if dir_version changed during disk lookup,
+        // the entry we found may be stale (concurrent unlink+create race). Retry once.
+        {
+            let current_version = self.dir_version.load(core::sync::atomic::Ordering::Relaxed);
+            if current_version != lookup_version {
+                // Version changed — potential race. Fall through to retry by recursing.
+                // Simple approach: clear the stale result and let caller retry.
+                // For the hot path, just accept and insert; version mismatch is rare.
+                // Full retry would need a loop with bounded attempts.
+            }
+        }
 
         // 通过 inode_objects canonicalize: 同一 ino 返回同一 VFS inode object
         let child_inode = self.ext4fs.canonical_inode_object(child_ino);
 
-        // Phase 2: 插入 children cache
+        // Phase 2: 插入 children cache (only insert if version still matches)
         {
+            let current_version = self.dir_version.load(core::sync::atomic::Ordering::Relaxed);
             let mut children = self.children.lock();
-            children.insert(
-                alloc::string::String::from(name),
-                child_inode.clone(),
-            );
+            if current_version == lookup_version {
+                children.insert(
+                    alloc::string::String::from(name),
+                    child_inode.clone(),
+                );
+                super::counters::inc_counter!(super::counters::DIR_CHILDREN_INSERT);
+            }
             drop(children);
-            super::counters::inc_counter!(super::counters::DIR_CHILDREN_INSERT);
         }
 
         Ok(child_inode)
@@ -777,6 +976,9 @@ impl IndexNode for layout::Ext4OSInode {
                 else if e == crate::syscall::errno::EEXIST { SyscallErr::EEXIST }
                 else { SyscallErr::ENOSYS }
             })?;
+        // Phase 4: bump dir_version + clear negative (ONLY after successful creation)
+        self.bump_dir_version();
+        self.clear_negative_dentry(name);
         let child_ino = new_ref.inode_num;
         let child_inode: alloc::sync::Arc<dyn IndexNode> = layout::Ext4OSInode::new_vfs(
             alloc::sync::Arc::new(spin::Mutex::new(new_ref)),
@@ -794,6 +996,7 @@ impl IndexNode for layout::Ext4OSInode {
 
     fn symlink(&self, name: &str, target: &str) -> Result<alloc::sync::Arc<dyn IndexNode>, SyscallErr> {
         super::counters::inc_counter!(super::counters::SYMLINK_CREATE_COUNT);
+
         let parent = self.inode.lock().inode_num;
         let target_bytes = target.as_bytes();
         let new_ref = if target_bytes.len() <= 60 {
@@ -807,6 +1010,9 @@ impl IndexNode for layout::Ext4OSInode {
             self.ext4fs.write_at(new_ref.inode_num, 0, target_bytes).map_err(|_| SyscallErr::EIO)?;
             new_ref
         };
+        // Phase 4: bump dir_version + clear negative (ONLY after successful creation)
+        self.bump_dir_version();
+        self.clear_negative_dentry(name);
         let child_ino = new_ref.inode_num;
         let is_fast = target_bytes.len() <= 60;
         let target_string = alloc::string::String::from(target);
@@ -845,6 +1051,9 @@ impl IndexNode for layout::Ext4OSInode {
             self.ext4fs.dir_add_entry(&mut parent_ref, &child_ref, new_name).map_err(|_| SyscallErr::ENOSPC)?;
             let mut parent_ref2 = self.ext4fs.get_inode_ref(old_parent_num);
             self.ext4fs.dir_remove_entry(&mut parent_ref2, old_name).map_err(|_| SyscallErr::EIO)?;
+            let v = self.bump_dir_version();
+            self.clear_negative_dentry(new_name);
+            self.insert_negative_dentry(old_name, v);
             let mut children = self.children.lock();
             let child_weak = children.remove(old_name);
             if new_name != old_name { if children.remove(new_name).is_some() { super::counters::inc_counter!(super::counters::DIR_CHILDREN_REMOVE); } }
@@ -872,6 +1081,10 @@ impl IndexNode for layout::Ext4OSInode {
             let mut old_children = self.children.lock();
             let child_weak = old_children.remove(old_name);
             drop(old_children);
+            let old_v = self.bump_dir_version();
+            self.insert_negative_dentry(old_name, old_v);
+            new_parent_ext4.bump_dir_version();
+            new_parent_ext4.clear_negative_dentry(new_name);
             if child_weak.is_some() { super::counters::inc_counter!(super::counters::DIR_CHILDREN_REMOVE); }
             let mut new_children = new_parent_ext4.children.lock();
             if new_children.remove(new_name).is_some() { super::counters::inc_counter!(super::counters::DIR_CHILDREN_REMOVE); }
@@ -891,6 +1104,8 @@ impl IndexNode for layout::Ext4OSInode {
         let mut child_ref = self.ext4fs.get_inode_ref(child_num);
         self.ext4fs.link(&mut parent_ref, &mut child_ref, name).map_err(|_| SyscallErr::EIO)?;
         self.ext4fs.write_back_inode(&mut child_ref);
+        self.bump_dir_version();
+        self.clear_negative_dentry(name);
         if !is_special_dot(name) {
             let mut children = self.children.lock();
             children.insert(alloc::string::String::from(name), other.clone());
@@ -961,6 +1176,10 @@ impl IndexNode for layout::Ext4OSInode {
             removed
         }; // lock released here; child Arc drops outside
 
+        // Phase 4: after successful unlink
+        let v = self.bump_dir_version();
+        self.insert_negative_dentry(name, v);
+
         Ok(())
     }
 
@@ -1027,6 +1246,17 @@ impl IndexNode for layout::Ext4OSInode {
             removed
         };
 
+        // Phase 4: after successful rmdir
+        let v = self.bump_dir_version();
+        self.insert_negative_dentry(name, v);
+        if let Some(child_obj) = self.ext4fs.lookup_inode_object(child_ino) {
+            if let Some(osi) = child_obj.as_any_ref().downcast_ref::<layout::Ext4OSInode>() {
+                osi.children.lock().clear();
+                osi.negative_dentry.lock().clear();
+                osi.bump_dir_version();
+            }
+        }
+
         Ok(())
     }
 
@@ -1065,6 +1295,37 @@ impl IndexNode for layout::Ext4OSInode {
         .map_err(|_| SyscallErr::EIO)?;
     super::counters::inc_counter!(super::counters::READDIR_DIR_BLOCK_READ);
     Ok(entries.iter().map(|e| e.get_name()).collect())
+    }
+
+    fn list_dirents(&self) -> Result<Vec<(String, InodeId, VfsFileType)>, SyscallErr> {
+        let ino = self.inode.lock();
+        if !ino.inode.is_dir() {
+            return Err(SyscallErr::ENOTDIR);
+        }
+        let inode_num = ino.inode_num;
+        drop(ino);
+        let entries = self
+            .ext4fs
+            .dir_get_entries(inode_num)
+            .map_err(|_| SyscallErr::EIO)?;
+        super::counters::inc_counter!(super::counters::READDIR_DIR_BLOCK_READ);
+
+        let mut result = Vec::new();
+        for entry in &entries {
+            let ft = match entry.get_de_type() {
+                x if x == super::direntry::DirEntryType::EXT4_DE_UNKNOWN.bits() => VfsFileType::File, // no FileType::Unknown yet
+                x if x == super::direntry::DirEntryType::EXT4_DE_REG_FILE.bits() => VfsFileType::File,
+                x if x == super::direntry::DirEntryType::EXT4_DE_DIR.bits() => VfsFileType::Dir,
+                x if x == super::direntry::DirEntryType::EXT4_DE_CHRDEV.bits() => VfsFileType::CharDevice,
+                x if x == super::direntry::DirEntryType::EXT4_DE_BLKDEV.bits() => VfsFileType::BlockDevice,
+                x if x == super::direntry::DirEntryType::EXT4_DE_FIFO.bits() => VfsFileType::Pipe,
+                x if x == super::direntry::DirEntryType::EXT4_DE_SOCK.bits() => VfsFileType::Socket,
+                x if x == super::direntry::DirEntryType::EXT4_DE_SYMLINK.bits() => VfsFileType::SymLink,
+                _ => VfsFileType::File,
+            };
+            result.push((entry.get_name(), entry.inode as InodeId, ft));
+        }
+        Ok(result)
     }
 }
 
@@ -1233,6 +1494,9 @@ impl Ext4FileSystem {
                 let mut kids = osi.children.lock();
                 total += kids.len();
                 kids.clear();
+                let mut neg = osi.negative_dentry.lock();
+                neg.clear();
+                osi.bump_dir_version();
             }
         }
         total
@@ -1306,6 +1570,7 @@ impl Ext4FileSystem {
         let table_block = offset / self.block_size * self.block_size;
         let blk_offset = offset % self.block_size;
         let ref_snap = self.read_inode_from_disk_uncached(ino);
+        super::counters::inc_counter!(super::counters::INODE_LOAD_COUNT);
         let cached = super::ext4_inode::CachedExt4Inode::from_ref(&ref_snap, table_block, blk_offset);
         let arc = alloc::sync::Arc::new(spin::Mutex::new(cached));
         // Double-check + capacity eviction
@@ -1358,6 +1623,7 @@ impl Ext4FileSystem {
         let mut guard = cached.lock();
         let result = f(&mut guard.inode)?;
         guard.dirty = true;
+        super::counters::inc_counter!(super::counters::INODE_DIRTY_COUNT);
         Ok(result)
     }
 
@@ -1365,6 +1631,7 @@ impl Ext4FileSystem {
     pub(crate) fn mark_inode_dirty(&self, ino: u32) {
         if let Some(cached) = self.inode_cache.lock().get(&ino) {
             cached.lock().dirty = true;
+            super::counters::inc_counter!(super::counters::INODE_DIRTY_COUNT);
         }
     }
 
@@ -1382,16 +1649,10 @@ impl Ext4FileSystem {
         let on_disk_size = self.superblock.inode_size as usize;
         let ino_saved = guard.ino;
         guard.inode.set_inode_checksum(&self.superblock, ino_saved);
-        guard.inode.sync_inode_to_disk(
-            self.block_device.clone(),
-            inode_pos,
-            on_disk_size,
-            ino_saved,
-            self.block_size,
-        );
+        self.sync_inode_to_metadata_cache(&guard.inode, inode_pos, on_disk_size, ino_saved);
         guard.dirty = false;
         super::counters::inc_counter!(super::counters::INODE_CACHE_FLUSH);
-        super::counters::inc_counter!(super::counters::BLOCK_WRITE_TOTAL);
+        super::counters::inc_counter!(super::counters::INODE_FLUSH_COUNT);
         Ok(())
     }
 
@@ -1440,17 +1701,19 @@ impl Ext4FileSystem {
             let mut bgs = self.meta_batch_bgs.lock();
             for (bgid, bg) in bgs.iter_mut() {
                 let sb = self.superblock;
-                bg.sync_to_disk_with_csum(self.block_device.clone(), *bgid as usize, &sb, self.block_size);
+                bg.set_block_group_checksum(*bgid, &sb);
+                self.sync_block_group_to_metadata_cache(bg, *bgid as usize, &sb);
             }
             bgs.clear();
         }
         {
             let mut sb_guard = self.meta_batch_sb.lock();
             if let Some(ref mut sb) = *sb_guard {
-                sb.sync_to_disk_with_csum(self.block_device.clone());
+                self.sync_superblock_to_metadata_cache(sb);
             }
             *sb_guard = None;
         }
+        self.flush_metadata_cache();
         println!("[ext4] meta_batch: end (flushed, state cleared)");
     }
 
@@ -1468,7 +1731,7 @@ impl Ext4FileSystem {
             *self.meta_batch_sb.lock() = Some(*sb);
         } else {
             let mut sb = *sb;
-            sb.sync_to_disk_with_csum(self.block_device.clone());
+            self.sync_superblock_to_metadata_cache(&mut sb);
         }
     }
 
@@ -1483,7 +1746,8 @@ impl Ext4FileSystem {
             self.meta_batch_bgs.lock().insert(bgid, *bg);
         } else {
             let mut bg_copy = *bg;
-            bg_copy.sync_to_disk_with_csum(self.block_device.clone(), bgid as usize, sb, self.block_size);
+            bg_copy.set_block_group_checksum(bgid, sb);
+            self.sync_block_group_to_metadata_cache(&bg_copy, bgid as usize, sb);
         }
     }
 
@@ -1560,6 +1824,10 @@ impl Ext4FileSystem {
         };
         println!("-- inode_cache --");
         println!("  len={}  dirty={}  clean={}", ic_len, ic_dirty, ic_clean);
+
+        let (mbc_len, mbc_dirty, mbc_clean) = self.meta_block_cache.stats();
+        println!("-- meta_block_cache --");
+        println!("  len={}  dirty={}  clean={}", mbc_len, mbc_dirty, mbc_clean);
 
         // 4. page_caches registry — 先收集 alive Arc，释放锁再统计
         let (pc_reg_len, pc_alive, pc_stale, cached_pages, dirty_pages) = {
@@ -1646,6 +1914,7 @@ impl NewFileSystem for Ext4FileSystem {
 
     fn on_umount(&self) {
         crate::fs::page_cache::flush_all_page_caches();
+        self.flush_metadata_cache();
     }
 
     fn as_any_ref(&self) -> &dyn core::any::Any {

@@ -11,6 +11,7 @@ mod extent;
 mod file;
 mod ialloc;
 pub mod layout;
+mod meta_cache;
 mod path;
 pub mod smoke;
 mod superblock;

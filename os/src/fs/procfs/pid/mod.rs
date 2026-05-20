@@ -1,6 +1,7 @@
 //! /proc/<pid>/ 目录 — 进程信息目录
 
 pub mod cmdline;
+pub mod stat;
 pub mod status;
 
 use alloc::{
@@ -50,6 +51,13 @@ fn create_pid_dir(parent: &LockedProcInode, pid: usize) -> Result<Arc<dyn IndexN
         "status",
         InodeMode::from_bits_truncate(0o444),
         status::pid_status_content,
+        pid,
+    )?;
+
+    dir.add_file(
+        "stat",
+        InodeMode::from_bits_truncate(0o444),
+        stat::pid_stat_content,
         pid,
     )?;
 

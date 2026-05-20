@@ -882,22 +882,27 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> isize {
             }
         }
     };
-    // 获取目录项向量 — count 是字节数，需要转换为最大条目数
-    let max_entries = count / size_of::<Dirent>();
-    let dirent_vec = match file.get_dirent(max_entries) {
-        Ok(vec) => vec,
+
+    let mut kernel_buf = alloc::vec![0u8; count];
+    let written = match file.get_dirent64(&mut kernel_buf) {
+        Ok(n) => n,
         Err(errno) => return errno,
     };
-    // 将结果复制到用户态的数组中
-    if UserSlice::new(dirp as *const Dirent, dirent_vec.len())
-        .write_array_from(token, &dirent_vec)
-        .is_err()
-    {
+
+    if written == 0 {
+        return 0;
+    }
+
+    let mut writer = match UserBufferWriter::new(token, dirp, written) {
+        Ok(w) => w,
+        Err(_) => return EFAULT,
+    };
+    if writer.write_from(&kernel_buf[..written]).is_err() {
         log::error!("[sys_getdents64] Failed to copy to {:?}", dirp);
         return EFAULT;
-    };
+    }
     info!("[sys_getdents64] fd: {}, count: {}", fd, count);
-    dirent_vec.len() as isize * size_of::<Dirent>() as isize
+    written as isize
 }
 
 pub fn sys_dup(oldfd: usize) -> isize {
@@ -1097,20 +1102,19 @@ pub fn sys_fstatat(dirfd: usize, path: *const u8, buf: *mut u8, flags: u32) -> i
         }
         SUCCESS
     } else {
-        match open_file_at(dirfd, &path, OpenFlags::O_RDONLY) {
-            Ok(file) => {
-                let stat = match file.metadata() {
-                    Ok(meta) => metadata_to_stat(&meta),
-                    Err(e) => return -(e as isize),
-                };
-                if UserPtrMut::new(buf as *mut Stat).write(token, &stat).is_err() {
-                    log::error!("[sys_fstatat] Failed to copy to {:?}", buf);
-                    return EFAULT;
-                };
-                SUCCESS
-            }
-            Err(errno) => errno,
-        }
+        let inode = match vfs_lookup(&start, &path, true) {
+            Ok(inode) => inode,
+            Err(errno) => return errno,
+        };
+        let stat = match inode.metadata() {
+            Ok(meta) => metadata_to_stat(&meta),
+            Err(e) => return -(e as isize),
+        };
+        if UserPtrMut::new(buf as *mut Stat).write(token, &stat).is_err() {
+            log::error!("[sys_fstatat] Failed to copy to {:?}", buf);
+            return EFAULT;
+        };
+        SUCCESS
     }
 }
 
@@ -1155,21 +1159,20 @@ pub fn sys_statx(dirfd: usize, path: *const u8, flags: u32, mask: u32, buf: *mut
         }
         SUCCESS
     } else {
-        match open_file_at(dirfd, &path, OpenFlags::O_RDONLY) {
-            Ok(file) => {
-                let statx = match file.metadata() {
-                    Ok(meta) => metadata_to_statx(&meta, mask),
-                    Err(e) => return -(e as isize),
-                };
-                if UserPtrMut::new(buf as *mut Statx).write(token, &statx).is_err() {
-                    log::error!("[sys_statx] Failed to copy to {:?}", buf);
-                    return EFAULT;
-                };
-                log::debug!("[sys_statx] statx:\n{:?}", statx);
-                SUCCESS
-            }
-            Err(errno) => errno,
-        }
+        let inode = match vfs_lookup(&start, &path, true) {
+            Ok(inode) => inode,
+            Err(errno) => return errno,
+        };
+        let statx = match inode.metadata() {
+            Ok(meta) => metadata_to_statx(&meta, mask),
+            Err(e) => return -(e as isize),
+        };
+        if UserPtrMut::new(buf as *mut Statx).write(token, &statx).is_err() {
+            log::error!("[sys_statx] Failed to copy to {:?}", buf);
+            return EFAULT;
+        };
+        log::debug!("[sys_statx] statx:\n{:?}", statx);
+        SUCCESS
     }
 }
 
@@ -1270,6 +1273,11 @@ pub fn sys_fsync(fd: usize) -> isize {
 
 pub fn sys_sync() -> isize {
     crate::fs::flush_all_page_caches();
+    // Also flush ext4 metadata cache and dirty inodes
+    let guard = crate::fs::ext4::ext4fs::GLOBAL_EXT4FS.lock();
+    if let Some(fs) = guard.as_ref().and_then(|w| w.upgrade()) {
+        fs.flush_metadata_cache();
+    }
     SUCCESS
 }
 
@@ -1432,13 +1440,31 @@ pub fn sys_renameat2(
     }
 }
 
+const FIONREAD: u32 = 0x541B;
+
 pub fn sys_ioctl(fd: usize, cmd: u32, arg: usize) -> isize {
     let task = current_task().unwrap();
+    let token = task.get_user_token();
     let fd_table = task.files.lock();
     let file = match fd_table.get_file(fd) {
         Ok(file) => file,
         Err(e) => return -(e as isize),
     };
+
+    if cmd == FIONREAD {
+        let md = match file.metadata() {
+            Ok(m) => m,
+            Err(e) => return -(e as isize),
+        };
+        let remaining = (md.size as usize).saturating_sub(file.offset());
+        let val = remaining.min(i32::MAX as usize) as i32;
+        match crate::mm::translated_refmut(token, arg as *mut i32) {
+            Ok(r) => *r = val,
+            Err(_) => return EFAULT,
+        }
+        return 0;
+    }
+
     match file.inode.ioctl(cmd, arg, file.private_data()) {
         Ok(n) => n as isize,
         Err(e) => -(e as isize),
@@ -2044,8 +2070,14 @@ pub fn sys_faccessat2(dirfd: usize, pathname: *const u8, mode: u32, flags: u32) 
 
     // Do not check user's authority, because user group is not implemented yet.
     // All existing files can be accessed.
-    match __openat(dirfd, pathname.as_str()) {
-        Ok(_) => SUCCESS,
+    let nofollow = flags.contains(FaccessatFlags::AT_SYMLINK_NOFOLLOW);
+    match resolve_start_inode(dirfd) {
+        Ok(start_inode) => {
+            match vfs_lookup(&start_inode, &pathname, !nofollow) {
+                Ok(_) => SUCCESS,
+                Err(errno) => errno,
+            }
+        }
         Err(errno) => errno,
     }
 }
