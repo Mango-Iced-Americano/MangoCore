@@ -76,11 +76,12 @@ def run_qemu_instance(cmd, output_path, timeout, result_key):
     启动一个 QEMU 进程，实时捕获 stdout+stderr 写入 output_path。
     超时则 kill。结果存入 qemu_results[result_key]。
 
-    模式完全参照 judge/run_qemu.py 的 run_qemu_loong()：
-      - Popen 管道捕获输出
-      - 逐行写入文件
-      - p.wait(timeout=timeout) + p.kill()
+    用 block 读取 + wall-clock 计时实现超时：启动时记录时间，
+    read 每次超时检查是否超过 timeout，超时则强杀进程。
+    与 auto_include_ltp.py 的 run_qemu_round 模式一致。
     """
+    import select as _select
+
     log(f"QEMU [{result_key}] 启动，输出 → {output_path}")
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -92,7 +93,6 @@ def run_qemu_instance(cmd, output_path, timeout, result_key):
         shell=True,
     )
 
-    # 发送回车让 QEMU 开始运行
     try:
         p.stdin.write(b"\n")
         p.stdin.flush()
@@ -100,46 +100,77 @@ def run_qemu_instance(cmd, output_path, timeout, result_key):
     except Exception:
         pass
 
+    fd = p.stdout.fileno()
+    os.set_blocking(fd, False)
+
+    started = time.time()
     timed_out = False
-    killed = False
 
-    with open(output_path, "wb", buffering=1) as f:
-        f.write(f"# QEMU CMD: {cmd}\n".encode("utf-8", errors="replace"))
-        f.write(f"# Started: {datetime.now().isoformat()}\n".encode("utf-8", errors="replace"))
-        f.write(b"#" * 60 + b"\n")
-        f.flush()
+    try:
+        with open(output_path, "wb", buffering=1) as f:
+            f.write(f"# QEMU CMD: {cmd}\n".encode("utf-8", errors="replace"))
+            f.write(f"# Started: {datetime.now().isoformat()}\n".encode("utf-8", errors="replace"))
+            f.write(b"#" * 60 + b"\n")
+            f.flush()
 
-        try:
-            # 逐行读取二进制输出，解码失败时替换非法字节
-            for raw_line in p.stdout:
-                line = raw_line.decode("utf-8", errors="replace")
-                f.write(line.encode("utf-8"))
-                f.flush()
-            p.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            log(f"QEMU [{result_key}] 超时 ({timeout}s)，正在 kill...", YELLOW)
-            p.kill()
-            killed = True
-            try:
-                for raw_line in p.stdout:
-                    line = raw_line.decode("utf-8", errors="replace")
+            buf = b""
+            while True:
+                remaining = timeout - (time.time() - started)
+                if remaining <= 0:
+                    timed_out = True
+                    break
+
+                ready, _, _ = _select.select([fd], [], [], min(remaining, 5.0))
+                if not ready:
+                    continue
+
+                try:
+                    chunk = os.read(fd, 65536)
+                except BlockingIOError:
+                    continue
+
+                if not chunk:
+                    break
+
+                buf += chunk
+                while b"\n" in buf:
+                    raw_line, buf = buf.split(b"\n", 1)
+                    try:
+                        line = raw_line.decode("utf-8", errors="replace") + "\n"
+                    except Exception:
+                        line = raw_line.decode("latin-1", errors="replace") + "\n"
                     f.write(line.encode("utf-8"))
                     f.flush()
+
+                if buf:
+                    try:
+                        line = buf.decode("utf-8", errors="replace")
+                    except Exception:
+                        line = buf.decode("latin-1", errors="replace")
+                    f.write(line.encode("utf-8"))
+                    f.flush()
+                    buf = b""
+    finally:
+        if timed_out:
+            log(f"QEMU [{result_key}] 超时 ({timeout}s)，正在 kill...", YELLOW)
+            p.kill()
+            try:
+                for raw_line in p.stdout:
+                    pass
             except Exception:
                 pass
-            p.wait()
+        p.wait()
 
     rc = p.returncode
     qemu_results[result_key] = {
         "rc": rc,
         "timed_out": timed_out,
-        "killed": killed,
+        "killed": timed_out,
         "output": output_path,
     }
 
     fname = os.path.basename(output_path)
-    if killed:
+    if timed_out:
         log(f"{fname}: 被终止（超时 {timeout}s）", YELLOW)
     elif rc != 0:
         log(f"{fname}: QEMU 异常退出 (rc={rc})", RED)
@@ -326,9 +357,9 @@ def main():
 
     log("✅ 镜像就绪", GREEN)
 
-    # ========== Phase 3: 串行 QEMU ==========
+    # ========== Phase 3: 并行 QEMU ==========
     log("\n" + "=" * 50, BOLD)
-    log(f"Phase 3/6: 串行 QEMU 运行（每架构超时 {QEMU_TIMEOUT}s）", BOLD)
+    log(f"Phase 3/6: 并行 QEMU 运行（每架构超时 {QEMU_TIMEOUT}s）", BOLD)
     log("=" * 50, BOLD)
 
     rv64_cmd = build_rv64_cmd()
@@ -336,10 +367,21 @@ def main():
     rv64_output = os.path.join(TESTRESULT_DIR, "output-rv.txt")
     la64_output = os.path.join(TESTRESULT_DIR, "output-la.txt")
 
-    # 先 rv64，再 la64（串行避免并行竞态）
-    run_qemu_instance(rv64_cmd, rv64_output, QEMU_TIMEOUT, "rv64")
-    log("rv64 运行完毕，开始 la64...")
-    run_qemu_instance(la64_cmd, la64_output, QEMU_TIMEOUT, "la64")
+    # 并行启动 rv64 和 la64 QEMU（两个独立 QEMU 进程，互不依赖）
+    rv_thread = threading.Thread(
+        target=run_qemu_instance,
+        args=(rv64_cmd, rv64_output, QEMU_TIMEOUT, "rv64"),
+        name="qemu-rv64",
+    )
+    la_thread = threading.Thread(
+        target=run_qemu_instance,
+        args=(la64_cmd, la64_output, QEMU_TIMEOUT, "la64"),
+        name="qemu-la64",
+    )
+    rv_thread.start()
+    la_thread.start()
+    rv_thread.join()
+    la_thread.join()
 
     log("✅ QEMU 运行完毕", GREEN)
 

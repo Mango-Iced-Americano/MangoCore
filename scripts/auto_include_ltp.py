@@ -24,6 +24,7 @@ import sys
 import time
 import signal
 import select
+import threading
 import subprocess
 from pathlib import Path
 
@@ -99,6 +100,7 @@ def resolve_image_paths(arch: str):
 
 
 def restore_image(img_file: Path, img_backup: Path) -> bool:
+    """同步解压镜像（仅在初始化时使用）。"""
     if not img_backup.exists():
         log(f"ERROR: backup image not found: {img_backup}, cannot restore")
         return False
@@ -107,6 +109,19 @@ def restore_image(img_file: Path, img_backup: Path) -> bool:
         subprocess.run(["xz", "-dkc", str(img_backup)], stdout=out, check=True)
     log("restore done")
     return True
+
+
+def bkg_decompress(img_backup: Path, output_path: Path):
+    """后台解压镜像到临时文件。失败时删除不完整文件。"""
+    try:
+        with open(output_path, "wb") as f:
+            subprocess.run(
+                ["xz", "-dkc", str(img_backup)],
+                stdout=f, check=True,
+            )
+    except Exception as e:
+        log(f"background decompress failed: {e}")
+        output_path.unlink(missing_ok=True)
 
 
 # ============================================================
@@ -194,9 +209,9 @@ def write_temp_conf(
 # conf-inject（带重试）
 # ============================================================
 def conf_inject(
-    conf_path: Path, img_file: Path, img_backup: Path,
-    arch: str, blk_mode: str, max_retries: int = 3,
+    conf_path: Path, arch: str, blk_mode: str, max_retries: int = 2,
 ) -> bool:
+    """将配置文件注入镜像。每轮镜像都是新鲜的，只需简单重试。"""
     for attempt in range(1, max_retries + 1):
         result = subprocess.run(
             [
@@ -211,10 +226,6 @@ def conf_inject(
         if result.returncode == 0:
             return True
         log(f"conf-inject failed (attempt {attempt}/{max_retries}): {result.stderr.strip()}")
-        if attempt < max_retries:
-            log("restoring image before retry...")
-            if not restore_image(img_file, img_backup):
-                return False
     log(f"conf-inject failed after {max_retries} attempts, giving up")
     return False
 
@@ -478,7 +489,7 @@ def main():
     if ltp_from:
         log(f"ltp_from={ltp_from} (will skip passed cases)")
 
-    # 恢复原始镜像
+    # 恢复原始镜像作为起点（同步解压）
     if not restore_image(img_file, img_backup):
         die("initial image restore failed")
 
@@ -498,9 +509,24 @@ def main():
                 log(f"rescued {added} cases from existing {round_file.name}")
 
     # ============ 主循环 ============
+    bg_decompress_thread: threading.Thread | None = None
+    next_img_path = Path(str(img_file) + ".next")
+
     for round_num in range(1, MAX_ROUNDS + 1):
         if _should_stop:
             break
+
+        # 等上一轮后台解压完成 → 原子替换镜像（首轮跳过）
+        if bg_decompress_thread is not None:
+            bg_decompress_thread.join()
+            if next_img_path.exists():
+                os.replace(next_img_path, img_file)
+                log(f"swapped fresh image for round {round_num}")
+            else:
+                log(f"WARNING: background decompress did not produce {next_img_path}, re-decompressing")
+                if not restore_image(img_file, img_backup):
+                    die("re-decompress failed")
+            bg_decompress_thread = None
 
         write_temp_conf(exclude_accum, exclude_musl_accum, exclude_glibc_accum, ltp_from)
 
@@ -509,8 +535,15 @@ def main():
         else:
             log(f"round={round_num} include={len(include_accum)} exclude={len(exclude_accum)}")
 
-        if not conf_inject(TEMP_CONF, img_file, img_backup, arch, blk_mode):
+        if not conf_inject(TEMP_CONF, arch, blk_mode):
             die("conf-inject failed repeatedly, aborting")
+
+        # 启动后台解压，为下一轮准备镜像（QEMU 运行时并行解压）
+        bg_decompress_thread = threading.Thread(
+            target=bkg_decompress, args=(img_backup, next_img_path),
+            daemon=True,
+        )
+        bg_decompress_thread.start()
 
         log_file = LOG_DIR / f"include_round_{round_num}.log"
 
@@ -551,15 +584,9 @@ def main():
                 write_conf("ltp_exclude_musl", list_to_conf(exclude_musl_accum))
                 write_conf("ltp_from", ltp_from)
                 log(f"excluded (musl): {current_case}")
-
-                if not conf_inject(CONF_FILE, img_file, img_backup, arch, blk_mode):
-                    log("conf-inject for exclusion failed, restoring image")
-                    restore_image(img_file, img_backup)
                 continue
             else:
                 log("no RUN LTP CASE line found in log, cannot determine current case")
-                log("restoring image and retrying")
-                restore_image(img_file, img_backup)
                 continue
 
         # ---- 整轮跑完 ----
@@ -571,7 +598,8 @@ def main():
     write_conf("ltp_include", list_to_conf(include_accum))
     write_conf("ltp_from", "")
 
-    conf_inject(CONF_FILE, img_file, img_backup, arch, blk_mode)
+    # 清理临时文件
+    next_img_path.unlink(missing_ok=True)
 
     log("===== Final Results =====")
     log(f"ltp_include ({len(include_accum)} items) = {list_to_conf(include_accum)}")

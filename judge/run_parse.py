@@ -30,7 +30,9 @@ def _get_exec(x: str):
 def parse_serial_out_new(config, filename):
     """复制自 kernel/run.py 第 221 行，一字未改。"""
     ans = {}
-    file = open(filename, "r", encoding='utf-8', errors='ignore')
+    file = open(filename, "r", encoding='utf-8', errors='ignore', newline='')
+    # NOTE: newline='' 保留原始换行符，避免 Python universal newline 把
+    # la64 串口的 \n\r 转换为 \n\n（导致 judge_ltp 在 Summary 后遇空行退出解析）
     judge_path = config["testcase_dir"]
     judge = None
     group = None

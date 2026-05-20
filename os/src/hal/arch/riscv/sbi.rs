@@ -1,6 +1,7 @@
 #![allow(unused)]
 
 use core::arch::asm;
+use riscv::register::sstatus;
 
 const SBI_SET_TIMER: usize = 0;
 const SBI_CONSOLE_PUTCHAR: usize = 1;
@@ -41,6 +42,20 @@ pub fn console_getchar() -> usize {
 }
 
 pub fn console_flush() {}
+
+/// 保存当前中断使能状态，并关中断（用于 console 临界区）。
+pub fn local_irq_save() -> bool {
+    let was_enabled = sstatus::read().sie();
+    unsafe { sstatus::clear_sie() };
+    was_enabled
+}
+
+/// 恢复中断使能状态到调用 local_irq_save 之前的值。
+pub fn local_irq_restore(was_enabled: bool) {
+    if was_enabled {
+        unsafe { sstatus::set_sie() };
+    }
+}
 
 pub fn shutdown() -> ! {
     sbi_call(SBI_SHUTDOWN, 0, 0, 0);

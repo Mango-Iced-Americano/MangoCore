@@ -1,10 +1,12 @@
-use crate::hal::{console_flush, console_putchar};
+use crate::hal::{console_flush, console_putchar, local_irq_restore, local_irq_save};
 use crate::task::current_task;
 use crate::timer::get_time_ms;
 use core::fmt::{self, Write};
 use log::{self, Level, LevelFilter, Log, Metadata, Record};
 
-// won't require lock, but unlikely to cause problem
+// la64: console_putchar 直接写 UART，无 SBI 序列化保护，因此需要 irq-save
+// 临界区确保整条 print 输出原子。rv64 虽 SBI ecall 有单字符原子性，但全局
+// 关中断可避免多个 print 调用之间的交错，且不会死锁（无持锁等待）。
 struct KernelOutput;
 
 impl Write for KernelOutput {
@@ -26,7 +28,9 @@ impl Write for KernelOutput {
 }
 
 pub fn print(args: fmt::Arguments) {
+    let irq_state = local_irq_save();
     KernelOutput.write_fmt(args).unwrap();
+    local_irq_restore(irq_state);
 }
 
 #[macro_export]
