@@ -1325,6 +1325,15 @@ pub fn sys_chdir(path: *const u8) -> isize {
     if path.is_empty() {
         return ENOENT;
     }
+    // ENAMETOOLONG: total path or any component exceeds limit
+    if path.len() >= vfs::MAX_PATHLEN {
+        return ENAMETOOLONG;
+    }
+    for component in path.split('/') {
+        if component.len() > vfs::NAME_MAX {
+            return ENAMETOOLONG;
+        }
+    }
 
     // 克隆当前 cwd 状态后释放锁，避免在 find/open 持锁
     let (cwd_inode, old_path) = {
