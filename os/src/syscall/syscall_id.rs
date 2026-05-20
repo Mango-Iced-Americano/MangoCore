@@ -1,7 +1,9 @@
 pub const SYSCALL_GETCWD: usize = 17;
-pub const SYSCALL_DUP3: usize = 20;
+pub const SYSCALL_EPOLL_CREATE1: usize = 20;
+pub const SYSCALL_EPOLL_CTL: usize = 21;
+pub const SYSCALL_EPOLL_PWAIT: usize = 22;
 pub const SYSCALL_DUP: usize = 23;
-pub const SYSCALL_DUP2: usize = 24;
+pub const SYSCALL_DUP3: usize = 24;
 pub const SYSCALL_FCNTL: usize = 25;
 pub const SYSCALL_IOCTL: usize = 29;
 pub const SYSCALL_MKDIRAT: usize = 34;

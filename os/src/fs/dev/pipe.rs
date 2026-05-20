@@ -199,7 +199,7 @@ impl Pipe {
 #[cfg(feature = "board_fu740")]
 const RING_DEFAULT_BUFFER_SIZE: usize = 4096 * 16;
 #[cfg(not(feature = "board_fu740"))]
-const RING_DEFAULT_BUFFER_SIZE: usize = 256;
+const RING_DEFAULT_BUFFER_SIZE: usize = 4096 * 16;
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 enum RingBufferStatus {

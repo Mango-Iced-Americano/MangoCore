@@ -21,5 +21,9 @@ bitflags! {
         const EPOLLMSG      = 0x400;
         const EPOLLREMOVE   = 0x1000;
         const EPOLLRDHUP    = 0x2000;
+        const EPOLLEXCLUSIVE = 1usize << 28;
+        const EPOLLWAKEUP    = 1usize << 29;
+        const EPOLLONESHOT   = 1usize << 30;
+        const EPOLLET        = 1usize << 31;
     }
 }

@@ -12,6 +12,7 @@ use crate::utils::error::SyscallErr;
 use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::any::Any;
 use core::fmt;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::{Mutex, MutexGuard};
@@ -761,6 +762,10 @@ impl File {
     /// 获取私有数据的锁
     pub fn private_data(&self) -> MutexGuard<FilePrivateData> {
         self.private_data.lock()
+    }
+
+    pub fn inode_as_any_ref(&self) -> &dyn Any {
+        self.inode.as_any_ref()
     }
 
     // ── Clone ──────────────────────────────────────────────────────
