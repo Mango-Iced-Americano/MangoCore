@@ -1,36 +1,17 @@
-use crate::net::config::NET_INTERFACE;
-use crate::task::signal::{discard_non_actionable_unblocked_signals, has_actionable_signal};
 use crate::{
+    config::PAGE_SIZE,
+    fs::vfs::{event::EPollEvent, FdTable, File, PollWaitQueue},
     mm::{UserPtr, UserSlice},
+    net::config::NET_INTERFACE,
+    signal_type,
     syscall::errno::EFAULT,
     task::signal::Signals,
-    timer::TimeSpec,
+    timer::{TimeSpec, NSEC_PER_SEC},
     utils::error::SyscallErr,
 };
 use alloc::vec::Vec;
-use core::ptr::null_mut;
 
-use crate::task::{current_task, sigprocmask, SigMaskHow, WaitQueue, WaitResult};
-
-const POLL_SLEEP_MS: usize = 10;
-
-fn poll_wait_deadline(timeout: Option<TimeSpec>) -> TimeSpec {
-    let now = TimeSpec::now();
-    let next_poll = now + TimeSpec::from_ms(POLL_SLEEP_MS);
-    match timeout {
-        Some(deadline) if deadline < next_poll => deadline,
-        _ => next_poll,
-    }
-}
-
-fn wait_poll_interval(timeout: Option<TimeSpec>) -> WaitResult {
-    let wait_queue = spin::Mutex::new(WaitQueue::new());
-    WaitQueue::wait_event_interruptible_timeout(
-        &wait_queue,
-        || -> Option<isize> { None },
-        poll_wait_deadline(timeout),
-    )
-}
+use crate::task::{current_task, WaitQueue, WaitResult};
 ///  A scheduling  scheme  whereby  the  local  process  periodically  checks  until  the  pre-specified events (for example, read, write) have occurred.
 /// The PollFd struct in 32-bit style.
 #[repr(C)]
@@ -92,6 +73,219 @@ bitflags! {
     }
 }
 
+fn implicit_epoll_events() -> EPollEvent {
+    EPollEvent::EPOLLERR | EPollEvent::EPOLLHUP | EPollEvent::EPOLLNVAL
+}
+
+fn pselect_read_events() -> EPollEvent {
+    EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM | EPollEvent::EPOLLERR | EPollEvent::EPOLLHUP
+}
+
+fn pselect_write_events() -> EPollEvent {
+    EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM | EPollEvent::EPOLLERR | EPollEvent::EPOLLHUP
+}
+
+fn pselect_except_events() -> EPollEvent {
+    EPollEvent::EPOLLPRI | EPollEvent::EPOLLRDBAND | EPollEvent::EPOLLERR
+}
+
+fn poll_to_epoll(events: PollEvent) -> EPollEvent {
+    EPollEvent::from_bits_truncate(events.bits() as usize)
+}
+
+fn epoll_to_poll(events: EPollEvent) -> PollEvent {
+    PollEvent::from_bits_truncate(events.bits() as u16)
+}
+
+fn apply_temporary_sigmask(sigmask: *const Signals) -> Result<Option<Signals>, isize> {
+    if sigmask.is_null() {
+        return Ok(None);
+    }
+    if (sigmask as usize) < PAGE_SIZE {
+        return Err(EFAULT);
+    }
+
+    let task = current_task().unwrap();
+    let token = task.get_user_token();
+    let bits = UserPtr::new(sigmask as *const u64).read(token)?;
+    let mut new_mask = Signals::from_bits_truncate(bits as signal_type!());
+    new_mask.remove(Signals::CAN_NOT_BE_MASKED);
+
+    let mut inner = task.acquire_inner_lock();
+    let old_mask = inner.sigmask;
+    inner.sigmask = new_mask;
+    Ok(Some(old_mask))
+}
+
+fn restore_sigmask(old_mask: Option<Signals>) {
+    if let Some(old_mask) = old_mask {
+        if let Some(task) = current_task() {
+            task.acquire_inner_lock().sigmask = old_mask;
+        }
+    }
+}
+
+fn collect_wait_queues(file: &File, wait_queues: &mut Vec<PollWaitQueue>) {
+    if let Some(queue) = file.read_wait_queue() {
+        wait_queues.push(queue);
+    }
+    if let Some(queue) = file.write_wait_queue() {
+        wait_queues.push(queue);
+    }
+}
+
+fn poll_wait(
+    wait_queues: &[PollWaitQueue],
+    deadline: Option<TimeSpec>,
+    cond: impl FnMut() -> Option<isize>,
+) -> WaitResult {
+    let queue_refs: Vec<&spin::Mutex<WaitQueue>> =
+        wait_queues.iter().map(|queue| queue.queue()).collect();
+    WaitQueue::wait_on_queues_interruptible_timeout(&queue_refs, cond, deadline)
+}
+
+fn checked_timeout_deadline(timeout: Option<TimeSpec>) -> Result<Option<TimeSpec>, isize> {
+    match timeout {
+        Some(timeout) => {
+            if timeout.tv_sec > isize::MAX as usize || timeout.tv_nsec >= NSEC_PER_SEC {
+                Err(-(SyscallErr::EINVAL as isize))
+            } else {
+                Ok(Some(timeout + TimeSpec::now()))
+            }
+        }
+        None => Ok(None),
+    }
+}
+
+struct PPollScan {
+    ready: isize,
+    wait_queues: Vec<PollWaitQueue>,
+}
+
+fn scan_ppoll(fds: &spin::Mutex<FdTable>, poll_fds: &mut [PollFd], collect_wait: bool) -> PPollScan {
+    NET_INTERFACE.poll();
+    let fd_table = fds.lock();
+    let mut ready = 0;
+    let mut wait_queues = Vec::new();
+
+    for poll_fd in poll_fds.iter_mut() {
+        poll_fd.revents = PollEvent::empty();
+        if (poll_fd.fd as i32) < 0 {
+            continue;
+        }
+        match fd_table.get_ref(poll_fd.fd as usize) {
+            Ok(file) => {
+                let requested = poll_to_epoll(poll_fd.events);
+                let observed = file.poll_events();
+                let returned = observed & (requested | implicit_epoll_events());
+                poll_fd.revents = epoll_to_poll(returned);
+                if !poll_fd.revents.is_empty() {
+                    ready += 1;
+                } else if collect_wait {
+                    collect_wait_queues(file, &mut wait_queues);
+                }
+            }
+            Err(_) => {
+                poll_fd.revents = PollEvent::POLLNVAL;
+                ready += 1;
+            }
+        }
+    }
+
+    PPollScan { ready, wait_queues }
+}
+
+struct PSelectScan {
+    ready: isize,
+    wait_queues: Vec<PollWaitQueue>,
+    read_fds: Option<FdSet>,
+    write_fds: Option<FdSet>,
+    exception_fds: Option<FdSet>,
+    error: Option<isize>,
+}
+
+fn scan_pselect(
+    fds: &spin::Mutex<FdTable>,
+    nfds: usize,
+    read_fds: &Option<FdSet>,
+    write_fds: &Option<FdSet>,
+    exception_fds: &Option<FdSet>,
+    collect_wait: bool,
+) -> PSelectScan {
+    NET_INTERFACE.poll();
+    let fd_table = fds.lock();
+    let mut ready = 0;
+    let mut wait_queues = Vec::new();
+    let mut out_read = read_fds.map(|_| FdSet::empty());
+    let mut out_write = write_fds.map(|_| FdSet::empty());
+    let mut out_exception = exception_fds.map(|_| FdSet::empty());
+
+    for fd in 0..1024 {
+        let want_read = read_fds.as_ref().map(|set| set.is_set(fd)).unwrap_or(false);
+        let want_write = write_fds.as_ref().map(|set| set.is_set(fd)).unwrap_or(false);
+        let want_exception = exception_fds
+            .as_ref()
+            .map(|set| set.is_set(fd))
+            .unwrap_or(false);
+        if !want_read && !want_write && !want_exception {
+            continue;
+        }
+
+        let file = match fd_table.get_ref(fd) {
+            Ok(file) => file,
+            Err(_) => {
+                return PSelectScan {
+                    ready: 0,
+                    wait_queues,
+                    read_fds: out_read,
+                    write_fds: out_write,
+                    exception_fds: out_exception,
+                    error: Some(-(SyscallErr::EBADF as isize)),
+                };
+            }
+        };
+        if fd >= nfds {
+            continue;
+        }
+
+        let observed = file.poll_events();
+        let mut fd_ready = false;
+        if want_read && observed.intersects(pselect_read_events()) {
+            if let Some(set) = out_read.as_mut() {
+                set.set(fd);
+            }
+            ready += 1;
+            fd_ready = true;
+        }
+        if want_write && observed.intersects(pselect_write_events()) {
+            if let Some(set) = out_write.as_mut() {
+                set.set(fd);
+            }
+            ready += 1;
+            fd_ready = true;
+        }
+        if want_exception && observed.intersects(pselect_except_events()) {
+            if let Some(set) = out_exception.as_mut() {
+                set.set(fd);
+            }
+            ready += 1;
+            fd_ready = true;
+        }
+        if !fd_ready && collect_wait {
+            collect_wait_queues(file, &mut wait_queues);
+        }
+    }
+
+    PSelectScan {
+        ready,
+        wait_queues,
+        read_fds: out_read,
+        write_fds: out_write,
+        exception_fds: out_exception,
+        error: None,
+    }
+}
+
 /// Wait for one of the events in `poll_fd_p` to happen, or the time limit to run out if any.
 /// Unlike the function family of `select()` which are basically AND'S,
 /// `poll()`'s act like OR's for polling the files.
@@ -104,7 +298,6 @@ bitflags! {
 /// * `POLLHUP`, `POLLNVAL` and `POLLERR` are ALWAYS polled for all given files,
 ///   regardless of whether it is set in the array.
 /// # Unsupported Features
-/// * Timeout is not yet supported.
 /// * Other implementations are supported by specific files and may not be used by
 /// * Currently only user space structs are supported.
 /// # Return Conditions
@@ -131,19 +324,18 @@ pub fn ppoll(
     let task = current_task().unwrap();
     let token = task.get_user_token();
     let timeout: Option<TimeSpec> = match UserPtr::new(tmo_p).read_optional(token) {
-        Ok(tmo) => match tmo {
-            Some(tmo) => Some(tmo + crate::timer::TimeSpec::now()),
-            None => None,
+        Ok(tmo) => match checked_timeout_deadline(tmo) {
+            Ok(deadline) => deadline,
+            Err(errno) => return errno,
         },
         Err(errno) => return errno,
     };
-    // push to the top of TrapContext page, make use of redundant space
-    let oldsig =
-        ((task.trap_cx_user_va() + crate::config::PAGE_SIZE) as *mut Signals).wrapping_sub(1);
-    if !sigmask.is_null() {
-        sigprocmask(SigMaskHow::SIG_SETMASK.bits(), sigmask, oldsig);
-    }
+    let files = task.process.files();
     drop(task);
+    let old_mask = match apply_temporary_sigmask(sigmask) {
+        Ok(old_mask) => old_mask,
+        Err(errno) => return errno,
+    };
 
     let mut poll_fd = alloc::vec![
         PollFd {
@@ -153,93 +345,52 @@ pub fn ppoll(
         };
         nfds
     ];
-    let mut done: isize = 0;
+
+    let mut done: isize;
     let mut interrupted = false;
-    if let Ok(_) = UserSlice::new(fds as *const PollFd, nfds).read_array_into(token, &mut poll_fd) {
-        for poll_fd in poll_fd.iter_mut() {
-            poll_fd.revents = PollEvent::empty();
-        }
-
-        loop {
-            let task = current_task().unwrap();
-            let files_ref = task.process.files();
-        let fd_table = files_ref.lock();
-
-            for poll_fd in poll_fd.iter_mut() {
-                let fd = poll_fd.fd as usize;
-                match fd_table.get_ref(fd) {
-                    Ok(file_descriptor) => {
-                        let mut trigger = 0;
-                        if file_descriptor.hang_up() {
-                            poll_fd.revents |= PollEvent::POLLHUP;
-                            trigger = 1;
-                        }
-                        if poll_fd.events.contains(PollEvent::POLLIN)
-                            && file_descriptor.r_ready()
-                        {
-                            poll_fd.revents |= PollEvent::POLLIN;
-                            trigger = 1;
-                        }
-                        if poll_fd.events.contains(PollEvent::POLLOUT)
-                            && file_descriptor.w_ready()
-                        {
-                            poll_fd.revents |= PollEvent::POLLOUT;
-                            trigger = 1;
-                        }
-                        done += trigger;
-                    }
-                    Err(_) => continue,
-                }
-            }
-            if done > 0 {
-                break;
-            }
-            if let Some(timeout) = timeout {
-                if crate::timer::TimeSpec::now() >= timeout {
-                    break;
-                }
-            }
-            drop(fd_table);
-            // 推送网络栈状态，确保下一步 r_ready()/w_ready() 能检测到新数据
-            NET_INTERFACE.poll();
-            // 信号检查
-            let task = current_task().unwrap();
-            if has_actionable_signal(&task) {
-                interrupted = true;
-                break;
-            } else {
-                // 无actionable信号：清除它们，避免在 suspend 循环中重复检查。
-                // do_signal() 在 trap_return 中调用，但这里可能很快重新取回同一任务。
-                discard_non_actionable_unblocked_signals(&task);
-            }
-            drop(task);
-            if wait_poll_interval(timeout) == WaitResult::Interrupted {
-                interrupted = true;
-                break;
-            }
-        }
-
-        log::trace!("[ppoll] result: {:?}", poll_fd);
-        UserSlice::new(fds as *const PollFd, nfds)
-            .write_array_from(token, &poll_fd)
-            .unwrap();
-    } else {
+    if UserSlice::new(fds as *const PollFd, nfds)
+        .read_array_into(token, &mut poll_fd)
+        .is_err()
+    {
         log::error!(
             "[ppoll] Error copy_from_user_array(_, fds: {:?}, poll_fd.as_mut_ptr():{:?}, _)",
             fds,
             poll_fd.as_mut_ptr()
         );
         done = EFAULT;
+    } else {
+        let scan = scan_ppoll(&files, &mut poll_fd, true);
+        done = scan.ready;
+        if done == 0
+            && timeout
+                .map(|deadline| TimeSpec::now() < deadline)
+                .unwrap_or(true)
+        {
+            match poll_wait(&scan.wait_queues, timeout, || {
+                let scan = scan_ppoll(&files, &mut poll_fd, false);
+                if scan.ready > 0 {
+                    Some(scan.ready)
+                } else {
+                    None
+                }
+            }) {
+                WaitResult::Ready(value) => done = value,
+                WaitResult::Interrupted => interrupted = true,
+                WaitResult::TimedOut => done = 0,
+            }
+        }
+
+        log::trace!("[ppoll] result: {:?}", poll_fd);
+        if let Err(_) = UserSlice::new(fds as *const PollFd, nfds)
+            .write_array_from(token, &poll_fd)
+        {
+            done = EFAULT;
+            interrupted = false;
+        }
     }
-    if !sigmask.is_null() {
-        sigprocmask(
-            SigMaskHow::SIG_SETMASK.bits(),
-            oldsig,
-            null_mut::<Signals>(),
-        );
-    }
+    restore_sigmask(old_mask);
     if interrupted {
-        return -(SyscallErr::ERESTART as isize);
+        return -(SyscallErr::EINTR as isize);
     }
     done
 }
@@ -349,118 +500,67 @@ pub fn pselect(
     timeout: &Option<TimeSpec>,
     sigmask: *const Signals,
 ) -> isize {
-    let timeout: Option<TimeSpec> = if let Some(ref timeout) = timeout {
-        Some(*timeout + crate::timer::TimeSpec::now())
+    let timeout: Option<TimeSpec> = match checked_timeout_deadline(*timeout) {
+        Ok(deadline) => deadline,
+        Err(errno) => return errno,
+    };
+
+    let old_mask = match apply_temporary_sigmask(sigmask) {
+        Ok(old_mask) => old_mask,
+        Err(errno) => return errno,
+    };
+
+    if nfds > 1024 {
+        restore_sigmask(old_mask);
+        return -(SyscallErr::EINVAL as isize);
+    }
+
+    let files = current_task().unwrap().process.files();
+    let initial_scan = scan_pselect(&files, nfds, read_fds, write_fds, exception_fds, true);
+    let mut done = initial_scan.ready;
+    let mut interrupted = false;
+    let mut error = initial_scan.error;
+    let mut ready_sets = if error.is_none() && done > 0 {
+        Some((
+            initial_scan.read_fds,
+            initial_scan.write_fds,
+            initial_scan.exception_fds,
+        ))
     } else {
         None
     };
 
-    // push to the top of TrapContext page, make use of redundant space
-    let oldsig = ((current_task().unwrap().trap_cx_user_va() + crate::config::PAGE_SIZE)
-        as *mut Signals)
-        .wrapping_sub(1);
-    if !sigmask.is_null() {
-        sigprocmask(SigMaskHow::SIG_SETMASK.bits(), sigmask, oldsig);
-    }
-
-    let mut done = 0;
-    let mut interrupted = false;
-    let mut error: Option<isize> = None;
-    loop {
-        let task = current_task().unwrap();
-        let files_ref = task.process.files();
-        let fd_table = files_ref.lock();
-
-        // check read
-        if let Some(ref read_fds) = read_fds {
-            for i in 0..nfds {
-                if !read_fds.is_set(i) {
-                    continue;
-                }
-                if let Ok(fd) = fd_table.get_ref(i) {
-                    if fd.r_ready() {
-                        done += 1;
-                    }
-                } else {
-                    error = Some(-(SyscallErr::EBADF as isize));
-                    break;
-                }
+    if error.is_none()
+        && done == 0
+        && timeout
+            .map(|deadline| TimeSpec::now() < deadline)
+            .unwrap_or(true)
+    {
+        match poll_wait(&initial_scan.wait_queues, timeout, || {
+            let scan = scan_pselect(&files, nfds, read_fds, write_fds, exception_fds, false);
+            if let Some(error) = scan.error {
+                Some(error)
+            } else if scan.ready > 0 {
+                ready_sets = Some((scan.read_fds, scan.write_fds, scan.exception_fds));
+                Some(scan.ready)
+            } else {
+                None
             }
-            if error.is_some() {
-                drop(fd_table);
-                break;
+        }) {
+            WaitResult::Ready(value) if value < 0 => error = Some(value),
+            WaitResult::Ready(value) => done = value,
+            WaitResult::Interrupted => {
+                interrupted = true;
+                log::info!("[pselect] Interrupted by signal(s)");
             }
-        }
-        // check write
-        if let Some(ref write_fds) = write_fds {
-            for i in 0..nfds {
-                if !write_fds.is_set(i) {
-                    continue;
-                }
-                if let Ok(fd) = fd_table.get_ref(i) {
-                    if fd.w_ready() {
-                        done += 1;
-                    }
-                } else {
-                    error = Some(-(SyscallErr::EBADF as isize));
-                    break;
-                }
-            }
-            if error.is_some() {
-                drop(fd_table);
-                break;
-            }
-        }
-        // check exception
-        // do nothing
-
-        if done != 0 {
-            break;
-        }
-        if let Some(timeout) = timeout {
-            if crate::timer::TimeSpec::now() >= timeout {
-                break;
-            }
-        }
-
-        drop(fd_table);
-        // 推送网络栈状态，确保下一步 r_ready()/w_ready() 能检测到新数据
-        NET_INTERFACE.poll();
-        let task = current_task().unwrap();
-        if has_actionable_signal(&task) {
-            let mut inner = task.acquire_inner_lock();
-            inner.refresh_real_timer();
-            drop(inner);
-            interrupted = true;
-            drop(task);
-            log::info!("[pselect] Interrupted by signal(s)");
-            break;
-        } else {
-            let mut inner = task.acquire_inner_lock();
-            inner.refresh_real_timer();
-            drop(inner);
-            // 无actionable信号：清除它们，避免在 suspend 循环中重复检查。
-            // do_signal() 在 trap_return 中调用，但这里可能很快重新取回同一任务。
-            discard_non_actionable_unblocked_signals(&task);
-        }
-        drop(task);
-        if wait_poll_interval(timeout) == WaitResult::Interrupted {
-            interrupted = true;
-            log::info!("[pselect] Interrupted by signal(s)");
-            break;
+            WaitResult::TimedOut => done = 0,
         }
     }
 
     // ============================================================
     // Step 1: Always restore sigmask first, regardless of outcome
     // ============================================================
-    if !sigmask.is_null() {
-        sigprocmask(
-            SigMaskHow::SIG_SETMASK.bits(),
-            oldsig,
-            null_mut::<Signals>(),
-        );
-    }
+    restore_sigmask(old_mask);
 
     // ============================================================
     // Step 2: Priority-based result dispatch
@@ -472,47 +572,26 @@ pub fn pselect(
     }
 
     // 2. Signal interruption
-    // NOTE: Must return ERESTART(-85) instead of EINTR(-4) so that do_signal
-    // can detect this interrupted syscall and apply SA_RESTART logic.
-    // do_signal() converts ERESTART→restart(if SA_RESTART) or ERESTART→EINTR(if not).
     if interrupted {
-        log::info!("[pselect] Interrupted by signal(s), returning ERESTART");
-        return -(SyscallErr::ERESTART as isize);
+        log::info!("[pselect] Interrupted by signal(s), returning EINTR");
+        return -(SyscallErr::EINTR as isize);
     }
 
-    // 3. Normal FD counting
-    let task = current_task().unwrap();
-    let files_ref = task.process.files();
-        let fd_table = files_ref.lock();
-    // count read
-    if let Some(read_fds) = read_fds.as_mut() {
-        for i in 0..nfds {
-            if !read_fds.is_set(i) {
-                continue;
-            }
-            if let Ok(fd) = fd_table.get_ref(i) {
-                if !fd.r_ready() {
-                    read_fds.clr(i);
-                }
-            }
+    // 3. Normal FD set writeback
+    if let Some((new_read, new_write, new_exception)) = ready_sets {
+        *read_fds = new_read;
+        *write_fds = new_write;
+        *exception_fds = new_exception;
+    } else {
+        if let Some(read_fds) = read_fds.as_mut() {
+            *read_fds = FdSet::empty();
         }
-    }
-    // count write
-    if let Some(write_fds) = write_fds.as_mut() {
-        for i in 0..nfds {
-            if !write_fds.is_set(i) {
-                continue;
-            }
-            if let Ok(fd) = fd_table.get_ref(i) {
-                if !fd.w_ready() {
-                    write_fds.clr(i);
-                }
-            }
+        if let Some(write_fds) = write_fds.as_mut() {
+            *write_fds = FdSet::empty();
         }
-    }
-    // count exception
-    if let Some(exception_fds) = exception_fds {
-        *exception_fds = FdSet::empty();
+        if let Some(exception_fds) = exception_fds {
+            *exception_fds = FdSet::empty();
+        }
     }
     log::debug!(
         "[pselect] read_fds: {:?}, write_fds: {:?}, exception_fds: {:?}",

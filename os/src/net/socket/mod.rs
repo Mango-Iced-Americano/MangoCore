@@ -472,6 +472,18 @@ impl IndexNode for SocketFile {
         Ok(revents)
     }
 
+    fn read_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        self.inner
+            .recv_wait_queue()
+            .or_else(|| self.inner.accept_wait_queue())
+    }
+
+    fn write_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        self.inner
+            .send_wait_queue()
+            .or_else(|| self.inner.connect_wait_queue())
+    }
+
     fn ioctl(
         &self,
         _cmd: u32,

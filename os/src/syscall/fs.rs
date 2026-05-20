@@ -2012,6 +2012,9 @@ pub fn sys_pselect(
         &ktimeout,
         sigmask,
     );
+    if ret < 0 {
+        return ret;
+    }
     /*
     WARNING! The EFAULT errno is NOT mentioned in man for Linux.
     However, it is mentioned in BSD man, so we keep it anyway.

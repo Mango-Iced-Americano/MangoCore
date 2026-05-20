@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use crate::timer::{TimeSpec, TimeVal};
 
 use super::{
-    block_current_and_run_next_with_lock_checked, current_task,
+    block_current_and_run_next_checked, block_current_and_run_next_with_lock_checked, current_task,
     discard_non_actionable_unblocked_signals, has_actionable_signal, signal::Signals,
     TaskControlBlock, TaskStatus,
 };
@@ -675,6 +675,105 @@ impl WaitQueue {
                     return WaitResult::Ready(res);
                 }
             }
+        }
+    }
+
+    fn finish_wait_on_queues(queues: &[&Mutex<Self>], task: &Arc<TaskControlBlock>) {
+        for queue in queues {
+            queue.lock().finish_wait(task);
+        }
+    }
+
+    pub fn wait_on_queues_interruptible_timeout<F>(
+        queues: &[&Mutex<Self>],
+        mut cond: F,
+        deadline: Option<TimeSpec>,
+    ) -> WaitResult
+    where
+        F: FnMut() -> Option<isize>,
+    {
+        // `cond` may be evaluated while the current task is temporarily
+        // removed from the CPU, so callers must not depend on `current_task()`.
+        if let Some(res) = cond() {
+            return WaitResult::Ready(res);
+        }
+
+        if queues.is_empty() {
+            let wait_queue = Mutex::new(WaitQueue::new());
+            loop {
+                let next_deadline = match deadline {
+                    Some(deadline) if TimeSpec::now() >= deadline => return WaitResult::TimedOut,
+                    Some(deadline) => {
+                        let fallback = TimeSpec::now() + TimeSpec::from_ms(Self::WAIT_IO_FALLBACK_MS);
+                        if fallback < deadline {
+                            fallback
+                        } else {
+                            deadline
+                        }
+                    }
+                    None => TimeSpec::now() + TimeSpec::from_ms(Self::WAIT_IO_FALLBACK_MS),
+                };
+                match Self::wait_event_interruptible_timeout(&wait_queue, &mut cond, next_deadline) {
+                    WaitResult::Ready(value) => return WaitResult::Ready(value),
+                    WaitResult::Interrupted => return WaitResult::Interrupted,
+                    WaitResult::TimedOut => {
+                        if deadline
+                            .map(|deadline| TimeSpec::now() >= deadline)
+                            .unwrap_or(false)
+                        {
+                            return WaitResult::TimedOut;
+                        }
+                    }
+                }
+            }
+        }
+
+        loop {
+            if deadline
+                .map(|deadline| TimeSpec::now() >= deadline)
+                .unwrap_or(false)
+            {
+                return WaitResult::TimedOut;
+            }
+
+            let task = current_task().unwrap();
+            for queue in queues {
+                queue.lock().prepare_to_wait(Arc::downgrade(&task));
+            }
+
+            if let Some(res) = cond() {
+                Self::finish_wait_on_queues(queues, &task);
+                return WaitResult::Ready(res);
+            }
+            if deadline
+                .map(|deadline| TimeSpec::now() >= deadline)
+                .unwrap_or(false)
+            {
+                Self::finish_wait_on_queues(queues, &task);
+                return WaitResult::TimedOut;
+            }
+            if has_actionable_signal(&task) {
+                Self::finish_wait_on_queues(queues, &task);
+                return WaitResult::Interrupted;
+            }
+            discard_non_actionable_unblocked_signals(&task);
+
+            if let Some(deadline) = deadline {
+                wait_with_timeout(Arc::downgrade(&task), deadline);
+            }
+            drop(task);
+
+            block_current_and_run_next_checked(|task| {
+                let no_signal = !has_actionable_signal(task);
+                let not_timed_out = deadline
+                    .map(|deadline| TimeSpec::now() < deadline)
+                    .unwrap_or(true);
+                no_signal && not_timed_out && cond().is_none()
+            });
+
+            let task = current_task().unwrap();
+            Self::finish_wait_on_queues(queues, &task);
+            task.acquire_inner_lock().refresh_real_timer();
         }
     }
 
