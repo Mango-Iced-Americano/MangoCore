@@ -17,7 +17,7 @@ use crate::{
     timer::TimeSpec,
     utils::error::{GeneralRet, SyscallErr},
 };
-use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 pub use context::TaskContext;
 pub use elf::{load_elf_interp, AuxvEntry, AuxvType, ELFInfo};
 use lazy_static::*;
@@ -25,8 +25,9 @@ use log::warn;
 use manager::fetch_task;
 pub use manager::{
     add_kernel_timer, add_task, all_pids, do_oom, do_wake_expired, kernel_timer_queue_len,
-    procs_count, send_signal_to_interruptible, sleep_interruptible, task_manager_counts,
-    wait_with_timeout, wake_interruptible, zombie_count, TimerAction, WaitQueue, WaitResult,
+    procs_count, remove_tasks_from_queues, send_signal_to_interruptible, sleep_interruptible,
+    task_manager_counts, wait_with_timeout, wake_interruptible, zombie_count, TimerAction,
+    WaitQueue, WaitResult,
 };
 // pub use pid::RecycleAllocator;
 pub use pid::{
@@ -260,6 +261,7 @@ pub fn do_exit(task: Arc<TaskControlBlock>, exit_code: u32) {
 
 fn finish_process_exit(task: &Arc<TaskControlBlock>, exit_code: u32) {
     let process = task.process.clone();
+    process.complete_vfork();
     if !process.mark_zombie(exit_code) {
         return;
     }
@@ -282,10 +284,7 @@ fn finish_process_exit(task: &Arc<TaskControlBlock>, exit_code: u32) {
         warn!("[finish_process_exit] parent is None");
     }
 
-    let children = {
-        let mut inner = process.acquire_inner_lock();
-        core::mem::take(&mut inner.children)
-    };
+    let children = process.take_children();
     if !children.is_empty() {
         let mut initproc_inner = INITPROC.process.acquire_inner_lock();
         for child in children {
@@ -314,12 +313,7 @@ fn finish_process_exit(task: &Arc<TaskControlBlock>, exit_code: u32) {
     // 确保读端能收到 EOF（all_write_ends_closed() == true）。
     // SocketFile 通过 fd_table 管理，无需额外清理。
     {
-        let files_ref = task.process.files();
-    let mut fd_table = files_ref.lock();
-        let open_fds: Vec<usize> = fd_table.iter().map(|(i, _f)| i).collect();
-        for fd in open_fds {
-            let _ = fd_table.drop_fd(fd);
-        }
+        task.process.close_files_on_exit();
     }
 }
 
@@ -341,23 +335,12 @@ pub fn exit_group_and_run_next(exit_code: u32) -> ! {
     let task = take_current_task().unwrap();
     let process = task.process.clone();
     process.request_group_exit(exit_code);
-    let exit_list: VecDeque<_> = process
+    let exit_list: Vec<_> = process
         .threads()
         .into_iter()
         .filter(|thread| thread.tid.0 != task.tid.0)
         .collect();
-    let mut manager = manager::TASK_MANAGER.lock();
-    manager.ready_queue.retain(|queued| {
-        !exit_list
-            .iter()
-            .any(|exit_task| Arc::as_ptr(exit_task) == Arc::as_ptr(queued))
-    });
-    manager.interruptible_queue.retain(|queued| {
-        !exit_list
-            .iter()
-            .any(|exit_task| Arc::as_ptr(exit_task) == Arc::as_ptr(queued))
-    });
-    drop(manager);
+    manager::remove_tasks_from_queues(&exit_list);
 
     for task in exit_list.into_iter() {
         exit_thread(task, exit_code);

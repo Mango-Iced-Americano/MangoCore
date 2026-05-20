@@ -626,6 +626,9 @@ pub fn sys_clone(
     };
     // Sure to succeed, because all bits are valid (See `CloneFlags`)
     let flags = CloneFlags::from_bits(flags & !0xff).unwrap();
+    if flags.contains(CloneFlags::CLONE_VFORK) && flags.contains(CloneFlags::CLONE_THREAD) {
+        return EINVAL;
+    }
     info!(
         "[sys_clone] flags: {:?}, stack: {:?}, exit_signal: {:?}, ptid: {:?}, tls: {:?}, ctid: {:?}",
         flags, stack, exit_signal, ptid, tls, ctid
@@ -669,8 +672,18 @@ pub fn sys_clone(
         child.cleanup_unpublished_clone(flags.contains(CloneFlags::CLONE_VM));
         return errno;
     }
+    if flags.contains(CloneFlags::CLONE_VFORK) {
+        child.process.set_vfork_parent(&parent);
+    }
     // add new task to scheduler
-    add_task(child);
+    add_task(child.clone());
+    if flags.contains(CloneFlags::CLONE_VFORK) {
+        match child.process.wait_vfork_done_interruptible() {
+            WaitResult::Ready(_) => {}
+            WaitResult::Interrupted => return ERESTART,
+            WaitResult::TimedOut => {}
+        }
+    }
     new_tid as isize
 }
 
@@ -808,13 +821,14 @@ pub fn sys_execve(
                     alloc::format!("{}/{}", cwd, path)
                 }
             };
-            task.process.set_exe_path(abs_path);
             show_frame_consumption! {
                 "load_elf";
                 if let Err(errno) = task.load_elf(elf, &argv_vec, &envp_vec) {
                     exit_current_and_run_next(127);
                 };
             }
+            task.process.set_exe_path(abs_path);
+            task.process.complete_vfork();
             // should return 0 in success
             SUCCESS
         }

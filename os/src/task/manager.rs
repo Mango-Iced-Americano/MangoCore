@@ -143,6 +143,25 @@ impl TaskManager {
             // 使用retain过滤掉与指定任务相同的任务
             .retain(|task_in_queue| Arc::as_ptr(task_in_queue) != Arc::as_ptr(task));
     }
+    /// 从调度器的 ready / interruptible 队列中移除一组任务。
+    /// 线程组退出和 exec 清理只能通过这个入口调整队列，避免业务层直接扫描队列。
+    pub fn remove_tasks(&mut self, tasks: &[Arc<TaskControlBlock>]) -> usize {
+        fn should_remove(task: &Arc<TaskControlBlock>, tasks: &[Arc<TaskControlBlock>]) -> bool {
+            tasks
+                .iter()
+                .any(|target| Arc::as_ptr(target) == Arc::as_ptr(task))
+        }
+
+        let old_ready_len = self.ready_queue.len();
+        self.ready_queue
+            .retain(|task| !should_remove(task, tasks));
+        let old_interruptible_len = self.interruptible_queue.len();
+        self.interruptible_queue
+            .retain(|task| !should_remove(task, tasks));
+
+        (old_ready_len - self.ready_queue.len())
+            + (old_interruptible_len - self.interruptible_queue.len())
+    }
     /// 就绪队列中任务数量
     pub fn ready_count(&self) -> u16 {
         self.ready_queue.len() as u16
@@ -311,6 +330,11 @@ pub fn sleep_interruptible(task: Arc<TaskControlBlock>) {
 /// 这个函数不会改变`task_status`，你应该手动改变它以保持一致性。
 pub fn wake_interruptible(task: Arc<TaskControlBlock>) {
     TASK_MANAGER.lock().wake_interruptible(task)
+}
+
+/// 从调度队列中移除一组任务。
+pub fn remove_tasks_from_queues(tasks: &[Arc<TaskControlBlock>]) -> usize {
+    TASK_MANAGER.lock().remove_tasks(tasks)
 }
 
 /// 返回就绪队列中的任务数量

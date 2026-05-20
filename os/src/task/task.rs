@@ -1,4 +1,3 @@
-use super::manager::TASK_MANAGER;
 use super::pid::RecycleAllocator;
 use super::process::ProcessControlBlock;
 use super::registry;
@@ -17,6 +16,7 @@ use crate::hal::{trap_handler, TrapContext};
 use crate::mm::PageTableImpl;
 use crate::mm::{AddressSpace, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::syscall::CloneFlags;
+use crate::syscall::errno::ENOMEM;
 use crate::timer::{ITimerVal, TimeSpec, TimeVal};
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -452,12 +452,14 @@ impl TaskControlBlock {
         argv_vec: &Vec<String>,
         envp_vec: &Vec<String>,
     ) -> Result<(), isize> {
-        // 在加载新 ELF 前先释放旧的用户数据页（物理帧），避免新旧内存集
-        // 同时存在导致双倍内存压力触发 OOM。
-        // 注意：调用者必须理解，如果 load_elf 返回 Err，旧数据页已被清除，
-        // 进程无法回到原来的用户态，调用者应当直接 exit。
+        // 旧 VM 没有被其他 CLONE_VM 进程共享时，可以先释放用户数据页，
+        // 避免新旧内存集同时存在导致双倍内存压力触发 OOM。
+        // 如果旧 VM 被共享（典型是 CLONE_VM | CLONE_VFORK），exec 必须先
+        // 构造新地址空间，提交时再让当前进程脱离共享 VM，不能破坏父进程。
         let current_vm = self.process.vm();
-        current_vm.lock().recycle_data_pages();
+        if Arc::strong_count(&current_vm) <= 2 {
+            current_vm.lock().recycle_data_pages();
+        }
 
         // 将ELF文件映射到内核空间
         let elf_data = elf.map_to_kernel_space(MMAP_BASE);
@@ -515,20 +517,40 @@ impl TaskControlBlock {
             // 陷阱处理函数地址
             trap_handler as usize,
         );
-        // **** 保持当前PCB锁
-        let mut inner = self.acquire_inner_lock();
-        // 更新陷阱上下文的物理页号
-        inner.trap_cx_ppn = (&memory_set)
-            .translate(VirtAddr::from(self.trap_cx_user_va()).into())
-            .unwrap();
-        // 更新任务上下文
-        *inner.get_trap_cx() = trap_cx;
-        // 重置clear_child_tid
-        inner.clear_child_tid = 0;
-        // 重置robust_list
-        inner.robust_list = RobustList::default();
-        // execve disables the alternate signal stack.
-        inner.signal_stack = SignalStack::disabled();
+        let other_threads: Vec<_> = self
+            .process
+            .threads()
+            .into_iter()
+            .filter(|task| task.tid.0 != self.tid.0)
+            .collect();
+        for task in &other_threads {
+            // execve 会杀掉同线程组的其他线程，但保留当前 process。
+            super::exit_thread(task.clone(), Signals::SIGKILL.to_signum().unwrap() as u32);
+        }
+        super::remove_tasks_from_queues(&other_threads);
+
+        {
+            // **** 保持当前PCB锁
+            let mut inner = self.acquire_inner_lock();
+            // 更新陷阱上下文的物理页号
+            inner.trap_cx_ppn = (&memory_set)
+                .translate(VirtAddr::from(self.trap_cx_user_va()).into())
+                .unwrap();
+            // 更新任务上下文
+            *inner.get_trap_cx() = trap_cx;
+            // 重置clear_child_tid
+            inner.clear_child_tid = 0;
+            // 重置robust_list
+            inner.robust_list = RobustList::default();
+            // execve disables the alternate signal stack.
+            inner.signal_stack = SignalStack::disabled();
+        }
+        if Arc::strong_count(&current_vm) > 2 {
+            // CLONE_VM/vfork 子进程 exec 后会脱离旧地址空间。这里仅从旧 VM
+            // 中移除当前线程的 trap context/默认栈映射，不释放 slot 号本身；
+            // 新 VM 仍使用同一个 user_res_slot，避免父 VM 留下孤儿映射。
+            current_vm.lock().dealloc_user_res(self.user_res_slot);
+        }
         // 更新可执行文件描述符
         self.process.replace_exe(elf);
         // 清理资源 — 关闭所有 CLOEXEC 文件描述符
@@ -539,38 +561,6 @@ impl TaskControlBlock {
         self.process.sighand().lock().reset();
         // 清空futex
         self.process.futex().lock().clear();
-        // 检查当前任务是否是多线程任务
-        if self
-            .process
-            .user_res_slot_allocator()
-            .lock()
-            .get_allocated()
-            > 1
-        {
-            let other_threads: Vec<_> = self
-                .process
-                .threads()
-                .into_iter()
-                .filter(|task| task.tid.0 != self.tid.0)
-                .collect();
-
-            for task in &other_threads {
-                // execve 会杀掉同线程组的其他线程，但保留当前 process。
-                super::exit_thread(task.clone(), Signals::SIGKILL.to_signum().unwrap() as u32);
-            }
-            // 销毁所有其他同一线程组的任务
-            let mut manager = TASK_MANAGER.lock();
-            manager.ready_queue.retain(|task| {
-                !other_threads
-                    .iter()
-                    .any(|other| Arc::as_ptr(other) == Arc::as_ptr(task))
-            });
-            manager.interruptible_queue.retain(|task| {
-                !other_threads
-                    .iter()
-                    .any(|other| Arc::as_ptr(other) == Arc::as_ptr(task))
-            });
-        };
         Ok(())
         // **** 释放当前PCB锁
     }
@@ -669,10 +659,22 @@ impl TaskControlBlock {
             );
         }
         // 获取陷阱上下文的物理页号
-        let trap_cx_ppn = memory_set
+        let trap_cx_va = trap_cx_bottom_from_slot(user_res_slot);
+        let trap_cx_ppn = match memory_set
             .lock()
-            .translate(VirtAddr::from(trap_cx_bottom_from_slot(user_res_slot)).into())
-            .unwrap();
+            .translate(VirtAddr::from(trap_cx_va).into())
+        {
+            Some(ppn) => ppn,
+            None => {
+                warn!(
+                    "[sys_clone] trap context is not mapped after alloc_user_res: slot={}, va={:#x}",
+                    user_res_slot, trap_cx_va
+                );
+                memory_set.lock().dealloc_user_res(user_res_slot);
+                user_res_slot_allocator.lock().dealloc(user_res_slot);
+                return Err(ENOMEM);
+            }
+        };
 
         // 创建任务控制块
         let task_control_block = Arc::new(TaskControlBlock {

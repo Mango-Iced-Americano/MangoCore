@@ -3,7 +3,7 @@ use super::{
     registry,
     signal::{PendingSignal, SignalQueue, Sighand, Signals},
     threads::Futex,
-    FsStatus, TaskControlBlock, TaskStatus, WaitQueue,
+    FsStatus, TaskControlBlock, TaskStatus, WaitQueue, WaitResult,
 };
 use crate::fs::vfs;
 use crate::mm::{AddressSpace, PageTableImpl};
@@ -27,8 +27,18 @@ pub struct ProcessControlBlock {
     pub threads: Mutex<Vec<Weak<TaskControlBlock>>>,
     /// 父进程 wait4() 等待子进程退出的等待队列。
     pub child_exit_wait: Mutex<WaitQueue>,
+    /// CLONE_VFORK completion。父线程等待子进程 exec 成功或 exit。
+    vfork: Mutex<VforkState>,
     inner: Mutex<ProcessInner>,
     signal: Mutex<ProcessSignalState>,
+}
+
+struct VforkState {
+    /// CLONE_VFORK 父线程。Some 表示当前进程来自 vfork，且尚未完成。
+    parent: Option<Weak<TaskControlBlock>>,
+    /// completion 状态。true 表示子进程已经 exec 成功或 exit。
+    done: bool,
+    wait_queue: WaitQueue,
 }
 
 pub struct ProcessInner {
@@ -89,6 +99,11 @@ impl ProcessControlBlock {
             leader_tid,
             threads: Mutex::new(Vec::new()),
             child_exit_wait: Mutex::new(WaitQueue::new()),
+            vfork: Mutex::new(VforkState {
+                parent: None,
+                done: false,
+                wait_queue: WaitQueue::new(),
+            }),
             inner: Mutex::new(ProcessInner {
                 exe,
                 exe_path,
@@ -129,7 +144,7 @@ impl ProcessControlBlock {
     }
 
     pub fn replace_exe(&self, exe: vfs::File) {
-        *self.exe().lock() = exe;
+        self.inner.lock().exe = Arc::new(Mutex::new(exe));
     }
 
     pub fn files(&self) -> Arc<Mutex<vfs::FdTable>> {
@@ -145,7 +160,7 @@ impl ProcessControlBlock {
     }
 
     pub fn replace_vm(&self, vm: AddressSpace<PageTableImpl>) {
-        *self.vm().lock() = vm;
+        self.inner.lock().vm = Arc::new(Mutex::new(vm));
     }
 
     pub fn sighand(&self) -> Arc<Mutex<Sighand>> {
@@ -291,6 +306,44 @@ impl ProcessControlBlock {
 
     pub fn set_parent(&self, parent: Option<Weak<ProcessControlBlock>>) {
         self.inner.lock().parent = parent;
+    }
+
+    pub fn set_vfork_parent(&self, parent: &Arc<TaskControlBlock>) {
+        let mut vfork = self.vfork.lock();
+        vfork.parent = Some(Arc::downgrade(parent));
+        vfork.done = false;
+    }
+
+    pub fn complete_vfork(&self) {
+        let mut vfork = self.vfork.lock();
+        if vfork.parent.is_none() || vfork.done {
+            return;
+        }
+        vfork.parent = None;
+        vfork.done = true;
+        vfork.wait_queue.wake_all();
+    }
+
+    pub fn wait_vfork_done_interruptible(&self) -> WaitResult {
+        WaitQueue::wait_event_interruptible_locked(
+            &self.vfork,
+            |state| &mut state.wait_queue,
+            |state| state.done.then_some(0),
+        )
+    }
+
+    pub fn take_children(&self) -> Vec<Arc<ProcessControlBlock>> {
+        let mut inner = self.inner.lock();
+        core::mem::take(&mut inner.children)
+    }
+
+    pub fn close_files_on_exit(&self) {
+        let files_ref = self.files();
+        let mut fd_table = files_ref.lock();
+        let open_fds: Vec<usize> = fd_table.iter().map(|(i, _f)| i).collect();
+        for fd in open_fds {
+            let _ = fd_table.drop_fd(fd);
+        }
     }
 }
 
