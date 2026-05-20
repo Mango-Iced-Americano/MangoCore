@@ -750,7 +750,7 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset: *mut usize, count: usiz
                 Some(offset) => *offset -= redundant_bytes,
                 None => match in_file.lseek(SeekFrom::SeekCurrent(-(redundant_bytes as i64))) {
                     Ok(_) => {}
-                    Err(errno) => panic!("failed! errno {:?}", errno),
+                    Err(errno) => log::error!("splice fallback lseek failed: errno {:?}", errno),
                 },
             }
         };
@@ -1665,7 +1665,10 @@ pub fn sys_mount(
         Ok(filesystemtype) => filesystemtype,
         Err(errno) => return errno,
     };
-    let mountflags = MountFlags::from_bits(mountflags).unwrap();
+    let mountflags = match MountFlags::from_bits(mountflags) {
+        Some(f) => f,
+        None => return EINVAL,
+    };
     info!(
         "[sys_mount] source: {}, target: {}, filesystemtype: {}, mountflags: {:?}, data: {:?}",
         source, target, filesystemtype, mountflags, data
