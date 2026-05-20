@@ -25,6 +25,7 @@ use smoltcp::{
 use crate::net::config::NetInterfaceInner;
 use crate::net::socket::inet::common::PortManager;
 use crate::net::{UDP_SOCKETS, UDP_SOCKETS_TO_REMOVE};
+use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::task::WaitQueue;
 use alloc::sync::Weak;
 use alloc::vec::Vec;
@@ -32,8 +33,8 @@ use alloc::vec::Vec;
 pub struct UdpSocket {
     inner: Mutex<UdpSocketInner>,
     socket_handler: SocketHandle,
-    recv_waiters: Mutex<WaitQueue>,
-    send_waiters: Mutex<WaitQueue>,
+    recv_waiters: EventWaitQueue,
+    send_waiters: EventWaitQueue,
 }
 
 struct UdpSocketInner {
@@ -353,10 +354,18 @@ impl Socket for UdpSocket {
     }
 
     fn recv_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(self.recv_waiters.wait_queue())
+    }
+
+    fn recv_event_queue(&self) -> Option<&EventWaitQueue> {
         Some(&self.recv_waiters)
     }
 
     fn send_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(self.send_waiters.wait_queue())
+    }
+
+    fn send_event_queue(&self) -> Option<&EventWaitQueue> {
         Some(&self.send_waiters)
     }
 
@@ -395,8 +404,8 @@ impl UdpSocket {
                 reuse_addr: false,
             }),
             socket_handler,
-            recv_waiters: Mutex::new(WaitQueue::new()),
-            send_waiters: Mutex::new(WaitQueue::new()),
+            recv_waiters: EventWaitQueue::new(),
+            send_waiters: EventWaitQueue::new(),
         }
     }
     pub fn register_udp_socket(socket: &Arc<Self>) {
@@ -480,7 +489,9 @@ pub fn dispatch_udp_packets(inner: &mut NetInterfaceInner) {
                             let mut inner = os_sock.inner.lock();
                             inner.rx_queue.push_back((buf, remote));
                             // 唤醒等待这个 socket 的任务
-                            os_sock.recv_waiters.lock().wake_all();
+                            os_sock
+                                .recv_waiters
+                                .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM);
                         } else {
                             log::warn!(
                                 "[dispatch_udp_packets] no match for {:?}, local={:?}",

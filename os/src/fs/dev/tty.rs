@@ -14,7 +14,7 @@ use spin::Mutex;
 use crate::fs::vfs::{
     FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata,
 };
-use crate::fs::vfs::event::EPollEvent;
+use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::fs::vfs::file_system::FileSystem as NewFileSystem;
 use crate::fs::dev::DEV_FS;
 use crate::timer::TimeSpec;
@@ -64,14 +64,14 @@ impl Default for TeletypeInner {
 
 pub struct Teletype {
     inner: Mutex<TeletypeInner>,
-    read_waiters: Mutex<WaitQueue>,
+    read_waiters: EventWaitQueue,
 }
 
 impl Default for Teletype {
     fn default() -> Self {
         Self {
             inner: Mutex::new(TeletypeInner::default()),
-            read_waiters: Mutex::new(WaitQueue::new()),
+            read_waiters: EventWaitQueue::new(),
         }
     }
 }
@@ -182,7 +182,8 @@ impl IndexNode for Teletype {
             inner.last_char = 255;
             result = Ok(1);
         }
-        self.read_waiters.lock().wake_at_most(1);
+        self.read_waiters
+            .notify_events_at_most(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM, 1);
         result
     }
 
@@ -244,7 +245,8 @@ impl IndexNode for Teletype {
         let mut revents: usize = 0;
         if has_data {
             revents |= EPollEvent::EPOLLIN.bits();
-            self.read_waiters.lock().wake_at_most(1);
+            self.read_waiters
+                .notify_events_at_most(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM, 1);
         }
         revents |= EPollEvent::EPOLLOUT.bits();
         Ok(revents)
@@ -327,6 +329,10 @@ impl IndexNode for Teletype {
     }
 
     fn read_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(self.read_waiters.wait_queue())
+    }
+
+    fn read_event_queue(&self) -> Option<&crate::fs::vfs::event::EventWaitQueue> {
         Some(&self.read_waiters)
     }
 

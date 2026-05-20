@@ -1,4 +1,3 @@
-use crate::task::WaitQueue;
 use alloc::boxed::Box;
 use alloc::sync::{Arc, Weak};
 use core::any::Any;
@@ -8,9 +7,10 @@ use spin::Mutex;
 use crate::fs::vfs::{
     FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata,
 };
-use crate::fs::vfs::event::EPollEvent;
+use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::fs::vfs::file_system::FileSystem as NewFileSystem;
 use crate::fs::dev::DEV_FS;
+use crate::task::WaitQueue;
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
 
@@ -18,8 +18,8 @@ pub struct Pipe {
     readable: bool,
     writable: bool,
     buffer: Arc<Mutex<PipeRingBuffer>>,
-    read_wait: Mutex<WaitQueue>,
-    write_wait: Mutex<WaitQueue>,
+    read_wait: EventWaitQueue,
+    write_wait: EventWaitQueue,
 }
 
 impl core::fmt::Debug for Pipe {
@@ -61,9 +61,12 @@ impl IndexNode for Pipe {
             };
             Ok(read_bytes)
         };
-        // Drop ring lock before acquiring write_wait lock to avoid deadlock
         if let Ok(_n) = &result {
-            self.write_wait.lock().wake_at_most(1);
+            if let Some(write_end) = self.peer_write_end() {
+                write_end
+                    .write_wait
+                    .notify_events_at_most(EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM, 1);
+            }
         }
         result
     }
@@ -98,7 +101,11 @@ impl IndexNode for Pipe {
             Ok(write_bytes)
         };
         if let Ok(_n) = &result {
-            self.read_wait.lock().wake_at_most(1);
+            if let Some(read_end) = self.peer_read_end() {
+                read_end
+                    .read_wait
+                    .notify_events_at_most(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM, 1);
+            }
         }
         result
     }
@@ -147,10 +154,18 @@ impl IndexNode for Pipe {
     }
 
     fn read_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
-        Some(&self.read_wait)
+        Some(self.read_wait.wait_queue())
     }
 
     fn write_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(self.write_wait.wait_queue())
+    }
+
+    fn read_event_queue(&self) -> Option<&crate::fs::vfs::event::EventWaitQueue> {
+        Some(&self.read_wait)
+    }
+
+    fn write_event_queue(&self) -> Option<&crate::fs::vfs::event::EventWaitQueue> {
         Some(&self.write_wait)
     }
 
@@ -165,24 +180,47 @@ impl IndexNode for Pipe {
 
 impl Drop for Pipe {
     fn drop(&mut self) {
-        let _ring = self.buffer.lock();
         if self.readable {
-            self.write_wait.lock().wake_all();
+            if let Some(write_end) = self.peer_write_end() {
+                write_end
+                    .write_wait
+                    .notify_events_all(EPollEvent::EPOLLOUT | EPollEvent::EPOLLHUP);
+            }
         }
         if self.writable {
-            self.read_wait.lock().wake_all();
+            if let Some(read_end) = self.peer_read_end() {
+                read_end
+                    .read_wait
+                    .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLHUP);
+            }
         }
     }
 }
 
 impl Pipe {
+    fn peer_read_end(&self) -> Option<Arc<Pipe>> {
+        self.buffer
+            .lock()
+            .read_end
+            .as_ref()
+            .and_then(Weak::upgrade)
+    }
+
+    fn peer_write_end(&self) -> Option<Arc<Pipe>> {
+        self.buffer
+            .lock()
+            .write_end
+            .as_ref()
+            .and_then(Weak::upgrade)
+    }
+
     pub fn read_end_with_buffer(buffer: Arc<Mutex<PipeRingBuffer>>) -> Self {
         Self {
             readable: true,
             writable: false,
             buffer,
-            read_wait: Mutex::new(WaitQueue::new()),
-            write_wait: Mutex::new(WaitQueue::new()),
+            read_wait: EventWaitQueue::new(),
+            write_wait: EventWaitQueue::new(),
         }
     }
     pub fn write_end_with_buffer(buffer: Arc<Mutex<PipeRingBuffer>>) -> Self {
@@ -190,8 +228,8 @@ impl Pipe {
             readable: false,
             writable: true,
             buffer,
-            read_wait: Mutex::new(WaitQueue::new()),
-            write_wait: Mutex::new(WaitQueue::new()),
+            read_wait: EventWaitQueue::new(),
+            write_wait: EventWaitQueue::new(),
         }
     }
 }

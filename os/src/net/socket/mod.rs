@@ -33,7 +33,7 @@ use spin::Mutex;
 use crate::fs::vfs::{
     FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata,
 };
-use crate::fs::vfs::event::EPollEvent;
+use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::fs::vfs::file_system::FileSystem as NewFileSystem;
 use crate::fs::vfs::file_system::{FileSystem, FsInfo, SuperBlock};
 use crate::timer::TimeSpec;
@@ -347,8 +347,16 @@ pub trait Socket: Send + Sync {
         None
     }
 
+    fn recv_event_queue(&self) -> Option<&EventWaitQueue> {
+        None
+    }
+
     /// 获取发送等待队列引用
     fn send_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        None
+    }
+
+    fn send_event_queue(&self) -> Option<&EventWaitQueue> {
         None
     }
 
@@ -357,8 +365,16 @@ pub trait Socket: Send + Sync {
         None
     }
 
+    fn connect_event_queue(&self) -> Option<&EventWaitQueue> {
+        None
+    }
+
     /// 获取 accept 等待队列引用
     fn accept_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        None
+    }
+
+    fn accept_event_queue(&self) -> Option<&EventWaitQueue> {
         None
     }
 
@@ -478,10 +494,22 @@ impl IndexNode for SocketFile {
             .or_else(|| self.inner.accept_wait_queue())
     }
 
+    fn read_event_queue(&self) -> Option<&EventWaitQueue> {
+        self.inner
+            .recv_event_queue()
+            .or_else(|| self.inner.accept_event_queue())
+    }
+
     fn write_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
         self.inner
             .send_wait_queue()
             .or_else(|| self.inner.connect_wait_queue())
+    }
+
+    fn write_event_queue(&self) -> Option<&EventWaitQueue> {
+        self.inner
+            .send_event_queue()
+            .or_else(|| self.inner.connect_event_queue())
     }
 
     fn ioctl(
@@ -658,8 +686,8 @@ pub fn wake_raw_waiters() {
                 .raw_socket(*handler, |s| s.can_recv())
                 .unwrap_or(false);
             if can_recv {
-                if let Some(wq) = socket.recv_wait_queue() {
-                    wq.lock().wake_at_most(1);
+                if let Some(wq) = socket.recv_event_queue() {
+                    wq.notify_events_at_most(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM, 1);
                 }
             }
         } else {

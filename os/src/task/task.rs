@@ -2,7 +2,7 @@ use super::pid::RecycleAllocator;
 use super::process::ProcessControlBlock;
 use super::registry;
 use super::signal::*;
-use super::threads::Futex;
+use super::threads::{futex_wake_shared, Futex};
 use super::TaskContext;
 use super::{
     tid_alloc, trap_cx_bottom_from_slot, ustack_bottom_from_slot, TidHandle,
@@ -14,7 +14,7 @@ use crate::hal::TrapImpl;
 use crate::hal::{kstack_alloc, KernelStack};
 use crate::hal::{trap_handler, TrapContext};
 use crate::mm::PageTableImpl;
-use crate::mm::{AddressSpace, PhysPageNum, UserPtrMut, VirtAddr, KERNEL_SPACE};
+use crate::mm::{AddressSpace, FaultAccess, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::syscall::CloneFlags;
 use crate::syscall::errno::ENOMEM;
 use crate::timer::{ITimerVal, TimeSpec, TimeVal};
@@ -307,6 +307,28 @@ fn align_up(addr: usize, align: usize) -> usize {
 }
 
 impl TaskControlBlock {
+    fn write_clear_child_tid_word(&self, addr: usize) -> Result<(Option<usize>, usize), isize> {
+        let bytes = 0u32.to_ne_bytes();
+        let vm = self.process.vm();
+        let mut vm = vm.lock();
+        let base_va = VirtAddr::from(addr);
+        let before_key = vm
+            .translate(base_va.floor())
+            .map(|ppn| (ppn.0 << 12) + base_va.page_offset());
+        let mut after_key = None;
+        for (offset, byte) in bytes.iter().enumerate() {
+            let va = VirtAddr::from(addr + offset);
+            let pa = vm.fault_in_user_va(va, FaultAccess::Store)?;
+            if offset == 0 {
+                after_key = Some((pa.floor().0 << 12) + pa.page_offset());
+            }
+            pa.floor().get_bytes_array()[pa.page_offset()] = *byte;
+        }
+        after_key
+            .map(|key| (before_key, key))
+            .ok_or(crate::syscall::errno::EFAULT)
+    }
+
     /// 获取任务内部状态的互斥锁
     pub fn acquire_inner_lock(&self) -> MutexGuard<TaskControlBlockInner> {
         self.inner.lock()
@@ -337,7 +359,10 @@ impl TaskControlBlock {
                 return false;
             }
             inner.task_status = TaskStatus::Zombie;
-            inner.clear_child_tid
+            let clear_child_tid = inner.clear_child_tid;
+            inner.clear_child_tid = 0;
+            inner.robust_list = RobustList::default();
+            clear_child_tid
         };
 
         if clear_child_tid != 0 {
@@ -345,9 +370,15 @@ impl TaskControlBlock {
                 "[do_exit] do futex wake on clear_child_tid: {:X}",
                 clear_child_tid
             );
-            match UserPtrMut::from_addr(clear_child_tid).write(self.get_user_token(), &0u32) {
-                Ok(()) => {
+            match self.write_clear_child_tid_word(clear_child_tid) {
+                Ok((before_key, after_key)) => {
                     self.process.futex().lock().wake(clear_child_tid, 1);
+                    if let Some(before_key) = before_key {
+                        futex_wake_shared(before_key, 1);
+                    }
+                    if before_key != Some(after_key) {
+                        futex_wake_shared(after_key, 1);
+                    }
                 }
                 Err(_) => log::warn!("invalid clear_child_tid"),
             };

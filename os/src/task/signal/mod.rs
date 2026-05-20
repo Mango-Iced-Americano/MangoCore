@@ -12,7 +12,7 @@ use crate::config::*;
 use crate::mm::{UserPtr, UserPtrMut};
 use crate::syscall::errno::*;
 use crate::task::{
-    block_current_and_run_next, exit_current_and_run_next, exit_group_and_run_next,
+    exit_current_and_run_next, exit_group_and_run_next, WaitQueue,
 };
 
 use super::current_task;
@@ -517,6 +517,18 @@ pub fn has_actionable_signal(task: &TaskControlBlock) -> bool {
     false
 }
 
+fn wait_for_default_stop_signal() {
+    let wait_queue = spin::Mutex::new(WaitQueue::new());
+    let _ = WaitQueue::wait_event_interruptible(&wait_queue, || {
+        let task = current_task()?;
+        if pending_unblocked_signals(&task).contains(Signals::SIGCONT) {
+            Some(0)
+        } else {
+            None
+        }
+    });
+}
+
 /// 执行信号处理
 /// 在从内核返回到用户空间前调用
 pub fn do_signal() {
@@ -748,7 +760,7 @@ pub fn do_signal() {
                     drop(inner);
                     drop(sighand);
                     drop(task);
-                    block_current_and_run_next();
+                    wait_for_default_stop_signal();
                     // because this loop require `inner`, and we have `drop(inner)` above, so `break` is compulsory
                     // this would cause some signals won't be handled immediately when this process resumes
                     // but it doesn't matter, maybe

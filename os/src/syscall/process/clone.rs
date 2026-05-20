@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 
 use crate::config::SYSTEM_TASK_LIMIT;
-use crate::mm::UserPtrMut;
+use crate::mm::{FaultAccess, UserPtrMut, VirtAddr};
 use crate::show_frame_consumption;
 use crate::syscall::errno::*;
 use crate::task::{current_task, signal::Signals, ProcessManager, TaskControlBlock};
@@ -45,6 +45,25 @@ bitflags! {
         const CLONE_NEWNET          =   0x40000000;
         const CLONE_IO              =   0x80000000;
     }
+}
+
+fn write_u32_to_task_user(
+    task: &Arc<TaskControlBlock>,
+    ptr: *mut u32,
+    value: u32,
+) -> Result<(), isize> {
+    if ptr.is_null() {
+        return Err(EFAULT);
+    }
+
+    let bytes = value.to_ne_bytes();
+    let vm = task.process.vm();
+    let mut vm = vm.lock();
+    for (offset, byte) in bytes.iter().enumerate() {
+        let pa = vm.fault_in_user_va(VirtAddr::from(ptr as usize + offset), FaultAccess::Store)?;
+        pa.floor().get_bytes_array()[pa.page_offset()] = *byte;
+    }
+    Ok(())
 }
 
 /// # Explanation of Parameters
@@ -123,12 +142,12 @@ pub fn sys_clone(
     }
     // todo: CLONE_CHILD_SETTID标志被设置，但是ctid指针为零，会出现地址错误，干脆全注释掉
     if flags.contains(CloneFlags::CLONE_CHILD_SETTID) {
-        match UserPtrMut::new(ctid).write(child.get_user_token(), &(new_tid as u32)) {
+        match write_u32_to_task_user(&child, ctid, new_tid as u32) {
             Ok(()) => {}
-            Err(errno) => log::warn!(
-                "[sys_clone] Failed to set child_tid at {:?} with errno {}, but still create the thread",
-                ctid, errno
-            ),
+            Err(errno) => {
+                child.cleanup_unpublished_clone(flags.contains(CloneFlags::CLONE_VM));
+                return errno;
+            }
         };
     }
     if flags.contains(CloneFlags::CLONE_CHILD_CLEARTID) {

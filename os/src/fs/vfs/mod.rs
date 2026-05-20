@@ -34,7 +34,7 @@ use alloc::{string::String, sync::Arc, vec::Vec};
 use core::any::Any;
 use core::fmt::Debug;
 
-pub use file::{FdTable, File, FileFlags, FileMode, PollWaitQueue, SeekFrom};
+pub use file::{EventQueueHandle, FdTable, File, FileFlags, FileMode, PollWaitQueue, SeekFrom};
 pub use file_system::{FileSystem, FsInfo, SuperBlock};
 pub use index_node::IndexNode;
 pub use mount::{MountFS, MountFSInode, MountFlags, MountList, MountPath};

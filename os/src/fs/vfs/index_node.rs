@@ -285,9 +285,20 @@ pub trait IndexNode: Any + Send + Sync + Debug {
         None
     }
 
+    /// 返回读端事件队列（可选）
+    /// epoll 使用事件队列建立持久订阅；ppoll/pselect 仍可通过其中的 WaitQueue 睡眠。
+    fn read_event_queue(&self) -> Option<&super::event::EventWaitQueue> {
+        None
+    }
+
     /// 返回写端等待队列（可选）
     /// 仅需要阻塞写的设备（Pipe、Socket 等）需要实现此方法。
     fn write_wait_queue(&self) -> Option<&spin::Mutex<crate::task::WaitQueue>> {
+        None
+    }
+
+    /// 返回写端事件队列（可选）
+    fn write_event_queue(&self) -> Option<&super::event::EventWaitQueue> {
         None
     }
 

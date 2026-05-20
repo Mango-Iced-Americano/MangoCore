@@ -18,6 +18,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::{Mutex, MutexGuard};
 
 use super::{FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata};
+use super::event::EventWaitQueue;
 use crate::task::WaitQueue;
 use crate::config::SYSTEM_FD_LIMIT;
 
@@ -461,6 +462,23 @@ impl PollWaitQueue {
     }
 }
 
+#[derive(Clone)]
+pub struct EventQueueHandle {
+    _inode: Arc<dyn IndexNode>,
+    queue: *const EventWaitQueue,
+}
+
+unsafe impl Send for EventQueueHandle {}
+unsafe impl Sync for EventQueueHandle {}
+
+impl EventQueueHandle {
+    pub fn queue(&self) -> &EventWaitQueue {
+        // `EventQueueHandle` keeps the inode Arc alive, so the queue reference
+        // returned by `IndexNode` remains valid for this poll/epoll cycle.
+        unsafe { &*self.queue }
+    }
+}
+
 impl File {
     /// 根据 inode 创建新 File
     pub fn new(inode: Arc<dyn IndexNode>, flags: FileFlags) -> Result<Self, SyscallErr> {
@@ -697,6 +715,12 @@ impl File {
     }
 
     pub fn read_wait_queue(&self) -> Option<PollWaitQueue> {
+        if let Some(queue) = self.inode.read_event_queue() {
+            return Some(PollWaitQueue {
+                _inode: self.inode.clone(),
+                queue: queue.wait_queue() as *const Mutex<WaitQueue>,
+            });
+        }
         let queue = self.inode.read_wait_queue()? as *const Mutex<WaitQueue>;
         Some(PollWaitQueue {
             _inode: self.inode.clone(),
@@ -705,8 +729,30 @@ impl File {
     }
 
     pub fn write_wait_queue(&self) -> Option<PollWaitQueue> {
+        if let Some(queue) = self.inode.write_event_queue() {
+            return Some(PollWaitQueue {
+                _inode: self.inode.clone(),
+                queue: queue.wait_queue() as *const Mutex<WaitQueue>,
+            });
+        }
         let queue = self.inode.write_wait_queue()? as *const Mutex<WaitQueue>;
         Some(PollWaitQueue {
+            _inode: self.inode.clone(),
+            queue,
+        })
+    }
+
+    pub fn read_event_queue(&self) -> Option<EventQueueHandle> {
+        let queue = self.inode.read_event_queue()? as *const EventWaitQueue;
+        Some(EventQueueHandle {
+            _inode: self.inode.clone(),
+            queue,
+        })
+    }
+
+    pub fn write_event_queue(&self) -> Option<EventQueueHandle> {
+        let queue = self.inode.write_event_queue()? as *const EventWaitQueue;
+        Some(EventQueueHandle {
             _inode: self.inode.clone(),
             queue,
         })
