@@ -146,7 +146,7 @@ fn metadata_to_statx(meta: &vfs::Metadata, mask: u32) -> Statx {
     )
 }
 
-fn open_file_at(dirfd: usize, path: &str, flags: OpenFlags) -> Result<vfs::File, isize> {
+fn open_file_at(dirfd: usize, path: &str, flags: OpenFlags, mode: u32) -> Result<vfs::File, isize> {
     let start = resolve_start_inode(dirfd)?;
     if path.is_empty() {
         let md = start.metadata().map_err(|e| -(e as isize))?;
@@ -181,7 +181,7 @@ fn open_file_at(dirfd: usize, path: &str, flags: OpenFlags) -> Result<vfs::File,
             }
             let (parent, leaf) = vfs_lookup_parent_for_start(&start, path)?;
             let inode = parent
-                .create(&leaf, FileType::File, vfs::InodeMode::S_IRWXUGO)
+                .create(&leaf, FileType::File, vfs::InodeMode::from_bits_truncate(mode))
                 .map_err(|e| -(e as isize))?;
             vfs::File::new(inode, _open_flags_to_vfs_flags(flags)).map_err(|e| -(e as isize))
         }
@@ -426,7 +426,7 @@ pub fn sys_splice(
 /// # Warning
 /// `fs` & `files` is locked in this function
 fn __openat(dirfd: usize, path: &str) -> Result<vfs::File, isize> {
-    open_file_at(dirfd, path, OpenFlags::O_RDONLY)
+    open_file_at(dirfd, path, OpenFlags::O_RDONLY, 0)
 }
 
 pub fn sys_getcwd(buf: usize, size: usize) -> isize {
@@ -1359,12 +1359,12 @@ pub fn sys_openat(dirfd: usize, path: *const u8, flags: u32, mode: u32) -> isize
             return EINVAL;
         }
     };
-    let mode = StatMode::from_bits(mode);
+    let _mode = StatMode::from_bits(mode);
     info!(
         "[sys_openat] dirfd: {}, path: {}, flags: {:?}, mode: {:?}",
-        dirfd as isize, path, flags, mode
+        dirfd as isize, path, flags, _mode
     );
-    let new_file = match open_file_at(dirfd, &path, flags) {
+    let new_file = match open_file_at(dirfd, &path, flags, mode) {
         Ok(file) => file,
         Err(errno) => return errno,
     };
