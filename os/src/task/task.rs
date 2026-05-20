@@ -582,20 +582,27 @@ impl TaskControlBlock {
         } else {
             // 复制地址空间（进程）
             crate::mm::frame_reserve(16);
-            Arc::new(Mutex::new(AddressSpace::from_existing_user(
-                &mut parent_vm.lock(),
-            )?))
+            let copied = AddressSpace::from_existing_user(&mut parent_vm.lock())?;
+            Arc::new(Mutex::new(copied))
         };
 
         // 共享地址空间时，trap context 的虚拟地址也共享，必须复用同一个用户资源槽位分配器。
+        // fork 复制出独立地址空间时，子进程沿用当前线程的 slot：slot 是地址空间内布局索引，
+        // 不是全局线程 ID，独立地址空间之间可以重复使用同一个 slot 号。
         let user_res_slot_allocator = if share_vm {
             self.process.user_res_slot_allocator()
         } else {
-            Arc::new(Mutex::new(RecycleAllocator::new()))
+            let allocator = self.process.user_res_slot_allocator();
+            let cloned_allocator = allocator.lock().clone();
+            Arc::new(Mutex::new(cloned_allocator))
         };
         // 在内核空间分配一个用户可见 tid 和一个内核栈
         let tid_handle = tid_alloc();
-        let user_res_slot = user_res_slot_allocator.lock().alloc();
+        let user_res_slot = if share_vm {
+            user_res_slot_allocator.lock().alloc()
+        } else {
+            self.user_res_slot
+        };
         let process = if flags.contains(CloneFlags::CLONE_THREAD) {
             self.process.clone()
         } else {

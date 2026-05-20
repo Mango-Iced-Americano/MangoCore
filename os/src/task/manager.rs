@@ -537,10 +537,11 @@ impl WaitQueue {
     where
         F: FnMut() -> Option<isize>,
     {
+        if let Some(res) = cond() {
+            return WaitResult::Ready(res);
+        }
+
         loop {
-            if let Some(res) = cond() {
-                return WaitResult::Ready(res);
-            }
             if deadline
                 .map(|deadline| TimeSpec::now() >= deadline)
                 .unwrap_or(false)
@@ -549,12 +550,6 @@ impl WaitQueue {
             }
 
             let task = current_task().unwrap();
-            if signal_check {
-                if has_actionable_signal(&task) {
-                    return WaitResult::Interrupted;
-                }
-                discard_non_actionable_unblocked_signals(&task);
-            }
 
             let mut guard = wq.lock();
             guard.prepare_to_wait(Arc::downgrade(&task));
@@ -569,6 +564,13 @@ impl WaitQueue {
             {
                 guard.finish_wait(&task);
                 return WaitResult::TimedOut;
+            }
+            if signal_check {
+                if has_actionable_signal(&task) {
+                    guard.finish_wait(&task);
+                    return WaitResult::Interrupted;
+                }
+                discard_non_actionable_unblocked_signals(&task);
             }
 
             if let Some(deadline) = deadline {
@@ -612,11 +614,15 @@ impl WaitQueue {
         Q: for<'a> FnMut(&'a mut T) -> &'a mut WaitQueue,
         F: FnMut(&mut T) -> Option<isize>,
     {
-        loop {
+        {
             let mut guard = lock.lock();
             if let Some(res) = cond(&mut guard) {
                 return WaitResult::Ready(res);
             }
+        }
+
+        loop {
+            let mut guard = lock.lock();
             if deadline
                 .map(|deadline| TimeSpec::now() >= deadline)
                 .unwrap_or(false)
@@ -625,12 +631,6 @@ impl WaitQueue {
             }
 
             let task = current_task().unwrap();
-            if signal_check {
-                if has_actionable_signal(&task) {
-                    return WaitResult::Interrupted;
-                }
-                discard_non_actionable_unblocked_signals(&task);
-            }
 
             queue_of(&mut guard).prepare_to_wait(Arc::downgrade(&task));
             if let Some(res) = cond(&mut guard) {
@@ -643,6 +643,13 @@ impl WaitQueue {
             {
                 queue_of(&mut guard).finish_wait(&task);
                 return WaitResult::TimedOut;
+            }
+            if signal_check {
+                if has_actionable_signal(&task) {
+                    queue_of(&mut guard).finish_wait(&task);
+                    return WaitResult::Interrupted;
+                }
+                discard_non_actionable_unblocked_signals(&task);
             }
             if let Some(deadline) = deadline {
                 wait_with_timeout(Arc::downgrade(&task), deadline);
@@ -663,15 +670,6 @@ impl WaitQueue {
             drop(guard);
             task.acquire_inner_lock().refresh_real_timer();
 
-            if signal_check && has_actionable_signal(&task) {
-                return WaitResult::Interrupted;
-            }
-            if deadline
-                .map(|deadline| TimeSpec::now() >= deadline)
-                .unwrap_or(false)
-            {
-                return WaitResult::TimedOut;
-            }
             if !removed {
                 if let Some(res) = normal_wake_result {
                     return WaitResult::Ready(res);

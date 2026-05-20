@@ -4,6 +4,7 @@ use lazy_static::*;
 use spin::Mutex;
 
 /// 用于分配可回收 id 的结构体
+#[derive(Clone)]
 pub struct RecycleAllocator {
     /// 当前分配的id
     current: usize,
