@@ -67,4 +67,6 @@ pub enum DiskInodeType {
     Block,
     Socket,
     Link,
+    /// Unknown/invalid inode type (e.g. corrupted disk metadata)
+    Unknown,
 }

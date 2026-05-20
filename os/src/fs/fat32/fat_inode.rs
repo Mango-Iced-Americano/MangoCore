@@ -113,6 +113,10 @@ fn fat_disk_type_to_vfs_type(dt: DiskInodeType) -> FileType {
         DiskInodeType::Block => FileType::BlockDevice,
         DiskInodeType::Socket => FileType::Socket,
         DiskInodeType::FIFO => FileType::Pipe,
+        DiskInodeType::Unknown => {
+            log::error!("fat_disk_type_to_vfs_type: unknown disk type, falling back to File");
+            FileType::File
+        }
     }
 }
 

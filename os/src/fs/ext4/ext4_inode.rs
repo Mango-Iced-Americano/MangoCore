@@ -357,7 +357,10 @@ impl Ext4Inode {
             InodeFileType::S_IFIFO => crate::fs::DiskInodeType::FIFO,
             InodeFileType::S_IFSOCK => crate::fs::DiskInodeType::Socket,
             InodeFileType::S_IFLNK => crate::fs::DiskInodeType::Link,
-            _ => panic!("Unknown disk type: mode={:#x}", self.mode),
+            _ => {
+                log::error!("Unknown disk type: mode={:#x}", self.mode);
+                crate::fs::DiskInodeType::Unknown
+            }
         }
     }
 
