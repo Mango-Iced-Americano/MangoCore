@@ -3,44 +3,48 @@ use alloc::sync::Arc;
 use crate::mm::{UserPtr, UserPtrMut};
 use crate::syscall::errno::*;
 use crate::task::{
-    add_kernel_timer, current_task, current_user_token, signal::Signals, Rusage, TimerAction,
-    WaitQueue, WaitResult,
+    add_kernel_timer, current_task, current_user_token, signal::Signals,
+    sleep_relative_interruptible, sleep_until_interruptible, Rusage, TimerAction,
 };
-use crate::timer::{get_time_ms, ITimerVal, TimeSpec, TimeVal, TimeZone, Times};
+use crate::timer::{
+    get_time_ms, ITimerVal, TimeSpec, TimeVal, TimeZone, Times, NSEC_PER_SEC,
+};
 use log::{info, trace};
 
+const CLOCK_REALTIME: usize = 0;
+const CLOCK_MONOTONIC: usize = 1;
+const CLOCK_PROCESS_CPUTIME_ID: usize = 2;
+const CLOCK_THREAD_CPUTIME_ID: usize = 3;
+const CLOCK_MONOTONIC_RAW: usize = 4;
+const CLOCK_REALTIME_COARSE: usize = 5;
+const CLOCK_MONOTONIC_COARSE: usize = 6;
+const CLOCK_BOOTTIME: usize = 7;
+const CLOCK_REALTIME_ALARM: usize = 8;
+const CLOCK_BOOTTIME_ALARM: usize = 9;
+const CLOCK_TAI: usize = 11;
+const TIMER_ABSTIME: u32 = 1;
+
 pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
-    if req.is_null() {
-        return EINVAL;
-    }
-    let task = current_task().unwrap();
-    let token = task.get_user_token();
+    let token = current_user_token();
     let req = match UserPtr::new(req).read(token) {
         Ok(req) => req,
         Err(errno) => return errno,
     };
+    if !is_valid_timespec(req) {
+        return EINVAL;
+    }
 
-    let end = TimeSpec::now() + req;
-    let wait_queue = spin::Mutex::new(WaitQueue::new());
-    let wait_result =
-        WaitQueue::wait_event_interruptible_timeout(&wait_queue, || None::<isize>, end);
-    let now = TimeSpec::now();
-
-    // 先释放 inner 锁再检查信号，避免与 has_actionable_signal 死锁
-    // 参考 pselect/ppoll 的信号检查模式
-    if wait_result == WaitResult::Interrupted {
-        // 被可操作信号打断 → 返回剩余时间 + EINTR
-        if !rem.is_null() {
-            UserPtrMut::new(rem).write(token, &(end - now)).unwrap();
+    match sleep_relative_interruptible(req) {
+        Ok(()) => SUCCESS,
+        Err(interrupted) => {
+            if !rem.is_null() {
+                if let Err(errno) = UserPtrMut::new(rem).write(token, &interrupted.remaining) {
+                    return errno;
+                }
+            }
+            EINTR
         }
-        return EINTR;
     }
-
-    // 正常超时返回
-    if !rem.is_null() {
-        UserPtrMut::new(rem).write(token, &TimeSpec::new()).unwrap();
-    }
-    SUCCESS
 }
 
 pub fn sys_setitimer(
@@ -172,18 +176,66 @@ pub fn sys_clock_nanosleep(
     rqtp: *const TimeSpec,
     rmtp: *mut TimeSpec,
 ) -> isize {
-    if !rqtp.is_null() {
-        let token = current_user_token();
-        let timespec = match UserPtr::new(rqtp).read(token) {
-            Ok(timespec) => timespec,
-            Err(errno) => return errno,
-        };
-        info!(
-            "[sys_clock_nanosleep] clk_id: {}, flags: {:?}, rqtp: {:?}, rmtp: {:?}",
-            clk_id, flags, timespec, rmtp
-        );
+    if flags & !TIMER_ABSTIME != 0 {
+        return EINVAL;
     }
-    SUCCESS
+    if let Err(errno) = check_sleep_clock(clk_id) {
+        return errno;
+    }
+
+    let token = current_user_token();
+    let req = match UserPtr::new(rqtp).read(token) {
+        Ok(req) => req,
+        Err(errno) => return errno,
+    };
+    if !is_valid_timespec(req) {
+        return EINVAL;
+    }
+
+    info!(
+        "[sys_clock_nanosleep] clk_id: {}, flags: {:?}, rqtp: {:?}, rmtp: {:?}",
+        clk_id, flags, req, rmtp
+    );
+
+    if flags & TIMER_ABSTIME != 0 {
+        match sleep_until_interruptible(req) {
+            Ok(()) => SUCCESS,
+            Err(_) => EINTR,
+        }
+    } else {
+        match sleep_relative_interruptible(req) {
+            Ok(()) => SUCCESS,
+            Err(interrupted) => {
+                if !rmtp.is_null() {
+                    if let Err(errno) =
+                        UserPtrMut::new(rmtp).write(token, &interrupted.remaining)
+                    {
+                        return errno;
+                    }
+                }
+                EINTR
+            }
+        }
+    }
+}
+
+fn is_valid_timespec(timespec: TimeSpec) -> bool {
+    timespec.tv_sec <= isize::MAX as usize && timespec.tv_nsec < NSEC_PER_SEC
+}
+
+fn check_sleep_clock(clk_id: usize) -> Result<(), isize> {
+    match clk_id {
+        CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_BOOTTIME => Ok(()),
+        CLOCK_PROCESS_CPUTIME_ID
+        | CLOCK_THREAD_CPUTIME_ID
+        | CLOCK_MONOTONIC_RAW
+        | CLOCK_REALTIME_COARSE
+        | CLOCK_MONOTONIC_COARSE
+        | CLOCK_REALTIME_ALARM
+        | CLOCK_BOOTTIME_ALARM
+        | CLOCK_TAI => Err(EOPNOTSUPP),
+        _ => Err(EINVAL),
+    }
 }
 
 pub fn sys_times(buf: *mut Times) -> isize {

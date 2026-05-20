@@ -8,6 +8,7 @@ mod process;
 mod process_manager;
 mod processor;
 mod registry;
+mod sleep;
 pub mod signal;
 mod task;
 pub mod threads;
@@ -41,6 +42,7 @@ pub use registry::{
     find_task_by_tid,
 };
 pub use signal::*;
+pub use sleep::{sleep_relative_interruptible, sleep_until_interruptible};
 pub use task::{FsStatus, RobustList, Rusage, TaskControlBlock, TaskStatus};
 
 use self::processor::PROCESSOR;
