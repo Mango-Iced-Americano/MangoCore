@@ -108,6 +108,19 @@ fn user_cstring(token: usize, ptr: *const u8) -> Result<String, isize> {
     UserCString::new(ptr).read(token)
 }
 
+fn validate_path_len(path: &str) -> Result<(), isize> {
+    if path.len() >= vfs::MAX_PATHLEN {
+        return Err(ENAMETOOLONG);
+    }
+    if path
+        .split('/')
+        .any(|component| component.len() > vfs::NAME_MAX)
+    {
+        return Err(ENAMETOOLONG);
+    }
+    Ok(())
+}
+
 fn metadata_to_stat(meta: &vfs::Metadata) -> Stat {
     Stat {
         st_dev: meta.dev_id as u64,
@@ -131,7 +144,7 @@ fn metadata_to_stat(meta: &vfs::Metadata) -> Stat {
 
 fn metadata_to_statx(meta: &vfs::Metadata, mask: u32) -> Statx {
     let stat = metadata_to_stat(meta);
-    Statx::new(
+    let mut statx = Statx::new(
         mask,
         stat.get_nlink(),
         stat.get_mode() as u16,
@@ -144,7 +157,10 @@ fn metadata_to_statx(meta: &vfs::Metadata, mask: u32) -> Statx {
         (stat.get_rdev() & 0xff) as u32,
         ((stat.get_dev() & 0xffff_00) >> 8) as u32,
         (stat.get_dev() & 0xff) as u32,
-    )
+    );
+    statx.stx_uid = stat.st_uid;
+    statx.stx_gid = stat.st_gid;
+    statx
 }
 
 fn open_file_at(
@@ -1348,9 +1364,84 @@ pub fn sys_fchmodat(dirfd: usize, path: *const u8, mode: u32, _flags: u32) -> is
     }
 }
 
-pub fn sys_fchownat() -> isize {
-    // 内核暂无权限系统，假装返回成功
-    0
+bitflags! {
+    pub struct FchownatFlags: u32 {
+        const AT_SYMLINK_NOFOLLOW = 0x100;
+        const AT_NO_AUTOMOUNT = 0x800;
+        const AT_EMPTY_PATH = 0x1000;
+    }
+}
+
+pub fn sys_fchownat(
+    dirfd: usize,
+    path: *const u8,
+    owner: u32,
+    group: u32,
+    flags: u32,
+) -> isize {
+    const CHOWN_ID_NO_CHANGE: u32 = u32::MAX;
+
+    let token = current_user_token();
+    let path = match user_cstring(token, path) {
+        Ok(path) => path,
+        Err(errno) => return errno,
+    };
+    if let Err(errno) = validate_path_len(&path) {
+        return errno;
+    }
+
+    let flags = match FchownatFlags::from_bits(flags) {
+        Some(flags) => flags,
+        None => return EINVAL,
+    };
+    if path.is_empty() && !flags.contains(FchownatFlags::AT_EMPTY_PATH) {
+        return ENOENT;
+    }
+
+    let follow_final = !flags.contains(FchownatFlags::AT_SYMLINK_NOFOLLOW);
+    let inode = if path.is_empty() {
+        match resolve_start_inode(dirfd) {
+            Ok(inode) => inode,
+            Err(errno) => return errno,
+        }
+    } else {
+        let start = if path.starts_with('/') {
+            vfs_root().mountpoint_root_inode()
+        } else {
+            match resolve_start_inode(dirfd) {
+                Ok(inode) => inode,
+                Err(errno) => return errno,
+            }
+        };
+        match vfs_lookup(&start, &path, follow_final) {
+            Ok(inode) => inode,
+            Err(errno) => return errno,
+        }
+    };
+
+    let mut meta = match inode.metadata() {
+        Ok(meta) => meta,
+        Err(e) => return -(e as isize),
+    };
+
+    let chown_requested = owner != CHOWN_ID_NO_CHANGE || group != CHOWN_ID_NO_CHANGE;
+    if owner != CHOWN_ID_NO_CHANGE {
+        meta.uid = owner;
+    }
+    if group != CHOWN_ID_NO_CHANGE {
+        meta.gid = group;
+    }
+    if chown_requested {
+        meta.mode.remove(vfs::InodeMode::S_ISUID);
+        if meta.mode.contains(vfs::InodeMode::S_IXGRP) {
+            meta.mode.remove(vfs::InodeMode::S_ISGID);
+        }
+    }
+
+    match inode.set_metadata(&meta) {
+        Ok(()) => SUCCESS,
+        Err(e) => -(e as isize),
+    }
 }
 
 pub fn sys_chdir(path: *const u8) -> isize {
@@ -1363,6 +1454,9 @@ pub fn sys_chdir(path: *const u8) -> isize {
     info!("[sys_chdir] path: {}", path);
     if path.is_empty() {
         return ENOENT;
+    }
+    if let Err(errno) = validate_path_len(&path) {
+        return errno;
     }
 
     // 克隆当前 cwd 状态后释放锁，避免在 find/open 持锁
