@@ -1,7 +1,7 @@
 //! /proc/config — 内核编译配置（供 LTP 使用）
 
-use crate::utils::error::SyscallErr;
 use crate::fs::procfs::proc_read_str;
+use crate::utils::error::SyscallErr;
 use alloc::string::String;
 use core::fmt::Write;
 
@@ -29,9 +29,21 @@ pub fn config_content(
     // ── Memory ──
     let _ = writeln!(s, "CONFIG_PAGE_SIZE={}", crate::config::PAGE_SIZE);
     let _ = writeln!(s, "CONFIG_MEMORY_SIZE={}", crate::config::MEMORY_SIZE);
-    let _ = writeln!(s, "CONFIG_KERNEL_HEAP_SIZE={}", crate::config::KERNEL_HEAP_SIZE);
-    let _ = writeln!(s, "CONFIG_SYSTEM_TASK_LIMIT={}", crate::config::SYSTEM_TASK_LIMIT);
-    let _ = writeln!(s, "CONFIG_SYSTEM_FD_LIMIT={}", crate::config::SYSTEM_FD_LIMIT);
+    let _ = writeln!(
+        s,
+        "CONFIG_KERNEL_HEAP_SIZE={}",
+        crate::config::KERNEL_HEAP_SIZE
+    );
+    let _ = writeln!(
+        s,
+        "CONFIG_SYSTEM_TASK_LIMIT={}",
+        crate::config::SYSTEM_TASK_LIMIT
+    );
+    let _ = writeln!(
+        s,
+        "CONFIG_SYSTEM_FD_LIMIT={}",
+        crate::config::SYSTEM_FD_LIMIT
+    );
     #[cfg(feature = "swap")]
     let _ = writeln!(s, "CONFIG_SWAP=y");
     #[cfg(not(feature = "swap"))]
@@ -50,7 +62,7 @@ pub fn config_content(
     let _ = writeln!(s, "CONFIG_DEVFS=y");
     let _ = writeln!(s, "CONFIG_RAMFS=y");
     let _ = writeln!(s, "CONFIG_PAGE_CACHE=y");
-    let _ = writeln!(s, "# CONFIG_TMPFS is not set");
+    let _ = writeln!(s, "CONFIG_TMPFS=y");
 
     // ── Block ──
     let _ = writeln!(s, "CONFIG_BLOCK=y");

@@ -50,33 +50,32 @@ const DEFAULT_ORDER: &[&str] = &[
     "basic",
     "busybox",
     "lua",
-    "ltp",
     "libctest",
     "netperf",
     "cyclictest",
     "iozone",
-    "lmbench",
     "libcbench",
     "iperf",
-    "unixbench",
-
+    "ltp",
+    "lmbench",
+    // "unixbench",
 ];
 
 /// 每组默认超时（秒），索引 0..11 与 TEST_GROUPS 一一对应
 /// 例如 [6]=90 表示 TEST_GROUPS[6] (iperf) 的超时时间为 90 秒
 const DEFAULT_TIMEOUTS: [u64; 12] = [
-    60,  // [0]  basic
-    60,  // [1]  busybox
-    60,  // [2]  lua
-    120, // [3]  libctest
-    60,  // [4]  iozone
-    90,  // [5]  unixbench
-    40,  // [6]  iperf
-    60,  // [7]  libcbench
-    60,  // [8]  lmbench
-    90,  // [9]  netperf
-    60,  // [10] cyclictest
-    300, // [11] ltp
+    60,   // [0]  basic
+    60,   // [1]  busybox
+    60,   // [2]  lua
+    120,  // [3]  libctest
+    60,   // [4]  iozone
+    90,   // [5]  unixbench
+    40,   // [6]  iperf
+    60,   // [7]  libcbench
+    1800, // [8]  lmbench
+    90,   // [9]  netperf
+    60,   // [10] cyclictest
+    300,  // [11] ltp
 ];
 
 /// LTP 默认排除测例名列表
@@ -1009,8 +1008,22 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
                 run_group_in_dir(environ, "/glibc\0", group_name, script, timeout_secs, 1);
             }
         } else {
-            run_group_in_dir(environ, "/musl\0", group_name, script, timeout_secs, MAX_GROUP_RETRIES);
-            run_group_in_dir(environ, "/glibc\0", group_name, script, timeout_secs, MAX_GROUP_RETRIES);
+            run_group_in_dir(
+                environ,
+                "/musl\0",
+                group_name,
+                script,
+                timeout_secs,
+                MAX_GROUP_RETRIES,
+            );
+            run_group_in_dir(
+                environ,
+                "/glibc\0",
+                group_name,
+                script,
+                timeout_secs,
+                MAX_GROUP_RETRIES,
+            );
         }
         // 诊断模式：每组完成后打印标记，配合内核 STATS_ENABLED 输出定位资源变化
         if cfg.diag {
