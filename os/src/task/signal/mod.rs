@@ -427,8 +427,20 @@ impl SignalStack {
     }
 }
 
+const WAIT_COREDUMP: u32 = 0x80;
+
+fn default_signal_wait_status(signal: Signals) -> u32 {
+    let signum = signal.to_signum().unwrap() as u32;
+    // Linux wait status uses bit 7 to report WCOREDUMP(status).
+    if matches!(signum, 3 | 4 | 5 | 6 | 7 | 8 | 11 | 24 | 25 | 31) {
+        signum | WAIT_COREDUMP
+    } else {
+        signum
+    }
+}
+
 fn exit_current_with_sigsegv() -> ! {
-    exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
+    exit_current_and_run_next(default_signal_wait_status(Signals::SIGSEGV));
 }
 
 /// Signals whose SIG_DFL action is to ignore the signal.
@@ -787,7 +799,7 @@ pub fn do_signal() {
                     drop(inner);
                     drop(sighand);
                     drop(task);
-                    exit_group_and_run_next(signal.to_signum().unwrap() as u32);
+                    exit_group_and_run_next(default_signal_wait_status(signal));
                 }
                 // the current process we are handing is sure to be in RUNNING status, so just ignore SIGCONT
                 // where we really wake up this process is where we sent SIGCONT, such as `sys_kill()`
@@ -812,7 +824,7 @@ pub fn do_signal() {
                     drop(inner);
                     drop(sighand);
                     drop(task);
-                    exit_group_and_run_next(signal.to_signum().unwrap() as u32);
+                    exit_group_and_run_next(default_signal_wait_status(signal));
                 }
             }
         }
