@@ -105,46 +105,38 @@ impl TcpSocket {
         let events = self.pollee.load(Ordering::Acquire);
 
         // accept 等待者：Listening 收到了新连接
-        if !self.accept_waiters.lock().is_empty() {
-            if events & (EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM).bits() != 0 {
-                self.accept_waiters
-                    .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM);
-            }
+        if events & (EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM).bits() != 0 {
+            self.accept_waiters
+                .notify_events_all_if_unlocked(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM);
         }
 
         // connect 等待者：连接已建立（EPOLLOUT）或被拒绝（EPOLLERR / EPOLLHUP）
-        if !self.connect_waiters.lock().is_empty() {
-            if events & (EPollEvent::EPOLLOUT | EPollEvent::EPOLLERR | EPollEvent::EPOLLHUP).bits()
-                != 0
-            {
-                self.connect_waiters
-                    .notify_events_all(EPollEvent::EPOLLOUT | EPollEvent::EPOLLERR | EPollEvent::EPOLLHUP);
-            }
+        if events & (EPollEvent::EPOLLOUT | EPollEvent::EPOLLERR | EPollEvent::EPOLLHUP).bits() != 0
+        {
+            self.connect_waiters.notify_events_all_if_unlocked(
+                EPollEvent::EPOLLOUT | EPollEvent::EPOLLERR | EPollEvent::EPOLLHUP,
+            );
         }
 
         // recv 等待者：有数据可读或对端关闭
-        if !self.recv_waiters.lock().is_empty() {
-            if events
-                & (EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM | EPollEvent::EPOLLRDHUP).bits()
-                != 0
-            {
-                self.recv_waiters.notify_events_at_most(
-                    EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM | EPollEvent::EPOLLRDHUP,
-                    1,
-                );
-            }
+        if events
+            & (EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM | EPollEvent::EPOLLRDHUP).bits()
+            != 0
+        {
+            self.recv_waiters.notify_events_at_most_if_unlocked(
+                EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM | EPollEvent::EPOLLRDHUP,
+                1,
+            );
         }
 
         // send 等待者：可发送或写端已 shutdown（shutdown 时 send 会返回 EPIPE）
-        if !self.send_waiters.lock().is_empty() {
-            if events & (EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM).bits() != 0
-                || self.write_shutdown.load(Ordering::Acquire)
-            {
-                self.send_waiters.notify_events_at_most(
-                    EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM,
-                    1,
-                );
-            }
+        if events & (EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM).bits() != 0
+            || self.write_shutdown.load(Ordering::Acquire)
+        {
+            self.send_waiters.notify_events_at_most_if_unlocked(
+                EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM,
+                1,
+            );
         }
     }
 

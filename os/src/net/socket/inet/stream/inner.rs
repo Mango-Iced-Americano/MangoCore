@@ -532,7 +532,17 @@ impl Listening {
             self.handles.len()
         );
         for &h in &self.handles {
-            with_tcp_mut(h, |socket| socket.close());
+            with_tcp_mut(h, |socket| {
+                if socket.is_active() {
+                    log::info!(
+                        "[Listening::close] aborting pending handle {} (state={:?})",
+                        h, socket.state()
+                    );
+                    socket.abort();
+                } else {
+                    socket.close();
+                }
+            });
             log::info!(
                 "[Listening::close] push handle {} to TCP_SOCKETS_TO_REMOVE",
                 h

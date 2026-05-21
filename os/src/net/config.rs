@@ -241,8 +241,10 @@ impl<'a> NetInterface<'a> {
         });
 
         // 5. 更新所有 TCP/RAW socket 事件并唤醒等待者
-        // crate::net::wake_tcp_waiters();
-        // crate::net::wake_raw_waiters();
+        if progressed {
+            crate::net::wake_tcp_waiters();
+            crate::net::wake_raw_waiters();
+        }
 
         // Trace: 记录 poll 后仍在连接中的 TCP socket 数
         // {

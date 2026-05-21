@@ -10,7 +10,11 @@ use crate::{
     mm::{UserBuffer, UserBufferWriter, UserPtr, UserPtrMut},
     net::{
         posix::PosixArgsSocketType,
-        socket::inet::{datagram::udp::UdpSocket, raw::raw::RawSocket, stream::TcpSocket},
+        socket::inet::{
+            datagram::udp::UdpSocket,
+            raw::raw::RawSocket,
+            stream::{inner::with_tcp_mut, TcpSocket},
+        },
         syscall::common::MsgFlags,
     },
     task::{current_task, WaitQueue},
@@ -655,17 +659,22 @@ impl dyn Socket {
 
 /// 在每次 poll 后，遍历所有 TCP_SOCKETS，唤醒其等待队列
 pub fn wake_tcp_waiters() {
+    let mut live_sockets: Vec<Arc<TcpSocket>> = Vec::new();
     let mut remove_indices = Vec::new();
-    let sockets = TCP_SOCKETS.lock();
-    for (i, weak_socket) in sockets.iter().enumerate() {
-        if let Some(socket) = weak_socket.upgrade() {
-            socket.wake_if_ready();
-            // socket.wake_wait_queues();
-        } else {
-            remove_indices.push(i);
+    {
+        let sockets = TCP_SOCKETS.lock();
+        for (i, weak_socket) in sockets.iter().enumerate() {
+            if let Some(socket) = weak_socket.upgrade() {
+                live_sockets.push(socket);
+            } else {
+                remove_indices.push(i);
+            }
         }
     }
-    drop(sockets);
+    for socket in &live_sockets {
+        socket.wake_if_ready();
+    }
+    drop(live_sockets);
     if !remove_indices.is_empty() {
         let mut sockets = TCP_SOCKETS.lock();
         for &i in remove_indices.iter().rev() {
@@ -678,23 +687,32 @@ pub fn wake_tcp_waiters() {
 
 /// 在每次 poll 后，遍历所有 RAW_SOCKETS，唤醒其等待队列
 pub fn wake_raw_waiters() {
+    let mut live_sockets: Vec<(SocketHandle, Arc<dyn Socket>)> = Vec::new();
     let mut remove_indices = Vec::new();
-    let sockets = RAW_SOCKETS.lock();
-    for (i, (handler, weak_socket)) in sockets.iter().enumerate() {
-        if let Some(socket) = weak_socket.upgrade() {
-            let can_recv = crate::net::config::NET_INTERFACE
-                .raw_socket(*handler, |s| s.can_recv())
-                .unwrap_or(false);
-            if can_recv {
-                if let Some(wq) = socket.recv_event_queue() {
-                    wq.notify_events_at_most(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM, 1);
-                }
+    {
+        let sockets = RAW_SOCKETS.lock();
+        for (i, (handler, weak_socket)) in sockets.iter().enumerate() {
+            if let Some(socket) = weak_socket.upgrade() {
+                live_sockets.push((*handler, socket));
+            } else {
+                remove_indices.push(i);
             }
-        } else {
-            remove_indices.push(i);
         }
     }
-    drop(sockets);
+    for (handler, socket) in &live_sockets {
+        let can_recv = crate::net::config::NET_INTERFACE
+            .raw_socket(*handler, |s| s.can_recv())
+            .unwrap_or(false);
+        if can_recv {
+            if let Some(wq) = socket.recv_event_queue() {
+                wq.notify_events_at_most_if_unlocked(
+                    EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM,
+                    1,
+                );
+            }
+        }
+    }
+    drop(live_sockets);
     if !remove_indices.is_empty() {
         let mut sockets = RAW_SOCKETS.lock();
         for &i in remove_indices.iter().rev() {

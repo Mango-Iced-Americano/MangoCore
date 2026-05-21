@@ -69,6 +69,10 @@ impl EventWaitQueue {
         self.wait_queue.lock()
     }
 
+    pub fn try_lock(&self) -> Option<MutexGuard<WaitQueue>> {
+        self.wait_queue.try_lock()
+    }
+
     pub fn register(
         &self,
         listener_id: usize,
@@ -107,6 +111,24 @@ impl EventWaitQueue {
     pub fn notify_events_at_most(&self, events: EPollEvent, limit: usize) -> usize {
         self.notify_listeners(events);
         self.wait_queue.lock().wake_at_most(limit)
+    }
+
+    /// 非阻塞版 notify：listener 总是通知，task 唤醒仅在 wait_queue 未被锁定时生效。
+    /// 避免在 WaitQueue::wait_until_interruptible 的 cond 闭包内自死锁。
+    pub fn notify_events_all_if_unlocked(&self, events: EPollEvent) -> usize {
+        self.notify_listeners(events);
+        match self.wait_queue.try_lock() {
+            Some(mut guard) => guard.wake_all(),
+            None => 0,
+        }
+    }
+
+    pub fn notify_events_at_most_if_unlocked(&self, events: EPollEvent, limit: usize) -> usize {
+        self.notify_listeners(events);
+        match self.wait_queue.try_lock() {
+            Some(mut guard) => guard.wake_at_most(limit),
+            None => 0,
+        }
     }
 
     fn notify_listeners(&self, events: EPollEvent) {

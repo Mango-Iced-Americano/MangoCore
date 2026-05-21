@@ -45,14 +45,19 @@ impl Inner {
                             .map_err(|_| SyscallErr::ENOTCONN);
                     }
                     let state = socket.state();
-                    // 对端已关闭写端（收到 FIN），或连接已完全关闭 → 返回 EOF
                     if state == tcp::State::CloseWait
                         || state == tcp::State::Closing
                         || state == tcp::State::LastAck
                         || state == tcp::State::TimeWait
-                        || state == tcp::State::Closed
                     {
                         return Ok(0);
+                    }
+                    if state == tcp::State::Closed {
+                        return Err(SyscallErr::ECONNRESET);
+                    }
+                    // RST（如 listener close 时 abort backlog 连接）→ ECONNRESET
+                    if state == tcp::State::Closed {
+                        return Err(SyscallErr::ECONNRESET);
                     }
 
                     if !socket.may_recv() {
