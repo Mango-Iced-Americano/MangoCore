@@ -872,7 +872,11 @@ impl IndexNode for layout::Ext4OSInode {
     fn set_metadata(&self, metadata: &Metadata) -> Result<(), SyscallErr> {
         let ino = { self.inode.lock().inode_num };
         let cached = self.ext4fs.get_inode_cached(ino);
-        cached.lock().inode.set_mode(metadata.mode.bits() as u16);
+        let mut guard = cached.lock();
+        guard.inode.set_mode(metadata.mode.bits() as u16);
+        guard.dirty = true;
+        drop(guard);
+        self.inode.lock().inode.set_mode(metadata.mode.bits() as u16);
         self.ext4fs.flush_inode(ino).map_err(|e| {
             log::warn!("set_metadata: flush_inode failed for ino={}: {}", ino, e);
             SyscallErr::EIO

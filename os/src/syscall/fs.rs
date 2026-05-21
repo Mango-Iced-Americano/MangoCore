@@ -1276,7 +1276,7 @@ pub fn sys_fchmodat(dirfd: usize, path: *const u8, mode: u32, _flags: u32) -> is
     let token = task.get_user_token();
     let path_str = match UserCString::from_addr(path as usize).read(token) {
         Ok(s) => s,
-        Err(_) => return -EFAULT,
+        Err(_) => return EFAULT,
     };
     let inode = if dirfd == AT_FDCWD || path_str.starts_with('/') {
         match vfs_lookup_absolute(&path_str) {
@@ -1288,7 +1288,7 @@ pub fn sys_fchmodat(dirfd: usize, path: *const u8, mode: u32, _flags: u32) -> is
             let fd_table = task.files.lock();
             match fd_table.get_file(dirfd) {
                 Ok(f) => f.inode.clone(),
-                Err(_) => return -EBADF,
+                Err(_) => return EBADF,
             }
         };
         match vfs_lookup(&dir_inode, &path_str, true) {
@@ -1335,7 +1335,9 @@ pub fn sys_mknodat(dirfd: usize, path: *const u8, mode: u32, _dev: usize) -> isi
         m if m == vfs::InodeMode::S_IFIFO => FileType::Pipe,
         m if m == vfs::InodeMode::S_IFBLK => FileType::BlockDevice,
         m if m == vfs::InodeMode::S_IFCHR => FileType::CharDevice,
-        _ => FileType::File,
+        m if m == vfs::InodeMode::S_IFSOCK => FileType::Socket,
+        m if m == vfs::InodeMode::S_IFREG || m == vfs::InodeMode::S_IFDIR => return EINVAL,
+        _ => return EINVAL,
     };
     let perm = vfs::InodeMode::from_bits_truncate(mode) & vfs::InodeMode::S_IALLUGO;
     match parent.create(&leaf, file_type, perm) {
@@ -1530,7 +1532,7 @@ pub fn sys_mkdirat(dirfd: usize, path: *const u8, mode: u32) -> isize {
         Ok(result) => result,
         Err(errno) => return errno,
     };
-    match parent.mkdir(&leaf, vfs::InodeMode::S_IRWXUGO) {
+    match parent.mkdir(&leaf, vfs::InodeMode::from_bits_truncate(mode) & vfs::InodeMode::S_IALLUGO) {
         Ok(_) => SUCCESS,
         Err(e) => -(e as isize),
     }
