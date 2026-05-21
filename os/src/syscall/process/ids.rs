@@ -3,7 +3,9 @@ use crate::mm::{
     copy_to_user, translated_byte_buffer, UserAccess, UserBuffer, UserPtr, UserPtrMut,
 };
 use crate::syscall::errno::*;
-use crate::task::{current_task, current_user_token, ProcessManager, TaskControlBlock};
+use crate::task::{
+    current_task, current_user_token, ProcessControlBlock, ProcessManager, TaskControlBlock,
+};
 use crate::timer::{get_time_sec, TimeSpec};
 use alloc::sync::Arc;
 use core::mem::size_of;
@@ -26,6 +28,7 @@ const LINUX_CAPABILITY_VERSION_2: u32 = 0x20071026;
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x20080522;
 const CAP_LAST_CAP: usize = 40;
 const CAP_SETPCAP: usize = 8;
+const CAP_SYS_NICE: usize = 23;
 const CAP_FULL_SET: u64 = (1u64 << (CAP_LAST_CAP + 1)) - 1;
 const PR_GET_DUMPABLE: usize = 3;
 const PR_SET_DUMPABLE: usize = 4;
@@ -737,7 +740,12 @@ pub enum Resource {
     ILLEAGAL,
 }
 
-fn rlimit_value_for(resource: Resource, nofile: Option<RLimit>) -> Option<RLimit> {
+fn rlimit_value_for(
+    resource: Resource,
+    nofile: Option<RLimit>,
+    nice: Option<RLimit>,
+    rtprio: Option<RLimit>,
+) -> Option<RLimit> {
     let unlimited = RLimit {
         rlim_cur: usize::MAX,
         rlim_max: usize::MAX,
@@ -752,10 +760,10 @@ fn rlimit_value_for(resource: Resource, nofile: Option<RLimit>) -> Option<RLimit
         | Resource::LOCKS
         | Resource::SIGPENDING
         | Resource::MSGQUEUE
-        | Resource::NICE
-        | Resource::RTPRIO
         | Resource::RTTIME
         | Resource::MEMLOCK => unlimited,
+        Resource::NICE => nice?,
+        Resource::RTPRIO => rtprio?,
         Resource::CORE => RLimit {
             rlim_cur: 0,
             rlim_max: 0,
@@ -810,7 +818,25 @@ pub fn sys_prlimit(
         } else {
             None
         };
-        let Some(limit) = rlimit_value_for(resource, nofile_limit) else {
+        let rtprio_limit = if resource == Resource::RTPRIO {
+            let inner = task.acquire_inner_lock();
+            Some(RLimit {
+                rlim_cur: inner.rtprio_limit_cur,
+                rlim_max: inner.rtprio_limit_max,
+            })
+        } else {
+            None
+        };
+        let nice_limit = if resource == Resource::NICE {
+            let inner = task.acquire_inner_lock();
+            Some(RLimit {
+                rlim_cur: inner.nice_limit_cur,
+                rlim_max: inner.nice_limit_max,
+            })
+        } else {
+            None
+        };
+        let Some(limit) = rlimit_value_for(resource, nofile_limit, nice_limit, rtprio_limit) else {
             return EINVAL;
         };
         if UserPtrMut::new(old_limit).write(token, &limit).is_err() {
@@ -835,6 +861,16 @@ pub fn sys_prlimit(
                 task.process.files().lock().set_soft_limit(rlimit.rlim_cur);
                 task.process.files().lock().set_hard_limit(rlimit.rlim_max);
             }
+            Resource::RTPRIO => {
+                let mut inner = task.acquire_inner_lock();
+                inner.rtprio_limit_cur = rlimit.rlim_cur;
+                inner.rtprio_limit_max = rlimit.rlim_max;
+            }
+            Resource::NICE => {
+                let mut inner = task.acquire_inner_lock();
+                inner.nice_limit_cur = rlimit.rlim_cur;
+                inner.nice_limit_max = rlimit.rlim_max;
+            }
             Resource::STACK => {
                 warn!("[prlimit] Unsupported modification stack");
                 if rlimit.rlim_cur > USER_STACK_SIZE {
@@ -852,8 +888,6 @@ pub fn sys_prlimit(
             | Resource::LOCKS
             | Resource::SIGPENDING
             | Resource::MSGQUEUE
-            | Resource::NICE
-            | Resource::RTPRIO
             | Resource::RTTIME => {
                 warn!(
                     "[prlimit] Ignore unsupported modification for {:?}: {:?}",
@@ -897,26 +931,193 @@ pub struct SchedParam {
     sched_priority: i32,
 }
 
-fn find_task_for_pid_or_current(pid: usize) -> Result<Arc<TaskControlBlock>, isize> {
-    if pid == 0 {
-        current_task().ok_or(ESRCH)
-    } else {
-        ProcessManager::find_task(pid).ok_or(ESRCH)
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SchedAttr {
+    size: u32,
+    sched_policy: u32,
+    sched_flags: u64,
+    sched_nice: i32,
+    sched_priority: u32,
+    sched_runtime: u64,
+    sched_deadline: u64,
+    sched_period: u64,
+}
+
+const SCHED_NORMAL: usize = 0;
+const SCHED_FIFO: usize = 1;
+const SCHED_RR: usize = 2;
+const SCHED_BATCH: usize = 3;
+const SCHED_IDLE: usize = 5;
+const SCHED_DEADLINE: usize = 6;
+const SCHED_RESET_ON_FORK: usize = 0x4000_0000;
+const SCHED_FLAG_RESET_ON_FORK: u64 = 0x01;
+
+#[derive(Clone, Copy)]
+struct SchedAccess {
+    euid: u32,
+    has_sys_nice: bool,
+    rtprio_limit_cur: usize,
+}
+
+#[derive(Clone, Copy)]
+struct SchedState {
+    policy: usize,
+    priority: i32,
+    reset_on_fork: bool,
+    nice: i32,
+    runtime: u64,
+    deadline: u64,
+    period: u64,
+}
+
+fn task_sched_state(task: &Arc<TaskControlBlock>) -> SchedState {
+    let inner = task.acquire_inner_lock();
+    SchedState {
+        policy: inner.sched_policy,
+        priority: inner.sched_priority,
+        reset_on_fork: inner.sched_reset_on_fork,
+        nice: inner.sched_nice,
+        runtime: inner.sched_runtime,
+        deadline: inner.sched_deadline,
+        period: inner.sched_period,
     }
 }
 
+fn process_sched_state(process: &Arc<ProcessControlBlock>) -> SchedState {
+    let (policy, priority, reset_on_fork, nice, runtime, deadline, period) =
+        process.sched_state();
+    SchedState {
+        policy,
+        priority,
+        reset_on_fork,
+        nice,
+        runtime,
+        deadline,
+        period,
+    }
+}
+
+fn sync_process_sched_state(task: &Arc<TaskControlBlock>, state: SchedState) {
+    task.process.set_sched_state(
+        state.policy,
+        state.priority,
+        state.reset_on_fork,
+        state.nice,
+        state.runtime,
+        state.deadline,
+        state.period,
+    );
+}
+
+fn signed_pid_invalid(pid: usize) -> bool {
+    (pid as isize) < 0
+}
+
+fn find_task_for_pid_or_current(pid: usize) -> Result<Arc<TaskControlBlock>, isize> {
+    if let Some(task) = current_task() {
+        if pid == 0 || pid == task.pid() {
+            return Ok(task);
+        }
+    }
+    if let Some(task) = ProcessManager::find_task(pid) {
+        return Ok(task);
+    }
+    ProcessManager::find_process(pid)
+        .and_then(|process| {
+            process
+                .threads()
+                .into_iter()
+                .find(|task| task.gettid() == pid || task.pid() == pid)
+        })
+        .ok_or(ESRCH)
+}
+
+fn find_sched_state_for_pid_or_current(pid: usize) -> Result<SchedState, isize> {
+    if let Some(task) = current_task() {
+        if pid == 0 || pid == task.pid() {
+            return Ok(task_sched_state(&task));
+        }
+    }
+    if let Some(task) = ProcessManager::find_task(pid) {
+        return Ok(task_sched_state(&task));
+    }
+    if let Some(process) = ProcessManager::find_process(pid) {
+        return Ok(process_sched_state(&process));
+    }
+    Err(ESRCH)
+}
+
 fn valid_sched_policy(policy: usize) -> bool {
-    matches!(policy & !0x40000000, 0 | 1 | 2 | 3 | 5 | 6)
+    matches!(
+        policy & !SCHED_RESET_ON_FORK,
+        SCHED_NORMAL | SCHED_FIFO | SCHED_RR | SCHED_BATCH | SCHED_IDLE | SCHED_DEADLINE
+    )
 }
 
 fn valid_sched_priority(policy: usize, priority: i32) -> bool {
-    match policy & !0x40000000 {
-        1 | 2 => (1..=99).contains(&priority),
+    match policy & !SCHED_RESET_ON_FORK {
+        SCHED_FIFO | SCHED_RR => (1..=99).contains(&priority),
         _ => priority == 0,
     }
 }
 
+fn current_sched_access() -> SchedAccess {
+    let task = current_task().unwrap();
+    let inner = task.acquire_inner_lock();
+    SchedAccess {
+        euid: inner.euid,
+        has_sys_nice: inner.euid == 0 || (inner.cap_effective & (1u64 << CAP_SYS_NICE)) != 0,
+        rtprio_limit_cur: inner.rtprio_limit_cur,
+    }
+}
+
+fn sched_same_owner(access: SchedAccess, task: &Arc<TaskControlBlock>) -> bool {
+    let inner = task.acquire_inner_lock();
+    access.euid == inner.euid || access.euid == inner.uid
+}
+
+fn can_apply_sched_change(
+    task: &Arc<TaskControlBlock>,
+    old_policy: usize,
+    old_priority: i32,
+    old_reset_on_fork: bool,
+    new_policy: usize,
+    new_priority: i32,
+    new_reset_on_fork: bool,
+) -> bool {
+    let access = current_sched_access();
+    if access.has_sys_nice {
+        return true;
+    }
+
+    let new_base_policy = new_policy & !SCHED_RESET_ON_FORK;
+    if new_base_policy == SCHED_DEADLINE {
+        return false;
+    }
+
+    if matches!(new_base_policy, SCHED_FIFO | SCHED_RR) {
+        if new_base_policy != old_policy && access.rtprio_limit_cur == 0 {
+            return false;
+        }
+        if new_priority > old_priority
+            && (new_priority < 0 || new_priority as usize > access.rtprio_limit_cur)
+        {
+            return false;
+        }
+    }
+
+    if old_reset_on_fork && !new_reset_on_fork {
+        return false;
+    }
+
+    sched_same_owner(access, task)
+}
+
 pub fn sys_sched_setparam(pid: usize, param: *const SchedParam) -> isize {
+    if signed_pid_invalid(pid) || param.is_null() {
+        return EINVAL;
+    }
     let task = match find_task_for_pid_or_current(pid) {
         Ok(task) => task,
         Err(errno) => return errno,
@@ -925,15 +1126,45 @@ pub fn sys_sched_setparam(pid: usize, param: *const SchedParam) -> isize {
         Ok(param) => param,
         Err(_) => return EFAULT,
     };
-    let mut inner = task.acquire_inner_lock();
-    if !valid_sched_priority(inner.sched_policy, param.sched_priority) {
-        return EINVAL;
+    let (old_policy, old_priority, old_reset_on_fork) = {
+        let inner = task.acquire_inner_lock();
+        if !valid_sched_priority(inner.sched_policy, param.sched_priority) {
+            return EINVAL;
+        }
+        (inner.sched_policy, inner.sched_priority, inner.sched_reset_on_fork)
+    };
+    if !can_apply_sched_change(
+        &task,
+        old_policy,
+        old_priority,
+        old_reset_on_fork,
+        old_policy,
+        param.sched_priority,
+        old_reset_on_fork,
+    ) {
+        return EPERM;
     }
-    inner.sched_priority = param.sched_priority;
+    let state = {
+        let mut inner = task.acquire_inner_lock();
+        inner.sched_priority = param.sched_priority;
+        SchedState {
+            policy: inner.sched_policy,
+            priority: inner.sched_priority,
+            reset_on_fork: inner.sched_reset_on_fork,
+            nice: inner.sched_nice,
+            runtime: inner.sched_runtime,
+            deadline: inner.sched_deadline,
+            period: inner.sched_period,
+        }
+    };
+    sync_process_sched_state(&task, state);
     SUCCESS
 }
 
 pub fn sys_sched_setscheduler(pid: usize, policy: usize, param: *const SchedParam) -> isize {
+    if signed_pid_invalid(pid) || param.is_null() {
+        return EINVAL;
+    }
     if !valid_sched_policy(policy) {
         return EINVAL;
     }
@@ -948,42 +1179,113 @@ pub fn sys_sched_setscheduler(pid: usize, policy: usize, param: *const SchedPara
     if !valid_sched_priority(policy, param.sched_priority) {
         return EINVAL;
     }
-    let mut inner = task.acquire_inner_lock();
-    inner.sched_policy = policy & !0x40000000;
-    inner.sched_priority = param.sched_priority;
+    let base_policy = policy & !SCHED_RESET_ON_FORK;
+    let new_reset_on_fork = policy & SCHED_RESET_ON_FORK != 0;
+    let (old_policy, old_priority, old_reset_on_fork) = {
+        let inner = task.acquire_inner_lock();
+        (inner.sched_policy, inner.sched_priority, inner.sched_reset_on_fork)
+    };
+    if !can_apply_sched_change(
+        &task,
+        old_policy,
+        old_priority,
+        old_reset_on_fork,
+        base_policy,
+        param.sched_priority,
+        new_reset_on_fork,
+    ) {
+        return EPERM;
+    }
+    let state = {
+        let mut inner = task.acquire_inner_lock();
+        inner.sched_policy = base_policy;
+        inner.sched_priority = param.sched_priority;
+        inner.sched_reset_on_fork = new_reset_on_fork;
+        inner.sched_runtime = 0;
+        inner.sched_deadline = 0;
+        inner.sched_period = 0;
+        SchedState {
+            policy: inner.sched_policy,
+            priority: inner.sched_priority,
+            reset_on_fork: inner.sched_reset_on_fork,
+            nice: inner.sched_nice,
+            runtime: inner.sched_runtime,
+            deadline: inner.sched_deadline,
+            period: inner.sched_period,
+        }
+    };
+    sync_process_sched_state(&task, state);
     SUCCESS
 }
 
 pub fn sys_sched_getscheduler(pid: usize) -> isize {
-    match find_task_for_pid_or_current(pid) {
-        Ok(task) => task.acquire_inner_lock().sched_policy as isize,
+    if signed_pid_invalid(pid) {
+        return EINVAL;
+    }
+    match find_sched_state_for_pid_or_current(pid) {
+        Ok(state) => {
+            (state.policy
+                | if state.reset_on_fork {
+                    SCHED_RESET_ON_FORK
+                } else {
+                    0
+                }) as isize
+        }
         Err(errno) => errno,
     }
 }
 
 pub fn sys_sched_getparam(pid: usize, param: *mut SchedParam) -> isize {
-    let task = match find_task_for_pid_or_current(pid) {
-        Ok(task) => task,
+    if signed_pid_invalid(pid) || param.is_null() {
+        return EINVAL;
+    }
+    let state = match find_sched_state_for_pid_or_current(pid) {
+        Ok(state) => state,
         Err(errno) => return errno,
     };
-    let sched_priority = task.acquire_inner_lock().sched_priority;
-    match UserPtrMut::new(param).write(current_user_token(), &SchedParam { sched_priority }) {
+    match UserPtrMut::new(param).write(
+        current_user_token(),
+        &SchedParam {
+            sched_priority: state.priority,
+        },
+    ) {
         Ok(()) => SUCCESS,
         Err(_) => EFAULT,
     }
 }
 
 pub fn sys_sched_setaffinity(pid: usize, cpusetsize: usize, mask: *const u8) -> isize {
-    if let Err(errno) = find_task_for_pid_or_current(pid) {
-        return errno;
+    if signed_pid_invalid(pid) {
+        return EINVAL;
     }
-    if cpusetsize == 0 || mask.is_null() {
+    let task = match find_task_for_pid_or_current(pid) {
+        Ok(task) => task,
+        Err(errno) => return errno,
+    };
+    if mask.is_null() {
         return EFAULT;
     }
-    if let Err(errno) =
-        translated_byte_buffer(current_user_token(), mask, cpusetsize, UserAccess::Read)
-    {
-        return errno;
+    if cpusetsize == 0 {
+        return EINVAL;
+    }
+    let buffers = match translated_byte_buffer(
+        current_user_token(),
+        mask,
+        cpusetsize,
+        UserAccess::Read,
+    ) {
+        Ok(buffers) => buffers,
+        Err(errno) => return errno,
+    };
+    let user = UserBuffer::new(buffers);
+    let mut first = [0u8; 1];
+    user.read(&mut first);
+    if first[0] & 1 == 0 {
+        return EINVAL;
+    }
+    let access = current_sched_access();
+    if !access.has_sys_nice && !sched_same_owner(access, &task) {
+        return EPERM;
     }
     SUCCESS
 }
@@ -992,8 +1294,8 @@ pub fn sys_sched_get_priority_max(policy: usize) -> isize {
     if !valid_sched_policy(policy) {
         return EINVAL;
     }
-    match policy & !0x40000000 {
-        1 | 2 => 99,
+    match policy & !SCHED_RESET_ON_FORK {
+        SCHED_FIFO | SCHED_RR => 99,
         _ => 0,
     }
 }
@@ -1002,21 +1304,124 @@ pub fn sys_sched_get_priority_min(policy: usize) -> isize {
     if !valid_sched_policy(policy) {
         return EINVAL;
     }
-    match policy & !0x40000000 {
-        1 | 2 => 1,
+    match policy & !SCHED_RESET_ON_FORK {
+        SCHED_FIFO | SCHED_RR => 1,
         _ => 0,
     }
 }
 
 pub fn sys_sched_rr_get_interval(pid: usize, tp: *mut TimeSpec) -> isize {
-    if let Err(errno) = find_task_for_pid_or_current(pid) {
-        return errno;
+    if signed_pid_invalid(pid) {
+        return EINVAL;
     }
+    let state = match find_sched_state_for_pid_or_current(pid) {
+        Ok(state) => state,
+        Err(errno) => return errno,
+    };
+    let is_round_robin = state.policy == SCHED_RR;
     let interval = TimeSpec {
         tv_sec: 0,
-        tv_nsec: 10_000_000,
+        tv_nsec: if is_round_robin { 100_000_000 } else { 0 },
     };
     match UserPtrMut::new(tp).write(current_user_token(), &interval) {
+        Ok(()) => SUCCESS,
+        Err(_) => EFAULT,
+    }
+}
+
+pub fn sys_sched_setattr(pid: usize, attr: *const SchedAttr, flags: usize) -> isize {
+    if signed_pid_invalid(pid) || attr.is_null() || flags != 0 {
+        return EINVAL;
+    }
+    let task = match find_task_for_pid_or_current(pid) {
+        Ok(task) => task,
+        Err(errno) => return errno,
+    };
+    let attr = match UserPtr::new(attr).read(current_user_token()) {
+        Ok(attr) => attr,
+        Err(_) => return EFAULT,
+    };
+    if (attr.size as usize) < size_of::<SchedAttr>()
+        || !valid_sched_policy(attr.sched_policy as usize)
+        || attr.sched_flags & !SCHED_FLAG_RESET_ON_FORK != 0
+    {
+        return EINVAL;
+    }
+    let policy = attr.sched_policy as usize;
+    let priority = attr.sched_priority as i32;
+    if !valid_sched_priority(policy, priority) {
+        return EINVAL;
+    }
+    let base_policy = policy & !SCHED_RESET_ON_FORK;
+    let new_reset_on_fork =
+        policy & SCHED_RESET_ON_FORK != 0 || attr.sched_flags & SCHED_FLAG_RESET_ON_FORK != 0;
+    let (old_policy, old_priority, old_reset_on_fork) = {
+        let inner = task.acquire_inner_lock();
+        (inner.sched_policy, inner.sched_priority, inner.sched_reset_on_fork)
+    };
+    if !can_apply_sched_change(
+        &task,
+        old_policy,
+        old_priority,
+        old_reset_on_fork,
+        base_policy,
+        priority,
+        new_reset_on_fork,
+    ) {
+        return EPERM;
+    }
+    let state = {
+        let mut inner = task.acquire_inner_lock();
+        inner.sched_policy = base_policy;
+        inner.sched_priority = priority;
+        inner.sched_reset_on_fork = new_reset_on_fork;
+        inner.sched_nice = attr.sched_nice;
+        inner.sched_runtime = attr.sched_runtime;
+        inner.sched_deadline = attr.sched_deadline;
+        inner.sched_period = attr.sched_period;
+        SchedState {
+            policy: inner.sched_policy,
+            priority: inner.sched_priority,
+            reset_on_fork: inner.sched_reset_on_fork,
+            nice: inner.sched_nice,
+            runtime: inner.sched_runtime,
+            deadline: inner.sched_deadline,
+            period: inner.sched_period,
+        }
+    };
+    sync_process_sched_state(&task, state);
+    SUCCESS
+}
+
+pub fn sys_sched_getattr(pid: usize, attr: *mut SchedAttr, size: usize, flags: usize) -> isize {
+    if signed_pid_invalid(pid) || attr.is_null() || size < size_of::<SchedAttr>() || flags != 0 {
+        return EINVAL;
+    }
+    let state = match find_sched_state_for_pid_or_current(pid) {
+        Ok(state) => state,
+        Err(errno) => return errno,
+    };
+    let sched_policy = state.policy
+        | if state.reset_on_fork {
+            SCHED_RESET_ON_FORK
+        } else {
+            0
+        };
+    let attr_value = SchedAttr {
+        size: size_of::<SchedAttr>() as u32,
+        sched_policy: sched_policy as u32,
+        sched_flags: if state.reset_on_fork {
+            SCHED_FLAG_RESET_ON_FORK
+        } else {
+            0
+        },
+        sched_nice: state.nice,
+        sched_priority: state.priority as u32,
+        sched_runtime: state.runtime,
+        sched_deadline: state.deadline,
+        sched_period: state.period,
+    };
+    match UserPtrMut::new(attr).write(current_user_token(), &attr_value) {
         Ok(()) => SUCCESS,
         Err(_) => EFAULT,
     }

@@ -69,6 +69,15 @@ pub struct ProcessInner {
     pub state: ProcessState,
     /// wait4 可回收的进程退出码。
     pub exit_code: u32,
+    /// 进程 leader 的调度策略兼容快照，供 zombie 子进程在 wait 前被查询。
+    pub sched_policy: usize,
+    pub sched_priority: i32,
+    /// SCHED_RESET_ON_FORK 的进程级兼容标记，用于覆盖测试框架中非 leader fork 的路径。
+    pub sched_reset_on_fork: bool,
+    pub sched_nice: i32,
+    pub sched_runtime: u64,
+    pub sched_deadline: u64,
+    pub sched_period: u64,
 }
 
 pub struct ProcessSignalState {
@@ -166,6 +175,13 @@ impl ProcessControlBlock {
                 children: Vec::new(),
                 state: ProcessState::Running,
                 exit_code: 0,
+                sched_policy: 0,
+                sched_priority: 0,
+                sched_reset_on_fork: false,
+                sched_nice: 0,
+                sched_runtime: 0,
+                sched_deadline: 0,
+                sched_period: 0,
             }),
             signal: Mutex::new(ProcessSignalState {
                 shared_pending: SignalQueue::empty(),
@@ -240,6 +256,47 @@ impl ProcessControlBlock {
 
     pub fn user_res_slot_allocator(&self) -> Arc<Mutex<RecycleAllocator>> {
         self.inner.lock().user_res_slot_allocator.clone()
+    }
+
+    pub fn sched_reset_on_fork(&self) -> bool {
+        self.inner.lock().sched_reset_on_fork
+    }
+
+    pub fn set_sched_reset_on_fork(&self, reset: bool) {
+        self.inner.lock().sched_reset_on_fork = reset;
+    }
+
+    pub fn sched_state(&self) -> (usize, i32, bool, i32, u64, u64, u64) {
+        let inner = self.inner.lock();
+        (
+            inner.sched_policy,
+            inner.sched_priority,
+            inner.sched_reset_on_fork,
+            inner.sched_nice,
+            inner.sched_runtime,
+            inner.sched_deadline,
+            inner.sched_period,
+        )
+    }
+
+    pub fn set_sched_state(
+        &self,
+        policy: usize,
+        priority: i32,
+        reset_on_fork: bool,
+        nice: i32,
+        runtime: u64,
+        deadline: u64,
+        period: u64,
+    ) {
+        let mut inner = self.inner.lock();
+        inner.sched_policy = policy;
+        inner.sched_priority = priority;
+        inner.sched_reset_on_fork = reset_on_fork;
+        inner.sched_nice = nice;
+        inner.sched_runtime = runtime;
+        inner.sched_deadline = deadline;
+        inner.sched_period = period;
     }
 
     pub fn add_thread(&self, task: &Arc<TaskControlBlock>) {

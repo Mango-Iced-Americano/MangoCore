@@ -178,6 +178,8 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_SCHED_GET_PRIORITY_MAX => "sched_get_priority_max",
         SYSCALL_SCHED_GET_PRIORITY_MIN => "sched_get_priority_min",
         SYSCALL_SCHED_RR_GET_INTERVAL => "sched_rr_get_interval",
+        SYSCALL_SCHED_SETATTR => "sched_setattr",
+        SYSCALL_SCHED_GETATTR => "sched_getattr",
         // non-standard
         SYSCALL_LS => "ls",
         SYSCALL_SHUTDOWN => "shutdown",
@@ -581,6 +583,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SCHED_GET_PRIORITY_MIN => sys_sched_get_priority_min(args[0]),
         SYSCALL_SCHED_RR_GET_INTERVAL => {
             sys_sched_rr_get_interval(args[0], args[1] as *mut TimeSpec)
+        }
+        SYSCALL_SCHED_SETATTR => sys_sched_setattr(args[0], args[1] as *const SchedAttr, args[2]),
+        SYSCALL_SCHED_GETATTR => {
+            sys_sched_getattr(args[0], args[1] as *mut SchedAttr, args[2], args[3])
         }
         SYSCALL_GET_MEMPOLICY => sys_get_mempolicy(
             args[0] as *mut i32,
