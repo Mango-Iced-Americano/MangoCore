@@ -111,11 +111,21 @@ if __name__ == "__main__":
     for name in sorted(result.keys()):
         r = result[name]
         if isinstance(r, list):
-            p = sum(x.get("pass", x.get("success", 0)) for x in r)
-            a = sum(x.get("all", 0) for x in r)
+            # 兼容 judge 脚本的多种输出格式：
+            #   basic/busybox/lua/ltp: {"pass": N, "all": N} — 直接取值
+            #   libctest:              {"pass": N, "total": N} — "all" 缺省用 "total"
+            #   iozone/iperf/netperf/cyclictest/lmbench/libcbench:
+            #                           {"score": 0.0~1.0} — 无 pass/all，用 score>0 判通过
+            p = sum(
+                x.get("pass", x.get("success",
+                    int(x.get("score", 0.0) > 0.0)
+                ))
+                for x in r
+            )
+            a = sum(x.get("all", x.get("total", 1)) for x in r)
         elif isinstance(r, dict):
-            p = r.get("pass", r.get("passed", r.get("score", 0)))
-            a = r.get("all", 0)
+            p = r.get("pass", r.get("passed", int(r.get("score", 0.0) > 0.0)))
+            a = r.get("all", len(r) - 2 if "pass" not in r else 0)
         else:
             p = 0
             a = 0
