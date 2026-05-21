@@ -4,7 +4,7 @@ use crate::mm::{UserPtr, UserPtrMut};
 use crate::syscall::errno::*;
 use crate::task::{
     add_kernel_timer, current_task, current_user_token, signal::Signals,
-    sleep_relative_interruptible, sleep_until_interruptible, Rusage, TimerAction,
+    sleep_relative_interruptible, Rusage, TimerAction,
 };
 use crate::timer::{
     current_timespec, current_timeval, get_time_ms, ITimerVal, TimeSpec, TimeVal, TimeZone, Times,
@@ -380,7 +380,9 @@ pub fn sys_clock_nanosleep(
     );
 
     if flags & TIMER_ABSTIME != 0 {
-        match sleep_until_interruptible(req) {
+        // 绝对睡眠的时间点属于传入的 clock，等待队列内部只使用单调时间。
+        let duration = timespec_saturating_sub(req, sleep_clock_now(clk_id));
+        match sleep_relative_interruptible(duration) {
             Ok(()) => SUCCESS,
             Err(_) => EINTR,
         }
@@ -403,6 +405,28 @@ pub fn sys_clock_nanosleep(
 
 fn is_valid_timespec(timespec: TimeSpec) -> bool {
     timespec.tv_sec <= isize::MAX as usize && timespec.tv_nsec < NSEC_PER_SEC
+}
+
+fn sleep_clock_now(clk_id: usize) -> TimeSpec {
+    match clk_id {
+        CLOCK_REALTIME => current_timespec(),
+        CLOCK_MONOTONIC | CLOCK_BOOTTIME => TimeSpec::now(),
+        _ => TimeSpec::new(),
+    }
+}
+
+fn timespec_saturating_sub(lhs: TimeSpec, rhs: TimeSpec) -> TimeSpec {
+    if lhs <= rhs {
+        return TimeSpec::new();
+    }
+    let mut tv_sec = lhs.tv_sec - rhs.tv_sec;
+    let tv_nsec = if lhs.tv_nsec >= rhs.tv_nsec {
+        lhs.tv_nsec - rhs.tv_nsec
+    } else {
+        tv_sec -= 1;
+        lhs.tv_nsec + NSEC_PER_SEC - rhs.tv_nsec
+    };
+    TimeSpec { tv_sec, tv_nsec }
 }
 
 fn check_sleep_clock(clk_id: usize) -> Result<(), isize> {

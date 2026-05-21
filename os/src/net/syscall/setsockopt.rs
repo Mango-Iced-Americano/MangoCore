@@ -1,11 +1,11 @@
-use crate::mm::{get_from_user, UserPtr};
+use crate::mm::{get_from_user, UserBufferReader, UserPtr};
 use crate::task::current_task;
 use crate::timer::TimeVal;
 use crate::utils::error::SyscallErr;
 
-use super::common::{SOL_SOCKET, SOL_TCP, TCP_NODELAY};
 use super::common::{
-    SO_DONTROUTE, SO_KEEPALIVE, SO_RCVBUF, SO_RCVTIMEO, SO_REUSEADDR, SO_SNDBUF, SO_SNDTIMEO,
+    MCAST_JOIN_GROUP, MCAST_LEAVE_GROUP, SO_DONTROUTE, SO_KEEPALIVE, SO_RCVBUF, SO_RCVTIMEO,
+    SO_REUSEADDR, SO_SNDBUF, SO_SNDTIMEO, SOL_IP, SOL_SOCKET, SOL_TCP, TCP_NODELAY,
 };
 
 pub fn sys_setsockopt(
@@ -76,6 +76,23 @@ pub fn sys_setsockopt(
         (SOL_SOCKET, SO_DONTROUTE) => {
             // do noting, just return success
             log::warn!("[sys_setsockopt] set socket DONTROUTE: {}", optval);
+        }
+        (SOL_IP, MCAST_JOIN_GROUP | MCAST_LEAVE_GROUP) => {
+            const GROUP_REQ_LEN: usize = 136;
+            if (optlen as usize) < GROUP_REQ_LEN {
+                return -(SyscallErr::EINVAL as isize);
+            }
+            if UserBufferReader::new(token, optval_ptr as *const u8, optlen as usize).is_err() {
+                return -(SyscallErr::EFAULT as isize);
+            }
+            let result = if optname == MCAST_JOIN_GROUP {
+                socket.join_multicast_group()
+            } else {
+                socket.leave_multicast_group()
+            };
+            if let Err(errno) = result {
+                return -(errno as isize);
+            }
         }
         (SOL_SOCKET, SO_RCVTIMEO | SO_SNDTIMEO) => {
             if (optlen as usize) < core::mem::size_of::<TimeVal>() {

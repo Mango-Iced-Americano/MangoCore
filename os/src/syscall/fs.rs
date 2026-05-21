@@ -874,7 +874,10 @@ pub fn sys_pipe2(pipefd: usize, flags: u32) -> isize {
     );
     let write_fd = match fd_table.alloc_fd(vf_write, cloexec) {
         Ok(fd) => fd,
-        Err(e) => return -(e as isize),
+        Err(e) => {
+            let _ = fd_table.drop_fd(read_fd);
+            return -(e as isize);
+        }
     };
 
     let token = task.get_user_token();
@@ -884,6 +887,8 @@ pub fn sys_pipe2(pipefd: usize, flags: u32) -> isize {
         .is_err()
     {
         log::error!("[sys_pipe2] Failed to copy to {:?}", pipefd);
+        let _ = fd_table.drop_fd(read_fd);
+        let _ = fd_table.drop_fd(write_fd);
         return EFAULT;
     };
     info!(
@@ -961,14 +966,17 @@ pub fn sys_dup(oldfd: usize) -> isize {
 }
 
 pub fn sys_dup2(oldfd: usize, newfd: usize) -> isize {
-    if oldfd == newfd {
-        return oldfd as isize;
-    }
     let task = current_task().unwrap();
 
     let ret = {
         let files_ref = task.process.files();
-    let mut fd_table = files_ref.lock();
+        let mut fd_table = files_ref.lock();
+        if oldfd == newfd {
+            return match fd_table.get_file(oldfd) {
+                Ok(_) => oldfd as isize,
+                Err(e) => -(e as isize),
+            };
+        }
         let file = match fd_table.get_file(oldfd) {
             Ok(file) => match file.try_clone() { Some(f) => f, None => return EBADF, },
             Err(e) => return -(e as isize),
@@ -1997,16 +2005,7 @@ pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
                 Err(e) => return -(e as isize),
             };
 
-            // Find the lowest-numbered available fd greater than or equal to arg
-            let mut new_fd = arg;
-            while new_fd < fd_table.len() {
-                if fd_table.get_file(new_fd).is_err() {
-                    break;
-                }
-                new_fd += 1;
-            }
-
-            match fd_table.alloc_fd_at(new_fd, file, cloexec) {
+            match fd_table.alloc_fd_from(arg, file, cloexec) {
                 Ok(fd) => fd as isize,
                 Err(e) => -(e as isize),
             }

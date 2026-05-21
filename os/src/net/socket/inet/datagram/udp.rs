@@ -46,6 +46,7 @@ struct UdpSocketInner {
     recvbuf_size: usize,
     sendbuf_size: usize,
     reuse_addr: bool,
+    multicast_group_joined: bool,
 }
 
 impl Socket for UdpSocket {
@@ -208,6 +209,21 @@ impl Socket for UdpSocket {
     fn set_reuse_addr(&self, enabled: bool) -> SyscallRet {
         self.inner.lock().reuse_addr = enabled;
         Ok(0)
+    }
+
+    fn join_multicast_group(&self) -> SyscallRet {
+        self.inner.lock().multicast_group_joined = true;
+        Ok(0)
+    }
+
+    fn leave_multicast_group(&self) -> SyscallRet {
+        let mut inner = self.inner.lock();
+        if inner.multicast_group_joined {
+            inner.multicast_group_joined = false;
+            Ok(0)
+        } else {
+            Err(SyscallErr::EADDRNOTAVAIL)
+        }
     }
 
     fn send_to(&self, buf: &[u8], dest: Endpoint) -> SyscallRet {
@@ -408,6 +424,7 @@ impl UdpSocket {
                 recvbuf_size: MAX_BUFFER_SIZE,
                 sendbuf_size: MAX_BUFFER_SIZE,
                 reuse_addr: false,
+                multicast_group_joined: false,
             }),
             socket_handler,
             recv_waiters: EventWaitQueue::new(),

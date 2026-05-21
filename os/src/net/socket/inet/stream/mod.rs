@@ -49,6 +49,7 @@ pub struct TcpSocket {
     /// 写端已关闭（SHUT_WR）
     pub write_shutdown: AtomicBool,
     pub reuse_addr: AtomicBool,
+    multicast_group_joined: AtomicBool,
     pub recv_waiters: EventWaitQueue,
     pub send_waiters: EventWaitQueue,
     pub connect_waiters: EventWaitQueue,
@@ -64,6 +65,7 @@ impl TcpSocket {
             read_shutdown: AtomicBool::new(false),
             write_shutdown: AtomicBool::new(false),
             reuse_addr: AtomicBool::new(false),
+            multicast_group_joined: AtomicBool::new(false),
             recv_waiters: EventWaitQueue::new(),
             send_waiters: EventWaitQueue::new(),
             connect_waiters: EventWaitQueue::new(),
@@ -323,6 +325,7 @@ impl Socket for TcpSocket {
             read_shutdown: AtomicBool::new(false),
             write_shutdown: AtomicBool::new(false),
             reuse_addr: AtomicBool::new(false),
+            multicast_group_joined: AtomicBool::new(false),
             recv_waiters: EventWaitQueue::new(),
             send_waiters: EventWaitQueue::new(),
             connect_waiters: EventWaitQueue::new(),
@@ -444,6 +447,19 @@ impl Socket for TcpSocket {
     fn set_reuse_addr(&self, enabled: bool) -> SyscallRet {
         self.reuse_addr.store(enabled, Ordering::Release);
         Ok(0)
+    }
+
+    fn join_multicast_group(&self) -> SyscallRet {
+        self.multicast_group_joined.store(true, Ordering::Release);
+        Ok(0)
+    }
+
+    fn leave_multicast_group(&self) -> SyscallRet {
+        if self.multicast_group_joined.swap(false, Ordering::AcqRel) {
+            Ok(0)
+        } else {
+            Err(SyscallErr::EADDRNOTAVAIL)
+        }
     }
 
     fn send_to(&self, _buf: &[u8], _dest: Endpoint) -> SyscallRet {
