@@ -1,6 +1,7 @@
 //! /proc/<pid>/ 目录 — 进程信息目录
 
 pub mod cmdline;
+pub mod exe;
 pub mod maps;
 pub mod stat;
 pub mod status;
@@ -82,6 +83,8 @@ fn create_pid_dir(parent: &LockedProcInode, pid: usize) -> Result<Arc<dyn IndexN
         crate::fs::procfs::files::mounts::mounts_content,
         pid,
     )?;
+
+    dir.add_dynamic_symlink("exe", exe::pid_exe_content)?;
 
     Ok(dir)
 }
