@@ -134,7 +134,6 @@ pub fn sys_execve(
             let elf = if &magic_number == b"\x7fELF" {
                 file
             } else if &magic_number[..2] == b"#!" {
-                // 脚本：优先用 shebang 指定的解释器，不存在则回退 /bin/bash
                 let shell_file = match parse_shebang(&file) {
                     Ok(Some((interp, shebang_arg))) => {
                         match open_exec(&interp) {

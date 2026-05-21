@@ -519,7 +519,8 @@ pub fn flush_preload() {
     ) {
         crate::mm::frame_dealloc(ppn);
     }
-    // /bin/busybox: 可能失败，忽略
+    // /bin/busybox: 写入实际内容（不是空占位），否则 shebang 解析
+    // 到 interpreter=/bin/busybox 时 execve 会因空文件失败
     {
         let _ = vfs_lookup_parent("/bin/busybox").or_else(|_| {
             let root = vfs_root().mountpoint_root_inode();
@@ -529,6 +530,12 @@ pub fn flush_preload() {
             if parent.find("busybox").is_err() {
                 let _ = parent.create("busybox", self::vfs::FileType::File, self::vfs::InodeMode::S_IRWXUGO);
             }
+        });
+        // 写入嵌入的 busybox 数据
+        let _ = create_or_open_file("/bin/busybox").map(|f| {
+            let _ = f.write(unsafe {
+                core::slice::from_raw_parts(sbusybox as *const u8, ebusybox as usize - sbusybox as usize)
+            });
         });
     }
     match file_size("os_test.conf") {
