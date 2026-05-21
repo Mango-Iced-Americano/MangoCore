@@ -902,6 +902,7 @@ impl File {
         use core::convert::TryInto;
 
         let size = self.get_size();
+        log::info!("[map_to_kernel_space] size={} inode={:?}", size, self.inode.metadata().ok());
         let need_pages = if size == 0 { 0 } else { (size + PAGE_SIZE - 1) / PAGE_SIZE };
 
         // Helper: allocate frames + pread full file content into them
@@ -921,9 +922,10 @@ impl File {
                 .expect("map_to_kernel_space: pread failed");
             if n != size {
                 log::warn!(
-                    "[map_to_kernel_space] pread returned {} bytes, expected {}",
+                    "[map_to_kernel_space] pread returned {} bytes, expected {} (file_size={})",
                     n,
-                    size
+                    size,
+                    self.get_size()
                 );
             }
             let mut offset = 0;
@@ -938,36 +940,11 @@ impl File {
 
         let frames: Vec<Arc<FrameTracker>> = if need_pages == 0 {
             Vec::new()
-        } else if let Some(pc) = self.inode.page_cache() {
-            let cached_frames: Vec<Arc<FrameTracker>> = pc.frame_trackers().into_iter()
-                .filter_map(|f| match f {
-                    Frame::InMemory(t) => Some(t),
-                    _ => None,
-                })
-                .collect();
-            let cached_count = pc.cached_page_count();
-            log::debug!(
-                "[map_to_kernel_space] page_cache: {}/{} pages cached, {} frames tracked",
-                cached_count,
-                need_pages,
-                cached_frames.len()
-            );
-            if cached_frames.len() >= need_pages {
-                log::trace!("[map_to_kernel_space] using page_cache frames directly");
-                cached_frames
-            } else {
-                // PageCache has insufficient frames — fall back to pread path.
-                // This handles the case where a freshly created ext4 PageCache
-                // has zero populated pages (lazy-init in get_new_page_cache).
-                log::warn!(
-                    "[map_to_kernel_space] page_cache only {}/{} frames, falling back to pread",
-                    cached_frames.len(),
-                    need_pages
-                );
-                alloc_and_pread(size, need_pages)
-            }
         } else {
-            log::trace!("[map_to_kernel_space] no page_cache, allocating from heap");
+            // ELF 加载不能信任 page-cache 快捷路径——
+            // frame_trackers() 返回的帧可能只包含部分数据（如 4 字节 magic read
+            // 残留），导致 from_elf 拿到残缺的 ELF header 而返回 ENOEXEC。
+            // 始终走 alloc_and_pread 确保完整读取文件内容。
             alloc_and_pread(size, need_pages)
         };
 
