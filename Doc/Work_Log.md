@@ -851,3 +851,49 @@ fn list(&self) -> Result<Vec<String>, SyscallErr> {
 **Oracle 审查：** 6 轮 (P2, P3, P4, P5, 终审, P7 嵌入)
 **编译：** rv64 ✅, la64 ✅
 **QEMU：** rv64 basic (mask=0x001) ✅
+
+---
+
+## 2026-05-21
+
+### 修复 run_parse.py 评分汇总 — judge 脚本输出格式不兼容导致大量 0 分
+
+**问题：** 全量测试跑了，但 `run_full_test.py` 汇总显示 iperf/netperf/libcbench/lmbench 全是 0/0，libctest 的 ALL 列也是 0。
+
+**根因：** `run_parse.py` 汇总代码只从 judge 输出里取 `"pass"` 和 `"all"` 字段，但 judge 脚本输出格式不统一：
+
+| 测试组 | judge 输出字段 | 汇总能找到吗？ |
+|--------|---------------|--------------|
+| basic/busybox/lua/ltp | `pass`, `all` | ✅ |
+| libctest | `pass`, `total` | `all` 找不到 → ALL=0 |
+| iozone/iperf/netperf/cyclictest/libcbench/lmbench | `score` (0.0~1.0) | `pass`/`all` 都找不到 → 0/0 |
+
+**修复：** `judge/run_parse.py` 中 `p` 和 `a` 的 fallback 链：
+
+```python
+# PASS: pass → success → int(score > 0.0)
+p = sum(x.get("pass", x.get("success",
+    int(x.get("score", 0.0) > 0.0))) for x in r)
+
+# ALL: all → total → 1 (per item)
+a = sum(x.get("all", x.get("total", 1)) for x in r)
+```
+
+**前后对比（rv64+la64 合并）：**
+
+| 指标 | 修复前 | 修复后 | 增量 |
+|------|--------|--------|------|
+| PASS | 2228 | 2358 | +130 |
+| ALL  | 1932 | 3132 | +1200 |
+
+**各测试组明细（修复后）：**
+- libctest: 340+419/440 ALL 列正确
+- libcbench: 41+51/54 (之前显示 0/0)
+- iperf: 5+8/12 (之前显示 0/0)
+- netperf: 9+8/10 (之前显示 0/0)
+- lmbench-musl: 3+4/72 (之前显示 0/0)
+- iozone: 0/40 (真·失败，多进程吞吐量测试不产出 Children 行)
+- cyclictest: 0/8 (真·失败，需要 RT kernel)
+- lmbench-glibc: 0/0 (initproc 没触发运行，可能 bug)
+
+**验证：** `python3 judge/run_parse.py testresult/output-{rv,la}.txt judge/`
