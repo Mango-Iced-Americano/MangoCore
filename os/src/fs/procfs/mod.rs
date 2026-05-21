@@ -71,6 +71,7 @@ pub struct ProcInodeData {
     pub children: BTreeMap<String, Arc<dyn IndexNode>>,
     pub content_fn: Option<ProcContentFn>,
     pub extra_data: usize,
+    pub writable: bool,
     /// 符号链接目标路径（仅 SymLink inode）
     pub symlink_target: Option<String>,
     /// 动态查找钩子（如 /proc 根目录的 PID 查找）
@@ -107,6 +108,7 @@ impl ProcInodeData {
             children: BTreeMap::new(),
             content_fn: None,
             extra_data: 0,
+            writable: false,
             symlink_target: None,
             find_hook: None,
             list_hook: None,
@@ -138,6 +140,7 @@ impl ProcInodeData {
             children: BTreeMap::new(),
             content_fn: Some(content_fn),
             extra_data: 0,
+            writable: false,
             symlink_target: None,
             find_hook: None,
             list_hook: None,
@@ -146,7 +149,7 @@ impl ProcInodeData {
 
     fn new_symlink(target: &str) -> Self {
         let target_bytes = target.as_bytes();
-        let mut data = Self {
+        let data = Self {
             parent: Weak::default(),
             self_ref: Weak::default(),
             fs: Weak::default(),
@@ -170,6 +173,7 @@ impl ProcInodeData {
             children: BTreeMap::new(),
             content_fn: None,
             extra_data: 0,
+            writable: false,
             symlink_target: Some(String::from(target)),
             find_hook: None,
             list_hook: None,
@@ -214,6 +218,24 @@ impl LockedProcInode {
         data.parent = parent;
         data.fs = fs;
         data.extra_data = extra_data;
+        Arc::new_cyclic(|weak| {
+            data.self_ref = weak.clone();
+            LockedProcInode(Mutex::new(data))
+        })
+    }
+
+    fn new_writable_file_wired(
+        parent: Weak<LockedProcInode>,
+        fs: Weak<ProcFS>,
+        mode: InodeMode,
+        content_fn: ProcContentFn,
+        extra_data: usize,
+    ) -> Arc<Self> {
+        let mut data = ProcInodeData::new_file(mode, content_fn);
+        data.parent = parent;
+        data.fs = fs;
+        data.extra_data = extra_data;
+        data.writable = true;
         Arc::new_cyclic(|weak| {
             data.self_ref = weak.clone();
             LockedProcInode(Mutex::new(data))
@@ -290,6 +312,34 @@ impl LockedProcInode {
             return Err(SyscallErr::ENAMETOOLONG);
         }
         let child = LockedProcInode::new_file_wired(
+            this.self_ref.clone(),
+            this.fs.clone(),
+            mode,
+            content_fn,
+            extra_data,
+        );
+        this.children.insert(String::from(name), child.clone());
+        Ok(child)
+    }
+
+    pub fn add_writable_file(
+        self: &Arc<Self>,
+        name: &str,
+        mode: InodeMode,
+        content_fn: ProcContentFn,
+        extra_data: usize,
+    ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+        let mut this = self.0.lock();
+        if this.metadata.file_type != FileType::Dir {
+            return Err(SyscallErr::ENOTDIR);
+        }
+        if this.children.contains_key(name) {
+            return Err(SyscallErr::EEXIST);
+        }
+        if name.len() > PROCFS_MAX_NAMELEN as usize {
+            return Err(SyscallErr::ENAMETOOLONG);
+        }
+        let child = LockedProcInode::new_writable_file_wired(
             this.self_ref.clone(),
             this.fs.clone(),
             mode,
@@ -507,11 +557,19 @@ impl IndexNode for LockedProcInode {
     fn write_at(
         &self,
         _offset: usize,
-        _len: usize,
+        len: usize,
         _buf: &[u8],
         _data: MutexGuard<FilePrivateData>,
     ) -> Result<usize, SyscallErr> {
-        Err(SyscallErr::EPERM)
+        let mut data = self.0.lock();
+        if data.metadata.file_type == FileType::File && data.writable {
+            let now = crate::timer::TimeSpec::new();
+            data.metadata.mtime = now;
+            data.metadata.ctime = now;
+            Ok(len)
+        } else {
+            Err(SyscallErr::EPERM)
+        }
     }
 
     fn find(&self, name: &str) -> Result<Arc<dyn IndexNode>, SyscallErr> {
@@ -649,7 +707,15 @@ impl IndexNode for LockedProcInode {
     }
 
     fn resize(&self, _len: usize) -> Result<(), SyscallErr> {
-        Err(SyscallErr::EPERM)
+        let mut data = self.0.lock();
+        if data.metadata.file_type == FileType::File && data.writable {
+            let now = crate::timer::TimeSpec::new();
+            data.metadata.mtime = now;
+            data.metadata.ctime = now;
+            Ok(())
+        } else {
+            Err(SyscallErr::EPERM)
+        }
     }
 
     fn truncate(&self, len: usize) -> Result<(), SyscallErr> {

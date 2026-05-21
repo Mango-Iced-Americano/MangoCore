@@ -387,8 +387,14 @@ impl Ext4FileSystem {
         // 初始化inode
         let mut inode = Ext4Inode::default();
 
-        // 设置文件类型和权限
-        inode.set_mode(inode_mode | 0o777);
+        // 调用者只传文件类型时沿用旧默认权限；传入权限位时保留精确 mode。
+        let permission_bits = inode_mode & 0o7777;
+        let final_mode = if permission_bits == 0 {
+            inode_mode | 0o777
+        } else {
+            inode_mode
+        };
+        inode.set_mode(final_mode);
 
         // set extra size
         let inode_size = self.superblock.inode_size();

@@ -10,6 +10,8 @@ use alloc::format;
 use alloc::string::ToString;
 use alloc::sync::Arc;
 
+const CAP_NET_BIND_SERVICE: usize = 10;
+
 pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize {
     match check_addrlen(addrlen) {
         Ok(_) => {}
@@ -24,6 +26,14 @@ pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize {
         Endpoint::Ip(_) => {
             let socket = crate::get_socket!(sockfd);
             let task = current_task().unwrap();
+            if endpoint.port() < 1024 {
+                let inner = task.acquire_inner_lock();
+                if inner.euid != 0
+                    && (inner.cap_effective & (1u64 << CAP_NET_BIND_SERVICE)) == 0
+                {
+                    return -(SyscallErr::EACCES as isize);
+                }
+            }
             match crate::net::socket::inet::common::PortManager::bind_port(
                 &task, &socket, &endpoint,
             ) {

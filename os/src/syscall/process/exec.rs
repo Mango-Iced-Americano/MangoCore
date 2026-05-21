@@ -1,4 +1,3 @@
-use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -10,13 +9,35 @@ use crate::syscall::errno::*;
 use crate::task::{current_task, exit_current_and_run_next};
 use log::{debug, info};
 
+fn parse_shebang(file: &vfs::File) -> Result<Option<(String, Option<String>)>, isize> {
+    let mut header = [0u8; 128];
+    let n = file.pread(0, &mut header).map_err(|e| -(e as isize))?;
+    if n < 2 || header[0] != b'#' || header[1] != b'!' {
+        return Ok(None);
+    }
+
+    let line_end = header[..n].iter().position(|&c| c == b'\n').unwrap_or(n);
+    let line = core::str::from_utf8(&header[2..line_end]).map_err(|_| ENOEXEC)?;
+    let line = line.trim();
+    if line.is_empty() {
+        return Err(ENOEXEC);
+    }
+
+    let mut parts = line.splitn(2, |c: char| c == ' ' || c == '\t');
+    let interpreter = parts.next().unwrap().to_string();
+    let arg = parts
+        .next()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+    Ok(Some((interpreter, arg)))
+}
+
 pub fn sys_execve(
     pathname: *const u8,
     mut argv: *const *const u8,
     mut envp: *const *const u8,
 ) -> isize {
-    // 设置默认shell为bash
-    const DEFAULT_SHELL: &str = "/bin/bash";
     // 获取当前进程
     let task = current_task().unwrap();
     // 获取当前进程的用户态内存访问权限
@@ -107,24 +128,42 @@ pub fn sys_execve(
                 return ENOEXEC;
             }
             // 看前四个字节是否是可执行文件魔数
-            let mut magic_number = Box::<[u8; 4]>::new([0; 4]);
+            let mut magic_number = [0u8; 4];
             // this operation may be expensive... I'm not sure
-            let _ = file.pread(0, magic_number.as_mut_slice());
-            let elf = match magic_number.as_slice() {
-                // ELF可执行文件
-                b"\x7fELF" => file,
-                // 脚本文件
-                // 用默认Shell即bash加载
-                b"#!" => {
-                    let shell_file = open_exec(DEFAULT_SHELL).unwrap();
-                    if argv_vec.try_reserve(1).is_err() {
+            let _ = file.pread(0, &mut magic_number);
+            let elf = if &magic_number == b"\x7fELF" {
+                file
+            } else if let Some((interpreter, shebang_arg)) = match parse_shebang(&file) {
+                Ok(result) => result,
+                Err(errno) => return errno,
+            } {
+                let shell_file = match open_exec(&interpreter) {
+                    Ok(file) => file,
+                    Err(errno) => return errno,
+                };
+                let mut script_argv = Vec::new();
+                let extra = 2 + shebang_arg.as_ref().map_or(0, |_| 1);
+                if script_argv
+                    .try_reserve(argv_vec.len().saturating_add(extra))
+                    .is_err()
+                {
+                    return ENOMEM;
+                }
+                script_argv.push(interpreter);
+                if let Some(arg) = shebang_arg {
+                    script_argv.push(arg);
+                }
+                script_argv.push(path.clone());
+                for arg in argv_vec.iter().skip(1) {
+                    if script_argv.try_reserve(1).is_err() {
                         return ENOMEM;
                     }
-                    argv_vec.insert(0, DEFAULT_SHELL.to_string());
-                    shell_file
+                    script_argv.push(arg.clone());
                 }
-                // 非可执行文件
-                _ => return ENOEXEC,
+                argv_vec = script_argv;
+                shell_file
+            } else {
+                return ENOEXEC;
             };
 
             let task = current_task().unwrap();

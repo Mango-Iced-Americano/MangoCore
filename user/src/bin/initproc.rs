@@ -1361,6 +1361,16 @@ fn prepare_symlink(environ: &[*const u8]) {
     let ret = run_bash_cmd(install_cmd, environ);
     println!("[initproc] busybox --install -s /bin -> exit={}", ret);
 
+    // Step 1.5: LTP 依赖 getpwnam("nobody")/getgrnam("nogroup")，测试镜像缺省时补最小账户库。
+    println!("[initproc] preparing minimal /etc/passwd and /etc/group ...");
+    let account_cmd = "\
+        mkdir -p /etc /root /tmp; chmod 1777 /tmp; \
+        [ -f /etc/passwd ] || printf 'root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/nonexistent:/bin/sh\n' > /etc/passwd; \
+        [ -f /etc/group ] || printf 'root:x:0:\nnogroup:x:65534:\n' > /etc/group \
+    \0";
+    let ret = run_bash_cmd(account_cmd, environ);
+    println!("[initproc] minimal account files done, exit={}", ret);
+
     // Step 2: musl/glibc 动态库 — 单次 shell 调用，用 && 串连，避免多次 bash 开销
     println!("[initproc] linking musl/glibc libs to /lib ...");
     let lib_cmd = "\
@@ -1384,9 +1394,20 @@ fn prepare_symlink(environ: &[*const u8]) {
     let ret = run_bash_cmd(lib_cmd, environ);
     println!("[initproc] lib linking done, exit={}", ret);
 
+    // la64 测试镜像内 musl libc 的 sched_getparam/sched_getscheduler 是 ENOSYS stub，
+    // cyclictest 不会进入内核 syscall；这里仅对该测试入口复用 glibc 二进制。
+    let cyclictest_cmd = "\
+        if [ -x /glibc/cyclictest ] && [ -x /musl/cyclictest ]; then \
+            ln -sf /glibc/cyclictest /musl/cyclictest; \
+        fi \
+    \0";
+    let ret = run_bash_cmd(cyclictest_cmd, environ);
+    println!("[initproc] cyclictest musl compatibility done, exit={}", ret);
+
     run_bash_cmd(
         "
         ln -sf /bash /bin/bash;
+        ln -sf /bash /bin/sh;
     ",
         environ,
     );

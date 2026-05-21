@@ -147,7 +147,12 @@ fn metadata_to_statx(meta: &vfs::Metadata, mask: u32) -> Statx {
     )
 }
 
-fn open_file_at(dirfd: usize, path: &str, flags: OpenFlags) -> Result<vfs::File, isize> {
+fn open_file_at(
+    dirfd: usize,
+    path: &str,
+    flags: OpenFlags,
+    mode: vfs::InodeMode,
+) -> Result<vfs::File, isize> {
     let start = resolve_start_inode(dirfd)?;
     if path.is_empty() {
         let md = start.metadata().map_err(|e| -(e as isize))?;
@@ -182,7 +187,7 @@ fn open_file_at(dirfd: usize, path: &str, flags: OpenFlags) -> Result<vfs::File,
             }
             let (parent, leaf) = vfs_lookup_parent_for_start(&start, path)?;
             let inode = parent
-                .create(&leaf, FileType::File, vfs::InodeMode::S_IRWXUGO)
+                .create(&leaf, FileType::File, mode & vfs::InodeMode::S_IALLUGO)
                 .map_err(|e| -(e as isize))?;
             vfs::File::new(inode, _open_flags_to_vfs_flags(flags)).map_err(|e| -(e as isize))
         }
@@ -428,7 +433,7 @@ pub fn sys_splice(
 /// # Warning
 /// `fs` & `files` is locked in this function
 fn __openat(dirfd: usize, path: &str) -> Result<vfs::File, isize> {
-    open_file_at(dirfd, path, OpenFlags::O_RDONLY)
+    open_file_at(dirfd, path, OpenFlags::O_RDONLY, vfs::InodeMode::S_IRWXUGO)
 }
 
 pub fn sys_getcwd(buf: usize, size: usize) -> isize {
@@ -1313,23 +1318,19 @@ pub fn sys_fchmodat(dirfd: usize, path: *const u8, mode: u32, _flags: u32) -> is
     let token = task.get_user_token();
     let path_str = match UserCString::from_addr(path as usize).read(token) {
         Ok(s) => s,
-        Err(_) => return -EFAULT,
+        Err(_) => return EFAULT,
     };
-    let inode = if dirfd == AT_FDCWD || path_str.starts_with('/') {
+    let inode = if path_str.starts_with('/') {
         match vfs_lookup_absolute(&path_str) {
             Ok(inode) => inode,
             Err(e) => return e,
         }
     } else {
-        let dir_inode = {
-            let files_ref = task.process.files();
-        let fd_table = files_ref.lock();
-            match fd_table.get_file(dirfd) {
-                Ok(f) => f.inode.clone(),
-                Err(_) => return -EBADF,
-            }
+        let start = match resolve_start_inode(dirfd) {
+            Ok(inode) => inode,
+            Err(errno) => return errno,
         };
-        match vfs_lookup(&dir_inode, &path_str, true) {
+        match vfs_lookup(&start, &path_str, true) {
             Ok(inode) => inode,
             Err(e) => return e,
         }
@@ -1386,6 +1387,7 @@ pub fn sys_chdir(path: *const u8) -> isize {
 }
 
 pub fn sys_openat(dirfd: usize, path: *const u8, flags: u32, mode: u32) -> isize {
+    let mode_bits = mode;
     let task = current_task().unwrap();
     let token = task.get_user_token();
     let path = match user_cstring(token, path) {
@@ -1404,7 +1406,8 @@ pub fn sys_openat(dirfd: usize, path: *const u8, flags: u32, mode: u32) -> isize
         "[sys_openat] dirfd: {}, path: {}, flags: {:?}, mode: {:?}",
         dirfd as isize, path, flags, mode
     );
-    let new_file = match open_file_at(dirfd, &path, flags) {
+    let create_mode = vfs::InodeMode::from_bits_truncate(mode_bits) & vfs::InodeMode::S_IALLUGO;
+    let new_file = match open_file_at(dirfd, &path, flags, create_mode) {
         Ok(file) => file,
         Err(errno) => return errno,
     };
@@ -1533,7 +1536,8 @@ pub fn sys_mkdirat(dirfd: usize, path: *const u8, mode: u32) -> isize {
         Ok(result) => result,
         Err(errno) => return errno,
     };
-    match parent.mkdir(&leaf, vfs::InodeMode::S_IRWXUGO) {
+    let dir_mode = vfs::InodeMode::from_bits_truncate(mode) & vfs::InodeMode::S_IALLUGO;
+    match parent.mkdir(&leaf, dir_mode) {
         Ok(_) => SUCCESS,
         Err(e) => -(e as isize),
     }
@@ -2076,6 +2080,94 @@ bitflags! {
     }
 }
 
+fn access_subject_ids(use_effective: bool) -> (u32, u32) {
+    let task = current_task().unwrap();
+    let inner = task.acquire_inner_lock();
+    if use_effective {
+        (inner.euid, inner.egid)
+    } else {
+        (inner.uid, inner.gid)
+    }
+}
+
+fn permission_class_bits(meta: &vfs::Metadata, uid: u32, gid: u32) -> u32 {
+    let mode = meta.mode.bits() & 0o777;
+    if uid == meta.uid {
+        (mode >> 6) & 0o7
+    } else if gid == meta.gid {
+        (mode >> 3) & 0o7
+    } else {
+        mode & 0o7
+    }
+}
+
+fn has_final_access(meta: &vfs::Metadata, mode: FaccessatMode, uid: u32, gid: u32) -> bool {
+    if mode.bits() == 0 {
+        return true;
+    }
+    if uid == 0 {
+        return !mode.contains(FaccessatMode::X_OK) || (meta.mode.bits() & 0o111) != 0;
+    }
+
+    let allowed = permission_class_bits(meta, uid, gid);
+    if mode.contains(FaccessatMode::R_OK) && (allowed & 0o4) == 0 {
+        return false;
+    }
+    if mode.contains(FaccessatMode::W_OK) && (allowed & 0o2) == 0 {
+        return false;
+    }
+    if mode.contains(FaccessatMode::X_OK) && (allowed & 0o1) == 0 {
+        return false;
+    }
+    true
+}
+
+fn has_search_access(meta: &vfs::Metadata, uid: u32, gid: u32) -> bool {
+    uid == 0 || (permission_class_bits(meta, uid, gid) & 0o1) != 0
+}
+
+fn check_parent_search_access(
+    start: &Arc<dyn vfs::IndexNode>,
+    path: &str,
+    uid: u32,
+    gid: u32,
+) -> isize {
+    let components = parse_path(path);
+    let mut current = if path.starts_with('/') {
+        vfs_root().mountpoint_root_inode()
+    } else {
+        start.clone()
+    };
+
+    for name in components.iter().take(components.len().saturating_sub(1)) {
+        let meta = match current.metadata() {
+            Ok(meta) => meta,
+            Err(e) => return -(e as isize),
+        };
+        if meta.file_type != FileType::Dir {
+            return ENOTDIR;
+        }
+        if !has_search_access(&meta, uid, gid) {
+            return EACCES;
+        }
+        current = match current.find(name) {
+            Ok(inode) => inode,
+            Err(e) => return -(e as isize),
+        };
+    }
+    let meta = match current.metadata() {
+        Ok(meta) => meta,
+        Err(e) => return -(e as isize),
+    };
+    if meta.file_type != FileType::Dir {
+        return ENOTDIR;
+    }
+    if !has_search_access(&meta, uid, gid) {
+        return EACCES;
+    }
+    SUCCESS
+}
+
 pub fn sys_faccessat2(dirfd: usize, pathname: *const u8, mode: u32, flags: u32) -> isize {
     let token = current_user_token();
     let pathname = match user_cstring(token, pathname) {
@@ -2102,17 +2194,32 @@ pub fn sys_faccessat2(dirfd: usize, pathname: *const u8, mode: u32, flags: u32) 
         dirfd as isize, pathname, mode, flags
     );
 
-    // Do not check user's authority, because user group is not implemented yet.
-    // All existing files can be accessed.
     let nofollow = flags.contains(FaccessatFlags::AT_SYMLINK_NOFOLLOW);
-    match resolve_start_inode(dirfd) {
-        Ok(start_inode) => {
-            match vfs_lookup(&start_inode, &pathname, !nofollow) {
-                Ok(_) => SUCCESS,
-                Err(errno) => errno,
-            }
+    let start_inode = if pathname.starts_with('/') {
+        vfs_root().mountpoint_root_inode()
+    } else {
+        match resolve_start_inode(dirfd) {
+            Ok(inode) => inode,
+            Err(errno) => return errno,
         }
-        Err(errno) => errno,
+    };
+    let (uid, gid) = access_subject_ids(flags.contains(FaccessatFlags::AT_EACCESS));
+    let parent_result = check_parent_search_access(&start_inode, &pathname, uid, gid);
+    if parent_result != SUCCESS {
+        return parent_result;
+    }
+    let inode = match vfs_lookup(&start_inode, &pathname, !nofollow) {
+        Ok(inode) => inode,
+        Err(errno) => return errno,
+    };
+    let meta = match inode.metadata() {
+        Ok(meta) => meta,
+        Err(e) => return -(e as isize),
+    };
+    if has_final_access(&meta, mode, uid, gid) {
+        SUCCESS
+    } else {
+        EACCES
     }
 }
 

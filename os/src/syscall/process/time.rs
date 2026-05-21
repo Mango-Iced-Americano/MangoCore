@@ -23,6 +23,60 @@ const CLOCK_REALTIME_ALARM: usize = 8;
 const CLOCK_BOOTTIME_ALARM: usize = 9;
 const CLOCK_TAI: usize = 11;
 const TIMER_ABSTIME: u32 = 1;
+const CAP_SYS_TIME: usize = 25;
+const ADJ_OFFSET: u32 = 0x0001;
+const ADJ_FREQUENCY: u32 = 0x0002;
+const ADJ_MAXERROR: u32 = 0x0004;
+const ADJ_ESTERROR: u32 = 0x0008;
+const ADJ_STATUS: u32 = 0x0010;
+const ADJ_TIMECONST: u32 = 0x0020;
+const ADJ_TAI: u32 = 0x0080;
+const ADJ_SETOFFSET: u32 = 0x0100;
+const ADJ_MICRO: u32 = 0x1000;
+const ADJ_NANO: u32 = 0x2000;
+const ADJ_TICK: u32 = 0x4000;
+const ADJ_OFFSET_SINGLESHOT: u32 = 0x8001;
+const ADJ_OFFSET_SS_READ: u32 = 0xa001;
+const MIN_TICK: i64 = 9_000;
+const MAX_TICK: i64 = 11_000;
+const ADJ_VALID_MASK: u32 = ADJ_OFFSET
+    | ADJ_FREQUENCY
+    | ADJ_MAXERROR
+    | ADJ_ESTERROR
+    | ADJ_STATUS
+    | ADJ_TIMECONST
+    | ADJ_TAI
+    | ADJ_SETOFFSET
+    | ADJ_MICRO
+    | ADJ_NANO
+    | ADJ_TICK;
+const TIME_OK: isize = 0;
+
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct Timex {
+    modes: u32,
+    offset: i64,
+    freq: i64,
+    maxerror: i64,
+    esterror: i64,
+    status: i32,
+    constant: i64,
+    precision: i64,
+    tolerance: i64,
+    time: TimeVal,
+    tick: i64,
+    ppsfreq: i64,
+    jitter: i64,
+    shift: i32,
+    stabil: i64,
+    jitcnt: i64,
+    calcnt: i64,
+    errcnt: i64,
+    stbcnt: i64,
+    tai: i32,
+    __padding: [i32; 11],
+}
 
 pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
     let token = current_user_token();
@@ -150,6 +204,92 @@ pub fn sys_gettimeofday(tv: *mut TimeVal, _tz: *mut TimeZone) -> isize {
             log::error!("[sys_gettimeofday] Failed to copy to {:?}", tv);
             return EFAULT;
         }
+    }
+    SUCCESS
+}
+
+fn valid_timex_modes(modes: u32) -> bool {
+    matches!(modes, ADJ_OFFSET_SINGLESHOT | ADJ_OFFSET_SS_READ)
+        || (modes & !ADJ_VALID_MASK == 0)
+}
+
+fn valid_timex_value(timex: &Timex) -> bool {
+    valid_timex_modes(timex.modes)
+        && (timex.modes & ADJ_TICK == 0 || (MIN_TICK..=MAX_TICK).contains(&timex.tick))
+}
+
+fn has_time_adjust_permission() -> bool {
+    let task = current_task().unwrap();
+    let inner = task.acquire_inner_lock();
+    inner.euid == 0 || (inner.cap_effective & (1u64 << CAP_SYS_TIME)) != 0
+}
+
+fn fill_timex_snapshot(timex: &mut Timex) {
+    timex.offset = 0;
+    timex.freq = 0;
+    timex.maxerror = 0;
+    timex.esterror = 0;
+    timex.status = 0;
+    timex.constant = 0;
+    timex.precision = 1;
+    timex.tolerance = 32_768_000;
+    timex.time = TimeVal::now();
+    timex.tick = 10_000;
+    timex.ppsfreq = 0;
+    timex.jitter = 0;
+    timex.shift = 0;
+    timex.stabil = 0;
+    timex.jitcnt = 0;
+    timex.calcnt = 0;
+    timex.errcnt = 0;
+    timex.stbcnt = 0;
+    timex.tai = 0;
+}
+
+fn do_adjtimex(timex_ptr: *mut Timex) -> isize {
+    let token = current_user_token();
+    let mut timex = match UserPtr::new(timex_ptr as *const Timex).read(token) {
+        Ok(value) => value,
+        Err(errno) => return errno,
+    };
+    if !valid_timex_value(&timex) {
+        return EINVAL;
+    }
+    if timex.modes != 0 && !has_time_adjust_permission() {
+        return EPERM;
+    }
+    fill_timex_snapshot(&mut timex);
+    match UserPtrMut::new(timex_ptr).write(token, &timex) {
+        Ok(()) => TIME_OK,
+        Err(errno) => errno,
+    }
+}
+
+pub fn sys_adjtimex(timex: *mut Timex) -> isize {
+    do_adjtimex(timex)
+}
+
+pub fn sys_clock_adjtime(clk_id: usize, timex: *mut Timex) -> isize {
+    match clk_id {
+        CLOCK_REALTIME => do_adjtimex(timex),
+        _ => EINVAL,
+    }
+}
+
+pub fn sys_clock_settime(clk_id: usize, tp: *const TimeSpec) -> isize {
+    if clk_id != CLOCK_REALTIME {
+        return EINVAL;
+    }
+    let token = current_user_token();
+    let timespec = match UserPtr::new(tp).read(token) {
+        Ok(value) => value,
+        Err(errno) => return errno,
+    };
+    if !is_valid_timespec(timespec) {
+        return EINVAL;
+    }
+    if !has_time_adjust_permission() {
+        return EPERM;
     }
     SUCCESS
 }

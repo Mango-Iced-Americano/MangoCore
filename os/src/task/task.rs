@@ -26,6 +26,8 @@ use core::sync::atomic::AtomicBool;
 use log::{trace, warn};
 use spin::{Mutex, MutexGuard};
 
+const TASK_CAP_FULL_SET: u64 = (1u64 << 41) - 1;
+
 #[derive(Clone)]
 /// 任务的文件系统状态
 pub struct FsStatus {
@@ -81,6 +83,20 @@ pub struct TaskControlBlockInner {
     pub sched_policy: usize,
     /// POSIX 调度优先级兼容字段。
     pub sched_priority: i32,
+    /// POSIX 用户/组 ID 兼容字段，供 LTP 权限类用例和 capability 查询使用。
+    pub uid: u32,
+    pub euid: u32,
+    pub suid: u32,
+    pub fsuid: u32,
+    pub gid: u32,
+    pub egid: u32,
+    pub sgid: u32,
+    pub fsgid: u32,
+    /// Linux capability 兼容字段。当前内核只做权限语义判定，不实现真实权能隔离。
+    pub cap_effective: u64,
+    pub cap_permitted: u64,
+    pub cap_inheritable: u64,
+    pub cap_bounding: u64,
     /// 用于清理子进程的线程ID
     pub clear_child_tid: usize,
     /// 鲁棒列表，用于管理鲁棒互斥锁
@@ -504,6 +520,18 @@ impl TaskControlBlock {
                 task_status: TaskStatus::Ready,
                 sched_policy: 0,
                 sched_priority: 0,
+                uid: 0,
+                euid: 0,
+                suid: 0,
+                fsuid: 0,
+                gid: 0,
+                egid: 0,
+                sgid: 0,
+                fsgid: 0,
+                cap_effective: TASK_CAP_FULL_SET,
+                cap_permitted: TASK_CAP_FULL_SET,
+                cap_inheritable: 0,
+                cap_bounding: TASK_CAP_FULL_SET,
                 clear_child_tid: 0,
                 robust_list: RobustList::default(),
                 rusage: Rusage::new(),
@@ -799,7 +827,7 @@ impl TaskControlBlock {
                 timer: [ITimerVal::new(); 3],
                 real_timer_deadline: None,
                 real_timer_generation: 0,
-                sigmask: Signals::empty(),
+                sigmask: parent_inner.sigmask,
                 sigmask_to_restore: None,
                 // compute
                 trap_cx_ppn,
@@ -808,6 +836,18 @@ impl TaskControlBlock {
                 task_status: TaskStatus::Ready,
                 sched_policy: parent_inner.sched_policy,
                 sched_priority: parent_inner.sched_priority,
+                uid: parent_inner.uid,
+                euid: parent_inner.euid,
+                suid: parent_inner.suid,
+                fsuid: parent_inner.fsuid,
+                gid: parent_inner.gid,
+                egid: parent_inner.egid,
+                sgid: parent_inner.sgid,
+                fsgid: parent_inner.fsgid,
+                cap_effective: parent_inner.cap_effective,
+                cap_permitted: parent_inner.cap_permitted,
+                cap_inheritable: parent_inner.cap_inheritable,
+                cap_bounding: parent_inner.cap_bounding,
                 pending_oom_kill: false,
             }),
         });

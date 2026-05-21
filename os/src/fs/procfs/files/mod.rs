@@ -11,7 +11,7 @@ pub mod uptime;
 pub mod version;
 
 use alloc::sync::Arc;
-use crate::fs::vfs::{IndexNode, InodeMode};
+use crate::fs::vfs::InodeMode;
 use crate::utils::error::SyscallErr;
 
 pub fn register_all(root: &Arc<crate::fs::procfs::LockedProcInode>) -> Result<(), SyscallErr> {
@@ -37,9 +37,9 @@ pub fn register_all(root: &Arc<crate::fs::procfs::LockedProcInode>) -> Result<()
         0,
     )?;
     let user_dir = sys_dir.add_dir_locked("user", InodeMode::from_bits_truncate(0o555))?;
-    user_dir.add_file(
+    user_dir.add_writable_file(
         "max_user_namespaces",
-        InodeMode::from_bits_truncate(0o444),
+        InodeMode::from_bits_truncate(0o644),
         sys::max_user_namespaces_content,
         0,
     )?;

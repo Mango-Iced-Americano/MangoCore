@@ -1,8 +1,8 @@
 use crate::config::PAGE_SIZE;
 use crate::fs::vfs;
-use crate::mm::{MapFlags, MapPermission};
+use crate::mm::{translated_byte_buffer, MapFlags, MapPermission, UserAccess};
 use crate::syscall::errno::*;
-use crate::task::current_task;
+use crate::task::{current_task, current_user_token};
 use crate::utils::error::SyscallErr;
 use log::{error, info, warn};
 
@@ -175,6 +175,37 @@ pub fn sys_mprotect(addr: usize, len: usize, prot: usize) -> isize {
         Ok(_) => SUCCESS,
         Err(errno) => errno,
     }
+}
+
+pub fn sys_mlock(addr: usize, len: usize) -> isize {
+    if len == 0 {
+        return SUCCESS;
+    }
+    if addr.checked_add(len).is_none() {
+        return EINVAL;
+    }
+    match translated_byte_buffer(current_user_token(), addr as *const u8, len, UserAccess::Read) {
+        Ok(_) => SUCCESS,
+        Err(errno) => errno,
+    }
+}
+
+pub fn sys_munlock(addr: usize, len: usize) -> isize {
+    sys_mlock(addr, len)
+}
+
+pub fn sys_mlockall(flags: usize) -> isize {
+    const MCL_CURRENT: usize = 1;
+    const MCL_FUTURE: usize = 2;
+    const MCL_ONFAULT: usize = 4;
+    if flags & !(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) != 0 {
+        return EINVAL;
+    }
+    SUCCESS
+}
+
+pub fn sys_munlockall() -> isize {
+    SUCCESS
 }
 
 pub fn sys_madvise(_addr: usize, _length: usize, _advice: usize) -> isize {

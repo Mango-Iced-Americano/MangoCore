@@ -64,7 +64,11 @@ pub fn sys_sigaction(signum: usize, act: usize, oldact: usize) -> isize {
         act,
         oldact
     );
-    sigaction(signum, act as *const SigAction, oldact as *mut SigAction)
+    sigaction(
+        signum,
+        act as *const UserSigAction,
+        oldact as *mut UserSigAction,
+    )
 }
 
 /// Note: code translation should be done in syscall rather than the call handler as the handler may be reused by kernel code which use kernel structs

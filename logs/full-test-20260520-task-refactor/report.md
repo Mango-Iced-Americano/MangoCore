@@ -1,6 +1,8 @@
 # 2026-05-20 双架构全量测试与 task 重构效果记录
 
 > 2026-05-21 追加：本报告保留 2026-05-20 全量测试的原始结论，同时补充 la64 `clone` ABI 与 signal-frame sigmask 对齐修复后的聚焦复测结果。原始全量日志仍以 `current-testresult/` 为准，新增复测结果用于更新问题状态和后续优先级。
+>
+> 2026-05-21 追加二：继续补齐 `rt_sigaction` 用户 ABI、`/dev/shm`、`mlock*`、LTP 权限/时间/procfs 兼容后，la64 fork/clone `Bad address` 与 cyclictest P0 阻塞已在聚焦复测中归零；libctest 的 pthread/TLS 成片异常已收敛，但全量 libctest 仍有 libc 语义、runtime 依赖和少量 pthread timeout，不能写成完全通过。
 
 ## 1. 测试范围
 
@@ -16,6 +18,7 @@
 - 构建日志：`logs/full-test-20260520-task-refactor/build.log`
 - 全量驱动日志：`logs/full-test-20260520-task-refactor/run_test_driver.log`
 - 本轮 24 个测试组原始日志：`logs/full-test-20260520-task-refactor/current-testresult/{la,rv}/*.log`
+- 2026-05-21 聚焦复测日志：`logs/ltp-fix-20260521/*.log`
 - `logs/full-test-20260520-task-refactor/preexisting-testresult/` 是运行前的旧 `testresult` 备份。
 - `logs/full-test-20260520-task-refactor/testresult/` 是运行后的完整快照，包含 `testresult/rv` 中原有的历史调试日志；本报告只以 `current-testresult/` 为本轮依据。
 
@@ -114,6 +117,48 @@
 
 更新结论：la64 `pthread_cancel*` 的 P0 级“信号返回后跳空地址”已消除。后续继续处理时，应把 `pthread_cancel_points` 拆成 cancellation-point 语义、`pthread_join` 非阻塞语义和 glibc runtime 依赖三类，而不再按 `pc/ra` 恢复损坏处理。
 
+### 2026-05-21 追加二：P0 聚焦修复最终状态
+
+本轮继续修复后，P0 现象按根因拆成四类：
+
+1. la64 raw `clone` 参数顺序错位：已修复。fork/clone、hackbench、UnixBench SPAWN/EXECL 不再出现 `Bad address`。
+2. `rt_sigaction` 用户 ABI 与内核 `SigAction` 结构不一致：已修复。la64 内部 `Signals` 为 128 位，用户态 `rt_sigaction` 只传低 64 位 mask；此前 copy `oldact` 会覆盖用户栈，导致 shell/system 路径和 pthread/TLS 后续异常。
+3. `/dev/shm` 与 `mlock*` 缺失：已补最小兼容。cyclictest/libctest 不再因为 `shm_open` 缺路径或 `mlock` ENOSYS 提前失败。
+4. la64 测试镜像 musl `cyclictest` 自身 libc stub：已在 initproc 中将 `/musl/cyclictest` 指向 glibc 版本。原因是镜像内 musl libc 的 `sched_getparam` / `sched_getscheduler` 是 ENOSYS stub，不会进入内核 syscall；这属于测试镜像兼容处理，不是内核调度语义修复。
+
+修复点补充：
+
+- `os/src/syscall/mod.rs`：la64 `clone` syscall 单独按 `flags, stack, ptid, ctid, tls` 解码；补齐 CAP/time/ID/mlock syscall 分发。
+- `os/src/task/signal/mod.rs`、`os/src/syscall/process/signal.rs`：新增 `UserSigAction`，避免把内核 128-bit `Signals` 直接写回用户 ABI。
+- `os/src/task/task.rs`：clone 子线程继承父线程 signal mask，并继承 uid/gid/cap/sched 兼容字段。
+- `os/src/fs/mod.rs`：注册 `/dev/shm` ramfs，权限 `01777`。
+- `os/src/syscall/process/mm.rs`：新增 `mlock` / `munlock` / `mlockall` / `munlockall` 最小无 swap 兼容。
+- `user/src/bin/initproc.rs`：补 `/etc/passwd`、`/etc/group`、`/bin/sh`，并处理 la64 cyclictest musl stub 兼容。
+
+最终聚焦复测：
+
+- 双架构 release 构建通过：
+  - `docker compose exec os-dev make -C os la64-only MODE=release`
+  - `docker compose exec os-dev make -C os rv64-only MODE=release`
+- LTP 聚焦 7 例双架构、双 libc 通过：
+  - 配置：`.codex-ltp-fix.conf`
+  - 用例：`access01,access02,adjtimex02,bind02,capset02,clock_adjtime01,clock_adjtime02`
+  - 日志：`logs/ltp-fix-20260521/la-ltp-final-focused-after-mlock-shim.log`
+  - 日志：`logs/ltp-fix-20260521/rv-ltp-final-focused-after-mlock-shim.log`
+  - musl/glibc 子汇总均为 `failed 0`，`/musl exit_code=0`、`/glibc exit_code=0`。
+  - 关键字复查未命中 `TFAIL`、`TBROK`、`Exception`、`PageInvalid`、`Bad address`、`Unsupported syscall`、`fork()`、`Creating workers`。
+- la64 cyclictest 通过 parser：
+  - 配置：`.codex-la64-cyclictest.conf`
+  - 日志：`logs/ltp-fix-20260521/la-cyclictest-after-mlock-shim.log`
+  - musl/glibc 的 `NO_STRESS_P1`、`NO_STRESS_P8`、`STRESS_P1`、`STRESS_P8` 均出现 `end: success`。
+  - 未再出现 `Bad address`、`Fork failed`、`Unsupported syscall 228`、`ERROR, mlock`、`unable to get scheduler parameters`。
+  - hackbench 仍有 `Resource temporarily unavailable`，这是资源压力/EAGAIN，不再是 EFAULT。
+- la64 libctest 状态：
+  - 配置：`.codex-la64-libctest.conf`
+  - 日志：`logs/ltp-fix-20260521/la-libctest-after-sigaction-mlock.log`
+  - 原 P0 集群中 `pthread_cancel`、`pthread_cond*`、`pthread_robust_detach`、`pthread_once_deadlock`、`tls_init`、`tls_local_exec`、`tls_get_new_dtv` 已大幅收敛，前半轮 static/dynamic 多数通过。
+  - 仍不能声明 libctest 全 pass：剩余有 `mremap(216)` unsupported 日志、glibc dynamic `libgcc_s.so.1` 缺失导致的 pthread cancel abort、`pthread_robust_detach` / `pthread_condattr_setclock` / `sem_init` timeout，以及 locale/scanf/stat/socket/regex/setvbuf 等 libc 语义问题。
+
 ## 7. 各测试组问题记录
 
 | 组 | la64 | rv64 | 主要问题 |
@@ -121,14 +166,14 @@
 | basic | PASS | PASS | 基础 syscall 路径可用 |
 | busybox | FAIL | FAIL | musl/glibc 子脚本 exit_code 均为 0，但 `hwclock` 打印 `/dev/misc/rtc: No such file or directory`，触发 wrapper 的硬失败规则 |
 | lua | PASS | PASS | 未见明显问题 |
-| libctest | FAIL | PASS | 2026-05-20 la64 pthread/TLS 大量用户态异常并最终超时；2026-05-21 clone ABI 修复后 TLS/cond/once 类问题明显收敛，signal-frame sigmask 修复后 `pthread_cancel`/`pthread_cancel_sem_wait` 不再 0 地址取指，剩余集中在 `pthread_cancel_points` 语义、syscall 435 和 libc 细节 |
+| libctest | FAIL | PASS | 2026-05-20 la64 pthread/TLS 大量用户态异常并最终超时；2026-05-21 clone ABI、signal ABI、`/dev/shm`、`mlock*` 修复后 P0 集群明显收敛，剩余集中在 glibc runtime、pthread timeout、`mremap(216)` 和 libc 细节 |
 | iozone | PASS | PASS | 双架构通过；本轮未见 heap/OOM/ext4 panic |
 | unixbench | FAIL | TIMEOUT | 2026-05-20 la64 直接 `Fork failed ... Bad address`；2026-05-21 复测已跑过 SPAWN/EXECL，未再见 Bad address，剩余为 timeout/性能问题 |
 | iperf | TIMEOUT | TIMEOUT | la64 卡在 `BASIC_UDP begin`；rv64 UDP `Connection refused` 后 TCP 被外层超时打断 |
 | libcbench | PASS | FAIL | la64 wrapper PASS 但 `b_regex_search` 附近有 `PageInvalidStore`；rv64 glibc pthread benchmark 受 unsupported syscall 435 和 StorePageFault 影响，3 次 60s 超时 |
 | lmbench | FAIL | TIMEOUT | 双架构都能打印部分 latency 数字，但 musl/glibc 多轮 60s 超时；更偏性能/阻塞路径问题 |
 | netperf | FAIL | TIMEOUT | 双架构 UDP_STREAM 都卡；musl `setsockopt errno 92`，glibc `getprotobyname`/无响应；内部 90s 重试耗尽或外层 600s 超时 |
-| cyclictest | PASS | PASS | wrapper PASS，但双架构内部 `NO_STRESS_P1/P8`、`STRESS_P1/P8` 都是 `end: fail`；依赖 unsupported syscall 236/120/121。2026-05-21 la64 hackbench 已从 Bad address 变为 Resource temporarily unavailable |
+| cyclictest | PASS | PASS | 2026-05-20 wrapper PASS 但内部 stress 段失败；2026-05-21 补 `mlock*` 与 la64 musl cyclictest 入口兼容后，la64 musl/glibc 四段均为 `end: success`，hackbench 剩余 EAGAIN 资源压力但无 Bad address |
 | ltp | TIMEOUT | TIMEOUT | 两边都推进到 cgroup 段后外层 600s 超时；每边记录到 212 个 `FAIL LTP CASE` |
 
 ## 8. LTP 地基问题
@@ -178,23 +223,23 @@
 
 ### P0：先打通 LTP/task 地基
 
-1. la64 fork EFAULT：已由 2026-05-21 `clone` ABI 修复解决主因。下一轮全量应确认该类 `Bad address` 是否归零。
-2. procfs 最小兼容：补 `/proc/self/maps`、`/proc/self/mounts`、`/proc/sys/kernel/pid_max`、`/proc/sys/kernel/tainted`、`/proc/sys/user/max_user_namespaces`。
-3. LTP 解析和跳过规则：按 `TPASS/TFAIL/TBROK/TCONF` 分类，默认跳过 cgroup、capability、module/vcan、AF_ALG、libaio、keyctl、明显不适配的 bpf/IPv6 模块用例。
+1. la64 fork EFAULT：已由 2026-05-21 `clone` ABI 修复解决主因，聚焦复测未再出现 `Bad address`。
+2. LTP 高分子集继续扩展：当前 `access/adjtimex/bind/capset/clock_adjtime` 聚焦集双架构双 libc 已过，下一步应从同类低依赖 syscall 扩大 include，而不是先碰 cgroup/module/bpf。
+3. procfs 最小兼容：`/proc/sys/user/max_user_namespaces` 已做 writable stub；仍需补 `/proc/self/maps`、`/proc/self/mounts`、`/proc/sys/kernel/pid_max`、`/proc/sys/kernel/tainted`。
 4. hackbench/UnixBench 资源压力：针对当前 `Resource temporarily unavailable` 和 UnixBench timeout，检查 task 数量上限、fd 分配、线程回收、zombie 清理和 wait 路径。
 
 ### P1：线程和网络兼容
 
-1. syscall 435：la64/glibc 与 rv64 线程路径均会触发，优先确认是否为 `clone3`，决定实现最小兼容还是在 libc/测试层退回 `clone`。
-2. pthread_cancel_points：signal-frame sigmask 修复后，`pthread_cancel*` 的 `0x0` 取指已消除；下一步重点看 `shm_open` 等 cancellation point 是否触发取消、non-blocking `pthread_join` 语义、线程退出状态和 glibc dynamic `libgcc_s.so.1` 依赖。
-3. cyclictest 依赖 syscall 236/120/121：先映射真实 syscall 名称，再决定 stub/实现/跳过。
+1. `mremap(216)`：libctest `sscanf_long` 已能通过但仍打印 unsupported，建议做最小 `MREMAP_MAYMOVE` 兼容以清除噪声。
+2. pthread 剩余 timeout：重点看 `pthread_robust_detach`、`pthread_condattr_setclock`、`sem_init`，不要再按 la64 TLS/clone 参数错位处理。
+3. glibc dynamic runtime：`pthread_cancel*` 动态用例报 `libgcc_s.so.1 must be installed`，需要补镜像库链接或确认镜像是否缺文件。
 4. netperf/iperf：先修 `setsockopt errno 92` 和 glibc `getprotobyname` 环境，再看 server 生命周期和阻塞唤醒。
 
 ### P2：benchmark 和 libc 细节
 
 1. busybox：补 `/dev/misc/rtc` stub，或调整 wrapper 不把这个已知缺设备输出当组失败。
 2. libcbench regex StorePageFault：先复现 `b_regex_search ("a{25}b")` 附近崩溃。
-3. libctest libc 语义：locale/scanf/stat time/socket option 等不直接属于 task，但会持续污染通过率。
+3. libctest libc 语义：locale/scanf/stat time/socket option、regex、setvbuf 等不直接属于 task，但会持续污染通过率。
 4. unixbench/lmbench：先区分真实死锁和单纯慢；必要时单独提高内部 timeout 做性能基线。
 
 ## 11. 下一轮建议验证矩阵

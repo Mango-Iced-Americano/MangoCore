@@ -97,6 +97,14 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
             .expect("devfs: failed to register /dev/zero");
         devfs.add_dev("urandom", alloc::sync::Arc::new(crate::fs::dev::urandom::Urandom) as Arc<dyn self::vfs::IndexNode>)
             .expect("devfs: failed to register /dev/urandom");
+        let shmfs = crate::fs::ramfs::RamFS::new_with_quota(4096);
+        if let Ok(mut meta) = shmfs.root_inode().metadata() {
+            meta.mode = self::vfs::InodeMode::from_bits_truncate(0o1777);
+            shmfs.root_inode().set_metadata(&meta).ok();
+        }
+        devfs.add_dev("shm", shmfs.root_inode())
+            .expect("devfs: failed to register /dev/shm");
+        let _ = alloc::sync::Arc::into_raw(shmfs);
         let dev_inode_id = dev_inode.metadata().expect("dev_inode metadata failed").inode_id;
         let devfs_mnt = self::vfs::MountFS::new(devfs, self::vfs::MountFlags::empty());
         mfs.add_mount(dev_inode_id, devfs_mnt)
