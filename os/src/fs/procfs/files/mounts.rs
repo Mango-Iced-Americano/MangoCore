@@ -22,7 +22,8 @@ pub fn mounts_content(
     s.push_str(root_fs_name);
     s.push_str(" rw,relatime 0 0\n");
 
-    // List sub-mounts from VFS_ROOT
+    // List sub-mounts using actual mountpoint names from root filesystem
+    // List sub-mounts from VFS_ROOT (TODO: use get_entry_name for accurate paths)
     let mountpoints = root.mountpoints.lock();
     for (_ino, mfs) in mountpoints.iter() {
         let fs = mfs.inner_filesystem();

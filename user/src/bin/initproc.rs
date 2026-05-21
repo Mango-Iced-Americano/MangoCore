@@ -1396,12 +1396,15 @@ fn prepare_symlink(environ: &[*const u8]) {
     let ret = run_bash_cmd(install_cmd, environ);
     println!("[initproc] busybox --install -s /bin -> exit={}", ret);
 
-    // Step 1.5: LTP 依赖 getpwnam("nobody")/getgrnam("nogroup")，测试镜像缺省时补最小账户库。
-    println!("[initproc] preparing minimal /etc/passwd and /etc/group ...");
+    // Step 1.5: 测试环境依赖最小账户/网络配置，无条件幂等写入（镜像可能缺失或格式错误）
+    println!("[initproc] preparing /etc account/network files ...");
     let account_cmd = "\
-        mkdir -p /etc /root /tmp; chmod 1777 /tmp; \
-        [ -f /etc/passwd ] || printf 'root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/nonexistent:/bin/sh\n' > /etc/passwd; \
-        [ -f /etc/group ] || printf 'root:x:0:\nnogroup:x:65534:\n' > /etc/group \
+        mkdir -p /etc /root /tmp /run /var /var/tmp; chmod 1777 /tmp /var/tmp; \
+        printf 'root:x:0:0:root:/root:/bin/sh\\nnobody:x:65534:65534:nobody:/nonexistent:/bin/sh\\n' > /etc/passwd; \
+        printf 'root:x:0:\\nnogroup:x:65534:\\n' > /etc/group; \
+        printf 'passwd: files\\ngroup: files\\nhosts: files dns\\n' > /etc/nsswitch.conf; \
+        printf 'nameserver 8.8.8.8\\n' > /etc/resolv.conf; \
+        printf 'blossom\\n' > /etc/hostname; \
     \0";
     let ret = run_bash_cmd(account_cmd, environ);
     println!("[initproc] minimal account files done, exit={}", ret);
@@ -1441,10 +1444,6 @@ fn prepare_symlink(environ: &[*const u8]) {
 
     run_bash_cmd(
         "
-        mkdir -p /etc; \
-        echo 'root:x:0:0:root:/root:/bin/sh' > /etc/passwd; \
-        echo 'nobody:x:65534:65534:nobody:/nonexistent:/bin/false' >> /etc/passwd; \
-        echo 'root::0:0:root:/root:/bin/sh' > /etc/group; \
         ln -sf /bash /bin/bash;
         ln -sf /bash /bin/sh;
     ",
@@ -1476,7 +1475,6 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
 
     prepare_symlink(&environ);
 
-    // Self-check: verify /bin/bash is usable after prepare_symlink
     let bash_check = "test -x /bin/bash && echo BIN_BASH_OK || echo BIN_BASH_BAD\0";
     let bash_ret = run_bash_cmd(bash_check, &environ);
     let has_bin_bash = bash_ret == 0;

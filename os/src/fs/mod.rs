@@ -97,6 +97,14 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
             .expect("devfs: failed to register /dev/zero");
         devfs.add_dev("urandom", alloc::sync::Arc::new(crate::fs::dev::urandom::Urandom) as Arc<dyn self::vfs::IndexNode>)
             .expect("devfs: failed to register /dev/urandom");
+        devfs.add_dev("random", alloc::sync::Arc::new(crate::fs::dev::urandom::Urandom) as Arc<dyn self::vfs::IndexNode>)
+            .expect("devfs: failed to register /dev/random");
+        devfs.add_dev("console", crate::fs::dev::tty::TTY.clone() as Arc<dyn self::vfs::IndexNode>)
+            .expect("devfs: failed to register /dev/console");
+        devfs.add_dev("rtc", alloc::sync::Arc::new(crate::fs::dev::rtc::Rtc) as Arc<dyn self::vfs::IndexNode>)
+            .expect("devfs: failed to register /dev/rtc");
+        devfs.add_dev("cpu_dma_latency", alloc::sync::Arc::new(crate::fs::dev::null::Null) as Arc<dyn self::vfs::IndexNode>)
+            .expect("devfs: failed to register /dev/cpu_dma_latency");
         let misc_dir = devfs
             .add_dir("misc", self::vfs::InodeMode::from_bits_truncate(0o755))
             .expect("devfs: failed to register /dev/misc");

@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod cpuinfo;
+pub mod filesystems;
 pub mod meminfo;
 pub mod mounts;
 pub mod self_;
@@ -22,6 +23,7 @@ pub fn register_all(root: &Arc<crate::fs::procfs::LockedProcInode>) -> Result<()
     root.add_file("mounts", InodeMode::from_bits_truncate(0o444), mounts::mounts_content, 0)?;
     root.add_file("stat", InodeMode::from_bits_truncate(0o444), stat::stat_content, 0)?;
     root.add_file("config", InodeMode::from_bits_truncate(0o444), config::config_content, 0)?;
+    root.add_file("filesystems", InodeMode::from_bits_truncate(0o444), filesystems::filesystems_content, 0)?;
     let sys_dir = root.add_dir_locked("sys", InodeMode::from_bits_truncate(0o555))?;
     let kernel_dir = sys_dir.add_dir_locked("kernel", InodeMode::from_bits_truncate(0o555))?;
     kernel_dir.add_file(
@@ -34,6 +36,12 @@ pub fn register_all(root: &Arc<crate::fs::procfs::LockedProcInode>) -> Result<()
         "tainted",
         InodeMode::from_bits_truncate(0o444),
         sys::tainted_content,
+        0,
+    )?;
+    kernel_dir.add_file(
+        "osrelease",
+        InodeMode::from_bits_truncate(0o444),
+        sys::osrelease_content,
         0,
     )?;
     let user_dir = sys_dir.add_dir_locked("user", InodeMode::from_bits_truncate(0o555))?;
