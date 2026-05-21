@@ -5,6 +5,7 @@ pub const SYSCALL_DUP2: usize = 24;
 pub const SYSCALL_FCNTL: usize = 25;
 pub const SYSCALL_IOCTL: usize = 29;
 pub const SYSCALL_MKNODAT: usize = 33;
+pub const SYSCALL_MKDIRAT: usize = 34;
 pub const SYSCALL_UNLINKAT: usize = 35;
 pub const SYSCALL_SYMLINKAT: usize = 36;
 pub const SYSCALL_LINKAT: usize = 37;
