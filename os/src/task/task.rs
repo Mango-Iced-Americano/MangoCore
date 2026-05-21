@@ -16,7 +16,7 @@ use crate::hal::{trap_handler, TrapContext};
 use crate::mm::PageTableImpl;
 use crate::mm::{AddressSpace, FaultAccess, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::syscall::CloneFlags;
-use crate::syscall::errno::ENOMEM;
+use crate::syscall::errno::{ENOEXEC, ENOMEM};
 use crate::timer::{ITimerVal, TimeSpec, TimeVal};
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -430,10 +430,13 @@ impl TaskControlBlock {
             elf_data.len(),
             &elf_data[..16.min(elf_data.len())]
         );
+        if elf_data.is_empty() {
+            panic!("[TCB::new] initproc ELF is empty");
+        }
         // 带有ELF程序头/跳板的用户地址空间（AddressSpace）
         // 解析ELF文件，初始化内存映射
         let (mut memory_set, _user_heap, elf_info) =
-            AddressSpace::<PageTableImpl>::from_elf(elf_data).unwrap();
+            AddressSpace::<PageTableImpl>::from_elf(elf_data).expect("initproc ELF is invalid");
         // 在内核空间中删除ELF区域
         crate::mm::KERNEL_SPACE
             .lock()
@@ -577,6 +580,10 @@ impl TaskControlBlock {
 
         // 将ELF文件映射到内核空间
         let elf_data = elf.map_to_kernel_space(MMAP_BASE);
+        if elf_data.is_empty() {
+            log::error!("[load_elf] ELF file is empty (size=0)");
+            return Err(ENOEXEC);
+        }
         // 带有ELF程序头/跳板/陷阱上下文/用户栈的用户地址空间（AddressSpace）
         let load_result = AddressSpace::from_elf(elf_data);
 
