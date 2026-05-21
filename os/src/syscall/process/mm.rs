@@ -6,6 +6,10 @@ use crate::task::{current_task, current_user_token};
 use crate::utils::error::SyscallErr;
 use log::{error, info, warn};
 
+const PROT_READ: usize = 0x1;
+const PROT_WRITE: usize = 0x2;
+const PROT_EXEC: usize = 0x4;
+
 pub fn sys_sbrk(increment: isize) -> isize {
     let task = current_task().unwrap();
     let vm = task.process.vm();
@@ -55,9 +59,6 @@ pub fn sys_brk(brk_addr: usize) -> isize {
 }
 
 fn parse_mmap_prot(prot: usize) -> Result<MapPermission, isize> {
-    const PROT_READ: usize = 0x1;
-    const PROT_WRITE: usize = 0x2;
-    const PROT_EXEC: usize = 0x4;
     const PROT_ALLOWED: usize = PROT_READ | PROT_WRITE | PROT_EXEC;
     if prot & !PROT_ALLOWED != 0 {
         return Err(EINVAL);
@@ -162,6 +163,170 @@ pub fn sys_munmap(start: usize, len: usize) -> isize {
         Ok(_) => SUCCESS,
         Err(errno) => errno,
     }
+}
+
+fn page_round_up_len(len: usize) -> Option<usize> {
+    len.checked_add(PAGE_SIZE - 1)
+        .map(|len| len & !(PAGE_SIZE - 1))
+}
+
+fn checked_page_range(start: usize, len: usize) -> Result<usize, isize> {
+    let end = start.checked_add(len).ok_or(EINVAL)?;
+    if start >= crate::config::USER_VA_END || end > crate::config::USER_VA_END {
+        return Err(EINVAL);
+    }
+    Ok(end)
+}
+
+fn ranges_overlap(a_start: usize, a_len: usize, b_start: usize, b_len: usize) -> bool {
+    let Some(a_end) = a_start.checked_add(a_len) else {
+        return true;
+    };
+    let Some(b_end) = b_start.checked_add(b_len) else {
+        return true;
+    };
+    a_start < b_end && b_start < a_end
+}
+
+fn copy_current_user_range(src: usize, dst: usize, len: usize) -> Result<(), isize> {
+    let token = current_user_token();
+    let mut copied = 0usize;
+    while copied < len {
+        let chunk_len = (len - copied).min(PAGE_SIZE);
+        let src_addr = src.checked_add(copied).ok_or(EFAULT)?;
+        let dst_addr = dst.checked_add(copied).ok_or(EFAULT)?;
+        let src_buf = translated_byte_buffer(
+            token,
+            src_addr as *const u8,
+            chunk_len,
+            UserAccess::Read,
+        )?;
+        let mut dst_buf = translated_byte_buffer(
+            token,
+            dst_addr as *const u8,
+            chunk_len,
+            UserAccess::Write,
+        )?;
+        if src_buf.len() != 1 || dst_buf.len() != 1 {
+            return Err(EFAULT);
+        }
+        dst_buf[0].copy_from_slice(src_buf[0]);
+        copied += chunk_len;
+    }
+    Ok(())
+}
+
+pub fn sys_mremap(
+    old_addr: usize,
+    old_size: usize,
+    new_size: usize,
+    flags: usize,
+    new_addr: usize,
+) -> isize {
+    const MREMAP_MAYMOVE: usize = 0x1;
+    const MREMAP_FIXED: usize = 0x2;
+    const MREMAP_DONTUNMAP: usize = 0x4;
+    const MREMAP_ALLOWED: usize = MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP;
+
+    if old_addr & (PAGE_SIZE - 1) != 0 || flags & !MREMAP_ALLOWED != 0 {
+        return EINVAL;
+    }
+    let old_len = match page_round_up_len(old_size) {
+        Some(0) | None => return EINVAL,
+        Some(len) => len,
+    };
+    let new_len = match page_round_up_len(new_size) {
+        Some(0) | None => return EINVAL,
+        Some(len) => len,
+    };
+    if checked_page_range(old_addr, old_len).is_err() {
+        return EINVAL;
+    }
+
+    let may_move = flags & MREMAP_MAYMOVE != 0;
+    let fixed = flags & MREMAP_FIXED != 0;
+    let dont_unmap = flags & MREMAP_DONTUNMAP != 0;
+    if fixed && !may_move {
+        return EINVAL;
+    }
+    if dont_unmap && (!may_move || old_len != new_len) {
+        return EINVAL;
+    }
+
+    if !fixed && !dont_unmap && new_len <= old_len {
+        if new_len < old_len {
+            let tail = match old_addr.checked_add(new_len) {
+                Some(addr) => addr,
+                None => return EINVAL,
+            };
+            let ret = sys_munmap(tail, old_len - new_len);
+            if ret < 0 {
+                return ret;
+            }
+        }
+        return old_addr as isize;
+    }
+
+    if !may_move {
+        let tail = match old_addr.checked_add(old_len) {
+            Some(addr) => addr,
+            None => return EINVAL,
+        };
+        let grow_len = new_len - old_len;
+        let ret = sys_mmap(
+            tail,
+            grow_len,
+            PROT_READ | PROT_WRITE,
+            (MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS | MapFlags::MAP_FIXED_NOREPLACE)
+                .bits(),
+            usize::MAX,
+            0,
+        );
+        return if ret < 0 { ENOMEM } else { old_addr as isize };
+    }
+
+    let target = if fixed {
+        if new_addr & (PAGE_SIZE - 1) != 0
+            || checked_page_range(new_addr, new_len).is_err()
+            || ranges_overlap(old_addr, old_len, new_addr, new_len)
+        {
+            return EINVAL;
+        }
+        new_addr
+    } else {
+        0
+    };
+
+    let map_flags = if fixed {
+        MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS | MapFlags::MAP_FIXED
+    } else {
+        MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS
+    };
+    let mapped = sys_mmap(
+        target,
+        new_len,
+        PROT_READ | PROT_WRITE,
+        map_flags.bits(),
+        usize::MAX,
+        0,
+    );
+    if mapped < 0 {
+        return mapped;
+    }
+    let mapped = mapped as usize;
+    let copy_len = old_size.min(new_size).min(old_len).min(new_len);
+    if let Err(errno) = copy_current_user_range(old_addr, mapped, copy_len) {
+        let _ = sys_munmap(mapped, new_len);
+        return errno;
+    }
+    if !dont_unmap {
+        let ret = sys_munmap(old_addr, old_len);
+        if ret < 0 {
+            let _ = sys_munmap(mapped, new_len);
+            return ret;
+        }
+    }
+    mapped as isize
 }
 
 pub fn sys_mprotect(addr: usize, len: usize, prot: usize) -> isize {

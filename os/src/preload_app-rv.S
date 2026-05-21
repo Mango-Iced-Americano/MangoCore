@@ -42,3 +42,12 @@ sfstest:
     .incbin "../user/target/riscv64gc-unknown-none-elf/release/fs_test"
 efstest:
     .align 12
+
+    .section .data
+    .global sltpcompat
+    .global eltpcompat
+    .align 12
+sltpcompat:
+    .incbin "./ltp_proto_compat-rv.so"
+eltpcompat:
+    .align 12

@@ -9,7 +9,7 @@ use crate::utils::error::SyscallErr;
 use alloc::format;
 use alloc::string::ToString;
 use alloc::sync::Arc;
-use smoltcp::wire::{IpAddress, Ipv6Address};
+use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address, Ipv6Address};
 
 const CAP_NET_BIND_SERVICE: usize = 10;
 
@@ -23,6 +23,15 @@ fn is_local_bind_addr(addr: IpAddress) -> bool {
     }
 }
 
+fn ipv4_endpoint_from_unspec_sockaddr(addr_buf: &[u8]) -> Option<Endpoint> {
+    if addr_buf.len() < 16 {
+        return None;
+    }
+    let port = u16::from_be_bytes([addr_buf[2], addr_buf[3]]);
+    let ip = Ipv4Address::from_bytes(&[addr_buf[4], addr_buf[5], addr_buf[6], addr_buf[7]]);
+    Some(Endpoint::Ip(IpEndpoint::new(IpAddress::Ipv4(ip), port)))
+}
+
 pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize {
     match check_addrlen(addrlen) {
         Ok(_) => {}
@@ -30,6 +39,9 @@ pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize {
     }
     let addr_buf = crate::trans_ref!(addr, addrlen);
     let endpoint = match Endpoint::from_sockaddr(addr_buf) {
+        Ok(Endpoint::Unspecified) => {
+            ipv4_endpoint_from_unspec_sockaddr(addr_buf).unwrap_or(Endpoint::Unspecified)
+        }
         Ok(ep) => ep,
         Err(e) => return -(e as isize),
     };

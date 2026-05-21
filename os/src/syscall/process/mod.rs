@@ -2,6 +2,7 @@ mod clone;
 mod exec;
 mod futex;
 mod ids;
+mod ipc;
 mod lifecycle;
 mod misc;
 mod mm;
@@ -21,6 +22,7 @@ pub use ids::{
     sys_setregid, sys_setresgid, sys_setresuid, sys_setreuid, sys_setsid, sys_setuid,
     sys_sysinfo, sys_uname, CapUserData, CapUserHeader, RLimit, SchedParam, Sysinfo,
 };
+pub use ipc::{sys_shmat, sys_shmctl, sys_shmdt, sys_shmget};
 pub use lifecycle::{
     sys_exit, sys_exit_group, sys_get_robust_list, sys_set_robust_list, sys_set_tid_address,
     sys_wait4,
@@ -28,7 +30,7 @@ pub use lifecycle::{
 pub use misc::{sys_shutdown, sys_syslog, sys_yield};
 pub use mm::{
     sys_brk, sys_madvise, sys_memorybarrier, sys_mlock, sys_mlockall, sys_mmap, sys_mprotect,
-    sys_munlock, sys_munlockall, sys_munmap, sys_sbrk,
+    sys_mremap, sys_munlock, sys_munlockall, sys_munmap, sys_sbrk,
 };
 pub use signal::{
     sys_kill, sys_rt_sigpending, sys_rt_sigsuspend, sys_sigaction, sys_sigaltstack,

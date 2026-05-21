@@ -692,6 +692,11 @@ fn run_group_once(
 /// ⚠️ 堆限制：不使用 Vec<String> 收集文件名（会导致 OOM），改用栈缓冲。
 const MAX_LTP_ENTRIES: usize = 3000;
 const MAX_NAME_BYTES: usize = 98304; // 96KB name storage on stack
+
+fn should_preload_musl_ltp_compat(libc_suffix: &str, name: &str) -> bool {
+    libc_suffix == "musl" && !name.as_bytes().iter().any(|b| *b == b'.')
+}
+
 fn run_ltp_binaries(
     environ: &[*const u8],
     dir: &str,
@@ -877,9 +882,14 @@ fn run_ltp_binaries(
             // 将 ltp/testcases/bin 加入 PATH。同时设置 LTPROOT 以兼容 LTP
             // 内部路径解析逻辑。musl/glibc 使用各自目录下的 ltp，自然不同。
             let ltp_root_abs = format!("{}/ltp", log_dir);
+            let preload = if should_preload_musl_ltp_compat(libc_suffix, name) {
+                "LD_PRELOAD=/ltp_proto_compat.so "
+            } else {
+                ""
+            };
             let cmd = format!(
-                "export LTPROOT=\"{}\" && export PATH=\"{}/testcases/bin:$PATH\" && ./ltp/testcases/bin/{}",
-                ltp_root_abs, ltp_root_abs, name
+                "export LTPROOT=\"{}\" && export PATH=\"{}/testcases/bin:$PATH\" && {}./ltp/testcases/bin/{}",
+                ltp_root_abs, ltp_root_abs, preload, name
             );
             let ret = run_bash_cmd(&cmd, environ);
             let exit_code = exit_code_from_waitpid_status(ret);
