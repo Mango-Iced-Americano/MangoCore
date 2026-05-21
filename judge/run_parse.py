@@ -108,30 +108,26 @@ if __name__ == "__main__":
     print("=" * 70)
     total_all = 0
     total_pass = 0
+    # 官方评测 (postwork.py build_table) 使用 score 字段聚合所有分数，
+    # 不是 pass 字段。对齐官方行为。
     for name in sorted(result.keys()):
         r = result[name]
         if isinstance(r, list):
-            # 兼容 judge 脚本的多种输出格式：
-            #   basic/busybox/lua/ltp: {"pass": N, "all": N} — 直接取值
-            #   libctest:              {"pass": N, "total": N} — "all" 缺省用 "total"
-            #   iozone/iperf/netperf/cyclictest/lmbench/libcbench:
-            #                           {"score": 0.0~1.0} — 无 pass/all，用 score>0 判通过
-            p = sum(
-                x.get("pass", x.get("success",
-                    int(x.get("score", 0.0) > 0.0)
-                ))
-                for x in r
-            )
+            # 官方: score_col += data[arch].get(name, {}).get('score', 0)
+            # 所有 judge 脚本都输出 score 字段：
+            #   basic/busybox/lua/ltp/libctest: score == pass (assertion count 或 0/1)
+            #   iozone/iperf/netperf/cyclictest/libcbench/lmbench: score = 0.0~2.0 (标准化性能分)
+            p = sum(x.get("score", 0) for x in r)
             a = sum(x.get("all", x.get("total", 1)) for x in r)
         elif isinstance(r, dict):
-            p = r.get("pass", r.get("passed", int(r.get("score", 0.0) > 0.0)))
-            a = r.get("all", len(r) - 2 if "pass" not in r else 0)
+            p = r.get("score", r.get("pass", 0))
+            a = r.get("all", 0)
         else:
             p = 0
             a = 0
         total_all += a
-        total_pass += p
-        print(f"  {name:<28}  {p:>6} {a:>6}")
+        total_pass += int(p)
+        print(f"  {name:<28}  {int(p):>6} {a:>6}")
     print("=" * 70)
     print(f"  {'TOTAL':<28}  {total_pass:>6} {total_all:>6}")
     print()
