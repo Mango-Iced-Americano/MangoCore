@@ -736,9 +736,10 @@ fn should_skip_ltp_helper(name: &str) -> Option<&'static str> {
         "cpuacct.sh" | "cpuacct_task" => Some("cgroup controller helper"),
         "connect02" => Some("requires AF_INET6 connect support"),
         "cn_pec.sh" => Some("requires process event connector"),
-        "close_range01" | "copy_file_range01" | "copy_file_range02" => {
+        "close_range01" | "copy_file_range01" | "copy_file_range02" | "creat09" => {
             Some("requires LTP external block device")
         }
+        "create_datafile" | "create_file" => Some("standalone LTP helper"),
         _ => None,
     }
 }
@@ -907,10 +908,8 @@ fn run_ltp_binaries(
                 }
             }
 
-            // include 白名单过滤
+            // include 仅用于 focused 调试，非白名单测例直接略过，避免 la64 在空跑列表上耗尽组超时。
             if !include.is_empty() && !include.iter().any(|e| e == name) {
-                println!("RUN LTP CASE {}", name);
-                println!("FAIL LTP CASE {} : 0", name);
                 continue;
             }
 
