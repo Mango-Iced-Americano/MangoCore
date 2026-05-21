@@ -90,7 +90,8 @@ pub fn config_content(
     let _ = writeln!(s, "CONFIG_SIGNALFD=y");
     let _ = writeln!(s, "CONFIG_TIMERFD=y");
     let _ = writeln!(s, "CONFIG_SIGNAL=y");
-    let _ = writeln!(s, "# CONFIG_SYSVIPC is not set");
+    let _ = writeln!(s, "CONFIG_SYSVIPC=y");
+    let _ = writeln!(s, "# CONFIG_POSIX_MQUEUE is not set");
     let _ = writeln!(s, "# CONFIG_PTRACE is not set");
 
     // ── Namespaces ──
@@ -118,6 +119,14 @@ pub fn config_content(
     let _ = writeln!(s, "# CONFIG_PROVE_LOCKING is not set");
     let _ = writeln!(s, "# CONFIG_LOCKDEP is not set");
     let _ = writeln!(s, "# CONFIG_KASAN is not set");
+    let _ = writeln!(s, "# CONFIG_XATTR is not set");
+    let _ = writeln!(s, "# CONFIG_ACL is not set");
+    let _ = writeln!(s, "# CONFIG_QUOTA is not set");
+    let _ = writeln!(s, "# CONFIG_INOTIFY is not set");
+    let _ = writeln!(s, "# CONFIG_FANOTIFY is not set");
+    let _ = writeln!(s, "# CONFIG_CGROUPS is not set");
+    let _ = writeln!(s, "# CONFIG_SECCOMP is not set");
+    let _ = writeln!(s, "# CONFIG_SECURITY is not set");
 
     proc_read_str(offset, len, buf, &s)
 }
