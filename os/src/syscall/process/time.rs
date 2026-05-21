@@ -311,6 +311,9 @@ pub fn sys_timer_settime(
     if flags & !TIMER_ABSTIME != 0 {
         return EINVAL;
     }
+    if new_value.is_null() {
+        return EINVAL;
+    }
 
     let token = current_user_token();
     let new_spec = match UserPtr::new(new_value).read(token) {
@@ -409,13 +412,22 @@ fn timespec_to_timeval(value: TimeSpec) -> TimeVal {
 }
 
 fn valid_posix_timer_clock(clock_id: usize) -> bool {
-    matches!(clock_id, CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_BOOTTIME)
+    matches!(
+        clock_id,
+        CLOCK_REALTIME
+            | CLOCK_MONOTONIC
+            | CLOCK_PROCESS_CPUTIME_ID
+            | CLOCK_THREAD_CPUTIME_ID
+            | CLOCK_BOOTTIME
+    )
 }
 
 fn posix_timer_clock_now(clock_id: usize) -> TimeSpec {
     match clock_id {
         CLOCK_REALTIME => current_timespec(),
-        CLOCK_MONOTONIC | CLOCK_BOOTTIME => TimeSpec::now(),
+        CLOCK_MONOTONIC | CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID | CLOCK_BOOTTIME => {
+            TimeSpec::now()
+        }
         _ => TimeSpec::new(),
     }
 }
