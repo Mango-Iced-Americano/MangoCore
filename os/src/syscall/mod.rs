@@ -310,12 +310,22 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_UNAME => sys_uname(args[0] as *mut u8),
         SYSCALL_GETPID => sys_getpid(),
         SYSCALL_GETPPID => sys_getppid(),
+        #[cfg(not(feature = "loongarch64"))]
         SYSCALL_CLONE => sys_clone(
             args[0] as u32,
             args[1] as *const u8,
             args[2] as *mut u32,
             args[3],
             args[4] as *mut u32,
+        ),
+        #[cfg(feature = "loongarch64")]
+        SYSCALL_CLONE => sys_clone(
+            args[0] as u32,
+            args[1] as *const u8,
+            args[2] as *mut u32,
+            // LoongArch raw clone ABI 为 flags, stack, ptid, ctid, tls。
+            args[4],
+            args[3] as *mut u32,
         ),
         SYSCALL_EXECVE => sys_execve(
             args[0] as *const u8,
