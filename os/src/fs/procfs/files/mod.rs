@@ -43,6 +43,23 @@ pub fn register_all(root: &Arc<crate::fs::procfs::LockedProcInode>) -> Result<()
         sys::max_user_namespaces_content,
         0,
     )?;
+    let net_dir = sys_dir.add_dir_locked("net", InodeMode::from_bits_truncate(0o555))?;
+    let ipv4_dir = net_dir.add_dir_locked("ipv4", InodeMode::from_bits_truncate(0o555))?;
+    let conf_dir = ipv4_dir.add_dir_locked("conf", InodeMode::from_bits_truncate(0o555))?;
+    let lo_dir = conf_dir.add_dir_locked("lo", InodeMode::from_bits_truncate(0o555))?;
+    let default_dir = conf_dir.add_dir_locked("default", InodeMode::from_bits_truncate(0o555))?;
+    default_dir.add_writable_file(
+        "tag",
+        InodeMode::from_bits_truncate(0o644),
+        sys::net_conf_tag_content,
+        0,
+    )?;
+    lo_dir.add_writable_file(
+        "tag",
+        InodeMode::from_bits_truncate(0o644),
+        sys::net_conf_tag_content,
+        0,
+    )?;
     root.add_dynamic_symlink("self", self_::self_content)?;
 
     crate::fs::procfs::pid::setup_pid_hooks(root);

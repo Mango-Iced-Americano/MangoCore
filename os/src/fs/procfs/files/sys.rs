@@ -29,3 +29,12 @@ pub fn max_user_namespaces_content(
 ) -> Result<usize, SyscallErr> {
     proc_read_str(offset, len, buf, "0\n")
 }
+
+pub fn net_conf_tag_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    proc_read_str(offset, len, buf, "0\n")
+}

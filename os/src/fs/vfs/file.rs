@@ -163,7 +163,7 @@ impl FdTable {
             fds,
             cloexec,
             next_fd: 0,
-            soft_limit: Self::INITIAL_CAPACITY,
+            soft_limit: Self::MAX_CAPACITY,
             hard_limit: Self::MAX_CAPACITY,
         }
     }
@@ -375,6 +375,32 @@ impl FdTable {
         }
         self.cloexec[fd] = val;
         Ok(())
+    }
+
+    pub fn close_range(&mut self, first: usize, last: usize) {
+        if first >= self.fds.len() {
+            return;
+        }
+        let last = last.min(self.fds.len().saturating_sub(1));
+        for fd in first..=last {
+            self.fds[fd] = None;
+            self.cloexec[fd] = false;
+        }
+        if first < self.next_fd {
+            self.next_fd = first;
+        }
+    }
+
+    pub fn set_cloexec_range(&mut self, first: usize, last: usize) {
+        if first >= self.fds.len() {
+            return;
+        }
+        let last = last.min(self.fds.len().saturating_sub(1));
+        for fd in first..=last {
+            if self.fds[fd].is_some() {
+                self.cloexec[fd] = true;
+            }
+        }
     }
 
     /// 遍历所有打开的 fd
@@ -654,6 +680,9 @@ impl File {
         if !flags.contains(FileFlags::O_APPEND) && n > 0 {
             self.offset.fetch_add(n, Ordering::SeqCst);
         }
+        if n > 0 {
+            self.touch_modified();
+        }
         Ok(n)
     }
 
@@ -666,8 +695,13 @@ impl File {
         if mode.contains(FileMode::FMODE_STREAM) {
             return Err(SyscallErr::ESPIPE);
         }
-        self.inode
-            .write_at(offset, buf.len(), buf, self.private_data.lock())
+        let n = self
+            .inode
+            .write_at(offset, buf.len(), buf, self.private_data.lock())?;
+        if n > 0 {
+            self.touch_modified();
+        }
+        Ok(n)
     }
 
     // ── Seek ───────────────────────────────────────────────────────
@@ -833,6 +867,16 @@ impl File {
     #[inline]
     pub fn metadata(&self) -> Result<Metadata, SyscallErr> {
         self.inode.metadata()
+    }
+
+    fn touch_modified(&self) {
+        let Ok(mut metadata) = self.inode.metadata() else {
+            return;
+        };
+        let now = crate::timer::TimeSpec::now();
+        metadata.mtime = now;
+        metadata.ctime = now;
+        let _ = self.inode.set_metadata(&metadata);
     }
 
     pub fn offset(&self) -> usize {

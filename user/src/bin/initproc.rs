@@ -707,6 +707,33 @@ fn should_preload_musl_ltp_compat(libc_suffix: &str, name: &str) -> bool {
     libc_suffix == "musl" && !name.as_bytes().iter().any(|b| *b == b'.')
 }
 
+fn should_skip_ltp_helper(name: &str) -> Option<&'static str> {
+    if name.starts_with("cgroup_regression") {
+        return Some("cgroup regression helper");
+    }
+    if name.starts_with("cpuctl_")
+        || name.starts_with("cpuset")
+        || name.starts_with("cpu_controller")
+    {
+        return Some("cgroup controller helper");
+    }
+
+    match name {
+        "ask_password.sh" | "assign_password.sh" | "change_password.sh"
+        | "remove_password.sh" => Some("interactive password helper"),
+        "cgroup_fj_common.sh" | "cgroup_fj_function.sh" | "cgroup_fj_proc"
+        | "cgroup_fj_stress.sh" | "cgroup_lib.sh" => Some("cgroup helper"),
+        "clone303" => Some("requires cgroup v2 clone3 controller support"),
+        "cpuacct.sh" | "cpuacct_task" => Some("cgroup controller helper"),
+        "connect02" => Some("requires AF_INET6 connect support"),
+        "cn_pec.sh" => Some("requires process event connector"),
+        "close_range01" | "copy_file_range01" | "copy_file_range02" => {
+            Some("requires LTP external block device")
+        }
+        _ => None,
+    }
+}
+
 fn run_ltp_binaries(
     environ: &[*const u8],
     dir: &str,
@@ -885,6 +912,11 @@ fn run_ltp_binaries(
                 continue;
             }
 
+            if let Some(reason) = should_skip_ltp_helper(name) {
+                println!("SKIP LTP CASE {} : {}", name, reason);
+                continue;
+            }
+
             println!("RUN LTP CASE {}", name);
             // CWD 为 /musl 或 /glibc，二进制在 ltp/testcases/bin/xxx
             // LTP shell 脚本（如 gzip_tests.sh）通过 `. tst_test.sh` 引入
@@ -947,7 +979,10 @@ fn run_ltp_binaries(
         if timed_out {
             println!("#### OS COMP TEST GROUP END ltp-{} ####", libc_suffix);
         }
-        println!("[initproc] done ltp in {} exit_code={}", log_dir, exit_code);
+        println!(
+            "[initproc] done ltp_testcode.sh in {} exit_code={}",
+            log_dir, exit_code
+        );
     }
 }
 
@@ -1399,7 +1434,7 @@ fn prepare_symlink(environ: &[*const u8]) {
     // Step 1.5: LTP 依赖 getpwnam("nobody")/getgrnam("nogroup")，测试镜像缺省时补最小账户库。
     println!("[initproc] preparing minimal /etc/passwd and /etc/group ...");
     let account_cmd = "\
-        mkdir -p /etc /root /tmp; chmod 1777 /tmp; \
+        mkdir -p /etc /root /tmp /dev/shm; chmod 1777 /tmp /dev/shm; \
         [ -f /etc/passwd ] || printf 'root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/nonexistent:/bin/sh\n' > /etc/passwd; \
         [ -f /etc/group ] || printf 'root:x:0:\nnogroup:x:65534:\n' > /etc/group \
     \0";

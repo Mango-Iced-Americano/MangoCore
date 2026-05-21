@@ -8,6 +8,7 @@ use super::{
 };
 use crate::fs::vfs;
 use crate::mm::{AddressSpace, PageTableImpl};
+use crate::utils::error::SyscallErr;
 use alloc::sync::{Arc, Weak};
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -142,6 +143,14 @@ impl ProcessControlBlock {
 
     pub fn files(&self) -> Arc<Mutex<vfs::FdTable>> {
         self.inner.lock().files.clone()
+    }
+
+    pub fn unshare_files(&self) -> Result<Arc<Mutex<vfs::FdTable>>, SyscallErr> {
+        let files_ref = self.files();
+        let copied = files_ref.lock().try_clone()?;
+        let new_files = Arc::new(Mutex::new(copied));
+        self.inner.lock().files = new_files.clone();
+        Ok(new_files)
     }
 
     pub fn fs(&self) -> Arc<Mutex<FsStatus>> {

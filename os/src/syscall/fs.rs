@@ -815,6 +815,135 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset: *mut usize, count: usiz
     send_size as isize
 }
 
+pub fn sys_copy_file_range(
+    fd_in: usize,
+    off_in: *mut usize,
+    fd_out: usize,
+    off_out: *mut usize,
+    len: usize,
+    flags: u32,
+) -> isize {
+    if flags != 0 {
+        return EINVAL;
+    }
+    let len = len.min(64 * 1024 * 1024);
+    let task = current_task().unwrap();
+    let files_ref = task.process.files();
+    let fd_table = files_ref.lock();
+    let in_file = match fd_table.get_file(fd_in) {
+        Ok(file) => match file.try_clone() { Some(f) => f, None => return EBADF, },
+        Err(e) => return -(e as isize),
+    };
+    let out_file = match fd_table.get_file(fd_out) {
+        Ok(file) => match file.try_clone() { Some(f) => f, None => return EBADF, },
+        Err(e) => return -(e as isize),
+    };
+    drop(fd_table);
+
+    if in_file.readable().is_err() || out_file.writable().is_err() {
+        return EBADF;
+    }
+
+    let token = task.get_user_token();
+    let mut in_offset = if off_in.is_null() {
+        None
+    } else {
+        match UserPtrMut::new(off_in).read(token) {
+            Ok(offset) => Some(offset),
+            Err(errno) => return errno,
+        }
+    };
+    let mut out_offset = if off_out.is_null() {
+        None
+    } else {
+        match UserPtrMut::new(off_out).read(token) {
+            Ok(offset) => Some(offset),
+            Err(errno) => return errno,
+        }
+    };
+
+    const BUFFER_SIZE: usize = 4096;
+    let mut buffer = Vec::<u8>::with_capacity(BUFFER_SIZE);
+    let mut copied = 0usize;
+
+    while copied < len {
+        let chunk = (len - copied).min(BUFFER_SIZE);
+        unsafe { buffer.set_len(chunk); }
+
+        let read_size = if let Some(offset) = in_offset {
+            match in_file.pread(offset, buffer.as_mut_slice()) {
+                Ok(n) => n,
+                Err(e) => return -(e as isize),
+            }
+        } else {
+            match in_file.read(buffer.as_mut_slice()) {
+                Ok(n) => n,
+                Err(e) => return -(e as isize),
+            }
+        };
+        if read_size == 0 {
+            break;
+        }
+        unsafe { buffer.set_len(read_size); }
+
+        let write_size = if let Some(offset) = out_offset {
+            match out_file.pwrite(offset, buffer.as_slice()) {
+                Ok(n) => n,
+                Err(e) => {
+                    if in_offset.is_none() {
+                        let _ = in_file.lseek(SeekFrom::SeekCurrent(-(read_size as i64)));
+                    }
+                    return -(e as isize);
+                }
+            }
+        } else {
+            match out_file.write(buffer.as_slice()) {
+                Ok(n) => n,
+                Err(e) => {
+                    if in_offset.is_none() {
+                        let _ = in_file.lseek(SeekFrom::SeekCurrent(-(read_size as i64)));
+                    }
+                    return -(e as isize);
+                }
+            }
+        };
+
+        if write_size == 0 {
+            if in_offset.is_none() {
+                let _ = in_file.lseek(SeekFrom::SeekCurrent(-(read_size as i64)));
+            }
+            break;
+        }
+
+        if let Some(offset) = in_offset.as_mut() {
+            *offset += write_size;
+        } else if write_size < read_size {
+            let _ = in_file.lseek(SeekFrom::SeekCurrent(-((read_size - write_size) as i64)));
+        }
+        if let Some(offset) = out_offset.as_mut() {
+            *offset += write_size;
+        }
+
+        copied += write_size;
+        if write_size < read_size {
+            break;
+        }
+    }
+
+    if let Some(offset) = in_offset {
+        if UserPtrMut::new(off_in).write(token, &offset).is_err() {
+            return EFAULT;
+        }
+    }
+    if let Some(offset) = out_offset {
+        if UserPtrMut::new(off_out).write(token, &offset).is_err() {
+            return EFAULT;
+        }
+    }
+
+    copied as isize
+}
+
 pub fn sys_close(fd: usize) -> isize {
     info!("[sys_close] fd: {}", fd);
     let task = current_task().unwrap();
@@ -824,6 +953,33 @@ pub fn sys_close(fd: usize) -> isize {
         Ok(_) => SUCCESS,
         Err(e) => return -(e as isize),
     }
+}
+
+pub fn sys_close_range(first: usize, last: usize, flags: u32) -> isize {
+    const CLOSE_RANGE_UNSHARE: u32 = 1 << 1;
+    const CLOSE_RANGE_CLOEXEC: u32 = 1 << 2;
+    const VALID_FLAGS: u32 = CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC;
+
+    if first > last || (flags & !VALID_FLAGS) != 0 {
+        return EINVAL;
+    }
+
+    let task = current_task().unwrap();
+    let files_ref = if (flags & CLOSE_RANGE_UNSHARE) != 0 {
+        match task.process.unshare_files() {
+            Ok(files) => files,
+            Err(e) => return -(e as isize),
+        }
+    } else {
+        task.process.files()
+    };
+    let mut fd_table = files_ref.lock();
+    if (flags & CLOSE_RANGE_CLOEXEC) != 0 {
+        fd_table.set_cloexec_range(first, last);
+    } else {
+        fd_table.close_range(first, last);
+    }
+    SUCCESS
 }
 
 /// # Warning
@@ -1803,13 +1959,17 @@ pub fn sys_mount(
     mountflags: usize,
     data: *const u8,
 ) -> isize {
-    if source.is_null() || target.is_null() || filesystemtype.is_null() {
+    if target.is_null() || filesystemtype.is_null() {
         return EINVAL;
     }
     let token = current_user_token();
-    let source = match user_cstring(token, source) {
-        Ok(source) => source,
-        Err(errno) => return errno,
+    let source = if source.is_null() {
+        String::new()
+    } else {
+        match user_cstring(token, source) {
+            Ok(source) => source,
+            Err(errno) => return errno,
+        }
     };
     let target = match user_cstring(token, target) {
         Ok(target) => target,
@@ -1827,6 +1987,11 @@ pub fn sys_mount(
         "[sys_mount] source: {}, target: {}, filesystemtype: {}, mountflags: {:?}, data: {:?}",
         source, target, filesystemtype, mountflags, data
     );
+
+    if matches!(filesystemtype.as_str(), "cgroup" | "cgroup2") {
+        // 未实现 cgroupfs 时不能伪装成 tmpfs，否则 LTP 会误判支持并运行会挂起的 helper。
+        return ENODEV;
+    }
 
     // Resolve target path (support CWD-relative)
     let (lookup_inode, lookup_path) = {
@@ -1873,7 +2038,8 @@ pub fn sys_mount(
 
     // Create a tmpfs-backed MountFS and register it
     let tmpfs = crate::fs::ramfs::RamFS::new_with_quota(4096);
-    let mnt_fs = vfs::MountFS::new(tmpfs, vfs::MountFlags::empty());
+    let mnt_flags = vfs::MountFlags::from_bits_truncate(mountflags.bits() as u32);
+    let mnt_fs = vfs::MountFS::new(tmpfs, mnt_flags);
 
     parent_mount_fs.add_mount(inode_id, mnt_fs)
         .map(|_| SUCCESS)
@@ -2316,6 +2482,13 @@ pub fn sys_faccessat2(dirfd: usize, pathname: *const u8, mode: u32, flags: u32) 
         dirfd as isize, pathname, mode, flags
     );
 
+    if pathname.is_empty() {
+        return ENOENT;
+    }
+    if let Err(errno) = validate_path_len(&pathname) {
+        return errno;
+    }
+
     let nofollow = flags.contains(FaccessatFlags::AT_SYMLINK_NOFOLLOW);
     let start_inode = if pathname.starts_with('/') {
         vfs_root().mountpoint_root_inode()
@@ -2338,6 +2511,13 @@ pub fn sys_faccessat2(dirfd: usize, pathname: *const u8, mode: u32, flags: u32) 
         Ok(meta) => meta,
         Err(e) => return -(e as isize),
     };
+    if mode.contains(FaccessatMode::W_OK) {
+        if let Some(mnt) = inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+            if mnt.mount_fs.mount_flags().contains(vfs::MountFlags::RDONLY) {
+                return EROFS;
+            }
+        }
+    }
     if has_final_access(&meta, mode, uid, gid) {
         SUCCESS
     } else {

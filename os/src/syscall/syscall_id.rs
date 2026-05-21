@@ -149,9 +149,11 @@ pub const SYSCALL_PRLIMIT: usize = 261;
 pub const SYSCALL_RENAMEAT2: usize = 276;
 pub const SYSCALL_GETRANDOM: usize = 278;
 pub const SYSCALL_MEMBARRIER: usize = 283;
+pub const SYSCALL_COPY_FILE_RANGE: usize = 285;
 pub const SYSCALL_STATX: usize = 291;
 pub const SYSCALL_SYNCFS: usize = 306;
 pub const SYSCALL_CLONE3: usize = 435;
+pub const SYSCALL_CLOSE_RANGE: usize = 436;
 pub const SYSCALL_FACCESSAT2: usize = 439;
 pub const SYSCALL_MADVISE: usize = 233;
 // Not standard POSIX sys_call
