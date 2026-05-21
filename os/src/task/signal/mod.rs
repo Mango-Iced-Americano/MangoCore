@@ -1,12 +1,11 @@
 use crate::hal::{
-    get_bad_addr, get_bad_instruction, get_exception_cause, MachineContext, UserContext,
+    get_bad_addr, get_bad_instruction, get_exception_cause, MachineContext, TrapContext,
+    UserContext, UserSignalMask,
 };
 use crate::signal_type;
 use core::fmt::{self, Debug, Formatter};
 use core::mem::size_of;
 use log::{debug, error, trace, warn};
-
-use crate::hal::TrapContext;
 
 use crate::config::*;
 use crate::mm::{UserPtr, UserPtrMut};
@@ -607,14 +606,8 @@ pub fn do_signal() {
                 }
                 // In this case, signal hander have three parameters
                 if act.flags.contains(SigActionFlags::SA_SIGINFO) {
-                    let user_context = UserContext {
-                        flags: 0,
-                        link: 0,
-                        stack: frame_stack,
-                        sigmask: saved_sigmask,
-                        __pad: [0; UserContext::PADDING_SIZE],
-                        mcontext,
-                    };
+                    let user_context =
+                        UserContext::new(0, 0, frame_stack, saved_sigmask, mcontext);
                     if UserPtrMut::from_addr(ucontext_addr)
                         .write(token, &user_context) // push UserContext into user stack
                         .is_err()
@@ -642,10 +635,11 @@ pub fn do_signal() {
                                                   // To simplify the implementation of sigreturn, here we keep the same layout as above...
                 } else {
                     // push sigmask into user stack
+                    let user_sigmask = UserContext::encode_sigmask(saved_sigmask);
                     match UserPtrMut::from_addr(
                         ucontext_addr + 2 * size_of::<usize>() + size_of::<SignalStack>(),
                     )
-                    .write(token, &saved_sigmask)
+                    .write(token, &user_sigmask)
                     {
                         Ok(()) => {}
                         Err(_) => {
@@ -663,7 +657,7 @@ pub fn do_signal() {
                         ucontext_addr
                             + 2 * size_of::<usize>()
                             + size_of::<SignalStack>()
-                            + size_of::<Signals>()
+                            + size_of::<UserSignalMask>()
                             + UserContext::PADDING_SIZE,
                     )
                     .write(token, &mcontext) // push MachineContext into user stack
@@ -681,7 +675,9 @@ pub fn do_signal() {
                 let trap_cx = inner.get_trap_cx();
                 trap_cx.gp.a0 = signum; // a0 <- signum
                 trap_cx.set_sp(sig_sp); // update sp, because we've pushed something into stack
-                trap_cx.gp.ra = if act.flags.contains(SigActionFlags::SA_RESTORER) {
+                trap_cx.gp.ra = if act.flags.contains(SigActionFlags::SA_RESTORER)
+                    && act.restorer != 0
+                {
                     act.restorer // legacy, signal trampoline provided by C library's wrapper function
                 } else {
                     SIGNAL_TRAMPOLINE // ra <- __call_sigreturn, when handler ret, we will go to __call_sigreturn

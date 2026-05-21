@@ -13,7 +13,7 @@ use crate::task::{
 };
 use crate::timer::{ITimerVal, TimeVal};
 use alloc::format;
-pub use context::UserContext;
+pub use context::{UserContext, UserSignalMask};
 use riscv::register::{
     mtvec::TrapMode,
     scause::{self, Exception, Interrupt, Trap},

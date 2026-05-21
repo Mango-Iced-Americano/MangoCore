@@ -12,7 +12,7 @@ pub use arch::{trap_cx_bottom_from_tid, ustack_bottom_from_tid};
 pub use arch::{trap_handler, trap_return};
 pub use arch::{
     KernelPageTableImpl, KernelStack, MachineContext, PageTableImpl, TrapContext, TrapImpl,
-    UserContext,
+    UserContext, UserSignalMask,
 };
 pub use arch::{BLOCK_SZ, BUFFER_CACHE_NUM, KERNEL_HEAP_SIZE, MEMORY_END};
 pub use arch::{MMIO, TICKS_PER_SEC};

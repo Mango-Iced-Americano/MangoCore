@@ -13,7 +13,7 @@ pub use loongarch64::{
     KernelPageTableImpl, PageTableImpl, __switch, kstack_alloc, tlb_invalidate,
     trap::{
         get_bad_addr, get_bad_instruction, get_exception_cause, trap_handler, trap_return,
-        MachineContext, TrapContext, TrapImpl, UserContext,
+        MachineContext, TrapContext, TrapImpl, UserContext, UserSignalMask,
     },
     trap_cx_bottom_from_tid, ustack_bottom_from_tid, KernelStack, BLOCK_SZ,
 };
@@ -35,7 +35,7 @@ pub use riscv::{
     time::{get_clock_freq, get_time, TICKS_PER_SEC},
     trap::{
         context::TrapContext, get_bad_addr, get_bad_instruction, get_exception_cause, trap_handler,
-        trap_return, UserContext,
+        trap_return, UserContext, UserSignalMask,
     },
     KernelPageTableImpl, MachineContext, PageTableImpl, TrapImpl,
 };
