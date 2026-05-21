@@ -9,7 +9,7 @@ use crate::mm::{
 };
 use crate::syscall::utils::wait_io_core;
 use crate::task::{current_task, current_user_token, signal, WaitQueue, WaitResult};
-use crate::timer::TimeSpec;
+use crate::timer::{current_timespec, TimeSpec};
 use crate::utils::error::SyscallErr;
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -1800,7 +1800,7 @@ pub fn sys_utimensat(
         Err(errno) => return errno,
     };
 
-    let now = TimeSpec::now();
+    let now = current_timespec();
     let timespec = if !times.is_null() {
         match UserPtr::new(times).read(token) {
             Ok(timespec) => timespec,

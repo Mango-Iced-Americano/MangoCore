@@ -3,6 +3,8 @@
 > 2026-05-21 追加：本报告保留 2026-05-20 全量测试的原始结论，同时补充 la64 `clone` ABI 与 signal-frame sigmask 对齐修复后的聚焦复测结果。原始全量日志仍以 `current-testresult/` 为准，新增复测结果用于更新问题状态和后续优先级。
 >
 > 2026-05-21 追加二：继续补齐 `rt_sigaction` 用户 ABI、`/dev/shm`、`mlock*`、LTP 权限/时间/procfs 兼容后，la64 fork/clone `Bad address` 与 cyclictest P0 阻塞已在聚焦复测中归零；libctest 的 pthread/TLS 成片异常已收敛，但全量 libctest 仍有 libc 语义、runtime 依赖和少量 pthread timeout，不能写成完全通过。
+>
+> 2026-05-21 追加三：按“容易拿分优先”继续补齐 `/dev/misc/rtc`、`SO_RCVTIMEO/SO_SNDTIMEO` 与 `CLOCK_REALTIME/gettimeofday/utimensat` 墙钟语义。rv64/la64 busybox `hwclock` 已通过；rv64/la64 libctest wrapper 均 PASS，且本轮目标内层 `socket`、`stat`、`utime`、TLS 常规项通过。剩余 libctest 内层失败主要是 libc locale/scanf/regex/宽字符、glibc `libgcc_s.so.1` 依赖和少量 pthread timeout。
 
 ## 1. 测试范围
 
@@ -159,14 +161,45 @@
   - 原 P0 集群中 `pthread_cancel`、`pthread_cond*`、`pthread_robust_detach`、`pthread_once_deadlock`、`tls_init`、`tls_local_exec`、`tls_get_new_dtv` 已大幅收敛，前半轮 static/dynamic 多数通过。
   - 仍不能声明 libctest 全 pass：剩余有 `mremap(216)` unsupported 日志、glibc dynamic `libgcc_s.so.1` 缺失导致的 pthread cancel abort、`pthread_robust_detach` / `pthread_condattr_setclock` / `sem_init` timeout，以及 locale/scanf/stat/socket/regex/setvbuf 等 libc 语义问题。
 
+### 2026-05-21 追加三：低成本得分点适配状态
+
+本轮按日志中最直接的失败入口继续推进，优先处理“不需要重构大子系统、但会让 wrapper 或 libc 子项直接失败”的兼容层：
+
+1. `/dev/misc/rtc`：
+   - 新增 devfs 子目录支持，注册 `/dev/misc/rtc` char device。
+   - 支持 Linux `RTC_RD_TIME` ioctl，返回当前 wall-clock 转换出的 `struct rtc_time`。
+   - rv64/la64 busybox 复测均出现 `testcase busybox hwclock success`，wrapper `PASS=1 FAIL=0 TIMEOUT=0 TOTAL=1`。
+2. socket timeout sockopt：
+   - 补齐 `SOL_SOCKET` 下 `SO_RCVTIMEO` / `SO_SNDTIMEO` 的 `setsockopt` 参数校验与 `getsockopt` 返回。
+   - 当前先按 ABI 接受和返回零超时，未实现 per-socket deadline；这足以消除 libctest/socket 因未知 sockopt 直接失败。
+   - la64、rv64 libctest 中 `entry-static.exe socket` / `entry-dynamic.exe socket` 均 PASS，未再出现 `Protocol not available`。
+3. wall-clock 与 monotonic 分离：
+   - `CLOCK_REALTIME`、`gettimeofday`、`adjtimex` 快照和 `utimensat(UTIME_NOW/NULL)` 改用 `current_timespec/current_timeval`。
+   - `CLOCK_MONOTONIC`、`CLOCK_BOOTTIME` 等仍使用启动后单调时间。
+   - 默认 `BOOT_TIME_OFFSET` 暂设为 2027-01-01 UTC，避免测试镜像 ext4 inode 时间晚于内核墙钟导致 libc `stat` 误判“文件来自未来”；后续更干净的方案是从 QEMU RTC 或启动参数初始化真实时间。
+
+验证：
+
+- 双架构内核构建通过：
+  - `docker compose exec os-dev make -C os rv64-kernel-build-only`
+  - `docker compose exec os-dev make -C os la64-kernel-build-only`
+- busybox：
+  - `docker compose exec -e TEST_ARCH=rv64 -e TEST_GROUPS=busybox -e GROUP_TIMEOUT_SEC=300 os-dev bash run_test.sh`：PASS，musl/glibc 均 `busybox hwclock success`。
+  - `docker compose exec -e TEST_ARCH=la64 -e TEST_GROUPS=busybox -e GROUP_TIMEOUT_SEC=300 os-dev bash run_test.sh`：PASS，musl/glibc 均 `busybox hwclock success`。
+- libctest：
+  - `docker compose exec -e TEST_ARCH=rv64 -e TEST_GROUPS=libctest -e GROUP_TIMEOUT_SEC=360 os-dev bash run_test.sh`：wrapper PASS，`stat`、`utime`、`socket` 目标项通过。
+  - `docker compose exec -e TEST_ARCH=la64 -e TEST_GROUPS=libctest -e GROUP_TIMEOUT_SEC=360 os-dev bash run_test.sh`：wrapper PASS，`stat`、`utime`、`socket`、`tls_init`、`tls_local_exec`、`tls_get_new_dtv` 通过。
+
+更新结论：busybox 的硬失败点已经清掉；libctest 的高收益兼容点已转正。下一步更适合继续从 syscall 缺口和轻量 libc 兼容入手，例如 `mremap(216)`、`getprotobyname` 环境文件、`daemon_failure` 的 fd/EMFILE 语义，而不是优先深挖 locale/regex 这类用户态 libc 细节。
+
 ## 7. 各测试组问题记录
 
 | 组 | la64 | rv64 | 主要问题 |
 | --- | --- | --- | --- |
 | basic | PASS | PASS | 基础 syscall 路径可用 |
-| busybox | FAIL | FAIL | musl/glibc 子脚本 exit_code 均为 0，但 `hwclock` 打印 `/dev/misc/rtc: No such file or directory`，触发 wrapper 的硬失败规则 |
+| busybox | FAIL -> 聚焦 PASS | FAIL -> 聚焦 PASS | 2026-05-20 原始全量因 `hwclock` 缺 `/dev/misc/rtc` 失败；2026-05-21 追加三补 RTC stub 后，rv64/la64 musl/glibc 均 `busybox hwclock success` |
 | lua | PASS | PASS | 未见明显问题 |
-| libctest | FAIL | PASS | 2026-05-20 la64 pthread/TLS 大量用户态异常并最终超时；2026-05-21 clone ABI、signal ABI、`/dev/shm`、`mlock*` 修复后 P0 集群明显收敛，剩余集中在 glibc runtime、pthread timeout、`mremap(216)` 和 libc 细节 |
+| libctest | FAIL -> 聚焦 PASS | PASS | 2026-05-20 la64 pthread/TLS 大量用户态异常并最终超时；2026-05-21 多轮修复后 rv64/la64 wrapper 均 PASS，`socket/stat/utime/TLS` 目标项通过；仍不能写成 clean pass，内层剩余 glibc runtime、pthread timeout、`mremap(216)` 和 libc locale/scanf/regex/宽字符细节 |
 | iozone | PASS | PASS | 双架构通过；本轮未见 heap/OOM/ext4 panic |
 | unixbench | FAIL | TIMEOUT | 2026-05-20 la64 直接 `Fork failed ... Bad address`；2026-05-21 复测已跑过 SPAWN/EXECL，未再见 Bad address，剩余为 timeout/性能问题 |
 | iperf | TIMEOUT | TIMEOUT | la64 卡在 `BASIC_UDP begin`；rv64 UDP `Connection refused` 后 TCP 被外层超时打断 |
@@ -233,13 +266,13 @@
 1. `mremap(216)`：libctest `sscanf_long` 已能通过但仍打印 unsupported，建议做最小 `MREMAP_MAYMOVE` 兼容以清除噪声。
 2. pthread 剩余 timeout：重点看 `pthread_robust_detach`、`pthread_condattr_setclock`、`sem_init`，不要再按 la64 TLS/clone 参数错位处理。
 3. glibc dynamic runtime：`pthread_cancel*` 动态用例报 `libgcc_s.so.1 must be installed`，需要补镜像库链接或确认镜像是否缺文件。
-4. netperf/iperf：先修 `setsockopt errno 92` 和 glibc `getprotobyname` 环境，再看 server 生命周期和阻塞唤醒。
+4. netperf/iperf：`SO_RCVTIMEO/SO_SNDTIMEO` 已补，下一步先看 glibc `getprotobyname` 环境、server 生命周期和阻塞唤醒。
 
 ### P2：benchmark 和 libc 细节
 
-1. busybox：补 `/dev/misc/rtc` stub，或调整 wrapper 不把这个已知缺设备输出当组失败。
+1. busybox：`/dev/misc/rtc` stub 已补，后续只在全量回归里确认是否稳定保持 PASS。
 2. libcbench regex StorePageFault：先复现 `b_regex_search ("a{25}b")` 附近崩溃。
-3. libctest libc 语义：locale/scanf/stat time/socket option、regex、setvbuf 等不直接属于 task，但会持续污染通过率。
+3. libctest libc 语义：locale/scanf/regex/宽字符、setvbuf 等不直接属于 task，但会持续污染通过率；`stat`、`utime`、socket timeout option 已转正。
 4. unixbench/lmbench：先区分真实死锁和单纯慢；必要时单独提高内部 timeout 做性能基线。
 
 ## 11. 下一轮建议验证矩阵

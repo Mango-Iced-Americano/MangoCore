@@ -4,6 +4,27 @@
 
 ## 2026-05-21
 
+### busybox/libctest 低成本兼容点补齐
+
+**涉及文件：**
+- `os/src/fs/dev/mod.rs`、`os/src/fs/dev/rtc.rs`、`os/src/fs/mod.rs` — devfs 支持注册子目录，新增 `/dev/misc/rtc` char device，并实现 `RTC_RD_TIME` ioctl。
+- `os/src/net/syscall/{common,getsockopt,setsockopt}.rs` — 补 `SO_RCVTIMEO` / `SO_SNDTIMEO` ABI 兼容，`setsockopt` 校验用户 `TimeVal`，`getsockopt` 返回零超时。
+- `os/src/timer.rs`、`os/src/syscall/process/time.rs`、`os/src/syscall/fs.rs` — 分离 realtime wall-clock 与 monotonic uptime，`CLOCK_REALTIME/gettimeofday/adjtimex/utimensat(UTIME_NOW)` 改用墙钟时间。
+- `logs/full-test-20260520-task-refactor/report.md`、`WORK_LOG.md` — 记录本轮适配结论和剩余问题边界。
+
+**验证：**
+- `docker compose exec os-dev make -C os rv64-kernel-build-only` ✅
+- `docker compose exec os-dev make -C os la64-kernel-build-only` ✅
+- rv64 busybox：wrapper PASS，musl/glibc 均 `testcase busybox hwclock success` ✅
+- la64 busybox：wrapper PASS，musl/glibc 均 `testcase busybox hwclock success` ✅
+- rv64 libctest：wrapper PASS，`socket/stat/utime` 目标项通过 ✅
+- la64 libctest：wrapper PASS，`socket/stat/utime/tls_init/tls_local_exec/tls_get_new_dtv` 目标项通过 ✅
+
+**剩余边界：**
+- socket timeout 目前是 ABI 兼容，不做 per-socket deadline。
+- realtime 默认 offset 暂设为 2027-01-01 UTC，后续应接 QEMU RTC 或启动参数时间。
+- libctest 内层仍有 locale/scanf/regex/宽字符、glibc `libgcc_s.so.1`、pthread timeout 等非本轮目标失败。
+
 ### la64 fork/clone Bad address 与 LTP/cyclictest P0 修复
 
 **涉及文件：**

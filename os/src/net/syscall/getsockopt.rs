@@ -1,11 +1,12 @@
 use crate::mm::{UserBufferWriter, UserPtrMut};
 use crate::net::{TcpInfo, TCP_MSS};
 use crate::task::current_task;
+use crate::timer::TimeVal;
 use crate::utils::error::SyscallErr;
 
-use super::common::{SOL_SOCKET, SOL_TCP, SOL_IP, TCP_CONGESTION, TCP_INFO, TCP_MAXSEG};
-use super::common::{SO_RCVBUF, SO_REUSEADDR, SO_SNDBUF};
 use super::common::is_known_sockopt_level;
+use super::common::{SOL_SOCKET, SOL_TCP, TCP_CONGESTION, TCP_INFO, TCP_MAXSEG};
+use super::common::{SO_RCVBUF, SO_RCVTIMEO, SO_REUSEADDR, SO_SNDBUF, SO_SNDTIMEO};
 
 pub fn sys_getsockopt(
     sockfd: u32,
@@ -107,6 +108,28 @@ pub fn sys_getsockopt(
                 _ => {
                     return -(SyscallErr::EINVAL as isize);
                 }
+            }
+        }
+        (SOL_SOCKET, SO_RCVTIMEO | SO_SNDTIMEO) => {
+            let optlen_val = match optlen_ptr.read(token) {
+                Ok(len) => len,
+                Err(_) => return -(SyscallErr::EFAULT as isize),
+            };
+            let len = core::mem::size_of::<TimeVal>();
+            if optlen_val < len as u32 {
+                return -(SyscallErr::EINVAL as isize);
+            }
+            let timeout = TimeVal::new();
+            let mut writer = match UserBufferWriter::new(token, optval_ptr_ as *mut u8, len) {
+                Ok(writer) => writer,
+                Err(_) => return -(SyscallErr::EFAULT as isize),
+            };
+            let bytes = unsafe {
+                core::slice::from_raw_parts(&timeout as *const TimeVal as *const u8, len)
+            };
+            if writer.write_from(bytes).is_err() || optlen_ptr.write(token, &(len as u32)).is_err()
+            {
+                return -(SyscallErr::EFAULT as isize);
             }
         }
         _ => {

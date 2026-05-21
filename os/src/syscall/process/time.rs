@@ -7,7 +7,8 @@ use crate::task::{
     sleep_relative_interruptible, sleep_until_interruptible, Rusage, TimerAction,
 };
 use crate::timer::{
-    get_time_ms, ITimerVal, TimeSpec, TimeVal, TimeZone, Times, NSEC_PER_SEC,
+    current_timespec, current_timeval, get_time_ms, ITimerVal, TimeSpec, TimeVal, TimeZone, Times,
+    NSEC_PER_SEC,
 };
 use log::{info, trace};
 
@@ -199,8 +200,8 @@ pub fn sys_gettimeofday(tv: *mut TimeVal, _tz: *mut TimeZone) -> isize {
     // Timezone is currently NOT supported.
     if !tv.is_null() {
         let token = current_user_token();
-        let timeval = &TimeVal::now();
-        if UserPtrMut::new(tv).write(token, timeval).is_err() {
+        let timeval = current_timeval();
+        if UserPtrMut::new(tv).write(token, &timeval).is_err() {
             log::error!("[sys_gettimeofday] Failed to copy to {:?}", tv);
             return EFAULT;
         }
@@ -233,7 +234,7 @@ fn fill_timex_snapshot(timex: &mut Timex) {
     timex.constant = 0;
     timex.precision = 1;
     timex.tolerance = 32_768_000;
-    timex.time = TimeVal::now();
+    timex.time = current_timeval();
     timex.tick = 10_000;
     timex.ppsfreq = 0;
     timex.jitter = 0;
@@ -299,10 +300,22 @@ pub fn sys_get_time() -> isize {
 }
 
 pub fn sys_clock_gettime(clk_id: usize, tp: *mut TimeSpec) -> isize {
+    let timespec = match clk_id {
+        CLOCK_REALTIME | CLOCK_REALTIME_COARSE | CLOCK_REALTIME_ALARM | CLOCK_TAI => {
+            current_timespec()
+        }
+        CLOCK_MONOTONIC
+        | CLOCK_PROCESS_CPUTIME_ID
+        | CLOCK_THREAD_CPUTIME_ID
+        | CLOCK_MONOTONIC_RAW
+        | CLOCK_MONOTONIC_COARSE
+        | CLOCK_BOOTTIME
+        | CLOCK_BOOTTIME_ALARM => TimeSpec::now(),
+        _ => return EINVAL,
+    };
     if !tp.is_null() {
         let token = current_user_token();
-        let timespec = &TimeSpec::now();
-        if UserPtrMut::new(tp).write(token, timespec).is_err() {
+        if UserPtrMut::new(tp).write(token, &timespec).is_err() {
             log::error!("[sys_clock_gettime] Failed to copy to {:?}", tp);
             return EFAULT;
         };

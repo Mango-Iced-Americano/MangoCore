@@ -308,8 +308,16 @@ pub trait TimeSource {
     fn uptime(&self) -> u64;
 }
 
+/// 无 RTC/cmdline 时间源时的默认 Unix 启动时间。
+///
+/// 测试镜像里的 ext4 inode 带有构建时的真实 Unix 时间戳；如果内核把
+/// CLOCK_REALTIME 暴露为 1970 起步的开机时间，libc `stat` 会看到文件时间
+/// “来自未来”。Linux 的做法是用 RTC/boot time offset 区分 wall clock 与
+/// monotonic clock；这里先提供一个稳定 fallback，后续可替换为真实 RTC 初始化。
+const DEFAULT_BOOT_TIME_OFFSET: u64 = 1_798_761_600; // 2027-01-01 00:00:00 UTC
+
 /// 系统启动时间偏移（使 current_time = Unix 时间）
-static BOOT_TIME_OFFSET: AtomicU64 = AtomicU64::new(0);
+static BOOT_TIME_OFFSET: AtomicU64 = AtomicU64::new(DEFAULT_BOOT_TIME_OFFSET);
 
 static mut TIME_SOURCE: Option<&'static dyn TimeSource> = None;
 
@@ -339,6 +347,18 @@ pub fn current_time() -> u64 {
 pub fn current_time_safe() -> u64 {
     let offset = BOOT_TIME_OFFSET.load(core::sync::atomic::Ordering::Relaxed);
     get_time_sec() as u64 + offset
+}
+
+/// 当前 Unix 时间戳，timespec 形式。
+pub fn current_timespec() -> TimeSpec {
+    let offset = BOOT_TIME_OFFSET.load(core::sync::atomic::Ordering::Relaxed) as usize;
+    TimeSpec::from_ns(get_time_ns() + offset * NSEC_PER_SEC)
+}
+
+/// 当前 Unix 时间戳，timeval 形式。
+pub fn current_timeval() -> TimeVal {
+    let offset = BOOT_TIME_OFFSET.load(core::sync::atomic::Ordering::Relaxed) as usize;
+    TimeVal::from_us(get_time_us() + offset * USEC_PER_SEC)
 }
 
 /// 获取系统启动以来的时间（秒）
