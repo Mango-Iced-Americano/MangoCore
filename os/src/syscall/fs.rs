@@ -144,6 +144,30 @@ fn has_directory_write_search_access(meta: &vfs::Metadata, uid: u32, gid: u32) -
     (permission_class_bits(meta, uid, gid) & 0o3) == 0o3
 }
 
+fn apply_created_inode_metadata(
+    parent_meta: &vfs::Metadata,
+    inode: &Arc<dyn vfs::IndexNode>,
+    mode: vfs::InodeMode,
+    uid: u32,
+    gid: u32,
+) -> Result<(), isize> {
+    let mut meta = inode.metadata().map_err(|e| -(e as isize))?;
+    let parent_setgid = parent_meta.mode.contains(vfs::InodeMode::S_ISGID);
+    let child_gid = if parent_setgid { parent_meta.gid } else { gid };
+
+    meta.uid = uid;
+    meta.gid = child_gid;
+    meta.mode = vfs::InodeMode::from(meta.file_type) | (mode & vfs::InodeMode::S_IALLUGO);
+    if meta.mode.contains(vfs::InodeMode::S_ISGID) && uid != 0 && gid != child_gid {
+        meta.mode.remove(vfs::InodeMode::S_ISGID);
+    }
+
+    match inode.set_metadata(&meta) {
+        Ok(()) | Err(SyscallErr::ENOSYS) => Ok(()),
+        Err(e) => Err(-(e as isize)),
+    }
+}
+
 fn metadata_to_stat(meta: &vfs::Metadata) -> Stat {
     Stat {
         st_dev: meta.dev_id as u64,
@@ -239,10 +263,12 @@ fn open_file_at(
                 return Err(errno);
             }
             let (parent, leaf) = vfs_lookup_parent_for_start(&start, path)?;
+            let parent_meta = parent.metadata().map_err(|e| -(e as isize))?;
             check_parent_write_search_access(&parent, uid, gid)?;
             let inode = parent
                 .create(&leaf, FileType::File, mode & vfs::InodeMode::S_IALLUGO)
                 .map_err(|e| -(e as isize))?;
+            apply_created_inode_metadata(&parent_meta, &inode, mode, uid, gid)?;
             vfs::File::new(inode, _open_flags_to_vfs_flags(flags)).map_err(|e| -(e as isize))
         }
         Err(errno) => Err(errno),

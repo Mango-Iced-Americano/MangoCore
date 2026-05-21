@@ -109,7 +109,7 @@ fn parse_id(arg: usize) -> Result<u32, isize> {
 }
 
 fn parse_optional_id(arg: usize) -> Result<Option<u32>, isize> {
-    if arg == usize::MAX {
+    if arg == usize::MAX || arg == u32::MAX as usize {
         Ok(None)
     } else {
         parse_id(arg).map(Some)
