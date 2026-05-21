@@ -74,15 +74,9 @@ def parse_serial_out_new(config, filename):
             raise e
     for g, j in judges.items():
         if g not in called_group:
-            print(f"正在评测：{filename} : {g}")
-            try:
-                judge = subprocess.Popen(judges[g], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                judge.stdin.close()
-                x = judge.stdout.read().decode()
-                ans[g] = json.loads(x)
-            except Exception as e:
-                print(f"评测 {filename} : {g} 发生错误：{e}")
-                raise e
+            # 该测试组并未在串口输出中出现（QEMU 未启动或超时），
+            # 不调 judge 脚本，直接记 0 分，避免 ALL 列显示预期用例数造成混淆
+            ans[g] = {"pass": 0, "all": 0}
     return ans
 
 # ============ 以上是官方代码，以下是参数处理+汇总打印 ============

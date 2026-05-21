@@ -57,8 +57,9 @@ const DEFAULT_ORDER: &[&str] = &[
     "iozone",
     "lmbench",
     "libcbench",
-    "unixbench",
     "iperf",
+    "unixbench",
+
 ];
 
 /// 每组默认超时（秒），索引 0..11 与 TEST_GROUPS 一一对应
@@ -501,13 +502,15 @@ fn display_path(path: &str) -> &str {
 
 const MAX_GROUP_RETRIES: usize = 3;
 
-/// 运行测试脚本，失败时自动重试（最多 MAX_GROUP_RETRIES 次）。
+/// 运行测试脚本，失败时自动重试（最多 max_retries 次）。
+/// 若进程被 SIGKILL 终止（由 initproc 超时逻辑主动发送），则不重试。
 fn run_group_in_dir(
     environ: &[*const u8],
     dir: &str,
     group_name: &str,
     script: &str,
     timeout_secs: u64,
+    max_retries: usize,
 ) {
     let log_dir = display_path(dir);
     // 构造比赛的 START/END 标记
@@ -518,7 +521,7 @@ fn run_group_in_dir(
     };
 
     let mut last_exit_code: i32 = 0;
-    for attempt in 1..=MAX_GROUP_RETRIES {
+    for attempt in 1..=max_retries {
         last_exit_code = run_group_once(
             environ,
             dir,
@@ -531,10 +534,18 @@ fn run_group_in_dir(
         if last_exit_code == 0 {
             return; // 成功，直接返回
         }
-        if attempt < MAX_GROUP_RETRIES {
+        // SIGKILL 是 initproc 超时后主动发送的，说明我们故意要终止它，不重试
+        if (last_exit_code & 0x7F) == SIGKILL as i32 {
+            println!(
+                "[initproc] {} in {} was killed by SIGKILL, skipping retry",
+                script, log_dir
+            );
+            return;
+        }
+        if attempt < max_retries {
             println!(
                 "[initproc] {} in {} failed (exit_code={}), retry {}/{} after 2s...",
-                script, log_dir, last_exit_code, attempt, MAX_GROUP_RETRIES
+                script, log_dir, last_exit_code, attempt, max_retries
             );
             sleep(2000);
         }
@@ -542,7 +553,7 @@ fn run_group_in_dir(
     // 所有重试均失败
     println!(
         "[initproc] {} in {} failed after {} retries, final exit_code={}",
-        script, log_dir, MAX_GROUP_RETRIES, last_exit_code
+        script, log_dir, max_retries, last_exit_code
     );
 }
 
@@ -989,16 +1000,17 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
             }
         } else if group_name == "ltp" {
             // 提交默认路径：运行镜像内官方 ltp_testcode.sh，保持评测器期望的串口协议。
+            // LTP 不重试——超时说明内核有问题，重试没有意义。
             let libc = cfg.ltp_libc;
             if libc == LtpLibc::Musl || libc == LtpLibc::Both {
-                run_group_in_dir(environ, "/musl\0", group_name, script, timeout_secs);
+                run_group_in_dir(environ, "/musl\0", group_name, script, timeout_secs, 1);
             }
             if libc == LtpLibc::Glibc || libc == LtpLibc::Both {
-                run_group_in_dir(environ, "/glibc\0", group_name, script, timeout_secs);
+                run_group_in_dir(environ, "/glibc\0", group_name, script, timeout_secs, 1);
             }
         } else {
-            run_group_in_dir(environ, "/musl\0", group_name, script, timeout_secs);
-            run_group_in_dir(environ, "/glibc\0", group_name, script, timeout_secs);
+            run_group_in_dir(environ, "/musl\0", group_name, script, timeout_secs, MAX_GROUP_RETRIES);
+            run_group_in_dir(environ, "/glibc\0", group_name, script, timeout_secs, MAX_GROUP_RETRIES);
         }
         // 诊断模式：每组完成后打印标记，配合内核 STATS_ENABLED 输出定位资源变化
         if cfg.diag {
