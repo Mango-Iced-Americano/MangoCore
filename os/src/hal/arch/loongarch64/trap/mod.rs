@@ -21,7 +21,7 @@ use crate::task::{
 use core::arch::{asm, global_asm};
 use core::ptr::{addr_of, addr_of_mut};
 
-pub use context::{MachineContext, TrapContext, UserContext};
+pub use context::{MachineContext, TrapContext, UserContext, UserSignalMask};
 use register::{
     BadV, EStat, TLBRBadV, TLBREHi, TLBRELo0, TLBRELo1, TLBRPrMd, PGD, PGDH, PGDL, PWCH, PWCL,
     TLBRERA,

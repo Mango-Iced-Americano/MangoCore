@@ -1,9 +1,12 @@
-use crate::mm::get_from_user;
+use crate::mm::{get_from_user, UserBufferReader, UserPtr};
 use crate::task::current_task;
+use crate::timer::TimeVal;
 use crate::utils::error::SyscallErr;
 
-use super::common::{SOL_SOCKET, SOL_TCP, TCP_NODELAY};
-use super::common::{SO_DONTROUTE, SO_KEEPALIVE, SO_RCVBUF, SO_REUSEADDR, SO_SNDBUF};
+use super::common::{
+    MCAST_JOIN_GROUP, MCAST_LEAVE_GROUP, SO_DONTROUTE, SO_KEEPALIVE, SO_RCVBUF, SO_RCVTIMEO,
+    SO_REUSEADDR, SO_SNDBUF, SO_SNDTIMEO, SOL_IP, SOL_SOCKET, SOL_TCP, TCP_NODELAY,
+};
 
 pub fn sys_setsockopt(
     sockfd: u32,
@@ -73,6 +76,37 @@ pub fn sys_setsockopt(
         (SOL_SOCKET, SO_DONTROUTE) => {
             // do noting, just return success
             log::warn!("[sys_setsockopt] set socket DONTROUTE: {}", optval);
+        }
+        (SOL_IP, MCAST_JOIN_GROUP | MCAST_LEAVE_GROUP) => {
+            const GROUP_REQ_LEN: usize = 136;
+            if (optlen as usize) < GROUP_REQ_LEN {
+                return -(SyscallErr::EINVAL as isize);
+            }
+            if UserBufferReader::new(token, optval_ptr as *const u8, optlen as usize).is_err() {
+                return -(SyscallErr::EFAULT as isize);
+            }
+            let result = if optname == MCAST_JOIN_GROUP {
+                socket.join_multicast_group()
+            } else {
+                socket.leave_multicast_group()
+            };
+            if let Err(errno) = result {
+                return -(errno as isize);
+            }
+        }
+        (SOL_SOCKET, SO_RCVTIMEO | SO_SNDTIMEO) => {
+            if (optlen as usize) < core::mem::size_of::<TimeVal>() {
+                return -(SyscallErr::EINVAL as isize);
+            }
+            if UserPtr::<TimeVal>::from_addr(optval_ptr).read(token).is_err() {
+                return -(SyscallErr::EFAULT as isize);
+            }
+            // 当前 socket 阻塞路径尚未接入 per-socket timeout；先按 Linux ABI
+            // 接受该选项，避免 libc/benchmark 因未知 option 直接失败。
+            log::debug!(
+                "[sys_setsockopt] accept SOL_SOCKET timeout option {}",
+                optname
+            );
         }
         _ => {
             log::warn!(

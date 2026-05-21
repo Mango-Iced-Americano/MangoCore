@@ -97,6 +97,20 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
             .expect("devfs: failed to register /dev/zero");
         devfs.add_dev("urandom", alloc::sync::Arc::new(crate::fs::dev::urandom::Urandom) as Arc<dyn self::vfs::IndexNode>)
             .expect("devfs: failed to register /dev/urandom");
+        let misc_dir = devfs
+            .add_dir("misc", self::vfs::InodeMode::from_bits_truncate(0o755))
+            .expect("devfs: failed to register /dev/misc");
+        misc_dir
+            .add_dev("rtc", alloc::sync::Arc::new(crate::fs::dev::rtc::Rtc) as Arc<dyn self::vfs::IndexNode>)
+            .expect("devfs: failed to register /dev/misc/rtc");
+        let shmfs = crate::fs::ramfs::RamFS::new_with_quota(4096);
+        if let Ok(mut meta) = shmfs.root_inode().metadata() {
+            meta.mode = self::vfs::InodeMode::from_bits_truncate(0o1777);
+            shmfs.root_inode().set_metadata(&meta).ok();
+        }
+        devfs.add_dev("shm", shmfs.root_inode())
+            .expect("devfs: failed to register /dev/shm");
+        let _ = alloc::sync::Arc::into_raw(shmfs);
         let dev_inode_id = dev_inode.metadata().expect("dev_inode metadata failed").inode_id;
         let devfs_mnt = self::vfs::MountFS::new(devfs, self::vfs::MountFlags::empty());
         mfs.add_mount(dev_inode_id, devfs_mnt)
@@ -377,6 +391,77 @@ fn file_size(path: &str) -> Result<usize, isize> {
     Ok(inode.metadata().map_err(|e| e as isize)?.size.max(0) as usize)
 }
 
+fn ensure_etc_dir() -> Option<Arc<dyn self::vfs::IndexNode>> {
+    let root = vfs_root().mountpoint_root_inode();
+    match root.find("etc") {
+        Ok(etc) => Some(etc),
+        Err(_) => root
+            .create(
+                "etc",
+                self::vfs::FileType::Dir,
+                self::vfs::InodeMode::from_bits_truncate(0o755),
+            )
+            .ok(),
+    }
+}
+
+fn write_etc_compat_file(etc: &Arc<dyn self::vfs::IndexNode>, name: &str, content: &str) {
+    use self::vfs::{FileFlags, FileType, InodeMode};
+
+    let inode = match etc.find(name) {
+        Ok(inode) => inode,
+        Err(_) => match etc.create(name, FileType::File, InodeMode::from_bits_truncate(0o644)) {
+            Ok(inode) => inode,
+            Err(_) => return,
+        },
+    };
+    if inode.metadata().map(|m| m.file_type) != Ok(FileType::File) {
+        return;
+    }
+    let _ = inode.resize(0);
+    let _ = self::vfs::File::new(inode, FileFlags::O_RDWR)
+        .and_then(|file| file.write(content.as_bytes()));
+}
+
+fn ensure_ltp_compat_etc_files() {
+    const PASSWD: &str = "\
+root:x:0:0:root:/root:/bin/sh\n\
+nobody:x:65534:65534:nobody:/nonexistent:/sbin/nologin\n";
+    const GROUP: &str = "\
+root:x:0:\n\
+nogroup:x:65534:nobody\n\
+nobody:x:65534:\n";
+    const HOSTS: &str = "\
+127.0.0.1 localhost\n\
+::1 localhost ip6-localhost ip6-loopback\n";
+    const PROTOCOLS: &str = "\
+ip 0 IP\n\
+hopopt 0 HOPOPT\n\
+icmp 1 ICMP\n\
+igmp 2 IGMP\n\
+ggp 3 GGP\n\
+ipv4 4 IPv4\n\
+tcp 6 TCP\n\
+udp 17 UDP\n\
+ipv6 41 IPv6\n\
+ipv6-route 43 IPv6-Route\n\
+ipv6-frag 44 IPv6-Frag\n\
+esp 50 ESP\n\
+ah 51 AH\n\
+ipv6-icmp 58 IPv6-ICMP\n\
+ipv6-nonxt 59 IPv6-NoNxt\n\
+ipv6-opts 60 IPv6-Opts\n\
+raw 255 RAW\n";
+
+    if let Some(etc) = ensure_etc_dir() {
+        write_etc_compat_file(&etc, "passwd", PASSWD);
+        write_etc_compat_file(&etc, "group", GROUP);
+        write_etc_compat_file(&etc, "hosts", HOSTS);
+        write_etc_compat_file(&etc, "protocols", PROTOCOLS);
+        write_etc_compat_file(&etc, "termcap", "");
+    }
+}
+
 #[allow(unused)]
 pub fn flush_preload() {
     extern "C" {
@@ -390,6 +475,8 @@ pub fn flush_preload() {
         fn eosconfig();
         fn sfstest();
         fn efstest();
+        fn sltpcompat();
+        fn eltpcompat();
     }
     println!(
         "sinitproc: {:X}, einitproc: {:X}, sbash: {:X}, ebash: {:X}, sbusybox: {:X}, ebusybox: {:X}, sosconfig: {:X}, eosconfig: {:X}",
@@ -473,18 +560,18 @@ pub fn flush_preload() {
             crate::mm::frame_dealloc(ppn);
         }
     }
-    // 创建 /etc/termcap（空文件），防止 bash 卡在 termcap 读取
-    match vfs_lookup_parent("/etc/termcap") {
-        Ok((parent, name)) => {
-            if parent.find(&name).is_err() {
-                let _ = parent.create(&name, self::vfs::FileType::File, self::vfs::InodeMode::S_IRWXUGO);
-            }
-        }
-        Err(_) => {
-            let root = vfs_root().mountpoint_root_inode();
-            let etc = root.create("etc", self::vfs::FileType::Dir, self::vfs::InodeMode::S_IRWXUGO)
-                .unwrap_or_else(|_| root.find("etc").unwrap());
-            let _ = etc.create("termcap", self::vfs::FileType::File, self::vfs::InodeMode::S_IRWXUGO);
+    {
+        let _ = vfs_lookup_absolute("ltp_proto_compat.so")
+            .and_then(|inode| inode.resize(0).map_err(|e| e as isize));
+        let _ = create_or_open_file("ltp_proto_compat.so").map(|f| {
+            let _ = f.write(unsafe { core::slice::from_raw_parts(sltpcompat as *const u8, eltpcompat as usize - sltpcompat as usize) });
+        });
+        for ppn in crate::mm::PPNRange::new(
+            crate::mm::PhysAddr::from(sltpcompat as usize).floor(),
+            crate::mm::PhysAddr::from(eltpcompat as usize).floor(),
+        ) {
+            crate::mm::frame_dealloc(ppn);
         }
     }
+    ensure_ltp_compat_etc_files();
 }

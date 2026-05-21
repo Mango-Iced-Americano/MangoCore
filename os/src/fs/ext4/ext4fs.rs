@@ -869,22 +869,6 @@ impl IndexNode for layout::Ext4OSInode {
         })
     }
 
-    fn set_metadata(&self, metadata: &Metadata) -> Result<(), SyscallErr> {
-        let ino = { self.inode.lock().inode_num };
-        let cached = self.ext4fs.get_inode_cached(ino);
-        let mut guard = cached.lock();
-        guard.inode.set_mode(metadata.mode.bits() as u16);
-        guard.dirty = true;
-        drop(guard);
-        self.inode.lock().inode.set_mode(metadata.mode.bits() as u16);
-        self.ext4fs.flush_inode(ino).map_err(|e| {
-            log::warn!("set_metadata: flush_inode failed for ino={}: {}", ino, e);
-            SyscallErr::EIO
-        })?;
-        super::counters::inc_counter!(super::counters::INODE_DIRTY_COUNT);
-        Ok(())
-    }
-
     fn find(&self, name: &str) -> Result<alloc::sync::Arc<dyn IndexNode>, SyscallErr> {
         super::counters::inc_counter!(super::counters::DENTRY_LOOKUP_COUNT);
         let inode_num = self.inode.lock().inode_num;
@@ -980,10 +964,10 @@ impl IndexNode for layout::Ext4OSInode {
         &self,
         name: &str,
         file_type: VfsFileType,
-        _mode: InodeMode,
+        mode: InodeMode,
     ) -> Result<alloc::sync::Arc<dyn IndexNode>, SyscallErr> {
         let parent = self.inode.lock().inode_num;
-        let inode_mode = vfs_type_to_inode_mode(file_type);
+        let inode_mode = vfs_type_to_inode_mode(file_type) | (mode & InodeMode::S_IALLUGO).bits() as u16;
         let new_ref = self
             .ext4fs
             .create(parent, name, inode_mode)
@@ -1008,6 +992,26 @@ impl IndexNode for layout::Ext4OSInode {
             super::counters::inc_counter!(super::counters::DIR_CHILDREN_INSERT);
         }
         Ok(child_inode)
+    }
+
+    fn set_metadata(&self, metadata: &Metadata) -> Result<(), SyscallErr> {
+        let inode_num = self.inode.lock().inode_num;
+        let mut fresh = self.ext4fs.get_inode_ref(inode_num);
+        let file_type = vfs_type_to_inode_mode(metadata.file_type);
+        let mode = file_type | (metadata.mode & InodeMode::S_IALLUGO).bits() as u16;
+        fresh.inode.set_mode(mode);
+        fresh.inode.set_uid(metadata.uid as u16);
+        fresh.inode.set_gid(metadata.gid as u16);
+        fresh.set_atime(metadata.atime.tv_sec as u32);
+        fresh.set_mtime(metadata.mtime.tv_sec as u32);
+        fresh.set_ctime(metadata.ctime.tv_sec as u32);
+        self.ext4fs.write_back_inode(&mut fresh);
+        {
+            let mut inode = self.inode.lock();
+            inode.inode = fresh.inode;
+        }
+        self.metadata_dirty.store(false, core::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
 
     fn symlink(&self, name: &str, target: &str) -> Result<alloc::sync::Arc<dyn IndexNode>, SyscallErr> {

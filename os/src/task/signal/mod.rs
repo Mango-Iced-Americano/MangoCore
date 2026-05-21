@@ -1,12 +1,11 @@
 use crate::hal::{
-    get_bad_addr, get_bad_instruction, get_exception_cause, MachineContext, UserContext,
+    get_bad_addr, get_bad_instruction, get_exception_cause, MachineContext, TrapContext,
+    UserContext, UserSignalMask,
 };
 use crate::signal_type;
 use core::fmt::{self, Debug, Formatter};
 use core::mem::size_of;
 use log::{debug, error, trace, warn};
-
-use crate::hal::TrapContext;
 
 use crate::config::*;
 use crate::mm::{UserPtr, UserPtrMut};
@@ -227,10 +226,11 @@ pub struct SigAction {
     pub handler: SigHandler,
     /// 信号处理标志位
     pub flags: SigActionFlags,
+    /// 恢复函数地址。la64 rt_sigaction 使用 kernel k_sigaction 布局：
+    /// handler, flags, restorer, mask。
+    pub restorer: usize,
     /// 要屏蔽的信号
     pub mask: Signals,
-    /// 恢复函数地址
-    pub restorer: usize,
 }
 
 #[cfg(feature = "riscv")]
@@ -243,6 +243,17 @@ pub struct SigAction {
     pub mask: Signals,
 }
 
+#[derive(Clone, Copy)]
+#[repr(C)]
+/// rt_sigaction 用户 ABI 结构。Linux k_sigaction 只传递低 64 位 signal mask；
+/// la64 内部 Signals 是 128 位，不能直接 copy_to_user，否则会覆盖用户栈。
+pub struct UserSigAction {
+    pub handler: SigHandler,
+    pub flags: SigActionFlags,
+    pub restorer: usize,
+    pub mask: u64,
+}
+
 impl SigAction {
     pub fn new() -> Self {
         Self {
@@ -250,6 +261,26 @@ impl SigAction {
             flags: SigActionFlags::empty(),
             restorer: 0,
             mask: Signals::empty(),
+        }
+    }
+}
+
+impl UserSigAction {
+    fn from_kernel(action: SigAction) -> Self {
+        Self {
+            handler: action.handler,
+            flags: action.flags,
+            restorer: action.restorer,
+            mask: action.mask.bits() as u64,
+        }
+    }
+
+    fn into_kernel(self) -> SigAction {
+        SigAction {
+            handler: self.handler,
+            flags: self.flags,
+            restorer: self.restorer,
+            mask: Signals::from_bits_truncate(self.mask as signal_type!()),
         }
     }
 }
@@ -272,7 +303,7 @@ impl Debug for SigAction {
 /// * `act`: new action
 /// * `oldact`: old action
 /// 此函数与RV版本略有不同，但是可以不处理，因为此版本的这个函数鲁棒性更强
-pub fn sigaction(signum: usize, act: *const SigAction, oldact: *mut SigAction) -> isize {
+pub fn sigaction(signum: usize, act: *const UserSigAction, oldact: *mut UserSigAction) -> isize {
     let task = current_task().unwrap();
     match signum {
         0 /* None */ | 9 /* SIGKILL */ | 19 /* SIGSTOP */ | 65.. /* Unsupported */ => {
@@ -284,29 +315,30 @@ pub fn sigaction(signum: usize, act: *const SigAction, oldact: *mut SigAction) -
             let token = task.get_user_token();
             if !oldact.is_null() {
                 let sighand_ref = task.process.sighand();
-    let sighand = sighand_ref.lock();
+                let sighand = sighand_ref.lock();
                 let suc = if let Some(sigact) = sighand.get(signum) {
                     trace!("[sigaction] *oldact: {:?}", sigact);
-                    UserPtrMut::new(oldact).write(token, sigact)
+                    UserPtrMut::new(oldact).write(token, &UserSigAction::from_kernel(*sigact))
                 } else {
                     trace!("[sigaction] *oldact: not found");
-                    UserPtrMut::new(oldact).write(token, &SigAction::new())
+                    UserPtrMut::new(oldact)
+                        .write(token, &UserSigAction::from_kernel(SigAction::new()))
                 };
-                if suc.is_err(){
-                    log::error!("[sigaction] Error on copy_to_user(_,{:?},_)",oldact);
+                if suc.is_err() {
+                    log::error!("[sigaction] Error on copy_to_user(_,{:?},_)", oldact);
                     return EFAULT;
                 }
             }
             if let Some(mut sigact) = match UserPtr::new(act).read_optional(token) {
-                Ok(sigact) => sigact,
+                Ok(sigact) => sigact.map(UserSigAction::into_kernel),
                 Err(_) => {
-                    log::error!("[sigaction] Failed to copy sigact {:?} from user.",act);
+                    log::error!("[sigaction] Failed to copy sigact {:?} from user.", act);
                     return EFAULT;
                 }
             } {
                 sigact.mask.remove(Signals::CAN_NOT_BE_MASKED);
                 let sighand_ref = task.process.sighand();
-        let mut sighand = sighand_ref.lock();
+                let mut sighand = sighand_ref.lock();
                 if sigact.handler == SigHandler::SIG_IGN {
                     // Store SIG_IGN explicitly so we can distinguish from SIG_DFL
                     sighand.set(signum, Some(sigact));
@@ -607,14 +639,8 @@ pub fn do_signal() {
                 }
                 // In this case, signal hander have three parameters
                 if act.flags.contains(SigActionFlags::SA_SIGINFO) {
-                    let user_context = UserContext {
-                        flags: 0,
-                        link: 0,
-                        stack: frame_stack,
-                        sigmask: saved_sigmask,
-                        __pad: [0; UserContext::PADDING_SIZE],
-                        mcontext,
-                    };
+                    let user_context =
+                        UserContext::new(0, 0, frame_stack, saved_sigmask, mcontext);
                     if UserPtrMut::from_addr(ucontext_addr)
                         .write(token, &user_context) // push UserContext into user stack
                         .is_err()
@@ -642,10 +668,11 @@ pub fn do_signal() {
                                                   // To simplify the implementation of sigreturn, here we keep the same layout as above...
                 } else {
                     // push sigmask into user stack
+                    let user_sigmask = UserContext::encode_sigmask(saved_sigmask);
                     match UserPtrMut::from_addr(
                         ucontext_addr + 2 * size_of::<usize>() + size_of::<SignalStack>(),
                     )
-                    .write(token, &saved_sigmask)
+                    .write(token, &user_sigmask)
                     {
                         Ok(()) => {}
                         Err(_) => {
@@ -663,7 +690,7 @@ pub fn do_signal() {
                         ucontext_addr
                             + 2 * size_of::<usize>()
                             + size_of::<SignalStack>()
-                            + size_of::<Signals>()
+                            + size_of::<UserSignalMask>()
                             + UserContext::PADDING_SIZE,
                     )
                     .write(token, &mcontext) // push MachineContext into user stack
@@ -681,7 +708,9 @@ pub fn do_signal() {
                 let trap_cx = inner.get_trap_cx();
                 trap_cx.gp.a0 = signum; // a0 <- signum
                 trap_cx.set_sp(sig_sp); // update sp, because we've pushed something into stack
-                trap_cx.gp.ra = if act.flags.contains(SigActionFlags::SA_RESTORER) {
+                trap_cx.gp.ra = if act.flags.contains(SigActionFlags::SA_RESTORER)
+                    && act.restorer != 0
+                {
                     act.restorer // legacy, signal trampoline provided by C library's wrapper function
                 } else {
                     SIGNAL_TRAMPOLINE // ra <- __call_sigreturn, when handler ret, we will go to __call_sigreturn

@@ -292,6 +292,12 @@ pub trait Socket: Send + Sync {
     fn set_reuse_addr(&self, _enabled: bool) -> SyscallRet {
         Err(SyscallErr::EOPNOTSUPP)
     }
+    fn join_multicast_group(&self) -> SyscallRet {
+        Ok(0)
+    }
+    fn leave_multicast_group(&self) -> SyscallRet {
+        Err(SyscallErr::EADDRNOTAVAIL)
+    }
     fn send_to(&self, _buf: &[u8], _dest: Endpoint) -> SyscallRet {
         Err(SyscallErr::EOPNOTSUPP)
     }

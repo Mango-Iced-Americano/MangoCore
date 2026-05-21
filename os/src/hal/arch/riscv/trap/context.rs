@@ -56,18 +56,57 @@ pub struct MachineContext {
 }
 
 #[repr(C)]
+#[derive(Default, Debug, Clone, Copy)]
+pub struct UserSignalMask {
+    bits: [usize; 1],
+}
+
+impl UserSignalMask {
+    pub fn from_signals(sigmask: Signals) -> Self {
+        Self {
+            bits: [sigmask.bits()],
+        }
+    }
+
+    pub fn to_signals(self) -> Signals {
+        Signals::from_bits_truncate(self.bits[0])
+    }
+}
+
+#[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct UserContext {
     pub flags: usize,
     pub link: usize,
     pub stack: SignalStack,
-    pub sigmask: Signals,
+    pub sigmask: UserSignalMask,
     pub __pad: [u8; 128],
     pub mcontext: MachineContext,
 }
 
 impl UserContext {
     pub const PADDING_SIZE: usize = 128;
+
+    pub fn new(
+        flags: usize,
+        link: usize,
+        stack: SignalStack,
+        sigmask: Signals,
+        mcontext: MachineContext,
+    ) -> Self {
+        Self {
+            flags,
+            link,
+            stack,
+            sigmask: UserSignalMask::from_signals(sigmask),
+            __pad: [0; Self::PADDING_SIZE],
+            mcontext,
+        }
+    }
+
+    pub fn encode_sigmask(sigmask: Signals) -> UserSignalMask {
+        UserSignalMask::from_signals(sigmask)
+    }
 }
 
 #[repr(C)]

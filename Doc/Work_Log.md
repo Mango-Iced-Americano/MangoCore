@@ -2,6 +2,51 @@
 
 ---
 
+## 2026-05-21
+
+### busybox/libctest 低成本兼容点补齐
+
+**涉及文件：**
+- `os/src/fs/dev/mod.rs`、`os/src/fs/dev/rtc.rs`、`os/src/fs/mod.rs` — devfs 支持注册子目录，新增 `/dev/misc/rtc` char device，并实现 `RTC_RD_TIME` ioctl。
+- `os/src/net/syscall/{common,getsockopt,setsockopt}.rs` — 补 `SO_RCVTIMEO` / `SO_SNDTIMEO` ABI 兼容，`setsockopt` 校验用户 `TimeVal`，`getsockopt` 返回零超时。
+- `os/src/timer.rs`、`os/src/syscall/process/time.rs`、`os/src/syscall/fs.rs` — 分离 realtime wall-clock 与 monotonic uptime，`CLOCK_REALTIME/gettimeofday/adjtimex/utimensat(UTIME_NOW)` 改用墙钟时间。
+- `logs/full-test-20260520-task-refactor/report.md`、`WORK_LOG.md` — 记录本轮适配结论和剩余问题边界。
+
+**验证：**
+- `docker compose exec os-dev make -C os rv64-kernel-build-only` ✅
+- `docker compose exec os-dev make -C os la64-kernel-build-only` ✅
+- rv64 busybox：wrapper PASS，musl/glibc 均 `testcase busybox hwclock success` ✅
+- la64 busybox：wrapper PASS，musl/glibc 均 `testcase busybox hwclock success` ✅
+- rv64 libctest：wrapper PASS，`socket/stat/utime` 目标项通过 ✅
+- la64 libctest：wrapper PASS，`socket/stat/utime/tls_init/tls_local_exec/tls_get_new_dtv` 目标项通过 ✅
+
+**剩余边界：**
+- socket timeout 目前是 ABI 兼容，不做 per-socket deadline。
+- realtime 默认 offset 暂设为 2027-01-01 UTC，后续应接 QEMU RTC 或启动参数时间。
+- libctest 内层仍有 locale/scanf/regex/宽字符、glibc `libgcc_s.so.1`、pthread timeout 等非本轮目标失败。
+
+### la64 fork/clone Bad address 与 LTP/cyclictest P0 修复
+
+**涉及文件：**
+- `os/src/syscall/mod.rs`、`os/src/syscall/syscall_id.rs`、`os/src/syscall/process/{mm,mod,signal,time,ids,lifecycle}.rs` — 修复 la64 raw `clone` 参数解码，补齐 `capget/capset`、uid/gid、`prctl`、`adjtimex/clock_adjtime/clock_settime`、`mlock*`、wait4 兼容选项等 LTP 高收益 syscall。
+- `os/src/task/signal/mod.rs`、`os/src/syscall/process/signal.rs` — 新增 `UserSigAction`，把用户态 `rt_sigaction` ABI 与内核 `SigAction` 分离，避免 la64 128-bit `Signals` 写回用户栈导致后续 shell/pthread/TLS 异常。
+- `os/src/task/task.rs` — clone 子任务继承父任务 signal mask、uid/gid/cap/sched 兼容字段。
+- `os/src/fs/mod.rs` — 注册 `/dev/shm` ramfs，权限 `01777`，满足 cyclictest/libctest 的 `shm_open` 路径。
+- `os/src/fs/procfs/{mod.rs,files/mod.rs}` — `/proc/sys/user/max_user_namespaces` 改为 writable stub，适配 LTP 探测/写入。
+- `os/src/fs/ext4/{ext4fs.rs,file.rs}`、`os/src/syscall/fs.rs`、`os/src/net/syscall/bind.rs`、`os/src/syscall/process/exec.rs`、`user/src/bin/initproc.rs` — 补 open/mkdir/chmod mode 语义、access 权限判断、shebang/`/bin/sh`、最小账户库、低端口 bind 权限与 la64 cyclictest musl stub 兼容。
+- `.codex-ltp-fix.conf`、`.codex-la64-cyclictest.conf`、`.codex-la64-libctest.conf`、`.codex-la64-task-groups.conf` — 本轮聚焦复测配置。
+- `logs/full-test-20260520-task-refactor/report.md` — 更新 P0 修复结论、验证日志与剩余问题边界。
+
+**验证：**
+- `docker compose exec os-dev make -C os la64-only MODE=release` ✅
+- `docker compose exec os-dev make -C os rv64-only MODE=release` ✅
+- la64/rv64 LTP 聚焦 7 例 `access01,access02,adjtimex02,bind02,capset02,clock_adjtime01,clock_adjtime02`，musl/glibc 均 `failed 0` ✅
+- la64 cyclictest musl/glibc `NO_STRESS_P1/P8`、`STRESS_P1/P8` 均 `end: success` ✅
+- 关键 P0 复查未再命中 `fork(): EFAULT`、`Bad address`、`Fork failed`、`Creating workers (error: Bad address)`、`ERROR, mlock`、`unable to get scheduler parameters` ✅
+- la64 libctest pthread/TLS 成片异常已收敛，但全量 libctest 尚未 clean pass；剩余为 `mremap(216)` unsupported、glibc dynamic `libgcc_s.so.1` 缺失、少量 pthread timeout 与 libc 语义问题。
+
+---
+
 ## 2026-05-20
 
 ### FS-LTP 分诊体系建设与 Round-0 适配

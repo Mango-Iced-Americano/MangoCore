@@ -3,12 +3,34 @@ use crate::get_socket;
 use crate::net::socket::unix::ns::{ABSTRACT_TABLE, UNIX_PATH_MAX};
 use crate::net::socket::unix::PATH_TABLE;
 use crate::net::socket::UnixEndpoint;
-use crate::net::Endpoint;
+use crate::net::{Endpoint, LOCAL_IP};
 use crate::task::current_task;
 use crate::utils::error::SyscallErr;
 use alloc::format;
 use alloc::string::ToString;
 use alloc::sync::Arc;
+use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address, Ipv6Address};
+
+const CAP_NET_BIND_SERVICE: usize = 10;
+
+fn is_local_bind_addr(addr: IpAddress) -> bool {
+    if addr.is_unspecified() || addr == LOCAL_IP {
+        return true;
+    }
+    match addr {
+        IpAddress::Ipv4(ip) => ip.is_loopback(),
+        IpAddress::Ipv6(ip) => ip == Ipv6Address::LOOPBACK,
+    }
+}
+
+fn ipv4_endpoint_from_unspec_sockaddr(addr_buf: &[u8]) -> Option<Endpoint> {
+    if addr_buf.len() < 16 {
+        return None;
+    }
+    let port = u16::from_be_bytes([addr_buf[2], addr_buf[3]]);
+    let ip = Ipv4Address::from_bytes(&[addr_buf[4], addr_buf[5], addr_buf[6], addr_buf[7]]);
+    Some(Endpoint::Ip(IpEndpoint::new(IpAddress::Ipv4(ip), port)))
+}
 
 pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize {
     match check_addrlen(addrlen) {
@@ -17,13 +39,28 @@ pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize {
     }
     let addr_buf = crate::trans_ref!(addr, addrlen);
     let endpoint = match Endpoint::from_sockaddr(addr_buf) {
+        Ok(Endpoint::Unspecified) => {
+            ipv4_endpoint_from_unspec_sockaddr(addr_buf).unwrap_or(Endpoint::Unspecified)
+        }
         Ok(ep) => ep,
         Err(e) => return -(e as isize),
     };
     match endpoint {
-        Endpoint::Ip(_) => {
+        Endpoint::Ip(ep) => {
+            if !is_local_bind_addr(ep.addr) {
+                return -(SyscallErr::EADDRNOTAVAIL as isize);
+            }
+            let endpoint = Endpoint::Ip(ep);
             let socket = crate::get_socket!(sockfd);
             let task = current_task().unwrap();
+            if endpoint.port() < 1024 {
+                let inner = task.acquire_inner_lock();
+                if inner.euid != 0
+                    && (inner.cap_effective & (1u64 << CAP_NET_BIND_SERVICE)) == 0
+                {
+                    return -(SyscallErr::EACCES as isize);
+                }
+            }
             match crate::net::socket::inet::common::PortManager::bind_port(
                 &task, &socket, &endpoint,
             ) {
@@ -97,8 +134,15 @@ pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize {
                     let start = cwd_node.inode.clone();
                     let parent_node = match crate::fs::vfs_lookup(&start, parent_path, true) {
                         Ok(node) => node,
-                        Err(_) => return -(SyscallErr::ENOENT as isize),
+                        Err(errno) => return errno,
                     };
+                    match parent_node.metadata() {
+                        Ok(meta) if meta.file_type != crate::fs::vfs::FileType::Dir => {
+                            return -(SyscallErr::ENOTDIR as isize);
+                        }
+                        Ok(_) => {}
+                        Err(e) => return -(e as isize),
+                    }
 
                     // 检查文件是否已存在
                     if parent_node.find(file_name).is_ok() {
@@ -115,7 +159,7 @@ pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize {
                         Err(e) if e == SyscallErr::EEXIST => {
                             return -(SyscallErr::EADDRINUSE as isize);
                         }
-                        Err(_) => return -(SyscallErr::EACCES as isize),
+                        Err(e) => return -(e as isize),
                     };
 
                     // 生成绝对路径

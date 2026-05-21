@@ -1,6 +1,7 @@
 //! /proc/<pid>/ 目录 — 进程信息目录
 
 pub mod cmdline;
+pub mod maps;
 pub mod stat;
 pub mod status;
 
@@ -65,6 +66,20 @@ fn create_pid_dir(parent: &LockedProcInode, pid: usize) -> Result<Arc<dyn IndexN
         "cmdline",
         InodeMode::from_bits_truncate(0o444),
         cmdline::pid_cmdline_content,
+        pid,
+    )?;
+
+    dir.add_file(
+        "maps",
+        InodeMode::from_bits_truncate(0o444),
+        maps::pid_maps_content,
+        pid,
+    )?;
+
+    dir.add_file(
+        "mounts",
+        InodeMode::from_bits_truncate(0o444),
+        crate::fs::procfs::files::mounts::mounts_content,
         pid,
     )?;
 

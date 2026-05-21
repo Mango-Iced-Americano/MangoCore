@@ -225,7 +225,6 @@ impl FdTable {
                 }
             }
         }
-        self.soft_limit = new_capacity;
         Ok(())
     }
 
@@ -233,23 +232,22 @@ impl FdTable {
         self.fds.iter().rposition(|f| f.is_some())
     }
 
+    fn effective_soft_limit(&self) -> usize {
+        self.soft_limit.min(Self::MAX_CAPACITY)
+    }
+
     // ── FD 分配/释放 ──────────────────────────────────────────────
 
     /// 分配一个新的文件描述符
     pub fn alloc_fd(&mut self, file: File, cloexec: bool) -> Result<usize, SyscallErr> {
-        // 从 next_fd 开始扫描，找第一个空闲的
-        let len = self.fds.len();
-        for i in self.next_fd..len {
-            if self.fds[i].is_none() {
-                self.fds[i] = Some(file);
-                self.cloexec[i] = cloexec;
-                self.next_fd = i + 1;
-                return Ok(i);
-            }
+        let limit = self.effective_soft_limit();
+        if limit == 0 {
+            return Err(SyscallErr::EMFILE);
         }
 
-        // 从 0 到 next_fd 再扫一遍
-        for i in 0..self.next_fd {
+        // Linux open/pipe/socket 语义要求返回最低编号的可用 fd。
+        let len = self.fds.len().min(limit);
+        for i in 0..len {
             if self.fds[i].is_none() {
                 self.fds[i] = Some(file);
                 self.cloexec[i] = cloexec;
@@ -259,13 +257,49 @@ impl FdTable {
         }
 
         // 没有空闲的，尝试扩容
-        if len >= self.soft_limit {
+        let old_capacity = self.fds.len();
+        if old_capacity >= limit {
             return Err(SyscallErr::EMFILE);
         }
-        let new_capacity = core::cmp::min(len * 2, self.soft_limit);
+        let new_capacity = core::cmp::min(old_capacity.saturating_mul(2).max(old_capacity + 1), limit);
         self.resize_to_capacity(new_capacity)?;
         // 递归分配
         self.alloc_fd(file, cloexec)
+    }
+
+    /// 分配不小于 `min_fd` 的空闲 fd（fcntl F_DUPFD/F_DUPFD_CLOEXEC）。
+    pub fn alloc_fd_from(
+        &mut self,
+        min_fd: usize,
+        file: File,
+        cloexec: bool,
+    ) -> Result<usize, SyscallErr> {
+        let limit = self.effective_soft_limit();
+        if min_fd >= limit {
+            return Err(SyscallErr::EINVAL);
+        }
+
+        loop {
+            let len = self.fds.len().min(limit);
+            for fd in min_fd..len {
+                if self.fds[fd].is_none() {
+                    self.fds[fd] = Some(file);
+                    self.cloexec[fd] = cloexec;
+                    if fd < self.next_fd {
+                        self.next_fd = fd + 1;
+                    }
+                    return Ok(fd);
+                }
+            }
+
+            let old_capacity = self.fds.len();
+            if old_capacity >= limit {
+                return Err(SyscallErr::EMFILE);
+            }
+            let wanted = core::cmp::max(min_fd + 1, old_capacity + 1);
+            let doubled = old_capacity.saturating_mul(2).max(wanted);
+            self.resize_to_capacity(core::cmp::min(doubled, limit))?;
+        }
     }
 
     /// 在指定位置分配 fd（dup2 用）
@@ -275,12 +309,12 @@ impl FdTable {
         file: File,
         cloexec: bool,
     ) -> Result<usize, SyscallErr> {
-        if fd >= self.soft_limit {
+        if fd >= self.effective_soft_limit() {
             return Err(SyscallErr::EBADF);
         }
         // 扩容到至少 fd + 1
         while self.fds.len() <= fd {
-            let new_cap = core::cmp::min(self.fds.len() * 2, self.soft_limit);
+            let new_cap = core::cmp::min(self.fds.len() * 2, self.effective_soft_limit());
             if new_cap <= self.fds.len() {
                 return Err(SyscallErr::EMFILE);
             }
@@ -405,9 +439,13 @@ impl FdTable {
     }
 
     pub fn get_soft_limit(&self) -> usize { self.soft_limit }
-    pub fn set_soft_limit(&mut self, limit: usize) { self.soft_limit = limit; }
+    pub fn set_soft_limit(&mut self, limit: usize) {
+        self.soft_limit = limit.min(Self::MAX_CAPACITY);
+    }
     pub fn get_hard_limit(&self) -> usize { self.hard_limit }
-    pub fn set_hard_limit(&mut self, limit: usize) { self.hard_limit = limit; }
+    pub fn set_hard_limit(&mut self, limit: usize) {
+        self.hard_limit = limit.min(Self::MAX_CAPACITY);
+    }
 }
 
 impl Drop for FdTable {
@@ -820,18 +858,14 @@ impl File {
     pub fn try_clone(&self) -> Option<Self> {
         let inode = self.inode.clone();
         let flags = *self.flags.lock();
-        let private_data = Mutex::new(FilePrivateData::default());
-        // 先检查 open 是否成功，避免失败后 Drop 错误调用 close
-        if inode.open(private_data.lock(), &flags).is_err() {
-            return None;
-        }
+        let private_data = self.private_data.lock().clone();
         Some(File {
             inode,
             offset: Arc::clone(&self.offset),
             flags: Mutex::new(flags),
             mode: Mutex::new(*self.mode.lock()),
             file_type: self.file_type,
-            private_data,
+            private_data: Mutex::new(private_data),
         })
     }
 

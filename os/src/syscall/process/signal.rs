@@ -1,4 +1,4 @@
-use crate::hal::{MachineContext, TrapContext};
+use crate::hal::{MachineContext, TrapContext, UserSignalMask};
 use crate::mm::{copy_from_user, UserPtr, UserPtrMut};
 use crate::syscall::errno::*;
 use crate::task::{current_task, exit_current_and_run_next, signal::*, ProcessManager};
@@ -64,7 +64,11 @@ pub fn sys_sigaction(signum: usize, act: usize, oldact: usize) -> isize {
         act,
         oldact
     );
-    sigaction(signum, act as *const SigAction, oldact as *mut SigAction)
+    sigaction(
+        signum,
+        act as *const UserSigAction,
+        oldact as *mut UserSigAction,
+    )
 }
 
 /// Note: code translation should be done in syscall rather than the call handler as the handler may be reused by kernel code which use kernel structs
@@ -164,7 +168,7 @@ pub fn sys_sigreturn() -> isize {
         }
     };
     let mcontext_addr = match sigmask_addr
-        .checked_add(size_of::<Signals>())
+        .checked_add(size_of::<UserSignalMask>())
         .and_then(|addr| addr.checked_add(crate::hal::UserContext::PADDING_SIZE))
     {
         Some(addr) => addr,
@@ -175,8 +179,8 @@ pub fn sys_sigreturn() -> isize {
             exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
         }
     };
-    let restored_sigmask = match UserPtr::<Signals>::from_addr(sigmask_addr).read(token) {
-        Ok(sigmask) => sigmask - Signals::CAN_NOT_BE_MASKED,
+    let restored_sigmask = match UserPtr::<UserSignalMask>::from_addr(sigmask_addr).read(token) {
+        Ok(sigmask) => sigmask.to_signals() - Signals::CAN_NOT_BE_MASKED,
         Err(_) => {
             error!("[sys_sigreturn] bad sigmask in signal frame, send SIGSEGV");
             drop(inner);

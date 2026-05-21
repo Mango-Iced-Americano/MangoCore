@@ -1,6 +1,6 @@
 use crate::net::config::lookup_source_ip;
 use crate::net::syscall::common::MsgFlags;
-use crate::net::{config::NET_INTERFACE, Endpoint, Mutex, Socket, MAX_BUFFER_SIZE};
+use crate::net::{config::NET_INTERFACE, Endpoint, Mutex, Socket, LOCAL_IP, MAX_BUFFER_SIZE};
 use crate::{
     net::address,
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
@@ -46,6 +46,7 @@ struct UdpSocketInner {
     recvbuf_size: usize,
     sendbuf_size: usize,
     reuse_addr: bool,
+    multicast_group_joined: bool,
 }
 
 impl Socket for UdpSocket {
@@ -210,6 +211,21 @@ impl Socket for UdpSocket {
         Ok(0)
     }
 
+    fn join_multicast_group(&self) -> SyscallRet {
+        self.inner.lock().multicast_group_joined = true;
+        Ok(0)
+    }
+
+    fn leave_multicast_group(&self) -> SyscallRet {
+        let mut inner = self.inner.lock();
+        if inner.multicast_group_joined {
+            inner.multicast_group_joined = false;
+            Ok(0)
+        } else {
+            Err(SyscallErr::EADDRNOTAVAIL)
+        }
+    }
+
     fn send_to(&self, buf: &[u8], dest: Endpoint) -> SyscallRet {
         let Endpoint::Ip(ep) = dest else {
             return Err(SyscallErr::EINVAL);
@@ -246,6 +262,9 @@ impl Socket for UdpSocket {
             endpoint: remote,
             meta: PacketMeta::default(),
         };
+        if let Some(n) = self.try_deliver_local(remote, &send_buf)? {
+            return Ok(n);
+        }
         // 不调用 poll，只做一次尝试
         NET_INTERFACE
             .udp_socket(self.socket_handler, |socket| {
@@ -320,6 +339,9 @@ impl Socket for UdpSocket {
             endpoint: remote,
             meta: PacketMeta::default(),
         };
+        if let Some(n) = self.try_deliver_local(remote, &send_buf)? {
+            return Ok(n);
+        }
         NET_INTERFACE
             .udp_socket(self.socket_handler, |socket| {
                 if !socket.can_send() {
@@ -402,6 +424,7 @@ impl UdpSocket {
                 recvbuf_size: MAX_BUFFER_SIZE,
                 sendbuf_size: MAX_BUFFER_SIZE,
                 reuse_addr: false,
+                multicast_group_joined: false,
             }),
             socket_handler,
             recv_waiters: EventWaitQueue::new(),
@@ -412,6 +435,50 @@ impl UdpSocket {
         let local = socket.inner.lock().local_endpoint;
         log::info!("[register_udp_socket] local={:?}", local);
         UDP_SOCKETS.lock().push(Arc::downgrade(socket));
+    }
+
+    fn local_source_endpoint(&self, remote: IpEndpoint) -> Option<IpEndpoint> {
+        let local = self.inner.lock().local_endpoint?;
+        if local.port == 0 {
+            return None;
+        }
+        let addr = local.addr.unwrap_or_else(|| lookup_source_ip(remote.addr));
+        Some(IpEndpoint::new(addr, local.port))
+    }
+
+    fn is_local_udp_destination(addr: IpAddress) -> bool {
+        if addr.is_unspecified() || addr == LOCAL_IP {
+            return true;
+        }
+        match addr {
+            IpAddress::Ipv4(ip) => ip.is_loopback(),
+            IpAddress::Ipv6(_) => false,
+        }
+    }
+
+    fn try_deliver_local(
+        &self,
+        remote: IpEndpoint,
+        data: &[u8],
+    ) -> Result<Option<isize>, SyscallErr> {
+        if !Self::is_local_udp_destination(remote.addr) {
+            return Ok(None);
+        }
+        let Some(src) = self.local_source_endpoint(remote) else {
+            return Ok(None);
+        };
+        let Some(peer) = find_local_udp_recipient(remote, src) else {
+            return Ok(None);
+        };
+
+        let mut peer_inner = peer.inner.lock();
+        if peer_inner.rx_queue.len() >= peer_inner.recvbuf_size {
+            return Err(SyscallErr::EAGAIN);
+        }
+        peer_inner.rx_queue.push_back((data.to_vec(), src));
+        peer.recv_waiters
+            .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM);
+        Ok(Some(data.len() as isize))
     }
 }
 
@@ -515,6 +582,41 @@ pub fn dispatch_udp_packets(inner: &mut NetInterfaceInner) {
 }
 
 // 寻找最匹配的 OS UdpSocket
+fn find_local_udp_recipient(remote: IpEndpoint, src: IpEndpoint) -> Option<Arc<UdpSocket>> {
+    let sockets = UDP_SOCKETS.lock();
+    let mut best_match = None;
+    let mut best_score = 0;
+
+    for weak_sock in sockets.iter() {
+        if let Some(sock) = weak_sock.upgrade() {
+            let inner = sock.inner.lock();
+            let Some(local) = inner.local_endpoint else {
+                continue;
+            };
+            if local.port != remote.port {
+                continue;
+            }
+            let addr_score = match local.addr {
+                Some(addr) if addr == remote.addr => 2,
+                Some(_) => continue,
+                None => 1,
+            };
+            let peer_score = match inner.remote_endpoint {
+                Some(peer) if peer == src => 2,
+                Some(_) => continue,
+                None => 1,
+            };
+            let score = addr_score + peer_score;
+            if score > best_score {
+                best_score = score;
+                best_match = Some(sock.clone());
+            }
+        }
+    }
+
+    best_match
+}
+
 fn find_best_match(
     sockets: &[Weak<UdpSocket>],
     local: IpListenEndpoint,

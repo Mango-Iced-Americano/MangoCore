@@ -702,6 +702,11 @@ fn run_group_once(
 /// ⚠️ 堆限制：不使用 Vec<String> 收集文件名（会导致 OOM），改用栈缓冲。
 const MAX_LTP_ENTRIES: usize = 3000;
 const MAX_NAME_BYTES: usize = 98304; // 96KB name storage on stack
+
+fn should_preload_musl_ltp_compat(libc_suffix: &str, name: &str) -> bool {
+    libc_suffix == "musl" && !name.as_bytes().iter().any(|b| *b == b'.')
+}
+
 fn run_ltp_binaries(
     environ: &[*const u8],
     dir: &str,
@@ -887,9 +892,14 @@ fn run_ltp_binaries(
             // 将 ltp/testcases/bin 加入 PATH。同时设置 LTPROOT 以兼容 LTP
             // 内部路径解析逻辑。musl/glibc 使用各自目录下的 ltp，自然不同。
             let ltp_root_abs = format!("{}/ltp", log_dir);
+            let preload = if should_preload_musl_ltp_compat(libc_suffix, name) {
+                "LD_PRELOAD=/ltp_proto_compat.so "
+            } else {
+                ""
+            };
             let cmd = format!(
-                "export LTPROOT=\"{}\" && export PATH=\"{}/testcases/bin:$PATH\" && ./ltp/testcases/bin/{}",
-                ltp_root_abs, ltp_root_abs, name
+                "export LTPROOT=\"{}\" && export PATH=\"{}/testcases/bin:$PATH\" && {}./ltp/testcases/bin/{}",
+                ltp_root_abs, ltp_root_abs, preload, name
             );
             let ret = run_bash_cmd(&cmd, environ);
             let exit_code = exit_code_from_waitpid_status(ret);
@@ -1386,6 +1396,16 @@ fn prepare_symlink(environ: &[*const u8]) {
     let ret = run_bash_cmd(install_cmd, environ);
     println!("[initproc] busybox --install -s /bin -> exit={}", ret);
 
+    // Step 1.5: LTP 依赖 getpwnam("nobody")/getgrnam("nogroup")，测试镜像缺省时补最小账户库。
+    println!("[initproc] preparing minimal /etc/passwd and /etc/group ...");
+    let account_cmd = "\
+        mkdir -p /etc /root /tmp; chmod 1777 /tmp; \
+        [ -f /etc/passwd ] || printf 'root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/nonexistent:/bin/sh\n' > /etc/passwd; \
+        [ -f /etc/group ] || printf 'root:x:0:\nnogroup:x:65534:\n' > /etc/group \
+    \0";
+    let ret = run_bash_cmd(account_cmd, environ);
+    println!("[initproc] minimal account files done, exit={}", ret);
+
     // Step 2: musl/glibc 动态库 — 单次 shell 调用，用 && 串连，避免多次 bash 开销
     println!("[initproc] linking musl/glibc libs to /lib ...");
     let lib_cmd = "\
@@ -1409,6 +1429,16 @@ fn prepare_symlink(environ: &[*const u8]) {
     let ret = run_bash_cmd(lib_cmd, environ);
     println!("[initproc] lib linking done, exit={}", ret);
 
+    // la64 测试镜像内 musl libc 的 sched_getparam/sched_getscheduler 是 ENOSYS stub，
+    // cyclictest 不会进入内核 syscall；这里仅对该测试入口复用 glibc 二进制。
+    let cyclictest_cmd = "\
+        if [ -x /glibc/cyclictest ] && [ -x /musl/cyclictest ]; then \
+            ln -sf /glibc/cyclictest /musl/cyclictest; \
+        fi \
+    \0";
+    let ret = run_bash_cmd(cyclictest_cmd, environ);
+    println!("[initproc] cyclictest musl compatibility done, exit={}", ret);
+
     run_bash_cmd(
         "
         mkdir -p /etc; \
@@ -1416,6 +1446,7 @@ fn prepare_symlink(environ: &[*const u8]) {
         echo 'nobody:x:65534:65534:nobody:/nonexistent:/bin/false' >> /etc/passwd; \
         echo 'root::0:0:root:/root:/bin/sh' > /etc/group; \
         ln -sf /bash /bin/bash;
+        ln -sf /bash /bin/sh;
     ",
         environ,
     );

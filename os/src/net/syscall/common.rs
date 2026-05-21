@@ -25,6 +25,10 @@ pub const TCP_MAXSEG: u32 = 2;
 pub const TCP_INFO: u32 = 11;
 pub const TCP_CONGESTION: u32 = 13;
 
+/// option name (IP)
+pub const MCAST_JOIN_GROUP: u32 = 42;
+pub const MCAST_LEAVE_GROUP: u32 = 45;
+
 /// option name (socket)
 pub const SO_DEBUG: u32 = 1;
 pub const SO_REUSEADDR: u32 = 2;
@@ -37,6 +41,8 @@ pub const SO_RCVBUF: u32 = 8;
 pub const SO_KEEPALIVE: u32 = 9;
 pub const SO_OOBINLINE: u32 = 10;
 pub const SO_REUSEPORT: u32 = 15;
+pub const SO_RCVTIMEO: u32 = 20;
+pub const SO_SNDTIMEO: u32 = 21;
 
 bitflags! {
     /// MSG flags for send/recv syscalls.

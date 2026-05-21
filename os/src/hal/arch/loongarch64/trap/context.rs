@@ -120,18 +120,59 @@ pub struct MachineContext {
 }
 
 #[repr(C)]
+#[derive(Default, Debug, Clone, Copy)]
+pub struct UserSignalMask {
+    bits: [usize; 2],
+}
+
+impl UserSignalMask {
+    pub fn from_signals(sigmask: Signals) -> Self {
+        let raw = sigmask.bits();
+        Self {
+            bits: [raw as usize, (raw >> usize::BITS) as usize],
+        }
+    }
+
+    pub fn to_signals(self) -> Signals {
+        let raw = self.bits[0] as u128 | ((self.bits[1] as u128) << usize::BITS);
+        Signals::from_bits_truncate(raw)
+    }
+}
+
+#[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct UserContext {
     pub flags: usize,
     pub link: usize,
     pub stack: SignalStack,
-    pub sigmask: Signals,
+    pub sigmask: UserSignalMask,
     pub __pad: [u8; 128],
     pub mcontext: MachineContext,
 }
 
 impl UserContext {
     pub const PADDING_SIZE: usize = 128;
+
+    pub fn new(
+        flags: usize,
+        link: usize,
+        stack: SignalStack,
+        sigmask: Signals,
+        mcontext: MachineContext,
+    ) -> Self {
+        Self {
+            flags,
+            link,
+            stack,
+            sigmask: UserSignalMask::from_signals(sigmask),
+            __pad: [0; Self::PADDING_SIZE],
+            mcontext,
+        }
+    }
+
+    pub fn encode_sigmask(sigmask: Signals) -> UserSignalMask {
+        UserSignalMask::from_signals(sigmask)
+    }
 }
 
 #[repr(C)]

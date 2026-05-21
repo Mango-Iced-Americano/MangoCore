@@ -17,10 +17,16 @@ pub fn sys_exit_group(exit_code: u32) -> ! {
 bitflags! {
     struct WaitOption: u32 {
         const WNOHANG    = 1;
+        // wait4()/waitpid() 常见 Linux 选项。当前内核还不支持 stopped/continued
+        // 子进程状态上报，但这些标志不能直接作为 EINVAL 处理，否则 shell 的
+        // system()/脚本执行路径会失败。
         const WSTOPPED   = 2;
         const WEXITED    = 4;
         const WCONTINUED = 8;
         const WNOWAIT    = 0x1000000;
+        const WNOTHREAD  = 0x20000000;
+        const WALL       = 0x40000000;
+        const WCLONE     = 0x80000000;
     }
 }
 /// If there is not a child process whose pid is same as given, return -1.
@@ -34,9 +40,6 @@ pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) ->
         Some(option) => option,
         None => return EINVAL,
     };
-    if option.bits() & !WaitOption::WNOHANG.bits() != 0 {
-        return EINVAL;
-    }
     info!("[sys_wait4] pid: {}, option: {:?}", pid, option);
     let task = current_task().unwrap();
     let token = task.get_user_token();

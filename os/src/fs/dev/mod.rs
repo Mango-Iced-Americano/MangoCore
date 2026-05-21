@@ -1,5 +1,6 @@
 pub mod null;
 pub mod pipe;
+pub mod rtc;
 pub mod tty;
 pub mod zero;
 pub mod urandom;
@@ -113,12 +114,53 @@ impl DevFS {
 
     /// 注册设备 inode（直接插入 children map）
     pub fn add_dev(&self, name: &str, dev: Arc<dyn IndexNode>) -> Result<(), SyscallErr> {
-        let mut this = self.root_inode.0.lock();
+        self.root_inode.add_dev(name, dev)
+    }
+
+    /// 注册设备目录，例如 Linux 常见的 /dev/misc。
+    pub fn add_dir(
+        &self,
+        name: &str,
+        mode: InodeMode,
+    ) -> Result<Arc<LockedDevFSInode>, SyscallErr> {
+        self.root_inode.add_dir(name, mode)
+    }
+}
+
+impl LockedDevFSInode {
+    pub fn add_dev(&self, name: &str, dev: Arc<dyn IndexNode>) -> Result<(), SyscallErr> {
+        let mut this = self.0.lock();
+        if this.metadata.file_type != FileType::Dir {
+            return Err(SyscallErr::ENOTDIR);
+        }
         if this.children.contains_key(name) {
             return Err(SyscallErr::EEXIST);
         }
         this.children.insert(String::from(name), dev);
         Ok(())
+    }
+
+    pub fn add_dir(
+        &self,
+        name: &str,
+        mode: InodeMode,
+    ) -> Result<Arc<LockedDevFSInode>, SyscallErr> {
+        let mut this = self.0.lock();
+        if this.metadata.file_type != FileType::Dir {
+            return Err(SyscallErr::ENOTDIR);
+        }
+        if this.children.contains_key(name) {
+            return Err(SyscallErr::EEXIST);
+        }
+        let child = Arc::new_cyclic(|weak| {
+            let mut data = DevFSInode::new(FileType::Dir, mode);
+            data.parent = this.self_ref.clone();
+            data.self_ref = weak.clone();
+            data.fs = this.fs.clone();
+            LockedDevFSInode(Mutex::new(data))
+        });
+        this.children.insert(String::from(name), child.clone());
+        Ok(child)
     }
 }
 
