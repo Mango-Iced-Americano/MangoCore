@@ -16,6 +16,7 @@ use crate::fs::vfs::IndexNode;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::fmt::Write;
 use log::{debug, error, trace, warn};
 
 extern "C" {
@@ -205,6 +206,32 @@ impl<T: PageTable> AddressSpace<T> {
                     && end_vpn <= area.get_end::<T>()
             })
             .is_some()
+    }
+
+    pub fn proc_maps_content(&self) -> String {
+        let mut s = String::with_capacity(self.vmas.len() * 80);
+        for vma in self.vmas.iter().filter(|vma| vma.vm_is_user()) {
+            let start = vma.vm_start().0 * PAGE_SIZE;
+            let end = vma.vm_end().0 * PAGE_SIZE;
+            let perm = vma.vm_perm();
+            let mapping = if vma.vm_mapping() == VmAreaMapping::Shared {
+                's'
+            } else {
+                'p'
+            };
+            let _ = writeln!(
+                s,
+                "{:016x}-{:016x} {}{}{}{} {:08x} 00:00 0",
+                start,
+                end,
+                if perm.contains(MapPermission::R) { 'r' } else { '-' },
+                if perm.contains(MapPermission::W) { 'w' } else { '-' },
+                if perm.contains(MapPermission::X) { 'x' } else { '-' },
+                mapping,
+                vma.map_file_offset,
+            );
+        }
+        s
     }
     /// The REAL handler to page fault.
     /// Handles all types of page fault:(In regex:) "(Store|Load|Instruction)(Page)?Fault"

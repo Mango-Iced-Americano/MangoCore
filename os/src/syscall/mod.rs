@@ -70,6 +70,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_GETITIMER => "getitimer",
         SYSCALL_SETITIMER => "setitimer",
         SYSCALL_CLOCK_GETTIME => "clock_gettime",
+        SYSCALL_CLOCK_GETRES => "clock_getres",
         SYSCALL_CLOCK_NANOSLEEP => "clock_nanosleep",
         SYSCALL_SYSLOG => "syslog",
         SYSCALL_YIELD => "yield",
@@ -131,6 +132,17 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_SYNCFS => "syncfs",
         SYSCALL_GETRANDOM => "getrandom",
         SYSCALL_MADVISE => "madvise",
+        SYSCALL_CLONE3 => "clone3",
+        SYSCALL_GET_MEMPOLICY => "get_mempolicy",
+        SYSCALL_SCHED_SETPARAM => "sched_setparam",
+        SYSCALL_SCHED_SETSCHEDULER => "sched_setscheduler",
+        SYSCALL_SCHED_GETSCHEDULER => "sched_getscheduler",
+        SYSCALL_SCHED_GETPARAM => "sched_getparam",
+        SYSCALL_SCHED_SETAFFINITY => "sched_setaffinity",
+        SYSCALL_SCHED_GETAFFINITY => "sched_getaffinity",
+        SYSCALL_SCHED_GET_PRIORITY_MAX => "sched_get_priority_max",
+        SYSCALL_SCHED_GET_PRIORITY_MIN => "sched_get_priority_min",
+        SYSCALL_SCHED_RR_GET_INTERVAL => "sched_rr_get_interval",
         // non-standard
         SYSCALL_LS => "ls",
         SYSCALL_SHUTDOWN => "shutdown",
@@ -269,6 +281,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_EXIT => sys_exit(args[0] as u32),
         SYSCALL_EXIT_GROUP => sys_exit_group(args[0] as u32),
         SYSCALL_CLOCK_GETTIME => sys_clock_gettime(args[0], args[1] as *mut TimeSpec),
+        SYSCALL_CLOCK_GETRES => sys_clock_getres(args[0], args[1] as *mut TimeSpec),
         SYSCALL_CLOCK_NANOSLEEP => sys_clock_nanosleep(
             args[0] as usize,
             args[1] as u32,
@@ -345,6 +358,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[3] as *mut RLimit,
         ),
         SYSCALL_SET_TID_ADDRESS => sys_set_tid_address(args[0]),
+        SYSCALL_CLONE3 => sys_clone3(args[0] as *const u8, args[1]),
         SYSCALL_FUTEX => sys_futex(
             args[0] as *mut u32,
             args[1] as u32,
@@ -456,7 +470,28 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_GETRANDOM => sys_getrandom(args[0] as usize, args[1] as usize, args[2] as u32),
         SYSCALL_SHUTDOWN => sys_shutdown(),
         SYSCALL_EXT4_COUNTERS => crate::fs::ext4::counters::sys_ext4_counters(args[0], args[1], args[2]),
+        SYSCALL_SCHED_SETPARAM => sys_sched_setparam(args[0], args[1] as *const SchedParam),
+        SYSCALL_SCHED_SETSCHEDULER => {
+            sys_sched_setscheduler(args[0], args[1], args[2] as *const SchedParam)
+        }
+        SYSCALL_SCHED_GETSCHEDULER => sys_sched_getscheduler(args[0]),
+        SYSCALL_SCHED_GETPARAM => sys_sched_getparam(args[0], args[1] as *mut SchedParam),
+        SYSCALL_SCHED_SETAFFINITY => {
+            sys_sched_setaffinity(args[0], args[1], args[2] as *const u8)
+        }
         SYSCALL_SCHED_GETAFFINITY => sys_sched_getaffinity(args[0], args[1], args[2] as *mut u8),
+        SYSCALL_SCHED_GET_PRIORITY_MAX => sys_sched_get_priority_max(args[0]),
+        SYSCALL_SCHED_GET_PRIORITY_MIN => sys_sched_get_priority_min(args[0]),
+        SYSCALL_SCHED_RR_GET_INTERVAL => {
+            sys_sched_rr_get_interval(args[0], args[1] as *mut TimeSpec)
+        }
+        SYSCALL_GET_MEMPOLICY => sys_get_mempolicy(
+            args[0] as *mut i32,
+            args[1] as *mut usize,
+            args[2],
+            args[3],
+            args[4],
+        ),
         SYSCALL_MADVISE => sys_madvise(args[0], args[1], args[2]),
         _ => {
             if syscall_id == 242 {

@@ -170,6 +170,35 @@ pub fn sys_clock_gettime(clk_id: usize, tp: *mut TimeSpec) -> isize {
     }
     SUCCESS
 }
+
+pub fn sys_clock_getres(clk_id: usize, tp: *mut TimeSpec) -> isize {
+    match clk_id {
+        CLOCK_REALTIME
+        | CLOCK_MONOTONIC
+        | CLOCK_PROCESS_CPUTIME_ID
+        | CLOCK_THREAD_CPUTIME_ID
+        | CLOCK_MONOTONIC_RAW
+        | CLOCK_REALTIME_COARSE
+        | CLOCK_MONOTONIC_COARSE
+        | CLOCK_BOOTTIME
+        | CLOCK_TAI => {}
+        _ => return EINVAL,
+    }
+    if !tp.is_null() {
+        let resolution = TimeSpec {
+            tv_sec: 0,
+            tv_nsec: 1,
+        };
+        if UserPtrMut::new(tp)
+            .write(current_user_token(), &resolution)
+            .is_err()
+        {
+            return EFAULT;
+        }
+    }
+    SUCCESS
+}
+
 pub fn sys_clock_nanosleep(
     clk_id: usize,
     flags: u32,

@@ -73,6 +73,10 @@ pub fn pid_status_content(
          CapPrm:\t0000000000000000\n\
          CapEff:\t0000000000000000\n\
          CapBnd:\t0000000000000000\n\
+         Cpus_allowed:\t1\n\
+         Cpus_allowed_list:\t0\n\
+         Mems_allowed:\t1\n\
+         Mems_allowed_list:\t0\n\
          Seccomp:\t0\n",
         proc_name,
         state_char,

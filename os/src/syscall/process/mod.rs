@@ -8,13 +8,16 @@ mod mm;
 mod signal;
 mod time;
 
-pub use clone::{sys_clone, CloneFlags};
+pub use clone::{sys_clone, sys_clone3, CloneFlags};
 pub use exec::sys_execve;
 pub use futex::sys_futex;
 pub use ids::{
     sys_getegid, sys_geteuid, sys_getgid, sys_getpgid, sys_getpid, sys_getppid, sys_gettid,
-    sys_getuid, sys_prlimit, sys_sched_getaffinity, sys_setpgid, sys_setsid, sys_sysinfo,
-    sys_uname, RLimit, Sysinfo,
+    sys_get_mempolicy, sys_getuid, sys_prlimit, sys_sched_get_priority_max,
+    sys_sched_get_priority_min, sys_sched_getaffinity, sys_sched_getparam,
+    sys_sched_getscheduler, sys_sched_rr_get_interval, sys_sched_setaffinity,
+    sys_sched_setparam, sys_sched_setscheduler, sys_setpgid, sys_setsid, sys_sysinfo, sys_uname,
+    RLimit, SchedParam, Sysinfo,
 };
 pub use lifecycle::{
     sys_exit, sys_exit_group, sys_get_robust_list, sys_set_robust_list, sys_set_tid_address,
@@ -29,6 +32,6 @@ pub use signal::{
     sys_sigprocmask, sys_sigreturn, sys_sigtimedwait, sys_tgkill, sys_tkill,
 };
 pub use time::{
-    sys_clock_gettime, sys_clock_nanosleep, sys_get_time, sys_getrusage, sys_gettimeofday,
-    sys_nanosleep, sys_setitimer, sys_times,
+    sys_clock_getres, sys_clock_gettime, sys_clock_nanosleep, sys_get_time, sys_getrusage,
+    sys_gettimeofday, sys_nanosleep, sys_setitimer, sys_times,
 };

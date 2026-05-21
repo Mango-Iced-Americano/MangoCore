@@ -3,8 +3,9 @@ use crate::mm::{
     copy_to_user, translated_byte_buffer, UserAccess, UserBuffer, UserPtr, UserPtrMut,
 };
 use crate::syscall::errno::*;
-use crate::task::{current_task, current_user_token, ProcessManager};
-use crate::timer::get_time_sec;
+use crate::task::{current_task, current_user_token, ProcessManager, TaskControlBlock};
+use crate::timer::{get_time_sec, TimeSpec};
+use alloc::sync::Arc;
 use core::mem::size_of;
 use log::{info, warn};
 use num_enum::FromPrimitive;
@@ -369,4 +370,158 @@ pub fn sys_sched_getaffinity(pid: usize, cpusetsize: usize, mask: *mut u8) -> is
         Ok(()) => core::mem::size_of::<usize>() as isize,
         Err(_) => EFAULT,
     }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SchedParam {
+    sched_priority: i32,
+}
+
+fn find_task_for_pid_or_current(pid: usize) -> Result<Arc<TaskControlBlock>, isize> {
+    if pid == 0 {
+        current_task().ok_or(ESRCH)
+    } else {
+        ProcessManager::find_task(pid).ok_or(ESRCH)
+    }
+}
+
+fn valid_sched_policy(policy: usize) -> bool {
+    matches!(policy & !0x40000000, 0 | 1 | 2 | 3 | 5 | 6)
+}
+
+fn valid_sched_priority(policy: usize, priority: i32) -> bool {
+    match policy & !0x40000000 {
+        1 | 2 => (1..=99).contains(&priority),
+        _ => priority == 0,
+    }
+}
+
+pub fn sys_sched_setparam(pid: usize, param: *const SchedParam) -> isize {
+    let task = match find_task_for_pid_or_current(pid) {
+        Ok(task) => task,
+        Err(errno) => return errno,
+    };
+    let param = match UserPtr::new(param).read(current_user_token()) {
+        Ok(param) => param,
+        Err(_) => return EFAULT,
+    };
+    let mut inner = task.acquire_inner_lock();
+    if !valid_sched_priority(inner.sched_policy, param.sched_priority) {
+        return EINVAL;
+    }
+    inner.sched_priority = param.sched_priority;
+    SUCCESS
+}
+
+pub fn sys_sched_setscheduler(pid: usize, policy: usize, param: *const SchedParam) -> isize {
+    if !valid_sched_policy(policy) {
+        return EINVAL;
+    }
+    let task = match find_task_for_pid_or_current(pid) {
+        Ok(task) => task,
+        Err(errno) => return errno,
+    };
+    let param = match UserPtr::new(param).read(current_user_token()) {
+        Ok(param) => param,
+        Err(_) => return EFAULT,
+    };
+    if !valid_sched_priority(policy, param.sched_priority) {
+        return EINVAL;
+    }
+    let mut inner = task.acquire_inner_lock();
+    inner.sched_policy = policy & !0x40000000;
+    inner.sched_priority = param.sched_priority;
+    SUCCESS
+}
+
+pub fn sys_sched_getscheduler(pid: usize) -> isize {
+    match find_task_for_pid_or_current(pid) {
+        Ok(task) => task.acquire_inner_lock().sched_policy as isize,
+        Err(errno) => errno,
+    }
+}
+
+pub fn sys_sched_getparam(pid: usize, param: *mut SchedParam) -> isize {
+    let task = match find_task_for_pid_or_current(pid) {
+        Ok(task) => task,
+        Err(errno) => return errno,
+    };
+    let sched_priority = task.acquire_inner_lock().sched_priority;
+    match UserPtrMut::new(param).write(current_user_token(), &SchedParam { sched_priority }) {
+        Ok(()) => SUCCESS,
+        Err(_) => EFAULT,
+    }
+}
+
+pub fn sys_sched_setaffinity(pid: usize, cpusetsize: usize, mask: *const u8) -> isize {
+    if let Err(errno) = find_task_for_pid_or_current(pid) {
+        return errno;
+    }
+    if cpusetsize == 0 || mask.is_null() {
+        return EFAULT;
+    }
+    if let Err(errno) =
+        translated_byte_buffer(current_user_token(), mask, cpusetsize, UserAccess::Read)
+    {
+        return errno;
+    }
+    SUCCESS
+}
+
+pub fn sys_sched_get_priority_max(policy: usize) -> isize {
+    if !valid_sched_policy(policy) {
+        return EINVAL;
+    }
+    match policy & !0x40000000 {
+        1 | 2 => 99,
+        _ => 0,
+    }
+}
+
+pub fn sys_sched_get_priority_min(policy: usize) -> isize {
+    if !valid_sched_policy(policy) {
+        return EINVAL;
+    }
+    match policy & !0x40000000 {
+        1 | 2 => 1,
+        _ => 0,
+    }
+}
+
+pub fn sys_sched_rr_get_interval(pid: usize, tp: *mut TimeSpec) -> isize {
+    if let Err(errno) = find_task_for_pid_or_current(pid) {
+        return errno;
+    }
+    let interval = TimeSpec {
+        tv_sec: 0,
+        tv_nsec: 10_000_000,
+    };
+    match UserPtrMut::new(tp).write(current_user_token(), &interval) {
+        Ok(()) => SUCCESS,
+        Err(_) => EFAULT,
+    }
+}
+
+pub fn sys_get_mempolicy(
+    mode: *mut i32,
+    nodemask: *mut usize,
+    maxnode: usize,
+    _addr: usize,
+    _flags: usize,
+) -> isize {
+    let token = current_user_token();
+    if !mode.is_null()
+        && UserPtrMut::new(mode)
+            .write(token, &0i32)
+            .is_err()
+    {
+        return EFAULT;
+    }
+    if !nodemask.is_null() && maxnode > 0 {
+        if UserPtrMut::new(nodemask).write(token, &1usize).is_err() {
+            return EFAULT;
+        }
+    }
+    SUCCESS
 }

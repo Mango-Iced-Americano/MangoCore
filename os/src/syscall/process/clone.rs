@@ -1,12 +1,25 @@
 use alloc::sync::Arc;
 
 use crate::config::SYSTEM_TASK_LIMIT;
-use crate::mm::{FaultAccess, UserPtrMut, VirtAddr};
+use crate::mm::{FaultAccess, UserPtr, UserPtrMut, VirtAddr};
 use crate::show_frame_consumption;
 use crate::syscall::errno::*;
 use crate::task::{current_task, signal::Signals, ProcessManager, TaskControlBlock};
 use crate::utils::error::SyscallErr;
 use log::{info, warn};
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct CloneArgsV0 {
+    flags: u64,
+    pidfd: u64,
+    child_tid: u64,
+    parent_tid: u64,
+    exit_signal: u64,
+    stack: u64,
+    stack_size: u64,
+    tls: u64,
+}
 
 bitflags! {
     pub struct CloneFlags: u32 {
@@ -161,4 +174,43 @@ pub fn sys_clone(
         return errno;
     }
     new_tid as isize
+}
+
+pub fn sys_clone3(uargs: *const u8, size: usize) -> isize {
+    if size < core::mem::size_of::<CloneArgsV0>() {
+        return EINVAL;
+    }
+
+    let token = current_task().unwrap().get_user_token();
+    let args = match UserPtr::<CloneArgsV0>::new(uargs as *const CloneArgsV0).read(token) {
+        Ok(args) => args,
+        Err(errno) => return errno,
+    };
+
+    if args.flags >> 32 != 0 {
+        return EINVAL;
+    }
+
+    let mut flags = args.flags as u32;
+    if args.exit_signal > 0xff {
+        return EINVAL;
+    }
+    flags |= args.exit_signal as u32;
+
+    let stack = if args.stack == 0 {
+        core::ptr::null()
+    } else {
+        match (args.stack as usize).checked_add(args.stack_size as usize) {
+            Some(sp) => sp as *const u8,
+            None => return EINVAL,
+        }
+    };
+
+    sys_clone(
+        flags,
+        stack,
+        args.parent_tid as *mut u32,
+        args.tls as usize,
+        args.child_tid as *mut u32,
+    )
 }

@@ -236,11 +236,11 @@ impl LockedProcInode {
     }
 
     /// 在当前 inode 下添加子目录，自动设置 parent/fs/nlinks
-    pub fn add_dir(
+    pub fn add_dir_locked(
         self: &Arc<Self>,
         name: &str,
         mode: InodeMode,
-    ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+    ) -> Result<Arc<LockedProcInode>, SyscallErr> {
         let mut this = self.0.lock();
         if this.metadata.file_type != FileType::Dir {
             return Err(SyscallErr::ENOTDIR);
@@ -259,6 +259,16 @@ impl LockedProcInode {
         this.children.insert(String::from(name), child.clone());
         this.metadata.nlinks += 1;
         Ok(child)
+    }
+
+    /// 在当前 inode 下添加子目录，自动设置 parent/fs/nlinks
+    pub fn add_dir(
+        self: &Arc<Self>,
+        name: &str,
+        mode: InodeMode,
+    ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+        self.add_dir_locked(name, mode)
+            .map(|child| child as Arc<dyn IndexNode>)
     }
 
     /// 在当前 inode 下添加子文件，自动设置 parent/fs

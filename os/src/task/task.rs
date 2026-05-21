@@ -77,6 +77,10 @@ pub struct TaskControlBlockInner {
     pub task_cx: TaskContext,
     /// 任务状态
     pub task_status: TaskStatus,
+    /// POSIX 调度策略兼容字段。当前调度器仍是单核轮转，这里用于 syscall 语义回读。
+    pub sched_policy: usize,
+    /// POSIX 调度优先级兼容字段。
+    pub sched_priority: i32,
     /// 用于清理子进程的线程ID
     pub clear_child_tid: usize,
     /// 鲁棒列表，用于管理鲁棒互斥锁
@@ -498,6 +502,8 @@ impl TaskControlBlock {
                 trap_cx_ppn,
                 task_cx: TaskContext::goto_trap_return(kstack_top),
                 task_status: TaskStatus::Ready,
+                sched_policy: 0,
+                sched_priority: 0,
                 clear_child_tid: 0,
                 robust_list: RobustList::default(),
                 rusage: Rusage::new(),
@@ -800,6 +806,8 @@ impl TaskControlBlock {
                 task_cx: TaskContext::goto_trap_return(kstack_top),
                 // constants
                 task_status: TaskStatus::Ready,
+                sched_policy: parent_inner.sched_policy,
+                sched_priority: parent_inner.sched_priority,
                 pending_oom_kill: false,
             }),
         });
