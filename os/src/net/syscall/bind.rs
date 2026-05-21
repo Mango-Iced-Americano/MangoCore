@@ -3,14 +3,25 @@ use crate::get_socket;
 use crate::net::socket::unix::ns::{ABSTRACT_TABLE, UNIX_PATH_MAX};
 use crate::net::socket::unix::PATH_TABLE;
 use crate::net::socket::UnixEndpoint;
-use crate::net::Endpoint;
+use crate::net::{Endpoint, LOCAL_IP};
 use crate::task::current_task;
 use crate::utils::error::SyscallErr;
 use alloc::format;
 use alloc::string::ToString;
 use alloc::sync::Arc;
+use smoltcp::wire::{IpAddress, Ipv6Address};
 
 const CAP_NET_BIND_SERVICE: usize = 10;
+
+fn is_local_bind_addr(addr: IpAddress) -> bool {
+    if addr.is_unspecified() || addr == LOCAL_IP {
+        return true;
+    }
+    match addr {
+        IpAddress::Ipv4(ip) => ip.is_loopback(),
+        IpAddress::Ipv6(ip) => ip == Ipv6Address::LOOPBACK,
+    }
+}
 
 pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize {
     match check_addrlen(addrlen) {
@@ -23,7 +34,11 @@ pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize {
         Err(e) => return -(e as isize),
     };
     match endpoint {
-        Endpoint::Ip(_) => {
+        Endpoint::Ip(ep) => {
+            if !is_local_bind_addr(ep.addr) {
+                return -(SyscallErr::EADDRNOTAVAIL as isize);
+            }
+            let endpoint = Endpoint::Ip(ep);
             let socket = crate::get_socket!(sockfd);
             let task = current_task().unwrap();
             if endpoint.port() < 1024 {
@@ -107,8 +122,15 @@ pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize {
                     let start = cwd_node.inode.clone();
                     let parent_node = match crate::fs::vfs_lookup(&start, parent_path, true) {
                         Ok(node) => node,
-                        Err(_) => return -(SyscallErr::ENOENT as isize),
+                        Err(errno) => return errno,
                     };
+                    match parent_node.metadata() {
+                        Ok(meta) if meta.file_type != crate::fs::vfs::FileType::Dir => {
+                            return -(SyscallErr::ENOTDIR as isize);
+                        }
+                        Ok(_) => {}
+                        Err(e) => return -(e as isize),
+                    }
 
                     // 检查文件是否已存在
                     if parent_node.find(file_name).is_ok() {
@@ -125,7 +147,7 @@ pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize {
                         Err(e) if e == SyscallErr::EEXIST => {
                             return -(SyscallErr::EADDRINUSE as isize);
                         }
-                        Err(_) => return -(SyscallErr::EACCES as isize),
+                        Err(e) => return -(e as isize),
                     };
 
                     // 生成绝对路径

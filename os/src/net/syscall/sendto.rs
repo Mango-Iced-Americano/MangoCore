@@ -6,7 +6,7 @@ use crate::syscall::utils::wait_io;
 use crate::task::current_task;
 use crate::task::WaitQueue;
 use crate::utils::error::SyscallErr;
-use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address};
+use smoltcp::wire::{IpAddress, IpEndpoint};
 
 use super::common::MsgFlags;
 
@@ -47,8 +47,8 @@ pub fn sys_sendto(
                 let _ = crate::trans_ref!(dest_addr, addrlen);
             }
             PSOCK::Datagram => {
-                // Validate addrlen: must be at least sizeof(sockaddr_in) = 16, at most 128
-                if addrlen < 16 || addrlen > 128 {
+                // AF_UNIX sockaddr_un may be shorter than sockaddr_in; parse by family later.
+                if addrlen < 2 || addrlen > 128 {
                     return -(SyscallErr::EINVAL as isize);
                 }
             }
@@ -74,7 +74,7 @@ pub fn sys_sendto(
                 let dest_buf = crate::trans_ref!(dest_addr, addrlen);
                 match Endpoint::from_sockaddr(dest_buf) {
                     Ok(ep) => Some(ep),
-                    Err(e) => None,
+                    Err(e) => return -(e as isize),
                 }
             } else {
                 None

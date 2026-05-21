@@ -238,6 +238,30 @@ impl UnixDatagramSocket {
 
         (socket_a, socket_b)
     }
+
+    fn send_to_bound(
+        &self,
+        peer_addr: UnixEndpointBound,
+        buf: &[u8],
+    ) -> Result<isize, SyscallErr> {
+        let local_addr = self.inner.lock().local_addr.clone();
+        let peer_socket = BIND_TABLE
+            .lookup(&peer_addr)
+            .ok_or(SyscallErr::ECONNREFUSED)?;
+
+        let mut peer_inner = peer_socket.inner.lock();
+        if peer_inner.recv_queue.len() >= peer_inner.recv_queue_capacity {
+            return Err(SyscallErr::EAGAIN);
+        }
+        peer_inner.recv_queue.push_back(DatagramMessage {
+            data: buf.to_vec(),
+            src_addr: local_addr,
+        });
+        peer_socket
+            .recv_waiters
+            .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM);
+        Ok(buf.len() as isize)
+    }
 }
 
 impl Socket for UnixDatagramSocket {
@@ -379,25 +403,32 @@ impl Socket for UnixDatagramSocket {
     }
 
     fn try_send(&self, buf: &[u8], _flags: MsgFlags) -> Result<isize, SyscallErr> {
-        let inner = self.inner.lock();
-        let peer_addr = inner.peer_addr.clone().ok_or(SyscallErr::ENOTCONN)?;
-        let peer_socket = BIND_TABLE
-            .lookup(&peer_addr)
-            .ok_or(SyscallErr::ECONNREFUSED)?;
+        let peer_addr = self
+            .inner
+            .lock()
+            .peer_addr
+            .clone()
+            .ok_or(SyscallErr::ENOTCONN)?;
+        self.send_to_bound(peer_addr, buf)
+    }
 
-        let mut peer_inner = peer_socket.inner.lock();
-        if peer_inner.recv_queue.len() >= peer_inner.recv_queue_capacity {
-            return Err(SyscallErr::EAGAIN);
+    fn try_sendmsg(
+        &self,
+        buf: &[u8],
+        dest: Option<Endpoint>,
+        flags: MsgFlags,
+    ) -> Result<isize, SyscallErr> {
+        match dest {
+            Some(Endpoint::Unix(UnixEndpoint::Path(path))) => {
+                self.send_to_bound(UnixEndpointBound::Path(path), buf)
+            }
+            Some(Endpoint::Unix(UnixEndpoint::Abstract(name))) => {
+                self.send_to_bound(UnixEndpointBound::Abstract(name), buf)
+            }
+            Some(Endpoint::Unix(UnixEndpoint::Unnamed)) => Err(SyscallErr::EINVAL),
+            Some(_) => Err(SyscallErr::EAFNOSUPPORT),
+            None => self.try_send(buf, flags),
         }
-        peer_inner.recv_queue.push_back(DatagramMessage {
-            data: buf.to_vec(),
-            src_addr: inner.local_addr.clone(),
-        });
-        // 唤醒对端的接收等待者
-        peer_socket
-            .recv_waiters
-            .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM);
-        Ok(buf.len() as isize)
     }
 
     fn try_recvmsg(&self, buf: &mut [u8]) -> Result<(isize, Option<Endpoint>), SyscallErr> {
