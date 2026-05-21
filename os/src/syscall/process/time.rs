@@ -188,6 +188,35 @@ pub fn sys_setitimer(
     }
 }
 
+pub fn sys_getitimer(which: usize, curr_value: *mut ITimerVal) -> isize {
+    if which > 2 {
+        return EINVAL;
+    }
+    if curr_value.is_null() {
+        return EFAULT;
+    }
+
+    let task = current_task().unwrap();
+    let token = task.get_user_token();
+    let now = TimeSpec::now();
+    let value = {
+        let inner = task.acquire_inner_lock();
+        let mut value = inner.timer[which];
+        if which == 0 {
+            value.it_value = match inner.real_timer_deadline {
+                Some(deadline) => timespec_to_timeval(deadline - now),
+                None => TimeVal::new(),
+            };
+        }
+        value
+    };
+
+    match UserPtrMut::new(curr_value).write(token, &value) {
+        Ok(()) => SUCCESS,
+        Err(errno) => errno,
+    }
+}
+
 fn timeval_to_timespec(value: TimeVal) -> TimeSpec {
     TimeSpec::from_us(value.to_us())
 }

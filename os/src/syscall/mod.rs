@@ -356,6 +356,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[0] as *const crate::timer::TimeSpec,
             args[1] as *mut crate::timer::TimeSpec,
         ),
+        SYSCALL_GETITIMER => sys_getitimer(args[0], args[1] as *mut ITimerVal),
         SYSCALL_SETITIMER => sys_setitimer(
             args[0],
             args[1] as *const ITimerVal,
