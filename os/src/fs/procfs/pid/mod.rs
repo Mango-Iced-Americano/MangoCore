@@ -24,7 +24,7 @@ pub fn setup_pid_hooks(root: &Arc<LockedProcInode>) {
 
 fn pid_find_hook(inode: &LockedProcInode, name: &str) -> Option<Arc<dyn IndexNode>> {
     let pid: usize = name.parse().ok()?;
-    crate::task::find_task_by_pid(pid)?;
+    crate::task::find_process_by_pid(pid)?;
     create_pid_dir(inode, pid).ok()
 }
 

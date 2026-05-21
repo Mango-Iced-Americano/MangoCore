@@ -206,7 +206,12 @@ pub fn trap_handler() -> ! {
             let task = current_task().unwrap();
             let mut inner = task.acquire_inner_lock();
             let addr = VirtAddr::from(get_bad_addr());
-            log::debug!("[page_fault] pid: {}, type: {:?}", task.pid.0, cause);
+            log::debug!(
+                "[page_fault] tid: {}, pid: {}, type: {:?}",
+                task.tid.0,
+                task.pid(),
+                cause
+            );
             log::debug!(
                 "[page_fault] {:?}, {:?}, {:?}, {:?}, {:?}, {:?}",
                 TLBRERA::read(),
@@ -218,7 +223,8 @@ pub fn trap_handler() -> ! {
             );
             // This is where we handle the page fault.
             frame_reserve(3);
-            let mut mset_lock = task.vm.lock();
+            let vm_ref = task.process.vm();
+            let mut mset_lock = vm_ref.lock();
             let access = match cause {
                 Trap::Exception(Exception::PageInvalidStore)
                 | Trap::Exception(Exception::PageModifyFault) => FaultAccess::Store,
@@ -271,6 +277,12 @@ pub fn trap_handler() -> ! {
             let task = current_task().unwrap();
             let mut inner = task.acquire_inner_lock();
             inner.add_signal(Signals::SIGILL);
+        }
+        Trap::Exception(Exception::AddressError) => {
+            log::info!("[trap] trigger SIGSEGV from address error");
+            let task = current_task().unwrap();
+            let mut inner = task.acquire_inner_lock();
+            inner.add_signal(Signals::SIGSEGV);
         }
         Trap::Interrupt(Interrupt::Timer) => {
             do_wake_expired();

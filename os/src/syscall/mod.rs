@@ -7,6 +7,7 @@ mod process;
 mod syscall_id;
 pub mod utils;
 
+use crate::fs::eventpoll::{sys_epoll_create1, sys_epoll_ctl, sys_epoll_pwait};
 use crate::net::syscall::*;
 use core::convert::TryFrom;
 use fs::*;
@@ -17,8 +18,10 @@ use syscall_id::*;
 pub fn syscall_name(id: usize) -> &'static str {
     match id {
         SYSCALL_DUP => "dup",
-        SYSCALL_DUP2 => "dup2",
         SYSCALL_DUP3 => "dup3",
+        SYSCALL_EPOLL_CREATE1 => "epoll_create1",
+        SYSCALL_EPOLL_CTL => "epoll_ctl",
+        SYSCALL_EPOLL_PWAIT => "epoll_pwait",
         SYSCALL_OPEN => "open",
         SYSCALL_GET_TIME => "get_time",
         SYSCALL_GETCWD => "getcwd",
@@ -79,7 +82,6 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_SIGACTION => "sigaction",
         SYSCALL_SIGPROCMASK => "sigprocmask",
         SYSCALL_RT_SIGPENDING => "rt_sigpending",
-        SYSCALL_RT_SIGSUSPEND => "rt_sigsuspend",
         SYSCALL_SIGTIMEDWAIT => "sigtimedwait",
         SYSCALL_RT_SIGQUEUEINFO => "rt_sigqueueinfo",
         SYSCALL_SIGRETURN => "sigreturn",
@@ -184,8 +186,21 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     let ret = match syscall_id {
         SYSCALL_GETCWD => sys_getcwd(args[0], args[1]),
         SYSCALL_DUP => sys_dup(args[0]),
-        SYSCALL_DUP2 => sys_dup2(args[0], args[1]),
         SYSCALL_DUP3 => sys_dup3(args[0], args[1], args[2] as u32),
+        SYSCALL_EPOLL_CREATE1 => sys_epoll_create1(args[0]),
+        SYSCALL_EPOLL_CTL => sys_epoll_ctl(
+            args[0],
+            args[1],
+            args[2],
+            args[3] as *const crate::fs::eventpoll::EpollUserEvent,
+        ),
+        SYSCALL_EPOLL_PWAIT => sys_epoll_pwait(
+            args[0],
+            args[1] as *mut crate::fs::eventpoll::EpollUserEvent,
+            args[2] as isize,
+            args[3] as isize,
+            args[4] as *const crate::task::signal::Signals,
+        ),
         SYSCALL_FCNTL => sys_fcntl(args[0], args[1] as u32, args[2]),
         SYSCALL_IOCTL => sys_ioctl(args[0], args[1] as u32, args[2]),
         SYSCALL_MKDIRAT => sys_mkdirat(args[0], args[1] as *const u8, args[2] as u32),
@@ -269,10 +284,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_YIELD => sys_yield(),
         SYSCALL_SIGALTSTACK => sys_sigaltstack(args[0], args[1]),
         SYSCALL_SIGACTION => sys_sigaction(args[0], args[1], args[2]),
-        SYSCALL_SIGPROCMASK => sys_sigprocmask(args[0] as u32, args[1], args[2]),
+        SYSCALL_SIGPROCMASK => sys_sigprocmask(args[0] as u32, args[1], args[2], args[3]),
         SYSCALL_RT_SIGPENDING => sys_rt_sigpending(args[0], args[1]),
         SYSCALL_RT_SIGSUSPEND => sys_rt_sigsuspend(args[0], args[1]),
-        SYSCALL_SIGTIMEDWAIT => sys_sigtimedwait(args[0], args[1], args[2]),
+        SYSCALL_SIGTIMEDWAIT => sys_sigtimedwait(args[0], args[1], args[2], args[3]),
         SYSCALL_SIGRETURN => sys_sigreturn(),
         SYSCALL_TIMES => sys_times(args[0] as *mut Times),
         SYSCALL_NANOSLEEP => sys_nanosleep(
@@ -297,12 +312,22 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_UNAME => sys_uname(args[0] as *mut u8),
         SYSCALL_GETPID => sys_getpid(),
         SYSCALL_GETPPID => sys_getppid(),
+        #[cfg(not(feature = "loongarch64"))]
         SYSCALL_CLONE => sys_clone(
             args[0] as u32,
             args[1] as *const u8,
             args[2] as *mut u32,
             args[3],
             args[4] as *mut u32,
+        ),
+        #[cfg(feature = "loongarch64")]
+        SYSCALL_CLONE => sys_clone(
+            args[0] as u32,
+            args[1] as *const u8,
+            args[2] as *mut u32,
+            // LoongArch raw clone ABI 为 flags, stack, ptid, ctid, tls。
+            args[4],
+            args[3] as *mut u32,
         ),
         SYSCALL_EXECVE => sys_execve(
             args[0] as *const u8,

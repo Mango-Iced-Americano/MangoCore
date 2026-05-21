@@ -1,7 +1,9 @@
 ARCHS = rv64
 CURR_ARCH ?= la64
 FS_MODE ?= ext4
+TOP_BLK_MODE_ORIGIN := $(origin BLK_MODE)
 BLK_MODE ?= virt
+LA64_BLK_MODE ?= $(if $(filter undefined,$(TOP_BLK_MODE_ORIGIN)),virt_pci,$(BLK_MODE))
 MODE ?= release
 CONF_FILE ?= ../os_test.conf
 CONF_ARCH ?= $(CURR_ARCH)
@@ -75,7 +77,7 @@ la64-kernel-build-only: prepare-cargo-config
 	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	make -f make/la64o.mk build BLK_MODE=${BLK_MODE} MODE=${MODE} LOG=${LOG}
+	make -f make/la64o.mk build BLK_MODE=${LA64_BLK_MODE} MODE=${MODE} LOG=${LOG}
 
 la64-debug:
 	@rustup override set $(LA_TOOLCHAIN)

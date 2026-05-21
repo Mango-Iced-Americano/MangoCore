@@ -33,7 +33,7 @@ use crate::{
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
 };
 
-use crate::fs::vfs::event::EPollEvent;
+use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use self::inner::{
     with_tcp_mut, Connecting, Established, Init, Listening, SelfConnected, BACKLOG_SIZE,
 };
@@ -49,10 +49,10 @@ pub struct TcpSocket {
     /// 写端已关闭（SHUT_WR）
     pub write_shutdown: AtomicBool,
     pub reuse_addr: AtomicBool,
-    pub recv_waiters: Mutex<WaitQueue>,
-    pub send_waiters: Mutex<WaitQueue>,
-    pub connect_waiters: Mutex<WaitQueue>,
-    pub accept_waiters: Mutex<WaitQueue>,
+    pub recv_waiters: EventWaitQueue,
+    pub send_waiters: EventWaitQueue,
+    pub connect_waiters: EventWaitQueue,
+    pub accept_waiters: EventWaitQueue,
 }
 
 impl TcpSocket {
@@ -64,10 +64,10 @@ impl TcpSocket {
             read_shutdown: AtomicBool::new(false),
             write_shutdown: AtomicBool::new(false),
             reuse_addr: AtomicBool::new(false),
-            recv_waiters: Mutex::new(WaitQueue::new()),
-            send_waiters: Mutex::new(WaitQueue::new()),
-            connect_waiters: Mutex::new(WaitQueue::new()),
-            accept_waiters: Mutex::new(WaitQueue::new()),
+            recv_waiters: EventWaitQueue::new(),
+            send_waiters: EventWaitQueue::new(),
+            connect_waiters: EventWaitQueue::new(),
+            accept_waiters: EventWaitQueue::new(),
         }
     }
 
@@ -85,10 +85,16 @@ impl TcpSocket {
 
     /// 唤醒所有等待队列（无差别，仅在 shutdown/close 时使用）
     pub fn wake_wait_queues(&self) {
-        self.recv_waiters.lock().wake_all();
-        self.send_waiters.lock().wake_all();
-        self.connect_waiters.lock().wake_all();
-        self.accept_waiters.lock().wake_all();
+        self.recv_waiters.notify_events_all(
+            EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM | EPollEvent::EPOLLHUP,
+        );
+        self.send_waiters.notify_events_all(
+            EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM | EPollEvent::EPOLLHUP,
+        );
+        self.connect_waiters
+            .notify_events_all(EPollEvent::EPOLLOUT | EPollEvent::EPOLLERR | EPollEvent::EPOLLHUP);
+        self.accept_waiters
+            .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM | EPollEvent::EPOLLHUP);
     }
 
     /// 条件唤醒等待队列：仅当 smoltcp 状态表明对应的 I/O 操作可执行时才唤醒。
@@ -101,7 +107,8 @@ impl TcpSocket {
         // accept 等待者：Listening 收到了新连接
         if !self.accept_waiters.lock().is_empty() {
             if events & (EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM).bits() != 0 {
-                self.accept_waiters.lock().wake_all();
+                self.accept_waiters
+                    .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM);
             }
         }
 
@@ -110,7 +117,8 @@ impl TcpSocket {
             if events & (EPollEvent::EPOLLOUT | EPollEvent::EPOLLERR | EPollEvent::EPOLLHUP).bits()
                 != 0
             {
-                self.connect_waiters.lock().wake_all();
+                self.connect_waiters
+                    .notify_events_all(EPollEvent::EPOLLOUT | EPollEvent::EPOLLERR | EPollEvent::EPOLLHUP);
             }
         }
 
@@ -120,7 +128,10 @@ impl TcpSocket {
                 & (EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM | EPollEvent::EPOLLRDHUP).bits()
                 != 0
             {
-                self.recv_waiters.lock().wake_at_most(1);
+                self.recv_waiters.notify_events_at_most(
+                    EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM | EPollEvent::EPOLLRDHUP,
+                    1,
+                );
             }
         }
 
@@ -129,7 +140,10 @@ impl TcpSocket {
             if events & (EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM).bits() != 0
                 || self.write_shutdown.load(Ordering::Acquire)
             {
-                self.send_waiters.lock().wake_at_most(1);
+                self.send_waiters.notify_events_at_most(
+                    EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM,
+                    1,
+                );
             }
         }
     }
@@ -309,10 +323,10 @@ impl Socket for TcpSocket {
             read_shutdown: AtomicBool::new(false),
             write_shutdown: AtomicBool::new(false),
             reuse_addr: AtomicBool::new(false),
-            recv_waiters: Mutex::new(WaitQueue::new()),
-            send_waiters: Mutex::new(WaitQueue::new()),
-            connect_waiters: Mutex::new(WaitQueue::new()),
-            accept_waiters: Mutex::new(WaitQueue::new()),
+            recv_waiters: EventWaitQueue::new(),
+            send_waiters: EventWaitQueue::new(),
+            connect_waiters: EventWaitQueue::new(),
+            accept_waiters: EventWaitQueue::new(),
         });
 
         // 新 accept 的连接也必须注册到全局 TCP_SOCKETS，否则 pselect/epoll 永远等不到事件
@@ -322,7 +336,8 @@ impl Socket for TcpSocket {
             Arc::new(SocketFile::new(connected_socket));
 
         let task = current_task().unwrap();
-        let mut fd_table = task.files.lock();
+        let files_ref = task.process.files();
+    let mut fd_table = files_ref.lock();
         let old_cloexec = fd_table.get_cloexec(sockfd as usize);
         let vf = vfs::File::new_without_open(
             socket_file, FileFlags::O_RDWR, vfs::FileType::Socket,
@@ -476,18 +491,34 @@ impl Socket for TcpSocket {
     }
 
     fn recv_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(self.recv_waiters.wait_queue())
+    }
+
+    fn recv_event_queue(&self) -> Option<&EventWaitQueue> {
         Some(&self.recv_waiters)
     }
 
     fn send_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(self.send_waiters.wait_queue())
+    }
+
+    fn send_event_queue(&self) -> Option<&EventWaitQueue> {
         Some(&self.send_waiters)
     }
 
     fn connect_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(self.connect_waiters.wait_queue())
+    }
+
+    fn connect_event_queue(&self) -> Option<&EventWaitQueue> {
         Some(&self.connect_waiters)
     }
 
     fn accept_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(self.accept_waiters.wait_queue())
+    }
+
+    fn accept_event_queue(&self) -> Option<&EventWaitQueue> {
         Some(&self.accept_waiters)
     }
 

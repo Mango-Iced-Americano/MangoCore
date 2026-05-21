@@ -8,7 +8,7 @@ use crate::mm::{
     UserPtrMut, UserSlice, VirtAddr,
 };
 use crate::syscall::utils::wait_io_core;
-use crate::task::{current_task, current_user_token, signal, WaitQueue};
+use crate::task::{current_task, current_user_token, signal, WaitQueue, WaitResult};
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
 use alloc::boxed::Box;
@@ -68,9 +68,10 @@ fn _open_flags_to_vfs_flags(o: OpenFlags) -> vfs::FileFlags {
 fn resolve_start_inode(dirfd: usize) -> Result<Arc<dyn vfs::IndexNode>, isize> {
     let task = current_task().unwrap();
     Ok(match dirfd {
-        AT_FDCWD => task.fs.lock().working_inode.inode.clone(),
+        AT_FDCWD => task.process.fs().lock().working_inode.inode.clone(),
         fd => {
-            let fd_table = task.files.lock();
+            let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
             fd_table.get_file(fd).map_err(|e| -(e as isize))?.inode.clone()
         }
     })
@@ -292,7 +293,8 @@ pub fn sys_splice(
     _flags: u32,
 ) -> isize {
     let task = current_task().unwrap();
-    let fd_table = task.files.lock();
+    let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
     let in_file = match fd_table.get_file(fd_in) {
         Ok(file) => match file.try_clone() {
             Some(f) => f,
@@ -431,7 +433,8 @@ fn __openat(dirfd: usize, path: &str) -> Result<vfs::File, isize> {
 
 pub fn sys_getcwd(buf: usize, size: usize) -> isize {
     let task = current_task().unwrap();
-    let fs_lock = task.fs.lock();
+    let fs_ref = task.process.fs();
+    let fs_lock = fs_ref.lock();
     let working_dir = fs_lock.working_path.clone();
     drop(fs_lock);
     // ERANGE must be checked BEFORE buffer validation:
@@ -439,8 +442,8 @@ pub fn sys_getcwd(buf: usize, size: usize) -> isize {
     if working_dir.len() + 1 > size {
         return ERANGE;
     }
-    if !task
-        .vm
+    let vm_ref = task.process.vm();
+    if !vm_ref
         .lock()
         .contains_valid_buffer(buf, size, MapPermission::W)
     {
@@ -475,7 +478,8 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: u32) -> isize {
         fd, offset, whence,
     );
     let task = current_task().unwrap();
-    let fd_table = task.files.lock();
+    let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
     let file = match fd_table.get_file(fd) {
         Ok(file) => file,
         Err(e) => return -(e as isize),
@@ -495,7 +499,8 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
     let count = count.min(MAX_SYSCALL_BUFFER_SIZE);
     let task = current_task().unwrap();
     let file = {
-        let fd_table = task.files.lock();
+        let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
         match fd_table.get_file(fd) {
             Ok(fd_ref) => match fd_ref.try_clone() { Some(f) => f, None => return EBADF, },
             Err(e) => return -(e as isize),
@@ -513,10 +518,12 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
             let ret = read_into_user(&file, token, buf, count);
             if ret == -(SyscallErr::EAGAIN as isize) { None } else { Some(ret) }
         }) {
-            Ok(n) => n,
-            Err(n) => n,
+            WaitResult::Ready(n) => n,
+            WaitResult::Interrupted => -(SyscallErr::ERESTART as isize),
+            WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
         }
     } else {
+        // Fallback: regular files and legacy File implementations may not expose a WaitQueue yet.
         wait_io_core(|| read_into_user(&file, token, buf, count), is_nonblock)
     }
 }
@@ -525,7 +532,8 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
     let count = count.min(MAX_SYSCALL_BUFFER_SIZE);
     let task = current_task().unwrap();
     let file = {
-        let fd_table = task.files.lock();
+        let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
         match fd_table.get_file(fd) {
             Ok(fd_ref) => match fd_ref.try_clone() { Some(f) => f, None => return EBADF, },
             Err(e) => return -(e as isize),
@@ -543,10 +551,12 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
             let ret = write_from_user(&file, token, buf, count);
             if ret == -(SyscallErr::EAGAIN as isize) { None } else { Some(ret) }
         }) {
-            Ok(n) => n,
-            Err(n) => n,
+            WaitResult::Ready(n) => n,
+            WaitResult::Interrupted => -(SyscallErr::ERESTART as isize),
+            WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
         }
     } else {
+        // Fallback: regular files and legacy File implementations may not expose a WaitQueue yet.
         wait_io_core(|| write_from_user(&file, token, buf, count), is_nonblock)
     }
 }
@@ -554,7 +564,8 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
 pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
     let count = count.min(MAX_SYSCALL_BUFFER_SIZE);
     let task = current_task().unwrap();
-    let fd_table = task.files.lock();
+    let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
     let file = match fd_table.get_file(fd) {
         Ok(file) => file,
         Err(e) => return -(e as isize),
@@ -570,7 +581,8 @@ pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
 pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
     let count = count.min(MAX_SYSCALL_BUFFER_SIZE);
     let task = current_task().unwrap();
-    let fd_table = task.files.lock();
+    let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
     let file = match fd_table.get_file(fd) {
         Ok(file) => file,
         Err(e) => return -(e as isize),
@@ -585,7 +597,8 @@ pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
 
 pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
     let task = current_task().unwrap();
-    let fd_table = task.files.lock();
+    let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
     let file = match fd_table.get_file(fd) {
         Ok(file) => file,
         Err(e) => return -(e as isize),
@@ -621,7 +634,8 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
 
 pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
     let task = current_task().unwrap();
-    let fd_table = task.files.lock();
+    let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
     let file = match fd_table.get_file(fd) {
         Ok(file) => file,
         Err(e) => return -(e as isize),
@@ -669,7 +683,8 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
 pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset: *mut usize, count: usize) -> isize {
     let count = count.min(64 * 1024 * 1024);
     let task = current_task().unwrap();
-    let fd_table = task.files.lock();
+    let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
     let in_file = match fd_table.get_file(in_fd) {
         Ok(file) => match file.try_clone() { Some(f) => f, None => return EBADF, },
         Err(e) => return -(e as isize),
@@ -782,7 +797,8 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset: *mut usize, count: usiz
 pub fn sys_close(fd: usize) -> isize {
     info!("[sys_close] fd: {}", fd);
     let task = current_task().unwrap();
-    let mut fd_table = task.files.lock();
+    let files_ref = task.process.files();
+    let mut fd_table = files_ref.lock();
     match fd_table.drop_fd(fd) {
         Ok(_) => SUCCESS,
         Err(e) => return -(e as isize),
@@ -816,7 +832,8 @@ pub fn sys_pipe2(pipefd: usize, flags: u32) -> isize {
         }
     };
     let task = current_task().unwrap();
-    let mut fd_table = task.files.lock();
+    let files_ref = task.process.files();
+    let mut fd_table = files_ref.lock();
     let (pipe_read, pipe_write) = make_pipe();
     let cloexec = flags.contains(OpenFlags::O_CLOEXEC);
     let vf_read = vfs::File::new_without_open(
@@ -868,9 +885,10 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> isize {
 
     // 获取文件描述符
     let file = match fd {
-        AT_FDCWD => match task.fs.lock().working_inode.try_clone() { Some(f) => f, None => return EBADF, },
+        AT_FDCWD => match task.process.fs().lock().working_inode.try_clone() { Some(f) => f, None => return EBADF, },
         fd => {
-            let fd_table = task.files.lock();
+            let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
             match fd_table.get_file(fd) {
                 Ok(file) => match file.try_clone() { Some(f) => f, None => return EBADF, },
                 Err(e) => return -(e as isize),
@@ -902,7 +920,8 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> isize {
 
 pub fn sys_dup(oldfd: usize) -> isize {
     let task = current_task().unwrap();
-    let mut fd_table = task.files.lock();
+    let files_ref = task.process.files();
+    let mut fd_table = files_ref.lock();
     let file = match fd_table.get_file(oldfd) {
         Ok(file) => match file.try_clone() { Some(f) => f, None => return EBADF, },
         Err(e) => return -(e as isize),
@@ -922,7 +941,8 @@ pub fn sys_dup2(oldfd: usize, newfd: usize) -> isize {
     let task = current_task().unwrap();
 
     let ret = {
-        let mut fd_table = task.files.lock();
+        let files_ref = task.process.files();
+    let mut fd_table = files_ref.lock();
         let file = match fd_table.get_file(oldfd) {
             Ok(file) => match file.try_clone() { Some(f) => f, None => return EBADF, },
             Err(e) => return -(e as isize),
@@ -956,7 +976,8 @@ pub fn sys_dup3(oldfd: usize, newfd: usize, flags: u32) -> isize {
     }
     let is_cloexec = (flags & O_CLOEXEC) != 0;
     let task = current_task().unwrap();
-    let mut fd_table = task.files.lock();
+    let files_ref = task.process.files();
+    let mut fd_table = files_ref.lock();
 
     let file = match fd_table.get_file(oldfd) {
         Ok(file) => match file.try_clone() { Some(f) => f, None => return EBADF, },
@@ -977,7 +998,7 @@ pub fn sys_readlinkat(dirfd: usize, pathname: *const u8, buf: *mut u8, bufsiz: u
         Err(errno) => return errno,
     };
     let real_path = if path.as_str() == "/proc/self/exe" {
-        let exe_path = task.exe_path.lock().clone();
+        let exe_path = task.process.exe_path();
         if exe_path.is_empty() {
             return ENOENT;
         }
@@ -1168,9 +1189,10 @@ pub fn sys_fstat(fd: usize, statbuf: *mut u8) -> isize {
 
     info!("[sys_fstat] fd: {}", fd);
     let file = match fd {
-        AT_FDCWD => match task.fs.lock().working_inode.try_clone() { Some(f) => f, None => return EBADF, },
+        AT_FDCWD => match task.process.fs().lock().working_inode.try_clone() { Some(f) => f, None => return EBADF, },
         fd => {
-            let fd_table = task.files.lock();
+            let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
             match fd_table.get_file(fd) {
                 Ok(file) => match file.try_clone() { Some(f) => f, None => return EBADF, },
                 Err(e) => return -(e as isize),
@@ -1245,7 +1267,8 @@ pub fn sys_fsync(fd: usize) -> isize {
     let task = current_task().unwrap();
 
     info!("[sys_fsync] fd: {}", fd);
-    let fd_table = task.files.lock();
+    let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
     let inode = match fd_table.get_file(fd) {
         Ok(file) => file.inode.clone(),
         Err(e) => return -(e as isize),
@@ -1285,7 +1308,8 @@ pub fn sys_fchmodat(dirfd: usize, path: *const u8, mode: u32, _flags: u32) -> is
         }
     } else {
         let dir_inode = {
-            let fd_table = task.files.lock();
+            let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
             match fd_table.get_file(dirfd) {
                 Ok(f) => f.inode.clone(),
                 Err(_) => return EBADF,
@@ -1369,7 +1393,8 @@ pub fn sys_chdir(path: *const u8) -> isize {
 
     // 克隆当前 cwd 状态后释放锁，避免在 find/open 持锁
     let (cwd_inode, old_path) = {
-        let lock = task.fs.lock();
+        let fs_ref = task.process.fs();
+        let lock = fs_ref.lock();
         (lock.working_inode.clone(), lock.working_path.clone())
     };
 
@@ -1380,7 +1405,8 @@ pub fn sys_chdir(path: *const u8) -> isize {
         },
         Err(errno) => return errno,
     };
-    let mut lock = task.fs.lock();
+    let fs_ref = task.process.fs();
+    let mut lock = fs_ref.lock();
     lock.working_inode = Arc::new(target);
     lock.working_path = normalize_cwd(&old_path, &path);
     SUCCESS
@@ -1410,7 +1436,8 @@ pub fn sys_openat(dirfd: usize, path: *const u8, flags: u32, mode: u32) -> isize
         Err(errno) => return errno,
     };
 
-    let mut fd_table = task.files.lock();
+    let files_ref = task.process.files();
+    let mut fd_table = files_ref.lock();
     let new_fd = match fd_table.alloc_fd(new_file, flags.contains(OpenFlags::O_CLOEXEC)) {
         Ok(fd) => fd,
         Err(e) => return -(e as isize),
@@ -1472,7 +1499,8 @@ const FIONREAD: u32 = 0x541B;
 pub fn sys_ioctl(fd: usize, cmd: u32, arg: usize) -> isize {
     let task = current_task().unwrap();
     let token = task.get_user_token();
-    let fd_table = task.files.lock();
+    let files_ref = task.process.files();
+    let fd_table = files_ref.lock();
     let file = match fd_table.get_file(fd) {
         Ok(file) => file,
         Err(e) => return -(e as isize),
@@ -1609,7 +1637,8 @@ pub fn sys_umount2(target: *const u8, flags: u32) -> isize {
     info!("[sys_umount2] target: {}, flags: {:?}", target, flags);
     let (lookup_inode, lookup_path) = {
         let task = current_task().unwrap();
-        let fs = task.fs.lock();
+        let fs_ref = task.process.fs();
+        let fs = fs_ref.lock();
         if target.starts_with('/') {
             let root: Arc<dyn vfs::IndexNode> = crate::fs::vfs_root().mountpoint_root_inode();
             (root, target)
@@ -1704,7 +1733,8 @@ pub fn sys_mount(
     // Resolve target path (support CWD-relative)
     let (lookup_inode, lookup_path) = {
         let task = current_task().unwrap();
-        let fs = task.fs.lock();
+        let fs_ref = task.process.fs();
+        let fs = fs_ref.lock();
         if target.starts_with('/') {
             let root: Arc<dyn vfs::IndexNode> = crate::fs::vfs_root().mountpoint_root_inode();
             (root, target)
@@ -1880,7 +1910,8 @@ pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
     const FD_CLOEXEC: usize = 1;
 
     let task = current_task().unwrap();
-    let mut fd_table = task.files.lock();
+    let files_ref = task.process.files();
+    let mut fd_table = files_ref.lock();
 
     info!(
         "[sys_fcntl] fd: {}, cmd: {:?}, arg: {:X}",
@@ -2018,6 +2049,9 @@ pub fn sys_pselect(
         &ktimeout,
         sigmask,
     );
+    if ret < 0 {
+        return ret;
+    }
     /*
     WARNING! The EFAULT errno is NOT mentioned in man for Linux.
     However, it is mentioned in BSD man, so we keep it anyway.
@@ -2136,8 +2170,8 @@ pub fn sys_msync(addr: usize, length: usize, flags: u32) -> isize {
         None => return EINVAL,
     };
     let task = current_task().unwrap();
-    if !task
-        .vm
+    let vm_ref = task.process.vm();
+    if !vm_ref
         .lock()
         .contains_valid_buffer(addr, length, MapPermission::empty())
     {
@@ -2152,7 +2186,8 @@ pub fn sys_msync(addr: usize, length: usize, flags: u32) -> isize {
 
 pub fn sys_ftruncate(fd: usize, length: isize) -> isize {
     let task = current_task().unwrap();
-    let fd_table = task.files.lock();
+    let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
     let file = match fd_table.get_file(fd) {
         Ok(file) => file,
         Err(e) => return -(e as isize),
@@ -2178,7 +2213,8 @@ pub fn sys_fallocate(fd: usize, mode: u32, offset: isize, len: isize) -> isize {
     };
 
     let task = current_task().unwrap();
-    let fd_table = task.files.lock();
+    let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
     let file = match fd_table.get_file(fd) {
         Ok(file) => file,
         Err(e) => return -(e as isize),

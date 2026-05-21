@@ -40,7 +40,8 @@ impl PortManager {
             target_sock.socket_type()
         );
         let target_pure_type = target_sock.socket_type();
-        let fd_table = task.files.lock();
+        let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
         for (_fd_num, file) in fd_table.iter() {
             let socket_file = match file.inode.as_any_ref().downcast_ref::<SocketFile>() {
                 Some(sf) => sf,

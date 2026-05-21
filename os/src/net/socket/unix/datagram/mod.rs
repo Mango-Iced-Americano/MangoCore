@@ -6,6 +6,7 @@
 use crate::net::socket::unix::{UnixEndpoint, UnixEndpointBound};
 use crate::net::syscall::common::MsgFlags;
 use crate::net::{Endpoint, Socket, PSOCK};
+use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::task::WaitQueue;
 use crate::utils::error::{GeneralRet, SyscallErr, SyscallRet};
 use alloc::collections::BTreeMap;
@@ -189,8 +190,8 @@ impl Inner {
 pub struct UnixDatagramSocket {
     inner: Mutex<Inner>,
     is_nonblock: AtomicBool,
-    pub recv_waiters: Mutex<WaitQueue>,
-    pub send_waiters: Mutex<WaitQueue>,
+    pub recv_waiters: EventWaitQueue,
+    pub send_waiters: EventWaitQueue,
     /// 指向自身的弱引用，用于 bind 时注册到全局绑定表
     self_ref: Mutex<Option<Weak<UnixDatagramSocket>>>,
 }
@@ -210,8 +211,8 @@ impl UnixDatagramSocket {
         let socket = Arc::new(Self {
             inner: Mutex::new(Inner::new()),
             is_nonblock: AtomicBool::new(is_nonblock),
-            recv_waiters: Mutex::new(WaitQueue::new()),
-            send_waiters: Mutex::new(WaitQueue::new()),
+            recv_waiters: EventWaitQueue::new(),
+            send_waiters: EventWaitQueue::new(),
             self_ref: Mutex::new(None),
         });
         // 保存自身的弱引用，bind() 时可通过它升级出 Arc
@@ -393,7 +394,9 @@ impl Socket for UnixDatagramSocket {
             src_addr: inner.local_addr.clone(),
         });
         // 唤醒对端的接收等待者
-        peer_socket.recv_waiters.lock().wake_all();
+        peer_socket
+            .recv_waiters
+            .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM);
         Ok(buf.len() as isize)
     }
 
@@ -422,10 +425,18 @@ impl Socket for UnixDatagramSocket {
     }
 
     fn recv_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(self.recv_waiters.wait_queue())
+    }
+
+    fn recv_event_queue(&self) -> Option<&EventWaitQueue> {
         Some(&self.recv_waiters)
     }
 
     fn send_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(self.send_waiters.wait_queue())
+    }
+
+    fn send_event_queue(&self) -> Option<&EventWaitQueue> {
         Some(&self.send_waiters)
     }
 

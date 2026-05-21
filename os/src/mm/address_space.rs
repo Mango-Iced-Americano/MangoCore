@@ -1,5 +1,5 @@
 use super::mapper::translate_page;
-use super::page_table::{FaultAccess, PageTable};
+use super::page_table::{FaultAccess, PageTable, UserAccess};
 use super::user_mapper::UserMapper;
 use super::vma::*;
 use super::vma_set::VmaSet;
@@ -10,9 +10,11 @@ use crate::hal::TICKS_PER_SEC;
 use crate::should_map_trampoline;
 use crate::syscall::errno::*;
 use crate::task::{
-    current_task, trap_cx_bottom_from_tid, ustack_bottom_from_tid, AuxvEntry, AuxvType, ELFInfo,
+    current_task, trap_cx_bottom_from_slot, ustack_bottom_from_slot, AuxvEntry, AuxvType, ELFInfo,
 };
+use crate::fs::vfs::IndexNode;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use log::{debug, error, trace, warn};
 
@@ -47,6 +49,10 @@ pub struct AddressSpace<T: PageTable> {
     pub(super) page_table: T,
     /// 用户 VMA 集合，负责用户区间查找、插入、拆分和空洞管理。
     pub(super) vmas: VmaSet,
+    /// 进程堆起始位置，由 ELF 加载阶段初始化。
+    pub(super) heap_bottom: usize,
+    /// 当前 program break。该状态属于地址空间，CLONE_VM 线程自然共享。
+    pub(super) heap_pt: usize,
 }
 
 impl<T: PageTable> AddressSpace<T> {
@@ -55,6 +61,8 @@ impl<T: PageTable> AddressSpace<T> {
         Self {
             page_table: T::new(),
             vmas: VmaSet::with_capacity(16),
+            heap_bottom: 0,
+            heap_pt: 0,
         }
     }
     /// Getter to the token of current memory space, or "this" page table.
@@ -211,12 +219,72 @@ impl<T: PageTable> AddressSpace<T> {
             let ctx = super::page_fault::FaultContext::new(addr, access);
             let page_table = &mut self.page_table;
             let area = self.vmas.find_user_vma_mut(vpn).unwrap();
-            super::page_fault::handle_page_fault(area, page_table, ctx)
+            super::page_fault::handle_page_fault(area, page_table, ctx)?;
+            self.validate_user_fault_result(addr, access)
         } else {
             // In all segments, nothing matches the requirements. Throws.
             error!("[do_page_fault] addr: {:?}, result: bad addr", addr);
             Err(MemoryError::BadAddress)
         }
+    }
+
+    /// Fault in one user VA and return the verified physical address.
+    ///
+    /// This is the single uaccess-facing contract: after success, the VA must
+    /// have a valid user PTE, required access permission, and a physical address
+    /// inside real memory.
+    pub fn fault_in_user_va(
+        &mut self,
+        addr: VirtAddr,
+        access: FaultAccess,
+    ) -> Result<PhysAddr, isize> {
+        super::frame_reserve(3);
+        self.do_page_fault(addr, access).map_err(memory_error_to_errno)
+    }
+
+    fn validate_user_fault_result(
+        &self,
+        addr: VirtAddr,
+        access: FaultAccess,
+    ) -> Result<PhysAddr, MemoryError> {
+        let vpn = addr.floor();
+        let pa = self
+            .page_table
+            .translate_va(addr)
+            .ok_or(MemoryError::NotMapped)?;
+
+        if pa.0 < MEMORY_START || pa.0 >= MEMORY_END {
+            warn!(
+                "[fault_in] translated user va {:#x} to invalid pa {:#x}",
+                addr.0, pa.0
+            );
+            return Err(MemoryError::BadAddress);
+        }
+
+        let ok = match access {
+            FaultAccess::Load => self
+                .page_table
+                .user_access_ok(vpn, UserAccess::Read)
+                .unwrap_or(false),
+            FaultAccess::Store => self
+                .page_table
+                .user_access_ok(vpn, UserAccess::Write)
+                .unwrap_or(false),
+            FaultAccess::Execute => {
+                self.page_table.is_valid(vpn).unwrap_or(false)
+                    && self.page_table.executable(vpn).unwrap_or(false)
+            }
+        };
+
+        if !ok {
+            warn!(
+                "[fault_in] user va {:#x} failed post-fault permission check: {:?}",
+                addr.0, access
+            );
+            return Err(MemoryError::NoPermission);
+        }
+
+        Ok(pa)
     }
     #[cfg(feature = "loongarch64")]
     #[cfg(feature = "oom_handler")]
@@ -447,6 +515,8 @@ impl<T: PageTable> AddressSpace<T> {
         address_space.map_signaltrampoline();
         let elf = xmas_elf::ElfFile::new(elf_data).unwrap();
         let (program_break, elf_info) = address_space.map_elf(&elf)?;
+        address_space.heap_bottom = program_break;
+        address_space.heap_pt = program_break;
 
         Ok((address_space, program_break, elf_info))
     }
@@ -458,6 +528,8 @@ impl<T: PageTable> AddressSpace<T> {
         }
         // map signaltrampoline
         address_space.map_signaltrampoline();
+        address_space.heap_bottom = user_space.heap_bottom;
+        address_space.heap_pt = user_space.heap_pt;
         // map data sections/user heap/mmap area/user stack
         if address_space
             .vmas
@@ -518,8 +590,8 @@ impl<T: PageTable> AddressSpace<T> {
         //*self = Self::new_bare();
         self.vmas.clear();
     }
-    pub fn sbrk(&mut self, heap_pt: usize, heap_bottom: usize, increment: isize) -> usize {
-        super::mmap::do_sbrk(self, heap_pt, heap_bottom, increment)
+    pub fn sbrk(&mut self, increment: isize) -> usize {
+        super::mmap::do_sbrk(self, increment)
     }
 
     pub fn mmap(
@@ -528,10 +600,10 @@ impl<T: PageTable> AddressSpace<T> {
         len: usize,
         prot: MapPermission,
         flags: MapFlags,
-        fd: usize,
         offset: usize,
+        map_file: Option<Arc<dyn IndexNode>>,
     ) -> isize {
-        super::mmap::do_mmap(self, start, len, prot, flags, fd, offset)
+        super::mmap::do_mmap(self, start, len, prot, flags, offset, map_file)
     }
 
     pub fn munmap(&mut self, start: usize, len: usize) -> Result<(), isize> {
@@ -683,12 +755,13 @@ impl<T: PageTable> AddressSpace<T> {
         // }
         Ok(user_sp)
     }
-    pub fn alloc_user_res(&mut self, tid: usize, alloc_stack: bool) {
+    pub fn alloc_user_res(&mut self, slot: usize, alloc_stack: bool) {
         if alloc_stack {
-            let ustack_bottom = ustack_bottom_from_tid(tid);
+            let ustack_bottom = ustack_bottom_from_slot(slot);
             let ustack_top = ustack_bottom - USER_STACK_SIZE;
             trace!(
-                "[alloc_user_res] user stack start_va: {:X}, end_va: {:X}",
+                "[alloc_user_res] slot {}, user stack start_va: {:X}, end_va: {:X}",
+                slot,
                 ustack_top,
                 ustack_bottom
             );
@@ -705,7 +778,7 @@ impl<T: PageTable> AddressSpace<T> {
             );
         }
         // alloc trap_cx
-        let trap_cx_bottom = trap_cx_bottom_from_tid(tid);
+        let trap_cx_bottom = trap_cx_bottom_from_slot(slot);
         let trap_cx_top = trap_cx_bottom + PAGE_SIZE;
         self.insert_framed_area(
             trap_cx_bottom.into(),
@@ -713,43 +786,48 @@ impl<T: PageTable> AddressSpace<T> {
             MapPermission::R | MapPermission::W,
         );
         trace!(
-            "[alloc_user_res] trap context start_va: {:X}, end_va: {:X}",
+            "[alloc_user_res] slot {}, trap context start_va: {:X}, end_va: {:X}",
+            slot,
             trap_cx_bottom,
             trap_cx_top
         );
     }
 
-    pub fn dealloc_user_res(&mut self, tid: usize) {
+    pub fn dealloc_user_res(&mut self, slot: usize) {
         // dealloc ustack manually
-        let ustack_top_va: VirtAddr = (ustack_bottom_from_tid(tid) - USER_STACK_SIZE).into();
+        let ustack_top_va: VirtAddr = (ustack_bottom_from_slot(slot) - USER_STACK_SIZE).into();
         if let Err(err) = self.remove_area_with_start_vpn(ustack_top_va.into()) {
             match err {
                 MemoryError::AreaNotFound => {
-                    warn!("[dealloc_user_res] user stack is not allocated")
+                    warn!("[dealloc_user_res] slot {}, user stack is not allocated", slot)
                 }
                 MemoryError::NotMapped => {
                     warn!(
-                        "[dealloc_user_res] user stack is partially unmapped, is it caused by oom?"
+                        "[dealloc_user_res] slot {}, user stack is partially unmapped, is it caused by oom?",
+                        slot
                     )
                 }
                 _ => {} //忽略非致命错误
             }
         }
         // 处理 trap_cx 回收
-        let trap_cx_bottom_va: VirtAddr = trap_cx_bottom_from_tid(tid).into();
+        let trap_cx_bottom_va: VirtAddr = trap_cx_bottom_from_slot(slot).into();
 
         // 改为这种写法，不再使用 unwrap()
         if let Err(err) = self.remove_area_with_start_vpn(trap_cx_bottom_va.into()) {
             match err {
                 MemoryError::AreaNotFound => {
                     // 如果没找到该区域，可能是在之前的清理中整个 Area 都删了
-                    trace!("[dealloc_user_res] trap_cx area not found for tid {}", tid);
+                    trace!(
+                        "[dealloc_user_res] trap_cx area not found for slot {}",
+                        slot
+                    );
                 }
                 MemoryError::NotMapped => {
                     // 如果页面已经不在页表里（被 OOM 换出），这在回收逻辑中是正常的
                     trace!(
-                        "[dealloc_user_res] trap_cx already unmapped for tid {}",
-                        tid
+                        "[dealloc_user_res] trap_cx already unmapped for slot {}",
+                        slot
                     );
                 }
                 _ => {
@@ -759,16 +837,30 @@ impl<T: PageTable> AddressSpace<T> {
             }
         }
         // dealloc trap_cx manually
-        // let trap_cx_bottom_va: VirtAddr = trap_cx_bottom_from_tid(tid).into();
+        // let trap_cx_bottom_va: VirtAddr = trap_cx_bottom_from_slot(slot).into();
         // self.remove_area_with_start_vpn(trap_cx_bottom_va.into())
         //     .unwrap();
     }
 
 }
 
+fn memory_error_to_errno(err: MemoryError) -> isize {
+    match err {
+        MemoryError::BeyondEOF
+        | MemoryError::NoPermission
+        | MemoryError::BadAddress
+        | MemoryError::NotMapped
+        | MemoryError::BackingStoreFailure => EFAULT,
+        MemoryError::OutOfMemory => ENOMEM,
+        other => {
+            warn!("[fault_in] unexpected memory error: {:?}", other);
+            EFAULT
+        }
+    }
+}
+
 pub(super) fn check_page_fault(addr: VirtAddr, access: FaultAccess) -> Result<PhysAddr, isize> {
     // This is where we handle the page fault.
-    super::frame_reserve(3);
     let task = match current_task() {
         Some(task) => task,
         None => {
@@ -776,22 +868,7 @@ pub(super) fn check_page_fault(addr: VirtAddr, access: FaultAccess) -> Result<Ph
             return Err(EFAULT);
         }
     };
-    match task.vm.lock().do_page_fault(addr, access) {
-        Ok(pa) => return Ok(pa),
-        Err(MemoryError::BeyondEOF)
-        | Err(MemoryError::NoPermission)
-        | Err(MemoryError::BadAddress)
-        | Err(MemoryError::NotMapped)
-        | Err(MemoryError::BackingStoreFailure) => {
-            return Err(EFAULT);
-        }
-        Err(MemoryError::OutOfMemory) => return Err(ENOMEM),
-        Err(err) => {
-            warn!(
-                "[check_page_fault] unexpected error: {:?}, addr={:?}, access={:?}",
-                err, addr, access
-            );
-            return Err(EFAULT);
-        }
-    };
+    let vm = task.process.vm();
+    let result = vm.lock().fault_in_user_va(addr, access);
+    result
 }

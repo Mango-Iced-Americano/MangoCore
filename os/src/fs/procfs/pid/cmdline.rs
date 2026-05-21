@@ -10,12 +10,19 @@ pub fn pid_cmdline_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    let task = match crate::task::find_task_by_pid(pid) {
-        Some(t) => t,
+    let process = match crate::task::find_process_by_pid(pid) {
+        Some(process) => process,
+        None => return Err(SyscallErr::ENOENT),
+    };
+    let task = match process
+        .any_live_thread()
+        .or_else(|| process.threads().into_iter().next())
+    {
+        Some(task) => task,
         None => return Err(SyscallErr::ENOENT),
     };
 
-    let exe_path = task.exe_path.lock().clone();
+    let exe_path = task.process.exe_path();
     let s = if exe_path.is_empty() {
         String::from("initproc")
     } else {

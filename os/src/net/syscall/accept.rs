@@ -6,7 +6,7 @@ use crate::utils::error::SyscallErr;
 pub fn sys_accept(sockfd: u32, addr: usize, addrlen: usize) -> isize {
     let socket = crate::get_socket!(sockfd);
     let task = current_task().unwrap();
-    let is_nonblock = match task.files.lock().get_file(sockfd as usize) {
+    let is_nonblock = match task.process.files().lock().get_file(sockfd as usize) {
         Ok(f) => f.is_nonblock(),
         Err(e) => return -(e as isize),
     };
@@ -54,7 +54,8 @@ pub fn sys_accept4(sockfd: u32, addr: usize, addrlen: usize, flags: u32) -> isiz
     let new_fd = ret as usize;
 
     let task = current_task().unwrap();
-    let mut fd_table = task.files.lock();
+    let files_ref = task.process.files();
+    let mut fd_table = files_ref.lock();
     if flags & SOCK_CLOEXEC != 0 {
         let _ = fd_table.set_cloexec(new_fd, true);
     }

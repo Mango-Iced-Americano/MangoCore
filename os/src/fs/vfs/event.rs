@@ -5,6 +5,14 @@
 //!
 //! 整个内核（VFS、net、设备驱动）统一使用此类型作为 poll 事件位掩码。
 
+use alloc::{
+    sync::Weak,
+    vec::Vec,
+};
+use spin::{Mutex, MutexGuard};
+
+use crate::task::WaitQueue;
+
 bitflags! {
     /// IO 就绪事件位，用作 `IndexNode::poll()` 返回值及 socket pollee 缓存。
     pub struct EPollEvent: usize {
@@ -21,5 +29,117 @@ bitflags! {
         const EPOLLMSG      = 0x400;
         const EPOLLREMOVE   = 0x1000;
         const EPOLLRDHUP    = 0x2000;
+        const EPOLLEXCLUSIVE = 1usize << 28;
+        const EPOLLWAKEUP    = 1usize << 29;
+        const EPOLLONESHOT   = 1usize << 30;
+        const EPOLLET        = 1usize << 31;
+    }
+}
+
+pub trait EventListener: Send + Sync {
+    fn on_event(&self, key: usize, events: EPollEvent);
+}
+
+#[derive(Clone)]
+struct EventListenerEntry {
+    listener_id: usize,
+    key: usize,
+    interest: EPollEvent,
+    listener: Weak<dyn EventListener>,
+}
+
+pub struct EventWaitQueue {
+    wait_queue: Mutex<WaitQueue>,
+    listeners: Mutex<Vec<EventListenerEntry>>,
+}
+
+impl EventWaitQueue {
+    pub fn new() -> Self {
+        Self {
+            wait_queue: Mutex::new(WaitQueue::new()),
+            listeners: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn wait_queue(&self) -> &Mutex<WaitQueue> {
+        &self.wait_queue
+    }
+
+    pub fn lock(&self) -> MutexGuard<WaitQueue> {
+        self.wait_queue.lock()
+    }
+
+    pub fn register(
+        &self,
+        listener_id: usize,
+        key: usize,
+        interest: EPollEvent,
+        listener: Weak<dyn EventListener>,
+    ) {
+        let mut listeners = self.listeners.lock();
+        if let Some(entry) = listeners
+            .iter_mut()
+            .find(|entry| entry.listener_id == listener_id && entry.key == key)
+        {
+            entry.interest = interest;
+            entry.listener = listener;
+            return;
+        }
+        listeners.push(EventListenerEntry {
+            listener_id,
+            key,
+            interest,
+            listener,
+        });
+    }
+
+    pub fn unregister(&self, listener_id: usize, key: usize) {
+        self.listeners
+            .lock()
+            .retain(|entry| entry.listener_id != listener_id || entry.key != key);
+    }
+
+    pub fn notify_events_all(&self, events: EPollEvent) -> usize {
+        self.notify_listeners(events);
+        self.wait_queue.lock().wake_all()
+    }
+
+    pub fn notify_events_at_most(&self, events: EPollEvent, limit: usize) -> usize {
+        self.notify_listeners(events);
+        self.wait_queue.lock().wake_at_most(limit)
+    }
+
+    fn notify_listeners(&self, events: EPollEvent) {
+        if events.is_empty() {
+            return;
+        }
+
+        let mut deliver = Vec::new();
+        {
+            let mut listeners = self.listeners.lock();
+            listeners.retain(|entry| entry.listener.strong_count() > 0);
+            for entry in listeners.iter() {
+                let returned = Self::returned_events(events, entry.interest);
+                if returned.is_empty() {
+                    continue;
+                }
+                if let Some(listener) = entry.listener.upgrade() {
+                    deliver.push((listener, entry.key, returned));
+                }
+            }
+        }
+
+        for (listener, key, returned) in deliver {
+            listener.on_event(key, returned);
+        }
+    }
+
+    fn returned_events(observed: EPollEvent, interest: EPollEvent) -> EPollEvent {
+        let control = EPollEvent::EPOLLET
+            | EPollEvent::EPOLLONESHOT
+            | EPollEvent::EPOLLEXCLUSIVE
+            | EPollEvent::EPOLLWAKEUP;
+        let implicit = EPollEvent::EPOLLERR | EPollEvent::EPOLLHUP;
+        observed & ((interest & !control) | implicit)
     }
 }

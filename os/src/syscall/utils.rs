@@ -1,15 +1,10 @@
 use crate::net::config::NET_INTERFACE;
 use crate::task::{
-    block_current_and_run_next_with_lock, current_task, has_actionable_signal,
-    suspend_current_and_run_next, wait_with_timeout, WaitQueue,
+    current_task, discard_non_actionable_unblocked_signals, has_actionable_signal,
+    suspend_current_and_run_next, WaitQueue,
 };
-use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
-use alloc::sync::Arc;
-use core::sync::atomic::Ordering;
 use spin::Mutex;
-
-const WAIT_IO_QUEUE_FALLBACK_MS: usize = 10;
 
 /// 通用的阻塞 I/O 等待循环核心（与具体设备无关）。
 /// `f` 返回 isize: >=0 表示成功字节数，<0 表示 -errno（as_errno_ret 编码）。
@@ -26,16 +21,10 @@ pub fn wait_io_core(mut f: impl FnMut() -> isize, nonblock: bool) -> isize {
                 }
                 suspend_current_and_run_next();
                 let task = current_task().unwrap();
-                {
-                    let inner = task.acquire_inner_lock();
-                    if !inner.sigpending.is_empty() {
-                        drop(inner);
-                        if has_actionable_signal(&task) {
-                            return -(SyscallErr::ERESTART as isize);
-                        }
-                    } else {
-                        drop(inner);
-                    }
+                if has_actionable_signal(&task) {
+                    return -(SyscallErr::ERESTART as isize);
+                } else {
+                    discard_non_actionable_unblocked_signals(&task);
                 }
                 task.acquire_inner_lock().refresh_real_timer();
             }
@@ -54,67 +43,16 @@ pub fn wait_io_core_with_queue(
     mut f: impl FnMut() -> isize,
     nonblock: bool,
     wait_queue: &Mutex<WaitQueue>,
-    mut cond: impl FnMut() -> bool,
+    _cond: impl FnMut() -> bool,
 ) -> isize {
-    loop {
-        match f() {
-            v if v >= 0 => return v,
-            v if v == -(SyscallErr::EAGAIN as isize) => {
-                if nonblock {
-                    return v;
-                }
-                let task = current_task().unwrap();
-                {
-                    let inner = task.acquire_inner_lock();
-                    let pending = inner.sigpending.difference(inner.sigmask);
-                    if !pending.is_empty() {
-                        drop(inner);
-                        if has_actionable_signal(&task) {
-                            return -(SyscallErr::ERESTART as isize);
-                        }
-                    } else {
-                        drop(inner);
-                    }
-                }
-                let mut wait = wait_queue.lock();
-                wait.prepare_to_wait(Arc::downgrade(&task));
-                // 如果已经满足条件，就不睡了，回到loop重试f()
-                if cond() {
-                    wait.finish_wait(&task);
-                    continue;
-                }
-                // 兜底 —— Option B：仅当尚未有挂起定时器时才添加新的
-                // 否则依赖已有定时器（10ms 后自动过期）。
-                // 防止 log=off 时高频 accept/connect 循环撑爆 KERNEL_TIMER_QUEUE。
-                if !task.wait_io_timer_pending.swap(true, Ordering::AcqRel) {
-                    wait_with_timeout(
-                        Arc::downgrade(&task),
-                        TimeSpec::now() + TimeSpec::from_ms(WAIT_IO_QUEUE_FALLBACK_MS),
-                    );
-                }
-                drop(task);
-                block_current_and_run_next_with_lock(wait);
-                // 从wake_at_most()回来
-                let task = current_task().unwrap();
-                //结束等待
-                wait_queue.lock().finish_wait(&task);
-                {
-                    let inner = task.acquire_inner_lock();
-                    let pending = inner.sigpending.difference(inner.sigmask);
-                    if !pending.is_empty() {
-                        drop(inner);
-                        if has_actionable_signal(&task) {
-                            return -(SyscallErr::ERESTART as isize);
-                        }
-                    } else {
-                        drop(inner);
-                    }
-                }
-                task.acquire_inner_lock().refresh_real_timer();
-            }
-            v => return v,
-        }
+    if nonblock {
+        return f();
     }
+    WaitQueue::wait_until_interruptible(wait_queue, || match f() {
+        v if v == -(SyscallErr::EAGAIN as isize) => None,
+        v => Some(v),
+    })
+    .unwrap_or_else(|e| e)
 }
 
 /// 网络 I/O 等待循环，EAGAIN 时挂入指定等待队列。

@@ -2,8 +2,6 @@ use crate::hal::{
     get_bad_addr, get_bad_instruction, get_exception_cause, MachineContext, UserContext,
 };
 use crate::signal_type;
-use alloc::boxed::Box;
-use alloc::sync::Arc;
 use core::fmt::{self, Debug, Formatter};
 use core::mem::size_of;
 use log::{debug, error, trace, warn};
@@ -13,13 +11,25 @@ use crate::hal::TrapContext;
 use crate::config::*;
 use crate::mm::{UserPtr, UserPtrMut};
 use crate::syscall::errno::*;
-use crate::task::manager::wait_with_timeout;
-use crate::task::{block_current_and_run_next, exit_current_and_run_next, exit_group_and_run_next};
-use crate::timer::TimeSpec;
+use crate::task::{
+    exit_current_and_run_next, exit_group_and_run_next, WaitQueue,
+};
 
 use super::current_task;
 use super::task::TaskControlBlock;
 use crate::utils::error::SyscallErr;
+
+mod action;
+mod delivery;
+mod frame;
+mod pending;
+mod wait;
+
+pub use action::Sighand;
+pub use delivery::{send_process_signal, send_thread_signal};
+use frame::signal_frame_layout;
+pub use pending::{PendingSignal, SignalQueue};
+pub use wait::{sigsuspend, sigtimedwait};
 
 bitflags! {
     /// Signals 枚举
@@ -122,6 +132,9 @@ bitflags! {
     }
 }
 
+const SYSCALL_SIGTIMEDWAIT: usize = 137;
+const SYSCALL_RT_SIGSUSPEND: usize = 133;
+
 impl Signals {
     // SIGILL | SIGKILL | SIGSEGV | SIGSTOP
     /// 不能被处理的信号
@@ -184,9 +197,9 @@ pub struct SigHandler(usize);
 
 impl SigHandler {
     /// 默认处理
-    const SIG_DFL: Self = Self(0);
+    pub(super) const SIG_DFL: Self = Self(0);
     /// 忽略信号
-    const SIG_IGN: Self = Self(1);
+    pub(super) const SIG_IGN: Self = Self(1);
     fn addr(&self) -> Option<usize> {
         match *self {
             Self::SIG_DFL | Self::SIG_IGN => None,
@@ -270,9 +283,11 @@ pub fn sigaction(signum: usize, act: *const SigAction, oldact: *mut SigAction) -
             trace!("[sigaction] signal: {:?}", Signals::from_signum(signum));
             let token = task.get_user_token();
             if !oldact.is_null() {
-                let suc = if let Some(sigact) = &task.sighand.lock()[signum - 1] {
+                let sighand_ref = task.process.sighand();
+    let sighand = sighand_ref.lock();
+                let suc = if let Some(sigact) = sighand.get(signum) {
                     trace!("[sigaction] *oldact: {:?}", sigact);
-                    UserPtrMut::new(oldact).write(token, sigact.as_ref())
+                    UserPtrMut::new(oldact).write(token, sigact)
                 } else {
                     trace!("[sigaction] *oldact: not found");
                     UserPtrMut::new(oldact).write(token, &SigAction::new())
@@ -290,13 +305,15 @@ pub fn sigaction(signum: usize, act: *const SigAction, oldact: *mut SigAction) -
                 }
             } {
                 sigact.mask.remove(Signals::CAN_NOT_BE_MASKED);
+                let sighand_ref = task.process.sighand();
+        let mut sighand = sighand_ref.lock();
                 if sigact.handler == SigHandler::SIG_IGN {
                     // Store SIG_IGN explicitly so we can distinguish from SIG_DFL
-                    task.sighand.lock()[signum - 1] = Some(Box::new(sigact));
+                    sighand.set(signum, Some(sigact));
                 } else if sigact.handler == SigHandler::SIG_DFL {
-                    task.sighand.lock()[signum - 1] = None;
+                    sighand.set(signum, None);
                 } else {
-                    task.sighand.lock()[signum - 1] = Some(Box::new(sigact));
+                    sighand.set(signum, Some(sigact));
                 }
                 trace!("[sigaction] *act: {:?}", sigact);
             }
@@ -382,25 +399,86 @@ fn exit_current_with_sigsegv() -> ! {
     exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
 }
 
-fn signal_frame_layout(base_sp: usize, stack_bottom: usize) -> Option<(usize, usize, usize, usize)> {
-    let ucontext_addr = base_sp.checked_sub(size_of::<UserContext>())? & !0x7;
-    let siginfo_addr = ucontext_addr.checked_sub(size_of::<SigInfo>())? & !0x7;
-    if siginfo_addr < stack_bottom {
-        return None;
-    }
-    let sig_sp = siginfo_addr;
-    let sig_size = sig_sp - stack_bottom;
-    Some((ucontext_addr, siginfo_addr, sig_sp, sig_size))
-}
-
 /// Signals whose SIG_DFL action is to ignore the signal.
 /// These signals should NOT cause EINTR in pselect/ppoll/wait/etc.
-const SIG_DFL_IGNORE: Signals = Signals::from_bits_truncate(
+pub(super) const SIG_DFL_IGNORE: Signals = Signals::from_bits_truncate(
     Signals::SIGCHLD.bits()
         | Signals::SIGCONT.bits()
         | Signals::SIGURG.bits()
         | Signals::SIGWINCH.bits(),
 );
+
+fn pending_unblocked_signals(task: &TaskControlBlock) -> Signals {
+    let inner = task.acquire_inner_lock();
+    let sigmask = inner.sigmask;
+    let pending = inner.sigpending.pending() | task.process.shared_pending();
+    pending.difference(sigmask)
+}
+
+fn signal_is_actionable(sighand: &Sighand, signum: usize, signal: Signals) -> bool {
+    match sighand.get(signum) {
+        Some(act) => act.handler != SigHandler::SIG_IGN,
+        None => !SIG_DFL_IGNORE.contains(signal),
+    }
+}
+
+fn take_next_pending_signal(
+    task: &TaskControlBlock,
+    inner: &mut super::task::TaskControlBlockInner,
+) -> Option<(PendingSignal, bool)> {
+    let thread_pending = inner.sigpending.pending().difference(inner.sigmask);
+    if let Some(pending) = inner.sigpending.dequeue_matching(thread_pending) {
+        return Some((pending, false));
+    }
+
+    let shared_pending = task.process.shared_pending().difference(inner.sigmask);
+    task.process
+        .take_shared_matching(shared_pending)
+        .map(|pending| (pending, true))
+}
+
+pub fn discard_non_actionable_unblocked_signals(task: &TaskControlBlock) {
+    let (thread_pending, sigmask) = {
+        let inner = task.acquire_inner_lock();
+        (
+            inner.sigpending.pending().difference(inner.sigmask),
+            inner.sigmask,
+        )
+    };
+    let shared_pending = task.process.shared_pending().difference(sigmask);
+    let mut discard_thread = Signals::empty();
+    let mut discard_shared = Signals::empty();
+    let sighand_ref = task.process.sighand();
+    let sighand = sighand_ref.lock();
+    for signum in 1..=64usize {
+        let signal = match Signals::from_signum(signum) {
+            Ok(signal) => signal,
+            Err(_) => continue,
+        };
+        if !signal_is_actionable(&sighand, signum, signal) {
+            if thread_pending.contains(signal) {
+                discard_thread.insert(signal);
+            }
+            if shared_pending.contains(signal) {
+                discard_shared.insert(signal);
+            }
+        }
+    }
+    drop(sighand);
+
+    if !discard_thread.is_empty() {
+        task.acquire_inner_lock()
+            .sigpending
+            .remove_signals(discard_thread);
+    }
+    for signum in 1..=64usize {
+        if let Ok(signal) = Signals::from_signum(signum) {
+            if discard_shared.contains(signal) {
+                task.process.take_shared_signal(signal);
+            }
+        }
+    }
+}
 
 /// Check whether any pending-unblocked signal has an actionable disposition.
 /// A signal is actionable only if:
@@ -411,19 +489,19 @@ const SIG_DFL_IGNORE: Signals = Signals::from_bits_truncate(
 /// This function is used by pselect/ppoll/wait_io_core/has_unblocked_signal etc.
 /// to decide whether a pending signal should trigger EINTR.
 pub fn has_actionable_signal(task: &TaskControlBlock) -> bool {
-    let inner = task.acquire_inner_lock();
-    let pending = inner.sigpending.difference(inner.sigmask);
+    let pending = pending_unblocked_signals(task);
     if pending.is_empty() {
         return false;
     }
     log::debug!(
-        "Task {} has pending: {:x}, mask: {:x}",
-        task.pid.0,
-        inner.sigpending.bits(),
-        inner.sigmask.bits()
+        "Task tid {} pid {} has pending: {:x}, mask: {:x}",
+        task.tid.0,
+        task.pid(),
+        pending.bits(),
+        task.acquire_inner_lock().sigmask.bits()
     );
-    drop(inner);
-    let sighand = task.sighand.lock();
+    let sighand_ref = task.process.sighand();
+    let sighand = sighand_ref.lock();
     for signum in 1..=64usize {
         let signal_bit = match Signals::from_signum(signum) {
             Ok(s) => s,
@@ -432,22 +510,23 @@ pub fn has_actionable_signal(task: &TaskControlBlock) -> bool {
         if !pending.contains(signal_bit) {
             continue;
         }
-        match &sighand[signum - 1] {
-            // Registered handler → actionable (unless it's SIG_IGN)
-            Some(act) => {
-                if act.handler != SigHandler::SIG_IGN {
-                    return true;
-                }
-            }
-            // SIG_DFL
-            None => {
-                if !SIG_DFL_IGNORE.contains(signal_bit) {
-                    return true;
-                }
-            }
+        if signal_is_actionable(&sighand, signum, signal_bit) {
+            return true;
         }
     }
     false
+}
+
+fn wait_for_default_stop_signal() {
+    let wait_queue = spin::Mutex::new(WaitQueue::new());
+    let _ = WaitQueue::wait_event_interruptible(&wait_queue, || {
+        let task = current_task()?;
+        if pending_unblocked_signals(&task).contains(Signals::SIGCONT) {
+            Some(0)
+        } else {
+            None
+        }
+    });
 }
 
 /// 执行信号处理
@@ -455,18 +534,21 @@ pub fn has_actionable_signal(task: &TaskControlBlock) -> bool {
 pub fn do_signal() {
     let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
-    while let Some(signum) = inner.sigpending.difference(inner.sigmask).peek_front() {
-        let signal = Signals::from_bits_truncate(1 << (signum - 1));
-        inner.sigpending.remove(signal);
+    while let Some((pending, from_process)) = take_next_pending_signal(&task, &mut inner) {
+        let signum = pending.signum();
+        let signal = pending.signal;
         trace!(
-            "[do_signal] signal: {:?}, pending: {:?}, sigmask: {:?}",
+            "[do_signal] signal: {:?}, from_process: {}, thread_pending: {:?}, process_pending: {:?}, sigmask: {:?}",
             signal,
-            inner.sigpending,
+            from_process,
+            inner.sigpending.pending(),
+            task.process.shared_pending(),
             inner.sigmask
         );
-        let mut sighand = task.sighand.lock();
+        let sighand_ref = task.process.sighand();
+        let mut sighand = sighand_ref.lock();
         // user-defined handler
-        if let Some(act) = &sighand[signum - 1] {
+        if let Some(act) = sighand.get(signum).copied() {
             // SIG_IGN → discard this signal (POSIX: ignored signals are not delivered)
             if act.handler == SigHandler::SIG_IGN {
                 trace!("[do_signal] Ignore {:?} (SIG_IGN)", signal);
@@ -478,7 +560,10 @@ pub fn do_signal() {
                 // if this syscall wants to restart
                 if a0_isize == -(SyscallErr::ERESTART as isize) {
                     // and if `SA_RESTART` is set
-                    if act.flags.contains(SigActionFlags::SA_RESTART) {
+                    if act.flags.contains(SigActionFlags::SA_RESTART)
+                        && trap_cx.gp.a7 != SYSCALL_SIGTIMEDWAIT
+                        && trap_cx.gp.a7 != SYSCALL_RT_SIGSUSPEND
+                    {
                         debug!("[do_signal] syscall will restart after sigreturn");
                         // back to `ecall`
                         trap_cx.gp.pc -= 4;
@@ -509,7 +594,7 @@ pub fn do_signal() {
                 signal_frame_layout(frame_base_sp, stack_bottom)
             {
                 let token = task.get_user_token();
-                let saved_sigmask = inner.sigmask;
+                let saved_sigmask = inner.sigmask_to_restore.take().unwrap_or(inner.sigmask);
                 let mcontext =
                     unsafe { *(inner.get_trap_cx() as *const TrapContext).cast::<MachineContext>() };
                 let mut frame_stack = if use_alt_stack {
@@ -541,7 +626,7 @@ pub fn do_signal() {
                         exit_current_with_sigsegv();
                     }
                     if UserPtrMut::from_addr(siginfo_addr)
-                        .write(token, &SigInfo::new(signum, 0, 0)) // push SigInfo into user stack
+                        .write(token, &pending.siginfo) // push SigInfo into user stack
                         .is_err()
                     {
                         error!("[do_signal] Failed to write SigInfo to user stack. Send SIGSEGV.");
@@ -630,7 +715,7 @@ pub fn do_signal() {
                 (signal | act.mask) - Signals::CAN_NOT_BE_MASKED
             };
             if act.flags.contains(SigActionFlags::SA_RESETHAND) {
-                sighand[signum - 1] = None;
+                sighand.set(signum, None);
             }
             // go back to `trap_return`
             return;
@@ -675,7 +760,7 @@ pub fn do_signal() {
                     drop(inner);
                     drop(sighand);
                     drop(task);
-                    block_current_and_run_next();
+                    wait_for_default_stop_signal();
                     // because this loop require `inner`, and we have `drop(inner)` above, so `break` is compulsory
                     // this would cause some signals won't be handled immediately when this process resumes
                     // but it doesn't matter, maybe
@@ -756,7 +841,8 @@ pub fn sigprocmask(how: u32, set: *const Signals, oldset: *mut Signals) -> isize
     let token = task.get_user_token();
     // If oldset is non-NULL, the previous value of the signal mask is stored in oldset
     if oldset as usize != 0 {
-        match UserPtrMut::new(oldset).write(token, &inner.sigmask) {
+        let old_bits = inner.sigmask.bits() as u64;
+        match UserPtrMut::new(oldset as *mut u64).write(token, &old_bits) {
             Ok(()) => {}
             Err(errno) => return errno,
         }
@@ -765,8 +851,8 @@ pub fn sigprocmask(how: u32, set: *const Signals, oldset: *mut Signals) -> isize
     // If set is NULL, then the signal mask is unchanged
     if set as usize != 0 {
         let how = SigMaskHow::from_bits(how);
-        let signal_set = match UserPtr::new(set).read(token) {
-            Ok(set) => set,
+        let signal_set = match UserPtr::new(set as *const u64).read(token) {
+            Ok(bits) => Signals::from_bits_truncate(bits as signal_type!()),
             Err(errno) => return errno,
         };
         trace!("[sigprocmask] how: {:?}, *set: ({:?})", how, signal_set);
@@ -795,38 +881,53 @@ pub fn sigprocmask(how: u32, set: *const Signals, oldset: *mut Signals) -> isize
 }
 
 #[allow(unused)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 #[repr(C)] //UNSAFE! IS THIS CORRECT?
 pub struct SigInfo {
     si_signo: u32,
     si_errno: u32,
     si_code: u32,
+    __pad0: u32,
+    si_pid: u32,
+    si_uid: u32,
     // unsupported fields
-    __pad: [u8; 128 - 3 * core::mem::size_of::<u32>()],
+    __pad: [u8; 128 - 6 * core::mem::size_of::<u32>()],
 }
 
 impl SigInfo {
     pub fn new(si_signo: usize, si_errno: usize, si_code: usize) -> Self {
+        Self::new_with_sender(si_signo, si_errno, si_code, 0)
+    }
+
+    pub fn new_with_sender(
+        si_signo: usize,
+        si_errno: usize,
+        si_code: usize,
+        si_pid: usize,
+    ) -> Self {
         Self {
             si_signo: si_signo as u32,
             si_errno: si_errno as u32,
             si_code: si_code as u32,
-            __pad: [0; 128 - 3 * core::mem::size_of::<u32>()],
+            __pad0: 0,
+            si_pid: si_pid as u32,
+            si_uid: 0,
+            __pad: [0; 128 - 6 * core::mem::size_of::<u32>()],
         }
     }
 }
 
 #[allow(unused)]
 impl SigInfo {
-    const SI_ASYNCNL: u32 = 60u32.wrapping_neg();
-    const SI_TKILL: u32 = 6u32.wrapping_neg();
-    const SI_SIGIO: u32 = 5u32.wrapping_neg();
-    const SI_ASYNCIO: u32 = 4u32.wrapping_neg();
-    const SI_MESGQ: u32 = 3u32.wrapping_neg();
-    const SI_TIMER: u32 = 2u32.wrapping_neg();
-    const SI_QUEUE: u32 = 1u32.wrapping_neg();
-    const SI_USER: u32 = 0;
-    const SI_KERNEL: u32 = 128;
+    pub const SI_ASYNCNL: u32 = 60u32.wrapping_neg();
+    pub const SI_TKILL: u32 = 6u32.wrapping_neg();
+    pub const SI_SIGIO: u32 = 5u32.wrapping_neg();
+    pub const SI_ASYNCIO: u32 = 4u32.wrapping_neg();
+    pub const SI_MESGQ: u32 = 3u32.wrapping_neg();
+    pub const SI_TIMER: u32 = 2u32.wrapping_neg();
+    pub const SI_QUEUE: u32 = 1u32.wrapping_neg();
+    pub const SI_USER: u32 = 0;
+    pub const SI_KERNEL: u32 = 128;
     const FPE_INTDIV: u32 = 1;
     const FPE_INTOVF: u32 = 2;
     const FPE_FLTDIV: u32 = 3;
@@ -858,83 +959,4 @@ impl SigInfo {
     const CLD_TRAPPED: u32 = 4;
     const CLD_STOPPED: u32 = 5;
     const CLD_CONTINUED: u32 = 6;
-}
-
-pub fn sigtimedwait(set: *const Signals, info: *mut SigInfo, timeout: *const TimeSpec) -> isize {
-    let task = current_task().unwrap();
-    let token = task.get_user_token();
-    let set = match UserPtr::new(set).read(token) {
-        Ok(set) => set,
-        Err(errno) => return errno,
-    };
-    // timeout == NULL → infinite wait (POSIX sigwaitinfo semantics)
-    let timeout = match UserPtr::new(timeout).read_optional(token) {
-        Ok(timeout) => timeout,
-        Err(errno) => return errno,
-    };
-    debug!("[sigtimedwait] set: {:?}, timeout: {:?}", set, timeout);
-
-    {
-        let mut inner = task.acquire_inner_lock();
-        if !inner.sigpending.is_empty() {
-            if let Some(signum) = (inner.sigpending & set).peek_front() {
-                // 消费该信号：从 pending 中移除，防止异步再进入 handler
-                let signal = Signals::from_signum(signum).unwrap();
-                inner.sigpending.remove(signal);
-                drop(inner);
-                if !info.is_null() {
-                    if UserPtrMut::new(info)
-                        .write(token, &SigInfo::new(signum, 0, 0))
-                        .is_err()
-                    {
-                        log::error!("[sys_sigtimedwait] Error copying to info {:?} ", info);
-                        return EFAULT;
-                    };
-                }
-                return signum as isize;
-            }
-            // pending 里没有匹配的信号，继续正常阻塞流程
-        }
-        drop(inner);
-    }
-
-    let start = TimeSpec::now();
-    if let Some(timeout) = timeout {
-        wait_with_timeout(Arc::downgrade(&task), start + timeout);
-    }
-    drop(task);
-
-    block_current_and_run_next();
-    let task = current_task().unwrap();
-    let mut inner = task.acquire_inner_lock();
-    // interrupted by signal(s)
-    if !inner.sigpending.is_empty() {
-        match (inner.sigpending & set).peek_front() {
-            Some(signum) => {
-                // 消费该信号
-                let signal = Signals::from_signum(signum).unwrap();
-                inner.sigpending.remove(signal);
-                drop(inner);
-                if !info.is_null() {
-                    if UserPtrMut::new(info)
-                        .write(token, &SigInfo::new(signum, 0, 0))
-                        .is_err()
-                    {
-                        log::error!("[sys_sigtimedwait] Error copying to info {:?} ", info);
-                        return EFAULT;
-                    };
-                }
-                signum as isize
-            }
-            // Interrupted by signal(s) that not present in `set`
-            // This syscall is never restarted after being interrupted by a signal handler
-            None => EINTR,
-        }
-    // reach timeout
-    } else {
-        if let Some(timeout) = timeout {
-            assert!(start + timeout <= TimeSpec::now());
-        }
-        EAGAIN
-    }
 }

@@ -1,4 +1,5 @@
 pub mod dev;
+pub mod eventpoll;
 pub mod ext4;
 pub mod fat32;
 mod filesystem;

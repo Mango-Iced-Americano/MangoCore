@@ -149,8 +149,9 @@ pub fn check_oom_kill() {
             inner.pending_oom_kill = false;
             inner.add_signal(Signals::SIGKILL);
             log::warn!(
-                "[OOM killer] PID {} marked for OOM kill, sending SIGKILL",
-                task.pid.0
+                "[OOM killer] tid {} pid {} marked for OOM kill, sending SIGKILL",
+                task.tid.0,
+                task.pid()
             );
         }
     }

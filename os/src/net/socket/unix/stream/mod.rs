@@ -5,6 +5,7 @@
 
 pub mod inner;
 use self::inner::Connected;
+use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::fs::vfs::{self, FileFlags};
 use crate::net::socket::unix::ns::{ABSTRACT_TABLE, UNIX_PATH_MAX};
 use crate::net::socket::unix::PATH_TABLE;
@@ -30,10 +31,10 @@ pub struct UnixStreamSocket {
     /// 发送缓冲区大小
     send_buf_size: AtomicUsize,
     /// 等待队列
-    pub recv_waiters: Mutex<WaitQueue>,
-    pub send_waiters: Mutex<WaitQueue>,
-    pub connect_waiters: Mutex<WaitQueue>,
-    pub accept_waiters: Mutex<WaitQueue>,
+    pub recv_waiters: EventWaitQueue,
+    pub send_waiters: EventWaitQueue,
+    pub connect_waiters: EventWaitQueue,
+    pub accept_waiters: EventWaitQueue,
 }
 
 impl core::fmt::Debug for UnixStreamSocket {
@@ -53,10 +54,10 @@ impl UnixStreamSocket {
             is_nonblock: AtomicBool::new(is_nonblock),
             recv_buf_size: AtomicUsize::new(UNIX_STREAM_DEFAULT_BUF_SIZE),
             send_buf_size: AtomicUsize::new(UNIX_STREAM_DEFAULT_BUF_SIZE),
-            recv_waiters: Mutex::new(WaitQueue::new()),
-            send_waiters: Mutex::new(WaitQueue::new()),
-            connect_waiters: Mutex::new(WaitQueue::new()),
-            accept_waiters: Mutex::new(WaitQueue::new()),
+            recv_waiters: EventWaitQueue::new(),
+            send_waiters: EventWaitQueue::new(),
+            connect_waiters: EventWaitQueue::new(),
+            accept_waiters: EventWaitQueue::new(),
         }
     }
 
@@ -67,10 +68,10 @@ impl UnixStreamSocket {
             is_nonblock: AtomicBool::new(is_nonblock),
             recv_buf_size: AtomicUsize::new(UNIX_STREAM_DEFAULT_BUF_SIZE),
             send_buf_size: AtomicUsize::new(UNIX_STREAM_DEFAULT_BUF_SIZE),
-            recv_waiters: Mutex::new(WaitQueue::new()),
-            send_waiters: Mutex::new(WaitQueue::new()),
-            connect_waiters: Mutex::new(WaitQueue::new()),
-            accept_waiters: Mutex::new(WaitQueue::new()),
+            recv_waiters: EventWaitQueue::new(),
+            send_waiters: EventWaitQueue::new(),
+            connect_waiters: EventWaitQueue::new(),
+            accept_waiters: EventWaitQueue::new(),
         }
     }
 
@@ -80,10 +81,16 @@ impl UnixStreamSocket {
 
     /// 唤醒所有等待队列
     pub fn wake_wait_queues(&self) {
-        self.recv_waiters.lock().wake_all();
-        self.send_waiters.lock().wake_all();
-        self.connect_waiters.lock().wake_all();
-        self.accept_waiters.lock().wake_all();
+        self.recv_waiters.notify_events_all(
+            EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM | EPollEvent::EPOLLHUP,
+        );
+        self.send_waiters.notify_events_all(
+            EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM | EPollEvent::EPOLLHUP,
+        );
+        self.connect_waiters
+            .notify_events_all(EPollEvent::EPOLLOUT | EPollEvent::EPOLLERR | EPollEvent::EPOLLHUP);
+        self.accept_waiters
+            .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM | EPollEvent::EPOLLHUP);
     }
 }
 
@@ -185,8 +192,8 @@ impl Socket for UnixStreamSocket {
                 server_socket.push_pending_connected(server_conn)?;
 
                 // 5. 唤醒 acceptor
-                if let Some(wq) = server_socket.accept_wait_queue() {
-                    wq.lock().wake_all();
+                if let Some(wq) = server_socket.accept_event_queue() {
+                    wq.notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM);
                 }
 
                 // 6. 本端变为 Connected
@@ -212,8 +219,8 @@ impl Socket for UnixStreamSocket {
                     Connected::new_pair(UNIX_STREAM_DEFAULT_BUF_SIZE);
                 client_conn.peer_addr = Some(UnixEndpointBound::Path(path.clone()));
                 server_socket.push_pending_connected(server_conn)?;
-                if let Some(wq) = server_socket.accept_wait_queue() {
-                    wq.lock().wake_all();
+                if let Some(wq) = server_socket.accept_event_queue() {
+                    wq.notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM);
                 }
 
                 let mut self_inner = self.inner.lock();
@@ -255,8 +262,8 @@ impl Socket for UnixStreamSocket {
                 );
 
                 let task = crate::task::current_task().ok_or(SyscallErr::ESRCH)?;
-                let fd = task
-                    .files
+                let files_ref = task.process.files();
+                let fd = files_ref
                     .lock()
                     .alloc_fd(vf, false)
                     .map_err(|_| SyscallErr::ENFILE)?;
@@ -401,18 +408,34 @@ impl Socket for UnixStreamSocket {
     }
 
     fn recv_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(self.recv_waiters.wait_queue())
+    }
+
+    fn recv_event_queue(&self) -> Option<&EventWaitQueue> {
         Some(&self.recv_waiters)
     }
 
     fn send_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(self.send_waiters.wait_queue())
+    }
+
+    fn send_event_queue(&self) -> Option<&EventWaitQueue> {
         Some(&self.send_waiters)
     }
 
     fn connect_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(self.connect_waiters.wait_queue())
+    }
+
+    fn connect_event_queue(&self) -> Option<&EventWaitQueue> {
         Some(&self.connect_waiters)
     }
 
     fn accept_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(self.accept_waiters.wait_queue())
+    }
+
+    fn accept_event_queue(&self) -> Option<&EventWaitQueue> {
         Some(&self.accept_waiters)
     }
 

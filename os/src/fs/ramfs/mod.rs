@@ -122,16 +122,20 @@ fn alloc_page() -> Option<Arc<FrameTracker>> {
 
 /// 从 FrameTracker 获取页内偏移处的只读物理地址
 fn page_ptr(frame: &Arc<FrameTracker>, offset_within_page: usize) -> *const u8 {
-    let ppn = frame.ppn;
-    let phys_addr = ppn.0 * PAGE_SIZE + offset_within_page;
-    phys_addr as *const u8
+    frame
+        .ppn
+        .get_bytes_array()
+        .as_ptr()
+        .wrapping_add(offset_within_page)
 }
 
 /// 从 FrameTracker 获取页内偏移处的可写物理地址
 fn page_ptr_mut(frame: &Arc<FrameTracker>, offset_within_page: usize) -> *mut u8 {
-    let ppn = frame.ppn;
-    let phys_addr = ppn.0 * PAGE_SIZE + offset_within_page;
-    phys_addr as *mut u8
+    frame
+        .ppn
+        .get_bytes_array()
+        .as_mut_ptr()
+        .wrapping_add(offset_within_page)
 }
 
 // ── FileSystem impl for RamFS ─────────────────────────────────────────
@@ -220,7 +224,7 @@ impl PageCacheBackend for RamFsPageCacheBackend {
         let inode = self.inode.upgrade().ok_or(SyscallErr::EIO)?;
         let inner = inode.0.lock();
         if let Some(frame) = inner.pages.get(&index) {
-            let src = unsafe { &*(frame.ppn.0 as *const [u8; PAGE_SIZE]) };
+            let src = frame.ppn.get_bytes_array();
             buf[..PAGE_SIZE].copy_from_slice(&src[..PAGE_SIZE]);
         } else {
             buf[..PAGE_SIZE].fill(0);
@@ -236,11 +240,11 @@ impl PageCacheBackend for RamFsPageCacheBackend {
         };
         let mut inner = inode.0.lock();
         if let Some(frame) = inner.pages.get(&index) {
-            let dst = unsafe { &mut *(frame.ppn.0 as *mut [u8; PAGE_SIZE]) };
+            let dst = frame.ppn.get_bytes_array();
             dst[..PAGE_SIZE].copy_from_slice(&buf[..PAGE_SIZE]);
         } else {
             let frame = frame_alloc().ok_or(SyscallErr::ENOMEM)?;
-            let dst = unsafe { &mut *(frame.ppn.0 as *mut [u8; PAGE_SIZE]) };
+            let dst = frame.ppn.get_bytes_array();
             dst[..PAGE_SIZE].copy_from_slice(&buf[..PAGE_SIZE]);
             inner.pages.insert(index, frame);
             if ramfs.max_pages > 0 {
@@ -771,7 +775,7 @@ impl IndexNode for LockedRamFSInode {
     }
 
     fn page_cache(&self) -> Option<Arc<NewPageCache>> {
-        let mut inner = self.0.lock();
+        let inner = self.0.lock();
         if inner.metadata.file_type == FileType::Dir {
             return None;
         }

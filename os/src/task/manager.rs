@@ -12,7 +12,8 @@ use alloc::vec::Vec;
 use crate::timer::{TimeSpec, TimeVal};
 
 use super::{
-    block_current_and_run_next_with_lock, current_task, has_actionable_signal, signal::Signals,
+    block_current_and_run_next_checked, block_current_and_run_next_with_lock_checked, current_task,
+    discard_non_actionable_unblocked_signals, has_actionable_signal, signal::Signals,
     TaskControlBlock, TaskStatus,
 };
 use crate::utils::error::SyscallErr;
@@ -20,7 +21,6 @@ use alloc::collections::{BinaryHeap, VecDeque};
 use alloc::sync::{Arc, Weak};
 use lazy_static::*;
 use spin::Mutex;
-use spin::MutexGuard;
 
 #[cfg(feature = "oom_handler")]
 /// 任务的激活状态跟踪器
@@ -44,37 +44,37 @@ impl ActiveTracker {
         bitmap.resize(len, 0);
         Self { bitmap }
     }
-    /// 确保位图可以容纳指定 pid
-    pub fn ensure_capacity(&mut self, pid: usize) {
-        let word = pid / 64;
+    /// 确保位图可以容纳指定 tid
+    pub fn ensure_capacity(&mut self, tid: usize) {
+        let word = tid / 64;
         if word >= self.bitmap.len() {
             self.bitmap.resize(word + 1, 0);
         }
     }
-    /// 检查制定pid的任务是否处于激活状态
-    pub fn check_active(&self, pid: usize) -> bool {
-        let word = pid / 64;
+    /// 检查指定 tid 的任务是否处于激活状态
+    pub fn check_active(&self, tid: usize) -> bool {
+        let word = tid / 64;
         if word >= self.bitmap.len() {
             return false;
         }
-        (self.bitmap[word] & (1 << (pid % 64))) != 0
+        (self.bitmap[word] & (1 << (tid % 64))) != 0
     }
-    /// 检查制定pid的任务是否处于非激活状态
-    pub fn check_inactive(&self, pid: usize) -> bool {
-        !self.check_active(pid)
+    /// 检查指定 tid 的任务是否处于非激活状态
+    pub fn check_inactive(&self, tid: usize) -> bool {
+        !self.check_active(tid)
     }
-    /// 标记指定pid的任务为激活状态
-    pub fn mark_active(&mut self, pid: usize) {
-        self.ensure_capacity(pid);
-        self.bitmap[pid / 64] |= 1 << (pid % 64)
+    /// 标记指定 tid 的任务为激活状态
+    pub fn mark_active(&mut self, tid: usize) {
+        self.ensure_capacity(tid);
+        self.bitmap[tid / 64] |= 1 << (tid % 64)
     }
-    /// 标记指定pid的任务为非激活状态
-    pub fn mark_inactive(&mut self, pid: usize) {
-        let word = pid / 64;
+    /// 标记指定 tid 的任务为非激活状态
+    pub fn mark_inactive(&mut self, tid: usize) {
+        let word = tid / 64;
         if word >= self.bitmap.len() {
             return;
         }
-        self.bitmap[word] &= !(1 << (pid % 64))
+        self.bitmap[word] &= !(1 << (tid % 64))
     }
 }
 
@@ -123,7 +123,7 @@ impl TaskManager {
         match self.ready_queue.pop_front() {
             Some(task) => {
                 // 标记任务为激活状态
-                self.active_tracker.mark_active(task.pid.0);
+                self.active_tracker.mark_active(task.tid.0);
                 Some(task)
             }
             None => None,
@@ -143,21 +143,24 @@ impl TaskManager {
             // 使用retain过滤掉与指定任务相同的任务
             .retain(|task_in_queue| Arc::as_ptr(task_in_queue) != Arc::as_ptr(task));
     }
-    /// 根据pid查找任务
-    pub fn find_by_pid(&self, pid: usize) -> Option<Arc<TaskControlBlock>> {
+    /// 从调度器的 ready / interruptible 队列中移除一组任务。
+    /// 线程组退出和 exec 清理只能通过这个入口调整队列，避免业务层直接扫描队列。
+    pub fn remove_tasks(&mut self, tasks: &[Arc<TaskControlBlock>]) -> usize {
+        fn should_remove(task: &Arc<TaskControlBlock>, tasks: &[Arc<TaskControlBlock>]) -> bool {
+            tasks
+                .iter()
+                .any(|target| Arc::as_ptr(target) == Arc::as_ptr(task))
+        }
+
+        let old_ready_len = self.ready_queue.len();
         self.ready_queue
-            .iter()
-            .chain(self.interruptible_queue.iter())
-            .find(|task| task.pid.0 == pid)
-            .cloned()
-    }
-    /// 根据tgid(线程组id)查找任务
-    pub fn find_by_tgid(&self, tgid: usize) -> Option<Arc<TaskControlBlock>> {
-        self.ready_queue
-            .iter()
-            .chain(self.interruptible_queue.iter())
-            .find(|task| task.tgid == tgid)
-            .cloned()
+            .retain(|task| !should_remove(task, tasks));
+        let old_interruptible_len = self.interruptible_queue.len();
+        self.interruptible_queue
+            .retain(|task| !should_remove(task, tasks));
+
+        (old_ready_len - self.ready_queue.len())
+            + (old_interruptible_len - self.interruptible_queue.len())
     }
     /// 就绪队列中任务数量
     pub fn ready_count(&self) -> u16 {
@@ -204,7 +207,11 @@ impl TaskManager {
         // 从可中断队列中删除指定任务
         self.drop_interruptible(&task);
         // 如果任务不在就绪队列中，将其加入就绪队列
-        if self.find_by_pid(task.pid.0).is_none() {
+        if !self
+            .ready_queue
+            .iter()
+            .any(|task_in_queue| Arc::as_ptr(task_in_queue) == Arc::as_ptr(&task))
+        {
             self.add(task);
             Ok(())
         } else {
@@ -216,7 +223,7 @@ impl TaskManager {
     /// 打印就绪队列中的任务ID
     pub fn show_ready(&self) {
         self.ready_queue.iter().for_each(|task| {
-            log::error!("[show_ready] pid: {}", task.pid.0);
+            log::error!("[show_ready] tid: {}, pid: {}", task.tid.0, task.pid());
         })
     }
     #[allow(unused)]
@@ -224,7 +231,11 @@ impl TaskManager {
     /// 打印可中断队列中的任务ID
     pub fn show_interruptible(&self) {
         self.interruptible_queue.iter().for_each(|task| {
-            log::error!("[show_interruptible] pid: {}", task.pid.0);
+            log::error!(
+                "[show_interruptible] tid: {}, pid: {}",
+                task.tid.0,
+                task.pid()
+            );
         })
     }
 }
@@ -255,12 +266,17 @@ pub fn do_oom(req: usize) -> Result<(), ()> {
     let interruptible_len = manager.interruptible_queue.len();
     for idx in 0..interruptible_len {
         let task = manager.interruptible_queue[idx].clone();
-        if !manager.active_tracker.check_active(task.pid.0) {
+        if !manager.active_tracker.check_active(task.tid.0) {
             continue;
         }
-        let released = task.vm.lock().do_deep_clean();
-        log::warn!("deep clean on task: {}, released: {}", task.tgid, released);
-        manager.active_tracker.mark_inactive(task.pid.0);
+        let released = task.process.vm().lock().do_deep_clean();
+        log::warn!(
+            "deep clean on task: tid {}, pid {}, released: {}",
+            task.tid.0,
+            task.pid(),
+            released
+        );
+        manager.active_tracker.mark_inactive(task.tid.0);
         total_released += released;
         if total_released >= req {
             return Ok(());
@@ -269,16 +285,17 @@ pub fn do_oom(req: usize) -> Result<(), ()> {
     let ready_len = manager.ready_queue.len();
     for idx in (0..ready_len).rev() {
         let task = manager.ready_queue[idx].clone();
-        if !manager.active_tracker.check_active(task.pid.0) {
+        if !manager.active_tracker.check_active(task.tid.0) {
             continue;
         }
-        let released = task.vm.lock().do_shallow_clean();
+        let released = task.process.vm().lock().do_shallow_clean();
         log::warn!(
-            "shallow clean on task: {}, released: {}",
-            task.tgid,
+            "shallow clean on task: tid {}, pid {}, released: {}",
+            task.tid.0,
+            task.pid(),
             released
         );
-        manager.active_tracker.mark_inactive(task.pid.0);
+        manager.active_tracker.mark_inactive(task.tid.0);
         total_released += released;
         if total_released >= req {
             return Ok(());
@@ -315,31 +332,9 @@ pub fn wake_interruptible(task: Arc<TaskControlBlock>) {
     TASK_MANAGER.lock().wake_interruptible(task)
 }
 
-/// # 警告
-/// 这里的`pid`是唯一的，用户会将其视为`tid`
-pub fn find_task_by_pid(pid: usize) -> Option<Arc<TaskControlBlock>> {
-    // 获取当前任务
-    let task = current_task().unwrap();
-    // 如果当前任务的pid与指定的pid相同，返回当前任务
-    if task.pid.0 == pid {
-        Some(task)
-    } else {
-        // 否则从任务管理器中查找
-        TASK_MANAGER.lock().find_by_pid(pid)
-    }
-}
-
-/// 返回线程组ID为`tgid`的任意任务。
-pub fn find_task_by_tgid(tgid: usize) -> Option<Arc<TaskControlBlock>> {
-    // 获取当前任务
-    let task = current_task().unwrap();
-    // 如果当前任务的tgid与指定的tgid相同，返回当前任务
-    if task.tgid == tgid {
-        Some(task)
-    } else {
-        // 否则从任务管理器中查找
-        TASK_MANAGER.lock().find_by_tgid(tgid)
-    }
+/// 从调度队列中移除一组任务。
+pub fn remove_tasks_from_queues(tasks: &[Arc<TaskControlBlock>]) -> usize {
+    TASK_MANAGER.lock().remove_tasks(tasks)
 }
 
 /// 返回就绪队列中的任务数量
@@ -354,14 +349,14 @@ pub fn zombie_count() -> u16 {
     manager.zombie_count()
 }
 
-/// Send a signal to all interruptible tasks EXCEPT initproc (tgid=1).
+/// Send a signal to all interruptible tasks EXCEPT initproc (pid=1).
 /// Returns true if at least one task received the signal.
 pub fn send_signal_to_interruptible(signal: Signals) -> bool {
     let manager = TASK_MANAGER.lock();
     let tasks: Vec<_> = manager
         .interruptible_queue
         .iter()
-        .filter(|t| t.tgid != 1) // never signal initproc via Ctrl+C
+        .filter(|t| t.pid() != 1) // never signal initproc via Ctrl+C
         .cloned()
         .collect();
     drop(manager);
@@ -387,6 +382,23 @@ pub fn send_signal_to_interruptible(signal: Signals) -> bool {
 pub enum WaitQueueError {
     /// 已经唤醒
     AlreadyWaken,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WaitResult {
+    Ready(isize),
+    Interrupted,
+    TimedOut,
+}
+
+impl WaitResult {
+    pub fn unwrap_or_else(self, f: impl FnOnce(isize) -> isize) -> isize {
+        match self {
+            WaitResult::Ready(value) => value,
+            WaitResult::Interrupted => f(-(SyscallErr::ERESTART as isize)),
+            WaitResult::TimedOut => f(-(SyscallErr::EAGAIN as isize)),
+        }
+    }
 }
 
 /// 等待队列
@@ -515,72 +527,252 @@ impl WaitQueue {
     /// 兜底定时器的超时毫秒数，防止丢失唤醒导致永久阻塞。
     const WAIT_IO_FALLBACK_MS: usize = 10;
 
-    /// Core `wait_until` 实现（参照 DragonOS 架构）。
-    ///
-    /// `cond` 返回 `None` 表示继续等待，`Some(v)` 表示条件满足返回 `v`。
-    /// `signal_check` 为 true 时在等待前检查信号（interruptible 变体）。
-    /// `is_io` 为 true 时正确标记 iowait（用于 CPU iowait 统计）。
-    ///
-    /// ## 关键设计
-    /// 在检查条件前先通过 `prepare_to_wait` 注册 waker，确保不会丢失唤醒。
-    /// 调用者将 `poll()` 等准备工作放在 `cond` 闭包中（文件和网络 IO 通用）。
-    ///
-    /// ## 返回值
-    /// - `>= 0`：条件满足，返回 `cond()` 提供的值
-    /// - `< 0`：被信号中断（`-ERESTART`）
-    fn wait_until_impl<F>(wq: &Mutex<Self>, cond: &mut F, signal_check: bool, is_io: bool) -> isize
+    fn wait_event_impl<F>(
+        wq: &Mutex<Self>,
+        cond: &mut F,
+        signal_check: bool,
+        deadline: Option<TimeSpec>,
+        fallback_ms: Option<usize>,
+    ) -> WaitResult
     where
         F: FnMut() -> Option<isize>,
     {
-        // 快路径：先检查一次条件
         if let Some(res) = cond() {
-            return res;
+            return WaitResult::Ready(res);
         }
 
         loop {
-            let task = current_task().unwrap();
-
-            // 1. 信号检查（仅 interruptible 变体）
-            if signal_check {
-                let inner = task.acquire_inner_lock();
-                let pending = inner.sigpending.difference(inner.sigmask);
-                let has_pending = !pending.is_empty();
-                drop(inner);
-                if has_pending && has_actionable_signal(&task) {
-                    return -(SyscallErr::ERESTART as isize);
-                }
+            if deadline
+                .map(|deadline| TimeSpec::now() >= deadline)
+                .unwrap_or(false)
+            {
+                return WaitResult::TimedOut;
             }
 
-            // 2. 注册 waker（DragonOS 关键模式：注册后再检查条件）
+            let task = current_task().unwrap();
+
             let mut guard = wq.lock();
             guard.prepare_to_wait(Arc::downgrade(&task));
 
-            // 3. 注册后检查条件（调用者的闭包里包含 poll 等准备工作）
             if let Some(res) = cond() {
                 guard.finish_wait(&task);
-                return res;
+                return WaitResult::Ready(res);
+            }
+            if deadline
+                .map(|deadline| TimeSpec::now() >= deadline)
+                .unwrap_or(false)
+            {
+                guard.finish_wait(&task);
+                return WaitResult::TimedOut;
+            }
+            if signal_check {
+                if has_actionable_signal(&task) {
+                    guard.finish_wait(&task);
+                    return WaitResult::Interrupted;
+                }
+                discard_non_actionable_unblocked_signals(&task);
             }
 
-            // 4. 设置兜底定时器（Option B）
-            if !task
-                .wait_io_timer_pending
-                .swap(true, AtomicOrdering::AcqRel)
-            {
-                wait_with_timeout(
-                    Arc::downgrade(&task),
-                    TimeSpec::now() + TimeSpec::from_ms(Self::WAIT_IO_FALLBACK_MS),
-                );
+            if let Some(deadline) = deadline {
+                wait_with_timeout(Arc::downgrade(&task), deadline);
+            } else if let Some(ms) = fallback_ms {
+                if !task
+                    .wait_io_timer_pending
+                    .swap(true, AtomicOrdering::AcqRel)
+                {
+                    wait_with_timeout(
+                        Arc::downgrade(&task),
+                        TimeSpec::now() + TimeSpec::from_ms(ms),
+                    );
+                }
             }
             drop(task);
 
-            // 5. 阻塞 — 丢弃 MutexGuard，调度其他任务
-            block_current_and_run_next_with_lock(guard);
+            block_current_and_run_next_with_lock_checked(guard, |task| {
+                let no_signal = !signal_check || !has_actionable_signal(task);
+                let not_timed_out = deadline
+                    .map(|deadline| TimeSpec::now() < deadline)
+                    .unwrap_or(true);
+                no_signal && not_timed_out
+            });
 
-            // 6. 唤醒后：重新加锁并完成等待
             let task = current_task().unwrap();
             wq.lock().finish_wait(&task);
+            task.acquire_inner_lock().refresh_real_timer();
+        }
+    }
 
-            // 7. 刷新 real timer
+    fn wait_event_locked_impl<T, Q, F>(
+        lock: &Mutex<T>,
+        mut queue_of: Q,
+        cond: &mut F,
+        signal_check: bool,
+        deadline: Option<TimeSpec>,
+        normal_wake_result: Option<isize>,
+    ) -> WaitResult
+    where
+        Q: for<'a> FnMut(&'a mut T) -> &'a mut WaitQueue,
+        F: FnMut(&mut T) -> Option<isize>,
+    {
+        {
+            let mut guard = lock.lock();
+            if let Some(res) = cond(&mut guard) {
+                return WaitResult::Ready(res);
+            }
+        }
+
+        loop {
+            let mut guard = lock.lock();
+            if deadline
+                .map(|deadline| TimeSpec::now() >= deadline)
+                .unwrap_or(false)
+            {
+                return WaitResult::TimedOut;
+            }
+
+            let task = current_task().unwrap();
+
+            queue_of(&mut guard).prepare_to_wait(Arc::downgrade(&task));
+            if let Some(res) = cond(&mut guard) {
+                queue_of(&mut guard).finish_wait(&task);
+                return WaitResult::Ready(res);
+            }
+            if deadline
+                .map(|deadline| TimeSpec::now() >= deadline)
+                .unwrap_or(false)
+            {
+                queue_of(&mut guard).finish_wait(&task);
+                return WaitResult::TimedOut;
+            }
+            if signal_check {
+                if has_actionable_signal(&task) {
+                    queue_of(&mut guard).finish_wait(&task);
+                    return WaitResult::Interrupted;
+                }
+                discard_non_actionable_unblocked_signals(&task);
+            }
+            if let Some(deadline) = deadline {
+                wait_with_timeout(Arc::downgrade(&task), deadline);
+            }
+            drop(task);
+
+            block_current_and_run_next_with_lock_checked(guard, |task| {
+                let no_signal = !signal_check || !has_actionable_signal(task);
+                let not_timed_out = deadline
+                    .map(|deadline| TimeSpec::now() < deadline)
+                    .unwrap_or(true);
+                no_signal && not_timed_out
+            });
+
+            let task = current_task().unwrap();
+            let mut guard = lock.lock();
+            let removed = queue_of(&mut guard).finish_wait(&task);
+            drop(guard);
+            task.acquire_inner_lock().refresh_real_timer();
+
+            if !removed {
+                if let Some(res) = normal_wake_result {
+                    return WaitResult::Ready(res);
+                }
+            }
+        }
+    }
+
+    fn finish_wait_on_queues(queues: &[&Mutex<Self>], task: &Arc<TaskControlBlock>) {
+        for queue in queues {
+            queue.lock().finish_wait(task);
+        }
+    }
+
+    pub fn wait_on_queues_interruptible_timeout<F>(
+        queues: &[&Mutex<Self>],
+        mut cond: F,
+        deadline: Option<TimeSpec>,
+    ) -> WaitResult
+    where
+        F: FnMut() -> Option<isize>,
+    {
+        // `cond` may be evaluated while the current task is temporarily
+        // removed from the CPU, so callers must not depend on `current_task()`.
+        if let Some(res) = cond() {
+            return WaitResult::Ready(res);
+        }
+
+        if queues.is_empty() {
+            let wait_queue = Mutex::new(WaitQueue::new());
+            loop {
+                let next_deadline = match deadline {
+                    Some(deadline) if TimeSpec::now() >= deadline => return WaitResult::TimedOut,
+                    Some(deadline) => {
+                        let fallback = TimeSpec::now() + TimeSpec::from_ms(Self::WAIT_IO_FALLBACK_MS);
+                        if fallback < deadline {
+                            fallback
+                        } else {
+                            deadline
+                        }
+                    }
+                    None => TimeSpec::now() + TimeSpec::from_ms(Self::WAIT_IO_FALLBACK_MS),
+                };
+                match Self::wait_event_interruptible_timeout(&wait_queue, &mut cond, next_deadline) {
+                    WaitResult::Ready(value) => return WaitResult::Ready(value),
+                    WaitResult::Interrupted => return WaitResult::Interrupted,
+                    WaitResult::TimedOut => {
+                        if deadline
+                            .map(|deadline| TimeSpec::now() >= deadline)
+                            .unwrap_or(false)
+                        {
+                            return WaitResult::TimedOut;
+                        }
+                    }
+                }
+            }
+        }
+
+        loop {
+            if deadline
+                .map(|deadline| TimeSpec::now() >= deadline)
+                .unwrap_or(false)
+            {
+                return WaitResult::TimedOut;
+            }
+
+            let task = current_task().unwrap();
+            for queue in queues {
+                queue.lock().prepare_to_wait(Arc::downgrade(&task));
+            }
+
+            if let Some(res) = cond() {
+                Self::finish_wait_on_queues(queues, &task);
+                return WaitResult::Ready(res);
+            }
+            if deadline
+                .map(|deadline| TimeSpec::now() >= deadline)
+                .unwrap_or(false)
+            {
+                Self::finish_wait_on_queues(queues, &task);
+                return WaitResult::TimedOut;
+            }
+            if has_actionable_signal(&task) {
+                Self::finish_wait_on_queues(queues, &task);
+                return WaitResult::Interrupted;
+            }
+            discard_non_actionable_unblocked_signals(&task);
+
+            if let Some(deadline) = deadline {
+                wait_with_timeout(Arc::downgrade(&task), deadline);
+            }
+            drop(task);
+
+            block_current_and_run_next_checked(|task| {
+                let no_signal = !has_actionable_signal(task);
+                let not_timed_out = deadline
+                    .map(|deadline| TimeSpec::now() < deadline)
+                    .unwrap_or(true);
+                no_signal && not_timed_out && cond().is_none()
+            });
+
+            let task = current_task().unwrap();
+            Self::finish_wait_on_queues(queues, &task);
             task.acquire_inner_lock().refresh_real_timer();
         }
     }
@@ -594,7 +786,11 @@ impl WaitQueue {
     where
         F: FnMut() -> Option<isize>,
     {
-        Self::wait_until_impl(wq, &mut cond, false, false)
+        match Self::wait_event_impl(wq, &mut cond, false, None, Some(Self::WAIT_IO_FALLBACK_MS)) {
+            WaitResult::Ready(value) => value,
+            WaitResult::Interrupted => -(SyscallErr::ERESTART as isize),
+            WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
+        }
     }
 
     /// 可中断等待，条件满足或收到信号时返回。
@@ -603,16 +799,11 @@ impl WaitQueue {
     /// 文件和网络 IO 通用。
     /// - `Ok(v)`：条件满足
     /// - `Err(-ERESTART)`：被信号中断
-    pub fn wait_until_interruptible<F>(wq: &Mutex<Self>, mut cond: F) -> Result<isize, isize>
+    pub fn wait_until_interruptible<F>(wq: &Mutex<Self>, mut cond: F) -> WaitResult
     where
         F: FnMut() -> Option<isize>,
     {
-        let ret = Self::wait_until_impl(wq, &mut cond, true, false);
-        if ret < 0 {
-            Err(ret)
-        } else {
-            Ok(ret)
-        }
+        Self::wait_event_impl(wq, &mut cond, true, None, Some(Self::WAIT_IO_FALLBACK_MS))
     }
 
     /// IO 等待（不可中断），正确标记 iowait 以用于 CPU iowait 统计。
@@ -622,7 +813,11 @@ impl WaitQueue {
     where
         F: FnMut() -> Option<isize>,
     {
-        Self::wait_until_impl(wq, &mut cond, false, true)
+        match Self::wait_event_impl(wq, &mut cond, false, None, Some(Self::WAIT_IO_FALLBACK_MS)) {
+            WaitResult::Ready(value) => value,
+            WaitResult::Interrupted => -(SyscallErr::ERESTART as isize),
+            WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
+        }
     }
 
     /// IO 等待（可中断），正确标记 iowait。
@@ -630,16 +825,86 @@ impl WaitQueue {
     /// 等价于 DragonOS 的 `wait_until_io_interruptible`。
     /// - `Ok(v)`：条件满足
     /// - `Err(-ERESTART)`：被信号中断
-    pub fn wait_until_io_interruptible<F>(wq: &Mutex<Self>, mut cond: F) -> Result<isize, isize>
+    pub fn wait_until_io_interruptible<F>(wq: &Mutex<Self>, mut cond: F) -> WaitResult
     where
         F: FnMut() -> Option<isize>,
     {
-        let ret = Self::wait_until_impl(wq, &mut cond, true, true);
-        if ret < 0 {
-            Err(ret)
-        } else {
-            Ok(ret)
-        }
+        Self::wait_event_impl(wq, &mut cond, true, None, Some(Self::WAIT_IO_FALLBACK_MS))
+    }
+
+    pub fn wait_event_interruptible<F>(wq: &Mutex<Self>, mut cond: F) -> WaitResult
+    where
+        F: FnMut() -> Option<isize>,
+    {
+        Self::wait_event_impl(wq, &mut cond, true, None, None)
+    }
+
+    pub fn wait_event_timeout<F>(
+        wq: &Mutex<Self>,
+        mut cond: F,
+        deadline: TimeSpec,
+    ) -> WaitResult
+    where
+        F: FnMut() -> Option<isize>,
+    {
+        Self::wait_event_impl(wq, &mut cond, false, Some(deadline), None)
+    }
+
+    pub fn wait_event_interruptible_timeout<F>(
+        wq: &Mutex<Self>,
+        mut cond: F,
+        deadline: TimeSpec,
+    ) -> WaitResult
+    where
+        F: FnMut() -> Option<isize>,
+    {
+        Self::wait_event_impl(wq, &mut cond, true, Some(deadline), None)
+    }
+
+    pub fn wait_event_interruptible_locked<T, Q, F>(
+        lock: &Mutex<T>,
+        queue_of: Q,
+        mut cond: F,
+    ) -> WaitResult
+    where
+        Q: for<'a> FnMut(&'a mut T) -> &'a mut WaitQueue,
+        F: FnMut(&mut T) -> Option<isize>,
+    {
+        Self::wait_event_locked_impl(lock, queue_of, &mut cond, true, None, None)
+    }
+
+    pub fn wait_event_interruptible_timeout_locked<T, Q, F>(
+        lock: &Mutex<T>,
+        queue_of: Q,
+        mut cond: F,
+        deadline: TimeSpec,
+    ) -> WaitResult
+    where
+        Q: for<'a> FnMut(&'a mut T) -> &'a mut WaitQueue,
+        F: FnMut(&mut T) -> Option<isize>,
+    {
+        Self::wait_event_locked_impl(lock, queue_of, &mut cond, true, Some(deadline), None)
+    }
+
+    pub fn wait_event_interruptible_timeout_locked_with_wake_result<T, Q, F>(
+        lock: &Mutex<T>,
+        queue_of: Q,
+        mut cond: F,
+        deadline: Option<TimeSpec>,
+        normal_wake_result: isize,
+    ) -> WaitResult
+    where
+        Q: for<'a> FnMut(&'a mut T) -> &'a mut WaitQueue,
+        F: FnMut(&mut T) -> Option<isize>,
+    {
+        Self::wait_event_locked_impl(
+            lock,
+            queue_of,
+            &mut cond,
+            true,
+            deadline,
+            Some(normal_wake_result),
+        )
     }
 }
 
@@ -945,8 +1210,9 @@ impl TimeoutWaitQueue {
                         // 释放锁
                         drop(inner);
                         log::trace!(
-                            "[wake_expired] pid: {}, timeout: {:?}",
-                            task.pid.0,
+                            "[wake_expired] tid: {}, pid: {}, timeout: {:?}",
+                            task.tid.0,
+                            task.pid(),
                             waiter.timeout
                         );
                         manager.wake_interruptible(task);
@@ -1012,27 +1278,8 @@ pub fn task_manager_counts() -> Option<(u16, u16)> {
 
 /// 返回所有活跃的 PID 列表
 pub fn all_pids() -> alloc::vec::Vec<usize> {
-    let manager = TASK_MANAGER.lock();
-    let mut pids = alloc::vec::Vec::new();
-    for task in manager.ready_queue.iter() {
-        let pid = task.pid.0;
-        if !pids.contains(&pid) {
-            pids.push(pid);
-        }
-    }
-    for task in manager.interruptible_queue.iter() {
-        let pid = task.pid.0;
-        if !pids.contains(&pid) {
-            pids.push(pid);
-        }
-    }
-    drop(manager);
-    // Also include the currently running task (not in any queue)
-    if let Some(current) = crate::task::current_task() {
-        let pid = current.pid.0;
-        if !pids.contains(&pid) {
-            pids.push(pid);
-        }
-    }
-    pids
+    super::registry::all_processes()
+        .into_iter()
+        .map(|process| process.pid)
+        .collect()
 }

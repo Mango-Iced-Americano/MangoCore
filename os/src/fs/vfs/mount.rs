@@ -395,6 +395,22 @@ impl IndexNode for MountFSInode {
         self.inner_inode.poll(private_data)
     }
 
+    fn read_wait_queue(&self) -> Option<&spin::Mutex<crate::task::WaitQueue>> {
+        self.inner_inode.read_wait_queue()
+    }
+
+    fn read_event_queue(&self) -> Option<&super::event::EventWaitQueue> {
+        self.inner_inode.read_event_queue()
+    }
+
+    fn write_wait_queue(&self) -> Option<&spin::Mutex<crate::task::WaitQueue>> {
+        self.inner_inode.write_wait_queue()
+    }
+
+    fn write_event_queue(&self) -> Option<&super::event::EventWaitQueue> {
+        self.inner_inode.write_event_queue()
+    }
+
     fn is_stream(&self) -> bool {
         self.inner_inode.is_stream()
     }

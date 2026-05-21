@@ -12,11 +12,14 @@ use crate::utils::error::SyscallErr;
 use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::any::Any;
 use core::fmt;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::{Mutex, MutexGuard};
 
 use super::{FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata};
+use super::event::EventWaitQueue;
+use crate::task::WaitQueue;
 use crate::config::SYSTEM_FD_LIMIT;
 
 // ── FileFlags ───────────────────────────────────────────────────────────
@@ -446,6 +449,36 @@ impl fmt::Debug for File {
     }
 }
 
+pub struct PollWaitQueue {
+    _inode: Arc<dyn IndexNode>,
+    queue: *const Mutex<WaitQueue>,
+}
+
+impl PollWaitQueue {
+    pub fn queue(&self) -> &Mutex<WaitQueue> {
+        // `PollWaitQueue` keeps the inode Arc alive, so the queue reference
+        // returned by `IndexNode` remains valid for this poll wait cycle.
+        unsafe { &*self.queue }
+    }
+}
+
+#[derive(Clone)]
+pub struct EventQueueHandle {
+    _inode: Arc<dyn IndexNode>,
+    queue: *const EventWaitQueue,
+}
+
+unsafe impl Send for EventQueueHandle {}
+unsafe impl Sync for EventQueueHandle {}
+
+impl EventQueueHandle {
+    pub fn queue(&self) -> &EventWaitQueue {
+        // `EventQueueHandle` keeps the inode Arc alive, so the queue reference
+        // returned by `IndexNode` remains valid for this poll/epoll cycle.
+        unsafe { &*self.queue }
+    }
+}
+
 impl File {
     /// 根据 inode 创建新 File
     pub fn new(inode: Arc<dyn IndexNode>, flags: FileFlags) -> Result<Self, SyscallErr> {
@@ -657,18 +690,72 @@ impl File {
 
     /// 读就绪检查（poll 用）
     pub fn r_ready(&self) -> bool {
-        match self.inode.poll(&*self.private_data.lock()) {
-            Ok(revents) => (revents & super::event::EPollEvent::EPOLLIN.bits()) != 0,
-            Err(_) => true, // ENOSYS fallback: 不支持 poll 的普通文件默认可读
-        }
+        self.poll_events()
+            .intersects(super::event::EPollEvent::EPOLLIN | super::event::EPollEvent::EPOLLRDNORM)
     }
 
     /// 写就绪检查（poll 用）
     pub fn w_ready(&self) -> bool {
+        self.poll_events().intersects(
+            super::event::EPollEvent::EPOLLOUT | super::event::EPollEvent::EPOLLWRNORM,
+        )
+    }
+
+    /// 统一 poll 事件检查。
+    ///
+    /// 还没有实现 poll 的普通文件保持旧行为：默认读写均就绪。
+    pub fn poll_events(&self) -> super::event::EPollEvent {
         match self.inode.poll(&*self.private_data.lock()) {
-            Ok(revents) => (revents & super::event::EPollEvent::EPOLLOUT.bits()) != 0,
-            Err(_) => true,
+            Ok(revents) => super::event::EPollEvent::from_bits_truncate(revents),
+            Err(_) => super::event::EPollEvent::EPOLLIN
+                | super::event::EPollEvent::EPOLLOUT
+                | super::event::EPollEvent::EPOLLRDNORM
+                | super::event::EPollEvent::EPOLLWRNORM,
         }
+    }
+
+    pub fn read_wait_queue(&self) -> Option<PollWaitQueue> {
+        if let Some(queue) = self.inode.read_event_queue() {
+            return Some(PollWaitQueue {
+                _inode: self.inode.clone(),
+                queue: queue.wait_queue() as *const Mutex<WaitQueue>,
+            });
+        }
+        let queue = self.inode.read_wait_queue()? as *const Mutex<WaitQueue>;
+        Some(PollWaitQueue {
+            _inode: self.inode.clone(),
+            queue,
+        })
+    }
+
+    pub fn write_wait_queue(&self) -> Option<PollWaitQueue> {
+        if let Some(queue) = self.inode.write_event_queue() {
+            return Some(PollWaitQueue {
+                _inode: self.inode.clone(),
+                queue: queue.wait_queue() as *const Mutex<WaitQueue>,
+            });
+        }
+        let queue = self.inode.write_wait_queue()? as *const Mutex<WaitQueue>;
+        Some(PollWaitQueue {
+            _inode: self.inode.clone(),
+            queue,
+        })
+    }
+
+    pub fn read_event_queue(&self) -> Option<EventQueueHandle> {
+        let queue = self.inode.read_event_queue()? as *const EventWaitQueue;
+        Some(EventQueueHandle {
+            _inode: self.inode.clone(),
+            queue,
+        })
+    }
+
+    pub fn write_event_queue(&self) -> Option<EventQueueHandle> {
+        let queue = self.inode.write_event_queue()? as *const EventWaitQueue;
+        Some(EventQueueHandle {
+            _inode: self.inode.clone(),
+            queue,
+        })
     }
 
     // ── 属性访问 ───────────────────────────────────────────────────
@@ -721,6 +808,10 @@ impl File {
     /// 获取私有数据的锁
     pub fn private_data(&self) -> MutexGuard<FilePrivateData> {
         self.private_data.lock()
+    }
+
+    pub fn inode_as_any_ref(&self) -> &dyn Any {
+        self.inode.as_any_ref()
     }
 
     // ── Clone ──────────────────────────────────────────────────────

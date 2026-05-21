@@ -3,7 +3,8 @@
 macro_rules! get_socket {
     ($sockfd:expr) => {{
         let task = crate::task::current_task().unwrap();
-        let fd_table = task.files.lock();
+        let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
         let file = match fd_table.get_file($sockfd as usize) {
             Err(e) => return -(e as isize),
             Ok(f) => {

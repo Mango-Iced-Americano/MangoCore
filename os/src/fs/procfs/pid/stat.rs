@@ -13,37 +13,36 @@ pub fn pid_stat_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    let task = match crate::task::find_task_by_pid(pid) {
-        Some(t) => t,
+    let process = match crate::task::find_process_by_pid(pid) {
+        Some(process) => process,
         None => return Err(SyscallErr::ENOENT),
     };
 
-    let (state_char, ppid, pgid) = {
+    let state_char = if process.is_zombie() {
+        'Z'
+    } else if let Some(task) = process.any_live_thread() {
         let inner = task.acquire_inner_lock();
-        let state = match inner.task_status {
+        match inner.task_status {
             TaskStatus::Ready => 'R',
             TaskStatus::Running => 'R',
             TaskStatus::Interruptible => 'S',
             TaskStatus::Zombie => 'Z',
-        };
-        let ppid_val = inner
-            .parent
-            .as_ref()
-            .and_then(|p| p.upgrade())
-            .map(|p| p.pid.0)
-            .unwrap_or(0);
-        let pgid_val = inner.pgid;
-        (state, ppid_val, pgid_val)
+        }
+    } else {
+        'R'
     };
+    let ppid = process.parent_pid();
+    let pgid = process.getpgid();
+    let num_threads = process.live_thread_count().max(1);
 
     let comm = {
-        let exe = task.exe_path.lock();
+        let exe = process.exe_path();
         if exe.is_empty() {
             String::from("(initproc)")
         } else if let Some(pos) = exe.rfind('/') {
             alloc::format!("({})", &exe[pos + 1..])
         } else {
-            alloc::format!("({})", exe.as_str())
+            alloc::format!("({})", exe)
         }
     };
 
@@ -71,7 +70,7 @@ pub fn pid_stat_content(
         0,                                      // 17: cstime (not tracked)
         20,                                     // 18: priority (default)
         0,                                      // 19: nice
-        1,                                      // 20: num_threads
+        num_threads,                            // 20: num_threads
         0,                                      // 21: itrealvalue
         0,                                      // 22: starttime (not tracked)
         0,                                      // 23: vsize

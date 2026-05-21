@@ -109,8 +109,9 @@ pub fn trap_handler() -> ! {
             let mut inner = task.acquire_inner_lock();
             let addr = VirtAddr::from(stval);
             log::debug!(
-                "[page_fault] pid: {}, type: {:?}",
-                task.pid.0,
+                "[page_fault] tid: {}, pid: {}, type: {:?}",
+                task.tid.0,
+                task.pid(),
                 scause.cause()
             );
             // This is where we handle the page fault.
@@ -122,7 +123,7 @@ pub fn trap_handler() -> ! {
                 | Trap::Exception(Exception::InstructionPageFault) => FaultAccess::Execute,
                 _ => FaultAccess::Load,
             };
-            if let Err(error) = task.vm.lock().do_page_fault(addr, access) {
+            if let Err(error) = task.process.vm().lock().do_page_fault(addr, access) {
                 match error {
                     MemoryError::BeyondEOF | MemoryError::BackingStoreFailure => {
                         inner.add_signal(Signals::SIGBUS);

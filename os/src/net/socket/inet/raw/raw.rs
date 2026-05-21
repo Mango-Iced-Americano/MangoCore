@@ -2,6 +2,7 @@ use crate::net::syscall::common::MsgFlags;
 use crate::net::{
     config::NET_INTERFACE, Endpoint, Mutex, Socket, MAX_BUFFER_SIZE, RAW_SOCKETS, SHUT_WR,
 };
+use crate::fs::vfs::event::EventWaitQueue;
 use crate::task::WaitQueue;
 use crate::utils::error::{GeneralRet, SyscallErr, SyscallRet};
 use alloc::{
@@ -19,8 +20,8 @@ use smoltcp::{
 pub struct RawSocket {
     inner: Mutex<RawSocketInner>,
     socket_handler: SocketHandle,
-    recv_waiters: Mutex<WaitQueue>,
-    send_waiters: Mutex<WaitQueue>,
+    recv_waiters: EventWaitQueue,
+    send_waiters: EventWaitQueue,
 }
 
 #[allow(unused)]
@@ -184,10 +185,18 @@ impl Socket for RawSocket {
     }
 
     fn recv_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(self.recv_waiters.wait_queue())
+    }
+
+    fn recv_event_queue(&self) -> Option<&EventWaitQueue> {
         Some(&self.recv_waiters)
     }
 
     fn send_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(self.send_waiters.wait_queue())
+    }
+
+    fn send_event_queue(&self) -> Option<&EventWaitQueue> {
         Some(&self.send_waiters)
     }
 
@@ -234,8 +243,8 @@ impl RawSocket {
 
         Self {
             inner: Mutex::new(inner),
-            recv_waiters: Mutex::new(WaitQueue::new()),
-            send_waiters: Mutex::new(WaitQueue::new()),
+            recv_waiters: EventWaitQueue::new(),
+            send_waiters: EventWaitQueue::new(),
             socket_handler,
         }
     }

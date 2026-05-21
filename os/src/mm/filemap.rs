@@ -1,11 +1,10 @@
 use super::page_fault::FaultContext;
 use super::user_mapper::UserMapper;
-use super::vma::{Vma, VmAreaMapping};
-use super::{MapPermission, MemoryError, PageTable, PhysAddr, PhysPageNum, VirtAddr};
+use super::vma::Vma;
+use super::{MapPermission, MemoryError, PageTable, PhysAddr, PhysPageNum};
 use crate::config::{PAGE_SIZE, PAGE_SIZE_BITS};
 use crate::fs::vfs::IndexNode;
 use crate::utils::error::SyscallErr;
-use alloc::sync::Arc;
 
 fn round_up_page(size: usize) -> usize {
     size.saturating_add(PAGE_SIZE - 1) & !(PAGE_SIZE - 1)
@@ -39,6 +38,36 @@ fn map_pc_error(e: SyscallErr) -> MemoryError {
     }
 }
 
+fn verify_filemap_fault<T: PageTable>(
+    area: &Vma,
+    page_table: &mut T,
+    ctx: FaultContext,
+    expected_ppn: PhysPageNum,
+) -> Result<PhysAddr, MemoryError> {
+    if area.inner.get_in_memory(&ctx.vpn).is_none() {
+        log::warn!(
+            "[filemap] fault succeeded without resident frame: vpn={:?}",
+            ctx.vpn
+        );
+        return Err(MemoryError::NotMapped);
+    }
+
+    let mapped_ppn = UserMapper::new(page_table)
+        .translate(ctx.vpn)
+        .ok_or(MemoryError::NotMapped)?;
+    if mapped_ppn != expected_ppn {
+        log::warn!(
+            "[filemap] pte/frame mismatch: vpn={:?}, pte={:?}, expected={:?}",
+            ctx.vpn,
+            mapped_ppn,
+            expected_ppn
+        );
+        return Err(MemoryError::BackingStoreFailure);
+    }
+
+    Ok(ctx.offset_phys(mapped_ppn))
+}
+
 pub(super) fn filemap_private_fault<T: PageTable>(
     area: &mut Vma,
     page_table: &mut T,
@@ -61,7 +90,7 @@ pub(super) fn filemap_private_fault<T: PageTable>(
     dst.copy_from_slice(src);
     zero_tail(file_size, file_offset, dst);
 
-    Ok(ctx.offset_phys(allocated_ppn))
+    verify_filemap_fault(area, page_table, ctx, allocated_ppn)
 }
 
 pub(super) fn filemap_read_fault<T: PageTable>(
@@ -100,7 +129,7 @@ pub(super) fn filemap_read_fault<T: PageTable>(
         return Err(err);
     }
 
-    Ok(ctx.offset_phys(cache_ppn))
+    verify_filemap_fault(area, page_table, ctx, cache_ppn)
 }
 
 pub(super) fn filemap_shared_write_fault<T: PageTable>(
@@ -130,5 +159,5 @@ pub(super) fn filemap_shared_write_fault<T: PageTable>(
         return Err(err);
     }
 
-    Ok(ctx.offset_phys(cache_ppn))
+    verify_filemap_fault(area, page_table, ctx, cache_ppn)
 }

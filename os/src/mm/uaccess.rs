@@ -1,8 +1,8 @@
 use core::{marker::PhantomData, ops::IndexMut};
 
-use crate::fs::iov::IOVec;
-use super::page_table::{FaultAccess, PageTable, UserAccess};
+use super::page_table::{FaultAccess, UserAccess};
 use super::{PhysAddr, StepByOne, VirtAddr};
+use crate::fs::iov::IOVec;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -376,22 +376,19 @@ fn is_current_user_token(token: usize) -> bool {
 // 区分用户触发缺页时的权限
 // 例如：copy_from_user - Read; copy_to_user - Write; 获得可变引用-ReadWrite等
 // 通过不同权限的区分使得缺页处理更灵活更稳定
-fn handle_user_page_fault(token: usize, va: VirtAddr, access: UserAccess) -> Result<(), isize> {
-    // page_fault只能由当前任务token处理
+fn fault_in_current_user_va(
+    token: usize,
+    va: VirtAddr,
+    access: FaultAccess,
+) -> Result<PhysAddr, isize> {
+    // fault-in 只能由当前任务 token 处理；跨进程 token 只能返回 EFAULT。
     if !is_current_user_token(token) {
         return Err(crate::syscall::errno::EFAULT);
     }
-    // ReadWrite first resolves read access, then write access.
-    match access {
-        UserAccess::Read => super::address_space::check_page_fault(va, FaultAccess::Load).map(|_| ()),
-        UserAccess::Write => {
-            super::address_space::check_page_fault(va, FaultAccess::Store).map(|_| ())
-        }
-        UserAccess::ReadWrite => {
-            super::address_space::check_page_fault(va, FaultAccess::Load)?;
-            super::address_space::check_page_fault(va, FaultAccess::Store).map(|_| ())
-        }
-    }
+    let task = crate::task::current_task().ok_or(crate::syscall::errno::EFAULT)?;
+    let vm = task.process.vm();
+    let result = vm.lock().fault_in_user_va(va, access);
+    result
 }
 
 // 将用户va翻译为pa
@@ -401,27 +398,15 @@ pub fn translate_user_va_checked(
     access: UserAccess,
 ) -> Result<PhysAddr, isize> {
     check_user_range(va.0, 1)?;
-    let vpn = va.floor();
-    let mut page_table = super::PageTableImpl::from_token(token);
-    // pte不存在，可能是lazy alloc、swap、页压缩等情况，做缺页处理
-    if page_table.translate_va(va).is_none() {
-        handle_user_page_fault(token, va, access)?;
-        page_table = super::PageTableImpl::from_token(token);
+
+    match access {
+        UserAccess::Read => fault_in_current_user_va(token, va, FaultAccess::Load),
+        UserAccess::Write => fault_in_current_user_va(token, va, FaultAccess::Store),
+        UserAccess::ReadWrite => {
+            fault_in_current_user_va(token, va, FaultAccess::Load)?;
+            fault_in_current_user_va(token, va, FaultAccess::Store)
+        }
     }
-    let mut ok = page_table.user_access_ok(vpn, access).unwrap_or(false);
-    // pte存在但不可写，可能为cow等情况，再进行一次缺页处理
-    if !ok && access.needs_write() {
-        handle_user_page_fault(token, va, access)?;
-        page_table = super::PageTableImpl::from_token(token);
-        ok = page_table.user_access_ok(vpn, access).unwrap_or(false);
-    }
-    // 如果这时候还不ok，是真的权限错误了
-    if !ok {
-        return Err(crate::syscall::errno::EFAULT);
-    }
-    page_table
-        .translate_va(va)
-        .ok_or(crate::syscall::errno::EFAULT)
 }
 
 // Split a user buffer by page.

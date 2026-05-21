@@ -64,14 +64,13 @@ pub fn sys_socketpair(domain: u32, socket_type: u32, protocol: u32, sv: usize) -
     let vf2 =
         vfs::File::new_without_open(socket_file2, vfs_flags, vfs::FileType::Socket);
 
-    let fd1 = task
-        .files
+    let files_ref = task.process.files();
+    let fd1 = files_ref
         .lock()
         .alloc_fd(vf1, is_cloexec)
         .map_err(|e| -(e as isize))
         .unwrap();
-    let fd2 = task
-        .files
+    let fd2 = files_ref
         .lock()
         .alloc_fd(vf2, is_cloexec)
         .map_err(|e| -(e as isize))

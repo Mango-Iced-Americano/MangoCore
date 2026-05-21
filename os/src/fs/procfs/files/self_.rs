@@ -16,7 +16,7 @@ pub fn self_content(
     // /proc/self is a symlink, but it's implemented as a file with dynamic content.
     // The VFS symlink resolution path will call read_at to get the target.
     let pid = crate::task::current_task()
-        .map(|t| t.pid.0)
+        .map(|t| t.pid())
         .unwrap_or(0);
     let s = format!("{}", pid);
     proc_read_str(offset, len, buf, &s)
