@@ -39,5 +39,6 @@ pub use signal::{
 pub use time::{
     sys_adjtimex, sys_clock_adjtime, sys_clock_getres, sys_clock_gettime, sys_clock_nanosleep,
     sys_clock_settime, sys_get_time, sys_getitimer, sys_getrusage, sys_gettimeofday, sys_nanosleep,
-    sys_setitimer, sys_times, Timex,
+    sys_setitimer, sys_timer_create, sys_timer_delete, sys_timer_getoverrun, sys_timer_gettime,
+    sys_timer_settime, sys_times, ITimerSpec, SigeventHeader, Timex,
 };

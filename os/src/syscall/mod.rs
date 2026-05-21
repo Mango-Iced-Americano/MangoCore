@@ -74,6 +74,11 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_NANOSLEEP => "nanosleep",
         SYSCALL_GETITIMER => "getitimer",
         SYSCALL_SETITIMER => "setitimer",
+        SYSCALL_TIMER_CREATE => "timer_create",
+        SYSCALL_TIMER_GETTIME => "timer_gettime",
+        SYSCALL_TIMER_GETOVERRUN => "timer_getoverrun",
+        SYSCALL_TIMER_SETTIME => "timer_settime",
+        SYSCALL_TIMER_DELETE => "timer_delete",
         SYSCALL_CLOCK_SETTIME => "clock_settime",
         SYSCALL_CLOCK_GETTIME => "clock_gettime",
         SYSCALL_CLOCK_GETRES => "clock_getres",
@@ -362,6 +367,18 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[1] as *const ITimerVal,
             args[2] as *mut ITimerVal,
         ),
+        SYSCALL_TIMER_CREATE => {
+            sys_timer_create(args[0], args[1] as *const SigeventHeader, args[2] as *mut i32)
+        }
+        SYSCALL_TIMER_GETTIME => sys_timer_gettime(args[0], args[1] as *mut ITimerSpec),
+        SYSCALL_TIMER_GETOVERRUN => sys_timer_getoverrun(args[0]),
+        SYSCALL_TIMER_SETTIME => sys_timer_settime(
+            args[0],
+            args[1] as u32,
+            args[2] as *const ITimerSpec,
+            args[3] as *mut ITimerSpec,
+        ),
+        SYSCALL_TIMER_DELETE => sys_timer_delete(args[0]),
         SYSCALL_GET_TIME => sys_get_time(),
         SYSCALL_GETRUSAGE => sys_getrusage(args[0] as isize, args[1] as *mut Rusage),
         SYSCALL_UMASK => sys_umask(args[0] as u32),

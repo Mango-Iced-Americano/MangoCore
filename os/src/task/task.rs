@@ -111,8 +111,33 @@ pub struct TaskControlBlockInner {
     pub real_timer_deadline: Option<TimeSpec>,
     /// ITIMER_REAL 的版本号，用于让旧TimerQueue节点失效
     pub real_timer_generation: usize,
+    /// POSIX timer 的最小兼容实现。当前按创建线程保存，用于 LTP timer/clock 用例。
+    pub posix_timers: Vec<Option<PosixTimer>>,
     /// OOM killer pending 标志：分配器已耗尽，本进程将在 trap_return 时被杀死
     pub pending_oom_kill: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PosixTimer {
+    pub clock_id: usize,
+    pub signal: Signals,
+    pub interval: TimeSpec,
+    pub value: TimeSpec,
+    pub deadline: Option<TimeSpec>,
+    pub generation: usize,
+}
+
+impl PosixTimer {
+    pub fn new(clock_id: usize, signal: Signals) -> Self {
+        Self {
+            clock_id,
+            signal,
+            interval: TimeSpec::new(),
+            value: TimeSpec::new(),
+            deadline: None,
+            generation: 0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -542,6 +567,7 @@ impl TaskControlBlock {
                 timer: [ITimerVal::new(); 3],
                 real_timer_deadline: None,
                 real_timer_generation: 0,
+                posix_timers: Vec::new(),
                 pending_oom_kill: false,
             }),
         });
@@ -834,6 +860,7 @@ impl TaskControlBlock {
                 timer: [ITimerVal::new(); 3],
                 real_timer_deadline: None,
                 real_timer_generation: 0,
+                posix_timers: Vec::new(),
                 sigmask: parent_inner.sigmask,
                 sigmask_to_restore: None,
                 // compute
