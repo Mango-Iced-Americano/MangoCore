@@ -8,7 +8,9 @@ use crate::mm::{
     UserPtrMut, UserSlice, VirtAddr,
 };
 use crate::syscall::utils::wait_io_core;
-use crate::task::{current_task, current_user_token, signal, WaitQueue, WaitResult};
+use crate::task::{
+    current_task, current_user_token, is_executable_inode_busy, signal, WaitQueue, WaitResult,
+};
 use crate::timer::{current_timespec, TimeSpec};
 use crate::utils::error::SyscallErr;
 use alloc::boxed::Box;
@@ -22,6 +24,7 @@ use num_enum::FromPrimitive;
 
 // 防止用户传入过大参数导致内核 OOM 或者长时间阻塞
 const MAX_SYSCALL_BUFFER_SIZE: usize = 2 * 1024 * 1024; // 限制为 2 MiB
+const OPEN_ACCMODE_MASK: u32 = 0o3;
 
 pub const AT_FDCWD: usize = 100usize.wrapping_neg();
 
@@ -121,6 +124,26 @@ fn validate_path_len(path: &str) -> Result<(), isize> {
     Ok(())
 }
 
+fn open_subject_ids() -> (u32, u32) {
+    let task = current_task().unwrap();
+    let inner = task.acquire_inner_lock();
+    (inner.fsuid, inner.fsgid)
+}
+
+fn open_requests_write(flags: OpenFlags) -> bool {
+    let access_mode = flags.bits() & OPEN_ACCMODE_MASK;
+    access_mode == OpenFlags::O_WRONLY.bits()
+        || access_mode == OpenFlags::O_RDWR.bits()
+        || flags.contains(OpenFlags::O_TRUNC)
+}
+
+fn has_directory_write_search_access(meta: &vfs::Metadata, uid: u32, gid: u32) -> bool {
+    if uid == 0 {
+        return true;
+    }
+    (permission_class_bits(meta, uid, gid) & 0o3) == 0o3
+}
+
 fn metadata_to_stat(meta: &vfs::Metadata) -> Stat {
     Stat {
         st_dev: meta.dev_id as u64,
@@ -177,6 +200,12 @@ fn open_file_at(
             .ok_or(ENOMEM);
     }
 
+    let (uid, gid) = open_subject_ids();
+    let parent_result = check_parent_search_access(&start, path, uid, gid);
+    if parent_result != SUCCESS {
+        return Err(parent_result);
+    }
+
     let follow_final = !flags.contains(OpenFlags::O_NOFOLLOW);
     match vfs_lookup(&start, path, follow_final) {
         Ok(target) => {
@@ -192,6 +221,14 @@ fn open_file_at(
             if md.file_type != FileType::Dir && flags.contains(OpenFlags::O_DIRECTORY) {
                 return Err(ENOTDIR);
             }
+            if open_requests_write(flags) {
+                if is_executable_inode_busy(&target) {
+                    return Err(ETXTBSY);
+                }
+                if !has_final_access(&md, FaccessatMode::W_OK, uid, gid) {
+                    return Err(EACCES);
+                }
+            }
             if flags.contains(OpenFlags::O_TRUNC) {
                 target.resize(0).map_err(|e| -(e as isize))?;
             }
@@ -202,6 +239,7 @@ fn open_file_at(
                 return Err(errno);
             }
             let (parent, leaf) = vfs_lookup_parent_for_start(&start, path)?;
+            check_parent_write_search_access(&parent, uid, gid)?;
             let inode = parent
                 .create(&leaf, FileType::File, mode & vfs::InodeMode::S_IALLUGO)
                 .map_err(|e| -(e as isize))?;
@@ -1671,6 +1709,9 @@ pub fn sys_openat(dirfd: usize, path: *const u8, flags: u32, mode: u32) -> isize
         Ok(path) => path,
         Err(errno) => return errno,
     };
+    if let Err(errno) = validate_path_len(&path) {
+        return errno;
+    }
     let flags = match OpenFlags::from_bits(flags) {
         Some(flags) => flags,
         None => {
@@ -2421,14 +2462,14 @@ fn check_parent_search_access(
     gid: u32,
 ) -> isize {
     let components = parse_path(path);
-    let mut current = if path.starts_with('/') {
+    let base = if path.starts_with('/') {
         vfs_root().mountpoint_root_inode()
     } else {
         start.clone()
     };
 
-    for name in components.iter().take(components.len().saturating_sub(1)) {
-        let meta = match current.metadata() {
+    let check_dir = |inode: &Arc<dyn vfs::IndexNode>| -> isize {
+        let meta = match inode.metadata() {
             Ok(meta) => meta,
             Err(e) => return -(e as isize),
         };
@@ -2438,22 +2479,52 @@ fn check_parent_search_access(
         if !has_search_access(&meta, uid, gid) {
             return EACCES;
         }
-        current = match current.find(name) {
-            Ok(inode) => inode,
-            Err(e) => return -(e as isize),
-        };
-    }
-    let meta = match current.metadata() {
-        Ok(meta) => meta,
-        Err(e) => return -(e as isize),
+        SUCCESS
     };
-    if meta.file_type != FileType::Dir {
-        return ENOTDIR;
+
+    let result = check_dir(&base);
+    if result != SUCCESS {
+        return result;
     }
-    if !has_search_access(&meta, uid, gid) {
-        return EACCES;
+
+    let mut prefix = String::new();
+    for (idx, name) in components
+        .iter()
+        .take(components.len().saturating_sub(1))
+        .enumerate()
+    {
+        if idx > 0 {
+            prefix.push('/');
+        }
+        prefix.push_str(name);
+        let inode = match vfs_lookup(&base, &prefix, true) {
+            Ok(inode) => inode,
+            Err(errno) => return errno,
+        };
+        let result = check_dir(&inode);
+        if result != SUCCESS {
+            return result;
+        }
     }
     SUCCESS
+}
+
+fn check_parent_write_search_access(
+    parent: &Arc<dyn vfs::IndexNode>,
+    uid: u32,
+    gid: u32,
+) -> Result<(), isize> {
+    let meta = match parent.metadata() {
+        Ok(meta) => meta,
+        Err(e) => return Err(-(e as isize)),
+    };
+    if meta.file_type != FileType::Dir {
+        return Err(ENOTDIR);
+    }
+    if !has_directory_write_search_access(&meta, uid, gid) {
+        return Err(EACCES);
+    }
+    Ok(())
 }
 
 pub fn sys_faccessat2(dirfd: usize, pathname: *const u8, mode: u32, flags: u32) -> isize {

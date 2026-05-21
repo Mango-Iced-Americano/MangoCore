@@ -9,9 +9,11 @@ use super::{
 use crate::fs::vfs;
 use crate::mm::{AddressSpace, PageTableImpl};
 use crate::utils::error::SyscallErr;
+use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
 use alloc::string::String;
 use alloc::vec::Vec;
+use lazy_static::lazy_static;
 use log::warn;
 use spin::{Mutex, MutexGuard};
 
@@ -41,6 +43,8 @@ pub struct ProcessControlBlock {
 pub struct ProcessInner {
     /// 可执行文件描述符（新 VFS）。
     exe: Arc<Mutex<vfs::File>>,
+    /// 当前可执行文件的稳定 key，用于 open(O_TRUNC/O_WRONLY) 返回 ETXTBSY。
+    exec_key: Option<ExecInodeKey>,
     /// 可执行文件路径（用于 /proc/self/exe）。
     exe_path: String,
     /// 文件描述符表（新 VFS）。
@@ -76,6 +80,48 @@ pub struct ProcessSignalState {
     pub group_exiting: bool,
 }
 
+type ExecInodeKey = (usize, vfs::InodeId);
+
+lazy_static! {
+    static ref EXEC_INODE_REFS: Mutex<BTreeMap<ExecInodeKey, usize>> =
+        Mutex::new(BTreeMap::new());
+}
+
+fn exec_key_from_file(file: &vfs::File) -> Option<ExecInodeKey> {
+    file.metadata().ok().map(|meta| (meta.dev_id, meta.inode_id))
+}
+
+fn register_exec_key(key: ExecInodeKey) {
+    let mut refs = EXEC_INODE_REFS.lock();
+    let count = refs.entry(key).or_insert(0);
+    *count = count.saturating_add(1);
+}
+
+fn unregister_exec_key(key: ExecInodeKey) {
+    let mut refs = EXEC_INODE_REFS.lock();
+    let remove = if let Some(count) = refs.get_mut(&key) {
+        if *count > 1 {
+            *count -= 1;
+            false
+        } else {
+            true
+        }
+    } else {
+        false
+    };
+    if remove {
+        refs.remove(&key);
+    }
+}
+
+pub fn is_executable_inode_busy(inode: &Arc<dyn vfs::IndexNode>) -> bool {
+    let key = match inode.metadata() {
+        Ok(meta) => (meta.dev_id, meta.inode_id),
+        Err(_) => return false,
+    };
+    EXEC_INODE_REFS.lock().get(&key).copied().unwrap_or(0) > 0
+}
+
 impl ProcessControlBlock {
     pub fn new(
         pid: usize,
@@ -91,6 +137,13 @@ impl ProcessControlBlock {
         futex: Arc<Mutex<Futex>>,
         user_res_slot_allocator: Arc<Mutex<RecycleAllocator>>,
     ) -> Self {
+        let exec_key = {
+            let lock = exe.lock();
+            exec_key_from_file(&lock)
+        };
+        if let Some(key) = exec_key {
+            register_exec_key(key);
+        }
         Self {
             pid,
             leader_tid,
@@ -100,6 +153,7 @@ impl ProcessControlBlock {
             vfork_done: Completion::new(),
             inner: Mutex::new(ProcessInner {
                 exe,
+                exec_key,
                 exe_path,
                 files,
                 fs,
@@ -138,7 +192,18 @@ impl ProcessControlBlock {
     }
 
     pub fn replace_exe(&self, exe: vfs::File) {
-        self.inner.lock().exe = Arc::new(Mutex::new(exe));
+        let new_key = exec_key_from_file(&exe);
+        let mut inner = self.inner.lock();
+        if inner.exec_key != new_key {
+            if let Some(old_key) = inner.exec_key.take() {
+                unregister_exec_key(old_key);
+            }
+            if let Some(key) = new_key {
+                register_exec_key(key);
+            }
+            inner.exec_key = new_key;
+        }
+        inner.exe = Arc::new(Mutex::new(exe));
     }
 
     pub fn files(&self) -> Arc<Mutex<vfs::FdTable>> {
@@ -352,6 +417,10 @@ impl ProcessControlBlock {
         if !self.mark_zombie(exit_code) {
             return;
         }
+        let old_exec_key = self.inner.lock().exec_key.take();
+        if let Some(key) = old_exec_key {
+            unregister_exec_key(key);
+        }
 
         if let Some(parent_process) = self.parent() {
             parent_process.child_exit_wait.lock().wake_all();
@@ -400,6 +469,9 @@ impl ProcessControlBlock {
 
 impl Drop for ProcessControlBlock {
     fn drop(&mut self) {
+        if let Some(key) = self.inner.get_mut().exec_key.take() {
+            unregister_exec_key(key);
+        }
         registry::unregister_process(self.pid);
     }
 }
