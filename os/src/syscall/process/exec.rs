@@ -133,34 +133,45 @@ pub fn sys_execve(
             let _ = file.pread(0, &mut magic_number);
             let elf = if &magic_number == b"\x7fELF" {
                 file
-            } else if let Some((interpreter, shebang_arg)) = match parse_shebang(&file) {
-                Ok(result) => result,
-                Err(errno) => return errno,
-            } {
-                let shell_file = match open_exec(&interpreter) {
-                    Ok(file) => file,
-                    Err(errno) => return errno,
-                };
-                let mut script_argv = Vec::new();
-                let extra = 2 + shebang_arg.as_ref().map_or(0, |_| 1);
-                if script_argv
-                    .try_reserve(argv_vec.len().saturating_add(extra))
-                    .is_err()
-                {
-                    return ENOMEM;
-                }
-                script_argv.push(interpreter);
-                if let Some(arg) = shebang_arg {
-                    script_argv.push(arg);
-                }
-                script_argv.push(path.clone());
-                for arg in argv_vec.iter().skip(1) {
-                    if script_argv.try_reserve(1).is_err() {
-                        return ENOMEM;
+            } else if &magic_number[..2] == b"#!" {
+                // 脚本：优先用 shebang 指定的解释器，不存在则回退 /bin/bash
+                let shell_file = match parse_shebang(&file) {
+                    Ok(Some((interp, shebang_arg))) => {
+                        match open_exec(&interp) {
+                            Ok(f) => {
+                                let mut script_argv = Vec::new();
+                                script_argv.push(interp);
+                                if let Some(arg) = shebang_arg { script_argv.push(arg); }
+                                script_argv.push(path.clone());
+                                for arg in argv_vec.iter().skip(1) {
+                                    script_argv.push(arg.clone());
+                                }
+                                argv_vec = script_argv;
+                                f
+                            }
+                            Err(_) => {
+                                match open_exec("/bin/bash") {
+                                    Ok(f) => {
+                                        if argv_vec.try_reserve(1).is_err() { return ENOMEM; }
+                                        argv_vec.insert(0, path.clone());
+                                        f
+                                    }
+                                    Err(e) => return e,
+                                }
+                            }
+                        }
                     }
-                    script_argv.push(arg.clone());
-                }
-                argv_vec = script_argv;
+                    _ => {
+                        match open_exec("/bin/bash") {
+                            Ok(f) => {
+                                if argv_vec.try_reserve(1).is_err() { return ENOMEM; }
+                                argv_vec.insert(0, path.clone());
+                                f
+                            }
+                            Err(e) => return e,
+                        }
+                    }
+                };
                 shell_file
             } else {
                 return ENOEXEC;
