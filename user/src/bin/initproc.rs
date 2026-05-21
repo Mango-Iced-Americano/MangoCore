@@ -708,6 +708,9 @@ fn should_preload_musl_ltp_compat(libc_suffix: &str, name: &str) -> bool {
 }
 
 fn should_skip_ltp_helper(name: &str) -> Option<&'static str> {
+    if name.starts_with("cfs_bandwidth") || name.starts_with("cgroup_") {
+        return Some("requires cgroup support");
+    }
     if name.starts_with("cgroup_regression") {
         return Some("cgroup regression helper");
     }
@@ -716,6 +719,12 @@ fn should_skip_ltp_helper(name: &str) -> Option<&'static str> {
         || name.starts_with("cpu_controller")
     {
         return Some("cgroup controller helper");
+    }
+    if name.starts_with("cpufreq") {
+        return Some("requires CPU frequency sysfs");
+    }
+    if name.starts_with("cpuhotplug") {
+        return Some("requires CPU hotplug support");
     }
 
     match name {
