@@ -497,7 +497,7 @@ impl<T: PageTable> AddressSpace<T> {
                     );
                     debug!("[map_elf] Found interpreter path: {}", path);
                     let interp_data = crate::task::load_elf_interp(&path)?;
-                    let interp = xmas_elf::ElfFile::new(interp_data).unwrap();
+                    let interp = xmas_elf::ElfFile::new(interp_data).map_err(|_| ENOEXEC)?;
                     let (_, interp_info) = self.map_elf(&interp)?;
                     interp_entry = Some(interp_info.entry);
                     interp_base = Some(interp_info.base);
@@ -540,7 +540,11 @@ impl<T: PageTable> AddressSpace<T> {
         }
         // map signaltrampoline
         address_space.map_signaltrampoline();
-        let elf = xmas_elf::ElfFile::new(elf_data).unwrap();
+        let elf = xmas_elf::ElfFile::new(elf_data).map_err(|_| {
+            log::warn!("[from_elf] invalid ELF: {} bytes, first 16: {:02x?}",
+                elf_data.len(), &elf_data[..16.min(elf_data.len())]);
+            ENOEXEC
+        })?;
         let (program_break, elf_info) = address_space.map_elf(&elf)?;
         address_space.heap_bottom = program_break;
         address_space.heap_pt = program_break;
