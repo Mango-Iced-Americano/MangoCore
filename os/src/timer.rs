@@ -300,7 +300,7 @@ pub enum TimeRange {
     TimeVal(TimeVal),
 }
 
-use core::sync::atomic::{AtomicU64};
+use core::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 /// 启动以来的时间源（秒），例如通过读取 mtime / TSC
 pub trait TimeSource {
@@ -316,8 +316,9 @@ pub trait TimeSource {
 /// monotonic clock；这里先提供一个稳定 fallback，后续可替换为真实 RTC 初始化。
 const DEFAULT_BOOT_TIME_OFFSET: u64 = 1_798_761_600; // 2027-01-01 00:00:00 UTC
 
-/// 系统启动时间偏移（使 current_time = Unix 时间）
-static BOOT_TIME_OFFSET: AtomicU64 = AtomicU64::new(DEFAULT_BOOT_TIME_OFFSET);
+/// 系统启动时间偏移（纳秒，使 current_time = Unix 时间）。
+static BOOT_TIME_OFFSET_NS: AtomicU64 =
+    AtomicU64::new(DEFAULT_BOOT_TIME_OFFSET * NSEC_PER_SEC as u64);
 
 static mut TIME_SOURCE: Option<&'static dyn TimeSource> = None;
 
@@ -332,7 +333,7 @@ pub fn init_time_source(ts: &'static dyn TimeSource) {
 pub fn init_time_from_cmdline(cmdline: &str) {
     if let Some(ts) = parse_cmdline_boot_time(cmdline) {
         let uptime = uptime();
-        BOOT_TIME_OFFSET.store(ts - uptime, core::sync::atomic::Ordering::Relaxed);
+        BOOT_TIME_OFFSET_NS.store((ts - uptime) * NSEC_PER_SEC as u64, AtomicOrdering::Relaxed);
     } else {
         panic!("no valid now= timestamp in cmdline");
     }
@@ -340,25 +341,31 @@ pub fn init_time_from_cmdline(cmdline: &str) {
 
 /// 当前 Unix 时间戳
 pub fn current_time() -> u64 {
-    uptime() + BOOT_TIME_OFFSET.load(core::sync::atomic::Ordering::Relaxed)
+    current_timespec().tv_sec as u64
 }
 
 /// 当前 Unix 时间戳（安全版本）
 pub fn current_time_safe() -> u64 {
-    let offset = BOOT_TIME_OFFSET.load(core::sync::atomic::Ordering::Relaxed);
-    get_time_sec() as u64 + offset
+    current_time()
 }
 
 /// 当前 Unix 时间戳，timespec 形式。
 pub fn current_timespec() -> TimeSpec {
-    let offset = BOOT_TIME_OFFSET.load(core::sync::atomic::Ordering::Relaxed) as usize;
-    TimeSpec::from_ns(get_time_ns() + offset * NSEC_PER_SEC)
+    let offset = BOOT_TIME_OFFSET_NS.load(AtomicOrdering::Relaxed) as usize;
+    TimeSpec::from_ns(get_time_ns() + offset)
 }
 
 /// 当前 Unix 时间戳，timeval 形式。
 pub fn current_timeval() -> TimeVal {
-    let offset = BOOT_TIME_OFFSET.load(core::sync::atomic::Ordering::Relaxed) as usize;
-    TimeVal::from_us(get_time_us() + offset * USEC_PER_SEC)
+    let offset_us =
+        (BOOT_TIME_OFFSET_NS.load(AtomicOrdering::Relaxed) / NSEC_PER_USEC as u64) as usize;
+    TimeVal::from_us(get_time_us() + offset_us)
+}
+
+/// 设置当前 Unix 时间。单调时钟不受影响，仅调整 wall-clock 偏移。
+pub fn set_current_timespec(target: TimeSpec) {
+    let offset = target.to_ns().saturating_sub(get_time_ns());
+    BOOT_TIME_OFFSET_NS.store(offset as u64, AtomicOrdering::Relaxed);
 }
 
 /// 获取系统启动以来的时间（秒）

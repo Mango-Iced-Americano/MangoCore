@@ -7,8 +7,8 @@ use crate::task::{
     sleep_relative_interruptible, Rusage, TimerAction,
 };
 use crate::timer::{
-    current_timespec, current_timeval, get_time_ms, ITimerVal, TimeSpec, TimeVal, TimeZone, Times,
-    NSEC_PER_SEC,
+    current_timespec, current_timeval, get_time_ms, set_current_timespec, ITimerVal, TimeSpec,
+    TimeVal, TimeZone, Times, NSEC_PER_SEC,
 };
 use log::{info, trace};
 
@@ -321,6 +321,7 @@ pub fn sys_clock_settime(clk_id: usize, tp: *const TimeSpec) -> isize {
     if !has_time_adjust_permission() {
         return EPERM;
     }
+    set_current_timespec(timespec);
     SUCCESS
 }
 
