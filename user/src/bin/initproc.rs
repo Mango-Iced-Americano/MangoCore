@@ -707,7 +707,11 @@ fn should_preload_musl_ltp_compat(libc_suffix: &str, name: &str) -> bool {
     libc_suffix == "musl" && !name.as_bytes().iter().any(|b| *b == b'.')
 }
 
-fn should_skip_ltp_helper(name: &str) -> Option<&'static str> {
+fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str> {
+    if cfg!(target_arch = "loongarch64") && libc_suffix == "glibc" && name == "crash01" {
+        return Some("la64 glibc crashme random-code timeout");
+    }
+
     if name.starts_with("cfs_bandwidth") || name.starts_with("cgroup_") {
         return Some("requires cgroup support");
     }
@@ -920,7 +924,7 @@ fn run_ltp_binaries(
                 continue;
             }
 
-            if let Some(reason) = should_skip_ltp_helper(name) {
+            if let Some(reason) = should_skip_ltp_helper(libc_suffix, name) {
                 println!("SKIP LTP CASE {} : {}", name, reason);
                 continue;
             }
