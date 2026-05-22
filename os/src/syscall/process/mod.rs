@@ -32,8 +32,8 @@ pub use lifecycle::{
 };
 pub use misc::{sys_shutdown, sys_syslog, sys_yield};
 pub use mm::{
-    sys_brk, sys_madvise, sys_memorybarrier, sys_mlock, sys_mlockall, sys_mmap, sys_mprotect,
-    sys_mremap, sys_munlock, sys_munlockall, sys_munmap, sys_sbrk,
+    sys_brk, sys_madvise, sys_memorybarrier, sys_mincore, sys_mlock, sys_mlockall, sys_mmap,
+    sys_mprotect, sys_mremap, sys_munlock, sys_munlockall, sys_munmap, sys_sbrk,
 };
 pub use signal::{
     sys_kill, sys_pidfd_send_signal, sys_rt_sigpending, sys_rt_sigsuspend, sys_sigaction,

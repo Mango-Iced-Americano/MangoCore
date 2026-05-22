@@ -39,6 +39,19 @@ fn align_up(value: usize, align: usize) -> Option<usize> {
         .map(|value| value & !(align - 1))
 }
 
+fn file_backed_page_resident(area: &Vma, vpn: VirtPageNum) -> bool {
+    let Some(inode) = area.vm_file() else {
+        return false;
+    };
+    let Ok(file_offset) = area.vm_file_offset(vpn) else {
+        return false;
+    };
+    inode
+        .page_cache()
+        .map(|pc| pc.contains_page(file_offset >> PAGE_SIZE_BITS))
+        .unwrap_or(false)
+}
+
 impl VmaSet {
     pub(super) fn new() -> Self {
         Self::with_capacity(0)
@@ -342,6 +355,42 @@ impl VmaSet {
             }
 
             cursor = advise_end;
+        }
+        Ok(())
+    }
+
+    pub(super) fn mincore_range<T: PageTable>(
+        &self,
+        page_table: &T,
+        start_vpn: VirtPageNum,
+        end_vpn: VirtPageNum,
+        residency: &mut [u8],
+    ) -> Result<(), isize> {
+        let mut cursor = start_vpn;
+        let mut index = 0usize;
+        while cursor < end_vpn {
+            let area_start = self.find_user_vma_key(cursor).ok_or(ENOMEM)?;
+            let area = self.vmas.get(&area_start).ok_or(ENOMEM)?;
+            let area_end = area.vm_end();
+            let scan_end = if area_end < end_vpn {
+                area_end
+            } else {
+                end_vpn
+            };
+
+            while cursor < scan_end {
+                if let Some(slot) = residency.get_mut(index) {
+                    *slot = if page_table.is_mapped(cursor)
+                        || file_backed_page_resident(area, cursor)
+                    {
+                        1
+                    } else {
+                        0
+                    };
+                }
+                index += 1;
+                cursor.0 += 1;
+            }
         }
         Ok(())
     }

@@ -371,6 +371,28 @@
 - rv64/la64、musl/glibc 下 `madvise10` 的 child、zero-length、grand-child、KEEPONFORK 四个子场景均 TPASS。
 - 同组回归 `madvise02`、`madvise03`，rv64/la64、musl/glibc 均为 `FAIL LTP CASE ... : 0`。
 
+### 19. `mincore01-04` 最小语义适配
+
+问题：从 `memfd_create/mincore` 扫描继续推进时，`memfd_create01/02` 当前在镜像中按 `TCONF` 处理，`memfd_create03/04` 主要卡在 hugepage 环境；更值得优先适配的是 `mincore(232)` 未注册导致：
+- `mincore01` 的 `EINVAL/EFAULT/ENOMEM` 错误码用例全部返回 `ENOSYS`。
+- `mincore02`、`mincore03` 因 `mincore` 未实现导致 resident page 统计失败或 TBROK。
+- `mincore04` 在初版实现后仍失败，因为父进程只看自身 PTE，无法看到子进程通过 `mlock` 触发进 PageCache 的 file-backed 页面。
+
+处理：
+- 注册 syscall 232 并实现 `sys_mincore(addr, len, vec)`。
+- syscall 层对齐 Linux 风格错误码顺序：起始地址非页对齐返回 `EINVAL`，结果向量坏地址返回 `EFAULT`，区间越界或存在 VMA hole 返回 `ENOMEM`。
+- `VmaSet::mincore_range()` 按用户 VMA 覆盖逐页填充结果向量；匿名未触碰页保持 non-resident，`mlock`/fault-in 后的页返回 resident。
+- file-backed VMA 除当前进程页表 PTE 外，再查询 inode `PageCache::contains_page()`；这样子进程 fault-in 的文件页能被父进程 `mincore` 看到为 resident。
+- `mincore04` 日志中仍会出现 syscall 223 (`fadvise64`) unsupported 提示，但该测试未因此失败；按 fs 方向暂不展开适配。
+
+验证日志：
+- `logs/ltp-20260522-adapt/rv64-mincore-after2.log`
+- `logs/ltp-20260522-adapt/la64-mincore-after.log`
+
+结果：
+- rv64 musl/glibc：`mincore01`、`mincore02`、`mincore03`、`mincore04` 均为 `FAIL LTP CASE ... : 0`，内部 summary 均为 `failed 0, broken 0`。
+- la64 musl/glibc：`mincore01`、`mincore02`、`mincore03`、`mincore04` 均为 `FAIL LTP CASE ... : 0`，内部 summary 均为 `failed 0, broken 0`。
+
 ## 本轮跳过项
 
 已按规则加入 `os_test.conf` 的全量 exclude：
@@ -438,6 +460,8 @@
 - `logs/ltp-20260522-adapt/la64-madvise02-03-05-after.log`
 - `logs/ltp-20260522-adapt/rv64-madvise10-after2.log`
 - `logs/ltp-20260522-adapt/la64-madvise10-after2.log`
+- `logs/ltp-20260522-adapt/rv64-mincore-after2.log`
+- `logs/ltp-20260522-adapt/la64-mincore-after.log`
 
 扫描发现：
 - `clone301` 已从真实失败变为双架构通过。
@@ -465,6 +489,7 @@
 - `membarrier01` 已修复：`QUERY/GLOBAL/PRIVATE_EXPEDITED` 注册语义已对齐，双架构双 libc 内部 summary 均为 `failed 0`。
 - `madvise02/03/05` 已修复：区间 hole 返回 `ENOMEM`、匿名私有 `MADV_DONTNEED` 丢弃页后重新零填充、`MADV_WILLNEED` 已映射区间 no-op 成功。
 - `madvise10` 已修复：匿名私有 `MADV_WIPEONFORK` fork 后子进程零填充，标记继承到孙进程，`MADV_KEEPONFORK` 可撤销。
+- `mincore01-04` 已修复：syscall 232 分发、错误码、匿名页 resident 统计、file-backed PageCache resident 查询已对齐当前 LTP 用例。
 - 当前影响扫描推进的主要是 fs/net/epoll/文件锁/xattr/环境 helper，不适合作为本轮优先目标。
 - 继续往后扫描时，应在更新 exclude 后从全量配置继续跑，寻找 syscall/process/mm/time/signal 方向的真实 TFAIL。
 

@@ -1,8 +1,11 @@
 use crate::config::PAGE_SIZE;
 use crate::fs::vfs;
-use crate::mm::{translated_byte_buffer, MapFlags, MapPermission, UserAccess};
+use crate::mm::{
+    copy_to_user_array, translated_byte_buffer, MapFlags, MapPermission, UserAccess,
+};
 use crate::syscall::errno::*;
 use crate::task::{current_task, current_user_token};
+use alloc::vec::Vec;
 use log::{info, warn};
 
 const PROT_READ: usize = 0x1;
@@ -399,6 +402,64 @@ pub fn sys_mlockall(flags: usize) -> isize {
 
 pub fn sys_munlockall() -> isize {
     SUCCESS
+}
+
+pub fn sys_mincore(addr: usize, len: usize, vec: usize) -> isize {
+    if addr & (PAGE_SIZE - 1) != 0 {
+        return EINVAL;
+    }
+
+    let rounded_len = match page_round_up_len(len) {
+        Some(len) => len,
+        None => return ENOMEM,
+    };
+    if rounded_len == 0 {
+        return SUCCESS;
+    }
+    if addr
+        .checked_add(rounded_len)
+        .map_or(true, |end| end > crate::config::USER_VA_END)
+    {
+        return ENOMEM;
+    }
+
+    let page_count = rounded_len / PAGE_SIZE;
+    if translated_byte_buffer(
+        current_user_token(),
+        vec as *const u8,
+        page_count,
+        UserAccess::Write,
+    )
+    .is_err()
+    {
+        return EFAULT;
+    }
+
+    let mut residency = Vec::new();
+    if residency.try_reserve(page_count).is_err() {
+        return ENOMEM;
+    }
+    residency.resize(page_count, 0);
+
+    let task = current_task().unwrap();
+    if let Err(errno) = task
+        .process
+        .vm()
+        .lock()
+        .mincore(addr, rounded_len, residency.as_mut_slice())
+    {
+        return errno;
+    }
+
+    match copy_to_user_array(
+        current_user_token(),
+        residency.as_ptr(),
+        vec as *mut u8,
+        page_count,
+    ) {
+        Ok(_) => SUCCESS,
+        Err(_) => EFAULT,
+    }
 }
 
 pub fn sys_madvise(addr: usize, length: usize, advice: usize) -> isize {

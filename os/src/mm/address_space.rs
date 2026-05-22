@@ -657,6 +657,14 @@ impl<T: PageTable> AddressSpace<T> {
             .advise_range(&mut self.page_table, start_vpn, end_vpn, advice)
     }
 
+    pub fn mincore(&self, start: usize, len: usize, residency: &mut [u8]) -> Result<(), isize> {
+        let end = start.checked_add(len).ok_or(ENOMEM)?;
+        let start_vpn = VirtAddr::from(start).floor();
+        let end_vpn = VirtAddr::from(end).ceil();
+        self.vmas
+            .mincore_range(&self.page_table, start_vpn, end_vpn, residency)
+    }
+
     pub fn create_elf_tables(
         &self,
         mut user_sp: usize,
