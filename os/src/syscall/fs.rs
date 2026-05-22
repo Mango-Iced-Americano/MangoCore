@@ -1769,6 +1769,10 @@ pub fn sys_unlinkat(dirfd: usize, path: *const u8, flags: u32) -> isize {
         dirfd as isize, path, flags
     );
 
+    if let Err(errno) = validate_path_len(&path) {
+        return errno;
+    }
+
     let start = match resolve_start_inode(dirfd) {
         Ok(inode) => inode,
         Err(errno) => return errno,
@@ -1777,10 +1781,6 @@ pub fn sys_unlinkat(dirfd: usize, path: *const u8, flags: u32) -> isize {
         Ok(result) => result,
         Err(errno) => return errno,
     };
-    // 与 open/mkdir 等 syscall 对齐路径长度校验
-    if let Err(errno) = validate_path_len(&path) {
-        return errno;
-    }
     let result = if flags.contains(UnlinkatFlags::AT_REMOVEDIR) {
         parent.rmdir(&leaf)
     } else {
