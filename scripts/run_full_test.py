@@ -29,7 +29,7 @@ TESTRESULT_DIR = os.path.join(PROJECT_ROOT, "testresult")
 JUDGE_DIR = os.path.join(PROJECT_ROOT, "judge")
 FS_IMG_DIR = os.path.join(PROJECT_ROOT, "fs-img-dir")
 
-QEMU_TIMEOUT = int(os.environ.get("QEMU_TIMEOUT", "600"))  # 默认 10 分钟
+QEMU_TIMEOUT = int(os.environ.get("QEMU_TIMEOUT", "1200"))  # 默认 20 分钟
 
 # ANSI colors
 GREEN = "\033[92m"

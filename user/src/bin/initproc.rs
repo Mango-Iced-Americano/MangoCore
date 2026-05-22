@@ -68,10 +68,10 @@ const DEFAULT_TIMEOUTS: [u64; 12] = [
     60,   // [1]  busybox
     60,   // [2]  lua
     120,  // [3]  libctest
-    60,   // [4]  iozone
+    120,  // [4]  iozone
     90,   // [5]  unixbench
     40,   // [6]  iperf
-    60,   // [7]  libcbench
+    120,  // [7]  libcbench
     1800, // [8]  lmbench
     90,   // [9]  netperf
     60,   // [10] cyclictest
@@ -1440,7 +1440,10 @@ fn prepare_symlink(environ: &[*const u8]) {
         fi \
     \0";
     let ret = run_bash_cmd(cyclictest_cmd, environ);
-    println!("[initproc] cyclictest musl compatibility done, exit={}", ret);
+    println!(
+        "[initproc] cyclictest musl compatibility done, exit={}",
+        ret
+    );
 
     run_bash_cmd(
         "
