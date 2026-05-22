@@ -180,6 +180,13 @@ fn open_file_at(
     let follow_final = !flags.contains(OpenFlags::O_NOFOLLOW);
     match vfs_lookup(&start, path, follow_final) {
         Ok(target) => {
+            if !follow_final {
+                if let Ok(md) = target.metadata() {
+                    if md.file_type == FileType::SymLink {
+                        return Err(ELOOP);
+                    }
+                }
+            }
             if flags.contains(OpenFlags::O_CREAT | OpenFlags::O_EXCL) {
                 return Err(EEXIST);
             }
@@ -1335,6 +1342,9 @@ pub fn sys_fchmodat(dirfd: usize, path: *const u8, mode: u32, _flags: u32) -> is
     };
     if let Err(errno) = validate_path_len(&path_str) {
         return errno;
+    }
+    if path_str.is_empty() {
+        return ENOENT;
     }
     let inode = if path_str.starts_with('/') {
         match vfs_lookup_absolute(&path_str) {
