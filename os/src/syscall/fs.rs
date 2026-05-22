@@ -1026,6 +1026,9 @@ pub fn sys_readlinkat(dirfd: usize, pathname: *const u8, buf: *mut u8, bufsiz: u
         Ok(path) => path,
         Err(errno) => return errno,
     };
+    if let Err(errno) = validate_path_len(&path) {
+        return errno;
+    }
     let real_path = if path.as_str() == "/proc/self/exe" {
         let exe_path = task.process.exe_path();
         if exe_path.is_empty() {
