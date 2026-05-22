@@ -140,14 +140,14 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
             .expect("failed to mount procfs at /proc");
     }
 
-    // ── /tmp — 临时文件系统（ramfs + 16MB 配额）──
+     // ── /tmp — 临时文件系统（ramfs, 不受配额限制）──
     {
         let tmp_inode = root.find("tmp").unwrap_or_else(|_| {
             root.create("tmp", self::vfs::FileType::Dir, self::vfs::InodeMode::from_bits_truncate(0o1777))
                 .expect("failed to create /tmp")
         });
         let tmp_inode_id = tmp_inode.metadata().expect("tmp_inode metadata failed").inode_id;
-        let tmpfs = crate::fs::ramfs::RamFS::new_with_quota(4096);
+        let tmpfs = crate::fs::ramfs::RamFS::new_with_quota(0);
         // 设置挂载后的根 inode 为 01777（sticky bit + 全局可读写）
         if let Ok(mut meta) = tmpfs.root_inode().metadata() {
             meta.mode = self::vfs::InodeMode::from_bits_truncate(0o1777);

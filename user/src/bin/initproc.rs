@@ -50,13 +50,13 @@ const DEFAULT_ORDER: &[&str] = &[
     "basic",
     "busybox",
     "lua",
+    "ltp",
     "libctest",
     "netperf",
     "cyclictest",
     "iozone",
     "libcbench",
     "iperf",
-    "ltp",
     "lmbench",
     // "unixbench",
 ];
@@ -732,10 +732,14 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     }
 
     match name {
-        "ask_password.sh" | "assign_password.sh" | "change_password.sh"
-        | "remove_password.sh" => Some("interactive password helper"),
-        "cgroup_fj_common.sh" | "cgroup_fj_function.sh" | "cgroup_fj_proc"
-        | "cgroup_fj_stress.sh" | "cgroup_lib.sh" => Some("cgroup helper"),
+        "ask_password.sh" | "assign_password.sh" | "change_password.sh" | "remove_password.sh" => {
+            Some("interactive password helper")
+        }
+        "cgroup_fj_common.sh"
+        | "cgroup_fj_function.sh"
+        | "cgroup_fj_proc"
+        | "cgroup_fj_stress.sh"
+        | "cgroup_lib.sh" => Some("cgroup helper"),
         "clone303" => Some("requires cgroup v2 clone3 controller support"),
         "cpuacct.sh" | "cpuacct_task" => Some("cgroup controller helper"),
         "connect02" => Some("requires AF_INET6 connect support"),
@@ -942,7 +946,7 @@ fn run_ltp_binaries(
                 ""
             };
             let cmd = format!(
-                "export LTPROOT=\"{}\" && export PATH=\"{}/testcases/bin:$PATH\" && {}./ltp/testcases/bin/{}",
+                "export LTPROOT=\"{}\" && export LTP_IPC_PATH=/tmp && export PATH=\"{}/testcases/bin:$PATH\" && {}./ltp/testcases/bin/{}",
                 ltp_root_abs, ltp_root_abs, preload, name
             );
             let ret = run_bash_cmd(&cmd, environ);
