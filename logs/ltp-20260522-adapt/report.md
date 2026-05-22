@@ -150,6 +150,21 @@
 - `setpriority02` 经 errno 顺序修正后，rv64/la64、musl/glibc 均为 7 个 TPASS，内部 summary `failed 0`。
 - `getrusage01` 的 panic 已消除，非法参数路径改为正常 errno 返回。
 
+### 8. `get_robust_list01` 权限语义
+
+问题：`get_robust_list01` 第 5 个子项在 `setuid(1)` 后读取 `pid=1` 的 robust list，LTP 期望 `EPERM`，原实现只要目标 pid 存在就直接返回成功。
+
+处理：
+- `get_robust_list(pid != 0)` 增加最小 Linux ptrace/read-realcreds 权限检查。
+- 允许当前线程、root/`CAP_SYS_PTRACE`、或 uid/gid 凭证一致的目标。
+- 对无权限读取其他用户任务 robust list 的场景返回 `EPERM`。
+
+验证日志：
+- `logs/ltp-20260522-adapt/rv64-get-robust-list-after.log`
+- `logs/ltp-20260522-adapt/la64-get-robust-list-after.log`
+
+结果：rv64/la64、musl/glibc 下 `get_robust_list01` 5 个子项均为 TPASS，外层 wrapper 仍打印 `FAIL LTP CASE get_robust_list01 : 0`，按内部结果为通过。
+
 ## 本轮跳过项
 
 已按规则加入 `os_test.conf` 的全量 exclude：
@@ -183,6 +198,8 @@
 - `logs/ltp-20260522-adapt/rv64-priority-random-rlimit-rusage-after.log`
 - `logs/ltp-20260522-adapt/rv64-setpriority02-after3.log`
 - `logs/ltp-20260522-adapt/la64-setpriority02-after.log`
+- `logs/ltp-20260522-adapt/rv64-get-robust-list-after.log`
+- `logs/ltp-20260522-adapt/la64-get-robust-list-after.log`
 
 扫描发现：
 - `clone301` 已从真实失败变为双架构通过。
@@ -193,7 +210,7 @@
 - `setpriority02` 需要细分权限错误：同 owner 非特权提高优先级返回 `EACCES`，跨 owner 返回 `EPERM`。
 - `genbessel/geniperb/genpower/gentrigo` 当前是测试镜像 helper 路径/环境问题；`geneve01.sh/geneve02.sh` 属于 net module/veth 环境问题；本轮不纳入修复。
 - `getaddrinfo_01` 仍停在 glibc service/protocol 环境文件问题，后续可单独补 `/etc/services`/协议文件。
-- `get_robust_list01` 仍是下一批较小的非 fs/net 候选项，需要核对 `get_robust_list` 对 pid/权限/不存在目标的 Linux 语义。
+- `get_robust_list01` 已修复：坏指针、无效 pid、当前线程成功、跨用户无权限 `EPERM` 均已对齐。
 - 最新 rv64 扫描继续推进到 `ftp-download-stress02-rmt.sh`，其中 `fstatfs*`/`fsync*`/`fsx*`/`ftest*` 都属于 fs 方向，`ftp-*` 属于 net 长压测，按当前策略跳过。
 - 当前影响扫描推进的主要是 fs/net/epoll/文件锁/xattr/环境 helper，不适合作为本轮优先目标。
 - 继续往后扫描时，应在更新 exclude 后从全量配置继续跑，寻找 syscall/process/mm/time/signal 方向的真实 TFAIL。
@@ -203,7 +220,6 @@
 1. 用更新后的 `os_test.conf` 重新注入 rv64/la64 镜像。
 2. 继续跑全量 LTP 扫描，遇到 fs/net/epoll/环境项继续记录并跳过。
 3. 优先适配后续出现的非 fs/net 真失败，例如：
-   - `get_robust_list01`：小范围 syscall 语义差异，优先级高于 fs/net；
    - `getaddrinfo_01`：偏环境文件补齐，可评估 `/etc/services` 和 protocol 数据；
    - `futex_waitv01-03`：当前 LTP 内部为 kernel version TCONF，暂不按真实失败处理；
    - `futex_wake02`：依赖 `/proc/<pid>/task`，属于 procfs 支持缺口，按当前 fs/procfs 冲突策略先记录，暂不优先；

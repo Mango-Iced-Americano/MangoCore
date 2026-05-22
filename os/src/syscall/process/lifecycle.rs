@@ -6,6 +6,8 @@ use crate::task::{
 };
 use log::info;
 
+const CAP_SYS_PTRACE: usize = 19;
+
 pub fn sys_exit(exit_code: u32) -> ! {
     exit_current_and_run_next((exit_code & 0xff) << 8);
 }
@@ -84,6 +86,32 @@ pub fn sys_get_robust_list(pid: u32, head_ptr: *mut usize, len_ptr: *mut usize) 
             None => return ESRCH,
         }
     };
+    let current = current_task().unwrap();
+    if current.gettid() != task.gettid() {
+        let (uid, euid, gid, egid, cap_effective) = {
+            let inner = current.acquire_inner_lock();
+            (
+                inner.uid,
+                inner.euid,
+                inner.gid,
+                inner.egid,
+                inner.cap_effective,
+            )
+        };
+        let (target_uid, target_euid, target_gid, target_egid) = {
+            let inner = task.acquire_inner_lock();
+            (inner.uid, inner.euid, inner.gid, inner.egid)
+        };
+        let privileged =
+            euid == 0 || (cap_effective & (1u64 << CAP_SYS_PTRACE)) != 0;
+        let same_creds = uid == target_uid
+            && euid == target_euid
+            && gid == target_gid
+            && egid == target_egid;
+        if !privileged && !same_creds {
+            return EPERM;
+        }
+    }
     let inner = task.acquire_inner_lock();
     let token = current_user_token();
     if copy_to_user(token, &inner.robust_list.head, head_ptr).is_err() {
