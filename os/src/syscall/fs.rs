@@ -1699,10 +1699,9 @@ pub fn sys_unlinkat(dirfd: usize, path: *const u8, flags: u32) -> isize {
         Ok(result) => result,
         Err(errno) => return errno,
     };
-    // POSIX: name too long → ENAMETOOLONG
-    const NAME_MAX: usize = 255;
-    if leaf.len() > NAME_MAX {
-        return ENAMETOOLONG;
+    // 与 open/mkdir 等 syscall 对齐路径长度校验
+    if let Err(errno) = validate_path_len(&path) {
+        return errno;
     }
     let result = if flags.contains(UnlinkatFlags::AT_REMOVEDIR) {
         parent.rmdir(&leaf)
