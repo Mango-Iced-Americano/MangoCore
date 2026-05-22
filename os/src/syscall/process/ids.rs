@@ -668,6 +668,23 @@ pub fn sys_getpgid(pid: usize) -> isize {
 
     process.getpgid() as isize
 }
+
+pub fn sys_getsid(pid: usize) -> isize {
+    if (pid as isize) < 0 {
+        return ESRCH;
+    }
+    let process = if pid == 0 {
+        current_task().unwrap().process.clone()
+    } else {
+        match ProcessManager::find_process(pid) {
+            Some(process) => process,
+            None => return ESRCH,
+        }
+    };
+
+    process.getsid() as isize
+}
+
 /// creates a new session if the calling process is not a process group leader.
 /// The calling process is the leader of the new session, and its pgid is set to its pid.
 /// 当前进程脱离父进程，从父进程的子进程列表中移除当前进程，当前进程的父进程设置为空。
@@ -679,7 +696,7 @@ pub fn sys_setsid() -> isize {
     }
     // Make this process a session leader and process group leader.
     process.set_parent(None);
-    process.setpgid(process.pid);
+    process.setsid(process.pid);
     SUCCESS
 }
 

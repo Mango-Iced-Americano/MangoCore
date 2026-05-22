@@ -222,6 +222,27 @@
 - rv64/la64、musl/glibc 下 `gethostname02` 均为 1 个 TPASS。
 - rv64/la64、musl/glibc 下 `getpgid02` 均为 2 个 TPASS。
 
+### 12. `getsid01/getsid02` syscall 分发与 session id
+
+问题：跳过 `getrusage03` 后继续扫描，`getsid01/getsid02` 都直接命中缺 syscall：
+- `syscall 156` 未注册，`getsid(0)` 和 `getsid(unused_pid)` 均返回 `ENOSYS`。
+- LTP 期望父子进程 session id 一致；不存在 pid 返回 `ESRCH`。
+
+处理：
+- 增加 `SYSCALL_GETSID(156)`、syscall name 和 dispatch。
+- `ProcessControlBlock` 增加 session id：init 进程 sid 初始化为自身 pid；fork/clone 继承父进程 sid。
+- `setsid()` 改为同时更新 sid 和 pgid；`getsid(pid)` 返回目标进程 sid，负 pid/不存在 pid 返回 `ESRCH`。
+- 扫描中发现的 `getrusage03/getrusage03_child` 依赖 `/proc/self/status` 和子进程资源统计，先按 procfs/资源统计大面项跳过。
+- `getsockopt01/getsockopt02` 属于 net/socket 方向，按当前协作约束先加入跳过。
+
+验证日志：
+- `logs/ltp-20260522-adapt/rv64-getsid-after.log`
+- `logs/ltp-20260522-adapt/la64-getsid-after.log`
+
+结果：
+- rv64/la64、musl/glibc 下 `getsid01` 均为 1 个 TPASS。
+- rv64/la64、musl/glibc 下 `getsid02` 均为 1 个 TPASS。
+
 ## 本轮跳过项
 
 已按规则加入 `os_test.conf` 的全量 exclude：
@@ -232,6 +253,8 @@
 - 环境/TCONF/helper：`add_key*`、`af_alg*`、`aio*`、`cap_bounds*`、`check_keepcaps`、`check_envval`、`cleanup_lvm.sh`、`cacheflush01`、`endian_switch01`、`event_generator`、`data`、`datafiles`、`find_portbundle` 等。
 - tracing/内核特性环境：`ftrace_*`。
 - glibc-only 长耗时：`futex_cmp_requeue01`（rv64 glibc 1000 waiter 子场景稳定触发 30 秒超时；la64 和 rv64 musl 已验证通过）。
+- procfs/资源统计卡点：`getrusage03`、`getrusage03_child`。
+- net/socket 当前暂缓项：`getsockopt01`、`getsockopt02`。
 
 注意：这些跳过项不是声明内核已经支持，而是为了遵守“非 fs/net 优先、卡死/长耗时跳过”的当前适配策略。
 
@@ -263,6 +286,10 @@
 - `logs/ltp-20260522-adapt/la64-getgroups-after.log`
 - `logs/ltp-20260522-adapt/rv64-gethostname-getpgid-after.log`
 - `logs/ltp-20260522-adapt/la64-gethostname-getpgid-after.log`
+- `logs/ltp-20260522-adapt/rv64-full-ltp-from-getrusage-current.log`
+- `logs/ltp-20260522-adapt/rv64-full-ltp-from-getrusage04-current.log`
+- `logs/ltp-20260522-adapt/rv64-getsid-after.log`
+- `logs/ltp-20260522-adapt/la64-getsid-after.log`
 
 扫描发现：
 - `clone301` 已从真实失败变为双架构通过。
@@ -277,6 +304,9 @@
 - `getcpu01` 已由 unsupported/TCONF 变为双架构双 libc TPASS。
 - `getgroups01/getgroups03` 已修复：`setgroups` 保存补充组列表，`getgroups` 的数量查询、列表写回、`EINVAL/EFAULT` 语义已对齐。
 - `gethostname02/getpgid02` 已修复：musl hostname 截断路径补齐 `ENAMETOOLONG`，负 pid `getpgid` 改为 `ESRCH`。
+- `getrusage01/getrusage02/getrusage04` 已确认内部 TPASS；`getrusage03` 的剩余问题集中在 `/proc/self/status` 和 child rusage 累计，当前按 procfs/资源统计大面项跳过。
+- `getsid01/getsid02` 已修复：`syscall 156` 分发和 session id 继承/查询语义已对齐。
+- `getsockname01` 当前内部 TPASS；`getsockopt01/02` 属于 net/socket 方向，按当前策略先跳过。
 - 最新 rv64 扫描继续推进到 `ftp-download-stress02-rmt.sh`，其中 `fstatfs*`/`fsync*`/`fsx*`/`ftest*` 都属于 fs 方向，`ftp-*` 属于 net 长压测，按当前策略跳过。
 - 当前影响扫描推进的主要是 fs/net/epoll/文件锁/xattr/环境 helper，不适合作为本轮优先目标。
 - 继续往后扫描时，应在更新 exclude 后从全量配置继续跑，寻找 syscall/process/mm/time/signal 方向的真实 TFAIL。

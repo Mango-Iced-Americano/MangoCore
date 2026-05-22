@@ -105,6 +105,7 @@ pub const SYSCALL_SETFSGID: usize = 152;
 pub const SYSCALL_TIMES: usize = 153;
 pub const SYSCALL_SETPGID: usize = 154;
 pub const SYSCALL_GETPGID: usize = 155;
+pub const SYSCALL_GETSID: usize = 156;
 pub const SYSCALL_SETSID: usize = 157;
 pub const SYSCALL_GETGROUPS: usize = 158;
 pub const SYSCALL_SETGROUPS: usize = 159;
