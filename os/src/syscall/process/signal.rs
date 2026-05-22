@@ -1,3 +1,4 @@
+use crate::fs::pidfd::PidFd;
 use crate::hal::{MachineContext, TrapContext, UserSignalMask};
 use crate::mm::{copy_from_user, UserPtr, UserPtrMut};
 use crate::syscall::errno::*;
@@ -54,6 +55,54 @@ pub fn sys_tgkill(pid: usize, tid: usize, sig: usize) -> isize {
         SUCCESS
     } else {
         ESRCH
+    }
+}
+
+pub fn sys_pidfd_send_signal(pidfd: usize, sig: usize, info: usize, flags: usize) -> isize {
+    if flags != 0 {
+        return EINVAL;
+    }
+    let signal = match Signals::from_signum(sig) {
+        Ok(signal) => signal,
+        Err(_) => return EINVAL,
+    };
+
+    let task = current_task().unwrap();
+    let token = task.get_user_token();
+    let queued_siginfo = if info != 0 {
+        match UserPtr::<SigInfo>::from_addr(info).read(token) {
+            Ok(siginfo) => Some(siginfo.with_signal_sender(sig, task.pid())),
+            Err(_) => return EFAULT,
+        }
+    } else {
+        None
+    };
+
+    let target_pid = {
+        let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
+        let file = match fd_table.get_file(pidfd) {
+            Ok(file) => file,
+            Err(err) => return -(err as isize),
+        };
+        match file.inode_as_any_ref().downcast_ref::<PidFd>() {
+            Some(pidfd) => pidfd.target_pid(),
+            None => return EBADF,
+        }
+    };
+
+    let Some(process) = ProcessManager::find_process(target_pid) else {
+        return ESRCH;
+    };
+    if signal.is_empty() {
+        return SUCCESS;
+    }
+    match queued_siginfo {
+        Some(siginfo) => {
+            send_process_signal_info(&process, signal, siginfo);
+            SUCCESS
+        }
+        None => ProcessManager::send_signal_to_process(target_pid, signal),
     }
 }
 

@@ -34,8 +34,8 @@ pub use mm::{
     sys_mremap, sys_munlock, sys_munlockall, sys_munmap, sys_sbrk,
 };
 pub use signal::{
-    sys_kill, sys_rt_sigpending, sys_rt_sigsuspend, sys_sigaction, sys_sigaltstack,
-    sys_sigprocmask, sys_sigreturn, sys_sigtimedwait, sys_tgkill, sys_tkill,
+    sys_kill, sys_pidfd_send_signal, sys_rt_sigpending, sys_rt_sigsuspend, sys_sigaction,
+    sys_sigaltstack, sys_sigprocmask, sys_sigreturn, sys_sigtimedwait, sys_tgkill, sys_tkill,
 };
 pub use time::{
     sys_adjtimex, sys_clock_adjtime, sys_clock_getres, sys_clock_gettime, sys_clock_nanosleep,

@@ -1,4 +1,4 @@
-use crate::config::{PAGE_SIZE, SYSTEM_TASK_LIMIT, USER_STACK_SIZE};
+use crate::config::{PAGE_SIZE, SYSTEM_TASK_LIMIT};
 use crate::mm::{
     copy_to_user, translated_byte_buffer, UserAccess, UserBuffer, UserPtr, UserPtrMut,
 };
@@ -745,6 +745,7 @@ fn rlimit_value_for(
     nofile: Option<RLimit>,
     nice: Option<RLimit>,
     rtprio: Option<RLimit>,
+    stack: Option<RLimit>,
 ) -> Option<RLimit> {
     let unlimited = RLimit {
         rlim_cur: usize::MAX,
@@ -768,10 +769,7 @@ fn rlimit_value_for(
             rlim_cur: 0,
             rlim_max: 0,
         },
-        Resource::STACK => RLimit {
-            rlim_cur: USER_STACK_SIZE,
-            rlim_max: USER_STACK_SIZE,
-        },
+        Resource::STACK => stack?,
         Resource::NPROC => RLimit {
             rlim_cur: SYSTEM_TASK_LIMIT,
             rlim_max: SYSTEM_TASK_LIMIT,
@@ -836,7 +834,18 @@ pub fn sys_prlimit(
         } else {
             None
         };
-        let Some(limit) = rlimit_value_for(resource, nofile_limit, nice_limit, rtprio_limit) else {
+        let stack_limit = if resource == Resource::STACK {
+            let inner = task.acquire_inner_lock();
+            Some(RLimit {
+                rlim_cur: inner.stack_limit_cur,
+                rlim_max: inner.stack_limit_max,
+            })
+        } else {
+            None
+        };
+        let Some(limit) =
+            rlimit_value_for(resource, nofile_limit, nice_limit, rtprio_limit, stack_limit)
+        else {
             return EINVAL;
         };
         if UserPtrMut::new(old_limit).write(token, &limit).is_err() {
@@ -872,10 +881,13 @@ pub fn sys_prlimit(
                 inner.nice_limit_max = rlimit.rlim_max;
             }
             Resource::STACK => {
-                warn!("[prlimit] Unsupported modification stack");
-                if rlimit.rlim_cur > USER_STACK_SIZE {
-                    return EINVAL;
-                }
+                let mut inner = task.acquire_inner_lock();
+                inner.stack_limit_cur = rlimit.rlim_cur;
+                inner.stack_limit_max = rlimit.rlim_max;
+                warn!(
+                    "[prlimit] Accept stack limit update as ABI state only: {:?}",
+                    rlimit
+                );
             }
             Resource::CPU
             | Resource::FSIZE

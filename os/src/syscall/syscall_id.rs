@@ -1,4 +1,5 @@
 pub const SYSCALL_GETCWD: usize = 17;
+pub const SYSCALL_EVENTFD2: usize = 19;
 pub const SYSCALL_EPOLL_CREATE1: usize = 20;
 pub const SYSCALL_EPOLL_CTL: usize = 21;
 pub const SYSCALL_EPOLL_PWAIT: usize = 22;
@@ -164,6 +165,7 @@ pub const SYSCALL_MEMBARRIER: usize = 283;
 pub const SYSCALL_COPY_FILE_RANGE: usize = 285;
 pub const SYSCALL_STATX: usize = 291;
 pub const SYSCALL_SYNCFS: usize = 306;
+pub const SYSCALL_PIDFD_SEND_SIGNAL: usize = 424;
 pub const SYSCALL_CLONE3: usize = 435;
 pub const SYSCALL_CLOSE_RANGE: usize = 436;
 pub const SYSCALL_FACCESSAT2: usize = 439;

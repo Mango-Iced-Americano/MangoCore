@@ -1,7 +1,9 @@
 pub mod dev;
+pub mod eventfd;
 pub mod eventpoll;
 pub mod ext4;
 pub mod fat32;
+pub mod pidfd;
 mod filesystem;
 pub mod iov;
 mod layout;

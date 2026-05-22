@@ -25,7 +25,7 @@ mod pending;
 mod wait;
 
 pub use action::Sighand;
-pub use delivery::{send_process_signal, send_thread_signal};
+pub use delivery::{send_process_signal, send_process_signal_info, send_thread_signal};
 use frame::signal_frame_layout;
 pub use pending::{PendingSignal, SignalQueue};
 pub use wait::{sigsuspend, sigtimedwait};
@@ -942,8 +942,9 @@ pub struct SigInfo {
     __pad0: u32,
     si_pid: u32,
     si_uid: u32,
+    si_value: usize,
     // unsupported fields
-    __pad: [u8; 128 - 6 * core::mem::size_of::<u32>()],
+    __pad: [u8; 128 - 6 * core::mem::size_of::<u32>() - core::mem::size_of::<usize>()],
 }
 
 impl SigInfo {
@@ -957,6 +958,16 @@ impl SigInfo {
         si_code: usize,
         si_pid: usize,
     ) -> Self {
+        Self::new_with_sender_value(si_signo, si_errno, si_code, si_pid, 0)
+    }
+
+    pub fn new_with_sender_value(
+        si_signo: usize,
+        si_errno: usize,
+        si_code: usize,
+        si_pid: usize,
+        si_value: usize,
+    ) -> Self {
         Self {
             si_signo: si_signo as u32,
             si_errno: si_errno as u32,
@@ -964,8 +975,16 @@ impl SigInfo {
             __pad0: 0,
             si_pid: si_pid as u32,
             si_uid: 0,
-            __pad: [0; 128 - 6 * core::mem::size_of::<u32>()],
+            si_value,
+            __pad: [0; 128 - 6 * core::mem::size_of::<u32>() - core::mem::size_of::<usize>()],
         }
+    }
+
+    pub fn with_signal_sender(mut self, si_signo: usize, si_pid: usize) -> Self {
+        self.si_signo = si_signo as u32;
+        self.si_pid = si_pid as u32;
+        self.si_uid = 0;
+        self
     }
 }
 

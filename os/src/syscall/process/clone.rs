@@ -1,6 +1,7 @@
 use alloc::sync::Arc;
 
 use crate::config::{PAGE_SIZE, SYSTEM_TASK_LIMIT};
+use crate::fs::pidfd::new_pidfd_file;
 use crate::mm::{
     translated_byte_buffer, FaultAccess, UserAccess, UserBuffer, UserPtrMut, VirtAddr,
 };
@@ -142,19 +143,18 @@ fn write_u32_to_task_user(
     Ok(())
 }
 
-/// # Explanation of Parameters
-/// Mainly about `ptid`, `tls` and `ctid`: \
-/// `CLONE_SETTLS`: The TLS (Thread Local Storage) descriptor is set to `tls`. \
-/// `CLONE_PARENT_SETTID`: Store the child thread ID at the location pointed to by `ptid` in the parent's memory. \
-/// `CLONE_CHILD_SETTID`: Store the child thread ID at the location pointed to by `ctid` in the child's memory. \
-/// `ptid` is also used in `CLONE_PIDFD` (since Linux 5.2) \
-/// Since user programs rarely use these, we could do lazy implementation.
-pub fn sys_clone(
+fn drop_parent_fd(parent: &Arc<TaskControlBlock>, fd: usize) {
+    let files = parent.process.files();
+    let _ = files.lock().drop_fd(fd);
+}
+
+fn sys_clone_inner(
     flags: u32,
     stack: *const u8,
     ptid: *mut u32,
     tls: usize,
     ctid: *mut u32,
+    pidfd_ptr: Option<*mut u32>,
 ) -> isize {
     // ---- 防御性检查 1：进程总量限制 ----
     if ProcessManager::process_count() >= SYSTEM_TASK_LIMIT as u16 {
@@ -238,7 +238,40 @@ pub fn sys_clone(
     if flags.contains(CloneFlags::CLONE_CHILD_CLEARTID) {
         child.acquire_inner_lock().clear_child_tid = ctid as usize;
     }
+    let mut allocated_pidfd = None;
+    if flags.contains(CloneFlags::CLONE_PIDFD) {
+        let Some(pidfd_ptr) = pidfd_ptr else {
+            child.cleanup_unpublished_clone(flags.contains(CloneFlags::CLONE_VM));
+            return EINVAL;
+        };
+        let file = match new_pidfd_file(child.pid()) {
+            Ok(file) => file,
+            Err(err) => {
+                child.cleanup_unpublished_clone(flags.contains(CloneFlags::CLONE_VM));
+                return -(err as isize);
+            }
+        };
+        let files = parent.process.files();
+        let pidfd = match files.lock().alloc_fd(file, false) {
+            Ok(fd) => fd,
+            Err(err) => {
+                child.cleanup_unpublished_clone(flags.contains(CloneFlags::CLONE_VM));
+                return -(err as isize);
+            }
+        };
+        match UserPtrMut::new(pidfd_ptr).write(parent.get_user_token(), &(pidfd as u32)) {
+            Ok(()) => allocated_pidfd = Some(pidfd),
+            Err(errno) => {
+                drop_parent_fd(&parent, pidfd);
+                child.cleanup_unpublished_clone(flags.contains(CloneFlags::CLONE_VM));
+                return errno;
+            }
+        };
+    }
     if let Err(errno) = ProcessManager::publish_clone_child(&parent, child.clone(), flags) {
+        if let Some(pidfd) = allocated_pidfd {
+            drop_parent_fd(&parent, pidfd);
+        }
         child.cleanup_unpublished_clone(flags.contains(CloneFlags::CLONE_VM));
         return errno;
     }
@@ -246,6 +279,33 @@ pub fn sys_clone(
         return errno;
     }
     new_tid as isize
+}
+
+/// # Explanation of Parameters
+/// Mainly about `ptid`, `tls` and `ctid`: \
+/// `CLONE_SETTLS`: The TLS (Thread Local Storage) descriptor is set to `tls`. \
+/// `CLONE_PARENT_SETTID`: Store the child thread ID at the location pointed to by `ptid` in the parent's memory. \
+/// `CLONE_CHILD_SETTID`: Store the child thread ID at the location pointed to by `ctid` in the child's memory. \
+/// `ptid` is also used in `CLONE_PIDFD` (since Linux 5.2) \
+/// Since user programs rarely use these, we could do lazy implementation.
+pub fn sys_clone(
+    flags: u32,
+    stack: *const u8,
+    ptid: *mut u32,
+    tls: usize,
+    ctid: *mut u32,
+) -> isize {
+    if flags & CloneFlags::CLONE_PIDFD.bits() != 0
+        && flags & CloneFlags::CLONE_PARENT_SETTID.bits() != 0
+    {
+        return EINVAL;
+    }
+    let pidfd_ptr = if flags & CloneFlags::CLONE_PIDFD.bits() != 0 {
+        Some(ptid)
+    } else {
+        None
+    };
+    sys_clone_inner(flags, stack, ptid, tls, ctid, pidfd_ptr)
 }
 
 pub fn sys_clone3(uargs: *const u8, size: usize) -> isize {
@@ -288,11 +348,18 @@ pub fn sys_clone3(uargs: *const u8, size: usize) -> isize {
         }
     };
 
-    sys_clone(
+    let pidfd_ptr = if flags & CloneFlags::CLONE_PIDFD.bits() != 0 {
+        Some(args.pidfd as *mut u32)
+    } else {
+        None
+    };
+
+    sys_clone_inner(
         flags,
         stack,
         args.parent_tid as *mut u32,
         args.tls as usize,
         args.child_tid as *mut u32,
+        pidfd_ptr,
     )
 }

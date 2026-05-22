@@ -39,8 +39,20 @@ pub fn send_process_signal(process: &ProcessControlBlock, signal: Signals) -> bo
         SigInfo::SI_USER as usize,
         current_sender_pid(),
     ) {
-        process.enqueue_process_signal(pending);
+        return send_process_signal_info(process, signal, pending.siginfo);
     }
+    false
+}
+
+pub fn send_process_signal_info(
+    process: &ProcessControlBlock,
+    signal: Signals,
+    siginfo: SigInfo,
+) -> bool {
+    if signal.is_empty() {
+        return true;
+    }
+    process.enqueue_process_signal(PendingSignal { signal, siginfo });
     if let Some(task) = process_signal_target(process, signal) {
         let mut inner = task.acquire_inner_lock();
         if inner.task_status == TaskStatus::Interruptible {

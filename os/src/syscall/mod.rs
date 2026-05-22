@@ -7,6 +7,7 @@ mod process;
 mod syscall_id;
 pub mod utils;
 
+use crate::fs::eventfd::sys_eventfd2;
 use crate::fs::eventpoll::{sys_epoll_create1, sys_epoll_ctl, sys_epoll_pwait};
 use crate::net::syscall::*;
 use core::convert::TryFrom;
@@ -19,6 +20,7 @@ pub fn syscall_name(id: usize) -> &'static str {
     match id {
         SYSCALL_DUP => "dup",
         SYSCALL_DUP3 => "dup3",
+        SYSCALL_EVENTFD2 => "eventfd2",
         SYSCALL_EPOLL_CREATE1 => "epoll_create1",
         SYSCALL_EPOLL_CTL => "epoll_ctl",
         SYSCALL_EPOLL_PWAIT => "epoll_pwait",
@@ -100,6 +102,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_RT_SIGPENDING => "rt_sigpending",
         SYSCALL_SIGTIMEDWAIT => "sigtimedwait",
         SYSCALL_RT_SIGQUEUEINFO => "rt_sigqueueinfo",
+        SYSCALL_PIDFD_SEND_SIGNAL => "pidfd_send_signal",
         SYSCALL_SIGRETURN => "sigreturn",
         SYSCALL_SETREGID => "setregid",
         SYSCALL_SETGID => "setgid",
@@ -240,6 +243,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_GETCWD => sys_getcwd(args[0], args[1]),
         SYSCALL_DUP => sys_dup(args[0]),
         SYSCALL_DUP3 => sys_dup3(args[0], args[1], args[2] as u32),
+        SYSCALL_EVENTFD2 => sys_eventfd2(args[0] as u32, args[1] as u32),
         SYSCALL_EPOLL_CREATE1 => sys_epoll_create1(args[0]),
         SYSCALL_EPOLL_CTL => sys_epoll_ctl(
             args[0],
@@ -367,6 +371,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_RT_SIGPENDING => sys_rt_sigpending(args[0], args[1]),
         SYSCALL_RT_SIGSUSPEND => sys_rt_sigsuspend(args[0], args[1]),
         SYSCALL_SIGTIMEDWAIT => sys_sigtimedwait(args[0], args[1], args[2], args[3]),
+        SYSCALL_PIDFD_SEND_SIGNAL => sys_pidfd_send_signal(args[0], args[1], args[2], args[3]),
         SYSCALL_SIGRETURN => sys_sigreturn(),
         SYSCALL_TIMES => sys_times(args[0] as *mut Times),
         SYSCALL_NANOSLEEP => sys_nanosleep(
