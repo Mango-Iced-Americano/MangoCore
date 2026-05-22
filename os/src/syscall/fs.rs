@@ -1361,6 +1361,31 @@ pub fn sys_fchmodat(dirfd: usize, path: *const u8, mode: u32, _flags: u32) -> is
     }
 }
 
+pub fn sys_fchmod(fd: usize, mode: u32) -> isize {
+    let task = current_task().unwrap();
+    let files_ref = task.process.files();
+    let fd_table = files_ref.lock();
+    let file = match fd_table.get_file(fd) {
+        Ok(file) => file,
+        Err(e) => return -(e as isize),
+    };
+    let new_mode = vfs::InodeMode::from_bits_truncate(mode);
+    let mut meta = match file.inode.metadata() {
+        Ok(m) => m,
+        Err(e) => return -(e as isize),
+    };
+    let file_type = meta.mode & vfs::InodeMode::S_IFMT;
+    meta.mode = file_type | (new_mode & vfs::InodeMode::S_IALLUGO);
+    match file.inode.set_metadata(&meta) {
+        Ok(()) => 0,
+        Err(e) => -(e as isize),
+    }
+}
+
+pub fn sys_chmod(path: *const u8, mode: u32) -> isize {
+    sys_fchmodat(crate::syscall::AT_FDCWD, path, mode, 0)
+}
+
 bitflags! {
     pub struct FchownatFlags: u32 {
         const AT_SYMLINK_NOFOLLOW = 0x100;
@@ -1508,6 +1533,35 @@ pub fn sys_chdir(path: *const u8) -> isize {
     lock.working_inode = Arc::new(target);
     lock.working_path = normalize_cwd(&old_path, &path);
     SUCCESS
+}
+
+pub fn sys_fchdir(fd: usize) -> isize {
+    let task = current_task().unwrap();
+    let files_ref = task.process.files();
+    let fd_table = files_ref.lock();
+    let file = match fd_table.get_file(fd) {
+        Ok(file) => file,
+        Err(e) => return -(e as isize),
+    };
+    if !file.is_dir() {
+        return ENOTDIR;
+    }
+    let inode = file.inode.clone();
+    drop(fd_table);
+    let file = match vfs::File::new(inode, vfs::FileFlags::O_RDONLY) {
+        Ok(f) => f,
+        Err(e) => return -(e as isize),
+    };
+    let fs_ref = task.process.fs();
+    let mut lock = fs_ref.lock();
+    let old_path = lock.working_path.clone();
+    lock.working_inode = Arc::new(file);
+    lock.working_path = alloc::format!("{}/{}", old_path, "<fd>");
+    SUCCESS
+}
+
+pub fn sys_flock(_fd: usize, _operation: u32) -> isize {
+    ENOSYS
 }
 
 pub fn sys_openat(dirfd: usize, path: *const u8, flags: u32, mode: u32) -> isize {
