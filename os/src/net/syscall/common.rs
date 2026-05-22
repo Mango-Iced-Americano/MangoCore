@@ -32,6 +32,7 @@ pub const MCAST_LEAVE_GROUP: u32 = 45;
 /// option name (socket)
 pub const SO_DEBUG: u32 = 1;
 pub const SO_REUSEADDR: u32 = 2;
+pub const SO_PEERCRED: u32 = 17;
 pub const SO_TYPE: u32 = 3;
 pub const SO_ERROR: u32 = 4;
 pub const SO_DONTROUTE: u32 = 5;

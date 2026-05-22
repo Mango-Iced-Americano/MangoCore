@@ -289,6 +289,9 @@ pub trait Socket: Send + Sync {
     fn reuse_addr(&self) -> SyscallRet {
         Err(SyscallErr::EOPNOTSUPP)
     }
+    fn peer_creds(&self) -> Result<(u32, u32, u32), SyscallErr> {
+        Err(SyscallErr::ENOPROTOOPT)
+    }
     fn set_reuse_addr(&self, _enabled: bool) -> SyscallRet {
         Err(SyscallErr::EOPNOTSUPP)
     }

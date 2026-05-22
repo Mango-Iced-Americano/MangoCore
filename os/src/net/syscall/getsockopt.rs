@@ -6,7 +6,7 @@ use crate::utils::error::SyscallErr;
 
 use super::common::is_known_sockopt_level;
 use super::common::{SOL_IP, SOL_SOCKET, SOL_TCP, TCP_CONGESTION, TCP_INFO, TCP_MAXSEG};
-use super::common::{SO_RCVBUF, SO_RCVTIMEO, SO_REUSEADDR, SO_SNDBUF, SO_SNDTIMEO};
+use super::common::{SO_RCVBUF, SO_RCVTIMEO, SO_REUSEADDR, SO_SNDBUF, SO_SNDTIMEO, SO_PEERCRED};
 
 pub fn sys_getsockopt(
     sockfd: u32,
@@ -74,7 +74,7 @@ pub fn sys_getsockopt(
                 return -(SyscallErr::EFAULT as isize);
             }
         }
-        (SOL_SOCKET, SO_SNDBUF | SO_RCVBUF | SO_REUSEADDR) => {
+        (SOL_SOCKET, SO_SNDBUF | SO_RCVBUF | SO_REUSEADDR | SO_PEERCRED) => {
             // 对于需要写入 u32 的选项，检查 optlen 是否够大
             let optlen_val = match optlen_ptr.read(token) {
                 Ok(len) => len,
@@ -109,6 +109,23 @@ pub fn sys_getsockopt(
                     };
                     if optval_ptr.write(token, &(enabled as u32)).is_err()
                         || optlen_ptr.write(token, &4).is_err()
+                    {
+                        return -(SyscallErr::EFAULT as isize);
+                    }
+                }
+                SO_PEERCRED => {
+                    let (pid, uid, gid) = match socket.peer_creds() {
+                        Ok(creds) => creds,
+                        Err(e) => return -(e as isize),
+                    };
+                    // ucred: pid(4) + uid(4) + gid(4) = 12 bytes
+                    let p_pid = UserPtrMut::<u32>::from_addr(optval_ptr_);
+                    let p_uid = UserPtrMut::<u32>::from_addr(optval_ptr_ + 4);
+                    let p_gid = UserPtrMut::<u32>::from_addr(optval_ptr_ + 8);
+                    if p_pid.write(token, &pid).is_err()
+                        || p_uid.write(token, &uid).is_err()
+                        || p_gid.write(token, &gid).is_err()
+                        || optlen_ptr.write(token, &12).is_err()
                     {
                         return -(SyscallErr::EFAULT as isize);
                     }
