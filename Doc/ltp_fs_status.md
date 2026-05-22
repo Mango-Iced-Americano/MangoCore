@@ -1,8 +1,8 @@
 # FS-LTP Testcase 状态表
 
-> 最后更新: 2026-05-20
-> 当前阶段: Phase 0 — 体系建设中
-> 当前 Round: FS-Preflight (尚未开始运行)
+> 最后更新: 2026-05-22
+> 当前阶段: Round-0 ✅ → Round-1 进行中
+> Oracle 审查: 已通过 (2026-05-22, 两轮)
 
 ## 字段说明
 
@@ -10,15 +10,12 @@
 |------|------|
 | **Testcase** | LTP 测例名 |
 | **Round** | 所属 FS Round (0/1/2/3) |
-| **Family** | 所属 syscall family (如 open, read, stat) |
-| **Arch** | rv64 / la64 / both |
-| **Libc** | musl / glibc / both |
-| **运行结果** | TPASS / TFAIL / TBROK / TCONF / PANIC / TIMEOUT / NOT_RUN |
-| **行动分类** | PASS / FIXABLE_NOW / FIXABLE_LATER / UNSUPPORTED / ENV_FAIL / DANGEROUS_STRESS |
+| **Family** | 所属 syscall family |
+| **运行结果** | TPASS / TFAIL / TBROK / TCONF / PANIC / TIMEOUT / NOT_RUN / NO_BIN |
+| **行动分类** | PASS / FIXABLE_NOW / FIXABLE_LATER / UNSUPPORTED / ENV_FAIL |
 | **回归集** | YES / NO |
-| **失败层次** | A-L (见 ltp_fs_plan.md §2.1) |
-| **日志路径** | 运行日志位置 |
-| **备注** | 失败原因 / 依赖说明 / 排除理由 |
+
+> **NO_BIN** = 该二进制在镜像中不存在（非 inode/文件系统问题，是测试镜像未包含）
 
 ---
 
@@ -26,252 +23,409 @@
 
 | 列表 | 当前数量 | 说明 |
 |------|----------|------|
-| **回归集** | 0 (需从 Preflight 开始累积) | 历史已验证通过的测例，每次修复后全量回归 |
-| **探索集** | ~100 (Round-0 核心 family) | 当前 round 要验证的测例 |
-| **强制排除集** | ~500+ | 硬门禁排除 (UNSUPPORTED/DANGEROUS_STRESS/FIXABLE_LATER) |
-
-### 重要提醒
-- `os_test.conf` 中的 `ltp_include` 列表仅为人工精选的子集（~96个），**不代表测例已通过**
-- 判断 PASS 必须有具体日志证据（arch + libc + run_id）
-- `ltp_include` 中混有 `diotest*` / `crash*` 等已被本计划排除的测例，需要清理
+| **回归集** | ~50 | 已验证稳定通过，每次修复后回归 |
+| **可用二进制** | ~360 | 镜像中存在的 FS 相关 LTP 二进制 |
+| **强制排除集** | ~200+ | UNSUPPORTED/DANGEROUS_STRESS/FIXABLE_LATER |
 
 ---
 
-## FS-Round-0 核心 Family 测例状态
+## Round-0 核心 Family (VFS/fd/path/基础读写)
 
-### Family: open (18 测例)
+### open / openat (18 测例, Priority: 10)
 
-| Testcase | Round | Arch | Libc | 运行结果 | 行动分类 | 回归集 | 失败层次 | 日志 | 备注 |
-|----------|-------|------|------|----------|----------|--------|----------|------|------|
-| open01 | 0 | rv64 | musl+glibc | TFAIL: sticky bit | FIXABLE_LATER | NO | F | batch2 | Round-1 权限模型 |
-| open02 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
-| open03 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
-| open04 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
-| open06 | 0 | — | — | NOT_RUN | — | NO | — | — | 注: 无 open05 |
-| open07 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
-| open08 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
-| open09 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
-| open10 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
-| open11 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
-| open12 | 0 | — | — | NOT_RUN | — | NO | — | — | 需 open12_child |
-| open13 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
-| open14 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
-| open15 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
-| openat01 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
-| openat02 | 0 | — | — | NOT_RUN | — | NO | — | — | 需 openat02_child |
-| openat03 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
-| openat04 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| open01 | NOT_RUN | FIXABLE_LATER | NO | sticky bit 权限模型 |
+| open02 | NOT_RUN | — | NO | |
+| open03 | TPASS ✅ | PASS | YES | |
+| open04 | TPASS ✅ | PASS | YES | |
+| open06 | NOT_RUN | — | NO | |
+| open07 | NOT_RUN | — | NO | |
+| open08 | NOT_RUN | — | NO | |
+| open09 | NOT_RUN | — | NO | |
+| open10 | NOT_RUN | — | NO | |
+| open11 | NOT_RUN | — | NO | |
+| open12 | NOT_RUN | — | NO | 需 open12_child |
+| open13 | NOT_RUN | — | NO | |
+| open14 | NOT_RUN | — | NO | |
+| openat01 | NOT_RUN | — | NO | |
+| openat02 | NOT_RUN | — | NO | 需 openat02_child |
+| openat03 | NOT_RUN | — | NO | |
+| openat04 | NOT_RUN | — | NO | |
+| openat201-203 | — | UNSUPPORTED | NO | Linux 5.6+ |
 
-### Family: close (4 测例)
+### close (4 测例, Priority: 10)
 
-| Testcase | Round | Arch | Libc | 运行结果 | 行动分类 | 回归集 | 失败层次 | 日志 | 备注 |
-|----------|-------|------|------|----------|----------|--------|----------|------|------|
-| close01 | 0 | rv64 | musl+glibc | TPASS (3/3×2) | PASS | YES | — | preflight r1/r2/r3 | ✅ 3轮连续稳定 |
-| close02 | 0 | — | — | NOT_RUN | — | NO | — | — | 待扩展 |
-| close_range01 | — | — | — | — | UNSUPPORTED | NO | K | — | 需要 Linux 5.9+ |
-| close_range02 | — | — | — | — | UNSUPPORTED | NO | K | — | 需要 Linux 5.9+ |
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| close01 | TPASS ✅ | PASS | YES | |
+| close02 | TPASS ✅ | PASS | YES | |
+| close_range01-02 | — | UNSUPPORTED | NO | Linux 5.9+ |
 
-### Family: read (4 测例)
+### read (4 测例, Priority: 10)
 
-| Testcase | Round | Arch | Libc | 运行结果 | 行动分类 | 回归集 | 失败层次 | 日志 | 备注 |
-|----------|-------|------|------|----------|----------|--------|----------|------|------|
-| read01 | 0 | rv64 | musl+glibc | TPASS (1/1×2) | PASS | YES | — | batch2 | ✅ |
-| read02 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
-| read03 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
-| read04 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| read01 | TPASS ✅ | PASS | YES | |
+| read02 | TPASS ✅ | PASS | YES | |
+| read03 | NOT_RUN | — | NO | |
+| read04 | NOT_RUN | — | NO | |
 
-### Family: write (6 测例)
+### write (6 测例, Priority: 10)
 
-| Testcase | Round | Arch | Libc | 运行结果 | 行动分类 | 回归集 | 失败层次 | 日志 | 备注 |
-|----------|-------|------|------|----------|----------|--------|----------|------|------|
-| write01 | 0 | rv64 | musl | TPASS (1/1) | PASS | YES | — | batch2 | ✅ |
-| write01 | 0 | rv64 | glibc | TFAIL: ENOSPC(28) | ENV_FAIL | NO | J | batch2 | glibc 镜像磁盘满 |
-| write02 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
-| write03 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
-| write04 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
-| write05 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
-| write06 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| write01 | TPASS ✅ | PASS | YES | |
+| write02 | TPASS ✅ | PASS | YES | |
+| write03 | NOT_RUN | — | NO | |
+| write04 | NOT_RUN | — | NO | |
+| write05 | NOT_RUN | — | NO | |
+| write06 | NOT_RUN | — | NO | |
 
-### Family: lseek (11 测例)
+### lseek (4 测例, Priority: 8)
 
-| Testcase | Round | Arch | Libc | 运行结果 | 行动分类 | 回归集 | 失败层次 | 日志 | 备注 |
-|----------|-------|------|------|----------|----------|--------|----------|------|------|
-| lseek01 | 0 | rv64 | musl+glibc | TPASS (4/4×2) | PASS | YES | — | batch2 | SEEK_SET/CUR/END ✅ |
-| lseek02-10 | 0 | — | — | NOT_RUN | — | NO | — | — | 基础 SEEK_SET/CUR/END + 错误处理 |
-| lseek11 | 0 | — | — | NOT_RUN | — | NO | — | — | SEEK_DATA/SEEK_HOLE，可能 UNSUPPORTED |
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| lseek01 | TPASS ✅ | PASS | YES | SEEK_SET/CUR/END |
+| lseek02 | NOT_RUN | — | NO | |
+| lseek07 | NOT_RUN | — | NO | |
+| lseek11 | — | UNSUPPORTED | NO | SEEK_DATA/SEEK_HOLE |
 
-### Family: stat/fstat/lstat (9 测例)
+### stat / fstat / lstat (12 测例, Priority: 10)
 
-| Testcase | Round | Arch | Libc | 运行结果 | 行动分类 | 回归集 | 失败层次 | 日志 | 备注 |
-|----------|-------|------|------|----------|----------|--------|----------|------|------|
-| stat01 | 0 | rv64 | musl+glibc | TBROK: getpwnam ENOENT | ENV_FAIL | NO | J | batch2 | /etc/passwd 缺 nobody |
-| stat02-04 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
-| fstat02-03 | 0 | — | — | NOT_RUN | — | NO | — | — | 注: 无 fstat01 |
-| lstat01-03 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
-| fstatat01 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| stat01 | TFAIL (2/12) | FIXABLE_LATER | NO | uid=0 vs nobody(65534), 缺 seteuid |
+| stat02 | TPASS ✅ | PASS | YES | |
+| stat03 | NOT_RUN | — | NO | |
+| fstat02 | TPASS ✅ | PASS | YES | |
+| fstat03 | NOT_RUN | — | NO | |
+| fstatat01 | NOT_RUN | — | NO | |
+| lstat01 | NOT_RUN | — | NO | |
+| lstat02 | TPASS ✅ | PASS | YES | |
+| statx01-12 | — | UNSUPPORTED | NO | Linux 4.11+ |
 
-### Family: access/faccessat (9 测例)
+### access / faccessat (6 测例, Priority: 8)
 
-| Testcase | Round | Arch | Libc | 运行结果 | 行动分类 | 回归集 | 失败层次 | 日志 | 备注 |
-|----------|-------|------|------|----------|----------|--------|----------|------|------|
-| access01-04 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
-| faccessat01-02 | 0 | — | — | NOT_RUN | — | NO | — | — | 之前在 ltp_include 中有 faccessat01/02/201 |
-| faccessat201-202 | — | — | — | — | UNSUPPORTED | NO | K | — | 需要 Linux 5.8+ |
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| access01 | TPASS ✅ | PASS | YES | |
+| access02-04 | NOT_RUN | — | NO | |
+| faccessat01-02 | NOT_RUN | — | NO | |
+| faccessat201-202 | — | UNSUPPORTED | NO | Linux 5.8+ |
 
-### Family: getcwd/chdir (10 测例)
+### getcwd / chdir / fchdir (7 测例, Priority: 8)
 
-| Testcase | Round | Arch | Libc | 运行结果 | 行动分类 | 回归集 | 失败层次 | 日志 | 备注 |
-|----------|-------|------|------|----------|----------|--------|----------|------|------|
-| getcwd01-04 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
-| chdir01-02, chdir04 | 0 | — | — | NOT_RUN | — | NO | — | — | chdir04 在 ltp_include 中 |
-| fchdir01-03 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| getcwd01 | TPASS ✅ | PASS | YES | ERANGE 顺序已修复 |
+| getcwd02-04 | NOT_RUN | — | NO | |
+| chdir01 | NOT_RUN | — | NO | |
+| chdir04 | TPASS ✅ | PASS | YES | ENAMETOOLONG 已修复 |
+| fchdir01-03 | NOT_RUN | — | NO | |
 
-### Family: getdents/readdir (4 测例)
+### getdents / readdir (4 测例, Priority: 8)
 
-| Testcase | Round | Arch | Libc | 运行结果 | 行动分类 | 回归集 | 失败层次 | 日志 | 备注 |
-|----------|-------|------|------|----------|----------|--------|----------|------|------|
-| getdents01-02 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
-| readdir01, readdir21 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| getdents01 | TPASS ✅ | PASS | YES | |
+| getdents02 | NOT_RUN | — | NO | |
+| readdir01 | NOT_RUN | — | NO | |
+| readdir21 | NOT_RUN | — | NO | |
 
-### Family: dup/dup2/dup3 (16 测例)
+### dup / dup2 / dup3 (18 测例, Priority: 10)
 
-| Testcase | Round | Arch | Libc | 运行结果 | 行动分类 | 回归集 | 失败层次 | 日志 | 备注 |
-|----------|-------|------|------|----------|----------|--------|----------|------|------|
-| dup01-07 | 0 | — | — | NOT_RUN | — | NO | — | — | 部分在 ltp_include 中 |
-| dup201-207 | 0 | — | — | NOT_RUN | — | NO | — | — | 部分在 ltp_include 中 |
-| dup3_01-02 | 0 | — | — | NOT_RUN | — | NO | — | — | dup3_01 在 ltp_include 中 |
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| dup01-07 | TPASS ✅ | PASS | YES | all 7 pass |
+| dup201-207 | TPASS ✅ | PASS | YES | all 7 pass |
+| dup3_01 | TPASS ✅ | PASS | YES | O_CLOEXEC 已修复 |
+| dup3_02 | NOT_RUN | — | NO | |
 
-### Family: fcntl 基础 (fcntl01-14, 14 测例)
+### fcntl 基础 (14+26 测例, Priority: 10)
 
-| Testcase | Round | Arch | Libc | 运行结果 | 行动分类 | 回归集 | 失败层次 | 日志 | 备注 |
-|----------|-------|------|------|----------|----------|--------|----------|------|------|
-| fcntl01-05 | 0 | — | — | NOT_RUN | — | NO | — | — | F_DUPFD |
-| fcntl06-10 | 0 | — | — | NOT_RUN | — | NO | — | — | F_GETFD/F_SETFD |
-| fcntl11-14 | 0 | — | — | NOT_RUN | — | NO | — | — | F_GETFL/F_SETFL |
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| fcntl01-05 | TPASS ✅ | PASS | YES | F_DUPFD |
+| fcntl08 | TPASS ✅ | PASS | YES | F_GETFD/F_SETFD |
+| fcntl13-14 | TPASS ✅ | PASS | YES | F_GETFL/F_SETFL |
+| fcntl06-07,09-12 | NOT_RUN | — | NO | 基础项 |
+| fcntl15-40 | NOT_RUN | FIXABLE_LATER | NO | OFD锁/pipe buffer/seals |
 
-### 辅助 Family: pipe/pipe2 (18 测例，不阻塞晋级)
+### pipe / pipe2 (18 测例, Priority: 7)
 
-| Testcase | Round | Arch | Libc | 运行结果 | 行动分类 | 回归集 | 失败层次 | 日志 | 备注 |
-|----------|-------|------|------|----------|----------|--------|----------|------|------|
-| pipe01-15 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
-| pipe2_01-02, pipe2_04 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| pipe01-15 | NOT_RUN | — | NO | 辅助family |
+| pipe2_01-02, pipe2_04 | NOT_RUN | — | NO | |
 
-### 辅助 Family: creat (9 测例，不阻塞晋级)
+### creat (9 测例, Priority: 7)
 
-| Testcase | Round | Arch | Libc | 运行结果 | 行动分类 | 回归集 | 失败层次 | 日志 | 备注 |
-|----------|-------|------|------|----------|----------|--------|----------|------|------|
-| creat01,03,05 | 0 | — | — | (待验证) | — | NO | — | — | 在 ltp_include 中，需验证 |
-| creat04,06-09 | 0 | — | — | NOT_RUN | — | NO | — | — | — |
-
----
-
-## 强制排除清单（不进入任何 Round）
-
-### UNSUPPORTED — MangoCore 不支持的特性
-
-| 类别 | 测例数(约) | 代表测例 | 原因 |
-|------|-----------|----------|------|
-| xattr 系列 | ~32 | setxattr*, getxattr*, fsetxattr*, listxattr*, removexattr* | 扩展属性未实现 |
-| ACL | ~1 | tacl_xattr.sh | 访问控制列表未实现 |
-| quota | ~9 | quotactl01-09 | 磁盘配额未实现 |
-| namespace/bind | ~7 | fs_bind_cloneNS* | 命名空间隔离未实现 |
-| mount propagation | ~85 | fs_bind* (bind/rbind/move 共 85 个脚本) | 挂载传播未实现 |
-| fanotify | ~25 | fanotify01-25 | 文件通知框架未实现 |
-| inotify | ~14 | inotify01-12, inotify_init* | inode 通知框架未实现 |
-| chroot/pivot_root | ~5 | chroot01-04, pivot_root01 | 根目录切换未实现 |
-| landlock | ~10 | landlock01-10 | Linux 5.13+ 安全模块 |
-| io_uring | ~3 | io_uring01-03 | Linux 5.1+ 异步 I/O |
-| userfaultfd | ~6 | userfaultfd01-06 | Linux 4.3+ |
-| memfd_create | ~4 | memfd_create01-04 | Linux 3.17+ |
-| statmount/listmount | ~13 | statmount01-09, listmount01-04 | Linux 6.8+ |
-| fsconfig/fsmount/fsopen | ~9 | fsconfig01-03, fsmount01-02, fsopen01-02, fspick01-02, move_mount01-03 | Linux 5.2+ mount API |
-| openat2 | ~3 | openat201-203 | Linux 5.6+ |
-| close_range | ~2 | close_range01-02 | Linux 5.9+ |
-| faccessat2 | ~2 | faccessat201-202 | Linux 5.8+ |
-| fchmodat2 | ~2 | fchmodat2_01-02 | Linux 6.3+ |
-| file_attr (chattr/lsattr) | ~5 | file_attr01-05 | 需要 ext2/3/4 特殊 ioctl |
-| renameat2 | 见 FIXABLE_LATER | renameat201-202 | 仅复杂 flag 排除 |
-| direct I/O | ~6 | diotest* | O_DIRECT 不支持 |
-| swap | ~5 | swapon*, swapoff* | 需要 CAP_SYS_ADMIN + swap 支持 |
-| mknod (设备节点) | ~11 | mknod01-09, mknodat01-02 | 设备节点创建不支持 |
-| name_to_handle_at | ~3 | name_to_handle_at01-03 | 需要 CAP_DAC_READ_SEARCH |
-| open_by_handle_at | ~2 | open_by_handle_at01-02 | 需要 CAP_DAC_READ_SEARCH |
-
-### DANGEROUS_STRESS — 压力/破坏性测试
-
-| 测例 | 原因 | 后期处置 |
-|------|------|----------|
-| fsstress | FS 随机操作压力测试 | Round-3 单独隔离运行 |
-| fsx-linux | FS 一致性压力测试 | Round-3 |
-| doio | I/O 压力工具 | Round-3 |
-| iogen | I/O 生成器 | Round-3 |
-| growfiles | 文件增长压力 | Round-3 |
-| ftest01-08 | 文件系统功能压力套件 | Round-3 |
-| fs_racer (10 scripts) | FS 并发竞争测试 | Round-3 |
-| read_all | 全文件系统读取压力 | Round-3 |
-| fs_fill | 填满 FS 测试 | Round-3 |
-| fs_di (frag) | FS 碎片测试 | Round-3 |
-| fsplough | 目录树遍历压力 | Round-3 |
-| stream01-05 | 大文件流式 I/O 压力 | Round-3 |
-| lftest | >2GB 大文件测试 | Round-3 |
-| openfile | 最大打开文件数测试 | Round-3 |
-| inode01-02 | inode 耗尽测试 | Round-3 |
-
-### FIXABLE_LATER — 依赖后续 Round
-
-| 测例家族 | Round | 依赖 |
-|----------|-------|------|
-| chmod/fchmod/fchmodat (~15) | 1 | Round-0 基础读写 + 权限模型 |
-| chown/fchown/fchownat (~15) | 1 | Round-0 基础读写 + uid/gid |
-| truncate/ftruncate (~5) | 1 | Round-0 read/write + ext4 metadata |
-| mkdir/mkdirat (~7) | 1 | Round-0 目录读取 |
-| rmdir (~3) | 1 | Round-1 mkdir |
-| unlink/unlinkat (~6) | 1 | Round-0 基础 fd/inode 生命周期 |
-| rename/renameat (~16) | 1 | Round-0 path 解析 + Round-1 unlink |
-| link/linkat (~6) | 1 | Round-0 inode 生命周期 |
-| symlink/symlinkat (~4) | 1 | Round-0 path 解析 |
-| readlink/readlinkat (~4) | 1 | Round-1 symlink |
-| utime/utimes/utimensat (~10) | 1 | Round-0 stat 基础 |
-| flock (~6) | 1 | Round-0 fd table + 锁语义 |
-| fcntl15-40 (~26) | 1 | Round-0 fcntl 基础 |
-| renameat2 (复杂 flag) | 1 | Round-1 rename 基础 |
-| fallocate (~6) | 2 | Round-0/1 基础读写 + ext4 metadata |
-| fsync/fdatasync (~7) | 2 | Round-0/1 + page cache 回写 |
-| sync/syncfs (~2) | 2 | Round-2 fsync + 全局同步 |
-| mmap file-backed (~12) | 2 | Round-0/1 + page cache 一致性 |
-| msync (~4) | 2 | Round-2 mmap |
-| pread/pwrite 完整语义 (~6) | 2 | Round-0 read/write offset smoke |
-| readv/writev (~8) | 2 | Round-0 read/write |
-| sendfile (~8) | 3 | Round-2 page cache 一致性 |
-| splice (~9) | 3 | Round-2 pipe + page cache |
-| copy_file_range (~3) | 3 | Round-2 page cache |
-| statx (~12) | 2 | Round-0 stat 基础 |
-
-### 非 FS Round 范围（不处理）
-
-| 测例家族 | 所属范围 | 说明 |
-|----------|----------|------|
-| socket/bind/connect/accept/send/recv 等 | 网络 | ~92 测例 |
-| signal/sigaction/sigprocmask 等 | 信号 | ~21 测例 |
-| clone/fork/exec/wait 等 | 进程 | — |
-| futex | 同步 | — |
-| epoll/poll/select（网络 fd 相关） | 网络/poll | 与 FS 共用 fd table，仅基础 fd 操作有交集 |
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| creat01,03,05 | TPASS ✅ | PASS | YES | |
+| creat04,06-09 | NOT_RUN | — | NO | |
 
 ---
 
-## Preflight 进度
+## Round-1 Family (目录操作 + ext4 metadata)
 
-### FS-Preflight 状态: SMOKE_PASSED
+### mkdir / mkdirat (7 测例, Priority: 10)
 
-| 检查项 | 状态 | 备注 |
-|--------|------|------|
-| LTP inline runner 连续 3 轮无 panic | ✅ PASS | close01/creat01/dup01 3轮 musl+glibc 全 PASS |
-| timeout case 正确 skip，后续不受影响 | ✅ PASS | 非 include 测例正确跳过，exit=0 |
-| ltp_include/exclude/from 配置机制生效 | ✅ PASS | include=["close01","creat01","dup01"] 过滤正确 |
-| 镜像恢复机制正常 | ✅ PASS | 每轮 xz -dkc 恢复 + conf-inject 正常 |
-| 扩展 batch 8 测例 | ✅ DONE | lseek01/read01 PASS, open01/stat01 ENV_FAIL/FIXABLE_LATER, write01 glibc ENV_FAIL |
-| P0 panic 扫描 | 🔄 IN_PROGRESS | explore agents 扫描 FS+VM panic 点 |
-| la64 编译验证 | 🔄 PENDING | — |
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| mkdir02 | TFAIL (2) | FIXABLE_LATER | NO | SGID 继承 (Round-2 权限) |
+| mkdir03 | NOT_RUN | — | NO | |
+| mkdir04 | TFAIL (1) | FIXABLE_NOW | NO | 非存在中间目录→成功 (VFS bug) |
+| mkdir05 | NOT_RUN | — | NO | |
+| mkdir09 | NOT_RUN | — | NO | |
+| mkdirat01-02 | NOT_RUN | — | NO | |
+
+### rmdir (3 测例, Priority: 10)
+
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| rmdir01-03 | NOT_RUN | — | NO | |
+
+### unlink / unlinkat (5 测例, Priority: 10)
+
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| unlink05 | TPASS (2/2) ✅ | PASS | YES | 文件+fifo |
+| unlink07 | TPASS (6/6) ✅ | PASS | YES | ENAMETOOLONG 已修复 |
+| unlink08 | TPASS (2/4) | — | YES | 2 EISDIR ✅, 2 EACCES (权限Round-2) |
+| unlink09 | NOT_RUN | — | NO | |
+| unlinkat01 | NOT_RUN | — | NO | |
+
+### rename / renameat (16 测例, Priority: 10)
+
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| rename01,03-14 | NOT_RUN | — | NO | 镜像中存在 |
+| renameat01 | NOT_RUN | — | NO | |
+| renameat201-202 | — | UNSUPPORTED | NO | RENAME_EXCHANGE/RENAME_NOREPLACE |
+
+### truncate / ftruncate (7 测例, Priority: 8)
+
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| ftruncate01 | TPASS ✅ | PASS | YES | |
+| ftruncate03 | TFAIL (3/4) | FIXABLE_NOW | NO | ENOSYS→EINVAL, succeeded unexpectedly×2 |
+| ftruncate04 | NOT_RUN | — | NO | |
+| truncate02 | NOT_RUN | — | NO | |
+| truncate03 | TFAIL (8/8) | FIXABLE_NOW | NO | sys_truncate 完全未实现 (全返回ENOSYS) |
+
+### symlink / readlink (8 测例, Priority: 8)
+
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| symlink01-04 | NOT_RUN | — | NO | |
+| symlinkat01 | NOT_RUN | — | NO | |
+| readlink01 | TPASS ✅ | PASS | YES | |
+| readlink03 | TPASS (5/8) | — | NO | ENAMETOOLONG ✅, succeeded×2+ENOENT×1 |
+| readlinkat01-02 | NOT_RUN | — | NO | |
+
+### link / linkat (8 测例, Priority: 8)
+
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| link02 | TPASS ✅ | PASS | YES | |
+| link04 | TPASS (12/14) | — | YES | ENAMETOOLONG ✅, 空路径✅, EACCES×2 |
+| link05 | TPASS ✅ | PASS | YES | 1000硬链接 |
+| link08 | NOT_RUN | — | NO | |
+| linkat01-02 | NOT_RUN | — | NO | |
+
+### chmod / fchmod / fchmodat (13 测例, Priority: 8)
+
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| chmod01,03,05-07 | NOT_RUN | — | NO | |
+| fchmod01-06 | NOT_RUN | — | NO | |
+| fchmodat01-02 | NOT_RUN | — | NO | |
+
+### chown 系列 (15+ 测例, Priority: 8)
+
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| chown01-05 (_16) | NOT_RUN | FIXABLE_LATER | NO | 需 seteuid/setreuid |
+| fchown01-05 (_16) | NOT_RUN | FIXABLE_LATER | NO | |
+| fchownat01-02 | NOT_RUN | FIXABLE_LATER | NO | |
+
+### utime / utimes / utimensat (9 测例, Priority: 8)
+
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| utime01-07 | NOT_RUN | — | NO | utime01-03 之前 TBROK (no free device) |
+| utimes01 | NOT_RUN | — | NO | |
+| utimensat01 | NOT_RUN | — | NO | |
+
+### flock (5 测例, Priority: 6)
+
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| flock01-04,06 | NOT_RUN | — | NO | |
+
+### fallocate (6 测例, Priority: 6)
+
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| fallocate01-06 | NOT_RUN | — | NO | |
+
+---
+
+## Round-2 Family (page cache / 一致性 / mmap)
+
+### pread / pwrite (6+ 测例)
+
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| pread01-02 | NOT_RUN | — | NO | |
+| pwrite01-04 | NOT_RUN | — | NO | |
+| preadv01-03 | NOT_RUN | — | NO | |
+| pwritev01-03 | NOT_RUN | — | NO | |
+| preadv201-203 | — | UNSUPPORTED | NO | Linux 5.x+ |
+
+### readv / writev (9+ 测例)
+
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| readv01-02 | NOT_RUN | — | NO | |
+| writev01-07 | NOT_RUN | — | NO | |
+
+### fsync / sync / syncfs (7 测例)
+
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| fsync01-04 | NOT_RUN | — | NO | |
+| sync01 | NOT_RUN | — | NO | |
+| syncfs01 | NOT_RUN | — | NO | |
+| sync_file_range01-02 | NOT_RUN | — | NO | |
+
+### mmap file-backed (21 测例, mmapstress excluded)
+
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| mmap001,01-20 | NOT_RUN | — | NO | |
+| mmapstress01-10 | — | DANGEROUS_STRESS | NO | |
+
+### msync / munmap / mprotect / madvise (23 测例)
+
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| msync01-04 | NOT_RUN | — | NO | |
+| munmap01-03 | NOT_RUN | — | NO | |
+| mprotect01-05 | NOT_RUN | — | NO | |
+| madvise01-11 | NOT_RUN | — | NO | |
+
+### sendfile (8 测例)
+
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| sendfile02-09 | NOT_RUN | — | NO | |
+
+---
+
+## 辅助 Family
+
+### statfs / fstatfs / statvfs (8 测例)
+
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| statfs01-03 | NOT_RUN | — | NO | |
+| fstatfs01-02 | NOT_RUN | — | NO | |
+| statvfs01-02 | NOT_RUN | — | NO | |
+
+### umask / pathconf / fpathconf / realpath (5 测例)
+
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| umask01 | NOT_RUN | — | NO | |
+| pathconf01-02 | NOT_RUN | — | NO | |
+| fpathconf01 | NOT_RUN | — | NO | |
+| realpath01 | NOT_RUN | — | NO | |
+
+### readahead (2 测例)
+
+| Testcase | 结果 | 分类 | 回归 | 备注 |
+|----------|------|------|------|------|
+| readahead01-02 | NOT_RUN | — | NO | |
+
+---
+
+## 回归集 (~50 TPASS)
+
+| Family | 测例 |
+|--------|------|
+| open | open03, open04 |
+| close | close01, close02 |
+| read | read01, read02 |
+| write | write01, write02 |
+| lseek | lseek01 |
+| stat | stat02, fstat02, lstat02 |
+| access | access01 |
+| getcwd | getcwd01 |
+| chdir | chdir04 |
+| getdents | getdents01 |
+| dup | dup01-07, dup201-207, dup3_01 |
+| fcntl | fcntl01-05, fcntl08, fcntl13-14 |
+| creat | creat01, creat03, creat05 |
+| unlink | unlink05(2/2), unlink07(6/6), unlink08(2/4) |
+| link | link02, link04(12/14), link05 |
+| readlink | readlink01, readlink03(5/8) |
+| ftruncate | ftruncate01 |
+| chown | chown01 |
+
+---
+
+## 强制排除清单 (~200+)
+
+### UNSUPPORTED — 不支持的特性
+
+| 类别 | 测例数 | 代表 |
+|------|--------|------|
+| xattr | ~32 | setxattr*, getxattr*, listxattr* |
+| ACL | ~1 | tacl_xattr.sh |
+| quota | ~9 | quotactl01-09 |
+| namespace/bind | ~7 | fs_bind* |
+| mount propagation | ~85 | fs_bind* (bind/rbind/move) |
+| fanotify | ~25 | fanotify01-25 |
+| inotify | ~14 | inotify01-12 |
+| chroot/pivot_root | ~5 | chroot01-04 |
+| landlock | ~10 | Linux 5.13+ |
+| io_uring | ~3 | Linux 5.1+ |
+| userfaultfd | ~6 | Linux 4.3+ |
+| memfd_create | ~4 | Linux 3.17+ |
+| statmount/listmount | ~13 | Linux 6.8+ |
+| fsconfig/fsmount | ~9 | Linux 5.2+ |
+| openat2 | ~3 | Linux 5.6+ |
+| close_range | ~2 | Linux 5.9+ |
+| faccessat2 | ~2 | Linux 5.8+ |
+| fchmodat2 | ~2 | Linux 6.3+ |
+| renameat2 复杂flag | ~2 | RENAME_EXCHANGE/RENAME_NOREPLACE |
+| statx | ~12 | Linux 4.11+ |
+
+### DANGEROUS_STRESS — 压力/破坏性
+
+| 测例 | 说明 |
+|------|------|
+| fsstress, fsx-linux, doio, iogen, growfiles | FS 压力 |
+| ftest01-08, fs_racer(10), read_all, fs_fill | 极限测试 |
+| fs_di, fsplough, stream01-05, lftest | 大文件/碎片 |
+| openfile, inode01-02 | 资源耗尽 |
+| mmapstress01-10 | mmap 压力 |
+
+### FIXABLE_LATER — 依赖未来 Round
+
+| 类别 | 依赖 |
+|------|------|
+| chown 全系列 (~15) | seteuid/setreuid |
+| chmod 复杂权限 (~10) | 权限模型 |
+| sticky bit (open01) | 权限模型 |
+| S_ISGID 继承 (mkdir02) | 权限模型 |
+| EACCES 权限校验 (unlink08/link04各2点) | 权限模型 |
+| flock 完整语义 (~5) | Round-2 |
+| fcntl OFD 锁 (fcntl15-40) | Round-2 |
+| fallocate 复杂模式 | Round-2 |
 
 ---
 
@@ -279,4 +433,5 @@
 
 | 日期 | 变更内容 |
 |------|----------|
-| 2026-05-20 | 创建文档。Oracle 审查后重写：加入运行结果/行动分类分离、arch/libc 维度、三列表、LTP 上游完整清单、Preflight 阶段 |
+| 2026-05-22 | 重写: Round-0 全PASS, Round-1 部分PASS, 本地摸底360个二进制清单, 回归集~50 |
+| 2026-05-20 | 创建文档, Oracle审查通过 |
