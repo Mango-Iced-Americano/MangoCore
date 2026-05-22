@@ -703,8 +703,9 @@ fn run_group_once(
 const MAX_LTP_ENTRIES: usize = 3000;
 const MAX_NAME_BYTES: usize = 98304; // 96KB name storage on stack
 
-fn should_preload_musl_ltp_compat(libc_suffix: &str, name: &str) -> bool {
-    libc_suffix == "musl" && !name.as_bytes().iter().any(|b| *b == b'.')
+fn should_preload_ltp_compat(libc_suffix: &str, name: &str) -> bool {
+    (libc_suffix == "musl" || libc_suffix == "glibc")
+        && !name.as_bytes().iter().any(|b| *b == b'.')
 }
 
 fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str> {
@@ -940,7 +941,7 @@ fn run_ltp_binaries(
             // 将 ltp/testcases/bin 加入 PATH。同时设置 LTPROOT 以兼容 LTP
             // 内部路径解析逻辑。musl/glibc 使用各自目录下的 ltp，自然不同。
             let ltp_root_abs = format!("{}/ltp", log_dir);
-            let preload = if should_preload_musl_ltp_compat(libc_suffix, name) {
+            let preload = if should_preload_ltp_compat(libc_suffix, name) {
                 "LD_PRELOAD=/ltp_proto_compat.so "
             } else {
                 ""

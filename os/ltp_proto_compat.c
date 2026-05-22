@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <sched.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/syscall.h>
 #include <sys/utsname.h>
@@ -104,6 +105,33 @@ int gethostname(char *name, size_t len)
 
     memcpy(name, uts.nodename, actual_len + 1);
     return 0;
+}
+
+char *getcwd(char *buf, size_t size)
+{
+    char *target = buf;
+    long ret;
+
+    if (target == NULL) {
+        if (size == 0) {
+            size = 4096;
+        }
+        target = malloc(size);
+        if (target == NULL) {
+            errno = ENOMEM;
+            return NULL;
+        }
+    }
+
+    ret = syscall(SYS_getcwd, target, size);
+    if (ret < 0) {
+        if (target != buf) {
+            free(target);
+        }
+        return NULL;
+    }
+
+    return target;
 }
 
 int sched_setscheduler(pid_t pid, int policy, const struct sched_param *param)

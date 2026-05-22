@@ -286,6 +286,28 @@
 - rv64/la64、musl/glibc 下 `ioprio_set02` 均为 3 个 TPASS。
 - rv64/la64、musl/glibc 下 `ioprio_set03` 均为 3 个 TPASS。
 
+### 15. `kill05` 跨 uid 信号权限与 glibc cwd 兼容
+
+问题：从 `kcmp03` 后继续扫描，`kill05` 暴露两个层次的问题：
+- musl 下真实语义失败：不同 uid 进程对目标进程发送 `SIGKILL` 时成功返回，LTP 期望 `EPERM`。
+- glibc 下前置 TBROK：LTP 框架 `getcwd(...,1024)` 返回 `ENOENT`，尚未进入 `kill05` 断言主体。这不是 `kill05` 本体语义，而是 glibc cwd 解析路径依赖更完整的 fs/procfs 行为。
+
+处理：
+- `sys_kill(pid > 0)` 改为先查找目标进程，再按 Linux 基本权限规则校验：root/euid 0 允许；同进程允许；发送者 real/effective uid 匹配目标 real/saved uid 时允许，否则返回 `EPERM`。
+- 保留 `ESRCH` 优先级：目标进程不存在时先返回 `ESRCH`，再做权限判断。
+- `ltp_proto_compat.so` 增加 `getcwd()` 包装，直接走 `SYS_getcwd`，避开 glibc 对 cwd 的额外解析。
+- 内联 LTP runner 对 musl/glibc 的普通二进制用例都注入 `LD_PRELOAD=/ltp_proto_compat.so`，但继续避开 `.sh` 脚本，降低脚本环境污染。
+
+验证日志：
+- `logs/ltp-20260522-adapt/rv64-kill05-glibc-preload-after2.log`
+- `logs/ltp-20260522-adapt/la64-kill05-glibc-preload-after.log`
+- `logs/ltp-20260522-adapt/rv64-kill-both-preload-after.log`
+- `logs/ltp-20260522-adapt/la64-kill-both-preload-after.log`
+
+结果：
+- rv64/la64、glibc 下 `kill05` 均从 `getcwd ENOENT` TBROK 变为 `kill failed with EPERM` TPASS。
+- rv64/la64、musl/glibc 下 `kill03/kill05/kill06` 小回归均为 exit 0。
+
 ## 本轮跳过项
 
 已按规则加入 `os_test.conf` 的全量 exclude：
@@ -344,6 +366,9 @@
 - `logs/ltp-20260522-adapt/rv64-full-ltp-from-hackbench-current.log`
 - `logs/ltp-20260522-adapt/rv64-ioprio-after.log`
 - `logs/ltp-20260522-adapt/la64-ioprio-after.log`
+- `logs/ltp-20260522-adapt/rv64-full-ltp-from-kcmp03-current.log`
+- `logs/ltp-20260522-adapt/rv64-kill-both-preload-after.log`
+- `logs/ltp-20260522-adapt/la64-kill-both-preload-after.log`
 
 扫描发现：
 - `clone301` 已从真实失败变为双架构通过。
@@ -366,6 +391,8 @@
 - `ioprio_get01/ioprio_set01-03` 已由 syscall unsupported/TCONF 变为双架构双 libc TPASS。
 - `hackbench` 后连续出现 `http/icmp/if/ip` net 脚本、`huge/ima/inotify/ioctl/isofs/kallsyms/kcmp` fs/proc/device/内核子系统项、以及 `io_uring/AIO/module/x86-only` 环境项，已按当前策略跳过。
 - 最新 rv64 扫描已从 `hackbench` 推进到 `kcmp03`，中间主要是 fs/net/proc/device/module/AIO/io_uring/环境类项目，已按当前策略跳过。
+- 从 `kcmp03` 后继续扫描发现 `keyctl01-09` 主要依赖 keyring/proc/sysctl/modprobe 环境，`leapsec01` 依赖完整 `adjtimex` 状态语义，`lchown/link/linkat/lgetxattr` 属于 fs/权限/xattr，均不作为当前非 fs/net 优先目标。
+- `kill05` 已修复：跨 uid 正向 `kill(pid, SIGKILL)` 现在返回 `EPERM`；glibc 前置 `getcwd` TBROK 通过 LTP compat preload 绕开。
 - 当前影响扫描推进的主要是 fs/net/epoll/文件锁/xattr/环境 helper，不适合作为本轮优先目标。
 - 继续往后扫描时，应在更新 exclude 后从全量配置继续跑，寻找 syscall/process/mm/time/signal 方向的真实 TFAIL。
 

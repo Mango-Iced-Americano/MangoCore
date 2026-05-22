@@ -2,11 +2,39 @@ use crate::fs::pidfd::PidFd;
 use crate::hal::{MachineContext, TrapContext, UserSignalMask};
 use crate::mm::{copy_from_user, UserPtr, UserPtrMut};
 use crate::syscall::errno::*;
-use crate::task::{current_task, exit_current_and_run_next, signal::*, ProcessManager};
+use crate::task::{
+    current_task, exit_current_and_run_next, signal::*, ProcessControlBlock, ProcessManager,
+};
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
 use core::mem::size_of;
 use log::{error, info, trace};
+
+fn can_signal_process(target: &ProcessControlBlock) -> bool {
+    let Some(sender) = current_task() else {
+        return false;
+    };
+    if sender.pid() == target.pid {
+        return true;
+    }
+    let sender_inner = sender.acquire_inner_lock();
+    let sender_uid = sender_inner.uid;
+    let sender_euid = sender_inner.euid;
+    drop(sender_inner);
+
+    if sender_euid == 0 {
+        return true;
+    }
+
+    let Some(target_task) = target.any_live_thread() else {
+        return true;
+    };
+    let target_inner = target_task.acquire_inner_lock();
+    sender_uid == target_inner.uid
+        || sender_uid == target_inner.suid
+        || sender_euid == target_inner.uid
+        || sender_euid == target_inner.suid
+}
 
 pub fn sys_kill(pid: usize, sig: usize) -> isize {
     let signal = match Signals::from_signum(sig) {
@@ -15,7 +43,14 @@ pub fn sys_kill(pid: usize, sig: usize) -> isize {
     };
     let pid_signed = pid as isize;
     if pid_signed > 0 {
-        ProcessManager::send_signal_to_process(pid, signal)
+        let Some(process) = ProcessManager::find_process(pid) else {
+            return ESRCH;
+        };
+        if !can_signal_process(&process) {
+            return EPERM;
+        }
+        send_process_signal(&process, signal);
+        SUCCESS
     } else if pid_signed == 0 {
         ProcessManager::send_signal_to_current_group(signal)
     } else if pid_signed == -1 {
