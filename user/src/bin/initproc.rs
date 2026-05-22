@@ -1446,14 +1446,12 @@ fn prepare_symlink(environ: &[*const u8]) {
     // Step 1.5: 测试环境依赖最小账户/网络配置，无条件幂等写入（镜像可能缺失或格式错误）
     println!("[initproc] preparing /etc account/network files ...");
     let account_cmd = "\
-    let account_cmd = "\
         mkdir -p /etc /root /tmp /run /var /var/tmp /dev/shm; chmod 1777 /tmp /var/tmp /dev/shm; \
         [ -f /etc/passwd ] || printf 'root:x:0:0:root:/root:/bin/sh\\nnobody:x:65534:65534:nobody:/nonexistent:/bin/sh\\n' > /etc/passwd; \
         [ -f /etc/group ] || printf 'root:x:0:\\nnogroup:x:65534:\\n' > /etc/group; \
         printf 'passwd: files\\ngroup: files\\nhosts: files dns\\n' > /etc/nsswitch.conf; \
         printf 'nameserver 8.8.8.8\\n' > /etc/resolv.conf; \
         printf 'blossom\\n' > /etc/hostname; \
-    \0";
     \0";
     let ret = run_bash_cmd(account_cmd, environ);
     println!("[initproc] minimal account files done, exit={}", ret);
