@@ -1333,6 +1333,9 @@ pub fn sys_fchmodat(dirfd: usize, path: *const u8, mode: u32, _flags: u32) -> is
         Ok(s) => s,
         Err(_) => return EFAULT,
     };
+    if let Err(errno) = validate_path_len(&path_str) {
+        return errno;
+    }
     let inode = if path_str.starts_with('/') {
         match vfs_lookup_absolute(&path_str) {
             Ok(inode) => inode,
@@ -1572,6 +1575,9 @@ pub fn sys_openat(dirfd: usize, path: *const u8, flags: u32, mode: u32) -> isize
         Ok(path) => path,
         Err(errno) => return errno,
     };
+    if let Err(errno) = validate_path_len(&path) {
+        return errno;
+    }
     let flags = match OpenFlags::from_bits(flags) {
         Some(flags) => flags,
         None => {
