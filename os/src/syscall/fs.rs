@@ -1261,6 +1261,12 @@ pub fn sys_readlinkat(dirfd: usize, pathname: *const u8, buf: *mut u8, bufsiz: u
     if let Err(errno) = validate_path_len(&path) {
         return errno;
     }
+    if bufsiz == 0 {
+        return EINVAL;
+    }
+    if path.is_empty() {
+        return ENOENT;
+    }
     let real_path = if path.as_str() == "/proc/self/exe" {
         let exe_path = task.process.exe_path();
         if exe_path.is_empty() {
