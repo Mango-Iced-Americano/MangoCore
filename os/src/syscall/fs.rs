@@ -2391,6 +2391,9 @@ pub fn sys_ftruncate(fd: usize, length: isize) -> isize {
         Ok(file) => file,
         Err(e) => return -(e as isize),
     };
+    if file.is_dir() {
+        return EISDIR;
+    }
     match file.truncate_size(length as usize) {
         Ok(()) => SUCCESS,
         Err(e) => -(e as isize),
