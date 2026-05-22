@@ -165,6 +165,22 @@
 
 结果：rv64/la64、musl/glibc 下 `get_robust_list01` 5 个子项均为 TPASS，外层 wrapper 仍打印 `FAIL LTP CASE get_robust_list01 : 0`，按内部结果为通过。
 
+### 9. `getcpu(2)` 单核最小实现
+
+问题：`getcpu01` 在旧扫描中调用 syscall 168，内核未分发，LTP 内部判定为 `TCONF: __NR_getcpu not supported on your arch`。
+
+处理：
+- 新增 syscall 168 `getcpu(cpu, node, tcache)`。
+- 当前 QEMU 单核环境固定返回 `cpu=0`、`node=0`。
+- `cpu` / `node` 指针允许为 NULL；非 NULL 时按用户指针写回，坏地址返回 `EFAULT`。
+- `tcache` 按 Linux 已弃用参数处理，忽略。
+
+验证日志：
+- `logs/ltp-20260522-adapt/rv64-getcpu-after.log`
+- `logs/ltp-20260522-adapt/la64-getcpu-after.log`
+
+结果：rv64/la64、musl/glibc 下 `getcpu01` 均为 1 个 TPASS，内部 summary `failed 0`，不再是 unsupported/TCONF。
+
 ## 本轮跳过项
 
 已按规则加入 `os_test.conf` 的全量 exclude：
@@ -200,6 +216,8 @@
 - `logs/ltp-20260522-adapt/la64-setpriority02-after.log`
 - `logs/ltp-20260522-adapt/rv64-get-robust-list-after.log`
 - `logs/ltp-20260522-adapt/la64-get-robust-list-after.log`
+- `logs/ltp-20260522-adapt/rv64-getcpu-after.log`
+- `logs/ltp-20260522-adapt/la64-getcpu-after.log`
 
 扫描发现：
 - `clone301` 已从真实失败变为双架构通过。
@@ -211,6 +229,7 @@
 - `genbessel/geniperb/genpower/gentrigo` 当前是测试镜像 helper 路径/环境问题；`geneve01.sh/geneve02.sh` 属于 net module/veth 环境问题；本轮不纳入修复。
 - `getaddrinfo_01` 仍停在 glibc service/protocol 环境文件问题，后续可单独补 `/etc/services`/协议文件。
 - `get_robust_list01` 已修复：坏指针、无效 pid、当前线程成功、跨用户无权限 `EPERM` 均已对齐。
+- `getcpu01` 已由 unsupported/TCONF 变为双架构双 libc TPASS。
 - 最新 rv64 扫描继续推进到 `ftp-download-stress02-rmt.sh`，其中 `fstatfs*`/`fsync*`/`fsx*`/`ftest*` 都属于 fs 方向，`ftp-*` 属于 net 长压测，按当前策略跳过。
 - 当前影响扫描推进的主要是 fs/net/epoll/文件锁/xattr/环境 helper，不适合作为本轮优先目标。
 - 继续往后扫描时，应在更新 exclude 后从全量配置继续跑，寻找 syscall/process/mm/time/signal 方向的真实 TFAIL。

@@ -125,6 +125,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_GETRUSAGE => "getrusage",
         SYSCALL_UMASK => "umask",
         SYSCALL_PRCTL => "prctl",
+        SYSCALL_GETCPU => "getcpu",
         SYSCALL_GET_TIME_OF_DAY => "get_time_of_day",
         SYSCALL_ADJTIMEX => "adjtimex",
         SYSCALL_GETPID => "getpid",
@@ -407,6 +408,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_GETRUSAGE => sys_getrusage(args[0] as isize, args[1] as *mut Rusage),
         SYSCALL_UMASK => sys_umask(args[0] as u32),
         SYSCALL_PRCTL => sys_prctl(args[0], args[1], args[2], args[3], args[4]),
+        SYSCALL_GETCPU => sys_getcpu(args[0] as *mut u32, args[1] as *mut u32, args[2]),
         SYSCALL_GET_TIME_OF_DAY => sys_gettimeofday(
             args[0] as *mut crate::timer::TimeVal,
             args[1] as *mut crate::timer::TimeZone,

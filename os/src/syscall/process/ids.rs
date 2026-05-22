@@ -1049,6 +1049,21 @@ pub fn sys_setpriority(which: usize, who: usize, prio: usize) -> isize {
     SUCCESS
 }
 
+pub fn sys_getcpu(cpu: *mut u32, node: *mut u32, _tcache: usize) -> isize {
+    let token = current_user_token();
+    if !cpu.is_null() {
+        if let Err(errno) = UserPtrMut::new(cpu).write(token, &0u32) {
+            return errno;
+        }
+    }
+    if !node.is_null() {
+        if let Err(errno) = UserPtrMut::new(node).write(token, &0u32) {
+            return errno;
+        }
+    }
+    SUCCESS
+}
+
 /// set pointer to thread ID
 /// This feature is currently NOT supported and is implemented as a stub,
 
