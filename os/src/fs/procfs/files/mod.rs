@@ -51,7 +51,7 @@ pub fn register_all(root: &Arc<crate::fs::procfs::LockedProcInode>) -> Result<()
         sys::max_user_namespaces_content,
         0,
     )?;
-    root.add_dynamic_symlink("self", self_::self_content)?;
+    root.add_dynamic_symlink("self", self_::self_content, 0)?;
 
     crate::fs::procfs::pid::setup_pid_hooks(root);
 

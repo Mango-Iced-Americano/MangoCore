@@ -42,6 +42,13 @@ pub fn fd_list_hook(inode: &LockedProcInode) -> Vec<String> {
 pub fn fd_find_hook(inode: &LockedProcInode, name: &str) -> Option<Arc<dyn crate::fs::vfs::IndexNode>> {
     let pid = get_pid(inode);
     let fd: usize = name.parse().ok()?;
+    // 验证 fd 确实存在 — 无效 fd 应返回 ENOENT
+    let task = crate::task::find_process_by_pid(pid)?;
+    let files = task.files();
+    let guard = files.lock();
+    guard.get_file(fd).ok()?;
+    drop(guard);
+
     let extra = (pid << 16) | (fd & 0xFFFF);
     let (parent_weak, fs_weak) = {
         let dir_lock = inode.0.lock();

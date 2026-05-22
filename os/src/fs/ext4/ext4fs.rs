@@ -1144,6 +1144,11 @@ impl IndexNode for layout::Ext4OSInode {
             .map_err(|_| SyscallErr::ENOENT)?;
         let child_num = result.dentry.inode;
 
+        // unlink 不可用于目录 — 必须返回 EISDIR
+        if self.ext4fs.get_inode_ref(child_num).inode.is_dir() {
+            return Err(SyscallErr::EISDIR);
+        }
+
         // Phase 2: flush dirty PageCache BEFORE freeing inode
         self.ext4fs.flush_inode_pagecache_if_dirty(child_num)
             .map_err(|_| SyscallErr::EIO)?;

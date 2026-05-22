@@ -85,7 +85,7 @@ fn create_pid_dir(parent: &LockedProcInode, pid: usize) -> Result<Arc<dyn IndexN
         pid,
     )?;
 
-    dir.add_dynamic_symlink("exe", exe::pid_exe_content)?;
+    dir.add_dynamic_symlink("exe", exe::pid_exe_content, pid)?;
 
     let fd_dir = dir.add_dir_locked("fd", InodeMode::from_bits_truncate(0o500))?;
     fd_dir.0.lock().extra_data = pid;

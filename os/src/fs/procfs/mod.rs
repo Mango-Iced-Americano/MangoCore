@@ -383,6 +383,7 @@ impl LockedProcInode {
         self: &Arc<Self>,
         name: &str,
         content_fn: ProcContentFn,
+        extra_data: usize,
     ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
         let mut this = self.0.lock();
         if this.metadata.file_type != FileType::Dir {
@@ -395,6 +396,7 @@ impl LockedProcInode {
             return Err(SyscallErr::ENAMETOOLONG);
         }
         let mut data = ProcInodeData::new_file(InodeMode::from_bits_truncate(0o777), content_fn);
+        data.extra_data = extra_data;
         data.metadata.file_type = FileType::SymLink;
         data.metadata.mode = InodeMode::S_IFLNK | InodeMode::S_IRWXUGO;
         data.metadata.size = PROCFS_SYMLINK_MAX as i64;

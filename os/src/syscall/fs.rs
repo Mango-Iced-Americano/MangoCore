@@ -1699,6 +1699,11 @@ pub fn sys_unlinkat(dirfd: usize, path: *const u8, flags: u32) -> isize {
         Ok(result) => result,
         Err(errno) => return errno,
     };
+    // POSIX: name too long → ENAMETOOLONG
+    const NAME_MAX: usize = 255;
+    if leaf.len() > NAME_MAX {
+        return ENAMETOOLONG;
+    }
     let result = if flags.contains(UnlinkatFlags::AT_REMOVEDIR) {
         parent.rmdir(&leaf)
     } else {

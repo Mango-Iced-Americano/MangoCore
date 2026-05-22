@@ -591,6 +591,12 @@ impl IndexNode for LockedRamFSInode {
             .as_any_ref()
             .downcast_ref::<LockedRamFSInode>()
             .ok_or(SyscallErr::EINVAL)?;
+        // unlink 不可用于目录 — 必须返回 EISDIR
+        if child_inode.0.lock().metadata.file_type == FileType::Dir {
+            // 恢复: 刚才 remove 了 child，但这是非法操作
+            inode.children.insert(alloc::string::String::from(name), child.clone());
+            return Err(SyscallErr::EISDIR);
+        }
         let child_pages: usize = {
             let mut child_locked = child_inode.0.lock();
             child_locked.metadata.nlinks -= 1;
