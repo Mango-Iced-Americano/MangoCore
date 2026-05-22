@@ -263,6 +263,29 @@
 - rv64/la64、musl/glibc 下 `gettimeofday01` 均为 3 个 TPASS，坏 `tv`/坏 `tz`/组合坏指针都返回 `EFAULT`。
 - rv64/la64、musl/glibc 下 `gettimeofday02` 均保持 TPASS。
 
+### 14. `ioprio_get01` / `ioprio_set01-03` 最小兼容
+
+问题：从 `hackbench` 后继续扫描，`ioprio_get01`、`ioprio_set01`、`ioprio_set02`、`ioprio_set03` 均因 syscall 30/31 未注册而 TCONF：
+- `ioprio_get01`：`__NR_ioprio_get(31)` 未支持。
+- `ioprio_set01-03`：`__NR_ioprio_set(30)` / `__NR_ioprio_get(31)` 未支持。
+
+处理：
+- 增加 `ioprio_set(30)` / `ioprio_get(31)` syscall id、名称和分发。
+- `TaskControlBlockInner` 增加 ABI 可见的 I/O priority 状态，不接入真实 I/O 调度器。
+- 默认值使用 Linux 常见 best-effort/4，支持 `IOPRIO_WHO_PROCESS` 当前进程。
+- 支持 `NONE/0`、`RT/0-7`、`BE/0-7`、`IDLE/0-7`；非法 class、`BE/8`、`NONE/非 0` 返回 `EINVAL` 且不改变旧值。
+- fork/clone 继承父线程 ioprio 兼容状态。
+
+验证日志：
+- `logs/ltp-20260522-adapt/rv64-ioprio-after.log`
+- `logs/ltp-20260522-adapt/la64-ioprio-after.log`
+
+结果：
+- rv64/la64、musl/glibc 下 `ioprio_get01` 均为 1 个 TPASS。
+- rv64/la64、musl/glibc 下 `ioprio_set01` 均为 2 个 TPASS。
+- rv64/la64、musl/glibc 下 `ioprio_set02` 均为 3 个 TPASS。
+- rv64/la64、musl/glibc 下 `ioprio_set03` 均为 3 个 TPASS。
+
 ## 本轮跳过项
 
 已按规则加入 `os_test.conf` 的全量 exclude：
@@ -276,6 +299,10 @@
 - procfs/资源统计卡点：`getrusage03`、`getrusage03_child`。
 - net/socket 当前暂缓项：`getsockopt01`、`getsockopt02`。
 - 本轮新增跳过：`getxattr01-05`（fs/xattr）、`gre01.sh/gre02.sh`（net）、`gzip_tests.sh`（环境命令能力）、`hackbench`（长耗时性能项）。
+- `hackbench` 后扫描新增跳过：
+  - net/协议/网络脚本：`http-stress*`、`icmp*`、`if-*`、`in6_02`、`ip*`、`ipvlan01.sh`。
+  - fs/设备/内核子系统环境：`hangup01`、`huge*`、`ima*`、`inotify*`、`input*`、`ioctl*`、`isofs.sh`、`kallsyms`、`kcmp01-03`。
+  - module/AIO/io_uring/平台环境：`init_module*`、`insmod01.sh`、`io_*`、`io_uring*`、`ioperm*`、`iopl*`、`irqbalance01`、`ht_affinity`、`ht_enabled`、`initialize_if`、`iogen`。
 
 注意：这些跳过项不是声明内核已经支持，而是为了遵守“非 fs/net 优先、卡死/长耗时跳过”的当前适配策略。
 
@@ -314,6 +341,9 @@
 - `logs/ltp-20260522-adapt/rv64-full-ltp-from-gettid-current.log`
 - `logs/ltp-20260522-adapt/rv64-gettimeofday-after.log`
 - `logs/ltp-20260522-adapt/la64-gettimeofday-after.log`
+- `logs/ltp-20260522-adapt/rv64-full-ltp-from-hackbench-current.log`
+- `logs/ltp-20260522-adapt/rv64-ioprio-after.log`
+- `logs/ltp-20260522-adapt/la64-ioprio-after.log`
 
 扫描发现：
 - `clone301` 已从真实失败变为双架构通过。
@@ -333,7 +363,9 @@
 - `getsockname01` 当前内部 TPASS；`getsockopt01/02` 属于 net/socket 方向，按当前策略先跳过。
 - `gettid01/gettid02` 已确认内部 TPASS。
 - `gettimeofday01` 已修复：坏 `tz` 指针现在返回 `EFAULT`；`gettimeofday02` 单调性保持通过。
-- 最新 rv64 扫描继续推进到 `ftp-download-stress02-rmt.sh`，其中 `fstatfs*`/`fsync*`/`fsx*`/`ftest*` 都属于 fs 方向，`ftp-*` 属于 net 长压测，按当前策略跳过。
+- `ioprio_get01/ioprio_set01-03` 已由 syscall unsupported/TCONF 变为双架构双 libc TPASS。
+- `hackbench` 后连续出现 `http/icmp/if/ip` net 脚本、`huge/ima/inotify/ioctl/isofs/kallsyms/kcmp` fs/proc/device/内核子系统项、以及 `io_uring/AIO/module/x86-only` 环境项，已按当前策略跳过。
+- 最新 rv64 扫描已从 `hackbench` 推进到 `kcmp03`，中间主要是 fs/net/proc/device/module/AIO/io_uring/环境类项目，已按当前策略跳过。
 - 当前影响扫描推进的主要是 fs/net/epoll/文件锁/xattr/环境 helper，不适合作为本轮优先目标。
 - 继续往后扫描时，应在更新 exclude 后从全量配置继续跑，寻找 syscall/process/mm/time/signal 方向的真实 TFAIL。
 

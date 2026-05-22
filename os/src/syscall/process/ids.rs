@@ -38,6 +38,14 @@ const PR_SET_KEEPCAPS: usize = 8;
 const PR_CAPBSET_READ: usize = 23;
 const PR_CAPBSET_DROP: usize = 24;
 const PERSONALITY_GET: usize = 0xffff_ffff;
+const IOPRIO_WHO_PROCESS: usize = 1;
+const IOPRIO_CLASS_SHIFT: usize = 13;
+const IOPRIO_PRIO_MASK: usize = (1 << IOPRIO_CLASS_SHIFT) - 1;
+const IOPRIO_PRIO_NUM: usize = 8;
+const IOPRIO_CLASS_NONE: usize = 0;
+const IOPRIO_CLASS_RT: usize = 1;
+const IOPRIO_CLASS_BE: usize = 2;
+const IOPRIO_CLASS_IDLE: usize = 3;
 
 pub fn sys_personality(persona: usize) -> isize {
     let task = current_task().unwrap();
@@ -47,6 +55,45 @@ pub fn sys_personality(persona: usize) -> isize {
         inner.personality = persona & PERSONALITY_GET;
     }
     old as isize
+}
+
+fn valid_ioprio(class: usize, prio: usize) -> bool {
+    match class {
+        IOPRIO_CLASS_NONE => prio == 0,
+        IOPRIO_CLASS_RT | IOPRIO_CLASS_BE | IOPRIO_CLASS_IDLE => prio < IOPRIO_PRIO_NUM,
+        _ => false,
+    }
+}
+
+pub fn sys_ioprio_get(which: usize, who: usize) -> isize {
+    if which != IOPRIO_WHO_PROCESS {
+        return EINVAL;
+    }
+    let task = current_task().unwrap();
+    if who != 0 && who != task.pid() {
+        return ESRCH;
+    }
+    let inner = task.acquire_inner_lock();
+    ((inner.ioprio_class << IOPRIO_CLASS_SHIFT) | inner.ioprio_prio) as isize
+}
+
+pub fn sys_ioprio_set(which: usize, who: usize, ioprio: usize) -> isize {
+    if which != IOPRIO_WHO_PROCESS {
+        return EINVAL;
+    }
+    let task = current_task().unwrap();
+    if who != 0 && who != task.pid() {
+        return ESRCH;
+    }
+    let class = ioprio >> IOPRIO_CLASS_SHIFT;
+    let prio = ioprio & IOPRIO_PRIO_MASK;
+    if !valid_ioprio(class, prio) {
+        return EINVAL;
+    }
+    let mut inner = task.acquire_inner_lock();
+    inner.ioprio_class = class;
+    inner.ioprio_prio = prio;
+    SUCCESS
 }
 
 #[derive(Clone, Copy, Debug)]
