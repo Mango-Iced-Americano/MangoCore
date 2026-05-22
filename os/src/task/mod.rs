@@ -45,7 +45,7 @@ pub use signal::*;
 pub use sleep::{sleep_relative_interruptible, sleep_until_interruptible};
 pub use task::{FsStatus, PosixTimer, RobustList, Rusage, TaskControlBlock, TaskStatus};
 
-use self::processor::PROCESSOR;
+pub use self::processor::PROCESSOR;
 #[allow(unused)]
 pub fn try_yield() {
     let lock = PROCESSOR.lock();

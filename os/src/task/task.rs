@@ -453,7 +453,7 @@ impl TaskControlBlock {
             self.pid(),
             exit_code
         );
-        crate::utils::stats::print_resource_stats();
+        crate::utils::stats::print_resource_stats(Some(self));
         true
     }
 
@@ -1025,13 +1025,21 @@ impl TaskControlBlock {
         self.tid.0
     }
 
-    /// 获取用户可见进程 ID。
+        /// 获取用户可见进程 ID。
     pub fn getpid(&self) -> usize {
         self.process.pid
     }
     /// 获取用户可见进程 ID。
     pub fn pid(&self) -> usize {
         self.process.pid
+    }
+    /// 获取线程组 ID（当前简化为进程 ID）
+    pub fn tgid(&self) -> usize {
+        self.process.pid
+    }
+    /// 尝试获取内部锁，用于 panic 诊断等不可阻塞场景
+    pub fn try_inner(&self) -> Option<spin::MutexGuard<TaskControlBlockInner>> {
+        self.inner.try_lock()
     }
     /// 设置进程组ID
     pub fn setpgid(&self, pgid: usize) -> isize {

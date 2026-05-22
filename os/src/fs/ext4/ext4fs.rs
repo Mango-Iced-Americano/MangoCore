@@ -976,7 +976,6 @@ impl IndexNode for layout::Ext4OSInode {
                 else if e == crate::syscall::errno::EEXIST { SyscallErr::EEXIST }
                 else { SyscallErr::ENOSYS }
             })?;
-        // Phase 4: bump dir_version + clear negative (ONLY after successful creation)
         self.bump_dir_version();
         self.clear_negative_dentry(name);
         let child_ino = new_ref.inode_num;

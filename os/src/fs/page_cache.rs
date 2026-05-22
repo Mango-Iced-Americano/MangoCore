@@ -39,6 +39,21 @@ pub fn flush_all_page_caches() {
     });
 }
 
+/// Evict clean pages from all registered caches. Called periodically
+/// to prevent unbounded PageCache growth.
+pub fn evict_all_clean_pages(max_per_cache: usize) -> usize {
+    let mut total = 0;
+    PAGE_CACHE_REGISTRY.lock().retain(|weak| {
+        if let Some(pc) = weak.upgrade() {
+            total += pc.evict_clean_pages(max_per_cache);
+            true
+        } else {
+            false
+        }
+    });
+    total
+}
+
 // ── PageState ────────────────────────────────────────────────────────────
 
 /// 页面状态，对标 Linux 的 `PG_*` 标志组合
@@ -225,6 +240,47 @@ impl PageCache {
     /// 获取缓存中的页面数量
     pub fn cached_page_count(&self) -> usize {
         self.entries.lock().iter().filter(|e| e.is_some()).count()
+    }
+
+    /// Evict up to `target` clean pages that are held only by the cache.
+    /// Checks: UpToDate state, not in dirty set, PageEntry refcount==1,
+    /// AND FrameTracker refcount==1 (protects mmap'd pages).
+    /// Returns the number evicted.
+    pub fn evict_clean_pages(&self, target: usize) -> usize {
+        let mut entries = self.entries.lock();
+        let mut inner = self.inner.lock();
+        let mut evicted = 0;
+
+        for i in 0..entries.len() {
+            if evicted >= target {
+                break;
+            }
+            if let Some(entry) = &entries[i] {
+                if entry.state() != PageState::UpToDate {
+                    continue;
+                }
+                if inner.dirty_pages.contains(&i) {
+                    continue;
+                }
+                if Arc::strong_count(entry) != 1 {
+                    continue;
+                }
+                if Arc::strong_count(&entry.page) != 1 {
+                    continue;
+                }
+                // Safe to evict — only the cache holds this page, not mmap'd
+                inner.pages.remove(&i);
+                entries[i] = None;
+                evicted += 1;
+            }
+        }
+
+        // Shrink trailing Nones
+        while entries.last().map_or(false, |e| e.is_none()) {
+            entries.pop();
+        }
+
+        evicted
     }
 
     /// 获取页面状态

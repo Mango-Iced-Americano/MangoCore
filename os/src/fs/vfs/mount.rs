@@ -535,9 +535,9 @@ impl MountFS {
         }
         // 从父文件系统的挂载表中移除
         if let Some(mountpoint) = self.self_mountpoint.lock().take() {
-            let _ = mountpoint
-                .mount_fs
-                .remove_mount(mountpoint.inner_inode.metadata()?.inode_id);
+            if let Ok(md) = mountpoint.inner_inode.metadata() {
+                mountpoint.mount_fs.remove_mount(md.inode_id);
+            }
         }
         self.inner_filesystem.on_umount();
         Ok(())

@@ -2108,42 +2108,23 @@ pub fn sys_mount(
     source: *const u8,
     target: *const u8,
     filesystemtype: *const u8,
-    mountflags: usize,
+    mountflags_raw: usize,
     data: *const u8,
 ) -> isize {
-    if target.is_null() || filesystemtype.is_null() {
+    if target.is_null() {
         return EINVAL;
     }
     let token = current_user_token();
-    let source = if source.is_null() {
-        String::new()
-    } else {
-        match user_cstring(token, source) {
-            Ok(source) => source,
-            Err(errno) => return errno,
-        }
-    };
     let target = match user_cstring(token, target) {
         Ok(target) => target,
         Err(errno) => return errno,
     };
-    let filesystemtype = match user_cstring(token, filesystemtype) {
-        Ok(filesystemtype) => filesystemtype,
-        Err(errno) => return errno,
-    };
-    let mountflags = match MountFlags::from_bits(mountflags) {
+
+    // Parse mountflags early — needed for flag routing
+    let mountflags = match MountFlags::from_bits(mountflags_raw) {
         Some(f) => f,
         None => return EINVAL,
     };
-    info!(
-        "[sys_mount] source: {}, target: {}, filesystemtype: {}, mountflags: {:?}, data: {:?}",
-        source, target, filesystemtype, mountflags, data
-    );
-
-    if matches!(filesystemtype.as_str(), "cgroup" | "cgroup2") {
-        // 未实现 cgroupfs 时不能伪装成 tmpfs，否则 LTP 会误判支持并运行会挂起的 helper。
-        return ENODEV;
-    }
 
     // Resolve target path (support CWD-relative)
     let (lookup_inode, lookup_path) = {
@@ -2168,7 +2149,6 @@ pub fn sys_mount(
             return errno;
         }
     };
-
     let md = match target_inode.metadata() {
         Ok(md) => md,
         Err(e) => return -(e as isize),
@@ -2178,13 +2158,67 @@ pub fn sys_mount(
     }
     let inode_id = md.inode_id;
 
+    // ── Flag routing — must happen BEFORE any RamFS creation ──
+
+    let propagation = mountflags
+        & (MountFlags::MS_SHARED | MountFlags::MS_PRIVATE | MountFlags::MS_SLAVE | MountFlags::MS_UNBINDABLE);
+
+    if !propagation.is_empty() {
+        // Allow at most one propagation type
+        if propagation.bits().count_ones() != 1
+            || mountflags.intersects(MountFlags::MS_BIND | MountFlags::MS_MOVE | MountFlags::MS_REMOUNT)
+        {
+            return EINVAL;
+        }
+        info!("[sys_mount] propagation flag — no-op success, target={}", lookup_path);
+        return SUCCESS;
+    }
+
+    if mountflags.intersects(MountFlags::MS_BIND | MountFlags::MS_MOVE | MountFlags::MS_REMOUNT) {
+        return EINVAL;
+    }
+
+    if mountflags.intersects(MountFlags::MS_REC) {
+        // MS_REC is a modifier, not a standalone operation
+        return EINVAL;
+    }
+
+    // ── Normal mount path ──
+
+    // filesystemtype is required for normal mounts (already checked NULL at entry for bind,
+    // but normal mounts need it)
+    if filesystemtype.is_null() {
+        return EINVAL;
+    }
+
+    let source = if source.is_null() {
+        String::new()
+    } else {
+        match user_cstring(token, source) {
+            Ok(source) => source,
+            Err(errno) => return errno,
+        }
+    };
+    let filesystemtype = match user_cstring(token, filesystemtype) {
+        Ok(filesystemtype) => filesystemtype,
+        Err(errno) => return errno,
+    };
+
+    info!(
+        "[sys_mount] source: {}, target: {}, filesystemtype: {}, mountflags: {:?}, data: {:?}",
+        source, lookup_path, filesystemtype, mountflags, data
+    );
+
+    if matches!(filesystemtype.as_str(), "cgroup" | "cgroup2") {
+        return ENODEV;
+    }
+
     // Get the parent MountFS via downcast
     let parent_mount_fs = if let Some(mfs_inode) =
         (target_inode.as_any_ref().downcast_ref::<vfs::MountFSInode>())
     {
         mfs_inode.mount_fs.clone()
     } else {
-        // fallback: use VFS root's mount_fs
         crate::fs::vfs_root().clone()
     };
 
@@ -2193,8 +2227,17 @@ pub fn sys_mount(
     let mnt_flags = vfs::MountFlags::from_bits_truncate(mountflags.bits() as u32);
     let mnt_fs = vfs::MountFS::new(tmpfs, mnt_flags);
 
-    parent_mount_fs.add_mount(inode_id, mnt_fs)
-        .map(|_| SUCCESS)
+    parent_mount_fs.add_mount(inode_id, mnt_fs.clone())
+        .map(|_| {
+            if let Some(target_mnt) = target_inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+                let backref = vfs::MountFSInode::new(
+                    target_mnt.inner_inode.clone(),
+                    target_mnt.mount_fs.clone(),
+                );
+                mnt_fs.set_self_mountpoint(Some(backref));
+            }
+            SUCCESS
+        })
         .unwrap_or_else(|e| {
             error!("[sys_mount] add_mount failed: errno={}", e as isize);
             -(e as isize)
