@@ -98,14 +98,41 @@
 
 结果：rv64/la64、musl/glibc 下 `execve03` 均为 6 个 TPASS，内部 summary `failed 0`。
 
+### 6. futex requeue / wait bitset
+
+问题：继续扫描到 futex 后出现三类非 fs/net 真失败：
+- `futex_cmp_requeue01`：`FUTEX_CMP_REQUEUE` 未实际支持，返回 `-1`，waiter 没有被 requeue。
+- `futex_cmp_requeue02`：比较值不匹配时返回 `EINVAL`，LTP 期望 `EAGAIN`；负 `nr_wake/nr_requeue` 参数又被当成超大无符号数执行，LTP 期望 `EINVAL`。
+- `futex_wait_bitset01`：`FUTEX_WAIT_BITSET` 未分发，直接 `EINVAL`，LTP 期望按绝对超时返回 `ETIMEDOUT`。
+
+处理：
+- 新增 `FUTEX_CMP_REQUEUE` / `FUTEX_WAIT_BITSET` / `FUTEX_WAKE_BITSET` 分支。
+- 抽出 futex wake/requeue 公共队列逻辑，并补齐 process-shared futex 的 requeue。
+- `FUTEX_CMP_REQUEUE` 按 Linux 语义检查比较值，不匹配返回 `EAGAIN`。
+- `FUTEX_REQUEUE` / `FUTEX_CMP_REQUEUE` 对负计数参数返回 `EINVAL`，避免把 `-1` 当成大计数执行。
+- `FUTEX_WAIT_BITSET` 支持非零 bitset，并按 `CLOCK_MONOTONIC` / `CLOCK_REALTIME` 处理绝对 timeout。
+- 双架构 `SYSTEM_TASK_LIMIT` 从 128 提升到 1024，解除 `futex_cmp_requeue01` 1000 waiter 子场景的 fork 上限阻塞。
+
+验证日志：
+- `logs/ltp-20260522-adapt/rv64-futex-requeue-bitset-after2.log`
+- `logs/ltp-20260522-adapt/rv64-futex-requeue-bitset-after3.log`
+- `logs/ltp-20260522-adapt/la64-futex-requeue-bitset-after.log`
+
+结果：
+- `futex_cmp_requeue02`：rv64/la64、musl/glibc 均为 3 个 TPASS，内部 summary `failed 0`。
+- `futex_wait_bitset01`：rv64/la64、musl/glibc 均为 2 个 TPASS，内部 summary `failed 0`。
+- `futex_cmp_requeue01`：la64、musl/glibc 均通过；rv64 musl 通过；rv64 glibc 稳定卡在最后一个 1000 waiter 子场景并触发 LTP 30 秒超时。该项当前按“长耗时/性能阻塞”策略加入 glibc-only exclude，保留 musl 侧可得分结果。
+
 ## 本轮跳过项
 
 已按规则加入 `os_test.conf` 的全量 exclude：
 
 - 已知大面/耗时：`epoll-ltp`、`epoll_ctl*`、`epoll_pwait*`、`epoll_create*`。
-- fs/VFS/mount/权限类：`chdir01`、`chmod05/06/07`、`chown04`、`chroot01-04`、`fs_bind*`、`fs_racer*`、`fsconfig*`、`fsmount*`、`fsopen*`、`fspick*`、`fsstress`、`cp*`、`copy_file_range*`、`dio*`、`dirty*`、`du01.sh`、`df01.sh`、`fanotify*`、`fdatasync*`、`flock*`、`xattr*` 等。
-- net/协议/网络环境：`busy_poll*`、`can_*`、`check_icmp*`、`dns*`、`dhcp*`、`dccp*`、`broken_ip*`、`bind_noport01.sh` 等。
+- fs/VFS/mount/权限类：`chdir01`、`chmod05/06/07`、`chown04`、`chroot01-04`、`fs_bind*`、`fs_racer*`、`fsconfig*`、`fsmount*`、`fsopen*`、`fspick*`、`fsstress`、`fstatfs*`、`fsx*`、`fsync*`、`ftest*`、`ftruncate*`、`cp*`、`copy_file_range*`、`dio*`、`dirty*`、`du01.sh`、`df01.sh`、`fanotify*`、`fdatasync*`、`flock*`、`xattr*` 等。
+- net/协议/网络环境：`busy_poll*`、`can_*`、`check_icmp*`、`dns*`、`dhcp*`、`dccp*`、`broken_ip*`、`bind_noport01.sh`、`ftp-download-stress*`、`ftp-upload-stress*`、`ftp01.sh` 等。
 - 环境/TCONF/helper：`add_key*`、`af_alg*`、`aio*`、`cap_bounds*`、`check_keepcaps`、`check_envval`、`cleanup_lvm.sh`、`cacheflush01`、`endian_switch01`、`event_generator`、`data`、`datafiles`、`find_portbundle` 等。
+- tracing/内核特性环境：`ftrace_*`。
+- glibc-only 长耗时：`futex_cmp_requeue01`（rv64 glibc 1000 waiter 子场景稳定触发 30 秒超时；la64 和 rv64 musl 已验证通过）。
 
 注意：这些跳过项不是声明内核已经支持，而是为了遵守“非 fs/net 优先、卡死/长耗时跳过”的当前适配策略。
 
@@ -120,11 +147,18 @@
 - `logs/ltp-20260522-adapt/rv64-full-ltp-after-execve03.log`
 - `logs/ltp-20260522-adapt/rv64-full-ltp-from-clockgettime02.log`
 - `logs/ltp-20260522-adapt/rv64-full-ltp-after-fsbind-skip.log`
+- `logs/ltp-20260522-adapt/rv64-full-ltp-after-personality-execve-commit.log`
+- `logs/ltp-20260522-adapt/rv64-full-ltp-from-futex.log`
+- `logs/ltp-20260522-adapt/rv64-futex-requeue-bitset-after2.log`
+- `logs/ltp-20260522-adapt/rv64-futex-requeue-bitset-after3.log`
+- `logs/ltp-20260522-adapt/la64-futex-requeue-bitset-after.log`
 
 扫描发现：
 - `clone301` 已从真实失败变为双架构通过。
 - `personality` 前置缺口已补齐，AIO `io_setup` 仍按环境/大面项跳过。
 - `execve03` 已从真实 TFAIL 变为双架构通过。
+- futex 方向的 `cmp_requeue02`、`wait_bitset01` 已双架构双 libc 通过；`cmp_requeue01` 的语义已修复，但 rv64 glibc 1000 waiter 子场景耗时过长，当前只在 glibc exclude。
+- 最新 rv64 扫描继续推进到 `ftp-download-stress02-rmt.sh`，其中 `fstatfs*`/`fsync*`/`fsx*`/`ftest*` 都属于 fs 方向，`ftp-*` 属于 net 长压测，按当前策略跳过。
 - 当前影响扫描推进的主要是 fs/net/epoll/文件锁/xattr/环境 helper，不适合作为本轮优先目标。
 - 继续往后扫描时，应在更新 exclude 后从全量配置继续跑，寻找 syscall/process/mm/time/signal 方向的真实 TFAIL。
 
@@ -133,6 +167,8 @@
 1. 用更新后的 `os_test.conf` 重新注入 rv64/la64 镜像。
 2. 继续跑全量 LTP 扫描，遇到 fs/net/epoll/环境项继续记录并跳过。
 3. 优先适配后续出现的非 fs/net 真失败，例如：
+   - `futex_waitv01-03`：syscall 449 缺失或语义未适配，可评估最小 wait-vector 实现；
+   - `futex_wake02`：依赖 `/proc/<pid>/task`，属于 procfs 支持缺口，按当前 fs/procfs 冲突策略先记录，暂不优先；
    - 缺 syscall 且语义较小的 compat 项；
    - process/signal/time/mm 类错误码不一致；
    - `TFAIL` 明确指向单个 syscall 行为差异的项目。
