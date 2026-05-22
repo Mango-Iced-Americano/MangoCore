@@ -427,8 +427,20 @@ impl SignalStack {
     }
 }
 
+const WAIT_COREDUMP: u32 = 0x80;
+
+fn default_signal_wait_status(signal: Signals) -> u32 {
+    let signum = signal.to_signum().unwrap() as u32;
+    // Linux wait status uses bit 7 to report WCOREDUMP(status).
+    if matches!(signum, 3 | 4 | 5 | 6 | 7 | 8 | 11 | 24 | 25 | 31) {
+        signum | WAIT_COREDUMP
+    } else {
+        signum
+    }
+}
+
 fn exit_current_with_sigsegv() -> ! {
-    exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
+    exit_current_and_run_next(default_signal_wait_status(Signals::SIGSEGV));
 }
 
 /// Signals whose SIG_DFL action is to ignore the signal.
@@ -613,13 +625,24 @@ pub fn do_signal() {
             let use_alt_stack = act.flags.contains(SigActionFlags::SA_ONSTACK)
                 && !alt_stack.is_disabled()
                 && !alt_stack.contains_sp(current_sp);
+            let default_stack_top = task.ustack_bottom_va();
+            let default_stack_bottom = default_stack_top - USER_STACK_SIZE;
+            let normal_stack_bottom = if current_sp > default_stack_bottom
+                && current_sp <= default_stack_top
+            {
+                // execve 后会重新分配默认用户栈；vfork/clone 旧的 ustack_base
+                // 可能仍是自定义栈指针，因此按当前 sp 所在栈槽重新判定边界。
+                default_stack_bottom
+            } else {
+                task.ustack_base.saturating_sub(USER_STACK_SIZE)
+            };
             let (frame_base_sp, stack_bottom) = if use_alt_stack {
                 match alt_stack.top() {
                     Some(top) => (top, alt_stack.sp),
-                    None => (current_sp, task.ustack_base - USER_STACK_SIZE),
+                    None => (current_sp, normal_stack_bottom),
                 }
             } else {
-                (current_sp, task.ustack_base - USER_STACK_SIZE)
+                (current_sp, normal_stack_bottom)
             };
             // check if we have enough space on selected user stack
             if let Some((ucontext_addr, siginfo_addr, sig_sp, sig_size)) =
@@ -776,7 +799,7 @@ pub fn do_signal() {
                     drop(inner);
                     drop(sighand);
                     drop(task);
-                    exit_group_and_run_next(signal.to_signum().unwrap() as u32);
+                    exit_group_and_run_next(default_signal_wait_status(signal));
                 }
                 // the current process we are handing is sure to be in RUNNING status, so just ignore SIGCONT
                 // where we really wake up this process is where we sent SIGCONT, such as `sys_kill()`
@@ -801,7 +824,7 @@ pub fn do_signal() {
                     drop(inner);
                     drop(sighand);
                     drop(task);
-                    exit_group_and_run_next(signal.to_signum().unwrap() as u32);
+                    exit_group_and_run_next(default_signal_wait_status(signal));
                 }
             }
         }

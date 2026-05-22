@@ -13,7 +13,7 @@ use crate::timer::{TimeSpec, TimeVal};
 
 use super::{
     block_current_and_run_next_checked, block_current_and_run_next_with_lock_checked, current_task,
-    discard_non_actionable_unblocked_signals, has_actionable_signal, signal::Signals,
+    discard_non_actionable_unblocked_signals, has_actionable_signal, signal::{SigInfo, Signals},
     TaskControlBlock, TaskStatus,
 };
 use crate::utils::error::SyscallErr;
@@ -929,6 +929,13 @@ pub enum TimerAction {
         signal: Signals,
         generation: usize,
     },
+    // POSIX timer 到期后向创建线程投递信号。
+    PosixTimerSignal {
+        task: Weak<TaskControlBlock>,
+        timer_id: usize,
+        signal: Signals,
+        generation: usize,
+    },
 }
 
 //内核中的统一计时器，目前用于itimer_real
@@ -1124,6 +1131,61 @@ impl KernelTimerQueue {
                         self.add_action(
                             TimerAction::SendSignal {
                                 task: Arc::downgrade(&task),
+                                signal,
+                                generation: next_generation,
+                            },
+                            deadline,
+                        );
+                    }
+                }
+            }
+            TimerAction::PosixTimerSignal {
+                task,
+                timer_id,
+                signal,
+                generation,
+            } => {
+                if let Some(task) = task.upgrade() {
+                    let mut should_wake = false;
+                    let mut next_timer = None;
+                    {
+                        let mut inner = task.acquire_inner_lock();
+                        let Some(Some(timer_state)) = inner.posix_timers.get_mut(timer_id) else {
+                            return;
+                        };
+                        if timer_state.generation != generation
+                            || timer_state.deadline != Some(timer.deadline)
+                        {
+                            return;
+                        }
+                        if timer_state.interval.is_zero() {
+                            timer_state.value = TimeSpec::new();
+                            timer_state.deadline = None;
+                        } else {
+                            let deadline = now + timer_state.interval;
+                            timer_state.generation = timer_state.generation.wrapping_add(1);
+                            timer_state.value = timer_state.interval;
+                            timer_state.deadline = Some(deadline);
+                            next_timer = Some((deadline, timer_state.generation));
+                        }
+                        if !signal.is_empty() {
+                            let _ = inner
+                                .sigpending
+                                .enqueue_signal(signal, SigInfo::SI_TIMER as usize);
+                            if inner.task_status == super::TaskStatus::Interruptible {
+                                inner.task_status = super::TaskStatus::Ready;
+                                should_wake = true;
+                            }
+                        }
+                    }
+                    if should_wake {
+                        wake_interruptible(task.clone());
+                    }
+                    if let Some((deadline, next_generation)) = next_timer {
+                        self.add_action(
+                            TimerAction::PosixTimerSignal {
+                                task: Arc::downgrade(&task),
+                                timer_id,
                                 signal,
                                 generation: next_generation,
                             },

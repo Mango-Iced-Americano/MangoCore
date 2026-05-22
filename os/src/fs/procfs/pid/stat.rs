@@ -2,10 +2,12 @@
 //!
 //! 仿照 DragonOS /proc/<pid>/stat 设计。
 
-use crate::utils::error::SyscallErr;
 use crate::fs::procfs::proc_read_str;
-use alloc::string::String;
+use crate::hal::TICKS_PER_SEC;
 use crate::task::TaskStatus;
+use crate::timer::get_time_ms;
+use crate::utils::error::SyscallErr;
+use alloc::string::String;
 
 pub fn pid_stat_content(
     pid: usize,
@@ -34,6 +36,7 @@ pub fn pid_stat_content(
     let ppid = process.parent_pid();
     let pgid = process.getpgid();
     let num_threads = process.live_thread_count().max(1);
+    let uptime_ticks = get_time_ms().saturating_mul(TICKS_PER_SEC) / 1000;
 
     let comm = {
         let exe = process.exe_path();
@@ -46,11 +49,12 @@ pub fn pid_stat_content(
         }
     };
 
-    // Linux /proc/<pid>/stat 单行空格分隔格式:
+    // Linux /proc/<pid>/stat 单行空格分隔格式。字段数量需要保持完整，
+    // glibc/musl 的 CPU clock fallback 会解析后段字段。
     // pid comm state ppid pgrp session tty_nr tpgid flags minflt cminflt majflt cmajflt
     // utime stime cutime cstime priority nice num_threads itrealvalue starttime vsize rss ...
     let s = alloc::format!(
-        "{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+        "{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}\n",
         pid,                                    // 1:  pid
         comm,                                   // 2:  comm (括号包裹)
         state_char,                             // 3:  state
@@ -64,7 +68,7 @@ pub fn pid_stat_content(
         0,                                      // 11: cminflt
         0,                                      // 12: majflt
         0,                                      // 13: cmajflt
-        0,                                      // 14: utime (not tracked)
+        uptime_ticks,                           // 14: utime (rough fallback ticks)
         0,                                      // 15: stime (not tracked)
         0,                                      // 16: cutime (not tracked)
         0,                                      // 17: cstime (not tracked)
@@ -75,6 +79,34 @@ pub fn pid_stat_content(
         0,                                      // 22: starttime (not tracked)
         0,                                      // 23: vsize
         0,                                      // 24: rss
+        0,                                      // 25: rsslim
+        0,                                      // 26: startcode
+        0,                                      // 27: endcode
+        0,                                      // 28: startstack
+        0,                                      // 29: kstkesp
+        0,                                      // 30: kstkeip
+        0,                                      // 31: signal
+        0,                                      // 32: blocked
+        0,                                      // 33: sigignore
+        0,                                      // 34: sigcatch
+        0,                                      // 35: wchan
+        0,                                      // 36: nswap
+        0,                                      // 37: cnswap
+        17,                                     // 38: exit_signal (SIGCHLD)
+        0,                                      // 39: processor
+        0,                                      // 40: rt_priority
+        0,                                      // 41: policy
+        0,                                      // 42: delayacct_blkio_ticks
+        0,                                      // 43: guest_time
+        0,                                      // 44: cguest_time
+        0,                                      // 45: start_data
+        0,                                      // 46: end_data
+        0,                                      // 47: start_brk
+        0,                                      // 48: arg_start
+        0,                                      // 49: arg_end
+        0,                                      // 50: env_start
+        0,                                      // 51: env_end
+        0,                                      // 52: exit_code
     );
 
     proc_read_str(offset, len, buf, &s)

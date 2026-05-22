@@ -83,6 +83,19 @@ pub struct TaskControlBlockInner {
     pub sched_policy: usize,
     /// POSIX 调度优先级兼容字段。
     pub sched_priority: i32,
+    /// SCHED_RESET_ON_FORK 兼容标记。
+    pub sched_reset_on_fork: bool,
+    /// sched_attr 兼容回读字段，当前不参与真实调度。
+    pub sched_nice: i32,
+    pub sched_runtime: u64,
+    pub sched_deadline: u64,
+    pub sched_period: u64,
+    /// RLIMIT_RTPRIO 兼容字段，供非 root 实时调度权限检查使用。
+    pub rtprio_limit_cur: usize,
+    pub rtprio_limit_max: usize,
+    /// RLIMIT_NICE 兼容字段，供 LTP 权限类用例回读。
+    pub nice_limit_cur: usize,
+    pub nice_limit_max: usize,
     /// POSIX 用户/组 ID 兼容字段，供 LTP 权限类用例和 capability 查询使用。
     pub uid: u32,
     pub euid: u32,
@@ -111,8 +124,33 @@ pub struct TaskControlBlockInner {
     pub real_timer_deadline: Option<TimeSpec>,
     /// ITIMER_REAL 的版本号，用于让旧TimerQueue节点失效
     pub real_timer_generation: usize,
+    /// POSIX timer 的最小兼容实现。当前按创建线程保存，用于 LTP timer/clock 用例。
+    pub posix_timers: Vec<Option<PosixTimer>>,
     /// OOM killer pending 标志：分配器已耗尽，本进程将在 trap_return 时被杀死
     pub pending_oom_kill: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PosixTimer {
+    pub clock_id: usize,
+    pub signal: Signals,
+    pub interval: TimeSpec,
+    pub value: TimeSpec,
+    pub deadline: Option<TimeSpec>,
+    pub generation: usize,
+}
+
+impl PosixTimer {
+    pub fn new(clock_id: usize, signal: Signals) -> Self {
+        Self {
+            clock_id,
+            signal,
+            interval: TimeSpec::new(),
+            value: TimeSpec::new(),
+            deadline: None,
+            generation: 0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -523,6 +561,15 @@ impl TaskControlBlock {
                 task_status: TaskStatus::Ready,
                 sched_policy: 0,
                 sched_priority: 0,
+                sched_reset_on_fork: false,
+                sched_nice: 0,
+                sched_runtime: 0,
+                sched_deadline: 0,
+                sched_period: 0,
+                rtprio_limit_cur: 0,
+                rtprio_limit_max: 0,
+                nice_limit_cur: usize::MAX,
+                nice_limit_max: usize::MAX,
                 uid: 0,
                 euid: 0,
                 suid: 0,
@@ -542,6 +589,7 @@ impl TaskControlBlock {
                 timer: [ITimerVal::new(); 3],
                 real_timer_deadline: None,
                 real_timer_generation: 0,
+                posix_timers: Vec::new(),
                 pending_oom_kill: false,
             }),
         });
@@ -695,6 +743,41 @@ impl TaskControlBlock {
     ) -> Result<Arc<TaskControlBlock>, isize> {
         // ---- 保持父PCB锁
         let parent_inner = self.acquire_inner_lock();
+        // 当前调度器不实现真实 RT 调度，FIFO/RR 只作为 syscall 兼容状态。
+        // fork 时将子任务降回 normal，可避免测试进程间泄漏伪 RT 状态。
+        let reset_sched_on_fork = parent_inner.sched_reset_on_fork
+            || self.process.sched_reset_on_fork()
+            || matches!(parent_inner.sched_policy, 1 | 2);
+        let child_sched_policy = if reset_sched_on_fork {
+            0
+        } else {
+            parent_inner.sched_policy
+        };
+        let child_sched_priority = if reset_sched_on_fork {
+            0
+        } else {
+            parent_inner.sched_priority
+        };
+        let child_sched_nice = if reset_sched_on_fork {
+            0
+        } else {
+            parent_inner.sched_nice
+        };
+        let child_sched_runtime = if reset_sched_on_fork {
+            0
+        } else {
+            parent_inner.sched_runtime
+        };
+        let child_sched_deadline = if reset_sched_on_fork {
+            0
+        } else {
+            parent_inner.sched_deadline
+        };
+        let child_sched_period = if reset_sched_on_fork {
+            0
+        } else {
+            parent_inner.sched_period
+        };
         // 复制用户空间（包括陷阱上下文）
         let share_vm = flags.contains(CloneFlags::CLONE_VM);
         let parent_vm = self.process.vm();
@@ -834,6 +917,7 @@ impl TaskControlBlock {
                 timer: [ITimerVal::new(); 3],
                 real_timer_deadline: None,
                 real_timer_generation: 0,
+                posix_timers: Vec::new(),
                 sigmask: parent_inner.sigmask,
                 sigmask_to_restore: None,
                 // compute
@@ -841,8 +925,17 @@ impl TaskControlBlock {
                 task_cx: TaskContext::goto_trap_return(kstack_top),
                 // constants
                 task_status: TaskStatus::Ready,
-                sched_policy: parent_inner.sched_policy,
-                sched_priority: parent_inner.sched_priority,
+                sched_policy: child_sched_policy,
+                sched_priority: child_sched_priority,
+                sched_reset_on_fork: false,
+                sched_nice: child_sched_nice,
+                sched_runtime: child_sched_runtime,
+                sched_deadline: child_sched_deadline,
+                sched_period: child_sched_period,
+                rtprio_limit_cur: parent_inner.rtprio_limit_cur,
+                rtprio_limit_max: parent_inner.rtprio_limit_max,
+                nice_limit_cur: parent_inner.nice_limit_cur,
+                nice_limit_max: parent_inner.nice_limit_max,
                 uid: parent_inner.uid,
                 euid: parent_inner.euid,
                 suid: parent_inner.suid,
@@ -881,6 +974,15 @@ impl TaskControlBlock {
         trap_cx.kernel_sp = kstack_top;
         task_control_block.process.add_thread(&task_control_block);
         if !flags.contains(CloneFlags::CLONE_THREAD) {
+            task_control_block.process.set_sched_state(
+                child_sched_policy,
+                child_sched_priority,
+                false,
+                child_sched_nice,
+                child_sched_runtime,
+                child_sched_deadline,
+                child_sched_period,
+            );
             registry::register_process(&task_control_block.process);
         }
         registry::register_task(&task_control_block);

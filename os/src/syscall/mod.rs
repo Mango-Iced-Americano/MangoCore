@@ -44,6 +44,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_FCHOWNAT => "fchownat",
         SYSCALL_OPENAT => "openat",
         SYSCALL_CLOSE => "close",
+        SYSCALL_CLOSE_RANGE => "close_range",
         SYSCALL_PIPE2 => "pipe2",
         SYSCALL_GETDENTS64 => "getdents64",
         SYSCALL_LSEEK => "lseek",
@@ -54,6 +55,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_PREAD => "pread",
         SYSCALL_PWRITE => "pwrite",
         SYSCALL_SENDFILE => "sendfile",
+        SYSCALL_COPY_FILE_RANGE => "copy_file_range",
         SYSCALL_PSELECT6 => "pselect6",
         SYSCALL_PPOLL => "ppoll",
         SYSCALL_READLINKAT => "readlinkat",
@@ -77,6 +79,11 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_NANOSLEEP => "nanosleep",
         SYSCALL_GETITIMER => "getitimer",
         SYSCALL_SETITIMER => "setitimer",
+        SYSCALL_TIMER_CREATE => "timer_create",
+        SYSCALL_TIMER_GETTIME => "timer_gettime",
+        SYSCALL_TIMER_GETOVERRUN => "timer_getoverrun",
+        SYSCALL_TIMER_SETTIME => "timer_settime",
+        SYSCALL_TIMER_DELETE => "timer_delete",
         SYSCALL_CLOCK_SETTIME => "clock_settime",
         SYSCALL_CLOCK_GETTIME => "clock_gettime",
         SYSCALL_CLOCK_GETRES => "clock_getres",
@@ -176,6 +183,8 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_SCHED_GET_PRIORITY_MAX => "sched_get_priority_max",
         SYSCALL_SCHED_GET_PRIORITY_MIN => "sched_get_priority_min",
         SYSCALL_SCHED_RR_GET_INTERVAL => "sched_rr_get_interval",
+        SYSCALL_SCHED_SETATTR => "sched_setattr",
+        SYSCALL_SCHED_GETATTR => "sched_getattr",
         // non-standard
         SYSCALL_LS => "ls",
         SYSCALL_SHUTDOWN => "shutdown",
@@ -282,6 +291,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[3] as u32,
         ),
         SYSCALL_CLOSE => sys_close(args[0]),
+        SYSCALL_CLOSE_RANGE => sys_close_range(args[0], args[1], args[2] as u32),
         SYSCALL_PIPE2 => sys_pipe2(args[0], args[1] as u32),
         SYSCALL_GETDENTS64 => sys_getdents64(args[0], args[1] as *mut u8, args[2]),
         SYSCALL_READ => sys_read(args[0], args[1], args[2]),
@@ -292,6 +302,14 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_PWRITE => sys_pwrite(args[0], args[1], args[2], args[3]),
         SYSCALL_LSEEK => sys_lseek(args[0], args[1] as isize, args[2] as u32),
         SYSCALL_SENDFILE => sys_sendfile(args[0], args[1], args[2] as *mut usize, args[3]),
+        SYSCALL_COPY_FILE_RANGE => sys_copy_file_range(
+            args[0],
+            args[1] as *mut usize,
+            args[2],
+            args[3] as *mut usize,
+            args[4],
+            args[5] as u32,
+        ),
         SYSCALL_SPLICE => sys_splice(
             args[0],
             args[1] as *mut usize,
@@ -355,11 +373,24 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[0] as *const crate::timer::TimeSpec,
             args[1] as *mut crate::timer::TimeSpec,
         ),
+        SYSCALL_GETITIMER => sys_getitimer(args[0], args[1] as *mut ITimerVal),
         SYSCALL_SETITIMER => sys_setitimer(
             args[0],
             args[1] as *const ITimerVal,
             args[2] as *mut ITimerVal,
         ),
+        SYSCALL_TIMER_CREATE => {
+            sys_timer_create(args[0], args[1] as *const SigeventHeader, args[2] as *mut i32)
+        }
+        SYSCALL_TIMER_GETTIME => sys_timer_gettime(args[0], args[1] as *mut ITimerSpec),
+        SYSCALL_TIMER_GETOVERRUN => sys_timer_getoverrun(args[0]),
+        SYSCALL_TIMER_SETTIME => sys_timer_settime(
+            args[0],
+            args[1] as u32,
+            args[2] as *const ITimerSpec,
+            args[3] as *mut ITimerSpec,
+        ),
+        SYSCALL_TIMER_DELETE => sys_timer_delete(args[0]),
         SYSCALL_GET_TIME => sys_get_time(),
         SYSCALL_GETRUSAGE => sys_getrusage(args[0] as isize, args[1] as *mut Rusage),
         SYSCALL_UMASK => sys_umask(args[0] as u32),
@@ -562,6 +593,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SCHED_GET_PRIORITY_MIN => sys_sched_get_priority_min(args[0]),
         SYSCALL_SCHED_RR_GET_INTERVAL => {
             sys_sched_rr_get_interval(args[0], args[1] as *mut TimeSpec)
+        }
+        SYSCALL_SCHED_SETATTR => sys_sched_setattr(args[0], args[1] as *const SchedAttr, args[2]),
+        SYSCALL_SCHED_GETATTR => {
+            sys_sched_getattr(args[0], args[1] as *mut SchedAttr, args[2], args[3])
         }
         SYSCALL_GET_MEMPOLICY => sys_get_mempolicy(
             args[0] as *mut i32,

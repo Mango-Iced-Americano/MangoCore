@@ -3,12 +3,12 @@ use alloc::sync::Arc;
 use crate::mm::{UserPtr, UserPtrMut};
 use crate::syscall::errno::*;
 use crate::task::{
-    add_kernel_timer, current_task, current_user_token, signal::Signals,
+    add_kernel_timer, current_task, current_user_token, signal::Signals, PosixTimer,
     sleep_relative_interruptible, Rusage, TimerAction,
 };
 use crate::timer::{
-    current_timespec, current_timeval, get_time_ms, ITimerVal, TimeSpec, TimeVal, TimeZone, Times,
-    NSEC_PER_SEC,
+    current_timespec, current_timeval, get_time_ms, set_current_timespec, ITimerVal, TimeSpec,
+    TimeVal, TimeZone, Times, NSEC_PER_SEC,
 };
 use log::{info, trace};
 
@@ -24,6 +24,9 @@ const CLOCK_REALTIME_ALARM: usize = 8;
 const CLOCK_BOOTTIME_ALARM: usize = 9;
 const CLOCK_TAI: usize = 11;
 const TIMER_ABSTIME: u32 = 1;
+const SIGEV_SIGNAL: i32 = 0;
+const SIGEV_NONE: i32 = 1;
+const MAX_POSIX_TIMERS: usize = 32;
 const CAP_SYS_TIME: usize = 25;
 const ADJ_OFFSET: u32 = 0x0001;
 const ADJ_FREQUENCY: u32 = 0x0002;
@@ -77,6 +80,21 @@ pub struct Timex {
     stbcnt: i64,
     tai: i32,
     __padding: [i32; 11],
+}
+
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct ITimerSpec {
+    pub it_interval: TimeSpec,
+    pub it_value: TimeSpec,
+}
+
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct SigeventHeader {
+    sigev_value: usize,
+    sigev_signo: i32,
+    sigev_notify: i32,
 }
 
 pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
@@ -188,12 +206,250 @@ pub fn sys_setitimer(
     }
 }
 
+pub fn sys_getitimer(which: usize, curr_value: *mut ITimerVal) -> isize {
+    if which > 2 {
+        return EINVAL;
+    }
+    if curr_value.is_null() {
+        return EFAULT;
+    }
+
+    let task = current_task().unwrap();
+    let token = task.get_user_token();
+    let now = TimeSpec::now();
+    let value = {
+        let inner = task.acquire_inner_lock();
+        let mut value = inner.timer[which];
+        if which == 0 {
+            value.it_value = match inner.real_timer_deadline {
+                Some(deadline) => timespec_to_timeval(deadline - now),
+                None => TimeVal::new(),
+            };
+        }
+        value
+    };
+
+    match UserPtrMut::new(curr_value).write(token, &value) {
+        Ok(()) => SUCCESS,
+        Err(errno) => errno,
+    }
+}
+
+pub fn sys_timer_create(
+    clock_id: usize,
+    sevp: *const SigeventHeader,
+    timerid: *mut i32,
+) -> isize {
+    if timerid.is_null() {
+        return EFAULT;
+    }
+    if !valid_posix_timer_clock(clock_id) {
+        return EINVAL;
+    }
+
+    let token = current_user_token();
+    let signal = if sevp.is_null() {
+        Signals::SIGALRM
+    } else {
+        let event = match UserPtr::new(sevp).read(token) {
+            Ok(event) => event,
+            Err(errno) => return errno,
+        };
+        match event.sigev_notify {
+            SIGEV_SIGNAL => match Signals::from_signum(event.sigev_signo as usize) {
+                Ok(signal) => signal,
+                Err(_) => return EINVAL,
+            },
+            SIGEV_NONE => Signals::empty(),
+            _ => return EINVAL,
+        }
+    };
+
+    let task = current_task().unwrap();
+    let id = {
+        let mut inner = task.acquire_inner_lock();
+        if let Some((id, slot)) = inner
+            .posix_timers
+            .iter_mut()
+            .enumerate()
+            .find(|(_, slot)| slot.is_none())
+        {
+            *slot = Some(PosixTimer::new(clock_id, signal));
+            id
+        } else {
+            if inner.posix_timers.len() >= MAX_POSIX_TIMERS {
+                return EAGAIN;
+            }
+            if inner.posix_timers.try_reserve(1).is_err() {
+                return ENOMEM;
+            }
+            inner
+                .posix_timers
+                .push(Some(PosixTimer::new(clock_id, signal)));
+            inner.posix_timers.len() - 1
+        }
+    };
+
+    match UserPtrMut::new(timerid).write(token, &(id as i32)) {
+        Ok(()) => SUCCESS,
+        Err(errno) => {
+            let mut inner = task.acquire_inner_lock();
+            if let Some(slot) = inner.posix_timers.get_mut(id) {
+                *slot = None;
+            }
+            errno
+        }
+    }
+}
+
+pub fn sys_timer_settime(
+    timer_id: usize,
+    flags: u32,
+    new_value: *const ITimerSpec,
+    old_value: *mut ITimerSpec,
+) -> isize {
+    if flags & !TIMER_ABSTIME != 0 {
+        return EINVAL;
+    }
+    if new_value.is_null() {
+        return EINVAL;
+    }
+
+    let token = current_user_token();
+    let new_spec = match UserPtr::new(new_value).read(token) {
+        Ok(value) => value,
+        Err(errno) => return errno,
+    };
+    if !is_valid_timespec(new_spec.it_interval) || !is_valid_timespec(new_spec.it_value) {
+        return EINVAL;
+    }
+
+    let task = current_task().unwrap();
+    let mut register_timer = None;
+    {
+        let mut inner = task.acquire_inner_lock();
+        let Some(Some(timer)) = inner.posix_timers.get_mut(timer_id) else {
+            return EINVAL;
+        };
+        if !old_value.is_null() {
+            let old_spec = current_posix_itimerspec(timer);
+            if let Err(errno) = UserPtrMut::new(old_value).write(token, &old_spec) {
+                return errno;
+            }
+        }
+
+        timer.interval = new_spec.it_interval;
+        timer.value = new_spec.it_value;
+        timer.generation = timer.generation.wrapping_add(1);
+        if timer.value.is_zero() {
+            timer.deadline = None;
+        } else {
+            let deadline = posix_timer_deadline(timer.clock_id, flags, timer.value);
+            timer.deadline = Some(deadline);
+            register_timer = Some((deadline, timer.signal, timer.generation));
+        }
+    }
+
+    if let Some((deadline, signal, generation)) = register_timer {
+        add_kernel_timer(
+            TimerAction::PosixTimerSignal {
+                task: Arc::downgrade(&task),
+                timer_id,
+                signal,
+                generation,
+            },
+            deadline,
+        );
+    }
+    SUCCESS
+}
+
+pub fn sys_timer_gettime(timer_id: usize, curr_value: *mut ITimerSpec) -> isize {
+    if curr_value.is_null() {
+        return EFAULT;
+    }
+    let task = current_task().unwrap();
+    let value = {
+        let inner = task.acquire_inner_lock();
+        let Some(Some(timer)) = inner.posix_timers.get(timer_id) else {
+            return EINVAL;
+        };
+        current_posix_itimerspec(timer)
+    };
+    match UserPtrMut::new(curr_value).write(task.get_user_token(), &value) {
+        Ok(()) => SUCCESS,
+        Err(errno) => errno,
+    }
+}
+
+pub fn sys_timer_getoverrun(timer_id: usize) -> isize {
+    let task = current_task().unwrap();
+    let inner = task.acquire_inner_lock();
+    match inner.posix_timers.get(timer_id) {
+        Some(Some(_)) => 0,
+        _ => EINVAL,
+    }
+}
+
+pub fn sys_timer_delete(timer_id: usize) -> isize {
+    let task = current_task().unwrap();
+    let mut inner = task.acquire_inner_lock();
+    match inner.posix_timers.get_mut(timer_id) {
+        Some(slot @ Some(_)) => {
+            *slot = None;
+            SUCCESS
+        }
+        _ => EINVAL,
+    }
+}
+
 fn timeval_to_timespec(value: TimeVal) -> TimeSpec {
     TimeSpec::from_us(value.to_us())
 }
 
 fn timespec_to_timeval(value: TimeSpec) -> TimeVal {
     TimeVal::from_us(value.to_ns() / 1000)
+}
+
+fn valid_posix_timer_clock(clock_id: usize) -> bool {
+    matches!(
+        clock_id,
+        CLOCK_REALTIME
+            | CLOCK_MONOTONIC
+            | CLOCK_PROCESS_CPUTIME_ID
+            | CLOCK_THREAD_CPUTIME_ID
+            | CLOCK_BOOTTIME
+    )
+}
+
+fn posix_timer_clock_now(clock_id: usize) -> TimeSpec {
+    match clock_id {
+        CLOCK_REALTIME => current_timespec(),
+        CLOCK_MONOTONIC | CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID | CLOCK_BOOTTIME => {
+            TimeSpec::now()
+        }
+        _ => TimeSpec::new(),
+    }
+}
+
+fn posix_timer_deadline(clock_id: usize, flags: u32, value: TimeSpec) -> TimeSpec {
+    let duration = if flags & TIMER_ABSTIME != 0 {
+        timespec_saturating_sub(value, posix_timer_clock_now(clock_id))
+    } else {
+        value
+    };
+    TimeSpec::now() + duration
+}
+
+fn current_posix_itimerspec(timer: &PosixTimer) -> ITimerSpec {
+    let value = match timer.deadline {
+        Some(deadline) => timespec_saturating_sub(deadline, TimeSpec::now()),
+        None => TimeSpec::new(),
+    };
+    ITimerSpec {
+        it_interval: timer.interval,
+        it_value: value,
+    }
 }
 
 pub fn sys_gettimeofday(tv: *mut TimeVal, _tz: *mut TimeZone) -> isize {
@@ -292,6 +548,7 @@ pub fn sys_clock_settime(clk_id: usize, tp: *const TimeSpec) -> isize {
     if !has_time_adjust_permission() {
         return EPERM;
     }
+    set_current_timespec(timespec);
     SUCCESS
 }
 

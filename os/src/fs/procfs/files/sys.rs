@@ -38,3 +38,12 @@ pub fn osrelease_content(
 ) -> Result<usize, SyscallErr> {
     proc_read_str(offset, len, buf, "5.10.0-mangocore\n")
 }
+
+pub fn net_conf_tag_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    proc_read_str(offset, len, buf, "0\n")
+}

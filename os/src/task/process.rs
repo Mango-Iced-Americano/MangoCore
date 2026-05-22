@@ -8,9 +8,12 @@ use super::{
 };
 use crate::fs::vfs;
 use crate::mm::{AddressSpace, PageTableImpl};
+use crate::utils::error::SyscallErr;
+use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
 use alloc::string::String;
 use alloc::vec::Vec;
+use lazy_static::lazy_static;
 use log::warn;
 use spin::{Mutex, MutexGuard};
 
@@ -40,6 +43,8 @@ pub struct ProcessControlBlock {
 pub struct ProcessInner {
     /// 可执行文件描述符（新 VFS）。
     exe: Arc<Mutex<vfs::File>>,
+    /// 当前可执行文件的稳定 key，用于 open(O_TRUNC/O_WRONLY) 返回 ETXTBSY。
+    exec_key: Option<ExecInodeKey>,
     /// 可执行文件路径（用于 /proc/self/exe）。
     exe_path: String,
     /// 文件描述符表（新 VFS）。
@@ -64,6 +69,15 @@ pub struct ProcessInner {
     pub state: ProcessState,
     /// wait4 可回收的进程退出码。
     pub exit_code: u32,
+    /// 进程 leader 的调度策略兼容快照，供 zombie 子进程在 wait 前被查询。
+    pub sched_policy: usize,
+    pub sched_priority: i32,
+    /// SCHED_RESET_ON_FORK 的进程级兼容标记，用于覆盖测试框架中非 leader fork 的路径。
+    pub sched_reset_on_fork: bool,
+    pub sched_nice: i32,
+    pub sched_runtime: u64,
+    pub sched_deadline: u64,
+    pub sched_period: u64,
 }
 
 pub struct ProcessSignalState {
@@ -73,6 +87,48 @@ pub struct ProcessSignalState {
     pub group_exit_code: Option<u32>,
     /// 线程组是否已经进入 group exit。
     pub group_exiting: bool,
+}
+
+type ExecInodeKey = (usize, vfs::InodeId);
+
+lazy_static! {
+    static ref EXEC_INODE_REFS: Mutex<BTreeMap<ExecInodeKey, usize>> =
+        Mutex::new(BTreeMap::new());
+}
+
+fn exec_key_from_file(file: &vfs::File) -> Option<ExecInodeKey> {
+    file.metadata().ok().map(|meta| (meta.dev_id, meta.inode_id))
+}
+
+fn register_exec_key(key: ExecInodeKey) {
+    let mut refs = EXEC_INODE_REFS.lock();
+    let count = refs.entry(key).or_insert(0);
+    *count = count.saturating_add(1);
+}
+
+fn unregister_exec_key(key: ExecInodeKey) {
+    let mut refs = EXEC_INODE_REFS.lock();
+    let remove = if let Some(count) = refs.get_mut(&key) {
+        if *count > 1 {
+            *count -= 1;
+            false
+        } else {
+            true
+        }
+    } else {
+        false
+    };
+    if remove {
+        refs.remove(&key);
+    }
+}
+
+pub fn is_executable_inode_busy(inode: &Arc<dyn vfs::IndexNode>) -> bool {
+    let key = match inode.metadata() {
+        Ok(meta) => (meta.dev_id, meta.inode_id),
+        Err(_) => return false,
+    };
+    EXEC_INODE_REFS.lock().get(&key).copied().unwrap_or(0) > 0
 }
 
 impl ProcessControlBlock {
@@ -90,6 +146,13 @@ impl ProcessControlBlock {
         futex: Arc<Mutex<Futex>>,
         user_res_slot_allocator: Arc<Mutex<RecycleAllocator>>,
     ) -> Self {
+        let exec_key = {
+            let lock = exe.lock();
+            exec_key_from_file(&lock)
+        };
+        if let Some(key) = exec_key {
+            register_exec_key(key);
+        }
         Self {
             pid,
             leader_tid,
@@ -99,6 +162,7 @@ impl ProcessControlBlock {
             vfork_done: Completion::new(),
             inner: Mutex::new(ProcessInner {
                 exe,
+                exec_key,
                 exe_path,
                 files,
                 fs,
@@ -111,6 +175,13 @@ impl ProcessControlBlock {
                 children: Vec::new(),
                 state: ProcessState::Running,
                 exit_code: 0,
+                sched_policy: 0,
+                sched_priority: 0,
+                sched_reset_on_fork: false,
+                sched_nice: 0,
+                sched_runtime: 0,
+                sched_deadline: 0,
+                sched_period: 0,
             }),
             signal: Mutex::new(ProcessSignalState {
                 shared_pending: SignalQueue::empty(),
@@ -137,11 +208,30 @@ impl ProcessControlBlock {
     }
 
     pub fn replace_exe(&self, exe: vfs::File) {
-        self.inner.lock().exe = Arc::new(Mutex::new(exe));
+        let new_key = exec_key_from_file(&exe);
+        let mut inner = self.inner.lock();
+        if inner.exec_key != new_key {
+            if let Some(old_key) = inner.exec_key.take() {
+                unregister_exec_key(old_key);
+            }
+            if let Some(key) = new_key {
+                register_exec_key(key);
+            }
+            inner.exec_key = new_key;
+        }
+        inner.exe = Arc::new(Mutex::new(exe));
     }
 
     pub fn files(&self) -> Arc<Mutex<vfs::FdTable>> {
         self.inner.lock().files.clone()
+    }
+
+    pub fn unshare_files(&self) -> Result<Arc<Mutex<vfs::FdTable>>, SyscallErr> {
+        let files_ref = self.files();
+        let copied = files_ref.lock().try_clone()?;
+        let new_files = Arc::new(Mutex::new(copied));
+        self.inner.lock().files = new_files.clone();
+        Ok(new_files)
     }
 
     pub fn fs(&self) -> Arc<Mutex<FsStatus>> {
@@ -166,6 +256,47 @@ impl ProcessControlBlock {
 
     pub fn user_res_slot_allocator(&self) -> Arc<Mutex<RecycleAllocator>> {
         self.inner.lock().user_res_slot_allocator.clone()
+    }
+
+    pub fn sched_reset_on_fork(&self) -> bool {
+        self.inner.lock().sched_reset_on_fork
+    }
+
+    pub fn set_sched_reset_on_fork(&self, reset: bool) {
+        self.inner.lock().sched_reset_on_fork = reset;
+    }
+
+    pub fn sched_state(&self) -> (usize, i32, bool, i32, u64, u64, u64) {
+        let inner = self.inner.lock();
+        (
+            inner.sched_policy,
+            inner.sched_priority,
+            inner.sched_reset_on_fork,
+            inner.sched_nice,
+            inner.sched_runtime,
+            inner.sched_deadline,
+            inner.sched_period,
+        )
+    }
+
+    pub fn set_sched_state(
+        &self,
+        policy: usize,
+        priority: i32,
+        reset_on_fork: bool,
+        nice: i32,
+        runtime: u64,
+        deadline: u64,
+        period: u64,
+    ) {
+        let mut inner = self.inner.lock();
+        inner.sched_policy = policy;
+        inner.sched_priority = priority;
+        inner.sched_reset_on_fork = reset_on_fork;
+        inner.sched_nice = nice;
+        inner.sched_runtime = runtime;
+        inner.sched_deadline = deadline;
+        inner.sched_period = period;
     }
 
     pub fn add_thread(&self, task: &Arc<TaskControlBlock>) {
@@ -343,6 +474,10 @@ impl ProcessControlBlock {
         if !self.mark_zombie(exit_code) {
             return;
         }
+        let old_exec_key = self.inner.lock().exec_key.take();
+        if let Some(key) = old_exec_key {
+            unregister_exec_key(key);
+        }
 
         if let Some(parent_process) = self.parent() {
             parent_process.child_exit_wait.lock().wake_all();
@@ -391,6 +526,9 @@ impl ProcessControlBlock {
 
 impl Drop for ProcessControlBlock {
     fn drop(&mut self) {
+        if let Some(key) = self.inner.get_mut().exec_key.take() {
+            unregister_exec_key(key);
+        }
         registry::unregister_process(self.pid);
     }
 }

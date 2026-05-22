@@ -1,6 +1,25 @@
 #include <netdb.h>
+#include <sched.h>
 #include <stddef.h>
 #include <string.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+#ifndef SYS_sched_setscheduler
+#define SYS_sched_setscheduler 119
+#endif
+
+#ifndef SYS_sched_setparam
+#define SYS_sched_setparam 118
+#endif
+
+#ifndef SYS_sched_getscheduler
+#define SYS_sched_getscheduler 120
+#endif
+
+#ifndef SYS_sched_getparam
+#define SYS_sched_getparam 121
+#endif
 
 struct proto_entry {
     const char *name;
@@ -61,4 +80,24 @@ struct protoent *getprotobynumber(int number)
         }
     }
     return NULL;
+}
+
+int sched_setscheduler(pid_t pid, int policy, const struct sched_param *param)
+{
+    return syscall(SYS_sched_setscheduler, pid, policy, param);
+}
+
+int sched_setparam(pid_t pid, const struct sched_param *param)
+{
+    return syscall(SYS_sched_setparam, pid, param);
+}
+
+int sched_getscheduler(pid_t pid)
+{
+    return syscall(SYS_sched_getscheduler, pid);
+}
+
+int sched_getparam(pid_t pid, struct sched_param *param)
+{
+    return syscall(SYS_sched_getparam, pid, param);
 }

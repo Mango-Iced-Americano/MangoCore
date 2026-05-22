@@ -71,7 +71,7 @@ la64-only: prepare-cargo-config
 	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	make -f make/la64o.mk all 
+	make -f make/la64o.mk all MODE=${MODE} LOG=${LOG}
 
 la64-kernel-build-only: prepare-cargo-config
 	@rustup override set $(LA_TOOLCHAIN)
@@ -89,13 +89,13 @@ la64-run-only:
 	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	make -f make/la64o.mk runsimple
+	make -f make/la64o.mk runsimple MODE=${MODE} LOG=${LOG}
 
 la64-run: prepare-cargo-config
 	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	make -f make/la64o.mk comp
+	make -f make/la64o.mk comp MODE=${MODE} LOG=${LOG}
 
 comp:
 	make -f make/$(CURR_ARCH).mk comp

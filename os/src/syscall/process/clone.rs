@@ -1,7 +1,9 @@
 use alloc::sync::Arc;
 
-use crate::config::SYSTEM_TASK_LIMIT;
-use crate::mm::{FaultAccess, UserPtr, UserPtrMut, VirtAddr};
+use crate::config::{PAGE_SIZE, SYSTEM_TASK_LIMIT};
+use crate::mm::{
+    translated_byte_buffer, FaultAccess, UserAccess, UserBuffer, UserPtrMut, VirtAddr,
+};
 use crate::show_frame_consumption;
 use crate::syscall::errno::*;
 use crate::task::{current_task, signal::Signals, ProcessManager, TaskControlBlock};
@@ -19,6 +21,22 @@ struct CloneArgsV0 {
     stack: u64,
     stack_size: u64,
     tls: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+struct CloneArgs {
+    flags: u64,
+    pidfd: u64,
+    child_tid: u64,
+    parent_tid: u64,
+    exit_signal: u64,
+    stack: u64,
+    stack_size: u64,
+    tls: u64,
+    set_tid: u64,
+    set_tid_size: u64,
+    cgroup: u64,
 }
 
 bitflags! {
@@ -58,6 +76,51 @@ bitflags! {
         const CLONE_NEWNET          =   0x40000000;
         const CLONE_IO              =   0x80000000;
     }
+}
+
+fn read_clone3_args(uargs: *const u8, size: usize, token: usize) -> Result<CloneArgs, isize> {
+    const MIN_SIZE: usize = core::mem::size_of::<CloneArgsV0>();
+    const SUPPORTED_SIZE: usize = core::mem::size_of::<CloneArgs>();
+
+    if size < MIN_SIZE {
+        return Err(EINVAL);
+    }
+    if size > PAGE_SIZE {
+        return Err(E2BIG);
+    }
+    if uargs.is_null() {
+        return Err(EFAULT);
+    }
+
+    let copy_len = size.min(SUPPORTED_SIZE);
+    let user = UserBuffer::new(translated_byte_buffer(
+        token,
+        uargs,
+        copy_len,
+        UserAccess::Read,
+    )?);
+    let mut args = CloneArgs::default();
+    let dst = unsafe {
+        core::slice::from_raw_parts_mut((&mut args as *mut CloneArgs).cast::<u8>(), copy_len)
+    };
+    user.read(dst);
+
+    if size > SUPPORTED_SIZE {
+        let extra_len = size - SUPPORTED_SIZE;
+        let extra = UserBuffer::new(translated_byte_buffer(
+            token,
+            unsafe { uargs.add(SUPPORTED_SIZE) },
+            extra_len,
+            UserAccess::Read,
+        )?);
+        for idx in 0..extra.len() {
+            if extra[idx] != 0 {
+                return Err(E2BIG);
+            }
+        }
+    }
+
+    Ok(args)
 }
 
 fn write_u32_to_task_user(
@@ -124,6 +187,15 @@ pub fn sys_clone(
     };
     // Sure to succeed, because all bits are valid (See `CloneFlags`)
     let flags = CloneFlags::from_bits(flags & !0xff).unwrap();
+    if flags.contains(CloneFlags::CLONE_SIGHAND) && !flags.contains(CloneFlags::CLONE_VM) {
+        return EINVAL;
+    }
+    if flags.contains(CloneFlags::CLONE_THREAD) && !flags.contains(CloneFlags::CLONE_SIGHAND) {
+        return EINVAL;
+    }
+    if flags.contains(CloneFlags::CLONE_FS) && flags.contains(CloneFlags::CLONE_NEWNS) {
+        return EINVAL;
+    }
     if flags.contains(CloneFlags::CLONE_VFORK) && flags.contains(CloneFlags::CLONE_THREAD) {
         return EINVAL;
     }
@@ -177,12 +249,8 @@ pub fn sys_clone(
 }
 
 pub fn sys_clone3(uargs: *const u8, size: usize) -> isize {
-    if size < core::mem::size_of::<CloneArgsV0>() {
-        return EINVAL;
-    }
-
     let token = current_task().unwrap().get_user_token();
-    let args = match UserPtr::<CloneArgsV0>::new(uargs as *const CloneArgsV0).read(token) {
+    let args = match read_clone3_args(uargs, size, token) {
         Ok(args) => args,
         Err(errno) => return errno,
     };
@@ -193,6 +261,20 @@ pub fn sys_clone3(uargs: *const u8, size: usize) -> isize {
 
     let mut flags = args.flags as u32;
     if args.exit_signal > 0xff {
+        return EINVAL;
+    }
+    if flags & CloneFlags::CLONE_PIDFD.bits() != 0
+        && translated_byte_buffer(
+            token,
+            args.pidfd as *const u8,
+            core::mem::size_of::<u32>(),
+            UserAccess::Write,
+        )
+        .is_err()
+    {
+        return EFAULT;
+    }
+    if (args.stack == 0) != (args.stack_size == 0) {
         return EINVAL;
     }
     flags |= args.exit_signal as u32;
