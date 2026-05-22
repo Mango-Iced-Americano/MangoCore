@@ -65,14 +65,47 @@
 - rv64/la64、musl/glibc 均为 7 个 TPASS，内部 summary `failed 0`。
 - 外层仍打印 `FAIL LTP CASE clone301 : 0`，这是现有 runner 包装行，不能按失败看。
 
+### 4. `personality(2)` 最小 ABI
+
+问题：`cve-2016-10044` 进入用例后首先调用 `personality(92)`，原内核未分发该 syscall，导致用例在前置阶段报 unsupported。
+
+处理：
+- 新增 syscall 92 `personality`。
+- 在 `TaskControlBlockInner` 保存 Linux personality ABI 状态。
+- `clone` 继承父任务 personality。
+- `personality(0xffffffff)` / `usize::MAX` 只读旧值，其他值更新低 32 位状态。
+
+验证日志：
+- `logs/ltp-20260522-adapt/rv64-personality.log`
+- `logs/ltp-20260522-adapt/la64-personality.log`
+
+结果：`personality(92)` 不再 unsupported；`cve-2016-10044` 后续停在 `io_setup` 缺失并 TCONF。AIO 属于当前跳过范围，本轮不继续展开。
+
+### 5. `execve03` errno 对齐
+
+问题：全量扫描中 `execve03` 有两个真实 TFAIL：
+- 超长路径场景期望 `ENAMETOOLONG`，实际走 VFS lookup 后返回 `ENOENT`。
+- 不可执行普通文件场景期望 `EACCES`，实际先读魔数后返回 `ENOEXEC`。
+
+处理：
+- `sys_execve` 入口按 `MAX_PATHLEN/NAME_MAX` 提前校验路径长度。
+- 打开可执行文件后、读取 ELF/shebang 魔数前检查元数据：必须是普通文件，且至少具备一个执行位。
+- shebang 解释器打开路径复用同一检查。
+
+验证日志：
+- `logs/ltp-20260522-adapt/rv64-execve03-after.log`
+- `logs/ltp-20260522-adapt/la64-execve03-after.log`
+
+结果：rv64/la64、musl/glibc 下 `execve03` 均为 6 个 TPASS，内部 summary `failed 0`。
+
 ## 本轮跳过项
 
 已按规则加入 `os_test.conf` 的全量 exclude：
 
 - 已知大面/耗时：`epoll-ltp`、`epoll_ctl*`、`epoll_pwait*`、`epoll_create*`。
-- fs/VFS/mount/权限类：`chdir01`、`chmod05/06/07`、`chown04`、`chroot01-04`、`fs_bind01-05.sh`、`cp*`、`copy_file_range*`、`dio*`、`dirty*`、`du01.sh`、`df01.sh`、`fanotify*` 等。
+- fs/VFS/mount/权限类：`chdir01`、`chmod05/06/07`、`chown04`、`chroot01-04`、`fs_bind*`、`fs_racer*`、`fsconfig*`、`fsmount*`、`fsopen*`、`fspick*`、`fsstress`、`cp*`、`copy_file_range*`、`dio*`、`dirty*`、`du01.sh`、`df01.sh`、`fanotify*`、`fdatasync*`、`flock*`、`xattr*` 等。
 - net/协议/网络环境：`busy_poll*`、`can_*`、`check_icmp*`、`dns*`、`dhcp*`、`dccp*`、`broken_ip*`、`bind_noport01.sh` 等。
-- 环境/TCONF：`add_key*`、`af_alg*`、`aio*`、`cap_bounds*`、`check_keepcaps`、`check_envval`、`cleanup_lvm.sh`、`cacheflush01`、`endian_switch01` 等。
+- 环境/TCONF/helper：`add_key*`、`af_alg*`、`aio*`、`cap_bounds*`、`check_keepcaps`、`check_envval`、`cleanup_lvm.sh`、`cacheflush01`、`endian_switch01`、`event_generator`、`data`、`datafiles`、`find_portbundle` 等。
 
 注意：这些跳过项不是声明内核已经支持，而是为了遵守“非 fs/net 优先、卡死/长耗时跳过”的当前适配策略。
 
@@ -83,10 +116,16 @@
 - `logs/ltp-20260522-adapt/rv64-full-ltp-after-pidfd.log`
 - `logs/ltp-20260522-adapt/rv64-full-ltp-after-skip2.log`
 - `logs/ltp-20260522-adapt/rv64-full-ltp-after-skip3.log`
+- `logs/ltp-20260522-adapt/rv64-full-ltp-after-personality-skip.log`
+- `logs/ltp-20260522-adapt/rv64-full-ltp-after-execve03.log`
+- `logs/ltp-20260522-adapt/rv64-full-ltp-from-clockgettime02.log`
+- `logs/ltp-20260522-adapt/rv64-full-ltp-after-fsbind-skip.log`
 
 扫描发现：
 - `clone301` 已从真实失败变为双架构通过。
-- 当前影响扫描推进的主要是 fs/net/epoll/环境 TCONF，不适合作为本轮优先目标。
+- `personality` 前置缺口已补齐，AIO `io_setup` 仍按环境/大面项跳过。
+- `execve03` 已从真实 TFAIL 变为双架构通过。
+- 当前影响扫描推进的主要是 fs/net/epoll/文件锁/xattr/环境 helper，不适合作为本轮优先目标。
 - 继续往后扫描时，应在更新 exclude 后从全量配置继续跑，寻找 syscall/process/mm/time/signal 方向的真实 TFAIL。
 
 ## 下一步建议

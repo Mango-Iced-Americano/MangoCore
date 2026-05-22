@@ -72,6 +72,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_UTIMENSAT => "utimensat",
         SYSCALL_CAPGET => "capget",
         SYSCALL_CAPSET => "capset",
+        SYSCALL_PERSONALITY => "personality",
         SYSCALL_EXIT => "exit",
         SYSCALL_EXIT_GROUP => "exit_GROUP",
         SYSCALL_SET_TID_ADDRESS => "set_tid_address",
@@ -349,6 +350,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_CAPSET => {
             sys_capset(args[0] as *mut CapUserHeader, args[1] as *const CapUserData)
         }
+        SYSCALL_PERSONALITY => sys_personality(args[0]),
         SYSCALL_EXIT => sys_exit(args[0] as u32),
         SYSCALL_EXIT_GROUP => sys_exit_group(args[0] as u32),
         SYSCALL_CLOCK_SETTIME => sys_clock_settime(args[0], args[1] as *const TimeSpec),

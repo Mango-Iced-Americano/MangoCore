@@ -36,6 +36,17 @@ const PR_GET_KEEPCAPS: usize = 7;
 const PR_SET_KEEPCAPS: usize = 8;
 const PR_CAPBSET_READ: usize = 23;
 const PR_CAPBSET_DROP: usize = 24;
+const PERSONALITY_GET: usize = 0xffff_ffff;
+
+pub fn sys_personality(persona: usize) -> isize {
+    let task = current_task().unwrap();
+    let mut inner = task.acquire_inner_lock();
+    let old = inner.personality;
+    if persona != PERSONALITY_GET && persona != usize::MAX {
+        inner.personality = persona & PERSONALITY_GET;
+    }
+    old as isize
+}
 
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]

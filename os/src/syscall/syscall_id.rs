@@ -49,6 +49,7 @@ pub const SYSCALL_FSYNC: usize = 82;
 pub const SYSCALL_UTIMENSAT: usize = 88;
 pub const SYSCALL_CAPGET: usize = 90;
 pub const SYSCALL_CAPSET: usize = 91;
+pub const SYSCALL_PERSONALITY: usize = 92;
 pub const SYSCALL_EXIT: usize = 93;
 pub const SYSCALL_EXIT_GROUP: usize = 94;
 pub const SYSCALL_SET_TID_ADDRESS: usize = 96;

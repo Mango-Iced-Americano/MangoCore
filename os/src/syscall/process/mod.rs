@@ -15,8 +15,8 @@ pub use futex::sys_futex;
 pub use ids::{
     sys_capget, sys_capset, sys_getegid, sys_geteuid, sys_getgid, sys_getgroups, sys_getpgid,
     sys_getpid, sys_getppid, sys_getresgid, sys_getresuid, sys_gettid, sys_get_mempolicy,
-    sys_getuid, sys_prctl, sys_prlimit, sys_sched_get_priority_max, sys_sched_get_priority_min,
-    sys_sched_getaffinity, sys_sched_getattr, sys_sched_getparam, sys_sched_getscheduler,
+    sys_getuid, sys_personality, sys_prctl, sys_prlimit, sys_sched_get_priority_max,
+    sys_sched_get_priority_min, sys_sched_getaffinity, sys_sched_getattr, sys_sched_getparam, sys_sched_getscheduler,
     sys_sched_rr_get_interval, sys_sched_setaffinity, sys_sched_setparam,
     sys_sched_setattr, sys_sched_setscheduler, sys_setfsgid, sys_setfsuid, sys_setgid,
     sys_setgroups, sys_setpgid, sys_setregid, sys_setresgid, sys_setresuid, sys_setreuid,
