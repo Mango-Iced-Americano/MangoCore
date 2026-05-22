@@ -289,9 +289,9 @@ impl Ext4FileSystem {
     ///
     /// # 返回值:
     /// + `Result<Ext4InodeRef>` - 新文件的inode
-    pub fn create(&self, parent: u32, name: &str, inode_mode: u16) -> Result<Ext4InodeRef, isize> {
+    pub fn create(&self, parent: u32, name: &str, inode_mode: u16, uid: u16, gid: u16) -> Result<Ext4InodeRef, isize> {
         let mut parent_inode_ref = self.get_inode_ref(parent);
-        let init_child_ref = self.create_inode(inode_mode)?;
+        let init_child_ref = self.create_inode(inode_mode, uid, gid)?;
         let mut child_mut = init_child_ref.clone();
         self.link_no_parent_flush(&mut parent_inode_ref, &mut child_mut, name)?;
         self.write_back_inode(&mut parent_inode_ref);
@@ -361,7 +361,7 @@ impl Ext4FileSystem {
     /// + inode_mode: inode类型
     /// # 返回值
     /// + 新inode
-    pub fn create_inode(&self, inode_mode: u16) -> Result<Ext4InodeRef, isize> {
+    pub fn create_inode(&self, inode_mode: u16, uid: u16, gid: u16) -> Result<Ext4InodeRef, isize> {
         // 匹配新inode的文件类型
         let inode_file_type_bits = inode_mode & EXT4_INODE_MODE_TYPE_MASK;
         // println!(
@@ -395,6 +395,10 @@ impl Ext4FileSystem {
             inode_mode
         };
         inode.set_mode(final_mode);
+        inode.set_uid(uid);
+        inode.set_gid(gid);
+        inode.set_uid(uid);
+        inode.set_gid(gid);
 
         // set extra size
         let inode_size = self.superblock.inode_size();
@@ -441,9 +445,7 @@ impl Ext4FileSystem {
         gid: u16,
     ) -> Result<Ext4InodeRef, isize> {
         let mut parent_inode_ref = self.get_inode_ref(parent);
-        let mut init_child_ref = self.create_inode(inode_mode)?;
-        init_child_ref.inode.set_uid(uid);
-        init_child_ref.inode.set_gid(gid);
+        let mut init_child_ref = self.create_inode(inode_mode, uid, gid)?;
         let mut child_mut = init_child_ref.clone();
         self.link_no_parent_flush(&mut parent_inode_ref, &mut child_mut, name)?;
         self.write_back_inode(&mut parent_inode_ref);

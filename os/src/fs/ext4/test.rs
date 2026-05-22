@@ -95,7 +95,7 @@ fn create_file(
 ) -> Result<Arc<dyn IndexNode>, String> {
     let mode = InodeFileType::S_IFREG.bits() | 0x1FF;
     let child_ref = fs
-        .create(super::ROOT_INODE, name, mode)
+        .create(super::ROOT_INODE, name, mode, 0, 0)
         .map_err(|e| alloc::format!("create file '{name}': {e}"))?;
     let ino = Arc::new(Mutex::new(child_ref));
     Ok(super::layout::Ext4OSInode::new_vfs(ino, fs.clone()))

@@ -17,6 +17,15 @@ use alloc::{string::String, sync::Arc, sync::Weak, vec::Vec};
 use alloc::collections::BTreeMap;
 use layout::Ext4OSInode;
 use spin::Mutex;
+
+fn current_fsuid_fsgid() -> (u16, u16) {
+    crate::task::current_task()
+        .map(|t| {
+            let inner = t.acquire_inner_lock();
+            (inner.fsuid as u16, inner.fsgid as u16)
+        })
+        .unwrap_or((0, 0))
+}
 type SuperBlock = Ext4Superblock;
 
 /// Ext4文件系统对象实例
@@ -310,7 +319,7 @@ impl Ext4FileSystem {
                     inode_mode = InodeFileType::S_IFDIR.bits();
                 }
 
-                let new_inode_ref = self.create(*parent, current_path, inode_mode)?;
+                let new_inode_ref = self.create(*parent, current_path, inode_mode, 0, 0)?;
 
                 // Update parent the new inode
                 *parent = new_inode_ref.inode_num;
@@ -968,9 +977,10 @@ impl IndexNode for layout::Ext4OSInode {
     ) -> Result<alloc::sync::Arc<dyn IndexNode>, SyscallErr> {
         let parent = self.inode.lock().inode_num;
         let inode_mode = vfs_type_to_inode_mode(file_type) | (mode & InodeMode::S_IALLUGO).bits() as u16;
+        let (uid, gid) = current_fsuid_fsgid();
         let new_ref = self
             .ext4fs
-            .create(parent, name, inode_mode)
+            .create(parent, name, inode_mode, uid, gid)
             .map_err(|e| {
                 if e == crate::syscall::errno::ENOENT { SyscallErr::ENOENT }
                 else if e == crate::syscall::errno::EEXIST { SyscallErr::EEXIST }
@@ -1019,13 +1029,14 @@ impl IndexNode for layout::Ext4OSInode {
 
         let parent = self.inode.lock().inode_num;
         let target_bytes = target.as_bytes();
+        let (uid, gid) = current_fsuid_fsgid();
         let new_ref = if target_bytes.len() <= 60 {
             super::counters::inc_counter!(super::counters::FAST_SYMLINK_CREATE_COUNT);
-            self.ext4fs.create_fast_symlink(parent, name, target_bytes, 0, 0)
+            self.ext4fs.create_fast_symlink(parent, name, target_bytes, uid, gid)
                 .map_err(|e| map_create_error(e))?
         } else {
             let inode_mode = InodeFileType::S_IFLNK.bits();
-            let mut new_ref = self.ext4fs.create(parent, name, inode_mode).map_err(|e| map_create_error(e))?;
+            let mut new_ref = self.ext4fs.create(parent, name, inode_mode, uid, gid).map_err(|e| map_create_error(e))?;
             super::counters::inc_counter!(super::counters::SYMLINK_DIR_BLOCK_WRITE_COUNT);
             self.ext4fs.write_at(new_ref.inode_num, 0, target_bytes).map_err(|_| SyscallErr::EIO)?;
             new_ref
