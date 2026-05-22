@@ -243,6 +243,26 @@
 - rv64/la64、musl/glibc 下 `getsid01` 均为 1 个 TPASS。
 - rv64/la64、musl/glibc 下 `getsid02` 均为 1 个 TPASS。
 
+### 13. `gettimeofday01` timezone 指针校验
+
+问题：从 `gettid01` 继续扫描后，`gettimeofday01` 出现 1 个 TFAIL：
+- 坏 `tv` 指针场景已经能返回 `EFAULT`。
+- 坏 `tz` 指针场景被误判成功，因为 `sys_gettimeofday()` 只写回 `tv`，完全忽略 `tz`。
+- `gettimeofday02` 单调性本身已通过。
+
+处理：
+- `sys_gettimeofday()` 对非空 `tz` 写回零值 `TimeZone`，写回失败时返回 `EFAULT`。
+- `TimeZone` 补 `Copy`，满足 `UserPtrMut::write()` 的小 C ABI 结构写回约束。
+- 扫描中遇到的 `getxattr01-05` 属于 fs/xattr，`gre01.sh/gre02.sh` 属于 net，`gzip_tests.sh` 属于测试环境命令能力缺口，`hackbench` 属于长耗时性能项，按当前策略加入全量 exclude。
+
+验证日志：
+- `logs/ltp-20260522-adapt/rv64-gettimeofday-after.log`
+- `logs/ltp-20260522-adapt/la64-gettimeofday-after.log`
+
+结果：
+- rv64/la64、musl/glibc 下 `gettimeofday01` 均为 3 个 TPASS，坏 `tv`/坏 `tz`/组合坏指针都返回 `EFAULT`。
+- rv64/la64、musl/glibc 下 `gettimeofday02` 均保持 TPASS。
+
 ## 本轮跳过项
 
 已按规则加入 `os_test.conf` 的全量 exclude：
@@ -255,6 +275,7 @@
 - glibc-only 长耗时：`futex_cmp_requeue01`（rv64 glibc 1000 waiter 子场景稳定触发 30 秒超时；la64 和 rv64 musl 已验证通过）。
 - procfs/资源统计卡点：`getrusage03`、`getrusage03_child`。
 - net/socket 当前暂缓项：`getsockopt01`、`getsockopt02`。
+- 本轮新增跳过：`getxattr01-05`（fs/xattr）、`gre01.sh/gre02.sh`（net）、`gzip_tests.sh`（环境命令能力）、`hackbench`（长耗时性能项）。
 
 注意：这些跳过项不是声明内核已经支持，而是为了遵守“非 fs/net 优先、卡死/长耗时跳过”的当前适配策略。
 
@@ -290,6 +311,9 @@
 - `logs/ltp-20260522-adapt/rv64-full-ltp-from-getrusage04-current.log`
 - `logs/ltp-20260522-adapt/rv64-getsid-after.log`
 - `logs/ltp-20260522-adapt/la64-getsid-after.log`
+- `logs/ltp-20260522-adapt/rv64-full-ltp-from-gettid-current.log`
+- `logs/ltp-20260522-adapt/rv64-gettimeofday-after.log`
+- `logs/ltp-20260522-adapt/la64-gettimeofday-after.log`
 
 扫描发现：
 - `clone301` 已从真实失败变为双架构通过。
@@ -307,6 +331,8 @@
 - `getrusage01/getrusage02/getrusage04` 已确认内部 TPASS；`getrusage03` 的剩余问题集中在 `/proc/self/status` 和 child rusage 累计，当前按 procfs/资源统计大面项跳过。
 - `getsid01/getsid02` 已修复：`syscall 156` 分发和 session id 继承/查询语义已对齐。
 - `getsockname01` 当前内部 TPASS；`getsockopt01/02` 属于 net/socket 方向，按当前策略先跳过。
+- `gettid01/gettid02` 已确认内部 TPASS。
+- `gettimeofday01` 已修复：坏 `tz` 指针现在返回 `EFAULT`；`gettimeofday02` 单调性保持通过。
 - 最新 rv64 扫描继续推进到 `ftp-download-stress02-rmt.sh`，其中 `fstatfs*`/`fsync*`/`fsx*`/`ftest*` 都属于 fs 方向，`ftp-*` 属于 net 长压测，按当前策略跳过。
 - 当前影响扫描推进的主要是 fs/net/epoll/文件锁/xattr/环境 helper，不适合作为本轮优先目标。
 - 继续往后扫描时，应在更新 exclude 后从全量配置继续跑，寻找 syscall/process/mm/time/signal 方向的真实 TFAIL。

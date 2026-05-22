@@ -452,13 +452,22 @@ fn current_posix_itimerspec(timer: &PosixTimer) -> ITimerSpec {
     }
 }
 
-pub fn sys_gettimeofday(tv: *mut TimeVal, _tz: *mut TimeZone) -> isize {
-    // Timezone is currently NOT supported.
+pub fn sys_gettimeofday(tv: *mut TimeVal, tz: *mut TimeZone) -> isize {
+    let token = current_user_token();
     if !tv.is_null() {
-        let token = current_user_token();
         let timeval = current_timeval();
         if UserPtrMut::new(tv).write(token, &timeval).is_err() {
             log::error!("[sys_gettimeofday] Failed to copy to {:?}", tv);
+            return EFAULT;
+        }
+    }
+    if !tz.is_null() {
+        let timezone = TimeZone {
+            tz_minuteswest: 0,
+            tz_dsttime: 0,
+        };
+        if UserPtrMut::new(tz).write(token, &timezone).is_err() {
+            log::error!("[sys_gettimeofday] Failed to copy to {:?}", tz);
             return EFAULT;
         }
     }

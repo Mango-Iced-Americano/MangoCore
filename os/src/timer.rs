@@ -259,7 +259,7 @@ impl PartialOrd for TimeVal {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 #[repr(C)]
 pub struct TimeZone {
     pub tz_minuteswest: u32,
