@@ -61,6 +61,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_FSTAT => "fstat",
         SYSCALL_SYNC => "sync",
         SYSCALL_STATFS => "statfs",
+        SYSCALL_TRUNCATE => "truncate",
         SYSCALL_FTRUNCATE => "ftruncate",
         SYSCALL_FALLOCATE => "fallocate",
         SYSCALL_FSYNC => "fsync",
@@ -309,6 +310,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[3] as u32,
         ),
         SYSCALL_FSTAT => sys_fstat(args[0], args[1] as *mut u8),
+        SYSCALL_TRUNCATE => sys_truncate(args[0] as *const u8, args[1] as isize),
         SYSCALL_FTRUNCATE => sys_ftruncate(args[0], args[1] as isize),
         SYSCALL_FALLOCATE => {
             sys_fallocate(args[0], args[1] as u32, args[2] as isize, args[3] as isize)

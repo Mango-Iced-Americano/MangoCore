@@ -1574,7 +1574,7 @@ pub fn sys_fchdir(fd: usize) -> isize {
     let mut lock = fs_ref.lock();
     let old_path = lock.working_path.clone();
     lock.working_inode = Arc::new(file);
-    lock.working_path = alloc::format!("{}/{}", old_path, "<fd>");
+    // fchdir: 路径不变 (无法确定 fd 对应的路径名)
     SUCCESS
 }
 
@@ -2459,6 +2459,9 @@ pub fn sys_msync(addr: usize, length: usize, flags: u32) -> isize {
 }
 
 pub fn sys_ftruncate(fd: usize, length: isize) -> isize {
+    if length < 0 {
+        return EINVAL;
+    }
     let task = current_task().unwrap();
     let files_ref = task.process.files();
         let fd_table = files_ref.lock();
@@ -2470,6 +2473,51 @@ pub fn sys_ftruncate(fd: usize, length: isize) -> isize {
         return EISDIR;
     }
     match file.truncate_size(length as usize) {
+        Ok(()) => SUCCESS,
+        Err(e) => -(e as isize),
+    }
+}
+
+pub fn sys_truncate(path: *const u8, length: isize) -> isize {
+    if length < 0 {
+        return EINVAL;
+    }
+    let task = current_task().unwrap();
+    let token = task.get_user_token();
+    let path = match user_cstring(token, path) {
+        Ok(path) => path,
+        Err(errno) => return errno,
+    };
+    if let Err(errno) = validate_path_len(&path) {
+        return errno;
+    }
+    if path.is_empty() {
+        return ENOENT;
+    }
+    let cwd_inode = {
+        let fs_ref = task.process.fs();
+        let lock = fs_ref.lock();
+        lock.working_inode.inode.clone()
+    };
+    let inode = if path.starts_with('/') {
+        match vfs_lookup_absolute(&path) {
+            Ok(inode) => inode,
+            Err(errno) => return errno,
+        }
+    } else {
+        match vfs_lookup(&cwd_inode, &path, true) {
+            Ok(inode) => inode,
+            Err(errno) => return errno,
+        }
+    };
+    let md = match inode.metadata() {
+        Ok(md) => md,
+        Err(e) => return -(e as isize),
+    };
+    if md.file_type == FileType::Dir {
+        return EISDIR;
+    }
+    match inode.resize(length as usize) {
         Ok(()) => SUCCESS,
         Err(e) => -(e as isize),
     }
