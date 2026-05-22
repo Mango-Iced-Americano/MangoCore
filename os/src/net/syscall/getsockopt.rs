@@ -26,6 +26,14 @@ pub fn sys_getsockopt(
     let token = task.get_user_token();
     let optval_ptr = UserPtrMut::<u32>::from_addr(optval_ptr_);
     let optlen_ptr = UserPtrMut::<u32>::from_addr(optlen);
+    // optlen 校验必须在 optname/level 匹配之前（getsockopt01 期望 EINVAL 优先于 ENOPROTOOPT）
+    let optlen_val = match optlen_ptr.read(token) {
+        Ok(val) => val,
+        Err(_) => return -(SyscallErr::EFAULT as isize),
+    };
+    if optlen_val < 4 {
+        return -(SyscallErr::EINVAL as isize);
+    }
     match (level, optname) {
         (SOL_TCP, TCP_MAXSEG) => {
             // return max tcp fregment size (MSS)
