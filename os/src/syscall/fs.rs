@@ -2512,6 +2512,13 @@ pub fn sys_linkat(
         Err(e) => return e,
     };
 
+    if let Err(errno) = validate_path_len(&oldpath_str) {
+        return errno;
+    }
+    if let Err(errno) = validate_path_len(&newpath_str) {
+        return errno;
+    }
+
     log::info!(
         "[sys_linkat] old: dirfd={} path={}, new: dirfd={} path={}",
         olddirfd as isize,
@@ -2524,6 +2531,10 @@ pub fn sys_linkat(
         Ok(inode) => inode,
         Err(errno) => return errno,
     };
+
+    if oldpath_str.is_empty() {
+        return ENOENT;
+    }
 
     // 查找已存在的 inode
     let existing = match crate::fs::vfs_lookup(&old_start, &oldpath_str, true) {
