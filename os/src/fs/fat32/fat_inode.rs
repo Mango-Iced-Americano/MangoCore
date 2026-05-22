@@ -1294,6 +1294,10 @@ impl IndexNode for FatInode {
             .as_any_ref()
             .downcast_ref::<FatInode>()
             .ok_or(SyscallErr::EIO)?;
+        let md = child.metadata()?;
+        if md.file_type == FileType::Dir {
+            return Err(SyscallErr::EISDIR);
+        }
         let child_arc = child_fat
             .self_weak
             .lock()
