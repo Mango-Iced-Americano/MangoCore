@@ -50,14 +50,14 @@ const DEFAULT_ORDER: &[&str] = &[
     "basic",
     "busybox",
     "lua",
-    "ltp",
     "libctest",
     "netperf",
     "cyclictest",
     "iozone",
     "libcbench",
     "iperf",
-    "lmbench",
+    "ltp",
+    // "lmbench",
     // "unixbench",
 ];
 
