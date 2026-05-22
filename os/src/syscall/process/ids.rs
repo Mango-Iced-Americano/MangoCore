@@ -655,7 +655,7 @@ pub fn sys_setpgid(pid: usize, pgid: usize) -> isize {
 
 pub fn sys_getpgid(pid: usize) -> isize {
     if (pid as isize) < 0 {
-        return EINVAL;
+        return ESRCH;
     }
     let process = if pid == 0 {
         current_task().unwrap().process.clone()

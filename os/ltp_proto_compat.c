@@ -1,8 +1,10 @@
 #include <netdb.h>
+#include <errno.h>
 #include <sched.h>
 #include <stddef.h>
 #include <string.h>
 #include <sys/syscall.h>
+#include <sys/utsname.h>
 #include <unistd.h>
 
 #ifndef SYS_sched_setscheduler
@@ -80,6 +82,28 @@ struct protoent *getprotobynumber(int number)
         }
     }
     return NULL;
+}
+
+int gethostname(char *name, size_t len)
+{
+    struct utsname uts;
+    size_t actual_len;
+
+    if (uname(&uts) < 0) {
+        return -1;
+    }
+
+    actual_len = strlen(uts.nodename);
+    if (actual_len >= len) {
+        if (len > 0) {
+            memcpy(name, uts.nodename, len);
+        }
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    memcpy(name, uts.nodename, actual_len + 1);
+    return 0;
 }
 
 int sched_setscheduler(pid_t pid, int policy, const struct sched_param *param)

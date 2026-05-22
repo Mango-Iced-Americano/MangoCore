@@ -203,6 +203,25 @@
 - rv64/la64、musl/glibc 下 `getgroups03` 均为 1 个 TPASS。
 - 外层 wrapper 仍打印 `FAIL LTP CASE ... : 0`，按内部 TPASS 和退出码 0 判断为通过。
 
+### 11. `gethostname02` / `getpgid02` 错误语义
+
+问题：继续优先处理非 fs/net 小项时，两个用例都是边界 errno 对齐：
+- `gethostname02`：musl 下 hostname 截断返回成功，LTP 期望 `ENAMETOOLONG`；glibc 已经通过。
+- `getpgid02`：`getpgid(-99)` 返回 `EINVAL`，LTP 期望无该进程的 `ESRCH`。
+
+处理：
+- 在 `ltp_proto_compat` preload 中补 `gethostname()` wrapper：通过 `uname()` 取 nodename，若 `len <= strlen(nodename)` 则返回 `-1/ENAMETOOLONG`，否则完整写回字符串。
+- 重新生成 rv64/la64 两份 `ltp_proto_compat-*.so`，使 musl/glibc LTP 都使用同一兼容语义。
+- `sys_getpgid` 对负 pid 改为返回 `ESRCH`，与不存在的正 pid 一致。
+
+验证日志：
+- `logs/ltp-20260522-adapt/rv64-gethostname-getpgid-after.log`
+- `logs/ltp-20260522-adapt/la64-gethostname-getpgid-after.log`
+
+结果：
+- rv64/la64、musl/glibc 下 `gethostname02` 均为 1 个 TPASS。
+- rv64/la64、musl/glibc 下 `getpgid02` 均为 2 个 TPASS。
+
 ## 本轮跳过项
 
 已按规则加入 `os_test.conf` 的全量 exclude：
@@ -242,6 +261,8 @@
 - `logs/ltp-20260522-adapt/la64-getcpu-after.log`
 - `logs/ltp-20260522-adapt/rv64-getgroups-after.log`
 - `logs/ltp-20260522-adapt/la64-getgroups-after.log`
+- `logs/ltp-20260522-adapt/rv64-gethostname-getpgid-after.log`
+- `logs/ltp-20260522-adapt/la64-gethostname-getpgid-after.log`
 
 扫描发现：
 - `clone301` 已从真实失败变为双架构通过。
@@ -255,6 +276,7 @@
 - `get_robust_list01` 已修复：坏指针、无效 pid、当前线程成功、跨用户无权限 `EPERM` 均已对齐。
 - `getcpu01` 已由 unsupported/TCONF 变为双架构双 libc TPASS。
 - `getgroups01/getgroups03` 已修复：`setgroups` 保存补充组列表，`getgroups` 的数量查询、列表写回、`EINVAL/EFAULT` 语义已对齐。
+- `gethostname02/getpgid02` 已修复：musl hostname 截断路径补齐 `ENAMETOOLONG`，负 pid `getpgid` 改为 `ESRCH`。
 - 最新 rv64 扫描继续推进到 `ftp-download-stress02-rmt.sh`，其中 `fstatfs*`/`fsync*`/`fsx*`/`ftest*` 都属于 fs 方向，`ftp-*` 属于 net 长压测，按当前策略跳过。
 - 当前影响扫描推进的主要是 fs/net/epoll/文件锁/xattr/环境 helper，不适合作为本轮优先目标。
 - 继续往后扫描时，应在更新 exclude 后从全量配置继续跑，寻找 syscall/process/mm/time/signal 方向的真实 TFAIL。
@@ -267,8 +289,6 @@
    - `getaddrinfo_01`：偏环境文件补齐，可评估 `/etc/services` 和 protocol 数据；
    - `futex_waitv01-03`：当前 LTP 内部为 kernel version TCONF，暂不按真实失败处理；
    - `futex_wake02`：依赖 `/proc/<pid>/task`，属于 procfs 支持缺口，按当前 fs/procfs 冲突策略先记录，暂不优先；
-   - `getpgid02`：负 pid 错误码小范围对齐候选，可优先验证；
-   - `gethostname02`：主机名长度/坏指针错误码小范围对齐候选，可优先验证；
    - 缺 syscall 且语义较小的 compat 项；
    - process/signal/time/mm 类错误码不一致；
    - `TFAIL` 明确指向单个 syscall 行为差异的项目。
