@@ -2743,16 +2743,25 @@ pub fn sys_ftruncate(fd: usize, length: isize) -> isize {
         return EINVAL;
     }
     let task = current_task().unwrap();
-    let files_ref = task.process.files();
+    let inode = {
+        let files_ref = task.process.files();
         let fd_table = files_ref.lock();
-    let file = match fd_table.get_file(fd) {
-        Ok(file) => file,
-        Err(e) => return -(e as isize),
+        let file = match fd_table.get_file(fd) {
+            Ok(file) => file,
+            Err(e) => return -(e as isize),
+        };
+        if file.is_dir() {
+            return EISDIR;
+        }
+        if matches!(file.file_type(), vfs::FileType::Pipe | vfs::FileType::Socket) {
+            return EINVAL;
+        }
+        if !file.flags().is_writable() {
+            return EINVAL;
+        }
+        file.inode.clone()
     };
-    if file.is_dir() {
-        return EISDIR;
-    }
-    match file.truncate_size(length as usize) {
+    match inode.resize(length as usize) {
         Ok(()) => SUCCESS,
         Err(e) => -(e as isize),
     }
