@@ -570,13 +570,18 @@ impl<T: PageTable> AddressSpace<T> {
             return Err(crate::syscall::errno::ENOMEM);
         }
         for area in user_space.vmas.iter().filter(|area| area.vm_is_user()) {
-            let mut new_area = area.try_clone()?;
-            new_area
-                .map_from_existing_page_table(
-                    &mut address_space.page_table,
-                    &mut user_space.page_table,
-                )
-                .map_err(|_| crate::syscall::errno::ENOMEM)?;
+            let new_area = if area.wipe_on_fork {
+                Vma::from_another(area)
+            } else {
+                let mut cloned = area.try_clone()?;
+                cloned
+                    .map_from_existing_page_table(
+                        &mut address_space.page_table,
+                        &mut user_space.page_table,
+                    )
+                    .map_err(|_| crate::syscall::errno::ENOMEM)?;
+                cloned
+            };
             address_space.vmas.push(new_area)?;
             debug!(
                 "[fork] map shared area: {:?}",

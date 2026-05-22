@@ -407,6 +407,8 @@ pub fn sys_madvise(addr: usize, length: usize, advice: usize) -> isize {
     const MADV_SEQUENTIAL: usize = 2;
     const MADV_WILLNEED: usize = 3;
     const MADV_DONTNEED: usize = 4;
+    const MADV_WIPEONFORK: usize = 18;
+    const MADV_KEEPONFORK: usize = 19;
 
     if addr & (PAGE_SIZE - 1) != 0 {
         return EINVAL;
@@ -424,8 +426,20 @@ pub fn sys_madvise(addr: usize, length: usize, advice: usize) -> isize {
     }
 
     match advice {
-        MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED | MADV_DONTNEED => {
-            match current_task().unwrap().process.vm().lock().madvise(addr, len, advice) {
+        MADV_NORMAL
+        | MADV_RANDOM
+        | MADV_SEQUENTIAL
+        | MADV_WILLNEED
+        | MADV_DONTNEED
+        | MADV_WIPEONFORK
+        | MADV_KEEPONFORK => {
+            match current_task()
+                .unwrap()
+                .process
+                .vm()
+                .lock()
+                .madvise(addr, len, advice)
+            {
                 Ok(_) => SUCCESS,
                 Err(errno) => errno,
             }

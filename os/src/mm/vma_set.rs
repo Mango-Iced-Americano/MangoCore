@@ -303,6 +303,8 @@ impl VmaSet {
         advice: usize,
     ) -> Result<(), isize> {
         const MADV_DONTNEED: usize = 4;
+        const MADV_WIPEONFORK: usize = 18;
+        const MADV_KEEPONFORK: usize = 19;
 
         let mut cursor = start_vpn;
         while cursor < end_vpn {
@@ -321,6 +323,22 @@ impl VmaSet {
                 }
                 area.discard_range(page_table, cursor, advise_end)
                     .map_err(|_| EINVAL)?;
+            }
+            if advice == MADV_WIPEONFORK || advice == MADV_KEEPONFORK {
+                if advice == MADV_WIPEONFORK {
+                    let area = self.vmas.get(&area_start).ok_or(ENOMEM)?;
+                    let is_anonymous_private = area.map_file.is_none()
+                        && area
+                            .flags
+                            .contains(MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS)
+                        && !area.flags.contains(MapFlags::MAP_SHARED);
+                    if !is_anonymous_private {
+                        return Err(EINVAL);
+                    }
+                }
+                let target_start = self.split_for_range(area_start, cursor, advise_end)?;
+                let area = self.vmas.get_mut(&target_start).ok_or(ENOMEM)?;
+                area.wipe_on_fork = advice == MADV_WIPEONFORK;
             }
 
             cursor = advise_end;

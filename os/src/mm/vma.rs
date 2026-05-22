@@ -22,6 +22,7 @@ impl Debug for Vma {
                 "map_file",
                 &if self.map_file.is_some() { "yes" } else { "no" },
             )
+            .field("wipe_on_fork", &self.wipe_on_fork)
             .finish()
     }
 }
@@ -40,6 +41,7 @@ pub struct Vma {
     pub map_file_offset: usize,
 
     pub flags: MapFlags,
+    pub wipe_on_fork: bool,
 }
 
 impl Vma {
@@ -51,6 +53,7 @@ impl Vma {
             map_file: self.map_file.clone(),
             map_file_offset: self.map_file_offset,
             flags: self.flags,
+            wipe_on_fork: self.wipe_on_fork,
         })
     }
     /// Construct a new segment without without allocating memory
@@ -85,6 +88,7 @@ impl Vma {
             map_file,
             map_file_offset,
             flags: MapFlags::empty(),
+            wipe_on_fork: false,
         })
     }
     /// Copier, but the physical pages are not allocated,
@@ -99,6 +103,7 @@ impl Vma {
             map_file: another.map_file.clone(),
             map_file_offset: another.map_file_offset,
             flags: another.flags,
+            wipe_on_fork: another.wipe_on_fork,
         }
     }
     pub fn frame_is_unallocated(&self, vpn: VirtPageNum) -> bool {
@@ -511,6 +516,7 @@ impl Vma {
             map_file: second_file,
             map_file_offset: second_offset,
             flags: self.flags,
+            wipe_on_fork: self.wipe_on_fork,
         })
     }
     pub fn into_three(
@@ -707,6 +713,7 @@ impl Vma {
             && flags.contains(MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS)
             && prot == self.map_perm
             && self.map_file.is_none()
+            && !self.wipe_on_fork
     }
 
     pub(super) fn vm_perm(&self) -> MapPermission {

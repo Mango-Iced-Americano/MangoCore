@@ -353,6 +353,24 @@
 - rv64 musl/glibc：`madvise02`、`madvise03`、`madvise05` 均为 `FAIL LTP CASE ... : 0`。
 - la64 musl/glibc：`madvise02`、`madvise03`、`madvise05` 均为 `FAIL LTP CASE ... : 0`。
 
+### 18. `madvise10` WIPEONFORK/KEEPONFORK 适配
+
+问题：`madvise10` 原本全部子场景为 `TCONF`，因为 `MADV_WIPEONFORK(18)` 和 `MADV_KEEPONFORK(19)` 返回 `EINVAL`。该用例验证的是匿名私有映射在 fork 后对子进程零填充，以及 `KEEPONFORK` 撤销该标记。
+
+处理：
+- `Vma` 增加 `wipe_on_fork` 标记，VMA split 时继承该标记，普通相邻匿名 mmap 不与已标记 VMA 合并。
+- `MADV_WIPEONFORK` 只允许匿名私有 VMA；文件映射、共享匿名映射继续返回 `EINVAL`，保持 `madvise02` 语义。
+- `MADV_KEEPONFORK` 清除目标 VMA 的 `wipe_on_fork` 标记。
+- fork 复制独立地址空间时，`wipe_on_fork` VMA 只复制地址区间和属性，不复制父进程驻留页和 PTE；子进程后续缺页按匿名私有映射重新获得零页，且标记继续传给孙进程。
+
+验证日志：
+- `logs/ltp-20260522-adapt/rv64-madvise10-after2.log`
+- `logs/ltp-20260522-adapt/la64-madvise10-after2.log`
+
+结果：
+- rv64/la64、musl/glibc 下 `madvise10` 的 child、zero-length、grand-child、KEEPONFORK 四个子场景均 TPASS。
+- 同组回归 `madvise02`、`madvise03`，rv64/la64、musl/glibc 均为 `FAIL LTP CASE ... : 0`。
+
 ## 本轮跳过项
 
 已按规则加入 `os_test.conf` 的全量 exclude：
@@ -418,6 +436,8 @@
 - `logs/ltp-20260522-adapt/la64-membarrier01-after-private.log`
 - `logs/ltp-20260522-adapt/rv64-madvise02-03-05-after.log`
 - `logs/ltp-20260522-adapt/la64-madvise02-03-05-after.log`
+- `logs/ltp-20260522-adapt/rv64-madvise10-after2.log`
+- `logs/ltp-20260522-adapt/la64-madvise10-after2.log`
 
 扫描发现：
 - `clone301` 已从真实失败变为双架构通过。
@@ -444,6 +464,7 @@
 - `kill05` 已修复：跨 uid 正向 `kill(pid, SIGKILL)` 现在返回 `EPERM`；glibc 前置 `getcwd` TBROK 通过 LTP compat preload 绕开。
 - `membarrier01` 已修复：`QUERY/GLOBAL/PRIVATE_EXPEDITED` 注册语义已对齐，双架构双 libc 内部 summary 均为 `failed 0`。
 - `madvise02/03/05` 已修复：区间 hole 返回 `ENOMEM`、匿名私有 `MADV_DONTNEED` 丢弃页后重新零填充、`MADV_WILLNEED` 已映射区间 no-op 成功。
+- `madvise10` 已修复：匿名私有 `MADV_WIPEONFORK` fork 后子进程零填充，标记继承到孙进程，`MADV_KEEPONFORK` 可撤销。
 - 当前影响扫描推进的主要是 fs/net/epoll/文件锁/xattr/环境 helper，不适合作为本轮优先目标。
 - 继续往后扫描时，应在更新 exclude 后从全量配置继续跑，寻找 syscall/process/mm/time/signal 方向的真实 TFAIL。
 
