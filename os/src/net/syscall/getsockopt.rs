@@ -1,11 +1,11 @@
 use crate::mm::{UserBufferWriter, UserPtrMut};
-use crate::net::{TcpInfo, TCP_MSS};
+use crate::net::{TcpInfo, TCP_MSS, PSOCK};
 use crate::task::current_task;
 use crate::timer::TimeVal;
 use crate::utils::error::SyscallErr;
 
 use super::common::is_known_sockopt_level;
-use super::common::{SOL_SOCKET, SOL_TCP, TCP_CONGESTION, TCP_INFO, TCP_MAXSEG};
+use super::common::{SOL_IP, SOL_SOCKET, SOL_TCP, TCP_CONGESTION, TCP_INFO, TCP_MAXSEG};
 use super::common::{SO_RCVBUF, SO_RCVTIMEO, SO_REUSEADDR, SO_SNDBUF, SO_SNDTIMEO};
 
 pub fn sys_getsockopt(
@@ -80,7 +80,7 @@ pub fn sys_getsockopt(
                 Ok(len) => len,
                 Err(_) => return -(SyscallErr::EFAULT as isize),
             };
-            if optlen_val < 4 {
+    if (optlen_val as i32) < 0 || optlen_val < 4 {
                 return -(SyscallErr::EINVAL as isize);
             }
             let socket = crate::get_socket!(sockfd);
@@ -142,7 +142,14 @@ pub fn sys_getsockopt(
         }
         _ => {
             log::warn!("[sys_getsockopt] level: {}, optname: {}", level, optname);
-            if is_known_sockopt_level(level) {
+            // 未知 level 或 level 与 socket 类型不兼容 → EOPNOTSUPP
+            // 已知 level 但未知 optname → ENOPROTOOPT
+            let s_type = socket.socket_type();
+            let level_compat = level == SOL_SOCKET || level == SOL_IP
+                || (level == SOL_TCP && matches!(s_type, PSOCK::Stream))
+                || (level == 17 /* SOL_UDP */ && matches!(s_type, PSOCK::Datagram))
+                || (level == 255 /* SOL_RAW */ && matches!(s_type, PSOCK::Raw));
+            if level_compat {
                 return -(SyscallErr::ENOPROTOOPT as isize);
             } else {
                 return -(SyscallErr::EOPNOTSUPP as isize);

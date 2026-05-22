@@ -226,3 +226,41 @@ task(subagent_type="librarian", run_in_background=true, load_skills=[], prompt="
 
 # 6. 开始 Phase 1 发现扫
 ```
+
+---
+
+## 六、DragonOS 参考模式
+
+DragonOS（[DragonOS-Community/DragonOS](https://github.com/DragonOS-Community/DragonOS)）是本项目的设计标杆，尤其在 VFS 架构、Socket trait、权限模型方面。修复前应优先查阅 DragonOS 的对应实现。
+
+### 查阅方式
+
+```bash
+# librarian agent 搜索 DragonOS 仓库
+task(subagent_type="librarian", run_in_background=true, load_skills=[],
+  prompt="Search DragonOS-Community/DragonOS on GitHub.
+[CONTEXT]: MangoCore, implementing <feature>.
+[GOAL]: Find how DragonOS handles <specific pattern>.
+[REQUEST]: Show code patterns, file paths, trait definitions.")
+```
+
+### 已验证的 DragonOS 模式
+
+| 场景 | DragonOS 做法 | MangoCore 应用 |
+|------|-------------|---------------|
+| **O_NOFOLLOW** | `openat2` 中双层检查：`lookup_follow_symlink2(follow=false)` + 后检查 `file_type==SymLink→ELOOP` | `open_file_at` 同模式 (`fs.rs:180`) |
+| **VFS 分层** | `File trait → IndexNode trait → FileSystem trait` | 沿袭同一分层设计 |
+| **Socket trait** | `Socket` trait + `PSOCK` enum + `impl_file_for_socket!` 宏 | 复用同一架构 |
+| **procfs fd 目录** | `ProcFS` 动态 inode + `find_hook/list_hook` | 使用 `LockedProcInode` + `set_hooks` |
+| **EPTAL/errno 顺序** | 参数校验 → 连接状态检查（EFAULT 先于 ENOTCONN） | `Socket::peer_addr` 中 `probe_user_write` 先于 `remote_endpoint` |
+
+### 关键文件映射
+
+| MangoCore | DragonOS 对应 |
+|-----------|-------------|
+| `os/src/fs/vfs/file.rs` | `kernel/src/filesystem/vfs/file.rs` |
+| `os/src/fs/vfs/index_node.rs` | `kernel/src/filesystem/vfs/mod.rs` (IndexNode trait) |
+| `os/src/net/socket/mod.rs` | `kernel/src/net/socket/mod.rs` |
+| `os/src/net/socket/inet/` | `kernel/src/net/socket/inet/` |
+| `os/src/syscall/fs.rs` | `kernel/src/filesystem/vfs/syscall/` |
+| `os/src/fs/procfs/` | `kernel/src/filesystem/procfs/` |
