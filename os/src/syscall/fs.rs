@@ -864,15 +864,20 @@ pub fn sys_pipe2(pipefd: usize, flags: u32) -> isize {
     let mut fd_table = files_ref.lock();
     let (pipe_read, pipe_write) = make_pipe();
     let cloexec = flags.contains(OpenFlags::O_CLOEXEC);
+    let nonblock = flags.contains(OpenFlags::O_NONBLOCK);
     let vf_read = vfs::File::new_without_open(
-        pipe_read, vfs::FileFlags::O_RDONLY, vfs::FileType::Pipe,
+        pipe_read,
+        vfs::FileFlags::O_RDONLY | if nonblock { vfs::FileFlags::O_NONBLOCK } else { vfs::FileFlags::empty() },
+        vfs::FileType::Pipe,
     );
     let read_fd = match fd_table.alloc_fd(vf_read, cloexec) {
         Ok(fd) => fd,
         Err(e) => return -(e as isize),
     };
     let vf_write = vfs::File::new_without_open(
-        pipe_write, vfs::FileFlags::O_WRONLY, vfs::FileType::Pipe,
+        pipe_write,
+        vfs::FileFlags::O_WRONLY | if nonblock { vfs::FileFlags::O_NONBLOCK } else { vfs::FileFlags::empty() },
+        vfs::FileType::Pipe,
     );
     let write_fd = match fd_table.alloc_fd(vf_write, cloexec) {
         Ok(fd) => fd,
