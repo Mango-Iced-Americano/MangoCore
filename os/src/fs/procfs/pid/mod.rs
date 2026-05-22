@@ -2,6 +2,7 @@
 
 pub mod cmdline;
 pub mod exe;
+pub mod fd;
 pub mod maps;
 pub mod stat;
 pub mod status;
@@ -85,6 +86,10 @@ fn create_pid_dir(parent: &LockedProcInode, pid: usize) -> Result<Arc<dyn IndexN
     )?;
 
     dir.add_dynamic_symlink("exe", exe::pid_exe_content)?;
+
+    let fd_dir = dir.add_dir_locked("fd", InodeMode::from_bits_truncate(0o500))?;
+    fd_dir.0.lock().extra_data = pid;
+    fd_dir.set_hooks(fd::fd_find_hook, fd::fd_list_hook);
 
     Ok(dir)
 }

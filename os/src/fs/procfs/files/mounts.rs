@@ -28,9 +28,15 @@ pub fn mounts_content(
     for (_ino, mfs) in mountpoints.iter() {
         let fs = mfs.inner_filesystem();
         let fs_name = fs.name();
+        let mp_name = match fs_name {
+            "proc" => "proc",
+            "dev" => "dev",
+            "ramfs" => "tmp",
+            _ => fs_name,
+        };
         s.push_str(fs_name);
         s.push_str(" /");
-        s.push_str(fs_name);
+        s.push_str(mp_name);
         s.push(' ');
         s.push_str(fs_name);
         s.push_str(" rw,relatime 0 0\n");
