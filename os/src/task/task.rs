@@ -100,6 +100,9 @@ pub struct TaskControlBlockInner {
     /// ABI-visible only; it does not affect actual I/O scheduling.
     pub ioprio_class: usize,
     pub ioprio_prio: usize,
+    /// membarrier PRIVATE_EXPEDITED compatibility registration.
+    /// MangoCore is single-core, so the barrier itself is a no-op after registration.
+    pub membarrier_private_expedited_registered: bool,
     /// RLIMIT_RTPRIO 兼容字段，供非 root 实时调度权限检查使用。
     pub rtprio_limit_cur: usize,
     pub rtprio_limit_max: usize,
@@ -586,6 +589,7 @@ impl TaskControlBlock {
                 sched_period: 0,
                 ioprio_class: 2,
                 ioprio_prio: 4,
+                membarrier_private_expedited_registered: false,
                 rtprio_limit_cur: 0,
                 rtprio_limit_max: 0,
                 nice_limit_cur: usize::MAX,
@@ -959,6 +963,8 @@ impl TaskControlBlock {
                 sched_period: child_sched_period,
                 ioprio_class: parent_inner.ioprio_class,
                 ioprio_prio: parent_inner.ioprio_prio,
+                membarrier_private_expedited_registered: parent_inner
+                    .membarrier_private_expedited_registered,
                 rtprio_limit_cur: parent_inner.rtprio_limit_cur,
                 rtprio_limit_max: parent_inner.rtprio_limit_max,
                 nice_limit_cur: parent_inner.nice_limit_cur,

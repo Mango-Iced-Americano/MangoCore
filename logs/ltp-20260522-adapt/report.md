@@ -308,6 +308,30 @@
 - rv64/la64、glibc 下 `kill05` 均从 `getcwd ENOENT` TBROK 变为 `kill failed with EPERM` TPASS。
 - rv64/la64、musl/glibc 下 `kill03/kill05/kill06` 小回归均为 exit 0。
 
+### 16. `membarrier01` QUERY/PRIVATE_EXPEDITED 兼容
+
+问题：从 `madvise01` 后继续扫描时，`membarrier01` 初始表现为 `TBROK: Test 0 haven't reported results!`。去掉旧的总是成功 stub 后，`cmd_fail`、`cmd_flags_fail`、`cmd_global_success` 已对齐，但 LTP 的 `cmd_private_expedited_success` 仍因 `EINVAL` 失败。
+
+根因：
+- 旧实现无条件返回成功，会让非法 cmd/flags 的错误码测试无法得到预期结果。
+- 只声明 `GLOBAL` 支持时，LTP 的 force 分支仍会覆盖测试 `PRIVATE_EXPEDITED` 注册路径；此路径要求“未注册失败、注册成功、注册后执行成功”的 Linux 语义。
+- MangoCore 当前单核调度下不需要真实跨核 IPI 栅栏，但需要保留 ABI 可见的注册状态。
+
+处理：
+- `membarrier(QUERY)` 返回 `GLOBAL | PRIVATE_EXPEDITED | REGISTER_PRIVATE_EXPEDITED`。
+- `GLOBAL` 保持 no-op 成功。
+- `REGISTER_PRIVATE_EXPEDITED` 在任务兼容状态中记录注册成功。
+- `PRIVATE_EXPEDITED` 未注册返回 `EPERM`，注册后 no-op 成功。
+- 非零 flags 和未支持 cmd 继续返回 `EINVAL`。
+
+验证日志：
+- `logs/ltp-20260522-adapt/rv64-membarrier01-after-private.log`
+- `logs/ltp-20260522-adapt/la64-membarrier01-after-private.log`
+
+结果：
+- rv64 musl/glibc：`membarrier01` 内部 summary 均为 `passed 12, failed 0`，`FAIL LTP CASE membarrier01 : 0`。
+- la64 musl/glibc：`membarrier01` 内部 summary 均为 `passed 12, failed 0`，`FAIL LTP CASE membarrier01 : 0`。
+
 ## 本轮跳过项
 
 已按规则加入 `os_test.conf` 的全量 exclude：
@@ -393,6 +417,7 @@
 - 最新 rv64 扫描已从 `hackbench` 推进到 `kcmp03`，中间主要是 fs/net/proc/device/module/AIO/io_uring/环境类项目，已按当前策略跳过。
 - 从 `kcmp03` 后继续扫描发现 `keyctl01-09` 主要依赖 keyring/proc/sysctl/modprobe 环境，`leapsec01` 依赖完整 `adjtimex` 状态语义，`lchown/link/linkat/lgetxattr` 属于 fs/权限/xattr，均不作为当前非 fs/net 优先目标。
 - `kill05` 已修复：跨 uid 正向 `kill(pid, SIGKILL)` 现在返回 `EPERM`；glibc 前置 `getcwd` TBROK 通过 LTP compat preload 绕开。
+- `membarrier01` 已修复：`QUERY/GLOBAL/PRIVATE_EXPEDITED` 注册语义已对齐，双架构双 libc 内部 summary 均为 `failed 0`。
 - 当前影响扫描推进的主要是 fs/net/epoll/文件锁/xattr/环境 helper，不适合作为本轮优先目标。
 - 继续往后扫描时，应在更新 exclude 后从全量配置继续跑，寻找 syscall/process/mm/time/signal 方向的真实 TFAIL。
 

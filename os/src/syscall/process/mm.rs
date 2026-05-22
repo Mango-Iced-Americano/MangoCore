@@ -4,7 +4,7 @@ use crate::mm::{translated_byte_buffer, MapFlags, MapPermission, UserAccess};
 use crate::syscall::errno::*;
 use crate::task::{current_task, current_user_token};
 use crate::utils::error::SyscallErr;
-use log::{error, info, warn};
+use log::{info, warn};
 
 const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
@@ -147,13 +147,42 @@ pub fn sys_mmap(
 /// The membarrier() system call was added in Linux 4.3.
 /// Before Linux 5.10, the prototype for membarrier() was:
 /// `int membarrier(int cmd, int flags);`
-pub fn sys_memorybarrier(_cmd: usize, _flags: usize, _cpu_id: usize) -> isize {
-    error!("[sys_memorybarrier]=========PSEUDOIMPLEMENTATION=========");
-    error!(
-        "This system call is only needed by the multicore environment for faster synchronization."
-    );
-    error!("In theory, it can be replaced (INefficiently) by fencing.");
-    return SUCCESS;
+pub fn sys_memorybarrier(cmd: usize, flags: usize, _cpu_id: usize) -> isize {
+    const MEMBARRIER_CMD_QUERY: usize = 0;
+    const MEMBARRIER_CMD_GLOBAL: usize = 1 << 0;
+    const MEMBARRIER_CMD_PRIVATE_EXPEDITED: usize = 1 << 3;
+    const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED: usize = 1 << 4;
+    const MEMBARRIER_SUPPORTED_CMDS: usize = MEMBARRIER_CMD_GLOBAL
+        | MEMBARRIER_CMD_PRIVATE_EXPEDITED
+        | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED;
+
+    if flags != 0 {
+        return EINVAL;
+    }
+
+    match cmd {
+        MEMBARRIER_CMD_QUERY => MEMBARRIER_SUPPORTED_CMDS as isize,
+        MEMBARRIER_CMD_GLOBAL => SUCCESS,
+        MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED => {
+            current_task()
+                .unwrap()
+                .acquire_inner_lock()
+                .membarrier_private_expedited_registered = true;
+            SUCCESS
+        }
+        MEMBARRIER_CMD_PRIVATE_EXPEDITED => {
+            if current_task()
+                .unwrap()
+                .acquire_inner_lock()
+                .membarrier_private_expedited_registered
+            {
+                SUCCESS
+            } else {
+                EPERM
+            }
+        }
+        _ => EINVAL,
+    }
 }
 
 pub fn sys_munmap(start: usize, len: usize) -> isize {
