@@ -7,8 +7,8 @@ use crate::task::{
     current_task, current_user_token, ProcessControlBlock, ProcessManager, TaskControlBlock,
 };
 use crate::timer::{get_time_sec, TimeSpec};
-use alloc::sync::Arc;
-use core::mem::size_of;
+use alloc::{sync::Arc, vec::Vec};
+use core::{mem::size_of, ptr};
 use log::{info, warn};
 use num_enum::FromPrimitive;
 
@@ -922,6 +922,133 @@ pub fn sys_prlimit(
     }
     SUCCESS
 }
+
+pub fn sys_getrlimit(resource: u32, old_limit: *mut RLimit) -> isize {
+    sys_prlimit(0, resource, ptr::null(), old_limit)
+}
+
+pub fn sys_setrlimit(resource: u32, new_limit: *const RLimit) -> isize {
+    sys_prlimit(0, resource, new_limit, ptr::null_mut())
+}
+
+const PRIO_PROCESS: i32 = 0;
+const PRIO_PGRP: i32 = 1;
+const PRIO_USER: i32 = 2;
+
+fn syscall_arg_i32(arg: usize) -> i32 {
+    arg as u32 as i32
+}
+
+fn process_main_task(pid: usize) -> Option<Arc<TaskControlBlock>> {
+    ProcessManager::find_process(pid)
+        .and_then(|process| process.threads().into_iter().next())
+        .or_else(|| ProcessManager::find_task(pid))
+}
+
+fn priority_targets(which: i32, who: i32) -> Result<Vec<Arc<TaskControlBlock>>, isize> {
+    let current = current_task().unwrap();
+    let mut targets = Vec::new();
+    match which {
+        PRIO_PROCESS => {
+            if who == 0 {
+                targets.push(current);
+            } else if who < 0 {
+                return Err(ESRCH);
+            } else if let Some(task) = process_main_task(who as usize) {
+                targets.push(task);
+            }
+        }
+        PRIO_PGRP => {
+            let pgid = if who == 0 {
+                current.process.getpgid()
+            } else if who < 0 {
+                return Err(ESRCH);
+            } else {
+                who as usize
+            };
+            for process in ProcessManager::find_processes_by_pgid(pgid) {
+                targets.extend(process.threads());
+            }
+        }
+        PRIO_USER => {
+            let uid = if who == 0 {
+                current.acquire_inner_lock().euid
+            } else if who < 0 {
+                return Err(ESRCH);
+            } else {
+                who as u32
+            };
+            for process in ProcessManager::all_processes() {
+                for task in process.threads() {
+                    let inner = task.acquire_inner_lock();
+                    let matches_user = inner.uid == uid || inner.euid == uid;
+                    drop(inner);
+                    if matches_user {
+                        targets.push(task);
+                    }
+                }
+            }
+        }
+        _ => return Err(EINVAL),
+    }
+    if targets.is_empty() {
+        Err(ESRCH)
+    } else {
+        Ok(targets)
+    }
+}
+
+fn set_task_nice(task: &Arc<TaskControlBlock>, nice: i32) {
+    let state = {
+        let mut inner = task.acquire_inner_lock();
+        inner.sched_nice = nice;
+        SchedState {
+            policy: inner.sched_policy,
+            priority: inner.sched_priority,
+            reset_on_fork: inner.sched_reset_on_fork,
+            nice: inner.sched_nice,
+            runtime: inner.sched_runtime,
+            deadline: inner.sched_deadline,
+            period: inner.sched_period,
+        }
+    };
+    sync_process_sched_state(task, state);
+}
+
+pub fn sys_getpriority(which: usize, who: usize) -> isize {
+    let targets = match priority_targets(syscall_arg_i32(which), syscall_arg_i32(who)) {
+        Ok(targets) => targets,
+        Err(errno) => return errno,
+    };
+    let mut best_nice = i32::MAX;
+    for task in targets {
+        best_nice = best_nice.min(task.acquire_inner_lock().sched_nice);
+    }
+    (20 - best_nice) as isize
+}
+
+pub fn sys_setpriority(which: usize, who: usize, prio: usize) -> isize {
+    let targets = match priority_targets(syscall_arg_i32(which), syscall_arg_i32(who)) {
+        Ok(targets) => targets,
+        Err(errno) => return errno,
+    };
+    let nice = syscall_arg_i32(prio).clamp(-20, 19);
+    let access = current_sched_access();
+    for task in &targets {
+        if !access.has_sys_nice && !sched_same_owner(access, task) {
+            return EPERM;
+        }
+        let old_nice = task.acquire_inner_lock().sched_nice;
+        if nice < old_nice && !access.has_sys_nice {
+            return EACCES;
+        }
+    }
+    for task in targets {
+        set_task_nice(&task, nice);
+    }
+    SUCCESS
+}
+
 /// set pointer to thread ID
 /// This feature is currently NOT supported and is implemented as a stub,
 

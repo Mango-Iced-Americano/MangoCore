@@ -720,16 +720,21 @@ pub fn sys_times(buf: *mut Times) -> isize {
 }
 
 pub fn sys_getrusage(who: isize, usage: *mut Rusage) -> isize {
-    if who != 0 {
-        panic!("[sys_getrusage] parameter 'who' is not RUSAGE_SELF.");
-    }
+    const RUSAGE_CHILDREN: isize = -1;
+    const RUSAGE_SELF: isize = 0;
+    const RUSAGE_THREAD: isize = 1;
+
     let task = current_task().unwrap();
-    let inner = task.acquire_inner_lock();
     let token = task.get_user_token();
-    if UserPtrMut::new(usage).write(token, &inner.rusage).is_err() {
+    let rusage = match who {
+        RUSAGE_SELF | RUSAGE_THREAD => task.acquire_inner_lock().rusage,
+        RUSAGE_CHILDREN => Rusage::new(),
+        _ => return EINVAL,
+    };
+    if UserPtrMut::new(usage).write(token, &rusage).is_err() {
         log::error!("[sys_getrusage] Failed to copy to {:?}", usage);
         return EFAULT;
     };
-    //info!("[sys_getrusage] who: RUSAGE_SELF, usage: {:?}", inner.rusage);
+    //info!("[sys_getrusage] who: {:?}, usage: {:?}", who, rusage);
     SUCCESS
 }

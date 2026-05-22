@@ -123,6 +123,33 @@
 - `futex_wait_bitset01`：rv64/la64、musl/glibc 均为 2 个 TPASS，内部 summary `failed 0`。
 - `futex_cmp_requeue01`：la64、musl/glibc 均通过；rv64 musl 通过；rv64 glibc 稳定卡在最后一个 1000 waiter 子场景并触发 LTP 30 秒超时。该项当前按“长耗时/性能阻塞”策略加入 glibc-only exclude，保留 musl 侧可得分结果。
 
+### 7. priority / random / rlimit / rusage syscall 补齐
+
+问题：继续从 `genatan` 以后扫描时，出现一组非 fs/net、适合短平快补齐的 syscall 缺口：
+- `getpriority01/02`：syscall 141 未分发。
+- `setpriority02`：补齐后又暴露 unprivileged 场景的权限 errno 顺序问题，LTP 同时检查 `EACCES` 和 `EPERM`。
+- `getrandom01/03/05`：原 `getrandom` stub 返回 0，导致用例认为没有填充用户缓冲区。
+- `getrlimit03`：旧 syscall 163 `getrlimit` 缺失；已有 `prlimit64` 不能覆盖 glibc/LTP 的旧入口。
+- `getrusage01`：传入非 `RUSAGE_SELF` 时内核直接 panic，属于 P0 稳定性问题。
+
+处理：
+- 新增 syscall 140/141 `setpriority/getpriority`，支持 `PRIO_PROCESS`、`PRIO_PGRP`、`PRIO_USER` 的基础目标查找和 nice 值读写。
+- `getpriority` 按 Linux 内核 raw ABI 返回 `20 - nice`，交给 libc 还原为用户可见 nice 值。
+- `setpriority` 对 nice 值按 `[-20, 19]` clamp，并按 Linux/LTP 期望区分：同 owner 降低 nice 值需要 `CAP_SYS_NICE` 返回 `EACCES`，跨 owner 修改返回 `EPERM`。
+- 新增 syscall 163/164 `getrlimit/setrlimit`，复用已有 `prlimit64` 资源限制逻辑。
+- `getrandom` 对用户缓冲区做 `EFAULT` 校验，支持当前 LTP 覆盖的 flags，并填充非零伪随机字节。
+- `getrusage` 不再 panic：支持 `RUSAGE_SELF`、`RUSAGE_THREAD`、`RUSAGE_CHILDREN`，非法 `who` 返回 `EINVAL`，坏用户指针返回 `EFAULT`。
+
+验证日志：
+- `logs/ltp-20260522-adapt/rv64-priority-random-rlimit-rusage-after.log`
+- `logs/ltp-20260522-adapt/rv64-setpriority02-after3.log`
+- `logs/ltp-20260522-adapt/la64-setpriority02-after.log`
+
+结果：
+- rv64 聚合定向中，`getpriority01/02`、`setpriority01`、`getrandom01-05`、`getrlimit01-03`、`getrusage01/02` 均已进入内部 summary `failed 0`。
+- `setpriority02` 经 errno 顺序修正后，rv64/la64、musl/glibc 均为 7 个 TPASS，内部 summary `failed 0`。
+- `getrusage01` 的 panic 已消除，非法参数路径改为正常 errno 返回。
+
 ## 本轮跳过项
 
 已按规则加入 `os_test.conf` 的全量 exclude：
@@ -152,12 +179,21 @@
 - `logs/ltp-20260522-adapt/rv64-futex-requeue-bitset-after2.log`
 - `logs/ltp-20260522-adapt/rv64-futex-requeue-bitset-after3.log`
 - `logs/ltp-20260522-adapt/la64-futex-requeue-bitset-after.log`
+- `logs/ltp-20260522-adapt/rv64-full-ltp-from-genatan-after-futex.log`
+- `logs/ltp-20260522-adapt/rv64-priority-random-rlimit-rusage-after.log`
+- `logs/ltp-20260522-adapt/rv64-setpriority02-after3.log`
+- `logs/ltp-20260522-adapt/la64-setpriority02-after.log`
 
 扫描发现：
 - `clone301` 已从真实失败变为双架构通过。
 - `personality` 前置缺口已补齐，AIO `io_setup` 仍按环境/大面项跳过。
 - `execve03` 已从真实 TFAIL 变为双架构通过。
 - futex 方向的 `cmp_requeue02`、`wait_bitset01` 已双架构双 libc 通过；`cmp_requeue01` 的语义已修复，但 rv64 glibc 1000 waiter 子场景耗时过长，当前只在 glibc exclude。
+- `getpriority/getrlimit/getrandom/getrusage` 这一批 syscall 缺口已补齐；其中 `getrusage01` 从 kernel panic 变为正常通过。
+- `setpriority02` 需要细分权限错误：同 owner 非特权提高优先级返回 `EACCES`，跨 owner 返回 `EPERM`。
+- `genbessel/geniperb/genpower/gentrigo` 当前是测试镜像 helper 路径/环境问题；`geneve01.sh/geneve02.sh` 属于 net module/veth 环境问题；本轮不纳入修复。
+- `getaddrinfo_01` 仍停在 glibc service/protocol 环境文件问题，后续可单独补 `/etc/services`/协议文件。
+- `get_robust_list01` 仍是下一批较小的非 fs/net 候选项，需要核对 `get_robust_list` 对 pid/权限/不存在目标的 Linux 语义。
 - 最新 rv64 扫描继续推进到 `ftp-download-stress02-rmt.sh`，其中 `fstatfs*`/`fsync*`/`fsx*`/`ftest*` 都属于 fs 方向，`ftp-*` 属于 net 长压测，按当前策略跳过。
 - 当前影响扫描推进的主要是 fs/net/epoll/文件锁/xattr/环境 helper，不适合作为本轮优先目标。
 - 继续往后扫描时，应在更新 exclude 后从全量配置继续跑，寻找 syscall/process/mm/time/signal 方向的真实 TFAIL。
@@ -167,7 +203,9 @@
 1. 用更新后的 `os_test.conf` 重新注入 rv64/la64 镜像。
 2. 继续跑全量 LTP 扫描，遇到 fs/net/epoll/环境项继续记录并跳过。
 3. 优先适配后续出现的非 fs/net 真失败，例如：
-   - `futex_waitv01-03`：syscall 449 缺失或语义未适配，可评估最小 wait-vector 实现；
+   - `get_robust_list01`：小范围 syscall 语义差异，优先级高于 fs/net；
+   - `getaddrinfo_01`：偏环境文件补齐，可评估 `/etc/services` 和 protocol 数据；
+   - `futex_waitv01-03`：当前 LTP 内部为 kernel version TCONF，暂不按真实失败处理；
    - `futex_wake02`：依赖 `/proc/<pid>/task`，属于 procfs 支持缺口，按当前 fs/procfs 冲突策略先记录，暂不优先；
    - 缺 syscall 且语义较小的 compat 项；
    - process/signal/time/mm 类错误码不一致；

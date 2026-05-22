@@ -134,6 +134,8 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_GETGID => "getgid",
         SYSCALL_GETEGID => "getegid",
         SYSCALL_GETTID => "gettid",
+        SYSCALL_SETPRIORITY => "setpriority",
+        SYSCALL_GETPRIORITY => "getpriority",
         SYSCALL_SYSINFO => "sysinfo",
         SYSCALL_SHMGET => "shmget",
         SYSCALL_SHMCTL => "shmctl",
@@ -166,6 +168,8 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_MUNLOCK => "munlock",
         SYSCALL_MLOCKALL => "mlockall",
         SYSCALL_MUNLOCKALL => "munlockall",
+        SYSCALL_GETRLIMIT => "getrlimit",
+        SYSCALL_SETRLIMIT => "setrlimit",
         SYSCALL_WAIT4 => "wait4",
         SYSCALL_PRLIMIT => "prlimit",
         SYSCALL_RENAMEAT2 => "renameat2",
@@ -199,8 +203,9 @@ pub fn syscall_name(id: usize) -> &'static str {
 }
 use crate::{
     fs::poll::FdSet,
+    mm::{translated_byte_buffer, UserAccess, UserBuffer},
     syscall::errno::Errno,
-    task::Rusage,
+    task::{current_user_token, Rusage},
     timer::{ITimerVal, TimeSpec, Times},
 };
 
@@ -442,6 +447,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[2] as u32,
             args[3] as *mut Rusage,
         ),
+        SYSCALL_GETRLIMIT => sys_getrlimit(args[0] as u32, args[1] as *mut RLimit),
+        SYSCALL_SETRLIMIT => sys_setrlimit(args[0] as u32, args[1] as *const RLimit),
         SYSCALL_PRLIMIT => sys_prlimit(
             args[0],
             args[1] as u32,
@@ -482,6 +489,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SETFSGID => sys_setfsgid(args[0]),
         SYSCALL_GETGROUPS => sys_getgroups(args[0], args[1] as *mut u32),
         SYSCALL_SETGROUPS => sys_setgroups(args[0], args[1] as *const u32),
+        SYSCALL_SETPRIORITY => sys_setpriority(args[0], args[1], args[2]),
+        SYSCALL_GETPRIORITY => sys_getpriority(args[0], args[1]),
         SYSCALL_GETTID => sys_gettid(),
         SYSCALL_SYSINFO => sys_sysinfo(args[0] as *mut Sysinfo),
         SYSCALL_SHMGET => sys_shmget(args[0] as isize, args[1], args[2]),
@@ -668,7 +677,42 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     ret
 }
 
-/// todo: 未实现
-pub fn sys_getrandom(_buf: usize, _buflen: usize, _flags: u32) -> isize {
-    0
+pub fn sys_getrandom(buf: usize, buflen: usize, flags: u32) -> isize {
+    const GRND_NONBLOCK: u32 = 0x0001;
+    const GRND_RANDOM: u32 = 0x0002;
+    const GRND_INSECURE: u32 = 0x0004;
+    const GRND_ALLOWED: u32 = GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE;
+
+    if flags & !GRND_ALLOWED != 0 {
+        return errno::EINVAL;
+    }
+    if buflen == 0 {
+        return 0;
+    }
+
+    let buffers = match translated_byte_buffer(
+        current_user_token(),
+        buf as *const u8,
+        buflen,
+        UserAccess::Write,
+    ) {
+        Ok(buffers) => buffers,
+        Err(errno) => return errno,
+    };
+    let mut user = UserBuffer::new(buffers);
+    let mut seed = crate::hal::get_time() as u64 ^ ((buf as u64) << 17) ^ buflen as u64;
+    let mut offset = 0usize;
+    let mut chunk = [0u8; 64];
+    while offset < buflen {
+        for byte in chunk.iter_mut() {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            *byte = seed as u8;
+        }
+        let copy_len = core::cmp::min(chunk.len(), buflen - offset);
+        user.write_at(offset, &chunk[..copy_len]);
+        offset += copy_len;
+    }
+    buflen as isize
 }
