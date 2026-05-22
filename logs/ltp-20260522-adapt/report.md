@@ -332,6 +332,27 @@
 - rv64 musl/glibc：`membarrier01` 内部 summary 均为 `passed 12, failed 0`，`FAIL LTP CASE membarrier01 : 0`。
 - la64 musl/glibc：`membarrier01` 内部 summary 均为 `passed 12, failed 0`，`FAIL LTP CASE membarrier01 : 0`。
 
+### 17. `madvise02/03/05` 最小语义适配
+
+问题：从 `madvise01` 后继续扫描时，`madvise02`、`madvise03`、`madvise05` 暴露 `sys_madvise` 仍是过窄 stub：
+- `madvise02` 的部分未映射区间期望 `ENOMEM`，旧实现直接返回 `EINVAL`。
+- `madvise03` 需要 `MADV_DONTNEED` 对匿名私有映射丢弃驻留页，后续读回零页。
+- `madvise05` 需要 `MADV_WILLNEED` 在已映射区间上至少 no-op 成功，旧实现返回 `EINVAL` 导致 TBROK。
+
+处理：
+- `sys_madvise` 支持 `MADV_NORMAL/RANDOM/SEQUENTIAL/WILLNEED/DONTNEED`，保留页对齐和范围溢出检查。
+- `VmaSet::advise_range()` 按 VMA 覆盖逐段检查区间；发现 hole 返回 `ENOMEM`，非法 advice 或不支持的 DONTNEED 映射返回 `EINVAL`。
+- `MADV_DONTNEED` 当前只对匿名私有映射生效，通过 `unmap_one()` 丢弃已映射页但保留 VMA，后续缺页按匿名映射重新填零。
+- `MADV_NORMAL/RANDOM/SEQUENTIAL/WILLNEED` 当前作为兼容 no-op，只校验区间覆盖。
+
+验证日志：
+- `logs/ltp-20260522-adapt/rv64-madvise02-03-05-after.log`
+- `logs/ltp-20260522-adapt/la64-madvise02-03-05-after.log`
+
+结果：
+- rv64 musl/glibc：`madvise02`、`madvise03`、`madvise05` 均为 `FAIL LTP CASE ... : 0`。
+- la64 musl/glibc：`madvise02`、`madvise03`、`madvise05` 均为 `FAIL LTP CASE ... : 0`。
+
 ## 本轮跳过项
 
 已按规则加入 `os_test.conf` 的全量 exclude：
@@ -393,6 +414,10 @@
 - `logs/ltp-20260522-adapt/rv64-full-ltp-from-kcmp03-current.log`
 - `logs/ltp-20260522-adapt/rv64-kill-both-preload-after.log`
 - `logs/ltp-20260522-adapt/la64-kill-both-preload-after.log`
+- `logs/ltp-20260522-adapt/rv64-membarrier01-after-private.log`
+- `logs/ltp-20260522-adapt/la64-membarrier01-after-private.log`
+- `logs/ltp-20260522-adapt/rv64-madvise02-03-05-after.log`
+- `logs/ltp-20260522-adapt/la64-madvise02-03-05-after.log`
 
 扫描发现：
 - `clone301` 已从真实失败变为双架构通过。
@@ -418,6 +443,7 @@
 - 从 `kcmp03` 后继续扫描发现 `keyctl01-09` 主要依赖 keyring/proc/sysctl/modprobe 环境，`leapsec01` 依赖完整 `adjtimex` 状态语义，`lchown/link/linkat/lgetxattr` 属于 fs/权限/xattr，均不作为当前非 fs/net 优先目标。
 - `kill05` 已修复：跨 uid 正向 `kill(pid, SIGKILL)` 现在返回 `EPERM`；glibc 前置 `getcwd` TBROK 通过 LTP compat preload 绕开。
 - `membarrier01` 已修复：`QUERY/GLOBAL/PRIVATE_EXPEDITED` 注册语义已对齐，双架构双 libc 内部 summary 均为 `failed 0`。
+- `madvise02/03/05` 已修复：区间 hole 返回 `ENOMEM`、匿名私有 `MADV_DONTNEED` 丢弃页后重新零填充、`MADV_WILLNEED` 已映射区间 no-op 成功。
 - 当前影响扫描推进的主要是 fs/net/epoll/文件锁/xattr/环境 helper，不适合作为本轮优先目标。
 - 继续往后扫描时，应在更新 exclude 后从全量配置继续跑，寻找 syscall/process/mm/time/signal 方向的真实 TFAIL。
 

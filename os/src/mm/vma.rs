@@ -188,6 +188,25 @@ impl Vma {
         Ok(())
     }
 
+    pub fn discard_range<T: PageTable>(
+        &mut self,
+        page_table: &mut T,
+        start_vpn: VirtPageNum,
+        end_vpn: VirtPageNum,
+    ) -> Result<(), MemoryError> {
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            if !self.vm_contains(vpn) {
+                return Err(MemoryError::BadAddress);
+            }
+            if let Err(err) = self.unmap_one(page_table, vpn) {
+                if !matches!(err, MemoryError::NotMapped) {
+                    return Err(err);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn map_from_existing_page_table<T: PageTable>(
         &mut self,
         dst_page_table: &mut T,

@@ -645,6 +645,13 @@ impl<T: PageTable> AddressSpace<T> {
         super::mmap::do_mprotect(self, addr, len, prot)
     }
 
+    pub fn madvise(&mut self, start: usize, len: usize, advice: usize) -> Result<(), isize> {
+        let start_vpn = VirtAddr::from(start).floor();
+        let end_vpn = VirtAddr::from(start + len).ceil();
+        self.vmas
+            .advise_range(&mut self.page_table, start_vpn, end_vpn, advice)
+    }
+
     pub fn create_elf_tables(
         &self,
         mut user_sp: usize,

@@ -3,7 +3,6 @@ use crate::fs::vfs;
 use crate::mm::{translated_byte_buffer, MapFlags, MapPermission, UserAccess};
 use crate::syscall::errno::*;
 use crate::task::{current_task, current_user_token};
-use crate::utils::error::SyscallErr;
 use log::{info, warn};
 
 const PROT_READ: usize = 0x1;
@@ -402,7 +401,35 @@ pub fn sys_munlockall() -> isize {
     SUCCESS
 }
 
-pub fn sys_madvise(_addr: usize, _length: usize, _advice: usize) -> isize {
-    // 暂时返回 EINVAL
-    -(SyscallErr::EINVAL as isize)
+pub fn sys_madvise(addr: usize, length: usize, advice: usize) -> isize {
+    const MADV_NORMAL: usize = 0;
+    const MADV_RANDOM: usize = 1;
+    const MADV_SEQUENTIAL: usize = 2;
+    const MADV_WILLNEED: usize = 3;
+    const MADV_DONTNEED: usize = 4;
+
+    if addr & (PAGE_SIZE - 1) != 0 {
+        return EINVAL;
+    }
+
+    let len = match page_round_up_len(length) {
+        Some(len) => len,
+        None => return EINVAL,
+    };
+    if len == 0 {
+        return SUCCESS;
+    }
+    if checked_page_range(addr, len).is_err() {
+        return EINVAL;
+    }
+
+    match advice {
+        MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED | MADV_DONTNEED => {
+            match current_task().unwrap().process.vm().lock().madvise(addr, len, advice) {
+                Ok(_) => SUCCESS,
+                Err(errno) => errno,
+            }
+        }
+        _ => EINVAL,
+    }
 }

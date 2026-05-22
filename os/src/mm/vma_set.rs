@@ -295,6 +295,39 @@ impl VmaSet {
         }
     }
 
+    pub(super) fn advise_range<T: PageTable>(
+        &mut self,
+        page_table: &mut T,
+        start_vpn: VirtPageNum,
+        end_vpn: VirtPageNum,
+        advice: usize,
+    ) -> Result<(), isize> {
+        const MADV_DONTNEED: usize = 4;
+
+        let mut cursor = start_vpn;
+        while cursor < end_vpn {
+            let area_start = self.find_user_vma_key(cursor).ok_or(ENOMEM)?;
+            let area_end = self.vmas.get(&area_start).ok_or(ENOMEM)?.vm_end();
+            let advise_end = if area_end < end_vpn {
+                area_end
+            } else {
+                end_vpn
+            };
+
+            if advice == MADV_DONTNEED {
+                let area = self.vmas.get_mut(&area_start).ok_or(ENOMEM)?;
+                if area.map_file.is_some() || !area.flags.contains(MapFlags::MAP_PRIVATE) {
+                    return Err(EINVAL);
+                }
+                area.discard_range(page_table, cursor, advise_end)
+                    .map_err(|_| EINVAL)?;
+            }
+
+            cursor = advise_end;
+        }
+        Ok(())
+    }
+
     pub(super) fn protect_range<T: PageTable>(
         &mut self,
         page_table: &mut T,
