@@ -181,6 +181,28 @@
 
 结果：rv64/la64、musl/glibc 下 `getcpu01` 均为 1 个 TPASS，内部 summary `failed 0`，不再是 unsupported/TCONF。
 
+### 10. `getgroups/setgroups` 补充组语义
+
+问题：继续从 `genatan` 后扫描时，`getgroups01/getgroups03` 暴露原实现只是空桩：
+- `setgroups(3, {0,1,2})` 没有保存补充组列表；
+- `getgroups(0, gidset)` 返回 0，且不能按真实组数量做 `EINVAL` 检查；
+- `getgroups(NGROUPS, gidset)` 无法写回列表，`getgroups03` 的 set/get 一致性检查失败。
+
+处理：
+- `TaskControlBlockInner` 增加 Linux supplementary group list，初始为 `[0]`。
+- `clone/fork` 继承父任务补充组列表。
+- `setgroups(size, list)` 校验 root 权限、`NGROUPS_MAX`、用户指针，并保存用户传入的 gid 列表。
+- `getgroups(size, list)` 支持 `size == 0` 查询数量；`size < groups.len()` 或超过上限返回 `EINVAL`；坏用户指针返回 `EFAULT`；正常路径写回补充组列表。
+
+验证日志：
+- `logs/ltp-20260522-adapt/rv64-getgroups-after.log`
+- `logs/ltp-20260522-adapt/la64-getgroups-after.log`
+
+结果：
+- rv64/la64、musl/glibc 下 `getgroups01` 均为 4 个 TPASS。
+- rv64/la64、musl/glibc 下 `getgroups03` 均为 1 个 TPASS。
+- 外层 wrapper 仍打印 `FAIL LTP CASE ... : 0`，按内部 TPASS 和退出码 0 判断为通过。
+
 ## 本轮跳过项
 
 已按规则加入 `os_test.conf` 的全量 exclude：
@@ -218,6 +240,8 @@
 - `logs/ltp-20260522-adapt/la64-get-robust-list-after.log`
 - `logs/ltp-20260522-adapt/rv64-getcpu-after.log`
 - `logs/ltp-20260522-adapt/la64-getcpu-after.log`
+- `logs/ltp-20260522-adapt/rv64-getgroups-after.log`
+- `logs/ltp-20260522-adapt/la64-getgroups-after.log`
 
 扫描发现：
 - `clone301` 已从真实失败变为双架构通过。
@@ -230,6 +254,7 @@
 - `getaddrinfo_01` 仍停在 glibc service/protocol 环境文件问题，后续可单独补 `/etc/services`/协议文件。
 - `get_robust_list01` 已修复：坏指针、无效 pid、当前线程成功、跨用户无权限 `EPERM` 均已对齐。
 - `getcpu01` 已由 unsupported/TCONF 变为双架构双 libc TPASS。
+- `getgroups01/getgroups03` 已修复：`setgroups` 保存补充组列表，`getgroups` 的数量查询、列表写回、`EINVAL/EFAULT` 语义已对齐。
 - 最新 rv64 扫描继续推进到 `ftp-download-stress02-rmt.sh`，其中 `fstatfs*`/`fsync*`/`fsx*`/`ftest*` 都属于 fs 方向，`ftp-*` 属于 net 长压测，按当前策略跳过。
 - 当前影响扫描推进的主要是 fs/net/epoll/文件锁/xattr/环境 helper，不适合作为本轮优先目标。
 - 继续往后扫描时，应在更新 exclude 后从全量配置继续跑，寻找 syscall/process/mm/time/signal 方向的真实 TFAIL。
@@ -242,6 +267,8 @@
    - `getaddrinfo_01`：偏环境文件补齐，可评估 `/etc/services` 和 protocol 数据；
    - `futex_waitv01-03`：当前 LTP 内部为 kernel version TCONF，暂不按真实失败处理；
    - `futex_wake02`：依赖 `/proc/<pid>/task`，属于 procfs 支持缺口，按当前 fs/procfs 冲突策略先记录，暂不优先；
+   - `getpgid02`：负 pid 错误码小范围对齐候选，可优先验证；
+   - `gethostname02`：主机名长度/坏指针错误码小范围对齐候选，可优先验证；
    - 缺 syscall 且语义较小的 compat 项；
    - process/signal/time/mm 类错误码不一致；
    - `TFAIL` 明确指向单个 syscall 行为差异的项目。

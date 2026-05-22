@@ -30,6 +30,7 @@ const CAP_LAST_CAP: usize = 40;
 const CAP_SETPCAP: usize = 8;
 const CAP_SYS_NICE: usize = 23;
 const CAP_FULL_SET: u64 = (1u64 << (CAP_LAST_CAP + 1)) - 1;
+const NGROUPS_MAX: usize = 65536;
 const PR_GET_DUMPABLE: usize = 3;
 const PR_SET_DUMPABLE: usize = 4;
 const PR_GET_KEEPCAPS: usize = 7;
@@ -391,27 +392,53 @@ pub fn sys_setfsgid(fsgid: usize) -> isize {
 }
 
 pub fn sys_getgroups(size: usize, list: *mut u32) -> isize {
+    let task = current_task().unwrap();
+    let groups = task.acquire_inner_lock().groups.clone();
     if size == 0 {
-        return 0;
+        return groups.len() as isize;
+    }
+    if size > NGROUPS_MAX || size < groups.len() {
+        return EINVAL;
     }
     if list.is_null() {
         return EFAULT;
     }
-    0
+    let token = current_user_token();
+    for (idx, gid) in groups.iter().enumerate() {
+        let ptr = (list as usize + idx * size_of::<u32>()) as *mut u32;
+        if let Err(errno) = UserPtrMut::new(ptr).write(token, gid) {
+            return errno;
+        }
+    }
+    groups.len() as isize
 }
 
 pub fn sys_setgroups(size: usize, list: *const u32) -> isize {
-    if current_task().unwrap().acquire_inner_lock().euid != 0 {
+    let task = current_task().unwrap();
+    if task.acquire_inner_lock().euid != 0 {
         return EPERM;
     }
+    if size > NGROUPS_MAX {
+        return EINVAL;
+    }
+    let mut groups = Vec::new();
+    if groups.try_reserve(size).is_err() {
+        return ENOMEM;
+    }
     if size > 0 {
-        let token = current_user_token();
-        if translated_byte_buffer(token, list as *const u8, size * size_of::<u32>(), UserAccess::Read)
-            .is_err()
-        {
+        if list.is_null() {
             return EFAULT;
         }
+        let token = current_user_token();
+        for idx in 0..size {
+            let ptr = (list as usize + idx * size_of::<u32>()) as *const u32;
+            match UserPtr::new(ptr).read(token) {
+                Ok(gid) => groups.push(gid),
+                Err(errno) => return errno,
+            }
+        }
     }
+    task.acquire_inner_lock().groups = groups;
     SUCCESS
 }
 

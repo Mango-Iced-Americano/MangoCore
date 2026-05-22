@@ -28,6 +28,12 @@ use spin::{Mutex, MutexGuard};
 
 const TASK_CAP_FULL_SET: u64 = (1u64 << 41) - 1;
 
+fn default_groups() -> Vec<u32> {
+    let mut groups = Vec::new();
+    groups.push(0);
+    groups
+}
+
 #[derive(Clone)]
 /// 任务的文件系统状态
 pub struct FsStatus {
@@ -110,6 +116,8 @@ pub struct TaskControlBlockInner {
     pub egid: u32,
     pub sgid: u32,
     pub fsgid: u32,
+    /// Linux supplementary group list, used by getgroups/setgroups compatibility.
+    pub groups: Vec<u32>,
     /// Linux capability 兼容字段。当前内核只做权限语义判定，不实现真实权能隔离。
     pub cap_effective: u64,
     pub cap_permitted: u64,
@@ -586,6 +594,7 @@ impl TaskControlBlock {
                 egid: 0,
                 sgid: 0,
                 fsgid: 0,
+                groups: default_groups(),
                 cap_effective: TASK_CAP_FULL_SET,
                 cap_permitted: TASK_CAP_FULL_SET,
                 cap_inheritable: 0,
@@ -955,6 +964,7 @@ impl TaskControlBlock {
                 egid: parent_inner.egid,
                 sgid: parent_inner.sgid,
                 fsgid: parent_inner.fsgid,
+                groups: parent_inner.groups.clone(),
                 cap_effective: parent_inner.cap_effective,
                 cap_permitted: parent_inner.cap_permitted,
                 cap_inheritable: parent_inner.cap_inheritable,
