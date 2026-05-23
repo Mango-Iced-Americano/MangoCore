@@ -66,7 +66,11 @@ impl IndexNode for PidFd {
     }
 }
 
-pub fn new_pidfd_file(target_pid: usize) -> Result<File, SyscallErr> {
+pub fn new_pidfd_file_with_flags(target_pid: usize, flags: FileFlags) -> Result<File, SyscallErr> {
     let inode = Arc::new(PidFd::new(target_pid)) as Arc<dyn IndexNode>;
-    File::new(inode, FileFlags::O_RDWR)
+    File::new(inode, flags)
+}
+
+pub fn new_pidfd_file(target_pid: usize) -> Result<File, SyscallErr> {
+    new_pidfd_file_with_flags(target_pid, FileFlags::O_RDWR)
 }

@@ -251,6 +251,9 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | execve 后 OOM | 新旧内存集同时存在 | `load_elf` 开头 `recycle_data_pages()` |
 | LTP nice05 动态 CPU clock 失败 | glibc 使用负数动态 clock id，且相邻 nice 在单核调度中差异太小 | 解码动态 CPU clock id，并让 `CPUCLOCK_SCHED`/调度统计体现 nice |
 | glibc pthread cancel 缺库 | 测试镜像缺少架构匹配 `libgcc_s.so.1` | initproc 写入 `/glibc/lib/libgcc_s.so.1` 后再链接到 `/lib` |
+| pidfd_send_signal 对 `/proc/<pid>` fd 返回 EBADF | procfs inode 被 MountFSInode 包装，且 `/proc/<pid>` 目录未记录 pid | 解包 MountFSInode 后识别 LockedProcInode，并在 pid 目录 `extra_data` 保存 pid |
+| pidfd_getfd 已退出目标返回 EBADF | wait 后 zombie 进程仍可被 registry 查到，但 fd table 已关闭 | 目标进程 zombie 时按 Linux 语义返回 `ESRCH` |
+| pidfd_open04 waitid(P_PIDFD) ENOSYS | 缺少 `waitid(95)` 分发和 P_PIDFD 最小语义 | 支持 `P_PIDFD + WEXITED`，非阻塞未退出返回 `EAGAIN`，退出后回收子进程 |
 
 ### QEMU / 测试
 

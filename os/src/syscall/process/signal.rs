@@ -1,4 +1,10 @@
-use crate::fs::pidfd::PidFd;
+use alloc::sync::Arc;
+
+use crate::fs::{
+    pidfd::{new_pidfd_file_with_flags, PidFd},
+    procfs::LockedProcInode,
+    vfs::{File, FileFlags, FileType, IndexNode, MountFSInode},
+};
 use crate::hal::{MachineContext, TrapContext, UserSignalMask};
 use crate::mm::{copy_from_user, UserPtr, UserPtrMut};
 use crate::syscall::errno::*;
@@ -36,6 +42,28 @@ fn can_signal_process(target: &ProcessControlBlock) -> bool {
         || sender_euid == target_inner.suid
 }
 
+pub(super) fn pidfd_file_target_pid(file: &File) -> Result<usize, isize> {
+    let inode = MountFSInode::unwrap_inode(&file.inode);
+    if let Some(pidfd) = inode.as_any_ref().downcast_ref::<PidFd>() {
+        return Ok(pidfd.target_pid());
+    }
+    if let Some(proc_inode) = inode.as_any_ref().downcast_ref::<LockedProcInode>() {
+        let data = proc_inode.0.lock();
+        if data.metadata.file_type == FileType::Dir && data.extra_data != 0 {
+            return Ok(data.extra_data);
+        }
+    }
+    Err(EBADF)
+}
+
+fn pidfd_target_pid(pidfd: usize) -> Result<usize, isize> {
+    let task = current_task().unwrap();
+    let files_ref = task.process.files();
+    let fd_table = files_ref.lock();
+    let file = fd_table.get_file(pidfd).map_err(|err| -(err as isize))?;
+    pidfd_file_target_pid(file)
+}
+
 pub fn sys_kill(pid: usize, sig: usize) -> isize {
     let signal = match Signals::from_signum(sig) {
         Ok(signal) => signal,
@@ -58,6 +86,116 @@ pub fn sys_kill(pid: usize, sig: usize) -> isize {
     } else {
         let pgid = (-pid_signed) as usize;
         ProcessManager::send_signal_to_group(pgid, signal)
+    }
+}
+
+pub fn sys_pidfd_open(pid: usize, flags: usize) -> isize {
+    const PIDFD_NONBLOCK: usize = FileFlags::O_NONBLOCK.bits() as usize;
+
+    if pid == 0 || (pid as isize) < 0 {
+        return EINVAL;
+    }
+    if flags & !PIDFD_NONBLOCK != 0 {
+        return EINVAL;
+    }
+    if ProcessManager::find_process(pid).is_none() {
+        return ESRCH;
+    }
+
+    let mut file_flags = FileFlags::O_RDWR;
+    if flags & PIDFD_NONBLOCK != 0 {
+        file_flags.insert(FileFlags::O_NONBLOCK);
+    }
+    let file = match new_pidfd_file_with_flags(pid, file_flags) {
+        Ok(file) => file,
+        Err(err) => return -(err as isize),
+    };
+
+    let task = current_task().unwrap();
+    let files_ref = task.process.files();
+    let mut fd_table = files_ref.lock();
+    match fd_table.alloc_fd(file, true) {
+        Ok(fd) => fd as isize,
+        Err(err) => -(err as isize),
+    }
+}
+
+pub fn sys_pidfd_getfd(pidfd: usize, targetfd: usize, flags: usize) -> isize {
+    if flags != 0 {
+        return EINVAL;
+    }
+
+    let target_pid = match pidfd_target_pid(pidfd) {
+        Ok(pid) => pid,
+        Err(errno) => return errno,
+    };
+    let Some(process) = ProcessManager::find_process(target_pid) else {
+        return ESRCH;
+    };
+    if process.is_zombie() {
+        return ESRCH;
+    }
+    if !can_signal_process(&process) {
+        return EPERM;
+    }
+
+    let remote_file = {
+        let files_ref = process.files();
+        let fd_table = files_ref.lock();
+        let file = match fd_table.get_file(targetfd) {
+            Ok(file) => file,
+            Err(err) => return -(err as isize),
+        };
+        match file.try_clone() {
+            Some(file) => file,
+            None => return ENOMEM,
+        }
+    };
+
+    let task = current_task().unwrap();
+    let files_ref = task.process.files();
+    let mut fd_table = files_ref.lock();
+    match fd_table.alloc_fd(remote_file, true) {
+        Ok(fd) => fd as isize,
+        Err(err) => -(err as isize),
+    }
+}
+
+pub fn sys_kcmp(pid1: usize, pid2: usize, kcmp_type: usize, idx1: usize, idx2: usize) -> isize {
+    const KCMP_FILE: usize = 0;
+
+    if kcmp_type != KCMP_FILE {
+        return EINVAL;
+    }
+
+    let Some(process1) = ProcessManager::find_process(pid1) else {
+        return ESRCH;
+    };
+    let Some(process2) = ProcessManager::find_process(pid2) else {
+        return ESRCH;
+    };
+
+    let inode1: Arc<dyn IndexNode> = {
+        let files_ref = process1.files();
+        let fd_table = files_ref.lock();
+        match fd_table.get_file(idx1) {
+            Ok(file) => file.inode.clone(),
+            Err(err) => return -(err as isize),
+        }
+    };
+    let inode2: Arc<dyn IndexNode> = {
+        let files_ref = process2.files();
+        let fd_table = files_ref.lock();
+        match fd_table.get_file(idx2) {
+            Ok(file) => file.inode.clone(),
+            Err(err) => return -(err as isize),
+        }
+    };
+
+    if Arc::ptr_eq(&inode1, &inode2) {
+        0
+    } else {
+        1
     }
 }
 
@@ -106,35 +244,38 @@ pub fn sys_pidfd_send_signal(pidfd: usize, sig: usize, info: usize, flags: usize
     let token = task.get_user_token();
     let queued_siginfo = if info != 0 {
         match UserPtr::<SigInfo>::from_addr(info).read(token) {
-            Ok(siginfo) => Some(siginfo.with_signal_sender(sig, task.pid())),
+            Ok(siginfo) => {
+                if siginfo.signo() != sig {
+                    return EINVAL;
+                }
+                Some(siginfo)
+            }
             Err(_) => return EFAULT,
         }
     } else {
         None
     };
 
-    let target_pid = {
-        let files_ref = task.process.files();
-        let fd_table = files_ref.lock();
-        let file = match fd_table.get_file(pidfd) {
-            Ok(file) => file,
-            Err(err) => return -(err as isize),
-        };
-        match file.inode_as_any_ref().downcast_ref::<PidFd>() {
-            Some(pidfd) => pidfd.target_pid(),
-            None => return EBADF,
-        }
+    let target_pid = match pidfd_target_pid(pidfd) {
+        Ok(pid) => pid,
+        Err(errno) => return errno,
     };
 
     let Some(process) = ProcessManager::find_process(target_pid) else {
         return ESRCH;
     };
+    if !can_signal_process(&process) {
+        return EPERM;
+    }
     if signal.is_empty() {
         return SUCCESS;
     }
     match queued_siginfo {
         Some(siginfo) => {
-            send_process_signal_info(&process, signal, siginfo);
+            if target_pid != task.pid() && siginfo.is_kernel_generated() {
+                return EPERM;
+            }
+            send_process_signal_info(&process, signal, siginfo.with_signal_sender(sig, task.pid()));
             SUCCESS
         }
         None => ProcessManager::send_signal_to_process(target_pid, signal),

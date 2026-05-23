@@ -986,6 +986,14 @@ impl SigInfo {
         self.si_uid = 0;
         self
     }
+
+    pub fn signo(&self) -> usize {
+        self.si_signo as usize
+    }
+
+    pub fn is_kernel_generated(&self) -> bool {
+        (self.si_code as i32) >= 0
+    }
 }
 
 #[allow(unused)]

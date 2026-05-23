@@ -2,7 +2,7 @@ use crate::mm::{copy_to_user, UserPtrMut};
 use crate::syscall::errno::*;
 use crate::task::{
     current_task, current_user_token, exit_current_and_run_next, exit_group_and_run_next,
-    ProcessManager, Rusage,
+    signal::SigInfo, ProcessManager, Rusage,
 };
 use log::info;
 
@@ -56,6 +56,75 @@ pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) ->
             child.pid as isize
         }
         Ok(None) => SUCCESS,
+        Err(errno) => errno,
+    }
+}
+
+pub fn sys_waitid(
+    idtype: usize,
+    id: usize,
+    infop: usize,
+    options: u32,
+    _ru: *mut Rusage,
+) -> isize {
+    const P_PIDFD: usize = 3;
+    const SIGCHLD_SIGNUM: usize = 17;
+    const CLD_EXITED: usize = 1;
+
+    let option = match WaitOption::from_bits(options) {
+        Some(option) => option,
+        None => return EINVAL,
+    };
+    if idtype != P_PIDFD || !option.contains(WaitOption::WEXITED) {
+        return EINVAL;
+    }
+
+    let task = current_task().unwrap();
+    let token = task.get_user_token();
+    let (target_pid, nonblock) = {
+        let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
+        let file = match fd_table.get_file(id) {
+            Ok(file) => file,
+            Err(err) => return -(err as isize),
+        };
+        let target_pid = match super::signal::pidfd_file_target_pid(file) {
+            Ok(pid) => pid,
+            Err(errno) => return errno,
+        };
+        (target_pid, file.is_nonblock())
+    };
+
+    if nonblock {
+        if let Some(process) = ProcessManager::find_process(target_pid) {
+            if !process.is_zombie() {
+                return EAGAIN;
+            }
+        }
+    }
+
+    match ProcessManager::wait_child(
+        &task.process,
+        target_pid as isize,
+        nonblock || option.contains(WaitOption::WNOHANG),
+    ) {
+        Ok(Some(child)) => {
+            if infop != 0 {
+                let siginfo = SigInfo::new_with_sender(SIGCHLD_SIGNUM, 0, CLD_EXITED, child.pid);
+                if let Err(errno) = UserPtrMut::<SigInfo>::from_addr(infop).write(token, &siginfo)
+                {
+                    return errno;
+                }
+            }
+            SUCCESS
+        }
+        Ok(None) => {
+            if nonblock {
+                EAGAIN
+            } else {
+                SUCCESS
+            }
+        }
         Err(errno) => errno,
     }
 }

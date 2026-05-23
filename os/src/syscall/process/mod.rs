@@ -28,7 +28,7 @@ pub use ids::{
 pub use ipc::{sys_shmat, sys_shmctl, sys_shmdt, sys_shmget};
 pub use lifecycle::{
     sys_exit, sys_exit_group, sys_get_robust_list, sys_set_robust_list, sys_set_tid_address,
-    sys_wait4,
+    sys_wait4, sys_waitid,
 };
 pub use misc::{sys_shutdown, sys_syslog, sys_yield};
 pub use mm::{
@@ -37,8 +37,9 @@ pub use mm::{
     sys_munmap, sys_sbrk,
 };
 pub use signal::{
-    sys_kill, sys_pidfd_send_signal, sys_rt_sigpending, sys_rt_sigsuspend, sys_sigaction,
-    sys_sigaltstack, sys_sigprocmask, sys_sigreturn, sys_sigtimedwait, sys_tgkill, sys_tkill,
+    sys_kcmp, sys_kill, sys_pidfd_getfd, sys_pidfd_open, sys_pidfd_send_signal, sys_rt_sigpending,
+    sys_rt_sigsuspend, sys_sigaction, sys_sigaltstack, sys_sigprocmask, sys_sigreturn,
+    sys_sigtimedwait, sys_tgkill, sys_tkill,
 };
 pub use time::{
     sys_adjtimex, sys_clock_adjtime, sys_clock_getres, sys_clock_gettime, sys_clock_nanosleep,

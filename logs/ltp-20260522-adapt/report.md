@@ -584,6 +584,36 @@
   - `numa01.sh` 因测试镜像缺少 `numactl` 为 `TCONF`。
   - 这两个 TCONF 属于用户态工具/环境缺口，不是当前内核 syscall 行为失败。
 
+## 2026-05-23 focused 补充：pidfd / waitid(P_PIDFD)
+
+本轮继续从 `pause/personality/perf_event_open/pidfd` focused 扫描推进，优先处理非 fs/net 的真实 syscall 失败。
+
+- `pidfd_open(434)` 已补齐最小实现：
+  - 支持 `flags=0` 与 `PIDFD_NONBLOCK(O_NONBLOCK)`。
+  - 非法 pid/flag 返回 `EINVAL`，不存在 pid 返回 `ESRCH`。
+  - `pidfd_open01/02/03` 在 rv64/la64 musl/glibc 下均为 wrapper `: 0`。
+- `pidfd_getfd(438)` 已补齐最小实现：
+  - 支持从目标进程 fd table 复制 fd，并设置新 fd 的 close-on-exec。
+  - 对齐 `EBADF/EINVAL/EPERM/ESRCH`；目标进程已经退出或处于 zombie 时返回 `ESRCH`，避免继续复制已关闭 fd 得到错误的 `EBADF`。
+  - `pidfd_getfd01/02` 在 rv64/la64 musl/glibc 下均为 wrapper `: 0`。
+- `pidfd_send_signal` 已对齐 LTP 兼容路径：
+  - 既支持真实 `PidFd`，也支持 Linux 兼容的 `/proc/<pid>` 目录 fd。
+  - 解析 VFS `MountFSInode` 后再识别底层 `LockedProcInode`，避免 procfs 挂载包装导致误判 `EBADF`。
+  - 校验 siginfo signo 不匹配返回 `EINVAL`，跨进程伪造 kernel-generated siginfo 返回 `EPERM`。
+  - `pidfd_send_signal01/02` 在 rv64/la64 musl/glibc 下均为 wrapper `: 0`。
+- `waitid(95)` 已补齐 `P_PIDFD` 最小实现：
+  - 覆盖 `pidfd_open04` 需要的 `waitid(P_PIDFD, pidfd, ..., WEXITED)`。
+  - `PIDFD_NONBLOCK` 且子进程未退出时返回 `EAGAIN`；退出后可通过 `wait_child` 回收并写回基础 `SigInfo`。
+  - `pidfd_open04` 在 rv64/la64 musl/glibc 下均为 3 个 TPASS。
+- 仍为 TCONF/环境项：
+  - `perf_event_open01/02/03`：内核未提供 perf_event/intel_pt 支持，LTP 报 `TCONF`。
+  - `pidfd_send_signal03`：依赖 `/proc/sys/kernel/ns_last_pid`，当前 proc/sysctl 面不补，LTP 报 `TCONF`。
+
+验证日志：
+
+- `logs/ltp-20260523-rv64-pidfd-final2.log`
+- `logs/ltp-20260523-la64-pidfd-final.log`
+
 ## 下一步建议
 
 1. 用更新后的 `os_test.conf` 重新注入 rv64/la64 镜像。
