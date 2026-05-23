@@ -107,6 +107,7 @@ pub(super) fn do_sbrk<T: PageTable>(
                 MapFlags::MAP_ANONYMOUS | MapFlags::MAP_FIXED | MapFlags::MAP_PRIVATE,
                 0,
                 None,
+                true,
             );
             if ret < 0 {
                 warn!(
@@ -140,6 +141,7 @@ pub(super) fn do_mmap<T: PageTable>(
     flags: MapFlags,
     offset: usize,
     map_file: Option<Arc<dyn IndexNode>>,
+    may_write: bool,
 ) -> isize {
     // not aligned on a page boundary
     if start & 0xfff != 0 {
@@ -203,6 +205,7 @@ pub(super) fn do_mmap<T: PageTable>(
         Err(e) => return e,
     };
     new_area.flags = flags;
+    new_area.may_write = may_write;
     if !flags.contains(MapFlags::MAP_ANONYMOUS) {
         if offset & (PAGE_SIZE - 1) != 0 || offset > isize::MAX as usize {
             return EINVAL;
@@ -268,6 +271,9 @@ pub(super) fn do_mprotect<T: PageTable>(
         return Ok(());
     }
     let (start_va, end_va) = checked_user_range(addr, len)?;
+    if addr == 0 {
+        return Err(ENOMEM);
+    }
     // addr is not a multiple of the system page size.
     if !start_va.aligned() {
         warn!("[mprotect] Not aligned");

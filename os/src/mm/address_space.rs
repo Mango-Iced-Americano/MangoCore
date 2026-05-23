@@ -638,8 +638,9 @@ impl<T: PageTable> AddressSpace<T> {
         flags: MapFlags,
         offset: usize,
         map_file: Option<Arc<dyn IndexNode>>,
+        may_write: bool,
     ) -> isize {
-        super::mmap::do_mmap(self, start, len, prot, flags, offset, map_file)
+        super::mmap::do_mmap(self, start, len, prot, flags, offset, map_file, may_write)
     }
 
     pub fn munmap(&mut self, start: usize, len: usize) -> Result<(), isize> {

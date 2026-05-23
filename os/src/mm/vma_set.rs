@@ -2,7 +2,7 @@ use super::user_mapper::UserMapper;
 use super::vma::{MapFlags, MapPermission, Vma};
 use super::{MemoryError, PageTable, VirtAddr, VirtPageNum};
 use crate::config::*;
-use crate::syscall::errno::{EINVAL, ENOMEM};
+use crate::syscall::errno::{EACCES, EINVAL, ENOMEM};
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use log::{debug, warn};
@@ -435,6 +435,26 @@ impl VmaSet {
         end_vpn: VirtPageNum,
         prot: MapPermission,
     ) -> Result<(), isize> {
+        let mut cursor = start_vpn;
+        while cursor < end_vpn {
+            let Some(area_start) = self.find_user_vma_key(cursor) else {
+                warn!("[mprotect] addr: {:?} is not in any user Vma", cursor);
+                return Err(ENOMEM);
+            };
+            let area = self.vmas.get(&area_start).ok_or(ENOMEM)?;
+            if prot.contains(MapPermission::W)
+                && area.flags.contains(MapFlags::MAP_SHARED)
+                && !area.may_write
+            {
+                return Err(EACCES);
+            }
+            cursor = if area.vm_end() < end_vpn {
+                area.vm_end()
+            } else {
+                end_vpn
+            };
+        }
+
         let mut cursor = start_vpn;
         while cursor < end_vpn {
             let Some(area_start) = self.find_user_vma_key(cursor) else {

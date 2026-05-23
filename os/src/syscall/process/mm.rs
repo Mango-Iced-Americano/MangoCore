@@ -120,6 +120,7 @@ pub fn sys_mmap(
         start, len, prot, flags, fd as isize, offset
     );
 
+    let mut may_write = true;
     let map_file = if flags.contains(MapFlags::MAP_ANONYMOUS) {
         None
     } else {
@@ -135,11 +136,15 @@ pub fn sys_mmap(
         if file.readable().is_err() {
             return EACCES;
         }
+        let file_writable = file.writable().is_ok();
         if flags.contains(MapFlags::MAP_SHARED)
             && prot.contains(MapPermission::W)
-            && file.writable().is_err()
+            && !file_writable
         {
             return EACCES;
+        }
+        if flags.contains(MapFlags::MAP_SHARED) {
+            may_write = file_writable;
         }
         let inode = vfs::MountFSInode::unwrap_inode(&file.inode);
         let is_zero = inode.as_any_ref().is::<crate::fs::dev::zero::Zero>();
@@ -156,7 +161,7 @@ pub fn sys_mmap(
 
     let vm_ref = task.process.vm();
     let mut memory_set = vm_ref.lock();
-    memory_set.mmap(start, len, prot, flags, offset, map_file)
+    memory_set.mmap(start, len, prot, flags, offset, map_file, may_write)
 }
 
 /// # Versions

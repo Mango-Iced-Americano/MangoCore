@@ -530,6 +530,8 @@
 - `logs/ltp-20260523-la64-mlock202-after.log`
 - `logs/ltp-20260523-rv64-mmap20-after.log`
 - `logs/ltp-20260523-la64-mmap20-after.log`
+- `logs/ltp-20260523-rv64-mprotect-after2.log`
+- `logs/ltp-20260523-la64-mprotect-after.log`
 
 扫描发现：
 - `clone301` 已从真实失败变为双架构通过。
@@ -562,6 +564,7 @@
 - `mmap06/mmap10` 已修复：`len == 0` errno 顺序对齐 `EINVAL`，`/dev/zero` 经 MountFS 解包后按匿名零页映射处理。
 - `mlock202` 已修复：新增 `mlock2(284)` 最小兼容分发，支持 `flags=0` 复用 `mlock`，支持 `MLOCK_ONFAULT` 的区间/limit 校验，双架构双 libc 均为 4 个 TPASS。
 - `mmap20` 已修复：`MAP_SHARED_VALIDATE` 携带未知 flag 时返回 `EOPNOTSUPP`，不再被通用 bitflags 解析误判为 `EINVAL`。
+- `mprotect01-05` 已修复并复核：`addr=0,len>0` 返回 `ENOMEM`，`MAP_SHARED` 只读 fd 映射禁止后续 `mprotect(PROT_WRITE)` 提权并返回 `EACCES`；`/dev/zero` 转匿名页时仍保留 fd 写权限约束。rv64/la64 双 libc 均为 `FAIL LTP CASE ... : 0`。
 - 当前影响扫描推进的主要是 fs/net/epoll/文件锁/xattr/环境 helper，不适合作为本轮优先目标。
 - 继续往后扫描时，应在更新 exclude 后从全量配置继续跑，寻找 syscall/process/mm/time/signal 方向的真实 TFAIL。
 

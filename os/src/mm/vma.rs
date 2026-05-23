@@ -39,6 +39,7 @@ pub struct Vma {
     /// Offset into the file where this VMA starts (in bytes).
     /// For anonymous mappings, this is always 0.
     pub map_file_offset: usize,
+    pub may_write: bool,
 
     pub flags: MapFlags,
     pub wipe_on_fork: bool,
@@ -52,6 +53,7 @@ impl Vma {
             map_perm: self.map_perm,
             map_file: self.map_file.clone(),
             map_file_offset: self.map_file_offset,
+            may_write: self.may_write,
             flags: self.flags,
             wipe_on_fork: self.wipe_on_fork,
         })
@@ -87,6 +89,7 @@ impl Vma {
             map_perm,
             map_file,
             map_file_offset,
+            may_write: true,
             flags: MapFlags::empty(),
             wipe_on_fork: false,
         })
@@ -102,6 +105,7 @@ impl Vma {
             map_perm: another.map_perm,
             map_file: another.map_file.clone(),
             map_file_offset: another.map_file_offset,
+            may_write: another.may_write,
             flags: another.flags,
             wipe_on_fork: another.wipe_on_fork,
         }
@@ -515,6 +519,7 @@ impl Vma {
             map_perm: self.map_perm,
             map_file: second_file,
             map_file_offset: second_offset,
+            may_write: self.may_write,
             flags: self.flags,
             wipe_on_fork: self.wipe_on_fork,
         })
