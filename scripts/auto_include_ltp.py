@@ -41,6 +41,7 @@ LOG_DIR = Path(os.environ.get("LOG_DIR", str(REPO_ROOT / "testresult/auto_ltp"))
 MAX_ROUNDS = int(os.environ.get("MAX_ROUNDS", "200"))
 MASK_OVERRIDE = os.environ.get("MASK_OVERRIDE", "0x800")
 TEMP_CONF = Path(f"/tmp/auto_include_{ARCH}.conf")
+SCAN_ONLY = os.environ.get("SCAN_ONLY", "0") == "1"
 
 # QEMU kill patterns
 QEMU_PATTERNS = {
@@ -68,6 +69,12 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
 def strip_ansi(s: str) -> str:
     return ANSI_RE.sub("", s)
+
+
+def normalize_case_name(name: str) -> str:
+    if name.endswith(".sh"):
+        return name[:-3]
+    return name
 
 
 # ============================================================
@@ -262,8 +269,8 @@ def signal_handler(signum, frame):
 #   格式 B:  file.c:line: TPASS: message
 #      例:   abort01.c:65: TPASS: abort() raised SIGIOT
 
-# 格式 A: "case_name   N  TPASS  :"
-RE_TPASS_A = re.compile(r"^(\S+)\s+\d+\s+TPASS\s+:")
+# 格式 A: "case_name   N  TPASS  :" 或 "case_name   N  TPASS:"
+RE_TPASS_A = re.compile(r"^(\S+)\s+\d+\s+TPASS\s*:")
 
 # 格式 B: "file.c:line: TPASS:"
 RE_TPASS_B = re.compile(r"^(\S+)\.c:\d+:\s*TPASS:")
@@ -276,8 +283,8 @@ def scan_log_for_tpass(log_path: Path) -> tuple[set[str], bool, str | None]:
     """
     扫描日志文件，返回 (有 TPASS 的 case 集合, 是否 panic, 最后一个 RUN case 名)
 
-    对于格式 A，case 名直接从行首取。
-    对于格式 B，case 名从文件名（去掉 .c）取。
+    通过 RUN LTP CASE 记录当前 case，并用它来归一化匹配 TPASS 行。
+    这样既能处理 .sh 脚本，也能处理不带后缀的 LTP case。
     """
     tpass_cases: set[str] = set()
     panic = False
@@ -287,6 +294,7 @@ def scan_log_for_tpass(log_path: Path) -> tuple[set[str], bool, str | None]:
         return tpass_cases, panic, last_run_case
 
     run_re = re.compile(r"RUN LTP CASE (.+)")
+    current_case: str | None = None
 
     for raw_line in log_path.read_text(errors="replace").splitlines():
         raw_line = raw_line.strip()
@@ -297,6 +305,7 @@ def scan_log_for_tpass(log_path: Path) -> tuple[set[str], bool, str | None]:
         m = run_re.search(raw_line)
         if m:
             last_run_case = m.group(1).strip()
+            current_case = last_run_case
             continue
 
         # 检测 panic
@@ -308,17 +317,30 @@ def scan_log_for_tpass(log_path: Path) -> tuple[set[str], bool, str | None]:
 
         # 格式 A: case_name   N  TPASS  :
         m = RE_TPASS_A.search(line)
-        if m:
-            tpass_cases.add(m.group(1))
+        if m and current_case and normalize_case_name(m.group(1)) == normalize_case_name(current_case):
+            tpass_cases.add(current_case)
             continue
 
         # 格式 B: file.c:line: TPASS:
         m = RE_TPASS_B.search(line)
-        if m:
-            tpass_cases.add(m.group(1))
+        if m and current_case and normalize_case_name(m.group(1)) == normalize_case_name(current_case):
+            tpass_cases.add(current_case)
             continue
 
     return tpass_cases, panic, last_run_case
+
+
+def collect_include_from_logs() -> list[str]:
+    include_accum = unique_list(read_conf("ltp_include"))
+
+    for round_file in sorted(LOG_DIR.glob("include_round_*.log")):
+        tpass_cases, _has_panic, _last_run = scan_log_for_tpass(round_file)
+        for case_name in sorted(tpass_cases):
+            if case_name not in include_accum:
+                include_accum = append_item(include_accum, case_name)
+                log(f"rescued include candidate: {case_name} from {round_file.name}")
+
+    return include_accum
 
 
 # ============================================================
@@ -475,6 +497,18 @@ def main():
         die(f"CONF_FILE not found: {CONF_FILE}")
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    if SCAN_ONLY:
+        log(f"scan-only mode enabled, scanning {LOG_DIR} for existing round logs")
+        include_accum = collect_include_from_logs()
+        write_conf("ltp_include", list_to_conf(include_accum))
+        write_conf("ltp_from", "")
+        log("===== Final Results =====")
+        log(f"ltp_include ({len(include_accum)} items) = {list_to_conf(include_accum)}")
+        log("")
+        log(f"done — {len(include_accum)} cases in include list")
+        log("os_test.conf updated")
+        return
 
     # 加载已有状态（支持断点续跑）
     include_accum = unique_list(read_conf("ltp_include"))
