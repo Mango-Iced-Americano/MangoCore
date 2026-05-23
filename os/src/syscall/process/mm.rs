@@ -81,15 +81,18 @@ fn parse_mmap_prot(prot: usize) -> Result<MapPermission, isize> {
 }
 
 fn parse_mmap_flags(flags: usize) -> Result<MapFlags, isize> {
-    let flags = MapFlags::from_bits(flags).ok_or(EINVAL)?;
-    let type_bits = flags.bits() & MapFlags::MAP_TYPE.bits();
+    let type_bits = flags & MapFlags::MAP_TYPE.bits();
     if type_bits != MapFlags::MAP_SHARED.bits()
         && type_bits != MapFlags::MAP_PRIVATE.bits()
         && type_bits != MapFlags::MAP_SHARED_VALIDATE.bits()
     {
         return Err(EINVAL);
     }
-    Ok(flags)
+    let unknown_bits = flags & !MapFlags::all().bits();
+    if type_bits == MapFlags::MAP_SHARED_VALIDATE.bits() && unknown_bits != 0 {
+        return Err(EOPNOTSUPP);
+    }
+    Ok(MapFlags::from_bits_truncate(flags))
 }
 
 pub fn sys_mmap(
