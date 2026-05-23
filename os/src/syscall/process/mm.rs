@@ -11,6 +11,7 @@ use log::{info, warn};
 const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
 const PROT_EXEC: usize = 0x4;
+const CAP_IPC_LOCK: usize = 14;
 
 pub fn sys_sbrk(increment: isize) -> isize {
     let task = current_task().unwrap();
@@ -374,28 +375,58 @@ pub fn sys_mprotect(addr: usize, len: usize, prot: usize) -> isize {
 }
 
 pub fn sys_mlock(addr: usize, len: usize) -> isize {
-    if len == 0 {
-        return SUCCESS;
+    let task = current_task().unwrap();
+    let privileged = {
+        let inner = task.acquire_inner_lock();
+        inner.euid == 0 || (inner.cap_effective & (1u64 << CAP_IPC_LOCK)) != 0
+    };
+    let locked_len = match task.process.vm().lock().mlock(addr, len) {
+        Ok(locked_len) => locked_len,
+        Err(errno) => return errno,
+    };
+    if !privileged {
+        let memlock_limit = task.acquire_inner_lock().memlock_limit_cur;
+        if memlock_limit == 0 {
+            return EPERM;
+        }
+        if locked_len > memlock_limit {
+            return ENOMEM;
+        }
     }
-    if addr.checked_add(len).is_none() {
-        return EINVAL;
-    }
-    match translated_byte_buffer(current_user_token(), addr as *const u8, len, UserAccess::Read) {
-        Ok(_) => SUCCESS,
-        Err(errno) => errno,
-    }
+    SUCCESS
 }
 
 pub fn sys_munlock(addr: usize, len: usize) -> isize {
-    sys_mlock(addr, len)
+    let task = current_task().unwrap();
+    match task.process.vm().lock().munlock(addr, len) {
+        Ok(_) => SUCCESS,
+        Err(errno) => errno,
+    }
 }
 
 pub fn sys_mlockall(flags: usize) -> isize {
     const MCL_CURRENT: usize = 1;
     const MCL_FUTURE: usize = 2;
     const MCL_ONFAULT: usize = 4;
-    if flags & !(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) != 0 {
+    if flags == 0 || flags & !(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) != 0 {
         return EINVAL;
+    }
+    let task = current_task().unwrap();
+    let (privileged, memlock_limit) = {
+        let inner = task.acquire_inner_lock();
+        (
+            inner.euid == 0 || (inner.cap_effective & (1u64 << CAP_IPC_LOCK)) != 0,
+            inner.memlock_limit_cur,
+        )
+    };
+    if !privileged && flags & MCL_CURRENT != 0 {
+        if memlock_limit == 0 {
+            return EPERM;
+        }
+        let mapped = task.process.vm().lock().user_mapped_bytes();
+        if mapped > memlock_limit {
+            return ENOMEM;
+        }
     }
     SUCCESS
 }

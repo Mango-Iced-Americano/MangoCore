@@ -393,6 +393,29 @@
 - rv64 musl/glibc：`mincore01`、`mincore02`、`mincore03`、`mincore04` 均为 `FAIL LTP CASE ... : 0`，内部 summary 均为 `failed 0, broken 0`。
 - la64 musl/glibc：`mincore01`、`mincore02`、`mincore03`、`mincore04` 均为 `FAIL LTP CASE ... : 0`，内部 summary 均为 `failed 0, broken 0`。
 
+### 20. `mlock01/02`、`mlockall02/03` MEMLOCK 语义适配
+
+问题：从 `mincore01` 后继续扫描，`mlock01` 的 10MiB 锁页场景返回 `EFAULT`，`mlock02`、`mlockall02`、`mlockall03` 的限额/权限/非法 flags 语义均与 LTP 期望不一致：
+- 旧 `sys_mlock` 依赖 `translated_byte_buffer()`，跨越较大区间时会被用户缓冲区转换上限误判为 `EFAULT`。
+- `RLIMIT_MEMLOCK` 在 `prlimit/setrlimit` 中只返回固定 unlimited，写入新 limit 被忽略。
+- 非 root/无 `CAP_IPC_LOCK` 时，低 MEMLOCK limit 和 0 limit 没有触发 `ENOMEM/EPERM`。
+- `mlockall(flags=0)` 旧实现直接成功，LTP 期望 `EINVAL`。
+
+处理：
+- `TaskControlBlockInner` 增加 `memlock_limit_cur/max`，fork/clone 继承，`prlimit` 对 `RLIMIT_MEMLOCK` 支持读写。
+- `AddressSpace::mlock()` 改为按 VMA 覆盖检查用户区间，hole/越界返回 `ENOMEM`，并逐页 fault-in，不再依赖一次性用户缓冲区转换。
+- `sys_mlock()` 区分 root/`CAP_IPC_LOCK` 与普通用户：普通用户超过 MEMLOCK limit 返回 `ENOMEM`，limit 为 0 返回 `EPERM`。
+- `sys_mlockall()` 支持 `MCL_CURRENT/MCL_FUTURE/MCL_ONFAULT` flags 校验，`flags=0` 或非法 bit 返回 `EINVAL`，普通用户按当前映射规模检查 MEMLOCK limit。
+- `sys_munlock()` 单独走范围校验 no-op，不复用 `sys_mlock()`，避免被权限/限额逻辑误伤。
+
+验证日志：
+- `logs/ltp-20260523-rv64-mlock-after.log`
+- `logs/ltp-20260523-la64-mlock-after.log`
+
+结果：
+- rv64 musl/glibc：`mlock01`、`mlock02`、`mlockall02`、`mlockall03` 均为 `FAIL LTP CASE ... : 0`，内部 summary 均为 `failed 0, broken 0`。
+- la64 musl/glibc：`mlock01`、`mlock02`、`mlockall02`、`mlockall03` 均为 `FAIL LTP CASE ... : 0`，内部 summary 均为 `failed 0, broken 0`。
+
 ## 本轮跳过项
 
 已按规则加入 `os_test.conf` 的全量 exclude：
@@ -462,6 +485,9 @@
 - `logs/ltp-20260522-adapt/la64-madvise10-after2.log`
 - `logs/ltp-20260522-adapt/rv64-mincore-after2.log`
 - `logs/ltp-20260522-adapt/la64-mincore-after.log`
+- `logs/ltp-20260523-rv64-from-mincore-scan.log`
+- `logs/ltp-20260523-rv64-mlock-after.log`
+- `logs/ltp-20260523-la64-mlock-after.log`
 
 扫描发现：
 - `clone301` 已从真实失败变为双架构通过。
@@ -490,6 +516,7 @@
 - `madvise02/03/05` 已修复：区间 hole 返回 `ENOMEM`、匿名私有 `MADV_DONTNEED` 丢弃页后重新零填充、`MADV_WILLNEED` 已映射区间 no-op 成功。
 - `madvise10` 已修复：匿名私有 `MADV_WIPEONFORK` fork 后子进程零填充，标记继承到孙进程，`MADV_KEEPONFORK` 可撤销。
 - `mincore01-04` 已修复：syscall 232 分发、错误码、匿名页 resident 统计、file-backed PageCache resident 查询已对齐当前 LTP 用例。
+- `mlock01/02`、`mlockall02/03` 已修复：大区间锁页不再误报 `EFAULT`，`RLIMIT_MEMLOCK` 读写、非特权 `ENOMEM/EPERM`、`mlockall` flags `EINVAL` 语义已对齐当前 LTP 用例。
 - 当前影响扫描推进的主要是 fs/net/epoll/文件锁/xattr/环境 helper，不适合作为本轮优先目标。
 - 继续往后扫描时，应在更新 exclude 后从全量配置继续跑，寻找 syscall/process/mm/time/signal 方向的真实 TFAIL。
 

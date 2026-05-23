@@ -112,6 +112,9 @@ pub struct TaskControlBlockInner {
     /// RLIMIT_STACK 兼容字段。当前用户栈仍按固定槽位映射，这里只保存 ABI 可见限制。
     pub stack_limit_cur: usize,
     pub stack_limit_max: usize,
+    /// RLIMIT_MEMLOCK 兼容字段，供 mlock/mlockall 权限和限额类用例使用。
+    pub memlock_limit_cur: usize,
+    pub memlock_limit_max: usize,
     /// Linux personality ABI state. MangoCore does not alter layout/exec policy based on it yet.
     pub personality: usize,
     /// POSIX 用户/组 ID 兼容字段，供 LTP 权限类用例和 capability 查询使用。
@@ -596,6 +599,8 @@ impl TaskControlBlock {
                 nice_limit_max: usize::MAX,
                 stack_limit_cur: USER_STACK_SIZE,
                 stack_limit_max: USER_STACK_SIZE,
+                memlock_limit_cur: usize::MAX,
+                memlock_limit_max: usize::MAX,
                 personality: 0,
                 uid: 0,
                 euid: 0,
@@ -971,6 +976,8 @@ impl TaskControlBlock {
                 nice_limit_max: parent_inner.nice_limit_max,
                 stack_limit_cur: parent_inner.stack_limit_cur,
                 stack_limit_max: parent_inner.stack_limit_max,
+                memlock_limit_cur: parent_inner.memlock_limit_cur,
+                memlock_limit_max: parent_inner.memlock_limit_max,
                 personality: parent_inner.personality,
                 uid: parent_inner.uid,
                 euid: parent_inner.euid,

@@ -665,6 +665,45 @@ impl<T: PageTable> AddressSpace<T> {
             .mincore_range(&self.page_table, start_vpn, end_vpn, residency)
     }
 
+    fn user_lock_range(
+        &self,
+        start: usize,
+        len: usize,
+    ) -> Result<(VirtPageNum, VirtPageNum, usize), isize> {
+        if len == 0 {
+            return Ok((VirtPageNum(0), VirtPageNum(0), 0));
+        }
+        let end = start.checked_add(len).ok_or(ENOMEM)?;
+        if end > USER_VA_END {
+            return Err(ENOMEM);
+        }
+        let start_vpn = VirtAddr::from(start).floor();
+        let end_vpn = VirtAddr::from(end).ceil();
+        if !self.vmas.covers_user_range(start_vpn, end_vpn) {
+            return Err(ENOMEM);
+        }
+        let locked_len = (end_vpn.0 - start_vpn.0).saturating_mul(PAGE_SIZE);
+        Ok((start_vpn, end_vpn, locked_len))
+    }
+
+    pub fn mlock(&mut self, start: usize, len: usize) -> Result<usize, isize> {
+        let (start_vpn, end_vpn, locked_len) = self.user_lock_range(start, len)?;
+        let mut vpn = start_vpn;
+        while vpn < end_vpn {
+            self.fault_in_user_va(VirtAddr::from(vpn), FaultAccess::Load)?;
+            vpn.0 += 1;
+        }
+        Ok(locked_len)
+    }
+
+    pub fn munlock(&self, start: usize, len: usize) -> Result<(), isize> {
+        self.user_lock_range(start, len).map(|_| ())
+    }
+
+    pub fn user_mapped_bytes(&self) -> usize {
+        self.vmas.user_mapped_bytes()
+    }
+
     pub fn create_elf_tables(
         &self,
         mut user_sp: usize,

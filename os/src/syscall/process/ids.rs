@@ -945,11 +945,23 @@ pub fn sys_prlimit(
         } else {
             None
         };
-        let Some(limit) =
+        let memlock_limit = if resource == Resource::MEMLOCK {
+            let inner = task.acquire_inner_lock();
+            Some(RLimit {
+                rlim_cur: inner.memlock_limit_cur,
+                rlim_max: inner.memlock_limit_max,
+            })
+        } else {
+            None
+        };
+        let Some(mut limit) =
             rlimit_value_for(resource, nofile_limit, nice_limit, rtprio_limit, stack_limit)
         else {
             return EINVAL;
         };
+        if let Some(value) = memlock_limit {
+            limit = value;
+        }
         if UserPtrMut::new(old_limit).write(token, &limit).is_err() {
             log::error!("[sys_prlimit] Failed to copy to {:?}", old_limit);
             return EFAULT;
@@ -991,13 +1003,17 @@ pub fn sys_prlimit(
                     rlimit
                 );
             }
+            Resource::MEMLOCK => {
+                let mut inner = task.acquire_inner_lock();
+                inner.memlock_limit_cur = rlimit.rlim_cur;
+                inner.memlock_limit_max = rlimit.rlim_max;
+            }
             Resource::CPU
             | Resource::FSIZE
             | Resource::DATA
             | Resource::CORE
             | Resource::RSS
             | Resource::NPROC
-            | Resource::MEMLOCK
             | Resource::AS
             | Resource::LOCKS
             | Resource::SIGPENDING

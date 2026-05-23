@@ -395,6 +395,39 @@ impl VmaSet {
         Ok(())
     }
 
+    pub(super) fn covers_user_range(
+        &self,
+        start_vpn: VirtPageNum,
+        end_vpn: VirtPageNum,
+    ) -> bool {
+        let mut cursor = start_vpn;
+        while cursor < end_vpn {
+            let Some(area_start) = self.find_user_vma_key(cursor) else {
+                return false;
+            };
+            let Some(area) = self.vmas.get(&area_start) else {
+                return false;
+            };
+            if area.vm_end() <= cursor {
+                return false;
+            }
+            cursor = if area.vm_end() < end_vpn {
+                area.vm_end()
+            } else {
+                end_vpn
+            };
+        }
+        true
+    }
+
+    pub(super) fn user_mapped_bytes(&self) -> usize {
+        self.vmas
+            .values()
+            .filter(|area| area.vm_is_user())
+            .map(|area| (area.vm_end().0 - area.vm_start().0).saturating_mul(PAGE_SIZE))
+            .fold(0usize, |acc, len| acc.saturating_add(len))
+    }
+
     pub(super) fn protect_range<T: PageTable>(
         &mut self,
         page_table: &mut T,
