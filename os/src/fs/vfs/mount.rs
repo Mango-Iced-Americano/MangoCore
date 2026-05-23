@@ -500,6 +500,23 @@ impl MountFS {
         })
     }
 
+    /// 创建以指定 inode 为根的 MountFS（用于 bind mount）
+    pub fn new_with_root(
+        inner_filesystem: Arc<dyn FileSystem>,
+        root_inner_inode: Arc<dyn IndexNode>,
+        mount_flags: MountFlags,
+    ) -> Arc<Self> {
+        Arc::new_cyclic(|self_ref| MountFS {
+            root_inner_inode: Some(root_inner_inode),
+            inner_filesystem,
+            mountpoints: Mutex::new(BTreeMap::new()),
+            self_mountpoint: Mutex::new(None),
+            mount_flags: Mutex::new(mount_flags),
+            mount_source: Mutex::new(None),
+            self_ref: Mutex::new(self_ref.clone()),
+        })
+    }
+
     /// 获取挂载点根 inode（穿过子挂载表找最底层）
     pub fn mountpoint_root_inode(&self) -> Arc<MountFSInode> {
         let root_inner = self

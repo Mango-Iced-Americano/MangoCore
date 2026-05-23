@@ -2104,6 +2104,136 @@ bitflags! {
     }
 }
 
+/// Bind mount: make source subtree visible at target.
+fn do_bind_mount(
+    source: *const u8,
+    token: usize,
+    lookup_inode: &Arc<dyn vfs::IndexNode>,
+    _lookup_path: &str,
+    target_inode: Arc<dyn vfs::IndexNode>,
+    mountflags: MountFlags,
+) -> isize {
+    // MS_REC recursive bind not yet implemented
+    if mountflags.contains(MountFlags::MS_REC) {
+        return EINVAL;
+    }
+    let source_path = if source.is_null() {
+        return EINVAL;
+    } else {
+        match user_cstring(token, source) {
+            Ok(s) => s,
+            Err(errno) => return errno,
+        }
+    };
+
+    let source_inode = match vfs_lookup(lookup_inode, &source_path, true) {
+        Ok(inode) => inode,
+        Err(errno) => {
+            error!("[do_bind_mount] vfs_lookup source '{}' failed: {}", source_path, errno);
+            return errno;
+        }
+    };
+
+    let source_mfs_inode = match source_inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+        Some(mfs) => mfs,
+        None => return EINVAL,
+    };
+    let source_mount_fs = source_mfs_inode.mount_fs.clone();
+    let source_inner = source_mfs_inode.inner_inode.clone();
+
+    let target_mfs = match target_inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+        Some(mfs) => mfs,
+        None => return EINVAL,
+    };
+    let parent_mount_fs = target_mfs.mount_fs.clone();
+    let target_inode_id = match target_mfs.inner_inode.metadata() {
+        Ok(md) => md.inode_id,
+        Err(e) => return -(e as isize),
+    };
+
+    let mnt_flags = vfs::MountFlags::from_bits_truncate(mountflags.bits() as u32);
+    let mnt_fs = vfs::MountFS::new_with_root(source_mount_fs.inner_filesystem(), source_inner, mnt_flags);
+    mnt_fs.set_mount_source(Some(source_path));
+
+    if let Err(e) = parent_mount_fs.add_mount(target_inode_id, mnt_fs.clone()) {
+        return -(e as isize);
+    }
+
+    let backref = vfs::MountFSInode::new(
+        target_mfs.inner_inode.clone(),
+        target_mfs.mount_fs.clone(),
+    );
+    mnt_fs.set_self_mountpoint(Some(backref));
+
+    // MS_REC not yet ready — recursive bind needs self_mountpoint fix
+    // do_recursive_bind(source_mount_fs, mnt_fs.clone(), token, lookup_inode);
+
+    SUCCESS
+}
+
+/// Recursively bind all child mounts from source MountFS into the target MountFS.
+fn do_recursive_bind(
+    source_mfs: Arc<vfs::MountFS>,
+    target_mfs: Arc<vfs::MountFS>,
+    token: usize,
+    root_inode: &Arc<dyn vfs::IndexNode>,
+) {
+    // Clone mountpoints to avoid holding lock during recursion
+    let child_mounts: Vec<(vfs::InodeId, Arc<vfs::MountFS>)> = {
+        source_mfs.mountpoints.lock().iter()
+            .map(|(id, fs)| (*id, fs.clone()))
+            .collect()
+    };
+
+    let target_root: Arc<dyn vfs::IndexNode> = target_mfs.mountpoint_root_inode();
+
+    for (child_inode_id, child_mfs) in child_mounts {
+        // Find the child inode's name in the source filesystem
+        // by listing the source directory
+        let source_root: Arc<dyn vfs::IndexNode> = source_mfs.mountpoint_root_inode();
+        if let Ok(entries) = source_root.list() {
+            for name in entries {
+                if let Ok(child_inode) = source_root.find(&name) {
+                    if let Ok(md) = child_inode.metadata() {
+                        if md.inode_id == child_inode_id {
+                            // Found the child — bind it into target
+                            let target_inode_id = match target_root.find(&name) {
+                                Ok(inode) => match inode.metadata() {
+                                    Ok(md) => md.inode_id,
+                                    Err(_) => continue,
+                                },
+                                Err(_) => continue,
+                            };
+
+                            let child_root = child_mfs.root_inner_inode();
+                            let mnt = vfs::MountFS::new_with_root(
+                                child_mfs.inner_filesystem(),
+                                child_root,
+                                vfs::MountFlags::empty(),
+                            );
+
+                            if target_mfs.add_mount(target_inode_id, mnt.clone()).is_ok() {
+                                let backref = vfs::MountFSInode::new(
+                                    child_inode, // the child inode in source
+                                    source_mfs.clone(),
+                                );
+                                // Actually we need the target's MountFSInode, not source
+                                // But for umount, we just need (inode_id, parent_mfs)
+                                // Let's set it differently
+                                mnt.set_self_mountpoint(Some(backref));
+                            }
+
+                            // Recursively bind grandchildren
+                            do_recursive_bind(child_mfs, mnt, token, root_inode);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn sys_mount(
     source: *const u8,
     target: *const u8,
@@ -2174,7 +2304,11 @@ pub fn sys_mount(
         return SUCCESS;
     }
 
-    if mountflags.intersects(MountFlags::MS_BIND | MountFlags::MS_MOVE | MountFlags::MS_REMOUNT) {
+    if mountflags.intersects(MountFlags::MS_BIND) {
+        return do_bind_mount(source, token, &lookup_inode, &lookup_path, target_inode, mountflags);
+    }
+
+    if mountflags.intersects(MountFlags::MS_MOVE | MountFlags::MS_REMOUNT) {
         return EINVAL;
     }
 
