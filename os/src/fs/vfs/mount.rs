@@ -167,10 +167,7 @@ impl MountFSInode {
             lock.get(&inode_id).cloned()
         };
         match sub_mountfs {
-            Some(sub) => {
-                sub.set_self_mountpoint(Some(self_inode));
-                sub.mountpoint_root_inode()
-            }
+            Some(sub) => sub.mountpoint_root_inode(),
             None => self_inode,
         }
     }
