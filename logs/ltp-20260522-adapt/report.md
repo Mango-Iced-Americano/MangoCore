@@ -416,6 +416,40 @@
 - rv64 musl/glibc：`mlock01`、`mlock02`、`mlockall02`、`mlockall03` 均为 `FAIL LTP CASE ... : 0`，内部 summary 均为 `failed 0, broken 0`。
 - la64 musl/glibc：`mlock01`、`mlock02`、`mlockall02`、`mlockall03` 均为 `FAIL LTP CASE ... : 0`，内部 summary 均为 `failed 0, broken 0`。
 
+### 21. getrusage panic 复核
+
+问题：队友反馈历史扫描中 `getrusage02/getrusage03/getrusage04` 附近出现大量 panic 标记。复查日志后确认，真实内核 panic 来源是旧 `sys_getrusage` 对非 `RUSAGE_SELF` 直接 `panic!`，已在 `60cbbcb ltp: cover priority random rlimit rusage syscalls` 中修复。
+
+验证日志：
+- `logs/ltp-20260523-rv64-getrusage-focused.log`
+- `logs/ltp-20260523-la64-getrusage-focused.log`
+
+结果：
+- rv64/la64、musl/glibc：`getrusage01` 内部 2 个 TPASS，summary `failed 0`。
+- rv64/la64、musl/glibc：`getrusage02` 内部 `EINVAL/EFAULT` 路径 TPASS，summary `failed 0`。
+- rv64/la64、musl/glibc：`getrusage03/getrusage03_child` wrapper 均为 `FAIL LTP CASE ... : 0`，没有 `TFAIL/TBROK/PANIC` 输出。
+- rv64/la64、musl/glibc：`getrusage04` 内部 `Test Passed`。
+
+结论：当前分支上 getrusage panic 已消除，不是继续限制 LTP 的主要问题。
+
+### 22. mmap06 / mmap10 errno 与 /dev/zero 映射
+
+问题：
+- `mmap06` 负向用例中，`len == 0` 的非法 mmap 被后续 fd 权限检查抢先返回 `EACCES`，LTP 期望 `EINVAL`。
+- `mmap10` 使用 `/dev/zero` 做 mmap，当前 `sys_mmap` 将 char device 一律拒绝为 `EACCES`。首次修复只检查 `file.inode` 是否为 `Zero`，但路径解析后 inode 可能被 `MountFSInode` 包装，导致识别失败。
+
+处理：
+- `sys_mmap` 入口先检查 `len == 0`，直接返回 `EINVAL`。
+- file-backed mmap 中对 inode 先 `MountFSInode::unwrap_inode()`，真实 inode 是 `/dev/zero` 时按匿名零页映射处理；普通 char device 仍保持 `EACCES`。
+
+验证日志：
+- `logs/ltp-20260523-rv64-mmap06-mmap10-after2.log`
+- `logs/ltp-20260523-la64-mmap06-mmap10-after.log`
+
+结果：
+- rv64/la64、musl/glibc：`mmap06` 内部 8 个 TPASS，summary `failed 0`。
+- rv64/la64、musl/glibc：`mmap10` wrapper 均为 `FAIL LTP CASE mmap10 : 0`，不再出现 `/dev/zero` mmap 的 `EACCES`。
+
 ## 本轮跳过项
 
 已按规则加入 `os_test.conf` 的全量 exclude：
@@ -426,7 +460,7 @@
 - 环境/TCONF/helper：`add_key*`、`af_alg*`、`aio*`、`cap_bounds*`、`check_keepcaps`、`check_envval`、`cleanup_lvm.sh`、`cacheflush01`、`endian_switch01`、`event_generator`、`data`、`datafiles`、`find_portbundle` 等。
 - tracing/内核特性环境：`ftrace_*`。
 - glibc-only 长耗时：`futex_cmp_requeue01`（rv64 glibc 1000 waiter 子场景稳定触发 30 秒超时；la64 和 rv64 musl 已验证通过）。
-- procfs/资源统计卡点：`getrusage03`、`getrusage03_child`。
+- 历史 procfs/资源统计风险项：`getrusage03`、`getrusage03_child` 已在 focused 复核中 wrapper 通过且无 panic/TFAIL，暂不再作为优先阻塞点。
 - net/socket 当前暂缓项：`getsockopt01`、`getsockopt02`。
 - 本轮新增跳过：`getxattr01-05`（fs/xattr）、`gre01.sh/gre02.sh`（net）、`gzip_tests.sh`（环境命令能力）、`hackbench`（长耗时性能项）。
 - `hackbench` 后扫描新增跳过：
@@ -488,6 +522,10 @@
 - `logs/ltp-20260523-rv64-from-mincore-scan.log`
 - `logs/ltp-20260523-rv64-mlock-after.log`
 - `logs/ltp-20260523-la64-mlock-after.log`
+- `logs/ltp-20260523-rv64-getrusage-focused.log`
+- `logs/ltp-20260523-la64-getrusage-focused.log`
+- `logs/ltp-20260523-rv64-mmap06-mmap10-after2.log`
+- `logs/ltp-20260523-la64-mmap06-mmap10-after.log`
 
 扫描发现：
 - `clone301` 已从真实失败变为双架构通过。
@@ -502,7 +540,7 @@
 - `getcpu01` 已由 unsupported/TCONF 变为双架构双 libc TPASS。
 - `getgroups01/getgroups03` 已修复：`setgroups` 保存补充组列表，`getgroups` 的数量查询、列表写回、`EINVAL/EFAULT` 语义已对齐。
 - `gethostname02/getpgid02` 已修复：musl hostname 截断路径补齐 `ENAMETOOLONG`，负 pid `getpgid` 改为 `ESRCH`。
-- `getrusage01/getrusage02/getrusage04` 已确认内部 TPASS；`getrusage03` 的剩余问题集中在 `/proc/self/status` 和 child rusage 累计，当前按 procfs/资源统计大面项跳过。
+- `getrusage01/getrusage02/getrusage04` 已确认内部 TPASS；`getrusage03/getrusage03_child` focused 复核 wrapper 通过且无 panic/TFAIL，不再作为当前阻塞点。
 - `getsid01/getsid02` 已修复：`syscall 156` 分发和 session id 继承/查询语义已对齐。
 - `getsockname01` 当前内部 TPASS；`getsockopt01/02` 属于 net/socket 方向，按当前策略先跳过。
 - `gettid01/gettid02` 已确认内部 TPASS。
@@ -517,6 +555,7 @@
 - `madvise10` 已修复：匿名私有 `MADV_WIPEONFORK` fork 后子进程零填充，标记继承到孙进程，`MADV_KEEPONFORK` 可撤销。
 - `mincore01-04` 已修复：syscall 232 分发、错误码、匿名页 resident 统计、file-backed PageCache resident 查询已对齐当前 LTP 用例。
 - `mlock01/02`、`mlockall02/03` 已修复：大区间锁页不再误报 `EFAULT`，`RLIMIT_MEMLOCK` 读写、非特权 `ENOMEM/EPERM`、`mlockall` flags `EINVAL` 语义已对齐当前 LTP 用例。
+- `mmap06/mmap10` 已修复：`len == 0` errno 顺序对齐 `EINVAL`，`/dev/zero` 经 MountFS 解包后按匿名零页映射处理。
 - 当前影响扫描推进的主要是 fs/net/epoll/文件锁/xattr/环境 helper，不适合作为本轮优先目标。
 - 继续往后扫描时，应在更新 exclude 后从全量配置继续跑，寻找 syscall/process/mm/time/signal 方向的真实 TFAIL。
 

@@ -101,11 +101,14 @@ pub fn sys_mmap(
     offset: usize,
 ) -> isize {
     let task = current_task().unwrap();
+    if len == 0 {
+        return EINVAL;
+    }
     let prot = match parse_mmap_prot(prot) {
         Ok(prot) => prot,
         Err(errno) => return errno,
     };
-    let flags = match parse_mmap_flags(flags) {
+    let mut flags = match parse_mmap_flags(flags) {
         Ok(flags) => flags,
         Err(errno) => return errno,
     };
@@ -135,10 +138,17 @@ pub fn sys_mmap(
         {
             return EACCES;
         }
-        if !matches!(file.file_type(), vfs::FileType::File) {
+        let inode = vfs::MountFSInode::unwrap_inode(&file.inode);
+        let is_zero = inode.as_any_ref().is::<crate::fs::dev::zero::Zero>();
+        if !is_zero && !matches!(file.file_type(), vfs::FileType::File) {
             return EACCES;
         }
-        Some(file.inode.clone())
+        if is_zero {
+            flags |= MapFlags::MAP_ANONYMOUS;
+            None
+        } else {
+            Some(inode)
+        }
     };
 
     let vm_ref = task.process.vm();
