@@ -696,6 +696,11 @@ impl<T: PageTable> AddressSpace<T> {
         Ok(locked_len)
     }
 
+    pub fn mlock_onfault(&self, start: usize, len: usize) -> Result<usize, isize> {
+        self.user_lock_range(start, len)
+            .map(|(_, _, locked_len)| locked_len)
+    }
+
     pub fn munlock(&self, start: usize, len: usize) -> Result<(), isize> {
         self.user_lock_range(start, len).map(|_| ())
     }

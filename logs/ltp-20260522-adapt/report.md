@@ -526,6 +526,8 @@
 - `logs/ltp-20260523-la64-getrusage-focused.log`
 - `logs/ltp-20260523-rv64-mmap06-mmap10-after2.log`
 - `logs/ltp-20260523-la64-mmap06-mmap10-after.log`
+- `logs/ltp-20260523-rv64-mlock202-after.log`
+- `logs/ltp-20260523-la64-mlock202-after.log`
 
 扫描发现：
 - `clone301` 已从真实失败变为双架构通过。
@@ -556,6 +558,7 @@
 - `mincore01-04` 已修复：syscall 232 分发、错误码、匿名页 resident 统计、file-backed PageCache resident 查询已对齐当前 LTP 用例。
 - `mlock01/02`、`mlockall02/03` 已修复：大区间锁页不再误报 `EFAULT`，`RLIMIT_MEMLOCK` 读写、非特权 `ENOMEM/EPERM`、`mlockall` flags `EINVAL` 语义已对齐当前 LTP 用例。
 - `mmap06/mmap10` 已修复：`len == 0` errno 顺序对齐 `EINVAL`，`/dev/zero` 经 MountFS 解包后按匿名零页映射处理。
+- `mlock202` 已修复：新增 `mlock2(284)` 最小兼容分发，支持 `flags=0` 复用 `mlock`，支持 `MLOCK_ONFAULT` 的区间/limit 校验，双架构双 libc 均为 4 个 TPASS。
 - 当前影响扫描推进的主要是 fs/net/epoll/文件锁/xattr/环境 helper，不适合作为本轮优先目标。
 - 继续往后扫描时，应在更新 exclude 后从全量配置继续跑，寻找 syscall/process/mm/time/signal 方向的真实 TFAIL。
 

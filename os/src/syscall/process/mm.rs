@@ -406,6 +406,38 @@ pub fn sys_mlock(addr: usize, len: usize) -> isize {
     SUCCESS
 }
 
+pub fn sys_mlock2(addr: usize, len: usize, flags: usize) -> isize {
+    const MLOCK_ONFAULT: usize = 1;
+    if flags & !MLOCK_ONFAULT != 0 {
+        return EINVAL;
+    }
+    if flags == 0 {
+        return sys_mlock(addr, len);
+    }
+
+    let task = current_task().unwrap();
+    let (privileged, memlock_limit) = {
+        let inner = task.acquire_inner_lock();
+        (
+            inner.euid == 0 || (inner.cap_effective & (1u64 << CAP_IPC_LOCK)) != 0,
+            inner.memlock_limit_cur,
+        )
+    };
+    let locked_len = match task.process.vm().lock().mlock_onfault(addr, len) {
+        Ok(locked_len) => locked_len,
+        Err(errno) => return errno,
+    };
+    if !privileged {
+        if memlock_limit == 0 {
+            return EPERM;
+        }
+        if locked_len > memlock_limit {
+            return ENOMEM;
+        }
+    }
+    SUCCESS
+}
+
 pub fn sys_munlock(addr: usize, len: usize) -> isize {
     let task = current_task().unwrap();
     match task.process.vm().lock().munlock(addr, len) {
