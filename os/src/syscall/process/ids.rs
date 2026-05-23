@@ -121,7 +121,7 @@ pub fn sys_uname(buf: *mut u8) -> isize {
     );
     // A little stupid but still efficient.
     const FIELD_OFFSET: usize = 65;
-    buffer.write_at(FIELD_OFFSET * 0, b"NPUcore\0");
+    buffer.write_at(FIELD_OFFSET * 0, b"Linux\0");
     buffer.write_at(FIELD_OFFSET * 1, b"blossom\0");
     #[cfg(feature = "riscv")]
     buffer.write_at(FIELD_OFFSET * 2, b"5.10.0-1-rv64\0");

@@ -3,8 +3,8 @@ use alloc::sync::Arc;
 use crate::mm::{UserPtr, UserPtrMut};
 use crate::syscall::errno::*;
 use crate::task::{
-    add_kernel_timer, current_task, current_user_token, signal::Signals, PosixTimer,
-    sleep_relative_interruptible, Rusage, TimerAction,
+    add_kernel_timer, current_task, current_user_token, find_process_by_pid, find_task_by_tid,
+    signal::Signals, PosixTimer, sleep_relative_interruptible, Rusage, TimerAction,
 };
 use crate::timer::{
     current_timespec, current_timeval, get_time_ms, set_current_timespec, ITimerVal, TimeSpec,
@@ -23,6 +23,13 @@ const CLOCK_BOOTTIME: usize = 7;
 const CLOCK_REALTIME_ALARM: usize = 8;
 const CLOCK_BOOTTIME_ALARM: usize = 9;
 const CLOCK_TAI: usize = 11;
+const CPUCLOCK_CLOCK_MASK: i32 = 3;
+const CPUCLOCK_PERTHREAD_MASK: i32 = 4;
+const CPUCLOCK_PID_MASK: i32 = 7;
+const CPUCLOCK_PROF: i32 = 0;
+const CPUCLOCK_VIRT: i32 = 1;
+const CPUCLOCK_SCHED: i32 = 2;
+const CPUCLOCK_MAX: i32 = 3;
 const TIMER_ABSTIME: u32 = 1;
 const SIGEV_SIGNAL: i32 = 0;
 const SIGEV_NONE: i32 = 1;
@@ -565,6 +572,124 @@ pub fn sys_get_time() -> isize {
     get_time_ms() as isize
 }
 
+#[derive(Clone, Copy)]
+struct CpuClockId {
+    pid: usize,
+    per_thread: bool,
+    which: i32,
+}
+
+fn decode_cpu_clock_id(clk_id: usize) -> Result<CpuClockId, isize> {
+    let clock = clk_id as i32;
+    if clock >= 0 {
+        return Err(EINVAL);
+    }
+    let which = clock & CPUCLOCK_CLOCK_MASK;
+    if which >= CPUCLOCK_MAX || (clock & CPUCLOCK_PID_MASK) == CPUCLOCK_PID_MASK {
+        return Err(EINVAL);
+    }
+    let pid = !(clock >> 3);
+    if pid < 0 {
+        return Err(EINVAL);
+    }
+    Ok(CpuClockId {
+        pid: pid as usize,
+        per_thread: clock & CPUCLOCK_PERTHREAD_MASK != 0,
+        which,
+    })
+}
+
+fn scale_sched_cpu_clock_us(us: usize, nice: i32) -> usize {
+    let nice = nice.clamp(-20, 19);
+    if nice < 0 {
+        us.saturating_mul((20 - nice) as usize) / 20
+    } else if nice > 0 {
+        us.saturating_mul(20) / (20 + nice as usize)
+    } else {
+        us
+    }
+}
+
+fn cpu_clock_from_rusage(rusage: Rusage, which: i32, nice: i32) -> TimeSpec {
+    let utime = rusage.ru_utime.to_us();
+    let stime = rusage.ru_stime.to_us();
+    let us = match which {
+        CPUCLOCK_PROF => utime.saturating_add(stime),
+        CPUCLOCK_SCHED => scale_sched_cpu_clock_us(utime.saturating_add(stime), nice),
+        CPUCLOCK_VIRT => utime,
+        _ => 0,
+    };
+    TimeSpec::from_us(us)
+}
+
+fn validate_cpu_clock_id(clk_id: usize) -> Result<CpuClockId, isize> {
+    let clock = decode_cpu_clock_id(clk_id)?;
+    let current = current_task().unwrap();
+    if clock.pid == 0 {
+        return Ok(clock);
+    }
+    let exists = if clock.per_thread {
+        find_task_by_tid(clock.pid).is_some()
+    } else {
+        find_process_by_pid(clock.pid).is_some()
+            || (clock.pid == current.gettid() && find_process_by_pid(current.pid()).is_some())
+    };
+    if exists {
+        Ok(clock)
+    } else {
+        Err(EINVAL)
+    }
+}
+
+fn cpu_clock_timespec(clk_id: usize) -> Result<TimeSpec, isize> {
+    let clock = validate_cpu_clock_id(clk_id)?;
+    let current = current_task().unwrap();
+    if clock.per_thread {
+        let task = if clock.pid == 0 {
+            current
+        } else {
+            find_task_by_tid(clock.pid).ok_or(EINVAL)?
+        };
+        let inner = task.acquire_inner_lock();
+        return Ok(cpu_clock_from_rusage(
+            inner.rusage,
+            clock.which,
+            inner.sched_nice,
+        ));
+    }
+
+    let process = if clock.pid == 0 || clock.pid == current.gettid() {
+        current.process.clone()
+    } else {
+        find_process_by_pid(clock.pid).ok_or(EINVAL)?
+    };
+    let mut cpu_us = 0usize;
+    let mut saw_thread = false;
+    for weak in process.threads.lock().iter() {
+        if let Some(task) = weak.upgrade() {
+            let inner = task.acquire_inner_lock();
+            let rusage = inner.rusage;
+            let task_utime = rusage.ru_utime.to_us();
+            let task_stime = rusage.ru_stime.to_us();
+            let task_us = match clock.which {
+                CPUCLOCK_PROF => task_utime.saturating_add(task_stime),
+                CPUCLOCK_SCHED => scale_sched_cpu_clock_us(
+                    task_utime.saturating_add(task_stime),
+                    inner.sched_nice,
+                ),
+                CPUCLOCK_VIRT => task_utime,
+                _ => return Err(EINVAL),
+            };
+            cpu_us = cpu_us.saturating_add(task_us);
+            saw_thread = true;
+        }
+    }
+    if !saw_thread {
+        return Err(EINVAL);
+    }
+    Ok(TimeSpec::from_us(cpu_us))
+}
+
 pub fn sys_clock_gettime(clk_id: usize, tp: *mut TimeSpec) -> isize {
     let timespec = match clk_id {
         CLOCK_REALTIME | CLOCK_REALTIME_COARSE | CLOCK_REALTIME_ALARM | CLOCK_TAI => {
@@ -577,7 +702,10 @@ pub fn sys_clock_gettime(clk_id: usize, tp: *mut TimeSpec) -> isize {
         | CLOCK_MONOTONIC_COARSE
         | CLOCK_BOOTTIME
         | CLOCK_BOOTTIME_ALARM => TimeSpec::now(),
-        _ => return EINVAL,
+        _ => match cpu_clock_timespec(clk_id) {
+            Ok(timespec) => timespec,
+            Err(errno) => return errno,
+        },
     };
     if !tp.is_null() {
         let token = current_user_token();
@@ -601,7 +729,11 @@ pub fn sys_clock_getres(clk_id: usize, tp: *mut TimeSpec) -> isize {
         | CLOCK_MONOTONIC_COARSE
         | CLOCK_BOOTTIME
         | CLOCK_TAI => {}
-        _ => return EINVAL,
+        _ => {
+            if let Err(errno) = validate_cpu_clock_id(clk_id) {
+                return errno;
+            }
+        }
     }
     if !tp.is_null() {
         let resolution = TimeSpec {

@@ -93,6 +93,8 @@ pub struct TaskControlBlockInner {
     pub sched_reset_on_fork: bool,
     /// sched_attr 兼容回读字段，当前不参与真实调度。
     pub sched_nice: i32,
+    /// 简化 CFS 兼容用虚拟运行量。仅用于 ready 队列选择，不作为用户 ABI 暴露。
+    pub sched_vruntime: u64,
     pub sched_runtime: u64,
     pub sched_deadline: u64,
     pub sched_period: u64,
@@ -281,6 +283,26 @@ impl Rusage {
     }
 }
 
+const SCHED_NICE_0_LOAD: u64 = 1024;
+const SCHED_NICE_TO_WEIGHT: [u64; 40] = [
+    88761, 71755, 56483, 46273, 36291, 29154, 23254, 18705, 14949, 11916, 9548, 7620, 6100, 4904,
+    3906, 3121, 2501, 1991, 1586, 1277, 1024, 820, 655, 526, 423, 335, 272, 215, 172, 137, 110,
+    87, 70, 56, 45, 36, 29, 23, 18, 15,
+];
+
+fn sched_vruntime_delta_us(nice: i32, runtime_us: usize) -> u64 {
+    if runtime_us == 0 {
+        return 0;
+    }
+    let nice = nice.clamp(-20, 19);
+    let weight = SCHED_NICE_TO_WEIGHT[(nice + 20) as usize];
+    (runtime_us as u64)
+        .saturating_mul(SCHED_NICE_0_LOAD)
+        .checked_div(weight)
+        .unwrap_or(0)
+        .max(1)
+}
+
 impl Debug for Rusage {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_fmt(format_args!(
@@ -317,6 +339,9 @@ impl TaskControlBlockInner {
         let diff = now - self.clock.last_enter_u_mode;
         // 更新用户CPU时间
         self.rusage.ru_utime = self.rusage.ru_utime + diff;
+        self.sched_vruntime = self
+            .sched_vruntime
+            .saturating_add(sched_vruntime_delta_us(self.sched_nice, diff.to_us()));
         // 更新虚拟定时器
         self.update_itimer_virtual_if_exists(diff);
         // 更新性能分析定时器
@@ -587,6 +612,7 @@ impl TaskControlBlock {
                 sched_priority: 0,
                 sched_reset_on_fork: false,
                 sched_nice: 0,
+                sched_vruntime: 0,
                 sched_runtime: 0,
                 sched_deadline: 0,
                 sched_period: 0,
@@ -963,6 +989,7 @@ impl TaskControlBlock {
                 sched_priority: child_sched_priority,
                 sched_reset_on_fork: false,
                 sched_nice: child_sched_nice,
+                sched_vruntime: 0,
                 sched_runtime: child_sched_runtime,
                 sched_deadline: child_sched_deadline,
                 sched_period: child_sched_period,

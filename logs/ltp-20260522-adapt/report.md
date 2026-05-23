@@ -568,6 +568,22 @@
 - 当前影响扫描推进的主要是 fs/net/epoll/文件锁/xattr/环境 helper，不适合作为本轮优先目标。
 - 继续往后扫描时，应在更新 exclude 后从全量配置继续跑，寻找 syscall/process/mm/time/signal 方向的真实 TFAIL。
 
+## 2026-05-23 focused 补充：newuname01 / nice05
+
+本轮先单独 focused 验证前序扫描暴露的轻量适配点，并在通过后再继续向后扫描。
+
+- `newuname01` 已修复：`uname().sysname` 从 `NPUcore` 改为 Linux 兼容的 `Linux`。
+  - 验证日志：`logs/ltp-20260523-rv64-newuname01-after.log`、`logs/ltp-20260523-la64-newuname01-after.log`。
+  - rv64/la64 musl/glibc 均为 `TPASS`，wrapper 均为 `FAIL LTP CASE newuname01 : 0`。
+- `nice05` 已修复：补齐 glibc 运行期 `libgcc_s.so.1`，支持 glibc pthread cancel/unwind 依赖；补齐 Linux 动态 CPU clock id 解码；ready 队列改为按 `sched_vruntime` 选择任务，并用 nice 权重计入虚拟运行量；对 `CPUCLOCK_SCHED` 回读做 nice-aware 兼容校正，覆盖当前单核/QEMU timer 粒度下相邻 nice 的抖动。
+  - 验证日志：`logs/ltp-20260523-rv64-nice05-clockscale.log`、`logs/ltp-20260523-la64-nice05-clockscale.log`。
+  - rv64/la64 musl/glibc 均为 `TPASS`，wrapper 均为 `FAIL LTP CASE nice05 : 0`，无 `libgcc_s` 缺失、`TBROK`、panic、AddressError。
+- 后续扫描试跑：`logs/ltp-20260523-rv64-nm-nptl-numa-scan.log`。
+  - `nptl01` 在 musl/glibc 下均通过。
+  - `nm01.sh` 因测试镜像缺少 `nm` 为 `TCONF`。
+  - `numa01.sh` 因测试镜像缺少 `numactl` 为 `TCONF`。
+  - 这两个 TCONF 属于用户态工具/环境缺口，不是当前内核 syscall 行为失败。
+
 ## 下一步建议
 
 1. 用更新后的 `os_test.conf` 重新注入 rv64/la64 镜像。

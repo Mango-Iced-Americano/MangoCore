@@ -249,6 +249,8 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | nanosleep 唤醒后死锁 | 持 `task.inner` 锁调 `has_actionable_signal()` | 释放锁后再调 |
 | 被屏蔽信号导致 EINTR | 用 `is_empty()` 检查信号 | 用 `sigpending.difference(sigmask)` |
 | execve 后 OOM | 新旧内存集同时存在 | `load_elf` 开头 `recycle_data_pages()` |
+| LTP nice05 动态 CPU clock 失败 | glibc 使用负数动态 clock id，且相邻 nice 在单核调度中差异太小 | 解码动态 CPU clock id，并让 `CPUCLOCK_SCHED`/调度统计体现 nice |
+| glibc pthread cancel 缺库 | 测试镜像缺少架构匹配 `libgcc_s.so.1` | initproc 写入 `/glibc/lib/libgcc_s.so.1` 后再链接到 `/lib` |
 
 ### QEMU / 测试
 
