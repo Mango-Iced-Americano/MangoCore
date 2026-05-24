@@ -269,6 +269,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 
 - 未对齐 addrlen → EFAULT（RISC-V 硬件不报错，需显式检查 `addrlen % 4 != 0`）
 - `mmap` 非匿名映射的坏 fd → EBADF 优先于 len/flags 校验；`mmap08` 会在 page size 异常为 0 时仍期待 EBADF
+- `msync` 的 `MS_ASYNC|MS_SYNC` → EINVAL；`MS_INVALIDATE` 命中 `MAP_LOCKED` VMA → EBUSY；未映射区间 → ENOMEM
 - setsockopt 未知 level → ENOPROTOOPT(92)，不是 EOPNOTSUPP(95)
 - socketpair 非 AF_UNIX → EPROTONOSUPPORT(93)，不是 EAFNOSUPPORT(97)
 - `Socket::alloc` 未知 domain → EAFNOSUPPORT(97)，不是 EINVAL(22)
