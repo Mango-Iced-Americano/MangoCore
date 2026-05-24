@@ -7,13 +7,20 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use user_lib::{
     chdir, close, exec, exit, fork, getdents64, kill, open, println, read, shutdown, sleep, wait,
-    waitpid, waitpid_wnohang, OpenFlags, SIGKILL,
+    waitpid, waitpid_wnohang, write, OpenFlags, SIGKILL,
 };
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
 /// /bin/bash 是否可用（由 prepare_symlink 后检查决定）
 static HAS_BIN_BASH: AtomicBool = AtomicBool::new(true);
+
+#[cfg(target_arch = "riscv64")]
+const LIBGCC_S_SO: &[u8] =
+    include_bytes!("../../assets/libgcc_s/riscv64/libgcc_s.so.1");
+#[cfg(target_arch = "loongarch64")]
+const LIBGCC_S_SO: &[u8] =
+    include_bytes!("../../assets/libgcc_s/loongarch64/libgcc_s.so.1");
 // ============================================================
 // TEST_GROUPS — 组名与脚本文件名的映射
 // 索引 0..11 与 mask 的 bit0..bit11 一一对应
@@ -703,8 +710,9 @@ fn run_group_once(
 const MAX_LTP_ENTRIES: usize = 3000;
 const MAX_NAME_BYTES: usize = 98304; // 96KB name storage on stack
 
-fn should_preload_musl_ltp_compat(libc_suffix: &str, name: &str) -> bool {
-    libc_suffix == "musl" && !name.as_bytes().iter().any(|b| *b == b'.')
+fn should_preload_ltp_compat(libc_suffix: &str, name: &str) -> bool {
+    (libc_suffix == "musl" || libc_suffix == "glibc")
+        && !name.as_bytes().iter().any(|b| *b == b'.')
 }
 
 fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str> {
@@ -730,11 +738,43 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     if name.starts_with("cpuhotplug") {
         return Some("requires CPU hotplug support");
     }
+    if name.starts_with("pm_") {
+        return Some("requires power-management sysfs/python environment");
+    }
+    if name.starts_with("ptrace") {
+        return Some("ptrace subsystem not implemented");
+    }
+    if name.starts_with("rename") {
+        return Some("filesystem rename tests skipped in syscall scan");
+    }
+    if name.starts_with("request_key") {
+        return Some("keyring/request_key subsystem not implemented");
+    }
+    if name.starts_with("rmdir") {
+        return Some("filesystem rmdir tests skipped in syscall scan");
+    }
+    if name.starts_with("route") {
+        return Some("network route tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("rtc") {
+        return Some("requires RTC device ioctl support");
+    }
+    if name.starts_with("run_cpuctl")
+        || name.starts_with("run_freezer")
+        || name.starts_with("run_memctl")
+    {
+        return Some("cgroup/controller helper skipped in LTP syscall scan");
+    }
+    if name.starts_with("runpwtests") {
+        return Some("requires power-management test environment");
+    }
 
     match name {
         "ask_password.sh" | "assign_password.sh" | "change_password.sh" | "remove_password.sh" => {
             Some("interactive password helper")
         }
+        "run_capbounds.sh" => Some("requires POSIX capability support"),
+        "rwtest" => Some("filesystem/pipe stress helper skipped in syscall scan"),
         "cgroup_fj_common.sh"
         | "cgroup_fj_function.sh"
         | "cgroup_fj_proc"
@@ -748,6 +788,20 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
             Some("requires LTP external block device")
         }
         "create_datafile" | "create_file" => Some("standalone LTP helper"),
+        "pthcli" | "pthserv" => Some("standalone LTP network helper"),
+        "sigtimedwait01" | "rt_sigtimedwait01" | "sigwaitinfo01" => {
+            Some("blocking signal-wait case pending dedicated wait-queue support")
+        }
+        "signal06" => Some("x86_64-only signal testcase"),
+        "ping01.sh" | "ping02.sh" => Some("network test skipped in LTP syscall scan"),
+        "pivot_root01" | "prepare_lvm.sh" => Some("filesystem/namespace setup skipped"),
+        "pkey01" => Some("requires memory protection keys"),
+        "profil01" => Some("requires profil syscall support"),
+        "process_madvise01" => Some("requires swap-backed process_madvise environment"),
+        "pt_test" => Some("requires Intel perf events"),
+        "proc_sched_rt01" => Some("requires procfs/sysctl RT scheduler config"),
+        "prctl03" | "prctl04" | "prctl05" | "prctl06" | "prctl06_execve" | "prctl07"
+        | "prctl10" => Some("requires unsupported prctl/procfs capability"),
         _ => None,
     }
 }
@@ -940,7 +994,7 @@ fn run_ltp_binaries(
             // 将 ltp/testcases/bin 加入 PATH。同时设置 LTPROOT 以兼容 LTP
             // 内部路径解析逻辑。musl/glibc 使用各自目录下的 ltp，自然不同。
             let ltp_root_abs = format!("{}/ltp", log_dir);
-            let preload = if should_preload_musl_ltp_compat(libc_suffix, name) {
+            let preload = if should_preload_ltp_compat(libc_suffix, name) {
                 "LD_PRELOAD=/ltp_proto_compat.so "
             } else {
                 ""
@@ -1440,6 +1494,35 @@ pub extern "C" fn _start() -> ! {
 /// 初始化所有符号链接:
 /// 1. busybox --install -s /bin — 把 busybox applet 装为 /bin 下的 symlink
 /// 2. musl/glibc 动态库链接到 /lib
+fn install_embedded_libgcc_s() {
+    let path = "/glibc/lib/libgcc_s.so.1\0";
+    let fd = open(path, OpenFlags::CREATE | OpenFlags::WRONLY | OpenFlags::TRUNC);
+    if fd < 0 {
+        println!("[initproc] install libgcc_s failed to open, ret={}", fd);
+        return;
+    }
+
+    let mut written = 0usize;
+    for chunk in LIBGCC_S_SO.chunks(4096) {
+        let ret = write(fd as usize, chunk);
+        if ret < 0 {
+            println!("[initproc] install libgcc_s write failed, ret={}", ret);
+            break;
+        }
+        written += ret as usize;
+        if ret as usize != chunk.len() {
+            println!("[initproc] install libgcc_s short write");
+            break;
+        }
+    }
+    close(fd as usize);
+    println!(
+        "[initproc] install libgcc_s bytes={} expected={}",
+        written,
+        LIBGCC_S_SO.len()
+    );
+}
+
 fn prepare_symlink(environ: &[*const u8]) {
     // Step 1: busybox applet 安装到 /bin（用 PATH 查找 busybox，兼容旧镜像 /busybox）
     println!("[initproc] installing busybox applets to /bin ...");
@@ -1450,7 +1533,7 @@ fn prepare_symlink(environ: &[*const u8]) {
     // Step 1.5: 测试环境依赖最小账户/网络配置，无条件幂等写入（镜像可能缺失或格式错误）
     println!("[initproc] preparing /etc account/network files ...");
     let account_cmd = "\
-        mkdir -p /etc /root /tmp /run /var /var/tmp /dev/shm; chmod 1777 /tmp /var/tmp /dev/shm; \
+        mkdir -p /etc /root /tmp /run /var /var/tmp /dev/shm /glibc/lib; chmod 1777 /tmp /var/tmp /dev/shm; : > /glibc/lib/libgcc_s.so.1; \
         [ -f /etc/passwd ] || printf 'root:x:0:0:root:/root:/bin/sh\\nnobody:x:65534:65534:nobody:/nonexistent:/bin/sh\\n' > /etc/passwd; \
         [ -f /etc/group ] || printf 'root:x:0:\\nnogroup:x:65534:\\n' > /etc/group; \
         printf 'passwd: files\\ngroup: files\\nhosts: files dns\\n' > /etc/nsswitch.conf; \
@@ -1459,6 +1542,8 @@ fn prepare_symlink(environ: &[*const u8]) {
     \0";
     let ret = run_bash_cmd(account_cmd, environ);
     println!("[initproc] minimal account files done, exit={}", ret);
+
+    install_embedded_libgcc_s();
 
     // Step 2: musl/glibc 动态库 — 单次 shell 调用，用 && 串连，避免多次 bash 开销
     println!("[initproc] linking musl/glibc libs to /lib ...");

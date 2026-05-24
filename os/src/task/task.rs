@@ -7,7 +7,7 @@ use super::TaskContext;
 use super::{
     tid_alloc, trap_cx_bottom_from_slot, ustack_bottom_from_slot, TidHandle,
 };
-use crate::config::MMAP_BASE;
+use crate::config::{MMAP_BASE, USER_STACK_SIZE};
 use crate::fs::vfs;
 use crate::fs::{vfs_lookup_absolute, vfs_root};
 use crate::hal::TrapImpl;
@@ -27,6 +27,19 @@ use log::{trace, warn};
 use spin::{Mutex, MutexGuard};
 
 const TASK_CAP_FULL_SET: u64 = (1u64 << 41) - 1;
+const DEFAULT_TIMER_SLACK_NS: usize = 50_000;
+
+fn default_task_comm() -> [u8; 16] {
+    let mut comm = [0u8; 16];
+    comm[..8].copy_from_slice(b"initproc");
+    comm
+}
+
+fn default_groups() -> Vec<u32> {
+    let mut groups = Vec::new();
+    groups.push(0);
+    groups
+}
 
 #[derive(Clone)]
 /// 任务的文件系统状态
@@ -87,15 +100,44 @@ pub struct TaskControlBlockInner {
     pub sched_reset_on_fork: bool,
     /// sched_attr 兼容回读字段，当前不参与真实调度。
     pub sched_nice: i32,
+    /// 简化 CFS 兼容用虚拟运行量。仅用于 ready 队列选择，不作为用户 ABI 暴露。
+    pub sched_vruntime: u64,
     pub sched_runtime: u64,
     pub sched_deadline: u64,
     pub sched_period: u64,
+    /// Linux I/O priority compatibility state.
+    /// ABI-visible only; it does not affect actual I/O scheduling.
+    pub ioprio_class: usize,
+    pub ioprio_prio: usize,
+    /// membarrier PRIVATE_EXPEDITED compatibility registration.
+    /// MangoCore is single-core, so the barrier itself is a no-op after registration.
+    pub membarrier_private_expedited_registered: bool,
     /// RLIMIT_RTPRIO 兼容字段，供非 root 实时调度权限检查使用。
     pub rtprio_limit_cur: usize,
     pub rtprio_limit_max: usize,
     /// RLIMIT_NICE 兼容字段，供 LTP 权限类用例回读。
     pub nice_limit_cur: usize,
     pub nice_limit_max: usize,
+    /// RLIMIT_SIGPENDING 兼容字段，用于实时信号 pending 队列限额语义。
+    pub sigpending_limit_cur: usize,
+    pub sigpending_limit_max: usize,
+    /// RLIMIT_STACK 兼容字段。当前用户栈仍按固定槽位映射，这里只保存 ABI 可见限制。
+    pub stack_limit_cur: usize,
+    pub stack_limit_max: usize,
+    /// RLIMIT_MEMLOCK 兼容字段，供 mlock/mlockall 权限和限额类用例使用。
+    pub memlock_limit_cur: usize,
+    pub memlock_limit_max: usize,
+    /// Linux personality ABI state. MangoCore does not alter layout/exec policy based on it yet.
+    pub personality: usize,
+    /// Parent-death signal configured by prctl(PR_SET_PDEATHSIG).
+    pub pdeath_signal: usize,
+    /// Dumpable state used by prctl(PR_GET/SET_DUMPABLE).
+    pub dumpable: usize,
+    /// Linux task comm, capped at 16 bytes including the trailing NUL.
+    pub task_comm: [u8; 16],
+    /// Timer slack compatibility state in nanoseconds.
+    pub timer_slack_ns: usize,
+    pub timer_slack_default_ns: usize,
     /// POSIX 用户/组 ID 兼容字段，供 LTP 权限类用例和 capability 查询使用。
     pub uid: u32,
     pub euid: u32,
@@ -105,6 +147,8 @@ pub struct TaskControlBlockInner {
     pub egid: u32,
     pub sgid: u32,
     pub fsgid: u32,
+    /// Linux supplementary group list, used by getgroups/setgroups compatibility.
+    pub groups: Vec<u32>,
     /// Linux capability 兼容字段。当前内核只做权限语义判定，不实现真实权能隔离。
     pub cap_effective: u64,
     pub cap_permitted: u64,
@@ -258,6 +302,26 @@ impl Rusage {
     }
 }
 
+const SCHED_NICE_0_LOAD: u64 = 1024;
+const SCHED_NICE_TO_WEIGHT: [u64; 40] = [
+    88761, 71755, 56483, 46273, 36291, 29154, 23254, 18705, 14949, 11916, 9548, 7620, 6100, 4904,
+    3906, 3121, 2501, 1991, 1586, 1277, 1024, 820, 655, 526, 423, 335, 272, 215, 172, 137, 110,
+    87, 70, 56, 45, 36, 29, 23, 18, 15,
+];
+
+fn sched_vruntime_delta_us(nice: i32, runtime_us: usize) -> u64 {
+    if runtime_us == 0 {
+        return 0;
+    }
+    let nice = nice.clamp(-20, 19);
+    let weight = SCHED_NICE_TO_WEIGHT[(nice + 20) as usize];
+    (runtime_us as u64)
+        .saturating_mul(SCHED_NICE_0_LOAD)
+        .checked_div(weight)
+        .unwrap_or(0)
+        .max(1)
+}
+
 impl Debug for Rusage {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_fmt(format_args!(
@@ -294,6 +358,9 @@ impl TaskControlBlockInner {
         let diff = now - self.clock.last_enter_u_mode;
         // 更新用户CPU时间
         self.rusage.ru_utime = self.rusage.ru_utime + diff;
+        self.sched_vruntime = self
+            .sched_vruntime
+            .saturating_add(sched_vruntime_delta_us(self.sched_nice, diff.to_us()));
         // 更新虚拟定时器
         self.update_itimer_virtual_if_exists(diff);
         // 更新性能分析定时器
@@ -528,6 +595,7 @@ impl TaskControlBlock {
             pid,
             tid_handle.0,
             pgid,
+            pgid,
             None,
             Arc::new(Mutex::new(elf)),
             String::new(),
@@ -563,13 +631,29 @@ impl TaskControlBlock {
                 sched_priority: 0,
                 sched_reset_on_fork: false,
                 sched_nice: 0,
+                sched_vruntime: 0,
                 sched_runtime: 0,
                 sched_deadline: 0,
                 sched_period: 0,
+                ioprio_class: 2,
+                ioprio_prio: 4,
+                membarrier_private_expedited_registered: false,
                 rtprio_limit_cur: 0,
                 rtprio_limit_max: 0,
                 nice_limit_cur: usize::MAX,
                 nice_limit_max: usize::MAX,
+                sigpending_limit_cur: usize::MAX,
+                sigpending_limit_max: usize::MAX,
+                stack_limit_cur: USER_STACK_SIZE,
+                stack_limit_max: USER_STACK_SIZE,
+                memlock_limit_cur: usize::MAX,
+                memlock_limit_max: usize::MAX,
+                personality: 0,
+                pdeath_signal: 0,
+                dumpable: 1,
+                task_comm: default_task_comm(),
+                timer_slack_ns: DEFAULT_TIMER_SLACK_NS,
+                timer_slack_default_ns: DEFAULT_TIMER_SLACK_NS,
                 uid: 0,
                 euid: 0,
                 suid: 0,
@@ -578,6 +662,7 @@ impl TaskControlBlock {
                 egid: 0,
                 sgid: 0,
                 fsgid: 0,
+                groups: default_groups(),
                 cap_effective: TASK_CAP_FULL_SET,
                 cap_permitted: TASK_CAP_FULL_SET,
                 cap_inheritable: 0,
@@ -850,6 +935,7 @@ impl TaskControlBlock {
                 tid_handle.0,
                 tid_handle.0,
                 self.process.getpgid(),
+                self.process.getsid(),
                 parent_process.as_ref().map(Arc::downgrade),
                 self.process.exe(),
                 self.process.exe_path(),
@@ -932,13 +1018,30 @@ impl TaskControlBlock {
                 sched_priority: child_sched_priority,
                 sched_reset_on_fork: false,
                 sched_nice: child_sched_nice,
+                sched_vruntime: 0,
                 sched_runtime: child_sched_runtime,
                 sched_deadline: child_sched_deadline,
                 sched_period: child_sched_period,
+                ioprio_class: parent_inner.ioprio_class,
+                ioprio_prio: parent_inner.ioprio_prio,
+                membarrier_private_expedited_registered: parent_inner
+                    .membarrier_private_expedited_registered,
                 rtprio_limit_cur: parent_inner.rtprio_limit_cur,
                 rtprio_limit_max: parent_inner.rtprio_limit_max,
                 nice_limit_cur: parent_inner.nice_limit_cur,
                 nice_limit_max: parent_inner.nice_limit_max,
+                sigpending_limit_cur: parent_inner.sigpending_limit_cur,
+                sigpending_limit_max: parent_inner.sigpending_limit_max,
+                stack_limit_cur: parent_inner.stack_limit_cur,
+                stack_limit_max: parent_inner.stack_limit_max,
+                memlock_limit_cur: parent_inner.memlock_limit_cur,
+                memlock_limit_max: parent_inner.memlock_limit_max,
+                personality: parent_inner.personality,
+                pdeath_signal: 0,
+                dumpable: parent_inner.dumpable,
+                task_comm: parent_inner.task_comm,
+                timer_slack_ns: parent_inner.timer_slack_ns,
+                timer_slack_default_ns: parent_inner.timer_slack_ns,
                 uid: parent_inner.uid,
                 euid: parent_inner.euid,
                 suid: parent_inner.suid,
@@ -947,6 +1050,7 @@ impl TaskControlBlock {
                 egid: parent_inner.egid,
                 sgid: parent_inner.sgid,
                 fsgid: parent_inner.fsgid,
+                groups: parent_inner.groups.clone(),
                 cap_effective: parent_inner.cap_effective,
                 cap_permitted: parent_inner.cap_permitted,
                 cap_inheritable: parent_inner.cap_inheritable,

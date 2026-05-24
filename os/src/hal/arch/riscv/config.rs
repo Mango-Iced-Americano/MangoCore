@@ -39,7 +39,7 @@ pub const MEMORY_PHYS: usize = 0x800_0000;
 pub const DISK_IMAGE_BASE: usize = 0x8000_0000 + MEMORY_PHYS;
 // pub const DISK_IMAGE_BASE: usize = MEMORY_END;
 
-pub const SYSTEM_TASK_LIMIT: usize = 128;
+pub const SYSTEM_TASK_LIMIT: usize = 1024;
 pub const SYSTEM_FD_LIMIT: usize = 256;
 
 pub const BLOCK_SZ: usize = 4096;

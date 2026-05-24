@@ -49,6 +49,7 @@ fn create_pid_dir(parent: &LockedProcInode, pid: usize) -> Result<Arc<dyn IndexN
         fs_weak,
         InodeMode::from_bits_truncate(0o555),
     );
+    dir.0.lock().extra_data = pid;
 
     dir.add_file(
         "status",

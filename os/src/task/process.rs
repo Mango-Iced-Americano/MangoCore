@@ -61,6 +61,8 @@ pub struct ProcessInner {
     user_res_slot_allocator: Arc<Mutex<RecycleAllocator>>,
     /// 进程组 ID。
     pub pgid: usize,
+    /// 会话 ID。
+    pub sid: usize,
     /// 父进程。
     pub parent: Option<Weak<ProcessControlBlock>>,
     /// 子进程。
@@ -136,6 +138,7 @@ impl ProcessControlBlock {
         pid: usize,
         leader_tid: usize,
         pgid: usize,
+        sid: usize,
         parent: Option<Weak<ProcessControlBlock>>,
         exe: Arc<Mutex<vfs::File>>,
         exe_path: String,
@@ -171,6 +174,7 @@ impl ProcessControlBlock {
                 futex,
                 user_res_slot_allocator,
                 pgid,
+                sid,
                 parent,
                 children: Vec::new(),
                 state: ProcessState::Running,
@@ -350,6 +354,17 @@ impl ProcessControlBlock {
 
     pub fn getpgid(&self) -> usize {
         self.inner.lock().pgid
+    }
+
+    pub fn setsid(&self, sid: usize) -> isize {
+        let mut inner = self.inner.lock();
+        inner.sid = sid;
+        inner.pgid = sid;
+        0
+    }
+
+    pub fn getsid(&self) -> usize {
+        self.inner.lock().sid
     }
 
     pub fn parent(&self) -> Option<Arc<ProcessControlBlock>> {

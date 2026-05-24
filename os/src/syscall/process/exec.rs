@@ -31,8 +31,9 @@ fn try_open_shell_fallback(
     for shell in &["/bin/sh", "/bin/bash"] {
         let file = match vfs_lookup(cwd_inode, shell, true)
             .and_then(|inode| vfs::File::new(inode, vfs::FileFlags::O_RDONLY).map_err(|e| -(e as isize)))
+            .and_then(|f| check_exec_metadata(&f).map(|_| f))
         {
-            Ok(f) if !f.is_dir() && is_valid_elf(&f) => f,
+            Ok(f) if is_valid_elf(&f) => f,
             _ => continue,
         };
         if argv_vec.try_reserve(1).is_err() { return Err(ENOMEM); }
@@ -66,6 +67,34 @@ fn parse_shebang(file: &vfs::File) -> Result<Option<(String, Option<String>)>, i
     Ok(Some((interpreter, arg)))
 }
 
+fn validate_exec_path_len(path: &str) -> Result<(), isize> {
+    if path.len() >= vfs::MAX_PATHLEN {
+        return Err(ENAMETOOLONG);
+    }
+    if path
+        .split('/')
+        .any(|component| component.len() > vfs::NAME_MAX)
+    {
+        return Err(ENAMETOOLONG);
+    }
+    Ok(())
+}
+
+fn check_exec_metadata(file: &vfs::File) -> Result<(), isize> {
+    let metadata = file.metadata().map_err(|e| -(e as isize))?;
+    if metadata.file_type != vfs::FileType::File {
+        if metadata.file_type == vfs::FileType::Dir {
+            return Err(EISDIR);
+        }
+        return Err(EACCES);
+    }
+    let exec_bits = vfs::InodeMode::S_IXUSR | vfs::InodeMode::S_IXGRP | vfs::InodeMode::S_IXOTH;
+    if !metadata.mode.intersects(exec_bits) {
+        return Err(EACCES);
+    }
+    Ok(())
+}
+
 pub fn sys_execve(
     pathname: *const u8,
     mut argv: *const *const u8,
@@ -80,6 +109,9 @@ pub fn sys_execve(
         Ok(path) => path,
         Err(errno) => return errno,
     };
+    if let Err(errno) = validate_exec_path_len(&path) {
+        return errno;
+    }
     // 解析参数列表
     let mut argv_vec: Vec<String> = Vec::new();
     if argv_vec.try_reserve(16).is_err() {
@@ -148,8 +180,11 @@ pub fn sys_execve(
     let cwd_inode: Arc<dyn vfs::IndexNode> = working_inode.inode.clone();
 
     let open_exec = |path: &str| -> Result<vfs::File, isize> {
+        validate_exec_path_len(path)?;
         let inode = vfs_lookup(&cwd_inode, path, true)?;
-        vfs::File::new(inode, vfs::FileFlags::O_RDONLY).map_err(|e| -(e as isize))
+        let file = vfs::File::new(inode, vfs::FileFlags::O_RDONLY).map_err(|e| -(e as isize))?;
+        check_exec_metadata(&file)?;
+        Ok(file)
     };
 
     match open_exec(&path) {

@@ -13,29 +13,36 @@ pub use clone::{sys_clone, sys_clone3, CloneFlags};
 pub use exec::sys_execve;
 pub use futex::sys_futex;
 pub use ids::{
-    sys_capget, sys_capset, sys_getegid, sys_geteuid, sys_getgid, sys_getgroups, sys_getpgid,
-    sys_getpid, sys_getppid, sys_getresgid, sys_getresuid, sys_gettid, sys_get_mempolicy,
-    sys_getuid, sys_prctl, sys_prlimit, sys_sched_get_priority_max, sys_sched_get_priority_min,
-    sys_sched_getaffinity, sys_sched_getattr, sys_sched_getparam, sys_sched_getscheduler,
-    sys_sched_rr_get_interval, sys_sched_setaffinity, sys_sched_setparam,
-    sys_sched_setattr, sys_sched_setscheduler, sys_setfsgid, sys_setfsuid, sys_setgid,
-    sys_setgroups, sys_setpgid, sys_setregid, sys_setresgid, sys_setresuid, sys_setreuid,
-    sys_setsid, sys_setuid, sys_sysinfo, sys_uname, CapUserData, CapUserHeader, RLimit,
-    SchedAttr, SchedParam, Sysinfo,
+    sys_capget, sys_capset, sys_get_mempolicy, sys_getegid, sys_geteuid, sys_getgid,
+    sys_getcpu, sys_getgroups, sys_getpgid, sys_getpid, sys_getppid, sys_getpriority,
+    sys_getresgid, sys_getresuid, sys_getrlimit, sys_getsid, sys_gettid, sys_getuid,
+    sys_ioprio_get, sys_ioprio_set, sys_personality, sys_prctl, sys_prlimit,
+    sys_process_vm_readv, sys_process_vm_writev, sys_sched_get_priority_max,
+    sys_sched_get_priority_min, sys_sched_getaffinity, sys_sched_getattr, sys_sched_getparam,
+    sys_sched_getscheduler, sys_sched_rr_get_interval, sys_sched_setaffinity, sys_sched_setattr,
+    sys_sched_setparam, sys_sched_setscheduler, sys_setfsgid, sys_setfsuid, sys_setgid,
+    sys_setgroups, sys_setpgid, sys_setpriority, sys_setregid, sys_setresgid, sys_setresuid,
+    sys_setreuid, sys_setrlimit, sys_setsid, sys_setuid, sys_sysinfo, sys_uname, CapUserData,
+    CapUserHeader, RLimit, SchedAttr, SchedParam, Sysinfo,
 };
-pub use ipc::{sys_shmat, sys_shmctl, sys_shmdt, sys_shmget};
+pub use ipc::{
+    sys_msgctl, sys_msgget, sys_msgrcv, sys_msgsnd, sys_semctl, sys_semget, sys_semop,
+    sys_semtimedop, sys_shmat, sys_shmctl, sys_shmdt, sys_shmget,
+};
 pub use lifecycle::{
     sys_exit, sys_exit_group, sys_get_robust_list, sys_set_robust_list, sys_set_tid_address,
-    sys_wait4,
+    sys_wait4, sys_waitid,
 };
-pub use misc::{sys_shutdown, sys_syslog, sys_yield};
+pub use misc::{sys_delete_module, sys_reboot, sys_shutdown, sys_syslog, sys_yield};
 pub use mm::{
-    sys_brk, sys_madvise, sys_memorybarrier, sys_mlock, sys_mlockall, sys_mmap, sys_mprotect,
-    sys_mremap, sys_munlock, sys_munlockall, sys_munmap, sys_sbrk,
+    sys_brk, sys_madvise, sys_memorybarrier, sys_mincore, sys_mlock, sys_mlock2,
+    sys_mlockall, sys_mmap, sys_mprotect, sys_mremap, sys_munlock, sys_munlockall,
+    sys_munmap, sys_sbrk,
 };
 pub use signal::{
-    sys_kill, sys_rt_sigpending, sys_rt_sigsuspend, sys_sigaction, sys_sigaltstack,
-    sys_sigprocmask, sys_sigreturn, sys_sigtimedwait, sys_tgkill, sys_tkill,
+    sys_kcmp, sys_kill, sys_pidfd_getfd, sys_pidfd_open, sys_pidfd_send_signal, sys_rt_sigpending,
+    sys_rt_sigqueueinfo, sys_rt_sigsuspend, sys_sigaction, sys_sigaltstack, sys_sigprocmask,
+    sys_sigreturn, sys_sigtimedwait, sys_tgkill, sys_tkill,
 };
 pub use time::{
     sys_adjtimex, sys_clock_adjtime, sys_clock_getres, sys_clock_gettime, sys_clock_nanosleep,

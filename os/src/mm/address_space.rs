@@ -212,6 +212,46 @@ impl<T: PageTable> AddressSpace<T> {
             .is_some()
     }
 
+    pub fn validate_msync_range(
+        &self,
+        addr: usize,
+        len: usize,
+        invalidate: bool,
+    ) -> Result<(), isize> {
+        if len == 0 {
+            return Ok(());
+        }
+        let rounded_len = len
+            .checked_add(PAGE_SIZE - 1)
+            .map(|len| len & !(PAGE_SIZE - 1))
+            .ok_or(ENOMEM)?;
+        let end = addr.checked_add(rounded_len).ok_or(ENOMEM)?;
+        if end > USER_VA_END {
+            return Err(ENOMEM);
+        }
+        if self.heap_bottom != 0 {
+            let heap_limit = self.heap_bottom.saturating_add(USER_HEAP_SIZE);
+            if addr < heap_limit && end > self.heap_pt && end > self.heap_bottom {
+                return Err(ENOMEM);
+            }
+        }
+        let start_vpn = VirtAddr::from(addr).floor();
+        let end_vpn = VirtAddr::from(end).ceil();
+        if !self.vmas.covers_user_range(start_vpn, end_vpn) {
+            return Err(ENOMEM);
+        }
+        if invalidate
+            && self.vmas.iter().any(|area| {
+                area.vm_is_user()
+                    && area.vm_overlaps(start_vpn, end_vpn)
+                    && area.flags.contains(MapFlags::MAP_LOCKED)
+            })
+        {
+            return Err(EBUSY);
+        }
+        Ok(())
+    }
+
     pub fn proc_maps_content(&self) -> String {
         let mut s = String::with_capacity(self.vmas.len() * 80);
         for vma in self.vmas.iter().filter(|vma| vma.vm_is_user()) {
@@ -246,7 +286,11 @@ impl<T: PageTable> AddressSpace<T> {
         access: FaultAccess,
     ) -> Result<PhysAddr, MemoryError> {
         let vpn = addr.floor();
-        if self.vmas.find_user_vma_key(vpn).is_some() {
+        let area_start = match self.vmas.find_user_vma_key(vpn) {
+            Some(start) => Some(start),
+            None => self.vmas.expand_growsdown_for_fault(vpn)?,
+        };
+        if area_start.is_some() {
             let ctx = super::page_fault::FaultContext::new(addr, access);
             let page_table = &mut self.page_table;
             let area = self.vmas.find_user_vma_mut(vpn).unwrap();
@@ -574,13 +618,18 @@ impl<T: PageTable> AddressSpace<T> {
             return Err(crate::syscall::errno::ENOMEM);
         }
         for area in user_space.vmas.iter().filter(|area| area.vm_is_user()) {
-            let mut new_area = area.try_clone()?;
-            new_area
-                .map_from_existing_page_table(
-                    &mut address_space.page_table,
-                    &mut user_space.page_table,
-                )
-                .map_err(|_| crate::syscall::errno::ENOMEM)?;
+            let new_area = if area.wipe_on_fork {
+                Vma::from_another(area)
+            } else {
+                let mut cloned = area.try_clone()?;
+                cloned
+                    .map_from_existing_page_table(
+                        &mut address_space.page_table,
+                        &mut user_space.page_table,
+                    )
+                    .map_err(|_| crate::syscall::errno::ENOMEM)?;
+                cloned
+            };
             address_space.vmas.push(new_area)?;
             debug!(
                 "[fork] map shared area: {:?}",
@@ -645,8 +694,9 @@ impl<T: PageTable> AddressSpace<T> {
         flags: MapFlags,
         offset: usize,
         map_file: Option<Arc<dyn IndexNode>>,
+        may_write: bool,
     ) -> isize {
-        super::mmap::do_mmap(self, start, len, prot, flags, offset, map_file)
+        super::mmap::do_mmap(self, start, len, prot, flags, offset, map_file, may_write)
     }
 
     pub fn munmap(&mut self, start: usize, len: usize) -> Result<(), isize> {
@@ -655,6 +705,65 @@ impl<T: PageTable> AddressSpace<T> {
 
     pub fn mprotect(&mut self, addr: usize, len: usize, prot: MapPermission) -> Result<(), isize> {
         super::mmap::do_mprotect(self, addr, len, prot)
+    }
+
+    pub fn madvise(&mut self, start: usize, len: usize, advice: usize) -> Result<(), isize> {
+        let start_vpn = VirtAddr::from(start).floor();
+        let end_vpn = VirtAddr::from(start + len).ceil();
+        self.vmas
+            .advise_range(&mut self.page_table, start_vpn, end_vpn, advice)
+    }
+
+    pub fn mincore(&self, start: usize, len: usize, residency: &mut [u8]) -> Result<(), isize> {
+        let end = start.checked_add(len).ok_or(ENOMEM)?;
+        let start_vpn = VirtAddr::from(start).floor();
+        let end_vpn = VirtAddr::from(end).ceil();
+        self.vmas
+            .mincore_range(&self.page_table, start_vpn, end_vpn, residency)
+    }
+
+    fn user_lock_range(
+        &self,
+        start: usize,
+        len: usize,
+    ) -> Result<(VirtPageNum, VirtPageNum, usize), isize> {
+        if len == 0 {
+            return Ok((VirtPageNum(0), VirtPageNum(0), 0));
+        }
+        let end = start.checked_add(len).ok_or(ENOMEM)?;
+        if end > USER_VA_END {
+            return Err(ENOMEM);
+        }
+        let start_vpn = VirtAddr::from(start).floor();
+        let end_vpn = VirtAddr::from(end).ceil();
+        if !self.vmas.covers_user_range(start_vpn, end_vpn) {
+            return Err(ENOMEM);
+        }
+        let locked_len = (end_vpn.0 - start_vpn.0).saturating_mul(PAGE_SIZE);
+        Ok((start_vpn, end_vpn, locked_len))
+    }
+
+    pub fn mlock(&mut self, start: usize, len: usize) -> Result<usize, isize> {
+        let (start_vpn, end_vpn, locked_len) = self.user_lock_range(start, len)?;
+        let mut vpn = start_vpn;
+        while vpn < end_vpn {
+            self.fault_in_user_va(VirtAddr::from(vpn), FaultAccess::Load)?;
+            vpn.0 += 1;
+        }
+        Ok(locked_len)
+    }
+
+    pub fn mlock_onfault(&self, start: usize, len: usize) -> Result<usize, isize> {
+        self.user_lock_range(start, len)
+            .map(|(_, _, locked_len)| locked_len)
+    }
+
+    pub fn munlock(&self, start: usize, len: usize) -> Result<(), isize> {
+        self.user_lock_range(start, len).map(|_| ())
+    }
+
+    pub fn user_mapped_bytes(&self) -> usize {
+        self.vmas.user_mapped_bytes()
     }
 
     pub fn create_elf_tables(

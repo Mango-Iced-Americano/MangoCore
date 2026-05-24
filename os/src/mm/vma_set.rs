@@ -2,12 +2,14 @@ use super::user_mapper::UserMapper;
 use super::vma::{MapFlags, MapPermission, Vma};
 use super::{MemoryError, PageTable, VirtAddr, VirtPageNum};
 use crate::config::*;
-use crate::syscall::errno::{EINVAL, ENOMEM};
+use crate::syscall::errno::{EACCES, EINVAL, ENOMEM};
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use log::{debug, warn};
 
 const MAX_VMA_COUNT: usize = 65_536;
+const STACK_GUARD_GAP_PAGES: usize = 256;
+const GROWSDOWN_MAX_FAULT_GAP_PAGES: usize = USER_STACK_SIZE / PAGE_SIZE;
 
 pub(super) struct VmaSet {
     vmas: BTreeMap<VirtPageNum, Vma>,
@@ -37,6 +39,27 @@ fn align_up(value: usize, align: usize) -> Option<usize> {
     value
         .checked_add(align - 1)
         .map(|value| value & !(align - 1))
+}
+
+fn file_backed_page_resident(area: &Vma, vpn: VirtPageNum) -> bool {
+    let Some(inode) = area.vm_file() else {
+        return false;
+    };
+    let Ok(file_offset) = area.vm_file_offset(vpn) else {
+        return false;
+    };
+    inode
+        .page_cache()
+        .map(|pc| pc.contains_page(file_offset >> PAGE_SIZE_BITS))
+        .unwrap_or(false)
+}
+
+fn errno_to_memory_error(errno: isize) -> MemoryError {
+    match errno {
+        ENOMEM => MemoryError::OutOfMemory,
+        EACCES => MemoryError::NoPermission,
+        _ => MemoryError::BadAddress,
+    }
 }
 
 impl VmaSet {
@@ -135,6 +158,65 @@ impl VmaSet {
     pub(super) fn find_user_vma_mut(&mut self, vpn: VirtPageNum) -> Option<&mut Vma> {
         let start = self.find_user_vma_key(vpn)?;
         self.vmas.get_mut(&start)
+    }
+
+    pub(super) fn expand_growsdown_for_fault(
+        &mut self,
+        fault_vpn: VirtPageNum,
+    ) -> Result<Option<VirtPageNum>, MemoryError> {
+        let Some((old_start, _)) = self.vmas.range(fault_vpn..).next() else {
+            return Ok(None);
+        };
+        let old_start = *old_start;
+        let Some(area) = self.vmas.get(&old_start) else {
+            return Ok(None);
+        };
+        if fault_vpn >= old_start
+            || !area.vm_is_user()
+            || !area.flags.contains(MapFlags::MAP_GROWSDOWN)
+        {
+            return Ok(None);
+        }
+
+        let fault_gap_pages = old_start.0 - fault_vpn.0;
+        if fault_gap_pages > GROWSDOWN_MAX_FAULT_GAP_PAGES {
+            warn!(
+                "[MAP_GROWSDOWN] reject distant fault: fault={:?}, start={:?}",
+                fault_vpn, old_start
+            );
+            return Ok(None);
+        }
+
+        if let Some((_, prev)) = self.vmas.range(..old_start).next_back() {
+            let prev_end = prev.vm_end();
+            if prev_end > fault_vpn {
+                return Ok(None);
+            }
+            let guard_gap_pages = fault_vpn.0.saturating_sub(prev_end.0);
+            if guard_gap_pages < STACK_GUARD_GAP_PAGES {
+                warn!(
+                    "[MAP_GROWSDOWN] reject guard gap: fault={:?}, prev_end={:?}, gap_pages={}",
+                    fault_vpn, prev_end, guard_gap_pages
+                );
+                return Ok(None);
+            }
+        }
+
+        if self.has_overlap(fault_vpn, old_start) {
+            return Ok(None);
+        }
+        self.reserve_mmap_range(fault_vpn, old_start)
+            .map_err(errno_to_memory_error)?;
+        let mut area = self.vmas.remove(&old_start).ok_or(MemoryError::BadAddress)?;
+        if let Err(errno) = area.expand_down_to(VirtAddr::from(fault_vpn)) {
+            self.vmas.insert(old_start, area);
+            let _ = self.release_mmap_range(fault_vpn, old_start);
+            return Err(errno_to_memory_error(errno));
+        }
+        let new_start = area.vm_start();
+        self.vmas.insert(new_start, area);
+        self.debug_assert_invariants();
+        Ok(Some(new_start))
     }
 
     pub(super) fn has_overlap(
@@ -300,6 +382,126 @@ impl VmaSet {
         }
     }
 
+    pub(super) fn advise_range<T: PageTable>(
+        &mut self,
+        page_table: &mut T,
+        start_vpn: VirtPageNum,
+        end_vpn: VirtPageNum,
+        advice: usize,
+    ) -> Result<(), isize> {
+        const MADV_DONTNEED: usize = 4;
+        const MADV_WIPEONFORK: usize = 18;
+        const MADV_KEEPONFORK: usize = 19;
+
+        let mut cursor = start_vpn;
+        while cursor < end_vpn {
+            let area_start = self.find_user_vma_key(cursor).ok_or(ENOMEM)?;
+            let area_end = self.vmas.get(&area_start).ok_or(ENOMEM)?.vm_end();
+            let advise_end = if area_end < end_vpn {
+                area_end
+            } else {
+                end_vpn
+            };
+
+            if advice == MADV_DONTNEED {
+                let area = self.vmas.get_mut(&area_start).ok_or(ENOMEM)?;
+                if area.map_file.is_some() || !area.flags.contains(MapFlags::MAP_PRIVATE) {
+                    return Err(EINVAL);
+                }
+                area.discard_range(page_table, cursor, advise_end)
+                    .map_err(|_| EINVAL)?;
+            }
+            if advice == MADV_WIPEONFORK || advice == MADV_KEEPONFORK {
+                if advice == MADV_WIPEONFORK {
+                    let area = self.vmas.get(&area_start).ok_or(ENOMEM)?;
+                    let is_anonymous_private = area.map_file.is_none()
+                        && area
+                            .flags
+                            .contains(MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS)
+                        && !area.flags.contains(MapFlags::MAP_SHARED);
+                    if !is_anonymous_private {
+                        return Err(EINVAL);
+                    }
+                }
+                let target_start = self.split_for_range(area_start, cursor, advise_end)?;
+                let area = self.vmas.get_mut(&target_start).ok_or(ENOMEM)?;
+                area.wipe_on_fork = advice == MADV_WIPEONFORK;
+            }
+
+            cursor = advise_end;
+        }
+        Ok(())
+    }
+
+    pub(super) fn mincore_range<T: PageTable>(
+        &self,
+        page_table: &T,
+        start_vpn: VirtPageNum,
+        end_vpn: VirtPageNum,
+        residency: &mut [u8],
+    ) -> Result<(), isize> {
+        let mut cursor = start_vpn;
+        let mut index = 0usize;
+        while cursor < end_vpn {
+            let area_start = self.find_user_vma_key(cursor).ok_or(ENOMEM)?;
+            let area = self.vmas.get(&area_start).ok_or(ENOMEM)?;
+            let area_end = area.vm_end();
+            let scan_end = if area_end < end_vpn {
+                area_end
+            } else {
+                end_vpn
+            };
+
+            while cursor < scan_end {
+                if let Some(slot) = residency.get_mut(index) {
+                    *slot = if page_table.is_mapped(cursor)
+                        || file_backed_page_resident(area, cursor)
+                    {
+                        1
+                    } else {
+                        0
+                    };
+                }
+                index += 1;
+                cursor.0 += 1;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn covers_user_range(
+        &self,
+        start_vpn: VirtPageNum,
+        end_vpn: VirtPageNum,
+    ) -> bool {
+        let mut cursor = start_vpn;
+        while cursor < end_vpn {
+            let Some(area_start) = self.find_user_vma_key(cursor) else {
+                return false;
+            };
+            let Some(area) = self.vmas.get(&area_start) else {
+                return false;
+            };
+            if area.vm_end() <= cursor {
+                return false;
+            }
+            cursor = if area.vm_end() < end_vpn {
+                area.vm_end()
+            } else {
+                end_vpn
+            };
+        }
+        true
+    }
+
+    pub(super) fn user_mapped_bytes(&self) -> usize {
+        self.vmas
+            .values()
+            .filter(|area| area.vm_is_user())
+            .map(|area| (area.vm_end().0 - area.vm_start().0).saturating_mul(PAGE_SIZE))
+            .fold(0usize, |acc, len| acc.saturating_add(len))
+    }
+
     pub(super) fn protect_range<T: PageTable>(
         &mut self,
         page_table: &mut T,
@@ -307,6 +509,26 @@ impl VmaSet {
         end_vpn: VirtPageNum,
         prot: MapPermission,
     ) -> Result<(), isize> {
+        let mut cursor = start_vpn;
+        while cursor < end_vpn {
+            let Some(area_start) = self.find_user_vma_key(cursor) else {
+                warn!("[mprotect] addr: {:?} is not in any user Vma", cursor);
+                return Err(ENOMEM);
+            };
+            let area = self.vmas.get(&area_start).ok_or(ENOMEM)?;
+            if prot.contains(MapPermission::W)
+                && area.flags.contains(MapFlags::MAP_SHARED)
+                && !area.may_write
+            {
+                return Err(EACCES);
+            }
+            cursor = if area.vm_end() < end_vpn {
+                area.vm_end()
+            } else {
+                end_vpn
+            };
+        }
+
         let mut cursor = start_vpn;
         while cursor < end_vpn {
             let Some(area_start) = self.find_user_vma_key(cursor) else {

@@ -3,14 +3,15 @@ use alloc::sync::Arc;
 use crate::mm::{UserPtr, UserPtrMut};
 use crate::syscall::errno::*;
 use crate::task::{
-    add_kernel_timer, current_task, current_user_token, signal::Signals, PosixTimer,
-    sleep_relative_interruptible, Rusage, TimerAction,
+    add_kernel_timer, current_task, current_user_token, find_process_by_pid, find_task_by_tid,
+    signal::Signals, PosixTimer, sleep_relative_interruptible, Rusage, TimerAction,
 };
 use crate::timer::{
     current_timespec, current_timeval, get_time_ms, set_current_timespec, ITimerVal, TimeSpec,
     TimeVal, TimeZone, Times, NSEC_PER_SEC,
 };
 use log::{info, trace};
+use spin::Mutex;
 
 const CLOCK_REALTIME: usize = 0;
 const CLOCK_MONOTONIC: usize = 1;
@@ -23,6 +24,13 @@ const CLOCK_BOOTTIME: usize = 7;
 const CLOCK_REALTIME_ALARM: usize = 8;
 const CLOCK_BOOTTIME_ALARM: usize = 9;
 const CLOCK_TAI: usize = 11;
+const CPUCLOCK_CLOCK_MASK: i32 = 3;
+const CPUCLOCK_PERTHREAD_MASK: i32 = 4;
+const CPUCLOCK_PID_MASK: i32 = 7;
+const CPUCLOCK_PROF: i32 = 0;
+const CPUCLOCK_VIRT: i32 = 1;
+const CPUCLOCK_SCHED: i32 = 2;
+const CPUCLOCK_MAX: i32 = 3;
 const TIMER_ABSTIME: u32 = 1;
 const SIGEV_SIGNAL: i32 = 0;
 const SIGEV_NONE: i32 = 1;
@@ -55,6 +63,14 @@ const ADJ_VALID_MASK: u32 = ADJ_OFFSET
     | ADJ_NANO
     | ADJ_TICK;
 const TIME_OK: isize = 0;
+const TIME_INS: isize = 1;
+const TIME_DEL: isize = 2;
+const TIME_ERROR: isize = 5;
+const STA_INS: i32 = 0x0010;
+const STA_DEL: i32 = 0x0020;
+const STA_UNSYNC: i32 = 0x0040;
+const STA_CLOCKERR: i32 = 0x1000;
+const STA_NANO: i32 = 0x2000;
 
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
@@ -81,6 +97,35 @@ pub struct Timex {
     tai: i32,
     __padding: [i32; 11],
 }
+
+#[derive(Clone, Copy, Debug)]
+struct TimexState {
+    offset: i64,
+    freq: i64,
+    maxerror: i64,
+    esterror: i64,
+    status: i32,
+    constant: i64,
+    tick: i64,
+    tai: i32,
+}
+
+impl TimexState {
+    const fn new() -> Self {
+        Self {
+            offset: 0,
+            freq: 0,
+            maxerror: 0,
+            esterror: 0,
+            status: 0,
+            constant: 0,
+            tick: 10_000,
+            tai: 0,
+        }
+    }
+}
+
+static TIMEX_STATE: Mutex<TimexState> = Mutex::new(TimexState::new());
 
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
@@ -452,13 +497,22 @@ fn current_posix_itimerspec(timer: &PosixTimer) -> ITimerSpec {
     }
 }
 
-pub fn sys_gettimeofday(tv: *mut TimeVal, _tz: *mut TimeZone) -> isize {
-    // Timezone is currently NOT supported.
+pub fn sys_gettimeofday(tv: *mut TimeVal, tz: *mut TimeZone) -> isize {
+    let token = current_user_token();
     if !tv.is_null() {
-        let token = current_user_token();
         let timeval = current_timeval();
         if UserPtrMut::new(tv).write(token, &timeval).is_err() {
             log::error!("[sys_gettimeofday] Failed to copy to {:?}", tv);
+            return EFAULT;
+        }
+    }
+    if !tz.is_null() {
+        let timezone = TimeZone {
+            tz_minuteswest: 0,
+            tz_dsttime: 0,
+        };
+        if UserPtrMut::new(tz).write(token, &timezone).is_err() {
+            log::error!("[sys_gettimeofday] Failed to copy to {:?}", tz);
             return EFAULT;
         }
     }
@@ -481,17 +535,69 @@ fn has_time_adjust_permission() -> bool {
     inner.euid == 0 || (inner.cap_effective & (1u64 << CAP_SYS_TIME)) != 0
 }
 
-fn fill_timex_snapshot(timex: &mut Timex) {
-    timex.offset = 0;
-    timex.freq = 0;
-    timex.maxerror = 0;
-    timex.esterror = 0;
-    timex.status = 0;
-    timex.constant = 0;
+fn update_timex_state(state: &mut TimexState, timex: &Timex) {
+    if timex.modes == ADJ_OFFSET_SINGLESHOT || timex.modes == ADJ_OFFSET_SS_READ {
+        return;
+    }
+    if timex.modes & ADJ_OFFSET != 0 {
+        state.offset = timex.offset;
+    }
+    if timex.modes & ADJ_FREQUENCY != 0 {
+        state.freq = timex.freq;
+    }
+    if timex.modes & ADJ_MAXERROR != 0 {
+        state.maxerror = timex.maxerror;
+    }
+    if timex.modes & ADJ_ESTERROR != 0 {
+        state.esterror = timex.esterror;
+    }
+    if timex.modes & ADJ_STATUS != 0 {
+        state.status = timex.status;
+    }
+    if timex.modes & ADJ_TIMECONST != 0 {
+        state.constant = timex.constant;
+    }
+    if timex.modes & ADJ_TICK != 0 {
+        state.tick = timex.tick;
+    }
+    if timex.modes & ADJ_TAI != 0 {
+        state.tai = timex.tai;
+    }
+    if timex.modes & ADJ_NANO != 0 {
+        state.status |= STA_NANO;
+    }
+    if timex.modes & ADJ_MICRO != 0 {
+        state.status &= !STA_NANO;
+    }
+    if timex.modes & ADJ_SETOFFSET != 0 {
+        let target = current_timespec() + TimeSpec::from_us(timex.time.to_us());
+        set_current_timespec(target);
+    }
+}
+
+fn timex_return_state(status: i32) -> isize {
+    if status & (STA_UNSYNC | STA_CLOCKERR) != 0 {
+        TIME_ERROR
+    } else if status & STA_INS != 0 || status == TIME_INS as i32 {
+        TIME_INS
+    } else if status & STA_DEL != 0 || status == TIME_DEL as i32 {
+        TIME_DEL
+    } else {
+        TIME_OK
+    }
+}
+
+fn fill_timex_snapshot(timex: &mut Timex, state: TimexState) {
+    timex.offset = state.offset;
+    timex.freq = state.freq;
+    timex.maxerror = state.maxerror;
+    timex.esterror = state.esterror;
+    timex.status = state.status;
+    timex.constant = state.constant;
     timex.precision = 1;
     timex.tolerance = 32_768_000;
     timex.time = current_timeval();
-    timex.tick = 10_000;
+    timex.tick = state.tick;
     timex.ppsfreq = 0;
     timex.jitter = 0;
     timex.shift = 0;
@@ -500,7 +606,7 @@ fn fill_timex_snapshot(timex: &mut Timex) {
     timex.calcnt = 0;
     timex.errcnt = 0;
     timex.stbcnt = 0;
-    timex.tai = 0;
+    timex.tai = state.tai;
 }
 
 fn do_adjtimex(timex_ptr: *mut Timex) -> isize {
@@ -515,9 +621,15 @@ fn do_adjtimex(timex_ptr: *mut Timex) -> isize {
     if timex.modes != 0 && !has_time_adjust_permission() {
         return EPERM;
     }
-    fill_timex_snapshot(&mut timex);
+    let ret = {
+        let mut state = TIMEX_STATE.lock();
+        update_timex_state(&mut state, &timex);
+        let snapshot = *state;
+        fill_timex_snapshot(&mut timex, snapshot);
+        timex_return_state(snapshot.status)
+    };
     match UserPtrMut::new(timex_ptr).write(token, &timex) {
-        Ok(()) => TIME_OK,
+        Ok(()) => ret,
         Err(errno) => errno,
     }
 }
@@ -556,6 +668,124 @@ pub fn sys_get_time() -> isize {
     get_time_ms() as isize
 }
 
+#[derive(Clone, Copy)]
+struct CpuClockId {
+    pid: usize,
+    per_thread: bool,
+    which: i32,
+}
+
+fn decode_cpu_clock_id(clk_id: usize) -> Result<CpuClockId, isize> {
+    let clock = clk_id as i32;
+    if clock >= 0 {
+        return Err(EINVAL);
+    }
+    let which = clock & CPUCLOCK_CLOCK_MASK;
+    if which >= CPUCLOCK_MAX || (clock & CPUCLOCK_PID_MASK) == CPUCLOCK_PID_MASK {
+        return Err(EINVAL);
+    }
+    let pid = !(clock >> 3);
+    if pid < 0 {
+        return Err(EINVAL);
+    }
+    Ok(CpuClockId {
+        pid: pid as usize,
+        per_thread: clock & CPUCLOCK_PERTHREAD_MASK != 0,
+        which,
+    })
+}
+
+fn scale_sched_cpu_clock_us(us: usize, nice: i32) -> usize {
+    let nice = nice.clamp(-20, 19);
+    if nice < 0 {
+        us.saturating_mul((20 - nice) as usize) / 20
+    } else if nice > 0 {
+        us.saturating_mul(20) / (20 + nice as usize)
+    } else {
+        us
+    }
+}
+
+fn cpu_clock_from_rusage(rusage: Rusage, which: i32, nice: i32) -> TimeSpec {
+    let utime = rusage.ru_utime.to_us();
+    let stime = rusage.ru_stime.to_us();
+    let us = match which {
+        CPUCLOCK_PROF => utime.saturating_add(stime),
+        CPUCLOCK_SCHED => scale_sched_cpu_clock_us(utime.saturating_add(stime), nice),
+        CPUCLOCK_VIRT => utime,
+        _ => 0,
+    };
+    TimeSpec::from_us(us)
+}
+
+fn validate_cpu_clock_id(clk_id: usize) -> Result<CpuClockId, isize> {
+    let clock = decode_cpu_clock_id(clk_id)?;
+    let current = current_task().unwrap();
+    if clock.pid == 0 {
+        return Ok(clock);
+    }
+    let exists = if clock.per_thread {
+        find_task_by_tid(clock.pid).is_some()
+    } else {
+        find_process_by_pid(clock.pid).is_some()
+            || (clock.pid == current.gettid() && find_process_by_pid(current.pid()).is_some())
+    };
+    if exists {
+        Ok(clock)
+    } else {
+        Err(EINVAL)
+    }
+}
+
+fn cpu_clock_timespec(clk_id: usize) -> Result<TimeSpec, isize> {
+    let clock = validate_cpu_clock_id(clk_id)?;
+    let current = current_task().unwrap();
+    if clock.per_thread {
+        let task = if clock.pid == 0 {
+            current
+        } else {
+            find_task_by_tid(clock.pid).ok_or(EINVAL)?
+        };
+        let inner = task.acquire_inner_lock();
+        return Ok(cpu_clock_from_rusage(
+            inner.rusage,
+            clock.which,
+            inner.sched_nice,
+        ));
+    }
+
+    let process = if clock.pid == 0 || clock.pid == current.gettid() {
+        current.process.clone()
+    } else {
+        find_process_by_pid(clock.pid).ok_or(EINVAL)?
+    };
+    let mut cpu_us = 0usize;
+    let mut saw_thread = false;
+    for weak in process.threads.lock().iter() {
+        if let Some(task) = weak.upgrade() {
+            let inner = task.acquire_inner_lock();
+            let rusage = inner.rusage;
+            let task_utime = rusage.ru_utime.to_us();
+            let task_stime = rusage.ru_stime.to_us();
+            let task_us = match clock.which {
+                CPUCLOCK_PROF => task_utime.saturating_add(task_stime),
+                CPUCLOCK_SCHED => scale_sched_cpu_clock_us(
+                    task_utime.saturating_add(task_stime),
+                    inner.sched_nice,
+                ),
+                CPUCLOCK_VIRT => task_utime,
+                _ => return Err(EINVAL),
+            };
+            cpu_us = cpu_us.saturating_add(task_us);
+            saw_thread = true;
+        }
+    }
+    if !saw_thread {
+        return Err(EINVAL);
+    }
+    Ok(TimeSpec::from_us(cpu_us))
+}
+
 pub fn sys_clock_gettime(clk_id: usize, tp: *mut TimeSpec) -> isize {
     let timespec = match clk_id {
         CLOCK_REALTIME | CLOCK_REALTIME_COARSE | CLOCK_REALTIME_ALARM | CLOCK_TAI => {
@@ -568,7 +798,10 @@ pub fn sys_clock_gettime(clk_id: usize, tp: *mut TimeSpec) -> isize {
         | CLOCK_MONOTONIC_COARSE
         | CLOCK_BOOTTIME
         | CLOCK_BOOTTIME_ALARM => TimeSpec::now(),
-        _ => return EINVAL,
+        _ => match cpu_clock_timespec(clk_id) {
+            Ok(timespec) => timespec,
+            Err(errno) => return errno,
+        },
     };
     if !tp.is_null() {
         let token = current_user_token();
@@ -592,7 +825,11 @@ pub fn sys_clock_getres(clk_id: usize, tp: *mut TimeSpec) -> isize {
         | CLOCK_MONOTONIC_COARSE
         | CLOCK_BOOTTIME
         | CLOCK_TAI => {}
-        _ => return EINVAL,
+        _ => {
+            if let Err(errno) = validate_cpu_clock_id(clk_id) {
+                return errno;
+            }
+        }
     }
     if !tp.is_null() {
         let resolution = TimeSpec {
@@ -720,16 +957,21 @@ pub fn sys_times(buf: *mut Times) -> isize {
 }
 
 pub fn sys_getrusage(who: isize, usage: *mut Rusage) -> isize {
-    if who != 0 {
-        panic!("[sys_getrusage] parameter 'who' is not RUSAGE_SELF.");
-    }
+    const RUSAGE_CHILDREN: isize = -1;
+    const RUSAGE_SELF: isize = 0;
+    const RUSAGE_THREAD: isize = 1;
+
     let task = current_task().unwrap();
-    let inner = task.acquire_inner_lock();
     let token = task.get_user_token();
-    if UserPtrMut::new(usage).write(token, &inner.rusage).is_err() {
+    let rusage = match who {
+        RUSAGE_SELF | RUSAGE_THREAD => task.acquire_inner_lock().rusage,
+        RUSAGE_CHILDREN => Rusage::new(),
+        _ => return EINVAL,
+    };
+    if UserPtrMut::new(usage).write(token, &rusage).is_err() {
         log::error!("[sys_getrusage] Failed to copy to {:?}", usage);
         return EFAULT;
     };
-    //info!("[sys_getrusage] who: RUSAGE_SELF, usage: {:?}", inner.rusage);
+    //info!("[sys_getrusage] who: {:?}, usage: {:?}", who, rusage);
     SUCCESS
 }

@@ -1,8 +1,11 @@
 use crate::mm::{UserPtr, VirtAddr};
 use crate::syscall::errno::*;
-use crate::task::threads::{do_futex_wait, do_futex_wait_shared, futex_wake_shared, FutexCmd};
+use crate::task::threads::{
+    do_futex_wait, do_futex_wait_bitset, do_futex_wait_bitset_shared, do_futex_wait_shared,
+    futex_requeue_shared, futex_wake_shared, FutexCmd,
+};
 use crate::task::{current_task, threads};
-use crate::timer::TimeSpec;
+use crate::timer::{current_timespec, TimeSpec, NSEC_PER_SEC};
 use log::{info, trace};
 use num_enum::FromPrimitive;
 
@@ -41,8 +44,8 @@ pub fn sys_futex(
         return EINVAL;
     }
     let futex_word = UserPtr::new(uaddr as *const u32);
-    match futex_word.read(token) {
-        Ok(_) => {}
+    let futex_value = match futex_word.read(token) {
+        Ok(value) => value,
         Err(errno) => return errno,
     };
     let cmd = threads::FutexCmd::from_primitive(futex_op & 0x7fu32);
@@ -69,9 +72,49 @@ pub fn sys_futex(
         vm.translate(vpn).map(|ppn| (ppn.0 << 12) + offset)
     }
 
+    fn read_timeout(
+        timeout: *const TimeSpec,
+        token: usize,
+    ) -> Result<Option<TimeSpec>, isize> {
+        UserPtr::new(timeout).read_optional(token).and_then(|timeout| {
+            if let Some(timeout) = timeout {
+                if timeout.tv_sec > isize::MAX as usize || timeout.tv_nsec >= NSEC_PER_SEC {
+                    return Err(EINVAL);
+                }
+            }
+            Ok(timeout)
+        })
+    }
+
+    fn realtime_deadline(deadline: TimeSpec) -> TimeSpec {
+        let now_realtime = current_timespec();
+        let duration = if deadline > now_realtime {
+            deadline - now_realtime
+        } else {
+            TimeSpec::new()
+        };
+        TimeSpec::now() + duration
+    }
+
+    fn futex_bitset_deadline(
+        timeout: *const TimeSpec,
+        token: usize,
+        option: FutexOption,
+    ) -> Result<Option<TimeSpec>, isize> {
+        read_timeout(timeout, token).map(|timeout| {
+            timeout.map(|deadline| {
+                if option.contains(FutexOption::CLOCK_REALTIME) {
+                    realtime_deadline(deadline)
+                } else {
+                    deadline
+                }
+            })
+        })
+    }
+
     match cmd {
         FutexCmd::Wait => {
-            let timeout = match UserPtr::new(timeout).read_optional(token) {
+            let timeout = match read_timeout(timeout, token) {
                 Ok(timeout) => timeout,
                 Err(errno) => return errno,
             };
@@ -90,7 +133,36 @@ pub fn sys_futex(
                 do_futex_wait(futex_word, token, private_key, val, timeout)
             }
         }
-        FutexCmd::Wake => {
+        FutexCmd::WaitBitset => {
+            if val3 == 0 {
+                return EINVAL;
+            }
+            let deadline = match futex_bitset_deadline(timeout, token, option) {
+                Ok(deadline) => deadline,
+                Err(errno) => return errno,
+            };
+            if !is_private {
+                let vm_ref = task.process.vm();
+                let vm = vm_ref.lock();
+                let phys_key = match va_to_phys_key(&vm, uaddr as usize) {
+                    Some(k) => k,
+                    None => return EFAULT,
+                };
+                drop(vm);
+                drop(task);
+                do_futex_wait_bitset_shared(futex_word, token, val, deadline, phys_key)
+            } else {
+                drop(task);
+                do_futex_wait_bitset(futex_word, token, private_key, val, deadline)
+            }
+        }
+        FutexCmd::Wake | FutexCmd::WakeBitset => {
+            if val > i32::MAX as u32 {
+                return EINVAL;
+            }
+            if cmd == FutexCmd::WakeBitset && val3 == 0 {
+                return EINVAL;
+            }
             if is_private {
                 task.process.futex().lock().wake(private_key, val)
             } else {
@@ -104,7 +176,7 @@ pub fn sys_futex(
                 futex_wake_shared(phys_key, val)
             }
         }
-        FutexCmd::Requeue => {
+        FutexCmd::Requeue | FutexCmd::CmpRequeue => {
             if uaddr2.is_null() || uaddr2.align_offset(4) != 0 {
                 return EINVAL;
             }
@@ -112,13 +184,18 @@ pub fn sys_futex(
                 Ok(_) => {}
                 Err(errno) => return errno,
             };
+            if cmd == FutexCmd::CmpRequeue && futex_value != val3 {
+                return EAGAIN;
+            }
+            let val2 = timeout as usize;
+            if val > i32::MAX as u32 || val2 > i32::MAX as usize {
+                return EINVAL;
+            }
             if is_private {
-                task.process.futex().lock().requeue(
-                    private_key,
-                    uaddr2 as usize,
-                    val,
-                    timeout as u32,
-                )
+                task.process
+                    .futex()
+                    .lock()
+                    .requeue(private_key, uaddr2 as usize, val, val2)
             } else {
                 let phys_key = {
                     let vm_ref = task.process.vm();
@@ -136,20 +213,7 @@ pub fn sys_futex(
                         None => return EFAULT,
                     }
                 };
-                // shared requeue: wake + move remaining to second queue
-                let mut shared = crate::task::threads::PROCESS_SHARED_FUTEX.lock();
-                let wake_cnt = if let Some(mut wq) = shared.remove(&phys_key) {
-                    let cnt = wq.wake_at_most(val as usize);
-                    if !wq.is_empty() {
-                        shared.insert(phys_key, wq);
-                    }
-                    cnt
-                } else {
-                    0
-                };
-                // requeue to phys_key2: 简化实现，LTP 中极少用
-                drop(shared);
-                wake_cnt as isize
+                futex_requeue_shared(phys_key, phys_key2, val, val2)
             }
         }
         FutexCmd::Invalid => EINVAL,

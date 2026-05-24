@@ -22,6 +22,7 @@ impl Debug for Vma {
                 "map_file",
                 &if self.map_file.is_some() { "yes" } else { "no" },
             )
+            .field("wipe_on_fork", &self.wipe_on_fork)
             .finish()
     }
 }
@@ -38,8 +39,10 @@ pub struct Vma {
     /// Offset into the file where this VMA starts (in bytes).
     /// For anonymous mappings, this is always 0.
     pub map_file_offset: usize,
+    pub may_write: bool,
 
     pub flags: MapFlags,
+    pub wipe_on_fork: bool,
 }
 
 impl Vma {
@@ -50,7 +53,9 @@ impl Vma {
             map_perm: self.map_perm,
             map_file: self.map_file.clone(),
             map_file_offset: self.map_file_offset,
+            may_write: self.may_write,
             flags: self.flags,
+            wipe_on_fork: self.wipe_on_fork,
         })
     }
     /// Construct a new segment without without allocating memory
@@ -84,7 +89,9 @@ impl Vma {
             map_perm,
             map_file,
             map_file_offset,
+            may_write: true,
             flags: MapFlags::empty(),
+            wipe_on_fork: false,
         })
     }
     /// Copier, but the physical pages are not allocated,
@@ -98,7 +105,9 @@ impl Vma {
             map_perm: another.map_perm,
             map_file: another.map_file.clone(),
             map_file_offset: another.map_file_offset,
+            may_write: another.may_write,
             flags: another.flags,
+            wipe_on_fork: another.wipe_on_fork,
         }
     }
     pub fn frame_is_unallocated(&self, vpn: VirtPageNum) -> bool {
@@ -185,6 +194,25 @@ impl Vma {
         }
         self.inner.remove_in_memory(&vpn);
         UserMapper::new(page_table).unmap_user_page(vpn)?;
+        Ok(())
+    }
+
+    pub fn discard_range<T: PageTable>(
+        &mut self,
+        page_table: &mut T,
+        start_vpn: VirtPageNum,
+        end_vpn: VirtPageNum,
+    ) -> Result<(), MemoryError> {
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            if !self.vm_contains(vpn) {
+                return Err(MemoryError::BadAddress);
+            }
+            if let Err(err) = self.unmap_one(page_table, vpn) {
+                if !matches!(err, MemoryError::NotMapped) {
+                    return Err(err);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -414,6 +442,26 @@ impl Vma {
             .map_err(|_| crate::syscall::errno::ENOMEM)?;
         Ok(())
     }
+    /// If `new_start` is equal to the current start of area, do nothing and return `Ok(())`.
+    pub fn expand_down_to(&mut self, new_start: VirtAddr) -> Result<(), isize> {
+        let new_start_vpn: VirtPageNum = new_start.floor();
+        let old_start_vpn = self.inner.vpn_range.get_start();
+        if new_start_vpn > old_start_vpn {
+            warn!(
+                "[expand_down_to] new_start_vpn: {:?} is higher than old_start_vpn: {:?}",
+                new_start_vpn, old_start_vpn
+            );
+            return Err(crate::syscall::errno::EINVAL);
+        }
+        if self.map_file.is_some() {
+            warn!("[expand_down_to] file-backed MAP_GROWSDOWN is unsupported");
+            return Err(crate::syscall::errno::EINVAL);
+        }
+        self.inner
+            .set_start(new_start_vpn)
+            .map_err(|_| crate::syscall::errno::ENOMEM)?;
+        Ok(())
+    }
     /// If `new_end` is equal to the current end of area, do nothing and return `Ok(())`.
     pub fn shrink_to<T: PageTable>(
         &mut self,
@@ -491,7 +539,9 @@ impl Vma {
             map_perm: self.map_perm,
             map_file: second_file,
             map_file_offset: second_offset,
+            may_write: self.may_write,
             flags: self.flags,
+            wipe_on_fork: self.wipe_on_fork,
         })
     }
     pub fn into_three(
@@ -714,6 +764,7 @@ impl Vma {
             && flags.contains(MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS)
             && prot == self.map_perm
             && self.map_file.is_none()
+            && !self.wipe_on_fork
     }
 
     pub(super) fn vm_perm(&self) -> MapPermission {

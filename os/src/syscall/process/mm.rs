@@ -1,14 +1,17 @@
 use crate::config::PAGE_SIZE;
 use crate::fs::vfs;
-use crate::mm::{translated_byte_buffer, MapFlags, MapPermission, UserAccess};
+use crate::mm::{
+    copy_to_user_array, translated_byte_buffer, MapFlags, MapPermission, UserAccess,
+};
 use crate::syscall::errno::*;
 use crate::task::{current_task, current_user_token};
-use crate::utils::error::SyscallErr;
-use log::{error, info, warn};
+use alloc::vec::Vec;
+use log::{info, warn};
 
 const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
 const PROT_EXEC: usize = 0x4;
+const CAP_IPC_LOCK: usize = 14;
 
 pub fn sys_sbrk(increment: isize) -> isize {
     let task = current_task().unwrap();
@@ -78,15 +81,18 @@ fn parse_mmap_prot(prot: usize) -> Result<MapPermission, isize> {
 }
 
 fn parse_mmap_flags(flags: usize) -> Result<MapFlags, isize> {
-    let flags = MapFlags::from_bits(flags).ok_or(EINVAL)?;
-    let type_bits = flags.bits() & MapFlags::MAP_TYPE.bits();
+    let type_bits = flags & MapFlags::MAP_TYPE.bits();
     if type_bits != MapFlags::MAP_SHARED.bits()
         && type_bits != MapFlags::MAP_PRIVATE.bits()
         && type_bits != MapFlags::MAP_SHARED_VALIDATE.bits()
     {
         return Err(EINVAL);
     }
-    Ok(flags)
+    let unknown_bits = flags & !MapFlags::all().bits();
+    if type_bits == MapFlags::MAP_SHARED_VALIDATE.bits() && unknown_bits != 0 {
+        return Err(EOPNOTSUPP);
+    }
+    Ok(MapFlags::from_bits_truncate(flags))
 }
 
 pub fn sys_mmap(
@@ -98,11 +104,21 @@ pub fn sys_mmap(
     offset: usize,
 ) -> isize {
     let task = current_task().unwrap();
+    if flags & MapFlags::MAP_ANONYMOUS.bits() == 0 {
+        let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
+        if fd_table.get_file(fd).is_err() {
+            return EBADF;
+        }
+    }
+    if len == 0 {
+        return EINVAL;
+    }
     let prot = match parse_mmap_prot(prot) {
         Ok(prot) => prot,
         Err(errno) => return errno,
     };
-    let flags = match parse_mmap_flags(flags) {
+    let mut flags = match parse_mmap_flags(flags) {
         Ok(flags) => flags,
         Err(errno) => return errno,
     };
@@ -111,6 +127,7 @@ pub fn sys_mmap(
         start, len, prot, flags, fd as isize, offset
     );
 
+    let mut may_write = true;
     let map_file = if flags.contains(MapFlags::MAP_ANONYMOUS) {
         None
     } else {
@@ -126,34 +143,74 @@ pub fn sys_mmap(
         if file.readable().is_err() {
             return EACCES;
         }
+        let file_writable = file.writable().is_ok();
         if flags.contains(MapFlags::MAP_SHARED)
             && prot.contains(MapPermission::W)
-            && file.writable().is_err()
+            && !file_writable
         {
             return EACCES;
         }
-        if !matches!(file.file_type(), vfs::FileType::File) {
+        if flags.contains(MapFlags::MAP_SHARED) {
+            may_write = file_writable;
+        }
+        let inode = vfs::MountFSInode::unwrap_inode(&file.inode);
+        let is_zero = inode.as_any_ref().is::<crate::fs::dev::zero::Zero>();
+        if !is_zero && !matches!(file.file_type(), vfs::FileType::File) {
             return EACCES;
         }
-        Some(file.inode.clone())
+        if is_zero {
+            flags |= MapFlags::MAP_ANONYMOUS;
+            None
+        } else {
+            Some(inode)
+        }
     };
 
     let vm_ref = task.process.vm();
     let mut memory_set = vm_ref.lock();
-    memory_set.mmap(start, len, prot, flags, offset, map_file)
+    memory_set.mmap(start, len, prot, flags, offset, map_file, may_write)
 }
 
 /// # Versions
 /// The membarrier() system call was added in Linux 4.3.
 /// Before Linux 5.10, the prototype for membarrier() was:
 /// `int membarrier(int cmd, int flags);`
-pub fn sys_memorybarrier(_cmd: usize, _flags: usize, _cpu_id: usize) -> isize {
-    error!("[sys_memorybarrier]=========PSEUDOIMPLEMENTATION=========");
-    error!(
-        "This system call is only needed by the multicore environment for faster synchronization."
-    );
-    error!("In theory, it can be replaced (INefficiently) by fencing.");
-    return SUCCESS;
+pub fn sys_memorybarrier(cmd: usize, flags: usize, _cpu_id: usize) -> isize {
+    const MEMBARRIER_CMD_QUERY: usize = 0;
+    const MEMBARRIER_CMD_GLOBAL: usize = 1 << 0;
+    const MEMBARRIER_CMD_PRIVATE_EXPEDITED: usize = 1 << 3;
+    const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED: usize = 1 << 4;
+    const MEMBARRIER_SUPPORTED_CMDS: usize = MEMBARRIER_CMD_GLOBAL
+        | MEMBARRIER_CMD_PRIVATE_EXPEDITED
+        | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED;
+
+    if flags != 0 {
+        return EINVAL;
+    }
+
+    match cmd {
+        MEMBARRIER_CMD_QUERY => MEMBARRIER_SUPPORTED_CMDS as isize,
+        MEMBARRIER_CMD_GLOBAL => SUCCESS,
+        MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED => {
+            current_task()
+                .unwrap()
+                .acquire_inner_lock()
+                .membarrier_private_expedited_registered = true;
+            SUCCESS
+        }
+        MEMBARRIER_CMD_PRIVATE_EXPEDITED => {
+            if current_task()
+                .unwrap()
+                .acquire_inner_lock()
+                .membarrier_private_expedited_registered
+            {
+                SUCCESS
+            } else {
+                EPERM
+            }
+        }
+        _ => EINVAL,
+    }
 }
 
 pub fn sys_munmap(start: usize, len: usize) -> isize {
@@ -343,28 +400,90 @@ pub fn sys_mprotect(addr: usize, len: usize, prot: usize) -> isize {
 }
 
 pub fn sys_mlock(addr: usize, len: usize) -> isize {
-    if len == 0 {
-        return SUCCESS;
+    let task = current_task().unwrap();
+    let privileged = {
+        let inner = task.acquire_inner_lock();
+        inner.euid == 0 || (inner.cap_effective & (1u64 << CAP_IPC_LOCK)) != 0
+    };
+    let locked_len = match task.process.vm().lock().mlock(addr, len) {
+        Ok(locked_len) => locked_len,
+        Err(errno) => return errno,
+    };
+    if !privileged {
+        let memlock_limit = task.acquire_inner_lock().memlock_limit_cur;
+        if memlock_limit == 0 {
+            return EPERM;
+        }
+        if locked_len > memlock_limit {
+            return ENOMEM;
+        }
     }
-    if addr.checked_add(len).is_none() {
+    SUCCESS
+}
+
+pub fn sys_mlock2(addr: usize, len: usize, flags: usize) -> isize {
+    const MLOCK_ONFAULT: usize = 1;
+    if flags & !MLOCK_ONFAULT != 0 {
         return EINVAL;
     }
-    match translated_byte_buffer(current_user_token(), addr as *const u8, len, UserAccess::Read) {
-        Ok(_) => SUCCESS,
-        Err(errno) => errno,
+    if flags == 0 {
+        return sys_mlock(addr, len);
     }
+
+    let task = current_task().unwrap();
+    let (privileged, memlock_limit) = {
+        let inner = task.acquire_inner_lock();
+        (
+            inner.euid == 0 || (inner.cap_effective & (1u64 << CAP_IPC_LOCK)) != 0,
+            inner.memlock_limit_cur,
+        )
+    };
+    let locked_len = match task.process.vm().lock().mlock_onfault(addr, len) {
+        Ok(locked_len) => locked_len,
+        Err(errno) => return errno,
+    };
+    if !privileged {
+        if memlock_limit == 0 {
+            return EPERM;
+        }
+        if locked_len > memlock_limit {
+            return ENOMEM;
+        }
+    }
+    SUCCESS
 }
 
 pub fn sys_munlock(addr: usize, len: usize) -> isize {
-    sys_mlock(addr, len)
+    let task = current_task().unwrap();
+    match task.process.vm().lock().munlock(addr, len) {
+        Ok(_) => SUCCESS,
+        Err(errno) => errno,
+    }
 }
 
 pub fn sys_mlockall(flags: usize) -> isize {
     const MCL_CURRENT: usize = 1;
     const MCL_FUTURE: usize = 2;
     const MCL_ONFAULT: usize = 4;
-    if flags & !(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) != 0 {
+    if flags == 0 || flags & !(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) != 0 {
         return EINVAL;
+    }
+    let task = current_task().unwrap();
+    let (privileged, memlock_limit) = {
+        let inner = task.acquire_inner_lock();
+        (
+            inner.euid == 0 || (inner.cap_effective & (1u64 << CAP_IPC_LOCK)) != 0,
+            inner.memlock_limit_cur,
+        )
+    };
+    if !privileged && flags & MCL_CURRENT != 0 {
+        if memlock_limit == 0 {
+            return EPERM;
+        }
+        let mapped = task.process.vm().lock().user_mapped_bytes();
+        if mapped > memlock_limit {
+            return ENOMEM;
+        }
     }
     SUCCESS
 }
@@ -373,7 +492,107 @@ pub fn sys_munlockall() -> isize {
     SUCCESS
 }
 
-pub fn sys_madvise(_addr: usize, _length: usize, _advice: usize) -> isize {
-    // 暂时返回 EINVAL
-    -(SyscallErr::EINVAL as isize)
+pub fn sys_mincore(addr: usize, len: usize, vec: usize) -> isize {
+    if addr & (PAGE_SIZE - 1) != 0 {
+        return EINVAL;
+    }
+
+    let rounded_len = match page_round_up_len(len) {
+        Some(len) => len,
+        None => return ENOMEM,
+    };
+    if rounded_len == 0 {
+        return SUCCESS;
+    }
+    if addr
+        .checked_add(rounded_len)
+        .map_or(true, |end| end > crate::config::USER_VA_END)
+    {
+        return ENOMEM;
+    }
+
+    let page_count = rounded_len / PAGE_SIZE;
+    if translated_byte_buffer(
+        current_user_token(),
+        vec as *const u8,
+        page_count,
+        UserAccess::Write,
+    )
+    .is_err()
+    {
+        return EFAULT;
+    }
+
+    let mut residency = Vec::new();
+    if residency.try_reserve(page_count).is_err() {
+        return ENOMEM;
+    }
+    residency.resize(page_count, 0);
+
+    let task = current_task().unwrap();
+    if let Err(errno) = task
+        .process
+        .vm()
+        .lock()
+        .mincore(addr, rounded_len, residency.as_mut_slice())
+    {
+        return errno;
+    }
+
+    match copy_to_user_array(
+        current_user_token(),
+        residency.as_ptr(),
+        vec as *mut u8,
+        page_count,
+    ) {
+        Ok(_) => SUCCESS,
+        Err(_) => EFAULT,
+    }
+}
+
+pub fn sys_madvise(addr: usize, length: usize, advice: usize) -> isize {
+    const MADV_NORMAL: usize = 0;
+    const MADV_RANDOM: usize = 1;
+    const MADV_SEQUENTIAL: usize = 2;
+    const MADV_WILLNEED: usize = 3;
+    const MADV_DONTNEED: usize = 4;
+    const MADV_WIPEONFORK: usize = 18;
+    const MADV_KEEPONFORK: usize = 19;
+
+    if addr & (PAGE_SIZE - 1) != 0 {
+        return EINVAL;
+    }
+
+    let len = match page_round_up_len(length) {
+        Some(len) => len,
+        None => return EINVAL,
+    };
+    if len == 0 {
+        return SUCCESS;
+    }
+    if checked_page_range(addr, len).is_err() {
+        return EINVAL;
+    }
+
+    match advice {
+        MADV_NORMAL
+        | MADV_RANDOM
+        | MADV_SEQUENTIAL
+        | MADV_WILLNEED
+        | MADV_DONTNEED
+        | MADV_WIPEONFORK
+        | MADV_KEEPONFORK => {
+            match current_task()
+                .unwrap()
+                .process
+                .vm()
+                .lock()
+                .madvise(addr, len, advice)
+            {
+                Ok(_) => SUCCESS,
+                Err(errno) => errno,
+            }
+        }
+        _ => EINVAL,
+    }
 }

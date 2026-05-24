@@ -25,9 +25,12 @@ mod pending;
 mod wait;
 
 pub use action::Sighand;
-pub use delivery::{send_process_signal, send_thread_signal};
+pub use delivery::{
+    send_process_signal, send_process_signal_info, send_thread_signal,
+    send_thread_signal_info_deferred,
+};
 use frame::signal_frame_layout;
-pub use pending::{PendingSignal, SignalQueue};
+pub use pending::{is_realtime_signal, PendingSignal, SignalQueue};
 pub use wait::{sigsuspend, sigtimedwait};
 
 bitflags! {
@@ -461,7 +464,9 @@ fn pending_unblocked_signals(task: &TaskControlBlock) -> Signals {
 
 fn signal_is_actionable(sighand: &Sighand, signum: usize, signal: Signals) -> bool {
     match sighand.get(signum) {
-        Some(act) => act.handler != SigHandler::SIG_IGN,
+        Some(act) if act.handler == SigHandler::SIG_IGN => false,
+        Some(act) if act.handler == SigHandler::SIG_DFL => !SIG_DFL_IGNORE.contains(signal),
+        Some(_) => true,
         None => !SIG_DFL_IGNORE.contains(signal),
     }
 }
@@ -598,7 +603,7 @@ pub fn do_signal() {
                 trace!("[do_signal] Ignore {:?} (SIG_IGN)", signal);
                 continue;
             }
-            {
+            if act.handler != SigHandler::SIG_DFL {
                 let trap_cx = inner.get_trap_cx();
                 let a0_isize = trap_cx.gp.a0 as isize;
                 // if this syscall wants to restart
@@ -619,7 +624,6 @@ pub fn do_signal() {
                         trap_cx.gp.a0 = EINTR as usize;
                     }
                 }
-            }
             let current_sp = inner.get_trap_cx().gp.sp;
             let alt_stack = inner.signal_stack;
             let use_alt_stack = act.flags.contains(SigActionFlags::SA_ONSTACK)
@@ -767,13 +771,16 @@ pub fn do_signal() {
                 (signal | act.mask) - Signals::CAN_NOT_BE_MASKED
             };
             if act.flags.contains(SigActionFlags::SA_RESETHAND) {
-                sighand.set(signum, None);
+                let mut reset_action = act;
+                reset_action.handler = SigHandler::SIG_DFL;
+                sighand.set(signum, Some(reset_action));
             }
             // go back to `trap_return`
             return;
-        } else {
-            // user program doesn't register a handler for this signal, use our default handler
-            match signal {
+            }
+        }
+        // user program doesn't register a handler for this signal, use our default handler
+        match signal {
                 // caused by a specific instruction in user program, print log here before exit
                 Signals::SIGILL | Signals::SIGSEGV => {
                     let scause = get_exception_cause();
@@ -826,7 +833,6 @@ pub fn do_signal() {
                     drop(task);
                     exit_group_and_run_next(default_signal_wait_status(signal));
                 }
-            }
         }
     }
 }
@@ -942,8 +948,9 @@ pub struct SigInfo {
     __pad0: u32,
     si_pid: u32,
     si_uid: u32,
+    si_value: usize,
     // unsupported fields
-    __pad: [u8; 128 - 6 * core::mem::size_of::<u32>()],
+    __pad: [u8; 128 - 6 * core::mem::size_of::<u32>() - core::mem::size_of::<usize>()],
 }
 
 impl SigInfo {
@@ -957,6 +964,16 @@ impl SigInfo {
         si_code: usize,
         si_pid: usize,
     ) -> Self {
+        Self::new_with_sender_value(si_signo, si_errno, si_code, si_pid, 0)
+    }
+
+    pub fn new_with_sender_value(
+        si_signo: usize,
+        si_errno: usize,
+        si_code: usize,
+        si_pid: usize,
+        si_value: usize,
+    ) -> Self {
         Self {
             si_signo: si_signo as u32,
             si_errno: si_errno as u32,
@@ -964,8 +981,24 @@ impl SigInfo {
             __pad0: 0,
             si_pid: si_pid as u32,
             si_uid: 0,
-            __pad: [0; 128 - 6 * core::mem::size_of::<u32>()],
+            si_value,
+            __pad: [0; 128 - 6 * core::mem::size_of::<u32>() - core::mem::size_of::<usize>()],
         }
+    }
+
+    pub fn with_signal_sender(mut self, si_signo: usize, si_pid: usize) -> Self {
+        self.si_signo = si_signo as u32;
+        self.si_pid = si_pid as u32;
+        self.si_uid = 0;
+        self
+    }
+
+    pub fn signo(&self) -> usize {
+        self.si_signo as usize
+    }
+
+    pub fn is_kernel_generated(&self) -> bool {
+        (self.si_code as i32) >= 0
     }
 }
 

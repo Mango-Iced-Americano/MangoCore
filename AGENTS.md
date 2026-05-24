@@ -223,6 +223,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | unmap 后读到 PTE 残留值 | 未刷新 TLB，CPU 仍用旧缓存 | **所有 PTE 修改后 `sfence.vma` / `invtlb`** |
 | heap allocator panic | 内核堆耗尽 | `try_reserve` 防御 + OOM killer |
 | `brk`/`mmap` 返回意外值 | 堆/mmap 区域冲突 | 检查 `program_break` 边界 |
+| `mmap18` MAP_GROWSDOWN 栈增长失败 | 页故障只查已覆盖 VMA，未在 guard page fault 时扩展 grow-down VMA | fault 地址位于 grow-down VMA 下方且不碰撞/不进入 stack_guard_gap 时，先下扩 VMA 起点再走懒分配 |
 
 ### 文件系统
 
@@ -242,6 +243,12 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | socketpair 非 AF_UNIX | 返回 EAFNOSUPPORT | Linux 语义：返回 EPROTONOSUPPORT(93) |
 | getpeername NULL addr | EFAULT 被 ENOTCONN 覆盖 | 必须先验证参数再检查连接状态 |
 
+### 时间/定时器
+
+| 问题 | 根因 | 修复 |
+|------|------|------|
+| `leapsec01` 报 `adjtimex status ... not set` | `adjtimex/clock_adjtime` 只返回快照，未保存 `ADJ_STATUS` 等可调字段 | 保存 `TimexState`，按 `ADJ_*` 更新并在后续 snapshot 回填 |
+
 ### 信号/进程
 
 | 问题 | 根因 | 修复 |
@@ -249,6 +256,19 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | nanosleep 唤醒后死锁 | 持 `task.inner` 锁调 `has_actionable_signal()` | 释放锁后再调 |
 | 被屏蔽信号导致 EINTR | 用 `is_empty()` 检查信号 | 用 `sigpending.difference(sigmask)` |
 | execve 后 OOM | 新旧内存集同时存在 | `load_elf` 开头 `recycle_data_pages()` |
+| `rt_sigaction03` invalid sigsetsize 误成功 | `rt_sigaction` 分发忽略第 4 参数 `sigsetsize` | syscall 层传入并校验 `sigsetsize == sizeof(kernel sigset_t)` |
+| `sigaction01` 中 `SA_RESETHAND` 清掉 `SA_SIGINFO` | 信号投递后直接删除 action，handler 内 `sigaction(..., oldact)` 读到默认空 flags | `SA_RESETHAND` 只把 handler 重置为 `SIG_DFL`，保留 flags/mask/restorer 供 oldact 查询 |
+| `rt_sigqueueinfo01` pthread checkpoint 超时 | TID 目标信号立即唤醒 futex/checkpoint waiter，导致 LTP 后续 `TST_CHECKPOINT_WAKE` 找不到等待者 | 对非 leader TID 先入线程 pending，不主动信号唤醒；由测试的 futex wake 释放后再处理 pending signal |
+| LTP cgroup 脚本触发 `syslog/klogctl` panic 或 `syslog12` 非 root 失败 | `sys_syslog()` 对 READ_CLEAR/CLEAR/console/size action 留了 `todo!()`，用户拷贝 `unwrap()`，且缺少权限检查 | 所有 action 返回稳定 errno/成功值，用户指针错误返回错误码；除 READ_ALL/SIZE_BUFFER 外需 root 或 `CAP_SYS_ADMIN/CAP_SYSLOG` |
+| LTP nice05 动态 CPU clock 失败 | glibc 使用负数动态 clock id，且相邻 nice 在单核调度中差异太小 | 解码动态 CPU clock id，并让 `CPUCLOCK_SCHED`/调度统计体现 nice |
+| glibc pthread cancel 缺库 | 测试镜像缺少架构匹配 `libgcc_s.so.1` | initproc 写入 `/glibc/lib/libgcc_s.so.1` 后再链接到 `/lib` |
+| pidfd_send_signal 对 `/proc/<pid>` fd 返回 EBADF | procfs inode 被 MountFSInode 包装，且 `/proc/<pid>` 目录未记录 pid | 解包 MountFSInode 后识别 LockedProcInode，并在 pid 目录 `extra_data` 保存 pid |
+| pidfd_getfd 已退出目标返回 EBADF | wait 后 zombie 进程仍可被 registry 查到，但 fd table 已关闭 | 目标进程 zombie 时按 Linux 语义返回 `ESRCH` |
+| pidfd_open04 waitid(P_PIDFD) ENOSYS | 缺少 `waitid(95)` 分发和 P_PIDFD 最小语义 | 支持 `P_PIDFD + WEXITED`，非阻塞未退出返回 `EAGAIN`，退出后回收子进程 |
+| futex_wait05 短 timeout 超时过长 | 单线程短等待走完整 wait queue/调度路径，QEMU 下固定增加数毫秒 | 仅对单线程、ready 队列为空、短 timeout 使用硬件时钟短轮询；仍保持值不匹配优先返回 `EAGAIN` |
+| process_vm_readv03 多 iovec 数据错误 | 大量同页一字节 iovec 被长期保存成多个 `&mut` 页切片，存在别名风险 | 跨进程 iovec 拷贝逐页 chunk 即时复制，不持久保存页切片 |
+| process_vm01 无权限场景返回 EFAULT | 先访问目标进程坏地址，后做 ptrace/credential 权限判断，errno 优先级反了 | 读取/写入远程 VM 前先按 uid/gid/suid/sgid、dumpable 和 `CAP_SYS_PTRACE` 检查访问权限，无权限返回 `EPERM` |
+| LTP `msg*` 大片 ENOSYS/errno 失败 | 缺少 SysV message queue syscall 和 Linux IPC 权限/时间字段语义 | 最小实现 `msgget/msgctl/msgsnd/msgrcv`，用 wall-clock 填 `msg_*time`，校验 uid/gid/mode、NULL 用户指针和 `MSG_COPY/MSG_EXCEPT/MSG_NOERROR`；`msgrcv06/msgsnd06` 这类删除唤醒需后续 wait queue 化 |
 
 ### QEMU / 测试
 
@@ -257,11 +277,25 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | QEMU 启动无显示 | 检查 `console::init()` 是否第一个被调用 |
 | `os_test.conf` 修改不生效 | 用 `conf-inject` 重新注入镜像 |
 | QEMU 进程残留 | `pkill qemu-system` |
+| `sigtimedwait01`/`rt_sigtimedwait01`/`sigwaitinfo01` 卡住整轮 LTP | 当前 signal wait 缺少专用唤醒队列，先由 inline runner 显式 skip，后续专项修 |
+| `signal06` 返回 TCONF 32 | LTP 标注 x86_64-only，rv64/la64 下不是有效适配目标，inline runner 显式 skip |
+| `pthcli`/`pthserv` 单独运行失败或挂住 | 它们是 LTP 网络 helper/server，不是独立 syscall 用例，inline runner 显式 skip |
+| `ptrace*` 大片 ENOSYS/TBROK | 当前内核无 ptrace stop/wait/tracee 状态机，属于结构性子系统 | 先由 inline runner skip，后续专项做 ptrace 模型 |
+| LTP `pm_*`/`pkey01`/`profil01`/`pt_test`/部分 `prctl*` TCONF | 依赖 power-management、pkey、profil、perf、procfs/capability 等当前非目标环境 | 先 narrow skip，避免阻塞后续 syscall 扫描 |
+| LTP `rename*` 大片 TBROK 或卡住 | 多数依赖外部块设备、目录权限矩阵等 fs 适配面 | 当前 fs/net 协作期先由 inline runner skip |
+| LTP `request_key*`/`rmdir*`/`route*` 阻塞后续扫描 | 分别依赖 keyring 子系统、fs 语义和网络路由脚本 | 当前非 fs/net 主线先 narrow skip |
+| LTP `rtc*`/`run_cpuctl*`/`run_freezer*`/`run_memctl*`/`runpwtests*` TFAIL/TCONF | 依赖 RTC ioctl、cgroup controller 或 power-management 环境 | 当前非设备/控制器主线先 narrow skip |
+| LTP `rwtest` 持续刷 Broken pipe | 文件/管道压力 helper，容易拖慢扫描 | 当前 broad scan 中单点 skip |
 | 非阻塞 socket 测试失败 | 检查是否在 `try_xxx` 前调了 `try_poll()` |
 
 ### 错误码对齐（Linux 语义）
 
 - 未对齐 addrlen → EFAULT（RISC-V 硬件不报错，需显式检查 `addrlen % 4 != 0`）
+- `mmap` 非匿名映射的坏 fd → EBADF 优先于 len/flags 校验；`mmap08` 会在 page size 异常为 0 时仍期待 EBADF
+- `msync` 的 `MS_ASYNC|MS_SYNC` → EINVAL；`MS_INVALIDATE` 命中 `MAP_LOCKED` VMA → EBUSY；未映射区间 → ENOMEM
+- `prctl` 兼容项不要统一返回 EINVAL：`PR_SET_NAME` 坏用户指针要 EFAULT，`PR_SET_DUMPABLE` 非 0/1 要 EINVAL，`PR_CAPBSET_DROP`/`PR_SET_SECUREBITS` 缺 `CAP_SETPCAP` 要 EPERM，`PR_SET_TIMERSLACK(0)` 要恢复线程默认值
+- `process_vm_readv/writev`：`flags != 0` → EINVAL，`liovcnt/riovcnt > 1024` → EINVAL，零 iovec sanity call 要返回 0；跨进程访问要用目标进程 `vm` fault-in，不能直接套当前 token 的 uaccess；远程地址 EFAULT 前要先做权限检查，无权限返回 EPERM
+- SysV msg：`msgp == NULL` → EFAULT，`mtype <= 0` 或 `msgsz > MSGMAX` → EINVAL，无权限按读写位返回 EACCES；空队列配 `IPC_NOWAIT/MSG_COPY` 返回 ENOMSG
 - setsockopt 未知 level → ENOPROTOOPT(92)，不是 EOPNOTSUPP(95)
 - socketpair 非 AF_UNIX → EPROTONOSUPPORT(93)，不是 EAFNOSUPPORT(97)
 - `Socket::alloc` 未知 domain → EAFNOSUPPORT(97)，不是 EINVAL(22)

@@ -70,6 +70,10 @@ impl SignalQueue {
         self.bitmap.contains(signal)
     }
 
+    pub fn queued_count(&self) -> usize {
+        self.queue.len()
+    }
+
     pub fn enqueue_signal(&mut self, signal: Signals, si_code: usize) -> Result<(), isize> {
         self.enqueue_signal_with_sender(signal, si_code, 0)
     }
@@ -153,6 +157,6 @@ impl Default for SignalQueue {
     }
 }
 
-fn is_realtime_signal(signal: Signals) -> bool {
+pub fn is_realtime_signal(signal: Signals) -> bool {
     signal.to_signum().map(|signum| signum >= 32).unwrap_or(false)
 }

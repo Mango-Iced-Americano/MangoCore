@@ -95,7 +95,25 @@ pub struct TaskManager {
     pub interruptible_queue: VecDeque<Arc<TaskControlBlock>>,
 }
 
-/// 简单的FIFO调度器
+fn sched_pick_key(task: &Arc<TaskControlBlock>) -> (u64, i32, usize) {
+    let inner = task.acquire_inner_lock();
+    (inner.sched_vruntime, inner.sched_nice, task.gettid())
+}
+
+fn pop_next_ready(queue: &mut VecDeque<Arc<TaskControlBlock>>) -> Option<Arc<TaskControlBlock>> {
+    let mut best_index = 0usize;
+    let mut best_key = sched_pick_key(queue.front()?);
+    for (index, task) in queue.iter().enumerate().skip(1) {
+        let key = sched_pick_key(task);
+        if key < best_key {
+            best_index = index;
+            best_key = key;
+        }
+    }
+    queue.remove(best_index)
+}
+
+/// 简化的 nice-aware 调度器。
 impl TaskManager {
     #[cfg(feature = "oom_handler")]
     /// 构造函数
@@ -120,7 +138,7 @@ impl TaskManager {
     /// 从就绪队列中取出一个任务
     #[cfg(feature = "oom_handler")]
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
-        match self.ready_queue.pop_front() {
+        match pop_next_ready(&mut self.ready_queue) {
             Some(task) => {
                 // 标记任务为激活状态
                 self.active_tracker.mark_active(task.tid.0);
@@ -131,7 +149,7 @@ impl TaskManager {
     }
     #[cfg(not(feature = "oom_handler"))]
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
-        self.ready_queue.pop_front()
+        pop_next_ready(&mut self.ready_queue)
     }
     /// 添加一个任务到可中断队列
     pub fn add_interruptible(&mut self, task: Arc<TaskControlBlock>) {
