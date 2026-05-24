@@ -789,6 +789,9 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     if name.starts_with("dirtyc0w") {
         return Some("procfs/fs dirtyc0w regression tests skipped in broad LTP scan");
     }
+    if name.starts_with("dns") {
+        return Some("network DNS stress/helper tests skipped in LTP syscall scan");
+    }
     if name.starts_with("pm_") {
         return Some("requires power-management sysfs/python environment");
     }
@@ -965,6 +968,9 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "creat07_child" => Some("standalone creat child helper skipped in LTP syscall scan"),
         "delete_module01" => Some("requires procfs cmdline/module environment"),
         "delete_module03" => Some("requires procfs cmdline/module environment"),
+        "dirtypipe" => Some("pipe CVE regression test skipped in broad LTP scan"),
+        "dma_thread_diotest" => Some("requires large block device for DMA direct-I/O test"),
+        "doio" => Some("long-running filesystem I/O stress helper skipped in broad scan"),
         "df01.sh" => Some("filesystem shell helper skipped in LTP syscall scan"),
         "killall_udp_traffic" | "ns-udpclient" | "ns-udpsender" | "ns-udpserver" => {
             Some("network UDP helper skipped in LTP syscall scan")
