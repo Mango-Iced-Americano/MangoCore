@@ -1,10 +1,20 @@
+use crate::fs::ext4::ext4fs::GLOBAL_EXT4FS;
+use crate::fs::flush_all_page_caches;
 use crate::hal::shutdown;
 use crate::mm::copy_to_user_string;
 use crate::syscall::errno::*;
 use crate::task::{current_user_token, suspend_current_and_run_next};
+use log::info;
 use num_enum::FromPrimitive;
 
 pub fn sys_shutdown() -> isize {
+    info!("[sys_shutdown] flushing page caches and ext4 metadata...");
+    flush_all_page_caches();
+    if let Some(ext4fs) = GLOBAL_EXT4FS.lock().as_ref().and_then(|w| w.upgrade()) {
+        ext4fs.flush_metadata_cache();
+        info!("[sys_shutdown] ext4 metadata cache flushed");
+    }
+    info!("[sys_shutdown] halting");
     shutdown()
 }
 

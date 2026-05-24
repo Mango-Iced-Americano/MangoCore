@@ -9,6 +9,39 @@ use crate::syscall::errno::*;
 use crate::task::{current_task, exit_current_and_run_next};
 use log::{debug, info};
 
+/// 验证文件是否为有效 ELF（前4字节为 \x7fELF 魔数）
+fn is_valid_elf(file: &vfs::File) -> bool {
+    if file.get_size() < 4 {
+        return false;
+    }
+    let mut magic = [0u8; 4];
+    match file.pread(0, &mut magic) {
+        Ok(n) if n >= 4 => &magic == b"\x7fELF",
+        _ => false,
+    }
+}
+
+/// shebang 解释器无效时尝试常见 shell：/bin/sh → /bin/bash
+/// 成功时更新 argv_vec（插入脚本路径为 argv[0]），返回打开的 shell File
+fn try_open_shell_fallback(
+    cwd_inode: &Arc<dyn vfs::IndexNode>,
+    argv_vec: &mut Vec<String>,
+    script_path: &str,
+) -> Result<vfs::File, isize> {
+    for shell in &["/bin/sh", "/bin/bash"] {
+        let file = match vfs_lookup(cwd_inode, shell, true)
+            .and_then(|inode| vfs::File::new(inode, vfs::FileFlags::O_RDONLY).map_err(|e| -(e as isize)))
+        {
+            Ok(f) if !f.is_dir() && is_valid_elf(&f) => f,
+            _ => continue,
+        };
+        if argv_vec.try_reserve(1).is_err() { return Err(ENOMEM); }
+        argv_vec.insert(0, script_path.to_string());
+        return Ok(file);
+    }
+    Err(ENOEXEC)
+}
+
 fn parse_shebang(file: &vfs::File) -> Result<Option<(String, Option<String>)>, isize> {
     let mut header = [0u8; 128];
     let n = file.pread(0, &mut header).map_err(|e| -(e as isize))?;
@@ -134,47 +167,50 @@ pub fn sys_execve(
             let elf = if &magic_number == b"\x7fELF" {
                 file
             } else if &magic_number[..2] == b"#!" {
-                let shell_file = match parse_shebang(&file) {
-                    Ok(Some((interp, shebang_arg))) => {
-                        match open_exec(&interp) {
-                            Ok(f) => {
-                                let mut script_argv = Vec::new();
-                                script_argv.push(interp);
-                                if let Some(arg) = shebang_arg { script_argv.push(arg); }
-                                script_argv.push(path.clone());
-                                for arg in argv_vec.iter().skip(1) {
-                                    script_argv.push(arg.clone());
-                                }
-                                argv_vec = script_argv;
-                                f
+                let shell_file = if let Ok(Some((interp, shebang_arg))) = parse_shebang(&file) {
+                    // 尝试打开并验证 shebang 解释器
+                    match open_exec(&interp).and_then(|f| {
+                        if !f.is_dir() && is_valid_elf(&f) {
+                            Ok(f)
+                        } else {
+                            Err(ENOEXEC)
+                        }
+                    }) {
+                        Ok(f) => {
+                            let mut script_argv = Vec::new();
+                            script_argv.push(interp);
+                            if let Some(arg) = shebang_arg { script_argv.push(arg); }
+                            script_argv.push(path.clone());
+                            for arg in argv_vec.iter().skip(1) {
+                                script_argv.push(arg.clone());
                             }
-                            Err(_) => {
-                                match open_exec("/bin/bash") {
-                                    Ok(f) => {
-                                        if argv_vec.try_reserve(1).is_err() { return ENOMEM; }
-                                        argv_vec.insert(0, path.clone());
-                                        f
-                                    }
-                                    Err(e) => return e,
-                                }
+                            argv_vec = script_argv;
+                            f
+                        }
+                        Err(_) => {
+                            // 解释器无效，回退到常见 shell
+                            match try_open_shell_fallback(&cwd_inode, &mut argv_vec, &path) {
+                                Ok(f) => f,
+                                Err(e) => return e,
                             }
                         }
                     }
-                    _ => {
-                        match open_exec("/bin/bash") {
-                            Ok(f) => {
-                                if argv_vec.try_reserve(1).is_err() { return ENOMEM; }
-                                argv_vec.insert(0, path.clone());
-                                f
-                            }
-                            Err(e) => return e,
-                        }
+                } else {
+                    // shebang 解析失败，尝试常见 shell 回退
+                    match try_open_shell_fallback(&cwd_inode, &mut argv_vec, &path) {
+                        Ok(f) => f,
+                        Err(e) => return e,
                     }
                 };
                 shell_file
             } else {
                 return ENOEXEC;
             };
+
+            // 检查不是目录 — Linux execve(2) 对目录返回 EISDIR
+            if elf.is_dir() {
+                return EISDIR;
+            }
 
             let task = current_task().unwrap();
             // 确保 exe_path 是绝对路径（glibc _dl_get_origin 要求以 '/' 开头）

@@ -16,7 +16,7 @@ use crate::hal::{trap_handler, TrapContext};
 use crate::mm::PageTableImpl;
 use crate::mm::{AddressSpace, FaultAccess, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::syscall::CloneFlags;
-use crate::syscall::errno::{ENOEXEC, ENOMEM};
+use crate::syscall::errno::{EISDIR, ENOEXEC, ENOMEM};
 use crate::timer::{ITimerVal, TimeSpec, TimeVal};
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -617,6 +617,9 @@ impl TaskControlBlock {
         argv_vec: &Vec<String>,
         envp_vec: &Vec<String>,
     ) -> Result<(), isize> {
+        if elf.is_dir() {
+            return Err(EISDIR);
+        }
         // 旧 VM 没有被其他 CLONE_VM 进程共享时，可以先释放用户数据页，
         // 避免新旧内存集同时存在导致双倍内存压力触发 OOM。
         // 如果旧 VM 被共享（典型是 CLONE_VM | CLONE_VFORK），exec 必须先

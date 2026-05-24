@@ -75,7 +75,7 @@ const DEFAULT_TIMEOUTS: [u64; 12] = [
     1800, // [8]  lmbench
     90,   // [9]  netperf
     60,   // [10] cyclictest
-    300,  // [11] ltp
+    600,  // [11] ltp
 ];
 
 /// LTP 默认排除测例名列表
@@ -1498,8 +1498,9 @@ fn prepare_symlink(environ: &[*const u8]) {
 
     run_bash_cmd(
         "
-        ln -sf /bash /bin/bash;
-        ln -sf /bash /bin/sh;
+        rm -f /bin/bash /bin/sh;
+        ln -s /bash /bin/bash;
+        ln -s /bash /bin/sh;
     ",
         environ,
     );
@@ -1539,8 +1540,8 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     );
 
     // println!("[initproc] running fs_test...");
-    // let fs_test_cmd = "cd / && ./fs_test\0";
-    // let fs_test_ret = run_bash_cmd(fs_test_cmd, &environ);
+    let fs_test_cmd = "cd / && ./fs_test\0";
+    let fs_test_ret = run_bash_cmd(fs_test_cmd, &environ);
     // println!("[initproc] fs_test returned exit_code={}", fs_test_ret);
 
     let cfg = load_runtime_config();

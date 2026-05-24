@@ -125,6 +125,16 @@ impl Drop for Ext4OSInode {
             (guard.inode_num, guard.inode.links_count(), guard.inode.is_dir())
         };
         if links == 0 {
+            // Defense-in-depth: re-read authoritative link count from cache
+            // to avoid freeing an inode that still has links (stale snapshot guard)
+            let snapshot = self.ext4fs.get_inode_snapshot(ino);
+            if snapshot.inode.links_count() > 0 {
+                log::warn!(
+                    "[Ext4OSInode::Drop] ino={} stale snapshot had links==0 but cache shows links={}, skipping free",
+                    ino, snapshot.inode.links_count()
+                );
+                return;
+            }
             // truncate_inode(0) 释放所有数据块，失败则跳过后续 inode 号释放
             if self.ext4fs.truncate_inode(&mut *self.inode.lock(), 0).is_ok() {
                 self.ext4fs.ialloc_free_inode(ino, is_dir);
