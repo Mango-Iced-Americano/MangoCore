@@ -72,6 +72,17 @@ fn proc_object_stats() -> (usize, usize, usize, usize, usize, usize, usize, usiz
     (pcbs, zpcbs, tcb_live, tcb_slots, pcb_refs, zpcb_refs, as_refs, zas_refs, zvm_x)
 }
 
+fn vma_stats() -> (usize, usize, usize) {
+    let mut vmas = 0; let mut zvmas = 0; let mut frames = 0;
+    for pcb in crate::task::ProcessManager::all_processes() {
+        let vm = pcb.vm();
+        let vc = vm.lock().vma_count();
+        frames += alloc::sync::Arc::strong_count(&vm).saturating_sub(1);
+        if pcb.is_zombie() { zvmas += vc; } else { vmas += vc; }
+    }
+    (vmas, zvmas, frames)
+}
+
 pub fn print_resource_stats(task: Option<&TaskControlBlock>) {
     if !STATS_ENABLED { return; }
 
@@ -87,6 +98,7 @@ pub fn print_resource_stats(task: Option<&TaskControlBlock>) {
     let (kt, ka, ks, kb, nt, nb) = ext4_dentry_stats();
     let (pa, pz, fo, fs, fc, zfo, zfc) = proc_fd_stats();
     let (pcbs, zpcbs, tcbs, tcb_slots, pcb_refs, zpcb_refs, as_refs, zas_refs, zvm_x) = proc_object_stats();
+    let (vmas, zvmas, pt_frames) = vma_stats();
 
     // Line 1: system resources
     let procs = procs_count();
@@ -137,8 +149,8 @@ pub fn print_resource_stats(task: Option<&TaskControlBlock>) {
     println!("[kernel] [stats] buddy_free={}", orders);
     // Line 6: process/thread object lifecycle
     println!(
-        "[kernel] [stats] objs pcb={} zpcb={} tcb={}/{} stale={} pcb_ref={}/{} as_ref={}/{}/{}",
+        "[kernel] [stats] objs pcb={} zpcb={} tcb={}/{} stale={} pcb_ref={}/{} as_ref={}/{}/{} vma={}/{} ptf={}",
         pcbs, zpcbs, tcbs, tcb_slots, tcb_slots.saturating_sub(tcbs),
-        pcb_refs, zpcb_refs, as_refs, zas_refs, zvm_x
+        pcb_refs, zpcb_refs, as_refs, zas_refs, zvm_x, vmas, zvmas, pt_frames
     );
 }

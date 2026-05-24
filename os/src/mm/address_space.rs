@@ -70,6 +70,10 @@ impl<T: PageTable> AddressSpace<T> {
     pub fn token(&self) -> usize {
         self.page_table.token()
     }
+    /// VMA 数量（用于诊断）
+    pub fn vma_count(&self) -> usize {
+        self.vmas.len()
+    }
     /// Insert an anonymous segment containing the space between `start_va.floor()` to `end_va.ceil()`.
     /// The space is allocated and added to the current address space.
     /// # Prerequisite
