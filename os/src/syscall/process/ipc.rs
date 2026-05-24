@@ -3,9 +3,9 @@ use crate::mm::{copy_from_user, copy_from_user_array, copy_to_user, copy_to_user
 use crate::syscall::errno::*;
 use crate::task::{
     current_task, current_user_token, discard_non_actionable_unblocked_signals,
-    has_actionable_signal, suspend_current_and_run_next,
+    has_actionable_signal, suspend_current_and_run_next, WaitQueue, WaitResult,
 };
-use crate::timer::{current_timespec, get_time_ms};
+use crate::timer::{current_timespec, get_time_ms, TimeSpec};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 use core::mem::size_of;
@@ -40,6 +40,25 @@ const MSGMAX: usize = 8192;
 const MSGMNB: usize = 16384;
 const MSGTQL: usize = 4096;
 const MSG_BLOCK_TIMEOUT_MS: usize = 3000;
+
+const GETPID: usize = 11;
+const GETVAL: usize = 12;
+const GETALL: usize = 13;
+const GETNCNT: usize = 14;
+const GETZCNT: usize = 15;
+const SETVAL: usize = 16;
+const SETALL: usize = 17;
+const SEM_STAT: usize = 18;
+const SEM_INFO: usize = 19;
+const SEM_STAT_ANY: usize = 20;
+const SEM_UNDO: i16 = 0x1000;
+const SEM_R: usize = 0o400;
+const SEM_A: usize = 0o200;
+const SEMMNI: usize = 1024;
+const SEMMSL: usize = 32000;
+const SEMOPM: usize = 500;
+const SEMVMX: i32 = 32767;
+const SEMAEM: i32 = 32767;
 
 const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
@@ -119,6 +138,40 @@ struct LinuxMsgInfo {
     msgssz: i32,
     msgtql: i32,
     msgseg: u16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LinuxSemidDs {
+    sem_perm: LinuxIpcPerm,
+    sem_otime: i64,
+    sem_ctime: i64,
+    sem_nsems: u64,
+    reserved3: u64,
+    reserved4: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LinuxSemInfo {
+    semmap: i32,
+    semmni: i32,
+    semmns: i32,
+    semmnu: i32,
+    semmsl: i32,
+    semopm: i32,
+    semume: i32,
+    semusz: i32,
+    semvmx: i32,
+    semaem: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LinuxSembuf {
+    sem_num: u16,
+    sem_op: i16,
+    sem_flg: i16,
 }
 
 #[derive(Clone)]
@@ -243,6 +296,131 @@ impl MsgRegistry {
     }
 }
 
+#[derive(Clone, Copy)]
+struct Semaphore {
+    value: i32,
+    last_pid: i32,
+    ncnt: u16,
+    zcnt: u16,
+}
+
+impl Semaphore {
+    fn new() -> Self {
+        Self {
+            value: 0,
+            last_pid: 0,
+            ncnt: 0,
+            zcnt: 0,
+        }
+    }
+}
+
+struct SemSet {
+    key: isize,
+    uid: u32,
+    gid: u32,
+    cuid: u32,
+    cgid: u32,
+    mode: usize,
+    semaphores: Vec<Semaphore>,
+    otime: usize,
+    ctime: usize,
+}
+
+impl SemSet {
+    fn new(key: isize, nsems: usize, mode: usize, uid: u32, gid: u32) -> Result<Self, isize> {
+        let mut semaphores = Vec::new();
+        semaphores.try_reserve_exact(nsems).map_err(|_| ENOMEM)?;
+        semaphores.resize(nsems, Semaphore::new());
+        Ok(Self {
+            key,
+            uid,
+            gid,
+            cuid: uid,
+            cgid: gid,
+            mode: mode & 0o777,
+            semaphores,
+            otime: 0,
+            ctime: now_sec(),
+        })
+    }
+
+    fn to_semid_ds(&self) -> LinuxSemidDs {
+        LinuxSemidDs {
+            sem_perm: LinuxIpcPerm::new(
+                self.key, self.uid, self.gid, self.cuid, self.cgid, self.mode,
+            ),
+            sem_otime: self.otime as i64,
+            sem_ctime: self.ctime as i64,
+            sem_nsems: self.semaphores.len() as u64,
+            reserved3: 0,
+            reserved4: 0,
+        }
+    }
+}
+
+struct SemRegistry {
+    next_id: i32,
+    sets: BTreeMap<i32, SemSet>,
+    wait_queue: WaitQueue,
+    removed_ids: Vec<i32>,
+}
+
+impl SemRegistry {
+    fn new() -> Self {
+        Self {
+            next_id: 1,
+            sets: BTreeMap::new(),
+            wait_queue: WaitQueue::new(),
+            removed_ids: Vec::new(),
+        }
+    }
+
+    fn alloc_id(&mut self) -> i32 {
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1).max(1);
+        id
+    }
+
+    fn find_by_key(&self, key: isize) -> Option<(i32, &SemSet)> {
+        self.sets
+            .iter()
+            .find(|(_, set)| set.key == key)
+            .map(|(id, set)| (*id, set))
+    }
+
+    fn id_by_index(&self, index: i32) -> Option<i32> {
+        if index < 0 {
+            return None;
+        }
+        self.sets.keys().nth(index as usize).copied()
+    }
+
+    fn highest_index(&self) -> isize {
+        if self.sets.is_empty() {
+            0
+        } else {
+            self.sets.len() as isize - 1
+        }
+    }
+
+    fn total_semaphores(&self) -> usize {
+        self.sets.values().map(|set| set.semaphores.len()).sum()
+    }
+
+    fn mark_removed(&mut self, id: i32) {
+        if !self.removed_ids.contains(&id) {
+            if self.removed_ids.try_reserve(1).is_ok() {
+                self.removed_ids.push(id);
+            }
+        }
+    }
+
+    fn was_removed(&self, id: i32) -> bool {
+        self.removed_ids.contains(&id)
+    }
+}
+
 struct ShmSegment {
     key: isize,
     size: usize,
@@ -291,6 +469,7 @@ impl ShmRegistry {
 lazy_static! {
     static ref SHM_REGISTRY: Mutex<ShmRegistry> = Mutex::new(ShmRegistry::new());
     static ref MSG_REGISTRY: Mutex<MsgRegistry> = Mutex::new(MsgRegistry::new());
+    static ref SEM_REGISTRY: Mutex<SemRegistry> = Mutex::new(SemRegistry::new());
 }
 
 pub fn sys_shmget(key: isize, size: usize, shmflg: usize) -> isize {
@@ -430,6 +609,517 @@ fn current_ipc_ids() -> (u32, u32) {
 
 fn now_sec() -> usize {
     current_timespec().tv_sec
+}
+
+fn has_sem_permission(set: &SemSet, requested: usize) -> bool {
+    if requested == 0 {
+        return true;
+    }
+    let (euid, egid) = current_ipc_ids();
+    if euid == 0 {
+        return true;
+    }
+    let shift = if euid == set.uid || euid == set.cuid {
+        6
+    } else if egid == set.gid || egid == set.cgid {
+        3
+    } else {
+        0
+    };
+    let available = (set.mode >> shift) & 0o7;
+    let mut need = 0;
+    if requested & SEM_R != 0 {
+        need |= 0o4;
+    }
+    if requested & SEM_A != 0 {
+        need |= 0o2;
+    }
+    available & need == need
+}
+
+fn can_modify_sem_set(set: &SemSet) -> bool {
+    let (euid, _) = current_ipc_ids();
+    euid == 0 || euid == set.uid || euid == set.cuid
+}
+
+fn seminfo_snapshot(registry: &SemRegistry, runtime: bool) -> LinuxSemInfo {
+    let total = registry.total_semaphores();
+    LinuxSemInfo {
+        semmap: SEMMNI as i32,
+        semmni: SEMMNI as i32,
+        semmns: (SEMMNI * SEMMSL) as i32,
+        semmnu: SEMMNI as i32,
+        semmsl: SEMMSL as i32,
+        semopm: SEMOPM as i32,
+        semume: SEMOPM as i32,
+        semusz: if runtime {
+            registry.sets.len() as i32
+        } else {
+            size_of::<SemSet>() as i32
+        },
+        semvmx: SEMVMX,
+        semaem: if runtime { total as i32 } else { SEMAEM },
+    }
+}
+
+pub fn sys_semget(key: isize, nsems: usize, semflg: usize) -> isize {
+    let mut registry = SEM_REGISTRY.lock();
+    if key != IPC_PRIVATE {
+        if let Some((id, set)) = registry.find_by_key(key) {
+            if semflg & IPC_CREAT != 0 && semflg & IPC_EXCL != 0 {
+                return EEXIST;
+            }
+            if nsems > set.semaphores.len() {
+                return EINVAL;
+            }
+            if !has_sem_permission(set, semflg & (SEM_R | SEM_A)) {
+                return EACCES;
+            }
+            return id as isize;
+        }
+        if semflg & IPC_CREAT == 0 {
+            return ENOENT;
+        }
+    }
+
+    if nsems == 0 || nsems > SEMMSL {
+        return EINVAL;
+    }
+    if registry.sets.len() >= SEMMNI {
+        return ENOSPC;
+    }
+    let (uid, gid) = current_ipc_ids();
+    let id = registry.alloc_id();
+    let set = match SemSet::new(key, nsems, semflg & 0o777, uid, gid) {
+        Ok(set) => set,
+        Err(errno) => return errno,
+    };
+    registry.sets.insert(id, set);
+    id as isize
+}
+
+fn semctl_copy_stat(id: i32, cmd: usize, buf: usize) -> isize {
+    let ds = {
+        let registry = SEM_REGISTRY.lock();
+        let id = if cmd == SEM_STAT || cmd == SEM_STAT_ANY {
+            match registry.id_by_index(id) {
+                Some(id) => id,
+                None => return EINVAL,
+            }
+        } else {
+            id
+        };
+        let Some(set) = registry.sets.get(&id) else {
+            return EINVAL;
+        };
+        if cmd != SEM_STAT_ANY && !has_sem_permission(set, SEM_R) {
+            return EACCES;
+        }
+        set.to_semid_ds()
+    };
+    match copy_to_user(
+        current_user_token(),
+        &ds as *const LinuxSemidDs,
+        buf as *mut LinuxSemidDs,
+    ) {
+        Ok(()) if cmd == SEM_STAT || cmd == SEM_STAT_ANY => {
+            let registry = SEM_REGISTRY.lock();
+            registry.id_by_index(id).unwrap_or(id) as isize
+        }
+        Ok(()) => SUCCESS,
+        Err(errno) => errno,
+    }
+}
+
+pub fn sys_semctl(semid: i32, semnum: usize, cmd: usize, arg: usize) -> isize {
+    match cmd {
+        IPC_INFO | SEM_INFO => {
+            let (info, highest) = {
+                let registry = SEM_REGISTRY.lock();
+                (
+                    seminfo_snapshot(&registry, cmd == SEM_INFO),
+                    registry.highest_index(),
+                )
+            };
+            return match copy_to_user(
+                current_user_token(),
+                &info as *const LinuxSemInfo,
+                arg as *mut LinuxSemInfo,
+            ) {
+                Ok(()) => highest,
+                Err(errno) => errno,
+            };
+        }
+        IPC_STAT | SEM_STAT | SEM_STAT_ANY => return semctl_copy_stat(semid, cmd, arg),
+        IPC_RMID => {
+            let mut registry = SEM_REGISTRY.lock();
+            let Some(set) = registry.sets.get(&semid) else {
+                return EINVAL;
+            };
+            if !can_modify_sem_set(set) {
+                return EPERM;
+            }
+            registry.sets.remove(&semid);
+            registry.mark_removed(semid);
+            registry.wait_queue.wake_all();
+            return SUCCESS;
+        }
+        IPC_SET => {
+            let mut ds = LinuxSemidDs {
+                sem_perm: LinuxIpcPerm::new(0, 0, 0, 0, 0, 0),
+                sem_otime: 0,
+                sem_ctime: 0,
+                sem_nsems: 0,
+                reserved3: 0,
+                reserved4: 0,
+            };
+            if let Err(errno) = copy_from_user(
+                current_user_token(),
+                arg as *const LinuxSemidDs,
+                &mut ds as *mut LinuxSemidDs,
+            ) {
+                return errno;
+            }
+            let mut registry = SEM_REGISTRY.lock();
+            let Some(set) = registry.sets.get_mut(&semid) else {
+                return EINVAL;
+            };
+            if !can_modify_sem_set(set) {
+                return EPERM;
+            }
+            set.uid = ds.sem_perm.uid;
+            set.gid = ds.sem_perm.gid;
+            set.mode = ds.sem_perm.mode as usize & 0o777;
+            set.ctime = now_sec();
+            return SUCCESS;
+        }
+        _ => {}
+    }
+
+    let mut registry = SEM_REGISTRY.lock();
+    let Some(set) = registry.sets.get_mut(&semid) else {
+        return EINVAL;
+    };
+    if semnum >= set.semaphores.len() {
+        return EINVAL;
+    }
+
+    let mut wake_waiters = false;
+    let result = match cmd {
+        GETPID => set.semaphores[semnum].last_pid as isize,
+        GETVAL => {
+            if !has_sem_permission(set, SEM_R) {
+                return EACCES;
+            }
+            set.semaphores[semnum].value as isize
+        }
+        GETNCNT => set.semaphores[semnum].ncnt as isize,
+        GETZCNT => set.semaphores[semnum].zcnt as isize,
+        GETALL => {
+            if !has_sem_permission(set, SEM_R) {
+                return EACCES;
+            }
+            let mut values = Vec::new();
+            if values.try_reserve_exact(set.semaphores.len()).is_err() {
+                return ENOMEM;
+            }
+            values.extend(set.semaphores.iter().map(|sem| sem.value as u16));
+            match copy_to_user_array(
+                current_user_token(),
+                values.as_ptr(),
+                arg as *mut u16,
+                values.len(),
+            ) {
+                Ok(()) => SUCCESS,
+                Err(errno) => errno,
+            }
+        }
+        SETVAL => {
+            if !can_modify_sem_set(set) {
+                return EPERM;
+            }
+            if arg > SEMVMX as usize {
+                return ERANGE;
+            }
+            let sem = &mut set.semaphores[semnum];
+            sem.value = arg as i32;
+            sem.last_pid = current_pid_i32();
+            set.ctime = now_sec();
+            wake_waiters = true;
+            SUCCESS
+        }
+        SETALL => {
+            if !can_modify_sem_set(set) {
+                return EPERM;
+            }
+            let mut values = Vec::new();
+            if values.try_reserve_exact(set.semaphores.len()).is_err() {
+                return ENOMEM;
+            }
+            values.resize(set.semaphores.len(), 0u16);
+            if let Err(errno) = copy_from_user_array(
+                current_user_token(),
+                arg as *const u16,
+                values.as_mut_ptr(),
+                values.len(),
+            ) {
+                return errno;
+            }
+            if values.iter().any(|value| *value as i32 > SEMVMX) {
+                return ERANGE;
+            }
+            let pid = current_pid_i32();
+            for (sem, value) in set.semaphores.iter_mut().zip(values.iter()) {
+                sem.value = *value as i32;
+                sem.last_pid = pid;
+            }
+            set.ctime = now_sec();
+            wake_waiters = true;
+            SUCCESS
+        }
+        _ => EINVAL,
+    };
+    if wake_waiters {
+        registry.wait_queue.wake_all();
+    }
+    result
+}
+
+enum SemApplyResult {
+    Applied,
+    Blocked { sem_num: usize, wait_zero: bool },
+}
+
+fn try_apply_sem_ops(set: &mut SemSet, ops: &[LinuxSembuf]) -> Result<SemApplyResult, isize> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(set.semaphores.len())
+        .map_err(|_| ENOMEM)?;
+    values.extend(set.semaphores.iter().map(|sem| sem.value));
+
+    for op in ops {
+        let sem_num = op.sem_num as usize;
+        if sem_num >= set.semaphores.len() {
+            return Err(EFBIG);
+        }
+        if op.sem_flg & !(IPC_NOWAIT as i16 | SEM_UNDO) != 0 {
+            return Err(EINVAL);
+        }
+        let need = if op.sem_op == 0 { SEM_R } else { SEM_A };
+        if !has_sem_permission(set, need) {
+            return Err(EACCES);
+        }
+        if op.sem_op > 0 {
+            let next = values[sem_num].saturating_add(op.sem_op as i32);
+            if next > SEMVMX {
+                return Err(ERANGE);
+            }
+            values[sem_num] = next;
+        } else if op.sem_op < 0 {
+            let decrement = -(op.sem_op as i32);
+            if values[sem_num] < decrement {
+                if op.sem_flg & IPC_NOWAIT as i16 != 0 {
+                    return Err(EAGAIN);
+                }
+                return Ok(SemApplyResult::Blocked {
+                    sem_num,
+                    wait_zero: false,
+                });
+            }
+            values[sem_num] -= decrement;
+        } else if values[sem_num] != 0 {
+            if op.sem_flg & IPC_NOWAIT as i16 != 0 {
+                return Err(EAGAIN);
+            }
+            return Ok(SemApplyResult::Blocked {
+                sem_num,
+                wait_zero: true,
+            });
+        }
+    }
+
+    let pid = current_pid_i32();
+    let mut changed = false;
+    for op in ops {
+        if op.sem_op != 0 {
+            let sem = &mut set.semaphores[op.sem_num as usize];
+            sem.value = values[op.sem_num as usize];
+            sem.last_pid = pid;
+            changed = true;
+        }
+    }
+    if changed {
+        set.otime = now_sec();
+    }
+    Ok(SemApplyResult::Applied)
+}
+
+fn read_sem_ops(sops: usize, nsops: usize) -> Result<Vec<LinuxSembuf>, isize> {
+    if nsops == 0 {
+        return Err(EINVAL);
+    }
+    if nsops > SEMOPM {
+        return Err(E2BIG);
+    }
+    let mut ops = Vec::new();
+    ops.try_reserve_exact(nsops).map_err(|_| ENOMEM)?;
+    ops.resize(
+        nsops,
+        LinuxSembuf {
+            sem_num: 0,
+            sem_op: 0,
+            sem_flg: 0,
+        },
+    );
+    copy_from_user_array(
+        current_user_token(),
+        sops as *const LinuxSembuf,
+        ops.as_mut_ptr(),
+        nsops,
+    )?;
+    Ok(ops)
+}
+
+fn sem_block_deadline(timeout: usize) -> Result<Option<TimeSpec>, isize> {
+    if timeout == 0 {
+        return Ok(None);
+    }
+    let mut ts = TimeSpec::new();
+    copy_from_user(
+        current_user_token(),
+        timeout as *const TimeSpec,
+        &mut ts as *mut TimeSpec,
+    )?;
+    if ts.tv_nsec >= 1_000_000_000 {
+        return Err(EINVAL);
+    }
+    Ok(Some(TimeSpec::now() + ts))
+}
+
+fn cleanup_sem_wait(set: &mut SemSet, registered: &mut Option<(usize, bool)>) {
+    let Some((sem_num, wait_zero)) = registered.take() else {
+        return;
+    };
+    if let Some(sem) = set.semaphores.get_mut(sem_num) {
+        if wait_zero {
+            sem.zcnt = sem.zcnt.saturating_sub(1);
+        } else {
+            sem.ncnt = sem.ncnt.saturating_sub(1);
+        }
+    }
+}
+
+fn update_sem_wait(set: &mut SemSet, registered: &mut Option<(usize, bool)>, next: (usize, bool)) {
+    if registered.map(|current| current == next).unwrap_or(false) {
+        return;
+    }
+    cleanup_sem_wait(set, registered);
+    if let Some(sem) = set.semaphores.get_mut(next.0) {
+        if next.1 {
+            sem.zcnt = sem.zcnt.saturating_add(1);
+        } else {
+            sem.ncnt = sem.ncnt.saturating_add(1);
+        }
+        *registered = Some(next);
+    }
+}
+
+fn sem_wait_condition(
+    registry: &mut SemRegistry,
+    semid: i32,
+    ops: &[LinuxSembuf],
+    registered: &mut Option<(usize, bool)>,
+) -> Option<isize> {
+    let mut wake_waiters = false;
+    let result = {
+        let Some(set) = registry.sets.get_mut(&semid) else {
+            return Some(if registry.was_removed(semid) { EIDRM } else { EINVAL });
+        };
+        match try_apply_sem_ops(set, ops) {
+            Ok(SemApplyResult::Applied) => {
+                cleanup_sem_wait(set, registered);
+                wake_waiters = true;
+                Some(SUCCESS)
+            }
+            Ok(SemApplyResult::Blocked { sem_num, wait_zero }) => {
+                update_sem_wait(set, registered, (sem_num, wait_zero));
+                None
+            }
+            Err(errno) => {
+                cleanup_sem_wait(set, registered);
+                Some(errno)
+            }
+        }
+    };
+    if wake_waiters {
+        registry.wait_queue.wake_all();
+    }
+    result
+}
+
+pub fn sys_semtimedop(semid: i32, sops: usize, nsops: usize, timeout: usize) -> isize {
+    let ops = match read_sem_ops(sops, nsops) {
+        Ok(ops) => ops,
+        Err(errno) => return errno,
+    };
+
+    {
+        let mut registry = SEM_REGISTRY.lock();
+        let mut wake_waiters = false;
+        let result = {
+            let Some(set) = registry.sets.get_mut(&semid) else {
+                return EINVAL;
+            };
+            match try_apply_sem_ops(set, &ops) {
+                Ok(SemApplyResult::Applied) => {
+                    wake_waiters = true;
+                    Some(SUCCESS)
+                }
+                Ok(SemApplyResult::Blocked { .. }) => None,
+                Err(errno) => Some(errno),
+            }
+        };
+        if wake_waiters {
+            registry.wait_queue.wake_all();
+        }
+        if let Some(errno) = result {
+            return errno;
+        }
+    }
+
+    let deadline = match sem_block_deadline(timeout) {
+        Ok(deadline) => deadline,
+        Err(errno) => return errno,
+    };
+    let mut registered = None;
+    let wait_result = if let Some(deadline) = deadline {
+        WaitQueue::wait_event_interruptible_timeout_locked(
+            &SEM_REGISTRY,
+            |registry| &mut registry.wait_queue,
+            |registry| sem_wait_condition(registry, semid, &ops, &mut registered),
+            deadline,
+        )
+    } else {
+        WaitQueue::wait_event_interruptible_locked(
+            &SEM_REGISTRY,
+            |registry| &mut registry.wait_queue,
+            |registry| sem_wait_condition(registry, semid, &ops, &mut registered),
+        )
+    };
+
+    let mut registry = SEM_REGISTRY.lock();
+    if let Some(set) = registry.sets.get_mut(&semid) {
+        cleanup_sem_wait(set, &mut registered);
+    }
+    match wait_result {
+        WaitResult::Ready(value) => value,
+        WaitResult::Interrupted => EINTR,
+        WaitResult::TimedOut => EAGAIN,
+    }
+}
+
+pub fn sys_semop(semid: i32, sops: usize, nsops: usize) -> isize {
+    sys_semtimedop(semid, sops, nsops, 0)
 }
 
 fn has_msg_permission(queue: &MsgQueue, requested: usize) -> bool {
