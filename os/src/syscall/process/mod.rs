@@ -33,7 +33,7 @@ pub use lifecycle::{
     sys_exit, sys_exit_group, sys_get_robust_list, sys_set_robust_list, sys_set_tid_address,
     sys_wait4, sys_waitid,
 };
-pub use misc::{sys_shutdown, sys_syslog, sys_yield};
+pub use misc::{sys_delete_module, sys_shutdown, sys_syslog, sys_yield};
 pub use mm::{
     sys_brk, sys_madvise, sys_memorybarrier, sys_mincore, sys_mlock, sys_mlock2,
     sys_mlockall, sys_mmap, sys_mprotect, sys_mremap, sys_munlock, sys_munlockall,

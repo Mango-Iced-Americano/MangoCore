@@ -1,5 +1,5 @@
 use crate::hal::shutdown;
-use crate::mm::copy_to_user_array;
+use crate::mm::{copy_to_user_array, translated_str};
 use crate::syscall::errno::*;
 use crate::task::{current_task, current_user_token, suspend_current_and_run_next};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -105,4 +105,16 @@ fn has_syslog_privilege() -> bool {
 pub fn sys_yield() -> isize {
     suspend_current_and_run_next();
     SUCCESS
+}
+
+pub fn sys_delete_module(name: *const u8, _flags: u32) -> isize {
+    let task = current_task().unwrap();
+    if task.acquire_inner_lock().euid != 0 {
+        return EPERM;
+    }
+
+    match translated_str(current_user_token(), name) {
+        Ok(_) => ENOENT,
+        Err(errno) => errno,
+    }
 }

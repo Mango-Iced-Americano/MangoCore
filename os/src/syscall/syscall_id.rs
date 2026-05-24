@@ -62,6 +62,7 @@ pub const SYSCALL_GET_ROBUST_LIST: usize = 100;
 pub const SYSCALL_NANOSLEEP: usize = 101;
 pub const SYSCALL_GETITIMER: usize = 102;
 pub const SYSCALL_SETITIMER: usize = 103;
+pub const SYSCALL_DELETE_MODULE: usize = 106;
 pub const SYSCALL_TIMER_CREATE: usize = 107;
 pub const SYSCALL_TIMER_GETTIME: usize = 108;
 pub const SYSCALL_TIMER_GETOVERRUN: usize = 109;
