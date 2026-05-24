@@ -30,6 +30,7 @@ const LINUX_CAPABILITY_VERSION_2: u32 = 0x20071026;
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x20080522;
 const CAP_LAST_CAP: usize = 40;
 const CAP_SETPCAP: usize = 8;
+const CAP_SYS_PTRACE: usize = 19;
 const CAP_SYS_NICE: usize = 23;
 const CAP_FULL_SET: u64 = (1u64 << (CAP_LAST_CAP + 1)) - 1;
 const NGROUPS_MAX: usize = 65536;
@@ -812,6 +813,55 @@ fn copy_slice_to_process_vm_iovecs(
     })
 }
 
+fn check_process_vm_access(
+    current_process: &Arc<ProcessControlBlock>,
+    target_process: &Arc<ProcessControlBlock>,
+) -> Result<(), isize> {
+    if current_process.pid == target_process.pid {
+        return Ok(());
+    }
+    let current = current_task().unwrap();
+    let (uid, euid, suid, gid, egid, sgid, cap_effective) = {
+        let inner = current.acquire_inner_lock();
+        (
+            inner.uid,
+            inner.euid,
+            inner.suid,
+            inner.gid,
+            inner.egid,
+            inner.sgid,
+            inner.cap_effective,
+        )
+    };
+    let Some(target) = target_process.any_live_thread() else {
+        return Err(ESRCH);
+    };
+    let (target_uid, target_euid, target_suid, target_gid, target_egid, target_sgid, dumpable) = {
+        let inner = target.acquire_inner_lock();
+        (
+            inner.uid,
+            inner.euid,
+            inner.suid,
+            inner.gid,
+            inner.egid,
+            inner.sgid,
+            inner.dumpable,
+        )
+    };
+    let privileged = euid == 0 || (cap_effective & (1u64 << CAP_SYS_PTRACE)) != 0;
+    let same_creds = uid == target_uid
+        && euid == target_euid
+        && suid == target_suid
+        && gid == target_gid
+        && egid == target_egid
+        && sgid == target_sgid;
+    if privileged || (same_creds && dumpable != 0) {
+        Ok(())
+    } else {
+        Err(EPERM)
+    }
+}
+
 fn sys_process_vm_transfer(
     pid: usize,
     local_iov: *const IOVec,
@@ -852,6 +902,9 @@ fn sys_process_vm_transfer(
         None => return ESRCH,
     };
     let current_process = current_task().unwrap().process.clone();
+    if let Err(errno) = check_process_vm_access(&current_process, &remote_process) {
+        return errno;
+    }
     let mut scratch = Vec::new();
     if scratch.try_reserve(copy_len).is_err() {
         return ENOMEM;
