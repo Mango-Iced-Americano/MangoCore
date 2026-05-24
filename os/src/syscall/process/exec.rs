@@ -2,12 +2,16 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use crate::config::{PAGE_SIZE, USER_STACK_SIZE};
 use crate::fs::{vfs, vfs_lookup};
 use crate::mm::{UserCString, UserPtr};
 use crate::show_frame_consumption;
 use crate::syscall::errno::*;
-use crate::task::{current_task, exit_current_and_run_next};
+use crate::task::{current_task, exit_current_and_run_next, AuxvEntry};
 use log::{debug, info};
+
+const MAX_EXEC_ARG_ENV_BYTES: usize = USER_STACK_SIZE / 2;
+const EXEC_AUXV_ENTRY_COUNT: usize = 17;
 
 fn parse_shebang(file: &vfs::File) -> Result<Option<(String, Option<String>)>, isize> {
     let mut header = [0u8; 128];
@@ -58,6 +62,58 @@ fn check_exec_metadata(file: &vfs::File) -> Result<(), isize> {
     Ok(())
 }
 
+fn checked_add_exec_bytes(total: &mut usize, add: usize) -> Result<(), isize> {
+    *total = total.checked_add(add).ok_or(E2BIG)?;
+    Ok(())
+}
+
+fn account_exec_string_bytes(total: &mut usize, value: &str) -> Result<(), isize> {
+    let size = value.len().checked_add(1).ok_or(E2BIG)?;
+    checked_add_exec_bytes(total, size)?;
+    if *total > MAX_EXEC_ARG_ENV_BYTES {
+        return Err(E2BIG);
+    }
+    Ok(())
+}
+
+fn validate_exec_stack_usage(argv_vec: &[String], envp_vec: &[String]) -> Result<(), isize> {
+    let word = core::mem::size_of::<usize>();
+    let mut bytes = 2usize.checked_mul(word).ok_or(E2BIG)?;
+    for value in argv_vec.iter().chain(envp_vec.iter()) {
+        checked_add_exec_bytes(&mut bytes, value.len().checked_add(1).ok_or(E2BIG)?)?;
+    }
+    bytes = (bytes + word - 1) & !(word - 1);
+    checked_add_exec_bytes(&mut bytes, 2 * word)?; // AT_RANDOM bytes
+    checked_add_exec_bytes(&mut bytes, word)?; // padding
+    checked_add_exec_bytes(
+        &mut bytes,
+        EXEC_AUXV_ENTRY_COUNT
+            .checked_mul(core::mem::size_of::<AuxvEntry>())
+            .ok_or(E2BIG)?,
+    )?;
+    checked_add_exec_bytes(
+        &mut bytes,
+        argv_vec
+            .len()
+            .checked_add(1)
+            .and_then(|n| n.checked_mul(word))
+            .ok_or(E2BIG)?,
+    )?;
+    checked_add_exec_bytes(
+        &mut bytes,
+        envp_vec
+            .len()
+            .checked_add(1)
+            .and_then(|n| n.checked_mul(word))
+            .ok_or(E2BIG)?,
+    )?;
+    checked_add_exec_bytes(&mut bytes, word)?; // argc
+    if bytes > USER_STACK_SIZE.saturating_sub(PAGE_SIZE) {
+        return Err(E2BIG);
+    }
+    Ok(())
+}
+
 pub fn sys_execve(
     pathname: *const u8,
     mut argv: *const *const u8,
@@ -86,6 +142,7 @@ pub fn sys_execve(
         return ENOMEM;
     }
     if !argv.is_null() {
+        let mut arg_env_bytes = 0usize;
         loop {
             let arg_ptr = match UserPtr::new(argv).read(token) {
                 Ok(argv) => argv,
@@ -97,15 +154,23 @@ pub fn sys_execve(
             if argv_vec.try_reserve(1).is_err() {
                 return ENOMEM;
             }
-            argv_vec.push(match UserCString::new(arg_ptr).read(token) {
+            let arg = match UserCString::new(arg_ptr).read(token) {
                 Ok(arg) => arg,
                 Err(errno) => return errno,
-            });
+            };
+            if let Err(errno) = account_exec_string_bytes(&mut arg_env_bytes, &arg) {
+                return errno;
+            }
+            argv_vec.push(arg);
             unsafe {
                 argv = argv.add(1);
             }
         }
     }
+    let mut arg_env_bytes = argv_vec
+        .iter()
+        .map(|arg| arg.len().saturating_add(1))
+        .sum::<usize>();
     if !envp.is_null() {
         loop {
             let env_ptr = match UserPtr::new(envp).read(token) {
@@ -118,10 +183,14 @@ pub fn sys_execve(
             if envp_vec.try_reserve(1).is_err() {
                 return ENOMEM;
             }
-            envp_vec.push(match UserCString::new(env_ptr).read(token) {
+            let env = match UserCString::new(env_ptr).read(token) {
                 Ok(env) => env,
                 Err(errno) => return errno,
-            });
+            };
+            if let Err(errno) = account_exec_string_bytes(&mut arg_env_bytes, &env) {
+                return errno;
+            }
+            envp_vec.push(env);
             unsafe {
                 envp = envp.add(1);
             }
@@ -206,6 +275,9 @@ pub fn sys_execve(
             } else {
                 return ENOEXEC;
             };
+            if let Err(errno) = validate_exec_stack_usage(&argv_vec, &envp_vec) {
+                return errno;
+            }
 
             let task = current_task().unwrap();
             // 确保 exe_path 是绝对路径（glibc _dl_get_origin 要求以 '/' 开头）

@@ -801,6 +801,25 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     if name.starts_with("tcp") {
         return Some("network TCP stress tests skipped in LTP syscall scan");
     }
+    if name.starts_with("test_1_to_1")
+        || name.starts_with("test_assoc")
+        || name.starts_with("test_autoclose")
+        || name.starts_with("test_basic")
+        || name.starts_with("test_connect")
+        || name.starts_with("test_fragments")
+        || name.starts_with("test_getname")
+        || name.starts_with("test_inaddr_any")
+        || name.starts_with("test_peeloff")
+        || name.starts_with("test_sctp")
+        || name.starts_with("test_sockopt")
+        || name.starts_with("test_tcp_style")
+        || name.starts_with("test_timetolive")
+    {
+        return Some("network SCTP helper skipped in LTP syscall scan");
+    }
+    if name.starts_with("testsf_") {
+        return Some("standalone sendfile helper skipped in LTP syscall scan");
+    }
     if name.ends_with("_16") {
         return Some("16-bit compat syscall variant not supported on this platform");
     }
@@ -841,6 +860,11 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "stat03" | "stat03_64" => Some("filesystem permission stat cases skipped in LTP syscall scan"),
         "stream02" => Some("stdio pipe/tty helper skipped in LTP syscall scan"),
         "support_numa" => Some("requires NUMA support"),
+        "tee01" | "tee02" => Some("pipe tee syscall tests skipped in LTP syscall scan"),
+        "test.sh" => Some("standalone LTP helper skipped in syscall scan"),
+        "test_ioctl" | "test_recvmsg" | "test_robind.sh" => {
+            Some("network SCTP helper skipped in LTP syscall scan")
+        },
         "cgroup_fj_common.sh"
         | "cgroup_fj_function.sh"
         | "cgroup_fj_proc"

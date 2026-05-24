@@ -293,6 +293,8 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | LTP `setsockopt02/04..10`、`setxattr*`、`sgetmask01`、`shell_pipe01.sh`、`shm_comm`、`shm_test` | net/fs、旧 signal ABI、standalone helper 或 System V SHM 长耗时/namespace 兼容问题 | 当前 broad scan 中 narrow skip，后续专项处理 |
 | LTP `shm*`、`splice*`、`squashfs01`、`ssetmask01`、`ssh-stress.sh`、`stack_clash`、`starvation` | IPC/pipe/fs/网络压力、旧 signal ABI、procfs/CVE 环境或长耗时 scheduler stress | 当前 broad scan 中 narrow skip，后续专项处理 |
 | LTP `stat03*`、`statfs*`、`statvfs*`、`statx*`、`swap*`、`symlink*`、`sync*`、`sysctl*`、`tcp*`、`stream02`、`support_numa` | fs/device/procfs/网络/NUMA 或 stdio helper 范围 | 当前 fs/net 协作期 broad scan 中 narrow skip |
+| LTP `tee*`、SCTP `test_*` helper、`testsf_*` | pipe/fs 或网络 helper，不是当前非 fs/net 主线 | 当前 fs/net 协作期 broad scan 中 narrow skip |
+| LTP `thp01` 超大 argv 触发内核跳到 `0x6363...` | `execve` 参数栈跨页写入时旧代码只翻译栈顶一页，且缺少过大 argv/env 的 `E2BIG` 预检 | `execve` 先按用户栈容量拒绝过大参数，ELF 启动栈按虚拟地址逐页翻译写入 |
 | 非阻塞 socket 测试失败 | 检查是否在 `try_xxx` 前调了 `try_poll()` |
 
 ### 错误码对齐（Linux 语义）

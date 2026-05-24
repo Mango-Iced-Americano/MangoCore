@@ -761,25 +761,63 @@ impl<T: PageTable> AddressSpace<T> {
         envp_vec: &Vec<String>,
         elf_info: &ELFInfo,
     ) -> Result<usize, isize> {
-        // go down to the stack page (important!) and align
-        user_sp -= 2 * core::mem::size_of::<usize>();
-        // because size of parameters is almost never more than PAGE_SIZE,
-        // so I decide to use physical address directly for better performance
-        let mut phys_user_sp = T::from_token(self.token())
-            .translate_va(VirtAddr::from(user_sp))
-            .unwrap()
-            .0;
-        let virt_phys_offset = user_sp - phys_user_sp;
-        let phys_start = phys_user_sp;
-        // unsafe code is efficient code! here we go!
-        fn copy_to_user_string_unchecked(src: &str, dst: *mut u8) {
-            let size = src.len();
-            unsafe {
-                core::slice::from_raw_parts_mut(dst, size)
-                    .copy_from_slice(core::slice::from_raw_parts(src.as_ptr(), size));
-                // adapt to C-style string
-                *dst.add(size) = b'\0';
+        fn push_stack(sp: &mut usize, stack_bottom: usize, size: usize) -> Result<usize, isize> {
+            *sp = sp.checked_sub(size).ok_or(E2BIG)?;
+            if *sp < stack_bottom {
+                return Err(E2BIG);
             }
+            Ok(*sp)
+        }
+
+        fn align_stack(sp: &mut usize, stack_bottom: usize) -> Result<(), isize> {
+            *sp &= !(core::mem::size_of::<usize>() - 1);
+            if *sp < stack_bottom {
+                return Err(E2BIG);
+            }
+            Ok(())
+        }
+
+        fn write_user_bytes<T: PageTable>(
+            page_table: &T,
+            mut dst: usize,
+            mut src: &[u8],
+        ) -> Result<(), isize> {
+            while !src.is_empty() {
+                let pa = page_table
+                    .translate_va(VirtAddr::from(dst))
+                    .ok_or(EFAULT)?;
+                let page_offset = pa.page_offset();
+                let copy_len = (PAGE_SIZE - page_offset).min(src.len());
+                let page = pa.floor().get_bytes_array();
+                page[page_offset..page_offset + copy_len].copy_from_slice(&src[..copy_len]);
+                dst = dst.checked_add(copy_len).ok_or(EFAULT)?;
+                src = &src[copy_len..];
+            }
+            Ok(())
+        }
+
+        fn write_user_slice<T: PageTable, U: Copy>(
+            page_table: &T,
+            dst: usize,
+            src: &[U],
+        ) -> Result<(), isize> {
+            let bytes = core::mem::size_of::<U>()
+                .checked_mul(src.len())
+                .ok_or(E2BIG)?;
+            if bytes == 0 {
+                return Ok(());
+            }
+            let src = unsafe { core::slice::from_raw_parts(src.as_ptr() as *const u8, bytes) };
+            write_user_bytes(page_table, dst, src)
+        }
+
+        let stack_bottom = user_sp.checked_sub(USER_STACK_SIZE).ok_or(E2BIG)?;
+        // Keep the top guard gap used by the old startup ABI.
+        user_sp = user_sp
+            .checked_sub(2 * core::mem::size_of::<usize>())
+            .ok_or(E2BIG)?;
+        if user_sp < stack_bottom {
+            return Err(E2BIG);
         }
 
         // we don't care about the order of env...
@@ -791,9 +829,11 @@ impl<T: PageTable> AddressSpace<T> {
             return Err(crate::syscall::errno::ENOMEM);
         }
         for env in envp_vec.iter() {
-            phys_user_sp -= env.len() + 1;
-            envp_user.push((phys_user_sp + virt_phys_offset) as *const u8);
-            copy_to_user_string_unchecked(env, phys_user_sp as *mut u8);
+            let len = env.len().checked_add(1).ok_or(E2BIG)?;
+            let dst = push_stack(&mut user_sp, stack_bottom, len)?;
+            envp_user.push(dst as *const u8);
+            write_user_bytes(&self.page_table, dst, env.as_bytes())?;
+            write_user_bytes(&self.page_table, dst + env.len(), b"\0")?;
         }
         envp_user.push(core::ptr::null());
 
@@ -806,27 +846,29 @@ impl<T: PageTable> AddressSpace<T> {
             return Err(crate::syscall::errno::ENOMEM);
         }
         for arg in argv_vec.iter() {
-            phys_user_sp -= arg.len() + 1;
-            argv_user.push((phys_user_sp + virt_phys_offset) as *const u8);
-            copy_to_user_string_unchecked(arg, phys_user_sp as *mut u8);
+            let len = arg.len().checked_add(1).ok_or(E2BIG)?;
+            let dst = push_stack(&mut user_sp, stack_bottom, len)?;
+            argv_user.push(dst as *const u8);
+            write_user_bytes(&self.page_table, dst, arg.as_bytes())?;
+            write_user_bytes(&self.page_table, dst + arg.len(), b"\0")?;
         }
         argv_user.push(core::ptr::null());
         // align downward to usize (64bit)
-        phys_user_sp &= !0x7;
+        align_stack(&mut user_sp, stack_bottom)?;
 
         // 16 random bytes
-        phys_user_sp -= 2 * core::mem::size_of::<usize>();
-        // should be virt addr!
-        let random_bits_ptr = phys_user_sp + virt_phys_offset;
-        unsafe {
-            *(phys_user_sp as *mut usize) = 0xdeadbeefcafebabe;
-            *(phys_user_sp as *mut usize).add(1) = 0xdeadbeefcafebabe;
-        }
+        let random_bits = [0xdeadbeefcafebabeusize, 0xdeadbeefcafebabeusize];
+        let random_bits_ptr = push_stack(
+            &mut user_sp,
+            stack_bottom,
+            random_bits.len() * core::mem::size_of::<usize>(),
+        )?;
+        write_user_slice(&self.page_table, random_bits_ptr, &random_bits)?;
         // padding
-        phys_user_sp -= core::mem::size_of::<usize>();
-        unsafe {
-            *(phys_user_sp as *mut usize) = 0x0000000000000000;
-        }
+        let zero = 0usize;
+        let padding_ptr =
+            push_stack(&mut user_sp, stack_bottom, core::mem::size_of::<usize>())?;
+        write_user_slice(&self.page_table, padding_ptr, core::slice::from_ref(&zero))?;
         let auxv = [
             // AuxvEntry::new(AuxvType::SYSINFO_EHDR, vDSO_mapping);
             // AuxvEntry::new(AuxvType::L1I_CACHESIZE, 0);
@@ -857,30 +899,27 @@ impl<T: PageTable> AddressSpace<T> {
             ),
             AuxvEntry::new(AuxvType::NULL, 0),
         ];
-        phys_user_sp -= auxv.len() * core::mem::size_of::<AuxvEntry>();
-        unsafe {
-            core::slice::from_raw_parts_mut(phys_user_sp as *mut AuxvEntry, auxv.len())
-                .copy_from_slice(auxv.as_slice());
-        }
-        phys_user_sp -= envp_user.len() * core::mem::size_of::<usize>();
-        unsafe {
-            core::slice::from_raw_parts_mut(phys_user_sp as *mut *const u8, envp_user.len())
-                .copy_from_slice(envp_user.as_slice());
-        }
-        phys_user_sp -= argv_user.len() * core::mem::size_of::<usize>();
-        unsafe {
-            core::slice::from_raw_parts_mut(phys_user_sp as *mut *const u8, argv_user.len())
-                .copy_from_slice(argv_user.as_slice());
-        }
-        phys_user_sp -= core::mem::size_of::<usize>();
-        unsafe {
-            *(phys_user_sp as *mut usize) = argv_vec.len();
-        }
-
-        user_sp = phys_user_sp + virt_phys_offset;
-
-        // unlikely, if `start` and `end` are in different pages, we should panic
-        assert_eq!(phys_start & !0xfff, phys_user_sp & !0xfff);
+        let auxv_ptr = push_stack(
+            &mut user_sp,
+            stack_bottom,
+            auxv.len() * core::mem::size_of::<AuxvEntry>(),
+        )?;
+        write_user_slice(&self.page_table, auxv_ptr, auxv.as_slice())?;
+        let envp_ptr = push_stack(
+            &mut user_sp,
+            stack_bottom,
+            envp_user.len() * core::mem::size_of::<usize>(),
+        )?;
+        write_user_slice(&self.page_table, envp_ptr, envp_user.as_slice())?;
+        let argv_ptr = push_stack(
+            &mut user_sp,
+            stack_bottom,
+            argv_user.len() * core::mem::size_of::<usize>(),
+        )?;
+        write_user_slice(&self.page_table, argv_ptr, argv_user.as_slice())?;
+        let argc_ptr = push_stack(&mut user_sp, stack_bottom, core::mem::size_of::<usize>())?;
+        let argc = argv_vec.len();
+        write_user_slice(&self.page_table, argc_ptr, core::slice::from_ref(&argc))?;
 
         // print user stack
         // let mut phys_addr = phys_user_sp & !0xf;
