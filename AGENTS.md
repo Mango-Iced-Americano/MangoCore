@@ -282,6 +282,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | `pthcli`/`pthserv` 单独运行失败或挂住 | 它们是 LTP 网络 helper/server，不是独立 syscall 用例，inline runner 显式 skip |
 | `ptrace*` 大片 ENOSYS/TBROK | 当前内核无 ptrace stop/wait/tracee 状态机，属于结构性子系统 | 先由 inline runner skip，后续专项做 ptrace 模型 |
 | LTP `pm_*`/`pkey01`/`profil01`/`pt_test`/部分 `prctl*` TCONF | 依赖 power-management、pkey、profil、perf、procfs/capability 等当前非目标环境 | 先 narrow skip，避免阻塞后续 syscall 扫描 |
+| LTP `rename*` 大片 TBROK 或卡住 | 多数依赖外部块设备、目录权限矩阵等 fs 适配面 | 当前 fs/net 协作期先由 inline runner skip |
 | 非阻塞 socket 测试失败 | 检查是否在 `try_xxx` 前调了 `try_poll()` |
 
 ### 错误码对齐（Linux 语义）
