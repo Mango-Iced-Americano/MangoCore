@@ -1,10 +1,11 @@
 use alloc::sync::Arc;
 
+use crate::syscall::errno::EAGAIN;
 use crate::task::{
     current_task, wake_interruptible, ProcessControlBlock, TaskControlBlock, TaskStatus,
 };
 
-use super::{PendingSignal, SigInfo, Signals};
+use super::{is_realtime_signal, PendingSignal, SigInfo, Signals};
 
 fn current_sender_pid() -> usize {
     current_task().map(|task| task.pid()).unwrap_or(0)
@@ -64,18 +65,23 @@ pub fn send_process_signal_info(
     true
 }
 
-pub fn send_thread_signal(task: &Arc<TaskControlBlock>, signal: Signals) -> bool {
+pub fn send_thread_signal(task: &Arc<TaskControlBlock>, signal: Signals) -> Result<(), isize> {
     if signal.is_empty() {
-        return true;
+        return Ok(());
     }
     let mut inner = task.acquire_inner_lock();
-    let _ = inner
+    if is_realtime_signal(signal) && inner.sigpending.queued_count() >= inner.sigpending_limit_cur {
+        return Err(EAGAIN);
+    }
+    inner
         .sigpending
-        .enqueue_signal_with_sender(signal, SigInfo::SI_TKILL as usize, current_sender_pid());
-    if inner.task_status == TaskStatus::Interruptible {
+        .enqueue_signal_with_sender(signal, SigInfo::SI_TKILL as usize, current_sender_pid())?;
+    if inner.task_status == TaskStatus::Interruptible
+        && !signal.difference(inner.sigmask).is_empty()
+    {
         inner.task_status = TaskStatus::Ready;
         drop(inner);
         wake_interruptible(task.clone());
     }
-    true
+    Ok(())
 }

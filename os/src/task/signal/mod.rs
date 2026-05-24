@@ -27,7 +27,7 @@ mod wait;
 pub use action::Sighand;
 pub use delivery::{send_process_signal, send_process_signal_info, send_thread_signal};
 use frame::signal_frame_layout;
-pub use pending::{PendingSignal, SignalQueue};
+pub use pending::{is_realtime_signal, PendingSignal, SignalQueue};
 pub use wait::{sigsuspend, sigtimedwait};
 
 bitflags! {

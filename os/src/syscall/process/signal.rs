@@ -208,8 +208,10 @@ pub fn sys_tkill(tid: usize, sig: usize) -> isize {
         Err(_) => return EINVAL,
     };
     if let Some(task) = ProcessManager::find_task(tid) {
-        send_thread_signal(&task, signal);
-        SUCCESS
+        match send_thread_signal(&task, signal) {
+            Ok(()) => SUCCESS,
+            Err(err) => err,
+        }
     } else {
         ESRCH
     }
@@ -224,8 +226,10 @@ pub fn sys_tgkill(pid: usize, tid: usize, sig: usize) -> isize {
         Err(_) => return EINVAL,
     };
     if let Some(task) = ProcessManager::find_task_in_process(pid, tid) {
-        send_thread_signal(&task, signal);
-        SUCCESS
+        match send_thread_signal(&task, signal) {
+            Ok(()) => SUCCESS,
+            Err(err) => err,
+        }
     } else {
         ESRCH
     }

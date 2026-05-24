@@ -1207,6 +1207,7 @@ fn rlimit_value_for(
     nofile: Option<RLimit>,
     nice: Option<RLimit>,
     rtprio: Option<RLimit>,
+    sigpending: Option<RLimit>,
     stack: Option<RLimit>,
 ) -> Option<RLimit> {
     let unlimited = RLimit {
@@ -1221,10 +1222,10 @@ fn rlimit_value_for(
         | Resource::RSS
         | Resource::AS
         | Resource::LOCKS
-        | Resource::SIGPENDING
         | Resource::MSGQUEUE
         | Resource::RTTIME
         | Resource::MEMLOCK => unlimited,
+        Resource::SIGPENDING => sigpending?,
         Resource::NICE => nice?,
         Resource::RTPRIO => rtprio?,
         Resource::CORE => RLimit {
@@ -1305,6 +1306,15 @@ pub fn sys_prlimit(
         } else {
             None
         };
+        let sigpending_limit = if resource == Resource::SIGPENDING {
+            let inner = task.acquire_inner_lock();
+            Some(RLimit {
+                rlim_cur: inner.sigpending_limit_cur,
+                rlim_max: inner.sigpending_limit_max,
+            })
+        } else {
+            None
+        };
         let memlock_limit = if resource == Resource::MEMLOCK {
             let inner = task.acquire_inner_lock();
             Some(RLimit {
@@ -1314,8 +1324,14 @@ pub fn sys_prlimit(
         } else {
             None
         };
-        let Some(mut limit) =
-            rlimit_value_for(resource, nofile_limit, nice_limit, rtprio_limit, stack_limit)
+        let Some(mut limit) = rlimit_value_for(
+            resource,
+            nofile_limit,
+            nice_limit,
+            rtprio_limit,
+            sigpending_limit,
+            stack_limit,
+        )
         else {
             return EINVAL;
         };
@@ -1368,6 +1384,11 @@ pub fn sys_prlimit(
                 inner.memlock_limit_cur = rlimit.rlim_cur;
                 inner.memlock_limit_max = rlimit.rlim_max;
             }
+            Resource::SIGPENDING => {
+                let mut inner = task.acquire_inner_lock();
+                inner.sigpending_limit_cur = rlimit.rlim_cur;
+                inner.sigpending_limit_max = rlimit.rlim_max;
+            }
             Resource::CPU
             | Resource::FSIZE
             | Resource::DATA
@@ -1376,7 +1397,6 @@ pub fn sys_prlimit(
             | Resource::NPROC
             | Resource::AS
             | Resource::LOCKS
-            | Resource::SIGPENDING
             | Resource::MSGQUEUE
             | Resource::RTTIME => {
                 warn!(

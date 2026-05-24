@@ -118,6 +118,9 @@ pub struct TaskControlBlockInner {
     /// RLIMIT_NICE 兼容字段，供 LTP 权限类用例回读。
     pub nice_limit_cur: usize,
     pub nice_limit_max: usize,
+    /// RLIMIT_SIGPENDING 兼容字段，用于实时信号 pending 队列限额语义。
+    pub sigpending_limit_cur: usize,
+    pub sigpending_limit_max: usize,
     /// RLIMIT_STACK 兼容字段。当前用户栈仍按固定槽位映射，这里只保存 ABI 可见限制。
     pub stack_limit_cur: usize,
     pub stack_limit_max: usize,
@@ -639,6 +642,8 @@ impl TaskControlBlock {
                 rtprio_limit_max: 0,
                 nice_limit_cur: usize::MAX,
                 nice_limit_max: usize::MAX,
+                sigpending_limit_cur: usize::MAX,
+                sigpending_limit_max: usize::MAX,
                 stack_limit_cur: USER_STACK_SIZE,
                 stack_limit_max: USER_STACK_SIZE,
                 memlock_limit_cur: usize::MAX,
@@ -1022,6 +1027,8 @@ impl TaskControlBlock {
                 rtprio_limit_max: parent_inner.rtprio_limit_max,
                 nice_limit_cur: parent_inner.nice_limit_cur,
                 nice_limit_max: parent_inner.nice_limit_max,
+                sigpending_limit_cur: parent_inner.sigpending_limit_cur,
+                sigpending_limit_max: parent_inner.sigpending_limit_max,
                 stack_limit_cur: parent_inner.stack_limit_cur,
                 stack_limit_max: parent_inner.stack_limit_max,
                 memlock_limit_cur: parent_inner.memlock_limit_cur,
