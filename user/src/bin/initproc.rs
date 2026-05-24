@@ -774,6 +774,7 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
             Some("interactive password helper")
         }
         "run_capbounds.sh" => Some("requires POSIX capability support"),
+        "rwtest" => Some("filesystem/pipe stress helper skipped in syscall scan"),
         "cgroup_fj_common.sh"
         | "cgroup_fj_function.sh"
         | "cgroup_fj_proc"
