@@ -54,6 +54,16 @@ pub fn evict_all_clean_pages(max_per_cache: usize) -> usize {
     total
 }
 
+/// 返回全局 PageCache registry 统计: (len, capacity, alive, stale)
+pub fn registry_stats() -> (usize, usize, usize, usize) {
+    let reg = PAGE_CACHE_REGISTRY.lock();
+    let len = reg.len();
+    let cap = reg.capacity();
+    let alive = reg.iter().filter(|w| w.upgrade().is_some()).count();
+    let stale = len.saturating_sub(alive);
+    (len, cap, alive, stale)
+}
+
 // ── PageState ────────────────────────────────────────────────────────────
 
 /// 页面状态，对标 Linux 的 `PG_*` 标志组合
@@ -286,6 +296,16 @@ impl PageCache {
     /// 回收干净页面（仅释放 UpToDate 且无外部引用的页）
     pub fn shrink_clean_pages(&self, max_to_free: usize) -> usize {
         self.evict_clean_pages(max_to_free)
+    }
+
+    /// 返回 entries 元数据: (len, capacity, live, holes)
+    pub fn entries_stats(&self) -> (usize, usize, usize, usize) {
+        let entries = self.entries.lock();
+        let len = entries.len();
+        let cap = entries.capacity();
+        let live = entries.iter().filter(|e| e.is_some()).count();
+        let holes = len.saturating_sub(live);
+        (len, cap, live, holes)
     }
 
     /// 获取页面状态

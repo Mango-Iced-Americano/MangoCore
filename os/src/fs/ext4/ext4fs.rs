@@ -1625,6 +1625,38 @@ impl Ext4FileSystem {
         }
     }
 
+    /// 统计 ext4 dentry cache: children + negative_dentry
+    pub fn dentry_stats(&self) -> (usize, usize, usize, usize, usize, usize) {
+        let mut kids_total = 0usize;
+        let mut kids_alive = 0usize;
+        let mut kids_stale = 0usize;
+        let mut kids_bytes = 0usize;
+        let mut neg_total = 0usize;
+        let mut neg_bytes = 0usize;
+
+        let guard = self.inode_objects.lock();
+        let arcs: alloc::vec::Vec<alloc::sync::Arc<dyn crate::fs::vfs::IndexNode>> =
+            guard.iter().filter_map(|(_, w)| w.upgrade()).collect();
+        drop(guard);
+
+        for arc in &arcs {
+            if let Some(osi) = arc.as_any_ref().downcast_ref::<layout::Ext4OSInode>() {
+                let kids = osi.children.lock();
+                kids_total += kids.len();
+                for (name, weak) in kids.iter() {
+                    kids_bytes += name.len();
+                    if weak.upgrade().is_some() { kids_alive += 1; } else { kids_stale += 1; }
+                }
+                drop(kids);
+                let neg = osi.negative_dentry.lock();
+                neg_total += neg.len();
+                for name in neg.keys() { neg_bytes += name.len(); }
+            }
+        }
+
+        (kids_total, kids_alive, kids_stale, kids_bytes, neg_total, neg_bytes)
+    }
+
     /// 显式清空所有目录的 children 缓存（仅 umount/debug）
     pub fn clear_all_children_caches(&self) -> usize {
         let mut total = 0usize;

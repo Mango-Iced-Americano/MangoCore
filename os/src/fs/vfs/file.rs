@@ -421,6 +421,11 @@ impl FdTable {
         self.fds.len()
     }
 
+    /// 获取底层 Vec 的 capacity（堆分配大小）
+    pub fn capacity(&self) -> usize {
+        self.fds.capacity()
+    }
+
     // ── exec 相关 ─────────────────────────────────────────────────
 
     /// exec 时：关闭所有 CLOEXEC 的 fd
