@@ -255,6 +255,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | nanosleep 唤醒后死锁 | 持 `task.inner` 锁调 `has_actionable_signal()` | 释放锁后再调 |
 | 被屏蔽信号导致 EINTR | 用 `is_empty()` 检查信号 | 用 `sigpending.difference(sigmask)` |
 | execve 后 OOM | 新旧内存集同时存在 | `load_elf` 开头 `recycle_data_pages()` |
+| LTP cgroup 脚本触发 `syslog/klogctl` panic 或 `syslog12` 非 root 失败 | `sys_syslog()` 对 READ_CLEAR/CLEAR/console/size action 留了 `todo!()`，用户拷贝 `unwrap()`，且缺少权限检查 | 所有 action 返回稳定 errno/成功值，用户指针错误返回错误码；除 READ_ALL/SIZE_BUFFER 外需 root 或 `CAP_SYS_ADMIN/CAP_SYSLOG` |
 | LTP nice05 动态 CPU clock 失败 | glibc 使用负数动态 clock id，且相邻 nice 在单核调度中差异太小 | 解码动态 CPU clock id，并让 `CPUCLOCK_SCHED`/调度统计体现 nice |
 | glibc pthread cancel 缺库 | 测试镜像缺少架构匹配 `libgcc_s.so.1` | initproc 写入 `/glibc/lib/libgcc_s.so.1` 后再链接到 `/lib` |
 | pidfd_send_signal 对 `/proc/<pid>` fd 返回 EBADF | procfs inode 被 MountFSInode 包装，且 `/proc/<pid>` 目录未记录 pid | 解包 MountFSInode 后识别 LockedProcInode，并在 pid 目录 `extra_data` 保存 pid |

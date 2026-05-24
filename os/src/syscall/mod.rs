@@ -392,7 +392,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_KILL => sys_kill(args[0], args[1]),
         SYSCALL_TKILL => sys_tkill(args[0], args[1]),
         SYSCALL_TGKILL => sys_tgkill(args[0], args[1], args[2]),
-        SYSCALL_SYSLOG => sys_syslog(args[0] as u32, args[1] as *mut u8, args[2] as u32),
+        SYSCALL_SYSLOG => sys_syslog(args[0] as u32, args[1] as *mut u8, args[2] as isize),
         SYSCALL_YIELD => sys_yield(),
         SYSCALL_SIGALTSTACK => sys_sigaltstack(args[0], args[1]),
         SYSCALL_SIGACTION => sys_sigaction(args[0], args[1], args[2]),
