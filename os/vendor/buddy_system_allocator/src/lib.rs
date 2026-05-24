@@ -196,6 +196,15 @@ impl<const ORDER: usize> Heap<ORDER> {
     pub fn stats_total_bytes(&self) -> usize {
         self.total
     }
+
+    /// Return number of free blocks per order (for heap fragmentation diagnosis)
+    pub fn free_block_counts(&self) -> [usize; ORDER] {
+        let mut counts = [0usize; ORDER];
+        for i in 0..ORDER {
+            counts[i] = self.free_list[i].iter().count();
+        }
+        counts
+    }
 }
 
 impl<const ORDER: usize> fmt::Debug for Heap<ORDER> {

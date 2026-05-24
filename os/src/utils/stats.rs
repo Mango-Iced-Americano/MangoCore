@@ -119,6 +119,22 @@ pub fn print_resource_stats(task: Option<&TaskControlBlock>) {
         "[kernel] [stats] net tcp={} udp={} raw={} pend={}",
         tn, un, rn, sp
     );
+    // Line 7: I/O buffer stats (pipe + AF_UNIX ring)
+    let pn = crate::fs::dev::pipe::pipe_buf_alive();
+    let pb = crate::fs::dev::pipe::pipe_buf_bytes();
+    let urn = crate::net::socket::unix::stream::inner::unix_ring_alive();
+    let urb = crate::net::socket::unix::stream::inner::unix_ring_bytes();
+    println!("[kernel] [stats] io_buf pipe={}/{}K unix={}/{}K", pn, pb>>10, urn, urb>>10);
+    // Line 7: buddy free histogram (orders with >0 blocks, size=2^order)
+    let h = crate::mm::heap_free_histogram();
+    let mut orders = alloc::string::String::with_capacity(128);
+    for (i, &n) in h.iter().enumerate() {
+        if n > 0 {
+            use core::fmt::Write;
+            let _ = write!(orders, "{}:{} ", i, n);
+        }
+    }
+    println!("[kernel] [stats] buddy_free={}", orders);
     // Line 6: process/thread object lifecycle
     println!(
         "[kernel] [stats] objs pcb={} zpcb={} tcb={}/{} stale={} pcb_ref={}/{} as_ref={}/{}/{}",

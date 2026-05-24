@@ -25,7 +25,7 @@ pub use frame_allocator::{
     unallocated_frames, FrameTracker,
 };
 pub use frame_store::Frame;
-pub use heap_allocator::heap_stats;
+pub use heap_allocator::{heap_free_histogram, heap_stats};
 pub use vma::{MapFlags, MapPermission};
 pub use address_space::{AddressSpace, MemoryError};
 pub use kernel_space::{kernel_token, KernelSpace, KERNEL_SPACE};

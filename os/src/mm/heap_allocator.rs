@@ -127,6 +127,11 @@ pub fn heap_stats() -> (usize, usize, usize, usize, usize) {
     (free, total, alloc_user, alloc_actual, waste)
 }
 
+/// 返回每 order 的空闲块数（order 0 = 1B, order 16 = 64KB, ...）
+pub fn heap_free_histogram() -> [usize; 32] {
+    HEAP_ALLOCATOR.inner.lock().free_block_counts()
+}
+
 /// 全局堆内存空间
 static mut HEAP_SPACE: [u8; KERNEL_HEAP_SIZE] = [0; KERNEL_HEAP_SIZE];
 

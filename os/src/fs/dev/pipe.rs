@@ -239,6 +239,12 @@ const RING_DEFAULT_BUFFER_SIZE: usize = 4096 * 16;
 #[cfg(not(feature = "board_fu740"))]
 const RING_DEFAULT_BUFFER_SIZE: usize = 4096 * 16;
 
+use core::sync::atomic::AtomicUsize;
+static PIPE_BUF_COUNT: AtomicUsize = AtomicUsize::new(0);
+static PIPE_BUF_BYTES: AtomicUsize = AtomicUsize::new(0);
+pub fn pipe_buf_alive() -> usize { PIPE_BUF_COUNT.load(core::sync::atomic::Ordering::Relaxed) }
+pub fn pipe_buf_bytes() -> usize { PIPE_BUF_BYTES.load(core::sync::atomic::Ordering::Relaxed) }
+
 #[derive(Copy, Clone, PartialEq, Debug)]
 enum RingBufferStatus {
     FULL,
@@ -257,6 +263,8 @@ pub struct PipeRingBuffer {
 
 impl PipeRingBuffer {
     fn new() -> Self {
+        PIPE_BUF_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        PIPE_BUF_BYTES.fetch_add(RING_DEFAULT_BUFFER_SIZE, core::sync::atomic::Ordering::Relaxed);
         Self {
             arr: Box::new([0u8; RING_DEFAULT_BUFFER_SIZE]),
             head: 0,
@@ -336,6 +344,13 @@ impl PipeRingBuffer {
     }
     fn all_read_ends_closed(&self) -> bool {
         self.read_end.as_ref().unwrap().upgrade().is_none()
+    }
+}
+
+impl Drop for PipeRingBuffer {
+    fn drop(&mut self) {
+        PIPE_BUF_COUNT.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+        PIPE_BUF_BYTES.fetch_sub(RING_DEFAULT_BUFFER_SIZE, core::sync::atomic::Ordering::Relaxed);
     }
 }
 
