@@ -1823,6 +1823,189 @@ fn test_fork_create() -> bool {
     }
 }
 
+// ── Phase 5: cache lifecycle helpers ─────────────────────────────────
+
+fn read_metric(metric_id: usize) -> isize {
+    sys_ext4_counters(10, 0, metric_id)
+}
+
+// ── Phase 5: cache lifecycle tests ───────────────────────────────────
+
+/// Lifecycle test: repeated open/read/close on same file should not
+/// cause linear growth of alive inode objects or page caches.
+/// This test MUST NOT call any reclaim.
+fn test_repeated_open_close_same_file_lifecycle() -> bool {
+    println!("[fs_cache_lifecycle] repeated_open_close_same_file_lifecycle: begin");
+    sys_mkdirat(AT_FDCWD, "/tmp_lc1\0", 0o777);
+    const O_RDWRc: u32 = 0o2;
+    const O_CREATc: u32 = 0o100;
+    // Create a small test file
+    let fd = sys_open("/tmp_lc1/f\0", O_RDWRc | O_CREATc);
+    if fd < 0 { println!("  FAIL: create err={}", fd); return false; }
+    sys_write(fd as usize, b"hello lifecycle!\n");
+    sys_close(fd as usize);
+
+    let before_alive = read_metric(0); // inode_objects_alive
+    let before_pc = read_metric(4);     // page_cache_alive
+    dump_sub_profile("lc1_before_loop");
+
+    const N: usize = 200;
+    for _ in 0..N {
+        let fd = sys_open("/tmp_lc1/f\0", 0); // O_RDONLY
+        if fd < 0 { println!("  FAIL: open err={} at iteration", fd); return false; }
+        let mut buf = [0u8; 64];
+        let n = sys_read(fd as usize, &mut buf);
+        if n <= 0 || &buf[..n as usize] != b"hello lifecycle!\n" {
+            println!("  FAIL: read mismatch n={}", n);
+            return false;
+        }
+        sys_close(fd as usize);
+    }
+
+    dump_sub_profile("lc1_after_loop");
+    let after_alive = read_metric(0);
+    let after_pc = read_metric(4);
+
+    // Cleanup
+    sys_unlinkat(AT_FDCWD, "/tmp_lc1/f\0", 0);
+    sys_unlinkat(AT_FDCWD, "/tmp_lc1\0", 0x200);
+
+    // Assert: alive counts should not have grown by N
+    let diff_alive = (after_alive as i64 - before_alive as i64).unsigned_abs() as isize;
+    let diff_pc = (after_pc as i64 - before_pc as i64).unsigned_abs() as isize;
+    let max_growth = (N / 10) as isize; // allow at most 10% growth
+    if diff_alive > max_growth || diff_pc > max_growth {
+        println!("  FAIL: alive growth too large: inode_objects +{} page_caches +{} (max={})",
+            diff_alive, diff_pc, max_growth);
+        return false;
+    }
+
+    println!("[fs_cache_lifecycle] repeated_open_close_same_file_lifecycle: pass (alive_diff={}, pc_diff={})",
+        diff_alive, diff_pc);
+    true
+}
+
+/// Lifecycle test: create many files, open/read all, close all.
+/// After all fds closed, inode_objects and page_caches should converge.
+/// This test MUST NOT call any reclaim.
+fn test_lookup_many_files_then_close_lifecycle() -> bool {
+    println!("[fs_cache_lifecycle] lookup_many_files_then_close_lifecycle: begin");
+    sys_mkdirat(AT_FDCWD, "/tmp_lc2\0", 0o777);
+    const N: usize = 64;
+    const O_RDWRc: u32 = 0o2;
+    const O_CREATc: u32 = 0o100;
+
+    // Create N files with deterministic content
+    for i in 0..N {
+        let path = make_file_path("/tmp_lc2/", i);
+        let fd = sys_open(&path, O_RDWRc | O_CREATc);
+        if fd < 0 { println!("  FAIL: create err={}", fd); return false; }
+        let content = format!("file_{:04}\n", i);
+        sys_write(fd as usize, content.as_bytes());
+        sys_close(fd as usize);
+    }
+
+    let before_alive = read_metric(0); // inode_objects_alive
+    let before_pc = read_metric(4);     // page_cache_alive
+    dump_sub_profile("lc2_before_lookup");
+
+    // Open, read, close all files
+    for i in 0..N {
+        let path = make_file_path("/tmp_lc2/", i);
+        let fd = sys_open(&path, 0); // O_RDONLY
+        if fd < 0 { println!("  FAIL: open err={}", fd); return false; }
+        let mut buf = [0u8; 64];
+        let n = sys_read(fd as usize, &mut buf);
+        if n <= 0 { println!("  FAIL: read err n={}", n); return false; }
+        sys_close(fd as usize);
+    }
+
+    dump_sub_profile("lc2_after_close");
+    let after_alive = read_metric(0);
+    let after_pc = read_metric(4);
+
+    // Cleanup
+    for i in 0..N {
+        let path = make_file_path("/tmp_lc2/", i);
+        sys_unlinkat(AT_FDCWD, &path, 0);
+    }
+    sys_unlinkat(AT_FDCWD, "/tmp_lc2\0", 0x200);
+
+    // Assert: alive counts should converge back after all fds closed
+    let diff_alive = (after_alive as i64 - before_alive as i64).unsigned_abs() as isize;
+    let diff_pc = (after_pc as i64 - before_pc as i64).unsigned_abs() as isize;
+    let max_growth = 16isize; // some background cache entries are OK
+    if diff_alive > max_growth || diff_pc > max_growth {
+        println!("  FAIL: alive count too high: inode_objects +{} page_caches +{} (max={})",
+            diff_alive, diff_pc, max_growth);
+        return false;
+    }
+
+    println!("[fs_cache_lifecycle] lookup_many_files_then_close_lifecycle: pass (alive_diff={}, pc_diff={})",
+        diff_alive, diff_pc);
+    true
+}
+
+/// Lifecycle test: unlink a file while fd is open, verify data still
+/// accessible via fd, then close and verify cache cleanup.
+/// This test MUST NOT call any reclaim.
+fn test_unlink_open_file_lifecycle() -> bool {
+    println!("[fs_cache_lifecycle] unlink_open_file_lifecycle: begin");
+    sys_mkdirat(AT_FDCWD, "/tmp_lc3\0", 0o777);
+    const O_RDWRc: u32 = 0o2;
+    const O_CREATc: u32 = 0o100;
+
+    // Create file with pattern
+    let fd = sys_open("/tmp_lc3/f\0", O_RDWRc | O_CREATc);
+    if fd < 0 { println!("  FAIL: create err={}", fd); return false; }
+    let pattern = b"unlink_lifecycle_data_pattern_42\n";
+    sys_write(fd as usize, pattern);
+    sys_close(fd as usize);
+
+    // Open and read to trigger PageCache
+    let fd = sys_open("/tmp_lc3/f\0", O_RDWRc);
+    if fd < 0 { println!("  FAIL: open err={}", fd); return false; }
+    let mut buf = [0u8; 64];
+    let n = sys_read(fd as usize, &mut buf);
+    if n <= 0 || &buf[..n as usize] != pattern {
+        println!("  FAIL: initial read mismatch");
+        return false;
+    }
+
+    // Unlink while fd is still open
+    let ret = sys_unlinkat(AT_FDCWD, "/tmp_lc3/f\0", 0);
+    if ret < 0 { println!("  FAIL: unlink err={}", ret); return false; }
+
+    dump_sub_profile("lc3_before_close");
+
+    // Read again via same fd — content must still be accessible
+    let mut buf2 = [0u8; 64];
+    let n2 = sys_read(fd as usize, &mut buf2);
+    if n2 <= 0 || &buf2[..n2 as usize] != pattern {
+        println!("  FAIL: post-unlink read mismatch n={}", n2);
+        return false;
+    }
+
+    // Close fd
+    sys_close(fd as usize);
+
+    dump_sub_profile("lc3_after_close");
+
+    // Cleanup
+    sys_unlinkat(AT_FDCWD, "/tmp_lc3\0", 0x200);
+
+    // Verify: file should be unreachable now
+    let fd3 = sys_open("/tmp_lc3/f\0", 0);
+    if fd3 >= 0 {
+        println!("  FAIL: file still accessible after unlink+close");
+        sys_close(fd3 as usize);
+        return false;
+    }
+
+    println!("[fs_cache_lifecycle] unlink_open_file_lifecycle: pass");
+    true
+}
+
 #[no_mangle]
 #[link_section = ".text.entry"]
 pub extern "C" fn _start() -> ! {
@@ -1867,187 +2050,198 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     let mut passed = 0;
     let mut failed = 0;
 
-    println!("[1/56] mkdir");
+    println!("[1/59] mkdir");
     if run_test("mkdir", test_mkdir) { passed += 1; } else { failed += 1; }
 
-    println!("[2/56] file create + write");
+    println!("[2/59] file create + write");
     if run_test("create_and_write", test_create_and_write) { passed += 1; } else { failed += 1; }
 
-    println!("[3/56] file read");
+    println!("[3/59] file read");
     if run_test("read", test_read) { passed += 1; } else { failed += 1; }
 
-    println!("[4/56] symlink");
+    println!("[4/59] symlink");
     if run_test("symlink", test_symlink) { passed += 1; } else { failed += 1; }
 
-    println!("[5/56] readlink");
+    println!("[5/59] readlink");
     if run_test("readlink", test_readlink) { passed += 1; } else { failed += 1; }
 
-    println!("[6/56] read via symlink");
+    println!("[6/59] read via symlink");
     if run_test("read_via_symlink", test_read_via_symlink) { passed += 1; } else { failed += 1; }
 
-    println!("[7/56] unlink + rmdir");
+    println!("[7/59] unlink + rmdir");
     sys_ext4_counters(2, 0, 0);
     let ok = test_unlink() && test_rmdir();
     let label = "unlink+rmdir\0";
     sys_ext4_counters(3, label.as_ptr() as usize, 12);
     if ok { passed += 1; } else { failed += 1; }
 
-    println!("[8/56] dangling symlink");
+    println!("[8/59] dangling symlink");
     if run_test("dangling_symlink", test_dangling_symlink) { passed += 1; } else { failed += 1; }
 
-    println!("[9/56] ELOOP detection");
+    println!("[9/59] ELOOP detection");
     if run_test("eloop", test_eloop) { passed += 1; } else { failed += 1; }
 
-    println!("[10/56] symlink chain");
+    println!("[10/59] symlink chain");
     if run_test("symlink_chain", test_symlink_chain) { passed += 1; } else { failed += 1; }
 
-    println!("[11/56] O_CREAT|O_EXCL");
+    println!("[11/59] O_CREAT|O_EXCL");
     if run_test("excl_create", test_excl_create) { passed += 1; } else { failed += 1; }
 
-    println!("[12/56] readlink on regular file");
+    println!("[12/59] readlink on regular file");
     if run_test("readlink_on_regular", test_readlink_on_regular) { passed += 1; } else { failed += 1; }
 
-    println!("[13/56] unlink symlink preserves target");
+    println!("[13/59] unlink symlink preserves target");
     if run_test("unlink_symlink_preserves_target", test_unlink_symlink_preserves_target) { passed += 1; } else { failed += 1; }
 
-    println!("[14/56] hard link");
+    println!("[14/59] hard link");
     if run_test("hard_link", test_hard_link) { passed += 1; } else { failed += 1; }
 
-    println!("[15/56] hard link to dir rejected");
+    println!("[15/59] hard link to dir rejected");
     if run_test("hard_link_dir_rejected", test_hard_link_dir_rejected) { passed += 1; } else { failed += 1; }
 
-    println!("[16/56] lseek");
+    println!("[16/59] lseek");
     if run_test("lseek", test_lseek) { passed += 1; } else { failed += 1; }
 
-    println!("[17/56] rename file");
+    println!("[17/59] rename file");
     if run_test("rename_file", test_rename_file) { passed += 1; } else { failed += 1; }
 
-    println!("[18/56] rename directory");
+    println!("[18/59] rename directory");
     if run_test("rename_dir", test_rename_dir) { passed += 1; } else { failed += 1; }
 
-    println!("[19/56] fstatat");
+    println!("[19/59] fstatat");
     if run_test("fstatat", test_fstatat) { passed += 1; } else { failed += 1; }
 
-    println!("[20/56] ftruncate");
+    println!("[20/59] ftruncate");
     if run_test("ftruncate", test_ftruncate) { passed += 1; } else { failed += 1; }
 
-    println!("[21/56] getdents64");
+    println!("[21/59] getdents64");
     if run_test("getdents64", test_getdents64) { passed += 1; } else { failed += 1; }
 
     // ── A组: 高级 read/write 测试 ──────────────────────────
 
-    println!("[22/56] read empty file");
+    println!("[22/59] read empty file");
     if run_split_test("read_empty", test_read_empty) { passed += 1; } else { failed += 1; }
 
-    println!("[23/56] read past EOF");
+    println!("[23/59] read past EOF");
     if run_split_test("read_past_eof", test_read_past_eof) { passed += 1; } else { failed += 1; }
 
-    println!("[24/56] read data integrity (256B + partial)");
+    println!("[24/59] read data integrity (256B + partial)");
     if run_test("read_data_integrity", test_read_data_integrity) { passed += 1; } else { failed += 1; }
 
-    println!("[25/56] read bad fd -> EBADF");
+    println!("[25/59] read bad fd -> EBADF");
     if run_test("read_bad_fd", test_read_bad_fd) { passed += 1; } else { failed += 1; }
 
-    println!("[26/56] read on dir -> EISDIR");
+    println!("[26/59] read on dir -> EISDIR");
     if run_test("read_dir", test_read_dir) { passed += 1; } else { failed += 1; }
 
-    println!("[27/56] write readonly fd -> EBADF");
+    println!("[27/59] write readonly fd -> EBADF");
     if run_split_test("write_readonly", test_write_readonly) { passed += 1; } else { failed += 1; }
 
-    println!("[28/56] O_APPEND + lseek atomicity");
+    println!("[28/59] O_APPEND + lseek atomicity");
     if run_test("write_append", test_write_append) { passed += 1; } else { failed += 1; }
 
-    println!("[29/56] write varying sizes 1..4096");
+    println!("[29/59] write varying sizes 1..4096");
     if run_test("write_varying_sizes", test_write_varying_sizes) { passed += 1; } else { failed += 1; }
 
-    println!("[30/56] overwrite middle of file");
+    println!("[30/59] overwrite middle of file");
     if run_test("write_overwrite_middle", test_write_overwrite_middle) { passed += 1; } else { failed += 1; }
 
-    println!("[31/56] write bad fd -> EBADF");
+    println!("[31/59] write bad fd -> EBADF");
     if run_test("write_bad_fd", test_write_bad_fd) { passed += 1; } else { failed += 1; }
 
     // ── B组: 高级 lseek 测试 ──────────────────────────────
 
-    println!("[32/56] lseek SEEK_END + negative offset");
+    println!("[32/59] lseek SEEK_END + negative offset");
     if run_test("lseek_seek_end", test_lseek_seek_end) { passed += 1; } else { failed += 1; }
 
-    println!("[33/56] lseek bad whence -> EINVAL");
+    println!("[33/59] lseek bad whence -> EINVAL");
     if run_split_test("lseek_bad_whence", test_lseek_bad_whence) { passed += 1; } else { failed += 1; }
 
-    println!("[34/56] lseek on pipe -> ESPIPE");
+    println!("[34/59] lseek on pipe -> ESPIPE");
     if run_test("lseek_pipe", test_lseek_pipe) { passed += 1; } else { failed += 1; }
 
-    println!("[35/56] lseek beyond EOF + hole read");
+    println!("[35/59] lseek beyond EOF + hole read");
     if run_test("lseek_hole_read", test_lseek_hole_read) { passed += 1; } else { failed += 1; }
 
-    println!("[36/56] lseek chain: SET→CUR→END");
+    println!("[36/59] lseek chain: SET→CUR→END");
     if run_test("lseek_chain", test_lseek_chain) { passed += 1; } else { failed += 1; }
 
     // ── C组: open/close 错误路径 ───────────────────────────
 
-    println!("[37/56] open nonexistent -> ENOENT");
+    println!("[37/59] open nonexistent -> ENOENT");
     if run_test("open_noent", test_open_noent) { passed += 1; } else { failed += 1; }
 
-    println!("[38/56] open dir as file -> EISDIR");
+    println!("[38/59] open dir as file -> EISDIR");
     if run_split_test("open_dir_as_file", test_open_dir_as_file) { passed += 1; } else { failed += 1; }
 
-    println!("[39/56] O_TRUNC (size=0 + data lost)");
+    println!("[39/59] O_TRUNC (size=0 + data lost)");
     if run_test("open_trunc", test_open_trunc) { passed += 1; } else { failed += 1; }
 
-    println!("[40/56] close twice -> EBADF");
+    println!("[40/59] close twice -> EBADF");
     if run_split_test("close_twice", test_close_twice) { passed += 1; } else { failed += 1; }
 
-    println!("[41/56] open/close 32 times");
+    println!("[41/59] open/close 32 times");
     if run_test("open_close_many", test_open_close_many) { passed += 1; } else { failed += 1; }
 
-    println!("[42/56] open existing file (no O_CREAT)");
+    println!("[42/59] open existing file (no O_CREAT)");
     if run_split_test("open_create_existing", test_open_create_existing) { passed += 1; } else { failed += 1; }
 
     // ── D组: 压力/边界测试 ─────────────────────────────────
 
-    println!("[43/56] stress: create 50 files + verify");
+    println!("[43/59] stress: create 50 files + verify");
     if run_test("stress_create_many", test_stress_create_many) { passed += 1; } else { failed += 1; }
 
-    println!("[44/56] stress: read 30 files with unique content");
+    println!("[44/59] stress: read 30 files with unique content");
     if run_test("stress_read_many", test_stress_read_many) { passed += 1; } else { failed += 1; }
 
-    println!("[45/56] stress: unlink 30 files -> empty dir");
+    println!("[45/59] stress: unlink 30 files -> empty dir");
     if run_test("stress_unlink_loop", test_stress_unlink_loop) { passed += 1; } else { failed += 1; }
 
-    println!("[46/56] stress: rename A↔B loop x10");
+    println!("[46/59] stress: rename A↔B loop x10");
     if run_test("stress_rename_loop", test_stress_rename_loop) { passed += 1; } else { failed += 1; }
 
-    println!("[47/56] stress: large file 64KB write+read");
+    println!("[47/59] stress: large file 64KB write+read");
     if run_test("stress_large_file", test_stress_large_file) { passed += 1; } else { failed += 1; }
 
-    println!("[48/56] stress: getdents counts 20 files");
+    println!("[48/59] stress: getdents counts 20 files");
     if run_test("stress_getdents", test_stress_getdents) { passed += 1; } else { failed += 1; }
 
-    println!("[49/56] stress: truncate 100→50→200 with hole");
+    println!("[49/59] stress: truncate 100→50→200 with hole");
     if run_test("stress_truncate", test_stress_truncate) { passed += 1; } else { failed += 1; }
 
-    println!("[50/56] perf: getdents 1000 files");
+    println!("[50/59] perf: getdents 1000 files");
     if run_split_test("perf_getdents_1000", test_perf_getdents_1000) { passed += 1; } else { failed += 1; }
 
-    println!("[51/56] perf: stat-like 1000 files");
+    println!("[51/59] perf: stat-like 1000 files");
     if run_split_test("perf_stat_like_1000", test_perf_stat_like_1000) { passed += 1; } else { failed += 1; }
 
-    println!("[52/56] perf: repeated lookup cache");
+    println!("[52/59] perf: repeated lookup cache");
     if run_split_test("perf_repeated_lookup_cache", test_perf_repeated_lookup_cache) { passed += 1; } else { failed += 1; }
 
-    println!("[53/56] perf: symlink batch 200");
+    println!("[53/59] perf: symlink batch 200");
     if run_split_test("perf_symlink_batch_200", test_perf_symlink_batch_200) { passed += 1; } else { failed += 1; }
 
-    println!("[54/56] perf: open/access large dir");
+    println!("[54/59] perf: open/access large dir");
     if run_split_test("perf_open_access_large_dir", test_perf_open_access_large_dir) { passed += 1; } else { failed += 1; }
 
     // ── E组: 并发测试 (fork) ──────────────────────────────
 
-    println!("[55/56] fork: read same fd (parent+child)");
+    println!("[55/59] fork: read same fd (parent+child)");
     if run_test("fork_read_same_fd", test_fork_read_same_fd) { passed += 1; } else { failed += 1; }
 
-    println!("[56/56] fork: create files (parent+child)");
+    println!("[56/59] fork: create files (parent+child)");
     if run_test("fork_create", test_fork_create) { passed += 1; } else { failed += 1; }
+
+    // ── F组: 缓存生命周期测试（禁止 reclaim） ────────────────
+
+    println!("[57/59] lifecycle: repeated open/close 200x");
+    if run_split_test("lc_repeated_oc", test_repeated_open_close_same_file_lifecycle) { passed += 1; } else { failed += 1; }
+
+    println!("[58/59] lifecycle: lookup 64 files then close");
+    if run_split_test("lc_lookup_close", test_lookup_many_files_then_close_lifecycle) { passed += 1; } else { failed += 1; }
+
+    println!("[59/59] lifecycle: unlink while open");
+    if run_split_test("lc_unlink_open", test_unlink_open_file_lifecycle) { passed += 1; } else { failed += 1; }
 
     println!("=== FS Test: {}/{} passed ===", passed, passed + failed);
 
