@@ -71,6 +71,18 @@ pub struct Ext4FileSystem {
 /// 全局 Ext4FileSystem 引用（用于 syscall 触发的 batch mode）
 pub static GLOBAL_EXT4FS: spin::Mutex<Option<alloc::sync::Weak<Ext4FileSystem>>> = spin::Mutex::new(None);
 
+/// FS cache reclaim 统计结果
+pub struct FsCacheReclaimStats {
+    pub stale_inode_objects_removed: usize,
+    pub stale_page_caches_removed: usize,
+    pub stale_children_removed: usize,
+    pub clean_pages_freed: usize,
+    pub cached_pages_before: usize,
+    pub cached_pages_after: usize,
+    pub dirty_pages_before: usize,
+    pub dirty_pages_after: usize,
+}
+
 impl Ext4FileSystem {
     pub(crate) fn read_metadata_block(&self, block_id: usize) -> Vec<u8> {
         let bd = self.block_device.clone();
@@ -1551,6 +1563,66 @@ impl Ext4FileSystem {
             }
         }
         total
+    }
+
+    /// 遍历所有 alive PageCache，回收最多 max_pages 个干净页
+    pub fn shrink_all_page_caches_clean(&self, max_pages: usize) -> usize {
+        let mut total = 0usize;
+        let mut alive: alloc::vec::Vec<alloc::sync::Arc<crate::fs::page_cache::PageCache>> =
+            alloc::vec::Vec::new();
+        {
+            let mut reg = self.page_caches.lock();
+            reg.retain(|_, weak| {
+                if let Some(pc) = weak.upgrade() {
+                    alive.push(pc);
+                    true
+                } else {
+                    false
+                }
+            });
+        }
+        for pc in &alive {
+            let freed = pc.shrink_clean_pages(max_pages.saturating_sub(total));
+            total += freed;
+            if total >= max_pages {
+                break;
+            }
+        }
+        total
+    }
+
+    /// 统计所有 alive PageCache 的 cached/dirty 页数
+    fn count_page_cache_metrics(&self) -> (usize, usize) {
+        let mut cached = 0usize;
+        let mut dirty = 0usize;
+        let reg = self.page_caches.lock();
+        for (_, weak) in reg.iter() {
+            if let Some(pc) = weak.upgrade() {
+                cached += pc.cached_page_count();
+                dirty += pc.dirty_count();
+            }
+        }
+        (cached, dirty)
+    }
+
+    /// 统一 reclaim 入口：prune stale + shrink clean pages（不写回脏页）
+    pub fn reclaim_fs_caches(&self, target_pages: usize) -> FsCacheReclaimStats {
+        let (cached_before, dirty_before) = self.count_page_cache_metrics();
+        let (io_removed, pc_removed) = self.prune_stale_weak_entries();
+        let children_removed = self.prune_children_stale_entries();
+        let clean_freed = self.shrink_all_page_caches_clean(target_pages);
+        let (cached_after, dirty_after) = self.count_page_cache_metrics();
+
+        FsCacheReclaimStats {
+            stale_inode_objects_removed: io_removed,
+            stale_page_caches_removed: pc_removed,
+            stale_children_removed: children_removed,
+            clean_pages_freed: clean_freed,
+            cached_pages_before: cached_before,
+            cached_pages_after: cached_after,
+            dirty_pages_before: dirty_before,
+            dirty_pages_after: dirty_after,
+        }
     }
 
     /// 显式清空所有目录的 children 缓存（仅 umount/debug）

@@ -283,6 +283,11 @@ impl PageCache {
         evicted
     }
 
+    /// 回收干净页面（仅释放 UpToDate 且无外部引用的页）
+    pub fn shrink_clean_pages(&self, max_to_free: usize) -> usize {
+        self.evict_clean_pages(max_to_free)
+    }
+
     /// 获取页面状态
     pub fn state_of(&self, page_index: usize) -> Option<PageState> {
         let entries = self.entries.lock();

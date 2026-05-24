@@ -2006,6 +2006,155 @@ fn test_unlink_open_file_lifecycle() -> bool {
     true
 }
 
+// ── G组: 缓存回收测试（允许调用 reclaim） ──────────────────────
+
+/// Reclaim test: write a large file, read to fill clean PageCache,
+/// verify clean pages can be reclaimed and re-read from backend.
+fn test_page_cache_reclaim_clean_pages() -> bool {
+    println!("[fs_cache_reclaim] page_cache_reclaim_clean_pages: begin");
+    sys_mkdirat(AT_FDCWD, "/tmp_rc1\0", 0o777);
+    const O_RDWRc: u32 = 0o2;
+    const O_CREATc: u32 = 0o100;
+    const PAGE: usize = 4096;
+    const N_PAGES: usize = 16;
+
+    // Create a multi-page file with deterministic pattern
+    let fd = sys_open("/tmp_rc1/big\0", O_RDWRc | O_CREATc);
+    if fd < 0 { println!("  FAIL: create err={}", fd); return false; }
+    let pattern = [0xABu8; PAGE];
+    for i in 0..N_PAGES {
+        let w = sys_write(fd as usize, &pattern);
+        if w != PAGE as isize { println!("  FAIL: write page {} err={}", i, w); return false; }
+    }
+    sys_fsync(fd as usize);
+    sys_close(fd as usize);
+
+    // Re-open and read all pages to fill clean PageCache (KEEP fd open for reclaim)
+    let fd = sys_open("/tmp_rc1/big\0", O_RDWRc);
+    if fd < 0 { println!("  FAIL: reopen err={}", fd); return false; }
+    {
+        let mut buf = [0u8; PAGE];
+        for i in 0..N_PAGES {
+            sys_lseek(fd as usize, (i * PAGE) as isize, 0);
+            let n = sys_read(fd as usize, &mut buf);
+            if n != PAGE as isize || buf != pattern {
+                println!("  FAIL: read page {} n={}", i, n);
+                return false;
+            }
+        }
+    }
+
+    let before_cached = read_metric(6); // page_cache_cached_pages
+    dump_sub_profile("rc1_before_reclaim");
+    if before_cached < N_PAGES as isize {
+        println!("  WARN: cached before={}, expected >={}", before_cached, N_PAGES);
+    }
+
+    let freed = sys_ext4_counters(11, 0, N_PAGES); // cmd 11: reclaim target_pages=16
+    if freed < 0 { println!("  FAIL: reclaim err={}", freed); sys_close(fd as usize); return false; }
+
+    dump_sub_profile("rc1_after_reclaim");
+    let after_cached = read_metric(6);
+
+    println!("  reclaim: before_cached={} after_cached={} freed={}", before_cached, after_cached, freed);
+
+    // Verify: some pages should have been freed
+    if freed == 0 && before_cached >= N_PAGES as isize {
+        println!("  FAIL: reclaim freed 0 pages despite cached={}", before_cached);
+        sys_close(fd as usize);
+        return false;
+    }
+
+    // Re-read to verify data is still accessible (backed by disk)
+    {
+        let mut buf = [0u8; PAGE];
+        for i in 0..N_PAGES {
+            sys_lseek(fd as usize, (i * PAGE) as isize, 0);
+            let n = sys_read(fd as usize, &mut buf);
+            if n != PAGE as isize || buf != pattern {
+                println!("  FAIL: re-read page {} after reclaim n={}", i, n);
+                sys_close(fd as usize);
+                return false;
+            }
+        }
+    }
+
+    sys_close(fd as usize);
+    sys_unlinkat(AT_FDCWD, "/tmp_rc1/big\0", 0);
+    sys_unlinkat(AT_FDCWD, "/tmp_rc1\0", 0x200);
+
+    println!("[fs_cache_reclaim] page_cache_reclaim_clean_pages: pass (freed={})", freed);
+    true
+}
+
+/// Reclaim test: write dirty data, verify reclaim does NOT lose dirty pages.
+/// Reclaim must not silently drop dirty pages; data must survive fsync.
+fn test_dirty_page_no_loss_under_reclaim() -> bool {
+    println!("[fs_cache_reclaim] dirty_page_no_loss_under_reclaim: begin");
+    sys_mkdirat(AT_FDCWD, "/tmp_rc2\0", 0o777);
+    const O_RDWRc: u32 = 0o2;
+    const O_CREATc: u32 = 0o100;
+    const PAGE: usize = 4096;
+    const N_PAGES: usize = 4;
+
+    // Write pattern A, do NOT sync/close — keep fd open with dirty data
+    let fd = sys_open("/tmp_rc2/f\0", O_RDWRc | O_CREATc);
+    if fd < 0 { println!("  FAIL: create err={}", fd); return false; }
+    let pattern_a = [0xCDu8; PAGE];
+    for i in 0..N_PAGES {
+        let w = sys_write(fd as usize, &pattern_a);
+        if w != PAGE as isize { println!("  FAIL: write page {} err={}", i, w); return false; }
+    }
+
+    let dirty_before = read_metric(7); // page_cache_dirty_pages
+    dump_sub_profile("rc2_before_reclaim");
+
+    let freed = sys_ext4_counters(11, 0, 32); // cmd 11: reclaim
+    if freed < 0 { println!("  FAIL: reclaim err={}", freed); sys_close(fd as usize); return false; }
+
+    let dirty_after = read_metric(7);
+    dump_sub_profile("rc2_after_reclaim");
+
+    println!("  reclaim: dirty_before={} dirty_after={} freed={}", dirty_before, dirty_after, freed);
+
+    // Dirty pages must not decrease (if dirty_before > 0)
+    if dirty_before > 0 && dirty_after < dirty_before {
+        println!("  FAIL: dirty pages decreased from {} to {} — possible data loss", dirty_before, dirty_after);
+        sys_close(fd as usize);
+        return false;
+    }
+    if dirty_before == 0 {
+        println!("  NOTE: dirty_before=0 (likely write-through), test still valid");
+    }
+
+    // fsync + close
+    sys_fsync(fd as usize);
+    sys_close(fd as usize);
+
+    // Re-open and verify pattern A is intact
+    let fd2 = sys_open("/tmp_rc2/f\0", 0);
+    if fd2 < 0 { println!("  FAIL: reopen err={}", fd2); return false; }
+    {
+        let mut buf = [0u8; PAGE];
+        for i in 0..N_PAGES {
+            sys_lseek(fd2 as usize, (i * PAGE) as isize, 0);
+            let n = sys_read(fd2 as usize, &mut buf);
+            if n != PAGE as isize || buf != pattern_a {
+                println!("  FAIL: data corruption page {} n={}", i, n);
+                sys_close(fd2 as usize);
+                return false;
+            }
+        }
+    }
+    sys_close(fd2 as usize);
+
+    sys_unlinkat(AT_FDCWD, "/tmp_rc2/f\0", 0);
+    sys_unlinkat(AT_FDCWD, "/tmp_rc2\0", 0x200);
+
+    println!("[fs_cache_reclaim] dirty_page_no_loss_under_reclaim: pass");
+    true
+}
+
 #[no_mangle]
 #[link_section = ".text.entry"]
 pub extern "C" fn _start() -> ! {
@@ -2050,198 +2199,206 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     let mut passed = 0;
     let mut failed = 0;
 
-    println!("[1/59] mkdir");
+    println!("[1/61] mkdir");
     if run_test("mkdir", test_mkdir) { passed += 1; } else { failed += 1; }
 
-    println!("[2/59] file create + write");
+    println!("[2/61] file create + write");
     if run_test("create_and_write", test_create_and_write) { passed += 1; } else { failed += 1; }
 
-    println!("[3/59] file read");
+    println!("[3/61] file read");
     if run_test("read", test_read) { passed += 1; } else { failed += 1; }
 
-    println!("[4/59] symlink");
+    println!("[4/61] symlink");
     if run_test("symlink", test_symlink) { passed += 1; } else { failed += 1; }
 
-    println!("[5/59] readlink");
+    println!("[5/61] readlink");
     if run_test("readlink", test_readlink) { passed += 1; } else { failed += 1; }
 
-    println!("[6/59] read via symlink");
+    println!("[6/61] read via symlink");
     if run_test("read_via_symlink", test_read_via_symlink) { passed += 1; } else { failed += 1; }
 
-    println!("[7/59] unlink + rmdir");
+    println!("[7/61] unlink + rmdir");
     sys_ext4_counters(2, 0, 0);
     let ok = test_unlink() && test_rmdir();
     let label = "unlink+rmdir\0";
     sys_ext4_counters(3, label.as_ptr() as usize, 12);
     if ok { passed += 1; } else { failed += 1; }
 
-    println!("[8/59] dangling symlink");
+    println!("[8/61] dangling symlink");
     if run_test("dangling_symlink", test_dangling_symlink) { passed += 1; } else { failed += 1; }
 
-    println!("[9/59] ELOOP detection");
+    println!("[9/61] ELOOP detection");
     if run_test("eloop", test_eloop) { passed += 1; } else { failed += 1; }
 
-    println!("[10/59] symlink chain");
+    println!("[10/61] symlink chain");
     if run_test("symlink_chain", test_symlink_chain) { passed += 1; } else { failed += 1; }
 
-    println!("[11/59] O_CREAT|O_EXCL");
+    println!("[11/61] O_CREAT|O_EXCL");
     if run_test("excl_create", test_excl_create) { passed += 1; } else { failed += 1; }
 
-    println!("[12/59] readlink on regular file");
+    println!("[12/61] readlink on regular file");
     if run_test("readlink_on_regular", test_readlink_on_regular) { passed += 1; } else { failed += 1; }
 
-    println!("[13/59] unlink symlink preserves target");
+    println!("[13/61] unlink symlink preserves target");
     if run_test("unlink_symlink_preserves_target", test_unlink_symlink_preserves_target) { passed += 1; } else { failed += 1; }
 
-    println!("[14/59] hard link");
+    println!("[14/61] hard link");
     if run_test("hard_link", test_hard_link) { passed += 1; } else { failed += 1; }
 
-    println!("[15/59] hard link to dir rejected");
+    println!("[15/61] hard link to dir rejected");
     if run_test("hard_link_dir_rejected", test_hard_link_dir_rejected) { passed += 1; } else { failed += 1; }
 
-    println!("[16/59] lseek");
+    println!("[16/61] lseek");
     if run_test("lseek", test_lseek) { passed += 1; } else { failed += 1; }
 
-    println!("[17/59] rename file");
+    println!("[17/61] rename file");
     if run_test("rename_file", test_rename_file) { passed += 1; } else { failed += 1; }
 
-    println!("[18/59] rename directory");
+    println!("[18/61] rename directory");
     if run_test("rename_dir", test_rename_dir) { passed += 1; } else { failed += 1; }
 
-    println!("[19/59] fstatat");
+    println!("[19/61] fstatat");
     if run_test("fstatat", test_fstatat) { passed += 1; } else { failed += 1; }
 
-    println!("[20/59] ftruncate");
+    println!("[20/61] ftruncate");
     if run_test("ftruncate", test_ftruncate) { passed += 1; } else { failed += 1; }
 
-    println!("[21/59] getdents64");
+    println!("[21/61] getdents64");
     if run_test("getdents64", test_getdents64) { passed += 1; } else { failed += 1; }
 
     // ── A组: 高级 read/write 测试 ──────────────────────────
 
-    println!("[22/59] read empty file");
+    println!("[22/61] read empty file");
     if run_split_test("read_empty", test_read_empty) { passed += 1; } else { failed += 1; }
 
-    println!("[23/59] read past EOF");
+    println!("[23/61] read past EOF");
     if run_split_test("read_past_eof", test_read_past_eof) { passed += 1; } else { failed += 1; }
 
-    println!("[24/59] read data integrity (256B + partial)");
+    println!("[24/61] read data integrity (256B + partial)");
     if run_test("read_data_integrity", test_read_data_integrity) { passed += 1; } else { failed += 1; }
 
-    println!("[25/59] read bad fd -> EBADF");
+    println!("[25/61] read bad fd -> EBADF");
     if run_test("read_bad_fd", test_read_bad_fd) { passed += 1; } else { failed += 1; }
 
-    println!("[26/59] read on dir -> EISDIR");
+    println!("[26/61] read on dir -> EISDIR");
     if run_test("read_dir", test_read_dir) { passed += 1; } else { failed += 1; }
 
-    println!("[27/59] write readonly fd -> EBADF");
+    println!("[27/61] write readonly fd -> EBADF");
     if run_split_test("write_readonly", test_write_readonly) { passed += 1; } else { failed += 1; }
 
-    println!("[28/59] O_APPEND + lseek atomicity");
+    println!("[28/61] O_APPEND + lseek atomicity");
     if run_test("write_append", test_write_append) { passed += 1; } else { failed += 1; }
 
-    println!("[29/59] write varying sizes 1..4096");
+    println!("[29/61] write varying sizes 1..4096");
     if run_test("write_varying_sizes", test_write_varying_sizes) { passed += 1; } else { failed += 1; }
 
-    println!("[30/59] overwrite middle of file");
+    println!("[30/61] overwrite middle of file");
     if run_test("write_overwrite_middle", test_write_overwrite_middle) { passed += 1; } else { failed += 1; }
 
-    println!("[31/59] write bad fd -> EBADF");
+    println!("[31/61] write bad fd -> EBADF");
     if run_test("write_bad_fd", test_write_bad_fd) { passed += 1; } else { failed += 1; }
 
     // ── B组: 高级 lseek 测试 ──────────────────────────────
 
-    println!("[32/59] lseek SEEK_END + negative offset");
+    println!("[32/61] lseek SEEK_END + negative offset");
     if run_test("lseek_seek_end", test_lseek_seek_end) { passed += 1; } else { failed += 1; }
 
-    println!("[33/59] lseek bad whence -> EINVAL");
+    println!("[33/61] lseek bad whence -> EINVAL");
     if run_split_test("lseek_bad_whence", test_lseek_bad_whence) { passed += 1; } else { failed += 1; }
 
-    println!("[34/59] lseek on pipe -> ESPIPE");
+    println!("[34/61] lseek on pipe -> ESPIPE");
     if run_test("lseek_pipe", test_lseek_pipe) { passed += 1; } else { failed += 1; }
 
-    println!("[35/59] lseek beyond EOF + hole read");
+    println!("[35/61] lseek beyond EOF + hole read");
     if run_test("lseek_hole_read", test_lseek_hole_read) { passed += 1; } else { failed += 1; }
 
-    println!("[36/59] lseek chain: SET→CUR→END");
+    println!("[36/61] lseek chain: SET→CUR→END");
     if run_test("lseek_chain", test_lseek_chain) { passed += 1; } else { failed += 1; }
 
     // ── C组: open/close 错误路径 ───────────────────────────
 
-    println!("[37/59] open nonexistent -> ENOENT");
+    println!("[37/61] open nonexistent -> ENOENT");
     if run_test("open_noent", test_open_noent) { passed += 1; } else { failed += 1; }
 
-    println!("[38/59] open dir as file -> EISDIR");
+    println!("[38/61] open dir as file -> EISDIR");
     if run_split_test("open_dir_as_file", test_open_dir_as_file) { passed += 1; } else { failed += 1; }
 
-    println!("[39/59] O_TRUNC (size=0 + data lost)");
+    println!("[39/61] O_TRUNC (size=0 + data lost)");
     if run_test("open_trunc", test_open_trunc) { passed += 1; } else { failed += 1; }
 
-    println!("[40/59] close twice -> EBADF");
+    println!("[40/61] close twice -> EBADF");
     if run_split_test("close_twice", test_close_twice) { passed += 1; } else { failed += 1; }
 
-    println!("[41/59] open/close 32 times");
+    println!("[41/61] open/close 32 times");
     if run_test("open_close_many", test_open_close_many) { passed += 1; } else { failed += 1; }
 
-    println!("[42/59] open existing file (no O_CREAT)");
+    println!("[42/61] open existing file (no O_CREAT)");
     if run_split_test("open_create_existing", test_open_create_existing) { passed += 1; } else { failed += 1; }
 
     // ── D组: 压力/边界测试 ─────────────────────────────────
 
-    println!("[43/59] stress: create 50 files + verify");
+    println!("[43/61] stress: create 50 files + verify");
     if run_test("stress_create_many", test_stress_create_many) { passed += 1; } else { failed += 1; }
 
-    println!("[44/59] stress: read 30 files with unique content");
+    println!("[44/61] stress: read 30 files with unique content");
     if run_test("stress_read_many", test_stress_read_many) { passed += 1; } else { failed += 1; }
 
-    println!("[45/59] stress: unlink 30 files -> empty dir");
+    println!("[45/61] stress: unlink 30 files -> empty dir");
     if run_test("stress_unlink_loop", test_stress_unlink_loop) { passed += 1; } else { failed += 1; }
 
-    println!("[46/59] stress: rename A↔B loop x10");
+    println!("[46/61] stress: rename A↔B loop x10");
     if run_test("stress_rename_loop", test_stress_rename_loop) { passed += 1; } else { failed += 1; }
 
-    println!("[47/59] stress: large file 64KB write+read");
+    println!("[47/61] stress: large file 64KB write+read");
     if run_test("stress_large_file", test_stress_large_file) { passed += 1; } else { failed += 1; }
 
-    println!("[48/59] stress: getdents counts 20 files");
+    println!("[48/61] stress: getdents counts 20 files");
     if run_test("stress_getdents", test_stress_getdents) { passed += 1; } else { failed += 1; }
 
-    println!("[49/59] stress: truncate 100→50→200 with hole");
+    println!("[49/61] stress: truncate 100→50→200 with hole");
     if run_test("stress_truncate", test_stress_truncate) { passed += 1; } else { failed += 1; }
 
-    println!("[50/59] perf: getdents 1000 files");
+    println!("[50/61] perf: getdents 1000 files");
     if run_split_test("perf_getdents_1000", test_perf_getdents_1000) { passed += 1; } else { failed += 1; }
 
-    println!("[51/59] perf: stat-like 1000 files");
+    println!("[51/61] perf: stat-like 1000 files");
     if run_split_test("perf_stat_like_1000", test_perf_stat_like_1000) { passed += 1; } else { failed += 1; }
 
-    println!("[52/59] perf: repeated lookup cache");
+    println!("[52/61] perf: repeated lookup cache");
     if run_split_test("perf_repeated_lookup_cache", test_perf_repeated_lookup_cache) { passed += 1; } else { failed += 1; }
 
-    println!("[53/59] perf: symlink batch 200");
+    println!("[53/61] perf: symlink batch 200");
     if run_split_test("perf_symlink_batch_200", test_perf_symlink_batch_200) { passed += 1; } else { failed += 1; }
 
-    println!("[54/59] perf: open/access large dir");
+    println!("[54/61] perf: open/access large dir");
     if run_split_test("perf_open_access_large_dir", test_perf_open_access_large_dir) { passed += 1; } else { failed += 1; }
 
     // ── E组: 并发测试 (fork) ──────────────────────────────
 
-    println!("[55/59] fork: read same fd (parent+child)");
+    println!("[55/61] fork: read same fd (parent+child)");
     if run_test("fork_read_same_fd", test_fork_read_same_fd) { passed += 1; } else { failed += 1; }
 
-    println!("[56/59] fork: create files (parent+child)");
+    println!("[56/61] fork: create files (parent+child)");
     if run_test("fork_create", test_fork_create) { passed += 1; } else { failed += 1; }
 
     // ── F组: 缓存生命周期测试（禁止 reclaim） ────────────────
 
-    println!("[57/59] lifecycle: repeated open/close 200x");
+    println!("[57/61] lifecycle: repeated open/close 200x");
     if run_split_test("lc_repeated_oc", test_repeated_open_close_same_file_lifecycle) { passed += 1; } else { failed += 1; }
 
-    println!("[58/59] lifecycle: lookup 64 files then close");
+    println!("[58/61] lifecycle: lookup 64 files then close");
     if run_split_test("lc_lookup_close", test_lookup_many_files_then_close_lifecycle) { passed += 1; } else { failed += 1; }
 
-    println!("[59/59] lifecycle: unlink while open");
+    println!("[59/61] lifecycle: unlink while open");
     if run_split_test("lc_unlink_open", test_unlink_open_file_lifecycle) { passed += 1; } else { failed += 1; }
+
+    // ── G组: 缓存回收测试（允许 reclaim） ────────────────────
+
+    println!("[60/61] reclaim: clean page cache shrink");
+    if run_split_test("rc_clean_shrink", test_page_cache_reclaim_clean_pages) { passed += 1; } else { failed += 1; }
+
+    println!("[61/61] reclaim: dirty page no-loss");
+    if run_split_test("rc_dirty_noloss", test_dirty_page_no_loss_under_reclaim) { passed += 1; } else { failed += 1; }
 
     println!("=== FS Test: {}/{} passed ===", passed, passed + failed);
 
