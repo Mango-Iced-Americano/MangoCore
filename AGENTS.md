@@ -290,6 +290,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | LTP `sched_tc0/1/6`、`sem_comm`、`semctl08/09`、`semget05` 阻塞扫描 | 依赖 KERNEL 环境、IPC namespace、semid64 time_high、SEM_STAT_ANY 或 `/proc/sys/kernel/sem` | 当前 syscall 扫描中先 narrow skip，后续 IPC/procfs 专项处理 |
 | LTP `sctp*`、`send02`、`sendmsg01`、`sendmmsg*`、`recvmmsg01`、部分 `sendfile*` 阻塞扫描 | SCTP/网络收发或 fs sendfile 边界用例 | 当前 fs/net 协作期先由 inline runner skip |
 | LTP `*_16`、`set_mempolicy*`、`set_thread_area01`、`set_ipv4addr`、`sendmsg03`/`sendto03` | 16-bit compat、NUMA policy、架构 TLS 或网络配置环境不支持 | 当前 broad scan 中显式 skip |
+| LTP `setsockopt02/04..10`、`setxattr*`、`sgetmask01`、`shell_pipe01.sh`、`shm_comm`、`shm_test` | net/fs、旧 signal ABI、standalone helper 或 System V SHM 长耗时/namespace 兼容问题 | 当前 broad scan 中 narrow skip，后续专项处理 |
 | 非阻塞 socket 测试失败 | 检查是否在 `try_xxx` 前调了 `try_poll()` |
 
 ### 错误码对齐（Linux 语义）

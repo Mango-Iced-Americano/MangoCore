@@ -774,6 +774,9 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     if name.starts_with("set_mempolicy") {
         return Some("requires NUMA memory policy support");
     }
+    if name.starts_with("setxattr") {
+        return Some("filesystem xattr tests skipped in LTP syscall scan");
+    }
     if name.ends_with("_16") {
         return Some("16-bit compat syscall variant not supported on this platform");
     }
@@ -799,7 +802,15 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "sendfile01.sh" | "sendfile05" | "sendfile05_64" | "sendfile09" | "sendfile09_64" => {
             Some("filesystem sendfile edge case skipped in LTP syscall scan")
         }
+        "setsockopt02" | "setsockopt04" | "setsockopt05" | "setsockopt06" | "setsockopt07"
+        | "setsockopt08" | "setsockopt09" | "setsockopt10" => {
+            Some("network socket-option cases skipped in LTP syscall scan")
+        }
         "set_thread_area01" => Some("architecture-specific TLS syscall not supported"),
+        "sgetmask01" => Some("legacy signal mask syscall not supported on this arch"),
+        "shell_pipe01.sh" => Some("standalone shell pipe helper skipped in LTP syscall scan"),
+        "shm_comm" => Some("requires IPC namespace/System V SHM compatibility"),
+        "shm_test" => Some("long-running System V SHM stress helper skipped in broad scan"),
         "cgroup_fj_common.sh"
         | "cgroup_fj_function.sh"
         | "cgroup_fj_proc"

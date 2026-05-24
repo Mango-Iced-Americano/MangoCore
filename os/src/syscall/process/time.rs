@@ -532,7 +532,7 @@ fn valid_timex_value(timex: &Timex) -> bool {
 fn has_time_adjust_permission() -> bool {
     let task = current_task().unwrap();
     let inner = task.acquire_inner_lock();
-    inner.euid == 0 || (inner.cap_effective & (1u64 << CAP_SYS_TIME)) != 0
+    (inner.cap_effective & (1u64 << CAP_SYS_TIME)) != 0
 }
 
 fn update_timex_state(state: &mut TimexState, timex: &Timex) {
