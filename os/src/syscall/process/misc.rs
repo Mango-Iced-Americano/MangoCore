@@ -15,6 +15,61 @@ pub fn sys_shutdown() -> isize {
     shutdown()
 }
 
+pub fn sys_reboot(magic: usize, magic2: usize, cmd: usize, _arg: usize) -> isize {
+    const LINUX_REBOOT_MAGIC1: u32 = 0xfee1dead;
+    const LINUX_REBOOT_MAGIC2: u32 = 0x28121969;
+    const LINUX_REBOOT_MAGIC2A: u32 = 0x05121996;
+    const LINUX_REBOOT_MAGIC2B: u32 = 0x16041998;
+    const LINUX_REBOOT_MAGIC2C: u32 = 0x20112000;
+
+    const LINUX_REBOOT_CMD_CAD_OFF: u32 = 0x00000000;
+    const LINUX_REBOOT_CMD_RESTART: u32 = 0x01234567;
+    const LINUX_REBOOT_CMD_HALT: u32 = 0xcdef0123;
+    const LINUX_REBOOT_CMD_CAD_ON: u32 = 0x89abcdef;
+    const LINUX_REBOOT_CMD_POWER_OFF: u32 = 0x4321fedc;
+    const LINUX_REBOOT_CMD_RESTART2: u32 = 0xa1b2c3d4;
+    const LINUX_REBOOT_CMD_SW_SUSPEND: u32 = 0xd000fce2;
+    const LINUX_REBOOT_CMD_KEXEC: u32 = 0x45584543;
+
+    let magic = magic as u32;
+    let magic2 = magic2 as u32;
+    let cmd = cmd as u32;
+
+    if magic != LINUX_REBOOT_MAGIC1
+        || !matches!(
+            magic2,
+            LINUX_REBOOT_MAGIC2
+                | LINUX_REBOOT_MAGIC2A
+                | LINUX_REBOOT_MAGIC2B
+                | LINUX_REBOOT_MAGIC2C
+        )
+    {
+        return EINVAL;
+    }
+
+    let known_cmd = matches!(
+        cmd,
+        LINUX_REBOOT_CMD_CAD_OFF
+            | LINUX_REBOOT_CMD_RESTART
+            | LINUX_REBOOT_CMD_HALT
+            | LINUX_REBOOT_CMD_CAD_ON
+            | LINUX_REBOOT_CMD_POWER_OFF
+            | LINUX_REBOOT_CMD_RESTART2
+            | LINUX_REBOOT_CMD_SW_SUSPEND
+            | LINUX_REBOOT_CMD_KEXEC
+    );
+    if !known_cmd {
+        return EINVAL;
+    }
+
+    let task = current_task().unwrap();
+    if task.acquire_inner_lock().euid != 0 {
+        return EPERM;
+    }
+
+    SUCCESS
+}
+
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, FromPrimitive)]
 #[repr(u32)]

@@ -69,14 +69,39 @@ pub fn send_thread_signal(task: &Arc<TaskControlBlock>, signal: Signals) -> Resu
     if signal.is_empty() {
         return Ok(());
     }
+    send_thread_signal_info(task, signal, None, true)
+}
+
+pub fn send_thread_signal_info_deferred(
+    task: &Arc<TaskControlBlock>,
+    signal: Signals,
+    siginfo: SigInfo,
+) -> Result<(), isize> {
+    send_thread_signal_info(task, signal, Some(siginfo), false)
+}
+
+fn send_thread_signal_info(
+    task: &Arc<TaskControlBlock>,
+    signal: Signals,
+    siginfo: Option<SigInfo>,
+    wake: bool,
+) -> Result<(), isize> {
+    if signal.is_empty() {
+        return Ok(());
+    }
     let mut inner = task.acquire_inner_lock();
     if is_realtime_signal(signal) && inner.sigpending.queued_count() >= inner.sigpending_limit_cur {
         return Err(EAGAIN);
     }
-    inner
-        .sigpending
-        .enqueue_signal_with_sender(signal, SigInfo::SI_TKILL as usize, current_sender_pid())?;
-    if inner.task_status == TaskStatus::Interruptible
+    if let Some(siginfo) = siginfo {
+        inner.sigpending.enqueue(PendingSignal { signal, siginfo })?;
+    } else {
+        inner
+            .sigpending
+            .enqueue_signal_with_sender(signal, SigInfo::SI_TKILL as usize, current_sender_pid())?;
+    }
+    if wake
+        && inner.task_status == TaskStatus::Interruptible
         && !signal.difference(inner.sigmask).is_empty()
     {
         inner.task_status = TaskStatus::Ready;

@@ -33,7 +33,7 @@ pub use lifecycle::{
     sys_exit, sys_exit_group, sys_get_robust_list, sys_set_robust_list, sys_set_tid_address,
     sys_wait4, sys_waitid,
 };
-pub use misc::{sys_delete_module, sys_shutdown, sys_syslog, sys_yield};
+pub use misc::{sys_delete_module, sys_reboot, sys_shutdown, sys_syslog, sys_yield};
 pub use mm::{
     sys_brk, sys_madvise, sys_memorybarrier, sys_mincore, sys_mlock, sys_mlock2,
     sys_mlockall, sys_mmap, sys_mprotect, sys_mremap, sys_munlock, sys_munlockall,
@@ -41,8 +41,8 @@ pub use mm::{
 };
 pub use signal::{
     sys_kcmp, sys_kill, sys_pidfd_getfd, sys_pidfd_open, sys_pidfd_send_signal, sys_rt_sigpending,
-    sys_rt_sigsuspend, sys_sigaction, sys_sigaltstack, sys_sigprocmask, sys_sigreturn,
-    sys_sigtimedwait, sys_tgkill, sys_tkill,
+    sys_rt_sigqueueinfo, sys_rt_sigsuspend, sys_sigaction, sys_sigaltstack, sys_sigprocmask,
+    sys_sigreturn, sys_sigtimedwait, sys_tgkill, sys_tkill,
 };
 pub use time::{
     sys_adjtimex, sys_clock_adjtime, sys_clock_getres, sys_clock_gettime, sys_clock_nanosleep,

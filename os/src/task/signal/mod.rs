@@ -25,7 +25,10 @@ mod pending;
 mod wait;
 
 pub use action::Sighand;
-pub use delivery::{send_process_signal, send_process_signal_info, send_thread_signal};
+pub use delivery::{
+    send_process_signal, send_process_signal_info, send_thread_signal,
+    send_thread_signal_info_deferred,
+};
 use frame::signal_frame_layout;
 pub use pending::{is_realtime_signal, PendingSignal, SignalQueue};
 pub use wait::{sigsuspend, sigtimedwait};

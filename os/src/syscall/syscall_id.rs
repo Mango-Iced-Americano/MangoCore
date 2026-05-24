@@ -96,6 +96,7 @@ pub const SYSCALL_RT_SIGQUEUEINFO: usize = 138;
 pub const SYSCALL_SIGRETURN: usize = 139;
 pub const SYSCALL_SETPRIORITY: usize = 140;
 pub const SYSCALL_GETPRIORITY: usize = 141;
+pub const SYSCALL_REBOOT: usize = 142;
 pub const SYSCALL_SETREGID: usize = 143;
 pub const SYSCALL_SETGID: usize = 144;
 pub const SYSCALL_SETREUID: usize = 145;
