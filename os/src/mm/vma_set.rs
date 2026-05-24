@@ -97,6 +97,11 @@ impl VmaSet {
         self.debug_assert_invariants();
     }
 
+    pub(super) fn clear_no_hole(&mut self) {
+        self.vmas.clear();
+        self.mmap_holes.clear();
+    }
+
     pub(super) fn try_reserve(&mut self, additional: usize) -> Result<(), isize> {
         self.ensure_can_add(additional)
     }

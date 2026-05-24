@@ -625,6 +625,14 @@ impl<T: PageTable> AddressSpace<T> {
         //*self = Self::new_bare();
         self.vmas.clear();
     }
+
+    /// Release all resources for a zombie process: VMA metadata, page table
+    /// frames, and backing Vec storage.  The zombie no longer needs address
+    /// space after exit; only wait4 metadata (pid, exit_code) is required.
+    pub fn release_for_zombie(&mut self) {
+        self.vmas.clear_no_hole();
+        self.page_table.release_frames();
+    }
     pub fn sbrk(&mut self, increment: isize) -> usize {
         super::mmap::do_sbrk(self, increment)
     }

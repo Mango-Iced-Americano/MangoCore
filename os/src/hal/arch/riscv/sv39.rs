@@ -376,4 +376,9 @@ impl PageTable for Sv39PageTable {
             (!access.needs_read() || pte.readable()) && (!access.needs_write() || pte.writable())
         })
     }
+
+    fn release_frames(&mut self) {
+        self.frames.clear();
+        self.frames.shrink_to_fit();
+    }
 }

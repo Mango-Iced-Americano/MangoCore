@@ -147,7 +147,7 @@ impl FdTable {
     const INITIAL_CAPACITY: usize = 32;
     const MAX_CAPACITY: usize = SYSTEM_FD_LIMIT;
 
-    /// 创建空的 FdTable
+    /// 创建一个新的 FdTable
     pub fn new() -> Self {
         let capacity = Self::INITIAL_CAPACITY;
         let mut fds = Vec::with_capacity(capacity);
@@ -166,6 +166,14 @@ impl FdTable {
             soft_limit: Self::MAX_CAPACITY,
             hard_limit: Self::MAX_CAPACITY,
         }
+    }
+
+    /// 释放内部 Vec 的 backing storage，替换为零容量的空 Vec。
+    /// 用于 zombie 进程退出时释放 fd 表占用的堆内存。
+    pub fn release_backing_storage(&mut self) {
+        self.fds = alloc::vec::Vec::new();
+        self.cloexec = alloc::vec::Vec::new();
+        self.next_fd = 0;
     }
 
     /// 克隆 FdTable（fork 时用）
