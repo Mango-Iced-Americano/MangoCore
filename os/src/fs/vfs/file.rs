@@ -957,7 +957,7 @@ impl File {
         // Helper: allocate frames + pread full file content into them
         let alloc_and_pread = |size: usize, need_pages: usize| -> Vec<Arc<FrameTracker>> {
             log::debug!(
-                "[map_to_kernel_space] allocating {} frames + pread {} bytes",
+                "[map_to_kernel_space] allocating {} frames + pread {} bytes (page-at-a-time)",
                 need_pages,
                 size
             );
@@ -965,23 +965,20 @@ impl File {
             for _ in 0..need_pages {
                 trackers.push(frame_alloc().expect("map_to_kernel_space: frame_alloc failed"));
             }
-            let mut buf = alloc::vec![0u8; size];
-            let n = self
-                .pread(0, &mut buf)
-                .expect("map_to_kernel_space: pread failed");
-            if n != size {
-                log::warn!(
-                    "[map_to_kernel_space] pread returned {} bytes, expected {} (file_size={})",
-                    n,
-                    size,
-                    self.get_size()
-                );
-            }
+            // pread directly into each frame, avoiding a monolithic heap Vec
             let mut offset = 0;
             for tracker in &trackers {
                 let dst = tracker.ppn.get_bytes_array();
                 let chunk = (size - offset).min(PAGE_SIZE);
-                dst[..chunk].copy_from_slice(&buf[offset..offset + chunk]);
+                let n = self
+                    .pread(offset, &mut dst[..chunk])
+                    .expect("map_to_kernel_space: pread failed");
+                if n != chunk {
+                    log::warn!(
+                        "[map_to_kernel_space] pread at offset {} returned {} bytes, expected {}",
+                        offset, n, chunk
+                    );
+                }
                 offset += chunk;
             }
             trackers

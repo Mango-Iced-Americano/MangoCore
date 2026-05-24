@@ -25,7 +25,7 @@ fn print_syscall_context() {
 fn print_kernel_memory() {
     println!("--- KERNEL MEMORY ---");
 
-    let (free, total) = crate::mm::heap_stats();
+    let (free, total, _au, _aa, _w) = crate::mm::heap_stats();
     println!(
         "heap: {}/{} bytes free ({:.1}% used)",
         free,

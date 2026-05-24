@@ -115,12 +115,16 @@ pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
     crate::hal::shutdown()
 }
 
-/// 返回 (free_bytes, total_bytes) 用于诊断
-pub fn heap_stats() -> (usize, usize) {
+/// 返回 (free_bytes, total_bytes, allocated_user, allocated_actual, internal_waste)
+/// where internal_waste = allocated_actual - allocated_user (fragmentation overhead)
+pub fn heap_stats() -> (usize, usize, usize, usize, usize) {
     let heap = HEAP_ALLOCATOR.inner.lock();
     let total = heap.stats_total_bytes();
-    let allocated = heap.stats_alloc_actual();
-    (total.saturating_sub(allocated), total)
+    let alloc_actual = heap.stats_alloc_actual();
+    let alloc_user = heap.stats_alloc_user();
+    let free = total.saturating_sub(alloc_actual);
+    let waste = alloc_actual.saturating_sub(alloc_user);
+    (free, total, alloc_user, alloc_actual, waste)
 }
 
 /// 全局堆内存空间

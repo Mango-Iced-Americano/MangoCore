@@ -64,6 +64,19 @@ pub fn registry_stats() -> (usize, usize, usize, usize) {
     (len, cap, alive, stale)
 }
 
+/// 聚合所有 alive PageCache 的 entries 统计: (total_len, total_cap, total_live, total_holes)
+pub fn entries_global_stats() -> (usize, usize, usize, usize) {
+    let mut tlen = 0; let mut tcap = 0; let mut tlive = 0; let mut tholes = 0;
+    let reg = PAGE_CACHE_REGISTRY.lock();
+    for weak in reg.iter() {
+        if let Some(pc) = weak.upgrade() {
+            let (len, cap, live, holes) = pc.entries_stats();
+            tlen += len; tcap += cap; tlive += live; tholes += holes;
+        }
+    }
+    (tlen, tcap, tlive, tholes)
+}
+
 // ── PageState ────────────────────────────────────────────────────────────
 
 /// 页面状态，对标 Linux 的 `PG_*` 标志组合

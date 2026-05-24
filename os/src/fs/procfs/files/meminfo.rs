@@ -14,7 +14,7 @@ pub fn meminfo_content(
     let total_pages = crate::config::MEMORY_SIZE / page_size;
     let used_pages = total_pages.saturating_sub(free_frames);
 
-    let (heap_free, heap_total) = crate::mm::heap_stats();
+    let (heap_free, heap_total, _au, _aa, _w) = crate::mm::heap_stats();
 
     let mut s = alloc::string::String::with_capacity(512);
     use core::fmt::Write;

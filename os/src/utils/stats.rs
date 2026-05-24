@@ -54,7 +54,7 @@ pub fn print_resource_stats(task: Option<&TaskControlBlock>) {
     if !STATS_ENABLED { return; }
 
     let free = unallocated_frames();
-    let (heap_free, heap_total) = heap_stats();
+    let (heap_free, heap_total, _alloc_user, alloc_actual, waste) = heap_stats();
     let (ready, int_count) = task_manager_counts().unwrap_or((0, 0));
     let cur_fds = task.and_then(|t| t.process.files().try_lock().map(|f| f.fd_count())).unwrap_or(0);
 
@@ -67,8 +67,8 @@ pub fn print_resource_stats(task: Option<&TaskControlBlock>) {
 
     // Line 1: system resources
     println!(
-        "[kernel] [stats] free_frames={} ready={} int={} procs={} heap_free={}K heap_total={}K",
-        free, ready, int_count, pa, heap_free >> 10, heap_total >> 10
+        "[kernel] [stats] free_frames={} ready={} int={} procs={} heap={}K/{}/{}K waste={}K",
+        free, ready, int_count, pa, heap_free >> 10, alloc_actual >> 10, heap_total >> 10, waste >> 10
     );
     // Line 2: cache memory
     println!(
@@ -76,9 +76,11 @@ pub fn print_resource_stats(task: Option<&TaskControlBlock>) {
         pc * 4, pd * 4, ic, mbc >> 10, mbd, mntfs, mntinode
     );
     // Line 3: PageCache metadata + ext4 dentry
+    let (el, ec, ev, eh) = crate::fs::entries_global_stats();
     println!(
-        "[kernel] [stats] pc_reg={}/{}/{}/{} kids={}/{}/{}/{}K neg={}/{}K",
+        "[kernel] [stats] pc_reg={}/{}/{}/{} pc_ent={}/{}/{}/{} kids={}/{}/{}/{}K neg={}/{}K",
         pr_len, pr_cap, pr_alive, pr_stale,
+        el, ec, ev, eh,
         kt, ka, ks, kb >> 10, nt, nb >> 10
     );
     // Line 4: process fd tables

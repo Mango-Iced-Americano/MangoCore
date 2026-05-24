@@ -6,7 +6,7 @@ mod filesystem;
 pub mod iov;
 mod layout;
 mod page_cache;
-pub use page_cache::{evict_all_clean_pages, flush_all_page_caches, registry_stats};
+pub use page_cache::{entries_global_stats, evict_all_clean_pages, flush_all_page_caches, registry_stats};
 pub mod poll;
 pub mod procfs;
 pub mod ramfs;
