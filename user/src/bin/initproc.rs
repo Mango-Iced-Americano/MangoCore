@@ -865,6 +865,8 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "test_ioctl" | "test_recvmsg" | "test_robind.sh" => {
             Some("network SCTP helper skipped in LTP syscall scan")
         },
+        "thp02" | "thp03" | "thp04" => Some("requires transparent/huge page support"),
+        "timed_forkbomb" => Some("long-running fork pressure case skipped in broad scan"),
         "cgroup_fj_common.sh"
         | "cgroup_fj_function.sh"
         | "cgroup_fj_proc"
