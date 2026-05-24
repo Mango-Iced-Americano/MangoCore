@@ -22,12 +22,6 @@ use crate::net::Endpoint;
 /// 默认收发缓冲区大小（字节数）
 pub const UNIX_STREAM_DEFAULT_BUF_SIZE: usize = 64 * 1024;
 
-use core::sync::atomic::AtomicUsize;
-static UNIX_RING_COUNT: AtomicUsize = AtomicUsize::new(0);
-static UNIX_RING_BYTES: AtomicUsize = AtomicUsize::new(0);
-pub fn unix_ring_alive() -> usize { UNIX_RING_COUNT.load(core::sync::atomic::Ordering::Relaxed) }
-pub fn unix_ring_bytes() -> usize { UNIX_RING_BYTES.load(core::sync::atomic::Ordering::Relaxed) }
-
 // ── Inner 状态机 ─────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -82,8 +76,6 @@ impl Connected {
     /// - `side_a.peer_rx == side_b.rx`
     /// - `side_a.rx == side_b.peer_rx`
     pub fn new_pair(buf_size: usize) -> (Self, Self) {
-        UNIX_RING_COUNT.fetch_add(2, core::sync::atomic::Ordering::Relaxed);
-        UNIX_RING_BYTES.fetch_add(buf_size * 2, core::sync::atomic::Ordering::Relaxed);
         let buf_a = Arc::new(Mutex::new(RingBuffer::new(buf_size)));
         let buf_b = Arc::new(Mutex::new(RingBuffer::new(buf_size)));
         (
@@ -153,13 +145,6 @@ impl Connected {
         self.peer_addr
             .as_ref()
             .map(|addr| Endpoint::Unix(addr.clone().into()))
-    }
-}
-
-impl Drop for Connected {
-    fn drop(&mut self) {
-        UNIX_RING_COUNT.fetch_sub(2, core::sync::atomic::Ordering::Relaxed);
-        UNIX_RING_BYTES.fetch_sub(UNIX_STREAM_DEFAULT_BUF_SIZE * 2, core::sync::atomic::Ordering::Relaxed);
     }
 }
 

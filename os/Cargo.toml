@@ -68,6 +68,7 @@ block_mem = []
 block_virt = []
 block_virt_pci = []
 comp = []
+heap_trace = []
 
 # LoongArch Boards:
 loongarch64 = []

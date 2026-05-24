@@ -71,9 +71,18 @@ impl OomAwareAllocator {
 unsafe impl GlobalAlloc for OomAwareAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         for _ in 0..3 {
-            if let Ok(ptr) = self.inner.lock().alloc(layout) {
+            let mut inner = self.inner.lock();
+            if let Ok(ptr) = inner.alloc(layout) {
+                let block_size = layout.size()
+                    .max(layout.align())
+                    .max(core::mem::size_of::<usize>())
+                    .next_power_of_two();
+                drop(inner);
+                #[cfg(feature = "heap_trace")]
+                crate::mm::heap_trace::record_alloc(ptr.as_ptr(), layout, block_size);
                 return ptr.as_ptr();
             }
+            drop(inner);
             if !self.recover_for(layout) {
                 break;
             }
@@ -83,6 +92,8 @@ unsafe impl GlobalAlloc for OomAwareAllocator {
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         if let Some(ptr) = core::ptr::NonNull::new(ptr) {
+            #[cfg(feature = "heap_trace")]
+            crate::mm::heap_trace::record_dealloc(ptr.as_ptr());
             self.inner.lock().dealloc(ptr, layout);
         }
     }
@@ -111,6 +122,8 @@ pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
     println!("triggered by syscall: {}", syscall_name);
     println!("layout: size={}, align={}", layout.size(), layout.align());
     println!("KERNEL_HEAP_SIZE: {} bytes", KERNEL_HEAP_SIZE);
+    #[cfg(feature = "heap_trace")]
+    crate::mm::heap_trace::dump_oom(layout);
     println!("======================================");
     crate::hal::shutdown()
 }

@@ -462,6 +462,7 @@ impl ProcessControlBlock {
         for fd in open_fds {
             let _ = fd_table.drop_fd(fd);
         }
+        *fd_table = crate::fs::vfs::file::FdTable::new();
     }
 
     /// 完成进程级退出收尾。

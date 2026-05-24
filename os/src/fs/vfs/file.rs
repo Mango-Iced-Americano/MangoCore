@@ -170,21 +170,24 @@ impl FdTable {
 
     /// 克隆 FdTable（fork 时用）
     pub fn try_clone(&self) -> Result<Self, SyscallErr> {
+        let hi = self.highest_open_index().map(|i| i + 1).unwrap_or(0);
+        let clone_len = hi.max(Self::INITIAL_CAPACITY).min(self.fds.len());
+
         let mut fds = Vec::new();
-        if fds.try_reserve(self.fds.len()).is_err() {
+        if fds.try_reserve(clone_len).is_err() {
             return Err(SyscallErr::ENOMEM);
         }
         fds.extend(
-            self.fds
+            self.fds[..clone_len]
                 .iter()
                 .map(|opt| opt.as_ref().and_then(|f| f.try_clone())),
         );
 
         let mut cloexec = Vec::new();
-        if cloexec.try_reserve(self.cloexec.len()).is_err() {
+        if cloexec.try_reserve(clone_len).is_err() {
             return Err(SyscallErr::ENOMEM);
         }
-        cloexec.extend(self.cloexec.iter().copied());
+        cloexec.extend(self.cloexec[..clone_len].iter().copied());
 
         Ok(FdTable {
             fds,

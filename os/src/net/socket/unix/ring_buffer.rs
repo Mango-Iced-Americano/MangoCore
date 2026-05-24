@@ -9,7 +9,12 @@
 //! - 支持 shutdown 标志位
 
 use alloc::collections::VecDeque;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+static RB_COUNT: AtomicUsize = AtomicUsize::new(0);
+static RB_BYTES: AtomicUsize = AtomicUsize::new(0);
+pub fn rb_alive() -> usize { RB_COUNT.load(Ordering::Relaxed) }
+pub fn rb_bytes() -> usize { RB_BYTES.load(Ordering::Relaxed) }
 
 /// 通用环形缓冲区
 #[derive(Debug)]
@@ -29,6 +34,8 @@ impl<T> RingBuffer<T> {
     ///
     /// `capacity` 是最大元素数限制（非字节数）。
     pub fn new(capacity: usize) -> Self {
+        RB_COUNT.fetch_add(1, Ordering::Relaxed);
+        RB_BYTES.fetch_add(capacity, Ordering::Relaxed);
         Self {
             deque: VecDeque::with_capacity(capacity),
             capacity,
@@ -128,5 +135,12 @@ impl<T> RingBuffer<T> {
     /// 本端是否已关闭写入
     pub fn is_send_shutdown(&self) -> bool {
         self.send_shutdown.load(Ordering::Acquire)
+    }
+}
+
+impl<T> Drop for RingBuffer<T> {
+    fn drop(&mut self) {
+        RB_COUNT.fetch_sub(1, Ordering::Relaxed);
+        RB_BYTES.fetch_sub(self.capacity, Ordering::Relaxed);
     }
 }

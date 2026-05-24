@@ -134,8 +134,8 @@ pub fn print_resource_stats(task: Option<&TaskControlBlock>) {
     // Line 7: I/O buffer stats (pipe + AF_UNIX ring)
     let pn = crate::fs::dev::pipe::pipe_buf_alive();
     let pb = crate::fs::dev::pipe::pipe_buf_bytes();
-    let urn = crate::net::socket::unix::stream::inner::unix_ring_alive();
-    let urb = crate::net::socket::unix::stream::inner::unix_ring_bytes();
+    let urn = crate::net::socket::unix::ring_buffer::rb_alive();
+    let urb = crate::net::socket::unix::ring_buffer::rb_bytes();
     println!("[kernel] [stats] io_buf pipe={}/{}K unix={}/{}K", pn, pb>>10, urn, urb>>10);
     // Line 7: buddy free histogram (orders with >0 blocks, size=2^order)
     let h = crate::mm::heap_free_histogram();
@@ -153,4 +153,8 @@ pub fn print_resource_stats(task: Option<&TaskControlBlock>) {
         pcbs, zpcbs, tcbs, tcb_slots, tcb_slots.saturating_sub(tcbs),
         pcb_refs, zpcb_refs, as_refs, zas_refs, zvm_x, vmas, zvmas, pt_frames
     );
+    #[cfg(feature = "heap_trace")]
+    {
+        crate::mm::heap_trace::print_summary();
+    }
 }

@@ -212,7 +212,7 @@ impl<'a> NetInterface<'a> {
                     let socket = inner.sockets.get::<tcp::Socket>(h);
                     let state = socket.state();
                     let can_remove =
-                        state == tcp::State::Closed || state == tcp::State::TimeWait;
+                        state == tcp::State::Closed;
                     if !can_remove {
                         log::debug!(
                             "[NetInterface::poll_once] TCP handle {} not ready yet (state={:?}), deferring",
