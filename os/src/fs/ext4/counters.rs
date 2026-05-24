@@ -324,6 +324,17 @@ pub fn sys_ext4_counters(cmd: usize, label_ptr: usize, label_len: usize) -> isiz
             drop(guard);
             fs.clear_all_children_caches() as isize
         }
+        10 => {
+            // get_cache_metric(metric_id): return single numeric value
+            // metric_id passed as label_len (arg2)
+            let guard = crate::fs::ext4::ext4fs::GLOBAL_EXT4FS.lock();
+            let fs = match guard.as_ref().and_then(|w| w.upgrade()) {
+                Some(fs) => fs,
+                None => return -6,
+            };
+            drop(guard);
+            fs.get_cache_metric(label_len)
+        }
         _ => -22, // EINVAL
     }
 }

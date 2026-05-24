@@ -83,14 +83,16 @@ pub struct Ext4OSInode {
     /// 新 PageCache（懒初始化，仅用于普通文件数据）
     pub(super) new_page_cache: Mutex<Option<Arc<NewPageCache>>>,
 
-    // ── Phase 2: children cache (reference: DragonOS Ext4Inode.children) ──
+    // ── Phase 2: children cache (opportunistic dentry cache) ──
     //
     // 目录 inode 维护的子项缓存，加速同目录 repeated lookup/find/readlink。
-    // 使用 Weak<dyn IndexNode> 避免循环引用（parent → child → parent）。
-    // 所有目录修改操作（create/symlink/mkdir/unlink/rmdir/rename）必须维护一致性。
+    // 使用 Weak<dyn IndexNode> 避免强引用：children cache 不拥有 inode 生命周期，
+    // inode 的真正所有权由 fd table / cwd / mmap / mount / exe 等持有。
+    // Weak 升级失败时惰性清理，回退到磁盘目录查找。
     //
+    // 所有目录修改操作（create/symlink/mkdir/unlink/rmdir/rename）必须维护一致性。
     // 非目录 inode 此字段为空且不使用。
-    pub(super) children: Mutex<BTreeMap<String, alloc::sync::Arc<dyn crate::fs::vfs::IndexNode>>>,
+    pub(super) children: Mutex<BTreeMap<String, alloc::sync::Weak<dyn crate::fs::vfs::IndexNode>>>,
 
     // ── Phase 4: negative dentry cache (version-based invalidation) ──
     pub(super) negative_dentry: Mutex<BTreeMap<String, u64>>,
