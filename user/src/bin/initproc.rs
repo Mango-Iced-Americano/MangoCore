@@ -1581,6 +1581,15 @@ fn prepare_symlink(environ: &[*const u8]) {
         ret
     );
 
+    // Step 3: 修复测试目录中脚本的执行权限。
+    // ext4 镜像可能来自宿主机，文件不带有 +x 位。basic/lua/busybox 等测试
+    // 脚本通过 ./run-all.sh 直接执行（不经过 bash），必须设 +x。
+    // LTP inline runner 不受影响（使用 bash -c "./binary" 绕过权限检查）。
+    println!("[initproc] fixing +x permissions on test scripts ...");
+    let chmod_cmd = "chmod +x /musl/*.sh /musl/*/*.sh /glibc/*.sh /glibc/*/*.sh 2>/dev/null; true\0";
+    let ret = run_bash_cmd(chmod_cmd, environ);
+    println!("[initproc] chmod test scripts done, exit={}", ret);
+
     run_bash_cmd(
         "
         rm -f /bin/bash /bin/sh;
