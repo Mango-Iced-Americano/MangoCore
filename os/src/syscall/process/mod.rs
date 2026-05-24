@@ -25,7 +25,9 @@ pub use ids::{
     sys_setreuid, sys_setrlimit, sys_setsid, sys_setuid, sys_sysinfo, sys_uname, CapUserData,
     CapUserHeader, RLimit, SchedAttr, SchedParam, Sysinfo,
 };
-pub use ipc::{sys_shmat, sys_shmctl, sys_shmdt, sys_shmget};
+pub use ipc::{
+    sys_msgctl, sys_msgget, sys_msgrcv, sys_msgsnd, sys_shmat, sys_shmctl, sys_shmdt, sys_shmget,
+};
 pub use lifecycle::{
     sys_exit, sys_exit_group, sys_get_robust_list, sys_set_robust_list, sys_set_tid_address,
     sys_wait4, sys_waitid,

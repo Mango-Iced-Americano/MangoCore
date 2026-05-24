@@ -264,6 +264,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | pidfd_open04 waitid(P_PIDFD) ENOSYS | 缺少 `waitid(95)` 分发和 P_PIDFD 最小语义 | 支持 `P_PIDFD + WEXITED`，非阻塞未退出返回 `EAGAIN`，退出后回收子进程 |
 | futex_wait05 短 timeout 超时过长 | 单线程短等待走完整 wait queue/调度路径，QEMU 下固定增加数毫秒 | 仅对单线程、ready 队列为空、短 timeout 使用硬件时钟短轮询；仍保持值不匹配优先返回 `EAGAIN` |
 | process_vm_readv03 多 iovec 数据错误 | 大量同页一字节 iovec 被长期保存成多个 `&mut` 页切片，存在别名风险 | 跨进程 iovec 拷贝逐页 chunk 即时复制，不持久保存页切片 |
+| LTP `msg*` 大片 ENOSYS/errno 失败 | 缺少 SysV message queue syscall 和 Linux IPC 权限/时间字段语义 | 最小实现 `msgget/msgctl/msgsnd/msgrcv`，用 wall-clock 填 `msg_*time`，校验 uid/gid/mode、NULL 用户指针和 `MSG_COPY/MSG_EXCEPT/MSG_NOERROR`；`msgrcv06/msgsnd06` 这类删除唤醒需后续 wait queue 化 |
 
 ### QEMU / 测试
 
@@ -281,6 +282,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 - `msync` 的 `MS_ASYNC|MS_SYNC` → EINVAL；`MS_INVALIDATE` 命中 `MAP_LOCKED` VMA → EBUSY；未映射区间 → ENOMEM
 - `prctl` 兼容项不要统一返回 EINVAL：`PR_SET_NAME` 坏用户指针要 EFAULT，`PR_SET_DUMPABLE` 非 0/1 要 EINVAL，`PR_CAPBSET_DROP`/`PR_SET_SECUREBITS` 缺 `CAP_SETPCAP` 要 EPERM，`PR_SET_TIMERSLACK(0)` 要恢复线程默认值
 - `process_vm_readv/writev`：`flags != 0` → EINVAL，`liovcnt/riovcnt > 1024` → EINVAL，零 iovec sanity call 要返回 0；跨进程访问要用目标进程 `vm` fault-in，不能直接套当前 token 的 uaccess
+- SysV msg：`msgp == NULL` → EFAULT，`mtype <= 0` 或 `msgsz > MSGMAX` → EINVAL，无权限按读写位返回 EACCES；空队列配 `IPC_NOWAIT/MSG_COPY` 返回 ENOMSG
 - setsockopt 未知 level → ENOPROTOOPT(92)，不是 EOPNOTSUPP(95)
 - socketpair 非 AF_UNIX → EPROTONOSUPPORT(93)，不是 EAFNOSUPPORT(97)
 - `Socket::alloc` 未知 domain → EAFNOSUPPORT(97)，不是 EINVAL(22)
