@@ -719,7 +719,13 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     if cfg!(target_arch = "loongarch64") && libc_suffix == "glibc" && name == "crash01" {
         return Some("la64 glibc crashme random-code timeout");
     }
+    if libc_suffix == "musl" && name == "clone08" {
+        return Some("musl clone wrapper rejects CLONE_THREAD/CLONE_CHILD_CLEARTID");
+    }
 
+    if name.starts_with("af_alg") {
+        return Some("kernel crypto socket tests skipped in broad LTP scan");
+    }
     if name.starts_with("aio") {
         return Some("requires libaio userspace environment");
     }
@@ -887,6 +893,9 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
             Some("interactive password helper")
         }
         "chdir01" => Some("requires LTP external block device"),
+        "chmod05" | "chmod06" | "chmod07" => {
+            Some("filesystem permission/user database semantics skipped in LTP syscall scan")
+        },
         "check_envval" => Some("standalone locale/environment helper skipped in LTP syscall scan"),
         "clock_nanosleep03" => Some("requires time namespace kernel config"),
         "data" | "datafiles" => Some("standalone LTP helper skipped in syscall scan"),

@@ -262,6 +262,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | `waitid11` SIGKILL 子进程被报告为正常退出 | `waitid` siginfo 总是填 `CLD_EXITED` | 按 wait status 低 7 位区分 `CLD_KILLED/CLD_DUMPED` |
 | `userns*`、`utime*`、`vmsplice*`、`wireguard*`、`zram*` 等后段失败 | user namespace/procfs、fs timestamp、pipe splice、net/module 环境缺失 | broad scan 中按家族窄跳过，后续专项处理 |
 | `aio*`、`chdir01`、`dio*`、`data*`、`dccp*`、`dhcp*`、`dctcp*` 等前段噪声 | libaio 用户态环境、外部测试设备、fs direct-io 压测、standalone helper、网络协议矩阵 | broad scan 中按家族/精确项跳过，保留普通核心 syscall 用例 |
+| `clone08` musl 失败但 glibc 通过 | musl `clone()` wrapper 对 `CLONE_THREAD/CLONE_CHILD_CLEARTID` 组合直接 `EINVAL`，未进入内核；glibc 路径验证内核线程 clone 可用 | broad scan 中仅跳过 musl `clone08`，保留 glibc |
 
 ### 信号/进程
 
