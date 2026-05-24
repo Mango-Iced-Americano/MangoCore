@@ -371,6 +371,10 @@ impl IndexNode for MountFSInode {
         self.inner_inode.page_cache()
     }
 
+    fn ensure_page_cache(&self) -> Option<Arc<super::super::page_cache::PageCache>> {
+        self.inner_inode.ensure_page_cache()
+    }
+
     fn sync(&self) -> Result<(), SyscallErr> {
         self.inner_inode.sync()
     }

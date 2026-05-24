@@ -211,7 +211,7 @@ fn restore_shared_write<T: PageTable>(
         if let (Some(inode), Ok(file_offset)) =
             (area.vm_file(), area.vm_file_offset(ctx.vpn))
         {
-            if let Some(pc) = inode.page_cache() {
+            if let Some(pc) = inode.ensure_page_cache() {
                 let page_index = file_offset >> crate::config::PAGE_SIZE_BITS;
                 if let Err(e) = pc.frame_for_write(page_index) {
                     return Err(match e {
