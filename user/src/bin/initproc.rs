@@ -760,6 +760,7 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "sigtimedwait01" | "rt_sigtimedwait01" | "sigwaitinfo01" => {
             Some("blocking signal-wait case pending dedicated wait-queue support")
         }
+        "signal06" => Some("x86_64-only signal testcase"),
         _ => None,
     }
 }
