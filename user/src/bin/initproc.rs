@@ -720,6 +720,9 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         return Some("la64 glibc crashme random-code timeout");
     }
 
+    if name.starts_with("aio") {
+        return Some("requires libaio userspace environment");
+    }
     if name.starts_with("cfs_bandwidth") || name.starts_with("cgroup_") {
         return Some("requires cgroup support");
     }
@@ -737,6 +740,15 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     }
     if name.starts_with("cpuhotplug") {
         return Some("requires CPU hotplug support");
+    }
+    if name.starts_with("check_icmp") {
+        return Some("network connectivity helper skipped in LTP syscall scan");
+    }
+    if name.starts_with("dccp") || name.starts_with("dhcp") || name.starts_with("dctcp") {
+        return Some("network protocol helper skipped in LTP syscall scan");
+    }
+    if name.starts_with("dio") {
+        return Some("filesystem direct-io stress tests skipped in LTP syscall scan");
     }
     if name.starts_with("pm_") {
         return Some("requires power-management sysfs/python environment");
@@ -874,6 +886,12 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "ask_password.sh" | "assign_password.sh" | "change_password.sh" | "remove_password.sh" => {
             Some("interactive password helper")
         }
+        "chdir01" => Some("requires LTP external block device"),
+        "check_envval" => Some("standalone locale/environment helper skipped in LTP syscall scan"),
+        "clock_nanosleep03" => Some("requires time namespace kernel config"),
+        "data" | "datafiles" => Some("standalone LTP helper skipped in syscall scan"),
+        "delete_module03" => Some("requires procfs cmdline/module environment"),
+        "df01.sh" => Some("filesystem shell helper skipped in LTP syscall scan"),
         "killall_udp_traffic" | "ns-udpclient" | "ns-udpsender" | "ns-udpserver" => {
             Some("network UDP helper skipped in LTP syscall scan")
         }

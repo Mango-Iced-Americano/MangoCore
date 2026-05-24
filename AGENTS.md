@@ -261,6 +261,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | `utsname04` 非 root `CLONE_NEWUTS` 未拒绝 | `clone` 未检查 UTS namespace 权限 | 非 root 使用 `CLONE_NEWUTS` 返回 `EPERM` |
 | `waitid11` SIGKILL 子进程被报告为正常退出 | `waitid` siginfo 总是填 `CLD_EXITED` | 按 wait status 低 7 位区分 `CLD_KILLED/CLD_DUMPED` |
 | `userns*`、`utime*`、`vmsplice*`、`wireguard*`、`zram*` 等后段失败 | user namespace/procfs、fs timestamp、pipe splice、net/module 环境缺失 | broad scan 中按家族窄跳过，后续专项处理 |
+| `aio*`、`chdir01`、`dio*`、`data*`、`dccp*`、`dhcp*`、`dctcp*` 等前段噪声 | libaio 用户态环境、外部测试设备、fs direct-io 压测、standalone helper、网络协议矩阵 | broad scan 中按家族/精确项跳过，保留普通核心 syscall 用例 |
 
 ### 信号/进程
 
