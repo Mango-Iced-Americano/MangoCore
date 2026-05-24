@@ -774,11 +774,20 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     if name.starts_with("chroot") {
         return Some("filesystem chroot semantics skipped in LTP syscall scan");
     }
+    if name.starts_with("crypto_user") {
+        return Some("kernel crypto netlink tests skipped in broad LTP scan");
+    }
+    if name.starts_with("cve-") {
+        return Some("CVE regression environment tests skipped in broad LTP scan");
+    }
     if name.starts_with("dccp") || name.starts_with("dhcp") || name.starts_with("dctcp") {
         return Some("network protocol helper skipped in LTP syscall scan");
     }
     if name.starts_with("dio") {
         return Some("filesystem direct-io stress tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("dirtyc0w") {
+        return Some("procfs/fs dirtyc0w regression tests skipped in broad LTP scan");
     }
     if name.starts_with("pm_") {
         return Some("requires power-management sysfs/python environment");
@@ -942,8 +951,19 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         }
         "check_netem" | "check_setkey" => Some("network setup helper skipped in LTP syscall scan"),
         "chown04" => Some("filesystem permission chown edge case skipped in LTP syscall scan"),
+        "cleanup_lvm.sh" => Some("filesystem LVM cleanup helper skipped in LTP syscall scan"),
+        "clock_gettime03" => Some("requires time namespace kernel config"),
+        "clock_gettime04" => Some("performance-sensitive clock_gettime threshold case skipped"),
         "clock_nanosleep03" => Some("requires time namespace kernel config"),
+        "copy_file_range03" => {
+            Some("filesystem timestamp copy_file_range edge case skipped in LTP syscall scan")
+        }
+        "cp_tests.sh" | "cpio_tests.sh" => {
+            Some("filesystem archive shell helper skipped in LTP syscall scan")
+        }
         "data" | "datafiles" => Some("standalone LTP helper skipped in syscall scan"),
+        "creat07_child" => Some("standalone creat child helper skipped in LTP syscall scan"),
+        "delete_module01" => Some("requires procfs cmdline/module environment"),
         "delete_module03" => Some("requires procfs cmdline/module environment"),
         "df01.sh" => Some("filesystem shell helper skipped in LTP syscall scan"),
         "killall_udp_traffic" | "ns-udpclient" | "ns-udpsender" | "ns-udpserver" => {
