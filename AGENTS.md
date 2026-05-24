@@ -284,6 +284,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | LTP `pm_*`/`pkey01`/`profil01`/`pt_test`/部分 `prctl*` TCONF | 依赖 power-management、pkey、profil、perf、procfs/capability 等当前非目标环境 | 先 narrow skip，避免阻塞后续 syscall 扫描 |
 | LTP `rename*` 大片 TBROK 或卡住 | 多数依赖外部块设备、目录权限矩阵等 fs 适配面 | 当前 fs/net 协作期先由 inline runner skip |
 | LTP `request_key*`/`rmdir*`/`route*` 阻塞后续扫描 | 分别依赖 keyring 子系统、fs 语义和网络路由脚本 | 当前非 fs/net 主线先 narrow skip |
+| LTP `rtc*`/`run_cpuctl*`/`run_freezer*`/`run_memctl*`/`runpwtests*` TFAIL/TCONF | 依赖 RTC ioctl、cgroup controller 或 power-management 环境 | 当前非设备/控制器主线先 narrow skip |
 | 非阻塞 socket 测试失败 | 检查是否在 `try_xxx` 前调了 `try_poll()` |
 
 ### 错误码对齐（Linux 语义）

@@ -756,11 +756,24 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     if name.starts_with("route") {
         return Some("network route tests skipped in LTP syscall scan");
     }
+    if name.starts_with("rtc") {
+        return Some("requires RTC device ioctl support");
+    }
+    if name.starts_with("run_cpuctl")
+        || name.starts_with("run_freezer")
+        || name.starts_with("run_memctl")
+    {
+        return Some("cgroup/controller helper skipped in LTP syscall scan");
+    }
+    if name.starts_with("runpwtests") {
+        return Some("requires power-management test environment");
+    }
 
     match name {
         "ask_password.sh" | "assign_password.sh" | "change_password.sh" | "remove_password.sh" => {
             Some("interactive password helper")
         }
+        "run_capbounds.sh" => Some("requires POSIX capability support"),
         "cgroup_fj_common.sh"
         | "cgroup_fj_function.sh"
         | "cgroup_fj_proc"
