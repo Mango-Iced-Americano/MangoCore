@@ -208,6 +208,46 @@ impl<T: PageTable> AddressSpace<T> {
             .is_some()
     }
 
+    pub fn validate_msync_range(
+        &self,
+        addr: usize,
+        len: usize,
+        invalidate: bool,
+    ) -> Result<(), isize> {
+        if len == 0 {
+            return Ok(());
+        }
+        let rounded_len = len
+            .checked_add(PAGE_SIZE - 1)
+            .map(|len| len & !(PAGE_SIZE - 1))
+            .ok_or(ENOMEM)?;
+        let end = addr.checked_add(rounded_len).ok_or(ENOMEM)?;
+        if end > USER_VA_END {
+            return Err(ENOMEM);
+        }
+        if self.heap_bottom != 0 {
+            let heap_limit = self.heap_bottom.saturating_add(USER_HEAP_SIZE);
+            if addr < heap_limit && end > self.heap_pt && end > self.heap_bottom {
+                return Err(ENOMEM);
+            }
+        }
+        let start_vpn = VirtAddr::from(addr).floor();
+        let end_vpn = VirtAddr::from(end).ceil();
+        if !self.vmas.covers_user_range(start_vpn, end_vpn) {
+            return Err(ENOMEM);
+        }
+        if invalidate
+            && self.vmas.iter().any(|area| {
+                area.vm_is_user()
+                    && area.vm_overlaps(start_vpn, end_vpn)
+                    && area.flags.contains(MapFlags::MAP_LOCKED)
+            })
+        {
+            return Err(EBUSY);
+        }
+        Ok(())
+    }
+
     pub fn proc_maps_content(&self) -> String {
         let mut s = String::with_capacity(self.vmas.len() * 80);
         for vma in self.vmas.iter().filter(|vma| vma.vm_is_user()) {
@@ -242,7 +282,11 @@ impl<T: PageTable> AddressSpace<T> {
         access: FaultAccess,
     ) -> Result<PhysAddr, MemoryError> {
         let vpn = addr.floor();
-        if self.vmas.find_user_vma_key(vpn).is_some() {
+        let area_start = match self.vmas.find_user_vma_key(vpn) {
+            Some(start) => Some(start),
+            None => self.vmas.expand_growsdown_for_fault(vpn)?,
+        };
+        if area_start.is_some() {
             let ctx = super::page_fault::FaultContext::new(addr, access);
             let page_table = &mut self.page_table;
             let area = self.vmas.find_user_vma_mut(vpn).unwrap();

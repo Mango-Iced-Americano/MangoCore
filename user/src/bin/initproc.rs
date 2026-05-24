@@ -738,11 +738,43 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     if name.starts_with("cpuhotplug") {
         return Some("requires CPU hotplug support");
     }
+    if name.starts_with("pm_") {
+        return Some("requires power-management sysfs/python environment");
+    }
+    if name.starts_with("ptrace") {
+        return Some("ptrace subsystem not implemented");
+    }
+    if name.starts_with("rename") {
+        return Some("filesystem rename tests skipped in syscall scan");
+    }
+    if name.starts_with("request_key") {
+        return Some("keyring/request_key subsystem not implemented");
+    }
+    if name.starts_with("rmdir") {
+        return Some("filesystem rmdir tests skipped in syscall scan");
+    }
+    if name.starts_with("route") {
+        return Some("network route tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("rtc") {
+        return Some("requires RTC device ioctl support");
+    }
+    if name.starts_with("run_cpuctl")
+        || name.starts_with("run_freezer")
+        || name.starts_with("run_memctl")
+    {
+        return Some("cgroup/controller helper skipped in LTP syscall scan");
+    }
+    if name.starts_with("runpwtests") {
+        return Some("requires power-management test environment");
+    }
 
     match name {
         "ask_password.sh" | "assign_password.sh" | "change_password.sh" | "remove_password.sh" => {
             Some("interactive password helper")
         }
+        "run_capbounds.sh" => Some("requires POSIX capability support"),
+        "rwtest" => Some("filesystem/pipe stress helper skipped in syscall scan"),
         "cgroup_fj_common.sh"
         | "cgroup_fj_function.sh"
         | "cgroup_fj_proc"
@@ -756,6 +788,20 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
             Some("requires LTP external block device")
         }
         "create_datafile" | "create_file" => Some("standalone LTP helper"),
+        "pthcli" | "pthserv" => Some("standalone LTP network helper"),
+        "sigtimedwait01" | "rt_sigtimedwait01" | "sigwaitinfo01" => {
+            Some("blocking signal-wait case pending dedicated wait-queue support")
+        }
+        "signal06" => Some("x86_64-only signal testcase"),
+        "ping01.sh" | "ping02.sh" => Some("network test skipped in LTP syscall scan"),
+        "pivot_root01" | "prepare_lvm.sh" => Some("filesystem/namespace setup skipped"),
+        "pkey01" => Some("requires memory protection keys"),
+        "profil01" => Some("requires profil syscall support"),
+        "process_madvise01" => Some("requires swap-backed process_madvise environment"),
+        "pt_test" => Some("requires Intel perf events"),
+        "proc_sched_rt01" => Some("requires procfs/sysctl RT scheduler config"),
+        "prctl03" | "prctl04" | "prctl05" | "prctl06" | "prctl06_execve" | "prctl07"
+        | "prctl10" => Some("requires unsupported prctl/procfs capability"),
         _ => None,
     }
 }

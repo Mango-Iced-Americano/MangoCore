@@ -2,7 +2,14 @@
     此文件内容用于
     内容与RISCV版本相同，无需修改
 */
-use crate::{mm::UserPtr, syscall::errno::*, task::current_task, timer::TimeSpec};
+use core::hint::spin_loop;
+
+use crate::{
+    mm::UserPtr,
+    syscall::errno::*,
+    task::{current_task, has_actionable_signal, task_manager_counts},
+    timer::TimeSpec,
+};
 use alloc::collections::BTreeMap;
 use lazy_static::lazy_static;
 use log::*;
@@ -79,7 +86,11 @@ fn wait_queue_for_key(map: &mut BTreeMap<usize, WaitQueue>, key: usize) -> &mut 
 }
 
 fn remove_empty_wait_queue(map: &mut BTreeMap<usize, WaitQueue>, key: usize) {
-    if map.get(&key).map(|wait_queue| wait_queue.is_empty()).unwrap_or(false) {
+    if map
+        .get(&key)
+        .map(|wait_queue| wait_queue.is_empty())
+        .unwrap_or(false)
+    {
         map.remove(&key);
     }
 }
@@ -136,6 +147,64 @@ fn requeue_waiters(
     }
 }
 
+fn futex_wait_result_to_errno(wait_result: WaitResult) -> isize {
+    match wait_result {
+        WaitResult::Ready(value) => value,
+        WaitResult::Interrupted => EINTR,
+        WaitResult::TimedOut => ETIMEDOUT,
+    }
+}
+
+fn try_single_thread_short_timeout(
+    futex_word: UserPtr<u32>,
+    token: usize,
+    val: u32,
+    deadline: Option<TimeSpec>,
+) -> Option<WaitResult> {
+    let deadline = deadline?;
+    let now = TimeSpec::now();
+    if deadline - now > TimeSpec::from_ms(150) {
+        return None;
+    }
+
+    let task = current_task().unwrap();
+    if task.process.live_thread_count() != 1 {
+        return None;
+    }
+    if task_manager_counts()
+        .map(|(ready, _)| ready != 0)
+        .unwrap_or(true)
+    {
+        return None;
+    }
+
+    let mut spins = 0usize;
+    loop {
+        match futex_word.read(token) {
+            Ok(value) if value == val => {}
+            Ok(_) => return Some(WaitResult::Ready(EAGAIN)),
+            Err(errno) => return Some(WaitResult::Ready(errno)),
+        }
+        if TimeSpec::now() >= deadline {
+            return Some(WaitResult::TimedOut);
+        }
+        if has_actionable_signal(&task) {
+            return Some(WaitResult::Interrupted);
+        }
+
+        spins = spins.wrapping_add(1);
+        if spins & 0x3ff == 0 {
+            if task_manager_counts()
+                .map(|(ready, _)| ready != 0)
+                .unwrap_or(true)
+            {
+                return None;
+            }
+        }
+        spin_loop();
+    }
+}
+
 // Futex wait 只读用户 word
 fn do_futex_wait_until(
     futex_word: UserPtr<u32>,
@@ -147,6 +216,10 @@ fn do_futex_wait_until(
     let task = current_task().unwrap();
     let futex_table = task.process.futex().clone();
     drop(task);
+
+    if let Some(wait_result) = try_single_thread_short_timeout(futex_word, token, val, deadline) {
+        return futex_wait_result_to_errno(wait_result);
+    }
 
     let wait_result = WaitQueue::wait_event_interruptible_timeout_locked_with_wake_result(
         &futex_table,
@@ -168,11 +241,7 @@ fn do_futex_wait_until(
     );
     futex_table.lock().remove_empty(futex_key);
 
-    match wait_result {
-        WaitResult::Ready(value) => value,
-        WaitResult::Interrupted => EINTR,
-        WaitResult::TimedOut => ETIMEDOUT,
-    }
+    futex_wait_result_to_errno(wait_result)
 }
 
 // Futex wait 只读用户 word，timeout 参数为相对时间。
@@ -222,6 +291,10 @@ fn do_futex_wait_shared_until(
     deadline: Option<TimeSpec>,
     phys_key: usize,
 ) -> isize {
+    if let Some(wait_result) = try_single_thread_short_timeout(futex_word, token, val, deadline) {
+        return futex_wait_result_to_errno(wait_result);
+    }
+
     let wait_result = WaitQueue::wait_event_interruptible_timeout_locked_with_wake_result(
         &PROCESS_SHARED_FUTEX,
         |shared| wait_queue_for_key(shared, phys_key),
@@ -242,11 +315,7 @@ fn do_futex_wait_shared_until(
     );
     remove_empty_wait_queue(&mut PROCESS_SHARED_FUTEX.lock(), phys_key);
 
-    match wait_result {
-        WaitResult::Ready(value) => value,
-        WaitResult::Interrupted => EINTR,
-        WaitResult::TimedOut => ETIMEDOUT,
-    }
+    futex_wait_result_to_errno(wait_result)
 }
 
 pub fn do_futex_wait_shared(
@@ -298,7 +367,13 @@ impl Futex {
     }
 
     /// 重新排列
-    pub fn requeue(&mut self, futex_key: usize, futex_key_2: usize, val: u32, val2: usize) -> isize {
+    pub fn requeue(
+        &mut self,
+        futex_key: usize,
+        futex_key_2: usize,
+        val: u32,
+        val2: usize,
+    ) -> isize {
         requeue_waiters(&mut self.inner, futex_key, futex_key_2, val, val2)
     }
 

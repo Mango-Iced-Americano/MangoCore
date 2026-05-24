@@ -8,6 +8,8 @@ use alloc::vec::Vec;
 use log::{debug, warn};
 
 const MAX_VMA_COUNT: usize = 65_536;
+const STACK_GUARD_GAP_PAGES: usize = 256;
+const GROWSDOWN_MAX_FAULT_GAP_PAGES: usize = USER_STACK_SIZE / PAGE_SIZE;
 
 pub(super) struct VmaSet {
     vmas: BTreeMap<VirtPageNum, Vma>,
@@ -50,6 +52,14 @@ fn file_backed_page_resident(area: &Vma, vpn: VirtPageNum) -> bool {
         .page_cache()
         .map(|pc| pc.contains_page(file_offset >> PAGE_SIZE_BITS))
         .unwrap_or(false)
+}
+
+fn errno_to_memory_error(errno: isize) -> MemoryError {
+    match errno {
+        ENOMEM => MemoryError::OutOfMemory,
+        EACCES => MemoryError::NoPermission,
+        _ => MemoryError::BadAddress,
+    }
 }
 
 impl VmaSet {
@@ -143,6 +153,65 @@ impl VmaSet {
     pub(super) fn find_user_vma_mut(&mut self, vpn: VirtPageNum) -> Option<&mut Vma> {
         let start = self.find_user_vma_key(vpn)?;
         self.vmas.get_mut(&start)
+    }
+
+    pub(super) fn expand_growsdown_for_fault(
+        &mut self,
+        fault_vpn: VirtPageNum,
+    ) -> Result<Option<VirtPageNum>, MemoryError> {
+        let Some((old_start, _)) = self.vmas.range(fault_vpn..).next() else {
+            return Ok(None);
+        };
+        let old_start = *old_start;
+        let Some(area) = self.vmas.get(&old_start) else {
+            return Ok(None);
+        };
+        if fault_vpn >= old_start
+            || !area.vm_is_user()
+            || !area.flags.contains(MapFlags::MAP_GROWSDOWN)
+        {
+            return Ok(None);
+        }
+
+        let fault_gap_pages = old_start.0 - fault_vpn.0;
+        if fault_gap_pages > GROWSDOWN_MAX_FAULT_GAP_PAGES {
+            warn!(
+                "[MAP_GROWSDOWN] reject distant fault: fault={:?}, start={:?}",
+                fault_vpn, old_start
+            );
+            return Ok(None);
+        }
+
+        if let Some((_, prev)) = self.vmas.range(..old_start).next_back() {
+            let prev_end = prev.vm_end();
+            if prev_end > fault_vpn {
+                return Ok(None);
+            }
+            let guard_gap_pages = fault_vpn.0.saturating_sub(prev_end.0);
+            if guard_gap_pages < STACK_GUARD_GAP_PAGES {
+                warn!(
+                    "[MAP_GROWSDOWN] reject guard gap: fault={:?}, prev_end={:?}, gap_pages={}",
+                    fault_vpn, prev_end, guard_gap_pages
+                );
+                return Ok(None);
+            }
+        }
+
+        if self.has_overlap(fault_vpn, old_start) {
+            return Ok(None);
+        }
+        self.reserve_mmap_range(fault_vpn, old_start)
+            .map_err(errno_to_memory_error)?;
+        let mut area = self.vmas.remove(&old_start).ok_or(MemoryError::BadAddress)?;
+        if let Err(errno) = area.expand_down_to(VirtAddr::from(fault_vpn)) {
+            self.vmas.insert(old_start, area);
+            let _ = self.release_mmap_range(fault_vpn, old_start);
+            return Err(errno_to_memory_error(errno));
+        }
+        let new_start = area.vm_start();
+        self.vmas.insert(new_start, area);
+        self.debug_assert_invariants();
+        Ok(Some(new_start))
     }
 
     pub(super) fn has_overlap(

@@ -104,6 +104,13 @@ pub fn sys_mmap(
     offset: usize,
 ) -> isize {
     let task = current_task().unwrap();
+    if flags & MapFlags::MAP_ANONYMOUS.bits() == 0 {
+        let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
+        if fd_table.get_file(fd).is_err() {
+            return EBADF;
+        }
+    }
     if len == 0 {
         return EINVAL;
     }

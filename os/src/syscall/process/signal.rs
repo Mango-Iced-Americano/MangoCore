@@ -208,8 +208,10 @@ pub fn sys_tkill(tid: usize, sig: usize) -> isize {
         Err(_) => return EINVAL,
     };
     if let Some(task) = ProcessManager::find_task(tid) {
-        send_thread_signal(&task, signal);
-        SUCCESS
+        match send_thread_signal(&task, signal) {
+            Ok(()) => SUCCESS,
+            Err(err) => err,
+        }
     } else {
         ESRCH
     }
@@ -224,8 +226,10 @@ pub fn sys_tgkill(pid: usize, tid: usize, sig: usize) -> isize {
         Err(_) => return EINVAL,
     };
     if let Some(task) = ProcessManager::find_task_in_process(pid, tid) {
-        send_thread_signal(&task, signal);
-        SUCCESS
+        match send_thread_signal(&task, signal) {
+            Ok(()) => SUCCESS,
+            Err(err) => err,
+        }
     } else {
         ESRCH
     }
@@ -282,13 +286,17 @@ pub fn sys_pidfd_send_signal(pidfd: usize, sig: usize, info: usize, flags: usize
     }
 }
 
-pub fn sys_sigaction(signum: usize, act: usize, oldact: usize) -> isize {
+pub fn sys_sigaction(signum: usize, act: usize, oldact: usize, sigsetsize: usize) -> isize {
     trace!(
-        "[sys_sigaction] signum: {:?}, act: {:X}, oldact: {:X}",
+        "[sys_sigaction] signum: {:?}, act: {:X}, oldact: {:X}, sigsetsize: {}",
         signum,
         act,
-        oldact
+        oldact,
+        sigsetsize
     );
+    if sigsetsize != size_of::<u64>() {
+        return EINVAL;
+    }
     sigaction(
         signum,
         act as *const UserSigAction,
@@ -346,6 +354,53 @@ pub fn sys_sigtimedwait(set: usize, info: usize, timeout: usize, sigsetsize: usi
         info as *mut SigInfo,
         timeout as *const TimeSpec,
     )
+}
+
+pub fn sys_rt_sigqueueinfo(pid: usize, sig: usize, info: usize) -> isize {
+    let signal = match Signals::from_signum(sig) {
+        Ok(signal) => signal,
+        Err(_) => return EINVAL,
+    };
+
+    let task = current_task().unwrap();
+    let siginfo = match UserPtr::<SigInfo>::from_addr(info).read(task.get_user_token()) {
+        Ok(siginfo) => siginfo,
+        Err(_) => return EFAULT,
+    };
+    if siginfo.signo() != 0 && siginfo.signo() != sig {
+        return EINVAL;
+    }
+
+    let target_task = ProcessManager::find_task(pid);
+    let process = match ProcessManager::find_process(pid) {
+        Some(process) => process,
+        None => match &target_task {
+            Some(target_task) => target_task.process.clone(),
+            None => return ESRCH,
+        },
+    };
+    if !can_signal_process(&process) {
+        return EPERM;
+    }
+    if signal.is_empty() {
+        return SUCCESS;
+    }
+    if pid != task.pid() && siginfo.is_kernel_generated() {
+        return EPERM;
+    }
+
+    let siginfo = siginfo.with_signal_sender(sig, task.pid());
+    if let Some(target_task) = target_task {
+        if target_task.gettid() == pid && target_task.pid() != pid {
+            return match send_thread_signal_info_deferred(&target_task, signal, siginfo) {
+                Ok(()) => SUCCESS,
+                Err(errno) => errno,
+            };
+        }
+    }
+
+    send_process_signal_info(&process, signal, siginfo);
+    SUCCESS
 }
 
 pub fn sys_rt_sigsuspend(set: usize, sigsetsize: usize) -> isize {

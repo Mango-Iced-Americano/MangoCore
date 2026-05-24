@@ -27,6 +27,13 @@ use log::{trace, warn};
 use spin::{Mutex, MutexGuard};
 
 const TASK_CAP_FULL_SET: u64 = (1u64 << 41) - 1;
+const DEFAULT_TIMER_SLACK_NS: usize = 50_000;
+
+fn default_task_comm() -> [u8; 16] {
+    let mut comm = [0u8; 16];
+    comm[..8].copy_from_slice(b"initproc");
+    comm
+}
 
 fn default_groups() -> Vec<u32> {
     let mut groups = Vec::new();
@@ -111,6 +118,9 @@ pub struct TaskControlBlockInner {
     /// RLIMIT_NICE 兼容字段，供 LTP 权限类用例回读。
     pub nice_limit_cur: usize,
     pub nice_limit_max: usize,
+    /// RLIMIT_SIGPENDING 兼容字段，用于实时信号 pending 队列限额语义。
+    pub sigpending_limit_cur: usize,
+    pub sigpending_limit_max: usize,
     /// RLIMIT_STACK 兼容字段。当前用户栈仍按固定槽位映射，这里只保存 ABI 可见限制。
     pub stack_limit_cur: usize,
     pub stack_limit_max: usize,
@@ -119,6 +129,15 @@ pub struct TaskControlBlockInner {
     pub memlock_limit_max: usize,
     /// Linux personality ABI state. MangoCore does not alter layout/exec policy based on it yet.
     pub personality: usize,
+    /// Parent-death signal configured by prctl(PR_SET_PDEATHSIG).
+    pub pdeath_signal: usize,
+    /// Dumpable state used by prctl(PR_GET/SET_DUMPABLE).
+    pub dumpable: usize,
+    /// Linux task comm, capped at 16 bytes including the trailing NUL.
+    pub task_comm: [u8; 16],
+    /// Timer slack compatibility state in nanoseconds.
+    pub timer_slack_ns: usize,
+    pub timer_slack_default_ns: usize,
     /// POSIX 用户/组 ID 兼容字段，供 LTP 权限类用例和 capability 查询使用。
     pub uid: u32,
     pub euid: u32,
@@ -623,11 +642,18 @@ impl TaskControlBlock {
                 rtprio_limit_max: 0,
                 nice_limit_cur: usize::MAX,
                 nice_limit_max: usize::MAX,
+                sigpending_limit_cur: usize::MAX,
+                sigpending_limit_max: usize::MAX,
                 stack_limit_cur: USER_STACK_SIZE,
                 stack_limit_max: USER_STACK_SIZE,
                 memlock_limit_cur: usize::MAX,
                 memlock_limit_max: usize::MAX,
                 personality: 0,
+                pdeath_signal: 0,
+                dumpable: 1,
+                task_comm: default_task_comm(),
+                timer_slack_ns: DEFAULT_TIMER_SLACK_NS,
+                timer_slack_default_ns: DEFAULT_TIMER_SLACK_NS,
                 uid: 0,
                 euid: 0,
                 suid: 0,
@@ -1001,11 +1027,18 @@ impl TaskControlBlock {
                 rtprio_limit_max: parent_inner.rtprio_limit_max,
                 nice_limit_cur: parent_inner.nice_limit_cur,
                 nice_limit_max: parent_inner.nice_limit_max,
+                sigpending_limit_cur: parent_inner.sigpending_limit_cur,
+                sigpending_limit_max: parent_inner.sigpending_limit_max,
                 stack_limit_cur: parent_inner.stack_limit_cur,
                 stack_limit_max: parent_inner.stack_limit_max,
                 memlock_limit_cur: parent_inner.memlock_limit_cur,
                 memlock_limit_max: parent_inner.memlock_limit_max,
                 personality: parent_inner.personality,
+                pdeath_signal: 0,
+                dumpable: parent_inner.dumpable,
+                task_comm: parent_inner.task_comm,
+                timer_slack_ns: parent_inner.timer_slack_ns,
+                timer_slack_default_ns: parent_inner.timer_slack_ns,
                 uid: parent_inner.uid,
                 euid: parent_inner.euid,
                 suid: parent_inner.suid,

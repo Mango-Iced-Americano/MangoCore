@@ -1,6 +1,8 @@
 use crate::config::{PAGE_SIZE, SYSTEM_TASK_LIMIT};
+use crate::fs::iov::IOVec;
 use crate::mm::{
-    copy_to_user, translated_byte_buffer, UserAccess, UserBuffer, UserPtr, UserPtrMut,
+    check_user_range, copy_from_user_array, copy_to_user, translated_byte_buffer, AddressSpace,
+    FaultAccess, PageTableImpl, StepByOne, UserAccess, UserBuffer, UserPtr, UserPtrMut, VirtAddr,
 };
 use crate::syscall::errno::*;
 use crate::task::{
@@ -28,15 +30,27 @@ const LINUX_CAPABILITY_VERSION_2: u32 = 0x20071026;
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x20080522;
 const CAP_LAST_CAP: usize = 40;
 const CAP_SETPCAP: usize = 8;
+const CAP_SYS_PTRACE: usize = 19;
 const CAP_SYS_NICE: usize = 23;
 const CAP_FULL_SET: u64 = (1u64 << (CAP_LAST_CAP + 1)) - 1;
 const NGROUPS_MAX: usize = 65536;
+const PR_SET_PDEATHSIG: usize = 1;
+const PR_GET_PDEATHSIG: usize = 2;
 const PR_GET_DUMPABLE: usize = 3;
 const PR_SET_DUMPABLE: usize = 4;
 const PR_GET_KEEPCAPS: usize = 7;
 const PR_SET_KEEPCAPS: usize = 8;
+const PR_SET_NAME: usize = 15;
+const PR_GET_NAME: usize = 16;
 const PR_CAPBSET_READ: usize = 23;
 const PR_CAPBSET_DROP: usize = 24;
+const PR_SET_SECUREBITS: usize = 28;
+const PR_SET_TIMERSLACK: usize = 29;
+const PR_GET_TIMERSLACK: usize = 30;
+const PR_TASK_COMM_LEN: usize = 16;
+const PR_MAX_SIGNAL: usize = 64;
+const PROCESS_VM_MAX_IOVEC: usize = 1024;
+const PROCESS_VM_MAX_COPY: usize = 8 * 1024 * 1024;
 const PERSONALITY_GET: usize = 0xffff_ffff;
 const IOPRIO_WHO_PROCESS: usize = 1;
 const IOPRIO_CLASS_SHIFT: usize = 13;
@@ -650,9 +664,319 @@ pub fn sys_capset(header: *mut CapUserHeader, data: *const CapUserData) -> isize
     SUCCESS
 }
 
+fn read_prctl_comm_from_user(ptr: usize) -> Result<[u8; PR_TASK_COMM_LEN], isize> {
+    let token = current_user_token();
+    let buffer = UserBuffer::new(translated_byte_buffer(
+        token,
+        ptr as *const u8,
+        PR_TASK_COMM_LEN,
+        UserAccess::Read,
+    )?);
+    let mut comm = [0u8; PR_TASK_COMM_LEN];
+    buffer.read(&mut comm);
+    if let Some(nul_pos) = comm.iter().position(|&ch| ch == 0) {
+        for byte in &mut comm[nul_pos..] {
+            *byte = 0;
+        }
+    } else {
+        comm[PR_TASK_COMM_LEN - 1] = 0;
+    }
+    Ok(comm)
+}
+
+fn write_prctl_comm_to_user(ptr: usize, comm: &[u8; PR_TASK_COMM_LEN]) -> isize {
+    let token = current_user_token();
+    let mut buffer = match translated_byte_buffer(
+        token,
+        ptr as *const u8,
+        PR_TASK_COMM_LEN,
+        UserAccess::Write,
+    ) {
+        Ok(buffer) => UserBuffer::new(buffer),
+        Err(errno) => return errno,
+    };
+    buffer.write(comm);
+    SUCCESS
+}
+
+fn read_process_vm_iovecs(iov: *const IOVec, iovcnt: usize) -> Result<Vec<IOVec>, isize> {
+    if iovcnt > PROCESS_VM_MAX_IOVEC {
+        return Err(EINVAL);
+    }
+    let mut iovecs = Vec::<IOVec>::new();
+    iovecs.try_reserve(iovcnt).map_err(|_| ENOMEM)?;
+    if iovcnt != 0 {
+        copy_from_user_array(current_user_token(), iov, iovecs.as_mut_ptr(), iovcnt)?;
+    }
+    unsafe {
+        iovecs.set_len(iovcnt);
+    }
+    Ok(iovecs)
+}
+
+fn process_vm_iov_total(iovecs: &[IOVec]) -> Result<usize, isize> {
+    let mut total = 0usize;
+    for iov in iovecs {
+        total = total
+            .checked_add(iov.iov_len)
+            .filter(|len| *len <= isize::MAX as usize)
+            .ok_or(EINVAL)?;
+    }
+    Ok(total)
+}
+
+fn for_process_vm_iov_chunks<F>(
+    process: &Arc<ProcessControlBlock>,
+    iovecs: &[IOVec],
+    cap: usize,
+    access: FaultAccess,
+    mut f: F,
+) -> Result<(), isize>
+where
+    F: FnMut(&mut [u8]) -> Result<(), isize>,
+{
+    let vm_ref = process.vm();
+    let mut vm = vm_ref.lock();
+    let mut total = 0usize;
+    for iov in iovecs {
+        if total >= cap {
+            break;
+        }
+        let len = iov.iov_len.min(cap - total);
+        append_process_vm_iov_chunks(&mut vm, iov.iov_base, len, access, &mut f)?;
+        total += len;
+    }
+    Ok(())
+}
+
+fn append_process_vm_iov_chunks<F>(
+    vm: &mut AddressSpace<PageTableImpl>,
+    ptr: *const u8,
+    len: usize,
+    access: FaultAccess,
+    f: &mut F,
+) -> Result<(), isize>
+where
+    F: FnMut(&mut [u8]) -> Result<(), isize>,
+{
+    if len == 0 {
+        return Ok(());
+    }
+    let mut start = ptr as usize;
+    let end = check_user_range(start, len)?;
+    while start < end {
+        let start_va = VirtAddr::from(start);
+        let pa = vm.fault_in_user_va(start_va, access)?;
+        let ppn = pa.floor();
+        let mut next_vpn = start_va.floor();
+        next_vpn.step();
+        let mut end_va: VirtAddr = next_vpn.into();
+        end_va = end_va.min(VirtAddr::from(end));
+        let chunk_end = if end_va.page_offset() == 0 {
+            PAGE_SIZE
+        } else {
+            end_va.page_offset()
+        };
+        f(&mut ppn.get_bytes_array()[start_va.page_offset()..chunk_end])?;
+        start = end_va.into();
+    }
+    Ok(())
+}
+
+fn copy_process_vm_iovecs_to_slice(
+    process: &Arc<ProcessControlBlock>,
+    iovecs: &[IOVec],
+    cap: usize,
+    dst: &mut [u8],
+) -> Result<(), isize> {
+    let mut copied = 0usize;
+    for_process_vm_iov_chunks(process, iovecs, cap, FaultAccess::Load, |chunk| {
+        let end = copied + chunk.len();
+        dst[copied..end].copy_from_slice(chunk);
+        copied = end;
+        Ok(())
+    })
+}
+
+fn copy_slice_to_process_vm_iovecs(
+    src: &[u8],
+    process: &Arc<ProcessControlBlock>,
+    iovecs: &[IOVec],
+    cap: usize,
+) -> Result<(), isize> {
+    let mut copied = 0usize;
+    for_process_vm_iov_chunks(process, iovecs, cap, FaultAccess::Store, |chunk| {
+        let end = copied + chunk.len();
+        chunk.copy_from_slice(&src[copied..end]);
+        copied = end;
+        Ok(())
+    })
+}
+
+fn check_process_vm_access(
+    current_process: &Arc<ProcessControlBlock>,
+    target_process: &Arc<ProcessControlBlock>,
+) -> Result<(), isize> {
+    if current_process.pid == target_process.pid {
+        return Ok(());
+    }
+    let current = current_task().unwrap();
+    let (uid, euid, suid, gid, egid, sgid, cap_effective) = {
+        let inner = current.acquire_inner_lock();
+        (
+            inner.uid,
+            inner.euid,
+            inner.suid,
+            inner.gid,
+            inner.egid,
+            inner.sgid,
+            inner.cap_effective,
+        )
+    };
+    let Some(target) = target_process.any_live_thread() else {
+        return Err(ESRCH);
+    };
+    let (target_uid, target_euid, target_suid, target_gid, target_egid, target_sgid, dumpable) = {
+        let inner = target.acquire_inner_lock();
+        (
+            inner.uid,
+            inner.euid,
+            inner.suid,
+            inner.gid,
+            inner.egid,
+            inner.sgid,
+            inner.dumpable,
+        )
+    };
+    let privileged = euid == 0 || (cap_effective & (1u64 << CAP_SYS_PTRACE)) != 0;
+    let same_creds = uid == target_uid
+        && euid == target_euid
+        && suid == target_suid
+        && gid == target_gid
+        && egid == target_egid
+        && sgid == target_sgid;
+    if privileged || (same_creds && dumpable != 0) {
+        Ok(())
+    } else {
+        Err(EPERM)
+    }
+}
+
+fn sys_process_vm_transfer(
+    pid: usize,
+    local_iov: *const IOVec,
+    liovcnt: usize,
+    remote_iov: *const IOVec,
+    riovcnt: usize,
+    flags: usize,
+    write_remote: bool,
+) -> isize {
+    if flags != 0 {
+        return EINVAL;
+    }
+    let local_iovecs = match read_process_vm_iovecs(local_iov, liovcnt) {
+        Ok(iovecs) => iovecs,
+        Err(errno) => return errno,
+    };
+    let remote_iovecs = match read_process_vm_iovecs(remote_iov, riovcnt) {
+        Ok(iovecs) => iovecs,
+        Err(errno) => return errno,
+    };
+    let local_total = match process_vm_iov_total(&local_iovecs) {
+        Ok(total) => total,
+        Err(errno) => return errno,
+    };
+    let remote_total = match process_vm_iov_total(&remote_iovecs) {
+        Ok(total) => total,
+        Err(errno) => return errno,
+    };
+    let copy_len = local_total.min(remote_total);
+    if copy_len == 0 {
+        return 0;
+    }
+    if copy_len > PROCESS_VM_MAX_COPY {
+        return EFAULT;
+    }
+    let remote_process = match ProcessManager::find_process(pid) {
+        Some(process) => process,
+        None => return ESRCH,
+    };
+    let current_process = current_task().unwrap().process.clone();
+    if let Err(errno) = check_process_vm_access(&current_process, &remote_process) {
+        return errno;
+    }
+    let mut scratch = Vec::new();
+    if scratch.try_reserve(copy_len).is_err() {
+        return ENOMEM;
+    }
+    unsafe {
+        scratch.set_len(copy_len);
+    }
+
+    if write_remote {
+        match copy_process_vm_iovecs_to_slice(&current_process, &local_iovecs, copy_len, &mut scratch)
+        {
+            Ok(()) => {}
+            Err(errno) => return errno,
+        }
+        match copy_slice_to_process_vm_iovecs(&scratch, &remote_process, &remote_iovecs, copy_len) {
+            Ok(()) => {}
+            Err(errno) => return errno,
+        }
+    } else {
+        match copy_process_vm_iovecs_to_slice(&remote_process, &remote_iovecs, copy_len, &mut scratch)
+        {
+            Ok(()) => {}
+            Err(errno) => return errno,
+        }
+        match copy_slice_to_process_vm_iovecs(&scratch, &current_process, &local_iovecs, copy_len) {
+            Ok(()) => {}
+            Err(errno) => return errno,
+        }
+    }
+    copy_len as isize
+}
+
+pub fn sys_process_vm_readv(
+    pid: usize,
+    local_iov: *const IOVec,
+    liovcnt: usize,
+    remote_iov: *const IOVec,
+    riovcnt: usize,
+    flags: usize,
+) -> isize {
+    sys_process_vm_transfer(pid, local_iov, liovcnt, remote_iov, riovcnt, flags, false)
+}
+
+pub fn sys_process_vm_writev(
+    pid: usize,
+    local_iov: *const IOVec,
+    liovcnt: usize,
+    remote_iov: *const IOVec,
+    riovcnt: usize,
+    flags: usize,
+) -> isize {
+    sys_process_vm_transfer(pid, local_iov, liovcnt, remote_iov, riovcnt, flags, true)
+}
+
 pub fn sys_prctl(option: usize, arg2: usize, _arg3: usize, _arg4: usize, _arg5: usize) -> isize {
     let task = current_task().unwrap();
     match option {
+        PR_SET_PDEATHSIG => {
+            if arg2 > PR_MAX_SIGNAL {
+                return EINVAL;
+            }
+            task.acquire_inner_lock().pdeath_signal = arg2;
+            SUCCESS
+        }
+        PR_GET_PDEATHSIG => {
+            let signal = task.acquire_inner_lock().pdeath_signal as i32;
+            if copy_to_user(current_user_token(), &signal, arg2 as *mut i32).is_err() {
+                EFAULT
+            } else {
+                SUCCESS
+            }
+        }
         PR_CAPBSET_READ => {
             if arg2 > CAP_LAST_CAP {
                 return EINVAL;
@@ -665,7 +989,7 @@ pub fn sys_prctl(option: usize, arg2: usize, _arg3: usize, _arg4: usize, _arg5: 
                 return EINVAL;
             }
             let mut inner = task.acquire_inner_lock();
-            if inner.euid != 0 && (inner.cap_effective & (1u64 << CAP_SETPCAP)) == 0 {
+            if (inner.cap_effective & (1u64 << CAP_SETPCAP)) == 0 {
                 return EPERM;
             }
             inner.cap_bounding &= !(1u64 << arg2);
@@ -673,8 +997,44 @@ pub fn sys_prctl(option: usize, arg2: usize, _arg3: usize, _arg4: usize, _arg5: 
         }
         PR_GET_KEEPCAPS => 0,
         PR_SET_KEEPCAPS => SUCCESS,
-        PR_GET_DUMPABLE => 1,
-        PR_SET_DUMPABLE => SUCCESS,
+        PR_GET_DUMPABLE => task.acquire_inner_lock().dumpable as isize,
+        PR_SET_DUMPABLE => {
+            if arg2 > 1 {
+                return EINVAL;
+            }
+            task.acquire_inner_lock().dumpable = arg2;
+            SUCCESS
+        }
+        PR_SET_NAME => {
+            let comm = match read_prctl_comm_from_user(arg2) {
+                Ok(comm) => comm,
+                Err(errno) => return errno,
+            };
+            task.acquire_inner_lock().task_comm = comm;
+            SUCCESS
+        }
+        PR_GET_NAME => {
+            let comm = task.acquire_inner_lock().task_comm;
+            write_prctl_comm_to_user(arg2, &comm)
+        }
+        PR_SET_SECUREBITS => {
+            let inner = task.acquire_inner_lock();
+            if (inner.cap_effective & (1u64 << CAP_SETPCAP)) == 0 {
+                EPERM
+            } else {
+                SUCCESS
+            }
+        }
+        PR_SET_TIMERSLACK => {
+            let mut inner = task.acquire_inner_lock();
+            inner.timer_slack_ns = if arg2 == 0 {
+                inner.timer_slack_default_ns
+            } else {
+                arg2
+            };
+            SUCCESS
+        }
+        PR_GET_TIMERSLACK => task.acquire_inner_lock().timer_slack_ns as isize,
         _ => EINVAL,
     }
 }
@@ -847,6 +1207,7 @@ fn rlimit_value_for(
     nofile: Option<RLimit>,
     nice: Option<RLimit>,
     rtprio: Option<RLimit>,
+    sigpending: Option<RLimit>,
     stack: Option<RLimit>,
 ) -> Option<RLimit> {
     let unlimited = RLimit {
@@ -861,10 +1222,10 @@ fn rlimit_value_for(
         | Resource::RSS
         | Resource::AS
         | Resource::LOCKS
-        | Resource::SIGPENDING
         | Resource::MSGQUEUE
         | Resource::RTTIME
         | Resource::MEMLOCK => unlimited,
+        Resource::SIGPENDING => sigpending?,
         Resource::NICE => nice?,
         Resource::RTPRIO => rtprio?,
         Resource::CORE => RLimit {
@@ -945,6 +1306,15 @@ pub fn sys_prlimit(
         } else {
             None
         };
+        let sigpending_limit = if resource == Resource::SIGPENDING {
+            let inner = task.acquire_inner_lock();
+            Some(RLimit {
+                rlim_cur: inner.sigpending_limit_cur,
+                rlim_max: inner.sigpending_limit_max,
+            })
+        } else {
+            None
+        };
         let memlock_limit = if resource == Resource::MEMLOCK {
             let inner = task.acquire_inner_lock();
             Some(RLimit {
@@ -954,8 +1324,14 @@ pub fn sys_prlimit(
         } else {
             None
         };
-        let Some(mut limit) =
-            rlimit_value_for(resource, nofile_limit, nice_limit, rtprio_limit, stack_limit)
+        let Some(mut limit) = rlimit_value_for(
+            resource,
+            nofile_limit,
+            nice_limit,
+            rtprio_limit,
+            sigpending_limit,
+            stack_limit,
+        )
         else {
             return EINVAL;
         };
@@ -1008,6 +1384,11 @@ pub fn sys_prlimit(
                 inner.memlock_limit_cur = rlimit.rlim_cur;
                 inner.memlock_limit_max = rlimit.rlim_max;
             }
+            Resource::SIGPENDING => {
+                let mut inner = task.acquire_inner_lock();
+                inner.sigpending_limit_cur = rlimit.rlim_cur;
+                inner.sigpending_limit_max = rlimit.rlim_max;
+            }
             Resource::CPU
             | Resource::FSIZE
             | Resource::DATA
@@ -1016,7 +1397,6 @@ pub fn sys_prlimit(
             | Resource::NPROC
             | Resource::AS
             | Resource::LOCKS
-            | Resource::SIGPENDING
             | Resource::MSGQUEUE
             | Resource::RTTIME => {
                 warn!(

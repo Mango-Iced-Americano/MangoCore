@@ -1,8 +1,10 @@
+use alloc::sync::Arc;
+
 use crate::mm::{copy_to_user, UserPtrMut};
 use crate::syscall::errno::*;
 use crate::task::{
     current_task, current_user_token, exit_current_and_run_next, exit_group_and_run_next,
-    signal::SigInfo, ProcessManager, Rusage,
+    signal::SigInfo, ProcessControlBlock, ProcessManager, Rusage,
 };
 use log::info;
 
@@ -38,6 +40,9 @@ bitflags! {
 ///   pid == 0  → wait for any child in the same process group (pgid)
 ///   pid < -1 → wait for any child whose pgid == |pid|
 pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) -> isize {
+    if pid == i32::MIN as isize {
+        return ESRCH;
+    }
     let option = match WaitOption::from_bits(option) {
         Some(option) => option,
         None => return EINVAL,
@@ -68,19 +73,25 @@ pub fn sys_waitid(
     _ru: *mut Rusage,
 ) -> isize {
     const P_PIDFD: usize = 3;
-    const SIGCHLD_SIGNUM: usize = 17;
-    const CLD_EXITED: usize = 1;
 
     let option = match WaitOption::from_bits(options) {
         Some(option) => option,
         None => return EINVAL,
     };
-    if idtype != P_PIDFD || !option.contains(WaitOption::WEXITED) {
+    if !option.contains(WaitOption::WEXITED) {
         return EINVAL;
     }
 
     let task = current_task().unwrap();
     let token = task.get_user_token();
+    if idtype != P_PIDFD {
+        let wait_pid = match waitid_target_pid(idtype, id, &task.process) {
+            Ok(pid) => pid,
+            Err(errno) => return errno,
+        };
+        return waitid_wait_child(&task.process, wait_pid, infop, option, token);
+    }
+
     let (target_pid, nonblock) = {
         let files_ref = task.process.files();
         let fd_table = files_ref.lock();
@@ -110,7 +121,7 @@ pub fn sys_waitid(
     ) {
         Ok(Some(child)) => {
             if infop != 0 {
-                let siginfo = SigInfo::new_with_sender(SIGCHLD_SIGNUM, 0, CLD_EXITED, child.pid);
+                let siginfo = waitid_siginfo(child.pid, child.exit_code);
                 if let Err(errno) = UserPtrMut::<SigInfo>::from_addr(infop).write(token, &siginfo)
                 {
                     return errno;
@@ -127,6 +138,69 @@ pub fn sys_waitid(
         }
         Err(errno) => errno,
     }
+}
+
+fn waitid_target_pid(
+    idtype: usize,
+    id: usize,
+    process: &Arc<ProcessControlBlock>,
+) -> Result<isize, isize> {
+    const P_ALL: usize = 0;
+    const P_PID: usize = 1;
+    const P_PGID: usize = 2;
+
+    match idtype {
+        P_ALL => Ok(-1),
+        P_PID => {
+            if id > isize::MAX as usize {
+                Err(ESRCH)
+            } else {
+                Ok(id as isize)
+            }
+        }
+        P_PGID => {
+            let pgid = if id == 0 { process.getpgid() } else { id };
+            if pgid > isize::MAX as usize {
+                Err(ESRCH)
+            } else if pgid == 0 {
+                Ok(0)
+            } else {
+                Ok(-(pgid as isize))
+            }
+        }
+        _ => Err(EINVAL),
+    }
+}
+
+fn waitid_wait_child(
+    process: &Arc<ProcessControlBlock>,
+    pid: isize,
+    infop: usize,
+    option: WaitOption,
+    token: usize,
+) -> isize {
+    match ProcessManager::wait_child(process, pid, option.contains(WaitOption::WNOHANG)) {
+        Ok(Some(child)) => {
+            if infop != 0 {
+                let siginfo = waitid_siginfo(child.pid, child.exit_code);
+                if let Err(errno) = UserPtrMut::<SigInfo>::from_addr(infop).write(token, &siginfo)
+                {
+                    return errno;
+                }
+            }
+            SUCCESS
+        }
+        Ok(None) => SUCCESS,
+        Err(errno) => errno,
+    }
+}
+
+fn waitid_siginfo(pid: usize, wait_status: u32) -> SigInfo {
+    const SIGCHLD_SIGNUM: usize = 17;
+    const CLD_EXITED: usize = 1;
+
+    let exit_status = ((wait_status >> 8) & 0xff) as usize;
+    SigInfo::new_with_sender_value(SIGCHLD_SIGNUM, 0, CLD_EXITED, pid, exit_status)
 }
 
 pub fn sys_set_tid_address(tidptr: usize) -> isize {
