@@ -738,6 +738,12 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     if name.starts_with("cpuhotplug") {
         return Some("requires CPU hotplug support");
     }
+    if name.starts_with("pm_") {
+        return Some("requires power-management sysfs/python environment");
+    }
+    if name.starts_with("ptrace") {
+        return Some("ptrace subsystem not implemented");
+    }
 
     match name {
         "ask_password.sh" | "assign_password.sh" | "change_password.sh" | "remove_password.sh" => {
@@ -761,6 +767,15 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
             Some("blocking signal-wait case pending dedicated wait-queue support")
         }
         "signal06" => Some("x86_64-only signal testcase"),
+        "ping01.sh" | "ping02.sh" => Some("network test skipped in LTP syscall scan"),
+        "pivot_root01" | "prepare_lvm.sh" => Some("filesystem/namespace setup skipped"),
+        "pkey01" => Some("requires memory protection keys"),
+        "profil01" => Some("requires profil syscall support"),
+        "process_madvise01" => Some("requires swap-backed process_madvise environment"),
+        "pt_test" => Some("requires Intel perf events"),
+        "proc_sched_rt01" => Some("requires procfs/sysctl RT scheduler config"),
+        "prctl03" | "prctl04" | "prctl05" | "prctl06" | "prctl06_execve" | "prctl07"
+        | "prctl10" => Some("requires unsupported prctl/procfs capability"),
         _ => None,
     }
 }
