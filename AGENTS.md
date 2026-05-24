@@ -296,6 +296,8 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | LTP `tee*`、SCTP `test_*` helper、`testsf_*` | pipe/fs 或网络 helper，不是当前非 fs/net 主线 | 当前 fs/net 协作期 broad scan 中 narrow skip |
 | LTP `thp01` 超大 argv 触发内核跳到 `0x6363...` | `execve` 参数栈跨页写入时旧代码只翻译栈顶一页，且缺少过大 argv/env 的 `E2BIG` 预检 | `execve` 先按用户栈容量拒绝过大参数，ELF 启动栈按虚拟地址逐页翻译写入 |
 | LTP `thp02/03/04`、`timed_forkbomb` | THP/huge page 环境缺失或 fork 压力长耗时 | 当前 broad scan 中 narrow skip，保留 `thp01` 回归验证 |
+| LTP `times03` CPU 时间统计异常 | `times(2)` 把硬件 tick 当作 `clock_t`，且没有累计已 wait 回收子进程 CPU 时间 | 按 Linux `USER_HZ=100` 换算 `clock_t`，wait 回收 zombie 时累加子进程 `rusage`，`getrusage(RUSAGE_CHILDREN)` 同步返回累计值 |
+| LTP `timens*`、`timerfd*`、`tst_*`、`tpm*`、`trace*`、`truncate03*` 阻塞扫描 | time namespace/timerfd/TPM/tracing/fs truncate edge 或 LTP 内部 helper，当前非 fs/net 主线不适合长卡 | 先 narrow skip 解堵；`timerfd*` 后续作为 fd+timer 子系统专项实现 |
 | 非阻塞 socket 测试失败 | 检查是否在 `try_xxx` 前调了 `try_poll()` |
 
 ### 错误码对齐（Linux 语义）

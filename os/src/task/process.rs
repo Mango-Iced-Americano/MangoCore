@@ -4,7 +4,7 @@ use super::{
     signal::{PendingSignal, SignalQueue, Sighand, Signals},
     threads::Futex,
     wake_interruptible, Completion, FsStatus, TaskControlBlock, TaskStatus, WaitQueue, WaitResult,
-    INITPROC,
+    Rusage, INITPROC,
 };
 use crate::fs::vfs;
 use crate::mm::{AddressSpace, PageTableImpl};
@@ -71,6 +71,10 @@ pub struct ProcessInner {
     pub state: ProcessState,
     /// wait4 可回收的进程退出码。
     pub exit_code: u32,
+    /// 进程退出时记录的 leader CPU 时间快照。
+    pub rusage: Rusage,
+    /// 已由 wait/waitid 回收的子进程 CPU 时间累计。
+    pub child_rusage: Rusage,
     /// 进程 leader 的调度策略兼容快照，供 zombie 子进程在 wait 前被查询。
     pub sched_policy: usize,
     pub sched_priority: i32,
@@ -179,6 +183,8 @@ impl ProcessControlBlock {
                 children: Vec::new(),
                 state: ProcessState::Running,
                 exit_code: 0,
+                rusage: Rusage::new(),
+                child_rusage: Rusage::new(),
                 sched_policy: 0,
                 sched_priority: 0,
                 sched_reset_on_fork: false,
@@ -383,18 +389,27 @@ impl ProcessControlBlock {
         self.inner.lock().state == ProcessState::Zombie
     }
 
-    pub fn mark_zombie(&self, exit_code: u32) -> bool {
+    pub fn mark_zombie(&self, exit_code: u32, rusage: Rusage) -> bool {
         let mut inner = self.inner.lock();
         if inner.state == ProcessState::Zombie {
             return false;
         }
         inner.state = ProcessState::Zombie;
         inner.exit_code = exit_code;
+        inner.rusage = rusage;
         true
     }
 
     pub fn exit_code(&self) -> u32 {
         self.inner.lock().exit_code
+    }
+
+    pub fn rusage(&self) -> Rusage {
+        self.inner.lock().rusage
+    }
+
+    pub fn child_rusage(&self) -> Rusage {
+        self.inner.lock().child_rusage
     }
 
     pub fn enqueue_process_signal(&self, pending: PendingSignal) {
@@ -486,7 +501,8 @@ impl ProcessControlBlock {
     /// 以及进程资源关闭。
     pub fn finish_exit(&self, exit_task: &TaskControlBlock, exit_code: u32) {
         self.complete_vfork();
-        if !self.mark_zombie(exit_code) {
+        let rusage = exit_task.acquire_inner_lock().rusage;
+        if !self.mark_zombie(exit_code, rusage) {
             return;
         }
         let old_exec_key = self.inner.lock().exec_key.take();

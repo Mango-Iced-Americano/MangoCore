@@ -300,6 +300,11 @@ impl Rusage {
             ru_nivcsw: 0,
         }
     }
+
+    pub fn add_cpu(&mut self, other: Rusage) {
+        self.ru_utime = self.ru_utime + other.ru_utime;
+        self.ru_stime = self.ru_stime + other.ru_stime;
+    }
 }
 
 const SCHED_NICE_0_LOAD: u64 = 1024;

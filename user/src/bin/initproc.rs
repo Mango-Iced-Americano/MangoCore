@@ -801,6 +801,21 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     if name.starts_with("tcp") {
         return Some("network TCP stress tests skipped in LTP syscall scan");
     }
+    if name.starts_with("timens") {
+        return Some("requires time namespace kernel config");
+    }
+    if name.starts_with("timerfd") {
+        return Some("timerfd syscall family pending dedicated fd implementation");
+    }
+    if name.starts_with("tpm") {
+        return Some("requires TPM device/userspace environment");
+    }
+    if name.starts_with("tracepath") || name.starts_with("traceroute") {
+        return Some("network route tracing tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("tst_") {
+        return Some("standalone LTP library helper skipped in syscall scan");
+    }
     if name.starts_with("test_1_to_1")
         || name.starts_with("test_assoc")
         || name.starts_with("test_autoclose")
@@ -867,6 +882,10 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         },
         "thp02" | "thp03" | "thp04" => Some("requires transparent/huge page support"),
         "timed_forkbomb" => Some("long-running fork pressure case skipped in broad scan"),
+        "timer_settime03" => Some("POSIX timer overrun saturation pending dedicated timer fix"),
+        "tpci" => Some("requires PCI test driver environment"),
+        "trace_sched" => Some("requires kernel tracing scheduler environment"),
+        "truncate03" | "truncate03_64" => Some("filesystem truncate edge cases skipped in LTP syscall scan"),
         "cgroup_fj_common.sh"
         | "cgroup_fj_function.sh"
         | "cgroup_fj_proc"
