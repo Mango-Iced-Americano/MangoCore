@@ -256,6 +256,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | nanosleep 唤醒后死锁 | 持 `task.inner` 锁调 `has_actionable_signal()` | 释放锁后再调 |
 | 被屏蔽信号导致 EINTR | 用 `is_empty()` 检查信号 | 用 `sigpending.difference(sigmask)` |
 | execve 后 OOM | 新旧内存集同时存在 | `load_elf` 开头 `recycle_data_pages()` |
+| `rt_sigaction03` invalid sigsetsize 误成功 | `rt_sigaction` 分发忽略第 4 参数 `sigsetsize` | syscall 层传入并校验 `sigsetsize == sizeof(kernel sigset_t)` |
 | `rt_sigqueueinfo01` pthread checkpoint 超时 | TID 目标信号立即唤醒 futex/checkpoint waiter，导致 LTP 后续 `TST_CHECKPOINT_WAKE` 找不到等待者 | 对非 leader TID 先入线程 pending，不主动信号唤醒；由测试的 futex wake 释放后再处理 pending signal |
 | LTP cgroup 脚本触发 `syslog/klogctl` panic 或 `syslog12` 非 root 失败 | `sys_syslog()` 对 READ_CLEAR/CLEAR/console/size action 留了 `todo!()`，用户拷贝 `unwrap()`，且缺少权限检查 | 所有 action 返回稳定 errno/成功值，用户指针错误返回错误码；除 READ_ALL/SIZE_BUFFER 外需 root 或 `CAP_SYS_ADMIN/CAP_SYSLOG` |
 | LTP nice05 动态 CPU clock 失败 | glibc 使用负数动态 clock id，且相邻 nice 在单核调度中差异太小 | 解码动态 CPU clock id，并让 `CPUCLOCK_SCHED`/调度统计体现 nice |

@@ -286,13 +286,17 @@ pub fn sys_pidfd_send_signal(pidfd: usize, sig: usize, info: usize, flags: usize
     }
 }
 
-pub fn sys_sigaction(signum: usize, act: usize, oldact: usize) -> isize {
+pub fn sys_sigaction(signum: usize, act: usize, oldact: usize, sigsetsize: usize) -> isize {
     trace!(
-        "[sys_sigaction] signum: {:?}, act: {:X}, oldact: {:X}",
+        "[sys_sigaction] signum: {:?}, act: {:X}, oldact: {:X}, sigsetsize: {}",
         signum,
         act,
-        oldact
+        oldact,
+        sigsetsize
     );
+    if sigsetsize != size_of::<u64>() {
+        return EINVAL;
+    }
     sigaction(
         signum,
         act as *const UserSigAction,

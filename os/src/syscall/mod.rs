@@ -405,7 +405,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SYSLOG => sys_syslog(args[0] as u32, args[1] as *mut u8, args[2] as isize),
         SYSCALL_YIELD => sys_yield(),
         SYSCALL_SIGALTSTACK => sys_sigaltstack(args[0], args[1]),
-        SYSCALL_SIGACTION => sys_sigaction(args[0], args[1], args[2]),
+        SYSCALL_SIGACTION => sys_sigaction(args[0], args[1], args[2], args[3]),
         SYSCALL_SIGPROCMASK => sys_sigprocmask(args[0] as u32, args[1], args[2], args[3]),
         SYSCALL_RT_SIGPENDING => sys_rt_sigpending(args[0], args[1]),
         SYSCALL_RT_SIGSUSPEND => sys_rt_sigsuspend(args[0], args[1]),
