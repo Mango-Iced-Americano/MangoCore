@@ -1,6 +1,8 @@
 use crate::config::{PAGE_SIZE, SYSTEM_TASK_LIMIT};
+use crate::fs::iov::IOVec;
 use crate::mm::{
-    copy_to_user, translated_byte_buffer, UserAccess, UserBuffer, UserPtr, UserPtrMut,
+    check_user_range, copy_from_user_array, copy_to_user, translated_byte_buffer, AddressSpace,
+    FaultAccess, PageTableImpl, StepByOne, UserAccess, UserBuffer, UserPtr, UserPtrMut, VirtAddr,
 };
 use crate::syscall::errno::*;
 use crate::task::{
@@ -46,6 +48,8 @@ const PR_SET_TIMERSLACK: usize = 29;
 const PR_GET_TIMERSLACK: usize = 30;
 const PR_TASK_COMM_LEN: usize = 16;
 const PR_MAX_SIGNAL: usize = 64;
+const PROCESS_VM_MAX_IOVEC: usize = 1024;
+const PROCESS_VM_MAX_COPY: usize = 8 * 1024 * 1024;
 const PERSONALITY_GET: usize = 0xffff_ffff;
 const IOPRIO_WHO_PROCESS: usize = 1;
 const IOPRIO_CLASS_SHIFT: usize = 13;
@@ -692,6 +696,214 @@ fn write_prctl_comm_to_user(ptr: usize, comm: &[u8; PR_TASK_COMM_LEN]) -> isize 
     };
     buffer.write(comm);
     SUCCESS
+}
+
+fn read_process_vm_iovecs(iov: *const IOVec, iovcnt: usize) -> Result<Vec<IOVec>, isize> {
+    if iovcnt > PROCESS_VM_MAX_IOVEC {
+        return Err(EINVAL);
+    }
+    let mut iovecs = Vec::<IOVec>::new();
+    iovecs.try_reserve(iovcnt).map_err(|_| ENOMEM)?;
+    if iovcnt != 0 {
+        copy_from_user_array(current_user_token(), iov, iovecs.as_mut_ptr(), iovcnt)?;
+    }
+    unsafe {
+        iovecs.set_len(iovcnt);
+    }
+    Ok(iovecs)
+}
+
+fn process_vm_iov_total(iovecs: &[IOVec]) -> Result<usize, isize> {
+    let mut total = 0usize;
+    for iov in iovecs {
+        total = total
+            .checked_add(iov.iov_len)
+            .filter(|len| *len <= isize::MAX as usize)
+            .ok_or(EINVAL)?;
+    }
+    Ok(total)
+}
+
+fn for_process_vm_iov_chunks<F>(
+    process: &Arc<ProcessControlBlock>,
+    iovecs: &[IOVec],
+    cap: usize,
+    access: FaultAccess,
+    mut f: F,
+) -> Result<(), isize>
+where
+    F: FnMut(&mut [u8]) -> Result<(), isize>,
+{
+    let vm_ref = process.vm();
+    let mut vm = vm_ref.lock();
+    let mut total = 0usize;
+    for iov in iovecs {
+        if total >= cap {
+            break;
+        }
+        let len = iov.iov_len.min(cap - total);
+        append_process_vm_iov_chunks(&mut vm, iov.iov_base, len, access, &mut f)?;
+        total += len;
+    }
+    Ok(())
+}
+
+fn append_process_vm_iov_chunks<F>(
+    vm: &mut AddressSpace<PageTableImpl>,
+    ptr: *const u8,
+    len: usize,
+    access: FaultAccess,
+    f: &mut F,
+) -> Result<(), isize>
+where
+    F: FnMut(&mut [u8]) -> Result<(), isize>,
+{
+    if len == 0 {
+        return Ok(());
+    }
+    let mut start = ptr as usize;
+    let end = check_user_range(start, len)?;
+    while start < end {
+        let start_va = VirtAddr::from(start);
+        let pa = vm.fault_in_user_va(start_va, access)?;
+        let ppn = pa.floor();
+        let mut next_vpn = start_va.floor();
+        next_vpn.step();
+        let mut end_va: VirtAddr = next_vpn.into();
+        end_va = end_va.min(VirtAddr::from(end));
+        let chunk_end = if end_va.page_offset() == 0 {
+            PAGE_SIZE
+        } else {
+            end_va.page_offset()
+        };
+        f(&mut ppn.get_bytes_array()[start_va.page_offset()..chunk_end])?;
+        start = end_va.into();
+    }
+    Ok(())
+}
+
+fn copy_process_vm_iovecs_to_slice(
+    process: &Arc<ProcessControlBlock>,
+    iovecs: &[IOVec],
+    cap: usize,
+    dst: &mut [u8],
+) -> Result<(), isize> {
+    let mut copied = 0usize;
+    for_process_vm_iov_chunks(process, iovecs, cap, FaultAccess::Load, |chunk| {
+        let end = copied + chunk.len();
+        dst[copied..end].copy_from_slice(chunk);
+        copied = end;
+        Ok(())
+    })
+}
+
+fn copy_slice_to_process_vm_iovecs(
+    src: &[u8],
+    process: &Arc<ProcessControlBlock>,
+    iovecs: &[IOVec],
+    cap: usize,
+) -> Result<(), isize> {
+    let mut copied = 0usize;
+    for_process_vm_iov_chunks(process, iovecs, cap, FaultAccess::Store, |chunk| {
+        let end = copied + chunk.len();
+        chunk.copy_from_slice(&src[copied..end]);
+        copied = end;
+        Ok(())
+    })
+}
+
+fn sys_process_vm_transfer(
+    pid: usize,
+    local_iov: *const IOVec,
+    liovcnt: usize,
+    remote_iov: *const IOVec,
+    riovcnt: usize,
+    flags: usize,
+    write_remote: bool,
+) -> isize {
+    if flags != 0 {
+        return EINVAL;
+    }
+    let local_iovecs = match read_process_vm_iovecs(local_iov, liovcnt) {
+        Ok(iovecs) => iovecs,
+        Err(errno) => return errno,
+    };
+    let remote_iovecs = match read_process_vm_iovecs(remote_iov, riovcnt) {
+        Ok(iovecs) => iovecs,
+        Err(errno) => return errno,
+    };
+    let local_total = match process_vm_iov_total(&local_iovecs) {
+        Ok(total) => total,
+        Err(errno) => return errno,
+    };
+    let remote_total = match process_vm_iov_total(&remote_iovecs) {
+        Ok(total) => total,
+        Err(errno) => return errno,
+    };
+    let copy_len = local_total.min(remote_total);
+    if copy_len == 0 {
+        return 0;
+    }
+    if copy_len > PROCESS_VM_MAX_COPY {
+        return EFAULT;
+    }
+    let remote_process = match ProcessManager::find_process(pid) {
+        Some(process) => process,
+        None => return ESRCH,
+    };
+    let current_process = current_task().unwrap().process.clone();
+    let mut scratch = Vec::new();
+    if scratch.try_reserve(copy_len).is_err() {
+        return ENOMEM;
+    }
+    unsafe {
+        scratch.set_len(copy_len);
+    }
+
+    if write_remote {
+        match copy_process_vm_iovecs_to_slice(&current_process, &local_iovecs, copy_len, &mut scratch)
+        {
+            Ok(()) => {}
+            Err(errno) => return errno,
+        }
+        match copy_slice_to_process_vm_iovecs(&scratch, &remote_process, &remote_iovecs, copy_len) {
+            Ok(()) => {}
+            Err(errno) => return errno,
+        }
+    } else {
+        match copy_process_vm_iovecs_to_slice(&remote_process, &remote_iovecs, copy_len, &mut scratch)
+        {
+            Ok(()) => {}
+            Err(errno) => return errno,
+        }
+        match copy_slice_to_process_vm_iovecs(&scratch, &current_process, &local_iovecs, copy_len) {
+            Ok(()) => {}
+            Err(errno) => return errno,
+        }
+    }
+    copy_len as isize
+}
+
+pub fn sys_process_vm_readv(
+    pid: usize,
+    local_iov: *const IOVec,
+    liovcnt: usize,
+    remote_iov: *const IOVec,
+    riovcnt: usize,
+    flags: usize,
+) -> isize {
+    sys_process_vm_transfer(pid, local_iov, liovcnt, remote_iov, riovcnt, flags, false)
+}
+
+pub fn sys_process_vm_writev(
+    pid: usize,
+    local_iov: *const IOVec,
+    liovcnt: usize,
+    remote_iov: *const IOVec,
+    riovcnt: usize,
+    flags: usize,
+) -> isize {
+    sys_process_vm_transfer(pid, local_iov, liovcnt, remote_iov, riovcnt, flags, true)
 }
 
 pub fn sys_prctl(option: usize, arg2: usize, _arg3: usize, _arg4: usize, _arg5: usize) -> isize {

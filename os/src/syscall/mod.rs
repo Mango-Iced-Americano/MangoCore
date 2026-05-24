@@ -9,6 +9,7 @@ pub mod utils;
 
 use crate::fs::eventfd::sys_eventfd2;
 use crate::fs::eventpoll::{sys_epoll_create1, sys_epoll_ctl, sys_epoll_pwait};
+use crate::fs::iov::IOVec;
 use crate::net::syscall::*;
 use core::convert::TryFrom;
 use fs::*;
@@ -182,6 +183,8 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_SETRLIMIT => "setrlimit",
         SYSCALL_WAIT4 => "wait4",
         SYSCALL_PRLIMIT => "prlimit",
+        SYSCALL_PROCESS_VM_READV => "process_vm_readv",
+        SYSCALL_PROCESS_VM_WRITEV => "process_vm_writev",
         SYSCALL_RENAMEAT2 => "renameat2",
         SYSCALL_FACCESSAT2 => "faccessat2",
         SYSCALL_MEMBARRIER => "membarrier",
@@ -478,6 +481,22 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[1] as u32,
             args[2] as *const RLimit,
             args[3] as *mut RLimit,
+        ),
+        SYSCALL_PROCESS_VM_READV => sys_process_vm_readv(
+            args[0],
+            args[1] as *const IOVec,
+            args[2],
+            args[3] as *const IOVec,
+            args[4],
+            args[5],
+        ),
+        SYSCALL_PROCESS_VM_WRITEV => sys_process_vm_writev(
+            args[0],
+            args[1] as *const IOVec,
+            args[2],
+            args[3] as *const IOVec,
+            args[4],
+            args[5],
         ),
         SYSCALL_SET_TID_ADDRESS => sys_set_tid_address(args[0]),
         SYSCALL_CLONE3 => sys_clone3(args[0] as *const u8, args[1]),
