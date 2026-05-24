@@ -464,7 +464,9 @@ fn pending_unblocked_signals(task: &TaskControlBlock) -> Signals {
 
 fn signal_is_actionable(sighand: &Sighand, signum: usize, signal: Signals) -> bool {
     match sighand.get(signum) {
-        Some(act) => act.handler != SigHandler::SIG_IGN,
+        Some(act) if act.handler == SigHandler::SIG_IGN => false,
+        Some(act) if act.handler == SigHandler::SIG_DFL => !SIG_DFL_IGNORE.contains(signal),
+        Some(_) => true,
         None => !SIG_DFL_IGNORE.contains(signal),
     }
 }
@@ -601,7 +603,7 @@ pub fn do_signal() {
                 trace!("[do_signal] Ignore {:?} (SIG_IGN)", signal);
                 continue;
             }
-            {
+            if act.handler != SigHandler::SIG_DFL {
                 let trap_cx = inner.get_trap_cx();
                 let a0_isize = trap_cx.gp.a0 as isize;
                 // if this syscall wants to restart
@@ -622,7 +624,6 @@ pub fn do_signal() {
                         trap_cx.gp.a0 = EINTR as usize;
                     }
                 }
-            }
             let current_sp = inner.get_trap_cx().gp.sp;
             let alt_stack = inner.signal_stack;
             let use_alt_stack = act.flags.contains(SigActionFlags::SA_ONSTACK)
@@ -770,13 +771,16 @@ pub fn do_signal() {
                 (signal | act.mask) - Signals::CAN_NOT_BE_MASKED
             };
             if act.flags.contains(SigActionFlags::SA_RESETHAND) {
-                sighand.set(signum, None);
+                let mut reset_action = act;
+                reset_action.handler = SigHandler::SIG_DFL;
+                sighand.set(signum, Some(reset_action));
             }
             // go back to `trap_return`
             return;
-        } else {
-            // user program doesn't register a handler for this signal, use our default handler
-            match signal {
+            }
+        }
+        // user program doesn't register a handler for this signal, use our default handler
+        match signal {
                 // caused by a specific instruction in user program, print log here before exit
                 Signals::SIGILL | Signals::SIGSEGV => {
                     let scause = get_exception_cause();
@@ -829,7 +833,6 @@ pub fn do_signal() {
                     drop(task);
                     exit_group_and_run_next(default_signal_wait_status(signal));
                 }
-            }
         }
     }
 }
