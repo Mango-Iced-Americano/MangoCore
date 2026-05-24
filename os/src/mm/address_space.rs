@@ -282,7 +282,11 @@ impl<T: PageTable> AddressSpace<T> {
         access: FaultAccess,
     ) -> Result<PhysAddr, MemoryError> {
         let vpn = addr.floor();
-        if self.vmas.find_user_vma_key(vpn).is_some() {
+        let area_start = match self.vmas.find_user_vma_key(vpn) {
+            Some(start) => Some(start),
+            None => self.vmas.expand_growsdown_for_fault(vpn)?,
+        };
+        if area_start.is_some() {
             let ctx = super::page_fault::FaultContext::new(addr, access);
             let page_table = &mut self.page_table;
             let area = self.vmas.find_user_vma_mut(vpn).unwrap();

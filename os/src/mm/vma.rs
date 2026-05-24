@@ -442,6 +442,26 @@ impl Vma {
             .map_err(|_| crate::syscall::errno::ENOMEM)?;
         Ok(())
     }
+    /// If `new_start` is equal to the current start of area, do nothing and return `Ok(())`.
+    pub fn expand_down_to(&mut self, new_start: VirtAddr) -> Result<(), isize> {
+        let new_start_vpn: VirtPageNum = new_start.floor();
+        let old_start_vpn = self.inner.vpn_range.get_start();
+        if new_start_vpn > old_start_vpn {
+            warn!(
+                "[expand_down_to] new_start_vpn: {:?} is higher than old_start_vpn: {:?}",
+                new_start_vpn, old_start_vpn
+            );
+            return Err(crate::syscall::errno::EINVAL);
+        }
+        if self.map_file.is_some() {
+            warn!("[expand_down_to] file-backed MAP_GROWSDOWN is unsupported");
+            return Err(crate::syscall::errno::EINVAL);
+        }
+        self.inner
+            .set_start(new_start_vpn)
+            .map_err(|_| crate::syscall::errno::ENOMEM)?;
+        Ok(())
+    }
     /// If `new_end` is equal to the current end of area, do nothing and return `Ok(())`.
     pub fn shrink_to<T: PageTable>(
         &mut self,

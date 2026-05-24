@@ -223,6 +223,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | unmap 后读到 PTE 残留值 | 未刷新 TLB，CPU 仍用旧缓存 | **所有 PTE 修改后 `sfence.vma` / `invtlb`** |
 | heap allocator panic | 内核堆耗尽 | `try_reserve` 防御 + OOM killer |
 | `brk`/`mmap` 返回意外值 | 堆/mmap 区域冲突 | 检查 `program_break` 边界 |
+| `mmap18` MAP_GROWSDOWN 栈增长失败 | 页故障只查已覆盖 VMA，未在 guard page fault 时扩展 grow-down VMA | fault 地址位于 grow-down VMA 下方且不碰撞/不进入 stack_guard_gap 时，先下扩 VMA 起点再走懒分配 |
 
 ### 文件系统
 
