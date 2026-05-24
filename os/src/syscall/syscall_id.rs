@@ -116,6 +116,7 @@ pub const SYSCALL_SETSID: usize = 157;
 pub const SYSCALL_GETGROUPS: usize = 158;
 pub const SYSCALL_SETGROUPS: usize = 159;
 pub const SYSCALL_UNAME: usize = 160;
+pub const SYSCALL_SETHOSTNAME: usize = 161;
 pub const SYSCALL_SETDOMAINNAME: usize = 162;
 pub const SYSCALL_GETRLIMIT: usize = 163;
 pub const SYSCALL_SETRLIMIT: usize = 164;

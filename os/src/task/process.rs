@@ -3,8 +3,8 @@ use super::{
     registry,
     signal::{PendingSignal, SignalQueue, Sighand, Signals},
     threads::Futex,
-    wake_interruptible, Completion, FsStatus, TaskControlBlock, TaskStatus, WaitQueue, WaitResult,
-    Rusage, INITPROC,
+    wake_interruptible, Completion, FsStatus, TaskControlBlock, TaskStatus, UtsNamespace,
+    Rusage, WaitQueue, WaitResult, INITPROC,
 };
 use crate::fs::vfs;
 use crate::mm::{AddressSpace, PageTableImpl};
@@ -51,6 +51,8 @@ pub struct ProcessInner {
     files: Arc<Mutex<vfs::FdTable>>,
     /// 文件系统状态（cwd 等）。
     fs: Arc<Mutex<FsStatus>>,
+    /// UTS namespace 状态（hostname/domainname）。
+    uts: Arc<Mutex<UtsNamespace>>,
     /// 虚拟内存空间。
     vm: Arc<Mutex<AddressSpace<PageTableImpl>>>,
     /// 信号处理函数表。
@@ -148,6 +150,7 @@ impl ProcessControlBlock {
         exe_path: String,
         files: Arc<Mutex<vfs::FdTable>>,
         fs: Arc<Mutex<FsStatus>>,
+        uts: Arc<Mutex<UtsNamespace>>,
         vm: Arc<Mutex<AddressSpace<PageTableImpl>>>,
         sighand: Arc<Mutex<Sighand>>,
         futex: Arc<Mutex<Futex>>,
@@ -173,6 +176,7 @@ impl ProcessControlBlock {
                 exe_path,
                 files,
                 fs,
+                uts,
                 vm,
                 sighand,
                 futex,
@@ -254,6 +258,18 @@ impl ProcessControlBlock {
 
     pub fn fs(&self) -> Arc<Mutex<FsStatus>> {
         self.inner.lock().fs.clone()
+    }
+
+    pub fn uts(&self) -> Arc<Mutex<UtsNamespace>> {
+        self.inner.lock().uts.clone()
+    }
+
+    pub fn unshare_uts(&self) -> Arc<Mutex<UtsNamespace>> {
+        let uts_ref = self.uts();
+        let copied = uts_ref.lock().clone();
+        let new_uts = Arc::new(Mutex::new(copied));
+        self.inner.lock().uts = new_uts.clone();
+        new_uts
     }
 
     pub fn vm(&self) -> Arc<Mutex<AddressSpace<PageTableImpl>>> {

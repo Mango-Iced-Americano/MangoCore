@@ -50,6 +50,23 @@ pub struct FsStatus {
     pub working_path: String,
 }
 
+#[derive(Clone)]
+pub struct UtsNamespace {
+    pub nodename: [u8; 65],
+    pub domainname: [u8; 65],
+}
+
+impl UtsNamespace {
+    pub fn new() -> Self {
+        let mut nodename = [0u8; 65];
+        nodename[..8].copy_from_slice(b"blossom\0");
+        Self {
+            nodename,
+            domainname: [0; 65],
+        }
+    }
+}
+
 /// 任务控制块
 pub struct TaskControlBlock {
     // 不可变字段
@@ -609,6 +626,7 @@ impl TaskControlBlock {
                 working_inode: Arc::new(cwd),
                 working_path: String::from("/"),
             })),
+            Arc::new(Mutex::new(UtsNamespace::new())),
             Arc::new(Mutex::new(memory_set)),
             Arc::new(Mutex::new(Sighand::new())),
             Arc::new(Mutex::new(Futex::new())),
@@ -921,6 +939,11 @@ impl TaskControlBlock {
             } else {
                 Arc::new(Mutex::new(self.process.fs().lock().clone()))
             };
+            let uts = if flags.contains(CloneFlags::CLONE_NEWUTS) {
+                Arc::new(Mutex::new(self.process.uts().lock().clone()))
+            } else {
+                self.process.uts()
+            };
             let sighand = if flags.contains(CloneFlags::CLONE_SIGHAND) {
                 self.process.sighand()
             } else {
@@ -943,6 +966,7 @@ impl TaskControlBlock {
                 self.process.exe_path(),
                 files,
                 fs,
+                uts,
                 memory_set.clone(),
                 sighand,
                 futex,

@@ -257,6 +257,10 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | `unshare01.sh` 持续 5 分钟 shell 噪声 | LTP standalone helper 不通过标准 `tst_run` 运行 | broad scan 中跳过 |
 | `umip_basic_test` TBROK/TCONF | x86_64-only UMIP 测试 | broad scan 中跳过 |
 | `umask01` 大量 mode/return TFAIL | 文件创建 umask 语义未实现，涉及 fs 权限路径 | fs 适配窗口前先跳过，避免和 VFS 工作冲突 |
+| `utsname02/03` sethostname ENOSYS | syscall 161 未注册，hostname 固定写死在 `uname` | 用进程共享 `UtsNamespace` 保存 nodename/domainname，`sethostname`/`setdomainname` 更新当前 UTS namespace |
+| `utsname04` 非 root `CLONE_NEWUTS` 未拒绝 | `clone` 未检查 UTS namespace 权限 | 非 root 使用 `CLONE_NEWUTS` 返回 `EPERM` |
+| `waitid11` SIGKILL 子进程被报告为正常退出 | `waitid` siginfo 总是填 `CLD_EXITED` | 按 wait status 低 7 位区分 `CLD_KILLED/CLD_DUMPED` |
+| `userns*`、`utime*`、`vmsplice*`、`wireguard*`、`zram*` 等后段失败 | user namespace/procfs、fs timestamp、pipe splice、net/module 环境缺失 | broad scan 中按家族窄跳过，后续专项处理 |
 
 ### 信号/进程
 

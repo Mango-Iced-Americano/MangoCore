@@ -13,9 +13,6 @@ use alloc::{sync::Arc, vec::Vec};
 use core::{mem::size_of, ptr};
 use log::{info, warn};
 use num_enum::FromPrimitive;
-use spin::Mutex;
-
-static UTS_DOMAINNAME: Mutex<[u8; 65]> = Mutex::new([0; 65]);
 
 #[allow(unused)]
 #[repr(C)]
@@ -139,7 +136,6 @@ pub fn sys_uname(buf: *mut u8) -> isize {
     // A little stupid but still efficient.
     const FIELD_OFFSET: usize = 65;
     buffer.write_at(FIELD_OFFSET * 0, b"Linux\0");
-    buffer.write_at(FIELD_OFFSET * 1, b"blossom\0");
     #[cfg(feature = "riscv")]
     buffer.write_at(FIELD_OFFSET * 2, b"5.10.0-1-rv64\0");
     #[cfg(feature = "loongarch64")]
@@ -149,33 +145,56 @@ pub fn sys_uname(buf: *mut u8) -> isize {
     buffer.write_at(FIELD_OFFSET * 4, b"rv64\0");
     #[cfg(feature = "loongarch64")]
     buffer.write_at(FIELD_OFFSET * 4, b"la64\0");
-    let domainname = UTS_DOMAINNAME.lock();
-    buffer.write_at(FIELD_OFFSET * 5, &domainname[..]);
+    let task = current_task().unwrap();
+    let uts_ref = task.process.uts();
+    let uts = uts_ref.lock();
+    buffer.write_at(FIELD_OFFSET * 1, &uts.nodename[..]);
+    buffer.write_at(FIELD_OFFSET * 5, &uts.domainname[..]);
     SUCCESS
 }
 
-pub fn sys_setdomainname(name: *const u8, len: usize) -> isize {
+fn copy_uts_field(name: *const u8, len: usize) -> Result<[u8; 65], isize> {
     const UTS_FIELD_LEN: usize = 65;
     const UTS_NAME_MAX: usize = UTS_FIELD_LEN - 1;
 
     if len > UTS_NAME_MAX {
-        return EINVAL;
+        return Err(EINVAL);
     }
+    if len > 0 && name.is_null() {
+        return Err(EFAULT);
+    }
+    let mut field = [0u8; UTS_FIELD_LEN];
+    if len > 0 {
+        copy_from_user_array(current_user_token(), name, field.as_mut_ptr(), len)?;
+    }
+    Ok(field)
+}
+
+pub fn sys_sethostname(name: *const u8, len: usize) -> isize {
     let task = current_task().unwrap();
     if task.acquire_inner_lock().euid != 0 {
         return EPERM;
     }
+    let hostname = match copy_uts_field(name, len) {
+        Ok(hostname) => hostname,
+        Err(errno) => return errno,
+    };
+    let uts_ref = task.process.uts();
+    uts_ref.lock().nodename = hostname;
+    SUCCESS
+}
 
-    if len > 0 && name.is_null() {
-        return EFAULT;
+pub fn sys_setdomainname(name: *const u8, len: usize) -> isize {
+    let task = current_task().unwrap();
+    if task.acquire_inner_lock().euid != 0 {
+        return EPERM;
     }
-    let mut domainname = [0u8; UTS_FIELD_LEN];
-    if let Err(errno) =
-        copy_from_user_array(current_user_token(), name, domainname.as_mut_ptr(), len)
-    {
-        return errno;
-    }
-    *UTS_DOMAINNAME.lock() = domainname;
+    let domainname = match copy_uts_field(name, len) {
+        Ok(domainname) => domainname,
+        Err(errno) => return errno,
+    };
+    let uts_ref = task.process.uts();
+    uts_ref.lock().domainname = domainname;
     SUCCESS
 }
 

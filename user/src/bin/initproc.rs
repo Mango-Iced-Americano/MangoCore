@@ -822,6 +822,31 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     if name.starts_with("umount") {
         return Some("filesystem mount/device tests skipped in LTP syscall scan");
     }
+    if name.starts_with("userns") {
+        return Some("user namespace/procfs uid_map tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("utime") {
+        return Some("filesystem timestamp/device tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("vlan")
+        || name.starts_with("vsock")
+        || name.starts_with("vxlan")
+        || name.starts_with("wireguard")
+    {
+        return Some("network virtualization tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("vma") {
+        return Some("procfs/vma environment tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("vmsplice") {
+        return Some("pipe vmsplice tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("wqueue") {
+        return Some("watch queue notification pipe tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("zram") {
+        return Some("zram module tests skipped in LTP syscall scan");
+    }
     if name.starts_with("test_1_to_1")
         || name.starts_with("test_assoc")
         || name.starts_with("test_autoclose")
@@ -898,7 +923,11 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "uaccess" => Some("requires LTP kernel module environment"),
         "umask01" => Some("filesystem umask/create-mode semantics skipped in LTP syscall scan"),
         "umip_basic_test" => Some("x86_64-only UMIP testcase"),
+        "unshare02" => Some("mount namespace invalid-case test skipped before full namespace support"),
         "unshare01.sh" => Some("standalone namespace shell helper skipped in broad scan"),
+        "unzip01.sh" => Some("standalone unzip shell helper skipped in LTP syscall scan"),
+        "userfaultfd01" => Some("userfaultfd syscall not supported"),
+        "ustat01" | "ustat02" => Some("legacy ustat syscall not supported on this arch"),
         "cgroup_fj_common.sh"
         | "cgroup_fj_function.sh"
         | "cgroup_fj_proc"
@@ -926,6 +955,20 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "proc_sched_rt01" => Some("requires procfs/sysctl RT scheduler config"),
         "prctl03" | "prctl04" | "prctl05" | "prctl06" | "prctl06_execve" | "prctl07"
         | "prctl10" => Some("requires unsupported prctl/procfs capability"),
+        "verify_caps_exec" => Some("requires complete POSIX file capability support"),
+        "vfork" => Some("requires ptrace capability environment"),
+        "vfork_freeze.sh" => Some("freezer/cgroup helper skipped in LTP syscall scan"),
+        "vhangup01" | "vhangup02" => Some("vhangup syscall not supported"),
+        "virt_lib.sh" => Some("network virtualization helper skipped in LTP syscall scan"),
+        "waitid07" | "waitid08" => Some("stopped/continued waitid state pending task-stop support"),
+        "waitid10" => Some("requires procfs core_pattern"),
+        "waitpid08" | "waitpid13" => Some("stopped-child waitpid state pending task-stop support"),
+        "wc01.sh" | "which01.sh" => Some("standalone shell helper skipped in LTP syscall scan"),
+        "write04" | "write05" | "write06" | "writev01" => {
+            Some("filesystem/pipe write edge cases skipped in LTP syscall scan")
+        },
+        "writetest" => Some("standalone write stress helper skipped in LTP syscall scan"),
+        "writev03" => Some("requires at least two CPUs online"),
         _ => None,
     }
 }

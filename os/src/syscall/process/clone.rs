@@ -199,6 +199,9 @@ fn sys_clone_inner(
     if flags.contains(CloneFlags::CLONE_VFORK) && flags.contains(CloneFlags::CLONE_THREAD) {
         return EINVAL;
     }
+    if flags.contains(CloneFlags::CLONE_NEWUTS) && parent.acquire_inner_lock().euid != 0 {
+        return EPERM;
+    }
     info!(
         "[sys_clone] flags: {:?}, stack: {:?}, exit_signal: {:?}, ptid: {:?}, tls: {:?}, ctid: {:?}",
         flags, stack, exit_signal, ptid, tls, ctid
@@ -317,12 +320,20 @@ pub fn sys_unshare(flags: u32) -> isize {
         return EINVAL;
     }
 
-    let supported = CloneFlags::CLONE_FILES | CloneFlags::CLONE_FS | CloneFlags::CLONE_NEWNS;
+    let supported = CloneFlags::CLONE_FILES
+        | CloneFlags::CLONE_FS
+        | CloneFlags::CLONE_NEWNS
+        | CloneFlags::CLONE_NEWUTS;
     if !flags.difference(supported).is_empty() {
         return EINVAL;
     }
 
     let task = current_task().unwrap();
+    if flags.intersects(CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWUTS)
+        && task.acquire_inner_lock().euid != 0
+    {
+        return EPERM;
+    }
     if flags.contains(CloneFlags::CLONE_FILES) {
         if let Err(e) = task.process.unshare_files() {
             return -(e as isize);
@@ -330,6 +341,9 @@ pub fn sys_unshare(flags: u32) -> isize {
     }
     if flags.contains(CloneFlags::CLONE_FS) {
         task.process.unshare_fs();
+    }
+    if flags.contains(CloneFlags::CLONE_NEWUTS) {
+        task.process.unshare_uts();
     }
 
     // MangoCore has a single global mount tree today. Treat CLONE_NEWNS as a
