@@ -971,6 +971,8 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "dirtypipe" => Some("pipe CVE regression test skipped in broad LTP scan"),
         "dma_thread_diotest" => Some("requires large block device for DMA direct-I/O test"),
         "doio" => Some("long-running filesystem I/O stress helper skipped in broad scan"),
+        "du01.sh" => Some("filesystem disk-usage shell helper skipped in LTP syscall scan"),
+        "dynamic_debug01.sh" => Some("requires kernel dynamic_debug/debugfs support"),
         "df01.sh" => Some("filesystem shell helper skipped in LTP syscall scan"),
         "killall_udp_traffic" | "ns-udpclient" | "ns-udpsender" | "ns-udpserver" => {
             Some("network UDP helper skipped in LTP syscall scan")
