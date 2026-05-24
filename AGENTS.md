@@ -254,6 +254,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | pidfd_send_signal 对 `/proc/<pid>` fd 返回 EBADF | procfs inode 被 MountFSInode 包装，且 `/proc/<pid>` 目录未记录 pid | 解包 MountFSInode 后识别 LockedProcInode，并在 pid 目录 `extra_data` 保存 pid |
 | pidfd_getfd 已退出目标返回 EBADF | wait 后 zombie 进程仍可被 registry 查到，但 fd table 已关闭 | 目标进程 zombie 时按 Linux 语义返回 `ESRCH` |
 | pidfd_open04 waitid(P_PIDFD) ENOSYS | 缺少 `waitid(95)` 分发和 P_PIDFD 最小语义 | 支持 `P_PIDFD + WEXITED`，非阻塞未退出返回 `EAGAIN`，退出后回收子进程 |
+| futex_wait05 短 timeout 超时过长 | 单线程短等待走完整 wait queue/调度路径，QEMU 下固定增加数毫秒 | 仅对单线程、ready 队列为空、短 timeout 使用硬件时钟短轮询；仍保持值不匹配优先返回 `EAGAIN` |
 
 ### QEMU / 测试
 
