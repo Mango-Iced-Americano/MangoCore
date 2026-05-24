@@ -10,25 +10,28 @@ use crate::task::{procs_count, task_manager_counts, zombie_count, TaskControlBlo
 const STATS_ENABLED: bool = true;
 
 /// 收集缓存内存统计
-fn cache_memory_stats() -> (usize, usize, usize, usize) {
+fn cache_memory_stats() -> (usize, usize, usize, usize, usize) {
     let mut page_cached = 0usize;
     let mut page_dirty = 0usize;
     let mut ext4_inode_cache = 0usize;
-    let mut ext4_meta_approx = 0usize;
+    let mut ext4_mbc_bytes = 0usize;
+    let mut mbc_dirty = 0usize;
 
-    // 通过 GLOBAL_EXT4FS 查询 ext4 缓存指标
     let guard = crate::fs::ext4::ext4fs::GLOBAL_EXT4FS.lock();
     if let Some(fs) = guard.as_ref().and_then(|w| w.upgrade()) {
-        let cached = fs.get_cache_metric(6);  // page_cache_cached_pages
-        let dirty = fs.get_cache_metric(7);   // page_cache_dirty_pages
-        let ic_total = fs.get_cache_metric(8); // inode_cache_total
+        let cached = fs.get_cache_metric(6);
+        let dirty = fs.get_cache_metric(7);
+        let ic_total = fs.get_cache_metric(8);
         if cached >= 0 { page_cached = cached as usize; }
         if dirty >= 0 { page_dirty = dirty as usize; }
         if ic_total >= 0 { ext4_inode_cache = ic_total as usize; }
-        ext4_meta_approx = ic_total.max(0) as usize * 512;
+        // MetaBlockCache: len/dirty/clean, each entry ≈ block_size bytes
+        let (mbc_len, mbc_d, _mbc_clean) = fs.meta_block_cache.stats();
+        ext4_mbc_bytes = mbc_len * fs.block_size;
+        mbc_dirty = mbc_d;
     }
 
-    (page_cached, page_dirty, ext4_inode_cache, ext4_meta_approx)
+    (page_cached, page_dirty, ext4_inode_cache, ext4_mbc_bytes, mbc_dirty)
 }
 
 /// 打印当前内核资源统计信息
@@ -55,47 +58,11 @@ pub fn print_resource_stats(task: Option<&TaskControlBlock>) {
     );
 
     // Cache memory line
-    let (page_cached, page_dirty, ext4_ic, ext4_meta) = cache_memory_stats();
+    let (page_cached, page_dirty, ext4_ic, ext4_mbc, mbc_dirty) = cache_memory_stats();
+    let mntfs = crate::fs::vfs::mount::counters::mountfs_alive();
+    let mntinode = crate::fs::vfs::mount::counters::mountfsinode_alive();
     println!(
-        "[kernel] [stats] page_cache={}K dirty={}K ext4_inode_cache={} ext4_meta_approx={}K",
-        (page_cached * 4), page_dirty * 4, ext4_ic, ext4_meta >> 10
+        "[kernel] [stats] page_cache={}K dirty={}K ext4_ic={} ext4_mbc={}K dirty={} mounts={} mntinode={}",
+        (page_cached * 4), page_dirty * 4, ext4_ic, ext4_mbc >> 10, mbc_dirty, mntfs, mntinode
     );
-}
-
-/// 周期回收 page cache 干净页（调度循环中调用，带节流）
-/// 仅在 page_cache > 64MB 时触发，每次最多回收 64 页
-pub fn maybe_reclaim_fs_caches() {
-    use crate::fs::ext4::ext4fs::GLOBAL_EXT4FS;
-    use core::sync::atomic::{AtomicUsize, Ordering};
-
-    static TICK: AtomicUsize = AtomicUsize::new(0);
-    const THROTTLE: usize = 64; // 每 64 次调度循环尝试一次
-    const HIGH_WATER_PAGES: isize = 16384; // 64MB
-    const BATCH_PAGES: usize = 64;
-
-    let tick = TICK.fetch_add(1, Ordering::Relaxed);
-    if tick % THROTTLE != 0 {
-        return;
-    }
-
-    // 锁 → clone Arc → 释放锁 → 操作（避免持锁调 reclaim）
-    let fs = {
-        let guard = GLOBAL_EXT4FS.lock();
-        guard.as_ref().and_then(|w| w.upgrade())
-    };
-
-    if let Some(fs) = fs {
-        let cached = fs.get_cache_metric(6); // page_cache_cached_pages
-        if cached > HIGH_WATER_PAGES {
-            let stats = fs.reclaim_fs_caches(BATCH_PAGES);
-            if stats.clean_pages_freed > 0 {
-                log::debug!(
-                    "[reclaim] freed={} before={} after={}",
-                    stats.clean_pages_freed,
-                    stats.cached_pages_before,
-                    stats.cached_pages_after
-                );
-            }
-        }
-    }
 }

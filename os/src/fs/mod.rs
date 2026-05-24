@@ -10,6 +10,7 @@ pub use page_cache::{evict_all_clean_pages, flush_all_page_caches};
 pub mod poll;
 pub mod procfs;
 pub mod ramfs;
+pub mod reclaim;
 #[cfg(feature = "swap")]
 pub mod swap;
 // Xein add this
