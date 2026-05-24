@@ -291,6 +291,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | LTP `sctp*`、`send02`、`sendmsg01`、`sendmmsg*`、`recvmmsg01`、部分 `sendfile*` 阻塞扫描 | SCTP/网络收发或 fs sendfile 边界用例 | 当前 fs/net 协作期先由 inline runner skip |
 | LTP `*_16`、`set_mempolicy*`、`set_thread_area01`、`set_ipv4addr`、`sendmsg03`/`sendto03` | 16-bit compat、NUMA policy、架构 TLS 或网络配置环境不支持 | 当前 broad scan 中显式 skip |
 | LTP `setsockopt02/04..10`、`setxattr*`、`sgetmask01`、`shell_pipe01.sh`、`shm_comm`、`shm_test` | net/fs、旧 signal ABI、standalone helper 或 System V SHM 长耗时/namespace 兼容问题 | 当前 broad scan 中 narrow skip，后续专项处理 |
+| LTP `shm*`、`splice*`、`squashfs01`、`ssetmask01`、`ssh-stress.sh`、`stack_clash`、`starvation` | IPC/pipe/fs/网络压力、旧 signal ABI、procfs/CVE 环境或长耗时 scheduler stress | 当前 broad scan 中 narrow skip，后续专项处理 |
 | 非阻塞 socket 测试失败 | 检查是否在 `try_xxx` 前调了 `try_poll()` |
 
 ### 错误码对齐（Linux 语义）

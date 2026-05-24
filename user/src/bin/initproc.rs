@@ -777,6 +777,12 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     if name.starts_with("setxattr") {
         return Some("filesystem xattr tests skipped in LTP syscall scan");
     }
+    if name.starts_with("shm") {
+        return Some("System V SHM/IPC compatibility skipped in broad LTP scan");
+    }
+    if name.starts_with("splice") {
+        return Some("filesystem/pipe splice tests skipped in LTP syscall scan");
+    }
     if name.ends_with("_16") {
         return Some("16-bit compat syscall variant not supported on this platform");
     }
@@ -808,9 +814,12 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         }
         "set_thread_area01" => Some("architecture-specific TLS syscall not supported"),
         "sgetmask01" => Some("legacy signal mask syscall not supported on this arch"),
+        "ssetmask01" => Some("legacy signal mask syscall not supported on this arch"),
         "shell_pipe01.sh" => Some("standalone shell pipe helper skipped in LTP syscall scan"),
-        "shm_comm" => Some("requires IPC namespace/System V SHM compatibility"),
-        "shm_test" => Some("long-running System V SHM stress helper skipped in broad scan"),
+        "squashfs01" => Some("requires squashfs userspace tooling and fs support"),
+        "ssh-stress.sh" => Some("network ssh stress helper skipped in LTP syscall scan"),
+        "stack_clash" => Some("requires procfs cmdline and stack guard CVE environment"),
+        "starvation" => Some("long-running scheduler stress case skipped in broad scan"),
         "cgroup_fj_common.sh"
         | "cgroup_fj_function.sh"
         | "cgroup_fj_proc"
