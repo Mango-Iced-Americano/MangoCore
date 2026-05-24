@@ -85,6 +85,7 @@ pub fn run_tasks() {
         // 处理到期内核定时器（SIGALRM 等），防止忙等待/轮询任务阻塞定时器投递。
         do_wake_expired();
         NET_INTERFACE.try_poll();
+        crate::utils::stats::maybe_reclaim_fs_caches();
         let mut processor = PROCESSOR.lock();
         if let Some(task) = fetch_task() {
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
