@@ -145,6 +145,19 @@ impl<'a> NetInterface<'a> {
         Some(f(self.inner.lock().as_mut()?))
     }
 
+    /// 返回 (tcp_count, udp_count, raw_count, pending_remove)
+    pub fn socket_stats(&self) -> (usize, usize, usize, usize) {
+        let tcp = crate::net::TCP_SOCKETS.lock().len();
+        let raw = crate::net::RAW_SOCKETS.lock().len();
+        let pending = TCP_SOCKETS_TO_REMOVE.lock().len() + UDP_SOCKETS_TO_REMOVE.lock().len();
+        // UDP: count via inner sockets (only if initialized)
+        let udp = match self.inner.lock().as_ref() {
+            Some(inner) => inner.sockets.iter().count().saturating_sub(tcp).saturating_sub(raw),
+            None => 0,
+        };
+        (tcp, udp, raw, pending)
+    }
+
     pub fn poll(&self) {
         if self.inner.lock().is_none() {
             return;
@@ -199,7 +212,7 @@ impl<'a> NetInterface<'a> {
                     let socket = inner.sockets.get::<tcp::Socket>(h);
                     let state = socket.state();
                     let can_remove =
-                        state == tcp::State::Closed;
+                        state == tcp::State::Closed || state == tcp::State::TimeWait;
                     if !can_remove {
                         log::debug!(
                             "[NetInterface::poll_once] TCP handle {} not ready yet (state={:?}), deferring",

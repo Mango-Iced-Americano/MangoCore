@@ -88,4 +88,10 @@ pub fn print_resource_stats(task: Option<&TaskControlBlock>) {
         "[kernel] [stats] proc z={} cur_fds={} fds={}/{}/{} zfds={}/{}",
         pz, cur_fds, fo, fs, fc, zfo >> 1, zfc >> 1
     );
+    // Line 5: network socket stats
+    let (tn, un, rn, sp) = crate::net::config::NET_INTERFACE.socket_stats();
+    println!(
+        "[kernel] [stats] net tcp={} udp={} raw={} pend={}",
+        tn, un, rn, sp
+    );
 }

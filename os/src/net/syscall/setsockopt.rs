@@ -36,6 +36,8 @@ pub fn sys_setsockopt(
     match (level, optname) {
         (SOL_SOCKET, SO_SNDBUF | SO_RCVBUF) => {
             let size = optval;
+            // Clamp to prevent unbounded buffer growth (match Linux rmem_max default)
+            let size = (size as usize).min(256 * 1024).max(4096);
             match optname {
                 SO_SNDBUF => {
                     socket.set_send_buf_size(size as usize);

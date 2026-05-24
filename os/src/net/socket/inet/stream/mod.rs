@@ -365,7 +365,8 @@ impl Socket for TcpSocket {
         let mut inner = self.inner.lock();
         match &mut *inner {
             Inner::Init(init) => {
-                let _ = init.resize_buffers(size, size);
+                // Only resize RX; keep TX at default (64KB)
+                let _ = init.resize_buffers(size, 64 * 1024);
             }
             Inner::Established(e) => {
                 // 此 smoltcp 版本不支持动态 recv buffer 调整
@@ -385,7 +386,8 @@ impl Socket for TcpSocket {
         let mut inner = self.inner.lock();
         match &mut *inner {
             Inner::Init(init) => {
-                let _ = init.resize_buffers(size, size);
+                // Only resize TX; keep RX at default (64KB)
+                let _ = init.resize_buffers(64 * 1024, size);
             }
             Inner::Established(e) => {
                 // 此 smoltcp 版本不支持动态 send buffer 调整
