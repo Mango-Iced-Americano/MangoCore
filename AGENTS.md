@@ -242,6 +242,12 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | socketpair 非 AF_UNIX | 返回 EAFNOSUPPORT | Linux 语义：返回 EPROTONOSUPPORT(93) |
 | getpeername NULL addr | EFAULT 被 ENOTCONN 覆盖 | 必须先验证参数再检查连接状态 |
 
+### 时间/定时器
+
+| 问题 | 根因 | 修复 |
+|------|------|------|
+| `leapsec01` 报 `adjtimex status ... not set` | `adjtimex/clock_adjtime` 只返回快照，未保存 `ADJ_STATUS` 等可调字段 | 保存 `TimexState`，按 `ADJ_*` 更新并在后续 snapshot 回填 |
+
 ### 信号/进程
 
 | 问题 | 根因 | 修复 |
