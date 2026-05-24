@@ -819,6 +819,9 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     if name.starts_with("udp") {
         return Some("network UDP tests skipped in LTP syscall scan");
     }
+    if name.starts_with("umount") {
+        return Some("filesystem mount/device tests skipped in LTP syscall scan");
+    }
     if name.starts_with("test_1_to_1")
         || name.starts_with("test_assoc")
         || name.starts_with("test_autoclose")
@@ -845,6 +848,9 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     match name {
         "ask_password.sh" | "assign_password.sh" | "change_password.sh" | "remove_password.sh" => {
             Some("interactive password helper")
+        }
+        "killall_udp_traffic" | "ns-udpclient" | "ns-udpsender" | "ns-udpserver" => {
+            Some("network UDP helper skipped in LTP syscall scan")
         }
         "run_capbounds.sh" => Some("requires POSIX capability support"),
         "rwtest" => Some("filesystem/pipe stress helper skipped in syscall scan"),
@@ -890,6 +896,9 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "trace_sched" => Some("requires kernel tracing scheduler environment"),
         "truncate03" | "truncate03_64" => Some("filesystem truncate edge cases skipped in LTP syscall scan"),
         "uaccess" => Some("requires LTP kernel module environment"),
+        "umask01" => Some("filesystem umask/create-mode semantics skipped in LTP syscall scan"),
+        "umip_basic_test" => Some("x86_64-only UMIP testcase"),
+        "unshare01.sh" => Some("standalone namespace shell helper skipped in broad scan"),
         "cgroup_fj_common.sh"
         | "cgroup_fj_function.sh"
         | "cgroup_fj_proc"

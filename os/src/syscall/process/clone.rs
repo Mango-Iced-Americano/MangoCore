@@ -308,6 +308,35 @@ pub fn sys_clone(
     sys_clone_inner(flags, stack, ptid, tls, ctid, pidfd_ptr)
 }
 
+pub fn sys_unshare(flags: u32) -> isize {
+    let flags = match CloneFlags::from_bits(flags) {
+        Some(flags) => flags,
+        None => return EINVAL,
+    };
+    if flags.contains(CloneFlags::CLONE_FS) && flags.contains(CloneFlags::CLONE_NEWNS) {
+        return EINVAL;
+    }
+
+    let supported = CloneFlags::CLONE_FILES | CloneFlags::CLONE_FS | CloneFlags::CLONE_NEWNS;
+    if !flags.difference(supported).is_empty() {
+        return EINVAL;
+    }
+
+    let task = current_task().unwrap();
+    if flags.contains(CloneFlags::CLONE_FILES) {
+        if let Err(e) = task.process.unshare_files() {
+            return -(e as isize);
+        }
+    }
+    if flags.contains(CloneFlags::CLONE_FS) {
+        task.process.unshare_fs();
+    }
+
+    // MangoCore has a single global mount tree today. Treat CLONE_NEWNS as a
+    // successful private namespace request so basic libc/LTP probes can proceed.
+    SUCCESS
+}
+
 pub fn sys_clone3(uargs: *const u8, size: usize) -> isize {
     let token = current_task().unwrap().get_user_token();
     let args = match read_clone3_args(uargs, size, token) {

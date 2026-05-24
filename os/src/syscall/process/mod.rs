@@ -9,7 +9,7 @@ mod mm;
 mod signal;
 mod time;
 
-pub use clone::{sys_clone, sys_clone3, CloneFlags};
+pub use clone::{sys_clone, sys_clone3, sys_unshare, CloneFlags};
 pub use exec::sys_execve;
 pub use futex::sys_futex;
 pub use ids::{

@@ -244,6 +244,14 @@ impl ProcessControlBlock {
         Ok(new_files)
     }
 
+    pub fn unshare_fs(&self) -> Arc<Mutex<FsStatus>> {
+        let fs_ref = self.fs();
+        let copied = fs_ref.lock().clone();
+        let new_fs = Arc::new(Mutex::new(copied));
+        self.inner.lock().fs = new_fs.clone();
+        new_fs
+    }
+
     pub fn fs(&self) -> Arc<Mutex<FsStatus>> {
         self.inner.lock().fs.clone()
     }

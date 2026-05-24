@@ -249,6 +249,15 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 |------|------|------|
 | `leapsec01` 报 `adjtimex status ... not set` | `adjtimex/clock_adjtime` 只返回快照，未保存 `ADJ_STATUS` 等可调字段 | 保存 `TimexState`，按 `ADJ_*` 更新并在后续 snapshot 回填 |
 
+### LTP 扫描取舍
+
+| 问题 | 根因 | 修复 |
+|------|------|------|
+| `unshare01` 全部 ENOSYS | `unshare(2)` 未接入通用 syscall 表 | 最小支持 `CLONE_FILES`/`CLONE_FS` 拷贝，`CLONE_NEWNS` 在当前全局 mount tree 下兼容返回成功 |
+| `unshare01.sh` 持续 5 分钟 shell 噪声 | LTP standalone helper 不通过标准 `tst_run` 运行 | broad scan 中跳过 |
+| `umip_basic_test` TBROK/TCONF | x86_64-only UMIP 测试 | broad scan 中跳过 |
+| `umask01` 大量 mode/return TFAIL | 文件创建 umask 语义未实现，涉及 fs 权限路径 | fs 适配窗口前先跳过，避免和 VFS 工作冲突 |
+
 ### 信号/进程
 
 | 问题 | 根因 | 修复 |

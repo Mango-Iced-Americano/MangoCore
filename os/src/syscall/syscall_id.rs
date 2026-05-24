@@ -56,6 +56,7 @@ pub const SYSCALL_EXIT: usize = 93;
 pub const SYSCALL_EXIT_GROUP: usize = 94;
 pub const SYSCALL_WAITID: usize = 95;
 pub const SYSCALL_SET_TID_ADDRESS: usize = 96;
+pub const SYSCALL_UNSHARE: usize = 97;
 pub const SYSCALL_FUTEX: usize = 98;
 pub const SYSCALL_SET_ROBUST_LIST: usize = 99;
 pub const SYSCALL_GET_ROBUST_LIST: usize = 100;
