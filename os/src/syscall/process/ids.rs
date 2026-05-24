@@ -31,12 +31,21 @@ const CAP_SETPCAP: usize = 8;
 const CAP_SYS_NICE: usize = 23;
 const CAP_FULL_SET: u64 = (1u64 << (CAP_LAST_CAP + 1)) - 1;
 const NGROUPS_MAX: usize = 65536;
+const PR_SET_PDEATHSIG: usize = 1;
+const PR_GET_PDEATHSIG: usize = 2;
 const PR_GET_DUMPABLE: usize = 3;
 const PR_SET_DUMPABLE: usize = 4;
 const PR_GET_KEEPCAPS: usize = 7;
 const PR_SET_KEEPCAPS: usize = 8;
+const PR_SET_NAME: usize = 15;
+const PR_GET_NAME: usize = 16;
 const PR_CAPBSET_READ: usize = 23;
 const PR_CAPBSET_DROP: usize = 24;
+const PR_SET_SECUREBITS: usize = 28;
+const PR_SET_TIMERSLACK: usize = 29;
+const PR_GET_TIMERSLACK: usize = 30;
+const PR_TASK_COMM_LEN: usize = 16;
+const PR_MAX_SIGNAL: usize = 64;
 const PERSONALITY_GET: usize = 0xffff_ffff;
 const IOPRIO_WHO_PROCESS: usize = 1;
 const IOPRIO_CLASS_SHIFT: usize = 13;
@@ -650,9 +659,59 @@ pub fn sys_capset(header: *mut CapUserHeader, data: *const CapUserData) -> isize
     SUCCESS
 }
 
+fn read_prctl_comm_from_user(ptr: usize) -> Result<[u8; PR_TASK_COMM_LEN], isize> {
+    let token = current_user_token();
+    let buffer = UserBuffer::new(translated_byte_buffer(
+        token,
+        ptr as *const u8,
+        PR_TASK_COMM_LEN,
+        UserAccess::Read,
+    )?);
+    let mut comm = [0u8; PR_TASK_COMM_LEN];
+    buffer.read(&mut comm);
+    if let Some(nul_pos) = comm.iter().position(|&ch| ch == 0) {
+        for byte in &mut comm[nul_pos..] {
+            *byte = 0;
+        }
+    } else {
+        comm[PR_TASK_COMM_LEN - 1] = 0;
+    }
+    Ok(comm)
+}
+
+fn write_prctl_comm_to_user(ptr: usize, comm: &[u8; PR_TASK_COMM_LEN]) -> isize {
+    let token = current_user_token();
+    let mut buffer = match translated_byte_buffer(
+        token,
+        ptr as *const u8,
+        PR_TASK_COMM_LEN,
+        UserAccess::Write,
+    ) {
+        Ok(buffer) => UserBuffer::new(buffer),
+        Err(errno) => return errno,
+    };
+    buffer.write(comm);
+    SUCCESS
+}
+
 pub fn sys_prctl(option: usize, arg2: usize, _arg3: usize, _arg4: usize, _arg5: usize) -> isize {
     let task = current_task().unwrap();
     match option {
+        PR_SET_PDEATHSIG => {
+            if arg2 > PR_MAX_SIGNAL {
+                return EINVAL;
+            }
+            task.acquire_inner_lock().pdeath_signal = arg2;
+            SUCCESS
+        }
+        PR_GET_PDEATHSIG => {
+            let signal = task.acquire_inner_lock().pdeath_signal as i32;
+            if copy_to_user(current_user_token(), &signal, arg2 as *mut i32).is_err() {
+                EFAULT
+            } else {
+                SUCCESS
+            }
+        }
         PR_CAPBSET_READ => {
             if arg2 > CAP_LAST_CAP {
                 return EINVAL;
@@ -665,7 +724,7 @@ pub fn sys_prctl(option: usize, arg2: usize, _arg3: usize, _arg4: usize, _arg5: 
                 return EINVAL;
             }
             let mut inner = task.acquire_inner_lock();
-            if inner.euid != 0 && (inner.cap_effective & (1u64 << CAP_SETPCAP)) == 0 {
+            if (inner.cap_effective & (1u64 << CAP_SETPCAP)) == 0 {
                 return EPERM;
             }
             inner.cap_bounding &= !(1u64 << arg2);
@@ -673,8 +732,44 @@ pub fn sys_prctl(option: usize, arg2: usize, _arg3: usize, _arg4: usize, _arg5: 
         }
         PR_GET_KEEPCAPS => 0,
         PR_SET_KEEPCAPS => SUCCESS,
-        PR_GET_DUMPABLE => 1,
-        PR_SET_DUMPABLE => SUCCESS,
+        PR_GET_DUMPABLE => task.acquire_inner_lock().dumpable as isize,
+        PR_SET_DUMPABLE => {
+            if arg2 > 1 {
+                return EINVAL;
+            }
+            task.acquire_inner_lock().dumpable = arg2;
+            SUCCESS
+        }
+        PR_SET_NAME => {
+            let comm = match read_prctl_comm_from_user(arg2) {
+                Ok(comm) => comm,
+                Err(errno) => return errno,
+            };
+            task.acquire_inner_lock().task_comm = comm;
+            SUCCESS
+        }
+        PR_GET_NAME => {
+            let comm = task.acquire_inner_lock().task_comm;
+            write_prctl_comm_to_user(arg2, &comm)
+        }
+        PR_SET_SECUREBITS => {
+            let inner = task.acquire_inner_lock();
+            if (inner.cap_effective & (1u64 << CAP_SETPCAP)) == 0 {
+                EPERM
+            } else {
+                SUCCESS
+            }
+        }
+        PR_SET_TIMERSLACK => {
+            let mut inner = task.acquire_inner_lock();
+            inner.timer_slack_ns = if arg2 == 0 {
+                inner.timer_slack_default_ns
+            } else {
+                arg2
+            };
+            SUCCESS
+        }
+        PR_GET_TIMERSLACK => task.acquire_inner_lock().timer_slack_ns as isize,
         _ => EINVAL,
     }
 }
