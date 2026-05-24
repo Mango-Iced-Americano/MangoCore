@@ -298,6 +298,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | LTP `thp02/03/04`、`timed_forkbomb` | THP/huge page 环境缺失或 fork 压力长耗时 | 当前 broad scan 中 narrow skip，保留 `thp01` 回归验证 |
 | LTP `times03` CPU 时间统计异常 | `times(2)` 把硬件 tick 当作 `clock_t`，且没有累计已 wait 回收子进程 CPU 时间 | 按 Linux `USER_HZ=100` 换算 `clock_t`，wait 回收 zombie 时累加子进程 `rusage`，`getrusage(RUSAGE_CHILDREN)` 同步返回累计值 |
 | LTP `timens*`、`timerfd*`、`tst_*`、`tpm*`、`trace*`、`truncate03*` 阻塞扫描 | time namespace/timerfd/TPM/tracing/fs truncate edge 或 LTP 内部 helper，当前非 fs/net 主线不适合长卡 | 先 narrow skip 解堵；`timerfd*` 后续作为 fd+timer 子系统专项实现 |
+| LTP `uaccess`、`udp*` 阻塞扫描 | `uaccess` 依赖 LTP kernel module，`udp*` 属于网络矩阵 | 当前 broad scan 中 narrow skip，避免和 net 适配冲突 |
 | 非阻塞 socket 测试失败 | 检查是否在 `try_xxx` 前调了 `try_poll()` |
 
 ### 错误码对齐（Linux 语义）
