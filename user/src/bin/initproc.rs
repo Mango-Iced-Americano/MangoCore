@@ -783,6 +783,24 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     if name.starts_with("splice") {
         return Some("filesystem/pipe splice tests skipped in LTP syscall scan");
     }
+    if name.starts_with("statfs") || name.starts_with("statvfs") || name.starts_with("statx") {
+        return Some("filesystem stat metadata tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("swap") {
+        return Some("requires swap device/procfs support");
+    }
+    if name.starts_with("symlink") {
+        return Some("filesystem symlink tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("sync") {
+        return Some("filesystem sync tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("sysctl") {
+        return Some("legacy sysctl/procfs helper skipped in LTP syscall scan");
+    }
+    if name.starts_with("tcp") {
+        return Some("network TCP stress tests skipped in LTP syscall scan");
+    }
     if name.ends_with("_16") {
         return Some("16-bit compat syscall variant not supported on this platform");
     }
@@ -820,6 +838,9 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "ssh-stress.sh" => Some("network ssh stress helper skipped in LTP syscall scan"),
         "stack_clash" => Some("requires procfs cmdline and stack guard CVE environment"),
         "starvation" => Some("long-running scheduler stress case skipped in broad scan"),
+        "stat03" | "stat03_64" => Some("filesystem permission stat cases skipped in LTP syscall scan"),
+        "stream02" => Some("stdio pipe/tty helper skipped in LTP syscall scan"),
+        "support_numa" => Some("requires NUMA support"),
         "cgroup_fj_common.sh"
         | "cgroup_fj_function.sh"
         | "cgroup_fj_proc"
