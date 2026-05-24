@@ -277,6 +277,8 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | QEMU 启动无显示 | 检查 `console::init()` 是否第一个被调用 |
 | `os_test.conf` 修改不生效 | 用 `conf-inject` 重新注入镜像 |
 | QEMU 进程残留 | `pkill qemu-system` |
+| `sigtimedwait01`/`rt_sigtimedwait01`/`sigwaitinfo01` 卡住整轮 LTP | 当前 signal wait 缺少专用唤醒队列，先由 inline runner 显式 skip，后续专项修 |
+| `pthcli`/`pthserv` 单独运行失败或挂住 | 它们是 LTP 网络 helper/server，不是独立 syscall 用例，inline runner 显式 skip |
 | 非阻塞 socket 测试失败 | 检查是否在 `try_xxx` 前调了 `try_poll()` |
 
 ### 错误码对齐（Linux 语义）

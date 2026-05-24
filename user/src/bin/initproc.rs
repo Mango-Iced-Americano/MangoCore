@@ -756,6 +756,10 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
             Some("requires LTP external block device")
         }
         "create_datafile" | "create_file" => Some("standalone LTP helper"),
+        "pthcli" | "pthserv" => Some("standalone LTP network helper"),
+        "sigtimedwait01" | "rt_sigtimedwait01" | "sigwaitinfo01" => {
+            Some("blocking signal-wait case pending dedicated wait-queue support")
+        }
         _ => None,
     }
 }
