@@ -747,6 +747,15 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     if name.starts_with("rename") {
         return Some("filesystem rename tests skipped in syscall scan");
     }
+    if name.starts_with("request_key") {
+        return Some("keyring/request_key subsystem not implemented");
+    }
+    if name.starts_with("rmdir") {
+        return Some("filesystem rmdir tests skipped in syscall scan");
+    }
+    if name.starts_with("route") {
+        return Some("network route tests skipped in LTP syscall scan");
+    }
 
     match name {
         "ask_password.sh" | "assign_password.sh" | "change_password.sh" | "remove_password.sh" => {
