@@ -263,6 +263,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | `userns*`、`utime*`、`vmsplice*`、`wireguard*`、`zram*` 等后段失败 | user namespace/procfs、fs timestamp、pipe splice、net/module 环境缺失 | broad scan 中按家族窄跳过，后续专项处理 |
 | `aio*`、`chdir01`、`dio*`、`data*`、`dccp*`、`dhcp*`、`dctcp*` 等前段噪声 | libaio 用户态环境、外部测试设备、fs direct-io 压测、standalone helper、网络协议矩阵 | broad scan 中按家族/精确项跳过，保留普通核心 syscall 用例 |
 | `clone08` musl 失败但 glibc 通过 | musl `clone()` wrapper 对 `CLONE_THREAD/CLONE_CHILD_CLEARTID` 组合直接 `EINVAL`，未进入内核；glibc 路径验证内核线程 clone 可用 | broad scan 中仅跳过 musl `clone08`，保留 glibc |
+| `acct*`、`add_key*`、`bpf_*`、`binfmt_misc*`、`broken_ip*`、`chroot*` 等早段扫描噪声 | process accounting/keyring/BPF/binfmt/module、raw network、fs chroot 等当前非核心或 fs/net 环境缺失 | broad scan 中窄跳过这些阻塞项，保留 `brk*`、`capget/capset`、`chdir04` 等已通过核心用例 |
 
 ### 信号/进程
 

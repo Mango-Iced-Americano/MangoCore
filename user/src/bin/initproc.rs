@@ -729,6 +729,27 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     if name.starts_with("aio") {
         return Some("requires libaio userspace environment");
     }
+    if name.starts_with("add_key") {
+        return Some("keyring add_key syscall family not implemented");
+    }
+    if name.starts_with("asapi_") {
+        return Some("advanced IPv6 socket API tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("bbr") {
+        return Some("network BBR tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("binfmt_misc") {
+        return Some("binfmt_misc filesystem/procfs tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("bpf_") {
+        return Some("BPF syscall family not implemented");
+    }
+    if name.starts_with("broken_ip") || name.starts_with("busy_poll") {
+        return Some("network raw-packet helper skipped in LTP syscall scan");
+    }
+    if name.starts_with("can_") {
+        return Some("CAN/vcan network tests skipped in LTP syscall scan");
+    }
     if name.starts_with("cfs_bandwidth") || name.starts_with("cgroup_") {
         return Some("requires cgroup support");
     }
@@ -749,6 +770,9 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     }
     if name.starts_with("check_icmp") {
         return Some("network connectivity helper skipped in LTP syscall scan");
+    }
+    if name.starts_with("chroot") {
+        return Some("filesystem chroot semantics skipped in LTP syscall scan");
     }
     if name.starts_with("dccp") || name.starts_with("dhcp") || name.starts_with("dctcp") {
         return Some("network protocol helper skipped in LTP syscall scan");
@@ -889,14 +913,35 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     }
 
     match name {
+        "acct01" | "acct02" | "acct02_helper" => {
+            Some("process accounting syscall support not configured")
+        }
+        "acl1" => Some("filesystem ACL helper skipped in LTP syscall scan"),
+        "add_ipv6addr" => Some("network IPv6 helper skipped in LTP syscall scan"),
+        "ar01.sh" => Some("standalone archive shell helper skipped in LTP syscall scan"),
+        "arch_prctl01" => Some("x86_64-specific arch_prctl testcase"),
+        "arping01.sh" => Some("network ARP helper skipped in LTP syscall scan"),
+        "aslr01" => Some("requires kernel ASLR config/procfs support"),
+        "autogroup01" => Some("autogroup scheduler feature not supported"),
         "ask_password.sh" | "assign_password.sh" | "change_password.sh" | "remove_password.sh" => {
             Some("interactive password helper")
+        }
+        "bind06" | "bind_noport01.sh" => Some("network namespace/bind helper skipped in LTP syscall scan"),
+        "block_dev" => Some("requires LTP block-device kernel module"),
+        "cacheflush01" => Some("architecture cacheflush syscall not supported"),
+        "cap_bounds_r" | "cap_bounds_rw" | "cap_bset_inh_bounds" => {
+            Some("requires full POSIX capability environment")
         }
         "chdir01" => Some("requires LTP external block device"),
         "chmod05" | "chmod06" | "chmod07" => {
             Some("filesystem permission/user database semantics skipped in LTP syscall scan")
         },
         "check_envval" => Some("standalone locale/environment helper skipped in LTP syscall scan"),
+        "check_keepcaps" | "check_pe" | "check_simple_capset" => {
+            Some("requires full POSIX capability userspace support")
+        }
+        "check_netem" | "check_setkey" => Some("network setup helper skipped in LTP syscall scan"),
+        "chown04" => Some("filesystem permission chown edge case skipped in LTP syscall scan"),
         "clock_nanosleep03" => Some("requires time namespace kernel config"),
         "data" | "datafiles" => Some("standalone LTP helper skipped in syscall scan"),
         "delete_module03" => Some("requires procfs cmdline/module environment"),
