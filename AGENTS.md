@@ -287,6 +287,8 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | LTP `rtc*`/`run_cpuctl*`/`run_freezer*`/`run_memctl*`/`runpwtests*` TFAIL/TCONF | 依赖 RTC ioctl、cgroup controller 或 power-management 环境 | 当前非设备/控制器主线先 narrow skip |
 | LTP `rwtest` 持续刷 Broken pipe | 文件/管道压力 helper，容易拖慢扫描 | 当前 broad scan 中单点 skip |
 | LTP `sched_stress.sh` 长时间运行且刷脚本命令异常 | scheduler stress helper，不适合作为 syscall 适配扫描阻塞点 | 当前 broad scan 中单点 skip，保留普通 `sched_*` 语义测试 |
+| LTP `sched_tc0/1/6`、`sem_comm`、`semctl08/09`、`semget05` 阻塞扫描 | 依赖 KERNEL 环境、IPC namespace、semid64 time_high、SEM_STAT_ANY 或 `/proc/sys/kernel/sem` | 当前 syscall 扫描中先 narrow skip，后续 IPC/procfs 专项处理 |
+| LTP `sctp*`、`send02`、`sendmsg01`、`sendmmsg*`、`recvmmsg01`、部分 `sendfile*` 阻塞扫描 | SCTP/网络收发或 fs sendfile 边界用例 | 当前 fs/net 协作期先由 inline runner skip |
 | 非阻塞 socket 测试失败 | 检查是否在 `try_xxx` 前调了 `try_poll()` |
 
 ### 错误码对齐（Linux 语义）

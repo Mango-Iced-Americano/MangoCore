@@ -768,6 +768,9 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     if name.starts_with("runpwtests") {
         return Some("requires power-management test environment");
     }
+    if name.starts_with("sctp") {
+        return Some("network SCTP tests skipped in LTP syscall scan");
+    }
 
     match name {
         "ask_password.sh" | "assign_password.sh" | "change_password.sh" | "remove_password.sh" => {
@@ -776,6 +779,17 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "run_capbounds.sh" => Some("requires POSIX capability support"),
         "rwtest" => Some("filesystem/pipe stress helper skipped in syscall scan"),
         "sched_stress.sh" => Some("scheduler stress helper skipped in broad LTP scan"),
+        "sched_tc0" | "sched_tc1" | "sched_tc6" => Some("requires LTP KERNEL environment"),
+        "sem_comm" => Some("requires IPC namespace isolation"),
+        "semctl08" => Some("requires semid64_ds time_high ABI"),
+        "semctl09" => Some("requires complete SEM_STAT_ANY compatibility"),
+        "semget05" => Some("requires /proc/sys/kernel/sem"),
+        "send02" | "sendmsg01" | "sendmmsg01" | "sendmmsg02" | "recvmmsg01" => {
+            Some("network send/recv message tests skipped in LTP syscall scan")
+        }
+        "sendfile01.sh" | "sendfile05" | "sendfile05_64" | "sendfile09" | "sendfile09_64" => {
+            Some("filesystem sendfile edge case skipped in LTP syscall scan")
+        }
         "cgroup_fj_common.sh"
         | "cgroup_fj_function.sh"
         | "cgroup_fj_proc"
