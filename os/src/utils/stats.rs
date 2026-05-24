@@ -50,6 +50,28 @@ fn proc_fd_stats() -> (usize, usize, usize, usize, usize, usize, usize) {
     (palive, pzombie, fd_open, fd_slots, fd_cap, zfd_open + zfd_slots, zfd_slots + zfd_cap)
 }
 
+fn proc_object_stats() -> (usize, usize, usize, usize, usize, usize, usize, usize, usize) {
+    let mut pcbs = 0; let mut zpcbs = 0; let mut tcb_slots = 0; let mut tcb_live = 0;
+    let mut pcb_refs = 0; let mut zpcb_refs = 0; let mut as_refs = 0; let mut zas_refs = 0; let mut zvm_x = 0;
+    for pcb in crate::task::ProcessManager::all_processes() {
+        pcbs += 1;
+        let z = pcb.is_zombie();
+        if z { zpcbs += 1; }
+        let pr = alloc::sync::Arc::strong_count(&pcb).saturating_sub(1);
+        pcb_refs += pr;
+        if z { zpcb_refs += pr; }
+        let threads = pcb.threads.lock();
+        tcb_slots += threads.len();
+        tcb_live += threads.iter().filter(|t| t.upgrade().is_some()).count();
+        drop(threads);
+        let vm = pcb.vm();
+        let vr = alloc::sync::Arc::strong_count(&vm).saturating_sub(1);
+        as_refs += vr;
+        if z { zas_refs += vr; zvm_x += vr.saturating_sub(1); }
+    }
+    (pcbs, zpcbs, tcb_live, tcb_slots, pcb_refs, zpcb_refs, as_refs, zas_refs, zvm_x)
+}
+
 pub fn print_resource_stats(task: Option<&TaskControlBlock>) {
     if !STATS_ENABLED { return; }
 
@@ -64,11 +86,14 @@ pub fn print_resource_stats(task: Option<&TaskControlBlock>) {
     let (pr_len, pr_cap, pr_alive, pr_stale) = pc_metadata_stats();
     let (kt, ka, ks, kb, nt, nb) = ext4_dentry_stats();
     let (pa, pz, fo, fs, fc, zfo, zfc) = proc_fd_stats();
+    let (pcbs, zpcbs, tcbs, tcb_slots, pcb_refs, zpcb_refs, as_refs, zas_refs, zvm_x) = proc_object_stats();
 
     // Line 1: system resources
+    let procs = procs_count();
+    let real_procs = crate::task::ProcessManager::all_processes().len();
     println!(
-        "[kernel] [stats] free_frames={} ready={} int={} procs={} heap={}K/{}/{}K waste={}K",
-        free, ready, int_count, pa, heap_free >> 10, alloc_actual >> 10, heap_total >> 10, waste >> 10
+        "[kernel] [stats] free_frames={} ready={} int={} procs={}/{} heap={}K/{}/{}K waste={}K",
+        free, ready, int_count, procs, real_procs, heap_free >> 10, alloc_actual >> 10, heap_total >> 10, waste >> 10
     );
     // Line 2: cache memory
     println!(
@@ -93,5 +118,11 @@ pub fn print_resource_stats(task: Option<&TaskControlBlock>) {
     println!(
         "[kernel] [stats] net tcp={} udp={} raw={} pend={}",
         tn, un, rn, sp
+    );
+    // Line 6: process/thread object lifecycle
+    println!(
+        "[kernel] [stats] objs pcb={} zpcb={} tcb={}/{} stale={} pcb_ref={}/{} as_ref={}/{}/{}",
+        pcbs, zpcbs, tcbs, tcb_slots, tcb_slots.saturating_sub(tcbs),
+        pcb_refs, zpcb_refs, as_refs, zas_refs, zvm_x
     );
 }
