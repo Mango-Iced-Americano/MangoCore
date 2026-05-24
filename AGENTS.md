@@ -286,6 +286,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | LTP `request_key*`/`rmdir*`/`route*` 阻塞后续扫描 | 分别依赖 keyring 子系统、fs 语义和网络路由脚本 | 当前非 fs/net 主线先 narrow skip |
 | LTP `rtc*`/`run_cpuctl*`/`run_freezer*`/`run_memctl*`/`runpwtests*` TFAIL/TCONF | 依赖 RTC ioctl、cgroup controller 或 power-management 环境 | 当前非设备/控制器主线先 narrow skip |
 | LTP `rwtest` 持续刷 Broken pipe | 文件/管道压力 helper，容易拖慢扫描 | 当前 broad scan 中单点 skip |
+| LTP `sched_stress.sh` 长时间运行且刷脚本命令异常 | scheduler stress helper，不适合作为 syscall 适配扫描阻塞点 | 当前 broad scan 中单点 skip，保留普通 `sched_*` 语义测试 |
 | 非阻塞 socket 测试失败 | 检查是否在 `try_xxx` 前调了 `try_poll()` |
 
 ### 错误码对齐（Linux 语义）
