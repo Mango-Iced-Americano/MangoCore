@@ -132,6 +132,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_GETGROUPS => "getgroups",
         SYSCALL_SETGROUPS => "setgroups",
         SYSCALL_UNAME => "uname",
+        SYSCALL_SETDOMAINNAME => "setdomainname",
         SYSCALL_GETRUSAGE => "getrusage",
         SYSCALL_UMASK => "umask",
         SYSCALL_PRCTL => "prctl",
@@ -456,6 +457,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_GETSID => sys_getsid(args[0]),
         SYSCALL_SETSID => sys_setsid(),
         SYSCALL_UNAME => sys_uname(args[0] as *mut u8),
+        SYSCALL_SETDOMAINNAME => sys_setdomainname(args[0] as *const u8, args[1]),
         SYSCALL_GETPID => sys_getpid(),
         SYSCALL_GETPPID => sys_getppid(),
         #[cfg(not(feature = "loongarch64"))]

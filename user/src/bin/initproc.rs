@@ -771,6 +771,12 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     if name.starts_with("sctp") {
         return Some("network SCTP tests skipped in LTP syscall scan");
     }
+    if name.starts_with("set_mempolicy") {
+        return Some("requires NUMA memory policy support");
+    }
+    if name.ends_with("_16") {
+        return Some("16-bit compat syscall variant not supported on this platform");
+    }
 
     match name {
         "ask_password.sh" | "assign_password.sh" | "change_password.sh" | "remove_password.sh" => {
@@ -787,9 +793,13 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "send02" | "sendmsg01" | "sendmmsg01" | "sendmmsg02" | "recvmmsg01" => {
             Some("network send/recv message tests skipped in LTP syscall scan")
         }
+        "sendmsg03" | "sendto03" | "set_ipv4addr" => {
+            Some("network setup case skipped in LTP syscall scan")
+        }
         "sendfile01.sh" | "sendfile05" | "sendfile05_64" | "sendfile09" | "sendfile09_64" => {
             Some("filesystem sendfile edge case skipped in LTP syscall scan")
         }
+        "set_thread_area01" => Some("architecture-specific TLS syscall not supported"),
         "cgroup_fj_common.sh"
         | "cgroup_fj_function.sh"
         | "cgroup_fj_proc"

@@ -20,9 +20,10 @@ pub use ids::{
     sys_process_vm_readv, sys_process_vm_writev, sys_sched_get_priority_max,
     sys_sched_get_priority_min, sys_sched_getaffinity, sys_sched_getattr, sys_sched_getparam,
     sys_sched_getscheduler, sys_sched_rr_get_interval, sys_sched_setaffinity, sys_sched_setattr,
-    sys_sched_setparam, sys_sched_setscheduler, sys_setfsgid, sys_setfsuid, sys_setgid,
-    sys_setgroups, sys_setpgid, sys_setpriority, sys_setregid, sys_setresgid, sys_setresuid,
-    sys_setreuid, sys_setrlimit, sys_setsid, sys_setuid, sys_sysinfo, sys_uname, CapUserData,
+    sys_sched_setparam, sys_sched_setscheduler, sys_setdomainname, sys_setfsgid, sys_setfsuid,
+    sys_setgid, sys_setgroups, sys_setpgid, sys_setpriority, sys_setregid, sys_setresgid,
+    sys_setresuid, sys_setreuid, sys_setrlimit, sys_setsid, sys_setuid, sys_sysinfo, sys_uname,
+    CapUserData,
     CapUserHeader, RLimit, SchedAttr, SchedParam, Sysinfo,
 };
 pub use ipc::{
