@@ -4,6 +4,7 @@ pub mod cmdline;
 pub mod exe;
 pub mod fd;
 pub mod maps;
+pub mod smaps;
 pub mod stat;
 pub mod status;
 pub mod task;
@@ -86,6 +87,13 @@ fn create_pid_dir(
         "maps",
         InodeMode::from_bits_truncate(0o444),
         maps::pid_maps_content,
+        pid,
+    )?;
+
+    dir.add_file(
+        "smaps",
+        InodeMode::from_bits_truncate(0o444),
+        smaps::pid_smaps_content,
         pid,
     )?;
 

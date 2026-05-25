@@ -3,7 +3,7 @@ use super::page_table::{FaultAccess, PageTable, UserAccess};
 use super::user_mapper::UserMapper;
 use super::vma::*;
 use super::vma_set::VmaSet;
-use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum, KERNEL_SPACE};
+use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum, VPNRange, KERNEL_SPACE};
 use crate::config::*;
 use crate::hal::TrapContext;
 use crate::hal::TICKS_PER_SEC;
@@ -287,6 +287,90 @@ impl<T: PageTable> AddressSpace<T> {
                 mapping,
                 vma.map_file_offset,
             );
+        }
+        s
+    }
+
+    fn write_proc_smaps_segment(
+        s: &mut String,
+        vma: &Vma,
+        start_vpn: VirtPageNum,
+        end_vpn: VirtPageNum,
+        locked_kb: usize,
+    ) {
+        let start = start_vpn.0 * PAGE_SIZE;
+        let end = end_vpn.0 * PAGE_SIZE;
+        let size_kb = (end - start) / 1024;
+        let mut rss_pages = 0usize;
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            if vma.inner.get_in_memory(&vpn).is_some() {
+                rss_pages += 1;
+            }
+        }
+        let rss_kb = rss_pages * PAGE_SIZE / 1024;
+        let perm = vma.vm_perm();
+        let mapping = if vma.vm_mapping() == VmAreaMapping::Shared {
+            's'
+        } else {
+            'p'
+        };
+        let _ = writeln!(
+            s,
+            "{:016x}-{:016x} {}{}{}{} {:08x} 00:00 0",
+            start,
+            end,
+            if perm.contains(MapPermission::R) { 'r' } else { '-' },
+            if perm.contains(MapPermission::W) { 'w' } else { '-' },
+            if perm.contains(MapPermission::X) { 'x' } else { '-' },
+            mapping,
+            vma.map_file_offset,
+        );
+        let _ = writeln!(s, "Size:           {:8} kB", size_kb);
+        let _ = writeln!(s, "KernelPageSize: {:7} kB", PAGE_SIZE / 1024);
+        let _ = writeln!(s, "MMUPageSize:    {:7} kB", PAGE_SIZE / 1024);
+        let _ = writeln!(s, "Rss:            {:7} kB", rss_kb);
+        let _ = writeln!(s, "Pss:            {:7} kB", rss_kb);
+        let _ = writeln!(s, "Shared_Clean:         0 kB");
+        let _ = writeln!(s, "Shared_Dirty:         0 kB");
+        let _ = writeln!(s, "Private_Clean:        0 kB");
+        let _ = writeln!(s, "Private_Dirty:  {:7} kB", rss_kb);
+        let _ = writeln!(s, "Referenced:     {:7} kB", rss_kb);
+        let _ = writeln!(s, "Anonymous:      {:7} kB", rss_kb);
+        let _ = writeln!(s, "LazyFree:             0 kB");
+        let _ = writeln!(s, "AnonHugePages:        0 kB");
+        let _ = writeln!(s, "ShmemPmdMapped:       0 kB");
+        let _ = writeln!(s, "FilePmdMapped:        0 kB");
+        let _ = writeln!(s, "Shared_Hugetlb:       0 kB");
+        let _ = writeln!(s, "Private_Hugetlb:      0 kB");
+        let _ = writeln!(s, "Swap:                 0 kB");
+        let _ = writeln!(s, "SwapPss:              0 kB");
+        let _ = writeln!(s, "Locked:         {:7} kB", locked_kb);
+        let _ = writeln!(s, "THPeligible:    0");
+        let _ = writeln!(s, "VmFlags: rd wr mr mw me ac sd");
+    }
+
+    pub fn proc_smaps_content(&self) -> String {
+        let mut s = String::with_capacity(self.vmas.len() * 512);
+        for vma in self.vmas.iter().filter(|vma| vma.vm_is_user()) {
+            let mut segment_start = vma.vm_start();
+            let end_vpn = vma.vm_end();
+            while segment_start < end_vpn {
+                let segment_locked = self.locked_pages.contains(&segment_start);
+                let mut segment_end = VirtPageNum(segment_start.0 + 1);
+                while segment_end < end_vpn
+                    && self.locked_pages.contains(&segment_end) == segment_locked
+                {
+                    segment_end.0 += 1;
+                }
+                let locked_pages = if segment_locked {
+                    segment_end.0 - segment_start.0
+                } else {
+                    0
+                };
+                let locked_kb = locked_pages * PAGE_SIZE / 1024;
+                Self::write_proc_smaps_segment(&mut s, vma, segment_start, segment_end, locked_kb);
+                segment_start = segment_end;
+            }
         }
         s
     }

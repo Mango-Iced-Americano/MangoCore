@@ -221,6 +221,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 |------|------|------|
 | MAP_SHARED 父子进程数据不一致 | fork 时 CoW 破坏共享语义 | MAP_SHARED 页面跳过 CoW，fork 时恢复 W 权限 |
 | `mlock201` 中 `mlock2(0)` 锁 1 页却显示 8 页 present | 匿名 `MAP_SHARED` mmap 直接安装整段 PTE，`mincore()` 无法区分未触达页 | 匿名 shared 可以预分配共享 frame 保留 fork 语义，但 PTE 要懒安装；首次访问/`mlock` fault-in 再映射现有 frame |
+| `mlock05` 找不到 `/proc/self/smaps` 或 `Rss` 多 1 页 | procfs 缺少 smaps，且 `mlock()` 锁定子区间后 VMA 合并导致 smaps 粗粒度统计误计旁边页 | 提供 `/proc/<pid>/smaps` 最小实现，并按 locked 页边界拆分输出段；`Rss`/`Locked` 只统计该段 |
 | unmap 后读到 PTE 残留值 | 未刷新 TLB，CPU 仍用旧缓存 | **所有 PTE 修改后 `sfence.vma` / `invtlb`** |
 | heap allocator panic | 内核堆耗尽 | `try_reserve` 防御 + OOM killer |
 | `brk`/`mmap` 返回意外值 | 堆/mmap 区域冲突 | 检查 `program_break` 边界 |
