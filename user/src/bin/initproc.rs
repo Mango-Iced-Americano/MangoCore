@@ -1856,7 +1856,7 @@ fn prepare_symlink(environ: &[*const u8]) {
 
     run_bash_cmd(
         "
-        rm -f /bin/bash /bin/sh;
+        rm -rf /bin/bash /bin/sh;
         ln -s /bash /bin/bash;
         ln -s /bash /bin/sh;
     ",
