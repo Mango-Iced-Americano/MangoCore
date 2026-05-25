@@ -47,6 +47,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_FCHMOD => "fchmod",
         SYSCALL_FCHMODAT => "fchmodat",
         SYSCALL_FCHOWNAT => "fchownat",
+        SYSCALL_FCHOWN => "fchown",
         SYSCALL_OPENAT => "openat",
         SYSCALL_CLOSE => "close",
         SYSCALL_CLOSE_RANGE => "close_range",
@@ -318,6 +319,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[3] as u32,
             args[4] as u32,
         ),
+        SYSCALL_FCHOWN => sys_fchown(args[0], args[1] as u32, args[2] as u32),
         SYSCALL_OPEN => sys_openat(AT_FDCWD, args[0] as *const u8, args[1] as u32, 0o777u32),
         SYSCALL_OPENAT => sys_openat(
             args[0],

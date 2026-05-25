@@ -1,8 +1,8 @@
 # MangoCore FS-LTP 分诊与推进计划
 
-> 最后更新: 2026-05-22
-> 状态: Round-0 ✅ → Round-1 进行中 → Mount 专项启动
-> Oracle 审查: 已通过 (2026-05-20, 2026-05-22 两轮)
+> 最后更新: 2026-05-25
+> 状态: Round A ✅ → Round B ✅ → Round C 收尾
+> Oracle 审查: Round A + B 通过 (2026-05-25 x2)
 
 ## 0. 核心原则
 

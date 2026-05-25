@@ -693,10 +693,12 @@ impl File {
             .inode
             .write_at(offset, len, buf, self.private_data.lock())?;
 
-        if !flags.contains(FileFlags::O_APPEND) && n > 0 {
-            self.offset.fetch_add(n, Ordering::SeqCst);
-        }
         if n > 0 {
+            if flags.contains(FileFlags::O_APPEND) {
+                self.offset.store(offset + n, Ordering::SeqCst);
+            } else {
+                self.offset.fetch_add(n, Ordering::SeqCst);
+            }
             self.touch_modified();
         }
         Ok(n)

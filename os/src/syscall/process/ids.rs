@@ -1209,6 +1209,7 @@ fn rlimit_value_for(
     rtprio: Option<RLimit>,
     sigpending: Option<RLimit>,
     stack: Option<RLimit>,
+    fsize: Option<RLimit>,
 ) -> Option<RLimit> {
     let unlimited = RLimit {
         rlim_cur: usize::MAX,
@@ -1217,7 +1218,6 @@ fn rlimit_value_for(
 
     let limit = match resource {
         Resource::CPU
-        | Resource::FSIZE
         | Resource::DATA
         | Resource::RSS
         | Resource::AS
@@ -1226,6 +1226,7 @@ fn rlimit_value_for(
         | Resource::RTTIME
         | Resource::MEMLOCK => unlimited,
         Resource::SIGPENDING => sigpending?,
+        Resource::FSIZE => fsize?,
         Resource::NICE => nice?,
         Resource::RTPRIO => rtprio?,
         Resource::CORE => RLimit {
@@ -1324,6 +1325,15 @@ pub fn sys_prlimit(
         } else {
             None
         };
+        let fsize_limit = if matches!(resource, Resource::FSIZE) {
+            let inner = task.acquire_inner_lock();
+            Some(RLimit {
+                rlim_cur: inner.fsize_limit_cur,
+                rlim_max: inner.fsize_limit_max,
+            })
+        } else {
+            None
+        };
         let Some(mut limit) = rlimit_value_for(
             resource,
             nofile_limit,
@@ -1331,6 +1341,7 @@ pub fn sys_prlimit(
             rtprio_limit,
             sigpending_limit,
             stack_limit,
+            fsize_limit,
         )
         else {
             return EINVAL;
@@ -1389,8 +1400,12 @@ pub fn sys_prlimit(
                 inner.sigpending_limit_cur = rlimit.rlim_cur;
                 inner.sigpending_limit_max = rlimit.rlim_max;
             }
+            Resource::FSIZE => {
+                let mut inner = task.acquire_inner_lock();
+                inner.fsize_limit_cur = rlimit.rlim_cur;
+                inner.fsize_limit_max = rlimit.rlim_max;
+            }
             Resource::CPU
-            | Resource::FSIZE
             | Resource::DATA
             | Resource::CORE
             | Resource::RSS

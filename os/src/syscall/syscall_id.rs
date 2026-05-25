@@ -28,6 +28,7 @@ pub const SYSCALL_CHMOD: usize = 51;
 pub const SYSCALL_FCHMOD: usize = 52;
 pub const SYSCALL_FCHMODAT: usize = 53;
 pub const SYSCALL_FCHOWNAT: usize = 54;
+pub const SYSCALL_FCHOWN: usize = 55;
 pub const SYSCALL_OPENAT: usize = 56;
 pub const SYSCALL_CLOSE: usize = 57;
 pub const SYSCALL_PIPE2: usize = 59;

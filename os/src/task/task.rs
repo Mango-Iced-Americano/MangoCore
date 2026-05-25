@@ -127,6 +127,9 @@ pub struct TaskControlBlockInner {
     /// RLIMIT_MEMLOCK 兼容字段，供 mlock/mlockall 权限和限额类用例使用。
     pub memlock_limit_cur: usize,
     pub memlock_limit_max: usize,
+    /// RLIMIT_FSIZE 兼容字段。当前只会影响 truncate/ftruncate 的 EFBIG 校验。
+    pub fsize_limit_cur: usize,
+    pub fsize_limit_max: usize,
     /// Linux personality ABI state. MangoCore does not alter layout/exec policy based on it yet.
     pub personality: usize,
     /// Parent-death signal configured by prctl(PR_SET_PDEATHSIG).
@@ -648,6 +651,8 @@ impl TaskControlBlock {
                 stack_limit_max: USER_STACK_SIZE,
                 memlock_limit_cur: usize::MAX,
                 memlock_limit_max: usize::MAX,
+                fsize_limit_cur: usize::MAX,
+                fsize_limit_max: usize::MAX,
                 personality: 0,
                 pdeath_signal: 0,
                 dumpable: 1,
@@ -1036,6 +1041,8 @@ impl TaskControlBlock {
                 stack_limit_max: parent_inner.stack_limit_max,
                 memlock_limit_cur: parent_inner.memlock_limit_cur,
                 memlock_limit_max: parent_inner.memlock_limit_max,
+                fsize_limit_cur: parent_inner.fsize_limit_cur,
+                fsize_limit_max: parent_inner.fsize_limit_max,
                 personality: parent_inner.personality,
                 pdeath_signal: 0,
                 dumpable: parent_inner.dumpable,

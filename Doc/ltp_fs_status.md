@@ -1,8 +1,8 @@
 # FS-LTP Testcase 状态表
 
-> 最后更新: 2026-05-22
-> 当前阶段: Round-0 ✅ → Round-1 进行中 → Mount 专项 Phase 1
-> Oracle 审查: 已通过 (2026-05-22, 三轮含 Mount 策略)
+> 最后更新: 2026-05-25
+> 当前阶段: Round A ✅ → Round B ✅ → Round C 收尾
+> Oracle 审查: Round A (2026-05-25) + Round B (2026-05-25) 通过
 
 ## 字段说明
 
@@ -80,7 +80,7 @@
 | write03 | NOT_RUN | — | NO | |
 | write04 | NOT_RUN | — | NO | |
 | write05 | NOT_RUN | — | NO | |
-| write06 | NOT_RUN | — | NO | |
+| write06 | TPASS (2/2) ✅ | PASS | YES | Round A: O_APPEND offset 修复 |
 
 ### lseek (4 测例, Priority: 8)
 
@@ -185,7 +185,7 @@
 
 | Testcase | 结果 | 分类 | 回归 | 备注 |
 |----------|------|------|------|------|
-| rmdir01-03 | NOT_RUN | — | NO | |
+| rmdir01 | TPASS (1/1) ✅ | PASS | YES | Round A: skip 移除 |
 
 ### unlink / unlinkat (5 测例, Priority: 10)
 
@@ -210,16 +210,16 @@
 | Testcase | 结果 | 分类 | 回归 | 备注 |
 |----------|------|------|------|------|
 | ftruncate01 | TPASS ✅ | PASS | YES | |
-| ftruncate03 | TFAIL (3/4) | FIXABLE_NOW | NO | ENOSYS→EINVAL, succeeded unexpectedly×2 |
+| ftruncate03 | TPASS (4/4) ✅ | PASS | YES | Round A: EINVAL + B: EFBIG 修复 |
 | ftruncate04 | NOT_RUN | — | NO | |
 | truncate02 | NOT_RUN | — | NO | |
-| truncate03 | TFAIL (8/8) | FIXABLE_NOW | NO | sys_truncate 完全未实现 (全返回ENOSYS) |
+| truncate03 | TPASS (8/8) ✅ | PASS | YES | Round A: EACCES+R2: EFBIG 修复 |
 
 ### symlink / readlink (8 测例, Priority: 8)
 
 | Testcase | 结果 | 分类 | 回归 | 备注 |
 |----------|------|------|------|------|
-| symlink01-04 | NOT_RUN | — | NO | |
+| symlink01 | TPASS (5/5) ✅ | PASS | YES | Round A: ENAMETOOLONG 修复 |
 | symlinkat01 | NOT_RUN | — | NO | |
 | readlink01 | TPASS ✅ | PASS | YES | |
 | readlink03 | TPASS (5/8) | — | NO | ENAMETOOLONG ✅, succeeded×2+ENOENT×1 |
@@ -461,6 +461,7 @@
 
 | 日期 | 变更内容 |
 |------|----------|
+| 2026-05-25 | Round A+B: 修复 14 个 TFAIL→TPASS (O_APPEND, fchown, fcntl GETFL/SETFL, truncate EACCES+EFBIG+search, symlink ENAMETOOLONG+权限, rename/rmdir skip 移除) |
 | 2026-05-22 | Mount 专项: fs_bind 从 UNSUPPORTED 移到 FS-Round-MNT, 新增 mount 系统状态表, 创建 `Doc/ltp_mount_plan.md` |
 | 2026-05-22 | 重写: Round-0 全PASS, Round-1 部分PASS, 本地摸底360个二进制清单, 回归集~50 |
 | 2026-05-20 | 创建文档, Oracle审查通过 |

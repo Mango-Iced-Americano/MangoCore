@@ -1639,6 +1639,42 @@ bitflags! {
     }
 }
 
+pub fn sys_fchown(fd: usize, owner: u32, group: u32) -> isize {
+    const CHOWN_ID_NO_CHANGE: u32 = u32::MAX;
+
+    let task = current_task().unwrap();
+    let files_ref = task.process.files();
+    let fd_table = files_ref.lock();
+    let file = match fd_table.get_file(fd) {
+        Ok(file) => file,
+        Err(e) => return -(e as isize),
+    };
+
+    let mut meta = match file.inode.metadata() {
+        Ok(meta) => meta,
+        Err(e) => return -(e as isize),
+    };
+
+    let chown_requested = owner != CHOWN_ID_NO_CHANGE || group != CHOWN_ID_NO_CHANGE;
+    if owner != CHOWN_ID_NO_CHANGE {
+        meta.uid = owner;
+    }
+    if group != CHOWN_ID_NO_CHANGE {
+        meta.gid = group;
+    }
+    if chown_requested {
+        meta.mode.remove(vfs::InodeMode::S_ISUID);
+        if meta.mode.contains(vfs::InodeMode::S_IXGRP) {
+            meta.mode.remove(vfs::InodeMode::S_ISGID);
+        }
+    }
+
+    match file.inode.set_metadata(&meta) {
+        Ok(()) => SUCCESS,
+        Err(e) => -(e as isize),
+    }
+}
+
 pub fn sys_fchownat(
     dirfd: usize,
     path: *const u8,
@@ -2653,11 +2689,16 @@ pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
                 Err(e) => return -(e as isize),
             };
 
-            let n_block = (arg & (OpenFlags::O_NONBLOCK.bits() as usize)) != 0;
-
-            file.set_nonblock(n_block);
-            warn!("[sys_fcntl] set fd {} nonblock to {}", fd, n_block);
-            SUCCESS
+            // Preserve old access mode, only update SETFL-allowed status bits
+            let old_flags = file.flags();
+            let old_access = old_flags.access_flags().bits();
+            const ACCMODE_MASK: u32 = 0o3;
+            let arg_without_accmode = (arg as u32) & !ACCMODE_MASK;
+            let new_flags = vfs::FileFlags::from_bits_truncate(arg_without_accmode | old_access);
+            match file.set_flags(new_flags) {
+                Ok(()) => SUCCESS,
+                Err(e) => -(e as isize),
+            }
         }
         Fcntl_Command::GETFL => {
             let file = match fd_table.get_file(fd) {
@@ -2673,8 +2714,20 @@ pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
             } else {
                 OpenFlags::O_RDONLY.bits() as isize
             };
-            if file.is_nonblock() {
+            if flags.contains(vfs::FileFlags::O_APPEND) {
+                res |= OpenFlags::O_APPEND.bits() as isize;
+            }
+            if flags.contains(vfs::FileFlags::O_NONBLOCK) {
                 res |= OpenFlags::O_NONBLOCK.bits() as isize;
+            }
+            if flags.contains(vfs::FileFlags::O_DIRECT) {
+                res |= OpenFlags::O_DIRECT.bits() as isize;
+            }
+            if flags.contains(vfs::FileFlags::O_NOATIME) {
+                res |= OpenFlags::O_NOATIME.bits() as isize;
+            }
+            if flags.contains(vfs::FileFlags::O_ASYNC) {
+                res |= OpenFlags::O_ASYNC.bits() as isize;
             }
             res
         }
@@ -3049,6 +3102,14 @@ pub fn sys_ftruncate(fd: usize, length: isize) -> isize {
         }
         file.inode.clone()
     };
+    // RLIMIT_FSIZE check
+    let fsize_limit = {
+        let inner = task.acquire_inner_lock();
+        inner.fsize_limit_cur
+    };
+    if (length as usize) > fsize_limit {
+        return EFBIG;
+    }
     match inode.resize(length as usize) {
         Ok(()) => SUCCESS,
         Err(e) => -(e as isize),
@@ -3076,6 +3137,17 @@ pub fn sys_truncate(path: *const u8, length: isize) -> isize {
         let lock = fs_ref.lock();
         lock.working_inode.inode.clone()
     };
+    // Check parent directory search permission before lookup (correct errno order)
+    let (uid, gid) = open_subject_ids();
+    let start = if path.starts_with('/') {
+        vfs_root().mountpoint_root_inode()
+    } else {
+        cwd_inode.clone()
+    };
+    let parent_result = check_parent_search_access(&start, &path, uid, gid);
+    if parent_result != SUCCESS {
+        return parent_result;
+    }
     let inode = if path.starts_with('/') {
         match vfs_lookup_absolute(&path) {
             Ok(inode) => inode,
@@ -3093,6 +3165,18 @@ pub fn sys_truncate(path: *const u8, length: isize) -> isize {
     };
     if md.file_type == FileType::Dir {
         return EISDIR;
+    }
+    // Check RLIMIT_FSIZE
+    let fsize_limit = {
+        let inner = task.acquire_inner_lock();
+        inner.fsize_limit_cur
+    };
+    if (length as usize) > fsize_limit {
+        return EFBIG;
+    }
+    // Check write permission on the file itself
+    if uid != 0 && (permission_class_bits(&md, uid, gid) & 0o2) == 0 {
+        return EACCES;
     }
     match inode.resize(length as usize) {
         Ok(()) => SUCCESS,
@@ -3149,6 +3233,13 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: usize, linkpath: *const u8) ->
         Err(e) => return e,
     };
 
+    if let Err(errno) = validate_path_len(&target_str) {
+        return errno;
+    }
+    if let Err(errno) = validate_path_len(&linkpath_str) {
+        return errno;
+    }
+
     log::info!(
         "[sys_symlinkat] target: {}, newdirfd: {}, linkpath: {}",
         target_str,
@@ -3160,6 +3251,12 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: usize, linkpath: *const u8) ->
         Ok(inode) => inode,
         Err(errno) => return errno,
     };
+
+    let (uid, gid) = open_subject_ids();
+    let search_result = check_parent_search_access(&start, &linkpath_str, uid, gid);
+    if search_result != SUCCESS {
+        return search_result;
+    }
 
     let components = crate::fs::parse_path(&linkpath_str);
     let leaf = match components.last() {
@@ -3189,6 +3286,10 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: usize, linkpath: *const u8) ->
             Err(errno) => return errno,
         }
     };
+
+    if let Err(errno) = check_parent_write_search_access(&parent_dir, uid, gid) {
+        return errno;
+    }
 
     match parent_dir.symlink(&leaf, &target_str) {
         Ok(_) => SUCCESS,
