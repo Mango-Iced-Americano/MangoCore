@@ -273,6 +273,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | nanosleep 唤醒后死锁 | 持 `task.inner` 锁调 `has_actionable_signal()` | 释放锁后再调 |
 | 被屏蔽信号导致 EINTR | 用 `is_empty()` 检查信号 | 用 `sigpending.difference(sigmask)` |
 | execve 后 OOM | 新旧内存集同时存在 | `load_elf` 开头 `recycle_data_pages()` |
+| execve 映射只读 ELF 段 panic | `map_elf` 把内核临时文件映射 fast path 当成必然成功并 `unwrap()`，失败后还可能留下部分用户映射 | fast path 只作为优化：严格检查页对齐/大小，失败回退 copy load，并保证跨地址空间映射失败时回滚 |
 | `rt_sigaction03` invalid sigsetsize 误成功 | `rt_sigaction` 分发忽略第 4 参数 `sigsetsize` | syscall 层传入并校验 `sigsetsize == sizeof(kernel sigset_t)` |
 | `sigaction01` 中 `SA_RESETHAND` 清掉 `SA_SIGINFO` | 信号投递后直接删除 action，handler 内 `sigaction(..., oldact)` 读到默认空 flags | `SA_RESETHAND` 只把 handler 重置为 `SIG_DFL`，保留 flags/mask/restorer 供 oldact 查询 |
 | `rt_sigqueueinfo01` pthread checkpoint 超时 | TID 目标信号立即唤醒 futex/checkpoint waiter，导致 LTP 后续 `TST_CHECKPOINT_WAKE` 找不到等待者 | 对非 leader TID 先入线程 pending，不主动信号唤醒；由测试的 futex wake 释放后再处理 pending signal |

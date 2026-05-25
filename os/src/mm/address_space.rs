@@ -499,34 +499,58 @@ impl<T: PageTable> AddressSpace<T> {
                             Err(e) => return Err(e),
                         };
                     vma.flags = MapFlags::MAP_PRIVATE;
-                    // Virtual addr is 4K-aligned
-                    if (start_va_page_offset & (PAGE_SIZE - 1)) == 0
-                    // Physical addr is 4K-aligned
-                        && (ph.offset() as usize & (PAGE_SIZE - 1)) == 0
-                        && ph.file_size() != 0
+                    let file_offset = ph.offset() as usize;
+                    let file_size = ph.file_size() as usize;
+                    let file_end = file_offset.checked_add(file_size).ok_or(ENOEXEC)?;
+                    let segment_data = elf.input.get(file_offset..file_end).ok_or(ENOEXEC)?;
+                    let vma_page_count = vma.get_end::<T>().0 - vma.get_start::<T>().0;
+                    let file_page_count = VirtAddr::from(file_size).ceil().0;
+                    let can_fast_map_readonly_segment = start_va_page_offset == 0
+                        && (file_offset & (PAGE_SIZE - 1)) == 0
+                        && file_size != 0
                         && !map_perm.contains(MapPermission::W)
-                    {
-                        // Size in virtual addr is equal to size in physical addr
-                        assert_eq!(
-                            VirtAddr::from(ph.file_size() as usize).ceil().0,
-                            vma.get_end::<T>().0 - vma.get_start::<T>().0
-                        );
+                        && file_page_count == vma_page_count;
 
+                    if can_fast_map_readonly_segment {
                         let kernel_start_vpn =
-                            (VirtAddr::from(elf.input.as_ptr() as usize + (ph.offset() as usize)))
-                                .floor();
-                        vma
+                            (VirtAddr::from(elf.input.as_ptr() as usize + file_offset)).floor();
+                        if vma
                             .map_from_kernel_area(&mut self.page_table, kernel_start_vpn)
-                            .unwrap();
-                        self.vmas.push(vma).map_err(|_| ENOMEM)?;
+                            .is_ok()
+                        {
+                            self.vmas.push(vma).map_err(|_| ENOMEM)?;
+                        } else {
+                            warn!(
+                                "[map_elf] readonly segment fast map failed; falling back to copy load: va={:#x}, file_offset={:#x}, file_size={:#x}",
+                                start_va.0,
+                                file_offset,
+                                file_size
+                            );
+                            if let Err((err, vpn)) =
+                                self.push_with_offset(vma, start_va_page_offset, segment_data)
+                            {
+                                error!(
+                                    "[map_elf] fallback copy load failed: err={:?}, vpn={:?}",
+                                    err, vpn
+                                );
+                                return Err(match err {
+                                    MemoryError::OutOfMemory => ENOMEM,
+                                    _ => ENOEXEC,
+                                });
+                            }
+                        }
                     } else {
-                        if let Err(_) = self.push_with_offset(
-                            vma,
-                            start_va_page_offset,
-                            &elf.input
-                                [ph.offset() as usize..(ph.offset() + ph.file_size()) as usize],
-                        ) {
-                            panic!("[map_elf] Target addr already mapped.")
+                        if let Err((err, vpn)) =
+                            self.push_with_offset(vma, start_va_page_offset, segment_data)
+                        {
+                            error!(
+                                "[map_elf] copy load failed: err={:?}, vpn={:?}",
+                                err, vpn
+                            );
+                            return Err(match err {
+                                MemoryError::OutOfMemory => ENOMEM,
+                                _ => ENOEXEC,
+                            });
                         };
                     }
                     program_break = Some(VirtAddr::from(end_va.ceil()).0);
