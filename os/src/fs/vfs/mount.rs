@@ -209,6 +209,10 @@ impl MountFSInode {
         }
 
         // Cache miss: record generation before disk I/O
+        if crate::fs::ext4::counters::counters_enabled() {
+            crate::fs::ext4::counters::DENTRY_LOOKUP_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            crate::fs::ext4::counters::DENTRY_CACHE_MISS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
         let gen_before = self.mount_fs.dentry_gen.load(core::sync::atomic::Ordering::Acquire);
 
         // Release cache lock, perform actual filesystem lookup

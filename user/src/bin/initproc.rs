@@ -1627,10 +1627,10 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         bash_ret, has_bin_bash
     );
 
-    // println!("[initproc] running fs_test...");
-    // let fs_test_cmd = "cd / && ./fs_test\0";
-    // let fs_test_ret = run_bash_cmd(fs_test_cmd, &environ);
-    // println!("[initproc] fs_test returned exit_code={}", fs_test_ret);
+    println!("[initproc] running fs_test...");
+    let fs_test_cmd = "cd / && ./fs_test\0";
+    let fs_test_ret = run_bash_cmd(fs_test_cmd, &environ);
+    println!("[initproc] fs_test returned exit_code={}", fs_test_ret);
 
     let cfg = load_runtime_config();
 

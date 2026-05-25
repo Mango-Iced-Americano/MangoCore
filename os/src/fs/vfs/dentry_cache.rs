@@ -64,6 +64,10 @@ impl DentryCache {
     pub fn get(&mut self, key: &DentryKey) -> Option<Arc<MountFSInode>> {
         let entry = self.map.get_mut(key)?;
         entry.referenced = true;
+        if crate::fs::ext4::counters::counters_enabled() {
+            crate::fs::ext4::counters::DENTRY_LOOKUP_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            crate::fs::ext4::counters::DENTRY_CACHE_HIT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
         Some(entry.node.clone())
     }
 
