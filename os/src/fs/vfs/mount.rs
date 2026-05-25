@@ -23,6 +23,7 @@ use alloc::{
 };
 use core::fmt::Debug;
 use spin::{Mutex, MutexGuard};
+use lazy_static::lazy_static;
 
 use super::{
     file::FileFlags, file_system::FileSystem, FilePrivateData, FileType, IndexNode, InodeId,
@@ -205,6 +206,38 @@ impl MountFSInode {
         // 向 inner_inode 请求父目录
         let parent_inner = self.inner_inode.find("..")?;
         Ok(MountFSInode::new(parent_inner, self.mount_fs.clone()))
+    }
+
+    /// Create a new MountFS rooted at `root_inner_inode` and attach it as a
+    /// child of this MountFSInode's parent MountFS at this inode's position.
+    pub fn mount_subtree(
+        &self,
+        inner_fs: Arc<dyn FileSystem>,
+        root_inner_inode: Arc<dyn IndexNode>,
+        mount_flags: MountFlags,
+        mount_path: Option<String>,
+    ) -> Result<Arc<MountFS>, SyscallErr> {
+        let metadata = self.inner_inode.metadata()?;
+        if metadata.file_type != FileType::Dir {
+            return Err(SyscallErr::ENOTDIR);
+        }
+        let inode_id = metadata.inode_id;
+
+        let new_mount_fs = MountFS::new_with_root(inner_fs, root_inner_inode, mount_flags);
+
+        let backref = MountFSInode::new(self.inner_inode.clone(), self.mount_fs.clone());
+        new_mount_fs.set_self_mountpoint(Some(backref));
+
+        self.mount_fs.add_mount(inode_id, new_mount_fs.clone())?;
+
+        new_mount_fs.set_mount_path(mount_path);
+
+        // Register in global mount list
+        if let Some(ref path) = new_mount_fs.mount_path() {
+            MOUNT_LIST.insert(path.as_str(), new_mount_fs.clone(), Some(inode_id));
+        }
+
+        Ok(new_mount_fs)
     }
 }
 
@@ -500,6 +533,8 @@ pub struct MountFS {
     mount_flags: Mutex<MountFlags>,
     /// 挂载源
     mount_source: Mutex<Option<String>>,
+    /// 挂载目标路径
+    mount_path: Mutex<Option<String>>,
     /// 指向自身的弱引用
     self_ref: Mutex<Weak<MountFS>>,
 }
@@ -515,6 +550,7 @@ impl MountFS {
             self_mountpoint: Mutex::new(None),
             mount_flags: Mutex::new(mount_flags),
             mount_source: Mutex::new(None),
+            mount_path: Mutex::new(None),
             self_ref: Mutex::new(self_ref.clone()),
         })
     }
@@ -533,6 +569,7 @@ impl MountFS {
             self_mountpoint: Mutex::new(None),
             mount_flags: Mutex::new(mount_flags),
             mount_source: Mutex::new(None),
+            mount_path: Mutex::new(None),
             self_ref: Mutex::new(self_ref.clone()),
         })
     }
@@ -570,10 +607,22 @@ impl MountFS {
         if !self.mountpoints.lock().is_empty() {
             return Err(SyscallErr::EBUSY);
         }
+        // Unregister from global mount list before detaching
+        if let Some(mountpoint) = self.self_mountpoint.lock().clone() {
+            if let Ok(path) = mountpoint.absolute_path() {
+                MOUNT_LIST.remove(path);
+            }
+        }
         // 从父文件系统的挂载表中移除
         if let Some(mountpoint) = self.self_mountpoint.lock().take() {
             if let Ok(md) = mountpoint.inner_inode.metadata() {
-                mountpoint.mount_fs.remove_mount(md.inode_id);
+                let removed = mountpoint.mount_fs.remove_mount(md.inode_id);
+                if removed.is_none() {
+                    log::warn!(
+                        "MountFS::umount: remove_mount returned None for inode {:?}",
+                        md.inode_id
+                    );
+                }
             }
         }
         self.inner_filesystem.on_umount();
@@ -614,6 +663,14 @@ impl MountFS {
 
     pub fn set_mount_source(&self, source: Option<String>) {
         *self.mount_source.lock() = source;
+    }
+
+    pub fn mount_path(&self) -> Option<String> {
+        self.mount_path.lock().clone()
+    }
+
+    pub fn set_mount_path(&self, path: Option<String>) {
+        *self.mount_path.lock() = path;
     }
 }
 
@@ -719,4 +776,11 @@ impl MountList {
         }
         None
     }
+}
+
+// ── Global MountList ─────────────────────────────────────────────────────
+
+lazy_static! {
+    /// 全局挂载列表，所有通过 mount_subtree 创建的挂载均在此注册。
+    pub static ref MOUNT_LIST: MountList = MountList::new();
 }

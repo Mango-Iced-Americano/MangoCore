@@ -124,6 +124,7 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
         let _ = alloc::sync::Arc::into_raw(shmfs);
         let dev_inode_id = dev_inode.metadata().expect("dev_inode metadata failed").inode_id;
         let devfs_mnt = self::vfs::MountFS::new(devfs, self::vfs::MountFlags::empty());
+        devfs_mnt.set_mount_path(Some(alloc::string::String::from("/dev")));
         if let Some(dev_mfsi) = dev_inode.as_any_ref().downcast_ref::<self::vfs::MountFSInode>() {
             let backref = self::vfs::MountFSInode::new(
                 dev_mfsi.inner_inode.clone(),
@@ -146,6 +147,7 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
         crate::fs::procfs::files::register_all(procfs.root())
             .expect("procfs: failed to register root entries");
         let procfs_mnt = self::vfs::MountFS::new(procfs, self::vfs::MountFlags::empty());
+        procfs_mnt.set_mount_path(Some(alloc::string::String::from("/proc")));
         if let Some(proc_mfsi) = proc_inode.as_any_ref().downcast_ref::<self::vfs::MountFSInode>() {
             let backref = self::vfs::MountFSInode::new(
                 proc_mfsi.inner_inode.clone(),
@@ -171,6 +173,7 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
             tmpfs.root_inode().set_metadata(&meta).ok();
         }
         let tmpfs_mnt = self::vfs::MountFS::new(tmpfs, self::vfs::MountFlags::empty());
+        tmpfs_mnt.set_mount_path(Some(alloc::string::String::from("/tmp")));
         if let Some(tmp_mfsi) = tmp_inode.as_any_ref().downcast_ref::<self::vfs::MountFSInode>() {
             let backref = self::vfs::MountFSInode::new(
                 tmp_mfsi.inner_inode.clone(),

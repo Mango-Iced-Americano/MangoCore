@@ -2173,6 +2173,13 @@ impl NewFileSystem for Ext4FileSystem {
     fn on_umount(&self) {
         crate::fs::page_cache::flush_all_page_caches();
         self.flush_metadata_cache();
+        // Evict stale dentry/Weak caches to release table entries, name strings,
+        // and stale Weak allocations. children are Weak — clearing them does NOT
+        // drop the underlying inode objects (Arc handles that via refcount).
+        let cleared = self.clear_all_children_caches();
+        if cleared > 0 {
+            log::debug!("ext4 on_umount: cleared {} dentry cache entries", cleared);
+        }
     }
 
     fn as_any_ref(&self) -> &dyn core::any::Any {

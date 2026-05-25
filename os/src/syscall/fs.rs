@@ -14,6 +14,7 @@ use crate::task::{
 use crate::timer::{current_timespec, TimeSpec};
 use crate::utils::error::SyscallErr;
 use alloc::boxed::Box;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -2109,14 +2110,10 @@ fn do_bind_mount(
     source: *const u8,
     token: usize,
     lookup_inode: &Arc<dyn vfs::IndexNode>,
-    _lookup_path: &str,
+    lookup_path: &str,
     target_inode: Arc<dyn vfs::IndexNode>,
     mountflags: MountFlags,
 ) -> isize {
-    // MS_REC recursive bind not yet implemented
-    if mountflags.contains(MountFlags::MS_REC) {
-        return EINVAL;
-    }
     let source_path = if source.is_null() {
         return EINVAL;
     } else {
@@ -2139,98 +2136,184 @@ fn do_bind_mount(
         None => return EINVAL,
     };
     let source_mount_fs = source_mfs_inode.mount_fs.clone();
-    let source_inner = source_mfs_inode.inner_inode.clone();
+    let source_inner: Arc<dyn vfs::IndexNode> = source_mfs_inode.inner_inode.clone();
 
-    let target_mfs = match target_inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+    // Collect recursive bind snapshot BEFORE creating base mount, so the
+    // new mnt_fs doesn't pollute the source mount tree during snapshotting.
+    let rbind_snapshot: Option<Vec<(Arc<vfs::MountFS>, Arc<vfs::MountFS>, alloc::string::String)>> =
+        if mountflags.contains(MountFlags::MS_REC) {
+            Some(collect_rbind_snapshot(source_mount_fs.clone(), source_inner.clone()))
+        } else {
+            None
+        };
+
+    let target_mfs_inode = match target_inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
         Some(mfs) => mfs,
         None => return EINVAL,
     };
-    let parent_mount_fs = target_mfs.mount_fs.clone();
-    let target_inode_id = match target_mfs.inner_inode.metadata() {
-        Ok(md) => md.inode_id,
-        Err(e) => return -(e as isize),
-    };
 
     let mnt_flags = vfs::MountFlags::from_bits_truncate(mountflags.bits() as u32);
-    let mnt_fs = vfs::MountFS::new_with_root(source_mount_fs.inner_filesystem(), source_inner, mnt_flags);
+    let mnt_fs = match target_mfs_inode.mount_subtree(
+        source_mount_fs.inner_filesystem(),
+        source_inner,
+        mnt_flags,
+        Some(alloc::string::String::from(lookup_path)),
+    ) {
+        Ok(fs) => fs,
+        Err(e) => return -(e as isize),
+    };
     mnt_fs.set_mount_source(Some(source_path));
 
-    if let Err(e) = parent_mount_fs.add_mount(target_inode_id, mnt_fs.clone()) {
-        return -(e as isize);
+    if let Some(snapshot) = rbind_snapshot {
+        if let Err(e) = apply_rbind_snapshot(
+            &snapshot,
+            source_mount_fs,
+            mnt_fs.clone(),
+            lookup_path,
+        ) {
+            let _ = mnt_fs.umount();
+            return -(e as isize);
+        }
     }
-
-    let backref = vfs::MountFSInode::new(
-        target_mfs.inner_inode.clone(),
-        target_mfs.mount_fs.clone(),
-    );
-    mnt_fs.set_self_mountpoint(Some(backref));
-
-    // MS_REC not yet ready — recursive bind needs self_mountpoint fix
-    // do_recursive_bind(source_mount_fs, mnt_fs.clone(), token, lookup_inode);
 
     SUCCESS
 }
 
-/// Recursively bind all child mounts from source MountFS into the target MountFS.
-fn do_recursive_bind(
+/// Collect all submounts under `source_subtree_root` within `source_mfs` tree.
+///
+/// Returns Vec of (child_mfs, parent_mfs, relative_name) — BFS order,
+/// no mutations to the mount tree.
+fn collect_rbind_snapshot(
     source_mfs: Arc<vfs::MountFS>,
-    target_mfs: Arc<vfs::MountFS>,
-    token: usize,
-    root_inode: &Arc<dyn vfs::IndexNode>,
-) {
-    // Clone mountpoints to avoid holding lock during recursion
-    let child_mounts: Vec<(vfs::InodeId, Arc<vfs::MountFS>)> = {
-        source_mfs.mountpoints.lock().iter()
-            .map(|(id, fs)| (*id, fs.clone()))
-            .collect()
-    };
+    source_subtree_root: Arc<dyn vfs::IndexNode>,
+) -> Vec<(Arc<vfs::MountFS>, Arc<vfs::MountFS>, alloc::string::String)> {
+    let mut queue: VecDeque<(Arc<vfs::MountFS>, Arc<dyn vfs::IndexNode>)> = VecDeque::new();
+    let mut result: Vec<(Arc<vfs::MountFS>, Arc<vfs::MountFS>, alloc::string::String)> = Vec::new();
+    let mut seen: Vec<usize> = Vec::new();
+    let root_ptr = Arc::as_ptr(&source_mfs) as usize;
+    seen.push(root_ptr);
 
-    let target_root: Arc<dyn vfs::IndexNode> = target_mfs.mountpoint_root_inode();
+    // Seed: submounts directly reachable from source_subtree_root
+    {
+        let mps = source_mfs.mountpoints.lock();
+        for (&ino, child_mfs) in mps.iter() {
+            let ptr = Arc::as_ptr(child_mfs) as usize;
+            if seen.contains(&ptr) {
+                continue;
+            }
+            // Find the name of this mountpoint under subtree_root
+            if let Ok(dirents) = source_subtree_root.list_dirents() {
+                if let Some((name, _, _)) = dirents.iter().find(|(_, i, _)| *i == ino) {
+                    seen.push(ptr);
+                    queue.push_back((child_mfs.clone(), child_mfs.mountpoint_root_inode()));
+                    result.push((child_mfs.clone(), source_mfs.clone(), name.clone()));
+                }
+            }
+        }
+    }
 
-    for (child_inode_id, child_mfs) in child_mounts {
-        // Find the child inode's name in the source filesystem
-        // by listing the source directory
-        let source_root: Arc<dyn vfs::IndexNode> = source_mfs.mountpoint_root_inode();
-        if let Ok(entries) = source_root.list() {
-            for name in entries {
-                if let Ok(child_inode) = source_root.find(&name) {
-                    if let Ok(md) = child_inode.metadata() {
-                        if md.inode_id == child_inode_id {
-                            // Found the child — bind it into target
-                            let target_inode_id = match target_root.find(&name) {
-                                Ok(inode) => match inode.metadata() {
-                                    Ok(md) => md.inode_id,
-                                    Err(_) => continue,
-                                },
-                                Err(_) => continue,
-                            };
-
-                            let child_root = child_mfs.root_inner_inode();
-                            let mnt = vfs::MountFS::new_with_root(
-                                child_mfs.inner_filesystem(),
-                                child_root,
-                                vfs::MountFlags::empty(),
-                            );
-
-                            if target_mfs.add_mount(target_inode_id, mnt.clone()).is_ok() {
-                                let backref = vfs::MountFSInode::new(
-                                    child_inode, // the child inode in source
-                                    source_mfs.clone(),
-                                );
-                                // Actually we need the target's MountFSInode, not source
-                                // But for umount, we just need (inode_id, parent_mfs)
-                                // Let's set it differently
-                                mnt.set_self_mountpoint(Some(backref));
-                            }
-
-                            // Recursively bind grandchildren
-                            do_recursive_bind(child_mfs, mnt, token, root_inode);
-                            break;
-                        }
+    // BFS: for each child, collect its submounts
+    while let Some((child_mfs, child_root)) = queue.pop_front() {
+        let mps = child_mfs.mountpoints.lock();
+        for (&grand_ino, grandchild) in mps.iter() {
+            let ptr = Arc::as_ptr(grandchild) as usize;
+            if seen.contains(&ptr) {
+                continue;
+            }
+            seen.push(ptr);
+            // Find name using child's inner inode (no mountpoint crossing)
+            if let Some(ref child_mfs_inode) = child_root.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+                if let Ok(dirents) = child_mfs_inode.inner_inode.list_dirents() {
+                    if let Some((name, _, _)) = dirents.iter().find(|(_, i, _)| *i == grand_ino) {
+                        result.push((grandchild.clone(), child_mfs.clone(), name.clone()));
+                        queue.push_back((grandchild.clone(), grandchild.mountpoint_root_inode()));
                     }
                 }
             }
         }
+    }
+    result
+}
+
+/// Apply previously collected rbind snapshot to the target mount tree.
+///
+/// Uses source→target parent mapping (by Arc pointer) to locate the correct
+/// target parent for each submount. All-or-nothing: any failure rolls back
+/// all created mounts.
+fn apply_rbind_snapshot(
+    snapshot: &[(Arc<vfs::MountFS>, Arc<vfs::MountFS>, alloc::string::String)],
+    source_mfs: Arc<vfs::MountFS>,
+    target_mfs: Arc<vfs::MountFS>,
+    _target_base_path: &str,
+) -> Result<(), SyscallErr> {
+    let mut mnt_map: BTreeMap<usize, Arc<vfs::MountFS>> = BTreeMap::new();
+    mnt_map.insert(Arc::as_ptr(&source_mfs) as usize, target_mfs.clone());
+
+    let mut created: Vec<Arc<vfs::MountFS>> = Vec::new();
+
+    for (child_mfs, source_parent_mfs, child_name) in snapshot {
+        let source_parent_ptr = Arc::as_ptr(source_parent_mfs) as usize;
+        let target_parent = match mnt_map.get(&source_parent_ptr) {
+            Some(p) => p.clone(),
+            None => {
+                rollback_mounts(&created);
+                return Err(SyscallErr::EINVAL);
+            }
+        };
+
+        let target_parent_inode: Arc<dyn vfs::IndexNode> = target_parent.mountpoint_root_inode();
+        let target_child_inode = match target_parent_inode.find(child_name) {
+            Ok(inode) => inode,
+            Err(_) => {
+                rollback_mounts(&created);
+                return Err(SyscallErr::ENOENT);
+            }
+        };
+
+        let target_mfs_inode = match target_child_inode
+            .as_any_ref()
+            .downcast_ref::<vfs::MountFSInode>()
+        {
+            Some(m) => vfs::MountFSInode::new(m.inner_inode.clone(), target_parent.clone()),
+            None => {
+                rollback_mounts(&created);
+                return Err(SyscallErr::EINVAL);
+            }
+        };
+
+        let mount_path = match target_parent.mount_path() {
+            Some(ref p) => alloc::format!("{}/{}", p, child_name),
+            None => alloc::format!("/{}", child_name),
+        };
+
+        match target_mfs_inode.mount_subtree(
+            child_mfs.inner_filesystem(),
+            child_mfs.root_inner_inode(),
+            vfs::MountFlags::empty(),
+            Some(mount_path),
+        ) {
+            Ok(new_mnt) => {
+                if let Some(src) = child_mfs.mount_source() {
+                    new_mnt.set_mount_source(Some(src));
+                }
+                let child_ptr = Arc::as_ptr(child_mfs) as usize;
+                mnt_map.insert(child_ptr, new_mnt.clone());
+                created.push(new_mnt);
+            }
+            Err(_) => {
+                rollback_mounts(&created);
+                return Err(SyscallErr::EIO);
+            }
+        }
+    }
+
+    drop(mnt_map);
+    Ok(())
+}
+
+fn rollback_mounts(created: &[Arc<vfs::MountFS>]) {
+    for mnt in created.iter().rev() {
+        let _ = mnt.umount();
     }
 }
 
@@ -2370,6 +2453,7 @@ pub fn sys_mount(
                 );
                 mnt_fs.set_self_mountpoint(Some(backref));
             }
+            mnt_fs.set_mount_path(Some(lookup_path));
             SUCCESS
         })
         .unwrap_or_else(|e| {

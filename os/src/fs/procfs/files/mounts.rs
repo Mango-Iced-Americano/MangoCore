@@ -11,36 +11,27 @@ pub fn mounts_content(
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
     let root = crate::fs::vfs_root();
-    let mut s = String::with_capacity(512);
+    let mut s = String::with_capacity(1024);
 
-    // Root mount
-    let root_fs = root.inner_filesystem();
-    let root_fs_name = root_fs.name();
-    let root_source = "rootfs";
-    s.push_str(root_source);
-    s.push_str(" / ");
-    s.push_str(root_fs_name);
-    s.push_str(" rw,relatime 0 0\n");
+    s.push_str("none / rootfs rw,relatime 0 0\n");
 
-    // List sub-mounts using actual mountpoint names from root filesystem
-    // List sub-mounts from VFS_ROOT (TODO: use get_entry_name for accurate paths)
-    let mountpoints = root.mountpoints.lock();
-    for (_ino, mfs) in mountpoints.iter() {
-        let fs = mfs.inner_filesystem();
-        let fs_name = fs.name();
-        let mp_name = match fs_name {
-            "proc" => "proc",
-            "dev" => "dev",
-            "ramfs" => "tmp",
-            _ => fs_name,
-        };
-        s.push_str(fs_name);
-        s.push_str(" /");
-        s.push_str(mp_name);
-        s.push(' ');
-        s.push_str(fs_name);
-        s.push_str(" rw,relatime 0 0\n");
+    fn walk_mounts(mfs: &crate::fs::vfs::MountFS, output: &mut String) {
+        let mountpoints = mfs.mountpoints.lock();
+        for (_ino, child_mfs) in mountpoints.iter() {
+            let inner_fs = child_mfs.inner_filesystem();
+            let fs_name = inner_fs.name();
+            let source = child_mfs.mount_source().unwrap_or_else(|| String::from("none"));
+            let path = child_mfs.mount_path().unwrap_or_else(|| String::from("/?"));
+            output.push_str(&source);
+            output.push(' ');
+            output.push_str(&path);
+            output.push(' ');
+            output.push_str(fs_name);
+            output.push_str(" rw,relatime 0 0\n");
+            walk_mounts(child_mfs, output);
+        }
     }
+    walk_mounts(&root, &mut s);
 
     proc_read_str(offset, len, buf, &s)
 }
