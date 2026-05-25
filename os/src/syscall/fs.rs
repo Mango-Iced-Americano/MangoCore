@@ -2473,8 +2473,72 @@ pub fn sys_mount(
         return do_bind_mount(source, token, &lookup_inode, &lookup_path, target_inode, mountflags);
     }
 
-    if mountflags.intersects(MountFlags::MS_MOVE | MountFlags::MS_REMOUNT) {
-        return EINVAL;
+    if mountflags.intersects(MountFlags::MS_MOVE) {
+        let source_path = match user_cstring(token, source) {
+            Ok(s) => s,
+            Err(errno) => return errno,
+        };
+        let (src_lookup_inode, src_lookup_path) = {
+            let task = current_task().unwrap();
+            let fs_ref = task.process.fs();
+            let fs = fs_ref.lock();
+            if source_path.starts_with('/') {
+                let root: Arc<dyn vfs::IndexNode> = crate::fs::vfs_root().mountpoint_root_inode();
+                (root, source_path)
+            } else {
+                let cwd: Arc<dyn vfs::IndexNode> = fs.working_inode.inode.clone();
+                let path = alloc::format!("{}/{}", fs.working_path, source_path);
+                (cwd, path)
+            }
+        };
+        let src_inode = match vfs_lookup(&src_lookup_inode, &src_lookup_path, false) {
+            Ok(inode) => inode,
+            Err(errno) => {
+                error!("[sys_mount] MS_MOVE source lookup failed: {}", errno);
+                return errno;
+            }
+        };
+        let src_mnt = match src_inode
+            .as_any_ref()
+            .downcast_ref::<vfs::MountFSInode>()
+            .map(|m| m.mount_fs.clone())
+        {
+            Some(m) => m,
+            None => return EINVAL,
+        };
+        let src_inode_id = match src_inode.metadata() {
+            Ok(md) => md.inode_id,
+            Err(e) => return -(e as isize),
+        };
+
+        if let Some(old_mp) = src_mnt.self_mountpoint() {
+            old_mp.mount_fs.remove_mount(src_inode_id);
+        }
+
+        let parent_mnt = target_inode
+            .as_any_ref()
+            .downcast_ref::<vfs::MountFSInode>()
+            .map(|m| m.mount_fs.clone())
+            .unwrap_or_else(|| crate::fs::vfs_root().clone());
+        if let Err(e) = parent_mnt.add_mount(inode_id, src_mnt.clone()) {
+            return -(e as isize);
+        }
+
+        src_mnt.set_mount_path(Some(lookup_path));
+        return SUCCESS;
+    }
+
+    if mountflags.intersects(MountFlags::MS_REMOUNT) {
+        let mnt_fs = target_inode
+            .as_any_ref()
+            .downcast_ref::<vfs::MountFSInode>()
+            .map(|m| m.mount_fs.clone())
+            .unwrap_or_else(|| crate::fs::vfs_root().clone());
+        let remount_flags = vfs::MountFlags::from_bits_truncate(
+            (mountflags.bits() & !MountFlags::MS_REMOUNT.bits()) as u32,
+        );
+        mnt_fs.set_mount_flags(remount_flags);
+        return SUCCESS;
     }
 
     if mountflags.intersects(MountFlags::MS_REC) {
