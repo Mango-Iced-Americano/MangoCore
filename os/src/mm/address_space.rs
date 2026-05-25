@@ -885,7 +885,7 @@ impl<T: PageTable> AddressSpace<T> {
         Ok((start_vpn, end_vpn, locked_len))
     }
 
-    fn set_locked_pages(
+    pub(super) fn set_locked_pages(
         &mut self,
         start_vpn: VirtPageNum,
         end_vpn: VirtPageNum,

@@ -227,6 +227,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | `brk`/`mmap` 返回意外值 | 堆/mmap 区域冲突 | 检查 `program_break` 边界 |
 | `mmap18` MAP_GROWSDOWN 栈增长失败 | 页故障只查已覆盖 VMA，未在 guard page fault 时扩展 grow-down VMA | fault 地址位于 grow-down VMA 下方且不碰撞/不进入 stack_guard_gap 时，先下扩 VMA 起点再走懒分配 |
 | `munlockall01`/`mlock203` 读取 `VmLck` 失败或重复锁页计数异常 | `/proc/<pid>/status` 缺 `VmLck`，或 mlock 路径未维护 ABI 可见锁页状态 | 在地址空间维护页级 locked 集合，`mlock/mlockall` 设置、`munlock/munlockall/munmap` 清除，`VmLck` 汇总 locked 用户页 |
+| `mmap14` 中 `MAP_LOCKED` 后 `VmLck=0` | `mmap()` 保留了 `MAP_LOCKED` VMA flag，但没有同步更新页级 locked 集合 | `MAP_LOCKED` 建图后必须把映射范围计入 locked 页；避免和未锁匿名 VMA 合并导致统计丢失 |
 
 ### 文件系统
 
