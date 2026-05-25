@@ -49,6 +49,7 @@ pub fn pid_status_content(
             exe
         }
     };
+    let vm_lck_kb = task.process.vm().lock().locked_user_bytes() / 1024;
 
     let s = alloc::format!(
         "Name:\t{}\n\
@@ -61,6 +62,7 @@ pub fn pid_status_content(
          FDSize:\t256\n\
          VmSize:\t       0 kB\n\
          VmRSS:\t        0 kB\n\
+         VmLck:\t{:9} kB\n\
          VmData:\t       0 kB\n\
          Threads:\t{}\n\
          SigQ:\t0/0\n\
@@ -83,6 +85,7 @@ pub fn pid_status_content(
         tgid,
         pid,
         ppid,
+        vm_lck_kb,
         threads,
         sig_pnd,
         sig_blk,

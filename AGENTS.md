@@ -224,6 +224,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | heap allocator panic | 内核堆耗尽 | `try_reserve` 防御 + OOM killer |
 | `brk`/`mmap` 返回意外值 | 堆/mmap 区域冲突 | 检查 `program_break` 边界 |
 | `mmap18` MAP_GROWSDOWN 栈增长失败 | 页故障只查已覆盖 VMA，未在 guard page fault 时扩展 grow-down VMA | fault 地址位于 grow-down VMA 下方且不碰撞/不进入 stack_guard_gap 时，先下扩 VMA 起点再走懒分配 |
+| `munlockall01` 读取 `/proc/self/status` 失败或 `VmLck` 一直为 0 | `/proc/<pid>/status` 缺 `VmLck`，或 mlock 路径未维护 ABI 可见锁页状态 | 在 VMA 上维护 locked 兼容位，`mlock/mlockall` 设置、`munlock/munlockall` 清除，`VmLck` 汇总 locked 用户 VMA |
 
 ### 文件系统
 

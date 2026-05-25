@@ -502,6 +502,59 @@ impl VmaSet {
             .fold(0usize, |acc, len| acc.saturating_add(len))
     }
 
+    pub(super) fn locked_user_bytes(&self) -> usize {
+        self.vmas
+            .values()
+            .filter(|area| area.vm_is_user() && area.vm_locked())
+            .map(|area| (area.vm_end().0 - area.vm_start().0).saturating_mul(PAGE_SIZE))
+            .fold(0usize, |acc, len| acc.saturating_add(len))
+    }
+
+    pub(super) fn lock_range(
+        &mut self,
+        start_vpn: VirtPageNum,
+        end_vpn: VirtPageNum,
+        locked: bool,
+    ) -> Result<usize, isize> {
+        let mut cursor = start_vpn;
+        let mut locked_len = 0usize;
+        while cursor < end_vpn {
+            let area_start = self.find_user_vma_key(cursor).ok_or(ENOMEM)?;
+            let area_end = self.vmas.get(&area_start).ok_or(ENOMEM)?.vm_end();
+            let lock_end = if area_end < end_vpn {
+                area_end
+            } else {
+                end_vpn
+            };
+            let target_start = self.split_for_range(area_start, cursor, lock_end)?;
+            let area = self.vmas.get_mut(&target_start).ok_or(ENOMEM)?;
+            area.set_vm_locked(locked);
+            locked_len = locked_len.saturating_add(
+                (lock_end.0 - cursor.0).saturating_mul(PAGE_SIZE),
+            );
+            cursor = lock_end;
+        }
+        self.debug_assert_invariants();
+        Ok(locked_len)
+    }
+
+    pub(super) fn lock_all_current(&mut self) -> usize {
+        let mut locked_len = 0usize;
+        for area in self.vmas.values_mut().filter(|area| area.vm_is_user()) {
+            locked_len = locked_len.saturating_add(
+                (area.vm_end().0 - area.vm_start().0).saturating_mul(PAGE_SIZE),
+            );
+            area.set_vm_locked(true);
+        }
+        locked_len
+    }
+
+    pub(super) fn unlock_all(&mut self) {
+        for area in self.vmas.values_mut().filter(|area| area.vm_is_user()) {
+            area.set_vm_locked(false);
+        }
+    }
+
     pub(super) fn protect_range<T: PageTable>(
         &mut self,
         page_table: &mut T,

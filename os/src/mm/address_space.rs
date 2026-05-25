@@ -780,20 +780,36 @@ impl<T: PageTable> AddressSpace<T> {
             self.fault_in_user_va(VirtAddr::from(vpn), FaultAccess::Load)?;
             vpn.0 += 1;
         }
+        self.vmas.lock_range(start_vpn, end_vpn, true)?;
         Ok(locked_len)
     }
 
-    pub fn mlock_onfault(&self, start: usize, len: usize) -> Result<usize, isize> {
-        self.user_lock_range(start, len)
-            .map(|(_, _, locked_len)| locked_len)
+    pub fn mlock_onfault(&mut self, start: usize, len: usize) -> Result<usize, isize> {
+        let (start_vpn, end_vpn, locked_len) = self.user_lock_range(start, len)?;
+        self.vmas.lock_range(start_vpn, end_vpn, true)?;
+        Ok(locked_len)
     }
 
-    pub fn munlock(&self, start: usize, len: usize) -> Result<(), isize> {
-        self.user_lock_range(start, len).map(|_| ())
+    pub fn munlock(&mut self, start: usize, len: usize) -> Result<(), isize> {
+        let (start_vpn, end_vpn, _) = self.user_lock_range(start, len)?;
+        self.vmas.lock_range(start_vpn, end_vpn, false)?;
+        Ok(())
     }
 
     pub fn user_mapped_bytes(&self) -> usize {
         self.vmas.user_mapped_bytes()
+    }
+
+    pub fn locked_user_bytes(&self) -> usize {
+        self.vmas.locked_user_bytes()
+    }
+
+    pub fn mlockall_current(&mut self) -> usize {
+        self.vmas.lock_all_current()
+    }
+
+    pub fn munlockall(&mut self) {
+        self.vmas.unlock_all();
     }
 
     pub fn create_elf_tables(

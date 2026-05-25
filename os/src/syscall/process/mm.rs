@@ -485,10 +485,15 @@ pub fn sys_mlockall(flags: usize) -> isize {
             return ENOMEM;
         }
     }
+    if flags & MCL_CURRENT != 0 {
+        task.process.vm().lock().mlockall_current();
+    }
     SUCCESS
 }
 
 pub fn sys_munlockall() -> isize {
+    let task = current_task().unwrap();
+    task.process.vm().lock().munlockall();
     SUCCESS
 }
 
