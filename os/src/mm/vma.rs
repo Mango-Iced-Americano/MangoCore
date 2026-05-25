@@ -593,7 +593,11 @@ impl Vma {
                 }
                 Err(MemoryError::SharedPage) => continue,
                 Err(MemoryError::ZramIsFull) => {}
-                _ => unreachable!(),
+                Err(MemoryError::NotInMemory) => continue,
+                Err(e) => {
+                    log::warn!("[do_oom] unexpected zip error {:?}, vpn={:?}", e, vpn);
+                    continue;
+                }
             }
 
             let swap_result = {
@@ -616,7 +620,17 @@ impl Vma {
                     continue;
                 }
                 Err(MemoryError::SharedPage) => continue,
-                _ => unreachable!(),
+                Err(MemoryError::NotInMemory) => continue,
+                Err(MemoryError::OutOfMemory)
+                | Err(MemoryError::SwapIsFull)
+                | Err(MemoryError::BackingStoreFailure) => {
+                    log::warn!("[do_oom] swap unavailable/full, stop reclaim: vpn={:?}", vpn);
+                    break;
+                }
+                Err(e) => {
+                    log::warn!("[do_oom] unexpected swap error {:?}, vpn={:?}", e, vpn);
+                    break;
+                }
             }
         }
         self.inner.compressed_count() + self.inner.swapped_count()
@@ -658,7 +672,19 @@ impl Vma {
                     );
                     continue;
                 }
-                _ => unreachable!(),
+                Err(MemoryError::OutOfMemory)
+                | Err(MemoryError::SwapIsFull)
+                | Err(MemoryError::BackingStoreFailure) => {
+                    log::warn!("[force_swap] swap unavailable/full, stop reclaim: vpn={:?}", vpn);
+                    break;
+                }
+                Err(MemoryError::SharedPage)
+                | Err(MemoryError::NotInMemory)
+                | Err(MemoryError::NotSwappedOut) => continue,
+                Err(e) => {
+                    log::warn!("[force_swap] unexpected swap error {:?}, vpn={:?}", e, vpn);
+                    break;
+                }
             }
         }
         self.inner.swapped_count() - swapped_before

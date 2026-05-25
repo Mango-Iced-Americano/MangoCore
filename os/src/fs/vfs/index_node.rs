@@ -262,9 +262,16 @@ pub trait IndexNode: Any + Send + Sync + Debug {
     /// 获取此 inode 所属的文件系统
     fn fs(&self) -> Arc<dyn super::file_system::FileSystem>;
 
-    /// 获取此 inode 的 page cache（如果有）
+    /// 获取此 inode 的 page cache（如果有）。只读查询，不创建新 cache。
     fn page_cache(&self) -> Option<Arc<super::super::page_cache::PageCache>> {
         None
+    }
+
+    /// 确保此 inode 有 page cache（如果已存在则返回，否则创建）。
+    /// 仅 read/write/mmap fault 等真正需要文件数据页的路径调用。
+    /// 默认委托给 page_cache()，文件系统可 override 为按需创建。
+    fn ensure_page_cache(&self) -> Option<Arc<super::super::page_cache::PageCache>> {
+        self.page_cache()
     }
 
     // ── 其他操作 ────────────────────────────────────────────────────

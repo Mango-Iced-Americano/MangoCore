@@ -181,11 +181,18 @@ impl Socket for UnixStreamSocket {
                     .ok_or(SyscallErr::ECONNREFUSED)?;
 
                 // 2. 创建一对 Connected（client_conn 给本端，server_conn 给 listener）
-                let (mut client_conn, server_conn) =
+                let (mut client_conn, mut server_conn) =
                     Connected::new_pair(UNIX_STREAM_DEFAULT_BUF_SIZE);
 
-                // 3. 设置对端地址
+                // 3. 设置对端地址和凭证
+                let peer_creds = crate::task::current_task()
+                    .map(|t| {
+                        let inner = t.acquire_inner_lock();
+                        (t.pid() as u32, inner.uid, inner.gid)
+                    });
                 client_conn.peer_addr = Some(UnixEndpointBound::Abstract(name.clone()));
+                client_conn.peer_creds = peer_creds;
+                server_conn.peer_creds = peer_creds;
 
                 // 4. 通过 trait 方法把 server_conn 推入 listener 队列
                 //    不再需要直接访问 server_socket.inner（dyn Socket 上访问不到）
@@ -215,9 +222,16 @@ impl Socket for UnixStreamSocket {
                     .and_then(|w| w.upgrade())
                     .ok_or(SyscallErr::ECONNREFUSED)?;
 
-                let (mut client_conn, server_conn) =
+                let (mut client_conn, mut server_conn) =
                     Connected::new_pair(UNIX_STREAM_DEFAULT_BUF_SIZE);
+                let peer_creds = crate::task::current_task()
+                    .map(|t| {
+                        let inner = t.acquire_inner_lock();
+                        (t.pid() as u32, inner.uid, inner.gid)
+                    });
                 client_conn.peer_addr = Some(UnixEndpointBound::Path(path.clone()));
+                client_conn.peer_creds = peer_creds;
+                server_conn.peer_creds = peer_creds;
                 server_socket.push_pending_connected(server_conn)?;
                 if let Some(wq) = server_socket.accept_event_queue() {
                     wq.notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM);
@@ -393,6 +407,14 @@ impl Socket for UnixStreamSocket {
         match &*inner {
             Inner::Connected(conn) => conn.send_ready(),
             _ => true, // 未连接时始终可写
+        }
+    }
+
+    fn peer_creds(&self) -> Result<(u32, u32, u32), SyscallErr> {
+        let inner = self.inner.lock();
+        match &*inner {
+            Inner::Connected(conn) => conn.peer_creds.ok_or(SyscallErr::ENOTCONN),
+            _ => Err(SyscallErr::ENOTCONN),
         }
     }
 

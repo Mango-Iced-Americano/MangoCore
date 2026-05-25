@@ -1,12 +1,12 @@
 use crate::mm::{UserBufferWriter, UserPtrMut};
-use crate::net::{TcpInfo, TCP_MSS};
+use crate::net::{TcpInfo, TCP_MSS, PSOCK};
 use crate::task::current_task;
 use crate::timer::TimeVal;
 use crate::utils::error::SyscallErr;
 
 use super::common::is_known_sockopt_level;
-use super::common::{SOL_SOCKET, SOL_TCP, TCP_CONGESTION, TCP_INFO, TCP_MAXSEG};
-use super::common::{SO_RCVBUF, SO_RCVTIMEO, SO_REUSEADDR, SO_SNDBUF, SO_SNDTIMEO};
+use super::common::{SOL_IP, SOL_SOCKET, SOL_TCP, TCP_CONGESTION, TCP_INFO, TCP_MAXSEG};
+use super::common::{SO_RCVBUF, SO_RCVTIMEO, SO_REUSEADDR, SO_SNDBUF, SO_SNDTIMEO, SO_PEERCRED};
 
 pub fn sys_getsockopt(
     sockfd: u32,
@@ -26,6 +26,14 @@ pub fn sys_getsockopt(
     let token = task.get_user_token();
     let optval_ptr = UserPtrMut::<u32>::from_addr(optval_ptr_);
     let optlen_ptr = UserPtrMut::<u32>::from_addr(optlen);
+    // optlen 校验必须在 optname/level 匹配之前（getsockopt01 期望 EINVAL 优先于 ENOPROTOOPT）
+    let optlen_val = match optlen_ptr.read(token) {
+        Ok(val) => val,
+        Err(_) => return -(SyscallErr::EFAULT as isize),
+    };
+    if optlen_val < 4 {
+        return -(SyscallErr::EINVAL as isize);
+    }
     match (level, optname) {
         (SOL_TCP, TCP_MAXSEG) => {
             // return max tcp fregment size (MSS)
@@ -66,13 +74,13 @@ pub fn sys_getsockopt(
                 return -(SyscallErr::EFAULT as isize);
             }
         }
-        (SOL_SOCKET, SO_SNDBUF | SO_RCVBUF | SO_REUSEADDR) => {
+        (SOL_SOCKET, SO_SNDBUF | SO_RCVBUF | SO_REUSEADDR | SO_PEERCRED) => {
             // 对于需要写入 u32 的选项，检查 optlen 是否够大
             let optlen_val = match optlen_ptr.read(token) {
                 Ok(len) => len,
                 Err(_) => return -(SyscallErr::EFAULT as isize),
             };
-            if optlen_val < 4 {
+    if (optlen_val as i32) < 0 || optlen_val < 4 {
                 return -(SyscallErr::EINVAL as isize);
             }
             let socket = crate::get_socket!(sockfd);
@@ -101,6 +109,23 @@ pub fn sys_getsockopt(
                     };
                     if optval_ptr.write(token, &(enabled as u32)).is_err()
                         || optlen_ptr.write(token, &4).is_err()
+                    {
+                        return -(SyscallErr::EFAULT as isize);
+                    }
+                }
+                SO_PEERCRED => {
+                    let (pid, uid, gid) = match socket.peer_creds() {
+                        Ok(creds) => creds,
+                        Err(e) => return -(e as isize),
+                    };
+                    // ucred: pid(4) + uid(4) + gid(4) = 12 bytes
+                    let p_pid = UserPtrMut::<u32>::from_addr(optval_ptr_);
+                    let p_uid = UserPtrMut::<u32>::from_addr(optval_ptr_ + 4);
+                    let p_gid = UserPtrMut::<u32>::from_addr(optval_ptr_ + 8);
+                    if p_pid.write(token, &pid).is_err()
+                        || p_uid.write(token, &uid).is_err()
+                        || p_gid.write(token, &gid).is_err()
+                        || optlen_ptr.write(token, &12).is_err()
                     {
                         return -(SyscallErr::EFAULT as isize);
                     }
@@ -134,7 +159,14 @@ pub fn sys_getsockopt(
         }
         _ => {
             log::warn!("[sys_getsockopt] level: {}, optname: {}", level, optname);
-            if is_known_sockopt_level(level) {
+            // 未知 level 或 level 与 socket 类型不兼容 → EOPNOTSUPP
+            // 已知 level 但未知 optname → ENOPROTOOPT
+            let s_type = socket.socket_type();
+            let level_compat = level == SOL_SOCKET || level == SOL_IP
+                || (level == SOL_TCP && matches!(s_type, PSOCK::Stream))
+                || (level == 17 /* SOL_UDP */ && matches!(s_type, PSOCK::Datagram))
+                || (level == 255 /* SOL_RAW */ && matches!(s_type, PSOCK::Raw));
+            if level_compat {
                 return -(SyscallErr::ENOPROTOOPT as isize);
             } else {
                 return -(SyscallErr::EOPNOTSUPP as isize);

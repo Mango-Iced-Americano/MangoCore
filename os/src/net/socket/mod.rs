@@ -289,6 +289,9 @@ pub trait Socket: Send + Sync {
     fn reuse_addr(&self) -> SyscallRet {
         Err(SyscallErr::EOPNOTSUPP)
     }
+    fn peer_creds(&self) -> Result<(u32, u32, u32), SyscallErr> {
+        Err(SyscallErr::ENOPROTOOPT)
+    }
     fn set_reuse_addr(&self, _enabled: bool) -> SyscallRet {
         Err(SyscallErr::EOPNOTSUPP)
     }
@@ -638,8 +641,21 @@ impl dyn Socket {
         Self::prevalidate_sockaddr(addr, addrlen)?;
         // 在检查连接状态前，先读取并验证 *addrlen
         Self::prevalidate_socklen_value(addrlen)?;
+        // 在连接状态检查前，先探针写入 addr 缓冲区 — 无效指针→EFAULT
+        // （getpeername01 期望 EFAULT 优先于 ENOTCONN）
+        Self::probe_user_write(addr)?;
         let endpoint = self.remote_endpoint().ok_or(SyscallErr::ENOTCONN)?;
         endpoint.fill_sockaddr(addr, addrlen)
+    }
+
+    fn probe_user_write(addr: usize) -> Result<(), SyscallErr> {
+        if addr == 0 {
+            return Err(SyscallErr::EFAULT);
+        }
+        let task = current_task().ok_or(SyscallErr::EINVAL)?;
+        let token = task.get_user_token();
+        // 探针读取 — 无效地址会触发 page fault → EFAULT
+        UserPtr::<u8>::from_addr(addr).read(token).map(|_| ()).map_err(|_| SyscallErr::EFAULT)
     }
 
     /// 读取并验证用户空间的 socklen_t 值，优先于连接状态检查。

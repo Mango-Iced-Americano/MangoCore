@@ -21,13 +21,14 @@ pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
 
     let endpoint = match endpoint {
         Endpoint::Unix(UnixEndpoint::Path(ref path)) => {
-            let task = current_task().unwrap();
-
             let abs_path = if path.starts_with('/') {
                 path.clone()
             } else {
-                let cwd = task.process.fs().lock().working_path.clone();
-                if cwd == "/" {
+                // 与 bind.rs 对齐：使用 CWD inode 的 absolute_path()
+                let task = current_task().unwrap();
+                let cwd_inode = task.process.fs().lock().working_inode.inode.clone();
+                let cwd = cwd_inode.absolute_path().unwrap_or_default();
+                if cwd == "/" || cwd.is_empty() {
                     format!("/{}", path)
                 } else {
                     format!("{}/{}", cwd, path)

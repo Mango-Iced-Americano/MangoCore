@@ -5,6 +5,7 @@ edition = "2018"
 
 [patch.crates-io]
 smoltcp = {path = "../dependency/smoltcp" }
+buddy_system_allocator = {path = "vendor/buddy_system_allocator" }
 
 [dependencies]
 lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
@@ -67,6 +68,7 @@ block_mem = []
 block_virt = []
 block_virt_pci = []
 comp = []
+heap_trace = []
 
 # LoongArch Boards:
 loongarch64 = []

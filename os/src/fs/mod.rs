@@ -8,10 +8,11 @@ mod filesystem;
 pub mod iov;
 mod layout;
 mod page_cache;
-pub use page_cache::flush_all_page_caches;
+pub use page_cache::{entries_global_stats, evict_all_clean_pages, flush_all_page_caches, registry_stats};
 pub mod poll;
 pub mod procfs;
 pub mod ramfs;
+pub mod reclaim;
 #[cfg(feature = "swap")]
 pub mod swap;
 // Xein add this
@@ -123,6 +124,13 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
         let _ = alloc::sync::Arc::into_raw(shmfs);
         let dev_inode_id = dev_inode.metadata().expect("dev_inode metadata failed").inode_id;
         let devfs_mnt = self::vfs::MountFS::new(devfs, self::vfs::MountFlags::empty());
+        if let Some(dev_mfsi) = dev_inode.as_any_ref().downcast_ref::<self::vfs::MountFSInode>() {
+            let backref = self::vfs::MountFSInode::new(
+                dev_mfsi.inner_inode.clone(),
+                dev_mfsi.mount_fs.clone(),
+            );
+            devfs_mnt.set_self_mountpoint(Some(backref));
+        }
         mfs.add_mount(dev_inode_id, devfs_mnt)
             .expect("failed to mount devfs at /dev");
     }
@@ -138,6 +146,13 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
         crate::fs::procfs::files::register_all(procfs.root())
             .expect("procfs: failed to register root entries");
         let procfs_mnt = self::vfs::MountFS::new(procfs, self::vfs::MountFlags::empty());
+        if let Some(proc_mfsi) = proc_inode.as_any_ref().downcast_ref::<self::vfs::MountFSInode>() {
+            let backref = self::vfs::MountFSInode::new(
+                proc_mfsi.inner_inode.clone(),
+                proc_mfsi.mount_fs.clone(),
+            );
+            procfs_mnt.set_self_mountpoint(Some(backref));
+        }
         mfs.add_mount(proc_inode_id, procfs_mnt)
             .expect("failed to mount procfs at /proc");
     }
@@ -156,6 +171,13 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
             tmpfs.root_inode().set_metadata(&meta).ok();
         }
         let tmpfs_mnt = self::vfs::MountFS::new(tmpfs, self::vfs::MountFlags::empty());
+        if let Some(tmp_mfsi) = tmp_inode.as_any_ref().downcast_ref::<self::vfs::MountFSInode>() {
+            let backref = self::vfs::MountFSInode::new(
+                tmp_mfsi.inner_inode.clone(),
+                tmp_mfsi.mount_fs.clone(),
+            );
+            tmpfs_mnt.set_self_mountpoint(Some(backref));
+        }
         mfs.add_mount(tmp_inode_id, tmpfs_mnt)
             .expect("failed to mount tmpfs at /tmp");
     }

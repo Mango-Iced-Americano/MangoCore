@@ -16,7 +16,7 @@ use crate::hal::{trap_handler, TrapContext};
 use crate::mm::PageTableImpl;
 use crate::mm::{AddressSpace, FaultAccess, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::syscall::CloneFlags;
-use crate::syscall::errno::{ENOEXEC, ENOMEM};
+use crate::syscall::errno::{EISDIR, ENOEXEC, ENOMEM};
 use crate::timer::{ITimerVal, TimeSpec, TimeVal};
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -542,7 +542,7 @@ impl TaskControlBlock {
             self.pid(),
             exit_code
         );
-        crate::utils::stats::print_resource_stats();
+        crate::utils::stats::print_resource_stats(Some(self));
         true
     }
 
@@ -725,6 +725,9 @@ impl TaskControlBlock {
         argv_vec: &Vec<String>,
         envp_vec: &Vec<String>,
     ) -> Result<(), isize> {
+        if elf.is_dir() {
+            return Err(EISDIR);
+        }
         // 旧 VM 没有被其他 CLONE_VM 进程共享时，可以先释放用户数据页，
         // 避免新旧内存集同时存在导致双倍内存压力触发 OOM。
         // 如果旧 VM 被共享（典型是 CLONE_VM | CLONE_VFORK），exec 必须先
@@ -1158,13 +1161,21 @@ impl TaskControlBlock {
         self.tid.0
     }
 
-    /// 获取用户可见进程 ID。
+        /// 获取用户可见进程 ID。
     pub fn getpid(&self) -> usize {
         self.process.pid
     }
     /// 获取用户可见进程 ID。
     pub fn pid(&self) -> usize {
         self.process.pid
+    }
+    /// 获取线程组 ID（当前简化为进程 ID）
+    pub fn tgid(&self) -> usize {
+        self.process.pid
+    }
+    /// 尝试获取内部锁，用于 panic 诊断等不可阻塞场景
+    pub fn try_inner(&self) -> Option<spin::MutexGuard<TaskControlBlockInner>> {
+        self.inner.try_lock()
     }
     /// 设置进程组ID
     pub fn setpgid(&self, pgid: usize) -> isize {

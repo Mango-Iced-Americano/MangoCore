@@ -32,6 +32,7 @@ const SYSCALL_PPOLL: usize = 73;
 const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_NEW_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
+const SYSCALL_SYNC: usize = 81;
 const SYSCALL_FSYNC: usize = 82;
 const SYSCALL_UTIMENSAT: usize = 88;
 const SYSCALL_EXIT: usize = 93;
@@ -481,6 +482,14 @@ pub fn sys_fstat(fd: usize, buf: &mut Stat) -> isize {
 
 pub fn sys_ftruncate(fd: usize, length: isize) -> isize {
     syscall(SYSCALL_FTRUNCATE, [fd, length as usize, 0])
+}
+
+pub fn sys_sync() -> isize {
+    syscall(SYSCALL_SYNC, [0, 0, 0])
+}
+
+pub fn sys_fsync(fd: usize) -> isize {
+    syscall(SYSCALL_FSYNC, [fd, 0, 0])
 }
 
 pub fn sys_ext4_counters(cmd: usize, arg1: usize, arg2: usize) -> isize {

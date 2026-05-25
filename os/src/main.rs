@@ -34,6 +34,7 @@ mod lang_items;
 mod math;
 mod mm;
 mod net;
+mod panic_diag;
 mod syscall;
 mod task;
 mod timer;

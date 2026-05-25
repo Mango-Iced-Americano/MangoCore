@@ -15,6 +15,7 @@ fn panic(info: &PanicInfo) -> ! {
         }
         None => println!("[kernel] panicked at '{}'", info.message().unwrap()),
     }
+    crate::panic_diag::dump_panic_context();
     shutdown()
 }
 

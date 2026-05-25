@@ -48,7 +48,8 @@ pub struct Ext4FileSystem {
     //   3. unlink (links_count > 0): inode object 不应移除（仍有其他 link 指向）。
     //   4. 内存泄漏: Weak 升级失败需惰性清理（后续 Phase 可加周期清理）。
     //
-    // 当前策略: Weak 引用，不强引用。inode 生命周期仍由 parent.children 主导。
+    // 当前策略: Weak 引用，不强引用。inode 生命周期由 fd table / cwd / mmap / mount / exe 等持有。
+    // children cache 和 inode_objects 都只是加速查找的 opportunistic cache，不保活 inode。
     /// 全局 VFS inode object 弱引用表 (ino → Weak<dyn IndexNode>)
     pub(super) inode_objects: spin::Mutex<BTreeMap<u32, alloc::sync::Weak<dyn crate::fs::vfs::IndexNode>>>,
 
@@ -69,6 +70,18 @@ pub struct Ext4FileSystem {
 
 /// 全局 Ext4FileSystem 引用（用于 syscall 触发的 batch mode）
 pub static GLOBAL_EXT4FS: spin::Mutex<Option<alloc::sync::Weak<Ext4FileSystem>>> = spin::Mutex::new(None);
+
+/// FS cache reclaim 统计结果
+pub struct FsCacheReclaimStats {
+    pub stale_inode_objects_removed: usize,
+    pub stale_page_caches_removed: usize,
+    pub stale_children_removed: usize,
+    pub clean_pages_freed: usize,
+    pub cached_pages_before: usize,
+    pub cached_pages_after: usize,
+    pub dirty_pages_before: usize,
+    pub dirty_pages_after: usize,
+}
 
 impl Ext4FileSystem {
     pub(crate) fn read_metadata_block(&self, block_id: usize) -> Vec<u8> {
@@ -790,12 +803,18 @@ impl IndexNode for layout::Ext4OSInode {
         write_result.map(|_| write_len).map_err(|_| SyscallErr::EIO)
     }
 
+    /// 只读查询已有 page cache，不创建新 cache（用于 sync/datasync/debug）
     fn page_cache(&self) -> Option<alloc::sync::Arc<crate::fs::page_cache::PageCache>> {
+        self.new_page_cache.lock().clone()
+    }
+
+    /// 确保有 page cache，若不存在则创建（用于 read/write/mmap fault）
+    fn ensure_page_cache(&self) -> Option<alloc::sync::Arc<crate::fs::page_cache::PageCache>> {
         self.get_new_page_cache()
     }
 
     fn sync(&self) -> Result<(), SyscallErr> {
-        if let Some(pc) = self.get_new_page_cache() {
+        if let Some(pc) = self.new_page_cache.lock().clone() {
             pc.writeback_all()?;
         }
         // Phase 3: flush per-inode metadata if dirty
@@ -814,7 +833,7 @@ impl IndexNode for layout::Ext4OSInode {
     }
 
     fn datasync(&self) -> Result<(), SyscallErr> {
-        if let Some(pc) = self.get_new_page_cache() {
+        if let Some(pc) = self.new_page_cache.lock().clone() {
             pc.writeback_all()?;
         }
         Ok(())
@@ -886,13 +905,31 @@ impl IndexNode for layout::Ext4OSInode {
             return Ok(self.ext4fs.canonical_inode_object(parent_ino));
         }
 
-        // Phase 2: children cache — 先查缓存，避免重复目录扫描和 inode 读
+        // Phase 2: children cache (Weak) — opportunistic dentry cache
+        // Weak upgrade in the lock is safe: it's just an atomic refcount bump, no I/O.
+        // On stale Weak, remove the entry and fall through to disk lookup.
         {
-            let children = self.children.lock();
-            if let Some(child) = children.get(name) {
-                super::counters::inc_counter!(super::counters::DENTRY_CACHE_HIT);
-                super::counters::inc_counter!(super::counters::DIR_CHILDREN_CACHE_HIT);
-                return Ok(child.clone());
+            let cached = {
+                let mut children = self.children.lock();
+                match children.get(name) {
+                    Some(weak) => match weak.upgrade() {
+                        Some(arc) => {
+                            super::counters::inc_counter!(super::counters::DENTRY_CACHE_HIT);
+                            super::counters::inc_counter!(super::counters::DIR_CHILDREN_CACHE_HIT);
+                            Some(arc)
+                        }
+                        None => {
+                            children.remove(name);
+                            super::counters::inc_counter!(super::counters::DIR_CHILDREN_STALE_WEAK);
+                            super::counters::inc_counter!(super::counters::DIR_CHILDREN_INVALIDATE);
+                            None
+                        }
+                    },
+                    None => None,
+                }
+            };
+            if let Some(child) = cached {
+                return Ok(child);
             }
         }
         super::counters::inc_counter!(super::counters::DENTRY_CACHE_MISS);
@@ -943,14 +980,14 @@ impl IndexNode for layout::Ext4OSInode {
         // 通过 inode_objects canonicalize: 同一 ino 返回同一 VFS inode object
         let child_inode = self.ext4fs.canonical_inode_object(child_ino);
 
-        // Phase 2: 插入 children cache (only insert if version still matches)
+        // Phase 2: 插入 children cache (Weak, only insert if version still matches)
         {
             let current_version = self.dir_version.load(core::sync::atomic::Ordering::Relaxed);
             let mut children = self.children.lock();
             if current_version == lookup_version {
                 children.insert(
                     alloc::string::String::from(name),
-                    child_inode.clone(),
+                    alloc::sync::Arc::downgrade(&child_inode),
                 );
                 super::counters::inc_counter!(super::counters::DIR_CHILDREN_INSERT);
             }
@@ -976,7 +1013,6 @@ impl IndexNode for layout::Ext4OSInode {
                 else if e == crate::syscall::errno::EEXIST { SyscallErr::EEXIST }
                 else { SyscallErr::ENOSYS }
             })?;
-        // Phase 4: bump dir_version + clear negative (ONLY after successful creation)
         self.bump_dir_version();
         self.clear_negative_dentry(name);
         let child_ino = new_ref.inode_num;
@@ -987,7 +1023,7 @@ impl IndexNode for layout::Ext4OSInode {
         self.ext4fs.insert_inode_object(child_ino, &child_inode);
         if !is_special_dot(name) {
             let mut children = self.children.lock();
-            children.insert(alloc::string::String::from(name), child_inode.clone());
+            children.insert(alloc::string::String::from(name), alloc::sync::Arc::downgrade(&child_inode));
             drop(children);
             super::counters::inc_counter!(super::counters::DIR_CHILDREN_INSERT);
         }
@@ -1048,7 +1084,7 @@ impl IndexNode for layout::Ext4OSInode {
         self.ext4fs.insert_inode_object(child_ino, &child_inode);
         if !is_special_dot(name) {
             let mut children = self.children.lock();
-            children.insert(alloc::string::String::from(name), child_inode.clone());
+            children.insert(alloc::string::String::from(name), alloc::sync::Arc::downgrade(&child_inode));
             drop(children);
             super::counters::inc_counter!(super::counters::DIR_CHILDREN_INSERT);
         }
@@ -1128,7 +1164,7 @@ impl IndexNode for layout::Ext4OSInode {
         self.clear_negative_dentry(name);
         if !is_special_dot(name) {
             let mut children = self.children.lock();
-            children.insert(alloc::string::String::from(name), other.clone());
+            children.insert(alloc::string::String::from(name), alloc::sync::Arc::downgrade(other));
             drop(children);
             super::counters::inc_counter!(super::counters::DIR_CHILDREN_INSERT);
         }
@@ -1191,15 +1227,13 @@ impl IndexNode for layout::Ext4OSInode {
         }
         // new_links > 0（hard link 场景）：不清理任何缓存，保留完整可用性
 
-        // 从 parent.children 移除（先 clone 出 Arc，释放锁后再 drop）
-        let _removed_child = {
+        // 从 parent.children 移除 (Weak, 不需要持锁释放)
+        {
             let mut children = self.children.lock();
-            let removed = children.remove(name);
-            if removed.is_some() {
+            if children.remove(name).is_some() {
                 super::counters::inc_counter!(super::counters::DIR_CHILDREN_REMOVE);
             }
-            removed
-        }; // lock released here; child Arc drops outside
+        }
 
         // Phase 4: after successful unlink
         let v = self.bump_dir_version();
@@ -1252,24 +1286,30 @@ impl IndexNode for layout::Ext4OSInode {
             }
         }
 
-        // 目录被删除后直接回收（与普通文件不同，目录不能有 mmap/fd）
-        if new_links == 0 {
+        // rmdir: 检查是否有 live object 再决定是否释放 ext4 底层资源
+        // 即使目录被 unlink，仍可能有 fd/cwd 持有 Arc<dyn IndexNode>，
+        // 此时不能释放 inode 和数据块（否则 Drop 会二次释放）。
+        let has_live = self.ext4fs.lookup_inode_object(child_ino).is_some();
+        if new_links == 0 && !has_live {
+            // 无 live object：安全释放 ext4 底层资源
             self.ext4fs.cleanup_inode_caches_on_unlink(child_ino);
             let _ = self.ext4fs.truncate_inode(&mut child_ref, 0);
             self.ext4fs.ialloc_free_inode(child_ino, true);
             self.ext4fs.evict_inode_object_if_deleted(child_ino);
             self.ext4fs.unregister_page_cache(child_ino);
+        } else if new_links == 0 {
+            // 有 live object：仅清理 soft caches，硬回收由 Drop 负责
+            self.ext4fs.cleanup_inode_caches_on_unlink(child_ino);
+            self.ext4fs.unregister_page_cache(child_ino);
         }
 
-        // 从 parent.children 移除
-        let _removed = {
+        // 从 parent.children 移除 (Weak, 不需要持锁释放)
+        {
             let mut children = self.children.lock();
-            let removed = children.remove(name);
-            if removed.is_some() {
+            if children.remove(name).is_some() {
                 super::counters::inc_counter!(super::counters::DIR_CHILDREN_REMOVE);
             }
-            removed
-        };
+        }
 
         // Phase 4: after successful rmdir
         let v = self.bump_dir_version();
@@ -1503,6 +1543,118 @@ impl Ext4FileSystem {
         let io = self.prune_inode_objects();
         let pc = self.prune_page_caches();
         (io, pc)
+    }
+
+    /// 清理所有目录 children 中 upgrade 失败的 stale Weak entry
+    pub fn prune_children_stale_entries(&self) -> usize {
+        let mut total = 0usize;
+        let guard = self.inode_objects.lock();
+        let arcs: alloc::vec::Vec<alloc::sync::Arc<dyn crate::fs::vfs::IndexNode>> = guard
+            .iter()
+            .filter_map(|(_, w)| w.upgrade())
+            .collect();
+        drop(guard);
+        for arc in &arcs {
+            if let Some(osi) = arc.as_any_ref().downcast_ref::<layout::Ext4OSInode>() {
+                let mut kids = osi.children.lock();
+                let before = kids.len();
+                kids.retain(|_, weak| weak.upgrade().is_some());
+                total += before - kids.len();
+            }
+        }
+        total
+    }
+
+    /// 遍历所有 alive PageCache，回收最多 max_pages 个干净页
+    pub fn shrink_all_page_caches_clean(&self, max_pages: usize) -> usize {
+        let mut total = 0usize;
+        let mut alive: alloc::vec::Vec<alloc::sync::Arc<crate::fs::page_cache::PageCache>> =
+            alloc::vec::Vec::new();
+        {
+            let mut reg = self.page_caches.lock();
+            reg.retain(|_, weak| {
+                if let Some(pc) = weak.upgrade() {
+                    alive.push(pc);
+                    true
+                } else {
+                    false
+                }
+            });
+        }
+        for pc in &alive {
+            let freed = pc.shrink_clean_pages(max_pages.saturating_sub(total));
+            total += freed;
+            if total >= max_pages {
+                break;
+            }
+        }
+        total
+    }
+
+    /// 统计所有 alive PageCache 的 cached/dirty 页数
+    fn count_page_cache_metrics(&self) -> (usize, usize) {
+        let mut cached = 0usize;
+        let mut dirty = 0usize;
+        let reg = self.page_caches.lock();
+        for (_, weak) in reg.iter() {
+            if let Some(pc) = weak.upgrade() {
+                cached += pc.cached_page_count();
+                dirty += pc.dirty_count();
+            }
+        }
+        (cached, dirty)
+    }
+
+    /// 统一 reclaim 入口：prune stale + shrink clean pages（不写回脏页）
+    pub fn reclaim_fs_caches(&self, target_pages: usize) -> FsCacheReclaimStats {
+        let (cached_before, dirty_before) = self.count_page_cache_metrics();
+        let (io_removed, pc_removed) = self.prune_stale_weak_entries();
+        let children_removed = self.prune_children_stale_entries();
+        let clean_freed = self.shrink_all_page_caches_clean(target_pages);
+        let (cached_after, dirty_after) = self.count_page_cache_metrics();
+
+        FsCacheReclaimStats {
+            stale_inode_objects_removed: io_removed,
+            stale_page_caches_removed: pc_removed,
+            stale_children_removed: children_removed,
+            clean_pages_freed: clean_freed,
+            cached_pages_before: cached_before,
+            cached_pages_after: cached_after,
+            dirty_pages_before: dirty_before,
+            dirty_pages_after: dirty_after,
+        }
+    }
+
+    /// 统计 ext4 dentry cache: children + negative_dentry
+    pub fn dentry_stats(&self) -> (usize, usize, usize, usize, usize, usize) {
+        let mut kids_total = 0usize;
+        let mut kids_alive = 0usize;
+        let mut kids_stale = 0usize;
+        let mut kids_bytes = 0usize;
+        let mut neg_total = 0usize;
+        let mut neg_bytes = 0usize;
+
+        let guard = self.inode_objects.lock();
+        let arcs: alloc::vec::Vec<alloc::sync::Arc<dyn crate::fs::vfs::IndexNode>> =
+            guard.iter().filter_map(|(_, w)| w.upgrade()).collect();
+        drop(guard);
+
+        for arc in &arcs {
+            if let Some(osi) = arc.as_any_ref().downcast_ref::<layout::Ext4OSInode>() {
+                let kids = osi.children.lock();
+                kids_total += kids.len();
+                for (name, weak) in kids.iter() {
+                    kids_bytes += name.len();
+                    if weak.upgrade().is_some() { kids_alive += 1; } else { kids_stale += 1; }
+                }
+                drop(kids);
+                let neg = osi.negative_dentry.lock();
+                neg_total += neg.len();
+                for name in neg.keys() { neg_bytes += name.len(); }
+            }
+        }
+
+        (kids_total, kids_alive, kids_stale, kids_bytes, neg_total, neg_bytes)
     }
 
     /// 显式清空所有目录的 children 缓存（仅 umount/debug）
@@ -1776,6 +1928,79 @@ impl Ext4FileSystem {
         }
     }
 
+    /// 返回单个缓存 metric 数值（用于 debug/test syscall cmd 10）
+    /// metric_id: 0=inode_objects_alive, 1=inode_objects_stale,
+    ///   2=children_alive, 3=children_stale,
+    ///   4=page_cache_alive, 5=page_cache_stale,
+    ///   6=page_cache_cached_pages, 7=page_cache_dirty_pages,
+    ///   8=inode_cache_total, 9=inode_cache_dirty, 10=inode_cache_clean
+    pub fn get_cache_metric(&self, metric_id: usize) -> isize {
+        match metric_id {
+            0 | 1 => {
+                let table = self.inode_objects.lock();
+                let mut alive = 0usize;
+                let mut stale = 0usize;
+                for (_, weak) in table.iter() {
+                    if weak.upgrade().is_some() { alive += 1; } else { stale += 1; }
+                }
+                drop(table);
+                if metric_id == 0 { alive as isize } else { stale as isize }
+            }
+            2 | 3 => {
+                let guard = self.inode_objects.lock();
+                let arcs: alloc::vec::Vec<alloc::sync::Arc<dyn crate::fs::vfs::IndexNode>> =
+                    guard.iter().filter_map(|(_, w)| w.upgrade()).collect();
+                drop(guard);
+                let mut alive = 0usize;
+                let mut stale = 0usize;
+                for arc in &arcs {
+                    if let Some(osi) = arc.as_any_ref().downcast_ref::<layout::Ext4OSInode>() {
+                        let kids = osi.children.lock();
+                        for (_, weak) in kids.iter() {
+                            if weak.upgrade().is_some() { alive += 1; } else { stale += 1; }
+                        }
+                    }
+                }
+                if metric_id == 2 { alive as isize } else { stale as isize }
+            }
+            4 | 5 => {
+                let reg = self.page_caches.lock();
+                let mut alive = 0usize;
+                let mut stale = 0usize;
+                for (_, weak) in reg.iter() {
+                    if weak.upgrade().is_some() { alive += 1; } else { stale += 1; }
+                }
+                drop(reg);
+                if metric_id == 4 { alive as isize } else { stale as isize }
+            }
+            6 | 7 => {
+                let reg = self.page_caches.lock();
+                let alive_arcs: alloc::vec::Vec<alloc::sync::Arc<crate::fs::page_cache::PageCache>> =
+                    reg.iter().filter_map(|(_, w)| w.upgrade()).collect();
+                drop(reg);
+                let mut cached = 0usize;
+                let mut dirty = 0usize;
+                for pc in &alive_arcs {
+                    cached += pc.cached_page_count();
+                    dirty += pc.dirty_count();
+                }
+                if metric_id == 6 { cached as isize } else { dirty as isize }
+            }
+            8 | 9 | 10 => {
+                let cache = self.inode_cache.lock();
+                let total = cache.len();
+                let dirty = cache.iter().filter(|(_, c)| c.lock().dirty).count();
+                drop(cache);
+                match metric_id {
+                    8 => total as isize,
+                    9 => dirty as isize,
+                    _ => (total - dirty) as isize,
+                }
+            }
+            _ => -22, // EINVAL
+        }
+    }
+
     /// Dump cache memory profile — 避免锁递归
     pub fn dump_cache_memory_profile(&self, label: &str) {
         println!("=== ext4 Cache Memory: {} ===", label);
@@ -1802,6 +2027,8 @@ impl Ext4FileSystem {
         // 2. children — 遍历收集到的 inode（锁已释放）
         let mut dir_count = 0usize;
         let mut children_total = 0usize;
+        let mut children_alive = 0usize;
+        let mut children_stale = 0usize;
         let mut children_max = 0usize;
         let mut children_name_bytes = 0usize;
         let mut symlink_cached = 0usize;
@@ -1815,8 +2042,13 @@ impl Ext4FileSystem {
                 if n > 0 { dir_count += 1; }
                 children_total += n;
                 if n > children_max { children_max = n; }
-                for name in kids.keys() {
+                for (name, weak) in kids.iter() {
                     children_name_bytes += name.len();
+                    if weak.upgrade().is_some() {
+                        children_alive += 1;
+                    } else {
+                        children_stale += 1;
+                    }
                 }
                 drop(kids);
 
@@ -1833,8 +2065,8 @@ impl Ext4FileSystem {
             }
         }
         println!("-- children --");
-        println!("  dir_count={}  entries_total={}  max_per_dir={}  name_bytes={}",
-            dir_count, children_total, children_max, children_name_bytes);
+        println!("  dir_count={}  entries_total={}  alive={}  stale={}  max_per_dir={}  name_bytes={}",
+            dir_count, children_total, children_alive, children_stale, children_max, children_name_bytes);
         println!("-- symlink_target --");
         println!("  cached_count={}  cached_bytes={}", symlink_cached, symlink_bytes);
         println!("-- per_inode_meta --");
@@ -1885,7 +2117,8 @@ impl Ext4FileSystem {
         let approx_ext4 = ic_len * 512; // ~512 bytes per cached ext4 inode
         let approx_page = cached_pages * 4096; // actual cached pages × PAGE_SIZE
         println!("-- memory_est --");
-        println!("  approx_ext4_cache={}  approx_page_cache={}", approx_ext4, approx_page);
+        println!("  approx_ext4_cache={}  approx_page_cache={}  approx_children_name={}",
+            approx_ext4, approx_page, children_name_bytes);
     }
 }
 

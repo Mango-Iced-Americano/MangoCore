@@ -39,6 +39,44 @@ pub fn flush_all_page_caches() {
     });
 }
 
+/// Evict clean pages from all registered caches. Called periodically
+/// to prevent unbounded PageCache growth.
+pub fn evict_all_clean_pages(max_per_cache: usize) -> usize {
+    let mut total = 0;
+    PAGE_CACHE_REGISTRY.lock().retain(|weak| {
+        if let Some(pc) = weak.upgrade() {
+            total += pc.evict_clean_pages(max_per_cache);
+            true
+        } else {
+            false
+        }
+    });
+    total
+}
+
+/// 返回全局 PageCache registry 统计: (len, capacity, alive, stale)
+pub fn registry_stats() -> (usize, usize, usize, usize) {
+    let reg = PAGE_CACHE_REGISTRY.lock();
+    let len = reg.len();
+    let cap = reg.capacity();
+    let alive = reg.iter().filter(|w| w.upgrade().is_some()).count();
+    let stale = len.saturating_sub(alive);
+    (len, cap, alive, stale)
+}
+
+/// 聚合所有 alive PageCache 的 entries 统计: (total_len, total_cap, total_live, total_holes)
+pub fn entries_global_stats() -> (usize, usize, usize, usize) {
+    let mut tlen = 0; let mut tcap = 0; let mut tlive = 0; let mut tholes = 0;
+    let reg = PAGE_CACHE_REGISTRY.lock();
+    for weak in reg.iter() {
+        if let Some(pc) = weak.upgrade() {
+            let (len, cap, live, holes) = pc.entries_stats();
+            tlen += len; tcap += cap; tlive += live; tholes += holes;
+        }
+    }
+    (tlen, tcap, tlive, tholes)
+}
+
 // ── PageState ────────────────────────────────────────────────────────────
 
 /// 页面状态，对标 Linux 的 `PG_*` 标志组合
@@ -225,6 +263,62 @@ impl PageCache {
     /// 获取缓存中的页面数量
     pub fn cached_page_count(&self) -> usize {
         self.entries.lock().iter().filter(|e| e.is_some()).count()
+    }
+
+    /// Evict up to `target` clean pages that are held only by the cache.
+    /// Checks: UpToDate state, not in dirty set, PageEntry refcount==1,
+    /// AND FrameTracker refcount==1 (protects mmap'd pages).
+    /// Returns the number evicted.
+    pub fn evict_clean_pages(&self, target: usize) -> usize {
+        let mut entries = self.entries.lock();
+        let mut inner = self.inner.lock();
+        let mut evicted = 0;
+
+        for i in 0..entries.len() {
+            if evicted >= target {
+                break;
+            }
+            if let Some(entry) = &entries[i] {
+                if entry.state() != PageState::UpToDate {
+                    continue;
+                }
+                if inner.dirty_pages.contains(&i) {
+                    continue;
+                }
+                if Arc::strong_count(entry) != 1 {
+                    continue;
+                }
+                if Arc::strong_count(&entry.page) != 1 {
+                    continue;
+                }
+                // Safe to evict — only the cache holds this page, not mmap'd
+                inner.pages.remove(&i);
+                entries[i] = None;
+                evicted += 1;
+            }
+        }
+
+        // Shrink trailing Nones
+        while entries.last().map_or(false, |e| e.is_none()) {
+            entries.pop();
+        }
+
+        evicted
+    }
+
+    /// 回收干净页面（仅释放 UpToDate 且无外部引用的页）
+    pub fn shrink_clean_pages(&self, max_to_free: usize) -> usize {
+        self.evict_clean_pages(max_to_free)
+    }
+
+    /// 返回 entries 元数据: (len, capacity, live, holes)
+    pub fn entries_stats(&self) -> (usize, usize, usize, usize) {
+        let entries = self.entries.lock();
+        let len = entries.len();
+        let cap = entries.capacity();
+        let live = entries.iter().filter(|e| e.is_some()).count();
+        let holes = len.saturating_sub(live);
+        (len, cap, live, holes)
     }
 
     /// 获取页面状态

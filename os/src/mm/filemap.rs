@@ -78,7 +78,7 @@ pub(super) fn filemap_private_fault<T: PageTable>(
     let file_size = check_within_file(inode.as_ref(), file_offset)?;
 
     let pc = inode
-        .page_cache()
+        .ensure_page_cache()
         .ok_or(MemoryError::BackingStoreFailure)?;
     let cache_frame = pc
         .frame_for_read(file_offset >> PAGE_SIZE_BITS)
@@ -103,7 +103,7 @@ pub(super) fn filemap_read_fault<T: PageTable>(
     let file_size = check_within_file(inode.as_ref(), file_offset)?;
 
     let pc = inode
-        .page_cache()
+        .ensure_page_cache()
         .ok_or(MemoryError::BackingStoreFailure)?;
     let page_index = file_offset >> PAGE_SIZE_BITS;
     let cache_frame = pc.frame_for_read(page_index).map_err(map_pc_error)?;
@@ -142,7 +142,7 @@ pub(super) fn filemap_shared_write_fault<T: PageTable>(
     let _file_size = check_within_file(inode.as_ref(), file_offset)?;
 
     let pc = inode
-        .page_cache()
+        .ensure_page_cache()
         .ok_or(MemoryError::BackingStoreFailure)?;
     let page_index = file_offset >> PAGE_SIZE_BITS;
     let cache_frame = pc.frame_for_write(page_index).map_err(map_pc_error)?;

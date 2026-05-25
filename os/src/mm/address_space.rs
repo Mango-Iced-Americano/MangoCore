@@ -70,6 +70,10 @@ impl<T: PageTable> AddressSpace<T> {
     pub fn token(&self) -> usize {
         self.page_table.token()
     }
+    /// VMA 数量（用于诊断）
+    pub fn vma_count(&self) -> usize {
+        self.vmas.len()
+    }
     /// Insert an anonymous segment containing the space between `start_va.floor()` to `end_va.ceil()`.
     /// The space is allocated and added to the current address space.
     /// # Prerequisite
@@ -669,6 +673,14 @@ impl<T: PageTable> AddressSpace<T> {
     pub fn recycle_data_pages(&mut self) {
         //*self = Self::new_bare();
         self.vmas.clear();
+    }
+
+    /// Release all resources for a zombie process: VMA metadata, page table
+    /// frames, and backing Vec storage.  The zombie no longer needs address
+    /// space after exit; only wait4 metadata (pid, exit_code) is required.
+    pub fn release_for_zombie(&mut self) {
+        self.vmas.clear_no_hole();
+        self.page_table.release_frames();
     }
     pub fn sbrk(&mut self, increment: isize) -> usize {
         super::mmap::do_sbrk(self, increment)

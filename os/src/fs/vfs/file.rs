@@ -147,7 +147,7 @@ impl FdTable {
     const INITIAL_CAPACITY: usize = 32;
     const MAX_CAPACITY: usize = SYSTEM_FD_LIMIT;
 
-    /// 创建空的 FdTable
+    /// 创建一个新的 FdTable
     pub fn new() -> Self {
         let capacity = Self::INITIAL_CAPACITY;
         let mut fds = Vec::with_capacity(capacity);
@@ -168,23 +168,34 @@ impl FdTable {
         }
     }
 
+    /// 释放内部 Vec 的 backing storage，替换为零容量的空 Vec。
+    /// 用于 zombie 进程退出时释放 fd 表占用的堆内存。
+    pub fn release_backing_storage(&mut self) {
+        self.fds = alloc::vec::Vec::new();
+        self.cloexec = alloc::vec::Vec::new();
+        self.next_fd = 0;
+    }
+
     /// 克隆 FdTable（fork 时用）
     pub fn try_clone(&self) -> Result<Self, SyscallErr> {
+        let hi = self.highest_open_index().map(|i| i + 1).unwrap_or(0);
+        let clone_len = hi.max(Self::INITIAL_CAPACITY).min(self.fds.len());
+
         let mut fds = Vec::new();
-        if fds.try_reserve(self.fds.len()).is_err() {
+        if fds.try_reserve(clone_len).is_err() {
             return Err(SyscallErr::ENOMEM);
         }
         fds.extend(
-            self.fds
+            self.fds[..clone_len]
                 .iter()
                 .map(|opt| opt.as_ref().and_then(|f| f.try_clone())),
         );
 
         let mut cloexec = Vec::new();
-        if cloexec.try_reserve(self.cloexec.len()).is_err() {
+        if cloexec.try_reserve(clone_len).is_err() {
             return Err(SyscallErr::ENOMEM);
         }
-        cloexec.extend(self.cloexec.iter().copied());
+        cloexec.extend(self.cloexec[..clone_len].iter().copied());
 
         Ok(FdTable {
             fds,
@@ -419,6 +430,11 @@ impl FdTable {
     /// 获取 FdTable 的容量（最大可能的 fd 索引 + 1）
     pub fn len(&self) -> usize {
         self.fds.len()
+    }
+
+    /// 获取底层 Vec 的 capacity（堆分配大小）
+    pub fn capacity(&self) -> usize {
+        self.fds.capacity()
     }
 
     // ── exec 相关 ─────────────────────────────────────────────────
@@ -952,7 +968,7 @@ impl File {
         // Helper: allocate frames + pread full file content into them
         let alloc_and_pread = |size: usize, need_pages: usize| -> Vec<Arc<FrameTracker>> {
             log::debug!(
-                "[map_to_kernel_space] allocating {} frames + pread {} bytes",
+                "[map_to_kernel_space] allocating {} frames + pread {} bytes (page-at-a-time)",
                 need_pages,
                 size
             );
@@ -960,23 +976,20 @@ impl File {
             for _ in 0..need_pages {
                 trackers.push(frame_alloc().expect("map_to_kernel_space: frame_alloc failed"));
             }
-            let mut buf = alloc::vec![0u8; size];
-            let n = self
-                .pread(0, &mut buf)
-                .expect("map_to_kernel_space: pread failed");
-            if n != size {
-                log::warn!(
-                    "[map_to_kernel_space] pread returned {} bytes, expected {} (file_size={})",
-                    n,
-                    size,
-                    self.get_size()
-                );
-            }
+            // pread directly into each frame, avoiding a monolithic heap Vec
             let mut offset = 0;
             for tracker in &trackers {
                 let dst = tracker.ppn.get_bytes_array();
                 let chunk = (size - offset).min(PAGE_SIZE);
-                dst[..chunk].copy_from_slice(&buf[offset..offset + chunk]);
+                let n = self
+                    .pread(offset, &mut dst[..chunk])
+                    .expect("map_to_kernel_space: pread failed");
+                if n != chunk {
+                    log::warn!(
+                        "[map_to_kernel_space] pread at offset {} returned {} bytes, expected {}",
+                        offset, n, chunk
+                    );
+                }
                 offset += chunk;
             }
             trackers

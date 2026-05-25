@@ -1,8 +1,8 @@
 # MangoCore FS-LTP 分诊与推进计划
 
-> 最后更新: 2026-05-20
-> 状态: Phase 0 — 体系建设中
-> Oracle 审查: 已通过 (2026-05-20)
+> 最后更新: 2026-05-22
+> 状态: Round-0 ✅ → Round-1 进行中 → Mount 专项启动
+> Oracle 审查: 已通过 (2026-05-20, 2026-05-22 两轮)
 
 ## 0. 核心原则
 
@@ -263,15 +263,45 @@ LTP 每个 testcase 有两层属性，必须分开记录：
 3. 每个 stress testcase 必须单独运行，必须有硬超时
 4. stress 只用于发现稳定性问题，不用于定义基础语义
 
-### 4.5 长期排除（不进入任何 Round）
+### 4.5 FS-Round-MNT: Mount 子系统 (Bind/Recursive/Move)
+
+> **目标**: 实现 mount 动态挂载功能，打通 fs_bind 测试系列。
+> **详细计划**: `Doc/ltp_mount_plan.md`
+> **Oracle 审查**: 已通过 (2026-05-22)
+
+**当前状态**: `sys_mount(40)` 已存在，但只支持"创建新 tmpfs 挂载"一种操作。
+`sys_umount2(39)` 已实现基础卸载。MountFS/MountFSInode/mountpoints 基础设施完备。
+
+**Phases**:
+
+| Phase | 功能 | 测试覆盖 | 预计 |
+|-------|------|---------|------|
+| **MNT-1: MS_BIND** | 基础 bind mount | fs_bind/bind/ 25 脚本 | 1-2 天 |
+| **MNT-2: MS_REC** | 递归 bind mount | fs_bind/rbind/ 40 脚本 | +0.5 天 |
+| **MNT-3: MS_MOVE** (可选) | 移动挂载点 | fs_bind/move/ 22 脚本 | +0.5 天 |
+
+**本轮不覆盖（独立专项）**:
+- mount propagation (shared/slave/private/unbindable) — 需 peer_group 引擎
+- mount namespace (CLONE_NEWNS) — 需 per-process mount tree
+- /dev/loop* + 块设备热插拔
+- 新 mount API (fsopen/fsmount/open_tree/move_mount) — Linux 5.2+
+
+**关键风险**:
+- 跨 mountpoint 路径解析回归
+- 递归 bind 环 → vfs_lookup 无限循环
+- page cache 共享语义（bind mount 不创建新 FS 实例）
+
+**验证**: 每 Phase 完成后跑全量回归集 + iperf/netperf 零退化。
+
+### 4.6 长期排除（不进入任何 Round）
 
 | 类别 | 测例数(约) | 原因 |
 |------|-----------|------|
 | xattr 系列 | ~32 | 扩展属性，比赛内核范围外 |
 | ACL 系列 | ~1 | 访问控制列表 |
 | quota 系列 | ~9 | 磁盘配额 |
-| namespace 相关 | ~7 | 命名空间隔离 |
-| mount propagation | ~85 | 挂载传播（fs_bind 系列） |
+| namespace 相关 | ~7 | 命名空间隔离 (Mount Round 独立专项) |
+| mount propagation | ~85 | 挂载传播 — 当前只做 bind/rbind/move，传播后续专项 |
 | fanotify | ~25 | 文件通知框架 |
 | inotify | ~14 | inode 通知框架 |
 | chroot/pivot_root | ~5 | 根目录切换 |
@@ -343,6 +373,16 @@ LTP 每个 testcase 有两层属性，必须分开记录：
 **os_test.conf 映射**:
 - `ltp_include` = 回归集 + 探索集
 - `ltp_exclude` + `ltp_exclude_musl` + `ltp_exclude_glibc` = 强制排除集
+
+### 6.2 Mount Round 特殊流程
+
+Mount Round 因涉及基础设施改动（路径解析跨 mountpoint、sys_mount 参数分流），修复流程与标准 family 不同：
+
+1. **不按 family 迭代** — bind/rbind/move 是同一套内核逻辑的三个 phase
+2. **每次改动后跑全量回归** — 不仅跑当前 phase 子集，还要跑 Round-0/1 全部回归集 + iperf/netperf
+3. **防环检查是硬门禁** — 任何改动后必须验证递归 bind 不会形成环（vfs_lookup 无限循环 → panic）
+4. **每 Phase 完成即 commit** — 不在一个 commit 里堆 bind + rbind + move
+5. **Phase 间可暂停** — MNT-1 完成后可以先跑全量确认稳定，再决定是否继续 MNT-2
 
 ---
 
@@ -484,8 +524,8 @@ LTP 每个 testcase 有两层属性，必须分开记录：
 | xattr 系列 | ~32 | UNSUPPORTED |
 | ACL | ~1 | UNSUPPORTED |
 | quota | ~9 | UNSUPPORTED |
-| namespace | ~7 | UNSUPPORTED |
-| mount propagation (fs_bind) | ~85 | UNSUPPORTED |
+| namespace (cloneNS) | ~7 | → FS-Round-MNT 后续 (CLONE_NEWNS 专项) |
+| mount propagation (fs_bind) | ~96 | → FS-Round-MNT (bind/rbind/move 专项) |
 | fanotify | ~25 | UNSUPPORTED |
 | inotify | ~14 | UNSUPPORTED |
 | direct I/O (diotest) | ~6 | UNSUPPORTED |

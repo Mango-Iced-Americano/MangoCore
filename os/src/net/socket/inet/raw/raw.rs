@@ -255,3 +255,15 @@ impl RawSocket {
             .push((socket.socket_handler, Arc::downgrade(socket)));
     }
 }
+
+impl Drop for RawSocket {
+    fn drop(&mut self) {
+        log::info!("[RawSocket::drop] removing handle {}", self.socket_handler);
+        crate::net::RAW_SOCKETS
+            .lock()
+            .retain(|(h, _)| *h != self.socket_handler);
+        crate::net::config::NET_INTERFACE.inner_handler(|inner| {
+            inner.sockets.remove(self.socket_handler);
+        });
+    }
+}

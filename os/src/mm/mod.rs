@@ -4,6 +4,8 @@ mod filemap;
 mod frame_store;
 mod frame_allocator;
 mod heap_allocator;
+#[cfg(feature = "heap_trace")]
+pub mod heap_trace;
 mod kernel_mapper;
 mod kernel_space;
 mod vma;
@@ -25,7 +27,7 @@ pub use frame_allocator::{
     unallocated_frames, FrameTracker,
 };
 pub use frame_store::Frame;
-pub use heap_allocator::heap_stats;
+pub use heap_allocator::{heap_free_histogram, heap_stats};
 pub use vma::{MapFlags, MapPermission};
 pub use address_space::{AddressSpace, MemoryError};
 pub use kernel_space::{kernel_token, KernelSpace, KERNEL_SPACE};
@@ -61,6 +63,8 @@ pub use uaccess::{
 
 pub fn init() {
     heap_allocator::init_heap();
+    #[cfg(feature = "heap_trace")]
+    heap_trace::enable();
     frame_allocator::init_frame_allocator();
     KERNEL_SPACE.lock().activate();
 }

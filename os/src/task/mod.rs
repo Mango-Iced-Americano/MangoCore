@@ -47,7 +47,7 @@ pub use task::{
     FsStatus, PosixTimer, RobustList, Rusage, TaskControlBlock, TaskStatus, UtsNamespace,
 };
 
-use self::processor::PROCESSOR;
+pub use self::processor::PROCESSOR;
 #[allow(unused)]
 pub fn try_yield() {
     let lock = PROCESSOR.lock();

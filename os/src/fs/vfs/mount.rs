@@ -99,6 +99,16 @@ impl PartialOrd for MountPath {
 
 // ── MountFSInode ────────────────────────────────────────────────────────
 
+/// Debug: lifetime counters for MountFS / MountFSInode
+pub mod counters {
+    use core::sync::atomic::AtomicUsize;
+    pub static MOUNTFS_ALIVE: AtomicUsize = AtomicUsize::new(0);
+    pub static MOUNTFSINODE_ALIVE: AtomicUsize = AtomicUsize::new(0);
+
+    pub fn mountfs_alive() -> usize { MOUNTFS_ALIVE.load(core::sync::atomic::Ordering::Relaxed) }
+    pub fn mountfsinode_alive() -> usize { MOUNTFSINODE_ALIVE.load(core::sync::atomic::Ordering::Relaxed) }
+}
+
 /// MountFSInode — 挂载感知的 inode 包装器
 ///
 /// 包装内层 inode，所有 `IndexNode` 方法委托给 `inner_inode`。
@@ -116,6 +126,7 @@ pub struct MountFSInode {
 impl MountFSInode {
     /// 创建新 MountFSInode
     pub fn new(inner_inode: Arc<dyn IndexNode>, mount_fs: Arc<MountFS>) -> Arc<Self> {
+        counters::MOUNTFSINODE_ALIVE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         Arc::new_cyclic(|self_ref| MountFSInode {
             inner_inode,
             mount_fs,
@@ -167,10 +178,7 @@ impl MountFSInode {
             lock.get(&inode_id).cloned()
         };
         match sub_mountfs {
-            Some(sub) => {
-                sub.set_self_mountpoint(Some(self_inode));
-                sub.mountpoint_root_inode()
-            }
+            Some(sub) => sub.mountpoint_root_inode(),
             None => self_inode,
         }
     }
@@ -374,6 +382,10 @@ impl IndexNode for MountFSInode {
         self.inner_inode.page_cache()
     }
 
+    fn ensure_page_cache(&self) -> Option<Arc<super::super::page_cache::PageCache>> {
+        self.inner_inode.ensure_page_cache()
+    }
+
     fn sync(&self) -> Result<(), SyscallErr> {
         self.inner_inode.sync()
     }
@@ -462,6 +474,12 @@ impl IndexNode for MountFSInode {
     }
 }
 
+impl Drop for MountFSInode {
+    fn drop(&mut self) {
+        counters::MOUNTFSINODE_ALIVE.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 // ── MountFS ─────────────────────────────────────────────────────────────
 
 /// MountFS — 挂载感知的文件系统包装器
@@ -489,8 +507,27 @@ pub struct MountFS {
 impl MountFS {
     /// 创建新的 MountFS
     pub fn new(inner_filesystem: Arc<dyn FileSystem>, mount_flags: MountFlags) -> Arc<Self> {
+        counters::MOUNTFS_ALIVE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         Arc::new_cyclic(|self_ref| MountFS {
             root_inner_inode: None,
+            inner_filesystem,
+            mountpoints: Mutex::new(BTreeMap::new()),
+            self_mountpoint: Mutex::new(None),
+            mount_flags: Mutex::new(mount_flags),
+            mount_source: Mutex::new(None),
+            self_ref: Mutex::new(self_ref.clone()),
+        })
+    }
+
+    /// 创建以指定 inode 为根的 MountFS（用于 bind mount）
+    pub fn new_with_root(
+        inner_filesystem: Arc<dyn FileSystem>,
+        root_inner_inode: Arc<dyn IndexNode>,
+        mount_flags: MountFlags,
+    ) -> Arc<Self> {
+        counters::MOUNTFS_ALIVE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        Arc::new_cyclic(|self_ref| MountFS {
+            root_inner_inode: Some(root_inner_inode),
             inner_filesystem,
             mountpoints: Mutex::new(BTreeMap::new()),
             self_mountpoint: Mutex::new(None),
@@ -535,9 +572,9 @@ impl MountFS {
         }
         // 从父文件系统的挂载表中移除
         if let Some(mountpoint) = self.self_mountpoint.lock().take() {
-            let _ = mountpoint
-                .mount_fs
-                .remove_mount(mountpoint.inner_inode.metadata()?.inode_id);
+            if let Ok(md) = mountpoint.inner_inode.metadata() {
+                mountpoint.mount_fs.remove_mount(md.inode_id);
+            }
         }
         self.inner_filesystem.on_umount();
         Ok(())
@@ -577,6 +614,12 @@ impl MountFS {
 
     pub fn set_mount_source(&self, source: Option<String>) {
         *self.mount_source.lock() = source;
+    }
+}
+
+impl Drop for MountFS {
+    fn drop(&mut self) {
+        counters::MOUNTFS_ALIVE.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
     }
 }
 

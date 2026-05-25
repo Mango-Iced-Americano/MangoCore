@@ -345,15 +345,14 @@ impl Ext4FileSystem {
         self.link_no_parent_flush(&mut parent_ref, &mut child_mut, name)?;
         super::counters::inc_counter!(super::counters::SYMLINK_DIR_BLOCK_WRITE_COUNT);
 
-        // 4. Flush parent once, child once
+        // 4. Flush parent and child — use child_mut which has updated links_count
         self.write_back_inode(&mut parent_ref);
         super::counters::inc_counter!(super::counters::SYMLINK_PARENT_INODE_WRITE_COUNT);
 
-        let mut final_ref = child_ref.clone();
-        self.write_back_inode(&mut final_ref);
+        self.write_back_inode(&mut child_mut);
         super::counters::inc_counter!(super::counters::SYMLINK_INODE_WRITE_COUNT);
 
-        Ok(final_ref)
+        Ok(child_mut)
     }
 
     /// 创建inode

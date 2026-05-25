@@ -42,7 +42,7 @@ impl Frame {
         match self {
             Frame::InMemory(frame_ref) => {
                 if Arc::strong_count(frame_ref) == 1 {
-                    let swap_tracker = SWAP_DEVICE.lock().write(frame_ref.ppn.get_bytes_array());
+                    let swap_tracker = SWAP_DEVICE.lock().write(frame_ref.ppn.get_bytes_array())?;
                     let swap_id = swap_tracker.0;
                     *self = Frame::SwappedOut(swap_tracker);
                     Ok(swap_id)
@@ -59,7 +59,7 @@ impl Frame {
     pub fn force_swap_out(&mut self) -> Result<usize, MemoryError> {
         match self {
             Frame::InMemory(frame_ref) => {
-                let swap_tracker = SWAP_DEVICE.lock().write(frame_ref.ppn.get_bytes_array());
+                let swap_tracker = SWAP_DEVICE.lock().write(frame_ref.ppn.get_bytes_array())?;
                 let swap_id = swap_tracker.0;
                 *self = Frame::SwappedOut(swap_tracker);
                 Ok(swap_id)
@@ -76,7 +76,7 @@ impl Frame {
                 let ppn = frame.ppn;
                 SWAP_DEVICE
                     .lock()
-                    .read(swap_tracker.0, ppn.get_bytes_array());
+                    .read(swap_tracker.0, ppn.get_bytes_array())?;
                 *self = Frame::InMemory(frame);
                 Ok(ppn)
             }

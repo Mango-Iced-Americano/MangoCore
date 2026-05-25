@@ -71,9 +71,18 @@ impl OomAwareAllocator {
 unsafe impl GlobalAlloc for OomAwareAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         for _ in 0..3 {
-            if let Ok(ptr) = self.inner.lock().alloc(layout) {
+            let mut inner = self.inner.lock();
+            if let Ok(ptr) = inner.alloc(layout) {
+                let block_size = layout.size()
+                    .max(layout.align())
+                    .max(core::mem::size_of::<usize>())
+                    .next_power_of_two();
+                drop(inner);
+                #[cfg(feature = "heap_trace")]
+                crate::mm::heap_trace::record_alloc(ptr.as_ptr(), layout, block_size);
                 return ptr.as_ptr();
             }
+            drop(inner);
             if !self.recover_for(layout) {
                 break;
             }
@@ -83,6 +92,8 @@ unsafe impl GlobalAlloc for OomAwareAllocator {
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         if let Some(ptr) = core::ptr::NonNull::new(ptr) {
+            #[cfg(feature = "heap_trace")]
+            crate::mm::heap_trace::record_dealloc(ptr.as_ptr());
             self.inner.lock().dealloc(ptr, layout);
         }
     }
@@ -111,16 +122,27 @@ pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
     println!("triggered by syscall: {}", syscall_name);
     println!("layout: size={}, align={}", layout.size(), layout.align());
     println!("KERNEL_HEAP_SIZE: {} bytes", KERNEL_HEAP_SIZE);
+    #[cfg(feature = "heap_trace")]
+    crate::mm::heap_trace::dump_oom(layout);
     println!("======================================");
     crate::hal::shutdown()
 }
 
-/// 返回 (free_bytes, total_bytes) 用于诊断
-pub fn heap_stats() -> (usize, usize) {
+/// 返回 (free_bytes, total_bytes, allocated_user, allocated_actual, internal_waste)
+/// where internal_waste = allocated_actual - allocated_user (fragmentation overhead)
+pub fn heap_stats() -> (usize, usize, usize, usize, usize) {
     let heap = HEAP_ALLOCATOR.inner.lock();
     let total = heap.stats_total_bytes();
-    let allocated = heap.stats_alloc_actual();
-    (total.saturating_sub(allocated), total)
+    let alloc_actual = heap.stats_alloc_actual();
+    let alloc_user = heap.stats_alloc_user();
+    let free = total.saturating_sub(alloc_actual);
+    let waste = alloc_actual.saturating_sub(alloc_user);
+    (free, total, alloc_user, alloc_actual, waste)
+}
+
+/// 返回每 order 的空闲块数（order 0 = 1B, order 16 = 64KB, ...）
+pub fn heap_free_histogram() -> [usize; 32] {
+    HEAP_ALLOCATOR.inner.lock().free_block_counts()
 }
 
 /// 全局堆内存空间

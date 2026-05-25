@@ -516,6 +516,7 @@ impl ProcessControlBlock {
         for fd in open_fds {
             let _ = fd_table.drop_fd(fd);
         }
+        fd_table.release_backing_storage();
     }
 
     /// 完成进程级退出收尾。
@@ -573,7 +574,7 @@ impl ProcessControlBlock {
 
         let vm = self.vm();
         if Arc::strong_count(&vm) <= 2 {
-            vm.lock().recycle_data_pages();
+            vm.lock().release_for_zombie();
         }
         self.close_files_on_exit();
     }

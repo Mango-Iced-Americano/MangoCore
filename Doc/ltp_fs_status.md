@@ -1,8 +1,8 @@
 # FS-LTP Testcase 状态表
 
 > 最后更新: 2026-05-22
-> 当前阶段: Round-0 ✅ → Round-1 进行中
-> Oracle 审查: 已通过 (2026-05-22, 两轮)
+> 当前阶段: Round-0 ✅ → Round-1 进行中 → Mount 专项 Phase 1
+> Oracle 审查: 已通过 (2026-05-22, 三轮含 Mount 策略)
 
 ## 字段说明
 
@@ -379,6 +379,36 @@
 
 ## 强制排除清单 (~200+)
 
+### Mount 系统状态（FS-Round-MNT）
+
+> **详细计划**: `Doc/ltp_mount_plan.md`
+
+| syscall | 当前能力 | 缺失 |
+|---------|---------|------|
+| `mount(40)` | 创建新 RamFS 挂载 | MS_BIND/MS_REC/MS_MOVE/MS_REMOUNT |
+| `umount2(39)` | 基础卸载 + MNT_FORCE | MNT_DETACH 未完整实现 |
+
+**基础设施状态**:
+- MountFS / MountFSInode / mountpoints BTreeMap ✅
+- add_mount / remove_mount / umount ✅
+- 启动时静态挂载 (/dev, /proc, /tmp) ✅
+- `/proc/mounts` ✅
+- MS_BIND/MS_REC/MS_MOVE 常量定义 ✅
+- bind mount 逻辑 ❌ (`filesystemtype=NULL → EINVAL`, 无 source 解析)
+- 递归 bind / mount propagation / mount namespace ❌
+
+**fs_bind 系列 (96 脚本)**:
+
+| 子目录 | 数量 | 依赖 | Phase |
+|--------|------|------|-------|
+| bind/ | 25 | MS_BIND | MNT-1 |
+| rbind/ | 40 | MS_BIND + MS_REC | MNT-2 |
+| move/ | 22 | MS_MOVE | MNT-3 (可选) |
+| cloneNS/ | 7 | CLONE_NEWNS | 后续专项 |
+| 杂项 | 2 | — | MNT-1/MNT-2 |
+
+**当前 fs_bind 状态**: 所有脚本在 `mount --bind` 第一步返回 EINVAL（`filesystemtype=NULL` 被第 2114 行拦截）。
+
 ### UNSUPPORTED — 不支持的特性
 
 | 类别 | 测例数 | 代表 |
@@ -386,8 +416,6 @@
 | xattr | ~32 | setxattr*, getxattr*, listxattr* |
 | ACL | ~1 | tacl_xattr.sh |
 | quota | ~9 | quotactl01-09 |
-| namespace/bind | ~7 | fs_bind* |
-| mount propagation | ~85 | fs_bind* (bind/rbind/move) |
 | fanotify | ~25 | fanotify01-25 |
 | inotify | ~14 | inotify01-12 |
 | chroot/pivot_root | ~5 | chroot01-04 |
@@ -396,7 +424,7 @@
 | userfaultfd | ~6 | Linux 4.3+ |
 | memfd_create | ~4 | Linux 3.17+ |
 | statmount/listmount | ~13 | Linux 6.8+ |
-| fsconfig/fsmount | ~9 | Linux 5.2+ |
+| fsconfig/fsmount/fsopen | ~9 | Linux 5.2+ |
 | openat2 | ~3 | Linux 5.6+ |
 | close_range | ~2 | Linux 5.9+ |
 | faccessat2 | ~2 | Linux 5.8+ |
@@ -433,5 +461,6 @@
 
 | 日期 | 变更内容 |
 |------|----------|
+| 2026-05-22 | Mount 专项: fs_bind 从 UNSUPPORTED 移到 FS-Round-MNT, 新增 mount 系统状态表, 创建 `Doc/ltp_mount_plan.md` |
 | 2026-05-22 | 重写: Round-0 全PASS, Round-1 部分PASS, 本地摸底360个二进制清单, 回归集~50 |
 | 2026-05-20 | 创建文档, Oracle审查通过 |

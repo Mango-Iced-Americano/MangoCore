@@ -537,4 +537,9 @@ impl PageTable for LAFlexPageTable {
     fn unmap_identical(&mut self, vpn: VirtPageNum) {
         self.unmap(vpn)
     }
+
+    fn release_frames(&mut self) {
+        self.frames.clear();
+        self.frames.shrink_to_fit();
+    }
 }

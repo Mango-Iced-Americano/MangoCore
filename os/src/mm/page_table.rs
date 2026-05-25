@@ -83,6 +83,9 @@ pub trait PageTable {
     {
         Self::new()
     }
+    /// Release all page table frames to the frame allocator.
+    /// Used when a zombie process no longer needs its address space.
+    fn release_frames(&mut self);
     /// Create an empty page table from `satp`
     /// # Argument
     /// * `satp` Supervisor Address Translation & Protection reg. that points to the physical page containing the root page.

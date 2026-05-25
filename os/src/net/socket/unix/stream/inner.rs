@@ -61,6 +61,8 @@ pub struct Connected {
     pub addr: Option<UnixEndpointBound>,
     /// 对端地址
     pub peer_addr: Option<UnixEndpointBound>,
+    /// 对端进程凭证 (pid, uid, gid) — SO_PEERCRED
+    pub peer_creds: Option<(u32, u32, u32)>,
     /// 发送缓冲区（写入此缓冲区 → 对端可以读到）
     pub peer_rx: Arc<Mutex<RingBuffer<u8>>>,
     /// 接收缓冲区（从此缓冲区读取 → 对端写入的数据）
@@ -80,12 +82,14 @@ impl Connected {
             Self {
                 addr: None,
                 peer_addr: None,
+                peer_creds: None,
                 peer_rx: buf_b.clone(),
                 rx: buf_a.clone(),
             },
             Self {
                 addr: None,
                 peer_addr: None,
+                peer_creds: None,
                 peer_rx: buf_a,
                 rx: buf_b,
             },
