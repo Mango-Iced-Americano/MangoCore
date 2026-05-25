@@ -1005,6 +1005,26 @@ impl SigInfo {
         self.si_signo as usize
     }
 
+    pub fn errno(&self) -> i32 {
+        self.si_errno as i32
+    }
+
+    pub fn code(&self) -> i32 {
+        self.si_code as i32
+    }
+
+    pub fn sender_pid(&self) -> u32 {
+        self.si_pid
+    }
+
+    pub fn sender_uid(&self) -> u32 {
+        self.si_uid
+    }
+
+    pub fn value(&self) -> usize {
+        self.si_value
+    }
+
     pub fn is_kernel_generated(&self) -> bool {
         (self.si_code as i32) >= 0
     }

@@ -43,7 +43,7 @@ pub use mm::{
 pub use signal::{
     sys_kcmp, sys_kill, sys_pidfd_getfd, sys_pidfd_open, sys_pidfd_send_signal, sys_rt_sigpending,
     sys_rt_sigqueueinfo, sys_rt_sigsuspend, sys_sigaction, sys_sigaltstack, sys_sigprocmask,
-    sys_sigreturn, sys_sigtimedwait, sys_tgkill, sys_tkill,
+    sys_sigreturn, sys_signalfd4, sys_sigtimedwait, sys_tgkill, sys_tkill,
 };
 pub use time::{
     sys_adjtimex, sys_clock_adjtime, sys_clock_getres, sys_clock_gettime, sys_clock_nanosleep,
