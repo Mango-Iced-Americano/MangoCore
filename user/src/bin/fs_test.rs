@@ -1979,6 +1979,7 @@ fn test_unlink_open_file_lifecycle() -> bool {
     dump_sub_profile("lc3_before_close");
 
     // Read again via same fd — content must still be accessible
+    sys_lseek(fd as usize, 0, SEEK_SET);
     let mut buf2 = [0u8; 64];
     let n2 = sys_read(fd as usize, &mut buf2);
     if n2 <= 0 || &buf2[..n2 as usize] != pattern {
