@@ -22,9 +22,11 @@ use alloc::{
     vec::Vec,
 };
 use core::fmt::Debug;
+use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use spin::{Mutex, MutexGuard};
 use lazy_static::lazy_static;
 
+use super::dentry_cache::DentryCache;
 use super::{
     file::FileFlags, file_system::FileSystem, propagation::{MountPropagation, PropagationType, register_peer, propagate_mount, propagate_umount, unregister_peer_mount},
     FilePrivateData, FileType, IndexNode, InodeId, InodeMode,
@@ -184,13 +186,47 @@ impl MountFSInode {
         }
     }
 
-    /// 逐级查找子项（带挂载点交叉）
+    /// 逐级查找子项（带挂载点交叉和 dentry 缓存）
     fn do_find(&self, name: &str) -> Result<Arc<MountFSInode>, SyscallErr> {
+        // Shortcut: skip dentry cache for dynamic filesystems (procfs)
+        if self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
+            let inner_inode = self.inner_inode.find(name)?;
+            return Ok(MountFSInode::overlaid_inode(MountFSInode::new(
+                inner_inode,
+                self.mount_fs.clone(),
+            )));
+        }
+
+        let parent_ino = self.inner_inode.metadata()?.inode_id;
+        let key = super::dentry_cache::DentryKey {
+            parent_ino,
+            name: String::from(name),
+        };
+
+        // Check dentry cache — returns covered dentry
+        if let Some(cached) = self.mount_fs.dentry_cache.lock().get(&key) {
+            return Ok(MountFSInode::overlaid_inode(cached));
+        }
+
+        // Cache miss: record generation before disk I/O
+        let gen_before = self.mount_fs.dentry_gen.load(core::sync::atomic::Ordering::Acquire);
+
+        // Release cache lock, perform actual filesystem lookup
         let inner_inode = self.inner_inode.find(name)?;
-        Ok(MountFSInode::overlaid_inode(MountFSInode::new(
-            inner_inode,
-            self.mount_fs.clone(),
-        )))
+
+        // Create covered dentry (before mount-point overlay)
+        let covered = MountFSInode::new(inner_inode, self.mount_fs.clone());
+
+        // Insert into cache — only if directory was not modified concurrently
+        let gen_after = self.mount_fs.dentry_gen.load(core::sync::atomic::Ordering::Acquire);
+        if gen_before == gen_after {
+            let (entry, evicted) = self.mount_fs.dentry_cache.lock().insert_or_get(key, covered);
+            drop(evicted); // Drop outside lock
+            Ok(MountFSInode::overlaid_inode(entry))
+        } else {
+            // Directory was modified (unlink/rename/etc.), don't cache stale dentry
+            Ok(MountFSInode::overlaid_inode(covered))
+        }
     }
 
     /// 查找父目录
@@ -335,20 +371,63 @@ impl IndexNode for MountFSInode {
         mode: InodeMode,
     ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
         self.ensure_mount_writable()?;
+        self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
         let inner_inode = self.inner_inode.create(name, file_type, mode)?;
-        Ok(MountFSInode::new(inner_inode, self.mount_fs.clone()))
+        let wrapper = MountFSInode::new(inner_inode, self.mount_fs.clone());
+        if !self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
+            if let Ok(parent_md) = self.inner_inode.metadata() {
+                let key = super::dentry_cache::DentryKey {
+                    parent_ino: parent_md.inode_id,
+                    name: String::from(name),
+                };
+                let (_, evicted) = self.mount_fs.dentry_cache.lock()
+                    .insert_or_get(key, wrapper.clone());
+                drop(evicted);
+            }
+        }
+        Ok(wrapper)
     }
 
     fn symlink(&self, name: &str, target: &str) -> Result<Arc<dyn IndexNode>, SyscallErr> {
         self.ensure_mount_writable()?;
+        self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
         let inner_inode = self.inner_inode.symlink(name, target)?;
-        Ok(MountFSInode::new(inner_inode, self.mount_fs.clone()))
+        let wrapper = MountFSInode::new(inner_inode, self.mount_fs.clone());
+        if !self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
+            if let Ok(parent_md) = self.inner_inode.metadata() {
+                let key = super::dentry_cache::DentryKey {
+                    parent_ino: parent_md.inode_id,
+                    name: String::from(name),
+                };
+                let (_, evicted) = self.mount_fs.dentry_cache.lock()
+                    .insert_or_get(key, wrapper.clone());
+                drop(evicted);
+            }
+        }
+        Ok(wrapper)
     }
 
     fn link(&self, name: &str, other: &Arc<dyn IndexNode>) -> Result<(), SyscallErr> {
         self.ensure_mount_writable()?;
+        self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
         let other = MountFSInode::unwrap_inode(other);
-        self.inner_inode.link(name, &other)
+        self.inner_inode.link(name, &other)?;
+        if !self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
+            if let Ok(parent_md) = self.inner_inode.metadata() {
+                let key = super::dentry_cache::DentryKey {
+                    parent_ino: parent_md.inode_id,
+                    name: String::from(name),
+                };
+                let linked = MountFSInode::new(
+                    self.inner_inode.find(name).unwrap_or(other),
+                    self.mount_fs.clone(),
+                );
+                let (_, evicted) = self.mount_fs.dentry_cache.lock()
+                    .insert_or_get(key, linked);
+                drop(evicted);
+            }
+        }
+        Ok(())
     }
 
     fn rename(
@@ -358,12 +437,27 @@ impl IndexNode for MountFSInode {
         new_name: &str,
     ) -> Result<(), SyscallErr> {
         self.ensure_mount_writable()?;
+        self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
+
         let new_parent = MountFSInode::unwrap_inode(new_parent);
-        self.inner_inode.rename(old_name, &new_parent, new_name)
+        self.inner_inode.rename(old_name, &new_parent, new_name)?;
+
+        if !self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
+            if let Ok(parent_md) = self.inner_inode.metadata() {
+                let old_key = super::dentry_cache::DentryKey {
+                    parent_ino: parent_md.inode_id,
+                    name: String::from(old_name),
+                };
+                let old_evicted = self.mount_fs.dentry_cache.lock().invalidate(&old_key);
+                drop(old_evicted);
+            }
+        }
+        Ok(())
     }
 
     fn unlink(&self, name: &str) -> Result<(), SyscallErr> {
         self.ensure_mount_writable()?;
+        self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
         // 检查是否为挂载点
         if let Ok(inode) = self.inner_inode.find(name) {
             let inode_id = inode.metadata()?.inode_id;
@@ -371,19 +465,49 @@ impl IndexNode for MountFSInode {
                 return Err(SyscallErr::EBUSY);
             }
         }
-        self.inner_inode.unlink(name)
+        self.inner_inode.unlink(name)?;
+        if !self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
+            if let Ok(parent_md) = self.inner_inode.metadata() {
+                let key = super::dentry_cache::DentryKey {
+                    parent_ino: parent_md.inode_id,
+                    name: String::from(name),
+                };
+                let removed = self.mount_fs.dentry_cache.lock().invalidate(&key);
+                drop(removed);
+            }
+        }
+        Ok(())
     }
 
     fn rmdir(&self, name: &str) -> Result<(), SyscallErr> {
         self.ensure_mount_writable()?;
+        self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
         // 检查是否为挂载点
-        if let Ok(inode) = self.inner_inode.find(name) {
+        let child_inode_id = if let Ok(inode) = self.inner_inode.find(name) {
             let inode_id = inode.metadata()?.inode_id;
             if self.mount_fs.mountpoints.lock().contains_key(&inode_id) {
                 return Err(SyscallErr::EBUSY);
             }
+            Some(inode_id)
+        } else {
+            None
+        };
+        self.inner_inode.rmdir(name)?;
+        if !self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
+            if let Ok(parent_md) = self.inner_inode.metadata() {
+                let key = super::dentry_cache::DentryKey {
+                    parent_ino: parent_md.inode_id,
+                    name: String::from(name),
+                };
+                let removed = self.mount_fs.dentry_cache.lock().invalidate(&key);
+                drop(removed);
+            }
+            if let Some(child_ino) = child_inode_id {
+                let evicted = self.mount_fs.dentry_cache.lock().clear_parent(child_ino);
+                drop(evicted);
+            }
         }
-        self.inner_inode.rmdir(name)
+        Ok(())
     }
 
     fn metadata(&self) -> Result<super::Metadata, SyscallErr> {
@@ -553,6 +677,13 @@ pub struct MountFS {
     propagation: MountPropagation,
     /// 指向自身的弱引用
     self_ref: Mutex<Weak<MountFS>>,
+    /// Dentry cache: (parent_ino, name) → Arc<MountFSInode>
+    pub dentry_cache: Mutex<DentryCache>,
+    /// 目录版本号，任何目录修改（create/unlink/rmdir/rename）后递增。
+    /// 用于检测并发修改，防止 find() 插入 stale dentry。
+    pub dentry_gen: AtomicU64,
+    /// 禁用 dentry cache 的动态文件系统（如 procfs）
+    pub no_dentry_cache: AtomicBool,
 }
 
 impl MountFS {
@@ -569,6 +700,9 @@ impl MountFS {
             mount_path: Mutex::new(None),
             propagation: MountPropagation::new_private(),
             self_ref: Mutex::new(self_ref.clone()),
+            dentry_cache: Mutex::new(DentryCache::new()),
+            dentry_gen: AtomicU64::new(0),
+            no_dentry_cache: AtomicBool::new(false),
         })
     }
 
@@ -589,6 +723,9 @@ impl MountFS {
             mount_path: Mutex::new(None),
             propagation: MountPropagation::new_private(),
             self_ref: Mutex::new(self_ref.clone()),
+            dentry_cache: Mutex::new(DentryCache::new()),
+            dentry_gen: AtomicU64::new(0),
+            no_dentry_cache: AtomicBool::new(false),
         })
     }
 
@@ -650,6 +787,11 @@ impl MountFS {
                     );
                 }
             }
+        }
+        // Clear dentry cache to break MountFS → cache → MountFSInode → MountFS cycle
+        {
+            let evicted = self.dentry_cache.lock().clear_all();
+            drop(evicted);
         }
         self.inner_filesystem.on_umount();
         Ok(())

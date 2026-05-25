@@ -23,6 +23,7 @@
 //! BlockDevice (块设备)
 //! ```
 
+pub mod dentry_cache;
 pub mod event;
 pub mod file;
 pub mod file_system;

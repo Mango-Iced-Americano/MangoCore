@@ -147,6 +147,7 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
         crate::fs::procfs::files::register_all(procfs.root())
             .expect("procfs: failed to register root entries");
         let procfs_mnt = self::vfs::MountFS::new(procfs, self::vfs::MountFlags::empty());
+        procfs_mnt.no_dentry_cache.store(true, core::sync::atomic::Ordering::Relaxed);
         procfs_mnt.set_mount_path(Some(alloc::string::String::from("/proc")));
         if let Some(proc_mfsi) = proc_inode.as_any_ref().downcast_ref::<self::vfs::MountFSInode>() {
             let backref = self::vfs::MountFSInode::new(
