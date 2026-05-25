@@ -183,6 +183,33 @@ impl Vma {
         }
         Ok(ppn)
     }
+
+    pub fn alloc_one_zeroed_unmapped(
+        &mut self,
+        vpn: VirtPageNum,
+    ) -> Result<PhysPageNum, MemoryError> {
+        let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
+        let ppn = frame.ppn;
+        self.inner.alloc_in_memory(vpn, frame)?;
+        Ok(ppn)
+    }
+
+    pub(super) fn map_existing_in_memory<T: PageTable>(
+        &mut self,
+        page_table: &mut T,
+        vpn: VirtPageNum,
+    ) -> Result<PhysPageNum, MemoryError> {
+        if UserMapper::new(page_table).is_mapped(vpn) {
+            return Err(MemoryError::AlreadyMapped);
+        }
+        let ppn = self
+            .inner
+            .get_in_memory(&vpn)
+            .map(|frame| frame.ppn)
+            .ok_or(MemoryError::NotMapped)?;
+        self.map_page_with_perm(page_table, vpn, ppn, self.map_perm)?;
+        Ok(ppn)
+    }
     /// Unmap a page in current area.
     /// If it is framed, then the physical pages will be removed from the `data_frames` Btree.
     /// This is unnecessary if the area is directly mapped.

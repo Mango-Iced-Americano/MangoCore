@@ -4,7 +4,7 @@ use super::vma::Vma;
 use super::vma::{VmAreaKind, VmAreaMapping, VmPageState};
 use super::{FaultAccess, MemoryError, PageTable, PhysAddr, VirtAddr, VirtPageNum};
 use crate::utils::error::SyscallErr;
-use log::{debug, error, info, warn};
+use log::{debug, error, warn};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct FaultContext {
@@ -91,8 +91,11 @@ impl PageFaultHandler {
             FaultAction::Cow => copy_private_page(area, page_table, ctx),
             // 已映射页读取/执行: 直接翻译物理地址。
             FaultAction::MappedRead => translate_mapped_page(page_table, ctx),
-            // 元数据认为页在内存中，但页表没有映射: 保留旧错误语义。
-            FaultAction::ResidentWithoutPte => reject_resident_frame_without_pte(area, ctx),
+            // MAP_SHARED anonymous pages may preallocate shared frames but install
+            // user PTEs lazily so mincore can still observe real residency.
+            FaultAction::ResidentWithoutPte => {
+                map_existing_resident_page(area, page_table, ctx).map(|ppn| ctx.offset_phys(ppn))
+            }
         }
     }
 
@@ -144,17 +147,18 @@ fn check_area_permission(area: &Vma, ctx: FaultContext) -> Result<(), MemoryErro
     }
 }
 
-fn reject_resident_frame_without_pte(
-    area: &Vma,
+fn map_existing_resident_page<T: PageTable>(
+    area: &mut Vma,
+    page_table: &mut T,
     ctx: FaultContext,
-) -> Result<PhysAddr, MemoryError> {
-    info!(
-        "[resident without pte] addr: {:?}, vpn: {:?}, state: {:?}",
+) -> Result<super::PhysPageNum, MemoryError> {
+    debug!(
+        "[do_page_fault] map resident page without pte: addr={:?}, vpn={:?}, state={:?}",
         ctx.addr,
         ctx.vpn,
         area.vm_page_state(ctx.vpn)
     );
-    Err(MemoryError::NotMapped)
+    area.map_existing_in_memory(page_table, ctx.vpn)
 }
 
 fn map_lazy_zero_page<T: PageTable>(

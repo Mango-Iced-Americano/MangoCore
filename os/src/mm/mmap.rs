@@ -222,15 +222,15 @@ pub(super) fn do_mmap<T: PageTable>(
     }
 
     if flags.contains(MapFlags::MAP_SHARED) && new_area.map_file.is_none() {
-        // Anonymous MAP_SHARED still maps pages eagerly (with size limit).
+        // Anonymous MAP_SHARED preallocates shared frames so fork inherits the
+        // same backing pages, but installs user PTEs lazily. This keeps Linux
+        // mincore/mlock2 residency semantics: untouched pages are not present.
         if len > MAX_EAGER_MMAP_SIZE {
             return ENOMEM;
         }
         let vpn_range = new_area.inner.vpn_range;
         for vpn in vpn_range {
-            if let Err(err) =
-                new_area.map_one_zeroed_unchecked(&mut address_space.page_table, vpn)
-            {
+            if let Err(err) = new_area.alloc_one_zeroed_unmapped(vpn) {
                 return match err {
                     MemoryError::OutOfMemory => ENOMEM,
                     _ => EINVAL,

@@ -220,6 +220,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | 问题 | 根因 | 修复 |
 |------|------|------|
 | MAP_SHARED 父子进程数据不一致 | fork 时 CoW 破坏共享语义 | MAP_SHARED 页面跳过 CoW，fork 时恢复 W 权限 |
+| `mlock201` 中 `mlock2(0)` 锁 1 页却显示 8 页 present | 匿名 `MAP_SHARED` mmap 直接安装整段 PTE，`mincore()` 无法区分未触达页 | 匿名 shared 可以预分配共享 frame 保留 fork 语义，但 PTE 要懒安装；首次访问/`mlock` fault-in 再映射现有 frame |
 | unmap 后读到 PTE 残留值 | 未刷新 TLB，CPU 仍用旧缓存 | **所有 PTE 修改后 `sfence.vma` / `invtlb`** |
 | heap allocator panic | 内核堆耗尽 | `try_reserve` 防御 + OOM killer |
 | `brk`/`mmap` 返回意外值 | 堆/mmap 区域冲突 | 检查 `program_break` 边界 |
