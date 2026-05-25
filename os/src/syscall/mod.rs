@@ -140,6 +140,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_PRCTL => "prctl",
         SYSCALL_GETCPU => "getcpu",
         SYSCALL_GET_TIME_OF_DAY => "get_time_of_day",
+        SYSCALL_SET_TIME_OF_DAY => "set_time_of_day",
         SYSCALL_ADJTIMEX => "adjtimex",
         SYSCALL_GETPID => "getpid",
         SYSCALL_GETPPID => "getppid",
@@ -232,7 +233,7 @@ use crate::{
     mm::{translated_byte_buffer, UserAccess, UserBuffer},
     syscall::errno::Errno,
     task::{current_user_token, Rusage},
-    timer::{ITimerVal, TimeSpec, Times},
+    timer::{ITimerVal, TimeSpec, TimeVal, Times},
 };
 
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
@@ -453,6 +454,9 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[0] as *mut crate::timer::TimeVal,
             args[1] as *mut crate::timer::TimeZone,
         ),
+        SYSCALL_SET_TIME_OF_DAY => {
+            sys_settimeofday(args[0] as *const TimeVal, args[1] as *const crate::timer::TimeZone)
+        }
         SYSCALL_ADJTIMEX => sys_adjtimex(args[0] as *mut Timex),
         SYSCALL_CLOCK_ADJTIME => sys_clock_adjtime(args[0], args[1] as *mut Timex),
         SYSCALL_SETPGID => sys_setpgid(args[0], args[1]),

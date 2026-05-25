@@ -125,6 +125,7 @@ pub const SYSCALL_UMASK: usize = 166;
 pub const SYSCALL_PRCTL: usize = 167;
 pub const SYSCALL_GETCPU: usize = 168;
 pub const SYSCALL_GET_TIME_OF_DAY: usize = 169;
+pub const SYSCALL_SET_TIME_OF_DAY: usize = 170;
 pub const SYSCALL_ADJTIMEX: usize = 171;
 pub const SYSCALL_GETPID: usize = 172;
 pub const SYSCALL_GETPPID: usize = 173;

@@ -520,6 +520,34 @@ pub fn sys_gettimeofday(tv: *mut TimeVal, tz: *mut TimeZone) -> isize {
     SUCCESS
 }
 
+fn is_valid_timeval(timeval: TimeVal) -> bool {
+    timeval.tv_sec <= isize::MAX as usize && timeval.tv_usec < USEC_PER_SEC
+}
+
+pub fn sys_settimeofday(tv: *const TimeVal, tz: *const TimeZone) -> isize {
+    let token = current_user_token();
+    if !tz.is_null() {
+        if let Err(errno) = UserPtr::new(tz).read(token) {
+            return errno;
+        }
+    }
+    if tv.is_null() {
+        return SUCCESS;
+    }
+    let timeval = match UserPtr::new(tv).read(token) {
+        Ok(value) => value,
+        Err(errno) => return errno,
+    };
+    if !is_valid_timeval(timeval) {
+        return EINVAL;
+    }
+    if !has_time_adjust_permission() {
+        return EPERM;
+    }
+    set_current_timespec(timeval_to_timespec(timeval));
+    SUCCESS
+}
+
 fn valid_timex_modes(modes: u32) -> bool {
     matches!(modes, ADJ_OFFSET_SINGLESHOT | ADJ_OFFSET_SS_READ)
         || (modes & !ADJ_VALID_MASK == 0)
