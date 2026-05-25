@@ -240,6 +240,7 @@ pub fn trap_handler() -> ! {
                     MemoryError::NoPermission
                     | MemoryError::BadAddress
                     | MemoryError::NotMapped => {
+                        inner.sigmask.remove(Signals::SIGSEGV);
                         inner.add_signal(Signals::SIGSEGV);
                     }
                     MemoryError::OutOfMemory => {
@@ -250,6 +251,7 @@ pub fn trap_handler() -> ! {
                             "[page_fault] unexpected memory error {:?}, send SIGSEGV",
                             other
                         );
+                        inner.sigmask.remove(Signals::SIGSEGV);
                         inner.add_signal(Signals::SIGSEGV);
                     }
                 },
@@ -276,12 +278,14 @@ pub fn trap_handler() -> ! {
             log::info!("[trap] trigger SIGILL/FPU from exception {:?}", cause);
             let task = current_task().unwrap();
             let mut inner = task.acquire_inner_lock();
+            inner.sigmask.remove(Signals::SIGILL);
             inner.add_signal(Signals::SIGILL);
         }
         Trap::Exception(Exception::AddressError) => {
             log::info!("[trap] trigger SIGSEGV from address error");
             let task = current_task().unwrap();
             let mut inner = task.acquire_inner_lock();
+            inner.sigmask.remove(Signals::SIGSEGV);
             inner.add_signal(Signals::SIGSEGV);
         }
         Trap::Interrupt(Interrupt::Timer) => {

@@ -15,20 +15,16 @@ fn process_signal_target(
     process: &ProcessControlBlock,
     signal: Signals,
 ) -> Option<Arc<TaskControlBlock>> {
-    let mut interruptible = None;
     for task in process.threads() {
         let inner = task.acquire_inner_lock();
         if inner.task_status == TaskStatus::Zombie {
             continue;
         }
-        if inner.task_status == TaskStatus::Interruptible && interruptible.is_none() {
-            interruptible = Some(task.clone());
-        }
         if !signal.difference(inner.sigmask).is_empty() {
             return Some(task.clone());
         }
     }
-    interruptible
+    None
 }
 
 pub fn send_process_signal(process: &ProcessControlBlock, signal: Signals) -> bool {

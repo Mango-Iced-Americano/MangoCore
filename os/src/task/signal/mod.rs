@@ -138,10 +138,10 @@ const SYSCALL_SIGTIMEDWAIT: usize = 137;
 const SYSCALL_RT_SIGSUSPEND: usize = 133;
 
 impl Signals {
-    // SIGILL | SIGKILL | SIGSEGV | SIGSTOP
-    /// 不能被处理的信号
+    // SIGKILL | SIGSTOP
+    /// Signals that cannot be blocked by user sigprocmask.
     pub const CAN_NOT_BE_MASKED: Signals =
-        Signals::from_bits_truncate(1 << 3 | 1 << 8 | 1 << 10 | 1 << 18);
+        Signals::from_bits_truncate(1 << 8 | 1 << 18);
     const EMPTY: Signals = Signals::empty();
     /// if 0 <= signum < 64, return `Ok(Signals)`, else return `Err()` (illeagal)
     pub fn from_signum(signum: usize) -> Result<Signals, ()> {
