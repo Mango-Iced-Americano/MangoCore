@@ -1,4 +1,5 @@
 use crate::hal::{trap_cx_bottom_from_tid, ustack_bottom_from_tid};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use lazy_static::*;
 use spin::Mutex;
@@ -63,8 +64,8 @@ lazy_static! {
 pub struct TidHandle(pub usize);
 
 /// 分配一个用户可见 tid。
-pub fn tid_alloc() -> TidHandle {
-    TidHandle(TID_ALLOCATOR.lock().alloc())
+pub fn tid_alloc() -> Arc<TidHandle> {
+    Arc::new(TidHandle(TID_ALLOCATOR.lock().alloc()))
 }
 
 impl Drop for TidHandle {

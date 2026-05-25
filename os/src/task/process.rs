@@ -1,5 +1,5 @@
 use super::{
-    pid::RecycleAllocator,
+    pid::{RecycleAllocator, TidHandle},
     registry,
     signal::{PendingSignal, SignalQueue, Sighand, Signals},
     threads::Futex,
@@ -29,6 +29,8 @@ pub struct ProcessControlBlock {
     pub pid: usize,
     /// 线程组主线程 tid。
     pub leader_tid: usize,
+    /// 保持进程 pid/tgid 在 zombie 被 wait 回收前不被复用。
+    _pid_handle: Arc<TidHandle>,
     /// 属于该进程的线程列表。
     pub threads: Mutex<Vec<Weak<TaskControlBlock>>>,
     /// 父进程 wait4() 等待子进程退出的等待队列。
@@ -150,6 +152,7 @@ impl ProcessControlBlock {
     pub fn new(
         pid: usize,
         leader_tid: usize,
+        pid_handle: Arc<TidHandle>,
         pgid: usize,
         sid: usize,
         parent: Option<Weak<ProcessControlBlock>>,
@@ -173,6 +176,7 @@ impl ProcessControlBlock {
         Self {
             pid,
             leader_tid,
+            _pid_handle: pid_handle,
             threads: Mutex::new(Vec::new()),
             child_exit_wait: Mutex::new(WaitQueue::new()),
             vfork_parent: Mutex::new(None),

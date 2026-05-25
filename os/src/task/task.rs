@@ -4,9 +4,7 @@ use super::registry;
 use super::signal::*;
 use super::threads::{futex_wake_shared, Futex};
 use super::TaskContext;
-use super::{
-    tid_alloc, trap_cx_bottom_from_slot, ustack_bottom_from_slot, TidHandle,
-};
+use super::{tid_alloc, trap_cx_bottom_from_slot, ustack_bottom_from_slot, TidHandle};
 use crate::config::{MMAP_BASE, USER_STACK_SIZE};
 use crate::fs::vfs;
 use crate::fs::{vfs_lookup_absolute, vfs_root};
@@ -71,7 +69,7 @@ impl UtsNamespace {
 pub struct TaskControlBlock {
     // 不可变字段
     /// 用户可见线程 ID，即 gettid() 返回值
-    pub tid: TidHandle,
+    pub tid: Arc<TidHandle>,
     /// 同一地址空间内 trap context / 默认用户栈的资源槽位
     pub user_res_slot: usize,
     /// 所属用户可见进程
@@ -616,6 +614,7 @@ impl TaskControlBlock {
         let process = Arc::new(ProcessControlBlock::new(
             pid,
             tid_handle.0,
+            tid_handle.clone(),
             pgid,
             pgid,
             None,
@@ -962,6 +961,7 @@ impl TaskControlBlock {
             Arc::new(ProcessControlBlock::new(
                 tid_handle.0,
                 tid_handle.0,
+                tid_handle.clone(),
                 self.process.getpgid(),
                 self.process.getsid(),
                 parent_process.as_ref().map(Arc::downgrade),
