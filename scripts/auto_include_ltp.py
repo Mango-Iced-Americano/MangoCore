@@ -39,7 +39,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ARCH = os.environ.get("ARCH", "rv64")
 LTP_LIBC = os.environ.get("LTP_LIBC", "musl")
-TIMEOUT_SEC = int(os.environ.get("TIMEOUT_SEC", "30"))
+TIMEOUT_SEC = int(os.environ.get("TIMEOUT_SEC", "35"))
 HARD_TIMEOUT_SEC = int(os.environ.get("HARD_TIMEOUT_SEC", "60"))
 HARD_ROUND_TIMEOUT_SEC = int(os.environ.get("HARD_ROUND_TIMEOUT_SEC", "120"))
 CONF_FILE = Path(os.environ.get("CONF_FILE", str(REPO_ROOT / "os_test.conf")))

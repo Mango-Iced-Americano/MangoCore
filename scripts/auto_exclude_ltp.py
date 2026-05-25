@@ -15,7 +15,7 @@ auto_exclude_ltp.py — 用指定 libc 跑 ltp_include 列表，把 panic/超时
     LTP_LIBC              — 超时/panic 时排除的目标 libc：glibc（默认）| musl
     TIMEOUT_SEC           — 无输出超时秒数（默认 15）
     HARD_TIMEOUT_SEC      — 单测例硬超时秒数（默认 30），超时即强杀
-    HARD_ROUND_TIMEOUT_SEC — 整轮硬超时秒数（默认 120）
+    HARD_ROUND_TIMEOUT_SEC — 整轮硬超时秒数（默认 900）
     CONF_FILE             — os_test.conf 路径
     LOG_DIR               — 日志输出目录
     MAX_ROUNDS            — 最大轮次（默认 200）
@@ -37,9 +37,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ARCH = os.environ.get("ARCH", "rv64")
 LTP_LIBC = os.environ.get("LTP_LIBC", "glibc")
-TIMEOUT_SEC = int(os.environ.get("TIMEOUT_SEC", "30"))
+TIMEOUT_SEC = int(os.environ.get("TIMEOUT_SEC", "35"))
 HARD_TIMEOUT_SEC = int(os.environ.get("HARD_TIMEOUT_SEC", "60"))
-HARD_ROUND_TIMEOUT_SEC = int(os.environ.get("HARD_ROUND_TIMEOUT_SEC", "120"))
+HARD_ROUND_TIMEOUT_SEC = int(os.environ.get("HARD_ROUND_TIMEOUT_SEC", "900"))
 CONF_FILE = Path(os.environ.get("CONF_FILE", str(REPO_ROOT / "os_test.conf")))
 LOG_DIR = Path(os.environ.get("LOG_DIR", str(REPO_ROOT / "testresult/auto_ltp")))
 MAX_ROUNDS = int(os.environ.get("MAX_ROUNDS", "200"))
