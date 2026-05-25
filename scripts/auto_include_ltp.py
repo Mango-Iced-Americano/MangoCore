@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """
 auto_include_ltp.py — 多轮自动收集有 TPASS 的 LTP 测例（两阶段架构）
+（也可作为 auto_exclude_ltp 使用：panic/超时的测例自动加入对应 libc 的排除列表。）
 
 Phase 1 (运行): 控制 QEMU 启动/超时/Kill，写日志到文件。
 Phase 2 (扫描): 解析已完成 round 的日志，提取有 TPASS 的 case。
 
 用法：
+    # 默认排除 musl（等同于 LTP_LIBC=musl）
     python3 scripts/auto_include_ltp.py
+    # 排除 glibc
+    LTP_LIBC=glibc python3 scripts/auto_include_ltp.py
 
 环境变量：
     ARCH                  — rv64（默认）| la64
+    LTP_LIBC              — 超时/panic 时排除的目标 libc：musl（默认）| glibc
     TIMEOUT_SEC           — 无输出超时秒数（默认 15）
     HARD_TIMEOUT_SEC      — 单测例硬超时秒数（默认 30），超时即强杀
     HARD_ROUND_TIMEOUT_SEC — 整轮硬超时秒数（默认 120）
@@ -33,6 +38,7 @@ from pathlib import Path
 # ============================================================
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ARCH = os.environ.get("ARCH", "rv64")
+LTP_LIBC = os.environ.get("LTP_LIBC", "musl")
 TIMEOUT_SEC = int(os.environ.get("TIMEOUT_SEC", "30"))
 HARD_TIMEOUT_SEC = int(os.environ.get("HARD_TIMEOUT_SEC", "60"))
 HARD_ROUND_TIMEOUT_SEC = int(os.environ.get("HARD_ROUND_TIMEOUT_SEC", "120"))
@@ -191,8 +197,9 @@ def write_temp_conf(
     exclude_musl: list[str],
     exclude_glibc: list[str],
     from_case: str,
+    ltp_libc: str,
 ) -> None:
-    """生成临时配置文件（ltp_include 置空 + ltp_libc 固定为 musl）"""
+    """生成临时配置文件（ltp_include 置空 + ltp_libc 由参数决定）"""
     base_lines = CONF_FILE.read_text().splitlines()
     skip_keys = {
         "mask", "ltp_include", "ltp_exclude",
@@ -208,7 +215,7 @@ def write_temp_conf(
     output_lines.append(f"ltp_exclude_musl={list_to_conf(exclude_musl)}")
     output_lines.append(f"ltp_exclude_glibc={list_to_conf(exclude_glibc)}")
     output_lines.append(f"ltp_from={from_case}")
-    output_lines.append("ltp_libc=musl")
+    output_lines.append(f"ltp_libc={ltp_libc}")
     TEMP_CONF.write_text("\n".join(output_lines) + "\n")
 
 
@@ -493,6 +500,9 @@ def main():
     run_target = resolve_run_target(arch)
     img_file, img_backup = resolve_image_paths(arch)
 
+    if LTP_LIBC not in ("musl", "glibc"):
+        die(f"LTP_LIBC must be 'musl' or 'glibc', got '{LTP_LIBC}'")
+
     if not CONF_FILE.exists():
         die(f"CONF_FILE not found: {CONF_FILE}")
 
@@ -562,7 +572,7 @@ def main():
                     die("re-decompress failed")
             bg_decompress_thread = None
 
-        write_temp_conf(exclude_accum, exclude_musl_accum, exclude_glibc_accum, ltp_from)
+        write_temp_conf(exclude_accum, exclude_musl_accum, exclude_glibc_accum, ltp_from, LTP_LIBC)
 
         if ltp_from:
             log(f"round={round_num} ltp_from={ltp_from} include={len(include_accum)} exclude={len(exclude_accum)}")
@@ -613,11 +623,15 @@ def main():
                 log(f"timeout detected, case={current_case}")
 
             if current_case:
-                exclude_musl_accum = append_item(exclude_musl_accum, current_case)
+                if LTP_LIBC == "musl":
+                    exclude_musl_accum = append_item(exclude_musl_accum, current_case)
+                    write_conf("ltp_exclude_musl", list_to_conf(exclude_musl_accum))
+                else:
+                    exclude_glibc_accum = append_item(exclude_glibc_accum, current_case)
+                    write_conf("ltp_exclude_glibc", list_to_conf(exclude_glibc_accum))
                 ltp_from = current_case
-                write_conf("ltp_exclude_musl", list_to_conf(exclude_musl_accum))
                 write_conf("ltp_from", ltp_from)
-                log(f"excluded (musl): {current_case}")
+                log(f"excluded ({LTP_LIBC}): {current_case}")
                 continue
             else:
                 log("no RUN LTP CASE line found in log, cannot determine current case")
@@ -639,9 +653,11 @@ def main():
     log(f"ltp_include ({len(include_accum)} items) = {list_to_conf(include_accum)}")
     log("")
     log(f"done — {len(include_accum)} cases in include list")
-    log(f"      {len(exclude_musl_accum)} cases in musl exclude list")
-    log(f"      {len(exclude_accum)} cases in global exclude list")
+    log(f"      {len(exclude_musl_accum)} cases in ltp_exclude_musl")
+    log(f"      {len(exclude_glibc_accum)} cases in ltp_exclude_glibc")
+    log(f"      {len(exclude_accum)} cases in ltp_exclude (global)")
     log("")
+    log(f"exclude target: {LTP_LIBC}")
     log("os_test.conf updated")
 
     TEMP_CONF.unlink(missing_ok=True)
