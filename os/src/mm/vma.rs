@@ -22,7 +22,6 @@ impl Debug for Vma {
                 "map_file",
                 &if self.map_file.is_some() { "yes" } else { "no" },
             )
-            .field("locked", &self.locked)
             .field("wipe_on_fork", &self.wipe_on_fork)
             .finish()
     }
@@ -43,7 +42,6 @@ pub struct Vma {
     pub may_write: bool,
 
     pub flags: MapFlags,
-    pub locked: bool,
     pub wipe_on_fork: bool,
 }
 
@@ -57,7 +55,6 @@ impl Vma {
             map_file_offset: self.map_file_offset,
             may_write: self.may_write,
             flags: self.flags,
-            locked: self.locked,
             wipe_on_fork: self.wipe_on_fork,
         })
     }
@@ -94,7 +91,6 @@ impl Vma {
             map_file_offset,
             may_write: true,
             flags: MapFlags::empty(),
-            locked: false,
             wipe_on_fork: false,
         })
     }
@@ -111,7 +107,6 @@ impl Vma {
             map_file_offset: another.map_file_offset,
             may_write: another.may_write,
             flags: another.flags,
-            locked: another.locked,
             wipe_on_fork: another.wipe_on_fork,
         }
     }
@@ -563,7 +558,6 @@ impl Vma {
             map_file_offset: second_offset,
             may_write: self.may_write,
             flags: self.flags,
-            locked: self.locked,
             wipe_on_fork: self.wipe_on_fork,
         })
     }
@@ -792,14 +786,6 @@ impl Vma {
 
     pub(super) fn vm_perm(&self) -> MapPermission {
         self.map_perm
-    }
-
-    pub(super) fn vm_locked(&self) -> bool {
-        self.locked
-    }
-
-    pub(super) fn set_vm_locked(&mut self, locked: bool) {
-        self.locked = locked;
     }
 
     pub(super) fn vm_access_allows(&self, access: FaultAccess) -> bool {

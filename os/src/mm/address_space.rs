@@ -13,6 +13,7 @@ use crate::task::{
     current_task, trap_cx_bottom_from_slot, ustack_bottom_from_slot, AuxvEntry, AuxvType, ELFInfo,
 };
 use crate::fs::vfs::IndexNode;
+use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -54,6 +55,8 @@ pub struct AddressSpace<T: PageTable> {
     pub(super) heap_bottom: usize,
     /// 当前 program break。该状态属于地址空间，CLONE_VM 线程自然共享。
     pub(super) heap_pt: usize,
+    /// ABI-visible mlock state used for /proc/<pid>/status VmLck accounting.
+    locked_pages: BTreeSet<VirtPageNum>,
 }
 
 impl<T: PageTable> AddressSpace<T> {
@@ -64,6 +67,7 @@ impl<T: PageTable> AddressSpace<T> {
             vmas: VmaSet::with_capacity(16),
             heap_bottom: 0,
             heap_pt: 0,
+            locked_pages: BTreeSet::new(),
         }
     }
     /// Getter to the token of current memory space, or "this" page table.
@@ -703,6 +707,7 @@ impl<T: PageTable> AddressSpace<T> {
     pub fn recycle_data_pages(&mut self) {
         //*self = Self::new_bare();
         self.vmas.clear();
+        self.locked_pages.clear();
     }
 
     /// Release all resources for a zombie process: VMA metadata, page table
@@ -710,6 +715,7 @@ impl<T: PageTable> AddressSpace<T> {
     /// space after exit; only wait4 metadata (pid, exit_code) is required.
     pub fn release_for_zombie(&mut self) {
         self.vmas.clear_no_hole();
+        self.locked_pages.clear();
         self.page_table.release_frames();
     }
     pub fn sbrk(&mut self, increment: isize) -> usize {
@@ -730,7 +736,15 @@ impl<T: PageTable> AddressSpace<T> {
     }
 
     pub fn munmap(&mut self, start: usize, len: usize) -> Result<(), isize> {
-        super::mmap::do_munmap(self, start, len)
+        let result = super::mmap::do_munmap(self, start, len);
+        if result.is_ok() {
+            if let Some(end) = start.checked_add(len) {
+                let start_vpn = VirtAddr::from(start).floor();
+                let end_vpn = VirtAddr::from(end).ceil();
+                self.set_locked_pages(start_vpn, end_vpn, false);
+            }
+        }
+        result
     }
 
     pub fn mprotect(&mut self, addr: usize, len: usize, prot: MapPermission) -> Result<(), isize> {
@@ -773,6 +787,26 @@ impl<T: PageTable> AddressSpace<T> {
         Ok((start_vpn, end_vpn, locked_len))
     }
 
+    fn set_locked_pages(
+        &mut self,
+        start_vpn: VirtPageNum,
+        end_vpn: VirtPageNum,
+        locked: bool,
+    ) -> usize {
+        let mut vpn = start_vpn;
+        let mut page_count = 0usize;
+        while vpn < end_vpn {
+            if locked {
+                self.locked_pages.insert(vpn);
+            } else {
+                self.locked_pages.remove(&vpn);
+            }
+            page_count = page_count.saturating_add(1);
+            vpn.0 += 1;
+        }
+        page_count.saturating_mul(PAGE_SIZE)
+    }
+
     pub fn mlock(&mut self, start: usize, len: usize) -> Result<usize, isize> {
         let (start_vpn, end_vpn, locked_len) = self.user_lock_range(start, len)?;
         let mut vpn = start_vpn;
@@ -780,19 +814,19 @@ impl<T: PageTable> AddressSpace<T> {
             self.fault_in_user_va(VirtAddr::from(vpn), FaultAccess::Load)?;
             vpn.0 += 1;
         }
-        self.vmas.lock_range(start_vpn, end_vpn, true)?;
+        self.set_locked_pages(start_vpn, end_vpn, true);
         Ok(locked_len)
     }
 
     pub fn mlock_onfault(&mut self, start: usize, len: usize) -> Result<usize, isize> {
         let (start_vpn, end_vpn, locked_len) = self.user_lock_range(start, len)?;
-        self.vmas.lock_range(start_vpn, end_vpn, true)?;
+        self.set_locked_pages(start_vpn, end_vpn, true);
         Ok(locked_len)
     }
 
     pub fn munlock(&mut self, start: usize, len: usize) -> Result<(), isize> {
         let (start_vpn, end_vpn, _) = self.user_lock_range(start, len)?;
-        self.vmas.lock_range(start_vpn, end_vpn, false)?;
+        self.set_locked_pages(start_vpn, end_vpn, false);
         Ok(())
     }
 
@@ -801,15 +835,25 @@ impl<T: PageTable> AddressSpace<T> {
     }
 
     pub fn locked_user_bytes(&self) -> usize {
-        self.vmas.locked_user_bytes()
+        self.locked_pages.len().saturating_mul(PAGE_SIZE)
     }
 
     pub fn mlockall_current(&mut self) -> usize {
-        self.vmas.lock_all_current()
+        let mut locked_len = 0usize;
+        let ranges: Vec<(VirtPageNum, VirtPageNum)> = self
+            .vmas
+            .iter()
+            .filter(|area| area.vm_is_user())
+            .map(|area| (area.vm_start(), area.vm_end()))
+            .collect();
+        for (start_vpn, end_vpn) in ranges {
+            locked_len = locked_len.saturating_add(self.set_locked_pages(start_vpn, end_vpn, true));
+        }
+        locked_len
     }
 
     pub fn munlockall(&mut self) {
-        self.vmas.unlock_all();
+        self.locked_pages.clear();
     }
 
     pub fn create_elf_tables(
