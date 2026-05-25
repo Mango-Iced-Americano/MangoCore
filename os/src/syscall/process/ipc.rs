@@ -671,15 +671,18 @@ fn semctl_setval_value(arg: usize) -> Result<i32, isize> {
         if (0..=SEMVMX).contains(&low) {
             return Ok(low);
         }
-        if arg >= crate::config::USER_VA_BASE && arg < crate::config::USER_VA_END {
+        if arg > i32::MAX as usize {
             let mut value = 0i32;
-            copy_from_user(
+            if copy_from_user(
                 current_user_token(),
                 arg as *const i32,
                 &mut value as *mut i32,
-            )?;
-            if (0..=SEMVMX).contains(&value) {
-                return Ok(value);
+            )
+            .is_ok()
+            {
+                if (0..=SEMVMX).contains(&value) {
+                    return Ok(value);
+                }
             }
         }
     }
