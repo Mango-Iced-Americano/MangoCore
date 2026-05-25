@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """
-auto_exclude_glibc.py — 用 glibc 跑 ltp_include 列表，把 panic/超时的 case 写入 ltp_exclude_glibc
+auto_exclude_ltp.py — 用指定 libc 跑 ltp_include 列表，把 panic/超时的 case 写入对应 exclude 列表
 
-前提：ltp_include 已由 auto_include_ltp.py (musl) 填充完毕。
+前提：ltp_include 已由 auto_include_ltp.py 填充完毕。
 
 用法：
+    # 排除 glibc（默认）
     python3 scripts/auto_exclude_glibc.py
+    # 排除 musl
+    LTP_LIBC=musl python3 scripts/auto_exclude_glibc.py
 
 环境变量：
     ARCH                  — rv64（默认）| la64
+    LTP_LIBC              — 超时/panic 时排除的目标 libc：glibc（默认）| musl
     TIMEOUT_SEC           — 无输出超时秒数（默认 15）
     HARD_TIMEOUT_SEC      — 单测例硬超时秒数（默认 30），超时即强杀
     HARD_ROUND_TIMEOUT_SEC — 整轮硬超时秒数（默认 120）
@@ -32,6 +36,7 @@ from pathlib import Path
 # ============================================================
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ARCH = os.environ.get("ARCH", "rv64")
+LTP_LIBC = os.environ.get("LTP_LIBC", "glibc")
 TIMEOUT_SEC = int(os.environ.get("TIMEOUT_SEC", "30"))
 HARD_TIMEOUT_SEC = int(os.environ.get("HARD_TIMEOUT_SEC", "60"))
 HARD_ROUND_TIMEOUT_SEC = int(os.environ.get("HARD_ROUND_TIMEOUT_SEC", "120"))
@@ -39,7 +44,7 @@ CONF_FILE = Path(os.environ.get("CONF_FILE", str(REPO_ROOT / "os_test.conf")))
 LOG_DIR = Path(os.environ.get("LOG_DIR", str(REPO_ROOT / "testresult/auto_ltp")))
 MAX_ROUNDS = int(os.environ.get("MAX_ROUNDS", "200"))
 MASK_OVERRIDE = os.environ.get("MASK_OVERRIDE", "0x800")
-TEMP_CONF = Path(f"/tmp/auto_exclude_glibc_{ARCH}.conf")
+TEMP_CONF = Path(f"/tmp/auto_exclude_ltp_{ARCH}.conf")
 
 QEMU_PATTERNS = {
     "rv64": "qemu-system-riscv64",
@@ -52,11 +57,11 @@ RE_PANIC = re.compile(r"panicked at|HEAP ALLOCATION FAILED|Exception\(")
 # 工具函数
 # ============================================================
 def log(msg: str) -> None:
-    print(f"[auto-exclude-glibc] {msg}", flush=True)
+    print(f"[auto-exclude-ltp] {msg}", flush=True)
 
 
 def die(msg: str) -> None:
-    print(f"[auto-exclude-glibc] ERROR: {msg}", file=sys.stderr, flush=True)
+    print(f"[auto-exclude-ltp] ERROR: {msg}", file=sys.stderr, flush=True)
     sys.exit(1)
 
 
@@ -171,10 +176,12 @@ def list_to_conf(lst: list[str]) -> str:
 
 def write_temp_conf(
     include_list: list[str],
-    exclude_glibc: list[str],
+    exclude_target: list[str],
     from_case: str,
+    ltp_libc: str,
+    exclude_key: str,
 ) -> None:
-    """生成临时配置：ltp_libc=glibc，ltp_include 来自主 conf，exclude 只填 glibc 的"""
+    """生成临时配置：ltp_libc 由参数决定，exclude 填入 target libc 的列表"""
     base_lines = CONF_FILE.read_text().splitlines()
     skip_keys = {
         "mask", "ltp_include", "ltp_exclude",
@@ -187,10 +194,14 @@ def write_temp_conf(
     output_lines.append(f"mask={MASK_OVERRIDE}")
     output_lines.append(f"ltp_include={list_to_conf(include_list)}")
     output_lines.append("ltp_exclude=")
-    output_lines.append("ltp_exclude_musl=")
-    output_lines.append(f"ltp_exclude_glibc={list_to_conf(exclude_glibc)}")
+    if exclude_key == "ltp_exclude_musl":
+        output_lines.append(f"ltp_exclude_musl={list_to_conf(exclude_target)}")
+        output_lines.append("ltp_exclude_glibc=")
+    else:
+        output_lines.append("ltp_exclude_musl=")
+        output_lines.append(f"ltp_exclude_glibc={list_to_conf(exclude_target)}")
     output_lines.append(f"ltp_from={from_case}")
-    output_lines.append("ltp_libc=glibc")
+    output_lines.append(f"ltp_libc={ltp_libc}")
     TEMP_CONF.write_text("\n".join(output_lines) + "\n")
 
 
@@ -409,6 +420,10 @@ def main():
     run_target = resolve_run_target(arch)
     img_file, img_backup = resolve_image_paths(arch)
 
+    if LTP_LIBC not in ("musl", "glibc"):
+        die(f"LTP_LIBC must be 'musl' or 'glibc', got '{LTP_LIBC}'")
+    exclude_key = "ltp_exclude_musl" if LTP_LIBC == "musl" else "ltp_exclude_glibc"
+
     if not CONF_FILE.exists():
         die(f"CONF_FILE not found: {CONF_FILE}")
 
@@ -417,14 +432,15 @@ def main():
     # 加载状态
     include_list = unique_list(read_conf("ltp_include"))
     if not include_list:
-        die("ltp_include is empty — run auto_include_ltp.py (musl) first")
+        die("ltp_include is empty — run auto_include_ltp.py first")
 
-    exclude_glibc_accum = unique_list(read_conf("ltp_exclude_glibc"))
+    exclude_target_accum = unique_list(read_conf(exclude_key))
     ltp_from = read_conf("ltp_from")
 
     log(f"start arch={arch} blk_mode={blk_mode} timeout={TIMEOUT_SEC}s")
     log(f"ltp_include has {len(include_list)} cases")
-    log(f"ltp_exclude_glibc already has {len(exclude_glibc_accum)} cases")
+    log(f"{exclude_key} already has {len(exclude_target_accum)} cases")
+    log(f"target libc: {LTP_LIBC}")
     if ltp_from:
         log(f"ltp_from={ltp_from} (resuming)")
 
@@ -454,12 +470,12 @@ def main():
                     die("re-decompress failed")
             bg_decompress_thread = None
 
-        write_temp_conf(include_list, exclude_glibc_accum, ltp_from)
+        write_temp_conf(include_list, exclude_target_accum, ltp_from, LTP_LIBC, exclude_key)
 
         if ltp_from:
-            log(f"round={round_num} ltp_from={ltp_from} glibc_exclude={len(exclude_glibc_accum)}")
+            log(f"round={round_num} ltp_from={ltp_from} {LTP_LIBC}_exclude={len(exclude_target_accum)}")
         else:
-            log(f"round={round_num} glibc_exclude={len(exclude_glibc_accum)}")
+            log(f"round={round_num} {LTP_LIBC}_exclude={len(exclude_target_accum)}")
 
         if not conf_inject(TEMP_CONF, arch, blk_mode):
             die("conf-inject failed repeatedly, aborting")
@@ -471,7 +487,7 @@ def main():
         )
         bg_decompress_thread.start()
 
-        log_file = LOG_DIR / f"exclude_glibc_round_{round_num}.log"
+        log_file = LOG_DIR / f"exclude_ltp_round_{round_num}.log"
 
         # ---- 运行 QEMU ----
         panic, timed_out, current_case = run_qemu_round(
@@ -493,11 +509,11 @@ def main():
                 log(f"timeout detected, case={current_case}")
 
             if current_case:
-                exclude_glibc_accum = append_item(exclude_glibc_accum, current_case)
+                exclude_target_accum = append_item(exclude_target_accum, current_case)
                 ltp_from = current_case
-                write_conf("ltp_exclude_glibc", list_to_conf(exclude_glibc_accum))
+                write_conf(exclude_key, list_to_conf(exclude_target_accum))
                 write_conf("ltp_from", ltp_from)
-                log(f"excluded (glibc): {current_case} (total={len(exclude_glibc_accum)})")
+                log(f"excluded ({LTP_LIBC}): {current_case} (total={len(exclude_target_accum)})")
                 continue
             else:
                 log("no RUN LTP CASE line found, will retry with fresh image")
@@ -508,17 +524,17 @@ def main():
         break
 
     # 写回最终结果
-    write_conf("ltp_exclude_glibc", list_to_conf(exclude_glibc_accum))
+    write_conf(exclude_key, list_to_conf(exclude_target_accum))
     write_conf("ltp_from", "")
 
     # 清理临时文件
     next_img_path.unlink(missing_ok=True)
 
     log("===== Final Results =====")
-    log(f"ltp_exclude_glibc ({len(exclude_glibc_accum)} items)")
-    log(f"  = {list_to_conf(exclude_glibc_accum)}")
+    log(f"{exclude_key} ({len(exclude_target_accum)} items)")
+    log(f"  = {list_to_conf(exclude_target_accum)}")
     log(f"ltp_include total: {len(include_list)}")
-    log(f"glibc-viable cases: {len(include_list) - len(exclude_glibc_accum)}")
+    log(f"{LTP_LIBC}-viable cases: {len(include_list) - len(exclude_target_accum)}")
     log("")
     log("os_test.conf updated")
 
