@@ -199,6 +199,12 @@ impl<T: PageTable> AddressSpace<T> {
         let Some(end) = buf.checked_add(size) else {
             return false;
         };
+        if self.heap_bottom != 0 {
+            let heap_limit = self.heap_bottom.saturating_add(USER_HEAP_SIZE);
+            if buf < heap_limit && end > self.heap_pt && end > self.heap_bottom {
+                return false;
+            }
+        }
         let start_vpn = VirtAddr::from(buf).floor();
         let end_vpn = VirtAddr::from(end).ceil();
         self.vmas

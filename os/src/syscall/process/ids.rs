@@ -2,7 +2,8 @@ use crate::config::{PAGE_SIZE, SYSTEM_TASK_LIMIT};
 use crate::fs::iov::IOVec;
 use crate::mm::{
     check_user_range, copy_from_user_array, copy_to_user, translated_byte_buffer, AddressSpace,
-    FaultAccess, PageTableImpl, StepByOne, UserAccess, UserBuffer, UserPtr, UserPtrMut, VirtAddr,
+    FaultAccess, MapPermission, PageTableImpl, StepByOne, UserAccess, UserBuffer, UserPtr,
+    UserPtrMut, VirtAddr,
 };
 use crate::syscall::errno::*;
 use crate::task::{
@@ -34,6 +35,7 @@ const CAP_SYS_PTRACE: usize = 19;
 const CAP_SYS_NICE: usize = 23;
 const CAP_FULL_SET: u64 = (1u64 << (CAP_LAST_CAP + 1)) - 1;
 const NGROUPS_MAX: usize = 65536;
+const LEGACY_NGROUPS_MAX: usize = 32;
 const PR_SET_PDEATHSIG: usize = 1;
 const PR_GET_PDEATHSIG: usize = 2;
 const PR_GET_DUMPABLE: usize = 3;
@@ -530,14 +532,31 @@ pub fn sys_setgroups(size: usize, list: *const u32) -> isize {
     if size > NGROUPS_MAX {
         return EINVAL;
     }
+    if size > 0 {
+        if list.is_null() {
+            return EFAULT;
+        }
+        let byte_len = match size.checked_mul(size_of::<u32>()) {
+            Some(len) => len,
+            None => return EFAULT,
+        };
+        if !task
+            .process
+            .vm()
+            .lock()
+            .contains_valid_buffer(list as usize, byte_len, MapPermission::R)
+        {
+            return EFAULT;
+        }
+        if size > LEGACY_NGROUPS_MAX {
+            return EINVAL;
+        }
+    }
     let mut groups = Vec::new();
     if groups.try_reserve(size).is_err() {
         return ENOMEM;
     }
     if size > 0 {
-        if list.is_null() {
-            return EFAULT;
-        }
         let token = current_user_token();
         for idx in 0..size {
             let ptr = (list as usize + idx * size_of::<u32>()) as *const u32;
