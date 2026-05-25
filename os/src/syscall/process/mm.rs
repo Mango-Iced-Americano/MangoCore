@@ -128,6 +128,7 @@ pub fn sys_mmap(
     );
 
     let mut may_write = true;
+    let mut write_sealed = false;
     let map_file = if flags.contains(MapFlags::MAP_ANONYMOUS) {
         None
     } else {
@@ -150,6 +151,16 @@ pub fn sys_mmap(
         {
             return EACCES;
         }
+        let seals = file.memfd_seal_bits().unwrap_or(0);
+        let sealed_against_write = (seals
+            & (vfs::file::F_SEAL_WRITE | vfs::file::F_SEAL_FUTURE_WRITE))
+            != 0;
+        if flags.contains(MapFlags::MAP_SHARED) && sealed_against_write {
+            write_sealed = true;
+            if prot.contains(MapPermission::W) {
+                return EPERM;
+            }
+        }
         if flags.contains(MapFlags::MAP_SHARED) {
             may_write = file_writable;
         }
@@ -168,7 +179,16 @@ pub fn sys_mmap(
 
     let vm_ref = task.process.vm();
     let mut memory_set = vm_ref.lock();
-    memory_set.mmap(start, len, prot, flags, offset, map_file, may_write)
+    memory_set.mmap(
+        start,
+        len,
+        prot,
+        flags,
+        offset,
+        map_file,
+        may_write,
+        write_sealed,
+    )
 }
 
 /// # Versions

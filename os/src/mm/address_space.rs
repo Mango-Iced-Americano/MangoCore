@@ -78,6 +78,9 @@ impl<T: PageTable> AddressSpace<T> {
     pub fn vma_count(&self) -> usize {
         self.vmas.len()
     }
+    pub fn has_shared_writable_mapping(&self, inode: &Arc<dyn IndexNode>) -> bool {
+        self.vmas.has_shared_writable_mapping(inode)
+    }
     /// Insert an anonymous segment containing the space between `start_va.floor()` to `end_va.ceil()`.
     /// The space is allocated and added to the current address space.
     /// # Prerequisite
@@ -731,8 +734,19 @@ impl<T: PageTable> AddressSpace<T> {
         offset: usize,
         map_file: Option<Arc<dyn IndexNode>>,
         may_write: bool,
+        write_sealed: bool,
     ) -> isize {
-        super::mmap::do_mmap(self, start, len, prot, flags, offset, map_file, may_write)
+        super::mmap::do_mmap(
+            self,
+            start,
+            len,
+            prot,
+            flags,
+            offset,
+            map_file,
+            may_write,
+            write_sealed,
+        )
     }
 
     pub fn munmap(&mut self, start: usize, len: usize) -> Result<(), isize> {

@@ -2,8 +2,10 @@ use super::user_mapper::UserMapper;
 use super::vma::{MapFlags, MapPermission, Vma};
 use super::{MemoryError, PageTable, VirtAddr, VirtPageNum};
 use crate::config::*;
-use crate::syscall::errno::{EACCES, EINVAL, ENOMEM};
+use crate::fs::vfs::IndexNode;
+use crate::syscall::errno::{EACCES, EINVAL, ENOMEM, EPERM};
 use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use log::{debug, warn};
 
@@ -81,6 +83,20 @@ impl VmaSet {
 
     pub(super) fn len(&self) -> usize {
         self.vmas.len()
+    }
+
+    pub(super) fn has_shared_writable_mapping(&self, inode: &Arc<dyn IndexNode>) -> bool {
+        self.vmas.values().any(|area| {
+            if !area.flags.contains(MapFlags::MAP_SHARED)
+                || !area.map_perm.contains(MapPermission::W)
+            {
+                return false;
+            }
+            match &area.map_file {
+                Some(mapped_inode) => Arc::ptr_eq(mapped_inode, inode),
+                None => false,
+            }
+        })
     }
 
     pub(super) fn is_empty(&self) -> bool {
@@ -518,9 +534,13 @@ impl VmaSet {
             let area = self.vmas.get(&area_start).ok_or(ENOMEM)?;
             if prot.contains(MapPermission::W)
                 && area.flags.contains(MapFlags::MAP_SHARED)
-                && !area.may_write
             {
-                return Err(EACCES);
+                if area.write_sealed {
+                    return Err(EPERM);
+                }
+                if !area.may_write {
+                    return Err(EACCES);
+                }
             }
             cursor = if area.vm_end() < end_vpn {
                 area.vm_end()

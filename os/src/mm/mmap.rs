@@ -108,6 +108,7 @@ pub(super) fn do_sbrk<T: PageTable>(
                 0,
                 None,
                 true,
+                false,
             );
             if ret < 0 {
                 warn!(
@@ -142,6 +143,7 @@ pub(super) fn do_mmap<T: PageTable>(
     offset: usize,
     map_file: Option<Arc<dyn IndexNode>>,
     may_write: bool,
+    write_sealed: bool,
 ) -> isize {
     // not aligned on a page boundary
     if start & 0xfff != 0 {
@@ -206,6 +208,7 @@ pub(super) fn do_mmap<T: PageTable>(
     };
     new_area.flags = flags;
     new_area.may_write = may_write;
+    new_area.write_sealed = write_sealed;
     if !flags.contains(MapFlags::MAP_ANONYMOUS) {
         if offset & (PAGE_SIZE - 1) != 0 || offset > isize::MAX as usize {
             return EINVAL;
