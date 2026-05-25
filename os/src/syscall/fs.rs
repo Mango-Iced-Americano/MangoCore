@@ -9,7 +9,7 @@ use crate::mm::{
 };
 use crate::syscall::utils::wait_io_core;
 use crate::task::{
-    current_task, current_user_token, is_executable_inode_busy, signal, WaitQueue, WaitResult,
+    current_task, current_user_token, is_executable_inode_busy, WaitQueue, WaitResult,
 };
 use crate::timer::{current_timespec, TimeSpec};
 use crate::utils::error::SyscallErr;
@@ -375,6 +375,32 @@ fn pwrite_from_user(file: &vfs::File, token: usize, buf: usize, count: usize, of
     }
 }
 
+fn write_start_offset(file: &vfs::File) -> usize {
+    if file.flags().contains(FileFlags::O_APPEND) {
+        if let Ok(metadata) = file.metadata() {
+            if metadata.size > 0 {
+                return metadata.size as usize;
+            }
+        }
+    }
+    file.offset()
+}
+
+fn apply_fsize_limit(
+    file: &vfs::File,
+    count: usize,
+    offset: usize,
+    fsize_limit: usize,
+) -> Result<usize, isize> {
+    if count == 0 || file.file_type() != FileType::File || fsize_limit == usize::MAX {
+        return Ok(count);
+    }
+    if offset >= fsize_limit {
+        return Err(EFBIG);
+    }
+    Ok(count.min(fsize_limit - offset))
+}
+
 // todo
 pub fn sys_splice(
     fd_in: usize,
@@ -621,7 +647,7 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
 }
 
 pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
-    let count = count.min(MAX_SYSCALL_BUFFER_SIZE);
+    let mut count = count.min(MAX_SYSCALL_BUFFER_SIZE);
     let task = current_task().unwrap();
     let file = {
         let files_ref = task.process.files();
@@ -634,6 +660,11 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
     if file.writable().is_err() {
         return EBADF;
     }
+    let fsize_limit = task.acquire_inner_lock().fsize_limit_cur;
+    count = match apply_fsize_limit(&file, count, write_start_offset(&file), fsize_limit) {
+        Ok(count) => count,
+        Err(errno) => return errno,
+    };
     let is_nonblock = file.is_nonblock();
     let token = task.get_user_token();
     if is_nonblock {
@@ -671,7 +702,7 @@ pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
 }
 
 pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
-    let count = count.min(MAX_SYSCALL_BUFFER_SIZE);
+    let mut count = count.min(MAX_SYSCALL_BUFFER_SIZE);
     let task = current_task().unwrap();
     let files_ref = task.process.files();
         let fd_table = files_ref.lock();
@@ -683,6 +714,11 @@ pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
     if file.writable().is_err() {
         return EBADF;
     }
+    let fsize_limit = task.acquire_inner_lock().fsize_limit_cur;
+    count = match apply_fsize_limit(&file, count, offset, fsize_limit) {
+        Ok(count) => count,
+        Err(errno) => return errno,
+    };
     let token = task.get_user_token();
     pwrite_from_user(&file, token, buf, count, offset)
 }
@@ -752,6 +788,17 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
     };
     let mut kernel_buf = alloc::vec![0u8; user_buf.len()];
     user_buf.read(&mut kernel_buf);
+    let fsize_limit = task.acquire_inner_lock().fsize_limit_cur;
+    let allowed = match apply_fsize_limit(
+        &file,
+        kernel_buf.len(),
+        write_start_offset(&file),
+        fsize_limit,
+    ) {
+        Ok(count) => count,
+        Err(errno) => return errno,
+    };
+    kernel_buf.truncate(allowed);
     match file.write(&kernel_buf) {
         Ok(n) => n as isize,
         Err(e) => -(e as isize),
