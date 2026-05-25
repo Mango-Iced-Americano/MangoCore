@@ -322,14 +322,13 @@ pub fn sys_unshare(flags: u32) -> isize {
 
     let supported = CloneFlags::CLONE_FILES
         | CloneFlags::CLONE_FS
-        | CloneFlags::CLONE_NEWNS
         | CloneFlags::CLONE_NEWUTS;
     if !flags.difference(supported).is_empty() {
         return EINVAL;
     }
 
     let task = current_task().unwrap();
-    if flags.intersects(CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWUTS)
+    if flags.contains(CloneFlags::CLONE_NEWUTS)
         && task.acquire_inner_lock().euid != 0
     {
         return EPERM;
@@ -345,9 +344,6 @@ pub fn sys_unshare(flags: u32) -> isize {
     if flags.contains(CloneFlags::CLONE_NEWUTS) {
         task.process.unshare_uts();
     }
-
-    // MangoCore has a single global mount tree today. Treat CLONE_NEWNS as a
-    // successful private namespace request so basic libc/LTP probes can proceed.
     SUCCESS
 }
 
