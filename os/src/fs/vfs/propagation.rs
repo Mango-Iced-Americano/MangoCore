@@ -226,7 +226,7 @@ pub fn propagate_mount(
     let source_child_group = new_child.propagation().peer_group_id();
 
     for peer in get_peers(source) {
-        let peer_root = peer.mountpoint_root_inode();
+        let peer_root = peer.covered_root_inode();
 
         // Check if this is a root mount event — mountpoint_id matches the
         // peer's root inner inode (e.g., bind-mounting directly onto a

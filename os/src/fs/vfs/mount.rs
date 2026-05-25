@@ -267,12 +267,14 @@ impl MountFSInode {
 
         let new_mount_fs = MountFS::new_with_root(inner_fs, root_inner_inode, mount_flags);
 
-        // Inherit parent's propagation type if parent is shared
+        // Inherit parent's propagation group ID if parent is shared.
+        // Defer peer registration until AFTER propagation to avoid the new
+        // mount appearing as a peer of itself during propagate_mount.
         let parent_prop = self.mount_fs.propagation();
-        if parent_prop.is_shared() {
+        let parent_shared = parent_prop.is_shared();
+        if parent_shared {
             let gid = parent_prop.peer_group_id();
             new_mount_fs.propagation().set_shared_with_group(gid);
-            register_peer(&new_mount_fs);
         }
 
         let backref = MountFSInode::new(self.inner_inode.clone(), self.mount_fs.clone());
@@ -288,13 +290,18 @@ impl MountFSInode {
         }
 
         // Propagate to peers if parent is shared (only from public API)
-        if do_propagate && parent_prop.is_shared() {
+        if do_propagate && parent_shared {
             let mount_path_owned = new_mount_fs.mount_path();
             let child_name = mount_path_owned
                 .as_ref()
                 .and_then(|p| p.rsplit('/').next())
                 .unwrap_or("");
             propagate_mount(&self.mount_fs, inode_id, &new_mount_fs, child_name);
+        }
+
+        // Register in peer group AFTER propagation (prevent self-peer loop)
+        if parent_shared {
+            register_peer(&new_mount_fs);
         }
 
         Ok(new_mount_fs)
@@ -761,6 +768,17 @@ impl MountFS {
         let self_arc = self.self_ref.lock().upgrade().unwrap();
         let root_mount_inode = MountFSInode::new(root_inner, self_arc);
         MountFSInode::overlaid_inode(root_mount_inode)
+    }
+
+    /// 获取"被覆盖的"根 inode — 不穿透子挂载 overlay。
+    /// 用于 propagation peer 定位，避免 mount 被注册到错误的 MountFS 层。
+    pub fn covered_root_inode(&self) -> Arc<MountFSInode> {
+        let root_inner = self
+            .root_inner_inode
+            .clone()
+            .unwrap_or_else(|| self.inner_filesystem.root_inode());
+        let self_arc = self.self_ref.lock().upgrade().unwrap();
+        MountFSInode::new(root_inner, self_arc)
     }
 
     /// 添加子挂载点
