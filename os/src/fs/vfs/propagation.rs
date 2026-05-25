@@ -240,20 +240,25 @@ pub fn get_peers(mfs: &Arc<MountFS>) -> Vec<Arc<MountFS>> {
 }
 
 /// Get all slave mounts that receive propagation from a master group.
+/// Cleans stale weak references on each lookup.
 pub fn get_slaves(master_gid: u32) -> Vec<Arc<MountFS>> {
     if master_gid == 0 {
         return Vec::new();
     }
-    let groups = SLAVE_GROUPS.lock();
-    groups
-        .get(&master_gid)
-        .map_or(Vec::new(), |slaves| {
-            slaves
-                .iter()
-                .filter_map(|w| w.upgrade())
-                .filter(|a| a.propagation().is_slave() && a.propagation().master_group_id() == master_gid)
-                .collect()
-        })
+    let mut groups = SLAVE_GROUPS.lock();
+    let slaves = groups.entry(master_gid).or_default();
+    // Clean stale refs and filter to active Slave mounts with matching master
+    slaves.retain(|w| {
+        if let Some(m) = w.upgrade() {
+            m.propagation().is_slave() && m.propagation().master_group_id() == master_gid
+        } else {
+            false
+        }
+    });
+    slaves
+        .iter()
+        .filter_map(|w| w.upgrade())
+        .collect()
 }
 
 // ============================================================================
@@ -278,10 +283,17 @@ pub fn set_propagation_type(mfs: &Arc<MountFS>, t: PropagationType) {
         prop.set_peer_group_id(0);
     }
 
-    // Leaving Slave: remove from SLAVE_GROUPS and clear master_group_id
-    if old_type == PropagationType::Slave && t != PropagationType::Slave {
-        unregister_slave_mount(mfs);
-        prop.set_master_group_id(0);
+    // Leaving Slave or retargeting Slave: unregister old master
+    if old_type == PropagationType::Slave {
+        let old_master = prop.master_group_id();
+        if t != PropagationType::Slave {
+            // Leaving Slave entirely
+            unregister_slave_mount(mfs);
+            prop.set_master_group_id(0);
+        } else if old_master != prop.master_group_id() {
+            // Slave→Slave with different master: retarget
+            unregister_slave_mount(mfs);
+        }
     }
 
     // Becoming Shared: allocate group ID if needed

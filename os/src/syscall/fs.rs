@@ -2211,29 +2211,53 @@ fn do_bind_mount(
     };
 
     let mnt_flags = vfs::MountFlags::from_bits_truncate(mountflags.bits() as u32);
-    let mnt_fs = match target_mfs_inode.mount_subtree(
+    // Use mount_subtree_inner(false) to skip automatic propagation.
+    // We'll set up the final propagation group and propagate manually,
+    // ensuring peers get the correct group membership.
+    let mnt_fs = match target_mfs_inode.mount_subtree_inner(
         source_mount_fs.inner_filesystem(),
         source_inner,
         mnt_flags,
         Some(alloc::string::String::from(lookup_path)),
+        false,
     ) {
         Ok(fs) => fs,
         Err(e) => return -(e as isize),
     };
     mnt_fs.set_mount_source(Some(source_path));
 
-    // If mount_subtree registered mnt_fs in the parent's peer group,
-    // unregister before switching to the source's peer group.
-    if mnt_fs.propagation().peer_group_id() != 0 {
+    // Set up propagation matching the source mount.
+    // The mount_subtree_inner(false) already inherited the parent's group ID
+    // (if parent shared) but didn't register in PEER_GROUPS.
+    // Unregister from parent's group first, then apply source's propagation.
+    let parent_gid = mnt_fs.propagation().peer_group_id();
+    let source_prop = source_mount_fs.propagation();
+    let source_is_shared = source_prop.is_shared();
+    let source_gid = source_prop.peer_group_id();
+
+    if parent_gid != 0 && parent_gid != source_gid {
         vfs::propagation::unregister_peer_mount(&mnt_fs);
     }
 
-    // Inherit source's propagation type for bind mounts
-    if source_mount_fs.propagation().is_shared() {
-        let gid = source_mount_fs.propagation().peer_group_id();
-        mnt_fs.propagation().set_shared_with_group(gid);
+    if source_is_shared {
+        mnt_fs.propagation().set_shared_with_group(source_gid);
         vfs::propagation::register_peer(&mnt_fs);
+    } else {
+        // Source is not shared — set to Private to clear parent's shared group
+        vfs::propagation::set_propagation_type(&mnt_fs, vfs::propagation::PropagationType::Private);
     }
+
+    // Now propagate to peers with the correct (source) group
+    let target_md = match target_inode.metadata() {
+        Ok(md) => md,
+        Err(e) => return -(e as isize),
+    };
+    let target_ino = target_md.inode_id;
+    let child_name = lookup_path
+        .rsplit('/')
+        .next()
+        .unwrap_or("");
+    vfs::propagation::propagate_mount(&source_mount_fs, target_ino, &mnt_fs, child_name);
 
     if let Some(snapshot) = rbind_snapshot {
         if let Err(e) = apply_rbind_snapshot(
