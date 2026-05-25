@@ -9,7 +9,8 @@ use crate::mm::{
 };
 use crate::syscall::utils::wait_io_core;
 use crate::task::{
-    current_task, current_user_token, is_executable_inode_busy, WaitQueue, WaitResult,
+    current_task, current_user_token, is_executable_inode_busy, signal::Signals, WaitQueue,
+    WaitResult,
 };
 use crate::timer::{current_timespec, TimeSpec};
 use crate::utils::error::SyscallErr;
@@ -135,6 +136,11 @@ fn open_requests_write(flags: OpenFlags) -> bool {
     access_mode == OpenFlags::O_WRONLY.bits()
         || access_mode == OpenFlags::O_RDWR.bits()
         || flags.contains(OpenFlags::O_TRUNC)
+}
+
+#[inline]
+fn offset_is_negative(offset: usize) -> bool {
+    offset > isize::MAX as usize
 }
 
 fn has_directory_write_search_access(meta: &vfs::Metadata, uid: u32, gid: u32) -> bool {
@@ -386,6 +392,23 @@ fn write_start_offset(file: &vfs::File) -> usize {
     file.offset()
 }
 
+fn pwrite_start_offset(file: &vfs::File, offset: usize) -> usize {
+    if file.flags().contains(FileFlags::O_APPEND) {
+        if let Ok(metadata) = file.metadata() {
+            if metadata.size > 0 {
+                return metadata.size as usize;
+            }
+        }
+    }
+    offset
+}
+
+fn raise_sigxfsz() {
+    if let Some(task) = current_task() {
+        task.acquire_inner_lock().add_signal(Signals::SIGXFSZ);
+    }
+}
+
 fn apply_fsize_limit(
     file: &vfs::File,
     count: usize,
@@ -396,6 +419,7 @@ fn apply_fsize_limit(
         return Ok(count);
     }
     if offset >= fsize_limit {
+        raise_sigxfsz();
         return Err(EFBIG);
     }
     Ok(count.min(fsize_limit - offset))
@@ -697,6 +721,9 @@ pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
     if file.readable().is_err() {
         return EBADF;
     }
+    if offset_is_negative(offset) {
+        return EINVAL;
+    }
     let token = task.get_user_token();
     pread_into_user(&file, token, buf, count, offset)
 }
@@ -714,8 +741,11 @@ pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
     if file.writable().is_err() {
         return EBADF;
     }
+    if offset_is_negative(offset) {
+        return EINVAL;
+    }
     let fsize_limit = task.acquire_inner_lock().fsize_limit_cur;
-    count = match apply_fsize_limit(&file, count, offset, fsize_limit) {
+    count = match apply_fsize_limit(&file, count, pwrite_start_offset(&file, offset), fsize_limit) {
         Ok(count) => count,
         Err(errno) => return errno,
     };

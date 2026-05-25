@@ -711,6 +711,13 @@ impl File {
         if mode.contains(FileMode::FMODE_STREAM) {
             return Err(SyscallErr::ESPIPE);
         }
+        let flags = *self.flags.lock();
+        let offset = if flags.contains(FileFlags::O_APPEND) {
+            let md = self.inode.metadata()?;
+            md.size.max(0) as usize
+        } else {
+            offset
+        };
         let n = self
             .inode
             .write_at(offset, buf.len(), buf, self.private_data.lock())?;

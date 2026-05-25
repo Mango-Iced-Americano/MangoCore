@@ -423,6 +423,9 @@ pub fn translate_user_buffer_checked(
     if len == 0 {
         return Ok(Vec::new());
     }
+    if ptr.is_null() {
+        return Err(crate::syscall::errno::EFAULT);
+    }
     let mut start = ptr as usize;
     let end = check_user_range(start, len)?;
     let mut v = Vec::with_capacity(32);
