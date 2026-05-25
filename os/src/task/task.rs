@@ -15,7 +15,7 @@ use crate::mm::PageTableImpl;
 use crate::mm::{AddressSpace, FaultAccess, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::syscall::CloneFlags;
 use crate::syscall::errno::{EISDIR, ENOEXEC, ENOMEM};
-use crate::timer::{ITimerVal, TimeSpec, TimeVal};
+use crate::timer::{ITimerVal, TimeSpec, TimeVal, USEC_PER_SEC};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -37,6 +37,14 @@ fn default_groups() -> Vec<u32> {
     let mut groups = Vec::new();
     groups.push(0);
     groups
+}
+
+fn cpu_limit_to_us(limit_secs: usize) -> Option<usize> {
+    if limit_secs == usize::MAX {
+        None
+    } else {
+        Some(limit_secs.saturating_mul(USEC_PER_SEC))
+    }
 }
 
 #[derive(Clone)]
@@ -148,6 +156,10 @@ pub struct TaskControlBlockInner {
     /// RLIMIT_NPROC 兼容字段，当前仅保存 ABI 可见状态。
     pub nproc_limit_cur: usize,
     pub nproc_limit_max: usize,
+    /// RLIMIT_CPU 兼容字段。单位为秒，usize::MAX 表示 unlimited。
+    pub cpu_limit_cur: usize,
+    pub cpu_limit_max: usize,
+    pub cpu_limit_sigxcpu_sent: bool,
     /// Linux personality ABI state. MangoCore does not alter layout/exec policy based on it yet.
     pub personality: usize,
     /// Parent-death signal configured by prctl(PR_SET_PDEATHSIG).
@@ -391,6 +403,7 @@ impl TaskControlBlockInner {
         self.update_itimer_virtual_if_exists(diff);
         // 更新性能分析定时器
         self.update_itimer_prof_if_exists(diff);
+        self.enforce_cpu_rlimit();
     }
     /// 在离开陷阱时更新进程时间
     pub fn update_process_times_leave_trap(&mut self, trap_cause: TrapImpl) {
@@ -399,8 +412,32 @@ impl TaskControlBlockInner {
             let diff = now - self.clock.last_enter_s_mode;
             self.rusage.ru_stime = self.rusage.ru_stime + diff;
             self.update_itimer_prof_if_exists(diff);
+            self.enforce_cpu_rlimit();
         }
         self.clock.last_enter_u_mode = now;
+    }
+
+    fn enforce_cpu_rlimit(&mut self) {
+        let cpu_us = self
+            .rusage
+            .ru_utime
+            .to_us()
+            .saturating_add(self.rusage.ru_stime.to_us());
+        if let Some(hard_us) = cpu_limit_to_us(self.cpu_limit_max) {
+            if cpu_us >= hard_us {
+                self.add_signal(Signals::SIGKILL);
+                return;
+            }
+        }
+        if self.cpu_limit_sigxcpu_sent {
+            return;
+        }
+        if let Some(soft_us) = cpu_limit_to_us(self.cpu_limit_cur) {
+            if cpu_us >= soft_us {
+                self.cpu_limit_sigxcpu_sent = true;
+                self.add_signal(Signals::SIGXCPU);
+            }
+        }
     }
     /// 更新实时定时器
     pub fn update_itimer_real_if_exists(&mut self, diff: TimeVal) {
@@ -680,6 +717,9 @@ impl TaskControlBlock {
                 fsize_limit_max: usize::MAX,
                 nproc_limit_cur: SYSTEM_TASK_LIMIT,
                 nproc_limit_max: SYSTEM_TASK_LIMIT,
+                cpu_limit_cur: usize::MAX,
+                cpu_limit_max: usize::MAX,
+                cpu_limit_sigxcpu_sent: false,
                 personality: 0,
                 pdeath_signal: 0,
                 dumpable: 1,
@@ -1079,6 +1119,9 @@ impl TaskControlBlock {
                 fsize_limit_max: parent_inner.fsize_limit_max,
                 nproc_limit_cur: parent_inner.nproc_limit_cur,
                 nproc_limit_max: parent_inner.nproc_limit_max,
+                cpu_limit_cur: parent_inner.cpu_limit_cur,
+                cpu_limit_max: parent_inner.cpu_limit_max,
+                cpu_limit_sigxcpu_sent: false,
                 personality: parent_inner.personality,
                 pdeath_signal: 0,
                 dumpable: parent_inner.dumpable,
