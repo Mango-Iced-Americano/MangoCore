@@ -2164,6 +2164,13 @@ fn do_bind_mount(
     };
     mnt_fs.set_mount_source(Some(source_path));
 
+    // Inherit source's propagation type for bind mounts
+    if source_mount_fs.propagation().is_shared() {
+        let gid = source_mount_fs.propagation().peer_group_id();
+        mnt_fs.propagation().set_shared_with_group(gid);
+        vfs::propagation::register_peer(&mnt_fs);
+    }
+
     if let Some(snapshot) = rbind_snapshot {
         if let Err(e) = apply_rbind_snapshot(
             &snapshot,

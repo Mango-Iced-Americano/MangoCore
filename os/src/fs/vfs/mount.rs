@@ -247,11 +247,8 @@ impl MountFSInode {
 
         // Propagate to peers if parent is shared
         if parent_prop.is_shared() {
-            let child_name = self
-                .inner_inode
-                .get_entry_name(inode_id)
-                .unwrap_or_else(|_| alloc::string::String::from("?"));
-            propagate_mount(&self.mount_fs, inode_id, &new_mount_fs, &child_name);
+            // Peer group membership alone provides visibility across peers;
+            // avoid creating duplicate MountFS instances that break umount cleanup.
         }
 
         Ok(new_mount_fs)
