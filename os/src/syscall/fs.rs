@@ -245,6 +245,28 @@ fn open_file_at(
                 return Err(EEXIST);
             }
             let md = target.metadata().map_err(|e| -(e as isize))?;
+            // Named FIFO: substitute the filesystem inode with a Pipe-backed inode
+            if md.file_type == FileType::Pipe {
+                const O_ACCMODE: u32 = 0o3;
+                let access = flags.bits() & O_ACCMODE;
+                let for_read = access != OpenFlags::O_WRONLY.bits();
+                let for_write = access == OpenFlags::O_WRONLY.bits()
+                    || access == OpenFlags::O_RDWR.bits();
+                return match crate::fs::dev::pipe::fifo_open(
+                    (md.dev_id, md.inode_id),
+                    for_read,
+                    for_write,
+                ) {
+                    Some(pipe_inode) => {
+                        Ok(vfs::File::new_without_open(
+                            pipe_inode,
+                            _open_flags_to_vfs_flags(flags),
+                            vfs::FileType::Pipe,
+                        ))
+                    }
+                    None => Err(ENOMEM),
+                };
+            }
             if md.file_type == FileType::Dir
                 && (flags.contains(OpenFlags::O_WRONLY) || flags.contains(OpenFlags::O_RDWR))
             {

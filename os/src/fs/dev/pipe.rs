@@ -364,3 +364,62 @@ pub fn make_pipe() -> (Arc<Pipe>, Arc<Pipe>) {
     buffer.lock().set_read_end(&read_end);
     (read_end, write_end)
 }
+
+// ── Named FIFO support ──────────────────────────────────────────────────
+
+use alloc::collections::BTreeMap;
+
+struct FifoEntry {
+    read_end: Weak<Pipe>,
+    write_end: Weak<Pipe>,
+    buffer: Arc<Mutex<PipeRingBuffer>>,
+}
+
+static FIFO_REGISTRY: spin::Mutex<BTreeMap<(usize, usize), FifoEntry>> = spin::Mutex::new(BTreeMap::new());
+
+/// Open a named FIFO inode, returning a Pipe end matching the access mode.
+/// `dev_inode` identifies the FIFO (dev_id, inode_id).
+/// `for_read` selects the read end; `for_write` selects the write end.
+pub fn fifo_open(dev_inode: (usize, usize), for_read: bool, for_write: bool) -> Option<Arc<Pipe>> {
+    let mut reg = FIFO_REGISTRY.lock();
+    let entry = reg.entry(dev_inode).or_insert_with(|| {
+        // Create ring buffer without linking ends yet
+        let buf = Arc::new(Mutex::new(PipeRingBuffer::new()));
+        FifoEntry {
+            read_end: Weak::new(),
+            write_end: Weak::new(),
+            buffer: buf,
+        }
+    });
+
+    let buffer = entry.buffer.clone();
+
+    if for_read {
+        if let Some(r) = entry.read_end.upgrade() {
+            return Some(r);
+        }
+        let r = Arc::new(Pipe::read_end_with_buffer(buffer.clone()));
+        buffer.lock().set_read_end(&r);
+        entry.read_end = Arc::downgrade(&r);
+        return Some(r);
+    }
+
+    if for_write {
+        if let Some(w) = entry.write_end.upgrade() {
+            return Some(w);
+        }
+        let w = Arc::new(Pipe::write_end_with_buffer(buffer.clone()));
+        buffer.lock().set_write_end(&w);
+        entry.write_end = Arc::downgrade(&w);
+        return Some(w);
+    }
+
+    // O_RDWR: return write end (rare case)
+    if let Some(w) = entry.write_end.upgrade() {
+        return Some(w);
+    }
+    let w = Arc::new(Pipe::write_end_with_buffer(buffer.clone()));
+    buffer.lock().set_write_end(&w);
+    entry.write_end = Arc::downgrade(&w);
+    Some(w)
+}
