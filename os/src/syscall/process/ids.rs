@@ -1110,15 +1110,25 @@ pub fn sys_prctl(option: usize, arg2: usize, _arg3: usize, _arg4: usize, _arg5: 
     }
 }
 
-// Warning, we don't support this syscall in fact, task.setpgid() won't take effect for some reason
-// So it just pretend to do this work.
-// Fortunately, that won't make difference when we just try to run busybox sh so far.
+fn is_child_of(process: &Arc<ProcessControlBlock>, parent: &Arc<ProcessControlBlock>) -> bool {
+    process
+        .parent()
+        .map_or(false, |process_parent| process_parent.pid == parent.pid)
+}
+
+fn pgid_exists_in_session(pgid: usize, sid: usize) -> bool {
+    ProcessManager::find_processes_by_pgid(pgid)
+        .into_iter()
+        .any(|process| process.getsid() == sid)
+}
+
 pub fn sys_setpgid(pid: usize, pgid: usize) -> isize {
     if (pid as isize) < 0 || (pgid as isize) < 0 {
         return EINVAL;
     }
+    let current = current_task().unwrap().process.clone();
     let process = if pid == 0 {
-        current_task().unwrap().process.clone()
+        current.clone()
     } else {
         match ProcessManager::find_process(pid) {
             Some(process) => process,
@@ -1126,7 +1136,28 @@ pub fn sys_setpgid(pid: usize, pgid: usize) -> isize {
         }
     };
 
+    let target_is_current = process.pid == current.pid;
+    if !target_is_current {
+        if !is_child_of(&process, &current) {
+            return ESRCH;
+        }
+        if process.has_execed() {
+            return EACCES;
+        }
+    }
+
+    let target_sid = process.getsid();
+    if target_sid != current.getsid() {
+        return EPERM;
+    }
+    if process.pid == target_sid {
+        return EPERM;
+    }
+
     let real_pgid = if pgid == 0 { process.pid } else { pgid };
+    if real_pgid != process.pid && !pgid_exists_in_session(real_pgid, target_sid) {
+        return EPERM;
+    }
 
     process.setpgid(real_pgid)
 }

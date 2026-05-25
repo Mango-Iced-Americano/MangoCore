@@ -341,6 +341,7 @@ pub fn sys_execve(
                     exit_current_and_run_next(127);
                 };
             }
+            task.process.mark_execed();
             task.process.set_exe_path(abs_path);
             task.process.complete_vfork();
             // should return 0 in success

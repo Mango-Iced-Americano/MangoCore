@@ -70,6 +70,8 @@ pub struct ProcessInner {
     pub sid: usize,
     /// 父进程。
     pub parent: Option<Weak<ProcessControlBlock>>,
+    /// 进程创建后是否已经成功执行过 execve。
+    pub has_execed: bool,
     /// 子进程。
     pub children: Vec<Arc<ProcessControlBlock>>,
     /// 进程级生命周期状态。
@@ -195,6 +197,7 @@ impl ProcessControlBlock {
                 pgid,
                 sid,
                 parent,
+                has_execed: false,
                 children: Vec::new(),
                 state: ProcessState::Running,
                 exit_code: 0,
@@ -233,6 +236,14 @@ impl ProcessControlBlock {
 
     pub fn set_exe_path(&self, exe_path: String) {
         self.inner.lock().exe_path = exe_path;
+    }
+
+    pub fn mark_execed(&self) {
+        self.inner.lock().has_execed = true;
+    }
+
+    pub fn has_execed(&self) -> bool {
+        self.inner.lock().has_execed
     }
 
     pub fn replace_exe(&self, exe: vfs::File) {
