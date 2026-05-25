@@ -288,6 +288,7 @@ pub fn sys_setreuid(ruid: usize, euid: usize) -> isize {
     let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
     let privileged = inner.euid == 0;
+    let old_uid = inner.uid;
     if !privileged {
         if let Some(id) = ruid {
             if id != inner.uid && id != inner.euid {
@@ -307,7 +308,7 @@ pub fn sys_setreuid(ruid: usize, euid: usize) -> isize {
         inner.euid = id;
         inner.fsuid = id;
     }
-    if privileged || ruid.is_some() || euid.map_or(false, |id| id != inner.uid) {
+    if ruid.is_some() || euid.map_or(false, |id| id != old_uid) {
         inner.suid = inner.euid;
     }
     let cap_permitted = inner.cap_permitted;
@@ -401,6 +402,7 @@ pub fn sys_setregid(rgid: usize, egid: usize) -> isize {
     let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
     let privileged = inner.euid == 0;
+    let old_gid = inner.gid;
     if !privileged {
         if let Some(id) = rgid {
             if id != inner.gid && id != inner.egid {
@@ -420,7 +422,7 @@ pub fn sys_setregid(rgid: usize, egid: usize) -> isize {
         inner.egid = id;
         inner.fsgid = id;
     }
-    if privileged || rgid.is_some() || egid.map_or(false, |id| id != inner.gid) {
+    if rgid.is_some() || egid.map_or(false, |id| id != old_gid) {
         inner.sgid = inner.egid;
     }
     SUCCESS
