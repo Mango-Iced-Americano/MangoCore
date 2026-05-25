@@ -162,6 +162,7 @@ impl ProcessManager {
                 let found_pid = child.pid;
                 wait_status.set(child.exit_code());
                 if !nowait {
+                    child.release_pid();
                     process_inner.child_rusage.add_cpu(child.rusage());
                 }
                 Some(found_pid as isize)

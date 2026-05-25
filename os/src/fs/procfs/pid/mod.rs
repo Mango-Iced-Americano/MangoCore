@@ -17,6 +17,7 @@ use crate::{
         procfs::{FindHookFn, ListHookFn, LockedProcInode},
         vfs::{IndexNode, InodeMode},
     },
+    task::ProcessControlBlock,
     utils::error::SyscallErr,
 };
 
@@ -27,8 +28,8 @@ pub fn setup_pid_hooks(root: &Arc<LockedProcInode>) {
 
 fn pid_find_hook(inode: &LockedProcInode, name: &str) -> Option<Arc<dyn IndexNode>> {
     let pid: usize = name.parse().ok()?;
-    crate::task::find_process_by_pid(pid)?;
-    create_pid_dir(inode, pid).ok()
+    let process = crate::task::find_process_by_pid(pid)?;
+    create_pid_dir(inode, process).ok()
 }
 
 fn pid_list_hook(_inode: &LockedProcInode) -> Vec<String> {
@@ -38,7 +39,11 @@ fn pid_list_hook(_inode: &LockedProcInode) -> Vec<String> {
         .collect()
 }
 
-fn create_pid_dir(parent: &LockedProcInode, pid: usize) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+fn create_pid_dir(
+    parent: &LockedProcInode,
+    process: Arc<ProcessControlBlock>,
+) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+    let pid = process.pid;
     let (parent_weak, fs_weak) = {
         let pdata = parent.0.lock();
         (pdata.self_ref.clone(), pdata.fs.clone())
@@ -49,7 +54,11 @@ fn create_pid_dir(parent: &LockedProcInode, pid: usize) -> Result<Arc<dyn IndexN
         fs_weak,
         InodeMode::from_bits_truncate(0o555),
     );
-    dir.0.lock().extra_data = pid;
+    {
+        let mut data = dir.0.lock();
+        data.extra_data = pid;
+        data.process_ref = Some(Arc::downgrade(&process));
+    }
 
     dir.add_file(
         "status",

@@ -16,6 +16,7 @@ use core::any::Any;
 use spin::{Mutex, MutexGuard};
 
 use crate::utils::error::SyscallErr;
+use crate::task::ProcessControlBlock;
 
 use super::vfs::{
     generate_inode_id, FileFlags, FilePrivateData, FileSystem, FileType, FsInfo, IndexNode,
@@ -40,6 +41,8 @@ pub type ProcContentFn = fn(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr>;
+
+pub type ProcWriteFn = fn(extra_data: usize, offset: usize, buf: &[u8]) -> Result<usize, SyscallErr>;
 
 /// 动态查找钩子：当 children BTreeMap 中找不到时调用
 pub type FindHookFn = fn(inode: &LockedProcInode, name: &str) -> Option<Arc<dyn IndexNode>>;
@@ -70,7 +73,9 @@ pub struct ProcInodeData {
     pub metadata: Metadata,
     pub children: BTreeMap<String, Arc<dyn IndexNode>>,
     pub content_fn: Option<ProcContentFn>,
+    pub write_fn: Option<ProcWriteFn>,
     pub extra_data: usize,
+    pub process_ref: Option<Weak<ProcessControlBlock>>,
     pub writable: bool,
     /// 符号链接目标路径（仅 SymLink inode）
     pub symlink_target: Option<String>,
@@ -107,7 +112,9 @@ impl ProcInodeData {
             },
             children: BTreeMap::new(),
             content_fn: None,
+            write_fn: None,
             extra_data: 0,
+            process_ref: None,
             writable: false,
             symlink_target: None,
             find_hook: None,
@@ -139,7 +146,9 @@ impl ProcInodeData {
             },
             children: BTreeMap::new(),
             content_fn: Some(content_fn),
+            write_fn: None,
             extra_data: 0,
+            process_ref: None,
             writable: false,
             symlink_target: None,
             find_hook: None,
@@ -172,7 +181,9 @@ impl ProcInodeData {
             },
             children: BTreeMap::new(),
             content_fn: None,
+            write_fn: None,
             extra_data: 0,
+            process_ref: None,
             writable: false,
             symlink_target: Some(String::from(target)),
             find_hook: None,
@@ -229,12 +240,14 @@ impl LockedProcInode {
         fs: Weak<ProcFS>,
         mode: InodeMode,
         content_fn: ProcContentFn,
+        write_fn: Option<ProcWriteFn>,
         extra_data: usize,
     ) -> Arc<Self> {
         let mut data = ProcInodeData::new_file(mode, content_fn);
         data.parent = parent;
         data.fs = fs;
         data.extra_data = extra_data;
+        data.write_fn = write_fn;
         data.writable = true;
         Arc::new_cyclic(|weak| {
             data.self_ref = weak.clone();
@@ -322,6 +335,36 @@ impl LockedProcInode {
         Ok(child)
     }
 
+    pub fn add_writable_file_with_write(
+        self: &Arc<Self>,
+        name: &str,
+        mode: InodeMode,
+        content_fn: ProcContentFn,
+        write_fn: ProcWriteFn,
+        extra_data: usize,
+    ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+        let mut this = self.0.lock();
+        if this.metadata.file_type != FileType::Dir {
+            return Err(SyscallErr::ENOTDIR);
+        }
+        if this.children.contains_key(name) {
+            return Err(SyscallErr::EEXIST);
+        }
+        if name.len() > PROCFS_MAX_NAMELEN as usize {
+            return Err(SyscallErr::ENAMETOOLONG);
+        }
+        let child = LockedProcInode::new_writable_file_wired(
+            this.self_ref.clone(),
+            this.fs.clone(),
+            mode,
+            content_fn,
+            Some(write_fn),
+            extra_data,
+        );
+        this.children.insert(String::from(name), child.clone());
+        Ok(child)
+    }
+
     pub fn add_writable_file(
         self: &Arc<Self>,
         name: &str,
@@ -344,6 +387,7 @@ impl LockedProcInode {
             this.fs.clone(),
             mode,
             content_fn,
+            None,
             extra_data,
         );
         this.children.insert(String::from(name), child.clone());
@@ -558,17 +602,34 @@ impl IndexNode for LockedProcInode {
 
     fn write_at(
         &self,
-        _offset: usize,
+        offset: usize,
         len: usize,
-        _buf: &[u8],
+        buf: &[u8],
         _data: MutexGuard<FilePrivateData>,
     ) -> Result<usize, SyscallErr> {
-        let mut data = self.0.lock();
-        if data.metadata.file_type == FileType::File && data.writable {
+        if buf.len() < len {
+            return Err(SyscallErr::EINVAL);
+        }
+        let (file_type, writable, write_fn, extra_data) = {
+            let data = self.0.lock();
+            (
+                data.metadata.file_type,
+                data.writable,
+                data.write_fn,
+                data.extra_data,
+            )
+        };
+        if file_type == FileType::File && writable {
+            let written = if let Some(f) = write_fn {
+                f(extra_data, offset, &buf[..len])?
+            } else {
+                len
+            };
             let now = crate::timer::TimeSpec::new();
+            let mut data = self.0.lock();
             data.metadata.mtime = now;
             data.metadata.ctime = now;
-            Ok(len)
+            Ok(written)
         } else {
             Err(SyscallErr::EPERM)
         }

@@ -34,6 +34,17 @@ pub fn unregister_task(tid: usize) {
     TASK_REGISTRY.lock().tasks.remove(&tid);
 }
 
+pub fn unregister_task_if_match(task: &TaskControlBlock) {
+    let mut registry = TASK_REGISTRY.lock();
+    let remove = match registry.tasks.get(&task.tid.0).and_then(|entry| entry.upgrade()) {
+        Some(registered) => core::ptr::eq(Arc::as_ptr(&registered), task as *const _),
+        None => true,
+    };
+    if remove {
+        registry.tasks.remove(&task.tid.0);
+    }
+}
+
 pub fn register_process(process: &Arc<ProcessControlBlock>) {
     TASK_REGISTRY
         .lock()
@@ -43,6 +54,21 @@ pub fn register_process(process: &Arc<ProcessControlBlock>) {
 
 pub fn unregister_process(pid: usize) {
     TASK_REGISTRY.lock().processes.remove(&pid);
+}
+
+pub fn unregister_process_if_match(process: &ProcessControlBlock) {
+    let mut registry = TASK_REGISTRY.lock();
+    let remove = match registry
+        .processes
+        .get(&process.pid)
+        .and_then(|entry| entry.upgrade())
+    {
+        Some(registered) => core::ptr::eq(Arc::as_ptr(&registered), process as *const _),
+        None => true,
+    };
+    if remove {
+        registry.processes.remove(&process.pid);
+    }
 }
 
 pub fn find_task_by_tid(tid: usize) -> Option<Arc<TaskControlBlock>> {

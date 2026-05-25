@@ -53,12 +53,25 @@ fn can_signal_process(target: &ProcessControlBlock) -> bool {
 pub(super) fn pidfd_file_target_pid(file: &File) -> Result<usize, isize> {
     let inode = MountFSInode::unwrap_inode(&file.inode);
     if let Some(pidfd) = inode.as_any_ref().downcast_ref::<PidFd>() {
-        return Ok(pidfd.target_pid());
+        return pidfd.target_pid().map_err(|err| -(err as isize));
     }
     if let Some(proc_inode) = inode.as_any_ref().downcast_ref::<LockedProcInode>() {
-        let data = proc_inode.0.lock();
-        if data.metadata.file_type == FileType::Dir && data.extra_data != 0 {
-            return Ok(data.extra_data);
+        let (file_type, pid, process_ref) = {
+            let data = proc_inode.0.lock();
+            (
+                data.metadata.file_type,
+                data.extra_data,
+                data.process_ref.clone(),
+            )
+        };
+        if file_type == FileType::Dir && pid != 0 {
+            if let Some(process_ref) = process_ref {
+                return match process_ref.upgrade() {
+                    Some(process) if process.pid == pid && !process.pid_released() => Ok(pid),
+                    _ => Err(ESRCH),
+                };
+            }
+            return Ok(pid);
         }
     }
     Err(EBADF)
@@ -358,15 +371,15 @@ pub fn sys_pidfd_open(pid: usize, flags: usize) -> isize {
     if flags & !PIDFD_NONBLOCK != 0 {
         return EINVAL;
     }
-    if ProcessManager::find_process(pid).is_none() {
+    let Some(process) = ProcessManager::find_process(pid) else {
         return ESRCH;
-    }
+    };
 
     let mut file_flags = FileFlags::O_RDWR;
     if flags & PIDFD_NONBLOCK != 0 {
         file_flags.insert(FileFlags::O_NONBLOCK);
     }
-    let file = match new_pidfd_file_with_flags(pid, file_flags) {
+    let file = match new_pidfd_file_with_flags(&process, file_flags) {
         Ok(file) => file,
         Err(err) => return -(err as isize),
     };

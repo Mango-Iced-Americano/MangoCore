@@ -29,7 +29,8 @@ pub use manager::{
 };
 // pub use pid::RecycleAllocator;
 pub use pid::{
-    tid_alloc, trap_cx_bottom_from_slot, ustack_bottom_from_slot, TidHandle,
+    ns_last_pid, set_ns_last_pid, tid_alloc, trap_cx_bottom_from_slot, ustack_bottom_from_slot,
+    TidHandle,
 };
 pub use processor::{
     check_oom_kill, current_syscall_name, current_task, current_trap_cx, current_user_token,

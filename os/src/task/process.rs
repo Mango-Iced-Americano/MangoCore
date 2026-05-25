@@ -226,6 +226,14 @@ impl ProcessControlBlock {
         self.inner.lock()
     }
 
+    pub fn release_pid(&self) {
+        self._pid_handle.release();
+    }
+
+    pub fn pid_released(&self) -> bool {
+        self._pid_handle.is_released()
+    }
+
     pub fn exe(&self) -> Arc<Mutex<vfs::File>> {
         self.inner.lock().exe.clone()
     }
@@ -672,6 +680,6 @@ impl Drop for ProcessControlBlock {
         if let Some(key) = self.inner.get_mut().exec_key.take() {
             unregister_exec_key(key);
         }
-        registry::unregister_process(self.pid);
+        registry::unregister_process_if_match(self);
     }
 }

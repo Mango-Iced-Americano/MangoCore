@@ -1251,7 +1251,7 @@ impl TaskControlBlock {
 impl Drop for TaskControlBlock {
     /// 当任务控制块被销毁时，释放用户资源槽位
     fn drop(&mut self) {
-        registry::unregister_task(self.tid.0);
+        registry::unregister_task_if_match(self);
         self.process.remove_thread(self.tid.0);
         self.process
             .user_res_slot_allocator()
