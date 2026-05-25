@@ -9,30 +9,11 @@ use crate::timer::get_time_ms;
 use crate::utils::error::SyscallErr;
 use alloc::string::String;
 
-pub fn pid_stat_content(
-    pid: usize,
-    offset: usize,
-    len: usize,
-    buf: &mut [u8],
-) -> Result<usize, SyscallErr> {
-    let process = match crate::task::find_process_by_pid(pid) {
-        Some(process) => process,
-        None => return Err(SyscallErr::ENOENT),
-    };
-
-    let state_char = if process.is_zombie() {
-        'Z'
-    } else if let Some(task) = process.any_live_thread() {
-        let inner = task.acquire_inner_lock();
-        match inner.task_status {
-            TaskStatus::Ready => 'R',
-            TaskStatus::Running => 'R',
-            TaskStatus::Interruptible => 'S',
-            TaskStatus::Zombie => 'Z',
-        }
-    } else {
-        'R'
-    };
+fn format_stat_line(
+    stat_pid: usize,
+    process: &crate::task::ProcessControlBlock,
+    state_char: char,
+) -> String {
     let ppid = process.parent_pid();
     let pgid = process.getpgid();
     let num_threads = process.live_thread_count().max(1);
@@ -53,9 +34,9 @@ pub fn pid_stat_content(
     // glibc/musl 的 CPU clock fallback 会解析后段字段。
     // pid comm state ppid pgrp session tty_nr tpgid flags minflt cminflt majflt cmajflt
     // utime stime cutime cstime priority nice num_threads itrealvalue starttime vsize rss ...
-    let s = alloc::format!(
+    alloc::format!(
         "{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}\n",
-        pid,                                    // 1:  pid
+        stat_pid,                               // 1:  pid
         comm,                                   // 2:  comm (括号包裹)
         state_char,                             // 3:  state
         ppid,                                   // 4:  ppid
@@ -107,7 +88,64 @@ pub fn pid_stat_content(
         0,                                      // 50: env_start
         0,                                      // 51: env_end
         0,                                      // 52: exit_code
-    );
+    )
+}
 
+pub fn pid_stat_content(
+    pid: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let process = match crate::task::find_process_by_pid(pid) {
+        Some(process) => process,
+        None => return Err(SyscallErr::ENOENT),
+    };
+
+    let state_char = if process.is_zombie() {
+        'Z'
+    } else if let Some(task) = process.any_live_thread() {
+        let inner = task.acquire_inner_lock();
+        match inner.task_status {
+            TaskStatus::Ready => 'R',
+            TaskStatus::Running => 'R',
+            TaskStatus::Interruptible => 'S',
+            TaskStatus::Zombie => 'Z',
+        }
+    } else {
+        'R'
+    };
+
+    let s = format_stat_line(pid, &process, state_char);
+
+    proc_read_str(offset, len, buf, &s)
+}
+
+pub fn task_stat_content(
+    extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let pid = extra >> 32;
+    let tid = extra & 0xffff_ffff;
+    let process = match crate::task::find_process_by_pid(pid) {
+        Some(process) => process,
+        None => return Err(SyscallErr::ENOENT),
+    };
+    let task = match crate::task::find_task_by_pid_tid(pid, tid) {
+        Some(task) => task,
+        None => return Err(SyscallErr::ENOENT),
+    };
+    let state_char = {
+        let inner = task.acquire_inner_lock();
+        match inner.task_status {
+            TaskStatus::Ready => 'R',
+            TaskStatus::Running => 'R',
+            TaskStatus::Interruptible => 'S',
+            TaskStatus::Zombie => 'Z',
+        }
+    };
+    let s = format_stat_line(tid, &process, state_char);
     proc_read_str(offset, len, buf, &s)
 }

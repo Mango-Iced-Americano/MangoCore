@@ -6,6 +6,7 @@ pub mod fd;
 pub mod maps;
 pub mod stat;
 pub mod status;
+pub mod task;
 
 use alloc::{
     string::{String, ToString},
@@ -14,7 +15,7 @@ use alloc::{
 };
 use crate::{
     fs::{
-        procfs::{FindHookFn, ListHookFn, LockedProcInode},
+        procfs::LockedProcInode,
         vfs::{IndexNode, InodeMode},
     },
     task::ProcessControlBlock,
@@ -100,6 +101,10 @@ fn create_pid_dir(
     let fd_dir = dir.add_dir_locked("fd", InodeMode::from_bits_truncate(0o500))?;
     fd_dir.0.lock().extra_data = pid;
     fd_dir.set_hooks(fd::fd_find_hook, fd::fd_list_hook);
+
+    let task_dir = dir.add_dir_locked("task", InodeMode::from_bits_truncate(0o555))?;
+    task_dir.0.lock().extra_data = pid;
+    task_dir.set_hooks(task::task_find_hook, task::task_list_hook);
 
     Ok(dir)
 }
