@@ -28,6 +28,7 @@ pub mod file;
 pub mod file_system;
 pub mod index_node;
 pub mod mount;
+pub mod propagation;
 
 use crate::utils::error::SyscallErr;
 use alloc::{string::String, sync::Arc, vec::Vec};
@@ -38,6 +39,7 @@ pub use file::{EventQueueHandle, FdTable, File, FileFlags, FileMode, PollWaitQue
 pub use file_system::{FileSystem, FsInfo, SuperBlock};
 pub use index_node::IndexNode;
 pub use mount::{MountFS, MountFSInode, MountFlags, MountList, MountPath};
+pub use propagation::{MountPropagation, PropagationType, register_peer, propagate_mount, propagate_umount, unregister_peer_mount};
 
 use crate::drivers::block::BlockDevice;
 use crate::timer::TimeSpec;

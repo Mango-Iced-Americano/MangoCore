@@ -26,8 +26,8 @@ use spin::{Mutex, MutexGuard};
 use lazy_static::lazy_static;
 
 use super::{
-    file::FileFlags, file_system::FileSystem, FilePrivateData, FileType, IndexNode, InodeId,
-    InodeMode,
+    file::FileFlags, file_system::FileSystem, propagation::{MountPropagation, PropagationType, register_peer, propagate_mount, propagate_umount, unregister_peer_mount},
+    FilePrivateData, FileType, IndexNode, InodeId, InodeMode,
 };
 
 // ── MountFlags ──────────────────────────────────────────────────────────
@@ -225,6 +225,14 @@ impl MountFSInode {
 
         let new_mount_fs = MountFS::new_with_root(inner_fs, root_inner_inode, mount_flags);
 
+        // Inherit parent's propagation type if parent is shared
+        let parent_prop = self.mount_fs.propagation();
+        if parent_prop.is_shared() {
+            let gid = parent_prop.peer_group_id();
+            new_mount_fs.propagation().set_shared_with_group(gid);
+            register_peer(&new_mount_fs);
+        }
+
         let backref = MountFSInode::new(self.inner_inode.clone(), self.mount_fs.clone());
         new_mount_fs.set_self_mountpoint(Some(backref));
 
@@ -235,6 +243,15 @@ impl MountFSInode {
         // Register in global mount list
         if let Some(ref path) = new_mount_fs.mount_path() {
             MOUNT_LIST.insert(path.as_str(), new_mount_fs.clone(), Some(inode_id));
+        }
+
+        // Propagate to peers if parent is shared
+        if parent_prop.is_shared() {
+            let child_name = self
+                .inner_inode
+                .get_entry_name(inode_id)
+                .unwrap_or_else(|_| alloc::string::String::from("?"));
+            propagate_mount(&self.mount_fs, inode_id, &new_mount_fs, &child_name);
         }
 
         Ok(new_mount_fs)
@@ -535,6 +552,8 @@ pub struct MountFS {
     mount_source: Mutex<Option<String>>,
     /// 挂载目标路径
     mount_path: Mutex<Option<String>>,
+    /// 挂载传播状态
+    propagation: MountPropagation,
     /// 指向自身的弱引用
     self_ref: Mutex<Weak<MountFS>>,
 }
@@ -551,6 +570,7 @@ impl MountFS {
             mount_flags: Mutex::new(mount_flags),
             mount_source: Mutex::new(None),
             mount_path: Mutex::new(None),
+            propagation: MountPropagation::new_private(),
             self_ref: Mutex::new(self_ref.clone()),
         })
     }
@@ -570,6 +590,7 @@ impl MountFS {
             mount_flags: Mutex::new(mount_flags),
             mount_source: Mutex::new(None),
             mount_path: Mutex::new(None),
+            propagation: MountPropagation::new_private(),
             self_ref: Mutex::new(self_ref.clone()),
         })
     }
@@ -603,17 +624,25 @@ impl MountFS {
 
     /// 卸载当前文件系统
     pub fn umount(self: &Arc<Self>) -> Result<(), SyscallErr> {
-        // 检查是否还有子挂载点
         if !self.mountpoints.lock().is_empty() {
             return Err(SyscallErr::EBUSY);
         }
-        // Unregister from global mount list before detaching
+        // Propagate umount to peers before removing from parent
+        if self.propagation().is_shared() {
+            if let Some(mp) = self.self_mountpoint.lock().clone() {
+                if let Ok(md) = mp.inner_inode.metadata() {
+                    propagate_umount(&mp.mount_fs, md.inode_id);
+                }
+            }
+        }
+        // Unregister from peer group
+        unregister_peer_mount(self);
+        // Unregister from global mount list
         if let Some(mountpoint) = self.self_mountpoint.lock().clone() {
             if let Ok(path) = mountpoint.absolute_path() {
                 MOUNT_LIST.remove(path);
             }
         }
-        // 从父文件系统的挂载表中移除
         if let Some(mountpoint) = self.self_mountpoint.lock().take() {
             if let Ok(md) = mountpoint.inner_inode.metadata() {
                 let removed = mountpoint.mount_fs.remove_mount(md.inode_id);
@@ -667,6 +696,10 @@ impl MountFS {
 
     pub fn mount_path(&self) -> Option<String> {
         self.mount_path.lock().clone()
+    }
+
+    pub fn propagation(&self) -> &MountPropagation {
+        &self.propagation
     }
 
     pub fn set_mount_path(&self, path: Option<String>) {

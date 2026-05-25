@@ -2383,7 +2383,24 @@ pub fn sys_mount(
         {
             return EINVAL;
         }
-        info!("[sys_mount] propagation flag — no-op success, target={}", lookup_path);
+        let target_mnt_inode = match target_inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+            Some(m) => m,
+            None => return EINVAL,
+        };
+        let prop_type = if propagation.contains(MountFlags::MS_SHARED) {
+            vfs::propagation::PropagationType::Shared
+        } else if propagation.contains(MountFlags::MS_PRIVATE) {
+            vfs::propagation::PropagationType::Private
+        } else if propagation.contains(MountFlags::MS_SLAVE) {
+            vfs::propagation::PropagationType::Slave
+        } else {
+            vfs::propagation::PropagationType::Unbindable
+        };
+        let mnt = target_mnt_inode.mount_fs.clone();
+        mnt.propagation().set_type(prop_type);
+        if prop_type == vfs::propagation::PropagationType::Shared {
+            vfs::propagation::register_peer(&mnt);
+        }
         return SUCCESS;
     }
 
