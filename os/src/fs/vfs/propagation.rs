@@ -46,6 +46,7 @@ pub enum PropagationType {
 pub struct MountPropagation {
     prop_type: Mutex<PropagationType>,
     peer_group_id: Mutex<u32>,
+    master_group_id: Mutex<u32>,
 }
 
 impl MountPropagation {
@@ -54,6 +55,7 @@ impl MountPropagation {
         Self {
             prop_type: Mutex::new(PropagationType::Private),
             peer_group_id: Mutex::new(0),
+            master_group_id: Mutex::new(0),
         }
     }
 
@@ -62,6 +64,7 @@ impl MountPropagation {
         Self {
             prop_type: Mutex::new(PropagationType::Shared),
             peer_group_id: Mutex::new(allocate_group_id()),
+            master_group_id: Mutex::new(0),
         }
     }
 
@@ -70,6 +73,7 @@ impl MountPropagation {
         Self {
             prop_type: Mutex::new(PropagationType::Shared),
             peer_group_id: Mutex::new(group_id),
+            master_group_id: Mutex::new(0),
         }
     }
 
@@ -93,31 +97,24 @@ impl MountPropagation {
     pub fn peer_group_id(&self) -> u32 {
         *self.peer_group_id.lock()
     }
+    pub fn master_group_id(&self) -> u32 {
+        *self.master_group_id.lock()
+    }
     pub fn set_peer_group_id(&self, id: u32) {
         *self.peer_group_id.lock() = id;
     }
+    pub fn set_master_group_id(&self, id: u32) {
+        *self.master_group_id.lock() = id;
+    }
 
-    // ── Mutation ────────────────────────────────────────────────────
-
-    /// Change propagation type.
-    ///
-    /// If transitioning FROM shared, unregisters from the peer group first.
-    /// If transitioning TO shared, allocates a new group ID if needed.
-    pub fn set_type(&self, t: PropagationType) {
-        let mut pt = self.prop_type.lock();
-        if *pt == PropagationType::Shared && t != PropagationType::Shared {
-            let gid = *self.peer_group_id.lock();
-            if gid != 0 {
-                unregister_peer(gid);
-            }
-        }
-        *pt = t;
-        if t == PropagationType::Shared && *self.peer_group_id.lock() == 0 {
-            *self.peer_group_id.lock() = allocate_group_id();
-        }
+    /// Set the propagation type value WITHOUT managing registries.
+    /// Use the free function `set_propagation_type()` for full lifecycle.
+    pub(crate) fn set_prop_type_value(&self, t: PropagationType) {
+        *self.prop_type.lock() = t;
     }
 
     /// Set shared with a specific group ID (used for propagation).
+    /// Caller must handle peer registry (unregister old / register new).
     pub fn set_shared_with_group(&self, group_id: u32) {
         let mut pt = self.prop_type.lock();
         *pt = PropagationType::Shared;
@@ -141,6 +138,10 @@ lazy_static! {
     /// Global peer group registry: maps group ID → weak references of mounts.
     /// Weak references are used to avoid preventing mount cleanup.
     static ref PEER_GROUPS: Mutex<BTreeMap<u32, Vec<Weak<MountFS>>>> = Mutex::new(BTreeMap::new());
+
+    /// Global slave group registry: maps master group ID → weak references of
+    /// slave mounts that receive propagation from that master.
+    static ref SLAVE_GROUPS: Mutex<BTreeMap<u32, Vec<Weak<MountFS>>>> = Mutex::new(BTreeMap::new());
 }
 
 /// Register a mount in a peer group.
@@ -165,6 +166,8 @@ pub fn register_peer(mfs: &Arc<MountFS>) {
 }
 
 /// Unregister a mount from its peer group by group ID.
+/// Only removes dead entries — does NOT remove the specific mount.
+/// Use `unregister_peer_mount()` to remove a specific mount by identity.
 fn unregister_peer(gid: u32) {
     if gid == 0 {
         return;
@@ -187,7 +190,37 @@ pub fn unregister_peer_mount(mfs: &Arc<MountFS>) {
     }
 }
 
+/// Register a slave mount under a master group.
+pub fn register_slave(mfs: &Arc<MountFS>, master_gid: u32) {
+    if master_gid == 0 {
+        return;
+    }
+    let mut groups = SLAVE_GROUPS.lock();
+    let slaves = groups.entry(master_gid).or_default();
+    slaves.retain(|w| {
+        if let Some(m) = w.upgrade() {
+            !Arc::ptr_eq(&m, mfs)
+        } else {
+            false
+        }
+    });
+    slaves.push(Arc::downgrade(mfs));
+}
+
+/// Unregister a slave mount from its master group.
+pub fn unregister_slave_mount(mfs: &Arc<MountFS>) {
+    let master_gid = mfs.propagation().master_group_id();
+    if master_gid == 0 {
+        return;
+    }
+    let mut groups = SLAVE_GROUPS.lock();
+    if let Some(slaves) = groups.get_mut(&master_gid) {
+        slaves.retain(|w| w.upgrade().map_or(true, |a| !Arc::ptr_eq(&a, mfs)));
+    }
+}
+
 /// Get all peers in a group, excluding the specified mount.
+/// Filters to only Shared mounts with matching group_id.
 pub fn get_peers(mfs: &Arc<MountFS>) -> Vec<Arc<MountFS>> {
     let gid = mfs.propagation().peer_group_id();
     if gid == 0 {
@@ -201,18 +234,73 @@ pub fn get_peers(mfs: &Arc<MountFS>) -> Vec<Arc<MountFS>> {
                 .iter()
                 .filter_map(|w| w.upgrade())
                 .filter(|a| !Arc::ptr_eq(a, mfs))
+                .filter(|a| a.propagation().is_shared() && a.propagation().peer_group_id() == gid)
                 .collect()
         })
+}
+
+/// Get all slave mounts that receive propagation from a master group.
+pub fn get_slaves(master_gid: u32) -> Vec<Arc<MountFS>> {
+    if master_gid == 0 {
+        return Vec::new();
+    }
+    let groups = SLAVE_GROUPS.lock();
+    groups
+        .get(&master_gid)
+        .map_or(Vec::new(), |slaves| {
+            slaves
+                .iter()
+                .filter_map(|w| w.upgrade())
+                .filter(|a| a.propagation().is_slave() && a.propagation().master_group_id() == master_gid)
+                .collect()
+        })
+}
+
+// ============================================================================
+// Owner-aware Propagation State Management
+// ============================================================================
+
+/// Change the propagation type of a mount, managing all registry transitions.
+///
+/// This is the canonical entry point for propagation type changes.
+/// It handles:
+/// - Shared → non-Shared: unregisters from PEER_GROUPS via unregister_peer_mount
+/// - Slave → non-Slave: unregisters from SLAVE_GROUPS
+/// - Non-Shared → Shared: allocates a new peer_group_id if needed
+/// - Non-Slave → Slave: preserves master_group_id (caller must set it first)
+pub fn set_propagation_type(mfs: &Arc<MountFS>, t: PropagationType) {
+    let prop = mfs.propagation();
+    let old_type = prop.prop_type();
+
+    // Leaving Shared: remove from PEER_GROUPS and clear peer_group_id
+    if old_type == PropagationType::Shared && t != PropagationType::Shared {
+        unregister_peer_mount(mfs);
+        prop.set_peer_group_id(0);
+    }
+
+    // Leaving Slave: remove from SLAVE_GROUPS and clear master_group_id
+    if old_type == PropagationType::Slave && t != PropagationType::Slave {
+        unregister_slave_mount(mfs);
+        prop.set_master_group_id(0);
+    }
+
+    // Becoming Shared: allocate group ID if needed
+    if t == PropagationType::Shared && prop.peer_group_id() == 0 {
+        prop.set_peer_group_id(allocate_group_id());
+    }
+
+    prop.set_prop_type_value(t);
 }
 
 // ============================================================================
 // Mount Propagation Functions
 // ============================================================================
 
-/// Propagate a mount event to all peers.
+/// Propagate a mount event to all shared peers and slaves.
 ///
-/// When a new mount is created under a shared mount point, this function
-/// propagates the mount to all peers in the same group.
+/// When a new mount is created under a shared mount point:
+/// - Shared peers in the same group receive a shared replica
+/// - Slave mounts receive a slave replica (receive-only)
 pub fn propagate_mount(
     source: &Arc<MountFS>,
     mountpoint_id: InodeId,
@@ -225,73 +313,109 @@ pub fn propagate_mount(
 
     let source_child_group = new_child.propagation().peer_group_id();
 
+    // Propagate to shared peers
     for peer in get_peers(source) {
-        let peer_root = peer.covered_root_inode();
+        propagate_to_mount(&peer, mountpoint_id, new_child, child_name, source_child_group, false);
+    }
 
-        // Check if this is a root mount event — mountpoint_id matches the
-        // peer's root inner inode (e.g., bind-mounting directly onto a
-        // shared mount's root). Propagate to the peer root itself.
-        if let Ok(root_md) = peer_root.inner_inode.metadata() {
-            if root_md.inode_id == mountpoint_id {
-                let mount_path = peer.mount_path().unwrap_or_default();
-                if let Ok(new_mount) = peer_root.mount_subtree_inner(
+    // Propagate to slaves (receive-only from this master group)
+    let master_gid = source.propagation().peer_group_id();
+    for slave in get_slaves(master_gid) {
+        propagate_to_mount(&slave, mountpoint_id, new_child, child_name, source_child_group, true);
+    }
+}
+
+/// Internal: propagate a single mount event to one target (peer or slave).
+fn propagate_to_mount(
+    target: &Arc<MountFS>,
+    mountpoint_id: InodeId,
+    new_child: &Arc<MountFS>,
+    child_name: &str,
+    source_child_group: u32,
+    as_slave: bool,
+) {
+    let target_root = target.covered_root_inode();
+
+    // Check root mount event — mountpoint_id matches target's root inner inode
+    if let Ok(root_md) = target_root.inner_inode.metadata() {
+        if root_md.inode_id == mountpoint_id {
+            let mount_path = target.mount_path().unwrap_or_default();
+            if let Ok(new_mount) = target_root.mount_subtree_inner(
+                new_child.inner_filesystem(),
+                new_child.root_inner_inode(),
+                super::MountFlags::empty(),
+                Some(mount_path),
+                false,
+            ) {
+                finish_propagated_mount(&new_mount, source_child_group, as_slave);
+            }
+            return;
+        }
+    }
+
+    // Fallback: find child directory matching child_name
+    if !child_name.is_empty() {
+        if let Ok(target_inode) = target_root.find(child_name) {
+            if let Some(target_mfs_inode) =
+                target_inode.as_any_ref().downcast_ref::<MountFSInode>()
+            {
+                let mount_path = alloc::format!(
+                    "{}/{}",
+                    target.mount_path().unwrap_or_default(),
+                    child_name
+                );
+                if let Ok(new_mount) = target_mfs_inode.mount_subtree_inner(
                     new_child.inner_filesystem(),
                     new_child.root_inner_inode(),
                     super::MountFlags::empty(),
                     Some(mount_path),
                     false,
                 ) {
-                    if source_child_group != 0 {
-                        new_mount
-                            .propagation()
-                            .set_shared_with_group(source_child_group);
-                        register_peer(&new_mount);
-                    }
-                }
-                continue;
-            }
-        }
-
-        // Fallback: find a child directory matching child_name in the peer
-        if !child_name.is_empty() {
-            if let Ok(target_inode) = peer_root.find(child_name) {
-                if let Some(target_mfs_inode) =
-                    target_inode.as_any_ref().downcast_ref::<MountFSInode>()
-                {
-                    let mount_path = alloc::format!(
-                        "{}/{}",
-                        peer.mount_path().unwrap_or_default(),
-                        child_name
-                    );
-                    if let Ok(new_mount) = target_mfs_inode.mount_subtree_inner(
-                        new_child.inner_filesystem(),
-                        new_child.root_inner_inode(),
-                        super::MountFlags::empty(),
-                        Some(mount_path),
-                        false,
-                    ) {
-                        if source_child_group != 0 {
-                            new_mount
-                                .propagation()
-                                .set_shared_with_group(source_child_group);
-                            register_peer(&new_mount);
-                        }
-                    }
+                    finish_propagated_mount(&new_mount, source_child_group, as_slave);
                 }
             }
         }
     }
 }
 
-/// Propagate an umount event to all peers.
+/// Finish setting up a propagated mount's group membership.
+fn finish_propagated_mount(new_mount: &Arc<MountFS>, source_child_group: u32, as_slave: bool) {
+    if as_slave {
+        new_mount.propagation().set_prop_type_value(PropagationType::Slave);
+        new_mount.propagation().set_master_group_id(source_child_group);
+        register_slave(new_mount, source_child_group);
+    } else if source_child_group != 0 {
+        new_mount.propagation().set_shared_with_group(source_child_group);
+        register_peer(new_mount);
+    }
+}
+
+/// Propagate an umount event to all shared peers and slaves.
 ///
-/// When a mount is unmounted from a shared mount point, this function
-/// propagates the umount to all peers in the same group.
+/// Uses proper detach via umount_inner(false) instead of raw remove_mount
+/// to ensure complete cleanup (MOUNT_LIST, peer/slave registry, caches).
 pub fn propagate_umount(source: &Arc<MountFS>, mountpoint_id: InodeId) {
     if !source.propagation().is_shared() {
         return;
     }
+
+    // Propagate to shared peers: find and detach the corresponding mount
     for peer in get_peers(source) {
-        peer.remove_mount(mountpoint_id);
+        if let Some(child) = find_child_mount_by_id(&peer, mountpoint_id) {
+            let _ = child.umount_inner(false);
+        }
     }
+
+    // Propagate to slaves
+    let master_gid = source.propagation().peer_group_id();
+    for slave in get_slaves(master_gid) {
+        if let Some(child) = find_child_mount_by_id(&slave, mountpoint_id) {
+            let _ = child.umount_inner(false);
+        }
+    }
+}
+
+/// Look up a child mount in a MountFS by its mountpoint inode_id.
+fn find_child_mount_by_id(parent: &Arc<MountFS>, inode_id: InodeId) -> Option<Arc<MountFS>> {
+    parent.mountpoints.lock().get(&inode_id).cloned()
 }

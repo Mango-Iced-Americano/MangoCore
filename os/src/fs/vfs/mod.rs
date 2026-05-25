@@ -40,7 +40,7 @@ pub use file::{EventQueueHandle, FdTable, File, FileFlags, FileMode, PollWaitQue
 pub use file_system::{FileSystem, FsInfo, SuperBlock};
 pub use index_node::IndexNode;
 pub use mount::{MountFS, MountFSInode, MountFlags, MountList, MountPath};
-pub use propagation::{MountPropagation, PropagationType, register_peer, propagate_mount, propagate_umount, unregister_peer_mount};
+pub use propagation::{MountPropagation, PropagationType, get_slaves, propagate_mount, propagate_umount, register_peer, register_slave, set_propagation_type, unregister_peer_mount, unregister_slave_mount};
 
 use crate::drivers::block::BlockDevice;
 use crate::timer::TimeSpec;

@@ -2222,6 +2222,12 @@ fn do_bind_mount(
     };
     mnt_fs.set_mount_source(Some(source_path));
 
+    // If mount_subtree registered mnt_fs in the parent's peer group,
+    // unregister before switching to the source's peer group.
+    if mnt_fs.propagation().peer_group_id() != 0 {
+        vfs::propagation::unregister_peer_mount(&mnt_fs);
+    }
+
     // Inherit source's propagation type for bind mounts
     if source_mount_fs.propagation().is_shared() {
         let gid = source_mount_fs.propagation().peer_group_id();
@@ -2298,6 +2304,50 @@ fn collect_rbind_snapshot(
         }
     }
     result
+}
+
+/// Recursively apply a propagation type change to all child mounts.
+///
+/// Uses snapshot-first BFS to avoid mutating the mount tree while iterating.
+fn set_propagation_recursive(
+    root: &Arc<vfs::MountFS>,
+    prop_type: vfs::propagation::PropagationType,
+) {
+    // Snapshot all child mounts (BFS order)
+    let mut children: Vec<Arc<vfs::MountFS>> = Vec::new();
+    let mut queue: Vec<Arc<vfs::MountFS>> = {
+        let mps = root.mountpoints.lock();
+        mps.values().cloned().collect()
+    };
+    while let Some(child) = queue.pop() {
+        children.push(child.clone());
+        let mps = child.mountpoints.lock();
+        for grandchild in mps.values() {
+            queue.push(grandchild.clone());
+        }
+    }
+
+    // Apply propagation change to each child (no locks held during iteration)
+    for child in &children {
+        let master_gid = if prop_type == vfs::propagation::PropagationType::Slave {
+            let parent_prop = child.propagation();
+            // Inherit master from parent's shared group
+            parent_prop.peer_group_id()
+        } else {
+            0
+        };
+
+        if prop_type == vfs::propagation::PropagationType::Slave {
+            child.propagation().set_master_group_id(master_gid);
+        }
+        vfs::propagation::set_propagation_type(child, prop_type);
+        if prop_type == vfs::propagation::PropagationType::Shared {
+            vfs::propagation::register_peer(child);
+        }
+        if prop_type == vfs::propagation::PropagationType::Slave {
+            vfs::propagation::register_slave(child, master_gid);
+        }
+    }
 }
 
 /// Apply previously collected rbind snapshot to the target mount tree.
@@ -2439,32 +2489,48 @@ pub fn sys_mount(
     // ── Flag routing — must happen BEFORE any RamFS creation ──
 
     let propagation = mountflags
-        & (MountFlags::MS_SHARED | MountFlags::MS_PRIVATE | MountFlags::MS_SLAVE | MountFlags::MS_UNBINDABLE);
+        & (MountFlags::MS_SHARED | MountFlags::MS_PRIVATE | MountFlags::MS_SLAVE | MountFlags::MS_UNBINDABLE | MountFlags::MS_REC);
 
     if !propagation.is_empty() {
-        // Allow at most one propagation type
-        if propagation.bits().count_ones() != 1
+        // MS_REC is a modifier — strip it to count the actual propagation type
+        let prop_type_flag = propagation & !MountFlags::MS_REC;
+        if prop_type_flag.bits().count_ones() != 1
             || mountflags.intersects(MountFlags::MS_BIND | MountFlags::MS_MOVE | MountFlags::MS_REMOUNT)
         {
             return EINVAL;
         }
+        let is_recursive = propagation.contains(MountFlags::MS_REC);
         let target_mnt_inode = match target_inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
             Some(m) => m,
             None => return EINVAL,
         };
-        let prop_type = if propagation.contains(MountFlags::MS_SHARED) {
+        let prop_type = if prop_type_flag.contains(MountFlags::MS_SHARED) {
             vfs::propagation::PropagationType::Shared
-        } else if propagation.contains(MountFlags::MS_PRIVATE) {
+        } else if prop_type_flag.contains(MountFlags::MS_PRIVATE) {
             vfs::propagation::PropagationType::Private
-        } else if propagation.contains(MountFlags::MS_SLAVE) {
+        } else if prop_type_flag.contains(MountFlags::MS_SLAVE) {
             vfs::propagation::PropagationType::Slave
         } else {
             vfs::propagation::PropagationType::Unbindable
         };
         let mnt = target_mnt_inode.mount_fs.clone();
-        mnt.propagation().set_type(prop_type);
+        // For Slave: set master_group_id before type change so
+        // set_propagation_type can register/unregister correctly.
+        if prop_type == vfs::propagation::PropagationType::Slave {
+            let parent_prop = target_mnt_inode.mount_fs.propagation();
+            let master_gid = parent_prop.peer_group_id();
+            mnt.propagation().set_master_group_id(master_gid);
+        }
+        vfs::propagation::set_propagation_type(&mnt, prop_type);
         if prop_type == vfs::propagation::PropagationType::Shared {
             vfs::propagation::register_peer(&mnt);
+        }
+        if prop_type == vfs::propagation::PropagationType::Slave {
+            let master_gid = mnt.propagation().master_group_id();
+            vfs::propagation::register_slave(&mnt, master_gid);
+        }
+        if is_recursive {
+            set_propagation_recursive(&mnt, prop_type);
         }
         return SUCCESS;
     }

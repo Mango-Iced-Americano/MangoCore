@@ -28,7 +28,7 @@ use lazy_static::lazy_static;
 
 use super::dentry_cache::DentryCache;
 use super::{
-    file::FileFlags, file_system::FileSystem, propagation::{MountPropagation, PropagationType, register_peer, propagate_mount, propagate_umount, unregister_peer_mount},
+    file::FileFlags, file_system::FileSystem, propagation::{MountPropagation, PropagationType, register_peer, propagate_mount, propagate_umount, unregister_peer_mount, unregister_slave_mount},
     FilePrivateData, FileType, IndexNode, InodeId, InodeMode,
 };
 
@@ -796,13 +796,14 @@ impl MountFS {
         self.mountpoints.lock().remove(&inode_id)
     }
 
-    /// 卸载当前文件系统
-    pub fn umount(self: &Arc<Self>) -> Result<(), SyscallErr> {
+    /// 卸载当前文件系统（内部版本）。
+    /// 当 do_propagate=false 时跳过传播步骤，避免递归传播。
+    pub fn umount_inner(self: &Arc<Self>, do_propagate: bool) -> Result<(), SyscallErr> {
         if !self.mountpoints.lock().is_empty() {
             return Err(SyscallErr::EBUSY);
         }
         // Propagate umount to peers before removing from parent
-        if self.propagation().is_shared() {
+        if do_propagate && self.propagation().is_shared() {
             if let Some(mp) = self.self_mountpoint.lock().clone() {
                 if let Ok(md) = mp.inner_inode.metadata() {
                     propagate_umount(&mp.mount_fs, md.inode_id);
@@ -811,6 +812,8 @@ impl MountFS {
         }
         // Unregister from peer group
         unregister_peer_mount(self);
+        // Unregister from slave group
+        unregister_slave_mount(self);
         // Unregister from global mount list
         if let Some(mountpoint) = self.self_mountpoint.lock().clone() {
             if let Ok(path) = mountpoint.absolute_path() {
@@ -835,6 +838,11 @@ impl MountFS {
         }
         self.inner_filesystem.on_umount();
         Ok(())
+    }
+
+    /// 卸载当前文件系统
+    pub fn umount(self: &Arc<Self>) -> Result<(), SyscallErr> {
+        self.umount_inner(true)
     }
 
     // ── 属性访问 ───────────────────────────────────────────────────
