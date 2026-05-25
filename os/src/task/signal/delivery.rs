@@ -53,6 +53,9 @@ pub fn send_process_signal_info(
     if signal.is_empty() {
         return true;
     }
+    if signal.contains(Signals::SIGCONT) {
+        process.mark_continued();
+    }
     process.enqueue_process_signal(PendingSignal { signal, siginfo });
     if let Some(task) = process_signal_target(process, signal) {
         let mut inner = task.acquire_inner_lock();
@@ -88,6 +91,9 @@ fn send_thread_signal_info(
 ) -> Result<(), isize> {
     if signal.is_empty() {
         return Ok(());
+    }
+    if signal.contains(Signals::SIGCONT) {
+        task.process.mark_continued();
     }
     let mut inner = task.acquire_inner_lock();
     if is_realtime_signal(signal) && inner.sigpending.queued_count() >= inner.sigpending_limit_cur {

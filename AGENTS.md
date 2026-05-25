@@ -260,6 +260,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | `utsname02/03` sethostname ENOSYS | syscall 161 未注册，hostname 固定写死在 `uname` | 用进程共享 `UtsNamespace` 保存 nodename/domainname，`sethostname`/`setdomainname` 更新当前 UTS namespace |
 | `utsname04` 非 root `CLONE_NEWUTS` 未拒绝 | `clone` 未检查 UTS namespace 权限 | 非 root 使用 `CLONE_NEWUTS` 返回 `EPERM` |
 | `waitid11` SIGKILL 子进程被报告为正常退出 | `waitid` siginfo 总是填 `CLD_EXITED` | 按 wait status 低 7 位区分 `CLD_KILLED/CLD_DUMPED` |
+| `waitid07/08`、`waitpid08/13` stopped/continued 用例失败 | SIGSTOP 只让任务睡眠，没有给父进程留下可 wait 的 stop/continue 状态；`waitid` 误要求必须带 `WEXITED` | 进程记录 stopped/continued 事件，`wait4/waitid` 按 `WSTOPPED/WCONTINUED/WNOWAIT` 返回 Linux wait status / `CLD_STOPPED` / `CLD_CONTINUED` |
 | `userns*`、`utime*`、`vmsplice*`、`wireguard*`、`zram*` 等后段失败 | user namespace/procfs、fs timestamp、pipe splice、net/module 环境缺失 | broad scan 中按家族窄跳过，后续专项处理 |
 | `aio*`、`chdir01`、`dio*`、`data*`、`dccp*`、`dhcp*`、`dctcp*` 等前段噪声 | libaio 用户态环境、外部测试设备、fs direct-io 压测、standalone helper、网络协议矩阵 | broad scan 中按家族/精确项跳过，保留普通核心 syscall 用例 |
 | `clone08` musl 失败但 glibc 通过 | musl `clone()` wrapper 对 `CLONE_THREAD/CLONE_CHILD_CLEARTID` 组合直接 `EINVAL`，未进入内核；glibc 路径验证内核线程 clone 可用 | broad scan 中仅跳过 musl `clone08`，保留 glibc |
@@ -274,6 +275,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | 被屏蔽信号导致 EINTR | 用 `is_empty()` 检查信号 | 用 `sigpending.difference(sigmask)` |
 | execve 后 OOM | 新旧内存集同时存在 | `load_elf` 开头 `recycle_data_pages()` |
 | execve 映射只读 ELF 段 panic | `map_elf` 把内核临时文件映射 fast path 当成必然成功并 `unwrap()`，失败后还可能留下部分用户映射 | fast path 只作为优化：严格检查页对齐/大小，失败回退 copy load，并保证跨地址空间映射失败时回滚 |
+| job-control stop 后父进程 wait 不到状态 | 默认 stop 信号没有记录进程级状态，也没有唤醒父进程 `child_exit_wait` | SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU 标记 stopped；SIGCONT 标记 continued 并唤醒父进程；wait 消费事件但不回收子进程 |
 | `rt_sigaction03` invalid sigsetsize 误成功 | `rt_sigaction` 分发忽略第 4 参数 `sigsetsize` | syscall 层传入并校验 `sigsetsize == sizeof(kernel sigset_t)` |
 | `sigaction01` 中 `SA_RESETHAND` 清掉 `SA_SIGINFO` | 信号投递后直接删除 action，handler 内 `sigaction(..., oldact)` 读到默认空 flags | `SA_RESETHAND` 只把 handler 重置为 `SIG_DFL`，保留 flags/mask/restorer 供 oldact 查询 |
 | `rt_sigqueueinfo01` pthread checkpoint 超时 | TID 目标信号立即唤醒 futex/checkpoint waiter，导致 LTP 后续 `TST_CHECKPOINT_WAKE` 找不到等待者 | 对非 leader TID 先入线程 pending，不主动信号唤醒；由测试的 futex wake 释放后再处理 pending signal |

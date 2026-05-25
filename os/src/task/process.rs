@@ -20,6 +20,7 @@ use spin::{Mutex, MutexGuard};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProcessState {
     Running,
+    Stopped,
     Zombie,
 }
 
@@ -73,6 +74,12 @@ pub struct ProcessInner {
     pub state: ProcessState,
     /// wait4 可回收的进程退出码。
     pub exit_code: u32,
+    /// 最近一次可被 waitpid(WUNTRACED)/waitid(WSTOPPED) 观察到的停止信号。
+    pub stopped_signal: Option<usize>,
+    /// 停止状态是否已经被不带 WNOWAIT 的 wait 消费。
+    pub stopped_reported: bool,
+    /// 最近一次可被 waitpid(WCONTINUED)/waitid(WCONTINUED) 观察到的继续事件。
+    pub continued_pending: bool,
     /// 进程退出时记录的 leader CPU 时间快照。
     pub rusage: Rusage,
     /// 已由 wait/waitid 回收的子进程 CPU 时间累计。
@@ -187,6 +194,9 @@ impl ProcessControlBlock {
                 children: Vec::new(),
                 state: ProcessState::Running,
                 exit_code: 0,
+                stopped_signal: None,
+                stopped_reported: false,
+                continued_pending: false,
                 rusage: Rusage::new(),
                 child_rusage: Rusage::new(),
                 sched_policy: 0,
@@ -420,8 +430,70 @@ impl ProcessControlBlock {
         }
         inner.state = ProcessState::Zombie;
         inner.exit_code = exit_code;
+        inner.stopped_signal = None;
+        inner.stopped_reported = true;
+        inner.continued_pending = false;
         inner.rusage = rusage;
         true
+    }
+
+    pub fn mark_stopped(&self, signum: usize) {
+        {
+            let mut inner = self.inner.lock();
+            if inner.state == ProcessState::Zombie {
+                return;
+            }
+            inner.state = ProcessState::Stopped;
+            inner.stopped_signal = Some(signum);
+            inner.stopped_reported = false;
+            inner.continued_pending = false;
+        }
+        if let Some(parent) = self.parent() {
+            parent.child_exit_wait.lock().wake_all();
+        }
+    }
+
+    pub fn mark_continued(&self) {
+        let changed = {
+            let mut inner = self.inner.lock();
+            if inner.state != ProcessState::Stopped {
+                false
+            } else {
+                inner.state = ProcessState::Running;
+                inner.stopped_signal = None;
+                inner.stopped_reported = true;
+                inner.continued_pending = true;
+                true
+            }
+        };
+        if changed {
+            if let Some(parent) = self.parent() {
+                parent.child_exit_wait.lock().wake_all();
+            }
+        }
+    }
+
+    pub fn take_stopped_status(&self, nowait: bool) -> Option<u32> {
+        let mut inner = self.inner.lock();
+        if inner.state != ProcessState::Stopped || inner.stopped_reported {
+            return None;
+        }
+        let signum = inner.stopped_signal?;
+        if !nowait {
+            inner.stopped_reported = true;
+        }
+        Some(((signum as u32) << 8) | 0x7f)
+    }
+
+    pub fn take_continued_status(&self, nowait: bool) -> Option<u32> {
+        let mut inner = self.inner.lock();
+        if !inner.continued_pending {
+            return None;
+        }
+        if !nowait {
+            inner.continued_pending = false;
+        }
+        Some(0xffff)
     }
 
     pub fn exit_code(&self) -> u32 {

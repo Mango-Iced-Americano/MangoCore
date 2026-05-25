@@ -14,7 +14,7 @@ use super::{
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct WaitChildResult {
     pub pid: usize,
-    pub exit_code: u32,
+    pub status: u32,
 }
 
 pub struct ProcessManager;
@@ -80,6 +80,10 @@ impl ProcessManager {
         process: &Arc<ProcessControlBlock>,
         pid: isize,
         nohang: bool,
+        report_exited: bool,
+        report_stopped: bool,
+        report_continued: bool,
+        nowait: bool,
     ) -> Result<Option<WaitChildResult>, isize> {
         fn child_matches_pid(
             child_pid: usize,
@@ -98,7 +102,7 @@ impl ProcessManager {
             }
         }
 
-        let reaped_exit_code = Cell::new(0);
+        let wait_status = Cell::new(0);
         let try_reap_child = || -> Option<isize> {
             let mut process_inner = process.acquire_inner_lock();
             let caller_pgid = process_inner.pgid;
@@ -111,26 +115,55 @@ impl ProcessManager {
                 return Some(ECHILD);
             }
 
-            let pair = process_inner
-                .children
-                .iter()
-                .enumerate()
-                .find(|(_, child)| {
-                    let child_inner = child.acquire_inner_lock();
-                    child_inner.state == ProcessState::Zombie
-                        && child_matches_pid(child.pid, child_inner.pgid, caller_pgid, pid)
-                });
+            for child in process_inner.children.iter() {
+                let child_inner = child.acquire_inner_lock();
+                let matched = child_matches_pid(child.pid, child_inner.pgid, caller_pgid, pid);
+                drop(child_inner);
+                if !matched {
+                    continue;
+                }
+                if report_stopped {
+                    if let Some(status) = child.take_stopped_status(nowait) {
+                        wait_status.set(status);
+                        return Some(child.pid as isize);
+                    }
+                }
+                if report_continued {
+                    if let Some(status) = child.take_continued_status(nowait) {
+                        wait_status.set(status);
+                        return Some(child.pid as isize);
+                    }
+                }
+            }
+
+            if !report_exited {
+                return None;
+            }
+
+            let pair = process_inner.children.iter().enumerate().find(|(_, child)| {
+                let child_inner = child.acquire_inner_lock();
+                child_inner.state == ProcessState::Zombie
+                    && child_matches_pid(child.pid, child_inner.pgid, caller_pgid, pid)
+            });
 
             if let Some((idx, _)) = pair {
-                let child = process_inner.children.remove(idx);
-                trace!(
-                    "[wait4] release zombie process, leader_tid: {}, pid: {}",
-                    child.leader_tid,
-                    child.pid
-                );
+                let child = if nowait {
+                    process_inner.children[idx].clone()
+                } else {
+                    process_inner.children.remove(idx)
+                };
+                if !nowait {
+                    trace!(
+                        "[wait4] release zombie process, leader_tid: {}, pid: {}",
+                        child.leader_tid,
+                        child.pid
+                    );
+                }
                 let found_pid = child.pid;
-                reaped_exit_code.set(child.exit_code());
-                process_inner.child_rusage.add_cpu(child.rusage());
+                wait_status.set(child.exit_code());
+                if !nowait {
+                    process_inner.child_rusage.add_cpu(child.rusage());
+                }
                 Some(found_pid as isize)
             } else {
                 None
@@ -143,7 +176,7 @@ impl ProcessManager {
             } else {
                 Ok(Some(WaitChildResult {
                     pid: value as usize,
-                    exit_code: reaped_exit_code.get(),
+                    status: wait_status.get(),
                 }))
             }
         };

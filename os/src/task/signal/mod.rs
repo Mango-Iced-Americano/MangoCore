@@ -578,6 +578,14 @@ fn wait_for_default_stop_signal() {
     });
 }
 
+fn stop_current_process_for_signal(signum: usize) {
+    let task = current_task().unwrap();
+    let process = task.process.clone();
+    process.mark_stopped(signum);
+    drop(task);
+    wait_for_default_stop_signal();
+}
+
 /// 执行信号处理
 /// 在从内核返回到用户空间前调用
 pub fn do_signal() {
@@ -815,11 +823,11 @@ pub fn do_signal() {
                     continue;
                 }
                 // stop (or we should say block) current process
-                Signals::SIGTSTP | Signals::SIGTTIN | Signals::SIGTTOU => {
+                Signals::SIGSTOP | Signals::SIGTSTP | Signals::SIGTTIN | Signals::SIGTTOU => {
                     drop(inner);
                     drop(sighand);
                     drop(task);
-                    wait_for_default_stop_signal();
+                    stop_current_process_for_signal(signum);
                     // because this loop require `inner`, and we have `drop(inner)` above, so `break` is compulsory
                     // this would cause some signals won't be handled immediately when this process resumes
                     // but it doesn't matter, maybe
