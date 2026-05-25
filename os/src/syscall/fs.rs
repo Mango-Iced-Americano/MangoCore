@@ -14,7 +14,6 @@ use crate::task::{
 };
 use crate::timer::{current_timespec, TimeSpec};
 use crate::utils::error::SyscallErr;
-use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -1586,9 +1585,8 @@ pub struct Statfs {
     /// Padding bytes reserved for future use
     f_spare: [usize; 4],
 }
-/// Fake implement for statfs syscall
-pub fn sys_statfs(_path: *const u8, buf: *mut Statfs) -> isize {
-    let statfs = Box::new(Statfs {
+fn fake_statfs() -> Statfs {
+    Statfs {
         f_type: 0xf2f52010,
         f_bsize: BLOCK_SZ,
         f_blocks: 10000,
@@ -1601,13 +1599,37 @@ pub fn sys_statfs(_path: *const u8, buf: *mut Statfs) -> isize {
         f_frsize: 0,
         f_flag: 0,
         f_spare: [0; 4],
-    });
+    }
+}
+
+fn write_statfs(buf: *mut Statfs, statfs: &Statfs) -> isize {
     let token = current_task().unwrap().get_user_token();
-    if UserPtrMut::new(buf).write(token, statfs.as_ref()).is_err() {
+    if UserPtrMut::new(buf).write(token, statfs).is_err() {
         log::error!("[sys_statfs] Failed to copy to {:?}", buf);
         return EFAULT;
     };
     SUCCESS
+}
+
+/// Fake implement for statfs syscall
+pub fn sys_statfs(_path: *const u8, buf: *mut Statfs) -> isize {
+    let statfs = fake_statfs();
+    write_statfs(buf, &statfs)
+}
+
+pub fn sys_fstatfs(fd: usize, buf: *mut Statfs) -> isize {
+    let Some(task) = current_task() else {
+        return ESRCH;
+    };
+    let files_ref = task.process.files();
+    let fd_table = files_ref.lock();
+    if let Err(e) = fd_table.get_file(fd) {
+        return -(e as isize);
+    }
+    drop(fd_table);
+
+    let statfs = fake_statfs();
+    write_statfs(buf, &statfs)
 }
 
 pub fn sys_fsync(fd: usize) -> isize {
@@ -1622,6 +1644,30 @@ pub fn sys_fsync(fd: usize) -> isize {
     };
     drop(fd_table);
     match inode.sync() {
+        Ok(()) => SUCCESS,
+        Err(e) => -(e as isize),
+    }
+}
+
+pub fn sys_fdatasync(fd: usize) -> isize {
+    let task = current_task().unwrap();
+
+    let files_ref = task.process.files();
+    let fd_table = files_ref.lock();
+    let file = match fd_table.get_file(fd) {
+        Ok(file) => match file.try_clone() {
+            Some(file) => file,
+            None => return EBADF,
+        },
+        Err(e) => return -(e as isize),
+    };
+    drop(fd_table);
+
+    if !matches!(file.file_type(), FileType::File | FileType::Dir) {
+        return EINVAL;
+    }
+
+    match file.inode.sync() {
         Ok(()) => SUCCESS,
         Err(e) => -(e as isize),
     }

@@ -69,10 +69,12 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_FSTAT => "fstat",
         SYSCALL_SYNC => "sync",
         SYSCALL_STATFS => "statfs",
+        SYSCALL_FSTATFS => "fstatfs",
         SYSCALL_TRUNCATE => "truncate",
         SYSCALL_FTRUNCATE => "ftruncate",
         SYSCALL_FALLOCATE => "fallocate",
         SYSCALL_FSYNC => "fsync",
+        SYSCALL_FDATASYNC => "fdatasync",
         SYSCALL_UTIMENSAT => "utimensat",
         SYSCALL_CAPGET => "capget",
         SYSCALL_CAPSET => "capset",
@@ -375,6 +377,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         }
         SYSCALL_SYNC => sys_sync(),
         SYSCALL_FSYNC => sys_fsync(args[0]),
+        SYSCALL_FDATASYNC => sys_fdatasync(args[0]),
         SYSCALL_UTIMENSAT => sys_utimensat(
             args[0],
             args[1] as *const u8,
@@ -616,6 +619,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_MINCORE => sys_mincore(args[0], args[1], args[2]),
         SYSCALL_MLOCK2 => sys_mlock2(args[0], args[1], args[2]),
         SYSCALL_STATFS => sys_statfs(args[0] as *const u8, args[1] as *mut Statfs),
+        SYSCALL_FSTATFS => sys_fstatfs(args[0], args[1] as *mut Statfs),
         SYSCALL_SYNCFS => sys_syncfs(args[0]),
         SYSCALL_SOCKET => sys_socket(args[0] as u32, args[1] as u32, args[2] as u32),
         SYSCALL_SOCKETPAIR => sys_socketpair(
