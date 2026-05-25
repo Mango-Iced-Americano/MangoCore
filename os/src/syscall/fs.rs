@@ -142,6 +142,11 @@ fn offset_is_negative(offset: usize) -> bool {
     offset > isize::MAX as usize
 }
 
+#[inline]
+fn is_stream_file(file: &vfs::File) -> bool {
+    file.mode().contains(vfs::FileMode::FMODE_STREAM)
+}
+
 fn has_directory_write_search_access(meta: &vfs::Metadata, uid: u32, gid: u32) -> bool {
     if uid == 0 {
         return true;
@@ -736,12 +741,15 @@ pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
         Ok(file) => file,
         Err(e) => return -(e as isize),
     };
+    if offset_is_negative(offset) {
+        return EINVAL;
+    }
+    if is_stream_file(&file) {
+        return ESPIPE;
+    }
     // fd is not open for writing
     if file.writable().is_err() {
         return EBADF;
-    }
-    if offset_is_negative(offset) {
-        return EINVAL;
     }
     let fsize_limit = task.acquire_inner_lock().fsize_limit_cur;
     count = match apply_fsize_limit(&file, count, pwrite_start_offset(&file, offset), fsize_limit) {
@@ -799,11 +807,14 @@ pub fn sys_pwritev(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize
         Ok(file) => file,
         Err(e) => return -(e as isize),
     };
-    if file.writable().is_err() {
-        return EBADF;
-    }
     if offset_is_negative(offset) {
         return EINVAL;
+    }
+    if is_stream_file(&file) {
+        return ESPIPE;
+    }
+    if file.writable().is_err() {
+        return EBADF;
     }
     let token = task.get_user_token();
     let user_iov = match UserIoVec::read_user_iovecs(
@@ -835,6 +846,48 @@ pub fn sys_pwritev(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize
     match file.pwrite(offset, &kernel_buf) {
         Ok(n) => n as isize,
         Err(e) => -(e as isize),
+    }
+}
+
+fn split_offset64(offset_low: usize, offset_high: usize) -> usize {
+    (offset_low & 0xffff_ffff) | ((offset_high & 0xffff_ffff) << 32)
+}
+
+pub fn sys_preadv2(
+    fd: usize,
+    iov: usize,
+    iovcnt: usize,
+    offset_low: usize,
+    offset_high: usize,
+    flags: usize,
+) -> isize {
+    if flags != 0 {
+        return EOPNOTSUPP;
+    }
+    let offset = split_offset64(offset_low, offset_high);
+    if offset == usize::MAX {
+        sys_readv(fd, iov, iovcnt)
+    } else {
+        sys_preadv(fd, iov, iovcnt, offset)
+    }
+}
+
+pub fn sys_pwritev2(
+    fd: usize,
+    iov: usize,
+    iovcnt: usize,
+    offset_low: usize,
+    offset_high: usize,
+    flags: usize,
+) -> isize {
+    if flags != 0 {
+        return EOPNOTSUPP;
+    }
+    let offset = split_offset64(offset_low, offset_high);
+    if offset == usize::MAX {
+        sys_writev(fd, iov, iovcnt)
+    } else {
+        sys_pwritev(fd, iov, iovcnt, offset)
     }
 }
 
