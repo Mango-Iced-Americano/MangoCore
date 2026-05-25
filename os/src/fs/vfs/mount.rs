@@ -248,14 +248,16 @@ impl MountFSInode {
         Ok(MountFSInode::new(parent_inner, self.mount_fs.clone()))
     }
 
-    /// Create a new MountFS rooted at `root_inner_inode` and attach it as a
-    /// child of this MountFSInode's parent MountFS at this inode's position.
-    pub fn mount_subtree(
+    /// Create a new MountFS and attach it as a child of this inode's parent
+    /// MountFS. When `do_propagate` is true and the parent is shared, the
+    /// mount event is replicated to all peer mounts.
+    pub(crate) fn mount_subtree_inner(
         &self,
         inner_fs: Arc<dyn FileSystem>,
         root_inner_inode: Arc<dyn IndexNode>,
         mount_flags: MountFlags,
         mount_path: Option<String>,
+        do_propagate: bool,
     ) -> Result<Arc<MountFS>, SyscallErr> {
         let metadata = self.inner_inode.metadata()?;
         if metadata.file_type != FileType::Dir {
@@ -285,13 +287,29 @@ impl MountFSInode {
             MOUNT_LIST.insert(path.as_str(), new_mount_fs.clone(), Some(inode_id));
         }
 
-        // Propagate to peers if parent is shared
-        if parent_prop.is_shared() {
-            // Peer group membership alone provides visibility across peers;
-            // avoid creating duplicate MountFS instances that break umount cleanup.
+        // Propagate to peers if parent is shared (only from public API)
+        if do_propagate && parent_prop.is_shared() {
+            let mount_path_owned = new_mount_fs.mount_path();
+            let child_name = mount_path_owned
+                .as_ref()
+                .and_then(|p| p.rsplit('/').next())
+                .unwrap_or("");
+            propagate_mount(&self.mount_fs, inode_id, &new_mount_fs, child_name);
         }
 
         Ok(new_mount_fs)
+    }
+
+    /// Create a new MountFS rooted at `root_inner_inode` and attach it as a
+    /// child of this MountFSInode's parent MountFS at this inode's position.
+    pub fn mount_subtree(
+        &self,
+        inner_fs: Arc<dyn FileSystem>,
+        root_inner_inode: Arc<dyn IndexNode>,
+        mount_flags: MountFlags,
+        mount_path: Option<String>,
+    ) -> Result<Arc<MountFS>, SyscallErr> {
+        self.mount_subtree_inner(inner_fs, root_inner_inode, mount_flags, mount_path, true)
     }
 }
 

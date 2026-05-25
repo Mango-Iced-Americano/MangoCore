@@ -227,29 +227,55 @@ pub fn propagate_mount(
 
     for peer in get_peers(source) {
         let peer_root = peer.mountpoint_root_inode();
-        // Find the directory in the peer that corresponds to the mountpoint name
-        if let Ok(target_inode) = peer_root.find(child_name) {
-            if let Some(target_mfs_inode) =
-                target_inode.as_any_ref().downcast_ref::<MountFSInode>()
-            {
-                let mount_path = alloc::format!(
-                    "{}/{}",
-                    peer.mount_path().unwrap_or_default(),
-                    child_name
-                );
-                // Clone the child's filesystem into the peer
-                if let Ok(new_mount) = target_mfs_inode.mount_subtree(
+
+        // Check if this is a root mount event — mountpoint_id matches the
+        // peer's root inner inode (e.g., bind-mounting directly onto a
+        // shared mount's root). Propagate to the peer root itself.
+        if let Ok(root_md) = peer_root.inner_inode.metadata() {
+            if root_md.inode_id == mountpoint_id {
+                let mount_path = peer.mount_path().unwrap_or_default();
+                if let Ok(new_mount) = peer_root.mount_subtree_inner(
                     new_child.inner_filesystem(),
                     new_child.root_inner_inode(),
                     super::MountFlags::empty(),
                     Some(mount_path),
+                    false,
                 ) {
-                    // Inherit peer group membership
                     if source_child_group != 0 {
                         new_mount
                             .propagation()
                             .set_shared_with_group(source_child_group);
                         register_peer(&new_mount);
+                    }
+                }
+                continue;
+            }
+        }
+
+        // Fallback: find a child directory matching child_name in the peer
+        if !child_name.is_empty() {
+            if let Ok(target_inode) = peer_root.find(child_name) {
+                if let Some(target_mfs_inode) =
+                    target_inode.as_any_ref().downcast_ref::<MountFSInode>()
+                {
+                    let mount_path = alloc::format!(
+                        "{}/{}",
+                        peer.mount_path().unwrap_or_default(),
+                        child_name
+                    );
+                    if let Ok(new_mount) = target_mfs_inode.mount_subtree_inner(
+                        new_child.inner_filesystem(),
+                        new_child.root_inner_inode(),
+                        super::MountFlags::empty(),
+                        Some(mount_path),
+                        false,
+                    ) {
+                        if source_child_group != 0 {
+                            new_mount
+                                .propagation()
+                                .set_shared_with_group(source_child_group);
+                            register_peer(&new_mount);
+                        }
                     }
                 }
             }
