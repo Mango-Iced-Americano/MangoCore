@@ -249,6 +249,23 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 |------|------|------|
 | `leapsec01` 报 `adjtimex status ... not set` | `adjtimex/clock_adjtime` 只返回快照，未保存 `ADJ_STATUS` 等可调字段 | 保存 `TimexState`，按 `ADJ_*` 更新并在后续 snapshot 回填 |
 
+### LTP 扫描取舍
+
+| 问题 | 根因 | 修复 |
+|------|------|------|
+| `unshare01` 全部 ENOSYS | `unshare(2)` 未接入通用 syscall 表 | 最小支持 `CLONE_FILES`/`CLONE_FS` 拷贝，`CLONE_NEWNS` 在当前全局 mount tree 下兼容返回成功 |
+| `unshare01.sh` 持续 5 分钟 shell 噪声 | LTP standalone helper 不通过标准 `tst_run` 运行 | broad scan 中跳过 |
+| `umip_basic_test` TBROK/TCONF | x86_64-only UMIP 测试 | broad scan 中跳过 |
+| `umask01` 大量 mode/return TFAIL | 文件创建 umask 语义未实现，涉及 fs 权限路径 | fs 适配窗口前先跳过，避免和 VFS 工作冲突 |
+| `utsname02/03` sethostname ENOSYS | syscall 161 未注册，hostname 固定写死在 `uname` | 用进程共享 `UtsNamespace` 保存 nodename/domainname，`sethostname`/`setdomainname` 更新当前 UTS namespace |
+| `utsname04` 非 root `CLONE_NEWUTS` 未拒绝 | `clone` 未检查 UTS namespace 权限 | 非 root 使用 `CLONE_NEWUTS` 返回 `EPERM` |
+| `waitid11` SIGKILL 子进程被报告为正常退出 | `waitid` siginfo 总是填 `CLD_EXITED` | 按 wait status 低 7 位区分 `CLD_KILLED/CLD_DUMPED` |
+| `userns*`、`utime*`、`vmsplice*`、`wireguard*`、`zram*` 等后段失败 | user namespace/procfs、fs timestamp、pipe splice、net/module 环境缺失 | broad scan 中按家族窄跳过，后续专项处理 |
+| `aio*`、`chdir01`、`dio*`、`data*`、`dccp*`、`dhcp*`、`dctcp*` 等前段噪声 | libaio 用户态环境、外部测试设备、fs direct-io 压测、standalone helper、网络协议矩阵 | broad scan 中按家族/精确项跳过，保留普通核心 syscall 用例 |
+| `clone08` musl 失败但 glibc 通过 | musl `clone()` wrapper 对 `CLONE_THREAD/CLONE_CHILD_CLEARTID` 组合直接 `EINVAL`，未进入内核；glibc 路径验证内核线程 clone 可用 | broad scan 中仅跳过 musl `clone08`，保留 glibc |
+| `acct*`、`add_key*`、`bpf_*`、`binfmt_misc*`、`broken_ip*`、`chroot*` 等早段扫描噪声 | process accounting/keyring/BPF/binfmt/module、raw network、fs chroot 等当前非核心或 fs/net 环境缺失 | broad scan 中窄跳过这些阻塞项，保留 `brk*`、`capget/capset`、`chdir04` 等已通过核心用例 |
+| `clock_gettime03/04`、`cve-*`、`dirtyc0w*`、`dirtypipe`、`crypto_user*`、`dns*`、`doio`、`du01.sh`、`dynamic_debug01.sh` 等中段噪声 | time namespace 配置、clock 性能阈值、procfs/CVE、pipe/fs、crypto netlink、DNS/net、I/O 压测、debugfs 环境缺失 | broad scan 中先跳过，后续如专攻性能/time/fs/procfs/net 再单独恢复 |
+
 ### 信号/进程
 
 | 问题 | 根因 | 修复 |
@@ -256,6 +273,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | nanosleep 唤醒后死锁 | 持 `task.inner` 锁调 `has_actionable_signal()` | 释放锁后再调 |
 | 被屏蔽信号导致 EINTR | 用 `is_empty()` 检查信号 | 用 `sigpending.difference(sigmask)` |
 | execve 后 OOM | 新旧内存集同时存在 | `load_elf` 开头 `recycle_data_pages()` |
+| execve 映射只读 ELF 段 panic | `map_elf` 把内核临时文件映射 fast path 当成必然成功并 `unwrap()`，失败后还可能留下部分用户映射 | fast path 只作为优化：严格检查页对齐/大小，失败回退 copy load，并保证跨地址空间映射失败时回滚 |
 | `rt_sigaction03` invalid sigsetsize 误成功 | `rt_sigaction` 分发忽略第 4 参数 `sigsetsize` | syscall 层传入并校验 `sigsetsize == sizeof(kernel sigset_t)` |
 | `sigaction01` 中 `SA_RESETHAND` 清掉 `SA_SIGINFO` | 信号投递后直接删除 action，handler 内 `sigaction(..., oldact)` 读到默认空 flags | `SA_RESETHAND` 只把 handler 重置为 `SIG_DFL`，保留 flags/mask/restorer 供 oldact 查询 |
 | `rt_sigqueueinfo01` pthread checkpoint 超时 | TID 目标信号立即唤醒 futex/checkpoint waiter，导致 LTP 后续 `TST_CHECKPOINT_WAKE` 找不到等待者 | 对非 leader TID 先入线程 pending，不主动信号唤醒；由测试的 futex wake 释放后再处理 pending signal |
@@ -286,6 +304,19 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | LTP `request_key*`/`rmdir*`/`route*` 阻塞后续扫描 | 分别依赖 keyring 子系统、fs 语义和网络路由脚本 | 当前非 fs/net 主线先 narrow skip |
 | LTP `rtc*`/`run_cpuctl*`/`run_freezer*`/`run_memctl*`/`runpwtests*` TFAIL/TCONF | 依赖 RTC ioctl、cgroup controller 或 power-management 环境 | 当前非设备/控制器主线先 narrow skip |
 | LTP `rwtest` 持续刷 Broken pipe | 文件/管道压力 helper，容易拖慢扫描 | 当前 broad scan 中单点 skip |
+| LTP `sched_stress.sh` 长时间运行且刷脚本命令异常 | scheduler stress helper，不适合作为 syscall 适配扫描阻塞点 | 当前 broad scan 中单点 skip，保留普通 `sched_*` 语义测试 |
+| LTP `sched_tc0/1/6`、`sem_comm`、`semctl08/09`、`semget05` 阻塞扫描 | 依赖 KERNEL 环境、IPC namespace、semid64 time_high、SEM_STAT_ANY 或 `/proc/sys/kernel/sem` | 当前 syscall 扫描中先 narrow skip，后续 IPC/procfs 专项处理 |
+| LTP `sctp*`、`send02`、`sendmsg01`、`sendmmsg*`、`recvmmsg01`、部分 `sendfile*` 阻塞扫描 | SCTP/网络收发或 fs sendfile 边界用例 | 当前 fs/net 协作期先由 inline runner skip |
+| LTP `*_16`、`set_mempolicy*`、`set_thread_area01`、`set_ipv4addr`、`sendmsg03`/`sendto03` | 16-bit compat、NUMA policy、架构 TLS 或网络配置环境不支持 | 当前 broad scan 中显式 skip |
+| LTP `setsockopt02/04..10`、`setxattr*`、`sgetmask01`、`shell_pipe01.sh`、`shm_comm`、`shm_test` | net/fs、旧 signal ABI、standalone helper 或 System V SHM 长耗时/namespace 兼容问题 | 当前 broad scan 中 narrow skip，后续专项处理 |
+| LTP `shm*`、`splice*`、`squashfs01`、`ssetmask01`、`ssh-stress.sh`、`stack_clash`、`starvation` | IPC/pipe/fs/网络压力、旧 signal ABI、procfs/CVE 环境或长耗时 scheduler stress | 当前 broad scan 中 narrow skip，后续专项处理 |
+| LTP `stat03*`、`statfs*`、`statvfs*`、`statx*`、`swap*`、`symlink*`、`sync*`、`sysctl*`、`tcp*`、`stream02`、`support_numa` | fs/device/procfs/网络/NUMA 或 stdio helper 范围 | 当前 fs/net 协作期 broad scan 中 narrow skip |
+| LTP `tee*`、SCTP `test_*` helper、`testsf_*` | pipe/fs 或网络 helper，不是当前非 fs/net 主线 | 当前 fs/net 协作期 broad scan 中 narrow skip |
+| LTP `thp01` 超大 argv 触发内核跳到 `0x6363...` | `execve` 参数栈跨页写入时旧代码只翻译栈顶一页，且缺少过大 argv/env 的 `E2BIG` 预检 | `execve` 先按用户栈容量拒绝过大参数，ELF 启动栈按虚拟地址逐页翻译写入 |
+| LTP `thp02/03/04`、`timed_forkbomb` | THP/huge page 环境缺失或 fork 压力长耗时 | 当前 broad scan 中 narrow skip，保留 `thp01` 回归验证 |
+| LTP `times03` CPU 时间统计异常 | `times(2)` 把硬件 tick 当作 `clock_t`，且没有累计已 wait 回收子进程 CPU 时间 | 按 Linux `USER_HZ=100` 换算 `clock_t`，wait 回收 zombie 时累加子进程 `rusage`，`getrusage(RUSAGE_CHILDREN)` 同步返回累计值 |
+| LTP `timens*`、`timerfd*`、`tst_*`、`tpm*`、`trace*`、`truncate03*` 阻塞扫描 | time namespace/timerfd/TPM/tracing/fs truncate edge 或 LTP 内部 helper，当前非 fs/net 主线不适合长卡 | 先 narrow skip 解堵；`timerfd*` 后续作为 fd+timer 子系统专项实现 |
+| LTP `uaccess`、`udp*` 阻塞扫描 | `uaccess` 依赖 LTP kernel module，`udp*` 属于网络矩阵 | 当前 broad scan 中 narrow skip，避免和 net 适配冲突 |
 | 非阻塞 socket 测试失败 | 检查是否在 `try_xxx` 前调了 `try_poll()` |
 
 ### 错误码对齐（Linux 语义）

@@ -8,7 +8,7 @@ use crate::task::{
 };
 use crate::timer::{
     current_timespec, current_timeval, get_time_ms, set_current_timespec, ITimerVal, TimeSpec,
-    TimeVal, TimeZone, Times, NSEC_PER_SEC,
+    TimeVal, TimeZone, Times, NSEC_PER_SEC, USEC_PER_SEC,
 };
 use log::{info, trace};
 use spin::Mutex;
@@ -35,6 +35,7 @@ const TIMER_ABSTIME: u32 = 1;
 const SIGEV_SIGNAL: i32 = 0;
 const SIGEV_NONE: i32 = 1;
 const MAX_POSIX_TIMERS: usize = 32;
+const USER_HZ: usize = 100;
 const CAP_SYS_TIME: usize = 25;
 const ADJ_OFFSET: u32 = 0x0001;
 const ADJ_FREQUENCY: u32 = 0x0002;
@@ -532,7 +533,7 @@ fn valid_timex_value(timex: &Timex) -> bool {
 fn has_time_adjust_permission() -> bool {
     let task = current_task().unwrap();
     let inner = task.acquire_inner_lock();
-    inner.euid == 0 || (inner.cap_effective & (1u64 << CAP_SYS_TIME)) != 0
+    (inner.cap_effective & (1u64 << CAP_SYS_TIME)) != 0
 }
 
 fn update_timex_state(state: &mut TimexState, timex: &Timex) {
@@ -940,20 +941,27 @@ fn check_sleep_clock(clk_id: usize) -> Result<(), isize> {
 
 pub fn sys_times(buf: *mut Times) -> isize {
     let task = current_task().unwrap();
-    let inner = task.acquire_inner_lock();
+    let (utime, stime) = {
+        let inner = task.acquire_inner_lock();
+        (
+            timeval_to_user_ticks(inner.rusage.ru_utime),
+            timeval_to_user_ticks(inner.rusage.ru_stime),
+        )
+    };
+    let child_rusage = task.process.child_rusage();
     let token = task.get_user_token();
     let times = Times {
-        tms_utime: inner.rusage.ru_utime.to_tick(),
-        tms_stime: inner.rusage.ru_stime.to_tick(),
-        tms_cutime: 0,
-        tms_cstime: 0,
+        tms_utime: utime,
+        tms_stime: stime,
+        tms_cutime: timeval_to_user_ticks(child_rusage.ru_utime),
+        tms_cstime: timeval_to_user_ticks(child_rusage.ru_stime),
     };
     if UserPtrMut::new(buf).write(token, &times).is_err() {
         log::error!("[sys_times] Failed to copy to {:?}", buf);
         return EFAULT;
     };
     // return clock ticks that have elapsed since an arbitrary point in the past
-    crate::hal::get_time() as isize
+    timeval_to_user_ticks(TimeVal::now()) as isize
 }
 
 pub fn sys_getrusage(who: isize, usage: *mut Rusage) -> isize {
@@ -965,7 +973,7 @@ pub fn sys_getrusage(who: isize, usage: *mut Rusage) -> isize {
     let token = task.get_user_token();
     let rusage = match who {
         RUSAGE_SELF | RUSAGE_THREAD => task.acquire_inner_lock().rusage,
-        RUSAGE_CHILDREN => Rusage::new(),
+        RUSAGE_CHILDREN => task.process.child_rusage(),
         _ => return EINVAL,
     };
     if UserPtrMut::new(usage).write(token, &rusage).is_err() {
@@ -974,4 +982,8 @@ pub fn sys_getrusage(who: isize, usage: *mut Rusage) -> isize {
     };
     //info!("[sys_getrusage] who: {:?}, usage: {:?}", who, rusage);
     SUCCESS
+}
+
+fn timeval_to_user_ticks(value: TimeVal) -> usize {
+    value.to_us().saturating_mul(USER_HZ) / USEC_PER_SEC
 }

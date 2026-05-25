@@ -3,8 +3,8 @@ use super::{
     registry,
     signal::{PendingSignal, SignalQueue, Sighand, Signals},
     threads::Futex,
-    wake_interruptible, Completion, FsStatus, TaskControlBlock, TaskStatus, WaitQueue, WaitResult,
-    INITPROC,
+    wake_interruptible, Completion, FsStatus, TaskControlBlock, TaskStatus, UtsNamespace,
+    Rusage, WaitQueue, WaitResult, INITPROC,
 };
 use crate::fs::vfs;
 use crate::mm::{AddressSpace, PageTableImpl};
@@ -51,6 +51,8 @@ pub struct ProcessInner {
     files: Arc<Mutex<vfs::FdTable>>,
     /// 文件系统状态（cwd 等）。
     fs: Arc<Mutex<FsStatus>>,
+    /// UTS namespace 状态（hostname/domainname）。
+    uts: Arc<Mutex<UtsNamespace>>,
     /// 虚拟内存空间。
     vm: Arc<Mutex<AddressSpace<PageTableImpl>>>,
     /// 信号处理函数表。
@@ -71,6 +73,10 @@ pub struct ProcessInner {
     pub state: ProcessState,
     /// wait4 可回收的进程退出码。
     pub exit_code: u32,
+    /// 进程退出时记录的 leader CPU 时间快照。
+    pub rusage: Rusage,
+    /// 已由 wait/waitid 回收的子进程 CPU 时间累计。
+    pub child_rusage: Rusage,
     /// 进程 leader 的调度策略兼容快照，供 zombie 子进程在 wait 前被查询。
     pub sched_policy: usize,
     pub sched_priority: i32,
@@ -144,6 +150,7 @@ impl ProcessControlBlock {
         exe_path: String,
         files: Arc<Mutex<vfs::FdTable>>,
         fs: Arc<Mutex<FsStatus>>,
+        uts: Arc<Mutex<UtsNamespace>>,
         vm: Arc<Mutex<AddressSpace<PageTableImpl>>>,
         sighand: Arc<Mutex<Sighand>>,
         futex: Arc<Mutex<Futex>>,
@@ -169,6 +176,7 @@ impl ProcessControlBlock {
                 exe_path,
                 files,
                 fs,
+                uts,
                 vm,
                 sighand,
                 futex,
@@ -179,6 +187,8 @@ impl ProcessControlBlock {
                 children: Vec::new(),
                 state: ProcessState::Running,
                 exit_code: 0,
+                rusage: Rusage::new(),
+                child_rusage: Rusage::new(),
                 sched_policy: 0,
                 sched_priority: 0,
                 sched_reset_on_fork: false,
@@ -238,8 +248,28 @@ impl ProcessControlBlock {
         Ok(new_files)
     }
 
+    pub fn unshare_fs(&self) -> Arc<Mutex<FsStatus>> {
+        let fs_ref = self.fs();
+        let copied = fs_ref.lock().clone();
+        let new_fs = Arc::new(Mutex::new(copied));
+        self.inner.lock().fs = new_fs.clone();
+        new_fs
+    }
+
     pub fn fs(&self) -> Arc<Mutex<FsStatus>> {
         self.inner.lock().fs.clone()
+    }
+
+    pub fn uts(&self) -> Arc<Mutex<UtsNamespace>> {
+        self.inner.lock().uts.clone()
+    }
+
+    pub fn unshare_uts(&self) -> Arc<Mutex<UtsNamespace>> {
+        let uts_ref = self.uts();
+        let copied = uts_ref.lock().clone();
+        let new_uts = Arc::new(Mutex::new(copied));
+        self.inner.lock().uts = new_uts.clone();
+        new_uts
     }
 
     pub fn vm(&self) -> Arc<Mutex<AddressSpace<PageTableImpl>>> {
@@ -383,18 +413,27 @@ impl ProcessControlBlock {
         self.inner.lock().state == ProcessState::Zombie
     }
 
-    pub fn mark_zombie(&self, exit_code: u32) -> bool {
+    pub fn mark_zombie(&self, exit_code: u32, rusage: Rusage) -> bool {
         let mut inner = self.inner.lock();
         if inner.state == ProcessState::Zombie {
             return false;
         }
         inner.state = ProcessState::Zombie;
         inner.exit_code = exit_code;
+        inner.rusage = rusage;
         true
     }
 
     pub fn exit_code(&self) -> u32 {
         self.inner.lock().exit_code
+    }
+
+    pub fn rusage(&self) -> Rusage {
+        self.inner.lock().rusage
+    }
+
+    pub fn child_rusage(&self) -> Rusage {
+        self.inner.lock().child_rusage
     }
 
     pub fn enqueue_process_signal(&self, pending: PendingSignal) {
@@ -487,7 +526,8 @@ impl ProcessControlBlock {
     /// 以及进程资源关闭。
     pub fn finish_exit(&self, exit_task: &TaskControlBlock, exit_code: u32) {
         self.complete_vfork();
-        if !self.mark_zombie(exit_code) {
+        let rusage = exit_task.acquire_inner_lock().rusage;
+        if !self.mark_zombie(exit_code, rusage) {
             return;
         }
         let old_exec_key = self.inner.lock().exec_key.take();

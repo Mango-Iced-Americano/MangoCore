@@ -130,6 +130,7 @@ impl ProcessManager {
                 );
                 let found_pid = child.pid;
                 reaped_exit_code.set(child.exit_code());
+                process_inner.child_rusage.add_cpu(child.rusage());
                 Some(found_pid as isize)
             } else {
                 None

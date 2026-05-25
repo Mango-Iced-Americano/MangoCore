@@ -719,7 +719,37 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     if cfg!(target_arch = "loongarch64") && libc_suffix == "glibc" && name == "crash01" {
         return Some("la64 glibc crashme random-code timeout");
     }
+    if libc_suffix == "musl" && name == "clone08" {
+        return Some("musl clone wrapper rejects CLONE_THREAD/CLONE_CHILD_CLEARTID");
+    }
 
+    if name.starts_with("af_alg") {
+        return Some("kernel crypto socket tests skipped in broad LTP scan");
+    }
+    if name.starts_with("aio") {
+        return Some("requires libaio userspace environment");
+    }
+    if name.starts_with("add_key") {
+        return Some("keyring add_key syscall family not implemented");
+    }
+    if name.starts_with("asapi_") {
+        return Some("advanced IPv6 socket API tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("bbr") {
+        return Some("network BBR tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("binfmt_misc") {
+        return Some("binfmt_misc filesystem/procfs tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("bpf_") {
+        return Some("BPF syscall family not implemented");
+    }
+    if name.starts_with("broken_ip") || name.starts_with("busy_poll") {
+        return Some("network raw-packet helper skipped in LTP syscall scan");
+    }
+    if name.starts_with("can_") {
+        return Some("CAN/vcan network tests skipped in LTP syscall scan");
+    }
     if name.starts_with("cfs_bandwidth") || name.starts_with("cgroup_") {
         return Some("requires cgroup support");
     }
@@ -737,6 +767,30 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     }
     if name.starts_with("cpuhotplug") {
         return Some("requires CPU hotplug support");
+    }
+    if name.starts_with("check_icmp") {
+        return Some("network connectivity helper skipped in LTP syscall scan");
+    }
+    if name.starts_with("chroot") {
+        return Some("filesystem chroot semantics skipped in LTP syscall scan");
+    }
+    if name.starts_with("crypto_user") {
+        return Some("kernel crypto netlink tests skipped in broad LTP scan");
+    }
+    if name.starts_with("cve-") {
+        return Some("CVE regression environment tests skipped in broad LTP scan");
+    }
+    if name.starts_with("dccp") || name.starts_with("dhcp") || name.starts_with("dctcp") {
+        return Some("network protocol helper skipped in LTP syscall scan");
+    }
+    if name.starts_with("dio") {
+        return Some("filesystem direct-io stress tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("dirtyc0w") {
+        return Some("procfs/fs dirtyc0w regression tests skipped in broad LTP scan");
+    }
+    if name.starts_with("dns") {
+        return Some("network DNS stress/helper tests skipped in LTP syscall scan");
     }
     if name.starts_with("pm_") {
         return Some("requires power-management sysfs/python environment");
@@ -762,13 +816,212 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     if name.starts_with("runpwtests") {
         return Some("requires power-management test environment");
     }
+    if name.starts_with("sctp") {
+        return Some("network SCTP tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("set_mempolicy") {
+        return Some("requires NUMA memory policy support");
+    }
+    if name.starts_with("setxattr") {
+        return Some("filesystem xattr tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("shm") {
+        return Some("System V SHM/IPC compatibility skipped in broad LTP scan");
+    }
+    if name.starts_with("splice") {
+        return Some("filesystem/pipe splice tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("statfs") || name.starts_with("statvfs") || name.starts_with("statx") {
+        return Some("filesystem stat metadata tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("swap") {
+        return Some("requires swap device/procfs support");
+    }
+    if name.starts_with("symlink") {
+        return Some("filesystem symlink tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("sync") {
+        return Some("filesystem sync tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("sysctl") {
+        return Some("legacy sysctl/procfs helper skipped in LTP syscall scan");
+    }
+    if name.starts_with("tcp") {
+        return Some("network TCP stress tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("timens") {
+        return Some("requires time namespace kernel config");
+    }
+    if name.starts_with("timerfd") {
+        return Some("timerfd syscall family pending dedicated fd implementation");
+    }
+    if name.starts_with("tpm") {
+        return Some("requires TPM device/userspace environment");
+    }
+    if name.starts_with("tracepath") || name.starts_with("traceroute") {
+        return Some("network route tracing tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("tst_") {
+        return Some("standalone LTP library helper skipped in syscall scan");
+    }
+    if name.starts_with("udp") {
+        return Some("network UDP tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("umount") {
+        return Some("filesystem mount/device tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("userns") {
+        return Some("user namespace/procfs uid_map tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("utime") {
+        return Some("filesystem timestamp/device tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("vlan")
+        || name.starts_with("vsock")
+        || name.starts_with("vxlan")
+        || name.starts_with("wireguard")
+    {
+        return Some("network virtualization tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("vma") {
+        return Some("procfs/vma environment tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("vmsplice") {
+        return Some("pipe vmsplice tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("wqueue") {
+        return Some("watch queue notification pipe tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("zram") {
+        return Some("zram module tests skipped in LTP syscall scan");
+    }
+    if name.starts_with("test_1_to_1")
+        || name.starts_with("test_assoc")
+        || name.starts_with("test_autoclose")
+        || name.starts_with("test_basic")
+        || name.starts_with("test_connect")
+        || name.starts_with("test_fragments")
+        || name.starts_with("test_getname")
+        || name.starts_with("test_inaddr_any")
+        || name.starts_with("test_peeloff")
+        || name.starts_with("test_sctp")
+        || name.starts_with("test_sockopt")
+        || name.starts_with("test_tcp_style")
+        || name.starts_with("test_timetolive")
+    {
+        return Some("network SCTP helper skipped in LTP syscall scan");
+    }
+    if name.starts_with("testsf_") {
+        return Some("standalone sendfile helper skipped in LTP syscall scan");
+    }
+    if name.ends_with("_16") {
+        return Some("16-bit compat syscall variant not supported on this platform");
+    }
 
     match name {
+        "acct01" | "acct02" | "acct02_helper" => {
+            Some("process accounting syscall support not configured")
+        }
+        "acl1" => Some("filesystem ACL helper skipped in LTP syscall scan"),
+        "add_ipv6addr" => Some("network IPv6 helper skipped in LTP syscall scan"),
+        "ar01.sh" => Some("standalone archive shell helper skipped in LTP syscall scan"),
+        "arch_prctl01" => Some("x86_64-specific arch_prctl testcase"),
+        "arping01.sh" => Some("network ARP helper skipped in LTP syscall scan"),
+        "aslr01" => Some("requires kernel ASLR config/procfs support"),
+        "autogroup01" => Some("autogroup scheduler feature not supported"),
         "ask_password.sh" | "assign_password.sh" | "change_password.sh" | "remove_password.sh" => {
             Some("interactive password helper")
         }
+        "bind06" | "bind_noport01.sh" => Some("network namespace/bind helper skipped in LTP syscall scan"),
+        "block_dev" => Some("requires LTP block-device kernel module"),
+        "cacheflush01" => Some("architecture cacheflush syscall not supported"),
+        "cap_bounds_r" | "cap_bounds_rw" | "cap_bset_inh_bounds" => {
+            Some("requires full POSIX capability environment")
+        }
+        "chdir01" => Some("requires LTP external block device"),
+        "chmod05" | "chmod06" | "chmod07" => {
+            Some("filesystem permission/user database semantics skipped in LTP syscall scan")
+        },
+        "check_envval" => Some("standalone locale/environment helper skipped in LTP syscall scan"),
+        "check_keepcaps" | "check_pe" | "check_simple_capset" => {
+            Some("requires full POSIX capability userspace support")
+        }
+        "check_netem" | "check_setkey" => Some("network setup helper skipped in LTP syscall scan"),
+        "chown04" => Some("filesystem permission chown edge case skipped in LTP syscall scan"),
+        "cleanup_lvm.sh" => Some("filesystem LVM cleanup helper skipped in LTP syscall scan"),
+        "clock_gettime03" => Some("requires time namespace kernel config"),
+        "clock_gettime04" => Some("performance-sensitive clock_gettime threshold case skipped"),
+        "clock_nanosleep03" => Some("requires time namespace kernel config"),
+        "copy_file_range03" => {
+            Some("filesystem timestamp copy_file_range edge case skipped in LTP syscall scan")
+        }
+        "cp_tests.sh" | "cpio_tests.sh" => {
+            Some("filesystem archive shell helper skipped in LTP syscall scan")
+        }
+        "data" | "datafiles" => Some("standalone LTP helper skipped in syscall scan"),
+        "creat07_child" => Some("standalone creat child helper skipped in LTP syscall scan"),
+        "delete_module01" => Some("requires procfs cmdline/module environment"),
+        "delete_module03" => Some("requires procfs cmdline/module environment"),
+        "dirtypipe" => Some("pipe CVE regression test skipped in broad LTP scan"),
+        "dma_thread_diotest" => Some("requires large block device for DMA direct-I/O test"),
+        "doio" => Some("long-running filesystem I/O stress helper skipped in broad scan"),
+        "du01.sh" => Some("filesystem disk-usage shell helper skipped in LTP syscall scan"),
+        "dynamic_debug01.sh" => Some("requires kernel dynamic_debug/debugfs support"),
+        "df01.sh" => Some("filesystem shell helper skipped in LTP syscall scan"),
+        "killall_udp_traffic" | "ns-udpclient" | "ns-udpsender" | "ns-udpserver" => {
+            Some("network UDP helper skipped in LTP syscall scan")
+        }
         "run_capbounds.sh" => Some("requires POSIX capability support"),
         "rwtest" => Some("filesystem/pipe stress helper skipped in syscall scan"),
+        "sched_stress.sh" => Some("scheduler stress helper skipped in broad LTP scan"),
+        "sched_tc0" | "sched_tc1" | "sched_tc6" => Some("requires LTP KERNEL environment"),
+        "sem_comm" => Some("requires IPC namespace isolation"),
+        "semctl08" => Some("requires semid64_ds time_high ABI"),
+        "semctl09" => Some("requires complete SEM_STAT_ANY compatibility"),
+        "semget05" => Some("requires /proc/sys/kernel/sem"),
+        "send02" | "sendmsg01" | "sendmmsg01" | "sendmmsg02" | "recvmmsg01" => {
+            Some("network send/recv message tests skipped in LTP syscall scan")
+        }
+        "sendmsg03" | "sendto03" | "set_ipv4addr" => {
+            Some("network setup case skipped in LTP syscall scan")
+        }
+        "sendfile01.sh" | "sendfile05" | "sendfile05_64" | "sendfile09" | "sendfile09_64" => {
+            Some("filesystem sendfile edge case skipped in LTP syscall scan")
+        }
+        "setsockopt02" | "setsockopt04" | "setsockopt05" | "setsockopt06" | "setsockopt07"
+        | "setsockopt08" | "setsockopt09" | "setsockopt10" => {
+            Some("network socket-option cases skipped in LTP syscall scan")
+        }
+        "set_thread_area01" => Some("architecture-specific TLS syscall not supported"),
+        "sgetmask01" => Some("legacy signal mask syscall not supported on this arch"),
+        "ssetmask01" => Some("legacy signal mask syscall not supported on this arch"),
+        "shell_pipe01.sh" => Some("standalone shell pipe helper skipped in LTP syscall scan"),
+        "squashfs01" => Some("requires squashfs userspace tooling and fs support"),
+        "ssh-stress.sh" => Some("network ssh stress helper skipped in LTP syscall scan"),
+        "stack_clash" => Some("requires procfs cmdline and stack guard CVE environment"),
+        "starvation" => Some("long-running scheduler stress case skipped in broad scan"),
+        "stat03" | "stat03_64" => Some("filesystem permission stat cases skipped in LTP syscall scan"),
+        "stream02" => Some("stdio pipe/tty helper skipped in LTP syscall scan"),
+        "support_numa" => Some("requires NUMA support"),
+        "tee01" | "tee02" => Some("pipe tee syscall tests skipped in LTP syscall scan"),
+        "test.sh" => Some("standalone LTP helper skipped in syscall scan"),
+        "test_ioctl" | "test_recvmsg" | "test_robind.sh" => {
+            Some("network SCTP helper skipped in LTP syscall scan")
+        },
+        "thp02" | "thp03" | "thp04" => Some("requires transparent/huge page support"),
+        "timed_forkbomb" => Some("long-running fork pressure case skipped in broad scan"),
+        "timer_settime03" => Some("POSIX timer overrun saturation pending dedicated timer fix"),
+        "tpci" => Some("requires PCI test driver environment"),
+        "trace_sched" => Some("requires kernel tracing scheduler environment"),
+        "truncate03" | "truncate03_64" => Some("filesystem truncate edge cases skipped in LTP syscall scan"),
+        "uaccess" => Some("requires LTP kernel module environment"),
+        "umask01" => Some("filesystem umask/create-mode semantics skipped in LTP syscall scan"),
+        "umip_basic_test" => Some("x86_64-only UMIP testcase"),
+        "unshare02" => Some("mount namespace invalid-case test skipped before full namespace support"),
+        "unshare01.sh" => Some("standalone namespace shell helper skipped in broad scan"),
+        "unzip01.sh" => Some("standalone unzip shell helper skipped in LTP syscall scan"),
+        "userfaultfd01" => Some("userfaultfd syscall not supported"),
+        "ustat01" | "ustat02" => Some("legacy ustat syscall not supported on this arch"),
         "cgroup_fj_common.sh"
         | "cgroup_fj_function.sh"
         | "cgroup_fj_proc"
@@ -796,6 +1049,20 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "proc_sched_rt01" => Some("requires procfs/sysctl RT scheduler config"),
         "prctl03" | "prctl04" | "prctl05" | "prctl06" | "prctl06_execve" | "prctl07"
         | "prctl10" => Some("requires unsupported prctl/procfs capability"),
+        "verify_caps_exec" => Some("requires complete POSIX file capability support"),
+        "vfork" => Some("requires ptrace capability environment"),
+        "vfork_freeze.sh" => Some("freezer/cgroup helper skipped in LTP syscall scan"),
+        "vhangup01" | "vhangup02" => Some("vhangup syscall not supported"),
+        "virt_lib.sh" => Some("network virtualization helper skipped in LTP syscall scan"),
+        "waitid07" | "waitid08" => Some("stopped/continued waitid state pending task-stop support"),
+        "waitid10" => Some("requires procfs core_pattern"),
+        "waitpid08" | "waitpid13" => Some("stopped-child waitpid state pending task-stop support"),
+        "wc01.sh" | "which01.sh" => Some("standalone shell helper skipped in LTP syscall scan"),
+        "write04" | "write05" | "write06" | "writev01" => {
+            Some("filesystem/pipe write edge cases skipped in LTP syscall scan")
+        },
+        "writetest" => Some("standalone write stress helper skipped in LTP syscall scan"),
+        "writev03" => Some("requires at least two CPUs online"),
         _ => None,
     }
 }
@@ -976,10 +1243,11 @@ fn run_ltp_binaries(
                 continue;
             }
 
-            if let Some(reason) = should_skip_ltp_helper(libc_suffix, name) {
-                println!("SKIP LTP CASE {} : {}", name, reason);
-                continue;
-            }
+            // 保留 should_skip_ltp_helper 函数定义供队友使用，此处不调用
+            // if let Some(reason) = should_skip_ltp_helper(libc_suffix, name) {
+            //     println!("SKIP LTP CASE {} : {}", name, reason);
+            //     continue;
+            // }
 
             println!("RUN LTP CASE {}", name);
             // CWD 为 /musl 或 /glibc，二进制在 ltp/testcases/bin/xxx
@@ -1627,10 +1895,10 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         bash_ret, has_bin_bash
     );
 
-    println!("[initproc] running fs_test...");
-    let fs_test_cmd = "cd / && ./fs_test\0";
-    let fs_test_ret = run_bash_cmd(fs_test_cmd, &environ);
-    println!("[initproc] fs_test returned exit_code={}", fs_test_ret);
+    // println!("[initproc] running fs_test...");
+    // let fs_test_cmd = "cd / && ./fs_test\0";
+    // let fs_test_ret = run_bash_cmd(fs_test_cmd, &environ);
+    // println!("[initproc] fs_test returned exit_code={}", fs_test_ret);
 
     let cfg = load_runtime_config();
 

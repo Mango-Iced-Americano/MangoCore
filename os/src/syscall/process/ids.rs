@@ -136,7 +136,6 @@ pub fn sys_uname(buf: *mut u8) -> isize {
     // A little stupid but still efficient.
     const FIELD_OFFSET: usize = 65;
     buffer.write_at(FIELD_OFFSET * 0, b"Linux\0");
-    buffer.write_at(FIELD_OFFSET * 1, b"blossom\0");
     #[cfg(feature = "riscv")]
     buffer.write_at(FIELD_OFFSET * 2, b"5.10.0-1-rv64\0");
     #[cfg(feature = "loongarch64")]
@@ -146,7 +145,56 @@ pub fn sys_uname(buf: *mut u8) -> isize {
     buffer.write_at(FIELD_OFFSET * 4, b"rv64\0");
     #[cfg(feature = "loongarch64")]
     buffer.write_at(FIELD_OFFSET * 4, b"la64\0");
-    buffer.write_at(FIELD_OFFSET * 5, b"\0");
+    let task = current_task().unwrap();
+    let uts_ref = task.process.uts();
+    let uts = uts_ref.lock();
+    buffer.write_at(FIELD_OFFSET * 1, &uts.nodename[..]);
+    buffer.write_at(FIELD_OFFSET * 5, &uts.domainname[..]);
+    SUCCESS
+}
+
+fn copy_uts_field(name: *const u8, len: usize) -> Result<[u8; 65], isize> {
+    const UTS_FIELD_LEN: usize = 65;
+    const UTS_NAME_MAX: usize = UTS_FIELD_LEN - 1;
+
+    if len > UTS_NAME_MAX {
+        return Err(EINVAL);
+    }
+    if len > 0 && name.is_null() {
+        return Err(EFAULT);
+    }
+    let mut field = [0u8; UTS_FIELD_LEN];
+    if len > 0 {
+        copy_from_user_array(current_user_token(), name, field.as_mut_ptr(), len)?;
+    }
+    Ok(field)
+}
+
+pub fn sys_sethostname(name: *const u8, len: usize) -> isize {
+    let task = current_task().unwrap();
+    if task.acquire_inner_lock().euid != 0 {
+        return EPERM;
+    }
+    let hostname = match copy_uts_field(name, len) {
+        Ok(hostname) => hostname,
+        Err(errno) => return errno,
+    };
+    let uts_ref = task.process.uts();
+    uts_ref.lock().nodename = hostname;
+    SUCCESS
+}
+
+pub fn sys_setdomainname(name: *const u8, len: usize) -> isize {
+    let task = current_task().unwrap();
+    if task.acquire_inner_lock().euid != 0 {
+        return EPERM;
+    }
+    let domainname = match copy_uts_field(name, len) {
+        Ok(domainname) => domainname,
+        Err(errno) => return errno,
+    };
+    let uts_ref = task.process.uts();
+    uts_ref.lock().domainname = domainname;
     SUCCESS
 }
 
@@ -425,9 +473,9 @@ pub fn sys_getresgid(rgid: *mut u32, egid: *mut u32, sgid: *mut u32) -> isize {
 }
 
 pub fn sys_setfsuid(fsuid: usize) -> isize {
-    let fsuid = match parse_id(fsuid) {
-        Ok(fsuid) => fsuid,
-        Err(_) => return current_task().unwrap().acquire_inner_lock().fsuid as isize,
+    let fsuid = match parse_optional_id(fsuid) {
+        Ok(Some(fsuid)) => fsuid,
+        Ok(None) | Err(_) => return current_task().unwrap().acquire_inner_lock().fsuid as isize,
     };
     let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
@@ -439,9 +487,9 @@ pub fn sys_setfsuid(fsuid: usize) -> isize {
 }
 
 pub fn sys_setfsgid(fsgid: usize) -> isize {
-    let fsgid = match parse_id(fsgid) {
-        Ok(fsgid) => fsgid,
-        Err(_) => return current_task().unwrap().acquire_inner_lock().fsgid as isize,
+    let fsgid = match parse_optional_id(fsgid) {
+        Ok(Some(fsgid)) => fsgid,
+        Ok(None) | Err(_) => return current_task().unwrap().acquire_inner_lock().fsgid as isize,
     };
     let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
@@ -1098,13 +1146,11 @@ pub fn sys_getsid(pid: usize) -> isize {
 pub fn sys_setsid() -> isize {
     let task = current_task().unwrap();
     let process = task.process.clone();
-    if let Some(parent) = process.parent() {
-        parent.detach_child(process.pid);
+    if !ProcessManager::find_processes_by_pgid(process.pid).is_empty() {
+        return EPERM;
     }
-    // Make this process a session leader and process group leader.
-    process.set_parent(None);
     process.setsid(process.pid);
-    SUCCESS
+    process.pid as isize
 }
 
 pub fn sys_gettid() -> isize {

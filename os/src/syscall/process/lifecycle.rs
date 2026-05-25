@@ -198,6 +198,18 @@ fn waitid_wait_child(
 fn waitid_siginfo(pid: usize, wait_status: u32) -> SigInfo {
     const SIGCHLD_SIGNUM: usize = 17;
     const CLD_EXITED: usize = 1;
+    const CLD_KILLED: usize = 2;
+    const CLD_DUMPED: usize = 3;
+
+    let term_signal = (wait_status & 0x7f) as usize;
+    if term_signal != 0 {
+        let code = if (wait_status & 0x80) != 0 {
+            CLD_DUMPED
+        } else {
+            CLD_KILLED
+        };
+        return SigInfo::new_with_sender_value(SIGCHLD_SIGNUM, 0, code, pid, term_signal);
+    }
 
     let exit_status = ((wait_status >> 8) & 0xff) as usize;
     SigInfo::new_with_sender_value(SIGCHLD_SIGNUM, 0, CLD_EXITED, pid, exit_status)

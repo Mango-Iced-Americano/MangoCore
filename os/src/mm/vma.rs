@@ -261,25 +261,42 @@ impl Vma {
     ) -> Result<(), ()> {
         let kernel_space = KERNEL_SPACE.lock();
         let mut src_vpn = start_vpn_in_kernel_area;
-        for vpn in self.get_inner().vpn_range {
+        let mut mapped_vpns = alloc::vec::Vec::new();
+        let vpn_range = self.get_inner().vpn_range;
+        mapped_vpns
+            .try_reserve(vpn_range.get_end().0 - vpn_range.get_start().0)
+            .map_err(|_| ())?;
+        let rollback = |page_table: &mut T, this: &mut Vma, mapped_vpns: &[VirtPageNum]| {
+            let mut mapper = UserMapper::new(page_table);
+            for vpn in mapped_vpns.iter().rev() {
+                let _ = mapper.unmap_user_page_if_mapped(*vpn);
+                this.inner.remove_in_memory(vpn);
+            }
+        };
+        for vpn in vpn_range {
             if let Some(frame) = kernel_space.mapped_frame(src_vpn) {
                 let ppn = frame.ppn;
                 if !UserMapper::new(page_table).is_mapped(vpn) {
-                    self.inner
-                        .alloc_in_memory(vpn, frame.clone())
-                        .map_err(|_| ())?;
+                    if self.inner.alloc_in_memory(vpn, frame.clone()).is_err() {
+                        rollback(page_table, self, &mapped_vpns);
+                        return Err(());
+                    }
                     if let Err(_) =
                         UserMapper::new(page_table).map_user_page(vpn, ppn, self.map_perm)
                     {
                         self.inner.remove_in_memory(&vpn);
+                        rollback(page_table, self, &mapped_vpns);
                         return Err(());
                     }
+                    mapped_vpns.push(vpn);
                 } else {
                     error!("[map_from_kernel_area] user vpn already mapped!");
+                    rollback(page_table, self, &mapped_vpns);
                     return Err(());
                 }
             } else {
                 error!("[map_from_kernel_area] kernel vpn invalid!");
+                rollback(page_table, self, &mapped_vpns);
                 return Err(());
             }
             src_vpn = (src_vpn.0 + 1).into();
