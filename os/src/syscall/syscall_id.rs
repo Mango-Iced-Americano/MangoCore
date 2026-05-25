@@ -177,6 +177,7 @@ pub const SYSCALL_MREMAP: usize = 216;
 pub const SYSCALL_CLONE: usize = 220; // fork is implemented as clone(SIGCHLD, 0) in lib.
 pub const SYSCALL_EXECVE: usize = 221;
 pub const SYSCALL_MMAP: usize = 222;
+pub const SYSCALL_FADVISE64: usize = 223;
 pub const SYSCALL_MPROTECT: usize = 226;
 pub const SYSCALL_MSYNC: usize = 227;
 pub const SYSCALL_MLOCK: usize = 228;

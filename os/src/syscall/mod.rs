@@ -199,6 +199,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_MLOCKALL => "mlockall",
         SYSCALL_MUNLOCKALL => "munlockall",
         SYSCALL_MINCORE => "mincore",
+        SYSCALL_FADVISE64 => "fadvise64",
         SYSCALL_MLOCK2 => "mlock2",
         SYSCALL_GETRLIMIT => "getrlimit",
         SYSCALL_SETRLIMIT => "setrlimit",
@@ -711,6 +712,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[3],
             args[4],
         ),
+        SYSCALL_FADVISE64 => sys_fadvise64(args[0], args[1], args[2], args[3] as i32),
         SYSCALL_MADVISE => sys_madvise(args[0], args[1], args[2]),
         _ => {
             if syscall_id == 242 {
