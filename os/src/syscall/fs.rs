@@ -2506,25 +2506,54 @@ pub fn sys_mount(
             Some(m) => m,
             None => return EINVAL,
         };
-        let src_inode_id = match src_inode.metadata() {
+
+        let old_mp = match src_mnt.self_mountpoint() {
+            Some(mp) => mp,
+            None => return EINVAL,
+        };
+        let old_mp_id = match old_mp.inner_inode.metadata() {
             Ok(md) => md.inode_id,
             Err(e) => return -(e as isize),
         };
+        let old_parent_mnt = old_mp.mount_fs.clone();
 
-        if let Some(old_mp) = src_mnt.self_mountpoint() {
-            old_mp.mount_fs.remove_mount(src_inode_id);
-        }
-
-        let parent_mnt = target_inode
+        let target_mnt_inode = match target_inode
             .as_any_ref()
             .downcast_ref::<vfs::MountFSInode>()
-            .map(|m| m.mount_fs.clone())
-            .unwrap_or_else(|| crate::fs::vfs_root().clone());
-        if let Err(e) = parent_mnt.add_mount(inode_id, src_mnt.clone()) {
+        {
+            Some(m) => m,
+            None => return EINVAL,
+        };
+        let new_parent_mnt = target_mnt_inode.mount_fs.clone();
+
+        // Prevent moving a mount under its own subtree (would create a cycle)
+        {
+            let src_mnt_path = src_mnt.mount_path().unwrap_or_default();
+            if !src_mnt_path.is_empty()
+                && lookup_path.starts_with(&src_mnt_path)
+            {
+                return EINVAL;
+            }
+        }
+
+        old_parent_mnt.remove_mount(old_mp_id);
+
+        if let Some(old_path) = src_mnt.mount_path() {
+            vfs::mount::MOUNT_LIST.remove(old_path);
+        }
+
+        if let Err(e) = new_parent_mnt.add_mount(inode_id, src_mnt.clone()) {
             return -(e as isize);
         }
 
-        src_mnt.set_mount_path(Some(lookup_path));
+        let new_backref =
+            vfs::MountFSInode::new(target_mnt_inode.inner_inode.clone(), new_parent_mnt);
+        src_mnt.set_self_mountpoint(Some(new_backref));
+
+        src_mnt.set_mount_path(Some(lookup_path.clone()));
+
+        vfs::mount::MOUNT_LIST.insert(lookup_path.as_str(), src_mnt.clone(), Some(inode_id));
+
         return SUCCESS;
     }
 
