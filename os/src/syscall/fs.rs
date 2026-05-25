@@ -2080,10 +2080,18 @@ pub fn sys_unlinkat(dirfd: usize, path: *const u8, flags: u32) -> isize {
         Ok(inode) => inode,
         Err(errno) => return errno,
     };
+    let (uid, gid) = open_subject_ids();
+    let parent_result = check_parent_search_access(&start, &path, uid, gid);
+    if parent_result != SUCCESS {
+        return parent_result;
+    }
     let (parent, leaf) = match vfs_lookup_parent_for_start(&start, &path) {
         Ok(result) => result,
         Err(errno) => return errno,
     };
+    if let Err(errno) = check_parent_write_search_access(&parent, uid, gid) {
+        return errno;
+    }
     let result = if flags.contains(UnlinkatFlags::AT_REMOVEDIR) {
         parent.rmdir(&leaf)
     } else {
