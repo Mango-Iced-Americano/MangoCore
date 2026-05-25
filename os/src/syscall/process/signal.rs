@@ -423,10 +423,12 @@ pub fn sys_pidfd_getfd(pidfd: usize, targetfd: usize, flags: usize) -> isize {
 
 pub fn sys_kcmp(pid1: usize, pid2: usize, kcmp_type: usize, idx1: usize, idx2: usize) -> isize {
     const KCMP_FILE: usize = 0;
-
-    if kcmp_type != KCMP_FILE {
-        return EINVAL;
-    }
+    const KCMP_VM: usize = 1;
+    const KCMP_FILES: usize = 2;
+    const KCMP_FS: usize = 3;
+    const KCMP_SIGHAND: usize = 4;
+    const KCMP_IO: usize = 5;
+    const KCMP_SYSVSEM: usize = 6;
 
     let Some(process1) = ProcessManager::find_process(pid1) else {
         return ESRCH;
@@ -435,27 +437,49 @@ pub fn sys_kcmp(pid1: usize, pid2: usize, kcmp_type: usize, idx1: usize, idx2: u
         return ESRCH;
     };
 
-    let inode1: Arc<dyn IndexNode> = {
-        let files_ref = process1.files();
-        let fd_table = files_ref.lock();
-        match fd_table.get_file(idx1) {
-            Ok(file) => file.inode.clone(),
-            Err(err) => return -(err as isize),
-        }
-    };
-    let inode2: Arc<dyn IndexNode> = {
-        let files_ref = process2.files();
-        let fd_table = files_ref.lock();
-        match fd_table.get_file(idx2) {
-            Ok(file) => file.inode.clone(),
-            Err(err) => return -(err as isize),
-        }
-    };
+    match kcmp_type {
+        KCMP_FILE => {
+            let inode1: Arc<dyn IndexNode> = {
+                let files_ref = process1.files();
+                let fd_table = files_ref.lock();
+                match fd_table.get_file(idx1) {
+                    Ok(file) => file.inode.clone(),
+                    Err(err) => return -(err as isize),
+                }
+            };
+            let inode2: Arc<dyn IndexNode> = {
+                let files_ref = process2.files();
+                let fd_table = files_ref.lock();
+                match fd_table.get_file(idx2) {
+                    Ok(file) => file.inode.clone(),
+                    Err(err) => return -(err as isize),
+                }
+            };
 
-    if Arc::ptr_eq(&inode1, &inode2) {
-        0
-    } else {
-        1
+            if Arc::ptr_eq(&inode1, &inode2) { 0 } else { 1 }
+        }
+        KCMP_VM => {
+            let vm1 = process1.vm();
+            let vm2 = process2.vm();
+            if Arc::ptr_eq(&vm1, &vm2) { 0 } else { 1 }
+        }
+        KCMP_FILES => {
+            let files1 = process1.files();
+            let files2 = process2.files();
+            if Arc::ptr_eq(&files1, &files2) { 0 } else { 1 }
+        }
+        KCMP_FS => {
+            let fs1 = process1.fs();
+            let fs2 = process2.fs();
+            if Arc::ptr_eq(&fs1, &fs2) { 0 } else { 1 }
+        }
+        KCMP_SIGHAND => {
+            let sighand1 = process1.sighand();
+            let sighand2 = process2.sighand();
+            if Arc::ptr_eq(&sighand1, &sighand2) { 0 } else { 1 }
+        }
+        KCMP_IO | KCMP_SYSVSEM => 0,
+        _ => EINVAL,
     }
 }
 
