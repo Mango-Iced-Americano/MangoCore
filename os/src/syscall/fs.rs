@@ -752,6 +752,92 @@ pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
     pwrite_from_user(&file, token, buf, count, offset)
 }
 
+pub fn sys_preadv(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize {
+    let task = current_task().unwrap();
+    let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
+    let file = match fd_table.get_file(fd) {
+        Ok(file) => file,
+        Err(e) => return -(e as isize),
+    };
+    if file.readable().is_err() {
+        return EBADF;
+    }
+    if offset_is_negative(offset) {
+        return EINVAL;
+    }
+    let token = task.get_user_token();
+    let user_iov = match UserIoVec::read_user_iovecs(
+        token,
+        iov as *const crate::fs::iov::IOVec,
+        iovcnt,
+        MAX_SYSCALL_BUFFER_SIZE,
+    ) {
+        Ok(iov) => iov,
+        Err(errno) => return errno,
+    };
+    let user_buf = match user_iov.writer_buffer() {
+        Ok(buffer) => buffer,
+        Err(errno) => return errno,
+    };
+    let count = user_buf.len();
+    let mut kernel_buf = alloc::vec![0u8; count];
+    let n = match file.pread(offset, &mut kernel_buf) {
+        Ok(n) => n,
+        Err(e) => return -(e as isize),
+    };
+    let mut user_buf = user_buf;
+    user_buf.write(&kernel_buf[..n]);
+    n as isize
+}
+
+pub fn sys_pwritev(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize {
+    let task = current_task().unwrap();
+    let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
+    let file = match fd_table.get_file(fd) {
+        Ok(file) => file,
+        Err(e) => return -(e as isize),
+    };
+    if file.writable().is_err() {
+        return EBADF;
+    }
+    if offset_is_negative(offset) {
+        return EINVAL;
+    }
+    let token = task.get_user_token();
+    let user_iov = match UserIoVec::read_user_iovecs(
+        token,
+        iov as *const crate::fs::iov::IOVec,
+        iovcnt,
+        MAX_SYSCALL_BUFFER_SIZE,
+    ) {
+        Ok(iov) => iov,
+        Err(errno) => return errno,
+    };
+    let user_buf = match user_iov.reader_buffer() {
+        Ok(buffer) => buffer,
+        Err(errno) => return errno,
+    };
+    let mut kernel_buf = alloc::vec![0u8; user_buf.len()];
+    user_buf.read(&mut kernel_buf);
+    let fsize_limit = task.acquire_inner_lock().fsize_limit_cur;
+    let allowed = match apply_fsize_limit(
+        &file,
+        kernel_buf.len(),
+        pwrite_start_offset(&file, offset),
+        fsize_limit,
+    ) {
+        Ok(count) => count,
+        Err(errno) => return errno,
+    };
+    kernel_buf.truncate(allowed);
+    match file.pwrite(offset, &kernel_buf) {
+        Ok(n) => n as isize,
+        Err(e) => -(e as isize),
+    }
+}
+
 pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
     let task = current_task().unwrap();
     let files_ref = task.process.files();
