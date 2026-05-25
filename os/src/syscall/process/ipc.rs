@@ -662,6 +662,33 @@ fn seminfo_snapshot(registry: &SemRegistry, runtime: bool) -> LinuxSemInfo {
     }
 }
 
+fn semctl_setval_value(arg: usize) -> Result<i32, isize> {
+    if arg <= SEMVMX as usize {
+        return Ok(arg as i32);
+    }
+
+    #[cfg(target_arch = "loongarch64")]
+    {
+        let low = arg as i32;
+        if (0..=SEMVMX).contains(&low) {
+            return Ok(low);
+        }
+        if arg >= crate::config::USER_VA_BASE && arg < crate::config::USER_VA_END {
+            let mut value = 0i32;
+            copy_from_user(
+                current_user_token(),
+                arg as *const i32,
+                &mut value as *mut i32,
+            )?;
+            if (0..=SEMVMX).contains(&value) {
+                return Ok(value);
+            }
+        }
+    }
+
+    Err(ERANGE)
+}
+
 pub fn sys_semget(key: isize, nsems: usize, semflg: usize) -> isize {
     let mut registry = SEM_REGISTRY.lock();
     if key != IPC_PRIVATE {
@@ -838,11 +865,12 @@ pub fn sys_semctl(semid: i32, semnum: usize, cmd: usize, arg: usize) -> isize {
             if !can_modify_sem_set(set) {
                 return EPERM;
             }
-            if arg > SEMVMX as usize {
-                return ERANGE;
-            }
+            let value = match semctl_setval_value(arg) {
+                Ok(value) => value,
+                Err(errno) => return errno,
+            };
             let sem = &mut set.semaphores[semnum];
-            sem.value = arg as i32;
+            sem.value = value;
             sem.last_pid = current_pid_i32();
             set.ctime = now_sec();
             wake_waiters = true;
