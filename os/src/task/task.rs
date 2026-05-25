@@ -160,6 +160,9 @@ pub struct TaskControlBlockInner {
     pub cpu_limit_cur: usize,
     pub cpu_limit_max: usize,
     pub cpu_limit_sigxcpu_sent: bool,
+    /// RLIMIT_CORE 兼容字段。MangoCore 不生成 core 文件，但 wait status 需要按该值暴露 WCOREDUMP。
+    pub core_limit_cur: usize,
+    pub core_limit_max: usize,
     /// Linux personality ABI state. MangoCore does not alter layout/exec policy based on it yet.
     pub personality: usize,
     /// Parent-death signal configured by prctl(PR_SET_PDEATHSIG).
@@ -720,6 +723,8 @@ impl TaskControlBlock {
                 cpu_limit_cur: usize::MAX,
                 cpu_limit_max: usize::MAX,
                 cpu_limit_sigxcpu_sent: false,
+                core_limit_cur: 0,
+                core_limit_max: usize::MAX,
                 personality: 0,
                 pdeath_signal: 0,
                 dumpable: 1,
@@ -1122,6 +1127,8 @@ impl TaskControlBlock {
                 cpu_limit_cur: parent_inner.cpu_limit_cur,
                 cpu_limit_max: parent_inner.cpu_limit_max,
                 cpu_limit_sigxcpu_sent: false,
+                core_limit_cur: parent_inner.core_limit_cur,
+                core_limit_max: parent_inner.core_limit_max,
                 personality: parent_inner.personality,
                 pdeath_signal: 0,
                 dumpable: parent_inner.dumpable,

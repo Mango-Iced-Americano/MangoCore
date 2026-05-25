@@ -435,11 +435,24 @@ const WAIT_COREDUMP: u32 = 0x80;
 fn default_signal_wait_status(signal: Signals) -> u32 {
     let signum = signal.to_signum().unwrap() as u32;
     // Linux wait status uses bit 7 to report WCOREDUMP(status).
-    if matches!(signum, 3 | 4 | 5 | 6 | 7 | 8 | 11 | 24 | 25 | 31) {
+    if signal_default_dumps_core(signum) && current_core_dump_enabled() {
         signum | WAIT_COREDUMP
     } else {
         signum
     }
+}
+
+fn signal_default_dumps_core(signum: u32) -> bool {
+    matches!(signum, 3 | 4 | 5 | 6 | 7 | 8 | 11 | 24 | 25 | 31)
+}
+
+fn current_core_dump_enabled() -> bool {
+    current_task()
+        .map(|task| {
+            let inner = task.acquire_inner_lock();
+            inner.core_limit_cur > 0 && inner.dumpable != 0
+        })
+        .unwrap_or(false)
 }
 
 fn exit_current_with_sigsegv() -> ! {

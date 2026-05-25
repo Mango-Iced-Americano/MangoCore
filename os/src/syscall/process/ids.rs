@@ -1350,10 +1350,13 @@ fn current_rlimit_for(task: &Arc<TaskControlBlock>, resource: Resource) -> Optio
                 rlim_max: inner.rtprio_limit_max,
             }
         }
-        Resource::CORE => RLimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        },
+        Resource::CORE => {
+            let inner = task.acquire_inner_lock();
+            RLimit {
+                rlim_cur: inner.core_limit_cur,
+                rlim_max: inner.core_limit_max,
+            }
+        }
         Resource::STACK => {
             let inner = task.acquire_inner_lock();
             RLimit {
@@ -1500,8 +1503,12 @@ pub fn sys_prlimit(
                 inner.cpu_limit_max = rlimit.rlim_max;
                 inner.cpu_limit_sigxcpu_sent = false;
             }
+            Resource::CORE => {
+                let mut inner = task.acquire_inner_lock();
+                inner.core_limit_cur = rlimit.rlim_cur;
+                inner.core_limit_max = rlimit.rlim_max;
+            }
             Resource::DATA
-            | Resource::CORE
             | Resource::RSS
             | Resource::AS
             | Resource::LOCKS

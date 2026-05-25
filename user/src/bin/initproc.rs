@@ -1060,7 +1060,6 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "vfork_freeze.sh" => Some("freezer/cgroup helper skipped in LTP syscall scan"),
         "vhangup01" | "vhangup02" => Some("vhangup syscall not supported"),
         "virt_lib.sh" => Some("network virtualization helper skipped in LTP syscall scan"),
-        "waitid10" => Some("requires procfs core_pattern"),
         "wc01.sh" | "which01.sh" => Some("standalone shell helper skipped in LTP syscall scan"),
         "write04" | "write05" | "write06" | "writev01" => {
             Some("filesystem/pipe write edge cases skipped in LTP syscall scan")
