@@ -346,6 +346,11 @@ fn propagate_to_mount(
     source_child_group: u32,
     as_slave: bool,
 ) {
+    // Defensive: never propagate to the new_child itself
+    if Arc::ptr_eq(target, new_child) {
+        return;
+    }
+
     let target_root = target.covered_root_inode();
 
     // Check root mount event — mountpoint_id matches target's root inner inode
@@ -414,7 +419,7 @@ pub fn propagate_umount(source: &Arc<MountFS>, mountpoint_id: InodeId) {
     // Propagate to shared peers: find and detach the corresponding mount
     for peer in get_peers(source) {
         if let Some(child) = find_child_mount_by_id(&peer, mountpoint_id) {
-            let _ = child.umount_inner(false);
+            let _ = child.umount_inner(false, false);
         }
     }
 
@@ -422,7 +427,7 @@ pub fn propagate_umount(source: &Arc<MountFS>, mountpoint_id: InodeId) {
     let master_gid = source.propagation().peer_group_id();
     for slave in get_slaves(master_gid) {
         if let Some(child) = find_child_mount_by_id(&slave, mountpoint_id) {
-            let _ = child.umount_inner(false);
+            let _ = child.umount_inner(false, false);
         }
     }
 }

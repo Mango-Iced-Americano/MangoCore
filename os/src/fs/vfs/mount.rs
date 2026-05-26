@@ -170,20 +170,33 @@ impl MountFSInode {
     /// 解析路径时，跨越挂载点边界
     ///
     /// 如果在当前 inode 的子挂载表中找到了匹配的 inode_id，
-    /// 返回子文件系统的根 inode。
+    /// 返回子文件系统的根 inode。限制穿透深度防止 mount tree 环路。
     fn overlaid_inode(self_inode: Arc<MountFSInode>) -> Arc<MountFSInode> {
-        let inode_id = match self_inode.inner_inode.metadata() {
-            Ok(md) => md.inode_id,
-            Err(_) => return self_inode,
-        };
-        let sub_mountfs = {
-            let lock = self_inode.mount_fs.mountpoints.lock();
-            lock.get(&inode_id).cloned()
-        };
-        match sub_mountfs {
-            Some(sub) => sub.mountpoint_root_inode(),
-            None => self_inode,
+        const MAX_OVERLAY: u32 = 32;
+        let mut current = self_inode;
+        for _ in 0..MAX_OVERLAY {
+            let inode_id = match current.inner_inode.metadata() {
+                Ok(md) => md.inode_id,
+                Err(_) => return current,
+            };
+            let sub_mountfs = {
+                let lock = current.mount_fs.mountpoints.lock();
+                lock.get(&inode_id).cloned()
+            };
+            match sub_mountfs {
+                Some(sub) => {
+                    let root_inner = sub
+                        .root_inner_inode
+                        .clone()
+                        .unwrap_or_else(|| sub.inner_filesystem.root_inode());
+                    let sub_arc = sub.self_ref.lock().upgrade().unwrap();
+                    current = MountFSInode::new(root_inner, sub_arc);
+                }
+                None => return current,
+            }
         }
+        log::warn!("overlaid_inode: max overlay depth {} reached, stopping", MAX_OVERLAY);
+        current
     }
 
     /// 逐级查找子项（带挂载点交叉和 dentry 缓存）
@@ -573,7 +586,16 @@ impl IndexNode for MountFSInode {
             let mountpoints = self.mount_fs.mountpoints.lock();
             mountpoints.get(&inode_id).cloned()
         }
-        .ok_or(SyscallErr::EINVAL)?;
+        .ok_or_else(|| {
+            let parent_path = self.mount_fs.mount_path().unwrap_or_else(|| alloc::string::String::from("(nopath)"));
+            log::warn!(
+                "[umount] EINVAL: inode_id {:?} is NOT a mountpoint under '{}' (mountpoints count: {})",
+                inode_id,
+                parent_path,
+                self.mount_fs.mountpoints.lock().len(),
+            );
+            SyscallErr::EINVAL
+        })?;
         mounted.umount()?;
         Ok(mounted)
     }
@@ -671,6 +693,23 @@ impl IndexNode for MountFSInode {
             absolute_path.push('/');
         }
         Ok(absolute_path)
+    }
+}
+
+impl MountFSInode {
+    pub fn umount_force(&self) -> Result<Arc<MountFS>, SyscallErr> {
+        if self.is_mountpoint_root() {
+            self.mount_fs.umount_force()?;
+            return Ok(self.mount_fs.clone());
+        }
+        let inode_id = self.inner_inode.metadata()?.inode_id;
+        let mounted = {
+            let mountpoints = self.mount_fs.mountpoints.lock();
+            mountpoints.get(&inode_id).cloned()
+        }
+        .ok_or(SyscallErr::EINVAL)?;
+        mounted.umount_force()?;
+        Ok(mounted)
     }
 }
 
@@ -796,14 +835,76 @@ impl MountFS {
         self.mountpoints.lock().remove(&inode_id)
     }
 
+    /// Debug: dump mount state for diagnosing EBUSY/EINVAL on umount.
+    /// Does NOT panic — all reads are fallible via if-let/ok() chains.
+    pub fn dump_mount_state(self: &Arc<Self>, reason: &str) {
+        use log::warn;
+        use alloc::string::ToString;
+
+        let path = self.mount_path().unwrap_or_else(|| "(none)".to_string());
+        let source = self.mount_source().unwrap_or_else(|| "(none)".to_string());
+        let flags = self.mount_flags();
+        let prop = self.propagation();
+        let prop_type = prop.prop_type();
+        let peer_gid = prop.peer_group_id();
+        let master_gid = prop.master_group_id();
+
+        warn!(
+            "--- MountFS::dump_mount_state (reason: {}) --- path={} source={} flags={:?} prop={:?} peer_gid={} master_gid={}",
+            reason, path, source, flags, prop_type, peer_gid, master_gid
+        );
+
+        // self_mountpoint info
+        if let Some(mp) = self.self_mountpoint() {
+            if let Ok(md) = mp.inner_inode.metadata() {
+                warn!(
+                    "  self_mountpoint: parent_inode_id={:?} parent_fs_name={}",
+                    md.inode_id,
+                    mp.mount_fs.name()
+                );
+            } else {
+                warn!("  self_mountpoint: present but metadata failed");
+            }
+        } else {
+            warn!("  self_mountpoint: None (global root or detached)");
+        }
+
+        // Children in mountpoints table
+        {
+            let mps = self.mountpoints.lock();
+            warn!("  children: count={}", mps.len());
+            for (ino, child) in mps.iter() {
+                let child_path = child.mount_path().unwrap_or_else(|| "(nopath)".to_string());
+                let child_source = child.mount_source().unwrap_or_else(|| "(nosrc)".to_string());
+                warn!("    ino={:?} path={} source={}", ino, child_path, child_source);
+            }
+        }
+
+        // Peer group / slave group info
+        if peer_gid != 0 {
+            let peers = super::propagation::get_peers(self);
+            warn!("  peer_group({}): {} active peers", peer_gid, peers.len());
+        }
+        if master_gid != 0 {
+            let slaves = super::propagation::get_slaves(master_gid);
+            warn!("  slave_group(master={}): {} active slaves", master_gid, slaves.len());
+        }
+
+        warn!("--- end MountFS::dump_mount_state ---");
+    }
+
     /// 卸载当前文件系统（内部版本）。
     /// 当 do_propagate=false 时跳过传播步骤，避免递归传播。
-    pub fn umount_inner(self: &Arc<Self>, do_propagate: bool) -> Result<(), SyscallErr> {
-        if !self.mountpoints.lock().is_empty() {
+    /// 当 force=true 时（MNT_DETACH），跳过子挂载检查直接 detach。
+    pub fn umount_inner(self: &Arc<Self>, do_propagate: bool, force: bool) -> Result<(), SyscallErr> {
+        if !force && !self.mountpoints.lock().is_empty() {
+            self.dump_mount_state("umount_inner EBUSY: children still present");
             return Err(SyscallErr::EBUSY);
         }
-        // Propagate umount to peers before removing from parent
-        if do_propagate && self.propagation().is_shared() {
+        // Propagate umount to peers before removing from parent.
+        // The propagation should be driven by the PARENT mount's sharedness,
+        // not self's. propagate_umount() internally checks parent.is_shared().
+        if do_propagate {
             if let Some(mp) = self.self_mountpoint.lock().clone() {
                 if let Ok(md) = mp.inner_inode.metadata() {
                     propagate_umount(&mp.mount_fs, md.inode_id);
@@ -814,10 +915,21 @@ impl MountFS {
         unregister_peer_mount(self);
         // Unregister from slave group
         unregister_slave_mount(self);
-        // Unregister from global mount list
-        if let Some(mountpoint) = self.self_mountpoint.lock().clone() {
-            if let Ok(path) = mountpoint.absolute_path() {
-                MOUNT_LIST.remove(path);
+        // Unregister from global mount list — prefer mount_path for reliability,
+        // fall back to absolute_path (which may fail if mount tree is corrupted).
+        {
+            let removed = if let Some(ref path) = self.mount_path() {
+                MOUNT_LIST.remove(path.as_str())
+            } else {
+                None
+            };
+            if removed.is_none() {
+                // fallback: try absolute_path from self_mountpoint
+                if let Some(mountpoint) = self.self_mountpoint.lock().clone() {
+                    if let Ok(path) = mountpoint.absolute_path() {
+                        MOUNT_LIST.remove(path);
+                    }
+                }
             }
         }
         if let Some(mountpoint) = self.self_mountpoint.lock().take() {
@@ -842,7 +954,12 @@ impl MountFS {
 
     /// 卸载当前文件系统
     pub fn umount(self: &Arc<Self>) -> Result<(), SyscallErr> {
-        self.umount_inner(true)
+        self.umount_inner(true, false)
+    }
+
+    /// 强制卸载（MNT_DETACH），跳过子挂载检查
+    pub fn umount_force(self: &Arc<Self>) -> Result<(), SyscallErr> {
+        self.umount_inner(true, true)
     }
 
     // ── 属性访问 ───────────────────────────────────────────────────

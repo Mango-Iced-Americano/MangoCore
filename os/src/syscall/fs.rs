@@ -2099,6 +2099,8 @@ pub fn sys_umount2(target: *const u8, flags: u32) -> isize {
         Some(flags) => flags,
         None => return EINVAL,
     };
+    let is_detach = flags.contains(UmountFlags::MNT_DETACH);
+    let is_force = flags.contains(UmountFlags::MNT_FORCE);
     info!("[sys_umount2] target: {}, flags: {:?}", target, flags);
     let (lookup_inode, lookup_path) = {
         let task = current_task().unwrap();
@@ -2120,11 +2122,35 @@ pub fn sys_umount2(target: *const u8, flags: u32) -> isize {
             return errno;
         }
     };
-    match inode.umount() {
-        Ok(_) => SUCCESS,
-        Err(e) => {
-            error!("[sys_umount2] inode.umount() failed for '{}': errno={}", lookup_path, e as isize);
-            -(e as isize)
+    // Debug: log what we got from vfs_lookup to help diagnose EINVAL
+    if inode.as_any_ref().downcast_ref::<vfs::MountFSInode>().is_some() {
+        info!("[sys_umount2] lookup '{}' → MountFSInode", lookup_path);
+    } else {
+        info!("[sys_umount2] lookup '{}' → non-MountFSInode — will likely fail as not a mountpoint",
+            lookup_path,
+        );
+    }
+    if is_detach {
+        // MNT_DETACH: lazy umount, force-detach even with children
+        if let Some(mfs_inode) = inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+            match mfs_inode.umount_force() {
+                Ok(_) => SUCCESS,
+                Err(e) => {
+                    error!("[sys_umount2] MNT_DETACH umount_force failed for '{}': errno={}", lookup_path, e as isize);
+                    -(e as isize)
+                }
+            }
+        } else {
+            error!("[sys_umount2] MNT_DETACH on non-MountFSInode '{}'", lookup_path);
+            EINVAL
+        }
+    } else {
+        match inode.umount() {
+            Ok(_) => SUCCESS,
+            Err(e) => {
+                error!("[sys_umount2] inode.umount() failed for '{}': errno={}", lookup_path, e as isize);
+                -(e as isize)
+            }
         }
     }
 }
@@ -2196,11 +2222,21 @@ fn do_bind_mount(
     let source_mount_fs = source_mfs_inode.mount_fs.clone();
     let source_inner: Arc<dyn vfs::IndexNode> = source_mfs_inode.inner_inode.clone();
 
+    // Reject bind mount from unbindable source
+    if source_mount_fs.propagation().is_unbindable() {
+        warn!("[do_bind_mount] source mount '{}' is unbindable, refusing bind", source_path);
+        return EINVAL;
+    }
+
     // Collect recursive bind snapshot BEFORE creating base mount, so the
     // new mnt_fs doesn't pollute the source mount tree during snapshotting.
+    // Skip unbindable submounts — they must not be replicated.
     let rbind_snapshot: Option<Vec<(Arc<vfs::MountFS>, Arc<vfs::MountFS>, alloc::string::String)>> =
         if mountflags.contains(MountFlags::MS_REC) {
-            Some(collect_rbind_snapshot(source_mount_fs.clone(), source_inner.clone()))
+            let mut snapshot = collect_rbind_snapshot(source_mount_fs.clone(), source_inner.clone());
+            // Filter out unbindable submounts
+            snapshot.retain(|(child_mfs, _, _)| !child_mfs.propagation().is_unbindable());
+            Some(snapshot)
         } else {
             None
         };
@@ -2241,23 +2277,48 @@ fn do_bind_mount(
 
     if source_is_shared {
         mnt_fs.propagation().set_shared_with_group(source_gid);
-        vfs::propagation::register_peer(&mnt_fs);
+        // DO NOT register_peer yet — must defer until AFTER propagate_mount
+        // to avoid the new mount appearing as a peer of itself (self-reference).
+    } else if source_prop.is_slave() {
+        // Source is Slave — bind mount inherits the same master
+        let master_gid = source_prop.master_group_id();
+        mnt_fs.propagation().set_prop_type_value(vfs::propagation::PropagationType::Slave);
+        mnt_fs.propagation().set_master_group_id(master_gid);
+        // register_slave deferred — done after propagate_mount
     } else {
-        // Source is not shared — set to Private to clear parent's shared group
+        // Source is Private or Unbindable — set to Private to clear parent's group
         vfs::propagation::set_propagation_type(&mnt_fs, vfs::propagation::PropagationType::Private);
     }
 
-    // Now propagate to peers with the correct (source) group
+    // Propagate mount event. The correct source for the propagation is the
+    // TARGET'S parent mount (the mount that holds the mountpoint), not the
+    // bind source. Otherwise a mount --bind of a private source onto a shared
+    // target parent won't correctly propagate to the parent's peers/slaves.
+    let target_parent_mfs = target_mfs_inode.mount_fs.clone();
     let target_md = match target_inode.metadata() {
         Ok(md) => md,
-        Err(e) => return -(e as isize),
+        Err(e) => {
+            // Rollback: clear peer_group_id that was set above
+            if source_is_shared {
+                mnt_fs.propagation().set_peer_group_id(0);
+            }
+            return -(e as isize);
+        }
     };
     let target_ino = target_md.inode_id;
     let child_name = lookup_path
         .rsplit('/')
         .next()
         .unwrap_or("");
-    vfs::propagation::propagate_mount(&source_mount_fs, target_ino, &mnt_fs, child_name);
+    vfs::propagation::propagate_mount(&target_parent_mfs, target_ino, &mnt_fs, child_name);
+
+    // NOW register in peer/slave group AFTER propagation (prevents self-peer loop)
+    if source_is_shared {
+        vfs::propagation::register_peer(&mnt_fs);
+    } else if source_prop.is_slave() {
+        let master_gid = source_prop.master_group_id();
+        vfs::propagation::register_slave(&mnt_fs, master_gid);
+    }
 
     if let Some(snapshot) = rbind_snapshot {
         if let Err(e) = apply_rbind_snapshot(
@@ -2282,6 +2343,8 @@ fn collect_rbind_snapshot(
     source_mfs: Arc<vfs::MountFS>,
     source_subtree_root: Arc<dyn vfs::IndexNode>,
 ) -> Vec<(Arc<vfs::MountFS>, Arc<vfs::MountFS>, alloc::string::String)> {
+    const MAX_DEPTH: usize = 256;
+
     let mut queue: VecDeque<(Arc<vfs::MountFS>, Arc<dyn vfs::IndexNode>)> = VecDeque::new();
     let mut result: Vec<(Arc<vfs::MountFS>, Arc<vfs::MountFS>, alloc::string::String)> = Vec::new();
     let mut seen: Vec<usize> = Vec::new();
@@ -2307,8 +2370,12 @@ fn collect_rbind_snapshot(
         }
     }
 
-    // BFS: for each child, collect its submounts
+    // BFS: for each child, collect its submounts (with cycle detection + depth limit)
     while let Some((child_mfs, child_root)) = queue.pop_front() {
+        if seen.len() > MAX_DEPTH {
+            log::error!("[collect_rbind_snapshot] max depth {} exceeded, stopping BFS", MAX_DEPTH);
+            break;
+        }
         let mps = child_mfs.mountpoints.lock();
         for (&grand_ino, grandchild) in mps.iter() {
             let ptr = Arc::as_ptr(grandchild) as usize;
@@ -2512,18 +2579,20 @@ pub fn sys_mount(
 
     // ── Flag routing — must happen BEFORE any RamFS creation ──
 
-    let propagation = mountflags
-        & (MountFlags::MS_SHARED | MountFlags::MS_PRIVATE | MountFlags::MS_SLAVE | MountFlags::MS_UNBINDABLE | MountFlags::MS_REC);
+    let propagation_type_flags = MountFlags::MS_SHARED
+        | MountFlags::MS_PRIVATE | MountFlags::MS_SLAVE | MountFlags::MS_UNBINDABLE;
+    let prop_type_flag = mountflags & propagation_type_flags;
 
-    if !propagation.is_empty() {
-        // MS_REC is a modifier — strip it to count the actual propagation type
-        let prop_type_flag = propagation & !MountFlags::MS_REC;
+    // Propagation-type-change commands (e.g., mount --make-shared /mnt)
+    // MS_REC is allowed as modifier, but only when there is exactly one
+    // propagation-type flag AND no MS_BIND/MS_MOVE/MS_REMOUNT.
+    if !prop_type_flag.is_empty() {
         if prop_type_flag.bits().count_ones() != 1
             || mountflags.intersects(MountFlags::MS_BIND | MountFlags::MS_MOVE | MountFlags::MS_REMOUNT)
         {
             return EINVAL;
         }
-        let is_recursive = propagation.contains(MountFlags::MS_REC);
+        let is_recursive = mountflags.contains(MountFlags::MS_REC);
         let target_mnt_inode = match target_inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
             Some(m) => m,
             None => return EINVAL,
@@ -2538,8 +2607,6 @@ pub fn sys_mount(
             vfs::propagation::PropagationType::Unbindable
         };
         let mnt = target_mnt_inode.mount_fs.clone();
-        // For Slave: set master_group_id before type change so
-        // set_propagation_type can register/unregister correctly.
         if prop_type == vfs::propagation::PropagationType::Slave {
             let parent_prop = target_mnt_inode.mount_fs.propagation();
             let master_gid = parent_prop.peer_group_id();
@@ -2616,33 +2683,113 @@ pub fn sys_mount(
         };
         let new_parent_mnt = target_mnt_inode.mount_fs.clone();
 
-        // Prevent moving a mount under its own subtree (would create a cycle)
+        // Prevent moving a mount under its own subtree (would create a cycle).
+        // Walk parent chain from target: if any ancestor is src_mnt, reject.
         {
-            let src_mnt_path = src_mnt.mount_path().unwrap_or_default();
-            if !src_mnt_path.is_empty()
-                && lookup_path.starts_with(&src_mnt_path)
-            {
-                return EINVAL;
+            let mut cur = Arc::clone(&new_parent_mnt);
+            let mut depth: u32 = 0;
+            loop {
+                if Arc::ptr_eq(&cur, &src_mnt) {
+                    return EINVAL;
+                }
+                depth += 1;
+                if depth > 64 {
+                    return EINVAL;
+                }
+                // Walk up via self_mountpoint
+                let next = match cur.self_mountpoint() {
+                    Some(mp) => mp.mount_fs.clone(),
+                    None => break,
+                };
+                if Arc::ptr_eq(&next, &cur) {
+                    break;
+                }
+                cur = next;
             }
         }
 
+        // Save old state for rollback if new-parent add fails
+        let old_path = src_mnt.mount_path();
+        let old_backref = old_mp.clone();
+
         old_parent_mnt.remove_mount(old_mp_id);
 
-        if let Some(old_path) = src_mnt.mount_path() {
-            vfs::mount::MOUNT_LIST.remove(old_path);
+        if let Some(ref old_path) = old_path {
+            vfs::mount::MOUNT_LIST.remove(old_path.as_str());
         }
 
         if let Err(e) = new_parent_mnt.add_mount(inode_id, src_mnt.clone()) {
+            // Rollback: restore old parent (best-effort, must never panic)
+            log::error!(
+                "[sys_mount] MS_MOVE add_mount to '{}' failed (errno={}); restoring old parent",
+                lookup_path, e as isize,
+            );
+            if let Err(rollback_err) = old_parent_mnt.add_mount(old_mp_id, src_mnt.clone()) {
+                log::error!(
+                    "[sys_mount] MS_MOVE rollback failed: add_mount back to old parent errno={}",
+                    rollback_err as isize
+                );
+            } else {
+                if let Some(ref old_path) = old_path {
+                    vfs::mount::MOUNT_LIST.insert(old_path.as_str(), src_mnt.clone(), Some(old_mp_id));
+                }
+                src_mnt.set_self_mountpoint(Some(old_backref));
+                src_mnt.set_mount_path(old_path);
+            }
             return -(e as isize);
         }
 
+        // Success: update to new parent
         let new_backref =
             vfs::MountFSInode::new(target_mnt_inode.inner_inode.clone(), new_parent_mnt);
         src_mnt.set_self_mountpoint(Some(new_backref));
 
-        src_mnt.set_mount_path(Some(lookup_path.clone()));
+        let old_prefix = old_path.clone();
+        let new_prefix = lookup_path.clone();
+        src_mnt.set_mount_path(Some(new_prefix.clone()));
+        vfs::mount::MOUNT_LIST.insert(new_prefix.as_str(), src_mnt.clone(), Some(inode_id));
 
-        vfs::mount::MOUNT_LIST.insert(lookup_path.as_str(), src_mnt.clone(), Some(inode_id));
+        // MS_MOVE must also update mount_path of all descendants.
+        // Without this, child mounts retain old paths (e.g., "parent2/a")
+        // making them unreachable via umount and causing cleanup loops.
+        {
+            let mut queue: Vec<Arc<vfs::MountFS>> = {
+                let mps = src_mnt.mountpoints.lock();
+                mps.values().cloned().collect()
+            };
+            let mut seen: Vec<usize> = alloc::vec![Arc::as_ptr(&src_mnt) as usize];
+            while let Some(child) = queue.pop() {
+                let ptr = Arc::as_ptr(&child) as usize;
+                if seen.contains(&ptr) || seen.len() > 64 {
+                    continue;
+                }
+                seen.push(ptr);
+                if let Some(ref old_child_path) = old_prefix {
+                    if let Some(ref cur_path) = child.mount_path() {
+                        if let Some(suffix) = cur_path.strip_prefix(old_child_path.as_str()) {
+                            let new_child_path = if suffix.is_empty() {
+                                new_prefix.clone()
+                            } else if suffix.starts_with('/') {
+                                alloc::format!("{}{}", new_prefix, suffix)
+                            } else {
+                                alloc::format!("{}/{}", new_prefix, suffix)
+                            };
+                            vfs::mount::MOUNT_LIST.remove(cur_path.as_str());
+                            vfs::mount::MOUNT_LIST.insert(
+                                new_child_path.as_str(), child.clone(), None,
+                            );
+                            child.set_mount_path(Some(new_child_path));
+                        }
+                    }
+                }
+                {
+                    let mps = child.mountpoints.lock();
+                    for gc in mps.values() {
+                        queue.push(gc.clone());
+                    }
+                }
+            }
+        }
 
         return SUCCESS;
     }

@@ -193,7 +193,13 @@ fn sys_clone_inner(
     if flags.contains(CloneFlags::CLONE_THREAD) && !flags.contains(CloneFlags::CLONE_SIGHAND) {
         return EINVAL;
     }
+    // Reject CLONE_NEWNS: mount namespace is NOT implemented.
+    // If this flag succeeded, fs_bind_cloneNS tests would pollute the
+    // global mount tree and cause cleanup hangs.
     if flags.contains(CloneFlags::CLONE_FS) && flags.contains(CloneFlags::CLONE_NEWNS) {
+        return EINVAL;
+    }
+    if flags.contains(CloneFlags::CLONE_NEWNS) {
         return EINVAL;
     }
     if flags.contains(CloneFlags::CLONE_VFORK) && flags.contains(CloneFlags::CLONE_THREAD) {
