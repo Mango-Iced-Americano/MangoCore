@@ -837,6 +837,26 @@ impl MountFS {
         Ok(())
     }
 
+    /// Replace any existing mount at inode_id, or add if none exists.
+    /// Old mount is detached from peer/slave registries and MOUNT_LIST.
+    /// Returns the old mount (None if no existing mount).
+    pub fn overmount_and_add(&self, inode_id: InodeId, mount_fs: Arc<MountFS>) -> Option<Arc<MountFS>> {
+        use super::propagation;
+        let mut mps = self.mountpoints.lock();
+        let old = mps.remove(&inode_id);
+        if let Some(ref old_mfs) = old {
+            drop(mps);
+            propagation::unregister_peer_mount(old_mfs);
+            propagation::unregister_slave_mount(old_mfs);
+            if let Some(ref path) = old_mfs.mount_path() {
+                MOUNT_LIST.remove(path.as_str());
+            }
+            mps = self.mountpoints.lock();
+        }
+        mps.insert(inode_id, mount_fs);
+        old
+    }
+
     /// 移除子挂载点
     pub fn remove_mount(&self, inode_id: InodeId) -> Option<Arc<MountFS>> {
         self.mountpoints.lock().remove(&inode_id)

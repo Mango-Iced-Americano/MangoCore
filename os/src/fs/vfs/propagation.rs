@@ -473,26 +473,41 @@ fn propagate_to_mount(
         }
     }
 
-    // Fallback: find child directory matching child_name
+    // Fallback: find child directory matching child_name.
+    // Use raw inner_inode.find() to bypass overlaid_inode — propagation
+    // must land at the target parent's mountpoint level, not inside an
+    // existing child mount (which would hide the result).
     if !child_name.is_empty() {
-        if let Ok(target_inode) = target_root.find(child_name) {
-            if let Some(target_mfs_inode) =
-                target_inode.as_any_ref().downcast_ref::<MountFSInode>()
-            {
+        if let Ok(inner_inode) = target_root.inner_inode.find(child_name) {
+            if let Ok(md) = inner_inode.metadata() {
+                let ino = md.inode_id;
                 let mount_path = alloc::format!(
                     "{}/{}",
                     target.mount_path().unwrap_or_default(),
                     child_name
                 );
-                if let Ok(new_mount) = target_mfs_inode.mount_subtree_inner(
+
+                // Use MountFS::new_with_root for the propagated clone so it
+                // shares the source child's filesystem tree.
+                let new_mount = MountFS::new_with_root(
                     new_child.inner_filesystem(),
                     new_child.root_inner_inode(),
                     super::MountFlags::empty(),
-                    Some(mount_path),
-                    false,
-                ) {
-                    finish_propagated_mount(&new_mount, source_child_group, as_slave);
-                }
+                );
+                let backref = MountFSInode::new(inner_inode, Arc::clone(target));
+                new_mount.set_self_mountpoint(Some(backref));
+                new_mount.set_mount_path(Some(mount_path.clone()));
+                super::mount::MOUNT_LIST.insert(mount_path.as_str(), new_mount.clone(), Some(ino));
+
+                // overmount_and_add handles replacing any existing mount at this
+                // inode (from an earlier propagation) — the old mount is detached
+                // from peer/slave registries and MOUNT_LIST.
+                let _old = target.overmount_and_add(ino, new_mount.clone());
+
+                // If parent is shared, the new child mount inherits a fresh peer
+                // group from set_propagation_state_no_register. clear it before
+                // finish sets the correct source group.
+                finish_propagated_mount(&new_mount, source_child_group, as_slave);
             }
         }
     }
