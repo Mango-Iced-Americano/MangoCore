@@ -558,8 +558,10 @@ impl<T: PageTable> AddressSpace<T> {
                 {
                     // It's a loader!
                     0 => ELF_DYN_BASE,
-                    // It's a dynamically linked ELF.
-                    1 => 0,
+                    // It's a dynamically linked PIE main executable. Keep it
+                    // away from the NULL page so mprotect(0, ...) still
+                    // follows normal unmapped-range ENOMEM semantics.
+                    1 => ELF_PIE_BASE,
                     // Emmm, It has multiple interpreters.
                     _ => return Err(EINVAL),
                 }

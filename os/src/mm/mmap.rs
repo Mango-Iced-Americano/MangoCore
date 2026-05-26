@@ -280,9 +280,6 @@ pub(super) fn do_mprotect<T: PageTable>(
         return Ok(());
     }
     let (start_va, end_va) = checked_user_range(addr, len)?;
-    if addr == 0 {
-        return Err(ENOMEM);
-    }
     // addr is not a multiple of the system page size.
     if !start_va.aligned() {
         warn!("[mprotect] Not aligned");
