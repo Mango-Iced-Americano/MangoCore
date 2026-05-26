@@ -1,7 +1,15 @@
 //! /proc/sys/* — LTP 环境探测所需的最小兼容节点。
 
+use alloc::format;
+use alloc::string::{String, ToString};
 use crate::fs::procfs::proc_read_str;
 use crate::utils::error::SyscallErr;
+use lazy_static::lazy_static;
+use spin::Mutex;
+
+lazy_static! {
+    static ref CORE_PATTERN: Mutex<String> = Mutex::new(String::from("core\n"));
+}
 
 pub fn pid_max_content(
     _extra: usize,
@@ -10,6 +18,50 @@ pub fn pid_max_content(
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
     proc_read_str(offset, len, buf, "32768\n")
+}
+
+pub fn ns_last_pid_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let value = format!("{}\n", crate::task::ns_last_pid());
+    proc_read_str(offset, len, buf, &value)
+}
+
+pub fn ns_last_pid_write(
+    _extra: usize,
+    _offset: usize,
+    buf: &[u8],
+) -> Result<usize, SyscallErr> {
+    let text = core::str::from_utf8(buf).map_err(|_| SyscallErr::EINVAL)?;
+    let value = text
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| SyscallErr::EINVAL)?;
+    crate::task::set_ns_last_pid(value);
+    Ok(buf.len())
+}
+
+pub fn core_pattern_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let pattern = CORE_PATTERN.lock();
+    proc_read_str(offset, len, buf, &pattern)
+}
+
+pub fn core_pattern_write(
+    _extra: usize,
+    _offset: usize,
+    buf: &[u8],
+) -> Result<usize, SyscallErr> {
+    let text = core::str::from_utf8(buf).map_err(|_| SyscallErr::EINVAL)?;
+    *CORE_PATTERN.lock() = text.to_string();
+    Ok(buf.len())
 }
 
 pub fn tainted_content(

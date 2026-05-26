@@ -51,10 +51,18 @@ pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) ->
     let task = current_task().unwrap();
     let token = task.get_user_token();
     let process = task.process.clone();
-    match ProcessManager::wait_child(&process, pid, option.contains(WaitOption::WNOHANG)) {
+    match ProcessManager::wait_child(
+        &process,
+        pid,
+        option.contains(WaitOption::WNOHANG),
+        true,
+        option.contains(WaitOption::WSTOPPED),
+        option.contains(WaitOption::WCONTINUED),
+        option.contains(WaitOption::WNOWAIT),
+    ) {
         Ok(Some(child)) => {
             if !status.is_null() {
-                if let Err(errno) = UserPtrMut::new(status).write(token, &child.exit_code) {
+                if let Err(errno) = UserPtrMut::new(status).write(token, &child.status) {
                     return errno;
                 }
             }
@@ -78,7 +86,7 @@ pub fn sys_waitid(
         Some(option) => option,
         None => return EINVAL,
     };
-    if !option.contains(WaitOption::WEXITED) {
+    if !(option.intersects(WaitOption::WEXITED | WaitOption::WSTOPPED | WaitOption::WCONTINUED)) {
         return EINVAL;
     }
 
@@ -118,10 +126,14 @@ pub fn sys_waitid(
         &task.process,
         target_pid as isize,
         nonblock || option.contains(WaitOption::WNOHANG),
+        option.contains(WaitOption::WEXITED),
+        option.contains(WaitOption::WSTOPPED),
+        option.contains(WaitOption::WCONTINUED),
+        option.contains(WaitOption::WNOWAIT),
     ) {
         Ok(Some(child)) => {
             if infop != 0 {
-                let siginfo = waitid_siginfo(child.pid, child.exit_code);
+                let siginfo = waitid_siginfo(child.pid, child.status);
                 if let Err(errno) = UserPtrMut::<SigInfo>::from_addr(infop).write(token, &siginfo)
                 {
                     return errno;
@@ -132,6 +144,12 @@ pub fn sys_waitid(
         Ok(None) => {
             if nonblock {
                 EAGAIN
+            } else if infop != 0 {
+                match UserPtrMut::<SigInfo>::from_addr(infop).write(token, &SigInfo::new(0, 0, 0))
+                {
+                    Ok(()) => SUCCESS,
+                    Err(errno) => errno,
+                }
             } else {
                 SUCCESS
             }
@@ -179,10 +197,18 @@ fn waitid_wait_child(
     option: WaitOption,
     token: usize,
 ) -> isize {
-    match ProcessManager::wait_child(process, pid, option.contains(WaitOption::WNOHANG)) {
+    match ProcessManager::wait_child(
+        process,
+        pid,
+        option.contains(WaitOption::WNOHANG),
+        option.contains(WaitOption::WEXITED),
+        option.contains(WaitOption::WSTOPPED),
+        option.contains(WaitOption::WCONTINUED),
+        option.contains(WaitOption::WNOWAIT),
+    ) {
         Ok(Some(child)) => {
             if infop != 0 {
-                let siginfo = waitid_siginfo(child.pid, child.exit_code);
+                let siginfo = waitid_siginfo(child.pid, child.status);
                 if let Err(errno) = UserPtrMut::<SigInfo>::from_addr(infop).write(token, &siginfo)
                 {
                     return errno;
@@ -190,7 +216,17 @@ fn waitid_wait_child(
             }
             SUCCESS
         }
-        Ok(None) => SUCCESS,
+        Ok(None) => {
+            if infop != 0 {
+                match UserPtrMut::<SigInfo>::from_addr(infop).write(token, &SigInfo::new(0, 0, 0))
+                {
+                    Ok(()) => SUCCESS,
+                    Err(errno) => errno,
+                }
+            } else {
+                SUCCESS
+            }
+        }
         Err(errno) => errno,
     }
 }
@@ -200,6 +236,30 @@ fn waitid_siginfo(pid: usize, wait_status: u32) -> SigInfo {
     const CLD_EXITED: usize = 1;
     const CLD_KILLED: usize = 2;
     const CLD_DUMPED: usize = 3;
+    const CLD_STOPPED: usize = 5;
+    const CLD_CONTINUED: usize = 6;
+    const SIGCONT_SIGNUM: usize = 18;
+
+    if wait_status == 0xffff {
+        return SigInfo::new_with_sender_value(
+            SIGCHLD_SIGNUM,
+            0,
+            CLD_CONTINUED,
+            pid,
+            SIGCONT_SIGNUM,
+        );
+    }
+
+    if (wait_status & 0xff) == 0x7f {
+        let stop_signal = ((wait_status >> 8) & 0xff) as usize;
+        return SigInfo::new_with_sender_value(
+            SIGCHLD_SIGNUM,
+            0,
+            CLD_STOPPED,
+            pid,
+            stop_signal,
+        );
+    }
 
     let term_signal = (wait_status & 0x7f) as usize;
     if term_signal != 0 {

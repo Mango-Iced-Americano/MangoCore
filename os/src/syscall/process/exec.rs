@@ -33,12 +33,7 @@ fn try_open_shell_fallback(
     script_path: &str,
 ) -> Result<vfs::File, isize> {
     for shell in &["/bin/sh", "/bin/bash"] {
-        let file = match vfs_lookup(cwd_inode, shell, true)
-            .and_then(|inode| {
-                vfs::File::new(inode, vfs::FileFlags::O_RDONLY).map_err(|e| -(e as isize))
-            })
-            .and_then(|f| check_exec_metadata(&f).map(|_| f))
-        {
+        let file = match open_exec(cwd_inode, shell) {
             Ok(f) if is_valid_elf(&f) => f,
             _ => continue,
         };
@@ -101,6 +96,28 @@ fn check_exec_metadata(file: &vfs::File) -> Result<(), isize> {
         return Err(EACCES);
     }
     Ok(())
+}
+
+fn open_exec_file(cwd_inode: &Arc<dyn vfs::IndexNode>, path: &str) -> Result<vfs::File, isize> {
+    validate_exec_path_len(path)?;
+    let inode = vfs_lookup(cwd_inode, path, true)?;
+    let file = vfs::File::new(inode, vfs::FileFlags::O_RDONLY).map_err(|e| -(e as isize))?;
+    check_exec_metadata(&file)?;
+    Ok(file)
+}
+
+fn is_compat_shell_path(path: &str) -> bool {
+    path == "/bin/sh" || path == "/bin/bash"
+}
+
+fn open_exec(cwd_inode: &Arc<dyn vfs::IndexNode>, path: &str) -> Result<vfs::File, isize> {
+    match open_exec_file(cwd_inode, path) {
+        Ok(file) => Ok(file),
+        Err(errno) if is_compat_shell_path(path) => {
+            open_exec_file(cwd_inode, "/bash").or(Err(errno))
+        }
+        Err(errno) => Err(errno),
+    }
 }
 
 fn checked_add_exec_bytes(total: &mut usize, add: usize) -> Result<(), isize> {
@@ -252,15 +269,7 @@ pub fn sys_execve(
     };
     let cwd_inode: Arc<dyn vfs::IndexNode> = working_inode.inode.clone();
 
-    let open_exec = |path: &str| -> Result<vfs::File, isize> {
-        validate_exec_path_len(path)?;
-        let inode = vfs_lookup(&cwd_inode, path, true)?;
-        let file = vfs::File::new(inode, vfs::FileFlags::O_RDONLY).map_err(|e| -(e as isize))?;
-        check_exec_metadata(&file)?;
-        Ok(file)
-    };
-
-    match open_exec(&path) {
+    match open_exec(&cwd_inode, &path) {
         // 检查打开的文件
         Ok(file) => {
             // 若文件大小小于4，则返回ENOEXEC
@@ -277,7 +286,7 @@ pub fn sys_execve(
             } else if &magic_number[..2] == b"#!" {
                 let shell_file = if let Ok(Some((interp, shebang_arg))) = parse_shebang(&file) {
                     // 尝试打开并验证 shebang 解释器
-                    match open_exec(&interp).and_then(|f| {
+                    match open_exec(&cwd_inode, &interp).and_then(|f| {
                         if !f.is_dir() && is_valid_elf(&f) {
                             Ok(f)
                         } else {
@@ -341,6 +350,7 @@ pub fn sys_execve(
                     exit_current_and_run_next(127);
                 };
             }
+            task.process.mark_execed();
             task.process.set_exe_path(abs_path);
             task.process.complete_vfork();
             // should return 0 in success

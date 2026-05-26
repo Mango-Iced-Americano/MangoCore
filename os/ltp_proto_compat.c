@@ -1,5 +1,6 @@
 #include <netdb.h>
 #include <errno.h>
+#include <stdint.h>
 #include <sched.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -52,6 +53,17 @@ static const struct proto_entry proto_table[] = {
 
 static char *empty_aliases[] = { NULL };
 static struct protoent proto;
+
+static int brk_to(void *addr)
+{
+    void *ret = (void *)syscall(SYS_brk, addr);
+
+    if (ret != addr) {
+        errno = ENOMEM;
+        return -1;
+    }
+    return 0;
+}
 
 static struct protoent *make_protoent(const struct proto_entry *entry)
 {
@@ -132,6 +144,49 @@ char *getcwd(char *buf, size_t size)
     }
 
     return target;
+}
+
+int brk(void *addr)
+{
+    return brk_to(addr);
+}
+
+void *sbrk(intptr_t increment)
+{
+    uintptr_t old_addr;
+    uintptr_t target;
+    void *old_brk = (void *)syscall(SYS_brk, 0);
+
+    if (increment == 0) {
+        return old_brk;
+    }
+
+    old_addr = (uintptr_t)old_brk;
+    if (increment > 0) {
+        if (old_addr > UINTPTR_MAX - (uintptr_t)increment) {
+            errno = ENOMEM;
+            return (void *)-1;
+        }
+        target = old_addr + (uintptr_t)increment;
+    } else {
+        uintptr_t decrement;
+
+        if (increment == INTPTR_MIN) {
+            errno = ENOMEM;
+            return (void *)-1;
+        }
+        decrement = (uintptr_t)(-increment);
+        if (old_addr < decrement) {
+            errno = ENOMEM;
+            return (void *)-1;
+        }
+        target = old_addr - decrement;
+    }
+
+    if (brk_to((void *)target) < 0) {
+        return (void *)-1;
+    }
+    return old_brk;
 }
 
 int sched_setscheduler(pid_t pid, int policy, const struct sched_param *param)

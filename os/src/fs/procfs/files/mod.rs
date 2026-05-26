@@ -32,6 +32,20 @@ pub fn register_all(root: &Arc<crate::fs::procfs::LockedProcInode>) -> Result<()
         sys::pid_max_content,
         0,
     )?;
+    kernel_dir.add_writable_file_with_write(
+        "ns_last_pid",
+        InodeMode::from_bits_truncate(0o644),
+        sys::ns_last_pid_content,
+        sys::ns_last_pid_write,
+        0,
+    )?;
+    kernel_dir.add_writable_file_with_write(
+        "core_pattern",
+        InodeMode::from_bits_truncate(0o644),
+        sys::core_pattern_content,
+        sys::core_pattern_write,
+        0,
+    )?;
     kernel_dir.add_file(
         "tainted",
         InodeMode::from_bits_truncate(0o444),

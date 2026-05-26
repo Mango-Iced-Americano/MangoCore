@@ -43,11 +43,11 @@ pub use mm::{
 pub use signal::{
     sys_kcmp, sys_kill, sys_pidfd_getfd, sys_pidfd_open, sys_pidfd_send_signal, sys_rt_sigpending,
     sys_rt_sigqueueinfo, sys_rt_sigsuspend, sys_sigaction, sys_sigaltstack, sys_sigprocmask,
-    sys_sigreturn, sys_sigtimedwait, sys_tgkill, sys_tkill,
+    sys_sigreturn, sys_signalfd4, sys_sigtimedwait, sys_tgkill, sys_tkill,
 };
 pub use time::{
     sys_adjtimex, sys_clock_adjtime, sys_clock_getres, sys_clock_gettime, sys_clock_nanosleep,
     sys_clock_settime, sys_get_time, sys_getitimer, sys_getrusage, sys_gettimeofday, sys_nanosleep,
-    sys_setitimer, sys_timer_create, sys_timer_delete, sys_timer_getoverrun, sys_timer_gettime,
-    sys_timer_settime, sys_times, ITimerSpec, SigeventHeader, Timex,
+    sys_setitimer, sys_settimeofday, sys_timer_create, sys_timer_delete, sys_timer_getoverrun,
+    sys_timer_gettime, sys_timer_settime, sys_times, ITimerSpec, SigeventHeader, Timex,
 };

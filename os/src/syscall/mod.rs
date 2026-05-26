@@ -60,19 +60,26 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_WRITEV => "writev",
         SYSCALL_PREAD => "pread",
         SYSCALL_PWRITE => "pwrite",
+        SYSCALL_PREADV => "preadv",
+        SYSCALL_PWRITEV => "pwritev",
+        SYSCALL_PREADV2 => "preadv2",
+        SYSCALL_PWRITEV2 => "pwritev2",
         SYSCALL_SENDFILE => "sendfile",
         SYSCALL_COPY_FILE_RANGE => "copy_file_range",
         SYSCALL_PSELECT6 => "pselect6",
         SYSCALL_PPOLL => "ppoll",
+        SYSCALL_SIGNALFD4 => "signalfd4",
         SYSCALL_READLINKAT => "readlinkat",
         SYSCALL_FSTATAT => "fstatat",
         SYSCALL_FSTAT => "fstat",
         SYSCALL_SYNC => "sync",
         SYSCALL_STATFS => "statfs",
+        SYSCALL_FSTATFS => "fstatfs",
         SYSCALL_TRUNCATE => "truncate",
         SYSCALL_FTRUNCATE => "ftruncate",
         SYSCALL_FALLOCATE => "fallocate",
         SYSCALL_FSYNC => "fsync",
+        SYSCALL_FDATASYNC => "fdatasync",
         SYSCALL_UTIMENSAT => "utimensat",
         SYSCALL_CAPGET => "capget",
         SYSCALL_CAPSET => "capset",
@@ -141,6 +148,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_PRCTL => "prctl",
         SYSCALL_GETCPU => "getcpu",
         SYSCALL_GET_TIME_OF_DAY => "get_time_of_day",
+        SYSCALL_SET_TIME_OF_DAY => "set_time_of_day",
         SYSCALL_ADJTIMEX => "adjtimex",
         SYSCALL_GETPID => "getpid",
         SYSCALL_GETPPID => "getppid",
@@ -192,6 +200,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_MLOCKALL => "mlockall",
         SYSCALL_MUNLOCKALL => "munlockall",
         SYSCALL_MINCORE => "mincore",
+        SYSCALL_FADVISE64 => "fadvise64",
         SYSCALL_MLOCK2 => "mlock2",
         SYSCALL_GETRLIMIT => "getrlimit",
         SYSCALL_SETRLIMIT => "setrlimit",
@@ -205,6 +214,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_STATX => "statx",
         SYSCALL_SYNCFS => "syncfs",
         SYSCALL_GETRANDOM => "getrandom",
+        SYSCALL_MEMFD_CREATE => "memfd_create",
         SYSCALL_MADVISE => "madvise",
         SYSCALL_CLONE3 => "clone3",
         SYSCALL_GET_MEMPOLICY => "get_mempolicy",
@@ -233,7 +243,7 @@ use crate::{
     mm::{translated_byte_buffer, UserAccess, UserBuffer},
     syscall::errno::Errno,
     task::{current_user_token, Rusage},
-    timer::{ITimerVal, TimeSpec, Times},
+    timer::{ITimerVal, TimeSpec, TimeVal, Times},
 };
 
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
@@ -337,9 +347,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_READ => sys_read(args[0], args[1], args[2]),
         SYSCALL_READV => sys_readv(args[0], args[1], args[2]),
         SYSCALL_PREAD => sys_pread(args[0], args[1], args[2], args[3]),
+        SYSCALL_PREADV => sys_preadv(args[0], args[1], args[2], args[3]),
+        SYSCALL_PREADV2 => sys_preadv2(args[0], args[1], args[2], args[3], args[4], args[5]),
         SYSCALL_WRITE => sys_write(args[0], args[1], args[2]),
         SYSCALL_WRITEV => sys_writev(args[0], args[1], args[2]),
         SYSCALL_PWRITE => sys_pwrite(args[0], args[1], args[2], args[3]),
+        SYSCALL_PWRITEV => sys_pwritev(args[0], args[1], args[2], args[3]),
+        SYSCALL_PWRITEV2 => sys_pwritev2(args[0], args[1], args[2], args[3], args[4], args[5]),
         SYSCALL_LSEEK => sys_lseek(args[0], args[1] as isize, args[2] as u32),
         SYSCALL_SENDFILE => sys_sendfile(args[0], args[1], args[2] as *mut usize, args[3]),
         SYSCALL_COPY_FILE_RANGE => sys_copy_file_range(
@@ -375,6 +389,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         }
         SYSCALL_SYNC => sys_sync(),
         SYSCALL_FSYNC => sys_fsync(args[0]),
+        SYSCALL_FDATASYNC => sys_fdatasync(args[0]),
         SYSCALL_UTIMENSAT => sys_utimensat(
             args[0],
             args[1] as *const u8,
@@ -416,6 +431,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_RT_SIGSUSPEND => sys_rt_sigsuspend(args[0], args[1]),
         SYSCALL_SIGTIMEDWAIT => sys_sigtimedwait(args[0], args[1], args[2], args[3]),
         SYSCALL_RT_SIGQUEUEINFO => sys_rt_sigqueueinfo(args[0], args[1], args[2]),
+        SYSCALL_SIGNALFD4 => sys_signalfd4(args[0], args[1], args[2], args[3]),
         SYSCALL_KCMP => sys_kcmp(args[0], args[1], args[2], args[3], args[4]),
         SYSCALL_REBOOT => sys_reboot(args[0], args[1], args[2], args[3]),
         SYSCALL_PIDFD_SEND_SIGNAL => sys_pidfd_send_signal(args[0], args[1], args[2], args[3]),
@@ -455,6 +471,9 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[0] as *mut crate::timer::TimeVal,
             args[1] as *mut crate::timer::TimeZone,
         ),
+        SYSCALL_SET_TIME_OF_DAY => {
+            sys_settimeofday(args[0] as *const TimeVal, args[1] as *const crate::timer::TimeZone)
+        }
         SYSCALL_ADJTIMEX => sys_adjtimex(args[0] as *mut Timex),
         SYSCALL_CLOCK_ADJTIME => sys_clock_adjtime(args[0], args[1] as *mut Timex),
         SYSCALL_SETPGID => sys_setpgid(args[0], args[1]),
@@ -612,6 +631,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_MINCORE => sys_mincore(args[0], args[1], args[2]),
         SYSCALL_MLOCK2 => sys_mlock2(args[0], args[1], args[2]),
         SYSCALL_STATFS => sys_statfs(args[0] as *const u8, args[1] as *mut Statfs),
+        SYSCALL_FSTATFS => sys_fstatfs(args[0], args[1] as *mut Statfs),
         SYSCALL_SYNCFS => sys_syncfs(args[0]),
         SYSCALL_SOCKET => sys_socket(args[0] as u32, args[1] as u32, args[2] as u32),
         SYSCALL_SOCKETPAIR => sys_socketpair(
@@ -666,6 +686,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SENDMSG => sys_sendmsg(args[0] as u32, args[1], args[2] as u32),
         SYSCALL_RECVMSG => sys_recvmsg(args[0] as u32, args[1], args[2] as u32),
         SYSCALL_GETRANDOM => sys_getrandom(args[0] as usize, args[1] as usize, args[2] as u32),
+        SYSCALL_MEMFD_CREATE => sys_memfd_create(args[0] as *const u8, args[1] as u32),
         SYSCALL_DELETE_MODULE => sys_delete_module(args[0] as *const u8, args[1] as u32),
         SYSCALL_SHUTDOWN => sys_shutdown(),
         SYSCALL_EXT4_COUNTERS => crate::fs::ext4::counters::sys_ext4_counters(args[0], args[1], args[2]),
@@ -695,6 +716,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[3],
             args[4],
         ),
+        SYSCALL_FADVISE64 => sys_fadvise64(args[0], args[1], args[2], args[3] as i32),
         SYSCALL_MADVISE => sys_madvise(args[0], args[1], args[2]),
         _ => {
             if syscall_id == 242 {

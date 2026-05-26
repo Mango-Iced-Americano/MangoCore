@@ -220,10 +220,16 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | 问题 | 根因 | 修复 |
 |------|------|------|
 | MAP_SHARED 父子进程数据不一致 | fork 时 CoW 破坏共享语义 | MAP_SHARED 页面跳过 CoW，fork 时恢复 W 权限 |
+| `mlock201` 中 `mlock2(0)` 锁 1 页却显示 8 页 present | 匿名 `MAP_SHARED` mmap 直接安装整段 PTE，`mincore()` 无法区分未触达页 | 匿名 shared 可以预分配共享 frame 保留 fork 语义，但 PTE 要懒安装；首次访问/`mlock` fault-in 再映射现有 frame |
+| `mlock05` 找不到 `/proc/self/smaps` 或 `Rss` 多 1 页 | procfs 缺少 smaps，且 `mlock()` 锁定子区间后 VMA 合并导致 smaps 粗粒度统计误计旁边页 | 提供 `/proc/<pid>/smaps` 最小实现，并按 locked 页边界拆分输出段；`Rss`/`Locked` 只统计该段 |
 | unmap 后读到 PTE 残留值 | 未刷新 TLB，CPU 仍用旧缓存 | **所有 PTE 修改后 `sfence.vma` / `invtlb`** |
 | heap allocator panic | 内核堆耗尽 | `try_reserve` 防御 + OOM killer |
 | `brk`/`mmap` 返回意外值 | 堆/mmap 区域冲突 | 检查 `program_break` 边界 |
+| la64 在大量匿名页 fault 时 `frame_alloc`/`memset` AddressError，常见停在物理 `0xb0000000` | QEMU la64 DTB 的高段 RAM 是 `memory@80000000` + `0x30000000`，旧配置错误地按 1GB 连续 RAM 分配到 `0xc0000000` | la64 `MEMORY_SIZE` 必须匹配 DTB 的 `0x30000000`；不要跨真实 RAM 结尾分配物理页 |
+| la64 `getrusage03` 变成 `TCONF: needs at least 512MB MemAvailable` 或 30s timeout | la64 高段 RAM 只有 768MB，256MB 静态 kernel heap 挤占可用页帧；页帧清零被降成 byte-wise `memset`，大批量 fault 很慢 | la64 kernel heap 保持在实际需要范围内；页帧清零用 64-bit store 循环，避免每页 4096 次 byte store |
 | `mmap18` MAP_GROWSDOWN 栈增长失败 | 页故障只查已覆盖 VMA，未在 guard page fault 时扩展 grow-down VMA | fault 地址位于 grow-down VMA 下方且不碰撞/不进入 stack_guard_gap 时，先下扩 VMA 起点再走懒分配 |
+| `munlockall01`/`mlock203` 读取 `VmLck` 失败或重复锁页计数异常 | `/proc/<pid>/status` 缺 `VmLck`，或 mlock 路径未维护 ABI 可见锁页状态 | 在地址空间维护页级 locked 集合，`mlock/mlockall` 设置、`munlock/munlockall/munmap` 清除，`VmLck` 汇总 locked 用户页 |
+| `mmap14` 中 `MAP_LOCKED` 后 `VmLck=0` | `mmap()` 保留了 `MAP_LOCKED` VMA flag，但没有同步更新页级 locked 集合 | `MAP_LOCKED` 建图后必须把映射范围计入 locked 页；避免和未锁匿名 VMA 合并导致统计丢失 |
 
 ### 文件系统
 
@@ -260,6 +266,8 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | `utsname02/03` sethostname ENOSYS | syscall 161 未注册，hostname 固定写死在 `uname` | 用进程共享 `UtsNamespace` 保存 nodename/domainname，`sethostname`/`setdomainname` 更新当前 UTS namespace |
 | `utsname04` 非 root `CLONE_NEWUTS` 未拒绝 | `clone` 未检查 UTS namespace 权限 | 非 root 使用 `CLONE_NEWUTS` 返回 `EPERM` |
 | `waitid11` SIGKILL 子进程被报告为正常退出 | `waitid` siginfo 总是填 `CLD_EXITED` | 按 wait status 低 7 位区分 `CLD_KILLED/CLD_DUMPED` |
+| `waitid10` 先被跳过后 `si_code` 和 core-dump 语义异常 | 缺 `/proc/sys/kernel/core_pattern`，且 `RLIMIT_CORE` 更新不可见、WCOREDUMP 只按信号号硬编码 | 补 core_pattern 最小 sysctl；保存/继承 `RLIMIT_CORE`；只有 core-default 信号且 dumpable、core limit > 0 时设置 WCOREDUMP |
+| `waitid07/08`、`waitpid08/13` stopped/continued 用例失败 | SIGSTOP 只让任务睡眠，没有给父进程留下可 wait 的 stop/continue 状态；`waitid` 误要求必须带 `WEXITED` | 进程记录 stopped/continued 事件，`wait4/waitid` 按 `WSTOPPED/WCONTINUED/WNOWAIT` 返回 Linux wait status / `CLD_STOPPED` / `CLD_CONTINUED` |
 | `userns*`、`utime*`、`vmsplice*`、`wireguard*`、`zram*` 等后段失败 | user namespace/procfs、fs timestamp、pipe splice、net/module 环境缺失 | broad scan 中按家族窄跳过，后续专项处理 |
 | `aio*`、`chdir01`、`dio*`、`data*`、`dccp*`、`dhcp*`、`dctcp*` 等前段噪声 | libaio 用户态环境、外部测试设备、fs direct-io 压测、standalone helper、网络协议矩阵 | broad scan 中按家族/精确项跳过，保留普通核心 syscall 用例 |
 | `clone08` musl 失败但 glibc 通过 | musl `clone()` wrapper 对 `CLONE_THREAD/CLONE_CHILD_CLEARTID` 组合直接 `EINVAL`，未进入内核；glibc 路径验证内核线程 clone 可用 | broad scan 中仅跳过 musl `clone08`，保留 glibc |
@@ -274,6 +282,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | 被屏蔽信号导致 EINTR | 用 `is_empty()` 检查信号 | 用 `sigpending.difference(sigmask)` |
 | execve 后 OOM | 新旧内存集同时存在 | `load_elf` 开头 `recycle_data_pages()` |
 | execve 映射只读 ELF 段 panic | `map_elf` 把内核临时文件映射 fast path 当成必然成功并 `unwrap()`，失败后还可能留下部分用户映射 | fast path 只作为优化：严格检查页对齐/大小，失败回退 copy load，并保证跨地址空间映射失败时回滚 |
+| job-control stop 后父进程 wait 不到状态 | 默认 stop 信号没有记录进程级状态，也没有唤醒父进程 `child_exit_wait` | SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU 标记 stopped；SIGCONT 标记 continued 并唤醒父进程；wait 消费事件但不回收子进程 |
 | `rt_sigaction03` invalid sigsetsize 误成功 | `rt_sigaction` 分发忽略第 4 参数 `sigsetsize` | syscall 层传入并校验 `sigsetsize == sizeof(kernel sigset_t)` |
 | `sigaction01` 中 `SA_RESETHAND` 清掉 `SA_SIGINFO` | 信号投递后直接删除 action，handler 内 `sigaction(..., oldact)` 读到默认空 flags | `SA_RESETHAND` 只把 handler 重置为 `SIG_DFL`，保留 flags/mask/restorer 供 oldact 查询 |
 | `rt_sigqueueinfo01` pthread checkpoint 超时 | TID 目标信号立即唤醒 futex/checkpoint waiter，导致 LTP 后续 `TST_CHECKPOINT_WAKE` 找不到等待者 | 对非 leader TID 先入线程 pending，不主动信号唤醒；由测试的 futex wake 释放后再处理 pending signal |
@@ -284,6 +293,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | pidfd_getfd 已退出目标返回 EBADF | wait 后 zombie 进程仍可被 registry 查到，但 fd table 已关闭 | 目标进程 zombie 时按 Linux 语义返回 `ESRCH` |
 | pidfd_open04 waitid(P_PIDFD) ENOSYS | 缺少 `waitid(95)` 分发和 P_PIDFD 最小语义 | 支持 `P_PIDFD + WEXITED`，非阻塞未退出返回 `EAGAIN`，退出后回收子进程 |
 | futex_wait05 短 timeout 超时过长 | 单线程短等待走完整 wait queue/调度路径，QEMU 下固定增加数毫秒 | 仅对单线程、ready 队列为空、短 timeout 使用硬件时钟短轮询；仍保持值不匹配优先返回 `EAGAIN` |
+| `getrusage03` 读 `/proc/self/status` TBROK、`RUSAGE_CHILDREN.ru_maxrss=0` 或尾部卡住 | status 缺 `VmSwap`/RSS 字段，`ru_maxrss` 未按 resident high-water 更新，wait 聚合漏掉已回收后代资源；la64 `rt_sigaction(sigsetsize=16)` 被误拒导致 `SIGCHLD=SIG_IGN` 未生效 | status 补 `VmSwap`/RSS，`getrusage`/进程退出更新 `ru_maxrss`，wait 回收时合并子进程自身和后代 `rusage`；`rt_sigaction` 接受 libc 传入的 >=8 字节 sigsetsize，显式忽略 SIGCHLD/`SA_NOCLDWAIT` 时自动摘除子进程并从 registry 移除 |
 | process_vm_readv03 多 iovec 数据错误 | 大量同页一字节 iovec 被长期保存成多个 `&mut` 页切片，存在别名风险 | 跨进程 iovec 拷贝逐页 chunk 即时复制，不持久保存页切片 |
 | process_vm01 无权限场景返回 EFAULT | 先访问目标进程坏地址，后做 ptrace/credential 权限判断，errno 优先级反了 | 读取/写入远程 VM 前先按 uid/gid/suid/sgid、dumpable 和 `CAP_SYS_PTRACE` 检查访问权限，无权限返回 `EPERM` |
 | LTP `msg*` 大片 ENOSYS/errno 失败 | 缺少 SysV message queue syscall 和 Linux IPC 权限/时间字段语义 | 最小实现 `msgget/msgctl/msgsnd/msgrcv`，用 wall-clock 填 `msg_*time`，校验 uid/gid/mode、NULL 用户指针和 `MSG_COPY/MSG_EXCEPT/MSG_NOERROR`；`msgrcv06/msgsnd06` 这类删除唤醒需后续 wait queue 化 |
@@ -301,6 +311,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | `ptrace*` 大片 ENOSYS/TBROK | 当前内核无 ptrace stop/wait/tracee 状态机，属于结构性子系统 | 先由 inline runner skip，后续专项做 ptrace 模型 |
 | LTP `pm_*`/`pkey01`/`profil01`/`pt_test`/部分 `prctl*` TCONF | 依赖 power-management、pkey、profil、perf、procfs/capability 等当前非目标环境 | 先 narrow skip，避免阻塞后续 syscall 扫描 |
 | LTP `rename*` 大片 TBROK 或卡住 | 多数依赖外部块设备、目录权限矩阵等 fs 适配面 | 当前 fs/net 协作期先由 inline runner skip |
+| LTP helper 复制失败：`cp: command not found` | `/bin/sh` 已存在时 initproc 跳过 `busybox --install -s /bin`，导致 `/bin/cp` 等 applet 缺失 | 每次启动都幂等安装 BusyBox applet，并兜底创建常用命令 symlink |
 | LTP `request_key*`/`rmdir*`/`route*` 阻塞后续扫描 | 分别依赖 keyring 子系统、fs 语义和网络路由脚本 | 当前非 fs/net 主线先 narrow skip |
 | LTP `rtc*`/`run_cpuctl*`/`run_freezer*`/`run_memctl*`/`runpwtests*` TFAIL/TCONF | 依赖 RTC ioctl、cgroup controller 或 power-management 环境 | 当前非设备/控制器主线先 narrow skip |
 | LTP `rwtest` 持续刷 Broken pipe | 文件/管道压力 helper，容易拖慢扫描 | 当前 broad scan 中单点 skip |
@@ -315,6 +326,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | LTP `thp01` 超大 argv 触发内核跳到 `0x6363...` | `execve` 参数栈跨页写入时旧代码只翻译栈顶一页，且缺少过大 argv/env 的 `E2BIG` 预检 | `execve` 先按用户栈容量拒绝过大参数，ELF 启动栈按虚拟地址逐页翻译写入 |
 | LTP `thp02/03/04`、`timed_forkbomb` | THP/huge page 环境缺失或 fork 压力长耗时 | 当前 broad scan 中 narrow skip，保留 `thp01` 回归验证 |
 | LTP `times03` CPU 时间统计异常 | `times(2)` 把硬件 tick 当作 `clock_t`，且没有累计已 wait 回收子进程 CPU 时间 | 按 Linux `USER_HZ=100` 换算 `clock_t`，wait 回收 zombie 时累加子进程 `rusage`，`getrusage(RUSAGE_CHILDREN)` 同步返回累计值 |
+| LTP la64 `waitpid03` 二次 wait 曾返回已回收 child | `TidHandle` 只由 leader `TaskControlBlock` 持有，leader task 释放后 pid/tid 提前回收到全局分配器；zombie `ProcessControlBlock` 仍在父进程 children 中，25 连续 fork 时 la64 更容易复用 pid | 进程 PCB 持有 leader `TidHandle`，把 pid 生命周期延长到 zombie 被 wait 回收 |
 | LTP `timens*`、`timerfd*`、`tst_*`、`tpm*`、`trace*`、`truncate03*` 阻塞扫描 | time namespace/timerfd/TPM/tracing/fs truncate edge 或 LTP 内部 helper，当前非 fs/net 主线不适合长卡 | 先 narrow skip 解堵；`timerfd*` 后续作为 fd+timer 子系统专项实现 |
 | LTP `uaccess`、`udp*` 阻塞扫描 | `uaccess` 依赖 LTP kernel module，`udp*` 属于网络矩阵 | 当前 broad scan 中 narrow skip，避免和 net 适配冲突 |
 | 非阻塞 socket 测试失败 | 检查是否在 `try_xxx` 前调了 `try_poll()` |

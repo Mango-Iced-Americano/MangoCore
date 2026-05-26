@@ -1,20 +1,28 @@
 use alloc::sync::Arc;
 
 use crate::fs::{
+    dev::DEV_FS,
     pidfd::{new_pidfd_file_with_flags, PidFd},
     procfs::LockedProcInode,
-    vfs::{File, FileFlags, FileType, IndexNode, MountFSInode},
+    vfs::{
+        event::EPollEvent, File, FileFlags, FilePrivateData, FileSystem, FileType, IndexNode,
+        InodeMode, Metadata, MountFSInode,
+    },
 };
 use crate::hal::{MachineContext, TrapContext, UserSignalMask};
 use crate::mm::{copy_from_user, UserPtr, UserPtrMut};
+use crate::signal_type;
 use crate::syscall::errno::*;
 use crate::task::{
     current_task, exit_current_and_run_next, signal::*, ProcessControlBlock, ProcessManager,
+    TaskControlBlock,
 };
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
+use core::any::Any;
 use core::mem::size_of;
 use log::{error, info, trace};
+use spin::{Mutex, MutexGuard};
 
 fn can_signal_process(target: &ProcessControlBlock) -> bool {
     let Some(sender) = current_task() else {
@@ -45,12 +53,25 @@ fn can_signal_process(target: &ProcessControlBlock) -> bool {
 pub(super) fn pidfd_file_target_pid(file: &File) -> Result<usize, isize> {
     let inode = MountFSInode::unwrap_inode(&file.inode);
     if let Some(pidfd) = inode.as_any_ref().downcast_ref::<PidFd>() {
-        return Ok(pidfd.target_pid());
+        return pidfd.target_pid().map_err(|err| -(err as isize));
     }
     if let Some(proc_inode) = inode.as_any_ref().downcast_ref::<LockedProcInode>() {
-        let data = proc_inode.0.lock();
-        if data.metadata.file_type == FileType::Dir && data.extra_data != 0 {
-            return Ok(data.extra_data);
+        let (file_type, pid, process_ref) = {
+            let data = proc_inode.0.lock();
+            (
+                data.metadata.file_type,
+                data.extra_data,
+                data.process_ref.clone(),
+            )
+        };
+        if file_type == FileType::Dir && pid != 0 {
+            if let Some(process_ref) = process_ref {
+                return match process_ref.upgrade() {
+                    Some(process) if process.pid == pid && !process.pid_released() => Ok(pid),
+                    _ => Err(ESRCH),
+                };
+            }
+            return Ok(pid);
         }
     }
     Err(EBADF)
@@ -62,6 +83,258 @@ fn pidfd_target_pid(pidfd: usize) -> Result<usize, isize> {
     let fd_table = files_ref.lock();
     let file = fd_table.get_file(pidfd).map_err(|err| -(err as isize))?;
     pidfd_file_target_pid(file)
+}
+
+const SFD_NONBLOCK: usize = FileFlags::O_NONBLOCK.bits() as usize;
+const SFD_CLOEXEC: usize = FileFlags::O_CLOEXEC.bits() as usize;
+const SFD_VALID_FLAGS: usize = SFD_NONBLOCK | SFD_CLOEXEC;
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct SignalfdSiginfo {
+    ssi_signo: u32,
+    ssi_errno: i32,
+    ssi_code: i32,
+    ssi_pid: u32,
+    ssi_uid: u32,
+    ssi_fd: i32,
+    ssi_tid: u32,
+    ssi_band: u32,
+    ssi_overrun: u32,
+    ssi_trapno: u32,
+    ssi_status: i32,
+    ssi_int: i32,
+    ssi_ptr: u64,
+    ssi_utime: u64,
+    ssi_stime: u64,
+    ssi_addr: u64,
+    ssi_addr_lsb: u16,
+    __pad2: u16,
+    ssi_syscall: i32,
+    ssi_call_addr: u64,
+    ssi_arch: u32,
+    __pad: [u8; 28],
+}
+
+impl SignalfdSiginfo {
+    fn from_siginfo(info: SigInfo) -> Self {
+        Self {
+            ssi_signo: info.signo() as u32,
+            ssi_errno: info.errno(),
+            ssi_code: info.code(),
+            ssi_pid: info.sender_pid(),
+            ssi_uid: info.sender_uid(),
+            ssi_fd: 0,
+            ssi_tid: 0,
+            ssi_band: 0,
+            ssi_overrun: 0,
+            ssi_trapno: 0,
+            ssi_status: 0,
+            ssi_int: info.value() as i32,
+            ssi_ptr: info.value() as u64,
+            ssi_utime: 0,
+            ssi_stime: 0,
+            ssi_addr: 0,
+            ssi_addr_lsb: 0,
+            __pad2: 0,
+            ssi_syscall: 0,
+            ssi_call_addr: 0,
+            ssi_arch: 0,
+            __pad: [0; 28],
+        }
+    }
+
+    fn bytes(&self) -> &[u8] {
+        unsafe {
+            core::slice::from_raw_parts(
+                (self as *const SignalfdSiginfo) as *const u8,
+                size_of::<SignalfdSiginfo>(),
+            )
+        }
+    }
+}
+
+struct SignalFd {
+    mask: Mutex<Signals>,
+    metadata: Metadata,
+}
+
+impl core::fmt::Debug for SignalFd {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SignalFd")
+            .field("mask", &self.mask.lock().bits())
+            .finish()
+    }
+}
+
+impl SignalFd {
+    fn new(mask: Signals) -> Self {
+        Self {
+            mask: Mutex::new(mask),
+            metadata: Metadata::new(
+                FileType::File,
+                InodeMode::S_IFREG | InodeMode::from_bits_truncate(0o600),
+            ),
+        }
+    }
+
+    fn set_mask(&self, mask: Signals) {
+        *self.mask.lock() = mask;
+    }
+
+    fn pending_mask(&self) -> Signals {
+        *self.mask.lock()
+    }
+}
+
+impl IndexNode for SignalFd {
+    fn read_at(
+        &self,
+        _offset: usize,
+        len: usize,
+        buf: &mut [u8],
+        _data: MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        let info_size = size_of::<SignalfdSiginfo>();
+        if len < info_size || buf.len() < info_size {
+            return Err(SyscallErr::EINVAL);
+        }
+
+        let count = core::cmp::min(len, buf.len()) / info_size;
+        let task = current_task().ok_or(SyscallErr::ESRCH)?;
+        let mask = self.pending_mask();
+        let mut written = 0usize;
+        for slot in 0..count {
+            let Some(pending) = take_pending_signal_matching(&task, mask) else {
+                break;
+            };
+            let info = SignalfdSiginfo::from_siginfo(pending.siginfo);
+            let start = slot * info_size;
+            buf[start..start + info_size].copy_from_slice(info.bytes());
+            written += info_size;
+        }
+
+        if written == 0 {
+            Err(SyscallErr::EAGAIN)
+        } else {
+            Ok(written)
+        }
+    }
+
+    fn write_at(
+        &self,
+        _offset: usize,
+        _len: usize,
+        _buf: &[u8],
+        _data: MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        Err(SyscallErr::EINVAL)
+    }
+
+    fn metadata(&self) -> Result<Metadata, SyscallErr> {
+        Ok(self.metadata.clone())
+    }
+
+    fn poll(&self, _private_data: &FilePrivateData) -> Result<usize, SyscallErr> {
+        let task = current_task().ok_or(SyscallErr::ESRCH)?;
+        if has_pending_signal_matching(&task, self.pending_mask()) {
+            Ok((EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM).bits())
+        } else {
+            Ok(0)
+        }
+    }
+
+    fn fs(&self) -> Arc<dyn FileSystem> {
+        DEV_FS.clone()
+    }
+
+    fn is_stream(&self) -> bool {
+        true
+    }
+
+    fn as_any_ref(&self) -> &dyn Any {
+        self
+    }
+}
+
+fn read_signalfd_mask(token: usize, mask: usize, sigsetsize: usize) -> Result<Signals, isize> {
+    if !valid_rt_sigset_size(sigsetsize) {
+        return Err(EINVAL);
+    }
+    if mask == 0 {
+        return Err(EFAULT);
+    }
+    let bits = UserPtr::<u64>::from_addr(mask).read(token)?;
+    Ok(Signals::from_bits_truncate(bits as signal_type!()))
+}
+
+fn take_pending_signal_matching(task: &TaskControlBlock, set: Signals) -> Option<PendingSignal> {
+    {
+        let mut inner = task.acquire_inner_lock();
+        let matching = inner.sigpending.pending() & set;
+        if let Some(pending) = inner.sigpending.dequeue_matching(matching) {
+            return Some(pending);
+        }
+    }
+    task.process.take_shared_matching(set)
+}
+
+fn has_pending_signal_matching(task: &TaskControlBlock, set: Signals) -> bool {
+    let thread_pending = task.acquire_inner_lock().sigpending.pending();
+    (thread_pending | task.process.shared_pending()).intersects(set)
+}
+
+pub fn sys_signalfd4(fd: usize, mask: usize, sigsetsize: usize, flags: usize) -> isize {
+    if flags & !SFD_VALID_FLAGS != 0 {
+        return EINVAL;
+    }
+
+    let task = current_task().unwrap();
+    let sigmask = match read_signalfd_mask(task.get_user_token(), mask, sigsetsize) {
+        Ok(mask) => mask,
+        Err(errno) => return errno,
+    };
+
+    let fd_signed = fd as isize;
+    if fd_signed == -1 {
+        let mut file_flags = FileFlags::O_RDWR;
+        if flags & SFD_NONBLOCK != 0 {
+            file_flags.insert(FileFlags::O_NONBLOCK);
+        }
+        if flags & SFD_CLOEXEC != 0 {
+            file_flags.insert(FileFlags::O_CLOEXEC);
+        }
+
+        let inode = Arc::new(SignalFd::new(sigmask)) as Arc<dyn IndexNode>;
+        let file = match File::new(inode, file_flags) {
+            Ok(file) => file,
+            Err(err) => return -(err as isize),
+        };
+        let files_ref = task.process.files();
+        let mut fd_table = files_ref.lock();
+        return match fd_table.alloc_fd(file, flags & SFD_CLOEXEC != 0) {
+            Ok(new_fd) => new_fd as isize,
+            Err(err) => -(err as isize),
+        };
+    }
+
+    if fd_signed < 0 {
+        return EBADF;
+    }
+
+    let files_ref = task.process.files();
+    let fd_table = files_ref.lock();
+    let file = match fd_table.get_file(fd) {
+        Ok(file) => file,
+        Err(err) => return -(err as isize),
+    };
+    let inode = MountFSInode::unwrap_inode(&file.inode);
+    if let Some(signalfd) = inode.as_any_ref().downcast_ref::<SignalFd>() {
+        signalfd.set_mask(sigmask);
+        fd as isize
+    } else {
+        EINVAL
+    }
 }
 
 pub fn sys_kill(pid: usize, sig: usize) -> isize {
@@ -98,15 +371,15 @@ pub fn sys_pidfd_open(pid: usize, flags: usize) -> isize {
     if flags & !PIDFD_NONBLOCK != 0 {
         return EINVAL;
     }
-    if ProcessManager::find_process(pid).is_none() {
+    let Some(process) = ProcessManager::find_process(pid) else {
         return ESRCH;
-    }
+    };
 
     let mut file_flags = FileFlags::O_RDWR;
     if flags & PIDFD_NONBLOCK != 0 {
         file_flags.insert(FileFlags::O_NONBLOCK);
     }
-    let file = match new_pidfd_file_with_flags(pid, file_flags) {
+    let file = match new_pidfd_file_with_flags(&process, file_flags) {
         Ok(file) => file,
         Err(err) => return -(err as isize),
     };
@@ -163,10 +436,12 @@ pub fn sys_pidfd_getfd(pidfd: usize, targetfd: usize, flags: usize) -> isize {
 
 pub fn sys_kcmp(pid1: usize, pid2: usize, kcmp_type: usize, idx1: usize, idx2: usize) -> isize {
     const KCMP_FILE: usize = 0;
-
-    if kcmp_type != KCMP_FILE {
-        return EINVAL;
-    }
+    const KCMP_VM: usize = 1;
+    const KCMP_FILES: usize = 2;
+    const KCMP_FS: usize = 3;
+    const KCMP_SIGHAND: usize = 4;
+    const KCMP_IO: usize = 5;
+    const KCMP_SYSVSEM: usize = 6;
 
     let Some(process1) = ProcessManager::find_process(pid1) else {
         return ESRCH;
@@ -175,27 +450,49 @@ pub fn sys_kcmp(pid1: usize, pid2: usize, kcmp_type: usize, idx1: usize, idx2: u
         return ESRCH;
     };
 
-    let inode1: Arc<dyn IndexNode> = {
-        let files_ref = process1.files();
-        let fd_table = files_ref.lock();
-        match fd_table.get_file(idx1) {
-            Ok(file) => file.inode.clone(),
-            Err(err) => return -(err as isize),
-        }
-    };
-    let inode2: Arc<dyn IndexNode> = {
-        let files_ref = process2.files();
-        let fd_table = files_ref.lock();
-        match fd_table.get_file(idx2) {
-            Ok(file) => file.inode.clone(),
-            Err(err) => return -(err as isize),
-        }
-    };
+    match kcmp_type {
+        KCMP_FILE => {
+            let inode1: Arc<dyn IndexNode> = {
+                let files_ref = process1.files();
+                let fd_table = files_ref.lock();
+                match fd_table.get_file(idx1) {
+                    Ok(file) => file.inode.clone(),
+                    Err(err) => return -(err as isize),
+                }
+            };
+            let inode2: Arc<dyn IndexNode> = {
+                let files_ref = process2.files();
+                let fd_table = files_ref.lock();
+                match fd_table.get_file(idx2) {
+                    Ok(file) => file.inode.clone(),
+                    Err(err) => return -(err as isize),
+                }
+            };
 
-    if Arc::ptr_eq(&inode1, &inode2) {
-        0
-    } else {
-        1
+            if Arc::ptr_eq(&inode1, &inode2) { 0 } else { 1 }
+        }
+        KCMP_VM => {
+            let vm1 = process1.vm();
+            let vm2 = process2.vm();
+            if Arc::ptr_eq(&vm1, &vm2) { 0 } else { 1 }
+        }
+        KCMP_FILES => {
+            let files1 = process1.files();
+            let files2 = process2.files();
+            if Arc::ptr_eq(&files1, &files2) { 0 } else { 1 }
+        }
+        KCMP_FS => {
+            let fs1 = process1.fs();
+            let fs2 = process2.fs();
+            if Arc::ptr_eq(&fs1, &fs2) { 0 } else { 1 }
+        }
+        KCMP_SIGHAND => {
+            let sighand1 = process1.sighand();
+            let sighand2 = process2.sighand();
+            if Arc::ptr_eq(&sighand1, &sighand2) { 0 } else { 1 }
+        }
+        KCMP_IO | KCMP_SYSVSEM => 0,
+        _ => EINVAL,
     }
 }
 
@@ -294,7 +591,7 @@ pub fn sys_sigaction(signum: usize, act: usize, oldact: usize, sigsetsize: usize
         oldact,
         sigsetsize
     );
-    if sigsetsize != size_of::<u64>() {
+    if !valid_rt_sigset_size(sigsetsize) {
         return EINVAL;
     }
     sigaction(

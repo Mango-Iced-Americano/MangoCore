@@ -1,4 +1,4 @@
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use core::any::Any;
 use spin::MutexGuard;
 
@@ -7,19 +7,22 @@ use crate::{
         dev::DEV_FS,
         vfs::{File, FileFlags, FilePrivateData, FileSystem, FileType, IndexNode, InodeMode, Metadata},
     },
+    task::ProcessControlBlock,
     utils::error::SyscallErr,
 };
 
 #[derive(Debug)]
 pub struct PidFd {
     target_pid: usize,
+    target: Weak<ProcessControlBlock>,
     metadata: Metadata,
 }
 
 impl PidFd {
-    pub fn new(target_pid: usize) -> Self {
+    pub fn new(target: &Arc<ProcessControlBlock>) -> Self {
         Self {
-            target_pid,
+            target_pid: target.pid,
+            target: Arc::downgrade(target),
             metadata: Metadata::new(
                 FileType::File,
                 InodeMode::S_IFREG | InodeMode::from_bits_truncate(0o600),
@@ -27,8 +30,13 @@ impl PidFd {
         }
     }
 
-    pub fn target_pid(&self) -> usize {
-        self.target_pid
+    pub fn target_pid(&self) -> Result<usize, SyscallErr> {
+        match self.target.upgrade() {
+            Some(process) if process.pid == self.target_pid && !process.pid_released() => {
+                Ok(self.target_pid)
+            }
+            _ => Err(SyscallErr::ESRCH),
+        }
     }
 }
 
@@ -66,11 +74,14 @@ impl IndexNode for PidFd {
     }
 }
 
-pub fn new_pidfd_file_with_flags(target_pid: usize, flags: FileFlags) -> Result<File, SyscallErr> {
-    let inode = Arc::new(PidFd::new(target_pid)) as Arc<dyn IndexNode>;
+pub fn new_pidfd_file_with_flags(
+    target: &Arc<ProcessControlBlock>,
+    flags: FileFlags,
+) -> Result<File, SyscallErr> {
+    let inode = Arc::new(PidFd::new(target)) as Arc<dyn IndexNode>;
     File::new(inode, flags)
 }
 
-pub fn new_pidfd_file(target_pid: usize) -> Result<File, SyscallErr> {
-    new_pidfd_file_with_flags(target_pid, FileFlags::O_RDWR)
+pub fn new_pidfd_file(target: &Arc<ProcessControlBlock>) -> Result<File, SyscallErr> {
+    new_pidfd_file_with_flags(target, FileFlags::O_RDWR)
 }

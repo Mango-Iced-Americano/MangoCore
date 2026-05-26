@@ -1,7 +1,7 @@
 use super::{
-    pid::RecycleAllocator,
+    pid::{RecycleAllocator, TidHandle},
     registry,
-    signal::{PendingSignal, SignalQueue, Sighand, Signals},
+    signal::{sigchld_requests_auto_reap, PendingSignal, SignalQueue, Sighand, Signals},
     threads::Futex,
     wake_interruptible, Completion, FsStatus, TaskControlBlock, TaskStatus, UtsNamespace,
     Rusage, WaitQueue, WaitResult, INITPROC,
@@ -20,6 +20,7 @@ use spin::{Mutex, MutexGuard};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProcessState {
     Running,
+    Stopped,
     Zombie,
 }
 
@@ -28,6 +29,8 @@ pub struct ProcessControlBlock {
     pub pid: usize,
     /// 线程组主线程 tid。
     pub leader_tid: usize,
+    /// 保持进程 pid/tgid 在 zombie 被 wait 回收前不被复用。
+    _pid_handle: Arc<TidHandle>,
     /// 属于该进程的线程列表。
     pub threads: Mutex<Vec<Weak<TaskControlBlock>>>,
     /// 父进程 wait4() 等待子进程退出的等待队列。
@@ -67,12 +70,20 @@ pub struct ProcessInner {
     pub sid: usize,
     /// 父进程。
     pub parent: Option<Weak<ProcessControlBlock>>,
+    /// 进程创建后是否已经成功执行过 execve。
+    pub has_execed: bool,
     /// 子进程。
     pub children: Vec<Arc<ProcessControlBlock>>,
     /// 进程级生命周期状态。
     pub state: ProcessState,
     /// wait4 可回收的进程退出码。
     pub exit_code: u32,
+    /// 最近一次可被 waitpid(WUNTRACED)/waitid(WSTOPPED) 观察到的停止信号。
+    pub stopped_signal: Option<usize>,
+    /// 停止状态是否已经被不带 WNOWAIT 的 wait 消费。
+    pub stopped_reported: bool,
+    /// 最近一次可被 waitpid(WCONTINUED)/waitid(WCONTINUED) 观察到的继续事件。
+    pub continued_pending: bool,
     /// 进程退出时记录的 leader CPU 时间快照。
     pub rusage: Rusage,
     /// 已由 wait/waitid 回收的子进程 CPU 时间累计。
@@ -143,6 +154,7 @@ impl ProcessControlBlock {
     pub fn new(
         pid: usize,
         leader_tid: usize,
+        pid_handle: Arc<TidHandle>,
         pgid: usize,
         sid: usize,
         parent: Option<Weak<ProcessControlBlock>>,
@@ -166,6 +178,7 @@ impl ProcessControlBlock {
         Self {
             pid,
             leader_tid,
+            _pid_handle: pid_handle,
             threads: Mutex::new(Vec::new()),
             child_exit_wait: Mutex::new(WaitQueue::new()),
             vfork_parent: Mutex::new(None),
@@ -184,9 +197,13 @@ impl ProcessControlBlock {
                 pgid,
                 sid,
                 parent,
+                has_execed: false,
                 children: Vec::new(),
                 state: ProcessState::Running,
                 exit_code: 0,
+                stopped_signal: None,
+                stopped_reported: false,
+                continued_pending: false,
                 rusage: Rusage::new(),
                 child_rusage: Rusage::new(),
                 sched_policy: 0,
@@ -209,6 +226,14 @@ impl ProcessControlBlock {
         self.inner.lock()
     }
 
+    pub fn release_pid(&self) {
+        self._pid_handle.release();
+    }
+
+    pub fn pid_released(&self) -> bool {
+        self._pid_handle.is_released()
+    }
+
     pub fn exe(&self) -> Arc<Mutex<vfs::File>> {
         self.inner.lock().exe.clone()
     }
@@ -219,6 +244,14 @@ impl ProcessControlBlock {
 
     pub fn set_exe_path(&self, exe_path: String) {
         self.inner.lock().exe_path = exe_path;
+    }
+
+    pub fn mark_execed(&self) {
+        self.inner.lock().has_execed = true;
+    }
+
+    pub fn has_execed(&self) -> bool {
+        self.inner.lock().has_execed
     }
 
     pub fn replace_exe(&self, exe: vfs::File) {
@@ -420,8 +453,70 @@ impl ProcessControlBlock {
         }
         inner.state = ProcessState::Zombie;
         inner.exit_code = exit_code;
+        inner.stopped_signal = None;
+        inner.stopped_reported = true;
+        inner.continued_pending = false;
         inner.rusage = rusage;
         true
+    }
+
+    pub fn mark_stopped(&self, signum: usize) {
+        {
+            let mut inner = self.inner.lock();
+            if inner.state == ProcessState::Zombie {
+                return;
+            }
+            inner.state = ProcessState::Stopped;
+            inner.stopped_signal = Some(signum);
+            inner.stopped_reported = false;
+            inner.continued_pending = false;
+        }
+        if let Some(parent) = self.parent() {
+            parent.child_exit_wait.lock().wake_all();
+        }
+    }
+
+    pub fn mark_continued(&self) {
+        let changed = {
+            let mut inner = self.inner.lock();
+            if inner.state != ProcessState::Stopped {
+                false
+            } else {
+                inner.state = ProcessState::Running;
+                inner.stopped_signal = None;
+                inner.stopped_reported = true;
+                inner.continued_pending = true;
+                true
+            }
+        };
+        if changed {
+            if let Some(parent) = self.parent() {
+                parent.child_exit_wait.lock().wake_all();
+            }
+        }
+    }
+
+    pub fn take_stopped_status(&self, nowait: bool) -> Option<u32> {
+        let mut inner = self.inner.lock();
+        if inner.state != ProcessState::Stopped || inner.stopped_reported {
+            return None;
+        }
+        let signum = inner.stopped_signal?;
+        if !nowait {
+            inner.stopped_reported = true;
+        }
+        Some(((signum as u32) << 8) | 0x7f)
+    }
+
+    pub fn take_continued_status(&self, nowait: bool) -> Option<u32> {
+        let mut inner = self.inner.lock();
+        if !inner.continued_pending {
+            return None;
+        }
+        if !nowait {
+            inner.continued_pending = false;
+        }
+        Some(0xffff)
     }
 
     pub fn exit_code(&self) -> u32 {
@@ -434,6 +529,13 @@ impl ProcessControlBlock {
 
     pub fn child_rusage(&self) -> Rusage {
         self.inner.lock().child_rusage
+    }
+
+    pub fn wait_rusage(&self) -> Rusage {
+        let inner = self.inner.lock();
+        let mut rusage = inner.rusage;
+        rusage.add_child(inner.child_rusage);
+        rusage
     }
 
     pub fn enqueue_process_signal(&self, pending: PendingSignal) {
@@ -526,7 +628,18 @@ impl ProcessControlBlock {
     /// 以及进程资源关闭。
     pub fn finish_exit(&self, exit_task: &TaskControlBlock, exit_code: u32) {
         self.complete_vfork();
-        let rusage = exit_task.acquire_inner_lock().rusage;
+        let mut rusage = exit_task.acquire_inner_lock().rusage;
+        let resident_kb = self.vm().lock().resident_user_bytes() / 1024;
+        rusage.update_maxrss_kb(resident_kb);
+        let parent_process = self.parent();
+        let auto_reap = parent_process
+            .as_ref()
+            .map(|parent| {
+                let sighand_ref = parent.sighand();
+                let sighand = sighand_ref.lock();
+                sigchld_requests_auto_reap(&sighand)
+            })
+            .unwrap_or(false);
         if !self.mark_zombie(exit_code, rusage) {
             return;
         }
@@ -535,17 +648,23 @@ impl ProcessControlBlock {
             unregister_exec_key(key);
         }
 
-        if let Some(parent_process) = self.parent() {
-            parent_process.child_exit_wait.lock().wake_all();
-            if !exit_task.exit_signal.is_empty() {
-                if let Some(parent_task) = parent_process.any_live_thread() {
-                    let mut parent_inner = parent_task.acquire_inner_lock();
-                    parent_inner.add_signal(exit_task.exit_signal);
+        if let Some(parent_process) = parent_process {
+            if auto_reap {
+                parent_process.detach_child(self.pid);
+                registry::unregister_process(self.pid);
+                parent_process.child_exit_wait.lock().wake_all();
+            } else {
+                parent_process.child_exit_wait.lock().wake_all();
+                if !exit_task.exit_signal.is_empty() {
+                    if let Some(parent_task) = parent_process.any_live_thread() {
+                        let mut parent_inner = parent_task.acquire_inner_lock();
+                        parent_inner.add_signal(exit_task.exit_signal);
 
-                    if parent_inner.task_status == TaskStatus::Interruptible {
-                        parent_inner.task_status = TaskStatus::Ready;
-                        drop(parent_inner);
-                        wake_interruptible(parent_task);
+                        if parent_inner.task_status == TaskStatus::Interruptible {
+                            parent_inner.task_status = TaskStatus::Ready;
+                            drop(parent_inner);
+                            wake_interruptible(parent_task);
+                        }
                     }
                 }
             }
@@ -585,6 +704,6 @@ impl Drop for ProcessControlBlock {
         if let Some(key) = self.inner.get_mut().exec_key.take() {
             unregister_exec_key(key);
         }
-        registry::unregister_process(self.pid);
+        registry::unregister_process_if_match(self);
     }
 }

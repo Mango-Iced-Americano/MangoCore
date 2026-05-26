@@ -138,10 +138,10 @@ const SYSCALL_SIGTIMEDWAIT: usize = 137;
 const SYSCALL_RT_SIGSUSPEND: usize = 133;
 
 impl Signals {
-    // SIGILL | SIGKILL | SIGSEGV | SIGSTOP
-    /// 不能被处理的信号
+    // SIGKILL | SIGSTOP
+    /// Signals that cannot be blocked by user sigprocmask.
     pub const CAN_NOT_BE_MASKED: Signals =
-        Signals::from_bits_truncate(1 << 3 | 1 << 8 | 1 << 10 | 1 << 18);
+        Signals::from_bits_truncate(1 << 8 | 1 << 18);
     const EMPTY: Signals = Signals::empty();
     /// if 0 <= signum < 64, return `Ok(Signals)`, else return `Err()` (illeagal)
     pub fn from_signum(signum: usize) -> Result<Signals, ()> {
@@ -345,7 +345,7 @@ pub fn sigaction(signum: usize, act: *const UserSigAction, oldact: *mut UserSigA
                 if sigact.handler == SigHandler::SIG_IGN {
                     // Store SIG_IGN explicitly so we can distinguish from SIG_DFL
                     sighand.set(signum, Some(sigact));
-                } else if sigact.handler == SigHandler::SIG_DFL {
+                } else if sigact.handler == SigHandler::SIG_DFL && sigact.flags.is_empty() {
                     sighand.set(signum, None);
                 } else {
                     sighand.set(signum, Some(sigact));
@@ -354,6 +354,17 @@ pub fn sigaction(signum: usize, act: *const UserSigAction, oldact: *mut UserSigA
             }
             SUCCESS
         }
+    }
+}
+
+pub fn sigchld_requests_auto_reap(sighand: &Sighand) -> bool {
+    const SIGCHLD_SIGNUM: usize = 17;
+    match sighand.get(SIGCHLD_SIGNUM) {
+        Some(act) => {
+            act.handler == SigHandler::SIG_IGN
+                || act.flags.contains(SigActionFlags::SA_NOCLDWAIT)
+        }
+        None => false,
     }
 }
 
@@ -435,11 +446,24 @@ const WAIT_COREDUMP: u32 = 0x80;
 fn default_signal_wait_status(signal: Signals) -> u32 {
     let signum = signal.to_signum().unwrap() as u32;
     // Linux wait status uses bit 7 to report WCOREDUMP(status).
-    if matches!(signum, 3 | 4 | 5 | 6 | 7 | 8 | 11 | 24 | 25 | 31) {
+    if signal_default_dumps_core(signum) && current_core_dump_enabled() {
         signum | WAIT_COREDUMP
     } else {
         signum
     }
+}
+
+fn signal_default_dumps_core(signum: u32) -> bool {
+    matches!(signum, 3 | 4 | 5 | 6 | 7 | 8 | 11 | 24 | 25 | 31)
+}
+
+fn current_core_dump_enabled() -> bool {
+    current_task()
+        .map(|task| {
+            let inner = task.acquire_inner_lock();
+            inner.core_limit_cur > 0 && inner.dumpable != 0
+        })
+        .unwrap_or(false)
 }
 
 fn exit_current_with_sigsegv() -> ! {
@@ -576,6 +600,14 @@ fn wait_for_default_stop_signal() {
             None
         }
     });
+}
+
+fn stop_current_process_for_signal(signum: usize) {
+    let task = current_task().unwrap();
+    let process = task.process.clone();
+    process.mark_stopped(signum);
+    drop(task);
+    wait_for_default_stop_signal();
 }
 
 /// 执行信号处理
@@ -815,11 +847,11 @@ pub fn do_signal() {
                     continue;
                 }
                 // stop (or we should say block) current process
-                Signals::SIGTSTP | Signals::SIGTTIN | Signals::SIGTTOU => {
+                Signals::SIGSTOP | Signals::SIGTSTP | Signals::SIGTTIN | Signals::SIGTTOU => {
                     drop(inner);
                     drop(sighand);
                     drop(task);
-                    wait_for_default_stop_signal();
+                    stop_current_process_for_signal(signum);
                     // because this loop require `inner`, and we have `drop(inner)` above, so `break` is compulsory
                     // this would cause some signals won't be handled immediately when this process resumes
                     // but it doesn't matter, maybe
@@ -995,6 +1027,26 @@ impl SigInfo {
 
     pub fn signo(&self) -> usize {
         self.si_signo as usize
+    }
+
+    pub fn errno(&self) -> i32 {
+        self.si_errno as i32
+    }
+
+    pub fn code(&self) -> i32 {
+        self.si_code as i32
+    }
+
+    pub fn sender_pid(&self) -> u32 {
+        self.si_pid
+    }
+
+    pub fn sender_uid(&self) -> u32 {
+        self.si_uid
+    }
+
+    pub fn value(&self) -> usize {
+        self.si_value
     }
 
     pub fn is_kernel_generated(&self) -> bool {

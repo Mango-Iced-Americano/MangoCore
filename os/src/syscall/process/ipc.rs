@@ -1,11 +1,8 @@
 use super::mm::{sys_mmap, sys_munmap};
 use crate::mm::{copy_from_user, copy_from_user_array, copy_to_user, copy_to_user_array, MapFlags};
 use crate::syscall::errno::*;
-use crate::task::{
-    current_task, current_user_token, discard_non_actionable_unblocked_signals,
-    has_actionable_signal, suspend_current_and_run_next, WaitQueue, WaitResult,
-};
-use crate::timer::{current_timespec, get_time_ms, TimeSpec};
+use crate::task::{current_task, current_user_token, WaitQueue, WaitResult};
+use crate::timer::{current_timespec, TimeSpec};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 use core::mem::size_of;
@@ -39,7 +36,6 @@ const MSGMNI: usize = 1024;
 const MSGMAX: usize = 8192;
 const MSGMNB: usize = 16384;
 const MSGTQL: usize = 4096;
-const MSG_BLOCK_TIMEOUT_MS: usize = 3000;
 
 const GETPID: usize = 11;
 const GETVAL: usize = 12;
@@ -243,6 +239,7 @@ impl MsgQueue {
 struct MsgRegistry {
     next_id: i32,
     queues: BTreeMap<i32, MsgQueue>,
+    wait_queue: WaitQueue,
     removed_ids: Vec<i32>,
 }
 
@@ -251,6 +248,7 @@ impl MsgRegistry {
         Self {
             next_id: 1,
             queues: BTreeMap::new(),
+            wait_queue: WaitQueue::new(),
             removed_ids: Vec::new(),
         }
     }
@@ -662,6 +660,36 @@ fn seminfo_snapshot(registry: &SemRegistry, runtime: bool) -> LinuxSemInfo {
     }
 }
 
+fn semctl_setval_value(arg: usize) -> Result<i32, isize> {
+    if arg <= SEMVMX as usize {
+        return Ok(arg as i32);
+    }
+
+    #[cfg(target_arch = "loongarch64")]
+    {
+        let low = arg as i32;
+        if (0..=SEMVMX).contains(&low) {
+            return Ok(low);
+        }
+        if arg > i32::MAX as usize {
+            let mut value = 0i32;
+            if copy_from_user(
+                current_user_token(),
+                arg as *const i32,
+                &mut value as *mut i32,
+            )
+            .is_ok()
+            {
+                if (0..=SEMVMX).contains(&value) {
+                    return Ok(value);
+                }
+            }
+        }
+    }
+
+    Err(ERANGE)
+}
+
 pub fn sys_semget(key: isize, nsems: usize, semflg: usize) -> isize {
     let mut registry = SEM_REGISTRY.lock();
     if key != IPC_PRIVATE {
@@ -838,11 +866,12 @@ pub fn sys_semctl(semid: i32, semnum: usize, cmd: usize, arg: usize) -> isize {
             if !can_modify_sem_set(set) {
                 return EPERM;
             }
-            if arg > SEMVMX as usize {
-                return ERANGE;
-            }
+            let value = match semctl_setval_value(arg) {
+                Ok(value) => value,
+                Err(errno) => return errno,
+            };
             let sem = &mut set.semaphores[semnum];
-            sem.value = arg as i32;
+            sem.value = value;
             sem.last_pid = current_pid_i32();
             set.ctime = now_sec();
             wake_waiters = true;
@@ -1241,18 +1270,6 @@ fn select_msg_index(queue: &MsgQueue, msgtyp: isize, msgflg: usize) -> Option<us
     best.map(|(idx, _)| idx)
 }
 
-fn sleep_for_msg_retry() -> Option<isize> {
-    suspend_current_and_run_next();
-    let task = current_task().unwrap();
-    if has_actionable_signal(&task) {
-        Some(EINTR)
-    } else {
-        discard_non_actionable_unblocked_signals(&task);
-        task.acquire_inner_lock().refresh_real_timer();
-        None
-    }
-}
-
 pub fn sys_msgget(key: isize, msgflg: usize) -> isize {
     let mut registry = MSG_REGISTRY.lock();
     if key != IPC_PRIVATE {
@@ -1284,6 +1301,53 @@ pub fn sys_msgget(key: isize, msgflg: usize) -> isize {
     id as isize
 }
 
+fn try_msgsnd_locked(
+    registry: &mut MsgRegistry,
+    msqid: i32,
+    mtype: isize,
+    data: &[u8],
+) -> Option<isize> {
+    let mut wake_waiters = false;
+    let result = {
+        let Some(queue) = registry.queues.get_mut(&msqid) else {
+            return Some(if registry.was_removed(msqid) { EIDRM } else { EINVAL });
+        };
+        if !has_msg_permission(queue, MSG_W) {
+            return Some(EACCES);
+        }
+        if queue.cbytes.saturating_add(data.len()) > queue.qbytes
+            || queue.messages.len() >= MSGTQL
+        {
+            return None;
+        }
+
+        let serial = queue.next_serial;
+        queue.next_serial = queue.next_serial.saturating_add(1).max(1);
+        if queue.messages.try_reserve(1).is_err() {
+            return Some(ENOMEM);
+        }
+        let mut payload = Vec::new();
+        if payload.try_reserve_exact(data.len()).is_err() {
+            return Some(ENOMEM);
+        }
+        payload.extend_from_slice(data);
+        queue.messages.push_back(Message {
+            serial,
+            mtype,
+            data: payload,
+        });
+        queue.cbytes = queue.cbytes.saturating_add(data.len());
+        queue.lspid = current_pid_i32();
+        queue.stime = now_sec();
+        wake_waiters = true;
+        Some(SUCCESS)
+    };
+    if wake_waiters {
+        registry.wait_queue.wake_all();
+    }
+    result
+}
+
 pub fn sys_msgsnd(msqid: i32, msgp: usize, msgsz: usize, msgflg: usize) -> isize {
     if msgsz > MSGMAX || msgflg & !(IPC_NOWAIT) != 0 {
         return EINVAL;
@@ -1293,45 +1357,38 @@ pub fn sys_msgsnd(msqid: i32, msgp: usize, msgsz: usize, msgflg: usize) -> isize
         Err(errno) => return errno,
     };
 
-    let wait_start = get_time_ms();
-    loop {
-        {
-            let mut registry = MSG_REGISTRY.lock();
-            let Some(queue) = registry.queues.get_mut(&msqid) else {
-                return EINVAL;
-            };
-            if !has_msg_permission(queue, MSG_W) {
-                return EACCES;
-            }
-            if queue.cbytes.saturating_add(msgsz) <= queue.qbytes
-                && queue.messages.len() < MSGTQL
-            {
-                let serial = queue.next_serial;
-                queue.next_serial = queue.next_serial.saturating_add(1).max(1);
-                if queue.messages.try_reserve(1).is_err() {
-                    return ENOMEM;
-                }
-                queue.messages.push_back(Message {
-                    serial,
-                    mtype,
-                    data,
-                });
-                queue.cbytes = queue.cbytes.saturating_add(msgsz);
-                queue.lspid = current_pid_i32();
-                queue.stime = now_sec();
-                return SUCCESS;
-            }
-        }
+    if msgflg & IPC_NOWAIT != 0 {
+        let mut registry = MSG_REGISTRY.lock();
+        return try_msgsnd_locked(&mut registry, msqid, mtype, &data).unwrap_or(EAGAIN);
+    }
 
-        if msgflg & IPC_NOWAIT != 0 {
-            return EAGAIN;
-        }
-        if get_time_ms().saturating_sub(wait_start) >= MSG_BLOCK_TIMEOUT_MS {
-            return EINTR;
-        }
-        if let Some(errno) = sleep_for_msg_retry() {
-            return errno;
-        }
+    match WaitQueue::wait_event_interruptible_locked(
+        &MSG_REGISTRY,
+        |registry| &mut registry.wait_queue,
+        |registry| try_msgsnd_locked(registry, msqid, mtype, &data),
+    ) {
+        WaitResult::Ready(value) => value,
+        WaitResult::Interrupted => EINTR,
+        WaitResult::TimedOut => EINTR,
+    }
+}
+
+fn msg_recv_wait_condition(
+    registry: &mut MsgRegistry,
+    msqid: i32,
+    msgtyp: isize,
+    msgflg: usize,
+) -> Option<isize> {
+    let Some(queue) = registry.queues.get(&msqid) else {
+        return Some(if registry.was_removed(msqid) { EIDRM } else { EINVAL });
+    };
+    if !has_msg_permission(queue, MSG_R) {
+        return Some(EACCES);
+    }
+    if select_msg_index(queue, msgtyp, msgflg).is_some() {
+        Some(SUCCESS)
+    } else {
+        None
     }
 }
 
@@ -1376,17 +1433,36 @@ fn prepare_msgrcv(
 
 fn remove_received_message(msqid: i32, serial: u64, copy_len: usize) {
     let mut registry = MSG_REGISTRY.lock();
-    let Some(queue) = registry.queues.get_mut(&msqid) else {
-        return;
-    };
-    if let Some(idx) = queue.messages.iter().position(|msg| msg.serial == serial) {
-        if let Some(message) = queue.messages.remove(idx) {
-            queue.cbytes = queue.cbytes.saturating_sub(message.data.len());
-            queue.lrpid = current_pid_i32();
+    let mut wake_waiters = false;
+    {
+        let Some(queue) = registry.queues.get_mut(&msqid) else {
+            return;
+        };
+        if let Some(idx) = queue.messages.iter().position(|msg| msg.serial == serial) {
+            if let Some(message) = queue.messages.remove(idx) {
+                queue.cbytes = queue.cbytes.saturating_sub(message.data.len());
+                queue.lrpid = current_pid_i32();
+                queue.rtime = now_sec();
+                wake_waiters = true;
+            }
+        } else if copy_len != 0 {
             queue.rtime = now_sec();
         }
-    } else if copy_len != 0 {
-        queue.rtime = now_sec();
+    }
+    if wake_waiters {
+        registry.wait_queue.wake_all();
+    }
+}
+
+fn wait_for_msg_recv(msqid: i32, msgtyp: isize, msgflg: usize) -> isize {
+    match WaitQueue::wait_event_interruptible_locked(
+        &MSG_REGISTRY,
+        |registry| &mut registry.wait_queue,
+        |registry| msg_recv_wait_condition(registry, msqid, msgtyp, msgflg),
+    ) {
+        WaitResult::Ready(value) => value,
+        WaitResult::Interrupted => EINTR,
+        WaitResult::TimedOut => EINTR,
     }
 }
 
@@ -1407,7 +1483,6 @@ pub fn sys_msgrcv(
         return EINVAL;
     }
 
-    let wait_start = get_time_ms();
     loop {
         match prepare_msgrcv(msqid, msgsz, msgtyp, msgflg) {
             Ok((serial, mtype, data, copy_len, copy_only)) => {
@@ -1423,11 +1498,9 @@ pub fn sys_msgrcv(
                 if msgflg & IPC_NOWAIT != 0 {
                     return ENOMSG;
                 }
-                if get_time_ms().saturating_sub(wait_start) >= MSG_BLOCK_TIMEOUT_MS {
-                    return EINTR;
-                }
-                if let Some(errno) = sleep_for_msg_retry() {
-                    return errno;
+                let wait_result = wait_for_msg_recv(msqid, msgtyp, msgflg);
+                if wait_result < 0 {
+                    return wait_result;
                 }
             }
             Err(errno) => return errno,
@@ -1447,6 +1520,7 @@ pub fn sys_msgctl(msqid: i32, cmd: usize, buf: usize) -> isize {
             }
             registry.queues.remove(&msqid);
             registry.mark_removed(msqid);
+            registry.wait_queue.wake_all();
             SUCCESS
         }
         IPC_STAT | MSG_STAT | MSG_STAT_ANY => {
@@ -1515,6 +1589,7 @@ pub fn sys_msgctl(msqid: i32, cmd: usize, buf: usize) -> isize {
             queue.mode = ds.msg_perm.mode as usize & 0o777;
             queue.qbytes = (ds.msg_qbytes as usize).min(MSGMNB * 64);
             queue.ctime = now_sec();
+            registry.wait_queue.wake_all();
             SUCCESS
         }
         IPC_INFO | MSG_INFO => {

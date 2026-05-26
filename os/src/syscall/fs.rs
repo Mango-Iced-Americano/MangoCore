@@ -9,7 +9,8 @@ use crate::mm::{
 };
 use crate::syscall::utils::wait_io_core;
 use crate::task::{
-    current_task, current_user_token, is_executable_inode_busy, signal, WaitQueue, WaitResult,
+    current_task, current_user_token, is_executable_inode_busy, signal::Signals, WaitQueue,
+    WaitResult,
 };
 use crate::timer::{current_timespec, TimeSpec};
 use crate::utils::error::SyscallErr;
@@ -20,12 +21,21 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem::size_of;
 use core::panic;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use log::{debug, error, info, trace, warn};
 use num_enum::FromPrimitive;
 
 // 防止用户传入过大参数导致内核 OOM 或者长时间阻塞
 const MAX_SYSCALL_BUFFER_SIZE: usize = 2 * 1024 * 1024; // 限制为 2 MiB
 const OPEN_ACCMODE_MASK: u32 = 0o3;
+const MFD_CLOEXEC: u32 = 0x0001;
+const MFD_ALLOW_SEALING: u32 = 0x0002;
+const MFD_HUGETLB: u32 = 0x0004;
+const MFD_HUGE_SHIFT: u32 = 26;
+const MFD_HUGE_MASK: u32 = 0x3f << MFD_HUGE_SHIFT;
+const MFD_VALID_FLAGS: u32 = MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_HUGETLB | MFD_HUGE_MASK;
+const MEMFD_NAME_MAX: usize = 249;
+static MEMFD_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 pub const AT_FDCWD: usize = 100usize.wrapping_neg();
 
@@ -112,6 +122,19 @@ fn user_cstring(token: usize, ptr: *const u8) -> Result<String, isize> {
     UserCString::new(ptr).read(token)
 }
 
+fn validate_memfd_flags(flags: u32) -> Result<(), SyscallErr> {
+    if (flags & !MFD_VALID_FLAGS) != 0 {
+        return Err(SyscallErr::EINVAL);
+    }
+    if (flags & MFD_HUGE_MASK) != 0 && (flags & MFD_HUGETLB) == 0 {
+        return Err(SyscallErr::EINVAL);
+    }
+    if (flags & MFD_HUGETLB) != 0 {
+        return Err(SyscallErr::ENODEV);
+    }
+    Ok(())
+}
+
 fn validate_path_len(path: &str) -> Result<(), isize> {
     if path.len() >= vfs::MAX_PATHLEN {
         return Err(ENAMETOOLONG);
@@ -136,6 +159,16 @@ fn open_requests_write(flags: OpenFlags) -> bool {
     access_mode == OpenFlags::O_WRONLY.bits()
         || access_mode == OpenFlags::O_RDWR.bits()
         || flags.contains(OpenFlags::O_TRUNC)
+}
+
+#[inline]
+fn offset_is_negative(offset: usize) -> bool {
+    offset > isize::MAX as usize
+}
+
+#[inline]
+fn is_stream_file(file: &vfs::File) -> bool {
+    file.mode().contains(vfs::FileMode::FMODE_STREAM)
 }
 
 fn has_directory_write_search_access(meta: &vfs::Metadata, uid: u32, gid: u32) -> bool {
@@ -305,6 +338,69 @@ fn open_file_at(
     }
 }
 
+fn check_memfd_truncate_seals(file: &vfs::File, new_len: usize) -> Result<(), isize> {
+    if let Some(seals) = file.memfd_seal_bits() {
+        let current_len = file
+            .metadata()
+            .map_err(|e| -(e as isize))?
+            .size
+            .max(0) as usize;
+        if new_len < current_len && (seals & vfs::file::F_SEAL_SHRINK) != 0 {
+            return Err(EPERM);
+        }
+        if new_len > current_len && (seals & vfs::file::F_SEAL_GROW) != 0 {
+            return Err(EPERM);
+        }
+    }
+    Ok(())
+}
+
+fn open_proc_self_fd(path: &str, flags: OpenFlags) -> Option<Result<vfs::File, isize>> {
+    let fd_text = path.strip_prefix("/proc/self/fd/")?;
+    if fd_text.is_empty() || fd_text.as_bytes().iter().any(|b| !b.is_ascii_digit()) {
+        return Some(Err(ENOENT));
+    }
+    let fd = match fd_text.parse::<usize>() {
+        Ok(fd) => fd,
+        Err(_) => return Some(Err(ENOENT)),
+    };
+
+    let task = current_task().unwrap();
+    let (inode, file_type, seals) = {
+        let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
+        let file = match fd_table.get_file(fd) {
+            Ok(file) => file,
+            Err(e) => return Some(Err(-(e as isize))),
+        };
+        (file.inode.clone(), file.file_type(), file.memfd_seals())
+    };
+
+    let reopened = match vfs::File::new(inode.clone(), _open_flags_to_vfs_flags(flags)) {
+        Ok(file) => file,
+        Err(e) => return Some(Err(-(e as isize))),
+    };
+    let seals = seals?;
+    reopened.set_memfd_seals(seals);
+
+    if flags.contains(OpenFlags::O_TRUNC) {
+        if file_type == vfs::FileType::Dir {
+            return Some(Err(EISDIR));
+        }
+        if !reopened.flags().is_writable() {
+            return Some(Err(EACCES));
+        }
+        if let Err(errno) = check_memfd_truncate_seals(&reopened, 0) {
+            return Some(Err(errno));
+        }
+        if let Err(e) = inode.resize(0) {
+            return Some(Err(-(e as isize)));
+        }
+    }
+
+    Some(Ok(reopened))
+}
+
 fn read_into_user(file: &vfs::File, token: usize, buf: usize, count: usize) -> isize {
     let mut kernel_buf = alloc::vec![0u8; count];
     let n = match file.read(&mut kernel_buf) {
@@ -396,6 +492,50 @@ fn pwrite_from_user(file: &vfs::File, token: usize, buf: usize, count: usize, of
         Ok(n) => n as isize,
         Err(e) => -(e as isize),
     }
+}
+
+fn write_start_offset(file: &vfs::File) -> usize {
+    if file.flags().contains(FileFlags::O_APPEND) {
+        if let Ok(metadata) = file.metadata() {
+            if metadata.size > 0 {
+                return metadata.size as usize;
+            }
+        }
+    }
+    file.offset()
+}
+
+fn pwrite_start_offset(file: &vfs::File, offset: usize) -> usize {
+    if file.flags().contains(FileFlags::O_APPEND) {
+        if let Ok(metadata) = file.metadata() {
+            if metadata.size > 0 {
+                return metadata.size as usize;
+            }
+        }
+    }
+    offset
+}
+
+fn raise_sigxfsz() {
+    if let Some(task) = current_task() {
+        task.acquire_inner_lock().add_signal(Signals::SIGXFSZ);
+    }
+}
+
+fn apply_fsize_limit(
+    file: &vfs::File,
+    count: usize,
+    offset: usize,
+    fsize_limit: usize,
+) -> Result<usize, isize> {
+    if count == 0 || file.file_type() != FileType::File || fsize_limit == usize::MAX {
+        return Ok(count);
+    }
+    if offset >= fsize_limit {
+        raise_sigxfsz();
+        return Err(EFBIG);
+    }
+    Ok(count.min(fsize_limit - offset))
 }
 
 // todo
@@ -644,7 +784,7 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
 }
 
 pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
-    let count = count.min(MAX_SYSCALL_BUFFER_SIZE);
+    let mut count = count.min(MAX_SYSCALL_BUFFER_SIZE);
     let task = current_task().unwrap();
     let file = {
         let files_ref = task.process.files();
@@ -657,6 +797,11 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
     if file.writable().is_err() {
         return EBADF;
     }
+    let fsize_limit = task.acquire_inner_lock().fsize_limit_cur;
+    count = match apply_fsize_limit(&file, count, write_start_offset(&file), fsize_limit) {
+        Ok(count) => count,
+        Err(errno) => return errno,
+    };
     let is_nonblock = file.is_nonblock();
     let token = task.get_user_token();
     if is_nonblock {
@@ -689,12 +834,15 @@ pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
     if file.readable().is_err() {
         return EBADF;
     }
+    if offset_is_negative(offset) {
+        return EINVAL;
+    }
     let token = task.get_user_token();
     pread_into_user(&file, token, buf, count, offset)
 }
 
 pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
-    let count = count.min(MAX_SYSCALL_BUFFER_SIZE);
+    let mut count = count.min(MAX_SYSCALL_BUFFER_SIZE);
     let task = current_task().unwrap();
     let files_ref = task.process.files();
         let fd_table = files_ref.lock();
@@ -702,12 +850,154 @@ pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
         Ok(file) => file,
         Err(e) => return -(e as isize),
     };
+    if offset_is_negative(offset) {
+        return EINVAL;
+    }
+    if is_stream_file(&file) {
+        return ESPIPE;
+    }
     // fd is not open for writing
     if file.writable().is_err() {
         return EBADF;
     }
+    let fsize_limit = task.acquire_inner_lock().fsize_limit_cur;
+    count = match apply_fsize_limit(&file, count, pwrite_start_offset(&file, offset), fsize_limit) {
+        Ok(count) => count,
+        Err(errno) => return errno,
+    };
     let token = task.get_user_token();
     pwrite_from_user(&file, token, buf, count, offset)
+}
+
+pub fn sys_preadv(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize {
+    let task = current_task().unwrap();
+    let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
+    let file = match fd_table.get_file(fd) {
+        Ok(file) => file,
+        Err(e) => return -(e as isize),
+    };
+    if file.readable().is_err() {
+        return EBADF;
+    }
+    if offset_is_negative(offset) {
+        return EINVAL;
+    }
+    let token = task.get_user_token();
+    let user_iov = match UserIoVec::read_user_iovecs(
+        token,
+        iov as *const crate::fs::iov::IOVec,
+        iovcnt,
+        MAX_SYSCALL_BUFFER_SIZE,
+    ) {
+        Ok(iov) => iov,
+        Err(errno) => return errno,
+    };
+    let user_buf = match user_iov.writer_buffer() {
+        Ok(buffer) => buffer,
+        Err(errno) => return errno,
+    };
+    let count = user_buf.len();
+    let mut kernel_buf = alloc::vec![0u8; count];
+    let n = match file.pread(offset, &mut kernel_buf) {
+        Ok(n) => n,
+        Err(e) => return -(e as isize),
+    };
+    let mut user_buf = user_buf;
+    user_buf.write(&kernel_buf[..n]);
+    n as isize
+}
+
+pub fn sys_pwritev(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize {
+    let task = current_task().unwrap();
+    let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
+    let file = match fd_table.get_file(fd) {
+        Ok(file) => file,
+        Err(e) => return -(e as isize),
+    };
+    if offset_is_negative(offset) {
+        return EINVAL;
+    }
+    if is_stream_file(&file) {
+        return ESPIPE;
+    }
+    if file.writable().is_err() {
+        return EBADF;
+    }
+    let token = task.get_user_token();
+    let user_iov = match UserIoVec::read_user_iovecs(
+        token,
+        iov as *const crate::fs::iov::IOVec,
+        iovcnt,
+        MAX_SYSCALL_BUFFER_SIZE,
+    ) {
+        Ok(iov) => iov,
+        Err(errno) => return errno,
+    };
+    let user_buf = match user_iov.reader_buffer() {
+        Ok(buffer) => buffer,
+        Err(errno) => return errno,
+    };
+    let mut kernel_buf = alloc::vec![0u8; user_buf.len()];
+    user_buf.read(&mut kernel_buf);
+    let fsize_limit = task.acquire_inner_lock().fsize_limit_cur;
+    let allowed = match apply_fsize_limit(
+        &file,
+        kernel_buf.len(),
+        pwrite_start_offset(&file, offset),
+        fsize_limit,
+    ) {
+        Ok(count) => count,
+        Err(errno) => return errno,
+    };
+    kernel_buf.truncate(allowed);
+    match file.pwrite(offset, &kernel_buf) {
+        Ok(n) => n as isize,
+        Err(e) => -(e as isize),
+    }
+}
+
+fn split_offset64(offset_low: usize, offset_high: usize) -> usize {
+    (offset_low & 0xffff_ffff) | ((offset_high & 0xffff_ffff) << 32)
+}
+
+pub fn sys_preadv2(
+    fd: usize,
+    iov: usize,
+    iovcnt: usize,
+    offset_low: usize,
+    offset_high: usize,
+    flags: usize,
+) -> isize {
+    if flags != 0 {
+        return EOPNOTSUPP;
+    }
+    let offset = split_offset64(offset_low, offset_high);
+    if offset == usize::MAX {
+        sys_readv(fd, iov, iovcnt)
+    } else {
+        sys_preadv(fd, iov, iovcnt, offset)
+    }
+}
+
+pub fn sys_pwritev2(
+    fd: usize,
+    iov: usize,
+    iovcnt: usize,
+    offset_low: usize,
+    offset_high: usize,
+    flags: usize,
+) -> isize {
+    if flags != 0 {
+        return EOPNOTSUPP;
+    }
+    let offset = split_offset64(offset_low, offset_high);
+    if offset == usize::MAX {
+        sys_writev(fd, iov, iovcnt)
+    } else {
+        sys_pwritev(fd, iov, iovcnt, offset)
+    }
 }
 
 pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
@@ -775,6 +1065,17 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
     };
     let mut kernel_buf = alloc::vec![0u8; user_buf.len()];
     user_buf.read(&mut kernel_buf);
+    let fsize_limit = task.acquire_inner_lock().fsize_limit_cur;
+    let allowed = match apply_fsize_limit(
+        &file,
+        kernel_buf.len(),
+        write_start_offset(&file),
+        fsize_limit,
+    ) {
+        Ok(count) => count,
+        Err(errno) => return errno,
+    };
+    kernel_buf.truncate(allowed);
     match file.write(&kernel_buf) {
         Ok(n) => n as isize,
         Err(e) => -(e as isize),
@@ -1532,9 +1833,8 @@ pub struct Statfs {
     /// Padding bytes reserved for future use
     f_spare: [usize; 4],
 }
-/// Fake implement for statfs syscall
-pub fn sys_statfs(_path: *const u8, buf: *mut Statfs) -> isize {
-    let statfs = Box::new(Statfs {
+fn fake_statfs() -> Statfs {
+    Statfs {
         f_type: 0xf2f52010,
         f_bsize: BLOCK_SZ,
         f_blocks: 10000,
@@ -1547,13 +1847,37 @@ pub fn sys_statfs(_path: *const u8, buf: *mut Statfs) -> isize {
         f_frsize: 0,
         f_flag: 0,
         f_spare: [0; 4],
-    });
+    }
+}
+
+fn write_statfs(buf: *mut Statfs, statfs: &Statfs) -> isize {
     let token = current_task().unwrap().get_user_token();
-    if UserPtrMut::new(buf).write(token, statfs.as_ref()).is_err() {
+    if UserPtrMut::new(buf).write(token, statfs).is_err() {
         log::error!("[sys_statfs] Failed to copy to {:?}", buf);
         return EFAULT;
     };
     SUCCESS
+}
+
+/// Fake implement for statfs syscall
+pub fn sys_statfs(_path: *const u8, buf: *mut Statfs) -> isize {
+    let statfs = fake_statfs();
+    write_statfs(buf, &statfs)
+}
+
+pub fn sys_fstatfs(fd: usize, buf: *mut Statfs) -> isize {
+    let Some(task) = current_task() else {
+        return ESRCH;
+    };
+    let files_ref = task.process.files();
+    let fd_table = files_ref.lock();
+    if let Err(e) = fd_table.get_file(fd) {
+        return -(e as isize);
+    }
+    drop(fd_table);
+
+    let statfs = fake_statfs();
+    write_statfs(buf, &statfs)
 }
 
 pub fn sys_fsync(fd: usize) -> isize {
@@ -1568,6 +1892,30 @@ pub fn sys_fsync(fd: usize) -> isize {
     };
     drop(fd_table);
     match inode.sync() {
+        Ok(()) => SUCCESS,
+        Err(e) => -(e as isize),
+    }
+}
+
+pub fn sys_fdatasync(fd: usize) -> isize {
+    let task = current_task().unwrap();
+
+    let files_ref = task.process.files();
+    let fd_table = files_ref.lock();
+    let file = match fd_table.get_file(fd) {
+        Ok(file) => match file.try_clone() {
+            Some(file) => file,
+            None => return EBADF,
+        },
+        Err(e) => return -(e as isize),
+    };
+    drop(fd_table);
+
+    if !matches!(file.file_type(), FileType::File | FileType::Dir) {
+        return EINVAL;
+    }
+
+    match file.inode.sync() {
         Ok(()) => SUCCESS,
         Err(e) => -(e as isize),
     }
@@ -1890,6 +2238,18 @@ pub fn sys_openat(dirfd: usize, path: *const u8, flags: u32, mode: u32) -> isize
         "[sys_openat] dirfd: {}, path: {}, flags: {:?}, mode: {:?}",
         dirfd as isize, path, flags, _mode
     );
+    if let Some(result) = open_proc_self_fd(&path, flags) {
+        let new_file = match result {
+            Ok(file) => file,
+            Err(errno) => return errno,
+        };
+        let files_ref = task.process.files();
+        let mut fd_table = files_ref.lock();
+        return match fd_table.alloc_fd(new_file, flags.contains(OpenFlags::O_CLOEXEC)) {
+            Ok(fd) => fd as isize,
+            Err(e) => -(e as isize),
+        };
+    }
     let create_mode = vfs::InodeMode::from_bits_truncate(mode_bits) & vfs::InodeMode::S_IALLUGO;
     let new_file = match open_file_at(dirfd, &path, flags, create_mode) {
         Ok(file) => file,
@@ -1903,6 +2263,62 @@ pub fn sys_openat(dirfd: usize, path: *const u8, flags: u32, mode: u32) -> isize
         Err(e) => return -(e as isize),
     };
     new_fd as isize
+}
+
+pub fn sys_memfd_create(name: *const u8, flags: u32) -> isize {
+    if let Err(err) = validate_memfd_flags(flags) {
+        return -(err as isize);
+    }
+
+    let task = current_task().unwrap();
+    let token = task.get_user_token();
+    let name = match user_cstring(token, name) {
+        Ok(name) => name,
+        Err(errno) => return errno,
+    };
+    if name.len() > MEMFD_NAME_MAX {
+        return EINVAL;
+    }
+
+    let open_flags = OpenFlags::O_CREAT | OpenFlags::O_EXCL | OpenFlags::O_RDWR;
+    let create_mode = vfs::InodeMode::from_bits_truncate(0o600);
+    let mut last_errno = EEXIST;
+    let file = {
+        let tid = task.gettid();
+        let mut created = None;
+        for _ in 0..8 {
+            let id = MEMFD_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = alloc::format!("/dev/shm/.memfd-{}-{}", tid, id);
+            match open_file_at(AT_FDCWD, &path, open_flags, create_mode) {
+                Ok(file) => {
+                    created = Some(file);
+                    break;
+                }
+                Err(errno) if errno == EEXIST => {
+                    last_errno = errno;
+                }
+                Err(errno) => return errno,
+            }
+        }
+        match created {
+            Some(file) => file,
+            None => return last_errno,
+        }
+    };
+
+    let initial_seals = if (flags & MFD_ALLOW_SEALING) != 0 {
+        0
+    } else {
+        vfs::file::F_SEAL_SEAL
+    };
+    file.set_memfd_seals(Arc::new(AtomicUsize::new(initial_seals)));
+
+    let files_ref = task.process.files();
+    let mut fd_table = files_ref.lock();
+    match fd_table.alloc_fd(file, (flags & MFD_CLOEXEC) != 0) {
+        Ok(fd) => fd as isize,
+        Err(e) => -(e as isize),
+    }
 }
 
 pub fn sys_renameat2(
@@ -2062,10 +2478,18 @@ pub fn sys_unlinkat(dirfd: usize, path: *const u8, flags: u32) -> isize {
         Ok(inode) => inode,
         Err(errno) => return errno,
     };
+    let (uid, gid) = open_subject_ids();
+    let parent_result = check_parent_search_access(&start, &path, uid, gid);
+    if parent_result != SUCCESS {
+        return parent_result;
+    }
     let (parent, leaf) = match vfs_lookup_parent_for_start(&start, &path) {
         Ok(result) => result,
         Err(errno) => return errno,
     };
+    if let Err(errno) = check_parent_write_search_access(&parent, uid, gid) {
+        return errno;
+    }
     let result = if flags.contains(UnlinkatFlags::AT_REMOVEDIR) {
         parent.rmdir(&leaf)
     } else {
@@ -2936,6 +3360,52 @@ pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
             }
             res
         }
+        Fcntl_Command::ADD_SEALS => {
+            const VALID_SEALS: usize = vfs::file::F_SEAL_SEAL
+                | vfs::file::F_SEAL_SHRINK
+                | vfs::file::F_SEAL_GROW
+                | vfs::file::F_SEAL_WRITE
+                | vfs::file::F_SEAL_FUTURE_WRITE;
+
+            if (arg & !VALID_SEALS) != 0 {
+                return EINVAL;
+            }
+            let file = match fd_table.get_file(fd) {
+                Ok(file) => file,
+                Err(e) => return -(e as isize),
+            };
+            let seals = match file.memfd_seals() {
+                Some(seals) => seals,
+                None => return EINVAL,
+            };
+            if file.writable().is_err() {
+                return EPERM;
+            }
+            let old = seals.load(Ordering::SeqCst);
+            if (old & vfs::file::F_SEAL_SEAL) != 0 {
+                return EPERM;
+            }
+            if (arg & vfs::file::F_SEAL_WRITE) != 0 {
+                let inode = vfs::MountFSInode::unwrap_inode(&file.inode);
+                let vm_ref = task.process.vm();
+                let memory_set = vm_ref.lock();
+                if memory_set.has_shared_writable_mapping(&inode) {
+                    return EBUSY;
+                }
+            }
+            seals.store(old | arg, Ordering::SeqCst);
+            SUCCESS
+        }
+        Fcntl_Command::GET_SEALS => {
+            let file = match fd_table.get_file(fd) {
+                Ok(file) => file,
+                Err(e) => return -(e as isize),
+            };
+            match file.memfd_seal_bits() {
+                Some(seals) => seals as isize,
+                None => EINVAL,
+            }
+        }
         command => {
             warn!("[fcntl] Unsupported command: {:?}", command);
             -(SyscallErr::EINVAL as isize)
@@ -3284,6 +3754,28 @@ pub fn sys_msync(addr: usize, length: usize, flags: u32) -> isize {
     SUCCESS
 }
 
+pub fn sys_fadvise64(fd: usize, offset: usize, len: usize, advice: i32) -> isize {
+    let task = current_task().unwrap();
+    let files_ref = task.process.files();
+    let fd_table = files_ref.lock();
+    let file = match fd_table.get_file(fd) {
+        Ok(file) => file,
+        Err(e) => return -(e as isize),
+    };
+
+    if offset_is_negative(offset) || offset_is_negative(len) {
+        return EINVAL;
+    }
+    if !(0..=5).contains(&advice) {
+        return EINVAL;
+    }
+    if is_stream_file(&file) {
+        return ESPIPE;
+    }
+
+    SUCCESS
+}
+
 pub fn sys_ftruncate(fd: usize, length: isize) -> isize {
     if length < 0 {
         return EINVAL;
@@ -3304,6 +3796,9 @@ pub fn sys_ftruncate(fd: usize, length: isize) -> isize {
         }
         if !file.flags().is_writable() {
             return EINVAL;
+        }
+        if let Err(errno) = check_memfd_truncate_seals(file, length as usize) {
+            return errno;
         }
         file.inode.clone()
     };
@@ -3390,12 +3885,12 @@ pub fn sys_truncate(path: *const u8, length: isize) -> isize {
 }
 
 pub fn sys_fallocate(fd: usize, mode: u32, offset: isize, len: isize) -> isize {
+    const FALLOC_FL_KEEP_SIZE: u32 = 0x01;
+    const FALLOC_FL_PUNCH_HOLE: u32 = 0x02;
+    const FALLOC_PUNCH_HOLE_KEEP_SIZE: u32 = FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE;
+
     if offset < 0 || len <= 0 {
         return EINVAL;
-    }
-    if mode != 0 {
-        warn!("[sys_fallocate] unsupported mode: {:#x}", mode);
-        return EOPNOTSUPP;
     }
 
     let end = match offset.checked_add(len) {
@@ -3415,8 +3910,25 @@ pub fn sys_fallocate(fd: usize, mode: u32, offset: isize, len: isize) -> isize {
         fd, mode, offset, len, end
     );
 
+    if mode == FALLOC_PUNCH_HOLE_KEEP_SIZE {
+        let seals = file.memfd_seal_bits().unwrap_or(0);
+        if (seals & vfs::file::F_SEAL_WRITE) != 0 {
+            return EOPNOTSUPP;
+        }
+        return SUCCESS;
+    }
+    if mode != 0 {
+        warn!("[sys_fallocate] unsupported mode: {:#x}", mode);
+        return EOPNOTSUPP;
+    }
+
     if file.get_size() >= end as usize {
         return SUCCESS;
+    }
+    if let Some(seals) = file.memfd_seal_bits() {
+        if (seals & vfs::file::F_SEAL_GROW) != 0 {
+            return EPERM;
+        }
     }
     match file.truncate_size(end as usize) {
         Ok(()) => SUCCESS,

@@ -22,6 +22,12 @@ use super::event::EventWaitQueue;
 use crate::task::WaitQueue;
 use crate::config::SYSTEM_FD_LIMIT;
 
+pub const F_SEAL_SEAL: usize = 0x0001;
+pub const F_SEAL_SHRINK: usize = 0x0002;
+pub const F_SEAL_GROW: usize = 0x0004;
+pub const F_SEAL_WRITE: usize = 0x0008;
+pub const F_SEAL_FUTURE_WRITE: usize = 0x0010;
+
 // ── FileFlags ───────────────────────────────────────────────────────────
 
 bitflags! {
@@ -688,6 +694,7 @@ impl File {
         } else {
             self.offset.load(Ordering::SeqCst)
         };
+        self.check_memfd_write_seals(offset, len)?;
 
         let n = self
             .inode
@@ -713,6 +720,14 @@ impl File {
         if mode.contains(FileMode::FMODE_STREAM) {
             return Err(SyscallErr::ESPIPE);
         }
+        let flags = *self.flags.lock();
+        let offset = if flags.contains(FileFlags::O_APPEND) {
+            let md = self.inode.metadata()?;
+            md.size.max(0) as usize
+        } else {
+            offset
+        };
+        self.check_memfd_write_seals(offset, buf.len())?;
         let n = self
             .inode
             .write_at(offset, buf.len(), buf, self.private_data.lock())?;
@@ -908,6 +923,39 @@ impl File {
     /// 获取私有数据的锁
     pub fn private_data(&self) -> MutexGuard<FilePrivateData> {
         self.private_data.lock()
+    }
+
+    pub fn set_memfd_seals(&self, seals: Arc<AtomicUsize>) {
+        *self.private_data.lock() = FilePrivateData::Memfd { seals };
+    }
+
+    pub fn memfd_seals(&self) -> Option<Arc<AtomicUsize>> {
+        match &*self.private_data.lock() {
+            FilePrivateData::Memfd { seals } => Some(seals.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn memfd_seal_bits(&self) -> Option<usize> {
+        self.memfd_seals()
+            .map(|seals| seals.load(Ordering::SeqCst))
+    }
+
+    fn check_memfd_write_seals(&self, offset: usize, len: usize) -> Result<(), SyscallErr> {
+        let Some(seals) = self.memfd_seal_bits() else {
+            return Ok(());
+        };
+        if (seals & F_SEAL_WRITE) != 0 {
+            return Err(SyscallErr::EPERM);
+        }
+        if (seals & F_SEAL_GROW) != 0 {
+            let end = offset.checked_add(len).ok_or(SyscallErr::EFBIG)?;
+            let size = self.metadata()?.size.max(0) as usize;
+            if end > size {
+                return Err(SyscallErr::EPERM);
+            }
+        }
+        Ok(())
     }
 
     pub fn inode_as_any_ref(&self) -> &dyn Any {

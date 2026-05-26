@@ -108,6 +108,7 @@ pub(super) fn do_sbrk<T: PageTable>(
                 0,
                 None,
                 true,
+                false,
             );
             if ret < 0 {
                 warn!(
@@ -142,6 +143,7 @@ pub(super) fn do_mmap<T: PageTable>(
     offset: usize,
     map_file: Option<Arc<dyn IndexNode>>,
     may_write: bool,
+    write_sealed: bool,
 ) -> isize {
     // not aligned on a page boundary
     if start & 0xfff != 0 {
@@ -170,17 +172,20 @@ pub(super) fn do_mmap<T: PageTable>(
         {
             return errno;
         }
+        address_space.set_locked_pages(start_vpn, end_vpn, false);
         start_hint
     } else {
         match address_space.vmas.find_free_mmap_range(len, PAGE_SIZE) {
             Ok(start_va) => {
-                match address_space
-                    .vmas
-                    .try_merge_lazy_private_mmap::<T>(start_va, len, prot, flags)
-                {
-                    Ok(Some(end_va)) => return end_va.0 as isize,
-                    Ok(None) => {}
-                    Err(errno) => return errno,
+                if !flags.contains(MapFlags::MAP_LOCKED) {
+                    match address_space
+                        .vmas
+                        .try_merge_lazy_private_mmap::<T>(start_va, len, prot, flags)
+                    {
+                        Ok(Some(end_va)) => return end_va.0 as isize,
+                        Ok(None) => {}
+                        Err(errno) => return errno,
+                    }
                 }
                 start_va
             }
@@ -206,6 +211,7 @@ pub(super) fn do_mmap<T: PageTable>(
     };
     new_area.flags = flags;
     new_area.may_write = may_write;
+    new_area.write_sealed = write_sealed;
     if !flags.contains(MapFlags::MAP_ANONYMOUS) {
         if offset & (PAGE_SIZE - 1) != 0 || offset > isize::MAX as usize {
             return EINVAL;
@@ -219,15 +225,15 @@ pub(super) fn do_mmap<T: PageTable>(
     }
 
     if flags.contains(MapFlags::MAP_SHARED) && new_area.map_file.is_none() {
-        // Anonymous MAP_SHARED still maps pages eagerly (with size limit).
+        // Anonymous MAP_SHARED preallocates shared frames so fork inherits the
+        // same backing pages, but installs user PTEs lazily. This keeps Linux
+        // mincore/mlock2 residency semantics: untouched pages are not present.
         if len > MAX_EAGER_MMAP_SIZE {
             return ENOMEM;
         }
         let vpn_range = new_area.inner.vpn_range;
         for vpn in vpn_range {
-            if let Err(err) =
-                new_area.map_one_zeroed_unchecked(&mut address_space.page_table, vpn)
-            {
+            if let Err(err) = new_area.alloc_one_zeroed_unmapped(vpn) {
                 return match err {
                     MemoryError::OutOfMemory => ENOMEM,
                     _ => EINVAL,
@@ -238,6 +244,9 @@ pub(super) fn do_mmap<T: PageTable>(
 
     if let Err(errno) = address_space.vmas.insert_vma(new_area) {
         return errno;
+    }
+    if flags.contains(MapFlags::MAP_LOCKED) {
+        address_space.set_locked_pages(start_vpn, end_vpn, true);
     }
 
     start_va.0 as isize

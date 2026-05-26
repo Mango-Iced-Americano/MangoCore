@@ -247,7 +247,7 @@ fn sys_clone_inner(
             child.cleanup_unpublished_clone(flags.contains(CloneFlags::CLONE_VM));
             return EINVAL;
         };
-        let file = match new_pidfd_file(child.pid()) {
+        let file = match new_pidfd_file(&child.process) {
             Ok(file) => file,
             Err(err) => {
                 child.cleanup_unpublished_clone(flags.contains(CloneFlags::CLONE_VM));

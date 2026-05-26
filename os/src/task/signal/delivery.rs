@@ -15,20 +15,16 @@ fn process_signal_target(
     process: &ProcessControlBlock,
     signal: Signals,
 ) -> Option<Arc<TaskControlBlock>> {
-    let mut interruptible = None;
     for task in process.threads() {
         let inner = task.acquire_inner_lock();
         if inner.task_status == TaskStatus::Zombie {
             continue;
         }
-        if inner.task_status == TaskStatus::Interruptible && interruptible.is_none() {
-            interruptible = Some(task.clone());
-        }
         if !signal.difference(inner.sigmask).is_empty() {
             return Some(task.clone());
         }
     }
-    interruptible
+    None
 }
 
 pub fn send_process_signal(process: &ProcessControlBlock, signal: Signals) -> bool {
@@ -52,6 +48,9 @@ pub fn send_process_signal_info(
 ) -> bool {
     if signal.is_empty() {
         return true;
+    }
+    if signal.contains(Signals::SIGCONT) {
+        process.mark_continued();
     }
     process.enqueue_process_signal(PendingSignal { signal, siginfo });
     if let Some(task) = process_signal_target(process, signal) {
@@ -88,6 +87,9 @@ fn send_thread_signal_info(
 ) -> Result<(), isize> {
     if signal.is_empty() {
         return Ok(());
+    }
+    if signal.contains(Signals::SIGCONT) {
+        task.process.mark_continued();
     }
     let mut inner = task.acquire_inner_lock();
     if is_realtime_signal(signal) && inner.sigpending.queued_count() >= inner.sigpending_limit_cur {

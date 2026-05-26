@@ -4,8 +4,10 @@ pub mod cmdline;
 pub mod exe;
 pub mod fd;
 pub mod maps;
+pub mod smaps;
 pub mod stat;
 pub mod status;
+pub mod task;
 
 use alloc::{
     string::{String, ToString},
@@ -14,9 +16,10 @@ use alloc::{
 };
 use crate::{
     fs::{
-        procfs::{FindHookFn, ListHookFn, LockedProcInode},
+        procfs::LockedProcInode,
         vfs::{IndexNode, InodeMode},
     },
+    task::ProcessControlBlock,
     utils::error::SyscallErr,
 };
 
@@ -27,8 +30,8 @@ pub fn setup_pid_hooks(root: &Arc<LockedProcInode>) {
 
 fn pid_find_hook(inode: &LockedProcInode, name: &str) -> Option<Arc<dyn IndexNode>> {
     let pid: usize = name.parse().ok()?;
-    crate::task::find_process_by_pid(pid)?;
-    create_pid_dir(inode, pid).ok()
+    let process = crate::task::find_process_by_pid(pid)?;
+    create_pid_dir(inode, process).ok()
 }
 
 fn pid_list_hook(_inode: &LockedProcInode) -> Vec<String> {
@@ -38,7 +41,11 @@ fn pid_list_hook(_inode: &LockedProcInode) -> Vec<String> {
         .collect()
 }
 
-fn create_pid_dir(parent: &LockedProcInode, pid: usize) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+fn create_pid_dir(
+    parent: &LockedProcInode,
+    process: Arc<ProcessControlBlock>,
+) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+    let pid = process.pid;
     let (parent_weak, fs_weak) = {
         let pdata = parent.0.lock();
         (pdata.self_ref.clone(), pdata.fs.clone())
@@ -49,7 +56,11 @@ fn create_pid_dir(parent: &LockedProcInode, pid: usize) -> Result<Arc<dyn IndexN
         fs_weak,
         InodeMode::from_bits_truncate(0o555),
     );
-    dir.0.lock().extra_data = pid;
+    {
+        let mut data = dir.0.lock();
+        data.extra_data = pid;
+        data.process_ref = Some(Arc::downgrade(&process));
+    }
 
     dir.add_file(
         "status",
@@ -80,6 +91,13 @@ fn create_pid_dir(parent: &LockedProcInode, pid: usize) -> Result<Arc<dyn IndexN
     )?;
 
     dir.add_file(
+        "smaps",
+        InodeMode::from_bits_truncate(0o444),
+        smaps::pid_smaps_content,
+        pid,
+    )?;
+
+    dir.add_file(
         "mounts",
         InodeMode::from_bits_truncate(0o444),
         crate::fs::procfs::files::mounts::mounts_content,
@@ -91,6 +109,10 @@ fn create_pid_dir(parent: &LockedProcInode, pid: usize) -> Result<Arc<dyn IndexN
     let fd_dir = dir.add_dir_locked("fd", InodeMode::from_bits_truncate(0o500))?;
     fd_dir.0.lock().extra_data = pid;
     fd_dir.set_hooks(fd::fd_find_hook, fd::fd_list_hook);
+
+    let task_dir = dir.add_dir_locked("task", InodeMode::from_bits_truncate(0o555))?;
+    task_dir.0.lock().extra_data = pid;
+    task_dir.set_hooks(task::task_find_hook, task::task_list_hook);
 
     Ok(dir)
 }

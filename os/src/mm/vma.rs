@@ -40,6 +40,7 @@ pub struct Vma {
     /// For anonymous mappings, this is always 0.
     pub map_file_offset: usize,
     pub may_write: bool,
+    pub write_sealed: bool,
 
     pub flags: MapFlags,
     pub wipe_on_fork: bool,
@@ -54,6 +55,7 @@ impl Vma {
             map_file: self.map_file.clone(),
             map_file_offset: self.map_file_offset,
             may_write: self.may_write,
+            write_sealed: self.write_sealed,
             flags: self.flags,
             wipe_on_fork: self.wipe_on_fork,
         })
@@ -90,6 +92,7 @@ impl Vma {
             map_file,
             map_file_offset,
             may_write: true,
+            write_sealed: false,
             flags: MapFlags::empty(),
             wipe_on_fork: false,
         })
@@ -106,6 +109,7 @@ impl Vma {
             map_file: another.map_file.clone(),
             map_file_offset: another.map_file_offset,
             may_write: another.may_write,
+            write_sealed: another.write_sealed,
             flags: another.flags,
             wipe_on_fork: another.wipe_on_fork,
         }
@@ -177,6 +181,33 @@ impl Vma {
             self.inner.remove_in_memory(&vpn);
             return Err(err);
         }
+        Ok(ppn)
+    }
+
+    pub fn alloc_one_zeroed_unmapped(
+        &mut self,
+        vpn: VirtPageNum,
+    ) -> Result<PhysPageNum, MemoryError> {
+        let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
+        let ppn = frame.ppn;
+        self.inner.alloc_in_memory(vpn, frame)?;
+        Ok(ppn)
+    }
+
+    pub(super) fn map_existing_in_memory<T: PageTable>(
+        &mut self,
+        page_table: &mut T,
+        vpn: VirtPageNum,
+    ) -> Result<PhysPageNum, MemoryError> {
+        if UserMapper::new(page_table).is_mapped(vpn) {
+            return Err(MemoryError::AlreadyMapped);
+        }
+        let ppn = self
+            .inner
+            .get_in_memory(&vpn)
+            .map(|frame| frame.ppn)
+            .ok_or(MemoryError::NotMapped)?;
+        self.map_page_with_perm(page_table, vpn, ppn, self.map_perm)?;
         Ok(ppn)
     }
     /// Unmap a page in current area.
@@ -557,6 +588,7 @@ impl Vma {
             map_file: second_file,
             map_file_offset: second_offset,
             may_write: self.may_write,
+            write_sealed: self.write_sealed,
             flags: self.flags,
             wipe_on_fork: self.wipe_on_fork,
         })

@@ -1054,9 +1054,6 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "vfork_freeze.sh" => Some("freezer/cgroup helper skipped in LTP syscall scan"),
         "vhangup01" | "vhangup02" => Some("vhangup syscall not supported"),
         "virt_lib.sh" => Some("network virtualization helper skipped in LTP syscall scan"),
-        "waitid07" | "waitid08" => Some("stopped/continued waitid state pending task-stop support"),
-        "waitid10" => Some("requires procfs core_pattern"),
-        "waitpid08" | "waitpid13" => Some("stopped-child waitpid state pending task-stop support"),
         "wc01.sh" | "which01.sh" => Some("standalone shell helper skipped in LTP syscall scan"),
         "write04" | "write05" | "write06" | "writev01" => {
             Some("filesystem/pipe write edge cases skipped in LTP syscall scan")
@@ -1788,7 +1785,14 @@ fn install_embedded_libgcc_s() {
 fn prepare_symlink(environ: &[*const u8]) {
     // Step 1: busybox applet 安装到 /bin（用 PATH 查找 busybox，兼容旧镜像 /busybox）
     println!("[initproc] installing busybox applets to /bin ...");
-    let install_cmd = "busybox mkdir -p /bin; [ -f /bin/sh ] || busybox --install -s /bin\0";
+    let install_cmd = "\
+        busybox mkdir -p /bin; \
+        busybox --install -s /bin; \
+        for app in cp mv rm ln mkdir chmod cat printf sleep grep sed awk uname basename dirname true false test; do \
+            [ -e /bin/$app ] || busybox ln -sf /bin/busybox /bin/$app; \
+        done; \
+        true \
+    \0";
     let ret = run_bash_cmd(install_cmd, environ);
     println!("[initproc] busybox --install -s /bin -> exit={}", ret);
 
@@ -1854,7 +1858,7 @@ fn prepare_symlink(environ: &[*const u8]) {
 
     run_bash_cmd(
         "
-        rm -f /bin/bash /bin/sh;
+        rm -rf /bin/bash /bin/sh;
         ln -s /bash /bin/bash;
         ln -s /bash /bin/sh;
     ",

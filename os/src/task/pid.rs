@@ -1,5 +1,7 @@
 use crate::hal::{trap_cx_bottom_from_tid, ustack_bottom_from_tid};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 use lazy_static::*;
 use spin::Mutex;
 
@@ -34,6 +36,20 @@ impl RecycleAllocator {
             self.current - 1
         }
     }
+    pub fn last_allocated(&self) -> usize {
+        self.current.saturating_sub(1)
+    }
+    pub fn set_next_alloc_hint(&mut self, next: usize) {
+        let next = next.max(1);
+        if next >= self.current {
+            self.current = next;
+            return;
+        }
+        if let Some(pos) = self.recycled.iter().position(|id| *id == next) {
+            let id = self.recycled.remove(pos);
+            self.recycled.push(id);
+        }
+    }
     /// 回收一个id
     pub fn dealloc(&mut self, id: usize) {
         // 检查id是否合法
@@ -60,16 +76,41 @@ lazy_static! {
 }
 
 /// 用户可见的线程 ID 句柄，即 gettid() 返回的值。
-pub struct TidHandle(pub usize);
+pub struct TidHandle(pub usize, AtomicBool);
+
+impl TidHandle {
+    pub fn release(&self) {
+        if !self.1.swap(true, Ordering::AcqRel) {
+            TID_ALLOCATOR.lock().dealloc(self.0);
+        }
+    }
+
+    pub fn is_released(&self) -> bool {
+        self.1.load(Ordering::Acquire)
+    }
+}
 
 /// 分配一个用户可见 tid。
-pub fn tid_alloc() -> TidHandle {
-    TidHandle(TID_ALLOCATOR.lock().alloc())
+pub fn tid_alloc() -> Arc<TidHandle> {
+    Arc::new(TidHandle(
+        TID_ALLOCATOR.lock().alloc(),
+        AtomicBool::new(false),
+    ))
+}
+
+pub fn ns_last_pid() -> usize {
+    TID_ALLOCATOR.lock().last_allocated()
+}
+
+pub fn set_ns_last_pid(last_pid: usize) {
+    TID_ALLOCATOR
+        .lock()
+        .set_next_alloc_hint(last_pid.saturating_add(1));
 }
 
 impl Drop for TidHandle {
     fn drop(&mut self) {
-        TID_ALLOCATOR.lock().dealloc(self.0);
+        self.release();
     }
 }
 

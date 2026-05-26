@@ -233,6 +233,10 @@ pub fn generate_inode_id() -> InodeId {
 pub enum FilePrivateData {
     /// 未使用 / 默认
     Unused,
+    /// memfd sealing state shared by duplicated file descriptions.
+    Memfd {
+        seals: Arc<core::sync::atomic::AtomicUsize>,
+    },
     /// 管道文件私有信息
     #[allow(dead_code)]
     Pipe,

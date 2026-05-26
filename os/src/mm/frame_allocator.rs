@@ -1,5 +1,5 @@
 use super::{PhysAddr, PhysPageNum};
-use crate::config::MEMORY_START;
+use crate::config::{MEMORY_START, PAGE_SIZE};
 use crate::hal::MEMORY_END;
 #[cfg(feature = "oom_handler")]
 use crate::task::current_task;
@@ -17,10 +17,11 @@ pub struct FrameTracker {
 
 impl FrameTracker {
     pub fn new(ppn: PhysPageNum) -> Self {
-        // 清理页面内容
-        let dwords_array = ppn.get_dwords_array();
-        for i in dwords_array {
-            *i = 0;
+        let ptr = ppn.get_dwords_array().as_mut_ptr();
+        for i in 0..PAGE_SIZE / core::mem::size_of::<u64>() {
+            unsafe {
+                ptr.add(i).write_volatile(0);
+            }
         }
         Self { ppn }
     }

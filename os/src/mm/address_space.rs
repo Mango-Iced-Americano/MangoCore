@@ -3,7 +3,7 @@ use super::page_table::{FaultAccess, PageTable, UserAccess};
 use super::user_mapper::UserMapper;
 use super::vma::*;
 use super::vma_set::VmaSet;
-use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum, KERNEL_SPACE};
+use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum, VPNRange, KERNEL_SPACE};
 use crate::config::*;
 use crate::hal::TrapContext;
 use crate::hal::TICKS_PER_SEC;
@@ -13,6 +13,7 @@ use crate::task::{
     current_task, trap_cx_bottom_from_slot, ustack_bottom_from_slot, AuxvEntry, AuxvType, ELFInfo,
 };
 use crate::fs::vfs::IndexNode;
+use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -54,6 +55,8 @@ pub struct AddressSpace<T: PageTable> {
     pub(super) heap_bottom: usize,
     /// 当前 program break。该状态属于地址空间，CLONE_VM 线程自然共享。
     pub(super) heap_pt: usize,
+    /// ABI-visible mlock state used for /proc/<pid>/status VmLck accounting.
+    locked_pages: BTreeSet<VirtPageNum>,
 }
 
 impl<T: PageTable> AddressSpace<T> {
@@ -64,6 +67,7 @@ impl<T: PageTable> AddressSpace<T> {
             vmas: VmaSet::with_capacity(16),
             heap_bottom: 0,
             heap_pt: 0,
+            locked_pages: BTreeSet::new(),
         }
     }
     /// Getter to the token of current memory space, or "this" page table.
@@ -73,6 +77,9 @@ impl<T: PageTable> AddressSpace<T> {
     /// VMA 数量（用于诊断）
     pub fn vma_count(&self) -> usize {
         self.vmas.len()
+    }
+    pub fn has_shared_writable_mapping(&self, inode: &Arc<dyn IndexNode>) -> bool {
+        self.vmas.has_shared_writable_mapping(inode)
     }
     /// Insert an anonymous segment containing the space between `start_va.floor()` to `end_va.ceil()`.
     /// The space is allocated and added to the current address space.
@@ -199,6 +206,12 @@ impl<T: PageTable> AddressSpace<T> {
         let Some(end) = buf.checked_add(size) else {
             return false;
         };
+        if self.heap_bottom != 0 {
+            let heap_limit = self.heap_bottom.saturating_add(USER_HEAP_SIZE);
+            if buf < heap_limit && end > self.heap_pt && end > self.heap_bottom {
+                return false;
+            }
+        }
         let start_vpn = VirtAddr::from(buf).floor();
         let end_vpn = VirtAddr::from(end).ceil();
         self.vmas
@@ -274,6 +287,90 @@ impl<T: PageTable> AddressSpace<T> {
                 mapping,
                 vma.map_file_offset,
             );
+        }
+        s
+    }
+
+    fn write_proc_smaps_segment(
+        s: &mut String,
+        vma: &Vma,
+        start_vpn: VirtPageNum,
+        end_vpn: VirtPageNum,
+        locked_kb: usize,
+    ) {
+        let start = start_vpn.0 * PAGE_SIZE;
+        let end = end_vpn.0 * PAGE_SIZE;
+        let size_kb = (end - start) / 1024;
+        let mut rss_pages = 0usize;
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            if vma.inner.get_in_memory(&vpn).is_some() {
+                rss_pages += 1;
+            }
+        }
+        let rss_kb = rss_pages * PAGE_SIZE / 1024;
+        let perm = vma.vm_perm();
+        let mapping = if vma.vm_mapping() == VmAreaMapping::Shared {
+            's'
+        } else {
+            'p'
+        };
+        let _ = writeln!(
+            s,
+            "{:016x}-{:016x} {}{}{}{} {:08x} 00:00 0",
+            start,
+            end,
+            if perm.contains(MapPermission::R) { 'r' } else { '-' },
+            if perm.contains(MapPermission::W) { 'w' } else { '-' },
+            if perm.contains(MapPermission::X) { 'x' } else { '-' },
+            mapping,
+            vma.map_file_offset,
+        );
+        let _ = writeln!(s, "Size:           {:8} kB", size_kb);
+        let _ = writeln!(s, "KernelPageSize: {:7} kB", PAGE_SIZE / 1024);
+        let _ = writeln!(s, "MMUPageSize:    {:7} kB", PAGE_SIZE / 1024);
+        let _ = writeln!(s, "Rss:            {:7} kB", rss_kb);
+        let _ = writeln!(s, "Pss:            {:7} kB", rss_kb);
+        let _ = writeln!(s, "Shared_Clean:         0 kB");
+        let _ = writeln!(s, "Shared_Dirty:         0 kB");
+        let _ = writeln!(s, "Private_Clean:        0 kB");
+        let _ = writeln!(s, "Private_Dirty:  {:7} kB", rss_kb);
+        let _ = writeln!(s, "Referenced:     {:7} kB", rss_kb);
+        let _ = writeln!(s, "Anonymous:      {:7} kB", rss_kb);
+        let _ = writeln!(s, "LazyFree:             0 kB");
+        let _ = writeln!(s, "AnonHugePages:        0 kB");
+        let _ = writeln!(s, "ShmemPmdMapped:       0 kB");
+        let _ = writeln!(s, "FilePmdMapped:        0 kB");
+        let _ = writeln!(s, "Shared_Hugetlb:       0 kB");
+        let _ = writeln!(s, "Private_Hugetlb:      0 kB");
+        let _ = writeln!(s, "Swap:                 0 kB");
+        let _ = writeln!(s, "SwapPss:              0 kB");
+        let _ = writeln!(s, "Locked:         {:7} kB", locked_kb);
+        let _ = writeln!(s, "THPeligible:    0");
+        let _ = writeln!(s, "VmFlags: rd wr mr mw me ac sd");
+    }
+
+    pub fn proc_smaps_content(&self) -> String {
+        let mut s = String::with_capacity(self.vmas.len() * 512);
+        for vma in self.vmas.iter().filter(|vma| vma.vm_is_user()) {
+            let mut segment_start = vma.vm_start();
+            let end_vpn = vma.vm_end();
+            while segment_start < end_vpn {
+                let segment_locked = self.locked_pages.contains(&segment_start);
+                let mut segment_end = VirtPageNum(segment_start.0 + 1);
+                while segment_end < end_vpn
+                    && self.locked_pages.contains(&segment_end) == segment_locked
+                {
+                    segment_end.0 += 1;
+                }
+                let locked_pages = if segment_locked {
+                    segment_end.0 - segment_start.0
+                } else {
+                    0
+                };
+                let locked_kb = locked_pages * PAGE_SIZE / 1024;
+                Self::write_proc_smaps_segment(&mut s, vma, segment_start, segment_end, locked_kb);
+                segment_start = segment_end;
+            }
         }
         s
     }
@@ -697,6 +794,7 @@ impl<T: PageTable> AddressSpace<T> {
     pub fn recycle_data_pages(&mut self) {
         //*self = Self::new_bare();
         self.vmas.clear();
+        self.locked_pages.clear();
     }
 
     /// Release all resources for a zombie process: VMA metadata, page table
@@ -704,6 +802,7 @@ impl<T: PageTable> AddressSpace<T> {
     /// space after exit; only wait4 metadata (pid, exit_code) is required.
     pub fn release_for_zombie(&mut self) {
         self.vmas.clear_no_hole();
+        self.locked_pages.clear();
         self.page_table.release_frames();
     }
     pub fn sbrk(&mut self, increment: isize) -> usize {
@@ -719,12 +818,31 @@ impl<T: PageTable> AddressSpace<T> {
         offset: usize,
         map_file: Option<Arc<dyn IndexNode>>,
         may_write: bool,
+        write_sealed: bool,
     ) -> isize {
-        super::mmap::do_mmap(self, start, len, prot, flags, offset, map_file, may_write)
+        super::mmap::do_mmap(
+            self,
+            start,
+            len,
+            prot,
+            flags,
+            offset,
+            map_file,
+            may_write,
+            write_sealed,
+        )
     }
 
     pub fn munmap(&mut self, start: usize, len: usize) -> Result<(), isize> {
-        super::mmap::do_munmap(self, start, len)
+        let result = super::mmap::do_munmap(self, start, len);
+        if result.is_ok() {
+            if let Some(end) = start.checked_add(len) {
+                let start_vpn = VirtAddr::from(start).floor();
+                let end_vpn = VirtAddr::from(end).ceil();
+                self.set_locked_pages(start_vpn, end_vpn, false);
+            }
+        }
+        result
     }
 
     pub fn mprotect(&mut self, addr: usize, len: usize, prot: MapPermission) -> Result<(), isize> {
@@ -767,6 +885,26 @@ impl<T: PageTable> AddressSpace<T> {
         Ok((start_vpn, end_vpn, locked_len))
     }
 
+    pub(super) fn set_locked_pages(
+        &mut self,
+        start_vpn: VirtPageNum,
+        end_vpn: VirtPageNum,
+        locked: bool,
+    ) -> usize {
+        let mut vpn = start_vpn;
+        let mut page_count = 0usize;
+        while vpn < end_vpn {
+            if locked {
+                self.locked_pages.insert(vpn);
+            } else {
+                self.locked_pages.remove(&vpn);
+            }
+            page_count = page_count.saturating_add(1);
+            vpn.0 += 1;
+        }
+        page_count.saturating_mul(PAGE_SIZE)
+    }
+
     pub fn mlock(&mut self, start: usize, len: usize) -> Result<usize, isize> {
         let (start_vpn, end_vpn, locked_len) = self.user_lock_range(start, len)?;
         let mut vpn = start_vpn;
@@ -774,20 +912,58 @@ impl<T: PageTable> AddressSpace<T> {
             self.fault_in_user_va(VirtAddr::from(vpn), FaultAccess::Load)?;
             vpn.0 += 1;
         }
+        self.set_locked_pages(start_vpn, end_vpn, true);
         Ok(locked_len)
     }
 
-    pub fn mlock_onfault(&self, start: usize, len: usize) -> Result<usize, isize> {
-        self.user_lock_range(start, len)
-            .map(|(_, _, locked_len)| locked_len)
+    pub fn mlock_onfault(&mut self, start: usize, len: usize) -> Result<usize, isize> {
+        let (start_vpn, end_vpn, locked_len) = self.user_lock_range(start, len)?;
+        self.set_locked_pages(start_vpn, end_vpn, true);
+        Ok(locked_len)
     }
 
-    pub fn munlock(&self, start: usize, len: usize) -> Result<(), isize> {
-        self.user_lock_range(start, len).map(|_| ())
+    pub fn munlock(&mut self, start: usize, len: usize) -> Result<(), isize> {
+        let (start_vpn, end_vpn, _) = self.user_lock_range(start, len)?;
+        self.set_locked_pages(start_vpn, end_vpn, false);
+        Ok(())
     }
 
     pub fn user_mapped_bytes(&self) -> usize {
         self.vmas.user_mapped_bytes()
+    }
+
+    pub fn resident_user_bytes(&self) -> usize {
+        let mut resident_pages = 0usize;
+        for vma in self.vmas.iter().filter(|vma| vma.vm_is_user()) {
+            for vpn in VPNRange::new(vma.vm_start(), vma.vm_end()) {
+                if vma.inner.get_in_memory(&vpn).is_some() {
+                    resident_pages = resident_pages.saturating_add(1);
+                }
+            }
+        }
+        resident_pages.saturating_mul(PAGE_SIZE)
+    }
+
+    pub fn locked_user_bytes(&self) -> usize {
+        self.locked_pages.len().saturating_mul(PAGE_SIZE)
+    }
+
+    pub fn mlockall_current(&mut self) -> usize {
+        let mut locked_len = 0usize;
+        let ranges: Vec<(VirtPageNum, VirtPageNum)> = self
+            .vmas
+            .iter()
+            .filter(|area| area.vm_is_user())
+            .map(|area| (area.vm_start(), area.vm_end()))
+            .collect();
+        for (start_vpn, end_vpn) in ranges {
+            locked_len = locked_len.saturating_add(self.set_locked_pages(start_vpn, end_vpn, true));
+        }
+        locked_len
+    }
+
+    pub fn munlockall(&mut self) {
+        self.locked_pages.clear();
     }
 
     pub fn create_elf_tables(
