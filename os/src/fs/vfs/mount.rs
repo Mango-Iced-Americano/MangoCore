@@ -982,9 +982,32 @@ impl MountFS {
         // not self's. propagate_umount() internally checks parent.is_shared().
         // IMPORTANT: release self_mountpoint lock before propagate_umount,
         // which may recursively call umount_inner on peer mounts.
+        //
+        // If the direct parent is itself a mount root (e.g., disk2 mounted
+        // under a make-rshared child1), mp points into the child mount.
+        // Walk up one more level to reach the actual shared ancestor.
         let propagation_target = if do_propagate {
             self.self_mountpoint.lock().as_ref().and_then(|mp| {
-                mp.inner_inode.metadata().ok().map(|md| (mp.mount_fs.clone(), md.inode_id))
+                let parent_mfs = mp.mount_fs.clone();
+                let parent_ino = mp.inner_inode.metadata().ok()?.inode_id;
+                // Only walk up when the direct parent is a mount root that is
+                // Shared but has no peers (orphan). Private mounts never
+                // propagate — same logic as do_bind_mount's propagation source.
+                if mp.is_mountpoint_root() {
+                    let child_is_orphan_shared = parent_mfs.propagation().is_shared()
+                        && super::propagation::get_peers(&parent_mfs).is_empty();
+                    if child_is_orphan_shared {
+                        parent_mfs.self_mountpoint().and_then(|grand_mp| {
+                            grand_mp.inner_inode.metadata().ok().map(|md| {
+                                (grand_mp.mount_fs.clone(), md.inode_id)
+                            })
+                        })
+                    } else {
+                        Some((parent_mfs, parent_ino))
+                    }
+                } else {
+                    Some((parent_mfs, parent_ino))
+                }
             })
         } else {
             None

@@ -2292,23 +2292,69 @@ fn do_bind_mount(
 
     vfs::propagation::configure_propagation_no_register(&mnt_fs, desired_peer, desired_master);
 
-    // Propagate mount event. The correct source for the propagation is the
-    // TARGET'S parent mount (the mount that holds the mountpoint), not the
-    // bind source. Otherwise a mount --bind of a private source onto a shared
-    // target parent won't correctly propagate to the parent's peers/slaves.
-    let target_parent_mfs = target_mfs_inode.mount_fs.clone();
-    let target_md = match target_inode.metadata() {
-        Ok(md) => md,
-        Err(e) => {
-            // Rollback: clear configured state
-            vfs::propagation::unregister_peer_mount(&mnt_fs);
-            vfs::propagation::unregister_slave_mount(&mnt_fs);
-            mnt_fs.propagation().set_peer_group_id(0);
-            mnt_fs.propagation().set_master_group_id(0);
-            return Err(-(e as isize));
-        }
-    };
-    let target_ino = target_md.inode_id;
+    // Propagate mount event. The propagation source is the mount that HOLDS
+    // the mountpoint. If the target is itself a mount root (e.g. bind17's
+    // make-rshared parent1/child1), target_mfs_inode.mount_fs is the child
+    // mount. Walk up via self_mountpoint to reach the actual parent.
+    // Only walk up when the child mount is Shared but orphan (no peers).
+    // Private child mounts should never trigger propagation at all.
+    let (target_parent_mfs, target_ino) =
+        if target_mfs_inode.is_mountpoint_root() {
+            let child_mfs = target_mfs_inode.mount_fs.clone();
+            let child_is_orphan_shared = child_mfs.propagation().is_shared()
+                && vfs::propagation::get_peers(&child_mfs).is_empty();
+            if child_is_orphan_shared {
+                if let Some(mp) = child_mfs.self_mountpoint() {
+                    let ino = match mp.inner_inode.metadata() {
+                        Ok(md) => md.inode_id,
+                        Err(_) => {
+                            vfs::propagation::unregister_peer_mount(&mnt_fs);
+                            vfs::propagation::unregister_slave_mount(&mnt_fs);
+                            mnt_fs.propagation().set_peer_group_id(0);
+                            mnt_fs.propagation().set_master_group_id(0);
+                            return Err(-(SyscallErr::EIO as isize));
+                        }
+                    };
+                    (mp.mount_fs.clone(), ino)
+                } else {
+                    let md = match target_inode.metadata() {
+                        Ok(md) => md,
+                        Err(_) => {
+                            vfs::propagation::unregister_peer_mount(&mnt_fs);
+                            vfs::propagation::unregister_slave_mount(&mnt_fs);
+                            mnt_fs.propagation().set_peer_group_id(0);
+                            mnt_fs.propagation().set_master_group_id(0);
+                            return Err(-(SyscallErr::EIO as isize));
+                        }
+                    };
+                    (child_mfs.clone(), md.inode_id)
+                }
+            } else {
+                let md = match target_inode.metadata() {
+                    Ok(md) => md,
+                    Err(_) => {
+                        vfs::propagation::unregister_peer_mount(&mnt_fs);
+                        vfs::propagation::unregister_slave_mount(&mnt_fs);
+                        mnt_fs.propagation().set_peer_group_id(0);
+                        mnt_fs.propagation().set_master_group_id(0);
+                        return Err(-(SyscallErr::EIO as isize));
+                    }
+                };
+                (child_mfs, md.inode_id)
+            }
+        } else {
+            let md = match target_inode.metadata() {
+                Ok(md) => md,
+                Err(_) => {
+                    vfs::propagation::unregister_peer_mount(&mnt_fs);
+                    vfs::propagation::unregister_slave_mount(&mnt_fs);
+                    mnt_fs.propagation().set_peer_group_id(0);
+                    mnt_fs.propagation().set_master_group_id(0);
+                    return Err(-(SyscallErr::EIO as isize));
+                }
+            };
+            (target_mfs_inode.mount_fs.clone(), md.inode_id)
+        };
     let child_name = lookup_path
         .rsplit('/')
         .next()
