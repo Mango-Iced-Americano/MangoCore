@@ -30,8 +30,20 @@ pub enum PropagationType {
     Shared,
     /// Mount events propagate from the master mount to this slave mount (one-way)
     Slave,
+    /// Shared AND Slave: propagates with peers AND receives from master.
+    /// Created by `--make-shared` on a Slave, or bind from SharedSlave source.
+    SharedSlave,
     /// Mount cannot be bind mounted and events do not propagate
     Unbindable,
+}
+
+impl PropagationType {
+    pub fn is_shared(self) -> bool {
+        matches!(self, Self::Shared | Self::SharedSlave)
+    }
+    pub fn is_slave(self) -> bool {
+        matches!(self, Self::Slave | Self::SharedSlave)
+    }
 }
 
 // ============================================================================
@@ -80,10 +92,10 @@ impl MountPropagation {
     // ── Accessors ────────────────────────────────────────────────────
 
     pub fn is_shared(&self) -> bool {
-        *self.prop_type.lock() == PropagationType::Shared
+        self.prop_type().is_shared()
     }
     pub fn is_slave(&self) -> bool {
-        *self.prop_type.lock() == PropagationType::Slave
+        self.prop_type().is_slave()
     }
     pub fn is_unbindable(&self) -> bool {
         *self.prop_type.lock() == PropagationType::Unbindable
@@ -115,19 +127,56 @@ impl MountPropagation {
 
     /// Set shared with a specific group ID (used for propagation).
     /// Caller must handle peer registry (unregister old / register new).
+    /// Preserves existing Slave state (SharedSlave remains SharedSlave).
     pub fn set_shared_with_group(&self, group_id: u32) {
         let mut pt = self.prop_type.lock();
-        *pt = PropagationType::Shared;
+        *pt = match *pt {
+            PropagationType::Slave | PropagationType::SharedSlave => PropagationType::SharedSlave,
+            _ => PropagationType::Shared,
+        };
         drop(pt);
         *self.peer_group_id.lock() = group_id;
     }
 }
 
 /// Allocate a new unique peer group ID.
-fn allocate_group_id() -> u32 {
+pub(crate) fn allocate_group_id() -> u32 {
     /// Global peer group ID counter. Starts from 1 (0 = invalid).
     static NEXT_ID: AtomicU32 = AtomicU32::new(1);
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Unified propagation state installer. Clears old registrations, sets
+/// propagation type + peer group + master group, then registers.
+/// peer_gid: Some(id) enables Shared; master_gid: Some(id) enables Slave.
+/// When both are Some, the mount becomes SharedSlave.
+pub fn install_propagation(
+    mnt_fs: &Arc<MountFS>,
+    peer_gid: Option<u32>,
+    master_gid: Option<u32>,
+) {
+    // Clear old registrations
+    unregister_peer_mount(mnt_fs);
+    unregister_slave_mount(mnt_fs);
+    mnt_fs.propagation().set_peer_group_id(0);
+    mnt_fs.propagation().set_master_group_id(0);
+
+    let prop_type = match (peer_gid, master_gid) {
+        (Some(_), Some(_)) => PropagationType::SharedSlave,
+        (Some(_), None) => PropagationType::Shared,
+        (None, Some(_)) => PropagationType::Slave,
+        (None, None) => PropagationType::Private,
+    };
+
+    mnt_fs.propagation().set_prop_type_value(prop_type);
+    if let Some(gid) = peer_gid {
+        mnt_fs.propagation().set_peer_group_id(gid);
+        register_peer(mnt_fs);
+    }
+    if let Some(gid) = master_gid {
+        mnt_fs.propagation().set_master_group_id(gid);
+        register_slave(mnt_fs, gid);
+    }
 }
 
 /// Set a mount as Shared with a freshly allocated peer group ID.
@@ -280,41 +329,45 @@ pub fn get_slaves(master_gid: u32) -> Vec<Arc<MountFS>> {
 /// - Slave → non-Slave: unregisters from SLAVE_GROUPS
 /// - Non-Shared → Shared: allocates a new peer_group_id if needed
 /// - Non-Slave → Slave: preserves master_group_id (caller must set it first)
+/// - Shared + Slave transitions:
+///   - make-shared on Slave → SharedSlave (keeps master, allocates new peer)
+///   - make-slave on Shared → plain Slave (drops peer group)
+///   - make-slave on SharedSlave → plain Slave (drops peer, keeps master)
 pub fn set_propagation_type(mfs: &Arc<MountFS>, t: PropagationType) {
     let prop = mfs.propagation();
     let old_type = prop.prop_type();
 
-    // Leaving Shared: remove from PEER_GROUPS and clear peer_group_id
-    if old_type == PropagationType::Shared && t != PropagationType::Shared {
+    // ── Handle Shared (peer) dimension ──
+    let leaving_shared = old_type.is_shared() && !t.is_shared();
+    let becoming_shared = !old_type.is_shared() && t.is_shared();
+    let staying_shared = old_type.is_shared() && t.is_shared();
+
+    if leaving_shared {
         unregister_peer_mount(mfs);
         prop.set_peer_group_id(0);
     }
-
-    // Leaving Slave or retargeting Slave: unregister old master
-    if old_type == PropagationType::Slave {
-        let old_master = prop.master_group_id();
-        if t != PropagationType::Slave {
-            // Leaving Slave entirely
-            unregister_slave_mount(mfs);
-            prop.set_master_group_id(0);
-        } else if old_master != prop.master_group_id() {
-            // Slave→Slave with different master: retarget
-            unregister_slave_mount(mfs);
-        }
+    if staying_shared {
+        // Shared→Shared or SharedSlave→Shared: unregister old peer, re-allocate
+        unregister_peer_mount(mfs);
+        prop.set_peer_group_id(0);
+    }
+    if becoming_shared || (staying_shared && prop.peer_group_id() == 0) {
+        prop.set_peer_group_id(allocate_group_id());
     }
 
-    // Becoming Shared: unregister from old group first, then allocate new.
-    // Without this, Shared→Shared transitions (e.g., --make-rshared on a
-    // bind mount that inherited the parent's group) leave the mount in the
-    // old peer group, causing incorrect peer relationships.
-    if t == PropagationType::Shared {
-        if old_type == PropagationType::Shared {
-            unregister_peer_mount(mfs);
-            prop.set_peer_group_id(0);
-        }
-        if prop.peer_group_id() == 0 {
-            prop.set_peer_group_id(allocate_group_id());
-        }
+    // ── Handle Slave (master) dimension ──
+    let leaving_slave = old_type.is_slave() && !t.is_slave();
+    let _becoming_slave = !old_type.is_slave() && t.is_slave();
+    let staying_slave = old_type.is_slave() && t.is_slave();
+
+    if leaving_slave {
+        unregister_slave_mount(mfs);
+        prop.set_master_group_id(0);
+    }
+    if staying_slave && t != PropagationType::SharedSlave && old_type == PropagationType::Slave {
+        // Slave→Slave with different master: caller must have set new master already;
+        // just unregister old, keep new master_group_id intact.
+        unregister_slave_mount(mfs);
     }
 
     prop.set_prop_type_value(t);

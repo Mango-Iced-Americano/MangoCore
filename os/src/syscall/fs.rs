@@ -2277,18 +2277,34 @@ fn do_bind_mount(
     let mut register_shared = false;
     let mut register_slave_master: Option<u32> = None;
 
-    if source_is_shared {
+    if source_is_shared && source_prop.is_slave() {
+        // Source is SharedSlave: copy both peer and master
+        let master_gid = source_prop.master_group_id();
+        mnt_fs.propagation().set_shared_with_group(source_gid);
+        mnt_fs.propagation().set_master_group_id(master_gid);
+        // set_shared_with_group preserves SharedSlave state
+        register_shared = true;
+        register_slave_master = Some(master_gid);
+    } else if source_is_shared {
         mnt_fs.propagation().set_shared_with_group(source_gid);
         register_shared = true;
     } else if source_prop.is_slave() {
         let master_gid = source_prop.master_group_id();
-        mnt_fs.propagation().set_prop_type_value(vfs::propagation::PropagationType::Slave);
-        mnt_fs.propagation().set_master_group_id(master_gid);
-        register_slave_master = Some(master_gid);
+        if inherited_gid != 0 {
+            // Slave source under shared target: become SharedSlave
+            mnt_fs.propagation().set_shared_with_group(inherited_gid);
+            mnt_fs.propagation().set_master_group_id(master_gid);
+            register_shared = true;
+            register_slave_master = Some(master_gid);
+        } else {
+            mnt_fs.propagation().set_prop_type_value(vfs::propagation::PropagationType::Slave);
+            mnt_fs.propagation().set_master_group_id(master_gid);
+            register_slave_master = Some(master_gid);
+        }
     } else if inherited_gid != 0 {
         // Private source mounted under a shared target parent: the bind mount
-        // is still a mount event under a shared tree. Preserve the inherited
-        // target-parent group instead of forcing Private.
+        // is still a mount event under a shared tree. Use the inherited
+        // target-parent group (already a fresh child group from mount_subtree_inner).
         mnt_fs.propagation().set_shared_with_group(inherited_gid);
         register_shared = true;
     } else {
@@ -2351,21 +2367,36 @@ fn apply_propagation_change(
     prop_type: vfs::propagation::PropagationType,
     recursive: bool,
 ) {
-    if prop_type == vfs::propagation::PropagationType::Slave {
-        // Capture old state: if already slave, keep old master;
-        // otherwise use current peer_group_id as master.
-        let old_master = if mnt_fs.propagation().is_slave() {
-            mnt_fs.propagation().master_group_id()
-        } else {
-            mnt_fs.propagation().peer_group_id()
-        };
-        vfs::propagation::set_propagation_type(mnt_fs, prop_type);
-        mnt_fs.propagation().set_master_group_id(old_master);
-        vfs::propagation::register_slave(mnt_fs, old_master);
-    } else {
-        vfs::propagation::set_propagation_type(mnt_fs, prop_type);
-        if prop_type == vfs::propagation::PropagationType::Shared {
-            vfs::propagation::register_peer(mnt_fs);
+    match prop_type {
+        vfs::propagation::PropagationType::Shared => {
+            let master = if mnt_fs.propagation().is_slave() {
+                Some(mnt_fs.propagation().master_group_id())
+            } else {
+                None
+            };
+            let gid = vfs::propagation::allocate_group_id();
+            vfs::propagation::install_propagation(mnt_fs, Some(gid), master);
+        }
+        vfs::propagation::PropagationType::Slave => {
+            let master = if mnt_fs.propagation().is_slave() {
+                mnt_fs.propagation().master_group_id()
+            } else {
+                mnt_fs.propagation().peer_group_id()
+            };
+            let peer = if mnt_fs.propagation().is_shared() {
+                Some(mnt_fs.propagation().peer_group_id())
+            } else {
+                None
+            };
+            vfs::propagation::install_propagation(mnt_fs, peer, Some(master));
+        }
+        _ => {
+            // Private or Unbindable: clear all registrations
+            vfs::propagation::install_propagation(mnt_fs, None, None);
+            // install_propagation sets to Private by default, fix for Unbindable
+            if prop_type == vfs::propagation::PropagationType::Unbindable {
+                mnt_fs.propagation().set_prop_type_value(vfs::propagation::PropagationType::Unbindable);
+            }
         }
     }
     if recursive {
@@ -2530,13 +2561,33 @@ fn apply_rbind_snapshot(
             None => alloc::format!("/{}", child_name),
         };
 
-        match target_mfs_inode.mount_subtree(
+        // Use mount_subtree_inner(false) to avoid automatic propagation.
+        // rbind clones should NOT trigger new mount events — the base bind
+        // already propagated. We manually copy the source child's propagation.
+        match target_mfs_inode.mount_subtree_inner(
             child_mfs.inner_filesystem(),
             child_mfs.root_inner_inode(),
             vfs::MountFlags::empty(),
             Some(mount_path),
+            false,
         ) {
             Ok(new_mnt) => {
+                // Copy source child's propagation type
+                let child_prop = child_mfs.propagation();
+                let child_peer = if child_prop.is_shared() {
+                    Some(child_prop.peer_group_id())
+                } else {
+                    None
+                };
+                let child_master = if child_prop.is_slave() {
+                    Some(child_prop.master_group_id())
+                } else {
+                    None
+                };
+                vfs::propagation::install_propagation(&new_mnt, child_peer, child_master);
+                if child_prop.is_unbindable() {
+                    new_mnt.propagation().set_prop_type_value(vfs::propagation::PropagationType::Unbindable);
+                }
                 if let Some(src) = child_mfs.mount_source() {
                     new_mnt.set_mount_source(Some(src));
                 }
