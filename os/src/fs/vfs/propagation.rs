@@ -296,9 +296,18 @@ pub fn set_propagation_type(mfs: &Arc<MountFS>, t: PropagationType) {
         }
     }
 
-    // Becoming Shared: allocate group ID if needed
-    if t == PropagationType::Shared && prop.peer_group_id() == 0 {
-        prop.set_peer_group_id(allocate_group_id());
+    // Becoming Shared: unregister from old group first, then allocate new.
+    // Without this, Shared→Shared transitions (e.g., --make-rshared on a
+    // bind mount that inherited the parent's group) leave the mount in the
+    // old peer group, causing incorrect peer relationships.
+    if t == PropagationType::Shared {
+        if old_type == PropagationType::Shared {
+            unregister_peer_mount(mfs);
+            prop.set_peer_group_id(0);
+        }
+        if prop.peer_group_id() == 0 {
+            prop.set_peer_group_id(allocate_group_id());
+        }
     }
 
     prop.set_prop_type_value(t);
