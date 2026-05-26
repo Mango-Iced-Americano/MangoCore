@@ -2274,43 +2274,23 @@ fn do_bind_mount(
     let source_is_shared = source_prop.is_shared();
     let source_gid = source_prop.peer_group_id();
 
-    let mut register_shared = false;
-    let mut register_slave_master: Option<u32> = None;
-
-    if source_is_shared && source_prop.is_slave() {
-        // Source is SharedSlave: copy both peer and master
-        let master_gid = source_prop.master_group_id();
-        mnt_fs.propagation().set_shared_with_group(source_gid);
-        mnt_fs.propagation().set_master_group_id(master_gid);
-        // set_shared_with_group preserves SharedSlave state
-        register_shared = true;
-        register_slave_master = Some(master_gid);
-    } else if source_is_shared {
-        mnt_fs.propagation().set_shared_with_group(source_gid);
-        register_shared = true;
-    } else if source_prop.is_slave() {
-        let master_gid = source_prop.master_group_id();
-        if inherited_gid != 0 {
-            // Slave source under shared target: become SharedSlave
-            mnt_fs.propagation().set_shared_with_group(inherited_gid);
-            mnt_fs.propagation().set_master_group_id(master_gid);
-            register_shared = true;
-            register_slave_master = Some(master_gid);
-        } else {
-            mnt_fs.propagation().set_prop_type_value(vfs::propagation::PropagationType::Slave);
-            mnt_fs.propagation().set_master_group_id(master_gid);
-            register_slave_master = Some(master_gid);
-        }
+    // Compute desired (peer_gid, master_gid) from source + inherited context
+    let desired_peer: Option<u32> = if source_is_shared {
+        Some(source_gid)
     } else if inherited_gid != 0 {
-        // Private source mounted under a shared target parent: the bind mount
-        // is still a mount event under a shared tree. Use the inherited
-        // target-parent group (already a fresh child group from mount_subtree_inner).
-        mnt_fs.propagation().set_shared_with_group(inherited_gid);
-        register_shared = true;
+        // Private source under shared target parent → join target's child group
+        Some(inherited_gid)
     } else {
-        // Source is Private/Unbindable, target parent is also private → Private
-        vfs::propagation::set_propagation_type(&mnt_fs, vfs::propagation::PropagationType::Private);
-    }
+        None
+    };
+    let desired_master: Option<u32> = if source_prop.is_slave() {
+        let mgid = source_prop.master_group_id();
+        if mgid != 0 { Some(mgid) } else { None }
+    } else {
+        None
+    };
+
+    vfs::propagation::configure_propagation_no_register(&mnt_fs, desired_peer, desired_master);
 
     // Propagate mount event. The correct source for the propagation is the
     // TARGET'S parent mount (the mount that holds the mountpoint), not the
@@ -2320,10 +2300,11 @@ fn do_bind_mount(
     let target_md = match target_inode.metadata() {
         Ok(md) => md,
         Err(e) => {
-            // Rollback: clear peer_group_id that was set above
-            if register_shared {
-                mnt_fs.propagation().set_peer_group_id(0);
-            }
+            // Rollback: clear configured state
+            vfs::propagation::unregister_peer_mount(&mnt_fs);
+            vfs::propagation::unregister_slave_mount(&mnt_fs);
+            mnt_fs.propagation().set_peer_group_id(0);
+            mnt_fs.propagation().set_master_group_id(0);
             return Err(-(e as isize));
         }
     };
@@ -2335,11 +2316,7 @@ fn do_bind_mount(
     vfs::propagation::propagate_mount(&target_parent_mfs, target_ino, &mnt_fs, child_name);
 
     // NOW register in peer/slave group AFTER propagation (prevents self-peer loop)
-    if register_shared {
-        vfs::propagation::register_peer(&mnt_fs);
-    } else if let Some(master_gid) = register_slave_master {
-        vfs::propagation::register_slave(&mnt_fs, master_gid);
-    }
+    vfs::propagation::register_current_propagation(&mnt_fs);
 
     if let Some(snapshot) = rbind_snapshot {
         if let Err(e) = apply_rbind_snapshot(
@@ -2491,22 +2468,16 @@ fn set_propagation_recursive(
     for child in &children {
         let master_gid = if prop_type == vfs::propagation::PropagationType::Slave {
             let parent_prop = child.propagation();
-            // Inherit master from parent's shared group
             parent_prop.peer_group_id()
         } else {
             0
         };
 
-        if prop_type == vfs::propagation::PropagationType::Slave {
+        if prop_type == vfs::propagation::PropagationType::Slave && master_gid != 0 {
             child.propagation().set_master_group_id(master_gid);
         }
         vfs::propagation::set_propagation_type(child, prop_type);
-        if prop_type == vfs::propagation::PropagationType::Shared {
-            vfs::propagation::register_peer(child);
-        }
-        if prop_type == vfs::propagation::PropagationType::Slave {
-            vfs::propagation::register_slave(child, master_gid);
-        }
+        // registration handled inside set_propagation_type now
     }
 }
 
@@ -2756,13 +2727,7 @@ pub fn sys_mount(
                 mnt.propagation().set_master_group_id(master_gid);
             }
             vfs::propagation::set_propagation_type(&mnt, prop_type);
-            if prop_type == vfs::propagation::PropagationType::Shared {
-                vfs::propagation::register_peer(&mnt);
-            }
-            if prop_type == vfs::propagation::PropagationType::Slave {
-                let master_gid = mnt.propagation().master_group_id();
-                vfs::propagation::register_slave(&mnt, master_gid);
-            }
+            // registration now handled inside set_propagation_type
             if is_recursive {
                 set_propagation_recursive(&mnt, prop_type);
             }
