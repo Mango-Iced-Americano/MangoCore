@@ -130,6 +130,13 @@ fn allocate_group_id() -> u32 {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Set a mount as Shared with a freshly allocated peer group ID.
+/// Used when a mount event occurs under a shared parent — the new
+/// child mount must form its own peer group, not join the parent's.
+pub fn set_shared_new_group(mnt_fs: &Arc<MountFS>) {
+    mnt_fs.propagation().set_shared_with_group(allocate_group_id());
+}
+
 // ============================================================================
 // Peer Group Registry
 // ============================================================================

@@ -280,14 +280,15 @@ impl MountFSInode {
 
         let new_mount_fs = MountFS::new_with_root(inner_fs, root_inner_inode, mount_flags);
 
-        // Inherit parent's propagation group ID if parent is shared.
-        // Defer peer registration until AFTER propagation to avoid the new
-        // mount appearing as a peer of itself during propagate_mount.
+        // If parent is shared, allocate a fresh child peer group for the
+        // new mount. Linux semantics: mount events under shared parents
+        // form their own peer group, not the parent's. Propagated clones
+        // join this new group. Defer peer registration until AFTER
+        // propagation to avoid self-peer loops.
         let parent_prop = self.mount_fs.propagation();
         let parent_shared = parent_prop.is_shared();
         if parent_shared {
-            let gid = parent_prop.peer_group_id();
-            new_mount_fs.propagation().set_shared_with_group(gid);
+            super::propagation::set_shared_new_group(&new_mount_fs);
         }
 
         let backref = MountFSInode::new(self.inner_inode.clone(), self.mount_fs.clone());
