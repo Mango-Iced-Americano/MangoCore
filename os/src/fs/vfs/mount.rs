@@ -1000,40 +1000,7 @@ impl MountFS {
         unregister_peer_mount(self);
         // Unregister from slave group
         unregister_slave_mount(self);
-        // Unregister from global mount list — prefer mount_path for reliability,
-        // fall back to absolute_path (which may fail if mount tree is corrupted).
-        {
-            let removed = if let Some(ref path) = self.mount_path() {
-                MOUNT_LIST.remove(path.as_str())
-            } else {
-                None
-            };
-            if removed.is_none() {
-                // fallback: try absolute_path from self_mountpoint
-                if let Some(mountpoint) = self.self_mountpoint.lock().clone() {
-                    if let Ok(path) = mountpoint.absolute_path() {
-                        MOUNT_LIST.remove(path);
-                    }
-                }
-            }
-        }
-        if let Some(mountpoint) = self.self_mountpoint.lock().take() {
-            if let Ok(md) = mountpoint.inner_inode.metadata() {
-                let removed = mountpoint.mount_fs.remove_mount(md.inode_id);
-                if removed.is_none() {
-                    log::warn!(
-                        "MountFS::umount: remove_mount returned None for inode {:?}",
-                        md.inode_id
-                    );
-                }
-            }
-        }
-        // Clear dentry cache to break MountFS → cache → MountFSInode → MountFS cycle
-        {
-            let evicted = self.dentry_cache.lock().clear_all();
-            drop(evicted);
-        }
-        self.inner_filesystem.on_umount();
+        self.detach_from_parent_and_cleanup();
         Ok(())
     }
 
@@ -1045,6 +1012,65 @@ impl MountFS {
     /// 强制卸载（MNT_DETACH），跳过子挂载检查
     pub fn umount_force(self: &Arc<Self>) -> Result<(), SyscallErr> {
         self.umount_inner(true, true)
+    }
+
+    /// Lazily detach this mount and all submounts from the visible mount tree.
+    ///
+    /// This implements the part of Linux `MNT_DETACH` that LTP cleanup relies
+    /// on: remove the subtree from mount lookup immediately, then let normal
+    /// `Arc` lifetime rules release objects once outstanding cwd/fd refs go
+    /// away.
+    pub fn detach_recursive(self: &Arc<Self>) -> Result<(), SyscallErr> {
+        self.detach_recursive_inner(true)
+    }
+
+    pub(crate) fn detach_recursive_inner(self: &Arc<Self>, do_propagate: bool) -> Result<(), SyscallErr> {
+        if self.self_mountpoint.lock().is_none() {
+            return Err(SyscallErr::EINVAL);
+        }
+
+        let children: Vec<Arc<MountFS>> = {
+            let mountpoints = self.mountpoints.lock();
+            mountpoints.values().cloned().collect()
+        };
+        for child in children.iter().rev() {
+            let _ = child.detach_recursive_inner(false);
+        }
+
+        if do_propagate && self.propagation().is_shared() {
+            if let Some(mp) = self.self_mountpoint.lock().clone() {
+                if let Ok(md) = mp.inner_inode.metadata() {
+                    propagate_umount(&mp.mount_fs, md.inode_id);
+                }
+            }
+        }
+
+        self.detach_from_parent_and_cleanup();
+        Ok(())
+    }
+
+    fn detach_from_parent_and_cleanup(self: &Arc<Self>) {
+        unregister_peer_mount(self);
+        unregister_slave_mount(self);
+
+        MOUNT_LIST.remove_fs(self);
+
+        if let Some(mountpoint) = self.self_mountpoint.lock().take() {
+            if let Ok(md) = mountpoint.inner_inode.metadata() {
+                let removed = mountpoint.mount_fs.remove_mount(md.inode_id);
+                if removed.is_none() {
+                    log::warn!(
+                        "MountFS::detach: remove_mount returned None for inode {:?}",
+                        md.inode_id
+                    );
+                }
+            }
+        }
+
+        self.mountpoints.lock().clear();
+        let evicted = self.dentry_cache.lock().clear_all();
+        drop(evicted);
+        self.inner_filesystem.on_umount();
     }
 
     // ── 属性访问 ───────────────────────────────────────────────────
@@ -1211,6 +1237,34 @@ impl MountList {
         }
         result.sort_by(|a, b| a.0.cmp(&b.0));
         result
+    }
+
+    /// Remove one exact mount record by object identity.
+    ///
+    /// Bind/move/propagation operations may make `absolute_path()` differ from
+    /// the path that was recorded at insertion time.  Scanning by `Arc`
+    /// identity avoids leaving a strong reference in the global mount list.
+    pub fn remove_fs(&self, fs: &Arc<MountFS>) -> Option<Arc<MountFS>> {
+        let mut inner = self.mounts.lock();
+        let mut empty_path: Option<Arc<MountPath>> = None;
+        let mut removed: Option<Arc<MountFS>> = None;
+
+        for (path, stack) in inner.iter_mut() {
+            if let Some(pos) = stack.iter().rposition(|rec| Arc::ptr_eq(&rec.fs, fs)) {
+                let rec = stack.remove(pos);
+                removed = Some(rec.fs);
+                if stack.is_empty() {
+                    empty_path = Some(path.clone());
+                }
+                break;
+            }
+        }
+
+        if let Some(path) = empty_path {
+            inner.remove(&path);
+        }
+
+        removed
     }
 }
 

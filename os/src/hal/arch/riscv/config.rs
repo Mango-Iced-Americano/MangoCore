@@ -4,6 +4,7 @@ pub const MEMORY_SIZE: usize = 0x4000_0000;
 pub const USER_VA_BASE: usize = 0;
 pub const TASK_SIZE: usize = 0xc000_0000;
 pub const USER_VA_END: usize = TASK_SIZE;
+pub const ELF_PIE_BASE: usize = USER_VA_BASE + 0x0040_0000;
 pub const ELF_DYN_BASE: usize = TASK_SIZE / 3 * 2;
 pub const USER_STACK_BASE: usize = TASK_SIZE - PAGE_SIZE;
 pub const USER_STACK_SIZE: usize = PAGE_SIZE * 0x40;

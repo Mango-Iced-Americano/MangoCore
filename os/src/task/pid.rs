@@ -36,6 +36,13 @@ impl RecycleAllocator {
             self.current - 1
         }
     }
+    /// 分配一个新的id，不立即复用已回收id。
+    ///
+    /// 用户可见 pid/tid 过早复用会让并发创建线程的测试观察到重复 TID。
+    pub fn alloc_fresh(&mut self) -> usize {
+        self.current += 1;
+        self.current - 1
+    }
     pub fn last_allocated(&self) -> usize {
         self.current.saturating_sub(1)
     }
@@ -93,7 +100,7 @@ impl TidHandle {
 /// 分配一个用户可见 tid。
 pub fn tid_alloc() -> Arc<TidHandle> {
     Arc::new(TidHandle(
-        TID_ALLOCATOR.lock().alloc(),
+        TID_ALLOCATOR.lock().alloc_fresh(),
         AtomicBool::new(false),
     ))
 }

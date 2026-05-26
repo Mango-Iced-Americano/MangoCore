@@ -85,6 +85,7 @@ pub struct TaskManager {
     pub ready_queue: VecDeque<Arc<TaskControlBlock>>,
     /// 一个双端队列，用于存储可中断状态任务
     pub interruptible_queue: VecDeque<Arc<TaskControlBlock>>,
+    ready_nonzero_nice_count: usize,
     /// 任务激活状态跟踪器，用于跟踪任务的激活状态，并在OOM时释放内存
     pub active_tracker: ActiveTracker,
 }
@@ -93,6 +94,7 @@ pub struct TaskManager {
 pub struct TaskManager {
     pub ready_queue: VecDeque<Arc<TaskControlBlock>>,
     pub interruptible_queue: VecDeque<Arc<TaskControlBlock>>,
+    ready_nonzero_nice_count: usize,
 }
 
 fn sched_pick_key(task: &Arc<TaskControlBlock>) -> (u64, i32, usize) {
@@ -100,7 +102,15 @@ fn sched_pick_key(task: &Arc<TaskControlBlock>) -> (u64, i32, usize) {
     (inner.sched_vruntime, inner.sched_nice, task.gettid())
 }
 
-fn pop_next_ready(queue: &mut VecDeque<Arc<TaskControlBlock>>) -> Option<Arc<TaskControlBlock>> {
+fn task_has_nonzero_nice(task: &Arc<TaskControlBlock>) -> bool {
+    task.acquire_inner_lock().sched_nice != 0
+}
+
+fn count_ready_nonzero_nice(queue: &VecDeque<Arc<TaskControlBlock>>) -> usize {
+    queue.iter().filter(|task| task_has_nonzero_nice(task)).count()
+}
+
+fn pop_fair_ready(queue: &mut VecDeque<Arc<TaskControlBlock>>) -> Option<Arc<TaskControlBlock>> {
     let mut best_index = 0usize;
     let mut best_key = sched_pick_key(queue.front()?);
     for (index, task) in queue.iter().enumerate().skip(1) {
@@ -113,6 +123,25 @@ fn pop_next_ready(queue: &mut VecDeque<Arc<TaskControlBlock>>) -> Option<Arc<Tas
     queue.remove(best_index)
 }
 
+fn task_ptr_eq(left: &Arc<TaskControlBlock>, right: &Arc<TaskControlBlock>) -> bool {
+    Arc::as_ptr(left) == Arc::as_ptr(right)
+}
+
+fn task_ptr(task: &Arc<TaskControlBlock>) -> usize {
+    Arc::as_ptr(task) as usize
+}
+
+fn sorted_task_ptrs(tasks: &[Arc<TaskControlBlock>]) -> Vec<usize> {
+    let mut ptrs: Vec<usize> = tasks.iter().map(task_ptr).collect();
+    ptrs.sort_unstable();
+    ptrs.dedup();
+    ptrs
+}
+
+fn task_ptr_in(ptrs: &[usize], task: &Arc<TaskControlBlock>) -> bool {
+    ptrs.binary_search(&task_ptr(task)).is_ok()
+}
+
 /// 简化的 nice-aware 调度器。
 impl TaskManager {
     #[cfg(feature = "oom_handler")]
@@ -121,6 +150,7 @@ impl TaskManager {
         Self {
             ready_queue: VecDeque::new(),
             interruptible_queue: VecDeque::new(),
+            ready_nonzero_nice_count: 0,
             active_tracker: ActiveTracker::new(),
         }
     }
@@ -129,16 +159,47 @@ impl TaskManager {
         Self {
             ready_queue: VecDeque::new(),
             interruptible_queue: VecDeque::new(),
+            ready_nonzero_nice_count: 0,
         }
     }
     /// 添加一个任务到就绪队列
     pub fn add(&mut self, task: Arc<TaskControlBlock>) {
+        if task_has_nonzero_nice(&task) {
+            self.ready_nonzero_nice_count += 1;
+        }
         self.ready_queue.push_back(task);
+    }
+    fn pop_next_ready(&mut self) -> Option<Arc<TaskControlBlock>> {
+        let task = if self.ready_nonzero_nice_count == 0 {
+            self.ready_queue.pop_front()
+        } else {
+            pop_fair_ready(&mut self.ready_queue)
+        }?;
+        if task_has_nonzero_nice(&task) {
+            self.ready_nonzero_nice_count = self.ready_nonzero_nice_count.saturating_sub(1);
+        }
+        Some(task)
+    }
+    fn recompute_ready_nice_count(&mut self) {
+        self.ready_nonzero_nice_count = count_ready_nonzero_nice(&self.ready_queue);
+    }
+    fn update_ready_nice(&mut self, task: &Arc<TaskControlBlock>, old_nice: i32, new_nice: i32) {
+        if (old_nice == 0) == (new_nice == 0) {
+            return;
+        }
+        if !self.ready_queue.iter().any(|queued| task_ptr_eq(queued, task)) {
+            return;
+        }
+        if old_nice == 0 {
+            self.ready_nonzero_nice_count += 1;
+        } else {
+            self.ready_nonzero_nice_count = self.ready_nonzero_nice_count.saturating_sub(1);
+        }
     }
     /// 从就绪队列中取出一个任务
     #[cfg(feature = "oom_handler")]
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
-        match pop_next_ready(&mut self.ready_queue) {
+        match self.pop_next_ready() {
             Some(task) => {
                 // 标记任务为激活状态
                 self.active_tracker.mark_active(task.tid.0);
@@ -149,7 +210,7 @@ impl TaskManager {
     }
     #[cfg(not(feature = "oom_handler"))]
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
-        pop_next_ready(&mut self.ready_queue)
+        self.pop_next_ready()
     }
     /// 添加一个任务到可中断队列
     pub fn add_interruptible(&mut self, task: Arc<TaskControlBlock>) {
@@ -161,21 +222,33 @@ impl TaskManager {
             // 使用retain过滤掉与指定任务相同的任务
             .retain(|task_in_queue| Arc::as_ptr(task_in_queue) != Arc::as_ptr(task));
     }
+    fn prune_interruptible_queue(&mut self) {
+        self.interruptible_queue
+            .retain(|task| task.acquire_inner_lock().task_status == TaskStatus::Interruptible);
+    }
+    fn enqueue_ready_batch(&mut self, tasks: Vec<Arc<TaskControlBlock>>) -> usize {
+        if tasks.is_empty() {
+            return 0;
+        }
+        self.prune_interruptible_queue();
+        let count = tasks.len();
+        for task in tasks {
+            self.add(task);
+        }
+        count
+    }
     /// 从调度器的 ready / interruptible 队列中移除一组任务。
     /// 线程组退出和 exec 清理只能通过这个入口调整队列，避免业务层直接扫描队列。
     pub fn remove_tasks(&mut self, tasks: &[Arc<TaskControlBlock>]) -> usize {
-        fn should_remove(task: &Arc<TaskControlBlock>, tasks: &[Arc<TaskControlBlock>]) -> bool {
-            tasks
-                .iter()
-                .any(|target| Arc::as_ptr(target) == Arc::as_ptr(task))
-        }
+        let ptrs = sorted_task_ptrs(tasks);
 
         let old_ready_len = self.ready_queue.len();
         self.ready_queue
-            .retain(|task| !should_remove(task, tasks));
+            .retain(|task| !task_ptr_in(&ptrs, task));
+        self.recompute_ready_nice_count();
         let old_interruptible_len = self.interruptible_queue.len();
         self.interruptible_queue
-            .retain(|task| !should_remove(task, tasks));
+            .retain(|task| !task_ptr_in(&ptrs, task));
 
         (old_ready_len - self.ready_queue.len())
             + (old_interruptible_len - self.interruptible_queue.len())
@@ -256,6 +329,16 @@ impl TaskManager {
             );
         })
     }
+}
+
+fn enqueue_ready_batch(tasks: Vec<Arc<TaskControlBlock>>) -> usize {
+    TASK_MANAGER.lock().enqueue_ready_batch(tasks)
+}
+
+pub fn update_ready_nice(task: &Arc<TaskControlBlock>, old_nice: i32, new_nice: i32) {
+    TASK_MANAGER
+        .lock()
+        .update_ready_nice(task, old_nice, new_nice);
 }
 
 lazy_static! {
@@ -390,9 +473,7 @@ pub fn send_signal_to_interruptible(signal: Signals) -> bool {
         }
         sent = true;
     }
-    for task in &tasks {
-        wake_interruptible(task.clone());
-    }
+    enqueue_ready_batch(tasks);
     sent
 }
 
@@ -439,11 +520,6 @@ impl WaitQueue {
         // 将task添加到back端
         self.inner.push_back(task);
     }
-    fn contains_task(&self, task: &Arc<TaskControlBlock>) -> bool {
-        self.inner
-            .iter()
-            .any(|task_in_queue| Weak::as_ptr(task_in_queue) == Arc::as_ptr(task))
-    }
     /// 这个函数会尝试从`WaitQueue`中弹出一个`task`，但是不会唤醒它
     pub fn pop_task(&mut self) -> Option<Weak<TaskControlBlock>> {
         // 将front端的任务弹出
@@ -474,10 +550,7 @@ impl WaitQueue {
         if limit == 0 {
             return 0;
         }
-        // 获取全局任务管理器
-        let mut manager = TASK_MANAGER.lock();
-        // 初始化计数器
-        let mut cnt = 0;
+        let mut tasks_to_wake = Vec::new();
         // 遍历内部队列，从self.inner中逐个取出任务处理
         while let Some(task) = self.inner.pop_front() {
             // 检查任务的弱引用是否仍然有效
@@ -499,12 +572,9 @@ impl WaitQueue {
                     }
                     // 释放内部锁
                     drop(inner);
-                    // 唤醒任务
-                    if manager.try_wake_interruptible(task).is_ok() {
-                        cnt += 1;
-                    }
+                    tasks_to_wake.push(task);
                     // 到达数量限制，停止遍历
-                    if cnt == limit {
+                    if tasks_to_wake.len() == limit {
                         break;
                     }
                 }
@@ -512,17 +582,13 @@ impl WaitQueue {
                 None => continue,
             }
         }
-        cnt
+        enqueue_ready_batch(tasks_to_wake)
     }
     pub fn prepare_to_wait(&mut self, task: Weak<TaskControlBlock>) {
         match task.upgrade() {
             Some(task) => {
                 let mut task_inner = task.acquire_inner_lock();
                 task_inner.task_status = super::TaskStatus::Interruptible;
-                drop(task_inner);
-                if self.contains_task(&task) {
-                    return;
-                }
             }
             None => return, // 不会发生
         }
@@ -1257,8 +1323,7 @@ impl TimeoutWaitQueue {
     }
     /// 唤醒所有超时的任务
     pub fn wake_expired(&mut self, now: TimeSpec) {
-        // 获取任务管理器
-        let mut manager = TASK_MANAGER.lock();
+        let mut tasks_to_wake = Vec::new();
         // 循环处理超时任务
         while let Some(waiter) = self.inner.pop() {
             // 堆中剩下的任务还没有超时
@@ -1295,13 +1360,14 @@ impl TimeoutWaitQueue {
                             task.pid(),
                             waiter.timeout
                         );
-                        manager.wake_interruptible(task);
+                        tasks_to_wake.push(task);
                     }
                     // task is dead, just ignore
                     None => continue,
                 }
             }
         }
+        enqueue_ready_batch(tasks_to_wake);
     }
     #[allow(unused)]
     // debug use only

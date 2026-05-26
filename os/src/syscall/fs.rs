@@ -2523,8 +2523,6 @@ pub fn sys_umount2(target: *const u8, flags: u32) -> isize {
         Some(flags) => flags,
         None => return EINVAL,
     };
-    let is_detach = flags.contains(UmountFlags::MNT_DETACH);
-    let is_force = flags.contains(UmountFlags::MNT_FORCE);
     info!("[sys_umount2] target: {}, flags: {:?}", target, flags);
     let (lookup_inode, lookup_path) = {
         let task = current_task().unwrap();
@@ -2546,35 +2544,33 @@ pub fn sys_umount2(target: *const u8, flags: u32) -> isize {
             return errno;
         }
     };
-    // Debug: log what we got from vfs_lookup to help diagnose EINVAL
-    if inode.as_any_ref().downcast_ref::<vfs::MountFSInode>().is_some() {
-        info!("[sys_umount2] lookup '{}' → MountFSInode", lookup_path);
-    } else {
-        info!("[sys_umount2] lookup '{}' → non-MountFSInode — will likely fail as not a mountpoint",
-            lookup_path,
-        );
-    }
-    if is_detach {
-        // MNT_DETACH: lazy umount, force-detach even with children
-        if let Some(mfs_inode) = inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
-            match mfs_inode.umount_force() {
-                Ok(_) => SUCCESS,
-                Err(e) => {
-                    error!("[sys_umount2] MNT_DETACH umount_force failed for '{}': errno={}", lookup_path, e as isize);
-                    -(e as isize)
-                }
-            }
+    if flags.contains(UmountFlags::MNT_DETACH) {
+        let mnt_inode = match inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+            Some(mnt) => mnt,
+            None => return EINVAL,
+        };
+        let target_mnt = if mnt_inode.is_mountpoint_root() {
+            mnt_inode.mount_fs.clone()
         } else {
-            error!("[sys_umount2] MNT_DETACH on non-MountFSInode '{}'", lookup_path);
-            EINVAL
-        }
-    } else {
-        match inode.umount() {
-            Ok(_) => SUCCESS,
-            Err(e) => {
-                error!("[sys_umount2] inode.umount() failed for '{}': errno={}", lookup_path, e as isize);
-                -(e as isize)
+            let inode_id = match mnt_inode.inner_inode.metadata() {
+                Ok(md) => md.inode_id,
+                Err(e) => return -(e as isize),
+            };
+            match mnt_inode.mount_fs.mountpoints.lock().get(&inode_id).cloned() {
+                Some(mnt) => mnt,
+                None => return EINVAL,
             }
+        };
+        return match target_mnt.detach_recursive() {
+            Ok(()) => SUCCESS,
+            Err(e) => -(e as isize),
+        };
+    }
+    match inode.umount() {
+        Ok(_) => SUCCESS,
+        Err(e) => {
+            error!("[sys_umount2] inode.umount() failed for '{}': errno={}", lookup_path, e as isize);
+            -(e as isize)
         }
     }
 }
@@ -3313,9 +3309,7 @@ pub fn sys_mount(
 
         old_parent_mnt.remove_mount(old_mp_id);
 
-        if let Some(ref old_path) = old_path {
-            vfs::mount::MOUNT_LIST.remove(old_path.as_str());
-        }
+        vfs::mount::MOUNT_LIST.remove_fs(&src_mnt);
 
         if let Err(e) = new_parent_mnt.add_mount(inode_id, src_mnt.clone()) {
             // Rollback: restore old parent (best-effort, must never panic)

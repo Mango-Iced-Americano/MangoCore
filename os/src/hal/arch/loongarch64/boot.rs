@@ -1,6 +1,6 @@
 use core::arch::asm;
 
-use crate::config::KERNEL_STACK_SIZE;
+use crate::config::BOOT_STACK_SIZE;
 
 #[naked]
 #[no_mangle]
@@ -38,6 +38,5 @@ unsafe extern "C" fn _start() -> ! {
     }
 }
 
-pub const BOOT_STACK_SIZE: usize = KERNEL_STACK_SIZE;
 #[link_section = ".bss.stack"]
 pub(crate) static mut BOOT_STACK: [u8; BOOT_STACK_SIZE] = [0; BOOT_STACK_SIZE];

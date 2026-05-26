@@ -159,7 +159,16 @@ impl Debug for VmPageStore {
 
 impl VmPageStore {
     pub fn try_clone(&self) -> Result<Self, isize> {
-        Ok(self.clone())
+        Ok(Self {
+            vpn_range: self.vpn_range,
+            frames: self.frames.clone(),
+            #[cfg(feature = "oom_handler")]
+            active: VecDeque::new(),
+            #[cfg(feature = "oom_handler")]
+            compressed: self.compressed,
+            #[cfg(feature = "oom_handler")]
+            swapped: self.swapped,
+        })
     }
 
     pub fn new(vpn_range: VPNRange) -> Self {

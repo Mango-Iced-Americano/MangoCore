@@ -42,16 +42,18 @@ struct SiteEntry {
 // ── global state ────────────────────────────────────────────────────────────
 
 struct TraceState {
-    active: &'static mut [ActiveEntry],
+    active: *mut ActiveEntry,
     active_count: usize,
     active_dropped: usize,
-    sites: &'static mut [SiteEntry],
+    sites: *mut SiteEntry,
     site_count: usize,
     site_dropped: usize,
     unknown_free: usize,
     tracked_actual: usize,
     tracked_req: usize,
 }
+
+unsafe impl Send for TraceState {}
 
 static mut ACTIVE_BUF: [ActiveEntry; ACTIVE_CAP] = [ActiveEntry {
     ptr: 0, req_size: 0, actual_size: 0, site_idx: 0,
@@ -68,10 +70,10 @@ static TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
 impl TraceState {
     const fn new() -> Self {
         Self {
-            active: unsafe { &mut *core::ptr::addr_of_mut!(ACTIVE_BUF) },
+            active: core::ptr::null_mut(),
             active_count: 0,
             active_dropped: 0,
-            sites: unsafe { &mut *core::ptr::addr_of_mut!(SITES_BUF) },
+            sites: core::ptr::null_mut(),
             site_count: 0,
             site_dropped: 0,
             unknown_free: 0,
@@ -84,6 +86,7 @@ impl TraceState {
 // ── public API ──────────────────────────────────────────────────────────────
 
 pub fn enable() {
+    TRACE.lock().init_buffers();
     TRACE_ENABLED.store(true, Ordering::Relaxed);
 }
 
@@ -96,6 +99,7 @@ pub fn record_alloc(ptr: *mut u8, layout: Layout, actual_size: usize) {
         return;
     }
     let mut trace = TRACE.lock();
+    trace.init_buffers();
     trace.record_alloc_inner(ptr as usize, layout.size(), actual_size, layout.align());
 }
 
@@ -104,6 +108,7 @@ pub fn record_dealloc(ptr: *mut u8) {
         return;
     }
     let mut trace = TRACE.lock();
+    trace.init_buffers();
     trace.record_dealloc_inner(ptr as usize);
 }
 
@@ -111,7 +116,8 @@ pub fn dump_oom(failing_layout: Layout) {
     if !is_enabled() {
         return;
     }
-    let trace = TRACE.lock();
+    let mut trace = TRACE.lock();
+    trace.init_buffers();
     trace.dump_oom_inner(failing_layout);
 }
 
@@ -119,7 +125,8 @@ pub fn print_summary() -> bool {
     if !is_enabled() {
         return false;
     }
-    let trace = TRACE.lock();
+    let mut trace = TRACE.lock();
+    trace.init_buffers();
     trace.print_summary_inner()
 }
 
@@ -179,6 +186,39 @@ unsafe fn capture_stack(pcs: &mut [usize; STACK_DEPTH]) -> usize {
 // ── table operations ────────────────────────────────────────────────────────
 
 impl TraceState {
+    fn init_buffers(&mut self) {
+        if self.active.is_null() {
+            self.active = unsafe { core::ptr::addr_of_mut!(ACTIVE_BUF).cast::<ActiveEntry>() };
+        }
+        if self.sites.is_null() {
+            self.sites = unsafe { core::ptr::addr_of_mut!(SITES_BUF).cast::<SiteEntry>() };
+        }
+    }
+
+    fn active_entry(&self, idx: usize) -> ActiveEntry {
+        debug_assert!(!self.active.is_null());
+        debug_assert!(idx < ACTIVE_CAP);
+        unsafe { *self.active.add(idx) }
+    }
+
+    fn active_entry_mut(&mut self, idx: usize) -> &mut ActiveEntry {
+        debug_assert!(!self.active.is_null());
+        debug_assert!(idx < ACTIVE_CAP);
+        unsafe { &mut *self.active.add(idx) }
+    }
+
+    fn site_entry(&self, idx: usize) -> &SiteEntry {
+        debug_assert!(!self.sites.is_null());
+        debug_assert!(idx < SITES_CAP);
+        unsafe { &*self.sites.add(idx) }
+    }
+
+    fn site_entry_mut(&mut self, idx: usize) -> &mut SiteEntry {
+        debug_assert!(!self.sites.is_null());
+        debug_assert!(idx < SITES_CAP);
+        unsafe { &mut *self.sites.add(idx) }
+    }
+
     fn active_probe(&self, ptr: usize) -> usize {
         ((ptr.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as usize) % ACTIVE_CAP
     }
@@ -208,7 +248,7 @@ impl TraceState {
             return;
         }
 
-        let site = &mut self.sites[site_idx as usize];
+        let site = self.site_entry_mut(site_idx as usize);
         site.live_req = site.live_req.wrapping_add(req);
         site.live_actual = site.live_actual.wrapping_add(actual);
         if site.live_req > site.peak_req {
@@ -227,18 +267,20 @@ impl TraceState {
         let mut idx = Self::site_probe(hash);
         let mut step: usize = 1;
         loop {
-            let site = &mut self.sites[idx];
-            if site.hash == 0 {
+            let site_hash = self.site_entry(idx).hash;
+            if site_hash == 0 {
                 if self.site_count >= SITES_CAP {
                     self.site_dropped += 1;
                     idx = hash as usize % SITES_CAP;
                     break;
                 }
+                let site = self.site_entry_mut(idx);
                 site.hash = hash;
                 site.pcs = *pcs;
                 self.site_count += 1;
                 return idx as u32;
             }
+            let site = self.site_entry(idx);
             if site.hash == hash && site.pcs == *pcs {
                 return idx as u32;
             }
@@ -261,7 +303,7 @@ impl TraceState {
         let mut idx = self.active_probe(ptr);
         let mut step: usize = 1;
         loop {
-            let entry = &mut self.active[idx];
+            let entry = self.active_entry_mut(idx);
             if entry.ptr == 0 {
                 entry.ptr = ptr;
                 entry.req_size = req;
@@ -292,7 +334,7 @@ impl TraceState {
 
         let site_idx = entry.site_idx as usize;
         if site_idx < SITES_CAP {
-            let site = &mut self.sites[site_idx];
+            let site = self.site_entry_mut(site_idx);
             site.live_req = site.live_req.wrapping_sub(entry.req_size as usize);
             site.live_actual = site.live_actual.wrapping_sub(entry.actual_size as usize);
             site.frees = site.frees.wrapping_add(1);
@@ -302,44 +344,22 @@ impl TraceState {
         self.tracked_req = self.tracked_req.wrapping_sub(entry.req_size as usize);
     }
 
-    /// Remove an entry and re-compact the probe chain so future lookups
-    /// don't hit fake misses.  Uses backward-shift deletion.
+    /// Remove an entry using the same bounded probe sequence as insertion.
+    ///
+    /// The table uses a triangular/quadratic probe sequence, so linear
+    /// backward-shift deletion would corrupt lookup chains.  Keep removal
+    /// simple: clear the matching slot, and let future lookups scan the full
+    /// bounded sequence instead of stopping at the first empty slot.
     fn active_remove(&mut self, ptr: usize) -> Option<ActiveEntry> {
-        let start = self.active_probe(ptr);
-        let mut idx = start;
+        let mut idx = self.active_probe(ptr);
         let mut step: usize = 1;
 
         loop {
-            let entry = self.active[idx];
-            if entry.ptr == 0 {
-                return None;
-            }
+            let entry = self.active_entry(idx);
             if entry.ptr == ptr {
-                // Remove this entry.
                 self.active_count = self.active_count.saturating_sub(1);
-                let result = Some(entry);
-
-                // Backward-shift: pull subsequent entries in the same
-                // probe chain forward to fill the gap.
-                let mut gap = idx;
-                loop {
-                    idx = (idx + 1) % ACTIVE_CAP;
-                    let next = self.active[idx];
-                    if next.ptr == 0 {
-                        self.active[gap].ptr = 0;
-                        return result;
-                    }
-                    let ideal = self.active_probe(next.ptr);
-                    // Does this entry belong before or at the gap?
-                    // Check if ideal is "between" gap and idx in the
-                    // circular table sense.
-                    if !in_probe_range(ideal, gap, idx) {
-                        continue;
-                    }
-                    self.active[gap] = next;
-                    self.active[idx].ptr = 0;
-                    gap = idx;
-                }
+                *self.active_entry_mut(idx) = ActiveEntry::default();
+                return Some(entry);
             }
             idx = (idx + step) % ACTIVE_CAP;
             step += 1;
@@ -355,7 +375,7 @@ impl TraceState {
         let mut top: [Option<(usize, usize)>; 20] = [None; 20];
 
         for i in 0..SITES_CAP {
-            let s = &self.sites[i];
+            let s = self.site_entry(i);
             if s.hash == 0 || s.live_actual == 0 {
                 continue;
             }
@@ -375,8 +395,13 @@ impl TraceState {
             }
         }
 
-        let sum_live_req: usize = self.sites.iter().map(|s| s.live_req).sum();
-        let sum_live_actual: usize = self.sites.iter().map(|s| s.live_actual).sum();
+        let mut sum_live_req: usize = 0;
+        let mut sum_live_actual: usize = 0;
+        for i in 0..SITES_CAP {
+            let s = self.site_entry(i);
+            sum_live_req = sum_live_req.wrapping_add(s.live_req);
+            sum_live_actual = sum_live_actual.wrapping_add(s.live_actual);
+        }
 
         println!(
             "[heap_trace] oom fail size={} align={} active={} live_req={}K live_actual={}K tracked_req={}K tracked_actual={}K dropped={}/{} unknown_free={}",
@@ -394,7 +419,7 @@ impl TraceState {
 
         for (rank, entry) in top.iter().enumerate() {
             if let Some((idx, _)) = entry {
-                let s = &self.sites[*idx];
+                let s = self.site_entry(*idx);
                 println!(
                     "[heap_trace] top_live rank={} live_req={}K live_actual={}K allocs={} frees={} peak={}K max={} site={} pcs={:#018x},{:#018x},{:#018x},{:#018x},{:#018x},{:#018x}",
                     rank + 1,
@@ -413,7 +438,7 @@ impl TraceState {
         let mut by_order = [0usize; 32];
         let mut by_order_bytes = [0usize; 32];
         for i in 0..ACTIVE_CAP {
-            let e = self.active[i];
+            let e = self.active_entry(i);
             if e.ptr == 0 {
                 continue;
             }
@@ -437,14 +462,17 @@ impl TraceState {
     // ── periodic summary ────────────────────────────────────────────────
 
     fn print_summary_inner(&self) -> bool {
-        let total_live: usize = self.sites.iter().map(|s| s.live_actual).sum();
+        let mut total_live: usize = 0;
+        for i in 0..SITES_CAP {
+            total_live = total_live.wrapping_add(self.site_entry(i).live_actual);
+        }
         if total_live < 4 * 1024 * 1024 {
             return false;
         }
 
         let mut top: [Option<(usize, usize)>; 3] = [None; 3];
         for i in 0..SITES_CAP {
-            let s = &self.sites[i];
+            let s = self.site_entry(i);
             if s.hash == 0 || s.live_actual == 0 {
                 continue;
             }
@@ -474,28 +502,26 @@ impl TraceState {
         );
         for entry in top.iter() {
             if let Some((idx, la)) = entry {
-                let s = &self.sites[*idx];
+                let s = self.site_entry(*idx);
                 // Print the first non-zero, non-obvious-hook PC.
                 let pc = first_useful_pc(&s.pcs);
                 print!(
-                    " {:#x}:{}K/{}/{}",
-                    pc, s.live_req >> 10, la >> 10, s.allocs
+                    " {:#x}:{}K/{}/{} pcs={:#x},{:#x},{:#x},{:#x},{:#x},{:#x}",
+                    pc,
+                    s.live_req >> 10,
+                    la >> 10,
+                    s.allocs,
+                    s.pcs[0],
+                    s.pcs[1],
+                    s.pcs[2],
+                    s.pcs[3],
+                    s.pcs[4],
+                    s.pcs[5],
                 );
             }
         }
         println!("");
         true
-    }
-}
-
-/// Return true if `ideal` is between `start` (inclusive) and `end`
-/// (exclusive) when moving forward in the circular table.
-fn in_probe_range(ideal: usize, start: usize, end: usize) -> bool {
-    if start <= end {
-        ideal >= start && ideal <= end
-    } else {
-        // Wrapped around
-        ideal >= start || ideal <= end
     }
 }
 

@@ -3,7 +3,7 @@
 use crate::mm::{heap_stats, unallocated_frames};
 use crate::task::{procs_count, task_manager_counts, zombie_count, TaskControlBlock};
 
-const STATS_ENABLED: bool = false;
+const STATS_ENABLED: bool = cfg!(feature = "heap_trace");
 
 fn ext4_cache_stats() -> (usize, usize, usize, usize, usize) {
     let mut pc = 0; let mut pd = 0; let mut ic = 0; let mut mb = 0; let mut md = 0;
