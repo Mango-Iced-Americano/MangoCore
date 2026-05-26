@@ -422,7 +422,25 @@ pub fn propagate_mount(
     new_child: &Arc<MountFS>,
     child_name: &str,
 ) {
+    const MAX_DEPTH: usize = 32;
+    let mut visited: Vec<usize> = Vec::new();
+    visited.push(Arc::as_ptr(source) as usize);
+    propagate_mount_inner(source, mountpoint_id, new_child, child_name, &mut visited, MAX_DEPTH);
+}
+
+fn propagate_mount_inner(
+    source: &Arc<MountFS>,
+    mountpoint_id: InodeId,
+    new_child: &Arc<MountFS>,
+    child_name: &str,
+    visited: &mut Vec<usize>,
+    max_depth: usize,
+) {
     if !source.propagation().is_shared() {
+        return;
+    }
+    if visited.len() > max_depth {
+        log::warn!("propagate_mount_inner: max depth {} exceeded", max_depth);
         return;
     }
 
@@ -433,14 +451,30 @@ pub fn propagate_mount(
         propagate_to_mount(&peer, mountpoint_id, new_child, child_name, source_child_group, false);
     }
 
-    // Propagate to slaves (receive-only from this master group)
+    // Propagate to slaves. SharedSlave receivers forward to their own peers.
     let master_gid = source.propagation().peer_group_id();
     for slave in get_slaves(master_gid) {
-        propagate_to_mount(&slave, mountpoint_id, new_child, child_name, source_child_group, true);
+        let slave_ptr = Arc::as_ptr(&slave) as usize;
+        if visited.contains(&slave_ptr) {
+            continue;
+        }
+        let created = propagate_to_mount(
+            &slave, mountpoint_id, new_child, child_name, source_child_group, true,
+        );
+        // If slave is SharedSlave and a mount was created, recurse
+        if let Some(ref created_mount) = created {
+            if slave.propagation().is_shared() {
+                visited.push(slave_ptr);
+                propagate_mount_inner(
+                    &slave, mountpoint_id, created_mount, child_name, visited, max_depth,
+                );
+            }
+        }
     }
 }
 
 /// Internal: propagate a single mount event to one target (peer or slave).
+/// Returns the created mount if successful.
 fn propagate_to_mount(
     target: &Arc<MountFS>,
     mountpoint_id: InodeId,
@@ -448,10 +482,10 @@ fn propagate_to_mount(
     child_name: &str,
     source_child_group: u32,
     as_slave: bool,
-) {
+) -> Option<Arc<MountFS>> {
     // Defensive: never propagate to the new_child itself
     if Arc::ptr_eq(target, new_child) {
-        return;
+        return None;
     }
 
     let target_root = target.covered_root_inode();
@@ -468,15 +502,13 @@ fn propagate_to_mount(
                 false,
             ) {
                 finish_propagated_mount(&new_mount, source_child_group, as_slave);
+                return Some(new_mount);
             }
-            return;
+            return None;
         }
     }
 
     // Fallback: find child directory matching child_name.
-    // Use raw inner_inode.find() to bypass overlaid_inode — propagation
-    // must land at the target parent's mountpoint level, not inside an
-    // existing child mount (which would hide the result).
     if !child_name.is_empty() {
         if let Ok(inner_inode) = target_root.inner_inode.find(child_name) {
             if let Ok(md) = inner_inode.metadata() {
@@ -487,8 +519,6 @@ fn propagate_to_mount(
                     child_name
                 );
 
-                // Use MountFS::new_with_root for the propagated clone so it
-                // shares the source child's filesystem tree.
                 let new_mount = MountFS::new_with_root(
                     new_child.inner_filesystem(),
                     new_child.root_inner_inode(),
@@ -499,18 +529,14 @@ fn propagate_to_mount(
                 new_mount.set_mount_path(Some(mount_path.clone()));
                 super::mount::MOUNT_LIST.insert(mount_path.as_str(), new_mount.clone(), Some(ino));
 
-                // overmount_and_add handles replacing any existing mount at this
-                // inode (from an earlier propagation) — the old mount is detached
-                // from peer/slave registries and MOUNT_LIST.
                 let _old = target.overmount_and_add(ino, new_mount.clone());
 
-                // If parent is shared, the new child mount inherits a fresh peer
-                // group from set_propagation_state_no_register. clear it before
-                // finish sets the correct source group.
                 finish_propagated_mount(&new_mount, source_child_group, as_slave);
+                return Some(new_mount);
             }
         }
     }
+    None
 }
 
 /// Finish setting up a propagated mount's group membership.
