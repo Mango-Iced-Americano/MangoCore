@@ -146,6 +146,52 @@ pub(crate) fn allocate_group_id() -> u32 {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Set propagation state WITHOUT registering in global registries.
+/// peer_gid: Some(id) enables Shared; master_gid: Some(id) enables Slave.
+/// When both are Some, the mount becomes SharedSlave.
+fn set_propagation_state_no_register(
+    mnt_fs: &Arc<MountFS>,
+    peer_gid: Option<u32>,
+    master_gid: Option<u32>,
+) {
+    mnt_fs.propagation().set_peer_group_id(peer_gid.unwrap_or(0));
+    mnt_fs.propagation().set_master_group_id(master_gid.unwrap_or(0));
+
+    let prop_type = match (peer_gid, master_gid) {
+        (Some(_), Some(_)) => PropagationType::SharedSlave,
+        (Some(_), None) => PropagationType::Shared,
+        (None, Some(_)) => PropagationType::Slave,
+        (None, None) => PropagationType::Private,
+    };
+    mnt_fs.propagation().set_prop_type_value(prop_type);
+}
+
+/// Re-register based on current propagation state.
+/// Must be called after propagation is complete to avoid self-peer loops.
+pub fn register_current_propagation(mnt_fs: &Arc<MountFS>) {
+    if mnt_fs.propagation().is_shared() {
+        register_peer(mnt_fs);
+    }
+    if mnt_fs.propagation().is_slave() {
+        let master = mnt_fs.propagation().master_group_id();
+        if master != 0 {
+            register_slave(mnt_fs, master);
+        }
+    }
+}
+
+/// Configure propagation state without registering. Caller must call
+/// `register_current_propagation()` after propagation is complete.
+pub fn configure_propagation_no_register(
+    mnt_fs: &Arc<MountFS>,
+    peer_gid: Option<u32>,
+    master_gid: Option<u32>,
+) {
+    unregister_peer_mount(mnt_fs);
+    unregister_slave_mount(mnt_fs);
+    set_propagation_state_no_register(mnt_fs, peer_gid, master_gid);
+}
+
 /// Unified propagation state installer. Clears old registrations, sets
 /// propagation type + peer group + master group, then registers.
 /// peer_gid: Some(id) enables Shared; master_gid: Some(id) enables Slave.
@@ -155,28 +201,10 @@ pub fn install_propagation(
     peer_gid: Option<u32>,
     master_gid: Option<u32>,
 ) {
-    // Clear old registrations
     unregister_peer_mount(mnt_fs);
     unregister_slave_mount(mnt_fs);
-    mnt_fs.propagation().set_peer_group_id(0);
-    mnt_fs.propagation().set_master_group_id(0);
-
-    let prop_type = match (peer_gid, master_gid) {
-        (Some(_), Some(_)) => PropagationType::SharedSlave,
-        (Some(_), None) => PropagationType::Shared,
-        (None, Some(_)) => PropagationType::Slave,
-        (None, None) => PropagationType::Private,
-    };
-
-    mnt_fs.propagation().set_prop_type_value(prop_type);
-    if let Some(gid) = peer_gid {
-        mnt_fs.propagation().set_peer_group_id(gid);
-        register_peer(mnt_fs);
-    }
-    if let Some(gid) = master_gid {
-        mnt_fs.propagation().set_master_group_id(gid);
-        register_slave(mnt_fs, gid);
-    }
+    set_propagation_state_no_register(mnt_fs, peer_gid, master_gid);
+    register_current_propagation(mnt_fs);
 }
 
 /// Set a mount as Shared with a freshly allocated peer group ID.
@@ -324,53 +352,59 @@ pub fn get_slaves(master_gid: u32) -> Vec<Arc<MountFS>> {
 /// Change the propagation type of a mount, managing all registry transitions.
 ///
 /// This is the canonical entry point for propagation type changes.
-/// It handles:
-/// - Shared → non-Shared: unregisters from PEER_GROUPS via unregister_peer_mount
-/// - Slave → non-Slave: unregisters from SLAVE_GROUPS
-/// - Non-Shared → Shared: allocates a new peer_group_id if needed
-/// - Non-Slave → Slave: preserves master_group_id (caller must set it first)
-/// - Shared + Slave transitions:
-///   - make-shared on Slave → SharedSlave (keeps master, allocates new peer)
-///   - make-slave on Shared → plain Slave (drops peer group)
-///   - make-slave on SharedSlave → plain Slave (drops peer, keeps master)
+/// Semantics:
+///   make-shared on Slave          → SharedSlave (keeps master, new peer group)
+///   make-shared on Shared         → Shared (new peer group)
+///   make-shared on SharedSlave    → SharedSlave (keeps master, new peer group)
+///   make-shared on Private        → Shared (new peer group)
+///   make-slave on Shared          → Slave (master = old peer group)
+///   make-slave on SharedSlave     → Slave (master = old master, drops peer)
+///   make-slave on Slave           → Slave (master = new, caller sets before)
+///   make-private / unbindable     → clear all
 pub fn set_propagation_type(mfs: &Arc<MountFS>, t: PropagationType) {
     let prop = mfs.propagation();
     let old_type = prop.prop_type();
+    let old_peer = prop.peer_group_id();
+    let old_master = prop.master_group_id();
 
-    // ── Handle Shared (peer) dimension ──
-    let leaving_shared = old_type.is_shared() && !t.is_shared();
-    let becoming_shared = !old_type.is_shared() && t.is_shared();
-    let staying_shared = old_type.is_shared() && t.is_shared();
-
-    if leaving_shared {
-        unregister_peer_mount(mfs);
-        prop.set_peer_group_id(0);
+    match t {
+        PropagationType::Shared => {
+            // Preserve slave state: Slave+Shared = SharedSlave
+            let master = if old_type.is_slave() { Some(old_master) } else { None };
+            unregister_peer_mount(mfs);
+            unregister_slave_mount(mfs);
+            let new_peer = allocate_group_id();
+            set_propagation_state_no_register(mfs, Some(new_peer), master);
+            register_current_propagation(mfs);
+        }
+        PropagationType::Slave => {
+            // Master = old peer group if old was Shared/SharedSlave
+            let master = if old_type.is_shared() { old_peer }
+                else { old_master };
+            unregister_peer_mount(mfs);
+            unregister_slave_mount(mfs);
+            let new_master = if master != 0 { Some(master) } else { None };
+            set_propagation_state_no_register(mfs, None, new_master);
+            prop.set_master_group_id(new_master.unwrap_or(0));
+            register_current_propagation(mfs);
+        }
+        PropagationType::Private | PropagationType::Unbindable => {
+            unregister_peer_mount(mfs);
+            unregister_slave_mount(mfs);
+            set_propagation_state_no_register(mfs, None, None);
+            if t == PropagationType::Unbindable {
+                prop.set_prop_type_value(PropagationType::Unbindable);
+            }
+        }
+        _ => {
+            // SharedSlave — not reachable via external API, treat as Shared
+            unregister_peer_mount(mfs);
+            unregister_slave_mount(mfs);
+            let new_peer = allocate_group_id();
+            set_propagation_state_no_register(mfs, Some(new_peer), Some(old_master));
+            register_current_propagation(mfs);
+        }
     }
-    if staying_shared {
-        // Shared→Shared or SharedSlave→Shared: unregister old peer, re-allocate
-        unregister_peer_mount(mfs);
-        prop.set_peer_group_id(0);
-    }
-    if becoming_shared || (staying_shared && prop.peer_group_id() == 0) {
-        prop.set_peer_group_id(allocate_group_id());
-    }
-
-    // ── Handle Slave (master) dimension ──
-    let leaving_slave = old_type.is_slave() && !t.is_slave();
-    let _becoming_slave = !old_type.is_slave() && t.is_slave();
-    let staying_slave = old_type.is_slave() && t.is_slave();
-
-    if leaving_slave {
-        unregister_slave_mount(mfs);
-        prop.set_master_group_id(0);
-    }
-    if staying_slave && t != PropagationType::SharedSlave && old_type == PropagationType::Slave {
-        // Slave→Slave with different master: caller must have set new master already;
-        // just unregister old, keep new master_group_id intact.
-        unregister_slave_mount(mfs);
-    }
-
-    prop.set_prop_type_value(t);
 }
 
 // ============================================================================
