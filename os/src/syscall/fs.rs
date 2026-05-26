@@ -2971,36 +2971,24 @@ pub fn sys_mount(
         return ENODEV;
     }
 
-    // Get the parent MountFS via downcast
-    let parent_mount_fs = if let Some(mfs_inode) =
-        (target_inode.as_any_ref().downcast_ref::<vfs::MountFSInode>())
-    {
-        mfs_inode.mount_fs.clone()
-    } else {
-        crate::fs::vfs_root().clone()
+    // Use mount_subtree_inner to go through the shared-parent propagation
+    // path. The raw MountFS::new() + add_mount() path would bypass child
+    // peer group allocation and mount event propagation.
+    let target_mfs_inode = match target_inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+        Some(m) => m,
+        None => return EINVAL,
     };
 
-    // Create a tmpfs-backed MountFS and register it
-    let tmpfs = crate::fs::ramfs::RamFS::new_with_quota(4096);
+    let tmpfs: Arc<dyn vfs::FileSystem> = crate::fs::ramfs::RamFS::new_with_quota(4096);
+    let root_inode = tmpfs.root_inode();
     let mnt_flags = vfs::MountFlags::from_bits_truncate(mountflags.bits() as u32);
-    let mnt_fs = vfs::MountFS::new(tmpfs, mnt_flags);
 
-    parent_mount_fs.add_mount(inode_id, mnt_fs.clone())
-        .map(|_| {
-            if let Some(target_mnt) = target_inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
-                let backref = vfs::MountFSInode::new(
-                    target_mnt.inner_inode.clone(),
-                    target_mnt.mount_fs.clone(),
-                );
-                mnt_fs.set_self_mountpoint(Some(backref));
-            }
-            mnt_fs.set_mount_path(Some(lookup_path));
-            SUCCESS
-        })
-        .unwrap_or_else(|e| {
-            error!("[sys_mount] add_mount failed: errno={}", e as isize);
-            -(e as isize)
-        })
+    match target_mfs_inode.mount_subtree_inner(
+        tmpfs, root_inode, mnt_flags, Some(lookup_path), true,
+    ) {
+        Ok(_) => SUCCESS,
+        Err(e) => -(e as isize),
+    }
 }
 
 bitflags! {
