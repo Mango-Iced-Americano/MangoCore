@@ -290,6 +290,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | LTP cgroup 脚本触发 `syslog/klogctl` panic 或 `syslog12` 非 root 失败 | `sys_syslog()` 对 READ_CLEAR/CLEAR/console/size action 留了 `todo!()`，用户拷贝 `unwrap()`，且缺少权限检查 | 所有 action 返回稳定 errno/成功值，用户指针错误返回错误码；除 READ_ALL/SIZE_BUFFER 外需 root 或 `CAP_SYS_ADMIN/CAP_SYSLOG` |
 | LTP nice05 动态 CPU clock 失败 | glibc 使用负数动态 clock id，且相邻 nice 在单核调度中差异太小 | 解码动态 CPU clock id，并让 `CPUCLOCK_SCHED`/调度统计体现 nice |
 | `futex_cmp_requeue01` 1000 waiter 通过 Test 5 后 30s timeout | nice-aware scheduler 每次 `fetch_task()` 都全队列扫描，默认 nice=0 的大量 waiter 变成 O(n²) 调度开销 | ready 队列记录非默认 nice 数量；全 nice=0 时走 FIFO fast path，非默认 nice 存在时才扫描；`wait(-1)` 大量回收用 `swap_remove` |
+| futex/eventfd/epoll/IPC wake-all 路径随 waiter 数量明显变慢 | `WaitQueue::wake_at_most()` 每唤醒一个任务都扫描全局 `interruptible_queue`/`ready_queue`；`prepare_to_wait()` 每次入队前也扫等待队列查重 | 批量收集待唤醒任务，一次性更新 `TASK_MANAGER` 队列；内部 wait helpers 已保证 prepare/finish 配对时不要做冗余查重 |
 | glibc pthread cancel 缺库 | 测试镜像缺少架构匹配 `libgcc_s.so.1` | initproc 写入 `/glibc/lib/libgcc_s.so.1` 后再链接到 `/lib` |
 | pidfd_send_signal 对 `/proc/<pid>` fd 返回 EBADF | procfs inode 被 MountFSInode 包装，且 `/proc/<pid>` 目录未记录 pid | 解包 MountFSInode 后识别 LockedProcInode，并在 pid 目录 `extra_data` 保存 pid |
 | pidfd_getfd 已退出目标返回 EBADF | wait 后 zombie 进程仍可被 registry 查到，但 fd table 已关闭 | 目标进程 zombie 时按 Linux 语义返回 `ESRCH` |

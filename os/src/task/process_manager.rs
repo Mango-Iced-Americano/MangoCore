@@ -115,23 +115,25 @@ impl ProcessManager {
                 return Some(ECHILD);
             }
 
-            for child in process_inner.children.iter() {
-                let child_inner = child.acquire_inner_lock();
-                let matched = child_matches_pid(child.pid, child_inner.pgid, caller_pgid, pid);
-                drop(child_inner);
-                if !matched {
-                    continue;
-                }
-                if report_stopped {
-                    if let Some(status) = child.take_stopped_status(nowait) {
-                        wait_status.set(status);
-                        return Some(child.pid as isize);
+            if report_stopped || report_continued {
+                for child in process_inner.children.iter() {
+                    let child_inner = child.acquire_inner_lock();
+                    let matched = child_matches_pid(child.pid, child_inner.pgid, caller_pgid, pid);
+                    drop(child_inner);
+                    if !matched {
+                        continue;
                     }
-                }
-                if report_continued {
-                    if let Some(status) = child.take_continued_status(nowait) {
-                        wait_status.set(status);
-                        return Some(child.pid as isize);
+                    if report_stopped {
+                        if let Some(status) = child.take_stopped_status(nowait) {
+                            wait_status.set(status);
+                            return Some(child.pid as isize);
+                        }
+                    }
+                    if report_continued {
+                        if let Some(status) = child.take_continued_status(nowait) {
+                            wait_status.set(status);
+                            return Some(child.pid as isize);
+                        }
                     }
                 }
             }
