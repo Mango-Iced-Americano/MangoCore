@@ -2916,7 +2916,7 @@ pub fn sys_mount(
 
         // Success: update to new parent
         let new_backref =
-            vfs::MountFSInode::new(target_mnt_inode.inner_inode.clone(), new_parent_mnt);
+            vfs::MountFSInode::new(target_mnt_inode.inner_inode.clone(), new_parent_mnt.clone());
         src_mnt.set_self_mountpoint(Some(new_backref));
 
         let old_prefix = old_path.clone();
@@ -2961,6 +2961,32 @@ pub fn sys_mount(
                     let mps = child.mountpoints.lock();
                     for gc in mps.values() {
                         queue.push(gc.clone());
+                    }
+                }
+            }
+        }
+
+        // Propagate moved mount tree to new parent's peers.
+        // collect_rbind_snapshot captures the subtree BEFORE we return.
+        if new_parent_mnt.propagation().is_shared() {
+            let snapshot = collect_rbind_snapshot(
+                src_mnt.clone(),
+                src_mnt.mountpoint_root_inode(),
+            );
+            let child_name = new_prefix.rsplit('/').next().unwrap_or("");
+            vfs::propagation::propagate_mount(
+                &new_parent_mnt, inode_id, &src_mnt, child_name,
+            );
+            if !snapshot.is_empty() {
+                for peer in vfs::propagation::get_peers(&new_parent_mnt) {
+                    let peer_clone = {
+                        let mps = peer.mountpoints.lock();
+                        mps.get(&inode_id).cloned()
+                    };
+                    if let Some(clone) = peer_clone {
+                        let _ = apply_rbind_snapshot(
+                            &snapshot, src_mnt.clone(), clone, &new_prefix,
+                        );
                     }
                 }
             }
