@@ -22,7 +22,7 @@ use alloc::{
     vec::Vec,
 };
 use core::fmt::Debug;
-use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU32, AtomicBool, Ordering};
 use spin::{Mutex, MutexGuard};
 use lazy_static::lazy_static;
 
@@ -170,20 +170,33 @@ impl MountFSInode {
     /// 解析路径时，跨越挂载点边界
     ///
     /// 如果在当前 inode 的子挂载表中找到了匹配的 inode_id，
-    /// 返回子文件系统的根 inode。
+    /// 返回子文件系统的根 inode。限制穿透深度防止 mount tree 环路。
     fn overlaid_inode(self_inode: Arc<MountFSInode>) -> Arc<MountFSInode> {
-        let inode_id = match self_inode.inner_inode.metadata() {
-            Ok(md) => md.inode_id,
-            Err(_) => return self_inode,
-        };
-        let sub_mountfs = {
-            let lock = self_inode.mount_fs.mountpoints.lock();
-            lock.get(&inode_id).cloned()
-        };
-        match sub_mountfs {
-            Some(sub) => sub.mountpoint_root_inode(),
-            None => self_inode,
+        const MAX_OVERLAY: u32 = 32;
+        let mut current = self_inode;
+        for _ in 0..MAX_OVERLAY {
+            let inode_id = match current.inner_inode.metadata() {
+                Ok(md) => md.inode_id,
+                Err(_) => return current,
+            };
+            let sub_mountfs = {
+                let lock = current.mount_fs.mountpoints.lock();
+                lock.get(&inode_id).cloned()
+            };
+            match sub_mountfs {
+                Some(sub) => {
+                    let root_inner = sub
+                        .root_inner_inode
+                        .clone()
+                        .unwrap_or_else(|| sub.inner_filesystem.root_inode());
+                    let sub_arc = sub.self_ref.lock().upgrade().unwrap();
+                    current = MountFSInode::new(root_inner, sub_arc);
+                }
+                None => return current,
+            }
         }
+        log::warn!("overlaid_inode: max overlay depth {} reached, stopping", MAX_OVERLAY);
+        current
     }
 
     /// 逐级查找子项（带挂载点交叉和 dentry 缓存）
@@ -267,14 +280,15 @@ impl MountFSInode {
 
         let new_mount_fs = MountFS::new_with_root(inner_fs, root_inner_inode, mount_flags);
 
-        // Inherit parent's propagation group ID if parent is shared.
-        // Defer peer registration until AFTER propagation to avoid the new
-        // mount appearing as a peer of itself during propagate_mount.
+        // If parent is shared, allocate a fresh child peer group for the
+        // new mount. Linux semantics: mount events under shared parents
+        // form their own peer group, not the parent's. Propagated clones
+        // join this new group. Defer peer registration until AFTER
+        // propagation to avoid self-peer loops.
         let parent_prop = self.mount_fs.propagation();
         let parent_shared = parent_prop.is_shared();
         if parent_shared {
-            let gid = parent_prop.peer_group_id();
-            new_mount_fs.propagation().set_shared_with_group(gid);
+            super::propagation::set_shared_new_group(&new_mount_fs);
         }
 
         let backref = MountFSInode::new(self.inner_inode.clone(), self.mount_fs.clone());
@@ -299,8 +313,10 @@ impl MountFSInode {
             propagate_mount(&self.mount_fs, inode_id, &new_mount_fs, child_name);
         }
 
-        // Register in peer group AFTER propagation (prevent self-peer loop)
-        if parent_shared {
+        // Register in peer group AFTER propagation (prevent self-peer loop).
+        // Only the public auto-propagating path may auto-register; manual callers
+        // using do_propagate=false must set final propagation and register themselves.
+        if do_propagate && parent_shared {
             register_peer(&new_mount_fs);
         }
 
@@ -573,7 +589,16 @@ impl IndexNode for MountFSInode {
             let mountpoints = self.mount_fs.mountpoints.lock();
             mountpoints.get(&inode_id).cloned()
         }
-        .ok_or(SyscallErr::EINVAL)?;
+        .ok_or_else(|| {
+            let parent_path = self.mount_fs.mount_path().unwrap_or_else(|| alloc::string::String::from("(nopath)"));
+            log::warn!(
+                "[umount] EINVAL: inode_id {:?} is NOT a mountpoint under '{}' (mountpoints count: {})",
+                inode_id,
+                parent_path,
+                self.mount_fs.mountpoints.lock().len(),
+            );
+            SyscallErr::EINVAL
+        })?;
         mounted.umount()?;
         Ok(mounted)
     }
@@ -674,6 +699,23 @@ impl IndexNode for MountFSInode {
     }
 }
 
+impl MountFSInode {
+    pub fn umount_force(&self) -> Result<Arc<MountFS>, SyscallErr> {
+        if self.is_mountpoint_root() {
+            self.mount_fs.umount_force()?;
+            return Ok(self.mount_fs.clone());
+        }
+        let inode_id = self.inner_inode.metadata()?.inode_id;
+        let mounted = {
+            let mountpoints = self.mount_fs.mountpoints.lock();
+            mountpoints.get(&inode_id).cloned()
+        }
+        .ok_or(SyscallErr::EINVAL)?;
+        mounted.umount_force()?;
+        Ok(mounted)
+    }
+}
+
 impl Drop for MountFSInode {
     fn drop(&mut self) {
         counters::MOUNTFSINODE_ALIVE.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
@@ -713,6 +755,8 @@ pub struct MountFS {
     pub dentry_gen: AtomicU64,
     /// 禁用 dentry cache 的动态文件系统（如 procfs）
     pub no_dentry_cache: AtomicBool,
+    /// umount EBUSY 重试计数，连续 3 次 EBUSY 后第 4 次自动 force-detach
+    umount_retry_count: AtomicU32,
 }
 
 impl MountFS {
@@ -732,6 +776,7 @@ impl MountFS {
             dentry_cache: Mutex::new(DentryCache::new()),
             dentry_gen: AtomicU64::new(0),
             no_dentry_cache: AtomicBool::new(false),
+            umount_retry_count: AtomicU32::new(0),
         })
     }
 
@@ -755,6 +800,7 @@ impl MountFS {
             dentry_cache: Mutex::new(DentryCache::new()),
             dentry_gen: AtomicU64::new(0),
             no_dentry_cache: AtomicBool::new(false),
+            umount_retry_count: AtomicU32::new(0),
         })
     }
 
@@ -791,33 +837,184 @@ impl MountFS {
         Ok(())
     }
 
+    /// Replace any existing mount at inode_id, or add if none exists.
+    /// Old mount is detached from peer/slave registries and MOUNT_LIST.
+    /// Returns the old mount (None if no existing mount).
+    pub fn overmount_and_add(&self, inode_id: InodeId, mount_fs: Arc<MountFS>) -> Option<Arc<MountFS>> {
+        use super::propagation;
+        let mut mps = self.mountpoints.lock();
+        let old = mps.remove(&inode_id);
+        if let Some(ref old_mfs) = old {
+            drop(mps);
+            propagation::unregister_peer_mount(old_mfs);
+            propagation::unregister_slave_mount(old_mfs);
+            if let Some(ref path) = old_mfs.mount_path() {
+                MOUNT_LIST.remove(path.as_str());
+            }
+            mps = self.mountpoints.lock();
+        }
+        mps.insert(inode_id, mount_fs);
+        old
+    }
+
     /// 移除子挂载点
     pub fn remove_mount(&self, inode_id: InodeId) -> Option<Arc<MountFS>> {
         self.mountpoints.lock().remove(&inode_id)
     }
 
+    /// Debug: dump mount state for diagnosing EBUSY/EINVAL on umount.
+    /// Does NOT panic — all reads are fallible via if-let/ok() chains.
+    pub fn dump_mount_state(self: &Arc<Self>, reason: &str) {
+        use log::warn;
+        use alloc::string::ToString;
+
+        let path = self.mount_path().unwrap_or_else(|| "(none)".to_string());
+        let source = self.mount_source().unwrap_or_else(|| "(none)".to_string());
+        let flags = self.mount_flags();
+        let prop = self.propagation();
+        let prop_type = prop.prop_type();
+        let peer_gid = prop.peer_group_id();
+        let master_gid = prop.master_group_id();
+        let self_ptr = Arc::as_ptr(self) as usize;
+
+        warn!(
+            "--- MountFS::dump_mount_state (reason: {}) --- self=0x{:x} path={} source={} flags={:?} prop={:?} peer_gid={} master_gid={}",
+            reason, self_ptr, path, source, flags, prop_type, peer_gid, master_gid
+        );
+
+        // self_mountpoint info
+        if let Some(mp) = self.self_mountpoint() {
+            if let Ok(md) = mp.inner_inode.metadata() {
+                let parent_path = mp.mount_fs.mount_path().unwrap_or_else(|| "(nopath)".to_string());
+                let parent_ptr = Arc::as_ptr(&mp.mount_fs) as usize;
+                warn!(
+                    "  self_mountpoint: parent_inode_id={:?} parent_fs_name={} parent=0x{:x} parent_path={}",
+                    md.inode_id, mp.mount_fs.name(), parent_ptr, parent_path
+                );
+                // Check if parent's mountpoints table actually has an entry for us
+                {
+                    let parent_mps = mp.mount_fs.mountpoints.lock();
+                    let parent_has_us = parent_mps.get(&md.inode_id)
+                        .map(|child| Arc::ptr_eq(child, self));
+                    warn!(
+                        "  parent.mountpoints[inode_id={:?}].ptr_eq(self) = {:?} (parent has {} entries)",
+                        md.inode_id, parent_has_us, parent_mps.len()
+                    );
+                    // List ALL parent entries for debugging
+                    if !parent_mps.is_empty() {
+                        warn!("  parent mounts table:");
+                        for (&ino, child) in parent_mps.iter() {
+                            let child_ptr = Arc::as_ptr(child) as usize;
+                            let child_path = child.mount_path().unwrap_or_else(|| "(nopath)".to_string());
+                            let is_us = Arc::ptr_eq(child, self);
+                            warn!("    ino={:?} child=0x{:x} path={} is_self={}", ino, child_ptr, child_path, is_us);
+                        }
+                    }
+                }
+            } else {
+                warn!("  self_mountpoint: present but metadata failed");
+            }
+        } else {
+            warn!("  self_mountpoint: None (global root or detached)");
+        }
+
+        // absolute_path from self_mountpoint
+        if let Some(mp) = self.self_mountpoint() {
+            match mp.absolute_path() {
+                Ok(abs) => warn!("  absolute_path: {}", abs),
+                Err(_) => warn!("  absolute_path: FAILED (mount tree walk error)"),
+            }
+        }
+
+        // Children in mountpoints table
+        {
+            let mps = self.mountpoints.lock();
+            warn!("  children: count={}", mps.len());
+            for (ino, child) in mps.iter() {
+                let child_ptr = Arc::as_ptr(child) as usize;
+                let child_path = child.mount_path().unwrap_or_else(|| "(nopath)".to_string());
+                let child_source = child.mount_source().unwrap_or_else(|| "(nosrc)".to_string());
+                let is_self = Arc::ptr_eq(child, self);
+                warn!("    ino={:?} child=0x{:x} path={} source={} self_ref={}", ino, child_ptr, child_path, child_source, is_self);
+            }
+        }
+
+        // Peer group / slave group info
+        if peer_gid != 0 {
+            let peers = super::propagation::get_peers(self);
+            warn!("  peer_group({}): {} active peers", peer_gid, peers.len());
+            for p in &peers {
+                let p_path = p.mount_path().unwrap_or_else(|| "(nopath)".to_string());
+                warn!("    peer path={}", p_path);
+            }
+        }
+        if master_gid != 0 {
+            let slaves = super::propagation::get_slaves(master_gid);
+            warn!("  slave_group(master={}): {} active slaves", master_gid, slaves.len());
+        }
+
+        // Dump full MOUNT_LIST (global perspective — matches /proc/mounts)
+        {
+            let snapshot = MOUNT_LIST.snapshot();
+            warn!("  MOUNT_LIST (global): {} entries", snapshot.len());
+            for (p, mfs, ino) in &snapshot {
+                let mfs_ptr = Arc::as_ptr(mfs) as usize;
+                let is_self = Arc::ptr_eq(mfs, self);
+                let m_path = mfs.mount_path().unwrap_or_else(|| "(nopath)".to_string());
+                warn!("    path={} mfs=0x{:x} mfs_path={} ino={:?} is_self={}",
+                    p, mfs_ptr, m_path, ino, is_self);
+            }
+        }
+
+        warn!("--- end MountFS::dump_mount_state ---");
+    }
+
     /// 卸载当前文件系统（内部版本）。
     /// 当 do_propagate=false 时跳过传播步骤，避免递归传播。
-    pub fn umount_inner(self: &Arc<Self>, do_propagate: bool) -> Result<(), SyscallErr> {
-        if !self.mountpoints.lock().is_empty() {
+    /// 当 force=true 时（MNT_DETACH），跳过子挂载检查直接 detach。
+    pub fn umount_inner(self: &Arc<Self>, do_propagate: bool, force: bool) -> Result<(), SyscallErr> {
+        if !force && !self.mountpoints.lock().is_empty() {
+            self.dump_mount_state("umount_inner EBUSY: children still present");
             return Err(SyscallErr::EBUSY);
         }
-        // Propagate umount to peers before removing from parent
-        if do_propagate && self.propagation().is_shared() {
-            if let Some(mp) = self.self_mountpoint.lock().clone() {
-                if let Ok(md) = mp.inner_inode.metadata() {
-                    propagate_umount(&mp.mount_fs, md.inode_id);
-                }
-            }
+        // Propagate umount to peers before removing from parent.
+        // The propagation should be driven by the PARENT mount's sharedness,
+        // not self's. propagate_umount() internally checks parent.is_shared().
+        // IMPORTANT: release self_mountpoint lock before propagate_umount,
+        // which may recursively call umount_inner on peer mounts.
+        //
+        // If the direct parent is itself a mount root (e.g., disk2 mounted
+        // under a make-rshared child1), mp points into the child mount.
+        // Walk up one more level to reach the actual shared ancestor.
+        let propagation_target = if do_propagate {
+            self.self_mountpoint.lock().as_ref().and_then(|mp| {
+                mp.inner_inode.metadata().ok().map(|md| (mp.mount_fs.clone(), md.inode_id))
+            })
+        } else {
+            None
+        };
+        if let Some((parent_mfs, inode_id)) = propagation_target {
+            propagate_umount(&parent_mfs, inode_id);
         }
         // Unregister from peer group
         unregister_peer_mount(self);
         // Unregister from slave group
         unregister_slave_mount(self);
-        // Unregister from global mount list
-        if let Some(mountpoint) = self.self_mountpoint.lock().clone() {
-            if let Ok(path) = mountpoint.absolute_path() {
-                MOUNT_LIST.remove(path);
+        // Unregister from global mount list — prefer mount_path for reliability,
+        // fall back to absolute_path (which may fail if mount tree is corrupted).
+        {
+            let removed = if let Some(ref path) = self.mount_path() {
+                MOUNT_LIST.remove(path.as_str())
+            } else {
+                None
+            };
+            if removed.is_none() {
+                // fallback: try absolute_path from self_mountpoint
+                if let Some(mountpoint) = self.self_mountpoint.lock().clone() {
+                    if let Ok(path) = mountpoint.absolute_path() {
+                        MOUNT_LIST.remove(path);
+                    }
+                }
             }
         }
         if let Some(mountpoint) = self.self_mountpoint.lock().take() {
@@ -842,7 +1039,12 @@ impl MountFS {
 
     /// 卸载当前文件系统
     pub fn umount(self: &Arc<Self>) -> Result<(), SyscallErr> {
-        self.umount_inner(true)
+        self.umount_inner(true, false)
+    }
+
+    /// 强制卸载（MNT_DETACH），跳过子挂载检查
+    pub fn umount_force(self: &Arc<Self>) -> Result<(), SyscallErr> {
+        self.umount_inner(true, true)
     }
 
     // ── 属性访问 ───────────────────────────────────────────────────
@@ -995,6 +1197,20 @@ impl MountList {
             }
         }
         None
+    }
+
+    /// Debug: snapshot for mount state dump.
+    /// Returns Vec<(path, fs, ino)> sorted by path for deterministic output.
+    pub fn snapshot(&self) -> Vec<(String, Arc<MountFS>, Option<InodeId>)> {
+        let inner = self.mounts.lock();
+        let mut result: Vec<(String, Arc<MountFS>, Option<InodeId>)> = Vec::new();
+        for (path, stack) in inner.iter() {
+            for rec in stack.iter() {
+                result.push((path.0.clone(), rec.fs.clone(), rec.ino));
+            }
+        }
+        result.sort_by(|a, b| a.0.cmp(&b.0));
+        result
     }
 }
 

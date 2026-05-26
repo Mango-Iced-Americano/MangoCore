@@ -2523,6 +2523,8 @@ pub fn sys_umount2(target: *const u8, flags: u32) -> isize {
         Some(flags) => flags,
         None => return EINVAL,
     };
+    let is_detach = flags.contains(UmountFlags::MNT_DETACH);
+    let is_force = flags.contains(UmountFlags::MNT_FORCE);
     info!("[sys_umount2] target: {}, flags: {:?}", target, flags);
     let (lookup_inode, lookup_path) = {
         let task = current_task().unwrap();
@@ -2544,11 +2546,35 @@ pub fn sys_umount2(target: *const u8, flags: u32) -> isize {
             return errno;
         }
     };
-    match inode.umount() {
-        Ok(_) => SUCCESS,
-        Err(e) => {
-            error!("[sys_umount2] inode.umount() failed for '{}': errno={}", lookup_path, e as isize);
-            -(e as isize)
+    // Debug: log what we got from vfs_lookup to help diagnose EINVAL
+    if inode.as_any_ref().downcast_ref::<vfs::MountFSInode>().is_some() {
+        info!("[sys_umount2] lookup '{}' → MountFSInode", lookup_path);
+    } else {
+        info!("[sys_umount2] lookup '{}' → non-MountFSInode — will likely fail as not a mountpoint",
+            lookup_path,
+        );
+    }
+    if is_detach {
+        // MNT_DETACH: lazy umount, force-detach even with children
+        if let Some(mfs_inode) = inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+            match mfs_inode.umount_force() {
+                Ok(_) => SUCCESS,
+                Err(e) => {
+                    error!("[sys_umount2] MNT_DETACH umount_force failed for '{}': errno={}", lookup_path, e as isize);
+                    -(e as isize)
+                }
+            }
+        } else {
+            error!("[sys_umount2] MNT_DETACH on non-MountFSInode '{}'", lookup_path);
+            EINVAL
+        }
+    } else {
+        match inode.umount() {
+            Ok(_) => SUCCESS,
+            Err(e) => {
+                error!("[sys_umount2] inode.umount() failed for '{}': errno={}", lookup_path, e as isize);
+                -(e as isize)
+            }
         }
     }
 }
@@ -2595,13 +2621,13 @@ fn do_bind_mount(
     lookup_path: &str,
     target_inode: Arc<dyn vfs::IndexNode>,
     mountflags: MountFlags,
-) -> isize {
+) -> Result<Arc<vfs::MountFS>, isize> {
     let source_path = if source.is_null() {
-        return EINVAL;
+        return Err(EINVAL);
     } else {
         match user_cstring(token, source) {
             Ok(s) => s,
-            Err(errno) => return errno,
+            Err(errno) => return Err(errno),
         }
     };
 
@@ -2609,29 +2635,39 @@ fn do_bind_mount(
         Ok(inode) => inode,
         Err(errno) => {
             error!("[do_bind_mount] vfs_lookup source '{}' failed: {}", source_path, errno);
-            return errno;
+            return Err(errno);
         }
     };
 
     let source_mfs_inode = match source_inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
         Some(mfs) => mfs,
-        None => return EINVAL,
+        None => return Err(EINVAL),
     };
     let source_mount_fs = source_mfs_inode.mount_fs.clone();
     let source_inner: Arc<dyn vfs::IndexNode> = source_mfs_inode.inner_inode.clone();
 
+    // Reject bind mount from unbindable source
+    if source_mount_fs.propagation().is_unbindable() {
+        warn!("[do_bind_mount] source mount '{}' is unbindable, refusing bind", source_path);
+        return Err(EINVAL);
+    }
+
     // Collect recursive bind snapshot BEFORE creating base mount, so the
     // new mnt_fs doesn't pollute the source mount tree during snapshotting.
+    // Skip unbindable submounts — they must not be replicated.
     let rbind_snapshot: Option<Vec<(Arc<vfs::MountFS>, Arc<vfs::MountFS>, alloc::string::String)>> =
         if mountflags.contains(MountFlags::MS_REC) {
-            Some(collect_rbind_snapshot(source_mount_fs.clone(), source_inner.clone()))
+            let mut snapshot = collect_rbind_snapshot(source_mount_fs.clone(), source_inner.clone());
+            // Filter out unbindable submounts
+            snapshot.retain(|(child_mfs, _, _)| !child_mfs.propagation().is_unbindable());
+            Some(snapshot)
         } else {
             None
         };
 
     let target_mfs_inode = match target_inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
         Some(mfs) => mfs,
-        None => return EINVAL,
+        None => return Err(EINVAL),
     };
 
     let mnt_flags = vfs::MountFlags::from_bits_truncate(mountflags.bits() as u32);
@@ -2646,42 +2682,111 @@ fn do_bind_mount(
         false,
     ) {
         Ok(fs) => fs,
-        Err(e) => return -(e as isize),
+        Err(e) => return Err(-(e as isize)),
     };
     mnt_fs.set_mount_source(Some(source_path));
 
     // Set up propagation matching the source mount.
     // The mount_subtree_inner(false) already inherited the parent's group ID
-    // (if parent shared) but didn't register in PEER_GROUPS.
-    // Unregister from parent's group first, then apply source's propagation.
-    let parent_gid = mnt_fs.propagation().peer_group_id();
+    // (if parent shared) but did NOT register in PEER_GROUPS.
+    // Unconditionally unregister from parent's group, then apply source's propagation.
+    let inherited_gid = mnt_fs.propagation().peer_group_id();
+    if inherited_gid != 0 {
+        vfs::propagation::unregister_peer_mount(&mnt_fs);
+    }
     let source_prop = source_mount_fs.propagation();
     let source_is_shared = source_prop.is_shared();
     let source_gid = source_prop.peer_group_id();
 
-    if parent_gid != 0 && parent_gid != source_gid {
-        vfs::propagation::unregister_peer_mount(&mnt_fs);
-    }
-
-    if source_is_shared {
-        mnt_fs.propagation().set_shared_with_group(source_gid);
-        vfs::propagation::register_peer(&mnt_fs);
+    // Compute desired (peer_gid, master_gid) from source + inherited context
+    let desired_peer: Option<u32> = if source_is_shared {
+        Some(source_gid)
+    } else if inherited_gid != 0 {
+        // Private source under shared target parent → join target's child group
+        Some(inherited_gid)
     } else {
-        // Source is not shared — set to Private to clear parent's shared group
-        vfs::propagation::set_propagation_type(&mnt_fs, vfs::propagation::PropagationType::Private);
-    }
-
-    // Now propagate to peers with the correct (source) group
-    let target_md = match target_inode.metadata() {
-        Ok(md) => md,
-        Err(e) => return -(e as isize),
+        None
     };
-    let target_ino = target_md.inode_id;
+    let desired_master: Option<u32> = if source_prop.is_slave() {
+        let mgid = source_prop.master_group_id();
+        if mgid != 0 { Some(mgid) } else { None }
+    } else {
+        None
+    };
+
+    vfs::propagation::configure_propagation_no_register(&mnt_fs, desired_peer, desired_master);
+
+    // Propagate mount event. The propagation source is the mount that HOLDS
+    // the mountpoint. If the target is itself a mount root (e.g. bind17's
+    // make-rshared parent1/child1), target_mfs_inode.mount_fs is the child
+    // mount. Walk up via self_mountpoint to reach the actual parent.
+    // Only walk up when the child mount is Shared but orphan (no peers).
+    // Private child mounts should never trigger propagation at all.
+    let (target_parent_mfs, target_ino) =
+        if target_mfs_inode.is_mountpoint_root() {
+            let child_mfs = target_mfs_inode.mount_fs.clone();
+            let child_is_orphan_shared = child_mfs.propagation().is_shared()
+                && vfs::propagation::get_peers(&child_mfs).is_empty();
+            if child_is_orphan_shared {
+                if let Some(mp) = child_mfs.self_mountpoint() {
+                    let ino = match mp.inner_inode.metadata() {
+                        Ok(md) => md.inode_id,
+                        Err(_) => {
+                            vfs::propagation::unregister_peer_mount(&mnt_fs);
+                            vfs::propagation::unregister_slave_mount(&mnt_fs);
+                            mnt_fs.propagation().set_peer_group_id(0);
+                            mnt_fs.propagation().set_master_group_id(0);
+                            return Err(-(SyscallErr::EIO as isize));
+                        }
+                    };
+                    (mp.mount_fs.clone(), ino)
+                } else {
+                    let md = match target_inode.metadata() {
+                        Ok(md) => md,
+                        Err(_) => {
+                            vfs::propagation::unregister_peer_mount(&mnt_fs);
+                            vfs::propagation::unregister_slave_mount(&mnt_fs);
+                            mnt_fs.propagation().set_peer_group_id(0);
+                            mnt_fs.propagation().set_master_group_id(0);
+                            return Err(-(SyscallErr::EIO as isize));
+                        }
+                    };
+                    (child_mfs.clone(), md.inode_id)
+                }
+            } else {
+                let md = match target_inode.metadata() {
+                    Ok(md) => md,
+                    Err(_) => {
+                        vfs::propagation::unregister_peer_mount(&mnt_fs);
+                        vfs::propagation::unregister_slave_mount(&mnt_fs);
+                        mnt_fs.propagation().set_peer_group_id(0);
+                        mnt_fs.propagation().set_master_group_id(0);
+                        return Err(-(SyscallErr::EIO as isize));
+                    }
+                };
+                (child_mfs, md.inode_id)
+            }
+        } else {
+            let md = match target_inode.metadata() {
+                Ok(md) => md,
+                Err(_) => {
+                    vfs::propagation::unregister_peer_mount(&mnt_fs);
+                    vfs::propagation::unregister_slave_mount(&mnt_fs);
+                    mnt_fs.propagation().set_peer_group_id(0);
+                    mnt_fs.propagation().set_master_group_id(0);
+                    return Err(-(SyscallErr::EIO as isize));
+                }
+            };
+            (target_mfs_inode.mount_fs.clone(), md.inode_id)
+        };
     let child_name = lookup_path
         .rsplit('/')
         .next()
         .unwrap_or("");
-    vfs::propagation::propagate_mount(&source_mount_fs, target_ino, &mnt_fs, child_name);
+    vfs::propagation::propagate_mount(&target_parent_mfs, target_ino, &mnt_fs, child_name);
+
+    // NOW register in peer/slave group AFTER propagation (prevents self-peer loop)
+    vfs::propagation::register_current_propagation(&mnt_fs);
 
     if let Some(snapshot) = rbind_snapshot {
         if let Err(e) = apply_rbind_snapshot(
@@ -2691,11 +2796,59 @@ fn do_bind_mount(
             lookup_path,
         ) {
             let _ = mnt_fs.umount();
-            return -(e as isize);
+            return Err(-(e as isize));
         }
     }
 
-    SUCCESS
+    Ok(mnt_fs)
+}
+
+/// Apply an explicit propagation override to a mount and its subtree.
+/// Used for combined flags like `mount --bind --make-slave`.
+///
+/// The mount has already been created by `do_bind_mount()` (which applied
+/// source-based propagation, peer registration, and rbind snapshot).
+/// This function overrides the final propagation type on top.
+fn apply_propagation_change(
+    mnt_fs: &Arc<vfs::MountFS>,
+    prop_type: vfs::propagation::PropagationType,
+    recursive: bool,
+) {
+    match prop_type {
+        vfs::propagation::PropagationType::Shared => {
+            let master = if mnt_fs.propagation().is_slave() {
+                Some(mnt_fs.propagation().master_group_id())
+            } else {
+                None
+            };
+            let gid = vfs::propagation::allocate_group_id();
+            vfs::propagation::install_propagation(mnt_fs, Some(gid), master);
+        }
+        vfs::propagation::PropagationType::Slave => {
+            let master = if mnt_fs.propagation().is_slave() {
+                mnt_fs.propagation().master_group_id()
+            } else {
+                mnt_fs.propagation().peer_group_id()
+            };
+            let peer = if mnt_fs.propagation().is_shared() {
+                Some(mnt_fs.propagation().peer_group_id())
+            } else {
+                None
+            };
+            vfs::propagation::install_propagation(mnt_fs, peer, Some(master));
+        }
+        _ => {
+            // Private or Unbindable: clear all registrations
+            vfs::propagation::install_propagation(mnt_fs, None, None);
+            // install_propagation sets to Private by default, fix for Unbindable
+            if prop_type == vfs::propagation::PropagationType::Unbindable {
+                mnt_fs.propagation().set_prop_type_value(vfs::propagation::PropagationType::Unbindable);
+            }
+        }
+    }
+    if recursive {
+        set_propagation_recursive(mnt_fs, prop_type);
+    }
 }
 
 /// Collect all submounts under `source_subtree_root` within `source_mfs` tree.
@@ -2706,6 +2859,8 @@ fn collect_rbind_snapshot(
     source_mfs: Arc<vfs::MountFS>,
     source_subtree_root: Arc<dyn vfs::IndexNode>,
 ) -> Vec<(Arc<vfs::MountFS>, Arc<vfs::MountFS>, alloc::string::String)> {
+    const MAX_DEPTH: usize = 256;
+
     let mut queue: VecDeque<(Arc<vfs::MountFS>, Arc<dyn vfs::IndexNode>)> = VecDeque::new();
     let mut result: Vec<(Arc<vfs::MountFS>, Arc<vfs::MountFS>, alloc::string::String)> = Vec::new();
     let mut seen: Vec<usize> = Vec::new();
@@ -2731,8 +2886,12 @@ fn collect_rbind_snapshot(
         }
     }
 
-    // BFS: for each child, collect its submounts
+    // BFS: for each child, collect its submounts (with cycle detection + depth limit)
     while let Some((child_mfs, child_root)) = queue.pop_front() {
+        if seen.len() > MAX_DEPTH {
+            log::error!("[collect_rbind_snapshot] max depth {} exceeded, stopping BFS", MAX_DEPTH);
+            break;
+        }
         let mps = child_mfs.mountpoints.lock();
         for (&grand_ino, grandchild) in mps.iter() {
             let ptr = Arc::as_ptr(grandchild) as usize;
@@ -2779,22 +2938,16 @@ fn set_propagation_recursive(
     for child in &children {
         let master_gid = if prop_type == vfs::propagation::PropagationType::Slave {
             let parent_prop = child.propagation();
-            // Inherit master from parent's shared group
             parent_prop.peer_group_id()
         } else {
             0
         };
 
-        if prop_type == vfs::propagation::PropagationType::Slave {
+        if prop_type == vfs::propagation::PropagationType::Slave && master_gid != 0 {
             child.propagation().set_master_group_id(master_gid);
         }
         vfs::propagation::set_propagation_type(child, prop_type);
-        if prop_type == vfs::propagation::PropagationType::Shared {
-            vfs::propagation::register_peer(child);
-        }
-        if prop_type == vfs::propagation::PropagationType::Slave {
-            vfs::propagation::register_slave(child, master_gid);
-        }
+        // registration handled inside set_propagation_type now
     }
 }
 
@@ -2849,13 +3002,33 @@ fn apply_rbind_snapshot(
             None => alloc::format!("/{}", child_name),
         };
 
-        match target_mfs_inode.mount_subtree(
+        // Use mount_subtree_inner(false) to avoid automatic propagation.
+        // rbind clones should NOT trigger new mount events — the base bind
+        // already propagated. We manually copy the source child's propagation.
+        match target_mfs_inode.mount_subtree_inner(
             child_mfs.inner_filesystem(),
             child_mfs.root_inner_inode(),
             vfs::MountFlags::empty(),
             Some(mount_path),
+            false,
         ) {
             Ok(new_mnt) => {
+                // Copy source child's propagation type
+                let child_prop = child_mfs.propagation();
+                let child_peer = if child_prop.is_shared() {
+                    Some(child_prop.peer_group_id())
+                } else {
+                    None
+                };
+                let child_master = if child_prop.is_slave() {
+                    Some(child_prop.master_group_id())
+                } else {
+                    None
+                };
+                vfs::propagation::install_propagation(&new_mnt, child_peer, child_master);
+                if child_prop.is_unbindable() {
+                    new_mnt.propagation().set_prop_type_value(vfs::propagation::PropagationType::Unbindable);
+                }
                 if let Some(src) = child_mfs.mount_source() {
                     new_mnt.set_mount_source(Some(src));
                 }
@@ -2872,6 +3045,35 @@ fn apply_rbind_snapshot(
 
     drop(mnt_map);
     Ok(())
+}
+
+/// Check whether any mount in the subtree rooted at `root_mfs` has
+/// unbindable propagation. Uses BFS with snapshot to avoid deadlocks.
+/// Conservative: returns true on overflow / errors.
+fn subtree_has_unbindable(root_mfs: &Arc<vfs::MountFS>) -> bool {
+    const MAX_NODES: usize = 256;
+    if root_mfs.propagation().is_unbindable() {
+        return true;
+    }
+    let mut queue: Vec<Arc<vfs::MountFS>> = {
+        let mps = root_mfs.mountpoints.lock();
+        mps.values().cloned().collect()
+    };
+    let mut checked: usize = 0;
+    while let Some(child) = queue.pop() {
+        if child.propagation().is_unbindable() {
+            return true;
+        }
+        checked += 1;
+        if checked > MAX_NODES {
+            return true;
+        }
+        let mps = child.mountpoints.lock();
+        for grandchild in mps.values() {
+            queue.push(grandchild.clone());
+        }
+    }
+    false
 }
 
 fn rollback_mounts(created: &[Arc<vfs::MountFS>]) {
@@ -2936,55 +3138,83 @@ pub fn sys_mount(
 
     // ── Flag routing — must happen BEFORE any RamFS creation ──
 
-    let propagation = mountflags
-        & (MountFlags::MS_SHARED | MountFlags::MS_PRIVATE | MountFlags::MS_SLAVE | MountFlags::MS_UNBINDABLE | MountFlags::MS_REC);
+    let propagation_type_flags = MountFlags::MS_SHARED
+        | MountFlags::MS_PRIVATE | MountFlags::MS_SLAVE | MountFlags::MS_UNBINDABLE;
+    let prop_type_flag = mountflags & propagation_type_flags;
 
-    if !propagation.is_empty() {
-        // MS_REC is a modifier — strip it to count the actual propagation type
-        let prop_type_flag = propagation & !MountFlags::MS_REC;
-        if prop_type_flag.bits().count_ones() != 1
-            || mountflags.intersects(MountFlags::MS_BIND | MountFlags::MS_MOVE | MountFlags::MS_REMOUNT)
+    // Propagation-type-change commands (e.g., mount --make-shared /mnt)
+    // MS_REC is allowed as modifier, but only when there is exactly one
+    // propagation-type flag AND no MS_MOVE/MS_REMOUNT.
+    // MS_BIND + single propagation flag is allowed (bind, then override).
+    let bind_prop_override: Option<vfs::propagation::PropagationType> = if mountflags.intersects(MountFlags::MS_BIND) && !prop_type_flag.is_empty() {
+        if prop_type_flag.bits().count_ones() != 1 {
+            return EINVAL;
+        }
+        if prop_type_flag.contains(MountFlags::MS_SHARED) {
+            Some(vfs::propagation::PropagationType::Shared)
+        } else if prop_type_flag.contains(MountFlags::MS_PRIVATE) {
+            Some(vfs::propagation::PropagationType::Private)
+        } else if prop_type_flag.contains(MountFlags::MS_SLAVE) {
+            Some(vfs::propagation::PropagationType::Slave)
+        } else {
+            Some(vfs::propagation::PropagationType::Unbindable)
+        }
+    } else {
+        None
+    };
+    let bind_prop_override_recursive = if bind_prop_override.is_some() {
+        mountflags.contains(MountFlags::MS_REC)
+    } else {
+        false
+    };
+
+    if !prop_type_flag.is_empty() {
+        if mountflags.intersects(MountFlags::MS_MOVE | MountFlags::MS_REMOUNT)
+            || (prop_type_flag.bits().count_ones() != 1 && bind_prop_override.is_none())
         {
             return EINVAL;
         }
-        let is_recursive = propagation.contains(MountFlags::MS_REC);
-        let target_mnt_inode = match target_inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
-            Some(m) => m,
-            None => return EINVAL,
-        };
-        let prop_type = if prop_type_flag.contains(MountFlags::MS_SHARED) {
-            vfs::propagation::PropagationType::Shared
-        } else if prop_type_flag.contains(MountFlags::MS_PRIVATE) {
-            vfs::propagation::PropagationType::Private
-        } else if prop_type_flag.contains(MountFlags::MS_SLAVE) {
-            vfs::propagation::PropagationType::Slave
-        } else {
-            vfs::propagation::PropagationType::Unbindable
-        };
-        let mnt = target_mnt_inode.mount_fs.clone();
-        // For Slave: set master_group_id before type change so
-        // set_propagation_type can register/unregister correctly.
-        if prop_type == vfs::propagation::PropagationType::Slave {
-            let parent_prop = target_mnt_inode.mount_fs.propagation();
-            let master_gid = parent_prop.peer_group_id();
-            mnt.propagation().set_master_group_id(master_gid);
+        // Pure propagation-type-change (no BIND): apply to existing mount
+        if bind_prop_override.is_none() {
+            let is_recursive = mountflags.contains(MountFlags::MS_REC);
+            let target_mnt_inode = match target_inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+                Some(m) => m,
+                None => return EINVAL,
+            };
+            let prop_type = if prop_type_flag.contains(MountFlags::MS_SHARED) {
+                vfs::propagation::PropagationType::Shared
+            } else if prop_type_flag.contains(MountFlags::MS_PRIVATE) {
+                vfs::propagation::PropagationType::Private
+            } else if prop_type_flag.contains(MountFlags::MS_SLAVE) {
+                vfs::propagation::PropagationType::Slave
+            } else {
+                vfs::propagation::PropagationType::Unbindable
+            };
+            let mnt = target_mnt_inode.mount_fs.clone();
+            if prop_type == vfs::propagation::PropagationType::Slave {
+                let parent_prop = target_mnt_inode.mount_fs.propagation();
+                let master_gid = parent_prop.peer_group_id();
+                mnt.propagation().set_master_group_id(master_gid);
+            }
+            vfs::propagation::set_propagation_type(&mnt, prop_type);
+            // registration now handled inside set_propagation_type
+            if is_recursive {
+                set_propagation_recursive(&mnt, prop_type);
+            }
+            return SUCCESS;
         }
-        vfs::propagation::set_propagation_type(&mnt, prop_type);
-        if prop_type == vfs::propagation::PropagationType::Shared {
-            vfs::propagation::register_peer(&mnt);
-        }
-        if prop_type == vfs::propagation::PropagationType::Slave {
-            let master_gid = mnt.propagation().master_group_id();
-            vfs::propagation::register_slave(&mnt, master_gid);
-        }
-        if is_recursive {
-            set_propagation_recursive(&mnt, prop_type);
-        }
-        return SUCCESS;
     }
 
     if mountflags.intersects(MountFlags::MS_BIND) {
-        return do_bind_mount(source, token, &lookup_inode, &lookup_path, target_inode, mountflags);
+        let mnt_fs = match do_bind_mount(source, token, &lookup_inode, &lookup_path, target_inode, mountflags) {
+            Ok(fs) => fs,
+            Err(errno) => return errno,
+        };
+        // Apply explicit propagation override if specified (e.g., --bind --make-slave)
+        if let Some(prop_type) = bind_prop_override {
+            apply_propagation_change(&mnt_fs, prop_type, bind_prop_override_recursive);
+        }
+        return SUCCESS;
     }
 
     if mountflags.intersects(MountFlags::MS_MOVE) {
@@ -3040,33 +3270,151 @@ pub fn sys_mount(
         };
         let new_parent_mnt = target_mnt_inode.mount_fs.clone();
 
-        // Prevent moving a mount under its own subtree (would create a cycle)
+        // Reject MS_MOVE from a shared parent: Linux forbids detaching
+        // a mount from a shared tree without move-propagation support.
+        if old_parent_mnt.propagation().is_shared() {
+            return EINVAL;
+        }
+
+        // Reject MS_MOVE to a shared parent when the subtree contains
+        // unbindable mounts: they cannot be propagated to peers.
+        if new_parent_mnt.propagation().is_shared() && subtree_has_unbindable(&src_mnt) {
+            return EINVAL;
+        }
+
+        // Prevent moving a mount under its own subtree (would create a cycle).
+        // Walk parent chain from target: if any ancestor is src_mnt, reject.
         {
-            let src_mnt_path = src_mnt.mount_path().unwrap_or_default();
-            if !src_mnt_path.is_empty()
-                && lookup_path.starts_with(&src_mnt_path)
-            {
-                return EINVAL;
+            let mut cur = Arc::clone(&new_parent_mnt);
+            let mut depth: u32 = 0;
+            loop {
+                if Arc::ptr_eq(&cur, &src_mnt) {
+                    return EINVAL;
+                }
+                depth += 1;
+                if depth > 64 {
+                    return EINVAL;
+                }
+                // Walk up via self_mountpoint
+                let next = match cur.self_mountpoint() {
+                    Some(mp) => mp.mount_fs.clone(),
+                    None => break,
+                };
+                if Arc::ptr_eq(&next, &cur) {
+                    break;
+                }
+                cur = next;
             }
         }
 
+        // Save old state for rollback if new-parent add fails
+        let old_path = src_mnt.mount_path();
+        let old_backref = old_mp.clone();
+
         old_parent_mnt.remove_mount(old_mp_id);
 
-        if let Some(old_path) = src_mnt.mount_path() {
-            vfs::mount::MOUNT_LIST.remove(old_path);
+        if let Some(ref old_path) = old_path {
+            vfs::mount::MOUNT_LIST.remove(old_path.as_str());
         }
 
         if let Err(e) = new_parent_mnt.add_mount(inode_id, src_mnt.clone()) {
+            // Rollback: restore old parent (best-effort, must never panic)
+            log::error!(
+                "[sys_mount] MS_MOVE add_mount to '{}' failed (errno={}); restoring old parent",
+                lookup_path, e as isize,
+            );
+            if let Err(rollback_err) = old_parent_mnt.add_mount(old_mp_id, src_mnt.clone()) {
+                log::error!(
+                    "[sys_mount] MS_MOVE rollback failed: add_mount back to old parent errno={}",
+                    rollback_err as isize
+                );
+            } else {
+                if let Some(ref old_path) = old_path {
+                    vfs::mount::MOUNT_LIST.insert(old_path.as_str(), src_mnt.clone(), Some(old_mp_id));
+                }
+                src_mnt.set_self_mountpoint(Some(old_backref));
+                src_mnt.set_mount_path(old_path);
+            }
             return -(e as isize);
         }
 
+        // Success: update to new parent
         let new_backref =
-            vfs::MountFSInode::new(target_mnt_inode.inner_inode.clone(), new_parent_mnt);
+            vfs::MountFSInode::new(target_mnt_inode.inner_inode.clone(), new_parent_mnt.clone());
         src_mnt.set_self_mountpoint(Some(new_backref));
 
-        src_mnt.set_mount_path(Some(lookup_path.clone()));
+        let old_prefix = old_path.clone();
+        let new_prefix = lookup_path.clone();
+        src_mnt.set_mount_path(Some(new_prefix.clone()));
+        vfs::mount::MOUNT_LIST.insert(new_prefix.as_str(), src_mnt.clone(), Some(inode_id));
 
-        vfs::mount::MOUNT_LIST.insert(lookup_path.as_str(), src_mnt.clone(), Some(inode_id));
+        // MS_MOVE must also update mount_path of all descendants.
+        // Without this, child mounts retain old paths (e.g., "parent2/a")
+        // making them unreachable via umount and causing cleanup loops.
+        {
+            let mut queue: Vec<Arc<vfs::MountFS>> = {
+                let mps = src_mnt.mountpoints.lock();
+                mps.values().cloned().collect()
+            };
+            let mut seen: Vec<usize> = alloc::vec![Arc::as_ptr(&src_mnt) as usize];
+            while let Some(child) = queue.pop() {
+                let ptr = Arc::as_ptr(&child) as usize;
+                if seen.contains(&ptr) || seen.len() > 64 {
+                    continue;
+                }
+                seen.push(ptr);
+                if let Some(ref old_child_path) = old_prefix {
+                    if let Some(ref cur_path) = child.mount_path() {
+                        if let Some(suffix) = cur_path.strip_prefix(old_child_path.as_str()) {
+                            let new_child_path = if suffix.is_empty() {
+                                new_prefix.clone()
+                            } else if suffix.starts_with('/') {
+                                alloc::format!("{}{}", new_prefix, suffix)
+                            } else {
+                                alloc::format!("{}/{}", new_prefix, suffix)
+                            };
+                            vfs::mount::MOUNT_LIST.remove(cur_path.as_str());
+                            vfs::mount::MOUNT_LIST.insert(
+                                new_child_path.as_str(), child.clone(), None,
+                            );
+                            child.set_mount_path(Some(new_child_path));
+                        }
+                    }
+                }
+                {
+                    let mps = child.mountpoints.lock();
+                    for gc in mps.values() {
+                        queue.push(gc.clone());
+                    }
+                }
+            }
+        }
+
+        // Propagate moved mount tree to new parent's peers.
+        // collect_rbind_snapshot captures the subtree BEFORE we return.
+        if new_parent_mnt.propagation().is_shared() {
+            let snapshot = collect_rbind_snapshot(
+                src_mnt.clone(),
+                src_mnt.mountpoint_root_inode(),
+            );
+            let child_name = new_prefix.rsplit('/').next().unwrap_or("");
+            vfs::propagation::propagate_mount(
+                &new_parent_mnt, inode_id, &src_mnt, child_name,
+            );
+            if !snapshot.is_empty() {
+                for peer in vfs::propagation::get_peers(&new_parent_mnt) {
+                    let peer_clone = {
+                        let mps = peer.mountpoints.lock();
+                        mps.get(&inode_id).cloned()
+                    };
+                    if let Some(clone) = peer_clone {
+                        let _ = apply_rbind_snapshot(
+                            &snapshot, src_mnt.clone(), clone, &new_prefix,
+                        );
+                    }
+                }
+            }
+        }
 
         return SUCCESS;
     }
@@ -3119,36 +3467,24 @@ pub fn sys_mount(
         return ENODEV;
     }
 
-    // Get the parent MountFS via downcast
-    let parent_mount_fs = if let Some(mfs_inode) =
-        (target_inode.as_any_ref().downcast_ref::<vfs::MountFSInode>())
-    {
-        mfs_inode.mount_fs.clone()
-    } else {
-        crate::fs::vfs_root().clone()
+    // Use mount_subtree_inner to go through the shared-parent propagation
+    // path. The raw MountFS::new() + add_mount() path would bypass child
+    // peer group allocation and mount event propagation.
+    let target_mfs_inode = match target_inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+        Some(m) => m,
+        None => return EINVAL,
     };
 
-    // Create a tmpfs-backed MountFS and register it
-    let tmpfs = crate::fs::ramfs::RamFS::new_with_quota(4096);
+    let tmpfs: Arc<dyn vfs::FileSystem> = crate::fs::ramfs::RamFS::new_with_quota(4096);
+    let root_inode = tmpfs.root_inode();
     let mnt_flags = vfs::MountFlags::from_bits_truncate(mountflags.bits() as u32);
-    let mnt_fs = vfs::MountFS::new(tmpfs, mnt_flags);
 
-    parent_mount_fs.add_mount(inode_id, mnt_fs.clone())
-        .map(|_| {
-            if let Some(target_mnt) = target_inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
-                let backref = vfs::MountFSInode::new(
-                    target_mnt.inner_inode.clone(),
-                    target_mnt.mount_fs.clone(),
-                );
-                mnt_fs.set_self_mountpoint(Some(backref));
-            }
-            mnt_fs.set_mount_path(Some(lookup_path));
-            SUCCESS
-        })
-        .unwrap_or_else(|e| {
-            error!("[sys_mount] add_mount failed: errno={}", e as isize);
-            -(e as isize)
-        })
+    match target_mfs_inode.mount_subtree_inner(
+        tmpfs, root_inode, mnt_flags, Some(lookup_path), true,
+    ) {
+        Ok(_) => SUCCESS,
+        Err(e) => -(e as isize),
+    }
 }
 
 bitflags! {

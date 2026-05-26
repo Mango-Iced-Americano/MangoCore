@@ -82,7 +82,7 @@ const DEFAULT_TIMEOUTS: [u64; 12] = [
     1800, // [8]  lmbench
     90,   // [9]  netperf
     60,   // [10] cyclictest
-    600,  // [11] ltp
+    1800,  // [11] ltp
 ];
 
 /// LTP 默认排除测例名列表
@@ -94,6 +94,10 @@ const DEFAULT_LTP_EXCLUDE_MUSL: &[&str] = &[];
 const DEFAULT_LTP_EXCLUDE_GLIBC: &[&str] = &[];
 
 fn run_bash_cmd(cmd: &str, environ: &[*const u8]) -> i32 {
+    run_bash_cmd_timeout(cmd, environ, 0)
+}
+
+fn run_bash_cmd_timeout(cmd: &str, environ: &[*const u8], timeout_secs: u64) -> i32 {
     let pid = fork();
     if pid == 0 {
         let shell_new = "/bin/bash\0";
@@ -117,16 +121,32 @@ fn run_bash_cmd(cmd: &str, environ: &[*const u8]) -> i32 {
     }
     if pid > 0 {
         let mut code = 0;
+        let max_loops = if timeout_secs > 0 {
+            timeout_secs.saturating_mul(100)
+        } else {
+            u64::MAX
+        };
+        let mut loops: u64 = 0;
         loop {
-            // 非阻塞收割孤儿僵尸，避免 stdout 延迟输出
             reap_orphans();
-            let ret = waitpid(pid as usize, &mut code);
+            let ret = waitpid_wnohang(pid as isize, &mut code);
             if ret == pid as isize || ret < 0 {
+                break;
+            }
+            loops += 1;
+            if loops >= max_loops {
+                let _ = kill(pid as usize, SIGKILL);
+                loop {
+                    let ret2 = waitpid_wnohang(pid as isize, &mut code);
+                    if ret2 == pid as isize || ret2 < 0 {
+                        break;
+                    }
+                    sleep(10);
+                }
                 break;
             }
             sleep(10);
         }
-        // drain_children();
         return code;
     }
     -1
@@ -1262,7 +1282,7 @@ fn run_ltp_binaries(
                 "export LTPROOT=\"{}\" && export LTP_IPC_PATH=/tmp && export PATH=\"{}/testcases/bin:$PATH\" && {}./ltp/testcases/bin/{}",
                 ltp_root_abs, ltp_root_abs, preload, name
             );
-            let ret = run_bash_cmd(&cmd, environ);
+            let ret = run_bash_cmd_timeout(&cmd, environ, 30);
             let exit_code = exit_code_from_waitpid_status(ret);
             println!("FAIL LTP CASE {} : {}", name, exit_code);
         }
