@@ -258,7 +258,7 @@ impl IndexNode for SignalFd {
 }
 
 fn read_signalfd_mask(token: usize, mask: usize, sigsetsize: usize) -> Result<Signals, isize> {
-    if sigsetsize != size_of::<u64>() {
+    if !valid_rt_sigset_size(sigsetsize) {
         return Err(EINVAL);
     }
     if mask == 0 {
@@ -591,7 +591,7 @@ pub fn sys_sigaction(signum: usize, act: usize, oldact: usize, sigsetsize: usize
         oldact,
         sigsetsize
     );
-    if sigsetsize != size_of::<u64>() {
+    if !valid_rt_sigset_size(sigsetsize) {
         return EINVAL;
     }
     sigaction(

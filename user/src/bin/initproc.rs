@@ -1790,7 +1790,14 @@ fn install_embedded_libgcc_s() {
 fn prepare_symlink(environ: &[*const u8]) {
     // Step 1: busybox applet 安装到 /bin（用 PATH 查找 busybox，兼容旧镜像 /busybox）
     println!("[initproc] installing busybox applets to /bin ...");
-    let install_cmd = "busybox mkdir -p /bin; [ -f /bin/sh ] || busybox --install -s /bin\0";
+    let install_cmd = "\
+        busybox mkdir -p /bin; \
+        busybox --install -s /bin; \
+        for app in cp mv rm ln mkdir chmod cat printf sleep grep sed awk uname basename dirname true false test; do \
+            [ -e /bin/$app ] || busybox ln -sf /bin/busybox /bin/$app; \
+        done; \
+        true \
+    \0";
     let ret = run_bash_cmd(install_cmd, environ);
     println!("[initproc] busybox --install -s /bin -> exit={}", ret);
 

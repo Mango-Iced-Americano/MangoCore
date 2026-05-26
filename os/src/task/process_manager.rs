@@ -163,7 +163,7 @@ impl ProcessManager {
                 wait_status.set(child.exit_code());
                 if !nowait {
                     child.release_pid();
-                    process_inner.child_rusage.add_cpu(child.rusage());
+                    process_inner.child_rusage.add_child(child.wait_rusage());
                 }
                 Some(found_pid as isize)
             } else {

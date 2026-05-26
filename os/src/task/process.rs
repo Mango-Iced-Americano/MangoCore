@@ -1,7 +1,7 @@
 use super::{
     pid::{RecycleAllocator, TidHandle},
     registry,
-    signal::{PendingSignal, SignalQueue, Sighand, Signals},
+    signal::{sigchld_requests_auto_reap, PendingSignal, SignalQueue, Sighand, Signals},
     threads::Futex,
     wake_interruptible, Completion, FsStatus, TaskControlBlock, TaskStatus, UtsNamespace,
     Rusage, WaitQueue, WaitResult, INITPROC,
@@ -531,6 +531,13 @@ impl ProcessControlBlock {
         self.inner.lock().child_rusage
     }
 
+    pub fn wait_rusage(&self) -> Rusage {
+        let inner = self.inner.lock();
+        let mut rusage = inner.rusage;
+        rusage.add_child(inner.child_rusage);
+        rusage
+    }
+
     pub fn enqueue_process_signal(&self, pending: PendingSignal) {
         let _ = self.signal.lock().shared_pending.enqueue(pending);
     }
@@ -621,7 +628,18 @@ impl ProcessControlBlock {
     /// 以及进程资源关闭。
     pub fn finish_exit(&self, exit_task: &TaskControlBlock, exit_code: u32) {
         self.complete_vfork();
-        let rusage = exit_task.acquire_inner_lock().rusage;
+        let mut rusage = exit_task.acquire_inner_lock().rusage;
+        let resident_kb = self.vm().lock().resident_user_bytes() / 1024;
+        rusage.update_maxrss_kb(resident_kb);
+        let parent_process = self.parent();
+        let auto_reap = parent_process
+            .as_ref()
+            .map(|parent| {
+                let sighand_ref = parent.sighand();
+                let sighand = sighand_ref.lock();
+                sigchld_requests_auto_reap(&sighand)
+            })
+            .unwrap_or(false);
         if !self.mark_zombie(exit_code, rusage) {
             return;
         }
@@ -630,17 +648,23 @@ impl ProcessControlBlock {
             unregister_exec_key(key);
         }
 
-        if let Some(parent_process) = self.parent() {
-            parent_process.child_exit_wait.lock().wake_all();
-            if !exit_task.exit_signal.is_empty() {
-                if let Some(parent_task) = parent_process.any_live_thread() {
-                    let mut parent_inner = parent_task.acquire_inner_lock();
-                    parent_inner.add_signal(exit_task.exit_signal);
+        if let Some(parent_process) = parent_process {
+            if auto_reap {
+                parent_process.detach_child(self.pid);
+                registry::unregister_process(self.pid);
+                parent_process.child_exit_wait.lock().wake_all();
+            } else {
+                parent_process.child_exit_wait.lock().wake_all();
+                if !exit_task.exit_signal.is_empty() {
+                    if let Some(parent_task) = parent_process.any_live_thread() {
+                        let mut parent_inner = parent_task.acquire_inner_lock();
+                        parent_inner.add_signal(exit_task.exit_signal);
 
-                    if parent_inner.task_status == TaskStatus::Interruptible {
-                        parent_inner.task_status = TaskStatus::Ready;
-                        drop(parent_inner);
-                        wake_interruptible(parent_task);
+                        if parent_inner.task_status == TaskStatus::Interruptible {
+                            parent_inner.task_status = TaskStatus::Ready;
+                            drop(parent_inner);
+                            wake_interruptible(parent_task);
+                        }
                     }
                 }
             }

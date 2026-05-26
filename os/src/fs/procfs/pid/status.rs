@@ -49,7 +49,14 @@ pub fn pid_status_content(
             exe
         }
     };
-    let vm_lck_kb = task.process.vm().lock().locked_user_bytes() / 1024;
+    let (vm_rss_kb, vm_lck_kb) = {
+        let vm_ref = task.process.vm();
+        let vm = vm_ref.lock();
+        (
+            vm.resident_user_bytes() / 1024,
+            vm.locked_user_bytes() / 1024,
+        )
+    };
 
     let s = alloc::format!(
         "Name:\t{}\n\
@@ -61,9 +68,11 @@ pub fn pid_status_content(
          Gid:\t0\t0\t0\t0\n\
          FDSize:\t256\n\
          VmSize:\t       0 kB\n\
-         VmRSS:\t        0 kB\n\
+         VmHWM:\t{:9} kB\n\
+         VmRSS:\t{:9} kB\n\
          VmLck:\t{:9} kB\n\
          VmData:\t       0 kB\n\
+         VmSwap:\t       0 kB\n\
          Threads:\t{}\n\
          SigQ:\t0/0\n\
          SigPnd:\t{:016x}\n\
@@ -85,6 +94,8 @@ pub fn pid_status_content(
         tgid,
         pid,
         ppid,
+        vm_rss_kb,
+        vm_rss_kb,
         vm_lck_kb,
         threads,
         sig_pnd,

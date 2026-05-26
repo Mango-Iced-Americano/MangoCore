@@ -225,6 +225,8 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | unmap 后读到 PTE 残留值 | 未刷新 TLB，CPU 仍用旧缓存 | **所有 PTE 修改后 `sfence.vma` / `invtlb`** |
 | heap allocator panic | 内核堆耗尽 | `try_reserve` 防御 + OOM killer |
 | `brk`/`mmap` 返回意外值 | 堆/mmap 区域冲突 | 检查 `program_break` 边界 |
+| la64 在大量匿名页 fault 时 `frame_alloc`/`memset` AddressError，常见停在物理 `0xb0000000` | QEMU la64 DTB 的高段 RAM 是 `memory@80000000` + `0x30000000`，旧配置错误地按 1GB 连续 RAM 分配到 `0xc0000000` | la64 `MEMORY_SIZE` 必须匹配 DTB 的 `0x30000000`；不要跨真实 RAM 结尾分配物理页 |
+| la64 `getrusage03` 变成 `TCONF: needs at least 512MB MemAvailable` 或 30s timeout | la64 高段 RAM 只有 768MB，256MB 静态 kernel heap 挤占可用页帧；页帧清零被降成 byte-wise `memset`，大批量 fault 很慢 | la64 kernel heap 保持在实际需要范围内；页帧清零用 64-bit store 循环，避免每页 4096 次 byte store |
 | `mmap18` MAP_GROWSDOWN 栈增长失败 | 页故障只查已覆盖 VMA，未在 guard page fault 时扩展 grow-down VMA | fault 地址位于 grow-down VMA 下方且不碰撞/不进入 stack_guard_gap 时，先下扩 VMA 起点再走懒分配 |
 | `munlockall01`/`mlock203` 读取 `VmLck` 失败或重复锁页计数异常 | `/proc/<pid>/status` 缺 `VmLck`，或 mlock 路径未维护 ABI 可见锁页状态 | 在地址空间维护页级 locked 集合，`mlock/mlockall` 设置、`munlock/munlockall/munmap` 清除，`VmLck` 汇总 locked 用户页 |
 | `mmap14` 中 `MAP_LOCKED` 后 `VmLck=0` | `mmap()` 保留了 `MAP_LOCKED` VMA flag，但没有同步更新页级 locked 集合 | `MAP_LOCKED` 建图后必须把映射范围计入 locked 页；避免和未锁匿名 VMA 合并导致统计丢失 |
@@ -291,6 +293,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | pidfd_getfd 已退出目标返回 EBADF | wait 后 zombie 进程仍可被 registry 查到，但 fd table 已关闭 | 目标进程 zombie 时按 Linux 语义返回 `ESRCH` |
 | pidfd_open04 waitid(P_PIDFD) ENOSYS | 缺少 `waitid(95)` 分发和 P_PIDFD 最小语义 | 支持 `P_PIDFD + WEXITED`，非阻塞未退出返回 `EAGAIN`，退出后回收子进程 |
 | futex_wait05 短 timeout 超时过长 | 单线程短等待走完整 wait queue/调度路径，QEMU 下固定增加数毫秒 | 仅对单线程、ready 队列为空、短 timeout 使用硬件时钟短轮询；仍保持值不匹配优先返回 `EAGAIN` |
+| `getrusage03` 读 `/proc/self/status` TBROK、`RUSAGE_CHILDREN.ru_maxrss=0` 或尾部卡住 | status 缺 `VmSwap`/RSS 字段，`ru_maxrss` 未按 resident high-water 更新，wait 聚合漏掉已回收后代资源；la64 `rt_sigaction(sigsetsize=16)` 被误拒导致 `SIGCHLD=SIG_IGN` 未生效 | status 补 `VmSwap`/RSS，`getrusage`/进程退出更新 `ru_maxrss`，wait 回收时合并子进程自身和后代 `rusage`；`rt_sigaction` 接受 libc 传入的 >=8 字节 sigsetsize，显式忽略 SIGCHLD/`SA_NOCLDWAIT` 时自动摘除子进程并从 registry 移除 |
 | process_vm_readv03 多 iovec 数据错误 | 大量同页一字节 iovec 被长期保存成多个 `&mut` 页切片，存在别名风险 | 跨进程 iovec 拷贝逐页 chunk 即时复制，不持久保存页切片 |
 | process_vm01 无权限场景返回 EFAULT | 先访问目标进程坏地址，后做 ptrace/credential 权限判断，errno 优先级反了 | 读取/写入远程 VM 前先按 uid/gid/suid/sgid、dumpable 和 `CAP_SYS_PTRACE` 检查访问权限，无权限返回 `EPERM` |
 | LTP `msg*` 大片 ENOSYS/errno 失败 | 缺少 SysV message queue syscall 和 Linux IPC 权限/时间字段语义 | 最小实现 `msgget/msgctl/msgsnd/msgrcv`，用 wall-clock 填 `msg_*time`，校验 uid/gid/mode、NULL 用户指针和 `MSG_COPY/MSG_EXCEPT/MSG_NOERROR`；`msgrcv06/msgsnd06` 这类删除唤醒需后续 wait queue 化 |
@@ -308,6 +311,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | `ptrace*` 大片 ENOSYS/TBROK | 当前内核无 ptrace stop/wait/tracee 状态机，属于结构性子系统 | 先由 inline runner skip，后续专项做 ptrace 模型 |
 | LTP `pm_*`/`pkey01`/`profil01`/`pt_test`/部分 `prctl*` TCONF | 依赖 power-management、pkey、profil、perf、procfs/capability 等当前非目标环境 | 先 narrow skip，避免阻塞后续 syscall 扫描 |
 | LTP `rename*` 大片 TBROK 或卡住 | 多数依赖外部块设备、目录权限矩阵等 fs 适配面 | 当前 fs/net 协作期先由 inline runner skip |
+| LTP helper 复制失败：`cp: command not found` | `/bin/sh` 已存在时 initproc 跳过 `busybox --install -s /bin`，导致 `/bin/cp` 等 applet 缺失 | 每次启动都幂等安装 BusyBox applet，并兜底创建常用命令 symlink |
 | LTP `request_key*`/`rmdir*`/`route*` 阻塞后续扫描 | 分别依赖 keyring 子系统、fs 语义和网络路由脚本 | 当前非 fs/net 主线先 narrow skip |
 | LTP `rtc*`/`run_cpuctl*`/`run_freezer*`/`run_memctl*`/`runpwtests*` TFAIL/TCONF | 依赖 RTC ioctl、cgroup controller 或 power-management 环境 | 当前非设备/控制器主线先 narrow skip |
 | LTP `rwtest` 持续刷 Broken pipe | 文件/管道压力 helper，容易拖慢扫描 | 当前 broad scan 中单点 skip |

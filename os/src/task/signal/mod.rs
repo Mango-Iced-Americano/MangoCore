@@ -345,7 +345,7 @@ pub fn sigaction(signum: usize, act: *const UserSigAction, oldact: *mut UserSigA
                 if sigact.handler == SigHandler::SIG_IGN {
                     // Store SIG_IGN explicitly so we can distinguish from SIG_DFL
                     sighand.set(signum, Some(sigact));
-                } else if sigact.handler == SigHandler::SIG_DFL {
+                } else if sigact.handler == SigHandler::SIG_DFL && sigact.flags.is_empty() {
                     sighand.set(signum, None);
                 } else {
                     sighand.set(signum, Some(sigact));
@@ -354,6 +354,17 @@ pub fn sigaction(signum: usize, act: *const UserSigAction, oldact: *mut UserSigA
             }
             SUCCESS
         }
+    }
+}
+
+pub fn sigchld_requests_auto_reap(sighand: &Sighand) -> bool {
+    const SIGCHLD_SIGNUM: usize = 17;
+    match sighand.get(SIGCHLD_SIGNUM) {
+        Some(act) => {
+            act.handler == SigHandler::SIG_IGN
+                || act.flags.contains(SigActionFlags::SA_NOCLDWAIT)
+        }
+        None => false,
     }
 }
 

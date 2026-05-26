@@ -932,6 +932,18 @@ impl<T: PageTable> AddressSpace<T> {
         self.vmas.user_mapped_bytes()
     }
 
+    pub fn resident_user_bytes(&self) -> usize {
+        let mut resident_pages = 0usize;
+        for vma in self.vmas.iter().filter(|vma| vma.vm_is_user()) {
+            for vpn in VPNRange::new(vma.vm_start(), vma.vm_end()) {
+                if vma.inner.get_in_memory(&vpn).is_some() {
+                    resident_pages = resident_pages.saturating_add(1);
+                }
+            }
+        }
+        resident_pages.saturating_mul(PAGE_SIZE)
+    }
+
     pub fn locked_user_bytes(&self) -> usize {
         self.locked_pages.len().saturating_mul(PAGE_SIZE)
     }

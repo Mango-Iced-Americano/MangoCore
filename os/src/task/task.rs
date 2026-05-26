@@ -341,6 +341,16 @@ impl Rusage {
         self.ru_utime = self.ru_utime + other.ru_utime;
         self.ru_stime = self.ru_stime + other.ru_stime;
     }
+
+    pub fn add_child(&mut self, other: Rusage) {
+        self.add_cpu(other);
+        self.ru_maxrss = self.ru_maxrss.max(other.ru_maxrss);
+    }
+
+    pub fn update_maxrss_kb(&mut self, rss_kb: usize) {
+        let rss_kb = rss_kb.min(isize::MAX as usize) as isize;
+        self.ru_maxrss = self.ru_maxrss.max(rss_kb);
+    }
 }
 
 const SCHED_NICE_0_LOAD: u64 = 1024;
