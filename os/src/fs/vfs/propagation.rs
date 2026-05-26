@@ -501,7 +501,7 @@ fn propagate_to_mount(
                 Some(mount_path),
                 false,
             ) {
-                finish_propagated_mount(&new_mount, source_child_group, as_slave);
+                finish_propagated_mount(&new_mount, target, source_child_group, as_slave);
                 return Some(new_mount);
             }
             return None;
@@ -531,7 +531,7 @@ fn propagate_to_mount(
 
                 let _old = target.overmount_and_add(ino, new_mount.clone());
 
-                finish_propagated_mount(&new_mount, source_child_group, as_slave);
+                finish_propagated_mount(&new_mount, target, source_child_group, as_slave);
                 return Some(new_mount);
             }
         }
@@ -540,23 +540,32 @@ fn propagate_to_mount(
 }
 
 /// Finish setting up a propagated mount's group membership.
-fn finish_propagated_mount(new_mount: &Arc<MountFS>, source_child_group: u32, as_slave: bool) {
-    // mount_subtree_inner(false) may have inherited the target parent's
-    // propagation group. A propagated clone must use the final group from
-    // the source child instead. Clear all inherited registrations first.
+/// When as_slave=true and target_parent is shared, the clone becomes
+/// SharedSlave so it can forward mount events to its own peers.
+fn finish_propagated_mount(
+    new_mount: &Arc<MountFS>,
+    target_parent: &Arc<MountFS>,
+    source_child_group: u32,
+    as_slave: bool,
+) {
     unregister_peer_mount(new_mount);
     unregister_slave_mount(new_mount);
     new_mount.propagation().set_peer_group_id(0);
     new_mount.propagation().set_master_group_id(0);
 
     if as_slave {
-        new_mount
-            .propagation()
-            .set_prop_type_value(PropagationType::Slave);
-        new_mount
-            .propagation()
-            .set_master_group_id(source_child_group);
-        register_slave(new_mount, source_child_group);
+        let peer_gid = if target_parent.propagation().is_shared() {
+            Some(allocate_group_id())
+        } else {
+            None
+        };
+        let master_gid = if source_child_group != 0 {
+            Some(source_child_group)
+        } else {
+            None
+        };
+        set_propagation_state_no_register(new_mount, peer_gid, master_gid);
+        register_current_propagation(new_mount);
     } else if source_child_group != 0 {
         new_mount
             .propagation()
@@ -574,22 +583,47 @@ fn finish_propagated_mount(new_mount: &Arc<MountFS>, source_child_group: u32, as
 /// Uses proper detach via umount_inner(false) instead of raw remove_mount
 /// to ensure complete cleanup (MOUNT_LIST, peer/slave registry, caches).
 pub fn propagate_umount(source: &Arc<MountFS>, mountpoint_id: InodeId) {
+    const MAX_DEPTH: usize = 32;
+    let mut visited: Vec<usize> = Vec::new();
+    visited.push(Arc::as_ptr(source) as usize);
+    propagate_umount_inner(source, mountpoint_id, &mut visited, MAX_DEPTH);
+}
+
+fn propagate_umount_inner(
+    source: &Arc<MountFS>,
+    mountpoint_id: InodeId,
+    visited: &mut Vec<usize>,
+    max_depth: usize,
+) {
     if !source.propagation().is_shared() {
         return;
     }
+    if visited.len() > max_depth {
+        log::warn!("propagate_umount_inner: max depth {} exceeded", max_depth);
+        return;
+    }
 
-    // Propagate to shared peers: find and detach the corresponding mount
+    // Propagate to shared peers
     for peer in get_peers(source) {
         if let Some(child) = find_child_mount_by_id(&peer, mountpoint_id) {
             let _ = child.umount_inner(false, false);
         }
     }
 
-    // Propagate to slaves
+    // Propagate to slaves. SharedSlave receivers recurse to their peers.
     let master_gid = source.propagation().peer_group_id();
     for slave in get_slaves(master_gid) {
+        let slave_ptr = Arc::as_ptr(&slave) as usize;
+        if visited.contains(&slave_ptr) {
+            continue;
+        }
         if let Some(child) = find_child_mount_by_id(&slave, mountpoint_id) {
             let _ = child.umount_inner(false, false);
+        }
+        // If slave is SharedSlave, recurse to propagate to slave's peers
+        if slave.propagation().is_shared() {
+            visited.push(slave_ptr);
+            propagate_umount_inner(&slave, mountpoint_id, visited, max_depth);
         }
     }
 }
