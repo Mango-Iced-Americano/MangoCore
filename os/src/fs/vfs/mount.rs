@@ -960,12 +960,17 @@ impl MountFS {
         // Propagate umount to peers before removing from parent.
         // The propagation should be driven by the PARENT mount's sharedness,
         // not self's. propagate_umount() internally checks parent.is_shared().
-        if do_propagate {
-            if let Some(mp) = self.self_mountpoint.lock().clone() {
-                if let Ok(md) = mp.inner_inode.metadata() {
-                    propagate_umount(&mp.mount_fs, md.inode_id);
-                }
-            }
+        // IMPORTANT: release self_mountpoint lock before propagate_umount,
+        // which may recursively call umount_inner on peer mounts.
+        let propagation_target = if do_propagate {
+            self.self_mountpoint.lock().as_ref().and_then(|mp| {
+                mp.inner_inode.metadata().ok().map(|md| (mp.mount_fs.clone(), md.inode_id))
+            })
+        } else {
+            None
+        };
+        if let Some((parent_mfs, inode_id)) = propagation_target {
+            propagate_umount(&parent_mfs, inode_id);
         }
         // Unregister from peer group
         unregister_peer_mount(self);
