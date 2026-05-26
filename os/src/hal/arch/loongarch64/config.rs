@@ -16,7 +16,10 @@ pub const KSTACK_PG_NUM_SHIFT: usize = 16usize.trailing_zeros() as usize;
 #[cfg(not(debug_assertions))]
 pub const KSTACK_PG_NUM_SHIFT: usize = 16usize.trailing_zeros() as usize;
 
-pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 0x20;
+// LA64 keeps per-task kernel stacks in the kernel heap.  128K stacks make
+// 1000-waiter fork/futex tests exhaust the 128M heap before wait can reap.
+pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 0x10;
+pub const BOOT_STACK_SIZE: usize = PAGE_SIZE * 0x20;
 pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x8000;
 
 // Addresses

@@ -139,9 +139,9 @@ kernel:
 	@echo Platform: $(BOARD)
 	@echo block_mode: $(BLK_MODE)
     ifeq ($(MODE), debug)
-		@LOG=$(LOG) cargo build --no-default-features --features "comp board_$(BOARD) block_$(BLK_MODE) $(LOG_OPTION)" --target $(TARGET)
+		@LOG=$(LOG) cargo build --no-default-features --features "comp board_$(BOARD) block_$(BLK_MODE) $(LOG_OPTION) $(EXTRA_FEATURES)" --target $(TARGET)
     else
-		@LOG=$(LOG) cargo build --no-default-features --release --features "comp board_$(BOARD) block_$(BLK_MODE) $(LOG_OPTION)"  --target $(TARGET)
+		@LOG=$(LOG) cargo build --no-default-features --release --features "comp board_$(BOARD) block_$(BLK_MODE) $(LOG_OPTION) $(EXTRA_FEATURES)"  --target $(TARGET)
     endif
 
 # 更新内核

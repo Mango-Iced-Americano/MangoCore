@@ -2544,6 +2544,28 @@ pub fn sys_umount2(target: *const u8, flags: u32) -> isize {
             return errno;
         }
     };
+    if flags.contains(UmountFlags::MNT_DETACH) {
+        let mnt_inode = match inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+            Some(mnt) => mnt,
+            None => return EINVAL,
+        };
+        let target_mnt = if mnt_inode.is_mountpoint_root() {
+            mnt_inode.mount_fs.clone()
+        } else {
+            let inode_id = match mnt_inode.inner_inode.metadata() {
+                Ok(md) => md.inode_id,
+                Err(e) => return -(e as isize),
+            };
+            match mnt_inode.mount_fs.mountpoints.lock().get(&inode_id).cloned() {
+                Some(mnt) => mnt,
+                None => return EINVAL,
+            }
+        };
+        return match target_mnt.detach_recursive() {
+            Ok(()) => SUCCESS,
+            Err(e) => -(e as isize),
+        };
+    }
     match inode.umount() {
         Ok(_) => SUCCESS,
         Err(e) => {
@@ -3052,9 +3074,7 @@ pub fn sys_mount(
 
         old_parent_mnt.remove_mount(old_mp_id);
 
-        if let Some(old_path) = src_mnt.mount_path() {
-            vfs::mount::MOUNT_LIST.remove(old_path);
-        }
+        vfs::mount::MOUNT_LIST.remove_fs(&src_mnt);
 
         if let Err(e) = new_parent_mnt.add_mount(inode_id, src_mnt.clone()) {
             return -(e as isize);

@@ -24,8 +24,8 @@ pub use completion::Completion;
 pub use manager::{
     add_kernel_timer, add_task, all_pids, do_oom, do_wake_expired, kernel_timer_queue_len,
     procs_count, remove_tasks_from_queues, send_signal_to_interruptible, sleep_interruptible,
-    task_manager_counts, wait_with_timeout, wake_interruptible, zombie_count, TimerAction,
-    WaitQueue, WaitResult,
+    task_manager_counts, update_ready_nice, wait_with_timeout, wake_interruptible, zombie_count,
+    TimerAction, WaitQueue, WaitResult,
 };
 // pub use pid::RecycleAllocator;
 pub use pid::{

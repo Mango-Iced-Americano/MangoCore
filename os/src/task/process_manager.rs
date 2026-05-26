@@ -149,6 +149,8 @@ impl ProcessManager {
             if let Some((idx, _)) = pair {
                 let child = if nowait {
                     process_inner.children[idx].clone()
+                } else if pid == -1 {
+                    process_inner.children.swap_remove(idx)
                 } else {
                     process_inner.children.remove(idx)
                 };

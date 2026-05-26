@@ -8,6 +8,7 @@ use crate::mm::{
 use crate::syscall::errno::*;
 use crate::task::{
     current_task, current_user_token, ProcessControlBlock, ProcessManager, TaskControlBlock,
+    update_ready_nice,
 };
 use crate::timer::{get_time_sec, TimeSpec};
 use alloc::{sync::Arc, vec::Vec};
@@ -1601,10 +1602,11 @@ fn priority_targets(which: i32, who: i32) -> Result<Vec<Arc<TaskControlBlock>>, 
 }
 
 fn set_task_nice(task: &Arc<TaskControlBlock>, nice: i32) {
-    let state = {
+    let (old_nice, state) = {
         let mut inner = task.acquire_inner_lock();
+        let old_nice = inner.sched_nice;
         inner.sched_nice = nice;
-        SchedState {
+        let state = SchedState {
             policy: inner.sched_policy,
             priority: inner.sched_priority,
             reset_on_fork: inner.sched_reset_on_fork,
@@ -1612,8 +1614,10 @@ fn set_task_nice(task: &Arc<TaskControlBlock>, nice: i32) {
             runtime: inner.sched_runtime,
             deadline: inner.sched_deadline,
             period: inner.sched_period,
-        }
+        };
+        (old_nice, state)
     };
+    update_ready_nice(task, old_nice, state.nice);
     sync_process_sched_state(task, state);
 }
 
@@ -2137,8 +2141,9 @@ pub fn sys_sched_setattr(pid: usize, attr: *const SchedAttr, flags: usize) -> is
     ) {
         return EPERM;
     }
-    let state = {
+    let (old_nice, state) = {
         let mut inner = task.acquire_inner_lock();
+        let old_nice = inner.sched_nice;
         inner.sched_policy = base_policy;
         inner.sched_priority = priority;
         inner.sched_reset_on_fork = new_reset_on_fork;
@@ -2146,7 +2151,7 @@ pub fn sys_sched_setattr(pid: usize, attr: *const SchedAttr, flags: usize) -> is
         inner.sched_runtime = attr.sched_runtime;
         inner.sched_deadline = attr.sched_deadline;
         inner.sched_period = attr.sched_period;
-        SchedState {
+        let state = SchedState {
             policy: inner.sched_policy,
             priority: inner.sched_priority,
             reset_on_fork: inner.sched_reset_on_fork,
@@ -2154,8 +2159,10 @@ pub fn sys_sched_setattr(pid: usize, attr: *const SchedAttr, flags: usize) -> is
             runtime: inner.sched_runtime,
             deadline: inner.sched_deadline,
             period: inner.sched_period,
-        }
+        };
+        (old_nice, state)
     };
+    update_ready_nice(&task, old_nice, state.nice);
     sync_process_sched_state(&task, state);
     SUCCESS
 }

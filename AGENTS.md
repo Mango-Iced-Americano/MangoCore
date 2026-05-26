@@ -224,6 +224,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | `mlock05` 找不到 `/proc/self/smaps` 或 `Rss` 多 1 页 | procfs 缺少 smaps，且 `mlock()` 锁定子区间后 VMA 合并导致 smaps 粗粒度统计误计旁边页 | 提供 `/proc/<pid>/smaps` 最小实现，并按 locked 页边界拆分输出段；`Rss`/`Locked` 只统计该段 |
 | unmap 后读到 PTE 残留值 | 未刷新 TLB，CPU 仍用旧缓存 | **所有 PTE 修改后 `sfence.vma` / `invtlb`** |
 | heap allocator panic | 内核堆耗尽 | `try_reserve` 防御 + OOM killer |
+| la64 `futex_cmp_requeue01`/clone 压测在 `clone()` 触发 heap fatal | la64 每个 task kernel stack 是堆上的 `Vec<u8>`；128KB 栈遇到 1000 waiter 会吃满 128MB kernel heap | la64 task stack 保持 64KB，并把 `BOOT_STACK_SIZE` 和 `KERNEL_STACK_SIZE` 分离；boot stack 仍保留 128KB |
 | `brk`/`mmap` 返回意外值 | 堆/mmap 区域冲突 | 检查 `program_break` 边界 |
 | la64 在大量匿名页 fault 时 `frame_alloc`/`memset` AddressError，常见停在物理 `0xb0000000` | QEMU la64 DTB 的高段 RAM 是 `memory@80000000` + `0x30000000`，旧配置错误地按 1GB 连续 RAM 分配到 `0xc0000000` | la64 `MEMORY_SIZE` 必须匹配 DTB 的 `0x30000000`；不要跨真实 RAM 结尾分配物理页 |
 | la64 `getrusage03` 变成 `TCONF: needs at least 512MB MemAvailable` 或 30s timeout | la64 高段 RAM 只有 768MB，256MB 静态 kernel heap 挤占可用页帧；页帧清零被降成 byte-wise `memset`，大批量 fault 很慢 | la64 kernel heap 保持在实际需要范围内；页帧清零用 64-bit store 循环，避免每页 4096 次 byte store |
@@ -288,6 +289,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | `rt_sigqueueinfo01` pthread checkpoint 超时 | TID 目标信号立即唤醒 futex/checkpoint waiter，导致 LTP 后续 `TST_CHECKPOINT_WAKE` 找不到等待者 | 对非 leader TID 先入线程 pending，不主动信号唤醒；由测试的 futex wake 释放后再处理 pending signal |
 | LTP cgroup 脚本触发 `syslog/klogctl` panic 或 `syslog12` 非 root 失败 | `sys_syslog()` 对 READ_CLEAR/CLEAR/console/size action 留了 `todo!()`，用户拷贝 `unwrap()`，且缺少权限检查 | 所有 action 返回稳定 errno/成功值，用户指针错误返回错误码；除 READ_ALL/SIZE_BUFFER 外需 root 或 `CAP_SYS_ADMIN/CAP_SYSLOG` |
 | LTP nice05 动态 CPU clock 失败 | glibc 使用负数动态 clock id，且相邻 nice 在单核调度中差异太小 | 解码动态 CPU clock id，并让 `CPUCLOCK_SCHED`/调度统计体现 nice |
+| `futex_cmp_requeue01` 1000 waiter 通过 Test 5 后 30s timeout | nice-aware scheduler 每次 `fetch_task()` 都全队列扫描，默认 nice=0 的大量 waiter 变成 O(n²) 调度开销 | ready 队列记录非默认 nice 数量；全 nice=0 时走 FIFO fast path，非默认 nice 存在时才扫描；`wait(-1)` 大量回收用 `swap_remove` |
 | glibc pthread cancel 缺库 | 测试镜像缺少架构匹配 `libgcc_s.so.1` | initproc 写入 `/glibc/lib/libgcc_s.so.1` 后再链接到 `/lib` |
 | pidfd_send_signal 对 `/proc/<pid>` fd 返回 EBADF | procfs inode 被 MountFSInode 包装，且 `/proc/<pid>` 目录未记录 pid | 解包 MountFSInode 后识别 LockedProcInode，并在 pid 目录 `extra_data` 保存 pid |
 | pidfd_getfd 已退出目标返回 EBADF | wait 后 zombie 进程仍可被 registry 查到，但 fd table 已关闭 | 目标进程 zombie 时按 Linux 语义返回 `ESRCH` |
