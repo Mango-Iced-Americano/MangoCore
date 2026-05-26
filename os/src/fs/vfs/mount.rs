@@ -22,7 +22,7 @@ use alloc::{
     vec::Vec,
 };
 use core::fmt::Debug;
-use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU32, AtomicBool, Ordering};
 use spin::{Mutex, MutexGuard};
 use lazy_static::lazy_static;
 
@@ -312,8 +312,10 @@ impl MountFSInode {
             propagate_mount(&self.mount_fs, inode_id, &new_mount_fs, child_name);
         }
 
-        // Register in peer group AFTER propagation (prevent self-peer loop)
-        if parent_shared {
+        // Register in peer group AFTER propagation (prevent self-peer loop).
+        // Only the public auto-propagating path may auto-register; manual callers
+        // using do_propagate=false must set final propagation and register themselves.
+        if do_propagate && parent_shared {
             register_peer(&new_mount_fs);
         }
 
@@ -752,6 +754,8 @@ pub struct MountFS {
     pub dentry_gen: AtomicU64,
     /// 禁用 dentry cache 的动态文件系统（如 procfs）
     pub no_dentry_cache: AtomicBool,
+    /// umount EBUSY 重试计数，连续 3 次 EBUSY 后第 4 次自动 force-detach
+    umount_retry_count: AtomicU32,
 }
 
 impl MountFS {
@@ -771,6 +775,7 @@ impl MountFS {
             dentry_cache: Mutex::new(DentryCache::new()),
             dentry_gen: AtomicU64::new(0),
             no_dentry_cache: AtomicBool::new(false),
+            umount_retry_count: AtomicU32::new(0),
         })
     }
 
@@ -794,6 +799,7 @@ impl MountFS {
             dentry_cache: Mutex::new(DentryCache::new()),
             dentry_gen: AtomicU64::new(0),
             no_dentry_cache: AtomicBool::new(false),
+            umount_retry_count: AtomicU32::new(0),
         })
     }
 
@@ -848,20 +854,42 @@ impl MountFS {
         let prop_type = prop.prop_type();
         let peer_gid = prop.peer_group_id();
         let master_gid = prop.master_group_id();
+        let self_ptr = Arc::as_ptr(self) as usize;
 
         warn!(
-            "--- MountFS::dump_mount_state (reason: {}) --- path={} source={} flags={:?} prop={:?} peer_gid={} master_gid={}",
-            reason, path, source, flags, prop_type, peer_gid, master_gid
+            "--- MountFS::dump_mount_state (reason: {}) --- self=0x{:x} path={} source={} flags={:?} prop={:?} peer_gid={} master_gid={}",
+            reason, self_ptr, path, source, flags, prop_type, peer_gid, master_gid
         );
 
         // self_mountpoint info
         if let Some(mp) = self.self_mountpoint() {
             if let Ok(md) = mp.inner_inode.metadata() {
+                let parent_path = mp.mount_fs.mount_path().unwrap_or_else(|| "(nopath)".to_string());
+                let parent_ptr = Arc::as_ptr(&mp.mount_fs) as usize;
                 warn!(
-                    "  self_mountpoint: parent_inode_id={:?} parent_fs_name={}",
-                    md.inode_id,
-                    mp.mount_fs.name()
+                    "  self_mountpoint: parent_inode_id={:?} parent_fs_name={} parent=0x{:x} parent_path={}",
+                    md.inode_id, mp.mount_fs.name(), parent_ptr, parent_path
                 );
+                // Check if parent's mountpoints table actually has an entry for us
+                {
+                    let parent_mps = mp.mount_fs.mountpoints.lock();
+                    let parent_has_us = parent_mps.get(&md.inode_id)
+                        .map(|child| Arc::ptr_eq(child, self));
+                    warn!(
+                        "  parent.mountpoints[inode_id={:?}].ptr_eq(self) = {:?} (parent has {} entries)",
+                        md.inode_id, parent_has_us, parent_mps.len()
+                    );
+                    // List ALL parent entries for debugging
+                    if !parent_mps.is_empty() {
+                        warn!("  parent mounts table:");
+                        for (&ino, child) in parent_mps.iter() {
+                            let child_ptr = Arc::as_ptr(child) as usize;
+                            let child_path = child.mount_path().unwrap_or_else(|| "(nopath)".to_string());
+                            let is_us = Arc::ptr_eq(child, self);
+                            warn!("    ino={:?} child=0x{:x} path={} is_self={}", ino, child_ptr, child_path, is_us);
+                        }
+                    }
+                }
             } else {
                 warn!("  self_mountpoint: present but metadata failed");
             }
@@ -869,14 +897,24 @@ impl MountFS {
             warn!("  self_mountpoint: None (global root or detached)");
         }
 
+        // absolute_path from self_mountpoint
+        if let Some(mp) = self.self_mountpoint() {
+            match mp.absolute_path() {
+                Ok(abs) => warn!("  absolute_path: {}", abs),
+                Err(_) => warn!("  absolute_path: FAILED (mount tree walk error)"),
+            }
+        }
+
         // Children in mountpoints table
         {
             let mps = self.mountpoints.lock();
             warn!("  children: count={}", mps.len());
             for (ino, child) in mps.iter() {
+                let child_ptr = Arc::as_ptr(child) as usize;
                 let child_path = child.mount_path().unwrap_or_else(|| "(nopath)".to_string());
                 let child_source = child.mount_source().unwrap_or_else(|| "(nosrc)".to_string());
-                warn!("    ino={:?} path={} source={}", ino, child_path, child_source);
+                let is_self = Arc::ptr_eq(child, self);
+                warn!("    ino={:?} child=0x{:x} path={} source={} self_ref={}", ino, child_ptr, child_path, child_source, is_self);
             }
         }
 
@@ -884,10 +922,27 @@ impl MountFS {
         if peer_gid != 0 {
             let peers = super::propagation::get_peers(self);
             warn!("  peer_group({}): {} active peers", peer_gid, peers.len());
+            for p in &peers {
+                let p_path = p.mount_path().unwrap_or_else(|| "(nopath)".to_string());
+                warn!("    peer path={}", p_path);
+            }
         }
         if master_gid != 0 {
             let slaves = super::propagation::get_slaves(master_gid);
             warn!("  slave_group(master={}): {} active slaves", master_gid, slaves.len());
+        }
+
+        // Dump full MOUNT_LIST (global perspective — matches /proc/mounts)
+        {
+            let snapshot = MOUNT_LIST.snapshot();
+            warn!("  MOUNT_LIST (global): {} entries", snapshot.len());
+            for (p, mfs, ino) in &snapshot {
+                let mfs_ptr = Arc::as_ptr(mfs) as usize;
+                let is_self = Arc::ptr_eq(mfs, self);
+                let m_path = mfs.mount_path().unwrap_or_else(|| "(nopath)".to_string());
+                warn!("    path={} mfs=0x{:x} mfs_path={} ino={:?} is_self={}",
+                    p, mfs_ptr, m_path, ino, is_self);
+            }
         }
 
         warn!("--- end MountFS::dump_mount_state ---");
@@ -1112,6 +1167,20 @@ impl MountList {
             }
         }
         None
+    }
+
+    /// Debug: snapshot for mount state dump.
+    /// Returns Vec<(path, fs, ino)> sorted by path for deterministic output.
+    pub fn snapshot(&self) -> Vec<(String, Arc<MountFS>, Option<InodeId>)> {
+        let inner = self.mounts.lock();
+        let mut result: Vec<(String, Arc<MountFS>, Option<InodeId>)> = Vec::new();
+        for (path, stack) in inner.iter() {
+            for rec in stack.iter() {
+                result.push((path.0.clone(), rec.fs.clone(), rec.ino));
+            }
+        }
+        result.sort_by(|a, b| a.0.cmp(&b.0));
+        result
     }
 }
 

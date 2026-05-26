@@ -397,13 +397,31 @@ fn propagate_to_mount(
 
 /// Finish setting up a propagated mount's group membership.
 fn finish_propagated_mount(new_mount: &Arc<MountFS>, source_child_group: u32, as_slave: bool) {
+    // mount_subtree_inner(false) may have inherited the target parent's
+    // propagation group. A propagated clone must use the final group from
+    // the source child instead. Clear all inherited registrations first.
+    unregister_peer_mount(new_mount);
+    unregister_slave_mount(new_mount);
+    new_mount.propagation().set_peer_group_id(0);
+    new_mount.propagation().set_master_group_id(0);
+
     if as_slave {
-        new_mount.propagation().set_prop_type_value(PropagationType::Slave);
-        new_mount.propagation().set_master_group_id(source_child_group);
+        new_mount
+            .propagation()
+            .set_prop_type_value(PropagationType::Slave);
+        new_mount
+            .propagation()
+            .set_master_group_id(source_child_group);
         register_slave(new_mount, source_child_group);
     } else if source_child_group != 0 {
-        new_mount.propagation().set_shared_with_group(source_child_group);
+        new_mount
+            .propagation()
+            .set_shared_with_group(source_child_group);
         register_peer(new_mount);
+    } else {
+        new_mount
+            .propagation()
+            .set_prop_type_value(PropagationType::Private);
     }
 }
 

@@ -2264,29 +2264,35 @@ fn do_bind_mount(
 
     // Set up propagation matching the source mount.
     // The mount_subtree_inner(false) already inherited the parent's group ID
-    // (if parent shared) but didn't register in PEER_GROUPS.
-    // Unregister from parent's group first, then apply source's propagation.
-    let parent_gid = mnt_fs.propagation().peer_group_id();
+    // (if parent shared) but did NOT register in PEER_GROUPS.
+    // Unconditionally unregister from parent's group, then apply source's propagation.
+    let inherited_gid = mnt_fs.propagation().peer_group_id();
+    if inherited_gid != 0 {
+        vfs::propagation::unregister_peer_mount(&mnt_fs);
+    }
     let source_prop = source_mount_fs.propagation();
     let source_is_shared = source_prop.is_shared();
     let source_gid = source_prop.peer_group_id();
 
-    if parent_gid != 0 && parent_gid != source_gid {
-        vfs::propagation::unregister_peer_mount(&mnt_fs);
-    }
+    let mut register_shared = false;
+    let mut register_slave_master: Option<u32> = None;
 
     if source_is_shared {
         mnt_fs.propagation().set_shared_with_group(source_gid);
-        // DO NOT register_peer yet — must defer until AFTER propagate_mount
-        // to avoid the new mount appearing as a peer of itself (self-reference).
+        register_shared = true;
     } else if source_prop.is_slave() {
-        // Source is Slave — bind mount inherits the same master
         let master_gid = source_prop.master_group_id();
         mnt_fs.propagation().set_prop_type_value(vfs::propagation::PropagationType::Slave);
         mnt_fs.propagation().set_master_group_id(master_gid);
-        // register_slave deferred — done after propagate_mount
+        register_slave_master = Some(master_gid);
+    } else if inherited_gid != 0 {
+        // Private source mounted under a shared target parent: the bind mount
+        // is still a mount event under a shared tree. Preserve the inherited
+        // target-parent group instead of forcing Private.
+        mnt_fs.propagation().set_shared_with_group(inherited_gid);
+        register_shared = true;
     } else {
-        // Source is Private or Unbindable — set to Private to clear parent's group
+        // Source is Private/Unbindable, target parent is also private → Private
         vfs::propagation::set_propagation_type(&mnt_fs, vfs::propagation::PropagationType::Private);
     }
 
@@ -2299,7 +2305,7 @@ fn do_bind_mount(
         Ok(md) => md,
         Err(e) => {
             // Rollback: clear peer_group_id that was set above
-            if source_is_shared {
+            if register_shared {
                 mnt_fs.propagation().set_peer_group_id(0);
             }
             return -(e as isize);
@@ -2313,10 +2319,9 @@ fn do_bind_mount(
     vfs::propagation::propagate_mount(&target_parent_mfs, target_ino, &mnt_fs, child_name);
 
     // NOW register in peer/slave group AFTER propagation (prevents self-peer loop)
-    if source_is_shared {
+    if register_shared {
         vfs::propagation::register_peer(&mnt_fs);
-    } else if source_prop.is_slave() {
-        let master_gid = source_prop.master_group_id();
+    } else if let Some(master_gid) = register_slave_master {
         vfs::propagation::register_slave(&mnt_fs, master_gid);
     }
 
