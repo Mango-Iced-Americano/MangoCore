@@ -321,13 +321,17 @@ fn get_time_ms() -> u64 {
     user_lib::get_time() as u64
 }
 
-fn run_case(
-    case: &LtpCase,
-    ltproot: &str,
-    tmpdir: &str,
-    deadline_ms: u64,
-    own_pgid: isize,
-) -> i32 {
+struct PrecomputedEnv {
+    ltp_root_s: String,
+    path_s: String,
+    tmpdir_s: String,
+    tmpbase_s: String,
+    pwd_s: String,
+    env_preload: [*const u8; 16],
+    env_no_preload: [*const u8; 16],
+}
+
+fn precompute_env(ltproot: &str, tmpdir: &str) -> PrecomputedEnv {
     let ltp_root_s = format!("LTPROOT={}\0", ltproot);
     let path_s = format!(
         "PATH=/bin:/usr/bin:{}/testcases/bin:{}/bin:{}/testcases/lib\0",
@@ -336,33 +340,39 @@ fn run_case(
     let tmpdir_s = format!("TMPDIR={}\0", tmpdir);
     let tmpbase_s = format!("TMPBASE={}\0", tmpdir);
     let pwd_s = format!("PWD={}/testcases/bin\0", ltproot);
-    let is_elf = !case.case_name.as_bytes().iter().any(|b| *b == b'.');
-    let ld_preload_ptr: *const u8 = if is_elf {
-        "LD_PRELOAD=/ltp_proto_compat.so\0".as_ptr()
-    } else {
-        core::ptr::null()
-    };
 
-    let env: [*const u8; 16] = [
-        ltp_root_s.as_ptr(),
-        path_s.as_ptr(),
-        tmpdir_s.as_ptr(),
-        tmpbase_s.as_ptr(),
-        "HOME=/\0".as_ptr(),
-        pwd_s.as_ptr(),
-        "SHELL=/bin/sh\0".as_ptr(),
-        "TERM=dumb\0".as_ptr(),
-        "LTP_COLORIZE_OUTPUT=y\0".as_ptr(),
-        "LTP_DEV_FS_TYPE=ext2\0".as_ptr(),
-        "LTP_IPC_PATH=/tmp\0".as_ptr(),
-        "LANG=C.UTF-8\0".as_ptr(),
-        "LTP_REPRODUCIBLE_OUTPUT=n\0".as_ptr(),
-        "KCONFIG_PATH=/proc/config\0".as_ptr(),
-        ld_preload_ptr,
-        core::ptr::null(),
+    let ld_preload_ptr: *const u8 = "LD_PRELOAD=/ltp_proto_compat.so\0".as_ptr();
+    let null_ptr: *const u8 = core::ptr::null();
+
+    let env_preload: [*const u8; 16] = [
+        ltp_root_s.as_ptr(), path_s.as_ptr(), tmpdir_s.as_ptr(), tmpbase_s.as_ptr(),
+        "HOME=/\0".as_ptr(), pwd_s.as_ptr(), "SHELL=/bin/sh\0".as_ptr(),
+        "TERM=dumb\0".as_ptr(), "LTP_COLORIZE_OUTPUT=y\0".as_ptr(),
+        "LTP_DEV_FS_TYPE=ext2\0".as_ptr(), "LTP_IPC_PATH=/tmp\0".as_ptr(),
+        "LANG=C.UTF-8\0".as_ptr(), "LTP_REPRODUCIBLE_OUTPUT=n\0".as_ptr(),
+        "KCONFIG_PATH=/proc/config\0".as_ptr(), ld_preload_ptr, null_ptr,
     ];
-    // 预留钩子: env.push("LTP_DEV=/dev/vda\0".as_ptr());
-    // 预留钩子: env.push("LTP_BIG_DEV=/dev/vda\0".as_ptr());
+    let env_no_preload: [*const u8; 16] = [
+        ltp_root_s.as_ptr(), path_s.as_ptr(), tmpdir_s.as_ptr(), tmpbase_s.as_ptr(),
+        "HOME=/\0".as_ptr(), pwd_s.as_ptr(), "SHELL=/bin/sh\0".as_ptr(),
+        "TERM=dumb\0".as_ptr(), "LTP_COLORIZE_OUTPUT=y\0".as_ptr(),
+        "LTP_DEV_FS_TYPE=ext2\0".as_ptr(), "LTP_IPC_PATH=/tmp\0".as_ptr(),
+        "LANG=C.UTF-8\0".as_ptr(), "LTP_REPRODUCIBLE_OUTPUT=n\0".as_ptr(),
+        "KCONFIG_PATH=/proc/config\0".as_ptr(), null_ptr, null_ptr,
+    ];
+
+    PrecomputedEnv { ltp_root_s, path_s, tmpdir_s, tmpbase_s, pwd_s, env_preload, env_no_preload }
+}
+
+fn run_case(
+    case: &LtpCase,
+    deadline_ms: u64,
+    own_pgid: isize,
+    penv: &PrecomputedEnv,
+) -> i32 {
+
+    let is_elf = !case.case_name.as_bytes().iter().any(|b| *b == b'.');
+    let env: &[*const u8] = if is_elf { &penv.env_preload } else { &penv.env_no_preload };
 
     let mut cmd_buf = String::from(&case.command);
     cmd_buf.push('\0');
@@ -501,6 +511,7 @@ fn main(_argc: usize, argv: &[&str]) -> i32 {
     }
 
     let own_pgid = getpgid(0);
+    let penv = precompute_env(&cli.ltproot, &cli.tmpdir);
     let mut raw_cases: Vec<LtpCase> = Vec::new();
     for suite in &cfg.ltp_suites {
         if suite.is_empty() {
@@ -608,7 +619,7 @@ fn main(_argc: usize, argv: &[&str]) -> i32 {
 
         println!("RUN LTP CASE {}", case.case_name);
 
-        let ret = run_case(case, &cli.ltproot, &cli.tmpdir, deadline_ms, own_pgid);
+        let ret = run_case(case, deadline_ms, own_pgid, &penv);
 
         println!("FAIL LTP CASE {} : {}", case.case_name, ret);
 
