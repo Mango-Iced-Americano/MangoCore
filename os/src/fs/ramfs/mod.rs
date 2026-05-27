@@ -641,7 +641,12 @@ impl IndexNode for LockedRamFSInode {
         {
             let mut new_locked = new_parent_inode.0.lock();
             if new_locked.children.contains_key(new_name) {
-                // Roll back: re-insert into old parent
+                // Roll back: re-insert into old parent.
+                // Drop new_locked first to avoid holding two Mutexes simultaneously,
+                // which would deadlock when old_parent == new_parent (same inode,
+                // non-reentrant spin::Mutex) or when two concurrent renames go in
+                // opposite directions (AB-BA circular wait).
+                drop(new_locked);
                 let mut old_locked = self.0.lock();
                 old_locked.children.insert(String::from(old_name), child);
                 if is_dir {
