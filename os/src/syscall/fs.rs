@@ -2414,6 +2414,12 @@ pub fn sys_ioctl(fd: usize, cmd: u32, arg: usize) -> isize {
     };
 
     if cmd == FIONREAD {
+        // Let inode try first (PTY uses internal buffer size)
+        match file.inode.ioctl(cmd, arg, file.private_data()) {
+            Ok(n) => return n as isize,
+            Err(SyscallErr::ENOSYS) => { /* fall through */ }
+            Err(e) => return -(e as isize),
+        }
         let md = match file.metadata() {
             Ok(m) => m,
             Err(e) => return -(e as isize),

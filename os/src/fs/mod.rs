@@ -105,6 +105,10 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
             .expect("devfs: failed to register /dev/random");
         devfs.add_dev("console", crate::fs::dev::tty::TTY.clone() as Arc<dyn self::vfs::IndexNode>)
             .expect("devfs: failed to register /dev/console");
+        devfs.add_dev("ptmx", alloc::sync::Arc::new(crate::fs::dev::pty::PtmxMasterInode) as Arc<dyn self::vfs::IndexNode>)
+            .expect("devfs: failed to register /dev/ptmx");
+        devfs.add_dev("pts", alloc::sync::Arc::new(crate::fs::dev::pty::PtsDirInode) as Arc<dyn self::vfs::IndexNode>)
+            .expect("devfs: failed to register /dev/pts");
         devfs.add_dev("rtc", alloc::sync::Arc::new(crate::fs::dev::rtc::Rtc) as Arc<dyn self::vfs::IndexNode>)
             .expect("devfs: failed to register /dev/rtc");
         devfs.add_dev("cpu_dma_latency", alloc::sync::Arc::new(crate::fs::dev::null::Null) as Arc<dyn self::vfs::IndexNode>)

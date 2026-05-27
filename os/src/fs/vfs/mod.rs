@@ -243,6 +243,10 @@ pub enum FilePrivateData {
     /// Socket 创建时使用
     #[allow(dead_code)]
     SocketCreate,
+    /// PTY master — internal state shared with slave
+    PtyMaster {
+        inner: alloc::sync::Arc<crate::fs::dev::pty::PtyInner>,
+    },
 }
 
 impl Default for FilePrivateData {

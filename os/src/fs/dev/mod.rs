@@ -1,5 +1,6 @@
 pub mod null;
 pub mod pipe;
+pub mod pty;
 pub mod rtc;
 pub mod tty;
 pub mod zero;
