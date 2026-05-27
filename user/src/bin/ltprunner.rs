@@ -342,7 +342,7 @@ fn run_case(
         core::ptr::null()
     };
 
-    let env: [*const u8; 18] = [
+    let env: [*const u8; 16] = [
         ltp_root_s.as_ptr(),
         path_s.as_ptr(),
         tmpdir_s.as_ptr(),
@@ -352,8 +352,6 @@ fn run_case(
         "SHELL=/bin/sh\0".as_ptr(),
         "TERM=dumb\0".as_ptr(),
         "LTP_COLORIZE_OUTPUT=y\0".as_ptr(),
-        "LTP_TIMEOUT_MUL=1\0".as_ptr(),
-        "LTP_RUNTIME_MUL=1\0".as_ptr(),
         "LTP_DEV_FS_TYPE=ext2\0".as_ptr(),
         "LTP_IPC_PATH=/tmp\0".as_ptr(),
         "LANG=C.UTF-8\0".as_ptr(),
