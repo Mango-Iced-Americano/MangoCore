@@ -2,7 +2,6 @@ use super::errno::*;
 use crate::fs::poll::{ppoll, pselect, FdSet, PollFd};
 use crate::fs::vfs::{self, FileFlags, FileType, SeekFrom, SuperBlock};
 use crate::fs::*;
-use crate::hal::BLOCK_SZ;
 use crate::mm::{
     MapPermission, UserBufferReader, UserBufferWriter, UserCString, UserIoVec, UserPtr,
     UserPtrMut, UserSlice, VirtAddr,
@@ -1833,7 +1832,7 @@ pub struct Statfs {
     /// Padding bytes reserved for future use
     f_spare: [usize; 4],
 }
-fn superblock_to_statfs(sb: &SuperBlock, mnt_flags: u64) -> Statfs {
+fn superblock_to_statfs(sb: &SuperBlock) -> Statfs {
     Statfs {
         f_type: sb.f_type as usize,
         f_bsize: sb.f_bsize as usize,
@@ -1845,7 +1844,7 @@ fn superblock_to_statfs(sb: &SuperBlock, mnt_flags: u64) -> Statfs {
         f_fsid: sb.f_fsid,
         f_namelen: sb.f_namelen as usize,
         f_frsize: sb.f_frsize as usize,
-        f_flag: mnt_flags as usize,
+        f_flag: sb.flags as usize,
         f_spare: [0; 4],
     }
 }
@@ -1866,8 +1865,13 @@ pub fn sys_statfs(pathname: *const u8, buf: *mut Statfs) -> isize {
         Ok(p) => p,
         Err(e) => return e,
     };
-    let root: Arc<dyn vfs::IndexNode> = crate::fs::vfs_root().mountpoint_root_inode();
-    let inode = match crate::fs::vfs_lookup(&root, &path, true) {
+    if path.is_empty() {
+        return ENOENT;
+    }
+    let start = current_task()
+        .map(|t| t.process.fs().lock().working_inode.inode.clone())
+        .unwrap_or_else(|| crate::fs::vfs_root().mountpoint_root_inode());
+    let inode = match crate::fs::vfs_lookup(&start, &path, true) {
         Ok(inode) => inode,
         Err(e) => return e,
     };
@@ -1876,7 +1880,7 @@ pub fn sys_statfs(pathname: *const u8, buf: *mut Statfs) -> isize {
         Ok(sb) => sb,
         Err(e) => return -(e as isize),
     };
-    let statfs = superblock_to_statfs(&sb, 0);
+    let statfs = superblock_to_statfs(&sb);
     write_statfs(buf, &statfs)
 }
 
@@ -1897,7 +1901,7 @@ pub fn sys_fstatfs(fd: usize, buf: *mut Statfs) -> isize {
         Ok(sb) => sb,
         Err(e) => return -(e as isize),
     };
-    let statfs = superblock_to_statfs(&sb, 0);
+    let statfs = superblock_to_statfs(&sb);
     write_statfs(buf, &statfs)
 }
 
@@ -2165,8 +2169,13 @@ pub fn sys_mknodat(dirfd: usize, path: *const u8, mode: u32, dev: usize) -> isiz
         _ => return EINVAL,
     };
     let perm = vfs::InodeMode::from_bits_truncate(mode) & vfs::InodeMode::S_IALLUGO;
-    // Pass raw device number via create_with_data so filesystem can store rdev
-    match parent.create_with_data(&leaf, file_type, perm, dev) {
+    // Only pass device number for CHR/BLK; FIFO/socket use 0
+    let rdev = if file_type == FileType::CharDevice || file_type == FileType::BlockDevice {
+        dev
+    } else {
+        0
+    };
+    match parent.create_with_data(&leaf, file_type, perm, rdev) {
         Ok(_) => SUCCESS,
         Err(e) => -(e as isize),
     }

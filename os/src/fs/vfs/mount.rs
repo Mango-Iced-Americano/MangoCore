@@ -433,6 +433,31 @@ impl IndexNode for MountFSInode {
         Ok(wrapper)
     }
 
+    fn create_with_data(
+        &self,
+        name: &str,
+        file_type: FileType,
+        mode: InodeMode,
+        data: usize,
+    ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+        self.ensure_mount_writable()?;
+        self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
+        let inner_inode = self.inner_inode.create_with_data(name, file_type, mode, data)?;
+        let wrapper = MountFSInode::new(inner_inode, self.mount_fs.clone());
+        if !self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
+            if let Ok(parent_md) = self.inner_inode.metadata() {
+                let key = super::dentry_cache::DentryKey {
+                    parent_ino: parent_md.inode_id,
+                    name: String::from(name),
+                };
+                let (_, evicted) = self.mount_fs.dentry_cache.lock()
+                    .insert_or_get(key, wrapper.clone());
+                drop(evicted);
+            }
+        }
+        Ok(wrapper)
+    }
+
     fn symlink(&self, name: &str, target: &str) -> Result<Arc<dyn IndexNode>, SyscallErr> {
         self.ensure_mount_writable()?;
         self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
@@ -1145,6 +1170,15 @@ impl FileSystem for MountFS {
         let mut sb = self.inner_filesystem.super_block();
         sb.flags = self.mount_flags().bits() as u64;
         sb
+    }
+
+    fn statfs(&self, inode: &Arc<dyn IndexNode>) -> Result<super::file_system::SuperBlock, SyscallErr> {
+        // Unwrap MountFSInode to reach the inner filesystem's statfs
+        if let Some(mfsi) = inode.as_any_ref().downcast_ref::<MountFSInode>() {
+            self.inner_filesystem.statfs(&mfsi.inner_inode)
+        } else {
+            self.inner_filesystem.statfs(inode)
+        }
     }
 
     fn support_readahead(&self) -> bool {
