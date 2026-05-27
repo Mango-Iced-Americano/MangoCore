@@ -204,6 +204,13 @@ pub fn sys_fork() -> isize {
     syscall(SYSCALL_CLONE, [SIGCHLD, 0, 0])
 }
 
+pub fn sys_vfork() -> isize {
+    const CLONE_VM: usize = 0x00000100;
+    const CLONE_VFORK: usize = 0x00004000;
+    const SIGCHLD: usize = 17;
+    syscall(SYSCALL_CLONE, [CLONE_VM | CLONE_VFORK | SIGCHLD, 0, 0])
+}
+
 pub fn sys_exec(path: &str, args: &[*const u8], envp: &[*const u8]) -> isize {
     syscall(
         SYSCALL_EXECVE,

@@ -7,7 +7,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use user_lib::{
-    close, exec, exit, fork, getpgid, kill, open, println, read, setpgid, sleep, waitpid,
+    close, exec, exit, getpgid, kill, open, println, read, setpgid, sleep, vfork, waitpid,
     waitpid_wnohang, OpenFlags, SIGKILL, SIGTERM,
 };
 
@@ -364,7 +364,10 @@ fn run_case(
     // 预留钩子: env.push("LTP_DEV=/dev/vda\0".as_ptr());
     // 预留钩子: env.push("LTP_BIG_DEV=/dev/vda\0".as_ptr());
 
-    let pid = fork();
+    let mut cmd_buf = String::from(&case.command);
+    cmd_buf.push('\0');
+
+    let pid = vfork();
     if pid < 0 {
         return 127;
     }
@@ -377,8 +380,6 @@ fn run_case(
         let shell_new = "/bin/bash\0";
         let shell_old = "/bash\0";
         let dash_c = "-c\0";
-        let mut cmd_buf = String::from(&case.command);
-        cmd_buf.push('\0');
 
         let argv: [*const u8; 4] = [
             shell_new.as_ptr(),
