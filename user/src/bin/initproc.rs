@@ -216,6 +216,14 @@ struct RuntimeConfig {
     ltp_exclude_musl: Vec<String>,
     /// LTP glibc 专属排除测例
     ltp_exclude_glibc: Vec<String>,
+    /// LTP rv64+musl 专属排除测例
+    ltp_exclude_rv64_musl: Vec<String>,
+    /// LTP rv64+glibc 专属排除测例
+    ltp_exclude_rv64_glibc: Vec<String>,
+    /// LTP la64+musl 专属排除测例
+    ltp_exclude_la64_musl: Vec<String>,
+    /// LTP la64+glibc 专属排除测例
+    ltp_exclude_la64_glibc: Vec<String>,
     /// LTP include 白名单（非空时只跑这些测例）
     ltp_include: Vec<String>,
     /// LTP 起始测例名（不设置则从头开始）
@@ -276,6 +284,10 @@ impl RuntimeConfig {
                 .iter()
                 .map(|s| String::from(*s))
                 .collect(),
+            ltp_exclude_rv64_musl: Vec::new(),
+            ltp_exclude_rv64_glibc: Vec::new(),
+            ltp_exclude_la64_musl: Vec::new(),
+            ltp_exclude_la64_glibc: Vec::new(),
             ltp_include: Vec::new(),
             ltp_from: None,
             ltp_libc: LtpLibc::Both,
@@ -341,6 +353,16 @@ fn parse_order(val: &[u8]) -> Option<Vec<usize>> {
     }
 }
 
+fn parse_csv_list(val: &[u8]) -> Option<Vec<String>> {
+    let s = core::str::from_utf8(val).ok()?;
+    Some(
+        s.split(',')
+            .filter(|x| !x.is_empty())
+            .map(String::from)
+            .collect(),
+    )
+}
+
 fn apply_conf_bytes(data: &[u8], cfg: &mut RuntimeConfig) {
     for raw_line in data.split(|b| *b == b'\n') {
         let line = trim_ascii(raw_line);
@@ -383,40 +405,36 @@ fn apply_conf_bytes(data: &[u8], cfg: &mut RuntimeConfig) {
                 }
             }
         } else if key == b"ltp_exclude" {
-            let s = core::str::from_utf8(val).ok();
-            if let Some(s) = s {
-                cfg.ltp_exclude = s
-                    .split(',')
-                    .filter(|x| !x.is_empty())
-                    .map(String::from)
-                    .collect();
+            if let Some(list) = parse_csv_list(val) {
+                cfg.ltp_exclude = list;
             }
         } else if key == b"ltp_exclude_musl" {
-            let s = core::str::from_utf8(val).ok();
-            if let Some(s) = s {
-                cfg.ltp_exclude_musl = s
-                    .split(',')
-                    .filter(|x| !x.is_empty())
-                    .map(String::from)
-                    .collect();
+            if let Some(list) = parse_csv_list(val) {
+                cfg.ltp_exclude_musl = list;
             }
         } else if key == b"ltp_exclude_glibc" {
-            let s = core::str::from_utf8(val).ok();
-            if let Some(s) = s {
-                cfg.ltp_exclude_glibc = s
-                    .split(',')
-                    .filter(|x| !x.is_empty())
-                    .map(String::from)
-                    .collect();
+            if let Some(list) = parse_csv_list(val) {
+                cfg.ltp_exclude_glibc = list;
+            }
+        } else if key == b"ltp_exclude_rv64_musl" {
+            if let Some(list) = parse_csv_list(val) {
+                cfg.ltp_exclude_rv64_musl = list;
+            }
+        } else if key == b"ltp_exclude_rv64_glibc" {
+            if let Some(list) = parse_csv_list(val) {
+                cfg.ltp_exclude_rv64_glibc = list;
+            }
+        } else if key == b"ltp_exclude_la64_musl" {
+            if let Some(list) = parse_csv_list(val) {
+                cfg.ltp_exclude_la64_musl = list;
+            }
+        } else if key == b"ltp_exclude_la64_glibc" {
+            if let Some(list) = parse_csv_list(val) {
+                cfg.ltp_exclude_la64_glibc = list;
             }
         } else if key == b"ltp_include" {
-            let s = core::str::from_utf8(val).ok();
-            if let Some(s) = s {
-                cfg.ltp_include = s
-                    .split(',')
-                    .filter(|x| !x.is_empty())
-                    .map(String::from)
-                    .collect();
+            if let Some(list) = parse_csv_list(val) {
+                cfg.ltp_include = list;
             }
         } else if key == b"ltp_libc" {
             match val {
@@ -492,7 +510,32 @@ fn load_runtime_config() -> RuntimeConfig {
         "[initproc] LTP exclude musl: {:?}, glibc: {:?}",
         cfg.ltp_exclude_musl, cfg.ltp_exclude_glibc
     );
+    println!(
+        "[initproc] LTP exclude arch musl: {:?}, glibc: {:?}",
+        ltp_arch_exclude_musl(&cfg),
+        ltp_arch_exclude_glibc(&cfg)
+    );
     cfg
+}
+
+#[cfg(target_arch = "riscv64")]
+fn ltp_arch_exclude_musl(cfg: &RuntimeConfig) -> &Vec<String> {
+    &cfg.ltp_exclude_rv64_musl
+}
+
+#[cfg(target_arch = "riscv64")]
+fn ltp_arch_exclude_glibc(cfg: &RuntimeConfig) -> &Vec<String> {
+    &cfg.ltp_exclude_rv64_glibc
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn ltp_arch_exclude_musl(cfg: &RuntimeConfig) -> &Vec<String> {
+    &cfg.ltp_exclude_la64_musl
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn ltp_arch_exclude_glibc(cfg: &RuntimeConfig) -> &Vec<String> {
+    &cfg.ltp_exclude_la64_glibc
 }
 
 fn enter_shell(path: &str, environ: &[*const u8]) {
@@ -1364,6 +1407,7 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
                     .ltp_exclude
                     .iter()
                     .chain(&cfg.ltp_exclude_musl)
+                    .chain(ltp_arch_exclude_musl(&cfg))
                     .cloned()
                     .collect();
                 run_ltp_binaries(
@@ -1380,6 +1424,7 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
                     .ltp_exclude
                     .iter()
                     .chain(&cfg.ltp_exclude_glibc)
+                    .chain(ltp_arch_exclude_glibc(&cfg))
                     .cloned()
                     .collect();
                 run_ltp_binaries(
