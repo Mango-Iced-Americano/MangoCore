@@ -365,7 +365,9 @@ impl IndexNode for LockedTmpFSInode {
 
         // 使用 PageCache 读取
         let pc = inode.page_cache.as_ref().ok_or(SyscallErr::EIO)?;
-        let mut read_buf = &mut buf[..effective_len];
+        let read_buf = &mut buf[..effective_len];
+        // Pre-fill with zeros so holes (sparse regions) return zero
+        read_buf.fill(0);
         pc.read(offset, read_buf)
     }
 
