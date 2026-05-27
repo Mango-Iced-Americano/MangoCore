@@ -623,8 +623,10 @@ fn main(_argc: usize, argv: &[&str]) -> i32 {
     }
 
     println!(
-        "[ltprunner] done. executed={} passed={} failed={} skipped={}",
-        executed, passed, failed, skipped_by_timeout
+        "[ltprunner] done. executed={} passed={} failed={} skipped={} total_ms={} rate={} cases/min",
+        executed, passed, failed, skipped_by_timeout,
+        get_time_ms() - start_ms,
+        (executed as u64 * 60000).checked_div(get_time_ms() - start_ms).unwrap_or(0),
     );
 
     0
