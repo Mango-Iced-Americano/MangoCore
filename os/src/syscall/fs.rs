@@ -1,6 +1,6 @@
 use super::errno::*;
 use crate::fs::poll::{ppoll, pselect, FdSet, PollFd};
-use crate::fs::vfs::{self, FileFlags, FileType, SeekFrom};
+use crate::fs::vfs::{self, FileFlags, FileType, SeekFrom, SuperBlock};
 use crate::fs::*;
 use crate::hal::BLOCK_SZ;
 use crate::mm::{
@@ -1833,19 +1833,19 @@ pub struct Statfs {
     /// Padding bytes reserved for future use
     f_spare: [usize; 4],
 }
-fn fake_statfs() -> Statfs {
+fn superblock_to_statfs(sb: &SuperBlock, mnt_flags: u64) -> Statfs {
     Statfs {
-        f_type: 0xf2f52010,
-        f_bsize: BLOCK_SZ,
-        f_blocks: 10000,
-        f_bfree: 9000,
-        f_bavail: 9000,
-        f_files: 1000,
-        f_ffree: 960,
-        f_fsid: [114, 514],
-        f_namelen: 256,
-        f_frsize: 0,
-        f_flag: 0,
+        f_type: sb.f_type as usize,
+        f_bsize: sb.f_bsize as usize,
+        f_blocks: sb.f_blocks,
+        f_bfree: sb.f_bfree,
+        f_bavail: sb.f_bavail,
+        f_files: sb.f_files,
+        f_ffree: sb.f_ffree,
+        f_fsid: sb.f_fsid,
+        f_namelen: sb.f_namelen as usize,
+        f_frsize: sb.f_frsize as usize,
+        f_flag: mnt_flags as usize,
         f_spare: [0; 4],
     }
 }
@@ -1859,9 +1859,24 @@ fn write_statfs(buf: *mut Statfs, statfs: &Statfs) -> isize {
     SUCCESS
 }
 
-/// Fake implement for statfs syscall
-pub fn sys_statfs(_path: *const u8, buf: *mut Statfs) -> isize {
-    let statfs = fake_statfs();
+/// sys_statfs — get filesystem statistics for a mounted path
+pub fn sys_statfs(pathname: *const u8, buf: *mut Statfs) -> isize {
+    let token = current_user_token();
+    let path = match user_cstring(token, pathname) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let root: Arc<dyn vfs::IndexNode> = crate::fs::vfs_root().mountpoint_root_inode();
+    let inode = match crate::fs::vfs_lookup(&root, &path, true) {
+        Ok(inode) => inode,
+        Err(e) => return e,
+    };
+    let fs = inode.fs();
+    let sb = match fs.statfs(&inode) {
+        Ok(sb) => sb,
+        Err(e) => return -(e as isize),
+    };
+    let statfs = superblock_to_statfs(&sb, 0);
     write_statfs(buf, &statfs)
 }
 
@@ -1871,12 +1886,18 @@ pub fn sys_fstatfs(fd: usize, buf: *mut Statfs) -> isize {
     };
     let files_ref = task.process.files();
     let fd_table = files_ref.lock();
-    if let Err(e) = fd_table.get_file(fd) {
-        return -(e as isize);
-    }
+    let inode = match fd_table.get_file(fd) {
+        Ok(file) => file.inode.clone(),
+        Err(e) => return -(e as isize),
+    };
     drop(fd_table);
 
-    let statfs = fake_statfs();
+    let fs = inode.fs();
+    let sb = match fs.statfs(&inode) {
+        Ok(sb) => sb,
+        Err(e) => return -(e as isize),
+    };
+    let statfs = superblock_to_statfs(&sb, 0);
     write_statfs(buf, &statfs)
 }
 
@@ -2117,7 +2138,7 @@ pub fn sys_fchownat(
     }
 }
 
-pub fn sys_mknodat(dirfd: usize, path: *const u8, mode: u32, _dev: usize) -> isize {
+pub fn sys_mknodat(dirfd: usize, path: *const u8, mode: u32, dev: usize) -> isize {
     let task = current_task().unwrap();
     let token = task.get_user_token();
     let path_str = match UserCString::from_addr(path as usize).read(token) {
@@ -2144,7 +2165,8 @@ pub fn sys_mknodat(dirfd: usize, path: *const u8, mode: u32, _dev: usize) -> isi
         _ => return EINVAL,
     };
     let perm = vfs::InodeMode::from_bits_truncate(mode) & vfs::InodeMode::S_IALLUGO;
-    match parent.create(&leaf, file_type, perm) {
+    // Pass raw device number via create_with_data so filesystem can store rdev
+    match parent.create_with_data(&leaf, file_type, perm, dev) {
         Ok(_) => SUCCESS,
         Err(e) => -(e as isize),
     }

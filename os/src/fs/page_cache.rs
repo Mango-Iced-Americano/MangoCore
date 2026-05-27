@@ -15,7 +15,7 @@ use crate::utils::error::SyscallErr;
 use alloc::collections::BTreeSet;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use spin::Mutex;
 
 use super::vfs::IndexNode;
@@ -209,6 +209,8 @@ pub struct PageCache {
     inode: Mutex<Option<Weak<dyn IndexNode>>>,
     /// 缓存的页面条目
     entries: Mutex<Vec<Option<Arc<PageEntry>>>>,
+    /// true = 页不可回收（用于 tmpfs/shmem，数据无持久化后端）
+    unevictable: AtomicBool,
 }
 
 impl PageCache {
@@ -219,6 +221,7 @@ impl PageCache {
             backend: Mutex::new(None),
             inode: Mutex::new(None),
             entries: Mutex::new(Vec::new()),
+            unevictable: AtomicBool::new(false),
         });
         register_page_cache(&pc);
         pc
@@ -232,6 +235,11 @@ impl PageCache {
     /// 设置关联的 inode
     pub fn set_inode(&self, inode: Weak<dyn IndexNode>) {
         *self.inode.lock() = Some(inode);
+    }
+
+    /// 设置不可回收标志（用于 tmpfs/shmem，数据无持久化后端）
+    pub fn set_unevictable(&self, val: bool) {
+        self.unevictable.store(val, Ordering::Release);
     }
 
     /// 获取后端
@@ -270,6 +278,10 @@ impl PageCache {
     /// AND FrameTracker refcount==1 (protects mmap'd pages).
     /// Returns the number evicted.
     pub fn evict_clean_pages(&self, target: usize) -> usize {
+        // tmpfs/shmem pages must never be evicted — no persistent backend
+        if self.unevictable.load(Ordering::Acquire) {
+            return 0;
+        }
         let mut entries = self.entries.lock();
         let mut inner = self.inner.lock();
         let mut evicted = 0;
