@@ -192,6 +192,8 @@ def write_temp_conf(
         if line.split("=", 1)[0] not in skip_keys
     ]
     output_lines.append(f"mask={MASK_OVERRIDE}")
+    output_lines.append("ltp_runner=suite")
+    output_lines.append("ltp_suites=smoketest,syscalls,syscalls-ipc,fs,fs_bind,mm,sched,nptl,pty,ipc,capability,fcntl-locktests")
     output_lines.append(f"ltp_include={list_to_conf(include_list)}")
     output_lines.append("ltp_exclude=")
     if exclude_key == "ltp_exclude_musl":
