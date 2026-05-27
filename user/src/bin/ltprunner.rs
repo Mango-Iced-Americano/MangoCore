@@ -326,6 +326,7 @@ fn run_case(
     ltproot: &str,
     tmpdir: &str,
     deadline_ms: u64,
+    own_pgid: isize,
 ) -> i32 {
     let ltp_root_s = format!("LTPROOT={}\0", ltproot);
     let path_s = format!(
@@ -368,7 +369,10 @@ fn run_case(
         return 127;
     }
     if pid == 0 {
-        let _ = setpgid(0, 0);
+        let ret = setpgid(0, 0);
+        if ret < 0 {
+            exit(126);
+        }
 
         let shell_new = "/bin/bash\0";
         let shell_old = "/bash\0";
@@ -439,7 +443,12 @@ fn run_case(
     }
 
     if timed_out {
-        let _ = kill(!(case_pgid as usize) + 1, SIGTERM);
+        let use_pgkill = case_pgid != own_pgid;
+        if use_pgkill {
+            let _ = kill(!(case_pgid as usize) + 1, SIGTERM);
+        } else {
+            let _ = kill(pid as usize, SIGTERM);
+        }
         let grace_start = get_time_ms();
         loop {
             let ret = waitpid_wnohang(pid, &mut code);
@@ -454,7 +463,11 @@ fn run_case(
 
         let ret = waitpid_wnohang(pid, &mut code);
         if ret != pid {
-            let _ = kill(!(case_pgid as usize) + 1, SIGKILL);
+            if use_pgkill {
+                let _ = kill(!(case_pgid as usize) + 1, SIGKILL);
+            } else {
+                let _ = kill(pid as usize, SIGKILL);
+            }
             let _ = waitpid(pid as usize, &mut code);
         }
         return 124;
@@ -486,6 +499,7 @@ fn main(_argc: usize, argv: &[&str]) -> i32 {
         return 2;
     }
 
+    let own_pgid = getpgid(0);
     let mut raw_cases: Vec<LtpCase> = Vec::new();
     for suite in &cfg.ltp_suites {
         if suite.is_empty() {
@@ -593,7 +607,7 @@ fn main(_argc: usize, argv: &[&str]) -> i32 {
 
         println!("RUN LTP CASE {}", case.case_name);
 
-        let ret = run_case(case, &cli.ltproot, &cli.tmpdir, deadline_ms);
+        let ret = run_case(case, &cli.ltproot, &cli.tmpdir, deadline_ms, own_pgid);
 
         println!("FAIL LTP CASE {} : {}", case.case_name, ret);
 
