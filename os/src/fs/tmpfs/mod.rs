@@ -33,7 +33,7 @@ use super::vfs::{
 // ── 常量 ─────────────────────────────────────────────────────────────────
 
 /// TmpFS inode 名称最大长度
-const TMPFS_MAX_NAMELEN: usize = 64;
+const TMPFS_MAX_NAMELEN: usize = 255;
 /// Linux tmpfs magic
 const TMPFS_MAGIC: u64 = 0x0102_1994;
 /// statfs 块大小（字节）
@@ -45,11 +45,13 @@ const TMPFS_BLOCK_SIZE: u64 = 4096;
 struct TmpfsPageCacheBackend;
 
 impl PageCacheBackend for TmpfsPageCacheBackend {
-    fn read_page(&self, _index: usize, _buf: &mut [u8]) -> Result<usize, SyscallErr> {
-        // TmpFS 数据全在 PageCache 中，无需从后端读取。
-        // 帧在分配时已清零（FrameTracker::new 使用 write_volatile(0)），
-        // 返回 0 字节表示无持久化数据需要填充。
-        Ok(0)
+    fn read_page(&self, _index: usize, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+        // TmpFS pages live entirely in PageCache; no persistent backend.
+        // Explicitly zero-fill the buffer and report PAGE_SIZE.
+        for b in buf.iter_mut() {
+            *b = 0;
+        }
+        Ok(PAGE_SIZE)
     }
 
     fn write_page(&self, _index: usize, _buf: &[u8]) -> Result<usize, SyscallErr> {
@@ -160,6 +162,24 @@ impl TmpFSInode {
     }
 }
 
+/// Check if `target_id` is an ancestor of `inode` (i.e. `inode` is in the subtree of `target_id`).
+/// Walks up the parent chain from `inode`.
+fn is_subtree(inode: &LockedTmpFSInode, target_id: InodeId) -> bool {
+    let id = inode.0.lock().metadata.inode_id;
+    if id == target_id {
+        return true;
+    }
+    let mut current = inode.0.lock().parent.upgrade();
+    while let Some(p) = current {
+        let p_locked = p.0.lock();
+        if p_locked.metadata.inode_id == target_id {
+            return true;
+        }
+        current = p_locked.parent.upgrade();
+    }
+    false
+}
+
 // ── FileSystem impl for TmpFS ────────────────────────────────────────────
 
 impl FileSystem for TmpFS {
@@ -188,7 +208,7 @@ impl FileSystem for TmpFS {
         let (total, free) = match limit {
             Some(max_bytes) if max_bytes > 0 => {
                 let total_blocks = (max_bytes / bsize).max(1);
-                let used_blocks = used / bsize;
+                let used_blocks = if used > 0 { (used + TMPFS_BLOCK_SIZE - 1) / TMPFS_BLOCK_SIZE } else { 0 };
                 let free_blocks = total_blocks.saturating_sub(used_blocks);
                 (total_blocks, free_blocks)
             }
@@ -196,7 +216,7 @@ impl FileSystem for TmpFS {
                 // 无限制：基于可用物理内存计算
                 let available_frames = crate::mm::unallocated_frames() as u64;
                 let available_bytes = available_frames * PAGE_SIZE as u64;
-                let used_blocks = used / bsize;
+                let used_blocks = if used > 0 { (used + TMPFS_BLOCK_SIZE - 1) / TMPFS_BLOCK_SIZE } else { 0 };
                 let avail_blocks = available_bytes / bsize;
                 let total_blocks = used_blocks + avail_blocks;
                 (total_blocks, avail_blocks)
@@ -583,14 +603,16 @@ impl IndexNode for LockedTmpFSInode {
         }
 
         child_locked.metadata.nlinks -= 1;
-
-        // 释放文件占用的空间配额
-        let file_sz = child_locked.file_size;
+        let nlinks_after = child_locked.metadata.nlinks;
+        let file_sz = child_locked.file_size as i64;
         drop(child_locked);
 
-        if let Some(ref fs) = inode.fs.upgrade() {
-            if file_sz > 0 {
-                fs.add_size(-(file_sz as i64));
+        // Only release quota when this is the last directory entry
+        if nlinks_after == 0 {
+            if let Some(ref fs) = inode.fs.upgrade() {
+                if file_sz > 0 {
+                    fs.add_size(-file_sz);
+                }
             }
         }
 
@@ -606,95 +628,198 @@ impl IndexNode for LockedTmpFSInode {
         let new_parent_inode: &LockedTmpFSInode = new_parent
             .as_any_ref()
             .downcast_ref::<LockedTmpFSInode>()
-            .ok_or(SyscallErr::EINVAL)?;
+            .ok_or(SyscallErr::EXDEV)?;
 
-        // 收集 inode_id 用于锁排序和同-inode 检测
-        let old_id: InodeId = self.0.lock().metadata.inode_id;
-        let new_id: InodeId = new_parent_inode.0.lock().metadata.inode_id;
+        let self_fs = self.0.lock().fs.upgrade().ok_or(SyscallErr::EIO)?;
+        let new_fs = new_parent_inode.0.lock().fs.upgrade().ok_or(SyscallErr::EIO)?;
+        if !Arc::ptr_eq(&self_fs, &new_fs) {
+            return Err(SyscallErr::EXDEV);
+        }
 
-        // 同 inode 路径：单锁原子重命名
-        if old_id == new_id {
+        if new_parent_inode.0.lock().metadata.file_type != FileType::Dir {
+            return Err(SyscallErr::ENOTDIR);
+        }
+
+        let id_self = self.0.lock().metadata.inode_id;
+        let id_new = new_parent_inode.0.lock().metadata.inode_id;
+
+        if id_self == id_new {
             let mut locked = self.0.lock();
-            let child = locked
-                .children
-                .remove(old_name)
-                .ok_or(SyscallErr::ENOENT)?;
-            if locked.children.contains_key(new_name) {
-                // 回滚
-                locked
-                    .children
-                    .insert(String::from(old_name), child);
-                return Err(SyscallErr::EEXIST);
+            let child = locked.children.remove(old_name).ok_or(SyscallErr::ENOENT)?;
+
+            if old_name == new_name {
+                locked.children.insert(String::from(old_name), child);
+                return Ok(());
             }
+
+            let mut release_sz: i64 = 0;
+            if let Some(existing) = locked.children.remove(new_name) {
+                let (existing_dir, existing_not_empty, nlinks_will_drop_to_zero, existing_sz) = {
+                    let existing_locked = existing.0.lock();
+                    let is_dir = existing_locked.metadata.file_type == FileType::Dir;
+                    let not_empty = is_dir && !existing_locked.children.is_empty();
+                    let sz = existing_locked.file_size as i64;
+                    let zero_nlinks = existing_locked.metadata.nlinks == 1;
+                    (is_dir, not_empty, zero_nlinks, sz)
+                };
+                if existing_dir {
+                    if existing_not_empty {
+                        locked.children.insert(String::from(new_name), existing);
+                        locked.children.insert(String::from(old_name), child);
+                        return Err(SyscallErr::ENOTEMPTY);
+                    }
+                    locked.metadata.nlinks -= 1;
+                }
+                if nlinks_will_drop_to_zero {
+                    release_sz = existing_sz;
+                }
+            }
+
             locked.children.insert(String::from(new_name), child);
+            let fs = locked.fs.upgrade();
+            drop(locked);
+            if release_sz > 0 {
+                if let Some(ref fs) = fs {
+                    fs.add_size(-release_sz);
+                }
+            }
             return Ok(());
         }
 
-        // 不同 inode：按 inode_id 排序避免死锁
-        // Phase 1: 从旧父目录移除（按锁序）
-        let (child, is_dir) = if old_id < new_id {
+        if id_self < id_new {
             let mut old_locked = self.0.lock();
-            let child = old_locked
-                .children
-                .remove(old_name)
-                .ok_or(SyscallErr::ENOENT)?;
-            let is_dir = child.0.lock().metadata.file_type == FileType::Dir;
+            let mut new_locked = new_parent_inode.0.lock();
+
+            let child = old_locked.children.remove(old_name).ok_or(SyscallErr::ENOENT)?;
+
+            let (is_dir, child_ino) = {
+                let cl = child.0.lock();
+                (cl.metadata.file_type == FileType::Dir, cl.metadata.inode_id)
+            };
+
+            if is_dir {
+                let mut ancestor = new_locked.parent.upgrade();
+                let mut would_cycle = false;
+                while let Some(p) = ancestor {
+                    if p.0.lock().metadata.inode_id == child_ino {
+                        would_cycle = true;
+                        break;
+                    }
+                    ancestor = p.0.lock().parent.upgrade();
+                }
+                if would_cycle {
+                    old_locked.children.insert(String::from(old_name), child);
+                    return Err(SyscallErr::EINVAL);
+                }
+            }
+
+            let mut release_sz: i64 = 0;
+            if let Some(existing) = new_locked.children.remove(new_name) {
+                let (existing_dir, existing_not_empty, nlinks_drop_to_zero, existing_sz) = {
+                    let existing_locked = existing.0.lock();
+                    let is_dir = existing_locked.metadata.file_type == FileType::Dir;
+                    let not_empty = is_dir && !existing_locked.children.is_empty();
+                    let sz = existing_locked.file_size as i64;
+                    let zero_nlinks = existing_locked.metadata.nlinks == 1;
+                    (is_dir, not_empty, zero_nlinks, sz)
+                };
+                if existing_dir {
+                    if existing_not_empty {
+                        new_locked.children.insert(String::from(new_name), existing);
+                        old_locked.children.insert(String::from(old_name), child);
+                        return Err(SyscallErr::ENOTEMPTY);
+                    }
+                    new_locked.metadata.nlinks -= 1;
+                }
+                if nlinks_drop_to_zero {
+                    release_sz = existing_sz;
+                }
+            }
+
             if is_dir {
                 old_locked.metadata.nlinks -= 1;
+                new_locked.metadata.nlinks += 1;
+                let parent_weak = new_locked.self_ref.clone();
+                drop(old_locked);
+                child.0.lock().parent = parent_weak;
+            } else {
+                drop(old_locked);
             }
-            (child, is_dir)
-        } else {
-            // 先锁新父目录再旧父目录
-            let mut new_locked = new_parent_inode.0.lock();
-            // 预先检查新名称是否冲突（先持新锁避免 TOCTOU）
-            let conflict = new_locked.children.contains_key(new_name);
+
+            new_locked.children.insert(String::from(new_name), child);
             drop(new_locked);
 
+            if release_sz > 0 {
+                self_fs.add_size(-release_sz);
+            }
+        } else {
+            let mut new_locked = new_parent_inode.0.lock();
             let mut old_locked = self.0.lock();
-            let child = old_locked
-                .children
-                .remove(old_name)
-                .ok_or(SyscallErr::ENOENT)?;
-            let is_dir = child.0.lock().metadata.file_type == FileType::Dir;
+
+            let child = old_locked.children.remove(old_name).ok_or(SyscallErr::ENOENT)?;
+
+            let (is_dir, child_ino) = {
+                let cl = child.0.lock();
+                (cl.metadata.file_type == FileType::Dir, cl.metadata.inode_id)
+            };
+
+            if is_dir {
+                let mut ancestor = new_locked.parent.upgrade();
+                let mut would_cycle = false;
+                while let Some(p) = ancestor {
+                    if p.0.lock().metadata.inode_id == child_ino {
+                        would_cycle = true;
+                        break;
+                    }
+                    ancestor = p.0.lock().parent.upgrade();
+                }
+                if would_cycle {
+                    old_locked.children.insert(String::from(old_name), child);
+                    return Err(SyscallErr::EINVAL);
+                }
+            }
+
+            let mut release_sz: i64 = 0;
+            if let Some(existing) = new_locked.children.remove(new_name) {
+                let (existing_dir, existing_not_empty, nlinks_drop_to_zero, existing_sz) = {
+                    let existing_locked = existing.0.lock();
+                    let is_dir = existing_locked.metadata.file_type == FileType::Dir;
+                    let not_empty = is_dir && !existing_locked.children.is_empty();
+                    let sz = existing_locked.file_size as i64;
+                    let zero_nlinks = existing_locked.metadata.nlinks == 1;
+                    (is_dir, not_empty, zero_nlinks, sz)
+                };
+                if existing_dir {
+                    if existing_not_empty {
+                        new_locked.children.insert(String::from(new_name), existing);
+                        old_locked.children.insert(String::from(old_name), child);
+                        return Err(SyscallErr::ENOTEMPTY);
+                    }
+                    new_locked.metadata.nlinks -= 1;
+                }
+                if nlinks_drop_to_zero {
+                    release_sz = existing_sz;
+                }
+            }
+
             if is_dir {
                 old_locked.metadata.nlinks -= 1;
-            }
-            // 如果新名冲突，先回滚
-            if conflict {
-                old_locked
-                    .children
-                    .insert(String::from(old_name), child);
-                if is_dir {
-                    old_locked.metadata.nlinks += 1;
-                }
-                return Err(SyscallErr::EEXIST);
-            }
-            (child, is_dir)
-        };
-
-        // Phase 2: 插入新父目录
-        {
-            let mut new_locked = new_parent_inode.0.lock();
-            if new_locked.children.contains_key(new_name) {
-                // 回滚：重新插入旧父目录。
-                // 先释放 new_locked 避免持双锁。
-                drop(new_locked);
-                let mut old_locked = self.0.lock();
-                old_locked
-                    .children
-                    .insert(String::from(old_name), child);
-                if is_dir {
-                    old_locked.metadata.nlinks += 1;
-                }
-                return Err(SyscallErr::EEXIST);
-            }
-            if is_dir {
                 new_locked.metadata.nlinks += 1;
+                let parent_weak = new_locked.self_ref.clone();
+                drop(old_locked);
+                child.0.lock().parent = parent_weak;
+            } else {
+                drop(old_locked);
             }
-            new_locked
-                .children
-                .insert(String::from(new_name), child);
+
+            new_locked.children.insert(String::from(new_name), child);
+            drop(new_locked);
+
+            if release_sz > 0 {
+                self_fs.add_size(-release_sz);
+            }
         }
+
         Ok(())
     }
 
@@ -749,6 +874,14 @@ impl IndexNode for LockedTmpFSInode {
         if let Some(pc) = pc {
             // 使用 PageCache 截断
             pc.truncate(len)?;
+
+            // Zero-fill the tail of the last retained page to prevent data leaks
+            let page_end = ((len + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+            let tail_start = len;
+            if tail_start < page_end {
+                let zero_buf = alloc::vec![0u8; page_end - tail_start];
+                let _ = pc.write(tail_start, &zero_buf);
+            }
         }
 
         inode.file_size = len;
