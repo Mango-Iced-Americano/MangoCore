@@ -88,7 +88,9 @@ pub struct TidHandle(pub usize, AtomicBool);
 impl TidHandle {
     pub fn release(&self) {
         if !self.1.swap(true, Ordering::AcqRel) {
-            TID_ALLOCATOR.lock().dealloc(self.0);
+            // tid_alloc() uses alloc_fresh() to avoid early PID/TID reuse.
+            // Recycling here would only grow an unused global free-list and
+            // make long fork/wait runs pay an increasing dealloc scan cost.
         }
     }
 

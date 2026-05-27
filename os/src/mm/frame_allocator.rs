@@ -55,21 +55,27 @@ trait FrameAllocator {
 
 /// 栈式帧分配器
 pub struct StackFrameAllocator {
+    // 可分配物理页号起点，用于把 PPN 映射到 recycled_flags 下标。
+    start: usize,
     // 当前分配器的位置，指向可分配区域的开始
     current: usize,
     // 分配器的结束地址，表示可分配内存区域的末尾
     end: usize,
     // 已回收的页面（内存框架）的列表
     recycled: Vec<usize>,
+    // recycled 中 PPN 的 O(1) membership 标记，避免释放大量用户页时线性查重。
+    recycled_flags: Vec<bool>,
 }
 
 impl StackFrameAllocator {
     /// 初始化方法
     pub fn init(&mut self, l: PhysPageNum, r: PhysPageNum) {
+        self.start = l.0;
         self.current = l.0;
         self.end = r.0;
         let last_frames = self.end - self.current;
         self.recycled.reserve(last_frames);
+        self.recycled_flags.resize(last_frames, false);
         println!("last {} Physical Frames.", last_frames);
     }
     /// 计算未分配的大小
@@ -81,9 +87,11 @@ impl StackFrameAllocator {
 impl FrameAllocator for StackFrameAllocator {
     fn new() -> Self {
         Self {
+            start: 0,
             current: 0,
             end: 0,
             recycled: Vec::new(),
+            recycled_flags: Vec::new(),
         }
     }
 
@@ -91,6 +99,7 @@ impl FrameAllocator for StackFrameAllocator {
     fn alloc(&mut self) -> Option<FrameTracker> {
         // 优先使用回收的帧
         if let Some(ppn) = self.recycled.pop() {
+            self.mark_recycled(ppn, false);
             let frame_tracker = FrameTracker::new(ppn.into());
             log::trace!("[frame_alloc] {:?}", frame_tracker);
             Some(frame_tracker)
@@ -110,6 +119,7 @@ impl FrameAllocator for StackFrameAllocator {
     }
     unsafe fn alloc_uninit(&mut self) -> Option<FrameTracker> {
         if let Some(ppn) = self.recycled.pop() {
+            self.mark_recycled(ppn, false);
             let frame_tracker = FrameTracker::new_uninit(ppn.into());
             //log::trace!("[frame_alloc_uninit] {:?}", frame_tracker);
             Some(frame_tracker)
@@ -137,8 +147,9 @@ impl FrameAllocator for StackFrameAllocator {
             );
             return;
         }
-        // 验证帧的有效性（DEBUG模式下），RELEASE中这个检查不必要，并且这个检查可能会显著降低回收速度
-        if self.recycled.iter().find(|&v| *v == ppn).is_some() {
+        // O(1) duplicate check.  The old linear scan made large mmap/free
+        // workloads degenerate as the free-list grew.
+        if self.is_recycled(ppn) {
             if option_env!("MODE") == Some("debug") {
                 panic!("Frame ppn={:#x} has not been allocated!", ppn);
             }
@@ -146,7 +157,27 @@ impl FrameAllocator for StackFrameAllocator {
             return;
         }
         // recycle
+        self.mark_recycled(ppn, true);
         self.recycled.push(ppn);
+    }
+}
+
+impl StackFrameAllocator {
+    fn recycled_index(&self, ppn: usize) -> Option<usize> {
+        ppn.checked_sub(self.start)
+            .filter(|idx| *idx < self.recycled_flags.len())
+    }
+
+    fn is_recycled(&self, ppn: usize) -> bool {
+        self.recycled_index(ppn)
+            .map(|idx| self.recycled_flags[idx])
+            .unwrap_or(false)
+    }
+
+    fn mark_recycled(&mut self, ppn: usize, value: bool) {
+        if let Some(idx) = self.recycled_index(ppn) {
+            self.recycled_flags[idx] = value;
+        }
     }
 }
 
@@ -300,7 +331,7 @@ pub fn frame_dealloc(ppn: PhysPageNum) {
 
 /// 计算可用帧数量
 pub fn unallocated_frames() -> usize {
-    FRAME_ALLOCATOR.write().unallocated_frames()
+    FRAME_ALLOCATOR.read().unallocated_frames()
 }
 
 #[macro_export]
