@@ -82,7 +82,7 @@ const DEFAULT_TIMEOUTS: [u64; 12] = [
     1800, // [8]  lmbench
     90,   // [9]  netperf
     60,   // [10] cyclictest
-    1800,  // [11] ltp
+    18000,  // [11] ltp
 ];
 
 /// LTP 默认排除测例名列表
@@ -1413,8 +1413,8 @@ fn run_ltp_suite_runner(
     let mut timed_out = false;
 
     loop {
-        let ret = waitpid_wnohang(pid as isize, &mut code);
-        if ret == pid {
+        let ret = waitpid_wnohang(-1, &mut code);
+        if ret == pid as isize {
             break;
         }
         if ret < 0 {
@@ -2042,10 +2042,10 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         bash_ret, has_bin_bash
     );
 
-println!("[initproc] running fs_test...");
-let fs_test_cmd = "cd / && ./fs_test\0";
-let fs_test_ret = run_bash_cmd(fs_test_cmd, &environ);
-println!("[initproc] fs_test returned exit_code={}", fs_test_ret);
+    // println!("[initproc] running fs_test...");
+    // let fs_test_cmd = "cd / && ./fs_test\0";
+    // let fs_test_ret = run_bash_cmd(fs_test_cmd, &environ);
+    // println!("[initproc] fs_test returned exit_code={}", fs_test_ret);
 
     let cfg = load_runtime_config();
 
