@@ -3500,12 +3500,16 @@ pub fn sys_mount(
         None => return EINVAL,
     };
 
-    let tmpfs: Arc<dyn vfs::FileSystem> = crate::fs::ramfs::RamFS::new_with_quota(4096);
-    let root_inode = tmpfs.root_inode();
+    let new_fs: Arc<dyn vfs::FileSystem> = if filesystemtype.as_str() == "tmpfs" {
+        crate::fs::tmpfs::TmpFS::new_with_options(4096 * 4096) // ~16MB default
+    } else {
+        crate::fs::ramfs::RamFS::new_with_quota(4096)
+    };
+    let root_inode = new_fs.root_inode();
     let mnt_flags = vfs::MountFlags::from_bits_truncate(mountflags.bits() as u32);
 
     match target_mfs_inode.mount_subtree_inner(
-        tmpfs, root_inode, mnt_flags, Some(lookup_path), true,
+        new_fs, root_inode, mnt_flags, Some(lookup_path), true,
     ) {
         Ok(_) => SUCCESS,
         Err(e) => -(e as isize),

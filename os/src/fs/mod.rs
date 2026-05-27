@@ -115,7 +115,7 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
         misc_dir
             .add_dev("rtc", alloc::sync::Arc::new(crate::fs::dev::rtc::Rtc) as Arc<dyn self::vfs::IndexNode>)
             .expect("devfs: failed to register /dev/misc/rtc");
-        let shmfs = crate::fs::ramfs::RamFS::new_with_quota(4096);
+        let shmfs = crate::fs::tmpfs::TmpFS::new_with_options(4096 * 4096); // ~16MB for /dev/shm
         if let Ok(mut meta) = shmfs.root_inode().metadata() {
             meta.mode = self::vfs::InodeMode::from_bits_truncate(0o1777);
             shmfs.root_inode().set_metadata(&meta).ok();
@@ -168,7 +168,7 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
                 .expect("failed to create /tmp")
         });
         let tmp_inode_id = tmp_inode.metadata().expect("tmp_inode metadata failed").inode_id;
-        let tmpfs = crate::fs::ramfs::RamFS::new_with_quota(0);
+        let tmpfs = crate::fs::tmpfs::TmpFS::new(); // unlimited for /tmp
         // 设置挂载后的根 inode 为 01777（sticky bit + 全局可读写）
         if let Ok(mut meta) = tmpfs.root_inode().metadata() {
             meta.mode = self::vfs::InodeMode::from_bits_truncate(0o1777);
