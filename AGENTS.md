@@ -228,6 +228,7 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | `brk`/`mmap` 返回意外值 | 堆/mmap 区域冲突 | 检查 `program_break` 边界 |
 | la64 在大量匿名页 fault 时 `frame_alloc`/`memset` AddressError，常见停在物理 `0xb0000000` | QEMU la64 DTB 的高段 RAM 是 `memory@80000000` + `0x30000000`，旧配置错误地按 1GB 连续 RAM 分配到 `0xc0000000` | la64 `MEMORY_SIZE` 必须匹配 DTB 的 `0x30000000`；不要跨真实 RAM 结尾分配物理页 |
 | la64 `getrusage03` 变成 `TCONF: needs at least 512MB MemAvailable` 或 30s timeout | la64 高段 RAM 只有 768MB，256MB 静态 kernel heap 挤占可用页帧；页帧清零被降成 byte-wise `memset`，大批量 fault 很慢 | la64 kernel heap 保持在实际需要范围内；页帧清零用 64-bit store 循环，避免每页 4096 次 byte store |
+| LTP 长跑后 fork/wait 或大匿名页退出越来越慢 | 全局 TID 使用 `alloc_fresh()` 后释放时仍 push 到永不复用的 recycled Vec；物理页释放每页线性扫描 free-list 查重 | TID release 只标记释放不回收到全局 free-list；frame allocator 用 PPN offset bitmap 做 O(1) duplicate check |
 | `mmap18` MAP_GROWSDOWN 栈增长失败 | 页故障只查已覆盖 VMA，未在 guard page fault 时扩展 grow-down VMA | fault 地址位于 grow-down VMA 下方且不碰撞/不进入 stack_guard_gap 时，先下扩 VMA 起点再走懒分配 |
 | `munlockall01`/`mlock203` 读取 `VmLck` 失败或重复锁页计数异常 | `/proc/<pid>/status` 缺 `VmLck`，或 mlock 路径未维护 ABI 可见锁页状态 | 在地址空间维护页级 locked 集合，`mlock/mlockall` 设置、`munlock/munlockall/munmap` 清除，`VmLck` 汇总 locked 用户页 |
 | `mmap14` 中 `MAP_LOCKED` 后 `VmLck=0` | `mmap()` 保留了 `MAP_LOCKED` VMA flag，但没有同步更新页级 locked 集合 | `MAP_LOCKED` 建图后必须把映射范围计入 locked 页；避免和未锁匿名 VMA 合并导致统计丢失 |

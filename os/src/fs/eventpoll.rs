@@ -14,8 +14,8 @@ use crate::{
         dev::DEV_FS,
         vfs::{
             event::{EPollEvent, EventListener},
-            EventQueueHandle, File, FileFlags, FilePrivateData, FileType, FileSystem, IndexNode,
-            InodeMode, Metadata, PollWaitQueue,
+            EventQueueHandle, File, FileFlags, FileMode, FilePrivateData, FileType, FileSystem,
+            IndexNode, InodeMode, Metadata, PollWaitQueue,
         },
     },
     mm::{UserPtr, UserSlice},
@@ -607,6 +607,9 @@ pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event: *const EpollUserE
             };
             if eventpoll_from_file(file).is_some() {
                 return -(SyscallErr::EINVAL as isize);
+            }
+            if !file.mode().contains(FileMode::FMODE_STREAM) {
+                return -(SyscallErr::EPERM as isize);
             }
             let cloned = match file.try_clone() {
                 Some(file) => file,
