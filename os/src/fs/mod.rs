@@ -13,6 +13,7 @@ pub mod poll;
 pub mod procfs;
 pub mod ramfs;
 pub mod reclaim;
+pub mod tmpfs;
 #[cfg(feature = "swap")]
 pub mod swap;
 // Xein add this
