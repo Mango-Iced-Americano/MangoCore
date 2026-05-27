@@ -162,20 +162,32 @@ impl TmpFSInode {
     }
 }
 
-/// Check if `target_id` is an ancestor of `inode` (i.e. `inode` is in the subtree of `target_id`).
-/// Walks up the parent chain from `inode`.
-fn is_subtree(inode: &LockedTmpFSInode, target_id: InodeId) -> bool {
-    let id = inode.0.lock().metadata.inode_id;
-    if id == target_id {
+/// Check if `target_id` is an ancestor of `inode` (i.e. `inode` is a descendant of `target_id`).
+/// Walks the parent chain UPWARD from `inode`, locking ONE inode at a time.
+/// This is safe to call when no directory locks are held — no deadlock risk.
+fn is_ancestor_of(inode: &LockedTmpFSInode, target_id: InodeId) -> bool {
+    let mut current_id = inode.0.lock().metadata.inode_id;
+    if current_id == target_id {
         return true;
     }
-    let mut current = inode.0.lock().parent.upgrade();
-    while let Some(p) = current {
-        let p_locked = p.0.lock();
-        if p_locked.metadata.inode_id == target_id {
+    let mut current_arc = {
+        let guard = inode.0.lock();
+        guard.parent.upgrade()
+    };
+    while let Some(p) = current_arc {
+        let p_guard = p.0.lock();
+        let p_id = p_guard.metadata.inode_id;
+        if p_id == target_id {
             return true;
         }
-        current = p_locked.parent.upgrade();
+        // Reached root (parent points to itself) — stop
+        if p_id == current_id {
+            return false;
+        }
+        current_id = p_id;
+        let p_parent = p_guard.parent.upgrade();
+        drop(p_guard);
+        current_arc = p_parent;
     }
     false
 }
@@ -207,7 +219,7 @@ impl FileSystem for TmpFS {
 
         let (total, free) = match limit {
             Some(max_bytes) if max_bytes > 0 => {
-                let total_blocks = (max_bytes / bsize).max(1);
+                let total_blocks = ((max_bytes + bsize - 1) / bsize).max(1);
                 let used_blocks = if used > 0 { (used + TMPFS_BLOCK_SIZE - 1) / TMPFS_BLOCK_SIZE } else { 0 };
                 let free_blocks = total_blocks.saturating_sub(used_blocks);
                 (total_blocks, free_blocks)
@@ -555,7 +567,14 @@ impl IndexNode for LockedTmpFSInode {
         let other_inode: &LockedTmpFSInode = other
             .as_any_ref()
             .downcast_ref::<LockedTmpFSInode>()
-            .ok_or(SyscallErr::EINVAL)?;
+            .ok_or(SyscallErr::EXDEV)?;
+
+        let self_fs = self.0.lock().fs.upgrade().ok_or(SyscallErr::EIO)?;
+        let other_fs = other_inode.0.lock().fs.upgrade().ok_or(SyscallErr::EIO)?;
+        if !Arc::ptr_eq(&self_fs, &other_fs) {
+            return Err(SyscallErr::EXDEV);
+        }
+
         let mut inode = self.0.lock();
         let mut other_locked = other_inode.0.lock();
 
@@ -643,35 +662,82 @@ impl IndexNode for LockedTmpFSInode {
         let id_self = self.0.lock().metadata.inode_id;
         let id_new = new_parent_inode.0.lock().metadata.inode_id;
 
+        let (child_is_dir, child_id) = {
+            let old_locked = self.0.lock();
+            let child = old_locked
+                .children
+                .get(old_name)
+                .ok_or(SyscallErr::ENOENT)?
+                .clone();
+            let cl = child.0.lock();
+            let is_dir = cl.metadata.file_type == FileType::Dir;
+            let ino = cl.metadata.inode_id;
+            (is_dir, ino)
+        };
+
+        if child_is_dir && id_self != id_new {
+            if is_ancestor_of(new_parent_inode, child_id) {
+                return Err(SyscallErr::EINVAL);
+            }
+        }
+
         if id_self == id_new {
             let mut locked = self.0.lock();
-            let child = locked.children.remove(old_name).ok_or(SyscallErr::ENOENT)?;
+            let child = locked
+                .children
+                .remove(old_name)
+                .ok_or(SyscallErr::ENOENT)?;
 
             if old_name == new_name {
                 locked.children.insert(String::from(old_name), child);
                 return Ok(());
             }
 
+            let child_is_dir = child.0.lock().metadata.file_type == FileType::Dir;
             let mut release_sz: i64 = 0;
+
             if let Some(existing) = locked.children.remove(new_name) {
-                let (existing_dir, existing_not_empty, nlinks_will_drop_to_zero, existing_sz) = {
-                    let existing_locked = existing.0.lock();
-                    let is_dir = existing_locked.metadata.file_type == FileType::Dir;
-                    let not_empty = is_dir && !existing_locked.children.is_empty();
-                    let sz = existing_locked.file_size as i64;
-                    let zero_nlinks = existing_locked.metadata.nlinks == 1;
-                    (is_dir, not_empty, zero_nlinks, sz)
+                if Arc::ptr_eq(&child, &existing) {
+                    locked.children.insert(String::from(new_name), existing);
+                    locked.children.insert(String::from(old_name), child);
+                    return Ok(());
+                }
+
+                let existing_is_dir = {
+                    let el = existing.0.lock();
+                    el.metadata.file_type == FileType::Dir
                 };
-                if existing_dir {
-                    if existing_not_empty {
+
+                if !child_is_dir && existing_is_dir {
+                    locked.children.insert(String::from(new_name), existing);
+                    locked.children.insert(String::from(old_name), child);
+                    return Err(SyscallErr::EISDIR);
+                }
+                if child_is_dir && !existing_is_dir {
+                    locked.children.insert(String::from(new_name), existing);
+                    locked.children.insert(String::from(old_name), child);
+                    return Err(SyscallErr::ENOTDIR);
+                }
+
+                if existing_is_dir {
+                    let not_empty = {
+                        let el = existing.0.lock();
+                        !el.children.is_empty()
+                    };
+                    if not_empty {
                         locked.children.insert(String::from(new_name), existing);
                         locked.children.insert(String::from(old_name), child);
                         return Err(SyscallErr::ENOTEMPTY);
                     }
                     locked.metadata.nlinks -= 1;
                 }
-                if nlinks_will_drop_to_zero {
-                    release_sz = existing_sz;
+
+                {
+                    let mut el = existing.0.lock();
+                    el.metadata.nlinks -= 1;
+                    if el.metadata.nlinks == 0 {
+                        release_sz = el.file_size as i64;
+                    }
                 }
             }
 
@@ -690,53 +756,59 @@ impl IndexNode for LockedTmpFSInode {
             let mut old_locked = self.0.lock();
             let mut new_locked = new_parent_inode.0.lock();
 
-            let child = old_locked.children.remove(old_name).ok_or(SyscallErr::ENOENT)?;
-
-            let (is_dir, child_ino) = {
-                let cl = child.0.lock();
-                (cl.metadata.file_type == FileType::Dir, cl.metadata.inode_id)
-            };
-
-            if is_dir {
-                let mut ancestor = new_locked.parent.upgrade();
-                let mut would_cycle = false;
-                while let Some(p) = ancestor {
-                    if p.0.lock().metadata.inode_id == child_ino {
-                        would_cycle = true;
-                        break;
-                    }
-                    ancestor = p.0.lock().parent.upgrade();
-                }
-                if would_cycle {
-                    old_locked.children.insert(String::from(old_name), child);
-                    return Err(SyscallErr::EINVAL);
-                }
-            }
+            let child = old_locked
+                .children
+                .remove(old_name)
+                .ok_or(SyscallErr::ENOENT)?;
+            let child_is_dir = child.0.lock().metadata.file_type == FileType::Dir;
 
             let mut release_sz: i64 = 0;
             if let Some(existing) = new_locked.children.remove(new_name) {
-                let (existing_dir, existing_not_empty, nlinks_drop_to_zero, existing_sz) = {
-                    let existing_locked = existing.0.lock();
-                    let is_dir = existing_locked.metadata.file_type == FileType::Dir;
-                    let not_empty = is_dir && !existing_locked.children.is_empty();
-                    let sz = existing_locked.file_size as i64;
-                    let zero_nlinks = existing_locked.metadata.nlinks == 1;
-                    (is_dir, not_empty, zero_nlinks, sz)
+                if Arc::ptr_eq(&child, &existing) {
+                    new_locked.children.insert(String::from(new_name), existing);
+                    old_locked.children.insert(String::from(old_name), child);
+                    return Ok(());
+                }
+
+                let existing_is_dir = {
+                    let el = existing.0.lock();
+                    el.metadata.file_type == FileType::Dir
                 };
-                if existing_dir {
-                    if existing_not_empty {
+
+                if !child_is_dir && existing_is_dir {
+                    new_locked.children.insert(String::from(new_name), existing);
+                    old_locked.children.insert(String::from(old_name), child);
+                    return Err(SyscallErr::EISDIR);
+                }
+                if child_is_dir && !existing_is_dir {
+                    new_locked.children.insert(String::from(new_name), existing);
+                    old_locked.children.insert(String::from(old_name), child);
+                    return Err(SyscallErr::ENOTDIR);
+                }
+
+                if existing_is_dir {
+                    let not_empty = {
+                        let el = existing.0.lock();
+                        !el.children.is_empty()
+                    };
+                    if not_empty {
                         new_locked.children.insert(String::from(new_name), existing);
                         old_locked.children.insert(String::from(old_name), child);
                         return Err(SyscallErr::ENOTEMPTY);
                     }
                     new_locked.metadata.nlinks -= 1;
                 }
-                if nlinks_drop_to_zero {
-                    release_sz = existing_sz;
+
+                {
+                    let mut el = existing.0.lock();
+                    el.metadata.nlinks -= 1;
+                    if el.metadata.nlinks == 0 {
+                        release_sz = el.file_size as i64;
+                    }
                 }
             }
 
-            if is_dir {
+            if child_is_dir {
                 old_locked.metadata.nlinks -= 1;
                 new_locked.metadata.nlinks += 1;
                 let parent_weak = new_locked.self_ref.clone();
@@ -756,53 +828,59 @@ impl IndexNode for LockedTmpFSInode {
             let mut new_locked = new_parent_inode.0.lock();
             let mut old_locked = self.0.lock();
 
-            let child = old_locked.children.remove(old_name).ok_or(SyscallErr::ENOENT)?;
-
-            let (is_dir, child_ino) = {
-                let cl = child.0.lock();
-                (cl.metadata.file_type == FileType::Dir, cl.metadata.inode_id)
-            };
-
-            if is_dir {
-                let mut ancestor = new_locked.parent.upgrade();
-                let mut would_cycle = false;
-                while let Some(p) = ancestor {
-                    if p.0.lock().metadata.inode_id == child_ino {
-                        would_cycle = true;
-                        break;
-                    }
-                    ancestor = p.0.lock().parent.upgrade();
-                }
-                if would_cycle {
-                    old_locked.children.insert(String::from(old_name), child);
-                    return Err(SyscallErr::EINVAL);
-                }
-            }
+            let child = old_locked
+                .children
+                .remove(old_name)
+                .ok_or(SyscallErr::ENOENT)?;
+            let child_is_dir = child.0.lock().metadata.file_type == FileType::Dir;
 
             let mut release_sz: i64 = 0;
             if let Some(existing) = new_locked.children.remove(new_name) {
-                let (existing_dir, existing_not_empty, nlinks_drop_to_zero, existing_sz) = {
-                    let existing_locked = existing.0.lock();
-                    let is_dir = existing_locked.metadata.file_type == FileType::Dir;
-                    let not_empty = is_dir && !existing_locked.children.is_empty();
-                    let sz = existing_locked.file_size as i64;
-                    let zero_nlinks = existing_locked.metadata.nlinks == 1;
-                    (is_dir, not_empty, zero_nlinks, sz)
+                if Arc::ptr_eq(&child, &existing) {
+                    new_locked.children.insert(String::from(new_name), existing);
+                    old_locked.children.insert(String::from(old_name), child);
+                    return Ok(());
+                }
+
+                let existing_is_dir = {
+                    let el = existing.0.lock();
+                    el.metadata.file_type == FileType::Dir
                 };
-                if existing_dir {
-                    if existing_not_empty {
+
+                if !child_is_dir && existing_is_dir {
+                    new_locked.children.insert(String::from(new_name), existing);
+                    old_locked.children.insert(String::from(old_name), child);
+                    return Err(SyscallErr::EISDIR);
+                }
+                if child_is_dir && !existing_is_dir {
+                    new_locked.children.insert(String::from(new_name), existing);
+                    old_locked.children.insert(String::from(old_name), child);
+                    return Err(SyscallErr::ENOTDIR);
+                }
+
+                if existing_is_dir {
+                    let not_empty = {
+                        let el = existing.0.lock();
+                        !el.children.is_empty()
+                    };
+                    if not_empty {
                         new_locked.children.insert(String::from(new_name), existing);
                         old_locked.children.insert(String::from(old_name), child);
                         return Err(SyscallErr::ENOTEMPTY);
                     }
                     new_locked.metadata.nlinks -= 1;
                 }
-                if nlinks_drop_to_zero {
-                    release_sz = existing_sz;
+
+                {
+                    let mut el = existing.0.lock();
+                    el.metadata.nlinks -= 1;
+                    if el.metadata.nlinks == 0 {
+                        release_sz = el.file_size as i64;
+                    }
                 }
             }
 
-            if is_dir {
+            if child_is_dir {
                 old_locked.metadata.nlinks -= 1;
                 new_locked.metadata.nlinks += 1;
                 let parent_weak = new_locked.self_ref.clone();

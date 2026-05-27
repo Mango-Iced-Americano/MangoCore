@@ -520,6 +520,15 @@ impl IndexNode for MountFSInode {
                 };
                 let old_evicted = self.mount_fs.dentry_cache.lock().invalidate(&old_key);
                 drop(old_evicted);
+
+                if let Ok(new_parent_md) = new_parent.metadata() {
+                    let new_key = super::dentry_cache::DentryKey {
+                        parent_ino: new_parent_md.inode_id,
+                        name: String::from(new_name),
+                    };
+                    let new_evicted = self.mount_fs.dentry_cache.lock().invalidate(&new_key);
+                    drop(new_evicted);
+                }
             }
         }
         Ok(())
