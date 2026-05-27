@@ -22,7 +22,7 @@ use buddy_system_allocator::LockedHeap;
 pub use core::arch::global_asm;
 pub use usr_call::*;
 
-const USER_HEAP_SIZE: usize = 131072;
+const USER_HEAP_SIZE: usize = 524288;
 
 static mut HEAP_SPACE: [u8; USER_HEAP_SIZE] = [0; USER_HEAP_SIZE];
 

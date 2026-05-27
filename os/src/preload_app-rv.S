@@ -51,3 +51,12 @@ sltpcompat:
     .incbin "./ltp_proto_compat-rv.so"
 eltpcompat:
     .align 12
+
+    .section .data
+    .global sltprunner
+    .global eltprunner
+    .align 12
+sltprunner:
+    .incbin "../user/target/riscv64gc-unknown-none-elf/release/ltprunner"
+eltprunner:
+    .align 12

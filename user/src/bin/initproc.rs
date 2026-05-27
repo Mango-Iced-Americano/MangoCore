@@ -6,8 +6,8 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use user_lib::{
-    chdir, close, exec, exit, fork, getdents64, kill, open, println, read, shutdown, sleep, wait,
-    waitpid, waitpid_wnohang, write, OpenFlags, SIGKILL,
+    chdir, close, exec, exit, fork, getdents64, getpgid, kill, open, println, read, setpgid,
+    shutdown, sleep, wait, waitpid, waitpid_wnohang, write, OpenFlags, SIGKILL,
 };
 
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -224,6 +224,8 @@ struct RuntimeConfig {
     ltp_libc: LtpLibc,
     /// LTP runner: script 使用镜像内官方脚本；inline 使用 initproc 内联枚举。
     ltp_runner: LtpRunner,
+    /// LTP suite 列表（逗号分隔），仅 Suite 模式使用
+    ltp_suites: Vec<String>,
     /// 诊断模式：每完成一组测试后打印资源统计标记
     diag: bool,
 }
@@ -239,12 +241,14 @@ enum LtpLibc {
 enum LtpRunner {
     Script,
     Inline,
+    Suite,
 }
 
 fn ltp_runner_name(runner: LtpRunner) -> &'static str {
     match runner {
         LtpRunner::Script => "script",
         LtpRunner::Inline => "inline",
+        LtpRunner::Suite => "suite",
     }
 }
 
@@ -280,6 +284,7 @@ impl RuntimeConfig {
             ltp_from: None,
             ltp_libc: LtpLibc::Both,
             ltp_runner: LtpRunner::Inline,
+            ltp_suites: Vec::new(),
             diag: false,
         }
     }
@@ -429,7 +434,17 @@ fn apply_conf_bytes(data: &[u8], cfg: &mut RuntimeConfig) {
             match val {
                 b"script" => cfg.ltp_runner = LtpRunner::Script,
                 b"inline" => cfg.ltp_runner = LtpRunner::Inline,
+                b"suite" => cfg.ltp_runner = LtpRunner::Suite,
                 _ => {}
+            }
+        } else if key == b"ltp_suites" {
+            let s = core::str::from_utf8(val).ok();
+            if let Some(s) = s {
+                cfg.ltp_suites = s
+                    .split(',')
+                    .filter(|x| !x.is_empty())
+                    .map(|x| String::from(x.trim()))
+                    .collect();
             }
         } else if key == b"diag" {
             cfg.diag = val == b"1" || val == b"true";
@@ -1335,6 +1350,106 @@ fn run_ltp_binaries(
     }
 }
 
+/// 启动 /ltprunner 子进程，管理整个 LTP Suite 测试组。
+/// initproc 只负责 group 级 marker 和硬兜底超时；case 级执行由 ltprunner 内部处理。
+fn run_ltp_suite_runner(
+    environ: &[*const u8],
+    libc_root: &str,
+    libc_suffix: &str,
+    timeout_secs: u64,
+) {
+    let ltp_root = format!("{}/ltp\0", libc_root);
+
+    println!(
+        "#### OS COMP TEST GROUP START ltp-{} ####",
+        libc_suffix
+    );
+
+    let pid = fork();
+    if pid < 0 {
+        println!(
+            "[initproc] fork failed for ltprunner ret={}",
+            pid
+        );
+        println!("#### OS COMP TEST GROUP END ltp-{} ####", libc_suffix);
+        return;
+    }
+    if pid == 0 {
+        let _ = setpgid(0, 0);
+
+        let ltprunner_path = "/ltprunner\0";
+        let conf_path_val = "/os_test.conf\0";
+        let libc_val = format!("{}\0", libc_suffix);
+        let ltproot_val = format!("{}\0", ltp_root);
+        let timeout_val = format!("{}\0", timeout_secs.saturating_sub(50));
+
+        let argv: [*const u8; 14] = [
+            ltprunner_path.as_ptr(),
+            "--conf\0".as_ptr(),
+            conf_path_val.as_ptr(),
+            "--libc\0".as_ptr(),
+            libc_val.as_ptr(),
+            "--ltproot\0".as_ptr(),
+            ltproot_val.as_ptr(),
+            "--tmpdir\0".as_ptr(),
+            "/tmp\0".as_ptr(),
+            "--no-group-marker\0".as_ptr(),
+            "--group-timeout-secs\0".as_ptr(),
+            timeout_val.as_ptr(),
+            core::ptr::null(),
+            core::ptr::null(),
+        ];
+
+        exec(ltprunner_path, &argv[..12], environ);
+        exec("/bin/ltprunner\0", &argv[..12], environ);
+        println!("[initproc] exec /ltprunner failed, exiting child");
+        exit(127);
+    }
+
+    let mut code: i32 = 0;
+    let timeout_ms = timeout_secs * 1000;
+    let mut elapsed_ms: u64 = 0;
+    const POLL_MS: u64 = 100;
+    let mut timed_out = false;
+
+    loop {
+        let ret = waitpid_wnohang(pid as isize, &mut code);
+        if ret == pid {
+            break;
+        }
+        if ret < 0 {
+            println!("[initproc] ltprunner pid={} vanished", pid);
+            break;
+        }
+        elapsed_ms += POLL_MS;
+        if elapsed_ms >= timeout_ms {
+            timed_out = true;
+            println!(
+                "[initproc] TIMEOUT ({}s) for ltprunner, sending SIGKILL to pgid of pid={}",
+                timeout_secs, pid
+            );
+            let pgid = getpgid(pid as usize);
+            if pgid > 0 {
+                let _ = kill(!(pgid as usize) + 1, SIGKILL);
+            }
+            let _ = kill(pid as usize, SIGKILL);
+            let _ = waitpid(pid as usize, &mut code);
+            break;
+        }
+        sleep(POLL_MS as usize);
+    }
+
+    reap_orphans();
+    if timed_out {
+        println!("#### OS COMP TEST GROUP END ltp-{} ####", libc_suffix);
+    }
+    println!(
+        "[initproc] done ltprunner (libc={}) exit_code={}",
+        libc_suffix,
+        exit_code_from_waitpid_status(code)
+    );
+}
+
 fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
     println!(
         "[initproc] run_selected_groups start mask=0x{:03X} order={:?}",
@@ -1356,7 +1471,15 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
             "[initproc] select group={} timeout={}s",
             group_name, timeout_secs
         );
-        if group_name == "ltp" && cfg.ltp_runner == LtpRunner::Inline {
+        if group_name == "ltp" && cfg.ltp_runner == LtpRunner::Suite {
+            let libc = cfg.ltp_libc;
+            if libc == LtpLibc::Musl || libc == LtpLibc::Both {
+                run_ltp_suite_runner(environ, "/musl", "musl", timeout_secs);
+            }
+            if libc == LtpLibc::Glibc || libc == LtpLibc::Both {
+                run_ltp_suite_runner(environ, "/glibc", "glibc", timeout_secs);
+            }
+        } else if group_name == "ltp" && cfg.ltp_runner == LtpRunner::Inline {
             // 本地调试路径：LTP 使用内联枚举，支持 include/exclude/from。
             let libc = cfg.ltp_libc;
             if libc == LtpLibc::Musl || libc == LtpLibc::Both {

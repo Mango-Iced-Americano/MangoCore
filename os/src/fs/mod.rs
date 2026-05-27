@@ -513,6 +513,8 @@ pub fn flush_preload() {
         fn efstest();
         fn sltpcompat();
         fn eltpcompat();
+        fn sltprunner();
+        fn eltprunner();
     }
     println!(
         "sinitproc: {:X}, einitproc: {:X}, sbash: {:X}, ebash: {:X}, sbusybox: {:X}, ebusybox: {:X}, sosconfig: {:X}, eosconfig: {:X}",
@@ -610,6 +612,19 @@ pub fn flush_preload() {
         for ppn in crate::mm::PPNRange::new(
             crate::mm::PhysAddr::from(sltpcompat as usize).floor(),
             crate::mm::PhysAddr::from(eltpcompat as usize).floor(),
+        ) {
+            crate::mm::frame_dealloc(ppn);
+        }
+    }
+    {
+        let _ = vfs_lookup_absolute("ltprunner")
+            .and_then(|inode| inode.resize(0).map_err(|e| e as isize));
+        let _ = create_or_open_file("ltprunner").map(|f| {
+            let _ = f.write(unsafe { core::slice::from_raw_parts(sltprunner as *const u8, eltprunner as usize - sltprunner as usize) });
+        });
+        for ppn in crate::mm::PPNRange::new(
+            crate::mm::PhysAddr::from(sltprunner as usize).floor(),
+            crate::mm::PhysAddr::from(eltprunner as usize).floor(),
         ) {
             crate::mm::frame_dealloc(ppn);
         }

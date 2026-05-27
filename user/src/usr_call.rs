@@ -67,6 +67,15 @@ pub fn kill(pid: usize, sig: usize) -> isize {
     sys_kill(pid, sig)
 }
 pub const SIGKILL: usize = 9;
+pub const SIGTERM: usize = 15;
+
+pub fn setpgid(pid: usize, pgid: usize) -> isize {
+    sys_setpgid(pid, pgid)
+}
+
+pub fn getpgid(pid: usize) -> isize {
+    sys_getpgid(pid)
+}
 
 pub fn shutdown() -> isize {
     sys_shutdown()

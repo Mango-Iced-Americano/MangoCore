@@ -51,3 +51,12 @@ sltpcompat:
     .incbin "./ltp_proto_compat-la.so"
 eltpcompat:
     .align 12
+
+    .section .data
+    .global sltprunner
+    .global eltprunner
+    .align 12
+sltprunner:
+    .incbin "../user/target/loongarch64-unknown-linux-gnu/release/ltprunner"
+eltprunner:
+    .align 12

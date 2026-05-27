@@ -231,6 +231,14 @@ pub fn sys_kill(pid: usize, sig: usize) -> isize {
     syscall(SYSCALL_KILL, [pid, sig, 0])
 }
 
+pub fn sys_setpgid(pid: usize, pgid: usize) -> isize {
+    syscall(SYSCALL_SETPGID, [pid, pgid, 0])
+}
+
+pub fn sys_getpgid(pid: usize) -> isize {
+    syscall(SYSCALL_GETPGID, [pid, 0, 0])
+}
+
 pub fn sys_shutdown() -> isize {
     syscall(SYSCALL_SHUTDOWN, [0, 0, 0])
 }
