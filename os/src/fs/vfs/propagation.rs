@@ -483,11 +483,6 @@ fn propagate_to_mount(
     source_child_group: u32,
     as_slave: bool,
 ) -> Option<Arc<MountFS>> {
-    // Defensive: never propagate to the new_child itself
-    if Arc::ptr_eq(target, new_child) {
-        return None;
-    }
-
     let target_root = target.covered_root_inode();
 
     // Check root mount event — mountpoint_id matches target's root inner inode
@@ -606,7 +601,12 @@ fn propagate_umount_inner(
     // Propagate to shared peers
     for peer in get_peers(source) {
         if let Some(child) = find_child_mount_by_id(&peer, mountpoint_id) {
-            let _ = child.umount_inner(false, false);
+            if matches!(
+                child.umount_inner(false, false),
+                Err(crate::utils::error::SyscallErr::EBUSY)
+            ) {
+                let _ = child.detach_recursive_inner(false);
+            }
         }
     }
 
@@ -618,7 +618,12 @@ fn propagate_umount_inner(
             continue;
         }
         if let Some(child) = find_child_mount_by_id(&slave, mountpoint_id) {
-            let _ = child.umount_inner(false, false);
+            if matches!(
+                child.umount_inner(false, false),
+                Err(crate::utils::error::SyscallErr::EBUSY)
+            ) {
+                let _ = child.detach_recursive_inner(false);
+            }
         }
         // If slave is SharedSlave, recurse to propagate to slave's peers
         if slave.propagation().is_shared() {

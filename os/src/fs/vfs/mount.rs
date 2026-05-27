@@ -993,14 +993,10 @@ impl MountFS {
         } else {
             None
         };
+        self.detach_from_parent_and_cleanup();
         if let Some((parent_mfs, inode_id)) = propagation_target {
             propagate_umount(&parent_mfs, inode_id);
         }
-        // Unregister from peer group
-        unregister_peer_mount(self);
-        // Unregister from slave group
-        unregister_slave_mount(self);
-        self.detach_from_parent_and_cleanup();
         Ok(())
     }
 
