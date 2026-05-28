@@ -2,10 +2,21 @@ use super::config::{
     KERNEL_STACK_SIZE, PAGE_SIZE, TRAP_CONTEXT_BASE, USER_STACK_BASE, USER_STACK_SIZE,
 };
 use alloc::vec::Vec;
+use lazy_static::*;
+use spin::Mutex;
+
+const KERNEL_STACK_CACHE_LIMIT: usize = 1024;
+
+lazy_static! {
+    static ref KERNEL_STACK_CACHE: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+}
 
 pub struct KernelStack(Vec<u8>);
 impl KernelStack {
     pub fn new() -> Self {
+        if let Some(stack) = KERNEL_STACK_CACHE.lock().pop() {
+            return Self(stack);
+        }
         Self(alloc::vec![0_u8; KERNEL_STACK_SIZE])
     }
     pub fn get_top(&self) -> usize {
@@ -18,6 +29,20 @@ impl KernelStack {
         let bottom = &v[0] as *const u8 as usize;
         let top: usize = bottom + KERNEL_STACK_SIZE;
         (bottom, top)
+    }
+}
+
+impl Drop for KernelStack {
+    fn drop(&mut self) {
+        let mut stack = Vec::new();
+        core::mem::swap(&mut stack, &mut self.0);
+        if stack.len() != KERNEL_STACK_SIZE {
+            return;
+        }
+        let mut cache = KERNEL_STACK_CACHE.lock();
+        if cache.len() < KERNEL_STACK_CACHE_LIMIT && cache.try_reserve(1).is_ok() {
+            cache.push(stack);
+        }
     }
 }
 
