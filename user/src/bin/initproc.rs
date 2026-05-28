@@ -1516,11 +1516,11 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
         );
         if group_name == "ltp" && cfg.ltp_runner == LtpRunner::Suite {
             let libc = cfg.ltp_libc;
-            if libc == LtpLibc::Musl || libc == LtpLibc::Both {
-                run_ltp_suite_runner(environ, "/musl", "musl", timeout_secs);
-            }
             if libc == LtpLibc::Glibc || libc == LtpLibc::Both {
                 run_ltp_suite_runner(environ, "/glibc", "glibc", timeout_secs);
+            }
+            if libc == LtpLibc::Musl || libc == LtpLibc::Both {
+                run_ltp_suite_runner(environ, "/musl", "musl", timeout_secs);
             }
         } else if group_name == "ltp" && cfg.ltp_runner == LtpRunner::Inline {
             // 本地调试路径：LTP 使用内联枚举，支持 include/exclude/from。
