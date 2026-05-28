@@ -222,15 +222,13 @@ impl TaskManager {
             // 使用retain过滤掉与指定任务相同的任务
             .retain(|task_in_queue| Arc::as_ptr(task_in_queue) != Arc::as_ptr(task));
     }
-    fn prune_interruptible_queue(&mut self) {
-        self.interruptible_queue
-            .retain(|task| task.acquire_inner_lock().task_status == TaskStatus::Interruptible);
-    }
     fn enqueue_ready_batch(&mut self, tasks: Vec<Arc<TaskControlBlock>>) -> usize {
         if tasks.is_empty() {
             return 0;
         }
-        self.prune_interruptible_queue();
+        let ptrs = sorted_task_ptrs(&tasks);
+        self.interruptible_queue
+            .retain(|task| !task_ptr_in(&ptrs, task));
         let count = tasks.len();
         for task in tasks {
             self.add(task);

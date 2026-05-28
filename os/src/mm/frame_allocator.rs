@@ -18,10 +18,25 @@ pub struct FrameTracker {
 impl FrameTracker {
     pub fn new(ppn: PhysPageNum) -> Self {
         let ptr = ppn.get_dwords_array().as_mut_ptr();
-        for i in 0..PAGE_SIZE / core::mem::size_of::<u64>() {
+        const WORDS_PER_PAGE: usize = PAGE_SIZE / core::mem::size_of::<u64>();
+        const UNROLL: usize = 8;
+        let mut i = 0;
+        while i + UNROLL <= WORDS_PER_PAGE {
             unsafe {
-                ptr.add(i).write_volatile(0);
+                ptr.add(i).write(0);
+                ptr.add(i + 1).write(0);
+                ptr.add(i + 2).write(0);
+                ptr.add(i + 3).write(0);
+                ptr.add(i + 4).write(0);
+                ptr.add(i + 5).write(0);
+                ptr.add(i + 6).write(0);
+                ptr.add(i + 7).write(0);
             }
+            i += UNROLL;
+        }
+        while i < WORDS_PER_PAGE {
+            unsafe { ptr.add(i).write(0) };
+            i += 1;
         }
         Self { ppn }
     }

@@ -6,12 +6,27 @@ use lazy_static::*;
 use spin::Mutex;
 
 /// 用于分配可回收 id 的结构体
-#[derive(Clone)]
 pub struct RecycleAllocator {
     /// 当前分配的id
     current: usize,
     /// 存储已经回收的id，供后续分配使用
     recycled: Vec<usize>,
+    /// O(1) membership bitmap for `recycled`.
+    recycled_flags: Vec<bool>,
+}
+
+impl Clone for RecycleAllocator {
+    fn clone(&self) -> Self {
+        let mut cloned = Self {
+            current: self.current,
+            recycled: self.recycled.clone(),
+            recycled_flags: Vec::new(),
+        };
+        for &id in self.recycled.iter() {
+            cloned.mark_recycled(id, true);
+        }
+        cloned
+    }
 }
 
 impl RecycleAllocator {
@@ -22,18 +37,22 @@ impl RecycleAllocator {
             current: 1,
             // 初始化为空向量
             recycled: Vec::new(),
+            recycled_flags: Vec::new(),
         }
     }
     /// 分配一个新的id
     pub fn alloc(&mut self) -> usize {
         // 从回收的id中取出一个，如果没有则分配一个新的
         if let Some(id) = self.recycled.pop() {
+            self.mark_recycled(id, false);
             id
         } else {
             // 当前分配的id数量加1
             self.current += 1;
+            let id = self.current - 1;
+            self.ensure_flag_capacity(id);
             // 返回分配的id号
-            self.current - 1
+            id
         }
     }
     /// 分配一个新的id，不立即复用已回收id。
@@ -41,7 +60,9 @@ impl RecycleAllocator {
     /// 用户可见 pid/tid 过早复用会让并发创建线程的测试观察到重复 TID。
     pub fn alloc_fresh(&mut self) -> usize {
         self.current += 1;
-        self.current - 1
+        let id = self.current - 1;
+        self.ensure_flag_capacity(id);
+        id
     }
     pub fn last_allocated(&self) -> usize {
         self.current.saturating_sub(1)
@@ -50,6 +71,7 @@ impl RecycleAllocator {
         let next = next.max(1);
         if next >= self.current {
             self.current = next;
+            self.ensure_flag_capacity(next);
             return;
         }
         if let Some(pos) = self.recycled.iter().position(|id| *id == next) {
@@ -63,17 +85,33 @@ impl RecycleAllocator {
         assert!(id < self.current);
         // 检查id是否已经被回收
         assert!(
-            !self.recycled.iter().any(|i| *i == id),
+            !self.is_recycled(id),
             "id {} has been deallocated!",
             id
         );
         // 将id回收，放入回收向量中
+        self.mark_recycled(id, true);
         self.recycled.push(id);
     }
     /// 获取已经分配的id数量
     pub fn get_allocated(&self) -> usize {
         // 返回当前分配的id数量减去已经回收的id数量
-        self.current - self.recycled.len()
+        self.current.saturating_sub(1).saturating_sub(self.recycled.len())
+    }
+
+    fn ensure_flag_capacity(&mut self, id: usize) {
+        if id >= self.recycled_flags.len() {
+            self.recycled_flags.resize(id + 1, false);
+        }
+    }
+
+    fn is_recycled(&self, id: usize) -> bool {
+        self.recycled_flags.get(id).copied().unwrap_or(false)
+    }
+
+    fn mark_recycled(&mut self, id: usize, value: bool) {
+        self.ensure_flag_capacity(id);
+        self.recycled_flags[id] = value;
     }
 }
 
