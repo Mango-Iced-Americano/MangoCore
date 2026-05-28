@@ -438,6 +438,11 @@ impl TaskControlBlockInner {
             .saturating_add(self.rusage.ru_stime.to_us());
         if let Some(hard_us) = cpu_limit_to_us(self.cpu_limit_max) {
             if cpu_us >= hard_us {
+                log::warn!(
+                    "[sigkill_diag] cpu rlimit exceeded cpu_us={} hard_us={}",
+                    cpu_us,
+                    hard_us
+                );
                 self.add_signal(Signals::SIGKILL);
                 return;
             }
@@ -961,7 +966,12 @@ impl TaskControlBlock {
         } else {
             // 复制地址空间（进程）
             crate::mm::frame_reserve(16);
-            let copied = AddressSpace::from_existing_user(&mut parent_vm.lock())?;
+            let parent_trap_cx = *parent_inner.get_trap_cx();
+            let copied = AddressSpace::from_existing_user(
+                &mut parent_vm.lock(),
+                self.user_res_slot,
+                &parent_trap_cx,
+            )?;
             Arc::new(Mutex::new(copied))
         };
 

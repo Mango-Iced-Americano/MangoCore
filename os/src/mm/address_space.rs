@@ -391,8 +391,8 @@ impl<T: PageTable> AddressSpace<T> {
             let ctx = super::page_fault::FaultContext::new(addr, access);
             let page_table = &mut self.page_table;
             let area = self.vmas.find_user_vma_mut(vpn).unwrap();
-            super::page_fault::handle_page_fault(area, page_table, ctx)?;
-            self.validate_user_fault_result(addr, access)
+            let pa = super::page_fault::handle_page_fault(area, page_table, ctx)?;
+            self.validate_fault_phys_addr(addr, pa)
         } else {
             // In all segments, nothing matches the requirements. Throws.
             error!("[do_page_fault] addr: {:?}, result: bad addr", addr);
@@ -411,7 +411,33 @@ impl<T: PageTable> AddressSpace<T> {
         access: FaultAccess,
     ) -> Result<PhysAddr, isize> {
         super::frame_reserve(3);
+        self.do_page_fault(addr, access)
+            .and_then(|_| self.validate_user_fault_result(addr, access))
+            .map_err(memory_error_to_errno)
+    }
+
+    pub fn fault_in_trap_va(
+        &mut self,
+        addr: VirtAddr,
+        access: FaultAccess,
+    ) -> Result<PhysAddr, isize> {
+        super::frame_reserve(3);
         self.do_page_fault(addr, access).map_err(memory_error_to_errno)
+    }
+
+    fn validate_fault_phys_addr(
+        &self,
+        addr: VirtAddr,
+        pa: PhysAddr,
+    ) -> Result<PhysAddr, MemoryError> {
+        if pa.0 < MEMORY_START || pa.0 >= MEMORY_END {
+            warn!(
+                "[fault_in] translated user va {:#x} to invalid pa {:#x}",
+                addr.0, pa.0
+            );
+            return Err(MemoryError::BadAddress);
+        }
+        Ok(pa)
     }
 
     fn validate_user_fault_result(
@@ -425,13 +451,7 @@ impl<T: PageTable> AddressSpace<T> {
             .translate_va(addr)
             .ok_or(MemoryError::NotMapped)?;
 
-        if pa.0 < MEMORY_START || pa.0 >= MEMORY_END {
-            warn!(
-                "[fault_in] translated user va {:#x} to invalid pa {:#x}",
-                addr.0, pa.0
-            );
-            return Err(MemoryError::BadAddress);
-        }
+        self.validate_fault_phys_addr(addr, pa)?;
 
         let ok = match access {
             FaultAccess::Load => self
@@ -722,7 +742,11 @@ impl<T: PageTable> AddressSpace<T> {
 
         Ok((address_space, program_break, elf_info))
     }
-    pub fn from_existing_user(user_space: &mut AddressSpace<T>) -> Result<AddressSpace<T>, isize> {
+    pub fn from_existing_user(
+        user_space: &mut AddressSpace<T>,
+        trap_cx_slot: usize,
+        trap_cx: &TrapContext,
+    ) -> Result<AddressSpace<T>, isize> {
         let mut address_space = Self::new_bare();
         // map trampoline
         if should_map_trampoline!() {
@@ -759,25 +783,26 @@ impl<T: PageTable> AddressSpace<T> {
                 area.inner.vpn_range
             );
         }
-        // copy trap context area
+        // Copy the current task's trap context.  A process can have stale or
+        // higher-numbered non-user VMAs after clone/exit churn, so do not guess
+        // with last_non_user().
+        let trap_cx_vpn: VirtPageNum =
+            VirtAddr::from(trap_cx_bottom_from_slot(trap_cx_slot)).into();
         let trap_cx_area = user_space
             .vmas
-            .last_non_user()
+            .get_by_start(trap_cx_vpn)
+            .filter(|area| !area.vm_is_user())
             .ok_or(crate::syscall::errno::EINVAL)?;
         let area = Vma::from_another(trap_cx_area);
-        let vpn = trap_cx_area.get_start::<T>();
-        address_space
-            .push(
-                area,
-                Some(
-                    user_space
-                        .translate(vpn)
-                        .unwrap()
-                        .start_addr()
-                        .get_bytes_ref::<TrapContext>(),
-                ),
+        let trap_cx_data = unsafe {
+            core::slice::from_raw_parts(
+                (trap_cx as *const TrapContext).cast::<u8>(),
+                core::mem::size_of::<TrapContext>(),
             )
-            .unwrap();
+        };
+        address_space
+            .push(area, Some(trap_cx_data))
+            .map_err(|_| crate::syscall::errno::ENOMEM)?;
 
         debug!(
             "[fork] copy trap_cx area: {:?}",
@@ -1262,6 +1287,6 @@ pub(super) fn check_page_fault(addr: VirtAddr, access: FaultAccess) -> Result<Ph
         }
     };
     let vm = task.process.vm();
-    let result = vm.lock().fault_in_user_va(addr, access);
+    let result = vm.lock().fault_in_trap_va(addr, access);
     result
 }
