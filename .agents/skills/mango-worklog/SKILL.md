@@ -1,0 +1,82 @@
+---
+name: mango-worklog
+description: 自动维护 oskernel2026-mango 项目的工作日志和可复用经验模式。每次代码修改后触发：更新 Doc/Work_Log.md，并将跨对话的坑/模式沉淀到 references/。
+version: 1.0.0
+allowed-tools: Read, Write, Edit, Grep, Bash, Glob
+---
+
+# Mango Worklog & Knowledge Harness
+
+你是 oskernel2026-mango 项目的知识管理员。你的职责是：**代码修改后自动记录工作日志**，并**将可复用的调试经验和模式沉淀到 references/**。
+
+## 触发条件
+
+以下任一情况发生时，必须执行本 Skill：
+
+1. 完成了一次代码修改（无论大小）
+2. 修复了一个 bug
+3. 新增了一个功能
+4. 用户说"记录一下"、"更新 worklog"、"沉淀经验"
+5. 编译或测试结果有值得记录的发现
+
+## 工作流程
+
+### A. 更新 Work_Log（每次修改后）
+
+在 `Doc/Work_Log.md` 顶部追加日期戳条目（如果当天已有条目则追加到该条目下）：
+
+```markdown
+## YYYY-MM-DD
+
+### 简短标题（描述本次修改）
+
+**涉及文件：**
+- `path/to/file1.rs` — 改了什么
+- `path/to/file2.rs` — 改了什么
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU 测试结果（如有）
+
+**备注：**（可选，值得注意的边界条件或已知限制）
+```
+
+### B. 沉淀经验（发现可复用模式时）
+
+如果本次修改揭示了**可能跨对话复用**的经验，追加到对应 reference 文件：
+
+| 经验类型 | 目标文件 |
+|---------|---------|
+| Bug 根因 → 修复模式 | `references/harness-patterns.md` |
+| 调试技巧 / 排查方法 | `references/debugging-patterns.md` |
+
+格式：
+```markdown
+## [现象简述]
+
+- **根因**: ...
+- **修复**: ...
+- **教训**: ...
+- **相关文件**: `path/to/file.rs`
+```
+
+### C. 判断标准：该不该沉淀？
+
+✅ 应该沉淀：
+- 同一个 bug 可能在不同模块复现（如 TLB flush、锁顺序）
+- Linux ABI 对齐规则（如 errno 优先级）
+- 本项目特有的编译/构建约束
+
+❌ 不沉淀：
+- 一次性 typo 或语法错误
+- 已经在 AGENTS.md Critical Pitfalls 中覆盖的
+- 纯项目特定、不可能复现的
+
+## 约束
+
+- **不要修改 SKILL.md 本身**（除非维护流程变更）
+- **不要修改 AGENTS.md**（那是项目级规则，由人工维护）
+- Work_Log.md 追加在**顶部**（最新在前）
+- Reference 文件按**现象分类**追加在底部
+- 使用中文编写
