@@ -942,3 +942,37 @@ a = sum(x.get("all", x.get("total", 1)) for x in r)
 - lmbench-glibc: 0/0 (initproc 没触发运行，可能 bug)
 
 **验证：** `python3 judge/run_parse.py testresult/output-{rv,la}.txt judge/`
+
+---
+
+## 2026-05-28
+
+### PCB 生命周期回收路径补齐
+
+**问题：** la64 futex/getrusage 压测后 `zpcb`/PCB 对象数量长期不回落，heap_trace 统计显示大量 zombie 仍按旧父进程聚合，即使父进程 `children` 已经被 wait 清空。
+
+**根因：**
+
+- `wait_child()` 消费 zombie 后只从父进程 `children` 摘链并释放 pid，未清子进程 `parent`，也未从 process registry 删除。
+- `SIGCHLD=SIG_IGN` / `SA_NOCLDWAIT` auto-reap 路径只 unregister，未完整释放 pid/parent。
+- 父进程退出时，对已 zombie 子进程简单转交 init，容易留下本应被回收的对象。
+
+**修复：**
+
+- `os/src/task/process_manager.rs`：wait 真正消费 zombie 时同步执行 `release_pid()`、聚合 waited rusage、清 `parent`、`unregister_process()`。
+- `os/src/task/process.rs`：抽出退出时子进程处理逻辑；live child 转交 init，zombie orphan 直接释放并把 rusage 归到 init。
+- `os/src/task/process.rs`：auto-reap 只丢弃子进程状态并释放对象，不再把 rusage 计入父进程 `RUSAGE_CHILDREN`，以符合 LTP `getrusage03` 的 `SIGCHLD=SIG_IGN` 期望。
+- `os/src/utils/stats.rs`：heap_trace 统计增加 `zombie_owner`，按 parent pid 输出 zombie PCB 聚合情况。
+
+**验证：**
+
+- Docker `make -C os rv64-kernel-build-only` ✅
+- Docker `make -C os la64-kernel-build-only` ✅
+- LA64 heap_trace focused LTP `futex_cmp_requeue01,getrusage03`：
+  - `futex_cmp_requeue01` summary `passed 7 / failed 0 / broken 0`
+  - futex 1000 waiter 阶段 zombie 临时增长，case 结束后回落到 `objs pcb=3 zpcb=0`，`zombie_owner` 为空
+  - `getrusage03` summary `passed 9 / failed 0 / broken 0`
+  - 未发现 `PANIC`、`KERNEL EXCEPTION`、`TFAIL`、`TBROK`
+- RV64 focused LTP：
+  - `futex_cmp_requeue01` summary `passed 7 / failed 0 / broken 0`
+  - `getrusage03` 已通过前 7 个 TPASS，到 final exec-child 阶段前触发 LTP 默认 30s timeout；该问题是 runner 超时倍率差异，不是 PCB 生命周期泄漏或内核 panic

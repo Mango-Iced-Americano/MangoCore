@@ -446,6 +446,26 @@ impl ProcessControlBlock {
         self.inner.lock().state == ProcessState::Zombie
     }
 
+    #[cfg(feature = "heap_trace")]
+    pub fn debug_state(&self) -> ProcessState {
+        self.inner.lock().state
+    }
+
+    #[cfg(feature = "heap_trace")]
+    pub fn debug_child_counts(&self) -> (usize, usize, usize) {
+        let inner = self.inner.lock();
+        let mut zombie_children = 0;
+        let mut live_children = 0;
+        for child in inner.children.iter() {
+            if child.is_zombie() {
+                zombie_children += 1;
+            } else {
+                live_children += 1;
+            }
+        }
+        (inner.children.len(), zombie_children, live_children)
+    }
+
     pub fn mark_zombie(&self, exit_code: u32, rusage: Rusage) -> bool {
         let mut inner = self.inner.lock();
         if inner.state == ProcessState::Zombie {
@@ -611,6 +631,41 @@ impl ProcessControlBlock {
         core::mem::take(&mut inner.children)
     }
 
+    fn wake_child_waiters(process: &Arc<ProcessControlBlock>) {
+        process.child_exit_wait.lock().wake_all();
+        if let Some(task) = process.any_live_thread() {
+            let mut inner = task.acquire_inner_lock();
+            if inner.task_status == TaskStatus::Interruptible {
+                inner.task_status = TaskStatus::Ready;
+                drop(inner);
+                wake_interruptible(task);
+            }
+        }
+    }
+
+    fn adopt_children_by_init(children: Vec<Arc<ProcessControlBlock>>) -> bool {
+        let mut live_children = Vec::new();
+        let mut orphan_rusage = Rusage::new();
+
+        for child in children {
+            if child.is_zombie() {
+                orphan_rusage.add_child(child.wait_rusage());
+                child.set_parent(None);
+                child.release_pid();
+                registry::unregister_process(child.pid);
+            } else {
+                child.set_parent(Some(Arc::downgrade(&INITPROC.process)));
+                live_children.push(child);
+            }
+        }
+
+        let has_live_children = !live_children.is_empty();
+        let mut initproc_inner = INITPROC.process.acquire_inner_lock();
+        initproc_inner.child_rusage.add_child(orphan_rusage);
+        initproc_inner.children.extend(live_children);
+        has_live_children
+    }
+
     pub fn close_files_on_exit(&self) {
         let files_ref = self.files();
         let mut fd_table = files_ref.lock();
@@ -648,9 +703,18 @@ impl ProcessControlBlock {
             unregister_exec_key(key);
         }
 
+        let children = self.take_children();
+        let adopted_live_children = if children.is_empty() {
+            false
+        } else {
+            Self::adopt_children_by_init(children)
+        };
+
         if let Some(parent_process) = parent_process {
             if auto_reap {
                 parent_process.detach_child(self.pid);
+                self.set_parent(None);
+                self.release_pid();
                 registry::unregister_process(self.pid);
                 parent_process.child_exit_wait.lock().wake_all();
             } else {
@@ -672,23 +736,8 @@ impl ProcessControlBlock {
             warn!("[finish_process_exit] parent is None");
         }
 
-        let children = self.take_children();
-        if !children.is_empty() {
-            let mut initproc_inner = INITPROC.process.acquire_inner_lock();
-            for child in children {
-                child.set_parent(Some(Arc::downgrade(&INITPROC.process)));
-                initproc_inner.children.push(child);
-            }
-            drop(initproc_inner);
-            INITPROC.process.child_exit_wait.lock().wake_all();
-            if let Some(init_task) = INITPROC.process.any_live_thread() {
-                let mut init_inner = init_task.acquire_inner_lock();
-                if init_inner.task_status == TaskStatus::Interruptible {
-                    init_inner.task_status = TaskStatus::Ready;
-                    drop(init_inner);
-                    wake_interruptible(init_task);
-                }
-            }
+        if adopted_live_children {
+            Self::wake_child_waiters(&INITPROC.process);
         }
 
         let vm = self.vm();

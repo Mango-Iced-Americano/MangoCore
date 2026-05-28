@@ -1,7 +1,11 @@
 //! 资源统计诊断模块
 
 use crate::mm::{heap_stats, unallocated_frames};
-use crate::task::{procs_count, task_manager_counts, zombie_count, TaskControlBlock};
+use crate::task::{procs_count, task_manager_counts, TaskControlBlock};
+#[cfg(feature = "heap_trace")]
+use alloc::string::String;
+#[cfg(feature = "heap_trace")]
+use core::fmt::Write;
 
 const STATS_ENABLED: bool = cfg!(feature = "heap_trace");
 
@@ -70,6 +74,45 @@ fn proc_object_stats() -> (usize, usize, usize, usize, usize, usize, usize, usiz
         if z { zas_refs += vr; zvm_x += vr.saturating_sub(1); }
     }
     (pcbs, zpcbs, tcb_live, tcb_slots, pcb_refs, zpcb_refs, as_refs, zas_refs, zvm_x)
+}
+
+#[cfg(feature = "heap_trace")]
+fn zombie_parent_stats() -> String {
+    let mut groups: alloc::vec::Vec<(usize, usize)> = alloc::vec::Vec::new();
+    for pcb in crate::task::ProcessManager::all_processes() {
+        if !pcb.is_zombie() {
+            continue;
+        }
+        let parent_pid = pcb.parent_pid();
+        if let Some((_, count)) = groups.iter_mut().find(|(pid, _)| *pid == parent_pid) {
+            *count += 1;
+        } else {
+            groups.push((parent_pid, 1));
+        }
+    }
+    groups.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let mut out = String::with_capacity(192);
+    for (parent_pid, zombie_count) in groups.into_iter().take(5) {
+        if let Some(parent) = crate::task::ProcessManager::find_process(parent_pid) {
+            let (children, zombie_children, live_children) = parent.debug_child_counts();
+            let parent_refs = alloc::sync::Arc::strong_count(&parent).saturating_sub(1);
+            let _ = write!(
+                out,
+                "{}:{} state={:?} kids={}/{}/{} refs={} ",
+                parent_pid,
+                zombie_count,
+                parent.debug_state(),
+                children,
+                zombie_children,
+                live_children,
+                parent_refs
+            );
+        } else {
+            let _ = write!(out, "{}:{} state=gone ", parent_pid, zombie_count);
+        }
+    }
+    out
 }
 
 fn vma_stats() -> (usize, usize, usize) {
@@ -153,6 +196,8 @@ pub fn print_resource_stats(task: Option<&TaskControlBlock>) {
         pcbs, zpcbs, tcbs, tcb_slots, tcb_slots.saturating_sub(tcbs),
         pcb_refs, zpcb_refs, as_refs, zas_refs, zvm_x, vmas, zvmas, pt_frames
     );
+    #[cfg(feature = "heap_trace")]
+    println!("[kernel] [stats] zombie_owner {}", zombie_parent_stats());
     #[cfg(feature = "heap_trace")]
     {
         crate::mm::heap_trace::print_summary();

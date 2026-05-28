@@ -151,10 +151,8 @@ impl ProcessManager {
             if let Some((idx, _)) = pair {
                 let child = if nowait {
                     process_inner.children[idx].clone()
-                } else if pid == -1 {
-                    process_inner.children.swap_remove(idx)
                 } else {
-                    process_inner.children.remove(idx)
+                    process_inner.children.swap_remove(idx)
                 };
                 if !nowait {
                     trace!(
@@ -168,6 +166,8 @@ impl ProcessManager {
                 if !nowait {
                     child.release_pid();
                     process_inner.child_rusage.add_child(child.wait_rusage());
+                    child.set_parent(None);
+                    registry::unregister_process(child.pid);
                 }
                 Some(found_pid as isize)
             } else {
