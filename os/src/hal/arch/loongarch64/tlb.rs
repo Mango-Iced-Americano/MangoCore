@@ -1,4 +1,5 @@
 use super::{ASId, TLBEHi, TLBIdx, TLBEL, TLBELO0, TLBELO1};
+use crate::config::PAGE_SIZE_BITS;
 use crate::mm::{PhysPageNum, VirtPageNum};
 use core::arch::asm;
 #[allow(unused)]
@@ -33,6 +34,17 @@ pub fn tlb_addr_allow_write(vpn: VirtPageNum, ppn: PhysPageNum) -> Result<(), ()
 pub fn tlb_invalidate() {
     unsafe {
         asm!("invtlb 0x3,$zero, $zero");
+    }
+}
+#[inline(always)]
+pub fn tlb_invalidate_page(vpn: VirtPageNum) {
+    let vaddr = (vpn.0 & !1) << PAGE_SIZE_BITS;
+    unsafe {
+        asm!(
+            "invtlb 0x5, $zero, {vaddr}",
+            vaddr = in(reg) vaddr,
+            options(nostack)
+        );
     }
 }
 #[inline(always)]

@@ -81,9 +81,9 @@ __alltraps:
     ld.d $t1, $sp, 68*8
     # move to kernel_sp
     ld.d $sp, $sp, 69*8
-    # switch to kernel space
-    #csrwr $t0, CSR_PGDL
-    invtlb 0x3, $zero, $zero
+    # Kernel runs through direct-map windows, so entering a trap does not switch
+    # PGDL.  Keep user TLB entries here; PTE changes and address-space switches
+    # still flush before returning to user mode.
     # jump to trap_handler
     jr $t1
 
@@ -93,8 +93,11 @@ __restore:
 
     # switch to user space
     slli.d $a1, $a1, 12
+    csrrd  $t0, CSR_PGDL
+    beq    $t0, $a1, 1f
     csrwr  $a1, CSR_PGDL
     invtlb 0x3, $zero, $zero
+1:
     move $sp, $a0
     csrwr  $a0, CSR_SAVE
     # now sp points to TrapContext in user space, start restoring based on it

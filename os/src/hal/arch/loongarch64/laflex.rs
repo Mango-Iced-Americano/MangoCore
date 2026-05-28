@@ -1,4 +1,4 @@
-use super::{tlb::tlb_invalidate, tlb_global_invalidate};
+use super::{tlb::tlb_invalidate_page, tlb_global_invalidate};
 use crate::{
     config::{
         MEMORY_HIGH_BASE_VPN, MEMORY_SIZE, PAGE_SIZE, PAGE_SIZE_BITS, PALEN, VA_MASK,
@@ -267,18 +267,25 @@ impl LAFlexPageTable {
         self.find_pte_refmut(vpn).map(|i| &*i)
     }
     pub fn set_dirty_bit(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
-        tlb_invalidate();
         if self.is_ident_map(vpn) {
             if let Some(idx) = dirty_index(vpn) {
                 unsafe {
+                    if DIRTY[idx] {
+                        return Ok(());
+                    }
                     DIRTY[idx] = true;
                 }
+                tlb_invalidate_page(vpn);
                 return Ok(());
             }
             return Err(());
         }
         if let Some(pte) = self.find_pte_refmut(vpn) {
+            if pte.is_dirty() {
+                return Ok(());
+            }
             pte.set_dirty();
+            tlb_invalidate_page(vpn);
             Ok(())
         } else {
             Err(())
@@ -371,6 +378,7 @@ impl PageTable for LAFlexPageTable {
         }
         if flags.contains(MapPermission::W) {
             flag |= LAPTEFlagBits::W;
+            flag |= LAPTEFlagBits::D;
         }
         if flags.contains(MapPermission::U) {
             flag |= LAPTEFlagBits::PLV3;
@@ -379,7 +387,7 @@ impl PageTable for LAFlexPageTable {
         let pte_new = LAFlexPageTableEntry::new(ppn, flag);
         //log::trace!("[laflex::map] pre_wr");
         *pte = pte_new;
-        tlb_invalidate();
+        tlb_invalidate_page(vpn);
         Ok(())
     }
     #[allow(unused)]
@@ -390,7 +398,7 @@ impl PageTable for LAFlexPageTable {
         let pte = self.find_pte_refmut(vpn).unwrap();
         debug_assert!(pte.is_valid(), "vpn {:?} is invalid before unmapping", vpn);
         *pte = LAFlexPageTableEntry { bits: 0 };
-        tlb_invalidate();
+        tlb_invalidate_page(vpn);
     }
     /// Translate the `vpn` into its corresponding `Some(PageTableEntry)` if exists
     /// `None` is returned if nothing is found.
@@ -413,7 +421,7 @@ impl PageTable for LAFlexPageTable {
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.clear_dirty();
             pte.revoke_write();
-            tlb_invalidate();
+            tlb_invalidate_page(vpn);
             Some(pte.ppn())
         } else {
             None
@@ -428,7 +436,7 @@ impl PageTable for LAFlexPageTable {
     fn revoke_read(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.revoke_read();
-            tlb_invalidate();
+            tlb_invalidate_page(vpn);
             Ok(())
         } else {
             Err(())
@@ -437,7 +445,7 @@ impl PageTable for LAFlexPageTable {
     fn revoke_write(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.revoke_write();
-            tlb_invalidate();
+            tlb_invalidate_page(vpn);
             Ok(())
         } else {
             Err(())
@@ -446,7 +454,7 @@ impl PageTable for LAFlexPageTable {
     fn revoke_execute(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.revoke_execute();
-            tlb_invalidate();
+            tlb_invalidate_page(vpn);
             Ok(())
         } else {
             Err(())
@@ -455,7 +463,7 @@ impl PageTable for LAFlexPageTable {
     fn set_ppn(&mut self, vpn: VirtPageNum, ppn: PhysPageNum) -> Result<(), ()> {
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.set_ppn(ppn);
-            tlb_invalidate();
+            tlb_invalidate_page(vpn);
             Ok(())
         } else {
             Err(())
@@ -464,34 +472,35 @@ impl PageTable for LAFlexPageTable {
     fn set_pte_flags(&mut self, vpn: VirtPageNum, flags: MapPermission) -> Result<(), ()> {
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.set_permission(flags);
-            tlb_invalidate();
+            tlb_invalidate_page(vpn);
             Ok(())
         } else {
             Err(())
         }
     }
     fn clear_access_bit(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
-        tlb_invalidate();
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.clear_access();
+            tlb_invalidate_page(vpn);
             Ok(())
         } else {
             Err(())
         }
     }
     fn clear_dirty_bit(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
-        tlb_invalidate();
         if self.is_ident_map(vpn) {
             if let Some(idx) = dirty_index(vpn) {
                 unsafe {
                     DIRTY[idx] = false;
                 }
+                tlb_invalidate_page(vpn);
                 return Ok(());
             }
             return Err(());
         }
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.clear_dirty();
+            tlb_invalidate_page(vpn);
             Ok(())
         } else {
             Err(())
