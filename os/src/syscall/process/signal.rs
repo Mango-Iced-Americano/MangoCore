@@ -14,8 +14,8 @@ use crate::mm::{copy_from_user, UserPtr, UserPtrMut};
 use crate::signal_type;
 use crate::syscall::errno::*;
 use crate::task::{
-    current_task, exit_current_and_run_next, signal::*, ProcessControlBlock, ProcessManager,
-    TaskControlBlock,
+    current_syscall_name, current_task, exit_current_and_run_next, signal::*, ProcessControlBlock,
+    ProcessManager, TaskControlBlock,
 };
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
@@ -342,6 +342,18 @@ pub fn sys_kill(pid: usize, sig: usize) -> isize {
         Ok(signal) => signal,
         Err(_) => return EINVAL,
     };
+    if signal.contains(Signals::SIGKILL) {
+        let (sender_tid, sender_pid) = current_task()
+            .map(|task| (task.gettid(), task.pid()))
+            .unwrap_or((0, 0));
+        log::warn!(
+            "[sigkill_diag] sys_kill sender tid={} pid={} syscall={} target_raw={}",
+            sender_tid,
+            sender_pid,
+            current_syscall_name(),
+            pid as isize
+        );
+    }
     let pid_signed = pid as isize;
     if pid_signed > 0 {
         let Some(process) = ProcessManager::find_process(pid) else {
@@ -504,6 +516,18 @@ pub fn sys_tkill(tid: usize, sig: usize) -> isize {
         Ok(signal) => signal,
         Err(_) => return EINVAL,
     };
+    if signal.contains(Signals::SIGKILL) {
+        let (sender_tid, sender_pid) = current_task()
+            .map(|task| (task.gettid(), task.pid()))
+            .unwrap_or((0, 0));
+        log::warn!(
+            "[sigkill_diag] sys_tkill sender tid={} pid={} syscall={} target_tid={}",
+            sender_tid,
+            sender_pid,
+            current_syscall_name(),
+            tid
+        );
+    }
     if let Some(task) = ProcessManager::find_task(tid) {
         match send_thread_signal(&task, signal) {
             Ok(()) => SUCCESS,
@@ -522,6 +546,19 @@ pub fn sys_tgkill(pid: usize, tid: usize, sig: usize) -> isize {
         Ok(signal) => signal,
         Err(_) => return EINVAL,
     };
+    if signal.contains(Signals::SIGKILL) {
+        let (sender_tid, sender_pid) = current_task()
+            .map(|task| (task.gettid(), task.pid()))
+            .unwrap_or((0, 0));
+        log::warn!(
+            "[sigkill_diag] sys_tgkill sender tid={} pid={} syscall={} target_pid={} target_tid={}",
+            sender_tid,
+            sender_pid,
+            current_syscall_name(),
+            pid,
+            tid
+        );
+    }
     if let Some(task) = ProcessManager::find_task_in_process(pid, tid) {
         match send_thread_signal(&task, signal) {
             Ok(()) => SUCCESS,
@@ -561,6 +598,15 @@ pub fn sys_pidfd_send_signal(pidfd: usize, sig: usize, info: usize, flags: usize
         Ok(pid) => pid,
         Err(errno) => return errno,
     };
+    if signal.contains(Signals::SIGKILL) {
+        log::warn!(
+            "[sigkill_diag] pidfd_send_signal sender tid={} pid={} syscall={} target_pid={}",
+            task.gettid(),
+            task.pid(),
+            current_syscall_name(),
+            target_pid
+        );
+    }
 
     let Some(process) = ProcessManager::find_process(target_pid) else {
         return ESRCH;
