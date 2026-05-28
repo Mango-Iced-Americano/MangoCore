@@ -183,6 +183,27 @@ impl TaskManager {
     fn recompute_ready_nice_count(&mut self) {
         self.ready_nonzero_nice_count = count_ready_nonzero_nice(&self.ready_queue);
     }
+    /// 从就绪队列中移除所有僵尸任务并返回，由调用者在锁外 drop。
+    /// 解决 zombie TCB 因 nice-aware 调度长期不被选中导致的内存泄漏。
+    fn drain_ready_zombies(&mut self) -> Vec<Arc<TaskControlBlock>> {
+        if self.ready_queue.is_empty() {
+            return Vec::new();
+        }
+        let mut zombies = Vec::new();
+        let mut rest = VecDeque::new();
+        while let Some(task) = self.ready_queue.pop_front() {
+            if task.acquire_inner_lock().is_zombie() {
+                zombies.push(task);
+            } else {
+                rest.push_back(task);
+            }
+        }
+        self.ready_queue = rest;
+        if !zombies.is_empty() {
+            self.recompute_ready_nice_count();
+        }
+        zombies
+    }
     fn update_ready_nice(&mut self, task: &Arc<TaskControlBlock>, old_nice: i32, new_nice: i32) {
         if (old_nice == 0) == (new_nice == 0) {
             return;
@@ -352,6 +373,12 @@ pub fn add_task(task: Arc<TaskControlBlock>) {
 /// 从任务管理器中取出一个任务
 pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
     TASK_MANAGER.lock().fetch()
+}
+
+/// 从就绪队列中移除所有僵尸任务并在锁外释放。
+/// 应在每次调度循环中调用，防止 zombie TCB 因调度策略不被选中而长期驻留。
+pub fn drain_ready_zombies() -> Vec<Arc<TaskControlBlock>> {
+    TASK_MANAGER.lock().drain_ready_zombies()
 }
 
 /// 尝试释放所有任务的内存空间，直到释放`req`页。

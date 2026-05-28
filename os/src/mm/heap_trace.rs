@@ -525,21 +525,47 @@ impl TraceState {
     }
 }
 
-/// Return the first PC in `pcs` that is not a hook-internal address
-/// (i.e. not inside `heap_trace` or the allocator wrapper), falling
-/// back to pcs[0] if none found.
+/// Sentinel function for `first_useful_pc` — see module-level docs.
+#[no_mangle]
+pub fn heap_trace_text_marker() {}
+
+/// Return the first PC in `pcs` whose address does not fall inside
+/// the allocator or heap_trace module.  We probe run-time addresses of
+/// sentinel functions placed in each module (±8 KB window) so the filter
+/// stays correct across linker layout changes.
 fn first_useful_pc(pcs: &[usize; STACK_DEPTH]) -> usize {
-    // Hook functions live roughly in 0x802c_0000..0x802d_0000 (for this kernel build).
-    // Skip PCs from within that range.
+    // Addresses of sentinel functions placed in the two modules.
+    let alloc_base = super::heap_allocator::heap_allocator_text_marker as usize;
+    let trace_base = heap_trace_text_marker as usize;
+
+    // Module code is typically < 8 KB; this window safely covers it.
+    const WINDOW: usize = 8 * 1024;
+
+    let is_alloc_frame = |pc: usize| -> bool {
+        if pc >= alloc_base.saturating_sub(WINDOW) && pc < alloc_base.saturating_add(WINDOW) {
+            return true;
+        }
+        if pc >= trace_base.saturating_sub(WINDOW) && pc < trace_base.saturating_add(WINDOW) {
+            return true;
+        }
+        false
+    };
+
     for &pc in pcs.iter() {
         if pc == 0 {
             continue;
         }
-        // Skip addresses inside heap_trace / allocator hook (approximate range).
-        if pc >= 0x802c_0000 && pc < 0x802e_0000 {
+        if is_alloc_frame(pc) {
             continue;
         }
         return pc;
     }
-    pcs[0]
+
+    // Fallback: return the first non-zero PC (the outermost frame we have).
+    for &pc in pcs.iter() {
+        if pc != 0 {
+            return pc;
+        }
+    }
+    0
 }
