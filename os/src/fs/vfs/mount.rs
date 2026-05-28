@@ -820,7 +820,8 @@ pub struct MountFS {
     /// 子挂载点表: parent_inode_id → mounted fs
     pub mountpoints: Mutex<BTreeMap<InodeId, Arc<MountFS>>>,
     /// 自身挂载到父文件系统上的 inode（如果是根则 None）
-    self_mountpoint: Mutex<Option<Arc<MountFSInode>>>,
+    /// 使用 Weak 避免 MountFS ↔ MountFSInode Arc 引用循环。
+    self_mountpoint: Mutex<Option<Weak<MountFSInode>>>,
     /// 挂载标志
     mount_flags: Mutex<MountFlags>,
     /// 挂载源
@@ -1087,7 +1088,7 @@ impl MountFS {
         // under a make-rshared child1), mp points into the child mount.
         // Walk up one more level to reach the actual shared ancestor.
         let propagation_target = if do_propagate {
-            self.self_mountpoint.lock().as_ref().and_then(|mp| {
+            self.self_mountpoint.lock().as_ref().and_then(|w| w.upgrade()).and_then(|mp| {
                 mp.inner_inode.metadata().ok().map(|md| (mp.mount_fs.clone(), md.inode_id))
             })
         } else {
@@ -1134,7 +1135,7 @@ impl MountFS {
         }
 
         if do_propagate && self.propagation().is_shared() {
-            if let Some(mp) = self.self_mountpoint.lock().clone() {
+            if let Some(mp) = self.self_mountpoint.lock().as_ref().and_then(|w| w.upgrade()) {
                 if let Ok(md) = mp.inner_inode.metadata() {
                     propagate_umount(&mp.mount_fs, md.inode_id);
                 }
@@ -1173,7 +1174,8 @@ impl MountFS {
 
         MOUNT_LIST.remove_fs(self);
 
-        let mountpoint = self.self_mountpoint.lock().take();
+        let mountpoint = self.self_mountpoint.lock().take()
+            .and_then(|w| w.upgrade());
         if let Some(mountpoint) = mountpoint {
             if let Ok(md) = mountpoint.inner_inode.metadata() {
                 let removed = mountpoint.mount_fs.remove_mount(md.inode_id);
@@ -1219,11 +1221,11 @@ impl MountFS {
     }
 
     pub fn self_mountpoint(&self) -> Option<Arc<MountFSInode>> {
-        self.self_mountpoint.lock().clone()
+        self.self_mountpoint.lock().as_ref().and_then(|w| w.upgrade())
     }
 
     pub fn set_self_mountpoint(&self, mp: Option<Arc<MountFSInode>>) {
-        *self.self_mountpoint.lock() = mp;
+        *self.self_mountpoint.lock() = mp.map(|arc| Arc::downgrade(&arc));
     }
 
     pub fn mount_source(&self) -> Option<String> {
@@ -1249,6 +1251,9 @@ impl MountFS {
 
 impl Drop for MountFS {
     fn drop(&mut self) {
+        // 防御性清理：断开 self_mountpoint 引用，确保即使 Weak 升级路径异常，
+        // MountFS ↔ MountFSInode 循环也能被打破。
+        self.self_mountpoint.lock().take();
         counters::MOUNTFS_ALIVE.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
     }
 }

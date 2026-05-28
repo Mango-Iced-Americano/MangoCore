@@ -259,6 +259,9 @@ fn unregister_peer(gid: u32) {
     let mut groups = PEER_GROUPS.lock();
     if let Some(peers) = groups.get_mut(&gid) {
         peers.retain(|w| w.upgrade().is_some());
+        if peers.is_empty() {
+            groups.remove(&gid);
+        }
     }
 }
 
@@ -271,6 +274,9 @@ pub fn unregister_peer_mount(mfs: &Arc<MountFS>) {
     let mut groups = PEER_GROUPS.lock();
     if let Some(peers) = groups.get_mut(&gid) {
         peers.retain(|w| w.upgrade().map_or(true, |a| !Arc::ptr_eq(&a, mfs)));
+        if peers.is_empty() {
+            groups.remove(&gid);
+        }
     }
 }
 
@@ -300,6 +306,9 @@ pub fn unregister_slave_mount(mfs: &Arc<MountFS>) {
     let mut groups = SLAVE_GROUPS.lock();
     if let Some(slaves) = groups.get_mut(&master_gid) {
         slaves.retain(|w| w.upgrade().map_or(true, |a| !Arc::ptr_eq(&a, mfs)));
+        if slaves.is_empty() {
+            groups.remove(&master_gid);
+        }
     }
 }
 

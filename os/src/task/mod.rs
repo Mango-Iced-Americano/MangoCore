@@ -22,7 +22,8 @@ use lazy_static::*;
 use manager::fetch_task;
 pub use completion::Completion;
 pub use manager::{
-    add_kernel_timer, add_task, all_pids, do_oom, do_wake_expired, drain_ready_zombies,
+    add_kernel_timer, add_task, all_pids, do_oom, do_wake_expired,
+    drain_interruptible_zombies, drain_ready_zombies,
     kernel_timer_queue_len, procs_count, remove_tasks_from_queues,
     send_signal_to_interruptible, sleep_interruptible, task_manager_counts, update_ready_nice,
     wait_with_timeout, wake_interruptible, zombie_count, TimerAction, WaitQueue, WaitResult,
