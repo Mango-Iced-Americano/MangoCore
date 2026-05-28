@@ -1,6 +1,8 @@
-//! 文件系统缓存周期回收
+//! Periodically reclaim filesystem caches from the scheduler loop.
 //!
-//! 从调度循环中调用，带节流和水位检查。仅回收干净页，不写回脏页。
+//! Stale metadata cleanup (inode_objects, page_caches, children) runs
+//! unconditionally every THROTTLE ticks. Clean page cache shrink is gated
+//! behind a 64MB high-water mark to avoid premature eviction.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -8,8 +10,6 @@ const THROTTLE: usize = 64;
 const HIGH_WATER_PAGES: isize = 16384; // 64MB
 const BATCH_PAGES: usize = 64;
 
-/// 周期回收 page cache 干净页（调度循环中调用，带节流）
-/// 仅在 page_cache > 64MB 时触发，每次最多回收 64 页
 pub fn maybe_reclaim_fs_caches() {
     static TICK: AtomicUsize = AtomicUsize::new(0);
 
@@ -24,17 +24,24 @@ pub fn maybe_reclaim_fs_caches() {
     };
 
     if let Some(fs) = fs {
+        let io_removed = fs.prune_inode_objects();
+        let pc_removed = fs.prune_page_caches();
+        let kids_removed = fs.prune_children_stale_entries();
+
         let cached = fs.get_cache_metric(6); // page_cache_cached_pages
         if cached > HIGH_WATER_PAGES {
-            let stats = fs.reclaim_fs_caches(BATCH_PAGES);
-            if stats.clean_pages_freed > 0 {
+            let freed = fs.shrink_all_page_caches_clean(BATCH_PAGES);
+            if freed > 0 {
                 log::debug!(
-                    "[reclaim] freed={} before={} after={}",
-                    stats.clean_pages_freed,
-                    stats.cached_pages_before,
-                    stats.cached_pages_after
+                    "[reclaim] clean_freed={} stale: io={} pc={} kids={}",
+                    freed, io_removed, pc_removed, kids_removed
                 );
             }
+        } else if io_removed + pc_removed + kids_removed > 0 {
+            log::debug!(
+                "[reclaim] stale: io={} pc={} kids={}",
+                io_removed, pc_removed, kids_removed
+            );
         }
     }
 }

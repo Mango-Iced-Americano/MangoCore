@@ -18,13 +18,33 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
+use core::sync::atomic::AtomicUsize;
 
 use super::mount::MountFSInode;
 
 /// Maximum number of entries in the dentry cache.
-/// Small enough not to break lifecycle tests (64-file lookup → delta ≤ 16),
-/// large enough for typical working sets.
 pub const DENTRY_CACHE_LIMIT: usize = 256;
+
+/// Global eviction counters for diagnostics.
+pub mod dcache_stats {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    pub static EVICT_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    /// Evictions where strong_count == 1 (cache was the sole owner).
+    pub static EVICT_SOLE_OWNER: AtomicUsize = AtomicUsize::new(0);
+    /// Evictions where strong_count > 1 (external holder exists).
+    pub static EVICT_EXTERN_HELD: AtomicUsize = AtomicUsize::new(0);
+    /// Entries removed by advance_clock_one.
+    pub static ADVANCE_REMOVED: AtomicUsize = AtomicUsize::new(0);
+
+    pub fn snapshot() -> (usize, usize, usize, usize) {
+        (
+            EVICT_TOTAL.load(Ordering::Relaxed),
+            EVICT_SOLE_OWNER.load(Ordering::Relaxed),
+            EVICT_EXTERN_HELD.load(Ordering::Relaxed),
+            ADVANCE_REMOVED.load(Ordering::Relaxed),
+        )
+    }
+}
 
 /// Cache key: (parent inode id, child name).
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
@@ -61,7 +81,12 @@ impl DentryCache {
     }
 
     /// Look up a cached entry. On hit, sets `referenced = true`.
+    /// If cache is at or above limit, advances CLOCK hand by one step
+    /// to prevent cold entries from staying forever on cache-hit-only workloads.
     pub fn get(&mut self, key: &DentryKey) -> Option<Arc<MountFSInode>> {
+        if self.map.len() >= DENTRY_CACHE_LIMIT {
+            self.advance_clock_one();
+        }
         let entry = self.map.get_mut(key)?;
         entry.referenced = true;
         if crate::fs::ext4::counters::counters_enabled() {
@@ -158,8 +183,33 @@ impl DentryCache {
 
             // Cold entry: evict
             if let Some(entry) = self.map.remove(&key) {
+                let sc = Arc::strong_count(&entry.node);
+                dcache_stats::EVICT_TOTAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if sc <= 1 {
+                    dcache_stats::EVICT_SOLE_OWNER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                } else {
+                    dcache_stats::EVICT_EXTERN_HELD.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                }
                 evicted.push(entry.node);
             }
+        }
+    }
+
+    /// Advance CLOCK hand by one step: if the front entry is cold, evict it.
+    /// Called from get() when cache is at limit, so cold entries get evicted
+    /// even on cache-hit-heavy workloads where insert_or_get rarely fires.
+    fn advance_clock_one(&mut self) {
+        let Some(key) = self.order.pop_front() else { return };
+        let Some(entry) = self.map.get_mut(&key) else {
+            // Entry missing from map — skip
+            return;
+        };
+        if entry.referenced {
+            entry.referenced = false;
+            self.order.push_back(key);
+        } else {
+            self.map.remove(&key);
+            dcache_stats::ADVANCE_REMOVED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         }
     }
 }

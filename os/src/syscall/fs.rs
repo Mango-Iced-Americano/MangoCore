@@ -2582,21 +2582,9 @@ pub fn sys_umount2(target: *const u8, flags: u32) -> isize {
         }
     };
     if flags.contains(UmountFlags::MNT_DETACH) {
-        let mnt_inode = match inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
-            Some(mnt) => mnt,
-            None => return EINVAL,
-        };
-        let target_mnt = if mnt_inode.is_mountpoint_root() {
-            mnt_inode.mount_fs.clone()
-        } else {
-            let inode_id = match mnt_inode.inner_inode.metadata() {
-                Ok(md) => md.inode_id,
-                Err(e) => return -(e as isize),
-            };
-            match mnt_inode.mount_fs.mountpoints.lock().get(&inode_id).cloned() {
-                Some(mnt) => mnt,
-                None => return EINVAL,
-            }
+        let target_mnt = match resolve_umount_target(&inode) {
+            Ok(mnt) => mnt,
+            Err(errno) => return errno,
         };
         return match target_mnt.detach_recursive() {
             Ok(()) => SUCCESS,
@@ -2606,10 +2594,43 @@ pub fn sys_umount2(target: *const u8, flags: u32) -> isize {
     match inode.umount() {
         Ok(_) => SUCCESS,
         Err(e) => {
+            if e == SyscallErr::EBUSY {
+                // Fallback: EBUSY on normal umount → force-detach subtree.
+                // Handles mounts with submounts without requiring MNT_DETACH.
+                let target_mnt = match resolve_umount_target(&inode) {
+                    Ok(mnt) => mnt,
+                    Err(_) => return -(e as isize),
+                };
+                return match target_mnt.detach_recursive() {
+                    Ok(()) => SUCCESS,
+                    Err(e2) => -(e2 as isize),
+                };
+            }
             error!("[sys_umount2] inode.umount() failed for '{}': errno={}", lookup_path, e as isize);
             -(e as isize)
         }
     }
+}
+
+/// Extract the target MountFS from a MountFSInode for umount/detach operations.
+/// Returns the child MountFS if the inode is a mountpoint, or the MountFS itself
+/// if the inode is a mountpoint root.
+fn resolve_umount_target(inode: &Arc<dyn vfs::IndexNode>) -> Result<Arc<vfs::MountFS>, isize> {
+    let mnt_inode = match inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+        Some(m) => m,
+        None => return Err(EINVAL),
+    };
+    if mnt_inode.is_mountpoint_root() {
+        return Ok(mnt_inode.mount_fs.clone());
+    }
+    let inode_id = match mnt_inode.inner_inode.metadata() {
+        Ok(md) => md.inode_id,
+        Err(e) => return Err(-(e as isize)),
+    };
+    mnt_inode.mount_fs.mountpoints.lock()
+        .get(&inode_id)
+        .cloned()
+        .ok_or(EINVAL)
 }
 
 bitflags! {

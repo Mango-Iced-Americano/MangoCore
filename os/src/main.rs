@@ -129,6 +129,8 @@ pub fn rust_main() -> ! {
     println!("[kernel] block in virt mode!");
     #[cfg(feature = "oom_handler")]
     println!("[kernel] oom_handler is enabled!");
+    #[cfg(feature = "heap_trace")]
+    println!("[kernel] heap_trace is enabled!");
     // #[cfg(feature = "riscv")]
     fs::flush_preload();
     // crate::fs::ext4::smoke::run_boot_smoke();  // 需要时取消注释
