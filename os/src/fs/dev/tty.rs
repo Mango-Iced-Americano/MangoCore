@@ -138,6 +138,11 @@ impl Teletype {
         result
     }
 
+    /// Wake any tasks blocked on TTY read (called after stashing input).
+    pub fn wake_readers() {
+        TTY.read_waiters.wait_queue().lock().wake_all();
+    }
+
     /// Read foreground_pgid for debugging.
     pub fn foreground_pgid() -> u32 {
         TTY.inner.lock().foreground_pgid
@@ -289,7 +294,18 @@ impl IndexNode for Teletype {
             // TCXONC (0x540A) — software flow control. No-op for virtual terminal.
             TeletypeCommand::TCXONC => Ok(0),
             TeletypeCommand::TIOCGPGRP => {
-                match UserPtrMut::from_addr(argp).write(token, &inner.foreground_pgid) {
+                // If foreground_pgid has never been set, return the caller's
+                // pgid as the default without modifying foreground_pgid.
+                // This matches Linux semantics: tcgetpgrp is a pure read.
+                let pgid = inner.foreground_pgid;
+                let val = if pgid == 0 {
+                    crate::task::current_task()
+                        .map(|t| t.process.getpgid() as u32)
+                        .unwrap_or(0)
+                } else {
+                    pgid
+                };
+                match UserPtrMut::from_addr(argp).write(token, &val) {
                     Ok(()) => Ok(0),
                     Err(_) => Err(SyscallErr::EFAULT),
                 }

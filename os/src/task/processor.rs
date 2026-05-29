@@ -80,6 +80,7 @@ pub fn run_tasks() {
                 log::info!("[vintr-poll] SIGINT sent! ch={:#x}", ch);
             } else {
                 crate::trace::stash_char(ch);
+                crate::fs::dev::tty::Teletype::wake_readers();
             }
         }
         // 处理到期内核定时器（SIGALRM 等），防止忙等待/轮询任务阻塞定时器投递。
