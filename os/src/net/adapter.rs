@@ -13,6 +13,79 @@ use smoltcp::wire::{
 };
 use spin::Mutex;
 
+/// Single-device wrapper enum — replaces RoutingDevice's multi-device software switch.
+/// Each DeviceStack gets its own IfaceDevice (Loopback for lo, Ethernet for eth0).
+pub enum IfaceDevice {
+    Lo(Loopback),
+    Eth(SmoltcpDeviceAdapter),
+}
+
+pub enum IfaceRxToken<'a> {
+    Lo(<Loopback as Device>::RxToken<'a>),
+    Eth(<SmoltcpDeviceAdapter as Device>::RxToken<'a>),
+}
+
+pub enum IfaceTxToken<'a> {
+    Lo(<Loopback as Device>::TxToken<'a>),
+    Eth(<SmoltcpDeviceAdapter as Device>::TxToken<'a>),
+}
+
+impl Device for IfaceDevice {
+    type RxToken<'a> = IfaceRxToken<'a>;
+    type TxToken<'a> = IfaceTxToken<'a>;
+
+    fn capabilities(&self) -> DeviceCapabilities {
+        match self {
+            Self::Lo(lo) => lo.capabilities(),
+            Self::Eth(eth) => eth.capabilities(),
+        }
+    }
+
+    fn receive(&mut self, timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        match self {
+            Self::Lo(lo) => {
+                let (rx, tx) = lo.receive(timestamp)?;
+                Some((IfaceRxToken::Lo(rx), IfaceTxToken::Lo(tx)))
+            }
+            Self::Eth(eth) => {
+                let (rx, tx) = eth.receive(timestamp)?;
+                Some((IfaceRxToken::Eth(rx), IfaceTxToken::Eth(tx)))
+            }
+        }
+    }
+
+    fn transmit(&mut self, timestamp: Instant) -> Option<Self::TxToken<'_>> {
+        match self {
+            Self::Lo(lo) => lo.transmit(timestamp).map(IfaceTxToken::Lo),
+            Self::Eth(eth) => eth.transmit(timestamp).map(IfaceTxToken::Eth),
+        }
+    }
+}
+
+impl<'a> RxToken for IfaceRxToken<'a> {
+    fn consume<R, F>(self, f: F) -> R
+    where
+        F: FnOnce(&mut [u8]) -> R,
+    {
+        match self {
+            Self::Lo(t) => t.consume(f),
+            Self::Eth(t) => t.consume(f),
+        }
+    }
+}
+
+impl<'a> TxToken for IfaceTxToken<'a> {
+    fn consume<R, F>(self, len: usize, f: F) -> R
+    where
+        F: FnOnce(&mut [u8]) -> R,
+    {
+        match self {
+            Self::Lo(t) => t.consume(len, f),
+            Self::Eth(t) => t.consume(len, f),
+        }
+    }
+}
+
 /// No-op network device used when no physical NIC is present.
 /// Allows the smoltcp stack to function with loopback only.
 /// transmit() always returns Some to keep RoutingDevice::transmit() working.

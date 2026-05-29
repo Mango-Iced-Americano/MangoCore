@@ -1,6 +1,6 @@
 use super::Mutex;
 use crate::drivers::NET_DEVICE;
-use crate::net::adapter::{NullNetDevice, RoutingDevice, SmoltcpDeviceAdapter};
+use crate::net::adapter::{IfaceDevice, NullNetDevice, SmoltcpDeviceAdapter};
 use crate::net::routing::{InetProtocol, RouteSocketHandle, SocketBinding};
 use crate::net::socket::inet::datagram::udp::dispatch_udp_packets;
 use crate::net::socket::inet::stream::inner::tcp_state_code;
@@ -43,7 +43,7 @@ pub struct NetInterface<'a> {
 pub struct DeviceStack<'a> {
     pub ifindex: u32,
     pub name: &'static str,
-    pub device: RoutingDevice,
+    pub device: IfaceDevice,
     pub iface: Interface,
     pub sockets: SocketSet<'a>,
 }
@@ -64,7 +64,29 @@ impl<'a> NetInterfaceInner<'a> {
     }
 
     fn new() -> Self {
-        let (eth, hw_addr, has_real_nic) = match NET_DEVICE.lock().take() {
+        let now = Instant::from_millis(current_time_duration().as_millis() as i64);
+        let mut stacks = Vec::new();
+
+        // Stack 0: loopback (ifindex=1)
+        {
+            let mut lo_device = IfaceDevice::Lo(Loopback::new(Medium::Ip));
+            let lo_config = Config::new(HardwareAddress::Ip);
+            let mut lo_iface = Interface::new(lo_config, &mut lo_device, now);
+            let mut lo_sockets = SocketSet::new(vec![]);
+            lo_iface.update_ip_addrs(|addrs| {
+                addrs.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8)).unwrap();
+            });
+            stacks.push(DeviceStack {
+                ifindex: 1,
+                name: "lo",
+                device: lo_device,
+                iface: lo_iface,
+                sockets: lo_sockets,
+            });
+        }
+
+        // Stack 1: ethernet (ifindex=2)
+        let (eth_adapter, hw_addr, has_real_nic) = match NET_DEVICE.lock().take() {
             Some(net_device) => {
                 let mac = net_device.mac_address();
                 (SmoltcpDeviceAdapter::new(net_device), EthernetAddress(mac), true)
@@ -76,87 +98,88 @@ impl<'a> NetInterfaceInner<'a> {
                 (SmoltcpDeviceAdapter::new(null_dev), EthernetAddress(null_mac), false)
             }
         };
-        let lo = Loopback::new(Medium::Ip);
-        let mut device = RoutingDevice::new(eth, lo);
 
-        let now = Instant::from_millis(current_time_duration().as_millis() as i64);
-        let config = Config::new(HardwareAddress::Ethernet(hw_addr));
-        let mut iface = Interface::new(config, &mut device, now);
+        {
+            let mut eth_device = IfaceDevice::Eth(eth_adapter);
+            let eth_config = Config::new(HardwareAddress::Ethernet(hw_addr));
+            let mut eth_iface = Interface::new(eth_config, &mut eth_device, now);
+            let mut eth_sockets = SocketSet::new(vec![]);
 
-        // Create SocketSet early for DHCP probe
-        let mut sockets = SocketSet::new(vec![]);
+            if has_real_nic {
+                // DHCP probe
+                let mut dhcp_socket = dhcpv4::Socket::new();
+                dhcp_socket.set_retry_config(dhcpv4::RetryConfig {
+                    discover_timeout: Duration::from_secs(2),
+                    initial_request_timeout: Duration::from_secs(1),
+                    request_retries: 3,
+                    min_renew_timeout: Duration::from_secs(60),
+                    ..dhcpv4::RetryConfig::default()
+                });
+                let dhcp_handle = eth_sockets.add(dhcp_socket);
+                let deadline = Instant::from_millis(
+                    current_time_duration().as_millis() as i64 + 5000,
+                );
 
-        if has_real_nic {
-            let mut dhcp_socket = dhcpv4::Socket::new();
-            dhcp_socket.set_retry_config(dhcpv4::RetryConfig {
-                discover_timeout: Duration::from_secs(2),
-                initial_request_timeout: Duration::from_secs(1),
-                request_retries: 3,
-                min_renew_timeout: Duration::from_secs(60),
-                ..dhcpv4::RetryConfig::default()
-            });
-            let dhcp_handle = sockets.add(dhcp_socket);
-            let deadline = Instant::from_millis(
-                current_time_duration().as_millis() as i64 + 5000,
-            );
+                loop {
+                    let timestamp = Instant::from_millis(current_time_duration().as_millis() as i64);
+                    eth_iface.poll(timestamp, &mut eth_device, &mut eth_sockets);
 
-            loop {
-                let timestamp = Instant::from_millis(current_time_duration().as_millis() as i64);
-                iface.poll(timestamp, &mut device, &mut sockets);
+                    let event = eth_sockets.get_mut::<dhcpv4::Socket>(dhcp_handle).poll();
+                    match event {
+                        Some(dhcpv4::Event::Configured(cfg)) => {
+                            net_core::set_eth0_ipv4(IpCidr::Ipv4(cfg.address));
+                            net_core::set_default_gateway(cfg.router);
+                            log::info!(
+                                "[net::config] DHCP: got IP {:?} gateway {:?}",
+                                cfg.address,
+                                cfg.router
+                            );
+                            break;
+                        }
+                        Some(dhcpv4::Event::Deconfigured) => {}
+                        None => {}
+                    }
 
-                let event = sockets.get_mut::<dhcpv4::Socket>(dhcp_handle).poll();
-                match event {
-                    Some(dhcpv4::Event::Configured(cfg)) => {
-                        net_core::set_eth0_ipv4(IpCidr::Ipv4(cfg.address));
-                        net_core::set_default_gateway(cfg.router);
-                        log::info!(
-                            "[net::config] DHCP: got IP {:?} gateway {:?}",
-                            cfg.address,
-                            cfg.router
-                        );
+                    if timestamp >= deadline {
+                        log::info!("[net::config] DHCP timeout, continuing without IP");
                         break;
                     }
-                    Some(dhcpv4::Event::Deconfigured) => {}
-                    None => {}
                 }
-
-                if timestamp >= deadline {
-                    log::info!("[net::config] DHCP timeout, continuing without IP");
-                    break;
-                }
+                eth_sockets.remove(dhcp_handle);
             }
-            sockets.remove(dhcp_handle);
+
+            // Source IP from net_core (DHCP result)
+            let addrs_src: Vec<IpCidr> = {
+                let ifaces = net_core::IFACES.lock();
+                ifaces.iter().filter(|d| d.ifindex == 2)
+                    .flat_map(|dev| dev.ip_addrs.iter().copied())
+                    .collect()
+            };
+            if !addrs_src.is_empty() {
+                eth_iface.update_ip_addrs(|addrs| {
+                    for cidr in &addrs_src {
+                        addrs.push(*cidr).unwrap();
+                    }
+                });
+            }
+            log::info!("[net::config] eth0 addresses: {:?}", addrs_src);
+
+            if let Some(gw) = net_core::default_gateway() {
+                eth_iface.routes_mut().add_default_ipv4_route(gw).unwrap();
+            }
+
+            stacks.push(DeviceStack {
+                ifindex: 2,
+                name: "eth0",
+                device: eth_device,
+                iface: eth_iface,
+                sockets: eth_sockets,
+            });
         }
 
-        // Source IP addresses from net_core registered interfaces
-        let addrs_src: Vec<IpCidr> = {
-            let ifaces = net_core::IFACES.lock();
-            ifaces
-                .iter()
-                .flat_map(|dev| dev.ip_addrs.iter().copied())
-                .collect()
-        };
-        iface.update_ip_addrs(|addrs| {
-            addrs.clear();
-            for cidr in &addrs_src {
-                addrs.push(*cidr).unwrap();
-            }
-        });
-        log::info!("[net::config] sourced addresses from net_core: {:?}", addrs_src);
-
-        // Default route from net_core (set by DHCP probe if NIC present)
-        if let Some(gw) = net_core::default_gateway() {
-            iface.routes_mut().add_default_ipv4_route(gw).unwrap();
-        }
-
+        log::info!("[net::config] initialized {} stacks", stacks.len());
         Self {
-            stacks: alloc::vec![DeviceStack {
-                ifindex: 0,
-                name: "routing",
-                device,
-                iface,
-                sockets,
-            }],
+            stacks,
             bindings: BTreeMap::new(),
             next_socket_id: 1,
         }
@@ -265,53 +288,62 @@ impl<'a> NetInterface<'a> {
     fn poll_once(&self) -> bool {
         let mut progressed = false;
         self.inner_handler(|inner| {
-            // Pre-collect UDP removal handles before borrowing stack
-            let udp_removes: Vec<(Option<SocketHandle>, RouteSocketHandle)> = {
+            // Pre-collect all removal handles with their ifindex
+            let udp_removes: Vec<(Option<SocketHandle>, u32, RouteSocketHandle)> = {
                 let mut to_remove = UDP_SOCKETS_TO_REMOVE.lock();
-                to_remove.drain(..).map(|rh| (inner.resolve(rh), rh)).collect()
+                to_remove.drain(..).map(|rh| {
+                    let ifindex = inner.bindings.get(&rh).map(|b| b.ifindex).unwrap_or(2);
+                    (inner.resolve(rh), ifindex, rh)
+                }).collect()
             };
-            let tcp_removes: Vec<(Option<SocketHandle>, RouteSocketHandle)> = {
+            let tcp_removes: Vec<(Option<SocketHandle>, u32, RouteSocketHandle)> = {
                 let mut to_remove = TCP_SOCKETS_TO_REMOVE.lock();
-                to_remove.drain(..).map(|rh| (inner.resolve(rh), rh)).collect()
+                to_remove.drain(..).map(|rh| {
+                    let ifindex = inner.bindings.get(&rh).map(|b| b.ifindex).unwrap_or(2);
+                    (inner.resolve(rh), ifindex, rh)
+                }).collect()
             };
 
-            let stack = &mut inner.stacks[0];
-
-            // 1. Clean up UDP sockets
-            for (resolved, rh) in &udp_removes {
-                if let Some(h) = resolved {
-                    stack.sockets.remove(*h);
-                }
-                inner.bindings.remove(rh);
-            }
-
-            // 2. Drive protocol stack
-            let timestamp = Instant::from_millis(current_time_duration().as_millis() as i64);
-            progressed = stack
-                .iface
-                .poll(timestamp, &mut stack.device, &mut stack.sockets);
-
-            // 3. Clean up TCP sockets
-            for (resolved, rh) in &tcp_removes {
-                let can_remove = match resolved {
-                    Some(h) => {
-                        let socket = stack.sockets.get::<tcp::Socket>(*h);
-                        socket.state() == tcp::State::Closed
+            for stack in inner.stacks.iter_mut() {
+                // 1. Clean up UDP sockets belonging to this stack
+                for (resolved, ifindex, rh) in &udp_removes {
+                    if *ifindex == stack.ifindex {
+                        if let Some(h) = resolved {
+                            stack.sockets.remove(*h);
+                        }
+                        inner.bindings.remove(rh);
                     }
-                    None => true,
-                };
-                if can_remove {
-                    if let Some(h) = resolved {
-                        stack.sockets.remove(*h);
-                    }
-                    inner.bindings.remove(rh);
-                } else {
-                    TCP_SOCKETS_TO_REMOVE.lock().push(*rh);
                 }
-            }
 
-            // 4. Dispatch UDP packets
-            dispatch_udp_packets(&mut stack.sockets);
+                // 2. Drive protocol stack
+                let timestamp = Instant::from_millis(current_time_duration().as_millis() as i64);
+                progressed |= stack
+                    .iface
+                    .poll(timestamp, &mut stack.device, &mut stack.sockets);
+
+                // 3. Clean up TCP sockets belonging to this stack
+                for (resolved, ifindex, rh) in &tcp_removes {
+                    if *ifindex != stack.ifindex { continue; }
+                    let can_remove = match resolved {
+                        Some(h) => {
+                            let socket = stack.sockets.get::<tcp::Socket>(*h);
+                            socket.state() == tcp::State::Closed
+                        }
+                        None => true,
+                    };
+                    if can_remove {
+                        if let Some(h) = resolved {
+                            stack.sockets.remove(*h);
+                        }
+                        inner.bindings.remove(rh);
+                    } else {
+                        TCP_SOCKETS_TO_REMOVE.lock().push(*rh);
+                    }
+                }
+
+                // 4. Dispatch UDP packets for this stack
+                dispatch_udp_packets(&mut stack.sockets);
+            }
         });
         // 5. 更新所有 TCP/RAW socket 事件并唤醒等待者
         if progressed {
@@ -338,50 +370,59 @@ impl<'a> NetInterface<'a> {
     pub fn _poll(&self) {
         log::trace!("[NetInterface::poll] poll...");
         self.inner_handler(|inner| {
-            let udp_removes: Vec<(Option<SocketHandle>, RouteSocketHandle)> = {
+            let udp_removes: Vec<(Option<SocketHandle>, u32, RouteSocketHandle)> = {
                 let mut to_remove = UDP_SOCKETS_TO_REMOVE.lock();
-                to_remove.drain(..).map(|rh| (inner.resolve(rh), rh)).collect()
+                to_remove.drain(..).map(|rh| {
+                    let ifindex = inner.bindings.get(&rh).map(|b| b.ifindex).unwrap_or(2);
+                    (inner.resolve(rh), ifindex, rh)
+                }).collect()
             };
-            let tcp_removes: Vec<(Option<SocketHandle>, RouteSocketHandle)> = {
+            let tcp_removes: Vec<(Option<SocketHandle>, u32, RouteSocketHandle)> = {
                 let mut to_remove = TCP_SOCKETS_TO_REMOVE.lock();
-                to_remove.drain(..).map(|rh| (inner.resolve(rh), rh)).collect()
+                to_remove.drain(..).map(|rh| {
+                    let ifindex = inner.bindings.get(&rh).map(|b| b.ifindex).unwrap_or(2);
+                    (inner.resolve(rh), ifindex, rh)
+                }).collect()
             };
 
-            let stack = &mut inner.stacks[0];
-
-            for (resolved, rh) in &udp_removes {
-                if let Some(h) = resolved {
-                    stack.sockets.remove(*h);
-                }
-                inner.bindings.remove(rh);
-            }
-
-            stack.iface.poll(
-                Instant::from_millis(current_time_duration().as_millis() as i64),
-                &mut stack.device,
-                &mut stack.sockets,
-            );
-
-            for (resolved, rh) in &tcp_removes {
-                let can_remove = match resolved {
-                    Some(h) => {
-                        let socket = stack.sockets.get::<tcp::Socket>(*h);
-                        socket.state() == tcp::State::Closed
-                            || socket.state() == tcp::State::TimeWait
+            for stack in inner.stacks.iter_mut() {
+                for (resolved, ifindex, rh) in &udp_removes {
+                    if *ifindex == stack.ifindex {
+                        if let Some(h) = resolved {
+                            stack.sockets.remove(*h);
+                        }
+                        inner.bindings.remove(rh);
                     }
-                    None => true,
-                };
-                if can_remove {
-                    if let Some(h) = resolved {
-                        stack.sockets.remove(*h);
-                    }
-                    inner.bindings.remove(rh);
-                } else {
-                    TCP_SOCKETS_TO_REMOVE.lock().push(*rh);
                 }
-            }
 
-            dispatch_udp_packets(&mut stack.sockets);
+                stack.iface.poll(
+                    Instant::from_millis(current_time_duration().as_millis() as i64),
+                    &mut stack.device,
+                    &mut stack.sockets,
+                );
+
+                for (resolved, ifindex, rh) in &tcp_removes {
+                    if *ifindex != stack.ifindex { continue; }
+                    let can_remove = match resolved {
+                        Some(h) => {
+                            let socket = stack.sockets.get::<tcp::Socket>(*h);
+                            socket.state() == tcp::State::Closed
+                                || socket.state() == tcp::State::TimeWait
+                        }
+                        None => true,
+                    };
+                    if can_remove {
+                        if let Some(h) = resolved {
+                            stack.sockets.remove(*h);
+                        }
+                        inner.bindings.remove(rh);
+                    } else {
+                        TCP_SOCKETS_TO_REMOVE.lock().push(*rh);
+                    }
+                }
+
+                dispatch_udp_packets(&mut stack.sockets);
+            }
         });
         // poll 结束后同步所有 TCP socket 的 IO 事件到 pollee（对标 DragonOS on_iface_events）
         {
@@ -411,14 +452,16 @@ impl<'a> NetInterface<'a> {
     {
         let mut inner = self.inner.lock();
         let inner_ref = inner.as_mut()?;
-        let handle = inner_ref.stacks[0].sockets.add(socket);
+        let target_ifindex = if inner_ref.stack_mut(2).is_some() { 2 } else { 1 };
+        let stack = inner_ref.stack_mut(target_ifindex)?;
+        let handle = stack.sockets.add(socket);
         let id = inner_ref.next_socket_id;
         inner_ref.next_socket_id += 1;
         let route_handle = RouteSocketHandle(id);
         inner_ref.bindings.insert(
             route_handle,
             SocketBinding {
-                ifindex: 0, // single-stack placeholder
+                ifindex: target_ifindex,
                 handle,
                 proto,
             },
@@ -434,7 +477,8 @@ impl<'a> NetInterface<'a> {
         let mut inner = self.inner.lock();
         let inner_ref = inner.as_mut()?;
         let binding = *inner_ref.bindings.get(&rh)?;
-        let socket = inner_ref.stacks[0].sockets.get_mut::<tcp::Socket>(binding.handle);
+        let stack = inner_ref.stack_mut(binding.ifindex)?;
+        let socket = stack.sockets.get_mut::<tcp::Socket>(binding.handle);
         Some(f(socket))
     }
 
@@ -446,7 +490,8 @@ impl<'a> NetInterface<'a> {
         let mut inner = self.inner.lock();
         let inner_ref = inner.as_mut()?;
         let binding = *inner_ref.bindings.get(&rh)?;
-        let socket = inner_ref.stacks[0].sockets.get_mut::<udp::Socket>(binding.handle);
+        let stack = inner_ref.stack_mut(binding.ifindex)?;
+        let socket = stack.sockets.get_mut::<udp::Socket>(binding.handle);
         Some(f(socket))
     }
 
@@ -459,7 +504,7 @@ impl<'a> NetInterface<'a> {
         let mut inner = self.inner.lock();
         let inner_ref = inner.as_mut()?;
         let binding = *inner_ref.bindings.get(&rh)?;
-        let stack = &mut inner_ref.stacks[0];
+        let stack = inner_ref.stack_mut(binding.ifindex)?;
         let socket = stack.sockets.get_mut::<tcp::Socket>(binding.handle);
         Some(socket.connect(stack.iface.context(), remote, local))
     }
@@ -467,8 +512,11 @@ impl<'a> NetInterface<'a> {
     pub fn remove_routed(&self, rh: RouteSocketHandle) {
         let mut inner = self.inner.lock();
         if let Some(inner_ref) = inner.as_mut() {
-            if let Some(binding) = inner_ref.bindings.remove(&rh) {
-                inner_ref.stacks[0].sockets.remove(binding.handle);
+            let binding = inner_ref.bindings.remove(&rh);
+            if let Some(b) = binding {
+                if let Some(stack) = inner_ref.stack_mut(b.ifindex) {
+                    stack.sockets.remove(b.handle);
+                }
             }
         }
     }
@@ -481,7 +529,8 @@ impl<'a> NetInterface<'a> {
         let mut inner = self.inner.lock();
         let inner_ref = inner.as_mut()?;
         let binding = *inner_ref.bindings.get(&rh)?;
-        let socket = inner_ref.stacks[0].sockets.get_mut::<raw::Socket>(binding.handle);
+        let stack = inner_ref.stack_mut(binding.ifindex)?;
+        let socket = stack.sockets.get_mut::<raw::Socket>(binding.handle);
         Some(f(socket))
     }
 }
