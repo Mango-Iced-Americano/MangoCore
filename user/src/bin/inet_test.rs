@@ -1919,11 +1919,11 @@ fn net_route05_no_route_no_panic() -> i32 {
 // ============================================================
 fn proc_net01_dev() -> i32 {
     const GROUP: &str = "PROC_NET"; const NAME: &str = "proc_net01_dev";
-    let fd = sys_open("/proc/net/dev\0".as_ptr(), 0);
+    let fd = sys_open("/proc/net/dev", 0);
     if fd < 0 { tbrok!(GROUP, NAME, "open /proc/net/dev failed: {}", fd); return 1; }
     let fd = fd as usize;
     let mut buf = [0u8; 4096];
-    let n = sys_read(fd, buf.as_mut_ptr(), buf.len());
+    let n = sys_read(fd, &mut buf);
     sys_close(fd);
     if n <= 0 { tfail!(GROUP, NAME, "read returned {}", n); return 1; }
     let content = core::str::from_utf8(&buf[..n as usize]).unwrap_or("");
@@ -1934,10 +1934,10 @@ fn proc_net01_dev() -> i32 {
 }
 fn proc_net02_route() -> i32 {
     const GROUP: &str = "PROC_NET"; const NAME: &str = "proc_net02_route";
-    let fd = sys_open("/proc/net/route\0".as_ptr(), 0);
+    let fd = sys_open("/proc/net/route", 0);
     if fd < 0 { tbrok!(GROUP, NAME, "open /proc/net/route failed: {}", fd); return 1; }
     let mut buf = [0u8; 2048];
-    let n = sys_read(fd as usize, buf.as_mut_ptr(), buf.len());
+    let n = sys_read(fd as usize, &mut buf);
     sys_close(fd as usize);
     if n <= 0 { tfail!(GROUP, NAME, "read returned {}", n); return 1; }
     let content = core::str::from_utf8(&buf[..n as usize]).unwrap_or("");
@@ -1946,10 +1946,10 @@ fn proc_net02_route() -> i32 {
 }
 fn proc_net03_tcp_header() -> i32 {
     const GROUP: &str = "PROC_NET"; const NAME: &str = "proc_net03_tcp_header";
-    let fd = sys_open("/proc/net/tcp\0".as_ptr(), 0);
+    let fd = sys_open("/proc/net/tcp", 0);
     if fd < 0 { tbrok!(GROUP, NAME, "open /proc/net/tcp failed: {}", fd); return 1; }
     let mut buf = [0u8; 512];
-    let n = sys_read(fd as usize, buf.as_mut_ptr(), buf.len());
+    let n = sys_read(fd as usize, &mut buf);
     sys_close(fd as usize);
     if n <= 0 { tfail!(GROUP, NAME, "read returned {}", n); return 1; }
     let content = core::str::from_utf8(&buf[..n as usize]).unwrap_or("");
@@ -1958,10 +1958,10 @@ fn proc_net03_tcp_header() -> i32 {
 }
 fn proc_net04_udp_header() -> i32 {
     const GROUP: &str = "PROC_NET"; const NAME: &str = "proc_net04_udp_header";
-    let fd = sys_open("/proc/net/udp\0".as_ptr(), 0);
+    let fd = sys_open("/proc/net/udp", 0);
     if fd < 0 { tbrok!(GROUP, NAME, "open /proc/net/udp failed: {}", fd); return 1; }
     let mut buf = [0u8; 512];
-    let n = sys_read(fd as usize, buf.as_mut_ptr(), buf.len());
+    let n = sys_read(fd as usize, &mut buf);
     sys_close(fd as usize);
     if n <= 0 { tfail!(GROUP, NAME, "read returned {}", n); return 1; }
     let content = core::str::from_utf8(&buf[..n as usize]).unwrap_or("");
@@ -1970,10 +1970,10 @@ fn proc_net04_udp_header() -> i32 {
 }
 fn proc_net05_ip_forward() -> i32 {
     const GROUP: &str = "PROC_NET"; const NAME: &str = "proc_net05_ip_forward";
-    let fd = sys_open("/proc/sys/net/ipv4/ip_forward\0".as_ptr(), 0);
+    let fd = sys_open("/proc/sys/net/ipv4/ip_forward", 0);
     if fd < 0 { tbrok!(GROUP, NAME, "open ip_forward failed: {}", fd); return 1; }
     let mut buf = [0u8; 16];
-    let n = sys_read(fd as usize, buf.as_mut_ptr(), buf.len());
+    let n = sys_read(fd as usize, &mut buf);
     sys_close(fd as usize);
     if n <= 0 { tfail!(GROUP, NAME, "read returned {}", n); return 1; }
     if buf[0] == b'0' { tpass!(GROUP, NAME, "ip_forward=0"); 0 }
@@ -1981,13 +1981,13 @@ fn proc_net05_ip_forward() -> i32 {
 }
 fn proc_net06_small_buffer() -> i32 {
     const GROUP: &str = "PROC_NET"; const NAME: &str = "proc_net06_small_buffer";
-    let fd = sys_open("/proc/net/dev\0".as_ptr(), 0);
+    let fd = sys_open("/proc/net/dev", 0);
     if fd < 0 { tbrok!(GROUP, NAME, "open failed: {}", fd); return 1; }
     let fd = fd as usize;
     let mut buf1 = [0u8; 32];
     let mut buf2 = [0u8; 32];
-    let n1 = sys_read(fd, buf1.as_mut_ptr(), 32);
-    let n2 = sys_read(fd, buf2.as_mut_ptr(), 32);
+    let n1 = sys_read(fd, &mut buf1[..32]);
+    let n2 = sys_read(fd, &mut buf2[..32]);
     sys_close(fd);
     if n1 > 0 && n2 > 0 {
         tpass!(GROUP, NAME, "small buffer reads work: {} + {} bytes", n1, n2); 0
@@ -2069,7 +2069,7 @@ fn net_ioctl06_hwaddr() -> i32 {
 // RTNETLINK test group
 // ============================================================
 const AF_NETLINK: usize = 16;
-const NETLINK_ROUTE: u32 = 0;
+const NETLINK_ROUTE: usize = 0;
 const SOCK_RAW: usize = 3;
 
 fn rtnetlink01_socket() -> i32 {
@@ -2096,7 +2096,7 @@ fn run_with_watchdog(name: &str, test_fn: fn() -> i32, timeout_ms: usize) -> boo
         }
         let now = user_lib::get_time();
         if (now - t0) as usize > timeout_ms {
-            sys_kill(pid as isize, 9);
+            sys_kill(pid as usize, 9);
             let mut status = 0;
             sys_waitpid(pid as isize, &mut status);
             println!("");
@@ -2119,7 +2119,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     println!("  INET (AF_INET) Connectivity Test Suite");
     println!("============================================");
 
-    let tests: [(&str, fn() -> i32); 28] = [
+    let tests: [(&str, fn() -> i32); 35] = [
         ("tcp_connect", test_tcp_connect_all),
         ("tcp_send_recv", || {
             test_tcp_send_recv("cloudflare", [1, 1, 1, 1])

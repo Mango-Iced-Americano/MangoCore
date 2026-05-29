@@ -182,6 +182,10 @@ pub fn sys_write(fd: usize, buffer: &[u8]) -> isize {
     syscall(SYSCALL_WRITE, [fd, buffer.as_ptr() as usize, buffer.len()])
 }
 
+pub fn sys_ioctl(fd: usize, cmd: u32, arg: usize) -> isize {
+    syscall(SYSCALL_IOCTL, [fd, cmd as usize, arg])
+}
+
 pub fn sys_exit(exit_code: i32) -> ! {
     syscall(SYSCALL_EXIT, [exit_code as usize, 0, 0]);
     panic!("sys_exit never returns!");
