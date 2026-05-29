@@ -173,6 +173,10 @@ pub(crate) fn block_current_and_run_next_with_lock_checked<T>(
 }
 
 fn do_exit(task: Arc<TaskControlBlock>, exit_code: u32) {
+    // 先从 process.threads 列表中移除此线程，否则 live_thread_count()
+    // 会因为 do_exit 持有的这个 Arc 参数而永远 ≥1，导致 finish_exit
+    // （PCB zombie、父进程 wait 唤醒、子进程收养）从未被触发。
+    task.process.remove_thread(task.tid.0);
     if task.exit_thread_resources(exit_code) && task.process.live_thread_count() == 0 {
         task.process.finish_exit(&task, exit_code);
     }
