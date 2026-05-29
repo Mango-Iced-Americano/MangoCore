@@ -126,7 +126,6 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
         }
         devfs.add_dev("shm", shmfs.root_inode())
             .expect("devfs: failed to register /dev/shm");
-        let _ = alloc::sync::Arc::into_raw(shmfs);
         let dev_inode_id = dev_inode.metadata().expect("dev_inode metadata failed").inode_id;
         let devfs_mnt = self::vfs::MountFS::new(devfs, self::vfs::MountFlags::empty());
         devfs_mnt.set_mount_path(Some(alloc::string::String::from("/dev")));
