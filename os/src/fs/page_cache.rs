@@ -305,6 +305,7 @@ impl PageCache {
                 }
                 // Safe to evict — only the cache holds this page, not mmap'd
                 inner.pages.remove(&i);
+                inner.dirty_pages.remove(&i);
                 entries[i] = None;
                 evicted += 1;
             }

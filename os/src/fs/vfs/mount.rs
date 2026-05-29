@@ -1254,6 +1254,10 @@ impl Drop for MountFS {
         // 防御性清理：断开 self_mountpoint 引用，确保即使 Weak 升级路径异常，
         // MountFS ↔ MountFSInode 循环也能被打破。
         self.self_mountpoint.lock().take();
+        // 清空 dentry_cache：cache 存储 Arc<MountFSInode>，后者持有
+        // Arc<MountFS>（本对象）。若不走 detach_from_parent_and_cleanup
+        // 的显式清理路径，此循环会阻止 MountFS 释放。
+        drop(self.dentry_cache.lock().clear_all());
         counters::MOUNTFS_ALIVE.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
     }
 }

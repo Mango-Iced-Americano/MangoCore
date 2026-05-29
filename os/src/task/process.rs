@@ -686,6 +686,12 @@ impl ProcessControlBlock {
         let mut rusage = exit_task.acquire_inner_lock().rusage;
         let resident_kb = self.vm().lock().resident_user_bytes() / 1024;
         rusage.update_maxrss_kb(resident_kb);
+        if !self.mark_zombie(exit_code, rusage) {
+            return;
+        }
+        // 在 mark_zombie 之后重新获取 parent: 虽然单核非抢占内核中
+        // mark_zombie（仅持自旋锁）和父进程 finish_exit 之间不存在竞态，
+        // 但防御性重读可避免未来引入抢占后 parent 引用变为陈旧。
         let parent_process = self.parent();
         let auto_reap = parent_process
             .as_ref()
@@ -695,9 +701,6 @@ impl ProcessControlBlock {
                 sigchld_requests_auto_reap(&sighand)
             })
             .unwrap_or(false);
-        if !self.mark_zombie(exit_code, rusage) {
-            return;
-        }
         let old_exec_key = self.inner.lock().exec_key.take();
         if let Some(key) = old_exec_key {
             unregister_exec_key(key);
