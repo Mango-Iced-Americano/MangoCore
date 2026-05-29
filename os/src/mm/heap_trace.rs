@@ -506,11 +506,12 @@ impl TraceState {
                 // Print the first non-zero, non-obvious-hook PC.
                 let pc = first_useful_pc(&s.pcs);
                 print!(
-                    " {:#x}:{}K/{}/{} pcs={:#x},{:#x},{:#x},{:#x},{:#x},{:#x}",
+                    " {:#x}:{}K/{}K/a{}/f{} pcs={:#x},{:#x},{:#x},{:#x},{:#x},{:#x}",
                     pc,
                     s.live_req >> 10,
                     la >> 10,
                     s.allocs,
+                    s.frees,
                     s.pcs[0],
                     s.pcs[1],
                     s.pcs[2],
