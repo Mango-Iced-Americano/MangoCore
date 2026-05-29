@@ -303,7 +303,7 @@ impl Socket for TcpSocket {
         let ret = match &*inner {
             Inner::Connecting(c) => {
                 let state = NET_INTERFACE
-                    .tcp_socket(c.handle, |s| s.state())
+                    .tcp_routed_socket(c.handle, |s| s.state())
                     .unwrap_or(smoltcp::socket::tcp::State::Closed);
                 let ready = c.update_io_events(&self.pollee);
                 if c.is_connected()

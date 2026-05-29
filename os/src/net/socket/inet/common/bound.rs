@@ -1,10 +1,10 @@
-use smoltcp::iface::SocketHandle;
 use smoltcp::wire::IpAddress;
 use crate::net::net_core::DeviceEntry;
+use crate::net::routing::RouteSocketHandle;
 
 #[derive(Clone, Debug)]
 pub struct BoundInner {
-    pub socket_handle: Option<SocketHandle>,
+    pub socket_handle: Option<RouteSocketHandle>,
     pub ifindex: u32,
     pub bound_addr: Option<IpAddress>,
     pub bound_port: u16,
@@ -31,7 +31,7 @@ impl BoundInner {
 
     pub fn bind(
         &mut self,
-        handle: SocketHandle,
+        handle: RouteSocketHandle,
         ifindex: u32,
         addr: Option<IpAddress>,
         port: u16,

@@ -1,5 +1,6 @@
 use crate::net::config::lookup_source_ip;
 use crate::net::config::route_check;
+use crate::net::routing::{InetProtocol, RouteSocketHandle};
 use crate::net::syscall::common::MsgFlags;
 use crate::net::{config::NET_INTERFACE, Endpoint, Mutex, Socket, MAX_BUFFER_SIZE};
 use crate::{
@@ -13,7 +14,6 @@ use alloc::sync::Arc;
 use alloc::vec;
 use log::info;
 use smoltcp::{
-    iface::SocketHandle,
     phy::PacketMeta,
     socket::{
         self,
@@ -33,7 +33,7 @@ use alloc::vec::Vec;
 
 pub struct UdpSocket {
     inner: Mutex<UdpSocketInner>,
-    socket_handler: SocketHandle,
+    socket_handler: RouteSocketHandle,
     bound: Mutex<BoundInner>,
     recv_waiters: EventWaitQueue,
     send_waiters: EventWaitQueue,
@@ -78,7 +78,7 @@ impl Socket for UdpSocket {
         self.inner.lock().local_endpoint = Some(bind_addr);
         NET_INTERFACE.poll();
         NET_INTERFACE
-            .udp_socket(self.socket_handler, |socket| {
+            .udp_routed_socket(self.socket_handler, |socket| {
                 socket.bind(bind_addr).ok().ok_or(SyscallErr::EINVAL)
             })
             .ok_or(SyscallErr::EAGAIN)??;
@@ -120,7 +120,7 @@ impl Socket for UdpSocket {
         }
         NET_INTERFACE.poll();
         let local_ep = NET_INTERFACE
-            .udp_socket(self.socket_handler, |socket| {
+            .udp_routed_socket(self.socket_handler, |socket| {
                 let local = socket.endpoint();
                 info!("[Udp::connect] local: {:?}", local);
                 if local.port == 0 {
@@ -199,7 +199,7 @@ impl Socket for UdpSocket {
     fn local_endpoint(&self) -> Option<Endpoint> {
         NET_INTERFACE.poll();
         let local: Option<IpListenEndpoint> =
-            NET_INTERFACE.udp_socket(self.socket_handler, |socket| socket.endpoint());
+            NET_INTERFACE.udp_routed_socket(self.socket_handler, |socket| socket.endpoint());
         NET_INTERFACE.poll();
         local.map(|ep| {
             let addr = ep.addr.unwrap_or(IpAddress::Ipv4(Ipv4Address::UNSPECIFIED));
@@ -290,7 +290,7 @@ impl Socket for UdpSocket {
         }
         // 不调用 poll，只做一次尝试
         NET_INTERFACE
-            .udp_socket(self.socket_handler, |socket| {
+            .udp_routed_socket(self.socket_handler, |socket| {
                 if !socket.can_send() {
                     return Err(SyscallErr::EAGAIN);
                 }
@@ -370,7 +370,7 @@ impl Socket for UdpSocket {
             return Err(e);
         }
         NET_INTERFACE
-            .udp_socket(self.socket_handler, |socket| {
+            .udp_routed_socket(self.socket_handler, |socket| {
                 if !socket.can_send() {
                     return Err(SyscallErr::EAGAIN);
                 }
@@ -394,7 +394,7 @@ impl Socket for UdpSocket {
 
     fn socket_w_ready(&self) -> bool {
         NET_INTERFACE
-            .udp_socket(self.socket_handler, |socket| socket.can_send())
+            .udp_routed_socket(self.socket_handler, |socket| socket.can_send())
             .unwrap_or(false)
     }
 
@@ -438,7 +438,7 @@ impl UdpSocket {
             vec![0 as u8; MAX_BUFFER_SIZE],
         );
         let socket = socket::udp::Socket::new(rx_buf, tx_buf);
-        let socket_handler = NET_INTERFACE.add_socket(socket).unwrap();
+        let socket_handler = NET_INTERFACE.add_routed_socket(InetProtocol::Udp, socket).unwrap();
         log::info!("[UdpSocket::new] new {}", socket_handler);
         NET_INTERFACE.poll();
         Self {
@@ -524,7 +524,7 @@ impl Drop for UdpSocket {
         //     self.inner.lock().remote_endpoint,
         //     self.inner.lock().local_endpoint
         // );
-        // NET_INTERFACE.udp_socket(self.socket_handler, |socket| {
+        // NET_INTERFACE.udp_routed_socket(self.socket_handler, |socket| {
         //     if socket.is_open() {
         //         socket.close();
         //     }

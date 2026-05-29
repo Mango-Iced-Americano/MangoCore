@@ -1,3 +1,4 @@
+use crate::net::routing::{InetProtocol, RouteSocketHandle};
 use crate::net::syscall::common::MsgFlags;
 use crate::net::{
     config::NET_INTERFACE, Endpoint, Mutex, Socket, MAX_BUFFER_SIZE, RAW_SOCKETS, SHUT_WR,
@@ -12,14 +13,13 @@ use alloc::{
 };
 use log::info;
 use smoltcp::{
-    iface::SocketHandle,
     socket::{self, raw, raw::PacketMetadata},
     wire::{IpEndpoint, IpListenEndpoint, IpProtocol, IpVersion},
 };
 
 pub struct RawSocket {
     inner: Mutex<RawSocketInner>,
-    socket_handler: SocketHandle,
+    socket_handler: RouteSocketHandle,
     recv_waiters: EventWaitQueue,
     send_waiters: EventWaitQueue,
 }
@@ -133,7 +133,7 @@ impl Socket for RawSocket {
 
                 NET_INTERFACE.poll();
                 let ret = NET_INTERFACE
-                    .raw_socket(self.socket_handler, |socket| {
+                    .raw_routed_socket(self.socket_handler, |socket| {
                         log::info!(
                             "[RawSocket] Sending {} bytes to {}",
                             user_buf.len(),
@@ -163,7 +163,7 @@ impl Socket for RawSocket {
     fn try_recv(&self, buf: &mut [u8]) -> Result<isize, SyscallErr> {
         // 不调用 poll，只做一次尝试
         NET_INTERFACE
-            .raw_socket(self.socket_handler, |socket| {
+            .raw_routed_socket(self.socket_handler, |socket| {
                 if !socket.can_recv() {
                     return Err(SyscallErr::EAGAIN);
                 }
@@ -184,7 +184,7 @@ impl Socket for RawSocket {
     fn try_send(&self, buf: &[u8], _flags: MsgFlags) -> Result<isize, SyscallErr> {
         // 不调用 poll，只做一次尝试
         NET_INTERFACE
-            .raw_socket(self.socket_handler, |socket| {
+            .raw_routed_socket(self.socket_handler, |socket| {
                 if !socket.can_send() {
                     return Err(SyscallErr::EAGAIN);
                 }
@@ -214,13 +214,13 @@ impl Socket for RawSocket {
 
     fn recv_ready(&self) -> bool {
         NET_INTERFACE
-            .raw_socket(self.socket_handler, |socket| socket.can_recv())
+            .raw_routed_socket(self.socket_handler, |socket| socket.can_recv())
             .unwrap_or(false)
     }
 
     fn send_ready(&self) -> bool {
         NET_INTERFACE
-            .raw_socket(self.socket_handler, |socket| socket.can_send())
+            .raw_routed_socket(self.socket_handler, |socket| socket.can_send())
             .unwrap_or(false)
     }
 }
@@ -241,7 +241,7 @@ impl RawSocket {
             rx_buf,
             tx_buf,
         );
-        let socket_handler = NET_INTERFACE.add_socket(socket).unwrap();
+        let socket_handler = NET_INTERFACE.add_routed_socket(InetProtocol::Raw, socket).unwrap();
         log::info!("[RawSocket::new] new {}", socket_handler);
         NET_INTERFACE.poll();
         let inner = RawSocketInner {
@@ -274,8 +274,6 @@ impl Drop for RawSocket {
         crate::net::RAW_SOCKETS
             .lock()
             .retain(|(h, _)| *h != self.socket_handler);
-        crate::net::config::NET_INTERFACE.inner_handler(|inner| {
-            inner.sockets.remove(self.socket_handler);
-        });
+        crate::net::config::NET_INTERFACE.remove_routed(self.socket_handler);
     }
 }

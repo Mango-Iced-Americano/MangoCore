@@ -2,6 +2,7 @@
 
 use crate::net::{
     config::{lookup_source_ip, route_check, NET_INTERFACE},
+    routing::InetProtocol,
     socket::inet::common::PortManager,
     TCP_SOCKETS_TO_REMOVE,
 };
@@ -41,7 +42,7 @@ impl Inner {
                 let local = IpEndpoint::new(local_addr, port);
 
                 let handle = NET_INTERFACE
-                    .add_socket(socket)
+                    .add_routed_socket(InetProtocol::Tcp, socket)
                     .ok_or_else(|| (Inner::Init(Init::new(ver)), SyscallErr::EAGAIN))?;
 
                 Ok(Inner::Init(Init::Bound { handle, local }))
@@ -69,7 +70,7 @@ impl Inner {
                     tcp::Socket::new(rx_buf, tx_buf)
                 };
                 let handle = NET_INTERFACE
-                    .add_socket(socket)
+                    .add_routed_socket(InetProtocol::Tcp, socket)
                     .ok_or_else(|| (Inner::Init(Init::new(ver)), SyscallErr::EAGAIN))?;
                 (handle, local)
             }
@@ -92,24 +93,7 @@ impl Inner {
         }
 
         let ret = NET_INTERFACE
-            .inner_handler(|inner| {
-                let socket = inner.sockets.get_mut::<tcp::Socket>(handle);
-                let before_state = tcp_state_code(&socket.state());
-                socket.set_timeout(Some(Duration::from_secs(20)));
-                let ret = socket.connect(inner.iface.context(), remote_endpoint, local);
-                let after_state = tcp_state_code(&socket.state());
-                let ret_ok = ret.is_ok() as u64;
-                trace_event!(
-                    0xB020,
-                    handle.as_usize() as u64,
-                    before_state,
-                    after_state,
-                    ret_ok,
-                    0,
-                    0
-                );
-                ret
-            })
+            .tcp_connect(handle, remote_endpoint, local)
             .ok_or(SyscallErr::ECONNREFUSED)
             .and_then(|r| r.map_err(|_| SyscallErr::ECONNREFUSED));
 
@@ -122,7 +106,7 @@ impl Inner {
                 );
                 trace_event!(
                     0xB021,
-                    handle.as_usize() as u64,
+                    handle.0 as u64,
                     local.port as u64,
                     remote_endpoint.port as u64,
                     0,
@@ -150,7 +134,7 @@ impl Inner {
                 );
                 let socket = *socket;
                 let handle = NET_INTERFACE
-                    .add_socket(socket)
+                    .add_routed_socket(InetProtocol::Tcp, socket)
                     .ok_or_else(|| (Inner::Init(Init::new(ver)), SyscallErr::EAGAIN))?;
                 (handle, unspec, ver)
             }
@@ -231,7 +215,7 @@ impl Inner {
                     })?;
                 s
             };
-            if let Some(h) = NET_INTERFACE.add_socket(new_socket) {
+            if let Some(h) = NET_INTERFACE.add_routed_socket(InetProtocol::Tcp, new_socket) {
                 handles.push(h);
             }
         }

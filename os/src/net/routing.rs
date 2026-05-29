@@ -1,3 +1,4 @@
+use alloc::fmt;
 use alloc::vec::Vec;
 use log::debug;
 use smoltcp::iface::SocketHandle;
@@ -7,6 +8,12 @@ use crate::utils::error::SyscallErr;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RouteSocketHandle(pub(crate) usize);
+
+impl fmt::Display for RouteSocketHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "RH({})", self.0)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InetProtocol {
