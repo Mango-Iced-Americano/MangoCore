@@ -2,6 +2,36 @@
 
 ---
 
+## 2026-05-29
+
+### 修复 /dev/shm TmpFS 生命周期 bug — 改为正规 MountFS 子挂载
+
+**涉及文件：**
+- `os/src/fs/mod.rs` — `mount_common_filesystems()` 中 /dev/shm 初始化逻辑重构
+
+**问题根因：**
+旧代码将 `shmfs.root_inode()` 直接通过 `devfs.add_dev()` 塞进 DevFS children，但 `shmfs`（`Arc<TmpFS>`）在代码块结束后离开作用域。DevFS 只保存 `Arc<dyn IndexNode>`，不持有 `Arc<TmpFS>`。`TmpFSInode.fs` 是 `Weak<TmpFS>`，TmpFS 被 drop 后 `fs.upgrade()` 返回 `None`，导致后续 /dev/shm 下文件写入扩容、truncate 扩容、link/rename 等依赖 `fs.upgrade()` 的路径返回 EIO。
+
+**修复方案：**
+1. 用 `devfs.add_dir("shm", 0o1777)` 在 devfs 中创建普通目录作为 cover mount point，不再直接 `add_dev(shmfs.root_inode())`
+2. 创建 `devfs_mnt` 后，用 `MountFS::new(shmfs, ...)` 包装 TmpFS → `MountFS.inner_filesystem` 持有 `Arc<dyn FileSystem>`，即强持有 `Arc<TmpFS>`
+3. 通过 `devfs_mnt.add_mount(shm_inode_id, shmfs_mnt)` 注册子挂载
+4. 设置 `shmfs_mnt` 的 `mount_path` 和 `self_mountpoint` backref，与 /dev、/proc、/tmp 保持一致
+
+**所有权链：**
+```
+VFS_ROOT MountFS
+  → mountpoints[{dev_inode_id}] = devfs_mnt (持有 Arc<DevFS>)
+    → mountpoints[{shm_inode_id}] = shmfs_mnt (持有 Arc<TmpFS>)
+```
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU 启动 + /dev/shm 基本操作验证待用户执行
+
+---
+
 ## 2026-05-21
 
 ### busybox/libctest 低成本兼容点补齐

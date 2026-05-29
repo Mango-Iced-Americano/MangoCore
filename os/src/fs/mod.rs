@@ -124,8 +124,15 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
             meta.mode = self::vfs::InodeMode::from_bits_truncate(0o1777);
             shmfs.root_inode().set_metadata(&meta).ok();
         }
-        devfs.add_dev("shm", shmfs.root_inode())
+        // Create a regular directory in devfs as the cover mount point,
+        // rather than leaking shmfs.root_inode() directly.
+        let shm_dir = devfs
+            .add_dir("shm", self::vfs::InodeMode::from_bits_truncate(0o1777))
             .expect("devfs: failed to register /dev/shm");
+        let shm_inode_id = shm_dir
+            .metadata()
+            .expect("devfs: failed to read /dev/shm metadata")
+            .inode_id;
         let dev_inode_id = dev_inode.metadata().expect("dev_inode metadata failed").inode_id;
         let devfs_mnt = self::vfs::MountFS::new(devfs, self::vfs::MountFlags::empty());
         devfs_mnt.set_mount_path(Some(alloc::string::String::from("/dev")));
@@ -136,6 +143,18 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
             );
             devfs_mnt.set_self_mountpoint(Some(backref));
         }
+        // Mount shmfs as a sub-mount of devfs, so MountFS owns the Arc<TmpFS>
+        // and TmpFSInode.fs.upgrade() stays valid.
+        let shmfs_mnt = self::vfs::MountFS::new(shmfs, self::vfs::MountFlags::empty());
+        shmfs_mnt.set_mount_path(Some(alloc::string::String::from("/dev/shm")));
+        let shm_backref = self::vfs::MountFSInode::new(
+            shm_dir.clone() as Arc<dyn self::vfs::IndexNode>,
+            devfs_mnt.clone(),
+        );
+        shmfs_mnt.set_self_mountpoint(Some(shm_backref));
+        devfs_mnt
+            .add_mount(shm_inode_id, shmfs_mnt)
+            .expect("failed to mount tmpfs at /dev/shm");
         mfs.add_mount(dev_inode_id, devfs_mnt)
             .expect("failed to mount devfs at /dev");
     }
