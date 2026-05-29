@@ -1,12 +1,14 @@
 use super::Mutex;
 use crate::drivers::NET_DEVICE;
 use crate::net::adapter::{NullNetDevice, RoutingDevice, SmoltcpDeviceAdapter};
+use crate::net::routing::{InetProtocol, RouteSocketHandle, SocketBinding};
 use crate::net::socket::inet::datagram::udp::dispatch_udp_packets;
 use crate::net::socket::inet::stream::inner::tcp_state_code;
 use crate::net::net_core;
 use crate::net::{TCP_SOCKETS, TCP_SOCKETS_TO_REMOVE, UDP_SOCKETS_TO_REMOVE};
 use crate::timer::current_time_duration;
 use crate::trace_event;
+use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -43,6 +45,8 @@ pub struct NetInterfaceInner<'a> {
     // pub device: SmoltcpDeviceAdapter,
     pub iface: Interface,
     pub sockets: SocketSet<'a>,
+    pub bindings: BTreeMap<RouteSocketHandle, SocketBinding>,
+    pub next_socket_id: usize,
 }
 
 impl<'a> NetInterfaceInner<'a> {
@@ -136,6 +140,8 @@ impl<'a> NetInterfaceInner<'a> {
             device,
             iface,
             sockets,
+            bindings: BTreeMap::new(),
+            next_socket_id: 1,
         }
     }
 }
@@ -398,6 +404,60 @@ impl<'a> NetInterface<'a> {
     pub fn _remove(&self, handler: SocketHandle) {
         if let Some(inner) = self.inner.lock().as_mut() {
             inner.sockets.remove(handler);
+        }
+    }
+
+    pub fn add_routed_socket<T>(&self, proto: InetProtocol, socket: T) -> Option<RouteSocketHandle>
+    where
+        T: AnySocket<'a>,
+    {
+        let mut inner = self.inner.lock();
+        let inner_ref = inner.as_mut()?;
+        let handle = inner_ref.sockets.add(socket);
+        let id = inner_ref.next_socket_id;
+        inner_ref.next_socket_id += 1;
+        let route_handle = RouteSocketHandle(id);
+        inner_ref.bindings.insert(
+            route_handle,
+            SocketBinding {
+                ifindex: 0, // single-stack placeholder
+                handle,
+                proto,
+            },
+        );
+        Some(route_handle)
+    }
+
+    pub fn tcp_routed_socket<T>(
+        &self,
+        rh: RouteSocketHandle,
+        f: impl FnOnce(&mut tcp::Socket) -> T,
+    ) -> Option<T> {
+        let mut inner = self.inner.lock();
+        let inner_ref = inner.as_mut()?;
+        let binding = *inner_ref.bindings.get(&rh)?;
+        let socket = inner_ref.sockets.get_mut::<tcp::Socket>(binding.handle);
+        Some(f(socket))
+    }
+
+    pub fn udp_routed_socket<T>(
+        &self,
+        rh: RouteSocketHandle,
+        f: impl FnOnce(&mut udp::Socket) -> T,
+    ) -> Option<T> {
+        let mut inner = self.inner.lock();
+        let inner_ref = inner.as_mut()?;
+        let binding = *inner_ref.bindings.get(&rh)?;
+        let socket = inner_ref.sockets.get_mut::<udp::Socket>(binding.handle);
+        Some(f(socket))
+    }
+
+    pub fn remove_routed(&self, rh: RouteSocketHandle) {
+        let mut inner = self.inner.lock();
+        if let Some(inner_ref) = inner.as_mut() {
+            if let Some(binding) = inner_ref.bindings.remove(&rh) {
+                inner_ref.sockets.remove(binding.handle);
+            }
         }
     }
 }
