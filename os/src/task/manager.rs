@@ -183,6 +183,45 @@ impl TaskManager {
     fn recompute_ready_nice_count(&mut self) {
         self.ready_nonzero_nice_count = count_ready_nonzero_nice(&self.ready_queue);
     }
+    /// 从就绪队列中移除所有僵尸任务并返回，由调用者在锁外 drop。
+    /// 解决 zombie TCB 因 nice-aware 调度长期不被选中导致的内存泄漏。
+    fn drain_ready_zombies(&mut self) -> Vec<Arc<TaskControlBlock>> {
+        if self.ready_queue.is_empty() {
+            return Vec::new();
+        }
+        let mut zombies = Vec::new();
+        let mut rest = VecDeque::new();
+        while let Some(task) = self.ready_queue.pop_front() {
+            if task.acquire_inner_lock().is_zombie() {
+                zombies.push(task);
+            } else {
+                rest.push_back(task);
+            }
+        }
+        self.ready_queue = rest;
+        if !zombies.is_empty() {
+            self.recompute_ready_nice_count();
+        }
+        zombies
+    }
+    /// 从可中断队列中移除所有僵尸任务并返回，由调用者在锁外 drop。
+    /// 解决 zombie TCB 在 interruptible_queue 中因无人唤醒而永久驻留导致的内存泄漏。
+    fn drain_interruptible_zombies(&mut self) -> Vec<Arc<TaskControlBlock>> {
+        if self.interruptible_queue.is_empty() {
+            return Vec::new();
+        }
+        let mut zombies = Vec::new();
+        let mut rest = VecDeque::new();
+        while let Some(task) = self.interruptible_queue.pop_front() {
+            if task.acquire_inner_lock().is_zombie() {
+                zombies.push(task);
+            } else {
+                rest.push_back(task);
+            }
+        }
+        self.interruptible_queue = rest;
+        zombies
+    }
     fn update_ready_nice(&mut self, task: &Arc<TaskControlBlock>, old_nice: i32, new_nice: i32) {
         if (old_nice == 0) == (new_nice == 0) {
             return;
@@ -352,6 +391,18 @@ pub fn add_task(task: Arc<TaskControlBlock>) {
 /// 从任务管理器中取出一个任务
 pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
     TASK_MANAGER.lock().fetch()
+}
+
+/// 从就绪队列中移除所有僵尸任务并在锁外释放。
+/// 应在每次调度循环中调用，防止 zombie TCB 因调度策略不被选中而长期驻留。
+pub fn drain_ready_zombies() -> Vec<Arc<TaskControlBlock>> {
+    TASK_MANAGER.lock().drain_ready_zombies()
+}
+
+/// 从可中断队列中移除所有僵尸任务并在锁外释放。
+/// 应在每次调度循环中调用，防止 zombie TCB 因无人唤醒而永久驻留。
+pub fn drain_interruptible_zombies() -> Vec<Arc<TaskControlBlock>> {
+    TASK_MANAGER.lock().drain_interruptible_zombies()
 }
 
 /// 尝试释放所有任务的内存空间，直到释放`req`页。
@@ -544,42 +595,36 @@ impl WaitQueue {
     /// # 警告
     /// 这个函数会为每个被唤醒的`task`调用`acquire_inner_lock`，请注意**死锁**
     pub fn wake_at_most(&mut self, limit: usize) -> usize {
-        // 如果limit为0，直接返回0
         if limit == 0 {
             return 0;
         }
         let mut tasks_to_wake = Vec::new();
-        // 遍历内部队列，从self.inner中逐个取出任务处理
+        let mut remaining = VecDeque::new();
+        // 遍历全部条目以自动 compact 失效 Weak，但只唤醒 ≤limit 个任务。
         while let Some(task) = self.inner.pop_front() {
-            // 检查任务的弱引用是否仍然有效
-            // 将弱引用升级为强引用
             match task.upgrade() {
                 Some(task) => {
-                    // 获取任务的内部锁
                     let mut inner = task.acquire_inner_lock();
-                    // 检查任务状态
                     match inner.task_status {
-                        // 可中断状态
                         super::TaskStatus::Interruptible => {
-                            // 将任务状态改为就绪态
-                            inner.task_status = super::task::TaskStatus::Ready
+                            if tasks_to_wake.len() < limit {
+                                inner.task_status = super::task::TaskStatus::Ready;
+                                drop(inner);
+                                tasks_to_wake.push(task);
+                            } else {
+                                drop(inner);
+                                remaining.push_back(Arc::downgrade(&task));
+                            }
                         }
-                        // 对于处于 就绪态或运行态的任务，不需要做唤醒操作
-                        // 对于处于僵尸态的任务，做唤醒操作会搞砸进程管理
-                        _ => continue,
-                    }
-                    // 释放内部锁
-                    drop(inner);
-                    tasks_to_wake.push(task);
-                    // 到达数量限制，停止遍历
-                    if tasks_to_wake.len() == limit {
-                        break;
+                        // 非 Interruptible 状态：直接丢弃（不应在等待队列中）
+                        _ => drop(inner),
                     }
                 }
-                // task is dead, just ignore
-                None => continue,
+                // 失效 Weak：直接丢弃，实现自动 compact
+                None => {}
             }
         }
+        self.inner = remaining;
         enqueue_ready_batch(tasks_to_wake)
     }
     pub fn prepare_to_wait(&mut self, task: Weak<TaskControlBlock>) {
@@ -1141,6 +1186,23 @@ impl KernelTimerQueue {
             self.run_timer(timer, now);
         }
     }
+    /// 清理所有失效 Weak 引用的定时器条目，释放堆槽位。
+    pub fn compact(&mut self) {
+        if self.inner.is_empty() {
+            return;
+        }
+        let entries: Vec<KernelTimer> = self.inner.drain().collect();
+        for timer in entries {
+            let task = match &timer.action {
+                TimerAction::WakeTask { task, .. }
+                | TimerAction::SendSignal { task, .. }
+                | TimerAction::PosixTimerSignal { task, .. } => task,
+            };
+            if task.strong_count() > 0 {
+                self.inner.push(timer);
+            }
+        }
+    }
     fn run_timer(&mut self, timer: KernelTimer, now: TimeSpec) {
         match timer.action {
             TimerAction::WakeTask {
@@ -1405,7 +1467,9 @@ pub fn wait_with_timeout(task: Weak<TaskControlBlock>, timeout: TimeSpec) {
 pub fn do_wake_expired() {
     let now = crate::timer::TimeSpec::now();
     TIMEOUT_WAITQUEUE.lock().wake_expired(now);
-    KERNEL_TIMER_QUEUE.lock().wake_expired(now);
+    let mut ktq = KERNEL_TIMER_QUEUE.lock();
+    ktq.wake_expired(now);
+    ktq.compact();
 }
 
 /// 获取内核计时器队列长度（诊断用，尝试获取锁）

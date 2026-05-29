@@ -10,9 +10,10 @@ pub struct Sighand {
 
 impl Sighand {
     pub fn new() -> Self {
-        let mut actions = Vec::with_capacity(64);
-        actions.resize(64, None);
-        Self { actions }
+        // 从空 Vec 开始，按需在 set() 中扩展，避免每个进程浪费 1024 字节。
+        Self {
+            actions: Vec::new(),
+        }
     }
 
     pub fn from_existing(other: &Self) -> Self {
@@ -28,9 +29,12 @@ impl Sighand {
     }
 
     pub fn set(&mut self, signum: usize, action: Option<SigAction>) {
-        if let Some(slot) = self.actions.get_mut(signum - 1) {
-            *slot = action.map(Box::new);
+        let idx = signum.saturating_sub(1);
+        if idx >= self.actions.len() {
+            // Resize on demand: 扩展到足够容纳该信号编号
+            self.actions.resize_with(idx + 1, || None);
         }
+        self.actions[idx] = action.map(Box::new);
     }
 
     pub fn reset(&mut self) {

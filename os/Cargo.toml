@@ -81,7 +81,7 @@ board_rvqemu = ["oom_handler", "riscv"]
 
 # default = ["board_laqemu", "block_sata"]
 # default = ["board_rvqemu", "block_mem"]
-default = ["board_rvqemu", "block_virt"]
+default = ["board_rvqemu", "block_virt", "heap_trace"]
 
 [profile.dev]
 # 优化级别

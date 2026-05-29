@@ -12,7 +12,7 @@ pub const USER_HEAP_SIZE: usize = PAGE_SIZE * 0x100;
 
 pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 0x20;
 #[cfg(feature = "board_rvqemu")]
-pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x10000;
+pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x2000; // 32MB — OOM-trigger test
 #[cfg(feature = "board_fu740")]
 pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x2000;
 #[cfg(feature = "board_cv1811h")]

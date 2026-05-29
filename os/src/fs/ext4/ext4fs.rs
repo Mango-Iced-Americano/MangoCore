@@ -76,6 +76,7 @@ pub struct FsCacheReclaimStats {
     pub stale_inode_objects_removed: usize,
     pub stale_page_caches_removed: usize,
     pub stale_children_removed: usize,
+    pub stale_negative_dentries_removed: usize,
     pub clean_pages_freed: usize,
     pub cached_pages_before: usize,
     pub cached_pages_after: usize,
@@ -575,9 +576,23 @@ impl layout::Ext4OSInode {
     }
 
     fn insert_negative_dentry(&self, name: &str, version: u64) {
+        let mut cache = self.negative_dentry.lock();
+        // 防止恶意查找随机文件名导致内存无界增长。
+        // 超过上限时清空整个缓存（简单且安全，Linux 的 negative dentry 也使用 LRU 淘汰）。
+        const NEGATIVE_DENTRY_CAP: usize = 512;
+        if cache.len() >= NEGATIVE_DENTRY_CAP {
+            cache.clear();
+        }
+        cache.insert(alloc::string::String::from(name), version);
+    }
+
+    /// 在 reclaim 周期中调用，清理过期的 negative dentry 条目。
+    /// version 不匹配的条目表示目录已被修改，条目已失效。
+    pub fn prune_negative_dentry(&self) {
+        let current = self.dir_version.load(core::sync::atomic::Ordering::Relaxed);
         self.negative_dentry
             .lock()
-            .insert(alloc::string::String::from(name), version);
+            .retain(|_, ver| *ver == current);
     }
 }
 
@@ -1545,6 +1560,25 @@ impl Ext4FileSystem {
         (io, pc)
     }
 
+    /// 清理所有目录 inode 中过期的 negative dentry 条目
+    pub fn prune_negative_dentries(&self) -> usize {
+        let mut total = 0usize;
+        let guard = self.inode_objects.lock();
+        let arcs: alloc::vec::Vec<alloc::sync::Arc<dyn crate::fs::vfs::IndexNode>> = guard
+            .iter()
+            .filter_map(|(_, w)| w.upgrade())
+            .collect();
+        drop(guard);
+        for arc in &arcs {
+            if let Some(osi) = arc.as_any_ref().downcast_ref::<layout::Ext4OSInode>() {
+                let before = osi.negative_dentry.lock().len();
+                osi.prune_negative_dentry();
+                total += before - osi.negative_dentry.lock().len();
+            }
+        }
+        total
+    }
+
     /// 清理所有目录 children 中 upgrade 失败的 stale Weak entry
     pub fn prune_children_stale_entries(&self) -> usize {
         let mut total = 0usize;
@@ -1610,6 +1644,7 @@ impl Ext4FileSystem {
         let (cached_before, dirty_before) = self.count_page_cache_metrics();
         let (io_removed, pc_removed) = self.prune_stale_weak_entries();
         let children_removed = self.prune_children_stale_entries();
+        let neg_removed = self.prune_negative_dentries();
         let clean_freed = self.shrink_all_page_caches_clean(target_pages);
         let (cached_after, dirty_after) = self.count_page_cache_metrics();
 
@@ -1617,6 +1652,7 @@ impl Ext4FileSystem {
             stale_inode_objects_removed: io_removed,
             stale_page_caches_removed: pc_removed,
             stale_children_removed: children_removed,
+            stale_negative_dentries_removed: neg_removed,
             clean_pages_freed: clean_freed,
             cached_pages_before: cached_before,
             cached_pages_after: cached_after,
@@ -1725,6 +1761,8 @@ impl Ext4FileSystem {
 
 /// 保守 soft cap — 超过后驱逐 clean entry
 const INODE_CACHE_SOFT_CAP: usize = 4096;
+/// 硬上限 — 超过后强制回写并驱逐脏条目，防止脏 inode 永久驻留
+const INODE_CACHE_HARD_CAP: usize = 8192;
 
 impl Ext4FileSystem {
     /// 获取缓存的 ext4 inode。先查 inode_cache，miss 时从磁盘读取并缓存。
@@ -1756,9 +1794,36 @@ impl Ext4FileSystem {
             if let Some(existing) = cache.get(&ino) {
                 return existing.clone();
             }
-            // Phase 3: enforce soft cap — evict clean entries if over limit
+            // Phase 3: enforce soft/hard cap
             let len = cache.len();
-            if len >= INODE_CACHE_SOFT_CAP {
+            if len >= INODE_CACHE_HARD_CAP {
+                // 硬上限：强制回写脏条目后驱逐，防止脏 inode 永久驻留内存
+                let dirty_inos: alloc::vec::Vec<u32> = cache
+                    .iter()
+                    .filter(|(_, c)| c.lock().dirty)
+                    .map(|(ino, _)| *ino)
+                    .collect();
+                drop(cache);
+                for ino in &dirty_inos {
+                    let _ = self.flush_inode(*ino);
+                }
+                let mut cache = self.inode_cache.lock();
+                // 回写后驱逐所有多余条目
+                let to_evict: alloc::vec::Vec<u32> = cache
+                    .iter()
+                    .take(len - INODE_CACHE_SOFT_CAP + 1)
+                    .map(|(ino, _)| *ino)
+                    .collect();
+                for evict_ino in &to_evict {
+                    cache.remove(evict_ino);
+                }
+                for _ in 0..to_evict.len() {
+                    super::counters::inc_counter!(super::counters::INODE_CACHE_EVICT_CLEAN);
+                }
+                cache.insert(ino, arc.clone());
+                super::counters::inc_counter!(super::counters::INODE_CACHE_INSERT);
+                return arc;
+            } else if len >= INODE_CACHE_SOFT_CAP {
                 let to_evict: alloc::vec::Vec<u32> = cache
                     .iter()
                     .filter(|(_, c)| !c.lock().dirty)

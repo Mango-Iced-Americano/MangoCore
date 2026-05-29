@@ -1,15 +1,37 @@
-//! 文件系统缓存周期回收
+//! Periodically reclaim filesystem caches from the scheduler loop.
 //!
-//! 从调度循环中调用，带节流和水位检查。仅回收干净页，不写回脏页。
+//! Stale metadata cleanup (inode_objects, page_caches, children) runs
+//! unconditionally every THROTTLE ticks. Clean page cache shrink uses a
+//! two-tier threshold plus heap-pressure fallback. Under severe heap
+//! pressure (>90%), inode caches are also pruned.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 const THROTTLE: usize = 64;
-const HIGH_WATER_PAGES: isize = 16384; // 64MB
+const LOW_WATER_PAGES: isize = 1024;   // 4MB — gentle eviction
+const HIGH_WATER_PAGES: isize = 4096;  // 16MB — aggressive eviction
 const BATCH_PAGES: usize = 64;
+const LOW_BATCH_PAGES: usize = 8;
+const CRITICAL_BATCH_PAGES: usize = 32;
+const HEAP_PRESSURE_PCT: usize = 75;   // trigger eviction when >75% heap used
+const HEAP_CRITICAL_PCT: usize = 90;   // aggressive multi-cache eviction
 
-/// 周期回收 page cache 干净页（调度循环中调用，带节流）
-/// 仅在 page_cache > 64MB 时触发，每次最多回收 64 页
+fn heap_used_pct() -> usize {
+    let (free, total, _, _, _) = crate::mm::heap_stats();
+    if total == 0 {
+        return 0;
+    }
+    (total - free) * 100 / total
+}
+
+fn heap_under_pressure() -> bool {
+    heap_used_pct() > HEAP_PRESSURE_PCT
+}
+
+fn heap_critical() -> bool {
+    heap_used_pct() > HEAP_CRITICAL_PCT
+}
+
 pub fn maybe_reclaim_fs_caches() {
     static TICK: AtomicUsize = AtomicUsize::new(0);
 
@@ -24,17 +46,42 @@ pub fn maybe_reclaim_fs_caches() {
     };
 
     if let Some(fs) = fs {
+        let io_removed = fs.prune_inode_objects();
+        let pc_removed = fs.prune_page_caches();
+        let kids_removed = fs.prune_children_stale_entries();
+
         let cached = fs.get_cache_metric(6); // page_cache_cached_pages
-        if cached > HIGH_WATER_PAGES {
-            let stats = fs.reclaim_fs_caches(BATCH_PAGES);
-            if stats.clean_pages_freed > 0 {
-                log::debug!(
-                    "[reclaim] freed={} before={} after={}",
-                    stats.clean_pages_freed,
-                    stats.cached_pages_before,
-                    stats.cached_pages_after
+
+        if heap_critical() {
+            // Severe heap pressure: evict aggressively from all caches
+            let freed = fs.shrink_all_page_caches_clean(CRITICAL_BATCH_PAGES);
+            if freed > 0 {
+                log::warn!(
+                    "[reclaim] CRITICAL heap={}% clean_freed={} stale: io={} pc={} kids={} cached={}",
+                    heap_used_pct(), freed, io_removed, pc_removed, kids_removed, cached
                 );
             }
+        } else if cached > HIGH_WATER_PAGES {
+            let freed = fs.shrink_all_page_caches_clean(BATCH_PAGES);
+            if freed > 0 {
+                log::debug!(
+                    "[reclaim] high-water clean_freed={} stale: io={} pc={} kids={}",
+                    freed, io_removed, pc_removed, kids_removed
+                );
+            }
+        } else if cached > LOW_WATER_PAGES || heap_under_pressure() {
+            let freed = fs.shrink_all_page_caches_clean(LOW_BATCH_PAGES);
+            if freed > 0 {
+                log::debug!(
+                    "[reclaim] low-water clean_freed={} stale: io={} pc={} kids={} cached={}",
+                    freed, io_removed, pc_removed, kids_removed, cached
+                );
+            }
+        } else if io_removed + pc_removed + kids_removed > 0 {
+            log::debug!(
+                "[reclaim] stale: io={} pc={} kids={}",
+                io_removed, pc_removed, kids_removed
+            );
         }
     }
 }

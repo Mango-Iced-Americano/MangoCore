@@ -711,6 +711,10 @@ impl ProcessControlBlock {
         };
 
         if let Some(parent_process) = parent_process {
+            // INITPROC 自动回收僵尸子进程，防止孤儿进程累积导致 PCB 内存泄漏。
+            let auto_reap = Arc::ptr_eq(&parent_process, &INITPROC.process)
+                || auto_reap
+                || sigchld_requests_auto_reap(&parent_process.sighand().lock());
             if auto_reap {
                 parent_process.detach_child(self.pid);
                 self.set_parent(None);

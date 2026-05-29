@@ -181,3 +181,9 @@ pub fn heap_test() {
     drop(v);
     println!("heap_test passed!");
 }
+
+/// Sentinel function for heap_trace backtrace filtering.
+/// `first_useful_pc` skips any PC within ±8 KB of this function,
+/// so allocator-internal frames are never reported as allocation sites.
+#[no_mangle]
+pub fn heap_allocator_text_marker() {}
