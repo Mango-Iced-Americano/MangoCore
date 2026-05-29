@@ -8,6 +8,7 @@ use crate::net::{
 };
 use crate::trace_event;
 use crate::utils::error::{GeneralRet, SyscallErr};
+use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
@@ -27,7 +28,6 @@ impl Inner {
     pub fn bind(self, endpoint: IpListenEndpoint) -> Result<Self, (Self, SyscallErr)> {
         match self {
             Inner::Init(Init::Unbound(socket, ver)) => {
-                let socket = *socket;
                 let port = if endpoint.port == 0 {
                     PortManager::alloc_ephemeral_port()
                 } else {
@@ -41,11 +41,7 @@ impl Inner {
                 });
                 let local = IpEndpoint::new(local_addr, port);
 
-                let handle = NET_INTERFACE
-                    .add_routed_socket(InetProtocol::Tcp, socket)
-                    .ok_or_else(|| (Inner::Init(Init::new(ver)), SyscallErr::EAGAIN))?;
-
-                Ok(Inner::Init(Init::Bound { handle, local }))
+                Ok(Inner::Init(Init::Bound { socket, local }))
             }
             Inner::Init(Init::Bound { .. }) => {
                 log::debug!("[TCP] already bound");
@@ -57,10 +53,8 @@ impl Inner {
 
     /// connect 操作：Unbound 先 bind_ephemeral → 发起 SYN
     pub fn connect(self, remote_endpoint: IpEndpoint) -> Result<Connecting, (Self, SyscallErr)> {
-        // 确保是 Init 状态
-        let (handle, local) = match self {
+        let (socket, local, ver) = match self {
             Inner::Init(Init::Unbound(_, ver)) => {
-                // auto-bind to ephemeral
                 let port = PortManager::alloc_ephemeral_port();
                 let local_addr = lookup_source_ip(remote_endpoint.addr);
                 let local = IpEndpoint::new(local_addr, port);
@@ -69,28 +63,40 @@ impl Inner {
                     let tx_buf = SocketBuffer::new(vec![0u8; DEFAULT_TX_BUF_SIZE]);
                     tcp::Socket::new(rx_buf, tx_buf)
                 };
-                let handle = NET_INTERFACE
-                    .add_routed_socket(InetProtocol::Tcp, socket)
-                    .ok_or_else(|| (Inner::Init(Init::new(ver)), SyscallErr::EAGAIN))?;
-                (handle, local)
+                (socket, local, ver)
             }
-            Inner::Init(Init::Bound { handle, local }) => {
-                // 如果用户 bind 的是 INADDR_ANY（未指定地址），
-                // 需要根据目标地址解析出源 IP（路由决策）
+            Inner::Init(Init::Bound { socket, local }) => {
                 let local = if local.addr.is_unspecified() {
                     IpEndpoint::new(lookup_source_ip(remote_endpoint.addr), local.port)
                 } else {
                     local
                 };
-                (handle, local)
+                let ver = match local.addr {
+                    IpAddress::Ipv4(_) => IpVersion::Ipv4,
+                    _ => IpVersion::Ipv6,
+                };
+                (*socket, local, ver)
             }
             other => return Err((other, SyscallErr::EISCONN)),
         };
 
-        // Route check before connect: external address without NIC → ENETUNREACH
         if let Err(e) = route_check(remote_endpoint.addr) {
-            return Err((Inner::Init(Init::Bound { handle, local }), e));
+            let new_sock = Box::new(socket);
+            return Err((Inner::Init(Init::Bound { socket: new_sock, local }), e));
         }
+
+        // Route to determine target ifindex for this connection
+        let route = crate::net::routing::route_output(remote_endpoint.addr).ok();
+        let ifindex = route.as_ref().map(|r| r.ifindex).unwrap_or(2);
+
+        let handle = NET_INTERFACE
+            .add_routed_socket(InetProtocol::Tcp, socket)
+            .ok_or_else(|| {
+                let rx_buf = SocketBuffer::new(vec![0u8; DEFAULT_RX_BUF_SIZE]);
+                let tx_buf = SocketBuffer::new(vec![0u8; DEFAULT_TX_BUF_SIZE]);
+                let new_sock = Box::new(tcp::Socket::new(rx_buf, tx_buf));
+                (Inner::Init(Init::Bound { socket: new_sock, local }), SyscallErr::EAGAIN)
+            })?;
 
         let ret = NET_INTERFACE
             .tcp_connect(handle, remote_endpoint, local)
@@ -115,14 +121,20 @@ impl Inner {
                 );
                 Ok(Connecting::new(handle, local, remote_endpoint))
             }
-            Err(err) => Err((Inner::Init(Init::Bound { handle, local }), err)),
+            Err(err) => {
+                // connect failed — create new socket for Bound state
+                NET_INTERFACE.remove_routed(handle);
+                let rx_buf = SocketBuffer::new(vec![0u8; DEFAULT_RX_BUF_SIZE]);
+                let tx_buf = SocketBuffer::new(vec![0u8; DEFAULT_TX_BUF_SIZE]);
+                let new_sock = Box::new(tcp::Socket::new(rx_buf, tx_buf));
+                Err((Inner::Init(Init::Bound { socket: new_sock, local }), err))
+            }
         }
     }
 
     /// listen 操作：Unbound 先 auto-bind INADDR_ANY → 切换 Listen
     pub fn listen(self, backlog: usize) -> Result<Listening, (Self, SyscallErr)> {
-        // 如果未 bind，自动 bind INADDR_ANY:0
-        let (handle, local_endpoint, ver) = match self {
+        let (socket, local_endpoint, ver) = match self {
             Inner::Init(Init::Unbound(socket, ver)) => {
                 let port = PortManager::alloc_ephemeral_port();
                 let unspec = IpEndpoint::new(
@@ -132,18 +144,14 @@ impl Inner {
                     },
                     port,
                 );
-                let socket = *socket;
-                let handle = NET_INTERFACE
-                    .add_routed_socket(InetProtocol::Tcp, socket)
-                    .ok_or_else(|| (Inner::Init(Init::new(ver)), SyscallErr::EAGAIN))?;
-                (handle, unspec, ver)
+                (*socket, unspec, ver)
             }
-            Inner::Init(Init::Bound { handle, local }) => {
+            Inner::Init(Init::Bound { socket, local }) => {
                 let ver = match local.addr {
                     IpAddress::Ipv4(_) => IpVersion::Ipv4,
-                    IpAddress::Ipv6(_) => IpVersion::Ipv6,
+                    _ => IpVersion::Ipv6,
                 };
-                (handle, local, ver)
+                (*socket, local, ver)
             }
             other => return Err((other, SyscallErr::EINVAL)),
         };
@@ -156,23 +164,27 @@ impl Inner {
 
         if listen_addr.port == 0 {
             return Err((
-                Inner::Init(Init::Bound {
-                    handle,
-                    local: local_endpoint,
-                }),
+                Inner::Init(Init::Bound { socket: Box::new(socket), local: local_endpoint }),
                 SyscallErr::EINVAL,
             ));
         }
 
         if backlog > u16::MAX as usize {
             return Err((
-                Inner::Init(Init::Bound {
-                    handle,
-                    local: local_endpoint,
-                }),
+                Inner::Init(Init::Bound { socket: Box::new(socket), local: local_endpoint }),
                 SyscallErr::EINVAL,
             ));
         }
+
+        // Attach socket to default stack (eth0), get handle for listen
+        let handle = NET_INTERFACE
+            .add_routed_socket(InetProtocol::Tcp, socket)
+            .ok_or_else(|| {
+                let rx_buf = SocketBuffer::new(vec![0u8; DEFAULT_RX_BUF_SIZE]);
+                let tx_buf = SocketBuffer::new(vec![0u8; DEFAULT_TX_BUF_SIZE]);
+                let new_sock = Box::new(tcp::Socket::new(rx_buf, tx_buf));
+                (Inner::Init(Init::Bound { socket: new_sock, local: local_endpoint }), SyscallErr::EAGAIN)
+            })?;
 
         // 第一个 listen socket 用已有的 handle
         if let Err(e) = with_tcp_mut(handle, |socket| {
@@ -183,11 +195,12 @@ impl Inner {
         })
         .unwrap_or(Err(SyscallErr::EINVAL))
         {
+            NET_INTERFACE.remove_routed(handle);
+            let rx_buf = SocketBuffer::new(vec![0u8; DEFAULT_RX_BUF_SIZE]);
+            let tx_buf = SocketBuffer::new(vec![0u8; DEFAULT_TX_BUF_SIZE]);
+            let new_sock = Box::new(tcp::Socket::new(rx_buf, tx_buf));
             return Err((
-                Inner::Init(Init::Bound {
-                    handle,
-                    local: local_endpoint,
-                }),
+                Inner::Init(Init::Bound { socket: new_sock, local: local_endpoint }),
                 e,
             ));
         }
@@ -205,9 +218,11 @@ impl Inner {
                 s.listen(listen_addr)
                     .map_err(|_| SyscallErr::EADDRINUSE)
                     .map_err(|e| {
+                        let rx = SocketBuffer::new(vec![0u8; DEFAULT_RX_BUF_SIZE]);
+                        let tx = SocketBuffer::new(vec![0u8; DEFAULT_TX_BUF_SIZE]);
                         (
                             Inner::Init(Init::Bound {
-                                handle,
+                                socket: Box::new(tcp::Socket::new(rx, tx)),
                                 local: local_endpoint,
                             }),
                             e,
@@ -289,8 +304,8 @@ impl Inner {
     pub fn set_nagle_enabled(&self, enabled: bool) {
         match self {
             Inner::Init(init) => match init {
-                Init::Bound { handle, .. } => {
-                    with_tcp_mut(*handle, |s| s.set_nagle_enabled(enabled));
+                Init::Bound { .. } => {
+                    // Lazy bind: settings applied at connect/listen time
                 }
                 Init::Unbound(_, _) => {
                     // Unbound socket 尚不可变访问 smoltcp，跳过（bind 后默认启用）
@@ -321,8 +336,8 @@ impl Inner {
         };
         match self {
             Inner::Init(init) => match init {
-                Init::Bound { handle, .. } => {
-                    with_tcp_mut(*handle, |s| s.set_keep_alive(timeout));
+                Init::Bound { .. } => {
+                    // Lazy bind: settings applied at connect/listen time
                 }
                 Init::Unbound(_, _) => {
                     // Unbound socket 尚不可变访问 smoltcp，跳过

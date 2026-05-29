@@ -144,7 +144,7 @@ pub(crate) fn with_tcp<R>(handle: RouteSocketHandle, f: impl FnOnce(&tcp::Socket
 pub enum Init {
     Unbound(Box<tcp::Socket<'static>>, IpVersion),
     Bound {
-        handle: RouteSocketHandle,
+        socket: Box<tcp::Socket<'static>>,
         local: IpEndpoint,
     },
 }
@@ -183,7 +183,7 @@ impl Init {
                 **socket = new_sock;
                 Ok(())
             }
-            Init::Bound { handle, .. } => {
+            Init::Bound { .. } => {
                 // 此 smoltcp 版本不支持动态调整缓冲区大小
                 log::warn!("[TCP] resize_buffers on Bound socket not supported");
                 Ok(())
@@ -220,7 +220,10 @@ impl Init {
                 })?;
                 Ok((handle, local_ep))
             }
-            Init::Bound { handle, local } => Ok((handle, local)),
+            Init::Bound { local, .. } => {
+                // Lazy bind: socket not yet in SocketSet; caller must attach before use
+                Err((Init::Unbound(Box::new(new_smoltcp_socket()), IpVersion::Ipv4), SyscallErr::EINVAL))
+            }
         }
     }
 }
@@ -823,8 +826,8 @@ impl Inner {
         match self {
             Inner::Closed(_) => 0,
             Inner::SelfConnected(sc) => sc.rx_cap.load(Ordering::Relaxed),
-            Inner::Init(Init::Bound { handle, .. }) => {
-                with_tcp_mut(*handle, |s| s.send_capacity()).unwrap_or(0)
+            Inner::Init(Init::Bound { socket, .. }) => {
+                socket.send_capacity()
             }
             Inner::Init(Init::Unbound(s, _)) => s.send_capacity(),
             Inner::Connecting(c) => with_tcp_mut(c.handle, |s| s.send_capacity()).unwrap_or(0),
@@ -838,8 +841,8 @@ impl Inner {
         match self {
             Inner::Closed(_) => 0,
             Inner::SelfConnected(sc) => sc.rx_cap.load(Ordering::Relaxed),
-            Inner::Init(Init::Bound { handle, .. }) => {
-                with_tcp_mut(*handle, |s| s.recv_capacity()).unwrap_or(0)
+            Inner::Init(Init::Bound { socket, .. }) => {
+                socket.recv_capacity()
             }
             Inner::Init(Init::Unbound(s, _)) => s.recv_capacity(),
             Inner::Connecting(c) => with_tcp_mut(c.handle, |s| s.recv_capacity()).unwrap_or(0),
@@ -855,14 +858,8 @@ impl Inner {
                 Init::Unbound(_, _) => {
                     log::info!("[Inner::close] Init::Unbound — no handle to close");
                 }
-                Init::Bound { handle, .. } => {
-                    log::info!("[Inner::close] Init::Bound — closing handle {}", handle);
-                    with_tcp_mut(*handle, |socket| socket.close());
-                    log::info!(
-                        "[Inner::close] push handle {} to TCP_SOCKETS_TO_REMOVE",
-                        handle
-                    );
-                    TCP_SOCKETS_TO_REMOVE.lock().push(*handle);
+            Init::Bound { .. } => {
+                    log::info!("[Inner::close] Init::Bound — dropping boxed socket (not yet attached)");
                 }
             },
             Inner::Connecting(c) => {
