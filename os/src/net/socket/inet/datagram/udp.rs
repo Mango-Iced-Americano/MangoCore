@@ -1,4 +1,5 @@
 use crate::net::config::lookup_source_ip;
+use crate::net::config::route_check;
 use crate::net::syscall::common::MsgFlags;
 use crate::net::{config::NET_INTERFACE, Endpoint, Mutex, Socket, MAX_BUFFER_SIZE};
 use crate::{
@@ -364,6 +365,10 @@ impl Socket for UdpSocket {
         if let Some(n) = self.try_deliver_local(remote, &send_buf)? {
             return Ok(n);
         }
+        // Route check: external dest without NIC → ENETUNREACH
+        if let Err(e) = route_check(remote.addr) {
+            return Err(e);
+        }
         NET_INTERFACE
             .udp_socket(self.socket_handler, |socket| {
                 if !socket.can_send() {
@@ -474,16 +479,13 @@ impl UdpSocket {
     }
 
     fn is_local_udp_destination(addr: IpAddress) -> bool {
-        if addr.is_unspecified()
-            || addr
-                == crate::net::net_core::default_iface()
-                    .and_then(|d| d.ip_addrs.first().map(|c| c.address()))
-                    .unwrap_or(IpAddress::v4(10, 0, 2, 15))
-        {
+        if addr.is_unspecified() {
             return true;
         }
         match addr {
-            IpAddress::Ipv4(ip) => ip.is_loopback(),
+            IpAddress::Ipv4(ip) => {
+                ip.is_loopback() || crate::net::net_core::is_local_addr(ip)
+            }
             IpAddress::Ipv6(_) => false,
         }
     }

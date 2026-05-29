@@ -13,6 +13,24 @@ use smoltcp::wire::{
 };
 use spin::Mutex;
 
+/// No-op network device used when no physical NIC is present.
+/// Allows the smoltcp stack to function with loopback only.
+/// transmit() always returns Some to keep RoutingDevice::transmit() working.
+pub struct NullNetDevice;
+
+impl NetDevice for NullNetDevice {
+    fn receive(&self, _buf: &mut [u8]) -> Option<usize> {
+        None
+    }
+    fn transmit(&self, _buf: &[u8]) {
+        // No-op: packets sent to eth on a null device are silently dropped
+    }
+    fn mac_address(&self) -> [u8; 6] {
+        // Locally administered unicast MAC (not all-zero, required by smoltcp DHCP)
+        [0x02, 0x00, 0x00, 0x00, 0x00, 0x01]
+    }
+}
+
 static mut ROUTING_BUF: [u8; 65536] = [0u8; 65536];
 pub struct RoutingDevice {
     pub eth: SmoltcpDeviceAdapter,

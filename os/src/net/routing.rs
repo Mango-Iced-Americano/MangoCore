@@ -121,11 +121,8 @@ impl Router {
         best_entry
     }
 
-    /// Create a Router pre-populated with default routes:
-    ///
-    /// - `127.0.0.0/8` → ifindex 1 (lo), Connected
-    /// - `10.0.2.0/24` → ifindex 2 (eth0), Connected (only if `NET_DEVICE` is present)
-    /// - `0.0.0.0/0` → ifindex 2 (eth0), next-hop `10.0.2.2`, Default (only if `NET_DEVICE` is present)
+    /// Create a Router pre-populated with default routes.
+    /// Dynamic: uses DHCP-assigned IP/gateway from net_core instead of hardcoded values.
     pub fn init_default() -> Self {
         let mut router = Self::new();
 
@@ -138,25 +135,25 @@ impl Router {
             RouteType::Connected,
         );
 
-        // Only add ethernet routes if a network device is present
-        if crate::net::net_core::find_by_name("eth0").is_some() {
-            // eth0 directly connected network
+        if let Some(cidr) = crate::net::net_core::eth0_ipv4_cidr() {
+            // Connected route from DHCP CIDR
             router.add_route(
-                IpCidr::new(IpAddress::Ipv4(Ipv4Address::new(10, 0, 2, 0)), 24),
+                IpCidr::new(cidr.address(), cidr.prefix_len()),
                 None,
                 2, // eth0
                 0,
                 RouteType::Connected,
             );
 
-            // Default gateway route
-            router.add_route(
-                IpCidr::new(IpAddress::Ipv4(Ipv4Address::new(0, 0, 0, 0)), 0),
-                Some(IpAddress::Ipv4(Ipv4Address::new(10, 0, 2, 2))),
-                2,   // eth0
-                100,
-                RouteType::Default,
-            );
+            if let Some(gw) = crate::net::net_core::default_gateway() {
+                router.add_route(
+                    IpCidr::new(IpAddress::Ipv4(Ipv4Address::new(0, 0, 0, 0)), 0),
+                    Some(IpAddress::Ipv4(gw)),
+                    2,   // eth0
+                    100,
+                    RouteType::Default,
+                );
+            }
         }
 
         router

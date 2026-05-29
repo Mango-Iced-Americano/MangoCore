@@ -21,7 +21,10 @@ lazy_static! {
 pub fn init_net_device() {
     #[cfg(any(feature = "block_virt", feature = "block_virt_pci"))]
     {
-        let net_dev = virtio_net::VirtIONetWrapper::new();
-        *NET_DEVICE.lock() = Some(Arc::new(net_dev));
+        if let Some(net_dev) = virtio_net::VirtIONetWrapper::new() {
+            *NET_DEVICE.lock() = Some(Arc::new(net_dev));
+        } else {
+            println!("[kernel] VirtIO net device not found, skipping network init");
+        }
     }
 }

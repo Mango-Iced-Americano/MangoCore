@@ -27,6 +27,10 @@ pub struct DeviceEntry {
 
 lazy_static! {
     pub static ref IFACES: Mutex<Vec<DeviceEntry>> = Mutex::new(Vec::new());
+    /// DHCP-assigned IPv4 CIDR for eth0 (set after DHCP probe completes)
+    pub static ref ETH0_CIDR: Mutex<Option<IpCidr>> = Mutex::new(None);
+    /// Default gateway (set after DHCP probe completes)
+    pub static ref DEFAULT_GW: Mutex<Option<Ipv4Address>> = Mutex::new(None);
 }
 
 /// 内部注册（不锁 IFACES，供持有锁的调用者使用）
@@ -95,16 +99,16 @@ pub fn init() {
         let mac = dev.mac_address();
         drop(net_guard);
 
-        let eth_ip = IpCidr::new(IpAddress::v4(10, 0, 2, 15), 24);
+        // eth0 registered with no IP — DHCP probe will fill it in later
         _register_device(
             &mut ifaces,
             "eth0",
             IFF_UP | IFF_BROADCAST | IFF_RUNNING | IFF_MULTICAST,
             1500,
             mac,
-            vec![eth_ip],
+            vec![], // IP will be set by DHCP
         );
-        log::info!("[net_core] registered eth0 (ifindex=2)");
+        log::info!("[net_core] registered eth0 (ifindex=2, no static IP)");
     } else {
         drop(net_guard);
     }
@@ -128,14 +132,34 @@ pub fn loopback_iface() -> Option<DeviceEntry> {
     ifaces.iter().find(|d| d.name == "lo").cloned()
 }
 
-/// Return the default gateway address (10.0.2.2) if eth0 is registered, otherwise None.
+/// Return the default gateway address (set by DHCP), otherwise None.
 pub fn default_gateway() -> Option<Ipv4Address> {
-    let ifaces = IFACES.lock();
-    if ifaces.iter().any(|d| d.name == "eth0") {
-        Some(Ipv4Address::new(10, 0, 2, 2))
-    } else {
-        None
+    *DEFAULT_GW.lock()
+}
+
+/// Set the DHCP-assigned IPv4 address for eth0.
+pub fn set_eth0_ipv4(cidr: IpCidr) {
+    *ETH0_CIDR.lock() = Some(cidr);
+    let mut ifaces = IFACES.lock();
+    if let Some(eth0) = ifaces.iter_mut().find(|d| d.name == "eth0") {
+        eth0.ip_addrs = vec![cidr];
     }
+}
+
+/// Return the DHCP-assigned eth0 IPv4 CIDR, if any.
+pub fn eth0_ipv4_cidr() -> Option<IpCidr> {
+    *ETH0_CIDR.lock()
+}
+
+/// Set the default gateway address (from DHCP).
+pub fn set_default_gateway(gw: Option<Ipv4Address>) {
+    *DEFAULT_GW.lock() = gw;
+}
+
+/// Check if the given address belongs to any local interface.
+pub fn is_local_addr(addr: Ipv4Address) -> bool {
+    let ip = IpAddress::Ipv4(addr);
+    IFACES.lock().iter().any(|d| d.ip_addrs.iter().any(|c| c.address() == ip))
 }
 
 /// Return the local port range for ephemeral ports (32768–60999 on Linux).
