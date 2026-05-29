@@ -403,14 +403,9 @@ impl<'a> NetInterface<'a> {
 }
 
 pub fn lookup_source_ip(dest_ip: IpAddress) -> IpAddress {
-    let result = match dest_ip {
-        IpAddress::Ipv4(addr) if addr.0[0] == 127 => net_core::loopback_iface()
-            .and_then(|d| d.ip_addrs.first().map(|c| c.address()))
-            .unwrap_or(IpAddress::v4(127, 0, 0, 1)),
-        _ => net_core::eth0_ipv4_cidr()
-            .map(|c| c.address())
-            .unwrap_or(IpAddress::v4(0, 0, 0, 0)),
-    };
+    let result = crate::net::routing::route_output(dest_ip)
+        .map(|r| r.source)
+        .unwrap_or(IpAddress::v4(0, 0, 0, 0));
     log::debug!("source_ip_select: dst={:?} -> src={:?}", dest_ip, result);
     result
 }
@@ -418,32 +413,5 @@ pub fn lookup_source_ip(dest_ip: IpAddress) -> IpAddress {
 /// Check whether a route exists for the given destination IP.
 /// Returns Ok(()) if reachable, Err(ENETUNREACH) if no route available.
 pub fn route_check(dest: IpAddress) -> Result<(), crate::utils::error::SyscallErr> {
-    use crate::utils::error::SyscallErr;
-    match dest {
-        IpAddress::Ipv4(addr) => {
-            if addr.as_bytes()[0] == 127 {
-                return Ok(());
-            }
-            let ifaces = net_core::IFACES.lock();
-            let is_local = ifaces
-                .iter()
-                .any(|d| d.ip_addrs.iter().any(|c| c.address() == dest));
-            if is_local {
-                return Ok(());
-            }
-            let has_eth = ifaces.iter().any(|d| d.name == "eth0");
-            if has_eth {
-                Ok(())
-            } else {
-                Err(SyscallErr::ENETUNREACH)
-            }
-        }
-        IpAddress::Ipv6(_) => {
-            if net_core::find_by_name("eth0").is_some() {
-                Ok(())
-            } else {
-                Err(SyscallErr::ENETUNREACH)
-            }
-        }
-    }
+    crate::net::routing::route_output(dest).map(|_| ())
 }
