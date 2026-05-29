@@ -1919,7 +1919,7 @@ fn net_route05_no_route_no_panic() -> i32 {
 // ============================================================
 fn proc_net01_dev() -> i32 {
     const GROUP: &str = "PROC_NET"; const NAME: &str = "proc_net01_dev";
-    let fd = sys_open("/proc/net/dev", 0);
+    let fd = sys_open("/proc/net/dev\0", 0);
     if fd < 0 { tbrok!(GROUP, NAME, "open /proc/net/dev failed: {}", fd); return 1; }
     let fd = fd as usize;
     let mut buf = [0u8; 4096];
@@ -1934,7 +1934,7 @@ fn proc_net01_dev() -> i32 {
 }
 fn proc_net02_route() -> i32 {
     const GROUP: &str = "PROC_NET"; const NAME: &str = "proc_net02_route";
-    let fd = sys_open("/proc/net/route", 0);
+    let fd = sys_open("/proc/net/route\0", 0);
     if fd < 0 { tbrok!(GROUP, NAME, "open /proc/net/route failed: {}", fd); return 1; }
     let mut buf = [0u8; 2048];
     let n = sys_read(fd as usize, &mut buf);
@@ -1946,7 +1946,7 @@ fn proc_net02_route() -> i32 {
 }
 fn proc_net03_tcp_header() -> i32 {
     const GROUP: &str = "PROC_NET"; const NAME: &str = "proc_net03_tcp_header";
-    let fd = sys_open("/proc/net/tcp", 0);
+    let fd = sys_open("/proc/net/tcp\0", 0);
     if fd < 0 { tbrok!(GROUP, NAME, "open /proc/net/tcp failed: {}", fd); return 1; }
     let mut buf = [0u8; 512];
     let n = sys_read(fd as usize, &mut buf);
@@ -1958,7 +1958,7 @@ fn proc_net03_tcp_header() -> i32 {
 }
 fn proc_net04_udp_header() -> i32 {
     const GROUP: &str = "PROC_NET"; const NAME: &str = "proc_net04_udp_header";
-    let fd = sys_open("/proc/net/udp", 0);
+    let fd = sys_open("/proc/net/udp\0", 0);
     if fd < 0 { tbrok!(GROUP, NAME, "open /proc/net/udp failed: {}", fd); return 1; }
     let mut buf = [0u8; 512];
     let n = sys_read(fd as usize, &mut buf);
@@ -1970,7 +1970,7 @@ fn proc_net04_udp_header() -> i32 {
 }
 fn proc_net05_ip_forward() -> i32 {
     const GROUP: &str = "PROC_NET"; const NAME: &str = "proc_net05_ip_forward";
-    let fd = sys_open("/proc/sys/net/ipv4/ip_forward", 0);
+    let fd = sys_open("/proc/sys/net/ipv4/ip_forward\0", 0);
     if fd < 0 { tbrok!(GROUP, NAME, "open ip_forward failed: {}", fd); return 1; }
     let mut buf = [0u8; 16];
     let n = sys_read(fd as usize, &mut buf);
@@ -1981,7 +1981,7 @@ fn proc_net05_ip_forward() -> i32 {
 }
 fn proc_net06_small_buffer() -> i32 {
     const GROUP: &str = "PROC_NET"; const NAME: &str = "proc_net06_small_buffer";
-    let fd = sys_open("/proc/net/dev", 0);
+    let fd = sys_open("/proc/net/dev\0", 0);
     if fd < 0 { tbrok!(GROUP, NAME, "open failed: {}", fd); return 1; }
     let fd = fd as usize;
     let mut buf1 = [0u8; 32];
