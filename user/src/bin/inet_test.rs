@@ -2090,20 +2090,21 @@ fn run_with_watchdog(name: &str, test_fn: fn() -> i32, timeout_ms: usize) -> boo
     }
     let t0 = user_lib::get_time();
     loop {
-        let mut status = 0;
-        if sys_waitpid(pid as isize, &mut status) == pid {
-            return true;
+        let mut status: i32 = 0;
+        let ret = user_lib::waitpid_wnohang(pid as isize, &mut status);
+        if ret == pid as isize {
+            return true; // child exited
         }
-        let now = user_lib::get_time();
-        if (now - t0) as usize > timeout_ms {
-            sys_kill(pid as usize, 9);
-            let mut status = 0;
-            sys_waitpid(pid as isize, &mut status);
+        let elapsed = (user_lib::get_time() - t0) as usize;
+        if elapsed > timeout_ms {
+            user_lib::kill(pid as usize, 9); // SIGKILL
+            let mut status: i32 = 0;
+            sys_waitpid(pid as isize, &mut status); // reap zombie
             println!("");
             println!("[TBROK] {} test timed out after {}ms", name, timeout_ms);
             return false;
         }
-        sys_yield();
+        user_lib::sleep(10); // 10ms polling interval
     }
 }
 
