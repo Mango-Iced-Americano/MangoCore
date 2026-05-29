@@ -4,7 +4,7 @@ use super::{
     signal::{sigchld_requests_auto_reap, PendingSignal, SignalQueue, Sighand, Signals},
     threads::Futex,
     wake_interruptible, Completion, FsStatus, TaskControlBlock, TaskStatus, UtsNamespace,
-    Rusage, WaitQueue, WaitResult, INITPROC,
+    Rusage, WaitQueue, INITPROC,
 };
 use crate::fs::vfs;
 use crate::mm::{AddressSpace, PageTableImpl};
@@ -596,21 +596,17 @@ impl ProcessControlBlock {
     pub fn add_child(&self, child: Arc<ProcessControlBlock>) -> Result<(), isize> {
         const CHILDREN_SOFT_CAP: usize = 512;
         let mut inner = self.inner.lock();
-        // 超过软上限时，先清理已 zombie 的子进程作为兜底防御。
-        // 正常情况下 finish_exit → wait4 会回收 zombie，此逻辑仅
-        // 在回收链路意外失效时防止 children 无限增长导致 OOM。
-        let len = inner.children.len();
-        if len >= CHILDREN_SOFT_CAP {
-            let before = len;
-            inner.children.retain(|c| !c.is_zombie());
-            if inner.children.len() >= CHILDREN_SOFT_CAP {
-                warn!(
-                    "[add_child] pid={} {} live children at cap (before={}), possible leak",
-                    self.pid,
-                    inner.children.len(),
-                    before,
-                );
-            }
+        // 超过软上限时仅告警，不在此处静默丢弃 zombie。
+        // 静默丢弃会绕过 wait4/rusage 回收语义，丢失子进程退出状态、
+        // rusage 聚合和 PID 生命周期管理。
+        // 正常情况下 finish_exit → wait4 会回收 zombie；
+        // 若此告警持续出现，说明父进程未调用 wait4 导致僵尸堆积。
+        if inner.children.len() >= CHILDREN_SOFT_CAP {
+            warn!(
+                "[add_child] pid={} children at soft cap ({}), possible wait4 leak",
+                self.pid,
+                inner.children.len(),
+            );
         }
         if inner.children.try_reserve(1).is_err() {
             return Err(crate::syscall::errno::ENOMEM);
@@ -644,8 +640,8 @@ impl ProcessControlBlock {
         self.vfork_done.complete();
     }
 
-    pub fn wait_vfork_done_interruptible(&self) -> WaitResult {
-        self.vfork_done.wait_interruptible()
+    pub fn wait_vfork_done_uninterruptible(&self) {
+        self.vfork_done.wait_uninterruptible()
     }
 
     pub fn take_children(&self) -> Vec<Arc<ProcessControlBlock>> {

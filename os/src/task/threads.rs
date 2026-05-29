@@ -85,13 +85,27 @@ fn wait_queue_for_key(map: &mut BTreeMap<usize, WaitQueue>, key: usize) -> &mut 
     map.get_mut(&key).unwrap()
 }
 
+/// 清理 PROCESS_SHARED_FUTEX 中所有空 WaitQueue 条目。
+/// 降频至每 64 个 tick 执行一次，避免频繁扫描 BTreeMap。
+pub fn compact_shared_futex() {
+    static TICK: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    let t = TICK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if t % 64 != 0 {
+        return;
+    }
+    let mut map = PROCESS_SHARED_FUTEX.lock();
+    map.retain(|_, wq| {
+        wq.compact_stale();
+        !wq.is_empty()
+    });
+}
+
 fn remove_empty_wait_queue(map: &mut BTreeMap<usize, WaitQueue>, key: usize) {
-    if map
-        .get(&key)
-        .map(|wait_queue| wait_queue.is_empty())
-        .unwrap_or(false)
-    {
-        map.remove(&key);
+    if let Some(wq) = map.get_mut(&key) {
+        wq.compact_stale();
+        if wq.is_empty() {
+            map.remove(&key);
+        }
     }
 }
 

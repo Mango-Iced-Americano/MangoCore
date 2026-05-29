@@ -565,6 +565,12 @@ impl WaitQueue {
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
+    /// 清理所有失效的 Weak 条目（upgrade 返回 None），返回清理数量。
+    pub fn compact_stale(&mut self) -> usize {
+        let before = self.inner.len();
+        self.inner.retain(|task| task.strong_count() > 0);
+        before - self.inner.len()
+    }
     /// 这个函数将会唤醒等待队列中所有的任务，并将它们的任务状态改变为就绪态，
     /// 如果一切正常，这些任务会在将来被调度。
     /// # 警告
@@ -979,6 +985,18 @@ impl WaitQueue {
         F: FnMut(&mut T) -> Option<isize>,
     {
         Self::wait_event_locked_impl(lock, queue_of, &mut cond, true, None, None)
+    }
+
+    pub fn wait_event_locked<T, Q, F>(
+        lock: &Mutex<T>,
+        queue_of: Q,
+        mut cond: F,
+    ) -> WaitResult
+    where
+        Q: for<'a> FnMut(&'a mut T) -> &'a mut WaitQueue,
+        F: FnMut(&mut T) -> Option<isize>,
+    {
+        Self::wait_event_locked_impl(lock, queue_of, &mut cond, false, None, None)
     }
 
     pub fn wait_event_interruptible_timeout_locked<T, Q, F>(

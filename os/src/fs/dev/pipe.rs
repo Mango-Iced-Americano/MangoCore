@@ -382,6 +382,12 @@ static FIFO_REGISTRY: spin::Mutex<BTreeMap<(usize, usize), FifoEntry>> = spin::M
 /// `for_read` selects the read end; `for_write` selects the write end.
 pub fn fifo_open(dev_inode: (usize, usize), for_read: bool, for_write: bool) -> Option<Arc<Pipe>> {
     let mut reg = FIFO_REGISTRY.lock();
+    // 清理两端都已关闭的陈旧条目，防止 64KB PipeRingBuffer 永久泄漏。
+    if let Some(entry) = reg.get(&dev_inode) {
+        if entry.read_end.strong_count() == 0 && entry.write_end.strong_count() == 0 {
+            reg.remove(&dev_inode);
+        }
+    }
     let entry = reg.entry(dev_inode).or_insert_with(|| {
         // Create ring buffer without linking ends yet
         let buf = Arc::new(Mutex::new(PipeRingBuffer::new()));
@@ -422,4 +428,15 @@ pub fn fifo_open(dev_inode: (usize, usize), for_read: bool, for_write: bool) -> 
     buffer.lock().set_write_end(&w);
     entry.write_end = Arc::downgrade(&w);
     Some(w)
+}
+
+/// 清理 FIFO_REGISTRY 中所有两端都已关闭的陈旧条目，
+/// 释放持有的 64KB PipeRingBuffer。由 reclaim 周期性触发。
+pub fn compact_fifo_registry() -> usize {
+    let mut reg = FIFO_REGISTRY.lock();
+    let before = reg.len();
+    reg.retain(|_, entry| {
+        entry.read_end.strong_count() > 0 || entry.write_end.strong_count() > 0
+    });
+    before - reg.len()
 }

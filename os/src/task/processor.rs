@@ -91,6 +91,8 @@ pub fn run_tasks() {
         // 逐出僵尸（零堆分配：每次 remove 一个，在锁外 drop）
         drop(take_one_ready_zombie());
         drop(take_one_interruptible_zombie());
+        // 降频清理 PROCESS_SHARED_FUTEX 空 WaitQueue 键
+        super::threads::compact_shared_futex();
         let mut processor = PROCESSOR.lock();
         if let Some(task) = fetch_task() {
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();

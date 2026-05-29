@@ -56,23 +56,21 @@ impl ProcessManager {
         parent.publish_clone_child(child, flags)
     }
 
+    /// 将已 publish 的子进程加入调度器并进入就绪队列。
+    /// 调用之后 child 已存活，不可再走 unpublished cleanup 回滚。
+    /// vfork 等待使用不可中断 completion —— 若用 Interrupted 循环重试，
+    /// 父进程在有 actionable signal 时会在内核自旋，子进程无法被调度。
     pub fn schedule_clone_child(
         parent: &Arc<TaskControlBlock>,
         child: Arc<TaskControlBlock>,
         flags: CloneFlags,
-    ) -> Result<(), isize> {
+    ) {
         if flags.contains(CloneFlags::CLONE_VFORK) {
             child.process.set_vfork_parent(parent);
         }
         add_task(child.clone());
         if flags.contains(CloneFlags::CLONE_VFORK) {
-            match child.process.wait_vfork_done_interruptible() {
-                WaitResult::Ready(_) => Ok(()),
-                WaitResult::Interrupted => Err(ERESTART),
-                WaitResult::TimedOut => Ok(()),
-            }
-        } else {
-            Ok(())
+            child.process.wait_vfork_done_uninterruptible();
         }
     }
 

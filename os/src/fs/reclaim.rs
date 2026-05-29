@@ -40,6 +40,9 @@ pub fn maybe_reclaim_fs_caches() {
         return;
     }
 
+    // 全局清理：FIFO registry 中两端都已关闭的陈旧条目
+    crate::fs::dev::pipe::compact_fifo_registry();
+
     let fs = {
         let guard = crate::fs::ext4::ext4fs::GLOBAL_EXT4FS.lock();
         guard.as_ref().and_then(|w| w.upgrade())
