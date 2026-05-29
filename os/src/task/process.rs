@@ -11,6 +11,7 @@ use crate::mm::{AddressSpace, PageTableImpl};
 use crate::utils::error::SyscallErr;
 use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
+use core::sync::atomic::{AtomicBool, Ordering};
 use alloc::string::String;
 use alloc::vec::Vec;
 use lazy_static::lazy_static;
@@ -39,6 +40,9 @@ pub struct ProcessControlBlock {
     vfork_parent: Mutex<Option<Weak<TaskControlBlock>>>,
     /// CLONE_VFORK completion。父线程等待子进程 exec 成功或 exit。
     vfork_done: Completion,
+    /// 是否被 init 收养（通过 adopt_children_by_init）。用于 finish_exit
+    /// 中区分 init 直接 fork 的子进程和被收养的孤儿，只对后者自动回收。
+    pub adopted_by_init: AtomicBool,
     inner: Mutex<ProcessInner>,
     signal: Mutex<ProcessSignalState>,
 }
@@ -183,6 +187,7 @@ impl ProcessControlBlock {
             child_exit_wait: Mutex::new(WaitQueue::new()),
             vfork_parent: Mutex::new(None),
             vfork_done: Completion::new(),
+            adopted_by_init: AtomicBool::new(false),
             inner: Mutex::new(ProcessInner {
                 exe,
                 exec_key,
@@ -655,6 +660,7 @@ impl ProcessControlBlock {
                 registry::unregister_process(child.pid);
             } else {
                 child.set_parent(Some(Arc::downgrade(&INITPROC.process)));
+                child.adopted_by_init.store(true, Ordering::Relaxed);
                 live_children.push(child);
             }
         }
@@ -714,8 +720,9 @@ impl ProcessControlBlock {
         };
 
         if let Some(parent_process) = parent_process {
-            // INITPROC 自动回收僵尸子进程，防止孤儿进程累积导致 PCB 内存泄漏。
-            let auto_reap = Arc::ptr_eq(&parent_process, &INITPROC.process)
+            // 仅对被 init 收养的孤儿做 auto-reap；init 直接 fork 的
+            // 子进程仍走正常 waitpid 路径，保证 wait/rusage 语义。
+            let auto_reap = self.adopted_by_init.load(Ordering::Relaxed)
                 || auto_reap
                 || sigchld_requests_auto_reap(&parent_process.sighand().lock());
             if auto_reap {

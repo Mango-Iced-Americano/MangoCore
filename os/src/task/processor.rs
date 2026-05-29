@@ -1,4 +1,4 @@
-use super::{__switch, do_wake_expired, drain_interruptible_zombies, drain_ready_zombies};
+use super::{__switch, do_wake_expired, take_one_interruptible_zombie, take_one_ready_zombie};
 use super::{fetch_task, TaskStatus};
 use super::{TaskContext, TaskControlBlock};
 use crate::hal::TrapContext;
@@ -88,8 +88,9 @@ pub fn run_tasks() {
         crate::fs::reclaim::maybe_reclaim_fs_caches();
         // 在取任务前先清理僵尸，防止 zombie TCB 因 nice-aware
         // 调度策略长期不被选中而导致 TCB/PCB 整链内存泄漏。
-        drop(drain_ready_zombies());
-        drop(drain_interruptible_zombies());
+        // 逐出僵尸（零堆分配：每次 remove 一个，在锁外 drop）
+        drop(take_one_ready_zombie());
+        drop(take_one_interruptible_zombie());
         let mut processor = PROCESSOR.lock();
         if let Some(task) = fetch_task() {
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();

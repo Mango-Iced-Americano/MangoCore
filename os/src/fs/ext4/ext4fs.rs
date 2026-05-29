@@ -1797,7 +1797,8 @@ impl Ext4FileSystem {
             // Phase 3: enforce soft/hard cap
             let len = cache.len();
             if len >= INODE_CACHE_HARD_CAP {
-                // 硬上限：强制回写脏条目后驱逐，防止脏 inode 永久驻留内存
+                // 硬上限：先回写所有脏条目，再驱逐 strong_count==1 的干净条目。
+                // 有外部引用的条目跳过，允许短暂超过 cap，避免产生重复缓存对象。
                 let dirty_inos: alloc::vec::Vec<u32> = cache
                     .iter()
                     .filter(|(_, c)| c.lock().dirty)
@@ -1808,17 +1809,21 @@ impl Ext4FileSystem {
                     let _ = self.flush_inode(*ino);
                 }
                 let mut cache = self.inode_cache.lock();
-                // 回写后驱逐所有多余条目
                 let to_evict: alloc::vec::Vec<u32> = cache
                     .iter()
+                    .filter(|(_, c)| {
+                        !c.lock().dirty && alloc::sync::Arc::strong_count(c) == 1
+                    })
                     .take(len - INODE_CACHE_SOFT_CAP + 1)
                     .map(|(ino, _)| *ino)
                     .collect();
                 for evict_ino in &to_evict {
                     cache.remove(evict_ino);
                 }
-                for _ in 0..to_evict.len() {
-                    super::counters::inc_counter!(super::counters::INODE_CACHE_EVICT_CLEAN);
+                if !to_evict.is_empty() {
+                    for _ in 0..to_evict.len() {
+                        super::counters::inc_counter!(super::counters::INODE_CACHE_EVICT_CLEAN);
+                    }
                 }
                 cache.insert(ino, arc.clone());
                 super::counters::inc_counter!(super::counters::INODE_CACHE_INSERT);
@@ -1826,7 +1831,9 @@ impl Ext4FileSystem {
             } else if len >= INODE_CACHE_SOFT_CAP {
                 let to_evict: alloc::vec::Vec<u32> = cache
                     .iter()
-                    .filter(|(_, c)| !c.lock().dirty)
+                    .filter(|(_, c)| {
+                        !c.lock().dirty && alloc::sync::Arc::strong_count(c) == 1
+                    })
                     .take(len - INODE_CACHE_SOFT_CAP + 1)
                     .map(|(ino, _)| *ino)
                     .collect();

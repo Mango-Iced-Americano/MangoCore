@@ -183,44 +183,26 @@ impl TaskManager {
     fn recompute_ready_nice_count(&mut self) {
         self.ready_nonzero_nice_count = count_ready_nonzero_nice(&self.ready_queue);
     }
-    /// 从就绪队列中移除所有僵尸任务并返回，由调用者在锁外 drop。
-    /// 解决 zombie TCB 因 nice-aware 调度长期不被选中导致的内存泄漏。
-    fn drain_ready_zombies(&mut self) -> Vec<Arc<TaskControlBlock>> {
-        if self.ready_queue.is_empty() {
-            return Vec::new();
-        }
-        let mut zombies = Vec::new();
-        let mut rest = VecDeque::new();
-        while let Some(task) = self.ready_queue.pop_front() {
-            if task.acquire_inner_lock().is_zombie() {
-                zombies.push(task);
-            } else {
-                rest.push_back(task);
+    /// 从就绪队列中逐出一个僵尸任务（零堆分配）。
+    /// 每次调用最多 remove 一个元素，drop 发生在锁外。
+    fn take_one_ready_zombie(&mut self) -> Option<Arc<TaskControlBlock>> {
+        for i in 0..self.ready_queue.len() {
+            if self.ready_queue[i].acquire_inner_lock().is_zombie() {
+                let zombie = self.ready_queue.remove(i).unwrap();
+                self.recompute_ready_nice_count();
+                return Some(zombie);
             }
         }
-        self.ready_queue = rest;
-        if !zombies.is_empty() {
-            self.recompute_ready_nice_count();
-        }
-        zombies
+        None
     }
-    /// 从可中断队列中移除所有僵尸任务并返回，由调用者在锁外 drop。
-    /// 解决 zombie TCB 在 interruptible_queue 中因无人唤醒而永久驻留导致的内存泄漏。
-    fn drain_interruptible_zombies(&mut self) -> Vec<Arc<TaskControlBlock>> {
-        if self.interruptible_queue.is_empty() {
-            return Vec::new();
-        }
-        let mut zombies = Vec::new();
-        let mut rest = VecDeque::new();
-        while let Some(task) = self.interruptible_queue.pop_front() {
-            if task.acquire_inner_lock().is_zombie() {
-                zombies.push(task);
-            } else {
-                rest.push_back(task);
+    /// 从可中断队列中逐出一个僵尸任务（零堆分配）。
+    fn take_one_interruptible_zombie(&mut self) -> Option<Arc<TaskControlBlock>> {
+        for i in 0..self.interruptible_queue.len() {
+            if self.interruptible_queue[i].acquire_inner_lock().is_zombie() {
+                return self.interruptible_queue.remove(i);
             }
         }
-        self.interruptible_queue = rest;
-        zombies
+        None
     }
     fn update_ready_nice(&mut self, task: &Arc<TaskControlBlock>, old_nice: i32, new_nice: i32) {
         if (old_nice == 0) == (new_nice == 0) {
@@ -393,16 +375,15 @@ pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
     TASK_MANAGER.lock().fetch()
 }
 
-/// 从就绪队列中移除所有僵尸任务并在锁外释放。
-/// 应在每次调度循环中调用，防止 zombie TCB 因调度策略不被选中而长期驻留。
-pub fn drain_ready_zombies() -> Vec<Arc<TaskControlBlock>> {
-    TASK_MANAGER.lock().drain_ready_zombies()
+/// 从就绪队列中逐出一个僵尸任务（零堆分配），返回后在锁外 drop。
+/// 调度循环中每轮调用一次，逐步排空。
+pub fn take_one_ready_zombie() -> Option<Arc<TaskControlBlock>> {
+    TASK_MANAGER.lock().take_one_ready_zombie()
 }
 
-/// 从可中断队列中移除所有僵尸任务并在锁外释放。
-/// 应在每次调度循环中调用，防止 zombie TCB 因无人唤醒而永久驻留。
-pub fn drain_interruptible_zombies() -> Vec<Arc<TaskControlBlock>> {
-    TASK_MANAGER.lock().drain_interruptible_zombies()
+/// 从可中断队列中逐出一个僵尸任务（零堆分配），返回后在锁外 drop。
+pub fn take_one_interruptible_zombie() -> Option<Arc<TaskControlBlock>> {
+    TASK_MANAGER.lock().take_one_interruptible_zombie()
 }
 
 /// 尝试释放所有任务的内存空间，直到释放`req`页。
@@ -1469,7 +1450,13 @@ pub fn do_wake_expired() {
     TIMEOUT_WAITQUEUE.lock().wake_expired(now);
     let mut ktq = KERNEL_TIMER_QUEUE.lock();
     ktq.wake_expired(now);
-    ktq.compact();
+    // compact 涉及 BinaryHeap::drain → Vec 堆分配，降频执行：
+    // 仅在队列半满时每 64 个 tick 执行一次。
+    static COMPACT_TICK: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    let tick = COMPACT_TICK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if tick % 64 == 0 && ktq.len() > KernelTimerQueue::MAX_TIMERS / 2 {
+        ktq.compact();
+    }
 }
 
 /// 获取内核计时器队列长度（诊断用，尝试获取锁）
