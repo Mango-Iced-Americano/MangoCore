@@ -594,7 +594,24 @@ impl ProcessControlBlock {
     }
 
     pub fn add_child(&self, child: Arc<ProcessControlBlock>) -> Result<(), isize> {
+        const CHILDREN_SOFT_CAP: usize = 512;
         let mut inner = self.inner.lock();
+        // 超过软上限时，先清理已 zombie 的子进程作为兜底防御。
+        // 正常情况下 finish_exit → wait4 会回收 zombie，此逻辑仅
+        // 在回收链路意外失效时防止 children 无限增长导致 OOM。
+        let len = inner.children.len();
+        if len >= CHILDREN_SOFT_CAP {
+            let before = len;
+            inner.children.retain(|c| !c.is_zombie());
+            if inner.children.len() >= CHILDREN_SOFT_CAP {
+                warn!(
+                    "[add_child] pid={} {} live children at cap (before={}), possible leak",
+                    self.pid,
+                    inner.children.len(),
+                    before,
+                );
+            }
+        }
         if inner.children.try_reserve(1).is_err() {
             return Err(crate::syscall::errno::ENOMEM);
         }
