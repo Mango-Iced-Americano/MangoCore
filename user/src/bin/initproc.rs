@@ -16,11 +16,9 @@ use core::sync::atomic::{AtomicBool, Ordering};
 static HAS_BIN_BASH: AtomicBool = AtomicBool::new(true);
 
 #[cfg(target_arch = "riscv64")]
-const LIBGCC_S_SO: &[u8] =
-    include_bytes!("../../assets/libgcc_s/riscv64/libgcc_s.so.1");
+const LIBGCC_S_SO: &[u8] = include_bytes!("../../assets/libgcc_s/riscv64/libgcc_s.so.1");
 #[cfg(target_arch = "loongarch64")]
-const LIBGCC_S_SO: &[u8] =
-    include_bytes!("../../assets/libgcc_s/loongarch64/libgcc_s.so.1");
+const LIBGCC_S_SO: &[u8] = include_bytes!("../../assets/libgcc_s/loongarch64/libgcc_s.so.1");
 // ============================================================
 // TEST_GROUPS — 组名与脚本文件名的映射
 // 索引 0..11 与 mask 的 bit0..bit11 一一对应
@@ -71,18 +69,18 @@ const DEFAULT_ORDER: &[&str] = &[
 /// 每组默认超时（秒），索引 0..11 与 TEST_GROUPS 一一对应
 /// 例如 [6]=90 表示 TEST_GROUPS[6] (iperf) 的超时时间为 90 秒
 const DEFAULT_TIMEOUTS: [u64; 12] = [
-    60,   // [0]  basic
-    60,   // [1]  busybox
-    60,   // [2]  lua
-    120,  // [3]  libctest
-    120,  // [4]  iozone
-    90,   // [5]  unixbench
-    40,   // [6]  iperf
-    120,  // [7]  libcbench
-    1800, // [8]  lmbench
-    90,   // [9]  netperf
-    60,   // [10] cyclictest
-    18000,  // [11] ltp
+    60,    // [0]  basic
+    60,    // [1]  busybox
+    60,    // [2]  lua
+    120,   // [3]  libctest
+    120,   // [4]  iozone
+    90,    // [5]  unixbench
+    40,    // [6]  iperf
+    120,   // [7]  libcbench
+    1800,  // [8]  lmbench
+    90,    // [9]  netperf
+    60,    // [10] cyclictest
+    18000, // [11] ltp
 ];
 
 /// LTP 默认排除测例名列表
@@ -789,8 +787,7 @@ const MAX_LTP_ENTRIES: usize = 3000;
 const MAX_NAME_BYTES: usize = 98304; // 96KB name storage on stack
 
 fn should_preload_ltp_compat(libc_suffix: &str, name: &str) -> bool {
-    (libc_suffix == "musl" || libc_suffix == "glibc")
-        && !name.as_bytes().iter().any(|b| *b == b'.')
+    (libc_suffix == "musl" || libc_suffix == "glibc") && !name.as_bytes().iter().any(|b| *b == b'.')
 }
 
 fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str> {
@@ -1010,7 +1007,9 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "ask_password.sh" | "assign_password.sh" | "change_password.sh" | "remove_password.sh" => {
             Some("interactive password helper")
         }
-        "bind06" | "bind_noport01.sh" => Some("network namespace/bind helper skipped in LTP syscall scan"),
+        "bind06" | "bind_noport01.sh" => {
+            Some("network namespace/bind helper skipped in LTP syscall scan")
+        }
         "block_dev" => Some("requires LTP block-device kernel module"),
         "cacheflush01" => Some("architecture cacheflush syscall not supported"),
         "cap_bounds_r" | "cap_bounds_rw" | "cap_bset_inh_bounds" => {
@@ -1019,7 +1018,7 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "chdir01" => Some("requires LTP external block device"),
         "chmod05" | "chmod06" | "chmod07" => {
             Some("filesystem permission/user database semantics skipped in LTP syscall scan")
-        },
+        }
         "check_envval" => Some("standalone locale/environment helper skipped in LTP syscall scan"),
         "check_keepcaps" | "check_pe" | "check_simple_capset" => {
             Some("requires full POSIX capability userspace support")
@@ -1078,24 +1077,30 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "ssh-stress.sh" => Some("network ssh stress helper skipped in LTP syscall scan"),
         "stack_clash" => Some("requires procfs cmdline and stack guard CVE environment"),
         "starvation" => Some("long-running scheduler stress case skipped in broad scan"),
-        "stat03" | "stat03_64" => Some("filesystem permission stat cases skipped in LTP syscall scan"),
+        "stat03" | "stat03_64" => {
+            Some("filesystem permission stat cases skipped in LTP syscall scan")
+        }
         "stream02" => Some("stdio pipe/tty helper skipped in LTP syscall scan"),
         "support_numa" => Some("requires NUMA support"),
         "tee01" | "tee02" => Some("pipe tee syscall tests skipped in LTP syscall scan"),
         "test.sh" => Some("standalone LTP helper skipped in syscall scan"),
         "test_ioctl" | "test_recvmsg" | "test_robind.sh" => {
             Some("network SCTP helper skipped in LTP syscall scan")
-        },
+        }
         "thp02" | "thp03" | "thp04" => Some("requires transparent/huge page support"),
         "timed_forkbomb" => Some("long-running fork pressure case skipped in broad scan"),
         "timer_settime03" => Some("POSIX timer overrun saturation pending dedicated timer fix"),
         "tpci" => Some("requires PCI test driver environment"),
         "trace_sched" => Some("requires kernel tracing scheduler environment"),
-        "truncate03" | "truncate03_64" => Some("filesystem truncate edge cases skipped in LTP syscall scan"),
+        "truncate03" | "truncate03_64" => {
+            Some("filesystem truncate edge cases skipped in LTP syscall scan")
+        }
         "uaccess" => Some("requires LTP kernel module environment"),
         "umask01" => Some("filesystem umask/create-mode semantics skipped in LTP syscall scan"),
         "umip_basic_test" => Some("x86_64-only UMIP testcase"),
-        "unshare02" => Some("mount namespace invalid-case test skipped before full namespace support"),
+        "unshare02" => {
+            Some("mount namespace invalid-case test skipped before full namespace support")
+        }
         "unshare01.sh" => Some("standalone namespace shell helper skipped in broad scan"),
         "unzip01.sh" => Some("standalone unzip shell helper skipped in LTP syscall scan"),
         "userfaultfd01" => Some("userfaultfd syscall not supported"),
@@ -1135,7 +1140,7 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "wc01.sh" | "which01.sh" => Some("standalone shell helper skipped in LTP syscall scan"),
         "write04" | "write05" | "write06" | "writev01" => {
             Some("filesystem/pipe write edge cases skipped in LTP syscall scan")
-        },
+        }
         "writetest" => Some("standalone write stress helper skipped in LTP syscall scan"),
         "writev03" => Some("requires at least two CPUs online"),
         _ => None,
@@ -1403,17 +1408,11 @@ fn run_ltp_suite_runner(
 ) {
     let ltp_root = format!("{}/ltp\0", libc_root);
 
-    println!(
-        "#### OS COMP TEST GROUP START ltp-{} ####",
-        libc_suffix
-    );
+    println!("#### OS COMP TEST GROUP START ltp-{} ####", libc_suffix);
 
     let pid = fork();
     if pid < 0 {
-        println!(
-            "[initproc] fork failed for ltprunner ret={}",
-            pid
-        );
+        println!("[initproc] fork failed for ltprunner ret={}", pid);
         println!("#### OS COMP TEST GROUP END ltp-{} ####", libc_suffix);
         return;
     }
@@ -1943,7 +1942,10 @@ pub extern "C" fn _start() -> ! {
 /// 2. musl/glibc 动态库链接到 /lib
 fn install_embedded_libgcc_s() {
     let path = "/glibc/lib/libgcc_s.so.1\0";
-    let fd = open(path, OpenFlags::CREATE | OpenFlags::WRONLY | OpenFlags::TRUNC);
+    let fd = open(
+        path,
+        OpenFlags::CREATE | OpenFlags::WRONLY | OpenFlags::TRUNC,
+    );
     if fd < 0 {
         println!("[initproc] install libgcc_s failed to open, ret={}", fd);
         return;
@@ -2040,7 +2042,8 @@ fn prepare_symlink(environ: &[*const u8]) {
     // 脚本通过 ./run-all.sh 直接执行（不经过 bash），必须设 +x。
     // LTP inline runner 不受影响（使用 bash -c "./binary" 绕过权限检查）。
     println!("[initproc] fixing +x permissions on test scripts ...");
-    let chmod_cmd = "chmod +x /musl/*.sh /musl/*/*.sh /glibc/*.sh /glibc/*/*.sh 2>/dev/null; true\0";
+    let chmod_cmd =
+        "chmod +x /musl/*.sh /musl/*/*.sh /glibc/*.sh /glibc/*/*.sh 2>/dev/null; true\0";
     let ret = run_bash_cmd(chmod_cmd, environ);
     println!("[initproc] chmod test scripts done, exit={}", ret);
 
@@ -2092,37 +2095,13 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     // let fs_test_ret = run_bash_cmd(fs_test_cmd, &environ);
     // println!("[initproc] fs_test returned exit_code={}", fs_test_ret);
 
+    println!("[initproc] running inet_test...");
+    let inet_test_cmd = "cd / && ./inet_test\0";
+    let inet_test_ret = run_bash_cmd(inet_test_cmd, &environ);
+    println!("[initproc] inet_test returned exit_code={}", inet_test_ret);
+
     let cfg = load_runtime_config();
 
-    // ============================================================
-    // LTP 信号系统测试（控制变量：先验证信号基础，再测网络）
-    // ============================================================
-    // run_ltp_signal_tests(&environ);
-
-    // ============================================================
-    // LTP 网络相关测例（独立 ELF 二进制，跳过 runltp 脚本框架）
-    // ============================================================
-    // run_ltp_network_tests(&environ);
-
-    // ============================================================
-    // Unix Domain Socket 独立测试（不依赖 LTP 框架）
-    // 编译自 user/src/bin/unix_test.rs
-    // ============================================================
-    // run_unix_standalone_tests(&environ);
-
-    // run_bash_cmd("cd musl && ./iperf3 -s &", &environ);
-    // run_bash_cmd(
-    //     "cd musl && ./netserver -D -L 127.0.0.1 -p 12865 &",
-    //     &environ,
-    // );
-    // sleep(100);
-    // run_bash_cmd("cd musl && ./netperf -H 127.0.0.1 -p 12865 -t TCP_CRR -l 1 -- -s 16k -S 16k -m 1k -M 1k -r 64,64 -R 1", &environ);
-
-    // run_bash_cmd("cd musl && bash ./netperf_testcode.sh", &environ);
-    // run_bash_cmd("cd musl && bash ./iperf_testcode.sh", &environ); // prepare test scripts (chmod +x etc)
-
-    // run_bash_cmd("cd musl/ltp/testcases/bin && ./send02", &environ);
-    // run_bash_cmd("./inet_test", &environ);
     if cfg.mode == RunMode::Shell {
         /*
         // Quick TTY diagnostic before shell — uncomment to debug echo

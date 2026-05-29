@@ -3,6 +3,7 @@ use crate::drivers::NET_DEVICE;
 use crate::net::adapter::{RoutingDevice, SmoltcpDeviceAdapter};
 use crate::net::socket::inet::datagram::udp::dispatch_udp_packets;
 use crate::net::socket::inet::stream::inner::tcp_state_code;
+use crate::net::net_core;
 use crate::net::{TCP_SOCKETS, TCP_SOCKETS_TO_REMOVE, UDP_SOCKETS_TO_REMOVE};
 use crate::timer::current_time_duration;
 use crate::trace_event;
@@ -13,12 +14,16 @@ use smoltcp::{
     phy::{Device, Loopback, Medium},
     socket::{raw, tcp, udp, AnySocket},
     time::Instant,
-    wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Address},
+    wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr},
 };
 
 pub static NET_INTERFACE: NetInterface = NetInterface::new();
 
 pub fn init() {
+    // Initialize net_core first (registers lo and eth0 into IFACES).
+    // Must happen before NET_INTERFACE.init() so that NetInterfaceInner::new()
+    // can read IP addresses from net_core::IFACES.
+    net_core::init();
     if NET_DEVICE.lock().is_none() {
         println!("[kernel] net device unavailable, skipping net interface initialization");
         return;
@@ -55,21 +60,25 @@ impl<'a> NetInterfaceInner<'a> {
         ])));
         let mut iface = Interface::new(config, &mut device, now);
         // let mut iface = Interface::new(config, &mut eth, now);
-        // 双 IP: loopback + 物理网卡
+        // Source IP addresses from net_core registered interfaces
+        let addrs_src: Vec<IpCidr> = {
+            let ifaces = net_core::IFACES.lock();
+            ifaces
+                .iter()
+                .flat_map(|dev| dev.ip_addrs.iter().copied())
+                .collect()
+        };
         iface.update_ip_addrs(|addrs| {
-            addrs
-                .push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8))
-                .unwrap();
-            addrs
-                .push(IpCidr::new(IpAddress::v4(10, 0, 2, 15), 24))
-                .unwrap();
+            for cidr in &addrs_src {
+                addrs.push(*cidr).unwrap();
+            }
         });
+        log::info!("[net::config] sourced addresses from net_core: {:?}", addrs_src);
 
-        // 默认路由: 0.0.0.0/0 via 10.0.2.2
-        iface
-            .routes_mut()
-            .add_default_ipv4_route(Ipv4Address::new(10, 0, 2, 2))
-            .unwrap();
+        // Default route from net_core
+        if let Some(gw) = net_core::default_gateway() {
+            iface.routes_mut().add_default_ipv4_route(gw).unwrap();
+        }
 
         Self {
             device,
@@ -343,9 +352,14 @@ impl<'a> NetInterface<'a> {
 }
 
 pub fn lookup_source_ip(dest_ip: IpAddress) -> IpAddress {
-    // 环回目标走 127.0.0.1，其他走物理网卡 IP
-    match dest_ip {
-        IpAddress::Ipv4(addr) if addr.0[0] == 127 => IpAddress::v4(127, 0, 0, 1),
-        _ => IpAddress::v4(10, 0, 2, 15),
-    }
+    let result = match dest_ip {
+        IpAddress::Ipv4(addr) if addr.0[0] == 127 => net_core::loopback_iface()
+            .and_then(|d| d.ip_addrs.first().map(|c| c.address()))
+            .unwrap_or(IpAddress::v4(127, 0, 0, 1)),
+        _ => net_core::default_iface()
+            .and_then(|d| d.ip_addrs.first().map(|c| c.address()))
+            .unwrap_or(IpAddress::v4(10, 0, 2, 15)),
+    };
+    log::debug!("source_ip_select: dst={:?} -> src={:?}", dest_ip, result);
+    result
 }

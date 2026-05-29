@@ -83,3 +83,17 @@
 ### WaitQueue wake-all 路径性能
 - **根因**: 每唤醒一个任务都扫描全局队列
 - **修复**: 批量收集待唤醒任务，一次性更新 `TASK_MANAGER` 队列
+
+## 网络
+
+### 硬编码 IPv4 地址替换为 net_core 动态查询
+- **根因**: 多处硬编码 `127.0.0.1` / `10.0.2.15` / `10.0.2.2`，QEMU 环境变更时需逐处修改
+- **修复**: 用 `net_core::loopback_iface()` / `net_core::default_iface()` / `net_core::default_gateway()` 动态查询，`unwrap_or` 保留硬编码 IP 作为防御性回退
+- **模式**:
+  ```rust
+  crate::net::net_core::loopback_iface()
+      .and_then(|d| d.ip_addrs.first().map(|c| c.address()))
+      .unwrap_or(IpAddress::v4(127, 0, 0, 1))
+  ```
+- **关键**: 必须保留 `unwrap_or` 回退，因为接口在 net_core 初始化前可能未注册；`unwrap()` 会导致过早调用 panic
+- **相关文件**: 所有 `net/socket/inet/` 下引用 IP 的文件
