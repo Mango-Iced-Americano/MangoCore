@@ -40,16 +40,25 @@ pub struct NetInterface<'a> {
     inner: Mutex<Option<NetInterfaceInner<'a>>>,
 }
 
-pub struct NetInterfaceInner<'a> {
+pub struct DeviceStack<'a> {
+    pub ifindex: u32,
+    pub name: &'static str,
     pub device: RoutingDevice,
-    // pub device: SmoltcpDeviceAdapter,
     pub iface: Interface,
     pub sockets: SocketSet<'a>,
+}
+
+pub struct NetInterfaceInner<'a> {
+    pub stacks: Vec<DeviceStack<'a>>,
     pub bindings: BTreeMap<RouteSocketHandle, SocketBinding>,
     pub next_socket_id: usize,
 }
 
 impl<'a> NetInterfaceInner<'a> {
+    fn stack_mut(&mut self, ifindex: u32) -> Option<&mut DeviceStack<'a>> {
+        self.stacks.iter_mut().find(|s| s.ifindex == ifindex)
+    }
+
     fn resolve(&self, rh: RouteSocketHandle) -> Option<SocketHandle> {
         self.bindings.get(&rh).map(|b| b.handle)
     }
@@ -141,9 +150,13 @@ impl<'a> NetInterfaceInner<'a> {
         }
 
         Self {
-            device,
-            iface,
-            sockets,
+            stacks: alloc::vec![DeviceStack {
+                ifindex: 0,
+                name: "routing",
+                device,
+                iface,
+                sockets,
+            }],
             bindings: BTreeMap::new(),
             next_socket_id: 1,
         }
@@ -175,7 +188,7 @@ impl<'a> NetInterface<'a> {
     where
         T: AnySocket<'a>,
     {
-        Some(self.inner.lock().as_mut()?.sockets.add(socket))
+        Some(self.inner.lock().as_mut()?.stacks[0].sockets.add(socket))
     }
 
     pub fn tcp_socket<T>(
@@ -185,7 +198,7 @@ impl<'a> NetInterface<'a> {
     ) -> Option<T> {
         let mut inner = self.inner.lock();
         let inner_ref = inner.as_mut()?;
-        let socket = inner_ref.sockets.get_mut::<tcp::Socket>(handler);
+        let socket = inner_ref.stacks[0].sockets.get_mut::<tcp::Socket>(handler);
         Some(f(socket))
     }
 
@@ -196,7 +209,7 @@ impl<'a> NetInterface<'a> {
     ) -> Option<T> {
         let mut inner = self.inner.lock();
         let inner_ref = inner.as_mut()?;
-        let socket = inner_ref.sockets.get_mut::<udp::Socket>(handler);
+        let socket = inner_ref.stacks[0].sockets.get_mut::<udp::Socket>(handler);
         Some(f(socket))
     }
 
@@ -207,7 +220,7 @@ impl<'a> NetInterface<'a> {
     ) -> Option<T> {
         let mut inner = self.inner.lock();
         let inner_ref = inner.as_mut()?;
-        let socket = inner_ref.sockets.get_mut::<raw::Socket>(handler);
+        let socket = inner_ref.stacks[0].sockets.get_mut::<raw::Socket>(handler);
         Some(f(socket))
     }
 
@@ -222,7 +235,7 @@ impl<'a> NetInterface<'a> {
         let pending = TCP_SOCKETS_TO_REMOVE.lock().len() + UDP_SOCKETS_TO_REMOVE.lock().len();
         // UDP: count via inner sockets (only if initialized)
         let udp = match self.inner.lock().as_ref() {
-            Some(inner) => inner.sockets.iter().count().saturating_sub(tcp).saturating_sub(raw),
+            Some(inner) => inner.stacks[0].sockets.iter().count().saturating_sub(tcp).saturating_sub(raw),
             None => 0,
         };
         (tcp, udp, raw, pending)
@@ -252,86 +265,54 @@ impl<'a> NetInterface<'a> {
     fn poll_once(&self) -> bool {
         let mut progressed = false;
         self.inner_handler(|inner| {
-            // Trace: dump all TCP socket states BEFORE poll
-            for (handle, sock) in inner.sockets.iter() {
-                if let smoltcp::socket::Socket::Tcp(tcp_sock) = sock {
-                    let sc = tcp_state_code(&tcp_sock.state());
-                    trace_event!(0xB035, handle.as_usize() as u64, sc, 0, 0, 0, 0);
+            // Pre-collect UDP removal handles before borrowing stack
+            let udp_removes: Vec<(Option<SocketHandle>, RouteSocketHandle)> = {
+                let mut to_remove = UDP_SOCKETS_TO_REMOVE.lock();
+                to_remove.drain(..).map(|rh| (inner.resolve(rh), rh)).collect()
+            };
+            let tcp_removes: Vec<(Option<SocketHandle>, RouteSocketHandle)> = {
+                let mut to_remove = TCP_SOCKETS_TO_REMOVE.lock();
+                to_remove.drain(..).map(|rh| (inner.resolve(rh), rh)).collect()
+            };
+
+            let stack = &mut inner.stacks[0];
+
+            // 1. Clean up UDP sockets
+            for (resolved, rh) in &udp_removes {
+                if let Some(h) = resolved {
+                    stack.sockets.remove(*h);
                 }
+                inner.bindings.remove(rh);
             }
 
-            // 1. 先清理标记删除的 UDP sockets
-            let mut to_remove = UDP_SOCKETS_TO_REMOVE.lock();
-            for rh in to_remove.drain(..) {
-                if let Some(h) = inner.resolve(rh) {
-                    inner.sockets.remove(h);
-                }
-                inner.bindings.remove(&rh);
-            }
-            drop(to_remove);
-
-            // 2. 驱动协议栈
+            // 2. Drive protocol stack
             let timestamp = Instant::from_millis(current_time_duration().as_millis() as i64);
-            progressed = inner
+            progressed = stack
                 .iface
-                .poll(timestamp, &mut inner.device, &mut inner.sockets);
+                .poll(timestamp, &mut stack.device, &mut stack.sockets);
 
-            // 3. 清理符合条件的 TCP sockets
-            let mut to_remove = TCP_SOCKETS_TO_REMOVE.lock();
-            let pending = to_remove.len();
-            let ready: Vec<RouteSocketHandle> = to_remove
-                .iter()
-                .filter(|&&rh| {
-                    if let Some(h) = inner.resolve(rh) {
-                        let socket = inner.sockets.get::<tcp::Socket>(h);
-                        let state = socket.state();
-                        let can_remove = state == tcp::State::Closed;
-                        if !can_remove {
-                            log::debug!(
-                                "[NetInterface::poll_once] TCP handle {:?} not ready yet (state={:?}), deferring",
-                                rh, state
-                            );
-                        }
-                        can_remove
-                    } else {
-                        true // stale binding, remove
+            // 3. Clean up TCP sockets
+            for (resolved, rh) in &tcp_removes {
+                let can_remove = match resolved {
+                    Some(h) => {
+                        let socket = stack.sockets.get::<tcp::Socket>(*h);
+                        socket.state() == tcp::State::Closed
                     }
-                })
-                .copied()
-                .collect();
-            if !ready.is_empty() {
-                log::info!(
-                    "[NetInterface::poll_once] removing {} of {} pending TCP sockets",
-                    ready.len(),
-                    pending
-                );
-            }
-            for &rh in &ready {
-                if let Some(h) = inner.resolve(rh) {
-                    inner.sockets.remove(h);
-                    log::info!("[NetInterface::poll_once] TCP socket {:?} fully removed from SocketSet", rh);
+                    None => true,
+                };
+                if can_remove {
+                    if let Some(h) = resolved {
+                        stack.sockets.remove(*h);
+                    }
+                    inner.bindings.remove(rh);
+                } else {
+                    TCP_SOCKETS_TO_REMOVE.lock().push(*rh);
                 }
-                inner.bindings.remove(&rh);
             }
-            to_remove.retain(|rh| !ready.contains(rh));
-            if to_remove.len() > 0 {
-                log::debug!("[NetInterface::poll_once] {} TCP handles still pending removal", to_remove.len());
-            }
-            drop(to_remove);
 
-            // 4. 分发 UDP 包（必须在每次 poll 后立刻做）
-            log::debug!("[poll_once] about to dispatch_udp_packets");
-            dispatch_udp_packets(inner);
-
-            // Trace: dump all TCP socket states AFTER poll
-            // for (handle, sock) in inner.sockets.iter() {
-            //     if let smoltcp::socket::Socket::Tcp(tcp_sock) = sock {
-            //         let sc = tcp_state_code(&tcp_sock.state());
-            //         trace_event!(0xB035, handle.as_usize() as u64, sc, 1, 0, 0, 0);
-            //     }
-            // }
+            // 4. Dispatch UDP packets
+            dispatch_udp_packets(&mut stack.sockets);
         });
-
         // 5. 更新所有 TCP/RAW socket 事件并唤醒等待者
         if progressed {
             crate::net::wake_tcp_waiters();
@@ -357,56 +338,50 @@ impl<'a> NetInterface<'a> {
     pub fn _poll(&self) {
         log::trace!("[NetInterface::poll] poll...");
         self.inner_handler(|inner| {
-            {
-                // 使用 drain(..) 一次性清空队列并取出所有元素
+            let udp_removes: Vec<(Option<SocketHandle>, RouteSocketHandle)> = {
                 let mut to_remove = UDP_SOCKETS_TO_REMOVE.lock();
-                for rh in to_remove.drain(..) {
-                    if let Some(h) = inner.resolve(rh) {
-                        inner.sockets.remove(h);
-                        log::info!(
-                            "[NetInterface] Successfully removed underlying socket {:?}",
-                            rh
-                        );
-                    }
-                    inner.bindings.remove(&rh);
-                }
-            }
-            // poll 必须在删除 TCP socket 之前，这样 drop 时 close() 触发的
-            // FIN/ACK 握手能在这个 poll 周期内完成（loopback 下一次 poll 即可完成）
-            inner.iface.poll(
-                Instant::from_millis(current_time_duration().as_millis() as i64),
-                &mut inner.device,
-                &mut inner.sockets,
-            );
-            {
+                to_remove.drain(..).map(|rh| (inner.resolve(rh), rh)).collect()
+            };
+            let tcp_removes: Vec<(Option<SocketHandle>, RouteSocketHandle)> = {
                 let mut to_remove = TCP_SOCKETS_TO_REMOVE.lock();
-                let ready: Vec<RouteSocketHandle> = to_remove
-                    .iter()
-                    .filter(|&&rh| {
-                        if let Some(h) = inner.resolve(rh) {
-                            let socket = inner.sockets.get::<tcp::Socket>(h);
-                            socket.state() == tcp::State::Closed
-                                || socket.state() == tcp::State::TimeWait
-                        } else {
-                            true
-                        }
-                    })
-                    .copied()
-                    .collect();
-                for &rh in &ready {
-                    if let Some(h) = inner.resolve(rh) {
-                        inner.sockets.remove(h);
-                        log::info!(
-                            "[NetInterface] Successfully removed underlying TCP socket {:?}",
-                            rh
-                        );
-                    }
-                    inner.bindings.remove(&rh);
+                to_remove.drain(..).map(|rh| (inner.resolve(rh), rh)).collect()
+            };
+
+            let stack = &mut inner.stacks[0];
+
+            for (resolved, rh) in &udp_removes {
+                if let Some(h) = resolved {
+                    stack.sockets.remove(*h);
                 }
-                to_remove.retain(|rh| !ready.contains(rh));
+                inner.bindings.remove(rh);
             }
 
-            dispatch_udp_packets(inner);
+            stack.iface.poll(
+                Instant::from_millis(current_time_duration().as_millis() as i64),
+                &mut stack.device,
+                &mut stack.sockets,
+            );
+
+            for (resolved, rh) in &tcp_removes {
+                let can_remove = match resolved {
+                    Some(h) => {
+                        let socket = stack.sockets.get::<tcp::Socket>(*h);
+                        socket.state() == tcp::State::Closed
+                            || socket.state() == tcp::State::TimeWait
+                    }
+                    None => true,
+                };
+                if can_remove {
+                    if let Some(h) = resolved {
+                        stack.sockets.remove(*h);
+                    }
+                    inner.bindings.remove(rh);
+                } else {
+                    TCP_SOCKETS_TO_REMOVE.lock().push(*rh);
+                }
+            }
+
+            dispatch_udp_packets(&mut stack.sockets);
         });
         // poll 结束后同步所有 TCP socket 的 IO 事件到 pollee（对标 DragonOS on_iface_events）
         {
@@ -426,7 +401,7 @@ impl<'a> NetInterface<'a> {
     }
     pub fn _remove(&self, handler: SocketHandle) {
         if let Some(inner) = self.inner.lock().as_mut() {
-            inner.sockets.remove(handler);
+            inner.stacks[0].sockets.remove(handler);
         }
     }
 
@@ -436,7 +411,7 @@ impl<'a> NetInterface<'a> {
     {
         let mut inner = self.inner.lock();
         let inner_ref = inner.as_mut()?;
-        let handle = inner_ref.sockets.add(socket);
+        let handle = inner_ref.stacks[0].sockets.add(socket);
         let id = inner_ref.next_socket_id;
         inner_ref.next_socket_id += 1;
         let route_handle = RouteSocketHandle(id);
@@ -459,7 +434,7 @@ impl<'a> NetInterface<'a> {
         let mut inner = self.inner.lock();
         let inner_ref = inner.as_mut()?;
         let binding = *inner_ref.bindings.get(&rh)?;
-        let socket = inner_ref.sockets.get_mut::<tcp::Socket>(binding.handle);
+        let socket = inner_ref.stacks[0].sockets.get_mut::<tcp::Socket>(binding.handle);
         Some(f(socket))
     }
 
@@ -471,7 +446,7 @@ impl<'a> NetInterface<'a> {
         let mut inner = self.inner.lock();
         let inner_ref = inner.as_mut()?;
         let binding = *inner_ref.bindings.get(&rh)?;
-        let socket = inner_ref.sockets.get_mut::<udp::Socket>(binding.handle);
+        let socket = inner_ref.stacks[0].sockets.get_mut::<udp::Socket>(binding.handle);
         Some(f(socket))
     }
 
@@ -484,15 +459,16 @@ impl<'a> NetInterface<'a> {
         let mut inner = self.inner.lock();
         let inner_ref = inner.as_mut()?;
         let binding = *inner_ref.bindings.get(&rh)?;
-        let socket = inner_ref.sockets.get_mut::<tcp::Socket>(binding.handle);
-        Some(socket.connect(inner_ref.iface.context(), remote, local))
+        let stack = &mut inner_ref.stacks[0];
+        let socket = stack.sockets.get_mut::<tcp::Socket>(binding.handle);
+        Some(socket.connect(stack.iface.context(), remote, local))
     }
 
     pub fn remove_routed(&self, rh: RouteSocketHandle) {
         let mut inner = self.inner.lock();
         if let Some(inner_ref) = inner.as_mut() {
             if let Some(binding) = inner_ref.bindings.remove(&rh) {
-                inner_ref.sockets.remove(binding.handle);
+                inner_ref.stacks[0].sockets.remove(binding.handle);
             }
         }
     }
@@ -505,7 +481,7 @@ impl<'a> NetInterface<'a> {
         let mut inner = self.inner.lock();
         let inner_ref = inner.as_mut()?;
         let binding = *inner_ref.bindings.get(&rh)?;
-        let socket = inner_ref.sockets.get_mut::<raw::Socket>(binding.handle);
+        let socket = inner_ref.stacks[0].sockets.get_mut::<raw::Socket>(binding.handle);
         Some(f(socket))
     }
 }

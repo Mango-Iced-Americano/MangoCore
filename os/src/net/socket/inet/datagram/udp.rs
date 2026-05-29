@@ -14,6 +14,7 @@ use alloc::sync::Arc;
 use alloc::vec;
 use log::info;
 use smoltcp::{
+    iface::SocketSet,
     phy::PacketMeta,
     socket::{
         self,
@@ -555,7 +556,7 @@ impl UdpSocket {
 }
 
 // 新的分发函数：直接接收 NetInterfaceInner，避免重复获取锁导致死锁！
-pub fn dispatch_udp_packets(inner: &mut NetInterfaceInner) {
+pub fn dispatch_udp_packets(sockets: &mut SocketSet) {
     let mut os_socks = UDP_SOCKETS.lock();
 
     // 顺便清理一下已经被 drop 掉的 socket
@@ -564,10 +565,10 @@ pub fn dispatch_udp_packets(inner: &mut NetInterfaceInner) {
     log::debug!(
         "[dispatch_udp_packets] scanning {} os socks, {} smoltcp sockets",
         os_socks.len(),
-        inner.sockets.iter().count()
+        sockets.iter().count()
     );
 
-    for (handle, socket) in inner.sockets.iter_mut() {
+    for (handle, socket) in sockets.iter_mut() {
         // 尝试把这个 socket 识别为 UDP 类型
         if let Some(udp_sock) = smoltcp::socket::udp::Socket::downcast_mut(socket) {
             // 只要这个底层缓冲区里有包，就全部抽干
