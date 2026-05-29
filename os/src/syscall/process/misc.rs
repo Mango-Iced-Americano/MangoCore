@@ -9,7 +9,7 @@ use log::info;
 use num_enum::FromPrimitive;
 
 const SYSLOG_BUF_LEN: usize = 4096;
-const SYSLOG_BOOT_LOG: &[u8] = b"<5>[    0.000000] Linux version 5.10.102.1-microsoft-standard-WSL2 (rtrt@TEAM-NPUCORE) (gcc (Ubuntu 9.4.0-1ubuntu1~20.04) 9.4.0, GNU ld (GNU Binutils for Ubuntu) 2.34) #1 SMP Thu Mar 10 13:31:47 CST 2022";
+const SYSLOG_BOOT_LOG: &[u8] = b"<5>[    0.000000] Linux version 5.10.102.1-MangoCore (mango@kernel.org) (gcc (Ubuntu 9.4.0-1ubuntu1~20.04) 9.4.0, GNU ld (GNU Binutils for Ubuntu) 2.34) #1 SMP Thu Mar 10 13:31:47 CST 2022";
 const CAP_SYS_ADMIN: usize = 21;
 const CAP_SYSLOG: usize = 34;
 static SYSLOG_READ_ALL_CLEARED: AtomicBool = AtomicBool::new(false);
