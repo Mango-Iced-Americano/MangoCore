@@ -291,7 +291,9 @@ impl PortManager {
 
     /// 检查 TCP 端口冲突（true = 已占用）。
     pub fn check_tcp_conflict(port: u16, addr: Option<Ipv4Address>) -> bool {
-        let table = TCP_PORTS.lock();
+        let mut table = TCP_PORTS.lock();
+        // 清理已失效的 Weak 引用（socket 已 drop 但表项未及时清除）
+        table.retain(|_, v| v.socket_weak.upgrade().is_some());
         if let Some(binding) = table.get(&port) {
             match (binding.addr, addr) {
                 (Some(a), Some(b)) => a == b,
@@ -310,7 +312,12 @@ impl PortManager {
         addr: Option<Ipv4Address>,
         reuseaddr: bool,
     ) -> Result<(), SyscallErr> {
-        let table = UDP_PORTS.lock();
+        let mut table = UDP_PORTS.lock();
+        // 清理已失效的 Weak 引用，同时移除空列表
+        for list in table.values_mut() {
+            list.retain(|b| b.socket_weak.upgrade().is_some());
+        }
+        table.retain(|_, v| !v.is_empty());
         if let Some(bindings) = table.get(&port) {
             for binding in bindings {
                 let addr_conflict = match (binding.addr, addr) {

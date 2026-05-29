@@ -1,6 +1,6 @@
 use log::info;
 
-use crate::mm::UserPtr;
+use crate::mm::{copy_to_user_array, UserPtr};
 use crate::net::config::NET_INTERFACE;
 use crate::net::PSOCK;
 use crate::syscall::utils::wait_io;
@@ -52,51 +52,74 @@ pub fn sys_recvfrom(
 
     info!("[sys_recvfrom] get socket sockfd: {}", sockfd);
     log::info!("[sys_recvfrom] is nonblock:{:?}", is_nonblock);
-    // 页表转换提到外面，避免 wait_io 循环中重复翻译
-    let buf_slice = crate::trans_refmut!(buf, len);
 
-    let mut recv = || match socket.socket_type() {
-        PSOCK::Stream => {
-            // TCP (SOCK_STREAM): recvfrom behaves like recv, ignores from/addrlen
-            let ret = socket.try_recv(buf_slice)?;
-            Ok(ret)
-        }
-        PSOCK::Datagram | PSOCK::Raw => {
-            let (ret, src_ep) = socket.try_recvmsg(buf_slice)?;
-            log::info!("[sys_recvfrom] Datagram try_recvmsg returned {} bytes", ret);
-            // 注意这里是 >= 0，因为 UDP 允许发送 0 字节的空包
-            if ret >= 0 && src_addr != 0 {
-                if let Some(ep) = src_ep {
-                    let _ = ep.fill_sockaddr(src_addr, addrlen);
-                }
+    // 使用 kernel buffer 中转，避免 trans_refmut! 跨页时返回非连续物理内存的 bug。
+    // trans_refmut! 验证了所有用户页，但只返回第一页的切片指针，超出第一页边界
+    // 的数据会写到错误地址。
+    let token = task.get_user_token();
+    let len_usize = len as usize;
+    let (result, kernel_buf) = {
+        let mut kernel_buf = alloc::vec![0u8; len_usize];
+
+        let mut recv = || match socket.socket_type() {
+            PSOCK::Stream => {
+                // TCP (SOCK_STREAM): recvfrom behaves like recv, ignores from/addrlen
+                let ret = socket.try_recv(&mut kernel_buf)?;
+                Ok(ret)
             }
-            Ok(ret)
-        }
-        _ => todo!(),
-    };
-    if let Some(wait_queue) = socket.recv_wait_queue() {
-        if is_nonblock {
-            // Non-blocking: poll once before trying to recv, so smoltcp can
-            // advance TCP state (handshake, data delivery). Without this, a
-            // tight non-blocking recv loop can starve the timer interrupt.
-            NET_INTERFACE.try_poll();
-            log::info!("[sys_recvfrom] after try_poll, calling recv()");
-            match recv() {
-                Ok(n) => n as isize,
-                Err(e) => -(e as isize),
+            PSOCK::Datagram | PSOCK::Raw => {
+                let (ret, src_ep) = socket.try_recvmsg(&mut kernel_buf)?;
+                log::info!("[sys_recvfrom] Datagram try_recvmsg returned {} bytes", ret);
+                // 注意这里是 >= 0，因为 UDP 允许发送 0 字节的空包
+                if ret >= 0 && src_addr != 0 {
+                    if let Some(ep) = src_ep {
+                        let _ = ep.fill_sockaddr(src_addr, addrlen);
+                    }
+                }
+                Ok(ret)
+            }
+            _ => todo!(),
+        };
+        if let Some(wait_queue) = socket.recv_wait_queue() {
+            if is_nonblock {
+                // Non-blocking: poll once before trying to recv, so smoltcp can
+                // advance TCP state (handshake, data delivery). Without this, a
+                // tight non-blocking recv loop can starve the timer interrupt.
+                NET_INTERFACE.try_poll();
+                log::info!("[sys_recvfrom] after try_poll, calling recv()");
+                let n = match recv() {
+                    Ok(n) => n as isize,
+                    Err(e) => -(e as isize),
+                };
+                (n, kernel_buf)
+            } else {
+                let n = WaitQueue::wait_until_interruptible(wait_queue, || match recv() {
+                    Ok(n) => Some(n as isize),
+                    Err(SyscallErr::EAGAIN) => {
+                        log::debug!("[sys_recvfrom] EAGAIN, will sleep");
+                        None
+                    }
+                    Err(e) => Some(-(e as isize)),
+                })
+                .unwrap_or_else(|e| e);
+                (n, kernel_buf)
             }
         } else {
-            WaitQueue::wait_until_interruptible(wait_queue, || match recv() {
-                Ok(n) => Some(n as isize),
-                Err(SyscallErr::EAGAIN) => {
-                    log::debug!("[sys_recvfrom] EAGAIN, will sleep");
-                    None
-                }
-                Err(e) => Some(-(e as isize)),
-            })
-            .unwrap_or_else(|e| e)
+            (wait_io(recv, is_nonblock), kernel_buf)
         }
-    } else {
-        wait_io(recv, is_nonblock)
+    };
+
+    if result > 0 {
+        if copy_to_user_array(
+            token,
+            kernel_buf.as_ptr(),
+            buf as *mut u8,
+            result as usize,
+        )
+        .is_err()
+        {
+            return -(SyscallErr::EFAULT as isize);
+        }
     }
+    result
 }
