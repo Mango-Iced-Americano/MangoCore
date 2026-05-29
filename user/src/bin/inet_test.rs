@@ -2017,8 +2017,9 @@ fn net_ioctl01_ifconf() -> i32 {
     if fd < 0 { tbrok!("NET_IOCTL","net_ioctl01","socket failed: {}",fd); return 1; }
     let fd = fd as usize;
     let mut buf = [0u8; 256];
-    let mut conf = [0u8; 8]; conf[0..4].copy_from_slice(&(256i32).to_ne_bytes());
-    conf[4..8].copy_from_slice(&(buf.as_ptr() as usize).to_ne_bytes());
+    let mut conf = [0u8; 16];
+    conf[0..4].copy_from_slice(&(256i32).to_ne_bytes());
+    conf[8..16].copy_from_slice(&(buf.as_ptr() as usize).to_ne_bytes());
     let ret = sys_ioctl(fd, SIOCGIFCONF, conf.as_ptr() as usize);
     sys_close(fd);
     if ret < 0 { tconf!("NET_IOCTL","net_ioctl01","SIOCGIFCONF not supported ({})",ret); 0 }
@@ -2093,18 +2094,24 @@ fn run_with_watchdog(name: &str, test_fn: fn() -> i32, timeout_ms: usize) -> boo
         let mut status: i32 = 0;
         let ret = user_lib::waitpid_wnohang(pid as isize, &mut status);
         if ret == pid as isize {
-            return true; // child exited
+            // child exited — check exit code
+            let exit_code = (status >> 8) & 0xFF;
+            if exit_code != 0 {
+                println!("[FAIL] {} (exit={})", name, exit_code);
+                return false;
+            }
+            return true; // exit code 0 = success
         }
         let elapsed = (user_lib::get_time() - t0) as usize;
         if elapsed > timeout_ms {
-            user_lib::kill(pid as usize, 9); // SIGKILL
-            let mut status: i32 = 0;
-            sys_waitpid(pid as isize, &mut status); // reap zombie
+            user_lib::kill(pid as usize, 9);
+            let mut s: i32 = 0;
+            sys_waitpid(pid as isize, &mut s);
             println!("");
             println!("[TBROK] {} test timed out after {}ms", name, timeout_ms);
             return false;
         }
-        user_lib::sleep(10); // 10ms polling interval
+        user_lib::sleep(10);
     }
 }
 
