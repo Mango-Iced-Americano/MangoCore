@@ -19,7 +19,7 @@
 
 ### 1.1 设计参考
 
-本网络子系统参考 [DragonOS](https://github.com/DragonOS-Community/DragonOS) 的 VFS/MountFS 架构和 Linux 6.6 语义设计，底层使用 [smoltcp](https://github.com/smoltcp-rs/smoltcp) 作为 TCP/IP 协议栈。
+本网络子系统参考 [DragonOS](https://github.com/DragonOS-Community/DragonOS) 的网络架构（每设备独立 SocketSet、BoundInner 桥接、RouteTable 路由表）和 Linux 6.6 语义设计，底层使用 [smoltcp](https://github.com/smoltcp-rs/smoltcp) 作为 TCP/IP 协议栈。
 
 ### 1.2 核心特性
 
