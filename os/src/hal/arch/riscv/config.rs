@@ -12,7 +12,7 @@ pub const USER_HEAP_SIZE: usize = PAGE_SIZE * 0x100;
 
 pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 0x20;
 #[cfg(feature = "board_rvqemu")]
-pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x2000; // 32MB — OOM-trigger test
+pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x10000;
 #[cfg(feature = "board_fu740")]
 pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x2000;
 #[cfg(feature = "board_cv1811h")]
@@ -44,7 +44,13 @@ pub const SYSTEM_TASK_LIMIT: usize = {
     let ram = MEMORY_SIZE;
     let stack = KERNEL_STACK_SIZE;
     let limit = ram / (stack * 4);
-    if limit < 512 { 512 } else if limit > 4096 { 4096 } else { limit }
+    if limit < 512 {
+        512
+    } else if limit > 4096 {
+        4096
+    } else {
+        limit
+    }
 };
 pub const SYSTEM_TASK_SOFT_LIMIT: usize = SYSTEM_TASK_LIMIT * 9 / 10;
 pub const SYSTEM_FD_LIMIT: usize = 256;

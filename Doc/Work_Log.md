@@ -2,6 +2,28 @@
 
 ---
 
+## 2026-05-30
+
+### heap OOM 分析 — I/O chunking 方案记录
+
+**涉及文件：**
+- `os/src/syscall/fs.rs` — write/read 路径一次性分配用户 count 大小缓冲区
+- `os/src/mm/uaccess.rs` — `UserBufferReader::read_to_vec` 是整个 count 的 Vec
+- `os/src/mm/heap_allocator.rs` — `handle_alloc_error` 直接 fatal
+- `os/src/mm/frame_allocator.rs` — `oom_handler` 中 `current_task().unwrap()` 可 panic
+
+**问题：** LTP openat02 测试中 `write` 触发 16MB 连续 heap 分配，32MB buddy heap 碎片化后无法满足，OOM。
+
+**分析结论：** 不是泄漏（live heap ~15MB，alloc/free 平衡）。根因是 I/O 路径依赖用户驱动的连续大分配。高 churn 来自页面缓存（每次 execve ELF 加载触发 `Arc<FrameTracker>` + `Arc<PageEntry>` 对，LTP 累计 800K+ 次分配/释放）。
+
+**方案：** I/O chunking — 用动态计算的 `IO_CHUNK_SIZE`（heap/16，clamp 64KB-2MB）做单 bounce buffer 循环，取代一次性大分配。覆盖 `write/pwrite/read/pread/readv/writev/preadv/pwritev/sendfile/copy_file_range/sendmsg/recvmsg`。
+
+**详细方案：** `Doc/io-chunking-plan.md`
+
+**状态：** 方案已设计，待后续实施。
+
+---
+
 ## 2026-05-29
 
 ### 修复 /dev/shm TmpFS 生命周期 bug — 改为正规 MountFS 子挂载

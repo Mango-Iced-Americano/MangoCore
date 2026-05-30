@@ -33,7 +33,7 @@ pub const KSTACK_PG_NUM_SHIFT: usize = 16usize.trailing_zeros() as usize;
 // 1000-waiter fork/futex tests exhaust the 128M heap before wait can reap.
 pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 0x10;
 pub const BOOT_STACK_SIZE: usize = PAGE_SIZE * 0x20;
-pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x2000; // 32MB — OOM-trigger test
+pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x10000;
 
 // Addresses
 /// Maximum length of a physical address
