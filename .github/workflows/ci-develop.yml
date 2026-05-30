@@ -65,7 +65,7 @@ jobs:
             -v "${GITHUB_WORKSPACE}:/app" \
             -w /app/os \
             "$CI_IMAGE" \
-            bash -lc 'make rv64-kernel-build-only MODE=release'
+            bash -lc 'make rv64_all MODE=release'
 
       - name: Build la64 kernel
         run: |
@@ -73,7 +73,7 @@ jobs:
             -v "${GITHUB_WORKSPACE}:/app" \
             -w /app/os \
             "$CI_IMAGE" \
-            bash -lc 'make la64-kernel-build-only MODE=release'
+            bash -lc 'make la64_all MODE=release'
 
       - name: Prepare develop config
         run: |
