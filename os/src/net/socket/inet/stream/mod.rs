@@ -194,14 +194,15 @@ impl Socket for TcpSocket {
         match new_inner.bind(listen_ep) {
             Ok(bound) => {
                 if let Inner::Init(inner_init) = &bound {
-                    if let Init::Bound { handle, local } = inner_init {
+                    if let Init::Bound { local, .. } = inner_init {
                         let ifindex = match local.addr {
                             IpAddress::Ipv4(ip) if ip.is_loopback() => 1,
                             _ => 2,
                         };
-                        self.bound
-                            .lock()
-                            .bind(*handle, ifindex, Some(local.addr), local.port);
+                        // Lazy bind: socket not yet in SocketSet; record metadata only
+                        self.bound.lock().ifindex = ifindex;
+                        self.bound.lock().bound_addr = Some(local.addr);
+                        self.bound.lock().bound_port = local.port;
                     }
                 }
                 *inner = bound;
@@ -303,7 +304,7 @@ impl Socket for TcpSocket {
         let ret = match &*inner {
             Inner::Connecting(c) => {
                 let state = NET_INTERFACE
-                    .tcp_socket(c.handle, |s| s.state())
+                    .tcp_routed_socket(c.handle, |s| s.state())
                     .unwrap_or(smoltcp::socket::tcp::State::Closed);
                 let ready = c.update_io_events(&self.pollee);
                 if c.is_connected()

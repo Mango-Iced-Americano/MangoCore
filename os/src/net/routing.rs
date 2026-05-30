@@ -1,6 +1,49 @@
+use alloc::fmt;
 use alloc::vec::Vec;
 use log::debug;
+use smoltcp::iface::SocketHandle;
 use smoltcp::wire::{IpAddress, IpCidr, Ipv4Address};
+
+use crate::utils::error::SyscallErr;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RouteSocketHandle(pub(crate) usize);
+
+impl fmt::Display for RouteSocketHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "RH({})", self.0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InetProtocol {
+    Tcp,
+    Udp,
+    Raw,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SocketBinding {
+    pub ifindex: u32,
+    pub handle: SocketHandle,
+    pub proto: InetProtocol,
+}
+
+#[derive(Clone, Debug)]
+pub struct RouteDecision {
+    pub ifindex: u32,
+    pub source: IpAddress,
+    pub next_hop: Option<IpAddress>,
+    pub is_local: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum RouteKind {
+    Local { dst_ifindex: u32 },
+    Connected { oif: u32 },
+    Gateway { oif: u32, gw: Ipv4Address },
+    Unreachable,
+}
 
 /// The type of a routing table entry.
 #[derive(Clone, Debug, PartialEq)]
@@ -121,6 +164,10 @@ impl Router {
         best_entry
     }
 
+    pub fn lookup_route_owned(&self, dest_ip: Ipv4Address) -> Option<RouteEntry> {
+        self.lookup_route(dest_ip).cloned()
+    }
+
     /// Create a Router pre-populated with default routes.
     /// Dynamic: uses DHCP-assigned IP/gateway from net_core instead of hardcoded values.
     pub fn init_default() -> Self {
@@ -157,5 +204,74 @@ impl Router {
         }
 
         router
+    }
+}
+
+pub fn route_output(dest: IpAddress) -> Result<RouteDecision, SyscallErr> {
+    let router = Router::init_default();
+    match dest {
+        IpAddress::Ipv4(addr) => {
+            let is_local = crate::net::net_core::IFACES
+                .lock()
+                .iter()
+                .any(|d| d.ip_addrs.iter().any(|c| c.address() == dest));
+            if is_local {
+                let ifaces = crate::net::net_core::IFACES.lock();
+                let dst_ifindex = ifaces
+                    .iter()
+                    .find(|d| d.ip_addrs.iter().any(|c| c.address() == dest))
+                    .map(|d| d.ifindex)
+                    .unwrap_or(1);
+                let source = ifaces
+                    .iter()
+                    .find(|d| d.ifindex == dst_ifindex)
+                    .and_then(|d| d.ip_addrs.first().map(|c| c.address()))
+                    .unwrap_or(IpAddress::v4(127, 0, 0, 1));
+                return Ok(RouteDecision {
+                    ifindex: dst_ifindex,
+                    source,
+                    next_hop: None,
+                    is_local: true,
+                });
+            }
+
+            if addr.0[0] == 127 {
+                let source = crate::net::net_core::loopback_iface()
+                    .and_then(|d| d.ip_addrs.first().map(|c| c.address()))
+                    .unwrap_or(IpAddress::v4(127, 0, 0, 1));
+                return Ok(RouteDecision {
+                    ifindex: 1,
+                    source,
+                    next_hop: None,
+                    is_local: true,
+                });
+            }
+
+            if let Some(entry) = router.lookup_route_owned(addr) {
+                let source = crate::net::net_core::find_by_index(entry.ifindex)
+                    .and_then(|d| d.ip_addrs.first().map(|c| c.address()))
+                    .unwrap_or(IpAddress::v4(0, 0, 0, 0));
+                return Ok(RouteDecision {
+                    ifindex: entry.ifindex,
+                    source,
+                    next_hop: entry.next_hop,
+                    is_local: false,
+                });
+            }
+
+            Err(SyscallErr::ENETUNREACH)
+        }
+        IpAddress::Ipv6(_) => {
+            if crate::net::net_core::find_by_name("eth0").is_some() {
+                Ok(RouteDecision {
+                    ifindex: 2,
+                    source: IpAddress::v4(0, 0, 0, 0),
+                    next_hop: None,
+                    is_local: false,
+                })
+            } else {
+                Err(SyscallErr::ENETUNREACH)
+            }
+        }
     }
 }

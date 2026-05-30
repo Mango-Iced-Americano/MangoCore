@@ -31,7 +31,7 @@ use alloc::{
 use core::any::Any;
 use core::convert::TryFrom;
 
-use smoltcp::iface::SocketHandle;
+use crate::net::routing::RouteSocketHandle;
 use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint, Ipv4Address, Ipv6Address};
 use spin::Mutex;
 
@@ -134,15 +134,15 @@ pub const MAX_BUFFER_SIZE: usize = 64 * 1024;
 
 // 定义全局的 UDP Sockets 集合
 pub static UDP_SOCKETS: Mutex<Vec<Weak<UdpSocket>>> = Mutex::new(Vec::new());
-pub static UDP_SOCKETS_TO_REMOVE: Mutex<Vec<SocketHandle>> = Mutex::new(Vec::new());
+pub static UDP_SOCKETS_TO_REMOVE: Mutex<Vec<RouteSocketHandle>> = Mutex::new(Vec::new());
 
 // tcp
 pub static TCP_SOCKETS: Mutex<Vec<Weak<TcpSocket>>> = Mutex::new(Vec::new());
-pub static TCP_SOCKETS_TO_REMOVE: Mutex<Vec<SocketHandle>> = Mutex::new(Vec::new());
+pub static TCP_SOCKETS_TO_REMOVE: Mutex<Vec<RouteSocketHandle>> = Mutex::new(Vec::new());
 
 // raw
-pub static RAW_SOCKETS: Mutex<Vec<(SocketHandle, Weak<RawSocket>)>> = Mutex::new(Vec::new());
-pub static RAW_SOCKETS_TO_REMOVE: Mutex<Vec<SocketHandle>> = Mutex::new(Vec::new());
+pub static RAW_SOCKETS: Mutex<Vec<(RouteSocketHandle, Weak<RawSocket>)>> = Mutex::new(Vec::new());
+pub static RAW_SOCKETS_TO_REMOVE: Mutex<Vec<RouteSocketHandle>> = Mutex::new(Vec::new());
 
 
 // ── Endpoint 枚举 ─────────────────────────────────────────────────────
@@ -720,7 +720,7 @@ pub fn wake_tcp_waiters() {
 
 /// 在每次 poll 后，遍历所有 RAW_SOCKETS，唤醒其等待队列
 pub fn wake_raw_waiters() {
-    let mut live_sockets: Vec<(SocketHandle, Arc<dyn Socket>)> = Vec::new();
+    let mut live_sockets: Vec<(RouteSocketHandle, Arc<dyn Socket>)> = Vec::new();
     let mut remove_indices = Vec::new();
     {
         let sockets = RAW_SOCKETS.lock();
@@ -734,7 +734,7 @@ pub fn wake_raw_waiters() {
     }
     for (handler, socket) in &live_sockets {
         let can_recv = crate::net::config::NET_INTERFACE
-            .raw_socket(*handler, |s| s.can_recv())
+            .raw_routed_socket(*handler, |s| s.can_recv())
             .unwrap_or(false);
         if can_recv {
             if let Some(wq) = socket.recv_event_queue() {

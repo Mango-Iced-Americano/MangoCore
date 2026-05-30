@@ -6,6 +6,7 @@
 
 use crate::net::{
     config::{lookup_source_ip, NET_INTERFACE},
+    routing::InetProtocol,
     TCP_SOCKETS_TO_REMOVE,
 };
 use crate::trace_event;
@@ -15,8 +16,8 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use crate::net::routing::RouteSocketHandle;
 use smoltcp::{
-    iface::SocketHandle,
     socket::tcp::{self, SocketBuffer},
     wire::{IpAddress, IpEndpoint, IpListenEndpoint, IpVersion},
 };
@@ -103,7 +104,7 @@ fn new_listen_smoltcp_socket(
     Ok(socket)
 }
 
-/// 从 smoltcp 的 SocketHandle 读取 tcp::State 并转换为 TcpStateCode (u64)
+/// 从 smoltcp 的 RouteSocketHandle 读取 tcp::State 并转换为 TcpStateCode (u64)
 /// 用于 trace_event
 pub(crate) fn tcp_state_code(state: &tcp::State) -> u64 {
     use tcp::State::*;
@@ -124,26 +125,14 @@ pub(crate) fn tcp_state_code(state: &tcp::State) -> u64 {
 
 /// 封装对单个 smoltcp handle 的可变访问
 pub(crate) fn with_tcp_mut<R>(
-    handle: SocketHandle,
+    handle: RouteSocketHandle,
     f: impl FnOnce(&mut tcp::Socket) -> R,
 ) -> Option<R> {
-    // inner_handler 返回 Option<Option<R>>，flatten 得到 Option<R>
-    NET_INTERFACE
-        .inner_handler(|inner| {
-            let socket = inner.sockets.get_mut::<tcp::Socket>(handle);
-            Some(f(socket))
-        })
-        .flatten()
+    NET_INTERFACE.tcp_routed_socket(handle, f)
 }
 
-/// 封装对单个 smoltcp handle 的不可变访问
-pub(crate) fn with_tcp<R>(handle: SocketHandle, f: impl FnOnce(&tcp::Socket) -> R) -> Option<R> {
-    NET_INTERFACE
-        .inner_handler(|inner| {
-            let socket = inner.sockets.get_mut::<tcp::Socket>(handle);
-            Some(f(socket))
-        })
-        .flatten()
+pub(crate) fn with_tcp<R>(handle: RouteSocketHandle, f: impl FnOnce(&tcp::Socket) -> R) -> Option<R> {
+    NET_INTERFACE.tcp_routed_socket(handle, |s| f(s))
 }
 
 // ── Init ─────────────────────────────────────────────────────────────
@@ -155,7 +144,7 @@ pub(crate) fn with_tcp<R>(handle: SocketHandle, f: impl FnOnce(&tcp::Socket) -> 
 pub enum Init {
     Unbound(Box<tcp::Socket<'static>>, IpVersion),
     Bound {
-        handle: SocketHandle,
+        socket: Box<tcp::Socket<'static>>,
         local: IpEndpoint,
     },
 }
@@ -194,7 +183,7 @@ impl Init {
                 **socket = new_sock;
                 Ok(())
             }
-            Init::Bound { handle, .. } => {
+            Init::Bound { .. } => {
                 // 此 smoltcp 版本不支持动态调整缓冲区大小
                 log::warn!("[TCP] resize_buffers on Bound socket not supported");
                 Ok(())
@@ -204,7 +193,7 @@ impl Init {
 
     /// 将本 socket 加入 SocketSet，返回 Bound 状态。
     /// 如果已有 handle 则直接返回 Ok。
-    pub fn bind_to_smoltcp(self) -> Result<(SocketHandle, IpEndpoint), (Self, SyscallErr)> {
+    pub fn bind_to_smoltcp(self) -> Result<(RouteSocketHandle, IpEndpoint), (Self, SyscallErr)> {
         match self {
             Init::Unbound(socket, ver) => {
                 let socket = *socket;
@@ -223,7 +212,7 @@ impl Init {
                         port,
                     )
                 });
-                let handle = NET_INTERFACE.add_socket(socket).ok_or_else(|| {
+                let handle = NET_INTERFACE.add_routed_socket(InetProtocol::Tcp, socket).ok_or_else(|| {
                     (
                         Init::Unbound(Box::new(new_smoltcp_socket()), ver),
                         SyscallErr::EAGAIN,
@@ -231,7 +220,10 @@ impl Init {
                 })?;
                 Ok((handle, local_ep))
             }
-            Init::Bound { handle, local } => Ok((handle, local)),
+            Init::Bound { local, .. } => {
+                // Lazy bind: socket not yet in SocketSet; caller must attach before use
+                Err((Init::Unbound(Box::new(new_smoltcp_socket()), IpVersion::Ipv4), SyscallErr::EINVAL))
+            }
         }
     }
 }
@@ -242,7 +234,7 @@ impl Init {
 /// 通过 `result` 字段跟踪握手进度。
 #[derive(Debug)]
 pub struct Connecting {
-    pub handle: SocketHandle,
+    pub handle: RouteSocketHandle,
     pub local: IpEndpoint,
     pub remote: IpEndpoint,
     pub result: Mutex<ConnectResult>,
@@ -250,7 +242,7 @@ pub struct Connecting {
 }
 
 impl Connecting {
-    pub fn new(handle: SocketHandle, local: IpEndpoint, remote: IpEndpoint) -> Self {
+    pub fn new(handle: RouteSocketHandle, local: IpEndpoint, remote: IpEndpoint) -> Self {
         Self {
             handle,
             local,
@@ -278,7 +270,7 @@ impl Connecting {
         };
         trace_event!(
             0xB032,
-            self.handle.as_usize() as u64,
+            self.handle.0 as u64,
             result_code,
             0,
             0,
@@ -418,18 +410,18 @@ impl Connecting {
 /// 监听状态：包含多个 smoltcp listen socket 以实现 backlog 语义。
 #[derive(Debug)]
 pub struct Listening {
-    pub handles: Vec<SocketHandle>,
+    pub handles: Vec<RouteSocketHandle>,
     connect: AtomicUsize,
     listen_addr: IpListenEndpoint,
 }
 
 impl Listening {
-    pub fn new(handles: Vec<SocketHandle>, listen_addr: IpListenEndpoint) -> Self {
+    pub fn new(handles: Vec<RouteSocketHandle>, listen_addr: IpListenEndpoint) -> Self {
         // Trace: record all listen handles and port
         for (i, h) in handles.iter().enumerate() {
             trace_event!(
                 0xB034,
-                h.as_usize() as u64,
+                h.0 as u64,
                 i as u64,
                 listen_addr.port as u64,
                 0,
@@ -457,7 +449,7 @@ impl Listening {
         self.listen_addr
     }
 
-    pub fn accept(&mut self) -> Result<(SocketHandle, IpEndpoint), SyscallErr> {
+    pub fn accept(&mut self) -> Result<(RouteSocketHandle, IpEndpoint), SyscallErr> {
         // 遍历所有 handles 找到第一个已建立连接的 socket，
         // 不依赖 self.connect（epoll/pselect 事件提示用）避免事件同步延迟导致 accept 失败。
         log::info!(
@@ -491,9 +483,8 @@ impl Listening {
         let new_listen =
             new_listen_smoltcp_socket(self.listen_addr).map_err(|_| SyscallErr::EADDRINUSE)?;
 
-        let connected_handle = if let Some(mut new_handle) = NET_INTERFACE.add_socket(new_listen) {
+        let connected_handle = if let Some(mut new_handle) = NET_INTERFACE.add_routed_socket(InetProtocol::Tcp, new_listen) {
             core::mem::swap(connected, &mut new_handle);
-            // swap 后 `new_handle` 是旧 `connected` 的值，即真正连接上的 socket handle
             new_handle
         } else {
             // add_socket 失败（极少情况），直接把当前连接 handle 返回
@@ -557,13 +548,13 @@ impl Listening {
 /// 已建立 TCP 连接（Established / CloseWait 等活跃状态）。
 #[derive(Debug)]
 pub struct Established {
-    pub handle: SocketHandle,
+    pub handle: RouteSocketHandle,
     pub local: IpEndpoint,
     pub peer: IpEndpoint,
 }
 
 impl Established {
-    pub fn new(handle: SocketHandle, local: IpEndpoint, peer: IpEndpoint) -> Self {
+    pub fn new(handle: RouteSocketHandle, local: IpEndpoint, peer: IpEndpoint) -> Self {
         Self {
             handle,
             local,
@@ -683,7 +674,7 @@ impl Established {
 /// 内部使用 VecDeque 队列模拟回环收发。smoltcp handle 保留但实际数据不走网络栈。
 #[derive(Debug)]
 pub struct SelfConnected {
-    pub handle: SocketHandle,
+    pub handle: RouteSocketHandle,
     pub local: IpEndpoint,
     pub buf: Mutex<VecDeque<u8>>,
     pub rx_cap: AtomicUsize,
@@ -691,7 +682,7 @@ pub struct SelfConnected {
 }
 
 impl SelfConnected {
-    pub fn new(handle: SocketHandle, local: IpEndpoint, rx_cap: usize) -> Self {
+    pub fn new(handle: RouteSocketHandle, local: IpEndpoint, rx_cap: usize) -> Self {
         Self {
             handle,
             local,
@@ -835,8 +826,8 @@ impl Inner {
         match self {
             Inner::Closed(_) => 0,
             Inner::SelfConnected(sc) => sc.rx_cap.load(Ordering::Relaxed),
-            Inner::Init(Init::Bound { handle, .. }) => {
-                with_tcp_mut(*handle, |s| s.send_capacity()).unwrap_or(0)
+            Inner::Init(Init::Bound { socket, .. }) => {
+                socket.send_capacity()
             }
             Inner::Init(Init::Unbound(s, _)) => s.send_capacity(),
             Inner::Connecting(c) => with_tcp_mut(c.handle, |s| s.send_capacity()).unwrap_or(0),
@@ -850,8 +841,8 @@ impl Inner {
         match self {
             Inner::Closed(_) => 0,
             Inner::SelfConnected(sc) => sc.rx_cap.load(Ordering::Relaxed),
-            Inner::Init(Init::Bound { handle, .. }) => {
-                with_tcp_mut(*handle, |s| s.recv_capacity()).unwrap_or(0)
+            Inner::Init(Init::Bound { socket, .. }) => {
+                socket.recv_capacity()
             }
             Inner::Init(Init::Unbound(s, _)) => s.recv_capacity(),
             Inner::Connecting(c) => with_tcp_mut(c.handle, |s| s.recv_capacity()).unwrap_or(0),
@@ -867,14 +858,8 @@ impl Inner {
                 Init::Unbound(_, _) => {
                     log::info!("[Inner::close] Init::Unbound — no handle to close");
                 }
-                Init::Bound { handle, .. } => {
-                    log::info!("[Inner::close] Init::Bound — closing handle {}", handle);
-                    with_tcp_mut(*handle, |socket| socket.close());
-                    log::info!(
-                        "[Inner::close] push handle {} to TCP_SOCKETS_TO_REMOVE",
-                        handle
-                    );
-                    TCP_SOCKETS_TO_REMOVE.lock().push(*handle);
+            Init::Bound { .. } => {
+                    log::info!("[Inner::close] Init::Bound — dropping boxed socket (not yet attached)");
                 }
             },
             Inner::Connecting(c) => {
