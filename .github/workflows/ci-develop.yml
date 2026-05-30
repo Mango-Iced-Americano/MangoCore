@@ -1,0 +1,168 @@
+name: CI Develop
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-develop-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI_IMAGE: zhouzhouyi/os-contest:20260104
+
+jobs:
+  develop-test:
+    name: Develop — Compile + Basic + Busybox
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af || true
+
+      - name: Prepare directories
+        run: mkdir -p fs-img-dir testresult
+
+      - name: Cache test images
+        id: cache-sdcards
+        uses: actions/cache@v4
+        with:
+          path: |
+            fs-img-dir/sdcard-rv.img.xz
+            fs-img-dir/sdcard-la.img.xz
+          key: oscomp-sdcards-pre-20250615-v1
+
+      - name: Pull contest container
+        run: docker pull "$CI_IMAGE"
+
+      - name: Download test images
+        run: |
+          docker run --rm --privileged --network host \
+            -v "${GITHUB_WORKSPACE}:/app" \
+            -w /app \
+            "$CI_IMAGE" \
+            bash -lc '
+              set -euo pipefail
+              if [ ! -s fs-img-dir/sdcard-rv.img.xz ] || [ ! -s fs-img-dir/sdcard-la.img.xz ] || \
+                 ! xz -t fs-img-dir/sdcard-rv.img.xz || ! xz -t fs-img-dir/sdcard-la.img.xz; then
+                rm -f fs-img-dir/sdcard-*.img.xz
+                make testsuits-download
+              fi
+            '
+
+      - name: Build rv64 kernel
+        run: |
+          docker run --rm --privileged --network host \
+            -v "${GITHUB_WORKSPACE}:/app" \
+            -w /app/os \
+            "$CI_IMAGE" \
+            bash -lc 'make rv64-kernel-build-only MODE=release'
+
+      - name: Build la64 kernel
+        run: |
+          docker run --rm --privileged --network host \
+            -v "${GITHUB_WORKSPACE}:/app" \
+            -w /app/os \
+            "$CI_IMAGE" \
+            bash -lc 'make la64-kernel-build-only MODE=release'
+
+      - name: Prepare develop config
+        run: |
+          {
+            echo "mode=run"
+            echo "mask=0x003"
+            echo "ltp_runner=script"
+            echo "ltp_libc=both"
+            echo "ltp_suites="
+            echo "ltp_exclude="
+            echo "ltp_exclude_musl="
+            echo "ltp_exclude_glibc="
+            echo "ltp_include="
+            echo "ltp_from="
+          } > os_test_develop.conf
+
+      - name: Run rv64 test (extract + inject + QEMU)
+        run: |
+          xz -dkcf fs-img-dir/sdcard-rv.img.xz > sdcard-rv.img
+          docker run --rm --privileged --network host \
+            -v "${GITHUB_WORKSPACE}:/app" \
+            -w /app \
+            "$CI_IMAGE" \
+            bash -lc '
+              set -euo pipefail
+              cd os
+              ARCH=rv64 BLK_MODE=virt CONF_FILE=/app/os_test_develop.conf ./inject_os_test_conf.sh
+              cd /app
+              qemu-system-riscv64 \
+                -machine virt -kernel kernel-rv -m 1024 -nographic -smp 1 \
+                -bios default \
+                -drive file=sdcard-rv.img,if=none,format=raw,id=x0 \
+                -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+                -no-reboot -rtc base=utc \
+                -device virtio-net-device,netdev=net -netdev user,id=net
+            ' > testresult/output-rv.txt 2>&1 &
+          echo "rv64_qemu_pid=$!" >> "$GITHUB_ENV"
+
+      - name: Run la64 test (extract + inject + QEMU)
+        run: |
+          xz -dkcf fs-img-dir/sdcard-la.img.xz > sdcard-la.img
+          docker run --rm --privileged --network host \
+            -v "${GITHUB_WORKSPACE}:/app" \
+            -w /app \
+            "$CI_IMAGE" \
+            bash -lc '
+              set -euo pipefail
+              cd os
+              ARCH=la64 BLK_MODE=virt_pci CONF_FILE=/app/os_test_develop.conf ./inject_os_test_conf.sh
+              cd /app
+              qemu-system-loongarch64 \
+                -kernel kernel-la -m 1G -nographic -smp 1 \
+                -drive file=sdcard-la.img,if=none,format=raw,id=x0 \
+                -device virtio-blk-pci,drive=x0 \
+                -no-reboot \
+                -device virtio-net-pci,netdev=net0 -netdev user,id=net0 \
+                -rtc base=utc
+            ' > testresult/output-la.txt 2>&1 &
+          echo "la64_qemu_pid=$!" >> "$GITHUB_ENV"
+
+      - name: Wait for both QEMU instances
+        timeout-minutes: 35
+        run: |
+          wait "${rv64_qemu_pid}" || echo "rv64 QEMU exited with code $?"
+          wait "${la64_qemu_pid}" || echo "la64 QEMU exited with code $?"
+          echo "Both QEMU instances finished"
+
+      - name: Analyze results
+        if: always()
+        run: python3 .github/scripts/analyze_os_results.py
+
+      - name: Package artifacts
+        if: always()
+        run: |
+          mkdir -p ci-artifacts
+          cp -f os_test_develop.conf ci-artifacts/ 2>/dev/null || true
+          cp -f kernel-rv kernel-la ci-artifacts/ 2>/dev/null || true
+          cp -f testresult/output-rv.txt ci-artifacts/ 2>/dev/null || true
+          cp -f testresult/output-la.txt ci-artifacts/ 2>/dev/null || true
+          cp -f testresult/ci-summary.md ci-artifacts/ 2>/dev/null || true
+          cp -f testresult/ci-rv64.json ci-artifacts/ 2>/dev/null || true
+          cp -f testresult/ci-la64.json ci-artifacts/ 2>/dev/null || true
+          tar -czf ci-develop-artifacts.tgz ci-artifacts
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: develop-test-results
+          retention-days: 7
+          if-no-files-found: ignore
+          path: ci-develop-artifacts.tgz

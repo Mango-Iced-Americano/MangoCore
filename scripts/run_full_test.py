@@ -486,9 +486,9 @@ def main():
     archive_dir = os.path.join(TESTRESULT_DIR, f"archive_{timestamp}")
     os.makedirs(archive_dir, exist_ok=True)
 
-    # 拷贝 QEMU 输出文件
-    for arch in ["rv64", "la64"]:
-        src = os.path.join(TESTRESULT_DIR, f"output-{arch}.txt")
+    # 拷贝 QEMU 输出文件（注意：实际文件名为 output-rv.txt / output-la.txt）
+    output_paths = {"rv64": rv64_output, "la64": la64_output}
+    for arch, src in output_paths.items():
         if os.path.exists(src):
             shutil.copy2(src, os.path.join(archive_dir, f"output-{arch}.txt"))
             log(f"  📄 output-{arch}.txt → {archive_dir}/")
