@@ -3,7 +3,7 @@ use crate::get_socket;
 use crate::net::socket::unix::ns::{ABSTRACT_TABLE, UNIX_PATH_MAX};
 use crate::net::socket::unix::PATH_TABLE;
 use crate::net::socket::UnixEndpoint;
-use crate::net::{Endpoint, LOCAL_IP};
+use crate::net::Endpoint;
 use crate::task::current_task;
 use crate::utils::error::SyscallErr;
 use alloc::format;
@@ -14,11 +14,13 @@ use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address, Ipv6Address};
 const CAP_NET_BIND_SERVICE: usize = 10;
 
 fn is_local_bind_addr(addr: IpAddress) -> bool {
-    if addr.is_unspecified() || addr == LOCAL_IP {
+    if addr.is_unspecified() {
         return true;
     }
     match addr {
-        IpAddress::Ipv4(ip) => ip.is_loopback(),
+        IpAddress::Ipv4(ip) => {
+            ip.is_loopback() || crate::net::net_core::is_local_addr(ip)
+        }
         IpAddress::Ipv6(ip) => ip == Ipv6Address::LOOPBACK,
     }
 }

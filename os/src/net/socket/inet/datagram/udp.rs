@@ -1,6 +1,7 @@
 use crate::net::config::lookup_source_ip;
+use crate::net::config::route_check;
 use crate::net::syscall::common::MsgFlags;
-use crate::net::{config::NET_INTERFACE, Endpoint, Mutex, Socket, LOCAL_IP, MAX_BUFFER_SIZE};
+use crate::net::{config::NET_INTERFACE, Endpoint, Mutex, Socket, MAX_BUFFER_SIZE};
 use crate::{
     net::address,
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
@@ -23,7 +24,7 @@ use smoltcp::{
 };
 
 use crate::net::config::NetInterfaceInner;
-use crate::net::socket::inet::common::PortManager;
+use crate::net::socket::inet::common::{BoundInner, PortManager};
 use crate::net::{UDP_SOCKETS, UDP_SOCKETS_TO_REMOVE};
 use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::task::WaitQueue;
@@ -33,6 +34,7 @@ use alloc::vec::Vec;
 pub struct UdpSocket {
     inner: Mutex<UdpSocketInner>,
     socket_handler: SocketHandle,
+    bound: Mutex<BoundInner>,
     recv_waiters: EventWaitQueue,
     send_waiters: EventWaitQueue,
 }
@@ -81,6 +83,14 @@ impl Socket for UdpSocket {
             })
             .ok_or(SyscallErr::EAGAIN)??;
         NET_INTERFACE.poll();
+        let ifindex = match bind_addr.addr {
+            Some(IpAddress::Ipv4(ip)) if ip.is_loopback() => 1,
+            _ => 2,
+        };
+        self.bound
+            .lock()
+            .bind(self.socket_handler, ifindex, bind_addr.addr, bind_addr.port);
+        log::debug!("udp_bind: addr={:?} port={} ifindex={}", bind_addr.addr, bind_addr.port, ifindex);
         Ok(0)
     }
 
@@ -94,7 +104,12 @@ impl Socket for UdpSocket {
         };
         // Linux: connect() to INADDR_ANY is treated as localhost
         let remote_endpoint = if ep.addr.is_unspecified() {
-            IpEndpoint::new(smoltcp::wire::IpAddress::v4(127, 0, 0, 1), ep.port)
+            IpEndpoint::new(
+                crate::net::net_core::loopback_iface()
+                    .and_then(|d| d.ip_addrs.first().map(|c| c.address()))
+                    .unwrap_or(IpAddress::v4(127, 0, 0, 1)),
+                ep.port,
+            )
         } else {
             *ep
         };
@@ -140,6 +155,14 @@ impl Socket for UdpSocket {
             })
             .ok_or(SyscallErr::EAGAIN)??;
         self.inner.lock().local_endpoint = Some(local_ep);
+        let ifindex = match local_ep.addr {
+            Some(IpAddress::Ipv4(ip)) if ip.is_loopback() => 1,
+            _ => 2,
+        };
+        self.bound
+            .lock()
+            .bind(self.socket_handler, ifindex, local_ep.addr, local_ep.port);
+        log::debug!("udp_connect: remote={:?} ifindex={}", remote_endpoint, ifindex);
         NET_INTERFACE.poll();
         Ok(0)
     }
@@ -342,6 +365,10 @@ impl Socket for UdpSocket {
         if let Some(n) = self.try_deliver_local(remote, &send_buf)? {
             return Ok(n);
         }
+        // Route check: external dest without NIC → ENETUNREACH
+        if let Err(e) = route_check(remote.addr) {
+            return Err(e);
+        }
         NET_INTERFACE
             .udp_socket(self.socket_handler, |socket| {
                 if !socket.can_send() {
@@ -427,10 +454,15 @@ impl UdpSocket {
                 multicast_group_joined: false,
             }),
             socket_handler,
+            bound: Mutex::new(BoundInner::new()),
             recv_waiters: EventWaitQueue::new(),
             send_waiters: EventWaitQueue::new(),
         }
     }
+    pub fn bound_inner(&self) -> BoundInner {
+        self.bound.lock().clone()
+    }
+
     pub fn register_udp_socket(socket: &Arc<Self>) {
         let local = socket.inner.lock().local_endpoint;
         log::info!("[register_udp_socket] local={:?}", local);
@@ -447,11 +479,13 @@ impl UdpSocket {
     }
 
     fn is_local_udp_destination(addr: IpAddress) -> bool {
-        if addr.is_unspecified() || addr == LOCAL_IP {
+        if addr.is_unspecified() {
             return true;
         }
         match addr {
-            IpAddress::Ipv4(ip) => ip.is_loopback(),
+            IpAddress::Ipv4(ip) => {
+                ip.is_loopback() || crate::net::net_core::is_local_addr(ip)
+            }
             IpAddress::Ipv6(_) => false,
         }
     }

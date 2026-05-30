@@ -1,7 +1,7 @@
 //! TCP 生命周期操作 —— bind / connect / listen / accept / shutdown
 
 use crate::net::{
-    config::{lookup_source_ip, NET_INTERFACE},
+    config::{lookup_source_ip, route_check, NET_INTERFACE},
     socket::inet::common::PortManager,
     TCP_SOCKETS_TO_REMOVE,
 };
@@ -85,6 +85,11 @@ impl Inner {
             }
             other => return Err((other, SyscallErr::EISCONN)),
         };
+
+        // Route check before connect: external address without NIC → ENETUNREACH
+        if let Err(e) = route_check(remote_endpoint.addr) {
+            return Err((Inner::Init(Init::Bound { handle, local }), e));
+        }
 
         let ret = NET_INTERFACE
             .inner_handler(|inner| {

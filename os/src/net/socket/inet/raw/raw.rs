@@ -36,19 +36,19 @@ struct RawSocketInner {
 
 impl Socket for RawSocket {
     fn bind(&self, _endpoint: &Endpoint) -> SyscallRet {
-        todo!()
+        Err(SyscallErr::EOPNOTSUPP) // Not implemented for raw sockets
     }
 
     fn listen(&self) -> SyscallRet {
-        todo!()
+        Err(SyscallErr::EOPNOTSUPP) // Not implemented for raw sockets
     }
 
     fn connect(&self, _endpoint: &Endpoint) -> SyscallRet {
-        todo!()
+        Err(SyscallErr::EOPNOTSUPP) // Not implemented for raw sockets
     }
 
     fn accept(&self, _sockfd: u32, _addr: usize, _addrlen: usize) -> SyscallRet {
-        todo!()
+        Err(SyscallErr::EOPNOTSUPP) // Not implemented for raw sockets
     }
 
     fn socket_type(&self) -> crate::net::PSOCK {
@@ -110,11 +110,23 @@ impl Socket for RawSocket {
                 ip_pkg.set_hop_limit(64);
                 ip_pkg.set_dst_addr(target_ip);
                 let src_addr = if target_ip.is_loopback() {
-                    smoltcp::wire::Ipv4Address([127, 0, 0, 1])
+                    crate::net::net_core::loopback_iface()
+                        .and_then(|d| d.ip_addrs.first().map(|c| c.address()))
+                        .and_then(|ip| match ip {
+                            smoltcp::wire::IpAddress::Ipv4(addr) => Some(addr),
+                            _ => None,
+                        })
+                        .unwrap_or(smoltcp::wire::Ipv4Address::UNSPECIFIED)
                 } else {
-                    smoltcp::wire::Ipv4Address([10, 0, 2, 15]) // 或者是你网卡的真实 IP
+                    crate::net::net_core::default_iface()
+                        .and_then(|d| d.ip_addrs.first().map(|c| c.address()))
+                        .and_then(|ip| match ip {
+                            smoltcp::wire::IpAddress::Ipv4(addr) => Some(addr),
+                            _ => None,
+                        })
+                        .unwrap_or(smoltcp::wire::Ipv4Address::UNSPECIFIED)
                 };
-                ip_pkg.set_src_addr(src_addr); //先硬编码
+                ip_pkg.set_src_addr(src_addr);
 
                 ip_pkg.payload_mut().copy_from_slice(user_buf);
                 ip_pkg.fill_checksum();

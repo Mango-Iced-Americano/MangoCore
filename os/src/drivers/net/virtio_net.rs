@@ -29,32 +29,32 @@ pub struct VirtIONetWrapper(Mutex<VirtIONet<VirtioHal, PciTransport, QUEUE_SIZE>
 
 #[cfg(feature = "block_virt")]
 impl VirtIONetWrapper {
-    pub fn new() -> Self {
+    pub fn new() -> Option<Self> {
         unsafe {
             let transport = MmioTransport::new(
                 NonNull::new_unchecked(VIRTIO_NET_BASE as *mut VirtIOHeader),
                 0x1000,
-            ).expect("virtio net transport initialization failed");
+            ).ok()?;
 
             // 创建网卡设备，注意这里直接把 VirtioHal 传进去了
             let net = VirtIONet::<VirtioHal, MmioTransport<'static>, QUEUE_SIZE>::new(
                 transport,
                 NET_BUF_SIZE,
-            ).expect("virtio net device initialization failed");
+            ).ok()?;
 
-            Self(Mutex::new(net))
+            Some(Self(Mutex::new(net)))
         }
     }
 }
 
 #[cfg(feature = "block_virt_pci")]
 impl VirtIONetWrapper {
-    pub fn new() -> Self {
-        let transport = enumerate_virtio_pci(DeviceType::Network).expect("No VirtIO network device");
+    pub fn new() -> Option<Self> {
+        let transport = enumerate_virtio_pci(DeviceType::Network)?;
         let net = VirtIONet::<VirtioHal, PciTransport, QUEUE_SIZE>::new(transport, NET_BUF_SIZE)
-            .expect("virtio net device initialization failed");
+            .ok()?;
 
-        Self(Mutex::new(net))
+        Some(Self(Mutex::new(net)))
     }
 }
 

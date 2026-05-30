@@ -1,3 +1,4 @@
+use core::convert::TryInto;
 use core::result;
 
 use alloc::sync::Arc;
@@ -11,6 +12,24 @@ use smoltcp::wire::{
     ArpPacket, EthernetAddress, EthernetFrame, EthernetProtocol, IpAddress, Ipv4Address, Ipv4Packet,
 };
 use spin::Mutex;
+
+/// No-op network device used when no physical NIC is present.
+/// Allows the smoltcp stack to function with loopback only.
+/// transmit() always returns Some to keep RoutingDevice::transmit() working.
+pub struct NullNetDevice;
+
+impl NetDevice for NullNetDevice {
+    fn receive(&self, _buf: &mut [u8]) -> Option<usize> {
+        None
+    }
+    fn transmit(&self, _buf: &[u8]) {
+        // No-op: packets sent to eth on a null device are silently dropped
+    }
+    fn mac_address(&self) -> [u8; 6] {
+        // Locally administered unicast MAC (not all-zero, required by smoltcp DHCP)
+        [0x02, 0x00, 0x00, 0x00, 0x00, 0x01]
+    }
+}
 
 static mut ROUTING_BUF: [u8; 65536] = [0u8; 65536];
 pub struct RoutingDevice {
@@ -103,8 +122,7 @@ impl<'a> TxToken for RoutingTxToken<'a> {
                 lo_tx,
                 hw_addr,
             } => {
-                let local_ip = &[10, 0, 2, 15]; //先硬编码
-                                                // let mut buf = vec![0u8; len];
+                // let mut buf = vec![0u8; len];
                 let mut buf = unsafe { &mut ROUTING_BUF[..len] };
 
                 let res = f(&mut buf);
@@ -131,36 +149,47 @@ impl<'a> TxToken for RoutingTxToken<'a> {
                         send_to_eth = true;
                     }
 
-                    // 判断包的目标 IP 是否是 127.x.x.x 环回段
+                    // Local delivery check: route loopback or own IP via lo, external via eth
                     match frame.ethertype() {
                         EthernetProtocol::Ipv4 => {
                             if let Ok(ipv4) = Ipv4Packet::new_checked(frame.payload()) {
                                 let dst_addr = ipv4.dst_addr();
-                                let dst_ip = dst_addr.as_bytes();
-                                if dst_ip[0] == 127 || dst_ip == local_ip {
+                                let dst_ip = IpAddress::Ipv4(dst_addr);
+                                let is_loopback = dst_addr.as_bytes()[0] == 127;
+                                let is_local = crate::net::net_core::IFACES.lock().iter()
+                                    .any(|d| d.ip_addrs.iter().any(|c| c.address() == dst_ip));
+                                if is_loopback || is_local {
+                                    log::debug!("[RoutingTxToken] dst={} -> local delivery (lo)", dst_addr);
                                     send_to_lo = true;
                                     send_to_eth = false;
+                                } else {
+                                    send_to_lo = false;
+                                    send_to_eth = true;
                                 }
                             }
                         }
                         EthernetProtocol::Arp => {
                             if let Ok(arp) = ArpPacket::new_checked(frame.payload()) {
-                                // 检查 ARP 寻找的目标 IP (Target Protocol Address)
                                 let target_ip = arp.target_protocol_addr();
-                                if target_ip[0] == 127 || target_ip == local_ip {
+                                let ipv4 = Ipv4Address::from_bytes(&target_ip[..4].try_into().unwrap_or([0;4]));
+                                let dst_ip = IpAddress::Ipv4(ipv4);
+                                let is_loopback = ipv4.as_bytes()[0] == 127;
+                                let is_local = crate::net::net_core::IFACES.lock().iter()
+                                    .any(|d| d.ip_addrs.iter().any(|c| c.address() == dst_ip));
+                                if is_loopback || is_local {
                                     send_to_lo = true;
                                     send_to_eth = false;
                                 }
                             }
                         }
                         _ => {}
-                    };
+                    }
                 } else {
                     send_to_eth = true;
                 }
 
                 if send_to_lo {
-                    log::info!("[RoutingTxToken] send to lo");
+                    log::debug!("[RoutingTxToken] send to lo");
                     lo_tx.consume(len, |b| {
                         b.copy_from_slice(&buf);
                     });
@@ -173,7 +202,7 @@ impl<'a> TxToken for RoutingTxToken<'a> {
                     //     );
                     //     return res;
                     // }
-                    log::info!("[RoutingTxToken] send to eth");
+                    log::debug!("[RoutingTxToken] send to eth");
                     eth_tx.consume(len, |b| {
                         b.copy_from_slice(&buf);
                     });

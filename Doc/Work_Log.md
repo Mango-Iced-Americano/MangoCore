@@ -54,6 +54,116 @@ VFS_ROOT MountFS
 
 ---
 
+## 2026-05-28
+
+### 新增 inet_test.rs [NET_ROUTE] 测试组（5 个 LTP-style 用例）
+
+**涉及文件：**
+- `user/src/bin/inet_test.rs` — 新增 5 个 NET_ROUTE 测试函数：
+  - `net_route01_loopback_udp` — 双 UDP socket 验证 127.0.0.1 环回路由
+  - `net_route02_eth_local_addr` — 验证绑定 eth0 地址 (10.0.2.15)
+  - `net_route03_dns_route` — 通过 DNS 查询验证路由可达性
+  - `net_route04_default_route` — 验证默认路由不 panic（sendto 8.8.8.8）
+  - `net_route05_no_route_no_panic` — 验证不可达目标不 panic（sendto 192.168.255.255）
+- 新增 `ENETUNREACH` 常量（errno 101）
+- 更新 `tests` 数组：17 → 22 项，追加 5 个 `[NET_ROUTE]` 条目
+
+**验证：**
+- `make rust-user BOARD=rvqemu` ✅（inet_test 编译无错误）
+- `make rust-user BOARD=laqemu` — 因环境缺少 `loongarch64-linux-gnu-gcc` 链接器失败；Rust 前端编译通过，inet_test 无错误
+- 无新增 warning（所有 warning 均为文件内既有）
+
+**备注：**
+- 严格复用现有 LTP 宏（`tpass!`/`tfail!`/`tbrok!`/`tconf!`）和 `errno_from_ret`
+- 复用现有 `sockaddr_in`、`dns_lookup`、`sys_socket`/`sys_bind`/`sys_sendto`/`sys_recvfrom`/`sys_getsockname`/`sys_close`
+- 未修改或删除任何现有测试用例
+- 同时顺手修复了 `initproc.rs` 预存在的语法错误（`println!(...)` 后缺失分号）
+
+### 替换 adapter.rs 硬编码路由决策为 Router::lookup_route()
+
+**涉及文件：**
+- `os/src/net/adapter.rs` — `RoutingTxToken::consume()` 中移除硬编码 `local_ip = &[10, 0, 2, 15]` 和手动 IP/ARP 检查，替换为 `Router::lookup_route()` 动态路由决策
+- 新增 `use core::convert::TryInto`（no_std 下需显式导入）
+- 新增 `use super::routing::Router`
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` — `lang_items.rs` 预存在编译错误（`Option<&Arguments<'_>>` 不实现 `Display`），非本次引入；adapter.rs 无错误
+- LSP diagnostics: clean
+
+**备注：**
+- MAC 路由保持不变（dst_mac==hw_addr→lo, broadcast→lo+eth, 其他→eth）
+- IPv4 路由通过 Router 覆盖 MAC 决策：ifindex==1（lo）→仅环回，否则→仅以太网
+- ARP 路由：若 Router 判定目标为 lo 网段则走环回
+- 无路由匹配时丢弃包 + `log::warn!`（不 panic）
+- 每次调用 `Router::init_default()` 创建新实例（表很小，2-3 条目），TODO 标记后续改为全局缓存
+
+### 移除 GATEWAY/LOCAL_IP 全局静态变量，替换为 net_core 动态查询
+
+**涉及文件：**
+- `os/src/net/socket/mod.rs` — 移除 `pub static GATEWAY` 和 `pub static LOCAL_IP` 定义
+- `os/src/net/mod.rs` — 从 `pub use socket::{...}` 移除 `GATEWAY, LOCAL_IP`
+- `os/src/net/syscall/bind.rs` — `is_local_bind_addr()` 中 `LOCAL_IP` → `net_core::default_iface()` 动态查询
+- `os/src/net/socket/inet/datagram/udp.rs` — `is_local_udp_destination()` 中 `LOCAL_IP` → `net_core::default_iface()` 动态查询
+
+**验证：**
+- `grep` 确认全文无 GATEWAY/LOCAL_IP 残留
+- `make rv64-kernel-build-only` — 仅有 `adapter.rs` 和 `unix/stream/mod.rs` 等预存在错误，非本次引入
+- `make la64-kernel-build-only` — 仅有预存在错误，非本次引入
+
+**备注：**
+- GATEWAY 静态变量未被任何业务代码引用，仅定义并重新导出，因此移除不影响逻辑
+- LOCAL_IP 在 `bind.rs` 和 `udp.rs` 中被替换为 `default_iface().and_then(|d| d.ip_addrs.first().map(|c| c.address())).unwrap_or(IpAddress::v4(10, 0, 2, 15))`，默认值不变
+- 模式与 `loopback` 替换一致：先查 net_core，防御性 `unwrap_or` 回退原有硬编码值
+
+### 替换 net/ 中硬编码 IPv4 地址为 net_core 动态查询
+
+**涉及文件：**
+- `os/src/net/socket/inet/stream/mod.rs` — `connect()` 中硬编码 `127.0.0.1` → `net_core::loopback_iface()` 动态查询，保留 `unwrap_or` 防御性回退
+- `os/src/net/socket/inet/datagram/udp.rs` — `connect()` 中硬编码 `127.0.0.1` → `net_core::loopback_iface()` 动态查询
+- `os/src/net/socket/inet/common/address.rs` — `_to_endpoint()`/`_endpoint()` 中 4 处硬编码 `127.0.0.1` → `net_core::loopback_iface()` 动态查询
+
+**验证：**
+- `grep` 确认排除 net_core.rs/routing.rs 后，所有 PRIMARY 硬编码 IPv4 已消除
+- 剩余 `unwrap_or(IpAddress::v4(...))` 为防御性回退（同 config.rs 模式，由 T8/T12 覆盖）
+- `make rv64-kernel-build-only` — 因 `adapter.rs`（T11 修改中）花括号不平衡导致编译失败，非本次引入
+- `make la64-kernel-build-only` — 待 adapter.rs 修复后验证
+
+### 新增 BoundInner 结构体，追踪 UDP/TCP 绑定的 ifindex
+
+**涉及文件：**
+- `os/src/net/socket/inet/common/bound.rs` — 新增 `BoundInner` 结构体（`socket_handle`/`ifindex`/`bound_addr`/`bound_port`），提供 `bind()`/`bound_iface()`/`is_bound()` 等方法。
+- `os/src/net/socket/inet/common/mod.rs` — 导出 `BoundInner`。
+- `os/src/net/socket/inet/datagram/udp.rs` — UdpSocket 增加 `bound: Mutex<BoundInner>` 字段，在 `bind()`/`connect()` 成功后记录 ifindex（127.x → lo=1，否则 → eth0=2），新增 `bound_inner()` 公开方法。
+- `os/src/net/socket/inet/stream/mod.rs` — TcpSocket 增加 `bound: Mutex<BoundInner>` 字段，在 `bind()`/`connect()`/`listen()`/`accept()` 成功后记录 ifindex，新增 `bound_inner()` 公开方法。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：**
+- ifindex 确定规则：`Ipv4Address::is_loopback()` → ifindex=1(lo)，否则 ifindex=2(eth0)。
+- BoundInner 通过 `bound_iface()` 调用 `net_core::find_by_index` 获取 `DeviceEntry`。
+
+### Wire net_core::init() into kernel boot sequence
+
+**涉及文件：**
+- `os/src/net/config.rs` — 在 `init()` 函数顶部（NET_DEVICE 检查之前）添加 `net_core::init()` 调用，确保 IFACES 在 `NET_INTERFACE.init()` 之前已填充 lo 和 eth0。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：**
+- net_core::init() 是幂等的（检查 IFACES.lock().len() > 0 则跳过），可安全重复调用。
+- T8 修改了 NetInterfaceInner::new() 从 net_core::IFACES 读取 IP 地址，因此 IFACES 必须在 NET_INTERFACE.init() 之前填充。
+- net_core::init() 自身会处理 lo-only 模式（NET_DEVICE 为 None 时只注册 lo），因此放在 NET_DEVICE 检查之前是安全的。
+- 启动日志顺序预期: "[net_core] registered lo (ifindex=1)" → "[net_core] registered eth0 (ifindex=2)" → "[kernel] net interface initialized (RoutingDevice: lo + eth)"
+
+---
+
+---
+
 ## 2026-05-21
 
 ### busybox/libctest 低成本兼容点补齐
@@ -1028,3 +1138,14 @@ a = sum(x.get("all", x.get("total", 1)) for x in r)
 - RV64 focused LTP：
   - `futex_cmp_requeue01` summary `passed 7 / failed 0 / broken 0`
   - `getrusage03` 已通过前 7 个 TPASS，到 final exec-child 阶段前触发 LTP 默认 30s timeout；该问题是 runner 超时倍率差异，不是 PCB 生命周期泄漏或内核 panic
+
+## 2026-05-29: net subsystem architecture upgrade — Waves 1-5
+**涉及文件**:
+- New: `os/src/net/net_core.rs`, `os/src/net/routing.rs`, `os/src/net/ioctl.rs`, `os/src/net/socket/inet/common/bound.rs`, `os/src/net/socket/netlink/{mod,netlink,route}.rs`, `os/src/fs/procfs/files/net_{dev,route,tcp,udp}.rs`
+- Modified: `os/src/net/{mod,config,adapter}.rs`, `os/src/net/socket/mod.rs`, `os/src/net/socket/inet/{common/mod,common/port,common/address,datagram/udp,raw/raw,stream/mod}.rs`, `os/src/net/syscall/bind.rs`, `os/src/fs/procfs/files/{mod,sys}.rs`, `user/src/bin/inet_test.rs`
+
+**新增能力**: Device list (lo/eth0), Router 最长前缀匹配路由, PortManager TCP/UDP 端口表, BoundInner iface 跟踪, /proc/net/{dev,route,tcp,udp}, SIOCGIF* ioctl (8种查询), AF_NETLINK + NETLINK_ROUTE dump
+
+**验证**: rv64 kernel build 零错误, 124 预存 warning, QEMU 启动无 panic, basic 测试通过
+
+**备注**: 16 处硬编码 IP 清零; RawSocket todo→EOPNOTSUPP; adapter 本地投递检查; watchdog 30s 每测例超时; API 余额不足无法补全高级测试

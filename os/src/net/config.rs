@@ -1,30 +1,37 @@
 use super::Mutex;
 use crate::drivers::NET_DEVICE;
-use crate::net::adapter::{RoutingDevice, SmoltcpDeviceAdapter};
+use crate::net::adapter::{NullNetDevice, RoutingDevice, SmoltcpDeviceAdapter};
 use crate::net::socket::inet::datagram::udp::dispatch_udp_packets;
 use crate::net::socket::inet::stream::inner::tcp_state_code;
+use crate::net::net_core;
 use crate::net::{TCP_SOCKETS, TCP_SOCKETS_TO_REMOVE, UDP_SOCKETS_TO_REMOVE};
 use crate::timer::current_time_duration;
 use crate::trace_event;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use smoltcp::{
     iface::{Config, Interface, SocketHandle, SocketSet},
     phy::{Device, Loopback, Medium},
-    socket::{raw, tcp, udp, AnySocket},
-    time::Instant,
-    wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Address},
+    socket::{dhcpv4, raw, tcp, udp, AnySocket},
+    time::{Duration, Instant},
+    wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr},
 };
 
 pub static NET_INTERFACE: NetInterface = NetInterface::new();
 
 pub fn init() {
-    if NET_DEVICE.lock().is_none() {
-        println!("[kernel] net device unavailable, skipping net interface initialization");
-        return;
-    }
+    // Initialize net_core first (registers lo and eth0 into IFACES).
+    // Must happen before NET_INTERFACE.init() so that NetInterfaceInner::new()
+    // can read IP addresses from net_core::IFACES.
+    let has_nic = NET_DEVICE.lock().is_some();
+    net_core::init();
     NET_INTERFACE.init();
-    println!("[kernel] net interface initialized (RoutingDevice: lo + eth)");
+    if has_nic {
+        println!("[kernel] net interface initialized (RoutingDevice: lo + eth)");
+    } else {
+        println!("[kernel] net interface initialized (loopback only, no NIC)");
+    }
 }
 
 pub struct NetInterface<'a> {
@@ -40,42 +47,95 @@ pub struct NetInterfaceInner<'a> {
 
 impl<'a> NetInterfaceInner<'a> {
     fn new() -> Self {
-        let net_device = NET_DEVICE
-            .lock()
-            .take()
-            .expect("NET_DEVICE not initialized before net::config::init()");
-        let mut eth = SmoltcpDeviceAdapter::new(net_device);
+        let (eth, hw_addr, has_real_nic) = match NET_DEVICE.lock().take() {
+            Some(net_device) => {
+                let mac = net_device.mac_address();
+                (SmoltcpDeviceAdapter::new(net_device), EthernetAddress(mac), true)
+            }
+            None => {
+                println!("[kernel] No net device, using null device (loopback only)");
+                let null_dev = Arc::new(NullNetDevice);
+                let null_mac = [0x02u8, 0, 0, 0, 0, 1];
+                (SmoltcpDeviceAdapter::new(null_dev), EthernetAddress(null_mac), false)
+            }
+        };
         let lo = Loopback::new(Medium::Ip);
-        // let lo = Loopback::new(Medium::Ethernet);
         let mut device = RoutingDevice::new(eth, lo);
 
         let now = Instant::from_millis(current_time_duration().as_millis() as i64);
-        let config = Config::new(HardwareAddress::Ethernet(EthernetAddress([
-            0, 0, 0, 0, 0, 0,
-        ])));
+        let config = Config::new(HardwareAddress::Ethernet(hw_addr));
         let mut iface = Interface::new(config, &mut device, now);
-        // let mut iface = Interface::new(config, &mut eth, now);
-        // 双 IP: loopback + 物理网卡
-        iface.update_ip_addrs(|addrs| {
-            addrs
-                .push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8))
-                .unwrap();
-            addrs
-                .push(IpCidr::new(IpAddress::v4(10, 0, 2, 15), 24))
-                .unwrap();
-        });
 
-        // 默认路由: 0.0.0.0/0 via 10.0.2.2
-        iface
-            .routes_mut()
-            .add_default_ipv4_route(Ipv4Address::new(10, 0, 2, 2))
-            .unwrap();
+        // Create SocketSet early for DHCP probe
+        let mut sockets = SocketSet::new(vec![]);
+
+        if has_real_nic {
+            let mut dhcp_socket = dhcpv4::Socket::new();
+            dhcp_socket.set_retry_config(dhcpv4::RetryConfig {
+                discover_timeout: Duration::from_secs(2),
+                initial_request_timeout: Duration::from_secs(1),
+                request_retries: 3,
+                min_renew_timeout: Duration::from_secs(60),
+                ..dhcpv4::RetryConfig::default()
+            });
+            let dhcp_handle = sockets.add(dhcp_socket);
+            let deadline = Instant::from_millis(
+                current_time_duration().as_millis() as i64 + 5000,
+            );
+
+            loop {
+                let timestamp = Instant::from_millis(current_time_duration().as_millis() as i64);
+                iface.poll(timestamp, &mut device, &mut sockets);
+
+                let event = sockets.get_mut::<dhcpv4::Socket>(dhcp_handle).poll();
+                match event {
+                    Some(dhcpv4::Event::Configured(cfg)) => {
+                        net_core::set_eth0_ipv4(IpCidr::Ipv4(cfg.address));
+                        net_core::set_default_gateway(cfg.router);
+                        log::info!(
+                            "[net::config] DHCP: got IP {:?} gateway {:?}",
+                            cfg.address,
+                            cfg.router
+                        );
+                        break;
+                    }
+                    Some(dhcpv4::Event::Deconfigured) => {}
+                    None => {}
+                }
+
+                if timestamp >= deadline {
+                    log::info!("[net::config] DHCP timeout, continuing without IP");
+                    break;
+                }
+            }
+            sockets.remove(dhcp_handle);
+        }
+
+        // Source IP addresses from net_core registered interfaces
+        let addrs_src: Vec<IpCidr> = {
+            let ifaces = net_core::IFACES.lock();
+            ifaces
+                .iter()
+                .flat_map(|dev| dev.ip_addrs.iter().copied())
+                .collect()
+        };
+        iface.update_ip_addrs(|addrs| {
+            addrs.clear();
+            for cidr in &addrs_src {
+                addrs.push(*cidr).unwrap();
+            }
+        });
+        log::info!("[net::config] sourced addresses from net_core: {:?}", addrs_src);
+
+        // Default route from net_core (set by DHCP probe if NIC present)
+        if let Some(gw) = net_core::default_gateway() {
+            iface.routes_mut().add_default_ipv4_route(gw).unwrap();
+        }
 
         Self {
             device,
-            // device: eth,
             iface,
-            sockets: SocketSet::new(vec![]),
+            sockets,
         }
     }
 }
@@ -343,9 +403,47 @@ impl<'a> NetInterface<'a> {
 }
 
 pub fn lookup_source_ip(dest_ip: IpAddress) -> IpAddress {
-    // 环回目标走 127.0.0.1，其他走物理网卡 IP
-    match dest_ip {
-        IpAddress::Ipv4(addr) if addr.0[0] == 127 => IpAddress::v4(127, 0, 0, 1),
-        _ => IpAddress::v4(10, 0, 2, 15),
+    let result = match dest_ip {
+        IpAddress::Ipv4(addr) if addr.0[0] == 127 => net_core::loopback_iface()
+            .and_then(|d| d.ip_addrs.first().map(|c| c.address()))
+            .unwrap_or(IpAddress::v4(127, 0, 0, 1)),
+        _ => net_core::eth0_ipv4_cidr()
+            .map(|c| c.address())
+            .unwrap_or(IpAddress::v4(0, 0, 0, 0)),
+    };
+    log::debug!("source_ip_select: dst={:?} -> src={:?}", dest_ip, result);
+    result
+}
+
+/// Check whether a route exists for the given destination IP.
+/// Returns Ok(()) if reachable, Err(ENETUNREACH) if no route available.
+pub fn route_check(dest: IpAddress) -> Result<(), crate::utils::error::SyscallErr> {
+    use crate::utils::error::SyscallErr;
+    match dest {
+        IpAddress::Ipv4(addr) => {
+            if addr.as_bytes()[0] == 127 {
+                return Ok(());
+            }
+            let ifaces = net_core::IFACES.lock();
+            let is_local = ifaces
+                .iter()
+                .any(|d| d.ip_addrs.iter().any(|c| c.address() == dest));
+            if is_local {
+                return Ok(());
+            }
+            let has_eth = ifaces.iter().any(|d| d.name == "eth0");
+            if has_eth {
+                Ok(())
+            } else {
+                Err(SyscallErr::ENETUNREACH)
+            }
+        }
+        IpAddress::Ipv6(_) => {
+            if net_core::find_by_name("eth0").is_some() {
+                Ok(())
+            } else {
+                Err(SyscallErr::ENETUNREACH)
+            }
+        }
     }
 }

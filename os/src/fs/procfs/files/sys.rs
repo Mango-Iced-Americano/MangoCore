@@ -99,3 +99,20 @@ pub fn net_conf_tag_content(
 ) -> Result<usize, SyscallErr> {
     proc_read_str(offset, len, buf, "0\n")
 }
+
+pub fn ip_forward_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    proc_read_str(offset, len, buf, "0\n")
+}
+
+pub fn ip_forward_write(
+    _extra: usize,
+    _offset: usize,
+    _buf: &[u8],
+) -> Result<usize, SyscallErr> {
+    Err(SyscallErr::EPERM)
+}

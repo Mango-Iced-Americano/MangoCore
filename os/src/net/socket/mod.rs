@@ -1,6 +1,7 @@
 pub mod common;
 pub mod inet;
 pub mod unix;
+pub mod netlink;
 
 use crate::{
     fs::{
@@ -77,6 +78,7 @@ pub const AF_UNSPEC: u16 = 0;
 pub const AF_UNIX: u16 = 1;
 pub const AF_INET: u16 = 2;
 pub const AF_INET6: u16 = 10;
+pub const AF_NETLINK: u16 = 16;
 
 /// shutdown
 #[allow(unused)]
@@ -142,8 +144,6 @@ pub static TCP_SOCKETS_TO_REMOVE: Mutex<Vec<SocketHandle>> = Mutex::new(Vec::new
 pub static RAW_SOCKETS: Mutex<Vec<(SocketHandle, Weak<RawSocket>)>> = Mutex::new(Vec::new());
 pub static RAW_SOCKETS_TO_REMOVE: Mutex<Vec<SocketHandle>> = Mutex::new(Vec::new());
 
-pub static GATEWAY: IpAddress = IpAddress::v4(10, 0, 2, 2);
-pub static LOCAL_IP: IpAddress = IpAddress::v4(10, 0, 2, 15);
 
 // ── Endpoint 枚举 ─────────────────────────────────────────────────────
 
@@ -527,10 +527,13 @@ impl IndexNode for SocketFile {
 
     fn ioctl(
         &self,
-        _cmd: u32,
-        _argp: usize,
+        cmd: u32,
+        argp: usize,
         _private_data: spin::MutexGuard<FilePrivateData>,
     ) -> Result<usize, SyscallErr> {
+        if cmd >= 0x8900 && cmd <= 0x89FF {
+            return crate::net::ioctl::siocgif_dispatch(cmd, argp);
+        }
         Err(SyscallErr::ENOTTY)
     }
 
@@ -609,6 +612,14 @@ impl dyn Socket {
                     _ => return Err(SyscallErr::EAFNOSUPPORT),
                 }
             }
+            AF_NETLINK => match psock {
+                PSOCK::Raw | PSOCK::Datagram => {
+                    let socket: Arc<dyn Socket> = Arc::new(crate::net::socket::netlink::NetlinkSocket::new(protocol));
+                    let socket_file = Arc::new(SocketFile::new(socket));
+                    alloc_socket_fd(socket_file)
+                }
+                _ => Err(SyscallErr::EINVAL),
+            },
             _ => Err(SyscallErr::EAFNOSUPPORT),
         }
     }

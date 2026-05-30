@@ -37,7 +37,7 @@ use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use self::inner::{
     with_tcp_mut, Connecting, Established, Init, Listening, SelfConnected, BACKLOG_SIZE,
 };
-use crate::net::socket::inet::common::PortManager;
+use crate::net::socket::inet::common::{BoundInner, PortManager};
 use crate::net::socket::inet::stream::inner::ConnectResult;
 use crate::trace_event;
 /// TCP Socket —— 对外表现为 Socket trait
@@ -50,6 +50,7 @@ pub struct TcpSocket {
     pub write_shutdown: AtomicBool,
     pub reuse_addr: AtomicBool,
     multicast_group_joined: AtomicBool,
+    pub bound: Mutex<BoundInner>,
     pub recv_waiters: EventWaitQueue,
     pub send_waiters: EventWaitQueue,
     pub connect_waiters: EventWaitQueue,
@@ -66,11 +67,16 @@ impl TcpSocket {
             write_shutdown: AtomicBool::new(false),
             reuse_addr: AtomicBool::new(false),
             multicast_group_joined: AtomicBool::new(false),
+            bound: Mutex::new(BoundInner::new()),
             recv_waiters: EventWaitQueue::new(),
             send_waiters: EventWaitQueue::new(),
             connect_waiters: EventWaitQueue::new(),
             accept_waiters: EventWaitQueue::new(),
         }
+    }
+
+    pub fn bound_inner(&self) -> BoundInner {
+        self.bound.lock().clone()
     }
 
     /// 注册到全局 TCP_SOCKETS 表
@@ -187,6 +193,17 @@ impl Socket for TcpSocket {
         );
         match new_inner.bind(listen_ep) {
             Ok(bound) => {
+                if let Inner::Init(inner_init) = &bound {
+                    if let Init::Bound { handle, local } = inner_init {
+                        let ifindex = match local.addr {
+                            IpAddress::Ipv4(ip) if ip.is_loopback() => 1,
+                            _ => 2,
+                        };
+                        self.bound
+                            .lock()
+                            .bind(*handle, ifindex, Some(local.addr), local.port);
+                    }
+                }
                 *inner = bound;
                 Ok(0)
             }
@@ -205,6 +222,16 @@ impl Socket for TcpSocket {
         );
         match new_inner.listen(BACKLOG_SIZE as usize) {
             Ok(listening) => {
+                let listen_addr = listening.listen_addr();
+                let ifindex = match listen_addr.addr {
+                    Some(IpAddress::Ipv4(ip)) if ip.is_loopback() => 1,
+                    _ => 2,
+                };
+                if let Some(&handle) = listening.handles.first() {
+                    self.bound
+                        .lock()
+                        .bind(handle, ifindex, listen_addr.addr, listen_addr.port);
+                }
                 *inner = Inner::Listening(listening);
                 Ok(0)
             }
@@ -221,7 +248,12 @@ impl Socket for TcpSocket {
         };
         // Linux: connect() to INADDR_ANY is treated as localhost
         let remote_endpoint = if ep.addr.is_unspecified() {
-            IpEndpoint::new(smoltcp::wire::IpAddress::v4(127, 0, 0, 1), ep.port)
+            IpEndpoint::new(
+                crate::net::net_core::loopback_iface()
+                    .and_then(|d| d.ip_addrs.first().map(|c| c.address()))
+                    .unwrap_or(IpAddress::v4(127, 0, 0, 1)),
+                ep.port,
+            )
         } else {
             *ep
         };
@@ -232,6 +264,13 @@ impl Socket for TcpSocket {
         );
         match new_inner.connect(remote_endpoint) {
             Ok(connecting) => {
+                let ifindex = match connecting.local.addr {
+                    IpAddress::Ipv4(ip) if ip.is_loopback() => 1,
+                    _ => 2,
+                };
+                self.bound
+                    .lock()
+                    .bind(connecting.handle, ifindex, Some(connecting.local.addr), connecting.local.port);
                 *inner = Inner::Connecting(connecting);
                 drop(inner);
                 // 做一次非阻塞状态检查
@@ -311,6 +350,18 @@ impl Socket for TcpSocket {
             Err(e) => return Err(e),
         };
 
+        let accepted_bound = if let Inner::Established(ref est) = connected_inner {
+            let ifindex = match est.local.addr {
+                IpAddress::Ipv4(ip) if ip.is_loopback() => 1,
+                _ => 2,
+            };
+            let mut b = BoundInner::new();
+            b.bind(est.handle, ifindex, Some(est.local.addr), est.local.port);
+            b
+        } else {
+            BoundInner::new()
+        };
+
         let connected_socket = Arc::new(TcpSocket {
             inner: Mutex::new(connected_inner),
             pollee: AtomicUsize::new(0),
@@ -318,6 +369,7 @@ impl Socket for TcpSocket {
             write_shutdown: AtomicBool::new(false),
             reuse_addr: AtomicBool::new(false),
             multicast_group_joined: AtomicBool::new(false),
+            bound: Mutex::new(accepted_bound),
             recv_waiters: EventWaitQueue::new(),
             send_waiters: EventWaitQueue::new(),
             connect_waiters: EventWaitQueue::new(),

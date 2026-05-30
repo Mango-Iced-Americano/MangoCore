@@ -5,6 +5,10 @@ pub mod cpuinfo;
 pub mod filesystems;
 pub mod meminfo;
 pub mod mounts;
+pub mod net_dev;
+pub mod net_route;
+pub mod net_tcp;
+pub mod net_udp;
 pub mod self_;
 pub mod stat;
 pub mod sys;
@@ -82,6 +86,20 @@ pub fn register_all(root: &Arc<crate::fs::procfs::LockedProcInode>) -> Result<()
         sys::net_conf_tag_content,
         0,
     )?;
+    ipv4_dir.add_writable_file_with_write(
+        "ip_forward",
+        InodeMode::from_bits_truncate(0o644),
+        sys::ip_forward_content,
+        sys::ip_forward_write,
+        0,
+    )?;
+
+    let net_dir = root.add_dir_locked("net", InodeMode::from_bits_truncate(0o555))?;
+    net_dir.add_file("dev", InodeMode::from_bits_truncate(0o444), net_dev::net_dev_content, 0)?;
+    net_dir.add_file("route", InodeMode::from_bits_truncate(0o444), net_route::net_route_content, 0)?;
+    net_dir.add_file("tcp", InodeMode::from_bits_truncate(0o444), net_tcp::net_tcp_content, 0)?;
+    net_dir.add_file("udp", InodeMode::from_bits_truncate(0o444), net_udp::net_udp_content, 0)?;
+
     root.add_dynamic_symlink("self", self_::self_content, 0)?;
 
     crate::fs::procfs::pid::setup_pid_hooks(root);
