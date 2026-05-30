@@ -89,9 +89,16 @@ pub fn run_tasks() {
         crate::fs::reclaim::maybe_reclaim_fs_caches();
         // 在取任务前先清理僵尸，防止 zombie TCB 因 nice-aware
         // 调度策略长期不被选中而导致 TCB/PCB 整链内存泄漏。
-        // 逐出僵尸（零堆分配：每次 remove 一个，在锁外 drop）
-        drop(take_one_ready_zombie());
-        drop(take_one_interruptible_zombie());
+        // 每次最多 drain 64 个，避免锁持有时间过长。
+        for _ in 0..64 {
+            let a = take_one_ready_zombie();
+            let b = take_one_interruptible_zombie();
+            if a.is_none() && b.is_none() {
+                break;
+            }
+            drop(a);
+            drop(b);
+        }
         // 降频清理 PROCESS_SHARED_FUTEX 空 WaitQueue 键
         super::threads::compact_shared_futex();
         let mut processor = PROCESSOR.lock();

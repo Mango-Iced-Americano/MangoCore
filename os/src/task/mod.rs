@@ -7,6 +7,7 @@ pub mod pid;
 mod process;
 mod process_manager;
 mod processor;
+pub mod quota;
 mod registry;
 mod sleep;
 pub mod signal;
@@ -23,6 +24,7 @@ use manager::fetch_task;
 pub use completion::Completion;
 pub use manager::{
     add_kernel_timer, add_task, all_pids, do_oom, do_wake_expired,
+    remove_zombie_tasks_by_pid,
     take_one_interruptible_zombie, take_one_ready_zombie,
     kernel_timer_queue_len, procs_count, remove_tasks_from_queues,
     send_signal_to_interruptible, sleep_interruptible, task_manager_counts, update_ready_nice,
@@ -194,13 +196,19 @@ pub fn exit_current_and_run_next(exit_code: u32) -> ! {
 
 pub fn exit_group_and_run_next(exit_code: u32) -> ! {
     let task = take_current_task().unwrap();
-    let process = task.process.clone();
-    process.request_group_exit(exit_code);
-    let exit_list: Vec<_> = process
-        .threads()
-        .into_iter()
-        .filter(|thread| thread.tid.0 != task.tid.0)
-        .collect();
+
+    // 把 process Arc 的生命周期限制在 schedule() 之前。
+    // 此函数返回 !，schedule() 切栈后本地变量永不析构——不能有任何 Arc 跨过它。
+    let exit_list: Vec<_> = {
+        let process = task.process.clone();
+        process.request_group_exit(exit_code);
+        process
+            .threads()
+            .into_iter()
+            .filter(|thread| thread.tid.0 != task.tid.0)
+            .collect()
+    }; // process Arcs 在此 drop
+
     manager::remove_tasks_from_queues(&exit_list);
 
     for task in exit_list.into_iter() {

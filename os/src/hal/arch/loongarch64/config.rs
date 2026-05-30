@@ -3,7 +3,20 @@
 pub const MEMORY_SIZE: usize = 0x3000_0000;
 pub const USER_STACK_SIZE: usize = PAGE_SIZE * 0x40;
 pub const USER_HEAP_SIZE: usize = PAGE_SIZE * 0x100;
-pub const SYSTEM_TASK_LIMIT: usize = 1024;
+pub const SYSTEM_TASK_LIMIT: usize = {
+    // la64 kernel stacks 分配在 kernel heap 上。
+    let by_ram = MEMORY_SIZE / (KERNEL_STACK_SIZE * 4);
+    let by_heap = KERNEL_HEAP_SIZE / (KERNEL_STACK_SIZE * 2);
+    let limit = if by_ram < by_heap { by_ram } else { by_heap };
+    if limit < 512 {
+        512
+    } else if limit > 4096 {
+        4096
+    } else {
+        limit
+    }
+};
+pub const SYSTEM_TASK_SOFT_LIMIT: usize = SYSTEM_TASK_LIMIT * 9 / 10;
 pub const SYSTEM_FD_LIMIT: usize = 256;
 pub const PAGE_SIZE: usize = 0x1000;
 pub const PAGE_SIZE_BITS: usize = PAGE_SIZE.trailing_zeros() as usize;
@@ -20,7 +33,7 @@ pub const KSTACK_PG_NUM_SHIFT: usize = 16usize.trailing_zeros() as usize;
 // 1000-waiter fork/futex tests exhaust the 128M heap before wait can reap.
 pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 0x10;
 pub const BOOT_STACK_SIZE: usize = PAGE_SIZE * 0x20;
-pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x10000;
+pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x2000; // 32MB — OOM-trigger test
 
 // Addresses
 /// Maximum length of a physical address

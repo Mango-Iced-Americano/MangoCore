@@ -156,15 +156,6 @@ fn sys_clone_inner(
     ctid: *mut u32,
     pidfd_ptr: Option<*mut u32>,
 ) -> isize {
-    // ---- 防御性检查 1：进程总量限制 ----
-    if ProcessManager::process_count() >= SYSTEM_TASK_LIMIT as u16 {
-        warn!(
-            "[sys_clone] Total process limit reached ({})",
-            SYSTEM_TASK_LIMIT
-        );
-        return -(SyscallErr::EAGAIN as isize); // Linux 语义：资源暂时不可用
-    }
-    // ---- 防御性检查 2：堆内存剩余预警 ----
     if crate::mm::unallocated_frames() < 32 {
         // 预留一点物理页给基本运作
         warn!("[sys_clone] Low physical memory, rejecting clone");
@@ -217,7 +208,19 @@ fn sys_clone_inner(
         "clone";
         child = match parent.sys_clone(flags, stack, tls, exit_signal) {
             Ok(task) => Some(task),
-            Err(errno) => return errno,
+            Err(errno) => {
+                println!(
+                    "[sys_clone] clone failed: errno={} flags={:?} quota={}/{} registry={} free_frames={} heap={}K",
+                    errno,
+                    flags,
+                    crate::task::quota::allocated_task_count(),
+                    SYSTEM_TASK_LIMIT,
+                    crate::task::ProcessManager::all_processes().len(),
+                    crate::mm::unallocated_frames(),
+                    crate::mm::heap_stats().1 >> 10,
+                );
+                return errno;
+            }
         };
     }
     let child = match child {

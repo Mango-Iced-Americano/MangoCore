@@ -317,6 +317,34 @@ fn reap_orphans() {
     }
 }
 
+fn vfork_with_retry() -> isize {
+    for _ in 0..200 {
+    let pid = vfork_with_retry();
+        if pid >= 0 {
+            return pid;
+        }
+        // pid < 0: 通常是 EAGAIN(-11)，quota 暂满。
+        // 短暂休眠等内核 / initproc 回收刚刚退出的孤儿进程。
+        sleep(5);
+    }
+    // 重试耗尽，返回最后的负值 errno
+    vfork()
+}
+
+fn cleanup_case_group(case_pgid: isize, own_pgid: isize) {
+    if case_pgid <= 0 || case_pgid == own_pgid {
+        return;
+    }
+    // kill 整个进程组，消灭测试留下的孤儿/后台进程
+    let pgid_arg = !(case_pgid as usize).wrapping_add(1);
+    let _ = kill(pgid_arg, SIGTERM);
+    sleep(50);
+    let _ = kill(pgid_arg, SIGKILL);
+    sleep(10);
+    // 非阻塞回收本进程能看到的任何僵尸子进程
+    reap_orphans();
+}
+
 fn get_time_ms() -> u64 {
     user_lib::get_time() as u64
 }
@@ -484,7 +512,9 @@ fn run_case(
         return 124;
     }
 
-    exit_code_status(code)
+    let ret = exit_code_status(code);
+    cleanup_case_group(case_pgid, own_pgid);
+    ret
 }
 
 #[no_mangle]

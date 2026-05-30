@@ -204,6 +204,31 @@ impl TaskManager {
         }
         None
     }
+    /// 从就绪 + 可中断队列中移除属于指定 pid 的所有 zombie TCB。
+    /// 返回收集到的 zombie Arc，由调用者负责在锁外 drop。
+    fn remove_zombie_tasks_by_pid(&mut self, pid: usize) -> alloc::vec::Vec<Arc<TaskControlBlock>> {
+        let mut zombies = alloc::vec::Vec::new();
+        self.ready_queue.retain(|task| {
+            let is_match = task.acquire_inner_lock().is_zombie() && task.process.pid == pid;
+            if is_match {
+                zombies.push(task.clone());
+                false
+            } else {
+                true
+            }
+        });
+        self.interruptible_queue.retain(|task| {
+            let is_match = task.acquire_inner_lock().is_zombie() && task.process.pid == pid;
+            if is_match {
+                zombies.push(task.clone());
+                false
+            } else {
+                true
+            }
+        });
+        self.recompute_ready_nice_count();
+        zombies
+    }
     fn update_ready_nice(&mut self, task: &Arc<TaskControlBlock>, old_nice: i32, new_nice: i32) {
         if (old_nice == 0) == (new_nice == 0) {
             return;
@@ -384,6 +409,13 @@ pub fn take_one_ready_zombie() -> Option<Arc<TaskControlBlock>> {
 /// 从可中断队列中逐出一个僵尸任务（零堆分配），返回后在锁外 drop。
 pub fn take_one_interruptible_zombie() -> Option<Arc<TaskControlBlock>> {
     TASK_MANAGER.lock().take_one_interruptible_zombie()
+}
+
+/// 从调度队列中移除属于指定 pid 的所有 zombie TCB，
+/// 在锁外 drop，避免 TCB::drop() 在持有 TASK_MANAGER 锁时执行析构链。
+pub fn remove_zombie_tasks_by_pid(pid: usize) {
+    let zombies = TASK_MANAGER.lock().remove_zombie_tasks_by_pid(pid);
+    drop(zombies);
 }
 
 /// 尝试释放所有任务的内存空间，直到释放`req`页。

@@ -1,14 +1,13 @@
 //! 资源统计诊断模块
 
 use crate::mm::{heap_stats, unallocated_frames};
-use crate::task::{procs_count, task_manager_counts, TaskControlBlock};
+use crate::task::{procs_count, quota, task_manager_counts, TaskControlBlock};
 #[cfg(feature = "heap_trace")]
 use alloc::string::String;
 #[cfg(feature = "heap_trace")]
 use core::fmt::Write;
 
-// const STATS_ENABLED: bool = cfg!(feature = "heap_trace");
-const STATS_ENABLED: bool = true;
+const STATS_ENABLED: bool = cfg!(feature = "heap_trace");
 
 fn ext4_cache_stats() -> (usize, usize, usize, usize, usize) {
     let mut pc = 0;
@@ -180,12 +179,18 @@ fn zombie_parent_stats() -> String {
 }
 
 fn vma_stats() -> (usize, usize, usize) {
-    let mut vmas = 0; let mut zvmas = 0; let mut frames = 0;
+    let mut vmas = 0;
+    let mut zvmas = 0;
+    let mut frames = 0;
     for pcb in crate::task::ProcessManager::all_processes() {
         let vm = pcb.vm();
         let vc = vm.lock().vma_count();
         frames += alloc::sync::Arc::strong_count(&vm).saturating_sub(1);
-        if pcb.is_zombie() { zvmas += vc; } else { vmas += vc; }
+        if pcb.is_zombie() {
+            zvmas += vc;
+        } else {
+            vmas += vc;
+        }
     }
     (vmas, zvmas, frames)
 }
@@ -194,11 +199,15 @@ fn vma_stats() -> (usize, usize, usize) {
 fn zombie_cwd_count() -> usize {
     let mut n = 0;
     for pcb in crate::task::ProcessManager::all_processes() {
-        if !pcb.is_zombie() { continue; }
+        if !pcb.is_zombie() {
+            continue;
+        }
         if let Some(files) = pcb.files().try_lock() {
             // The cwd is held via FsStatus.working_inode which is a vfs::File
             // containing an Arc<dyn IndexNode>. Check if it's non-null.
-            if files.fd_count() > 0 { n += 1; }
+            if files.fd_count() > 0 {
+                n += 1;
+            }
         }
     }
     n
@@ -237,13 +246,17 @@ pub fn print_resource_stats(task: Option<&TaskControlBlock>) {
     // Line 1: system resources
     let procs = procs_count();
     let real_procs = crate::task::ProcessManager::all_processes().len();
+    let quota = quota::allocated_task_count();
+    let proc_limit = crate::config::SYSTEM_TASK_LIMIT;
     println!(
-        "[kernel] [stats] free_frames={} ready={} int={} procs={}/{} heap={}K/{}/{}K waste={}K",
+        "[kernel] [stats] free_frames={} ready={} int={} procs={}/{} quota={}/{} heap={}K/{}/{}K waste={}K",
         free,
         ready,
         int_count,
         procs,
         real_procs,
+        quota,
+        proc_limit,
         heap_free >> 10,
         alloc_actual >> 10,
         heap_total >> 10,
@@ -326,12 +339,12 @@ pub fn print_resource_stats(task: Option<&TaskControlBlock>) {
     );
     // Line 9: dentry cache diagnostics + creation sources
     let (ev_tot, ev_sole, ev_ext, adv_rem) = crate::fs::vfs::dentry_cache::dcache_stats::snapshot();
-    let (ms_find, ms_ovl, ms_par, ms_root, ms_crt, ms_br) = crate::fs::vfs::mount::counters::creation_snapshot();
+    let (ms_find, ms_ovl, ms_par, ms_root, ms_crt, ms_br) =
+        crate::fs::vfs::mount::counters::creation_snapshot();
     let zcwd = zombie_cwd_count();
     println!(
         "[kernel] [stats] diag dc_evict={}/{}/{} dc_adv_rm={} zcwd={} mnode_src=f{}o{}p{}r{}c{}b{}",
-        ev_tot, ev_sole, ev_ext, adv_rem, zcwd,
-        ms_find, ms_ovl, ms_par, ms_root, ms_crt, ms_br
+        ev_tot, ev_sole, ev_ext, adv_rem, zcwd, ms_find, ms_ovl, ms_par, ms_root, ms_crt, ms_br
     );
     #[cfg(feature = "heap_trace")]
     println!("[kernel] [stats] zombie_owner {}", zombie_parent_stats());

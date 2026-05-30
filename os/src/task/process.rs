@@ -1,5 +1,6 @@
 use super::{
     pid::{RecycleAllocator, TidHandle},
+    quota::TaskQuotaGuard,
     registry,
     signal::{sigchld_requests_auto_reap, PendingSignal, SignalQueue, Sighand, Signals},
     threads::Futex,
@@ -32,6 +33,10 @@ pub struct ProcessControlBlock {
     pub leader_tid: usize,
     /// 保持进程 pid/tgid 在 zombie 被 wait 回收前不被复用。
     _pid_handle: Arc<TidHandle>,
+    /// 进程生命周期 quota。clone()/fork() 成功时申请。
+    /// wait_child / auto-reap / orphan-zombie-reap 时调用 release_process_quota_once()
+    /// 立即释放；PCB Drop 作为兜底。
+    process_quota: Mutex<Option<TaskQuotaGuard>>,
     /// 属于该进程的线程列表。
     pub threads: Mutex<Vec<Weak<TaskControlBlock>>>,
     /// 父进程 wait4() 等待子进程退出的等待队列。
@@ -155,10 +160,20 @@ pub fn is_executable_inode_busy(inode: &Arc<dyn vfs::IndexNode>) -> bool {
 }
 
 impl ProcessControlBlock {
+    /// 一次性释放进程级 clone quota。幂等，重复调用无副作用。
+    /// 应在 wait_child、auto-reap、orphan-zombie-reap 路径中尽早调用，
+    /// 不依赖 PCB Drop 的延迟释放。
+    pub fn release_process_quota_once(&self) {
+        if let Some(_guard) = self.process_quota.lock().take() {
+            // guard 在此处 drop → TASK_QUOTA_USED 递减
+        }
+    }
+
     pub fn new(
         pid: usize,
         leader_tid: usize,
         pid_handle: Arc<TidHandle>,
+        process_quota: TaskQuotaGuard,
         pgid: usize,
         sid: usize,
         parent: Option<Weak<ProcessControlBlock>>,
@@ -183,6 +198,7 @@ impl ProcessControlBlock {
             pid,
             leader_tid,
             _pid_handle: pid_handle,
+            process_quota: Mutex::new(Some(process_quota)),
             threads: Mutex::new(Vec::new()),
             child_exit_wait: Mutex::new(WaitQueue::new()),
             vfork_parent: Mutex::new(None),
@@ -671,6 +687,8 @@ impl ProcessControlBlock {
                 child.set_parent(None);
                 child.release_pid();
                 registry::unregister_process(child.pid);
+                child.release_process_quota_once();
+                crate::task::remove_zombie_tasks_by_pid(child.pid);
             } else {
                 child.set_parent(Some(Arc::downgrade(&INITPROC.process)));
                 child.adopted_by_init.store(true, Ordering::Relaxed);
@@ -743,6 +761,8 @@ impl ProcessControlBlock {
                 self.set_parent(None);
                 self.release_pid();
                 registry::unregister_process(self.pid);
+                self.release_process_quota_once();
+                crate::task::remove_zombie_tasks_by_pid(self.pid);
                 parent_process.child_exit_wait.lock().wake_all();
             } else {
                 parent_process.child_exit_wait.lock().wake_all();

@@ -1,5 +1,6 @@
 use super::pid::RecycleAllocator;
 use super::process::ProcessControlBlock;
+use super::quota::TaskQuotaGuard;
 use super::registry;
 use super::signal::*;
 use super::threads::{futex_wake_shared, Futex};
@@ -88,6 +89,8 @@ pub struct TaskControlBlock {
     pub ustack_base: usize,
     /// 退出信号
     pub exit_signal: Signals,
+    /// CLONE_THREAD 线程的 quota。非线程 clone 的 quota 在 PCB 上。
+    _thread_quota: Option<TaskQuotaGuard>,
     // 可变字段
     /// 任务内部状态，使用互斥锁保护
     inner: Mutex<TaskControlBlockInner>,
@@ -672,10 +675,13 @@ impl TaskControlBlock {
         )
         .unwrap();
 
+        let process_quota = TaskQuotaGuard::acquire_for_init();
+
         let process = Arc::new(ProcessControlBlock::new(
             pid,
             tid_handle.0,
             tid_handle.clone(),
+            process_quota,
             pgid,
             pgid,
             None,
@@ -701,6 +707,7 @@ impl TaskControlBlock {
             kstack,
             ustack_base: ustack_bottom_from_slot(user_res_slot),
             exit_signal: Signals::empty(),
+            _thread_quota: None,
             wait_io_timer_pending: AtomicBool::new(false),
             inner: Mutex::new(TaskControlBlockInner {
                 sigmask: Signals::empty(),
@@ -921,6 +928,8 @@ impl TaskControlBlock {
         tls: usize,
         exit_signal: Signals,
     ) -> Result<Arc<TaskControlBlock>, isize> {
+        let quota = TaskQuotaGuard::try_acquire()?;
+
         // ---- 保持父PCB锁
         let parent_inner = self.acquire_inner_lock();
         // 当前调度器不实现真实 RT 调度，FIFO/RR 只作为 syscall 兼容状态。
@@ -992,8 +1001,8 @@ impl TaskControlBlock {
         } else {
             self.user_res_slot
         };
-        let process = if flags.contains(CloneFlags::CLONE_THREAD) {
-            self.process.clone()
+        let (process, thread_quota) = if flags.contains(CloneFlags::CLONE_THREAD) {
+            (self.process.clone(), Some(quota))
         } else {
             let parent_process = if flags.contains(CloneFlags::CLONE_PARENT) {
                 self.process.parent()
@@ -1033,23 +1042,27 @@ impl TaskControlBlock {
             } else {
                 Arc::new(Mutex::new(Futex::new()))
             };
-            Arc::new(ProcessControlBlock::new(
-                tid_handle.0,
-                tid_handle.0,
-                tid_handle.clone(),
-                self.process.getpgid(),
-                self.process.getsid(),
-                parent_process.as_ref().map(Arc::downgrade),
-                self.process.exe(),
-                self.process.exe_path(),
-                files,
-                fs,
-                uts,
-                memory_set.clone(),
-                sighand,
-                futex,
-                user_res_slot_allocator.clone(),
-            ))
+            (
+                Arc::new(ProcessControlBlock::new(
+                    tid_handle.0,
+                    tid_handle.0,
+                    tid_handle.clone(),
+                    quota,
+                    self.process.getpgid(),
+                    self.process.getsid(),
+                    parent_process.as_ref().map(Arc::downgrade),
+                    self.process.exe(),
+                    self.process.exe_path(),
+                    files,
+                    fs,
+                    uts,
+                    memory_set.clone(),
+                    sighand,
+                    futex,
+                    user_res_slot_allocator.clone(),
+                )),
+                None,
+            )
         };
         // 分配内核栈
         let kstack = kstack_alloc();
@@ -1093,6 +1106,7 @@ impl TaskControlBlock {
                 ustack_bottom_from_slot(user_res_slot)
             },
             exit_signal,
+            _thread_quota: thread_quota,
             wait_io_timer_pending: AtomicBool::new(false),
             inner: Mutex::new(TaskControlBlockInner {
                 // clone

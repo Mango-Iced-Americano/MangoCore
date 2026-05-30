@@ -40,7 +40,13 @@ pub const MEMORY_PHYS: usize = 0x800_0000;
 pub const DISK_IMAGE_BASE: usize = 0x8000_0000 + MEMORY_PHYS;
 // pub const DISK_IMAGE_BASE: usize = MEMORY_END;
 
-pub const SYSTEM_TASK_LIMIT: usize = 1024;
+pub const SYSTEM_TASK_LIMIT: usize = {
+    let ram = MEMORY_SIZE;
+    let stack = KERNEL_STACK_SIZE;
+    let limit = ram / (stack * 4);
+    if limit < 512 { 512 } else if limit > 4096 { 4096 } else { limit }
+};
+pub const SYSTEM_TASK_SOFT_LIMIT: usize = SYSTEM_TASK_LIMIT * 9 / 10;
 pub const SYSTEM_FD_LIMIT: usize = 256;
 
 pub const BLOCK_SZ: usize = 4096;

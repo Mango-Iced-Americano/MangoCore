@@ -7,7 +7,7 @@ use crate::syscall::{errno::*, CloneFlags};
 
 use super::signal::Signals;
 use super::{
-    add_task, current_task, manager::procs_count, registry, signal::send_process_signal,
+    add_task, current_task, quota, registry, signal::send_process_signal,
     ProcessControlBlock, ProcessState, TaskControlBlock, WaitQueue, WaitResult,
 };
 
@@ -45,7 +45,7 @@ impl ProcessManager {
     }
 
     pub fn process_count() -> u16 {
-        procs_count()
+        quota::allocated_task_count().min(u16::MAX as usize) as u16
     }
 
     pub fn publish_clone_child(
@@ -166,6 +166,10 @@ impl ProcessManager {
                     process_inner.child_rusage.add_child(child.wait_rusage());
                     child.set_parent(None);
                     registry::unregister_process(child.pid);
+                    // 立即释放 clone quota —— 不等 zombie TCB 被调度器清理
+                    child.release_process_quota_once();
+                    // 同步从调度队列清除 zombie TCB，释放 PCB 及关联资源
+                    crate::task::remove_zombie_tasks_by_pid(child.pid);
                 }
                 Some(found_pid as isize)
             } else {

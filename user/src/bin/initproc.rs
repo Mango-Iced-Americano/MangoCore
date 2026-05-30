@@ -147,6 +147,11 @@ fn run_bash_cmd_timeout(cmd: &str, environ: &[*const u8], timeout_secs: u64) -> 
             }
             sleep(10);
         }
+        // 目标进程已回收。但它在运行期间可能创建了大量子进程；
+        // 那些子进程在目标进程退出后成为 initproc 的孤儿，仍占用
+        // clone quota。若不清空就直接运行下一个测试，vfork 可能
+        // 因 quota 满而失败（EAGAIN → 退出码 127）。
+        drain_children();
         return code;
     }
     -1
