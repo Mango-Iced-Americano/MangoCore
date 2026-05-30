@@ -90,18 +90,37 @@ jobs:
             echo "ltp_from="
           } > os_test_develop.conf
 
-      - name: Run rv64 test (extract + inject + QEMU)
+      - name: Extract rv64 image + inject config
         run: |
           xz -dkcf fs-img-dir/sdcard-rv.img.xz > sdcard-rv.img
+          docker run --rm --privileged --network host \
+            -v "${GITHUB_WORKSPACE}:/app" \
+            -w /app/os \
+            -e ARCH=rv64 -e BLK_MODE=virt \
+            -e CONF_FILE=/app/os_test_develop.conf \
+            "$CI_IMAGE" \
+            bash -lc './inject_os_test_conf.sh'
+
+      - name: Extract la64 image + inject config
+        run: |
+          xz -dkcf fs-img-dir/sdcard-la.img.xz > sdcard-la.img
+          docker run --rm --privileged --network host \
+            -v "${GITHUB_WORKSPACE}:/app" \
+            -w /app/os \
+            -e ARCH=la64 -e BLK_MODE=virt_pci \
+            -e CONF_FILE=/app/os_test_develop.conf \
+            "$CI_IMAGE" \
+            bash -lc './inject_os_test_conf.sh'
+
+      - name: Run QEMU (both arches in parallel)
+        timeout-minutes: 35
+        run: |
+          echo "Starting rv64 QEMU..."
           docker run --rm --privileged --network host \
             -v "${GITHUB_WORKSPACE}:/app" \
             -w /app \
             "$CI_IMAGE" \
             bash -lc '
-              set -euo pipefail
-              cd os
-              ARCH=rv64 BLK_MODE=virt CONF_FILE=/app/os_test_develop.conf ./inject_os_test_conf.sh
-              cd /app
               qemu-system-riscv64 \
                 -machine virt -kernel kernel-rv -m 1024 -nographic -smp 1 \
                 -bios default \
@@ -110,20 +129,14 @@ jobs:
                 -no-reboot -rtc base=utc \
                 -device virtio-net-device,netdev=net -netdev user,id=net
             ' > testresult/output-rv.txt 2>&1 &
-          echo "rv64_qemu_pid=$!" >> "$GITHUB_ENV"
+          RV_PID=$!
 
-      - name: Run la64 test (extract + inject + QEMU)
-        run: |
-          xz -dkcf fs-img-dir/sdcard-la.img.xz > sdcard-la.img
+          echo "Starting la64 QEMU..."
           docker run --rm --privileged --network host \
             -v "${GITHUB_WORKSPACE}:/app" \
             -w /app \
             "$CI_IMAGE" \
             bash -lc '
-              set -euo pipefail
-              cd os
-              ARCH=la64 BLK_MODE=virt_pci CONF_FILE=/app/os_test_develop.conf ./inject_os_test_conf.sh
-              cd /app
               qemu-system-loongarch64 \
                 -kernel kernel-la -m 1G -nographic -smp 1 \
                 -drive file=sdcard-la.img,if=none,format=raw,id=x0 \
@@ -132,18 +145,16 @@ jobs:
                 -device virtio-net-pci,netdev=net0 -netdev user,id=net0 \
                 -rtc base=utc
             ' > testresult/output-la.txt 2>&1 &
-          echo "la64_qemu_pid=$!" >> "$GITHUB_ENV"
+          LA_PID=$!
 
-      - name: Wait for both QEMU instances
-        timeout-minutes: 35
-        run: |
-          wait "${rv64_qemu_pid}" || echo "rv64 QEMU exited with code $?"
-          wait "${la64_qemu_pid}" || echo "la64 QEMU exited with code $?"
+          echo "Waiting for rv64 (PID $RV_PID) and la64 (PID $LA_PID)..."
+          wait $RV_PID && echo "rv64 QEMU finished OK" || echo "rv64 QEMU exited with code $?"
+          wait $LA_PID && echo "la64 QEMU finished OK" || echo "la64 QEMU exited with code $?"
           echo "Both QEMU instances finished"
 
       - name: Analyze results
         if: always()
-        run: python3 .github/scripts/analyze_os_results.py
+        run: python3 .github/scripts/analyze_os_results.py --mode develop
 
       - name: Package artifacts
         if: always()

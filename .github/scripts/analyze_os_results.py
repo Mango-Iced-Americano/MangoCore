@@ -11,6 +11,7 @@ Exits 0 if all gates pass, 1 otherwise.
 Outputs ci-summary.md → GITHUB_STEP_SUMMARY for in-CI display.
 """
 
+import argparse
 import json
 import os
 import re
@@ -117,9 +118,19 @@ def scan_panic(log_path):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="CI score gate analyzer")
+    parser.add_argument(
+        "--mode",
+        choices=["develop", "main"],
+        default="main",
+        help="develop: check basic+busybox only; main: check all gates including LTP",
+    )
+    args = parser.parse_args()
+
     TESTRESULT.mkdir(exist_ok=True)
     failures = []
-    summary_lines = ["# MangoCore CI — Full QEMU Test Summary", ""]
+    title = f"MangoCore CI — {args.mode.upper()} Test Summary"
+    summary_lines = [f"# {title}", ""]
 
     for arch, log_path in ARCHES.items():
         summary_lines.append(f"## {arch}")
@@ -166,14 +177,18 @@ def main():
             if not ok:
                 failures.append(f"{arch}: {group} must be full score, got {int(score)}/{total}")
 
-        for group in LTP_GROUPS:
-            score, total = group_score(result.get(group, {}))
-            pct = f"{score / total * 100:.0f}%" if total > 0 else "N/A"
-            ok = total > 0 and score > 0
-            gate = "PASS" if ok else "FAIL"
-            summary_lines.append(f"| {group} | {int(score)} | {total} | {pct} | {gate} |")
-            if not ok:
-                failures.append(f"{arch}: {group} must have score > 0, got {int(score)}/{total}")
+        if args.mode == "main":
+            for group in LTP_GROUPS:
+                score, total = group_score(result.get(group, {}))
+                pct = f"{score / total * 100:.0f}%" if total > 0 else "N/A"
+                ok = total > 0 and score > 0
+                gate = "PASS" if ok else "FAIL"
+                summary_lines.append(f"| {group} | {int(score)} | {total} | {pct} | {gate} |")
+                if not ok:
+                    failures.append(f"{arch}: {group} must have score > 0, got {int(score)}/{total}")
+        else:
+            summary_lines.append(f"| ltp-musl | — | — | — | skipped (develop) |")
+            summary_lines.append(f"| ltp-glibc | — | — | — | skipped (develop) |")
 
         summary_lines.append("")
 

@@ -82,7 +82,7 @@ jobs:
 
       - name: Analyze score gates
         if: always()
-        run: python3 .github/scripts/analyze_os_results.py
+        run: python3 .github/scripts/analyze_os_results.py --mode main
 
       - name: Package artifacts
         if: always()
