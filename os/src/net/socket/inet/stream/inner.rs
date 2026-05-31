@@ -471,6 +471,16 @@ impl Listening {
             "[TCP::accept] found established connection on listen socket handle {}, retrieving remote endpoint",
             self.handles[connected_idx]
         );
+        // Look up the ifindex of the accepted handle BEFORE taking the mutable
+        // borrow, so the replacement listen socket goes on the same interface stack.
+        let accepted_handle = self.handles[connected_idx];
+        let binding_ifindex = NET_INTERFACE
+            .inner_handler(|inner_ref| {
+                inner_ref.bindings.get(&accepted_handle).map(|b| b.ifindex)
+            })
+            .flatten()
+            .unwrap_or(1);
+
         let connected = &mut self.handles[connected_idx];
         let remote_endpoint = with_tcp_mut(*connected, |socket| {
             socket
@@ -483,7 +493,9 @@ impl Listening {
         let new_listen =
             new_listen_smoltcp_socket(self.listen_addr).map_err(|_| SyscallErr::EADDRINUSE)?;
 
-        let connected_handle = if let Some(mut new_handle) = NET_INTERFACE.add_routed_socket(InetProtocol::Tcp, new_listen) {
+        let connected_handle = if let Some(mut new_handle) = NET_INTERFACE.add_routed_socket_on(
+            InetProtocol::Tcp, new_listen, binding_ifindex
+        ) {
             core::mem::swap(connected, &mut new_handle);
             new_handle
         } else {

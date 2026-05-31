@@ -90,7 +90,7 @@ impl Inner {
         let ifindex = route.as_ref().map(|r| r.ifindex).unwrap_or(2);
 
         let handle = NET_INTERFACE
-            .add_routed_socket(InetProtocol::Tcp, socket)
+            .add_routed_socket_on(InetProtocol::Tcp, socket, ifindex)
             .ok_or_else(|| {
                 let rx_buf = SocketBuffer::new(vec![0u8; DEFAULT_RX_BUF_SIZE]);
                 let tx_buf = SocketBuffer::new(vec![0u8; DEFAULT_TX_BUF_SIZE]);
@@ -176,9 +176,17 @@ impl Inner {
             ));
         }
 
-        // Attach socket to default stack (eth0), get handle for listen
+        // Determine target stack for listen socket based on bind address.
+        // Loopback (127.x) → lo (1), INADDR_ANY → lo (1) for LTP minimum fix,
+        // specific non-loopback address → eth0 (2).
+        let listen_ifindex = match listen_addr.addr {
+            Some(IpAddress::Ipv4(ip)) if ip.is_loopback() => 1,
+            None => 1,
+            _ => 2,
+        };
+
         let handle = NET_INTERFACE
-            .add_routed_socket(InetProtocol::Tcp, socket)
+            .add_routed_socket_on(InetProtocol::Tcp, socket, listen_ifindex)
             .ok_or_else(|| {
                 let rx_buf = SocketBuffer::new(vec![0u8; DEFAULT_RX_BUF_SIZE]);
                 let tx_buf = SocketBuffer::new(vec![0u8; DEFAULT_TX_BUF_SIZE]);
@@ -230,7 +238,7 @@ impl Inner {
                     })?;
                 s
             };
-            if let Some(h) = NET_INTERFACE.add_routed_socket(InetProtocol::Tcp, new_socket) {
+            if let Some(h) = NET_INTERFACE.add_routed_socket_on(InetProtocol::Tcp, new_socket, listen_ifindex) {
                 handles.push(h);
             }
         }

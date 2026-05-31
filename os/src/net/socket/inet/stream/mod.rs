@@ -226,6 +226,7 @@ impl Socket for TcpSocket {
                 let listen_addr = listening.listen_addr();
                 let ifindex = match listen_addr.addr {
                     Some(IpAddress::Ipv4(ip)) if ip.is_loopback() => 1,
+                    None => 1,
                     _ => 2,
                 };
                 if let Some(&handle) = listening.handles.first() {
@@ -299,7 +300,7 @@ impl Socket for TcpSocket {
     }
 
     fn try_connect(&self) -> Result<isize, SyscallErr> {
-        // NET_INTERFACE.poll();
+        NET_INTERFACE.try_poll();
         let inner = self.inner.lock();
         let ret = match &*inner {
             Inner::Connecting(c) => {
@@ -341,7 +342,7 @@ impl Socket for TcpSocket {
     }
 
     fn accept(&self, sockfd: u32, addr: usize, addrlen: usize) -> SyscallRet {
-        // NET_INTERFACE.poll();
+        NET_INTERFACE.poll();
         let mut inner = self.inner.lock();
         if !matches!(&*inner, Inner::Listening(_)) {
             return Err(SyscallErr::EINVAL);
@@ -352,10 +353,15 @@ impl Socket for TcpSocket {
         };
 
         let accepted_bound = if let Inner::Established(ref est) = connected_inner {
-            let ifindex = match est.local.addr {
-                IpAddress::Ipv4(ip) if ip.is_loopback() => 1,
-                _ => 2,
-            };
+            let ifindex = NET_INTERFACE
+                .inner_handler(|inner_ref| {
+                    inner_ref.bindings.get(&est.handle).map(|b| b.ifindex)
+                })
+                .flatten()
+                .unwrap_or_else(|| match est.local.addr {
+                    IpAddress::Ipv4(ip) if ip.is_loopback() => 1,
+                    _ => 2,
+                });
             let mut b = BoundInner::new();
             b.bind(est.handle, ifindex, Some(est.local.addr), est.local.port);
             b

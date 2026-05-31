@@ -469,6 +469,33 @@ impl<'a> NetInterface<'a> {
         Some(route_handle)
     }
 
+    pub fn add_routed_socket_on<T>(
+        &self,
+        proto: InetProtocol,
+        socket: T,
+        ifindex: u32,
+    ) -> Option<RouteSocketHandle>
+    where
+        T: AnySocket<'a>,
+    {
+        let mut inner = self.inner.lock();
+        let inner_ref = inner.as_mut()?;
+        let stack = inner_ref.stack_mut(ifindex)?;
+        let handle = stack.sockets.add(socket);
+        let id = inner_ref.next_socket_id;
+        inner_ref.next_socket_id += 1;
+        let route_handle = RouteSocketHandle(id);
+        inner_ref.bindings.insert(
+            route_handle,
+            SocketBinding {
+                ifindex,
+                handle,
+                proto,
+            },
+        );
+        Some(route_handle)
+    }
+
     pub fn tcp_routed_socket<T>(
         &self,
         rh: RouteSocketHandle,
