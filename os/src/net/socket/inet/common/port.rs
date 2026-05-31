@@ -205,6 +205,13 @@ impl PortManager {
         }
         let ret = socket.bind(endpoint);
         if ret.is_ok() {
+            let actual_port = socket
+                .local_endpoint()
+                .map(|lep| match lep {
+                    Endpoint::Ip(ip_ep) => ip_ep.port,
+                    _ => ep.port,
+                })
+                .unwrap_or(ep.port);
             let ifindex = match listen_ep.addr {
                 Some(IpAddress::Ipv4(ip)) if ip.is_loopback() => 1,
                 _ => 2,
@@ -213,25 +220,25 @@ impl PortManager {
                 PSOCK::Stream => {
                     log::debug!(
                         "bind: {:?}:{} ifindex={} type={:?}",
-                        listen_ep.addr, ep.port, ifindex, PSOCK::Stream,
+                        listen_ep.addr, actual_port, ifindex, PSOCK::Stream,
                     );
                     log::info!(
                         "[PortManager] bind success: port={} type=TCP",
-                        ep.port
+                        actual_port
                     );
-                    Self::register_tcp_bind(ep.port, Self::addr_to_ipv4(listen_ep.addr), socket);
+                    Self::register_tcp_bind(actual_port, Self::addr_to_ipv4(listen_ep.addr), socket);
                 }
                 PSOCK::Datagram => {
                     let reuseaddr = socket.reuse_addr().is_ok();
                     log::debug!(
                         "bind: {:?}:{} ifindex={} type={:?}",
-                        listen_ep.addr, ep.port, ifindex, PSOCK::Datagram,
+                        listen_ep.addr, actual_port, ifindex, PSOCK::Datagram,
                     );
                     log::info!(
                         "[PortManager] bind success: port={} type=UDP",
-                        ep.port
+                        actual_port
                     );
-                    Self::register_udp_bind(ep.port, Self::addr_to_ipv4(listen_ep.addr), reuseaddr, reuseaddr, socket);
+                    Self::register_udp_bind(actual_port, Self::addr_to_ipv4(listen_ep.addr), reuseaddr, reuseaddr, socket);
                 }
                 _ => {}
             }
