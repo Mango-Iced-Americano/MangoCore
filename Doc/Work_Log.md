@@ -4,6 +4,25 @@
 
 ## 2026-06-01
 
+### 修复 LTP execve 权限、ETXTBSY 与空 argv 兼容语义
+
+**涉及文件：**
+- `os/src/syscall/process/exec.rs` — exec 权限检查改为按 `fsuid/fsgid` 和补充组选择 owner/group/other 执行位；被写打开的普通文件执行时返回 `ETXTBSY`；空 `argv` 自动补空字符串作为 `argv[0]`
+- `os/src/task/process.rs` — 将 executable inode busy 计数抽象为通用 inode busy key，并新增 writable inode 引用计数
+- `os/src/task/mod.rs` — 导出 writable inode busy 查询与注册接口
+- `os/src/fs/vfs/file.rs` — 普通文件写打开、dup/fork 克隆和 drop 时维护 writable inode 引用计数
+
+**验证：**
+- `make rv64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- `make la64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- rv64 heap_trace focused LTP：`execve02/execve04/execve06` musl+glibc 全部 TPASS，无 panic/exception ✅
+- la64 heap_trace focused LTP：`execve02/execve04/execve06` musl+glibc 全部 TPASS，无 panic/exception ✅
+
+**备注：**
+- `execve02` 期望非 root 执行 root-owned `0700` helper 返回 `EACCES`
+- `execve04` 期望 helper 被写打开期间执行返回 `ETXTBSY`
+- `execve06` 覆盖 Linux 对空 `argv` 的兼容行为：新程序仍应看到一个内核填充的空 `argv[0]`
+
 ### 适配 LTP signal wait 路径并收敛 libc 差异
 
 **涉及文件：**

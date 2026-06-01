@@ -39,7 +39,10 @@ pub use processor::{
     check_oom_kill, current_syscall_name, current_task, current_trap_cx, current_user_token,
     run_tasks, schedule, set_current_syscall_id, take_current_task,
 };
-pub use process::{is_executable_inode_busy, ProcessControlBlock, ProcessState};
+pub use process::{
+    is_executable_inode_busy, is_writable_inode_busy, register_writable_inode,
+    unregister_writable_inode, ProcessControlBlock, ProcessState,
+};
 pub use process_manager::ProcessManager;
 pub use registry::{
     all_processes, find_process_by_pid, find_processes_by_pgid, find_task_by_pid_tid,

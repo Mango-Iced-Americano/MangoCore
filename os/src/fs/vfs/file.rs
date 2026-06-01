@@ -19,7 +19,7 @@ use spin::{Mutex, MutexGuard};
 
 use super::{FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata};
 use super::event::EventWaitQueue;
-use crate::task::WaitQueue;
+use crate::task::{register_writable_inode, unregister_writable_inode, WaitQueue};
 use crate::config::SYSTEM_FD_LIMIT;
 
 pub const F_SEAL_SEAL: usize = 0x0001;
@@ -609,6 +609,9 @@ impl File {
         };
 
         file.inode.open(file.private_data.lock(), &flags)?;
+        if file.tracks_write_busy() {
+            register_writable_inode(&file.inode);
+        }
 
         Ok(file)
     }
@@ -630,14 +633,18 @@ impl File {
             mode |= FileMode::FMODE_STREAM;
         }
 
-        File {
+        let file = File {
             inode,
             offset: Arc::new(AtomicUsize::new(0)),
             flags: Mutex::new(flags),
             mode: Mutex::new(mode),
             file_type,
             private_data: Mutex::new(FilePrivateData::default()),
+        };
+        if file.tracks_write_busy() {
+            register_writable_inode(&file.inode);
         }
+        file
     }
 
     // ── 读取 ───────────────────────────────────────────────────────
@@ -969,14 +976,18 @@ impl File {
         let inode = self.inode.clone();
         let flags = *self.flags.lock();
         let private_data = self.private_data.lock().clone();
-        Some(File {
+        let file = File {
             inode,
             offset: Arc::clone(&self.offset),
             flags: Mutex::new(flags),
             mode: Mutex::new(*self.mode.lock()),
             file_type: self.file_type,
             private_data: Mutex::new(private_data),
-        })
+        };
+        if file.tracks_write_busy() {
+            register_writable_inode(&file.inode);
+        }
+        Some(file)
     }
 
     /// 获取 O_NONBLOCK 标志
@@ -1205,10 +1216,20 @@ impl File {
     pub fn hang_up(&self) -> bool {
         false
     }
+
+    fn tracks_write_busy(&self) -> bool {
+        let mode = self.mode();
+        self.file_type == FileType::File
+            && mode.contains(FileMode::FMODE_WRITE)
+            && !mode.contains(FileMode::FMODE_PATH)
+    }
 }
 
 impl Drop for File {
     fn drop(&mut self) {
+        if self.tracks_write_busy() {
+            unregister_writable_inode(&self.inode);
+        }
         let _ = self.inode.close(self.private_data.lock());
     }
 }

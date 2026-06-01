@@ -56,7 +56,7 @@ pub struct ProcessInner {
     /// 可执行文件描述符（新 VFS）。
     exe: Arc<Mutex<vfs::File>>,
     /// 当前可执行文件的稳定 key，用于 open(O_TRUNC/O_WRONLY) 返回 ETXTBSY。
-    exec_key: Option<ExecInodeKey>,
+    exec_key: Option<InodeBusyKey>,
     /// 可执行文件路径（用于 /proc/self/exe）。
     exe_path: String,
     /// 文件描述符表（新 VFS）。
@@ -117,25 +117,31 @@ pub struct ProcessSignalState {
     pub group_exiting: bool,
 }
 
-type ExecInodeKey = (usize, vfs::InodeId);
+type InodeBusyKey = (usize, vfs::InodeId);
 
 lazy_static! {
-    static ref EXEC_INODE_REFS: Mutex<BTreeMap<ExecInodeKey, usize>> =
+    static ref EXEC_INODE_REFS: Mutex<BTreeMap<InodeBusyKey, usize>> =
+        Mutex::new(BTreeMap::new());
+    static ref WRITE_INODE_REFS: Mutex<BTreeMap<InodeBusyKey, usize>> =
         Mutex::new(BTreeMap::new());
 }
 
-fn exec_key_from_file(file: &vfs::File) -> Option<ExecInodeKey> {
+fn inode_busy_key(inode: &Arc<dyn vfs::IndexNode>) -> Option<InodeBusyKey> {
+    inode.metadata().ok().map(|meta| (meta.dev_id, meta.inode_id))
+}
+
+fn exec_key_from_file(file: &vfs::File) -> Option<InodeBusyKey> {
     file.metadata().ok().map(|meta| (meta.dev_id, meta.inode_id))
 }
 
-fn register_exec_key(key: ExecInodeKey) {
-    let mut refs = EXEC_INODE_REFS.lock();
+fn register_busy_key(refs: &Mutex<BTreeMap<InodeBusyKey, usize>>, key: InodeBusyKey) {
+    let mut refs = refs.lock();
     let count = refs.entry(key).or_insert(0);
     *count = count.saturating_add(1);
 }
 
-fn unregister_exec_key(key: ExecInodeKey) {
-    let mut refs = EXEC_INODE_REFS.lock();
+fn unregister_busy_key(refs: &Mutex<BTreeMap<InodeBusyKey, usize>>, key: InodeBusyKey) {
+    let mut refs = refs.lock();
     let remove = if let Some(count) = refs.get_mut(&key) {
         if *count > 1 {
             *count -= 1;
@@ -151,12 +157,40 @@ fn unregister_exec_key(key: ExecInodeKey) {
     }
 }
 
+fn register_exec_key(key: InodeBusyKey) {
+    register_busy_key(&EXEC_INODE_REFS, key);
+}
+
+fn unregister_exec_key(key: InodeBusyKey) {
+    unregister_busy_key(&EXEC_INODE_REFS, key);
+}
+
 pub fn is_executable_inode_busy(inode: &Arc<dyn vfs::IndexNode>) -> bool {
-    let key = match inode.metadata() {
-        Ok(meta) => (meta.dev_id, meta.inode_id),
-        Err(_) => return false,
+    let key = match inode_busy_key(inode) {
+        Some(key) => key,
+        None => return false,
     };
     EXEC_INODE_REFS.lock().get(&key).copied().unwrap_or(0) > 0
+}
+
+pub fn register_writable_inode(inode: &Arc<dyn vfs::IndexNode>) {
+    if let Some(key) = inode_busy_key(inode) {
+        register_busy_key(&WRITE_INODE_REFS, key);
+    }
+}
+
+pub fn unregister_writable_inode(inode: &Arc<dyn vfs::IndexNode>) {
+    if let Some(key) = inode_busy_key(inode) {
+        unregister_busy_key(&WRITE_INODE_REFS, key);
+    }
+}
+
+pub fn is_writable_inode_busy(inode: &Arc<dyn vfs::IndexNode>) -> bool {
+    let key = match inode_busy_key(inode) {
+        Some(key) => key,
+        None => return false,
+    };
+    WRITE_INODE_REFS.lock().get(&key).copied().unwrap_or(0) > 0
 }
 
 impl ProcessControlBlock {

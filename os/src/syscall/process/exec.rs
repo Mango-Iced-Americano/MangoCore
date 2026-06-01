@@ -7,7 +7,7 @@ use crate::fs::{vfs, vfs_lookup};
 use crate::mm::{UserCString, UserPtr};
 use crate::show_frame_consumption;
 use crate::syscall::errno::*;
-use crate::task::{current_task, exit_current_and_run_next, AuxvEntry};
+use crate::task::{current_task, exit_current_and_run_next, is_writable_inode_busy, AuxvEntry};
 use log::{debug, info};
 
 const MAX_EXEC_ARG_ENV_BYTES: usize = USER_STACK_SIZE / 2;
@@ -91,11 +91,32 @@ fn check_exec_metadata(file: &vfs::File) -> Result<(), isize> {
         }
         return Err(EACCES);
     }
-    let exec_bits = vfs::InodeMode::S_IXUSR | vfs::InodeMode::S_IXGRP | vfs::InodeMode::S_IXOTH;
-    if !metadata.mode.intersects(exec_bits) {
+    if !has_exec_access(&metadata) {
         return Err(EACCES);
     }
+    if is_writable_inode_busy(&file.inode) {
+        return Err(ETXTBSY);
+    }
     Ok(())
+}
+
+fn has_exec_access(metadata: &vfs::Metadata) -> bool {
+    let mode = metadata.mode.bits() & 0o777;
+    let exec_any = (mode & 0o111) != 0;
+    let task = current_task().unwrap();
+    let inner = task.acquire_inner_lock();
+
+    if inner.fsuid == 0 {
+        return exec_any;
+    }
+    let allowed = if inner.fsuid == metadata.uid {
+        (mode >> 6) & 0o7
+    } else if inner.fsgid == metadata.gid || inner.groups.iter().any(|&gid| gid == metadata.gid) {
+        (mode >> 3) & 0o7
+    } else {
+        mode & 0o7
+    };
+    (allowed & 0o1) != 0
 }
 
 fn open_exec_file(cwd_inode: &Arc<dyn vfs::IndexNode>, path: &str) -> Result<vfs::File, isize> {
@@ -224,6 +245,12 @@ pub fn sys_execve(
                 argv = argv.add(1);
             }
         }
+    }
+    if argv_vec.is_empty() {
+        if argv_vec.try_reserve(1).is_err() {
+            return ENOMEM;
+        }
+        argv_vec.push(String::new());
     }
     let mut arg_env_bytes = argv_vec
         .iter()

@@ -5,3 +5,11 @@
 - **修复**: 内核仍实现同步等待的 blocked signal 命中和唤醒；runner 对当前镜像中受 libc wrapper 影响的 musl 用例做专属默认排除，glibc 继续实跑覆盖内核路径。
 - **教训**: LTP 双 libc 结果不一致时，先区分内核 syscall 语义、libc wrapper 重试策略和 runner timeout 三层，再决定是修内核还是做 libc 定向 exclude。
 - **相关文件**: `os/src/task/signal/wait.rs`, `os/src/task/signal/delivery.rs`, `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`
+
+## LTP execve 权限和 text-busy 语义
+
+- **现象**: `execve02/execve04` 中 helper 不应被执行却进入了 `execve_child`，`execve06` 空 argv 路径在用户态看到 `argc=0` 或触发空指针异常。
+- **根因**: exec 权限只检查“任意 execute 位”，没有按调用者 `fsuid/fsgid` 选择权限类别；内核只阻止写打开正在执行的文件，缺少执行正在写打开文件的反向 `ETXTBSY` 检查；空 argv 未按 Linux 兼容语义补 `argv[0]`。
+- **修复**: exec 检查按 owner/group/other 权限位判定，普通文件写打开生命周期维护 inode 引用计数，exec 时命中写打开返回 `ETXTBSY`，空 argv 自动补一个空字符串。
+- **教训**: LTP exec 权限类失败时，不要只看 ELF 加载是否成功；需要同时核对 VFS mode/uid/gid、进程 fsuid/fsgid、text-busy 双向关系和 libc 对空 argv 的启动假设。
+- **相关文件**: `os/src/syscall/process/exec.rs`, `os/src/task/process.rs`, `os/src/fs/vfs/file.rs`
