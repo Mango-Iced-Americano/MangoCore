@@ -4,6 +4,23 @@
 
 ## 2026-06-01
 
+### 修复 LTP rt_sigaction03 非法 sigsetsize 误成功
+
+**涉及文件：**
+- `os/src/syscall/process/signal.rs` — `rt_sigaction` 单独校验 `sigsetsize == 8`，保留其他 rt signal mask syscall 对 `sigsetsize >= 8` 的 libc 兼容
+
+**验证：**
+- `make rv64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- `make la64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- rv64 heap_trace focused LTP：`rt_sigaction03` musl+glibc 全部 TPASS，无 `TFAIL/TBROK` ✅
+- la64 heap_trace focused LTP：`rt_sigaction03` musl+glibc 全部 TPASS，无 `TFAIL/TBROK` ✅
+- la64 heap_trace glibc 信号烟测：`rt_sigaction01/rt_sigaction02/sigaction01` 全部 TPASS，无 `TFAIL/TBROK` ✅
+- la64 heap_trace glibc `getrusage03` 回归启动正常，但 LTP 因当前 heap_trace 镜像 `MemAvailable < 512MB` 判定 `TCONF`，未覆盖后续大内存压测路径
+
+**备注：**
+- `rt_sigaction03` 通过 raw syscall 传入非法 `sigsetsize`，期望 `EINVAL`；之前通用 `>= 8` 检查会让非法大尺寸误成功
+- `rt_sigprocmask/rt_sigpending/sigtimedwait/signalfd` 仍按低 64 位 mask 读写，继续接受更大的 libc `sigset_t` 存储尺寸
+
 ### 修复 LTP execve 权限、ETXTBSY 与空 argv 兼容语义
 
 **涉及文件：**

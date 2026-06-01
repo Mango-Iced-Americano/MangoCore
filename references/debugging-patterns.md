@@ -13,3 +13,11 @@
 - **修复**: exec 检查按 owner/group/other 权限位判定，普通文件写打开生命周期维护 inode 引用计数，exec 时命中写打开返回 `ETXTBSY`，空 argv 自动补一个空字符串。
 - **教训**: LTP exec 权限类失败时，不要只看 ELF 加载是否成功；需要同时核对 VFS mode/uid/gid、进程 fsuid/fsgid、text-busy 双向关系和 libc 对空 argv 的启动假设。
 - **相关文件**: `os/src/syscall/process/exec.rs`, `os/src/task/process.rs`, `os/src/fs/vfs/file.rs`
+
+## rt_sigaction sigsetsize 与其他 rt signal syscall 的差异
+
+- **现象**: `rt_sigaction03` 大量子项显示 raw syscall 传入非法 `sigsetsize` 后仍返回成功，LTP 报 “call succeeded ... expected EINVAL”。
+- **根因**: 为兼容 libc 较大的 `sigset_t` 存储尺寸，把所有 rt signal mask syscall 统一放宽成 `sigsetsize >= 8`；但 Linux `rt_sigaction` ABI 对第 4 参数要求更严格，非法尺寸必须返回 `EINVAL`。
+- **修复**: `rt_sigaction` 单独使用精确 8 字节校验；`rt_sigprocmask/rt_sigpending/sigtimedwait/signalfd` 继续接受 `>= 8` 并只读写低 64 位。
+- **教训**: 不要把 `rt_sigaction` 的 ABI 校验和 mask 读写类 syscall 混成一个 helper；LTP 会直接用 raw syscall 覆盖 libc wrapper 不常走的非法尺寸路径。
+- **相关文件**: `os/src/syscall/process/signal.rs`
