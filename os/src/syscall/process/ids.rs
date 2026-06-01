@@ -52,6 +52,8 @@ const PR_CAPBSET_DROP: usize = 24;
 const PR_SET_SECUREBITS: usize = 28;
 const PR_SET_TIMERSLACK: usize = 29;
 const PR_GET_TIMERSLACK: usize = 30;
+const PR_SET_CHILD_SUBREAPER: usize = 36;
+const PR_GET_CHILD_SUBREAPER: usize = 37;
 const PR_TASK_COMM_LEN: usize = 16;
 const PR_MAX_SIGNAL: usize = 64;
 const PROCESS_VM_MAX_IOVEC: usize = 1024;
@@ -1088,6 +1090,18 @@ pub fn sys_prctl(option: usize, arg2: usize, _arg3: usize, _arg4: usize, _arg5: 
         PR_GET_NAME => {
             let comm = task.acquire_inner_lock().task_comm;
             write_prctl_comm_to_user(arg2, &comm)
+        }
+        PR_SET_CHILD_SUBREAPER => {
+            task.process.set_child_subreaper(arg2 != 0);
+            SUCCESS
+        }
+        PR_GET_CHILD_SUBREAPER => {
+            let enabled = task.process.is_child_subreaper() as i32;
+            if copy_to_user(current_user_token(), &enabled, arg2 as *mut i32).is_err() {
+                EFAULT
+            } else {
+                SUCCESS
+            }
         }
         PR_SET_SECUREBITS => {
             let inner = task.acquire_inner_lock();

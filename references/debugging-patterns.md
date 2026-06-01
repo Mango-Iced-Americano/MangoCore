@@ -53,3 +53,11 @@
 - **修复**: timerfd 按自身 clock id 计算当前时间，tick registry 仅把 monotonic 时间作为 hint；`gettime/settime` 使用借用式 fd downcast 避免克隆 `File`；runner 只默认排除 `timerfd04` 和 `timerfd_settime02`，其余 timerfd 用例恢复实跑。
 - **教训**: fd+timer 对象要同时检查“时间源是否匹配”“读端 wait queue 是否被通知”“runner 是否真的执行该家族”；性能压力项不要用全家族 skip 掩盖已可通过的普通 ABI 用例。
 - **相关文件**: `os/src/fs/timerfd.rs`, `os/src/task/manager.rs`, `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`
+
+## PR_SET_CHILD_SUBREAPER 与孤儿进程重挂语义
+
+- **现象**: `prctl03` 因 `PR_SET_CHILD_SUBREAPER` 不支持而 TCONF，无法覆盖 subreaper 作为孤儿进程 reaper 的 Linux 语义。
+- **根因**: PCB 只有 parent/children 和 init 收养逻辑，父进程退出时所有 live orphan 都转交 init，缺少“最近的已启用 child_subreaper 的祖先进程”选择；`prctl()` 也未保存/读取该标记。
+- **修复**: PCB 保存不随 fork 继承、跨 exec 保留的 `child_subreaper` 标记；`prctl()` 实现 SET/GET；父进程退出时查找最近 subreaper 并把孤儿挂到其 children，下游 wait/SIGCHLD 仍复用既有退出路径，无 subreaper 时保持 init 收养和 zombie 清理逻辑。
+- **教训**: 进程 reparent 类功能不要只补 syscall 返回值；LTP 会验证 PPID、wait 回收和 SIGCHLD 投递，必须把 parent 链、children 列表、wait queue 和 OOM 扩容兜底一起检查。
+- **相关文件**: `os/src/task/process.rs`, `os/src/syscall/process/ids.rs`

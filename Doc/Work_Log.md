@@ -4,6 +4,22 @@
 
 ## 2026-06-01
 
+### 支持 PR_SET/GET_CHILD_SUBREAPER 与孤儿进程重挂
+
+**涉及文件：**
+- `os/src/task/process.rs` — PCB 增加 `child_subreaper` 状态，父进程退出时将孤儿子进程转交给最近的 subreaper；无 subreaper 时保持既有 init 收养/清理逻辑，并为 subreaper children 扩容增加 `try_reserve` 兜底
+- `os/src/syscall/process/ids.rs` — `prctl()` 接入 `PR_SET_CHILD_SUBREAPER` 与 `PR_GET_CHILD_SUBREAPER`
+
+**验证：**
+- `make rv64-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- `make la64-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- rv64 heap_trace focused LTP：`prctl03` musl+glibc 均 6/6 TPASS；同组 `membarrier/mlock2/mremap/personality/prctl01/02` 保持 TPASS；无 `PANIC/Exception/timeout` ✅
+- la64 heap_trace focused LTP：`prctl03` musl+glibc 均 6/6 TPASS；同组核心用例保持 TPASS；无 `PANIC/Exception/timeout` ✅
+
+**备注：**
+- `prctl05` 仍因 `/proc/self/task/<tid>/comm` 缺失而 TBROK，属于 procfs task 目录/comm 文件适配点，本轮未触碰
+- `prctl06` 依赖测试块设备获取，仍按设备/fs 环境问题处理
+
 ### 新增 timerfd 最小实现并收窄 LTP 跳过范围
 
 **涉及文件：**

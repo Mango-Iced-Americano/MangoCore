@@ -81,6 +81,9 @@ pub struct ProcessInner {
     pub parent: Option<Weak<ProcessControlBlock>>,
     /// 进程创建后是否已经成功执行过 execve。
     pub has_execed: bool,
+    /// PR_SET_CHILD_SUBREAPER 标记。Linux 语义是不被 fork/clone 继承，
+    /// 但会跨 execve 保留。
+    pub child_subreaper: bool,
     /// 子进程。
     pub children: Vec<Arc<ProcessControlBlock>>,
     /// 进程级生命周期状态。
@@ -253,6 +256,7 @@ impl ProcessControlBlock {
                 sid,
                 parent,
                 has_execed: false,
+                child_subreaper: false,
                 children: Vec::new(),
                 state: ProcessState::Running,
                 exit_code: 0,
@@ -307,6 +311,14 @@ impl ProcessControlBlock {
 
     pub fn has_execed(&self) -> bool {
         self.inner.lock().has_execed
+    }
+
+    pub fn set_child_subreaper(&self, enabled: bool) {
+        self.inner.lock().child_subreaper = enabled;
+    }
+
+    pub fn is_child_subreaper(&self) -> bool {
+        self.inner.lock().child_subreaper
     }
 
     pub fn replace_exe(&self, exe: vfs::File) {
@@ -711,6 +723,19 @@ impl ProcessControlBlock {
         }
     }
 
+    fn nearest_child_reaper(
+        parent: Option<Arc<ProcessControlBlock>>,
+    ) -> Arc<ProcessControlBlock> {
+        let mut cursor = parent;
+        while let Some(process) = cursor {
+            if !process.is_zombie() && process.is_child_subreaper() {
+                return process;
+            }
+            cursor = process.parent();
+        }
+        INITPROC.process.clone()
+    }
+
     fn adopt_children_by_init(children: Vec<Arc<ProcessControlBlock>>) -> bool {
         let mut live_children = Vec::new();
         let mut orphan_rusage = Rusage::new();
@@ -735,6 +760,31 @@ impl ProcessControlBlock {
         initproc_inner.child_rusage.add_child(orphan_rusage);
         initproc_inner.children.extend(live_children);
         has_live_children
+    }
+
+    fn adopt_children_by_reaper(
+        children: Vec<Arc<ProcessControlBlock>>,
+        reaper: Arc<ProcessControlBlock>,
+    ) -> bool {
+        if Arc::ptr_eq(&reaper, &INITPROC.process) {
+            return Self::adopt_children_by_init(children);
+        }
+
+        let has_children = !children.is_empty();
+        {
+            let mut reaper_inner = reaper.acquire_inner_lock();
+            if reaper_inner.children.try_reserve(children.len()).is_err() {
+                drop(reaper_inner);
+                return Self::adopt_children_by_init(children);
+            }
+        }
+
+        for child in &children {
+            child.set_parent(Some(Arc::downgrade(&reaper)));
+            child.adopted_by_init.store(false, Ordering::Relaxed);
+        }
+        reaper.acquire_inner_lock().children.extend(children);
+        has_children
     }
 
     pub fn close_files_on_exit(&self) {
@@ -778,10 +828,11 @@ impl ProcessControlBlock {
         }
 
         let children = self.take_children();
-        let adopted_live_children = if children.is_empty() {
+        let child_reaper = Self::nearest_child_reaper(parent_process.clone());
+        let adopted_children = if children.is_empty() {
             false
         } else {
-            Self::adopt_children_by_init(children)
+            Self::adopt_children_by_reaper(children, child_reaper.clone())
         };
 
         if let Some(parent_process) = parent_process {
@@ -817,8 +868,8 @@ impl ProcessControlBlock {
             warn!("[finish_process_exit] parent is None");
         }
 
-        if adopted_live_children {
-            Self::wake_child_waiters(&INITPROC.process);
+        if adopted_children {
+            Self::wake_child_waiters(&child_reaper);
         }
 
         let vm = self.vm();
