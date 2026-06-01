@@ -110,6 +110,8 @@ pub struct TaskControlBlockInner {
     pub sigmask_to_restore: Option<Signals>,
     /// 待处理信号
     pub sigpending: SignalQueue,
+    /// Signal set that sigwaitinfo/sigtimedwait is currently waiting for.
+    pub signal_wait_mask: Signals,
     /// 备用信号栈，每线程独立
     pub signal_stack: SignalStack,
     /// 陷阱上下文的物理页号
@@ -713,6 +715,7 @@ impl TaskControlBlock {
                 sigmask: Signals::empty(),
                 sigmask_to_restore: None,
                 sigpending: SignalQueue::empty(),
+                signal_wait_mask: Signals::empty(),
                 signal_stack: SignalStack::disabled(),
                 trap_cx_ppn,
                 task_cx: TaskContext::goto_trap_return(kstack_top),
@@ -1111,6 +1114,7 @@ impl TaskControlBlock {
             inner: Mutex::new(TaskControlBlockInner {
                 // clone
                 sigpending: SignalQueue::empty(),
+                signal_wait_mask: Signals::empty(),
                 signal_stack: if share_vm {
                     SignalStack::disabled()
                 } else {

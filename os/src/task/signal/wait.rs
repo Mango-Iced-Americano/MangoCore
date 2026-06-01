@@ -3,7 +3,7 @@ use crate::config::PAGE_SIZE;
 use crate::mm::{UserPtr, UserPtrMut};
 use crate::syscall::errno::*;
 use crate::task::{current_task, TaskControlBlock, WaitQueue, WaitResult};
-use crate::timer::TimeSpec;
+use crate::timer::{TimeSpec, NSEC_PER_SEC};
 
 use super::{PendingSignal, SigHandler, SigInfo, Signals, SIG_DFL_IGNORE};
 
@@ -119,17 +119,26 @@ pub fn sigtimedwait(set: *const Signals, info: *mut SigInfo, timeout: *const Tim
     let task = current_task().unwrap();
     let token = task.get_user_token();
     let set = match read_user_sigset(token, set) {
-        Ok(set) => set,
+        Ok(set) => set - Signals::CAN_NOT_BE_MASKED,
         Err(errno) => return errno,
     };
     let timeout = match read_optional_user_timespec(token, timeout) {
         Ok(timeout) => timeout,
         Err(errno) => return errno,
     };
+    if let Some(timeout) = timeout {
+        if timeout.tv_sec > isize::MAX as usize || timeout.tv_nsec >= NSEC_PER_SEC {
+            return EINVAL;
+        }
+    }
     let start = TimeSpec::now();
     let deadline = timeout.map(|timeout| start + timeout);
 
     let wait_queue = spin::Mutex::new(WaitQueue::new());
+    {
+        let mut inner = task.acquire_inner_lock();
+        inner.signal_wait_mask = set;
+    }
     let mut wait_condition = || -> Option<isize> {
         let task = current_task().unwrap();
         if let Some(pending) = take_pending_signal_matching(&task, set) {
@@ -155,6 +164,10 @@ pub fn sigtimedwait(set: *const Signals, info: *mut SigInfo, timeout: *const Tim
     } else {
         WaitQueue::wait_event_interruptible(&wait_queue, &mut wait_condition)
     };
+    {
+        let mut inner = task.acquire_inner_lock();
+        inner.signal_wait_mask = Signals::empty();
+    }
     match wait_result {
         WaitResult::Ready(value) => value,
         WaitResult::Interrupted => ERESTART,

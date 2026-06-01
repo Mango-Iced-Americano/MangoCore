@@ -84,10 +84,19 @@ const DEFAULT_TIMEOUTS: [u64; 12] = [
 ];
 
 /// LTP 默认排除测例名列表
-const DEFAULT_LTP_EXCLUDE: &[&str] = &[];
+const DEFAULT_LTP_EXCLUDE: &[&str] = &[
+    // The current LTP image lists this alias in runtest/syscalls, but does not
+    // ship a matching test binary. sigtimedwait01 covers the same syscall path.
+    "rt_sigtimedwait01",
+];
 
 /// LTP musl 专属排除测例（额外追加）
-const DEFAULT_LTP_EXCLUDE_MUSL: &[&str] = &[];
+const DEFAULT_LTP_EXCLUDE_MUSL: &[&str] = &[
+    // This musl wrapper retries raw EINTR from rt_sigtimedwait internally, so
+    // these LTP cases hit the per-case timeout even after the kernel path works.
+    "sigtimedwait01",
+    "sigwaitinfo01",
+];
 /// LTP glibc 专属排除测例（额外追加）
 const DEFAULT_LTP_EXCLUDE_GLIBC: &[&str] = &[];
 
@@ -371,6 +380,12 @@ fn parse_csv_list(val: &[u8]) -> Option<Vec<String>> {
     )
 }
 
+fn parse_csv_with_defaults(defaults: &[&str], val: &[u8]) -> Option<Vec<String>> {
+    let mut list: Vec<String> = defaults.iter().map(|s| String::from(*s)).collect();
+    list.extend(parse_csv_list(val)?);
+    Some(list)
+}
+
 fn apply_conf_bytes(data: &[u8], cfg: &mut RuntimeConfig) {
     for raw_line in data.split(|b| *b == b'\n') {
         let line = trim_ascii(raw_line);
@@ -413,15 +428,15 @@ fn apply_conf_bytes(data: &[u8], cfg: &mut RuntimeConfig) {
                 }
             }
         } else if key == b"ltp_exclude" {
-            if let Some(list) = parse_csv_list(val) {
+            if let Some(list) = parse_csv_with_defaults(DEFAULT_LTP_EXCLUDE, val) {
                 cfg.ltp_exclude = list;
             }
         } else if key == b"ltp_exclude_musl" {
-            if let Some(list) = parse_csv_list(val) {
+            if let Some(list) = parse_csv_with_defaults(DEFAULT_LTP_EXCLUDE_MUSL, val) {
                 cfg.ltp_exclude_musl = list;
             }
         } else if key == b"ltp_exclude_glibc" {
-            if let Some(list) = parse_csv_list(val) {
+            if let Some(list) = parse_csv_with_defaults(DEFAULT_LTP_EXCLUDE_GLIBC, val) {
                 cfg.ltp_exclude_glibc = list;
             }
         } else if key == b"ltp_exclude_rv64_musl" {
@@ -1124,9 +1139,6 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         }
         "create_datafile" | "create_file" => Some("standalone LTP helper"),
         "pthcli" | "pthserv" => Some("standalone LTP network helper"),
-        "sigtimedwait01" | "rt_sigtimedwait01" | "sigwaitinfo01" => {
-            Some("blocking signal-wait case pending dedicated wait-queue support")
-        }
         "signal06" => Some("x86_64-only signal testcase"),
         "ping01.sh" | "ping02.sh" => Some("network test skipped in LTP syscall scan"),
         "pivot_root01" | "prepare_lvm.sh" => Some("filesystem/namespace setup skipped"),

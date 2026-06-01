@@ -2,6 +2,29 @@
 
 ---
 
+## 2026-06-01
+
+### 适配 LTP signal wait 路径并收敛 libc 差异
+
+**涉及文件：**
+- `os/src/task/task.rs` — 在线程控制块中记录当前 `sigwaitinfo/sigtimedwait` 等待的信号集合
+- `os/src/task/signal/delivery.rs` — 进程/线程信号投递可命中正在同步等待的 blocked signal，并唤醒对应 interruptible task
+- `os/src/task/signal/wait.rs` — `sigtimedwait()` 过滤不可屏蔽信号、校验 timespec、进入等待期间登记/清理 `signal_wait_mask`
+- `user/src/bin/initproc.rs` — 默认排除镜像缺失的 `rt_sigtimedwait01`，并保留 glibc signal-wait 实跑；musl 专属排除 `sigtimedwait01/sigwaitinfo01`
+- `user/src/bin/ltprunner.rs` — suite runner 同步默认 LTP exclude，避免 inline/suite 行为不一致
+
+**验证：**
+- `make rv64-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- `make la64-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- rv64 heap_trace focused LTP：`sigtimedwait01` glibc 11/11 TPASS，`sigwaitinfo01` glibc 9/9 TPASS；musl 两项按默认 exclude 输出 0；无 panic/exception ✅
+- la64 heap_trace focused LTP：`sigtimedwait01` glibc 11/11 TPASS，`sigwaitinfo01` glibc 9/9 TPASS；musl 两项按默认 exclude 输出 0；无 panic/exception ✅
+
+**备注：**
+- 当前 LTP 镜像的 `rt_sigtimedwait01` 出现在 runtest 列表中，但没有对应测试二进制；`sigtimedwait01` 已覆盖同一个 `rt_sigtimedwait` syscall 路径
+- musl 的 `sigtimedwait/sigwaitinfo` wrapper 会在 raw syscall 返回 `EINTR` 时内部重试，当前用例会被 per-case timeout 杀掉；glibc 路径验证内核同步等待语义已经可用
+
+---
+
 ## 2026-05-31
 
 ### 修复 LTP 网络 syscall 全部超时——loopback TCP 路由 + PortManager port=0

@@ -13,6 +13,9 @@ use user_lib::{
 
 const DEFAULT_CASE_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_CASE_TERM_GRACE_MS: u64 = 1500;
+const DEFAULT_LTP_EXCLUDE: &[&str] = &["rt_sigtimedwait01"];
+const DEFAULT_LTP_EXCLUDE_MUSL: &[&str] = &["sigtimedwait01", "sigwaitinfo01"];
+const DEFAULT_LTP_EXCLUDE_GLIBC: &[&str] = &[];
 
 struct LtpCase {
     #[allow(dead_code)]
@@ -126,13 +129,31 @@ fn comma_split(s: &str) -> Vec<String> {
         .collect()
 }
 
+fn default_excludes(libc: &str) -> Vec<String> {
+    let mut list: Vec<String> = DEFAULT_LTP_EXCLUDE
+        .iter()
+        .map(|s| String::from(*s))
+        .collect();
+    let libc_defaults: &[&str] = if libc == "musl" {
+        DEFAULT_LTP_EXCLUDE_MUSL
+    } else if libc == "glibc" {
+        DEFAULT_LTP_EXCLUDE_GLIBC
+    } else {
+        &[]
+    };
+    list.extend(libc_defaults.iter().map(|s| String::from(*s)));
+    list
+}
+
 fn load_conf(path: &str, libc: &str) -> LtpConfig {
     let mut cfg = LtpConfig {
         ltp_suites: Vec::new(),
         ltp_from: String::new(),
         ltp_include: Vec::new(),
-        ltp_exclude: Vec::new(),
+        ltp_exclude: default_excludes(libc),
     };
+    let mut conf_exclude = Vec::new();
+    let mut conf_libc_exclude = Vec::new();
 
     let fd = open(path, OpenFlags::RDONLY);
     if fd < 0 {
@@ -180,14 +201,17 @@ fn load_conf(path: &str, libc: &str) -> LtpConfig {
         } else if key == b"ltp_include" {
             cfg.ltp_include = comma_split(val_str);
         } else if key == b"ltp_exclude" {
-            cfg.ltp_exclude = comma_split(val_str);
+            conf_exclude = comma_split(val_str);
         } else if key == b"ltp_exclude_musl" && libc == "musl" {
-            cfg.ltp_exclude.extend(comma_split(val_str));
+            conf_libc_exclude.extend(comma_split(val_str));
         } else if key == b"ltp_exclude_glibc" && libc == "glibc" {
-            cfg.ltp_exclude.extend(comma_split(val_str));
+            conf_libc_exclude.extend(comma_split(val_str));
         }
     }
 
+    cfg.ltp_exclude = default_excludes(libc);
+    cfg.ltp_exclude.extend(conf_exclude);
+    cfg.ltp_exclude.extend(conf_libc_exclude);
     cfg
 }
 

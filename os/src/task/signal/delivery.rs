@@ -20,7 +20,8 @@ fn process_signal_target(
         if inner.task_status == TaskStatus::Zombie {
             continue;
         }
-        if !signal.difference(inner.sigmask).is_empty() {
+        let matches_sigwait = !(signal & inner.signal_wait_mask).is_empty();
+        if matches_sigwait || !signal.difference(inner.sigmask).is_empty() {
             return Some(task.clone());
         }
     }
@@ -102,9 +103,10 @@ fn send_thread_signal_info(
             .sigpending
             .enqueue_signal_with_sender(signal, SigInfo::SI_TKILL as usize, current_sender_pid())?;
     }
-    if wake
-        && inner.task_status == TaskStatus::Interruptible
-        && !signal.difference(inner.sigmask).is_empty()
+    let matches_sigwait = !(signal & inner.signal_wait_mask).is_empty();
+    let matches_unblocked = !signal.difference(inner.sigmask).is_empty();
+    if inner.task_status == TaskStatus::Interruptible
+        && (matches_sigwait || (wake && matches_unblocked))
     {
         inner.task_status = TaskStatus::Ready;
         drop(inner);
