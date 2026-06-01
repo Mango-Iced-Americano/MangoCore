@@ -13,6 +13,7 @@ mod mapper;
 mod mmap;
 mod page_fault;
 mod page_table;
+mod sysctl;
 mod uaccess;
 mod user_mapper;
 mod vma_set;
@@ -32,6 +33,12 @@ pub use vma::{MapFlags, MapPermission};
 pub use address_space::{AddressSpace, MemoryError};
 pub use kernel_space::{kernel_token, KernelSpace, KERNEL_SPACE};
 pub use page_table::{FaultAccess, PageTable, UserAccess};
+pub use sysctl::{
+    commit_limit_kbytes, committed_as_kbytes, free_memory_kbytes, max_map_count,
+    min_free_kbytes, overcommit_memory, overcommit_ratio, panic_on_oom, set_max_map_count,
+    set_min_free_kbytes, set_overcommit_memory, set_overcommit_ratio, set_panic_on_oom,
+    overcommit_allows, total_memory_kbytes,
+};
 type MmResult<T> = Result<T, MemoryError>;
 #[allow(unused_imports)]
 pub use uaccess::{

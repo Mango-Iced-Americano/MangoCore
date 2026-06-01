@@ -141,3 +141,11 @@
 - **修复**: 在 TCB 保存并继承 no-new-privs、THP disabled、securebits、ambient capabilities；prctl 路径补状态回读和错误优先级，procfs status 同步输出真实 capability 与 no-new-privs 字段。
 - **教训**: 对状态类 prctl，不要只让 syscall 返回成功；LTP 常先做能力探测，再通过 procfs 对账。像 seccomp 这种语义面很大的 option 应保持“不宣称完整支持”，只补安全的错误码边界。
 - **相关文件**: `os/src/syscall/process/ids.rs`, `os/src/task/task.rs`, `os/src/fs/procfs/pid/status.rs`
+
+## VM tunable 测试会同时暴露 procfs、mmap 与 job-control 问题
+
+- **现象**: `max_map_count/min_free_kbytes/overcommit_memory` 起初因 `/proc/sys/vm/*` 和 `/proc/meminfo` 字段缺失 TBROK；补节点后又出现 rv64 大 malloc 虚拟地址空间不足、musl `max_map_count` 在 `raise(SIGSTOP)` 后 timeout、`min_free_kbytes` 吃尽物理页触发 OOM handler panic。
+- **根因**: LTP VM tunable 不只是读写 sysctl：`max_map_count` 会反复 mmap 并用 stopped child 的 `/proc/<pid>/maps` 对账，`overcommit_memory` 会按 `MemTotal/CommitLimit/Committed_AS` 构造大 malloc，`min_free_kbytes` 会主动制造物理 OOM；musl 的 stop/continue 路径还会暴露 SIGCONT 被 mask 时 stopped wait 仍必须恢复的 Linux 语义。
+- **修复**: 建立 VM sysctl 状态源，procfs 注册 `/proc/sys/vm/*` 和 meminfo 必需字段；mmap/brk 接入 overcommit 与用户可见 VMA 计数；只对可写匿名 `MAP_SHARED` 预分配共享页；stopped wait 用 pending SIGCONT 恢复而不看 sigmask；OOM handler 在 no-current 上下文跳过当前任务回收。
+- **教训**: 遇到 LTP tunable 类用例，先查源码确认它后续会触发哪些内核路径，不能只补文件节点。带 `raise(SIGSTOP)` 的测试要特别检查 musl/glibc signal wrapper 差异，带“吃内存”的测试必须同时看 heap_trace、物理 frame、OOM 安全点。
+- **相关文件**: `os/src/fs/procfs/files/sys.rs`, `os/src/fs/procfs/files/meminfo.rs`, `os/src/mm/mmap.rs`, `os/src/mm/vma_set.rs`, `os/src/task/signal/mod.rs`, `os/src/mm/frame_allocator.rs`

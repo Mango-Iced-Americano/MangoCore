@@ -129,6 +129,42 @@ pub fn register_all(root: &Arc<crate::fs::procfs::LockedProcInode>) -> Result<()
         sys::max_user_namespaces_content,
         0,
     )?;
+    let vm_dir = sys_dir.add_dir_locked("vm", InodeMode::from_bits_truncate(0o555))?;
+    vm_dir.add_writable_file_with_write(
+        "overcommit_memory",
+        InodeMode::from_bits_truncate(0o644),
+        sys::overcommit_memory_content,
+        sys::overcommit_memory_write,
+        0,
+    )?;
+    vm_dir.add_writable_file_with_write(
+        "overcommit_ratio",
+        InodeMode::from_bits_truncate(0o644),
+        sys::overcommit_ratio_content,
+        sys::overcommit_ratio_write,
+        0,
+    )?;
+    vm_dir.add_writable_file_with_write(
+        "max_map_count",
+        InodeMode::from_bits_truncate(0o644),
+        sys::max_map_count_content,
+        sys::max_map_count_write,
+        0,
+    )?;
+    vm_dir.add_writable_file_with_write(
+        "min_free_kbytes",
+        InodeMode::from_bits_truncate(0o644),
+        sys::min_free_kbytes_content,
+        sys::min_free_kbytes_write,
+        0,
+    )?;
+    vm_dir.add_writable_file_with_write(
+        "panic_on_oom",
+        InodeMode::from_bits_truncate(0o644),
+        sys::panic_on_oom_content,
+        sys::panic_on_oom_write,
+        0,
+    )?;
     let net_dir = sys_dir.add_dir_locked("net", InodeMode::from_bits_truncate(0o555))?;
     let ipv4_dir = net_dir.add_dir_locked("ipv4", InodeMode::from_bits_truncate(0o555))?;
     let conf_dir = ipv4_dir.add_dir_locked("conf", InodeMode::from_bits_truncate(0o555))?;

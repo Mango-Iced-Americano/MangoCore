@@ -92,6 +92,110 @@ pub fn max_user_namespaces_content(
     proc_read_str(offset, len, buf, "0\n")
 }
 
+pub fn overcommit_memory_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let value = format!("{}\n", crate::mm::overcommit_memory());
+    proc_read_str(offset, len, buf, &value)
+}
+
+pub fn overcommit_memory_write(
+    _extra: usize,
+    _offset: usize,
+    buf: &[u8],
+) -> Result<usize, SyscallErr> {
+    let value = parse_usize_sysctl(buf)?;
+    if !crate::mm::set_overcommit_memory(value) {
+        return Err(SyscallErr::EINVAL);
+    }
+    Ok(buf.len())
+}
+
+pub fn overcommit_ratio_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let value = format!("{}\n", crate::mm::overcommit_ratio());
+    proc_read_str(offset, len, buf, &value)
+}
+
+pub fn overcommit_ratio_write(
+    _extra: usize,
+    _offset: usize,
+    buf: &[u8],
+) -> Result<usize, SyscallErr> {
+    let value = parse_usize_sysctl(buf)?;
+    crate::mm::set_overcommit_ratio(value);
+    Ok(buf.len())
+}
+
+pub fn max_map_count_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let value = format!("{}\n", crate::mm::max_map_count());
+    proc_read_str(offset, len, buf, &value)
+}
+
+pub fn max_map_count_write(
+    _extra: usize,
+    _offset: usize,
+    buf: &[u8],
+) -> Result<usize, SyscallErr> {
+    let value = parse_usize_sysctl(buf)?;
+    if !crate::mm::set_max_map_count(value) {
+        return Err(SyscallErr::EINVAL);
+    }
+    Ok(buf.len())
+}
+
+pub fn min_free_kbytes_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let value = format!("{}\n", crate::mm::min_free_kbytes());
+    proc_read_str(offset, len, buf, &value)
+}
+
+pub fn min_free_kbytes_write(
+    _extra: usize,
+    _offset: usize,
+    buf: &[u8],
+) -> Result<usize, SyscallErr> {
+    let value = parse_usize_sysctl(buf)?;
+    crate::mm::set_min_free_kbytes(value);
+    Ok(buf.len())
+}
+
+pub fn panic_on_oom_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let value = format!("{}\n", crate::mm::panic_on_oom());
+    proc_read_str(offset, len, buf, &value)
+}
+
+pub fn panic_on_oom_write(
+    _extra: usize,
+    _offset: usize,
+    buf: &[u8],
+) -> Result<usize, SyscallErr> {
+    let value = parse_usize_sysctl(buf)?;
+    crate::mm::set_panic_on_oom(value);
+    Ok(buf.len())
+}
+
 pub fn osrelease_content(
     _extra: usize,
     offset: usize,

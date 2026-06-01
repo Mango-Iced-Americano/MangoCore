@@ -11,8 +11,10 @@ use crate::config::*;
 use crate::mm::{UserPtr, UserPtrMut};
 use crate::syscall::errno::*;
 use crate::task::{
-    exit_current_and_run_next, exit_group_and_run_next, WaitQueue,
+    block_current_and_run_next_with_lock_checked, exit_current_and_run_next,
+    exit_group_and_run_next, WaitQueue,
 };
+use alloc::sync::Arc;
 
 use super::current_task;
 use super::task::TaskControlBlock;
@@ -486,6 +488,17 @@ fn pending_unblocked_signals(task: &TaskControlBlock) -> Signals {
     pending.difference(sigmask)
 }
 
+fn pending_signals(task: &TaskControlBlock) -> Signals {
+    let inner = task.acquire_inner_lock();
+    inner.sigpending.pending() | task.process.shared_pending()
+}
+
+fn has_pending_sigcont(task: &TaskControlBlock) -> bool {
+    // SIGCONT resumes a stopped task even if the signal is currently masked;
+    // delivery can remain pending, but the stopped wait itself must end.
+    pending_signals(task).contains(Signals::SIGCONT)
+}
+
 fn signal_is_actionable(sighand: &Sighand, signum: usize, signal: Signals) -> bool {
     match sighand.get(signum) {
         Some(act) if act.handler == SigHandler::SIG_IGN => false,
@@ -592,14 +605,27 @@ pub fn has_actionable_signal(task: &TaskControlBlock) -> bool {
 
 fn wait_for_default_stop_signal() {
     let wait_queue = spin::Mutex::new(WaitQueue::new());
-    let _ = WaitQueue::wait_event_interruptible(&wait_queue, || {
-        let task = current_task()?;
-        if pending_unblocked_signals(&task).contains(Signals::SIGCONT) {
-            Some(0)
-        } else {
-            None
+    loop {
+        let task = current_task().unwrap();
+        if has_pending_sigcont(&task) {
+            break;
         }
-    });
+
+        let mut guard = wait_queue.lock();
+        guard.prepare_to_wait(Arc::downgrade(&task));
+        if has_pending_sigcont(&task) {
+            guard.finish_wait(&task);
+            break;
+        }
+        drop(task);
+
+        block_current_and_run_next_with_lock_checked(guard, |task| {
+            !has_pending_sigcont(task)
+        });
+
+        let task = current_task().unwrap();
+        wait_queue.lock().finish_wait(&task);
+    }
 }
 
 fn stop_current_process_for_signal(signum: usize) {

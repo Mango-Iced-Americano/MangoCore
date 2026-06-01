@@ -9,7 +9,6 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use log::{debug, warn};
 
-const MAX_VMA_COUNT: usize = 65_536;
 const STACK_GUARD_GAP_PAGES: usize = 256;
 const GROWSDOWN_MAX_FAULT_GAP_PAGES: usize = USER_STACK_SIZE / PAGE_SIZE;
 
@@ -83,6 +82,13 @@ impl VmaSet {
 
     pub(super) fn len(&self) -> usize {
         self.vmas.len()
+    }
+
+    fn accounted_len(&self) -> usize {
+        self.vmas
+            .values()
+            .filter(|area| area.vm_is_user())
+            .count()
     }
 
     pub(super) fn has_shared_writable_mapping(&self, inode: &Arc<dyn IndexNode>) -> bool {
@@ -740,10 +746,12 @@ impl VmaSet {
 
     fn ensure_can_add(&self, additional: usize) -> Result<(), isize> {
         if self
-            .vmas
-            .len()
+            .accounted_len()
             .checked_add(additional)
-            .map_or(true, |len| len > MAX_VMA_COUNT)
+            // Linux rejects at the failure point after the visible map count
+            // can exceed max_map_count by one; internal non-user VMAs should
+            // not reduce the user-visible limit.
+            .map_or(true, |len| len > crate::mm::max_map_count().saturating_add(1))
         {
             Err(ENOMEM)
         } else {

@@ -4,6 +4,27 @@
 
 ## 2026-06-01
 
+### 补齐 VM tunable sysctl 与 stopped SIGCONT 恢复
+
+**涉及文件：**
+- `os/src/fs/procfs/files/sys.rs` / `os/src/fs/procfs/files/mod.rs` — 注册 `/proc/sys/vm/{overcommit_memory,overcommit_ratio,max_map_count,min_free_kbytes,panic_on_oom}` 可写节点
+- `os/src/fs/procfs/files/meminfo.rs` — 补齐 `CommitLimit`、`Committed_AS`，并约束 LTP VM 压测使用的对外内存视图
+- `os/src/mm/sysctl.rs` / `os/src/mm/mod.rs` — 保存 VM sysctl 状态并提供 overcommit/max_map_count 查询入口
+- `os/src/mm/mmap.rs` / `os/src/mm/vma_set.rs` / `os/src/mm/address_space.rs` — 接入 overcommit 策略、按用户可见 VMA 计数限制 `max_map_count`，只对可写匿名 `MAP_SHARED` 预分配共享页
+- `os/src/hal/arch/riscv/config.rs` — 扩大 rv64 mmap arena，避免 overcommit=1 大 malloc 因虚拟地址空间过小误失败
+- `os/src/task/signal/mod.rs` / `os/src/task/signal/delivery.rs` — `SIGCONT` 恢复 stopped task 时不受 sigmask 影响，并显式唤醒 stopped 进程/线程
+- `os/src/mm/frame_allocator.rs` — OOM handler 在无 current task 上下文中跳过当前任务回收，避免物理页耗尽时 panic
+
+**验证：**
+- `make rv64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- `make la64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- rv64 heap_trace focused LTP：`max_map_count,min_free_kbytes,overcommit_memory` musl+glibc 全部 Summary `failed 0 / broken 0`，无 `TFAIL/TBROK/TCONF/Test timeouted/PANIC/KERNEL EXCEPTION` ✅
+- la64 heap_trace focused LTP：同 rv64，双 libc 三项全部 Summary `failed 0 / broken 0`，无 `TFAIL/TBROK/TCONF/Test timeouted/PANIC/KERNEL EXCEPTION` ✅
+
+**备注：**
+- `max_map_count` 用例通过 `raise(SIGSTOP)` + 父进程 `SIGCONT` 观察子进程 maps；musl 路径会在 SIGCONT 被 mask 时触发 stopped wait 丢恢复问题，本轮按 Linux 语义改为 pending SIGCONT 即恢复
+- `min_free_kbytes` 会故意吃尽物理页；本轮额外修掉 heap_trace 压测中 OOM handler `current_task().unwrap()` 的 no-current panic
+
 ### 补齐 prctl 状态类最小兼容
 
 **涉及文件：**
