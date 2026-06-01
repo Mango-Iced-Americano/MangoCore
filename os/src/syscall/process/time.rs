@@ -461,19 +461,24 @@ fn valid_posix_timer_clock(clock_id: usize) -> bool {
     matches!(
         clock_id,
         CLOCK_REALTIME
+            | CLOCK_REALTIME_ALARM
+            | CLOCK_TAI
             | CLOCK_MONOTONIC
             | CLOCK_PROCESS_CPUTIME_ID
             | CLOCK_THREAD_CPUTIME_ID
             | CLOCK_BOOTTIME
+            | CLOCK_BOOTTIME_ALARM
     )
 }
 
 fn posix_timer_clock_now(clock_id: usize) -> TimeSpec {
     match clock_id {
-        CLOCK_REALTIME => current_timespec(),
-        CLOCK_MONOTONIC | CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID | CLOCK_BOOTTIME => {
-            TimeSpec::now()
-        }
+        CLOCK_REALTIME | CLOCK_REALTIME_ALARM | CLOCK_TAI => current_timespec(),
+        CLOCK_MONOTONIC
+        | CLOCK_PROCESS_CPUTIME_ID
+        | CLOCK_THREAD_CPUTIME_ID
+        | CLOCK_BOOTTIME
+        | CLOCK_BOOTTIME_ALARM => TimeSpec::now(),
         _ => TimeSpec::new(),
     }
 }

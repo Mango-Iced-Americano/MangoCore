@@ -4,6 +4,21 @@
 
 ## 2026-06-01
 
+### 放开 POSIX timer alarm/TAI clock
+
+**涉及文件：**
+- `os/src/syscall/process/time.rs` — `timer_create()` 接受 `CLOCK_REALTIME_ALARM`、`CLOCK_BOOTTIME_ALARM`、`CLOCK_TAI`，并让绝对 deadline 计算复用现有 realtime/boottime 时间基准
+
+**验证：**
+- `make rv64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- `make la64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- rv64 heap_trace focused LTP：`timer_delete01,timer_settime01,timer_settime02` musl+glibc 全部 TPASS，合计 176 pass / 0 failed / 0 broken / 0 skipped；`CLOCK_REALTIME_ALARM`、`CLOCK_BOOTTIME_ALARM`、`CLOCK_TAI` 子项不再 TCONF，无 `PANIC/KERNEL EXCEPTION/heap fatal/HEAP OOM` ✅
+- la64 heap_trace focused LTP：fresh image 复跑后同 rv64，合计 176 pass / 0 failed / 0 broken / 0 skipped，无 `PANIC/KERNEL EXCEPTION/heap fatal/HEAP OOM` ✅
+
+**备注：**
+- 当前内核没有 suspend/wake-alarm 模型；本轮只补齐 LTP 可见的 POSIX timer 创建、set/delete 语义，`clock_nanosleep()` 的 clock id 支持范围保持不变
+- la64 首次使用复用过的可变镜像时在启动期 `busybox --install` 的 `symlinkat` 路径触发 allocator `AddressError`，换 fresh image 后消失；该问题属于测试镜像状态/FS 脏化触发的独立风险，未计入本轮 timer 适配改动
+
 ### 支持 alarm clock 的 clock_getres 查询
 
 **涉及文件：**

@@ -125,3 +125,11 @@
 - **修复**: `clock_getres()` 对 alarm clock id 返回与现有 clock 一致的最小 1ns 分辨率。
 - **教训**: 时间类 syscall 的 clock id 支持矩阵要成组维护；新增或放开一个 id 时同时检查 gettime/getres/nanosleep/timer_create 的语义边界。
 - **相关文件**: `os/src/syscall/process/time.rs`
+
+## POSIX timer clock 表要和时间查询能力同步
+
+- **现象**: `timer_delete01/timer_settime01/timer_settime02` 对 `CLOCK_REALTIME_ALARM`、`CLOCK_BOOTTIME_ALARM`、`CLOCK_TAI` 报 TCONF，但同类 clock id 的 `clock_gettime/getres` 已经能返回结果。
+- **根因**: POSIX timer 的合法 clock 表仍只接受 realtime/monotonic/cpu/boottime，遗漏 alarm/TAI；`timer_settime(TIMER_ABSTIME)` 也需要为新增 clock id 选择一致的时间基准。
+- **修复**: `timer_create()` 放开 alarm/TAI clock id，deadline 计算中 realtime alarm/TAI 复用 wall-clock 基准，boottime alarm 复用现有 boottime/monotonic 基准。
+- **教训**: 新增 clock id 时不要只补 gettime/getres；LTP 会通过 POSIX timer 再做一次能力探测，必须明确哪些接口共享支持矩阵，哪些接口因语义风险继续拒绝。
+- **相关文件**: `os/src/syscall/process/time.rs`
