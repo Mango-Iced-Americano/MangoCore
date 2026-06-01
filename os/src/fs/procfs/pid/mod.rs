@@ -77,6 +77,13 @@ fn create_pid_dir(
     )?;
 
     dir.add_file(
+        "comm",
+        InodeMode::from_bits_truncate(0o444),
+        task::task_comm_content,
+        (pid << 32) | (pid & 0xffff_ffff),
+    )?;
+
+    dir.add_file(
         "cmdline",
         InodeMode::from_bits_truncate(0o444),
         cmdline::pid_cmdline_content,

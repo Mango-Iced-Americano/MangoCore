@@ -77,3 +77,11 @@
 - **修复**: attachment 记录 `{pid, addr}`，普通 fork 复制 VM 时继承 attachment，进程最终退出时 detach；`shmctl` 返回完整 Linux `shmid_ds`/info 结构并保留高位 mode；`shmat` 无 `SHM_RND` 时按页对齐接受，带 `SHM_RND` 时兼容 4K/64K 两种用户 ABI 期望。
 - **教训**: SysV IPC 不能只建全局对象；LTP 会同时验证 syscall 返回值、IPC 元数据、fork 继承、进程退出回收和 libc 头文件暴露的 ABI 常量。遇到双 libc 结果相反时，先反汇编或检查头文件确认 wrapper/头文件差异，再决定兼容点放在内核还是 runner。
 - **相关文件**: `os/src/syscall/process/ipc.rs`, `os/src/syscall/process/clone.rs`, `os/src/task/mod.rs`
+
+## procfs comm 文件的进程级与线程级覆盖
+
+- **现象**: `prctl05` 的 `PR_SET_NAME/PR_GET_NAME` 已成功，但读取 `/proc/self/task/<tid>/comm` 或 `/proc/self/comm` 时报 `ENOENT`，导致用例 `TBROK`。
+- **根因**: `PR_SET_NAME` 更新的是 TCB 中的线程名，LTP 会同时检查线程目录和进程目录下的 `comm` 文件；只补 `/proc/<pid>/task/<tid>/comm` 会继续卡在 `/proc/<pid>/comm`。
+- **修复**: procfs PID 目录和 task 目录都挂载动态 `comm` 文件，内容从对应 task 的 `task_comm` 截断到 NUL 前并追加换行。
+- **教训**: procfs 适配不能只按报错路径补一个 inode；涉及线程属性的 ABI 要检查 `/proc/<pid>/...` 与 `/proc/<pid>/task/<tid>/...` 两套入口是否都被 LTP 覆盖。
+- **相关文件**: `os/src/fs/procfs/pid/mod.rs`, `os/src/fs/procfs/pid/task.rs`

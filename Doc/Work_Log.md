@@ -4,6 +4,21 @@
 
 ## 2026-06-01
 
+### 补齐 procfs comm 文件支持 LTP prctl05
+
+**涉及文件：**
+- `os/src/fs/procfs/pid/mod.rs` — 在 `/proc/<pid>/` 目录新增 `comm` 文件，复用线程 comm 读取逻辑输出 leader task 名称
+- `os/src/fs/procfs/pid/task.rs` — 在 `/proc/<pid>/task/<tid>/` 目录新增 `comm` 文件，从对应 TCB 的 `task_comm` 生成带换行的 procfs 内容
+
+**验证：**
+- `make rv64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- `make la64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- rv64 heap_trace focused LTP：`prctl05` musl+glibc 均 8/8 TPASS，`failed=0/broken=0/skipped=0`，无 panic/AddressError/heap fatal ✅
+- la64 heap_trace focused LTP：`prctl05` musl+glibc 均 8/8 TPASS，`failed=0/broken=0/skipped=0`，无 panic/AddressError/heap fatal ✅
+
+**备注：**
+- inline runner 仍会打印 `FAIL LTP CASE prctl05 : 0`，但 LTP summary 已显示 0 failed/0 broken；这是 runner 标签显示问题，不是用例失败
+
 ### 完善 SysV SHM IPC 生命周期与双 libc shmat 对齐兼容
 
 **涉及文件：**
