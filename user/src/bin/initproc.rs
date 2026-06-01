@@ -1189,7 +1189,6 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "verify_caps_exec" => Some("requires complete POSIX file capability support"),
         "vfork" => Some("requires ptrace capability environment"),
         "vfork_freeze.sh" => Some("freezer/cgroup helper skipped in LTP syscall scan"),
-        "vhangup01" | "vhangup02" => Some("vhangup syscall not supported"),
         "virt_lib.sh" => Some("network virtualization helper skipped in LTP syscall scan"),
         "wc01.sh" | "which01.sh" => Some("standalone shell helper skipped in LTP syscall scan"),
         "write04" | "write05" | "write06" | "writev01" => {

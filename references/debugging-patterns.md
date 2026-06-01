@@ -114,6 +114,6 @@
 
 - **现象**: `vhangup01/vhangup02` 因 syscall 58 未注册被 LTP 标记为 `__NR_vhangup not supported on your arch`，无法覆盖后续权限语义。
 - **根因**: 某些传统 syscall 的真实设备副作用对当前内核并不重要，但 LTP 会先检查 syscall 是否存在，再检查 root 成功与非特权 `EPERM`。
-- **修复**: 注册 syscall 并只实现 Linux 可见的 capability gate；root 或 `CAP_SYS_TTY_CONFIG` 返回成功，普通用户返回 `EPERM`，暂不改变 tty 状态。
-- **教训**: 对 vhangup 这类边缘但低风险的 ABI，优先补“存在性 + errno 优先级 + 权限检查”，避免把不必要的设备模型复杂度带入主线。
-- **相关文件**: `os/src/syscall/process/ids.rs`, `os/src/syscall/mod.rs`
+- **修复**: 注册 syscall 并只实现 Linux 可见的 capability gate；root 或 `CAP_SYS_TTY_CONFIG` 返回成功，普通用户返回 `EPERM`，暂不改变 tty 状态；同时清理 initproc 自动扫描里的历史 skip-reason。
+- **教训**: 对 vhangup 这类边缘但低风险的 ABI，优先补“存在性 + errno 优先级 + 权限检查”，避免把不必要的设备模型复杂度带入主线；提交前要同步检查默认 skip/reason 表，否则 focused 通过但全量不计分。
+- **相关文件**: `os/src/syscall/process/ids.rs`, `os/src/syscall/mod.rs`, `user/src/bin/initproc.rs`
