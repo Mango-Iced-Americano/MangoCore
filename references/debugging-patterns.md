@@ -85,3 +85,11 @@
 - **修复**: procfs PID 目录和 task 目录都挂载动态 `comm` 文件，内容从对应 task 的 `task_comm` 截断到 NUL 前并追加换行。
 - **教训**: procfs 适配不能只按报错路径补一个 inode；涉及线程属性的 ABI 要检查 `/proc/<pid>/...` 与 `/proc/<pid>/task/<tid>/...` 两套入口是否都被 LTP 覆盖。
 - **相关文件**: `os/src/fs/procfs/pid/mod.rs`, `os/src/fs/procfs/pid/task.rs`
+
+## SysV IPC 用例对 procfs/sysctl 视图的依赖
+
+- **现象**: SHM syscall 主路径已实现后，`shmctl03` 仍因 `/proc/sys/kernel/shmmax` 缺失 `TBROK`，`shmget03` 因 `/proc/sysvipc/shm` 缺失 `TBROK`。
+- **根因**: LTP 的 SysV IPC 用例不只调用 `shmctl/shmget`，还会通过 procfs/sysctl 获取系统上限和当前对象列表；缺少虚拟视图会让测试在准备阶段直接 broken。
+- **修复**: 从现有 SHM registry 导出 `shmmax/shmall/shmmni` 和 `/proc/sysvipc/shm` 表格快照，procfs 仅挂只读节点，不引入新的可写 sysctl。
+- **教训**: IPC 适配要把 syscall ABI 和 `/proc/sys/kernel/*`、`/proc/sysvipc/*` 作为同一个可观测面处理；否则内核对象行为正确也会被环境探测挡住。
+- **相关文件**: `os/src/syscall/process/ipc.rs`, `os/src/fs/procfs/files/sys.rs`, `os/src/fs/procfs/files/sysvipc.rs`

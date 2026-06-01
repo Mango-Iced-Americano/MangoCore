@@ -4,6 +4,22 @@
 
 ## 2026-06-01
 
+### 暴露 SysV SHM procfs/sysctl 视图以通过 shmctl03/shmget03
+
+**涉及文件：**
+- `os/src/syscall/process/ipc.rs` / `os/src/syscall/process/mod.rs` / `os/src/syscall/mod.rs` — 导出 SHM 上限、段数量上限和 `/proc/sysvipc/shm` 文本快照，复用现有 SHM registry 元数据
+- `os/src/fs/procfs/files/sys.rs` — 新增 `/proc/sys/kernel/shmmax`、`shmall`、`shmmni` 只读内容
+- `os/src/fs/procfs/files/sysvipc.rs` / `os/src/fs/procfs/files/mod.rs` — 新增 `/proc/sysvipc/shm` 只读表格并注册 sysvipc 目录
+
+**验证：**
+- `make rv64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- `make la64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- rv64 heap_trace focused LTP：`shmctl03` musl+glibc 均 4/4 TPASS，`shmget03` musl+glibc 均 1/1 TPASS，无 `TFAIL/TBROK/PANIC/AddressError/heap fatal` ✅
+- la64 heap_trace focused LTP：同 rv64，`shmctl03/shmget03` 双 libc 全部通过；glibc 阶段显示当前 SHM 段数仍为 0，未观察到 registry 残留 ✅
+
+**备注：**
+- 本轮只暴露 SysV SHM 相关虚拟 proc/sysctl 读接口，不扩展真实 VFS/磁盘文件系统语义
+
 ### 补齐 procfs comm 文件支持 LTP prctl05
 
 **涉及文件：**

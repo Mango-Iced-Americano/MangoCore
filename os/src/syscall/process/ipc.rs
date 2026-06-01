@@ -4,7 +4,9 @@ use crate::syscall::errno::*;
 use crate::task::{current_task, current_user_token, WaitQueue, WaitResult};
 use crate::timer::{current_timespec, TimeSpec};
 use alloc::collections::{BTreeMap, VecDeque};
+use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt::Write;
 use core::mem::size_of;
 use lazy_static::lazy_static;
 use spin::Mutex;
@@ -770,6 +772,49 @@ fn shminfo_snapshot() -> LinuxShmInfo {
         unused3: 0,
         unused4: 0,
     }
+}
+
+pub fn sysv_shmmax() -> usize {
+    MAX_SHM_SIZE
+}
+
+pub fn sysv_shmmni() -> usize {
+    SHMMNI
+}
+
+pub fn sysv_shmall() -> usize {
+    SHMMNI * (MAX_SHM_SIZE / crate::config::PAGE_SIZE)
+}
+
+pub fn sysv_shm_proc_snapshot() -> String {
+    let registry = SHM_REGISTRY.lock();
+    let mut out = String::from(
+        "       key      shmid perms                  size  cpid  lpid nattch   uid   gid  cuid  cgid      atime      dtime      ctime                   rss                  swap\n",
+    );
+    for (id, seg) in registry.segments.iter() {
+        let ds = seg.to_shmid_ds();
+        let _ = writeln!(
+            out,
+            "{:10} {:10} {:5o} {:21} {:5} {:5} {:6} {:5} {:5} {:5} {:5} {:10} {:10} {:10} {:21} {:21}",
+            seg.key as i32,
+            id,
+            ds.shm_perm.mode as usize,
+            ds.shm_segsz,
+            ds.shm_cpid,
+            ds.shm_lpid,
+            ds.shm_nattch,
+            ds.shm_perm.uid,
+            ds.shm_perm.gid,
+            ds.shm_perm.cuid,
+            ds.shm_perm.cgid,
+            ds.shm_atime,
+            ds.shm_dtime,
+            ds.shm_ctime,
+            0,
+            0
+        );
+    }
+    out
 }
 
 fn shm_usage_snapshot(registry: &ShmRegistry) -> LinuxShmUsageInfo {

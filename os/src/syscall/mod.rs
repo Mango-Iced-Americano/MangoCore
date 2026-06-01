@@ -17,7 +17,10 @@ use crate::net::syscall::*;
 use core::convert::TryFrom;
 use fs::*;
 use log::{error, info};
-pub use process::{CloneFlags, shm_detach_process};
+pub use process::{
+    CloneFlags, shm_detach_process, sysv_shmall, sysv_shm_proc_snapshot, sysv_shmmax,
+    sysv_shmmni,
+};
 use process::*;
 use syscall_id::*;
 pub fn syscall_name(id: usize) -> &'static str {

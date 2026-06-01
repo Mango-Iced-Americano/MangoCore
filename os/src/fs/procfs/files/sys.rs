@@ -91,6 +91,36 @@ pub fn osrelease_content(
     proc_read_str(offset, len, buf, "5.10.0-mangocore\n")
 }
 
+pub fn shmmax_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let value = format!("{}\n", crate::syscall::sysv_shmmax());
+    proc_read_str(offset, len, buf, &value)
+}
+
+pub fn shmall_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let value = format!("{}\n", crate::syscall::sysv_shmall());
+    proc_read_str(offset, len, buf, &value)
+}
+
+pub fn shmmni_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let value = format!("{}\n", crate::syscall::sysv_shmmni());
+    proc_read_str(offset, len, buf, &value)
+}
+
 pub fn net_conf_tag_content(
     _extra: usize,
     offset: usize,
