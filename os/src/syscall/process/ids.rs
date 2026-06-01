@@ -35,6 +35,7 @@ const CAP_SETPCAP: usize = 8;
 const CAP_SYS_PTRACE: usize = 19;
 const CAP_SYS_NICE: usize = 23;
 const CAP_SYS_RESOURCE: usize = 24;
+const CAP_SYS_TTY_CONFIG: usize = 26;
 const CAP_FULL_SET: u64 = (1u64 << (CAP_LAST_CAP + 1)) - 1;
 const NGROUPS_MAX: usize = 65536;
 const LEGACY_NGROUPS_MAX: usize = 32;
@@ -115,6 +116,16 @@ pub fn sys_ioprio_set(which: usize, who: usize, ioprio: usize) -> isize {
     inner.ioprio_class = class;
     inner.ioprio_prio = prio;
     SUCCESS
+}
+
+pub fn sys_vhangup() -> isize {
+    let task = current_task().unwrap();
+    let inner = task.acquire_inner_lock();
+    if inner.euid == 0 || (inner.cap_effective & (1u64 << CAP_SYS_TTY_CONFIG)) != 0 {
+        SUCCESS
+    } else {
+        EPERM
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

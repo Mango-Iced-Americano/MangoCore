@@ -109,3 +109,11 @@
 - **修复**: `SEM_STAT_ANY` 在 index 查找失败时 fallback 到直接 semid，保留权限绕过语义；导出 `/proc/sysvipc/sem` 快照，注册 `/proc/sys/kernel/sem` 四元组并限制写入不超过当前实现容量。
 - **教训**: SysV IPC 适配不要假设对象 ID 与内核数组 index 一定一致；LTP 探针常把 Linux 现有分配策略当作兼容前提，遇到 `*_STAT_ANY` TCONF 要同时检查 ID/index、procfs 表格和 sysctl 上限。
 - **相关文件**: `os/src/syscall/process/ipc.rs`, `os/src/fs/procfs/files/sys.rs`, `os/src/fs/procfs/files/sysvipc.rs`
+
+## 能 no-op 的特权 syscall 先补 errno 语义
+
+- **现象**: `vhangup01/vhangup02` 因 syscall 58 未注册被 LTP 标记为 `__NR_vhangup not supported on your arch`，无法覆盖后续权限语义。
+- **根因**: 某些传统 syscall 的真实设备副作用对当前内核并不重要，但 LTP 会先检查 syscall 是否存在，再检查 root 成功与非特权 `EPERM`。
+- **修复**: 注册 syscall 并只实现 Linux 可见的 capability gate；root 或 `CAP_SYS_TTY_CONFIG` 返回成功，普通用户返回 `EPERM`，暂不改变 tty 状态。
+- **教训**: 对 vhangup 这类边缘但低风险的 ABI，优先补“存在性 + errno 优先级 + 权限检查”，避免把不必要的设备模型复杂度带入主线。
+- **相关文件**: `os/src/syscall/process/ids.rs`, `os/src/syscall/mod.rs`

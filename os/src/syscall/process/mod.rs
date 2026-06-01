@@ -23,7 +23,7 @@ pub use ids::{
     sys_sched_setparam, sys_sched_setscheduler, sys_setdomainname, sys_setfsgid, sys_setfsuid,
     sys_setgid, sys_setgroups, sys_sethostname, sys_setpgid, sys_setpriority, sys_setregid,
     sys_setresgid, sys_setresuid, sys_setreuid, sys_setrlimit, sys_setsid, sys_setuid,
-    sys_sysinfo, sys_uname, CapUserData,
+    sys_sysinfo, sys_uname, sys_vhangup, CapUserData,
     CapUserHeader, RLimit, SchedAttr, SchedParam, Sysinfo,
 };
 pub use ipc::{

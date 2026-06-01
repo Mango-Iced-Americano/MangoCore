@@ -4,6 +4,21 @@
 
 ## 2026-06-01
 
+### 接入 vhangup 最小权限语义
+
+**涉及文件：**
+- `os/src/syscall/syscall_id.rs` / `os/src/syscall/mod.rs` — 注册 generic syscall 58 `vhangup`
+- `os/src/syscall/process/ids.rs` / `os/src/syscall/process/mod.rs` — 新增 `sys_vhangup()`，按 root 或 `CAP_SYS_TTY_CONFIG` 放行，否则返回 `EPERM`
+
+**验证：**
+- `make rv64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- `make la64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- rv64 heap_trace focused LTP：`vhangup01,vhangup02` musl+glibc 全部 TPASS，4 pass / 0 failed / 0 broken / 0 skipped，无 `PANIC/KERNEL EXCEPTION/heap fatal/HEAP OOM` ✅
+- la64 heap_trace focused LTP：`vhangup01,vhangup02` musl+glibc 全部 TPASS，4 pass / 0 failed / 0 broken / 0 skipped，无 `PANIC/KERNEL EXCEPTION/heap fatal/HEAP OOM` ✅
+
+**备注：**
+- 当前仅做 LTP/ABI 所需的权限兼容；不模拟真实 tty hangup 副作用，避免引入 TTY 状态变更风险
+
 ### 补齐 SysV SEM proc/sysctl 与 SEM_STAT_ANY 兼容
 
 **涉及文件：**

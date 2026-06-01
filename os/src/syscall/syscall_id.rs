@@ -32,6 +32,7 @@ pub const SYSCALL_FCHOWNAT: usize = 54;
 pub const SYSCALL_FCHOWN: usize = 55;
 pub const SYSCALL_OPENAT: usize = 56;
 pub const SYSCALL_CLOSE: usize = 57;
+pub const SYSCALL_VHANGUP: usize = 58;
 pub const SYSCALL_PIPE2: usize = 59;
 pub const SYSCALL_GETDENTS64: usize = 61;
 pub const SYSCALL_LSEEK: usize = 62;
