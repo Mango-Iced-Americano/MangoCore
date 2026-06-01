@@ -101,3 +101,11 @@
 - **修复**: 为 MSG 增加运行时 tunable 和 `msg_next_id`，注册可写 proc sysctl；`msgctl(MSG_INFO)` 返回当前队列/消息/字节 usage，`msgctl(IPC_INFO)` 继续返回上限；同时兼容 libc 可能带入的 `IPC_64` cmd 位。
 - **教训**: SysV IPC 的 `*_INFO` 命令名相似但语义分裂，LTP 会同时检查 sysctl 写入、下一次 ID 分配、权限绕过的 `*_STAT_ANY` 和 usage 字段，不能只实现对象增删收发主路径。
 - **相关文件**: `os/src/syscall/process/ipc.rs`, `os/src/fs/procfs/files/sys.rs`, `os/src/fs/procfs/files/sysvipc.rs`
+
+## SysV SEM 的 index/semid 兼容与 procfs 对账面
+
+- **现象**: `semctl09` 报 `kernel doesn't support SEM_STAT_ANY`，`semget05` 报 `/proc/sys/kernel/sem: ENOENT`；主 syscall 已有 `semget/semctl/semop` 仍无法通过这两个 LTP 用例。
+- **根因**: `semctl09` setup 直接用新建 semid 调 `SEM_STAT_ANY`，Linux 首个 semid 通常也是 index 0，而当前内核 semid 从 1 开始，按纯 index 查找会返回 `EINVAL` 并被判定为不支持；同时 SEM 用例会读取 `/proc/sysvipc/sem` 和 `/proc/sys/kernel/sem` 对账当前使用量与系统上限。
+- **修复**: `SEM_STAT_ANY` 在 index 查找失败时 fallback 到直接 semid，保留权限绕过语义；导出 `/proc/sysvipc/sem` 快照，注册 `/proc/sys/kernel/sem` 四元组并限制写入不超过当前实现容量。
+- **教训**: SysV IPC 适配不要假设对象 ID 与内核数组 index 一定一致；LTP 探针常把 Linux 现有分配策略当作兼容前提，遇到 `*_STAT_ANY` TCONF 要同时检查 ID/index、procfs 表格和 sysctl 上限。
+- **相关文件**: `os/src/syscall/process/ipc.rs`, `os/src/fs/procfs/files/sys.rs`, `os/src/fs/procfs/files/sysvipc.rs`

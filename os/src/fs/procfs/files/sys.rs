@@ -223,11 +223,60 @@ pub fn msg_next_id_write(
     Ok(buf.len())
 }
 
+pub fn sem_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let (semmsl, semmns, semopm, semmni) = crate::syscall::sysv_sem_limits();
+    let value = format!("{semmsl}\t{semmns}\t{semopm}\t{semmni}\n");
+    proc_read_str(offset, len, buf, &value)
+}
+
+pub fn sem_write(
+    _extra: usize,
+    _offset: usize,
+    buf: &[u8],
+) -> Result<usize, SyscallErr> {
+    let (semmsl, semmns, semopm, semmni) = parse_four_usize_sysctl(buf)?;
+    if !crate::syscall::set_sysv_sem_limits(semmsl, semmns, semopm, semmni) {
+        return Err(SyscallErr::EINVAL);
+    }
+    Ok(buf.len())
+}
+
 fn parse_usize_sysctl(buf: &[u8]) -> Result<usize, SyscallErr> {
     let text = core::str::from_utf8(buf).map_err(|_| SyscallErr::EINVAL)?;
     text.trim()
         .parse::<usize>()
         .map_err(|_| SyscallErr::EINVAL)
+}
+
+fn parse_four_usize_sysctl(buf: &[u8]) -> Result<(usize, usize, usize, usize), SyscallErr> {
+    let text = core::str::from_utf8(buf).map_err(|_| SyscallErr::EINVAL)?;
+    let mut fields = text.split_whitespace();
+    let semmsl = fields
+        .next()
+        .ok_or(SyscallErr::EINVAL)?
+        .parse::<usize>()
+        .map_err(|_| SyscallErr::EINVAL)?;
+    let semmns = fields
+        .next()
+        .ok_or(SyscallErr::EINVAL)?
+        .parse::<usize>()
+        .map_err(|_| SyscallErr::EINVAL)?;
+    let semopm = fields
+        .next()
+        .ok_or(SyscallErr::EINVAL)?
+        .parse::<usize>()
+        .map_err(|_| SyscallErr::EINVAL)?;
+    let semmni = fields
+        .next()
+        .ok_or(SyscallErr::EINVAL)?
+        .parse::<usize>()
+        .map_err(|_| SyscallErr::EINVAL)?;
+    Ok((semmsl, semmns, semopm, semmni))
 }
 
 pub fn net_conf_tag_content(

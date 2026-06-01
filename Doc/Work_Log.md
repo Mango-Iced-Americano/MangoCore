@@ -4,6 +4,23 @@
 
 ## 2026-06-01
 
+### 补齐 SysV SEM proc/sysctl 与 SEM_STAT_ANY 兼容
+
+**涉及文件：**
+- `os/src/syscall/process/ipc.rs` — 增加 SysV semaphore 运行时 limits，`SEM_STAT_ANY` 在 index 查找失败时兼容直接 semid，导出 `/proc/sysvipc/sem` 快照并让 `SEM_INFO` 返回 usage 语义
+- `os/src/syscall/process/mod.rs` / `os/src/syscall/mod.rs` — 导出 SEM proc/sysctl 查询与写入入口
+- `os/src/fs/procfs/files/sys.rs` / `os/src/fs/procfs/files/sysvipc.rs` / `os/src/fs/procfs/files/mod.rs` — 注册 `/proc/sys/kernel/sem` 与 `/proc/sysvipc/sem`
+
+**验证：**
+- `make rv64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- `make la64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- rv64 heap_trace focused LTP：`semctl09,semget05` musl+glibc 全部 TPASS，合计 34 pass / 0 failed / 0 broken / 0 skipped，无 `PANIC/KERNEL EXCEPTION/heap fatal/HEAP OOM` ✅
+- la64 heap_trace focused LTP：同 rv64，双 libc 合计 34 pass / 0 failed / 0 broken / 0 skipped，无 `PANIC/KERNEL EXCEPTION/heap fatal/HEAP OOM` ✅
+
+**备注：**
+- `semctl09` 的 setup 会直接用新建 semid 调 `SEM_STAT_ANY`，而 Linux 常见情况下首个 semid 与 index 同为 0；当前内核 semid 从 1 开始，因此需要兼容 direct semid fallback
+- `/proc/sys/kernel/sem` 写入被限制在当前实现容量内，避免手工或测试写入放大 SEMMNI/SEMMNS 引发堆压力
+
 ### 补齐 SysV MSG proc/sysctl 与 MSG_INFO 统计语义
 
 **涉及文件：**

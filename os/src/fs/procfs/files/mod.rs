@@ -115,6 +115,13 @@ pub fn register_all(root: &Arc<crate::fs::procfs::LockedProcInode>) -> Result<()
         sys::msg_next_id_write,
         0,
     )?;
+    kernel_dir.add_writable_file_with_write(
+        "sem",
+        InodeMode::from_bits_truncate(0o644),
+        sys::sem_content,
+        sys::sem_write,
+        0,
+    )?;
     let user_dir = sys_dir.add_dir_locked("user", InodeMode::from_bits_truncate(0o555))?;
     user_dir.add_writable_file(
         "max_user_namespaces",
@@ -157,6 +164,7 @@ pub fn register_all(root: &Arc<crate::fs::procfs::LockedProcInode>) -> Result<()
     let sysvipc_dir = root.add_dir_locked("sysvipc", InodeMode::from_bits_truncate(0o555))?;
     sysvipc_dir.add_file("shm", InodeMode::from_bits_truncate(0o444), sysvipc::shm_content, 0)?;
     sysvipc_dir.add_file("msg", InodeMode::from_bits_truncate(0o444), sysvipc::msg_content, 0)?;
+    sysvipc_dir.add_file("sem", InodeMode::from_bits_truncate(0o444), sysvipc::sem_content, 0)?;
 
     crate::fs::procfs::pid::setup_pid_hooks(root);
 

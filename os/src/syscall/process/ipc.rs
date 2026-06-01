@@ -85,6 +85,14 @@ const SEMOPM: usize = 500;
 const SEMVMX: i32 = 32767;
 const SEMAEM: i32 = 32767;
 
+#[derive(Clone, Copy)]
+struct SemLimits {
+    semmsl: usize,
+    semmns: usize,
+    semopm: usize,
+    semmni: usize,
+}
+
 const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
 
@@ -643,6 +651,12 @@ lazy_static! {
         msgmnb: MSGMNB,
         msgmni: MSGMNI,
     });
+    static ref SEM_LIMITS: Mutex<SemLimits> = Mutex::new(SemLimits {
+        semmsl: SEMMSL,
+        semmns: SEMMNI * SEMMSL,
+        semopm: SEMOPM,
+        semmni: SEMMNI,
+    });
     static ref MSG_REGISTRY: Mutex<MsgRegistry> = Mutex::new(MsgRegistry::new());
     static ref SEM_REGISTRY: Mutex<SemRegistry> = Mutex::new(SemRegistry::new());
 }
@@ -918,6 +932,51 @@ pub fn sysv_msg_proc_snapshot() -> String {
             queue.stime,
             queue.rtime,
             queue.ctime
+        );
+    }
+    out
+}
+
+pub fn sysv_sem_limits() -> (usize, usize, usize, usize) {
+    let limits = *SEM_LIMITS.lock();
+    (limits.semmsl, limits.semmns, limits.semopm, limits.semmni)
+}
+
+pub fn set_sysv_sem_limits(semmsl: usize, semmns: usize, semopm: usize, semmni: usize) -> bool {
+    if semmsl == 0 || semmns == 0 || semopm == 0 || semmni == 0 {
+        return false;
+    }
+    if semmsl > SEMMSL || semmns > SEMMNI * SEMMSL || semopm > SEMOPM || semmni > SEMMNI {
+        return false;
+    }
+    *SEM_LIMITS.lock() = SemLimits {
+        semmsl,
+        semmns,
+        semopm,
+        semmni,
+    };
+    true
+}
+
+pub fn sysv_sem_proc_snapshot() -> String {
+    let registry = SEM_REGISTRY.lock();
+    let mut out = String::from(
+        "       key      semid perms      nsems   uid   gid  cuid  cgid      otime      ctime\n",
+    );
+    for (id, set) in registry.sets.iter() {
+        let _ = writeln!(
+            out,
+            "{:10} {:10} {:5o} {:10} {:5} {:5} {:5} {:5} {:10} {:10}",
+            set.key as i32,
+            id,
+            set.mode,
+            set.semaphores.len(),
+            set.uid,
+            set.gid,
+            set.cuid,
+            set.cgid,
+            set.otime,
+            set.ctime
         );
     }
     out
@@ -1201,14 +1260,15 @@ fn can_modify_sem_set(set: &SemSet) -> bool {
 
 fn seminfo_snapshot(registry: &SemRegistry, runtime: bool) -> LinuxSemInfo {
     let total = registry.total_semaphores();
+    let limits = *SEM_LIMITS.lock();
     LinuxSemInfo {
-        semmap: SEMMNI as i32,
-        semmni: SEMMNI as i32,
-        semmns: (SEMMNI * SEMMSL) as i32,
-        semmnu: SEMMNI as i32,
-        semmsl: SEMMSL as i32,
-        semopm: SEMOPM as i32,
-        semume: SEMOPM as i32,
+        semmap: limits.semmni as i32,
+        semmni: limits.semmni as i32,
+        semmns: limits.semmns as i32,
+        semmnu: limits.semmni as i32,
+        semmsl: limits.semmsl as i32,
+        semopm: limits.semopm as i32,
+        semume: limits.semopm as i32,
         semusz: if runtime {
             registry.sets.len() as i32
         } else {
@@ -1251,6 +1311,7 @@ fn semctl_setval_value(arg: usize) -> Result<i32, isize> {
 
 pub fn sys_semget(key: isize, nsems: usize, semflg: usize) -> isize {
     let mut registry = SEM_REGISTRY.lock();
+    let limits = *SEM_LIMITS.lock();
     if key != IPC_PRIVATE {
         if let Some((id, set)) = registry.find_by_key(key) {
             if semflg & IPC_CREAT != 0 && semflg & IPC_EXCL != 0 {
@@ -1269,10 +1330,13 @@ pub fn sys_semget(key: isize, nsems: usize, semflg: usize) -> isize {
         }
     }
 
-    if nsems == 0 || nsems > SEMMSL {
+    if nsems == 0 || nsems > limits.semmsl {
         return EINVAL;
     }
-    if registry.sets.len() >= SEMMNI {
+    if registry.sets.len() >= limits.semmni {
+        return ENOSPC;
+    }
+    if registry.total_semaphores().saturating_add(nsems) > limits.semmns {
         return ENOSPC;
     }
     let (uid, gid) = current_ipc_ids();
@@ -1286,12 +1350,15 @@ pub fn sys_semget(key: isize, nsems: usize, semflg: usize) -> isize {
 }
 
 fn semctl_copy_stat(id: i32, cmd: usize, buf: usize) -> isize {
-    let ds = {
+    let (ds, real_id) = {
         let registry = SEM_REGISTRY.lock();
         let id = if cmd == SEM_STAT || cmd == SEM_STAT_ANY {
-            match registry.id_by_index(id) {
-                Some(id) => id,
-                None => return EINVAL,
+            if let Some(id) = registry.id_by_index(id) {
+                id
+            } else if cmd == SEM_STAT_ANY && registry.sets.contains_key(&id) {
+                id
+            } else {
+                return EINVAL;
             }
         } else {
             id
@@ -1302,17 +1369,14 @@ fn semctl_copy_stat(id: i32, cmd: usize, buf: usize) -> isize {
         if cmd != SEM_STAT_ANY && !has_sem_permission(set, SEM_R) {
             return EACCES;
         }
-        set.to_semid_ds()
+        (set.to_semid_ds(), id)
     };
     match copy_to_user(
         current_user_token(),
         &ds as *const LinuxSemidDs,
         buf as *mut LinuxSemidDs,
     ) {
-        Ok(()) if cmd == SEM_STAT || cmd == SEM_STAT_ANY => {
-            let registry = SEM_REGISTRY.lock();
-            registry.id_by_index(id).unwrap_or(id) as isize
-        }
+        Ok(()) if cmd == SEM_STAT || cmd == SEM_STAT_ANY => real_id as isize,
         Ok(()) => SUCCESS,
         Err(errno) => errno,
     }
@@ -1547,7 +1611,7 @@ fn read_sem_ops(sops: usize, nsops: usize) -> Result<Vec<LinuxSembuf>, isize> {
     if nsops == 0 {
         return Err(EINVAL);
     }
-    if nsops > SEMOPM {
+    if nsops > SEM_LIMITS.lock().semopm {
         return Err(E2BIG);
     }
     let mut ops = Vec::new();

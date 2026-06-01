@@ -22,3 +22,13 @@ pub fn msg_content(
     let snapshot = crate::syscall::sysv_msg_proc_snapshot();
     proc_read_str(offset, len, buf, &snapshot)
 }
+
+pub fn sem_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let snapshot = crate::syscall::sysv_sem_proc_snapshot();
+    proc_read_str(offset, len, buf, &snapshot)
+}
