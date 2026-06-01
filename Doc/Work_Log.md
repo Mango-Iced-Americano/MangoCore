@@ -4,6 +4,25 @@
 
 ## 2026-06-01
 
+### 新增 timerfd 最小实现并收窄 LTP 跳过范围
+
+**涉及文件：**
+- `os/src/fs/timerfd.rs` — 新增 timerfd inode/syscall 实现，支持 create/gettime/settime/read/poll、相对/绝对定时、过期计数和等待队列唤醒
+- `os/src/fs/mod.rs` — 注册 timerfd 模块
+- `os/src/syscall/syscall_id.rs` / `os/src/syscall/mod.rs` — 接入 `timerfd_create(85)`、`timerfd_settime(86)`、`timerfd_gettime(87)`
+- `os/src/task/manager.rs` — 在 timer tick 唤醒路径中扫描 timerfd registry，且先释放内核 timer queue 锁再通知 waiters
+- `user/src/bin/initproc.rs` / `user/src/bin/ltprunner.rs` — 取消 `timerfd*` 全家族 broad skip，仅默认排除 `timerfd04` 和长耗时 `timerfd_settime02`
+
+**验证：**
+- `make rv64-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- `make la64-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- rv64 heap_trace focused LTP：`timerfd01/timerfd02/timerfd_create01/timerfd_gettime01/timerfd_settime01` musl+glibc 全部 TPASS；`timerfd04/timerfd_settime02` 按默认 exclude 输出 0；无 `TFAIL/TBROK/PANIC/Exception` ✅
+- la64 heap_trace focused LTP：同 rv64，实际 timerfd 用例 musl+glibc 全部 TPASS，默认 exclude 生效；无 `TFAIL/TBROK/PANIC/Exception` ✅
+
+**备注：**
+- `timerfd04` 依赖 `CONFIG_TIME_NS`，当前环境不满足，保留默认 exclude
+- `timerfd_settime02` 是百万次 fuzzy-sync 热路径压力测试，本轮已将单次 syscall 从约 52us 降到 rv64 musl 约 46us，但仍超过本地 QEMU 180s 预算，暂按长耗时项跳过，后续如专项做 syscall/fd 热路径优化可恢复
+
 ### 修复 LTP unshare CLONE_NEWNS errno 语义
 
 **涉及文件：**

@@ -13,7 +13,11 @@ use user_lib::{
 
 const DEFAULT_CASE_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_CASE_TERM_GRACE_MS: u64 = 1500;
-const DEFAULT_LTP_EXCLUDE: &[&str] = &["rt_sigtimedwait01"];
+const DEFAULT_LTP_EXCLUDE: &[&str] = &[
+    "rt_sigtimedwait01",
+    "timerfd04",
+    "timerfd_settime02",
+];
 const DEFAULT_LTP_EXCLUDE_MUSL: &[&str] = &["sigtimedwait01", "sigwaitinfo01"];
 const DEFAULT_LTP_EXCLUDE_GLIBC: &[&str] = &[];
 #[cfg(target_arch = "riscv64")]

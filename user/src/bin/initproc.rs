@@ -88,6 +88,11 @@ const DEFAULT_LTP_EXCLUDE: &[&str] = &[
     // The current LTP image lists this alias in runtest/syscalls, but does not
     // ship a matching test binary. sigtimedwait01 covers the same syscall path.
     "rt_sigtimedwait01",
+    // timerfd04 requires CONFIG_TIME_NS; timerfd_settime02 is a long fuzzy-sync
+    // stress case that exceeds the local QEMU budget even after the timerfd
+    // syscall semantics are implemented.
+    "timerfd04",
+    "timerfd_settime02",
 ];
 
 /// LTP musl 专属排除测例（额外追加）
@@ -976,9 +981,6 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     }
     if name.starts_with("timens") {
         return Some("requires time namespace kernel config");
-    }
-    if name.starts_with("timerfd") {
-        return Some("timerfd syscall family pending dedicated fd implementation");
     }
     if name.starts_with("tpm") {
         return Some("requires TPM device/userspace environment");

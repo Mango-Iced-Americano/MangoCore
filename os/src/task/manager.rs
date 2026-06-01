@@ -1507,6 +1507,8 @@ pub fn do_wake_expired() {
     if tick % 64 == 0 && ktq.len() > KernelTimerQueue::MAX_TIMERS / 2 {
         ktq.compact();
     }
+    drop(ktq);
+    crate::fs::timerfd::wake_expired_timerfds(now);
 }
 
 /// 获取内核计时器队列长度（诊断用，尝试获取锁）

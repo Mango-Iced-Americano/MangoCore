@@ -10,6 +10,9 @@ pub mod utils;
 use crate::fs::eventfd::sys_eventfd2;
 use crate::fs::eventpoll::{sys_epoll_create1, sys_epoll_ctl, sys_epoll_pwait};
 use crate::fs::iov::IOVec;
+use crate::fs::timerfd::{
+    sys_timerfd_create, sys_timerfd_gettime, sys_timerfd_settime, TimerFdSpec,
+};
 use crate::net::syscall::*;
 use core::convert::TryFrom;
 use fs::*;
@@ -80,6 +83,9 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_FALLOCATE => "fallocate",
         SYSCALL_FSYNC => "fsync",
         SYSCALL_FDATASYNC => "fdatasync",
+        SYSCALL_TIMERFD_CREATE => "timerfd_create",
+        SYSCALL_TIMERFD_SETTIME => "timerfd_settime",
+        SYSCALL_TIMERFD_GETTIME => "timerfd_gettime",
         SYSCALL_UTIMENSAT => "utimensat",
         SYSCALL_CAPGET => "capget",
         SYSCALL_CAPSET => "capset",
@@ -390,6 +396,14 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SYNC => sys_sync(),
         SYSCALL_FSYNC => sys_fsync(args[0]),
         SYSCALL_FDATASYNC => sys_fdatasync(args[0]),
+        SYSCALL_TIMERFD_CREATE => sys_timerfd_create(args[0], args[1] as u32),
+        SYSCALL_TIMERFD_SETTIME => sys_timerfd_settime(
+            args[0],
+            args[1] as u32,
+            args[2] as *const TimerFdSpec,
+            args[3] as *mut TimerFdSpec,
+        ),
+        SYSCALL_TIMERFD_GETTIME => sys_timerfd_gettime(args[0], args[1] as *mut TimerFdSpec),
         SYSCALL_UTIMENSAT => sys_utimensat(
             args[0],
             args[1] as *const u8,

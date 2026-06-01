@@ -45,3 +45,11 @@
 - **修复**: 只在 `unshare()` 中支持 `CLONE_NEWNS`：root 或 `CAP_SYS_ADMIN` 作为 no-op 成功，非特权返回 `EPERM`；继续拒绝 `clone(CLONE_NEWNS)`。
 - **教训**: namespace 适配要区分“简单探针可 no-op 兼容”和“会产生隔离语义依赖的 clone/mount 路径”，否则容易为了多过一个用例引入全局状态污染。
 - **相关文件**: `os/src/syscall/process/clone.rs`
+
+## timerfd 等 fd+timer 对象的唤醒与 broad skip 边界
+
+- **现象**: `timerfd01` 的 `CLOCK_REALTIME` 相对/绝对定时读阻塞到超时；修复后 `timerfd01/02/create/gettime/settime01` 可通过，但 `timerfd_settime02` 仍在 180s 内被 SIGKILL。
+- **根因**: tick 唤醒路径最初只传入 monotonic 时间，导致 realtime timerfd 的 deadline 永远不被判定过期；同时 broad runner 曾按 `timerfd*` 全家族跳过，新增实现不会转化成真实 LTP 覆盖。`timerfd_settime02` 本质是百万次双线程 fuzzy-sync 热路径压力，当前 syscall/fd 查询成本在 QEMU 下仍偏高。
+- **修复**: timerfd 按自身 clock id 计算当前时间，tick registry 仅把 monotonic 时间作为 hint；`gettime/settime` 使用借用式 fd downcast 避免克隆 `File`；runner 只默认排除 `timerfd04` 和 `timerfd_settime02`，其余 timerfd 用例恢复实跑。
+- **教训**: fd+timer 对象要同时检查“时间源是否匹配”“读端 wait queue 是否被通知”“runner 是否真的执行该家族”；性能压力项不要用全家族 skip 掩盖已可通过的普通 ABI 用例。
+- **相关文件**: `os/src/fs/timerfd.rs`, `os/src/task/manager.rs`, `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`
