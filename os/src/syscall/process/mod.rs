@@ -28,7 +28,8 @@ pub use ids::{
 };
 pub use ipc::{
     sys_msgctl, sys_msgget, sys_msgrcv, sys_msgsnd, sys_semctl, sys_semget, sys_semop,
-    sys_semtimedop, sys_shmat, sys_shmctl, sys_shmdt, sys_shmget,
+    sys_semtimedop, sys_shmat, sys_shmctl, sys_shmdt, sys_shmget, shm_clone_attachments,
+    shm_detach_process,
 };
 pub use lifecycle::{
     sys_exit, sys_exit_group, sys_get_robust_list, sys_set_robust_list, sys_set_tid_address,

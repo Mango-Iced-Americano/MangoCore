@@ -69,3 +69,11 @@
 - **修复**: 不改内核 `setpriority` errno，避免破坏 Linux syscall 语义和 `setpriority02`；runner 对 musl 专属排除 `nice04`，glibc 继续实跑覆盖内核 priority path。
 - **教训**: 同一 syscall errno 被另一个 libc wrapper 测试间接消费时，优先保直接 syscall ABI；wrapper 层不可区分的冲突应按 libc 定向 exclude，而不是在内核里为某个测试二进制做特判。
 - **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`
+
+## SysV SHM attach 生命周期与 la64 SHMLBA 双 libc 差异
+
+- **现象**: `shmctl01` 的 `shm_nattch` 在 fork 继承场景不对，`shmctl07` 看不到 `SHM_LOCKED` mode 位；la64 glibc `shmat01` 期望 `SHM_RND` 按 64K 取整，la64 musl 同一用例又按 4K 取整。
+- **根因**: SHM registry 只保存地址列表，没有按进程记录 attach，也没有在 fork/exit/shmdt 路径维护 per-process 计数和最后操作时间；`LinuxIpcPerm::mode` 截断到 `0777` 会丢掉 `SHM_DEST/SHM_LOCKED`；当前镜像的 loongarch64 glibc 头文件 `SHMLBA=0x10000`，musl 头文件仍是通用 `4096`。
+- **修复**: attachment 记录 `{pid, addr}`，普通 fork 复制 VM 时继承 attachment，进程最终退出时 detach；`shmctl` 返回完整 Linux `shmid_ds`/info 结构并保留高位 mode；`shmat` 无 `SHM_RND` 时按页对齐接受，带 `SHM_RND` 时兼容 4K/64K 两种用户 ABI 期望。
+- **教训**: SysV IPC 不能只建全局对象；LTP 会同时验证 syscall 返回值、IPC 元数据、fork 继承、进程退出回收和 libc 头文件暴露的 ABI 常量。遇到双 libc 结果相反时，先反汇编或检查头文件确认 wrapper/头文件差异，再决定兼容点放在内核还是 runner。
+- **相关文件**: `os/src/syscall/process/ipc.rs`, `os/src/syscall/process/clone.rs`, `os/src/task/mod.rs`

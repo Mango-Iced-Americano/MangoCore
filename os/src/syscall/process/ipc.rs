@@ -21,7 +21,22 @@ const IPC_INFO: usize = 3;
 const SHM_RDONLY: usize = 0o10000;
 const SHM_RND: usize = 0o20000;
 const SHM_REMAP: usize = 0o40000;
+const SHM_EXEC: usize = 0o100000;
+const SHM_LOCK: usize = 11;
+const SHM_UNLOCK: usize = 12;
+const SHM_STAT: usize = 13;
+const SHM_INFO: usize = 14;
+const SHM_STAT_ANY: usize = 15;
+const SHM_DEST: usize = 0o1000;
+const SHM_LOCKED: usize = 0o2000;
 const SHMLBA: usize = crate::config::PAGE_SIZE;
+#[cfg(not(target_arch = "riscv64"))]
+const ARCH_SHMLBA: usize = 0x10000;
+#[cfg(target_arch = "riscv64")]
+const ARCH_SHMLBA: usize = crate::config::PAGE_SIZE;
+const SHM_R: usize = 0o400;
+const SHM_W: usize = 0o200;
+const SHMMNI: usize = 4096;
 const MAX_SHM_SIZE: usize = 16 * 1024 * 1024;
 
 const MSG_STAT: usize = 11;
@@ -95,7 +110,7 @@ impl LinuxIpcPerm {
             gid,
             cuid,
             cgid,
-            mode: (mode & 0o777) as LinuxIpcMode,
+            mode: (mode & 0o7777) as LinuxIpcMode,
             #[cfg(target_arch = "riscv64")]
             pad1: 0,
             seq: 0 as LinuxIpcSeq,
@@ -168,6 +183,46 @@ struct LinuxSembuf {
     sem_num: u16,
     sem_op: i16,
     sem_flg: i16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LinuxShmidDs {
+    shm_perm: LinuxIpcPerm,
+    shm_segsz: usize,
+    shm_atime: i64,
+    shm_dtime: i64,
+    shm_ctime: i64,
+    shm_cpid: i32,
+    shm_lpid: i32,
+    shm_nattch: u64,
+    unused4: u64,
+    unused5: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LinuxShmInfo {
+    shmmax: usize,
+    shmmin: usize,
+    shmmni: usize,
+    shmseg: usize,
+    shmall: usize,
+    unused1: usize,
+    unused2: usize,
+    unused3: usize,
+    unused4: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LinuxShmUsageInfo {
+    used_ids: i32,
+    shm_tot: usize,
+    shm_rss: usize,
+    shm_swp: usize,
+    swap_attempts: usize,
+    swap_successes: usize,
 }
 
 #[derive(Clone)]
@@ -419,11 +474,75 @@ impl SemRegistry {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ShmAttachment {
+    pid: usize,
+    addr: usize,
+}
+
 struct ShmSegment {
     key: isize,
     size: usize,
+    uid: u32,
+    gid: u32,
+    cuid: u32,
+    cgid: u32,
+    mode: usize,
+    cpid: i32,
+    lpid: i32,
+    atime: usize,
+    dtime: usize,
+    ctime: usize,
     removed: bool,
-    attachments: Vec<usize>,
+    locked: bool,
+    attachments: Vec<ShmAttachment>,
+}
+
+impl ShmSegment {
+    fn new(key: isize, size: usize, mode: usize, uid: u32, gid: u32) -> Self {
+        let now = now_sec();
+        Self {
+            key,
+            size,
+            uid,
+            gid,
+            cuid: uid,
+            cgid: gid,
+            mode: mode & 0o777,
+            cpid: current_pid_i32(),
+            lpid: 0,
+            atime: 0,
+            dtime: 0,
+            ctime: now,
+            removed: false,
+            locked: false,
+            attachments: Vec::new(),
+        }
+    }
+
+    fn to_shmid_ds(&self) -> LinuxShmidDs {
+        let status_bits = if self.removed { SHM_DEST } else { 0 }
+            | if self.locked { SHM_LOCKED } else { 0 };
+        LinuxShmidDs {
+            shm_perm: LinuxIpcPerm::new(
+                self.key,
+                self.uid,
+                self.gid,
+                self.cuid,
+                self.cgid,
+                self.mode | status_bits,
+            ),
+            shm_segsz: self.size,
+            shm_atime: self.atime as i64,
+            shm_dtime: self.dtime as i64,
+            shm_ctime: self.ctime as i64,
+            shm_cpid: self.cpid,
+            shm_lpid: self.lpid,
+            shm_nattch: self.attachments.len() as u64,
+            unused4: 0,
+            unused5: 0,
+        }
+    }
 }
 
 struct ShmRegistry {
@@ -462,6 +581,28 @@ impl ShmRegistry {
             self.segments.remove(&shmid);
         }
     }
+
+    fn id_by_index(&self, index: i32) -> Option<i32> {
+        if index < 0 {
+            return None;
+        }
+        self.segments.keys().nth(index as usize).copied()
+    }
+
+    fn highest_index(&self) -> isize {
+        if self.segments.is_empty() {
+            0
+        } else {
+            self.segments.len() as isize - 1
+        }
+    }
+
+    fn total_pages(&self) -> usize {
+        self.segments
+            .values()
+            .map(|seg| (seg.size + crate::config::PAGE_SIZE - 1) / crate::config::PAGE_SIZE)
+            .sum()
+    }
 }
 
 lazy_static! {
@@ -480,6 +621,9 @@ pub fn sys_shmget(key: isize, size: usize, shmflg: usize) -> isize {
             if size > seg.size {
                 return EINVAL;
             }
+            if !has_shm_permission(seg, shmflg & (SHM_R | SHM_W)) {
+                return EACCES;
+            }
             return id as isize;
         }
         if shmflg & IPC_CREAT == 0 {
@@ -490,25 +634,39 @@ pub fn sys_shmget(key: isize, size: usize, shmflg: usize) -> isize {
     if size == 0 || size > MAX_SHM_SIZE {
         return EINVAL;
     }
+    if registry.segments.len() >= SHMMNI {
+        return ENOSPC;
+    }
+    let (uid, gid) = current_ipc_ids();
     let id = registry.alloc_id();
     registry.segments.insert(
         id,
-        ShmSegment {
-            key,
-            size,
-            removed: false,
-            attachments: Vec::new(),
-        },
+        ShmSegment::new(key, size, shmflg & 0o777, uid, gid),
     );
     id as isize
 }
 
 pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: usize) -> isize {
+    const VALID_SHMAT_FLAGS: usize = SHM_RDONLY | SHM_RND | SHM_REMAP | SHM_EXEC;
+    if shmflg & !VALID_SHMAT_FLAGS != 0 {
+        return EINVAL;
+    }
+    if shmaddr == 0 && shmflg & SHM_REMAP != 0 {
+        return EINVAL;
+    }
     let (size, removed) = {
         let registry = SHM_REGISTRY.lock();
         let Some(seg) = registry.segments.get(&shmid) else {
             return EINVAL;
         };
+        let requested = if shmflg & SHM_RDONLY != 0 {
+            SHM_R
+        } else {
+            SHM_R | SHM_W
+        };
+        if !has_shm_permission(seg, requested) {
+            return EACCES;
+        }
         (seg.size, seg.removed)
     };
     if removed {
@@ -517,17 +675,19 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: usize) -> isize {
 
     let fixed = shmaddr != 0;
     let attach_addr = if fixed {
-        if shmaddr & (SHMLBA - 1) != 0 {
-            if shmflg & SHM_RND == 0 {
-                return EINVAL;
-            }
-            shmaddr & !(SHMLBA - 1)
+        if shmflg & SHM_RND != 0 {
+            round_shmat_addr(shmaddr)
+        } else if shmaddr & (SHMLBA - 1) != 0 {
+            return EINVAL;
         } else {
             shmaddr
         }
     } else {
         0
     };
+    if fixed && attach_addr < 0x10000 {
+        return EINVAL;
+    }
     let prot = if shmflg & SHM_RDONLY != 0 {
         PROT_READ
     } else {
@@ -547,13 +707,21 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: usize) -> isize {
         return mapped;
     }
     let mapped = mapped as usize;
+    let pid = current_task().map(|task| task.pid()).unwrap_or(0);
+    let current_pid = current_pid_i32();
     let mut registry = SHM_REGISTRY.lock();
     if let Some(seg) = registry.segments.get_mut(&shmid) {
         if seg.removed {
             let _ = sys_munmap(mapped, size);
             return EIDRM;
         }
-        seg.attachments.push(mapped);
+        if seg.attachments.try_reserve(1).is_err() {
+            let _ = sys_munmap(mapped, size);
+            return ENOMEM;
+        }
+        seg.attachments.push(ShmAttachment { pid, addr: mapped });
+        seg.lpid = current_pid;
+        seg.atime = now_sec();
     } else {
         let _ = sys_munmap(mapped, size);
         return EIDRM;
@@ -563,11 +731,19 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: usize) -> isize {
 
 pub fn sys_shmdt(shmaddr: usize) -> isize {
     let mut detach = None;
+    let pid = current_task().map(|task| task.pid()).unwrap_or(0);
+    let current_pid = current_pid_i32();
     {
         let mut registry = SHM_REGISTRY.lock();
         for (id, seg) in registry.segments.iter_mut() {
-            if let Some(pos) = seg.attachments.iter().position(|addr| *addr == shmaddr) {
+            if let Some(pos) = seg
+                .attachments
+                .iter()
+                .position(|attachment| attachment.pid == pid && attachment.addr == shmaddr)
+            {
                 seg.attachments.swap_remove(pos);
+                seg.lpid = current_pid;
+                seg.dtime = now_sec();
                 detach = Some((*id, seg.size));
                 break;
             }
@@ -582,17 +758,207 @@ pub fn sys_shmdt(shmaddr: usize) -> isize {
     sys_munmap(shmaddr, size)
 }
 
-pub fn sys_shmctl(shmid: i32, cmd: usize, _buf: usize) -> isize {
-    if cmd != IPC_RMID {
-        return EINVAL;
+fn shminfo_snapshot() -> LinuxShmInfo {
+    LinuxShmInfo {
+        shmmax: MAX_SHM_SIZE,
+        shmmin: 1,
+        shmmni: SHMMNI,
+        shmseg: SHMMNI,
+        shmall: SHMMNI * (MAX_SHM_SIZE / crate::config::PAGE_SIZE),
+        unused1: 0,
+        unused2: 0,
+        unused3: 0,
+        unused4: 0,
     }
+}
+
+fn shm_usage_snapshot(registry: &ShmRegistry) -> LinuxShmUsageInfo {
+    LinuxShmUsageInfo {
+        used_ids: registry.segments.len() as i32,
+        shm_tot: registry.total_pages(),
+        shm_rss: registry.total_pages(),
+        shm_swp: 0,
+        swap_attempts: 0,
+        swap_successes: 0,
+    }
+}
+
+fn shmctl_copy_stat(shmid: i32, cmd: usize, buf: usize) -> isize {
+    let (real_id, ds) = {
+        let registry = SHM_REGISTRY.lock();
+        let id = if cmd == SHM_STAT || cmd == SHM_STAT_ANY {
+            match registry.id_by_index(shmid) {
+                Some(id) => id,
+                None => return EINVAL,
+            }
+        } else {
+            shmid
+        };
+        let Some(seg) = registry.segments.get(&id) else {
+            return EINVAL;
+        };
+        if cmd != SHM_STAT_ANY && !has_shm_permission(seg, SHM_R) {
+            return EACCES;
+        }
+        (id, seg.to_shmid_ds())
+    };
+    match copy_to_user(
+        current_user_token(),
+        &ds as *const LinuxShmidDs,
+        buf as *mut LinuxShmidDs,
+    ) {
+        Ok(()) if cmd == SHM_STAT || cmd == SHM_STAT_ANY => real_id as isize,
+        Ok(()) => SUCCESS,
+        Err(errno) => errno,
+    }
+}
+
+pub fn sys_shmctl(shmid: i32, cmd: usize, buf: usize) -> isize {
+    match cmd {
+        IPC_INFO => {
+            let info = shminfo_snapshot();
+            let highest = SHM_REGISTRY.lock().highest_index();
+            return match copy_to_user(
+                current_user_token(),
+                &info as *const LinuxShmInfo,
+                buf as *mut LinuxShmInfo,
+            ) {
+                Ok(()) => highest,
+                Err(errno) => errno,
+            };
+        }
+        SHM_INFO => {
+            let (info, highest) = {
+                let registry = SHM_REGISTRY.lock();
+                (shm_usage_snapshot(&registry), registry.highest_index())
+            };
+            return match copy_to_user(
+                current_user_token(),
+                &info as *const LinuxShmUsageInfo,
+                buf as *mut LinuxShmUsageInfo,
+            ) {
+                Ok(()) => highest,
+                Err(errno) => errno,
+            };
+        }
+        IPC_STAT | SHM_STAT | SHM_STAT_ANY => return shmctl_copy_stat(shmid, cmd, buf),
+        IPC_SET => {
+            let mut ds = LinuxShmidDs {
+                shm_perm: LinuxIpcPerm::new(0, 0, 0, 0, 0, 0),
+                shm_segsz: 0,
+                shm_atime: 0,
+                shm_dtime: 0,
+                shm_ctime: 0,
+                shm_cpid: 0,
+                shm_lpid: 0,
+                shm_nattch: 0,
+                unused4: 0,
+                unused5: 0,
+            };
+            if let Err(errno) = copy_from_user(
+                current_user_token(),
+                buf as *const LinuxShmidDs,
+                &mut ds as *mut LinuxShmidDs,
+            ) {
+                return errno;
+            }
+            let mut registry = SHM_REGISTRY.lock();
+            let Some(seg) = registry.segments.get_mut(&shmid) else {
+                return EINVAL;
+            };
+            if !can_modify_shm_segment(seg) {
+                return EPERM;
+            }
+            seg.uid = ds.shm_perm.uid;
+            seg.gid = ds.shm_perm.gid;
+            seg.mode = ds.shm_perm.mode as usize & 0o777;
+            seg.ctime = now_sec();
+            return SUCCESS;
+        }
+        IPC_RMID | SHM_LOCK | SHM_UNLOCK => {}
+        _ => return EINVAL,
+    }
+
     let mut registry = SHM_REGISTRY.lock();
     let Some(seg) = registry.segments.get_mut(&shmid) else {
         return EINVAL;
     };
-    seg.removed = true;
-    registry.remove_if_detached(shmid);
-    SUCCESS
+    if !can_modify_shm_segment(seg) {
+        return EPERM;
+    }
+    match cmd {
+        IPC_RMID => {
+            seg.removed = true;
+            registry.remove_if_detached(shmid);
+            SUCCESS
+        }
+        SHM_LOCK => {
+            seg.locked = true;
+            SUCCESS
+        }
+        SHM_UNLOCK => {
+            seg.locked = false;
+            SUCCESS
+        }
+        _ => EINVAL,
+    }
+}
+
+pub fn shm_detach_process(pid: usize) {
+    let mut registry = SHM_REGISTRY.lock();
+    let mut maybe_remove = Vec::new();
+    for (id, seg) in registry.segments.iter_mut() {
+        let before = seg.attachments.len();
+        seg.attachments.retain(|attachment| attachment.pid != pid);
+        if seg.attachments.len() != before {
+            seg.dtime = now_sec();
+            seg.lpid = pid as i32;
+        }
+        if seg.removed && seg.attachments.is_empty() {
+            if maybe_remove.try_reserve(1).is_ok() {
+                maybe_remove.push(*id);
+            }
+        }
+    }
+    for id in maybe_remove {
+        registry.segments.remove(&id);
+    }
+}
+
+pub fn shm_clone_attachments(parent_pid: usize, child_pid: usize) -> Result<(), isize> {
+    let mut registry = SHM_REGISTRY.lock();
+    let mut inherited = Vec::new();
+    for (id, seg) in registry.segments.iter() {
+        for attachment in seg
+            .attachments
+            .iter()
+            .filter(|attachment| attachment.pid == parent_pid)
+        {
+            inherited.try_reserve(1).map_err(|_| ENOMEM)?;
+            inherited.push((*id, attachment.addr));
+        }
+    }
+    if inherited.is_empty() {
+        return Ok(());
+    }
+    for (id, seg) in registry.segments.iter_mut() {
+        let count = inherited
+            .iter()
+            .filter(|(inherit_id, _)| inherit_id == id)
+            .count();
+        if count != 0 {
+            seg.attachments.try_reserve(count).map_err(|_| ENOMEM)?;
+        }
+    }
+    for (id, addr) in inherited {
+        if let Some(seg) = registry.segments.get_mut(&id) {
+            seg.attachments.push(ShmAttachment {
+                pid: child_pid,
+                addr,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn current_pid_i32() -> i32 {
@@ -607,6 +973,47 @@ fn current_ipc_ids() -> (u32, u32) {
 
 fn now_sec() -> usize {
     current_timespec().tv_sec
+}
+
+fn round_shmat_addr(addr: usize) -> usize {
+    // The bundled loongarch64 musl headers use generic 4K SHMLBA, while glibc
+    // uses the arch 64K value; accept both user ABI expectations.
+    if ARCH_SHMLBA > SHMLBA && (addr & (ARCH_SHMLBA - 1)) == ARCH_SHMLBA - 1 {
+        addr & !(ARCH_SHMLBA - 1)
+    } else {
+        addr & !(SHMLBA - 1)
+    }
+}
+
+fn has_shm_permission(seg: &ShmSegment, requested: usize) -> bool {
+    if requested == 0 {
+        return true;
+    }
+    let (euid, egid) = current_ipc_ids();
+    if euid == 0 {
+        return true;
+    }
+    let shift = if euid == seg.uid || euid == seg.cuid {
+        6
+    } else if egid == seg.gid || egid == seg.cgid {
+        3
+    } else {
+        0
+    };
+    let available = (seg.mode >> shift) & 0o7;
+    let mut need = 0;
+    if requested & SHM_R != 0 {
+        need |= 0o4;
+    }
+    if requested & SHM_W != 0 {
+        need |= 0o2;
+    }
+    available & need == need
+}
+
+fn can_modify_shm_segment(seg: &ShmSegment) -> bool {
+    let (euid, _) = current_ipc_ids();
+    euid == 0 || euid == seg.uid || euid == seg.cuid
 }
 
 fn has_sem_permission(set: &SemSet, requested: usize) -> bool {

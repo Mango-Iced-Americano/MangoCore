@@ -1,5 +1,6 @@
 use alloc::sync::Arc;
 
+use super::{shm_clone_attachments, shm_detach_process};
 use crate::config::{PAGE_SIZE, SYSTEM_TASK_LIMIT};
 use crate::fs::pidfd::new_pidfd_file;
 use crate::mm::{
@@ -282,9 +283,24 @@ fn sys_clone_inner(
             }
         };
     }
+    let inherited_shm = !flags.contains(CloneFlags::CLONE_THREAD)
+        && !flags.contains(CloneFlags::CLONE_VM)
+        && match shm_clone_attachments(parent.pid(), child.pid()) {
+            Ok(()) => true,
+            Err(errno) => {
+                if let Some(pidfd) = allocated_pidfd {
+                    drop_parent_fd(&parent, pidfd);
+                }
+                child.cleanup_unpublished_clone(flags.contains(CloneFlags::CLONE_VM));
+                return errno;
+            }
+        };
     if let Err(errno) = ProcessManager::publish_clone_child(&parent, child.clone(), flags) {
         if let Some(pidfd) = allocated_pidfd {
             drop_parent_fd(&parent, pidfd);
+        }
+        if inherited_shm {
+            shm_detach_process(child.pid());
         }
         child.cleanup_unpublished_clone(flags.contains(CloneFlags::CLONE_VM));
         return errno;

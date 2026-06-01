@@ -4,6 +4,22 @@
 
 ## 2026-06-01
 
+### 完善 SysV SHM IPC 生命周期与双 libc shmat 对齐兼容
+
+**涉及文件：**
+- `os/src/syscall/process/ipc.rs` — 补齐 `shmctl()` 的 `IPC_INFO/SHM_INFO/IPC_STAT/SHM_STAT/SHM_STAT_ANY/IPC_SET/SHM_LOCK/SHM_UNLOCK`，维护 shm owner/mode/time/nattch/lock/remove 状态，`shmat()/shmdt()` 按进程记录 attach 生命周期，并兼容 la64 glibc 64K 与 musl 4K 的 `SHMLBA` 差异
+- `os/src/syscall/process/clone.rs` — 普通 fork 复制地址空间时同步继承 SysV SHM attach 计数，`CLONE_VM/CLONE_THREAD` 不重复计数，并在 clone publish 失败时回滚
+- `os/src/syscall/process/mod.rs` / `os/src/syscall/mod.rs` / `os/src/task/mod.rs` — 导出 SHM 回收入口，并在最后一个线程退出时自动 detach 当前进程的 SHM attachment
+
+**验证：**
+- `make rv64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- `make la64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- rv64 heap_trace focused LTP：`shmat01/shmat02/shmat03/shmat04/shmctl01/shmctl02/shmctl07/shmctl08/shmdt01/shmdt02/shmem_2nstest/shmget04/shmnstest` musl+glibc 主路径全部 TPASS；无 panic/AddressError/heap fatal ✅
+- la64 heap_trace focused LTP：同组主路径全部 TPASS，且 musl/glibc `shmat01` 同时通过；无 panic/AddressError/heap fatal ✅
+
+**备注：**
+- 当前未处理 `/proc/sys/kernel/shmmax`、`/proc/sysvipc/shm`、`remap_file_pages`、`shmid64_ds time_high`，这些属于 procfs/sysctl 或已知架构/配置残留，不纳入本轮非 fs/net 适配
+
 ### 收敛 musl nice04 与 setpriority errno wrapper 差异
 
 **涉及文件：**
