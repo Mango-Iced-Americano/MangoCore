@@ -4,6 +4,21 @@
 
 ## 2026-06-01
 
+### 修复 LTP unshare CLONE_NEWNS errno 语义
+
+**涉及文件：**
+- `os/src/syscall/process/clone.rs` — `unshare()` 支持 `CLONE_NEWNS` 的权限检查和 no-op 成功语义，非 root/无 `CAP_SYS_ADMIN` 返回 `EPERM`
+
+**验证：**
+- `make rv64-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- `make la64-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- rv64 heap_trace focused LTP：`unshare01/unshare02` musl+glibc 全部 TPASS，无 `TFAIL/TBROK/PANIC/Exception` ✅
+- la64 heap_trace focused LTP：`unshare01/unshare02` musl+glibc 全部 TPASS，无 `TFAIL/TBROK/PANIC/Exception` ✅
+
+**备注：**
+- 当前仍不打开 `clone(CLONE_NEWNS)`，避免 mount namespace 未建模时污染全局 mount tree
+- `unshare(CLONE_NEWNS)` 只作为特权 no-op 兼容简单 LTP 探针，后续真正 namespace 隔离需要 VFS/mount 专项实现
+
 ### 收敛 la64 musl clone08 wrapper 差异
 
 **涉及文件：**

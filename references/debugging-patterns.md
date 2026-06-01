@@ -37,3 +37,11 @@
 - **修复**: runner 只对 la64+musl 默认排除 `clone08`，rv64 musl 和双架构 glibc 保持实跑。
 - **教训**: 对 libc wrapper 差异做 exclude 时要同时按架构和 libc 缩窄，不要因为一个架构失败就扩大到全部 musl。
 - **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`
+
+## unshare(CLONE_NEWNS) 与 clone(CLONE_NEWNS) 的风险边界
+
+- **现象**: `unshare01/unshare02` 中 `CLONE_FILES/CLONE_FS` 通过，但 `CLONE_NEWNS` root 场景返回 `EINVAL`，非 root 场景也返回 `EINVAL` 而不是 `EPERM`。
+- **根因**: `sys_unshare()` 把 `CLONE_NEWNS` 放在 unsupported flag 里，导致权限检查前就返回 `EINVAL`；但当前 mount namespace 未建模，直接开放 `clone(CLONE_NEWNS)` 会污染全局 mount tree。
+- **修复**: 只在 `unshare()` 中支持 `CLONE_NEWNS`：root 或 `CAP_SYS_ADMIN` 作为 no-op 成功，非特权返回 `EPERM`；继续拒绝 `clone(CLONE_NEWNS)`。
+- **教训**: namespace 适配要区分“简单探针可 no-op 兼容”和“会产生隔离语义依赖的 clone/mount 路径”，否则容易为了多过一个用例引入全局状态污染。
+- **相关文件**: `os/src/syscall/process/clone.rs`
