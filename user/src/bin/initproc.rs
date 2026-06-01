@@ -109,7 +109,12 @@ const DEFAULT_LTP_EXCLUDE_RV64_MUSL: &[&str] = &[
 /// rv64 glibc 专属排除测例（额外追加）
 const DEFAULT_LTP_EXCLUDE_RV64_GLIBC: &[&str] = &[];
 /// la64 musl 专属排除测例（额外追加）
-const DEFAULT_LTP_EXCLUDE_LA64_MUSL: &[&str] = &[];
+const DEFAULT_LTP_EXCLUDE_LA64_MUSL: &[&str] = &[
+    // la64 musl rejects the clone08 CLONE_THREAD wrapper combination before
+    // the kernel path is meaningfully exercised. glibc validates the kernel
+    // thread-clone path and remains enabled.
+    "clone08",
+];
 /// la64 glibc 专属排除测例（额外追加）
 const DEFAULT_LTP_EXCLUDE_LA64_GLIBC: &[&str] = &[];
 
@@ -839,8 +844,8 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
     if cfg!(target_arch = "loongarch64") && libc_suffix == "glibc" && name == "crash01" {
         return Some("la64 glibc crashme random-code timeout");
     }
-    if libc_suffix == "musl" && name == "clone08" {
-        return Some("musl clone wrapper rejects CLONE_THREAD/CLONE_CHILD_CLEARTID");
+    if cfg!(target_arch = "loongarch64") && libc_suffix == "musl" && name == "clone08" {
+        return Some("la64 musl clone wrapper rejects CLONE_THREAD/CLONE_CHILD_CLEARTID");
     }
 
     if name.starts_with("af_alg") {

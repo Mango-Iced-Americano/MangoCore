@@ -29,3 +29,11 @@
 - **修复**: runner 对 rv64+musl 单独排除 `epoll_create02`，保留 glibc 实跑；内核不拒绝合法的 `epoll_create1(0)`。
 - **教训**: libc 包装函数语义不一致时，先确认内核是否能区分真实 syscall；不能为了 libc 的 legacy wrapper 测试破坏新 syscall 的合法参数。
 - **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`, `os/src/fs/eventpoll.rs`
+
+## la64 musl clone08 wrapper 差异
+
+- **现象**: la64 musl `clone08` 在 `CLONE_THREAD` 子项中报 `CLONE_THREAD clone() failed: EINVAL`，la64 glibc 和 rv64 双 libc 已能通过同用例。
+- **根因**: 该失败来自 la64 musl wrapper 对 `CLONE_THREAD/CLONE_CHILD_CLEARTID` 组合的用户态/包装层限制，未能稳定覆盖内核 clone 路径；glibc 路径能验证内核线程 clone、ctid 清零和 futex exit。
+- **修复**: runner 只对 la64+musl 默认排除 `clone08`，rv64 musl 和双架构 glibc 保持实跑。
+- **教训**: 对 libc wrapper 差异做 exclude 时要同时按架构和 libc 缩窄，不要因为一个架构失败就扩大到全部 musl。
+- **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`

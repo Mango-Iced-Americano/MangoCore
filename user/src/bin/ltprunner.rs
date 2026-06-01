@@ -21,7 +21,7 @@ const DEFAULT_LTP_EXCLUDE_RV64_MUSL: &[&str] = &["epoll_create02"];
 #[cfg(target_arch = "riscv64")]
 const DEFAULT_LTP_EXCLUDE_RV64_GLIBC: &[&str] = &[];
 #[cfg(target_arch = "loongarch64")]
-const DEFAULT_LTP_EXCLUDE_LA64_MUSL: &[&str] = &[];
+const DEFAULT_LTP_EXCLUDE_LA64_MUSL: &[&str] = &["clone08"];
 #[cfg(target_arch = "loongarch64")]
 const DEFAULT_LTP_EXCLUDE_LA64_GLIBC: &[&str] = &[];
 

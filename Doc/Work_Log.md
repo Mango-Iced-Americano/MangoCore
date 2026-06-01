@@ -4,6 +4,22 @@
 
 ## 2026-06-01
 
+### 收敛 la64 musl clone08 wrapper 差异
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — 将 broad inline helper 对 `clone08` 的 musl skip 缩窄到 la64+musl，并新增 la64+musl 默认 exclude
+- `user/src/bin/ltprunner.rs` — suite runner 同步 la64+musl 默认 exclude，保持 inline/suite 行为一致
+
+**验证：**
+- `make rv64-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- `make la64-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- rv64 heap_trace focused LTP：`clone08` musl+glibc 全部 TPASS，无 `TFAIL/TBROK/PANIC/Exception` ✅
+- la64 heap_trace focused LTP：`clone08` la64+musl 按默认 exclude 输出 0，glibc TPASS；无 `TFAIL/TBROK/PANIC/Exception` ✅
+
+**备注：**
+- 当前 rv64 musl/glibc 与 la64 glibc 都能覆盖 `clone08` 内核线程 clone 路径；la64 musl wrapper 在 `CLONE_THREAD/CLONE_CHILD_CLEARTID` 组合上先于内核语义返回 `EINVAL`
+- 因此只排除 la64+musl `clone08`，不扩大到全 musl，避免减少 rv64 musl 的真实覆盖
+
 ### 收敛 rv64 musl epoll_create02 wrapper 差异
 
 **涉及文件：**
