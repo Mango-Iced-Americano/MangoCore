@@ -117,3 +117,11 @@
 - **修复**: 注册 syscall 并只实现 Linux 可见的 capability gate；root 或 `CAP_SYS_TTY_CONFIG` 返回成功，普通用户返回 `EPERM`，暂不改变 tty 状态；同时清理 initproc 自动扫描里的历史 skip-reason。
 - **教训**: 对 vhangup 这类边缘但低风险的 ABI，优先补“存在性 + errno 优先级 + 权限检查”，避免把不必要的设备模型复杂度带入主线；提交前要同步检查默认 skip/reason 表，否则 focused 通过但全量不计分。
 - **相关文件**: `os/src/syscall/process/ids.rs`, `os/src/syscall/mod.rs`, `user/src/bin/initproc.rs`
+
+## 同一 clock id 在 gettime/getres 中要保持一致
+
+- **现象**: `clock_getres01` 中 `CLOCK_REALTIME_ALARM` / `CLOCK_BOOTTIME_ALARM` 被标记为不支持，但 `clock_gettime()` 已经能返回对应时间。
+- **根因**: 新增 clock id 时只扩展了 gettime 路径，遗漏 getres 的合法 clock 表，导致 libc/LTP 的能力探测产生 TCONF。
+- **修复**: `clock_getres()` 对 alarm clock id 返回与现有 clock 一致的最小 1ns 分辨率。
+- **教训**: 时间类 syscall 的 clock id 支持矩阵要成组维护；新增或放开一个 id 时同时检查 gettime/getres/nanosleep/timer_create 的语义边界。
+- **相关文件**: `os/src/syscall/process/time.rs`

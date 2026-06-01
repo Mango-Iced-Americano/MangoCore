@@ -4,6 +4,20 @@
 
 ## 2026-06-01
 
+### 支持 alarm clock 的 clock_getres 查询
+
+**涉及文件：**
+- `os/src/syscall/process/time.rs` — `clock_getres()` 接受 `CLOCK_REALTIME_ALARM` / `CLOCK_BOOTTIME_ALARM`，复用现有 1ns 分辨率返回
+
+**验证：**
+- `make rv64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- `make la64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- rv64 heap_trace focused LTP：`clock_getres01` musl+glibc 均 44/44 TPASS，`CLOCK_REALTIME_ALARM` / `CLOCK_BOOTTIME_ALARM` 不再 TCONF；复跑前置网络 smoke 35/35 pass，无 `PANIC/KERNEL EXCEPTION/heap fatal/HEAP OOM` ✅
+- la64 heap_trace focused LTP：`clock_getres01` musl+glibc 均 44/44 TPASS，0 failed / 0 broken / 0 skipped，无 `PANIC/KERNEL EXCEPTION/heap fatal/HEAP OOM` ✅
+
+**备注：**
+- `clock_gettime()` 已经支持这两个 clock id，本轮只补齐分辨率查询；不扩大 POSIX timer alarm clock 创建语义，避免引入 wake-alarm 权限模型风险
+
 ### 接入 vhangup 最小权限语义
 
 **涉及文件：**

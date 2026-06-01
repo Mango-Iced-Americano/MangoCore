@@ -853,6 +853,8 @@ pub fn sys_clock_getres(clk_id: usize, tp: *mut TimeSpec) -> isize {
         | CLOCK_REALTIME_COARSE
         | CLOCK_MONOTONIC_COARSE
         | CLOCK_BOOTTIME
+        | CLOCK_REALTIME_ALARM
+        | CLOCK_BOOTTIME_ALARM
         | CLOCK_TAI => {}
         _ => {
             if let Err(errno) = validate_cpu_clock_id(clk_id) {
