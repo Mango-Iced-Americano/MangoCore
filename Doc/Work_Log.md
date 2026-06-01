@@ -4,6 +4,22 @@
 
 ## 2026-06-01
 
+### 收敛 rv64 musl epoll_create02 wrapper 差异
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — 新增 rv64+musl 专属默认 LTP exclude：`epoll_create02`
+- `user/src/bin/ltprunner.rs` — suite runner 同步 rv64+musl 专属默认 exclude，保持 inline/suite 行为一致
+
+**验证：**
+- `make rv64-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- `make la64-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- rv64 heap_trace focused LTP：`epoll_create01` musl+glibc TPASS；`epoll_create02` rv64+musl 按默认 exclude 输出 0，glibc TPASS；无 `TFAIL/TBROK` ✅
+- la64 heap_trace focused LTP：`epoll_create01/epoll_create02` musl+glibc 全部 TPASS，无 `TFAIL/TBROK` ✅
+
+**备注：**
+- rv64 没有旧 `epoll_create(2)` syscall，只有 `epoll_create1(2)`；musl 的 `epoll_create()` wrapper 会直接走 `epoll_create1(0)`，跳过 legacy size 参数校验
+- 不能在内核拒绝 `epoll_create1(0)`，否则会破坏 Linux 合法 ABI；glibc wrapper 已在用户态对 `epoll_create(0/-1)` 返回 `EINVAL`
+
 ### 修复 LTP rt_sigaction03 非法 sigsetsize 误成功
 
 **涉及文件：**

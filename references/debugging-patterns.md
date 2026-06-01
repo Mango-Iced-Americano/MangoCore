@@ -21,3 +21,11 @@
 - **修复**: `rt_sigaction` 单独使用精确 8 字节校验；`rt_sigprocmask/rt_sigpending/sigtimedwait/signalfd` 继续接受 `>= 8` 并只读写低 64 位。
 - **教训**: 不要把 `rt_sigaction` 的 ABI 校验和 mask 读写类 syscall 混成一个 helper；LTP 会直接用 raw syscall 覆盖 libc wrapper 不常走的非法尺寸路径。
 - **相关文件**: `os/src/syscall/process/signal.rs`
+
+## rv64 musl epoll_create 与 epoll_create1 的 wrapper 差异
+
+- **现象**: rv64 musl `epoll_create02` 中 `epoll_create(0/-1)` 返回 fd，glibc 同用例返回 `EINVAL`。
+- **根因**: rv64 这类新架构没有旧 `epoll_create(2)` syscall，只有 `epoll_create1(2)`；musl wrapper 直接调用 `epoll_create1(0)`，没有执行 legacy size 参数校验，而 `epoll_create1(0)` 本身是合法 Linux ABI。
+- **修复**: runner 对 rv64+musl 单独排除 `epoll_create02`，保留 glibc 实跑；内核不拒绝合法的 `epoll_create1(0)`。
+- **教训**: libc 包装函数语义不一致时，先确认内核是否能区分真实 syscall；不能为了 libc 的 legacy wrapper 测试破坏新 syscall 的合法参数。
+- **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`, `os/src/fs/eventpoll.rs`

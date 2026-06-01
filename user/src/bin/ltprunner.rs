@@ -16,6 +16,14 @@ const DEFAULT_CASE_TERM_GRACE_MS: u64 = 1500;
 const DEFAULT_LTP_EXCLUDE: &[&str] = &["rt_sigtimedwait01"];
 const DEFAULT_LTP_EXCLUDE_MUSL: &[&str] = &["sigtimedwait01", "sigwaitinfo01"];
 const DEFAULT_LTP_EXCLUDE_GLIBC: &[&str] = &[];
+#[cfg(target_arch = "riscv64")]
+const DEFAULT_LTP_EXCLUDE_RV64_MUSL: &[&str] = &["epoll_create02"];
+#[cfg(target_arch = "riscv64")]
+const DEFAULT_LTP_EXCLUDE_RV64_GLIBC: &[&str] = &[];
+#[cfg(target_arch = "loongarch64")]
+const DEFAULT_LTP_EXCLUDE_LA64_MUSL: &[&str] = &[];
+#[cfg(target_arch = "loongarch64")]
+const DEFAULT_LTP_EXCLUDE_LA64_GLIBC: &[&str] = &[];
 
 struct LtpCase {
     #[allow(dead_code)]
@@ -142,7 +150,30 @@ fn default_excludes(libc: &str) -> Vec<String> {
         &[]
     };
     list.extend(libc_defaults.iter().map(|s| String::from(*s)));
+    list.extend(default_arch_excludes(libc).iter().map(|s| String::from(*s)));
     list
+}
+
+#[cfg(target_arch = "riscv64")]
+fn default_arch_excludes(libc: &str) -> &[&str] {
+    if libc == "musl" {
+        DEFAULT_LTP_EXCLUDE_RV64_MUSL
+    } else if libc == "glibc" {
+        DEFAULT_LTP_EXCLUDE_RV64_GLIBC
+    } else {
+        &[]
+    }
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn default_arch_excludes(libc: &str) -> &[&str] {
+    if libc == "musl" {
+        DEFAULT_LTP_EXCLUDE_LA64_MUSL
+    } else if libc == "glibc" {
+        DEFAULT_LTP_EXCLUDE_LA64_GLIBC
+    } else {
+        &[]
+    }
 }
 
 fn load_conf(path: &str, libc: &str) -> LtpConfig {
@@ -154,6 +185,7 @@ fn load_conf(path: &str, libc: &str) -> LtpConfig {
     };
     let mut conf_exclude = Vec::new();
     let mut conf_libc_exclude = Vec::new();
+    let mut conf_arch_libc_exclude = Vec::new();
 
     let fd = open(path, OpenFlags::RDONLY);
     if fd < 0 {
@@ -206,12 +238,33 @@ fn load_conf(path: &str, libc: &str) -> LtpConfig {
             conf_libc_exclude.extend(comma_split(val_str));
         } else if key == b"ltp_exclude_glibc" && libc == "glibc" {
             conf_libc_exclude.extend(comma_split(val_str));
+        } else if key == b"ltp_exclude_rv64_musl"
+            && cfg!(target_arch = "riscv64")
+            && libc == "musl"
+        {
+            conf_arch_libc_exclude.extend(comma_split(val_str));
+        } else if key == b"ltp_exclude_rv64_glibc"
+            && cfg!(target_arch = "riscv64")
+            && libc == "glibc"
+        {
+            conf_arch_libc_exclude.extend(comma_split(val_str));
+        } else if key == b"ltp_exclude_la64_musl"
+            && cfg!(target_arch = "loongarch64")
+            && libc == "musl"
+        {
+            conf_arch_libc_exclude.extend(comma_split(val_str));
+        } else if key == b"ltp_exclude_la64_glibc"
+            && cfg!(target_arch = "loongarch64")
+            && libc == "glibc"
+        {
+            conf_arch_libc_exclude.extend(comma_split(val_str));
         }
     }
 
     cfg.ltp_exclude = default_excludes(libc);
     cfg.ltp_exclude.extend(conf_exclude);
     cfg.ltp_exclude.extend(conf_libc_exclude);
+    cfg.ltp_exclude.extend(conf_arch_libc_exclude);
     cfg
 }
 

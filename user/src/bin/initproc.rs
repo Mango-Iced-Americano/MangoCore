@@ -99,6 +99,19 @@ const DEFAULT_LTP_EXCLUDE_MUSL: &[&str] = &[
 ];
 /// LTP glibc 专属排除测例（额外追加）
 const DEFAULT_LTP_EXCLUDE_GLIBC: &[&str] = &[];
+/// rv64 musl 专属排除测例（额外追加）
+const DEFAULT_LTP_EXCLUDE_RV64_MUSL: &[&str] = &[
+    // rv64 has only epoll_create1(2). musl's epoll_create() wrapper forwards
+    // to epoll_create1(0) without checking the legacy size argument, while
+    // glibc performs the userspace EINVAL check expected by this libc test.
+    "epoll_create02",
+];
+/// rv64 glibc 专属排除测例（额外追加）
+const DEFAULT_LTP_EXCLUDE_RV64_GLIBC: &[&str] = &[];
+/// la64 musl 专属排除测例（额外追加）
+const DEFAULT_LTP_EXCLUDE_LA64_MUSL: &[&str] = &[];
+/// la64 glibc 专属排除测例（额外追加）
+const DEFAULT_LTP_EXCLUDE_LA64_GLIBC: &[&str] = &[];
 
 fn run_bash_cmd(cmd: &str, environ: &[*const u8]) -> i32 {
     run_bash_cmd_timeout(cmd, environ, 0)
@@ -300,10 +313,22 @@ impl RuntimeConfig {
                 .iter()
                 .map(|s| String::from(*s))
                 .collect(),
-            ltp_exclude_rv64_musl: Vec::new(),
-            ltp_exclude_rv64_glibc: Vec::new(),
-            ltp_exclude_la64_musl: Vec::new(),
-            ltp_exclude_la64_glibc: Vec::new(),
+            ltp_exclude_rv64_musl: DEFAULT_LTP_EXCLUDE_RV64_MUSL
+                .iter()
+                .map(|s| String::from(*s))
+                .collect(),
+            ltp_exclude_rv64_glibc: DEFAULT_LTP_EXCLUDE_RV64_GLIBC
+                .iter()
+                .map(|s| String::from(*s))
+                .collect(),
+            ltp_exclude_la64_musl: DEFAULT_LTP_EXCLUDE_LA64_MUSL
+                .iter()
+                .map(|s| String::from(*s))
+                .collect(),
+            ltp_exclude_la64_glibc: DEFAULT_LTP_EXCLUDE_LA64_GLIBC
+                .iter()
+                .map(|s| String::from(*s))
+                .collect(),
             ltp_include: Vec::new(),
             ltp_from: None,
             ltp_libc: LtpLibc::Both,
@@ -440,19 +465,19 @@ fn apply_conf_bytes(data: &[u8], cfg: &mut RuntimeConfig) {
                 cfg.ltp_exclude_glibc = list;
             }
         } else if key == b"ltp_exclude_rv64_musl" {
-            if let Some(list) = parse_csv_list(val) {
+            if let Some(list) = parse_csv_with_defaults(DEFAULT_LTP_EXCLUDE_RV64_MUSL, val) {
                 cfg.ltp_exclude_rv64_musl = list;
             }
         } else if key == b"ltp_exclude_rv64_glibc" {
-            if let Some(list) = parse_csv_list(val) {
+            if let Some(list) = parse_csv_with_defaults(DEFAULT_LTP_EXCLUDE_RV64_GLIBC, val) {
                 cfg.ltp_exclude_rv64_glibc = list;
             }
         } else if key == b"ltp_exclude_la64_musl" {
-            if let Some(list) = parse_csv_list(val) {
+            if let Some(list) = parse_csv_with_defaults(DEFAULT_LTP_EXCLUDE_LA64_MUSL, val) {
                 cfg.ltp_exclude_la64_musl = list;
             }
         } else if key == b"ltp_exclude_la64_glibc" {
-            if let Some(list) = parse_csv_list(val) {
+            if let Some(list) = parse_csv_with_defaults(DEFAULT_LTP_EXCLUDE_LA64_GLIBC, val) {
                 cfg.ltp_exclude_la64_glibc = list;
             }
         } else if key == b"ltp_include" {
