@@ -37,6 +37,12 @@ pub fn register_all(root: &Arc<crate::fs::procfs::LockedProcInode>) -> Result<()
         sys::pid_max_content,
         0,
     )?;
+    kernel_dir.add_file(
+        "threads-max",
+        InodeMode::from_bits_truncate(0o444),
+        sys::threads_max_content,
+        0,
+    )?;
     kernel_dir.add_writable_file_with_write(
         "ns_last_pid",
         InodeMode::from_bits_truncate(0o644),
@@ -81,6 +87,34 @@ pub fn register_all(root: &Arc<crate::fs::procfs::LockedProcInode>) -> Result<()
         sys::shmmni_content,
         0,
     )?;
+    kernel_dir.add_writable_file_with_write(
+        "msgmax",
+        InodeMode::from_bits_truncate(0o644),
+        sys::msgmax_content,
+        sys::msgmax_write,
+        0,
+    )?;
+    kernel_dir.add_writable_file_with_write(
+        "msgmnb",
+        InodeMode::from_bits_truncate(0o644),
+        sys::msgmnb_content,
+        sys::msgmnb_write,
+        0,
+    )?;
+    kernel_dir.add_writable_file_with_write(
+        "msgmni",
+        InodeMode::from_bits_truncate(0o644),
+        sys::msgmni_content,
+        sys::msgmni_write,
+        0,
+    )?;
+    kernel_dir.add_writable_file_with_write(
+        "msg_next_id",
+        InodeMode::from_bits_truncate(0o644),
+        sys::msg_next_id_content,
+        sys::msg_next_id_write,
+        0,
+    )?;
     let user_dir = sys_dir.add_dir_locked("user", InodeMode::from_bits_truncate(0o555))?;
     user_dir.add_writable_file(
         "max_user_namespaces",
@@ -122,6 +156,7 @@ pub fn register_all(root: &Arc<crate::fs::procfs::LockedProcInode>) -> Result<()
     root.add_dynamic_symlink("self", self_::self_content, 0)?;
     let sysvipc_dir = root.add_dir_locked("sysvipc", InodeMode::from_bits_truncate(0o555))?;
     sysvipc_dir.add_file("shm", InodeMode::from_bits_truncate(0o444), sysvipc::shm_content, 0)?;
+    sysvipc_dir.add_file("msg", InodeMode::from_bits_truncate(0o444), sysvipc::msg_content, 0)?;
 
     crate::fs::procfs::pid::setup_pid_hooks(root);
 

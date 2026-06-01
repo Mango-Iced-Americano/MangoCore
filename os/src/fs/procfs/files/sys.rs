@@ -20,6 +20,16 @@ pub fn pid_max_content(
     proc_read_str(offset, len, buf, "32768\n")
 }
 
+pub fn threads_max_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let value = format!("{}\n", crate::config::SYSTEM_TASK_LIMIT);
+    proc_read_str(offset, len, buf, &value)
+}
+
 pub fn ns_last_pid_content(
     _extra: usize,
     offset: usize,
@@ -119,6 +129,105 @@ pub fn shmmni_content(
 ) -> Result<usize, SyscallErr> {
     let value = format!("{}\n", crate::syscall::sysv_shmmni());
     proc_read_str(offset, len, buf, &value)
+}
+
+pub fn msgmax_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let value = format!("{}\n", crate::syscall::sysv_msgmax());
+    proc_read_str(offset, len, buf, &value)
+}
+
+pub fn msgmax_write(
+    _extra: usize,
+    _offset: usize,
+    buf: &[u8],
+) -> Result<usize, SyscallErr> {
+    let value = parse_usize_sysctl(buf)?;
+    if !crate::syscall::set_sysv_msgmax(value) {
+        return Err(SyscallErr::EINVAL);
+    }
+    Ok(buf.len())
+}
+
+pub fn msgmnb_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let value = format!("{}\n", crate::syscall::sysv_msgmnb());
+    proc_read_str(offset, len, buf, &value)
+}
+
+pub fn msgmnb_write(
+    _extra: usize,
+    _offset: usize,
+    buf: &[u8],
+) -> Result<usize, SyscallErr> {
+    let value = parse_usize_sysctl(buf)?;
+    if !crate::syscall::set_sysv_msgmnb(value) {
+        return Err(SyscallErr::EINVAL);
+    }
+    Ok(buf.len())
+}
+
+pub fn msgmni_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let value = format!("{}\n", crate::syscall::sysv_msgmni());
+    proc_read_str(offset, len, buf, &value)
+}
+
+pub fn msgmni_write(
+    _extra: usize,
+    _offset: usize,
+    buf: &[u8],
+) -> Result<usize, SyscallErr> {
+    let value = parse_usize_sysctl(buf)?;
+    if !crate::syscall::set_sysv_msgmni(value) {
+        return Err(SyscallErr::EINVAL);
+    }
+    Ok(buf.len())
+}
+
+pub fn msg_next_id_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let value = format!("{}\n", crate::syscall::sysv_msg_next_id());
+    proc_read_str(offset, len, buf, &value)
+}
+
+pub fn msg_next_id_write(
+    _extra: usize,
+    _offset: usize,
+    buf: &[u8],
+) -> Result<usize, SyscallErr> {
+    let text = core::str::from_utf8(buf).map_err(|_| SyscallErr::EINVAL)?;
+    let value = text
+        .trim()
+        .parse::<i32>()
+        .map_err(|_| SyscallErr::EINVAL)?;
+    if !crate::syscall::set_sysv_msg_next_id(value) {
+        return Err(SyscallErr::EINVAL);
+    }
+    Ok(buf.len())
+}
+
+fn parse_usize_sysctl(buf: &[u8]) -> Result<usize, SyscallErr> {
+    let text = core::str::from_utf8(buf).map_err(|_| SyscallErr::EINVAL)?;
+    text.trim()
+        .parse::<usize>()
+        .map_err(|_| SyscallErr::EINVAL)
 }
 
 pub fn net_conf_tag_content(

@@ -19,6 +19,11 @@ const IPC_RMID: usize = 0;
 const IPC_SET: usize = 1;
 const IPC_STAT: usize = 2;
 const IPC_INFO: usize = 3;
+const IPC_64: usize = 0x0100;
+
+fn normalize_ipc_cmd(cmd: usize) -> usize {
+    cmd & !IPC_64
+}
 
 const SHM_RDONLY: usize = 0o10000;
 const SHM_RND: usize = 0o20000;
@@ -53,6 +58,13 @@ const MSGMNI: usize = 1024;
 const MSGMAX: usize = 8192;
 const MSGMNB: usize = 16384;
 const MSGTQL: usize = 4096;
+
+#[derive(Clone, Copy)]
+struct MsgLimits {
+    msgmax: usize,
+    msgmnb: usize,
+    msgmni: usize,
+}
 
 const GETPID: usize = 11;
 const GETVAL: usize = 12;
@@ -262,7 +274,7 @@ impl MsgQueue {
             cuid: uid,
             cgid: gid,
             mode: mode & 0o777,
-            qbytes: MSGMNB,
+            qbytes: sysv_msgmnb(),
             messages: VecDeque::new(),
             cbytes: 0,
             next_serial: 1,
@@ -303,7 +315,7 @@ struct MsgRegistry {
 impl MsgRegistry {
     fn new() -> Self {
         Self {
-            next_id: 1,
+            next_id: -1,
             queues: BTreeMap::new(),
             wait_queue: WaitQueue::new(),
             removed_ids: Vec::new(),
@@ -311,8 +323,17 @@ impl MsgRegistry {
     }
 
     fn alloc_id(&mut self) -> i32 {
-        let id = self.next_id;
-        self.next_id = self.next_id.saturating_add(1).max(1);
+        if self.next_id >= 0 {
+            let requested = self.next_id;
+            self.next_id = -1;
+            if !self.queues.contains_key(&requested) {
+                return requested;
+            }
+        }
+        let mut id = 1;
+        while self.queues.contains_key(&id) {
+            id = id.saturating_add(1).max(1);
+        }
         id
     }
 
@@ -336,6 +357,14 @@ impl MsgRegistry {
         } else {
             self.queues.len() as isize - 1
         }
+    }
+
+    fn set_next_id(&mut self, id: i32) -> bool {
+        if id < -1 {
+            return false;
+        }
+        self.next_id = id;
+        true
     }
 
     fn mark_removed(&mut self, id: i32) {
@@ -609,6 +638,11 @@ impl ShmRegistry {
 
 lazy_static! {
     static ref SHM_REGISTRY: Mutex<ShmRegistry> = Mutex::new(ShmRegistry::new());
+    static ref MSG_LIMITS: Mutex<MsgLimits> = Mutex::new(MsgLimits {
+        msgmax: MSGMAX,
+        msgmnb: MSGMNB,
+        msgmni: MSGMNI,
+    });
     static ref MSG_REGISTRY: Mutex<MsgRegistry> = Mutex::new(MsgRegistry::new());
     static ref SEM_REGISTRY: Mutex<SemRegistry> = Mutex::new(SemRegistry::new());
 }
@@ -817,6 +851,78 @@ pub fn sysv_shm_proc_snapshot() -> String {
     out
 }
 
+pub fn sysv_msgmax() -> usize {
+    MSG_LIMITS.lock().msgmax
+}
+
+pub fn sysv_msgmnb() -> usize {
+    MSG_LIMITS.lock().msgmnb
+}
+
+pub fn sysv_msgmni() -> usize {
+    MSG_LIMITS.lock().msgmni
+}
+
+pub fn set_sysv_msgmax(value: usize) -> bool {
+    if value == 0 {
+        return false;
+    }
+    MSG_LIMITS.lock().msgmax = value;
+    true
+}
+
+pub fn set_sysv_msgmnb(value: usize) -> bool {
+    if value == 0 {
+        return false;
+    }
+    MSG_LIMITS.lock().msgmnb = value;
+    true
+}
+
+pub fn set_sysv_msgmni(value: usize) -> bool {
+    if value == 0 {
+        return false;
+    }
+    MSG_LIMITS.lock().msgmni = value;
+    true
+}
+
+pub fn sysv_msg_next_id() -> i32 {
+    MSG_REGISTRY.lock().next_id
+}
+
+pub fn set_sysv_msg_next_id(value: i32) -> bool {
+    MSG_REGISTRY.lock().set_next_id(value)
+}
+
+pub fn sysv_msg_proc_snapshot() -> String {
+    let registry = MSG_REGISTRY.lock();
+    let mut out = String::from(
+        "       key      msqid perms      cbytes       qnum lspid lrpid   uid   gid  cuid  cgid      stime      rtime      ctime\n",
+    );
+    for (id, queue) in registry.queues.iter() {
+        let _ = writeln!(
+            out,
+            "{:10} {:10} {:5o} {:11} {:10} {:5} {:5} {:5} {:5} {:5} {:5} {:10} {:10} {:10}",
+            queue.key,
+            id,
+            queue.mode,
+            queue.cbytes,
+            queue.messages.len(),
+            queue.lspid,
+            queue.lrpid,
+            queue.uid,
+            queue.gid,
+            queue.cuid,
+            queue.cgid,
+            queue.stime,
+            queue.rtime,
+            queue.ctime
+        );
+    }
+    out
+}
+
 fn shm_usage_snapshot(registry: &ShmRegistry) -> LinuxShmUsageInfo {
     LinuxShmUsageInfo {
         used_ids: registry.segments.len() as i32,
@@ -859,6 +965,7 @@ fn shmctl_copy_stat(shmid: i32, cmd: usize, buf: usize) -> isize {
 }
 
 pub fn sys_shmctl(shmid: i32, cmd: usize, buf: usize) -> isize {
+    let cmd = normalize_ipc_cmd(cmd);
     match cmd {
         IPC_INFO => {
             let info = shminfo_snapshot();
@@ -1212,6 +1319,7 @@ fn semctl_copy_stat(id: i32, cmd: usize, buf: usize) -> isize {
 }
 
 pub fn sys_semctl(semid: i32, semnum: usize, cmd: usize, arg: usize) -> isize {
+    let cmd = normalize_ipc_cmd(cmd);
     match cmd {
         IPC_INFO | SEM_INFO => {
             let (info, highest) = {
@@ -1676,15 +1784,27 @@ fn write_msg_to_user(msgp: usize, mtype: isize, data: &[u8], copy_len: usize) ->
     Ok(())
 }
 
-fn msginfo_snapshot(queue_count: usize) -> LinuxMsgInfo {
+fn msginfo_snapshot(registry: &MsgRegistry, usage: bool) -> LinuxMsgInfo {
+    let limits = *MSG_LIMITS.lock();
+    let queue_count = registry.queues.len();
+    let message_count = registry
+        .queues
+        .values()
+        .map(|queue| queue.messages.len())
+        .sum::<usize>();
+    let message_bytes = registry
+        .queues
+        .values()
+        .map(|queue| queue.cbytes)
+        .sum::<usize>();
     LinuxMsgInfo {
-        msgpool: MSGMNI as i32,
-        msgmap: MSGMNI as i32,
-        msgmax: MSGMAX as i32,
-        msgmnb: MSGMNB as i32,
-        msgmni: MSGMNI as i32,
+        msgpool: if usage { queue_count } else { limits.msgmni } as i32,
+        msgmap: if usage { message_count } else { limits.msgmni } as i32,
+        msgmax: limits.msgmax as i32,
+        msgmnb: limits.msgmnb as i32,
+        msgmni: limits.msgmni as i32,
         msgssz: 16,
-        msgtql: MSGTQL.min(queue_count.saturating_mul(MSGTQL)) as i32,
+        msgtql: if usage { message_bytes } else { MSGTQL } as i32,
         msgseg: 0xffff,
     }
 }
@@ -1742,7 +1862,7 @@ pub fn sys_msgget(key: isize, msgflg: usize) -> isize {
         }
     }
 
-    if registry.queues.len() >= MSGMNI {
+    if registry.queues.len() >= sysv_msgmni() {
         return ENOSPC;
     }
     let (uid, gid) = current_ipc_ids();
@@ -1801,7 +1921,7 @@ fn try_msgsnd_locked(
 }
 
 pub fn sys_msgsnd(msqid: i32, msgp: usize, msgsz: usize, msgflg: usize) -> isize {
-    if msgsz > MSGMAX || msgflg & !(IPC_NOWAIT) != 0 {
+    if msgsz > sysv_msgmax() || msgflg & !(IPC_NOWAIT) != 0 {
         return EINVAL;
     }
     let (mtype, data) = match read_msg_payload(msgp, msgsz) {
@@ -1926,7 +2046,7 @@ pub fn sys_msgrcv(
     msgflg: usize,
 ) -> isize {
     let allowed_flags = IPC_NOWAIT | MSG_NOERROR | MSG_EXCEPT | MSG_COPY;
-    if msgsz > MSGMAX || msgflg & !allowed_flags != 0 {
+    if msgsz > sysv_msgmax() || msgflg & !allowed_flags != 0 {
         return EINVAL;
     }
     if msgflg & MSG_COPY != 0
@@ -1961,6 +2081,7 @@ pub fn sys_msgrcv(
 }
 
 pub fn sys_msgctl(msqid: i32, cmd: usize, buf: usize) -> isize {
+    let cmd = normalize_ipc_cmd(cmd);
     match cmd {
         IPC_RMID => {
             let mut registry = MSG_REGISTRY.lock();
@@ -1979,7 +2100,11 @@ pub fn sys_msgctl(msqid: i32, cmd: usize, buf: usize) -> isize {
             let (id, ds) = {
                 let registry = MSG_REGISTRY.lock();
                 let id = if cmd == MSG_STAT || cmd == MSG_STAT_ANY {
-                    match registry.id_by_index(msqid) {
+                    let id = registry
+                        .id_by_index(msqid)
+                        .or_else(|| (cmd == MSG_STAT_ANY).then_some(msqid))
+                        .filter(|id| registry.queues.contains_key(id));
+                    match id {
                         Some(id) => id,
                         None => return EINVAL,
                     }
@@ -2039,7 +2164,7 @@ pub fn sys_msgctl(msqid: i32, cmd: usize, buf: usize) -> isize {
             queue.uid = ds.msg_perm.uid;
             queue.gid = ds.msg_perm.gid;
             queue.mode = ds.msg_perm.mode as usize & 0o777;
-            queue.qbytes = (ds.msg_qbytes as usize).min(MSGMNB * 64);
+            queue.qbytes = (ds.msg_qbytes as usize).min(sysv_msgmnb() * 64);
             queue.ctime = now_sec();
             registry.wait_queue.wake_all();
             SUCCESS
@@ -2047,10 +2172,7 @@ pub fn sys_msgctl(msqid: i32, cmd: usize, buf: usize) -> isize {
         IPC_INFO | MSG_INFO => {
             let (info, highest) = {
                 let registry = MSG_REGISTRY.lock();
-                (
-                    msginfo_snapshot(registry.queues.len()),
-                    registry.highest_index(),
-                )
+                (msginfo_snapshot(&registry, cmd == MSG_INFO), registry.highest_index())
             };
             if let Err(errno) = copy_to_user(
                 current_user_token(),

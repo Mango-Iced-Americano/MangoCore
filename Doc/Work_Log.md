@@ -4,6 +4,23 @@
 
 ## 2026-06-01
 
+### 补齐 SysV MSG proc/sysctl 与 MSG_INFO 统计语义
+
+**涉及文件：**
+- `os/src/syscall/process/ipc.rs` — 增加 SysV message queue 运行时 limits、`msg_next_id`、`IPC_64` cmd 兼容、`MSG_STAT_ANY` fallback，以及 `/proc/sysvipc/msg`/`MSG_INFO` 快照所需元数据
+- `os/src/syscall/process/mod.rs` / `os/src/syscall/mod.rs` — 导出 MSG proc/sysctl 查询与写入入口
+- `os/src/fs/procfs/files/sys.rs` / `os/src/fs/procfs/files/sysvipc.rs` / `os/src/fs/procfs/files/mod.rs` — 注册 `/proc/sys/kernel/msgmax,msgmnb,msgmni,msg_next_id,threads-max` 与 `/proc/sysvipc/msg`
+- `os/src/fs/procfs/files/config.rs` — 在 `/proc/config` 暴露 `CONFIG_CHECKPOINT_RESTORE=y`，解除 MSG_COPY/msg_next_id 相关 LTP 探测门槛
+
+**验证：**
+- `make rv64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- `make la64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- rv64 heap_trace focused LTP：`msgctl06,msgget03,msgget04,msgget05,msgrcv03` musl+glibc 全部 TPASS，合计 34 pass / 0 failed / 0 broken / 0 skipped，无 `PANIC/AddressError/heap fatal/HEAP OOM` ✅
+- la64 heap_trace focused LTP：同 rv64，双 libc 合计 34 pass / 0 failed / 0 broken / 0 skipped，无 `PANIC/AddressError/heap fatal/HEAP OOM` ✅
+
+**备注：**
+- `msgstress01` 在 rv64 musl 阶段可 TPASS，但 glibc 压力阶段耗时较长，未纳入本轮小提交 focused gate；后续单独按性能/压力项评估
+
 ### 暴露 SysV SHM procfs/sysctl 视图以通过 shmctl03/shmget03
 
 **涉及文件：**

@@ -18,7 +18,9 @@ use core::convert::TryFrom;
 use fs::*;
 use log::{error, info};
 pub use process::{
-    CloneFlags, shm_detach_process, sysv_shmall, sysv_shm_proc_snapshot, sysv_shmmax,
+    CloneFlags, set_sysv_msg_next_id, set_sysv_msgmax, set_sysv_msgmnb, set_sysv_msgmni,
+    shm_detach_process, sysv_msg_next_id, sysv_msg_proc_snapshot, sysv_msgmax,
+    sysv_msgmnb, sysv_msgmni, sysv_shmall, sysv_shm_proc_snapshot, sysv_shmmax,
     sysv_shmmni,
 };
 use process::*;

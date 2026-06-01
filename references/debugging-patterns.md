@@ -93,3 +93,11 @@
 - **修复**: 从现有 SHM registry 导出 `shmmax/shmall/shmmni` 和 `/proc/sysvipc/shm` 表格快照，procfs 仅挂只读节点，不引入新的可写 sysctl。
 - **教训**: IPC 适配要把 syscall ABI 和 `/proc/sys/kernel/*`、`/proc/sysvipc/*` 作为同一个可观测面处理；否则内核对象行为正确也会被环境探测挡住。
 - **相关文件**: `os/src/syscall/process/ipc.rs`, `os/src/fs/procfs/files/sys.rs`, `os/src/fs/procfs/files/sysvipc.rs`
+
+## SysV MSG 的可写 sysctl 与 MSG_INFO usage 快照
+
+- **现象**: `msgget03` 因 `/proc/sys/kernel/msgmni` 只读而 `TBROK`，`msgget04/msgget05` 因 `/proc/sys/kernel/msg_next_id` 缺失而 `TBROK`，`msgctl06` 从 `MSG_STAT_ANY` 不支持变成 `MSG_INFO` 字段不匹配。
+- **根因**: SysV MSG 的 LTP 用例会写 `msgmni/msg_next_id` 控制下一次分配和上限，并把 `MSG_INFO` 解释为当前 usage 快照：`msgpool` 是队列数、`msgmap` 是消息数、`msgtql` 是消息字节数；不能复用 `IPC_INFO` 的 limit 快照。
+- **修复**: 为 MSG 增加运行时 tunable 和 `msg_next_id`，注册可写 proc sysctl；`msgctl(MSG_INFO)` 返回当前队列/消息/字节 usage，`msgctl(IPC_INFO)` 继续返回上限；同时兼容 libc 可能带入的 `IPC_64` cmd 位。
+- **教训**: SysV IPC 的 `*_INFO` 命令名相似但语义分裂，LTP 会同时检查 sysctl 写入、下一次 ID 分配、权限绕过的 `*_STAT_ANY` 和 usage 字段，不能只实现对象增删收发主路径。
+- **相关文件**: `os/src/syscall/process/ipc.rs`, `os/src/fs/procfs/files/sys.rs`, `os/src/fs/procfs/files/sysvipc.rs`
