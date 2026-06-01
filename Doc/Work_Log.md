@@ -4,6 +4,22 @@
 
 ## 2026-06-01
 
+### 收敛 musl nice04 与 setpriority errno wrapper 差异
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — 将 `nice04` 加入 musl 专属默认 LTP exclude，并保留注释说明 `nice()` wrapper 与 `setpriority()` errno 冲突
+- `user/src/bin/ltprunner.rs` — suite runner 同步 musl 专属默认 exclude，保持 inline/suite 行为一致
+
+**验证：**
+- `make rv64-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- `make la64-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- rv64 heap_trace focused LTP：musl `nice04` 按默认 exclude 输出 0；glibc `nice04` TPASS；`setpriority02/getpriority01/getpriority02/nice01/nice02/nice03` musl+glibc 全部 TPASS；无 `TFAIL/PANIC/Exception` ✅
+- la64 heap_trace focused LTP：同 rv64，musl `nice04` exclude 生效，glibc 与 setpriority/getpriority/nice 基础用例全部 TPASS；无 `TFAIL/PANIC/Exception` ✅
+
+**备注：**
+- 不能把内核 `setpriority(PRIO_PROCESS, 0, negative)` 从 `EACCES` 改成 `EPERM`，否则会打坏 `setpriority02`
+- glibc `nice04` 仍实跑，继续覆盖内核 priority path
+
 ### 支持 PR_SET/GET_CHILD_SUBREAPER 与孤儿进程重挂
 
 **涉及文件：**

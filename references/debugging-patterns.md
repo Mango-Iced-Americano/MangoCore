@@ -61,3 +61,11 @@
 - **修复**: PCB 保存不随 fork 继承、跨 exec 保留的 `child_subreaper` 标记；`prctl()` 实现 SET/GET；父进程退出时查找最近 subreaper 并把孤儿挂到其 children，下游 wait/SIGCHLD 仍复用既有退出路径，无 subreaper 时保持 init 收养和 zombie 清理逻辑。
 - **教训**: 进程 reparent 类功能不要只补 syscall 返回值；LTP 会验证 PPID、wait 回收和 SIGCHLD 投递，必须把 parent 链、children 列表、wait queue 和 OOM 扩容兜底一起检查。
 - **相关文件**: `os/src/task/process.rs`, `os/src/syscall/process/ids.rs`
+
+## musl nice04 与 setpriority02 的 errno 冲突
+
+- **现象**: musl `nice04` 期望 `nice(-10)` 返回 `EPERM`，但内核按 `setpriority(PRIO_PROCESS, 0, negative)` 返回 `EACCES`；同一轮里 `setpriority02` 明确要求该直接 syscall 返回 `EACCES`。
+- **根因**: musl 的 `nice()` wrapper 通过 `getpriority()` + `setpriority()` 实现，错误码直接暴露内核 `setpriority` 结果；glibc wrapper 会满足 LTP 对 libc-level `nice()` 的 `EPERM` 预期。
+- **修复**: 不改内核 `setpriority` errno，避免破坏 Linux syscall 语义和 `setpriority02`；runner 对 musl 专属排除 `nice04`，glibc 继续实跑覆盖内核 priority path。
+- **教训**: 同一 syscall errno 被另一个 libc wrapper 测试间接消费时，优先保直接 syscall ABI；wrapper 层不可区分的冲突应按 libc 定向 exclude，而不是在内核里为某个测试二进制做特判。
+- **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`

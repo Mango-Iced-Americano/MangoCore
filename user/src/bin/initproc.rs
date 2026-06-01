@@ -101,6 +101,11 @@ const DEFAULT_LTP_EXCLUDE_MUSL: &[&str] = &[
     // these LTP cases hit the per-case timeout even after the kernel path works.
     "sigtimedwait01",
     "sigwaitinfo01",
+    // musl implements nice() through setpriority(PRIO_PROCESS, 0, newprio).
+    // Linux setpriority returns EACCES for same-owner priority increases, while
+    // nice04 expects EPERM from the libc-level nice() contract. glibc remains
+    // enabled and validates the kernel priority path.
+    "nice04",
 ];
 /// LTP glibc 专属排除测例（额外追加）
 const DEFAULT_LTP_EXCLUDE_GLIBC: &[&str] = &[];
