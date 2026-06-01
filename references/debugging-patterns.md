@@ -149,3 +149,11 @@
 - **修复**: 建立 VM sysctl 状态源，procfs 注册 `/proc/sys/vm/*` 和 meminfo 必需字段；mmap/brk 接入 overcommit 与用户可见 VMA 计数；只对可写匿名 `MAP_SHARED` 预分配共享页；stopped wait 用 pending SIGCONT 恢复而不看 sigmask；OOM handler 在 no-current 上下文跳过当前任务回收。
 - **教训**: 遇到 LTP tunable 类用例，先查源码确认它后续会触发哪些内核路径，不能只补文件节点。带 `raise(SIGSTOP)` 的测试要特别检查 musl/glibc signal wrapper 差异，带“吃内存”的测试必须同时看 heap_trace、物理 frame、OOM 安全点。
 - **相关文件**: `os/src/fs/procfs/files/sys.rs`, `os/src/fs/procfs/files/meminfo.rs`, `os/src/mm/mmap.rs`, `os/src/mm/vma_set.rs`, `os/src/task/signal/mod.rs`, `os/src/mm/frame_allocator.rs`
+
+## inline broad scan 的 skip 表必须参与过滤
+
+- **现象**: 非 fs/net LTP 自动扫描在 `cfs_bandwidth01` 后直接进入 `cgroup_core*`、`cgroup_fj*` 等环境/helper 用例，产生 TBROK、长耗时和噪声 include；旧日志中同类用例曾经会输出 `SKIP LTP CASE ...`。
+- **根因**: `should_skip_ltp_helper()` 保留了完整 skip 表，但一次 merge 后 inline runner 调用点被注释掉，只剩手工 `ltp_exclude` 生效；suite/focused 路径和 broad scan 的语义边界被混在一起。
+- **修复**: 在 `ltp_include` 为空的 broad scan 中恢复 `should_skip_ltp_helper()` 过滤；当 `ltp_include` 非空时不调用 skip 表，让 focused 验证仍可强制运行某个历史 skip 项。
+- **教训**: LTP 扫描器本身也是适配面。处理 skip 表时要区分 broad scan 的“排噪”职责和 focused include 的“强制复现”职责；每次修改默认 skip/reason 表后都要用 `ltp_from` 在对应字母段快速复验。
+- **相关文件**: `user/src/bin/initproc.rs`

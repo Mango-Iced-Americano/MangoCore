@@ -4,6 +4,21 @@
 
 ## 2026-06-01
 
+### 恢复 inline LTP broad-skip 过滤
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — 恢复 `should_skip_ltp_helper()` 在 inline broad scan 中的调用，自动跳过已知环境、fs/net、helper、长耗时用例；保留 `ltp_include` focused 模式强制运行能力
+
+**验证：**
+- `make rv64-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- `make la64-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- rv64 heap_trace inline LTP：`ltp_from=cfs_bandwidth01` 起跑后 `cfs_bandwidth01`、`cgroup_core*`、`cgroup_fj*`、`cgroup_regression*` 全部输出 `SKIP LTP CASE ... requires cgroup support`；无 `PANIC/KERNEL EXCEPTION/heap fatal/HEAP OOM` ✅
+- la64 heap_trace inline LTP：同 rv64，cgroup 段全部被 broad-skip 过滤；无 `PANIC/KERNEL EXCEPTION/heap fatal/HEAP OOM` ✅
+
+**备注：**
+- 本轮只修复扫描器边界，避免后续非 fs/net LTP 推进被 cgroup/fs/net/helper 噪声污染；focused include 仍可显式跑任意单项
+- rv64 验证窗口继续向后扫到 `clone04`、`epoll-ltp/epoll_ctl*`、timer 性能等已有候选失败，作为后续适配点单独处理，未混入本次提交
+
 ### 补齐 VM tunable sysctl 与 stopped SIGCONT 恢复
 
 **涉及文件：**

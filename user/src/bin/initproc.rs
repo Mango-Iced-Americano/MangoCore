@@ -1376,11 +1376,14 @@ fn run_ltp_binaries(
                 continue;
             }
 
-            // 保留 should_skip_ltp_helper 函数定义供队友使用，此处不调用
-            // if let Some(reason) = should_skip_ltp_helper(libc_suffix, name) {
-            //     println!("SKIP LTP CASE {} : {}", name, reason);
-            //     continue;
-            // }
+            // Broad scans skip known environment/fs/net/helper cases, but a
+            // focused include list must still be able to force-run them.
+            if include.is_empty() {
+                if let Some(reason) = should_skip_ltp_helper(libc_suffix, name) {
+                    println!("SKIP LTP CASE {} : {}", name, reason);
+                    continue;
+                }
+            }
 
             println!("RUN LTP CASE {}", name);
             // CWD 为 /musl 或 /glibc，二进制在 ltp/testcases/bin/xxx
