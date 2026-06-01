@@ -4,6 +4,22 @@
 
 ## 2026-06-01
 
+### 补齐 prctl 状态类最小兼容
+
+**涉及文件：**
+- `os/src/syscall/process/ids.rs` — 支持 `PR_SET/GET_NO_NEW_PRIVS`、`PR_SET/GET_THP_DISABLE`、`PR_CAP_AMBIENT`、`PR_GET_SPECULATION_CTRL`、`PR_GET/SET_SECUREBITS` 的最小 ABI 状态与错误码，并为 `PR_SET_SECCOMP` 保留错误优先级但不启用真实 seccomp
+- `os/src/task/task.rs` — TCB 保存并继承 no-new-privs、THP disabled、securebits、ambient capabilities 状态
+- `os/src/fs/procfs/pid/status.rs` — `/proc/<pid>/status` 输出真实 UID/GID/capability、`CapAmb`、`NoNewPrivs`
+
+**验证：**
+- `make rv64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- `make la64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅（已有 warning）
+- rv64 heap_trace focused LTP：`prctl02` musl+glibc 均 16 pass / 0 failed / 0 broken / 2 skipped，较旧结果每 libc 减少 9 个 TCONF；`prctl07` 内核能力探测通过后因镜像缺 libcap devel TCONF；无 `PANIC/KERNEL EXCEPTION/heap fatal/HEAP OOM` ✅
+- la64 heap_trace focused LTP：同 rv64，`prctl02` 双 libc 合计 32 pass / 0 failed / 0 broken / 4 skipped，`prctl07` 仅剩 libcap 环境 TCONF；无 `PANIC/KERNEL EXCEPTION/heap fatal/HEAP OOM` ✅
+
+**备注：**
+- `PR_SET_SECCOMP` 只补 `prctl02` 可见的 EFAULT/EACCES 边界，不让 `PR_GET_SECCOMP` 宣称支持，避免 `prctl04` 误进入真实 seccomp 过滤器语义
+
 ### 放开 POSIX timer alarm/TAI clock
 
 **涉及文件：**

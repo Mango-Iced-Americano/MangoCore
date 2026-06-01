@@ -133,3 +133,11 @@
 - **修复**: `timer_create()` 放开 alarm/TAI clock id，deadline 计算中 realtime alarm/TAI 复用 wall-clock 基准，boottime alarm 复用现有 boottime/monotonic 基准。
 - **教训**: 新增 clock id 时不要只补 gettime/getres；LTP 会通过 POSIX timer 再做一次能力探测，必须明确哪些接口共享支持矩阵，哪些接口因语义风险继续拒绝。
 - **相关文件**: `os/src/syscall/process/time.rs`
+
+## prctl 状态类 ABI 要同时补 syscall 和 procfs 可见面
+
+- **现象**: `prctl02` 中 `NO_NEW_PRIVS`、`THP_DISABLE`、`CAP_AMBIENT`、speculation control 等子项大量 TCONF，`prctl07` 也只能停在 kernel unsupported 探测。
+- **根因**: prctl 入口缺少这些状态类 option 的最小状态保存和非法参数错误码；`/proc/<pid>/status` 也没有输出 `CapAmb`、`NoNewPrivs` 等 LTP 会读取的字段。
+- **修复**: 在 TCB 保存并继承 no-new-privs、THP disabled、securebits、ambient capabilities；prctl 路径补状态回读和错误优先级，procfs status 同步输出真实 capability 与 no-new-privs 字段。
+- **教训**: 对状态类 prctl，不要只让 syscall 返回成功；LTP 常先做能力探测，再通过 procfs 对账。像 seccomp 这种语义面很大的 option 应保持“不宣称完整支持”，只补安全的错误码边界。
+- **相关文件**: `os/src/syscall/process/ids.rs`, `os/src/task/task.rs`, `os/src/fs/procfs/pid/status.rs`

@@ -195,6 +195,11 @@ pub struct TaskControlBlockInner {
     pub cap_permitted: u64,
     pub cap_inheritable: u64,
     pub cap_bounding: u64,
+    /// prctl(NO_NEW_PRIVS/THP_DISABLE/securebits/CAP_AMBIENT) ABI-visible state.
+    pub no_new_privs: bool,
+    pub thp_disabled: bool,
+    pub securebits: usize,
+    pub cap_ambient: u64,
     /// 用于清理子进程的线程ID
     pub clear_child_tid: usize,
     /// 鲁棒列表，用于管理鲁棒互斥锁
@@ -769,6 +774,10 @@ impl TaskControlBlock {
                 cap_permitted: TASK_CAP_FULL_SET,
                 cap_inheritable: 0,
                 cap_bounding: TASK_CAP_FULL_SET,
+                no_new_privs: false,
+                thp_disabled: false,
+                securebits: 0,
+                cap_ambient: 0,
                 clear_child_tid: 0,
                 robust_list: RobustList::default(),
                 rusage: Rusage::new(),
@@ -1186,6 +1195,10 @@ impl TaskControlBlock {
                 cap_permitted: parent_inner.cap_permitted,
                 cap_inheritable: parent_inner.cap_inheritable,
                 cap_bounding: parent_inner.cap_bounding,
+                no_new_privs: parent_inner.no_new_privs,
+                thp_disabled: parent_inner.thp_disabled,
+                securebits: parent_inner.securebits,
+                cap_ambient: parent_inner.cap_ambient,
                 pending_oom_kill: false,
             }),
         });

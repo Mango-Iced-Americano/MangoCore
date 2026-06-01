@@ -1,7 +1,7 @@
 //! /proc/<pid>/status — 进程状态
 
-use crate::utils::error::SyscallErr;
 use crate::fs::procfs::proc_read_str;
+use crate::utils::error::SyscallErr;
 use alloc::string::{String, ToString};
 
 pub fn pid_status_content(
@@ -23,7 +23,28 @@ pub fn pid_status_content(
     };
 
     // Snapshot fields under inner lock, then release before format!
-    let (state_char, ppid, sig_blk, sig_pnd, tgid, threads) = {
+    let (
+        state_char,
+        ppid,
+        sig_blk,
+        sig_pnd,
+        tgid,
+        threads,
+        uid,
+        euid,
+        suid,
+        fsuid,
+        gid,
+        egid,
+        sgid,
+        fsgid,
+        cap_inheritable,
+        cap_permitted,
+        cap_effective,
+        cap_bounding,
+        cap_ambient,
+        no_new_privs,
+    ) = {
         let inner = task.acquire_inner_lock();
         let state = match inner.task_status {
             crate::task::TaskStatus::Ready => "R (running)",
@@ -36,7 +57,28 @@ pub fn pid_status_content(
         let pnd = inner.sigpending.pending().bits();
         let tg = task.pid();
         let threads = task.process.threads().len();
-        (state, ppid_str, blk, pnd, tg, threads)
+        (
+            state,
+            ppid_str,
+            blk,
+            pnd,
+            tg,
+            threads,
+            inner.uid,
+            inner.euid,
+            inner.suid,
+            inner.fsuid,
+            inner.gid,
+            inner.egid,
+            inner.sgid,
+            inner.fsgid,
+            inner.cap_inheritable,
+            inner.cap_permitted,
+            inner.cap_effective,
+            inner.cap_bounding,
+            inner.cap_ambient,
+            inner.no_new_privs as usize,
+        )
     };
 
     let proc_name = {
@@ -64,8 +106,8 @@ pub fn pid_status_content(
          Tgid:\t{}\n\
          Pid:\t{}\n\
          PPid:\t{}\n\
-         Uid:\t0\t0\t0\t0\n\
-         Gid:\t0\t0\t0\t0\n\
+         Uid:\t{}\t{}\t{}\t{}\n\
+         Gid:\t{}\t{}\t{}\t{}\n\
          FDSize:\t256\n\
          VmSize:\t       0 kB\n\
          VmHWM:\t{:9} kB\n\
@@ -80,10 +122,12 @@ pub fn pid_status_content(
          SigBlk:\t{:016x}\n\
          SigIgn:\t0000000000000000\n\
          SigCgt:\t0000000000000000\n\
-         CapInh:\t0000000000000000\n\
-         CapPrm:\t0000000000000000\n\
-         CapEff:\t0000000000000000\n\
-         CapBnd:\t0000000000000000\n\
+         CapInh:\t{:016x}\n\
+         CapPrm:\t{:016x}\n\
+         CapEff:\t{:016x}\n\
+         CapBnd:\t{:016x}\n\
+         CapAmb:\t{:016x}\n\
+         NoNewPrivs:\t{}\n\
          Cpus_allowed:\t1\n\
          Cpus_allowed_list:\t0\n\
          Mems_allowed:\t1\n\
@@ -94,12 +138,26 @@ pub fn pid_status_content(
         tgid,
         pid,
         ppid,
+        uid,
+        euid,
+        suid,
+        fsuid,
+        gid,
+        egid,
+        sgid,
+        fsgid,
         vm_rss_kb,
         vm_rss_kb,
         vm_lck_kb,
         threads,
         sig_pnd,
         sig_blk,
+        cap_inheritable,
+        cap_permitted,
+        cap_effective,
+        cap_bounding,
+        cap_ambient,
+        no_new_privs,
     );
 
     proc_read_str(offset, len, buf, &s)
