@@ -5,7 +5,7 @@ use super::registry;
 use super::signal::*;
 use super::threads::{futex_wake_shared, Futex};
 use super::TaskContext;
-use super::{tid_alloc, trap_cx_bottom_from_slot, ustack_bottom_from_slot, TidHandle};
+use super::{tid_alloc, trap_cx_bottom_from_slot, ustack_bottom_from_slot, TidHandle, INIT_IPC_NAMESPACE, INIT_MOUNT_NAMESPACE, IpcNamespace, MountNamespace, NetNamespace};
 use crate::config::{MMAP_BASE, SYSTEM_TASK_LIMIT, USER_STACK_SIZE};
 use crate::fs::vfs;
 use crate::fs::{vfs_lookup_absolute, vfs_root};
@@ -73,6 +73,8 @@ impl UtsNamespace {
         }
     }
 }
+
+use super::net_namespace::INIT_NET_NAMESPACE;
 
 /// 任务控制块
 pub struct TaskControlBlock {
@@ -693,6 +695,9 @@ impl TaskControlBlock {
                 working_path: String::from("/"),
             })),
             Arc::new(Mutex::new(UtsNamespace::new())),
+            INIT_NET_NAMESPACE.clone(),
+            INIT_MOUNT_NAMESPACE.clone(),
+            INIT_IPC_NAMESPACE.clone(),
             Arc::new(Mutex::new(memory_set)),
             Arc::new(Mutex::new(Sighand::new())),
             Arc::new(Mutex::new(Futex::new())),
@@ -1030,6 +1035,21 @@ impl TaskControlBlock {
             } else {
                 self.process.uts()
             };
+            let net = if flags.contains(CloneFlags::CLONE_NEWNET) {
+                NetNamespace::new_isolated()
+            } else {
+                self.process.net().clone()
+            };
+            let mnt = if flags.contains(CloneFlags::CLONE_NEWNS) {
+                MountNamespace::new()
+            } else {
+                self.process.mnt()
+            };
+            let ipc = if flags.contains(CloneFlags::CLONE_NEWIPC) {
+                IpcNamespace::new()
+            } else {
+                self.process.ipc()
+            };
             let sighand = if flags.contains(CloneFlags::CLONE_SIGHAND) {
                 self.process.sighand()
             } else {
@@ -1056,6 +1076,9 @@ impl TaskControlBlock {
                     files,
                     fs,
                     uts,
+                    net,
+                    mnt,
+                    ipc,
                     memory_set.clone(),
                     sighand,
                     futex,

@@ -111,7 +111,7 @@ impl Socket for RawSocket {
                 ip_pkg.set_dst_addr(target_ip);
                 let src_addr = if target_ip.is_loopback() {
                     crate::net::net_core::loopback_iface()
-                        .and_then(|d| d.ip_addrs.first().map(|c| c.address()))
+                        .and_then(|d| d.iface.ip_addrs().first().map(|c| c.address()))
                         .and_then(|ip| match ip {
                             smoltcp::wire::IpAddress::Ipv4(addr) => Some(addr),
                             _ => None,
@@ -119,7 +119,7 @@ impl Socket for RawSocket {
                         .unwrap_or(smoltcp::wire::Ipv4Address::UNSPECIFIED)
                 } else {
                     crate::net::net_core::default_iface()
-                        .and_then(|d| d.ip_addrs.first().map(|c| c.address()))
+                        .and_then(|d| d.iface.ip_addrs().first().map(|c| c.address()))
                         .and_then(|ip| match ip {
                             smoltcp::wire::IpAddress::Ipv4(addr) => Some(addr),
                             _ => None,
@@ -179,6 +179,21 @@ impl Socket for RawSocket {
                 }
             })
             .unwrap_or(Err(SyscallErr::EAGAIN))
+    }
+
+    fn try_sendmsg(
+        &self,
+        buf: &[u8],
+        dest: Option<Endpoint>,
+        flags: MsgFlags,
+    ) -> Result<isize, SyscallErr> {
+        match dest {
+            Some(Endpoint::Ip(ep)) => self
+                .send_to(buf, Endpoint::Ip(ep))
+                .map(|n| n as isize),
+            Some(_) => Err(SyscallErr::EINVAL),
+            None => self.try_send(buf, flags),
+        }
     }
 
     fn try_send(&self, buf: &[u8], _flags: MsgFlags) -> Result<isize, SyscallErr> {

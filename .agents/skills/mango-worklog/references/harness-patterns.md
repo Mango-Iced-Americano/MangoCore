@@ -31,6 +31,22 @@
 - **修复**: MAP_SHARED 页面跳过 CoW，fork 时恢复 W 权限，缺页时只恢复 W 不做 CoW
 - **相关文件**: `os/src/mm/memory_set.rs`
 
+### 无界队列导致 OOM
+- **根因**: 生产者-消费者队列（`VecDeque`、`Vec` 等）无上界，消费者慢于生产者时持续堆积，底层存储重分配触发大块内存请求超出堆容量
+- **症状**: 运行一段时间后 `alloc` 返回 `Err`，分配请求异常大（~96MB），远超单次正常分配
+- **修复**: 在 `push`/`push_back` 前检查 `len() >= MAX_QUEUE_LEN`；超限时静默丢弃并记录 warning；上限设为命名常量便于调优
+- **模式**:
+  ```rust
+  const MAX_QUEUE_LEN: usize = 4096;
+  if queue.len() >= MAX_QUEUE_LEN {
+      log::warn!("queue full, dropping");
+  } else {
+      queue.push_back(item);
+  }
+  ```
+- **注意**: 上限值需权衡内存和丢包率；4096 × MTU(1500) ≈ 6MB 通常安全
+- **相关文件**: `os/src/drivers/net/veth.rs`
+
 ### execve/clone 路径堆耗尽
 - **根因**: Vec 扩容在裸机环境下可能 panic
 - **修复**: 使用 `try_reserve` 并返回 `ENOMEM`
@@ -97,3 +113,14 @@
   ```
 - **关键**: 必须保留 `unwrap_or` 回退，因为接口在 net_core 初始化前可能未注册；`unwrap()` 会导致过早调用 panic
 - **相关文件**: 所有 `net/socket/inet/` 下引用 IP 的文件
+
+### 临时 Arc 值上的 MutexGuard 生命周期问题
+
+- **根因**: `current_netns()` 返回 `Arc<NetNamespace>`。链式调用 `current_netns().router.lock()` 创建一个临时 `Arc`，然后在同一语句中获取 `MutexGuard`。当 `MutexGuard` 赋值给变量时，临时 `Arc` 在语句结束时被释放，但 `MutexGuard` 仍然借用临时值 → `temporary value dropped while borrowed`
+- **修复**: 将 `Arc` 绑定到变量，确保其存活时间超过 `MutexGuard`：
+  ```rust
+  let ns = current_netns();
+  let mut router = ns.router.lock();  // OK
+  ```
+- **注意**: 如果 `MutexGuard` 不赋值给变量（仅用于链式调用如 `.clone()`、`.fill_default()`），临时 `Arc` 在 `MutexGuard` 被丢弃后释放，是安全的
+- **相关文件**: `os/src/net/socket/netlink/route/route.rs`（lines 127, 169）

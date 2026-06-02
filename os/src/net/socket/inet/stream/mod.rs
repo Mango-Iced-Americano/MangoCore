@@ -195,10 +195,8 @@ impl Socket for TcpSocket {
             Ok(bound) => {
                 if let Inner::Init(inner_init) = &bound {
                     if let Init::Bound { local, .. } = inner_init {
-                        let ifindex = match local.addr {
-                            IpAddress::Ipv4(ip) if ip.is_loopback() => 1,
-                            _ => 2,
-                        };
+                        let ifindex =
+                            crate::net::net_core::ifindex_for_local_addr(Some(local.addr));
                         // Lazy bind: socket not yet in SocketSet; record metadata only
                         self.bound.lock().ifindex = ifindex;
                         self.bound.lock().bound_addr = Some(local.addr);
@@ -224,11 +222,8 @@ impl Socket for TcpSocket {
         match new_inner.listen(BACKLOG_SIZE as usize) {
             Ok(listening) => {
                 let listen_addr = listening.listen_addr();
-                let ifindex = match listen_addr.addr {
-                    Some(IpAddress::Ipv4(ip)) if ip.is_loopback() => 1,
-                    None => 1,
-                    _ => 2,
-                };
+                let ifindex =
+                    crate::net::net_core::ifindex_for_local_addr(listen_addr.addr);
                 if let Some(&handle) = listening.handles.first() {
                     self.bound
                         .lock()
@@ -252,7 +247,7 @@ impl Socket for TcpSocket {
         let remote_endpoint = if ep.addr.is_unspecified() {
             IpEndpoint::new(
                 crate::net::net_core::loopback_iface()
-                    .and_then(|d| d.ip_addrs.first().map(|c| c.address()))
+                    .and_then(|d| d.iface.ip_addrs().first().map(|c| c.address()))
                     .unwrap_or(IpAddress::v4(127, 0, 0, 1)),
                 ep.port,
             )
@@ -266,10 +261,8 @@ impl Socket for TcpSocket {
         );
         match new_inner.connect(remote_endpoint) {
             Ok(connecting) => {
-                let ifindex = match connecting.local.addr {
-                    IpAddress::Ipv4(ip) if ip.is_loopback() => 1,
-                    _ => 2,
-                };
+                let ifindex =
+                    crate::net::net_core::ifindex_for_local_addr(Some(connecting.local.addr));
                 self.bound
                     .lock()
                     .bind(connecting.handle, ifindex, Some(connecting.local.addr), connecting.local.port);
@@ -358,9 +351,8 @@ impl Socket for TcpSocket {
                     inner_ref.bindings.get(&est.handle).map(|b| b.ifindex)
                 })
                 .flatten()
-                .unwrap_or_else(|| match est.local.addr {
-                    IpAddress::Ipv4(ip) if ip.is_loopback() => 1,
-                    _ => 2,
+                .unwrap_or_else(|| {
+                    crate::net::net_core::ifindex_for_local_addr(Some(est.local.addr))
                 });
             let mut b = BoundInner::new();
             b.bind(est.handle, ifindex, Some(est.local.addr), est.local.port);

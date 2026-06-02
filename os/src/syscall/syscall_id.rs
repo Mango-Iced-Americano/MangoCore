@@ -203,6 +203,7 @@ pub const SYSCALL_COPY_FILE_RANGE: usize = 285;
 pub const SYSCALL_PREADV2: usize = 286;
 pub const SYSCALL_PWRITEV2: usize = 287;
 pub const SYSCALL_STATX: usize = 291;
+pub const SYSCALL_SETNS: usize = 268;
 pub const SYSCALL_SYNCFS: usize = 306;
 pub const SYSCALL_PIDFD_SEND_SIGNAL: usize = 424;
 pub const SYSCALL_PIDFD_OPEN: usize = 434;

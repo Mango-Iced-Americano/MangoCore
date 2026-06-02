@@ -87,7 +87,8 @@ impl Inner {
 
         // Route to determine target ifindex for this connection
         let route = crate::net::routing::route_output(remote_endpoint.addr).ok();
-        let ifindex = route.as_ref().map(|r| r.ifindex).unwrap_or(2);
+        let ifindex = route.as_ref().map(|r| r.ifindex)
+            .unwrap_or_else(|| crate::net::net_core::ifindex_for_local_addr(Some(local.addr)));
 
         let handle = NET_INTERFACE
             .add_routed_socket_on(InetProtocol::Tcp, socket, ifindex)
@@ -176,14 +177,8 @@ impl Inner {
             ));
         }
 
-        // Determine target stack for listen socket based on bind address.
-        // Loopback (127.x) → lo (1), INADDR_ANY → lo (1) for LTP minimum fix,
-        // specific non-loopback address → eth0 (2).
-        let listen_ifindex = match listen_addr.addr {
-            Some(IpAddress::Ipv4(ip)) if ip.is_loopback() => 1,
-            None => 1,
-            _ => 2,
-        };
+        let listen_ifindex =
+            crate::net::net_core::ifindex_for_local_addr(listen_addr.addr);
 
         let handle = NET_INTERFACE
             .add_routed_socket_on(InetProtocol::Tcp, socket, listen_ifindex)

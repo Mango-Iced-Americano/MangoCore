@@ -1994,7 +1994,7 @@ fn prepare_symlink(environ: &[*const u8]) {
     // Step 1.5: 测试环境依赖最小账户/网络配置，无条件幂等写入（镜像可能缺失或格式错误）
     println!("[initproc] preparing /etc account/network files ...");
     let account_cmd = "\
-        mkdir -p /etc /root /tmp /run /var /var/tmp /dev/shm /glibc/lib; chmod 1777 /tmp /var/tmp /dev/shm; : > /glibc/lib/libgcc_s.so.1; \
+        mkdir -p /etc /root /tmp /run /var /var/tmp /dev/shm /sys /glibc/lib; chmod 1777 /tmp /var/tmp /dev/shm; : > /glibc/lib/libgcc_s.so.1; \
         [ -f /etc/passwd ] || printf 'root:x:0:0:root:/root:/bin/sh\\nnobody:x:65534:65534:nobody:/nonexistent:/bin/sh\\n' > /etc/passwd; \
         [ -f /etc/group ] || printf 'root:x:0:\\nnogroup:x:65534:\\n' > /etc/group; \
         printf 'passwd: files\\ngroup: files\\nhosts: files dns\\n' > /etc/nsswitch.conf; \
@@ -2006,13 +2006,20 @@ fn prepare_symlink(environ: &[*const u8]) {
 
     install_embedded_libgcc_s();
 
-    // Step 2: musl/glibc 动态库 — 单次 shell 调用，用 && 串连，避免多次 bash 开销
+    // Step 1.7: /lib/modules/ — merged into Step 2 (after /lib exists)
+
+    // Step 2: musl/glibc 动态库 + /lib/modules/ — 单次 shell 调用
     println!("[initproc] linking musl/glibc libs to /lib ...");
     let lib_cmd = "\
         mkdir -p /lib /usr /lib64 /usr/lib /usr/lib64; \
         rm -rf /lib64; ln -sf /lib /lib64; \
         rm -rf /usr/lib; ln -sf /lib /usr/lib; \
         rm -rf /usr/lib64; ln -sf /lib /usr/lib64; \
+        mkdir -p /lib/modules/5.10.0-1-rv64; \
+        : > /lib/modules/5.10.0-1-rv64/modules.dep; \
+        printf '/veth.ko\n' > /lib/modules/5.10.0-1-rv64/modules.builtin; \
+        ln -sf /bin/true /sbin/modprobe; \
+        ln -sf /bin/true /bin/modprobe; \
         ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64-sf.so.1; \
         ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64.so.1; \
         ln -sf /musl/lib/libc.so /lib/libc.so; \

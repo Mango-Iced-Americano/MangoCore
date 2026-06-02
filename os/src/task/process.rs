@@ -4,8 +4,9 @@ use super::{
     registry,
     signal::{sigchld_requests_auto_reap, PendingSignal, SignalQueue, Sighand, Signals},
     threads::Futex,
-    wake_interruptible, Completion, FsStatus, TaskControlBlock, TaskStatus, UtsNamespace,
-    Rusage, WaitQueue, INITPROC,
+    wake_interruptible, Completion, FsStatus, IpcNamespace, MountNamespace, NetNamespace,
+    TaskControlBlock, TaskStatus,
+    UtsNamespace, Rusage, WaitQueue, INITPROC,
 };
 use crate::fs::vfs;
 use crate::mm::{AddressSpace, PageTableImpl};
@@ -65,6 +66,12 @@ pub struct ProcessInner {
     fs: Arc<Mutex<FsStatus>>,
     /// UTS namespace 状态（hostname/domainname）。
     uts: Arc<Mutex<UtsNamespace>>,
+    /// 网络命名空间。
+    net: Arc<NetNamespace>,
+    /// 挂载命名空间（stub，不隔离）。
+    mnt: Arc<MountNamespace>,
+    /// IPC 命名空间（stub，不隔离）。
+    ipc: Arc<IpcNamespace>,
     /// 虚拟内存空间。
     vm: Arc<Mutex<AddressSpace<PageTableImpl>>>,
     /// 信号处理函数表。
@@ -182,6 +189,9 @@ impl ProcessControlBlock {
         files: Arc<Mutex<vfs::FdTable>>,
         fs: Arc<Mutex<FsStatus>>,
         uts: Arc<Mutex<UtsNamespace>>,
+        net: Arc<NetNamespace>,
+        mnt: Arc<MountNamespace>,
+        ipc: Arc<IpcNamespace>,
         vm: Arc<Mutex<AddressSpace<PageTableImpl>>>,
         sighand: Arc<Mutex<Sighand>>,
         futex: Arc<Mutex<Futex>>,
@@ -211,6 +221,9 @@ impl ProcessControlBlock {
                 files,
                 fs,
                 uts,
+                net,
+                mnt,
+                ipc,
                 vm,
                 sighand,
                 futex,
@@ -324,6 +337,37 @@ impl ProcessControlBlock {
         let new_uts = Arc::new(Mutex::new(copied));
         self.inner.lock().uts = new_uts.clone();
         new_uts
+    }
+
+    pub fn net(&self) -> Arc<NetNamespace> {
+        self.inner.lock().net.clone()
+    }
+
+    pub fn unshare_net(&self) -> Arc<NetNamespace> {
+        let new_ns = NetNamespace::new_isolated();
+        self.set_net(new_ns.clone());
+        new_ns
+    }
+
+    /// Replace the current process's network namespace.
+    pub fn set_net(&self, net: Arc<NetNamespace>) {
+        self.inner.lock().net = net;
+    }
+
+    pub fn mnt(&self) -> Arc<MountNamespace> {
+        self.inner.lock().mnt.clone()
+    }
+
+    pub fn set_mnt(&self, mnt: Arc<MountNamespace>) {
+        self.inner.lock().mnt = mnt;
+    }
+
+    pub fn ipc(&self) -> Arc<IpcNamespace> {
+        self.inner.lock().ipc.clone()
+    }
+
+    pub fn set_ipc(&self, ipc: Arc<IpcNamespace>) {
+        self.inner.lock().ipc = ipc;
     }
 
     pub fn vm(&self) -> Arc<Mutex<AddressSpace<PageTableImpl>>> {

@@ -619,6 +619,11 @@ impl Interface {
         InterfaceInner::check_ip_addrs(&self.inner.ip_addrs)
     }
 
+    /// Set the maximum transmission unit (MTU) for this interface.
+    pub fn set_mtu(&mut self, mtu: usize) {
+        self.inner.caps.max_transmission_unit = mtu;
+    }
+
     /// Check whether the interface has the given IP address assigned.
     pub fn has_ip_addr<T: Into<IpAddress>>(&self, addr: T) -> bool {
         self.inner.has_ip_addr(addr)

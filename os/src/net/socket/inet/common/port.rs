@@ -212,10 +212,8 @@ impl PortManager {
                     _ => ep.port,
                 })
                 .unwrap_or(ep.port);
-            let ifindex = match listen_ep.addr {
-                Some(IpAddress::Ipv4(ip)) if ip.is_loopback() => 1,
-                _ => 2,
-            };
+            let ifindex =
+                crate::net::net_core::ifindex_for_local_addr(listen_ep.addr);
             match socket.socket_type() {
                 PSOCK::Stream => {
                     log::debug!(

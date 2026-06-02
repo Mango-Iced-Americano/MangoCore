@@ -2,12 +2,13 @@ use alloc::sync::Arc;
 
 use crate::config::{PAGE_SIZE, SYSTEM_TASK_LIMIT};
 use crate::fs::pidfd::new_pidfd_file;
+use crate::fs::vfs::MountFSInode;
 use crate::mm::{
     translated_byte_buffer, FaultAccess, UserAccess, UserBuffer, UserPtrMut, VirtAddr,
 };
 use crate::show_frame_consumption;
 use crate::syscall::errno::*;
-use crate::task::{current_task, signal::Signals, ProcessManager, TaskControlBlock};
+use crate::task::{current_task, signal::Signals, IpcNamespace, MountNamespace, ProcessManager, TaskControlBlock};
 use crate::utils::error::SyscallErr;
 use log::{info, warn};
 
@@ -184,19 +185,13 @@ fn sys_clone_inner(
     if flags.contains(CloneFlags::CLONE_THREAD) && !flags.contains(CloneFlags::CLONE_SIGHAND) {
         return EINVAL;
     }
-    // Reject CLONE_NEWNS: mount namespace is NOT implemented.
-    // If this flag succeeded, fs_bind_cloneNS tests would pollute the
-    // global mount tree and cause cleanup hangs.
-    if flags.contains(CloneFlags::CLONE_FS) && flags.contains(CloneFlags::CLONE_NEWNS) {
-        return EINVAL;
-    }
-    if flags.contains(CloneFlags::CLONE_NEWNS) {
-        return EINVAL;
-    }
     if flags.contains(CloneFlags::CLONE_VFORK) && flags.contains(CloneFlags::CLONE_THREAD) {
         return EINVAL;
     }
-    if flags.contains(CloneFlags::CLONE_NEWUTS) && parent.acquire_inner_lock().euid != 0 {
+    if (flags.contains(CloneFlags::CLONE_NEWUTS) || flags.contains(CloneFlags::CLONE_NEWNET)
+        || flags.contains(CloneFlags::CLONE_NEWNS) || flags.contains(CloneFlags::CLONE_NEWIPC))
+        && parent.acquire_inner_lock().euid != 0
+    {
         return EPERM;
     }
     info!(
@@ -323,19 +318,20 @@ pub fn sys_unshare(flags: u32) -> isize {
         Some(flags) => flags,
         None => return EINVAL,
     };
-    if flags.contains(CloneFlags::CLONE_FS) && flags.contains(CloneFlags::CLONE_NEWNS) {
-        return EINVAL;
-    }
 
     let supported = CloneFlags::CLONE_FILES
         | CloneFlags::CLONE_FS
-        | CloneFlags::CLONE_NEWUTS;
+        | CloneFlags::CLONE_NEWUTS
+        | CloneFlags::CLONE_NEWNET
+        | CloneFlags::CLONE_NEWNS
+        | CloneFlags::CLONE_NEWIPC;
     if !flags.difference(supported).is_empty() {
         return EINVAL;
     }
 
     let task = current_task().unwrap();
-    if flags.contains(CloneFlags::CLONE_NEWUTS)
+    if (flags.contains(CloneFlags::CLONE_NEWUTS) || flags.contains(CloneFlags::CLONE_NEWNET)
+        || flags.contains(CloneFlags::CLONE_NEWNS) || flags.contains(CloneFlags::CLONE_NEWIPC))
         && task.acquire_inner_lock().euid != 0
     {
         return EPERM;
@@ -350,6 +346,24 @@ pub fn sys_unshare(flags: u32) -> isize {
     }
     if flags.contains(CloneFlags::CLONE_NEWUTS) {
         task.process.unshare_uts();
+    }
+    if flags.contains(CloneFlags::CLONE_NEWNET) {
+        if task.process.live_thread_count() != 1 {
+            return EINVAL;
+        }
+        task.process.unshare_net();
+    }
+    if flags.contains(CloneFlags::CLONE_NEWNS) {
+        if task.process.live_thread_count() != 1 {
+            return EINVAL;
+        }
+        task.process.set_mnt(MountNamespace::new());
+    }
+    if flags.contains(CloneFlags::CLONE_NEWIPC) {
+        if task.process.live_thread_count() != 1 {
+            return EINVAL;
+        }
+        task.process.set_ipc(IpcNamespace::new());
     }
     SUCCESS
 }
@@ -408,4 +422,63 @@ pub fn sys_clone3(uargs: *const u8, size: usize) -> isize {
         args.child_tid as *mut u32,
         pidfd_ptr,
     )
+}
+
+/// Switch to a different namespace by fd.
+/// Linux: int setns(int fd, int nstype);
+pub fn sys_setns(fd: usize, nstype: usize) -> isize {
+    const CLONE_NEWNET_VAL: usize = 0x40000000;
+    const CLONE_NEWNS_VAL: usize = 0x00020000;
+    const CLONE_NEWIPC_VAL: usize = 0x08000000;
+    if nstype != 0 && nstype != CLONE_NEWNET_VAL
+        && nstype != CLONE_NEWNS_VAL && nstype != CLONE_NEWIPC_VAL
+    {
+        return EINVAL;
+    }
+
+    let task = current_task().unwrap();
+    let files_ref = task.process.files();
+    let fd_table = files_ref.lock();
+    let file = match fd_table.get_file(fd) {
+        Ok(f) => f,
+        Err(_) => return EBADF,
+    };
+
+    let inode = MountFSInode::unwrap_inode(&file.inode);
+
+    if let Some(ns_inode) = inode
+        .as_any_ref()
+        .downcast_ref::<crate::fs::procfs::pid::ns::ProcNsNetInode>()
+    {
+        if nstype != 0 && nstype != CLONE_NEWNET_VAL {
+            return EINVAL;
+        }
+        let new_ns = ns_inode.netns().clone();
+        drop(fd_table);
+        task.process.set_net(new_ns);
+        return 0;
+    }
+
+    // ProcNsMntInode / ProcNsIpcInode to be added in a separate task;
+    // setns branches for those will be wired once the inode types exist.
+
+    use crate::fs::procfs::pid::ns::{ProcNsMntInode, ProcNsIpcInode};
+
+    if let Some(ns_inode) = inode.as_any_ref().downcast_ref::<ProcNsMntInode>() {
+        if nstype != 0 && nstype != CLONE_NEWNS_VAL { return EINVAL; }
+        let new_ns = ns_inode.mntns().clone();
+        drop(fd_table);
+        task.process.set_mnt(new_ns);
+        return 0;
+    }
+
+    if let Some(ns_inode) = inode.as_any_ref().downcast_ref::<ProcNsIpcInode>() {
+        if nstype != 0 && nstype != CLONE_NEWIPC_VAL { return EINVAL; }
+        let new_ns = ns_inode.ipcns().clone();
+        drop(fd_table);
+        task.process.set_ipc(new_ns);
+        return 0;
+    }
+
+    EINVAL
 }

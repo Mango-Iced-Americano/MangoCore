@@ -149,13 +149,15 @@ pub static RAW_SOCKETS_TO_REMOVE: Mutex<Vec<RouteSocketHandle>> = Mutex::new(Vec
 
 /// 统一的 socket 端点抽象，覆盖所有地址族。
 /// 对标 DragonOS `kernel/src/net/socket/endpoint.rs` 的 `Endpoint` 枚举，
-/// 当前仅实现了 IP 和 Unix 两种变体。
+/// 当前仅实现了 IP、Unix、Netlink 三种变体。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Endpoint {
     /// AF_INET / AF_INET6 端点
     Ip(IpEndpoint),
     /// AF_UNIX 端点
     Unix(UnixEndpoint),
+    /// AF_NETLINK 端点（nl_pid）
+    Netlink(u32),
     /// 未指定（AF_UNSPEC）
     Unspecified,
 }
@@ -209,6 +211,14 @@ impl Endpoint {
                 }
             }
             AF_UNSPEC => Ok(Endpoint::Unspecified),
+            AF_NETLINK => {
+                // sockaddr_nl: sa_family(2) + pad(2) + nl_pid(4) + nl_groups(4) = 12 bytes
+                if addr_buf.len() < 12 {
+                    return Err(SyscallErr::EINVAL);
+                }
+                let nl_pid = u32::from_ne_bytes([addr_buf[4], addr_buf[5], addr_buf[6], addr_buf[7]]);
+                Ok(Endpoint::Netlink(nl_pid))
+            }
             _ => Err(SyscallErr::EAFNOSUPPORT),
         }
     }
@@ -226,6 +236,37 @@ impl Endpoint {
         match self {
             Endpoint::Ip(ep) => address::fill_with_endpoint(*ep, addr, addrlen),
             Endpoint::Unix(unix_ep) => unix::fill_with_endpoint(unix_ep, addr, addrlen),
+            Endpoint::Netlink(nl_pid) => {
+                // sockaddr_nl: sa_family(2) + pad(2) + nl_pid(4) + nl_groups(4) = 12 bytes
+                if addr == 0 || addrlen == 0 {
+                    return Err(SyscallErr::EFAULT);
+                }
+                let task = current_task().unwrap();
+                let token = task.get_user_token();
+                let addrlen_ptr = UserPtrMut::<u32>::from_addr(addrlen);
+                let capacity = match addrlen_ptr.read(token) {
+                    Ok(len) => len as usize,
+                    Err(_) => return Err(SyscallErr::EFAULT),
+                };
+                if capacity < 12 {
+                    return Err(SyscallErr::EINVAL);
+                }
+                let mut buf = [0u8; 12];
+                buf[0..2].copy_from_slice(&AF_NETLINK.to_ne_bytes());
+                // pad[2..4] = 0
+                buf[4..8].copy_from_slice(&nl_pid.to_ne_bytes());
+                // nl_groups[8..12] = 0
+                let mut user_buf =
+                    UserBufferWriter::new(token, addr as *mut u8, 12)
+                        .map_err(|_| SyscallErr::EFAULT)?;
+                user_buf
+                    .write_from(&buf)
+                    .map_err(|_| SyscallErr::EFAULT)?;
+                addrlen_ptr
+                    .write(token, &12u32)
+                    .map_err(|_| SyscallErr::EFAULT)?;
+                Ok(0)
+            }
             Endpoint::Unspecified => {
                 // NULL 指针检查
                 if addr == 0 || addrlen == 0 {
@@ -458,9 +499,7 @@ impl IndexNode for SocketFile {
         buf: &[u8],
         _data: spin::MutexGuard<FilePrivateData>,
     ) -> Result<usize, SyscallErr> {
-        self.inner
-            .try_send(buf, MsgFlags::empty())
-            .map(|n| n as usize)
+        self.inner.try_send(buf, MsgFlags::empty()).map(|n| n as usize)
     }
 
     fn metadata(&self) -> Result<Metadata, SyscallErr> {

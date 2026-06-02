@@ -4,6 +4,7 @@ pub mod cmdline;
 pub mod exe;
 pub mod fd;
 pub mod maps;
+pub mod ns;
 pub mod smaps;
 pub mod stat;
 pub mod status;
@@ -113,6 +114,24 @@ fn create_pid_dir(
     let task_dir = dir.add_dir_locked("task", InodeMode::from_bits_truncate(0o555))?;
     task_dir.0.lock().extra_data = pid;
     task_dir.set_hooks(task::task_find_hook, task::task_list_hook);
+
+    let ns_dir = dir.add_dir_locked("ns", InodeMode::from_bits_truncate(0o500))?;
+    let fs_weak = ns_dir.0.lock().fs.clone();
+
+    let netns = process.net();
+    let ns_inode =
+        Arc::new(ns::ProcNsNetInode::new(netns, fs_weak.clone())) as Arc<dyn IndexNode>;
+    ns_dir.0.lock().children.insert(String::from("net"), ns_inode);
+
+    let mntns = process.mnt();
+    let mnt_inode =
+        Arc::new(ns::ProcNsMntInode::new(mntns, fs_weak.clone())) as Arc<dyn IndexNode>;
+    ns_dir.0.lock().children.insert(String::from("mnt"), mnt_inode);
+
+    let ipcns = process.ipc();
+    let ipc_inode =
+        Arc::new(ns::ProcNsIpcInode::new(ipcns, fs_weak.clone())) as Arc<dyn IndexNode>;
+    ns_dir.0.lock().children.insert(String::from("ipc"), ipc_inode);
 
     Ok(dir)
 }

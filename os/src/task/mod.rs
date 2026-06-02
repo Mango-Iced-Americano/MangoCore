@@ -2,6 +2,9 @@ mod completion;
 mod context;
 mod elf;
 mod manager;
+pub mod net_namespace;
+pub mod mount_namespace;
+pub mod ipc_namespace;
 use spin::MutexGuard;
 pub mod pid;
 mod process;
@@ -48,8 +51,12 @@ pub use registry::{
 pub use signal::*;
 pub use sleep::{sleep_relative_interruptible, sleep_until_interruptible};
 pub use task::{
-    FsStatus, PosixTimer, RobustList, Rusage, TaskControlBlock, TaskStatus, UtsNamespace,
+    FsStatus, PosixTimer, RobustList, Rusage, TaskControlBlock, TaskStatus,
+    UtsNamespace,
 };
+pub use net_namespace::{INIT_NET_NAMESPACE, NetNamespace};
+pub use mount_namespace::{INIT_MOUNT_NAMESPACE, MountNamespace};
+pub use ipc_namespace::{INIT_IPC_NAMESPACE, IpcNamespace};
 
 pub use self::processor::PROCESSOR;
 #[allow(unused)]

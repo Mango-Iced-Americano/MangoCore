@@ -2083,6 +2083,112 @@ fn rtnetlink01_socket() -> i32 {
     }
 }
 
+// ============================================================
+// VETH test group — veth pair newlink, setlink, addr, netns, cleanup
+// No "; true" hacks — each command chain validates via grep exit codes
+// ============================================================
+fn test_veth_newlink() -> i32 {
+    // ip link add → verify → ip link del → verify gone
+    const GROUP: &str = "VETH";
+    const NAME: &str = "veth_newlink";
+    // Step 1: create pair and verify both exist
+    let mut ret = run_bash_cmd(
+        "ip link add veth_t01 type veth peer name veth_t02 && \
+         ip link show veth_t01 >/dev/null 2>&1 && \
+         ip link show veth_t02 >/dev/null 2>&1"
+    );
+    if ret != 0 {
+        tfail!(GROUP, NAME, "create pair failed (exit={})", ret);
+        return 1;
+    }
+    // Step 2: delete and verify both gone
+    ret = run_bash_cmd(
+        "ip link del veth_t01 && \
+         (! ip link show veth_t01 >/dev/null 2>&1) && \
+         (! ip link show veth_t02 >/dev/null 2>&1)"
+    );
+    if ret != 0 {
+        tfail!(GROUP, NAME, "delete/verify gone failed (exit={})", ret);
+        return 1;
+    }
+    tpass!(GROUP, NAME, "VETH_NEWLINK_PASS — create, verify, delete, verify gone");
+    0
+}
+
+fn test_veth_setlink_up() -> i32 {
+    // create pair → ip link set up → verify IFF_UP flag
+    const GROUP: &str = "VETH";
+    const NAME: &str = "veth_setlink_up";
+    let cmd =
+        "ip link add veth_t01 type veth peer name veth_t02 && \
+         ip link set veth_t01 up && \
+         ip link show veth_t01 | grep -q 'UP'";
+    let ret = run_bash_cmd(cmd);
+    if ret == 0 {
+        tpass!(GROUP, NAME, "VETH_SETLINK_UP_PASS — interface UP flag set");
+        0
+    } else {
+        tfail!(GROUP, NAME, "failed (exit={})", ret);
+        1
+    }
+}
+
+fn test_veth_addr_add() -> i32 {
+    // create pair → ip addr add → verify via ip addr show
+    const GROUP: &str = "VETH";
+    const NAME: &str = "veth_addr_add";
+    let cmd =
+        "ip link add veth_t01 type veth peer name veth_t02 && \
+         ip addr add 10.0.0.1/24 dev veth_t01 && \
+         ip addr show veth_t01 | grep -q '10.0.0.1'";
+    let ret = run_bash_cmd(cmd);
+    if ret == 0 {
+        tpass!(GROUP, NAME, "VETH_ADDR_ADD_PASS — IP address assigned to veth");
+        0
+    } else {
+        tfail!(GROUP, NAME, "failed (exit={})", ret);
+        1
+    }
+}
+
+fn test_netns_isolation() -> i32 {
+    // unshare -n creates a new netns; veth created inside must NOT
+    // be visible in the default namespace
+    const GROUP: &str = "VETH";
+    const NAME: &str = "netns_isolation";
+    let cmd =
+        "unshare -n bash -c 'ip link add vt type veth peer vp && \
+         ip link show vt | grep -q vt' && \
+         ip link show vt 2>&1 | grep -q 'does not exist'";
+    let ret = run_bash_cmd(cmd);
+    if ret == 0 {
+        tpass!(GROUP, NAME, "NETNS_ISOLATION_PASS — veth visible in new ns, hidden from default");
+        0
+    } else {
+        tfail!(GROUP, NAME, "failed (exit={}) — unshare may be missing", ret);
+        1
+    }
+}
+
+fn test_rtm_dellink_cleanup() -> i32 {
+    // create pair → delete one → verify both are gone (pair cleanup)
+    const GROUP: &str = "VETH";
+    const NAME: &str = "rtm_dellink_cleanup";
+    let cmd =
+        "ip link add veth_x type veth peer name veth_y && \
+         ip link del veth_x && \
+         (! ip link show veth_x >/dev/null 2>&1) && \
+         (! ip link show veth_y >/dev/null 2>&1)";
+    let ret = run_bash_cmd(cmd);
+    if ret == 0 {
+        tpass!(GROUP, NAME, "RTM_DELLINK_CLEANUP_PASS — both ends removed after delete");
+        0
+    } else {
+        tfail!(GROUP, NAME, "failed (exit={})", ret);
+        1
+    }
+}
+
 fn run_with_watchdog(name: &str, test_fn: fn() -> i32, timeout_ms: usize) -> bool {
     let pid = sys_fork();
     if pid == 0 {
@@ -2127,7 +2233,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     println!("  INET (AF_INET) Connectivity Test Suite");
     println!("============================================");
 
-    let tests: [(&str, fn() -> i32); 35] = [
+    let tests: [(&str, fn() -> i32); 40] = [
         ("tcp_connect", test_tcp_connect_all),
         ("tcp_send_recv", || {
             test_tcp_send_recv("cloudflare", [1, 1, 1, 1])
@@ -2165,7 +2271,12 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         ("[NET_IOCTL] net_ioctl05_no_panic", net_ioctl05_no_panic),
         ("[NET_IOCTL] net_ioctl06_hwaddr", net_ioctl06_hwaddr),
         ("[RTNETLINK] rtnetlink01_socket", rtnetlink01_socket),
-    ]; // 35
+        ("[VETH] veth_newlink", test_veth_newlink),
+        ("[VETH] veth_setlink_up", test_veth_setlink_up),
+        ("[VETH] veth_addr_add", test_veth_addr_add),
+        ("[VETH] netns_isolation", test_netns_isolation),
+        ("[VETH] rtm_dellink_cleanup", test_rtm_dellink_cleanup),
+    ]; // 40
 
     let total = tests.len();
     let mut passed = 0;

@@ -84,10 +84,7 @@ impl Socket for UdpSocket {
             })
             .ok_or(SyscallErr::EAGAIN)??;
         NET_INTERFACE.poll();
-        let ifindex = match bind_addr.addr {
-            Some(IpAddress::Ipv4(ip)) if ip.is_loopback() => 1,
-            _ => 2,
-        };
+        let ifindex = crate::net::net_core::ifindex_for_local_addr(bind_addr.addr);
         self.bound
             .lock()
             .bind(self.socket_handler, ifindex, bind_addr.addr, bind_addr.port);
@@ -107,7 +104,7 @@ impl Socket for UdpSocket {
         let remote_endpoint = if ep.addr.is_unspecified() {
             IpEndpoint::new(
                 crate::net::net_core::loopback_iface()
-                    .and_then(|d| d.ip_addrs.first().map(|c| c.address()))
+                    .and_then(|d| d.iface.ip_addrs().first().map(|c| c.address()))
                     .unwrap_or(IpAddress::v4(127, 0, 0, 1)),
                 ep.port,
             )
@@ -156,10 +153,7 @@ impl Socket for UdpSocket {
             })
             .ok_or(SyscallErr::EAGAIN)??;
         self.inner.lock().local_endpoint = Some(local_ep);
-        let ifindex = match local_ep.addr {
-            Some(IpAddress::Ipv4(ip)) if ip.is_loopback() => 1,
-            _ => 2,
-        };
+        let ifindex = crate::net::net_core::ifindex_for_local_addr(local_ep.addr);
         self.bound
             .lock()
             .bind(self.socket_handler, ifindex, local_ep.addr, local_ep.port);

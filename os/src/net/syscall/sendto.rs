@@ -154,15 +154,19 @@ pub fn sys_sendto(
         }
         PSOCK::Raw => {
             info!("[sys_sendto] socket is raw");
-            let dest_buf = crate::trans_ref!(dest_addr, addrlen);
-            let dest_endpoint = match Endpoint::from_sockaddr(dest_buf) {
-                Ok(ep) => ep,
-                Err(e) => return -(e as isize),
+            let dest_endpoint = if dest_addr != 0 {
+                let dest_buf = crate::trans_ref!(dest_addr, addrlen);
+                match Endpoint::from_sockaddr(dest_buf) {
+                    Ok(ep) => Some(ep),
+                    Err(e) => return -(e as isize),
+                }
+            } else {
+                None
             };
             if let Some(wait_queue) = socket.send_wait_queue() {
                 if is_nonblock {
                     NET_INTERFACE.try_poll();
-                    let ret = match socket.send_to(&kernel_buf, dest_endpoint) {
+                    let ret = match socket.try_sendmsg(&kernel_buf, dest_endpoint, msg_flags) {
                         Ok(n) => n as isize,
                         Err(e) => -(e as isize),
                     };
@@ -170,7 +174,7 @@ pub fn sys_sendto(
                     ret
                 } else {
                     let ret = WaitQueue::wait_until_interruptible(wait_queue, || {
-                        match socket.send_to(&kernel_buf, dest_endpoint.clone()) {
+                        match socket.try_sendmsg(&kernel_buf, dest_endpoint.clone(), msg_flags) {
                             Ok(n) => Some(n as isize),
                             Err(SyscallErr::EAGAIN) => None,
                             Err(e) => Some(-(e as isize)),
@@ -182,11 +186,7 @@ pub fn sys_sendto(
                 }
             } else {
                 wait_io(
-                    || {
-                        socket
-                            .send_to(&kernel_buf, dest_endpoint.clone())
-                            .map(|n| n as isize)
-                    },
+                    || socket.try_sendmsg(&kernel_buf, dest_endpoint.clone(), msg_flags),
                     is_nonblock,
                 )
             }

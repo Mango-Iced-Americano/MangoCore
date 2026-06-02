@@ -189,6 +189,19 @@ pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize {
                 }
             }
         }
-        Endpoint::Unspecified => -(SyscallErr::EINVAL as isize),
+        Endpoint::Netlink(nl_pid) => {
+            let socket = crate::get_socket!(sockfd);
+            match socket.bind(&Endpoint::Netlink(nl_pid)) {
+                Ok(_) => 0 as isize,
+                Err(e) => -(e as isize),
+            }
+        }
+        Endpoint::Unspecified => {
+            let socket = crate::get_socket!(sockfd);
+            match socket.bind(&Endpoint::Unspecified) {
+                Ok(_) => 0 as isize,
+                Err(e) => -(e as isize),
+            }
+        }
     }
 }

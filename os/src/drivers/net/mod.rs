@@ -1,5 +1,6 @@
 #[cfg(any(feature = "block_virt", feature = "block_virt_pci"))]
 pub mod virtio_net;
+pub mod veth;
 
 pub trait NetDevice: Send + Sync {
     /// 接收一个数据包

@@ -4,6 +4,7 @@ use log::debug;
 use smoltcp::iface::SocketHandle;
 use smoltcp::wire::{IpAddress, IpCidr, Ipv4Address};
 
+use super::Mutex;
 use crate::utils::error::SyscallErr;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -168,13 +169,17 @@ impl Router {
         self.lookup_route(dest_ip).cloned()
     }
 
-    /// Create a Router pre-populated with default routes.
-    /// Dynamic: uses DHCP-assigned IP/gateway from net_core instead of hardcoded values.
-    pub fn init_default() -> Self {
-        let mut router = Self::new();
+    /// Fill the router with default routes (loopback + DHCP).
+    /// Safe to call multiple times — existing entries are not duplicated
+    /// because the caller is expected to manage the table lifecycle.
+    pub fn fill_default(&mut self) {
+        // Look up eth0 ifindex dynamically from the current netns
+        let eth0_ifindex = crate::net::net_core::find_by_name("eth0")
+            .map(|d| d.ifindex)
+            .unwrap_or(2);
 
         // Loopback route
-        router.add_route(
+        self.add_route(
             IpCidr::new(IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 0)), 8),
             None,
             1, // lo
@@ -184,48 +189,60 @@ impl Router {
 
         if let Some(cidr) = crate::net::net_core::eth0_ipv4_cidr() {
             // Connected route from DHCP CIDR
-            router.add_route(
+            self.add_route(
                 IpCidr::new(cidr.address(), cidr.prefix_len()),
                 None,
-                2, // eth0
+                eth0_ifindex,
                 0,
                 RouteType::Connected,
             );
 
             if let Some(gw) = crate::net::net_core::default_gateway() {
-                router.add_route(
+                self.add_route(
                     IpCidr::new(IpAddress::Ipv4(Ipv4Address::new(0, 0, 0, 0)), 0),
                     Some(IpAddress::Ipv4(gw)),
-                    2,   // eth0
+                    eth0_ifindex,
                     100,
                     RouteType::Default,
                 );
             }
         }
+    }
 
-        router
+    /// Fill default routes into the current netns router.
+    /// Should be called once during network init (after DHCP info is available).
+    pub fn init_router() {
+        crate::net::net_core::current_netns().router.lock().fill_default();
     }
 }
 
 pub fn route_output(dest: IpAddress) -> Result<RouteDecision, SyscallErr> {
-    let router = Router::init_default();
+    let ns = crate::net::net_core::current_netns();
+
+    // Lazily populate the netns router with default routes on first use.
+    {
+        let mut router = ns.router.lock();
+        if router.table.entries.is_empty() {
+            router.fill_default();
+        }
+    }
+
     match dest {
         IpAddress::Ipv4(addr) => {
-            let is_local = crate::net::net_core::IFACES
-                .lock()
-                .iter()
-                .any(|d| d.ip_addrs.iter().any(|c| c.address() == dest));
+            let list = ns.device_list.lock();
+            let is_local = list
+                .values()
+                .any(|iface| iface.ip_addrs().iter().any(|c| c.address() == dest));
             if is_local {
-                let ifaces = crate::net::net_core::IFACES.lock();
-                let dst_ifindex = ifaces
-                    .iter()
-                    .find(|d| d.ip_addrs.iter().any(|c| c.address() == dest))
-                    .map(|d| d.ifindex)
+                let dst_ifindex = list
+                    .values()
+                    .find(|iface| iface.ip_addrs().iter().any(|c| c.address() == dest))
+                    .map(|iface| iface.nic_id() as u32)
                     .unwrap_or(1);
-                let source = ifaces
-                    .iter()
-                    .find(|d| d.ifindex == dst_ifindex)
-                    .and_then(|d| d.ip_addrs.first().map(|c| c.address()))
+                let source = list
+                    .values()
+                    .find(|iface| iface.nic_id() as u32 == dst_ifindex)
+                    .and_then(|iface| iface.ip_addrs().first().map(|c| c.address()))
                     .unwrap_or(IpAddress::v4(127, 0, 0, 1));
                 return Ok(RouteDecision {
                     ifindex: dst_ifindex,
@@ -237,7 +254,7 @@ pub fn route_output(dest: IpAddress) -> Result<RouteDecision, SyscallErr> {
 
             if addr.0[0] == 127 {
                 let source = crate::net::net_core::loopback_iface()
-                    .and_then(|d| d.ip_addrs.first().map(|c| c.address()))
+                    .and_then(|d| d.iface.ip_addrs().first().map(|c| c.address()))
                     .unwrap_or(IpAddress::v4(127, 0, 0, 1));
                 return Ok(RouteDecision {
                     ifindex: 1,
@@ -247,9 +264,9 @@ pub fn route_output(dest: IpAddress) -> Result<RouteDecision, SyscallErr> {
                 });
             }
 
-            if let Some(entry) = router.lookup_route_owned(addr) {
+            if let Some(entry) = ns.router.lock().lookup_route_owned(addr) {
                 let source = crate::net::net_core::find_by_index(entry.ifindex)
-                    .and_then(|d| d.ip_addrs.first().map(|c| c.address()))
+                    .and_then(|d| d.iface.ip_addrs().first().map(|c| c.address()))
                     .unwrap_or(IpAddress::v4(0, 0, 0, 0));
                 return Ok(RouteDecision {
                     ifindex: entry.ifindex,
@@ -262,9 +279,9 @@ pub fn route_output(dest: IpAddress) -> Result<RouteDecision, SyscallErr> {
             Err(SyscallErr::ENETUNREACH)
         }
         IpAddress::Ipv6(_) => {
-            if crate::net::net_core::find_by_name("eth0").is_some() {
+            if let Some(eth0) = crate::net::net_core::find_by_name("eth0") {
                 Ok(RouteDecision {
-                    ifindex: 2,
+                    ifindex: eth0.ifindex,
                     source: IpAddress::v4(0, 0, 0, 0),
                     next_hop: None,
                     is_local: false,

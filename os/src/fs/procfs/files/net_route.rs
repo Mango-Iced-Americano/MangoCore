@@ -20,10 +20,10 @@ pub fn net_route_content(
     let mut content = String::new();
     content.push_str("Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n");
 
-    let router = crate::net::routing::Router::init_default();
-    for entry in &router.table.entries {
+    let entries = crate::net::net_core::current_netns().router.lock().table.entries.clone();
+    for entry in &entries {
         let ifname = crate::net::net_core::find_by_index(entry.ifindex)
-            .map(|d| d.name.to_string())
+            .map(|d| d.iface.iface_name())
             .unwrap_or_else(|| String::from("?"));
 
         let dest = match entry.destination.address() {
@@ -42,7 +42,7 @@ pub fn net_route_content(
             _ => "0001",
         };
         let mtu = crate::net::net_core::find_by_index(entry.ifindex)
-            .map(|d| d.mtu)
+            .map(|d| d.iface.mtu() as u32)
             .unwrap_or(0);
 
         content.push_str(&format!(

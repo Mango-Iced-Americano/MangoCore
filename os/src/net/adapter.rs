@@ -6,6 +6,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 // use riscv::addr::Address;
 use crate::drivers::net::NetDevice;
+use crate::drivers::net::veth::VethDriver;
 use smoltcp::phy::{Device, DeviceCapabilities, Loopback, Medium, RxToken, TxToken};
 use smoltcp::time::Instant;
 use smoltcp::wire::{
@@ -18,16 +19,19 @@ use spin::Mutex;
 pub enum IfaceDevice {
     Lo(Loopback),
     Eth(SmoltcpDeviceAdapter),
+    Veth(VethDriver),
 }
 
 pub enum IfaceRxToken<'a> {
     Lo(<Loopback as Device>::RxToken<'a>),
     Eth(<SmoltcpDeviceAdapter as Device>::RxToken<'a>),
+    Veth(<VethDriver as Device>::RxToken<'a>),
 }
 
 pub enum IfaceTxToken<'a> {
     Lo(<Loopback as Device>::TxToken<'a>),
     Eth(<SmoltcpDeviceAdapter as Device>::TxToken<'a>),
+    Veth(<VethDriver as Device>::TxToken<'a>),
 }
 
 impl Device for IfaceDevice {
@@ -38,6 +42,7 @@ impl Device for IfaceDevice {
         match self {
             Self::Lo(lo) => lo.capabilities(),
             Self::Eth(eth) => eth.capabilities(),
+            Self::Veth(veth) => veth.capabilities(),
         }
     }
 
@@ -51,6 +56,10 @@ impl Device for IfaceDevice {
                 let (rx, tx) = eth.receive(timestamp)?;
                 Some((IfaceRxToken::Eth(rx), IfaceTxToken::Eth(tx)))
             }
+            Self::Veth(veth) => {
+                let (rx, tx) = veth.receive(timestamp)?;
+                Some((IfaceRxToken::Veth(rx), IfaceTxToken::Veth(tx)))
+            }
         }
     }
 
@@ -58,6 +67,7 @@ impl Device for IfaceDevice {
         match self {
             Self::Lo(lo) => lo.transmit(timestamp).map(IfaceTxToken::Lo),
             Self::Eth(eth) => eth.transmit(timestamp).map(IfaceTxToken::Eth),
+            Self::Veth(veth) => veth.transmit(timestamp).map(IfaceTxToken::Veth),
         }
     }
 }
@@ -70,6 +80,7 @@ impl<'a> RxToken for IfaceRxToken<'a> {
         match self {
             Self::Lo(t) => t.consume(f),
             Self::Eth(t) => t.consume(f),
+            Self::Veth(t) => t.consume(f),
         }
     }
 }
@@ -82,6 +93,7 @@ impl<'a> TxToken for IfaceTxToken<'a> {
         match self {
             Self::Lo(t) => t.consume(len, f),
             Self::Eth(t) => t.consume(len, f),
+            Self::Veth(t) => t.consume(len, f),
         }
     }
 }
@@ -229,8 +241,9 @@ impl<'a> TxToken for RoutingTxToken<'a> {
                                 let dst_addr = ipv4.dst_addr();
                                 let dst_ip = IpAddress::Ipv4(dst_addr);
                                 let is_loopback = dst_addr.as_bytes()[0] == 127;
-                                let is_local = crate::net::net_core::IFACES.lock().iter()
-                                    .any(|d| d.ip_addrs.iter().any(|c| c.address() == dst_ip));
+                                let is_local = crate::net::net_core::current_netns()
+                                    .device_list.lock().values()
+                                    .any(|iface| iface.ip_addrs().iter().any(|c| c.address() == dst_ip));
                                 if is_loopback || is_local {
                                     log::debug!("[RoutingTxToken] dst={} -> local delivery (lo)", dst_addr);
                                     send_to_lo = true;
@@ -247,8 +260,9 @@ impl<'a> TxToken for RoutingTxToken<'a> {
                                 let ipv4 = Ipv4Address::from_bytes(&target_ip[..4].try_into().unwrap_or([0;4]));
                                 let dst_ip = IpAddress::Ipv4(ipv4);
                                 let is_loopback = ipv4.as_bytes()[0] == 127;
-                                let is_local = crate::net::net_core::IFACES.lock().iter()
-                                    .any(|d| d.ip_addrs.iter().any(|c| c.address() == dst_ip));
+                                let is_local = crate::net::net_core::current_netns()
+                                    .device_list.lock().values()
+                                    .any(|iface| iface.ip_addrs().iter().any(|c| c.address() == dst_ip));
                                 if is_loopback || is_local {
                                     send_to_lo = true;
                                     send_to_eth = false;
