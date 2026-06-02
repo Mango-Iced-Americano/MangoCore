@@ -280,6 +280,30 @@ impl<'a> NetInterface<'a> {
         }
     }
 
+    /// Sync an IP address into the smoltcp Interface of a DeviceStack.
+    pub fn add_ip_to_stack(&self, ifindex: u32, cidr: IpCidr) {
+        let mut inner = self.inner.lock();
+        if let Some(ref mut inner_ref) = *inner {
+            if let Some(stack) = inner_ref.stack_mut(ifindex) {
+                stack.iface.update_ip_addrs(|addrs| {
+                    let _ = addrs.push(cidr);
+                });
+            }
+        }
+    }
+
+    /// Remove an IP address from the smoltcp Interface of a DeviceStack.
+    pub fn remove_ip_from_stack(&self, ifindex: u32, cidr: IpCidr) {
+        let mut inner = self.inner.lock();
+        if let Some(ref mut inner_ref) = *inner {
+            if let Some(stack) = inner_ref.stack_mut(ifindex) {
+                stack.iface.update_ip_addrs(|addrs| {
+                    addrs.retain(|a| *a != cidr);
+                });
+            }
+        }
+    }
+
     pub fn tcp_socket<T>(
         &self,
         handler: SocketHandle,

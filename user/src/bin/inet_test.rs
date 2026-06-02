@@ -2234,30 +2234,13 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     println!("============================================");
 
     let tests: [(&str, fn() -> i32); 40] = [
-        ("tcp_connect", test_tcp_connect_all),
-        ("tcp_send_recv", || {
-            test_tcp_send_recv("cloudflare", [1, 1, 1, 1])
-        }),
-        ("http_get", test_http_get),
-        ("dns+baidu.com:80", || test_dns_and_tcp("baidu.com")),
-        ("dns+bilibili.com:80", || test_dns_and_tcp("bilibili.com")),
-        ("udp_loopback", test_udp_loopback),
-        ("udp_loopback_pair", test_udp_loopback_pair),
-        ("udp_external_dns", test_udp_external_dns),
-        ("udp_giant_loopback", test_udp_giant_loopback),
-        ("https_tls", test_https_tls),
-        ("https_download_8k", test_https_download),
+        // ── Step 1: unit / self-contained tests — no external dependencies ──
         ("[NET_CORE] net_core01_interface_basic", net_core01_interface_basic),
         ("[NET_CORE] net_core02_loopback_and_default_iface", net_core02_loopback_and_default_iface),
         ("[NET_CORE] net_core03_route_lookup", net_core03_route_lookup),
         ("[NET_CORE] net_core04_ephemeral_port_range", net_core04_ephemeral_port_range),
         ("[NET_CORE] net_core05_port_bind_conflict", net_core05_port_bind_conflict),
         ("[NET_CORE] net_core06_port_reuse_after_close", net_core06_port_reuse_after_close),
-        ("[NET_ROUTE] net_route01_loopback_udp", net_route01_loopback_udp),
-        ("[NET_ROUTE] net_route02_eth_local_addr", net_route02_eth_local_addr),
-        ("[NET_ROUTE] net_route03_dns_route", net_route03_dns_route),
-        ("[NET_ROUTE] net_route04_default_route", net_route04_default_route),
-        ("[NET_ROUTE] net_route05_no_route_no_panic", net_route05_no_route_no_panic),
         ("[PROC_NET] proc_net01_dev", proc_net01_dev),
         ("[PROC_NET] proc_net02_route", proc_net02_route),
         ("[PROC_NET] proc_net03_tcp_header", proc_net03_tcp_header),
@@ -2271,11 +2254,37 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         ("[NET_IOCTL] net_ioctl05_no_panic", net_ioctl05_no_panic),
         ("[NET_IOCTL] net_ioctl06_hwaddr", net_ioctl06_hwaddr),
         ("[RTNETLINK] rtnetlink01_socket", rtnetlink01_socket),
+
+        // ── Step 2: veth create / delete (local, no external net needed) ──
         ("[VETH] veth_newlink", test_veth_newlink),
         ("[VETH] veth_setlink_up", test_veth_setlink_up),
         ("[VETH] veth_addr_add", test_veth_addr_add),
         ("[VETH] netns_isolation", test_netns_isolation),
         ("[VETH] rtm_dellink_cleanup", test_rtm_dellink_cleanup),
+
+        // ── Step 3: loopback IP (127.0.0.1) — self-contained ──
+        ("udp_loopback", test_udp_loopback),
+        ("udp_loopback_pair", test_udp_loopback_pair),
+        ("udp_giant_loopback", test_udp_giant_loopback),
+        ("[NET_ROUTE] net_route01_loopback_udp", net_route01_loopback_udp),
+        ("[NET_ROUTE] net_route02_eth_local_addr", net_route02_eth_local_addr),
+
+        // ── Step 4: external connectivity (requires QEMU SLIRP / virtio-net) ──
+        ("tcp_connect", test_tcp_connect_all),
+        ("tcp_send_recv", || {
+            test_tcp_send_recv("cloudflare", [1, 1, 1, 1])
+        }),
+        ("http_get", test_http_get),
+        ("dns+baidu.com:80", || test_dns_and_tcp("baidu.com")),
+        ("dns+bilibili.com:80", || test_dns_and_tcp("bilibili.com")),
+        ("udp_external_dns", test_udp_external_dns),
+        ("[NET_ROUTE] net_route03_dns_route", net_route03_dns_route),
+        ("[NET_ROUTE] net_route04_default_route", net_route04_default_route),
+        ("[NET_ROUTE] net_route05_no_route_no_panic", net_route05_no_route_no_panic),
+
+        // ── Step 5: TLS (requires crypto + external connectivity) ──
+        ("https_tls", test_https_tls),
+        ("https_download_8k", test_https_download),
     ]; // 40
 
     let total = tests.len();
