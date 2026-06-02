@@ -204,7 +204,8 @@ impl ProcessControlBlock {
         if let Some(key) = exec_key {
             register_exec_key(key);
         }
-        Self {
+        let net_for_registry = net.clone();
+        let pcb = Self {
             pid,
             leader_tid,
             _pid_handle: pid_handle,
@@ -253,7 +254,9 @@ impl ProcessControlBlock {
                 group_exit_code: None,
                 group_exiting: false,
             }),
-        }
+        };
+        super::net_namespace::register_ns_for_pid(pid, &net_for_registry);
+        pcb
     }
 
     pub fn acquire_inner_lock(&self) -> MutexGuard<ProcessInner> {

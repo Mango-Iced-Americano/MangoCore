@@ -31,8 +31,33 @@ pub fn setup_pid_hooks(root: &Arc<LockedProcInode>) {
 
 fn pid_find_hook(inode: &LockedProcInode, name: &str) -> Option<Arc<dyn IndexNode>> {
     let pid: usize = name.parse().ok()?;
-    let process = crate::task::find_process_by_pid(pid)?;
-    create_pid_dir(inode, process).ok()
+    if let Some(process) = crate::task::find_process_by_pid(pid) {
+        return create_pid_dir(inode, process).ok();
+    }
+    create_dead_ns_dir(inode, pid)
+}
+
+fn create_dead_ns_dir(parent: &LockedProcInode, pid: usize) -> Option<Arc<dyn IndexNode>> {
+    let ns = crate::task::net_namespace::find_ns_by_pid(pid)?;
+    let (parent_weak, fs_weak) = {
+        let pdata = parent.0.lock();
+        (pdata.self_ref.clone(), pdata.fs.clone())
+    };
+    let dir = LockedProcInode::new_dir_wired(
+        parent_weak,
+        fs_weak,
+        InodeMode::from_bits_truncate(0o500),
+    );
+    let ns_dir = LockedProcInode::new_dir_wired(
+        dir.0.lock().self_ref.clone(),
+        dir.0.lock().fs.clone(),
+        InodeMode::from_bits_truncate(0o500),
+    );
+    let ns_fs = ns_dir.0.lock().fs.clone();
+    ns_dir.0.lock().children.insert(String::from("net"),
+        Arc::new(ns::ProcNsNetInode::new(ns, ns_fs)) as Arc<dyn IndexNode>);
+    dir.0.lock().children.insert(String::from("ns"), ns_dir);
+    Some(dir)
 }
 
 fn pid_list_hook(_inode: &LockedProcInode) -> Vec<String> {

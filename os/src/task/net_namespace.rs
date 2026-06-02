@@ -5,7 +5,7 @@
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use crate::net::iface::{DeviceKind, Iface};
 use crate::net::net_core::{NetDeviceEntry, IF_OPER_UP, IFF_LOOPBACK, IFF_RUNNING, IFF_UP};
@@ -95,4 +95,17 @@ impl NetNamespace {
             .find(|iface| iface.iface_name() == name)
             .cloned()
     }
+}
+
+lazy_static! {
+    static ref NS_BY_PID: spin::Mutex<BTreeMap<usize, Weak<NetNamespace>>> =
+        spin::Mutex::new(BTreeMap::new());
+}
+
+pub fn register_ns_for_pid(pid: usize, ns: &Arc<NetNamespace>) {
+    NS_BY_PID.lock().insert(pid, Arc::downgrade(ns));
+}
+
+pub fn find_ns_by_pid(pid: usize) -> Option<Arc<NetNamespace>> {
+    NS_BY_PID.lock().get(&pid).and_then(|w| w.upgrade())
 }
