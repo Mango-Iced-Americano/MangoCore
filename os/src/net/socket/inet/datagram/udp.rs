@@ -360,9 +360,11 @@ impl Socket for UdpSocket {
         if let Some(n) = self.try_deliver_local(remote, &send_buf)? {
             return Ok(n);
         }
-        // Route check: external dest without NIC → ENETUNREACH
         if let Err(e) = route_check(remote.addr) {
             return Err(e);
+        }
+        if let Some(route) = crate::net::routing::route_output(remote.addr).ok() {
+            NET_INTERFACE.rebind_routed_udp(self.socket_handler, route.ifindex);
         }
         NET_INTERFACE
             .udp_routed_socket(self.socket_handler, |socket| {

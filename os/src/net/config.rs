@@ -670,6 +670,44 @@ impl<'a> NetInterface<'a> {
         }
     }
 
+    pub fn rebind_routed_udp(
+        &self,
+        rh: RouteSocketHandle,
+        new_ifindex: u32,
+    ) -> Option<RouteSocketHandle> {
+        let mut inner = self.inner.lock();
+        let inner_ref = inner.as_mut()?;
+        let old_binding = inner_ref.bindings.remove(&rh)?;
+        if old_binding.ifindex == new_ifindex {
+            inner_ref.bindings.insert(rh, old_binding);
+            return Some(rh);
+        }
+        let rx_buf = udp::PacketBuffer::new(
+            vec![udp::PacketMetadata::EMPTY; 1024],
+            vec![0u8; crate::net::MAX_BUFFER_SIZE],
+        );
+        let tx_buf = udp::PacketBuffer::new(
+            vec![udp::PacketMetadata::EMPTY; 1024],
+            vec![0u8; crate::net::MAX_BUFFER_SIZE],
+        );
+        let new_socket = udp::Socket::new(rx_buf, tx_buf);
+        {
+            let old_stack = inner_ref.stack_mut(old_binding.ifindex)?;
+            old_stack.sockets.remove(old_binding.handle);
+        }
+        let new_stack = inner_ref.stack_mut(new_ifindex)?;
+        let new_handle = new_stack.sockets.add(new_socket);
+        inner_ref.bindings.insert(
+            rh,
+            SocketBinding {
+                ifindex: new_ifindex,
+                handle: new_handle,
+                proto: InetProtocol::Udp,
+            },
+        );
+        Some(rh)
+    }
+
     pub fn raw_routed_socket<T>(
         &self,
         rh: RouteSocketHandle,
