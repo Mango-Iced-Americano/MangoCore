@@ -95,6 +95,15 @@ impl RouteTable {
     pub fn remove(&mut self, destination: &IpCidr) {
         self.entries.retain(|e| &e.destination != destination);
     }
+
+    /// Remove connected routes for (ifindex, destination) only.
+    pub fn remove_connected(&mut self, ifindex: u32, dest: &IpCidr) {
+        self.entries.retain(|e| {
+            e.ifindex != ifindex
+                || e.destination != *dest
+                || e.route_type != RouteType::Connected
+        });
+    }
 }
 
 /// A routing table wrapper providing route lookup and management.

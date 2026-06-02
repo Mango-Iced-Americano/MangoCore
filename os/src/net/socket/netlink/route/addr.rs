@@ -132,18 +132,20 @@ pub fn handle_newaddr(
         iface.add_ip_addr(cidr);
     }
 
+    unsync_addr_from_smoltcp(msg.index as u32, cidr);
     sync_addr_to_smoltcp(msg.index as u32, cidr);
 
     {
         let ns = crate::net::net_core::current_netns();
-        let subnet = IpCidr::new(IpAddress::Ipv4(addr), msg.prefixlen);
+        let net_cidr = IpCidr::new(IpAddress::Ipv4(network_base(addr, msg.prefixlen)), msg.prefixlen);
         let mut router = ns.router.lock();
+        router.table.remove_connected(msg.index as u32, &net_cidr);
         router.add_route(
-            subnet,
+            net_cidr,
             None,
             msg.index as u32,
             0,
-            crate::net::routing::RouteType::Default,
+            crate::net::routing::RouteType::Connected,
         );
     }
 
@@ -180,8 +182,9 @@ pub fn handle_deladdr(
 
     {
         let ns = crate::net::net_core::current_netns();
+        let net_cidr = IpCidr::new(IpAddress::Ipv4(network_base(addr, msg.prefixlen)), msg.prefixlen);
         let mut router = ns.router.lock();
-        router.table.remove(&cidr);
+        router.table.remove_connected(msg.index as u32, &net_cidr);
     }
 
     let mut orig = [0u8; 16];
@@ -196,4 +199,10 @@ fn sync_addr_to_smoltcp(ifindex: u32, cidr: IpCidr) {
 
 fn unsync_addr_from_smoltcp(ifindex: u32, cidr: IpCidr) {
     crate::net::config::NET_INTERFACE.remove_ip_from_stack(ifindex, cidr);
+}
+
+fn network_base(addr: Ipv4Address, prefix_len: u8) -> Ipv4Address {
+    let ip = u32::from_be_bytes(addr.0);
+    let mask = if prefix_len == 0 { 0 } else { !0u32 << (32 - prefix_len) };
+    Ipv4Address::from_bytes(&(ip & mask).to_be_bytes())
 }

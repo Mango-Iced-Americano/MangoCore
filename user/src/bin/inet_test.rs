@@ -2116,13 +2116,13 @@ fn test_veth_newlink() -> i32 {
 }
 
 fn test_veth_setlink_up() -> i32 {
-    // create pair → ip link set up → verify IFF_UP flag
     const GROUP: &str = "VETH";
     const NAME: &str = "veth_setlink_up";
     let cmd =
         "ip link add veth_t01 type veth peer name veth_t02 && \
          ip link set veth_t01 up && \
-         ip link show veth_t01 | grep -q 'UP'";
+         ip link show veth_t01 | grep -q 'UP' && \
+         ip link del veth_t01";
     let ret = run_bash_cmd(cmd);
     if ret == 0 {
         tpass!(GROUP, NAME, "VETH_SETLINK_UP_PASS — interface UP flag set");
@@ -2134,13 +2134,13 @@ fn test_veth_setlink_up() -> i32 {
 }
 
 fn test_veth_addr_add() -> i32 {
-    // create pair → ip addr add → verify via ip addr show
     const GROUP: &str = "VETH";
     const NAME: &str = "veth_addr_add";
     let cmd =
         "ip link add veth_t01 type veth peer name veth_t02 && \
          ip addr add 10.0.0.1/24 dev veth_t01 && \
-         ip addr show veth_t01 | grep -q '10.0.0.1'";
+         ip addr show veth_t01 | grep -q '10.0.0.1' && \
+         ip link del veth_t01";
     let ret = run_bash_cmd(cmd);
     if ret == 0 {
         tpass!(GROUP, NAME, "VETH_ADDR_ADD_PASS — IP address assigned to veth");
