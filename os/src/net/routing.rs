@@ -261,6 +261,8 @@ pub fn route_output(dest: IpAddress) -> Result<RouteDecision, SyscallErr> {
                 });
             }
 
+            drop(list);
+
             if addr.0[0] == 127 {
                 let source = crate::net::net_core::loopback_iface()
                     .and_then(|d| d.iface.ip_addrs().first().map(|c| c.address()))
