@@ -14,6 +14,7 @@ pub const SIOCGIFMTU: u32 = 0x8921;
 pub const SIOCSIFMTU: u32 = 0x8922;
 pub const SIOCGIFHWADDR: u32 = 0x8927;
 pub const SIOCGIFINDEX: u32 = 0x8933;
+pub const SIOCGIFTXQLEN: u32 = 0x8942;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -119,11 +120,16 @@ fn siocgifbrdaddr(ifr: &mut ifreq) -> Result<usize, SyscallErr> {
 }
 fn siocgifmtu(ifr: &mut ifreq) -> Result<usize, SyscallErr> { let d = find_dev(ifr.name_str())?; ifr.set_ifr_mtu(d.iface.mtu() as i32); Ok(0) }
 fn siocgifhwaddr(ifr: &mut ifreq) -> Result<usize, SyscallErr> { let d = find_dev(ifr.name_str())?; ifr.set_ifr_hwaddr(&d.iface.mac()); Ok(0) }
+fn siocgiftxqlen(ifr: &mut ifreq) -> Result<usize, SyscallErr> {
+    let _d = find_dev(ifr.name_str())?;
+    ifr.set_ifr_mtu(1000); // reuse mtu field for qlen — same layout
+    Ok(0)
+}
 
 pub fn siocgif_dispatch(cmd: u32, arg: usize) -> Result<usize, SyscallErr> {
     match cmd {
         SIOCGIFCONF => siocgifconf(arg),
-        cmd if cmd == SIOCGIFINDEX || cmd == SIOCGIFFLAGS || cmd == SIOCGIFADDR || cmd == SIOCGIFNETMASK || cmd == SIOCGIFBRDADDR || cmd == SIOCGIFMTU || cmd == SIOCGIFHWADDR => {
+        cmd if cmd == SIOCGIFINDEX || cmd == SIOCGIFFLAGS || cmd == SIOCGIFADDR || cmd == SIOCGIFNETMASK || cmd == SIOCGIFBRDADDR || cmd == SIOCGIFMTU || cmd == SIOCGIFHWADDR || cmd == SIOCGIFTXQLEN => {
             let mut ifr = read_ifreq(arg)?;
             let r = match cmd {
                 SIOCGIFINDEX => siocgifindex(&mut ifr),
@@ -133,6 +139,7 @@ pub fn siocgif_dispatch(cmd: u32, arg: usize) -> Result<usize, SyscallErr> {
                 SIOCGIFBRDADDR => siocgifbrdaddr(&mut ifr),
                 SIOCGIFMTU => siocgifmtu(&mut ifr),
                 SIOCGIFHWADDR => siocgifhwaddr(&mut ifr),
+                SIOCGIFTXQLEN => siocgiftxqlen(&mut ifr),
                 _ => Err(SyscallErr::EOPNOTSUPP),
             };
             if r.is_ok() { write_ifreq(arg, &ifr)?; }
