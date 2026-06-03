@@ -38,7 +38,8 @@ fn pid_find_hook(inode: &LockedProcInode, name: &str) -> Option<Arc<dyn IndexNod
 }
 
 fn create_dead_ns_dir(parent: &LockedProcInode, pid: usize) -> Option<Arc<dyn IndexNode>> {
-    let ns = crate::task::net_namespace::find_ns_by_pid(pid)?;
+    let netns = crate::task::net_namespace::find_ns_by_pid(pid)
+        .unwrap_or_else(|| crate::task::INIT_NET_NAMESPACE.clone());
     let (parent_weak, fs_weak) = {
         let pdata = parent.0.lock();
         (pdata.self_ref.clone(), pdata.fs.clone())
@@ -48,14 +49,22 @@ fn create_dead_ns_dir(parent: &LockedProcInode, pid: usize) -> Option<Arc<dyn In
         fs_weak,
         InodeMode::from_bits_truncate(0o500),
     );
+    let (dir_self_ref, dir_fs) = {
+        let guard = dir.0.lock();
+        (guard.self_ref.clone(), guard.fs.clone())
+    };
     let ns_dir = LockedProcInode::new_dir_wired(
-        dir.0.lock().self_ref.clone(),
-        dir.0.lock().fs.clone(),
+        dir_self_ref,
+        dir_fs,
         InodeMode::from_bits_truncate(0o500),
     );
     let ns_fs = ns_dir.0.lock().fs.clone();
     ns_dir.0.lock().children.insert(String::from("net"),
-        Arc::new(ns::ProcNsNetInode::new(ns, ns_fs)) as Arc<dyn IndexNode>);
+        Arc::new(ns::ProcNsNetInode::new(netns, ns_fs.clone())) as Arc<dyn IndexNode>);
+    ns_dir.0.lock().children.insert(String::from("mnt"),
+        Arc::new(ns::ProcNsMntInode::new(crate::task::INIT_MOUNT_NAMESPACE.clone(), ns_fs.clone())) as Arc<dyn IndexNode>);
+    ns_dir.0.lock().children.insert(String::from("ipc"),
+        Arc::new(ns::ProcNsIpcInode::new(crate::task::INIT_IPC_NAMESPACE.clone(), ns_fs)) as Arc<dyn IndexNode>);
     dir.0.lock().children.insert(String::from("ns"), ns_dir);
     Some(dir)
 }

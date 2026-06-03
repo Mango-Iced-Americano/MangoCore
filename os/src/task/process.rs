@@ -349,11 +349,13 @@ impl ProcessControlBlock {
     pub fn unshare_net(&self) -> Arc<NetNamespace> {
         let new_ns = NetNamespace::new_isolated();
         self.set_net(new_ns.clone());
+        super::net_namespace::register_ns_for_pid(self.pid, &new_ns);
         new_ns
     }
 
     /// Replace the current process's network namespace.
     pub fn set_net(&self, net: Arc<NetNamespace>) {
+        super::net_namespace::register_ns_for_pid(self.pid, &net);
         self.inner.lock().net = net;
     }
 

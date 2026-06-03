@@ -98,14 +98,19 @@ impl NetNamespace {
 }
 
 lazy_static! {
-    static ref NS_BY_PID: spin::Mutex<BTreeMap<usize, Weak<NetNamespace>>> =
+    static ref NS_BY_PID: spin::Mutex<BTreeMap<usize, Arc<NetNamespace>>> =
         spin::Mutex::new(BTreeMap::new());
 }
 
 pub fn register_ns_for_pid(pid: usize, ns: &Arc<NetNamespace>) {
-    NS_BY_PID.lock().insert(pid, Arc::downgrade(ns));
+    NS_BY_PID.lock().insert(pid, ns.clone());
 }
 
 pub fn find_ns_by_pid(pid: usize) -> Option<Arc<NetNamespace>> {
-    NS_BY_PID.lock().get(&pid).and_then(|w| w.upgrade())
+    NS_BY_PID.lock().get(&pid).cloned()
+}
+
+/// Returns a reference to the PID→namespace registry for sysfs all-namespace iteration.
+pub fn ns_registry() -> &'static spin::Mutex<BTreeMap<usize, Arc<NetNamespace>>> {
+    &NS_BY_PID
 }

@@ -13,6 +13,7 @@ pub mod poll;
 pub mod procfs;
 pub mod ramfs;
 pub mod reclaim;
+pub mod sysfs;
 pub mod tmpfs;
 #[cfg(feature = "swap")]
 pub mod swap;
@@ -181,6 +182,30 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
         }
         mfs.add_mount(proc_inode_id, procfs_mnt)
             .expect("failed to mount procfs at /proc");
+    }
+
+     // ── /sys — kernel object filesystem ──
+    {
+        let sys_inode = root.find("sys").unwrap_or_else(|_| {
+            root.create("sys", self::vfs::FileType::Dir, self::vfs::InodeMode::from_bits_truncate(0o555))
+                .expect("failed to create /sys")
+        });
+        let sys_inode_id = sys_inode.metadata().expect("sys_inode metadata failed").inode_id;
+        let sysfs = crate::fs::sysfs::SysFS::new();
+        crate::fs::sysfs::files::register_all(sysfs.root())
+            .expect("sysfs: failed to register root entries");
+        let sysfs_mnt = self::vfs::MountFS::new(sysfs, self::vfs::MountFlags::empty());
+        sysfs_mnt.no_dentry_cache.store(true, core::sync::atomic::Ordering::Relaxed);
+        sysfs_mnt.set_mount_path(Some(alloc::string::String::from("/sys")));
+        if let Some(sys_mfsi) = sys_inode.as_any_ref().downcast_ref::<self::vfs::MountFSInode>() {
+            let backref = self::vfs::MountFSInode::new(
+                sys_mfsi.inner_inode.clone(),
+                sys_mfsi.mount_fs.clone(),
+            );
+            sysfs_mnt.set_self_mountpoint(Some(backref));
+        }
+        mfs.add_mount(sys_inode_id, sysfs_mnt)
+            .expect("failed to mount sysfs at /sys");
     }
 
      // ── /tmp — 临时文件系统（ramfs, 不受配额限制）──

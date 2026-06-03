@@ -20,7 +20,6 @@ pub fn handle_newlink(
     sock: &NetlinkSocket,
 ) -> Result<isize, crate::utils::error::SyscallErr> {
     let payload = &buf[16..];
-    // ifinfomsg is 16 bytes: family(1) + padding(1) + type(2) + index(4) + flags(4) + change(4)
     if payload.len() < 16 {
         return Err(crate::utils::error::SyscallErr::EINVAL);
     }
@@ -103,9 +102,10 @@ pub fn handle_newlink(
                                             if pp_len < 4 || poff + pp_len > p_payload.len() {
                                                 break;
                                             }
-                                            let pp_type = u16::from_ne_bytes(
+                                            let pp_type_raw = u16::from_ne_bytes(
                                                 [p_payload[poff + 2], p_payload[poff + 3]],
-                                            ) & !NLA_F_NESTED;
+                                            );
+                                            let pp_type = pp_type_raw & !NLA_F_NESTED;
                                             let pp_data = &p_payload[poff + 4..poff + pp_len];
 
                                             if pp_type == IFLA_IFNAME {
@@ -177,7 +177,11 @@ pub fn handle_newlink(
 
     // ---- Validate link kind (pure create path) ----
     if kind.is_empty() {
-        send_error(sock, buf, seq, pid, 22)?; // EINVAL: missing IFLA_INFO_KIND
+        send_error(sock, buf, seq, pid, 22)?;
+        return Ok(0);
+    }
+    if kind != "veth" {
+        send_error(sock, buf, seq, pid, 95)?;
         return Ok(0);
     }
     if kind != "veth" {
@@ -201,7 +205,7 @@ pub fn handle_newlink(
     if crate::net::net_core::find_by_name(&name1).is_some()
         || crate::net::net_core::find_by_name(&name2).is_some()
     {
-        send_error(sock, buf, seq, pid, 17)?; // EEXIST
+        send_error(sock, buf, seq, pid, 17)?;
         return Ok(0);
     }
 
@@ -424,14 +428,20 @@ pub fn handle_dellink(
 }
 
 fn infer_veth_peer_name(name: &str) -> String {
-    if let Some((prefix, num)) = name.rsplit_once(|c: char| c.is_ascii_digit()) {
-        if !prefix.is_empty() && num.parse::<u64>().is_ok() {
-            let next = alloc::string::ToString::to_string(
-                &(num.parse::<u64>().unwrap().wrapping_add(1)),
-            );
-            let candidate = alloc::string::ToString::to_string(prefix) + &next;
-            if crate::net::net_core::find_by_name(&candidate).is_none() {
-                return candidate;
+    // Find the trailing digit sequence (e.g., "veth_t01" -> "veth_t02", "eth0" -> "eth1").
+    let bytes = name.as_bytes();
+    let digit_len = bytes.iter().rev().take_while(|b| b.is_ascii_digit()).count();
+    if digit_len > 0 {
+        let split = name.len() - digit_len;
+        let prefix = &name[..split];
+        let suffix = &name[split..];
+        if let Ok(num) = suffix.parse::<u64>() {
+            if let Some(next) = num.checked_add(1) {
+                let next_str = alloc::format!("{:0width$}", next, width = suffix.len());
+                let candidate = alloc::string::ToString::to_string(prefix) + &next_str;
+                if crate::net::net_core::find_by_name(&candidate).is_none() {
+                    return candidate;
+                }
             }
         }
     }

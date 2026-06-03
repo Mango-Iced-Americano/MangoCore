@@ -374,7 +374,7 @@ fn precompute_env(ltproot: &str, tmpdir: &str) -> PrecomputedEnv {
 
     let env_preload: [*const u8; 16] = [
         ltp_root_s.as_ptr(), path_s.as_ptr(), tmpdir_s.as_ptr(), tmpbase_s.as_ptr(),
-        "HOME=/\0".as_ptr(), pwd_s.as_ptr(), "SHELL=/bin/sh\0".as_ptr(),
+        "HOME=/\0".as_ptr(), pwd_s.as_ptr(), "SHELL=/bin/bash\0".as_ptr(),
         "TERM=dumb\0".as_ptr(), "LTP_COLORIZE_OUTPUT=y\0".as_ptr(),
         "LTP_DEV_FS_TYPE=ext2\0".as_ptr(), "LTP_IPC_PATH=/tmp\0".as_ptr(),
         "LANG=C.UTF-8\0".as_ptr(), "LTP_REPRODUCIBLE_OUTPUT=n\0".as_ptr(),
@@ -382,7 +382,7 @@ fn precompute_env(ltproot: &str, tmpdir: &str) -> PrecomputedEnv {
     ];
     let env_no_preload: [*const u8; 16] = [
         ltp_root_s.as_ptr(), path_s.as_ptr(), tmpdir_s.as_ptr(), tmpbase_s.as_ptr(),
-        "HOME=/\0".as_ptr(), pwd_s.as_ptr(), "SHELL=/bin/sh\0".as_ptr(),
+        "HOME=/\0".as_ptr(), pwd_s.as_ptr(), "SHELL=/bin/bash\0".as_ptr(),
         "TERM=dumb\0".as_ptr(), "LTP_COLORIZE_OUTPUT=y\0".as_ptr(),
         "LTP_DEV_FS_TYPE=ext2\0".as_ptr(), "LTP_IPC_PATH=/tmp\0".as_ptr(),
         "LANG=C.UTF-8\0".as_ptr(), "LTP_REPRODUCIBLE_OUTPUT=n\0".as_ptr(),

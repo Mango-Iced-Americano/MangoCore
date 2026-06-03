@@ -4,6 +4,74 @@
 
 ## 2026-06-02
 
+### P0.1: 修复 inet_test VETH 4/5 失败 + non-dump RTM_GETLINK 补齐
+
+**涉及文件：**
+- `os/src/net/socket/netlink/route/link.rs` — `infer_veth_peer_name` 重写：旧版 `rsplit_once(|c| c.is_ascii_digit())` 从右匹配第一个数字导致后缀为空→解析失败→fallback 生成 "veth0"。新版统计尾随数字序列长度，分割后递增并保留零填充宽度（例："veth_t01"→"veth_t02"，"eth0"→"eth1"）。`wrapping_add` 替换为 `checked_add` 防溢出回绕。
+- `os/src/net/socket/netlink/route/mod.rs` — 非 DUMP 模式的 `RTM_GETLINK` 加入 dispatch，新增 `handle_getlink_single` 解析 ifindex/IFLA_IFNAME、查单设备、返回单个 RTM_NEWLINK（无 NLMSG_DONE）。原 bug：非 DUMP 的 GETLINK 落入 `_ => {}` 返回 EOPNOTSUPP。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU: VETH 4/5 TPASS (veth_newlink, veth_setlink_up, veth_addr_add, rtm_dellink_cleanup)，netns_isolation 仍 TFAIL（`unshare -n` 独立问题）
+- inet_test: 37/40 pass
+
+**备注：**
+- BusyBox `ip link show` 实际发送 NLM_F_DUMP=0x300，走 dump 路径（handle_getlink），non-dump handler 作为兜底
+- `ip link add veth_t01 type veth peer name veth_t02` 中 BusyBox 不发送 VETH_INFO_PEER，peer 名由内核推断
+
+### Oracle 审查修复：sysfs 缓存/锁/权限 + checked_add
+
+**涉及文件：**
+- `os/src/fs/sysfs/mod.rs` — 重写：find 不再缓存 hook 结果到 children（防 rename/delete 脏缓存）；read_at 先提取 content_fn/static_content 再释放锁再调用；static_content 优先于 content_fn；权限修正（iface 目录 0o555，文件 0o444）
+- `os/src/fs/sysfs/files/mod.rs` — 重写：简化内容函数，使用 `static_content: Option<&'static str>` 直接渲染 leaked 字符串
+- `os/src/net/socket/netlink/route/link.rs` — `wrapping_add(1)` → `checked_add(1)`
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU: 零 panic，VETH 4/5 保持 TPASS
+
+### 实现最小 sysfs：/sys/class/net/<iface>/{address,mtu}
+
+### 死锁修复：create_dead_ns_dir Rust 临时变量生命周期 bug
+
+**涉及文件：**
+- `os/src/fs/procfs/pid/mod.rs` — `create_dead_ns_dir` 中 `dir.0.lock()` 在同一函数调用表达式内被调用两次：第一个 MutexGuard 在第二个 lock() 时尚未 drop（Rust 临时变量在完整表达式结束才释放），导致 TicketMutex 不可重入死锁。修复：提取为独立 let 绑定，确保 guard 在第二次 lock 前释放。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+### Oracle 审查修复：SysFS Box::leak → owned String + 锁顺序
+
+**涉及文件：**
+- `os/src/fs/sysfs/mod.rs` — `static_content: Option<&'static str>` → `owned_content: Option<String>`；`add_file_static` → `add_file_owned`（接收 String）；`read_at` 增 `drop(_data)` 提前释放 FilePrivateData 锁；`owned_content.clone()` 提取后再渲染（释放 inode 锁后操作）
+- `os/src/fs/sysfs/files/mod.rs` — 移除 `Box::leak`，使用 `add_file_owned` 传入 owned String；`net_class_list_hook` 先收集 `Arc<dyn Iface>` 再释放 device_list 锁后调用 `iface_name()`
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU: 39/40 pass，零 panic
+
+### 实现最小 sysfs：/sys/class/net/<iface>/{address,mtu}
+
+**涉及文件：**
+- `os/src/fs/sysfs/mod.rs` — 新建：SysFS 文件系统核心（FileSystem trait + IndexNode trait 实现），含 SysInode/SysInodeData/SysContentFn/FindHookFn/ListHookFn，支持 static_content 直接渲染和 content_fn 动态生成
+- `os/src/fs/sysfs/files/mod.rs` — 新建：注册 /sys/class/net 目录树，通过 find/list 钩子动态枚举网络接口，每个 iface 目录下暴露 address（MAC xx:xx:xx:xx:xx:xx\n）和 mtu（数字\n）文件
+- `os/src/net/socket/netlink/route/link.rs` — 修复预存在的 `continue` 在循环外错误（checked_add 溢出处理改用 if let）
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- LSP diagnostics: 0 errors on sysfs files
+
+**备注：**
+- 仅实现 class/net/<iface>/{address,mtu}，不扩展其他路径
+- find hook 结果不缓存到 children（防 rename/delete 脏缓存）
+- static_content 优先于 content_fn（read_at 直接渲染 &'static str）
+- list() 中 children 与 hook 结果去重
+
 ### 添加 MountNamespace / IpcNamespace 最小 stub 支持
 
 **涉及文件：**

@@ -45,6 +45,7 @@ pub fn handle_netlink_msg(buf: &[u8], sock: &NetlinkSocket) -> Result<isize, cra
             RTM_SETLINK => return link::handle_setlink(seq, pid, buf, sock),
             RTM_NEWROUTE => return route::handle_newroute(seq, pid, buf, flags, sock),
             RTM_DELROUTE => return route::handle_delroute(seq, pid, buf, sock),
+            RTM_GETLINK => return handle_getlink_single(seq, pid, buf, sock),
             _ => {}
         }
         let mut orig = [0u8; 16]; orig.copy_from_slice(&buf[..16]);
@@ -88,6 +89,77 @@ fn handle_getlink(seq: u32, pid: u32, sock: &NetlinkSocket) -> Result<isize, cra
         }
     }
     if !sock.push_recv(super::netlink::build_nlmsg(NLMSG_DONE, NLM_F_MULTI, seq, pid, &[])) {
+        return Err(crate::utils::error::SyscallErr::ENOBUFS);
+    }
+    Ok(0)
+}
+
+/// Handle non-dump RTM_GETLINK — specific-device lookup by ifindex or IFLA_IFNAME.
+fn handle_getlink_single(seq: u32, pid: u32, buf: &[u8], sock: &NetlinkSocket) -> Result<isize, crate::utils::error::SyscallErr> {
+    let payload = buf.get(16..).ok_or(crate::utils::error::SyscallErr::EINVAL)?;
+    if payload.len() < 16 {
+        let mut orig = [0u8; 16]; orig.copy_from_slice(&buf[..16]);
+        if !sock.push_recv(super::netlink::build_nlmsg_error(22, seq, pid, &orig)) {
+            return Err(crate::utils::error::SyscallErr::ENOBUFS);
+        }
+        return Ok(0);
+    }
+
+    let ifindex = i32::from_ne_bytes([payload[4], payload[5], payload[6], payload[7]]);
+
+    let mut ifname: Option<alloc::string::String> = None;
+    let mut offset = 16;
+    while offset + 4 <= payload.len() {
+        let rta_len = u16::from_ne_bytes([payload[offset], payload[offset + 1]]) as usize;
+        if rta_len < 4 || offset + rta_len > payload.len() {
+            break;
+        }
+        let rta_type = u16::from_ne_bytes([payload[offset + 2], payload[offset + 3]]);
+        let rta_data = &payload[offset + 4..offset + rta_len];
+
+        if rta_type == IFLA_IFNAME {
+            let len = rta_data.iter().position(|&b| b == 0).unwrap_or(rta_data.len());
+            ifname = Some(alloc::string::String::from(
+                core::str::from_utf8(&rta_data[..len]).unwrap_or(""),
+            ));
+        }
+        offset += (rta_len + 3) & !3;
+    }
+
+    let ns = crate::net::net_core::current_netns();
+    let iface = if ifindex > 0 {
+        ns.device_by_index(ifindex as usize)
+    } else {
+        ifname.as_ref().and_then(|n| ns.device_by_name(n))
+    };
+
+    let iface = match iface {
+        Some(i) => i,
+        None => {
+            let mut orig = [0u8; 16]; orig.copy_from_slice(&buf[..16]);
+            if !sock.push_recv(super::netlink::build_nlmsg_error(19, seq, pid, &orig)) {
+                return Err(crate::utils::error::SyscallErr::ENOBUFS);
+            }
+            return Ok(0);
+        }
+    };
+
+    let nic_id = iface.nic_id() as u32;
+    let mut payload = alloc::vec::Vec::new();
+    payload.push(0); payload.push(0);
+    let ift = if nic_id == 1 { ARPHRD_LOOPBACK } else { ARPHRD_ETHER };
+    payload.extend_from_slice(&ift.to_ne_bytes());
+    payload.extend_from_slice(&nic_id.to_ne_bytes());
+    payload.extend_from_slice(&iface.flags().to_ne_bytes());
+    payload.extend_from_slice(&0u32.to_ne_bytes());
+    let mut n = alloc::vec::Vec::new(); n.extend_from_slice(iface.iface_name().as_bytes()); n.push(0);
+    payload.extend(&super::netlink::rta_data(IFLA_IFNAME, &n));
+    payload.extend(&super::netlink::rta_data(IFLA_MTU, &(iface.mtu() as u32).to_ne_bytes()));
+    if iface.kind() != DeviceKind::Loopback {
+        payload.extend(&super::netlink::rta_data(IFLA_ADDRESS, &iface.mac()));
+    }
+
+    if !sock.push_recv(super::netlink::build_nlmsg(RTM_NEWLINK, 0, seq, pid, &payload)) {
         return Err(crate::utils::error::SyscallErr::ENOBUFS);
     }
     Ok(0)
