@@ -22,6 +22,10 @@ sdcard-la.img
 
 sdcard-rv.img
 
+disk.img
+
+disk-la.img
+
 *digest.txt
  
 *packets.pcap

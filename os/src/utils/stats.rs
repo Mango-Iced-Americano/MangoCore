@@ -15,33 +15,46 @@ fn ext4_cache_stats() -> (usize, usize, usize, usize, usize) {
     let mut ic = 0;
     let mut mb = 0;
     let mut md = 0;
-    let g = crate::fs::ext4::ext4fs::GLOBAL_EXT4FS.lock();
-    if let Some(fs) = g.as_ref().and_then(|w| w.upgrade()) {
+    let mut g = crate::fs::ext4::ext4fs::EXT4_REGISTRY.lock();
+    let live: alloc::vec::Vec<_> = g.iter().filter_map(|w| w.upgrade()).collect();
+    g.retain(|w| w.strong_count() > 0);
+    drop(g);
+    for fs in &live {
         let c = fs.get_cache_metric(6);
         let d = fs.get_cache_metric(7);
         let i = fs.get_cache_metric(8);
         if c >= 0 {
-            pc = c as usize;
+            pc += c as usize;
         }
         if d >= 0 {
-            pd = d as usize;
+            pd += d as usize;
         }
         if i >= 0 {
-            ic = i as usize;
+            ic += i as usize;
         }
         let (l, dty, _) = fs.meta_block_cache.stats();
-        mb = l * fs.block_size;
-        md = dty;
+        mb += l * fs.block_size;
+        md += dty;
     }
     (pc, pd, ic, mb, md)
 }
 
 fn ext4_dentry_stats() -> (usize, usize, usize, usize, usize, usize) {
-    let g = crate::fs::ext4::ext4fs::GLOBAL_EXT4FS.lock();
-    if let Some(fs) = g.as_ref().and_then(|w| w.upgrade()) {
-        return fs.dentry_stats();
+    let mut g = crate::fs::ext4::ext4fs::EXT4_REGISTRY.lock();
+    let live: alloc::vec::Vec<_> = g.iter().filter_map(|w| w.upgrade()).collect();
+    g.retain(|w| w.strong_count() > 0);
+    drop(g);
+    let mut total = (0, 0, 0, 0, 0, 0);
+    for fs in &live {
+        let s = fs.dentry_stats();
+        total.0 += s.0;
+        total.1 += s.1;
+        total.2 += s.2;
+        total.3 += s.3;
+        total.4 += s.4;
+        total.5 += s.5;
     }
-    (0, 0, 0, 0, 0, 0)
+    total
 }
 
 fn pc_metadata_stats() -> (usize, usize, usize, usize) {

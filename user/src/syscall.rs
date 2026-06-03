@@ -167,6 +167,19 @@ pub fn sys_close(fd: usize) -> isize {
     syscall(SYSCALL_CLOSE, [fd, 0, 0])
 }
 
+pub fn sys_mount(
+    source: *const u8,
+    target: *const u8,
+    fstype: *const u8,
+    flags: usize,
+    data: usize,
+) -> isize {
+    syscall6(
+        SYSCALL_MOUNT,
+        [source as usize, target as usize, fstype as usize, flags, data],
+    )
+}
+
 pub fn sys_pipe(pipe: &mut [i32]) -> isize {
     syscall(SYSCALL_PIPE, [pipe.as_mut_ptr() as usize, 0, 0])
 }

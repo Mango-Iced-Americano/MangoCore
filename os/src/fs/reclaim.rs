@@ -43,12 +43,12 @@ pub fn maybe_reclaim_fs_caches() {
     // 全局清理：FIFO registry 中两端都已关闭的陈旧条目
     crate::fs::dev::pipe::compact_fifo_registry();
 
-    let fs = {
-        let guard = crate::fs::ext4::ext4fs::GLOBAL_EXT4FS.lock();
-        guard.as_ref().and_then(|w| w.upgrade())
-    };
+    let mut guard = crate::fs::ext4::ext4fs::EXT4_REGISTRY.lock();
+    let live: alloc::vec::Vec<_> = guard.iter().filter_map(|w| w.upgrade()).collect();
+    guard.retain(|w| w.strong_count() > 0);
+    drop(guard);
 
-    if let Some(fs) = fs {
+    for fs in &live {
         let io_removed = fs.prune_inode_objects();
         let pc_removed = fs.prune_page_caches();
         let kids_removed = fs.prune_children_stale_entries();
@@ -56,7 +56,6 @@ pub fn maybe_reclaim_fs_caches() {
         let cached = fs.get_cache_metric(6); // page_cache_cached_pages
 
         if heap_critical() {
-            // Severe heap pressure: evict aggressively from all caches
             let freed = fs.shrink_all_page_caches_clean(CRITICAL_BATCH_PAGES);
             if freed > 0 {
                 log::warn!(

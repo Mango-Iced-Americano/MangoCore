@@ -8,6 +8,16 @@ pub fn open(path: &str, flags: crate::OpenFlags) -> isize {
 pub fn close(fd: usize) -> isize {
     sys_close(fd)
 }
+
+pub fn mount(
+    source: *const u8,
+    target: *const u8,
+    fstype: *const u8,
+    flags: usize,
+    data: usize,
+) -> isize {
+    sys_mount(source, target, fstype, flags, data)
+}
 pub fn pipe(pipe_fd: &mut [i32]) -> isize {
     sys_pipe(pipe_fd)
 }

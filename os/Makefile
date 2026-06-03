@@ -190,3 +190,123 @@ inject-test:
 		debugfs -w -R "write ../user/target/riscv64gc-unknown-none-elf/release/$$testname $$testname" ../sdcard-rv.img 2>&1; \
 	done
 	@echo "[inject] Done."
+
+# ============================================================
+# 工具盘构建 (disk.img / disk-la.img)
+# 内容：busybox + bash + musl/glibc 库 + 软链接
+# 来源：user/tools/{riscv64,loongarch64}/
+# ============================================================
+
+TOOLS_IMG_RV := ../disk.img
+TOOLS_IMG_LA := ../disk-la.img
+TOOLS_SIZE_RV := 64
+TOOLS_SIZE_LA := 128
+TOOLS_SRC_RV := ../user/tools/riscv64
+TOOLS_SRC_LA := ../user/tools/loongarch64
+
+# 构建 tools 目录的通用配方
+# $(1)=镜像路径 $(2)=大小MB $(3)=源目录 $(4)=架构后缀(rv|la)
+define build_tools_disk
+	@echo "[tools-disk] Building $(1) ($(2)MB)..."
+	@dd if=/dev/zero of=$(1) bs=1M count=$(2) 2>/dev/null
+	@mkfs.ext4 -F $(1) -b 4096 2>/dev/null
+	@mkdir -p /tmp/tools-mnt
+	@mount -o loop $(1) /tmp/tools-mnt
+	@mkdir -p /tmp/tools-mnt/bin /tmp/tools-mnt/lib /tmp/tools-mnt/usr/bin /tmp/tools-mnt/usr/sbin /tmp/tools-mnt/etc
+	@echo "  copying files..."
+	@cp -a $(3)/bin/* /tmp/tools-mnt/bin/ 2>/dev/null || true
+	@cp -a $(3)/lib/* /tmp/tools-mnt/lib/ 2>/dev/null || true
+	@echo "  creating symlinks (matching initproc prepare_symlink)..."
+	@cd /tmp/tools-mnt/lib && \
+		if [ -f libc.so ]; then \
+			ln -sf libc.so ld-musl-riscv64.so.1 2>/dev/null; \
+			ln -sf libc.so ld-musl-riscv64-sf.so.1 2>/dev/null; \
+			ln -sf libc.so ld-musl-loongarch-lp64d.so.1 2>/dev/null; \
+			ln -sf libc.so libc.musl-riscv64.so.1 2>/dev/null; \
+			ln -sf libc.so libc.musl-loongarch64.so.1 2>/dev/null; \
+		fi
+	@cd /tmp/tools-mnt/lib && \
+		for f in *.so*; do \
+			[ "$$f" = "libc.so" ] && continue; \
+			[ "$$f" = "libc.so.6" ] && continue; \
+			[ "$$f" = "libm.so.6" ] && continue; \
+			[ "$$f" = "ld-linux-riscv64-lp64d.so.1" ] && continue; \
+			[ "$$f" = "ld-linux-loongarch-lp64d.so.1" ] && continue; \
+			[ "$$f" = "libgcc_s.so.1" ] && continue; \
+			ln -sf "$$f" "lib/$$f" 2>/dev/null; \
+		done 2>/dev/null; true
+	@umount /tmp/tools-mnt
+	@rmdir /tmp/tools-mnt
+	@echo "[tools-disk] $(1) ready."
+endef
+
+tools-disk-rv:
+	$(call build_tools_disk,$(TOOLS_IMG_RV),$(TOOLS_SIZE_RV),$(TOOLS_SRC_RV),rv)
+
+tools-disk-la:
+	$(call build_tools_disk,$(TOOLS_IMG_LA),$(TOOLS_SIZE_LA),$(TOOLS_SRC_LA),la)
+
+tools-disk: tools-disk-rv tools-disk-la
+
+# ============================================================
+# Alpine 预编译工具下载（本地缓存，避免每次下载）
+# 下载到 user/tools/{arch}/，tools-disk 自动打包
+# ============================================================
+
+ALPINE_MIRROR := https://dl-cdn.alpinelinux.org/alpine/edge/main
+
+tools-alpine-rv:
+	@echo "[alpine] Downloading riscv64 tools..."
+	@mkdir -p /tmp/alpine-rv
+	@for pkg_info in \
+		"tcpdump:usr/bin/tcpdump:tcpdump:bin" \
+		"iproute2-minimal:sbin/ip:ip:bin" \
+		"iproute2-ss:sbin/ss:ss:bin" \
+		"libpcap:usr/lib/libpcap.so.1:libpcap.so.1:lib" \
+		"libcrypto3:usr/lib/libcrypto.so.3:libcrypto.so.3:lib" \
+		"libcap2:usr/lib/libcap.so.2:libcap.so.2:lib" \
+		"libmnl:usr/lib/libmnl.so.0:libmnl.so.0:lib" \
+		"libelf:usr/lib/libelf.so.1:libelf.so.1:lib"; do \
+		pkg=$${pkg_info%%:*}; rest1=$${pkg_info#*:}; apath=$${rest1%%:*}; rest2=$${rest1#*:}; oname=$${rest2%%:*}; subdir=$${pkg_info##*:}; \
+		dest=$(CURDIR)/../user/tools/riscv64/$$subdir/$$oname; \
+		if [ -f "$$dest" ]; then \
+			echo "  [cache] $$oname"; continue; \
+		fi; \
+		apk=$$(curl -sL "$(ALPINE_MIRROR)/riscv64/" | grep -oP "\"$$pkg-[0-9][^\"]*\.apk\"" | tr -d '"' | sort -V | tail -1); \
+		if [ -z "$$apk" ]; then echo "  [skip] $$pkg not found"; continue; fi; \
+		echo "  fetching $$apk..."; \
+		curl -sL "$(ALPINE_MIRROR)/riscv64/$$apk" -o /tmp/alpine-rv/$$apk && \
+		tar -xzf /tmp/alpine-rv/$$apk -C /tmp/alpine-rv 2>/dev/null && \
+		cp /tmp/alpine-rv/$$apath "$$dest" 2>/dev/null && echo "  [done] $$oname"; \
+	done
+	@rm -rf /tmp/alpine-rv
+	@echo "[alpine] riscv64 done."
+
+tools-alpine-la:
+	@echo "[alpine] Downloading loongarch64 tools..."
+	@mkdir -p /tmp/alpine-la
+	@for pkg_info in \
+		"tcpdump:usr/bin/tcpdump:tcpdump:bin" \
+		"iproute2-minimal:sbin/ip:ip:bin" \
+		"iproute2-ss:sbin/ss:ss:bin" \
+		"libpcap:usr/lib/libpcap.so.1:libpcap.so.1:lib" \
+		"libcrypto3:usr/lib/libcrypto.so.3:libcrypto.so.3:lib" \
+		"libcap2:usr/lib/libcap.so.2:libcap.so.2:lib" \
+		"libmnl:usr/lib/libmnl.so.0:libmnl.so.0:lib" \
+		"libelf:usr/lib/libelf.so.1:libelf.so.1:lib"; do \
+		pkg=$${pkg_info%%:*}; rest1=$${pkg_info#*:}; apath=$${rest1%%:*}; rest2=$${rest1#*:}; oname=$${rest2%%:*}; subdir=$${pkg_info##*:}; \
+		dest=$(CURDIR)/../user/tools/loongarch64/$$subdir/$$oname; \
+		if [ -f "$$dest" ]; then \
+			echo "  [cache] $$oname"; continue; \
+		fi; \
+		apk=$$(curl -sL "$(ALPINE_MIRROR)/loongarch64/" | grep -oP "\"$$pkg-[0-9][^\"]*\.apk\"" | tr -d '"' | sort -V | tail -1); \
+		if [ -z "$$apk" ]; then echo "  [skip] $$pkg not found"; continue; fi; \
+		echo "  fetching $$apk..."; \
+		curl -sL "$(ALPINE_MIRROR)/loongarch64/$$apk" -o /tmp/alpine-la/$$apk && \
+		tar -xzf /tmp/alpine-la/$$apk -C /tmp/alpine-la 2>/dev/null && \
+		cp /tmp/alpine-la/$$apath "$$dest" 2>/dev/null && echo "  [done] $$oname"; \
+	done
+	@rm -rf /tmp/alpine-la
+	@echo "[alpine] loongarch64 done."
+
+tools-alpine: tools-alpine-rv tools-alpine-la

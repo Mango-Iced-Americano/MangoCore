@@ -6,8 +6,8 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use user_lib::{
-    chdir, close, exec, exit, fork, getdents64, getpgid, kill, open, println, read, setpgid,
-    shutdown, sleep, wait, waitpid, waitpid_wnohang, write, OpenFlags, SIGKILL,
+    chdir, close, exec, exit, fork, getdents64, getpgid, kill, mount, open, println, read,
+    setpgid, shutdown, sleep, wait, waitpid, waitpid_wnohang, write, OpenFlags, SIGKILL,
 };
 
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -1978,20 +1978,60 @@ fn install_embedded_libgcc_s() {
 }
 
 fn prepare_symlink(environ: &[*const u8]) {
-    // Step 1: busybox applet 安装到 /bin（用 PATH 查找 busybox，兼容旧镜像 /busybox）
+    // MS_BIND = 4096 (matches kernel MountFlags::MS_BIND)
+    const MS_BIND: usize = 4096;
+
+    // Helper: try bind mount from user-space via mount() syscall
+    let try_bind = |source: &str, target: &str| {
+        let src = alloc::format!("{}\0", source);
+        let tgt = alloc::format!("{}\0", target);
+        let fst = "\0";
+        let ret = mount(src.as_ptr(), tgt.as_ptr(), fst.as_ptr(), MS_BIND, 0);
+        if ret == 0 {
+            println!("[initproc] bind mount {} -> {}", source, target);
+        } else {
+            println!("[initproc] bind mount {} -> {}: skipped (errno={})", source, target, -ret);
+        }
+    };
+
+    // Phase 1: Ensure base directories exist (using embedded busybox/bash)
+    println!("[initproc] ensuring base directories...");
+    let dirs_cmd = "\
+        busybox mkdir -p /bin /lib /usr /etc /root /tmp /run /var /var/tmp /dev/shm /glibc/lib; \
+        chmod 1777 /tmp /var/tmp /dev/shm; \
+        true \
+    \0";
+    run_bash_cmd(dirs_cmd, environ);
+
+    // Phase 2: Try bind mount /tools/bin -> /bin (conservative — only /bin for now)
+    println!("[initproc] attempting bind mount /tools/bin -> /bin...");
+    try_bind("tools/bin", "bin");
+
+    // Phase 3: After bind, ensure /bin/busybox exists, then install applets
+    // If bind succeeded, this writes to /tools/bin (persists on ext4 disk)
+    // If bind failed (no tools disk), this writes to root /bin (ramfs/ext4)
     println!("[initproc] installing busybox applets to /bin ...");
     let install_cmd = "\
-        busybox mkdir -p /bin; \
-        busybox --install -s /bin; \
+        test -e /bin/busybox || ln -s /busybox /bin/busybox; \
+        /bin/busybox --install -s /bin; \
         for app in cp mv rm ln mkdir chmod cat printf sleep grep sed awk uname basename dirname true false test; do \
-            [ -e /bin/$app ] || busybox ln -sf /bin/busybox /bin/$app; \
+            [ -e /bin/$app ] || /bin/busybox ln -s /bin/busybox /bin/$app; \
         done; \
         true \
     \0";
     let ret = run_bash_cmd(install_cmd, environ);
     println!("[initproc] busybox --install -s /bin -> exit={}", ret);
 
-    // Step 1.5: 测试环境依赖最小账户/网络配置，无条件幂等写入（镜像可能缺失或格式错误）
+    // Phase 4: Ensure /bin/bash and /bin/sh exist (after bind, after busybox)
+    run_bash_cmd(
+        "
+        test -e /bin/bash || ln -s /bash /bin/bash;
+        test -e /bin/sh   || ln -s /bin/bash /bin/sh;
+    ",
+        environ,
+    );
+
+    // Phase 5: Account/network files, lib symlinks, chmod (existing, unchanged)
     println!("[initproc] preparing /etc account/network files ...");
     let account_cmd = "\
         mkdir -p /etc /root /tmp /run /var /var/tmp /dev/shm /glibc/lib; chmod 1777 /tmp /var/tmp /dev/shm; : > /glibc/lib/libgcc_s.so.1; \
@@ -2009,22 +2049,22 @@ fn prepare_symlink(environ: &[*const u8]) {
     // Step 2: musl/glibc 动态库 — 单次 shell 调用，用 && 串连，避免多次 bash 开销
     println!("[initproc] linking musl/glibc libs to /lib ...");
     let lib_cmd = "\
-        mkdir -p /lib /usr /lib64 /usr/lib /usr/lib64; \
-        rm -rf /lib64; ln -sf /lib /lib64; \
-        rm -rf /usr/lib; ln -sf /lib /usr/lib; \
-        rm -rf /usr/lib64; ln -sf /lib /usr/lib64; \
-        ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64-sf.so.1; \
-        ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64.so.1; \
-        ln -sf /musl/lib/libc.so /lib/libc.so; \
-        ln -sf /glibc/lib/ld-linux-riscv64-lp64d.so.1 /lib/ld-linux-riscv64-lp64d.so.1; \
-        ln -sf /glibc/lib/ld-linux-loongarch-lp64d.so.1 /lib/ld-linux-loongarch-lp64d.so.1; \
-        ln -sf /musl/lib/libc.so /lib/ld-musl-loongarch-lp64d.so.1; \
-        ln -sf /glibc/lib/libc.so.6 /lib/libc.so.6; \
-        ln -sf /glibc/lib/libm.so.6 /lib/libm.so.6; \
-        ln -sf /glibc/lib/tls_get_new-dtv_dso.so /lib/tls_get_new-dtv_dso.so; \
-        ln -sf /glibc/lib/tls_get_new-dtv_dso.so ./libtls_get_new-dtv_dso.so; \
-        for f in /musl/lib/*.so*; do ln -sf \"$f\" /lib/ 2>/dev/null; done; \
-        for f in /glibc/lib/*.so*; do ln -sf \"$f\" /lib/ 2>/dev/null; done \
+        mkdir -p /lib /usr; \
+        [ -e /lib64 ] || ln -s /lib /lib64; \
+        [ -e /usr/lib ] || ln -s /lib /usr/lib; \
+        [ -e /usr/lib64 ] || ln -s /lib /usr/lib64; \
+        [ -e /lib/ld-musl-riscv64-sf.so.1 ] || ln -s /musl/lib/libc.so /lib/ld-musl-riscv64-sf.so.1; \
+        [ -e /lib/ld-musl-riscv64.so.1 ] || ln -s /musl/lib/libc.so /lib/ld-musl-riscv64.so.1; \
+        [ -e /lib/libc.so ] || ln -s /musl/lib/libc.so /lib/libc.so; \
+        [ -e /lib/ld-linux-riscv64-lp64d.so.1 ] || ln -s /glibc/lib/ld-linux-riscv64-lp64d.so.1 /lib/ld-linux-riscv64-lp64d.so.1; \
+        [ -e /lib/ld-linux-loongarch-lp64d.so.1 ] || ln -s /glibc/lib/ld-linux-loongarch-lp64d.so.1 /lib/ld-linux-loongarch-lp64d.so.1; \
+        [ -e /lib/ld-musl-loongarch-lp64d.so.1 ] || ln -s /musl/lib/libc.so /lib/ld-musl-loongarch-lp64d.so.1; \
+        [ -e /lib/libc.so.6 ] || ln -s /glibc/lib/libc.so.6 /lib/libc.so.6; \
+        [ -e /lib/libm.so.6 ] || ln -s /glibc/lib/libm.so.6 /lib/libm.so.6; \
+        [ -e /lib/tls_get_new-dtv_dso.so ] || ln -s /glibc/lib/tls_get_new-dtv_dso.so /lib/tls_get_new-dtv_dso.so; \
+        [ -e ./libtls_get_new-dtv_dso.so ] || ln -s /glibc/lib/tls_get_new-dtv_dso.so ./libtls_get_new-dtv_dso.so; \
+        for f in /musl/lib/*.so*; do [ -e /lib/$$(basename \"$$f\") ] || ln -s \"$$f\" /lib/ 2>/dev/null; done; \
+        for f in /glibc/lib/*.so*; do [ -e /lib/$$(basename \"$$f\") ] || ln -s \"$$f\" /lib/ 2>/dev/null; done \
     \0";
     let ret = run_bash_cmd(lib_cmd, environ);
     println!("[initproc] lib linking done, exit={}", ret);
@@ -2033,7 +2073,7 @@ fn prepare_symlink(environ: &[*const u8]) {
     // cyclictest 不会进入内核 syscall；这里仅对该测试入口复用 glibc 二进制。
     let cyclictest_cmd = "\
         if [ -x /glibc/cyclictest ] && [ -x /musl/cyclictest ]; then \
-            ln -sf /glibc/cyclictest /musl/cyclictest; \
+            ln -s /glibc/cyclictest /musl/cyclictest; \
         fi \
     \0";
     let ret = run_bash_cmd(cyclictest_cmd, environ);
@@ -2054,9 +2094,8 @@ fn prepare_symlink(environ: &[*const u8]) {
 
     run_bash_cmd(
         "
-        rm -rf /bin/bash /bin/sh;
-        ln -s /bash /bin/bash;
-        ln -s /bash /bin/sh;
+        test -e /bin/bash || ln -s /bash /bin/bash;
+        test -e /bin/sh   || ln -s /bin/bash /bin/sh;
     ",
         environ,
     );

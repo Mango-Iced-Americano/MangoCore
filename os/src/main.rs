@@ -133,6 +133,8 @@ pub fn rust_main() -> ! {
     println!("[kernel] heap_trace is enabled!");
     // #[cfg(feature = "riscv")]
     fs::flush_preload();
+    // 尝试挂载工具盘（x1，若存在）到 /tools（若不存在 disk.img 则优雅跳过）
+    fs::mount_tools_disk();
     // crate::fs::ext4::smoke::run_boot_smoke();  // 需要时取消注释
     task::add_initproc();
     // note that in run_tasks(), there is yet *another* pre_start_init(),

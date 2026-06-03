@@ -119,6 +119,17 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
         misc_dir
             .add_dev("rtc", alloc::sync::Arc::new(crate::fs::dev::rtc::Rtc) as Arc<dyn self::vfs::IndexNode>)
             .expect("devfs: failed to register /dev/misc/rtc");
+        // ── 块设备节点 ──
+        if let Some(ref blk0) = crate::drivers::BLOCK_DEVICES[0] {
+            devfs.add_dev("vda", crate::fs::dev::block::BlockDevInode::new(
+                blk0.clone(), 0, "vda"))
+                .expect("devfs: failed to register /dev/vda");
+        }
+        if let Some(ref blk1) = crate::drivers::BLOCK_DEVICES[1] {
+            devfs.add_dev("vdb", crate::fs::dev::block::BlockDevInode::new(
+                blk1.clone(), 1, "vdb"))
+                .expect("devfs: failed to register /dev/vdb");
+        }
         let shmfs = crate::fs::tmpfs::TmpFS::new_with_options(4096 * 4096); // ~16MB for /dev/shm
         if let Ok(mut meta) = shmfs.root_inode().metadata() {
             meta.mode = self::vfs::InodeMode::from_bits_truncate(0o1777);
@@ -208,6 +219,77 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
         mfs.add_mount(tmp_inode_id, tmpfs_mnt)
             .expect("failed to mount tmpfs at /tmp");
     }
+}
+
+/// 启动时挂载块设备上的文件系统。
+///
+/// 在 VFS_ROOT 下创建挂载点目录，打开块设备上的 ext4/fat32，
+/// 包装为 MountFS 并注册到挂载树。
+///
+/// 返回挂载后的 MountFS，失败时打印错误并返回 None。
+pub fn mount_block_fs(
+    parent_mfs: &Arc<self::vfs::MountFS>,
+    block_device: &Arc<dyn BlockDevice>,
+    mount_point: &str,
+    label: &str,
+) -> Option<Arc<self::vfs::MountFS>> {
+    use self::filesystem::detect_fs;
+    use self::vfs::MountFlags;
+
+    let fs_type = detect_fs(block_device);
+    let mfs = match fs_type {
+        self::filesystem::FS_Type::Ext4 => {
+            let ext4 = self::ext4::ext4fs::Ext4FileSystem::open_ext4rs(block_device.clone());
+            self::vfs::MountFS::new(ext4, MountFlags::empty())
+        }
+        self::filesystem::FS_Type::Fat32 => {
+            let efs = self::fat32::EasyFileSystem::open(block_device.clone());
+            self::vfs::MountFS::new(efs, MountFlags::empty())
+        }
+        self::filesystem::FS_Type::Null => {
+            println!("[kernel] mount_block_fs: {} — no filesystem detected on block device", label);
+            return None;
+        }
+    };
+
+    let root = parent_mfs.mountpoint_root_inode();
+    let mount_inode = root.find(mount_point).unwrap_or_else(|_| {
+        root.create(mount_point, self::vfs::FileType::Dir,
+            self::vfs::InodeMode::from_bits_truncate(0o755))
+            .expect("failed to create mount point")
+    });
+    let inode_id = mount_inode.metadata().expect("mount_inode metadata failed").inode_id;
+
+    let mount_path = alloc::string::String::from(mount_point);
+    mfs.set_mount_path(Some(mount_path));
+
+    if let Some(mfsi) = mount_inode.as_any_ref().downcast_ref::<self::vfs::MountFSInode>() {
+        let backref = self::vfs::MountFSInode::new(
+            mfsi.inner_inode.clone(),
+            mfsi.mount_fs.clone(),
+        );
+        mfs.set_self_mountpoint(Some(backref));
+    }
+
+    parent_mfs.add_mount(inode_id, mfs.clone())
+        .unwrap_or_else(|e| panic!("[kernel] mount_block_fs: failed to mount {}: {:?}", label, e));
+
+    println!("[kernel] {} mounted at {}", label, mount_point);
+    Some(mfs)
+}
+
+/// 尝试挂载工具盘（BLOCK_DEVICES[1]）到 /tools。
+/// 设备不存在或挂载失败时不 panic，打印日志并优雅跳过。
+pub fn mount_tools_disk() {
+    let tools_dev = match crate::drivers::BLOCK_DEVICES[1].as_ref() {
+        Some(dev) => dev,
+        None => {
+            println!("[kernel] no tools disk (x1) found, skipping /tools mount");
+            return;
+        }
+    };
+    let root = vfs_root();
+    mount_block_fs(&root, tools_dev, "tools", "tools disk");
 }
 
 /// 返回新的 VFS 根（MountFS 实例）的共享引用。

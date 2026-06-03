@@ -2,6 +2,50 @@
 
 ---
 
+## 2026-06-03
+
+### Step 1: 多块设备探测 — BLOCK_DEVICES[2] 数组 + 向后兼容
+
+**涉及文件：**
+- `os/src/drivers/block/mod.rs` — 新增 `BLOCK_DEVICES: [Option<Arc<dyn BlockDevice>>; 2]` 数组，保留 `BLOCK_DEVICE = BLOCK_DEVICES[0]` 向后兼容别名，`SKIP_BLOCK_DEVICE` 单独处理 DummyBlockDevice
+- `os/src/drivers/block/virtio_blk.rs` — 新增 `try_new(base_addr)` 安全探测（返回 Option），`probe_rv64()` 探测 bus.0 + bus.1，rv64 `virtio_dma_alloc` 补 QUEUE_FRAMES collision assert
+- `os/src/drivers/block/virtio_blk_pci.rs` — 新增 `enumerate_all_virtio_pci()` 收集全部 PCI Block 设备（返回 Vec<(DeviceFunction, PciTransport)>），`probe_la64()` 按 BDF 收集前两个设备（slot0 panic / slot1 graceful），修复 BAR 分配失败时的 `continue` bug（原作用于内层 while，改为 labeled break + device_ok 标志）
+- `os/src/drivers/mod.rs` — re-export `BLOCK_DEVICES`
+- `os/src/hal/platform/riscv/qemu.rs` — MMIO 数组新增 `(0x1000_2000, 0x1000)` 映射 virtio-mmio bus.1
+- `os/make/rv64.mk` — rv64 QEMU net 显式指定 `bus=virtio-mmio-bus.7`
+- `scripts/run_full_test.py` — rv64 QEMU net 显式指定 `bus=virtio-mmio-bus.7`
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU rv64 basic 测试（mask=0x001）✅ — basic-musl + basic-glibc 均 exit_code=0，无 panic
+- 关键日志确认：`block device 0: official fs (MMIO 0x10001000)`，bus.1 无设备时 `try_new` 正确返回 None
+
+**备注：**
+- 本 Step 不修改任何消费者（fs/mod.rs、filesystem.rs、swap.rs 等仍使用 `BLOCK_DEVICE` = device[0]）
+- `#[cfg(not(any(feature = "block_virt", feature = "block_virt_pci")))]` 覆盖 block_mem/block_sata 单设备 fallback
+- la64 设备顺序依赖 PCI 枚举顺序（QEMU 参数顺序通常对应 BDF），后续如有需求可加 `addr=` 显式固定
+
+---
+
+### 整理 user/tools 目录结构 + disk.img gitignore
+
+**涉及文件：**
+- `user/tools/riscv64/` — 新增 `bin/` / `lib/` 子目录，将 .so* 文件从平面布局移入 `lib/`，ELF 二进制保留在 `bin/`
+- `user/tools/loongarch64/` — 同上整理
+- `os/Makefile` — `build_tools_disk` 模板改为 `cp $(3)/bin/*` + `cp $(3)/lib/*`（替代原先平面拷贝+删除 .so 的模式）；Alpine 预编译工具下载目标扩展为 4 字段格式 `pkg:apath:oname:subdir` 以路由到正确的子目录；移除无效的 `cp $(3)/*.so*` 遗留行
+- `.gitignore` — 新增 `disk.img` / `disk-la.img`
+
+**验证：**
+- `make tools-disk-rv` ✅ — bin/ 含 bash/busybox/ip/ss/strace/tcpdump，lib/ 含全部 .so + musl/glibc 兼容符号链接
+- `make tools-disk-la` ✅
+
+**备注：**
+- 构建目标受 Makefile 独立 shell 行影响，前次失败未执行 `umount` 导致磁盘镜像残留挂载，`mkfs.ext4` 拒绝格式化已挂载文件系统 → 解决方案：手动 `umount /tmp/tools-mnt` 后重试
+- 发现 `disk.img` 未在 `.gitignore` 中，一并添加
+
+---
+
 ## 2026-05-31
 
 ### 修复 LTP 网络 syscall 全部超时——loopback TCP 路由 + PortManager port=0

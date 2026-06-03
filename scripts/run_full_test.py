@@ -192,7 +192,7 @@ def build_rv64_cmd():
         "-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 "
         "-no-reboot "
         "-rtc base=utc "
-        "-device virtio-net-device,netdev=net "
+        "-device virtio-net-device,netdev=net,bus=virtio-mmio-bus.7 "
         "-netdev user,id=net"
     )
 
