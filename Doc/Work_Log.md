@@ -4,6 +4,24 @@
 
 ## 2026-06-04
 
+### 补齐 vmsplice pipe 最小兼容
+
+**涉及文件：**
+- `os/src/syscall/syscall_id.rs` — 新增通用 syscall 号 `vmsplice(75)`
+- `os/src/syscall/mod.rs` — 接入 syscall 名称和分发
+- `os/src/syscall/fs.rs` — 新增 `sys_vmsplice()`，支持向 pipe 写入用户 iovec；`SPLICE_F_NONBLOCK` 或 fd 非阻塞时返回 `EAGAIN`，阻塞模式复用 pipe 写等待队列
+
+**验证：**
+- Docker `make rv64-kernel-build-only` ✅
+- Docker `make la64-kernel-build-only` ✅
+- Docker `make rv64-only EXTRA_FEATURES=heap_trace` ✅
+- Docker `make la64-only EXTRA_FEATURES=heap_trace` ✅
+- rv64 heap_trace focused LTP：`vmsplice04` 2 个子项 TPASS，`FAIL LTP CASE vmsplice04 : 0`
+- la64 heap_trace focused LTP：`vmsplice04` 2 个子项 TPASS，`FAIL LTP CASE vmsplice04 : 0`
+- 双架构 focused 日志中 `Unsupported syscall=0`、`PANIC=0`、`KERNEL EXCEPTION=0`、`HEAP OOM=0`、`Test timeouted=0`、`TFAIL=0`、`TBROK=0`
+
+**备注：** 当前实现是安全复制版兼容路径，不实现 Linux 的页引用转移/零拷贝；先覆盖 pipe 写入与阻塞/非阻塞语义。
+
 ### 补齐 pipe fcntl/sysctl 与 FIONREAD 语义
 
 **涉及文件：**
