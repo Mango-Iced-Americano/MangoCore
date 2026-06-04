@@ -182,6 +182,13 @@
 - **教训**: 不要直接按 POSIX libc API 形态实现内核 syscall 入参；mqueue 的 name、timeout 和 notify 都经过 libc 包装，LTP 同时覆盖 musl/glibc，必须验证双 libc。
 - **相关文件**: `os/src/syscall/process/ipc.rs`, `os/src/net/socket/mod.rs`, `os/src/net/socket/netlink/mod.rs`
 
+## LTP inline 与 suite runner 过滤表同步
+
+- **根因**: inline runner 的 `should_skip_ltp_helper()` 会跳过已确认的 TCONF/环境项，但 suite runner 只读取默认 exclude；同一批用例在 suite 模式下仍会实际执行，LTP 返回 32 后被 harness 打成 `FAIL LTP CASE ... : 32`，表现为“inline 全量干净，suite/云端分数低”。
+- **修复**: 将稳定不支持或环境不满足的非目标项同步进 `ltprunner` 默认 exclude；修复后 suite focused 日志应显示 `skip excluded case ...` 和 `filtered=0`，而不是进入 `RUN LTP CASE`。
+- **教训**: 每次维护 inline broad-skip 后都要检查 `user/src/bin/ltprunner.rs`，否则本地 focused/inline 结果无法代表 suite 评测路径；需要调试被排除项时，应临时调整配置或过滤表，验证通过后再解除。
+- **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`
+
 ## 网络
 
 ### 硬编码 IPv4 地址替换为 net_core 动态查询

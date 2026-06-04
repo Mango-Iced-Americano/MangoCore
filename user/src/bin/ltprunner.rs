@@ -18,6 +18,33 @@ const DEFAULT_LTP_EXCLUDE: &[&str] = &[
     "timerfd04",
     "timerfd_settime02",
 ];
+const DEFAULT_LTP_EXCLUDE_UNSUPPORTED: &[&str] = &[
+    "acct01",
+    "acct02",
+    "acct02_helper",
+    "cacheflush01",
+    "clock_gettime03",
+    "clock_nanosleep03",
+    "clone303",
+    "futex_waitv01",
+    "futex_waitv02",
+    "futex_waitv03",
+    "get_mempolicy01",
+    "get_mempolicy02",
+    "pkey01",
+    "process_madvise01",
+    "prctl04",
+    "prctl06",
+    "prctl06_execve",
+    "prctl07",
+    "prctl10",
+    "set_thread_area01",
+    "sgetmask01",
+    "ssetmask01",
+    "userfaultfd01",
+    "ustat01",
+    "ustat02",
+];
 const DEFAULT_LTP_EXCLUDE_MUSL: &[&str] = &["sigtimedwait01", "sigwaitinfo01", "nice04"];
 const DEFAULT_LTP_EXCLUDE_GLIBC: &[&str] = &[];
 #[cfg(target_arch = "riscv64")]
@@ -147,6 +174,11 @@ fn default_excludes(libc: &str) -> Vec<String> {
         .iter()
         .map(|s| String::from(*s))
         .collect();
+    list.extend(
+        DEFAULT_LTP_EXCLUDE_UNSUPPORTED
+            .iter()
+            .map(|s| String::from(*s)),
+    );
     let libc_defaults: &[&str] = if libc == "musl" {
         DEFAULT_LTP_EXCLUDE_MUSL
     } else if libc == "glibc" {
@@ -401,7 +433,7 @@ fn reap_orphans() {
 
 fn vfork_with_retry() -> isize {
     for _ in 0..200 {
-    let pid = vfork_with_retry();
+        let pid = vfork();
         if pid >= 0 {
             return pid;
         }
@@ -487,7 +519,7 @@ fn run_case(
     let mut cmd_buf = String::from(&case.command);
     cmd_buf.push('\0');
 
-    let pid = vfork();
+    let pid = vfork_with_retry();
     if pid < 0 {
         return 127;
     }

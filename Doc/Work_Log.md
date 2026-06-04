@@ -4,6 +4,23 @@
 
 ## 2026-06-04
 
+### 同步 LTP suite runner 默认过滤并修复 vfork retry
+
+**涉及文件：**
+- `user/src/bin/ltprunner.rs` — suite runner 默认排除已确认的 TCONF/环境不满足项，避免 `pkey01/process_madvise01/set_thread_area01/sgetmask01/ssetmask01/ustat*` 等在 suite 模式下被执行并记为 `FAIL : 32`
+- `user/src/bin/ltprunner.rs` — 修复 `vfork_with_retry()` 中误写成递归调用的残留 typo，并让单 case 启动走 retry 路径，降低进程瞬时不足导致的 harness 假失败
+- `Doc/Work_Log.md` — 记录本轮 LTP harness 修复与验证
+- `.agents/skills/mango-worklog/references/harness-patterns.md` — 沉淀 inline/suite 过滤表同步经验
+
+**验证：**
+- `docker compose exec --workdir /app/os os-dev make rv64-only EXTRA_FEATURES=heap_trace` ✅
+- rv64 suite focused 配置 `set_thread_area01,sgetmask01,ssetmask01,ustat01,ustat02,pkey01,process_madvise01`：glibc/musl 均在 `ltprunner` 过滤阶段 `filtered=0`，不再实际 RUN 这些 TCONF 项
+- `docker compose exec --workdir /app/os os-dev make la64-only EXTRA_FEATURES=heap_trace` ✅
+- la64 同一 suite focused 配置：glibc/musl 均 `filtered=0`
+- 双架构 suite 验证日志未出现 `RUN LTP CASE`、`TFAIL`、`TBROK`、`PANIC`、`HEAP OOM`、`Test timeouted`、`Unsupported syscall`
+
+**备注：** 本轮不伪造内核 pkey/userfaultfd/acct/NUMA/cgroup/time namespace 语义，只把 suite runner 与 inline broad-skip 既有结论对齐；若后续真正实现这些能力，再按 focused 双架构 TPASS 结果从过滤表移除。
+
 ### 实现 POSIX mqueue 核心 syscall 与通知语义
 
 **涉及文件：**
