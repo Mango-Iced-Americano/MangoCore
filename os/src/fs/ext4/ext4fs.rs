@@ -68,7 +68,13 @@ pub struct Ext4FileSystem {
     pub(super) meta_batch_bgs: spin::Mutex<alloc::collections::BTreeMap<u32, super::block_group::Ext4BlockGroup>>,
 }
 
-/// 全局 Ext4FileSystem 引用（用于 syscall 触发的 batch mode）
+/// 全局 Ext4FileSystem 注册表（用于 sync / reclaim / stats）。
+/// 支持多 ext4 实例（如 /sdcard + /tools），每个 open_ext4rs() 调用会注册一个 Weak。
+pub static EXT4_REGISTRY: spin::Mutex<alloc::vec::Vec<alloc::sync::Weak<Ext4FileSystem>>> =
+    spin::Mutex::new(alloc::vec::Vec::new());
+
+/// 兼容别名：返回注册表中的第一个有效实例（向后兼容）。
+/// 推荐新代码直接遍历 EXT4_REGISTRY。
 pub static GLOBAL_EXT4FS: spin::Mutex<Option<alloc::sync::Weak<Ext4FileSystem>>> = spin::Mutex::new(None);
 
 /// FS cache reclaim 统计结果
@@ -228,7 +234,7 @@ impl Ext4FileSystem {
         let block = Block::load_superblock(block_device.clone(), 0);
         let superblock = block.read_offset_as_superblock(SUPERBLOCK_OFFSET);
         let block_size = superblock.clone().block_size() as usize;
-        Arc::new_cyclic(|weak| {
+        let fs = Arc::new_cyclic(|weak| {
             let fs = Ext4FileSystem {
                 block_device,
                 superblock,
@@ -242,9 +248,12 @@ impl Ext4FileSystem {
                 meta_batch_sb: spin::Mutex::new(None),
                 meta_batch_bgs: spin::Mutex::new(alloc::collections::BTreeMap::new()),
             };
-            *GLOBAL_EXT4FS.lock() = Some(weak.clone());
             fs
-        })
+        });
+        let weak = Arc::downgrade(&fs);
+        *GLOBAL_EXT4FS.lock() = Some(weak.clone());
+        EXT4_REGISTRY.lock().push(weak);
+        fs
     }
 
     /// with dir result search path offset

@@ -650,6 +650,24 @@ impl TaskControlBlock {
 
         // 为当前线程分配用户资源
         memory_set.alloc_user_res(user_res_slot, true);
+
+        // 构造初始进程的 argc/argv/envp 栈
+        let init_sp = {
+            let argv_vec = alloc::vec![alloc::string::String::from("/init")];
+            let envp_vec = alloc::vec![
+                alloc::string::String::from("PATH=/:/bin:/sbin:/usr/bin:/tools/bin"),
+                alloc::string::String::from("PWD=/"),
+                alloc::string::String::from("HOME=/root"),
+            ];
+            memory_set
+                .create_elf_tables(
+                    ustack_bottom_from_slot(user_res_slot),
+                    &argv_vec,
+                    &envp_vec,
+                    &elf_info,
+                )
+                .expect("init task stack setup failed")
+        };
         // 获取陷阱上下文的物理页号
         let trap_cx_ppn = memory_set
             .translate(VirtAddr::from(trap_cx_bottom_from_slot(user_res_slot)).into())
@@ -790,7 +808,7 @@ impl TaskControlBlock {
         // 初始化陷阱上下文
         *trap_cx = TrapContext::app_init_context(
             elf_info.entry,
-            ustack_bottom_from_slot(user_res_slot),
+            init_sp,
             KERNEL_SPACE.lock().token(),
             kstack_top,
             trap_handler as usize,

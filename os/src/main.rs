@@ -18,6 +18,9 @@
 #![allow(dead_code)]
 #![allow(unused_assignments)]
 #![allow(unused_variables)]
+
+#[cfg(all(feature = "initramfs", feature = "legacy_block_root"))]
+compile_error!("features initramfs and legacy_block_root are mutually exclusive");
 pub use hal::config;
 extern crate alloc;
 extern crate core;
@@ -49,13 +52,30 @@ use crate::hal::machine_init;
 // core::arch::global_asm!(include_str!("hal/arch/loongarch64/entry.asm"));
 #[cfg(feature = "riscv")]
 core::arch::global_asm!(include_str!("hal/arch/riscv/entry.asm"));
+
+// ── Initramfs root cpio (small boot root filesystem) ──
+#[cfg(all(feature = "initramfs", feature = "loongarch64"))]
+core::arch::global_asm!(include_str!("initramfs-la.S"));
+#[cfg(all(feature = "initramfs", feature = "riscv"))]
+core::arch::global_asm!(include_str!("initramfs-rv.S"));
+
+// ── Legacy: block_mem full rootfs image ──
 #[cfg(all(feature = "block_mem", feature = "loongarch64"))]
 core::arch::global_asm!(include_str!("load_img.S"));
 #[cfg(all(feature = "block_mem", feature = "riscv"))]
 core::arch::global_asm!(include_str!("load_img-rv.S"));
-#[cfg(all(not(feature = "block_mem"), feature = "riscv"))]
+
+// ── Preload test payloads (initproc, bash, busybox, LTP) ──
+// When preload_payloads feature is active AND we're not in block_mem mode
+#[cfg(all(not(feature = "block_mem"), feature = "preload_payloads", feature = "riscv"))]
 core::arch::global_asm!(include_str!("preload_app-rv.S"));
-#[cfg(all(not(feature = "block_mem"), feature = "loongarch64"))]
+#[cfg(all(not(feature = "block_mem"), feature = "preload_payloads", feature = "loongarch64"))]
+core::arch::global_asm!(include_str!("preload_app.S"));
+
+// ── Legacy preload (no initramfs, no block_mem, no preload_payloads) ──
+#[cfg(all(not(feature = "block_mem"), not(feature = "initramfs"), not(feature = "preload_payloads"), feature = "riscv"))]
+core::arch::global_asm!(include_str!("preload_app-rv.S"));
+#[cfg(all(not(feature = "block_mem"), not(feature = "initramfs"), not(feature = "preload_payloads"), feature = "loongarch64"))]
 core::arch::global_asm!(include_str!("preload_app.S"));
 
 fn mem_clear() {
@@ -118,22 +138,38 @@ pub fn rust_main() -> ! {
 
     machine_init();
 
-    //machine independent initialization
-    // use crate::drivers::block::block_device_test;
-    // block_device_test();
-    // 调试：强制 ramfs 启动，跳过块设备检测
-    // fs::force_ramfs();
-    drivers::init_net_device();
-    net::config::init();
-    #[cfg(feature = "block_virt")]
-    println!("[kernel] block in virt mode!");
-    #[cfg(feature = "oom_handler")]
-    println!("[kernel] oom_handler is enabled!");
-    #[cfg(feature = "heap_trace")]
-    println!("[kernel] heap_trace is enabled!");
-    // #[cfg(feature = "riscv")]
-    fs::flush_preload();
-    // crate::fs::ext4::smoke::run_boot_smoke();  // 需要时取消注释
+    // ── Initramfs 启动路径 ──
+    #[cfg(feature = "initramfs")]
+    {
+        // 在 mm::init() 之后创建 VFS_ROOT: 创建 RamFS + 解包 cpio + 挂载 devfs/proc/tmp
+        fs::initramfs_init();
+
+        drivers::init_net_device();
+        net::config::init();
+
+        // 先探测块设备（需要连续物理页 DMA，必须在 preload 分配页之前做）
+        fs::mount_boot_block_devices();
+
+        // 安装预装载的测试 payload（迁移期保留，在块设备探测之后避免页碎片化）
+        #[cfg(feature = "preload_payloads")]
+        fs::install_preload_payloads();
+    }
+
+    // ── Legacy 启动路径（initramfs 特性未启用时）──
+    #[cfg(not(feature = "initramfs"))]
+    {
+        drivers::init_net_device();
+        net::config::init();
+        #[cfg(feature = "block_virt")]
+        println!("[kernel] block in virt mode!");
+        #[cfg(feature = "oom_handler")]
+        println!("[kernel] oom_handler is enabled!");
+        #[cfg(feature = "heap_trace")]
+        println!("[kernel] heap_trace is enabled!");
+        fs::flush_preload();
+        fs::mount_tools_disk();
+    }
+
     task::add_initproc();
     // note that in run_tasks(), there is yet *another* pre_start_init(),
     // which is used to turn on interrupts in some archs like LoongArch.

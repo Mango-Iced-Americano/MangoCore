@@ -85,12 +85,18 @@ const fn align_up(addr: usize, align: usize) -> usize {
 }
 
 pub fn enumerate_virtio_pci(device_type: DeviceType) -> Option<PciTransport> {
+    enumerate_all_virtio_pci(device_type).into_iter().next().map(|(_df, t)| t)
+}
+
+pub fn enumerate_all_virtio_pci(
+    device_type: DeviceType,
+) -> alloc::vec::Vec<(DeviceFunction, PciTransport)> {
     let mmconfig_base = PCI_ECAM_BASE as *mut u8;
     println!("[PCI] ECAM base: {:#x}", mmconfig_base as usize);
 
     let mmio_cam = unsafe { MmioCam::new(mmconfig_base, Cam::Ecam) };
     let mut pci_root = PciRoot::new(mmio_cam);
-    let mut transport = None;
+    let mut transports = alloc::vec::Vec::new();
 
     for (device_function, info) in pci_root.enumerate_bus(0) {
         println!(
@@ -104,8 +110,9 @@ pub fn enumerate_virtio_pci(device_type: DeviceType) -> Option<PciTransport> {
             }
 
             println!("[PCI] Configuring BARs...");
+            let mut device_ok = true;
             let mut bar_index = 0;
-            while bar_index < 6 {
+            'configure_bars: while bar_index < 6 {
                 if let Some(bar) = pci_root.bar_info(device_function, bar_index).unwrap() {
                     if let BarInfo::Memory {
                         address_type,
@@ -134,6 +141,13 @@ pub fn enumerate_virtio_pci(device_type: DeviceType) -> Option<PciTransport> {
                                     ),
                                     _ => {}
                                 }
+                            } else {
+                                println!(
+                                    "[PCI] WARNING: PCI range allocator exhausted for BAR{}, skipping device {:?}",
+                                    bar_index, device_function
+                                );
+                                device_ok = false;
+                                break 'configure_bars;
                             }
                         }
                     }
@@ -144,30 +158,85 @@ pub fn enumerate_virtio_pci(device_type: DeviceType) -> Option<PciTransport> {
                 }
                 bar_index += 1;
             }
+            if !device_ok {
+                continue;
+            }
 
             pci_root.set_command(
                 device_function,
                 Command::IO_SPACE | Command::MEMORY_SPACE | Command::BUS_MASTER,
             );
             println!("[PCI] Device enabled.");
-            transport = Some(
-                PciTransport::new::<VirtioHal, MmioCam>(&mut pci_root, device_function).unwrap(),
-            );
-            break;
+            match PciTransport::new::<VirtioHal, MmioCam>(&mut pci_root, device_function) {
+                Ok(transport) => {
+                    transports.push((device_function, transport));
+                }
+                Err(e) => {
+                    println!(
+                        "[PCI] WARNING: failed to create PciTransport for {:?}: {:?}",
+                        device_function, e
+                    );
+                }
+            }
         }
     }
-    transport
+    transports
 }
 
 impl VirtIOBlock {
     pub fn new() -> Self {
-        Self(Mutex::new(
-            VirtIOBlk::<VirtioHal, PciTransport>::new(
-                enumerate_virtio_pci(DeviceType::Block).expect("No VirtIO block device"),
-            )
-            .expect("Invalid VirtIO device"),
-        ))
+        Self::try_from_iter(enumerate_all_virtio_pci(DeviceType::Block).into_iter())
+            .expect("No VirtIO block device found")
     }
+
+    fn try_from_iter(
+        iter: impl Iterator<Item = (DeviceFunction, PciTransport)>,
+    ) -> Option<Self> {
+        for (_df, transport) in iter {
+            match VirtIOBlk::<VirtioHal, PciTransport>::new(transport) {
+                Ok(blk) => return Some(Self(Mutex::new(blk))),
+                Err(_) => continue,
+            }
+        }
+        None
+    }
+}
+
+pub fn probe_la64() -> [Option<alloc::sync::Arc<dyn super::BlockDevice>>; 2] {
+    use alloc::sync::Arc;
+    let transports = enumerate_all_virtio_pci(DeviceType::Block);
+    let mut result: [Option<Arc<dyn super::BlockDevice>>; 2] = [None, None];
+
+    for (i, (df, transport)) in transports.into_iter().enumerate() {
+        if i >= 2 {
+            println!(
+                "[kernel] block device {} ({:?}): skipping (max 2 devices)",
+                i, df
+            );
+            break;
+        }
+        match VirtIOBlk::<VirtioHal, PciTransport>::new(transport) {
+            Ok(blk) => {
+                let label = if i == 0 { "official fs" } else { "tools disk" };
+                result[i] = Some(Arc::new(VirtIOBlock(Mutex::new(blk))) as Arc<dyn super::BlockDevice>);
+                println!("[kernel] block device {}: {} ({:?})", i, label, df);
+            }
+            Err(_e) => {
+                if i == 0 {
+                    panic!(
+                        "[kernel] FATAL: failed to initialize block device 0 ({:?})",
+                        df
+                    );
+                } else {
+                    println!(
+                        "[kernel] block device {} ({:?}): initialization failed, skipping",
+                        i, df
+                    );
+                }
+            }
+        }
+    }
+    result
 }
 
 pub struct VirtioHal;

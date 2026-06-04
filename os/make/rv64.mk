@@ -92,6 +92,16 @@ $(APPS):
 fs-img: user
 	./buildfs.sh "$(ROOTFS_IMG)" "rvqemu" $(MODE) $(FS_MODE)
 
+# Initramfs cpio generation (always needed when feature is in Cargo defaults)
+INITRAMFS_CPIO_RV := ../fs-img-dir/initramfs-rv.cpio
+
+kernel: $(INITRAMFS_CPIO_RV)
+
+$(INITRAMFS_CPIO_RV): user
+	@mkdir -p ../fs-img-dir
+	./build_initramfs.sh rv64 $(MODE) $(INITRAMFS_CPIO_RV)
+	@touch src/initramfs-rv.S  # 强制 Cargo 重编译（.incbin 时间戳变化）
+
 # xein TODO: 注意需要评估zero_init启用与否的影响
 kernel:
 	@echo Platform: $(BOARD)
@@ -115,6 +125,8 @@ ifeq ($(BOARD), rvqemu)
   		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
   		-drive if=none,file=$(ROOTFS_IMG),format=raw,id=x0 \
         -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+  		-drive if=none,file=../disk.img,format=raw,id=x1 \
+        -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
   		-m 1024 \
   		-smp threads=$(CORE_NUM)
 endif
@@ -130,6 +142,8 @@ gdb:
 	-device loader,file=target/riscv64gc-unknown-none-elf/debug/os,addr=0x80200000 \
 	-drive file=$(ROOTFS_IMG),if=none,format=raw,id=x0 \
 	-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+	-drive file=../disk.img,if=none,format=raw,id=x1 \
+	-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
 	-m 1024 \
 	-smp threads=$(CORE_NUM) -S -s | tee qemu.log
 
@@ -142,6 +156,8 @@ runsimple:
 		-drive file=$(ROOTFS_IMG),if=none,format=raw,id=x0 \
 		-m 1024 \
         -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		-drive file=../disk.img,if=none,format=raw,id=x1 \
+        -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
 		-smp threads=$(CORE_NUM)
 
 comp:
@@ -154,9 +170,11 @@ comp:
 		-bios default \
 		-drive file=$(SDCARD_RV),if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		-drive file=../disk.img,if=none,format=raw,id=x1 \
+		-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
 		-no-reboot \
 		-rtc base=utc \
-		-device virtio-net-device,netdev=net -netdev user,id=net \
+		-device virtio-net-device,netdev=net,bus=virtio-mmio-bus.7 -netdev user,id=net \
 		-object filter-dump,id=f1,netdev=net,file=packets.pcap
 
 comp-gdb:
@@ -169,10 +187,12 @@ comp-gdb:
         -bios default \
         -drive file=$(SDCARD_RV),if=none,format=raw,id=x0 \
         -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+        -drive file=../disk.img,if=none,format=raw,id=x1 \
+        -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
         -no-reboot \
         -rtc base=utc \
-		-device virtio-net-device,netdev=net -netdev user,id=net \
-		-object filter-dump,id=f1,netdev=net,file=packets.pcap \
+	-device virtio-net-device,netdev=net,bus=virtio-mmio-bus.7 -netdev user,id=net \
+	-object filter-dump,id=f1,netdev=net,file=packets.pcap \
         -S \
         -s
 

@@ -2,6 +2,7 @@ pub mod block;
 pub mod net;
 pub mod serial;
 
+pub use block::BLOCK_DEVICES;
 pub use block::BLOCK_DEVICE;
 pub use net::init_net_device;
 pub use net::NET_DEVICE;

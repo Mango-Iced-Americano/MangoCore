@@ -1,143 +1,154 @@
-# Target configuration
-TARGET := loongarch64-unknown-none
+# Building
+TARGET := loongarch64-unknown-linux-gnu
 MODE := release
 KERNEL_ELF := target/$(TARGET)/$(MODE)/os
 KERNEL_BIN := $(KERNEL_ELF).bin
-DISASM_TMP := target/$(TARGET)/$(MODE)/asm
+KERNEL_UIMG := $(KERNEL_ELF).ui
 BLK_MODE := virt_pci
 FS_MODE ?= ext4
-ROOTFS_IMG_NAME := rootfs-la.img
+ROOTFS_IMG_NAME = rootfs-la.img
 ROOTFS_IMG_DIR := ../fs-img-dir
 CORE_NUM := 1
-LOG := off
+LOG ?= off
 KERNEL_LA := ../kernel-la
 SDCARD_LA := ../sdcard-la.img
+DISK_LA := ../disk-la.img
 
 # BOARD
 BOARD ?= laqemu
 
-# SBI config (can be simplified later)
-SBI ?= opensbi-1.0
-ifeq ($(BOARD), laqemu)
-	ifeq ($(SBI), rustsbi)
-		BOOTLOADER := ../bootloader/$(SBI)-$(BOARD).bin
-	else ifeq ($(SBI), default)
-		BOOTLOADER := default
-	else
-		BOOTLOADER := ../bootloader/fw_payload.bin
-	endif
-else ifeq ($(BOARD), vf2)
-	BOOTLOADER := ../bootloader/rustsbi-$(BOARD).bin
-endif
-
-# Logging config
+# Logging
 ifndef LOG
 	LOG_OPTION := "log_off"
 else
 	LOG_OPTION := "log_${LOG}"
 endif
 
-# KERNEL entry address
+# Kernel entry (for -device loader fallback)
 KERNEL_ENTRY_PA := 0x9000000090000000
 
-# Binutils
-OBJDUMP := rust-objdump --arch-name=loongarch64
-OBJCOPY := rust-objcopy --binary-architecture=loongarch64
+# Binutils (cross toolchain, not llvm)
+OBJCOPY := loongarch64-linux-gnu-objcopy
+OBJDUMP := loongarch64-linux-gnu-objdump
+READELF := loongarch64-linux-gnu-readelf
+
+# uImage config
+LA_LOAD_ADDR := 0x9000000090000000
+LA_ENTRY_POINT := 0x9000000090000000
 
 # Applications
 APPS := ../user/src/bin/*
 
-# FS image
-ifeq ($(BOARD), vf2)
-	ROOTFS_IMG := /dev/sdc
-else
+# RootFS image
+ifeq ($(BOARD), laqemu)
 	ROOTFS_IMG := ${ROOTFS_IMG_DIR}/${ROOTFS_IMG_NAME}
 endif
 
-# Build rules
+# ============================================================
+# Targets (symmetric with rv64.mk)
+# ============================================================
+
 all: fs-img build
 
+debug: build mv-debug
+
 mv:
+	cp -f $(KERNEL_ELF) $(KERNEL_LA)
+
+mv-debug:
 	cp -f $(KERNEL_ELF) $(KERNEL_LA)
 
 build: env $(KERNEL_BIN) mv
 
 env:
 	(rustup target list | grep "$(TARGET) (installed)") || rustup target add $(TARGET)
-	(rustup target list | grep "loongarch64-unknown-none (installed)") || rustup target add loongarch64-unknown-none
 	rustup component add rust-src
-	rustup component add llvm-tools-preview
 
-# build all user programs
+# Build all user programs
 user:
 	@cd ../user && make rust-user BOARD=$(BOARD) MODE=$(MODE)
 
 $(KERNEL_BIN): kernel
 	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $@
 
+$(APPS):
+
 fs-img: user
 	./buildfs.sh "$(ROOTFS_IMG)" "$(BOARD)" $(MODE) $(FS_MODE)
 
+# Initramfs cpio generation (always needed when feature is in Cargo defaults)
+INITRAMFS_CPIO_LA := ../fs-img-dir/initramfs-la.cpio
+
+kernel: $(INITRAMFS_CPIO_LA)
+
+$(INITRAMFS_CPIO_LA): user
+	@mkdir -p ../fs-img-dir
+	./build_initramfs.sh la64 $(MODE) $(INITRAMFS_CPIO_LA)
+	@touch src/initramfs-la.S
+
 kernel:
 	@echo Platform: $(BOARD)
+	@cp -f src/hal/arch/loongarch64/linker-$(BOARD).ld src/hal/arch/loongarch64/linker.ld 2>/dev/null || true
 ifeq ($(MODE), debug)
-	@LOG=$(LOG) cargo build --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --no-default-features --target loongarch64-unknown-none
+	@LOG=$(LOG) cargo build --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
 else
-	@LOG=$(LOG) cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --no-default-features --target loongarch64-unknown-none
+	@LOG=$(LOG) cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
 endif
+
+# uImage (la64-specific: for uboot boot)
+uimage: $(KERNEL_BIN)
+	../util/mkimage -A loongarch -O linux -T kernel -C none \
+	  -a $(LA_LOAD_ADDR) -e $(LA_ENTRY_POINT) \
+	  -n NPUcore+ -d $(KERNEL_BIN) $(KERNEL_UIMG)
 
 clean:
 	@cargo clean
 	@rm -rf $(KERNEL_LA)
+
+# ============================================================
+# QEMU run targets
+# ============================================================
 
 run: build
 ifeq ($(BOARD), laqemu)
 	@qemu-system-loongarch64 \
 		-machine virt \
 		-nographic \
-		-bios $(BOOTLOADER) \
-		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
+		-kernel $(KERNEL_ELF) \
 		-drive if=none,file=$(ROOTFS_IMG),format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		-device virtio-blk-pci,drive=x0 \
+		-drive if=none,file=$(DISK_LA),format=raw,id=x1 \
+		-device virtio-blk-pci,drive=x1 \
 		-m 1024 \
 		-smp threads=$(CORE_NUM)
 endif
-
-monitor:
-	loongarch64-unknown-elf-gdb -ex 'file target/loongarch64-unknown-none/debug/os' -ex 'set arch loongarch64' -ex 'target remote localhost:1234'
-
-gdb:
-	@qemu-system-loongarch64 \
-		-machine virt \
-		-nographic \
-		-bios $(BOOTLOADER) \
-		-device loader,file=target/loongarch64-unknown-none/debug/os,addr=$(KERNEL_ENTRY_PA) \
-		-drive file=$(ROOTFS_IMG),if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		-m 1024 \
-		-smp threads=$(CORE_NUM) -S -s | tee qemu.log
 
 runsimple:
 	@qemu-system-loongarch64 \
 		-machine virt \
 		-nographic \
-		-bios $(BOOTLOADER) \
-		-device loader,file=$(KERNEL_ELF),addr=$(KERNEL_ENTRY_PA) \
-		-drive file=$(ROOTFS_IMG),if=none,format=raw,id=x0 \
+		-kernel $(KERNEL_ELF) \
+		-drive if=none,file=$(ROOTFS_IMG),format=raw,id=x0 \
+		-device virtio-blk-pci,drive=x0 \
+		-drive if=none,file=$(DISK_LA),format=raw,id=x1 \
+		-device virtio-blk-pci,drive=x1 \
 		-m 1024 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		-smp threads=$(CORE_NUM)
 
 comp:
 	@qemu-system-loongarch64 \
 		-machine virt \
 		-kernel $(KERNEL_LA) \
-		-m 1024 \
+		-m 1G \
 		-nographic \
 		-smp 1 \
 		-drive file=$(SDCARD_LA),if=none,format=raw,id=x0 \
-		-device virtio-blk-pci,drive=x0\
+		-device virtio-blk-pci,drive=x0 \
+		-drive file=$(DISK_LA),if=none,format=raw,id=x1 \
+		-device virtio-blk-pci,drive=x1 \
 		-no-reboot \
+		-device virtio-net-pci,netdev=net0 \
+		-netdev user,id=net0 \
 		-rtc base=utc
 
 comp-gdb:
@@ -149,9 +160,11 @@ comp-gdb:
 		-smp 1 \
 		-drive file=$(SDCARD_LA),if=none,format=raw,id=x0 \
 		-device virtio-blk-pci,drive=x0 \
+		-drive file=$(DISK_LA),if=none,format=raw,id=x1 \
+		-device virtio-blk-pci,drive=x1 \
 		-no-reboot \
 		-rtc base=utc \
 		-S \
 		-s
 
-.PHONY: all build kernel fs-img user clean run gdb comp comp-gdb
+.PHONY: all build kernel fs-img user clean run runsimple comp comp-gdb

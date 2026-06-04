@@ -192,13 +192,13 @@ def build_rv64_cmd():
         "-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 "
         "-no-reboot "
         "-rtc base=utc "
-        "-device virtio-net-device,netdev=net "
+        "-device virtio-net-device,netdev=net,bus=virtio-mmio-bus.7 "
         "-netdev user,id=net"
     )
 
 
 def build_la64_cmd():
-    """构建 la64 QEMU 命令，参数参照 os/make/la64o.mk 的 comp 目标。"""
+    """构建 la64 QEMU 命令，参数参照 os/make/la64.mk 的 comp 目标。"""
     return (
         "qemu-system-loongarch64 "
         "-kernel kernel-la "

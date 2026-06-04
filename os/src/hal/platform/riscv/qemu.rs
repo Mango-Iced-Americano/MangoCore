@@ -2,10 +2,11 @@ pub const CLOCK_FREQ: usize = 12500000;
 
 pub const MMIO: &[(usize, usize)] = &[
     // 前者为地址，后者为大小
-    (0x1000_0000, 0x1000),
-    (0x1000_1000, 0x1000),
-    (0x1000_8000, 0x1000), //nic
-    (0xC00_0000, 0x40_0000),
+    (0x1000_0000, 0x1000), // UART
+    (0x1000_1000, 0x1000), // virtio-mmio bus.0 (block x0)
+    (0x1000_2000, 0x1000), // virtio-mmio bus.1 (block x1 / tools disk)
+    (0x1000_8000, 0x1000), // virtio-mmio bus.7 (net)
+    (0xC00_0000, 0x40_0000), // PLIC
 ];
 
 // pub type BlockDeviceImpl = crate::drivers::block::VirtIOBlock;

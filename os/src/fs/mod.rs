@@ -5,6 +5,8 @@ pub mod ext4;
 pub mod fat32;
 pub mod pidfd;
 mod filesystem;
+#[cfg(feature = "initramfs")]
+pub mod initramfs;
 pub mod iov;
 mod layout;
 mod page_cache;
@@ -32,7 +34,6 @@ pub use self::layout::*;
 
 pub use self::fat32::DiskInodeType;
 pub use crate::drivers::block::BlockDevice;
-use crate::drivers::BLOCK_DEVICE;
 
 use alloc::{string::String, sync::Arc};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -41,7 +42,7 @@ use lazy_static::*;
 use self::vfs::IndexNode;
 use self::vfs::FileSystem as _;
 
-/// 强制使用 ramfs，跳过块设备检测（用于 VFS 层调试）
+/// 强制使用 ramfs，跳过块设备检测（用于 VFS 层调试 / legacy_block_root 模式）
 static FORCE_RAMFS: AtomicBool = AtomicBool::new(false);
 
 /// 在 BLOCK_DEVICE 初始化之前调用此函数，可跳过块设备检测，直接使用 ramfs 启动
@@ -50,9 +51,11 @@ pub fn force_ramfs() {
     crate::drivers::block::disable_block_device();
 }
 
+// ── VFS_ROOT：根据特性选择初始化策略 ──
+
+/// 非 initramfs 模式：传统块设备检测，失败时 fallback 到 ramfs
+#[cfg(not(feature = "initramfs"))]
 lazy_static! {
-    /// 新 VFS 根 — 基于 MountFS + 具体文件系统。
-    /// 若未检测到有效文件系统，自动 fallback 到 ramfs（兜底内存文件系统）。
     pub static ref VFS_ROOT: Arc<self::vfs::MountFS> = {
         let fs_type = if FORCE_RAMFS.load(Ordering::Relaxed) {
             self::filesystem::FS_Type::Null
@@ -62,13 +65,13 @@ lazy_static! {
         let mfs = match fs_type {
             self::filesystem::FS_Type::Fat32 => {
                 let efs = self::fat32::EasyFileSystem::open(
-                    BLOCK_DEVICE.clone(),
+                    crate::drivers::BLOCK_DEVICE.clone(),
                 );
                 self::vfs::MountFS::new(efs, self::vfs::MountFlags::empty())
             }
             self::filesystem::FS_Type::Ext4 => {
                 let ext4 = self::ext4::ext4fs::Ext4FileSystem::open_ext4rs(
-                    BLOCK_DEVICE.clone(),
+                    crate::drivers::BLOCK_DEVICE.clone(),
                 );
                 self::vfs::MountFS::new(ext4, self::vfs::MountFlags::empty())
             }
@@ -78,6 +81,33 @@ lazy_static! {
                 self::vfs::MountFS::new(ramfs, self::vfs::MountFlags::empty())
             }
         };
+        mount_common_filesystems(&mfs);
+        mfs
+    };
+}
+
+/// initramfs 模式：创建 RamFS → 解包内嵌 cpio → 挂载 devfs/procfs/tmpfs
+/// 完全不依赖 BLOCK_DEVICE，块设备在后续阶段可选挂载到 /sdcard 和 /tools
+#[cfg(feature = "initramfs")]
+lazy_static! {
+    pub static ref VFS_ROOT: Arc<self::vfs::MountFS> = {
+        let ramfs = self::ramfs::RamFS::new();
+        let mfs = self::vfs::MountFS::new(ramfs, self::vfs::MountFlags::empty());
+
+        // 解包 initramfs cpio
+        match self::initramfs::unpack_embedded(&mfs) {
+            Ok(stats) => {
+                println!(
+                    "[initramfs] unpacked: files={} dirs={} symlinks={} bytes={}",
+                    stats.files, stats.dirs, stats.symlinks, stats.bytes,
+                );
+            }
+            Err(e) => {
+                println!("[initramfs] WARNING: unpack failed: {:?}, continuing with empty root", e);
+            }
+        }
+
+        // 挂载 devfs/procfs/tmpfs（不含 /dev/vda/vdb）
         mount_common_filesystems(&mfs);
         mfs
     };
@@ -93,7 +123,7 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
             root.create("dev", self::vfs::FileType::Dir, self::vfs::InodeMode::from_bits_truncate(0o755))
                 .expect("failed to create /dev")
         });
-        let devfs = crate::fs::dev::DevFS::new();
+        let devfs = crate::fs::dev::DEV_FS.clone();
         devfs.add_dev("tty", crate::fs::dev::tty::TTY.clone() as Arc<dyn self::vfs::IndexNode>)
             .expect("devfs: failed to register /dev/tty");
         devfs.add_dev("null", alloc::sync::Arc::new(crate::fs::dev::null::Null) as Arc<dyn self::vfs::IndexNode>)
@@ -235,9 +265,150 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
     }
 }
 
+/// 启动时挂载块设备上的文件系统。
+///
+/// 在 VFS_ROOT 下创建挂载点目录，打开块设备上的 ext4/fat32，
+/// 包装为 MountFS 并注册到挂载树。
+///
+/// 返回挂载后的 MountFS，失败时打印错误并返回 None。
+pub fn mount_block_fs(
+    parent_mfs: &Arc<self::vfs::MountFS>,
+    block_device: &Arc<dyn BlockDevice>,
+    mount_point: &str,
+    label: &str,
+) -> Option<Arc<self::vfs::MountFS>> {
+    use self::filesystem::detect_fs;
+    use self::vfs::MountFlags;
+
+    let fs_type = detect_fs(block_device);
+    let mfs = match fs_type {
+        self::filesystem::FS_Type::Ext4 => {
+            let ext4 = self::ext4::ext4fs::Ext4FileSystem::open_ext4rs(block_device.clone());
+            self::vfs::MountFS::new(ext4, MountFlags::empty())
+        }
+        self::filesystem::FS_Type::Fat32 => {
+            let efs = self::fat32::EasyFileSystem::open(block_device.clone());
+            self::vfs::MountFS::new(efs, MountFlags::empty())
+        }
+        self::filesystem::FS_Type::Null => {
+            println!("[kernel] mount_block_fs: {} — no filesystem detected on block device", label);
+            return None;
+        }
+    };
+
+    let root = parent_mfs.mountpoint_root_inode();
+    let mount_inode = root.find(mount_point).unwrap_or_else(|_| {
+        root.create(mount_point, self::vfs::FileType::Dir,
+            self::vfs::InodeMode::from_bits_truncate(0o755))
+            .expect("failed to create mount point")
+    });
+    let inode_id = mount_inode.metadata().expect("mount_inode metadata failed").inode_id;
+
+    let mount_path = alloc::string::String::from(mount_point);
+    mfs.set_mount_path(Some(mount_path));
+
+    if let Some(mfsi) = mount_inode.as_any_ref().downcast_ref::<self::vfs::MountFSInode>() {
+        let backref = self::vfs::MountFSInode::new(
+            mfsi.inner_inode.clone(),
+            mfsi.mount_fs.clone(),
+        );
+        mfs.set_self_mountpoint(Some(backref));
+    }
+
+    if let Err(e) = parent_mfs.add_mount(inode_id, mfs.clone()) {
+        println!("[kernel] mount_block_fs: failed to mount {} at {}: {:?}", label, mount_point, e);
+        return None;
+    }
+
+    println!("[kernel] {} mounted at {}", label, mount_point);
+    Some(mfs)
+}
+
+/// 尝试挂载工具盘（BLOCK_DEVICES[1]）到 /tools。
+/// 设备不存在或挂载失败时不 panic，打印日志并优雅跳过。
+pub fn mount_tools_disk() {
+    let tools_dev = match crate::drivers::BLOCK_DEVICES[1].as_ref() {
+        Some(dev) => dev,
+        None => {
+            println!("[kernel] no tools disk (x1) found, skipping /tools mount");
+            return;
+        }
+    };
+    let root = vfs_root();
+    mount_block_fs(&root, tools_dev, "tools", "tools disk");
+}
+
 /// 返回新的 VFS 根（MountFS 实例）的共享引用。
 pub fn vfs_root() -> Arc<self::vfs::MountFS> {
     VFS_ROOT.clone()
+}
+
+/// 注册 /dev/vda 和 /dev/vdb 块设备节点到当前 devfs。
+/// 无需单独调用 — 由 mount_boot_block_devices 间接调用。
+pub fn register_block_device_nodes() {
+    // 保留空函数体供未来 devfs 重构使用；当前块设备节点已在
+    // mount_common_filesystems 中注册（使用 block_devices() 安全探测）。
+}
+
+/// 在 initramfs 模式下，首次触发 BLOCK_DEVICES 探测，并尝试挂载块设备：
+/// - x0 → /sdcard（官方 fs）
+/// - x1 → /tools（工具盘）
+///
+/// 任何设备缺失或挂载失败都只打印 warning，不 panic。
+pub fn mount_boot_block_devices() {
+    let root = vfs_root();
+
+    // 首次真正触发 BLOCK_DEVICES probe，但此时 VFS_ROOT 已经存在
+    let devs = crate::drivers::block::block_devices();
+
+    // 注册 /dev/vda 和 /dev/vdb 到已挂载的 DEV_FS
+    if let Some(ref blk0) = devs[0] {
+        let _ = crate::fs::dev::DEV_FS.add_dev(
+            "vda", crate::fs::dev::block::BlockDevInode::new(blk0.clone(), 0, "vda"));
+    }
+    if let Some(ref blk1) = devs[1] {
+        let _ = crate::fs::dev::DEV_FS.add_dev(
+            "vdb", crate::fs::dev::block::BlockDevInode::new(blk1.clone(), 1, "vdb"));
+    }
+
+    // 尝试挂载 x0 → /sdcard
+    match devs[0].as_ref() {
+        Some(dev) => {
+            if mount_block_fs(&root, dev, "sdcard", "official fs (x0)").is_none() {
+                println!("[initramfs] official fs (x0) mount failed, leaving /sdcard empty");
+            }
+        }
+        None => {
+            println!("[initramfs] official fs (x0) not found, skipping /sdcard mount");
+        }
+    }
+
+    // 尝试挂载 x1 → /tools
+    match devs[1].as_ref() {
+        Some(dev) => {
+            if mount_block_fs(&root, dev, "tools", "tools disk (x1)").is_none() {
+                println!("[initramfs] tools disk (x1) mount failed, leaving /tools empty");
+            }
+        }
+        None => {
+            println!("[initramfs] tools disk (x1) not found, skipping /tools mount");
+        }
+    }
+}
+
+/// 主动初始化 initramfs VFS_ROOT（触发 lazy_static）。
+/// 在 `mm::init()` 之后、`drivers::init_net_device()` 之前调用。
+#[cfg(feature = "initramfs")]
+pub fn initramfs_init() {
+    let _root = VFS_ROOT.clone();
+    println!("[initramfs] VFS_ROOT initialized (ramfs + cpio unpack + dev/proc/tmp)");
+}
+
+/// 安装预装载的用户态 payload（initproc、bash、busybox 等）。
+/// 用于 initramfs + preload_payloads 迁移阶段。
+#[cfg(feature = "preload_payloads")]
+pub fn install_preload_payloads() {
+    flush_preload();
 }
 
 /// 路径规范化：按 '/' 分割，处理 '.' 和 '..'

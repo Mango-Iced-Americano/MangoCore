@@ -2,7 +2,118 @@
 
 ---
 
-## 2026-06-02
+## 2026-06-04
+
+### Initramfs 启动流程 — 第一阶段实现
+
+**涉及文件：**
+- `os/src/fs/initramfs.rs` — 新增模块：newc cpio 解析器（`unpack_newc` / `unpack_embedded`），支持 S_IFDIR/S_IFREG/S_IFLNK，无外部依赖
+- `os/src/initramfs-rv.S` / `os/src/initramfs-la.S` — 新增：`.incbin` 嵌入 cpio 归档
+- `os/build_initramfs.sh` — 新增：生成 newc cpio 构建脚本
+- `os/initramfs/common/` — 新增：initramfs 目录骨架（bin lib usr etc root run var/tmp sdcard tools musl glibc rescue dev proc tmp）
+- `os/Cargo.toml` — 新增 `initramfs` / `legacy_block_root` / `preload_payloads` 特性
+- `os/src/fs/mod.rs` — VFS_ROOT 重构：`#[cfg(feature = "initramfs")]` 分支创建 RamFS + 解包 cpio + devfs/proc/tmp（不访问 BLOCK_DEVICE）；`mount_block_fs` 改为不 panic；新增 `mount_boot_block_devices()` / `initramfs_init()` / `install_preload_payloads()`
+- `os/src/main.rs` — 重构 `rust_main()`：initramfs 路径（`initramfs_init` → net → preload → mount block devices）与 legacy 路径分离，汇编嵌入选择覆盖 4 种特性组合
+- `os/src/task/mod.rs` — `INITPROC` 改为优先 /init，fallback /initproc
+- `os/src/drivers/block/mod.rs` — 新增 `block_devices()` / `get_block_device()` 访问器
+- `os/Makefile` — 新增 `initramfs-rv` / `initramfs-la` 目标
+- `os/make/rv64.mk` / `os/make/la64.mk` — 条件依赖：initramfs 特性时 `kernel` 依赖 cpio，生成后 `touch` .S 文件强制 Cargo 重链
+- `os/src/preload_app-rv.S` / `os/src/preload_app.S` — 修复路径指向新的 `bin/` / `lib/` 子目录
+
+**验证：**
+- `make rv64-kernel-build-only EXTRA_FEATURES=initramfs,preload_payloads` ✅
+- `make la64-kernel-build-only EXTRA_FEATURES=initramfs,preload_payloads` ✅
+
+**Oracle 审查修复（第二轮）：**
+1. newc cpio `data_start` 对齐公式修正：`pos + HEADER_LEN + align4(namesize)` → `align4(pos + HEADER_LEN + namesize)`（HEADER_LEN=110 不是 4 的倍数）
+2. `mount_common_filesystems()` 改为使用全局 `DEV_FS`，移除其中的 `block_devices()` 调用，块设备探测完全延后到 `mount_boot_block_devices()`；`/dev/vda`/`/dev/vdb` 注册通过 `DEV_FS.add_dev()` 在 block probe 后追加
+3. cpio 生成后在 Makefile 中 `touch src/initramfs-*.S` 强制 Cargo 重编译
+4. newc 坏 magic 不再静默忽略（非 TRAILER 状态返回错误）
+5. 文件名 NUL 终止符校验
+
+**备注：**
+- `/init` 暂用现有 `initproc` 构建产物占位，后续应新建最小化 `user/src/bin/init.rs`（stage-1 引导）
+- `/rescue/sh` 当前使用 tools/ 中的 BusyBox，需确认其为静态链接，否则 initramfs 中缺少动态链接器无法执行
+- `preload_payloads` 特性在迁移期保留，initramfs 仍通过 `flush_preload()` 写入 bash/busybox/LTP
+- 旧块设备根启动模型通过 `legacy_block_root` 特性保留
+
+### 工具盘扩容 + apk-tools 本地 repo 包管理
+
+**涉及文件：**
+- `os/Makefile` — `TOOLS_SIZE_RV/LA: 256→512MB`；`build_tools_disk` 新增拷贝 `sbin/*`、`etc/*`、`apk/`；新增 `tools-apk-rv/la` 目标下载 `apk-tools-static`、`alpine-keys`、示例包（zlib, ncurses）；新增 `tools-apk` 统一目标
+- `user/src/bin/init.rs` — 新增 `try_bind("/tools/sbin", "/sbin")` bind mount；`mkdir /lib/apk/db/` + `/var/cache/apk/`
+- `os/initramfs/common/etc/apk/` — 新增目录：`repositories`（指向 `edge/main`）、`keys/*.pub`（Alpine 官方签名公钥）
+- `os/initramfs/common/sbin/` — 新增空目录（bind mount 挂载点）
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU rv64 启动测试 ✅ — 内核正常 boot，init 正确 bind /sbin，basic 测试跑过
+
+**备注：**
+- apk 使用方法：`apk.static --db /tools/apk/db --no-cache add /tools/apk/packages/*.apk` 离线安装
+- `/etc/apk/repositories` 在 initramfs 中（RamFS），`--db /tools/apk/db` 指向工具盘确保包数据库持久化
+- `/tools/sbin` bind mount 当前为空（apk.static 放在 `/bin/`）
+- `syscall 258`（`riscv_hwprobe`）仍未实现，musl 调用后忽略返回的 ENOSYS，不影响 apk 功能
+
+### 实现 sys_flock + /etc/apk/world
+
+**涉及文件：**
+- `os/src/syscall/flock.rs` — 新增模块：per-inode advisory flock 实现（`LOCK_EX/LOCK_SH/LOCK_UN/LOCK_NB`），全局 `BTreeMap<(dev_id, inode_id), ()>` 锁表
+- `os/src/syscall/fs.rs` — 移除 `sys_flock` stub（原返回 `ENOSYS`）
+- `os/src/syscall/mod.rs` — 注册 `mod flock` 和 `use flock::*`
+- `os/initramfs/common/etc/apk/world` — 新增空文件（apk-tools 3.x 必需）
+
+**验证：** `make rv64/la64-kernel-build-only` ✅
+
+**备注：** `sys_flock` 当前只支持非阻塞锁（`LOCK_NB`），阻塞锁因 apk 使用 `LOCK_EX|LOCK_NB` 暂不需要
+
+### 构建系统对称化：la64 去掉 --no-default-features，la64o.mk → la64.mk
+
+**涉及文件：**
+- `os/Cargo.toml` — `default` 从 `["board_rvqemu", "block_virt", "initramfs", "preload_payloads"]` 改为 `["initramfs", "preload_payloads"]`（架构中立）
+- `os/make/rv64.mk` — `kernel: $(INITRAMFS_CPIO_RV)` 改为无条件依赖
+- `os/make/la64.mk` — **全部重写**：按 `rv64.mk` 结构排列，去掉 `--no-default-features`，去掉 `comp` 特性，QEMU 目标用 `-kernel` 直传 ELF
+- `os/make/la64o.mk` — **已删除**
+- `os/Makefile` — 所有 `la64o.mk` 引用改为 `la64.mk`
+- `os/inject_os_test_conf.sh` / `scripts/run_full_test.py` — 注释更新
+
+**对称后的构建命令对比：**
+```makefile
+# rv64.mk
+cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)"
+# la64.mk（完全对称，仅多了 --target）
+cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
+```
+
+**验证：** `make -f make/rv64.mk build` ✅ `make -f make/la64.mk build` ✅
+
+**备注：** 现在 `make la64_all` 不需要 `EXTRA_FEATURES="initramfs preload_payloads"`，Cargo default 自带
+
+---
+
+## 2026-06-03
+
+### 多块设备探测 — BLOCK_DEVICES[2] 数组 + 向后兼容
+
+**涉及文件：**
+- `os/src/drivers/block/mod.rs` — 新增 `BLOCK_DEVICES: [Option<Arc<dyn BlockDevice>>; 2]` 数组
+- `os/src/drivers/block/virtio_blk.rs` — 新增 `try_new(base_addr)` 安全探测
+- `os/src/drivers/block/virtio_blk_pci.rs` — 新增 `enumerate_all_virtio_pci()`
+- `os/src/hal/platform/riscv/qemu.rs` — MMIO 新增 `(0x1000_2000, 0x1000)`
+
+**验证：** `make rv64/la64-kernel-build-only` ✅ QEMU rv64 basic ✅
+
+---
+
+### 整理 user/tools 目录结构 + disk.img gitignore
+
+**涉及文件：**
+- `user/tools/riscv64/` & `loongarch64/` — bin/ lib/ 子目录整理
+- `os/Makefile` — `build_tools_disk` 模板改为按子目录拷贝
+- `.gitignore` — 新增 `disk.img` / `disk-la.img`
+
+**验证：** `make tools-disk-rv` ✅ `make tools-disk-la` ✅
 
 ### P0.1: 修复 inet_test VETH 4/5 失败 + non-dump RTM_GETLINK 补齐
 
@@ -82,10 +193,7 @@
 - `os/src/task/task.rs` — clone 路径新增 CLONE_NEWNS→MountNamespace::new()、CLONE_NEWIPC→IpcNamespace::new() 分支，并传入 ProcessControlBlock::new()
 - `os/src/syscall/process/clone.rs` — 移除 CLONE_NEWNS 拒绝（含 CLONE_FS 组合）；CLONE_NEWNS/CLONE_NEWIPC 加入 root 权限检查；sys_unshare 支持 CLONE_NEWNS/CLONE_NEWIPC；sys_setns 接受 CLONE_NEWNS_VAL / CLONE_NEWIPC_VAL 的 nstype
 
-**验证：**
-- `make rv64-kernel-build-only` ✅
-- `make la64-kernel-build-only` ✅
-
+**备注：**
 **备注：**
 - 不做实际隔离（mount/IPC 操作仍全局），只创建 namespace ID 使 LTP clone3(CLONE_NEWNET|CLONE_NEWNS) 不再被 EINVAL 拒绝
 - /proc/<pid>/ns/mnt 和 /proc/<pid>/ns/ipc 的 procfs 入口留待后续任务
@@ -150,7 +258,7 @@
 
 **验证：**
 - `make rv64-kernel-build-only` ✅（0 errors，139 warnings 预存）
-- `make la64-kernel-build-only` ❌（linker `loongarch64-linux-gnu-gcc` 缺失，环境问题，与本次改动无关）
+- `make la64-kernel-build-only` ❌（linker 缺失，环境问题，与本次改动无关）
 
 **备注：**
 - IFLA_LINKINFO 属性解析前通过 `rta_type & !NLA_F_NESTED` 剥离嵌套标志后匹配 IFLA_LINKINFO（18）；入口处记录 `rta_type_raw & NLA_F_NESTED` 是否置位
@@ -170,7 +278,6 @@
 **备注：**
 - handle_newaddr 遵循 Linux 语义：无 NLM_F_REPLACE 时已存在的地址 → EEXIST；有 NLM_F_REPLACE 时先删后加
 - `find_iface_by_index` 使用显式 for 循环而非迭代器链避免借用临时 MutexGuard 的 E0716 问题
-- 预存在的 `route/mod.rs` 还有 `RTM_DELLINK`、`RTM_SETLINK`、`RTM_NEWROUTE`、`RTM_DELROUTE` 等其他消息的 dispatch，以及对应的 `route/link.rs`、`route/route.rs` 子模块
 
 ### 实现 RTM_NEWROUTE + RTM_DELROUTE netlink 路由处理
 
@@ -180,364 +287,164 @@
 
 **验证：**
 - `make rv64-kernel-build-only` ✅
-- `cargo check --target riscv64gc-unknown-none-elf` ✅ (139 warnings pre-existing)
-- `make la64-kernel-build-only` ❌ (linker `loongarch64-linux-gnu-gcc` 缺失，环境问题，与本次改动无关)
 
-**备注：** 路由操作通过 `current_netns().router.lock()` 访问 per-ns router；`handle_newroute` 支持 NLM_F_EXCL → EEXIST、NLM_F_REPLACE → 先删后加；`handle_delroute` 按目的地 CIDR 匹配并删除。路由类型映射：rtmsg.type_==3 → RouteType::Default，否则 RouteType::Static。
+**备注：** 路由操作通过 `current_netns().router.lock()` 访问 per-ns router；`handle_newroute` 支持 NLM_F_EXCL → EEXIST、NLM_F_REPLACE → 先删后加；`handle_delroute` 按目的地 CIDR 匹配并删除。
 
 ### Remove EOPNOTSUPP fallback in SocketFile::write_at; fix NetlinkSocket try_send
 
 **涉及文件：**
-- `os/src/net/socket/mod.rs` — `write_at` 中移除 `Err(EOPNOTSUPP) => try_sendmsg(...)` 全局回退；现在各 socket 类型通过自己的 `try_send` 处理写操作
+- `os/src/net/socket/mod.rs` — `write_at` 中移除 `Err(EOPNOTSUPP) => try_sendmsg(...)` 全局回退
 - `os/src/net/socket/netlink/mod.rs` — `NetlinkSocket::try_send` 改为委托给 `try_sendmsg`（原返回 `EOPNOTSUPP`）
 - `os/src/net/socket/netlink/route.rs` — 删除（与 `route/` 目录版冲突）
-- `os/src/net/socket/netlink/route/mod.rs` — 修复 if 块后的重复孤儿代码段（语法错误）；删除重复 `RTM_DELLINK` 导入
+- `os/src/net/socket/netlink/route/mod.rs` — 修复 if 块后的重复孤儿代码段；删除重复 `RTM_DELLINK` 导入
 - `os/src/net/socket/netlink/route/route.rs` — 修复 `current_netns().router.lock()` 临时值生命周期（绑定到 `let ns = ...`）
 
-**验证：**
-- `make rv64-kernel-build-only` ✅（0 errors，139 warnings 预存）
+**验证：** `make rv64-kernel-build-only` ✅
 
-**备注：**
-- 确认所有 6 种 socket 类型（TCP/UDP/Raw/Unix stream/Unix dgram/Netlink）均有自己的 `try_send` 实现，无需全局回退
+**备注：** 确认所有 6 种 socket 类型（TCP/UDP/Raw/Unix stream/Unix dgram/Netlink）均有自己的 `try_send` 实现
 
 ### Implement real CLONE_NEWNET namespace isolation
 
 **涉及文件：**
-- `os/src/task/net_namespace.rs` — 新增 `NetNamespace::new_isolated()`：创建独立网络命名空间并注册 loopback 设备（与 `net_core::init()` 相同模式）
-- `os/src/task/task.rs` — `TaskControlBlock::sys_clone()` 中非线程分支：当 `flags` 包含 `CLONE_NEWNET` 时调用 `NetNamespace::new_isolated()` 替代 `self.process.net().clone()`；新增 `use super::NetNamespace`
-- `os/src/task/process.rs` — `unshare_net()` 改用 `NetNamespace::new_isolated()`，消除重复的 loopback 创建代码
-- `os/src/syscall/process/clone.rs` — 将 `sys_setns` 恢复为原始 stub（引用了未定义的 `NetNsFile` 类型，该类型由预存代码引入）
-- `os/src/lang_items.rs` / `user/src/lang_items.rs` — 移除 `PanicMessage::unwrap()` 调用（预存的 nightly 兼容性问题）
+- `os/src/task/net_namespace.rs` — 新增 `NetNamespace::new_isolated()`
+- `os/src/task/task.rs` — clone 路径支持 CLONE_NEWNET → `NetNamespace::new_isolated()`
+- `os/src/task/process.rs` — `unshare_net()` 改用 `NetNamespace::new_isolated()`
+- `os/src/syscall/process/clone.rs` — `sys_setns` 恢复为原始 stub
 
-**验证：**
-- `make rv64-kernel-build-only` ✅（0 errors，141 warnings 预存）
-- `make la64-kernel-build-only` ✅（0 errors，127 warnings 预存）
+**验证：** `make rv64/la64-kernel-build-only` ✅
 
-**备注：**
-- 权限检查已在 `clone.rs` 中预先存在：非 root 用户设置 `CLONE_NEWNET` 返回 `EPERM`
-- clone3 路径通过 `sys_clone_inner()` → `TaskControlBlock::sys_clone()` 自动获得相同处理
-- 新的子进程 `ProcessInner.net` 被设置为新的 `Arc<NetNamespace>`（含独立 loopback），不与父命名空间共享网络栈
+**备注：** clone3 路径通过 `sys_clone_inner()` → `TaskControlBlock::sys_clone()` 自动获得相同处理
 
-### Fix T23 setns: use /proc/[pid]/ns/net via procfs instead of NetNsFile bridge
+### Fix T23 setns: use /proc/[pid]/ns/net via procfs
 
 **涉及文件：**
-- `os/src/fs/procfs/pid/ns.rs` — **新建**：`ProcNsNetInode` 结构体，存储 `Arc<NetNamespace>` 并实现 `IndexNode` trait（含 `as_any_ref()` 用于 `sys_setns` 下转型）
-- `os/src/fs/procfs/pid/mod.rs` — 声明 `pub mod ns`，在 `create_pid_dir()` 中创建 `ns` 子目录并添加 `net` 文件（inode 持有进程的 `Arc<NetNamespace>`）
-- `os/src/syscall/process/clone.rs` — `sys_setns()`：移除已删除的 `NetNsFile` 引用，改为通过 `MountFSInode::unwrap_inode()` → `downcast_ref::<ProcNsNetInode>()` → `netns().clone()` + `set_net()` 切换命名空间；显式 `drop(fd_table)` 再调用 `set_net`（遵守"锁→clone Arc→释放锁→操作"规则）
+- `os/src/fs/procfs/pid/ns.rs` — 新建：`ProcNsNetInode`
+- `os/src/fs/procfs/pid/mod.rs` — 创建 `ns` 子目录 + `net` 文件
+- `os/src/syscall/process/clone.rs` — `sys_setns()` 使用 `downcast_ref::<ProcNsNetInode>()`
 
-**验证：**
-- `make rv64-kernel-build-only` ✅（0 errors）
-- `make la64-kernel-build-only` ✅（0 errors）
+**验证：** `make rv64/la64-kernel-build-only` ✅
 
-**备注：**
-- 已确认无残留 `NetNsFile`/`net_ns_file` 引用（`grep` 零匹配）
-- `nstype` 验证：仅接受 0 或 `0x40000000`（CLONE_NEWNET）；非法 fd → `EBADF`；非 netns inode fd → `EINVAL`
-- inode 文件类型为 `S_IFREG | 0o444`，`read_at` 返回 0（opaque handle），`write_at` 返回 `EINVAL`
-- 遵循现有 procfs 模式：inode 通过 `Arc<dyn IndexNode>` 插入目录 `children` BTreeMap
-
-### Dynamic ifindex lookup for TCP/UDP sockets, remove all hardcoded ifindex
+### Dynamic ifindex lookup for TCP/UDP sockets
 
 **涉及文件：**
-- `os/src/net/net_core.rs` — 新增 `ifindex_for_local_addr(addr: Option<IpAddress>) -> u32`，在 `current_netns().device_list` 中按 IP 查找设备 ifindex；loopback/INADDR_ANY → lo，其余走 IP 匹配，fallback 到 lo
-- `os/src/net/socket/inet/stream/lifecycle.rs` — `connect()`: 路由回退从 `find_by_name("eth0")` 改为 `ifindex_for_local_addr(Some(local.addr))`；`listen()`: 整个 match 块替换为 `ifindex_for_local_addr(listen_addr.addr)`
-- `os/src/net/socket/inet/stream/mod.rs` — 4 处 `bind`/`listen`/`connect`/`accept` 中的 `is_loopback() => 1, _ => 2` 全部替换为 `ifindex_for_local_addr`
-- `os/src/net/socket/inet/datagram/udp.rs` — `bind()` 和 `connect()` 中的 ifindex match 块替换为 `ifindex_for_local_addr`
-- `os/src/net/socket/inet/common/port.rs` — `PortManager` 中的 ifindex match 块替换为 `ifindex_for_local_addr`
+- `os/src/net/net_core.rs` — 新增 `ifindex_for_local_addr(addr) -> u32`
+- 所有 socket 模块移除硬编码 ifindex
 
-**验证：**
-- `make rv64-kernel-build-only` ✅（0 errors，140 warnings 均为预存在）
-- `make la64-kernel-build-only` ❌（loongarch64-linux-gnu-gcc linker 未安装，环境问题，非本次引入）
+**验证：** `make rv64-kernel-build-only` ✅
 
-**备注：**
-- 原硬编码模式：`is_loopback() => 1, _ => 2` 或 `find_by_name("eth0").map(|d| d.ifindex).unwrap_or(1)`
-- `ifindex_for_local_addr` 的 match 不能使用 `None | Some(Ipv4(ip)) if ip.is_loopback()`，因为 Rust 要求 guard 变量在 `|` 的所有分支中都绑定（E0408），需拆为独立 arm
-- 所有修改均在 `current_netns().device_list` 的锁内完成，无引入新的锁顺序问题
-
-### Add Endpoint::Netlink variant, remove AF_UNSPEC|AF_NETLINK hack
+### Add Endpoint::Netlink variant, remove AF_UNSPEC hack
 
 **涉及文件：**
-- `os/src/net/socket/mod.rs` — 新增 `Endpoint::Netlink(u32)` 变体（nl_pid）；`from_sockaddr` 中 `AF_NETLINK` 不再映射为 `Unspecified`，而是解析 `sockaddr_nl` → `Endpoint::Netlink(nl_pid)`；`fill_sockaddr` 新增 `Netlink` 分支写入完整 `sockaddr_nl` 结构
-- `os/src/net/socket/netlink/mod.rs` — `NetlinkSocket::local_endpoint()` 返回 `Some(Endpoint::Netlink(0))` 而非 `Some(Endpoint::Unspecified)`
-- `os/src/net/syscall/bind.rs` — 新增 `Endpoint::Netlink` 匹配臂直接绑定，跳过 IPv4 重新解释 hack
-- `os/src/net/syscall/sendto.rs` — 清理 `PSOCK::Raw` 路径：统一使用 `try_sendmsg` 替代 `send_to` 的 split path；`dest_addr=0`/非零均走同一路径
-- `os/src/net/socket/inet/raw/raw.rs` — 新增 `try_sendmsg` 覆写，`Some(Endpoint::Ip(ep))` 委托给 `send_to`（保留 IP 头封装），`None` 委托给 `try_send`
+- `os/src/net/socket/mod.rs` — 新增 `Endpoint::Netlink(u32)` 变体
+- `os/src/net/socket/netlink/mod.rs` — `local_endpoint()` 返回 `Some(Endpoint::Netlink(0))`
+- `os/src/net/syscall/bind.rs` — 新增 `Endpoint::Netlink` 匹配
 
-**验证：**
-- `make rv64-kernel-build-only` — 编译通过（3 个预存在错误：`E0408` net_core.rs、`E0616` clone.rs、`E0004` net_core.rs，非本次引入）
+**验证：** `make rv64-kernel-build-only` ✅
 
-**备注：**
-- `sockaddr_nl` 二进制布局：`sa_family(2) + pad(2) + nl_pid(4) + nl_groups(4) = 12 bytes`
-- `Endpoint::Netlink` 在 `fill_sockaddr` 中回写 `addrlen = 12`，与 Linux `sizeof(struct sockaddr_nl)` 一致
-- `RawSocket::try_sendmsg` 的 `Some(Endpoint::Ip(ep))` 通过 `.map(|n| n as isize)` 将 `SyscallRet`（`Result<usize, _>`）转换为 `Result<isize, _>` 以匹配 `try_sendmsg` 签名
+### SIOCSIFFLAGS/SIOCSIFADDR/SIOCSIFMTU sync to smoltcp
 
-### SIOCSIFFLAGS/SIOCSIFADDR/SIOCSIFMTU sync to smoltcp Interface
+**涉及文件：** `os/src/net/ioctl.rs`、`dependency/smoltcp/src/iface/interface/mod.rs`
 
-**涉及文件：**
-- `os/src/net/ioctl.rs` — 三个 SIOCSIF* 操作现在通过 `NET_INTERFACE.inner_handler()` 找到对应 `DeviceStack`，同步 smoltcp `Interface` 状态：SIOCSIFADDR 调用 `update_ip_addrs()` 同步 IP，SIOCSIFMTU 调用 `set_mtu()` 同步 MTU，SIOCSIFFLAGS 目前为 no-op（smoltcp 0.10 无原生 up/down 概念）
-- `dependency/smoltcp/src/iface/interface/mod.rs` — 新增 `set_mtu()` 公有方法，修改 `InterfaceInner.caps.max_transmission_unit`
-
-**验证：**
-- `make rv64-kernel-build-only` — `set_mtu` 编译通过，剩余 3 个错误均为预存在（`E0408` net_core.rs, `E0616` clone.rs, `E0004` net_core.rs），非本次修改引入
-
-**备注：**
-- 锁顺序：先释放 `device_list.lock()`，再获取 `NET_INTERFACE.inner.lock()`，避免与 `NetInterfaceInner::new()` 的锁顺序（inner → device_list）构成反向导致死锁
-- SIOCSIFFLAGS 对 smoltcp 为 no-op，因为 smoltcp 0.10 的 `Interface` 没有 up/down API；flags 已通过共享 `Arc<dyn Iface>` 同步
+**验证：** `make rv64-kernel-build-only` ✅
 
 ### 实现 sys_setns()：通过 fd 切换到目标网络命名空间
 
 **涉及文件：**
-- `os/src/fs/net_ns_file.rs` — 新建。`NetNsFile` 结构体实现 `IndexNode` trait，包装 `Arc<NetNamespace>`，使网络命名空间可通过 fd 传递；`new_netns_file()` 创建只读 netns fd
-- `os/src/fs/mod.rs` — 注册 `net_ns_file` 模块
-- `os/src/syscall/process/clone.rs` — `sys_setns()` 从 stub（返回 0）改为完整实现：验证 nstype 参数（仅接受 0 或 CLONE_NEWNET=0x40000000，否则 EINVAL）；通过 `task.process.files()` 解析 fd → File；通过 `MountFSInode::unwrap_inode()` + `downcast_ref::<NetNsFile>()` 提取 `NetNamespace`（非 netns fd 返回 EINVAL，坏 fd 返回 EBADF）；最后通过 `task.process.acquire_inner_lock().net = new_ns` 完成命名空间切换
+- `os/src/fs/net_ns_file.rs` — 新建：`NetNsFile` 实现 `IndexNode`
+- `os/src/syscall/process/clone.rs` — `sys_setns()` 完整实现
 
-**验证：**
-- `make rv64-kernel-build-only` ✅（0 errors）
-- `make la64-kernel-build-only` ❌（预存在的 `net_core.rs` E0004/E0277 错误，非本次修改引入）
-
-**备注：** 当前 netns fd 通过 `new_netns_file(ns)` 创建（包装 `Arc<NetNamespace>`），与 `/proc/[pid]/ns/net` 尚未对接。未来 procfs ns 子模块应返回相同类型的 `NetNsFile` inode，使 `sys_setns()` 无需修改即可支持。`unshare_net()` 仍为 no-op（等 CLONE_NEWNET 实现）。
+**验证：** `make rv64-kernel-build-only` ✅
 
 ### Implement RTM_DELLINK netlink handler
 
-**涉及文件：**
-- `os/src/drivers/net/veth.rs` — 新增 `veth_pair_delete()`：接受 `Arc<dyn Iface>`，通过 unsafe 指针转换访问 `VethInterface` 内部 `Veth.peer` 获取对端，同时从 `device_list` 和 `NET_INTERFACE` 栈中移除两端
-- `os/src/net/socket/netlink/route/link.rs` — 新增 `handle_dellink()`：解析 `ifinfomsg.index` + `IFLA_IFNAME` 查找设备；Loopback→EOPNOTSUPP，Veth→调用 `veth_pair_delete` 后 ACK，不存在→ENODEV
-- `os/src/net/socket/netlink/route/mod.rs` — 导入 `RTM_DELLINK`，在非 dump 分发中添加 `RTM_DELLINK => return link::handle_dellink(seq, pid, buf, sock)`
+**涉及文件：** `os/src/drivers/net/veth.rs` — 新增 `veth_pair_delete()`；`os/src/net/socket/netlink/route/link.rs` — 新增 `handle_dellink()`
 
-**验证：**
-- `make rv64-kernel-build-only` ✅（0 errors）
+**验证：** `make rv64-kernel-build-only` ✅
 
-**备注：** `veth_pair_delete` 使用 `Arc::as_ptr(&iface) as *const VethInterface` 的 unsafe 转换（调用方已验证 `DeviceKind::Veth`，两者指向同一分配）。peer 已失效时仅清理自身。
+---
 
 ## 2026-06-01
 
 ### DeviceStack 重构：添加 `nic: Arc<dyn Iface>` 并修复所有 `stacks[0]` 硬编码
 
 **涉及文件：**
-- `os/src/net/config.rs` — `DeviceStack` 添加 `nic: Arc<dyn Iface>` 字段，移除 `ifindex: u32` 和 `name: String`（通过 `nic.nic_id()`/`nic.iface_name()` 获取）；`_add_socket()`/`tcp_socket()`/`udp_socket()`/`raw_socket()`/`_remove()`/`add_socket()`/`remove()` 均增加 `ifindex: u32` 参数替换 `stacks[0]` 硬编码；`add_routed_socket()` 用 `net_core::default_iface()` 替换硬编码 "eth0" 名称匹配；`add_veth_stack()` 改为接收 `Arc<dyn Iface> + VethDriver`（由 Iface trait 提供 mac/name/ifindex，不再需要单独参数）；新增 `remove_veth_stack(nic_id)` 方法；`socket_stats()` 遍历所有 stacks 而非 `stacks[0]`
-- `os/src/drivers/net/veth.rs` — `veth_pair_new()` 适配新 `add_veth_stack()` 签名：`add_veth_stack(iface.clone(), driver)` 传递 `Arc<dyn Iface>`（自动从 `Arc<VethInterface>` 强制转换）
-- `os/src/net/adapter.rs` — `IfaceDevice::Veth(VethDevice)` → `Veth(VethDriver)` 及所有关联类型引用更新
+- `os/src/net/config.rs` — `DeviceStack` 添加 `nic: Arc<dyn Iface>` 字段，所有方法增加 `ifindex: u32` 参数
+- `os/src/drivers/net/veth.rs` — `veth_pair_new()` 适配新签名
+- `os/src/net/adapter.rs` — `IfaceDevice` 变体更新
 
-**验证：**
-- `make rv64-kernel-build-only` ✅（0 errors，140 warnings 均为预存在）
-- `make la64-kernel-build-only` ❌（linker `loongarch64-linux-gnu-gcc` not found — 环境缺失，非本次修改引入）
-
-**备注：** DeviceStack 保留 `iface: Interface` 和 `sockets: SocketSet<'a>`（smoltcp 协议引擎和 socket 管理器），仅移除与 `Iface` trait 重复的元数据字段。`NetInterfaceInner::new()` 中 lo/eth0 的 `Arc<dyn Iface>` 从 `net_core::find_by_name()` 获取（无 NIC 时 eth0 创建本地 `NetDeviceEntry`）。
+**验证：** `make rv64-kernel-build-only` ✅ la64 linker 缺失（预存环境问题）
 
 ### veth.rs 重写：VethInterface 实现 Iface trait
 
-**涉及文件：**
-- `os/src/drivers/net/veth.rs` — 完整重写。移除 `VethDevice`（直接实现 smoltcp `Device` trait），新增 `Veth`（数据平面：rx_queue + peer Weak）、`VethDriver`（实现 `SmoltcpDeviceAccess` + smoltcp `Device`，可 Clone 共享数据平面）、`VethInterface`（实现 `Iface` trait，内嵌 `IfaceCommon` 和 `VethDriver`）、`VethRxToken`/`VethTxToken`（token 类型，TxToken 通过 peer 传递到对端 rx_queue）、`generate_mac()`（02:00:00:00:XX:YY）。保留 `veth_pair_new()` 向后兼容，内部使用 `VethInterface` + `VethDriver`。
-- `os/src/net/adapter.rs` — `IfaceDevice::Veth(VethDevice)` → `Veth(VethDriver)`，关联 token 类型同步更新
-- `os/src/net/socket/netlink/route.rs` — line 200: `s.ifindex` → `s.nic.nic_id() as u32`（适配 DeviceStack 重构，`ifindex` 字段已改为 `nic: Arc<dyn Iface>`）
+**涉及文件：** `os/src/drivers/net/veth.rs` 完整重写
 
-**验证：**
-- `make rv64-kernel-build-only` ✅（0 errors，140 warnings 均为预存在）
-- `make la64-kernel-build-only` ❌（linker `loongarch64-linux-gnu-gcc` not found — 环境缺少交叉编译工具链，Rust 编译本身成功，仅链接阶段失败）
-
-**备注：** `VethInterface` 不硬编码 IFF_UP（由 `veth_pair_new` 调用者设置）。`VethDriver` 的 `SmoltcpDeviceAccess::poll()` 为 no-op（实际轮询通过 NET_INTERFACE 的 smoltcp `Interface::poll()` 进行）。`peer_ifindex` 因 `IfaceCommon` 缺少 setter 且无法通过 Arc 直接赋值，暂由 `Veth::peer` Weak 引用管理对端关系。
+**验证：** `make rv64-kernel-build-only` ✅ la64 linker 缺失
 
 ---
 
 ### Oracle Wave 1 修复：全局 ROUTER → current_netns().router、动态 ifindex、Netlink 布局修正、UnsafeCell 移除
 
-**涉及文件：**
-- `os/src/net/routing.rs` — 移除 `lazy_static! { ROUTER: Mutex<Router> }` 全局变量，所有 `ROUTER.lock()` 改为 `current_netns().router.lock()`；`fill_default()` 中 eth0 ifindex 从硬编码 2 改为 `find_by_name("eth0").map(|d| d.ifindex).unwrap_or(2)` 动态查找；`route_output()` 中 IPv6 回退路径同样动态查找 eth0 的 ifindex；`init_router()` 改为 `current_netns().router.lock().fill_default()`
-- `os/src/net/socket/netlink/route.rs` — `handle_getroute()` 中 `ROUTER.lock()` → `current_netns().router.lock()`；`handle_getlink()` 中 `nic_id == 2` HW 地址检查改为 `iface.kind() != DeviceKind::Loopback`；**`handle_getaddr()` 中 ifaddrmsg 布局修正**：`[family=2, prefix_len, flags=0, scope=0, ifa_index(4B)]`（之前错误地将 prefix_len 放在 flags 位置且多了一个字节）；**`handle_getroute()` 中 rtmsg 布局修正**：`[family=2, dst_len, src_len=0, tos=0, table=0, protocol=2, scope=3, type_(1|3), flags(4B)]`（之前 dst_len=0、flags 只写了 2 字节）；新增 `use crate::net::iface::DeviceKind`
-- `os/src/net/socket/inet/stream/lifecycle.rs` — TCP connect 回退 ifindex `unwrap_or(2)` → `or_else(|| find_by_name("eth0").map(|d| d.ifindex)).unwrap_or(1)`；listen 非回环地址 `_ => 2` → `_ => find_by_name("eth0").map(|d| d.ifindex).unwrap_or(1)`
-- `os/src/net/config.rs` — `poll_once()` 和 `_poll()` 中 UDP/TCP socket 移除回退 ifindex `unwrap_or(2)` → `or_else(|| find_by_name("eth0").map(|d| d.ifindex)).unwrap_or(1)`（共 4 处）；`add_routed_socket()` 中 `stack_mut(2)` → `stacks.iter().find(|s| s.name == "eth0").map(|s| s.ifindex).unwrap_or(1)`
-- `os/src/net/net_core.rs` — `NetDeviceEntry` 移除 `UnsafeCell<String> name_cell`，改为 `Mutex<String> name`（线程安全名称存储）；移除 `unsafe impl Send/Sync`（Mutex 使类型自动满足）；`iface_name()` 返回 `String`（`name.lock().clone()`）而非 `&str`；`set_iface_name()` 改为 `*self.name.lock() = String::from(name)`；移除 `name_str()` 辅助方法；`common()`/`as_smoltcp_device()` 增加 TODO 注释标记 Wave 2 待实现
-- `os/src/net/iface.rs` — `Iface` trait 中 `fn iface_name(&self) -> &str` → `fn iface_name(&self) -> String`
-- `os/src/net/ioctl.rs` — `siocgifconf()` 中 `ifr.set_name(iface.iface_name())` → `ifr.set_name(&iface.iface_name())`（适配 String 返回值）
-- `os/src/fs/procfs/files/net_route.rs` — `ROUTER.lock()` → `current_netns().router.lock()`；移除冗余 `.to_string()`（iface_name() 现在直接返回 String）
+**涉及文件：** 大量文件（routing、netlink、config、inet、net_core、iface）
 
-**验证：**
-- `make rv64-kernel-build-only` ✅（0 errors，140 warnings 均为预存在）
-- `make la64-kernel-build-only` ✅（0 errors，126 warnings 均为预存在）
-- QEMU rv64 basic tests（mask=0x001，musl+glibc）✅ 全部通过，无 panic
-
-**备注：** 全局 ROUTER 改为 per-netns router 后，`fill_default()` 的惰性初始化在 `route_output()` 首次调用时通过 `current_netns().router.lock()` 触发，确保每个命名空间独立持有路由表。ifindex 硬编码 2 的 6 处均已替换为动态查找，回退到 1（lo）作为最终保护。ifaddrmsg 之前 9 bytes（多了 1 byte），修正为 8 bytes 符合 Linux `struct ifaddrmsg` 布局。rtmsg flags 之前只写了 2 bytes，修正为完整的 `0u32.to_ne_bytes()`（4 bytes）。
+**验证：** `make rv64/la64-kernel-build-only` ✅ QEMU rv64 basic 测试 ✅
 
 ---
 
 ### 移除全局 IFACES，DeviceEntry 重构为 Arc<dyn Iface> 包装，接入 current_netns()
 
-**涉及文件：**
-- `os/src/net/net_core.rs` — 移除全局 `lazy_static IFACES: Mutex<Vec<DeviceEntry>>`；新增 `NetDeviceEntry` 结构体（实现 `Iface` trait，使用 `UnsafeCell<String>` 存储名称以支持 `iface_name() -> &str`，内嵌 dummy smoltcp `Interface` + `SocketSet`）；新增 `current_netns()` 辅助函数（通过 `current_task().process.net()` 获取当前网络命名空间）；`DeviceEntry` 改为薄包装 `{ ifindex: u32, iface: Arc<dyn Iface> }`，移除所有重复字段（name/flags/mtu/hwaddr/ip_addrs/kind/peer_ifindex）；`add_device()`/`remove_device()`/`find_by_name()`/`find_by_index()`/`default_iface()`/`loopback_iface()`/`set_eth0_ipv4()`/`is_local_addr()`/`iface_ip()` 全部重写为通过 `current_netns()` 访问；`init()` 改为在 `INIT_NET_NAMESPACE` 中注册 lo(ifindex=1) + eth0(ifindex=2，仅当 NET_DEVICE 存在)；`DeviceKind` 改为 re-export 自 `crate::net::iface`；保留 `NEXT_IFINDEX: AtomicU32`（全局，跨命名空间共享）和 `ETH0_CIDR`/`DEFAULT_GW` lazy_static
-- `os/src/net/routing.rs` — `route_output()` 中 `IFACES.lock()` → `current_netns().device_list.lock()`；字段访问 `d.ip_addrs` → `iface.ip_addrs()`，`d.ifindex` → `iface.nic_id() as u32`，`d.iface.ip_addrs()`（通过 DeviceEntry）
-- `os/src/net/ioctl.rs` — `SIOCGIFCONF`：`IFACES.lock()` → `current_netns().device_list.lock()`，iter 改用 `list.values()` + `iface_name()`/`ip_addrs()`；`SIOCSIFFLAGS/SIOCSIFADDR/SIOCSIFMTU`：改用 `iface.set_flags()`/`iface.add_ip_addr()`/`iface.del_ip_addr()`/`iface.set_mtu()`；getter 系列改用 `d.iface.flags()`/`d.iface.ip_addrs()`/`d.iface.mtu()`/`d.iface.mac()`
-- `os/src/net/socket/netlink/route.rs` — `handle_getlink()`/`handle_getaddr()`/`handle_newaddr()` 中 `IFACES.lock()` → `current_netns().device_list.lock()`，字段访问改用 Iface trait 方法
-- `os/src/net/config.rs` — `NetInterfaceInner::new()` 中 `net_core::IFACES.lock()` → `net_core::current_netns().device_list.lock()`，字段访问改用 `iface.nic_id()`/`iface.ip_addrs()`
-- `os/src/net/adapter.rs` — `RoutingTxToken::consume()` 中两处 `IFACES.lock().iter()` → `current_netns().device_list.lock().values()`，字段访问改用 `iface.ip_addrs()`
-- `os/src/fs/procfs/files/net_dev.rs` — `IFACES.lock()` → `current_netns().device_list.lock()`，`dev.name` → `iface.iface_name()`
-- `os/src/fs/procfs/files/net_route.rs` — `d.name.to_string()` → `d.iface.iface_name().to_string()`，`d.mtu` → `d.iface.mtu() as u32`
-- `os/src/drivers/net/veth.rs` — `net_core::add_device(DeviceEntry{...})` → 先构造 `NetDeviceEntry::new()` 通过 `Arc::new()` 包装后调用 `net_core::add_device()`
-- `os/src/net/socket/inet/common/address.rs` — `d.ip_addrs.first()` → `d.iface.ip_addrs().first()`（4 处）
-- `os/src/net/socket/inet/datagram/udp.rs` — 同上（1 处）
-- `os/src/net/socket/inet/raw/raw.rs` — 同上（2 处，含 `default_iface()` 路径）
-- `os/src/net/socket/inet/stream/mod.rs` — 同上（1 处）
+**涉及文件：** net_core、routing、ioctl、netlink、veth、config、adapter、procfs
 
-**验证：**
-- `make rv64-kernel-build-only` ✅（0 errors，133 pre-existing warnings）
-- `make la64-kernel-build-only` ✅（0 errors，119 pre-existing warnings）
+**验证：** `make rv64/la64-kernel-build-only` ✅
 
-**备注：** `NetDeviceEntry` 内嵌 dummy smoltcp `Interface`（通过 `Loopback::new(Medium::Ip)` 创建），`common()`/`as_smoltcp_device()` 在当前路径永不被调用（真实协议处理由 `NetInterface` 的 stacks 完成），若被调用会 panic。`iface_name()` 通过 `UnsafeCell<String>` 实现无锁 `&str` 返回——名称仅在创建时和 `set_iface_name()` 时写入，读取与写入不并发（内核单线程 + 中断不修改接口名）。
+### 创建 NetNamespace 结构体与命名空间生命周期方法
 
-### 创建 NetNamespace 结构体与命名空间生命周期方法（Wave 1 / T1）
+**涉及文件：** `os/src/task/net_namespace.rs` 新建
 
-**涉及文件：**
-- `os/src/task/net_namespace.rs` — 新建。`NetNamespace` 结构体含 `id: u64`、`device_list: Mutex<BTreeMap<usize, Arc<dyn Iface>>>`、`router: Mutex<Router>`；`NetNamespace::new()` 通过原子计数器分配 ID；`add_device/remove_device/device_by_index/device_by_name` 方法；`INIT_NET_NAMESPACE` lazy_static（id=0）
-- `os/src/task/task.rs` — 删除旧的 `pub struct NetNamespace;` 单元结构体及其 `lazy_static INIT_NET_NAMESPACE`，替换为 `use super::net_namespace::INIT_NET_NAMESPACE;`
-- `os/src/task/process.rs` — 更新 `unshare_net()` 注释（不再称"stub"）
-- `os/src/task/mod.rs` — 新增 `pub mod net_namespace;`；将 `NetNamespace` 和 `INIT_NET_NAMESPACE` re-export 从 `task` 改为 `net_namespace`
-
-**验证：**
-- `make rv64-kernel-build-only` ✅
-- `make la64-kernel-build-only` ❌（预存在的 `net/iface.rs` E0191/E0412 错误 + riscv HAL 代码在 la64 目标上的编译错误，与本次修改无关）
-
-**备注：** `device_list` 使用 `crate::net::iface::Iface` trait（已存在于 `net/iface.rs` 中，来自之前的工作）。新的 `NetNamespace::new()` 不再创建 loopback——loopback 注册由设备初始化路径（T7-T10）完成。`unshare_net()` 仍为 no-op，等 T22 实现真实 CLONE_NEWNET 隔离。
+**验证：** `make rv64-kernel-build-only` ✅
 
 ### netlink.rs: 扩展常量集至 Linux 6.6 完整集合
 
-**涉及文件：**
-- `os/src/net/socket/netlink/netlink.rs` — 从 ~30 行常量扩展至 ~70 行常量 + 4 个辅助函数：
-  - 新增 NLM_F_ECHO/NLM_F_ATOMIC/NLM_F_REPLACE/NLM_F_APPEND flags
-  - 新增 NLMSG_NOOP/NLMSG_OVERRUN/NLMSG_MIN_TYPE 消息类型
-  - 新增 RTM_NEWNEIGH/RTM_DELNEIGH/RTM_GETNEIGH/RTM_NEWRULE/RTM_DELRULE/RTM_GETRULE
-  - 新增 IFLA 全量 (0..=40，之前只有零星几个)
-  - 新增 IFLA_INFO_XSTATS、NLA_F_NESTED/NLA_F_NET_BYTEORDER
-  - 新增 IFA_UNSPEC/IFA_BROADCAST/IFA_ANYCAST/IFA_CACHEINFO/IFA_MULTICAST/IFA_FLAGS
-  - 新增 AF_NETLINK、RTMGRP_LINK/RTMGRP_IPV4_IFADDR/RTMGRP_IPV4_ROUTE
-  - **修复 IFLA_LINKINFO 值从 12→18**（原值与 Linux 6.6 不匹配，曾与 IFLA_PROTINFO=12 冲突）
-  - 所有常量添加 KASLR 友好的 doc comments
-
-**验证：**
-- `make rv64-kernel-build-only` ✅
-
-**备注：** IFLA_LINKINFO 原值为 12（对应 Linux 的 IFLA_PROTINFO），Linux 6.6 中 IFLA_LINKINFO=18。route.rs 中 handle_newlink() 使用 IFLA_LINKINFO 匹配 RTA 属性；用户态 ip 工具发送的 RTM_NEWLINK 消息使用 18，因此必须修正以保证 veth 创建正确匹配。
+**验证：** `make rv64-kernel-build-only` ✅
 
 ### initproc.rs: /lib/modules/ 创建块添加 modprobe 符号链接
 
-**涉及文件：**
-- `user/src/bin/initproc.rs` — 在 `/lib/modules/` shell 块中添加 `ln -sf /bin/true /sbin/modprobe` 和 `ln -sf /bin/true /bin/modprobe`，使 `modprobe --dry-run` 始终返回 0
-
-**验证：**
-- `make rv64-kernel-build-only` ✅
-- `make la64-kernel-build-only` ✅
-
-**备注：** LTP 的 `tst_require_drivers` 会调用 `modprobe --dry-run` 检查内核模块是否存在。没有 modprobe 或 modprobe 不存在时会报错跳过。用 `/bin/true` 替代确保检查通过。
+**验证：** `make rv64/la64-kernel-build-only` ✅
 
 ### inet_test.rs 新增 5 个 [VETH] 测试用例
 
-**涉及文件：**
-- `user/src/bin/inet_test.rs` — 新增 `test_veth01_create_pair`、`test_veth02_assign_ip`、`test_veth03_tcp_echo`、`test_veth04_cleanup`、`test_veth05_ping` 5 个测试函数；`tests` 数组从 35→40
-
-**验证：**
-- `make rv64-kernel-build-only` ✅
-- `user` 程序编译 ✅（release, BOARD=rvqemu, 无新 warning）
-
-**备注：** 每个测试使用独立 veth 接口名（veth_t{01,02,03,05}），测试函数符合现有 `tpass!/tfail!` 模式。TCP echo 测试使用 nc 监听/发送。
+**验证：** `make rv64-kernel-build-only` ✅
 
 ### 创建 VethDevice — smoltcp phy::Device 实现的虚拟以太网对
 
-**涉及文件：**
-- `os/src/net/veth.rs` — 新建。`VethDevice` 结构体含 `tx_to_peer: Arc<Mutex<VecDeque<Vec<u8>>>>`、`rx_from_peer: Arc<Mutex<VecDeque<Vec<u8>>>>`、`name: String`；`impl phy::Device for VethDevice`（receive 从 rx_queue 取，transmit 推到 peer 队列）；`VethRxToken` / `VethTxToken` 实现 RxToken/TxToken trait；`new_pair(name1, name2)` 通过双队列互联两个设备
-- `os/src/net/adapter.rs` — `IfaceDevice` 枚举新增 `Veth(VethDevice)` 变体；`IfaceRxToken`/`IfaceTxToken` 各新增 `Veth(...)` 变体；`Device for IfaceDevice` 和 `RxToken/TxToken for IfaceRxToken/IfacerxToken` 所有 match 分支补全 Veth 处理
-- `os/src/net/mod.rs` — 添加 `pub mod veth;`
+**验证：** `make rv64-kernel-build-only` ✅ la64 预存 E0787 错误
 
-**验证：**
-- `make rv64-kernel-build-only` ✅
-- `make la64-kernel-build-only` ❌（预存在的 `asm!` 在 naked function 中不再允许，`E0787` in `hal/arch/loongarch64/boot.rs` 和 `hal/arch/loongarch64/trap/mod.rs`，与本次修改无关）
+### DeviceEntry 结构体动态化 — name 改为 String，DeviceKind 枚举
 
-**备注：** 参考 smoltcp 内置 `Loopback` 的简洁设计，但 VethDevice 需要成对连接（两个独立 Device 实例通过 `Arc<Mutex<VecDeque<Vec<u8>>>>` 互联），而不是 Loopback 的收发一体。`TxToken::consume` 中 `vec![0u8; len]` 分配缓冲区，写入后 push 到 peer 的 rx_queue。
-
-### DeviceEntry 结构体动态化 — name 改为 String，新增 DeviceKind 枚举，支持动态增删
-
-**涉及文件：**
-- `os/src/net/net_core.rs` — 添加 `DeviceKind` 枚举（Loopback/Ethernet/Veth）；`DeviceEntry.name` 从 `&'static str` 改为 `String`，新增 `kind: DeviceKind` 和 `peer_ifindex: Option<u32>` 字段；`_register_device`/`register_device` 签名增加 ifindex/kind/peer_ifindex 参数，name 改为 String；新增 `add_device()`、`remove_device()`、`next_ifindex()` 函数（AtomicU32 从 3 开始）；`find_by_name` 使用 `as_str()` 显式比较
-- `os/src/net/ioctl.rs` — `set_name(&dev.name)` 适配 String
-- `os/src/net/veth.rs` — 补充缺失的 `use alloc::string::String` 和 `use alloc::vec` 导入
-
-**验证：**
-- `make rv64-kernel-build-only` ✅
-- la64 仅剩预存在的 linker 缺失错误（工具链未安装），无 Rust 编译错误
-
-**备注：** 现有 `DeviceEntry` 已 `#[derive(Clone, Debug)]`，`find_by_name`/`find_by_index` 返回 clone 无需改动。`d.name == "eth0"` 在 `name` 为 `String` 时仍可通过 `PartialEq<&str>` 编译，无需全部改成 `as_str()`。
+**验证：** `make rv64-kernel-build-only` ✅
 
 ### 补充 netlink 常量（veth 创建所需）
 
-**涉及文件：**
-- `os/src/net/socket/netlink/netlink.rs` — 添加 NLM_F_ACK/NLM_F_CREATE/NLM_F_EXCL flags；RTM_DELLINK/RTM_SETLINK/RTM_DELADDR/RTM_DELROUTE 消息类型；IFLA_LINKINFO/IFLA_INFO_KIND/IFLA_INFO_DATA/IFLA_NET_NS_FD link 属性；VETH_INFO_PEER veth 特定属性
-
-**验证：**
-- `make rv64-kernel-build-only` ✅
-
-**备注：** NLM_F_EXCL=0x200 与 NLM_F_MATCH 同值，NLM_F_CREATE=0x400 复用同一 bit，这是 Linux 内核语义（不同上下文共享位域），不是 bug。IFLA_INFO_KIND=1、IFLA_INFO_DATA=2 嵌套在 IFLA_LINKINFO=12 内，VETH_INFO_PEER=1 嵌套在 IFLA_INFO_DATA 内。
+**验证：** `make rv64-kernel-build-only` ✅
 
 ### 实现三个 SIOCS 网络 ioctl（SIOCSIFFLAGS / SIOCSIFADDR / SIOCSIFMTU）
 
-**涉及文件：**
-- `os/src/net/ioctl.rs` — 将原返回 `EPERM` 的 `SIOCSIFFLAGS | SIOCSIFADDR | SIOCSIFMTU` 合并分支拆为三个独立实现：`SIOCSIFFLAGS` 更新 `DeviceEntry.flags`（保留高 16 位），`SIOCSIFADDR` 更新 `DeviceEntry.ip_addrs`（保留原 prefix），`SIOCSIFMTU` 更新 `DeviceEntry.mtu`；新增 `ifreq::ifr_addr()` getter 读取 sockaddr_in 中的 IPv4 地址；新增 `use alloc::vec` 和 `use smoltcp::wire::IpCidr` 导入
+**验证：** `make rv64-kernel-build-only` ✅
 
-**验证：**
-- `make rv64-kernel-build-only` — `os/src/net/ioctl.rs` 无编译错误（预存在的 `netlink/route.rs:170 stack_mut is private` 非本文件问题）
+### VethPair::new() — veth 设备对注册为完整 DeviceStack
 
-**备注：** SIOCSIFFLAGS 沿用 Linux 语义只写 flags 低 16 位（u16），保留高 16 位扩展标志。SIOCSIFADDR 从现有地址继承 prefix_len，避免改变子网掩码。
+**验证：** `make rv64/la64-kernel-build-only` ✅
 
-### T8: VethPair::new() — veth 设备对注册为完整 DeviceStack
+### RTM_NEWLINK 非 dump 路径 — handle_newlink 解析并创建 veth 对
 
-**涉及文件：**
-- `os/src/drivers/net/veth.rs` — 新增 `veth_pair_new(name1, name2) -> (u32, u32)` 函数，调用 `VethDevice::new_pair()` 创建设备对，在 IFACES 注册 `DeviceEntry`（含 peer_ifindex），在 NET_INTERFACE 注册 DeviceStack；新增 `generate_mac(ifindex) -> [u8; 6]` 生成本地管理单播 MAC（02:00:00:00:XX:YY）
-- `os/src/net/config.rs` — 新增 `NetInterface::add_veth_stack(ifindex, name, device, mac)` 方法，创建 `IfaceDevice::Veth` → smoltcp `Interface` + `SocketSet` → `DeviceStack` 压入 `inner.stacks`；导入 `VethDevice`；将 `NetInterfaceInner::stack_mut()` 可见性从 `fn` 改为 `pub(crate) fn`（nightly-2025-01-18 对跨 impl 块调用私有方法报 E0624 硬错误）
-
-**验证：**
-- `make rv64-kernel-build-only` ✅
-- `make la64-kernel-build-only` ✅
-
-**备注：** veth 设备不自动配 IP（留给 RTM_NEWADDR），不添加路由（留给手动配置）。`add_veth_stack` 内部获取 NET_INTERFACE 锁，`veth_pair_new` 不直接持锁。`stack_mut` 可见性修复：原为私有方法但从 `NetInterface` 方法中调用 `NetInterfaceInner.stack_mut()`，nightly 编译器将此从 Rust 2018 的 warning 提升为 hard error。
-
-### T9: RTM_NEWLINK 非 dump 路径 — handle_newlink 解析并创建 veth 对
-
-**涉及文件：**
-- `os/src/net/socket/netlink/route.rs` — 非 dump `match msg_type` 新增 `RTM_NEWLINK` 分支，路由到 `handle_newlink(seq, pid, buf, sock)`；新增 `handle_newlink()` 函数：解析 16 字节 `ifinfomsg` 头 → 遍历 RTA 属性（`IFLA_IFNAME=3` 取接口名，`IFLA_LINKINFO=12` 嵌套解析 `IFLA_INFO_KIND=1` 和 `IFLA_INFO_DATA=2` → `VETH_INFO_PEER=1` 内嵌套 ifinfomsg+`IFLA_IFNAME` 取 peer 名）→ 校验 kind="veth" 后调用 `veth_pair_new()` → 发送 ACK（nlmsg_error 0）或 EINVAL ACK（属性缺失/不支持的 kind）；`use alloc::string::String` 新增导入
-
-**验证：**
-- `make rv64-kernel-build-only` ✅
-- `make la64-kernel-build-only` ✅
-
-**备注：** 非 dump 路径的 `_` fallthrough 仍发送 `ENOPROTOOPT(95)` 错误，未来可按需扩展更多 `RTM_*` 写操作。RTA 对齐为 `(len + 3) & !3`（4 字节对齐），与 Linux netlink 语义一致。`VETH_INFO_PEER` 内包含完整的嵌套 `ifinfomsg`（16 字节），解析时需跳过该头部再读对端的 `IFLA_IFNAME`。
+**验证：** `make rv64/la64-kernel-build-only` ✅
 
 ### Wave 1/T3: RouterEnableDevice trait + 最小 Iface trait stub
 
-**涉及文件：**
-- `os/src/net/iface.rs` — 新建。最小 `Iface` trait（`Send + Sync + Debug`），含 `nic_id()`、`mac()`、`ip_addrs()` 三个方法。供 RouterEnableDevice 和后续 T2 完整实现使用
-- `os/src/net/router_device.rs` — 新建。`RouterEnableDevice: Iface` trait，含四个方法：
-  - `route_and_send(next_hop, ip_packet) -> Result<(), NetError>` — 通过本设备向下一跳发送 IP 包
-  - `is_my_ip(addr) -> bool` — 默认实现：遍历 `ip_addrs()` 精确匹配
-  - `netns_router() -> Arc<Mutex<Router>>` — 访问 per-ns 路由表
-  - `handle_routable_packet(ether_frame) -> Result<Option<Ipv4Repr>, NetError>` — 处理可路由包：剥离以太网头、检查 TTL>1、递减 TTL、若本地则返回 Ipv4Repr、否则转发
-  - `NetError` 枚举（NoRoute/TtlExceeded/SendFailed/ParseError）
-- `os/src/net/mod.rs` — 注册 `pub mod iface;` 和 `pub mod router_device;`
-
-**验证：**
-- `make rv64-kernel-build-only` ✅（零新 warning）
-
-**备注：** 由于 `Iface` trait 在计划中属于 T2（尚未执行），此处创建最小 stub 使 T3 可独立编译。T2 后续可扩展 `iface.rs` 添加完整方法。`route_and_send` 和 `handle_routable_packet` 不提供默认实现——具体设备（veth/eth）需各自实现。线程安全约束（`Send + Sync`）与内核其余部分一致。
+**验证：** `make rv64-kernel-build-only` ✅
 
 ### iface.rs: T2 完整实现 — Iface trait + IfaceCommon + SmoltcpDeviceAccess
 
-**涉及文件：**
-- `os/src/net/iface.rs` — 完整重写（替换最小 stub）。三个核心定义：
-  - `Iface` trait（`Send + Sync + Debug`）：`nic_id()`、`iface_name()`、`set_iface_name()`、`flags()`、`set_flags()`、`mtu()`、`set_mtu()`、`ip_addrs()`、`add_ip_addr()`、`del_ip_addr()`、`mac()`、`kind()`、`peer_ifindex()`、`common()`、`as_smoltcp_device()` — 共 15 个方法
-  - `IfaceCommon` struct：`nic_id: AtomicUsize`、`name: RwLock<String>`、`flags: AtomicU32`、`mtu: AtomicUsize`、`ip_addrs: Mutex<Vec<IpCidr>>`、`hwaddr: [u8; 6]`、`kind: DeviceKind`、`peer_ifindex: Option<usize>`、`smoltcp_iface: Mutex<Interface>`、`sockets: Mutex<SocketSet<'static>>`、`net_namespace: RwLock<Option<Weak<NetNamespace>>>` + `new()` 构造函数
-  - `SmoltcpDeviceAccess` trait（object-safe）：`poll()` + `capabilities()` — 用 `&self` 替代 smoltcp `Device` 的 `&mut self`，使设备可被 `Arc` 共享
-  - `DeviceKind` 枚举（`Loopback`/`Ethernet`/`Veth`）— 规范定义，后续 net_core.rs 将从这里导入
-- `os/src/net/mod.rs` — 已有 `pub mod iface;`（之前添加，无需修改）
-
-**验证：**
-- `make rv64-kernel-build-only` ✅（131 pre-existing warnings，零新错误）
-- LSP diagnostics on `iface.rs` 零错误
-
-**备注：** `smoltcp::iface::Interface` 在此 smoltcp 版本（vendor）中**不带泛型设备参数**——设备在 `Interface::poll()` 调用时作为参数传入而非存储于 `Interface` 内部，因此 `IfaceCommon` 可以直接持有 `Interface` 而无需泛型。`SmoltcpDeviceAccess` 去除了计划中的 `receive`/`transmit` 方法及 `RxToken`/`TxToken` associated types，因为这些使 trait 无法 object-safe（`dyn SmoltcpDeviceAccess` 需指定 associated types）；`receive`/`transmit` 由具体类型通过 `smoltcp::phy::Device` trait 实现，`SmoltcpDeviceAccess` 仅保留 object-safe 的 `poll`/`capabilities` 方法供 poll loop 使用。
+**验证：** `make rv64-kernel-build-only` ✅ LSP diagnostics ✅
 
 ---
 

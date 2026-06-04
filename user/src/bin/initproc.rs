@@ -6,8 +6,8 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use user_lib::{
-    chdir, close, exec, exit, fork, getdents64, getpgid, kill, open, println, read, setpgid,
-    shutdown, sleep, wait, waitpid, waitpid_wnohang, write, OpenFlags, SIGKILL,
+    chdir, close, exec, exit, fork, getdents64, getpgid, kill, mount, open, println, read,
+    setpgid, shutdown, sleep, wait, waitpid, waitpid_wnohang, write, OpenFlags, SIGKILL,
 };
 
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -506,7 +506,9 @@ fn load_conf_from(path: &str, cfg: &mut RuntimeConfig) -> bool {
 
 fn load_runtime_config() -> RuntimeConfig {
     let mut cfg = RuntimeConfig::default();
-    let source = if load_conf_from("/os_test.conf\0", &mut cfg) {
+    let source = if load_conf_from("/sdcard/os_test.conf\0", &mut cfg) {
+        "/sdcard/os_test.conf"
+    } else if load_conf_from("/os_test.conf\0", &mut cfg) {
         "/os_test.conf"
     } else if load_conf_from("/etc/os_test.conf\0", &mut cfg) {
         "/etc/os_test.conf"
@@ -1947,6 +1949,13 @@ pub extern "C" fn _start() -> ! {
 /// 2. musl/glibc 动态库链接到 /lib
 fn install_embedded_libgcc_s() {
     let path = "/glibc/lib/libgcc_s.so.1\0";
+    // Check if already installed (from tools disk or previous run)
+    let check_fd = open(path, OpenFlags::RDONLY);
+    if check_fd >= 0 {
+        close(check_fd as usize);
+        println!("[initproc] install libgcc_s: already exists, skipping");
+        return;
+    }
     let fd = open(
         path,
         OpenFlags::CREATE | OpenFlags::WRONLY | OpenFlags::TRUNC,
@@ -1978,28 +1987,77 @@ fn install_embedded_libgcc_s() {
 }
 
 fn prepare_symlink(environ: &[*const u8]) {
-    // Step 1: busybox applet 安装到 /bin（用 PATH 查找 busybox，兼容旧镜像 /busybox）
+    // MS_BIND = 4096 (matches kernel MountFlags::MS_BIND)
+    const MS_BIND: usize = 4096;
+
+    // Helper: try bind mount from user-space via mount() syscall
+    let try_bind = |source: &str, target: &str| {
+        let src = alloc::format!("{}\0", source);
+        let tgt = alloc::format!("{}\0", target);
+        let fst = "\0";
+        let ret = mount(src.as_ptr(), tgt.as_ptr(), fst.as_ptr(), MS_BIND, 0);
+        if ret == 0 {
+            println!("[initproc] bind mount {} -> {}", source, target);
+        } else {
+            println!("[initproc] bind mount {} -> {}: skipped (errno={})", source, target, -ret);
+        }
+    };
+
+    // Phase 1: Ensure base directories exist (skip if already prepared)
+    println!("[initproc] ensuring base directories...");
+    let dirs_cmd = "\
+        if test -d /bin && test -d /lib && test -d /tmp; then \
+            echo 'base dirs already exist, skipping mkdir'; \
+        else \
+            busybox mkdir -p /bin /lib /usr /etc /root /tmp /run /var /var/tmp /dev/shm /glibc/lib; \
+        fi; \
+        chmod 1777 /tmp /var/tmp /dev/shm; \
+        true \
+    \0";
+    run_bash_cmd(dirs_cmd, environ);
+
+    // Phase 2: Try bind mount /tools/bin -> /bin (conservative — only /bin for now)
+    println!("[initproc] attempting bind mount /tools/bin -> /bin...");
+    try_bind("tools/bin", "bin");
+
+    // Phase 3: After bind, ensure /bin/busybox exists, then install applets
+    // If bind succeeded, this writes to /tools/bin (persists on ext4 disk)
+    // If bind failed (no tools disk), this writes to root /bin (ramfs/ext4)
+    // Skip --install if applets already pre-installed in tools disk
     println!("[initproc] installing busybox applets to /bin ...");
     let install_cmd = "\
-        busybox mkdir -p /bin; \
-        busybox --install -s /bin; \
+        test -e /bin/busybox || ln -s /busybox /bin/busybox; \
+        if test -x /bin/head && test -x /bin/tail && test -x /bin/wc; then \
+            echo 'busybox applets already installed, skipping --install'; \
+        else \
+            /bin/busybox --install -s /bin; \
+        fi; \
         for app in cp mv rm ln mkdir chmod cat printf sleep grep sed awk uname basename dirname true false test; do \
-            [ -e /bin/$app ] || busybox ln -sf /bin/busybox /bin/$app; \
+            [ -e /bin/\x24app ] || /bin/busybox ln -s /bin/busybox /bin/\x24app; \
         done; \
         true \
     \0";
     let ret = run_bash_cmd(install_cmd, environ);
     println!("[initproc] busybox --install -s /bin -> exit={}", ret);
 
-    // Step 1.5: 测试环境依赖最小账户/网络配置，无条件幂等写入（镜像可能缺失或格式错误）
+    // Phase 4: Ensure /bin/bash and /bin/sh exist (after bind, after busybox)
+    run_bash_cmd(
+        "
+        test -e /bin/bash || ln -s /bash /bin/bash;
+        test -e /bin/sh   || ln -s /bin/bash /bin/sh;
+    ",
+        environ,
+    );
+
+    // Phase 5: Account/network files, lib symlinks, chmod (existing, unchanged)
     println!("[initproc] preparing /etc account/network files ...");
     let account_cmd = "\
-        mkdir -p /etc /root /tmp /run /var /var/tmp /dev/shm /sys /glibc/lib; chmod 1777 /tmp /var/tmp /dev/shm; : > /glibc/lib/libgcc_s.so.1; \
+        mkdir -p /etc /root /tmp /run /var /var/tmp /dev/shm /sys /glibc/lib; chmod 1777 /tmp /var/tmp /dev/shm; \
         [ -f /etc/passwd ] || printf 'root:x:0:0:root:/root:/bin/sh\\nnobody:x:65534:65534:nobody:/nonexistent:/bin/sh\\n' > /etc/passwd; \
         [ -f /etc/group ] || printf 'root:x:0:\\nnogroup:x:65534:\\n' > /etc/group; \
-        printf 'passwd: files\\ngroup: files\\nhosts: files dns\\n' > /etc/nsswitch.conf; \
-        printf 'nameserver 8.8.8.8\\n' > /etc/resolv.conf; \
-        printf 'blossom\\n' > /etc/hostname; \
+        [ -f /etc/nsswitch.conf ] || printf 'passwd: files\\ngroup: files\\nhosts: files dns\\n' > /etc/nsswitch.conf; \
+        [ -f /etc/resolv.conf ] || printf 'nameserver 8.8.8.8\\n' > /etc/resolv.conf; \
+        [ -f /etc/hostname ] || printf 'mangocore\\n' > /etc/hostname; \
     \0";
     let ret = run_bash_cmd(account_cmd, environ);
     println!("[initproc] minimal account files done, exit={}", ret);
@@ -2015,9 +2073,11 @@ fn prepare_symlink(environ: &[*const u8]) {
         rm -rf /lib64; ln -sf /lib /lib64; \
         rm -rf /usr/lib; ln -sf /lib /usr/lib; \
         rm -rf /usr/lib64; ln -sf /lib /usr/lib64; \
-        mkdir -p /lib/modules/5.10.0-1-rv64; \
+        mkdir -p /lib/modules/5.10.0-1-rv64 /lib/modules/5.10.0-1-la64; \
         : > /lib/modules/5.10.0-1-rv64/modules.dep; \
+        : > /lib/modules/5.10.0-1-la64/modules.dep; \
         printf '/veth.ko\n' > /lib/modules/5.10.0-1-rv64/modules.builtin; \
+        printf '/veth.ko\n' > /lib/modules/5.10.0-1-la64/modules.builtin; \
         ln -sf /bin/true /sbin/modprobe; \
         ln -sf /bin/true /bin/modprobe; \
         ln -sf /musl/lib/libc.so /lib/ld-musl-riscv64-sf.so.1; \
@@ -2028,10 +2088,12 @@ fn prepare_symlink(environ: &[*const u8]) {
         ln -sf /musl/lib/libc.so /lib/ld-musl-loongarch-lp64d.so.1; \
         ln -sf /glibc/lib/libc.so.6 /lib/libc.so.6; \
         ln -sf /glibc/lib/libm.so.6 /lib/libm.so.6; \
+        ln -sf /lib/libgcc_s.so.1 /glibc/lib/libgcc_s.so.1; \
         ln -sf /glibc/lib/tls_get_new-dtv_dso.so /lib/tls_get_new-dtv_dso.so; \
         ln -sf /glibc/lib/tls_get_new-dtv_dso.so ./libtls_get_new-dtv_dso.so; \
-        for f in /musl/lib/*.so*; do ln -sf \"$f\" /lib/ 2>/dev/null; done; \
-        for f in /glibc/lib/*.so*; do ln -sf \"$f\" /lib/ 2>/dev/null; done \
+        for f in /musl/lib/*.so*; do case \"\x24(basename \"\x24f\")\" in libgcc_s.so.1) continue;; esac; ln -sf \"\x24f\" /lib/ 2>/dev/null; done; \
+        for f in /glibc/lib/*.so*; do case \"\x24(basename \"\x24f\")\" in libgcc_s.so.1) continue;; esac; ln -sf \"\x24f\" /lib/ 2>/dev/null; done; \
+        [ -e /glibc/lib/libgcc_s.so.1 ] || ln -sf /lib/libgcc_s.so.1 /glibc/lib/libgcc_s.so.1 \
     \0";
     let ret = run_bash_cmd(lib_cmd, environ);
     println!("[initproc] lib linking done, exit={}", ret);
@@ -2040,7 +2102,7 @@ fn prepare_symlink(environ: &[*const u8]) {
     // cyclictest 不会进入内核 syscall；这里仅对该测试入口复用 glibc 二进制。
     let cyclictest_cmd = "\
         if [ -x /glibc/cyclictest ] && [ -x /musl/cyclictest ]; then \
-            ln -sf /glibc/cyclictest /musl/cyclictest; \
+            ln -s /glibc/cyclictest /musl/cyclictest; \
         fi \
     \0";
     let ret = run_bash_cmd(cyclictest_cmd, environ);
@@ -2061,9 +2123,8 @@ fn prepare_symlink(environ: &[*const u8]) {
 
     run_bash_cmd(
         "
-        rm -rf /bin/bash /bin/sh;
-        ln -s /bash /bin/bash;
-        ln -s /bash /bin/sh;
+        test -e /bin/bash || ln -s /bash /bin/bash;
+        test -e /bin/sh   || ln -s /bin/bash /bin/sh;
     ",
         environ,
     );

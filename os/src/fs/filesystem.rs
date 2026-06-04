@@ -6,6 +6,7 @@ use lazy_static::*;
 use spin::Mutex;
 
 use crate::drivers::BLOCK_DEVICE;
+use crate::drivers::block::BlockDevice;
 
 #[allow(unused, non_camel_case_types)]
 #[derive(Debug, PartialEq, Eq)]
@@ -33,19 +34,12 @@ impl FileSystem {
     }
 }
 
-pub fn pre_mount() -> FS_Type {
-    // 如果设置了强制 ramfs 标志，跳过块设备检测
-    if super::FORCE_RAMFS.load(core::sync::atomic::Ordering::Relaxed) {
-        println!("[fs] ramfs forced, skipping block device detection");
-        return FS_Type::Null;
-    }
-    let block_device = BLOCK_DEVICE.clone();
+pub fn detect_fs(block_device: &Arc<dyn BlockDevice>) -> FS_Type {
     let mut buf = vec![0u8; BLOCK_SIZE];
     block_device.read_block(0, &mut buf);
-    // 判断第512个字节是不是0x55AA
     if buf[510] == 0x55 && buf[511] == 0xAA {
         println!("[fs] found fat32 filesystem");
-        return FS_Type::Fat32;
+        FS_Type::Fat32
     } else {
         let superblock_offset = 1024;
         let magic_number_high_index = superblock_offset + 56;
@@ -55,9 +49,18 @@ pub fn pre_mount() -> FS_Type {
         println!("[fs] read magic number: {}", magic_number);
         if magic_number == 0xEF53 {
             println!("[fs] found ext4 filesystem");
-            return FS_Type::Ext4;
+            FS_Type::Ext4
+        } else {
+            println!("[fs] no filesystem found");
+            FS_Type::Null
         }
     }
-    println!("[fs] no filesystem found");
-    FS_Type::Null
+}
+
+pub fn pre_mount() -> FS_Type {
+    if super::FORCE_RAMFS.load(core::sync::atomic::Ordering::Relaxed) {
+        println!("[fs] ramfs forced, skipping block device detection");
+        return FS_Type::Null;
+    }
+    detect_fs(&BLOCK_DEVICE)
 }

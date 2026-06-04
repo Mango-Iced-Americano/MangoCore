@@ -19,6 +19,8 @@ use crate::hal::{
 const BLOCK_RATIO: usize = BLOCK_SZ / VIRT_IO_BLOCK_SZ;
 #[allow(unused)]
 const VIRTIO0: usize = 0x10001000;
+const VIRTIO_MMIO_BASE: usize = 0x10001000;
+const VIRTIO_MMIO_STRIDE: usize = 0x1000;
 
 pub struct VirtIOBlock(Mutex<VirtIOBlk<VirtioHal, MmioTransport<'static>>>);
 
@@ -48,19 +50,35 @@ impl BlockDevice for VirtIOBlock {
 impl VirtIOBlock {
     #[allow(unused)]
     pub fn new() -> Self {
-        unsafe {
-            Self(Mutex::new(
-                VirtIOBlk::<VirtioHal, MmioTransport<'static>>::new(
-                    MmioTransport::new(
-                        NonNull::new_unchecked((VIRTIO0) as *mut VirtIOHeader),
-                        0x1000,
-                    )
-                    .expect("this is not a valid virtio device"),
-                )
-                .unwrap(),
-            ))
-        }
+        Self::try_new(VIRTIO0).expect("VirtIOBlock::new: no device at VIRTIO0")
     }
+
+    pub fn try_new(base_addr: usize) -> Option<Self> {
+        let transport = unsafe {
+            MmioTransport::new(
+                NonNull::new(base_addr as *mut VirtIOHeader)?,
+                0x1000,
+            )
+            .ok()?
+        };
+        let blk = VirtIOBlk::<VirtioHal, MmioTransport<'static>>::new(transport).ok()?;
+        Some(Self(Mutex::new(blk)))
+    }
+}
+
+pub fn probe_rv64() -> [Option<alloc::sync::Arc<dyn super::BlockDevice>>; 2] {
+    use alloc::sync::Arc;
+    let d0 = VirtIOBlock::try_new(VIRTIO_MMIO_BASE)
+        .map(|b| Arc::new(b) as Arc<dyn super::BlockDevice>);
+    if d0.is_some() {
+        println!("[kernel] block device 0: official fs (MMIO {:#x})", VIRTIO_MMIO_BASE);
+    }
+    let d1 = VirtIOBlock::try_new(VIRTIO_MMIO_BASE + VIRTIO_MMIO_STRIDE)
+        .map(|b| Arc::new(b) as Arc<dyn super::BlockDevice>);
+    if d1.is_some() {
+        println!("[kernel] block device 1: tools disk (MMIO {:#x})", VIRTIO_MMIO_BASE + VIRTIO_MMIO_STRIDE);
+    }
+    [d0, d1]
 }
 
 pub struct VirtioHal;
@@ -142,7 +160,8 @@ pub extern "C" fn virtio_dma_alloc(pages: usize) -> PhysAddr {
         frames.push(frame);
     }
     let pa = PhysAddr::from(ppn_base).0;
-    QUEUE_FRAMES.lock().insert(pa, frames);
+    let old = QUEUE_FRAMES.lock().insert(pa, frames);
+    assert!(old.is_none(), "[virtio] dma_alloc key collision pa=0x{:x}", pa);
     ppn_base.into()
 }
 

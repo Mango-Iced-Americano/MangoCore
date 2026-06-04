@@ -231,7 +231,10 @@ pub fn exit_group_and_run_next(exit_code: u32) -> ! {
 
 lazy_static! {
     pub static ref INITPROC: Arc<TaskControlBlock> = {
-        let inode = vfs_lookup_absolute("/initproc").unwrap();
+        // 优先使用 /init（initramfs 模式），fallback 到 /initproc（传统模式）
+        let inode = vfs_lookup_absolute("/init")
+            .or_else(|_| vfs_lookup_absolute("/initproc"))
+            .expect("[kernel] no /init or /initproc found");
         let elf = fs::vfs::File::new(inode, fs::vfs::FileFlags::O_RDONLY).unwrap();
         TaskControlBlock::new(elf)
     };

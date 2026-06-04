@@ -5,6 +5,7 @@ pub mod rtc;
 pub mod tty;
 pub mod zero;
 pub mod urandom;
+pub mod block;
 
 use alloc::sync::Arc;
 use alloc::collections::BTreeMap;
@@ -243,4 +244,11 @@ macro_rules! makedev {
             | (($y & 0xffffff00) << 12)
             | ($y & 0x000000ff)
     };
+}
+
+pub const fn mkdev(major: u64, minor: u64) -> u64 {
+    ((major & 0xfffff000) << 32)
+        | ((major & 0x00000fff) << 8)
+        | ((minor & 0xffffff00) << 12)
+        | (minor & 0x000000ff)
 }
