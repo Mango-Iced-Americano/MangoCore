@@ -350,6 +350,9 @@ impl Socket for UdpSocket {
                     .ok_or(SyscallErr::ENOTCONN),
             };
             let remote = res?;
+            if !self.addr_family_matches(remote.addr) {
+                return Err(SyscallErr::EAFNOSUPPORT);
+            }
             let mut inner = self.inner.lock();
             if flags.contains(MsgFlags::MSG_MORE) {
                 inner.msg_more_buf.extend_from_slice(buf);
