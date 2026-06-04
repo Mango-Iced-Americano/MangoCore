@@ -4,6 +4,21 @@
 
 ## 2026-06-04
 
+### 优化 timerfd_settime common path 并复核长耗时项边界
+
+**涉及文件：**
+- `os/src/fs/timerfd.rs` — 将 `timerfd_settime()` 设置新 timer 后的“是否已立即过期”判断合并到同一把 `TimerFdState` 锁内，避免 common path 再次进入 `wake_if_expired()` 造成二次 inner lock 和重复时钟读取
+- `user/src/bin/initproc.rs` — 更新 `timerfd_settime02` 默认排除说明；该用例仍按长耗时 fuzzy-sync 压力项处理
+
+**验证：**
+- `docker compose exec --workdir /app/os os-dev make rv64-only EXTRA_FEATURES=heap_trace` ✅，132 个既有 warning，无新增 error
+- `docker compose exec --workdir /app/os os-dev make la64-only EXTRA_FEATURES=heap_trace` ✅，116 个既有 warning，无新增 error
+- rv64 heap_trace focused `timerfd01,timerfd02,timerfd_gettime01,timerfd_settime01,timerfd_settime02`：musl/glibc 普通 timerfd 用例全部 TPASS，`timerfd_settime02` 按默认 exclude 输出 `SKIP LTP CASE ... : excluded`；未出现 `TFAIL/TBROK/PANIC/KERNEL EXCEPTION/HEAP OOM/Test timeouted/Unsupported syscall`
+- la64 同一 focused：结果同 rv64；普通 timerfd 双 libc TPASS，`timerfd_settime02` 默认跳过生效；未出现 `TFAIL/TBROK/PANIC/KERNEL EXCEPTION/HEAP OOM/Test timeouted/Unsupported syscall`
+- rv64 临时释放 `timerfd_settime02` 探针：musl/glibc 仍在 LTP per-case timeout 后返回 `137`，fuzzy-sync 采样显示单次热路径约 `43us`，较历史约 `46us` 仅小幅改善，暂不足以放回全量
+
+**备注：** 本轮保留内核 fast path 优化，但不释放 `timerfd_settime02` 默认跳过，避免把稳定长耗时项重新引入 full LTP。若后续专项优化 syscall/fd 查询或 QEMU 性能预算提高，再重新评估该用例。
+
 ### 新增 futex_waitv syscall 最小实现
 
 **涉及文件：**

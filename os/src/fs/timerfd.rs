@@ -165,6 +165,7 @@ impl TimerFd {
         } else {
             None
         };
+        let mut notify_readable = false;
         let old_value = {
             let mut inner = self.inner.lock();
             if let Some(now) = now {
@@ -187,10 +188,16 @@ impl TimerFd {
             } else {
                 Some(now.unwrap() + new_value.it_value)
             };
+            if let (Some(deadline), Some(now)) = (inner.deadline, now) {
+                if now >= deadline {
+                    Self::update_locked(&mut inner, now);
+                    notify_readable = inner.expirations > 0;
+                }
+            }
             old_value
         };
-        if let Some(now) = now {
-            self.wake_if_expired(now);
+        if notify_readable {
+            self.notify_readable();
         }
         Ok(old_value)
     }

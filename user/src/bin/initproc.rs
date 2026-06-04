@@ -118,8 +118,7 @@ const DEFAULT_LTP_EXCLUDE: &[&str] = &[
     // produces a TCONF exit that the suite runner records as failure.
     "signal06",
     // timerfd04 requires CONFIG_TIME_NS; timerfd_settime02 is a long fuzzy-sync
-    // stress case that exceeds the local QEMU budget even after the timerfd
-    // syscall semantics are implemented.
+    // stress case that still exceeds the local QEMU budget.
     "timerfd04",
     "timerfd_settime02",
 ];
