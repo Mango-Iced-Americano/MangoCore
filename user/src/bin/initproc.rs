@@ -2025,7 +2025,7 @@ fn prepare_symlink(environ: &[*const u8]) {
     println!("[initproc] installing busybox applets to /bin ...");
     let install_cmd = "\
         test -e /bin/busybox || ln -s /busybox /bin/busybox; \
-        if test -x /bin/which && test -x /bin/sort && test -x /bin/find; then \
+        if test -x /bin/head && test -x /bin/tail && test -x /bin/wc; then \
             echo 'busybox applets already installed, skipping --install'; \
         else \
             /bin/busybox --install -s /bin; \
