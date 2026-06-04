@@ -216,7 +216,7 @@ define build_tools_disk
 	@echo "  copying files..."
 	@cp -a $(3)/bin/* /tmp/tools-mnt/bin/ 2>/dev/null || true
 	@cp -a $(3)/lib/* /tmp/tools-mnt/lib/ 2>/dev/null || true
-	@echo "  creating symlinks (matching initproc prepare_symlink)..."
+	@echo "  creating symlinks ..."
 	@cd /tmp/tools-mnt/lib && \
 		if [ -f libc.so ]; then \
 			ln -sf libc.so ld-musl-riscv64.so.1 2>/dev/null; \
@@ -235,6 +235,12 @@ define build_tools_disk
 			[ "$$f" = "libgcc_s.so.1" ] && continue; \
 			ln -sf "$$f" "lib/$$f" 2>/dev/null; \
 		done 2>/dev/null; true
+	@echo "  pre-installing busybox applets to /tools/bin ..."
+	@cd /tmp/tools-mnt/bin && \
+		for applet in cp mv rm ln mkdir chmod cat printf sleep grep sed awk uname basename dirname true false test; do \
+			ln -sf busybox $$applet 2>/dev/null; \
+		done
+	@cd /tmp/tools-mnt/bin && ln -sf bash sh 2>/dev/null || true
 	@umount /tmp/tools-mnt
 	@rmdir /tmp/tools-mnt
 	@echo "[tools-disk] $(1) ready."
