@@ -21,6 +21,7 @@ use alloc::vec::Vec;
 use core::mem::size_of;
 use core::panic;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use lazy_static::lazy_static;
 use log::{debug, error, info, trace, warn};
 use num_enum::FromPrimitive;
 
@@ -35,6 +36,42 @@ const MFD_HUGE_MASK: u32 = 0x3f << MFD_HUGE_SHIFT;
 const MFD_VALID_FLAGS: u32 = MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_HUGETLB | MFD_HUGE_MASK;
 const MEMFD_NAME_MAX: usize = 249;
 static MEMFD_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+const F_RDLCK: i16 = 0;
+const F_WRLCK: i16 = 1;
+const F_UNLCK: i16 = 2;
+const SEEK_SET: i16 = 0;
+const SEEK_CUR: i16 = 1;
+const SEEK_END: i16 = 2;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct Flock {
+    l_type: i16,
+    l_whence: i16,
+    l_start: i64,
+    l_len: i64,
+    l_pid: i32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FcntlLockKey {
+    dev: usize,
+    inode: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FcntlRecordLock {
+    key: FcntlLockKey,
+    owner_pid: usize,
+    l_type: i16,
+    start: i64,
+    end: i64,
+}
+
+lazy_static! {
+    static ref FCNTL_RECORD_LOCKS: spin::Mutex<Vec<FcntlRecordLock>> = spin::Mutex::new(Vec::new());
+}
 
 pub const AT_FDCWD: usize = 100usize.wrapping_neg();
 
@@ -1485,8 +1522,18 @@ pub fn sys_close(fd: usize) -> isize {
     let task = current_task().unwrap();
     let files_ref = task.process.files();
     let mut fd_table = files_ref.lock();
+    let lock_key = match fd_table.get_file(fd) {
+        Ok(file) => fcntl_lock_key(file).ok(),
+        Err(e) => return -(e as isize),
+    };
     match fd_table.drop_fd(fd) {
-        Ok(_) => SUCCESS,
+        Ok(_) => {
+            drop(fd_table);
+            if let Some(key) = lock_key {
+                release_fcntl_locks_for_pid_key(task.pid(), key);
+            }
+            SUCCESS
+        }
         Err(e) => return -(e as isize),
     }
 }
@@ -1513,7 +1560,21 @@ pub fn sys_close_range(first: usize, last: usize, flags: u32) -> isize {
     if (flags & CLOSE_RANGE_CLOEXEC) != 0 {
         fd_table.set_cloexec_range(first, last);
     } else {
+        let mut lock_keys = Vec::new();
+        for fd in first..=last {
+            if let Ok(file) = fd_table.get_file(fd) {
+                if let Ok(key) = fcntl_lock_key(file) {
+                    lock_keys.push(key);
+                }
+            } else if fd >= fd_table.len() {
+                break;
+            }
+        }
         fd_table.close_range(first, last);
+        drop(fd_table);
+        for key in lock_keys {
+            release_fcntl_locks_for_pid_key(task.pid(), key);
+        }
     }
     SUCCESS
 }
@@ -1673,11 +1734,19 @@ pub fn sys_dup2(oldfd: usize, newfd: usize) -> isize {
             Ok(file) => match file.try_clone() { Some(f) => f, None => return EBADF, },
             Err(e) => return -(e as isize),
         };
+        let replaced_key = fd_table.get_file(newfd).ok().and_then(|file| fcntl_lock_key(file).ok());
 
-        match fd_table.alloc_fd_at(newfd, file, false) {
+        let ret = match fd_table.alloc_fd_at(newfd, file, false) {
             Ok(fd) => fd as isize,
             Err(e) => -(e as isize),
+        };
+        drop(fd_table);
+        if ret >= 0 {
+            if let Some(key) = replaced_key {
+                release_fcntl_locks_for_pid_key(task.pid(), key);
+            }
         }
+        ret
     };
     if ret < 0 {
         return ret;
@@ -1709,10 +1778,18 @@ pub fn sys_dup3(oldfd: usize, newfd: usize, flags: u32) -> isize {
         Ok(file) => match file.try_clone() { Some(f) => f, None => return EBADF, },
         Err(e) => return -(e as isize),
     };
-    match fd_table.alloc_fd_at(newfd, file, is_cloexec) {
+    let replaced_key = fd_table.get_file(newfd).ok().and_then(|file| fcntl_lock_key(file).ok());
+    let ret = match fd_table.alloc_fd_at(newfd, file, is_cloexec) {
         Ok(fd) => fd as isize,
         Err(e) => -(e as isize),
+    };
+    drop(fd_table);
+    if ret >= 0 {
+        if let Some(key) = replaced_key {
+            release_fcntl_locks_for_pid_key(task.pid(), key);
+        }
     }
+    ret
 }
 
 // This syscall is not complete at all, only /read proc/self/exe
@@ -3806,6 +3883,230 @@ pub enum Fcntl_Command {
     ILLEAGAL,
 }
 
+fn fcntl_lock_key(file: &vfs::File) -> Result<FcntlLockKey, isize> {
+    let meta = file.metadata().map_err(|e| -(e as isize))?;
+    Ok(FcntlLockKey {
+        dev: meta.dev_id,
+        inode: meta.inode_id as usize,
+    })
+}
+
+fn resolve_flock_range(file: &vfs::File, lock: &Flock) -> Result<(i64, i64), isize> {
+    let base = match lock.l_whence {
+        SEEK_SET => 0,
+        SEEK_CUR => file.offset() as i64,
+        SEEK_END => file.metadata().map_err(|e| -(e as isize))?.size,
+        _ => return Err(EINVAL),
+    } as i128;
+    let mut start = base + lock.l_start as i128;
+    let mut len = lock.l_len as i128;
+    if len < 0 {
+        start += len;
+        len = -len;
+    }
+    if start < 0 || start > i64::MAX as i128 || len > i64::MAX as i128 {
+        return Err(EINVAL);
+    }
+    let end = if len == 0 {
+        i64::MAX
+    } else {
+        let end = start + len;
+        if end <= start || end > i64::MAX as i128 {
+            return Err(EINVAL);
+        }
+        end as i64
+    };
+    Ok((start as i64, end))
+}
+
+fn fcntl_lock_conflicts(a_type: i16, a_start: i64, a_end: i64, b: &FcntlRecordLock) -> bool {
+    if a_end <= b.start || b.end <= a_start {
+        return false;
+    }
+    a_type == F_WRLCK || b.l_type == F_WRLCK
+}
+
+fn fcntl_lock_ranges_touch(a: &FcntlRecordLock, b: &FcntlRecordLock) -> bool {
+    a.key == b.key
+        && a.owner_pid == b.owner_pid
+        && a.l_type == b.l_type
+        && !(a.end < b.start || b.end < a.start)
+}
+
+fn compact_fcntl_record_locks(locks: &mut Vec<FcntlRecordLock>) {
+    let mut i = 0;
+    while i < locks.len() {
+        let mut j = i + 1;
+        while j < locks.len() {
+            if fcntl_lock_ranges_touch(&locks[i], &locks[j]) {
+                let merged = locks[j];
+                locks[i].start = locks[i].start.min(merged.start);
+                locks[i].end = locks[i].end.max(merged.end);
+                locks.remove(j);
+            } else {
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+}
+
+fn validate_fcntl_lock_access(file: &vfs::File, l_type: i16) -> Result<(), isize> {
+    match l_type {
+        F_RDLCK => file.readable().map(|_| ()).map_err(|e| -(e as isize)),
+        F_WRLCK => file.writable().map(|_| ()).map_err(|e| -(e as isize)),
+        F_UNLCK => Ok(()),
+        _ => Err(EINVAL),
+    }
+}
+
+fn fcntl_getlk(file: &vfs::File, arg: usize, owner_pid: usize) -> isize {
+    let token = current_user_token();
+    let mut query = match UserPtrMut::<Flock>::from_addr(arg).read(token) {
+        Ok(lock) => lock,
+        Err(errno) => return errno,
+    };
+    if let Err(errno) = validate_fcntl_lock_access(file, query.l_type) {
+        return errno;
+    }
+    if query.l_type == F_UNLCK {
+        return UserPtrMut::<Flock>::from_addr(arg)
+            .write(token, &query)
+            .map(|_| SUCCESS)
+            .unwrap_or(EFAULT);
+    }
+    let key = match fcntl_lock_key(file) {
+        Ok(key) => key,
+        Err(errno) => return errno,
+    };
+    let (start, end) = match resolve_flock_range(file, &query) {
+        Ok(range) => range,
+        Err(errno) => return errno,
+    };
+    let locks = FCNTL_RECORD_LOCKS.lock();
+    if let Some(lock) = locks
+        .iter()
+        .filter(|lock| {
+            lock.key == key
+                && lock.owner_pid != owner_pid
+                && fcntl_lock_conflicts(query.l_type, start, end, lock)
+        })
+        .min_by_key(|lock| lock.start)
+    {
+        query.l_type = lock.l_type;
+        query.l_whence = SEEK_SET;
+        query.l_start = lock.start;
+        query.l_len = if lock.end == i64::MAX {
+            0
+        } else {
+            lock.end - lock.start
+        };
+        query.l_pid = lock.owner_pid as i32;
+    } else {
+        query.l_type = F_UNLCK;
+    }
+    drop(locks);
+
+    UserPtrMut::<Flock>::from_addr(arg)
+        .write(token, &query)
+        .map(|_| SUCCESS)
+        .unwrap_or(EFAULT)
+}
+
+fn fcntl_setlk(file: &vfs::File, arg: usize, owner_pid: usize, wait: bool) -> isize {
+    let token = current_user_token();
+    let lock = match UserPtr::<Flock>::from_addr(arg).read(token) {
+        Ok(lock) => lock,
+        Err(errno) => return errno,
+    };
+    if let Err(errno) = validate_fcntl_lock_access(file, lock.l_type) {
+        return errno;
+    }
+    let key = match fcntl_lock_key(file) {
+        Ok(key) => key,
+        Err(errno) => return errno,
+    };
+    let (start, end) = match resolve_flock_range(file, &lock) {
+        Ok(range) => range,
+        Err(errno) => return errno,
+    };
+    let mut locks = FCNTL_RECORD_LOCKS.lock();
+    if lock.l_type != F_UNLCK {
+        if locks.iter().any(|entry| {
+            entry.key == key
+                && entry.owner_pid != owner_pid
+                && fcntl_lock_conflicts(lock.l_type, start, end, entry)
+        }) {
+            return if wait { EAGAIN } else { EACCES };
+        }
+    }
+
+    let mut i = 0;
+    while i < locks.len() {
+        let entry = locks[i];
+        if entry.key == key
+            && entry.owner_pid == owner_pid
+            && !(end <= entry.start || entry.end <= start)
+        {
+            locks.remove(i);
+            if entry.start < start {
+                locks.push(FcntlRecordLock {
+                    end: start,
+                    ..entry
+                });
+            }
+            if end < entry.end {
+                locks.push(FcntlRecordLock {
+                    start: end,
+                    ..entry
+                });
+            }
+        } else {
+            i += 1;
+        }
+    }
+    if lock.l_type != F_UNLCK {
+        locks.push(FcntlRecordLock {
+            key,
+            owner_pid,
+            l_type: lock.l_type,
+            start,
+            end,
+        });
+    }
+    compact_fcntl_record_locks(&mut locks);
+    SUCCESS
+}
+
+pub fn release_fcntl_locks_for_pid(pid: usize) {
+    FCNTL_RECORD_LOCKS
+        .lock()
+        .retain(|lock| lock.owner_pid != pid);
+}
+
+fn release_fcntl_locks_for_pid_key(pid: usize, key: FcntlLockKey) {
+    FCNTL_RECORD_LOCKS
+        .lock()
+        .retain(|lock| !(lock.owner_pid == pid && lock.key == key));
+}
+
+pub fn close_cloexec_and_release_fcntl_locks(pid: usize, fd_table: &mut vfs::FdTable) {
+    let mut lock_keys = Vec::new();
+    for fd in 0..fd_table.len() {
+        if fd_table.get_cloexec(fd) {
+            if let Ok(file) = fd_table.get_file(fd) {
+                if let Ok(key) = fcntl_lock_key(file) {
+                    lock_keys.push(key);
+                }
+            }
+        }
+    }
+    fd_table.close_cloexec();
+    for key in lock_keys {
+        release_fcntl_locks_for_pid_key(pid, key);
+    }
+}
+
 pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
     const FD_CLOEXEC: usize = 1;
 
@@ -3893,6 +4194,28 @@ pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
                 res |= OpenFlags::O_ASYNC.bits() as isize;
             }
             res
+        }
+        Fcntl_Command::GETLK | Fcntl_Command::OFD_GETLK => {
+            let file = match fd_table.get_file(fd) {
+                Ok(file) => match file.try_clone() { Some(f) => f, None => return EBADF, },
+                Err(e) => return -(e as isize),
+            };
+            let owner_pid = task.pid();
+            drop(fd_table);
+            fcntl_getlk(&file, arg, owner_pid)
+        }
+        Fcntl_Command::SETLK
+        | Fcntl_Command::SETLKW
+        | Fcntl_Command::OFD_SETLK
+        | Fcntl_Command::OFD_SETLKW => {
+            let file = match fd_table.get_file(fd) {
+                Ok(file) => match file.try_clone() { Some(f) => f, None => return EBADF, },
+                Err(e) => return -(e as isize),
+            };
+            let owner_pid = task.pid();
+            let wait = matches!(command, Fcntl_Command::SETLKW | Fcntl_Command::OFD_SETLKW);
+            drop(fd_table);
+            fcntl_setlk(&file, arg, owner_pid, wait)
         }
         Fcntl_Command::SETPIPE_SZ | Fcntl_Command::GETPIPE_SZ => {
             let file = match fd_table.get_file(fd) {

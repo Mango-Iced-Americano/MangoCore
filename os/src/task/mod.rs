@@ -183,6 +183,7 @@ fn do_exit(task: Arc<TaskControlBlock>, exit_code: u32) {
     // （PCB zombie、父进程 wait 唤醒、子进程收养）从未被触发。
     task.process.remove_thread(task.tid.0);
     if task.exit_thread_resources(exit_code) && task.process.live_thread_count() == 0 {
+        crate::syscall::fs::release_fcntl_locks_for_pid(task.pid());
         crate::syscall::shm_detach_process(task.pid());
         task.process.finish_exit(&task, exit_code);
     }

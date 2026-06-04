@@ -4,6 +4,24 @@
 
 ## 2026-06-04
 
+### 补齐 fcntl POSIX record lock 语义
+
+**涉及文件：**
+- `os/src/syscall/fs.rs` — 新增进程级 `F_GETLK/F_SETLK/F_SETLKW` 与 OFD lock 最小兼容；按 `(dev,inode,pid)` 维护 advisory record locks，支持 `SEEK_SET/CUR/END`、负 `l_len`、`l_len=0` 到 EOF、冲突探测、同 PID 区间拆分/合并
+- `os/src/syscall/fs.rs` — `close`、`close_range`、`dup2/dup3` 覆盖目标 fd、exec CLOEXEC 关闭路径同步释放本进程同 inode 的 record locks，避免锁表残留
+- `os/src/task/mod.rs` / `os/src/task/task.rs` — 进程最后线程退出时清理 fcntl locks；exec CLOEXEC 路径改用带 lock 清理的 helper
+
+**验证：**
+- Docker `make rv64-kernel-build-only` ✅
+- Docker `make la64-kernel-build-only` ✅
+- Docker `make rv64-only EXTRA_FEATURES=heap_trace` ✅
+- Docker `make la64-only EXTRA_FEATURES=heap_trace` ✅
+- rv64 heap_trace focused LTP：`fcntl05,fcntl09,fcntl10,fcntl11,fcntl05_64,fcntl09_64,fcntl10_64,fcntl11_64` 均无 `TFAIL/TBROK`，`fcntl11` 9 个区间组合 block 均通过，`FAIL LTP CASE ... : 0`
+- la64 heap_trace focused LTP：同上，均无 `TFAIL/TBROK`，`FAIL LTP CASE ... : 0`
+- 双架构日志中未出现 `PANIC`、`KERNEL EXCEPTION`、`HEAP OOM`、`Unsupported syscall`；heap stats 显示 `zpcb=0`、`stale=0`、`io_buf pipe=0/0K unix=0/0K`
+
+**备注：** `F_SETLKW` 当前在遇到真实跨 PID 冲突时仍返回 `EAGAIN`，尚未实现阻塞等待队列；本轮覆盖 LTP 现有无冲突/GETLK/区间覆盖组合需求。
+
 ### 修复 splice stream fd 阻塞语义
 
 **涉及文件：**

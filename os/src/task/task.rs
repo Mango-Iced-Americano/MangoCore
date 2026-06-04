@@ -922,7 +922,11 @@ impl TaskControlBlock {
         // 更新可执行文件描述符
         self.process.replace_exe(elf);
         // 清理资源 — 关闭所有 CLOEXEC 文件描述符
-        self.process.files().lock().close_cloexec();
+        {
+            let files_ref = self.process.files();
+            let mut fd_table = files_ref.lock();
+            crate::syscall::fs::close_cloexec_and_release_fcntl_locks(self.pid(), &mut fd_table);
+        }
         // 替换内存映射
         self.process.replace_vm(memory_set);
         // 清空信号处理函数表
