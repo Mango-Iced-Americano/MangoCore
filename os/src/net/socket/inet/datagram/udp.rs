@@ -503,7 +503,7 @@ impl UdpSocket {
             IpAddress::Ipv4(ip) => {
                 ip.is_loopback() || crate::net::net_core::is_local_addr(ip)
             }
-            IpAddress::Ipv6(_) => false,
+            IpAddress::Ipv6(ip) => ip.is_loopback(),
         }
     }
 

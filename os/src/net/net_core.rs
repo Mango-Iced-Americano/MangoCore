@@ -291,7 +291,10 @@ pub fn init() {
             [0u8; 6],
             65536,
             IFF_UP | IFF_LOOPBACK | IFF_RUNNING,
-            vec![IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8)],
+            vec![
+                IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8),
+                IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128),
+            ],
             None,
             IF_OPER_UP as u32,
         ));
