@@ -4,6 +4,21 @@
 
 ## 2026-06-04
 
+### 补齐 pipe size fcntl 与写就绪语义
+
+**涉及文件：**
+- `os/src/fs/dev/pipe.rs` — pipe ring buffer 增加逻辑容量，支持空 pipe 按页缩小容量；`poll()` 仅在可写空间达到 `PIPE_BUF` 时报告 `EPOLLOUT`，小于等于 `PIPE_BUF` 的非阻塞写保持原子性
+- `os/src/syscall/fs.rs` — `fcntl(F_GETPIPE_SZ/F_SETPIPE_SZ)` 接入 pipe，非 pipe 返回 `EINVAL`
+
+**验证：**
+- Docker `make rv64-kernel-build-only` ✅
+- Docker `make la64-kernel-build-only` ✅
+- rv64 heap_trace focused LTP：`epoll_wait06` 全部 TPASS，`FAIL LTP CASE epoll_wait06 : 0`
+- la64 heap_trace focused LTP：`epoll_wait06` 全部 TPASS，`FAIL LTP CASE epoll_wait06 : 0`
+- 双架构 focused 日志中 `PANIC=0`、`KERNEL EXCEPTION=0`、`HEAP OOM=0`、`Test timeouted=0`、`TFAIL=0`、`TBROK=0`、`TCONF=0`
+
+**备注：** 当前实现不做大于默认 64KiB 的 pipe 动态扩容；本轮覆盖 LTP `epoll_wait06` 需要的缩容、非阻塞写 EAGAIN 与 EPOLLET 写就绪边界。
+
 ### 补齐 epoll_pwait2 最小兼容
 
 **涉及文件：**

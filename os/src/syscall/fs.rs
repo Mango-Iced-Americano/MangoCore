@@ -3752,6 +3752,24 @@ pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
             }
             res
         }
+        Fcntl_Command::SETPIPE_SZ | Fcntl_Command::GETPIPE_SZ => {
+            let file = match fd_table.get_file(fd) {
+                Ok(file) => file,
+                Err(e) => return -(e as isize),
+            };
+            let pipe = match file.inode_as_any_ref().downcast_ref::<Pipe>() {
+                Some(pipe) => pipe,
+                None => return EINVAL,
+            };
+            match command {
+                Fcntl_Command::GETPIPE_SZ => pipe.pipe_capacity() as isize,
+                Fcntl_Command::SETPIPE_SZ => match pipe.set_pipe_capacity_compat(arg) {
+                    Ok(size) => size as isize,
+                    Err(e) => -(e as isize),
+                },
+                _ => unreachable!(),
+            }
+        }
         Fcntl_Command::ADD_SEALS => {
             const VALID_SEALS: usize = vfs::file::F_SEAL_SEAL
                 | vfs::file::F_SEAL_SHRINK

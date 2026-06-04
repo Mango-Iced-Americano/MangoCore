@@ -4,6 +4,7 @@ use core::any::Any;
 use core::ptr::copy_nonoverlapping;
 use spin::Mutex;
 
+use crate::config::PAGE_SIZE;
 use crate::fs::vfs::{
     FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata,
 };
@@ -92,6 +93,9 @@ impl IndexNode for Pipe {
                 }
                 return Err(SyscallErr::EAGAIN);
             }
+            if buf.len() <= PAGE_SIZE && ring.get_free_size() < buf.len() {
+                return Err(SyscallErr::EAGAIN);
+            }
             let write_bytes = ring.buffer_write(buf);
             ring.status = if ring.head == ring.tail {
                 RingBufferStatus::FULL
@@ -143,7 +147,7 @@ impl IndexNode for Pipe {
             }
         }
         if self.writable {
-            if ring.status != RingBufferStatus::FULL || ring.all_read_ends_closed() {
+            if ring.get_free_size() >= PAGE_SIZE || ring.all_read_ends_closed() {
                 revents |= EPollEvent::EPOLLOUT.bits();
             }
         }
@@ -198,6 +202,14 @@ impl Drop for Pipe {
 }
 
 impl Pipe {
+    pub fn pipe_capacity(&self) -> usize {
+        self.buffer.lock().capacity
+    }
+
+    pub fn set_pipe_capacity_compat(&self, requested: usize) -> Result<usize, SyscallErr> {
+        self.buffer.lock().set_capacity_compat(requested)
+    }
+
     fn peer_read_end(&self) -> Option<Arc<Pipe>> {
         self.buffer
             .lock()
@@ -254,6 +266,7 @@ enum RingBufferStatus {
 
 pub struct PipeRingBuffer {
     arr: Box<[u8; RING_DEFAULT_BUFFER_SIZE]>,
+    capacity: usize,
     head: usize,
     tail: usize,
     status: RingBufferStatus,
@@ -267,6 +280,7 @@ impl PipeRingBuffer {
         PIPE_BUF_BYTES.fetch_add(RING_DEFAULT_BUFFER_SIZE, core::sync::atomic::Ordering::Relaxed);
         Self {
             arr: Box::new([0u8; RING_DEFAULT_BUFFER_SIZE]),
+            capacity: RING_DEFAULT_BUFFER_SIZE,
             head: 0,
             tail: 0,
             status: RingBufferStatus::EMPTY,
@@ -277,7 +291,7 @@ impl PipeRingBuffer {
     #[allow(unused)]
     fn get_used_size(&self) -> usize {
         if self.status == RingBufferStatus::FULL {
-            self.arr.len()
+            self.capacity
         } else if self.status == RingBufferStatus::EMPTY {
             0
         } else {
@@ -285,16 +299,42 @@ impl PipeRingBuffer {
             if self.head < self.tail {
                 self.tail - self.head
             } else {
-                self.tail + self.arr.len() - self.head
+                self.tail + self.capacity - self.head
             }
         }
+    }
+    fn get_free_size(&self) -> usize {
+        self.capacity - self.get_used_size()
+    }
+    fn set_capacity_compat(&mut self, requested: usize) -> Result<usize, SyscallErr> {
+        if requested == 0 || requested > RING_DEFAULT_BUFFER_SIZE {
+            return Err(SyscallErr::EINVAL);
+        }
+        let requested = requested.max(PAGE_SIZE);
+        let new_capacity = (requested + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        if new_capacity > RING_DEFAULT_BUFFER_SIZE {
+            return Err(SyscallErr::EINVAL);
+        }
+        let used = self.get_used_size();
+        if used > new_capacity {
+            return Err(SyscallErr::EBUSY);
+        }
+        if used == 0 {
+            self.head = 0;
+            self.tail = 0;
+            self.status = RingBufferStatus::EMPTY;
+        } else if self.head >= new_capacity || self.tail > new_capacity {
+            return Err(SyscallErr::EBUSY);
+        }
+        self.capacity = new_capacity;
+        Ok(self.capacity)
     }
     #[inline]
     fn buffer_read(&mut self, buf: &mut [u8]) -> usize {
         // get range
         let begin = self.head;
         let end = if self.tail <= self.head {
-            RING_DEFAULT_BUFFER_SIZE
+            self.capacity
         } else {
             self.tail
         };
@@ -304,7 +344,7 @@ impl PipeRingBuffer {
             copy_nonoverlapping(self.arr.as_ptr().add(begin), buf.as_mut_ptr(), read_bytes);
         };
         // update head
-        self.head = if begin + read_bytes == RING_DEFAULT_BUFFER_SIZE {
+        self.head = if begin + read_bytes == self.capacity {
             0
         } else {
             begin + read_bytes
@@ -318,7 +358,7 @@ impl PipeRingBuffer {
         let end = if self.tail < self.head {
             self.head
         } else {
-            RING_DEFAULT_BUFFER_SIZE
+            self.capacity
         };
         // write
         let write_bytes = buf.len().min(end - begin);
@@ -326,7 +366,7 @@ impl PipeRingBuffer {
             copy_nonoverlapping(buf.as_ptr(), self.arr.as_mut_ptr().add(begin), write_bytes);
         };
         // update tail
-        self.tail = if begin + write_bytes == RING_DEFAULT_BUFFER_SIZE {
+        self.tail = if begin + write_bytes == self.capacity {
             0
         } else {
             begin + write_bytes
