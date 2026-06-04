@@ -12,7 +12,7 @@ einitproc:
     .global ebash
     .align 12
 sbash:
-    .incbin "../user/tools/loongarch64/bash"
+    .incbin "../user/tools/loongarch64/bin/bash"
 ebash:
     .align 12
 
@@ -21,7 +21,7 @@ ebash:
     .global ebusybox
     .align 12
 sbusybox:
-    .incbin "../user/tools/loongarch64/busybox"
+    .incbin "../user/tools/loongarch64/bin/busybox"
 ebusybox:
     .align 12
 
@@ -48,7 +48,7 @@ efstest:
     .global eltpcompat
     .align 12
 sltpcompat:
-    .incbin "../user/tools/loongarch64/ltp_proto_compat-la.so"
+    .incbin "../user/tools/loongarch64/lib/ltp_proto_compat-la.so"
 eltpcompat:
     .align 12
 

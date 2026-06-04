@@ -92,6 +92,19 @@ $(APPS):
 fs-img: user
 	./buildfs.sh "$(ROOTFS_IMG)" "rvqemu" $(MODE) $(FS_MODE)
 
+# Initramfs cpio generation (only when initramfs feature is active)
+INITRAMFS_CPIO_RV := ../fs-img-dir/initramfs-rv.cpio
+
+ifneq (,$(findstring initramfs,$(EXTRA_FEATURES)))
+  # kernel（cargo build）需要在编译前拿到 cpio
+  kernel: $(INITRAMFS_CPIO_RV)
+endif
+
+$(INITRAMFS_CPIO_RV): user
+	@mkdir -p ../fs-img-dir
+	./build_initramfs.sh rv64 $(MODE) $(INITRAMFS_CPIO_RV)
+	@touch src/initramfs-rv.S  # 强制 Cargo 重编译（.incbin 时间戳变化）
+
 # xein TODO: 注意需要评估zero_init启用与否的影响
 kernel:
 	@echo Platform: $(BOARD)

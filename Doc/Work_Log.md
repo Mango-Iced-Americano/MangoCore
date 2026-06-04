@@ -2,6 +2,44 @@
 
 ---
 
+## 2026-06-04
+
+### Initramfs 启动流程 — 第一阶段实现
+
+**涉及文件：**
+- `os/src/fs/initramfs.rs` — 新增模块：newc cpio 解析器（`unpack_newc` / `unpack_embedded`），支持 S_IFDIR/S_IFREG/S_IFLNK，无外部依赖
+- `os/src/initramfs-rv.S` / `os/src/initramfs-la.S` — 新增：`.incbin` 嵌入 cpio 归档
+- `os/build_initramfs.sh` — 新增：生成 newc cpio 构建脚本
+- `os/initramfs/common/` — 新增：initramfs 目录骨架（bin lib usr etc root run var/tmp sdcard tools musl glibc rescue dev proc tmp）
+- `os/Cargo.toml` — 新增 `initramfs` / `legacy_block_root` / `preload_payloads` 特性
+- `os/src/fs/mod.rs` — VFS_ROOT 重构：`#[cfg(feature = "initramfs")]` 分支创建 RamFS + 解包 cpio + devfs/proc/tmp（不访问 BLOCK_DEVICE）；`mount_block_fs` 改为不 panic；新增 `mount_boot_block_devices()` / `initramfs_init()` / `install_preload_payloads()`
+- `os/src/main.rs` — 重构 `rust_main()`：initramfs 路径（`initramfs_init` → net → preload → mount block devices）与 legacy 路径分离，汇编嵌入选择覆盖 4 种特性组合
+- `os/src/task/mod.rs` — `INITPROC` 改为优先 /init，fallback /initproc
+- `os/src/drivers/block/mod.rs` — 新增 `block_devices()` / `get_block_device()` 访问器
+- `os/Makefile` — 新增 `initramfs-rv` / `initramfs-la` 目标
+- `os/make/rv64.mk` / `os/make/la64o.mk` — 条件依赖：initramfs 特性时 `kernel` 依赖 cpio，生成后 `touch` .S 文件强制 Cargo 重链
+- `os/src/preload_app-rv.S` / `os/src/preload_app.S` — 修复路径指向新的 `bin/` / `lib/` 子目录
+
+**验证：**
+- `make rv64-kernel-build-only EXTRA_FEATURES=initramfs,preload_payloads` ✅
+- `make la64-kernel-build-only EXTRA_FEATURES=initramfs,preload_payloads` ✅
+
+**Oracle 审查修复（第二轮）：**
+1. newc cpio `data_start` 对齐公式修正：`pos + HEADER_LEN + align4(namesize)` → `align4(pos + HEADER_LEN + namesize)`（HEADER_LEN=110 不是 4 的倍数）
+2. `mount_common_filesystems()` 改为使用全局 `DEV_FS`，移除其中的 `block_devices()` 调用，块设备探测完全延后到 `mount_boot_block_devices()`；`/dev/vda`/`/dev/vdb` 注册通过 `DEV_FS.add_dev()` 在 block probe 后追加
+3. cpio 生成后在 Makefile 中 `touch src/initramfs-*.S` 强制 Cargo 重编译
+4. newc 坏 magic 不再静默忽略（非 TRAILER 状态返回错误）
+5. 文件名 NUL 终止符校验
+
+**备注：**
+- `/init` 暂用现有 `initproc` 构建产物占位，后续应新建最小化 `user/src/bin/init.rs`（stage-1 引导）
+- `/rescue/sh` 当前使用 tools/ 中的 BusyBox，需确认其为静态链接，否则 initramfs 中缺少动态链接器无法执行
+- `preload_payloads` 特性在迁移期保留，initramfs 仍通过 `flush_preload()` 写入 bash/busybox/LTP
+- 旧块设备根启动模型通过 `legacy_block_root` 特性保留
+
+---
+
+
 ## 2026-06-03
 
 ### Step 1: 多块设备探测 — BLOCK_DEVICES[2] 数组 + 向后兼容

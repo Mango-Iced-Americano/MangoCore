@@ -310,3 +310,19 @@ tools-alpine-la:
 	@echo "[alpine] loongarch64 done."
 
 tools-alpine: tools-alpine-rv tools-alpine-la
+
+# ============================================================
+# Initramfs 构建
+# 生成 tiny newc cpio 归档，嵌入 kernel 作为初始根文件系统
+# ============================================================
+
+INITRAMFS_DIR_RV := ../fs-img-dir/initramfs-rv.cpio
+INITRAMFS_DIR_LA := ../fs-img-dir/initramfs-la.cpio
+
+initramfs-rv: user
+	@./build_initramfs.sh rv64 $(MODE) $(INITRAMFS_DIR_RV)
+
+initramfs-la: user
+	@./build_initramfs.sh la64 $(MODE) $(INITRAMFS_DIR_LA)
+
+initramfs-all: initramfs-rv initramfs-la

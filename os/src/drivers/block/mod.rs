@@ -83,6 +83,16 @@ lazy_static! {
     };
 }
 
+/// 返回块设备数组的只读引用
+pub fn block_devices() -> &'static [Option<Arc<dyn BlockDevice>>; 2] {
+    &BLOCK_DEVICES
+}
+
+/// 获取指定索引的块设备（存在时返回 Some）
+pub fn get_block_device(index: usize) -> Option<Arc<dyn BlockDevice>> {
+    BLOCK_DEVICES.get(index).and_then(|dev| dev.clone())
+}
+
 #[allow(unused)]
 pub fn block_device_test() {
     let block_device = BLOCK_DEVICE.clone();

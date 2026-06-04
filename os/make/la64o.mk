@@ -144,6 +144,19 @@ kernel:
 		@LOG=$(LOG) cargo build --no-default-features --release --features "comp board_$(BOARD) block_$(BLK_MODE) $(LOG_OPTION) $(EXTRA_FEATURES)"  --target $(TARGET)
     endif
 
+# Initramfs cpio generation (only when initramfs feature is active)
+INITRAMFS_CPIO_LA := ../fs-img-dir/initramfs-la.cpio
+
+ifneq (,$(findstring initramfs,$(EXTRA_FEATURES)))
+  # kernel（cargo build）需要在编译前拿到 cpio
+  kernel: $(INITRAMFS_CPIO_LA)
+endif
+
+$(INITRAMFS_CPIO_LA): user
+	@mkdir -p ../fs-img-dir
+	./build_initramfs.sh la64 $(MODE) $(INITRAMFS_CPIO_LA)
+	@touch src/initramfs-la.S  # 强制 Cargo 重编译（.incbin 时间戳变化）
+
 # 更新内核
 uimage: env $(KERNEL_BIN)
 	../util/mkimage -A loongarch -O linux -T kernel -C none -a $(LA_LOAD_ADDR) -e $(LA_ENTRY_POINT) -n NPUcore+ -d $(KERNEL_BIN) $(KERNEL_UIMG)

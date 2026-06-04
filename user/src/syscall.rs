@@ -176,7 +176,7 @@ pub fn sys_mount(
 ) -> isize {
     syscall6(
         SYSCALL_MOUNT,
-        [source as usize, target as usize, fstype as usize, flags, data],
+        [source as usize, target as usize, fstype as usize, flags, data, 0],
     )
 }
 
