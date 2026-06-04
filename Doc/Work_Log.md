@@ -77,6 +77,36 @@
 - `/etc/apk/world` 在 initramfs（RamFS），不持久；如需持久化需在启动时拷贝到工具盘或 bind mount `/tools/etc/apk/world`
 - `syscall 258`（`riscv_hwprobe`）仍未实现，musl 调用后自动忽略返回的 ENOSYS，不影响 apk 功能
 
+### 构建系统对称化：la64 去掉 --no-default-features，la64o.mk → la64.mk
+
+**涉及文件：**
+- `os/Cargo.toml` — `default` 从 `["board_rvqemu", "block_virt", "initramfs", "preload_payloads"]` 改为 `["initramfs", "preload_payloads"]`（架构中立）
+- `os/make/rv64.mk` — `kernel: $(INITRAMFS_CPIO_RV)` 改为无条件依赖（不再只依赖 `EXTRA_FEATURES`）
+- `os/make/la64.mk` — **全部重写**：按 `rv64.mk` 结构排列，去掉 `--no-default-features`，去掉 `comp` 特性（仅 procfs 假配置），QEMU 目标用 `-kernel` 直传 ELF（不再用 `-device loader`），保留 `--target loongarch64-unknown-linux-gnu` 和 `virtio-blk-pci`
+- `os/make/la64o.mk` — **已删除**
+- `os/Makefile` — 所有 `la64o.mk` 引用改为 `la64.mk`；`la64_all` 不再需要 `EXTRA_FEATURES`
+- `os/inject_os_test_conf.sh` — 注释更新
+- `scripts/run_full_test.py` — 注释更新
+
+**对称后的构建命令对比：**
+
+```makefile
+# r64.mk
+cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)"
+
+# la64.mk（完全对称，仅多了 --target）
+cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
+```
+
+**验证：**
+- `make -f make/rv64.mk build LOG=off` ✅
+- `make -f make/la64.mk build LOG=off` ✅
+
+**备注：**
+- 现在 `make la64_all` 不需要 `EXTRA_FEATURES="initramfs preload_payloads"`，因为 Cargo default 自带
+- `comp` 特性（`CONFIG_COMPRESSED_ELF`）被移除，之前只有 la64 显式传入，rv64 从未启用，属无害不一致
+- la64 的 `run`/`runsimple` 目标改用 `-kernel` 直传 ELF（与 `comp` 目标一致），不再用 `-device loader`
+
 ---
 
 

@@ -92,13 +92,10 @@ $(APPS):
 fs-img: user
 	./buildfs.sh "$(ROOTFS_IMG)" "rvqemu" $(MODE) $(FS_MODE)
 
-# Initramfs cpio generation (only when initramfs feature is active)
+# Initramfs cpio generation (always needed when feature is in Cargo defaults)
 INITRAMFS_CPIO_RV := ../fs-img-dir/initramfs-rv.cpio
 
-ifneq (,$(findstring initramfs,$(EXTRA_FEATURES)))
-  # kernel（cargo build）需要在编译前拿到 cpio
-  kernel: $(INITRAMFS_CPIO_RV)
-endif
+kernel: $(INITRAMFS_CPIO_RV)
 
 $(INITRAMFS_CPIO_RV): user
 	@mkdir -p ../fs-img-dir

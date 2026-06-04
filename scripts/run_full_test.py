@@ -198,7 +198,7 @@ def build_rv64_cmd():
 
 
 def build_la64_cmd():
-    """构建 la64 QEMU 命令，参数参照 os/make/la64o.mk 的 comp 目标。"""
+    """构建 la64 QEMU 命令，参数参照 os/make/la64.mk 的 comp 目标。"""
     return (
         "qemu-system-loongarch64 "
         "-kernel kernel-la "

@@ -35,7 +35,7 @@ la64_all: prepare-cargo-config tools-disk-la
 	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	make ARCH=la64 -f make/la64o.mk all MODE=${MODE} LOG=${LOG}
+	make ARCH=la64 -f make/la64.mk all MODE=${MODE} LOG=${LOG}
 
 rv64-kernel-build-only: prepare-cargo-config
 	@rustup override set $(RV_TOOLCHAIN)
@@ -71,31 +71,31 @@ la64-only: prepare-cargo-config
 	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	make -f make/la64o.mk all MODE=${MODE} LOG=${LOG}
+	make -f make/la64.mk all MODE=${MODE} LOG=${LOG}
 
 la64-kernel-build-only: prepare-cargo-config
 	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	make -f make/la64o.mk build BLK_MODE=${LA64_BLK_MODE} MODE=${MODE} LOG=${LOG}
+	make -f make/la64.mk build BLK_MODE=${LA64_BLK_MODE} MODE=${MODE} LOG=${LOG}
 
 la64-debug:
 	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	make -f make/la64o.mk all MODE=debug	
+	make -f make/la64.mk all MODE=debug	
 
 la64-run-only:
 	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	make -f make/la64o.mk runsimple MODE=${MODE} LOG=${LOG}
+	make -f make/la64.mk runsimple MODE=${MODE} LOG=${LOG}
 
 la64-run: prepare-cargo-config
 	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	make -f make/la64o.mk comp MODE=${MODE} LOG=${LOG}
+	make -f make/la64.mk comp MODE=${MODE} LOG=${LOG}
 
 comp:
 	make -f make/$(CURR_ARCH).mk comp
@@ -128,7 +128,7 @@ la64-gdb: la64-debug
 	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
-	make -f make/la64o.mk comp-gdb	
+	make -f make/la64.mk comp-gdb	
 
 rvchange:
 	rm -f ../sdcard-rv.img
