@@ -462,10 +462,13 @@ tools-apk: tools-apk-rv tools-apk-la
 INITRAMFS_DIR_RV := ../fs-img-dir/initramfs-rv.cpio
 INITRAMFS_DIR_LA := ../fs-img-dir/initramfs-la.cpio
 
+# DNS 服务器：QEMU user 网用 10.0.2.3，真机/其他环境可覆写
+DNS_SERVER ?= 10.0.2.3
+
 initramfs-rv: user
-	@./build_initramfs.sh rv64 $(MODE) $(INITRAMFS_DIR_RV)
+	@DNS_SERVER=$(DNS_SERVER) ./build_initramfs.sh rv64 $(MODE) $(INITRAMFS_DIR_RV)
 
 initramfs-la: user
-	@./build_initramfs.sh la64 $(MODE) $(INITRAMFS_DIR_LA)
+	@DNS_SERVER=$(DNS_SERVER) ./build_initramfs.sh la64 $(MODE) $(INITRAMFS_DIR_LA)
 
 initramfs-all: initramfs-rv initramfs-la

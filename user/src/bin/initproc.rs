@@ -2061,7 +2061,7 @@ fn prepare_symlink(environ: &[*const u8]) {
         [ -f /etc/passwd ] || printf 'root:x:0:0:root:/root:/bin/sh\\nnobody:x:65534:65534:nobody:/nonexistent:/bin/sh\\n' > /etc/passwd; \
         [ -f /etc/group ] || printf 'root:x:0:\\nnogroup:x:65534:\\n' > /etc/group; \
         [ -f /etc/nsswitch.conf ] || printf 'passwd: files\\ngroup: files\\nhosts: files dns\\n' > /etc/nsswitch.conf; \
-        [ -f /etc/resolv.conf ] || printf 'nameserver 8.8.8.8\\n' > /etc/resolv.conf; \
+        [ -f /etc/resolv.conf ] || printf 'nameserver 10.0.2.3\\n' > /etc/resolv.conf; \
         [ -f /etc/hostname ] || printf 'mangocore\\n' > /etc/hostname; \
     \0";
     let ret = run_bash_cmd(account_cmd, environ);
