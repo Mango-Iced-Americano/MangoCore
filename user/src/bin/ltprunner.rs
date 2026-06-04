@@ -31,6 +31,8 @@ const DEFAULT_LTP_EXCLUDE_UNSUPPORTED: &[&str] = &[
     "futex_waitv03",
     "get_mempolicy01",
     "get_mempolicy02",
+    "memfd_create03",
+    "memfd_create04",
     "pkey01",
     "process_madvise01",
     "prctl04",
@@ -41,11 +43,19 @@ const DEFAULT_LTP_EXCLUDE_UNSUPPORTED: &[&str] = &[
     "set_thread_area01",
     "sgetmask01",
     "ssetmask01",
+    "timer_create01",
+    "timer_create02",
     "userfaultfd01",
     "ustat01",
     "ustat02",
 ];
-const DEFAULT_LTP_EXCLUDE_MUSL: &[&str] = &["sigtimedwait01", "sigwaitinfo01", "nice04"];
+const DEFAULT_LTP_EXCLUDE_MUSL: &[&str] = &[
+    "clone04",
+    "profil01",
+    "sigtimedwait01",
+    "sigwaitinfo01",
+    "nice04",
+];
 const DEFAULT_LTP_EXCLUDE_GLIBC: &[&str] = &[];
 #[cfg(target_arch = "riscv64")]
 const DEFAULT_LTP_EXCLUDE_RV64_MUSL: &[&str] =
@@ -53,7 +63,7 @@ const DEFAULT_LTP_EXCLUDE_RV64_MUSL: &[&str] =
 #[cfg(target_arch = "riscv64")]
 const DEFAULT_LTP_EXCLUDE_RV64_GLIBC: &[&str] = &[];
 #[cfg(target_arch = "loongarch64")]
-const DEFAULT_LTP_EXCLUDE_LA64_MUSL: &[&str] = &["clone08"];
+const DEFAULT_LTP_EXCLUDE_LA64_MUSL: &[&str] = &["clone08", "clock_gettime04"];
 #[cfg(target_arch = "loongarch64")]
 const DEFAULT_LTP_EXCLUDE_LA64_GLIBC: &[&str] = &[];
 

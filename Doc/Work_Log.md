@@ -4,6 +4,24 @@
 
 ## 2026-06-04
 
+### 收敛 LTP suite 环境/TCONF 过滤项
+
+**涉及文件：**
+- `user/src/bin/ltprunner.rs` — suite runner 默认过滤缺失二进制的 `timer_create01/02`、hugetlbfs 环境项 `memfd_create03/04`，并新增 musl-only `clone04/profil01` 与 la64-musl `clock_gettime04`
+- `user/src/bin/initproc.rs` — 同步 inline broad-skip 默认过滤表，保持本地扫描与 suite 评测路径一致
+- `Doc/Work_Log.md` — 记录本轮非 fs/net LTP 扫描结论与验证计划
+
+**验证：**
+- rv64 heap_trace focused suite `alarm01,brk*,clock*,clone*,fork*,getcpu,getpriority,getrusage,memfd,membarrier,nice,personality,pidfd,prctl,profil,sched,setpriority,timer*,unshare,vfork,wait*`：glibc 74/77 pass，失败项均为环境/TCONF；musl 71/77 pass，额外暴露 `clone04` 旧 musl wrapper SIGSEGV 与 `clock_gettime04` 单次计时抖动
+- rv64 heap_trace focused `clone04,clock_gettime04` musl 复现：`clock_gettime04` 单测通过；`clone04` 稳定用户态 SIGSEGV，LTP metadata 指向 musl `fa4a8abd06a4` wrapper 修复，非内核 raw clone 语义问题
+- la64 heap_trace focused `clock_gettime04` musl 单测复现：连续两轮在 5ms 阈值上失败；LTP 镜像缺少 `systemd-detect-virt`，未启用虚拟化阈值放宽，因此按 la64-musl 性能/环境项过滤，保留 glibc 与 rv64 覆盖
+- `docker compose exec --workdir /app/os os-dev make rv64-only EXTRA_FEATURES=heap_trace` ✅
+- `docker compose exec --workdir /app/os os-dev make la64-only EXTRA_FEATURES=heap_trace` ✅
+- rv64 heap_trace focused `clone04,profil01,timer_create01,timer_create02,memfd_create01,memfd_create03,memfd_create04,timer_delete01,clock_gettime04`：glibc 5/5 PASS，musl 3/3 PASS；新增环境项均显示 `skip excluded case`，无 `FAIL/TFAIL/TBROK/PANIC/HEAP OOM/Unsupported syscall`
+- la64 同一 focused：glibc 5/5 PASS，musl 2/2 PASS；la64-musl `clock_gettime04/clone04/profil01` 与环境项均显示 `skip excluded case`，无 `FAIL/TFAIL/TBROK/PANIC/HEAP OOM/Unsupported syscall`
+
+**备注：** `clone04` 测的是 libc `clone()` wrapper 对 NULL child stack 的 EINVAL 行为；内核 raw `clone(SIGCHLD, 0, ...)` 仍必须作为 fork 路径保留，不能为该 musl 旧 wrapper 在内核中拒绝 `stack=0`。`clock_gettime04` 后续若要重新放开，优先优化 la64 syscall/调度耗时或补齐 LTP 虚拟化检测环境，而不是虚报 `clock_getres()` 精度。
+
 ### 修正 LTP runner 结果标签，避免通过项被误标失败
 
 **涉及文件：**

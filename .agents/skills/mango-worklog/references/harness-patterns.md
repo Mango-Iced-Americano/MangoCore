@@ -196,6 +196,20 @@
 - **教训**: 每次维护 inline broad-skip 后都要检查 `user/src/bin/ltprunner.rs`，否则本地 focused/inline 结果无法代表 suite 评测路径；需要调试被排除项时，应临时调整配置或过滤表，验证通过后再解除。
 - **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`
 
+## LTP libc wrapper 用例不能反向改 raw syscall 语义
+
+- **根因**: LTP `clone04` 验证的是 libc `clone()` wrapper 对 NULL child stack 返回 `EINVAL`；旧 musl wrapper 会把该非法 libc API 调用继续下传，导致用户态 trampoline 在空栈附近 SIGSEGV。内核 raw `clone(SIGCHLD, 0, ...)` 仍是 fork 兼容路径，不能为了 wrapper 用例在内核里拒绝 `stack=0`。
+- **修复**: 将失败限定在旧 musl wrapper 的组合做 musl-only exclude，保留 glibc 路径继续覆盖 wrapper EINVAL 行为；内核 clone/fork 语义不做伪修。
+- **教训**: 遇到 LTP metadata 标注 `musl-git`/`glibc` 的用例，先区分“libc API 合约”和“内核 syscall ABI”；只有 raw syscall ABI 错误才改内核。
+- **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`, `os/src/syscall/process/clone.rs`
+
+## LTP clock_gettime04 与虚拟化阈值
+
+- **根因**: `clock_gettime04` 默认按 5ms 判定连续读时间跳变，只有 `tst_is_virt()` 识别到虚拟机才放宽阈值；测试镜像缺少 `systemd-detect-virt` 时，la64 + heap_trace QEMU 的 syscall/调度抖动会被记为 `TFAIL`。
+- **修复**: 失败限定在 la64-musl 时做架构+libc 专属 exclude，保留 la64-glibc 和 rv64 双 libc 覆盖；不要为了测试阈值虚报 `clock_getres()` 精度。
+- **教训**: 时间精度类 LTP 要先看测试自己的阈值来源、虚拟化检测和 libc 组合；若要重新放开，优先优化 syscall/调度耗时或补齐测试环境检测。
+- **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`, `os/src/syscall/process/time.rs`
+
 ## 网络
 
 ### 硬编码 IPv4 地址替换为 net_core 动态查询

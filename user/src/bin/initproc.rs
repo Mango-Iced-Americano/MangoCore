@@ -88,6 +88,15 @@ const DEFAULT_LTP_EXCLUDE: &[&str] = &[
     // The current LTP image lists this alias in runtest/syscalls, but does not
     // ship a matching test binary. sigtimedwait01 covers the same syscall path.
     "rt_sigtimedwait01",
+    // The current LTP image lists these cases in runtest/syscalls without
+    // shipping matching binaries; timer_delete/gettime/settime keep POSIX timer
+    // syscall coverage.
+    "timer_create01",
+    "timer_create02",
+    // These memfd_create cases require hugetlbfs/hugepage support. memfd_create
+    // syscall and sealing semantics remain covered by memfd_create01/02.
+    "memfd_create03",
+    "memfd_create04",
     // timerfd04 requires CONFIG_TIME_NS; timerfd_settime02 is a long fuzzy-sync
     // stress case that exceeds the local QEMU budget even after the timerfd
     // syscall semantics are implemented.
@@ -97,6 +106,13 @@ const DEFAULT_LTP_EXCLUDE: &[&str] = &[
 
 /// LTP musl 专属排除测例（额外追加）
 const DEFAULT_LTP_EXCLUDE_MUSL: &[&str] = &[
+    // clone04 checks libc clone(NULL stack) wrapper behavior. The current musl
+    // image predates the upstream wrapper fix and can segfault before a useful
+    // kernel errno path; glibc keeps this EINVAL coverage enabled.
+    "clone04",
+    // musl in this image reports profil() as unsupported. glibc still covers
+    // the kernel signal/ucontext path fixed for profil01.
+    "profil01",
     // This musl wrapper retries raw EINTR from rt_sigtimedwait internally, so
     // these LTP cases hit the per-case timeout even after the kernel path works.
     "sigtimedwait01",
@@ -131,6 +147,11 @@ const DEFAULT_LTP_EXCLUDE_LA64_MUSL: &[&str] = &[
     // the kernel path is meaningfully exercised. glibc validates the kernel
     // thread-clone path and remains enabled.
     "clone08",
+    // la64 musl under local heap_trace QEMU repeatedly exceeds the strict 5ms
+    // successive clock_gettime04 threshold because the LTP image cannot detect
+    // virtualization without systemd-detect-virt. glibc and rv64 still cover
+    // the same kernel clock_gettime path.
+    "clock_gettime04",
 ];
 /// la64 glibc 专属排除测例（额外追加）
 const DEFAULT_LTP_EXCLUDE_LA64_GLIBC: &[&str] = &[];
