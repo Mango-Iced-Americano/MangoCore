@@ -4,6 +4,25 @@
 
 ## 2026-06-04
 
+### 支持 ns_last_pid 显式复用已释放 PID
+
+**涉及文件：**
+- `os/src/task/pid.rs` — 为 fresh PID/TID 分配器增加 one-shot reuse hint；`TidHandle::release()` 只标记 released bitmap，不把 ID 塞回普通 free-list；`set_ns_last_pid()` 在目标 ID 已释放时让下一次 `tid_alloc()` 显式复用该 ID
+- `Doc/Work_Log.md` — 记录本轮适配和验证结果
+
+**问题：** LTP `pidfd_send_signal03` 旧全量日志中 `TBROK: Could not set new child to same PID as the old one!`。该用例通过写 `/proc/sys/kernel/ns_last_pid` 让新进程复用旧 PID，再验证旧 pidfd 不会错误指向新进程。
+
+**根因：** 为避免 fork 压力下过早复用导致重复 TID，`tid_alloc()` 走单调 `alloc_fresh()`，且 `TidHandle::release()` 不再回收到普通 free-list。这保证了普通路径稳定，但也让 `set_ns_last_pid(old_pid - 1)` 对已经释放且小于当前水位的 PID 没有效果。
+
+**修复：** 保留普通 `tid_alloc()` 单调递增语义；释放 PID/TID 时只在 bitmap 中标记可复用，不增长 `recycled Vec`；`set_ns_last_pid()` 对已释放目标 ID 设置一次性 hint，下一次 `alloc_fresh()` 消费该 hint 后立即清除。这样只满足显式 sysctl 复用，不恢复普通早期复用，也避免长跑时普通 free-list 常驻增长。
+
+**验证：**
+- Docker `make rv64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅
+- Docker `make la64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅
+- rv64 heap_trace focused LTP：`pidfd_open01,pidfd_open02,pidfd_open03,pidfd_open04,pidfd_send_signal01,pidfd_send_signal02,pidfd_send_signal03` musl/glibc 全部 0 failure / 0 broken；`pidfd_send_signal03` 从旧 TBROK 恢复为 `Did not send signal to wrong process with same PID!` TPASS
+- la64 heap_trace focused LTP：同组 musl/glibc 全部 0 failure / 0 broken，`pidfd_send_signal03` TPASS
+- 双架构 focused 日志中未出现 `PANIC`、`KERNEL EXCEPTION`、`HEAP OOM`、`Bad address`、`Unsupported syscall`、`TFAIL`、`TBROK`；heap stats 显示 `zpcb=0`、`stale=0`
+
 ### 修正 fchdir 权限与 getcwd 物理路径重建
 
 **涉及文件：**

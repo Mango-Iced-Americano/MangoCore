@@ -13,19 +13,18 @@ pub struct RecycleAllocator {
     recycled: Vec<usize>,
     /// O(1) membership bitmap for `recycled`.
     recycled_flags: Vec<bool>,
+    /// One-shot reuse request from `/proc/sys/kernel/ns_last_pid`.
+    fresh_reuse_hint: Option<usize>,
 }
 
 impl Clone for RecycleAllocator {
     fn clone(&self) -> Self {
-        let mut cloned = Self {
+        Self {
             current: self.current,
             recycled: self.recycled.clone(),
-            recycled_flags: Vec::new(),
-        };
-        for &id in self.recycled.iter() {
-            cloned.mark_recycled(id, true);
+            recycled_flags: self.recycled_flags.clone(),
+            fresh_reuse_hint: self.fresh_reuse_hint,
         }
-        cloned
     }
 }
 
@@ -38,27 +37,35 @@ impl RecycleAllocator {
             // 初始化为空向量
             recycled: Vec::new(),
             recycled_flags: Vec::new(),
+            fresh_reuse_hint: None,
         }
     }
     /// 分配一个新的id
     pub fn alloc(&mut self) -> usize {
         // 从回收的id中取出一个，如果没有则分配一个新的
-        if let Some(id) = self.recycled.pop() {
-            self.mark_recycled(id, false);
-            id
-        } else {
-            // 当前分配的id数量加1
-            self.current += 1;
-            let id = self.current - 1;
-            self.ensure_flag_capacity(id);
-            // 返回分配的id号
-            id
+        while let Some(id) = self.recycled.pop() {
+            if self.is_recycled(id) {
+                self.mark_recycled(id, false);
+                return id;
+            }
         }
+        // 当前分配的id数量加1
+        self.current += 1;
+        let id = self.current - 1;
+        self.ensure_flag_capacity(id);
+        // 返回分配的id号
+        id
     }
     /// 分配一个新的id，不立即复用已回收id。
     ///
     /// 用户可见 pid/tid 过早复用会让并发创建线程的测试观察到重复 TID。
     pub fn alloc_fresh(&mut self) -> usize {
+        if let Some(id) = self.fresh_reuse_hint.take() {
+            if id < self.current && self.is_recycled(id) {
+                self.mark_recycled(id, false);
+                return id;
+            }
+        }
         self.current += 1;
         let id = self.current - 1;
         self.ensure_flag_capacity(id);
@@ -72,11 +79,11 @@ impl RecycleAllocator {
         if next >= self.current {
             self.current = next;
             self.ensure_flag_capacity(next);
+            self.fresh_reuse_hint = None;
             return;
         }
-        if let Some(pos) = self.recycled.iter().position(|id| *id == next) {
-            let id = self.recycled.remove(pos);
-            self.recycled.push(id);
+        if self.is_recycled(next) {
+            self.fresh_reuse_hint = Some(next);
         }
     }
     /// 回收一个id
@@ -92,6 +99,12 @@ impl RecycleAllocator {
         // 将id回收，放入回收向量中
         self.mark_recycled(id, true);
         self.recycled.push(id);
+    }
+    /// Mark an ID allocated by `alloc_fresh()` as reusable only by an explicit
+    /// `ns_last_pid` hint, without growing the normal free-list.
+    pub fn release_fresh_id(&mut self, id: usize) {
+        assert!(id < self.current);
+        self.mark_recycled(id, true);
     }
     /// 获取已经分配的id数量
     pub fn get_allocated(&self) -> usize {
@@ -126,9 +139,9 @@ pub struct TidHandle(pub usize, AtomicBool);
 impl TidHandle {
     pub fn release(&self) {
         if !self.1.swap(true, Ordering::AcqRel) {
-            // tid_alloc() uses alloc_fresh() to avoid early PID/TID reuse.
-            // Recycling here would only grow an unused global free-list and
-            // make long fork/wait runs pay an increasing dealloc scan cost.
+            // Normal tid_alloc() remains monotonic, but ns_last_pid needs to
+            // reuse a released PID on explicit request.
+            TID_ALLOCATOR.lock().release_fresh_id(self.0);
         }
     }
 
