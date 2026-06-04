@@ -1022,7 +1022,7 @@ fn shm_usage_snapshot(registry: &ShmRegistry) -> LinuxShmUsageInfo {
     LinuxShmUsageInfo {
         used_ids: registry.segments.len() as i32,
         shm_tot: registry.total_pages(),
-        shm_rss: registry.total_pages(),
+        shm_rss: 0,
         shm_swp: 0,
         swap_attempts: 0,
         swap_successes: 0,
@@ -1033,7 +1033,10 @@ fn shmctl_copy_stat(shmid: i32, cmd: usize, buf: usize) -> isize {
     let (real_id, ds) = {
         let registry = SHM_REGISTRY.lock();
         let id = if cmd == SHM_STAT || cmd == SHM_STAT_ANY {
-            match registry.id_by_index(shmid) {
+            let id = registry
+                .id_by_index(shmid)
+                .or_else(|| registry.segments.contains_key(&shmid).then_some(shmid));
+            match id {
                 Some(id) => id,
                 None => return EINVAL,
             }

@@ -4,6 +4,20 @@
 
 ## 2026-06-04
 
+### 修复 shmctl04 的 SHM_STAT_ANY shmid/index 兼容
+
+**涉及文件：**
+- `os/src/syscall/process/ipc.rs` — `SHM_STAT/SHM_STAT_ANY` 查询先按现有 dense index 兼容 `SHM_INFO` 枚举，再允许传入值本身作为现存 shmid；对齐 Linux `ipc_obtain_object_idr()` 接受 full id 并映射到 ipc 槽位的行为，避免 `shmctl04` 用 `shmctl(shmid, SHM_STAT_ANY, ...)` 探测时误判不支持
+- `os/src/syscall/process/ipc.rs` — `SHM_INFO.shm_rss` 不再等同于预留段总页数；当前未实现真实 SysV SHM resident page 统计时返回 0，避免未 attach/未 fault 的段被算作 RSS
+
+**验证：**
+- `docker compose exec --workdir /app/os os-dev make rv64-only EXTRA_FEATURES=heap_trace` ✅，132 个既有 warning，无新增 error
+- `docker compose exec --workdir /app/os os-dev make la64-only EXTRA_FEATURES=heap_trace` ✅，116 个既有 warning，无新增 error
+- rv64 heap_trace focused `shmctl04`：glibc/musl 均 `executed=1 passed=1 failed=0`；`SHM_INFO returned valid index 0 maps to shmid 1/2`，`shm_rss=0`、`shm_tot=1` 均 TPASS；未出现 `TFAIL/TBROK/TCONF/PANIC/KERNEL EXCEPTION/HEAP OOM/Bad address/Unsupported syscall`
+- la64 heap_trace focused `shmctl04`：glibc/musl 均 `executed=1 passed=1 failed=0`；结果同 rv64；未出现 `TFAIL/TBROK/TCONF/PANIC/KERNEL EXCEPTION/HEAP OOM/Bad address/Unsupported syscall`
+
+**备注：** 诊断确认失败路径为 `shmget(...)->shmid=1/2` 后，LTP 直接调用 `SHM_STAT_ANY` 且传入真实 shmid；旧实现只按 `BTreeMap` 第 n 个元素解释 index，单对象时 `index=1/2` 返回 `EINVAL`，导致 TCONF。`semctl_copy_stat`、`msgctl` 已有类似 actual-id fallback，本轮补齐 shm 路径。第二阶段 focused 暴露 `shm_rss = total_pages` 也不符合 Linux 语义：`shm_rss` 是驻留页，不是创建段的预留页。
+
 ### 收敛 kill13 配置型 TCONF
 
 **涉及文件：**
