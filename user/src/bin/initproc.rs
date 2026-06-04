@@ -1118,8 +1118,6 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "sched_tc0" | "sched_tc1" | "sched_tc6" => Some("requires LTP KERNEL environment"),
         "sem_comm" => Some("requires IPC namespace isolation"),
         "semctl08" => Some("requires semid64_ds time_high ABI"),
-        "semctl09" => Some("requires complete SEM_STAT_ANY compatibility"),
-        "semget05" => Some("requires /proc/sys/kernel/sem"),
         "send02" | "sendmsg01" | "sendmmsg01" | "sendmmsg02" | "recvmmsg01" => {
             Some("network send/recv message tests skipped in LTP syscall scan")
         }
@@ -1187,8 +1185,9 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "process_madvise01" => Some("requires swap-backed process_madvise environment"),
         "pt_test" => Some("requires Intel perf events"),
         "proc_sched_rt01" => Some("requires procfs/sysctl RT scheduler config"),
-        "prctl03" | "prctl04" | "prctl05" | "prctl06" | "prctl06_execve" | "prctl07"
-        | "prctl10" => Some("requires unsupported prctl/procfs capability"),
+        "prctl04" | "prctl05" | "prctl06" | "prctl06_execve" | "prctl07" | "prctl10" => {
+            Some("requires unsupported prctl/procfs capability")
+        }
         "verify_caps_exec" => Some("requires complete POSIX file capability support"),
         "vfork" => Some("requires ptrace capability environment"),
         "vfork_freeze.sh" => Some("freezer/cgroup helper skipped in LTP syscall scan"),

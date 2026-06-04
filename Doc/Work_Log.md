@@ -4,6 +4,23 @@
 
 ## 2026-06-04
 
+### 放开已验证通过的 prctl/sem LTP broad skip
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — 从 inline broad-skip 表移除 `prctl03`、`semctl09`、`semget05`，保留 `prctl04/05/06/06_execve/07/10` 与 `semctl08` 等未覆盖项
+- `Doc/Work_Log.md` — 记录本轮 skip 表同步
+
+**验证：**
+- 修改前 rv64 heap_trace focused LTP `prctl03,semctl09,semget05`：musl/glibc 分别为 `prctl03` 6/6 TPASS、`semctl09` 16/16 TPASS、`semget05` 1/1 TPASS，summary 均 `failed 0 / broken 0 / skipped 0`
+- 修改前 la64 heap_trace focused LTP 同一 include：musl/glibc 同样全部 TPASS，summary 均 `failed 0 / broken 0 / skipped 0`
+- `docker compose exec --workdir /app/os os-dev make rv64-only EXTRA_FEATURES=heap_trace` ✅
+- 修改后 rv64 focused LTP 同一 include：musl/glibc 均全部 TPASS，summary 均 `failed 0 / broken 0 / skipped 0`
+- `docker compose exec --workdir /app/os os-dev make la64-only EXTRA_FEATURES=heap_trace` ✅
+- 修改后 la64 focused LTP 同一 include：musl/glibc 均全部 TPASS，summary 均 `failed 0 / broken 0 / skipped 0`
+- 修改后双架构 focused 日志未出现 `TFAIL/TBROK/PANIC/KERNEL EXCEPTION/HEAP OOM/Test timeouted/Bad address/Unsupported syscall`
+
+**备注：** 本次只解除已由当前代码验证通过的非 fs/net broad-skip 项；依赖 procfs/capability/测试块设备或未实现 ABI 的 prctl/sem 用例仍保持过滤。
+
 ### 收敛 rv64 musl 浮点用户态测试差异
 
 **涉及文件：**
