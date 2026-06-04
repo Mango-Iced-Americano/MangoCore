@@ -4,6 +4,23 @@
 
 ## 2026-06-04
 
+### 放开 clock_gettime04 非 fs/net LTP 用例
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — 从 inline broad-skip 表移除 `clock_gettime04`；保留 `clock_gettime03/clock_nanosleep03` 的 time namespace 配置跳过
+- `Doc/Work_Log.md` — 记录本轮非 fs/net broad-skip 复扫与验证
+
+**验证：**
+- 修改前 rv64 heap_trace focused LTP `acct01,acct02,clock_gettime04,profil01,prctl04,prctl10,userfaultfd01`：`clock_gettime04` 在 musl/glibc 均 6/6 TPASS；`acct*`、`prctl04/10`、`userfaultfd01` 为 TCONF；`profil01` 为 musl TCONF、glibc TPASS
+- 修改前 la64 heap_trace focused LTP 同一 include：`clock_gettime04` 在 musl/glibc 均 6/6 TPASS；`profil01` 在 glibc 仍 TFAIL；其余候选为 TCONF
+- `docker compose exec --workdir /app/os os-dev make rv64-only EXTRA_FEATURES=heap_trace` ✅
+- 修改后 rv64 focused LTP `clock_gettime04`：musl/glibc 均 6/6 TPASS，summary 均 `failed 0 / broken 0 / skipped 0`
+- `docker compose exec --workdir /app/os os-dev make la64-only EXTRA_FEATURES=heap_trace` ✅
+- 修改后 la64 focused LTP `clock_gettime04`：musl/glibc 均 6/6 TPASS，summary 均 `failed 0 / broken 0 / skipped 0`
+- 修改后双架构 focused 日志未出现 `TFAIL/TBROK/PANIC/KERNEL EXCEPTION/HEAP OOM/Test timeouted/Bad address/Unsupported syscall`
+
+**备注：** 本次只释放双架构双 libc 均稳定 TPASS 的 `clock_gettime04`；`profil01` 因 la64 glibc 仍失败继续保留，避免引入 full LTP 回归。
+
 ### 放开已验证通过的 prctl/sem LTP broad skip
 
 **涉及文件：**

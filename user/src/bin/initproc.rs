@@ -1091,7 +1091,6 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "chown04" => Some("filesystem permission chown edge case skipped in LTP syscall scan"),
         "cleanup_lvm.sh" => Some("filesystem LVM cleanup helper skipped in LTP syscall scan"),
         "clock_gettime03" => Some("requires time namespace kernel config"),
-        "clock_gettime04" => Some("performance-sensitive clock_gettime threshold case skipped"),
         "clock_nanosleep03" => Some("requires time namespace kernel config"),
         "copy_file_range03" => {
             Some("filesystem timestamp copy_file_range edge case skipped in LTP syscall scan")
