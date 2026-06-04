@@ -59,10 +59,9 @@ pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
     // 握手未完成，进入等待队列等待状态变化
     if let Some(wait_queue) = socket.connect_wait_queue() {
         if is_nonblock {
-            match socket.try_connect() {
-                Ok(n) => n as isize,
-                Err(e) => -(e as isize),
-            }
+            // Linux 语义：非阻塞 connect 返回 EINPROGRESS（不是 EAGAIN）
+            // 应用通过 poll(EPOLLOUT) 等待连接完成
+            return -(SyscallErr::EINPROGRESS as isize);
         } else {
             WaitQueue::wait_until_interruptible(wait_queue, || match socket.try_connect() {
                 Ok(n) => Some(n as isize),
