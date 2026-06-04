@@ -4,6 +4,21 @@
 
 ## 2026-06-04
 
+### 补齐 epoll_pwait2 最小兼容
+
+**涉及文件：**
+- `os/src/fs/eventpoll.rs` — 新增 `sys_epoll_pwait2()`，读取用户 `timespec` timeout 并转换为现有 epoll wait 的毫秒 timeout；校验负数/非法 `tv_nsec`
+- `os/src/syscall/syscall_id.rs` / `os/src/syscall/mod.rs` — 接入通用 syscall 号 `epoll_pwait2(441)`、名称和分发
+
+**验证：**
+- Docker `make rv64-kernel-build-only` ✅
+- Docker `make la64-kernel-build-only` ✅
+- rv64 heap_trace focused LTP：`epoll_pwait01,epoll_pwait02,epoll_pwait03,epoll_pwait04,epoll_pwait05` 全部 `FAIL LTP CASE ... : 0`
+- la64 heap_trace focused LTP：同上，全部 `FAIL LTP CASE ... : 0`
+- 双架构 focused 日志中 `PANIC=0`、`KERNEL EXCEPTION=0`、`HEAP OOM=0`、`Test timeouted=0`、`Unsupported syscall=0`、`TFAIL=0`、`TBROK=0`、`TCONF=0`
+
+**备注：** `epoll_pwait05` 由 syscall 441 未实现导致的纯 TCONF 变为 3 个非法 timespec 子项 TPASS；实际等待逻辑复用既有 `sys_epoll_pwait()`。
+
 ### 补齐 execveat 最小兼容
 
 **涉及文件：**

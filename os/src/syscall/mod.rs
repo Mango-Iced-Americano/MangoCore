@@ -8,7 +8,9 @@ mod syscall_id;
 pub mod utils;
 
 use crate::fs::eventfd::sys_eventfd2;
-use crate::fs::eventpoll::{sys_epoll_create1, sys_epoll_ctl, sys_epoll_pwait};
+use crate::fs::eventpoll::{
+    sys_epoll_create1, sys_epoll_ctl, sys_epoll_pwait, sys_epoll_pwait2,
+};
 use crate::fs::iov::IOVec;
 use crate::fs::timerfd::{
     sys_timerfd_create, sys_timerfd_gettime, sys_timerfd_settime, TimerFdSpec,
@@ -33,6 +35,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_EPOLL_CREATE1 => "epoll_create1",
         SYSCALL_EPOLL_CTL => "epoll_ctl",
         SYSCALL_EPOLL_PWAIT => "epoll_pwait",
+        SYSCALL_EPOLL_PWAIT2 => "epoll_pwait2",
         SYSCALL_OPEN => "open",
         SYSCALL_GET_TIME => "get_time",
         SYSCALL_GETCWD => "getcwd",
@@ -312,6 +315,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[1] as *mut crate::fs::eventpoll::EpollUserEvent,
             args[2] as isize,
             args[3] as isize,
+            args[4] as *const crate::task::signal::Signals,
+        ),
+        SYSCALL_EPOLL_PWAIT2 => sys_epoll_pwait2(
+            args[0],
+            args[1] as *mut crate::fs::eventpoll::EpollUserEvent,
+            args[2] as isize,
+            args[3] as *const TimeSpec,
             args[4] as *const crate::task::signal::Signals,
         ),
         SYSCALL_FCNTL => sys_fcntl(args[0], args[1] as u32, args[2]),

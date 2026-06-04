@@ -701,3 +701,36 @@ pub fn sys_epoll_pwait(
 
     out.len() as isize
 }
+
+pub fn sys_epoll_pwait2(
+    epfd: usize,
+    events: *mut EpollUserEvent,
+    maxevents: isize,
+    timeout: *const TimeSpec,
+    sigmask: *const Signals,
+) -> isize {
+    let timeout_ms = if timeout.is_null() {
+        -1
+    } else {
+        let task = current_task().unwrap();
+        let token = task.get_user_token();
+        let ts = match UserPtr::new(timeout).read(token) {
+            Ok(ts) => ts,
+            Err(errno) => return errno,
+        };
+        if ts.tv_sec > isize::MAX as usize || ts.tv_nsec >= 1_000_000_000 {
+            return -(SyscallErr::EINVAL as isize);
+        }
+        let sec_ms = match (ts.tv_sec as isize).checked_mul(1000) {
+            Some(v) => v,
+            None => return -(SyscallErr::EINVAL as isize),
+        };
+        let nsec_ms = ((ts.tv_nsec as isize) + 999_999) / 1_000_000;
+        match sec_ms.checked_add(nsec_ms) {
+            Some(v) => v,
+            None => return -(SyscallErr::EINVAL as isize),
+        }
+    };
+
+    sys_epoll_pwait(epfd, events, maxevents, timeout_ms, sigmask)
+}
