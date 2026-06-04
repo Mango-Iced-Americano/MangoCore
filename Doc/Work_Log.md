@@ -4,6 +4,28 @@
 
 ## 2026-06-04
 
+### 修正 fchdir 权限与 getcwd 物理路径重建
+
+**涉及文件：**
+- `os/src/syscall/fs.rs` — `getcwd()` 优先从 cwd inode 重建物理路径并刷新缓存；`chdir/fchdir` 成功后同步 cwd 路径；`fchdir()` 补齐目录 search 权限检查
+- `os/src/fs/vfs/mount.rs` — 为 MountFSInode 增加 bounded parent/name hint；`absolute_path()` 跨挂载根时先跳到挂载点再继续向上，避免把挂载根 inode 当成普通目录项反查
+- `os/src/fs/vfs/dentry_cache.rs` — 增加 parent entries 快照；清理 parent cache 时返回被移除的 Arc，避免持锁 drop
+- `os/src/fs/ext4/ext4fs.rs` — 为 ext4 inode 补齐 `get_entry_name()`，支持路径反查 fallback
+- `Doc/Work_Log.md` — 记录本轮适配和验证结果
+
+**问题：** LTP `fchdir03` 报 `fchdir() succeeded unexpectedly`；`getcwd03` 在 symlink cwd 场景下返回逻辑路径而不是物理路径，导致 musl/glibc 均失败。
+
+**根因：** `sys_fchdir()` 只校验 fd 是否为目录，缺少 execute/search 权限判断；cwd 路径缓存过度依赖字符串路径。`getcwd03` 则暴露了 `MountFSInode::absolute_path()` 的 mount crossing 语义错误：遇到 `/tmp` tmpfs 挂载根时，代码直接在挂载点 inode 里查 tmpfs root inode 的名字，必然 `ENOENT`，最终退回 symlink 路径缓存。
+
+**修复：** `fchdir()` 按当前 fsuid/fsgid 校验目录 search 权限，失败返回 `EACCES`；`getcwd/chdir/fchdir` 改为尽量使用 inode 物理路径。VFS 路径反查增加 bounded hint 与 ext4 fallback，并在 `absolute_path()` 中对挂载根执行“挂载根 → 挂载点 dentry → 父目录”切换，路径组件只由真实父目录项生成。
+
+**验证：**
+- Docker `make rv64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅
+- Docker `make la64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅
+- rv64 heap_trace focused LTP `getcwd01,getcwd02,getcwd03,fchdir01,fchdir02,fchdir03`：`fchdir01/02/03`、`getcwd01`、`getcwd03` musl/glibc 均 0 failure；glibc `getcwd02` 3/3 TPASS；musl `getcwd02` 仍为既有 `realpath() failed: EINVAL` TBROK
+- la64 heap_trace focused LTP 同组：musl/glibc 全部 0 failure / 0 broken
+- 日志 grep 未发现 `PANIC`、`KERNEL EXCEPTION`、`HEAP OOM`、`Bad address`、`Unsupported syscall`；唯一异常命中为 rv64 musl `getcwd02` 既有 `realpath()` TBROK
+
 ### 限制 la64 kernel stack cache 并修正 MemAvailable 估算
 
 **涉及文件：**

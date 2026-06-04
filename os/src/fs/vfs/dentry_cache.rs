@@ -136,22 +136,40 @@ impl DentryCache {
 
     /// Invalidate ALL cached children of a given parent inode.
     /// Used when removing a directory (rmdir).
-    pub fn clear_parent(&mut self, parent_ino: usize) {
+    #[must_use]
+    pub fn clear_parent(&mut self, parent_ino: usize) -> Vec<Arc<MountFSInode>> {
         let keys_to_remove: Vec<DentryKey> = self
             .map
             .keys()
             .filter(|k| k.parent_ino == parent_ino)
             .cloned()
             .collect();
+        let mut evicted = Vec::new();
         for key in keys_to_remove {
             if let Some(pos) = self.order.iter().position(|k| *k == key) {
                 self.order.remove(pos);
             }
-            self.map.remove(&key);
+            if let Some(entry) = self.map.remove(&key) {
+                evicted.push(entry.node);
+            }
         }
+        evicted
     }
 
-/// Clear ALL entries. Used during umount.
+    /// Return cached children under `parent_ino`.
+    ///
+    /// The caller can inspect metadata after releasing the cache lock; this
+    /// keeps reverse path reconstruction from holding the dentry cache across
+    /// filesystem callbacks.
+    pub fn entries_for_parent(&self, parent_ino: usize) -> Vec<(String, Arc<MountFSInode>)> {
+        self.map
+            .iter()
+            .filter(|(key, _)| key.parent_ino == parent_ino)
+            .map(|(key, entry)| (key.name.clone(), entry.node.clone()))
+            .collect()
+    }
+
+    /// Clear ALL entries. Used during umount.
     #[must_use]
     pub fn clear_all(&mut self) -> Vec<Arc<MountFSInode>> {
         self.order.clear();

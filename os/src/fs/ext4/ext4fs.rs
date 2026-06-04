@@ -1407,6 +1407,49 @@ impl IndexNode for layout::Ext4OSInode {
         }
         Ok(result)
     }
+
+    fn get_entry_name(&self, ino: InodeId) -> Result<String, SyscallErr> {
+        {
+            let mut stale = Vec::new();
+            let children = self.children.lock();
+            for (name, weak) in children.iter() {
+                match weak.upgrade() {
+                    Some(child) => {
+                        if child.metadata().map(|m| m.inode_id).ok() == Some(ino) {
+                            return Ok(name.clone());
+                        }
+                    }
+                    None => stale.push(name.clone()),
+                }
+            }
+            drop(children);
+            if !stale.is_empty() {
+                let mut children = self.children.lock();
+                for name in stale {
+                    children.remove(&name);
+                }
+            }
+        }
+
+        let guard = self.inode.lock();
+        if !guard.inode.is_dir() {
+            return Err(SyscallErr::ENOTDIR);
+        }
+        let parent_ino = guard.inode_num;
+        drop(guard);
+
+        let entries = self
+            .ext4fs
+            .dir_get_entries(parent_ino)
+            .map_err(|_| SyscallErr::EIO)?;
+        for entry in entries {
+            let name = entry.get_name();
+            if entry.inode as InodeId == ino && name != "." && name != ".." {
+                return Ok(name);
+            }
+        }
+        Err(SyscallErr::ENOENT)
+    }
 }
 
 impl core::fmt::Debug for Ext4FileSystem {

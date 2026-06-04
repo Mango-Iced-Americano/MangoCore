@@ -806,9 +806,19 @@ fn __openat(dirfd: usize, path: &str) -> Result<vfs::File, isize> {
 pub fn sys_getcwd(buf: usize, size: usize) -> isize {
     let task = current_task().unwrap();
     let fs_ref = task.process.fs();
-    let fs_lock = fs_ref.lock();
-    let working_dir = fs_lock.working_path.clone();
-    drop(fs_lock);
+    let (cwd_inode, cached_path) = {
+        let fs_lock = fs_ref.lock();
+        (fs_lock.working_inode.inode.clone(), fs_lock.working_path.clone())
+    };
+    let working_dir = match cwd_inode.absolute_path() {
+        Ok(path) => {
+            if path != cached_path {
+                fs_ref.lock().working_path = path.clone();
+            }
+            path
+        }
+        Err(_) => cached_path,
+    };
     // ERANGE must be checked BEFORE buffer validation:
     // Linux returns ERANGE if buffer is too small, even if buf is partially invalid
     if working_dir.len() + 1 > size {
@@ -2468,10 +2478,14 @@ pub fn sys_chdir(path: *const u8) -> isize {
         },
         Err(errno) => return errno,
     };
+    let working_path = target
+        .inode
+        .absolute_path()
+        .unwrap_or_else(|_| normalize_cwd(&old_path, &path));
     let fs_ref = task.process.fs();
     let mut lock = fs_ref.lock();
     lock.working_inode = Arc::new(target);
-    lock.working_path = normalize_cwd(&old_path, &path);
+    lock.working_path = working_path;
     SUCCESS
 }
 
@@ -2488,15 +2502,25 @@ pub fn sys_fchdir(fd: usize) -> isize {
     }
     let inode = file.inode.clone();
     drop(fd_table);
+    let meta = match inode.metadata() {
+        Ok(meta) => meta,
+        Err(e) => return -(e as isize),
+    };
+    let (uid, gid) = open_subject_ids();
+    if !has_search_access(&meta, uid, gid) {
+        return EACCES;
+    }
+    let working_path = inode.absolute_path().ok();
     let file = match vfs::File::new(inode, vfs::FileFlags::O_RDONLY) {
         Ok(f) => f,
         Err(e) => return -(e as isize),
     };
     let fs_ref = task.process.fs();
     let mut lock = fs_ref.lock();
-    let old_path = lock.working_path.clone();
     lock.working_inode = Arc::new(file);
-    // fchdir: 路径不变 (无法确定 fd 对应的路径名)
+    if let Some(path) = working_path {
+        lock.working_path = path;
+    }
     SUCCESS
 }
 
