@@ -237,6 +237,8 @@ struct RuntimeConfig {
     ltp_runner: LtpRunner,
     /// LTP suite 列表（逗号分隔），仅 Suite 模式使用
     ltp_suites: Vec<String>,
+    /// 配置来源路径（传递给 ltprunner --conf）
+    conf_source: Option<Vec<u8>>,
     /// 诊断模式：每完成一组测试后打印资源统计标记
     diag: bool,
 }
@@ -300,6 +302,7 @@ impl RuntimeConfig {
             ltp_libc: LtpLibc::Both,
             ltp_runner: LtpRunner::Inline,
             ltp_suites: Vec::new(),
+            conf_source: None,
             diag: false,
         }
     }
@@ -515,6 +518,7 @@ fn load_runtime_config() -> RuntimeConfig {
     } else {
         "<default>"
     };
+    cfg.conf_source = Some(format!("{}\0", source).into_bytes());
     println!(
         "[initproc] config source={} mode={} mask=0x{:03X} ltp_runner={}",
         source,
@@ -1412,6 +1416,7 @@ fn run_ltp_suite_runner(
     libc_root: &str,
     libc_suffix: &str,
     timeout_secs: u64,
+    conf_source: Option<&[u8]>,
 ) {
     let ltp_root = format!("{}/ltp\0", libc_root);
 
@@ -1427,7 +1432,7 @@ fn run_ltp_suite_runner(
         let _ = setpgid(0, 0);
 
         let ltprunner_path = "/ltprunner\0";
-        let conf_path_val = "/os_test.conf\0";
+        let conf_path_val: &[u8] = conf_source.unwrap_or(b"/os_test.conf\0");
         let libc_val = format!("{}\0", libc_suffix);
         let ltproot_val = format!("{}\0", ltp_root);
         let timeout_val = format!("{}\0", timeout_secs.saturating_sub(50));
@@ -1435,7 +1440,7 @@ fn run_ltp_suite_runner(
         let argv: [*const u8; 14] = [
             ltprunner_path.as_ptr(),
             "--conf\0".as_ptr(),
-            conf_path_val.as_ptr(),
+            conf_path_val.as_ptr() as *const u8,
             "--libc\0".as_ptr(),
             libc_val.as_ptr(),
             "--ltproot\0".as_ptr(),
@@ -1523,10 +1528,10 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
         if group_name == "ltp" && cfg.ltp_runner == LtpRunner::Suite {
             let libc = cfg.ltp_libc;
             if libc == LtpLibc::Glibc || libc == LtpLibc::Both {
-                run_ltp_suite_runner(environ, "/glibc", "glibc", timeout_secs);
+                run_ltp_suite_runner(environ, "/glibc", "glibc", timeout_secs, cfg.conf_source.as_deref());
             }
             if libc == LtpLibc::Musl || libc == LtpLibc::Both {
-                run_ltp_suite_runner(environ, "/musl", "musl", timeout_secs);
+                run_ltp_suite_runner(environ, "/musl", "musl", timeout_secs, cfg.conf_source.as_deref());
             }
         } else if group_name == "ltp" && cfg.ltp_runner == LtpRunner::Inline {
             // 本地调试路径：LTP 使用内联枚举，支持 include/exclude/from。
