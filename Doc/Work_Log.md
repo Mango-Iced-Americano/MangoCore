@@ -4,6 +4,23 @@
 
 ## 2026-06-04
 
+### 修复 splice stream fd 阻塞语义
+
+**涉及文件：**
+- `os/src/syscall/fs.rs` — `sys_splice()` 对无 offset 的 stream fd 读写复用 inode read/write wait queue；阻塞模式下仅对 `EAGAIN` 睡眠重试，非阻塞 fd 或 `SPLICE_F_NONBLOCK` 保持立即返回
+- `os/src/syscall/fs.rs` — 拆出通用 `SPLICE_VALID_FLAGS`，让 `splice`/`vmsplice` 共用 Linux 可见 flag 校验
+
+**验证：**
+- Docker `make rv64-kernel-build-only` ✅
+- Docker `make la64-kernel-build-only` ✅
+- Docker `make rv64-only EXTRA_FEATURES=heap_trace` ✅
+- Docker `make la64-only EXTRA_FEATURES=heap_trace` ✅
+- rv64 heap_trace focused LTP：`splice02` 1 个子项 TPASS，`FAIL LTP CASE splice02 : 0`
+- la64 heap_trace focused LTP：`splice02` 1 个子项 TPASS，`FAIL LTP CASE splice02 : 0`
+- 双架构 focused 日志中未出现 `EAGAIN/EWOULDBLOCK` 失败、`PANIC`、`KERNEL EXCEPTION`、`HEAP OOM`、`TFAIL`、`TBROK`
+
+**备注：** LTP `splice02` 的父子进程通过 pipe 传 1MiB 数据；子进程可能先 `splice()` 读空 pipe，阻塞 fd 必须睡眠等待父进程写入，而不是直接返回 pipe 层的 `EAGAIN`。
+
 ### 补齐 vmsplice pipe 最小兼容
 
 **涉及文件：**

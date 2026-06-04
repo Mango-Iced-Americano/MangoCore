@@ -544,11 +544,14 @@ pub fn sys_splice(
     fd_out: usize,
     off_out: *mut usize,
     len: usize,
-    _flags: u32,
+    flags: u32,
 ) -> isize {
+    if flags & !SPLICE_VALID_FLAGS != 0 {
+        return EINVAL;
+    }
     let task = current_task().unwrap();
     let files_ref = task.process.files();
-        let fd_table = files_ref.lock();
+    let fd_table = files_ref.lock();
     let in_file = match fd_table.get_file(fd_in) {
         Ok(file) => match file.try_clone() {
             Some(f) => f,
@@ -594,6 +597,8 @@ pub fn sys_splice(
     };
 
     let mut left_bytes = len;
+    let nonblock =
+        flags & SPLICE_F_NONBLOCK != 0 || in_file.is_nonblock() || out_file.is_nonblock();
     loop {
         let write_buffer = match buffer_ptr {
             Some(buffer_ptr) => buffer_ptr,
@@ -615,9 +620,9 @@ pub fn sys_splice(
                         *off_val += n;
                         n
                     } else {
-                        match in_file.read(buffer.as_mut_slice()) {
+                        match splice_read_stream(&in_file, buffer.as_mut_slice(), nonblock) {
                             Ok(n) => n,
-                            Err(e) => return -(e as isize),
+                            Err(errno) => return errno,
                         }
                     }
                 };
@@ -647,9 +652,9 @@ pub fn sys_splice(
                 *off_val += n;
                 n
             } else {
-                match out_file.write(write_buffer) {
+                match splice_write_stream(&out_file, write_buffer, nonblock) {
                     Ok(n) => n,
-                    Err(e) => return -(e as isize),
+                    Err(errno) => return errno,
                 }
             }
         };
@@ -677,6 +682,70 @@ pub fn sys_splice(
     }
     info!("[sys_sendfile] send bytes: {}", send_size);
     send_size as isize
+}
+
+fn splice_read_stream(
+    file: &vfs::File,
+    buf: &mut [u8],
+    nonblock: bool,
+) -> Result<usize, isize> {
+    let mut read_once = || match file.read(buf) {
+        Ok(n) => n as isize,
+        Err(e) => -(e as isize),
+    };
+    let ret = if nonblock {
+        read_once()
+    } else if let Some(wq) = file.inode.read_wait_queue() {
+        match WaitQueue::wait_until_interruptible(wq, || {
+            let ret = read_once();
+            if ret == -(SyscallErr::EAGAIN as isize) {
+                None
+            } else {
+                Some(ret)
+            }
+        }) {
+            WaitResult::Ready(n) => n,
+            WaitResult::Interrupted => -(SyscallErr::ERESTART as isize),
+            WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
+        }
+    } else {
+        read_once()
+    };
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as usize)
+    }
+}
+
+fn splice_write_stream(file: &vfs::File, buf: &[u8], nonblock: bool) -> Result<usize, isize> {
+    let mut write_once = || match file.write(buf) {
+        Ok(n) => n as isize,
+        Err(e) => -(e as isize),
+    };
+    let ret = if nonblock {
+        write_once()
+    } else if let Some(wq) = file.inode.write_wait_queue() {
+        match WaitQueue::wait_until_interruptible(wq, || {
+            let ret = write_once();
+            if ret == -(SyscallErr::EAGAIN as isize) {
+                None
+            } else {
+                Some(ret)
+            }
+        }) {
+            WaitResult::Ready(n) => n,
+            WaitResult::Interrupted => -(SyscallErr::ERESTART as isize),
+            WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
+        }
+    } else {
+        write_once()
+    };
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as usize)
+    }
 }
 
 /// # Warning
@@ -1085,8 +1154,8 @@ const SPLICE_F_MOVE: u32 = 0x01;
 const SPLICE_F_NONBLOCK: u32 = 0x02;
 const SPLICE_F_MORE: u32 = 0x04;
 const SPLICE_F_GIFT: u32 = 0x08;
-const VMSPLICE_VALID_FLAGS: u32 =
-    SPLICE_F_MOVE | SPLICE_F_NONBLOCK | SPLICE_F_MORE | SPLICE_F_GIFT;
+const SPLICE_VALID_FLAGS: u32 = SPLICE_F_MOVE | SPLICE_F_NONBLOCK | SPLICE_F_MORE | SPLICE_F_GIFT;
+const VMSPLICE_VALID_FLAGS: u32 = SPLICE_VALID_FLAGS;
 
 pub fn sys_vmsplice(fd: usize, iov: usize, iovcnt: usize, flags: u32) -> isize {
     if flags & !VMSPLICE_VALID_FLAGS != 0 {
