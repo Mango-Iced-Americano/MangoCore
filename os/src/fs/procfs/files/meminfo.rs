@@ -10,11 +10,14 @@ pub fn meminfo_content(
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
     let total_kb = crate::mm::total_memory_kbytes();
-    let free_available_kb = crate::mm::free_memory_kbytes();
-    let free_kb = free_available_kb.min(total_kb);
+    let free_frame_kb = crate::mm::free_memory_kbytes();
+    let free_kb = free_frame_kb.min(total_kb);
     let used_kb = total_kb.saturating_sub(free_kb);
 
     let (heap_free, heap_total, _au, _aa, _w) = crate::mm::heap_stats();
+    let free_available_kb = free_frame_kb
+        .saturating_add(heap_free / 1024)
+        .min(total_kb);
 
     let mut s = alloc::string::String::with_capacity(512);
     use core::fmt::Write;

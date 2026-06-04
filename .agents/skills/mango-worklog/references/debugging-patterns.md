@@ -67,6 +67,12 @@
 - 检查 TID 分配器是否有 O(n²) 查重
 - 检查物理页释放是否有线性扫描 free-list
 
+### heap_trace live 不回落但 PCB/TCB 正常
+- 先区分真实生命周期泄漏和缓存型常驻：同时看 `zpcb/stale/tcb`、heap used、free frames、对象 owner。
+- la64 需要额外检查架构特定 cache，例如 kernel stack 以 `Vec<u8>` 从 kernel heap 分配并可能被全局 cache 保留；1000 fork/futex 压力可把缓存打满，看起来像 heap leak。
+- 资源报告也要一起查：`/proc/meminfo` 的 `MemAvailable` 如果只看 free frames，可能把静态预留但空闲的 kernel heap 漏掉，导致 LTP 大内存用例误判 `TCONF`。
+- 修复模式：给大对象 cache 设置字节上限，保留小规模复用；对用户可见资源报告区分 `MemFree` 和估算型 `MemAvailable`。
+
 ## QEMU / 测试
 
 ### `os_test.conf` 修改不生效

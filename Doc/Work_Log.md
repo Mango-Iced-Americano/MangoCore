@@ -4,6 +4,23 @@
 
 ## 2026-06-04
 
+### 限制 la64 kernel stack cache 并修正 MemAvailable 估算
+
+**涉及文件：**
+- `os/src/hal/arch/loongarch64/kern_stack.rs` — 将 la64 `KernelStack` 复用 cache 从 1024 个栈改为 4MB 字节上限，避免 1000 waiter/fork 压力后常驻约 64MB kernel heap
+- `os/src/fs/procfs/files/meminfo.rs` — `MemFree` 继续报告空闲物理帧，`MemAvailable` 改为 `free frames + free kernel heap` 并封顶到 `MemTotal`，避免 la64 静态 heap 预留导致 LTP 大内存用例误判 `TCONF`
+
+**验证：**
+- 修改前 heap_trace 聚焦复测：rv64 `futex_cmp_requeue01,futex_wait05,getrusage03,getrusage04,timerfd01,timerfd_gettime01,timerfd_settime01` musl/glibc 均 0 failure
+- 修改前 la64 同组测试：futex/timerfd/getrusage04 均通过，但 `getrusage03` 因 `MemAvailable < 512MB` 进入 `TCONF`；futex 1000 waiter 后 kernel heap used 保持约 67-71MB，定位为 la64 kernel stack cache 常驻
+- Docker `make rv64-only EXTRA_FEATURES=heap_trace` ✅
+- Docker `make la64-only EXTRA_FEATURES=heap_trace` ✅
+- rv64 heap_trace focused LTP：`futex_cmp_requeue01,futex_wait05,getrusage03,getrusage04,timerfd01,timerfd_gettime01,timerfd_settime01` musl/glibc 均 0 failure；`getrusage03` 9/9 TPASS
+- la64 heap_trace focused LTP：同组 musl/glibc 均 0 failure；`getrusage03` 从 `TCONF` 恢复为 9/9 TPASS
+- 双架构 focused 日志中未出现 `PANIC`、`KERNEL EXCEPTION`、`HEAP OOM`、`TCONF`、`TFAIL`、`TBROK`；la64 futex 1000 waiter 后 heap used 从峰值约 114-116MB 回落到约 15-19MB，`zpcb/stale/tcb` 正常回落
+
+**备注：** 该问题不是 PCB/TCB 生命周期泄漏；`zpcb/stale/tcb` 均按预期回落。异常来自 la64 栈缓存策略和 `/proc/meminfo` 可用内存估算口径过窄。
+
 ### 实现 open-description 级 flock 兼容
 
 **涉及文件：**
