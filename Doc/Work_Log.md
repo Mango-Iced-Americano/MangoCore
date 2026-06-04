@@ -4,6 +4,23 @@
 
 ## 2026-06-04
 
+### 收敛 signal suite 环境项过滤
+
+**涉及文件：**
+- `user/src/bin/ltprunner.rs` — 默认过滤缺失二进制的 `rt_tgsigqueueinfo01` 与 x86_64-only 的 `signal06`
+- `user/src/bin/initproc.rs` — 同步默认过滤表与注释，避免 suite/inline 路径结果不一致
+- `Doc/Work_Log.md` — 记录本轮 signal suite 非 fs/net 扫描与验证
+- `.agents/skills/mango-worklog/references/harness-patterns.md` — 沉淀 suite 环境项过滤经验
+
+**验证：**
+- 修改前 rv64 heap_trace signal suite 扫描：glibc 19/21 PASS、musl 17/19 PASS；失败项均为环境项，`rt_tgsigqueueinfo01` 为 `command not found(127)`，`signal06` 为 `Only test on x86_64` TCONF；未出现 `PANIC/KERNEL EXCEPTION/HEAP OOM/Unsupported syscall`，heap_trace 中 `zpcb=0/stale=0/io_buf=0`
+- `docker compose exec --workdir /app/os os-dev make rv64-only EXTRA_FEATURES=heap_trace` ✅
+- `docker compose exec --workdir /app/os os-dev make la64-only EXTRA_FEATURES=heap_trace` ✅
+- rv64 heap_trace focused signal suite：glibc 19/19 PASS、musl 17/17 PASS；`rt_sigtimedwait01/rt_tgsigqueueinfo01/signal06` 与 musl-only `sigtimedwait01/sigwaitinfo01` 均显示 `skip excluded case`；无 `FAIL/TFAIL/TBROK/PANIC/HEAP OOM/Unsupported syscall`，heap_trace `zpcb=0/stale=0/io_buf=0`
+- la64 heap_trace focused signal suite：glibc 19/19 PASS、musl 17/17 PASS；新增环境项过滤生效；无 `FAIL/TFAIL/TBROK/PANIC/HEAP OOM/Unsupported syscall`，heap_trace `zpcb=0/stale=0/io_buf=0`
+
+**备注：** 本次只过滤镜像/架构环境项，不改变内核 signal/rt-signal 语义；`rt_sigqueueinfo`、`sigtimedwait`、`sigaction`、`sigpending` 等相邻用例继续运行覆盖。
+
 ### 收敛 clock_gettime04 计时阈值过滤
 
 **涉及文件：**

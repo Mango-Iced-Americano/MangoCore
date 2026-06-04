@@ -217,6 +217,13 @@
 - **教训**: LTP 返回 32 不一定是 syscall 语义失败，先看日志里的 kconfig constraint；配置类 TCONF 不应通过伪造 syscall 行为解决。
 - **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`
 
+## LTP suite 环境项要按根因过滤
+
+- **根因**: `rt_tgsigqueueinfo01` 这类 runtest 条目可能存在但镜像未携带同名二进制，`signal06` 这类用例也可能明确限定 x86_64；它们在 suite 模式下会以 127/TCONF(32) 退出，被 harness 记为失败，但不是内核 syscall 语义问题。
+- **修复**: 将缺二进制、架构限定等环境项加入 suite 默认 exclude，并确认相邻 syscall 用例仍在运行覆盖真实内核路径。
+- **教训**: 看到 `command not found`、`Only test on x86_64` 先归类为环境/架构项，避免为了提分修改无关内核行为。
+- **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`
+
 ## 网络
 
 ### 硬编码 IPv4 地址替换为 net_core 动态查询

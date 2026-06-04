@@ -105,6 +105,12 @@ const DEFAULT_LTP_EXCLUDE: &[&str] = &[
     // virtualization, so both libc paths can report scheduling jitter as TFAIL.
     // clock_gettime01/02 keep the syscall semantics covered.
     "clock_gettime04",
+    // The current LTP image lists this runtest entry without shipping the test
+    // binary. rt_sigqueueinfo/tkill/tgkill cases still cover signal delivery.
+    "rt_tgsigqueueinfo01",
+    // signal06 is explicitly x86_64-only, so running it on rv64/la64 only
+    // produces a TCONF exit that the suite runner records as failure.
+    "signal06",
     // timerfd04 requires CONFIG_TIME_NS; timerfd_settime02 is a long fuzzy-sync
     // stress case that exceeds the local QEMU budget even after the timerfd
     // syscall semantics are implemented.
