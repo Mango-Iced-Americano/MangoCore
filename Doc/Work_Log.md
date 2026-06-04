@@ -4,6 +4,25 @@
 
 ## 2026-06-04
 
+### 补齐 pipe fcntl/sysctl 与 FIONREAD 语义
+
+**涉及文件：**
+- `os/src/fs/dev/pipe.rs` — pipe 环形缓冲读写支持跨尾回绕；新增 `ioctl(FIONREAD)` 返回可读字节数；`F_SETPIPE_SZ(0)` 归一到一页，超过 `1<<31` 返回 `EINVAL`，无 `CAP_SYS_RESOURCE` 且超过 `/proc/sys/fs/pipe-max-size` 返回 `EPERM`
+- `os/src/fs/dev/pipe.rs` — 增加 `pipe-max-size` tunable 与 pipe 用户页软/硬限制查询；非 root 新 pipe 受 `pipe-max-size` 初始容量限制，root 保持默认 64KiB
+- `os/src/fs/procfs/files/sys.rs` / `os/src/fs/procfs/files/mod.rs` — 注册 `/proc/sys/fs/pipe-max-size`、`pipe-user-pages-soft`、`pipe-user-pages-hard`
+
+**验证：**
+- Docker `make rv64-kernel-build-only` ✅
+- Docker `make la64-kernel-build-only` ✅
+- Docker `make rv64-only EXTRA_FEATURES=heap_trace` ✅
+- Docker `make la64-only EXTRA_FEATURES=heap_trace` ✅
+- rv64 heap_trace focused LTP：`fcntl30,fcntl30_64,fcntl35,fcntl35_64,fcntl37,fcntl37_64,pipe12,pipe2_04` 全部 TPASS，`FAIL LTP CASE ... : 0`
+- la64 heap_trace focused LTP：同上，全部 TPASS，`FAIL LTP CASE ... : 0`
+- `pipe15` 双架构从 `/proc/sys/fs/pipe-user-pages-soft` 缺失 TBROK 变为 `NOFILE limit max too low: 256 < 1024` 环境 TCONF
+- 双架构 focused 日志中 `PANIC=0`、`KERNEL EXCEPTION=0`、`HEAP OOM=0`、`Test timeouted=0`、`TFAIL=0`、`TBROK=0`
+
+**备注：** 当前 pipe 仍使用静态 64KiB backing buffer，不做超过该上限的动态扩容；这避免了在 LTP 大量 pipe 场景中引入新的堆压力。
+
 ### 支持 epoll fd 嵌套监听与环路检查
 
 **涉及文件：**

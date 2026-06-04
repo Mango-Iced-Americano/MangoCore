@@ -129,6 +129,26 @@ pub fn register_all(root: &Arc<crate::fs::procfs::LockedProcInode>) -> Result<()
         sys::max_user_namespaces_content,
         0,
     )?;
+    let fs_dir = sys_dir.add_dir_locked("fs", InodeMode::from_bits_truncate(0o555))?;
+    fs_dir.add_writable_file_with_write(
+        "pipe-max-size",
+        InodeMode::from_bits_truncate(0o644),
+        sys::pipe_max_size_content,
+        sys::pipe_max_size_write,
+        0,
+    )?;
+    fs_dir.add_file(
+        "pipe-user-pages-soft",
+        InodeMode::from_bits_truncate(0o444),
+        sys::pipe_user_pages_soft_content,
+        0,
+    )?;
+    fs_dir.add_file(
+        "pipe-user-pages-hard",
+        InodeMode::from_bits_truncate(0o444),
+        sys::pipe_user_pages_hard_content,
+        0,
+    )?;
     let vm_dir = sys_dir.add_dir_locked("vm", InodeMode::from_bits_truncate(0o555))?;
     vm_dir.add_writable_file_with_write(
         "overcommit_memory",

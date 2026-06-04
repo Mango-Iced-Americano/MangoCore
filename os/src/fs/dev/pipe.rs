@@ -11,9 +11,13 @@ use crate::fs::vfs::{
 use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::fs::vfs::file_system::FileSystem as NewFileSystem;
 use crate::fs::dev::DEV_FS;
-use crate::task::WaitQueue;
+use crate::task::{current_task, WaitQueue};
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
+
+const FIONREAD: u32 = 0x541B;
+const CAP_SYS_RESOURCE: usize = 24;
+const PIPE_SET_SIZE_MAX: usize = 1usize << 31;
 
 pub struct Pipe {
     readable: bool,
@@ -157,6 +161,27 @@ impl IndexNode for Pipe {
         Ok(revents)
     }
 
+    fn ioctl(
+        &self,
+        cmd: u32,
+        argp: usize,
+        _private_data: spin::MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        match cmd {
+            FIONREAD => {
+                let n = self.buffer.lock().get_used_size().min(i32::MAX as usize) as i32;
+                let token = current_task()
+                    .map(|task| task.get_user_token())
+                    .ok_or(SyscallErr::EFAULT)?;
+                crate::mm::UserPtrMut::from_addr(argp)
+                    .write(token, &n)
+                    .map_err(|_| SyscallErr::EFAULT)?;
+                Ok(0)
+            }
+            _ => Err(SyscallErr::ENOSYS),
+        }
+    }
+
     fn read_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
         Some(self.read_wait.wait_queue())
     }
@@ -251,11 +276,22 @@ const RING_DEFAULT_BUFFER_SIZE: usize = 4096 * 16;
 #[cfg(not(feature = "board_fu740"))]
 const RING_DEFAULT_BUFFER_SIZE: usize = 4096 * 16;
 
-use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::{AtomicUsize, Ordering};
 static PIPE_BUF_COUNT: AtomicUsize = AtomicUsize::new(0);
 static PIPE_BUF_BYTES: AtomicUsize = AtomicUsize::new(0);
-pub fn pipe_buf_alive() -> usize { PIPE_BUF_COUNT.load(core::sync::atomic::Ordering::Relaxed) }
-pub fn pipe_buf_bytes() -> usize { PIPE_BUF_BYTES.load(core::sync::atomic::Ordering::Relaxed) }
+static PIPE_MAX_SIZE: AtomicUsize = AtomicUsize::new(RING_DEFAULT_BUFFER_SIZE);
+pub fn pipe_buf_alive() -> usize { PIPE_BUF_COUNT.load(Ordering::Relaxed) }
+pub fn pipe_buf_bytes() -> usize { PIPE_BUF_BYTES.load(Ordering::Relaxed) }
+pub fn pipe_max_size() -> usize { PIPE_MAX_SIZE.load(Ordering::Relaxed) }
+pub fn set_pipe_max_size(size: usize) -> bool {
+    if size < PAGE_SIZE || size > RING_DEFAULT_BUFFER_SIZE {
+        return false;
+    }
+    PIPE_MAX_SIZE.store(size, Ordering::Relaxed);
+    true
+}
+pub fn pipe_user_pages_soft() -> usize { 16384 }
+pub fn pipe_user_pages_hard() -> usize { 0 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 enum RingBufferStatus {
@@ -276,11 +312,11 @@ pub struct PipeRingBuffer {
 
 impl PipeRingBuffer {
     fn new() -> Self {
-        PIPE_BUF_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        PIPE_BUF_BYTES.fetch_add(RING_DEFAULT_BUFFER_SIZE, core::sync::atomic::Ordering::Relaxed);
+        PIPE_BUF_COUNT.fetch_add(1, Ordering::Relaxed);
+        PIPE_BUF_BYTES.fetch_add(RING_DEFAULT_BUFFER_SIZE, Ordering::Relaxed);
         Self {
             arr: Box::new([0u8; RING_DEFAULT_BUFFER_SIZE]),
-            capacity: RING_DEFAULT_BUFFER_SIZE,
+            capacity: initial_pipe_capacity(),
             head: 0,
             tail: 0,
             status: RingBufferStatus::EMPTY,
@@ -307,10 +343,16 @@ impl PipeRingBuffer {
         self.capacity - self.get_used_size()
     }
     fn set_capacity_compat(&mut self, requested: usize) -> Result<usize, SyscallErr> {
-        if requested == 0 || requested > RING_DEFAULT_BUFFER_SIZE {
+        if requested > PIPE_SET_SIZE_MAX {
             return Err(SyscallErr::EINVAL);
         }
         let requested = requested.max(PAGE_SIZE);
+        if !current_has_sys_resource() && requested > pipe_max_size() {
+            return Err(SyscallErr::EPERM);
+        }
+        if requested > RING_DEFAULT_BUFFER_SIZE {
+            return Err(SyscallErr::EINVAL);
+        }
         let new_capacity = (requested + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         if new_capacity > RING_DEFAULT_BUFFER_SIZE {
             return Err(SyscallErr::EINVAL);
@@ -331,47 +373,77 @@ impl PipeRingBuffer {
     }
     #[inline]
     fn buffer_read(&mut self, buf: &mut [u8]) -> usize {
-        // get range
-        let begin = self.head;
-        let end = if self.tail <= self.head {
-            self.capacity
-        } else {
-            self.tail
-        };
-        // copy
-        let read_bytes = buf.len().min(end - begin);
-        unsafe {
-            copy_nonoverlapping(self.arr.as_ptr().add(begin), buf.as_mut_ptr(), read_bytes);
-        };
-        // update head
-        self.head = if begin + read_bytes == self.capacity {
-            0
-        } else {
-            begin + read_bytes
-        };
-        read_bytes
+        let mut total = 0;
+        while total < buf.len() && self.status != RingBufferStatus::EMPTY {
+            let begin = self.head;
+            let end = if self.tail <= self.head {
+                self.capacity
+            } else {
+                self.tail
+            };
+            let read_bytes = (buf.len() - total).min(end - begin);
+            if read_bytes == 0 {
+                break;
+            }
+            unsafe {
+                copy_nonoverlapping(
+                    self.arr.as_ptr().add(begin),
+                    buf.as_mut_ptr().add(total),
+                    read_bytes,
+                );
+            };
+            self.head = if begin + read_bytes == self.capacity {
+                0
+            } else {
+                begin + read_bytes
+            };
+            total += read_bytes;
+            self.status = if self.head == self.tail {
+                RingBufferStatus::EMPTY
+            } else {
+                RingBufferStatus::NORMAL
+            };
+        }
+        total
     }
     #[inline]
     fn buffer_write(&mut self, buf: &[u8]) -> usize {
-        // get range
-        let begin = self.tail;
-        let end = if self.tail < self.head {
-            self.head
-        } else {
-            self.capacity
-        };
-        // write
-        let write_bytes = buf.len().min(end - begin);
-        unsafe {
-            copy_nonoverlapping(buf.as_ptr(), self.arr.as_mut_ptr().add(begin), write_bytes);
-        };
-        // update tail
-        self.tail = if begin + write_bytes == self.capacity {
-            0
-        } else {
-            begin + write_bytes
-        };
-        write_bytes
+        let mut total = 0;
+        while total < buf.len() && self.status != RingBufferStatus::FULL {
+            let free = self.get_free_size();
+            if free == 0 {
+                break;
+            }
+            let begin = self.tail;
+            let end = if self.tail < self.head {
+                self.head
+            } else {
+                self.capacity
+            };
+            let write_bytes = (buf.len() - total).min(free).min(end - begin);
+            if write_bytes == 0 {
+                break;
+            }
+            unsafe {
+                copy_nonoverlapping(
+                    buf.as_ptr().add(total),
+                    self.arr.as_mut_ptr().add(begin),
+                    write_bytes,
+                );
+            };
+            self.tail = if begin + write_bytes == self.capacity {
+                0
+            } else {
+                begin + write_bytes
+            };
+            total += write_bytes;
+            self.status = if self.head == self.tail {
+                RingBufferStatus::FULL
+            } else {
+                RingBufferStatus::NORMAL
+            };
+        }
+        total
     }
     fn set_write_end(&mut self, write_end: &Arc<Pipe>) {
         self.write_end = Some(Arc::downgrade(write_end));
@@ -389,9 +461,32 @@ impl PipeRingBuffer {
 
 impl Drop for PipeRingBuffer {
     fn drop(&mut self) {
-        PIPE_BUF_COUNT.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
-        PIPE_BUF_BYTES.fetch_sub(RING_DEFAULT_BUFFER_SIZE, core::sync::atomic::Ordering::Relaxed);
+        PIPE_BUF_COUNT.fetch_sub(1, Ordering::Relaxed);
+        PIPE_BUF_BYTES.fetch_sub(RING_DEFAULT_BUFFER_SIZE, Ordering::Relaxed);
     }
+}
+
+fn initial_pipe_capacity() -> usize {
+    if current_is_root() {
+        RING_DEFAULT_BUFFER_SIZE
+    } else {
+        pipe_max_size().min(RING_DEFAULT_BUFFER_SIZE).max(PAGE_SIZE)
+    }
+}
+
+fn current_is_root() -> bool {
+    current_task()
+        .map(|task| task.acquire_inner_lock().euid == 0)
+        .unwrap_or(true)
+}
+
+fn current_has_sys_resource() -> bool {
+    current_task()
+        .map(|task| {
+            let inner = task.acquire_inner_lock();
+            (inner.cap_effective & (1u64 << CAP_SYS_RESOURCE)) != 0
+        })
+        .unwrap_or(true)
 }
 
 /// Return (read_end, write_end)

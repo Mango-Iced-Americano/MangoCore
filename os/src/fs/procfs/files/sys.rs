@@ -92,6 +92,48 @@ pub fn max_user_namespaces_content(
     proc_read_str(offset, len, buf, "0\n")
 }
 
+pub fn pipe_max_size_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let value = format!("{}\n", crate::fs::dev::pipe::pipe_max_size());
+    proc_read_str(offset, len, buf, &value)
+}
+
+pub fn pipe_max_size_write(
+    _extra: usize,
+    _offset: usize,
+    buf: &[u8],
+) -> Result<usize, SyscallErr> {
+    let value = parse_usize_sysctl(buf)?;
+    if !crate::fs::dev::pipe::set_pipe_max_size(value) {
+        return Err(SyscallErr::EINVAL);
+    }
+    Ok(buf.len())
+}
+
+pub fn pipe_user_pages_soft_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let value = format!("{}\n", crate::fs::dev::pipe::pipe_user_pages_soft());
+    proc_read_str(offset, len, buf, &value)
+}
+
+pub fn pipe_user_pages_hard_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let value = format!("{}\n", crate::fs::dev::pipe::pipe_user_pages_hard());
+    proc_read_str(offset, len, buf, &value)
+}
+
 pub fn overcommit_memory_content(
     _extra: usize,
     offset: usize,
