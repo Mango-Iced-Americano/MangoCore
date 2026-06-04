@@ -1325,6 +1325,8 @@ impl KernelTimerQueue {
                     let mut next_timer = None;
                     {
                         let mut inner = task.acquire_inner_lock();
+                        let signal_pending =
+                            !signal.is_empty() && inner.sigpending.contains(signal);
                         let Some(Some(timer_state)) = inner.posix_timers.get_mut(timer_id) else {
                             return;
                         };
@@ -1337,7 +1339,19 @@ impl KernelTimerQueue {
                             timer_state.value = TimeSpec::new();
                             timer_state.deadline = None;
                         } else {
-                            let deadline = now + timer_state.interval;
+                            let interval_ns = timer_state.interval.to_ns().max(1);
+                            let deadline_ns = timer.deadline.to_ns();
+                            let elapsed_ns = now.to_ns().saturating_sub(deadline_ns);
+                            let expirations = 1usize.saturating_add(elapsed_ns / interval_ns);
+                            let missed = if signal_pending {
+                                expirations
+                            } else {
+                                expirations.saturating_sub(1)
+                            };
+                            timer_state.add_overrun(missed);
+                            let next_ns =
+                                deadline_ns.saturating_add(expirations.saturating_mul(interval_ns));
+                            let deadline = TimeSpec::from_ns(next_ns);
                             timer_state.generation = timer_state.generation.wrapping_add(1);
                             timer_state.value = timer_state.interval;
                             timer_state.deadline = Some(deadline);

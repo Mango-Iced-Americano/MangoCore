@@ -1815,3 +1815,32 @@ a = sum(x.get("all", x.get("total", 1)) for x in r)
   - musl/glibc `semctl06` 均 `TPASS`
   - 全部 case summary `failed 0 / broken 0`
 - 日志 grep 未发现 `TFAIL`、`TBROK`、`PANIC`、`KERNEL EXCEPTION`、`HEAP OOM`。`shmat01` 的只读段写入触发用户态 page fault 是该用例期望行为。
+
+### POSIX timer overrun 饱和语义
+
+**涉及文件：**
+- `os/src/task/task.rs`
+- `os/src/task/manager.rs`
+- `os/src/syscall/process/time.rs`
+- `Doc/Work_Log.md`
+
+**问题：** focused LTP `timer_settime03` 在 rv64 musl/glibc 均失败：`timer_getoverrun()` 返回 `0`，预期为 Linux 新内核的 `INT_MAX` 饱和值或旧内核溢出后的负数。
+
+**根因：** `sys_timer_getoverrun()` 仍是最小占位实现，固定返回 `0`；周期 POSIX timer 到期后只按 `now + interval` 重装，没有根据 `now - deadline` 批量追赶遗漏周期，也没有记录信号合并期间的 overrun。极小 interval 场景下，LTP 会触发 Linux CVE-2018-12896 对应的超大 overrun 校验。
+
+**修复：**
+- `PosixTimer` 增加饱和 overrun 计数器，用户态返回值限制在 `i32::MAX`。
+- `timer_settime()` 重新 arm timer 时清零当前 overrun 序列。
+- `TIMER_ABSTIME` 的初始到期时间已经在过去时，按绝对 clock 差值立即计算初始 overrun，投递一次 pending 信号，并把下一次周期 deadline 推到未来。
+- POSIX timer 周期重装时按 `elapsed / interval` 批量计算遗漏到期次数，并把普通信号 pending 后继续到期的次数计入 overrun。
+
+**验证：**
+- Docker `cd /app/os && make rv64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅（132 个既有 warning）
+- Docker `cd /app/os && make la64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅（116 个既有 warning）
+- rv64 heap_trace focused LTP `timer_getoverrun01,timer_gettime01,timer_settime01,timer_settime02,timer_settime03,timer_delete01,timer_delete02`：
+  - musl/glibc 全部 summary `failed 0 / broken 0`
+  - `timer_settime03` 均 `TPASS: Timer overrun count is capped`
+- la64 heap_trace focused LTP 同一 include：
+  - musl/glibc 全部 summary `failed 0 / broken 0`
+  - `timer_settime03` 均 `TPASS: Timer overrun count is capped`
+- 日志 grep 未发现 `TFAIL`、`TBROK`、`PANIC`、`KERNEL EXCEPTION`、`HEAP OOM`、`Test timeouted`、`Bad address`。

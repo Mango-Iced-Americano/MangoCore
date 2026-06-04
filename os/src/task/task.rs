@@ -228,9 +228,12 @@ pub struct PosixTimer {
     pub value: TimeSpec,
     pub deadline: Option<TimeSpec>,
     pub generation: usize,
+    overrun: usize,
 }
 
 impl PosixTimer {
+    const OVERRUN_MAX: usize = i32::MAX as usize;
+
     pub fn new(clock_id: usize, signal: Signals) -> Self {
         Self {
             clock_id,
@@ -239,7 +242,23 @@ impl PosixTimer {
             value: TimeSpec::new(),
             deadline: None,
             generation: 0,
+            overrun: 0,
         }
+    }
+
+    pub fn reset_overrun(&mut self) {
+        self.overrun = 0;
+    }
+
+    pub fn add_overrun(&mut self, count: usize) {
+        self.overrun = self
+            .overrun
+            .saturating_add(count)
+            .min(Self::OVERRUN_MAX);
+    }
+
+    pub fn overrun(&self) -> usize {
+        self.overrun
     }
 }
 
