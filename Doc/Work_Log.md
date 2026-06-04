@@ -4,6 +4,22 @@
 
 ## 2026-06-04
 
+### 对齐 la64 LTP 内部 timeout 预算
+
+**涉及文件：**
+- `user/src/bin/ltprunner.rs` — 在 `loongarch64` LTP 子进程环境中设置 `LTP_TIMEOUT_MUL=2`，让 LTP 自身 30s 默认 case timeout 提升到 60s，与 runner 外层 la64 `DEFAULT_CASE_TIMEOUT_SECS=60` 对齐；rv64 不传该变量，保持原 30s 行为
+- `.agents/skills/mango-worklog/references/harness-patterns.md` — 记录 LTP 内部 timeout 与外层 runner timeout 不一致时的判断和修复模式
+
+**验证：**
+- 修改前 la64 heap_trace process suite 大窗口：glibc `times03` 被 LTP 内部 `Test timeouted, sending SIGKILL!` 杀掉，汇总 `executed=100 passed=99 failed=1`；同窗口 musl `executed=99 passed=99 failed=0`
+- `docker compose exec --workdir /app/os os-dev make rv64-only EXTRA_FEATURES=heap_trace` ✅，132 个既有 warning，无新增 error
+- `docker compose exec --workdir /app/os os-dev make la64-only EXTRA_FEATURES=heap_trace` ✅，116 个既有 warning，无新增 error
+- rv64 heap_trace focused `times03`：glibc/musl 均打印 `Timeout per run is 0h 00m 30s`，`executed=1 passed=1 failed=0`；未出现 `FAIL/TFAIL/TBROK/PANIC/KERNEL EXCEPTION/HEAP OOM/Test timeouted`
+- la64 heap_trace focused `times03`：glibc/musl 均打印 `Timeout per run is 0h 01m 00s`，`executed=1 passed=1 failed=0`；未出现 `FAIL/TFAIL/TBROK/PANIC/KERNEL EXCEPTION/HEAP OOM/Test timeouted`
+- 修改后 la64 heap_trace process suite 大窗口：glibc `executed=100 passed=100 failed=0`，musl `executed=99 passed=99 failed=0`；未出现 `FAIL LTP CASE/TFAIL/TBROK/PANIC/KERNEL EXCEPTION/HEAP OOM/Bad address/Test timeouted`
+
+**备注：** 这不是内核 syscall 语义失败，而是 la64+heap_trace+批量窗口下单 case 运行时间接近 LTP 默认 30s 内部预算。runner 早已给 la64 外层子进程 60s，本轮只把 LTP 内部预算同步到同一档，避免用例在外层 runner 还允许继续运行时被 LTP 自己提前 SIGKILL。
+
 ### 过滤 msgctl05/msgstress01 的 IPC ABI 与压力环境项
 
 **涉及文件：**

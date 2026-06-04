@@ -9,6 +9,11 @@
 - **修复**: suite 路径按 `run_case()` 返回码输出 `PASS LTP CASE`/`FAIL LTP CASE`；inline 路径的过滤项输出 `SKIP LTP CASE`，成功退出只输出中性 `DONE LTP CASE`，真实非零退出才输出 `FAIL LTP CASE`。
 - **相关文件**: `user/src/bin/ltprunner.rs`、`user/src/bin/initproc.rs`
 
+### LTP 内部 timeout 与 runner timeout 不一致
+- **根因**: suite runner 外层按架构设置 case timeout，但 LTP 二进制内部还有自己的默认 timeout。la64+heap_trace+批量窗口下，单个较慢 case 可能还没触发外层超时，就先被 LTP 内部 30s watchdog 打印 `Test timeouted, sending SIGKILL!` 并返回 `TBROK`。
+- **修复**: 只在确实需要更长预算的架构上传 `LTP_TIMEOUT_MUL=2`，让 LTP 内部 timeout 与 runner 外层 `DEFAULT_CASE_TIMEOUT_SECS=60` 对齐；不要在默认 30s 的架构上传 `LTP_TIMEOUT_MUL=1`，避免不同 libc 对环境解析出现额外噪声。
+- **相关文件**: `user/src/bin/ltprunner.rs`
+
 ## 信号/进程
 
 ### nanosleep 唤醒后死锁
