@@ -4,6 +4,22 @@
 
 ## 2026-06-04
 
+### 放开 prctl04 默认 LTP 过滤
+
+**涉及文件：**
+- `user/src/bin/ltprunner.rs` — 从 suite runner 默认 unsupported exclude 中移除 `prctl04`，让已实现的 seccomp strict/filter 用例进入全量 LTP
+- `user/src/bin/initproc.rs` — 从 inline broad-skip 的 unsupported prctl 分组中移除 `prctl04`，保持 inline/suite 扫描口径一致
+
+**验证：**
+- `docker compose exec os-dev make -C /app/user rust-user BOARD=rvqemu MODE=release` ✅，用户态构建通过，仅既有 warning
+- `docker compose exec os-dev make -C /app/os rv64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅，132 个既有 warning，无新增 error
+- rv64 heap_trace suite focused `prctl04`：glibc/musl 的 runner exclude 列表均不含 `prctl04`，两轮均真实执行，`passed 9 / failed 0`，无 `TFAIL/TBROK/PANIC/BUG/OOM/Bad address`
+- `docker compose exec os-dev make -C /app/user rust-user BOARD=laqemu MODE=release` ✅，用户态构建通过，仅既有 warning
+- `docker compose exec os-dev make -C /app/os la64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅，116 个既有 warning，无新增 error
+- la64 heap_trace suite focused `prctl04`：glibc/musl 的 runner exclude 列表均不含 `prctl04`，两轮均真实执行，`passed 9 / failed 0`，无 `TFAIL/TBROK/PANIC/BUG/OOM/Bad address`
+
+**备注：** 只释放已在双架构 heap_trace focused LTP 中验证通过的 `prctl04`。`prctl06/06_execve/07/10` 仍依赖未覆盖的 prctl/procfs capability 或架构环境，继续保留过滤。
+
 ### 支持 prctl seccomp strict/filter 最小语义
 
 **涉及文件：**

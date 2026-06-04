@@ -1252,7 +1252,7 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "process_madvise01" => Some("requires swap-backed process_madvise environment"),
         "pt_test" => Some("requires Intel perf events"),
         "proc_sched_rt01" => Some("requires procfs/sysctl RT scheduler config"),
-        "prctl04" | "prctl06" | "prctl06_execve" | "prctl07" | "prctl10" => {
+        "prctl06" | "prctl06_execve" | "prctl07" | "prctl10" => {
             Some("requires unsupported prctl/procfs capability")
         }
         "verify_caps_exec" => Some("requires complete POSIX file capability support"),

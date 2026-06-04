@@ -53,7 +53,6 @@ const DEFAULT_LTP_EXCLUDE_UNSUPPORTED: &[&str] = &[
     "msgstress01",
     "pkey01",
     "process_madvise01",
-    "prctl04",
     "prctl06",
     "prctl06_execve",
     "prctl07",
