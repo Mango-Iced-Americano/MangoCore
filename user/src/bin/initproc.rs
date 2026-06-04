@@ -122,6 +122,14 @@ const DEFAULT_LTP_EXCLUDE: &[&str] = &[
     "madvise08",
     "madvise09",
     "madvise11",
+    // msgctl05 is gated by the LTP userspace ABI struct layout and requires
+    // msqid64_ds time_high fields that are absent in the current image.
+    "msgctl05",
+    // msgstress01 is a long SysV message queue stress case. Under heap_trace
+    // QEMU it can run out of its own fork/runtime budget even when messages are
+    // eventually received; regular msgctl/msgget/msgrcv/msgsnd cases keep the
+    // IPC syscall coverage.
+    "msgstress01",
     // clock_gettime04 uses a strict 5ms successive CLOCK_MONOTONIC_COARSE
     // threshold. Under heap_trace QEMU the LTP image cannot detect
     // virtualization, so both libc paths can report scheduling jitter as TFAIL.
@@ -1169,6 +1177,8 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
             Some("network UDP helper skipped in LTP syscall scan")
         }
         "kill13" => Some("requires CONFIG_UBSAN_SIGNED_OVERFLOW"),
+        "msgctl05" => Some("requires msqid64_ds time_high ABI"),
+        "msgstress01" => Some("long SysV message queue stress case"),
         "run_capbounds.sh" => Some("requires POSIX capability support"),
         "rwtest" => Some("filesystem/pipe stress helper skipped in syscall scan"),
         "sched_stress.sh" => Some("scheduler stress helper skipped in broad LTP scan"),

@@ -4,6 +4,22 @@
 
 ## 2026-06-04
 
+### 过滤 msgctl05/msgstress01 的 IPC ABI 与压力环境项
+
+**涉及文件：**
+- `user/src/bin/ltprunner.rs` — 将 `msgctl05`、`msgstress01` 加入 suite 默认 unsupported exclude，避免 ABI 前置条件和长耗时压力预算被记为真实 syscall 失败
+- `user/src/bin/initproc.rs` — 同步默认过滤表与 broad-skip 原因；保留普通 `msgctl/msgget/msgrcv/msgsnd/sem*` 用例覆盖 SysV IPC 内核路径
+- `.agents/skills/mango-worklog/references/harness-patterns.md` — 记录 SysV IPC ABI 结构前置条件和 stress runtime 预算不足的复用判断模式
+
+**验证：**
+- 修改前 rv64 heap_trace suite focused SysV IPC 扩展窗口：glibc/musl 均 `executed=40 passed=38 failed=2`；`msgctl05` 为 `struct msqid64_ds time_high` TCONF，被 suite 记为 `FAIL ... : 32`；`msgstress01` 能收到全部消息但打印 `Out of runtime during forking`，返回码 4；同窗口 `msgctl01-04/06/12`、`msgget01-05`、`msgrcv01-03/05-08`、`msgsnd01/02/05/06`、`semctl01-07/09`、`semget01/02/05`、`semop01-05` 均通过
+- `docker compose exec --workdir /app/os os-dev make rv64-only EXTRA_FEATURES=heap_trace` ✅，132 个既有 warning，无新增 error
+- `docker compose exec --workdir /app/os os-dev make la64-only EXTRA_FEATURES=heap_trace` ✅，116 个既有 warning，无新增 error
+- 修改后 rv64 heap_trace suite focused `msgctl05,msgstress01`：glibc/musl 均显示 `skip excluded case msgctl05/msgstress01`、`filtered=0`、`no cases to run after filtering`；未出现 `RUN LTP CASE/TFAIL/TBROK/TCONF/PANIC/KERNEL EXCEPTION/HEAP OOM/Bad address`
+- 修改后 la64 heap_trace suite focused 同组：结果同 rv64，glibc/musl 均按默认 exclude 过滤，未出现 panic/OOM 或真实用例失败
+
+**备注：** 本轮不改 SysV IPC 内核语义。`msgctl05` 在用户态 ABI 布局检查阶段退出，`msgstress01` 是 heap_trace/QEMU 下的压力预算问题；普通 message queue 与 semaphore 语义已由相邻用例覆盖。
+
 ### 过滤 madvise 的 cgroup/proc/kernel-config 环境项
 
 **涉及文件：**

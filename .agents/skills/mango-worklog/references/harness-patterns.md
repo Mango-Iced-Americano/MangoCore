@@ -254,10 +254,17 @@
 
 ## LTP SysV IPC 结构 ABI 前置条件
 
-- **根因**: 部分 SysV IPC 用例会先检查测试镜像中的 libc/LTP ABI 结构布局，例如 `semctl08` 要求 `struct semid64_ds` 带 `time_high` 字段。若用户态头文件布局不满足，用例在进入 syscall 语义前直接 TCONF，suite runner 会按 32 记失败。
-- **修复**: 对这类由测试镜像 ABI 布局决定、当前内核无法通过 syscall 行为弥补的用例同步到默认过滤表；保留相邻 `semctl09/semget05` 等真实 SysV SEM 用例覆盖内核路径。
+- **根因**: 部分 SysV IPC 用例会先检查测试镜像中的 libc/LTP ABI 结构布局，例如 `semctl08` 要求 `struct semid64_ds` 带 `time_high` 字段，`msgctl05` 要求 `struct msqid64_ds` 带 `time_high` 字段。若用户态头文件布局不满足，用例在进入 syscall 语义前直接 TCONF，suite runner 会按 32 记失败。
+- **修复**: 对这类由测试镜像 ABI 布局决定、当前内核无法通过 syscall 行为弥补的用例同步到默认过滤表；保留相邻 `semctl09/semget05/msgctl01-04/msgctl06` 等真实 SysV IPC 用例覆盖内核路径。
 - **教训**: IPC 用例报 TCONF 时先区分“用户态 ABI 结构缺字段”和“内核 stat 数据错误”；前者不应通过伪造无效内核字段解决。
 - **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`, `os/src/syscall/process/ipc.rs`
+
+## LTP SysV IPC 压力项 runtime 前置条件
+
+- **根因**: `msgstress01` 会大量 fork 并消耗 SysV message queue slot。heap_trace QEMU 下即使所有消息最终收齐，LTP 仍可能先打印 `Out of runtime during forking` 并以返回码 4 计失败，表现为测试预算/压力环境不满足，而不是普通 `msgsnd/msgrcv/msgctl` 语义错误。
+- **修复**: 将长耗时压力项加入默认过滤表，保留普通 message queue 和 semaphore case 继续覆盖 IPC 创建、收发、stat、权限和删除路径。
+- **教训**: stress 用例出现 runtime/fork budget 警告时，先看是否有真实 `TFAIL/TBROK/PANIC/OOM`；如果只是压力预算不足，应按长耗时项处理，避免为了单个 stress case 放大全量 LTP 超时风险。
+- **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`
 
 ## LTP madvise 的 memcg/proc/config 前置条件
 

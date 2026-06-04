@@ -47,6 +47,8 @@ const DEFAULT_LTP_EXCLUDE_UNSUPPORTED: &[&str] = &[
     "madvise11",
     "memfd_create03",
     "memfd_create04",
+    "msgctl05",
+    "msgstress01",
     "pkey01",
     "process_madvise01",
     "prctl04",
