@@ -266,7 +266,7 @@ use crate::{
     fs::poll::FdSet,
     mm::{translated_byte_buffer, UserAccess, UserBuffer},
     syscall::errno::Errno,
-    task::{current_user_token, Rusage},
+    task::{current_user_token, exit_current_and_run_next, exit_group_and_run_next, Rusage},
     timer::{ITimerVal, TimeSpec, TimeVal, Times},
 };
 
@@ -305,6 +305,17 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[4],
             args[5],
         );
+    }
+    match seccomp_action_for_syscall(syscall_id) {
+        SeccompSyscallAction::Allow => {}
+        SeccompSyscallAction::KillThread(signal) => {
+            let signum = signal.to_signum().unwrap() as u32;
+            exit_current_and_run_next(signum);
+        }
+        SeccompSyscallAction::KillProcess(signal) => {
+            let signum = signal.to_signum().unwrap() as u32;
+            exit_group_and_run_next(signum);
+        }
     }
     let ret = match syscall_id {
         SYSCALL_GETCWD => sys_getcwd(args[0], args[1]),

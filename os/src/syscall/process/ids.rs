@@ -1,14 +1,14 @@
 use crate::config::PAGE_SIZE;
 use crate::fs::iov::IOVec;
 use crate::mm::{
-    check_user_range, copy_from_user_array, copy_to_user, translated_byte_buffer, AddressSpace,
-    FaultAccess, MapPermission, PageTableImpl, StepByOne, UserAccess, UserBuffer, UserPtr,
-    UserPtrMut, VirtAddr,
+    check_user_range, copy_from_user, copy_from_user_array, copy_to_user, translated_byte_buffer,
+    AddressSpace, FaultAccess, MapPermission, PageTableImpl, StepByOne, UserAccess, UserBuffer,
+    UserPtr, UserPtrMut, VirtAddr,
 };
 use crate::syscall::errno::*;
 use crate::task::{
-    current_task, current_user_token, ProcessControlBlock, ProcessManager, TaskControlBlock,
-    update_ready_nice,
+    current_task, current_user_token, ProcessControlBlock, ProcessManager, SeccompFilterInsn,
+    Signals, TaskControlBlock, update_ready_nice,
 };
 use crate::timer::{get_time_sec, TimeSpec};
 use alloc::{sync::Arc, vec::Vec};
@@ -71,7 +71,27 @@ const PR_CAP_AMBIENT_CLEAR_ALL: usize = 4;
 const PR_GET_SPECULATION_CTRL: usize = 52;
 const PR_TASK_COMM_LEN: usize = 16;
 const PR_MAX_SIGNAL: usize = 64;
+const SECCOMP_MODE_DISABLED: usize = 0;
+const SECCOMP_MODE_STRICT: usize = 1;
 const SECCOMP_MODE_FILTER: usize = 2;
+const SECCOMP_FILTER_MAX_LEN: usize = 4096;
+const SECCOMP_RET_ACTION_FULL: u32 = 0xffff_0000;
+const SECCOMP_RET_KILL_THREAD: u32 = 0x0000_0000;
+const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
+const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
+const BPF_CLASS_MASK: u16 = 0x07;
+const BPF_LD: u16 = 0x00;
+const BPF_JMP: u16 = 0x05;
+const BPF_RET: u16 = 0x06;
+const BPF_SIZE_MASK: u16 = 0x18;
+const BPF_W: u16 = 0x00;
+const BPF_MODE_MASK: u16 = 0xe0;
+const BPF_ABS: u16 = 0x20;
+const BPF_OP_MASK: u16 = 0xf0;
+const BPF_JEQ: u16 = 0x10;
+const BPF_SRC_MASK: u16 = 0x08;
+const BPF_K: u16 = 0x00;
+const SECCOMP_DATA_NR_OFFSET: u32 = 0;
 const SECBIT_NO_CAP_AMBIENT_RAISE: usize = 1 << 6;
 const PR_SPEC_STORE_BYPASS: usize = 0;
 const PROCESS_VM_MAX_IOVEC: usize = 1024;
@@ -1062,19 +1082,208 @@ pub fn sys_process_vm_writev(
     sys_process_vm_transfer(pid, local_iov, liovcnt, remote_iov, riovcnt, flags, true)
 }
 
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct SockFilter {
+    code: u16,
+    jt: u8,
+    jf: u8,
+    k: u32,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct SockFprog {
+    len: u16,
+    filter: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SeccompSyscallAction {
+    Allow,
+    KillThread(Signals),
+    KillProcess(Signals),
+}
+
+fn seccomp_filter_allows_return(ret: u32) -> bool {
+    (ret & SECCOMP_RET_ACTION_FULL) == SECCOMP_RET_ALLOW
+}
+
+fn seccomp_filter_kills_return(ret: u32) -> bool {
+    ret == SECCOMP_RET_KILL_THREAD || ret == SECCOMP_RET_KILL_PROCESS
+}
+
+fn seccomp_filter_kill_action(ret: u32) -> SeccompSyscallAction {
+    if ret == SECCOMP_RET_KILL_PROCESS {
+        SeccompSyscallAction::KillProcess(Signals::SIGSYS)
+    } else {
+        SeccompSyscallAction::KillThread(Signals::SIGSYS)
+    }
+}
+
+fn verify_seccomp_filter(insns: &[SeccompFilterInsn]) -> Result<(), isize> {
+    if insns.is_empty() || insns.len() > SECCOMP_FILTER_MAX_LEN {
+        return Err(EINVAL);
+    }
+    let mut has_terminal_ret = false;
+    for (pc, insn) in insns.iter().enumerate() {
+        match insn.code & BPF_CLASS_MASK {
+            BPF_LD => {
+                if (insn.code & BPF_SIZE_MASK) != BPF_W
+                    || (insn.code & BPF_MODE_MASK) != BPF_ABS
+                    || insn.k != SECCOMP_DATA_NR_OFFSET
+                {
+                    return Err(EINVAL);
+                }
+            }
+            BPF_JMP => {
+                if (insn.code & BPF_OP_MASK) != BPF_JEQ
+                    || (insn.code & BPF_SRC_MASK) != BPF_K
+                    || pc + 1 + insn.jt as usize >= insns.len()
+                    || pc + 1 + insn.jf as usize >= insns.len()
+                {
+                    return Err(EINVAL);
+                }
+            }
+            BPF_RET => {
+                if (insn.code & BPF_SRC_MASK) != BPF_K {
+                    return Err(EINVAL);
+                }
+                if !seccomp_filter_allows_return(insn.k) && !seccomp_filter_kills_return(insn.k) {
+                    return Err(EINVAL);
+                }
+                has_terminal_ret = true;
+            }
+            _ => return Err(EINVAL),
+        }
+    }
+    if has_terminal_ret {
+        Ok(())
+    } else {
+        Err(EINVAL)
+    }
+}
+
+fn read_seccomp_filter(filter: usize) -> Result<Vec<SeccompFilterInsn>, isize> {
+    if filter == 0 {
+        return Err(EFAULT);
+    }
+    let token = current_user_token();
+    let mut prog = SockFprog { len: 0, filter: 0 };
+    copy_from_user(token, filter as *const SockFprog, &mut prog as *mut SockFprog)?;
+    let len = prog.len as usize;
+    if len == 0 || len > SECCOMP_FILTER_MAX_LEN {
+        return Err(EINVAL);
+    }
+    if prog.filter == 0 {
+        return Err(EFAULT);
+    }
+    let mut raw = Vec::new();
+    if raw.try_reserve(len).is_err() {
+        return Err(ENOMEM);
+    }
+    unsafe {
+        raw.set_len(len);
+    }
+    copy_from_user_array(token, prog.filter as *const SockFilter, raw.as_mut_ptr(), len)?;
+    let mut insns = Vec::new();
+    if insns.try_reserve(len).is_err() {
+        return Err(ENOMEM);
+    }
+    for raw_insn in raw {
+        insns.push(SeccompFilterInsn {
+            code: raw_insn.code,
+            jt: raw_insn.jt,
+            jf: raw_insn.jf,
+            k: raw_insn.k,
+        });
+    }
+    verify_seccomp_filter(&insns)?;
+    Ok(insns)
+}
+
+fn eval_seccomp_filter(insns: &[SeccompFilterInsn], syscall_id: usize) -> SeccompSyscallAction {
+    let mut pc = 0usize;
+    let mut accumulator = 0u32;
+    while pc < insns.len() {
+        let insn = insns[pc];
+        match insn.code & BPF_CLASS_MASK {
+            BPF_LD => {
+                accumulator = syscall_id as u32;
+                pc += 1;
+            }
+            BPF_JMP => {
+                if accumulator == insn.k {
+                    pc += 1 + insn.jt as usize;
+                } else {
+                    pc += 1 + insn.jf as usize;
+                }
+            }
+            BPF_RET => {
+                return if seccomp_filter_allows_return(insn.k) {
+                    SeccompSyscallAction::Allow
+                } else {
+                    seccomp_filter_kill_action(insn.k)
+                };
+            }
+            _ => return SeccompSyscallAction::KillThread(Signals::SIGSYS),
+        }
+    }
+    SeccompSyscallAction::KillThread(Signals::SIGSYS)
+}
+
+pub fn seccomp_action_for_syscall(syscall_id: usize) -> SeccompSyscallAction {
+    use crate::syscall::syscall_id::{
+        SYSCALL_EXIT, SYSCALL_READ, SYSCALL_SIGRETURN, SYSCALL_WRITE,
+    };
+
+    let task = match current_task() {
+        Some(task) => task,
+        None => return SeccompSyscallAction::Allow,
+    };
+    let inner = task.acquire_inner_lock();
+    match inner.seccomp_mode {
+        SECCOMP_MODE_DISABLED => SeccompSyscallAction::Allow,
+        SECCOMP_MODE_STRICT => match syscall_id {
+            SYSCALL_READ | SYSCALL_WRITE | SYSCALL_EXIT | SYSCALL_SIGRETURN => {
+                SeccompSyscallAction::Allow
+            }
+            _ => SeccompSyscallAction::KillProcess(Signals::SIGKILL),
+        },
+        SECCOMP_MODE_FILTER => eval_seccomp_filter(&inner.seccomp_filter, syscall_id),
+        _ => SeccompSyscallAction::KillProcess(Signals::SIGKILL),
+    }
+}
+
 fn sys_prctl_set_seccomp(mode: usize, filter: usize) -> isize {
+    if mode == SECCOMP_MODE_STRICT {
+        let task = current_task().unwrap();
+        let mut inner = task.acquire_inner_lock();
+        if inner.seccomp_mode != SECCOMP_MODE_DISABLED {
+            return EINVAL;
+        }
+        inner.seccomp_mode = SECCOMP_MODE_STRICT;
+        inner.seccomp_filter.clear();
+        return SUCCESS;
+    }
     if mode != SECCOMP_MODE_FILTER {
         return EINVAL;
     }
-    if filter == 0 || check_user_range(filter, size_of::<usize>()).is_err() {
-        return EFAULT;
-    }
+    let filter_insns = match read_seccomp_filter(filter) {
+        Ok(insns) => insns,
+        Err(errno) => return errno,
+    };
     let task = current_task().unwrap();
-    let inner = task.acquire_inner_lock();
-    if (inner.cap_effective & (1u64 << CAP_SYS_ADMIN)) == 0 {
+    let mut inner = task.acquire_inner_lock();
+    if inner.seccomp_mode != SECCOMP_MODE_DISABLED {
+        return EINVAL;
+    }
+    if !inner.no_new_privs && (inner.cap_effective & (1u64 << CAP_SYS_ADMIN)) == 0 {
         EACCES
     } else {
-        EINVAL
+        inner.seccomp_mode = SECCOMP_MODE_FILTER;
+        inner.seccomp_filter = filter_insns;
+        SUCCESS
     }
 }
 
@@ -1194,7 +1403,7 @@ pub fn sys_prctl(option: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usi
                 SUCCESS
             }
         }
-        PR_GET_SECCOMP => EINVAL,
+        PR_GET_SECCOMP => task.acquire_inner_lock().seccomp_mode as isize,
         PR_SET_SECCOMP => sys_prctl_set_seccomp(arg2, arg3),
         PR_SET_NO_NEW_PRIVS => {
             if arg2 != 1 || arg3 != 0 || arg4 != 0 || arg5 != 0 {

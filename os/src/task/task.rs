@@ -28,6 +28,14 @@ use spin::{Mutex, MutexGuard};
 const TASK_CAP_FULL_SET: u64 = (1u64 << 41) - 1;
 const DEFAULT_TIMER_SLACK_NS: usize = 50_000;
 
+#[derive(Clone, Copy, Debug)]
+pub struct SeccompFilterInsn {
+    pub code: u16,
+    pub jt: u8,
+    pub jf: u8,
+    pub k: u32,
+}
+
 fn default_task_comm() -> [u8; 16] {
     let mut comm = [0u8; 16];
     comm[..8].copy_from_slice(b"initproc");
@@ -200,6 +208,10 @@ pub struct TaskControlBlockInner {
     pub thp_disabled: bool,
     pub securebits: usize,
     pub cap_ambient: u64,
+    /// Minimal seccomp ABI state. The stored filter is copied from user memory
+    /// at PR_SET_SECCOMP time so forked children can inherit it safely.
+    pub seccomp_mode: usize,
+    pub seccomp_filter: Vec<SeccompFilterInsn>,
     /// 用于清理子进程的线程ID
     pub clear_child_tid: usize,
     /// 鲁棒列表，用于管理鲁棒互斥锁
@@ -818,6 +830,8 @@ impl TaskControlBlock {
                 thp_disabled: false,
                 securebits: 0,
                 cap_ambient: 0,
+                seccomp_mode: 0,
+                seccomp_filter: Vec::new(),
                 clear_child_tid: 0,
                 robust_list: RobustList::default(),
                 rusage: Rusage::new(),
@@ -1243,6 +1257,8 @@ impl TaskControlBlock {
                 thp_disabled: parent_inner.thp_disabled,
                 securebits: parent_inner.securebits,
                 cap_ambient: parent_inner.cap_ambient,
+                seccomp_mode: parent_inner.seccomp_mode,
+                seccomp_filter: parent_inner.seccomp_filter.clone(),
                 pending_oom_kill: false,
             }),
         });

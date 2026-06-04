@@ -4,6 +4,23 @@
 
 ## 2026-06-04
 
+### 支持 prctl seccomp strict/filter 最小语义
+
+**涉及文件：**
+- `os/src/task/task.rs` — 为 TCB 增加 `seccomp_mode/seccomp_filter` 状态，fork/clone 时继承已安装过滤器；过滤器在 `PR_SET_SECCOMP` 时从用户态复制进内核，避免保存用户指针
+- `os/src/task/mod.rs` — 导出轻量 `SeccompFilterInsn`，供 prctl 路径保存 cBPF 指令
+- `os/src/syscall/process/ids.rs` — 实现 `PR_GET_SECCOMP`、`PR_SET_SECCOMP(SECCOMP_MODE_STRICT/FILTER)`，补齐 filter 指针复制、权限错误码、基础 cBPF verifier/evaluator
+- `os/src/syscall/process/mod.rs`、`os/src/syscall/mod.rs` — 将 seccomp 检查接到 syscall 分发入口；strict 违规以 `SIGKILL` 结束进程，filter 违规按返回动作以 `SIGSYS` 结束线程或进程
+- `.agents/skills/mango-worklog/references/harness-patterns.md` — 记录 seccomp 探测类 TCONF 不能只改探测返回，必须同时实现执行路径的模式
+
+**验证：**
+- `docker compose exec os-dev bash -lc 'cd /app/os && make rv64-kernel-build-only EXTRA_FEATURES=heap_trace'` ✅，132 个既有 warning，无新增 error
+- `docker compose exec os-dev bash -lc 'cd /app/os && make la64-kernel-build-only EXTRA_FEATURES=heap_trace'` ✅，116 个既有 warning，无新增 error
+- rv64 heap_trace focused LTP `prctl02,prctl04`：glibc/musl 均 `prctl02 passed=18 failed=0`、`prctl04 passed=9 failed=0`；日志确认 `heap_trace is enabled`，未出现 `TFAIL/TBROK/PANIC/BUG/OOM/Bad address`
+- la64 heap_trace focused LTP `prctl02,prctl04`：glibc/musl 均 `prctl02 passed=18 failed=0`、`prctl04 passed=9 failed=0`；日志确认 `heap_trace is enabled`，未出现 `TFAIL/TBROK/PANIC/BUG/OOM/Bad address`
+
+**备注：** 这是 prctl seccomp 的最小兼容实现，不是完整 Linux seccomp 沙箱。当前 filter verifier/evaluator 只支持 LTP `prctl04` 覆盖的基础 cBPF 子集：`LD W ABS seccomp_data.nr`、`JMP JEQ K`、`RET K`，其余指令安装时返回 `EINVAL`，避免误放行未知策略。
+
 ### 对齐 la64 LTP 内部 timeout 预算
 
 **涉及文件：**

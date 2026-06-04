@@ -278,6 +278,13 @@
 - **教训**: mm syscall 窗口里出现 TCONF/TBROK 时要先区分“madvise 行为错误”和“测试环境探测失败”；前者改 `sys_madvise`，后者过滤并保留基础 madvise case 覆盖。
 - **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`, `os/src/syscall/process/mm.rs`
 
+## LTP seccomp 探测必须接真实执行路径
+
+- **根因**: `prctl04` 先通过 `PR_GET_SECCOMP`/`PR_SET_SECCOMP` 探测支持情况；如果内核只让探测返回成功，却没有在 syscall 入口执行 strict/filter 策略，测试会从 `TCONF` 变成真实 `TFAIL`，例如 GET_SECCOMP/close/exit/fork 继承不按预期触发 `SIGKILL`/`SIGSYS`。
+- **修复**: 保存 per-task seccomp mode/filter，fork/clone 继承过滤器，并在 syscall 分发入口按模式提前拦截；filter 安装时从用户态复制 cBPF 指令并做最小 verifier，避免保存用户指针或放行未知指令。
+- **教训**: 看到 “kernel doesn't support PR_GET/SET_SECCOMP” 这类探测型 TCONF 时，不要只改 `PR_GET` 或 `/proc/config`。一旦宣称支持，就必须补齐用例后续会触发的真实 ABI 行为和 wait status 信号语义。
+- **相关文件**: `os/src/syscall/process/ids.rs`, `os/src/syscall/mod.rs`, `os/src/task/task.rs`
+
 ## 网络
 
 ### 硬编码 IPv4 地址替换为 net_core 动态查询
