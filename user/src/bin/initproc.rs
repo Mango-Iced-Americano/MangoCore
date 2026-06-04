@@ -1947,6 +1947,13 @@ pub extern "C" fn _start() -> ! {
 /// 2. musl/glibc 动态库链接到 /lib
 fn install_embedded_libgcc_s() {
     let path = "/glibc/lib/libgcc_s.so.1\0";
+    // Check if already installed (from tools disk or previous run)
+    let check_fd = open(path, OpenFlags::RDONLY);
+    if check_fd >= 0 {
+        close(check_fd as usize);
+        println!("[initproc] install libgcc_s: already exists, skipping");
+        return;
+    }
     let fd = open(
         path,
         OpenFlags::CREATE | OpenFlags::WRONLY | OpenFlags::TRUNC,
@@ -1994,10 +2001,14 @@ fn prepare_symlink(environ: &[*const u8]) {
         }
     };
 
-    // Phase 1: Ensure base directories exist (using embedded busybox/bash)
+    // Phase 1: Ensure base directories exist (skip if already prepared)
     println!("[initproc] ensuring base directories...");
     let dirs_cmd = "\
-        busybox mkdir -p /bin /lib /usr /etc /root /tmp /run /var /var/tmp /dev/shm /glibc/lib; \
+        if test -d /bin && test -d /lib && test -d /tmp; then \
+            echo 'base dirs already exist, skipping mkdir'; \
+        else \
+            busybox mkdir -p /bin /lib /usr /etc /root /tmp /run /var /var/tmp /dev/shm /glibc/lib; \
+        fi; \
         chmod 1777 /tmp /var/tmp /dev/shm; \
         true \
     \0";
@@ -2042,9 +2053,9 @@ fn prepare_symlink(environ: &[*const u8]) {
         mkdir -p /etc /root /tmp /run /var /var/tmp /dev/shm /glibc/lib; chmod 1777 /tmp /var/tmp /dev/shm; : > /glibc/lib/libgcc_s.so.1; \
         [ -f /etc/passwd ] || printf 'root:x:0:0:root:/root:/bin/sh\\nnobody:x:65534:65534:nobody:/nonexistent:/bin/sh\\n' > /etc/passwd; \
         [ -f /etc/group ] || printf 'root:x:0:\\nnogroup:x:65534:\\n' > /etc/group; \
-        printf 'passwd: files\\ngroup: files\\nhosts: files dns\\n' > /etc/nsswitch.conf; \
-        printf 'nameserver 8.8.8.8\\n' > /etc/resolv.conf; \
-        printf 'blossom\\n' > /etc/hostname; \
+        [ -f /etc/nsswitch.conf ] || printf 'passwd: files\\ngroup: files\\nhosts: files dns\\n' > /etc/nsswitch.conf; \
+        [ -f /etc/resolv.conf ] || printf 'nameserver 8.8.8.8\\n' > /etc/resolv.conf; \
+        [ -f /etc/hostname ] || printf 'mangocore\\n' > /etc/hostname; \
     \0";
     let ret = run_bash_cmd(account_cmd, environ);
     println!("[initproc] minimal account files done, exit={}", ret);
