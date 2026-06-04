@@ -2025,13 +2025,13 @@ fn prepare_symlink(environ: &[*const u8]) {
     println!("[initproc] installing busybox applets to /bin ...");
     let install_cmd = "\
         test -e /bin/busybox || ln -s /busybox /bin/busybox; \
-        if test -x /bin/cp && test -x /bin/ls && test -x /bin/cat; then \
+        if test -x /bin/which && test -x /bin/sort && test -x /bin/find; then \
             echo 'busybox applets already installed, skipping --install'; \
         else \
             /bin/busybox --install -s /bin; \
         fi; \
         for app in cp mv rm ln mkdir chmod cat printf sleep grep sed awk uname basename dirname true false test; do \
-            [ -e /bin/$app ] || /bin/busybox ln -s /bin/busybox /bin/$app; \
+            [ -e /bin/\x24app ] || /bin/busybox ln -s /bin/busybox /bin/\x24app; \
         done; \
         true \
     \0";
@@ -2079,8 +2079,8 @@ fn prepare_symlink(environ: &[*const u8]) {
         [ -e /lib/libm.so.6 ] || ln -s /glibc/lib/libm.so.6 /lib/libm.so.6; \
         [ -e /lib/tls_get_new-dtv_dso.so ] || ln -s /glibc/lib/tls_get_new-dtv_dso.so /lib/tls_get_new-dtv_dso.so; \
         [ -e ./libtls_get_new-dtv_dso.so ] || ln -s /glibc/lib/tls_get_new-dtv_dso.so ./libtls_get_new-dtv_dso.so; \
-        for f in /musl/lib/*.so*; do [ -e /lib/$(basename "$f") ] || ln -s "$f" /lib/ 2>/dev/null; done; \
-        for f in /glibc/lib/*.so*; do [ -e /lib/$(basename "$f") ] || ln -s "$f" /lib/ 2>/dev/null; done \
+        for f in /musl/lib/*.so*; do [ -e /lib/\x24(basename \"\x24f\") ] || ln -s \"\x24f\" /lib/ 2>/dev/null; done; \
+        for f in /glibc/lib/*.so*; do [ -e /lib/\x24(basename \"\x24f\") ] || ln -s \"\x24f\" /lib/ 2>/dev/null; done \
     \0";
     let ret = run_bash_cmd(lib_cmd, environ);
     println!("[initproc] lib linking done, exit={}", ret);
