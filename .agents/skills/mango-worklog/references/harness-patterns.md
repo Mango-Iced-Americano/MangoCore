@@ -159,7 +159,14 @@
 - **根因**: inline LTP broad skip 表是人工维护的扩分保护层；内核语义已经修复后，如果旧 skip 原因不删除，后续自动 include/全量扫描仍会把可通过用例排除，表现为“focused 已 TPASS，但扩分没有增长”。
 - **修复**: 每次 focused 证明某个 skip 用例在双架构 musl/glibc 均 0 failure 后，同步删除对应 `should_skip_ltp_helper()` 分支，并在 Work_Log 中记录验证来源。
 - **教训**: skip 表不是事实来源，日志验证结果才是；修复内核 bug 后要回扫 `user/src/bin/initproc.rs`，避免陈旧 skip 抵消本次适配收益。
-- **相关文件**: `user/src/bin/initproc.rs`, `Doc/Work_Log.md`
+- **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`, `Doc/Work_Log.md`
+
+## 架构+libc 专属 LTP 差异收敛
+
+- **根因**: 部分 LTP 用例实际验证的是 libc wrapper、格式化库或测试镜像行为；同一内核路径在另一个 libc 或另一个架构已经 TPASS 时，强行按失败组合改内核容易破坏正确 ABI。
+- **修复**: 只在 focused 证明“失败限定为某架构+某 libc，且至少一个等价路径继续覆盖内核语义”后，加入架构+libc 专属默认 exclude；inline `initproc` 与 suite `ltprunner` 必须同步。
+- **教训**: 不要扩大到全 musl/全架构，也不要在内核里伪造用户态 wrapper 行为；Work_Log 必须写清楚哪个组合仍实际运行该用例。
+- **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`
 
 ## 网络
 

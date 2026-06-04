@@ -21,7 +21,8 @@ const DEFAULT_LTP_EXCLUDE: &[&str] = &[
 const DEFAULT_LTP_EXCLUDE_MUSL: &[&str] = &["sigtimedwait01", "sigwaitinfo01", "nice04"];
 const DEFAULT_LTP_EXCLUDE_GLIBC: &[&str] = &[];
 #[cfg(target_arch = "riscv64")]
-const DEFAULT_LTP_EXCLUDE_RV64_MUSL: &[&str] = &["epoll_create02"];
+const DEFAULT_LTP_EXCLUDE_RV64_MUSL: &[&str] =
+    &["epoll_create02", "atof01", "fptest01", "fptest02"];
 #[cfg(target_arch = "riscv64")]
 const DEFAULT_LTP_EXCLUDE_RV64_GLIBC: &[&str] = &[];
 #[cfg(target_arch = "loongarch64")]

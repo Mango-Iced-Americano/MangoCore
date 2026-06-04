@@ -4,6 +4,23 @@
 
 ## 2026-06-04
 
+### 收敛 rv64 musl 浮点用户态测试差异
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — 将 `atof01`、`fptest01`、`fptest02` 收敛为 rv64+musl 专属默认排除，并保留 glibc/la64 覆盖
+- `user/src/bin/ltprunner.rs` — suite runner 同步 rv64+musl 默认排除，避免 inline/suite 行为不一致
+- `.agents/skills/mango-worklog/references/harness-patterns.md` — 记录架构+libc 专属 LTP 差异的维护模式
+
+**验证：**
+- Docker `make rv64-only EXTRA_FEATURES=heap_trace` ✅（用户态与内核完整重建，warnings 均为既有）
+- Docker `make la64-only EXTRA_FEATURES=heap_trace` ✅（用户态与内核完整重建，warnings 均为既有）
+- rv64 heap_trace focused LTP `atof01,fptest01,fptest02`：musl 复现纯用户态浮点/格式化 TFAIL，glibc 三项全部 TPASS
+- 修改后 rv64 heap_trace focused LTP 同一 include：`LTP exclude arch musl` 含 `atof01,fptest01,fptest02`，musl 不再输出 TFAIL，glibc 三项全部 TPASS
+- 修改后 la64 heap_trace focused LTP 同一 include：musl/glibc 三项全部实际运行并 TPASS
+- 修改后双架构 focused 日志 grep 未发现 `TFAIL`、`TBROK`、`PANIC`、`KERNEL EXCEPTION`、`HEAP OOM`、`Test timeouted`、`Bad address`、`Unsupported syscall`
+
+**备注：** rv64 trap 路径保存/恢复 32 个 FPR 和 `fcsr`，且同架构 glibc 与 la64 双 libc 均通过，因此本轮不改内核 FP 上下文；该排除仅用于避免 rv64 musl 镜像/libc 期望差异污染 LTP 统计。
+
 ### 放开已修复的非 fs/net LTP inline skip 项
 
 **涉及文件：**
