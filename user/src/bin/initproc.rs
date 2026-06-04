@@ -2050,7 +2050,7 @@ fn prepare_symlink(environ: &[*const u8]) {
     // Phase 5: Account/network files, lib symlinks, chmod (existing, unchanged)
     println!("[initproc] preparing /etc account/network files ...");
     let account_cmd = "\
-        mkdir -p /etc /root /tmp /run /var /var/tmp /dev/shm /glibc/lib; chmod 1777 /tmp /var/tmp /dev/shm; : > /glibc/lib/libgcc_s.so.1; \
+        mkdir -p /etc /root /tmp /run /var /var/tmp /dev/shm /glibc/lib; chmod 1777 /tmp /var/tmp /dev/shm; \
         [ -f /etc/passwd ] || printf 'root:x:0:0:root:/root:/bin/sh\\nnobody:x:65534:65534:nobody:/nonexistent:/bin/sh\\n' > /etc/passwd; \
         [ -f /etc/group ] || printf 'root:x:0:\\nnogroup:x:65534:\\n' > /etc/group; \
         [ -f /etc/nsswitch.conf ] || printf 'passwd: files\\ngroup: files\\nhosts: files dns\\n' > /etc/nsswitch.conf; \

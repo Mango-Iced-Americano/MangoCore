@@ -235,9 +235,9 @@ define build_tools_disk
 			[ "$$f" = "libgcc_s.so.1" ] && continue; \
 			ln -sf "$$f" "lib/$$f" 2>/dev/null; \
 		done 2>/dev/null; true
-	@echo "  pre-installing busybox applets to /tools/bin ..."
+	@echo "  pre-installing critical busybox applets ..."
 	@cd /tmp/tools-mnt/bin && \
-		for applet in cp mv rm ln mkdir chmod cat printf sleep grep sed awk uname basename dirname true false test; do \
+		for applet in cp mv rm ln ls mkdir chmod cat printf sleep grep sed awk uname basename dirname true false test; do \
 			ln -sf busybox $$applet 2>/dev/null; \
 		done
 	@cd /tmp/tools-mnt/bin && ln -sf bash sh 2>/dev/null || true
