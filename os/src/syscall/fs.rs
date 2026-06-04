@@ -2245,10 +2245,6 @@ pub fn sys_fchdir(fd: usize) -> isize {
     SUCCESS
 }
 
-pub fn sys_flock(_fd: usize, _operation: u32) -> isize {
-    ENOSYS
-}
-
 pub fn sys_openat(dirfd: usize, path: *const u8, flags: u32, mode: u32) -> isize {
     let mode_bits = mode;
     let task = current_task().unwrap();

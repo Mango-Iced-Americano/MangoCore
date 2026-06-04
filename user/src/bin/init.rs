@@ -4,8 +4,10 @@ extern crate alloc;
 
 use alloc::format;
 use user_lib::*;
+use user_lib::syscall::sys_mkdirat;
 
 const MS_BIND: usize = 4096;
+const AT_FDCWD: isize = -100;
 
 fn try_mount(source: &str, target: &str, fstype: &str, flags: usize, data: usize) -> isize {
     let src_c = format!("{}\0", source);
@@ -43,11 +45,17 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
 
     // 内核已将 x0→/sdcard, x1→/tools 挂载好，直接 bind
     try_bind("/tools/bin", "/bin");
+    try_bind("/tools/sbin", "/sbin");
     try_bind("/tools/lib", "/lib");
     try_bind("/tools/usr", "/usr");
     // 不 bind /tools/etc — initramfs 已有完整 /etc，bind 会覆盖
     try_bind("/sdcard/musl", "/musl");
     try_bind("/sdcard/glibc", "/glibc");
+
+    // /lib 已 bind 到 /tools/lib (ext4)，创建 apk db 目录使其持久化
+    for dir in ["/lib/apk\0", "/lib/apk/db\0", "/var/cache/apk\0"] {
+        let _ = sys_mkdirat(AT_FDCWD, dir, 0o755);
+    }
 
     let environ: &[*const u8] = &[
         "SHELL=/bin/sh\0".as_ptr(),

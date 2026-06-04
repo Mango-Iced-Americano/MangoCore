@@ -3,6 +3,7 @@ mod syscall_macro;
 
 pub mod errno;
 pub mod fs;
+mod flock;
 mod process;
 mod syscall_id;
 pub mod utils;
@@ -12,6 +13,7 @@ use crate::fs::eventpoll::{sys_epoll_create1, sys_epoll_ctl, sys_epoll_pwait};
 use crate::fs::iov::IOVec;
 use crate::net::syscall::*;
 use core::convert::TryFrom;
+use flock::*;
 use fs::*;
 use log::{error, info};
 pub use process::CloneFlags;

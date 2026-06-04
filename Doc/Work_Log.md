@@ -37,6 +37,46 @@
 - `preload_payloads` 特性在迁移期保留，initramfs 仍通过 `flush_preload()` 写入 bash/busybox/LTP
 - 旧块设备根启动模型通过 `legacy_block_root` 特性保留
 
+### 工具盘扩容 + apk-tools 本地 repo 包管理
+
+**涉及文件：**
+- `os/Makefile` — `TOOLS_SIZE_RV/LA: 256→512MB`；`build_tools_disk` 新增拷贝 `sbin/*`、`etc/*`、`apk/`；新增 `tools-apk-rv/la` 目标下载 `apk-tools-static`、`alpine-keys`、示例包（zlib, ncurses）；新增 `tools-apk` 统一目标
+- `user/src/bin/init.rs` — 新增 `try_bind("/tools/sbin", "/sbin")` bind mount
+- `os/initramfs/common/etc/apk/` — 新增目录：`repositories`（指向 `edge/main`）、`keys/*.pub`（Alpine 官方签名公钥）
+- `os/initramfs/common/sbin/` — 新增空目录（bind mount 挂载点）
+
+**验证：**
+- `make rv64-kernel-build-only` ✅ (features: initramfs+preload_payloads)
+- `make la64-kernel-build-only --no-default-features --features comp,board_laqemu,block_virt_pci,log_off,initramfs,preload_payloads` ✅
+- QEMU rv64 启动测试 ✅ — 内核正常 boot，init 正确 bind /sbin，basic 测试跑过
+
+**备注：**
+- la64 编译需显式传递 `initramfs preload_payloads` 特性（la64 默认 `--no-default-features`）
+- apk 使用方法：
+  - `apk.static --db /tools/apk/db --initdb`（首次初始化）
+  - `apk.static --db /tools/apk/db --no-cache add /tools/apk/packages/zlib-*.apk`（离线安装）
+  - `apk.static --db /tools/apk/db update`（在线更新，需 QEMU user-net 网络通）
+- `/etc/apk/repositories` 在 initramfs 中（RamFS，重启不丢因为重建内核时重新生成），`--db /tools/apk/db` 指向工具盘确保包数据库持久化
+- `/tools/sbin` bind mount 当前为空（apk.static 放在 `/bin/`），需后续添加 `/sbin/apk` 软链接或直接使用 `/bin/apk.static`
+
+### 实现 sys_flock + 修复 apk 数据库找不到问题
+
+**涉及文件：**
+- `os/src/syscall/flock.rs` — 新增模块：per-inode advisory flock 实现（`LOCK_EX/LOCK_SH/LOCK_UN/LOCK_NB`），全局 `BTreeMap<(dev_id, inode_id), ()>` 锁表，支持非阻塞冲突返回 `EAGAIN`
+- `os/src/syscall/fs.rs` — 移除 `sys_flock` stub（原返回 `ENOSYS`）
+- `os/src/syscall/mod.rs` — 注册 `mod flock` 和 `use flock::*`
+- `os/initramfs/common/etc/apk/world` — 新增空文件（apk-tools 3.x 打开数据库时强制检查此文件，缺失返回 ENOENT）
+- `os/initramfs/common/etc/apk/repositories` — 新增本地源 `file:///tools/apk/packages`
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：**
+- `sys_flock` 当前只支持非阻塞锁（`LOCK_NB`），阻塞锁因 apk 使用 `LOCK_EX|LOCK_NB` 暂不需要，后续可用 `WaitQueue` 扩展
+- `/etc/apk/world` 在 initramfs（RamFS），不持久；如需持久化需在启动时拷贝到工具盘或 bind mount `/tools/etc/apk/world`
+- `syscall 258`（`riscv_hwprobe`）仍未实现，musl 调用后自动忽略返回的 ENOSYS，不影响 apk 功能
+
 ---
 
 
