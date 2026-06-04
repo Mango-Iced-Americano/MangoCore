@@ -23,14 +23,14 @@ prepare-cargo-config:
 	@test -f .cargo/config.toml || cp -f ../cargo-config/os/config.toml .cargo/config.toml
 	@test -f ../user/.cargo/config.toml || cp -f ../cargo-config/user/config.toml ../user/.cargo/config.toml
 
-rv64_all: prepare-cargo-config
+rv64_all: prepare-cargo-config tools-disk-rv
 	@echo "Building rv64"
 	@rustup override set $(RV_TOOLCHAIN)
 	cp ./src/lang_items.rs.rv ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
 	make ARCH=rv64 -f make/rv64.mk all MODE=${MODE}
 
-la64_all: prepare-cargo-config
+la64_all: prepare-cargo-config tools-disk-la
 	@echo "Building la64"
 	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs

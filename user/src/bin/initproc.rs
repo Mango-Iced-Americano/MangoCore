@@ -2079,8 +2079,8 @@ fn prepare_symlink(environ: &[*const u8]) {
         [ -e /lib/libm.so.6 ] || ln -s /glibc/lib/libm.so.6 /lib/libm.so.6; \
         [ -e /lib/tls_get_new-dtv_dso.so ] || ln -s /glibc/lib/tls_get_new-dtv_dso.so /lib/tls_get_new-dtv_dso.so; \
         [ -e ./libtls_get_new-dtv_dso.so ] || ln -s /glibc/lib/tls_get_new-dtv_dso.so ./libtls_get_new-dtv_dso.so; \
-        for f in /musl/lib/*.so*; do [ -e /lib/$$(basename \"$$f\") ] || ln -s \"$$f\" /lib/ 2>/dev/null; done; \
-        for f in /glibc/lib/*.so*; do [ -e /lib/$$(basename \"$$f\") ] || ln -s \"$$f\" /lib/ 2>/dev/null; done \
+        for f in /musl/lib/*.so*; do [ -e /lib/$(basename "$f") ] || ln -s "$f" /lib/ 2>/dev/null; done; \
+        for f in /glibc/lib/*.so*; do [ -e /lib/$(basename "$f") ] || ln -s "$f" /lib/ 2>/dev/null; done \
     \0";
     let ret = run_bash_cmd(lib_cmd, environ);
     println!("[initproc] lib linking done, exit={}", ret);
