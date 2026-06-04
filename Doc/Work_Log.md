@@ -4,6 +4,24 @@
 
 ## 2026-06-04
 
+### waitpid01 预期致命信号日志降噪
+
+**涉及文件：**
+- `os/src/task/signal/mod.rs` — SIGILL/SIGSEGV 默认动作只在同步 fault `si_code` 场景打印 `Exception(...) in application`，用户显式投递的同号信号只保留正常 wait status
+- `os/src/task/task.rs` — 新增带 `si_code` 的 pending signal 入队辅助
+- `os/src/hal/arch/riscv/trap/mod.rs` — 页错误/非法指令转 SIGSEGV/SIGILL 时写入 `SEGV_*`/`ILL_*` `si_code`
+- `os/src/hal/arch/loongarch64/trap/mod.rs` — 同步 la64 trap 到 signal 的 `si_code`
+- `.agents/skills/mango-worklog/references/harness-patterns.md` — 记录 wait/signal 用例误报内核异常的复用排查模式
+
+**验证：**
+- Docker `make rv64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅
+- Docker `make la64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅
+- rv64 heap_trace focused LTP `waitpid01`：musl/glibc 均 `passed 146 / failed 0 / broken 0`
+- la64 heap_trace focused LTP `waitpid01`：musl/glibc 均 `passed 146 / failed 0 / broken 0`
+- 双架构 focused 日志中未出现 `TFAIL`、`TBROK`、`PANIC`、`KERNEL EXCEPTION`、`HEAP OOM`、`Bad address`、`Exception(UserEnvCall)`、`Exception(Syscall)`
+
+**备注：** 真实 trap 触发的 SIGILL/SIGSEGV 仍携带同步 fault `si_code` 并保留异常诊断；本改动只抑制 `raise()/kill()` 这类用户投递信号触发的误报，避免自动 include 扫描把 `waitpid01` 误判为 panic 类用例。
+
 ### 支持 ns_last_pid 显式复用已释放 PID
 
 **涉及文件：**

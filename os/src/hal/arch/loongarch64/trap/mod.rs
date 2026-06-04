@@ -16,7 +16,7 @@ use crate::net::config::NET_INTERFACE;
 use crate::syscall::syscall;
 use crate::task::{
     check_oom_kill, current_task, current_trap_cx, current_user_token, do_signal, do_wake_expired,
-    suspend_current_and_run_next, Signals,
+    signal::SigInfo, suspend_current_and_run_next, Signals,
 };
 use core::arch::{asm, global_asm};
 use core::ptr::{addr_of, addr_of_mut};
@@ -237,11 +237,13 @@ pub fn trap_handler() -> ! {
                     MemoryError::BeyondEOF | MemoryError::BackingStoreFailure => {
                         inner.add_signal(Signals::SIGBUS);
                     }
-                    MemoryError::NoPermission
-                    | MemoryError::BadAddress
-                    | MemoryError::NotMapped => {
+                    MemoryError::NoPermission => {
                         inner.sigmask.remove(Signals::SIGSEGV);
-                        inner.add_signal(Signals::SIGSEGV);
+                        inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_ACCERR);
+                    }
+                    MemoryError::BadAddress | MemoryError::NotMapped => {
+                        inner.sigmask.remove(Signals::SIGSEGV);
+                        inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_MAPERR);
                     }
                     MemoryError::OutOfMemory => {
                         inner.pending_oom_kill = true;
@@ -252,7 +254,7 @@ pub fn trap_handler() -> ! {
                             other
                         );
                         inner.sigmask.remove(Signals::SIGSEGV);
-                        inner.add_signal(Signals::SIGSEGV);
+                        inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_MAPERR);
                     }
                 },
                 Ok(_) => {
@@ -279,14 +281,14 @@ pub fn trap_handler() -> ! {
             let task = current_task().unwrap();
             let mut inner = task.acquire_inner_lock();
             inner.sigmask.remove(Signals::SIGILL);
-            inner.add_signal(Signals::SIGILL);
+            inner.add_signal_with_code(Signals::SIGILL, SigInfo::ILL_ILLOPC);
         }
         Trap::Exception(Exception::AddressError) => {
             log::info!("[trap] trigger SIGSEGV from address error");
             let task = current_task().unwrap();
             let mut inner = task.acquire_inner_lock();
             inner.sigmask.remove(Signals::SIGSEGV);
-            inner.add_signal(Signals::SIGSEGV);
+            inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_MAPERR);
         }
         Trap::Interrupt(Interrupt::Timer) => {
             do_wake_expired();

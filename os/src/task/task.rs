@@ -428,6 +428,10 @@ impl TaskControlBlockInner {
     pub fn add_signal(&mut self, signal: Signals) {
         let _ = self.sigpending.enqueue_signal(signal, 0);
     }
+    /// 添加带 si_code 的信号，用于硬件异常转化出的同步 fault signal。
+    pub fn add_signal_with_code(&mut self, signal: Signals, si_code: u32) {
+        let _ = self.sigpending.enqueue_signal(signal, si_code as usize);
+    }
     /// 在进入陷阱时更新进程时间
     pub fn update_process_times_enter_trap(&mut self) {
         // 获取当前时间

@@ -841,26 +841,27 @@ pub fn do_signal() {
         match signal {
                 // caused by a specific instruction in user program, print log here before exit
                 Signals::SIGILL | Signals::SIGSEGV => {
-                    let scause = get_exception_cause();
-                    if signal == Signals::SIGILL {
-                        let stval = get_bad_instruction();
-                        warn!("[do_signal] process terminated due to {:?}", signal);
-                        println!(
-                        "[kernel] {:?} in application, instruction addr = {:#x}, bad instruction = {:#x}, core dumped.",
-                        scause,
-                        inner.get_trap_cx().gp.pc,
-                        stval,
-                        );
-                    } else {
-                        let stval = get_bad_addr();
-                        warn!("[do_signal] process terminated due to {:?}", signal);
-                        println!(
-                        "[kernel] {:?} in application, bad addr = {:#x}, bad instruction = {:#x}, core dumped.",
-                        scause,
-                        stval,
-                        inner.get_trap_cx().gp.pc,
-                        );
-                    };
+                    warn!("[do_signal] process terminated due to {:?}", signal);
+                    if pending.siginfo.is_sync_fault_for(signal) {
+                        let scause = get_exception_cause();
+                        if signal == Signals::SIGILL {
+                            let stval = get_bad_instruction();
+                            println!(
+                                "[kernel] {:?} in application, instruction addr = {:#x}, bad instruction = {:#x}, core dumped.",
+                                scause,
+                                inner.get_trap_cx().gp.pc,
+                                stval,
+                            );
+                        } else {
+                            let stval = get_bad_addr();
+                            println!(
+                                "[kernel] {:?} in application, bad addr = {:#x}, bad instruction = {:#x}, core dumped.",
+                                scause,
+                                stval,
+                                inner.get_trap_cx().gp.pc,
+                            );
+                        }
+                    }
                     drop(inner);
                     drop(sighand);
                     drop(task);
@@ -1099,7 +1100,7 @@ impl SigInfo {
     const FPE_FLTRES: u32 = 6;
     const FPE_FLTINV: u32 = 7;
     const FPE_FLTSUB: u32 = 8;
-    const ILL_ILLOPC: u32 = 1;
+    pub const ILL_ILLOPC: u32 = 1;
     const ILL_ILLOPN: u32 = 2;
     const ILL_ILLADR: u32 = 3;
     const ILL_ILLTRP: u32 = 4;
@@ -1107,8 +1108,8 @@ impl SigInfo {
     const ILL_PRVREG: u32 = 6;
     const ILL_COPROC: u32 = 7;
     const ILL_BADSTK: u32 = 8;
-    const SEGV_MAPERR: u32 = 1;
-    const SEGV_ACCERR: u32 = 2;
+    pub const SEGV_MAPERR: u32 = 1;
+    pub const SEGV_ACCERR: u32 = 2;
     const SEGV_BNDERR: u32 = 3;
     const SEGV_PKUERR: u32 = 4;
     const BUS_ADRALN: u32 = 1;
@@ -1122,4 +1123,12 @@ impl SigInfo {
     const CLD_TRAPPED: u32 = 4;
     const CLD_STOPPED: u32 = 5;
     const CLD_CONTINUED: u32 = 6;
+
+    pub fn is_sync_fault_for(&self, signal: Signals) -> bool {
+        match signal {
+            Signals::SIGILL => (Self::ILL_ILLOPC..=Self::ILL_BADSTK).contains(&self.si_code),
+            Signals::SIGSEGV => (Self::SEGV_MAPERR..=Self::SEGV_PKUERR).contains(&self.si_code),
+            _ => false,
+        }
+    }
 }
