@@ -45,4 +45,9 @@ impl Socket for NetlinkSocket {
         route::handle_netlink_msg(buf, self)
     }
     fn socket_r_ready(&self) -> bool { !self.recv_queue.lock().is_empty() }
+    fn push_netlink_message(&self, data: Vec<u8>) -> Result<(), SyscallErr> {
+        self.recv_queue.lock().push_back(data);
+        Ok(())
+    }
+    fn is_netlink_socket(&self) -> bool { true }
 }

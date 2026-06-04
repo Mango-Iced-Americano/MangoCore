@@ -340,6 +340,14 @@ pub trait Socket: Send + Sync {
     /// 不会调用 poll、不会睡眠、不会调度。成功时返回发送的字节数 (isize)。
     fn try_send(&self, buf: &[u8], _flags: MsgFlags) -> Result<isize, SyscallErr>;
 
+    fn push_netlink_message(&self, _data: Vec<u8>) -> Result<(), SyscallErr> {
+        Err(SyscallErr::EOPNOTSUPP)
+    }
+
+    fn is_netlink_socket(&self) -> bool {
+        false
+    }
+
     /// poll/select 相关：是否可读（不阻塞）
     fn socket_r_ready(&self) -> bool {
         true

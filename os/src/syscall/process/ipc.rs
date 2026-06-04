@@ -1,11 +1,28 @@
 use super::mm::{sys_mmap, sys_munmap};
-use crate::mm::{copy_from_user, copy_from_user_array, copy_to_user, copy_to_user_array, MapFlags};
+use crate::fs::{
+    dev::DEV_FS,
+    vfs::{
+        event::{EPollEvent, EventWaitQueue},
+        File, FileFlags, FilePrivateData, FileSystem, FileType, IndexNode, InodeMode, Metadata,
+    },
+};
+use crate::mm::{
+    copy_from_user, copy_from_user_array, copy_to_user, copy_to_user_array, translated_str,
+    MapFlags,
+};
+use crate::net::socket::SocketFile;
 use crate::syscall::errno::*;
-use crate::task::{current_task, current_user_token, signal::Signals, WaitQueue, WaitResult};
+use crate::task::{
+    current_task, current_user_token,
+    signal::{send_process_signal_info, SigInfo, Signals},
+    ProcessManager, WaitQueue, WaitResult,
+};
 use crate::timer::{current_timespec, TimeSpec};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::any::Any;
 use core::fmt::Write;
 use core::mem::size_of;
 use lazy_static::lazy_static;
@@ -61,6 +78,22 @@ const MSGTQL: usize = 4096;
 
 const SIGEV_SIGNAL: i32 = 0;
 const SIGEV_NONE: i32 = 1;
+const SIGEV_THREAD: i32 = 2;
+const MQ_NOTIFY_COOKIE_LEN: usize = 32;
+const MQ_NOTIFY_WOKENUP: u8 = 1;
+const MQ_NOTIFY_REMOVED: u8 = 2;
+
+const MQ_O_ACCMODE: u32 = FileFlags::O_ACCMODE.bits();
+const MQ_O_CREAT: u32 = FileFlags::O_CREAT.bits();
+const MQ_O_EXCL: u32 = FileFlags::O_EXCL.bits();
+const MQ_O_NONBLOCK: u32 = FileFlags::O_NONBLOCK.bits();
+const MQ_O_CLOEXEC: u32 = FileFlags::O_CLOEXEC.bits();
+const MQ_OPEN_VALID_FLAGS: u32 =
+    MQ_O_ACCMODE | MQ_O_CREAT | MQ_O_EXCL | MQ_O_NONBLOCK | MQ_O_CLOEXEC;
+const MQ_DEFAULT_MAXMSG: i64 = 10;
+const MQ_DEFAULT_MSGSIZE: i64 = 8192;
+const MQ_MAX_MAXMSG: i64 = 1024;
+const MQ_MAX_MSGSIZE: i64 = 65536;
 
 #[derive(Clone, Copy)]
 struct MsgLimits {
@@ -2256,14 +2289,701 @@ pub fn sys_msgctl(msqid: i32, cmd: usize, buf: usize) -> isize {
 
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
+struct LinuxMqAttr {
+    mq_flags: i64,
+    mq_maxmsg: i64,
+    mq_msgsize: i64,
+    mq_curmsgs: i64,
+}
+
+impl LinuxMqAttr {
+    fn new(maxmsg: i64, msgsize: i64) -> Self {
+        Self {
+            mq_flags: 0,
+            mq_maxmsg: maxmsg,
+            mq_msgsize: msgsize,
+            mq_curmsgs: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
 struct MqSigeventHeader {
     sigev_value: usize,
     sigev_signo: i32,
     sigev_notify: i32,
 }
 
-pub fn sys_mq_notify(_mqdes: usize, sevp: usize) -> isize {
-    if sevp != 0 {
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+struct MqAbsTimeout {
+    tv_sec: i64,
+    tv_nsec: i64,
+}
+
+#[derive(Debug)]
+struct MqMessage {
+    prio: u32,
+    data: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+enum MqNotification {
+    None,
+    Signal {
+        owner_pid: usize,
+        signo: usize,
+        value: usize,
+    },
+    Thread {
+        netlink_fd: usize,
+        cookie: [u8; MQ_NOTIFY_COOKIE_LEN],
+    },
+}
+
+#[derive(Debug)]
+struct MqQueueInner {
+    attr: LinuxMqAttr,
+    messages: VecDeque<MqMessage>,
+    notification: Option<MqNotification>,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+}
+
+struct MqQueue {
+    inner: Mutex<MqQueueInner>,
+    read_wait: EventWaitQueue,
+    write_wait: EventWaitQueue,
+    metadata: Metadata,
+}
+
+impl core::fmt::Debug for MqQueue {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let inner = self.inner.lock();
+        f.debug_struct("MqQueue")
+            .field("maxmsg", &inner.attr.mq_maxmsg)
+            .field("msgsize", &inner.attr.mq_msgsize)
+            .field("curmsgs", &inner.messages.len())
+            .finish()
+    }
+}
+
+impl MqQueue {
+    fn new(attr: LinuxMqAttr, mode: u32, uid: u32, gid: u32) -> Self {
+        let inode_mode = InodeMode::S_IFREG | InodeMode::from_bits_truncate(mode & 0o777);
+        let mut metadata = Metadata::new(FileType::File, inode_mode);
+        metadata.uid = uid;
+        metadata.gid = gid;
+        Self {
+            inner: Mutex::new(MqQueueInner {
+                attr,
+                messages: VecDeque::new(),
+                notification: None,
+                uid,
+                gid,
+                mode: mode & 0o777,
+            }),
+            read_wait: EventWaitQueue::new(),
+            write_wait: EventWaitQueue::new(),
+            metadata,
+        }
+    }
+
+    fn snapshot_attr(&self, flags: FileFlags) -> LinuxMqAttr {
+        let inner = self.inner.lock();
+        LinuxMqAttr {
+            mq_flags: if flags.contains(FileFlags::O_NONBLOCK) {
+                MQ_O_NONBLOCK as i64
+            } else {
+                0
+            },
+            mq_maxmsg: inner.attr.mq_maxmsg,
+            mq_msgsize: inner.attr.mq_msgsize,
+            mq_curmsgs: inner.messages.len() as i64,
+        }
+    }
+
+    fn notify_readable(&self) {
+        self.read_wait
+            .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM);
+    }
+
+    fn notify_writable(&self) {
+        self.write_wait
+            .notify_events_all(EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM);
+    }
+}
+
+struct MqDescriptor {
+    queue: Arc<MqQueue>,
+}
+
+impl core::fmt::Debug for MqDescriptor {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("MqDescriptor").finish()
+    }
+}
+
+impl IndexNode for MqDescriptor {
+    fn metadata(&self) -> Result<Metadata, crate::utils::error::SyscallErr> {
+        Ok(self.queue.metadata.clone())
+    }
+
+    fn poll(&self, _private_data: &FilePrivateData) -> Result<usize, crate::utils::error::SyscallErr> {
+        let inner = self.queue.inner.lock();
+        let mut events = EPollEvent::empty();
+        if !inner.messages.is_empty() {
+            events |= EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM;
+        }
+        if inner.messages.len() < inner.attr.mq_maxmsg as usize {
+            events |= EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM;
+        }
+        Ok(events.bits())
+    }
+
+    fn read_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(self.queue.read_wait.wait_queue())
+    }
+
+    fn write_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(self.queue.write_wait.wait_queue())
+    }
+
+    fn read_event_queue(&self) -> Option<&EventWaitQueue> {
+        Some(&self.queue.read_wait)
+    }
+
+    fn write_event_queue(&self) -> Option<&EventWaitQueue> {
+        Some(&self.queue.write_wait)
+    }
+
+    fn fs(&self) -> Arc<dyn FileSystem> {
+        DEV_FS.clone()
+    }
+
+    fn is_stream(&self) -> bool {
+        true
+    }
+
+    fn as_any_ref(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[derive(Debug)]
+struct MqRegistry {
+    queues: BTreeMap<String, Arc<MqQueue>>,
+}
+
+lazy_static! {
+    static ref MQ_REGISTRY: Mutex<MqRegistry> = Mutex::new(MqRegistry {
+        queues: BTreeMap::new(),
+    });
+}
+
+fn mq_name_from_user(name: *const u8) -> Result<String, isize> {
+    let name = translated_str(current_user_token(), name)?;
+    if name.is_empty() {
+        return Err(EINVAL);
+    }
+    if name.as_bytes().contains(&b'/') {
+        return Err(EACCES);
+    }
+    if name.len() + 1 > 256 {
+        return Err(ENAMETOOLONG);
+    }
+    Ok(name)
+}
+
+fn mq_attr_from_user(attr: usize) -> Result<LinuxMqAttr, isize> {
+    if attr == 0 {
+        return Ok(LinuxMqAttr::new(MQ_DEFAULT_MAXMSG, MQ_DEFAULT_MSGSIZE));
+    }
+    let mut user_attr = LinuxMqAttr::new(0, 0);
+    copy_from_user(
+        current_user_token(),
+        attr as *const LinuxMqAttr,
+        &mut user_attr as *mut LinuxMqAttr,
+    )?;
+    if user_attr.mq_maxmsg <= 0
+        || user_attr.mq_maxmsg > MQ_MAX_MAXMSG
+        || user_attr.mq_msgsize <= 0
+        || user_attr.mq_msgsize > MQ_MAX_MSGSIZE
+    {
+        return Err(EINVAL);
+    }
+    user_attr.mq_flags = 0;
+    user_attr.mq_curmsgs = 0;
+    Ok(user_attr)
+}
+
+fn mq_file_flags(oflag: u32) -> Result<FileFlags, isize> {
+    if (oflag & !MQ_OPEN_VALID_FLAGS) != 0 {
+        return Err(EINVAL);
+    }
+    let access = oflag & MQ_O_ACCMODE;
+    let mut flags = match access {
+        0 => FileFlags::O_RDONLY,
+        1 => FileFlags::O_WRONLY,
+        2 => FileFlags::O_RDWR,
+        _ => return Err(EINVAL),
+    };
+    if (oflag & MQ_O_NONBLOCK) != 0 {
+        flags |= FileFlags::O_NONBLOCK;
+    }
+    if (oflag & MQ_O_CLOEXEC) != 0 {
+        flags |= FileFlags::O_CLOEXEC;
+    }
+    Ok(flags)
+}
+
+fn mq_requested_access(oflag: u32) -> u32 {
+    match oflag & MQ_O_ACCMODE {
+        0 => 0o4,
+        1 => 0o2,
+        2 => 0o6,
+        _ => 0,
+    }
+}
+
+fn has_mq_permission(inner: &MqQueueInner, requested: u32) -> bool {
+    if requested == 0 {
+        return true;
+    }
+    let (euid, egid) = current_ipc_ids();
+    if euid == 0 {
+        return true;
+    }
+    let shift = if euid == inner.uid {
+        6
+    } else if egid == inner.gid {
+        3
+    } else {
+        0
+    };
+    let available = (inner.mode >> shift) & 0o7;
+    available & requested == requested
+}
+
+fn mq_netlink_socket_from_fd(fd: usize) -> Result<File, isize> {
+    let task = current_task().ok_or(EBADF)?;
+    let files = task.process.files();
+    let fd_table = files.lock();
+    let file = fd_table.get_file(fd).map_err(|err| -(err as isize))?;
+    let file = file.try_clone().ok_or(EBADF)?;
+    let Some(socket_file) = file.inode_as_any_ref().downcast_ref::<SocketFile>() else {
+        return Err(EBADF);
+    };
+    if !socket_file.inner.is_netlink_socket() {
+        return Err(EBADF);
+    }
+    Ok(file)
+}
+
+fn mq_send_netlink_cookie(fd: usize, cookie: [u8; MQ_NOTIFY_COOKIE_LEN], code: u8) {
+    let Ok(file) = mq_netlink_socket_from_fd(fd) else {
+        return;
+    };
+    let Some(socket_file) = file.inode_as_any_ref().downcast_ref::<SocketFile>() else {
+        return;
+    };
+    let mut data = Vec::new();
+    if data.try_reserve(MQ_NOTIFY_COOKIE_LEN).is_err() {
+        return;
+    }
+    data.extend_from_slice(&cookie);
+    data[MQ_NOTIFY_COOKIE_LEN - 1] = code;
+    let _ = socket_file.inner.push_netlink_message(data);
+}
+
+fn mq_deliver_notification(notification: MqNotification) {
+    match notification {
+        MqNotification::None => {}
+        MqNotification::Signal {
+            owner_pid,
+            signo,
+            value,
+        } => {
+            let Ok(signal) = Signals::from_signum(signo) else {
+                return;
+            };
+            let Some(process) = ProcessManager::find_process(owner_pid) else {
+                return;
+            };
+            let siginfo = SigInfo::new_with_sender_value(
+                signo,
+                0,
+                SigInfo::SI_MESGQ as usize,
+                owner_pid,
+                value,
+            );
+            send_process_signal_info(&process, signal, siginfo);
+        }
+        MqNotification::Thread { netlink_fd, cookie } => {
+            mq_send_netlink_cookie(netlink_fd, cookie, MQ_NOTIFY_WOKENUP);
+        }
+    }
+}
+
+fn mq_descriptor_from_fd(mqdes: usize) -> Result<(File, Arc<MqQueue>), isize> {
+    let task = current_task().ok_or(EBADF)?;
+    let file = {
+        let files = task.process.files();
+        let fd_table = files.lock();
+        let file = fd_table.get_file(mqdes).map_err(|err| -(err as isize))?;
+        file.try_clone().ok_or(EBADF)?
+    };
+    let queue = {
+        let Some(desc) = file.inode_as_any_ref().downcast_ref::<MqDescriptor>() else {
+            return Err(EBADF);
+        };
+        desc.queue.clone()
+    };
+    Ok((file, queue))
+}
+
+fn mq_timeout_deadline(timeout: usize) -> Result<Option<TimeSpec>, isize> {
+    if timeout == 0 {
+        return Ok(None);
+    }
+    let mut ts = MqAbsTimeout {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    copy_from_user(
+        current_user_token(),
+        timeout as *const MqAbsTimeout,
+        &mut ts as *mut MqAbsTimeout,
+    )?;
+    if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 {
+        return Err(EINVAL);
+    }
+    let realtime_deadline = TimeSpec {
+        tv_sec: ts.tv_sec as usize,
+        tv_nsec: ts.tv_nsec as usize,
+    };
+    let now_realtime = current_timespec();
+    let duration = if realtime_deadline > now_realtime {
+        realtime_deadline - now_realtime
+    } else {
+        TimeSpec::new()
+    };
+    Ok(Some(TimeSpec::now() + duration))
+}
+
+fn mq_wait_send_ready(queue: &MqQueue, abs_timeout: usize) -> isize {
+    let deadline = match mq_timeout_deadline(abs_timeout) {
+        Ok(deadline) => deadline,
+        Err(errno) => return errno,
+    };
+    let wait_queue = queue.write_wait.wait_queue();
+    let result = match deadline {
+        Some(deadline) => WaitQueue::wait_event_interruptible_timeout(wait_queue, || {
+            let inner = queue.inner.lock();
+            if inner.messages.len() < inner.attr.mq_maxmsg as usize {
+                Some(SUCCESS)
+            } else {
+                None
+            }
+        }, deadline),
+        None => WaitQueue::wait_event_interruptible(wait_queue, || {
+            let inner = queue.inner.lock();
+            if inner.messages.len() < inner.attr.mq_maxmsg as usize {
+                Some(SUCCESS)
+            } else {
+                None
+            }
+        }),
+    };
+    match result {
+        WaitResult::Ready(_) => SUCCESS,
+        WaitResult::Interrupted => EINTR,
+        WaitResult::TimedOut => ETIMEDOUT,
+    }
+}
+
+fn mq_wait_receive_ready(queue: &MqQueue, abs_timeout: usize) -> isize {
+    let deadline = match mq_timeout_deadline(abs_timeout) {
+        Ok(deadline) => deadline,
+        Err(errno) => return errno,
+    };
+    let wait_queue = queue.read_wait.wait_queue();
+    let result = match deadline {
+        Some(deadline) => WaitQueue::wait_event_interruptible_timeout(wait_queue, || {
+            let inner = queue.inner.lock();
+            if !inner.messages.is_empty() {
+                Some(SUCCESS)
+            } else {
+                None
+            }
+        }, deadline),
+        None => WaitQueue::wait_event_interruptible(wait_queue, || {
+            let inner = queue.inner.lock();
+            if !inner.messages.is_empty() {
+                Some(SUCCESS)
+            } else {
+                None
+            }
+        }),
+    };
+    match result {
+        WaitResult::Ready(_) => SUCCESS,
+        WaitResult::Interrupted => EINTR,
+        WaitResult::TimedOut => ETIMEDOUT,
+    }
+}
+
+pub fn sys_mq_open(name: *const u8, oflag: u32, _mode: u32, attr: usize) -> isize {
+    let name = match mq_name_from_user(name) {
+        Ok(name) => name,
+        Err(errno) => return errno,
+    };
+    let file_flags = match mq_file_flags(oflag) {
+        Ok(flags) => flags,
+        Err(errno) => return errno,
+    };
+
+    let mut created = false;
+    let queue = {
+        let mut registry = MQ_REGISTRY.lock();
+        if let Some(queue) = registry.queues.get(&name) {
+            if (oflag & (MQ_O_CREAT | MQ_O_EXCL)) == (MQ_O_CREAT | MQ_O_EXCL) {
+                return EEXIST;
+            }
+            if !has_mq_permission(&queue.inner.lock(), mq_requested_access(oflag)) {
+                return EACCES;
+            }
+            queue.clone()
+        } else {
+            if (oflag & MQ_O_CREAT) == 0 {
+                return ENOENT;
+            }
+            let attr = match mq_attr_from_user(attr) {
+                Ok(attr) => attr,
+                Err(errno) => return errno,
+            };
+            let (uid, gid) = current_ipc_ids();
+            let queue = Arc::new(MqQueue::new(attr, _mode, uid, gid));
+            registry.queues.insert(name.clone(), queue.clone());
+            created = true;
+            queue
+        }
+    };
+
+    let inode = Arc::new(MqDescriptor {
+        queue: queue.clone(),
+    }) as Arc<dyn IndexNode>;
+    let file = match File::new(inode, file_flags) {
+        Ok(file) => file,
+        Err(err) => {
+            if created {
+                MQ_REGISTRY.lock().queues.remove(&name);
+            }
+            return -(err as isize);
+        }
+    };
+
+    let task = current_task().unwrap();
+    let ret = match task
+        .process
+        .files()
+        .lock()
+        .alloc_fd(file, (oflag & MQ_O_CLOEXEC) != 0)
+    {
+        Ok(fd) => fd as isize,
+        Err(err) => {
+            if created {
+                MQ_REGISTRY.lock().queues.remove(&name);
+            }
+            -(err as isize)
+        }
+    };
+    ret
+}
+
+pub fn sys_mq_unlink(name: *const u8) -> isize {
+    let name = match mq_name_from_user(name) {
+        Ok(name) => name,
+        Err(errno) => return errno,
+    };
+    let mut registry = MQ_REGISTRY.lock();
+    let Some(queue) = registry.queues.get(&name) else {
+        return ENOENT;
+    };
+    if !has_mq_permission(&queue.inner.lock(), 0o2) {
+        return EACCES;
+    }
+    registry.queues.remove(&name);
+    SUCCESS
+}
+
+pub fn sys_mq_timedsend(
+    mqdes: usize,
+    msg_ptr: usize,
+    msg_len: usize,
+    msg_prio: u32,
+    abs_timeout: usize,
+) -> isize {
+    let (file, queue) = match mq_descriptor_from_fd(mqdes) {
+        Ok(v) => v,
+        Err(errno) => return errno,
+    };
+    if file.writable().is_err() {
+        return EBADF;
+    }
+
+    let msgsize = queue.inner.lock().attr.mq_msgsize as usize;
+    if msg_len > msgsize {
+        return EMSGSIZE;
+    }
+
+    let token = current_user_token();
+    let mut data = Vec::new();
+    if data.try_reserve(msg_len).is_err() {
+        return ENOMEM;
+    }
+    data.resize(msg_len, 0);
+    if let Err(errno) = copy_from_user_array(token, msg_ptr as *const u8, data.as_mut_ptr(), msg_len)
+    {
+        return errno;
+    }
+
+    let notification = loop {
+        let mut inner = queue.inner.lock();
+        if inner.messages.len() >= inner.attr.mq_maxmsg as usize {
+            if file.is_nonblock() {
+                return EAGAIN;
+            }
+            drop(inner);
+            let errno = mq_wait_send_ready(&queue, abs_timeout);
+            if errno != SUCCESS {
+                return errno;
+            }
+            continue;
+        }
+        let pos = inner
+            .messages
+            .iter()
+            .position(|message| message.prio < msg_prio)
+            .unwrap_or(inner.messages.len());
+        let was_empty = inner.messages.is_empty();
+        inner.messages.insert(pos, MqMessage { prio: msg_prio, data });
+        break if was_empty {
+            inner.notification.take()
+        } else {
+            None
+        };
+    };
+
+    queue.notify_readable();
+    if let Some(notification) = notification {
+        mq_deliver_notification(notification);
+    }
+    SUCCESS
+}
+
+pub fn sys_mq_timedreceive(
+    mqdes: usize,
+    msg_ptr: usize,
+    msg_len: usize,
+    msg_prio: *mut u32,
+    abs_timeout: usize,
+) -> isize {
+    let (file, queue) = match mq_descriptor_from_fd(mqdes) {
+        Ok(v) => v,
+        Err(errno) => return errno,
+    };
+    if file.readable().is_err() {
+        return EBADF;
+    }
+
+    let msgsize = queue.inner.lock().attr.mq_msgsize as usize;
+    if msg_len < msgsize {
+        return EMSGSIZE;
+    }
+
+    let message = loop {
+        let mut inner = queue.inner.lock();
+        match inner.messages.pop_front() {
+            Some(message) => break message,
+            None => {
+                if file.is_nonblock() {
+                    return EAGAIN;
+                }
+                drop(inner);
+                let errno = mq_wait_receive_ready(&queue, abs_timeout);
+                if errno != SUCCESS {
+                    return errno;
+                }
+            }
+        }
+    };
+
+    let token = current_user_token();
+    if let Err(errno) =
+        copy_to_user_array(token, message.data.as_ptr(), msg_ptr as *mut u8, message.data.len())
+    {
+        return errno;
+    }
+    if !msg_prio.is_null() {
+        if let Err(errno) = copy_to_user(token, &message.prio as *const u32, msg_prio) {
+            return errno;
+        }
+    }
+
+    queue.notify_writable();
+    message.data.len() as isize
+}
+
+pub fn sys_mq_getsetattr(mqdes: usize, newattr: usize, oldattr: usize) -> isize {
+    let (file, queue) = match mq_descriptor_from_fd(mqdes) {
+        Ok(v) => v,
+        Err(errno) => return errno,
+    };
+
+    if oldattr != 0 {
+        let snapshot = queue.snapshot_attr(file.flags());
+        if let Err(errno) = copy_to_user(
+            current_user_token(),
+            &snapshot as *const LinuxMqAttr,
+            oldattr as *mut LinuxMqAttr,
+        ) {
+            return errno;
+        }
+    }
+
+    if newattr != 0 {
+        let mut requested = LinuxMqAttr::new(0, 0);
+        if let Err(errno) = copy_from_user(
+            current_user_token(),
+            newattr as *const LinuxMqAttr,
+            &mut requested as *mut LinuxMqAttr,
+        ) {
+            return errno;
+        }
+        if (requested.mq_flags as u32) & !MQ_O_NONBLOCK != 0 {
+            return EINVAL;
+        }
+        let mut flags = file.flags();
+        if (requested.mq_flags as u32 & MQ_O_NONBLOCK) != 0 {
+            flags |= FileFlags::O_NONBLOCK;
+        } else {
+            flags.remove(FileFlags::O_NONBLOCK);
+        }
+        if let Err(err) = file.set_flags(flags) {
+            return -(err as isize);
+        }
+    }
+
+    SUCCESS
+}
+
+pub fn sys_mq_notify(mqdes: usize, sevp: usize) -> isize {
+    let notification = if sevp == 0 {
+        None
+    } else {
         let mut event = MqSigeventHeader {
             sigev_value: 0,
             sigev_signo: 0,
@@ -2277,16 +2997,61 @@ pub fn sys_mq_notify(_mqdes: usize, sevp: usize) -> isize {
             return errno;
         }
 
+        let owner_pid = current_task().map(|task| task.pid()).unwrap_or(0);
         match event.sigev_notify {
-            SIGEV_NONE => {}
+            SIGEV_NONE => Some(MqNotification::None),
             SIGEV_SIGNAL => {
                 if Signals::from_signum(event.sigev_signo as usize).is_err() {
                     return EINVAL;
                 }
+                Some(MqNotification::Signal {
+                    owner_pid,
+                    signo: event.sigev_signo as usize,
+                    value: event.sigev_value,
+                })
+            }
+            SIGEV_THREAD => {
+                if event.sigev_signo < 0 || event.sigev_value == 0 {
+                    return EBADF;
+                }
+                let mut cookie = [0u8; MQ_NOTIFY_COOKIE_LEN];
+                if let Err(errno) = copy_from_user_array(
+                    current_user_token(),
+                    event.sigev_value as *const u8,
+                    cookie.as_mut_ptr(),
+                    MQ_NOTIFY_COOKIE_LEN,
+                ) {
+                    return errno;
+                }
+                if mq_netlink_socket_from_fd(event.sigev_signo as usize).is_err() {
+                    return EBADF;
+                }
+                Some(MqNotification::Thread {
+                    netlink_fd: event.sigev_signo as usize,
+                    cookie,
+                })
             }
             _ => return EINVAL,
         }
+    };
+
+    let (_, queue) = match mq_descriptor_from_fd(mqdes) {
+        Ok(v) => v,
+        Err(errno) => return errno,
+    };
+
+    if notification.is_none() {
+        let removed = queue.inner.lock().notification.take();
+        if let Some(MqNotification::Thread { netlink_fd, cookie }) = removed {
+            mq_send_netlink_cookie(netlink_fd, cookie, MQ_NOTIFY_REMOVED);
+        }
+        return SUCCESS;
     }
 
-    ENOSYS
+    let mut inner = queue.inner.lock();
+    if inner.notification.is_some() {
+        return EBUSY;
+    }
+    inner.notification = notification;
+    SUCCESS
 }

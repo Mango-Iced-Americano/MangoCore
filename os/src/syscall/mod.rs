@@ -176,7 +176,12 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_SETPRIORITY => "setpriority",
         SYSCALL_GETPRIORITY => "getpriority",
         SYSCALL_SYSINFO => "sysinfo",
+        SYSCALL_MQ_OPEN => "mq_open",
+        SYSCALL_MQ_UNLINK => "mq_unlink",
+        SYSCALL_MQ_TIMEDSEND => "mq_timedsend",
+        SYSCALL_MQ_TIMEDRECEIVE => "mq_timedreceive",
         SYSCALL_MQ_NOTIFY => "mq_notify",
+        SYSCALL_MQ_GETSETATTR => "mq_getsetattr",
         SYSCALL_MSGGET => "msgget",
         SYSCALL_MSGCTL => "msgctl",
         SYSCALL_MSGRCV => "msgrcv",
@@ -617,7 +622,16 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_GETPRIORITY => sys_getpriority(args[0], args[1]),
         SYSCALL_GETTID => sys_gettid(),
         SYSCALL_SYSINFO => sys_sysinfo(args[0] as *mut Sysinfo),
+        SYSCALL_MQ_OPEN => sys_mq_open(args[0] as *const u8, args[1] as u32, args[2] as u32, args[3]),
+        SYSCALL_MQ_UNLINK => sys_mq_unlink(args[0] as *const u8),
+        SYSCALL_MQ_TIMEDSEND => {
+            sys_mq_timedsend(args[0], args[1], args[2], args[3] as u32, args[4])
+        }
+        SYSCALL_MQ_TIMEDRECEIVE => {
+            sys_mq_timedreceive(args[0], args[1], args[2], args[3] as *mut u32, args[4])
+        }
         SYSCALL_MQ_NOTIFY => sys_mq_notify(args[0], args[1]),
+        SYSCALL_MQ_GETSETATTR => sys_mq_getsetattr(args[0], args[1], args[2]),
         SYSCALL_MSGGET => sys_msgget(args[0] as isize, args[1]),
         SYSCALL_MSGCTL => sys_msgctl(args[0] as i32, args[1], args[2]),
         SYSCALL_MSGRCV => sys_msgrcv(args[0] as i32, args[1], args[2], args[3] as isize, args[4]),

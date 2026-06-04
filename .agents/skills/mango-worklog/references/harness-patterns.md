@@ -175,6 +175,13 @@
 - **教训**: signal frame 是 libc 可见 ABI，不能按内核内部 bitset 大小直觉拼结构；涉及 `ucontext_t`、`mcontext_t`、`sigset_t` 的偏移时，优先核对“总 ABI 保留区大小”，再判断寄存器数组内容是否需要重排。
 - **相关文件**: `os/src/hal/arch/riscv/trap/context.rs`, `os/src/hal/arch/loongarch64/trap/context.rs`, `os/src/task/signal/mod.rs`, `os/src/syscall/process/signal.rs`
 
+## POSIX mqueue libc/syscall ABI
+
+- **根因**: POSIX API 要求用户传 `/name`，但 Linux syscall 层接收的是去掉前导 `/` 的裸 name；同时 `mq_timedsend/mq_timedreceive` 的 timeout 是 `CLOCK_REALTIME` 绝对时间，不能直接交给内核单调时间等待队列。`mq_notify(SIGEV_THREAD)` 也不是普通 signal，glibc/musl 会把 32 字节 cookie 和 netlink fd 交给内核，等待内核把 cookie 写回 netlink socket 后再触发用户 callback。
+- **修复**: mqueue syscall 层按裸 name 校验并返回 Linux errno；timeout 先用 realtime now 计算 duration，再转成内核 `TimeSpec::now()` deadline；`SIGEV_SIGNAL` 用 `SI_MESGQ` siginfo 投递，`SIGEV_THREAD` 复制 32 字节 cookie 并在队列空转非空时写回 netlink recv queue，通知触发后一次性清除注册。
+- **教训**: 不要直接按 POSIX libc API 形态实现内核 syscall 入参；mqueue 的 name、timeout 和 notify 都经过 libc 包装，LTP 同时覆盖 musl/glibc，必须验证双 libc。
+- **相关文件**: `os/src/syscall/process/ipc.rs`, `os/src/net/socket/mod.rs`, `os/src/net/socket/netlink/mod.rs`
+
 ## 网络
 
 ### 硬编码 IPv4 地址替换为 net_core 动态查询

@@ -4,6 +4,29 @@
 
 ## 2026-06-04
 
+### 实现 POSIX mqueue 核心 syscall 与通知语义
+
+**涉及文件：**
+- `os/src/syscall/syscall_id.rs` — 注册 `mq_open/mq_unlink/mq_timedsend/mq_timedreceive/mq_getsetattr` syscall id
+- `os/src/syscall/mod.rs` — 接入 mqueue syscall 分发与 syscall name
+- `os/src/syscall/process/mod.rs` — 导出 mqueue syscall 入口
+- `os/src/syscall/process/ipc.rs` — 新增内存态 POSIX mqueue registry、属性/权限检查、阻塞收发、绝对 realtime timeout 转内核等待 deadline、`mq_notify` 一次性通知
+- `os/src/net/socket/mod.rs` — 为 socket trait 增加最小 netlink 通知投递接口与 netlink socket 判别
+- `os/src/net/socket/netlink/mod.rs` — 允许 mqueue `SIGEV_THREAD` 往已有 netlink socket recv queue 推送 32 字节 cookie
+- `Doc/Work_Log.md` — 记录本轮非 fs/net LTP 适配与验证
+- `.agents/skills/mango-worklog/references/harness-patterns.md` — 沉淀 POSIX mqueue libc/syscall ABI 经验
+
+**验证：**
+- `docker compose exec --workdir /app/os os-dev make rv64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅
+- rv64 heap_trace focused LTP `mq_open01,mq_timedsend01,mq_timedreceive01,mq_unlink01`：`mq_timedreceive01` musl/glibc 均 `passed 30 / failed 0 / broken 0`；`mq_timedsend01` 均 `passed 34 / failed 0 / broken 0`；`mq_unlink01` 均 `passed 4 / failed 0 / broken 0`；`mq_open01` 非 ProcFS 语义均通过，仅剩 `/proc/sys/fs/mqueue/queues_max` 缺失导致 `passed 9 / failed 0 / broken 1`
+- rv64 heap_trace focused LTP `mq_notify01,mq_notify02,mq_notify03`：musl/glibc 均 0 failed/0 broken，`mq_notify03` 不再 timeout
+- `docker compose exec --workdir /app/os os-dev make la64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅
+- la64 heap_trace focused LTP `mq_open01,mq_timedsend01,mq_timedreceive01,mq_unlink01`：结果与 rv64 一致，仅 `mq_open01` 的 ProcFS `queues_max` 子项 broken
+- la64 heap_trace focused LTP `mq_notify01,mq_notify02,mq_notify03`：musl/glibc 均 0 failed/0 broken
+- 双架构 focused 日志未出现 `PANIC/KERNEL EXCEPTION/HEAP OOM/Test timeouted/Unsupported syscall`
+
+**备注：** `mq_open01` 剩余 broken 依赖 `/proc/sys/fs/mqueue/queues_max`，属于 ProcFS/sysctl 扩展项，本轮按非 fs/net 适配原则暂不处理；为支持 `SIGEV_THREAD` 通知，netlink 改动仅限已有 socket trait 上的最小队列投递钩子。
+
 ### 放开已验证通过的 prctl05 LTP 用例
 
 **涉及文件：**
