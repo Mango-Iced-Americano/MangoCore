@@ -231,6 +231,13 @@
 - **教训**: eventfd/futex 名下的失败不一定代表对应 syscall 错误；先读 TCONF 原因和测试依赖，再决定是补内核能力、补镜像依赖，还是作为环境项过滤。
 - **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`
 
+## LTP suite 临时目录隔离与 times CPU accounting
+
+- **根因**: suite 模式连续跑 glibc/musl 时共用 `/tmp`，checkpoint/futex 临时文件和状态可能在长序列中互相影响；同时旧 CPU accounting 只在 timer trap 离开时累计 `ru_stime`，普通 syscall 内核时间不可见，`times()` 再向下取整会把非零亚 tick 时间变成 0，表现为 `times03` 偶发 `tms_stime = 0` 或 la64 被外层 30s timeout 误杀。
+- **修复**: initproc 给每个 libc 传独立 tmpdir；la64 suite runner 保留更宽的 60s 单例外层超时；任务调度出前结算当前内核态时间，调度入时重置内核态计时起点，回用户态/退出前补齐最后一段系统态时间；`times()` 对非零 CPU 时间向上折算 USER_HZ tick。
+- **教训**: `times03` 这类用例同时覆盖 harness 速度、CPU accounting 和 tick 换算，不要直接跳过；先看 `tms_utime/stime/cutime/cstime` 哪一项异常，再区分“测试超时窗口不足”和“内核记账缺失”。
+- **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`, `os/src/task/task.rs`, `os/src/task/mod.rs`, `os/src/task/processor.rs`, `os/src/syscall/process/time.rs`
+
 ## 网络
 
 ### 硬编码 IPv4 地址替换为 net_core 动态查询

@@ -1070,5 +1070,12 @@ pub fn sys_getrusage(who: isize, usage: *mut Rusage) -> isize {
 }
 
 fn timeval_to_user_ticks(value: TimeVal) -> usize {
-    value.to_us().saturating_mul(USER_HZ) / USEC_PER_SEC
+    let us = value.to_us();
+    if us == 0 {
+        0
+    } else {
+        us.saturating_mul(USER_HZ)
+            .saturating_add(USEC_PER_SEC - 1)
+            / USEC_PER_SEC
+    }
 }

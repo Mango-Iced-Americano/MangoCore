@@ -76,6 +76,7 @@ pub fn suspend_current_and_run_next() {
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
     // Change status to Ready
     task_inner.task_status = TaskStatus::Ready;
+    task_inner.update_process_times_schedule_out();
     drop(task_inner);
     // ---- release current PCB lock
 
@@ -94,6 +95,7 @@ pub(crate) fn block_current_and_run_next() {
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
     // Change status to Interruptible
     task_inner.task_status = TaskStatus::Interruptible;
+    task_inner.update_process_times_schedule_out();
     drop(task_inner);
     // ---- release current PCB lock
 
@@ -114,6 +116,7 @@ pub(crate) fn block_current_and_run_next_checked(
     let mut task_inner = task.acquire_inner_lock();
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
     task_inner.task_status = TaskStatus::Interruptible;
+    task_inner.update_process_times_schedule_out();
     drop(task_inner);
 
     sleep_interruptible(task.clone());
@@ -140,6 +143,7 @@ pub(crate) fn block_current_and_run_next_with_lock<T>(lock: MutexGuard<'_, T>) {
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
 
     task_inner.task_status = TaskStatus::Interruptible;
+    task_inner.update_process_times_schedule_out();
 
     drop(task_inner);
     // ---- release current PCB lock
@@ -162,6 +166,7 @@ pub(crate) fn block_current_and_run_next_with_lock_checked<T>(
     let mut task_inner = task.acquire_inner_lock();
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
     task_inner.task_status = TaskStatus::Interruptible;
+    task_inner.update_process_times_schedule_out();
     drop(task_inner);
 
     sleep_interruptible(task.clone());

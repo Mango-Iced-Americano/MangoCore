@@ -1500,7 +1500,24 @@ fn run_ltp_suite_runner(
     libc_suffix: &str,
     timeout_secs: u64,
 ) {
+    const AT_FDCWD: isize = -100;
+    const EEXIST: isize = -17;
+
     let ltp_root = format!("{}/ltp\0", libc_root);
+    let tmpdir_path = format!("/tmp/ltp-{}", libc_suffix);
+    let tmpdir_arg = format!("{}\0", tmpdir_path);
+    let mkdir_ret = user_lib::syscall::sys_mkdirat(AT_FDCWD, &tmpdir_arg, 0o777);
+    if mkdir_ret < 0 && mkdir_ret != EEXIST {
+        println!(
+            "[initproc] warning: mkdir {} failed ret={}, falling back to /tmp",
+            tmpdir_path, mkdir_ret
+        );
+    }
+    let runner_tmpdir = if mkdir_ret < 0 && mkdir_ret != EEXIST {
+        "/tmp\0"
+    } else {
+        tmpdir_arg.as_str()
+    };
 
     println!("#### OS COMP TEST GROUP START ltp-{} ####", libc_suffix);
 
@@ -1528,7 +1545,7 @@ fn run_ltp_suite_runner(
             "--ltproot\0".as_ptr(),
             ltproot_val.as_ptr(),
             "--tmpdir\0".as_ptr(),
-            "/tmp\0".as_ptr(),
+            runner_tmpdir.as_ptr(),
             "--no-group-marker\0".as_ptr(),
             "--group-timeout-secs\0".as_ptr(),
             timeout_val.as_ptr(),

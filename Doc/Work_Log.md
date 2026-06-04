@@ -4,6 +4,27 @@
 
 ## 2026-06-04
 
+### 修复 LTP suite 临时目录串扰与 times CPU accounting 抖动
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — suite 模式按 libc 创建 `/tmp/ltp-glibc`、`/tmp/ltp-musl`，避免 glibc/musl 长序列共用 `/tmp` 造成 checkpoint/futex 临时状态串扰
+- `user/src/bin/ltprunner.rs` — la64 suite runner 单用例外层超时从 30s 放宽为 60s，避免 heap_trace/QEMU 下 `times03` 被 runner 先于 LTP 收尾误杀；rv64 保持 30s
+- `os/src/task/task.rs` — 普通 syscall、阻塞/让出、退出路径补齐系统态 CPU 时间结算，避免 `ru_stime` 只在 timer trap 上增长
+- `os/src/task/mod.rs`、`os/src/task/processor.rs` — 调度出前结算当前内核态时间，调度入时重置内核态计时起点，防止离 CPU/阻塞时间被计入 `stime`
+- `os/src/syscall/process/time.rs` — `times()` 的 `TimeVal -> USER_HZ tick` 换算改为非零向上取整，避免亚 tick CPU 时间被截断为 0
+- `Doc/Work_Log.md` — 记录本轮 process/cred/resource/sched LTP 验证
+- `.agents/skills/mango-worklog/references/harness-patterns.md` — 沉淀 suite tmpdir/timeout 与 `times()` CPU accounting 调试经验
+
+**验证：**
+- 修改前 rv64 heap_trace process suite：glibc `times03` 偶发 `tms_stime = 0` 导致 99/100，musl 99/99；无 `PANIC/KERNEL EXCEPTION/HEAP OOM`
+- 修改前 la64 heap_trace process suite：glibc `times03` 已完成大部分断言但被 runner 30s timeout 杀掉，99/100；musl 99/99；无 `PANIC/KERNEL EXCEPTION/HEAP OOM`
+- `docker compose exec --workdir /app/os os-dev make rv64-only EXTRA_FEATURES=heap_trace` ✅
+- `docker compose exec --workdir /app/os os-dev make la64-only EXTRA_FEATURES=heap_trace` ✅
+- 修改后 rv64 heap_trace process suite：glibc 100/100 PASS、musl 99/99 PASS；`times03` 双 libc PASS；未出现 `FAIL/TFAIL/TBROK/PANIC/KERNEL EXCEPTION/HEAP OOM/Unsupported syscall`；最终 `zpcb=0/stale=0/io_buf=0`
+- 修改后 la64 heap_trace process suite：glibc 100/100 PASS、musl 99/99 PASS；`times03` 双 libc PASS，未再触发 runner timeout；未出现 `FAIL/TFAIL/TBROK/PANIC/KERNEL EXCEPTION/HEAP OOM/Unsupported syscall`；最终 `zpcb=0/stale=0/io_buf=0`
+
+**备注：** `times03` 失败不是单纯性能慢：旧实现只在 timer trap 结算 `ru_stime`，普通 syscall 内核时间不可见；同时 `times()` 向下取整会把非零亚 tick 时间截为 0。修复后 `tms_stime/tms_cstime` 明显稳定，但这会让 CPU accounting 更接近真实运行时间，后续若碰到 RLIMIT_CPU/ITIMER_PROF 用例变化，应优先检查这条路径。
+
 ### 收敛 eventfd/futex 环境型 TCONF
 
 **涉及文件：**

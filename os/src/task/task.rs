@@ -452,15 +452,31 @@ impl TaskControlBlockInner {
         self.enforce_cpu_rlimit();
     }
     /// 在离开陷阱时更新进程时间
-    pub fn update_process_times_leave_trap(&mut self, trap_cause: TrapImpl) {
+    pub fn update_process_times_leave_trap(&mut self, _trap_cause: TrapImpl) {
         let now = TimeVal::now();
-        if trap_cause.is_timer() {
-            let diff = now - self.clock.last_enter_s_mode;
-            self.rusage.ru_stime = self.rusage.ru_stime + diff;
-            self.update_itimer_prof_if_exists(diff);
-            self.enforce_cpu_rlimit();
-        }
+        self.account_system_time_until(now);
         self.clock.last_enter_u_mode = now;
+    }
+
+    /// 任务在内核态主动让出 CPU 前，先结算本次内核态运行时间。
+    pub fn update_process_times_schedule_out(&mut self) {
+        self.account_system_time_until(TimeVal::now());
+    }
+
+    /// 任务被重新调度进来后，重置内核态计时起点，避免把离 CPU 时间算入 stime。
+    pub fn update_process_times_schedule_in(&mut self) {
+        self.clock.last_enter_s_mode = TimeVal::now();
+    }
+
+    fn account_system_time_until(&mut self, now: TimeVal) {
+        let diff = now - self.clock.last_enter_s_mode;
+        if diff.is_zero() {
+            return;
+        }
+        self.rusage.ru_stime = self.rusage.ru_stime + diff;
+        self.update_itimer_prof_if_exists(diff);
+        self.enforce_cpu_rlimit();
+        self.clock.last_enter_s_mode = now;
     }
 
     fn enforce_cpu_rlimit(&mut self) {
@@ -597,6 +613,7 @@ impl TaskControlBlock {
             if inner.task_status == TaskStatus::Zombie {
                 return false;
             }
+            inner.update_process_times_schedule_out();
             inner.task_status = TaskStatus::Zombie;
             let clear_child_tid = inner.clear_child_tid;
             inner.clear_child_tid = 0;

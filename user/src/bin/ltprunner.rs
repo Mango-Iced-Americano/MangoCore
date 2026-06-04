@@ -11,6 +11,9 @@ use user_lib::{
     waitpid_wnohang, OpenFlags, SIGKILL, SIGTERM,
 };
 
+#[cfg(target_arch = "loongarch64")]
+const DEFAULT_CASE_TIMEOUT_SECS: u64 = 60;
+#[cfg(not(target_arch = "loongarch64"))]
 const DEFAULT_CASE_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_CASE_TERM_GRACE_MS: u64 = 1500;
 const DEFAULT_LTP_EXCLUDE: &[&str] = &[
