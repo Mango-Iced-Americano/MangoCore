@@ -97,6 +97,12 @@ const DEFAULT_LTP_EXCLUDE: &[&str] = &[
     // syscall and sealing semantics remain covered by memfd_create01/02.
     "memfd_create03",
     "memfd_create04",
+    // eventfd06 requires the libaio userspace library in the LTP image;
+    // eventfd01-05 and eventfd2_* keep eventfd syscall coverage.
+    "eventfd06",
+    // futex_wake04 requires hugetlbfs setup. futex_wake01/02 and wait/requeue
+    // cases keep the futex wake syscall semantics covered.
+    "futex_wake04",
     // sysinfo03 requires CONFIG_TIME_NS, matching the time namespace clock
     // cases filtered by the broad-scan helper.
     "sysinfo03",

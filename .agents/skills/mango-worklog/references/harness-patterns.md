@@ -224,6 +224,13 @@
 - **教训**: 看到 `command not found`、`Only test on x86_64` 先归类为环境/架构项，避免为了提分修改无关内核行为。
 - **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`
 
+## LTP userspace/fs 依赖型 TCONF 过滤
+
+- **根因**: `eventfd06` 依赖测试镜像中的 libaio，`futex_wake04` 依赖 hugetlbfs；当前镜像或内核配置不满足时 LTP 返回 TCONF(32)，suite runner 会按非 0 退出码记成失败。
+- **修复**: 将这类环境依赖项加入 suite 默认 exclude，同时保留相邻基础用例实际运行，例如 `eventfd01-05/eventfd2_*`、`futex_wake01/02`、`futex_wait*`、`futex_cmp_requeue*`。
+- **教训**: eventfd/futex 名下的失败不一定代表对应 syscall 错误；先读 TCONF 原因和测试依赖，再决定是补内核能力、补镜像依赖，还是作为环境项过滤。
+- **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`
+
 ## 网络
 
 ### 硬编码 IPv4 地址替换为 net_core 动态查询

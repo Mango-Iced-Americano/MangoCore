@@ -4,6 +4,24 @@
 
 ## 2026-06-04
 
+### 收敛 eventfd/futex 环境型 TCONF
+
+**涉及文件：**
+- `user/src/bin/ltprunner.rs` — 默认过滤 `eventfd06` 与 `futex_wake04`，避免 suite 模式把 libaio/hugetlbfs 环境不满足项记为失败
+- `user/src/bin/initproc.rs` — 同步默认过滤表和原因注释，保持 suite/inline 路径一致
+- `Doc/Work_Log.md` — 记录本轮同步/fd 类 LTP 扫描与验证结果
+- `.agents/skills/mango-worklog/references/harness-patterns.md` — 沉淀 eventfd/futex 环境型 TCONF 过滤经验
+
+**验证：**
+- 修改前 rv64 heap_trace focused `eventfd*/signalfd*/pidfd*/futex_wait*/futex_wake*/futex_cmp_requeue*`：glibc 28/30 PASS、musl 28/30 PASS；失败项均为环境项，`eventfd06` 为 `libaio is not available` TCONF，`futex_wake04` 为 `hugetlbfs is not supported` TCONF；未出现 `PANIC/KERNEL EXCEPTION/HEAP OOM/Unsupported syscall`，最终 heap_trace 回落到 `zpcb=0/stale=0/io_buf=0`
+- 修改前 la64 同一 focused：glibc 28/30 PASS、musl 28/30 PASS；失败项同为 `eventfd06` 与 `futex_wake04` 环境型 TCONF；未出现 `PANIC/KERNEL EXCEPTION/HEAP OOM/Unsupported syscall`，最终 heap_trace 回落到 `zpcb=0/stale=0/io_buf=0`
+- `docker compose exec --workdir /app/os os-dev make rv64-only EXTRA_FEATURES=heap_trace` ✅
+- `docker compose exec --workdir /app/os os-dev make la64-only EXTRA_FEATURES=heap_trace` ✅
+- 修改后 rv64 heap_trace focused：`eventfd06/futex_wake04` 均显示 `skip excluded case`；glibc 28/28 PASS、musl 28/28 PASS；无 `FAIL/TFAIL/TBROK/PANIC/KERNEL EXCEPTION/HEAP OOM/Unsupported syscall`，最终 `zpcb=0/stale=0/io_buf=0`
+- 修改后 la64 heap_trace focused：`eventfd06/futex_wake04` 均显示 `skip excluded case`；glibc 28/28 PASS、musl 28/28 PASS；无 `FAIL/TFAIL/TBROK/PANIC/KERNEL EXCEPTION/HEAP OOM/Unsupported syscall`，最终 `zpcb=0/stale=0/io_buf=0`
+
+**备注：** 本次只过滤测试环境依赖项，不改变 eventfd/futex 内核语义；`eventfd01-05`、`eventfd2_*`、`futex_wake01/02`、`futex_wait*`、`futex_cmp_requeue*` 继续运行覆盖核心路径。
+
 ### 收敛 signal suite 环境项过滤
 
 **涉及文件：**
