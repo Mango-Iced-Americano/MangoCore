@@ -106,6 +106,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_SET_TID_ADDRESS => "set_tid_address",
         SYSCALL_UNSHARE => "unshare",
         SYSCALL_FUTEX => "futex",
+        SYSCALL_FUTEX_WAITV => "futex_waitv",
         SYSCALL_SET_ROBUST_LIST => "set_robust_list",
         SYSCALL_GET_ROBUST_LIST => "get_robust_list",
         SYSCALL_NANOSLEEP => "nanosleep",
@@ -593,6 +594,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[3] as *const TimeSpec,
             args[4] as *mut u32,
             args[5] as u32,
+        ),
+        SYSCALL_FUTEX_WAITV => sys_futex_waitv(
+            args[0] as *const FutexWaitV,
+            args[1],
+            args[2] as u32,
+            args[3] as *const TimeSpec,
+            args[4],
         ),
         SYSCALL_SET_ROBUST_LIST => sys_set_robust_list(args[0], args[1]),
         SYSCALL_GET_ROBUST_LIST => {

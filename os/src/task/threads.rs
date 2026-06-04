@@ -7,10 +7,14 @@ use core::hint::spin_loop;
 use crate::{
     mm::UserPtr,
     syscall::errno::*,
-    task::{current_task, has_actionable_signal, task_manager_counts},
+    task::{
+        block_current_and_run_next_with_lock_checked, current_task,
+        discard_non_actionable_unblocked_signals, has_actionable_signal, task_manager_counts,
+        wait_with_timeout, TaskControlBlock,
+    },
     timer::TimeSpec,
 };
-use alloc::collections::BTreeMap;
+use alloc::{collections::BTreeMap, sync::Arc};
 use lazy_static::lazy_static;
 use log::*;
 use num_enum::FromPrimitive;
@@ -76,6 +80,13 @@ lazy_static! {
 /// + value：WaitQueue
 pub struct Futex {
     inner: BTreeMap<usize, WaitQueue>,
+}
+
+#[derive(Clone, Copy)]
+pub struct FutexWaitEntry {
+    pub futex_word: UserPtr<u32>,
+    pub futex_key: usize,
+    pub val: u32,
 }
 
 fn wait_queue_for_key(map: &mut BTreeMap<usize, WaitQueue>, key: usize) -> &mut WaitQueue {
@@ -167,6 +178,77 @@ fn futex_wait_result_to_errno(wait_result: WaitResult) -> isize {
         WaitResult::Interrupted => EINTR,
         WaitResult::TimedOut => ETIMEDOUT,
     }
+}
+
+fn check_waitv_values(entries: &[FutexWaitEntry], token: usize) -> Option<isize> {
+    for entry in entries {
+        match entry.futex_word.read(token) {
+            Ok(value) if value == entry.val => {}
+            Ok(_) => return Some(EAGAIN),
+            Err(errno) => return Some(errno),
+        }
+    }
+    None
+}
+
+fn deadline_expired(deadline: Option<TimeSpec>) -> bool {
+    deadline
+        .map(|deadline| TimeSpec::now() >= deadline)
+        .unwrap_or(false)
+}
+
+fn finish_waitv_private(
+    futex: &mut Futex,
+    entries: &[FutexWaitEntry],
+    task: &Arc<TaskControlBlock>,
+) -> Option<usize> {
+    let mut woken_key = None;
+
+    for (index, entry) in entries.iter().enumerate() {
+        if entries[..index]
+            .iter()
+            .any(|finished| finished.futex_key == entry.futex_key)
+        {
+            continue;
+        }
+        let removed = {
+            let wait_queue = futex.wait_queue_mut(entry.futex_key);
+            wait_queue.finish_wait(task)
+        };
+        if !removed && woken_key.is_none() {
+            woken_key = Some(entry.futex_key);
+        }
+        futex.remove_empty(entry.futex_key);
+    }
+
+    woken_key.and_then(|key| entries.iter().position(|entry| entry.futex_key == key))
+}
+
+fn finish_waitv_shared(
+    futex: &mut BTreeMap<usize, WaitQueue>,
+    entries: &[FutexWaitEntry],
+    task: &Arc<TaskControlBlock>,
+) -> Option<usize> {
+    let mut woken_key = None;
+
+    for (index, entry) in entries.iter().enumerate() {
+        if entries[..index]
+            .iter()
+            .any(|finished| finished.futex_key == entry.futex_key)
+        {
+            continue;
+        }
+        let removed = {
+            let wait_queue = wait_queue_for_key(futex, entry.futex_key);
+            wait_queue.finish_wait(task)
+        };
+        if !removed && woken_key.is_none() {
+            woken_key = Some(entry.futex_key);
+        }
+        remove_empty_wait_queue(futex, entry.futex_key);
+    }
+
+    woken_key.and_then(|key| entries.iter().position(|entry| entry.futex_key == key))
 }
 
 fn try_single_thread_short_timeout(
@@ -286,6 +368,64 @@ pub fn do_futex_wait_bitset(
     do_futex_wait_until(futex_word, token, futex_key, val, deadline)
 }
 
+pub fn do_futex_waitv(entries: &[FutexWaitEntry], token: usize, deadline: Option<TimeSpec>) -> isize {
+    if let Some(result) = check_waitv_values(entries, token) {
+        return result;
+    }
+
+    let task = current_task().unwrap();
+    let futex_table = task.process.futex().clone();
+    drop(task);
+
+    loop {
+        if deadline_expired(deadline) {
+            return ETIMEDOUT;
+        }
+
+        let task = current_task().unwrap();
+        let mut guard = futex_table.lock();
+        for entry in entries {
+            guard
+                .wait_queue_mut(entry.futex_key)
+                .prepare_to_wait(Arc::downgrade(&task));
+        }
+
+        if let Some(result) = check_waitv_values(entries, token) {
+            finish_waitv_private(&mut guard, entries, &task);
+            return result;
+        }
+        if deadline_expired(deadline) {
+            finish_waitv_private(&mut guard, entries, &task);
+            return ETIMEDOUT;
+        }
+        if has_actionable_signal(&task) {
+            finish_waitv_private(&mut guard, entries, &task);
+            return EINTR;
+        }
+        discard_non_actionable_unblocked_signals(&task);
+
+        if let Some(deadline) = deadline {
+            wait_with_timeout(Arc::downgrade(&task), deadline);
+        }
+        drop(task);
+
+        block_current_and_run_next_with_lock_checked(guard, |task| {
+            !has_actionable_signal(task)
+                && !deadline_expired(deadline)
+                && check_waitv_values(entries, token).is_none()
+        });
+
+        let task = current_task().unwrap();
+        let mut guard = futex_table.lock();
+        if let Some(index) = finish_waitv_private(&mut guard, entries, &task) {
+            task.acquire_inner_lock().refresh_real_timer();
+            return index as isize;
+        }
+        drop(guard);
+        task.acquire_inner_lock().refresh_real_timer();
+    }
+}
+
 /// 唤醒等待在全局 process-shared futex（物理地址 key）上的最多 val 个任务
 pub fn futex_wake_shared(phys_key: usize, val: u32) -> isize {
     let mut shared = PROCESS_SHARED_FUTEX.lock();
@@ -295,6 +435,62 @@ pub fn futex_wake_shared(phys_key: usize, val: u32) -> isize {
 pub fn futex_requeue_shared(phys_key: usize, phys_key_2: usize, val: u32, val2: usize) -> isize {
     let mut shared = PROCESS_SHARED_FUTEX.lock();
     requeue_waiters(&mut shared, phys_key, phys_key_2, val, val2)
+}
+
+pub fn do_futex_waitv_shared(
+    entries: &[FutexWaitEntry],
+    token: usize,
+    deadline: Option<TimeSpec>,
+) -> isize {
+    if let Some(result) = check_waitv_values(entries, token) {
+        return result;
+    }
+
+    loop {
+        if deadline_expired(deadline) {
+            return ETIMEDOUT;
+        }
+
+        let task = current_task().unwrap();
+        let mut guard = PROCESS_SHARED_FUTEX.lock();
+        for entry in entries {
+            wait_queue_for_key(&mut guard, entry.futex_key).prepare_to_wait(Arc::downgrade(&task));
+        }
+
+        if let Some(result) = check_waitv_values(entries, token) {
+            finish_waitv_shared(&mut guard, entries, &task);
+            return result;
+        }
+        if deadline_expired(deadline) {
+            finish_waitv_shared(&mut guard, entries, &task);
+            return ETIMEDOUT;
+        }
+        if has_actionable_signal(&task) {
+            finish_waitv_shared(&mut guard, entries, &task);
+            return EINTR;
+        }
+        discard_non_actionable_unblocked_signals(&task);
+
+        if let Some(deadline) = deadline {
+            wait_with_timeout(Arc::downgrade(&task), deadline);
+        }
+        drop(task);
+
+        block_current_and_run_next_with_lock_checked(guard, |task| {
+            !has_actionable_signal(task)
+                && !deadline_expired(deadline)
+                && check_waitv_values(entries, token).is_none()
+        });
+
+        let task = current_task().unwrap();
+        let mut guard = PROCESS_SHARED_FUTEX.lock();
+        if let Some(index) = finish_waitv_shared(&mut guard, entries, &task) {
+            task.acquire_inner_lock().refresh_real_timer();
+            return index as isize;
+        }
+        drop(guard);
+        task.acquire_inner_lock().refresh_real_timer();
+    }
 }
 
 /// Process-shared futex wait — 使用全局物理地址表

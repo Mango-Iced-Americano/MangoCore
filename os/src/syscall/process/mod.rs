@@ -11,7 +11,7 @@ mod time;
 
 pub use clone::{sys_clone, sys_clone3, sys_unshare, CloneFlags};
 pub use exec::{sys_execve, sys_execveat};
-pub use futex::sys_futex;
+pub use futex::{sys_futex, sys_futex_waitv, FutexWaitV};
 pub use ids::{
     sys_capget, sys_capset, sys_get_mempolicy, sys_getegid, sys_geteuid, sys_getgid,
     sys_getcpu, sys_getgroups, sys_getpgid, sys_getpid, sys_getppid, sys_getpriority,

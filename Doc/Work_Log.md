@@ -4,6 +4,25 @@
 
 ## 2026-06-04
 
+### 新增 futex_waitv syscall 最小实现
+
+**涉及文件：**
+- `os/src/syscall/syscall_id.rs` — 注册 Linux/riscv64/loongarch64 通用 syscall 号 `449`
+- `os/src/syscall/mod.rs` — 增加 `futex_waitv` 名称映射与 syscall 分发
+- `os/src/syscall/process/futex.rs` — 增加 `struct futex_waitv` ABI 解析、flags/timeout/clockid 校验、private/shared futex key 生成与错误码返回
+- `os/src/syscall/process/mod.rs` — 导出 `sys_futex_waitv` 与 ABI 结构
+- `os/src/task/threads.rs` — 增加 wait-multiple futex 等待路径，复用现有 `WaitQueue`，支持信号/超时唤醒清理；避免在 futex 表锁内做堆分配
+- `Doc/Work_Log.md` — 记录本轮 futex2/LTP 验证结果
+
+**验证：**
+- `docker compose exec --workdir /app/os os-dev make rv64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅，132 个既有 warning，无新增 error
+- `docker compose exec --workdir /app/os os-dev make la64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅，116 个既有 warning，无新增 error
+- rv64 heap_trace focused `futex_waitv01,futex_waitv02,futex_waitv03`：glibc/musl 均因真实内核版本 `5.10` 显示 `TCONF: The test requires kernel 5.16 or newer`；未出现 `PANIC/KERNEL EXCEPTION/HEAP OOM/Unsupported syscall`，初始统计 `zpcb=0/stale=0/io_buf=0`
+- la64 heap_trace focused `futex_waitv01,futex_waitv02,futex_waitv03`：结果同 rv64；未出现 `PANIC/KERNEL EXCEPTION/HEAP OOM/Unsupported syscall`，初始统计 `zpcb=0/stale=0/io_buf=0`
+- 临时 5.16 版本探针确认：本地 LTP 镜像中的 `__NR_futex_waitv` 为 `-1`，测试打印 `syscall(-1) __NR_futex_waitv not supported on your arch`，因此当前测试镜像不会真正调用 449；探针改动已撤回，未纳入提交
+
+**备注：** 本轮是内核侧补齐 futex2 wait-multiple ABI，不改全局内核版本号，也不为本地 LTP 头文件缺 syscall 号做 `syscall(-1)` workaround。若后续评测镜像更新到带 `__NR_futex_waitv=449` 的头文件，该实现才会被 `futex_waitv01/02/03` 真正覆盖；如果仍使用当前镜像，这三项会继续作为版本/架构 TCONF，不会直接增加 PASS 数。
+
 ### 修复 LTP suite 临时目录串扰与 times CPU accounting 抖动
 
 **涉及文件：**

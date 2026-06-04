@@ -223,6 +223,7 @@ pub const SYSCALL_CLOSE_RANGE: usize = 436;
 pub const SYSCALL_PIDFD_GETFD: usize = 438;
 pub const SYSCALL_FACCESSAT2: usize = 439;
 pub const SYSCALL_EPOLL_PWAIT2: usize = 441;
+pub const SYSCALL_FUTEX_WAITV: usize = 449;
 pub const SYSCALL_MADVISE: usize = 233;
 // Not standard POSIX sys_call
 pub const SYSCALL_LS: usize = 500;
