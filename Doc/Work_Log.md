@@ -4,6 +4,22 @@
 
 ## 2026-06-04
 
+### 收敛 sysinfo03 time namespace TCONF
+
+**涉及文件：**
+- `user/src/bin/ltprunner.rs` — suite runner 默认过滤 `sysinfo03`，避免缺 `CONFIG_TIME_NS` 的配置项在 suite 模式下记为失败
+- `user/src/bin/initproc.rs` — 同步默认过滤与 inline broad-skip 原因，和 `clock_gettime03/clock_nanosleep03` 的 time namespace 分类保持一致
+- `Doc/Work_Log.md` — 记录本轮非 fs/net process/sched/cred/rlimit 扫描结果
+
+**验证：**
+- rv64 heap_trace suite 扫描 `cap*/get*id/set*id/sched*/rlimit/sysinfo/times/nice` 共 100 个执行项：99 PASS，唯一 `sysinfo03` 为 `CONFIG_TIME_NS` 不满足导致 TCONF；未出现 `TFAIL/TBROK/PANIC/KERNEL EXCEPTION/HEAP OOM/Unsupported syscall`
+- `docker compose exec --workdir /app/os os-dev make rv64-only EXTRA_FEATURES=heap_trace` ✅
+- `docker compose exec --workdir /app/os os-dev make la64-only EXTRA_FEATURES=heap_trace` ✅
+- rv64 heap_trace focused `sysinfo01,sysinfo02,sysinfo03,times01,times03`：glibc/musl 均跳过 `sysinfo03`，其余 4 个用例全 PASS；heap_trace 初始统计 `zpcb=0/stale=0/io_buf=0`
+- la64 同一 focused：glibc/musl 均跳过 `sysinfo03`，其余 4 个用例全 PASS；heap_trace 初始统计 `zpcb=0/stale=0/io_buf=0`
+
+**备注：** `sysinfo03` 和 `clock_gettime03/clock_nanosleep03` 同属 time namespace 配置类用例；当前不伪造 time namespace，只过滤环境不满足项。
+
 ### 收敛 LTP suite 环境/TCONF 过滤项
 
 **涉及文件：**

@@ -43,6 +43,7 @@ const DEFAULT_LTP_EXCLUDE_UNSUPPORTED: &[&str] = &[
     "set_thread_area01",
     "sgetmask01",
     "ssetmask01",
+    "sysinfo03",
     "timer_create01",
     "timer_create02",
     "userfaultfd01",

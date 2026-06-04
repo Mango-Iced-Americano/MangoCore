@@ -210,6 +210,13 @@
 - **教训**: 时间精度类 LTP 要先看测试自己的阈值来源、虚拟化检测和 libc 组合；若要重新放开，优先优化 syscall/调度耗时或补齐测试环境检测。
 - **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`, `os/src/syscall/process/time.rs`
 
+## LTP time namespace 配置类 TCONF
+
+- **根因**: `clock_gettime03`、`clock_nanosleep03`、`sysinfo03` 等用例会读取 `/proc/config` 并要求 `CONFIG_TIME_NS=y`；当前内核未实现 time namespace，测试返回 `TCONF(32)`，suite runner 会把非 0 退出码记成失败。
+- **修复**: 将这类配置不满足项同步加入 suite `ltprunner` 默认 exclude 与 inline broad-skip 表；相邻基础 syscall 用例仍保留实际运行覆盖。
+- **教训**: LTP 返回 32 不一定是 syscall 语义失败，先看日志里的 kconfig constraint；配置类 TCONF 不应通过伪造 syscall 行为解决。
+- **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`
+
 ## 网络
 
 ### 硬编码 IPv4 地址替换为 net_core 动态查询

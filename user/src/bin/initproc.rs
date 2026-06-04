@@ -97,6 +97,9 @@ const DEFAULT_LTP_EXCLUDE: &[&str] = &[
     // syscall and sealing semantics remain covered by memfd_create01/02.
     "memfd_create03",
     "memfd_create04",
+    // sysinfo03 requires CONFIG_TIME_NS, matching the time namespace clock
+    // cases filtered by the broad-scan helper.
+    "sysinfo03",
     // timerfd04 requires CONFIG_TIME_NS; timerfd_settime02 is a long fuzzy-sync
     // stress case that exceeds the local QEMU budget even after the timerfd
     // syscall semantics are implemented.
@@ -1138,6 +1141,7 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "sched_tc0" | "sched_tc1" | "sched_tc6" => Some("requires LTP KERNEL environment"),
         "sem_comm" => Some("requires IPC namespace isolation"),
         "semctl08" => Some("requires semid64_ds time_high ABI"),
+        "sysinfo03" => Some("requires time namespace kernel config"),
         "send02" | "sendmsg01" | "sendmmsg01" | "sendmmsg02" | "recvmmsg01" => {
             Some("network send/recv message tests skipped in LTP syscall scan")
         }
