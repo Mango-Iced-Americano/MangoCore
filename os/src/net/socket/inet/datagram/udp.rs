@@ -58,6 +58,9 @@ impl Socket for UdpSocket {
         let Endpoint::Ip(ep) = endpoint else {
             return Err(SyscallErr::EINVAL);
         };
+        if !ep.addr.is_unspecified() && !self.addr_family_matches(ep.addr) {
+            return Err(SyscallErr::EAFNOSUPPORT);
+        }
         let addr = if ep.addr.is_unspecified() {
             IpListenEndpoint {
                 addr: None,
@@ -101,14 +104,16 @@ impl Socket for UdpSocket {
         let Endpoint::Ip(ep) = endpoint else {
             return Err(SyscallErr::EINVAL);
         };
+        if !self.addr_family_matches(ep.addr) {
+            return Err(SyscallErr::EAFNOSUPPORT);
+        }
         // Linux: connect() to INADDR_ANY is treated as localhost
         let remote_endpoint = if ep.addr.is_unspecified() {
-            IpEndpoint::new(
-                crate::net::net_core::loopback_iface()
-                    .and_then(|d| d.iface.ip_addrs().first().map(|c| c.address()))
-                    .unwrap_or(IpAddress::v4(127, 0, 0, 1)),
-                ep.port,
-            )
+            let loopback_addr = match self.ip_version {
+                IpVersion::Ipv4 => IpAddress::v4(127, 0, 0, 1),
+                IpVersion::Ipv6 => IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1),
+            };
+            IpEndpoint::new(loopback_addr, ep.port)
         } else {
             *ep
         };
@@ -463,6 +468,13 @@ impl UdpSocket {
     }
     pub fn bound_inner(&self) -> BoundInner {
         self.bound.lock().clone()
+    }
+
+    fn addr_family_matches(&self, addr: IpAddress) -> bool {
+        match self.ip_version {
+            IpVersion::Ipv4 => matches!(addr, IpAddress::Ipv4(_)),
+            IpVersion::Ipv6 => matches!(addr, IpAddress::Ipv6(_)),
+        }
     }
 
     pub fn register_udp_socket(socket: &Arc<Self>) {

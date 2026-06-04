@@ -626,6 +626,9 @@ impl dyn Socket {
                         alloc_socket_fd(socket_file)
                     }
                     PSOCK::Raw => {
+                        if ver == smoltcp::wire::IpVersion::Ipv6 {
+                            return Err(SyscallErr::EPROTONOSUPPORT);
+                        }
                         let socket = RawSocket::new(protocol);
                         let socket = Arc::new(socket);
                         RawSocket::register_raw_socket(&socket);

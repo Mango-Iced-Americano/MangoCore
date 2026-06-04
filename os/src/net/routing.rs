@@ -304,7 +304,9 @@ pub fn route_output(dest: IpAddress) -> Result<RouteDecision, SyscallErr> {
                 let source = list
                     .values()
                     .find(|iface| iface.nic_id() as u32 == dst_ifindex)
-                    .and_then(|iface| iface.ip_addrs().first().map(|c| c.address()))
+                    .and_then(|iface| iface.ip_addrs().iter().find_map(|c| {
+                        if let IpAddress::Ipv6(_) = c.address() { Some(c.address()) } else { None }
+                    }))
                     .unwrap_or(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1));
                 return Ok(RouteDecision {
                     ifindex: dst_ifindex,
