@@ -22,7 +22,7 @@ pub use tcp_info::TcpInfo;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint};
+use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint, IpVersion};
 use spin::Mutex;
 
 use crate::net::syscall::common::MsgFlags;
@@ -44,9 +44,7 @@ use crate::trace_event;
 pub struct TcpSocket {
     pub inner: Mutex<Inner>,
     pub pollee: AtomicUsize,
-    /// 读端已关闭（SHUT_RD）
     pub read_shutdown: AtomicBool,
-    /// 写端已关闭（SHUT_WR）
     pub write_shutdown: AtomicBool,
     pub reuse_addr: AtomicBool,
     multicast_group_joined: AtomicBool,
@@ -55,13 +53,13 @@ pub struct TcpSocket {
     pub send_waiters: EventWaitQueue,
     pub connect_waiters: EventWaitQueue,
     pub accept_waiters: EventWaitQueue,
+    pub ip_version: IpVersion,
 }
 
 impl TcpSocket {
-    /// 创建一个新的 TCP socket（默认 IPv4）
-    pub fn new() -> Self {
+    pub fn new(ver: IpVersion) -> Self {
         Self {
-            inner: Mutex::new(Inner::Init(Init::new(smoltcp::wire::IpVersion::Ipv4))),
+            inner: Mutex::new(Inner::Init(Init::new(ver))),
             pollee: AtomicUsize::new(0),
             read_shutdown: AtomicBool::new(false),
             write_shutdown: AtomicBool::new(false),
@@ -72,6 +70,7 @@ impl TcpSocket {
             send_waiters: EventWaitQueue::new(),
             connect_waiters: EventWaitQueue::new(),
             accept_waiters: EventWaitQueue::new(),
+            ip_version: ver,
         }
     }
 
@@ -373,6 +372,7 @@ impl Socket for TcpSocket {
             send_waiters: EventWaitQueue::new(),
             connect_waiters: EventWaitQueue::new(),
             accept_waiters: EventWaitQueue::new(),
+            ip_version: self.ip_version,
         });
 
         // 新 accept 的连接也必须注册到全局 TCP_SOCKETS，否则 pselect/epoll 永远等不到事件

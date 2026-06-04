@@ -80,7 +80,10 @@ impl<'a> NetInterfaceInner<'a> {
                     [0u8; 6],
                     65536,
                     crate::net::net_core::IFF_UP | crate::net::net_core::IFF_LOOPBACK | crate::net::net_core::IFF_RUNNING,
-                    vec![IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8)],
+                    vec![
+                        IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8),
+                        IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128),
+                    ],
                     None,
                     crate::net::net_core::IF_OPER_UP as u32,
                 ));
@@ -94,6 +97,7 @@ impl<'a> NetInterfaceInner<'a> {
             let mut lo_sockets = SocketSet::new(vec![]);
             lo_iface.update_ip_addrs(|addrs| {
                 addrs.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8)).unwrap();
+                addrs.push(IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128)).unwrap();
             });
             stacks.push(DeviceStack {
                 nic: lo_nic,
@@ -725,7 +729,10 @@ impl<'a> NetInterface<'a> {
 pub fn lookup_source_ip(dest_ip: IpAddress) -> IpAddress {
     let result = crate::net::routing::route_output(dest_ip)
         .map(|r| r.source)
-        .unwrap_or(IpAddress::v4(0, 0, 0, 0));
+        .unwrap_or(match dest_ip {
+            IpAddress::Ipv4(_) => IpAddress::v4(0, 0, 0, 0),
+            IpAddress::Ipv6(_) => IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 0),
+        });
     log::debug!("source_ip_select: dst={:?} -> src={:?}", dest_ip, result);
     result
 }

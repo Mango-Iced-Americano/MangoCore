@@ -594,10 +594,6 @@ impl dyn Socket {
         is_cloexec: bool,
     ) -> GeneralRet<usize> {
         log::info!("[Socket::new] domain: {}, psock: {:?}", domain, psock);
-        if domain == AF_INET6 as u32 {
-            log::warn!("[Socket::alloc] AF_INET6 is not supported yet!");
-            return Err(SyscallErr::EAFNOSUPPORT);
-        }
         let alloc_socket_fd = |socket_file: Arc<dyn crate::fs::vfs::IndexNode>| -> GeneralRet<usize> {
             let mut flags = FileFlags::O_RDWR;
             if is_nonblock { flags.insert(FileFlags::O_NONBLOCK); }
@@ -607,18 +603,23 @@ impl dyn Socket {
             result
         };
         match domain as u16 {
-            AF_INET | AF_UNSPEC => {
-                log::info!("[Socket::new] domain: {} -> treating as AF_INET", domain);
+            AF_INET | AF_UNSPEC | AF_INET6 => {
+                let ver = if domain as u16 == AF_INET6 {
+                    smoltcp::wire::IpVersion::Ipv6
+                } else {
+                    smoltcp::wire::IpVersion::Ipv4
+                };
+                log::info!("[Socket::new] domain: {} -> ver={:?}", domain, ver);
                 match psock {
                     PSOCK::Datagram => {
-                        let socket = UdpSocket::new();
+                        let socket = UdpSocket::new(ver);
                         let socket = Arc::new(socket);
                         UdpSocket::register_udp_socket(&socket);
                         let socket_file = Arc::new(SocketFile::new(socket));
                         alloc_socket_fd(socket_file)
                     }
                     PSOCK::Stream => {
-                        let socket = TcpSocket::new();
+                        let socket = TcpSocket::new(ver);
                         let socket = Arc::new(socket);
                         TcpSocket::register_tcp_socket(&socket);
                         let socket_file = Arc::new(SocketFile::new(socket));

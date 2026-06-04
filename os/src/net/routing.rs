@@ -289,17 +289,66 @@ pub fn route_output(dest: IpAddress) -> Result<RouteDecision, SyscallErr> {
 
             Err(SyscallErr::ENETUNREACH)
         }
-        IpAddress::Ipv6(_) => {
-            if let Some(eth0) = crate::net::net_core::find_by_name("eth0") {
-                Ok(RouteDecision {
-                    ifindex: eth0.ifindex,
-                    source: IpAddress::v4(0, 0, 0, 0),
+        IpAddress::Ipv6(addr) => {
+            // 先查本机接口是否有这个 v6 地址
+            let list = ns.device_list.lock();
+            let is_local = list
+                .values()
+                .any(|iface| iface.ip_addrs().iter().any(|c| c.address() == dest));
+            if is_local {
+                let dst_ifindex = list
+                    .values()
+                    .find(|iface| iface.ip_addrs().iter().any(|c| c.address() == dest))
+                    .map(|iface| iface.nic_id() as u32)
+                    .unwrap_or(1);
+                let source = list
+                    .values()
+                    .find(|iface| iface.nic_id() as u32 == dst_ifindex)
+                    .and_then(|iface| iface.ip_addrs().first().map(|c| c.address()))
+                    .unwrap_or(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1));
+                return Ok(RouteDecision {
+                    ifindex: dst_ifindex,
+                    source,
                     next_hop: None,
-                    is_local: false,
-                })
-            } else {
-                Err(SyscallErr::ENETUNREACH)
+                    is_local: true,
+                });
             }
+            drop(list);
+
+            // ::1 loopback
+            if addr == smoltcp::wire::Ipv6Address::LOOPBACK {
+                let source = crate::net::net_core::loopback_iface()
+                    .and_then(|d| d.iface.ip_addrs().iter().find_map(|c| {
+                        if let IpAddress::Ipv6(_) = c.address() { Some(c.address()) } else { None }
+                    }))
+                    .unwrap_or(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1));
+                return Ok(RouteDecision {
+                    ifindex: 1,
+                    source,
+                    next_hop: None,
+                    is_local: true,
+                });
+            }
+
+            // 查 v6 路由表
+            let router = ns.router.lock();
+            for entry in &router.table.entries {
+                if entry.destination.contains_addr(&dest) {
+                    let source = crate::net::net_core::find_by_index(entry.ifindex)
+                        .and_then(|d| d.iface.ip_addrs().iter().find_map(|c| {
+                            if let IpAddress::Ipv6(_) = c.address() { Some(c.address()) } else { None }
+                        }))
+                        .unwrap_or(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 0));
+                    return Ok(RouteDecision {
+                        ifindex: entry.ifindex,
+                        source,
+                        next_hop: entry.next_hop,
+                        is_local: false,
+                    });
+                }
+            }
+
+            Err(SyscallErr::ENETUNREACH)
         }
     }
 }

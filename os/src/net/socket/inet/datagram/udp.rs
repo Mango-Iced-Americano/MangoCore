@@ -21,7 +21,7 @@ use smoltcp::{
         udp::{PacketMetadata, SendError, UdpMetadata},
         AnySocket,
     },
-    wire::{IpAddress, IpEndpoint, IpListenEndpoint, Ipv4Address},
+    wire::{IpAddress, IpEndpoint, IpListenEndpoint, IpVersion, Ipv4Address},
 };
 
 use crate::net::config::NetInterfaceInner;
@@ -38,6 +38,7 @@ pub struct UdpSocket {
     bound: Mutex<BoundInner>,
     recv_waiters: EventWaitQueue,
     send_waiters: EventWaitQueue,
+    pub ip_version: IpVersion,
 }
 
 struct UdpSocketInner {
@@ -197,7 +198,10 @@ impl Socket for UdpSocket {
             NET_INTERFACE.udp_routed_socket(self.socket_handler, |socket| socket.endpoint());
         NET_INTERFACE.poll();
         local.map(|ep| {
-            let addr = ep.addr.unwrap_or(IpAddress::Ipv4(Ipv4Address::UNSPECIFIED));
+            let addr = ep.addr.unwrap_or_else(|| match self.ip_version {
+                IpVersion::Ipv4 => IpAddress::Ipv4(Ipv4Address::UNSPECIFIED),
+                IpVersion::Ipv6 => IpAddress::Ipv6(smoltcp::wire::Ipv6Address::UNSPECIFIED),
+            });
             Endpoint::Ip(IpEndpoint::new(addr, ep.port))
         })
     }
@@ -425,7 +429,7 @@ impl Socket for UdpSocket {
 }
 
 impl UdpSocket {
-    pub fn new() -> Self {
+    pub fn new(ver: IpVersion) -> Self {
         let tx_buf = socket::udp::PacketBuffer::new(
             vec![PacketMetadata::EMPTY; 1024],
             vec![0 as u8; MAX_BUFFER_SIZE],
@@ -454,6 +458,7 @@ impl UdpSocket {
             bound: Mutex::new(BoundInner::new()),
             recv_waiters: EventWaitQueue::new(),
             send_waiters: EventWaitQueue::new(),
+            ip_version: ver,
         }
     }
     pub fn bound_inner(&self) -> BoundInner {
