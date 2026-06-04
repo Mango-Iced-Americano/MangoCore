@@ -100,6 +100,14 @@ const DEFAULT_LTP_EXCLUDE: &[&str] = &[
     // eventfd06 requires the libaio userspace library in the LTP image;
     // eventfd01-05 and eventfd2_* keep eventfd syscall coverage.
     "eventfd06",
+    // fork13 requires complete /proc/sys/kernel/pid_max write + PID wrap
+    // semantics. Current PID allocation is intentionally monotonic to avoid
+    // immediate TID reuse regressions, so do not expose a fake writable sysctl.
+    "fork13",
+    // fork14 needs a user VMA layout large enough to build a 16TB anonymous
+    // mapping sequence. The current rv64/la64 task layouts cannot construct
+    // that reproducer, so the test returns TCONF before reaching fork().
+    "fork14",
     // futex_wake04 requires hugetlbfs setup. futex_wake01/02 and wait/requeue
     // cases keep the futex wake syscall semantics covered.
     "futex_wake04",

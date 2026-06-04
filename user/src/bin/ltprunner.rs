@@ -31,6 +31,8 @@ const DEFAULT_LTP_EXCLUDE_UNSUPPORTED: &[&str] = &[
     "clock_nanosleep03",
     "clone303",
     "eventfd06",
+    "fork13",
+    "fork14",
     "futex_waitv01",
     "futex_waitv02",
     "futex_waitv03",

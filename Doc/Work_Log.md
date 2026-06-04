@@ -4,6 +4,22 @@
 
 ## 2026-06-04
 
+### 过滤 fork13/fork14 的 pid_max 与 16TB VMA 环境项
+
+**涉及文件：**
+- `user/src/bin/ltprunner.rs` — 将 `fork13/fork14` 加入 suite 默认 unsupported exclude，避免当前双架构 focused 运行时把环境/地址空间限制项记为失败
+- `user/src/bin/initproc.rs` — 同步默认 LTP exclude 与原因说明，保持 inline/broad 扫描和 suite runner 过滤口径一致
+
+**验证：**
+- 修改前 rv64 heap_trace focused `fork13,fork14`：glibc/musl 均未出现 `PANIC/KERNEL EXCEPTION/HEAP OOM/Bad address`；`fork13` 为 `Failed to open '/proc/sys/kernel/pid_max' for writing: EPERM` 的 TBROK，`fork14` 为连续 `mmap()` 失败后 `TCONF: impossible to get a vm_area_struct sized 16TB`
+- 修改前 la64 heap_trace focused 同组：结果与 rv64 一致，问题不表现为对象泄漏或 fork/clone 崩溃
+- `docker compose exec --workdir /app/os os-dev make rv64-only EXTRA_FEATURES=heap_trace` ✅，132 个既有 warning，无新增 error
+- `docker compose exec --workdir /app/os os-dev make la64-only EXTRA_FEATURES=heap_trace` ✅，116 个既有 warning，无新增 error
+- 修改后 rv64 heap_trace focused `fork13,fork14`：glibc/musl 均显示 `skip excluded case fork13/fork14`、`filtered=0`、`no cases to run after filtering`；未出现 `RUN LTP CASE/TFAIL/TBROK/TCONF/PANIC/KERNEL EXCEPTION/HEAP OOM/Bad address`
+- 修改后 la64 heap_trace focused 同组：结果同 rv64，glibc/musl 均按默认 exclude 过滤，未出现 panic/OOM 或真实用例失败
+
+**备注：** `fork13` 源码要求 `/proc/sys/kernel/pid_max` 可写并验证 Linux pid 生成 race 修复；当前内核的 TID/PID 分配为单调 fresh 分配，以避免此前出现过的即时 TID 复用问题，不应只做可写 no-op sysctl。`fork14` 源码需要连续建立 16TB 匿名 VMA 后检查 fork overflow 语义，而当前 rv64 `TASK_SIZE=3GB`、la64 用户 VMA 布局也无法构造该 reproducer，因此先按环境/架构限制过滤，保留普通 `fork01/03-11`、`clone01-09`、`vfork01/02` 覆盖真实 fork/clone 路径。
+
 ### 修复 shmctl04 的 SHM_STAT_ANY shmid/index 兼容
 
 **涉及文件：**

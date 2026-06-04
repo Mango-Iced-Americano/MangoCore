@@ -245,6 +245,13 @@
 - **教训**: SysV IPC 的“index”不是简单的 `BTreeMap nth()` 抽象；遇到 `*_INFO returned valid index` 或 `doesn't support *_STAT_ANY`，先抓实际 syscall 入参，确认测试传的是 slot index 还是 full id，再改 registry 查找策略。
 - **相关文件**: `os/src/syscall/process/ipc.rs`
 
+## LTP fork pid_max/大 VMA 用例要先区分环境与内核缺陷
+
+- **根因**: `fork13` 依赖完整 `/proc/sys/kernel/pid_max` 可写与 Linux PID wrap 语义；`fork14` 依赖至少 16TB 用户 VMA 构造 fork overflow reproducer。当前内核为避免即时 TID 复用采用单调 fresh PID/TID 分配，双架构用户地址空间也无法构造 16TB VMA，因此用例会在 setup 阶段 TBROK/TCONF，而不是暴露 fork/clone 崩溃。
+- **修复**: 将这类当前环境/架构无法真实覆盖的项同步加入 suite 与 inline 默认过滤；不要为了通过 setup 写一个不生效的 `pid_max` no-op，也不要为单个 reproducer 冒险扩大整套用户 VA 布局。
+- **教训**: fork 压力用例失败时先看是否真的进入 `fork()` 路径；如果日志停在 sysctl 或 mmap 构造阶段，应按测试前置条件分类，保留普通 fork/clone/vfork 用例覆盖真实生命周期路径。
+- **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`, `os/src/task/pid.rs`, `os/src/mm/mmap.rs`
+
 ## 网络
 
 ### 硬编码 IPv4 地址替换为 net_core 动态查询
