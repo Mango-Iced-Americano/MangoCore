@@ -4,6 +4,24 @@
 
 ## 2026-06-04
 
+### 实现 open-description 级 flock 兼容
+
+**涉及文件：**
+- `os/src/fs/vfs/file.rs` — 暴露 `description_id()` 与 `description_ref_count()`，用共享 offset Arc 标识 open file description
+- `os/src/syscall/fs.rs` — 实现 `flock(2)` 的 `LOCK_SH/LOCK_EX/LOCK_UN/LOCK_NB` 最小语义；同一 open-description 可重入/解锁，另一次 open 同 inode 按共享/排他规则冲突；fd 关闭、`close_range`、`dup2/dup3` 覆盖和 exec CLOEXEC 路径释放最后引用的 flock 记录
+- `os/src/task/process.rs` — 进程退出批量关闭 fd 时释放最后引用的 flock 记录，避免锁表残留
+
+**验证：**
+- Docker `make rv64-kernel-build-only` ✅
+- Docker `make la64-kernel-build-only` ✅
+- Docker `make rv64-only EXTRA_FEATURES=heap_trace` ✅
+- Docker `make la64-only EXTRA_FEATURES=heap_trace` ✅
+- rv64 heap_trace focused LTP：`flock01,flock02,flock03,flock04,flock06` 共 19 个子项 TPASS，`FAIL LTP CASE ... : 0`
+- la64 heap_trace focused LTP：同上，共 19 个子项 TPASS，`FAIL LTP CASE ... : 0`
+- 双架构 focused 日志中未出现 `PANIC`、`KERNEL EXCEPTION`、`HEAP OOM`、`Unsupported syscall`、`TFAIL`、`TBROK`；heap stats 显示 `zpcb=0`、`stale=0`、`io_buf pipe=0/0K unix=0/0K`
+
+**备注：** 阻塞等待队列尚未实现；发生冲突时当前直接返回 `EWOULDBLOCK`，已覆盖 LTP 当前 `LOCK_NB` 组合用例，后续若遇到阻塞 flock 用例再补 wait queue。
+
 ### 对齐 ioctl 默认 ENOTTY 语义
 
 **涉及文件：**

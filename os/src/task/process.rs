@@ -792,7 +792,9 @@ impl ProcessControlBlock {
         let mut fd_table = files_ref.lock();
         let open_fds: Vec<usize> = fd_table.iter().map(|(i, _f)| i).collect();
         for fd in open_fds {
-            let _ = fd_table.drop_fd(fd);
+            if let Ok(file) = fd_table.drop_fd(fd) {
+                crate::syscall::fs::release_flock_for_file_if_last(&file);
+            }
         }
         fd_table.release_backing_storage();
     }

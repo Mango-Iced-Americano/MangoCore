@@ -990,6 +990,14 @@ impl File {
         Some(file)
     }
 
+    pub fn description_id(&self) -> usize {
+        Arc::as_ptr(&self.offset) as usize
+    }
+
+    pub fn description_ref_count(&self) -> usize {
+        Arc::strong_count(&self.offset)
+    }
+
     /// 获取 O_NONBLOCK 标志
     pub fn is_nonblock(&self) -> bool {
         self.flags().contains(FileFlags::O_NONBLOCK)
