@@ -4,6 +4,24 @@
 
 ## 2026-06-04
 
+### 放开已验证通过的 prctl05 LTP 用例
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — 从 inline broad-skip 表移除 `prctl05`，保留仍依赖 seccomp/capability/测试环境的 `prctl04/06/06_execve/07/10`
+- `Doc/Work_Log.md` — 记录本轮 skip 表同步与 focused 验证
+
+**验证：**
+- 修改前 rv64 heap_trace focused LTP `prctl05`：musl/glibc 均 8/8 TPASS，summary 均 `failed 0 / broken 0 / skipped 0`
+- 修改前 la64 heap_trace focused LTP `prctl05`：musl/glibc 均 8/8 TPASS，summary 均 `failed 0 / broken 0 / skipped 0`
+- 修改前双架构 focused 日志未出现 `TFAIL/TBROK/PANIC/KERNEL EXCEPTION/HEAP OOM/Test timeouted/Bad address/Unsupported syscall`
+- `docker compose exec --workdir /app/os os-dev make rv64-only EXTRA_FEATURES=heap_trace` ✅
+- 修改后 rv64 focused LTP `prctl05`：musl/glibc 均 8/8 TPASS，summary 均 `failed 0 / broken 0 / skipped 0`
+- `docker compose exec --workdir /app/os os-dev make la64-only EXTRA_FEATURES=heap_trace` ✅
+- 修改后 la64 focused LTP `prctl05`：musl/glibc 均 8/8 TPASS，summary 均 `failed 0 / broken 0 / skipped 0`
+- 修改后双架构 focused 日志未出现 `TFAIL/TBROK/PANIC/KERNEL EXCEPTION/HEAP OOM/Test timeouted/Bad address/Unsupported syscall`
+
+**备注：** `prctl05` 覆盖 `PR_SET_NAME/PR_GET_NAME` 以及 `/proc/self/task/<tid>/comm`、`/proc/self/comm` 读回路径，当前代码已满足该语义；本次只释放该已通过项，不扩大到真实 seccomp 或 capability 用例。
+
 ### 修复 signal ucontext sigmask padding 并放开 profil01
 
 **涉及文件：**
