@@ -149,6 +149,42 @@ pub fn register_all(root: &Arc<crate::fs::procfs::LockedProcInode>) -> Result<()
         sys::pipe_user_pages_hard_content,
         0,
     )?;
+    let mqueue_dir = fs_dir.add_dir_locked("mqueue", InodeMode::from_bits_truncate(0o555))?;
+    mqueue_dir.add_writable_file_with_write(
+        "queues_max",
+        InodeMode::from_bits_truncate(0o644),
+        sys::mqueue_queues_max_content,
+        sys::mqueue_queues_max_write,
+        0,
+    )?;
+    mqueue_dir.add_writable_file_with_write(
+        "msg_max",
+        InodeMode::from_bits_truncate(0o644),
+        sys::mqueue_msg_max_content,
+        sys::mqueue_msg_max_write,
+        0,
+    )?;
+    mqueue_dir.add_writable_file_with_write(
+        "msgsize_max",
+        InodeMode::from_bits_truncate(0o644),
+        sys::mqueue_msgsize_max_content,
+        sys::mqueue_msgsize_max_write,
+        0,
+    )?;
+    mqueue_dir.add_writable_file_with_write(
+        "msg_default",
+        InodeMode::from_bits_truncate(0o644),
+        sys::mqueue_msg_default_content,
+        sys::mqueue_msg_default_write,
+        0,
+    )?;
+    mqueue_dir.add_writable_file_with_write(
+        "msgsize_default",
+        InodeMode::from_bits_truncate(0o644),
+        sys::mqueue_msgsize_default_content,
+        sys::mqueue_msgsize_default_write,
+        0,
+    )?;
     let vm_dir = sys_dir.add_dir_locked("vm", InodeMode::from_bits_truncate(0o555))?;
     vm_dir.add_writable_file_with_write(
         "overcommit_memory",

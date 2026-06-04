@@ -92,7 +92,7 @@ pub fn config_content(
     let _ = writeln!(s, "CONFIG_SIGNAL=y");
     let _ = writeln!(s, "CONFIG_SYSVIPC=y");
     let _ = writeln!(s, "CONFIG_CHECKPOINT_RESTORE=y");
-    let _ = writeln!(s, "# CONFIG_POSIX_MQUEUE is not set");
+    let _ = writeln!(s, "CONFIG_POSIX_MQUEUE=y");
     let _ = writeln!(s, "# CONFIG_PTRACE is not set");
 
     // ── Namespaces ──

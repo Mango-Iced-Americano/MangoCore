@@ -285,6 +285,13 @@
 - **教训**: 看到 “kernel doesn't support PR_GET/SET_SECCOMP” 这类探测型 TCONF 时，不要只改 `PR_GET` 或 `/proc/config`。一旦宣称支持，就必须补齐用例后续会触发的真实 ABI 行为和 wait status 信号语义。
 - **相关文件**: `os/src/syscall/process/ids.rs`, `os/src/syscall/mod.rs`, `os/src/task/task.rs`
 
+## LTP syscall 用例可能依赖 /proc/sys 限额节点
+
+- **根因**: `mq_open01` 这类 syscall 用例会先通过 `/proc/sys/fs/mqueue/queues_max` 保存/调整/恢复内核限额，再验证 syscall 的 `ENOSPC` 等边界错误码。若只实现 `mq_open/mq_send/mq_receive`，但缺失对应 sysctl 节点或写语义，用例会在 ProcFS 前置步骤 `TBROK`，表现为 `ENOENT` 或 `EPERM`，并没有真正覆盖到目标 syscall 的边界路径。
+- **修复**: 将 sysctl 节点接到真实内核 limit 状态，读写路径复用同一份 getter/setter；syscall 创建和参数校验也读取该动态状态，而不是给 ProcFS 伪造只读常量。
+- **教训**: 遇到 IPC/mm/process syscall 用例在 `/proc/sys/...` 处 broken，先判断它是不是目标 ABI 的配置面。若是，应实现最小可写 sysctl 并接入真实行为；不要只加只读文件，也不要把它简单归类成通用 FS 问题跳过。
+- **相关文件**: `os/src/syscall/process/ipc.rs`, `os/src/fs/procfs/files/sys.rs`, `os/src/fs/procfs/files/mod.rs`
+
 ## 网络
 
 ### 硬编码 IPv4 地址替换为 net_core 动态查询

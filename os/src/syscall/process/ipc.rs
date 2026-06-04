@@ -90,6 +90,8 @@ const MQ_O_NONBLOCK: u32 = FileFlags::O_NONBLOCK.bits();
 const MQ_O_CLOEXEC: u32 = FileFlags::O_CLOEXEC.bits();
 const MQ_OPEN_VALID_FLAGS: u32 =
     MQ_O_ACCMODE | MQ_O_CREAT | MQ_O_EXCL | MQ_O_NONBLOCK | MQ_O_CLOEXEC;
+const MQ_DEFAULT_QUEUES_MAX: usize = 256;
+const MQ_HARD_QUEUES_MAX: usize = 4096;
 const MQ_DEFAULT_MAXMSG: i64 = 10;
 const MQ_DEFAULT_MSGSIZE: i64 = 8192;
 const MQ_MAX_MAXMSG: i64 = 1024;
@@ -100,6 +102,15 @@ struct MsgLimits {
     msgmax: usize,
     msgmnb: usize,
     msgmni: usize,
+}
+
+#[derive(Clone, Copy)]
+struct MqLimits {
+    queues_max: usize,
+    msg_max: usize,
+    msgsize_max: usize,
+    msg_default: usize,
+    msgsize_default: usize,
 }
 
 const GETPID: usize = 11;
@@ -2484,6 +2495,83 @@ lazy_static! {
     static ref MQ_REGISTRY: Mutex<MqRegistry> = Mutex::new(MqRegistry {
         queues: BTreeMap::new(),
     });
+    static ref MQ_LIMITS: Mutex<MqLimits> = Mutex::new(MqLimits {
+        queues_max: MQ_DEFAULT_QUEUES_MAX,
+        msg_max: MQ_MAX_MAXMSG as usize,
+        msgsize_max: MQ_MAX_MSGSIZE as usize,
+        msg_default: MQ_DEFAULT_MAXMSG as usize,
+        msgsize_default: MQ_DEFAULT_MSGSIZE as usize,
+    });
+}
+
+pub fn posix_mq_queues_max() -> usize {
+    MQ_LIMITS.lock().queues_max
+}
+
+pub fn posix_mq_msg_max() -> usize {
+    MQ_LIMITS.lock().msg_max
+}
+
+pub fn posix_mq_msgsize_max() -> usize {
+    MQ_LIMITS.lock().msgsize_max
+}
+
+pub fn posix_mq_msg_default() -> usize {
+    MQ_LIMITS.lock().msg_default
+}
+
+pub fn posix_mq_msgsize_default() -> usize {
+    MQ_LIMITS.lock().msgsize_default
+}
+
+pub fn set_posix_mq_queues_max(value: usize) -> bool {
+    if value == 0 || value > MQ_HARD_QUEUES_MAX {
+        return false;
+    }
+    MQ_LIMITS.lock().queues_max = value;
+    true
+}
+
+pub fn set_posix_mq_msg_max(value: usize) -> bool {
+    if value == 0 || value > MQ_MAX_MAXMSG as usize {
+        return false;
+    }
+    let mut limits = MQ_LIMITS.lock();
+    if value < limits.msg_default {
+        return false;
+    }
+    limits.msg_max = value;
+    true
+}
+
+pub fn set_posix_mq_msgsize_max(value: usize) -> bool {
+    if value == 0 || value > MQ_MAX_MSGSIZE as usize {
+        return false;
+    }
+    let mut limits = MQ_LIMITS.lock();
+    if value < limits.msgsize_default {
+        return false;
+    }
+    limits.msgsize_max = value;
+    true
+}
+
+pub fn set_posix_mq_msg_default(value: usize) -> bool {
+    let mut limits = MQ_LIMITS.lock();
+    if value == 0 || value > limits.msg_max {
+        return false;
+    }
+    limits.msg_default = value;
+    true
+}
+
+pub fn set_posix_mq_msgsize_default(value: usize) -> bool {
+    let mut limits = MQ_LIMITS.lock();
+    if value == 0 || value > limits.msgsize_max {
+        return false;
+    }
+    limits.msgsize_default = value;
+    true
 }
 
 fn mq_name_from_user(name: *const u8) -> Result<String, isize> {
@@ -2502,7 +2590,11 @@ fn mq_name_from_user(name: *const u8) -> Result<String, isize> {
 
 fn mq_attr_from_user(attr: usize) -> Result<LinuxMqAttr, isize> {
     if attr == 0 {
-        return Ok(LinuxMqAttr::new(MQ_DEFAULT_MAXMSG, MQ_DEFAULT_MSGSIZE));
+        let limits = *MQ_LIMITS.lock();
+        return Ok(LinuxMqAttr::new(
+            limits.msg_default as i64,
+            limits.msgsize_default as i64,
+        ));
     }
     let mut user_attr = LinuxMqAttr::new(0, 0);
     copy_from_user(
@@ -2510,10 +2602,11 @@ fn mq_attr_from_user(attr: usize) -> Result<LinuxMqAttr, isize> {
         attr as *const LinuxMqAttr,
         &mut user_attr as *mut LinuxMqAttr,
     )?;
+    let limits = *MQ_LIMITS.lock();
     if user_attr.mq_maxmsg <= 0
-        || user_attr.mq_maxmsg > MQ_MAX_MAXMSG
+        || user_attr.mq_maxmsg > limits.msg_max as i64
         || user_attr.mq_msgsize <= 0
-        || user_attr.mq_msgsize > MQ_MAX_MSGSIZE
+        || user_attr.mq_msgsize > limits.msgsize_max as i64
     {
         return Err(EINVAL);
     }
@@ -2749,6 +2842,7 @@ pub fn sys_mq_open(name: *const u8, oflag: u32, _mode: u32, attr: usize) -> isiz
     };
 
     let mut created = false;
+    let queues_max = posix_mq_queues_max();
     let queue = {
         let mut registry = MQ_REGISTRY.lock();
         if let Some(queue) = registry.queues.get(&name) {
@@ -2762,6 +2856,9 @@ pub fn sys_mq_open(name: *const u8, oflag: u32, _mode: u32, attr: usize) -> isiz
         } else {
             if (oflag & MQ_O_CREAT) == 0 {
                 return ENOENT;
+            }
+            if registry.queues.len() >= queues_max {
+                return ENOSPC;
             }
             let attr = match mq_attr_from_user(attr) {
                 Ok(attr) => attr,

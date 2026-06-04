@@ -27,6 +27,9 @@ pub use ids::{
     CapUserHeader, RLimit, SchedAttr, SchedParam, Sysinfo,
 };
 pub use ipc::{
+    posix_mq_msg_default, posix_mq_msg_max, posix_mq_msgsize_default, posix_mq_msgsize_max,
+    posix_mq_queues_max, set_posix_mq_msg_default, set_posix_mq_msg_max,
+    set_posix_mq_msgsize_default, set_posix_mq_msgsize_max, set_posix_mq_queues_max,
     sys_mq_getsetattr, sys_mq_notify, sys_mq_open, sys_mq_timedreceive, sys_mq_timedsend,
     sys_mq_unlink, sys_msgctl, sys_msgget, sys_msgrcv, sys_msgsnd, sys_semctl, sys_semget,
     sys_semop, sys_semtimedop, sys_shmat, sys_shmctl, sys_shmdt, sys_shmget,

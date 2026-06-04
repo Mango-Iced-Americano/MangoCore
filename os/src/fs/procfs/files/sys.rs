@@ -134,6 +134,116 @@ pub fn pipe_user_pages_hard_content(
     proc_read_str(offset, len, buf, &value)
 }
 
+pub fn mqueue_queues_max_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let value = format!("{}\n", crate::syscall::posix_mq_queues_max());
+    proc_read_str(offset, len, buf, &value)
+}
+
+pub fn mqueue_queues_max_write(
+    _extra: usize,
+    _offset: usize,
+    buf: &[u8],
+) -> Result<usize, SyscallErr> {
+    let value = parse_usize_sysctl(buf)?;
+    if !crate::syscall::set_posix_mq_queues_max(value) {
+        return Err(SyscallErr::EINVAL);
+    }
+    Ok(buf.len())
+}
+
+pub fn mqueue_msg_max_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let value = format!("{}\n", crate::syscall::posix_mq_msg_max());
+    proc_read_str(offset, len, buf, &value)
+}
+
+pub fn mqueue_msg_max_write(
+    _extra: usize,
+    _offset: usize,
+    buf: &[u8],
+) -> Result<usize, SyscallErr> {
+    let value = parse_usize_sysctl(buf)?;
+    if !crate::syscall::set_posix_mq_msg_max(value) {
+        return Err(SyscallErr::EINVAL);
+    }
+    Ok(buf.len())
+}
+
+pub fn mqueue_msgsize_max_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let value = format!("{}\n", crate::syscall::posix_mq_msgsize_max());
+    proc_read_str(offset, len, buf, &value)
+}
+
+pub fn mqueue_msgsize_max_write(
+    _extra: usize,
+    _offset: usize,
+    buf: &[u8],
+) -> Result<usize, SyscallErr> {
+    let value = parse_usize_sysctl(buf)?;
+    if !crate::syscall::set_posix_mq_msgsize_max(value) {
+        return Err(SyscallErr::EINVAL);
+    }
+    Ok(buf.len())
+}
+
+pub fn mqueue_msg_default_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let value = format!("{}\n", crate::syscall::posix_mq_msg_default());
+    proc_read_str(offset, len, buf, &value)
+}
+
+pub fn mqueue_msg_default_write(
+    _extra: usize,
+    _offset: usize,
+    buf: &[u8],
+) -> Result<usize, SyscallErr> {
+    let value = parse_usize_sysctl(buf)?;
+    if !crate::syscall::set_posix_mq_msg_default(value) {
+        return Err(SyscallErr::EINVAL);
+    }
+    Ok(buf.len())
+}
+
+pub fn mqueue_msgsize_default_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let value = format!("{}\n", crate::syscall::posix_mq_msgsize_default());
+    proc_read_str(offset, len, buf, &value)
+}
+
+pub fn mqueue_msgsize_default_write(
+    _extra: usize,
+    _offset: usize,
+    buf: &[u8],
+) -> Result<usize, SyscallErr> {
+    let value = parse_usize_sysctl(buf)?;
+    if !crate::syscall::set_posix_mq_msgsize_default(value) {
+        return Err(SyscallErr::EINVAL);
+    }
+    Ok(buf.len())
+}
+
 pub fn overcommit_memory_content(
     _extra: usize,
     offset: usize,

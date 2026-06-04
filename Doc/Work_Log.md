@@ -4,6 +4,24 @@
 
 ## 2026-06-04
 
+### 补齐 POSIX mqueue sysctl 语义
+
+**涉及文件：**
+- `os/src/syscall/process/ipc.rs` — 为 POSIX mqueue 增加可调 limits 状态，`mq_open` 的队列数、`mq_attr` 的最大消息数/消息大小校验改为读取动态 sysctl 值；`attr == NULL` 时使用 `msg_default/msgsize_default`
+- `os/src/fs/procfs/files/mod.rs` — 注册 `/proc/sys/fs/mqueue/{queues_max,msg_max,msgsize_max,msg_default,msgsize_default}`，权限为 `0644`
+- `os/src/fs/procfs/files/sys.rs` — 增加 mqueue sysctl 读写回调，写入非法值返回 `EINVAL`
+- `os/src/syscall/process/mod.rs`、`os/src/syscall/mod.rs` — 导出 mqueue sysctl getter/setter 供 ProcFS 使用
+- `os/src/fs/procfs/files/config.rs` — `/proc/config.gz` 视图声明 `CONFIG_POSIX_MQUEUE=y`
+- `.agents/skills/mango-worklog/references/harness-patterns.md` — 记录 LTP syscall 用例依赖 `/proc/sys` 限额节点时的处理模式
+
+**验证：**
+- `docker compose exec os-dev make -C /app/os rv64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅，132 个既有 warning，无新增 error
+- rv64 heap_trace focused LTP `mq_open01,mq_timedreceive01,mq_timedsend01,mq_unlink01,mq_notify01,mq_notify02,mq_notify03`：glibc/musl 均 `executed=7 passed=7 failed=0 skipped=0`；`mq_open01` 从原先 `/proc/sys/fs/mqueue/queues_max` 写入 `EPERM` 推进为 `NO_SPACE returned ENOSPC` 并通过
+- `docker compose exec os-dev make -C /app/os la64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅，116 个既有 warning，无新增 error
+- la64 heap_trace focused LTP 同组：glibc/musl 均 `executed=7 passed=7 failed=0 skipped=0`；未出现 `PANIC/KERNEL EXCEPTION/BUG/OOM/Unsupported syscall`
+
+**备注：** 这次 ProcFS 改动只服务 POSIX mqueue IPC ABI 的 Linux sysctl 兼容，不扩展通用 FS/net 行为。la64 验证后已恢复 `os/src/lang_items.rs` 与 `user/src/lang_items.rs` 到 rv64 变体。
+
 ### 放开 prctl04 默认 LTP 过滤
 
 **涉及文件：**
