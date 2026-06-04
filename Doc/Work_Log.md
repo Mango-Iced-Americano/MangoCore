@@ -2,6 +2,26 @@
 
 ---
 
+## 2026-06-04
+
+### 补齐 execveat 最小兼容
+
+**涉及文件：**
+- `os/src/syscall/syscall_id.rs` — 新增通用 syscall 号 `execveat(281)`
+- `os/src/syscall/mod.rs` / `os/src/syscall/process/mod.rs` — 接入 syscall 名称、分发与导出
+- `os/src/syscall/process/exec.rs` — 抽出 exec 参数读取与 ELF 加载公共路径，新增 `sys_execveat()`，支持 dirfd 相对路径、`AT_EMPTY_PATH`、`AT_SYMLINK_NOFOLLOW` 与 LTP 可见错误码优先级
+
+**验证：**
+- Docker `make rv64-kernel-build-only` ✅
+- Docker `make la64-kernel-build-only` ✅
+- rv64 heap_trace focused LTP：`execveat01,execveat02` 全部 `FAIL LTP CASE ... : 0`
+- la64 heap_trace focused LTP：`execveat01,execveat02` 全部 `FAIL LTP CASE ... : 0`
+- 双架构 focused 日志中 `PANIC=0`、`KERNEL EXCEPTION=0`、`HEAP OOM=0`、`Test timeouted=0`、`Unsupported syscall=0`、`TFAIL=0`、`TBROK=0`
+
+**备注：** 本轮覆盖 LTP `execveat01/02` 的成功路径与错误路径；`execveat03` 仍因测试设备获取失败 `TBROK`，未计入本次 syscall 语义修复。
+
+---
+
 ## 2026-06-02
 
 ### MountFS bind/umount 残留修复

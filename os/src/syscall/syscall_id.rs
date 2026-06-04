@@ -201,6 +201,7 @@ pub const SYSCALL_SCHED_GETATTR: usize = 275;
 pub const SYSCALL_RENAMEAT2: usize = 276;
 pub const SYSCALL_GETRANDOM: usize = 278;
 pub const SYSCALL_MEMFD_CREATE: usize = 279;
+pub const SYSCALL_EXECVEAT: usize = 281;
 pub const SYSCALL_MEMBARRIER: usize = 283;
 pub const SYSCALL_MLOCK2: usize = 284;
 pub const SYSCALL_COPY_FILE_RANGE: usize = 285;

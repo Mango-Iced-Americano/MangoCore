@@ -119,9 +119,18 @@ fn has_exec_access(metadata: &vfs::Metadata) -> bool {
     (allowed & 0o1) != 0
 }
 
-fn open_exec_file(cwd_inode: &Arc<dyn vfs::IndexNode>, path: &str) -> Result<vfs::File, isize> {
+fn open_exec_file(
+    cwd_inode: &Arc<dyn vfs::IndexNode>,
+    path: &str,
+    follow_final: bool,
+) -> Result<vfs::File, isize> {
     validate_exec_path_len(path)?;
-    let inode = vfs_lookup(cwd_inode, path, true)?;
+    let inode = vfs_lookup(cwd_inode, path, follow_final)?;
+    if !follow_final
+        && inode.metadata().map_err(|e| -(e as isize))?.file_type == vfs::FileType::SymLink
+    {
+        return Err(ELOOP);
+    }
     let file = vfs::File::new(inode, vfs::FileFlags::O_RDONLY).map_err(|e| -(e as isize))?;
     check_exec_metadata(&file)?;
     Ok(file)
@@ -132,10 +141,18 @@ fn is_compat_shell_path(path: &str) -> bool {
 }
 
 fn open_exec(cwd_inode: &Arc<dyn vfs::IndexNode>, path: &str) -> Result<vfs::File, isize> {
-    match open_exec_file(cwd_inode, path) {
+    open_exec_with_follow(cwd_inode, path, true)
+}
+
+fn open_exec_with_follow(
+    cwd_inode: &Arc<dyn vfs::IndexNode>,
+    path: &str,
+    follow_final: bool,
+) -> Result<vfs::File, isize> {
+    match open_exec_file(cwd_inode, path, follow_final) {
         Ok(file) => Ok(file),
-        Err(errno) if is_compat_shell_path(path) => {
-            open_exec_file(cwd_inode, "/bash").or(Err(errno))
+        Err(errno) if follow_final && is_compat_shell_path(path) => {
+            open_exec_file(cwd_inode, "/bash", true).or(Err(errno))
         }
         Err(errno) => Err(errno),
     }
@@ -193,53 +210,33 @@ fn validate_exec_stack_usage(argv_vec: &[String], envp_vec: &[String]) -> Result
     Ok(())
 }
 
-pub fn sys_execve(
-    pathname: *const u8,
+fn read_exec_vectors(
+    token: usize,
     mut argv: *const *const u8,
     mut envp: *const *const u8,
-) -> isize {
-    // 获取当前进程
-    let task = current_task().unwrap();
-    // 获取当前进程的用户态内存访问权限
-    let token = task.get_user_token();
-    // 获取可执行文件的路径
-    let path = match UserCString::new(pathname).read(token) {
-        Ok(path) => path,
-        Err(errno) => return errno,
-    };
-    if let Err(errno) = validate_exec_path_len(&path) {
-        return errno;
-    }
-    // 解析参数列表
+) -> Result<(Vec<String>, Vec<String>), isize> {
     let mut argv_vec: Vec<String> = Vec::new();
     if argv_vec.try_reserve(16).is_err() {
-        return ENOMEM;
+        return Err(ENOMEM);
     }
-    // 解析环境变量列表
+
     let mut envp_vec: Vec<String> = Vec::new();
     if envp_vec.try_reserve(16).is_err() {
-        return ENOMEM;
+        return Err(ENOMEM);
     }
+
+    let mut arg_env_bytes = 0usize;
     if !argv.is_null() {
-        let mut arg_env_bytes = 0usize;
         loop {
-            let arg_ptr = match UserPtr::new(argv).read(token) {
-                Ok(argv) => argv,
-                Err(errno) => return errno,
-            };
+            let arg_ptr = UserPtr::new(argv).read(token)?;
             if arg_ptr.is_null() {
                 break;
             }
             if argv_vec.try_reserve(1).is_err() {
-                return ENOMEM;
+                return Err(ENOMEM);
             }
-            let arg = match UserCString::new(arg_ptr).read(token) {
-                Ok(arg) => arg,
-                Err(errno) => return errno,
-            };
-            if let Err(errno) = account_exec_string_bytes(&mut arg_env_bytes, &arg) {
-                return errno;
-            }
+            let arg = UserCString::new(arg_ptr).read(token)?;
+            account_exec_string_bytes(&mut arg_env_bytes, &arg)?;
             argv_vec.push(arg);
             unsafe {
                 argv = argv.add(1);
@@ -248,39 +245,168 @@ pub fn sys_execve(
     }
     if argv_vec.is_empty() {
         if argv_vec.try_reserve(1).is_err() {
-            return ENOMEM;
+            return Err(ENOMEM);
         }
         argv_vec.push(String::new());
+        account_exec_string_bytes(&mut arg_env_bytes, "")?;
     }
-    let mut arg_env_bytes = argv_vec
-        .iter()
-        .map(|arg| arg.len().saturating_add(1))
-        .sum::<usize>();
+
     if !envp.is_null() {
         loop {
-            let env_ptr = match UserPtr::new(envp).read(token) {
-                Ok(envp) => envp,
-                Err(errno) => return errno,
-            };
+            let env_ptr = UserPtr::new(envp).read(token)?;
             if env_ptr.is_null() {
                 break;
             }
             if envp_vec.try_reserve(1).is_err() {
-                return ENOMEM;
+                return Err(ENOMEM);
             }
-            let env = match UserCString::new(env_ptr).read(token) {
-                Ok(env) => env,
-                Err(errno) => return errno,
-            };
-            if let Err(errno) = account_exec_string_bytes(&mut arg_env_bytes, &env) {
-                return errno;
-            }
+            let env = UserCString::new(env_ptr).read(token)?;
+            account_exec_string_bytes(&mut arg_env_bytes, &env)?;
             envp_vec.push(env);
             unsafe {
                 envp = envp.add(1);
             }
         }
     }
+
+    Ok((argv_vec, envp_vec))
+}
+
+fn make_abs_exec_path(path: &str, base_path: &str) -> String {
+    if path.starts_with('/') {
+        path.to_string()
+    } else if path.is_empty() {
+        base_path.to_string()
+    } else if base_path == "/" {
+        alloc::format!("/{}", path)
+    } else {
+        alloc::format!("{}/{}", base_path, path)
+    }
+}
+
+fn exec_opened_file(
+    cwd_inode: &Arc<dyn vfs::IndexNode>,
+    path: &str,
+    abs_path: String,
+    file: vfs::File,
+    mut argv_vec: Vec<String>,
+    envp_vec: Vec<String>,
+) -> isize {
+    if file.get_size() < 4 {
+        return ENOEXEC;
+    }
+
+    let mut magic_number = [0u8; 4];
+    let _ = file.pread(0, &mut magic_number);
+    let elf = if &magic_number == b"\x7fELF" {
+        file
+    } else if &magic_number[..2] == b"#!" {
+        if let Ok(Some((interp, shebang_arg))) = parse_shebang(&file) {
+            match open_exec(cwd_inode, &interp).and_then(|f| {
+                if !f.is_dir() && is_valid_elf(&f) {
+                    Ok(f)
+                } else {
+                    Err(ENOEXEC)
+                }
+            }) {
+                Ok(f) => {
+                    let mut script_argv = Vec::new();
+                    if script_argv
+                        .try_reserve(3usize.saturating_add(argv_vec.len()))
+                        .is_err()
+                    {
+                        return ENOMEM;
+                    }
+                    script_argv.push(interp);
+                    if let Some(arg) = shebang_arg {
+                        script_argv.push(arg);
+                    }
+                    script_argv.push(path.to_string());
+                    for arg in argv_vec.iter().skip(1) {
+                        script_argv.push(arg.clone());
+                    }
+                    argv_vec = script_argv;
+                    f
+                }
+                Err(_) => match try_open_shell_fallback(cwd_inode, &mut argv_vec, path) {
+                    Ok(f) => f,
+                    Err(e) => return e,
+                },
+            }
+        } else {
+            match try_open_shell_fallback(cwd_inode, &mut argv_vec, path) {
+                Ok(f) => f,
+                Err(e) => return e,
+            }
+        }
+    } else {
+        return ENOEXEC;
+    };
+
+    if let Err(errno) = validate_exec_stack_usage(&argv_vec, &envp_vec) {
+        return errno;
+    }
+
+    if elf.is_dir() {
+        return EISDIR;
+    }
+
+    let task = current_task().unwrap();
+    show_frame_consumption! {
+        "load_elf";
+        if let Err(_errno) = task.load_elf(elf, &argv_vec, &envp_vec) {
+            exit_current_and_run_next(127);
+        };
+    }
+    task.process.mark_execed();
+    task.process.set_exe_path(abs_path);
+    task.process.complete_vfork();
+    SUCCESS
+}
+
+fn clone_fd_file(fd: usize) -> Result<vfs::File, isize> {
+    let task = current_task().unwrap();
+    let files_ref = task.process.files();
+    let fd_table = files_ref.lock();
+    let file = fd_table.get_file(fd).map_err(|e| -(e as isize))?;
+    file.try_clone().ok_or(EBADF)
+}
+
+fn reopen_exec_fd(file: &vfs::File) -> Result<vfs::File, isize> {
+    let exec_file =
+        vfs::File::new(file.inode.clone(), vfs::FileFlags::O_RDONLY).map_err(|e| -(e as isize))?;
+    check_exec_metadata(&exec_file)?;
+    Ok(exec_file)
+}
+
+fn resolve_exec_start_inode(dirfd: usize, path: &str) -> Result<Arc<dyn vfs::IndexNode>, isize> {
+    let task = current_task().unwrap();
+    if path.starts_with('/') || dirfd == crate::syscall::fs::AT_FDCWD {
+        return Ok(task.process.fs().lock().working_inode.inode.clone());
+    }
+
+    let file = clone_fd_file(dirfd)?;
+    let metadata = file.metadata().map_err(|e| -(e as isize))?;
+    if metadata.file_type != vfs::FileType::Dir {
+        return Err(ENOTDIR);
+    }
+    Ok(file.inode.clone())
+}
+
+pub fn sys_execve(pathname: *const u8, argv: *const *const u8, envp: *const *const u8) -> isize {
+    let task = current_task().unwrap();
+    let token = task.get_user_token();
+    let path = match UserCString::new(pathname).read(token) {
+        Ok(path) => path,
+        Err(errno) => return errno,
+    };
+    if let Err(errno) = validate_exec_path_len(&path) {
+        return errno;
+    }
+    let (argv_vec, envp_vec) = match read_exec_vectors(token, argv, envp) {
+        Ok(v) => v,
+        Err(errno) => return errno,
+    };
     debug!(
         "[exec] argv: {:?} /* {} vars */, envp: {:?} /* {} vars */",
         argv_vec,
@@ -288,104 +414,90 @@ pub fn sys_execve(
         envp_vec,
         envp_vec.len()
     );
-    // 获取当前工作目录的文件描述符
     let (working_inode, working_path) = {
         let fs_ref = task.process.fs();
         let lock = fs_ref.lock();
         (lock.working_inode.clone(), lock.working_path.clone())
     };
     let cwd_inode: Arc<dyn vfs::IndexNode> = working_inode.inode.clone();
+    let abs_path = make_abs_exec_path(&path, &working_path);
 
     match open_exec(&cwd_inode, &path) {
-        // 检查打开的文件
-        Ok(file) => {
-            // 若文件大小小于4，则返回ENOEXEC
-            // 即非可执行文件
-            if file.get_size() < 4 {
-                return ENOEXEC;
-            }
-            // 看前四个字节是否是可执行文件魔数
-            let mut magic_number = [0u8; 4];
-            // this operation may be expensive... I'm not sure
-            let _ = file.pread(0, &mut magic_number);
-            let elf = if &magic_number == b"\x7fELF" {
-                file
-            } else if &magic_number[..2] == b"#!" {
-                let shell_file = if let Ok(Some((interp, shebang_arg))) = parse_shebang(&file) {
-                    // 尝试打开并验证 shebang 解释器
-                    match open_exec(&cwd_inode, &interp).and_then(|f| {
-                        if !f.is_dir() && is_valid_elf(&f) {
-                            Ok(f)
-                        } else {
-                            Err(ENOEXEC)
-                        }
-                    }) {
-                        Ok(f) => {
-                            let mut script_argv = Vec::new();
-                            script_argv.push(interp);
-                            if let Some(arg) = shebang_arg { script_argv.push(arg); }
-                            script_argv.push(path.clone());
-                            for arg in argv_vec.iter().skip(1) {
-                                script_argv.push(arg.clone());
-                            }
-                            argv_vec = script_argv;
-                            f
-                        }
-                        Err(_) => {
-                            // 解释器无效，回退到常见 shell
-                            match try_open_shell_fallback(&cwd_inode, &mut argv_vec, &path) {
-                                Ok(f) => f,
-                                Err(e) => return e,
-                            }
-                        }
-                    }
-                } else {
-                    // shebang 解析失败，尝试常见 shell 回退
-                    match try_open_shell_fallback(&cwd_inode, &mut argv_vec, &path) {
-                        Ok(f) => f,
-                        Err(e) => return e,
-                    }
-                };
-                shell_file
-            } else {
-                return ENOEXEC;
-            };
-            if let Err(errno) = validate_exec_stack_usage(&argv_vec, &envp_vec) {
-                return errno;
-            }
-
-            // 检查不是目录 — Linux execve(2) 对目录返回 EISDIR
-            if elf.is_dir() {
-                return EISDIR;
-            }
-
-            let task = current_task().unwrap();
-            // 确保 exe_path 是绝对路径（glibc _dl_get_origin 要求以 '/' 开头）
-            let abs_path = if path.starts_with('/') {
-                path.clone()
-            } else {
-                let cwd = working_path.clone();
-                if cwd == "/" {
-                    alloc::format!("/{}", path)
-                } else {
-                    alloc::format!("{}/{}", cwd, path)
-                }
-            };
-            show_frame_consumption! {
-                "load_elf";
-                if let Err(errno) = task.load_elf(elf, &argv_vec, &envp_vec) {
-                    exit_current_and_run_next(127);
-                };
-            }
-            task.process.mark_execed();
-            task.process.set_exe_path(abs_path);
-            task.process.complete_vfork();
-            // should return 0 in success
-            SUCCESS
-        }
+        Ok(file) => exec_opened_file(&cwd_inode, &path, abs_path, file, argv_vec, envp_vec),
         Err(errno) => {
             info!(
                 "[sys_execve] open_path(\"{}\") failed: errno={}",
+                path, errno
+            );
+            errno
+        }
+    }
+}
+
+pub fn sys_execveat(
+    dirfd: usize,
+    pathname: *const u8,
+    argv: *const *const u8,
+    envp: *const *const u8,
+    flags: u32,
+) -> isize {
+    const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    const AT_EMPTY_PATH: u32 = 0x1000;
+    const VALID_FLAGS: u32 = AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH;
+
+    let task = current_task().unwrap();
+    let token = task.get_user_token();
+    let path = match UserCString::new(pathname).read(token) {
+        Ok(path) => path,
+        Err(errno) => return errno,
+    };
+    if (flags & !VALID_FLAGS) != 0 {
+        return EINVAL;
+    }
+    if let Err(errno) = validate_exec_path_len(&path) {
+        return errno;
+    }
+    let (argv_vec, envp_vec) = match read_exec_vectors(token, argv, envp) {
+        Ok(v) => v,
+        Err(errno) => return errno,
+    };
+
+    if path.is_empty() {
+        if (flags & AT_EMPTY_PATH) == 0 {
+            return ENOENT;
+        }
+        if dirfd == crate::syscall::fs::AT_FDCWD {
+            return ENOENT;
+        }
+        let fd_file = match clone_fd_file(dirfd) {
+            Ok(file) => file,
+            Err(errno) => return errno,
+        };
+        let file = match reopen_exec_fd(&fd_file) {
+            Ok(file) => file,
+            Err(errno) => return errno,
+        };
+        let abs_path = fd_file
+            .inode
+            .absolute_path()
+            .unwrap_or_else(|_| alloc::format!("/dev/fd/{}", dirfd));
+        return exec_opened_file(&fd_file.inode, &path, abs_path, file, argv_vec, envp_vec);
+    }
+
+    let start_inode = match resolve_exec_start_inode(dirfd, &path) {
+        Ok(inode) => inode,
+        Err(errno) => return errno,
+    };
+    let follow_final = (flags & AT_SYMLINK_NOFOLLOW) == 0;
+    let base_path = start_inode
+        .absolute_path()
+        .unwrap_or_else(|_| task.process.fs().lock().working_path.clone());
+    let abs_path = make_abs_exec_path(&path, &base_path);
+    match open_exec_with_follow(&start_inode, &path, follow_final) {
+        Ok(file) => exec_opened_file(&start_inode, &path, abs_path, file, argv_vec, envp_vec),
+        Err(errno) => {
+            info!(
+                "[sys_execveat] open_path(\"{}\") failed: errno={}",
                 path, errno
             );
             errno

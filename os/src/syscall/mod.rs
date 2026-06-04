@@ -204,6 +204,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_MREMAP => "mremap",
         SYSCALL_CLONE => "clone",
         SYSCALL_EXECVE => "execve",
+        SYSCALL_EXECVEAT => "execveat",
         SYSCALL_MMAP => "mmap",
         SYSCALL_MPROTECT => "mprotect",
         SYSCALL_MSYNC => "msync",
@@ -527,6 +528,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[0] as *const u8,
             args[1] as *const *const u8,
             args[2] as *const *const u8,
+        ),
+        SYSCALL_EXECVEAT => sys_execveat(
+            args[0],
+            args[1] as *const u8,
+            args[2] as *const *const u8,
+            args[3] as *const *const u8,
+            args[4] as u32,
         ),
         SYSCALL_WAIT4 => sys_wait4(
             args[0] as isize,

@@ -10,7 +10,7 @@ mod signal;
 mod time;
 
 pub use clone::{sys_clone, sys_clone3, sys_unshare, CloneFlags};
-pub use exec::sys_execve;
+pub use exec::{sys_execve, sys_execveat};
 pub use futex::sys_futex;
 pub use ids::{
     sys_capget, sys_capset, sys_get_mempolicy, sys_getegid, sys_geteuid, sys_getgid,
