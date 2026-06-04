@@ -4,6 +4,26 @@
 
 ## 2026-06-04
 
+### 修复 signal ucontext sigmask padding 并放开 profil01
+
+**涉及文件：**
+- `os/src/hal/arch/riscv/trap/context.rs` — 将 `UserContext` 中 `uc_sigmask` 后的 padding 改为按 Linux/glibc 固定 128 字节 sigset 区计算，避免 `uc_mcontext` 偏移后移
+- `os/src/hal/arch/loongarch64/trap/context.rs` — 同步修正 la64 `UserContext` padding；la64 `UserSignalMask` 为 16 字节，因此 padding 为 112 字节
+- `user/src/bin/initproc.rs` — 从 inline broad-skip 表移除 `profil01`，保留 musl 自身 TCONF，放开 glibc 可通过路径
+- `Doc/Work_Log.md` — 记录本轮非 fs/net LTP 修复与验证
+- `.agents/skills/mango-worklog/references/harness-patterns.md` — 沉淀 signal frame ABI 偏移调试模式
+
+**验证：**
+- `docker compose exec --workdir /app/os os-dev make rv64-only EXTRA_FEATURES=heap_trace` ✅
+- 修改前 rv64 focused LTP `profil01`：musl TCONF；glibc TPASS，`profil recorded some data`
+- 修改前 la64 focused LTP `profil01`：musl TCONF；glibc 从此前 TFAIL 转为 TPASS，`profil recorded some data`
+- 移除 `profil01` broad skip 后重新构建 rv64 heap_trace 镜像 ✅
+- 修改后 rv64 focused LTP `profil01`：musl TCONF；glibc TPASS，未出现 `TFAIL/TBROK/PANIC/KERNEL EXCEPTION/HEAP OOM/Test timeouted/Bad address/Unsupported syscall`
+- `docker compose exec --workdir /app/os os-dev make la64-only EXTRA_FEATURES=heap_trace` ✅
+- 修改后 la64 focused LTP `profil01`：musl TCONF；glibc TPASS，未出现 `TFAIL/TBROK/PANIC/KERNEL EXCEPTION/HEAP OOM/Test timeouted/Bad address/Unsupported syscall`
+
+**备注：** glibc `profil()` 的 SA_SIGINFO handler 会从 `ucontext_t.uc_mcontext` 读取被打断 PC 并落入 profile bucket；旧布局把 `UserSignalMask` 后又固定追加 128 字节 padding，使 la64 的 `uc_mcontext` 比用户态 ABI 预期晚 16 字节，glibc 读到 padding 零值后无法记录采样。
+
 ### 放开 clock_gettime04 非 fs/net LTP 用例
 
 **涉及文件：**
