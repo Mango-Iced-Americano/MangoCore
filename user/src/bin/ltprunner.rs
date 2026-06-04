@@ -50,6 +50,7 @@ const DEFAULT_LTP_EXCLUDE_UNSUPPORTED: &[&str] = &[
     "prctl07",
     "prctl10",
     "rt_tgsigqueueinfo01",
+    "semctl08",
     "set_thread_area01",
     "sgetmask01",
     "signal06",

@@ -125,6 +125,9 @@ const DEFAULT_LTP_EXCLUDE: &[&str] = &[
     // signal06 is explicitly x86_64-only, so running it on rv64/la64 only
     // produces a TCONF exit that the suite runner records as failure.
     "signal06",
+    // semctl08 is gated by the LTP userspace ABI struct layout and requires
+    // semid64_ds time_high fields that are absent in the current image.
+    "semctl08",
     // kill13 requires CONFIG_UBSAN_SIGNED_OVERFLOW. kill02-12 keep kill/signal
     // delivery syscall coverage enabled under the current kernel config.
     "kill13",

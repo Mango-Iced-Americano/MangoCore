@@ -4,6 +4,21 @@
 
 ## 2026-06-04
 
+### 过滤 semctl08 的 semid64_ds time_high ABI 环境项
+
+**涉及文件：**
+- `user/src/bin/ltprunner.rs` — 将 `semctl08` 加入 suite 默认 unsupported exclude，避免当前 LTP 镜像缺 `semid64_ds time_high` 字段时被 suite 记为失败
+- `user/src/bin/initproc.rs` — 同步默认过滤表与注释；inline broad-skip 已有该用例原因，本轮补齐 suite 路径
+
+**验证：**
+- 修改前 rv64 heap_trace suite focused `semctl08`：glibc/musl 均 `TCONF: test requires struct semid64_ds to have the time_high fields`，suite runner 记为 `FAIL LTP CASE semctl08 : 32`；未出现 `PANIC/KERNEL EXCEPTION/HEAP OOM/Bad address/Unsupported syscall`
+- `docker compose exec --workdir /app/os os-dev make rv64-only EXTRA_FEATURES=heap_trace` ✅，132 个既有 warning，无新增 error
+- `docker compose exec --workdir /app/os os-dev make la64-only EXTRA_FEATURES=heap_trace` ✅，116 个既有 warning，无新增 error
+- 修改后 rv64 heap_trace suite focused `semctl08`：glibc/musl 均显示 `skip excluded case semctl08`、`filtered=0`、`no cases to run after filtering`；未出现 `RUN LTP CASE/TFAIL/TBROK/TCONF/PANIC/KERNEL EXCEPTION/HEAP OOM/Bad address`
+- 修改后 la64 heap_trace suite focused `semctl08`：结果同 rv64，glibc/musl 均按默认 exclude 过滤；未出现 panic/OOM 或真实用例失败
+
+**备注：** `semctl09/semget05` 已覆盖当前 SysV semaphore ID/stat 路径并通过；`semctl08` 在进入内核语义前由 LTP ABI 前置条件判定 TCONF，因此不通过伪造 `semid64_ds` time_high 用户态布局来解。
+
 ### 过滤 fork13/fork14 的 pid_max 与 16TB VMA 环境项
 
 **涉及文件：**
