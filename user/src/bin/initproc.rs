@@ -117,6 +117,9 @@ const DEFAULT_LTP_EXCLUDE: &[&str] = &[
     // signal06 is explicitly x86_64-only, so running it on rv64/la64 only
     // produces a TCONF exit that the suite runner records as failure.
     "signal06",
+    // kill13 requires CONFIG_UBSAN_SIGNED_OVERFLOW. kill02-12 keep kill/signal
+    // delivery syscall coverage enabled under the current kernel config.
+    "kill13",
     // timerfd04 requires CONFIG_TIME_NS; timerfd_settime02 is a long fuzzy-sync
     // stress case that still exceeds the local QEMU budget.
     "timerfd04",
@@ -1146,6 +1149,7 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "killall_udp_traffic" | "ns-udpclient" | "ns-udpsender" | "ns-udpserver" => {
             Some("network UDP helper skipped in LTP syscall scan")
         }
+        "kill13" => Some("requires CONFIG_UBSAN_SIGNED_OVERFLOW"),
         "run_capbounds.sh" => Some("requires POSIX capability support"),
         "rwtest" => Some("filesystem/pipe stress helper skipped in syscall scan"),
         "sched_stress.sh" => Some("scheduler stress helper skipped in broad LTP scan"),

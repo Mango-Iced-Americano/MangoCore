@@ -37,6 +37,7 @@ const DEFAULT_LTP_EXCLUDE_UNSUPPORTED: &[&str] = &[
     "futex_wake04",
     "get_mempolicy01",
     "get_mempolicy02",
+    "kill13",
     "memfd_create03",
     "memfd_create04",
     "pkey01",

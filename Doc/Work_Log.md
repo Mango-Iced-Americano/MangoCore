@@ -4,6 +4,20 @@
 
 ## 2026-06-04
 
+### 收敛 kill13 配置型 TCONF
+
+**涉及文件：**
+- `user/src/bin/ltprunner.rs` — 将 `kill13` 加入默认 unsupported/env 排除表，避免当前内核未启用 `CONFIG_UBSAN_SIGNED_OVERFLOW` 时被 suite runner 记为失败
+- `user/src/bin/initproc.rs` — 同步默认排除表与 skip reason；保留 `kill02-12` 对 kill/进程组信号/等待路径的实际 syscall 覆盖
+
+**验证：**
+- `docker compose exec --workdir /app/os os-dev make rv64-only EXTRA_FEATURES=heap_trace` ✅，132 个既有 warning，无新增 error
+- `docker compose exec --workdir /app/os os-dev make la64-only EXTRA_FEATURES=heap_trace` ✅，116 个既有 warning，无新增 error
+- rv64 heap_trace focused 非 fs/net 窗口：glibc `executed=59 passed=59 failed=0`，musl `executed=59 passed=59 failed=0`；`kill13` 显示 `skip excluded case`；未出现 `TFAIL/TBROK/PANIC/KERNEL EXCEPTION/HEAP OOM/Bad address/Unsupported syscall`
+- la64 heap_trace focused 同一窗口：glibc `executed=59 passed=59 failed=0`，musl `executed=59 passed=59 failed=0`；`kill13` 显示 `skip excluded case`；未出现 `TFAIL/TBROK/PANIC/KERNEL EXCEPTION/HEAP OOM/Bad address/Unsupported syscall`
+
+**备注：** `kill13` 是内核配置/测试环境项，不是 kill syscall 语义缺陷。若后续启用 UBSAN signed overflow 配置，可重新释放该用例；当前保留 `kill02-12` 覆盖实际信号发送、进程组和 wait/waitid 行为。
+
 ### 优化 timerfd_settime common path 并复核长耗时项边界
 
 **涉及文件：**
