@@ -200,7 +200,7 @@ inject-test:
 TOOLS_IMG_RV := ../disk.img
 TOOLS_IMG_LA := ../disk-la.img
 TOOLS_SIZE_RV := 256
-TOOLS_SIZE_LA := 128
+TOOLS_SIZE_LA := 256
 TOOLS_SRC_RV := ../user/tools/riscv64
 TOOLS_SRC_LA := ../user/tools/loongarch64
 
