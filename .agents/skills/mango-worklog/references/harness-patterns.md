@@ -2,6 +2,13 @@
 
 > 跨对话可复用的 bug 根因 → 修复模式。按子系统分类。
 
+## 测试 Harness / LTP
+
+### LTP suite/inline 结果标签不能混用
+- **根因**: suite runner 通过 `/ltprunner` 逐用例等待子进程，返回码可用于 `PASS/FAIL` 标签；inline runner 直接跑 LTP 二进制时，部分用例即使 summary 有 `failed > 0` 也可能返回 0，仅凭退出码会把真实 TFAIL 误标成 PASS。
+- **修复**: suite 路径按 `run_case()` 返回码输出 `PASS LTP CASE`/`FAIL LTP CASE`；inline 路径的过滤项输出 `SKIP LTP CASE`，成功退出只输出中性 `DONE LTP CASE`，真实非零退出才输出 `FAIL LTP CASE`。
+- **相关文件**: `user/src/bin/ltprunner.rs`、`user/src/bin/initproc.rs`
+
 ## 信号/进程
 
 ### nanosleep 唤醒后死锁

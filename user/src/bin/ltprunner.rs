@@ -765,11 +765,11 @@ fn main(_argc: usize, argv: &[&str]) -> i32 {
 
         let ret = run_case(case, deadline_ms, own_pgid, &penv);
 
-        println!("FAIL LTP CASE {} : {}", case.case_name, ret);
-
         if ret == 0 {
+            println!("PASS LTP CASE {} : 0", case.case_name);
             passed += 1;
         } else {
+            println!("FAIL LTP CASE {} : {}", case.case_name, ret);
             failed += 1;
         }
         executed += 1;

@@ -846,7 +846,7 @@ fn run_group_once(
 ///   - 字母序排序（与 bash 通配符展开一致）
 ///   - CWD 为 /musl 或 /glibc（与官方脚本一致）
 ///   - 退出码用 WEXITSTATUS 提取（与 bash $? 一致）
-///   - 被跳过/过滤的测例也输出 RUN/FAIL 行，保持测例列表完整
+///   - 被跳过/过滤的测例输出 SKIP，避免把过滤项记成失败
 ///   - 不过滤 .sh 文件（官方脚本运行所有可执行文件）
 ///
 /// ⚠️ 堆限制：不使用 Vec<String> 收集文件名（会导致 OOM），改用栈缓冲。
@@ -1356,9 +1356,7 @@ fn run_ltp_binaries(
                     if name == from_case {
                         found_from = true;
                     } else {
-                        // 被跳过的测例仍然输出 RUN/FAIL，保持测例列表完整
-                        println!("RUN LTP CASE {}", name);
-                        println!("FAIL LTP CASE {} : 0", name);
+                        println!("SKIP LTP CASE {} : before ltp_from", name);
                         continue;
                     }
                 }
@@ -1371,8 +1369,7 @@ fn run_ltp_binaries(
 
             // exclude 过滤
             if exclude.iter().any(|e| e == name) {
-                println!("RUN LTP CASE {}", name);
-                println!("FAIL LTP CASE {} : 0", name);
+                println!("SKIP LTP CASE {} : excluded", name);
                 continue;
             }
 
@@ -1403,7 +1400,11 @@ fn run_ltp_binaries(
             );
             let ret = run_bash_cmd_timeout(&cmd, environ, 30);
             let exit_code = exit_code_from_waitpid_status(ret);
-            println!("FAIL LTP CASE {} : {}", name, exit_code);
+            if exit_code == 0 {
+                println!("DONE LTP CASE {} : 0", name);
+            } else {
+                println!("FAIL LTP CASE {} : {}", name, exit_code);
+            }
         }
 
         let _ = close(fd as usize);

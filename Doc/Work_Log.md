@@ -4,6 +4,25 @@
 
 ## 2026-06-04
 
+### 修正 LTP runner 结果标签，避免通过项被误标失败
+
+**涉及文件：**
+- `user/src/bin/ltprunner.rs` — suite runner 按 `run_case()` 返回码输出 `PASS LTP CASE` 或 `FAIL LTP CASE`，避免 `ret=0` 的通过用例仍被标成 `FAIL ... : 0`
+- `user/src/bin/initproc.rs` — inline runner 的 `ltp_from`/`exclude` 过滤项改为 `SKIP LTP CASE`；真实执行成功输出中性 `DONE LTP CASE`，避免 inline 中 LTP summary 偶发 TFAIL 但进程退出码仍为 0 时被误报为 PASS
+- `Doc/Work_Log.md` — 记录本轮 runner 标签修正与双架构 heap_trace 验证
+- `.agents/skills/mango-worklog/references/harness-patterns.md` — 沉淀 suite/inline LTP 结果标签判定经验
+
+**验证：**
+- `docker compose exec --workdir /app/os os-dev make rv64-only EXTRA_FEATURES=heap_trace` ✅
+- rv64 suite focused `clock_gettime04`：musl/glibc 均 `failed 0 / broken 0`，均输出 `PASS LTP CASE clock_gettime04 : 0`，`ltprunner` 汇总 `executed=1 passed=1 failed=0`
+- rv64 inline focused `clock_gettime04`：成功退出时输出 `DONE LTP CASE clock_gettime04 : 0`；musl 运行出现计时抖动类 `TFAIL`，未被误标为 PASS
+- `docker compose exec --workdir /app/os os-dev make la64-only EXTRA_FEATURES=heap_trace` ✅
+- la64 suite focused `clock_gettime04`：musl/glibc 均 `failed 0 / broken 0`，均输出 `PASS LTP CASE clock_gettime04 : 0`，`ltprunner` 汇总 `executed=1 passed=1 failed=0`
+- la64 inline focused `clock_gettime04`：musl/glibc 均 `failed 0 / broken 0`，成功退出输出 `DONE LTP CASE clock_gettime04 : 0`
+- 双架构最终 focused 日志未出现 `PANIC/KERNEL EXCEPTION/HEAP OOM/heap fatal/Unsupported syscall`
+
+**备注：** 当前默认 `os_test.conf` 使用 `ltp_runner=suite`，正式 LTP 路径由 `/ltprunner` 覆盖；inline runner 主要用于本地扫描，因无法可靠解析每个 LTP summary，本轮只把成功退出标记为 `DONE`，不把它等同于子项全 PASS。
+
 ### 同步 LTP suite runner 默认过滤并修复 vfork retry
 
 **涉及文件：**
