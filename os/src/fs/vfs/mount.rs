@@ -819,9 +819,12 @@ pub struct MountFS {
     root_inner_inode: Option<Arc<dyn IndexNode>>,
     /// 子挂载点表: parent_inode_id → mounted fs
     pub mountpoints: Mutex<BTreeMap<InodeId, Arc<MountFS>>>,
-    /// 自身挂载到父文件系统上的 inode（如果是根则 None）
-    /// 使用 Weak 避免 MountFS ↔ MountFSInode Arc 引用循环。
-    self_mountpoint: Mutex<Option<Weak<MountFSInode>>>,
+    /// 自身挂载到父文件系统上的 inode（如果是根则 None）。
+    ///
+    /// This must be a strong reference: unmount needs a stable parent mountpoint
+    /// to remove this MountFS from the parent's mountpoints table. The cycle is
+    /// broken explicitly by detach_from_parent_and_cleanup().
+    self_mountpoint: Mutex<Option<Arc<MountFSInode>>>,
     /// 挂载标志
     mount_flags: Mutex<MountFlags>,
     /// 挂载源
@@ -925,19 +928,15 @@ impl MountFS {
     }
 
     /// Replace any existing mount at inode_id, or add if none exists.
-    /// Old mount is detached from peer/slave registries and MOUNT_LIST.
+    /// Old mount is fully detached so its parent backref and cached children
+    /// cannot keep the covered subtree alive after overmount.
     /// Returns the old mount (None if no existing mount).
     pub fn overmount_and_add(&self, inode_id: InodeId, mount_fs: Arc<MountFS>) -> Option<Arc<MountFS>> {
-        use super::propagation;
         let mut mps = self.mountpoints.lock();
         let old = mps.remove(&inode_id);
         if let Some(ref old_mfs) = old {
             drop(mps);
-            propagation::unregister_peer_mount(old_mfs);
-            propagation::unregister_slave_mount(old_mfs);
-            if let Some(ref path) = old_mfs.mount_path() {
-                MOUNT_LIST.remove(path.as_str());
-            }
+            old_mfs.detach_from_parent_and_cleanup();
             mps = self.mountpoints.lock();
         }
         mps.insert(inode_id, mount_fs);
@@ -1088,7 +1087,7 @@ impl MountFS {
         // under a make-rshared child1), mp points into the child mount.
         // Walk up one more level to reach the actual shared ancestor.
         let propagation_target = if do_propagate {
-            self.self_mountpoint.lock().as_ref().and_then(|w| w.upgrade()).and_then(|mp| {
+            self.self_mountpoint.lock().clone().and_then(|mp| {
                 mp.inner_inode.metadata().ok().map(|md| (mp.mount_fs.clone(), md.inode_id))
             })
         } else {
@@ -1126,6 +1125,14 @@ impl MountFS {
             return Err(SyscallErr::EINVAL);
         }
 
+        let propagation_target = if do_propagate {
+            self.self_mountpoint.lock().clone().and_then(|mp| {
+                mp.inner_inode.metadata().ok().map(|md| (mp.mount_fs.clone(), md.inode_id))
+            })
+        } else {
+            None
+        };
+
         let children: Vec<Arc<MountFS>> = {
             let mountpoints = self.mountpoints.lock();
             mountpoints.values().cloned().collect()
@@ -1134,15 +1141,10 @@ impl MountFS {
             let _ = child.detach_recursive_inner(false);
         }
 
-        if do_propagate && self.propagation().is_shared() {
-            if let Some(mp) = self.self_mountpoint.lock().as_ref().and_then(|w| w.upgrade()) {
-                if let Ok(md) = mp.inner_inode.metadata() {
-                    propagate_umount(&mp.mount_fs, md.inode_id);
-                }
-            }
-        }
-
         self.detach_from_parent_and_cleanup();
+        if let Some((parent_mfs, inode_id)) = propagation_target {
+            propagate_umount(&parent_mfs, inode_id);
+        }
         Ok(())
     }
 
@@ -1174,8 +1176,7 @@ impl MountFS {
 
         MOUNT_LIST.remove_fs(self);
 
-        let mountpoint = self.self_mountpoint.lock().take()
-            .and_then(|w| w.upgrade());
+        let mountpoint = self.self_mountpoint.lock().take();
         if let Some(mountpoint) = mountpoint {
             if let Ok(md) = mountpoint.inner_inode.metadata() {
                 let removed = mountpoint.mount_fs.remove_mount(md.inode_id);
@@ -1221,11 +1222,11 @@ impl MountFS {
     }
 
     pub fn self_mountpoint(&self) -> Option<Arc<MountFSInode>> {
-        self.self_mountpoint.lock().as_ref().and_then(|w| w.upgrade())
+        self.self_mountpoint.lock().clone()
     }
 
     pub fn set_self_mountpoint(&self, mp: Option<Arc<MountFSInode>>) {
-        *self.self_mountpoint.lock() = mp.map(|arc| Arc::downgrade(&arc));
+        *self.self_mountpoint.lock() = mp;
     }
 
     pub fn mount_source(&self) -> Option<String> {

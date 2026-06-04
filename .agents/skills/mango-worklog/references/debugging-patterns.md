@@ -32,6 +32,12 @@
 - 检查是否有 `try_reserve` 防御
 - 查看 `heap_trace.rs` 的分配记录（需启用 feature）
 
+### bind/umount 后 `/proc/mounts` 仍有 sandbox 残留
+- 症状：LTP `fs_bind*` 清理阶段反复提示 `There are still mounts in the sandbox`，`umount` 看似成功但同一路径仍出现在 `/proc/mounts`
+- 优先检查：子 `MountFS` 是否还能通过 `self_mountpoint` 找到父 `MountFSInode`，以及父 `mountpoints` 表是否真正删除了该 inode id
+- 典型根因：挂载点 backref 只保存弱引用或 overmount 旧挂载未走统一 detach，导致 `detach_from_parent_and_cleanup()` 无法摘除父表项
+- 修复模式：保留稳定 parent backref，在 detach 时 `take()` 断开引用；覆盖挂载旧节点也走完整 cleanup，避免 dentry/child mount 缓存继续持有 covered subtree
+
 ## 网络问题
 
 ### Socket 操作阻塞不返回

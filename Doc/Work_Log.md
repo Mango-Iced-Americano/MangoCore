@@ -2,6 +2,35 @@
 
 ---
 
+## 2026-06-02
+
+### MountFS bind/umount 残留修复
+
+**问题：** heap_trace 全量 LTP 中 `fs_bind*` 用例出现 `There are still mounts in the sandbox`，后续清理阶段反复 `umount` 仍无法摘掉残留挂载，导致用例超时或污染后续 mount 测试。
+
+**根因：**
+
+- `MountFS.self_mountpoint` 只保存 `Weak<MountFSInode>`，部分 bind/propagation 路径中挂载点包装对象没有稳定强引用，`umount()` 返回成功时可能已经无法升级 backref。
+- backref 丢失后 `detach_from_parent_and_cleanup()` 不能从父 `mountpoints` 表摘除当前 `MountFS`，`/proc/mounts` 仍能看到残留 mount。
+- 覆盖挂载 `overmount_and_add()` 只注销旧 mount 的 propagation/global 表项，未统一清理旧 mount 的 parent backref、dentry cache 与子挂载，强 backref 修复后需要一并处理。
+
+**修复：**
+
+- `os/src/fs/vfs/mount.rs`：`self_mountpoint` 改为强 `Arc<MountFSInode>`，unmount 清理时用 `take()` 显式断开引用环。
+- `os/src/fs/vfs/mount.rs`：`detach_recursive_inner()` 在本地 detach 后使用父 mountpoint 作为 propagation umount 源，和普通 `umount_inner()` 语义对齐。
+- `os/src/fs/vfs/mount.rs`：`overmount_and_add()` 覆盖旧 mount 时走 `detach_from_parent_and_cleanup()`，避免 covered subtree 被缓存和 backref 留住。
+
+**验证：**
+
+- Docker `make rv64-kernel-build-only` ✅
+- Docker `make la64-kernel-build-only` ✅
+- rv64 heap_trace focused LTP：`fs_bind01.sh,fs_bind_move22.sh,fs_bind_rbind03.sh` 全部 `FAIL LTP CASE ... : 0`
+- la64 heap_trace focused LTP：`fs_bind01.sh,fs_bind_move22.sh,fs_bind_rbind03.sh` 全部 `FAIL LTP CASE ... : 0`
+- 双架构 focused 日志中 `PANIC=0`、`KERNEL EXCEPTION=0`、`HEAP OOM=0`、`There are still mounts=0`、`TFAIL=0`、`TBROK=0`
+- 资源观察：`fs_bind01` 中 `mounts/mnode` 短暂升高，后续 move/rbind 后回落到稳定范围，未见单调堆积。
+
+---
+
 ## 2026-06-01
 
 ### 恢复 inline LTP broad-skip 过滤
