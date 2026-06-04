@@ -4,6 +4,23 @@
 
 ## 2026-06-04
 
+### 支持 epoll fd 嵌套监听与环路检查
+
+**涉及文件：**
+- `os/src/fs/eventpoll.rs` — `EPOLL_CTL_ADD` 不再一律拒绝目标 fd 为 epoll 的情况；加入嵌套 epoll DFS 检查，环路返回 `ELOOP`，超过兼容深度返回 `EINVAL`
+- `os/src/fs/eventpoll.rs` — `EventPollFile` 暴露读等待队列并标记为 stream，使父 epoll 等待子 epoll ready 时能正常睡眠/唤醒
+
+**验证：**
+- Docker `make rv64-kernel-build-only` ✅
+- Docker `make la64-kernel-build-only` ✅
+- Docker `make rv64-only EXTRA_FEATURES=heap_trace` ✅
+- Docker `make la64-only EXTRA_FEATURES=heap_trace` ✅
+- rv64 heap_trace focused LTP：`epoll_ctl04,epoll_ctl05` 全部 TPASS，`FAIL LTP CASE ... : 0`
+- la64 heap_trace focused LTP：`epoll_ctl04,epoll_ctl05` 全部 TPASS，`FAIL LTP CASE ... : 0`
+- 双架构 focused 日志中 `PANIC=0`、`KERNEL EXCEPTION=0`、`HEAP OOM=0`、`Test timeouted=0`、`TFAIL=0`、`TBROK=0`、`TCONF=0`
+
+**备注：** Linux 允许 epoll fd 被另一个 epoll 监听，但需要拒绝自监听、环路和过深嵌套；本轮覆盖 LTP 20240524 的 `epoll_ctl04/05`。
+
 ### 补齐 pipe size fcntl 与写就绪语义
 
 **涉及文件：**
