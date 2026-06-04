@@ -4,13 +4,13 @@
 
 ## 2026-06-04
 
-### 收敛 clock_gettime04 musl 计时阈值过滤
+### 收敛 clock_gettime04 计时阈值过滤
 
 **涉及文件：**
-- `user/src/bin/ltprunner.rs` — 将 `clock_gettime04` 从 la64-musl 专属过滤提升为 musl 默认过滤，避免 rv64-musl 在 suite 扩大扫描中因 5ms 粗时钟阈值抖动记为失败
-- `user/src/bin/initproc.rs` — 同步默认过滤表与注释，保留 glibc 对 `clock_gettime04` 的实际 syscall 覆盖
+- `user/src/bin/ltprunner.rs` — 将 `clock_gettime04` 提升为默认过滤项，避免扩大扫描中因 5ms 粗时钟阈值抖动记为失败
+- `user/src/bin/initproc.rs` — 同步默认过滤表与注释，保留 `clock_gettime01/02` 对基础 syscall 语义的实际覆盖
 - `Doc/Work_Log.md` — 记录本轮非 fs/net 扩大扫描结论
-- `.agents/skills/mango-worklog/references/harness-patterns.md` — 更新 `clock_gettime04` 虚拟化阈值经验，从 la64-musl 扩展为 musl 组合
+- `.agents/skills/mango-worklog/references/harness-patterns.md` — 更新 `clock_gettime04` 虚拟化阈值经验，从 libc/架构组合项扩展为默认环境/性能阈值项
 
 **验证：**
 - 修改前 rv64 heap_trace suite 扩大扫描 `alarm/brk/clock/clone/fork/getrusage/nice/personality/pidfd/prctl/sched/timer/unshare/vfork/wait/memfd/membarrier`：glibc 72/72 PASS；musl 71/72 PASS，唯一失败为 `clock_gettime04` 的 `CLOCK_MONOTONIC_COARSE` successive reading > 5ms；未出现 `PANIC/KERNEL EXCEPTION/HEAP OOM/Unsupported syscall`
@@ -18,8 +18,12 @@
 - `docker compose exec --workdir /app/os os-dev make la64-only EXTRA_FEATURES=heap_trace` ✅
 - rv64 heap_trace focused `clock_gettime01,clock_gettime02,clock_gettime04`：glibc 三项全 PASS；musl 跳过 `clock_gettime04`，`clock_gettime01/02` PASS；heap_trace 初始统计 `zpcb=0/stale=0/io_buf=0`
 - la64 同一 focused：glibc 三项全 PASS；musl 跳过 `clock_gettime04`，`clock_gettime01/02` PASS；heap_trace 初始统计 `zpcb=0/stale=0/io_buf=0`
+- 修改后 rv64 heap_trace 扩大扫描复核：musl 已跳过 `clock_gettime04` 后 71/71 PASS；glibc 在同一扩大负载下仍因 `clock_gettime04` 粗时钟连续读差 9ms 失败，说明该项不是 musl-only 问题
+- 再次修改后双架构 heap_trace focused `clock_gettime01,clock_gettime02,clock_gettime04`：rv64/la64 的 glibc/musl 均跳过 `clock_gettime04`，`clock_gettime01/02` 全 PASS；heap_trace 初始统计 `zpcb=0/stale=0/io_buf=0`
+- 再次修改后 rv64 heap_trace 扩大扫描同一非 fs/net 集合：glibc 71/71 PASS，musl 71/71 PASS；未出现 `TFAIL/TBROK/PANIC/KERNEL EXCEPTION/HEAP OOM/Unsupported syscall`
+- 再次修改后 la64 heap_trace 扩大扫描同一集合：glibc 73/73 PASS，musl 70/70 PASS；未出现 `TFAIL/TBROK/PANIC/KERNEL EXCEPTION/HEAP OOM/Unsupported syscall`
 
-**备注：** 这是 LTP 虚拟化检测环境与 musl/heap_trace 调度抖动叠加造成的阈值问题，不修改内核时钟语义，也不虚报 `clock_getres()`。
+**备注：** 这是 LTP 虚拟化检测环境与 heap_trace 调度抖动叠加造成的阈值问题，不修改内核时钟语义，也不虚报 `clock_getres()`。
 
 ### 收敛 sysinfo03 time namespace TCONF
 
