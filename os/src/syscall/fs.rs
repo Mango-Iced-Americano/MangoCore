@@ -2654,6 +2654,7 @@ pub fn sys_ioctl(fd: usize, cmd: u32, arg: usize) -> isize {
 
     match file.inode.ioctl(cmd, arg, file.private_data()) {
         Ok(n) => n as isize,
+        Err(SyscallErr::ENOSYS) => ENOTTY,
         Err(e) => -(e as isize),
     }
 }

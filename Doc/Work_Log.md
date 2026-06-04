@@ -4,6 +4,20 @@
 
 ## 2026-06-04
 
+### 对齐 ioctl 默认 ENOTTY 语义
+
+**涉及文件：**
+- `os/src/syscall/fs.rs` — `sys_ioctl()` 在 inode 未实现 ioctl 时将内部 `ENOSYS` 映射为用户可见 `ENOTTY`，对齐 Linux “fd 不支持该 ioctl” 语义；保留 `FIONREAD` 的专用 fallback 与其它具体 errno
+
+**验证：**
+- Docker `make rv64-kernel-build-only` ✅
+- Docker `make la64-kernel-build-only` ✅
+- Docker `make rv64-only EXTRA_FEATURES=heap_trace` ✅
+- Docker `make la64-only EXTRA_FEATURES=heap_trace` ✅
+- rv64 heap_trace focused LTP：`ioctl01` 9/9 TPASS，`FAIL LTP CASE ioctl01 : 0`
+- la64 heap_trace focused LTP：`ioctl01` 9/9 TPASS，`FAIL LTP CASE ioctl01 : 0`
+- 双架构 focused 日志中未出现 `PANIC`、`KERNEL EXCEPTION`、`HEAP OOM`、`Unsupported syscall`、`TFAIL`、`TBROK`；heap stats 显示 `zpcb=0`、`stale=0`、`io_buf pipe=0/0K unix=0/0K`
+
 ### 补齐 mq_notify 参数校验最小兼容
 
 **涉及文件：**
