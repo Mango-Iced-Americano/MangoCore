@@ -2077,6 +2077,7 @@ fn prepare_symlink(environ: &[*const u8]) {
         [ -e /lib/ld-musl-loongarch-lp64d.so.1 ] || ln -s /musl/lib/libc.so /lib/ld-musl-loongarch-lp64d.so.1; \
         [ -e /lib/libc.so.6 ] || ln -s /glibc/lib/libc.so.6 /lib/libc.so.6; \
         [ -e /lib/libm.so.6 ] || ln -s /glibc/lib/libm.so.6 /lib/libm.so.6; \
+        [ -e /glibc/lib/libgcc_s.so.1 ] || ln -s /lib/libgcc_s.so.1 /glibc/lib/libgcc_s.so.1; \
         [ -e /lib/tls_get_new-dtv_dso.so ] || ln -s /glibc/lib/tls_get_new-dtv_dso.so /lib/tls_get_new-dtv_dso.so; \
         [ -e ./libtls_get_new-dtv_dso.so ] || ln -s /glibc/lib/tls_get_new-dtv_dso.so ./libtls_get_new-dtv_dso.so; \
         for f in /musl/lib/*.so*; do [ -e /lib/\x24(basename \"\x24f\") ] || ln -s \"\x24f\" /lib/ 2>/dev/null; done; \
