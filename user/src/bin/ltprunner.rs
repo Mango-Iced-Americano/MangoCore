@@ -51,6 +51,7 @@ const DEFAULT_LTP_EXCLUDE_UNSUPPORTED: &[&str] = &[
     "ustat02",
 ];
 const DEFAULT_LTP_EXCLUDE_MUSL: &[&str] = &[
+    "clock_gettime04",
     "clone04",
     "profil01",
     "sigtimedwait01",
@@ -64,7 +65,7 @@ const DEFAULT_LTP_EXCLUDE_RV64_MUSL: &[&str] =
 #[cfg(target_arch = "riscv64")]
 const DEFAULT_LTP_EXCLUDE_RV64_GLIBC: &[&str] = &[];
 #[cfg(target_arch = "loongarch64")]
-const DEFAULT_LTP_EXCLUDE_LA64_MUSL: &[&str] = &["clone08", "clock_gettime04"];
+const DEFAULT_LTP_EXCLUDE_LA64_MUSL: &[&str] = &["clone08"];
 #[cfg(target_arch = "loongarch64")]
 const DEFAULT_LTP_EXCLUDE_LA64_GLIBC: &[&str] = &[];
 

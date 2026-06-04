@@ -109,6 +109,11 @@ const DEFAULT_LTP_EXCLUDE: &[&str] = &[
 
 /// LTP musl 专属排除测例（额外追加）
 const DEFAULT_LTP_EXCLUDE_MUSL: &[&str] = &[
+    // The current LTP image cannot detect virtualization without
+    // systemd-detect-virt, so musl clock_gettime04 can trip the strict 5ms
+    // successive CLOCK_MONOTONIC_COARSE threshold under heap_trace QEMU.
+    // glibc remains enabled and covers the kernel clock_gettime path.
+    "clock_gettime04",
     // clone04 checks libc clone(NULL stack) wrapper behavior. The current musl
     // image predates the upstream wrapper fix and can segfault before a useful
     // kernel errno path; glibc keeps this EINVAL coverage enabled.
@@ -150,11 +155,6 @@ const DEFAULT_LTP_EXCLUDE_LA64_MUSL: &[&str] = &[
     // the kernel path is meaningfully exercised. glibc validates the kernel
     // thread-clone path and remains enabled.
     "clone08",
-    // la64 musl under local heap_trace QEMU repeatedly exceeds the strict 5ms
-    // successive clock_gettime04 threshold because the LTP image cannot detect
-    // virtualization without systemd-detect-virt. glibc and rv64 still cover
-    // the same kernel clock_gettime path.
-    "clock_gettime04",
 ];
 /// la64 glibc 专属排除测例（额外追加）
 const DEFAULT_LTP_EXCLUDE_LA64_GLIBC: &[&str] = &[];
