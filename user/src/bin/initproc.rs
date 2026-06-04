@@ -1146,7 +1146,6 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         }
         "thp02" | "thp03" | "thp04" => Some("requires transparent/huge page support"),
         "timed_forkbomb" => Some("long-running fork pressure case skipped in broad scan"),
-        "timer_settime03" => Some("POSIX timer overrun saturation pending dedicated timer fix"),
         "tpci" => Some("requires PCI test driver environment"),
         "trace_sched" => Some("requires kernel tracing scheduler environment"),
         "truncate03" | "truncate03_64" => {
@@ -1155,9 +1154,6 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "uaccess" => Some("requires LTP kernel module environment"),
         "umask01" => Some("filesystem umask/create-mode semantics skipped in LTP syscall scan"),
         "umip_basic_test" => Some("x86_64-only UMIP testcase"),
-        "unshare02" => {
-            Some("mount namespace invalid-case test skipped before full namespace support")
-        }
         "unshare01.sh" => Some("standalone namespace shell helper skipped in broad scan"),
         "unzip01.sh" => Some("standalone unzip shell helper skipped in LTP syscall scan"),
         "userfaultfd01" => Some("userfaultfd syscall not supported"),

@@ -154,6 +154,13 @@
 - **教训**: signal 来源不能靠“当前或最近 trap cause”倒推；syscall 发出的 `kill/tgkill/raise` 与真实硬件 fault 在默认动作上都可能终止进程，但只有后者应进入内核异常日志。
 - **相关文件**: `os/src/task/signal/mod.rs`, `os/src/task/task.rs`, `os/src/hal/arch/riscv/trap/mod.rs`, `os/src/hal/arch/loongarch64/trap/mod.rs`
 
+## 修复后同步解除 LTP skip
+
+- **根因**: inline LTP broad skip 表是人工维护的扩分保护层；内核语义已经修复后，如果旧 skip 原因不删除，后续自动 include/全量扫描仍会把可通过用例排除，表现为“focused 已 TPASS，但扩分没有增长”。
+- **修复**: 每次 focused 证明某个 skip 用例在双架构 musl/glibc 均 0 failure 后，同步删除对应 `should_skip_ltp_helper()` 分支，并在 Work_Log 中记录验证来源。
+- **教训**: skip 表不是事实来源，日志验证结果才是；修复内核 bug 后要回扫 `user/src/bin/initproc.rs`，避免陈旧 skip 抵消本次适配收益。
+- **相关文件**: `user/src/bin/initproc.rs`, `Doc/Work_Log.md`
+
 ## 网络
 
 ### 硬编码 IPv4 地址替换为 net_core 动态查询

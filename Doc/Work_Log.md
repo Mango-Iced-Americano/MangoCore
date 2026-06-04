@@ -4,6 +4,22 @@
 
 ## 2026-06-04
 
+### 放开已修复的非 fs/net LTP inline skip 项
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — 从 inline LTP broad skip 表移除已验证通过的 `timer_settime03` 与 `unshare02`
+- `Doc/Work_Log.md` — 记录本轮 skip 表同步
+- `.agents/skills/mango-worklog/references/harness-patterns.md` — 沉淀修复后同步解除 LTP skip 的维护模式
+
+**验证：**
+- Docker `make rv64-only EXTRA_FEATURES=heap_trace` ✅（用户态与内核完整重建）
+- Docker `make la64-only EXTRA_FEATURES=heap_trace` ✅（用户态与内核完整重建）
+- rv64 heap_trace focused LTP `timer_settime03,unshare02`：musl/glibc 均实际 RUN，`timer_settime03` 为 `TPASS: Timer overrun count is capped`，`unshare02` 为 2/2 TPASS，全部 summary `failed 0 / broken 0 / skipped 0`
+- la64 heap_trace focused LTP 同一 include：musl/glibc 均实际 RUN，`timer_settime03` 与 `unshare02` 全部 TPASS，summary `failed 0 / broken 0 / skipped 0`
+- 双架构 focused 日志 grep 未发现 `TFAIL`、`TBROK`、`PANIC`、`KERNEL EXCEPTION`、`HEAP OOM`、`Test timeouted`、`Bad address`、`Unsupported syscall`
+
+**备注：** 本次只同步 inline LTP 扫描用 skip 表，不触碰 fs/net 内核实现；suite 评测路径不走该表，但后续自动 include 扩大时可直接纳入这两个已通过用例。
+
 ### waitpid01 预期致命信号日志降噪
 
 **涉及文件：**
