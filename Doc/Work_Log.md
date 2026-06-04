@@ -1749,3 +1749,28 @@ a = sum(x.get("all", x.get("total", 1)) for x in r)
 **验证**: rv64 kernel build 零错误, 124 预存 warning, QEMU 启动无 panic, basic 测试通过
 
 **备注**: 16 处硬编码 IP 清零; RawSocket todo→EOPNOTSUPP; adapter 本地投递检查; watchdog 30s 每测例超时; API 余额不足无法补全高级测试
+
+## 2026-06-04
+
+### getcwd 实际写入长度校验
+
+**涉及文件：**
+- `os/src/syscall/fs.rs`
+- `Doc/Work_Log.md`
+
+**问题：** rv64 heap_trace LTP IPC 聚焦扫描中，musl `semctl06` 在 LTP `libipc.c:getipckey()` 报 `Can't get current directory in getipckey()`；同一批 SHM/SEM 用例在 la64 通过，rv64 glibc 也通过。
+
+**根因：** `sys_getcwd()` 先按 Linux 语义用 `size` 判断 `ERANGE`，但随后错误地用用户传入的 `size` 校验整段 buffer 是否可写。实际只会复制 `working_path.len() + 1` 字节。musl 传入较大的 cwd buffer 时，如果栈上地址靠近 VMA 边界，整段 `size` 校验会误判 `EFAULT`。
+
+**修复：** 保留 `working_path.len() + 1 > size` 的 `ERANGE` 判断；用户 buffer 可写性校验和 `UserBufferWriter` 均改为实际写入长度 `write_len`。
+
+**验证：**
+- Docker `cd /app/os && make rv64-only EXTRA_FEATURES=heap_trace` ✅
+- Docker `cd /app/os && make la64-only EXTRA_FEATURES=heap_trace` ✅
+- rv64 heap_trace focused LTP `semctl06,shmat01,shmctl01,shmctl03,shmctl07,shmget03`：
+  - musl/glibc `semctl06` 均 `TPASS`
+  - 全部 case summary `failed 0 / broken 0`
+- la64 heap_trace focused LTP 同一 include：
+  - musl/glibc `semctl06` 均 `TPASS`
+  - 全部 case summary `failed 0 / broken 0`
+- 日志 grep 未发现 `TFAIL`、`TBROK`、`PANIC`、`KERNEL EXCEPTION`、`HEAP OOM`。`shmat01` 的只读段写入触发用户态 page fault 是该用例期望行为。
