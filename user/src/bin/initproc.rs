@@ -2010,10 +2010,15 @@ fn prepare_symlink(environ: &[*const u8]) {
     // Phase 3: After bind, ensure /bin/busybox exists, then install applets
     // If bind succeeded, this writes to /tools/bin (persists on ext4 disk)
     // If bind failed (no tools disk), this writes to root /bin (ramfs/ext4)
+    // Skip --install if applets already pre-installed in tools disk
     println!("[initproc] installing busybox applets to /bin ...");
     let install_cmd = "\
         test -e /bin/busybox || ln -s /busybox /bin/busybox; \
-        /bin/busybox --install -s /bin; \
+        if test -x /bin/cp && test -x /bin/ls && test -x /bin/cat; then \
+            echo 'busybox applets already installed, skipping --install'; \
+        else \
+            /bin/busybox --install -s /bin; \
+        fi; \
         for app in cp mv rm ln mkdir chmod cat printf sleep grep sed awk uname basename dirname true false test; do \
             [ -e /bin/$app ] || /bin/busybox ln -s /bin/busybox /bin/$app; \
         done; \
