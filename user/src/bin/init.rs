@@ -14,71 +14,40 @@ fn try_mount(source: &str, target: &str, fstype: &str, flags: usize, data: usize
     mount(src_c.as_ptr(), tgt_c.as_ptr(), fs_c.as_ptr(), flags, data)
 }
 
-fn try_bind(source: &str, target: &str) -> bool {
+fn try_bind(source: &str, target: &str) {
     let ret = try_mount(source, target, "", MS_BIND, 0);
     if ret == 0 {
-        println!("[init] bind mount {} -> {}", source, target);
-        true
+        println!("[init] bind {} -> {}", source, target);
     } else {
-        println!("[init] bind mount {} -> {}: skipped (errno={})", source, target, -ret);
-        false
+        println!("[init] bind {} -> {}: skipped (errno={})", source, target, -ret);
     }
 }
 
-fn file_exists(path: &str) -> bool {
-    let fd = open(path, OpenFlags::RDONLY);
-    if fd >= 0 {
-        close(fd as usize);
-        true
-    } else {
+fn try_exec(path: &str, environ: &[*const u8]) -> bool {
+    let path_c = format!("{}\0", path);
+    let args = [path_c.as_ptr(), core::ptr::null()];
+    let ret = exec(&path_c, &args, environ);
+    if ret < 0 {
+        println!("[init] exec {} failed (errno={})", path, -ret);
         false
+    } else {
+        true
     }
-}
-
-fn try_mount_block(device_path: &str, target: &str, label: &str) -> bool {
-    for fs_type in &["ext4", "vfat"] {
-        let ret = try_mount(device_path, target, fs_type, 0, 0);
-        if ret == 0 {
-            println!("[init] mounted {} ({}) at {}", label, fs_type, target);
-            return true;
-        }
-    }
-    println!("[init] {} not mounted at {} (no filesystem detected)", label, target);
-    false
 }
 
 #[no_mangle]
 fn main(_argc: usize, _argv: &[&str]) -> i32 {
     println!("[init] MangoCore stage-1 boot (initramfs mode)");
 
-    println!("[init] checking /dev, /proc, /tmp ...");
-    if file_exists("/dev") { println!("[init]   /dev: OK"); }
-    else { println!("[init]   /dev: MISSING"); }
-    if file_exists("/proc") { println!("[init]   /proc: OK"); }
-    else { println!("[init]   /proc: MISSING"); }
-    if file_exists("/tmp") { println!("[init]   /tmp: OK"); }
-    else { println!("[init]   /tmp: MISSING"); }
+    println!("[init] /dev /proc /tmp mounted by kernel, setting up bind mounts...");
 
-    if file_exists("/dev/vda") {
-        println!("[init] attempting to mount /dev/vda -> /sdcard ...");
-        let _ = try_mount_block("/dev/vda", "/sdcard", "official fs (x0)");
-    } else {
-        println!("[init] /dev/vda not found, skipping /sdcard mount");
-    }
-
-    if file_exists("/dev/vdb") {
-        println!("[init] attempting to mount /dev/vdb -> /tools ...");
-        let _ = try_mount_block("/dev/vdb", "/tools", "tools disk (x1)");
-    } else {
-        println!("[init] /dev/vdb not found, skipping /tools mount");
-    }
-
-    if file_exists("/tools/bin") { try_bind("/tools/bin", "/bin"); }
-    if file_exists("/tools/lib") { try_bind("/tools/lib", "/lib"); }
-    if file_exists("/tools/usr") { try_bind("/tools/usr", "/usr"); }
-    if file_exists("/tools/etc") { try_bind("/tools/etc", "/etc"); }
-    if file_exists("/sdcard/musl") { try_bind("/sdcard/musl", "/musl"); }
-    if file_exists("/sdcard/glibc") { try_bind("/sdcard/glibc", "/glibc"); }
+    // 内核已将 x0→/sdcard, x1→/tools 挂载好，直接 bind
+    try_bind("/tools/bin", "/bin");
+    try_bind("/tools/lib", "/lib");
+    try_bind("/tools/usr", "/usr");
+    try_bind("/tools/etc", "/etc");
+    try_bind("/sdcard/musl", "/musl");
+    try_bind("/sdcard/glibc", "/glibc");
 
     let environ: &[*const u8] = &[
         "SHELL=/bin/sh\0".as_ptr(),
@@ -89,36 +58,21 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         core::ptr::null(),
     ];
 
-    let test_elf = if file_exists("/sdcard/initproc") {
-        "/sdcard/initproc"
-    } else if file_exists("/initproc") {
-        "/initproc"
+    // 尝试进入测试模式
+    if try_exec("/sdcard/initproc", environ) || try_exec("/initproc", environ) {
+        println!("[init] test runner started");
     } else {
-        ""
-    };
-
-    if !test_elf.is_empty() {
-        println!("[init] entering test mode: exec {}", test_elf);
-        let elf_c = format!("{}\0", test_elf);
-        let args = [elf_c.as_ptr(), core::ptr::null()];
-        let _ = exec(&elf_c, &args, environ);
-        println!("[init] exec test runner returned, entering rescue");
-    } else {
-        println!("[init] no test runner found, entering rescue mode");
-    }
-
-    let rescue_shells = ["/tools/bin/sh", "/rescue/sh", "/bin/sh"];
-    for &shell in &rescue_shells {
-        if file_exists(shell) {
-            println!("[init] entering rescue shell: {}", shell);
-            let shell_c = format!("{}\0", shell);
-            let args = [shell_c.as_ptr(), core::ptr::null()];
-            let _ = exec(&shell_c, &args, environ);
-            println!("[init] {} exited, trying next shell", shell);
+        println!("[init] no test runner, entering rescue mode");
+        // exec 会替换当前进程，失败才继续下一个
+        if !try_exec("/tools/bin/sh", environ)
+            && !try_exec("/rescue/sh", environ)
+            && !try_exec("/bin/sh", environ)
+        {
+            println!("[init] FATAL: no shell available");
+            println!("[init] System halted.");
+            loop {}
         }
     }
 
-    println!("[init] FATAL: no shell available (/tools/bin/sh, /rescue/sh, /bin/sh all missing)");
-    println!("[init] System halted.");
     loop {}
 }
