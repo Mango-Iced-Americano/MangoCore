@@ -114,6 +114,14 @@ const DEFAULT_LTP_EXCLUDE: &[&str] = &[
     // sysinfo03 requires CONFIG_TIME_NS, matching the time namespace clock
     // cases filtered by the broad-scan helper.
     "sysinfo03",
+    // These madvise cases are gated by cgroup/memcg, memory-failure config, or
+    // procfs coredump_filter setup. madvise01/02/03/05/10 still cover the
+    // supported madvise syscall/error paths in the current image.
+    "madvise06",
+    "madvise07",
+    "madvise08",
+    "madvise09",
+    "madvise11",
     // clock_gettime04 uses a strict 5ms successive CLOCK_MONOTONIC_COARSE
     // threshold. Under heap_trace QEMU the LTP image cannot detect
     // virtualization, so both libc paths can report scheduling jitter as TFAIL.

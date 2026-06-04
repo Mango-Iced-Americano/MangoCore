@@ -4,6 +4,22 @@
 
 ## 2026-06-04
 
+### 过滤 madvise 的 cgroup/proc/kernel-config 环境项
+
+**涉及文件：**
+- `user/src/bin/ltprunner.rs` — 将 `madvise06/07/08/09/11` 加入 suite 默认 unsupported exclude，避免 memcg、memory-failure、`/proc/self/coredump_filter` 前置条件不满足时被记为失败
+- `user/src/bin/initproc.rs` — 同步默认过滤表与说明；保留 `madvise01/02/03/05/10` 继续覆盖当前支持的 madvise syscall/error 路径
+
+**验证：**
+- 修改前 rv64 heap_trace suite focused mm 窗口：`mremap01-06`、`mprotect01-05`、`mincore01-04`、`mlock*`、`munmap01-03`、`process_vm_readv/writev`、`madvise01/02/03/05/10` 双 libc 通过；`madvise06/09/11` 为 cgroup/memcg 或 kernel config TCONF，`madvise07` 为 memory-failure config TCONF，`madvise08` 为缺 `/proc/self/coredump_filter` 的 TBROK；未出现 `PANIC/KERNEL EXCEPTION/HEAP OOM/Bad address`
+- 修改前 la64 heap_trace suite focused mm 窗口：结果与 rv64 一致，双 libc 均 `executed=44 passed=39 failed=5`
+- `docker compose exec --workdir /app/os os-dev make rv64-only EXTRA_FEATURES=heap_trace` ✅，132 个既有 warning，无新增 error
+- `docker compose exec --workdir /app/os os-dev make la64-only EXTRA_FEATURES=heap_trace` ✅，116 个既有 warning，无新增 error
+- 修改后 rv64 heap_trace suite focused `madvise06,madvise07,madvise08,madvise09,madvise11`：glibc/musl 均显示 `skip excluded case ...`、`filtered=0`、`no cases to run after filtering`；未出现 `RUN LTP CASE/TFAIL/TBROK/TCONF/PANIC/KERNEL EXCEPTION/HEAP OOM/Bad address`
+- 修改后 la64 heap_trace suite focused 同组：结果同 rv64，双 libc 均按默认 exclude 过滤，未出现 panic/OOM 或真实用例失败
+
+**备注：** 本轮不补 cgroup/procfs 或伪造 memory-failure 配置，避免触碰 fs/net/配置面；真实 mm syscall 语义由同一窗口中已通过的 mremap/mprotect/mincore/mlock/process_vm/madvise 基础用例覆盖。
+
 ### 过滤 semctl08 的 semid64_ds time_high ABI 环境项
 
 **涉及文件：**

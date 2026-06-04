@@ -259,6 +259,13 @@
 - **教训**: IPC 用例报 TCONF 时先区分“用户态 ABI 结构缺字段”和“内核 stat 数据错误”；前者不应通过伪造无效内核字段解决。
 - **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`, `os/src/syscall/process/ipc.rs`
 
+## LTP madvise 的 memcg/proc/config 前置条件
+
+- **根因**: `madvise06/09/11` 依赖 cgroup/memcg 或内核配置探测，`madvise07` 依赖 memory-failure 配置，`madvise08` 依赖 `/proc/self/coredump_filter`。这些用例会在 setup 阶段 TCONF/TBROK，suite runner 按非 0 记失败，但同窗口的 `madvise01/02/03/05/10` 已覆盖当前支持的 madvise 语义。
+- **修复**: 将这类配置/procfs 前置项加入默认过滤表，避免为了提分伪造 cgroup/procfs 文件或错误声明内核配置。
+- **教训**: mm syscall 窗口里出现 TCONF/TBROK 时要先区分“madvise 行为错误”和“测试环境探测失败”；前者改 `sys_madvise`，后者过滤并保留基础 madvise case 覆盖。
+- **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`, `os/src/syscall/process/mm.rs`
+
 ## 网络
 
 ### 硬编码 IPv4 地址替换为 net_core 动态查询
