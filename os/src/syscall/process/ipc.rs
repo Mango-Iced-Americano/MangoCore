@@ -1,7 +1,7 @@
 use super::mm::{sys_mmap, sys_munmap};
 use crate::mm::{copy_from_user, copy_from_user_array, copy_to_user, copy_to_user_array, MapFlags};
 use crate::syscall::errno::*;
-use crate::task::{current_task, current_user_token, WaitQueue, WaitResult};
+use crate::task::{current_task, current_user_token, signal::Signals, WaitQueue, WaitResult};
 use crate::timer::{current_timespec, TimeSpec};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
@@ -58,6 +58,9 @@ const MSGMNI: usize = 1024;
 const MSGMAX: usize = 8192;
 const MSGMNB: usize = 16384;
 const MSGTQL: usize = 4096;
+
+const SIGEV_SIGNAL: i32 = 0;
+const SIGEV_NONE: i32 = 1;
 
 #[derive(Clone, Copy)]
 struct MsgLimits {
@@ -2249,4 +2252,41 @@ pub fn sys_msgctl(msqid: i32, cmd: usize, buf: usize) -> isize {
         }
         _ => EINVAL,
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+struct MqSigeventHeader {
+    sigev_value: usize,
+    sigev_signo: i32,
+    sigev_notify: i32,
+}
+
+pub fn sys_mq_notify(_mqdes: usize, sevp: usize) -> isize {
+    if sevp != 0 {
+        let mut event = MqSigeventHeader {
+            sigev_value: 0,
+            sigev_signo: 0,
+            sigev_notify: 0,
+        };
+        if let Err(errno) = copy_from_user(
+            current_user_token(),
+            sevp as *const MqSigeventHeader,
+            &mut event as *mut MqSigeventHeader,
+        ) {
+            return errno;
+        }
+
+        match event.sigev_notify {
+            SIGEV_NONE => {}
+            SIGEV_SIGNAL => {
+                if Signals::from_signum(event.sigev_signo as usize).is_err() {
+                    return EINVAL;
+                }
+            }
+            _ => return EINVAL,
+        }
+    }
+
+    ENOSYS
 }

@@ -27,7 +27,7 @@ pub use ids::{
     CapUserHeader, RLimit, SchedAttr, SchedParam, Sysinfo,
 };
 pub use ipc::{
-    sys_msgctl, sys_msgget, sys_msgrcv, sys_msgsnd, sys_semctl, sys_semget, sys_semop,
+    sys_mq_notify, sys_msgctl, sys_msgget, sys_msgrcv, sys_msgsnd, sys_semctl, sys_semget, sys_semop,
     sys_semtimedop, sys_shmat, sys_shmctl, sys_shmdt, sys_shmget, set_sysv_msg_next_id,
     set_sysv_msgmax, set_sysv_msgmnb, set_sysv_msgmni, set_sysv_sem_limits, shm_clone_attachments,
     shm_detach_process, sysv_msg_next_id, sysv_msg_proc_snapshot, sysv_msgmax, sysv_msgmnb,

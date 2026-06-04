@@ -4,6 +4,23 @@
 
 ## 2026-06-04
 
+### 补齐 mq_notify 参数校验最小兼容
+
+**涉及文件：**
+- `os/src/syscall/syscall_id.rs` / `os/src/syscall/mod.rs` — 接入通用 syscall 号 `mq_notify(184)`、名称和分发
+- `os/src/syscall/process/ipc.rs` / `os/src/syscall/process/mod.rs` — 新增 `sys_mq_notify()`，读取用户 `sigevent` 并优先校验 `sigev_notify` 与 `sigev_signo`
+
+**验证：**
+- Docker `make rv64-kernel-build-only` ✅
+- Docker `make la64-kernel-build-only` ✅
+- Docker `make rv64-only EXTRA_FEATURES=heap_trace` ✅
+- Docker `make la64-only EXTRA_FEATURES=heap_trace` ✅
+- rv64 heap_trace focused LTP：`mq_notify02` 2/2 TPASS，`FAIL LTP CASE mq_notify02 : 0`
+- la64 heap_trace focused LTP：`mq_notify02` 2/2 TPASS，`FAIL LTP CASE mq_notify02 : 0`
+- 双架构 focused 日志中未出现 `PANIC`、`KERNEL EXCEPTION`、`HEAP OOM`、`Unsupported syscall`、`TFAIL`、`TBROK`；heap stats 显示 `zpcb=0`、`stale=0`、`io_buf pipe=0/0K unix=0/0K`
+
+**备注：** 当前不是完整 POSIX mqueue 实现；合法 `sigevent` 参数仍返回 `ENOSYS`，只覆盖 LTP `mq_notify02` 要求的非法参数 `EINVAL` 优先级。
+
 ### 补齐 fcntl POSIX record lock 语义
 
 **涉及文件：**

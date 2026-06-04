@@ -146,6 +146,7 @@ pub const SYSCALL_GETGID: usize = 176;
 pub const SYSCALL_GETEGID: usize = 177;
 pub const SYSCALL_GETTID: usize = 178;
 pub const SYSCALL_SYSINFO: usize = 179;
+pub const SYSCALL_MQ_NOTIFY: usize = 184;
 pub const SYSCALL_MSGGET: usize = 186;
 pub const SYSCALL_MSGCTL: usize = 187;
 pub const SYSCALL_MSGRCV: usize = 188;
