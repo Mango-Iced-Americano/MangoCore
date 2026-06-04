@@ -90,6 +90,8 @@ comp:
 	-smp 1 \
 	-drive file=../sdcard-la.img,if=none,format=raw,id=x0 \
 	-device virtio-blk-pci,drive=x0 \
+	-drive file=../disk-la.img,if=none,format=raw,id=x1 \
+	-device virtio-blk-pci,drive=x1 \
 	-no-reboot \
 	-device virtio-net-pci,netdev=net0 \
 	-netdev user,id=net0 \
@@ -104,6 +106,8 @@ comp-gdb:
 		-smp 1 \
 		-drive file=../sdcard-la.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-pci,drive=x0 \
+		-drive file=../disk-la.img,if=none,format=raw,id=x1 \
+		-device virtio-blk-pci,drive=x1 \
 		-no-reboot \
 		-rtc base=utc \
 		-S \
