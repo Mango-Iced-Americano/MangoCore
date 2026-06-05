@@ -639,11 +639,22 @@ fn propagate_umount_inner(
         if visited.contains(&slave_ptr) {
             continue;
         }
-        let child = find_child_mount_by_id(&slave, mountpoint_id)
+        let child_opt = find_child_mount_by_id(&slave, mountpoint_id)
             .or_else(|| {
                 child_name.and_then(|name| find_child_mount_by_name(&slave, name))
             });
-        if let Some(child) = child {
+
+        // Extract local child_name before consuming child_opt — the name
+        // may differ from the original source tree if inode IDs were remapped.
+        let local_child_name = child_opt.as_ref().and_then(|c| {
+            c.mount_path().and_then(|p| {
+                let trimmed = p.trim_end_matches('/');
+                if trimmed.is_empty() || trimmed == "/" { None }
+                else { trimmed.rsplit('/').next().filter(|s| !s.is_empty()).map(|s| alloc::string::String::from(s)) }
+            })
+        });
+
+        if let Some(child) = child_opt {
             if matches!(
                 child.umount_inner(false, false),
                 Err(crate::utils::error::SyscallErr::EBUSY)
@@ -651,10 +662,9 @@ fn propagate_umount_inner(
                 let _ = child.detach_recursive_inner(false);
             }
         }
-        // If slave is SharedSlave, recurse to propagate to slave's peers
         if slave.propagation().is_shared() {
             visited.push(slave_ptr);
-            propagate_umount_inner(&slave, mountpoint_id, child_name, visited, max_depth);
+            propagate_umount_inner(&slave, mountpoint_id, local_child_name.as_deref(), visited, max_depth);
         }
     }
 }

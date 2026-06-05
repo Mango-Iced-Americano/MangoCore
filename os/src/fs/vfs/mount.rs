@@ -1088,14 +1088,10 @@ impl MountFS {
         // under a make-rshared child1), mp points into the child mount.
         // Walk up one more level to reach the actual shared ancestor.
         // Mirrors do_bind_mount's walk-up for mountpoint-root targets.
-        let child_name = self.mount_path().and_then(|p| {
-            let parts: alloc::vec::Vec<&str> = p.rsplitn(2, '/').collect();
-            if parts.len() >= 2 && !parts[0].is_empty() {
-                Some(alloc::string::String::from(parts[0]))
-            } else {
-                None
-            }
-        });
+        let child_name = self.mount_path()
+            .as_deref()
+            .and_then(|p| Self::last_path_component(p))
+            .map(|s| alloc::string::String::from(s));
         let propagation_target = if do_propagate {
             self.self_mountpoint.lock().as_ref().and_then(|w| w.upgrade()).and_then(|mp| {
                 if mp.is_mountpoint_root() {
@@ -1204,44 +1200,20 @@ impl MountFS {
     fn detach_from_parent_and_cleanup(self: &Arc<Self>) {
         unregister_peer_mount(self);
         unregister_slave_mount(self);
-
         MOUNT_LIST.remove_fs(self);
 
-        let mountpoint = self.self_mountpoint.lock().take()
+        // Snapshot mountpoint BEFORE taking it — parent removal happens under
+        // a single lock, then we clear the backref.
+        let mountpoint_ref = self.self_mountpoint.lock().as_ref()
             .and_then(|w| w.upgrade());
-        let mut detached = false;
-        if let Some(mountpoint) = mountpoint {
-            if let Ok(md) = mountpoint.inner_inode.metadata() {
-                let removed = mountpoint.mount_fs.remove_mount(md.inode_id);
-                match removed {
-                    Some(ref removed_fs) if Arc::ptr_eq(removed_fs, self) => {
-                        detached = true;
-                    }
-                    Some(wrong_fs) => {
-                        log::warn!(
-                            "MountFS::detach: remove_mount returned wrong Arc (ino={:?}); re-inserting + ptr_eq scan",
-                            md.inode_id
-                        );
-                        mountpoint.mount_fs.mountpoints.lock().insert(md.inode_id, wrong_fs);
-                        Self::remove_from_parent_by_ptr_eq(&mountpoint, self);
-                        detached = true;
-                    }
-                    None => {
-                        log::warn!(
-                            "MountFS::detach: remove_mount returned None for ino={:?} — ptr_eq scan",
-                            md.inode_id
-                        );
-                        Self::remove_from_parent_by_ptr_eq(&mountpoint, self);
-                        detached = true;
-                    }
-                }
-            } else {
-                Self::remove_from_parent_by_ptr_eq(&mountpoint, self);
-                detached = true;
-            }
-        }
+        let detached = if let Some(ref mp) = mountpoint_ref {
+            Self::remove_self_from_parent(mp, self)
+        } else {
+            false
+        };
+        self.self_mountpoint.lock().take();
 
-        // self_mountpoint was stale or None — BFS scan entire VFS tree
+        // self_mountpoint was stale/None — BFS scan entire VFS tree
         if !detached {
             Self::remove_from_vfs_tree_bfs(self);
         }
@@ -1255,14 +1227,46 @@ impl MountFS {
         self.inner_filesystem.on_umount();
     }
 
-    /// BFS scan the whole VFS mount tree to remove any entry where
+    /// Atomically remove self from parent's mountpoints table under a single
+    /// lock acquisition. Fast path: inode-based removal + Arc::ptr_eq check.
+    /// Fallback: ptr_eq scan if inode-based removal returns wrong mount or None.
+    fn remove_self_from_parent(mountpoint: &MountFSInode, self_ref: &Arc<MountFS>) -> bool {
+        let mut mps = mountpoint.mount_fs.mountpoints.lock();
+        if let Ok(md) = mountpoint.inner_inode.metadata() {
+            match mps.remove(&md.inode_id) {
+                Some(ref removed) if Arc::ptr_eq(removed, self_ref) => return true,
+                Some(wrong) => {
+                    log::warn!(
+                        "MountFS::detach: remove_mount returned wrong Arc (ino={:?}); re-inserting",
+                        md.inode_id
+                    );
+                    mps.insert(md.inode_id, wrong);
+                }
+                None => {}
+            }
+        }
+        // ptr_eq fallback (also catches the re-inserted "wrong mount" case)
+        let mut dead_keys: alloc::vec::Vec<InodeId> = alloc::vec::Vec::new();
+        for (ino, child) in mps.iter() {
+            if Arc::ptr_eq(child, self_ref) { dead_keys.push(*ino); }
+        }
+        for k in &dead_keys { mps.remove(k); }
+        !dead_keys.is_empty()
+    }
+
+    /// BFS scan the whole VFS mount tree to remove ALL entries where
     /// Arc::ptr_eq matches self.  Used when self_mountpoint is stale/None
     /// but the mount is still visible in some parent's mountpoints.
+    /// Includes visited set and depth guard to prevent infinite loops.
     fn remove_from_vfs_tree_bfs(self_ref: &Arc<MountFS>) {
+        const MAX_NODES: usize = 256;
         let root = crate::fs::vfs_root();
         let mut queue: alloc::vec::Vec<Arc<MountFS>> = alloc::vec![root];
+        let mut visited: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
+        visited.push(Arc::as_ptr(&queue[0]) as usize);
         let mut idx = 0usize;
-        while idx < queue.len() {
+        let mut found_any = false;
+        while idx < queue.len() && queue.len() < MAX_NODES {
             let current = &queue[idx];
             idx += 1;
             let mut mps = current.mountpoints.lock();
@@ -1272,23 +1276,37 @@ impl MountFS {
                     dead_keys.push(*ino);
                 }
             }
-            for k in &dead_keys {
-                mps.remove(k);
-            }
+            for k in &dead_keys { mps.remove(k); }
             if !dead_keys.is_empty() {
+                found_any = true;
                 log::warn!(
                     "MountFS::detach: BFS removed self from parent 0x{:x} (keys={:?})",
                     Arc::as_ptr(current) as usize, dead_keys
                 );
-                drop(mps);
-                return;
             }
-            // collect children for further BFS
-            let children: alloc::vec::Vec<Arc<MountFS>> = mps.values().cloned().collect();
+            let children: alloc::vec::Vec<Arc<MountFS>> = mps.values()
+                .filter(|c| {
+                    let p = Arc::as_ptr(*c) as usize;
+                    if visited.contains(&p) { false } else { visited.push(p); true }
+                })
+                .cloned()
+                .collect();
             drop(mps);
             queue.extend(children);
         }
-        log::warn!("MountFS::detach: BFS scan did not find self in any mountpoints tree");
+        if !found_any {
+            log::warn!("MountFS::detach: BFS scan did not find self in any mountpoints tree");
+        }
+    }
+
+    /// Extract the last path component, trimming trailing slashes.
+    /// Returns None for root "/", empty paths, or paths ending in "/".
+    fn last_path_component(mount_path: &str) -> Option<&str> {
+        let trimmed = mount_path.trim_end_matches('/');
+        if trimmed.is_empty() || trimmed == "/" {
+            return None;
+        }
+        trimmed.rsplit('/').next().filter(|c| !c.is_empty())
     }
 
     // ── 属性访问 ───────────────────────────────────────────────────
