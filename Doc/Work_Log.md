@@ -4,6 +4,19 @@
 
 ## 2026-06-05
 
+### 记录双架构 full LTP heap_trace 分析报告
+
+**涉及文件：**
+- `Doc/ltp/ltp_full_heaptrace_report_20260605.md` — 新增本轮 rv64/la64 full LTP heap_trace 结果报告，汇总通过率、deadline、资源回收、失败类型和后续适配建议
+
+**验证：**
+- rv64 heap_trace full LTP：`glibc executed=818 passed=502 failed=176`，`musl executed=903 passed=536 failed=205`，两轮均由 850s group deadline 截断
+- la64 heap_trace full LTP：`glibc executed=424 passed=297 failed=71`，`musl executed=687 passed=400 failed=149`，两轮均由 850s group deadline 截断
+- 双架构日志中 `PANIC=0`、`KERNEL EXCEPTION=0`、`HEAP OOM=0`、`HEAP ALLOCATION FAILED=0`、`BUG=0`
+- heap_trace 资源审计显示 `zpcb`、`stale`、`pipe io_buf` 压力态后均回落，未发现明确 PCB/WaitQueue/pipe buffer 泄漏
+
+**备注：** 本次为测试分析与文档提交，不修改内核代码。本地 ARM 转译 amd64 Docker + QEMU + heap_trace 会显著放大 deadline/timeout，不应用本轮覆盖率直接估算云端得分。
+
 ### 修复 LTP TCONF 计分与 futex wake 竞态
 
 **涉及文件：**
