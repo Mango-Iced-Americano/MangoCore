@@ -553,6 +553,14 @@ impl Socket for TcpSocket {
         if self.write_shutdown.load(Ordering::Acquire) {
             return Err(SyscallErr::EPIPE);
         }
+        // 非阻塞 connect 后 socket 可能仍在 Connecting 状态，先完成过渡
+        let is_connecting = {
+            let inner = self.inner.lock();
+            matches!(&*inner, Inner::Connecting(_))
+        };
+        if is_connecting {
+            let _ = self.try_connect();
+        }
         let inner = self.inner.lock();
         inner.try_send(buf)
     }

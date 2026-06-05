@@ -14,13 +14,9 @@ impl Inner {
     pub fn try_send(&self, buf: &[u8]) -> Result<isize, SyscallErr> {
         let ret = match self {
             Inner::Init(_) => Err(SyscallErr::EPIPE),
-            Inner::Connecting(c) => {
-                // 握手未完成，不可发送
-                if c.is_connected() {
-                    Err(SyscallErr::EISCONN) // 已连接但没转 Established？不应该
-                } else {
-                    Err(SyscallErr::EAGAIN)
-                }
+            Inner::Connecting(_) => {
+                // 非阻塞 connect 后可能仍在此状态，外层 try_send 已调用 try_connect 过渡
+                Err(SyscallErr::EAGAIN)
             }
             Inner::Listening(_) => Err(SyscallErr::EINVAL),
             Inner::Established(e) => e.send_slice(buf).map(|n| n as isize),
