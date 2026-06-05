@@ -616,17 +616,13 @@ fn propagate_umount_inner(
     }
 
     for peer in get_peers(source) {
+        // DragonOS umount_at_peer: remove child by InodeId + narrow cleanup.
+        // Silently skip if not found (peer may not have received propagation).
         if let Some(child) = find_child_mount_by_id(&peer, mountpoint_id) {
-            if matches!(
-                child.umount_inner(false, false),
-                Err(crate::utils::error::SyscallErr::EBUSY)
-            ) {
-                let _ = child.detach_recursive_inner(false);
-            }
+            child.umount_at_peer();
         }
     }
 
-    // Propagate to slaves. SharedSlave receivers recurse to their peers.
     let master_gid = source.propagation().peer_group_id();
     for slave in get_slaves(master_gid) {
         let slave_ptr = Arc::as_ptr(&slave) as usize;
@@ -634,12 +630,7 @@ fn propagate_umount_inner(
             continue;
         }
         if let Some(child) = find_child_mount_by_id(&slave, mountpoint_id) {
-            if matches!(
-                child.umount_inner(false, false),
-                Err(crate::utils::error::SyscallErr::EBUSY)
-            ) {
-                let _ = child.detach_recursive_inner(false);
-            }
+            child.umount_at_peer();
         }
         if slave.propagation().is_shared() {
             visited.push(slave_ptr);

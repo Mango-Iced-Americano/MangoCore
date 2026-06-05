@@ -1060,53 +1060,81 @@ impl MountFS {
     /// 当 do_propagate=false 时跳过传播步骤，避免递归传播。
     /// 当 force=true 时递归 detach 子挂载后再 detach self；
     /// 当 force=false 且子挂载存在时返回 EBUSY（保留 Linux 语义）。
+    ///
+    /// DragonOS phase order: children check → detach from parent → propagate → cleanup self.
     pub fn umount_inner(self: &Arc<Self>, do_propagate: bool, force: bool) -> Result<(), SyscallErr> {
-        let children: Vec<Arc<MountFS>> = {
+        // Phase 1: check children
+        {
             let mountpoints = self.mountpoints.lock();
             if !force && !mountpoints.is_empty() {
                 drop(mountpoints);
-                self.dump_mount_state("umount_inner EBUSY: children still present");
                 return Err(SyscallErr::EBUSY);
             }
-            mountpoints.values().cloned().collect()
-        };
-
-        if force {
-            for child in children.iter().rev() {
-                if let Err(e) = child.detach_recursive_inner(false) {
-                    log::warn!("[umount_inner] child detach failed: {:?}", e);
+            if force {
+                let children: Vec<Arc<MountFS>> = mountpoints.values().cloned().collect();
+                drop(mountpoints);
+                for child in children.iter().rev() {
+                    let _ = child.detach_recursive_inner(false);
                 }
             }
         }
-        // Propagate umount to peers before removing from parent.
-        let propagation_target = if do_propagate {
-            self.self_mountpoint.lock().as_ref().and_then(|w| w.upgrade()).and_then(|mp| {
-                if mp.is_mountpoint_root() {
-                    let child_mfs = mp.mount_fs.clone();
-                    let child_is_orphan_shared = child_mfs.propagation().is_shared()
-                        && crate::fs::vfs::propagation::get_peers(&child_mfs).is_empty();
-                    if child_is_orphan_shared {
-                        child_mfs.self_mountpoint().and_then(|walk_mp| {
-                            walk_mp.inner_inode.metadata().ok()
-                                .map(|md| (walk_mp.mount_fs.clone(), md.inode_id))
-                        })
-                    } else {
-                        mp.inner_inode.metadata().ok()
-                            .map(|md| (child_mfs.clone(), md.inode_id))
-                    }
-                } else {
-                    mp.inner_inode.metadata().ok()
-                        .map(|md| (mp.mount_fs.clone(), md.inode_id))
-                }
-            })
-        } else {
-            None
-        };
-        self.detach_from_parent_and_cleanup();
-        if let Some((parent_mfs, inode_id)) = propagation_target {
-            propagate_umount(&parent_mfs, inode_id);
+
+        // Phase 2: get parent edge & detach from parent mountpoints
+        let parent_info = self.parent_edge().ok();
+        if let Some((ref parent_mfs, inode_id)) = parent_info {
+            parent_mfs.remove_mount(inode_id);
         }
+
+        // Phase 3: propagate to peers/slaves (BEFORE finishing self cleanup)
+        if do_propagate {
+            if let Some((ref parent_mfs, inode_id)) = parent_info {
+                propagate_umount(parent_mfs, inode_id);
+            }
+        }
+
+        // Phase 4: cleanup self
+        self.finish_umount_cleanup();
         Ok(())
+    }
+
+    /// Extract (parent MountFS, mountpoint InodeId) from self_mountpoint backref.
+    /// Returns EINVAL if self_mountpoint is None (root mount should not be
+    /// detached this way).
+    fn parent_edge(self: &Arc<Self>) -> Result<(Arc<MountFS>, InodeId), SyscallErr> {
+        let mp = self.self_mountpoint().ok_or(SyscallErr::EINVAL)?;
+        let md = mp.inner_inode.metadata()?;
+        Ok((mp.mount_fs.clone(), md.inode_id))
+    }
+
+    /// Final cleanup after detach: unregister from peer/slave groups, remove
+    /// from global MOUNT_LIST, clear backref and children, flush caches.
+    fn finish_umount_cleanup(self: &Arc<Self>) {
+        unregister_peer_mount(self);
+        unregister_slave_mount(self);
+        MOUNT_LIST.remove_fs(self);
+        self.self_mountpoint.lock().take();
+        self.mountpoints.lock().clear();
+        let evicted = {
+            let mut cache = self.dentry_cache.lock();
+            cache.clear_all()
+        };
+        drop(evicted);
+        self.inner_filesystem.on_umount();
+    }
+
+    /// DragonOS-style narrow cleanup for propagation. Removes self from
+    /// parent mountpoints, then does minimal tear-down — no EBUSY check,
+    /// no recursive propagation, no dump.
+    pub(crate) fn umount_at_peer(self: &Arc<Self>) {
+        if let Some(mp) = self.self_mountpoint() {
+            if let Ok(md) = mp.inner_inode.metadata() {
+                mp.mount_fs.remove_mount(md.inode_id);
+            }
+        }
+        unregister_peer_mount(self);
+        unregister_slave_mount(self);
+        MOUNT_LIST.remove_fs(self);
+        self.self_mountpoint.lock().take();
     }
 
     /// 卸载当前文件系统
@@ -1142,7 +1170,9 @@ impl MountFS {
             let _ = child.detach_recursive_inner(false);
         }
 
-        if do_propagate && self.propagation().is_shared() {
+        // Propagation depends on the PARENT mount's sharedness, not self's.
+        // DragonOS: propagate_umount checks parent.is_shared() internally.
+        if do_propagate {
             if let Some(mp) = self.self_mountpoint.lock().as_ref().and_then(|w| w.upgrade()) {
                 if let Ok(md) = mp.inner_inode.metadata() {
                     propagate_umount(&mp.mount_fs, md.inode_id);
@@ -1150,62 +1180,8 @@ impl MountFS {
             }
         }
 
-        self.detach_from_parent_and_cleanup();
+        self.finish_umount_cleanup();
         Ok(())
-    }
-
-    /// Remove self from parent's mountpoints table using Arc::ptr_eq identity scan.
-    /// Used as fallback when metadata-based removal fails or returns None.
-    fn remove_from_parent_by_ptr_eq(mountpoint: &MountFSInode, self_ref: &Arc<MountFS>) {
-        let mut parent_mps = mountpoint.mount_fs.mountpoints.lock();
-        let mut removed: alloc::vec::Vec<InodeId> = alloc::vec::Vec::new();
-        parent_mps.retain(|&ino, child| {
-            if Arc::ptr_eq(child, self_ref) {
-                removed.push(ino);
-                false
-            } else {
-                true
-            }
-        });
-        drop(parent_mps);
-        if !removed.is_empty() {
-            log::warn!(
-                "MountFS::detach: removed self from parent by ptr_eq, {} entry(s): {:?}",
-                removed.len(), removed
-            );
-        }
-    }
-
-    fn detach_from_parent_and_cleanup(self: &Arc<Self>) {
-        unregister_peer_mount(self);
-        unregister_slave_mount(self);
-        MOUNT_LIST.remove_fs(self);
-
-        // DragonOS-style: remove from parent's mountpoints by InodeId.
-        // If propagation creates correct self_mountpoint backrefs, inode-based
-        // removal always gets the right mount — no ptr_eq scan or BFS needed.
-        let mountpoint_ref = self.self_mountpoint.lock().as_ref()
-            .and_then(|w| w.upgrade());
-        if let Some(ref mp) = mountpoint_ref {
-            if let Ok(md) = mp.inner_inode.metadata() {
-                let removed = mp.mount_fs.remove_mount(md.inode_id);
-                if removed.is_none() {
-                    log::warn!(
-                        "MountFS::detach: ino={:?} not found in parent mountpoints",
-                        md.inode_id
-                    );
-                }
-            }
-        }
-        self.self_mountpoint.lock().take();
-
-        self.mountpoints.lock().clear();
-        let evicted = {
-            let mut cache = self.dentry_cache.lock();
-            cache.clear_all()
-        };
-        drop(evicted);
-        self.inner_filesystem.on_umount();
     }
 
     // ── 属性访问 ───────────────────────────────────────────────────

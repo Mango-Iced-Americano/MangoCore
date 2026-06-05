@@ -2611,18 +2611,6 @@ pub fn sys_umount2(target: *const u8, flags: u32) -> isize {
     match inode.umount() {
         Ok(_) => SUCCESS,
         Err(e) => {
-            if e == SyscallErr::EBUSY {
-                // Fallback: EBUSY on normal umount → force-detach subtree.
-                // Handles mounts with submounts without requiring MNT_DETACH.
-                let target_mnt = match resolve_umount_target(&inode) {
-                    Ok(mnt) => mnt,
-                    Err(_) => return -(e as isize),
-                };
-                return match target_mnt.detach_recursive() {
-                    Ok(()) => SUCCESS,
-                    Err(e2) => -(e2 as isize),
-                };
-            }
             error!("[sys_umount2] inode.umount() failed for '{}': errno={}", lookup_path, e as isize);
             -(e as isize)
         }
