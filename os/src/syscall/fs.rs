@@ -2714,11 +2714,10 @@ fn do_bind_mount(
     // Collect recursive bind snapshot BEFORE creating base mount, so the
     // new mnt_fs doesn't pollute the source mount tree during snapshotting.
     // Skip unbindable submounts — they must not be replicated.
-    let rbind_snapshot: Option<Vec<(Arc<vfs::MountFS>, Arc<vfs::MountFS>, alloc::string::String)>> =
+    let rbind_snapshot: Option<Vec<RbindEntry>> =
         if mountflags.contains(MountFlags::MS_REC) {
             let mut snapshot = collect_rbind_snapshot(source_mount_fs.clone(), source_inner.clone());
-            // Filter out unbindable submounts
-            snapshot.retain(|(child_mfs, _, _)| !child_mfs.propagation().is_unbindable());
+            snapshot.retain(|e| !e.child_mfs.propagation().is_unbindable());
             Some(snapshot)
         } else {
             None
@@ -2852,6 +2851,15 @@ fn apply_propagation_change(
     }
 }
 
+/// Entry in rbind snapshot: records everything needed to recreate a submount
+/// in the target tree without relying on name-based find().
+struct RbindEntry {
+    child_mfs: Arc<vfs::MountFS>,
+    source_parent_mfs: Arc<vfs::MountFS>,
+    child_name: alloc::string::String,
+    mountpoint_id: usize,
+}
+
 /// Collect all submounts under `source_subtree_root` within `source_mfs` tree.
 ///
 /// Returns Vec of (child_mfs, parent_mfs, relative_name) — BFS order,
@@ -2859,11 +2867,11 @@ fn apply_propagation_change(
 fn collect_rbind_snapshot(
     source_mfs: Arc<vfs::MountFS>,
     source_subtree_root: Arc<dyn vfs::IndexNode>,
-) -> Vec<(Arc<vfs::MountFS>, Arc<vfs::MountFS>, alloc::string::String)> {
+) -> Vec<RbindEntry> {
     const MAX_DEPTH: usize = 256;
 
     let mut queue: VecDeque<(Arc<vfs::MountFS>, Arc<dyn vfs::IndexNode>)> = VecDeque::new();
-    let mut result: Vec<(Arc<vfs::MountFS>, Arc<vfs::MountFS>, alloc::string::String)> = Vec::new();
+    let mut result: Vec<RbindEntry> = Vec::new();
     let mut seen: Vec<usize> = Vec::new();
     let root_ptr = Arc::as_ptr(&source_mfs) as usize;
     seen.push(root_ptr);
@@ -2873,15 +2881,18 @@ fn collect_rbind_snapshot(
         let mps = source_mfs.mountpoints.lock();
         for (&ino, child_mfs) in mps.iter() {
             let ptr = Arc::as_ptr(child_mfs) as usize;
-            if seen.contains(&ptr) {
-                continue;
-            }
+            if seen.contains(&ptr) { continue; }
             // Find the name of this mountpoint under subtree_root
             if let Ok(dirents) = source_subtree_root.list_dirents() {
                 if let Some((name, _, _)) = dirents.iter().find(|(_, i, _)| *i == ino) {
                     seen.push(ptr);
                     queue.push_back((child_mfs.clone(), child_mfs.mountpoint_root_inode()));
-                    result.push((child_mfs.clone(), source_mfs.clone(), name.clone()));
+                    result.push(RbindEntry {
+                        child_mfs: child_mfs.clone(),
+                        source_parent_mfs: source_mfs.clone(),
+                        child_name: name.clone(),
+                        mountpoint_id: ino,
+                    });
                 }
             }
         }
@@ -2890,21 +2901,23 @@ fn collect_rbind_snapshot(
     // BFS: for each child, collect its submounts (with cycle detection + depth limit)
     while let Some((child_mfs, child_root)) = queue.pop_front() {
         if seen.len() > MAX_DEPTH {
-            log::error!("[collect_rbind_snapshot] max depth {} exceeded, stopping BFS", MAX_DEPTH);
+            log::error!("[collect_rbind_snapshot] max depth {} exceeded", MAX_DEPTH);
             break;
         }
         let mps = child_mfs.mountpoints.lock();
         for (&grand_ino, grandchild) in mps.iter() {
             let ptr = Arc::as_ptr(grandchild) as usize;
-            if seen.contains(&ptr) {
-                continue;
-            }
+            if seen.contains(&ptr) { continue; }
             seen.push(ptr);
-            // Find name using child's inner inode (no mountpoint crossing)
             if let Some(ref child_mfs_inode) = child_root.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
                 if let Ok(dirents) = child_mfs_inode.inner_inode.list_dirents() {
                     if let Some((name, _, _)) = dirents.iter().find(|(_, i, _)| *i == grand_ino) {
-                        result.push((grandchild.clone(), child_mfs.clone(), name.clone()));
+                        result.push(RbindEntry {
+                            child_mfs: grandchild.clone(),
+                            source_parent_mfs: child_mfs.clone(),
+                            child_name: name.clone(),
+                            mountpoint_id: grand_ino,
+                        });
                         queue.push_back((grandchild.clone(), grandchild.mountpoint_root_inode()));
                     }
                 }
@@ -2958,7 +2971,7 @@ fn set_propagation_recursive(
 /// target parent for each submount. All-or-nothing: any failure rolls back
 /// all created mounts.
 fn apply_rbind_snapshot(
-    snapshot: &[(Arc<vfs::MountFS>, Arc<vfs::MountFS>, alloc::string::String)],
+    snapshot: &[RbindEntry],
     source_mfs: Arc<vfs::MountFS>,
     target_mfs: Arc<vfs::MountFS>,
     _target_base_path: &str,
@@ -2968,8 +2981,8 @@ fn apply_rbind_snapshot(
 
     let mut created: Vec<Arc<vfs::MountFS>> = Vec::new();
 
-    for (child_mfs, source_parent_mfs, child_name) in snapshot {
-        let source_parent_ptr = Arc::as_ptr(source_parent_mfs) as usize;
+    for entry in snapshot {
+        let source_parent_ptr = Arc::as_ptr(&entry.source_parent_mfs) as usize;
         let target_parent = match mnt_map.get(&source_parent_ptr) {
             Some(p) => p.clone(),
             None => {
@@ -2978,44 +2991,27 @@ fn apply_rbind_snapshot(
             }
         };
 
-        let target_parent_inode: Arc<dyn vfs::IndexNode> = target_parent.mountpoint_root_inode();
-        let target_child_inode = match target_parent_inode.find(child_name) {
-            Ok(inode) => inode,
-            Err(_) => {
-                rollback_mounts(&created);
-                return Err(SyscallErr::ENOENT);
-            }
-        };
-
-        let target_mfs_inode = match target_child_inode
-            .as_any_ref()
-            .downcast_ref::<vfs::MountFSInode>()
-        {
-            Some(m) => vfs::MountFSInode::new(m.inner_inode.clone(), target_parent.clone()),
-            None => {
-                rollback_mounts(&created);
-                return Err(SyscallErr::EINVAL);
-            }
-        };
+        // DragonOS: use source child's self_mountpoint inner_inode to
+        // construct backref in target tree — no find(child_name) needed.
+        let covered_inode = entry.child_mfs.self_mountpoint()
+            .map(|mp| mp.inner_inode.clone())
+            .unwrap_or_else(|| entry.child_mfs.root_inner_inode());
+        let target_mfs_inode = vfs::MountFSInode::new(covered_inode, target_parent.clone());
 
         let mount_path = match target_parent.mount_path() {
-            Some(ref p) => alloc::format!("{}/{}", p, child_name),
-            None => alloc::format!("/{}", child_name),
+            Some(ref p) => alloc::format!("{}/{}", p, entry.child_name),
+            None => alloc::format!("/{}", entry.child_name),
         };
 
-        // Use mount_subtree_inner(false) to avoid automatic propagation.
-        // rbind clones should NOT trigger new mount events — the base bind
-        // already propagated. We manually copy the source child's propagation.
         match target_mfs_inode.mount_subtree_inner(
-            child_mfs.inner_filesystem(),
-            child_mfs.root_inner_inode(),
+            entry.child_mfs.inner_filesystem(),
+            entry.child_mfs.root_inner_inode(),
             vfs::MountFlags::empty(),
             Some(mount_path),
             false,
         ) {
             Ok(new_mnt) => {
-                // Copy source child's propagation type
-                let child_prop = child_mfs.propagation();
+                let child_prop = entry.child_mfs.propagation();
                 let child_peer = if child_prop.is_shared() {
                     Some(child_prop.peer_group_id())
                 } else {
@@ -3030,21 +3026,19 @@ fn apply_rbind_snapshot(
                 if child_prop.is_unbindable() {
                     new_mnt.propagation().set_prop_type_value(vfs::propagation::PropagationType::Unbindable);
                 }
-                if let Some(src) = child_mfs.mount_source() {
+                if let Some(src) = entry.child_mfs.mount_source() {
                     new_mnt.set_mount_source(Some(src));
                 }
-                let child_ptr = Arc::as_ptr(child_mfs) as usize;
+                let child_ptr = Arc::as_ptr(&entry.child_mfs) as usize;
                 mnt_map.insert(child_ptr, new_mnt.clone());
                 created.push(new_mnt);
             }
-            Err(_) => {
+            Err(e) => {
                 rollback_mounts(&created);
-                return Err(SyscallErr::EIO);
+                return Err(e);
             }
         }
     }
-
-    drop(mnt_map);
     Ok(())
 }
 
