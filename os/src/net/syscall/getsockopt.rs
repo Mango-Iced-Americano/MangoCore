@@ -37,9 +37,13 @@ pub fn sys_getsockopt(
     match (level, optname) {
         (SOL_SOCKET, SO_ERROR) => {
             // 非阻塞 connect 后应用调 getsockopt(SO_ERROR) 确认连接状态
-            // 对 TCP socket，先 try_connect 完成状态过渡，再返回 0
-            let _ = socket.try_connect();
-            if optval_ptr.write(token, &0u32).is_err()
+            // 成功或仍在等待 → 返回 0；失败 → 返回正 errno
+            let so_error = match socket.try_connect() {
+                Ok(_) => 0u32,
+                Err(SyscallErr::EAGAIN) | Err(SyscallErr::EOPNOTSUPP) => 0u32,
+                Err(e) => (-(e as isize)) as u32,
+            };
+            if optval_ptr.write(token, &so_error).is_err()
                 || optlen_ptr.write(token, &4u32).is_err()
             {
                 return -(SyscallErr::EFAULT as isize);
