@@ -820,9 +820,9 @@ pub struct MountFS {
     root_inner_inode: Option<Arc<dyn IndexNode>>,
     /// 子挂载点表: parent_inode_id → mounted fs
     pub mountpoints: Mutex<BTreeMap<InodeId, Arc<MountFS>>>,
-    /// 自身挂载到父文件系统上的 inode（如果是根则 None）
-    /// 使用 Weak 避免 MountFS ↔ MountFSInode Arc 引用循环。
-    self_mountpoint: Mutex<Option<Weak<MountFSInode>>>,
+    /// 自身挂载到父文件系统上的 inode（如果是根则 None）。
+    /// DragonOS 存 Arc 而非 Weak——循环由 umount 时 take() 打破。
+    self_mountpoint: Mutex<Option<Arc<MountFSInode>>>,
     /// 挂载标志
     mount_flags: Mutex<MountFlags>,
     /// 挂载源
@@ -1222,11 +1222,11 @@ impl MountFS {
     }
 
     pub fn self_mountpoint(&self) -> Option<Arc<MountFSInode>> {
-        self.self_mountpoint.lock().as_ref().and_then(|w| w.upgrade())
+        self.self_mountpoint.lock().clone()
     }
 
     pub fn set_self_mountpoint(&self, mp: Option<Arc<MountFSInode>>) {
-        *self.self_mountpoint.lock() = mp.map(|arc| Arc::downgrade(&arc));
+        *self.self_mountpoint.lock() = mp;
     }
 
     pub fn mount_source(&self) -> Option<String> {
