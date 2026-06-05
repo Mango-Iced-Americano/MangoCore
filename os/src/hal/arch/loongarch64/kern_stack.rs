@@ -5,7 +5,8 @@ use alloc::vec::Vec;
 use lazy_static::*;
 use spin::Mutex;
 
-const KERNEL_STACK_CACHE_LIMIT: usize = 1024;
+const KERNEL_STACK_CACHE_BYTES: usize = 4 * 1024 * 1024;
+const KERNEL_STACK_CACHE_LIMIT: usize = KERNEL_STACK_CACHE_BYTES / KERNEL_STACK_SIZE;
 
 lazy_static! {
     static ref KERNEL_STACK_CACHE: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());

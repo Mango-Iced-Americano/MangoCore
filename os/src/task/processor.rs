@@ -112,6 +112,7 @@ pub fn run_tasks() {
                     continue;
                 }
                 task_inner.task_status = TaskStatus::Running;
+                task_inner.update_process_times_schedule_in();
                 &task_inner.task_cx as *const TaskContext
             };
             // 设置当前正在运行的任务

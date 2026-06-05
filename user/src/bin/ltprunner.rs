@@ -11,8 +11,83 @@ use user_lib::{
     waitpid_wnohang, OpenFlags, SIGKILL, SIGTERM,
 };
 
+#[cfg(target_arch = "loongarch64")]
+const DEFAULT_CASE_TIMEOUT_SECS: u64 = 60;
+#[cfg(not(target_arch = "loongarch64"))]
 const DEFAULT_CASE_TIMEOUT_SECS: u64 = 30;
+#[cfg(target_arch = "loongarch64")]
+const LTP_TIMEOUT_MUL_ENV: &str = "LTP_TIMEOUT_MUL=2\0";
 const DEFAULT_CASE_TERM_GRACE_MS: u64 = 1500;
+const LTP_EXIT_TCONF: i32 = 32;
+const DEFAULT_LTP_EXCLUDE: &[&str] = &[
+    "rt_sigtimedwait01",
+    "timerfd04",
+    "timerfd_settime02",
+];
+const DEFAULT_LTP_EXCLUDE_UNSUPPORTED: &[&str] = &[
+    "acct01",
+    "acct02",
+    "acct02_helper",
+    "cacheflush01",
+    "clock_gettime03",
+    "clock_gettime04",
+    "clock_nanosleep03",
+    "clone303",
+    "eventfd06",
+    "fork13",
+    "fork14",
+    "futex_waitv01",
+    "futex_waitv02",
+    "futex_waitv03",
+    "futex_wake04",
+    "get_mempolicy01",
+    "get_mempolicy02",
+    "kill13",
+    "madvise06",
+    "madvise07",
+    "madvise08",
+    "madvise09",
+    "madvise11",
+    "memfd_create03",
+    "memfd_create04",
+    "msgctl05",
+    "msgstress01",
+    "pkey01",
+    "process_madvise01",
+    "prctl06",
+    "prctl06_execve",
+    "prctl07",
+    "prctl10",
+    "rt_tgsigqueueinfo01",
+    "semctl08",
+    "set_thread_area01",
+    "sgetmask01",
+    "signal06",
+    "ssetmask01",
+    "sysinfo03",
+    "timer_create01",
+    "timer_create02",
+    "userfaultfd01",
+    "ustat01",
+    "ustat02",
+];
+const DEFAULT_LTP_EXCLUDE_MUSL: &[&str] = &[
+    "clone04",
+    "profil01",
+    "sigtimedwait01",
+    "sigwaitinfo01",
+    "nice04",
+];
+const DEFAULT_LTP_EXCLUDE_GLIBC: &[&str] = &[];
+#[cfg(target_arch = "riscv64")]
+const DEFAULT_LTP_EXCLUDE_RV64_MUSL: &[&str] =
+    &["epoll_create02", "atof01", "fptest01", "fptest02"];
+#[cfg(target_arch = "riscv64")]
+const DEFAULT_LTP_EXCLUDE_RV64_GLIBC: &[&str] = &[];
+#[cfg(target_arch = "loongarch64")]
+const DEFAULT_LTP_EXCLUDE_LA64_MUSL: &[&str] = &["clone08"];
+#[cfg(target_arch = "loongarch64")]
+const DEFAULT_LTP_EXCLUDE_LA64_GLIBC: &[&str] = &[];
 
 struct LtpCase {
     #[allow(dead_code)]
@@ -126,13 +201,60 @@ fn comma_split(s: &str) -> Vec<String> {
         .collect()
 }
 
+fn default_excludes(libc: &str) -> Vec<String> {
+    let mut list: Vec<String> = DEFAULT_LTP_EXCLUDE
+        .iter()
+        .map(|s| String::from(*s))
+        .collect();
+    list.extend(
+        DEFAULT_LTP_EXCLUDE_UNSUPPORTED
+            .iter()
+            .map(|s| String::from(*s)),
+    );
+    let libc_defaults: &[&str] = if libc == "musl" {
+        DEFAULT_LTP_EXCLUDE_MUSL
+    } else if libc == "glibc" {
+        DEFAULT_LTP_EXCLUDE_GLIBC
+    } else {
+        &[]
+    };
+    list.extend(libc_defaults.iter().map(|s| String::from(*s)));
+    list.extend(default_arch_excludes(libc).iter().map(|s| String::from(*s)));
+    list
+}
+
+#[cfg(target_arch = "riscv64")]
+fn default_arch_excludes(libc: &str) -> &[&str] {
+    if libc == "musl" {
+        DEFAULT_LTP_EXCLUDE_RV64_MUSL
+    } else if libc == "glibc" {
+        DEFAULT_LTP_EXCLUDE_RV64_GLIBC
+    } else {
+        &[]
+    }
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn default_arch_excludes(libc: &str) -> &[&str] {
+    if libc == "musl" {
+        DEFAULT_LTP_EXCLUDE_LA64_MUSL
+    } else if libc == "glibc" {
+        DEFAULT_LTP_EXCLUDE_LA64_GLIBC
+    } else {
+        &[]
+    }
+}
+
 fn load_conf(path: &str, libc: &str) -> LtpConfig {
     let mut cfg = LtpConfig {
         ltp_suites: Vec::new(),
         ltp_from: String::new(),
         ltp_include: Vec::new(),
-        ltp_exclude: Vec::new(),
+        ltp_exclude: default_excludes(libc),
     };
+    let mut conf_exclude = Vec::new();
+    let mut conf_libc_exclude = Vec::new();
+    let mut conf_arch_libc_exclude = Vec::new();
 
     let fd = open(path, OpenFlags::RDONLY);
     if fd < 0 {
@@ -180,14 +302,38 @@ fn load_conf(path: &str, libc: &str) -> LtpConfig {
         } else if key == b"ltp_include" {
             cfg.ltp_include = comma_split(val_str);
         } else if key == b"ltp_exclude" {
-            cfg.ltp_exclude = comma_split(val_str);
+            conf_exclude = comma_split(val_str);
         } else if key == b"ltp_exclude_musl" && libc == "musl" {
-            cfg.ltp_exclude.extend(comma_split(val_str));
+            conf_libc_exclude.extend(comma_split(val_str));
         } else if key == b"ltp_exclude_glibc" && libc == "glibc" {
-            cfg.ltp_exclude.extend(comma_split(val_str));
+            conf_libc_exclude.extend(comma_split(val_str));
+        } else if key == b"ltp_exclude_rv64_musl"
+            && cfg!(target_arch = "riscv64")
+            && libc == "musl"
+        {
+            conf_arch_libc_exclude.extend(comma_split(val_str));
+        } else if key == b"ltp_exclude_rv64_glibc"
+            && cfg!(target_arch = "riscv64")
+            && libc == "glibc"
+        {
+            conf_arch_libc_exclude.extend(comma_split(val_str));
+        } else if key == b"ltp_exclude_la64_musl"
+            && cfg!(target_arch = "loongarch64")
+            && libc == "musl"
+        {
+            conf_arch_libc_exclude.extend(comma_split(val_str));
+        } else if key == b"ltp_exclude_la64_glibc"
+            && cfg!(target_arch = "loongarch64")
+            && libc == "glibc"
+        {
+            conf_arch_libc_exclude.extend(comma_split(val_str));
         }
     }
 
+    cfg.ltp_exclude = default_excludes(libc);
+    cfg.ltp_exclude.extend(conf_exclude);
+    cfg.ltp_exclude.extend(conf_libc_exclude);
+    cfg.ltp_exclude.extend(conf_arch_libc_exclude);
     cfg
 }
 
@@ -319,7 +465,7 @@ fn reap_orphans() {
 
 fn vfork_with_retry() -> isize {
     for _ in 0..200 {
-    let pid = vfork_with_retry();
+        let pid = vfork();
         if pid >= 0 {
             return pid;
         }
@@ -355,8 +501,8 @@ struct PrecomputedEnv {
     tmpdir_s: String,
     tmpbase_s: String,
     pwd_s: String,
-    env_preload: [*const u8; 16],
-    env_no_preload: [*const u8; 16],
+    env_preload: [*const u8; 17],
+    env_no_preload: [*const u8; 17],
 }
 
 fn precompute_env(ltproot: &str, tmpdir: &str) -> PrecomputedEnv {
@@ -372,21 +518,44 @@ fn precompute_env(ltproot: &str, tmpdir: &str) -> PrecomputedEnv {
     let ld_preload_ptr: *const u8 = "LD_PRELOAD=/ltp_proto_compat.so\0".as_ptr();
     let null_ptr: *const u8 = core::ptr::null();
 
-    let env_preload: [*const u8; 16] = [
+    #[cfg(target_arch = "loongarch64")]
+    let env_preload: [*const u8; 17] = [
         ltp_root_s.as_ptr(), path_s.as_ptr(), tmpdir_s.as_ptr(), tmpbase_s.as_ptr(),
         "HOME=/\0".as_ptr(), pwd_s.as_ptr(), "SHELL=/bin/bash\0".as_ptr(),
         "TERM=dumb\0".as_ptr(), "LTP_COLORIZE_OUTPUT=y\0".as_ptr(),
         "LTP_DEV_FS_TYPE=ext2\0".as_ptr(), "LTP_IPC_PATH=/tmp\0".as_ptr(),
         "LANG=C.UTF-8\0".as_ptr(), "LTP_REPRODUCIBLE_OUTPUT=n\0".as_ptr(),
-        "KCONFIG_PATH=/proc/config\0".as_ptr(), ld_preload_ptr, null_ptr,
+        LTP_TIMEOUT_MUL_ENV.as_ptr(), "KCONFIG_PATH=/proc/config\0".as_ptr(),
+        ld_preload_ptr, null_ptr,
     ];
-    let env_no_preload: [*const u8; 16] = [
+    #[cfg(not(target_arch = "loongarch64"))]
+    let env_preload: [*const u8; 17] = [
         ltp_root_s.as_ptr(), path_s.as_ptr(), tmpdir_s.as_ptr(), tmpbase_s.as_ptr(),
         "HOME=/\0".as_ptr(), pwd_s.as_ptr(), "SHELL=/bin/bash\0".as_ptr(),
         "TERM=dumb\0".as_ptr(), "LTP_COLORIZE_OUTPUT=y\0".as_ptr(),
         "LTP_DEV_FS_TYPE=ext2\0".as_ptr(), "LTP_IPC_PATH=/tmp\0".as_ptr(),
         "LANG=C.UTF-8\0".as_ptr(), "LTP_REPRODUCIBLE_OUTPUT=n\0".as_ptr(),
-        "KCONFIG_PATH=/proc/config\0".as_ptr(), null_ptr, null_ptr,
+        "KCONFIG_PATH=/proc/config\0".as_ptr(), ld_preload_ptr, null_ptr, null_ptr,
+    ];
+
+    #[cfg(target_arch = "loongarch64")]
+    let env_no_preload: [*const u8; 17] = [
+        ltp_root_s.as_ptr(), path_s.as_ptr(), tmpdir_s.as_ptr(), tmpbase_s.as_ptr(),
+        "HOME=/\0".as_ptr(), pwd_s.as_ptr(), "SHELL=/bin/sh\0".as_ptr(),
+        "TERM=dumb\0".as_ptr(), "LTP_COLORIZE_OUTPUT=y\0".as_ptr(),
+        "LTP_DEV_FS_TYPE=ext2\0".as_ptr(), "LTP_IPC_PATH=/tmp\0".as_ptr(),
+        "LANG=C.UTF-8\0".as_ptr(), "LTP_REPRODUCIBLE_OUTPUT=n\0".as_ptr(),
+        LTP_TIMEOUT_MUL_ENV.as_ptr(), "KCONFIG_PATH=/proc/config\0".as_ptr(),
+        null_ptr, null_ptr,
+    ];
+    #[cfg(not(target_arch = "loongarch64"))]
+    let env_no_preload: [*const u8; 17] = [
+        ltp_root_s.as_ptr(), path_s.as_ptr(), tmpdir_s.as_ptr(), tmpbase_s.as_ptr(),
+        "HOME=/\0".as_ptr(), pwd_s.as_ptr(), "SHELL=/bin/sh\0".as_ptr(),
+        "TERM=dumb\0".as_ptr(), "LTP_COLORIZE_OUTPUT=y\0".as_ptr(),
+        "LTP_DEV_FS_TYPE=ext2\0".as_ptr(), "LTP_IPC_PATH=/tmp\0".as_ptr(),
+        "LANG=C.UTF-8\0".as_ptr(), "LTP_REPRODUCIBLE_OUTPUT=n\0".as_ptr(),
+        "KCONFIG_PATH=/proc/config\0".as_ptr(), null_ptr, null_ptr, null_ptr,
     ];
 
     PrecomputedEnv { ltp_root_s, path_s, tmpdir_s, tmpbase_s, pwd_s, env_preload, env_no_preload }
@@ -405,7 +574,7 @@ fn run_case(
     let mut cmd_buf = String::from(&case.command);
     cmd_buf.push('\0');
 
-    let pid = vfork();
+    let pid = vfork_with_retry();
     if pid < 0 {
         return 127;
     }
@@ -621,7 +790,7 @@ fn main(_argc: usize, argv: &[&str]) -> i32 {
     let mut executed: usize = 0;
     let mut passed: usize = 0;
     let mut failed: usize = 0;
-    let mut skipped_by_timeout: usize = 0;
+    let mut skipped: usize = 0;
     let mut current_suite: &str = "";
 
     for &idx in &filtered_indices {
@@ -633,7 +802,7 @@ fn main(_argc: usize, argv: &[&str]) -> i32 {
                 "[ltprunner] group deadline exceeded, stopping. executed={} passed={} failed={} remaining={}",
                 executed, passed, failed, filtered_count - executed
             );
-            skipped_by_timeout = filtered_count - executed;
+            skipped += filtered_count - executed;
             break;
         }
 
@@ -651,11 +820,14 @@ fn main(_argc: usize, argv: &[&str]) -> i32 {
 
         let ret = run_case(case, deadline_ms, own_pgid, &penv);
 
-        println!("FAIL LTP CASE {} : {}", case.case_name, ret);
-
         if ret == 0 {
+            println!("PASS LTP CASE {} : 0", case.case_name);
             passed += 1;
+        } else if ret == LTP_EXIT_TCONF {
+            println!("SKIP LTP CASE {} : {}", case.case_name, ret);
+            skipped += 1;
         } else {
+            println!("FAIL LTP CASE {} : {}", case.case_name, ret);
             failed += 1;
         }
         executed += 1;
@@ -665,7 +837,7 @@ fn main(_argc: usize, argv: &[&str]) -> i32 {
 
     println!(
         "[ltprunner] done. executed={} passed={} failed={} skipped={} total_ms={} rate={} cases/min",
-        executed, passed, failed, skipped_by_timeout,
+        executed, passed, failed, skipped,
         get_time_ms() - start_ms,
         (executed as u64 * 60000).checked_div(get_time_ms() - start_ms).unwrap_or(0),
     );

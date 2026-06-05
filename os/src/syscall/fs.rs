@@ -21,6 +21,7 @@ use alloc::vec::Vec;
 use core::mem::size_of;
 use core::panic;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use lazy_static::lazy_static;
 use log::{debug, error, info, trace, warn};
 use num_enum::FromPrimitive;
 
@@ -35,6 +36,54 @@ const MFD_HUGE_MASK: u32 = 0x3f << MFD_HUGE_SHIFT;
 const MFD_VALID_FLAGS: u32 = MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_HUGETLB | MFD_HUGE_MASK;
 const MEMFD_NAME_MAX: usize = 249;
 static MEMFD_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+const F_RDLCK: i16 = 0;
+const F_WRLCK: i16 = 1;
+const F_UNLCK: i16 = 2;
+const SEEK_SET: i16 = 0;
+const SEEK_CUR: i16 = 1;
+const SEEK_END: i16 = 2;
+const LOCK_SH: u32 = 1;
+const LOCK_EX: u32 = 2;
+const LOCK_NB: u32 = 4;
+const LOCK_UN: u32 = 8;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct Flock {
+    l_type: i16,
+    l_whence: i16,
+    l_start: i64,
+    l_len: i64,
+    l_pid: i32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FcntlLockKey {
+    dev: usize,
+    inode: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FcntlRecordLock {
+    key: FcntlLockKey,
+    owner_pid: usize,
+    l_type: i16,
+    start: i64,
+    end: i64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FlockLock {
+    key: FcntlLockKey,
+    owner_description: usize,
+    exclusive: bool,
+}
+
+lazy_static! {
+    static ref FCNTL_RECORD_LOCKS: spin::Mutex<Vec<FcntlRecordLock>> = spin::Mutex::new(Vec::new());
+    static ref FLOCK_LOCKS: spin::Mutex<Vec<FlockLock>> = spin::Mutex::new(Vec::new());
+}
 
 pub const AT_FDCWD: usize = 100usize.wrapping_neg();
 
@@ -544,11 +593,14 @@ pub fn sys_splice(
     fd_out: usize,
     off_out: *mut usize,
     len: usize,
-    _flags: u32,
+    flags: u32,
 ) -> isize {
+    if flags & !SPLICE_VALID_FLAGS != 0 {
+        return EINVAL;
+    }
     let task = current_task().unwrap();
     let files_ref = task.process.files();
-        let fd_table = files_ref.lock();
+    let fd_table = files_ref.lock();
     let in_file = match fd_table.get_file(fd_in) {
         Ok(file) => match file.try_clone() {
             Some(f) => f,
@@ -594,6 +646,8 @@ pub fn sys_splice(
     };
 
     let mut left_bytes = len;
+    let nonblock =
+        flags & SPLICE_F_NONBLOCK != 0 || in_file.is_nonblock() || out_file.is_nonblock();
     loop {
         let write_buffer = match buffer_ptr {
             Some(buffer_ptr) => buffer_ptr,
@@ -615,9 +669,9 @@ pub fn sys_splice(
                         *off_val += n;
                         n
                     } else {
-                        match in_file.read(buffer.as_mut_slice()) {
+                        match splice_read_stream(&in_file, buffer.as_mut_slice(), nonblock) {
                             Ok(n) => n,
-                            Err(e) => return -(e as isize),
+                            Err(errno) => return errno,
                         }
                     }
                 };
@@ -647,9 +701,9 @@ pub fn sys_splice(
                 *off_val += n;
                 n
             } else {
-                match out_file.write(write_buffer) {
+                match splice_write_stream(&out_file, write_buffer, nonblock) {
                     Ok(n) => n,
-                    Err(e) => return -(e as isize),
+                    Err(errno) => return errno,
                 }
             }
         };
@@ -679,6 +733,70 @@ pub fn sys_splice(
     send_size as isize
 }
 
+fn splice_read_stream(
+    file: &vfs::File,
+    buf: &mut [u8],
+    nonblock: bool,
+) -> Result<usize, isize> {
+    let mut read_once = || match file.read(buf) {
+        Ok(n) => n as isize,
+        Err(e) => -(e as isize),
+    };
+    let ret = if nonblock {
+        read_once()
+    } else if let Some(wq) = file.inode.read_wait_queue() {
+        match WaitQueue::wait_until_interruptible(wq, || {
+            let ret = read_once();
+            if ret == -(SyscallErr::EAGAIN as isize) {
+                None
+            } else {
+                Some(ret)
+            }
+        }) {
+            WaitResult::Ready(n) => n,
+            WaitResult::Interrupted => -(SyscallErr::ERESTART as isize),
+            WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
+        }
+    } else {
+        read_once()
+    };
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as usize)
+    }
+}
+
+fn splice_write_stream(file: &vfs::File, buf: &[u8], nonblock: bool) -> Result<usize, isize> {
+    let mut write_once = || match file.write(buf) {
+        Ok(n) => n as isize,
+        Err(e) => -(e as isize),
+    };
+    let ret = if nonblock {
+        write_once()
+    } else if let Some(wq) = file.inode.write_wait_queue() {
+        match WaitQueue::wait_until_interruptible(wq, || {
+            let ret = write_once();
+            if ret == -(SyscallErr::EAGAIN as isize) {
+                None
+            } else {
+                Some(ret)
+            }
+        }) {
+            WaitResult::Ready(n) => n,
+            WaitResult::Interrupted => -(SyscallErr::ERESTART as isize),
+            WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
+        }
+    } else {
+        write_once()
+    };
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as usize)
+    }
+}
+
 /// # Warning
 /// `fs` & `files` is locked in this function
 fn __openat(dirfd: usize, path: &str) -> Result<vfs::File, isize> {
@@ -688,23 +806,33 @@ fn __openat(dirfd: usize, path: &str) -> Result<vfs::File, isize> {
 pub fn sys_getcwd(buf: usize, size: usize) -> isize {
     let task = current_task().unwrap();
     let fs_ref = task.process.fs();
-    let fs_lock = fs_ref.lock();
-    let working_dir = fs_lock.working_path.clone();
-    drop(fs_lock);
+    let (cwd_inode, cached_path) = {
+        let fs_lock = fs_ref.lock();
+        (fs_lock.working_inode.inode.clone(), fs_lock.working_path.clone())
+    };
+    let working_dir = match cwd_inode.absolute_path() {
+        Ok(path) => {
+            if path != cached_path {
+                fs_ref.lock().working_path = path.clone();
+            }
+            path
+        }
+        Err(_) => cached_path,
+    };
     // ERANGE must be checked BEFORE buffer validation:
     // Linux returns ERANGE if buffer is too small, even if buf is partially invalid
     if working_dir.len() + 1 > size {
         return ERANGE;
     }
     let vm_ref = task.process.vm();
+    let write_len = working_dir.len() + 1;
     if !vm_ref
         .lock()
-        .contains_valid_buffer(buf, size, MapPermission::W)
+        .contains_valid_buffer(buf, write_len, MapPermission::W)
     {
         return EFAULT;
     }
     let token = task.get_user_token();
-    let write_len = working_dir.len() + 1;
     let mut user_buf = match UserBufferWriter::new(token, buf as *mut u8, write_len) {
         Ok(writer) => writer,
         Err(errno) => return errno,
@@ -1081,6 +1209,79 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
     }
 }
 
+const SPLICE_F_MOVE: u32 = 0x01;
+const SPLICE_F_NONBLOCK: u32 = 0x02;
+const SPLICE_F_MORE: u32 = 0x04;
+const SPLICE_F_GIFT: u32 = 0x08;
+const SPLICE_VALID_FLAGS: u32 = SPLICE_F_MOVE | SPLICE_F_NONBLOCK | SPLICE_F_MORE | SPLICE_F_GIFT;
+const VMSPLICE_VALID_FLAGS: u32 = SPLICE_VALID_FLAGS;
+
+pub fn sys_vmsplice(fd: usize, iov: usize, iovcnt: usize, flags: u32) -> isize {
+    if flags & !VMSPLICE_VALID_FLAGS != 0 {
+        return EINVAL;
+    }
+    let task = current_task().unwrap();
+    let file = {
+        let files_ref = task.process.files();
+        let fd_table = files_ref.lock();
+        match fd_table.get_file(fd) {
+            Ok(file) => match file.try_clone() {
+                Some(file) => file,
+                None => return EBADF,
+            },
+            Err(e) => return -(e as isize),
+        }
+    };
+    if file.file_type() != FileType::Pipe {
+        return EINVAL;
+    }
+    if file.writable().is_err() {
+        return EBADF;
+    }
+
+    let token = task.get_user_token();
+    let user_iov = match UserIoVec::read_user_iovecs(
+        token,
+        iov as *const crate::fs::iov::IOVec,
+        iovcnt,
+        MAX_SYSCALL_BUFFER_SIZE,
+    ) {
+        Ok(iov) => iov,
+        Err(errno) => return errno,
+    };
+    let user_buf = match user_iov.reader_buffer() {
+        Ok(buffer) => buffer,
+        Err(errno) => return errno,
+    };
+    let mut kernel_buf = alloc::vec![0u8; user_buf.len()];
+    user_buf.read(&mut kernel_buf);
+
+    let mut try_write = || match file.write(&kernel_buf) {
+        Ok(n) => n as isize,
+        Err(e) => -(e as isize),
+    };
+    let is_nonblock = file.is_nonblock() || flags & SPLICE_F_NONBLOCK != 0;
+    if is_nonblock {
+        return try_write();
+    }
+    if let Some(wq) = file.inode.write_wait_queue() {
+        match WaitQueue::wait_until_interruptible(wq, || {
+            let ret = try_write();
+            if ret == -(SyscallErr::EAGAIN as isize) {
+                None
+            } else {
+                Some(ret)
+            }
+        }) {
+            WaitResult::Ready(n) => n,
+            WaitResult::Interrupted => -(SyscallErr::ERESTART as isize),
+            WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
+        }
+    } else {
+        try_write()
+    }
+}
+
 /// If offset is not NULL, then it points to a variable holding the
 /// file offset from which sendfile() will start reading data from
 /// in_fd.
@@ -1343,8 +1544,21 @@ pub fn sys_close(fd: usize) -> isize {
     let task = current_task().unwrap();
     let files_ref = task.process.files();
     let mut fd_table = files_ref.lock();
+    let lock_key = match fd_table.get_file(fd) {
+        Ok(file) => fcntl_lock_key(file).ok(),
+        Err(e) => return -(e as isize),
+    };
     match fd_table.drop_fd(fd) {
-        Ok(_) => SUCCESS,
+        Ok(file) => {
+            let mut flock_releases = Vec::new();
+            record_flock_close(&mut flock_releases, &file);
+            drop(fd_table);
+            release_closed_flock_descriptions(flock_releases);
+            if let Some(key) = lock_key {
+                release_fcntl_locks_for_pid_key(task.pid(), key);
+            }
+            SUCCESS
+        }
         Err(e) => return -(e as isize),
     }
 }
@@ -1371,7 +1585,23 @@ pub fn sys_close_range(first: usize, last: usize, flags: u32) -> isize {
     if (flags & CLOSE_RANGE_CLOEXEC) != 0 {
         fd_table.set_cloexec_range(first, last);
     } else {
-        fd_table.close_range(first, last);
+        let mut lock_keys = Vec::new();
+        let mut flock_releases = Vec::new();
+        for fd in first..=last {
+            if let Ok(file) = fd_table.drop_fd(fd) {
+                if let Ok(key) = fcntl_lock_key(&file) {
+                    lock_keys.push(key);
+                }
+                record_flock_close(&mut flock_releases, &file);
+            } else if fd >= fd_table.len() {
+                break;
+            }
+        }
+        drop(fd_table);
+        release_closed_flock_descriptions(flock_releases);
+        for key in lock_keys {
+            release_fcntl_locks_for_pid_key(task.pid(), key);
+        }
     }
     SUCCESS
 }
@@ -1531,11 +1761,30 @@ pub fn sys_dup2(oldfd: usize, newfd: usize) -> isize {
             Ok(file) => match file.try_clone() { Some(f) => f, None => return EBADF, },
             Err(e) => return -(e as isize),
         };
+        let replaced_key = fd_table.get_file(newfd).ok().and_then(|file| fcntl_lock_key(file).ok());
+        let replaced_flock = fd_table.get_file(newfd).ok().map(|file| {
+            (
+                file.description_id(),
+                file.description_ref_count(),
+            )
+        });
 
-        match fd_table.alloc_fd_at(newfd, file, false) {
+        let ret = match fd_table.alloc_fd_at(newfd, file, false) {
             Ok(fd) => fd as isize,
             Err(e) => -(e as isize),
+        };
+        drop(fd_table);
+        if ret >= 0 {
+            if let Some((description, refs)) = replaced_flock {
+                if refs <= 1 {
+                    release_flock_description(description);
+                }
+            }
+            if let Some(key) = replaced_key {
+                release_fcntl_locks_for_pid_key(task.pid(), key);
+            }
         }
+        ret
     };
     if ret < 0 {
         return ret;
@@ -1567,10 +1816,29 @@ pub fn sys_dup3(oldfd: usize, newfd: usize, flags: u32) -> isize {
         Ok(file) => match file.try_clone() { Some(f) => f, None => return EBADF, },
         Err(e) => return -(e as isize),
     };
-    match fd_table.alloc_fd_at(newfd, file, is_cloexec) {
+    let replaced_key = fd_table.get_file(newfd).ok().and_then(|file| fcntl_lock_key(file).ok());
+    let replaced_flock = fd_table.get_file(newfd).ok().map(|file| {
+        (
+            file.description_id(),
+            file.description_ref_count(),
+        )
+    });
+    let ret = match fd_table.alloc_fd_at(newfd, file, is_cloexec) {
         Ok(fd) => fd as isize,
         Err(e) => -(e as isize),
+    };
+    drop(fd_table);
+    if ret >= 0 {
+        if let Some((description, refs)) = replaced_flock {
+            if refs <= 1 {
+                release_flock_description(description);
+            }
+        }
+        if let Some(key) = replaced_key {
+            release_fcntl_locks_for_pid_key(task.pid(), key);
+        }
     }
+    ret
 }
 
 // This syscall is not complete at all, only /read proc/self/exe
@@ -2213,10 +2481,14 @@ pub fn sys_chdir(path: *const u8) -> isize {
         },
         Err(errno) => return errno,
     };
+    let working_path = target
+        .inode
+        .absolute_path()
+        .unwrap_or_else(|_| normalize_cwd(&old_path, &path));
     let fs_ref = task.process.fs();
     let mut lock = fs_ref.lock();
     lock.working_inode = Arc::new(target);
-    lock.working_path = normalize_cwd(&old_path, &path);
+    lock.working_path = working_path;
     SUCCESS
 }
 
@@ -2233,15 +2505,70 @@ pub fn sys_fchdir(fd: usize) -> isize {
     }
     let inode = file.inode.clone();
     drop(fd_table);
+    let meta = match inode.metadata() {
+        Ok(meta) => meta,
+        Err(e) => return -(e as isize),
+    };
+    let (uid, gid) = open_subject_ids();
+    if !has_search_access(&meta, uid, gid) {
+        return EACCES;
+    }
+    let working_path = inode.absolute_path().ok();
     let file = match vfs::File::new(inode, vfs::FileFlags::O_RDONLY) {
         Ok(f) => f,
         Err(e) => return -(e as isize),
     };
     let fs_ref = task.process.fs();
     let mut lock = fs_ref.lock();
-    let old_path = lock.working_path.clone();
     lock.working_inode = Arc::new(file);
-    // fchdir: 路径不变 (无法确定 fd 对应的路径名)
+    if let Some(path) = working_path {
+        lock.working_path = path;
+    }
+    SUCCESS
+}
+
+pub fn sys_flock(fd: usize, operation: u32) -> isize {
+    let task = current_task().unwrap();
+    let files_ref = task.process.files();
+    let fd_table = files_ref.lock();
+    let file = match fd_table.get_file(fd) {
+        Ok(file) => match file.try_clone() { Some(f) => f, None => return EBADF, },
+        Err(e) => return -(e as isize),
+    };
+    drop(fd_table);
+
+    let op = operation & !LOCK_NB;
+    if !matches!(op, LOCK_SH | LOCK_EX | LOCK_UN) {
+        return EINVAL;
+    }
+
+    let key = match fcntl_lock_key(&file) {
+        Ok(key) => key,
+        Err(errno) => return errno,
+    };
+    let owner_description = file.description_id();
+
+    if op == LOCK_UN {
+        release_flock_description(owner_description);
+        return SUCCESS;
+    }
+
+    let exclusive = op == LOCK_EX;
+    let mut locks = FLOCK_LOCKS.lock();
+    let conflict = locks.iter().any(|lock| {
+        lock.key == key
+            && lock.owner_description != owner_description
+            && (exclusive || lock.exclusive)
+    });
+    if conflict {
+        return EWOULDBLOCK;
+    }
+    locks.retain(|lock| !(lock.key == key && lock.owner_description == owner_description));
+    locks.push(FlockLock {
+        key,
+        owner_description,
+        exclusive,
+    });
     SUCCESS
 }
 
@@ -2452,6 +2779,7 @@ pub fn sys_ioctl(fd: usize, cmd: u32, arg: usize) -> isize {
 
     match file.inode.ioctl(cmd, arg, file.private_data()) {
         Ok(n) => n as isize,
+        Err(SyscallErr::ENOSYS) => ENOTTY,
         Err(e) => -(e as isize),
     }
 }
@@ -3614,6 +3942,271 @@ pub enum Fcntl_Command {
     ILLEAGAL,
 }
 
+fn fcntl_lock_key(file: &vfs::File) -> Result<FcntlLockKey, isize> {
+    let meta = file.metadata().map_err(|e| -(e as isize))?;
+    Ok(FcntlLockKey {
+        dev: meta.dev_id,
+        inode: meta.inode_id as usize,
+    })
+}
+
+fn record_flock_close(
+    releases: &mut Vec<(usize, usize, usize)>,
+    file: &vfs::File,
+) {
+    let description = file.description_id();
+    let ref_count = file.description_ref_count();
+    if let Some((_, closed, refs)) = releases
+        .iter_mut()
+        .find(|(existing, _, _)| *existing == description)
+    {
+        *closed += 1;
+        *refs = ref_count;
+    } else {
+        releases.push((description, 1, ref_count));
+    }
+}
+
+fn release_closed_flock_descriptions(releases: Vec<(usize, usize, usize)>) {
+    let mut locks = FLOCK_LOCKS.lock();
+    for (description, closed, refs) in releases {
+        if closed >= refs {
+            locks.retain(|lock| lock.owner_description != description);
+        }
+    }
+}
+
+fn release_flock_description(description: usize) {
+    FLOCK_LOCKS
+        .lock()
+        .retain(|lock| lock.owner_description != description);
+}
+
+pub fn release_flock_for_file_if_last(file: &vfs::File) {
+    let mut releases = Vec::new();
+    record_flock_close(&mut releases, file);
+    release_closed_flock_descriptions(releases);
+}
+
+fn resolve_flock_range(file: &vfs::File, lock: &Flock) -> Result<(i64, i64), isize> {
+    let base = match lock.l_whence {
+        SEEK_SET => 0,
+        SEEK_CUR => file.offset() as i64,
+        SEEK_END => file.metadata().map_err(|e| -(e as isize))?.size,
+        _ => return Err(EINVAL),
+    } as i128;
+    let mut start = base + lock.l_start as i128;
+    let mut len = lock.l_len as i128;
+    if len < 0 {
+        start += len;
+        len = -len;
+    }
+    if start < 0 || start > i64::MAX as i128 || len > i64::MAX as i128 {
+        return Err(EINVAL);
+    }
+    let end = if len == 0 {
+        i64::MAX
+    } else {
+        let end = start + len;
+        if end <= start || end > i64::MAX as i128 {
+            return Err(EINVAL);
+        }
+        end as i64
+    };
+    Ok((start as i64, end))
+}
+
+fn fcntl_lock_conflicts(a_type: i16, a_start: i64, a_end: i64, b: &FcntlRecordLock) -> bool {
+    if a_end <= b.start || b.end <= a_start {
+        return false;
+    }
+    a_type == F_WRLCK || b.l_type == F_WRLCK
+}
+
+fn fcntl_lock_ranges_touch(a: &FcntlRecordLock, b: &FcntlRecordLock) -> bool {
+    a.key == b.key
+        && a.owner_pid == b.owner_pid
+        && a.l_type == b.l_type
+        && !(a.end < b.start || b.end < a.start)
+}
+
+fn compact_fcntl_record_locks(locks: &mut Vec<FcntlRecordLock>) {
+    let mut i = 0;
+    while i < locks.len() {
+        let mut j = i + 1;
+        while j < locks.len() {
+            if fcntl_lock_ranges_touch(&locks[i], &locks[j]) {
+                let merged = locks[j];
+                locks[i].start = locks[i].start.min(merged.start);
+                locks[i].end = locks[i].end.max(merged.end);
+                locks.remove(j);
+            } else {
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+}
+
+fn validate_fcntl_lock_access(file: &vfs::File, l_type: i16) -> Result<(), isize> {
+    match l_type {
+        F_RDLCK => file.readable().map(|_| ()).map_err(|e| -(e as isize)),
+        F_WRLCK => file.writable().map(|_| ()).map_err(|e| -(e as isize)),
+        F_UNLCK => Ok(()),
+        _ => Err(EINVAL),
+    }
+}
+
+fn fcntl_getlk(file: &vfs::File, arg: usize, owner_pid: usize) -> isize {
+    let token = current_user_token();
+    let mut query = match UserPtrMut::<Flock>::from_addr(arg).read(token) {
+        Ok(lock) => lock,
+        Err(errno) => return errno,
+    };
+    if let Err(errno) = validate_fcntl_lock_access(file, query.l_type) {
+        return errno;
+    }
+    if query.l_type == F_UNLCK {
+        return UserPtrMut::<Flock>::from_addr(arg)
+            .write(token, &query)
+            .map(|_| SUCCESS)
+            .unwrap_or(EFAULT);
+    }
+    let key = match fcntl_lock_key(file) {
+        Ok(key) => key,
+        Err(errno) => return errno,
+    };
+    let (start, end) = match resolve_flock_range(file, &query) {
+        Ok(range) => range,
+        Err(errno) => return errno,
+    };
+    let locks = FCNTL_RECORD_LOCKS.lock();
+    if let Some(lock) = locks
+        .iter()
+        .filter(|lock| {
+            lock.key == key
+                && lock.owner_pid != owner_pid
+                && fcntl_lock_conflicts(query.l_type, start, end, lock)
+        })
+        .min_by_key(|lock| lock.start)
+    {
+        query.l_type = lock.l_type;
+        query.l_whence = SEEK_SET;
+        query.l_start = lock.start;
+        query.l_len = if lock.end == i64::MAX {
+            0
+        } else {
+            lock.end - lock.start
+        };
+        query.l_pid = lock.owner_pid as i32;
+    } else {
+        query.l_type = F_UNLCK;
+    }
+    drop(locks);
+
+    UserPtrMut::<Flock>::from_addr(arg)
+        .write(token, &query)
+        .map(|_| SUCCESS)
+        .unwrap_or(EFAULT)
+}
+
+fn fcntl_setlk(file: &vfs::File, arg: usize, owner_pid: usize, wait: bool) -> isize {
+    let token = current_user_token();
+    let lock = match UserPtr::<Flock>::from_addr(arg).read(token) {
+        Ok(lock) => lock,
+        Err(errno) => return errno,
+    };
+    if let Err(errno) = validate_fcntl_lock_access(file, lock.l_type) {
+        return errno;
+    }
+    let key = match fcntl_lock_key(file) {
+        Ok(key) => key,
+        Err(errno) => return errno,
+    };
+    let (start, end) = match resolve_flock_range(file, &lock) {
+        Ok(range) => range,
+        Err(errno) => return errno,
+    };
+    let mut locks = FCNTL_RECORD_LOCKS.lock();
+    if lock.l_type != F_UNLCK {
+        if locks.iter().any(|entry| {
+            entry.key == key
+                && entry.owner_pid != owner_pid
+                && fcntl_lock_conflicts(lock.l_type, start, end, entry)
+        }) {
+            return if wait { EAGAIN } else { EACCES };
+        }
+    }
+
+    let mut i = 0;
+    while i < locks.len() {
+        let entry = locks[i];
+        if entry.key == key
+            && entry.owner_pid == owner_pid
+            && !(end <= entry.start || entry.end <= start)
+        {
+            locks.remove(i);
+            if entry.start < start {
+                locks.push(FcntlRecordLock {
+                    end: start,
+                    ..entry
+                });
+            }
+            if end < entry.end {
+                locks.push(FcntlRecordLock {
+                    start: end,
+                    ..entry
+                });
+            }
+        } else {
+            i += 1;
+        }
+    }
+    if lock.l_type != F_UNLCK {
+        locks.push(FcntlRecordLock {
+            key,
+            owner_pid,
+            l_type: lock.l_type,
+            start,
+            end,
+        });
+    }
+    compact_fcntl_record_locks(&mut locks);
+    SUCCESS
+}
+
+pub fn release_fcntl_locks_for_pid(pid: usize) {
+    FCNTL_RECORD_LOCKS
+        .lock()
+        .retain(|lock| lock.owner_pid != pid);
+}
+
+fn release_fcntl_locks_for_pid_key(pid: usize, key: FcntlLockKey) {
+    FCNTL_RECORD_LOCKS
+        .lock()
+        .retain(|lock| !(lock.owner_pid == pid && lock.key == key));
+}
+
+pub fn close_cloexec_and_release_fcntl_locks(pid: usize, fd_table: &mut vfs::FdTable) {
+    let mut lock_keys = Vec::new();
+    let mut flock_releases = Vec::new();
+    for fd in 0..fd_table.len() {
+        if fd_table.get_cloexec(fd) {
+            if let Ok(file) = fd_table.get_file(fd) {
+                if let Ok(key) = fcntl_lock_key(file) {
+                    lock_keys.push(key);
+                }
+                record_flock_close(&mut flock_releases, file);
+            }
+        }
+    }
+    fd_table.close_cloexec();
+    release_closed_flock_descriptions(flock_releases);
+    for key in lock_keys {
+        release_fcntl_locks_for_pid_key(pid, key);
+    }
+}
+
 pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
     const FD_CLOEXEC: usize = 1;
 
@@ -3701,6 +4294,46 @@ pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
                 res |= OpenFlags::O_ASYNC.bits() as isize;
             }
             res
+        }
+        Fcntl_Command::GETLK | Fcntl_Command::OFD_GETLK => {
+            let file = match fd_table.get_file(fd) {
+                Ok(file) => match file.try_clone() { Some(f) => f, None => return EBADF, },
+                Err(e) => return -(e as isize),
+            };
+            let owner_pid = task.pid();
+            drop(fd_table);
+            fcntl_getlk(&file, arg, owner_pid)
+        }
+        Fcntl_Command::SETLK
+        | Fcntl_Command::SETLKW
+        | Fcntl_Command::OFD_SETLK
+        | Fcntl_Command::OFD_SETLKW => {
+            let file = match fd_table.get_file(fd) {
+                Ok(file) => match file.try_clone() { Some(f) => f, None => return EBADF, },
+                Err(e) => return -(e as isize),
+            };
+            let owner_pid = task.pid();
+            let wait = matches!(command, Fcntl_Command::SETLKW | Fcntl_Command::OFD_SETLKW);
+            drop(fd_table);
+            fcntl_setlk(&file, arg, owner_pid, wait)
+        }
+        Fcntl_Command::SETPIPE_SZ | Fcntl_Command::GETPIPE_SZ => {
+            let file = match fd_table.get_file(fd) {
+                Ok(file) => file,
+                Err(e) => return -(e as isize),
+            };
+            let pipe = match file.inode_as_any_ref().downcast_ref::<Pipe>() {
+                Some(pipe) => pipe,
+                None => return EINVAL,
+            };
+            match command {
+                Fcntl_Command::GETPIPE_SZ => pipe.pipe_capacity() as isize,
+                Fcntl_Command::SETPIPE_SZ => match pipe.set_pipe_capacity_compat(arg) {
+                    Ok(size) => size as isize,
+                    Err(e) => -(e as isize),
+                },
+                _ => unreachable!(),
+            }
         }
         Fcntl_Command::ADD_SEALS => {
             const VALID_SEALS: usize = vfs::file::F_SEAL_SEAL

@@ -32,6 +32,12 @@
 - 检查是否有 `try_reserve` 防御
 - 查看 `heap_trace.rs` 的分配记录（需启用 feature）
 
+### bind/umount 后 `/proc/mounts` 仍有 sandbox 残留
+- 症状：LTP `fs_bind*` 清理阶段反复提示 `There are still mounts in the sandbox`，`umount` 看似成功但同一路径仍出现在 `/proc/mounts`
+- 优先检查：子 `MountFS` 是否还能通过 `self_mountpoint` 找到父 `MountFSInode`，以及父 `mountpoints` 表是否真正删除了该 inode id
+- 典型根因：挂载点 backref 只保存弱引用或 overmount 旧挂载未走统一 detach，导致 `detach_from_parent_and_cleanup()` 无法摘除父表项
+- 修复模式：保留稳定 parent backref，在 detach 时 `take()` 断开引用；覆盖挂载旧节点也走完整 cleanup，避免 dentry/child mount 缓存继续持有 covered subtree
+
 ## 网络问题
 
 ### Socket 操作阻塞不返回
@@ -60,6 +66,17 @@
 ### fork/wait 越来越慢
 - 检查 TID 分配器是否有 O(n²) 查重
 - 检查物理页释放是否有线性扫描 free-list
+
+### heap_trace live 不回落但 PCB/TCB 正常
+- 先区分真实生命周期泄漏和缓存型常驻：同时看 `zpcb/stale/tcb`、heap used、free frames、对象 owner。
+- la64 需要额外检查架构特定 cache，例如 kernel stack 以 `Vec<u8>` 从 kernel heap 分配并可能被全局 cache 保留；1000 fork/futex 压力可把缓存打满，看起来像 heap leak。
+- 资源报告也要一起查：`/proc/meminfo` 的 `MemAvailable` 如果只看 free frames，可能把静态预留但空闲的 kernel heap 漏掉，导致 LTP 大内存用例误判 `TCONF`。
+- 修复模式：给大对象 cache 设置字节上限，保留小规模复用；对用户可见资源报告区分 `MemFree` 和估算型 `MemAvailable`。
+
+### 用户 buffer 大小与实际 copy 长度不一致
+- 症状：同一 syscall 在 glibc/musl 或不同架构下偶发 `EFAULT`，但实际输出内容很短，例如 `getcwd()` 只复制当前路径却按用户传入的 `PATH_MAX` 校验整段 buffer。
+- 优先检查：syscall 是否用“用户声明容量”做 VMA 可访问性校验，而真实 `copy_to_user` 只会访问更短的 `write_len`。
+- 修复模式：保留 Linux 语义需要的容量判断（如 `ERANGE`），但地址可访问性和 `UserBufferWriter` 长度按实际读写字节数校验。
 
 ## QEMU / 测试
 

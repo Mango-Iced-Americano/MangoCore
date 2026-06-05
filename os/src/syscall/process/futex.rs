@@ -2,10 +2,13 @@ use crate::mm::{UserPtr, VirtAddr};
 use crate::syscall::errno::*;
 use crate::task::threads::{
     do_futex_wait, do_futex_wait_bitset, do_futex_wait_bitset_shared, do_futex_wait_shared,
-    futex_requeue_shared, futex_wake_shared, FutexCmd,
+    do_futex_waitv, do_futex_waitv_shared, futex_requeue_shared, futex_wake_shared, FutexCmd,
+    FutexWaitEntry,
 };
 use crate::task::{current_task, threads};
 use crate::timer::{current_timespec, TimeSpec, NSEC_PER_SEC};
+use alloc::vec::Vec;
+use core::mem::size_of;
 use log::{info, trace};
 use num_enum::FromPrimitive;
 
@@ -13,6 +16,88 @@ bitflags! {
     pub struct FutexOption: u32 {
         const PRIVATE = 128;
         const CLOCK_REALTIME = 256;
+    }
+}
+
+const FUTEX_WAITV_MAX: usize = 128;
+const FUTEX2_SIZE_MASK: u32 = 0x03;
+const FUTEX_32: u32 = 0x02;
+const FUTEX_WAITV_SUPPORTED_FLAGS: u32 = FUTEX_32 | FutexOption::PRIVATE.bits();
+const CLOCK_REALTIME: usize = 0;
+const CLOCK_MONOTONIC: usize = 1;
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct FutexWaitV {
+    val: u64,
+    uaddr: u64,
+    flags: u32,
+    __reserved: u32,
+}
+
+fn va_to_phys_key(
+    vm: &crate::mm::AddressSpace<crate::mm::KernelPageTableImpl>,
+    va: usize,
+) -> Option<usize> {
+    let va = VirtAddr::from(va);
+    let vpn = va.floor();
+    let offset = va.page_offset();
+    vm.translate(vpn).map(|ppn| (ppn.0 << 12) + offset)
+}
+
+fn read_timeout(timeout: *const TimeSpec, token: usize) -> Result<Option<TimeSpec>, isize> {
+    UserPtr::new(timeout).read_optional(token).and_then(|timeout| {
+        if let Some(timeout) = timeout {
+            if timeout.tv_sec > isize::MAX as usize || timeout.tv_nsec >= NSEC_PER_SEC {
+                return Err(EINVAL);
+            }
+        }
+        Ok(timeout)
+    })
+}
+
+fn realtime_deadline(deadline: TimeSpec) -> TimeSpec {
+    let now_realtime = current_timespec();
+    let duration = if deadline > now_realtime {
+        deadline - now_realtime
+    } else {
+        TimeSpec::new()
+    };
+    TimeSpec::now() + duration
+}
+
+fn futex_bitset_deadline(
+    timeout: *const TimeSpec,
+    token: usize,
+    option: FutexOption,
+) -> Result<Option<TimeSpec>, isize> {
+    read_timeout(timeout, token).map(|timeout| {
+        timeout.map(|deadline| {
+            if option.contains(FutexOption::CLOCK_REALTIME) {
+                realtime_deadline(deadline)
+            } else {
+                deadline
+            }
+        })
+    })
+}
+
+fn futex_waitv_deadline(
+    timeout: *const TimeSpec,
+    token: usize,
+    clockid: usize,
+) -> Result<Option<TimeSpec>, isize> {
+    if timeout.is_null() {
+        return Ok(None);
+    }
+    let timeout = match read_timeout(timeout, token)? {
+        Some(timeout) => timeout,
+        None => return Ok(None),
+    };
+    match clockid {
+        CLOCK_MONOTONIC => Ok(Some(timeout)),
+        CLOCK_REALTIME => Ok(Some(realtime_deadline(timeout))),
+        _ => Err(EINVAL),
     }
 }
 
@@ -59,58 +144,6 @@ pub fn sys_futex(
         "[futex] uaddr: {:?}, futex_op: {:?}, option: {:?}, val: {:X}, timeout: {:?}, uaddr2: {:?}, val3: {:X}",
         uaddr, cmd, option, val, timeout, uaddr2, val3
     );
-
-    // 计算用户地址对应的物理地址 key（用于 process-shared futex）
-    // 分解为独立函数避免闭包捕获 task 的借用问题
-    fn va_to_phys_key(
-        vm: &crate::mm::AddressSpace<crate::mm::KernelPageTableImpl>,
-        va: usize,
-    ) -> Option<usize> {
-        let va = VirtAddr::from(va);
-        let vpn = va.floor();
-        let offset = va.page_offset();
-        vm.translate(vpn).map(|ppn| (ppn.0 << 12) + offset)
-    }
-
-    fn read_timeout(
-        timeout: *const TimeSpec,
-        token: usize,
-    ) -> Result<Option<TimeSpec>, isize> {
-        UserPtr::new(timeout).read_optional(token).and_then(|timeout| {
-            if let Some(timeout) = timeout {
-                if timeout.tv_sec > isize::MAX as usize || timeout.tv_nsec >= NSEC_PER_SEC {
-                    return Err(EINVAL);
-                }
-            }
-            Ok(timeout)
-        })
-    }
-
-    fn realtime_deadline(deadline: TimeSpec) -> TimeSpec {
-        let now_realtime = current_timespec();
-        let duration = if deadline > now_realtime {
-            deadline - now_realtime
-        } else {
-            TimeSpec::new()
-        };
-        TimeSpec::now() + duration
-    }
-
-    fn futex_bitset_deadline(
-        timeout: *const TimeSpec,
-        token: usize,
-        option: FutexOption,
-    ) -> Result<Option<TimeSpec>, isize> {
-        read_timeout(timeout, token).map(|timeout| {
-            timeout.map(|deadline| {
-                if option.contains(FutexOption::CLOCK_REALTIME) {
-                    realtime_deadline(deadline)
-                } else {
-                    deadline
-                }
-            })
-        })
-    }
 
     match cmd {
         FutexCmd::Wait => {
@@ -218,5 +251,95 @@ pub fn sys_futex(
         }
         FutexCmd::Invalid => EINVAL,
         _ => EINVAL, // Unsupported command
+    }
+}
+
+pub fn sys_futex_waitv(
+    waiters: *const FutexWaitV,
+    nr_futexes: usize,
+    flags: u32,
+    timeout: *const TimeSpec,
+    clockid: usize,
+) -> isize {
+    if flags != 0 || nr_futexes == 0 || nr_futexes > FUTEX_WAITV_MAX {
+        return EINVAL;
+    }
+    if waiters.is_null() {
+        return EFAULT;
+    }
+
+    let task = current_task().unwrap();
+    let token = task.get_user_token();
+    let deadline = match futex_waitv_deadline(timeout, token, clockid) {
+        Ok(deadline) => deadline,
+        Err(errno) => return errno,
+    };
+
+    let mut entries = Vec::new();
+    if entries.try_reserve(nr_futexes).is_err() {
+        return ENOMEM;
+    }
+    let mut all_private = None;
+
+    for index in 0..nr_futexes {
+        let waiter_addr = match (waiters as usize).checked_add(index * size_of::<FutexWaitV>()) {
+            Some(addr) => addr,
+            None => return EFAULT,
+        };
+        let waiter = match UserPtr::<FutexWaitV>::from_addr(waiter_addr).read(token) {
+            Ok(waiter) => waiter,
+            Err(errno) => return errno,
+        };
+
+        if waiter.__reserved != 0
+            || (waiter.flags & !FUTEX_WAITV_SUPPORTED_FLAGS) != 0
+            || (waiter.flags & FUTEX2_SIZE_MASK) != FUTEX_32
+            || waiter.val > u32::MAX as u64
+        {
+            return EINVAL;
+        }
+        if waiter.uaddr == 0 {
+            return EFAULT;
+        }
+        if (waiter.uaddr as usize) & (core::mem::align_of::<u32>() - 1) != 0 {
+            return EINVAL;
+        }
+        let futex_word = UserPtr::<u32>::from_addr(waiter.uaddr as usize);
+        if let Err(errno) = futex_word.read(token) {
+            return errno;
+        }
+
+        let is_private = (waiter.flags & FutexOption::PRIVATE.bits()) != 0;
+        match all_private {
+            Some(private) if private != is_private => return EINVAL,
+            None => all_private = Some(is_private),
+            _ => {}
+        }
+
+        let futex_key = if is_private {
+            waiter.uaddr as usize
+        } else {
+            let vm_ref = task.process.vm();
+            let vm = vm_ref.lock();
+            match va_to_phys_key(&vm, waiter.uaddr as usize) {
+                Some(key) => key,
+                None => return EFAULT,
+            }
+        };
+
+        entries.push(FutexWaitEntry {
+            futex_word,
+            futex_key,
+            val: waiter.val as u32,
+        });
+    }
+
+    let is_private = all_private.unwrap_or(true);
+    drop(task);
+
+    if is_private {
+        do_futex_waitv(&entries, token, deadline)
+    } else {
+        do_futex_waitv_shared(&entries, token, deadline)
     }
 }

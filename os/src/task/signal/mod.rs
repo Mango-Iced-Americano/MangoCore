@@ -11,8 +11,10 @@ use crate::config::*;
 use crate::mm::{UserPtr, UserPtrMut};
 use crate::syscall::errno::*;
 use crate::task::{
-    exit_current_and_run_next, exit_group_and_run_next, WaitQueue,
+    block_current_and_run_next_with_lock_checked, exit_current_and_run_next,
+    exit_group_and_run_next, WaitQueue,
 };
+use alloc::sync::Arc;
 
 use super::current_task;
 use super::task::TaskControlBlock;
@@ -165,6 +167,17 @@ impl Signals {
         } else {
             Some(self.bits().trailing_zeros() as usize + 1)
         }
+    }
+
+    pub fn wakes_interruptible(
+        self,
+        sigmask: Signals,
+        signal_wait_mask: Signals,
+        wake_unblocked: bool,
+    ) -> bool {
+        self.contains(Signals::SIGCONT)
+            || !(self & signal_wait_mask).is_empty()
+            || (wake_unblocked && !self.difference(sigmask).is_empty())
     }
 }
 
@@ -486,6 +499,17 @@ fn pending_unblocked_signals(task: &TaskControlBlock) -> Signals {
     pending.difference(sigmask)
 }
 
+fn pending_signals(task: &TaskControlBlock) -> Signals {
+    let inner = task.acquire_inner_lock();
+    inner.sigpending.pending() | task.process.shared_pending()
+}
+
+fn has_pending_sigcont(task: &TaskControlBlock) -> bool {
+    // SIGCONT resumes a stopped task even if the signal is currently masked;
+    // delivery can remain pending, but the stopped wait itself must end.
+    pending_signals(task).contains(Signals::SIGCONT)
+}
+
 fn signal_is_actionable(sighand: &Sighand, signum: usize, signal: Signals) -> bool {
     match sighand.get(signum) {
         Some(act) if act.handler == SigHandler::SIG_IGN => false,
@@ -592,14 +616,27 @@ pub fn has_actionable_signal(task: &TaskControlBlock) -> bool {
 
 fn wait_for_default_stop_signal() {
     let wait_queue = spin::Mutex::new(WaitQueue::new());
-    let _ = WaitQueue::wait_event_interruptible(&wait_queue, || {
-        let task = current_task()?;
-        if pending_unblocked_signals(&task).contains(Signals::SIGCONT) {
-            Some(0)
-        } else {
-            None
+    loop {
+        let task = current_task().unwrap();
+        if has_pending_sigcont(&task) {
+            break;
         }
-    });
+
+        let mut guard = wait_queue.lock();
+        guard.prepare_to_wait(Arc::downgrade(&task));
+        if has_pending_sigcont(&task) {
+            guard.finish_wait(&task);
+            break;
+        }
+        drop(task);
+
+        block_current_and_run_next_with_lock_checked(guard, |task| {
+            !has_pending_sigcont(task)
+        });
+
+        let task = current_task().unwrap();
+        wait_queue.lock().finish_wait(&task);
+    }
 }
 
 fn stop_current_process_for_signal(signum: usize) {
@@ -815,26 +852,27 @@ pub fn do_signal() {
         match signal {
                 // caused by a specific instruction in user program, print log here before exit
                 Signals::SIGILL | Signals::SIGSEGV => {
-                    let scause = get_exception_cause();
-                    if signal == Signals::SIGILL {
-                        let stval = get_bad_instruction();
-                        warn!("[do_signal] process terminated due to {:?}", signal);
-                        println!(
-                        "[kernel] {:?} in application, instruction addr = {:#x}, bad instruction = {:#x}, core dumped.",
-                        scause,
-                        inner.get_trap_cx().gp.pc,
-                        stval,
-                        );
-                    } else {
-                        let stval = get_bad_addr();
-                        warn!("[do_signal] process terminated due to {:?}", signal);
-                        println!(
-                        "[kernel] {:?} in application, bad addr = {:#x}, bad instruction = {:#x}, core dumped.",
-                        scause,
-                        stval,
-                        inner.get_trap_cx().gp.pc,
-                        );
-                    };
+                    warn!("[do_signal] process terminated due to {:?}", signal);
+                    if pending.siginfo.is_sync_fault_for(signal) {
+                        let scause = get_exception_cause();
+                        if signal == Signals::SIGILL {
+                            let stval = get_bad_instruction();
+                            println!(
+                                "[kernel] {:?} in application, instruction addr = {:#x}, bad instruction = {:#x}, core dumped.",
+                                scause,
+                                inner.get_trap_cx().gp.pc,
+                                stval,
+                            );
+                        } else {
+                            let stval = get_bad_addr();
+                            println!(
+                                "[kernel] {:?} in application, bad addr = {:#x}, bad instruction = {:#x}, core dumped.",
+                                scause,
+                                stval,
+                                inner.get_trap_cx().gp.pc,
+                            );
+                        }
+                    }
                     drop(inner);
                     drop(sighand);
                     drop(task);
@@ -1073,7 +1111,7 @@ impl SigInfo {
     const FPE_FLTRES: u32 = 6;
     const FPE_FLTINV: u32 = 7;
     const FPE_FLTSUB: u32 = 8;
-    const ILL_ILLOPC: u32 = 1;
+    pub const ILL_ILLOPC: u32 = 1;
     const ILL_ILLOPN: u32 = 2;
     const ILL_ILLADR: u32 = 3;
     const ILL_ILLTRP: u32 = 4;
@@ -1081,8 +1119,8 @@ impl SigInfo {
     const ILL_PRVREG: u32 = 6;
     const ILL_COPROC: u32 = 7;
     const ILL_BADSTK: u32 = 8;
-    const SEGV_MAPERR: u32 = 1;
-    const SEGV_ACCERR: u32 = 2;
+    pub const SEGV_MAPERR: u32 = 1;
+    pub const SEGV_ACCERR: u32 = 2;
     const SEGV_BNDERR: u32 = 3;
     const SEGV_PKUERR: u32 = 4;
     const BUS_ADRALN: u32 = 1;
@@ -1096,4 +1134,12 @@ impl SigInfo {
     const CLD_TRAPPED: u32 = 4;
     const CLD_STOPPED: u32 = 5;
     const CLD_CONTINUED: u32 = 6;
+
+    pub fn is_sync_fault_for(&self, signal: Signals) -> bool {
+        match signal {
+            Signals::SIGILL => (Self::ILL_ILLOPC..=Self::ILL_BADSTK).contains(&self.si_code),
+            Signals::SIGSEGV => (Self::SEGV_MAPERR..=Self::SEGV_PKUERR).contains(&self.si_code),
+            _ => false,
+        }
+    }
 }

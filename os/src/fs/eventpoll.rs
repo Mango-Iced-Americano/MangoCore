@@ -30,6 +30,7 @@ use crate::{
 const EPOLL_CTL_ADD: usize = 1;
 const EPOLL_CTL_DEL: usize = 2;
 const EPOLL_CTL_MOD: usize = 3;
+const EPOLL_MAX_NESTS: usize = 4;
 
 static NEXT_EVENTPOLL_ID: AtomicUsize = AtomicUsize::new(1);
 
@@ -371,6 +372,44 @@ impl EventPoll {
         Ok(())
     }
 
+    fn check_nested_epoll(self: &Arc<Self>, target: &Arc<EventPoll>) -> Result<(), SyscallErr> {
+        let mut seen = Vec::new();
+        let depth = target.nested_depth_to(self.id, &mut seen)?;
+        if depth + 1 > EPOLL_MAX_NESTS {
+            return Err(SyscallErr::EINVAL);
+        }
+        Ok(())
+    }
+
+    fn nested_depth_to(
+        &self,
+        ancestor_id: usize,
+        seen: &mut Vec<usize>,
+    ) -> Result<usize, SyscallErr> {
+        if self.id == ancestor_id {
+            return Err(SyscallErr::ELOOP);
+        }
+        if seen.iter().any(|id| *id == self.id) {
+            return Ok(0);
+        }
+        seen.push(self.id);
+
+        let items = self.snapshot_items();
+        let mut max_depth = 0;
+        for (_, item) in items {
+            let Some(child) = eventpoll_from_file(&item.file) else {
+                continue;
+            };
+            let child_depth = child.nested_depth_to(ancestor_id, seen)? + 1;
+            max_depth = max_depth.max(child_depth);
+            if max_depth >= EPOLL_MAX_NESTS {
+                break;
+            }
+        }
+        seen.pop();
+        Ok(max_depth)
+    }
+
     fn wait(&self, maxevents: usize, timeout: isize) -> Result<Vec<ReadyEvent>, isize> {
         let deadline = if timeout < -1 {
             return Err(-(SyscallErr::EINVAL as isize));
@@ -492,6 +531,14 @@ impl IndexNode for EventPollFile {
         }
     }
 
+    fn read_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
+        Some(&self.event_poll.wait_queue)
+    }
+
+    fn is_stream(&self) -> bool {
+        true
+    }
+
     fn fs(&self) -> Arc<dyn FileSystem> {
         DEV_FS.clone()
     }
@@ -605,10 +652,12 @@ pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event: *const EpollUserE
                 Ok(file) => file,
                 Err(err) => return -(err as isize),
             };
-            if eventpoll_from_file(file).is_some() {
-                return -(SyscallErr::EINVAL as isize);
-            }
-            if !file.mode().contains(FileMode::FMODE_STREAM) {
+            let target_epoll = eventpoll_from_file(file);
+            if let Some(target_epoll) = target_epoll.as_ref() {
+                if let Err(err) = epoll.check_nested_epoll(target_epoll) {
+                    return -(err as isize);
+                }
+            } else if !file.mode().contains(FileMode::FMODE_STREAM) {
                 return -(SyscallErr::EPERM as isize);
             }
             let cloned = match file.try_clone() {
@@ -700,4 +749,37 @@ pub fn sys_epoll_pwait(
     }
 
     out.len() as isize
+}
+
+pub fn sys_epoll_pwait2(
+    epfd: usize,
+    events: *mut EpollUserEvent,
+    maxevents: isize,
+    timeout: *const TimeSpec,
+    sigmask: *const Signals,
+) -> isize {
+    let timeout_ms = if timeout.is_null() {
+        -1
+    } else {
+        let task = current_task().unwrap();
+        let token = task.get_user_token();
+        let ts = match UserPtr::new(timeout).read(token) {
+            Ok(ts) => ts,
+            Err(errno) => return errno,
+        };
+        if ts.tv_sec > isize::MAX as usize || ts.tv_nsec >= 1_000_000_000 {
+            return -(SyscallErr::EINVAL as isize);
+        }
+        let sec_ms = match (ts.tv_sec as isize).checked_mul(1000) {
+            Some(v) => v,
+            None => return -(SyscallErr::EINVAL as isize),
+        };
+        let nsec_ms = ((ts.tv_nsec as isize) + 999_999) / 1_000_000;
+        match sec_ms.checked_add(nsec_ms) {
+            Some(v) => v,
+            None => return -(SyscallErr::EINVAL as isize),
+        }
+    };
+
+    sys_epoll_pwait(epfd, events, maxevents, timeout_ms, sigmask)
 }

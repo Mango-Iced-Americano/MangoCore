@@ -20,11 +20,26 @@ fn process_signal_target(
         if inner.task_status == TaskStatus::Zombie {
             continue;
         }
-        if !signal.difference(inner.sigmask).is_empty() {
+        if signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, true) {
             return Some(task.clone());
         }
     }
     None
+}
+
+fn wake_task_if_interruptible(task: Arc<TaskControlBlock>) {
+    let mut inner = task.acquire_inner_lock();
+    if inner.task_status == TaskStatus::Interruptible {
+        inner.task_status = TaskStatus::Ready;
+        drop(inner);
+        wake_interruptible(task);
+    }
+}
+
+fn wake_process_interruptible_threads(process: &ProcessControlBlock) {
+    for task in process.threads() {
+        wake_task_if_interruptible(task);
+    }
 }
 
 pub fn send_process_signal(process: &ProcessControlBlock, signal: Signals) -> bool {
@@ -51,15 +66,13 @@ pub fn send_process_signal_info(
     }
     if signal.contains(Signals::SIGCONT) {
         process.mark_continued();
+        process.enqueue_process_signal(PendingSignal { signal, siginfo });
+        wake_process_interruptible_threads(process);
+        return true;
     }
     process.enqueue_process_signal(PendingSignal { signal, siginfo });
     if let Some(task) = process_signal_target(process, signal) {
-        let mut inner = task.acquire_inner_lock();
-        if inner.task_status == TaskStatus::Interruptible {
-            inner.task_status = TaskStatus::Ready;
-            drop(inner);
-            wake_interruptible(task);
-        }
+        wake_task_if_interruptible(task);
     }
     true
 }
@@ -102,13 +115,16 @@ fn send_thread_signal_info(
             .sigpending
             .enqueue_signal_with_sender(signal, SigInfo::SI_TKILL as usize, current_sender_pid())?;
     }
-    if wake
-        && inner.task_status == TaskStatus::Interruptible
-        && !signal.difference(inner.sigmask).is_empty()
-    {
-        inner.task_status = TaskStatus::Ready;
+    if signal.contains(Signals::SIGCONT) {
         drop(inner);
-        wake_interruptible(task.clone());
+        wake_task_if_interruptible(task.clone());
+        return Ok(());
+    }
+    if inner.task_status == TaskStatus::Interruptible
+        && signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, wake)
+    {
+        drop(inner);
+        wake_task_if_interruptible(task.clone());
     }
     Ok(())
 }

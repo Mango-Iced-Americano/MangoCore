@@ -5,9 +5,10 @@ use alloc::{
 };
 
 use crate::fs::{
-    procfs::LockedProcInode,
+    procfs::{proc_read_str, LockedProcInode},
     vfs::{IndexNode, InodeMode},
 };
+use crate::utils::error::SyscallErr;
 
 fn get_pid(inode: &LockedProcInode) -> usize {
     inode.0.lock().extra_data
@@ -55,5 +56,32 @@ pub fn task_find_hook(inode: &LockedProcInode, name: &str) -> Option<Arc<dyn Ind
         stat_extra,
     )
     .ok()?;
+    dir.add_file(
+        "comm",
+        InodeMode::from_bits_truncate(0o444),
+        task_comm_content,
+        stat_extra,
+    )
+    .ok()?;
     Some(dir as Arc<dyn IndexNode>)
+}
+
+pub fn task_comm_content(
+    extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let pid = extra >> 32;
+    let tid = extra & 0xffff_ffff;
+    let task = match crate::task::find_task_by_pid_tid(pid, tid) {
+        Some(task) => task,
+        None => return Err(SyscallErr::ENOENT),
+    };
+    let comm = task.acquire_inner_lock().task_comm;
+    let comm_len = comm.iter().position(|&byte| byte == 0).unwrap_or(comm.len());
+    let name = core::str::from_utf8(&comm[..comm_len]).unwrap_or("");
+    let mut out = String::from(name);
+    out.push('\n');
+    proc_read_str(offset, len, buf, &out)
 }

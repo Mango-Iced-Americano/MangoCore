@@ -131,6 +131,14 @@ pub mod counters {
     }
 }
 
+#[derive(Debug, Clone)]
+struct PathHint {
+    parent_ino: InodeId,
+    name: String,
+}
+
+const PATH_HINT_LIMIT: usize = 512;
+
 /// MountFSInode — 挂载感知的 inode 包装器
 ///
 /// 包装内层 inode，所有 `IndexNode` 方法委托给 `inner_inode`。
@@ -143,6 +151,8 @@ pub struct MountFSInode {
     pub mount_fs: Arc<MountFS>,
     /// 指向自身的弱引用
     self_ref: Mutex<Weak<MountFSInode>>,
+    /// Best-effort parent/name hint for physical cwd reconstruction.
+    path_hint: Mutex<Option<PathHint>>,
 }
 
 impl MountFSInode {
@@ -153,6 +163,7 @@ impl MountFSInode {
             inner_inode,
             mount_fs,
             self_ref: Mutex::new(self_ref.clone()),
+            path_hint: Mutex::new(None),
         })
     }
 
@@ -176,6 +187,43 @@ impl MountFSInode {
             return Err(SyscallErr::EROFS);
         }
         Ok(())
+    }
+
+    fn remember_path_hint(&self, parent_ino: InodeId, name: &str) {
+        if name == "." || name == ".." {
+            return;
+        }
+        let hint = PathHint {
+            parent_ino,
+            name: String::from(name),
+        };
+        *self.path_hint.lock() = Some(hint.clone());
+        if let Ok(md) = self.metadata() {
+            self.mount_fs.remember_inode_path_hint(md.inode_id, hint);
+        }
+    }
+
+    fn valid_path_hint_name(
+        &self,
+        parent: &Arc<MountFSInode>,
+        parent_ino: InodeId,
+        child_ino: InodeId,
+    ) -> Option<String> {
+        let hint = self
+            .path_hint
+            .lock()
+            .clone()
+            .or_else(|| self.mount_fs.lookup_inode_path_hint(child_ino))?;
+        if hint.parent_ino != parent_ino {
+            return None;
+        }
+        let child = parent.do_find(&hint.name).ok()?;
+        let found_ino = child.metadata().map(|m| m.inode_id).ok();
+        if found_ino == Some(child_ino) {
+            Some(hint.name)
+        } else {
+            None
+        }
     }
 
     /// 判断当前 inode 是否为挂载点根
@@ -223,11 +271,13 @@ impl MountFSInode {
     fn do_find(&self, name: &str) -> Result<Arc<MountFSInode>, SyscallErr> {
         // Shortcut: skip dentry cache for dynamic filesystems (procfs)
         if self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
+            let parent_ino = self.inner_inode.metadata()?.inode_id;
             let inner_inode = self.inner_inode.find(name)?;
             let result = MountFSInode::overlaid_inode(MountFSInode::new(
                 inner_inode,
                 self.mount_fs.clone(),
             ));
+            result.remember_path_hint(parent_ino, name);
             counters::MFSI_FROM_FIND.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             return Ok(result);
         }
@@ -240,6 +290,7 @@ impl MountFSInode {
 
         // Check dentry cache — returns covered dentry
         if let Some(cached) = self.mount_fs.dentry_cache.lock().get(&key) {
+            cached.remember_path_hint(parent_ino, name);
             return Ok(MountFSInode::overlaid_inode(cached));
         }
 
@@ -255,6 +306,7 @@ impl MountFSInode {
 
         // Create covered dentry (before mount-point overlay)
         let covered = MountFSInode::new(inner_inode, self.mount_fs.clone());
+        covered.remember_path_hint(parent_ino, name);
         counters::MFSI_FROM_FIND.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
         // Insert into cache — only if directory was not modified concurrently
@@ -446,8 +498,12 @@ impl IndexNode for MountFSInode {
     ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
         self.ensure_mount_writable()?;
         self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
+        let parent_ino = self.inner_inode.metadata().ok().map(|m| m.inode_id);
         let inner_inode = self.inner_inode.create(name, file_type, mode)?;
         let wrapper = MountFSInode::new(inner_inode, self.mount_fs.clone());
+        if let Some(parent_ino) = parent_ino {
+            wrapper.remember_path_hint(parent_ino, name);
+        }
         counters::MFSI_FROM_CREATE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         if !self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
             if let Ok(parent_md) = self.inner_inode.metadata() {
@@ -474,8 +530,12 @@ impl IndexNode for MountFSInode {
     ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
         self.ensure_mount_writable()?;
         self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
+        let parent_ino = self.inner_inode.metadata().ok().map(|m| m.inode_id);
         let inner_inode = self.inner_inode.create_with_data(name, file_type, mode, data)?;
         let wrapper = MountFSInode::new(inner_inode, self.mount_fs.clone());
+        if let Some(parent_ino) = parent_ino {
+            wrapper.remember_path_hint(parent_ino, name);
+        }
         counters::MFSI_FROM_CREATE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         if !self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
             if let Ok(parent_md) = self.inner_inode.metadata() {
@@ -494,8 +554,12 @@ impl IndexNode for MountFSInode {
     fn symlink(&self, name: &str, target: &str) -> Result<Arc<dyn IndexNode>, SyscallErr> {
         self.ensure_mount_writable()?;
         self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
+        let parent_ino = self.inner_inode.metadata().ok().map(|m| m.inode_id);
         let inner_inode = self.inner_inode.symlink(name, target)?;
         let wrapper = MountFSInode::new(inner_inode, self.mount_fs.clone());
+        if let Some(parent_ino) = parent_ino {
+            wrapper.remember_path_hint(parent_ino, name);
+        }
         counters::MFSI_FROM_CREATE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         if !self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
             if let Ok(parent_md) = self.inner_inode.metadata() {
@@ -526,6 +590,7 @@ impl IndexNode for MountFSInode {
                     self.inner_inode.find(name).unwrap_or(other),
                     self.mount_fs.clone(),
                 );
+                linked.remember_path_hint(parent_md.inode_id, name);
                 let (_, evicted) = self.mount_fs.dentry_cache.lock()
                     .insert_or_get(key, linked);
                 drop(evicted);
@@ -543,9 +608,27 @@ impl IndexNode for MountFSInode {
     ) -> Result<(), SyscallErr> {
         self.ensure_mount_writable()?;
         self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
+        let renamed_ino = self
+            .inner_inode
+            .find(old_name)
+            .ok()
+            .and_then(|inode| inode.metadata().ok().map(|m| m.inode_id));
 
         let new_parent = MountFSInode::unwrap_inode(new_parent);
         self.inner_inode.rename(old_name, &new_parent, new_name, flags)?;
+        if let Some(child_ino) = renamed_ino {
+            if let Ok(new_parent_md) = new_parent.metadata() {
+                self.mount_fs.remember_inode_path_hint(
+                    child_ino,
+                    PathHint {
+                        parent_ino: new_parent_md.inode_id,
+                        name: String::from(new_name),
+                    },
+                );
+            } else {
+                self.mount_fs.remove_inode_path_hint(child_ino);
+            }
+        }
 
         if !self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
             if let Ok(parent_md) = self.inner_inode.metadata() {
@@ -579,12 +662,15 @@ impl IndexNode for MountFSInode {
         self.ensure_mount_writable()?;
         self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
         // 检查是否为挂载点
-        if let Ok(inode) = self.inner_inode.find(name) {
+        let child_inode_id = if let Ok(inode) = self.inner_inode.find(name) {
             let inode_id = inode.metadata()?.inode_id;
             if self.mount_fs.mountpoints.lock().contains_key(&inode_id) {
                 return Err(SyscallErr::EBUSY);
             }
-        }
+            Some(inode_id)
+        } else {
+            None
+        };
         self.inner_inode.unlink(name)?;
         if !self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
             if let Ok(parent_md) = self.inner_inode.metadata() {
@@ -598,6 +684,9 @@ impl IndexNode for MountFSInode {
                 };
                 drop(removed);
             }
+        }
+        if let Some(child_ino) = child_inode_id {
+            self.mount_fs.remove_inode_path_hint(child_ino);
         }
         Ok(())
     }
@@ -616,6 +705,9 @@ impl IndexNode for MountFSInode {
             None
         };
         self.inner_inode.rmdir(name)?;
+        if let Some(child_ino) = child_inode_id {
+            self.mount_fs.remove_inode_path_hint(child_ino);
+        }
         if !self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
             if let Ok(parent_md) = self.inner_inode.metadata() {
                 let key = super::dentry_cache::DentryKey {
@@ -646,6 +738,23 @@ impl IndexNode for MountFSInode {
     fn set_metadata(&self, metadata: &super::Metadata) -> Result<(), SyscallErr> {
         self.ensure_mount_writable()?;
         self.inner_inode.set_metadata(metadata)
+    }
+
+    fn get_entry_name(&self, ino: InodeId) -> Result<String, SyscallErr> {
+        if !self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
+            if let Ok(parent_md) = self.inner_inode.metadata() {
+                let entries = {
+                    let cache = self.mount_fs.dentry_cache.lock();
+                    cache.entries_for_parent(parent_md.inode_id)
+                };
+                for (name, node) in entries {
+                    if node.metadata().map(|m| m.inode_id).ok() == Some(ino) {
+                        return Ok(name);
+                    }
+                }
+            }
+        }
+        self.inner_inode.get_entry_name(ino)
     }
 
     fn resize(&self, len: usize) -> Result<(), SyscallErr> {
@@ -745,7 +854,11 @@ impl IndexNode for MountFSInode {
         let mut path_parts: Vec<String> = Vec::new();
 
         loop {
-            if current.is_mountpoint_root() && current.mount_fs.self_mountpoint().is_none() {
+            if current.is_mountpoint_root() {
+                if let Some(mountpoint) = current.mount_fs.self_mountpoint() {
+                    current = mountpoint;
+                    continue;
+                }
                 break;
             }
 
@@ -755,10 +868,15 @@ impl IndexNode for MountFSInode {
             }
 
             // 在 parent 中查找 current 的名称
-            let name = parent
-                .inner_inode
-                .get_entry_name(current.metadata()?.inode_id)
-                .unwrap_or_else(|_| alloc::string::String::from("?"));
+            let child_ino = current.metadata()?.inode_id;
+            let parent_ino = parent.metadata()?.inode_id;
+            let name = if let Some(name) =
+                current.valid_path_hint_name(&parent, parent_ino, child_ino)
+            {
+                name
+            } else {
+                parent.get_entry_name(child_ino)?
+            };
             path_parts.push(name);
 
             if path_parts.len() > 64 {
@@ -820,6 +938,8 @@ pub struct MountFS {
     root_inner_inode: Option<Arc<dyn IndexNode>>,
     /// 子挂载点表: parent_inode_id → mounted fs
     pub mountpoints: Mutex<BTreeMap<InodeId, Arc<MountFS>>>,
+    /// Bounded inode → parent/name hints for physical path reconstruction.
+    path_hints: Mutex<BTreeMap<InodeId, PathHint>>,
     /// 自身挂载到父文件系统上的 inode（如果是根则 None）。
     /// DragonOS 存 Arc 而非 Weak——循环由 umount 时 take() 打破。
     self_mountpoint: Mutex<Option<Arc<MountFSInode>>>,
@@ -852,6 +972,7 @@ impl MountFS {
             root_inner_inode: None,
             inner_filesystem,
             mountpoints: Mutex::new(BTreeMap::new()),
+            path_hints: Mutex::new(BTreeMap::new()),
             self_mountpoint: Mutex::new(None),
             mount_flags: Mutex::new(mount_flags),
             mount_source: Mutex::new(None),
@@ -876,6 +997,7 @@ impl MountFS {
             root_inner_inode: Some(root_inner_inode),
             inner_filesystem,
             mountpoints: Mutex::new(BTreeMap::new()),
+            path_hints: Mutex::new(BTreeMap::new()),
             self_mountpoint: Mutex::new(None),
             mount_flags: Mutex::new(mount_flags),
             mount_source: Mutex::new(None),
@@ -887,6 +1009,24 @@ impl MountFS {
             no_dentry_cache: AtomicBool::new(false),
             umount_retry_count: AtomicU32::new(0),
         })
+    }
+
+    fn remember_inode_path_hint(&self, child_ino: InodeId, hint: PathHint) {
+        let mut hints = self.path_hints.lock();
+        if hints.len() >= PATH_HINT_LIMIT && !hints.contains_key(&child_ino) {
+            if let Some(old_ino) = hints.keys().next().cloned() {
+                hints.remove(&old_ino);
+            }
+        }
+        hints.insert(child_ino, hint);
+    }
+
+    fn lookup_inode_path_hint(&self, child_ino: InodeId) -> Option<PathHint> {
+        self.path_hints.lock().get(&child_ino).cloned()
+    }
+
+    fn remove_inode_path_hint(&self, child_ino: InodeId) {
+        self.path_hints.lock().remove(&child_ino);
     }
 
     /// 获取挂载点根 inode（穿过子挂载表找最底层）
@@ -926,10 +1066,10 @@ impl MountFS {
     }
 
     /// Replace any existing mount at inode_id, or add if none exists.
-    /// Old mount is detached from peer/slave registries and MOUNT_LIST.
+    /// Old mount is fully detached so its parent backref and cached children
+    /// cannot keep the covered subtree alive after overmount.
     /// Returns the old mount (None if no existing mount).
     pub fn overmount_and_add(&self, inode_id: InodeId, mount_fs: Arc<MountFS>) -> Option<Arc<MountFS>> {
-        use super::propagation;
         let mut mps = self.mountpoints.lock();
         let old = mps.remove(&inode_id);
         if let Some(ref old_mfs) = old {
@@ -1179,6 +1319,14 @@ impl MountFS {
         if self.self_mountpoint.lock().is_none() {
             return Err(SyscallErr::EINVAL);
         }
+
+        let propagation_target = if do_propagate {
+            self.self_mountpoint.lock().clone().and_then(|mp| {
+                mp.inner_inode.metadata().ok().map(|md| (mp.mount_fs.clone(), md.inode_id))
+            })
+        } else {
+            None
+        };
 
         let children: Vec<Arc<MountFS>> = {
             let mountpoints = self.mountpoints.lock();

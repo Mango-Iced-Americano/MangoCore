@@ -42,7 +42,10 @@ pub use processor::{
     check_oom_kill, current_syscall_name, current_task, current_trap_cx, current_user_token,
     run_tasks, schedule, set_current_syscall_id, take_current_task,
 };
-pub use process::{is_executable_inode_busy, ProcessControlBlock, ProcessState};
+pub use process::{
+    is_executable_inode_busy, is_writable_inode_busy, register_writable_inode,
+    unregister_writable_inode, ProcessControlBlock, ProcessState,
+};
 pub use process_manager::ProcessManager;
 pub use registry::{
     all_processes, find_process_by_pid, find_processes_by_pgid, find_task_by_pid_tid,
@@ -51,7 +54,6 @@ pub use registry::{
 pub use signal::*;
 pub use sleep::{sleep_relative_interruptible, sleep_until_interruptible};
 pub use task::{
-    FsStatus, PosixTimer, RobustList, Rusage, TaskControlBlock, TaskStatus,
     UtsNamespace,
 };
 pub use net_namespace::{INIT_NET_NAMESPACE, NetNamespace};
@@ -80,6 +82,7 @@ pub fn suspend_current_and_run_next() {
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
     // Change status to Ready
     task_inner.task_status = TaskStatus::Ready;
+    task_inner.update_process_times_schedule_out();
     drop(task_inner);
     // ---- release current PCB lock
 
@@ -98,6 +101,7 @@ pub(crate) fn block_current_and_run_next() {
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
     // Change status to Interruptible
     task_inner.task_status = TaskStatus::Interruptible;
+    task_inner.update_process_times_schedule_out();
     drop(task_inner);
     // ---- release current PCB lock
 
@@ -118,6 +122,7 @@ pub(crate) fn block_current_and_run_next_checked(
     let mut task_inner = task.acquire_inner_lock();
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
     task_inner.task_status = TaskStatus::Interruptible;
+    task_inner.update_process_times_schedule_out();
     drop(task_inner);
 
     sleep_interruptible(task.clone());
@@ -144,6 +149,7 @@ pub(crate) fn block_current_and_run_next_with_lock<T>(lock: MutexGuard<'_, T>) {
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
 
     task_inner.task_status = TaskStatus::Interruptible;
+    task_inner.update_process_times_schedule_out();
 
     drop(task_inner);
     // ---- release current PCB lock
@@ -166,6 +172,7 @@ pub(crate) fn block_current_and_run_next_with_lock_checked<T>(
     let mut task_inner = task.acquire_inner_lock();
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
     task_inner.task_status = TaskStatus::Interruptible;
+    task_inner.update_process_times_schedule_out();
     drop(task_inner);
 
     sleep_interruptible(task.clone());
@@ -187,6 +194,8 @@ fn do_exit(task: Arc<TaskControlBlock>, exit_code: u32) {
     // （PCB zombie、父进程 wait 唤醒、子进程收养）从未被触发。
     task.process.remove_thread(task.tid.0);
     if task.exit_thread_resources(exit_code) && task.process.live_thread_count() == 0 {
+        crate::syscall::fs::release_fcntl_locks_for_pid(task.pid());
+        crate::syscall::shm_detach_process(task.pid());
         task.process.finish_exit(&task, exit_code);
     }
 }

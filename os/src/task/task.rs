@@ -28,6 +28,14 @@ use spin::{Mutex, MutexGuard};
 const TASK_CAP_FULL_SET: u64 = (1u64 << 41) - 1;
 const DEFAULT_TIMER_SLACK_NS: usize = 50_000;
 
+#[derive(Clone, Copy, Debug)]
+pub struct SeccompFilterInsn {
+    pub code: u16,
+    pub jt: u8,
+    pub jf: u8,
+    pub k: u32,
+}
+
 fn default_task_comm() -> [u8; 16] {
     let mut comm = [0u8; 16];
     comm[..8].copy_from_slice(b"initproc");
@@ -112,6 +120,8 @@ pub struct TaskControlBlockInner {
     pub sigmask_to_restore: Option<Signals>,
     /// 待处理信号
     pub sigpending: SignalQueue,
+    /// Signal set that sigwaitinfo/sigtimedwait is currently waiting for.
+    pub signal_wait_mask: Signals,
     /// 备用信号栈，每线程独立
     pub signal_stack: SignalStack,
     /// 陷阱上下文的物理页号
@@ -195,6 +205,15 @@ pub struct TaskControlBlockInner {
     pub cap_permitted: u64,
     pub cap_inheritable: u64,
     pub cap_bounding: u64,
+    /// prctl(NO_NEW_PRIVS/THP_DISABLE/securebits/CAP_AMBIENT) ABI-visible state.
+    pub no_new_privs: bool,
+    pub thp_disabled: bool,
+    pub securebits: usize,
+    pub cap_ambient: u64,
+    /// Minimal seccomp ABI state. The stored filter is copied from user memory
+    /// at PR_SET_SECCOMP time so forked children can inherit it safely.
+    pub seccomp_mode: usize,
+    pub seccomp_filter: Vec<SeccompFilterInsn>,
     /// 用于清理子进程的线程ID
     pub clear_child_tid: usize,
     /// 鲁棒列表，用于管理鲁棒互斥锁
@@ -223,9 +242,12 @@ pub struct PosixTimer {
     pub value: TimeSpec,
     pub deadline: Option<TimeSpec>,
     pub generation: usize,
+    overrun: usize,
 }
 
 impl PosixTimer {
+    const OVERRUN_MAX: usize = i32::MAX as usize;
+
     pub fn new(clock_id: usize, signal: Signals) -> Self {
         Self {
             clock_id,
@@ -234,7 +256,23 @@ impl PosixTimer {
             value: TimeSpec::new(),
             deadline: None,
             generation: 0,
+            overrun: 0,
         }
+    }
+
+    pub fn reset_overrun(&mut self) {
+        self.overrun = 0;
+    }
+
+    pub fn add_overrun(&mut self, count: usize) {
+        self.overrun = self
+            .overrun
+            .saturating_add(count)
+            .min(Self::OVERRUN_MAX);
+    }
+
+    pub fn overrun(&self) -> usize {
+        self.overrun
     }
 }
 
@@ -404,6 +442,10 @@ impl TaskControlBlockInner {
     pub fn add_signal(&mut self, signal: Signals) {
         let _ = self.sigpending.enqueue_signal(signal, 0);
     }
+    /// 添加带 si_code 的信号，用于硬件异常转化出的同步 fault signal。
+    pub fn add_signal_with_code(&mut self, signal: Signals, si_code: u32) {
+        let _ = self.sigpending.enqueue_signal(signal, si_code as usize);
+    }
     /// 在进入陷阱时更新进程时间
     pub fn update_process_times_enter_trap(&mut self) {
         // 获取当前时间
@@ -424,15 +466,31 @@ impl TaskControlBlockInner {
         self.enforce_cpu_rlimit();
     }
     /// 在离开陷阱时更新进程时间
-    pub fn update_process_times_leave_trap(&mut self, trap_cause: TrapImpl) {
+    pub fn update_process_times_leave_trap(&mut self, _trap_cause: TrapImpl) {
         let now = TimeVal::now();
-        if trap_cause.is_timer() {
-            let diff = now - self.clock.last_enter_s_mode;
-            self.rusage.ru_stime = self.rusage.ru_stime + diff;
-            self.update_itimer_prof_if_exists(diff);
-            self.enforce_cpu_rlimit();
-        }
+        self.account_system_time_until(now);
         self.clock.last_enter_u_mode = now;
+    }
+
+    /// 任务在内核态主动让出 CPU 前，先结算本次内核态运行时间。
+    pub fn update_process_times_schedule_out(&mut self) {
+        self.account_system_time_until(TimeVal::now());
+    }
+
+    /// 任务被重新调度进来后，重置内核态计时起点，避免把离 CPU 时间算入 stime。
+    pub fn update_process_times_schedule_in(&mut self) {
+        self.clock.last_enter_s_mode = TimeVal::now();
+    }
+
+    fn account_system_time_until(&mut self, now: TimeVal) {
+        let diff = now - self.clock.last_enter_s_mode;
+        if diff.is_zero() {
+            return;
+        }
+        self.rusage.ru_stime = self.rusage.ru_stime + diff;
+        self.update_itimer_prof_if_exists(diff);
+        self.enforce_cpu_rlimit();
+        self.clock.last_enter_s_mode = now;
     }
 
     fn enforce_cpu_rlimit(&mut self) {
@@ -569,6 +627,7 @@ impl TaskControlBlock {
             if inner.task_status == TaskStatus::Zombie {
                 return false;
             }
+            inner.update_process_times_schedule_out();
             inner.task_status = TaskStatus::Zombie;
             let clear_child_tid = inner.clear_child_tid;
             inner.clear_child_tid = 0;
@@ -736,6 +795,7 @@ impl TaskControlBlock {
                 sigmask: Signals::empty(),
                 sigmask_to_restore: None,
                 sigpending: SignalQueue::empty(),
+                signal_wait_mask: Signals::empty(),
                 signal_stack: SignalStack::disabled(),
                 trap_cx_ppn,
                 task_cx: TaskContext::goto_trap_return(kstack_top),
@@ -789,6 +849,12 @@ impl TaskControlBlock {
                 cap_permitted: TASK_CAP_FULL_SET,
                 cap_inheritable: 0,
                 cap_bounding: TASK_CAP_FULL_SET,
+                no_new_privs: false,
+                thp_disabled: false,
+                securebits: 0,
+                cap_ambient: 0,
+                seccomp_mode: 0,
+                seccomp_filter: Vec::new(),
                 clear_child_tid: 0,
                 robust_list: RobustList::default(),
                 rusage: Rusage::new(),
@@ -933,7 +999,11 @@ impl TaskControlBlock {
         // 更新可执行文件描述符
         self.process.replace_exe(elf);
         // 清理资源 — 关闭所有 CLOEXEC 文件描述符
-        self.process.files().lock().close_cloexec();
+        {
+            let files_ref = self.process.files();
+            let mut fd_table = files_ref.lock();
+            crate::syscall::fs::close_cloexec_and_release_fcntl_locks(self.pid(), &mut fd_table);
+        }
         // 替换内存映射
         self.process.replace_vm(memory_set);
         // 清空信号处理函数表
@@ -1152,6 +1222,7 @@ impl TaskControlBlock {
             inner: Mutex::new(TaskControlBlockInner {
                 // clone
                 sigpending: SignalQueue::empty(),
+                signal_wait_mask: Signals::empty(),
                 signal_stack: if share_vm {
                     SignalStack::disabled()
                 } else {
@@ -1223,6 +1294,12 @@ impl TaskControlBlock {
                 cap_permitted: parent_inner.cap_permitted,
                 cap_inheritable: parent_inner.cap_inheritable,
                 cap_bounding: parent_inner.cap_bounding,
+                no_new_privs: parent_inner.no_new_privs,
+                thp_disabled: parent_inner.thp_disabled,
+                securebits: parent_inner.securebits,
+                cap_ambient: parent_inner.cap_ambient,
+                seccomp_mode: parent_inner.seccomp_mode,
+                seccomp_filter: parent_inner.seccomp_filter.clone(),
                 pending_oom_kill: false,
             }),
         });

@@ -619,6 +619,7 @@ impl WaitQueue {
         }
         let mut tasks_to_wake = Vec::new();
         let mut remaining = VecDeque::new();
+        let mut wake_count = 0usize;
         // 遍历全部条目以自动 compact 失效 Weak，但只唤醒 ≤limit 个任务。
         while let Some(task) = self.inner.pop_front() {
             match task.upgrade() {
@@ -626,16 +627,26 @@ impl WaitQueue {
                     let mut inner = task.acquire_inner_lock();
                     match inner.task_status {
                         super::TaskStatus::Interruptible => {
-                            if tasks_to_wake.len() < limit {
+                            if wake_count < limit {
                                 inner.task_status = super::task::TaskStatus::Ready;
                                 drop(inner);
+                                wake_count += 1;
                                 tasks_to_wake.push(task);
                             } else {
                                 drop(inner);
                                 remaining.push_back(Arc::downgrade(&task));
                             }
                         }
-                        // 非 Interruptible 状态：直接丢弃（不应在等待队列中）
+                        super::TaskStatus::Ready => {
+                            if wake_count < limit {
+                                wake_count += 1;
+                                drop(inner);
+                            } else {
+                                drop(inner);
+                                remaining.push_back(Arc::downgrade(&task));
+                            }
+                        }
+                        // 其他状态：直接丢弃（Zombie/Running 不应继续停留在等待队列中）
                         _ => drop(inner),
                     }
                 }
@@ -644,7 +655,8 @@ impl WaitQueue {
             }
         }
         self.inner = remaining;
-        enqueue_ready_batch(tasks_to_wake)
+        enqueue_ready_batch(tasks_to_wake);
+        wake_count
     }
     pub fn prepare_to_wait(&mut self, task: Weak<TaskControlBlock>) {
         match task.upgrade() {
@@ -1294,7 +1306,9 @@ impl KernelTimerQueue {
                                 next_real_timer = Some((deadline, next_generation));
                             }
                         }
-                        if inner.task_status == super::TaskStatus::Interruptible {
+                        if signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, true)
+                            && inner.task_status == super::TaskStatus::Interruptible
+                        {
                             inner.task_status = super::TaskStatus::Ready;
                             should_wake = true;
                         }
@@ -1325,6 +1339,8 @@ impl KernelTimerQueue {
                     let mut next_timer = None;
                     {
                         let mut inner = task.acquire_inner_lock();
+                        let signal_pending =
+                            !signal.is_empty() && inner.sigpending.contains(signal);
                         let Some(Some(timer_state)) = inner.posix_timers.get_mut(timer_id) else {
                             return;
                         };
@@ -1337,7 +1353,19 @@ impl KernelTimerQueue {
                             timer_state.value = TimeSpec::new();
                             timer_state.deadline = None;
                         } else {
-                            let deadline = now + timer_state.interval;
+                            let interval_ns = timer_state.interval.to_ns().max(1);
+                            let deadline_ns = timer.deadline.to_ns();
+                            let elapsed_ns = now.to_ns().saturating_sub(deadline_ns);
+                            let expirations = 1usize.saturating_add(elapsed_ns / interval_ns);
+                            let missed = if signal_pending {
+                                expirations
+                            } else {
+                                expirations.saturating_sub(1)
+                            };
+                            timer_state.add_overrun(missed);
+                            let next_ns =
+                                deadline_ns.saturating_add(expirations.saturating_mul(interval_ns));
+                            let deadline = TimeSpec::from_ns(next_ns);
                             timer_state.generation = timer_state.generation.wrapping_add(1);
                             timer_state.value = timer_state.interval;
                             timer_state.deadline = Some(deadline);
@@ -1347,7 +1375,10 @@ impl KernelTimerQueue {
                             let _ = inner
                                 .sigpending
                                 .enqueue_signal(signal, SigInfo::SI_TIMER as usize);
-                            if inner.task_status == super::TaskStatus::Interruptible {
+                            if signal
+                                .wakes_interruptible(inner.sigmask, inner.signal_wait_mask, true)
+                                && inner.task_status == super::TaskStatus::Interruptible
+                            {
                                 inner.task_status = super::TaskStatus::Ready;
                                 should_wake = true;
                             }
@@ -1507,6 +1538,8 @@ pub fn do_wake_expired() {
     if tick % 64 == 0 && ktq.len() > KernelTimerQueue::MAX_TIMERS / 2 {
         ktq.compact();
     }
+    drop(ktq);
+    crate::fs::timerfd::wake_expired_timerfds(now);
 }
 
 /// 获取内核计时器队列长度（诊断用，尝试获取锁）

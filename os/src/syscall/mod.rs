@@ -9,14 +9,28 @@ mod syscall_id;
 pub mod utils;
 
 use crate::fs::eventfd::sys_eventfd2;
-use crate::fs::eventpoll::{sys_epoll_create1, sys_epoll_ctl, sys_epoll_pwait};
+use crate::fs::eventpoll::{
+    sys_epoll_create1, sys_epoll_ctl, sys_epoll_pwait, sys_epoll_pwait2,
+};
 use crate::fs::iov::IOVec;
+use crate::fs::timerfd::{
+    sys_timerfd_create, sys_timerfd_gettime, sys_timerfd_settime, TimerFdSpec,
+};
 use crate::net::syscall::*;
 use core::convert::TryFrom;
 use flock::*;
 use fs::*;
 use log::{error, info};
-pub use process::CloneFlags;
+pub use process::{
+    CloneFlags, posix_mq_msg_default, posix_mq_msg_max, posix_mq_msgsize_default,
+    posix_mq_msgsize_max, posix_mq_queues_max, set_posix_mq_msg_default,
+    set_posix_mq_msg_max, set_posix_mq_msgsize_default, set_posix_mq_msgsize_max,
+    set_posix_mq_queues_max, set_sysv_msg_next_id, set_sysv_msgmax, set_sysv_msgmnb,
+    set_sysv_msgmni, set_sysv_sem_limits, shm_detach_process, sysv_msg_next_id,
+    sysv_msg_proc_snapshot, sysv_msgmax, sysv_msgmnb, sysv_msgmni, sysv_sem_limits,
+    sysv_sem_proc_snapshot, sysv_shmall, sysv_shm_proc_snapshot, sysv_shmmax,
+    sysv_shmmni,
+};
 use process::*;
 use syscall_id::*;
 pub fn syscall_name(id: usize) -> &'static str {
@@ -27,6 +41,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_EPOLL_CREATE1 => "epoll_create1",
         SYSCALL_EPOLL_CTL => "epoll_ctl",
         SYSCALL_EPOLL_PWAIT => "epoll_pwait",
+        SYSCALL_EPOLL_PWAIT2 => "epoll_pwait2",
         SYSCALL_OPEN => "open",
         SYSCALL_GET_TIME => "get_time",
         SYSCALL_GETCWD => "getcwd",
@@ -52,6 +67,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_FCHOWN => "fchown",
         SYSCALL_OPENAT => "openat",
         SYSCALL_CLOSE => "close",
+        SYSCALL_VHANGUP => "vhangup",
         SYSCALL_CLOSE_RANGE => "close_range",
         SYSCALL_PIPE2 => "pipe2",
         SYSCALL_GETDENTS64 => "getdents64",
@@ -71,6 +87,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_PSELECT6 => "pselect6",
         SYSCALL_PPOLL => "ppoll",
         SYSCALL_SIGNALFD4 => "signalfd4",
+        SYSCALL_VMSPLICE => "vmsplice",
         SYSCALL_READLINKAT => "readlinkat",
         SYSCALL_FSTATAT => "fstatat",
         SYSCALL_FSTAT => "fstat",
@@ -82,6 +99,9 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_FALLOCATE => "fallocate",
         SYSCALL_FSYNC => "fsync",
         SYSCALL_FDATASYNC => "fdatasync",
+        SYSCALL_TIMERFD_CREATE => "timerfd_create",
+        SYSCALL_TIMERFD_SETTIME => "timerfd_settime",
+        SYSCALL_TIMERFD_GETTIME => "timerfd_gettime",
         SYSCALL_UTIMENSAT => "utimensat",
         SYSCALL_CAPGET => "capget",
         SYSCALL_CAPSET => "capset",
@@ -92,6 +112,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_SET_TID_ADDRESS => "set_tid_address",
         SYSCALL_UNSHARE => "unshare",
         SYSCALL_FUTEX => "futex",
+        SYSCALL_FUTEX_WAITV => "futex_waitv",
         SYSCALL_SET_ROBUST_LIST => "set_robust_list",
         SYSCALL_GET_ROBUST_LIST => "get_robust_list",
         SYSCALL_NANOSLEEP => "nanosleep",
@@ -162,6 +183,12 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_SETPRIORITY => "setpriority",
         SYSCALL_GETPRIORITY => "getpriority",
         SYSCALL_SYSINFO => "sysinfo",
+        SYSCALL_MQ_OPEN => "mq_open",
+        SYSCALL_MQ_UNLINK => "mq_unlink",
+        SYSCALL_MQ_TIMEDSEND => "mq_timedsend",
+        SYSCALL_MQ_TIMEDRECEIVE => "mq_timedreceive",
+        SYSCALL_MQ_NOTIFY => "mq_notify",
+        SYSCALL_MQ_GETSETATTR => "mq_getsetattr",
         SYSCALL_MSGGET => "msgget",
         SYSCALL_MSGCTL => "msgctl",
         SYSCALL_MSGRCV => "msgrcv",
@@ -194,6 +221,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_MREMAP => "mremap",
         SYSCALL_CLONE => "clone",
         SYSCALL_EXECVE => "execve",
+        SYSCALL_EXECVEAT => "execveat",
         SYSCALL_MMAP => "mmap",
         SYSCALL_MPROTECT => "mprotect",
         SYSCALL_MSYNC => "msync",
@@ -245,7 +273,7 @@ use crate::{
     fs::poll::FdSet,
     mm::{translated_byte_buffer, UserAccess, UserBuffer},
     syscall::errno::Errno,
-    task::{current_user_token, Rusage},
+    task::{current_user_token, exit_current_and_run_next, exit_group_and_run_next, Rusage},
     timer::{ITimerVal, TimeSpec, TimeVal, Times},
 };
 
@@ -285,6 +313,17 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[5],
         );
     }
+    match seccomp_action_for_syscall(syscall_id) {
+        SeccompSyscallAction::Allow => {}
+        SeccompSyscallAction::KillThread(signal) => {
+            let signum = signal.to_signum().unwrap() as u32;
+            exit_current_and_run_next(signum);
+        }
+        SeccompSyscallAction::KillProcess(signal) => {
+            let signum = signal.to_signum().unwrap() as u32;
+            exit_group_and_run_next(signum);
+        }
+    }
     let ret = match syscall_id {
         SYSCALL_GETCWD => sys_getcwd(args[0], args[1]),
         SYSCALL_DUP => sys_dup(args[0]),
@@ -302,6 +341,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[1] as *mut crate::fs::eventpoll::EpollUserEvent,
             args[2] as isize,
             args[3] as isize,
+            args[4] as *const crate::task::signal::Signals,
+        ),
+        SYSCALL_EPOLL_PWAIT2 => sys_epoll_pwait2(
+            args[0],
+            args[1] as *mut crate::fs::eventpoll::EpollUserEvent,
+            args[2] as isize,
+            args[3] as *const TimeSpec,
             args[4] as *const crate::task::signal::Signals,
         ),
         SYSCALL_FCNTL => sys_fcntl(args[0], args[1] as u32, args[2]),
@@ -344,6 +390,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[3] as u32,
         ),
         SYSCALL_CLOSE => sys_close(args[0]),
+        SYSCALL_VHANGUP => sys_vhangup(),
         SYSCALL_CLOSE_RANGE => sys_close_range(args[0], args[1], args[2] as u32),
         SYSCALL_PIPE2 => sys_pipe2(args[0], args[1] as u32),
         SYSCALL_GETDENTS64 => sys_getdents64(args[0], args[1] as *mut u8, args[2]),
@@ -375,6 +422,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[4],
             args[5] as u32,
         ),
+        SYSCALL_VMSPLICE => sys_vmsplice(args[0], args[1], args[2], args[3] as u32),
         SYSCALL_READLINKAT => {
             sys_readlinkat(args[0], args[1] as *const u8, args[2] as *mut u8, args[3])
         }
@@ -393,6 +441,14 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SYNC => sys_sync(),
         SYSCALL_FSYNC => sys_fsync(args[0]),
         SYSCALL_FDATASYNC => sys_fdatasync(args[0]),
+        SYSCALL_TIMERFD_CREATE => sys_timerfd_create(args[0], args[1] as u32),
+        SYSCALL_TIMERFD_SETTIME => sys_timerfd_settime(
+            args[0],
+            args[1] as u32,
+            args[2] as *const TimerFdSpec,
+            args[3] as *mut TimerFdSpec,
+        ),
+        SYSCALL_TIMERFD_GETTIME => sys_timerfd_gettime(args[0], args[1] as *mut TimerFdSpec),
         SYSCALL_UTIMENSAT => sys_utimensat(
             args[0],
             args[1] as *const u8,
@@ -511,6 +567,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[1] as *const *const u8,
             args[2] as *const *const u8,
         ),
+        SYSCALL_EXECVEAT => sys_execveat(
+            args[0],
+            args[1] as *const u8,
+            args[2] as *const *const u8,
+            args[3] as *const *const u8,
+            args[4] as u32,
+        ),
         SYSCALL_WAIT4 => sys_wait4(
             args[0] as isize,
             args[1] as *mut u32,
@@ -551,6 +614,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[4] as *mut u32,
             args[5] as u32,
         ),
+        SYSCALL_FUTEX_WAITV => sys_futex_waitv(
+            args[0] as *const FutexWaitV,
+            args[1],
+            args[2] as u32,
+            args[3] as *const TimeSpec,
+            args[4],
+        ),
         SYSCALL_SET_ROBUST_LIST => sys_set_robust_list(args[0], args[1]),
         SYSCALL_GET_ROBUST_LIST => {
             sys_get_robust_list(args[0] as u32, args[1] as *mut usize, args[2] as *mut usize)
@@ -579,6 +649,16 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_GETPRIORITY => sys_getpriority(args[0], args[1]),
         SYSCALL_GETTID => sys_gettid(),
         SYSCALL_SYSINFO => sys_sysinfo(args[0] as *mut Sysinfo),
+        SYSCALL_MQ_OPEN => sys_mq_open(args[0] as *const u8, args[1] as u32, args[2] as u32, args[3]),
+        SYSCALL_MQ_UNLINK => sys_mq_unlink(args[0] as *const u8),
+        SYSCALL_MQ_TIMEDSEND => {
+            sys_mq_timedsend(args[0], args[1], args[2], args[3] as u32, args[4])
+        }
+        SYSCALL_MQ_TIMEDRECEIVE => {
+            sys_mq_timedreceive(args[0], args[1], args[2], args[3] as *mut u32, args[4])
+        }
+        SYSCALL_MQ_NOTIFY => sys_mq_notify(args[0], args[1]),
+        SYSCALL_MQ_GETSETATTR => sys_mq_getsetattr(args[0], args[1], args[2]),
         SYSCALL_MSGGET => sys_msgget(args[0] as isize, args[1]),
         SYSCALL_MSGCTL => sys_msgctl(args[0] as i32, args[1], args[2]),
         SYSCALL_MSGRCV => sys_msgrcv(args[0] as i32, args[1], args[2], args[3] as isize, args[4]),

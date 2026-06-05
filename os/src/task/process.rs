@@ -57,7 +57,7 @@ pub struct ProcessInner {
     /// 可执行文件描述符（新 VFS）。
     exe: Arc<Mutex<vfs::File>>,
     /// 当前可执行文件的稳定 key，用于 open(O_TRUNC/O_WRONLY) 返回 ETXTBSY。
-    exec_key: Option<ExecInodeKey>,
+    exec_key: Option<InodeBusyKey>,
     /// 可执行文件路径（用于 /proc/self/exe）。
     exe_path: String,
     /// 文件描述符表（新 VFS）。
@@ -88,6 +88,9 @@ pub struct ProcessInner {
     pub parent: Option<Weak<ProcessControlBlock>>,
     /// 进程创建后是否已经成功执行过 execve。
     pub has_execed: bool,
+    /// PR_SET_CHILD_SUBREAPER 标记。Linux 语义是不被 fork/clone 继承，
+    /// 但会跨 execve 保留。
+    pub child_subreaper: bool,
     /// 子进程。
     pub children: Vec<Arc<ProcessControlBlock>>,
     /// 进程级生命周期状态。
@@ -124,25 +127,31 @@ pub struct ProcessSignalState {
     pub group_exiting: bool,
 }
 
-type ExecInodeKey = (usize, vfs::InodeId);
+type InodeBusyKey = (usize, vfs::InodeId);
 
 lazy_static! {
-    static ref EXEC_INODE_REFS: Mutex<BTreeMap<ExecInodeKey, usize>> =
+    static ref EXEC_INODE_REFS: Mutex<BTreeMap<InodeBusyKey, usize>> =
+        Mutex::new(BTreeMap::new());
+    static ref WRITE_INODE_REFS: Mutex<BTreeMap<InodeBusyKey, usize>> =
         Mutex::new(BTreeMap::new());
 }
 
-fn exec_key_from_file(file: &vfs::File) -> Option<ExecInodeKey> {
+fn inode_busy_key(inode: &Arc<dyn vfs::IndexNode>) -> Option<InodeBusyKey> {
+    inode.metadata().ok().map(|meta| (meta.dev_id, meta.inode_id))
+}
+
+fn exec_key_from_file(file: &vfs::File) -> Option<InodeBusyKey> {
     file.metadata().ok().map(|meta| (meta.dev_id, meta.inode_id))
 }
 
-fn register_exec_key(key: ExecInodeKey) {
-    let mut refs = EXEC_INODE_REFS.lock();
+fn register_busy_key(refs: &Mutex<BTreeMap<InodeBusyKey, usize>>, key: InodeBusyKey) {
+    let mut refs = refs.lock();
     let count = refs.entry(key).or_insert(0);
     *count = count.saturating_add(1);
 }
 
-fn unregister_exec_key(key: ExecInodeKey) {
-    let mut refs = EXEC_INODE_REFS.lock();
+fn unregister_busy_key(refs: &Mutex<BTreeMap<InodeBusyKey, usize>>, key: InodeBusyKey) {
+    let mut refs = refs.lock();
     let remove = if let Some(count) = refs.get_mut(&key) {
         if *count > 1 {
             *count -= 1;
@@ -158,12 +167,40 @@ fn unregister_exec_key(key: ExecInodeKey) {
     }
 }
 
+fn register_exec_key(key: InodeBusyKey) {
+    register_busy_key(&EXEC_INODE_REFS, key);
+}
+
+fn unregister_exec_key(key: InodeBusyKey) {
+    unregister_busy_key(&EXEC_INODE_REFS, key);
+}
+
 pub fn is_executable_inode_busy(inode: &Arc<dyn vfs::IndexNode>) -> bool {
-    let key = match inode.metadata() {
-        Ok(meta) => (meta.dev_id, meta.inode_id),
-        Err(_) => return false,
+    let key = match inode_busy_key(inode) {
+        Some(key) => key,
+        None => return false,
     };
     EXEC_INODE_REFS.lock().get(&key).copied().unwrap_or(0) > 0
+}
+
+pub fn register_writable_inode(inode: &Arc<dyn vfs::IndexNode>) {
+    if let Some(key) = inode_busy_key(inode) {
+        register_busy_key(&WRITE_INODE_REFS, key);
+    }
+}
+
+pub fn unregister_writable_inode(inode: &Arc<dyn vfs::IndexNode>) {
+    if let Some(key) = inode_busy_key(inode) {
+        unregister_busy_key(&WRITE_INODE_REFS, key);
+    }
+}
+
+pub fn is_writable_inode_busy(inode: &Arc<dyn vfs::IndexNode>) -> bool {
+    let key = match inode_busy_key(inode) {
+        Some(key) => key,
+        None => return false,
+    };
+    WRITE_INODE_REFS.lock().get(&key).copied().unwrap_or(0) > 0
 }
 
 impl ProcessControlBlock {
@@ -233,6 +270,7 @@ impl ProcessControlBlock {
                 sid,
                 parent,
                 has_execed: false,
+                child_subreaper: false,
                 children: Vec::new(),
                 state: ProcessState::Running,
                 exit_code: 0,
@@ -289,6 +327,14 @@ impl ProcessControlBlock {
 
     pub fn has_execed(&self) -> bool {
         self.inner.lock().has_execed
+    }
+
+    pub fn set_child_subreaper(&self, enabled: bool) {
+        self.inner.lock().child_subreaper = enabled;
+    }
+
+    pub fn is_child_subreaper(&self) -> bool {
+        self.inner.lock().child_subreaper
     }
 
     pub fn replace_exe(&self, exe: vfs::File) {
@@ -726,6 +772,19 @@ impl ProcessControlBlock {
         }
     }
 
+    fn nearest_child_reaper(
+        parent: Option<Arc<ProcessControlBlock>>,
+    ) -> Arc<ProcessControlBlock> {
+        let mut cursor = parent;
+        while let Some(process) = cursor {
+            if !process.is_zombie() && process.is_child_subreaper() {
+                return process;
+            }
+            cursor = process.parent();
+        }
+        INITPROC.process.clone()
+    }
+
     fn adopt_children_by_init(children: Vec<Arc<ProcessControlBlock>>) -> bool {
         let mut live_children = Vec::new();
         let mut orphan_rusage = Rusage::new();
@@ -752,12 +811,39 @@ impl ProcessControlBlock {
         has_live_children
     }
 
+    fn adopt_children_by_reaper(
+        children: Vec<Arc<ProcessControlBlock>>,
+        reaper: Arc<ProcessControlBlock>,
+    ) -> bool {
+        if Arc::ptr_eq(&reaper, &INITPROC.process) {
+            return Self::adopt_children_by_init(children);
+        }
+
+        let has_children = !children.is_empty();
+        {
+            let mut reaper_inner = reaper.acquire_inner_lock();
+            if reaper_inner.children.try_reserve(children.len()).is_err() {
+                drop(reaper_inner);
+                return Self::adopt_children_by_init(children);
+            }
+        }
+
+        for child in &children {
+            child.set_parent(Some(Arc::downgrade(&reaper)));
+            child.adopted_by_init.store(false, Ordering::Relaxed);
+        }
+        reaper.acquire_inner_lock().children.extend(children);
+        has_children
+    }
+
     pub fn close_files_on_exit(&self) {
         let files_ref = self.files();
         let mut fd_table = files_ref.lock();
         let open_fds: Vec<usize> = fd_table.iter().map(|(i, _f)| i).collect();
         for fd in open_fds {
-            let _ = fd_table.drop_fd(fd);
+            if let Ok(file) = fd_table.drop_fd(fd) {
+                crate::syscall::fs::release_flock_for_file_if_last(&file);
+            }
         }
         fd_table.release_backing_storage();
     }
@@ -793,10 +879,11 @@ impl ProcessControlBlock {
         }
 
         let children = self.take_children();
-        let adopted_live_children = if children.is_empty() {
+        let child_reaper = Self::nearest_child_reaper(parent_process.clone());
+        let adopted_children = if children.is_empty() {
             false
         } else {
-            Self::adopt_children_by_init(children)
+            Self::adopt_children_by_reaper(children, child_reaper.clone())
         };
 
         if let Some(parent_process) = parent_process {
@@ -832,8 +919,8 @@ impl ProcessControlBlock {
             warn!("[finish_process_exit] parent is None");
         }
 
-        if adopted_live_children {
-            Self::wake_child_waiters(&INITPROC.process);
+        if adopted_children {
+            Self::wake_child_waiters(&child_reaper);
         }
 
         let vm = self.vm();

@@ -1,14 +1,14 @@
 use crate::config::PAGE_SIZE;
 use crate::fs::iov::IOVec;
 use crate::mm::{
-    check_user_range, copy_from_user_array, copy_to_user, translated_byte_buffer, AddressSpace,
-    FaultAccess, MapPermission, PageTableImpl, StepByOne, UserAccess, UserBuffer, UserPtr,
-    UserPtrMut, VirtAddr,
+    check_user_range, copy_from_user, copy_from_user_array, copy_to_user, translated_byte_buffer,
+    AddressSpace, FaultAccess, MapPermission, PageTableImpl, StepByOne, UserAccess, UserBuffer,
+    UserPtr, UserPtrMut, VirtAddr,
 };
 use crate::syscall::errno::*;
 use crate::task::{
-    current_task, current_user_token, ProcessControlBlock, ProcessManager, TaskControlBlock,
-    update_ready_nice,
+    current_task, current_user_token, ProcessControlBlock, ProcessManager, SeccompFilterInsn,
+    Signals, TaskControlBlock, update_ready_nice,
 };
 use crate::timer::{get_time_sec, TimeSpec};
 use alloc::{sync::Arc, vec::Vec};
@@ -33,8 +33,10 @@ const LINUX_CAPABILITY_VERSION_3: u32 = 0x20080522;
 const CAP_LAST_CAP: usize = 40;
 const CAP_SETPCAP: usize = 8;
 const CAP_SYS_PTRACE: usize = 19;
+const CAP_SYS_ADMIN: usize = 21;
 const CAP_SYS_NICE: usize = 23;
 const CAP_SYS_RESOURCE: usize = 24;
+const CAP_SYS_TTY_CONFIG: usize = 26;
 const CAP_FULL_SET: u64 = (1u64 << (CAP_LAST_CAP + 1)) - 1;
 const NGROUPS_MAX: usize = 65536;
 const LEGACY_NGROUPS_MAX: usize = 32;
@@ -47,13 +49,51 @@ const PR_GET_KEEPCAPS: usize = 7;
 const PR_SET_KEEPCAPS: usize = 8;
 const PR_SET_NAME: usize = 15;
 const PR_GET_NAME: usize = 16;
+const PR_GET_SECCOMP: usize = 21;
+const PR_SET_SECCOMP: usize = 22;
 const PR_CAPBSET_READ: usize = 23;
 const PR_CAPBSET_DROP: usize = 24;
+const PR_GET_SECUREBITS: usize = 27;
 const PR_SET_SECUREBITS: usize = 28;
 const PR_SET_TIMERSLACK: usize = 29;
 const PR_GET_TIMERSLACK: usize = 30;
+const PR_SET_CHILD_SUBREAPER: usize = 36;
+const PR_GET_CHILD_SUBREAPER: usize = 37;
+const PR_SET_NO_NEW_PRIVS: usize = 38;
+const PR_GET_NO_NEW_PRIVS: usize = 39;
+const PR_SET_THP_DISABLE: usize = 41;
+const PR_GET_THP_DISABLE: usize = 42;
+const PR_CAP_AMBIENT: usize = 47;
+const PR_CAP_AMBIENT_IS_SET: usize = 1;
+const PR_CAP_AMBIENT_RAISE: usize = 2;
+const PR_CAP_AMBIENT_LOWER: usize = 3;
+const PR_CAP_AMBIENT_CLEAR_ALL: usize = 4;
+const PR_GET_SPECULATION_CTRL: usize = 52;
 const PR_TASK_COMM_LEN: usize = 16;
 const PR_MAX_SIGNAL: usize = 64;
+const SECCOMP_MODE_DISABLED: usize = 0;
+const SECCOMP_MODE_STRICT: usize = 1;
+const SECCOMP_MODE_FILTER: usize = 2;
+const SECCOMP_FILTER_MAX_LEN: usize = 4096;
+const SECCOMP_RET_ACTION_FULL: u32 = 0xffff_0000;
+const SECCOMP_RET_KILL_THREAD: u32 = 0x0000_0000;
+const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
+const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
+const BPF_CLASS_MASK: u16 = 0x07;
+const BPF_LD: u16 = 0x00;
+const BPF_JMP: u16 = 0x05;
+const BPF_RET: u16 = 0x06;
+const BPF_SIZE_MASK: u16 = 0x18;
+const BPF_W: u16 = 0x00;
+const BPF_MODE_MASK: u16 = 0xe0;
+const BPF_ABS: u16 = 0x20;
+const BPF_OP_MASK: u16 = 0xf0;
+const BPF_JEQ: u16 = 0x10;
+const BPF_SRC_MASK: u16 = 0x08;
+const BPF_K: u16 = 0x00;
+const SECCOMP_DATA_NR_OFFSET: u32 = 0;
+const SECBIT_NO_CAP_AMBIENT_RAISE: usize = 1 << 6;
+const PR_SPEC_STORE_BYPASS: usize = 0;
 const PROCESS_VM_MAX_IOVEC: usize = 1024;
 const PROCESS_VM_MAX_COPY: usize = 8 * 1024 * 1024;
 const PERSONALITY_GET: usize = 0xffff_ffff;
@@ -113,6 +153,16 @@ pub fn sys_ioprio_set(which: usize, who: usize, ioprio: usize) -> isize {
     inner.ioprio_class = class;
     inner.ioprio_prio = prio;
     SUCCESS
+}
+
+pub fn sys_vhangup() -> isize {
+    let task = current_task().unwrap();
+    let inner = task.acquire_inner_lock();
+    if inner.euid == 0 || (inner.cap_effective & (1u64 << CAP_SYS_TTY_CONFIG)) != 0 {
+        SUCCESS
+    } else {
+        EPERM
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -733,6 +783,7 @@ pub fn sys_capset(header: *mut CapUserHeader, data: *const CapUserData) -> isize
     inner.cap_effective = new_effective & CAP_FULL_SET;
     inner.cap_permitted = new_permitted & CAP_FULL_SET;
     inner.cap_inheritable = new_inheritable & CAP_FULL_SET;
+    inner.cap_ambient &= inner.cap_permitted & inner.cap_inheritable;
     SUCCESS
 }
 
@@ -1031,7 +1082,257 @@ pub fn sys_process_vm_writev(
     sys_process_vm_transfer(pid, local_iov, liovcnt, remote_iov, riovcnt, flags, true)
 }
 
-pub fn sys_prctl(option: usize, arg2: usize, _arg3: usize, _arg4: usize, _arg5: usize) -> isize {
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct SockFilter {
+    code: u16,
+    jt: u8,
+    jf: u8,
+    k: u32,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct SockFprog {
+    len: u16,
+    filter: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SeccompSyscallAction {
+    Allow,
+    KillThread(Signals),
+    KillProcess(Signals),
+}
+
+fn seccomp_filter_allows_return(ret: u32) -> bool {
+    (ret & SECCOMP_RET_ACTION_FULL) == SECCOMP_RET_ALLOW
+}
+
+fn seccomp_filter_kills_return(ret: u32) -> bool {
+    ret == SECCOMP_RET_KILL_THREAD || ret == SECCOMP_RET_KILL_PROCESS
+}
+
+fn seccomp_filter_kill_action(ret: u32) -> SeccompSyscallAction {
+    if ret == SECCOMP_RET_KILL_PROCESS {
+        SeccompSyscallAction::KillProcess(Signals::SIGSYS)
+    } else {
+        SeccompSyscallAction::KillThread(Signals::SIGSYS)
+    }
+}
+
+fn verify_seccomp_filter(insns: &[SeccompFilterInsn]) -> Result<(), isize> {
+    if insns.is_empty() || insns.len() > SECCOMP_FILTER_MAX_LEN {
+        return Err(EINVAL);
+    }
+    let mut has_terminal_ret = false;
+    for (pc, insn) in insns.iter().enumerate() {
+        match insn.code & BPF_CLASS_MASK {
+            BPF_LD => {
+                if (insn.code & BPF_SIZE_MASK) != BPF_W
+                    || (insn.code & BPF_MODE_MASK) != BPF_ABS
+                    || insn.k != SECCOMP_DATA_NR_OFFSET
+                {
+                    return Err(EINVAL);
+                }
+            }
+            BPF_JMP => {
+                if (insn.code & BPF_OP_MASK) != BPF_JEQ
+                    || (insn.code & BPF_SRC_MASK) != BPF_K
+                    || pc + 1 + insn.jt as usize >= insns.len()
+                    || pc + 1 + insn.jf as usize >= insns.len()
+                {
+                    return Err(EINVAL);
+                }
+            }
+            BPF_RET => {
+                if (insn.code & BPF_SRC_MASK) != BPF_K {
+                    return Err(EINVAL);
+                }
+                if !seccomp_filter_allows_return(insn.k) && !seccomp_filter_kills_return(insn.k) {
+                    return Err(EINVAL);
+                }
+                has_terminal_ret = true;
+            }
+            _ => return Err(EINVAL),
+        }
+    }
+    if has_terminal_ret {
+        Ok(())
+    } else {
+        Err(EINVAL)
+    }
+}
+
+fn read_seccomp_filter(filter: usize) -> Result<Vec<SeccompFilterInsn>, isize> {
+    if filter == 0 {
+        return Err(EFAULT);
+    }
+    let token = current_user_token();
+    let mut prog = SockFprog { len: 0, filter: 0 };
+    copy_from_user(token, filter as *const SockFprog, &mut prog as *mut SockFprog)?;
+    let len = prog.len as usize;
+    if len == 0 || len > SECCOMP_FILTER_MAX_LEN {
+        return Err(EINVAL);
+    }
+    if prog.filter == 0 {
+        return Err(EFAULT);
+    }
+    let mut raw = Vec::new();
+    if raw.try_reserve(len).is_err() {
+        return Err(ENOMEM);
+    }
+    unsafe {
+        raw.set_len(len);
+    }
+    copy_from_user_array(token, prog.filter as *const SockFilter, raw.as_mut_ptr(), len)?;
+    let mut insns = Vec::new();
+    if insns.try_reserve(len).is_err() {
+        return Err(ENOMEM);
+    }
+    for raw_insn in raw {
+        insns.push(SeccompFilterInsn {
+            code: raw_insn.code,
+            jt: raw_insn.jt,
+            jf: raw_insn.jf,
+            k: raw_insn.k,
+        });
+    }
+    verify_seccomp_filter(&insns)?;
+    Ok(insns)
+}
+
+fn eval_seccomp_filter(insns: &[SeccompFilterInsn], syscall_id: usize) -> SeccompSyscallAction {
+    let mut pc = 0usize;
+    let mut accumulator = 0u32;
+    while pc < insns.len() {
+        let insn = insns[pc];
+        match insn.code & BPF_CLASS_MASK {
+            BPF_LD => {
+                accumulator = syscall_id as u32;
+                pc += 1;
+            }
+            BPF_JMP => {
+                if accumulator == insn.k {
+                    pc += 1 + insn.jt as usize;
+                } else {
+                    pc += 1 + insn.jf as usize;
+                }
+            }
+            BPF_RET => {
+                return if seccomp_filter_allows_return(insn.k) {
+                    SeccompSyscallAction::Allow
+                } else {
+                    seccomp_filter_kill_action(insn.k)
+                };
+            }
+            _ => return SeccompSyscallAction::KillThread(Signals::SIGSYS),
+        }
+    }
+    SeccompSyscallAction::KillThread(Signals::SIGSYS)
+}
+
+pub fn seccomp_action_for_syscall(syscall_id: usize) -> SeccompSyscallAction {
+    use crate::syscall::syscall_id::{
+        SYSCALL_EXIT, SYSCALL_READ, SYSCALL_SIGRETURN, SYSCALL_WRITE,
+    };
+
+    let task = match current_task() {
+        Some(task) => task,
+        None => return SeccompSyscallAction::Allow,
+    };
+    let inner = task.acquire_inner_lock();
+    match inner.seccomp_mode {
+        SECCOMP_MODE_DISABLED => SeccompSyscallAction::Allow,
+        SECCOMP_MODE_STRICT => match syscall_id {
+            SYSCALL_READ | SYSCALL_WRITE | SYSCALL_EXIT | SYSCALL_SIGRETURN => {
+                SeccompSyscallAction::Allow
+            }
+            _ => SeccompSyscallAction::KillProcess(Signals::SIGKILL),
+        },
+        SECCOMP_MODE_FILTER => eval_seccomp_filter(&inner.seccomp_filter, syscall_id),
+        _ => SeccompSyscallAction::KillProcess(Signals::SIGKILL),
+    }
+}
+
+fn sys_prctl_set_seccomp(mode: usize, filter: usize) -> isize {
+    if mode == SECCOMP_MODE_STRICT {
+        let task = current_task().unwrap();
+        let mut inner = task.acquire_inner_lock();
+        if inner.seccomp_mode != SECCOMP_MODE_DISABLED {
+            return EINVAL;
+        }
+        inner.seccomp_mode = SECCOMP_MODE_STRICT;
+        inner.seccomp_filter.clear();
+        return SUCCESS;
+    }
+    if mode != SECCOMP_MODE_FILTER {
+        return EINVAL;
+    }
+    let filter_insns = match read_seccomp_filter(filter) {
+        Ok(insns) => insns,
+        Err(errno) => return errno,
+    };
+    let task = current_task().unwrap();
+    let mut inner = task.acquire_inner_lock();
+    if inner.seccomp_mode != SECCOMP_MODE_DISABLED {
+        return EINVAL;
+    }
+    if !inner.no_new_privs && (inner.cap_effective & (1u64 << CAP_SYS_ADMIN)) == 0 {
+        EACCES
+    } else {
+        inner.seccomp_mode = SECCOMP_MODE_FILTER;
+        inner.seccomp_filter = filter_insns;
+        SUCCESS
+    }
+}
+
+fn sys_prctl_cap_ambient(op: usize, cap: usize, arg4: usize, arg5: usize) -> isize {
+    if arg4 != 0 || arg5 != 0 {
+        return EINVAL;
+    }
+    let task = current_task().unwrap();
+    let mut inner = task.acquire_inner_lock();
+    match op {
+        PR_CAP_AMBIENT_IS_SET => {
+            if cap > CAP_LAST_CAP {
+                return EINVAL;
+            }
+            ((inner.cap_ambient & (1u64 << cap)) != 0) as isize
+        }
+        PR_CAP_AMBIENT_RAISE => {
+            if cap > CAP_LAST_CAP {
+                return EINVAL;
+            }
+            let mask = 1u64 << cap;
+            if (inner.securebits & SECBIT_NO_CAP_AMBIENT_RAISE) != 0
+                || (inner.cap_permitted & mask) == 0
+                || (inner.cap_inheritable & mask) == 0
+            {
+                return EPERM;
+            }
+            inner.cap_ambient |= mask;
+            SUCCESS
+        }
+        PR_CAP_AMBIENT_LOWER => {
+            if cap > CAP_LAST_CAP {
+                return EINVAL;
+            }
+            inner.cap_ambient &= !(1u64 << cap);
+            SUCCESS
+        }
+        PR_CAP_AMBIENT_CLEAR_ALL => {
+            if cap != 0 {
+                return EINVAL;
+            }
+            inner.cap_ambient = 0;
+            SUCCESS
+        }
+        _ => EINVAL,
+    }
+}
+
+pub fn sys_prctl(option: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize) -> isize {
     let task = current_task().unwrap();
     match option {
         PR_SET_PDEATHSIG => {
@@ -1065,6 +1366,7 @@ pub fn sys_prctl(option: usize, arg2: usize, _arg3: usize, _arg4: usize, _arg5: 
                 return EPERM;
             }
             inner.cap_bounding &= !(1u64 << arg2);
+            inner.cap_ambient &= inner.cap_bounding;
             SUCCESS
         }
         PR_GET_KEEPCAPS => 0,
@@ -1089,11 +1391,61 @@ pub fn sys_prctl(option: usize, arg2: usize, _arg3: usize, _arg4: usize, _arg5: 
             let comm = task.acquire_inner_lock().task_comm;
             write_prctl_comm_to_user(arg2, &comm)
         }
+        PR_SET_CHILD_SUBREAPER => {
+            task.process.set_child_subreaper(arg2 != 0);
+            SUCCESS
+        }
+        PR_GET_CHILD_SUBREAPER => {
+            let enabled = task.process.is_child_subreaper() as i32;
+            if copy_to_user(current_user_token(), &enabled, arg2 as *mut i32).is_err() {
+                EFAULT
+            } else {
+                SUCCESS
+            }
+        }
+        PR_GET_SECCOMP => task.acquire_inner_lock().seccomp_mode as isize,
+        PR_SET_SECCOMP => sys_prctl_set_seccomp(arg2, arg3),
+        PR_SET_NO_NEW_PRIVS => {
+            if arg2 != 1 || arg3 != 0 || arg4 != 0 || arg5 != 0 {
+                return EINVAL;
+            }
+            task.acquire_inner_lock().no_new_privs = true;
+            SUCCESS
+        }
+        PR_GET_NO_NEW_PRIVS => {
+            if arg2 != 0 || arg3 != 0 || arg4 != 0 || arg5 != 0 {
+                return EINVAL;
+            }
+            task.acquire_inner_lock().no_new_privs as isize
+        }
+        PR_SET_THP_DISABLE => {
+            if arg2 > 1 || arg3 != 0 || arg4 != 0 || arg5 != 0 {
+                return EINVAL;
+            }
+            task.acquire_inner_lock().thp_disabled = arg2 != 0;
+            SUCCESS
+        }
+        PR_GET_THP_DISABLE => {
+            if arg2 != 0 || arg3 != 0 || arg4 != 0 || arg5 != 0 {
+                return EINVAL;
+            }
+            task.acquire_inner_lock().thp_disabled as isize
+        }
+        PR_CAP_AMBIENT => sys_prctl_cap_ambient(arg2, arg3, arg4, arg5),
+        PR_GET_SPECULATION_CTRL => {
+            if arg3 != 0 || arg4 != 0 || arg5 != 0 || arg2 != PR_SPEC_STORE_BYPASS {
+                EINVAL
+            } else {
+                SUCCESS
+            }
+        }
+        PR_GET_SECUREBITS => task.acquire_inner_lock().securebits as isize,
         PR_SET_SECUREBITS => {
-            let inner = task.acquire_inner_lock();
+            let mut inner = task.acquire_inner_lock();
             if (inner.cap_effective & (1u64 << CAP_SETPCAP)) == 0 {
                 EPERM
             } else {
+                inner.securebits = arg2;
                 SUCCESS
             }
         }

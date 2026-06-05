@@ -637,7 +637,7 @@ pub fn sys_sigaction(signum: usize, act: usize, oldact: usize, sigsetsize: usize
         oldact,
         sigsetsize
     );
-    if !valid_rt_sigset_size(sigsetsize) {
+    if !valid_rt_sigaction_size(sigsetsize) {
         return EINVAL;
     }
     sigaction(
@@ -661,6 +661,10 @@ pub fn sys_sigprocmask(how: u32, set: usize, oldset: usize, sigsetsize: usize) -
 
 fn valid_rt_sigset_size(sigsetsize: usize) -> bool {
     sigsetsize >= size_of::<u64>()
+}
+
+fn valid_rt_sigaction_size(sigsetsize: usize) -> bool {
+    sigsetsize == size_of::<u64>()
 }
 
 /// rt_sigpending(sigset_t *set, size_t sigsetsize)

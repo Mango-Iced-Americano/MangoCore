@@ -4,7 +4,8 @@ use crate::mm::{UserPtr, UserPtrMut};
 use crate::syscall::errno::*;
 use crate::task::{
     add_kernel_timer, current_task, current_user_token, find_process_by_pid, find_task_by_tid,
-    signal::Signals, PosixTimer, sleep_relative_interruptible, Rusage, TimerAction,
+    signal::{SigInfo, Signals},
+    PosixTimer, sleep_relative_interruptible, Rusage, TimerAction,
 };
 use crate::timer::{
     current_timespec, current_timeval, get_time_ms, set_current_timespec, ITimerVal, TimeSpec,
@@ -374,25 +375,53 @@ pub fn sys_timer_settime(
     let mut register_timer = None;
     {
         let mut inner = task.acquire_inner_lock();
-        let Some(Some(timer)) = inner.posix_timers.get_mut(timer_id) else {
-            return EINVAL;
-        };
-        if !old_value.is_null() {
-            let old_spec = current_posix_itimerspec(timer);
-            if let Err(errno) = UserPtrMut::new(old_value).write(token, &old_spec) {
-                return errno;
+        let deliver_signal = {
+            let Some(Some(timer)) = inner.posix_timers.get_mut(timer_id) else {
+                return EINVAL;
+            };
+            if !old_value.is_null() {
+                let old_spec = current_posix_itimerspec(timer);
+                if let Err(errno) = UserPtrMut::new(old_value).write(token, &old_spec) {
+                    return errno;
+                }
             }
-        }
 
-        timer.interval = new_spec.it_interval;
-        timer.value = new_spec.it_value;
-        timer.generation = timer.generation.wrapping_add(1);
-        if timer.value.is_zero() {
-            timer.deadline = None;
-        } else {
-            let deadline = posix_timer_deadline(timer.clock_id, flags, timer.value);
-            timer.deadline = Some(deadline);
-            register_timer = Some((deadline, timer.signal, timer.generation));
+            let mut deliver_signal = Signals::empty();
+            timer.interval = new_spec.it_interval;
+            timer.value = new_spec.it_value;
+            timer.generation = timer.generation.wrapping_add(1);
+            timer.reset_overrun();
+            if timer.value.is_zero() {
+                timer.deadline = None;
+            } else if flags & TIMER_ABSTIME != 0
+                && timer.value <= posix_timer_clock_now(timer.clock_id)
+            {
+                let clock_now = posix_timer_clock_now(timer.clock_id);
+                deliver_signal = timer.signal;
+                if timer.interval.is_zero() {
+                    timer.value = TimeSpec::new();
+                    timer.deadline = None;
+                } else {
+                    let (deadline, overrun) = posix_timer_deadline_after_absolute_overrun(
+                        timer.value,
+                        timer.interval,
+                        clock_now,
+                    );
+                    timer.add_overrun(overrun);
+                    timer.deadline = Some(deadline);
+                    register_timer = Some((deadline, timer.signal, timer.generation));
+                }
+            } else {
+                let deadline = posix_timer_deadline(timer.clock_id, flags, timer.value);
+                timer.deadline = Some(deadline);
+                register_timer = Some((deadline, timer.signal, timer.generation));
+            }
+            deliver_signal
+        };
+        if !deliver_signal.is_empty() {
+            let _ = inner
+                .sigpending
+                .enqueue_signal(deliver_signal, SigInfo::SI_TIMER as usize);
         }
     }
 
@@ -432,7 +461,7 @@ pub fn sys_timer_getoverrun(timer_id: usize) -> isize {
     let task = current_task().unwrap();
     let inner = task.acquire_inner_lock();
     match inner.posix_timers.get(timer_id) {
-        Some(Some(_)) => 0,
+        Some(Some(timer)) => timer.overrun() as isize,
         _ => EINVAL,
     }
 }
@@ -461,19 +490,24 @@ fn valid_posix_timer_clock(clock_id: usize) -> bool {
     matches!(
         clock_id,
         CLOCK_REALTIME
+            | CLOCK_REALTIME_ALARM
+            | CLOCK_TAI
             | CLOCK_MONOTONIC
             | CLOCK_PROCESS_CPUTIME_ID
             | CLOCK_THREAD_CPUTIME_ID
             | CLOCK_BOOTTIME
+            | CLOCK_BOOTTIME_ALARM
     )
 }
 
 fn posix_timer_clock_now(clock_id: usize) -> TimeSpec {
     match clock_id {
-        CLOCK_REALTIME => current_timespec(),
-        CLOCK_MONOTONIC | CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID | CLOCK_BOOTTIME => {
-            TimeSpec::now()
-        }
+        CLOCK_REALTIME | CLOCK_REALTIME_ALARM | CLOCK_TAI => current_timespec(),
+        CLOCK_MONOTONIC
+        | CLOCK_PROCESS_CPUTIME_ID
+        | CLOCK_THREAD_CPUTIME_ID
+        | CLOCK_BOOTTIME
+        | CLOCK_BOOTTIME_ALARM => TimeSpec::now(),
         _ => TimeSpec::new(),
     }
 }
@@ -485,6 +519,22 @@ fn posix_timer_deadline(clock_id: usize, flags: u32, value: TimeSpec) -> TimeSpe
         value
     };
     TimeSpec::now() + duration
+}
+
+fn posix_timer_deadline_after_absolute_overrun(
+    value: TimeSpec,
+    interval: TimeSpec,
+    clock_now: TimeSpec,
+) -> (TimeSpec, usize) {
+    let interval_ns = interval.to_ns().max(1);
+    let elapsed_ns = clock_now.to_ns().saturating_sub(value.to_ns());
+    let expirations = 1usize.saturating_add(elapsed_ns / interval_ns);
+    let next_clock_ns = value
+        .to_ns()
+        .saturating_add(expirations.saturating_mul(interval_ns));
+    let duration = timespec_saturating_sub(TimeSpec::from_ns(next_clock_ns), clock_now);
+    let deadline = TimeSpec::now() + duration;
+    (deadline, expirations.saturating_sub(1))
 }
 
 fn current_posix_itimerspec(timer: &PosixTimer) -> ITimerSpec {
@@ -853,6 +903,8 @@ pub fn sys_clock_getres(clk_id: usize, tp: *mut TimeSpec) -> isize {
         | CLOCK_REALTIME_COARSE
         | CLOCK_MONOTONIC_COARSE
         | CLOCK_BOOTTIME
+        | CLOCK_REALTIME_ALARM
+        | CLOCK_BOOTTIME_ALARM
         | CLOCK_TAI => {}
         _ => {
             if let Err(errno) = validate_cpu_clock_id(clk_id) {
@@ -1018,5 +1070,12 @@ pub fn sys_getrusage(who: isize, usage: *mut Rusage) -> isize {
 }
 
 fn timeval_to_user_ticks(value: TimeVal) -> usize {
-    value.to_us().saturating_mul(USER_HZ) / USEC_PER_SEC
+    let us = value.to_us();
+    if us == 0 {
+        0
+    } else {
+        us.saturating_mul(USER_HZ)
+            .saturating_add(USEC_PER_SEC - 1)
+            / USEC_PER_SEC
+    }
 }

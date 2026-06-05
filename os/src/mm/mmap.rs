@@ -26,6 +26,10 @@ fn checked_user_range(start: usize, len: usize) -> Result<(VirtAddr, VirtAddr), 
     Ok((VirtAddr::from(start), VirtAddr::from(end)))
 }
 
+fn charges_overcommit(prot: MapPermission, flags: MapFlags) -> bool {
+    flags.contains(MapFlags::MAP_ANONYMOUS) && prot.contains(MapPermission::W)
+}
+
 pub(super) fn do_sbrk<T: PageTable>(
     address_space: &mut AddressSpace<T>,
     increment: isize,
@@ -99,6 +103,9 @@ pub(super) fn do_sbrk<T: PageTable>(
     if new_pt > old_pt {
         if new_page_end > old_page_end {
             let len = new_page_end - old_page_end;
+            if !crate::mm::overcommit_allows(address_space.committed_bytes(), len) {
+                return old_pt;
+            }
             let ret = do_mmap(
                 address_space,
                 old_page_end,
@@ -153,6 +160,11 @@ pub(super) fn do_mmap<T: PageTable>(
         Ok(range) => range,
         Err(errno) => return errno,
     };
+    if charges_overcommit(prot, flags)
+        && !crate::mm::overcommit_allows(address_space.committed_bytes(), len)
+    {
+        return ENOMEM;
+    }
     // 文件映射 MAP_SHARED 改为懒加载，不再需要提前拒绝大映射
     let fixed =
         flags.contains(MapFlags::MAP_FIXED) || flags.contains(MapFlags::MAP_FIXED_NOREPLACE);
@@ -224,10 +236,14 @@ pub(super) fn do_mmap<T: PageTable>(
         new_area.map_file_offset = offset;
     }
 
-    if flags.contains(MapFlags::MAP_SHARED) && new_area.map_file.is_none() {
-        // Anonymous MAP_SHARED preallocates shared frames so fork inherits the
-        // same backing pages, but installs user PTEs lazily. This keeps Linux
-        // mincore/mlock2 residency semantics: untouched pages are not present.
+    if flags.contains(MapFlags::MAP_SHARED)
+        && new_area.map_file.is_none()
+        && new_area.map_perm.contains(MapPermission::W)
+    {
+        // Writable anonymous MAP_SHARED preallocates shared frames so fork
+        // inherits the same backing pages, but installs user PTEs lazily. This
+        // keeps Linux mincore/mlock2 residency semantics: untouched pages are
+        // not present.
         if len > MAX_EAGER_MMAP_SIZE {
             return ENOMEM;
         }

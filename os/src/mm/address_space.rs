@@ -78,6 +78,9 @@ impl<T: PageTable> AddressSpace<T> {
     pub fn vma_count(&self) -> usize {
         self.vmas.len()
     }
+    pub fn committed_bytes(&self) -> usize {
+        self.vmas.user_mapped_bytes()
+    }
     pub fn has_shared_writable_mapping(&self, inode: &Arc<dyn IndexNode>) -> bool {
         self.vmas.has_shared_writable_mapping(inode)
     }

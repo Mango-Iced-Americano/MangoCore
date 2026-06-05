@@ -227,13 +227,17 @@ pub fn oom_handler(req: usize) -> Result<(), ()> {
         return Ok(());
     }
     // step 2: 清理当前任务的内存
-    let task = current_task().unwrap();
-    let vm_ref = task.process.vm();
-    if let Some(mut address_space) = vm_ref.try_lock() {
-        released += address_space.do_shallow_clean();
-        log::warn!("[oom_handler] current task released: {}", released);
+    if let Some(task) = current_task() {
+        let vm_ref = task.process.vm();
+        let mut maybe_guard = vm_ref.try_lock();
+        if let Some(address_space) = maybe_guard.as_mut() {
+            released += address_space.do_shallow_clean();
+            log::warn!("[oom_handler] current task released: {}", released);
+        } else {
+            log::warn!("[oom_handler] try lock current task vm failed!");
+        }
     } else {
-        log::warn!("[oom_handler] try lock current task vm failed!");
+        log::warn!("[oom_handler] no current task, skip current task reclaim");
     }
     if released >= req {
         return Ok(());

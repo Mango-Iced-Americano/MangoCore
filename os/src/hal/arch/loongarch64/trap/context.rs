@@ -5,6 +5,10 @@ use crate::{
     task::{SignalStack, Signals},
 };
 
+const USER_UCONTEXT_SIGSET_SIZE: usize = 128;
+const USER_CONTEXT_SIGMASK_PADDING: usize =
+    USER_UCONTEXT_SIGSET_SIZE - core::mem::size_of::<UserSignalMask>();
+
 /// General registers
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
@@ -146,12 +150,12 @@ pub struct UserContext {
     pub link: usize,
     pub stack: SignalStack,
     pub sigmask: UserSignalMask,
-    pub __pad: [u8; 128],
+    pub __pad: [u8; USER_CONTEXT_SIGMASK_PADDING],
     pub mcontext: MachineContext,
 }
 
 impl UserContext {
-    pub const PADDING_SIZE: usize = 128;
+    pub const PADDING_SIZE: usize = USER_CONTEXT_SIGMASK_PADDING;
 
     pub fn new(
         flags: usize,
