@@ -936,9 +936,8 @@ impl MountFS {
             drop(mps);
             propagation::unregister_peer_mount(old_mfs);
             propagation::unregister_slave_mount(old_mfs);
-            if let Some(ref path) = old_mfs.mount_path() {
-                MOUNT_LIST.remove(path.as_str());
-            }
+            MOUNT_LIST.remove_fs(old_mfs);
+            old_mfs.set_self_mountpoint(None);
             mps = self.mountpoints.lock();
         }
         mps.insert(inode_id, mount_fs);
@@ -1088,16 +1087,41 @@ impl MountFS {
         // If the direct parent is itself a mount root (e.g., disk2 mounted
         // under a make-rshared child1), mp points into the child mount.
         // Walk up one more level to reach the actual shared ancestor.
+        // Mirrors do_bind_mount's walk-up for mountpoint-root targets.
+        let child_name = self.mount_path().and_then(|p| {
+            let parts: alloc::vec::Vec<&str> = p.rsplitn(2, '/').collect();
+            if parts.len() >= 2 && !parts[0].is_empty() {
+                Some(alloc::string::String::from(parts[0]))
+            } else {
+                None
+            }
+        });
         let propagation_target = if do_propagate {
             self.self_mountpoint.lock().as_ref().and_then(|w| w.upgrade()).and_then(|mp| {
-                mp.inner_inode.metadata().ok().map(|md| (mp.mount_fs.clone(), md.inode_id))
+                if mp.is_mountpoint_root() {
+                    let child_mfs = mp.mount_fs.clone();
+                    let child_is_orphan_shared = child_mfs.propagation().is_shared()
+                        && crate::fs::vfs::propagation::get_peers(&child_mfs).is_empty();
+                    if child_is_orphan_shared {
+                        child_mfs.self_mountpoint().and_then(|walk_mp| {
+                            walk_mp.inner_inode.metadata().ok()
+                                .map(|md| (walk_mp.mount_fs.clone(), md.inode_id))
+                        })
+                    } else {
+                        mp.inner_inode.metadata().ok()
+                            .map(|md| (child_mfs.clone(), md.inode_id))
+                    }
+                } else {
+                    mp.inner_inode.metadata().ok()
+                        .map(|md| (mp.mount_fs.clone(), md.inode_id))
+                }
             })
         } else {
             None
         };
         self.detach_from_parent_and_cleanup();
         if let Some((parent_mfs, inode_id)) = propagation_target {
-            propagate_umount(&parent_mfs, inode_id);
+            propagate_umount(&parent_mfs, inode_id, child_name.as_deref());
         }
         Ok(())
     }
@@ -1138,7 +1162,15 @@ impl MountFS {
         if do_propagate && self.propagation().is_shared() {
             if let Some(mp) = self.self_mountpoint.lock().as_ref().and_then(|w| w.upgrade()) {
                 if let Ok(md) = mp.inner_inode.metadata() {
-                    propagate_umount(&mp.mount_fs, md.inode_id);
+                    let cn = self.mount_path().and_then(|p| {
+                        let parts: alloc::vec::Vec<&str> = p.rsplitn(2, '/').collect();
+                        if parts.len() >= 2 && !parts[0].is_empty() {
+                            Some(alloc::string::String::from(parts[0]))
+                        } else {
+                            None
+                        }
+                    });
+                    propagate_umount(&mp.mount_fs, md.inode_id, cn.as_deref());
                 }
             }
         }
@@ -1177,19 +1209,41 @@ impl MountFS {
 
         let mountpoint = self.self_mountpoint.lock().take()
             .and_then(|w| w.upgrade());
+        let mut detached = false;
         if let Some(mountpoint) = mountpoint {
             if let Ok(md) = mountpoint.inner_inode.metadata() {
                 let removed = mountpoint.mount_fs.remove_mount(md.inode_id);
-                if removed.is_none() {
-                    log::warn!(
-                        "MountFS::detach: remove_mount returned None for inode {:?} — trying ptr_eq",
-                        md.inode_id
-                    );
-                    Self::remove_from_parent_by_ptr_eq(&mountpoint, self);
+                match removed {
+                    Some(ref removed_fs) if Arc::ptr_eq(removed_fs, self) => {
+                        detached = true;
+                    }
+                    Some(wrong_fs) => {
+                        log::warn!(
+                            "MountFS::detach: remove_mount returned wrong Arc (ino={:?}); re-inserting + ptr_eq scan",
+                            md.inode_id
+                        );
+                        mountpoint.mount_fs.mountpoints.lock().insert(md.inode_id, wrong_fs);
+                        Self::remove_from_parent_by_ptr_eq(&mountpoint, self);
+                        detached = true;
+                    }
+                    None => {
+                        log::warn!(
+                            "MountFS::detach: remove_mount returned None for ino={:?} — ptr_eq scan",
+                            md.inode_id
+                        );
+                        Self::remove_from_parent_by_ptr_eq(&mountpoint, self);
+                        detached = true;
+                    }
                 }
             } else {
                 Self::remove_from_parent_by_ptr_eq(&mountpoint, self);
+                detached = true;
             }
+        }
+
+        // self_mountpoint was stale or None — BFS scan entire VFS tree
+        if !detached {
+            Self::remove_from_vfs_tree_bfs(self);
         }
 
         self.mountpoints.lock().clear();
@@ -1199,6 +1253,42 @@ impl MountFS {
         };
         drop(evicted);
         self.inner_filesystem.on_umount();
+    }
+
+    /// BFS scan the whole VFS mount tree to remove any entry where
+    /// Arc::ptr_eq matches self.  Used when self_mountpoint is stale/None
+    /// but the mount is still visible in some parent's mountpoints.
+    fn remove_from_vfs_tree_bfs(self_ref: &Arc<MountFS>) {
+        let root = crate::fs::vfs_root();
+        let mut queue: alloc::vec::Vec<Arc<MountFS>> = alloc::vec![root];
+        let mut idx = 0usize;
+        while idx < queue.len() {
+            let current = &queue[idx];
+            idx += 1;
+            let mut mps = current.mountpoints.lock();
+            let mut dead_keys: alloc::vec::Vec<InodeId> = alloc::vec::Vec::new();
+            for (ino, child) in mps.iter() {
+                if Arc::ptr_eq(child, self_ref) {
+                    dead_keys.push(*ino);
+                }
+            }
+            for k in &dead_keys {
+                mps.remove(k);
+            }
+            if !dead_keys.is_empty() {
+                log::warn!(
+                    "MountFS::detach: BFS removed self from parent 0x{:x} (keys={:?})",
+                    Arc::as_ptr(current) as usize, dead_keys
+                );
+                drop(mps);
+                return;
+            }
+            // collect children for further BFS
+            let children: alloc::vec::Vec<Arc<MountFS>> = mps.values().cloned().collect();
+            drop(mps);
+            queue.extend(children);
+        }
+        log::warn!("MountFS::detach: BFS scan did not find self in any mountpoints tree");
     }
 
     // ── 属性访问 ───────────────────────────────────────────────────

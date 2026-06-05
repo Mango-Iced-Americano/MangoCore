@@ -533,7 +533,15 @@ fn propagate_to_mount(
                 new_mount.set_mount_path(Some(mount_path.clone()));
                 super::mount::MOUNT_LIST.insert(mount_path.as_str(), new_mount.clone(), Some(ino));
 
-                let _old = target.overmount_and_add(ino, new_mount.clone());
+                // Use add_mount (not overmount_and_add) to avoid orphaning an
+                // existing mount at this inode. If the inode is already occupied,
+                // another peer already propagated here — skip gracefully.
+                if target.add_mount(ino, new_mount.clone()).is_err() {
+                    // Clean up MOUNT_LIST entry for failed propagation
+                    super::mount::MOUNT_LIST.remove_fs(&new_mount);
+                    new_mount.set_self_mountpoint(None);
+                    return None;
+                }
 
                 finish_propagated_mount(&new_mount, target, source_child_group, as_slave);
                 return Some(new_mount);
@@ -586,16 +594,17 @@ fn finish_propagated_mount(
 ///
 /// Uses proper detach via umount_inner(false) instead of raw remove_mount
 /// to ensure complete cleanup (MOUNT_LIST, peer/slave registry, caches).
-pub fn propagate_umount(source: &Arc<MountFS>, mountpoint_id: InodeId) {
+pub fn propagate_umount(source: &Arc<MountFS>, mountpoint_id: InodeId, child_name: Option<&str>) {
     const MAX_DEPTH: usize = 32;
     let mut visited: Vec<usize> = Vec::new();
     visited.push(Arc::as_ptr(source) as usize);
-    propagate_umount_inner(source, mountpoint_id, &mut visited, MAX_DEPTH);
+    propagate_umount_inner(source, mountpoint_id, child_name, &mut visited, MAX_DEPTH);
 }
 
 fn propagate_umount_inner(
     source: &Arc<MountFS>,
     mountpoint_id: InodeId,
+    child_name: Option<&str>,
     visited: &mut Vec<usize>,
     max_depth: usize,
 ) {
@@ -609,7 +618,11 @@ fn propagate_umount_inner(
 
     // Propagate to shared peers
     for peer in get_peers(source) {
-        if let Some(child) = find_child_mount_by_id(&peer, mountpoint_id) {
+        let child = find_child_mount_by_id(&peer, mountpoint_id)
+            .or_else(|| {
+                child_name.and_then(|name| find_child_mount_by_name(&peer, name))
+            });
+        if let Some(child) = child {
             if matches!(
                 child.umount_inner(false, false),
                 Err(crate::utils::error::SyscallErr::EBUSY)
@@ -626,7 +639,11 @@ fn propagate_umount_inner(
         if visited.contains(&slave_ptr) {
             continue;
         }
-        if let Some(child) = find_child_mount_by_id(&slave, mountpoint_id) {
+        let child = find_child_mount_by_id(&slave, mountpoint_id)
+            .or_else(|| {
+                child_name.and_then(|name| find_child_mount_by_name(&slave, name))
+            });
+        if let Some(child) = child {
             if matches!(
                 child.umount_inner(false, false),
                 Err(crate::utils::error::SyscallErr::EBUSY)
@@ -637,7 +654,7 @@ fn propagate_umount_inner(
         // If slave is SharedSlave, recurse to propagate to slave's peers
         if slave.propagation().is_shared() {
             visited.push(slave_ptr);
-            propagate_umount_inner(&slave, mountpoint_id, visited, max_depth);
+            propagate_umount_inner(&slave, mountpoint_id, child_name, visited, max_depth);
         }
     }
 }
@@ -645,4 +662,13 @@ fn propagate_umount_inner(
 /// Look up a child mount in a MountFS by its mountpoint inode_id.
 fn find_child_mount_by_id(parent: &Arc<MountFS>, inode_id: InodeId) -> Option<Arc<MountFS>> {
     parent.mountpoints.lock().get(&inode_id).cloned()
+}
+
+/// Fallback: look up a child mount by the directory name under the parent's root.
+/// Used when propagation target inode IDs differ between source and peer.
+fn find_child_mount_by_name(parent: &Arc<MountFS>, name: &str) -> Option<Arc<MountFS>> {
+    let root = parent.covered_root_inode();
+    let inner_inode = root.inner_inode.find(name).ok()?;
+    let ino = inner_inode.metadata().ok()?.inode_id;
+    find_child_mount_by_id(parent, ino)
 }
