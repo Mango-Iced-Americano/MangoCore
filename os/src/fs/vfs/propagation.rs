@@ -592,19 +592,18 @@ fn finish_propagated_mount(
 
 /// Propagate an umount event to all shared peers and slaves.
 ///
-/// Uses proper detach via umount_inner(false) instead of raw remove_mount
-/// to ensure complete cleanup (MOUNT_LIST, peer/slave registry, caches).
-pub fn propagate_umount(source: &Arc<MountFS>, mountpoint_id: InodeId, child_name: Option<&str>) {
+/// DragonOS-style: lookup by InodeId only; silently skip if the child mount
+/// is not found on a peer (it may not have been propagated there yet).
+pub fn propagate_umount(source: &Arc<MountFS>, mountpoint_id: InodeId) {
     const MAX_DEPTH: usize = 32;
     let mut visited: Vec<usize> = Vec::new();
     visited.push(Arc::as_ptr(source) as usize);
-    propagate_umount_inner(source, mountpoint_id, child_name, &mut visited, MAX_DEPTH);
+    propagate_umount_inner(source, mountpoint_id, &mut visited, MAX_DEPTH);
 }
 
 fn propagate_umount_inner(
     source: &Arc<MountFS>,
     mountpoint_id: InodeId,
-    child_name: Option<&str>,
     visited: &mut Vec<usize>,
     max_depth: usize,
 ) {
@@ -616,13 +615,8 @@ fn propagate_umount_inner(
         return;
     }
 
-    // Propagate to shared peers
     for peer in get_peers(source) {
-        let child = find_child_mount_by_id(&peer, mountpoint_id)
-            .or_else(|| {
-                child_name.and_then(|name| find_child_mount_by_name(&peer, name))
-            });
-        if let Some(child) = child {
+        if let Some(child) = find_child_mount_by_id(&peer, mountpoint_id) {
             if matches!(
                 child.umount_inner(false, false),
                 Err(crate::utils::error::SyscallErr::EBUSY)
@@ -639,22 +633,7 @@ fn propagate_umount_inner(
         if visited.contains(&slave_ptr) {
             continue;
         }
-        let child_opt = find_child_mount_by_id(&slave, mountpoint_id)
-            .or_else(|| {
-                child_name.and_then(|name| find_child_mount_by_name(&slave, name))
-            });
-
-        // Extract local child_name before consuming child_opt — the name
-        // may differ from the original source tree if inode IDs were remapped.
-        let local_child_name = child_opt.as_ref().and_then(|c| {
-            c.mount_path().and_then(|p| {
-                let trimmed = p.trim_end_matches('/');
-                if trimmed.is_empty() || trimmed == "/" { None }
-                else { trimmed.rsplit('/').next().filter(|s| !s.is_empty()).map(|s| alloc::string::String::from(s)) }
-            })
-        });
-
-        if let Some(child) = child_opt {
+        if let Some(child) = find_child_mount_by_id(&slave, mountpoint_id) {
             if matches!(
                 child.umount_inner(false, false),
                 Err(crate::utils::error::SyscallErr::EBUSY)
@@ -664,7 +643,7 @@ fn propagate_umount_inner(
         }
         if slave.propagation().is_shared() {
             visited.push(slave_ptr);
-            propagate_umount_inner(&slave, mountpoint_id, local_child_name.as_deref(), visited, max_depth);
+            propagate_umount_inner(&slave, mountpoint_id, visited, max_depth);
         }
     }
 }
@@ -672,13 +651,4 @@ fn propagate_umount_inner(
 /// Look up a child mount in a MountFS by its mountpoint inode_id.
 fn find_child_mount_by_id(parent: &Arc<MountFS>, inode_id: InodeId) -> Option<Arc<MountFS>> {
     parent.mountpoints.lock().get(&inode_id).cloned()
-}
-
-/// Fallback: look up a child mount by the directory name under the parent's root.
-/// Used when propagation target inode IDs differ between source and peer.
-fn find_child_mount_by_name(parent: &Arc<MountFS>, name: &str) -> Option<Arc<MountFS>> {
-    let root = parent.covered_root_inode();
-    let inner_inode = root.inner_inode.find(name).ok()?;
-    let ino = inner_inode.metadata().ok()?.inode_id;
-    find_child_mount_by_id(parent, ino)
 }
