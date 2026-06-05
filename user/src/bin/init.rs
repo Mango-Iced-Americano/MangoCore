@@ -5,6 +5,7 @@ extern crate alloc;
 use alloc::format;
 use user_lib::*;
 use user_lib::syscall::sys_mkdirat;
+use user_lib::syscall::TimeSpec;
 
 const MS_BIND: usize = 4096;
 const AT_FDCWD: isize = -100;
@@ -37,9 +38,31 @@ fn try_exec(path: &str, environ: &[*const u8]) -> bool {
     }
 }
 
+fn set_system_time(secs: usize, nsecs: usize) {
+    // raw ecall: clock_settime(CLOCK_REALTIME=0, timespec)
+    let ts = TimeSpec { tv_sec: secs, tv_nsec: nsecs };
+    let ret: isize;
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("a7") 112usize,       // SYSCALL_CLOCK_SETTIME
+            in("a0") 0usize,          // CLOCK_REALTIME
+            in("a1") &ts as *const _ as usize,
+            lateout("a0") ret,
+            options(nostack),
+        );
+    }
+    if ret < 0 {
+        println!("[init] clock_settime failed: {}", -ret);
+    }
+}
+
 #[no_mangle]
 fn main(_argc: usize, _argv: &[&str]) -> i32 {
     println!("[init] MangoCore stage-1 boot (initramfs mode)");
+
+    // 设系统时间用于 TLS 证书验证
+    set_system_time(1749049200, 0); // 2026-06-05T00:00:00 UTC
 
     println!("[init] /dev /proc /tmp mounted by kernel, setting up bind mounts...");
 
