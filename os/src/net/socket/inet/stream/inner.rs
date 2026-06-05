@@ -146,6 +146,7 @@ pub enum Init {
     Bound {
         socket: Box<tcp::Socket<'static>>,
         local: IpEndpoint,
+        pending_error: Option<SyscallErr>,
     },
 }
 

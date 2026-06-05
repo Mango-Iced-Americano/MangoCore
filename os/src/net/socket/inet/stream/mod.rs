@@ -352,6 +352,27 @@ impl Socket for TcpSocket {
         ret
     }
 
+    fn take_error(&self) -> Option<SyscallErr> {
+        NET_INTERFACE.try_poll();
+        let mut inner = self.inner.lock();
+        let inner_ref = &mut *inner;
+        // 如果仍处于 Connecting 状态，先尝试完成连接
+        if let Inner::Connecting(c) = inner_ref {
+            if c.is_connected() || c.failure_reason().is_some() {
+                let _ = core::mem::replace(inner_ref, Inner::Closed(Closed::new(IpVersion::Ipv4)));
+                // inner was replaced, can't use it anymore
+                drop(inner);
+                let _ = self.finish_connecting();
+                inner = self.inner.lock();
+            }
+        }
+        // 从 Init::Bound 取出 pending_error
+        match &mut *inner {
+            Inner::Init(Init::Bound { pending_error, .. }) => pending_error.take(),
+            _ => None,
+        }
+    }
+
     fn accept(&self, sockfd: u32, addr: usize, addrlen: usize) -> SyscallRet {
         NET_INTERFACE.poll();
         let mut inner = self.inner.lock();

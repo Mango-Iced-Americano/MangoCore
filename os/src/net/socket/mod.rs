@@ -312,6 +312,8 @@ pub trait Socket: Send + Sync {
     fn try_connect(&self) -> Result<isize, SyscallErr> {
         Err(SyscallErr::EOPNOTSUPP)
     }
+    /// 读取并清除 socket 的待处理错误（用于 getsockopt(SO_ERROR)）
+    fn take_error(&self) -> Option<SyscallErr> { None }
     fn accept(&self, sockfd: u32, addr: usize, addrlen: usize) -> SyscallRet;
     fn socket_type(&self) -> PSOCK;
     fn recv_buf_size(&self) -> usize;

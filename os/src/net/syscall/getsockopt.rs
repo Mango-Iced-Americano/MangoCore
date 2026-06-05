@@ -36,13 +36,10 @@ pub fn sys_getsockopt(
     }
     match (level, optname) {
         (SOL_SOCKET, SO_ERROR) => {
-            // 非阻塞 connect 后应用调 getsockopt(SO_ERROR) 确认连接状态
-            // 成功或仍在等待 → 返回 0；失败 → 返回正 errno
-            let so_error = match socket.try_connect() {
-                Ok(_) => 0u32,
-                Err(SyscallErr::EAGAIN) | Err(SyscallErr::EOPNOTSUPP) => 0u32,
-                Err(e) => (-(e as isize)) as u32,
-            };
+            // 读并清除 socket 待处理错误（非阻塞 connect 失败后 getsockopt(SO_ERROR)）
+            let so_error = socket.take_error()
+                .map(|e| (-(e as isize)) as u32)
+                .unwrap_or(0);
             if optval_ptr.write(token, &so_error).is_err()
                 || optlen_ptr.write(token, &4u32).is_err()
             {
