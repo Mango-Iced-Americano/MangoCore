@@ -533,11 +533,44 @@ fn propagate_to_mount(
                 new_mount.set_mount_path(Some(mount_path.clone()));
                 super::mount::MOUNT_LIST.insert(mount_path.as_str(), new_mount.clone(), Some(ino));
 
-                // Use add_mount (not overmount_and_add) to avoid orphaning an
-                // existing mount at this inode. If the inode is already occupied,
-                // another peer already propagated here — skip gracefully.
-                if target.add_mount(ino, new_mount.clone()).is_err() {
-                    // Clean up MOUNT_LIST entry for failed propagation
+                // Use add_mount (not overmount_and_add) to avoid orphaning
+                // existing mounts. On EEXIST: if the existing mount is a
+                // propagation duplicate (same group), skip. Otherwise descend
+                // into the existing mount's root and mount there.
+                if let Err(_) = target.add_mount(ino, new_mount.clone()) {
+                    let existing = {
+                        let mps = target.mountpoints.lock();
+                        mps.get(&ino).cloned()
+                    };
+                    if let Some(ref existing_mnt) = existing {
+                        let dup = if as_slave {
+                            existing_mnt.propagation().master_group_id() == source_child_group
+                                && source_child_group != 0
+                        } else {
+                            existing_mnt.propagation().peer_group_id() == source_child_group
+                                && source_child_group != 0
+                        };
+                        if dup {
+                            // Same propagation already received — skip
+                            super::mount::MOUNT_LIST.remove_fs(&new_mount);
+                            new_mount.set_self_mountpoint(None);
+                            return None;
+                        }
+                        // Descend into existing mount's root
+                        let ex_root = existing_mnt.covered_root_inode();
+                        let ex_path = existing_mnt.mount_path().unwrap_or_default();
+                        if let Ok(descend) = ex_root.mount_subtree_inner(
+                            new_child.inner_filesystem(),
+                            new_child.root_inner_inode(),
+                            super::MountFlags::empty(),
+                            Some(ex_path),
+                            false,
+                        ) {
+                            finish_propagated_mount(&descend, existing_mnt, source_child_group, as_slave);
+                            return Some(descend);
+                        }
+                    }
+                    // Cleanup on failure
                     super::mount::MOUNT_LIST.remove_fs(&new_mount);
                     new_mount.set_self_mountpoint(None);
                     return None;

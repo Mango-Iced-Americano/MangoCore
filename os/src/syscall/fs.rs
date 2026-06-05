@@ -2778,14 +2778,17 @@ fn do_bind_mount(
     // Propagate mount event. The propagation source is the mount that HOLDS
     // the mountpoint. If the target is itself a mount root (e.g. bind17's
     // make-rshared parent1/child1), target_mfs_inode.mount_fs is the child
-    // mount. Walk up via self_mountpoint to reach the actual parent.
-    // Only walk up when the child mount is Shared but orphan (no peers).
-    // Private child mounts should never trigger propagation at all.
+    // mount. Walk up via self_mountpoint only when the child has neither
+    // peers NOR slaves — a shared mount with slaves must stay as source
+    // so slave propagation receives events from the correct peer group.
     let (target_parent_mfs, target_ino) =
         if target_mfs_inode.is_mountpoint_root() {
             let child_mfs = target_mfs_inode.mount_fs.clone();
             let child_is_orphan_shared = child_mfs.propagation().is_shared()
-                && vfs::propagation::get_peers(&child_mfs).is_empty();
+                && vfs::propagation::get_peers(&child_mfs).is_empty()
+                && vfs::propagation::get_slaves(
+                    child_mfs.propagation().peer_group_id()
+                ).is_empty();
             if child_is_orphan_shared {
                 if let Some(mp) = child_mfs.self_mountpoint() {
                     let ino = match mp.inner_inode.metadata() {
