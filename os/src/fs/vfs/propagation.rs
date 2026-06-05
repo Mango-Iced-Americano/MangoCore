@@ -627,13 +627,15 @@ pub fn propagate_umount(source: &Arc<MountFS>, mountpoint_id: InodeId, removed: 
     const MAX_DEPTH: usize = 32;
     let mut visited: Vec<usize> = Vec::new();
     visited.push(Arc::as_ptr(source) as usize);
-    propagate_umount_inner(source, mountpoint_id, removed, &mut visited, MAX_DEPTH);
+    let expected_group = removed.propagation().peer_group_id();
+    propagate_umount_inner(source, mountpoint_id, removed, expected_group, &mut visited, MAX_DEPTH);
 }
 
 fn propagate_umount_inner(
     source: &Arc<MountFS>,
     mountpoint_id: InodeId,
     removed: &Arc<MountFS>,
+    expected_group: u32,
     visited: &mut Vec<usize>,
     max_depth: usize,
 ) {
@@ -645,19 +647,14 @@ fn propagate_umount_inner(
         return;
     }
 
-    let removed_gid = removed.propagation().peer_group_id();
-    let removed_master = removed.propagation().master_group_id();
-
     for peer in get_peers(source) {
-        // Skip self-bind peer: when parent and child share a peer group,
-        // looking up the mountpoint returns the parent mount, not a clone.
         let Some(child) = find_child_mount_by_id(&peer, mountpoint_id) else { continue };
         if Arc::ptr_eq(&child, removed) { continue; }
-        // Filter: only unmount candidates that share the removed mount's group
-        if removed_gid != 0 {
+        // Filter by expected group (per-level, not original removed's group)
+        if expected_group != 0 {
             let cg = child.propagation().peer_group_id();
             let cm = child.propagation().master_group_id();
-            if cg != removed_gid && cm != removed_gid { continue; }
+            if cg != expected_group && cm != expected_group { continue; }
         }
         child.umount_at_peer();
     }
@@ -668,15 +665,18 @@ fn propagate_umount_inner(
         if visited.contains(&slave_ptr) { continue; }
         let Some(child) = find_child_mount_by_id(&slave, mountpoint_id) else { continue };
         if Arc::ptr_eq(&child, removed) { continue; }
-        if removed_gid != 0 {
+        if expected_group != 0 {
             let cg = child.propagation().peer_group_id();
             let cm = child.propagation().master_group_id();
-            if cg != removed_gid && cm != removed_gid { continue; }
+            if cg != expected_group && cm != expected_group { continue; }
         }
+        let next_group = child.propagation().peer_group_id();
         child.umount_at_peer();
         if slave.propagation().is_shared() {
             visited.push(slave_ptr);
-            propagate_umount_inner(&slave, mountpoint_id, removed, visited, max_depth);
+            // Pass child's group as the next expected_group — multi-level
+            // slave chains allocate fresh peer groups per level
+            propagate_umount_inner(&slave, mountpoint_id, removed, next_group, visited, max_depth);
         }
     }
 }
