@@ -2876,38 +2876,9 @@ fn apply_propagation_change(
     prop_type: vfs::propagation::PropagationType,
     recursive: bool,
 ) {
-    match prop_type {
-        vfs::propagation::PropagationType::Shared => {
-            let master = if mnt_fs.propagation().is_slave() {
-                Some(mnt_fs.propagation().master_group_id())
-            } else {
-                None
-            };
-            let gid = vfs::propagation::allocate_group_id();
-            vfs::propagation::install_propagation(mnt_fs, Some(gid), master);
-        }
-        vfs::propagation::PropagationType::Slave => {
-            let master = if mnt_fs.propagation().is_slave() {
-                mnt_fs.propagation().master_group_id()
-            } else {
-                mnt_fs.propagation().peer_group_id()
-            };
-            let peer = if mnt_fs.propagation().is_shared() {
-                Some(mnt_fs.propagation().peer_group_id())
-            } else {
-                None
-            };
-            vfs::propagation::install_propagation(mnt_fs, peer, Some(master));
-        }
-        _ => {
-            // Private or Unbindable: clear all registrations
-            vfs::propagation::install_propagation(mnt_fs, None, None);
-            // install_propagation sets to Private by default, fix for Unbindable
-            if prop_type == vfs::propagation::PropagationType::Unbindable {
-                mnt_fs.propagation().set_prop_type_value(vfs::propagation::PropagationType::Unbindable);
-            }
-        }
-    }
+    // DragonOS: delegate to set_propagation_type for correct idempotent
+    // group handling (Shared→Shared no-op, SharedSlave→Slave keeps master).
+    vfs::propagation::set_propagation_type(mnt_fs, prop_type);
     if recursive {
         set_propagation_recursive(mnt_fs, prop_type);
     }
@@ -3451,8 +3422,17 @@ pub fn sys_mount(
         }
 
         // Propagate moved mount tree to new parent's peers.
-        // collect_rbind_snapshot captures the subtree BEFORE we return.
+        // DragonOS: mount into shared parent makes the moved root shared
+        // in the parent's peer group. Ensure src_mnt has a non-zero peer
+        // group before propagation so clones are created as shared.
         if new_parent_mnt.propagation().is_shared() {
+            let src_peer = src_mnt.propagation().peer_group_id();
+            if src_peer == 0 {
+                vfs::propagation::set_propagation_type(
+                    &src_mnt,
+                    vfs::propagation::PropagationType::Shared,
+                );
+            }
             let snapshot = collect_rbind_snapshot(
                 src_mnt.clone(),
                 src_mnt.mountpoint_root_inode(),

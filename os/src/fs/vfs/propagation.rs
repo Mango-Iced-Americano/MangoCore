@@ -380,16 +380,23 @@ pub fn set_propagation_type(mfs: &Arc<MountFS>, t: PropagationType) {
         PropagationType::Shared => {
             // Preserve slave state: Slave+Shared = SharedSlave
             let master = if old_type.is_slave() { Some(old_master) } else { None };
-            unregister_peer_mount(mfs);
-            unregister_slave_mount(mfs);
-            let new_peer = allocate_group_id();
-            set_propagation_state_no_register(mfs, Some(new_peer), master);
-            register_current_propagation(mfs);
+            if old_type.is_shared() && old_peer != 0 {
+                // Already shared: idempotent, keep existing peer group.
+                // DragonOS/Linux: make-rshared on already-shared is a no-op.
+                set_propagation_state_no_register(mfs, Some(old_peer), master);
+                register_current_propagation(mfs);
+            } else {
+                unregister_peer_mount(mfs);
+                unregister_slave_mount(mfs);
+                let new_peer = allocate_group_id();
+                set_propagation_state_no_register(mfs, Some(new_peer), master);
+                register_current_propagation(mfs);
+            }
         }
         PropagationType::Slave => {
-            // Master = old peer group if old was Shared/SharedSlave
-            let master = if old_type.is_shared() { old_peer }
-                else { old_master };
+            // Master = old peer group if old was Shared; otherwise old_master.
+            // SharedSlave → Slave: keep existing master, drop peer.
+            let master = if old_type.is_shared() { old_peer } else { old_master };
             unregister_peer_mount(mfs);
             unregister_slave_mount(mfs);
             let new_master = if master != 0 { Some(master) } else { None };
