@@ -1085,7 +1085,7 @@ impl MountFS {
 
         // Phase 3: propagate to peers/slaves (BEFORE finishing self cleanup)
         if do_propagate {
-            propagate_umount(parent_mfs, inode_id);
+            propagate_umount(parent_mfs, inode_id, self);
         }
 
         // Phase 4: cleanup self
@@ -1194,7 +1194,7 @@ impl MountFS {
         parent_mfs.remove_mount(inode_id);
 
         if do_propagate {
-            propagate_umount(parent_mfs, inode_id);
+            propagate_umount(parent_mfs, inode_id, self);
         }
 
         self.finish_umount_cleanup();

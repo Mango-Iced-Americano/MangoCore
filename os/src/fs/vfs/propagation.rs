@@ -631,19 +631,20 @@ fn finish_propagated_mount(
 }
 
 /// Propagate an umount event to all shared peers and slaves.
-///
-/// DragonOS-style: lookup by InodeId only; silently skip if the child mount
-/// is not found on a peer (it may not have been propagated there yet).
-pub fn propagate_umount(source: &Arc<MountFS>, mountpoint_id: InodeId) {
+/// `removed` is the mount being unmounted — used to skip the source peer
+/// (self-bind creates a peer relationship between parent and child) and
+/// to filter candidates by group ID.
+pub fn propagate_umount(source: &Arc<MountFS>, mountpoint_id: InodeId, removed: &Arc<MountFS>) {
     const MAX_DEPTH: usize = 32;
     let mut visited: Vec<usize> = Vec::new();
     visited.push(Arc::as_ptr(source) as usize);
-    propagate_umount_inner(source, mountpoint_id, &mut visited, MAX_DEPTH);
+    propagate_umount_inner(source, mountpoint_id, removed, &mut visited, MAX_DEPTH);
 }
 
 fn propagate_umount_inner(
     source: &Arc<MountFS>,
     mountpoint_id: InodeId,
+    removed: &Arc<MountFS>,
     visited: &mut Vec<usize>,
     max_depth: usize,
 ) {
@@ -655,26 +656,38 @@ fn propagate_umount_inner(
         return;
     }
 
+    let removed_gid = removed.propagation().peer_group_id();
+    let removed_master = removed.propagation().master_group_id();
+
     for peer in get_peers(source) {
-        // DragonOS umount_at_peer: remove child by InodeId + narrow cleanup.
-        // Silently skip if not found (peer may not have received propagation).
-        if let Some(child) = find_child_mount_by_id(&peer, mountpoint_id) {
-            child.umount_at_peer();
+        // Skip self-bind peer: when parent and child share a peer group,
+        // looking up the mountpoint returns the parent mount, not a clone.
+        let Some(child) = find_child_mount_by_id(&peer, mountpoint_id) else { continue };
+        if Arc::ptr_eq(&child, removed) { continue; }
+        // Filter: only unmount candidates that share the removed mount's group
+        if removed_gid != 0 {
+            let cg = child.propagation().peer_group_id();
+            let cm = child.propagation().master_group_id();
+            if cg != removed_gid && cm != removed_gid { continue; }
         }
+        child.umount_at_peer();
     }
 
     let master_gid = source.propagation().peer_group_id();
     for slave in get_slaves(master_gid) {
         let slave_ptr = Arc::as_ptr(&slave) as usize;
-        if visited.contains(&slave_ptr) {
-            continue;
+        if visited.contains(&slave_ptr) { continue; }
+        let Some(child) = find_child_mount_by_id(&slave, mountpoint_id) else { continue };
+        if Arc::ptr_eq(&child, removed) { continue; }
+        if removed_gid != 0 {
+            let cg = child.propagation().peer_group_id();
+            let cm = child.propagation().master_group_id();
+            if cg != removed_gid && cm != removed_gid { continue; }
         }
-        if let Some(child) = find_child_mount_by_id(&slave, mountpoint_id) {
-            child.umount_at_peer();
-        }
+        child.umount_at_peer();
         if slave.propagation().is_shared() {
             visited.push(slave_ptr);
-            propagate_umount_inner(&slave, mountpoint_id, visited, max_depth);
+            propagate_umount_inner(&slave, mountpoint_id, removed, visited, max_depth);
         }
     }
 }
