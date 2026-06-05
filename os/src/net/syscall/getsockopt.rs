@@ -6,7 +6,7 @@ use crate::utils::error::SyscallErr;
 
 use super::common::is_known_sockopt_level;
 use super::common::{SOL_IP, SOL_SOCKET, SOL_TCP, TCP_CONGESTION, TCP_INFO, TCP_MAXSEG};
-use super::common::{SO_RCVBUF, SO_RCVTIMEO, SO_REUSEADDR, SO_SNDBUF, SO_SNDTIMEO, SO_PEERCRED};
+use super::common::{SO_RCVBUF, SO_RCVTIMEO, SO_REUSEADDR, SO_SNDBUF, SO_SNDTIMEO, SO_PEERCRED, SO_ERROR};
 
 pub fn sys_getsockopt(
     sockfd: u32,
@@ -35,6 +35,16 @@ pub fn sys_getsockopt(
         return -(SyscallErr::EINVAL as isize);
     }
     match (level, optname) {
+        (SOL_SOCKET, SO_ERROR) => {
+            // 非阻塞 connect 后应用调 getsockopt(SO_ERROR) 确认连接状态
+            // 对 TCP socket，先 try_connect 完成状态过渡，再返回 0
+            let _ = socket.try_connect();
+            if optval_ptr.write(token, &0u32).is_err()
+                || optlen_ptr.write(token, &4u32).is_err()
+            {
+                return -(SyscallErr::EFAULT as isize);
+            }
+        }
         (SOL_TCP, TCP_MAXSEG) => {
             // return max tcp fregment size (MSS)
             let len = core::mem::size_of::<u32>();

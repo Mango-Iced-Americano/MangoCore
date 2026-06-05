@@ -81,6 +81,7 @@ impl Inner {
         };
 
         if let Err(e) = route_check(remote_endpoint.addr) {
+            log::info!("[tcp::connect] route_check failed for {:?}: {:?}", remote_endpoint.addr, e);
             let new_sock = Box::new(socket);
             return Err((Inner::Init(Init::Bound { socket: new_sock, local }), e));
         }

@@ -529,13 +529,13 @@ impl IndexNode for SocketFile {
     fn poll(&self, _private_data: &FilePrivateData) -> Result<usize, SyscallErr> {
         let mut revents: usize = 0;
         if self.inner.socket_r_ready() {
-            revents |= EPollEvent::EPOLLIN.bits();
+            revents |= EPollEvent::EPOLLIN.bits() | EPollEvent::EPOLLRDNORM.bits();
         }
         if self.inner.socket_w_ready() {
-            revents |= EPollEvent::EPOLLOUT.bits();
+            revents |= EPollEvent::EPOLLOUT.bits() | EPollEvent::EPOLLWRNORM.bits();
         }
         if self.inner.socket_hang_up() {
-            revents |= EPollEvent::EPOLLHUP.bits();
+            revents |= EPollEvent::EPOLLHUP.bits() | EPollEvent::EPOLLERR.bits();
         }
         Ok(revents)
     }
