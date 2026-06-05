@@ -298,6 +298,13 @@ impl Socket for TcpSocket {
             }
             Err((revert, err)) => {
                 *inner = revert;
+                // 连接失败：设 pollee 让 poll 立即返回 EPOLLOUT|EPOLLERR
+                if err != SyscallErr::EAGAIN {
+                    self.pollee.store(
+                        EPollEvent::EPOLLOUT.bits() | EPollEvent::EPOLLERR.bits(),
+                        Ordering::Relaxed,
+                    );
+                }
                 Err(err)
             }
         }

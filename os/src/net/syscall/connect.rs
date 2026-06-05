@@ -53,7 +53,10 @@ pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
     match socket.connect(&endpoint) {
         Ok(n) => return n as isize,
         Err(SyscallErr::EAGAIN) => {} // 需要 wait_io
-        Err(e) => return -(e as isize),
+        Err(e) => {
+            log::info!("[sys_connect] connect failed: {:?}", e);
+            return -(e as isize)
+        }
     }
 
     // 握手未完成，进入等待队列等待状态变化
@@ -61,6 +64,7 @@ pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
         if is_nonblock {
             // Linux 语义：非阻塞 connect 返回 EINPROGRESS（不是 EAGAIN）
             // 应用通过 poll(EPOLLOUT) 等待连接完成
+            log::info!("[sys_connect] nonblock → EINPROGRESS");
             return -(SyscallErr::EINPROGRESS as isize);
         } else {
             WaitQueue::wait_until_interruptible(wait_queue, || match socket.try_connect() {
