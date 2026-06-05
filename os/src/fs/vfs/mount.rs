@@ -319,36 +319,11 @@ impl MountFSInode {
             super::propagation::set_shared_new_group(&new_mount_fs);
         }
 
-        // DragonOS chain: on EEXIST, descend into existing top mount's root.
-        // This expresses stacked mounts (self-bind + overlay) without changing
-        // the BTreeMap to a multi-value container.
-        const MAX_STACK: usize = 32;
-        let mut target_parent = self.mount_fs.clone();
-        let mut target_ino = inode_id;
-        for _ in 0..MAX_STACK {
-            match target_parent.add_mount(target_ino, new_mount_fs.clone()) {
-                Ok(()) => break,
-                Err(SyscallErr::EEXIST) => {
-                    let existing = target_parent.mountpoints.lock()
-                        .get(&target_ino).cloned();
-                    if let Some(ex) = existing {
-                        target_parent = ex;
-                        let root_md = target_parent.root_inner_inode().metadata()?;
-                        target_ino = root_md.inode_id;
-                    } else {
-                        return Err(SyscallErr::EEXIST);
-                    }
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        // Update backref to point to final target_parent
-        let backref = MountFSInode::new(
-            self.inner_inode.clone(),
-            target_parent.clone(),
-        );
+        let backref = MountFSInode::new(self.inner_inode.clone(), self.mount_fs.clone());
         counters::MFSI_FROM_BACKREF.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         new_mount_fs.set_self_mountpoint(Some(backref));
+
+        self.mount_fs.add_mount(inode_id, new_mount_fs.clone())?;
 
         new_mount_fs.set_mount_path(mount_path);
 
