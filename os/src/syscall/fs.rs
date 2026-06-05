@@ -2527,51 +2527,6 @@ pub fn sys_fchdir(fd: usize) -> isize {
     SUCCESS
 }
 
-pub fn sys_flock(fd: usize, operation: u32) -> isize {
-    let task = current_task().unwrap();
-    let files_ref = task.process.files();
-    let fd_table = files_ref.lock();
-    let file = match fd_table.get_file(fd) {
-        Ok(file) => match file.try_clone() { Some(f) => f, None => return EBADF, },
-        Err(e) => return -(e as isize),
-    };
-    drop(fd_table);
-
-    let op = operation & !LOCK_NB;
-    if !matches!(op, LOCK_SH | LOCK_EX | LOCK_UN) {
-        return EINVAL;
-    }
-
-    let key = match fcntl_lock_key(&file) {
-        Ok(key) => key,
-        Err(errno) => return errno,
-    };
-    let owner_description = file.description_id();
-
-    if op == LOCK_UN {
-        release_flock_description(owner_description);
-        return SUCCESS;
-    }
-
-    let exclusive = op == LOCK_EX;
-    let mut locks = FLOCK_LOCKS.lock();
-    let conflict = locks.iter().any(|lock| {
-        lock.key == key
-            && lock.owner_description != owner_description
-            && (exclusive || lock.exclusive)
-    });
-    if conflict {
-        return EWOULDBLOCK;
-    }
-    locks.retain(|lock| !(lock.key == key && lock.owner_description == owner_description));
-    locks.push(FlockLock {
-        key,
-        owner_description,
-        exclusive,
-    });
-    SUCCESS
-}
-
 pub fn sys_openat(dirfd: usize, path: *const u8, flags: u32, mode: u32) -> isize {
     let mode_bits = mode;
     let task = current_task().unwrap();

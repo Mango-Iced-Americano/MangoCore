@@ -1074,8 +1074,8 @@ impl MountFS {
         let old = mps.remove(&inode_id);
         if let Some(ref old_mfs) = old {
             drop(mps);
-            propagation::unregister_peer_mount(old_mfs);
-            propagation::unregister_slave_mount(old_mfs);
+            unregister_peer_mount(old_mfs);
+            unregister_slave_mount(old_mfs);
             MOUNT_LIST.remove_fs(old_mfs);
             old_mfs.set_self_mountpoint(None);
             mps = self.mountpoints.lock();

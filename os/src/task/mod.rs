@@ -54,6 +54,7 @@ pub use registry::{
 pub use signal::*;
 pub use sleep::{sleep_relative_interruptible, sleep_until_interruptible};
 pub use task::{
+    FsStatus, PosixTimer, RobustList, Rusage, SeccompFilterInsn, TaskControlBlock, TaskStatus,
     UtsNamespace,
 };
 pub use net_namespace::{INIT_NET_NAMESPACE, NetNamespace};
