@@ -2776,58 +2776,26 @@ fn do_bind_mount(
     vfs::propagation::configure_propagation_no_register(&mnt_fs, desired_peer, desired_master);
 
     // Propagate mount event. The propagation source is the mount that HOLDS
-    // the mountpoint. If the target is itself a mount root (e.g. bind17's
-    // make-rshared parent1/child1), target_mfs_inode.mount_fs is the child
-    // mount. Walk up via self_mountpoint only when the child has neither
-    // peers NOR slaves — a shared mount with slaves must stay as source
-    // so slave propagation receives events from the correct peer group.
+    // the mountpoint. When the target is itself a mount root, the new mount
+    // is created inside that existing mount (chain: parent → old → new),
+    // so the propagation source must be the existing mount (not its parent).
+    // The walk-up heuristic below was incorrect — it switched the source to
+    // the grandparent, losing the correct mountpoint inode.
     let (target_parent_mfs, target_ino) =
         if target_mfs_inode.is_mountpoint_root() {
+            // target is an existing mount root → propagate FROM it
             let child_mfs = target_mfs_inode.mount_fs.clone();
-            let child_is_orphan_shared = child_mfs.propagation().is_shared()
-                && vfs::propagation::get_peers(&child_mfs).is_empty()
-                && vfs::propagation::get_slaves(
-                    child_mfs.propagation().peer_group_id()
-                ).is_empty();
-            if child_is_orphan_shared {
-                if let Some(mp) = child_mfs.self_mountpoint() {
-                    let ino = match mp.inner_inode.metadata() {
-                        Ok(md) => md.inode_id,
-                        Err(_) => {
-                            vfs::propagation::unregister_peer_mount(&mnt_fs);
-                            vfs::propagation::unregister_slave_mount(&mnt_fs);
-                            mnt_fs.propagation().set_peer_group_id(0);
-                            mnt_fs.propagation().set_master_group_id(0);
-                            return Err(-(SyscallErr::EIO as isize));
-                        }
-                    };
-                    (mp.mount_fs.clone(), ino)
-                } else {
-                    let md = match target_inode.metadata() {
-                        Ok(md) => md,
-                        Err(_) => {
-                            vfs::propagation::unregister_peer_mount(&mnt_fs);
-                            vfs::propagation::unregister_slave_mount(&mnt_fs);
-                            mnt_fs.propagation().set_peer_group_id(0);
-                            mnt_fs.propagation().set_master_group_id(0);
-                            return Err(-(SyscallErr::EIO as isize));
-                        }
-                    };
-                    (child_mfs.clone(), md.inode_id)
+            let md = match target_inode.metadata() {
+                Ok(md) => md,
+                Err(_) => {
+                    vfs::propagation::unregister_peer_mount(&mnt_fs);
+                    vfs::propagation::unregister_slave_mount(&mnt_fs);
+                    mnt_fs.propagation().set_peer_group_id(0);
+                    mnt_fs.propagation().set_master_group_id(0);
+                    return Err(-(SyscallErr::EIO as isize));
                 }
-            } else {
-                let md = match target_inode.metadata() {
-                    Ok(md) => md,
-                    Err(_) => {
-                        vfs::propagation::unregister_peer_mount(&mnt_fs);
-                        vfs::propagation::unregister_slave_mount(&mnt_fs);
-                        mnt_fs.propagation().set_peer_group_id(0);
-                        mnt_fs.propagation().set_master_group_id(0);
-                        return Err(-(SyscallErr::EIO as isize));
-                    }
-                };
-                (child_mfs, md.inode_id)
-            }
+            };
+            (child_mfs, md.inode_id)
         } else {
             let md = match target_inode.metadata() {
                 Ok(md) => md,
