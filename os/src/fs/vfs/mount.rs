@@ -1080,16 +1080,12 @@ impl MountFS {
         }
 
         // Phase 2: get parent edge & detach from parent mountpoints
-        let parent_info = self.parent_edge().ok();
-        if let Some((ref parent_mfs, inode_id)) = parent_info {
-            parent_mfs.remove_mount(inode_id);
-        }
+        let (ref parent_mfs, inode_id) = self.parent_edge()?;
+        parent_mfs.remove_mount(inode_id);
 
         // Phase 3: propagate to peers/slaves (BEFORE finishing self cleanup)
         if do_propagate {
-            if let Some((ref parent_mfs, inode_id)) = parent_info {
-                propagate_umount(parent_mfs, inode_id);
-            }
+            propagate_umount(parent_mfs, inode_id);
         }
 
         // Phase 4: cleanup self
@@ -1123,18 +1119,40 @@ impl MountFS {
     }
 
     /// DragonOS-style narrow cleanup for propagation. Removes self from
-    /// parent mountpoints, then does minimal tear-down — no EBUSY check,
-    /// no recursive propagation, no dump.
+    /// parent mountpoints, recursively cleans subtree without on_umount
+    /// (clones share inner_filesystem — only the source calls on_umount).
     pub(crate) fn umount_at_peer(self: &Arc<Self>) {
         if let Some(mp) = self.self_mountpoint() {
             if let Ok(md) = mp.inner_inode.metadata() {
                 mp.mount_fs.remove_mount(md.inode_id);
             }
         }
+        self.finish_propagated_cleanup();
+    }
+
+    /// Recursive cleanup for propagation clones: unwind child mounts,
+    /// unregister from peer/slave groups, clear backrefs and caches.
+    /// Does NOT call inner_filesystem.on_umount() — only the initiating
+    /// umount should trigger fs-level teardown.
+    fn finish_propagated_cleanup(self: &Arc<Self>) {
+        // Recurse into children first
+        let children: Vec<Arc<MountFS>> = {
+            let mps = self.mountpoints.lock();
+            mps.values().cloned().collect()
+        };
+        for child in children.iter().rev() {
+            child.finish_propagated_cleanup();
+        }
         unregister_peer_mount(self);
         unregister_slave_mount(self);
         MOUNT_LIST.remove_fs(self);
         self.self_mountpoint.lock().take();
+        self.mountpoints.lock().clear();
+        let evicted = {
+            let mut cache = self.dentry_cache.lock();
+            cache.clear_all()
+        };
+        drop(evicted);
     }
 
     /// 卸载当前文件系统
@@ -1170,14 +1188,13 @@ impl MountFS {
             let _ = child.detach_recursive_inner(false);
         }
 
-        // Propagation depends on the PARENT mount's sharedness, not self's.
-        // DragonOS: propagate_umount checks parent.is_shared() internally.
+        // Remove self from parent mountpoints BEFORE propagation and cleanup
+        let parent_info = self.parent_edge()?;
+        let (ref parent_mfs, inode_id) = parent_info;
+        parent_mfs.remove_mount(inode_id);
+
         if do_propagate {
-            if let Some(mp) = self.self_mountpoint.lock().as_ref().and_then(|w| w.upgrade()) {
-                if let Ok(md) = mp.inner_inode.metadata() {
-                    propagate_umount(&mp.mount_fs, md.inode_id);
-                }
-            }
+            propagate_umount(parent_mfs, inode_id);
         }
 
         self.finish_umount_cleanup();
