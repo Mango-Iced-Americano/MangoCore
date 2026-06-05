@@ -2356,8 +2356,17 @@ pub fn sys_renameat2(
     oldpath: *const u8,
     newdirfd: usize,
     newpath: *const u8,
-    _flags: u32,
+    flags: u32,
 ) -> isize {
+    use crate::fs::vfs::RENAME_NOREPLACE;
+    // RENAME_SUPPORTED_FLAGS: only NOREPLACE for now
+    const RENAME_SUPPORTED_FLAGS: u32 = RENAME_NOREPLACE;
+
+    // reject unsupported flags
+    if flags & !RENAME_SUPPORTED_FLAGS != 0 {
+        return -(SyscallErr::EINVAL as isize);
+    }
+
     let task = current_task().unwrap();
     let token = task.get_user_token();
     let oldpath_str = match user_cstring(token, oldpath) {
@@ -2369,8 +2378,8 @@ pub fn sys_renameat2(
         Err(errno) => return errno,
     };
     info!(
-        "[sys_renameat2] old: dirfd={} path={}, new: dirfd={} path={}",
-        olddirfd as isize, oldpath_str, newdirfd as isize, newpath_str
+        "[sys_renameat2] old: dirfd={} path={}, new: dirfd={} path={}, flags={:#x}",
+        olddirfd as isize, oldpath_str, newdirfd as isize, newpath_str, flags
     );
 
     let old_start = match resolve_start_inode(olddirfd) {
@@ -2394,7 +2403,16 @@ pub fn sys_renameat2(
         Err(errno) => return errno,
     };
 
-    match old_parent.rename(&old_leaf, &new_parent, &new_leaf) {
+    // VFS 层 RENAME_NOREPLACE 预检（目标存在即返回 EEXIST）
+    if flags & RENAME_NOREPLACE != 0 {
+        match new_parent.find(&new_leaf) {
+            Ok(_) => return -(SyscallErr::EEXIST as isize),
+            Err(SyscallErr::ENOENT) => {} // 目标不存在，继续
+            Err(e) => return -(e as isize),
+        }
+    }
+
+    match old_parent.rename(&old_leaf, &new_parent, &new_leaf, flags) {
         Ok(_) => SUCCESS,
         Err(e) => -(e as isize),
     }

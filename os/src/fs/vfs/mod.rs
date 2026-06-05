@@ -51,6 +51,9 @@ pub const MAX_PATHLEN: usize = 4096;
 /// 单个文件名的最大长度
 pub const NAME_MAX: usize = 255;
 
+// renameat2 flags
+pub const RENAME_NOREPLACE: u32 = 1;
+
 // ── FileType ────────────────────────────────────────────────────────────
 
 /// 文件类型枚举，对标 Linux 的 `S_IFMT` 字段

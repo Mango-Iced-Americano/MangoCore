@@ -645,7 +645,10 @@ impl IndexNode for LockedTmpFSInode {
         old_name: &str,
         new_parent: &Arc<dyn IndexNode>,
         new_name: &str,
+        flags: u32,
     ) -> Result<(), SyscallErr> {
+        use crate::fs::vfs::RENAME_NOREPLACE;
+
         let new_parent_inode: &LockedTmpFSInode = new_parent
             .as_any_ref()
             .downcast_ref::<LockedTmpFSInode>()
@@ -697,6 +700,11 @@ impl IndexNode for LockedTmpFSInode {
 
             let child_is_dir = child.0.lock().metadata.file_type == FileType::Dir;
             let mut release_sz: i64 = 0;
+            if flags & RENAME_NOREPLACE != 0 && locked.children.contains_key(new_name) {
+                // target exists but caller requested no overwrite — restore source
+                locked.children.insert(String::from(old_name), child);
+                return Err(SyscallErr::EEXIST);
+            }
 
             if let Some(existing) = locked.children.remove(new_name) {
                 if Arc::ptr_eq(&child, &existing) {
@@ -765,6 +773,10 @@ impl IndexNode for LockedTmpFSInode {
             let child_is_dir = child.0.lock().metadata.file_type == FileType::Dir;
 
             let mut release_sz: i64 = 0;
+            if flags & RENAME_NOREPLACE != 0 && new_locked.children.contains_key(new_name) {
+                old_locked.children.insert(String::from(old_name), child);
+                return Err(SyscallErr::EEXIST);
+            }
             if let Some(existing) = new_locked.children.remove(new_name) {
                 if Arc::ptr_eq(&child, &existing) {
                     new_locked.children.insert(String::from(new_name), existing);
@@ -837,6 +849,10 @@ impl IndexNode for LockedTmpFSInode {
             let child_is_dir = child.0.lock().metadata.file_type == FileType::Dir;
 
             let mut release_sz: i64 = 0;
+            if flags & RENAME_NOREPLACE != 0 && new_locked.children.contains_key(new_name) {
+                old_locked.children.insert(String::from(old_name), child);
+                return Err(SyscallErr::EEXIST);
+            }
             if let Some(existing) = new_locked.children.remove(new_name) {
                 if Arc::ptr_eq(&child, &existing) {
                     new_locked.children.insert(String::from(new_name), existing);

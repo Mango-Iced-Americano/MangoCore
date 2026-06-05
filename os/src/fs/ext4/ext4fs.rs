@@ -1115,7 +1115,9 @@ impl IndexNode for layout::Ext4OSInode {
         Ok(child_inode)
     }
 
-    fn rename(&self, old_name: &str, new_parent: &alloc::sync::Arc<dyn IndexNode>, new_name: &str) -> Result<(), SyscallErr> {
+    fn rename(&self, old_name: &str, new_parent: &alloc::sync::Arc<dyn IndexNode>, new_name: &str, flags: u32) -> Result<(), SyscallErr> {
+        use crate::fs::vfs::RENAME_NOREPLACE;
+
         let new_parent_ext4 = new_parent.as_any_ref().downcast_ref::<layout::Ext4OSInode>().ok_or(SyscallErr::EXDEV)?;
         if !alloc::sync::Arc::ptr_eq(&self.ext4fs, &new_parent_ext4.ext4fs) { return Err(SyscallErr::EXDEV); }
         let old_parent_num = self.inode.lock().inode_num;
@@ -1126,6 +1128,33 @@ impl IndexNode for layout::Ext4OSInode {
         let child_inode_num = result.dentry.inode;
         let child_ref = self.ext4fs.get_inode_ref(child_inode_num);
         let is_dir = child_ref.inode.is_dir();
+
+        // Helper: check if new_name exists, handle NOREPLACE / overwrite
+        let mut check = Ext4DirSearchResult::new(Ext4DirEntry::default());
+        let target_exists = self.ext4fs.dir_find_entry(new_parent_num, new_name, &mut check).is_ok();
+        if target_exists {
+            if flags & RENAME_NOREPLACE != 0 {
+                return Err(SyscallErr::EEXIST);
+            }
+            // Overwrite: remove existing new_name dirent before adding the new one.
+            // This prevents dir_add_entry from creating duplicate dirents when
+            // the target name already exists (e.g. apk rename(tmpl, final)).
+            let old_target_num = check.dentry.inode;
+            {
+                let mut parent_ref = self.ext4fs.get_inode_ref(new_parent_num);
+                self.ext4fs.dir_remove_entry(&mut parent_ref, new_name)
+                    .map_err(|_| SyscallErr::EIO)?;
+            }
+            // Decrement old target's link count (minimal cleanup; full inode
+            // truncate/free handled lazily if links reach 0 via Drop).
+            let mut old_target = self.ext4fs.get_inode_ref(old_target_num);
+            let links = old_target.inode.links_count();
+            if links > 0 {
+                old_target.inode.set_links_count(links - 1);
+                self.ext4fs.write_back_inode(&mut old_target);
+            }
+        }
+
         if old_parent_num == new_parent_num {
             let mut parent_ref = self.ext4fs.get_inode_ref(old_parent_num);
             self.ext4fs.dir_add_entry(&mut parent_ref, &child_ref, new_name).map_err(|_| SyscallErr::ENOSPC)?;

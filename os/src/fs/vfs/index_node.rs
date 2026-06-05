@@ -189,13 +189,15 @@ pub trait IndexNode: Any + Send + Sync + Debug {
     /// - `old_name`: 当前目录下的源文件名
     /// - `new_parent`: 目标目录
     /// - `new_name`: 目标目录下的新文件名
+    /// - `flags`: renameat2 flags (RENAME_NOREPLACE, etc.); per-FS handles overwrite
     fn rename(
         &self,
         old_name: &str,
         new_parent: &Arc<dyn IndexNode>,
         new_name: &str,
+        _flags: u32,
     ) -> Result<(), SyscallErr> {
-        // 默认实现：link + unlink
+        // 默认实现：link + unlink（不支持 RENAME_NOREPLACE 语义）
         let old_inode = self.find(old_name)?;
         new_parent.link(new_name, &old_inode)?;
         self.unlink(old_name)

@@ -539,12 +539,13 @@ impl IndexNode for MountFSInode {
         old_name: &str,
         new_parent: &Arc<dyn IndexNode>,
         new_name: &str,
+        flags: u32,
     ) -> Result<(), SyscallErr> {
         self.ensure_mount_writable()?;
         self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
 
         let new_parent = MountFSInode::unwrap_inode(new_parent);
-        self.inner_inode.rename(old_name, &new_parent, new_name)?;
+        self.inner_inode.rename(old_name, &new_parent, new_name, flags)?;
 
         if !self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
             if let Ok(parent_md) = self.inner_inode.metadata() {

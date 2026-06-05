@@ -42,6 +42,7 @@ const SYSCALL_NANOSLEEP: usize = 101;
 const SYSCALL_GETITIMER: usize = 102;
 const SYSCALL_SETITIMER: usize = 103;
 const SYSCALL_CLOCK_GETTIME: usize = 113;
+const SYSCALL_CLOCK_SETTIME: usize = 112;
 const SYSCALL_YIELD: usize = 124;
 const SYSCALL_KILL: usize = 129;
 const SYSCALL_SIGACTION: usize = 134;
@@ -538,4 +539,8 @@ pub fn sys_faccessat2(dirfd: isize, path: &str, mode: u32, flags: u32) -> isize 
             flags as usize,
         ],
     )
+}
+
+pub fn sys_clock_settime(clock_id: usize, tp: *const TimeSpec) -> isize {
+    syscall(SYSCALL_CLOCK_SETTIME, [clock_id, tp as usize, 0])
 }

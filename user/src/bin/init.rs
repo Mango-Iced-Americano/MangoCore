@@ -5,6 +5,7 @@ extern crate alloc;
 use alloc::format;
 use user_lib::*;
 use user_lib::syscall::sys_mkdirat;
+use user_lib::syscall::sys_clock_settime;
 use user_lib::syscall::TimeSpec;
 
 const MS_BIND: usize = 4096;
@@ -15,6 +16,46 @@ fn try_mount(source: &str, target: &str, fstype: &str, flags: usize, data: usize
     let tgt_c = format!("{}\0", target);
     let fs_c = format!("{}\0", fstype);
     mount(src_c.as_ptr(), tgt_c.as_ptr(), fs_c.as_ptr(), flags, data)
+}
+
+/// 用 busybox ntpd 通过 NTP 同步时间；失败则回退到硬编码时间以防 TLS 失败
+fn try_ntp_sync() {
+    let pid = fork();
+    if pid < 0 {
+        // fork 失败，回退到硬编码时间
+        set_system_time(1749049200, 0);
+        return;
+    }
+    if pid == 0 {
+        // child: run busybox ntpd
+        let path = "/rescue/sh\0";
+        let applet = "ntpd\0";
+        let bg = "-n\0";
+        let quit = "-q\0";
+        let flag_p = "-p\0";
+        let peer = "time.cloudflare.com\0";
+        let args: [*const u8; 6] = [
+            applet.as_ptr(),
+            bg.as_ptr(),
+            quit.as_ptr(),
+            flag_p.as_ptr(),
+            peer.as_ptr(),
+            core::ptr::null(),
+        ];
+        exec(path, &args, &[core::ptr::null()]);
+        // exec only returns on error
+        exit(-1);
+    } else {
+        // parent: wait for ntpd
+        let mut status: i32 = 0;
+        let ret = waitpid(pid as usize, &mut status);
+        if ret >= 0 && status == 0 {
+            println!("[init] ntpd time sync ok");
+        } else {
+            println!("[init] ntpd failed (ret={}, status={}), fallback to hardcoded time", ret, status);
+            set_system_time(1749049200, 0);
+        }
+    }
 }
 
 fn try_bind(source: &str, target: &str) {
@@ -39,19 +80,8 @@ fn try_exec(path: &str, environ: &[*const u8]) -> bool {
 }
 
 fn set_system_time(secs: usize, nsecs: usize) {
-    // raw ecall: clock_settime(CLOCK_REALTIME=0, timespec)
     let ts = TimeSpec { tv_sec: secs, tv_nsec: nsecs };
-    let ret: isize;
-    unsafe {
-        core::arch::asm!(
-            "ecall",
-            in("a7") 112usize,       // SYSCALL_CLOCK_SETTIME
-            in("a0") 0usize,          // CLOCK_REALTIME
-            in("a1") &ts as *const _ as usize,
-            lateout("a0") ret,
-            options(nostack),
-        );
-    }
+    let ret = sys_clock_settime(0, &ts); // CLOCK_REALTIME=0
     if ret < 0 {
         println!("[init] clock_settime failed: {}", -ret);
     }
@@ -61,8 +91,7 @@ fn set_system_time(secs: usize, nsecs: usize) {
 fn main(_argc: usize, _argv: &[&str]) -> i32 {
     println!("[init] MangoCore stage-1 boot (initramfs mode)");
 
-    // 设系统时间用于 TLS 证书验证
-    set_system_time(1749049200, 0); // 2026-06-05T00:00:00 UTC
+    try_ntp_sync();
 
     println!("[init] /dev /proc /tmp mounted by kernel, setting up bind mounts...");
 

@@ -617,7 +617,10 @@ impl IndexNode for LockedRamFSInode {
         old_name: &str,
         new_parent: &Arc<dyn IndexNode>,
         new_name: &str,
+        flags: u32,
     ) -> Result<(), SyscallErr> {
+        use crate::fs::vfs::RENAME_NOREPLACE;
+
         let new_parent_inode: &LockedRamFSInode = new_parent
             .as_any_ref()
             .downcast_ref::<LockedRamFSInode>()
@@ -641,18 +644,37 @@ impl IndexNode for LockedRamFSInode {
         {
             let mut new_locked = new_parent_inode.0.lock();
             if new_locked.children.contains_key(new_name) {
-                // Roll back: re-insert into old parent.
-                // Drop new_locked first to avoid holding two Mutexes simultaneously,
-                // which would deadlock when old_parent == new_parent (same inode,
-                // non-reentrant spin::Mutex) or when two concurrent renames go in
-                // opposite directions (AB-BA circular wait).
-                drop(new_locked);
-                let mut old_locked = self.0.lock();
-                old_locked.children.insert(String::from(old_name), child);
-                if is_dir {
-                    old_locked.metadata.nlinks += 1;
+                if flags & RENAME_NOREPLACE != 0 {
+                    // Roll back: re-insert into old parent
+                    drop(new_locked);
+                    let mut old_locked = self.0.lock();
+                    old_locked.children.insert(String::from(old_name), child);
+                    if is_dir {
+                        old_locked.metadata.nlinks += 1;
+                    }
+                    return Err(SyscallErr::EEXIST);
                 }
-                return Err(SyscallErr::EEXIST);
+                // Overwrite: remove existing target, mirror TmpFS semantics
+                if let Some(existing) = new_locked.children.remove(new_name) {
+                    let existing_is_dir = existing.0.lock().metadata.file_type == FileType::Dir;
+                    if is_dir != existing_is_dir {
+                        // Restore old before bailing
+                        drop(new_locked);
+                        let mut old_locked = self.0.lock();
+                        old_locked.children.insert(String::from(old_name), child);
+                        if is_dir {
+                            old_locked.metadata.nlinks += 1;
+                        }
+                        return if is_dir {
+                            Err(SyscallErr::ENOTDIR)
+                        } else {
+                            Err(SyscallErr::EISDIR)
+                        };
+                    }
+                    if existing_is_dir {
+                        new_locked.metadata.nlinks -= 1;
+                    }
+                }
             }
             if is_dir {
                 new_locked.metadata.nlinks += 1;
