@@ -2,6 +2,32 @@
 
 ---
 
+## 2026-06-05
+
+### 修复 LTP TCONF 计分与 futex wake 竞态
+
+**涉及文件：**
+- `user/src/bin/ltprunner.rs` — 将 LTP `TCONF` 退出码 32 统计为 `SKIP LTP CASE`，不再误记为 failed
+- `os/src/task/signal/mod.rs`、`os/src/task/signal/delivery.rs` — 抽出信号是否应唤醒 interruptible waiter 的统一判断，保留 SIGCONT/sigwait/unblocked 信号语义
+- `os/src/task/manager.rs` — timer signal 路径按信号掩码决定是否唤醒；`WaitQueue::wake_at_most` 遇到已 Ready 但仍留在 waitqueue 的 waiter 时按一次成功 wake 计数，避免 futex checkpoint 在信号竞态下丢 wake
+- `os/src/fs/poll.rs` — 对无请求 fd、短 deadline、无其他 ready task 的 `pselect/ppoll` timeout 路径使用硬件 tick 短忙等，降低 heap_trace/QEMU 下的短睡眠过冲
+- `.agents/skills/mango-worklog/references/harness-patterns.md` — 记录 LTP TCONF 与 futex waitqueue 竞态的复用模式
+
+**验证：**
+- Docker `make -C /app/os rv64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅，132 个既有 warning，无新增 error
+- Docker `make -C /app/os la64-kernel-build-only EXTRA_FEATURES=heap_trace` ✅，116 个既有 warning，无新增 error
+- rv64 heap_trace focused LTP `sighold02,getcontext01,gethostid01,pselect01_64`：
+  - glibc `executed=4 passed=4 failed=0 skipped=0`
+  - musl `executed=4 passed=2 failed=0 skipped=2`，`getcontext01/gethostid01` 的 `TCONF(32)` 正确记为 `SKIP`
+  - `pselect01_64` 全 timeout 档位 `TPASS`，25ms 档从过冲失败收敛为截尾均值约 25.318ms
+- la64 heap_trace focused LTP 同一 include：
+  - glibc `executed=4 passed=4 failed=0 skipped=0`
+  - musl `executed=4 passed=2 failed=0 skipped=2`
+  - `pselect01_64` 全 timeout 档位 `TPASS`，25ms 档截尾均值约 25.361ms
+- 双架构日志中未发现 `PANIC`、`KERNEL EXCEPTION`、`BUG`、`HEAP OOM`、`Bad address`；heap_trace 初始统计 `zpcb=0/stale=0/io_buf=0`
+
+**备注：** 本轮不触碰文件系统/网络语义。`sighold02` 的失败表现是子进程 checkpoint wait 返回后父进程 wake 超时，核心风险点是 signal/timer 把 waiter 置 Ready 后，futex wake 又从 waitqueue 中移除但未计数。
+
 ## 2026-06-04
 
 ### 补齐 POSIX mqueue sysctl 语义

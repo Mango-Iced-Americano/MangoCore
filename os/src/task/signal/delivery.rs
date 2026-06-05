@@ -20,8 +20,7 @@ fn process_signal_target(
         if inner.task_status == TaskStatus::Zombie {
             continue;
         }
-        let matches_sigwait = !(signal & inner.signal_wait_mask).is_empty();
-        if matches_sigwait || !signal.difference(inner.sigmask).is_empty() {
+        if signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, true) {
             return Some(task.clone());
         }
     }
@@ -121,10 +120,8 @@ fn send_thread_signal_info(
         wake_task_if_interruptible(task.clone());
         return Ok(());
     }
-    let matches_sigwait = !(signal & inner.signal_wait_mask).is_empty();
-    let matches_unblocked = !signal.difference(inner.sigmask).is_empty();
     if inner.task_status == TaskStatus::Interruptible
-        && (matches_sigwait || (wake && matches_unblocked))
+        && signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, wake)
     {
         drop(inner);
         wake_task_if_interruptible(task.clone());

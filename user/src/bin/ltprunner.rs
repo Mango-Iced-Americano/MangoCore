@@ -18,6 +18,7 @@ const DEFAULT_CASE_TIMEOUT_SECS: u64 = 30;
 #[cfg(target_arch = "loongarch64")]
 const LTP_TIMEOUT_MUL_ENV: &str = "LTP_TIMEOUT_MUL=2\0";
 const DEFAULT_CASE_TERM_GRACE_MS: u64 = 1500;
+const LTP_EXIT_TCONF: i32 = 32;
 const DEFAULT_LTP_EXCLUDE: &[&str] = &[
     "rt_sigtimedwait01",
     "timerfd04",
@@ -789,7 +790,7 @@ fn main(_argc: usize, argv: &[&str]) -> i32 {
     let mut executed: usize = 0;
     let mut passed: usize = 0;
     let mut failed: usize = 0;
-    let mut skipped_by_timeout: usize = 0;
+    let mut skipped: usize = 0;
     let mut current_suite: &str = "";
 
     for &idx in &filtered_indices {
@@ -801,7 +802,7 @@ fn main(_argc: usize, argv: &[&str]) -> i32 {
                 "[ltprunner] group deadline exceeded, stopping. executed={} passed={} failed={} remaining={}",
                 executed, passed, failed, filtered_count - executed
             );
-            skipped_by_timeout = filtered_count - executed;
+            skipped += filtered_count - executed;
             break;
         }
 
@@ -822,6 +823,9 @@ fn main(_argc: usize, argv: &[&str]) -> i32 {
         if ret == 0 {
             println!("PASS LTP CASE {} : 0", case.case_name);
             passed += 1;
+        } else if ret == LTP_EXIT_TCONF {
+            println!("SKIP LTP CASE {} : {}", case.case_name, ret);
+            skipped += 1;
         } else {
             println!("FAIL LTP CASE {} : {}", case.case_name, ret);
             failed += 1;
@@ -833,7 +837,7 @@ fn main(_argc: usize, argv: &[&str]) -> i32 {
 
     println!(
         "[ltprunner] done. executed={} passed={} failed={} skipped={} total_ms={} rate={} cases/min",
-        executed, passed, failed, skipped_by_timeout,
+        executed, passed, failed, skipped,
         get_time_ms() - start_ms,
         (executed as u64 * 60000).checked_div(get_time_ms() - start_ms).unwrap_or(0),
     );

@@ -14,7 +14,25 @@
 - **修复**: 只在确实需要更长预算的架构上传 `LTP_TIMEOUT_MUL=2`，让 LTP 内部 timeout 与 runner 外层 `DEFAULT_CASE_TIMEOUT_SECS=60` 对齐；不要在默认 30s 的架构上传 `LTP_TIMEOUT_MUL=1`，避免不同 libc 对环境解析出现额外噪声。
 - **相关文件**: `user/src/bin/ltprunner.rs`
 
+### LTP TCONF 不能计为 FAIL
+- **根因**: LTP 新 API 用退出码 32 表示 `TCONF`，即测试因 libc/架构/配置前置条件不满足而跳过。suite runner 若把所有非零返回码都记为 `FAIL LTP CASE`，会把 musl 缺少 `getcontext/sethostid` 这类库能力误算成内核失败。
+- **修复**: `run_case()` 返回 32 时输出 `SKIP LTP CASE` 并递增 skipped，其他非零才算 failed。
+- **教训**: 扩大 LTP include 时先区分 `TFAIL/TBROK` 与 `TCONF`，否则会把可接受的环境跳过项混入内核适配清单。
+- **相关文件**: `user/src/bin/ltprunner.rs`
+
 ## 信号/进程
+
+### futex wake 与信号唤醒竞态
+- **根因**: waiter 被信号或 timeout 先置为 Ready 后，仍可能暂时留在 futex waitqueue 中；随后 `FUTEX_WAKE` 移除该 waiter 时如果因状态非 Interruptible 不计数，用户态 checkpoint 会认为没有唤醒到等待者并重试到超时，而 waiter 本身又会把 waitqueue 条目被移除解释成正常 wake。
+- **修复**: `WaitQueue::wake_at_most()` 对 Ready-but-still-queued waiter 也按一次成功 wake 计数；timer signal 入队时按 sigmask/sigwait mask 判断是否需要唤醒 interruptible task，减少被屏蔽信号造成的伪唤醒。
+- **教训**: waitqueue 的“移出队列”和调度状态不是同一个原子状态；对 futex/checkpoint 这类计数语义，移出等待队列本身就应消耗一次 wake。
+- **相关文件**: `os/src/task/manager.rs`, `os/src/task/signal/mod.rs`
+
+### pselect/ppoll 空 fd 短 timeout 过冲
+- **根因**: 无请求 fd 的纯 timeout 等待复用通用 waitqueue 睡眠会经过调度器和 timer wake；heap_trace/QEMU 下 25ms 级短睡眠可能多出数百微秒，超过 LTP `pselect01_64` 的严格阈值。
+- **修复**: 对 `nfds=0`/无请求 fd 且 deadline 不超过 50ms、当前没有其他 ready task 的纯 timeout 路径，用硬件 tick 短忙等；一旦发现有其他 ready task，退回原 waitqueue 睡眠路径。
+- **教训**: 微秒级计时 LTP 用例要区分“有 fd/事件等待”的阻塞语义和“纯 timeout sleep”的精度语义；短忙等必须有时长上限和 ready task 逃逸条件，避免拖慢并发场景。
+- **相关文件**: `os/src/fs/poll.rs`
 
 ### nanosleep 唤醒后死锁
 - **根因**: 持有 `task.inner` 锁时调用 `has_actionable_signal(&task)`，后者尝试获取同一锁

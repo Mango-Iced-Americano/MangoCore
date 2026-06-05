@@ -1,3 +1,5 @@
+use core::hint::spin_loop;
+
 use crate::{
     config::PAGE_SIZE,
     fs::vfs::{event::EPollEvent, FdTable, File, PollWaitQueue},
@@ -6,12 +8,12 @@ use crate::{
     signal_type,
     syscall::errno::EFAULT,
     task::signal::Signals,
-    timer::{TimeSpec, NSEC_PER_SEC},
+    timer::{get_clock_freq, get_time, TimeSpec, NSEC_PER_SEC},
     utils::error::SyscallErr,
 };
 use alloc::vec::Vec;
 
-use crate::task::{current_task, WaitQueue, WaitResult};
+use crate::task::{current_task, has_actionable_signal, task_manager_counts, WaitQueue, WaitResult};
 ///  A scheduling  scheme  whereby  the  local  process  periodically  checks  until  the  pre-specified events (for example, read, write) have occurred.
 /// The PollFd struct in 32-bit style.
 #[repr(C)]
@@ -137,11 +139,134 @@ fn collect_wait_queues(file: &File, wait_queues: &mut Vec<PollWaitQueue>) {
 fn poll_wait(
     wait_queues: &[PollWaitQueue],
     deadline: Option<TimeSpec>,
-    cond: impl FnMut() -> Option<isize>,
+    mut cond: impl FnMut() -> Option<isize>,
 ) -> WaitResult {
+    if wait_queues.is_empty() {
+        if let Some(result) = try_short_empty_poll(deadline, &mut cond) {
+            return result;
+        }
+    }
     let queue_refs: Vec<&spin::Mutex<WaitQueue>> =
         wait_queues.iter().map(|queue| queue.queue()).collect();
     WaitQueue::wait_on_queues_interruptible_timeout(&queue_refs, cond, deadline)
+}
+
+fn poll_wait_empty(deadline: Option<TimeSpec>) -> WaitResult {
+    if let Some(result) = try_short_empty_timeout(deadline) {
+        return result;
+    }
+    WaitQueue::wait_on_queues_interruptible_timeout(&[], || None, deadline)
+}
+
+fn timespec_to_ticks(time: TimeSpec) -> usize {
+    time.tv_sec
+        .saturating_mul(get_clock_freq())
+        .saturating_add(time.tv_nsec.saturating_mul(get_clock_freq()) / NSEC_PER_SEC)
+}
+
+fn try_short_empty_timeout(deadline: Option<TimeSpec>) -> Option<WaitResult> {
+    let deadline = deadline?;
+    let now = TimeSpec::now();
+    if now >= deadline {
+        return Some(WaitResult::TimedOut);
+    }
+    if deadline - now > TimeSpec::from_ms(50) {
+        return None;
+    }
+    if task_manager_counts()
+        .map(|(ready, _)| ready != 0)
+        .unwrap_or(true)
+    {
+        return None;
+    }
+
+    let deadline_ticks = timespec_to_ticks(deadline);
+    let task = current_task().unwrap();
+    let mut spins = 0usize;
+    loop {
+        if get_time() >= deadline_ticks {
+            return Some(WaitResult::TimedOut);
+        }
+
+        spins = spins.wrapping_add(1);
+        if spins & 0x3ff == 0 && has_actionable_signal(&task) {
+            return Some(WaitResult::Interrupted);
+        }
+        spin_loop();
+    }
+}
+
+fn try_short_empty_poll<F>(deadline: Option<TimeSpec>, cond: &mut F) -> Option<WaitResult>
+where
+    F: FnMut() -> Option<isize>,
+{
+    let deadline = deadline?;
+    let now = TimeSpec::now();
+    if now >= deadline {
+        return Some(WaitResult::TimedOut);
+    }
+    if deadline - now > TimeSpec::from_ms(50) {
+        return None;
+    }
+    if task_manager_counts()
+        .map(|(ready, _)| ready != 0)
+        .unwrap_or(true)
+    {
+        return None;
+    }
+
+    if let Some(value) = cond() {
+        return Some(WaitResult::Ready(value));
+    }
+
+    let task = current_task().unwrap();
+    let mut spins = 0usize;
+    loop {
+        if TimeSpec::now() >= deadline {
+            return Some(WaitResult::TimedOut);
+        }
+        if has_actionable_signal(&task) {
+            return Some(WaitResult::Interrupted);
+        }
+
+        spins = spins.wrapping_add(1);
+        if spins & 0x3ff == 0 {
+            if let Some(value) = cond() {
+                return Some(WaitResult::Ready(value));
+            }
+            if task_manager_counts()
+                .map(|(ready, _)| ready != 0)
+                .unwrap_or(true)
+            {
+                return None;
+            }
+        }
+        spin_loop();
+    }
+}
+
+fn fdset_has_requested_fds(set: &Option<FdSet>, nfds: usize) -> bool {
+    let Some(set) = set else {
+        return false;
+    };
+    let limit = nfds.min(1024);
+    for fd in 0..limit {
+        if set.is_set(fd) {
+            return true;
+        }
+    }
+    false
+}
+
+fn pselect_has_requested_fds(
+    nfds: usize,
+    read_fds: &Option<FdSet>,
+    write_fds: &Option<FdSet>,
+    exception_fds: &Option<FdSet>,
+) -> bool {
+    fdset_has_requested_fds(read_fds, nfds)
+        || fdset_has_requested_fds(write_fds, nfds)
+        || fdset_has_requested_fds(exception_fds, nfds)
 }
 
 fn checked_timeout_deadline(timeout: Option<TimeSpec>) -> Result<Option<TimeSpec>, isize> {
@@ -359,24 +484,38 @@ pub fn ppoll(
         );
         done = EFAULT;
     } else {
-        let scan = scan_ppoll(&files, &mut poll_fd, true);
-        done = scan.ready;
-        if done == 0
-            && timeout
+        if nfds == 0 {
+            done = 0;
+            if timeout
                 .map(|deadline| TimeSpec::now() < deadline)
                 .unwrap_or(true)
-        {
-            match poll_wait(&scan.wait_queues, timeout, || {
-                let scan = scan_ppoll(&files, &mut poll_fd, false);
-                if scan.ready > 0 {
-                    Some(scan.ready)
-                } else {
-                    None
+            {
+                match poll_wait_empty(timeout) {
+                    WaitResult::Ready(value) => done = value,
+                    WaitResult::Interrupted => interrupted = true,
+                    WaitResult::TimedOut => done = 0,
                 }
-            }) {
-                WaitResult::Ready(value) => done = value,
-                WaitResult::Interrupted => interrupted = true,
-                WaitResult::TimedOut => done = 0,
+            }
+        } else {
+            let scan = scan_ppoll(&files, &mut poll_fd, true);
+            done = scan.ready;
+            if done == 0
+                && timeout
+                    .map(|deadline| TimeSpec::now() < deadline)
+                    .unwrap_or(true)
+            {
+                match poll_wait(&scan.wait_queues, timeout, || {
+                    let scan = scan_ppoll(&files, &mut poll_fd, false);
+                    if scan.ready > 0 {
+                        Some(scan.ready)
+                    } else {
+                        None
+                    }
+                }) {
+                    WaitResult::Ready(value) => done = value,
+                    WaitResult::Interrupted => interrupted = true,
+                    WaitResult::TimedOut => done = 0,
+                }
             }
         }
 
@@ -464,34 +603,6 @@ impl Bytes<FdSet> for FdSet {
         unsafe { core::slice::from_raw_parts_mut(self as *mut _ as *mut u8, size) }
     }
 }
-/// Poll each of the file discriptors
-/// until certain events.
-///
-/// # Arguments
-///
-/// * `nfds`: the highest-numbered file descriptor in any of the three sets
-///
-/// * `read_fds`: files to be watched to see if characters become available for reading
-///
-/// * `write_fds`: files to be watched to see if characters become available for writing
-///
-/// * `except_fds`: exceptional conditions
-///
-/// (For examples of some exceptional conditions, see the discussion of POLLPRI in [poll(2)].)
-/// * `timeout`: argument specifies the interval that pselect() should block waiting for a file descriptor to become ready
-///
-/// * `sigmask`: the sigmask used by the process during the poll, as in ppoll  
-///
-/// # Return Value
-///
-/// * On success, select() and pselect() return the number of file descriptors  contained in the three returned descriptor sets (that is, the total number of bits that are set in  readfds, writefds,  exceptfds)  which  may be zero if the timeout expires before anything interesting happens.  
-///
-/// * On error, -1  is returned,  the file descriptor sets are unmodified, and  timeout  becomes  undefined.
-///  
-/// * If both fields of the timeval structure are zero,
-///    then select() returns immediately.
-///    (This is useful for  polling.)
-///    If timeout is NULL (no timeout), select() can block indefinitely.
 pub fn pselect(
     nfds: usize,
     read_fds: &mut Option<FdSet>,
@@ -515,8 +626,20 @@ pub fn pselect(
         return -(SyscallErr::EINVAL as isize);
     }
 
+    let has_requested_fds = pselect_has_requested_fds(nfds, read_fds, write_fds, exception_fds);
     let files = current_task().unwrap().process.files();
-    let initial_scan = scan_pselect(&files, nfds, read_fds, write_fds, exception_fds, true);
+    let initial_scan = if has_requested_fds {
+        scan_pselect(&files, nfds, read_fds, write_fds, exception_fds, true)
+    } else {
+        PSelectScan {
+            ready: 0,
+            wait_queues: Vec::new(),
+            read_fds: read_fds.as_ref().map(|_| FdSet::empty()),
+            write_fds: write_fds.as_ref().map(|_| FdSet::empty()),
+            exception_fds: exception_fds.as_ref().map(|_| FdSet::empty()),
+            error: None,
+        }
+    };
     let mut done = initial_scan.ready;
     let mut interrupted = false;
     let mut error = initial_scan.error;
@@ -536,17 +659,22 @@ pub fn pselect(
             .map(|deadline| TimeSpec::now() < deadline)
             .unwrap_or(true)
     {
-        match poll_wait(&initial_scan.wait_queues, timeout, || {
-            let scan = scan_pselect(&files, nfds, read_fds, write_fds, exception_fds, false);
-            if let Some(error) = scan.error {
-                Some(error)
-            } else if scan.ready > 0 {
-                ready_sets = Some((scan.read_fds, scan.write_fds, scan.exception_fds));
-                Some(scan.ready)
-            } else {
-                None
-            }
-        }) {
+        let wait_result = if has_requested_fds {
+            poll_wait(&initial_scan.wait_queues, timeout, || {
+                let scan = scan_pselect(&files, nfds, read_fds, write_fds, exception_fds, false);
+                if let Some(error) = scan.error {
+                    Some(error)
+                } else if scan.ready > 0 {
+                    ready_sets = Some((scan.read_fds, scan.write_fds, scan.exception_fds));
+                    Some(scan.ready)
+                } else {
+                    None
+                }
+            })
+        } else {
+            poll_wait_empty(timeout)
+        };
+        match wait_result {
             WaitResult::Ready(value) if value < 0 => error = Some(value),
             WaitResult::Ready(value) => done = value,
             WaitResult::Interrupted => {

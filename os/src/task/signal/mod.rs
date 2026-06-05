@@ -168,6 +168,17 @@ impl Signals {
             Some(self.bits().trailing_zeros() as usize + 1)
         }
     }
+
+    pub fn wakes_interruptible(
+        self,
+        sigmask: Signals,
+        signal_wait_mask: Signals,
+        wake_unblocked: bool,
+    ) -> bool {
+        self.contains(Signals::SIGCONT)
+            || !(self & signal_wait_mask).is_empty()
+            || (wake_unblocked && !self.difference(sigmask).is_empty())
+    }
 }
 
 bitflags! {
