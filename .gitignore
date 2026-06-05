@@ -40,3 +40,4 @@ __pycache__/
 *.pyo
 .sisyphus/
 sdcard-rv-noconf.img
+/tools/
