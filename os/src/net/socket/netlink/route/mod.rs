@@ -8,7 +8,7 @@ use super::netlink::{
     IFLA_ADDRESS, IFLA_IFNAME, IFLA_MTU,
     IFA_ADDRESS, IFA_LOCAL, IFA_LABEL,
     NDA_DST, NDA_LLADDR,
-    NLMSG_DONE, NLMSG_ERROR, NLM_F_DUMP, NLM_F_MULTI, NLM_F_REQUEST,
+    NLMSG_DONE, NLMSG_ERROR, NLM_F_DUMP, NLM_F_MULTI, NLM_F_REQUEST, NLM_F_ROOT,
     RTA_DST, RTA_GATEWAY, RTA_OIF,
     RTM_DELADDR, RTM_DELLINK, RTM_DELROUTE, RTM_GETADDR, RTM_GETLINK, RTM_GETROUTE,
     RTM_GETNEIGH, RTM_NEWADDR, RTM_NEWLINK, RTM_NEWROUTE,
@@ -19,7 +19,7 @@ use super::segment::{
     ErrorSegment, ErrorSegmentBody, NoAttr, RouteNlSegment, SegmentCommon,
 };
 use alloc::vec::Vec;
-use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr, Ipv4Address};
+use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr, Ipv4Address, Ipv6Address};
 use crate::net::iface::DeviceKind;
 
 fn parse_nlmsg(buf: &[u8]) -> Option<(u16, u16, u32, u32)> {
@@ -49,7 +49,8 @@ pub fn handle_netlink_msg(buf: &[u8], sock: &NetlinkSocket) -> Result<isize, cra
     let pid = sock.local_portid();
 
     let is_get = matches!(msg_type, RTM_GETLINK | RTM_GETADDR | RTM_GETROUTE | RTM_GETNEIGH);
-    if !is_get || flags & NLM_F_DUMP != NLM_F_DUMP {
+    let is_dump = (flags & (NLM_F_DUMP | NLM_F_ROOT)) != 0;
+    if !is_get || !is_dump {
         // Single-object handler (NEW/DEL/SET, or GET without DUMP)
         let result = match msg_type {
             RTM_NEWADDR => addr::handle_newaddr(seq, pid, flags, buf, sock),
@@ -204,22 +205,42 @@ fn handle_getaddr(seq: u32, pid: u32, sock: &NetlinkSocket) -> Result<isize, cra
     for (nic_id, iface) in list.iter() {
         let nic_id = *nic_id as u32;
         for cidr in &iface.ip_addrs() {
-            if let IpAddress::Ipv4(addr) = cidr.address() {
-                let mut payload = Vec::new();
-                // ifaddrmsg: family(1) + prefixlen(1) + flags(1) + scope(1) + ifa_index(4) = 8 bytes
-                payload.push(2); // AF_INET
-                payload.push(cidr.prefix_len());
-                payload.push(0); // flags
-                payload.push(0); // scope
-                payload.extend_from_slice(&nic_id.to_ne_bytes());
-                let mut attrs = Vec::new();
-                attrs.extend(&super::netlink::rta_data(IFA_ADDRESS, &addr.0));
-                attrs.extend(&super::netlink::rta_data(IFA_LOCAL, &addr.0));
-                let mut label = Vec::new(); label.extend_from_slice(iface.iface_name().as_bytes()); label.push(0);
-                attrs.extend(&super::netlink::rta_data(IFA_LABEL, &label));
-                payload.extend(&attrs);
-                if !sock.push_recv(super::netlink::build_nlmsg(RTM_NEWADDR, NLM_F_MULTI, seq, pid, &payload)) {
-                    return Err(crate::utils::error::SyscallErr::ENOBUFS);
+            match cidr.address() {
+                IpAddress::Ipv4(addr) => {
+                    let mut payload = Vec::new();
+                    // ifaddrmsg: family(1) + prefixlen(1) + flags(1) + scope(1) + ifa_index(4) = 8 bytes
+                    payload.push(2); // AF_INET
+                    payload.push(cidr.prefix_len());
+                    payload.push(0); // flags
+                    payload.push(0); // scope
+                    payload.extend_from_slice(&nic_id.to_ne_bytes());
+                    let mut attrs = Vec::new();
+                    attrs.extend(&super::netlink::rta_data(IFA_ADDRESS, &addr.0));
+                    attrs.extend(&super::netlink::rta_data(IFA_LOCAL, &addr.0));
+                    let mut label = Vec::new(); label.extend_from_slice(iface.iface_name().as_bytes()); label.push(0);
+                    attrs.extend(&super::netlink::rta_data(IFA_LABEL, &label));
+                    payload.extend(&attrs);
+                    if !sock.push_recv(super::netlink::build_nlmsg(RTM_NEWADDR, NLM_F_MULTI, seq, pid, &payload)) {
+                        return Err(crate::utils::error::SyscallErr::ENOBUFS);
+                    }
+                }
+                IpAddress::Ipv6(addr) => {
+                    let mut payload = Vec::new();
+                    // ifaddrmsg: family(1) + prefixlen(1) + flags(1) + scope(1) + ifa_index(4) = 8 bytes
+                    payload.push(10); // AF_INET6
+                    payload.push(cidr.prefix_len());
+                    payload.push(0); // flags
+                    payload.push(0); // scope
+                    payload.extend_from_slice(&nic_id.to_ne_bytes());
+                    let mut attrs = Vec::new();
+                    attrs.extend(&super::netlink::rta_data(IFA_ADDRESS, &addr.0));
+                    attrs.extend(&super::netlink::rta_data(IFA_LOCAL, &addr.0));
+                    let mut label = Vec::new(); label.extend_from_slice(iface.iface_name().as_bytes()); label.push(0);
+                    attrs.extend(&super::netlink::rta_data(IFA_LABEL, &label));
+                    payload.extend(&attrs);
+                    if !sock.push_recv(super::netlink::build_nlmsg(RTM_NEWADDR, NLM_F_MULTI, seq, pid, &payload)) {
+                        return Err(crate::utils::error::SyscallErr::ENOBUFS);
+                    }
                 }
             }
         }

@@ -570,6 +570,15 @@ pub fn disable_ipv6_content(
     proc_read_str(offset, len, buf, "0\n")
 }
 
+pub fn accept_dad_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    proc_read_str(offset, len, buf, "0\n")
+}
+
 pub fn net_snmp_content(
     _extra: usize,
     offset: usize,

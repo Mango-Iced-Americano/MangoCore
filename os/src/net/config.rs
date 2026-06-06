@@ -741,6 +741,8 @@ impl<'a> NetInterface<'a> {
         &self,
         rh: RouteSocketHandle,
         new_ifindex: u32,
+        ip_version: smoltcp::wire::IpVersion,
+        ip_protocol: smoltcp::wire::IpProtocol,
     ) -> Option<RouteSocketHandle> {
         let mut inner = self.inner.lock();
         let inner_ref = inner.as_mut()?;
@@ -758,8 +760,8 @@ impl<'a> NetInterface<'a> {
             vec![0u8; crate::net::MAX_BUFFER_SIZE],
         );
         let new_socket = raw::Socket::new(
-            smoltcp::wire::IpVersion::Ipv4,
-            smoltcp::wire::IpProtocol::Icmp,
+            ip_version,
+            ip_protocol,
             rx_buf,
             tx_buf,
         );

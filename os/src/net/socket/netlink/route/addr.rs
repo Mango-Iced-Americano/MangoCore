@@ -5,7 +5,7 @@
 //! removes the address via [`Iface::add_ip_addr`] / [`Iface::del_ip_addr`].
 
 use alloc::vec::Vec;
-use smoltcp::wire::{IpAddress, IpCidr, Ipv4Address};
+use smoltcp::wire::{IpAddress, IpCidr, Ipv4Address, Ipv6Address};
 
 use crate::net::iface::Iface;
 use crate::utils::error::SyscallErr;
@@ -34,6 +34,33 @@ fn parse_ifa_addr(payload: &[u8], mut offset: usize) -> Option<Ipv4Address> {
                         payload[data_start + 2],
                         payload[data_start + 3],
                     ]));
+                }
+            }
+            _ => {}
+        }
+        offset += (rta_len + 3) & !3;
+    }
+    ip_addr
+}
+
+/// Parse an IPv6 address from the RTA attributes following the `ifaddrmsg` header.
+fn parse_ifa_addr_v6(payload: &[u8], mut offset: usize) -> Option<Ipv6Address> {
+    let mut ip_addr: Option<Ipv6Address> = None;
+    while offset + 4 <= payload.len() {
+        let rta_len = u16::from_ne_bytes([payload[offset], payload[offset + 1]]) as usize;
+        if rta_len < 4 || offset + rta_len > payload.len() {
+            break;
+        }
+        let rta_type = u16::from_ne_bytes([payload[offset + 2], payload[offset + 3]]);
+        let data_start = offset + 4;
+        let data_len = rta_len - 4;
+
+        match rta_type {
+            IFA_ADDRESS | IFA_LOCAL if data_len >= 16 => {
+                if ip_addr.is_none() {
+                    let mut bytes = [0u8; 16];
+                    bytes.copy_from_slice(&payload[data_start..data_start + 16]);
+                    ip_addr = Some(Ipv6Address(bytes));
                 }
             }
             _ => {}
@@ -108,45 +135,80 @@ pub fn handle_newaddr(
     let payload = buf.get(16..).ok_or(SyscallErr::EINVAL)?;
     let msg = parse_ifaddrmsg(payload).ok_or(SyscallErr::EINVAL)?;
 
-    if msg.family != 2 {
-        return Err(SyscallErr::EAFNOSUPPORT);
-    }
+    match msg.family {
+        2 => {
+            let addr = parse_ifa_addr(payload, 8).ok_or(SyscallErr::EINVAL)?;
+            let cidr = IpCidr::new(IpAddress::Ipv4(addr), msg.prefixlen);
 
-    let addr = parse_ifa_addr(payload, 8).ok_or(SyscallErr::EINVAL)?;
-    let cidr = IpCidr::new(IpAddress::Ipv4(addr), msg.prefixlen);
+            let iface = find_iface_by_index(msg.index).ok_or(SyscallErr::ENODEV)?;
 
-    let iface = find_iface_by_index(msg.index).ok_or(SyscallErr::ENODEV)?;
+            let exists = iface.ip_addrs().iter().any(|c| *c == cidr);
 
-    let exists = iface.ip_addrs().iter().any(|c| *c == cidr);
+            if exists {
+                if nl_flags & NLM_F_REPLACE != 0 {
+                    iface.del_ip_addr(cidr);
+                    iface.add_ip_addr(cidr);
+                } else if nl_flags & NLM_F_EXCL != 0 {
+                    return Err(SyscallErr::EEXIST);
+                } else {
+                    return Err(SyscallErr::EEXIST);
+                }
+            } else {
+                iface.add_ip_addr(cidr);
+            }
 
-    if exists {
-        if nl_flags & NLM_F_REPLACE != 0 {
-            iface.del_ip_addr(cidr);
-            iface.add_ip_addr(cidr);
-        } else if nl_flags & NLM_F_EXCL != 0 {
-            return Err(SyscallErr::EEXIST);
-        } else {
-            return Err(SyscallErr::EEXIST);
+            unsync_addr_from_smoltcp(msg.index as u32, cidr);
+            sync_addr_to_smoltcp(msg.index as u32, cidr);
+
+            let ns = crate::net::net_core::current_netns();
+            let net_cidr = IpCidr::new(IpAddress::Ipv4(network_base(addr, msg.prefixlen)), msg.prefixlen);
+            let mut router = ns.router.lock();
+            router.table.remove_connected(msg.index as u32, &net_cidr);
+            router.add_route(
+                net_cidr,
+                None,
+                msg.index as u32,
+                0,
+                crate::net::routing::RouteType::Connected,
+            );
         }
-    } else {
-        iface.add_ip_addr(cidr);
-    }
+        10 => {
+            let addr = parse_ifa_addr_v6(payload, 8).ok_or(SyscallErr::EINVAL)?;
+            let cidr = IpCidr::new(IpAddress::Ipv6(addr), msg.prefixlen);
 
-    unsync_addr_from_smoltcp(msg.index as u32, cidr);
-    sync_addr_to_smoltcp(msg.index as u32, cidr);
+            let iface = find_iface_by_index(msg.index).ok_or(SyscallErr::ENODEV)?;
 
-    {
-        let ns = crate::net::net_core::current_netns();
-        let net_cidr = IpCidr::new(IpAddress::Ipv4(network_base(addr, msg.prefixlen)), msg.prefixlen);
-        let mut router = ns.router.lock();
-        router.table.remove_connected(msg.index as u32, &net_cidr);
-        router.add_route(
-            net_cidr,
-            None,
-            msg.index as u32,
-            0,
-            crate::net::routing::RouteType::Connected,
-        );
+            let exists = iface.ip_addrs().iter().any(|c| *c == cidr);
+
+            if exists {
+                if nl_flags & NLM_F_REPLACE != 0 {
+                    iface.del_ip_addr(cidr);
+                    iface.add_ip_addr(cidr);
+                } else if nl_flags & NLM_F_EXCL != 0 {
+                    return Err(SyscallErr::EEXIST);
+                } else {
+                    return Err(SyscallErr::EEXIST);
+                }
+            } else {
+                iface.add_ip_addr(cidr);
+            }
+
+            unsync_addr_from_smoltcp(msg.index as u32, cidr);
+            sync_addr_to_smoltcp(msg.index as u32, cidr);
+
+            let ns = crate::net::net_core::current_netns();
+            let net_cidr = IpCidr::new(IpAddress::Ipv6(network_base_v6(&addr, msg.prefixlen)), msg.prefixlen);
+            let mut router = ns.router.lock();
+            router.table.remove_connected(msg.index as u32, &net_cidr);
+            router.add_route(
+                net_cidr,
+                None,
+                msg.index as u32,
+                0,
+                crate::net::routing::RouteType::Connected,
+            );
+        }
+        _ => return Err(SyscallErr::EAFNOSUPPORT),
     }
 
     let mut orig = [0u8; 16];
@@ -168,23 +230,36 @@ pub fn handle_deladdr(
     let payload = buf.get(16..).ok_or(SyscallErr::EINVAL)?;
     let msg = parse_ifaddrmsg(payload).ok_or(SyscallErr::EINVAL)?;
 
-    if msg.family != 2 {
-        return Err(SyscallErr::EAFNOSUPPORT);
-    }
+    match msg.family {
+        2 => {
+            let addr = parse_ifa_addr(payload, 8).ok_or(SyscallErr::EINVAL)?;
+            let cidr = IpCidr::new(IpAddress::Ipv4(addr), msg.prefixlen);
 
-    let addr = parse_ifa_addr(payload, 8).ok_or(SyscallErr::EINVAL)?;
-    let cidr = IpCidr::new(IpAddress::Ipv4(addr), msg.prefixlen);
+            let iface = find_iface_by_index(msg.index).ok_or(SyscallErr::ENODEV)?;
+            iface.del_ip_addr(cidr);
 
-    let iface = find_iface_by_index(msg.index).ok_or(SyscallErr::ENODEV)?;
-    iface.del_ip_addr(cidr);
+            unsync_addr_from_smoltcp(msg.index as u32, cidr);
 
-    unsync_addr_from_smoltcp(msg.index as u32, cidr);
+            let ns = crate::net::net_core::current_netns();
+            let net_cidr = IpCidr::new(IpAddress::Ipv4(network_base(addr, msg.prefixlen)), msg.prefixlen);
+            let mut router = ns.router.lock();
+            router.table.remove_connected(msg.index as u32, &net_cidr);
+        }
+        10 => {
+            let addr = parse_ifa_addr_v6(payload, 8).ok_or(SyscallErr::EINVAL)?;
+            let cidr = IpCidr::new(IpAddress::Ipv6(addr), msg.prefixlen);
 
-    {
-        let ns = crate::net::net_core::current_netns();
-        let net_cidr = IpCidr::new(IpAddress::Ipv4(network_base(addr, msg.prefixlen)), msg.prefixlen);
-        let mut router = ns.router.lock();
-        router.table.remove_connected(msg.index as u32, &net_cidr);
+            let iface = find_iface_by_index(msg.index).ok_or(SyscallErr::ENODEV)?;
+            iface.del_ip_addr(cidr);
+
+            unsync_addr_from_smoltcp(msg.index as u32, cidr);
+
+            let ns = crate::net::net_core::current_netns();
+            let net_cidr = IpCidr::new(IpAddress::Ipv6(network_base_v6(&addr, msg.prefixlen)), msg.prefixlen);
+            let mut router = ns.router.lock();
+            router.table.remove_connected(msg.index as u32, &net_cidr);
+        }
+        _ => return Err(SyscallErr::EAFNOSUPPORT),
     }
 
     let mut orig = [0u8; 16];
@@ -205,4 +280,28 @@ fn network_base(addr: Ipv4Address, prefix_len: u8) -> Ipv4Address {
     let ip = u32::from_be_bytes(addr.0);
     let mask = if prefix_len == 0 { 0 } else { !0u32 << (32 - prefix_len) };
     Ipv4Address::from_bytes(&(ip & mask).to_be_bytes())
+}
+
+fn network_base_v6(addr: &Ipv6Address, prefix_len: u8) -> Ipv6Address {
+    if prefix_len == 0 {
+        return Ipv6Address::UNSPECIFIED;
+    }
+    if prefix_len >= 128 {
+        return *addr;
+    }
+    let mut bytes = addr.0;
+    let full_bytes = (prefix_len / 8) as usize;
+    let remaining_bits = prefix_len % 8;
+    if remaining_bits > 0 {
+        let mask = 0xFFu8 << (8 - remaining_bits);
+        bytes[full_bytes] &= mask;
+        for b in &mut bytes[full_bytes + 1..] {
+            *b = 0;
+        }
+    } else {
+        for b in &mut bytes[full_bytes..] {
+            *b = 0;
+        }
+    }
+    Ipv6Address(bytes)
 }

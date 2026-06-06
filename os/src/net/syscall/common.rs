@@ -13,6 +13,9 @@ pub const IP_HDRINCL: u32 = 3;
 pub const IPV6_RECVPKTINFO: u32 = 49;
 pub const ICMP6_FILTER: u32 = 1;
 
+pub const SOL_RAW: u32 = 255;
+pub const IPV6_CHECKSUM: u32 = 7;
+
 /// Returns true if `level` is a commonly known socket option protocol level.
 /// Used to distinguish between ENOPROTOOPT (known level, unknown option)
 /// and EOPNOTSUPP (unknown level).

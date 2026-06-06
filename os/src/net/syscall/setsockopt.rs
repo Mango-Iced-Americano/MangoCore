@@ -5,8 +5,8 @@ use crate::utils::error::SyscallErr;
 
 use super::common::{
     MCAST_JOIN_GROUP, MCAST_LEAVE_GROUP, SO_BINDTODEVICE, SO_DONTROUTE, SO_KEEPALIVE, SO_RCVBUF, SO_RCVTIMEO,
-    SO_REUSEADDR, SO_SNDBUF, SO_SNDTIMEO, SOL_ICMPV6, SOL_IP, SOL_IPV6, SOL_SOCKET, SOL_TCP, TCP_NODELAY,
-    ICMP6_FILTER, IPV6_RECVPKTINFO, IP_HDRINCL,
+    SO_REUSEADDR, SO_SNDBUF, SO_SNDTIMEO, SOL_ICMPV6, SOL_IP, SOL_IPV6, SOL_RAW, SOL_SOCKET, SOL_TCP, TCP_NODELAY,
+    ICMP6_FILTER, IPV6_CHECKSUM, IPV6_RECVPKTINFO, IP_HDRINCL,
 };
 
 pub fn sys_setsockopt(
@@ -56,6 +56,16 @@ pub fn sys_setsockopt(
         }
         (SOL_IPV6, IPV6_RECVPKTINFO) | (SOL_ICMPV6, ICMP6_FILTER) => {
             // Accept and ignore — kernel handles packet header construction for raw sockets
+        }
+        (SOL_RAW, IPV6_CHECKSUM) => {
+            let offset = optval;
+            if offset & 1 != 0 {
+                return -(SyscallErr::EINVAL as isize);
+            }
+            match socket.set_ipv6_checksum(offset) {
+                Ok(_) => {}
+                Err(e) => return -(e as isize),
+            }
         }
         (SOL_TCP, TCP_NODELAY) => {
             // close Nagle’s Algorithm

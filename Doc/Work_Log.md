@@ -4,6 +4,28 @@
 
 ## 2026-06-06
 
+### IPv6 修复三合一：rebind_routed_raw、RTM_GETADDR IPv6、IPV6_CHECKSUM
+
+**背景：** LTP asapi_01（IPV6_CHECKSUM 子测试）、asapi_02、ping6 均被 IPv6 相关缺陷阻塞。
+
+**涉及文件：**
+- `os/src/net/config.rs` — `rebind_routed_raw()` 新增 `ip_version`、`ip_protocol` 参数，不再硬编码 IPv4 ICMP
+- `os/src/net/socket/inet/raw/raw.rs` — 两处 `rebind_routed_raw` 调用点传递 `version`、`protocol`；`RawSocketInner` 新增 `ipv6_checksum_offset` 字段；新增 `set_ipv6_checksum()` 实现（odd offset → EINVAL）；`send_to` IPv6 路径在 `ipv6_checksum_offset` 设置时计算伪头部校验和并写入；新增 `ipv6_pseudo_header_checksum()` 辅助函数
+- `os/src/net/socket/netlink/route/mod.rs` — dispatch 中 `is_dump` 检测改为 `(flags & (NLM_F_DUMP | NLM_F_ROOT)) != 0` 以兼容仅带 `NLM_F_ROOT` 标志的 dump 请求；`handle_getaddr` 新增 IPv6 地址分支（family=10 / AF_INET6）
+- `os/src/net/socket/netlink/route/addr.rs` — `handle_newaddr`/`handle_deladdr` 支持 AF_INET6（family=10）；新增 `parse_ifa_addr_v6()` 解析 16 字节 IPv6 地址；新增 `network_base_v6()` 计算 IPv6 网络前缀
+- `os/src/net/syscall/common.rs` — 新增 `SOL_RAW: u32 = 255` 和 `IPV6_CHECKSUM: u32 = 7`
+- `os/src/net/syscall/setsockopt.rs` — 新增 `(SOL_RAW, IPV6_CHECKSUM)` 处理器
+- `os/src/net/socket/mod.rs` — Socket trait 新增 `set_ipv6_checksum()` 默认方法
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：**
+- IPV6_CHECKSUM 校验和计算覆盖伪头部（src+dst+len+nh）+ payload，符合 RFC 2460 §8.1
+- RTM_GETADDR 现在可返回 IPv6 地址，解决 `tst_net_iface_prefix` 报告 "prefix and interface not found" 问题
+- `NLM_F_DUMP` 现包含 `NLM_F_ROOT`（0x100），但也接受单独的 `NLM_F_ROOT`（LTP 请求仅带此标志）
+
 ### Neighbour Table 实现：RTM_GETNEIGH / RTM_DELNEIGH / /proc/net/arp
 
 **背景：** `ip neigh show`、`arp -an` 和 LTP ipneigh01 测试需要内核维护邻居表（ARP 表），返回 IP→MAC 映射。此前 RTM_GETNEIGH 始终返回空，`/proc/net/arp` 仅输出表头。
