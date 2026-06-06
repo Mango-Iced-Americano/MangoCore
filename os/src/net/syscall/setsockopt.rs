@@ -5,7 +5,8 @@ use crate::utils::error::SyscallErr;
 
 use super::common::{
     MCAST_JOIN_GROUP, MCAST_LEAVE_GROUP, SO_BINDTODEVICE, SO_DONTROUTE, SO_KEEPALIVE, SO_RCVBUF, SO_RCVTIMEO,
-    SO_REUSEADDR, SO_SNDBUF, SO_SNDTIMEO, SOL_IP, SOL_SOCKET, SOL_TCP, TCP_NODELAY, IP_HDRINCL,
+    SO_REUSEADDR, SO_SNDBUF, SO_SNDTIMEO, SOL_ICMPV6, SOL_IP, SOL_IPV6, SOL_SOCKET, SOL_TCP, TCP_NODELAY,
+    ICMP6_FILTER, IPV6_RECVPKTINFO, IP_HDRINCL,
 };
 
 pub fn sys_setsockopt(
@@ -52,6 +53,9 @@ pub fn sys_setsockopt(
         }
         (SOL_IP, IP_HDRINCL) => {
             // Accept IP_HDRINCL; ping sets this but we build headers internally
+        }
+        (SOL_IPV6, IPV6_RECVPKTINFO) | (SOL_ICMPV6, ICMP6_FILTER) => {
+            // Accept and ignore — kernel handles packet header construction for raw sockets
         }
         (SOL_TCP, TCP_NODELAY) => {
             // close Nagle’s Algorithm

@@ -576,7 +576,21 @@ pub fn net_snmp_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    proc_read_str(offset, len, buf, "Ip: Forwarding DefaultTTL InReceives\nIp: 2 64 0\n")
+    // Must match net-tools parsesnmp() expectations: Ip, Icmp, Tcp, Udp, UdpLite sections
+    // with header fields matching snmp mib standard names.
+    let content = concat!(
+        "Ip: Forwarding DefaultTTL InReceives InHdrErrors InAddrErrors ForwDatagrams InUnknownProtos InDiscards InDelivers OutRequests OutDiscards OutNoRoutes ReasmTimeout ReasmReqds ReasmOKs ReasmFails FragOKs FragFails FragCreates\n",
+        "Ip: 2 64 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+        "Icmp: InMsgs InErrors InCsumErrors InDestUnreachs InTimeExcds InParmProbs InSrcQuenchs InRedirects InEchos InEchoReps InTimestamps InTimestampReps InAddrMasks InAddrMaskReps OutMsgs OutErrors OutDestUnreachs OutTimeExcds OutParmProbs OutSrcQuenchs OutRedirects OutEchos OutEchoReps OutTimestamps OutTimestampReps OutAddrMasks OutAddrMaskReps\n",
+        "Icmp: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+        "Tcp: RtoAlgorithm RtoMin RtoMax MaxConn ActiveOpens PassiveOpens AttemptFails EstabResets CurrEstab InSegs OutSegs RetransSegs InErrs OutRsts InCsumErrors\n",
+        "Tcp: 1 200 120000 -1 0 0 0 0 0 0 0 0 0 0 0\n",
+        "Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti\n",
+        "Udp: 0 0 0 0 0 0 0 0\n",
+        "UdpLite: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors\n",
+        "UdpLite: 0 0 0 0 0 0 0\n",
+    );
+    proc_read_str(offset, len, buf, content)
 }
 
 pub fn net_netstat_content(
@@ -585,7 +599,15 @@ pub fn net_netstat_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    proc_read_str(offset, len, buf, "TcpExt: SyncookiesSent\nTcpExt: 0\n")
+    // netstat -s also reads /proc/net/netstat; includes multicast counters for -gn.
+    // TcpExt: 69 fields; IpExt: 16 fields (with InMcastPkts/OutMcastPkts).
+    let content = concat!(
+        "TcpExt: SyncookiesSent SyncookiesRecv SyncookiesFailed EmbryonicRsts PruneCalled RcvPruned OfoPruned OutOfWindowIcmps LockDroppedIcmps ArpFilter TW TWRecycled TWKilled PAWSPassive PAWSActive PAWSEstab DelayedACKs DelayedACKLocked DelayedACKLost ListenOverflows ListenDropped TCPPrequeued TCPDirectCopyFromBacklog TCPDirectCopyFromPrequeue TCPHPHits TCPHPHitsToUser TCPPureAcks TCPHPAcks TCPRenoRecovery TCPSackRecovery TCPSACKReneging TCPFACKReorder TCPSACKReorder TCPRenoReorder TCPTSReorder TCPFullUndo TCPPartialUndo TCPLossUndo TCPLoss TCPLostRetransmit TCPRenoFailures TCPSackFailures TCPLossFailures TCPFastRetrans TCPForwardRetrans TCPSlowStartRetrans TCPTimeouts TCPLossProbes TCPLossProbeRecovery TCPRenoRecoveryFail TCPSackRecoveryFail TCPSchedulerFailed TCPRcvCollapsed TCPDSACKOldSent TCPDSACKOldRecv TCPDSACKUndo TCPDSACKIgnoredNoUndo TCPDSACKIgnoredOld TCPDSACKOfoRecv TCPDSACKRecv TCPDSACKOfoSent TCPAbortOnData TCPAbortOnClose TCPAbortOnMemory TCPAbortOnTimeout TCPAbortOnLinger TCPAbortFailed TCPMemoryPressures TCPSACKDiscard\n",
+        "TcpExt: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+        "IpExt: InNoRoutes InTruncatedPkts InMcastPkts OutMcastPkts InBcastPkts OutBcastPkts InOctets OutOctets InMcastOctets OutMcastOctets InBcastOctets OutBcastOctets InCsumErrors InNoECTPkts InECT0Pkts InCEPkts\n",
+        "IpExt: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+    );
+    proc_read_str(offset, len, buf, content)
 }
 
 pub fn net_snmp6_content(
@@ -594,5 +616,71 @@ pub fn net_snmp6_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    proc_read_str(offset, len, buf, "Ip6: InReceives\nIp6: 0\n")
+    // /proc/net/snmp6 uses "key value" pairs per line, parsed by process6_fd().
+    // Must include Ip6*, Icmp6*, and Udp6* entries matching snmp6tabs[].
+    // Using flat hex (no colons) for IPv6 addresses to match parser expectations.
+    let content = concat!(
+        "Ip6InReceives 0\n",
+        "Ip6InHdrErrors 0\n",
+        "Ip6InTooBigErrors 0\n",
+        "Ip6InNoRoutes 0\n",
+        "Ip6InAddrErrors 0\n",
+        "Ip6InUnknownProtos 0\n",
+        "Ip6InTruncatedPkts 0\n",
+        "Ip6InDiscards 0\n",
+        "Ip6InDelivers 0\n",
+        "Ip6OutForwDatagrams 0\n",
+        "Ip6OutRequests 0\n",
+        "Ip6OutDiscards 0\n",
+        "Ip6OutNoRoutes 0\n",
+        "Ip6ReasmTimeout 0\n",
+        "Ip6ReasmReqds 0\n",
+        "Ip6ReasmOKs 0\n",
+        "Ip6ReasmFails 0\n",
+        "Ip6FragOKs 0\n",
+        "Ip6FragFails 0\n",
+        "Ip6FragCreates 0\n",
+        "Ip6InMcastPkts 0\n",
+        "Ip6OutMcastPkts 0\n",
+        "Icmp6InMsgs 0\n",
+        "Icmp6InErrors 0\n",
+        "Icmp6OutMsgs 0\n",
+        "Icmp6OutErrors 0\n",
+        "Icmp6InDestUnreachs 0\n",
+        "Icmp6InPktTooBigs 0\n",
+        "Icmp6InTimeExcds 0\n",
+        "Icmp6InParmProblems 0\n",
+        "Icmp6InEchos 0\n",
+        "Icmp6InEchoReplies 0\n",
+        "Icmp6InGroupMembQueries 0\n",
+        "Icmp6InGroupMembResponses 0\n",
+        "Icmp6InGroupMembReductions 0\n",
+        "Icmp6InRouterSolicits 0\n",
+        "Icmp6InRouterAdvertisements 0\n",
+        "Icmp6InNeighborSolicits 0\n",
+        "Icmp6InNeighborAdvertisements 0\n",
+        "Icmp6InRedirects 0\n",
+        "Icmp6OutDestUnreachs 0\n",
+        "Icmp6OutPktTooBigs 0\n",
+        "Icmp6OutTimeExcds 0\n",
+        "Icmp6OutParmProblems 0\n",
+        "Icmp6OutEchos 0\n",
+        "Icmp6OutEchoReplies 0\n",
+        "Icmp6OutGroupMembQueries 0\n",
+        "Icmp6OutGroupMembResponses 0\n",
+        "Icmp6OutGroupMembReductions 0\n",
+        "Icmp6OutRouterSolicits 0\n",
+        "Icmp6OutRouterAdvertisements 0\n",
+        "Icmp6OutNeighborSolicits 0\n",
+        "Icmp6OutNeighborAdvertisements 0\n",
+        "Icmp6OutRedirects 0\n",
+        "Udp6InDatagrams 0\n",
+        "Udp6NoPorts 0\n",
+        "Udp6InErrors 0\n",
+        "Udp6OutDatagrams 0\n",
+        "Udp6RcvbufErrors 0\n",
+        "Udp6SndbufErrors 0\n",
+        "Udp6InCsumErrors 0\n",
+    );
+    proc_read_str(offset, len, buf, content)
 }

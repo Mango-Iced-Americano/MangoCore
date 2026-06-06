@@ -7,6 +7,7 @@ use super::netlink::{
     ARPHRD_ETHER, ARPHRD_LOOPBACK,
     IFLA_ADDRESS, IFLA_IFNAME, IFLA_MTU,
     IFA_ADDRESS, IFA_LOCAL, IFA_LABEL,
+    NDA_DST, NDA_LLADDR,
     NLMSG_DONE, NLMSG_ERROR, NLM_F_DUMP, NLM_F_MULTI, NLM_F_REQUEST,
     RTA_DST, RTA_GATEWAY, RTA_OIF,
     RTM_DELADDR, RTM_DELLINK, RTM_DELROUTE, RTM_GETADDR, RTM_GETLINK, RTM_GETROUTE,
@@ -58,6 +59,7 @@ pub fn handle_netlink_msg(buf: &[u8], sock: &NetlinkSocket) -> Result<isize, cra
             RTM_SETLINK => link::handle_setlink(seq, pid, buf, sock),
             RTM_NEWROUTE => route::handle_newroute(seq, pid, buf, flags, sock),
             RTM_DELROUTE => route::handle_delroute(seq, pid, buf, sock),
+            RTM_DELNEIGH => handle_delneigh(seq, pid, buf, sock),
             RTM_GETLINK => handle_getlink_single(seq, pid, buf, sock),
             _ => Err(crate::utils::error::SyscallErr::EOPNOTSUPP),
         };
@@ -268,10 +270,76 @@ fn handle_getneigh(
     pid: u32,
     sock: &NetlinkSocket,
 ) -> Result<isize, crate::utils::error::SyscallErr> {
-    // Empty neighbor table: send NLMSG_DONE immediately.
+    let entries = crate::net::neighbour::neighbour_dump();
+    for (ifindex, ip, mac, state) in &entries {
+        let mut payload = Vec::with_capacity(12 + 32);
+        // ndmsg header (12 bytes)
+        payload.push(2);        // ndm_family = AF_INET
+        payload.push(0);        // ndm_pad1
+        payload.push(0);        // ndm_pad2 low
+        payload.push(0);        // ndm_pad2 high
+        payload.extend_from_slice(&(*ifindex as i32).to_ne_bytes()); // ndm_ifindex
+        payload.extend_from_slice(&state.to_ne_bytes()); // ndm_state
+        payload.push(0);        // ndm_flags
+        payload.push(0);        // ndm_type
+
+        // NDA_DST: IP address
+        if let IpAddress::Ipv4(a) = ip {
+            payload.extend(&super::netlink::rta_data(NDA_DST, &a.0));
+        } else {
+            continue; // skip IPv6 for now
+        }
+
+        // NDA_LLADDR: MAC address
+        payload.extend(&super::netlink::rta_data(NDA_LLADDR, &mac.0));
+
+        if !sock.push_recv(super::netlink::build_nlmsg(RTM_NEWNEIGH, NLM_F_MULTI, seq, pid, &payload)) {
+            return Err(crate::utils::error::SyscallErr::ENOBUFS);
+        }
+    }
     let done_payload = 0i32.to_ne_bytes();
-    let done = super::netlink::build_nlmsg(NLMSG_DONE, 0, seq, pid, &done_payload);
-    if !sock.push_recv(done) {
+    if !sock.push_recv(super::netlink::build_nlmsg(NLMSG_DONE, 0, seq, pid, &done_payload)) {
+        return Err(crate::utils::error::SyscallErr::ENOBUFS);
+    }
+    Ok(0)
+}
+
+fn handle_delneigh(
+    _seq: u32,
+    _pid: u32,
+    buf: &[u8],
+    sock: &NetlinkSocket,
+) -> Result<isize, crate::utils::error::SyscallErr> {
+    let payload = buf.get(16..).ok_or(crate::utils::error::SyscallErr::EINVAL)?;
+    if payload.len() < 12 {
+        return Err(crate::utils::error::SyscallErr::EINVAL);
+    }
+    let ifindex = i32::from_ne_bytes([payload[4], payload[5], payload[6], payload[7]]) as u32;
+    // Parse RTA attributes to find NDA_DST
+    let mut offset = 12;
+    let mut dst_ip: Option<IpAddress> = None;
+    while offset + 4 <= payload.len() {
+        let len = u16::from_ne_bytes([payload[offset], payload[offset + 1]]) as usize;
+        if len < 4 {
+            break;
+        }
+        let rta_type = u16::from_ne_bytes([payload[offset + 2], payload[offset + 3]]);
+        let data_start = offset + 4;
+        let data_end = core::cmp::min(offset + len, payload.len());
+        let data = &payload[data_start..data_end];
+
+        if rta_type == NDA_DST && data.len() >= 4 {
+            dst_ip = Some(IpAddress::v4(data[0], data[1], data[2], data[3]));
+        }
+
+        offset = super::netlink::nlmsg_align(offset + len);
+    }
+
+    let ip = dst_ip.ok_or(crate::utils::error::SyscallErr::EINVAL)?;
+    crate::net::neighbour::neighbour_delete(ifindex, ip);
+
+    let done_payload = 0i32.to_ne_bytes();
+    if !sock.push_recv(super::netlink::build_nlmsg(NLMSG_DONE, 0, _seq, _pid, &done_payload)) {
         return Err(crate::utils::error::SyscallErr::ENOBUFS);
     }
     Ok(0)

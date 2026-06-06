@@ -146,8 +146,32 @@ pub static TCP_SOCKETS_TO_REMOVE: Mutex<Vec<RouteSocketHandle>> = Mutex::new(Vec
 pub static RAW_SOCKETS: Mutex<Vec<(RouteSocketHandle, Weak<RawSocket>)>> = Mutex::new(Vec::new());
 pub static RAW_SOCKETS_TO_REMOVE: Mutex<Vec<RouteSocketHandle>> = Mutex::new(Vec::new());
 
+// packet
+pub static PACKET_SOCKETS: Mutex<Vec<Weak<crate::net::socket::packet::PacketSocket>>> = Mutex::new(Vec::new());
+
 
 // ── Endpoint 枚举 ─────────────────────────────────────────────────────
+
+/// AF_PACKET endpoint (parsed from sockaddr_ll).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PacketEndpoint {
+    /// Interface index (0 = any, bind to specific interface)
+    pub ifindex: u32,
+    /// Ethernet protocol type in network byte order (ETH_P_ALL=0x0003, ETH_P_ARP=0x0806, etc.)
+    pub protocol: u16,
+    /// Hardware type (ARPHRD_ETHER=1)
+    #[allow(unused)]
+    pub hatype: u16,
+    /// Packet type (PACKET_HOST, PACKET_BROADCAST, etc.)
+    #[allow(unused)]
+    pub pkttype: u8,
+    /// Hardware address length (6 for Ethernet)
+    #[allow(unused)]
+    pub halen: u8,
+    /// Hardware address (MAC for Ethernet)
+    #[allow(unused)]
+    pub addr: [u8; 8],
+}
 
 /// 统一的 socket 端点抽象，覆盖所有地址族。
 /// 对标 DragonOS `kernel/src/net/socket/endpoint.rs` 的 `Endpoint` 枚举，
@@ -160,6 +184,8 @@ pub enum Endpoint {
     Unix(UnixEndpoint),
     /// AF_NETLINK 端点（nl_pid）
     Netlink(u32),
+    /// AF_PACKET 端点 (sockaddr_ll)
+    Packet(PacketEndpoint),
     /// 未指定（AF_UNSPEC）
     Unspecified,
 }
@@ -223,8 +249,24 @@ impl Endpoint {
             }
             AF_PACKET => {
                 // sockaddr_ll: family(2) + protocol(2) + ifindex(4) + hatype(2) + pkttype(1) + halen(1) + addr(8) = 20
-                // Return Unspecified to avoid adding a new Endpoint variant
-                Ok(Endpoint::Unspecified)
+                if addr_buf.len() < 20 {
+                    return Err(SyscallErr::EINVAL);
+                }
+                let protocol = u16::from_be_bytes([addr_buf[2], addr_buf[3]]);
+                let ifindex = u32::from_ne_bytes([addr_buf[4], addr_buf[5], addr_buf[6], addr_buf[7]]);
+                let hatype = u16::from_ne_bytes([addr_buf[8], addr_buf[9]]);
+                let pkttype = addr_buf[10];
+                let halen = addr_buf[11];
+                let mut addr = [0u8; 8];
+                addr.copy_from_slice(&addr_buf[12..20]);
+                Ok(Endpoint::Packet(PacketEndpoint {
+                    ifindex,
+                    protocol,
+                    hatype,
+                    pkttype,
+                    halen,
+                    addr,
+                }))
             }
             _ => Err(SyscallErr::EAFNOSUPPORT),
         }
@@ -234,6 +276,7 @@ impl Endpoint {
     pub fn port(&self) -> u16 {
         match self {
             Endpoint::Ip(ep) => ep.port,
+            Endpoint::Packet(_) => 0,
             _ => 0,
         }
     }
@@ -271,6 +314,40 @@ impl Endpoint {
                     .map_err(|_| SyscallErr::EFAULT)?;
                 addrlen_ptr
                     .write(token, &12u32)
+                    .map_err(|_| SyscallErr::EFAULT)?;
+                Ok(0)
+            }
+            Endpoint::Packet(pep) => {
+                // sockaddr_ll: family(2) + protocol(2) + ifindex(4) + hatype(2) + pkttype(1) + halen(1) + addr(8) = 20
+                if addr == 0 || addrlen == 0 {
+                    return Err(SyscallErr::EFAULT);
+                }
+                let task = current_task().unwrap();
+                let token = task.get_user_token();
+                let addrlen_ptr = UserPtrMut::<u32>::from_addr(addrlen);
+                let capacity = match addrlen_ptr.read(token) {
+                    Ok(len) => len as usize,
+                    Err(_) => return Err(SyscallErr::EFAULT),
+                };
+                if capacity < 20 {
+                    return Err(SyscallErr::EINVAL);
+                }
+                let mut buf = [0u8; 20];
+                buf[0..2].copy_from_slice(&AF_PACKET.to_ne_bytes());
+                buf[2..4].copy_from_slice(&pep.protocol.to_be_bytes());
+                buf[4..8].copy_from_slice(&pep.ifindex.to_ne_bytes());
+                buf[8..10].copy_from_slice(&pep.hatype.to_ne_bytes());
+                buf[10] = pep.pkttype;
+                buf[11] = pep.halen;
+                buf[12..20].copy_from_slice(&pep.addr);
+                let mut user_buf =
+                    UserBufferWriter::new(token, addr as *mut u8, 20)
+                        .map_err(|_| SyscallErr::EFAULT)?;
+                user_buf
+                    .write_from(&buf)
+                    .map_err(|_| SyscallErr::EFAULT)?;
+                addrlen_ptr
+                    .write(token, &20u32)
                     .map_err(|_| SyscallErr::EFAULT)?;
                 Ok(0)
             }
@@ -688,7 +765,10 @@ impl dyn Socket {
             },
             AF_PACKET => match psock {
                 PSOCK::Raw | PSOCK::Datagram => {
-                    let socket: Arc<dyn Socket> = Arc::new(crate::net::socket::packet::PacketSocket::new(protocol as u16));
+                    let socket = crate::net::socket::packet::PacketSocket::new(protocol as u16);
+                    let socket = Arc::new(socket);
+                    crate::net::socket::packet::PacketSocket::register_packet_socket(&socket);
+                    let socket: Arc<dyn Socket> = socket;
                     let socket_file = Arc::new(SocketFile::new(socket));
                     alloc_socket_fd(socket_file)
                 }

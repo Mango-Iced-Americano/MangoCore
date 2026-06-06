@@ -7,6 +7,8 @@ pub mod meminfo;
 pub mod mounts;
 pub mod net_arp;
 pub mod net_dev;
+pub mod net_igmp;
+pub mod net_igmp6;
 pub mod net_if_inet6;
 pub mod net_raw;
 pub mod net_raw6;
@@ -288,6 +290,9 @@ pub fn register_all(root: &Arc<crate::fs::procfs::LockedProcInode>) -> Result<()
     net_dir.add_file("snmp", InodeMode::from_bits_truncate(0o444), sys::net_snmp_content, 0)?;
     net_dir.add_file("netstat", InodeMode::from_bits_truncate(0o444), sys::net_netstat_content, 0)?;
     net_dir.add_file("snmp6", InodeMode::from_bits_truncate(0o444), sys::net_snmp6_content, 0)?;
+    // Multicast group membership for netstat -gn
+    net_dir.add_file("igmp", InodeMode::from_bits_truncate(0o444), net_igmp::net_igmp_content, 0)?;
+    net_dir.add_file("igmp6", InodeMode::from_bits_truncate(0o444), net_igmp6::net_igmp6_content, 0)?;
 
     root.add_dynamic_symlink("self", self_::self_content, 0)?;
     let sysvipc_dir = root.add_dir_locked("sysvipc", InodeMode::from_bits_truncate(0o555))?;

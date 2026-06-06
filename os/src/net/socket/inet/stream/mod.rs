@@ -49,6 +49,7 @@ pub struct TcpSocket {
     pub reuse_addr: AtomicBool,
     multicast_group_joined: AtomicBool,
     pub bound: Mutex<BoundInner>,
+    pub bound_ifindex: Mutex<Option<u32>>,
     pub recv_waiters: EventWaitQueue,
     pub send_waiters: EventWaitQueue,
     pub connect_waiters: EventWaitQueue,
@@ -66,6 +67,7 @@ impl TcpSocket {
             reuse_addr: AtomicBool::new(false),
             multicast_group_joined: AtomicBool::new(false),
             bound: Mutex::new(BoundInner::new()),
+            bound_ifindex: Mutex::new(None),
             recv_waiters: EventWaitQueue::new(),
             send_waiters: EventWaitQueue::new(),
             connect_waiters: EventWaitQueue::new(),
@@ -270,10 +272,11 @@ impl Socket for TcpSocket {
             &mut *inner,
             Inner::Closed(Closed::new(smoltcp::wire::IpVersion::Ipv4)),
         );
-        match new_inner.connect(remote_endpoint) {
+        let bound_ifindex_capture = *self.bound_ifindex.lock();
+        match new_inner.connect(remote_endpoint, bound_ifindex_capture) {
             Ok(connecting) => {
-                let ifindex =
-                    crate::net::net_core::ifindex_for_local_addr(Some(connecting.local.addr));
+                let ifindex = bound_ifindex_capture
+                    .unwrap_or_else(|| crate::net::net_core::ifindex_for_local_addr(Some(connecting.local.addr)));
                 self.bound
                     .lock()
                     .bind(connecting.handle, ifindex, Some(connecting.local.addr), connecting.local.port);
@@ -396,6 +399,7 @@ impl Socket for TcpSocket {
             reuse_addr: AtomicBool::new(false),
             multicast_group_joined: AtomicBool::new(false),
             bound: Mutex::new(accepted_bound),
+            bound_ifindex: Mutex::new(None),
             recv_waiters: EventWaitQueue::new(),
             send_waiters: EventWaitQueue::new(),
             connect_waiters: EventWaitQueue::new(),
@@ -520,6 +524,25 @@ impl Socket for TcpSocket {
     fn set_reuse_addr(&self, enabled: bool) -> SyscallRet {
         self.reuse_addr.store(enabled, Ordering::Release);
         Ok(0)
+    }
+
+    fn set_bind_to_device(&self, ifname: &str) -> SyscallRet {
+        if ifname.is_empty() {
+            *self.bound_ifindex.lock() = None;
+            log::info!("[TcpSocket] unbound from device");
+            return Ok(0);
+        }
+        let ns = crate::net::net_core::current_netns();
+        let list = ns.device_list.lock();
+        let iface = list.values().find(|d| d.iface_name() == ifname);
+        match iface {
+            Some(iface) => {
+                *self.bound_ifindex.lock() = Some(iface.nic_id() as u32);
+                log::info!("[TcpSocket] bound to device {} (ifindex={})", ifname, iface.nic_id());
+                Ok(0)
+            }
+            None => Err(SyscallErr::ENODEV),
+        }
     }
 
     fn join_multicast_group(&self) -> SyscallRet {

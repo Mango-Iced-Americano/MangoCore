@@ -223,6 +223,11 @@ pub const RTA_OIF: u16 = 4;
 /// Gateway address
 pub const RTA_GATEWAY: u16 = 5;
 
+// ── NDA constants (linux/neighbour.h) ──
+pub const NDA_UNSPEC: u16 = 0;
+pub const NDA_DST: u16 = 1;
+pub const NDA_LLADDR: u16 = 2;
+
 // ── ARPHRD constants (linux/if_arp.h) ──
 /// Ethernet (10/100/1000 Mb)
 pub const ARPHRD_ETHER: u16 = 1;

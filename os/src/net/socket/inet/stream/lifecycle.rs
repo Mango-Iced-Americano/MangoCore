@@ -52,7 +52,8 @@ impl Inner {
     }
 
     /// connect 操作：Unbound 先 bind_ephemeral → 发起 SYN
-    pub fn connect(self, remote_endpoint: IpEndpoint) -> Result<Connecting, (Self, SyscallErr)> {
+    /// If `bound_ifindex` is Some, use it instead of route-based ifindex lookup.
+    pub fn connect(self, remote_endpoint: IpEndpoint, bound_ifindex: Option<u32>) -> Result<Connecting, (Self, SyscallErr)> {
         let (socket, local, ver) = match self {
             Inner::Init(Init::Unbound(_, ver)) => {
                 let port = PortManager::alloc_ephemeral_port();
@@ -87,9 +88,12 @@ impl Inner {
         }
 
         // Route to determine target ifindex for this connection
-        let route = crate::net::routing::route_output(remote_endpoint.addr).ok();
-        let ifindex = route.as_ref().map(|r| r.ifindex)
-            .unwrap_or_else(|| crate::net::net_core::ifindex_for_local_addr(Some(local.addr)));
+        // SO_BINDTODEVICE overrides route-based ifindex
+        let ifindex = bound_ifindex.unwrap_or_else(|| {
+            let route = crate::net::routing::route_output(remote_endpoint.addr).ok();
+            route.as_ref().map(|r| r.ifindex)
+                .unwrap_or_else(|| crate::net::net_core::ifindex_for_local_addr(Some(local.addr)))
+        });
 
         let handle = NET_INTERFACE
             .add_routed_socket_on(InetProtocol::Tcp, socket, ifindex)

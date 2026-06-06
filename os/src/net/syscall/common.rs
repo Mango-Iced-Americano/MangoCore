@@ -7,7 +7,11 @@ pub const MAX_ADDR_LEN: usize = 512;
 pub const SOL_SOCKET: u32 = 1;
 pub const SOL_TCP: u32 = 6;
 pub const SOL_IP: u32 = 0;
+pub const SOL_IPV6: u32 = 41;
+pub const SOL_ICMPV6: u32 = 58;
 pub const IP_HDRINCL: u32 = 3;
+pub const IPV6_RECVPKTINFO: u32 = 49;
+pub const ICMP6_FILTER: u32 = 1;
 
 /// Returns true if `level` is a commonly known socket option protocol level.
 /// Used to distinguish between ENOPROTOOPT (known level, unknown option)
@@ -15,7 +19,7 @@ pub const IP_HDRINCL: u32 = 3;
 pub fn is_known_sockopt_level(level: u32) -> bool {
     matches!(
         level,
-        SOL_IP | SOL_SOCKET | SOL_TCP | 17 /* SOL_UDP */ | 41 /* SOL_IPV6 */ | 255 /* SOL_RAW */
+        SOL_IP | SOL_SOCKET | SOL_TCP | SOL_IPV6 | SOL_ICMPV6 | 17 /* SOL_UDP */ | 255 /* SOL_RAW */
     )
 }
 

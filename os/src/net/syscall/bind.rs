@@ -204,6 +204,13 @@ pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize {
                 Err(e) => -(e as isize),
             }
         }
+        Endpoint::Packet(ep) => {
+            let socket = crate::get_socket!(sockfd);
+            match socket.bind(&Endpoint::Packet(ep)) {
+                Ok(_) => 0 as isize,
+                Err(e) => -(e as isize),
+            }
+        }
         Endpoint::Unspecified => {
             let socket = crate::get_socket!(sockfd);
             match socket.bind(&Endpoint::Unspecified) {

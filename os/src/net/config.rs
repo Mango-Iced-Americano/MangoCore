@@ -161,6 +161,7 @@ impl<'a> NetInterfaceInner<'a> {
 
                 loop {
                     let timestamp = Instant::from_millis(current_time_duration().as_millis() as i64);
+                    *crate::net::neighbour::CURRENT_POLL_IFINDEX.lock() = 2;
                     eth_iface.poll(timestamp, &mut eth_device, &mut eth_sockets);
 
                     let event = eth_sockets.get_mut::<dhcpv4::Socket>(dhcp_handle).poll();
@@ -423,6 +424,10 @@ impl<'a> NetInterface<'a> {
             };
 
             for stack in inner.stacks.iter_mut() {
+                // Set the current poll ifindex so ARP interceptors
+                // can tag neighbour entries with the correct interface.
+                *crate::net::neighbour::CURRENT_POLL_IFINDEX.lock() = stack.nic.nic_id() as u32;
+
                 // 1. Clean up UDP sockets belonging to this stack
                 for (resolved, ifindex, rh) in &udp_removes {
                     if *ifindex as usize == stack.nic.nic_id() {
@@ -430,6 +435,15 @@ impl<'a> NetInterface<'a> {
                             stack.sockets.remove(*h);
                         }
                         inner.bindings.remove(rh);
+                    }
+                }
+
+                // 1.5. Deliver raw frames to packet sockets before smoltcp consumes them
+                {
+                    let nic_id = stack.nic.nic_id() as u32;
+                    if let IfaceDevice::Veth(ref veth_driver) = stack.device {
+                        let rx_queue = veth_driver.inner.rx_queue.lock();
+                        crate::net::socket::packet::deliver_frames_from_veth_queue(nic_id, &rx_queue);
                     }
                 }
 
@@ -514,6 +528,17 @@ impl<'a> NetInterface<'a> {
                             stack.sockets.remove(*h);
                         }
                         inner.bindings.remove(rh);
+                    }
+                }
+
+                *crate::net::neighbour::CURRENT_POLL_IFINDEX.lock() = stack.nic.nic_id() as u32;
+
+                // Deliver raw frames to packet sockets before smoltcp consumes them
+                {
+                    let nic_id = stack.nic.nic_id() as u32;
+                    if let IfaceDevice::Veth(ref veth_driver) = stack.device {
+                        let rx_queue = veth_driver.inner.rx_queue.lock();
+                        crate::net::socket::packet::deliver_frames_from_veth_queue(nic_id, &rx_queue);
                     }
                 }
 

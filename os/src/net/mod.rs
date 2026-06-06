@@ -3,6 +3,7 @@ pub mod config;
 pub mod iface;
 pub mod ioctl;
 mod macros;
+pub mod neighbour;
 pub mod net_core;
 pub mod posix;
 pub mod router_device;
@@ -23,9 +24,9 @@ pub use socket::inet::common::address;
 
 // Socket 核心类型
 pub use socket::{
-    make_unix_socket_pair, wake_raw_waiters, wake_tcp_waiters, Endpoint, Fd, Socket, SocketFile,
-    TcpInfo, AF_INET, AF_INET6, AF_NETLINK, AF_PACKET, AF_UNIX, AF_UNSPEC, MAX_BUFFER_SIZE, PSOCK,
-    RAW_SOCKETS, RAW_SOCKETS_TO_REMOVE, SHUT_RD, SHUT_RDWR, SHUT_WR, TCP_MSS, TCP_SOCKETS,
-    TCP_SOCKETS_TO_REMOVE, UDP_SOCKETS, UDP_SOCKETS_TO_REMOVE,
+    make_unix_socket_pair, wake_raw_waiters, wake_tcp_waiters, Endpoint, Fd, PacketEndpoint, Socket,
+    SocketFile, TcpInfo, AF_INET, AF_INET6, AF_NETLINK, AF_PACKET, AF_UNIX, AF_UNSPEC,
+    MAX_BUFFER_SIZE, PSOCK, PACKET_SOCKETS, RAW_SOCKETS, RAW_SOCKETS_TO_REMOVE, SHUT_RD, SHUT_RDWR,
+    SHUT_WR, TCP_MSS, TCP_SOCKETS, TCP_SOCKETS_TO_REMOVE, UDP_SOCKETS, UDP_SOCKETS_TO_REMOVE,
 };
 // PSOCK replaces the old SocketType bitflags (which mixed type + SOCK_NONBLOCK/SOCK_CLOEXEC)

@@ -114,6 +114,8 @@ impl RxToken for VethRxToken {
     where
         F: FnOnce(&mut [u8]) -> R,
     {
+        let ifindex = *crate::net::neighbour::CURRENT_POLL_IFINDEX.lock();
+        crate::net::neighbour::try_capture_arp_reply(&self.0, ifindex);
         f(&mut self.0)
     }
 }

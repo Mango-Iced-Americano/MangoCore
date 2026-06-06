@@ -4,6 +4,46 @@
 
 ## 2026-06-06
 
+### SO_BINDTODEVICE：全 socket 类型支持
+
+**背景：** 需要 `ping -I veth0` 和 `arping -I veth0` 工作。SO_BINDTODEVICE 此前仅 RawSocket 支持，TCP/UDP/Packet 未实现。
+
+**涉及文件：**
+- `os/src/net/socket/inet/stream/mod.rs` — TcpSocket 新增 `bound_ifindex: Mutex<Option<u32>>`；新增 `set_bind_to_device` 实现；`connect()` 传递 bound_ifindex 到 `Inner::connect()`，覆盖路由查找结果
+- `os/src/net/socket/inet/stream/lifecycle.rs` — `Inner::connect()` 新增 `bound_ifindex: Option<u32>` 参数；当 Some 时直接使用，跳过 route_output 查询
+- `os/src/net/socket/inet/datagram/udp.rs` — UdpSocket 新增 `bound_ifindex: Mutex<Option<u32>>`；新增 `set_bind_to_device` 实现；`try_sendmsg()` 优先使用 bound_ifindex，回退到 route_output
+- `os/src/net/socket/packet.rs` — 新增 `set_bind_to_device` 实现（复用已有的 `bound_ifindex` 字段）；`try_sendmsg()` 支持从 dest sockaddr_ll 读取 ifindex 并使用
+
+**不变文件（已有正确实现）：**
+- `os/src/net/socket/inet/raw/raw.rs` — RawSocket 已有完整 `bound_ifindex` + `set_bind_to_device` + send_to 路由支持
+- `os/src/net/socket/mod.rs` — Socket trait 已有 `set_bind_to_device` 默认方法（返回 EOPNOTSUPP）
+- `os/src/net/syscall/setsockopt.rs` — SO_BINDTODEVICE 处理已通用化（调用 `socket.set_bind_to_device(ifname)`）
+
+**设计：**
+- 接口名解析：通过 `NetNamespace::device_by_name()` 遍历 device_list，返回 ifindex
+- 路由覆盖：所有 socket 类型在发送路径优先使用 bound_ifindex，回退到 route_output
+- 解绑：optlen==0 或空字符串将 bound_ifindex 设为 None/0
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+### netstat/getaddrinfo LTP 修复：增强 procfs 内容 + igmp/igmp6
+
+**背景：** netstat01 TFAIL（netstat -s/-i/-gn 读 procfs 文件失败）；getaddrinfo_01 TBROK（无 /etc/services）
+
+**涉及文件：**
+- `os/src/fs/procfs/files/sys.rs` — `net_snmp_content` 扩展为完整 Ip/Icmp/Tcp/Udp/UdpLite 段（含对齐的 header/value 行）；`net_netstat_content` 扩展为 69-field TcpExt + 16-field IpExt（含 InMcastPkts/OutMcastPkts）；`net_snmp6_content` 扩展为完整 Ip6*/Icmp6*/Udp6* key-value 条目
+- `os/src/fs/procfs/files/net_igmp.rs` — 新建 `/proc/net/igmp`，格式匹配 net-tools igmp_do_one() 解析器
+- `os/src/fs/procfs/files/net_igmp6.rs` — 新建 `/proc/net/igmp6`，flat hex（无冒号）匹配 %64[0-9A-Fa-f] 解析规则
+- `os/src/fs/procfs/files/mod.rs` — 注册 igmp/igmp6 模块和文件
+
+**备注：** getaddrinfo_01 需要 /etc/services（musl getservbyname），此为工具镜像配置问题，非内核可修复。用户将在测试工具侧处理。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
 ### IPv6 支持：Raw socket 实现 IPv6 packet 构造与接收
 
 **涉及文件：**

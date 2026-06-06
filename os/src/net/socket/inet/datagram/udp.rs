@@ -36,6 +36,7 @@ pub struct UdpSocket {
     inner: Mutex<UdpSocketInner>,
     socket_handler: RouteSocketHandle,
     bound: Mutex<BoundInner>,
+    bound_ifindex: Mutex<Option<u32>>,
     recv_waiters: EventWaitQueue,
     send_waiters: EventWaitQueue,
     pub ip_version: IpVersion,
@@ -238,6 +239,25 @@ impl Socket for UdpSocket {
         Ok(0)
     }
 
+    fn set_bind_to_device(&self, ifname: &str) -> SyscallRet {
+        if ifname.is_empty() {
+            *self.bound_ifindex.lock() = None;
+            log::info!("[UdpSocket] unbound from device");
+            return Ok(0);
+        }
+        let ns = crate::net::net_core::current_netns();
+        let list = ns.device_list.lock();
+        let iface = list.values().find(|d| d.iface_name() == ifname);
+        match iface {
+            Some(iface) => {
+                *self.bound_ifindex.lock() = Some(iface.nic_id() as u32);
+                log::info!("[UdpSocket] bound to device {} (ifindex={})", ifname, iface.nic_id());
+                Ok(0)
+            }
+            None => Err(SyscallErr::ENODEV),
+        }
+    }
+
     fn join_multicast_group(&self) -> SyscallRet {
         self.inner.lock().multicast_group_joined = true;
         Ok(0)
@@ -375,8 +395,14 @@ impl Socket for UdpSocket {
         if let Err(e) = route_check(remote.addr) {
             return Err(e);
         }
-        if let Some(route) = crate::net::routing::route_output(remote.addr).ok() {
-            NET_INTERFACE.rebind_routed_udp(self.socket_handler, route.ifindex);
+        let bound = *self.bound_ifindex.lock();
+        let target_ifindex = bound.or_else(|| {
+            crate::net::routing::route_output(remote.addr)
+                .ok()
+                .map(|r| r.ifindex)
+        });
+        if let Some(ifidx) = target_ifindex {
+            NET_INTERFACE.rebind_routed_udp(self.socket_handler, ifidx);
         }
         NET_INTERFACE
             .udp_routed_socket(self.socket_handler, |socket| {
@@ -464,6 +490,7 @@ impl UdpSocket {
             }),
             socket_handler,
             bound: Mutex::new(BoundInner::new()),
+            bound_ifindex: Mutex::new(None),
             recv_waiters: EventWaitQueue::new(),
             send_waiters: EventWaitQueue::new(),
             ip_version: ver,

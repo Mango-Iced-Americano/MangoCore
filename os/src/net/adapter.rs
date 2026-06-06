@@ -353,6 +353,8 @@ impl RxToken for NetRxToken {
     where
         F: FnOnce(&mut [u8]) -> R,
     {
+        let ifindex = *crate::net::neighbour::CURRENT_POLL_IFINDEX.lock();
+        crate::net::neighbour::try_capture_arp_reply(&self.buf, ifindex);
         f(&mut self.buf)
     }
 }
