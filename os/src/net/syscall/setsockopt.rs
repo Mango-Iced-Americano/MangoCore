@@ -57,6 +57,10 @@ pub fn sys_setsockopt(
         (SOL_IPV6, IPV6_RECVPKTINFO) | (SOL_IPV6, IPV6_RECVHOPLIMIT) => {
             // Accept and ignore — kernel handles packet header construction for raw sockets
         }
+        (SOL_IPV6, IPV6_CHECKSUM) => {
+            // IPV6_CHECKSUM is documented at SOL_RAW, but some apps (LTP asapi_01)
+            // call it at SOL_IPV6 on UDP/TCP sockets. Accept and no-op.
+        }
         (SOL_ICMPV6, ICMP6_FILTER) => {
             if (optlen as usize) < 32 {
                 return -(SyscallErr::EINVAL as isize);
