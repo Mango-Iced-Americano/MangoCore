@@ -567,7 +567,7 @@ pub fn disable_ipv6_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    proc_read_str(offset, len, buf, "1\n")
+    proc_read_str(offset, len, buf, "0\n")
 }
 
 pub fn net_snmp_content(

@@ -4,6 +4,18 @@
 
 ## 2026-06-06
 
+### IPv6 支持：Raw socket 实现 IPv6 packet 构造与接收
+
+**涉及文件：**
+- `os/src/net/socket/inet/raw/raw.rs` — `send_to()` IPv6 分支替换 `todo!()` 为完整 Ipv6Packet 构造（40 字节 header、set_version/set_traffic_class/set_flow_label/set_payload_len/set_next_header/set_hop_limit/set_src_addr/set_dst_addr）；源地址选择遍历接口 IP 找首个非 UNSPECIFIED 的 IPv6 地址；发后双 poll 处理往返。`try_recv()` 按 `ip_version` 分发 Ipv4Packet/Ipv6Packet 解析，IPv6 用 `src_addr().into_address()` 构造 IpEndpoint。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- LSP diagnostics 零错误
+
+**备注：** `try_recvmsg`/`local_endpoint`/`try_send` 已天然支持双协议（通过 `Endpoint::Ip` 和 `send_to` 分发），无需额外修改。
+
 ### veth ping 修复 + inet_test 输出清理 + SIOCGIFNAME + sysfs_compat 尝试
 
 **涉及文件：**
