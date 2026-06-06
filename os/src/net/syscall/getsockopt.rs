@@ -5,8 +5,8 @@ use crate::timer::TimeVal;
 use crate::utils::error::SyscallErr;
 
 use super::common::is_known_sockopt_level;
-use super::common::{SOL_IP, SOL_SOCKET, SOL_TCP, TCP_CONGESTION, TCP_INFO, TCP_MAXSEG};
-use super::common::{SO_RCVBUF, SO_RCVTIMEO, SO_REUSEADDR, SO_SNDBUF, SO_SNDTIMEO, SO_PEERCRED, SO_ERROR};
+use super::common::{SOL_IP, SOL_IPV6, SOL_SOCKET, SOL_TCP, TCP_CONGESTION, TCP_INFO, TCP_MAXSEG};
+use super::common::{SO_RCVBUF, SO_RCVTIMEO, SO_REUSEADDR, SO_SNDBUF, SO_SNDTIMEO, SO_PEERCRED, SO_ERROR, IPV6_RECVPKTINFO};
 
 pub fn sys_getsockopt(
     sockfd: u32,
@@ -164,6 +164,14 @@ pub fn sys_getsockopt(
                 core::slice::from_raw_parts(&timeout as *const TimeVal as *const u8, len)
             };
             if writer.write_from(bytes).is_err() || optlen_ptr.write(token, &(len as u32)).is_err()
+            {
+                return -(SyscallErr::EFAULT as isize);
+            }
+        }
+        (SOL_IPV6, IPV6_RECVPKTINFO) => {
+            let val: u32 = 0;
+            if optval_ptr.write(token, &val).is_err()
+                || optlen_ptr.write(token, &4u32).is_err()
             {
                 return -(SyscallErr::EFAULT as isize);
             }

@@ -52,6 +52,7 @@ struct UdpSocketInner {
     sendbuf_size: usize,
     reuse_addr: bool,
     multicast_group_joined: bool,
+    ipv6_checksum_offset: Option<u32>,
 }
 
 impl Socket for UdpSocket {
@@ -256,6 +257,11 @@ impl Socket for UdpSocket {
             }
             None => Err(SyscallErr::ENODEV),
         }
+    }
+
+    fn set_ipv6_checksum(&self, offset: u32) -> SyscallRet {
+        self.inner.lock().ipv6_checksum_offset = Some(offset);
+        Ok(0)
     }
 
     fn join_multicast_group(&self) -> SyscallRet {
@@ -487,6 +493,7 @@ impl UdpSocket {
                 sendbuf_size: MAX_BUFFER_SIZE,
                 reuse_addr: false,
                 multicast_group_joined: false,
+                ipv6_checksum_offset: None,
             }),
             socket_handler,
             bound: Mutex::new(BoundInner::new()),
