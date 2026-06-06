@@ -3760,20 +3760,39 @@ pub fn sys_mount(
         None => return EINVAL,
     };
 
-    let new_fs: Arc<dyn vfs::FileSystem> = if filesystemtype.as_str() == "tmpfs" {
-        crate::fs::tmpfs::TmpFS::new_with_options(4096 * 4096) // ~16MB default
-    } else {
-        crate::fs::ramfs::RamFS::new_with_quota(4096)
+    let new_fs: Arc<dyn vfs::FileSystem> = match filesystemtype.as_str() {
+        "tmpfs" => crate::fs::tmpfs::TmpFS::new_with_options(4096 * 4096), // ~16MB default
+        "sysfs" => {
+            let s = crate::fs::sysfs::SysFS::new();
+            crate::fs::sysfs::files::register_all(s.root())
+                .expect("sysfs: failed to register root entries");
+            s
+        }
+        "proc" => {
+            let p = crate::fs::procfs::ProcFS::new();
+            crate::fs::procfs::files::register_all(p.root())
+                .expect("procfs: failed to register root entries");
+            p
+        }
+        _ => return -(SyscallErr::ENODEV as isize),
     };
     let root_inode = new_fs.root_inode();
     let mnt_flags = vfs::MountFlags::from_bits_truncate(mountflags.bits() as u32);
 
-    match target_mfs_inode.mount_subtree_inner(
-        new_fs, root_inode, mnt_flags, Some(lookup_path), true,
+    let mnt = match target_mfs_inode.mount_subtree_inner(
+        new_fs, root_inode, mnt_flags, Some(lookup_path.clone()), true,
     ) {
-        Ok(_) => SUCCESS,
-        Err(e) => -(e as isize),
+        Ok(m) => m,
+        Err(e) => return -(e as isize),
+    };
+
+    // Dynamic pseudo-fs need dentry cache disabled so hooks fire on every access
+    match filesystemtype.as_str() {
+        "sysfs" | "proc" => mnt.no_dentry_cache.store(true, core::sync::atomic::Ordering::Relaxed),
+        _ => {}
     }
+
+    SUCCESS
 }
 
 bitflags! {
