@@ -202,13 +202,13 @@ fn handle_getlink_single(seq: u32, pid: u32, buf: &[u8], sock: &NetlinkSocket) -
 fn handle_getaddr(seq: u32, pid: u32, sock: &NetlinkSocket) -> Result<isize, crate::utils::error::SyscallErr> {
     let ns = crate::net::net_core::current_netns();
     let list = ns.device_list.lock();
+    let mut out = Vec::new();
     for (nic_id, iface) in list.iter() {
         let nic_id = *nic_id as u32;
         for cidr in &iface.ip_addrs() {
             match cidr.address() {
                 IpAddress::Ipv4(addr) => {
                     let mut payload = Vec::new();
-                    // ifaddrmsg: family(1) + prefixlen(1) + flags(1) + scope(1) + ifa_index(4) = 8 bytes
                     payload.push(2); // AF_INET
                     payload.push(cidr.prefix_len());
                     payload.push(0); // flags
@@ -220,13 +220,10 @@ fn handle_getaddr(seq: u32, pid: u32, sock: &NetlinkSocket) -> Result<isize, cra
                     let mut label = Vec::new(); label.extend_from_slice(iface.iface_name().as_bytes()); label.push(0);
                     attrs.extend(&super::netlink::rta_data(IFA_LABEL, &label));
                     payload.extend(&attrs);
-                    if !sock.push_recv(super::netlink::build_nlmsg(RTM_NEWADDR, NLM_F_MULTI, seq, pid, &payload)) {
-                        return Err(crate::utils::error::SyscallErr::ENOBUFS);
-                    }
+                    out.extend(&super::netlink::build_nlmsg(RTM_NEWADDR, NLM_F_MULTI, seq, pid, &payload));
                 }
                 IpAddress::Ipv6(addr) => {
                     let mut payload = Vec::new();
-                    // ifaddrmsg: family(1) + prefixlen(1) + flags(1) + scope(1) + ifa_index(4) = 8 bytes
                     payload.push(10); // AF_INET6
                     payload.push(cidr.prefix_len());
                     payload.push(0); // flags
@@ -238,15 +235,14 @@ fn handle_getaddr(seq: u32, pid: u32, sock: &NetlinkSocket) -> Result<isize, cra
                     let mut label = Vec::new(); label.extend_from_slice(iface.iface_name().as_bytes()); label.push(0);
                     attrs.extend(&super::netlink::rta_data(IFA_LABEL, &label));
                     payload.extend(&attrs);
-                    if !sock.push_recv(super::netlink::build_nlmsg(RTM_NEWADDR, NLM_F_MULTI, seq, pid, &payload)) {
-                        return Err(crate::utils::error::SyscallErr::ENOBUFS);
-                    }
+                    out.extend(&super::netlink::build_nlmsg(RTM_NEWADDR, NLM_F_MULTI, seq, pid, &payload));
                 }
             }
         }
     }
     let done_payload = 0i32.to_ne_bytes();
-    if !sock.push_recv(super::netlink::build_nlmsg(NLMSG_DONE, 0, seq, pid, &done_payload)) {
+    out.extend(&super::netlink::build_nlmsg(NLMSG_DONE, 0, seq, pid, &done_payload));
+    if !sock.push_recv(out) {
         return Err(crate::utils::error::SyscallErr::ENOBUFS);
     }
     Ok(0)

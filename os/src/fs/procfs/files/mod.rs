@@ -338,7 +338,7 @@ fn ipv6_conf_find_hook(
         0,
     )
     .ok()?;
-    dir.add_file(
+    dir.add_writable_file(
         "accept_dad",
         InodeMode::from_bits_truncate(0o644),
         sys::accept_dad_content,

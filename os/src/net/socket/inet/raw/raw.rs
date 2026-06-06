@@ -450,23 +450,38 @@ impl Socket for RawSocket {
     }
 
     fn recv_ready(&self) -> bool {
-        for &handler in &self.socket_handlers {
-            if NET_INTERFACE
-                .raw_routed_socket(handler, |socket| socket.can_recv())
-                .unwrap_or(false)
-            {
-                return true;
-            }
-        }
-        false
+        self.socket_r_ready()
     }
 
     fn socket_r_ready(&self) -> bool {
+        let ip_version = self.inner.lock().ip_version;
+        let icmp6_filter = self.inner.lock().icmp6_filter;
         for &handler in &self.socket_handlers {
-            if NET_INTERFACE
-                .raw_routed_socket(handler, |socket| socket.can_recv())
-                .unwrap_or(false)
-            {
+            let ready = NET_INTERFACE
+                .raw_routed_socket(handler, |socket| loop {
+                    if !socket.can_recv() {
+                        return false;
+                    }
+                    if ip_version == IpVersion::Ipv6 {
+                        if let Ok(data) = socket.peek() {
+                            if data.len() > 40 {
+                                let icmp_type = data[40] as usize;
+                                if icmp_type < 256 {
+                                    let word_idx = icmp_type / 32;
+                                    let bit_idx = icmp_type % 32;
+                                    if (icmp6_filter[word_idx] & (1u32 << bit_idx)) != 0 {
+                                        let mut discard = [0u8; 256];
+                                        let _ = socket.recv_slice(&mut discard);
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return true;
+                })
+                .unwrap_or(false);
+            if ready {
                 return true;
             }
         }
