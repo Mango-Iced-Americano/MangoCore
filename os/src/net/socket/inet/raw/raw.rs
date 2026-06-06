@@ -350,6 +350,9 @@ impl Socket for RawSocket {
                                 let src_addr = packet.src_addr();
                                 self.inner.lock().remote_endpoint =
                                     Some(IpEndpoint::new(src_addr.into_address(), 0));
+                                let payload_len = nbytes - 40;
+                                buf.copy_within(40..nbytes, 0);
+                                return Ok(payload_len as isize);
                             }
                         }
                         Ok(nbytes as isize)
