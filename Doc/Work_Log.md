@@ -4,6 +4,28 @@
 
 ## 2026-06-06
 
+### IPv6 Raw Socket 多栈注册 + ICMP6_FILTER 实现
+
+**背景：** asapi_02 的 IPv6 raw socket 接收测试失败（"recv all time out"），两个根因：
+1. Raw socket 只注册到默认栈（eth0），loopback（::1）流量在 lo 栈上到达但 socket 不可见
+2. setsockopt 接受 ICMP6_FILTER 但不存储/过滤，导致所有类型都接收（与测试预期不符）
+
+**涉及文件：**
+- `os/src/net/socket/inet/raw/raw.rs` — `RawSocket.socket_handler` 改为 `socket_handlers: Vec<RouteSocketHandle>`，主句柄在 index 0；`new()` 迭代所有 DeviceStack 并分别创建 smoltcp raw socket 注册；`try_recv()` 遍历所有句柄并在 IPv6 路径应用 ICMP6_FILTER 过滤；`recv_ready()`/`socket_r_ready()` 遍历所有句柄；`send_to()`/`try_send()`/`send_ready()` 使用主句柄；`Drop` 清理所有句柄；`RawSocketInner` 新增 `icmp6_filter: [u32; 8]`；新增 `set_icmp6_filter()` 方法
+- `os/src/net/config.rs` — 新增 `stack_ifindexes()` 方法返回所有已注册 DeviceStack 的 ifindex 列表
+- `os/src/net/syscall/setsockopt.rs` — `(SOL_ICMPV6, ICMP6_FILTER)` 独立处理：从用户空间读取 32 字节 filter 并调用 `socket.set_icmp6_filter()`
+- `os/src/net/socket/mod.rs` — Socket trait 新增 `set_icmp6_filter()` 默认方法（返回 ENOPROTOOPT）
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：**
+- ICMP6_FILTER 语义：256-bit bitmap，bit=1 表示 BLOCK 该 ICMPv6 类型（匹配 Linux）
+- `try_recv()` 内对同一 smoltcp socket 循环 recv（遇到过滤类型则丢弃并 continue），遍历完所有栈仍无匹配返回 EAGAIN
+- 主句柄（index 0）用于 send 操作（send_to 仍可通过 rebind_routed_raw 动态迁移主句柄的绑定位）
+- `recv_ready` 不检查 filter（仅检查 can_recv），被过滤的包会在 try_recv 中被丢弃
+
 ### IPv6 修复三合一：rebind_routed_raw、RTM_GETADDR IPv6、IPV6_CHECKSUM
 
 **背景：** LTP asapi_01（IPV6_CHECKSUM 子测试）、asapi_02、ping6 均被 IPv6 相关缺陷阻塞。

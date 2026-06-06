@@ -19,7 +19,8 @@ use smoltcp::{
 
 pub struct RawSocket {
     inner: Mutex<RawSocketInner>,
-    socket_handler: RouteSocketHandle,
+    /// Primary handler at index 0; subsequent handlers cover other stacks (lo, veth).
+    socket_handlers: Vec<RouteSocketHandle>,
     recv_waiters: EventWaitQueue,
     send_waiters: EventWaitQueue,
 }
@@ -34,6 +35,8 @@ struct RawSocketInner {
     sendbuf_size: usize,
     bound_ifindex: Option<u32>,
     ipv6_checksum_offset: Option<u32>,
+    /// 256-bit bitmap: bit=1 means BLOCK (match Linux ICMP6_FILTER semantics)
+    icmp6_filter: [u32; 8],
 }
 
 impl Socket for RawSocket {
@@ -103,6 +106,11 @@ impl Socket for RawSocket {
         }
     }
 
+    fn set_icmp6_filter(&self, filter: [u32; 8]) -> SyscallRet {
+        self.inner.lock().icmp6_filter = filter;
+        Ok(0)
+    }
+
     fn set_ipv6_checksum(&self, offset: u32) -> SyscallRet {
         if offset & 1 != 0 {
             return Err(SyscallErr::EINVAL);
@@ -163,7 +171,7 @@ impl Socket for RawSocket {
                 };
 
                 if let Some(ifidx) = target_ifindex {
-                    NET_INTERFACE.rebind_routed_raw(self.socket_handler, ifidx, version, protocol);
+                    NET_INTERFACE.rebind_routed_raw(self.socket_handlers[0], ifidx, version, protocol);
                 }
 
                 // Source IP from the OUTPUT interface, not from destination-based lookup
@@ -194,8 +202,8 @@ impl Socket for RawSocket {
                 ip_pkg.fill_checksum();
 
                 NET_INTERFACE.poll();
-                let ret = NET_INTERFACE
-                    .raw_routed_socket(self.socket_handler, |socket| {
+                let ret =                 NET_INTERFACE
+                    .raw_routed_socket(self.socket_handlers[0], |socket| {
                         log::info!(
                             "[RawSocket] Sending {} bytes to {}",
                             user_buf.len(),
@@ -243,7 +251,7 @@ impl Socket for RawSocket {
                 };
 
                 if let Some(ifidx) = target_ifindex {
-                    NET_INTERFACE.rebind_routed_raw(self.socket_handler, ifidx, version, protocol);
+                    NET_INTERFACE.rebind_routed_raw(self.socket_handlers[0], ifidx, version, protocol);
                 }
 
                 // Source IP from the OUTPUT interface: pick first non-unspecified IPv6 address
@@ -301,7 +309,7 @@ impl Socket for RawSocket {
 
                 NET_INTERFACE.poll();
                 let ret = NET_INTERFACE
-                    .raw_routed_socket(self.socket_handler, |socket| {
+                    .raw_routed_socket(self.socket_handlers[0], |socket| {
                         log::info!(
                             "[RawSocket] Sending {} bytes to {}",
                             user_buf.len(),
@@ -327,40 +335,60 @@ impl Socket for RawSocket {
     }
 
     fn try_recv(&self, buf: &mut [u8]) -> Result<isize, SyscallErr> {
-        // 不调用 poll，只做一次尝试
-        NET_INTERFACE
-            .raw_routed_socket(self.socket_handler, |socket| {
-                if !socket.can_recv() {
-                    return Err(SyscallErr::EAGAIN);
-                }
-                match socket.recv_slice(buf) {
-                    Ok(nbytes) => {
-                        let ip_version = self.inner.lock().ip_version;
-                        match ip_version {
-                            IpVersion::Ipv4 => {
-                                let packet =
-                                    smoltcp::wire::Ipv4Packet::new_unchecked(&buf[..nbytes]);
-                                let src_addr = packet.src_addr();
-                                self.inner.lock().remote_endpoint =
-                                    Some(IpEndpoint::new(src_addr.into(), 0));
-                            }
-                            IpVersion::Ipv6 => {
-                                let packet =
-                                    smoltcp::wire::Ipv6Packet::new_unchecked(&buf[..nbytes]);
-                                let src_addr = packet.src_addr();
-                                self.inner.lock().remote_endpoint =
-                                    Some(IpEndpoint::new(src_addr.into_address(), 0));
-                                let payload_len = nbytes - 40;
-                                buf.copy_within(40..nbytes, 0);
-                                return Ok(payload_len as isize);
-                            }
-                        }
-                        Ok(nbytes as isize)
+        let ip_version = self.inner.lock().ip_version;
+        let icmp6_filter = self.inner.lock().icmp6_filter;
+
+        for &handler in &self.socket_handlers {
+            let result = NET_INTERFACE.raw_routed_socket(handler, |socket| {
+                loop {
+                    if !socket.can_recv() {
+                        return Err(SyscallErr::EAGAIN);
                     }
-                    Err(_) => Err(SyscallErr::ENOTCONN),
+                    match socket.recv_slice(buf) {
+                        Ok(nbytes) => {
+                            if ip_version == IpVersion::Ipv6 && nbytes > 40 {
+                                let icmp_type = buf[40] as usize;
+                                if icmp_type < 256 {
+                                    let word_idx = icmp_type / 32;
+                                    let bit_idx = icmp_type % 32;
+                                    if (icmp6_filter[word_idx] & (1u32 << bit_idx)) != 0 {
+                                        continue;
+                                    }
+                                }
+                            }
+                            match ip_version {
+                                IpVersion::Ipv4 => {
+                                    let packet =
+                                        smoltcp::wire::Ipv4Packet::new_unchecked(&buf[..nbytes]);
+                                    let src_addr = packet.src_addr();
+                                    self.inner.lock().remote_endpoint =
+                                        Some(IpEndpoint::new(src_addr.into(), 0));
+                                }
+                                IpVersion::Ipv6 => {
+                                    let packet =
+                                        smoltcp::wire::Ipv6Packet::new_unchecked(&buf[..nbytes]);
+                                    let src_addr = packet.src_addr();
+                                    self.inner.lock().remote_endpoint =
+                                        Some(IpEndpoint::new(src_addr.into_address(), 0));
+                                    let payload_len = nbytes - 40;
+                                    buf.copy_within(40..nbytes, 0);
+                                    return Ok(payload_len as isize);
+                                }
+                            }
+                            return Ok(nbytes as isize);
+                        }
+                        Err(_) => return Err(SyscallErr::ENOTCONN),
+                    }
                 }
-            })
-            .unwrap_or(Err(SyscallErr::EAGAIN))
+            });
+            match result {
+                Some(Ok(n)) => return Ok(n),
+                Some(Err(SyscallErr::EAGAIN)) => continue,
+                Some(Err(e)) => return Err(e),
+                None => continue,
+            }
+        }
+        Err(SyscallErr::EAGAIN)
     }
 
     fn try_sendmsg(
@@ -391,7 +419,7 @@ impl Socket for RawSocket {
             None => {
                 // Unconnected: send raw bytes (IP_HDRINCL mode)
                 NET_INTERFACE
-                    .raw_routed_socket(self.socket_handler, |socket| {
+                    .raw_routed_socket(self.socket_handlers[0], |socket| {
                         if !socket.can_send() {
                             return Err(SyscallErr::EAGAIN);
                         }
@@ -422,66 +450,110 @@ impl Socket for RawSocket {
     }
 
     fn recv_ready(&self) -> bool {
-        NET_INTERFACE
-            .raw_routed_socket(self.socket_handler, |socket| socket.can_recv())
-            .unwrap_or(false)
+        for &handler in &self.socket_handlers {
+            if NET_INTERFACE
+                .raw_routed_socket(handler, |socket| socket.can_recv())
+                .unwrap_or(false)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn socket_r_ready(&self) -> bool {
+        for &handler in &self.socket_handlers {
+            if NET_INTERFACE
+                .raw_routed_socket(handler, |socket| socket.can_recv())
+                .unwrap_or(false)
+            {
+                return true;
+            }
+        }
+        false
     }
 
     fn send_ready(&self) -> bool {
         NET_INTERFACE
-            .raw_routed_socket(self.socket_handler, |socket| socket.can_send())
-            .unwrap_or(false)
-    }
-
-    fn socket_r_ready(&self) -> bool {
-        NET_INTERFACE
-            .raw_routed_socket(self.socket_handler, |socket| socket.can_recv())
+            .raw_routed_socket(self.socket_handlers[0], |socket| socket.can_send())
             .unwrap_or(false)
     }
 }
 
 impl RawSocket {
     pub fn new(protocol: u32, ip_version: IpVersion) -> Self {
-        let tx_buf = socket::raw::PacketBuffer::new(
-            vec![PacketMetadata::EMPTY; 128],
-            vec![0 as u8; MAX_BUFFER_SIZE],
-        );
-        let rx_buf = socket::raw::PacketBuffer::new(
-            vec![PacketMetadata::EMPTY; 128],
-            vec![0 as u8; MAX_BUFFER_SIZE],
-        );
-        let socket = raw::Socket::new(
-            ip_version,
-            smoltcp::wire::IpProtocol::from(protocol as u8),
-            rx_buf,
-            tx_buf,
-        );
-        let socket_handler = NET_INTERFACE.add_routed_socket(InetProtocol::Raw, socket).unwrap();
-        log::info!("[RawSocket::new] new {} ver={:?}", socket_handler, ip_version);
+        let ip_protocol = smoltcp::wire::IpProtocol::from(protocol as u8);
+        let ifindexes = NET_INTERFACE.stack_ifindexes();
+        let mut handlers = Vec::with_capacity(ifindexes.len().max(1));
+
+        if ifindexes.is_empty() {
+            let tx_buf = socket::raw::PacketBuffer::new(
+                vec![PacketMetadata::EMPTY; 128],
+                vec![0 as u8; MAX_BUFFER_SIZE],
+            );
+            let rx_buf = socket::raw::PacketBuffer::new(
+                vec![PacketMetadata::EMPTY; 128],
+                vec![0 as u8; MAX_BUFFER_SIZE],
+            );
+            let socket = raw::Socket::new(ip_version, ip_protocol, rx_buf, tx_buf);
+            let handler = NET_INTERFACE
+                .add_routed_socket(InetProtocol::Raw, socket)
+                .unwrap();
+            handlers.push(handler);
+            log::info!(
+                "[RawSocket::new] handler {} (fallback default iface) ver={:?}",
+                handler,
+                ip_version
+            );
+        } else {
+            for &ifidx in &ifindexes {
+                let tx_buf = socket::raw::PacketBuffer::new(
+                    vec![PacketMetadata::EMPTY; 128],
+                    vec![0 as u8; MAX_BUFFER_SIZE],
+                );
+                let rx_buf = socket::raw::PacketBuffer::new(
+                    vec![PacketMetadata::EMPTY; 128],
+                    vec![0 as u8; MAX_BUFFER_SIZE],
+                );
+                let socket = raw::Socket::new(ip_version, ip_protocol, rx_buf, tx_buf);
+                let handler = NET_INTERFACE
+                    .add_routed_socket_on(InetProtocol::Raw, socket, ifidx)
+                    .unwrap();
+                handlers.push(handler);
+                log::info!(
+                    "[RawSocket::new] handler {} on ifindex={} ver={:?}",
+                    handler,
+                    ifidx,
+                    ip_version
+                );
+            }
+        }
+
         NET_INTERFACE.poll();
         let inner = RawSocketInner {
             local_endpoint: None,
             remote_endpoint: None,
             ip_version,
-            ip_protocol: IpProtocol::from(protocol as u8),
+            ip_protocol,
             recvbuf_size: MAX_BUFFER_SIZE,
             sendbuf_size: MAX_BUFFER_SIZE,
             bound_ifindex: None,
             ipv6_checksum_offset: None,
+            icmp6_filter: [0u32; 8],
         };
 
         Self {
             inner: Mutex::new(inner),
             recv_waiters: EventWaitQueue::new(),
             send_waiters: EventWaitQueue::new(),
-            socket_handler,
+            socket_handlers: handlers,
         }
     }
 
     pub fn register_raw_socket(socket: &Arc<Self>) {
         crate::net::RAW_SOCKETS
             .lock()
-            .push((socket.socket_handler, Arc::downgrade(socket)));
+            .push((socket.socket_handlers[0], Arc::downgrade(socket)));
     }
 }
 
@@ -526,10 +598,12 @@ fn ipv6_pseudo_header_checksum(
 
 impl Drop for RawSocket {
     fn drop(&mut self) {
-        log::info!("[RawSocket::drop] removing handle {}", self.socket_handler);
-        crate::net::RAW_SOCKETS
-            .lock()
-            .retain(|(h, _)| *h != self.socket_handler);
-        crate::net::config::NET_INTERFACE.remove_routed(self.socket_handler);
+        log::info!("[RawSocket::drop] removing {} handles", self.socket_handlers.len());
+        for &handler in &self.socket_handlers {
+            crate::net::RAW_SOCKETS
+                .lock()
+                .retain(|(h, _)| *h != handler);
+            crate::net::config::NET_INTERFACE.remove_routed(handler);
+        }
     }
 }

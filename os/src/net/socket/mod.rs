@@ -428,6 +428,9 @@ pub trait Socket: Send + Sync {
     fn set_ipv6_checksum(&self, _offset: u32) -> SyscallRet {
         Err(SyscallErr::ENOPROTOOPT)
     }
+    fn set_icmp6_filter(&self, _filter: [u32; 8]) -> SyscallRet {
+        Err(SyscallErr::ENOPROTOOPT)
+    }
     fn join_multicast_group(&self) -> SyscallRet {
         Ok(0)
     }

@@ -54,8 +54,34 @@ pub fn sys_setsockopt(
         (SOL_IP, IP_HDRINCL) => {
             // Accept IP_HDRINCL; ping sets this but we build headers internally
         }
-        (SOL_IPV6, IPV6_RECVPKTINFO) | (SOL_ICMPV6, ICMP6_FILTER) => {
+        (SOL_IPV6, IPV6_RECVPKTINFO) => {
             // Accept and ignore — kernel handles packet header construction for raw sockets
+        }
+        (SOL_ICMPV6, ICMP6_FILTER) => {
+            if (optlen as usize) < 32 {
+                return -(SyscallErr::EINVAL as isize);
+            }
+            let reader = match UserBufferReader::new(token, optval_ptr as *const u8, 32) {
+                Ok(r) => r,
+                Err(_) => return -(SyscallErr::EFAULT as isize),
+            };
+            let mut filter_bytes = [0u8; 32];
+            if reader.read_into(&mut filter_bytes).is_err() {
+                return -(SyscallErr::EFAULT as isize);
+            }
+            let mut filter = [0u32; 8];
+            for i in 0..8 {
+                filter[i] = u32::from_ne_bytes([
+                    filter_bytes[i * 4],
+                    filter_bytes[i * 4 + 1],
+                    filter_bytes[i * 4 + 2],
+                    filter_bytes[i * 4 + 3],
+                ]);
+            }
+            match socket.set_icmp6_filter(filter) {
+                Ok(_) => {}
+                Err(e) => return -(e as isize),
+            }
         }
         (SOL_RAW, IPV6_CHECKSUM) => {
             let offset = optval;

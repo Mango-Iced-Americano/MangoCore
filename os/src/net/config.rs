@@ -352,6 +352,14 @@ impl<'a> NetInterface<'a> {
         Some(f(self.inner.lock().as_mut()?))
     }
 
+    /// Return the ifindex of every currently-registered DeviceStack.
+    pub fn stack_ifindexes(&self) -> Vec<u32> {
+        self.inner_handler(|inner| {
+            inner.stacks.iter().map(|s| s.nic.nic_id() as u32).collect()
+        })
+        .unwrap_or_default()
+    }
+
     /// 返回 (tcp_count, udp_count, raw_count, pending_remove)
     pub fn socket_stats(&self) -> (usize, usize, usize, usize) {
         let tcp = crate::net::TCP_SOCKETS.lock().len();
