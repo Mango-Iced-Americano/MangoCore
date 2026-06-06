@@ -11,6 +11,7 @@ pub const SOL_IPV6: u32 = 41;
 pub const SOL_ICMPV6: u32 = 58;
 pub const IP_HDRINCL: u32 = 3;
 pub const IPV6_RECVPKTINFO: u32 = 49;
+pub const IPV6_RECVHOPLIMIT: u32 = 53;
 pub const ICMP6_FILTER: u32 = 1;
 
 pub const SOL_RAW: u32 = 255;

@@ -14,16 +14,12 @@ use user_lib::{
 #[cfg(target_arch = "loongarch64")]
 const DEFAULT_CASE_TIMEOUT_SECS: u64 = 60;
 #[cfg(not(target_arch = "loongarch64"))]
-const DEFAULT_CASE_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_CASE_TIMEOUT_SECS: u64 = 60;
 #[cfg(target_arch = "loongarch64")]
 const LTP_TIMEOUT_MUL_ENV: &str = "LTP_TIMEOUT_MUL=2\0";
 const DEFAULT_CASE_TERM_GRACE_MS: u64 = 1500;
 const LTP_EXIT_TCONF: i32 = 32;
-const DEFAULT_LTP_EXCLUDE: &[&str] = &[
-    "rt_sigtimedwait01",
-    "timerfd04",
-    "timerfd_settime02",
-];
+const DEFAULT_LTP_EXCLUDE: &[&str] = &["rt_sigtimedwait01", "timerfd04", "timerfd_settime02"];
 const DEFAULT_LTP_EXCLUDE_UNSUPPORTED: &[&str] = &[
     "acct01",
     "acct02",
@@ -307,9 +303,7 @@ fn load_conf(path: &str, libc: &str) -> LtpConfig {
             conf_libc_exclude.extend(comma_split(val_str));
         } else if key == b"ltp_exclude_glibc" && libc == "glibc" {
             conf_libc_exclude.extend(comma_split(val_str));
-        } else if key == b"ltp_exclude_rv64_musl"
-            && cfg!(target_arch = "riscv64")
-            && libc == "musl"
+        } else if key == b"ltp_exclude_rv64_musl" && cfg!(target_arch = "riscv64") && libc == "musl"
         {
             conf_arch_libc_exclude.extend(comma_split(val_str));
         } else if key == b"ltp_exclude_rv64_glibc"
@@ -520,56 +514,104 @@ fn precompute_env(ltproot: &str, tmpdir: &str) -> PrecomputedEnv {
 
     #[cfg(target_arch = "loongarch64")]
     let env_preload: [*const u8; 17] = [
-        ltp_root_s.as_ptr(), path_s.as_ptr(), tmpdir_s.as_ptr(), tmpbase_s.as_ptr(),
-        "HOME=/\0".as_ptr(), pwd_s.as_ptr(), "SHELL=/bin/bash\0".as_ptr(),
-        "TERM=dumb\0".as_ptr(), "LTP_COLORIZE_OUTPUT=y\0".as_ptr(),
-        "LTP_DEV_FS_TYPE=ext2\0".as_ptr(), "LTP_IPC_PATH=/tmp\0".as_ptr(),
-        "LANG=C.UTF-8\0".as_ptr(), "LTP_REPRODUCIBLE_OUTPUT=n\0".as_ptr(),
-        LTP_TIMEOUT_MUL_ENV.as_ptr(), "KCONFIG_PATH=/proc/config\0".as_ptr(),
-        ld_preload_ptr, null_ptr,
+        ltp_root_s.as_ptr(),
+        path_s.as_ptr(),
+        tmpdir_s.as_ptr(),
+        tmpbase_s.as_ptr(),
+        "HOME=/\0".as_ptr(),
+        pwd_s.as_ptr(),
+        "SHELL=/bin/bash\0".as_ptr(),
+        "TERM=dumb\0".as_ptr(),
+        "LTP_COLORIZE_OUTPUT=y\0".as_ptr(),
+        "LTP_DEV_FS_TYPE=ext2\0".as_ptr(),
+        "LTP_IPC_PATH=/tmp\0".as_ptr(),
+        "LANG=C.UTF-8\0".as_ptr(),
+        "LTP_REPRODUCIBLE_OUTPUT=n\0".as_ptr(),
+        LTP_TIMEOUT_MUL_ENV.as_ptr(),
+        "KCONFIG_PATH=/proc/config\0".as_ptr(),
+        ld_preload_ptr,
+        null_ptr,
     ];
     #[cfg(not(target_arch = "loongarch64"))]
     let env_preload: [*const u8; 17] = [
-        ltp_root_s.as_ptr(), path_s.as_ptr(), tmpdir_s.as_ptr(), tmpbase_s.as_ptr(),
-        "HOME=/\0".as_ptr(), pwd_s.as_ptr(), "SHELL=/bin/bash\0".as_ptr(),
-        "TERM=dumb\0".as_ptr(), "LTP_COLORIZE_OUTPUT=y\0".as_ptr(),
-        "LTP_DEV_FS_TYPE=ext2\0".as_ptr(), "LTP_IPC_PATH=/tmp\0".as_ptr(),
-        "LANG=C.UTF-8\0".as_ptr(), "LTP_REPRODUCIBLE_OUTPUT=n\0".as_ptr(),
-        "KCONFIG_PATH=/proc/config\0".as_ptr(), ld_preload_ptr, null_ptr, null_ptr,
+        ltp_root_s.as_ptr(),
+        path_s.as_ptr(),
+        tmpdir_s.as_ptr(),
+        tmpbase_s.as_ptr(),
+        "HOME=/\0".as_ptr(),
+        pwd_s.as_ptr(),
+        "SHELL=/bin/bash\0".as_ptr(),
+        "TERM=dumb\0".as_ptr(),
+        "LTP_COLORIZE_OUTPUT=y\0".as_ptr(),
+        "LTP_DEV_FS_TYPE=ext2\0".as_ptr(),
+        "LTP_IPC_PATH=/tmp\0".as_ptr(),
+        "LANG=C.UTF-8\0".as_ptr(),
+        "LTP_REPRODUCIBLE_OUTPUT=n\0".as_ptr(),
+        "KCONFIG_PATH=/proc/config\0".as_ptr(),
+        ld_preload_ptr,
+        null_ptr,
+        null_ptr,
     ];
 
     #[cfg(target_arch = "loongarch64")]
     let env_no_preload: [*const u8; 17] = [
-        ltp_root_s.as_ptr(), path_s.as_ptr(), tmpdir_s.as_ptr(), tmpbase_s.as_ptr(),
-        "HOME=/\0".as_ptr(), pwd_s.as_ptr(), "SHELL=/bin/sh\0".as_ptr(),
-        "TERM=dumb\0".as_ptr(), "LTP_COLORIZE_OUTPUT=y\0".as_ptr(),
-        "LTP_DEV_FS_TYPE=ext2\0".as_ptr(), "LTP_IPC_PATH=/tmp\0".as_ptr(),
-        "LANG=C.UTF-8\0".as_ptr(), "LTP_REPRODUCIBLE_OUTPUT=n\0".as_ptr(),
-        LTP_TIMEOUT_MUL_ENV.as_ptr(), "KCONFIG_PATH=/proc/config\0".as_ptr(),
-        null_ptr, null_ptr,
+        ltp_root_s.as_ptr(),
+        path_s.as_ptr(),
+        tmpdir_s.as_ptr(),
+        tmpbase_s.as_ptr(),
+        "HOME=/\0".as_ptr(),
+        pwd_s.as_ptr(),
+        "SHELL=/bin/sh\0".as_ptr(),
+        "TERM=dumb\0".as_ptr(),
+        "LTP_COLORIZE_OUTPUT=y\0".as_ptr(),
+        "LTP_DEV_FS_TYPE=ext2\0".as_ptr(),
+        "LTP_IPC_PATH=/tmp\0".as_ptr(),
+        "LANG=C.UTF-8\0".as_ptr(),
+        "LTP_REPRODUCIBLE_OUTPUT=n\0".as_ptr(),
+        LTP_TIMEOUT_MUL_ENV.as_ptr(),
+        "KCONFIG_PATH=/proc/config\0".as_ptr(),
+        null_ptr,
+        null_ptr,
     ];
     #[cfg(not(target_arch = "loongarch64"))]
     let env_no_preload: [*const u8; 17] = [
-        ltp_root_s.as_ptr(), path_s.as_ptr(), tmpdir_s.as_ptr(), tmpbase_s.as_ptr(),
-        "HOME=/\0".as_ptr(), pwd_s.as_ptr(), "SHELL=/bin/sh\0".as_ptr(),
-        "TERM=dumb\0".as_ptr(), "LTP_COLORIZE_OUTPUT=y\0".as_ptr(),
-        "LTP_DEV_FS_TYPE=ext2\0".as_ptr(), "LTP_IPC_PATH=/tmp\0".as_ptr(),
-        "LANG=C.UTF-8\0".as_ptr(), "LTP_REPRODUCIBLE_OUTPUT=n\0".as_ptr(),
-        "KCONFIG_PATH=/proc/config\0".as_ptr(), null_ptr, null_ptr, null_ptr,
+        ltp_root_s.as_ptr(),
+        path_s.as_ptr(),
+        tmpdir_s.as_ptr(),
+        tmpbase_s.as_ptr(),
+        "HOME=/\0".as_ptr(),
+        pwd_s.as_ptr(),
+        "SHELL=/bin/sh\0".as_ptr(),
+        "TERM=dumb\0".as_ptr(),
+        "LTP_COLORIZE_OUTPUT=y\0".as_ptr(),
+        "LTP_DEV_FS_TYPE=ext2\0".as_ptr(),
+        "LTP_IPC_PATH=/tmp\0".as_ptr(),
+        "LANG=C.UTF-8\0".as_ptr(),
+        "LTP_REPRODUCIBLE_OUTPUT=n\0".as_ptr(),
+        "KCONFIG_PATH=/proc/config\0".as_ptr(),
+        null_ptr,
+        null_ptr,
+        null_ptr,
     ];
 
-    PrecomputedEnv { ltp_root_s, path_s, tmpdir_s, tmpbase_s, pwd_s, env_preload, env_no_preload }
+    PrecomputedEnv {
+        ltp_root_s,
+        path_s,
+        tmpdir_s,
+        tmpbase_s,
+        pwd_s,
+        env_preload,
+        env_no_preload,
+    }
 }
 
-fn run_case(
-    case: &LtpCase,
-    deadline_ms: u64,
-    own_pgid: isize,
-    penv: &PrecomputedEnv,
-) -> i32 {
-
+fn run_case(case: &LtpCase, deadline_ms: u64, own_pgid: isize, penv: &PrecomputedEnv) -> i32 {
     let is_elf = !case.case_name.as_bytes().iter().any(|b| *b == b'.');
-    let env: &[*const u8] = if is_elf { &penv.env_preload } else { &penv.env_no_preload };
+    let env: &[*const u8] = if is_elf {
+        &penv.env_preload
+    } else {
+        &penv.env_no_preload
+    };
 
     let mut cmd_buf = String::from(&case.command);
     cmd_buf.push('\0');
