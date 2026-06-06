@@ -19,7 +19,9 @@ pub fn sys_recvfrom(
     addrlen: usize,
 ) -> isize {
     let len = (len as usize).min(64 * 1024 * 1024) as u32;
-    let msg_dontwait = match MsgFlags::from_bits_truncate(flags).validate_for_recv() {
+    let msg_flags = MsgFlags::from_bits_truncate(flags);
+    let is_peek = msg_flags.contains(MsgFlags::MSG_PEEK);
+    let msg_dontwait = match msg_flags.validate_for_recv() {
         Ok(nb) => nb,
         Err(e) => return -(e as isize),
     };
@@ -32,8 +34,8 @@ pub fn sys_recvfrom(
         let token = task.get_user_token();
         match UserPtr::<u32>::from_addr(addrlen).read(token) {
             Ok(len) => {
-                // addrlen 过小（< sizeof(struct sockaddr_in)=16）或过大（不合理）都返回 EINVAL
-                if len < 16 || len > 512 {
+                // addrlen 过小（< sizeof(struct sockaddr_nl)=12）或过大（不合理）都返回 EINVAL
+                if len < 12 || len > 512 {
                     return -(SyscallErr::EINVAL as isize);
                 }
             }
@@ -68,7 +70,11 @@ pub fn sys_recvfrom(
                 Ok(ret)
             }
             PSOCK::Datagram | PSOCK::Raw => {
-                let (ret, src_ep) = socket.try_recvmsg(&mut kernel_buf)?;
+                let (ret, src_ep) = if is_peek {
+                    socket.try_peek_recvmsg(&mut kernel_buf)?
+                } else {
+                    socket.try_recvmsg(&mut kernel_buf)?
+                };
                 log::info!("[sys_recvfrom] Datagram try_recvmsg returned {} bytes", ret);
                 // 注意这里是 >= 0，因为 UDP 允许发送 0 字节的空包
                 if ret >= 0 && src_addr != 0 {

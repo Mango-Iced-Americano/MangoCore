@@ -4,8 +4,8 @@ use crate::timer::TimeVal;
 use crate::utils::error::SyscallErr;
 
 use super::common::{
-    MCAST_JOIN_GROUP, MCAST_LEAVE_GROUP, SO_DONTROUTE, SO_KEEPALIVE, SO_RCVBUF, SO_RCVTIMEO,
-    SO_REUSEADDR, SO_SNDBUF, SO_SNDTIMEO, SOL_IP, SOL_SOCKET, SOL_TCP, TCP_NODELAY,
+    MCAST_JOIN_GROUP, MCAST_LEAVE_GROUP, SO_BINDTODEVICE, SO_DONTROUTE, SO_KEEPALIVE, SO_RCVBUF, SO_RCVTIMEO,
+    SO_REUSEADDR, SO_SNDBUF, SO_SNDTIMEO, SOL_IP, SOL_SOCKET, SOL_TCP, TCP_NODELAY, IP_HDRINCL,
 };
 
 pub fn sys_setsockopt(
@@ -49,6 +49,9 @@ pub fn sys_setsockopt(
                     return -(SyscallErr::EINVAL as isize);
                 }
             }
+        }
+        (SOL_IP, IP_HDRINCL) => {
+            // Accept IP_HDRINCL; ping sets this but we build headers internally
         }
         (SOL_TCP, TCP_NODELAY) => {
             // close Nagle’s Algorithm
@@ -109,6 +112,32 @@ pub fn sys_setsockopt(
                 "[sys_setsockopt] accept SOL_SOCKET timeout option {}",
                 optname
             );
+        }
+        (SOL_SOCKET, SO_BINDTODEVICE) => {
+            // SO_BINDTODEVICE optval is a NUL-terminated iface name string
+            let copy_len = (optlen as usize).min(16); // IFNAMSIZ=16
+            if copy_len == 0 {
+                // optlen==0: unbind
+                let _ = socket.set_bind_to_device("");
+                return 0;
+            }
+            let reader = match UserBufferReader::new(token, optval_ptr as *const u8, copy_len) {
+                Ok(r) => r,
+                Err(_) => return -(SyscallErr::EFAULT as isize),
+            };
+            let mut name_buf = [0u8; 16];
+            if reader.read_into(&mut name_buf[..copy_len]).is_err() {
+                return -(SyscallErr::EFAULT as isize);
+            }
+            let name_end = name_buf.iter().position(|&b| b == 0).unwrap_or(copy_len);
+            let ifname = match core::str::from_utf8(&name_buf[..name_end]) {
+                Ok(s) => s,
+                Err(_) => return -(SyscallErr::EINVAL as isize),
+            };
+            match socket.set_bind_to_device(ifname) {
+                Ok(_) => {}
+                Err(e) => return -(e as isize),
+            }
         }
         _ => {
             log::warn!(

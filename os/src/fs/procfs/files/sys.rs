@@ -560,3 +560,39 @@ pub fn ip_forward_write(
 ) -> Result<usize, SyscallErr> {
     Err(SyscallErr::EPERM)
 }
+
+pub fn disable_ipv6_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    proc_read_str(offset, len, buf, "1\n")
+}
+
+pub fn net_snmp_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    proc_read_str(offset, len, buf, "Ip: Forwarding DefaultTTL InReceives\nIp: 2 64 0\n")
+}
+
+pub fn net_netstat_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    proc_read_str(offset, len, buf, "TcpExt: SyncookiesSent\nTcpExt: 0\n")
+}
+
+pub fn net_snmp6_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    proc_read_str(offset, len, buf, "Ip6: InReceives\nIp6: 0\n")
+}

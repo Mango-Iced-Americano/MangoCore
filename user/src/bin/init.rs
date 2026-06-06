@@ -100,6 +100,8 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     try_bind("/tools/sbin", "/sbin");
     try_bind("/tools/lib", "/lib");
     try_bind("/tools/usr", "/usr");
+    let _ = sys_mkdirat(AT_FDCWD, "/tests\0", 0o755);
+    try_bind("/tools/tests", "/tests");
     // 不 bind /tools/etc — initramfs 已有完整 /etc，bind 会覆盖
     try_bind("/sdcard/musl", "/musl");
     try_bind("/sdcard/glibc", "/glibc");

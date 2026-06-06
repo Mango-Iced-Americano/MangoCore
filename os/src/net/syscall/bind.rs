@@ -21,7 +21,15 @@ fn is_local_bind_addr(addr: IpAddress) -> bool {
         IpAddress::Ipv4(ip) => {
             ip.is_loopback() || crate::net::net_core::is_local_addr(ip)
         }
-        IpAddress::Ipv6(ip) => ip == Ipv6Address::LOOPBACK,
+        IpAddress::Ipv6(ip) => {
+            if ip == Ipv6Address::LOOPBACK {
+                return true;
+            }
+            if let Some(v4) = ip.as_ipv4() {
+                return v4.is_loopback() || crate::net::net_core::is_local_addr(v4);
+            }
+            false
+        }
     }
 }
 

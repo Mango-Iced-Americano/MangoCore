@@ -2,6 +2,91 @@
 
 ---
 
+## 2026-06-06
+
+### 网络栈修复 P0–P3：MSG_PEEK、动态 IPv6 conf、NLM_F_DUMP、raw socket connect、邻居 netlink、netstat 伪文件
+
+**背景：** 即使 P0 netlink 响应路径已就绪，qemu.log 仍显示 "EOF on netlink"。根因：BusyBox libnetlink 先 `recvmsg(MSG_PEEK|MSG_DONTWAIT)` 再 `recv()`——MSG_PEEK 被 `validate_for_recv` 吞掉后，peek 直接消费了 ACK 数据，第二次 recv 看到空队列 → EAGAIN → BusyBox 报告 "EOF"。
+
+**涉及文件：**
+- `os/src/net/socket/mod.rs` — Socket trait 加 `try_peek_recvmsg` 默认方法
+- `os/src/net/socket/netlink/mod.rs` — NetlinkSocket 覆写 `try_peek_recvmsg`：加锁 peek `front()` 不 pop
+- `os/src/net/syscall/recvmsg.rs` — 捕获 `MSG_PEEK` flag，peek 时调用 `try_peek_recvmsg`
+- `os/src/net/syscall/recvfrom.rs` — 同上，加 `is_peek` 检查
+- `os/src/fs/procfs/mod.rs` — `new_dir_wired`/`new_file_wired` 改为 `pub(crate)` 供 hook 使用
+- `os/src/fs/procfs/files/mod.rs` — `ipv6_conf_dir` 加动态 find hook：任意 netns 中存在的 iface 自动创建虚拟 dir + `disable_ipv6` 文件；注册 `/proc/net/snmp`、`netstat`、`snmp6`
+- `os/src/fs/procfs/files/sys.rs` — `disable_ipv6_content` 改为返回 `"1\n"`（IPv6 实际未实现）；新增 `net_snmp_content`、`net_netstat_content`、`net_snmp6_content`
+- `os/src/net/socket/netlink/route/mod.rs` — NLM_F_DUMP 判定改为先检查 `is_get`（只有 GET 类消息走 dump）；dispatch 加 `RTM_GETNEIGH`/`RTM_NEWNEIGH`/`RTM_DELNEIGH`；新增 `handle_getneigh` 返回空 NLMSG_DONE
+- `os/src/net/socket/netlink/route/link.rs` — 删除重复 `kind != "veth"` 死代码
+- `os/src/net/socket/inet/raw/raw.rs` — 实现 `connect()`/`bind()`；`local_endpoint()` 从 `todo!()` 改为实际返回值；`try_send()` 在 connected 时转发到 `send_to()`；`send_to()` 改用 `lookup_source_ip()` 选源地址
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU 待跑
+
+**备注：** `disable_ipv6=1` 是临时值——等 IPv6 raw socket + rtnetlink 实现后改回 `0`。动态 procfs 目录 hook 仅用于 find（不支持 list），因为 LTP 只按名称查找。
+
+### P0 修复：NetlinkSocket local_portid + NLMSG_DONE 20 字节
+
+**背景：** 上轮 MSG_PEEK 修复后，"EOF on netlink" 仍然出现。Oracle 分析：根因是 `nlmsg_pid` 不匹配。BusyBox `rtnl_dump_filter` 检查 `h->nlmsg_pid == rth->local.nl_pid`，我们的 reply 用了请求头 `pid`（BusyBox 发 `_req_pid=0`），而 `getsockname` 返回的 `local.nl_pid` 由 kernel 分配 → 不匹配 → BusyBox 丢弃所有回复 → 收不到 NLMSG_DONE → "EOF on netlink"。同时 NLMSG_DONE 应为 20 字节（16 头 + 4 error code），我们只发了 16 字节。
+
+**涉及文件：**
+- `os/src/net/socket/netlink/mod.rs` — 加 `local_portid: Mutex<u32>` + 静态 `NEXT_NETLINK_PORTID` 计数器；`bind(nl_pid=0)` 分配唯一 id；`local_endpoint()` 返回实际 id；新增 `local_portid()` getter
+- `os/src/net/socket/netlink/route/mod.rs` — `handle_netlink_msg` 计算 `pid = sock.local_portid()` 统一用于所有回复 header；所有 `NLMSG_DONE` 的 payload 从 `&[]` 改为 `0i32.to_ne_bytes()`（20 字节）
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU 待跑
+
+**备注：** `try_recvmsg()`/`last_recv_addr()` 保持 `Endpoint::Netlink(0)`（BusyBox 检查 `sockaddr_nl.nl_pid == 0`）。`sys_recvmsg` 中 `WaitQueue::wait_until_interruptible` 不会返回 0——`TimedOut`/`Interrupted` 被 `unwrap_or_else` 映射为负 errno。
+
+## 2026-06-05
+
+### 网络栈 LTP 修复 — P0 Netlink + P1 procfs/socket/AF_PACKET
+
+**背景：** LTP net.features (62) + net.tcp_cmds (17) = 79 测例，0 PASS / 13 FAIL / 66 SKIP。根因：netlink 收发闭环断裂、/proc/net/ 缺失、SO_BINDTODEVICE 不支持、AF_PACKET 不支持、bind IPv4-mapped IPv6 地址失败。
+
+**涉及文件：**
+- `os/src/net/socket/netlink/mod.rs` — NetlinkSocket 加 `recv_wait` WaitQueue + `try_recvmsg` override + `last_recv_addr` override + push_recv 边界检查后 wake
+- `os/src/net/socket/netlink/route/mod.rs` — `handle_netlink_msg` 改为 wrap handler 调用，错误转 NLMSG_ERROR 入队而非通过 `?` 传播到 sendto
+- `os/src/net/syscall/recvmsg.rs` — `msg_namelen >= 16` → `>= 12`（兼容 sockaddr_nl）
+- `os/src/net/syscall/recvfrom.rs` — 同上
+- `os/src/net/syscall/bind.rs` — `is_local_bind_addr` 增加 IPv4-mapped IPv6 (`::ffff:x.x.x.x`) → IPv4 转换（smoltcp `ip.as_ipv4()`）
+- `os/src/net/syscall/common.rs` — 加 `SO_BINDTODEVICE = 25`
+- `os/src/net/syscall/setsockopt.rs` — 加 `SO_BINDTODEVICE` no-op 接受（struct 字段 + 路由过滤后续 QEMU 测试后补）
+- `os/src/net/socket/packet.rs` — 新增 AF_PACKET(17) PacketSocket（send to eth0 ifindex=2，不剥 20 字节，recv 返回 EAGAIN）
+- `os/src/net/socket/mod.rs` — 注册 AF_PACKET；`from_sockaddr` 返回 `Unspecified` 避免新增 Endpoint 变体
+- `os/src/net/mod.rs` — re-export AF_PACKET
+- `os/src/fs/procfs/files/mod.rs` — 注册 7 个 `/proc/net/` 文件 (arp, if_inet6, raw, raw6, tcp6, udp6, unix)
+- `os/src/fs/procfs/files/net_arp.rs` — 新增 stub（header only）
+- `os/src/fs/procfs/files/net_tcp6.rs` — 新增
+- `os/src/fs/procfs/files/net_udp6.rs` — 新增
+- `os/src/fs/procfs/files/net_raw.rs` — 新增
+- `os/src/fs/procfs/files/net_raw6.rs` — 新增
+- `os/src/fs/procfs/files/net_unix.rs` — 新增
+- `os/src/fs/procfs/files/net_if_inet6.rs` — 新增（空内容，用于 LTP 检测 IPv6 可用性）
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU 测试待运行
+
+**Oracle 审查修复：**
+- 删除 dummy0（`add_device()` 调用 `common()` panic + ifindex 冲突）
+- AF_PACKET 不剥 20 字节（`sendto/sendmsg` 的 payload 不含 sockaddr_ll）
+- AF_PACKET 只发 eth0 不发 loopback
+- recvfrom namelen 门槛同步为 >=12
+
+**已知限制：**
+- SO_BINDTODEVICE 为 no-op（未存 bound_ifindex 到 socket struct—加了导致 81 个级联编译错误，疑为 setsockopt.rs handler 括号/类型问题）
+- Netlink 收发闭环尚未 QEMU 验证
+- /proc/net/ 文件为空内容（header only），实际数据填充后续补
+- Syscall 258 未实现（tcpdump 需要，影响 1 个 SKIP）
+
+---
+
 ## 2026-06-04
 
 ### Initramfs 启动流程 — 第一阶段实现

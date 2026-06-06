@@ -79,18 +79,6 @@ mkdir -p ${U_FS_DIR}/fs/root
 printf 'root:x:0:0:root:/root:/bin/bash\n' > ${U_FS_DIR}/fs/etc/passwd
 touch ${U_FS_DIR}/fs/root/.bash_history
 
-# 只能copy一个文件夹下所有内容，无法copy单文件
-try_copy() {
-    if [ -d $1 ]; then
-        echo copying $1 ';'
-        for programname in $(ls -A $1); do
-            cp -fr "$1"/"$programname" $2
-        done
-    else
-        echo "$1" "doesn""'""t exist, skipped."
-    fi
-}
-
 for programname in $(ls ../user/src/bin); do
     cp -r ../user/target/${TARGET}/${MODE}/${programname%.rs} ${U_FS_DIR}/fs/${programname%.rs}
 done

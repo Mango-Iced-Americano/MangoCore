@@ -2,6 +2,7 @@ pub mod common;
 pub mod inet;
 pub mod unix;
 pub mod netlink;
+pub mod packet;
 
 use crate::{
     fs::{
@@ -79,6 +80,7 @@ pub const AF_UNIX: u16 = 1;
 pub const AF_INET: u16 = 2;
 pub const AF_INET6: u16 = 10;
 pub const AF_NETLINK: u16 = 16;
+pub const AF_PACKET: u16 = 17;
 
 /// shutdown
 #[allow(unused)]
@@ -219,6 +221,11 @@ impl Endpoint {
                 let nl_pid = u32::from_ne_bytes([addr_buf[4], addr_buf[5], addr_buf[6], addr_buf[7]]);
                 Ok(Endpoint::Netlink(nl_pid))
             }
+            AF_PACKET => {
+                // sockaddr_ll: family(2) + protocol(2) + ifindex(4) + hatype(2) + pkttype(1) + halen(1) + addr(8) = 20
+                // Return Unspecified to avoid adding a new Endpoint variant
+                Ok(Endpoint::Unspecified)
+            }
             _ => Err(SyscallErr::EAFNOSUPPORT),
         }
     }
@@ -338,6 +345,9 @@ pub trait Socket: Send + Sync {
     fn set_reuse_addr(&self, _enabled: bool) -> SyscallRet {
         Err(SyscallErr::EOPNOTSUPP)
     }
+    fn set_bind_to_device(&self, _ifname: &str) -> SyscallRet {
+        Err(SyscallErr::EOPNOTSUPP)
+    }
     fn join_multicast_group(&self) -> SyscallRet {
         Ok(0)
     }
@@ -355,6 +365,12 @@ pub trait Socket: Send + Sync {
         // 默认实现：委托 try_recv，不返回地址
         let n = self.try_recv(buf)?;
         Ok((n, None))
+    }
+
+    /// MSG_PEEK: 查看 recv 队列头部数据但不消费。
+    /// 默认委托给 try_recvmsg()（会消费）；支持 peek 的 socket 类型应覆写。
+    fn try_peek_recvmsg(&self, buf: &mut [u8]) -> Result<(isize, Option<Endpoint>), SyscallErr> {
+        self.try_recvmsg(buf)
     }
 
     /// 尝试发送消息（sendmsg 用）。
@@ -668,6 +684,14 @@ impl dyn Socket {
             AF_NETLINK => match psock {
                 PSOCK::Raw | PSOCK::Datagram => {
                     let socket: Arc<dyn Socket> = Arc::new(crate::net::socket::netlink::NetlinkSocket::new(protocol));
+                    let socket_file = Arc::new(SocketFile::new(socket));
+                    alloc_socket_fd(socket_file)
+                }
+                _ => Err(SyscallErr::EINVAL),
+            },
+            AF_PACKET => match psock {
+                PSOCK::Raw | PSOCK::Datagram => {
+                    let socket: Arc<dyn Socket> = Arc::new(crate::net::socket::packet::PacketSocket::new(protocol as u16));
                     let socket_file = Arc::new(SocketFile::new(socket));
                     alloc_socket_fd(socket_file)
                 }

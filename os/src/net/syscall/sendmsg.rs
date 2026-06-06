@@ -126,10 +126,12 @@ pub fn sys_sendmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
                 .unwrap_or_else(|e| e)
             }
         }
-        PSOCK::Raw => wait_io(
+        PSOCK::Raw => {
+            log::warn!("[netlink] sys_sendmsg: raw socket, buf_len={}", buf.len());
+            wait_io(
             || socket.try_sendmsg(&buf, dest_endpoint.clone(), msg_flags),
             is_nonblock,
-        ),
+        )},
         _ => wait_io(
             || socket.try_sendmsg(&buf, dest_endpoint.clone(), msg_flags),
             is_nonblock,

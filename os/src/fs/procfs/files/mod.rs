@@ -5,10 +5,17 @@ pub mod cpuinfo;
 pub mod filesystems;
 pub mod meminfo;
 pub mod mounts;
+pub mod net_arp;
 pub mod net_dev;
+pub mod net_if_inet6;
+pub mod net_raw;
+pub mod net_raw6;
 pub mod net_route;
 pub mod net_tcp;
+pub mod net_tcp6;
 pub mod net_udp;
+pub mod net_udp6;
+pub mod net_unix;
 pub mod self_;
 pub mod stat;
 pub mod sys;
@@ -246,11 +253,41 @@ pub fn register_all(root: &Arc<crate::fs::procfs::LockedProcInode>) -> Result<()
         0,
     )?;
 
+    // /proc/sys/net/ipv6/conf/{all,default,lo,eth0}/disable_ipv6
+    let ipv6_dir = net_dir.add_dir_locked("ipv6", InodeMode::from_bits_truncate(0o555))?;
+    let ipv6_conf_dir = ipv6_dir.add_dir_locked("conf", InodeMode::from_bits_truncate(0o555))?;
+    let ipv6_all_dir = ipv6_conf_dir.add_dir_locked("all", InodeMode::from_bits_truncate(0o555))?;
+    let ipv6_default_dir = ipv6_conf_dir.add_dir_locked("default", InodeMode::from_bits_truncate(0o555))?;
+    let ipv6_lo_dir = ipv6_conf_dir.add_dir_locked("lo", InodeMode::from_bits_truncate(0o555))?;
+    let ipv6_eth0_dir = ipv6_conf_dir.add_dir_locked("eth0", InodeMode::from_bits_truncate(0o555))?;
+    for dir in [&ipv6_all_dir, &ipv6_default_dir, &ipv6_lo_dir, &ipv6_eth0_dir] {
+        dir.add_writable_file(
+            "disable_ipv6",
+            InodeMode::from_bits_truncate(0o644),
+            sys::disable_ipv6_content,
+            0,
+        )?;
+    }
+    // Hook: dynamically resolve /proc/sys/net/ipv6/conf/<iface>/ for any
+    // interface in the current netns (e.g. ltp_ns_veth2 created by veth).
+    ipv6_conf_dir.set_hooks(ipv6_conf_find_hook, |_| alloc::vec![]);
+
     let net_dir = root.add_dir_locked("net", InodeMode::from_bits_truncate(0o555))?;
+    net_dir.add_file("arp", InodeMode::from_bits_truncate(0o444), net_arp::net_arp_content, 0)?;
     net_dir.add_file("dev", InodeMode::from_bits_truncate(0o444), net_dev::net_dev_content, 0)?;
+    net_dir.add_file("if_inet6", InodeMode::from_bits_truncate(0o444), net_if_inet6::net_if_inet6_content, 0)?;
+    net_dir.add_file("raw", InodeMode::from_bits_truncate(0o444), net_raw::net_raw_content, 0)?;
+    net_dir.add_file("raw6", InodeMode::from_bits_truncate(0o444), net_raw6::net_raw6_content, 0)?;
     net_dir.add_file("route", InodeMode::from_bits_truncate(0o444), net_route::net_route_content, 0)?;
     net_dir.add_file("tcp", InodeMode::from_bits_truncate(0o444), net_tcp::net_tcp_content, 0)?;
+    net_dir.add_file("tcp6", InodeMode::from_bits_truncate(0o444), net_tcp6::net_tcp6_content, 0)?;
     net_dir.add_file("udp", InodeMode::from_bits_truncate(0o444), net_udp::net_udp_content, 0)?;
+    net_dir.add_file("udp6", InodeMode::from_bits_truncate(0o444), net_udp6::net_udp6_content, 0)?;
+    net_dir.add_file("unix", InodeMode::from_bits_truncate(0o444), net_unix::net_unix_content, 0)?;
+    // Minimal stub files for netstat -s / -gn compatibility
+    net_dir.add_file("snmp", InodeMode::from_bits_truncate(0o444), sys::net_snmp_content, 0)?;
+    net_dir.add_file("netstat", InodeMode::from_bits_truncate(0o444), sys::net_netstat_content, 0)?;
+    net_dir.add_file("snmp6", InodeMode::from_bits_truncate(0o444), sys::net_snmp6_content, 0)?;
 
     root.add_dynamic_symlink("self", self_::self_content, 0)?;
     let sysvipc_dir = root.add_dir_locked("sysvipc", InodeMode::from_bits_truncate(0o555))?;
@@ -261,4 +298,40 @@ pub fn register_all(root: &Arc<crate::fs::procfs::LockedProcInode>) -> Result<()
     crate::fs::procfs::pid::setup_pid_hooks(root);
 
     Ok(())
+}
+
+/// Fallback find hook for /proc/sys/net/ipv6/conf/: creates a virtual directory
+/// for any interface present in the current netns that isn't a static child.
+fn ipv6_conf_find_hook(
+    inode: &crate::fs::procfs::LockedProcInode,
+    name: &str,
+) -> Option<Arc<dyn crate::fs::vfs::IndexNode>> {
+    let ns = crate::net::net_core::current_netns();
+    if ns.device_by_name(name).is_none() {
+        return None;
+    }
+
+    // Build a virtual dir with a disable_ipv6=1 file.
+    let parent_weak = {
+        let dir_lock = inode.0.lock();
+        dir_lock.self_ref.clone()
+    };
+    let fs_weak = {
+        let dir_lock = inode.0.lock();
+        dir_lock.fs.clone()
+    };
+
+    let dir = crate::fs::procfs::LockedProcInode::new_dir_wired(
+        parent_weak,
+        fs_weak,
+        InodeMode::from_bits_truncate(0o555),
+    );
+    dir.add_file(
+        "disable_ipv6",
+        InodeMode::from_bits_truncate(0o644),
+        sys::disable_ipv6_content,
+        0,
+    )
+    .ok()?;
+    Some(dir as Arc<dyn crate::fs::vfs::IndexNode>)
 }

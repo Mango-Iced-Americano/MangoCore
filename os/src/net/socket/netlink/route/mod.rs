@@ -10,8 +10,8 @@ use super::netlink::{
     NLMSG_DONE, NLMSG_ERROR, NLM_F_DUMP, NLM_F_MULTI, NLM_F_REQUEST,
     RTA_DST, RTA_GATEWAY, RTA_OIF,
     RTM_DELADDR, RTM_DELLINK, RTM_DELROUTE, RTM_GETADDR, RTM_GETLINK, RTM_GETROUTE,
-    RTM_NEWADDR, RTM_NEWLINK, RTM_NEWROUTE,
-    RTM_SETLINK,
+    RTM_GETNEIGH, RTM_NEWADDR, RTM_NEWLINK, RTM_NEWROUTE,
+    RTM_DELNEIGH, RTM_NEWNEIGH, RTM_SETLINK,
 };
 use super::segment::{
     CMsgSegHdr, DoneSegment, DoneSegmentBody,
@@ -31,44 +31,71 @@ fn parse_nlmsg(buf: &[u8]) -> Option<(u16, u16, u32, u32)> {
 }
 
 pub fn handle_netlink_msg(buf: &[u8], sock: &NetlinkSocket) -> Result<isize, crate::utils::error::SyscallErr> {
-    let (msg_type, flags, seq, pid) = match parse_nlmsg(buf) {
-        Some(v) => v, None => return Err(crate::utils::error::SyscallErr::EINVAL),
-    };
-    if flags & NLM_F_REQUEST == 0 { return Ok(0); }
-    if flags & NLM_F_DUMP != NLM_F_DUMP {
-        // Write operations (non-dump requests)
-        match msg_type {
-            RTM_NEWADDR => return addr::handle_newaddr(seq, pid, flags, buf, sock),
-            RTM_DELADDR => return addr::handle_deladdr(seq, pid, flags, buf, sock),
-            RTM_NEWLINK => return link::handle_newlink(seq, pid, buf, flags, sock),
-            RTM_DELLINK => return link::handle_dellink(seq, pid, buf, sock),
-            RTM_SETLINK => return link::handle_setlink(seq, pid, buf, sock),
-            RTM_NEWROUTE => return route::handle_newroute(seq, pid, buf, flags, sock),
-            RTM_DELROUTE => return route::handle_delroute(seq, pid, buf, sock),
-            RTM_GETLINK => return handle_getlink_single(seq, pid, buf, sock),
-            _ => {}
+    let (msg_type, flags, seq, _req_pid) = match parse_nlmsg(buf) {
+        Some(v) => v,
+        None => {
+            log::error!("[netlink] handle_netlink_msg: failed to parse nlmsghdr (len={})", buf.len());
+            return Ok(0);
         }
-        let mut orig = [0u8; 16]; orig.copy_from_slice(&buf[..16]);
-        if !sock.push_recv(super::netlink::build_nlmsg_error(95, seq, pid, &orig)) {
-            return Err(crate::utils::error::SyscallErr::ENOBUFS);
+    };
+    log::warn!("[netlink] handle msg type={} flags={:#x} seq={} pid={}", msg_type, flags, seq, _req_pid);
+
+    if flags & NLM_F_REQUEST == 0 {
+        log::error!("[netlink] ignoring non-request message (flags={:#x})", flags);
+        return Ok(0);
+    }
+
+    let pid = sock.local_portid();
+
+    let is_get = matches!(msg_type, RTM_GETLINK | RTM_GETADDR | RTM_GETROUTE | RTM_GETNEIGH);
+    if !is_get || flags & NLM_F_DUMP != NLM_F_DUMP {
+        // Single-object handler (NEW/DEL/SET, or GET without DUMP)
+        let result = match msg_type {
+            RTM_NEWADDR => addr::handle_newaddr(seq, pid, flags, buf, sock),
+            RTM_DELADDR => addr::handle_deladdr(seq, pid, flags, buf, sock),
+            RTM_NEWLINK => link::handle_newlink(seq, pid, buf, flags, sock),
+            RTM_DELLINK => link::handle_dellink(seq, pid, buf, sock),
+            RTM_SETLINK => link::handle_setlink(seq, pid, buf, sock),
+            RTM_NEWROUTE => route::handle_newroute(seq, pid, buf, flags, sock),
+            RTM_DELROUTE => route::handle_delroute(seq, pid, buf, sock),
+            RTM_GETLINK => handle_getlink_single(seq, pid, buf, sock),
+            _ => Err(crate::utils::error::SyscallErr::EOPNOTSUPP),
+        };
+
+        if let Err(e) = result {
+            let errno = e as i32;
+            log::warn!("[netlink] handler for msg_type={} failed: {:?} (errno={})", msg_type, e, errno);
+            let mut orig = [0u8; 16];
+            orig.copy_from_slice(&buf[..16]);
+            if !sock.push_recv(super::netlink::build_nlmsg_error(errno, seq, pid, &orig)) {
+                return Err(crate::utils::error::SyscallErr::ENOBUFS);
+            }
         }
         return Ok(0);
     }
-    match msg_type {
+
+    let result = match msg_type {
         RTM_GETLINK => handle_getlink(seq, pid, sock),
         RTM_GETADDR => handle_getaddr(seq, pid, sock),
         RTM_GETROUTE => handle_getroute(seq, pid, sock),
-        _ => {
-            let mut orig = [0u8; 16]; orig.copy_from_slice(&buf[..16]);
-            if !sock.push_recv(super::netlink::build_nlmsg_error(95, seq, pid, &orig)) {
-                return Err(crate::utils::error::SyscallErr::ENOBUFS);
-            }
-            Ok(0)
+        RTM_GETNEIGH => handle_getneigh(seq, pid, sock),
+        _ => Err(crate::utils::error::SyscallErr::EOPNOTSUPP),
+    };
+
+    if let Err(e) = result {
+        let errno = e as i32;
+        log::warn!("[netlink] dump handler for msg_type={} failed: {:?} (errno={})", msg_type, e, errno);
+        let mut orig = [0u8; 16];
+        orig.copy_from_slice(&buf[..16]);
+        if !sock.push_recv(super::netlink::build_nlmsg_error(errno, seq, pid, &orig)) {
+            return Err(crate::utils::error::SyscallErr::ENOBUFS);
         }
     }
+    Ok(0)
 }
 
-fn handle_getlink(seq: u32, pid: u32, sock: &NetlinkSocket) -> Result<isize, crate::utils::error::SyscallErr> {
+fn handle_getlink(seq: u32, _req_pid: u32, sock: &NetlinkSocket) -> Result<isize, crate::utils::error::SyscallErr> {
+    let pid = sock.local_portid();
     let ns = crate::net::net_core::current_netns();
     let list = ns.device_list.lock();
     for (nic_id, iface) in list.iter() {
@@ -88,7 +115,9 @@ fn handle_getlink(seq: u32, pid: u32, sock: &NetlinkSocket) -> Result<isize, cra
             return Err(crate::utils::error::SyscallErr::ENOBUFS);
         }
     }
-    if !sock.push_recv(super::netlink::build_nlmsg(NLMSG_DONE, NLM_F_MULTI, seq, pid, &[])) {
+    // NLMSG_DONE = 20 bytes: 16-byte header + 4-byte zero error code
+    let done_payload = 0i32.to_ne_bytes();
+    if !sock.push_recv(super::netlink::build_nlmsg(NLMSG_DONE, NLM_F_MULTI, seq, pid, &done_payload)) {
         return Err(crate::utils::error::SyscallErr::ENOBUFS);
     }
     Ok(0)
@@ -191,7 +220,8 @@ fn handle_getaddr(seq: u32, pid: u32, sock: &NetlinkSocket) -> Result<isize, cra
             }
         }
     }
-    if !sock.push_recv(super::netlink::build_nlmsg(NLMSG_DONE, NLM_F_MULTI, seq, pid, &[])) {
+    let done_payload = 0i32.to_ne_bytes();
+    if !sock.push_recv(super::netlink::build_nlmsg(NLMSG_DONE, NLM_F_MULTI, seq, pid, &done_payload)) {
         return Err(crate::utils::error::SyscallErr::ENOBUFS);
     }
     Ok(0)
@@ -226,7 +256,22 @@ fn handle_getroute(seq: u32, pid: u32, sock: &NetlinkSocket) -> Result<isize, cr
             return Err(crate::utils::error::SyscallErr::ENOBUFS);
         }
     }
-    if !sock.push_recv(super::netlink::build_nlmsg(NLMSG_DONE, NLM_F_MULTI, seq, pid, &[])) {
+    let done_payload = 0i32.to_ne_bytes();
+    if !sock.push_recv(super::netlink::build_nlmsg(NLMSG_DONE, NLM_F_MULTI, seq, pid, &done_payload)) {
+        return Err(crate::utils::error::SyscallErr::ENOBUFS);
+    }
+    Ok(0)
+}
+
+fn handle_getneigh(
+    seq: u32,
+    pid: u32,
+    sock: &NetlinkSocket,
+) -> Result<isize, crate::utils::error::SyscallErr> {
+    // Empty neighbor table: send NLMSG_DONE immediately.
+    let done_payload = 0i32.to_ne_bytes();
+    let done = super::netlink::build_nlmsg(NLMSG_DONE, NLM_F_MULTI, seq, pid, &done_payload);
+    if !sock.push_recv(done) {
         return Err(crate::utils::error::SyscallErr::ENOBUFS);
     }
     Ok(0)

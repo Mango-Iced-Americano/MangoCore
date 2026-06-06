@@ -19,6 +19,7 @@ pub fn handle_newlink(
     flags: u16,
     sock: &NetlinkSocket,
 ) -> Result<isize, crate::utils::error::SyscallErr> {
+    log::warn!("[netlink] handle_newlink called: seq={} pid={} flags={:#x} buf_len={}", seq, pid, flags, buf.len());
     let payload = &buf[16..];
     if payload.len() < 16 {
         return Err(crate::utils::error::SyscallErr::EINVAL);
@@ -171,6 +172,7 @@ pub fn handle_newlink(
 
     // ---- Dispatch: existing-link modification (no IFLA_INFO_KIND) ----
     let kind = linkkind.as_deref().unwrap_or("");
+    log::info!("[netlink] handle_newlink: kind='{}' ifindex={} ifname={:?} peer={:?}", kind, ifindex, ifname, peer_name);
     if kind.is_empty() && (ifindex > 0 || ifname.is_some()) {
         return handle_setlink(seq, pid, buf, sock);
     }
@@ -178,10 +180,6 @@ pub fn handle_newlink(
     // ---- Validate link kind (pure create path) ----
     if kind.is_empty() {
         send_error(sock, buf, seq, pid, 22)?;
-        return Ok(0);
-    }
-    if kind != "veth" {
-        send_error(sock, buf, seq, pid, 95)?;
         return Ok(0);
     }
     if kind != "veth" {

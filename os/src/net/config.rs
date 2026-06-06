@@ -712,6 +712,50 @@ impl<'a> NetInterface<'a> {
         Some(rh)
     }
 
+    pub fn rebind_routed_raw(
+        &self,
+        rh: RouteSocketHandle,
+        new_ifindex: u32,
+    ) -> Option<RouteSocketHandle> {
+        let mut inner = self.inner.lock();
+        let inner_ref = inner.as_mut()?;
+        let old_binding = inner_ref.bindings.remove(&rh)?;
+        if old_binding.ifindex == new_ifindex {
+            inner_ref.bindings.insert(rh, old_binding);
+            return Some(rh);
+        }
+        let rx_buf = raw::PacketBuffer::new(
+            vec![raw::PacketMetadata::EMPTY; 128],
+            vec![0u8; crate::net::MAX_BUFFER_SIZE],
+        );
+        let tx_buf = raw::PacketBuffer::new(
+            vec![raw::PacketMetadata::EMPTY; 128],
+            vec![0u8; crate::net::MAX_BUFFER_SIZE],
+        );
+        let new_socket = raw::Socket::new(
+            smoltcp::wire::IpVersion::Ipv4,
+            smoltcp::wire::IpProtocol::Icmp,
+            rx_buf,
+            tx_buf,
+        );
+        {
+            let old_stack = inner_ref.stack_mut(old_binding.ifindex)?;
+            old_stack.sockets.remove(old_binding.handle);
+        }
+        let new_stack = inner_ref.stack_mut(new_ifindex)?;
+        let new_handle = new_stack.sockets.add(new_socket);
+        inner_ref.bindings.insert(
+            rh,
+            SocketBinding {
+                ifindex: new_ifindex,
+                handle: new_handle,
+                proto: InetProtocol::Raw,
+            },
+        );
+        log::info!("[net] rebind_routed_raw {} from if={} to if={}", rh, old_binding.ifindex, new_ifindex);
+        Some(rh)
+    }
+
     pub fn raw_routed_socket<T>(
         &self,
         rh: RouteSocketHandle,

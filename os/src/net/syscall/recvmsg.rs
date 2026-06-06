@@ -13,7 +13,9 @@ use super::common::MsgFlags;
 const MAX_MSG_IO_SIZE: usize = 64 * 1024 * 1024;
 
 pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
-    let msgdontwait = match MsgFlags::from_bits_truncate(flags).validate_for_recv() {
+    let msg_flags = MsgFlags::from_bits_truncate(flags);
+    let is_peek = msg_flags.contains(MsgFlags::MSG_PEEK);
+    let msgdontwait = match msg_flags.validate_for_recv() {
         Ok(nb) => nb,
         Err(e) => return -(e as isize),
     };
@@ -59,16 +61,21 @@ pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
     }
 
     let socket = crate::get_socket!(sockfd);
+    let mut try_recv = || if is_peek {
+        socket.try_peek_recvmsg(&mut buf)
+    } else {
+        socket.try_recvmsg(&mut buf)
+    };
     let ret = if let Some(wq) = socket.recv_wait_queue() {
         if is_nonblock {
             // Non-blocking: poll before recv to prevent tight-loop starvation
             NET_INTERFACE.try_poll();
-            match socket.try_recvmsg(&mut buf) {
+            match try_recv() {
                 Ok((n, _)) => n as isize,
                 Err(e) => -(e as isize),
             }
         } else {
-            WaitQueue::wait_until_interruptible(wq, || match socket.try_recvmsg(&mut buf) {
+            WaitQueue::wait_until_interruptible(wq, || match try_recv() {
                 Ok((n, _)) => Some(n as isize),
                 Err(SyscallErr::EAGAIN) => None,
                 Err(e) => Some(-(e as isize)),
@@ -76,23 +83,31 @@ pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
             .unwrap_or_else(|e| e)
         }
     } else {
-        wait_io(|| socket.try_recvmsg(&mut buf).map(|(n, _)| n), is_nonblock)
+        wait_io(|| try_recv().map(|(n, _)| n), is_nonblock)
     };
 
     if ret < 0 {
+        log::warn!("[netlink] sys_recvmsg: returning error {}", ret);
         return ret;
     }
     let nbytes = ret as usize;
+    log::warn!("[netlink] sys_recvmsg: got {} bytes from socket", nbytes);
 
     // 将接收到的数据分散写入用户 iovec
+    // Cap write at buffer size: try_recv returns orig_len, copy_len is min(orig_len, buf.len())
+    let copy_len = nbytes.min(buf.len());
     let mut write_buf = match user_iov.writer_buffer() {
         Ok(buffer) => buffer,
         Err(errno) => return errno,
     };
-    write_buf.write(&buf[..nbytes]);
+    write_buf.write(&buf[..copy_len]);
+
+    // MSG_TRUNC: data was larger than user buffer
+    let truncated = nbytes > buf.len();
 
     // 写回源地址（msg_name）
-    if !msg.msg_name.is_null() && msg.msg_namelen >= 16 {
+    // sockaddr_nl is 12 bytes, sockaddr_in is 16 bytes — accept both.
+    if !msg.msg_name.is_null() && msg.msg_namelen >= 12 {
         if let Some(src_addr) = socket.last_recv_addr() {
             let namelen_field_offset = msg_ptr + core::mem::offset_of!(MsgHdr, msg_namelen);
             let _ = src_addr.fill_sockaddr(msg.msg_name as usize, namelen_field_offset);
@@ -107,7 +122,7 @@ pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
     {
         return -(SyscallErr::EFAULT as isize);
     }
-    let msg_flags = 0i32;
+    let msg_flags = if truncated { (MsgFlags::MSG_TRUNC).bits() as i32 } else { 0i32 };
     if UserPtrMut::from_addr(msg_ptr + core::mem::offset_of!(MsgHdr, msg_flags))
         .write(token, &msg_flags)
         .is_err()

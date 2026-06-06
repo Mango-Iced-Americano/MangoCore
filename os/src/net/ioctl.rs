@@ -14,6 +14,7 @@ pub const SIOCGIFMTU: u32 = 0x8921;
 pub const SIOCSIFMTU: u32 = 0x8922;
 pub const SIOCGIFHWADDR: u32 = 0x8927;
 pub const SIOCGIFINDEX: u32 = 0x8933;
+pub const SIOCGIFNAME: u32 = 0x8910;
 pub const SIOCGIFTXQLEN: u32 = 0x8942;
 
 #[repr(C)]
@@ -118,6 +119,15 @@ fn siocgifbrdaddr(ifr: &mut ifreq) -> Result<usize, SyscallErr> {
         } None => Err(SyscallErr::EADDRNOTAVAIL),
     }
 }
+fn siocgifname(ifr: &mut ifreq) -> Result<usize, SyscallErr> {
+    let idx = ifr.ifr_ifindex();
+    if idx == 0 { return Err(SyscallErr::ENXIO); }
+    let ns = net_core::current_netns();
+    let list = ns.device_list.lock();
+    let d = list.get(&(idx as usize)).ok_or(SyscallErr::ENODEV)?;
+    ifr.set_name(&d.iface_name());
+    Ok(0)
+}
 fn siocgifmtu(ifr: &mut ifreq) -> Result<usize, SyscallErr> { let d = find_dev(ifr.name_str())?; ifr.set_ifr_mtu(d.iface.mtu() as i32); Ok(0) }
 fn siocgifhwaddr(ifr: &mut ifreq) -> Result<usize, SyscallErr> { let d = find_dev(ifr.name_str())?; ifr.set_ifr_hwaddr(&d.iface.mac()); Ok(0) }
 fn siocgiftxqlen(ifr: &mut ifreq) -> Result<usize, SyscallErr> {
@@ -129,10 +139,11 @@ fn siocgiftxqlen(ifr: &mut ifreq) -> Result<usize, SyscallErr> {
 pub fn siocgif_dispatch(cmd: u32, arg: usize) -> Result<usize, SyscallErr> {
     match cmd {
         SIOCGIFCONF => siocgifconf(arg),
-        cmd if cmd == SIOCGIFINDEX || cmd == SIOCGIFFLAGS || cmd == SIOCGIFADDR || cmd == SIOCGIFNETMASK || cmd == SIOCGIFBRDADDR || cmd == SIOCGIFMTU || cmd == SIOCGIFHWADDR || cmd == SIOCGIFTXQLEN => {
+        cmd if cmd == SIOCGIFINDEX || cmd == SIOCGIFNAME || cmd == SIOCGIFFLAGS || cmd == SIOCGIFADDR || cmd == SIOCGIFNETMASK || cmd == SIOCGIFBRDADDR || cmd == SIOCGIFMTU || cmd == SIOCGIFHWADDR || cmd == SIOCGIFTXQLEN => {
             let mut ifr = read_ifreq(arg)?;
             let r = match cmd {
                 SIOCGIFINDEX => siocgifindex(&mut ifr),
+                SIOCGIFNAME => siocgifname(&mut ifr),
                 SIOCGIFFLAGS => siocgifflags(&mut ifr),
                 SIOCGIFADDR => siocgifaddr(&mut ifr),
                 SIOCGIFNETMASK => siocgifnetmask(&mut ifr),

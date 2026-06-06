@@ -32,19 +32,36 @@ struct RawSocketInner {
     ip_protocol: IpProtocol,
     recvbuf_size: usize,
     sendbuf_size: usize,
+    bound_ifindex: Option<u32>,
 }
 
 impl Socket for RawSocket {
-    fn bind(&self, _endpoint: &Endpoint) -> SyscallRet {
-        Err(SyscallErr::EOPNOTSUPP) // Not implemented for raw sockets
+    fn bind(&self, endpoint: &Endpoint) -> SyscallRet {
+        match endpoint {
+            Endpoint::Ip(ep) => {
+                let listen_ep = IpListenEndpoint {
+                    addr: Some(ep.addr),
+                    port: 0,
+                };
+                self.inner.lock().local_endpoint = Some(listen_ep);
+                Ok(0)
+            }
+            _ => Err(SyscallErr::EINVAL),
+        }
     }
 
     fn listen(&self) -> SyscallRet {
-        Err(SyscallErr::EOPNOTSUPP) // Not implemented for raw sockets
+        Err(SyscallErr::EOPNOTSUPP)
     }
 
-    fn connect(&self, _endpoint: &Endpoint) -> SyscallRet {
-        Err(SyscallErr::EOPNOTSUPP) // Not implemented for raw sockets
+    fn connect(&self, endpoint: &Endpoint) -> SyscallRet {
+        match endpoint {
+            Endpoint::Ip(ep) => {
+                self.inner.lock().remote_endpoint = Some(*ep);
+                Ok(0)
+            }
+            _ => Err(SyscallErr::EINVAL),
+        }
     }
 
     fn accept(&self, _sockfd: u32, _addr: usize, _addrlen: usize) -> SyscallRet {
@@ -71,8 +88,24 @@ impl Socket for RawSocket {
         self.inner.lock().sendbuf_size = size;
     }
 
+    fn set_bind_to_device(&self, ifname: &str) -> SyscallRet {
+        let ns = crate::net::net_core::current_netns();
+        let list = ns.device_list.lock();
+        let iface = list.values().find(|d| d.iface_name() == ifname);
+        match iface {
+            Some(iface) => {
+                self.inner.lock().bound_ifindex = Some(iface.nic_id() as u32);
+                log::info!("[RawSocket] bound to device {} (ifindex={})", ifname, iface.nic_id());
+                Ok(0)
+            }
+            None => Err(SyscallErr::ENODEV),
+        }
+    }
+
     fn local_endpoint(&self) -> Option<Endpoint> {
-        todo!()
+        self.inner.lock().local_endpoint.and_then(|ep| {
+            ep.addr.map(|addr| Endpoint::Ip(IpEndpoint::new(addr, 0)))
+        })
     }
 
     fn remote_endpoint(&self) -> Option<Endpoint> {
@@ -109,23 +142,43 @@ impl Socket for RawSocket {
                 ip_pkg.set_next_header(protocol); // 使用刚才解锁拿到的 protocol
                 ip_pkg.set_hop_limit(64);
                 ip_pkg.set_dst_addr(target_ip);
-                let src_addr = if target_ip.is_loopback() {
-                    crate::net::net_core::loopback_iface()
-                        .and_then(|d| d.iface.ip_addrs().first().map(|c| c.address()))
-                        .and_then(|ip| match ip {
-                            smoltcp::wire::IpAddress::Ipv4(addr) => Some(addr),
-                            _ => None,
-                        })
-                        .unwrap_or(smoltcp::wire::Ipv4Address::UNSPECIFIED)
-                } else {
-                    crate::net::net_core::default_iface()
-                        .and_then(|d| d.iface.ip_addrs().first().map(|c| c.address()))
-                        .and_then(|ip| match ip {
-                            smoltcp::wire::IpAddress::Ipv4(addr) => Some(addr),
-                            _ => None,
-                        })
-                        .unwrap_or(smoltcp::wire::Ipv4Address::UNSPECIFIED)
+
+                // Resolve output interface: prefer SO_BINDTODEVICE, fall back to route lookup
+                let target_ifindex = {
+                    let bound = self.inner.lock().bound_ifindex;
+                    bound.or_else(|| {
+                        crate::net::routing::route_output(smoltcp::wire::IpAddress::Ipv4(target_ip))
+                            .ok()
+                            .map(|r| r.ifindex)
+                    })
                 };
+
+                if let Some(ifidx) = target_ifindex {
+                    NET_INTERFACE.rebind_routed_raw(self.socket_handler, ifidx);
+                }
+
+                // Source IP from the OUTPUT interface, not from destination-based lookup
+                let src_addr = target_ifindex
+                    .and_then(|ifidx| {
+                        let ns = crate::net::net_core::current_netns();
+                        let list = ns.device_list.lock();
+                        list.values()
+                            .find(|iface| iface.nic_id() as u32 == ifidx)
+                            .and_then(|iface| iface.ip_addrs().first().map(|c| c.address()))
+                    })
+                    .and_then(|addr| match addr {
+                        smoltcp::wire::IpAddress::Ipv4(a) => Some(a),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| {
+                        // Fallback: use route-based source lookup
+                        match crate::net::config::lookup_source_ip(
+                            smoltcp::wire::IpAddress::Ipv4(target_ip),
+                        ) {
+                            smoltcp::wire::IpAddress::Ipv4(addr) => addr,
+                            _ => smoltcp::wire::Ipv4Address::UNSPECIFIED,
+                        }
+                    });
                 ip_pkg.set_src_addr(src_addr);
 
                 ip_pkg.payload_mut().copy_from_slice(user_buf);
@@ -145,6 +198,9 @@ impl Socket for RawSocket {
                         }
                     })
                     .ok_or(SyscallErr::EAGAIN)?;
+                // Poll twice: first to flush TX from our stack to peer's rx_queue,
+                // second to process the peer's reply back to our rx_queue.
+                NET_INTERFACE.poll();
                 NET_INTERFACE.poll();
                 ret
             }
@@ -197,18 +253,30 @@ impl Socket for RawSocket {
     }
 
     fn try_send(&self, buf: &[u8], _flags: MsgFlags) -> Result<isize, SyscallErr> {
-        // 不调用 poll，只做一次尝试
-        NET_INTERFACE
-            .raw_routed_socket(self.socket_handler, |socket| {
-                if !socket.can_send() {
-                    return Err(SyscallErr::EAGAIN);
+        let remote = self.inner.lock().remote_endpoint;
+        match remote {
+            Some(ep) => {
+                // Connected raw socket: add IP header and route via send_to
+                match self.send_to(buf, Endpoint::Ip(ep)) {
+                    Ok(n) => Ok(n as isize),
+                    Err(e) => Err(e),
                 }
-                match socket.send_slice(buf) {
-                    Ok(()) => Ok(buf.len() as isize),
-                    Err(_) => Err(SyscallErr::ENOBUFS),
-                }
-            })
-            .unwrap_or(Err(SyscallErr::EAGAIN))
+            }
+            None => {
+                // Unconnected: send raw bytes (IP_HDRINCL mode)
+                NET_INTERFACE
+                    .raw_routed_socket(self.socket_handler, |socket| {
+                        if !socket.can_send() {
+                            return Err(SyscallErr::EAGAIN);
+                        }
+                        match socket.send_slice(buf) {
+                            Ok(()) => Ok(buf.len() as isize),
+                            Err(_) => Err(SyscallErr::ENOBUFS),
+                        }
+                    })
+                    .unwrap_or(Err(SyscallErr::EAGAIN))
+            }
+        }
     }
 
     fn recv_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
@@ -266,6 +334,7 @@ impl RawSocket {
             ip_protocol: IpProtocol::from(protocol as u8),
             recvbuf_size: MAX_BUFFER_SIZE,
             sendbuf_size: MAX_BUFFER_SIZE,
+            bound_ifindex: None,
         };
 
         Self {

@@ -237,9 +237,11 @@ impl Iface for NetDeviceEntry {
 /// Register a new device in the current network namespace.
 pub fn add_device(iface: Arc<dyn Iface>) {
     let ns = current_netns();
-    // Track which namespace owns this device, so that delete/move
-    // can find the correct namespace even after netns switches.
     *iface.common().net_namespace.write() = Some(Arc::downgrade(&ns));
+
+    // Populate /sys/class/net/<name>/{address,mtu} for LTP net test compat
+    crate::net::sysfs_compat::register(&iface);
+
     ns.add_device(iface);
 }
 

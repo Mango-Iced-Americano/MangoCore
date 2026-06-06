@@ -212,12 +212,20 @@ define build_tools_disk
 	@mkfs.ext4 -F $(1) -b 4096 2>/dev/null
 	@mkdir -p /tmp/tools-mnt
 	@mount -o loop $(1) /tmp/tools-mnt
-	@mkdir -p /tmp/tools-mnt/bin /tmp/tools-mnt/lib /tmp/tools-mnt/usr/bin /tmp/tools-mnt/usr/sbin /tmp/tools-mnt/etc
+	@mkdir -p /tmp/tools-mnt/bin /tmp/tools-mnt/lib /tmp/tools-mnt/usr/bin /tmp/tools-mnt/usr/sbin /tmp/tools-mnt/etc /tmp/tools-mnt/tests
 	@echo "  copying files..."
 	@cp -a $(3)/bin/* /tmp/tools-mnt/bin/ 2>/dev/null || true
 	@cp -a $(3)/lib/* /tmp/tools-mnt/lib/ 2>/dev/null || true
 	@cp -a $(3)/sbin/* /tmp/tools-mnt/sbin/ 2>/dev/null || true
 	@cp -a $(3)/etc/* /tmp/tools-mnt/etc/ 2>/dev/null || true
+	@# Copy user-space test binaries into /tests
+	@echo "  copying test binaries..."
+	@case "$(4)" in rv) target=riscv64gc-unknown-none-elf ;; la) target=loongarch64-unknown-linux-gnu ;; esac; \
+	for t in inet_test fs_test unix_test; do \
+		src="../user/target/$$target/release/$$t"; \
+		if [ -f "$$src" ]; then cp -a "$$src" /tmp/tools-mnt/tests/; echo "    $$t"; \
+		else echo "    [skip] $$t (not built)"; fi; \
+	done
 	@if [ -d $(3)/apk ]; then \
 		cp -a $(3)/apk /tmp/tools-mnt/ 2>/dev/null; \
 		echo "  [apk] local repo included"; \

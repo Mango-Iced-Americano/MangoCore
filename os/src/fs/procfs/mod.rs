@@ -203,7 +203,7 @@ impl ProcInodeData {
 
 impl LockedProcInode {
     /// 创建目录 inode（已完成 parent/self_ref/fs 绑定）
-    fn new_dir_wired(
+    pub(crate) fn new_dir_wired(
         parent: Weak<LockedProcInode>,
         fs: Weak<ProcFS>,
         mode: InodeMode,
@@ -218,7 +218,7 @@ impl LockedProcInode {
     }
 
     /// 创建文件 inode（已完成 parent/self_ref/fs 绑定）
-    fn new_file_wired(
+    pub(crate) fn new_file_wired(
         parent: Weak<LockedProcInode>,
         fs: Weak<ProcFS>,
         mode: InodeMode,

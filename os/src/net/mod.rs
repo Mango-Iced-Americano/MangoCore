@@ -9,6 +9,7 @@ pub mod router_device;
 pub mod routing;
 pub mod socket;
 pub mod syscall;
+pub mod sysfs_compat;
 
 
 pub use spin::Mutex;
@@ -24,7 +25,7 @@ pub use socket::inet::common::address;
 // Socket 核心类型
 pub use socket::{
     make_unix_socket_pair, wake_raw_waiters, wake_tcp_waiters, Endpoint, Fd, Socket, SocketFile,
-    TcpInfo, AF_INET, AF_INET6, AF_NETLINK, AF_UNIX, AF_UNSPEC, MAX_BUFFER_SIZE, PSOCK,
+    TcpInfo, AF_INET, AF_INET6, AF_NETLINK, AF_PACKET, AF_UNIX, AF_UNSPEC, MAX_BUFFER_SIZE, PSOCK,
     RAW_SOCKETS, RAW_SOCKETS_TO_REMOVE, SHUT_RD, SHUT_RDWR, SHUT_WR, TCP_MSS, TCP_SOCKETS,
     TCP_SOCKETS_TO_REMOVE, UDP_SOCKETS, UDP_SOCKETS_TO_REMOVE,
 };

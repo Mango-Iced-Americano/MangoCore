@@ -7,6 +7,7 @@ pub const MAX_ADDR_LEN: usize = 512;
 pub const SOL_SOCKET: u32 = 1;
 pub const SOL_TCP: u32 = 6;
 pub const SOL_IP: u32 = 0;
+pub const IP_HDRINCL: u32 = 3;
 
 /// Returns true if `level` is a commonly known socket option protocol level.
 /// Used to distinguish between ENOPROTOOPT (known level, unknown option)
@@ -42,7 +43,7 @@ pub const SO_RCVBUF: u32 = 8;
 pub const SO_KEEPALIVE: u32 = 9;
 pub const SO_OOBINLINE: u32 = 10;
 pub const SO_REUSEPORT: u32 = 15;
-pub const SO_RCVTIMEO: u32 = 20;
+pub const SO_BINDTODEVICE: u32 = 25;pub const SO_RCVTIMEO: u32 = 20;
 pub const SO_SNDTIMEO: u32 = 21;
 
 bitflags! {

@@ -6,8 +6,8 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use user_lib::{
-    chdir, close, exec, exit, fork, getdents64, getpgid, kill, mount, open, println, read,
-    setpgid, shutdown, sleep, wait, waitpid, waitpid_wnohang, write, OpenFlags, SIGKILL,
+    chdir, close, exec, exit, fork, getdents64, getpgid, kill, mount, open, println, read, setpgid,
+    shutdown, sleep, wait, waitpid, waitpid_wnohang, write, OpenFlags, SIGKILL,
 };
 
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -1666,10 +1666,22 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
         if group_name == "ltp" && cfg.ltp_runner == LtpRunner::Suite {
             let libc = cfg.ltp_libc;
             if libc == LtpLibc::Glibc || libc == LtpLibc::Both {
-                run_ltp_suite_runner(environ, "/glibc", "glibc", timeout_secs, cfg.conf_source.as_deref());
+                run_ltp_suite_runner(
+                    environ,
+                    "/glibc",
+                    "glibc",
+                    timeout_secs,
+                    cfg.conf_source.as_deref(),
+                );
             }
             if libc == LtpLibc::Musl || libc == LtpLibc::Both {
-                run_ltp_suite_runner(environ, "/musl", "musl", timeout_secs, cfg.conf_source.as_deref());
+                run_ltp_suite_runner(
+                    environ,
+                    "/musl",
+                    "musl",
+                    timeout_secs,
+                    cfg.conf_source.as_deref(),
+                );
             }
         } else if group_name == "ltp" && cfg.ltp_runner == LtpRunner::Inline {
             // 本地调试路径：LTP 使用内联枚举，支持 include/exclude/from。
@@ -2142,7 +2154,10 @@ fn prepare_symlink(environ: &[*const u8]) {
         if ret == 0 {
             println!("[initproc] bind mount {} -> {}", source, target);
         } else {
-            println!("[initproc] bind mount {} -> {}: skipped (errno={})", source, target, -ret);
+            println!(
+                "[initproc] bind mount {} -> {}: skipped (errno={})",
+                source, target, -ret
+            );
         }
     };
 
@@ -2312,7 +2327,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     // println!("[initproc] fs_test returned exit_code={}", fs_test_ret);
 
     println!("[initproc] running inet_test...");
-    let inet_test_cmd = "cd / && ./inet_test\0";
+    let inet_test_cmd = "cd / && ./tests/inet_test\0";
     let inet_test_ret = run_bash_cmd(inet_test_cmd, &environ);
     println!("[initproc] inet_test returned exit_code={}", inet_test_ret);
 
