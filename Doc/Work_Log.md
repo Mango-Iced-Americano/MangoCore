@@ -4,6 +4,34 @@
 
 ## 2026-06-06
 
+### veth ping 修复 + inet_test 输出清理 + SIOCGIFNAME + sysfs_compat 尝试
+
+**涉及文件：**
+- `os/src/net/socket/inet/raw/raw.rs` — SO_BINDTODEVICE 实现（解析设备名查 ifindex）、`rebind_routed_raw`（raw socket 跨接口迁移）、源 IP 从出接口取（不用路由反查）、`IP_HDRINCL` no-op、发后双 poll 处理 veth tx→rx→reply 往返
+- `os/src/net/socket/mod.rs` — Socket trait 加 `set_bind_to_device()` 用于绑定到接口
+- `os/src/net/config.rs` — 新增 `rebind_routed_raw()` 函数
+- `os/src/net/syscall/setsockopt.rs` — SO_BINDTODEVICE 解析设备名字符串；IP_HDRINCL no-op
+- `os/src/net/syscall/bind.rs` — raw socket bind 传递 bindtodevice
+- `os/src/net/syscall/recvmsg.rs` — recvmsg 空 iov guard 删除（MSG_PEEK\|MSG_TRUNC 合法探测）；MSG_TRUNC 检测
+- `os/src/net/socket/netlink/mod.rs` — try_recv 改用 front()+pop_front() 防截断丢消息
+- `os/src/net/socket/netlink/route/mod.rs` — is_get 列表补 RTM_GETNEIGH
+- `os/src/net/ioctl.rs` — SIOCGIFNAME 常量修正 0x8934→0x8910
+- `os/src/net/sysfs_compat.rs` — **新模块**，尝试在 `/sys/class/net/<iface>/` 下动态创建 address/mtu 文件（当前 create() 在 cpio 解包目录返 ENOSYS）
+- `os/src/net/net_core.rs:243` — add_device() 调用 sysfs_compat::register()
+- `user/src/bin/inet_test.rs` — 删主循环 `[PASS]` 行；删第二套无颜色 tfail!/tbrok!/tconf! macro（覆盖彩色版）；veth_ping 拆分 ping/ip-addr/ip-route 诊断步；veth_ip_neigh 拆开 ping 和 ip neigh；https_download 砍成 1 轮+逐阶段诊断+任意字节即 TPASS；veth_diag tinfo→tfail+return 1
+- `os_test.conf` — 恢复 mask 0x001
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU inet_test: 所有 VETH 测试（ping/diag/ip_neigh）✅
+- QEMU in6_02: 全部 3 TPASS ✅
+- QEMU LTP: P0 网络测例全部 TBROK（缺少 /sys/class/net/ltp_ns_veth*/address/mtu）
+
+**备注：** CPIO 解包创建的 ramfs 目录在运行时 create() 返回 ENOSYS（与启动时 mount_common_filesystems 行为不同），阻断了内核态动态 sysfs 文件创建方案。待 Oracle 分析 DragonOS 做法后另寻方案。
+
+---
+
 ### 网络栈修复 P0–P3：MSG_PEEK、动态 IPv6 conf、NLM_F_DUMP、raw socket connect、邻居 netlink、netstat 伪文件
 
 **背景：** 即使 P0 netlink 响应路径已就绪，qemu.log 仍显示 "EOF on netlink"。根因：BusyBox libnetlink 先 `recvmsg(MSG_PEEK|MSG_DONTWAIT)` 再 `recv()`——MSG_PEEK 被 `validate_for_recv` 吞掉后，peek 直接消费了 ACK 数据，第二次 recv 看到空队列 → EAGAIN → BusyBox 报告 "EOF"。

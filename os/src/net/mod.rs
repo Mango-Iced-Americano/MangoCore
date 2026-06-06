@@ -9,7 +9,6 @@ pub mod router_device;
 pub mod routing;
 pub mod socket;
 pub mod syscall;
-pub mod sysfs_compat;
 
 
 pub use spin::Mutex;

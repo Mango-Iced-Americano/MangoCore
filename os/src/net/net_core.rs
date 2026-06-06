@@ -239,9 +239,6 @@ pub fn add_device(iface: Arc<dyn Iface>) {
     let ns = current_netns();
     *iface.common().net_namespace.write() = Some(Arc::downgrade(&ns));
 
-    // Populate /sys/class/net/<name>/{address,mtu} for LTP net test compat
-    crate::net::sysfs_compat::register(&iface);
-
     ns.add_device(iface);
 }
 

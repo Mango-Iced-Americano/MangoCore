@@ -4,6 +4,8 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use log::warn;
+
 use crate::fs::sysfs::SysInode;
 use crate::fs::vfs::InodeMode;
 use crate::net::iface::Iface;
@@ -14,6 +16,7 @@ pub fn register_all(root: &Arc<SysInode>) -> Result<(), SyscallErr> {
     let class_dir = root.add_dir_inner("class", InodeMode::from_bits_truncate(0o555))?;
     let net_dir = class_dir.add_dir_inner("net", InodeMode::from_bits_truncate(0o555))?;
     net_dir.set_hooks(net_class_find_hook, net_class_list_hook);
+    warn!("[sysfs] register_all: /sys/class/net hooks installed");
     Ok(())
 }
 
@@ -51,17 +54,24 @@ fn devices_all_ns() -> Vec<(String, Arc<dyn Iface>)> {
         }
     }
 
+    let names: Vec<&str> = result.iter().map(|(n, _)| n.as_str()).collect();
+    warn!("[sysfs] devices_all_ns() => {} devices: {:?}", result.len(), names);
     result
 }
 
 fn net_class_find_hook(inode: &SysInode, name: &str) -> Option<Arc<dyn crate::fs::vfs::IndexNode>> {
+    warn!("[sysfs] net_class_find_hook: looking up '{}'", name);
     let all = devices_all_ns();
     let iface = all.iter().find(|(n, _)| n == name).map(|(_, i)| i.clone())?;
+    warn!("[sysfs] net_class_find_hook: FOUND '{}', creating dir", name);
     Some(create_iface_dir(inode, iface))
 }
 
 fn net_class_list_hook(_inode: &SysInode) -> Vec<String> {
-    devices_all_ns().into_iter().map(|(name, _)| name).collect()
+    let all = devices_all_ns();
+    let names: Vec<String> = all.into_iter().map(|(name, _)| name).collect();
+    warn!("[sysfs] net_class_list_hook: returning {} entries: {:?}", names.len(), names);
+    names
 }
 
 fn create_iface_dir(parent: &SysInode, iface: Arc<dyn Iface>) -> Arc<dyn crate::fs::vfs::IndexNode> {

@@ -117,7 +117,7 @@ fn handle_getlink(seq: u32, _req_pid: u32, sock: &NetlinkSocket) -> Result<isize
     }
     // NLMSG_DONE = 20 bytes: 16-byte header + 4-byte zero error code
     let done_payload = 0i32.to_ne_bytes();
-    if !sock.push_recv(super::netlink::build_nlmsg(NLMSG_DONE, NLM_F_MULTI, seq, pid, &done_payload)) {
+    if !sock.push_recv(super::netlink::build_nlmsg(NLMSG_DONE, 0, seq, pid, &done_payload)) {
         return Err(crate::utils::error::SyscallErr::ENOBUFS);
     }
     Ok(0)
@@ -221,7 +221,7 @@ fn handle_getaddr(seq: u32, pid: u32, sock: &NetlinkSocket) -> Result<isize, cra
         }
     }
     let done_payload = 0i32.to_ne_bytes();
-    if !sock.push_recv(super::netlink::build_nlmsg(NLMSG_DONE, NLM_F_MULTI, seq, pid, &done_payload)) {
+    if !sock.push_recv(super::netlink::build_nlmsg(NLMSG_DONE, 0, seq, pid, &done_payload)) {
         return Err(crate::utils::error::SyscallErr::ENOBUFS);
     }
     Ok(0)
@@ -257,7 +257,7 @@ fn handle_getroute(seq: u32, pid: u32, sock: &NetlinkSocket) -> Result<isize, cr
         }
     }
     let done_payload = 0i32.to_ne_bytes();
-    if !sock.push_recv(super::netlink::build_nlmsg(NLMSG_DONE, NLM_F_MULTI, seq, pid, &done_payload)) {
+    if !sock.push_recv(super::netlink::build_nlmsg(NLMSG_DONE, 0, seq, pid, &done_payload)) {
         return Err(crate::utils::error::SyscallErr::ENOBUFS);
     }
     Ok(0)
@@ -270,7 +270,7 @@ fn handle_getneigh(
 ) -> Result<isize, crate::utils::error::SyscallErr> {
     // Empty neighbor table: send NLMSG_DONE immediately.
     let done_payload = 0i32.to_ne_bytes();
-    let done = super::netlink::build_nlmsg(NLMSG_DONE, NLM_F_MULTI, seq, pid, &done_payload);
+    let done = super::netlink::build_nlmsg(NLMSG_DONE, 0, seq, pid, &done_payload);
     if !sock.push_recv(done) {
         return Err(crate::utils::error::SyscallErr::ENOBUFS);
     }
@@ -381,8 +381,9 @@ pub fn finish_response(segments: &mut Vec<RouteNlSegment>, was_dump: bool) {
             RouteNlSegment::NewRoute(s) => s.header.flags |= NLM_F_MULTI,
             RouteNlSegment::DelRoute(s) => s.header.flags |= NLM_F_MULTI,
             RouteNlSegment::GetRoute(s) => s.header.flags |= NLM_F_MULTI,
-            RouteNlSegment::Error(s) => s.header.flags |= NLM_F_MULTI,
-            RouteNlSegment::Done(s) => s.header.flags |= NLM_F_MULTI,
+            // NLMSG_ERROR and NLMSG_DONE are terminal markers — never NLM_F_MULTI
+            RouteNlSegment::Error(_) => {}
+            RouteNlSegment::Done(_) => {}
         }
     }
 }
