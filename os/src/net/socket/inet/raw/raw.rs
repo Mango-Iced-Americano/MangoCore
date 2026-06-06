@@ -404,7 +404,7 @@ impl Socket for RawSocket {
 }
 
 impl RawSocket {
-    pub fn new(protocol: u32) -> Self {
+    pub fn new(protocol: u32, ip_version: IpVersion) -> Self {
         let tx_buf = socket::raw::PacketBuffer::new(
             vec![PacketMetadata::EMPTY; 128],
             vec![0 as u8; MAX_BUFFER_SIZE],
@@ -414,18 +414,18 @@ impl RawSocket {
             vec![0 as u8; MAX_BUFFER_SIZE],
         );
         let socket = raw::Socket::new(
-            smoltcp::wire::IpVersion::Ipv4,
+            ip_version,
             smoltcp::wire::IpProtocol::from(protocol as u8),
             rx_buf,
             tx_buf,
         );
         let socket_handler = NET_INTERFACE.add_routed_socket(InetProtocol::Raw, socket).unwrap();
-        log::info!("[RawSocket::new] new {}", socket_handler);
+        log::info!("[RawSocket::new] new {} ver={:?}", socket_handler, ip_version);
         NET_INTERFACE.poll();
         let inner = RawSocketInner {
             local_endpoint: None,
             remote_endpoint: None,
-            ip_version: IpVersion::Ipv4,
+            ip_version,
             ip_protocol: IpProtocol::from(protocol as u8),
             recvbuf_size: MAX_BUFFER_SIZE,
             sendbuf_size: MAX_BUFFER_SIZE,
