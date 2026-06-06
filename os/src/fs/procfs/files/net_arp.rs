@@ -1,5 +1,4 @@
 use alloc::string::String;
-use alloc::vec::Vec;
 use crate::fs::procfs::proc_read_str;
 use crate::utils::error::SyscallErr;
 use smoltcp::wire::IpAddress;

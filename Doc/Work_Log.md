@@ -4,6 +4,58 @@
 
 ## 2026-06-06
 
+### Neighbour Table 实现：RTM_GETNEIGH / RTM_DELNEIGH / /proc/net/arp
+
+**背景：** `ip neigh show`、`arp -an` 和 LTP ipneigh01 测试需要内核维护邻居表（ARP 表），返回 IP→MAC 映射。此前 RTM_GETNEIGH 始终返回空，`/proc/net/arp` 仅输出表头。
+
+**实现方式：**
+由于 smoltcp 的 neighbour cache 未暴露公开迭代接口且指令要求不修改 smoltcp 源码，采用**独立的全局邻居表**方案，通过**适配器层 ARP 拦截**自动填充。
+
+**涉及文件：**
+- `os/src/net/neighbour.rs` — **新文件**：全局 `NEIGHBOUR_TABLE`（`Mutex<BTreeMap<(ifindex, IpAddress), NeighbourEntry>>`）；`neighbour_record()`/`neighbour_delete()`/`neighbour_dump()` 公开 API；`try_capture_arp_reply()` 从原始以太网帧解析 ARP Reply 并记录；`CURRENT_POLL_IFINDEX` 跟踪当前轮询接口的 ifindex
+- `os/src/net/adapter.rs` — `NetRxToken::consume` 中调用 `try_capture_arp_reply()`，从以太网接收路径自动捕获 ARP 应答
+- `os/src/drivers/net/veth.rs` — `VethRxToken::consume` 同上，覆盖 veth 接收路径
+- `os/src/net/config.rs` — `poll_once()`、`_poll()`、DHCP 初始化中的 `eth_iface.poll()` 调用前设置 `CURRENT_POLL_IFINDEX`
+- `os/src/net/socket/netlink/netlink.rs` — 新增 `NDA_DST`、`NDA_LLADDR` 常量
+- `os/src/net/socket/netlink/route/mod.rs` — 重写 `handle_getneigh`（dump 全部 ARP 条目）；新增 `handle_delneigh`、`handle_newneigh`、`handle_getneigh_single`（单条目查询）；新增 `parse_nda_attrs()` 辅助函数解析 ndmsg 属性；dispatch 中注册 RTM_NEWNEIGH/RTM_DELNEIGH/RTM_GETNEIGH 单条目处理
+- `os/src/fs/procfs/files/net_arp.rs` — 重写：从 `NEIGHBOUR_TABLE` 读取条目，输出标准 `/proc/net/arp` 格式（IP/HW type/Flags/HW address/Mask/Device）
+- `os/src/net/mod.rs` — 注册 `pub mod neighbour`
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：**
+- 仅支持 IPv4 over Ethernet（ARP），IPv6 NDP 暂未实现
+- ARP 条目在接收到 ARP Reply 时自动记录，无主动老化机制（smoltcp 内部独立管理其缓存超时）
+- 锁顺序：`NET_INTERFACE.inner` → `CURRENT_POLL_IFINDEX` → `NEIGHBOUR_TABLE` → `net_core.device_list`
+
+### AF_PACKET 最小实现：send/recv/bind + 协议过滤
+
+**背景：** PacketSocket 此前仅有硬编码到 eth0 的发送路径，无接收、无 bind、无协议过滤。arping 等 L2 工具需要完整的 AF_PACKET 支持。
+
+**涉及文件：**
+- `os/src/net/socket/mod.rs` — 新增 `PacketEndpoint` 结构体（sockaddr_ll 字段）；新增 `Endpoint::Packet(PacketEndpoint)` 变体；新增 `PACKET_SOCKETS` 全局注册表；`from_sockaddr` 正确解析 AF_PACKET；`fill_sockaddr` 支持 Packet 变体写入
+- `os/src/net/socket/packet.rs` — 完整重写：`PacketSocket` 存储 `bound_ifindex`/`bound_protocol`/`rx_queue`/wait queues；`bind()` 处理 `Endpoint::Packet`；`try_send()` 通过 NET_INTERFACE 按 bound_ifindex 发送；`try_recv()` 从 rx_queue 出队；`deliver_frame_to_packet_sockets()` 含 ETH_P_ALL 过滤逻辑；`deliver_frames_from_veth_queue()` 批量投递
+- `os/src/net/syscall/bind.rs` — sys_bind 新增 `Endpoint::Packet` 分支
+- `os/src/net/config.rs` — poll_once / _poll 中，在 smoltcp poll 之前从 veth rx_queue 投递原始帧到 packet socket（防 smoltcp 消费后丢失）
+- `os/src/net/mod.rs` — 导出 `PacketEndpoint`、`PACKET_SOCKETS`
+
+**设计决策：**
+- **帧投递时机**：在 poll_once 中、smoltcp Interface::poll() 之前 snap veth rx_queue 内容投递到 packet socket。smoltcp poll 随后正常消费同一批帧（双重投递，对标 Linux 行为）
+- **协议过滤**：若 bound_protocol == ETH_P_ALL (0x0003) 接受所有帧；否则按 ethertype 过滤
+- **发送路径**：通过 NET_INTERFACE.inner_handler 遍历 DeviceStack，按 bound_ifindex 匹配后调用 `stack.device.transmit()`
+- **注册模式**：对标 RawSocket 的 RAW_SOCKETS 全局注册 + Drop 时清理
+
+**验证：**
+- `make rv64-kernel-build-only` ✅（157 warnings 均为既存，无新增）
+- `make la64-kernel-build-only` ❌（既存的 user program 编译错误：`src/bin/initproc.rs` 等 `E0277`，与本次修改无关）
+
+**已知限制：**
+- 仅 veth 设备支持帧接收投递，virtio 网卡（`IfaceDevice::Eth`）未接入投递路径
+- `try_recvmsg` 默认返回 `(n, None)`，不填充源 MAC 地址
+- 无 BPF 过滤、无混杂模式、无 fanout
+
 ### SO_BINDTODEVICE：全 socket 类型支持
 
 **背景：** 需要 `ping -I veth0` 和 `arping -I veth0` 工作。SO_BINDTODEVICE 此前仅 RawSocket 支持，TCP/UDP/Packet 未实现。

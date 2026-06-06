@@ -19,7 +19,7 @@ use super::segment::{
     ErrorSegment, ErrorSegmentBody, NoAttr, RouteNlSegment, SegmentCommon,
 };
 use alloc::vec::Vec;
-use smoltcp::wire::{IpAddress, IpCidr, Ipv4Address};
+use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr, Ipv4Address};
 use crate::net::iface::DeviceKind;
 
 fn parse_nlmsg(buf: &[u8]) -> Option<(u16, u16, u32, u32)> {
@@ -60,6 +60,8 @@ pub fn handle_netlink_msg(buf: &[u8], sock: &NetlinkSocket) -> Result<isize, cra
             RTM_NEWROUTE => route::handle_newroute(seq, pid, buf, flags, sock),
             RTM_DELROUTE => route::handle_delroute(seq, pid, buf, sock),
             RTM_DELNEIGH => handle_delneigh(seq, pid, buf, sock),
+            RTM_NEWNEIGH => handle_newneigh(seq, pid, buf, sock),
+            RTM_GETNEIGH => handle_getneigh_single(seq, pid, buf, sock),
             RTM_GETLINK => handle_getlink_single(seq, pid, buf, sock),
             _ => Err(crate::utils::error::SyscallErr::EOPNOTSUPP),
         };
@@ -315,9 +317,40 @@ fn handle_delneigh(
         return Err(crate::utils::error::SyscallErr::EINVAL);
     }
     let ifindex = i32::from_ne_bytes([payload[4], payload[5], payload[6], payload[7]]) as u32;
-    // Parse RTA attributes to find NDA_DST
-    let mut offset = 12;
+    let (dst_ip, _) = parse_nda_attrs(payload)?;
+    let ip = dst_ip.ok_or(crate::utils::error::SyscallErr::EINVAL)?;
+    crate::net::neighbour::neighbour_delete(ifindex, ip);
+
+    let done_payload = 0i32.to_ne_bytes();
+    if !sock.push_recv(super::netlink::build_nlmsg(NLMSG_DONE, 0, _seq, _pid, &done_payload)) {
+        return Err(crate::utils::error::SyscallErr::ENOBUFS);
+    }
+    Ok(0)
+}
+
+fn handle_newneigh(
+    _seq: u32,
+    _pid: u32,
+    buf: &[u8],
+    _sock: &NetlinkSocket,
+) -> Result<isize, crate::utils::error::SyscallErr> {
+    let payload = buf.get(16..).ok_or(crate::utils::error::SyscallErr::EINVAL)?;
+    if payload.len() < 12 {
+        return Err(crate::utils::error::SyscallErr::EINVAL);
+    }
+    let ifindex = i32::from_ne_bytes([payload[4], payload[5], payload[6], payload[7]]) as u32;
+    let (dst_ip, dst_mac) = parse_nda_attrs(payload)?;
+    let ip = dst_ip.ok_or(crate::utils::error::SyscallErr::EINVAL)?;
+    let mac = dst_mac.ok_or(crate::utils::error::SyscallErr::EINVAL)?;
+    crate::net::neighbour::neighbour_record(ifindex, ip, mac);
+    Ok(0)
+}
+
+/// Parse NDA_DST (IP) and NDA_LLADDR (MAC) from an ndmsg payload.
+fn parse_nda_attrs(payload: &[u8]) -> Result<(Option<IpAddress>, Option<EthernetAddress>), crate::utils::error::SyscallErr> {
     let mut dst_ip: Option<IpAddress> = None;
+    let mut dst_mac: Option<EthernetAddress> = None;
+    let mut offset = 12;
     while offset + 4 <= payload.len() {
         let len = u16::from_ne_bytes([payload[offset], payload[offset + 1]]) as usize;
         if len < 4 {
@@ -328,18 +361,58 @@ fn handle_delneigh(
         let data_end = core::cmp::min(offset + len, payload.len());
         let data = &payload[data_start..data_end];
 
-        if rta_type == NDA_DST && data.len() >= 4 {
-            dst_ip = Some(IpAddress::v4(data[0], data[1], data[2], data[3]));
+        match rta_type {
+            NDA_DST if data.len() >= 4 => {
+                dst_ip = Some(IpAddress::v4(data[0], data[1], data[2], data[3]));
+            }
+            NDA_LLADDR if data.len() >= 6 => {
+                dst_mac = Some(EthernetAddress([data[0], data[1], data[2], data[3], data[4], data[5]]));
+            }
+            _ => {}
         }
 
         offset = super::netlink::nlmsg_align(offset + len);
     }
+    Ok((dst_ip, dst_mac))
+}
 
+fn handle_getneigh_single(
+    seq: u32,
+    pid: u32,
+    buf: &[u8],
+    sock: &NetlinkSocket,
+) -> Result<isize, crate::utils::error::SyscallErr> {
+    let payload = buf.get(16..).ok_or(crate::utils::error::SyscallErr::EINVAL)?;
+    if payload.len() < 12 {
+        return Err(crate::utils::error::SyscallErr::EINVAL);
+    }
+    let ifindex = i32::from_ne_bytes([payload[4], payload[5], payload[6], payload[7]]) as u32;
+    let (dst_ip, _) = parse_nda_attrs(payload)?;
     let ip = dst_ip.ok_or(crate::utils::error::SyscallErr::EINVAL)?;
-    crate::net::neighbour::neighbour_delete(ifindex, ip);
+
+    // Look up the specific entry
+    let table = crate::net::neighbour::NEIGHBOUR_TABLE.lock();
+    if let Some(entry) = table.get(&(ifindex, ip)) {
+        let mut payload_out = Vec::with_capacity(12 + 32);
+        payload_out.push(2);        // ndm_family = AF_INET
+        payload_out.push(0);
+        payload_out.push(0);
+        payload_out.push(0);
+        payload_out.extend_from_slice(&(ifindex as i32).to_ne_bytes());
+        payload_out.extend_from_slice(&entry.state.to_ne_bytes());
+        payload_out.push(0);
+        payload_out.push(0);
+        if let IpAddress::Ipv4(a) = ip {
+            payload_out.extend(&super::netlink::rta_data(NDA_DST, &a.0));
+        }
+        payload_out.extend(&super::netlink::rta_data(NDA_LLADDR, &entry.mac.0));
+        if !sock.push_recv(super::netlink::build_nlmsg(RTM_NEWNEIGH, 0, seq, pid, &payload_out)) {
+            return Err(crate::utils::error::SyscallErr::ENOBUFS);
+        }
+    }
 
     let done_payload = 0i32.to_ne_bytes();
-    if !sock.push_recv(super::netlink::build_nlmsg(NLMSG_DONE, 0, _seq, _pid, &done_payload)) {
+    if !sock.push_recv(super::netlink::build_nlmsg(NLMSG_DONE, 0, seq, pid, &done_payload)) {
         return Err(crate::utils::error::SyscallErr::ENOBUFS);
     }
     Ok(0)
