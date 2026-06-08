@@ -7,6 +7,9 @@
 //! - `File` 存储 per-fd 可变状态（offset、flags、mode）
 //! - `IndexNode` 存储 per-inode 共享状态（数据块、元数据）
 //! - `File::read()` 调用 `IndexNode::read_at()`，然后更新 offset
+//!
+//! Arc model: File is shared via Arc. dup'd fds share the same Arc<File>,
+//! so status flags (O_NONBLOCK, O_APPEND) are shared correctly per POSIX.
 
 use crate::utils::error::SyscallErr;
 use alloc::string::ToString;
@@ -22,11 +25,76 @@ use super::event::EventWaitQueue;
 use crate::task::{register_writable_inode, unregister_writable_inode, WaitQueue};
 use crate::config::SYSTEM_FD_LIMIT;
 
-pub const F_SEAL_SEAL: usize = 0x0001;
-pub const F_SEAL_SHRINK: usize = 0x0002;
-pub const F_SEAL_GROW: usize = 0x0004;
-pub const F_SEAL_WRITE: usize = 0x0008;
-pub const F_SEAL_FUTURE_WRITE: usize = 0x0010;
+// ── Globally-unique open file id counter ────────────────────────────────
+
+static NEXT_OPEN_FILE_ID: AtomicUsize = AtomicUsize::new(1);
+static NEXT_LOCK_OWNER_ID: AtomicUsize = AtomicUsize::new(1);
+
+fn alloc_open_file_id() -> usize {
+    NEXT_OPEN_FILE_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn alloc_lock_owner_id() -> usize {
+    NEXT_LOCK_OWNER_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+// ── FileOwner ────────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+pub enum FileOwnerTarget {
+    None,
+    Pid(usize),
+    Pgrp(usize),
+    Tid(usize),
+}
+
+impl core::fmt::Debug for FileOwnerTarget {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::None => write!(f, "None"),
+            Self::Pid(pid) => f.debug_tuple("Pid").field(pid).finish(),
+            Self::Pgrp(pg) => f.debug_tuple("Pgrp").field(pg).finish(),
+            Self::Tid(tid) => f.debug_tuple("Tid").field(tid).finish(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct FileOwner {
+    target: FileOwnerTarget,
+    raw_owner: i32,
+    signum: i32,
+}
+
+impl Default for FileOwner {
+    fn default() -> Self {
+        Self {
+            target: FileOwnerTarget::None,
+            raw_owner: 0,
+            signum: 0,
+        }
+    }
+}
+
+impl FileOwner {
+    pub fn target(&self) -> &FileOwnerTarget {
+        &self.target
+    }
+
+    pub fn raw_owner(&self) -> i32 {
+        self.raw_owner
+    }
+
+    pub fn signum(&self) -> i32 {
+        self.signum
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct FileOwnerSnapshot {
+    pub target: FileOwnerTarget,
+    pub signum: i32,
+}
 
 // ── FileFlags ───────────────────────────────────────────────────────────
 
@@ -95,6 +163,11 @@ impl FileFlags {
     }
 }
 
+/// Mask of all status (non-access-mode) flags returned by fcntl(F_GETFL).
+pub const STATUS_MASK: u32 = FileFlags::O_APPEND.bits() | FileFlags::O_NONBLOCK.bits()
+    | FileFlags::O_DSYNC.bits() | FileFlags::O_SYNC.bits() | FileFlags::O_ASYNC.bits()
+    | FileFlags::O_DIRECT.bits() | FileFlags::O_LARGEFILE.bits() | FileFlags::O_NOATIME.bits();
+
 // ── FileMode ────────────────────────────────────────────────────────────
 
 bitflags! {
@@ -135,10 +208,9 @@ pub enum SeekFrom {
 ///
 /// 对标 DragonOS 的 `FileDescriptorVec`。
 /// 每个进程有一个 `FdTable`，存储所有打开的文件描述符。
-#[derive(Debug)]
 pub struct FdTable {
-    /// 文件描述符数组
-    fds: Vec<Option<File>>,
+    /// 文件描述符数组 (Arc<File> for shared status flags across dup'd fds)
+    fds: Vec<Option<Arc<File>>>,
     /// per-fd 的 close_on_exec 标志
     cloexec: Vec<bool>,
     /// 下一个可用的 fd（优化分配，避免 O(n²)）
@@ -147,6 +219,18 @@ pub struct FdTable {
     soft_limit: usize,
     /// 硬限制
     hard_limit: usize,
+    /// 此fd表所有者的lock owner id（fork时分配新值）
+    lock_owner_id: usize,
+}
+
+impl fmt::Debug for FdTable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FdTable")
+            .field("fds_len", &self.fds.len())
+            .field("next_fd", &self.next_fd)
+            .field("lock_owner_id", &self.lock_owner_id)
+            .finish()
+    }
 }
 
 impl FdTable {
@@ -171,6 +255,7 @@ impl FdTable {
             next_fd: 0,
             soft_limit: Self::MAX_CAPACITY,
             hard_limit: Self::MAX_CAPACITY,
+            lock_owner_id: alloc_lock_owner_id(),
         }
     }
 
@@ -182,7 +267,8 @@ impl FdTable {
         self.next_fd = 0;
     }
 
-    /// 克隆 FdTable（fork 时用）
+    /// 克隆 FdTable（fork 时用）。
+    /// fork 时每个 fd 共享同一个 Arc<File>，分配新的 lock_owner_id。
     pub fn try_clone(&self) -> Result<Self, SyscallErr> {
         let hi = self.highest_open_index().map(|i| i + 1).unwrap_or(0);
         let clone_len = hi.max(Self::INITIAL_CAPACITY).min(self.fds.len());
@@ -194,7 +280,7 @@ impl FdTable {
         fds.extend(
             self.fds[..clone_len]
                 .iter()
-                .map(|opt| opt.as_ref().and_then(|f| f.try_clone())),
+                .map(|opt| opt.as_ref().map(|f| Arc::clone(f))),
         );
 
         let mut cloexec = Vec::new();
@@ -209,6 +295,7 @@ impl FdTable {
             next_fd: 0,
             soft_limit: self.soft_limit,
             hard_limit: self.hard_limit,
+            lock_owner_id: alloc_lock_owner_id(),
         })
     }
 
@@ -256,7 +343,7 @@ impl FdTable {
     // ── FD 分配/释放 ──────────────────────────────────────────────
 
     /// 分配一个新的文件描述符
-    pub fn alloc_fd(&mut self, file: File, cloexec: bool) -> Result<usize, SyscallErr> {
+    pub fn alloc_fd(&mut self, file: Arc<File>, cloexec: bool) -> Result<usize, SyscallErr> {
         let limit = self.effective_soft_limit();
         if limit == 0 {
             return Err(SyscallErr::EMFILE);
@@ -288,7 +375,7 @@ impl FdTable {
     pub fn alloc_fd_from(
         &mut self,
         min_fd: usize,
-        file: File,
+        file: Arc<File>,
         cloexec: bool,
     ) -> Result<usize, SyscallErr> {
         let limit = self.effective_soft_limit();
@@ -323,7 +410,7 @@ impl FdTable {
     pub fn alloc_fd_at(
         &mut self,
         fd: usize,
-        file: File,
+        file: Arc<File>,
         cloexec: bool,
     ) -> Result<usize, SyscallErr> {
         if fd >= self.effective_soft_limit() {
@@ -342,12 +429,13 @@ impl FdTable {
         Ok(fd)
     }
 
-    /// 释放一个 fd
-    pub fn drop_fd(&mut self, fd: usize) -> Result<File, SyscallErr> {
+    /// 释放一个 fd，返回被移除的 Arc<File>
+    pub fn drop_fd(&mut self, fd: usize) -> Result<Arc<File>, SyscallErr> {
         if fd >= self.fds.len() {
             return Err(SyscallErr::EBADF);
         }
         let file = self.fds[fd].take().ok_or(SyscallErr::EBADF)?;
+        crate::fs::vfs::posix_lock::release_posix_for_owner(&file, self.lock_owner_id);
         self.cloexec[fd] = false;
         if fd < self.next_fd {
             self.next_fd = fd;
@@ -359,20 +447,20 @@ impl FdTable {
 
     /// 获取 fd 对应的 File 引用
     #[inline]
-    pub fn get_file(&self, fd: usize) -> Result<&File, SyscallErr> {
+    pub fn get_file(&self, fd: usize) -> Result<Arc<File>, SyscallErr> {
         if fd >= self.fds.len() {
             return Err(SyscallErr::EBADF);
         }
-        self.fds[fd].as_ref().ok_or(SyscallErr::EBADF)
+        self.fds[fd].as_ref().map(|f| Arc::clone(f)).ok_or(SyscallErr::EBADF)
     }
 
-    /// 获取 fd 对应的 File 可变引用
+    /// 获取 fd 对应的 File 引用（不 clone Arc —— borrow only）
     #[inline]
-    pub fn get_file_mut(&mut self, fd: usize) -> Result<&mut File, SyscallErr> {
+    pub fn get_file_ref(&self, fd: usize) -> Result<&File, SyscallErr> {
         if fd >= self.fds.len() {
             return Err(SyscallErr::EBADF);
         }
-        self.fds[fd].as_mut().ok_or(SyscallErr::EBADF)
+        self.fds[fd].as_ref().map(|f| &**f).ok_or(SyscallErr::EBADF)
     }
 
     /// 获取 close_on_exec 标志
@@ -425,7 +513,7 @@ impl FdTable {
         self.fds
             .iter()
             .enumerate()
-            .filter_map(|(i, f)| f.as_ref().map(|f| (i, f)))
+            .filter_map(|(i, f)| f.as_ref().map(|f| (i, &**f)))
     }
 
     /// 获取 fd 数量
@@ -443,6 +531,11 @@ impl FdTable {
         self.fds.capacity()
     }
 
+    /// 获取 lock_owner_id
+    pub fn lock_owner_id(&self) -> usize {
+        self.lock_owner_id
+    }
+
     // ── exec 相关 ─────────────────────────────────────────────────
 
     /// exec 时：关闭所有 CLOEXEC 的 fd
@@ -458,32 +551,28 @@ impl FdTable {
 
     // ── 过渡桥接（syscall 迁移期间使用 vfs::File）────────────────
 
-    pub fn get_ref(&self, fd: usize) -> Result<&File, isize> {
+    pub fn get_ref(&self, fd: usize) -> Result<Arc<File>, isize> {
         self.get_file(fd).map_err(|e| -(e as isize))
     }
 
-    pub fn get_refmut(&mut self, fd: usize) -> Result<&mut File, isize> {
-        self.get_file_mut(fd).map_err(|e| -(e as isize))
-    }
-
-    pub fn remove(&mut self, fd: usize) -> Result<File, isize> {
+    pub fn remove(&mut self, fd: usize) -> Result<Arc<File>, isize> {
         self.drop_fd(fd).map_err(|e| -(e as isize))
     }
 
-    pub fn insert(&mut self, file: File) -> Result<usize, isize> {
+    pub fn insert(&mut self, file: Arc<File>) -> Result<usize, isize> {
         self.alloc_fd(file, false).map_err(|e| -(e as isize))
     }
 
-    pub fn insert_at(&mut self, file: File, pos: usize) -> Result<usize, isize> {
+    pub fn insert_at(&mut self, file: Arc<File>, pos: usize) -> Result<usize, isize> {
         self.alloc_fd_at(pos, file, false).map_err(|e| -(e as isize))
     }
 
-    pub fn try_insert_at(&mut self, file: File, hint: usize) -> Result<usize, isize> {
+    pub fn try_insert_at(&mut self, file: Arc<File>, hint: usize) -> Result<usize, isize> {
         self.insert_at(file, hint)
     }
 
     pub fn check(&self, fd: usize) -> Result<(), isize> {
-        self.get_file(fd).map(|_| ()).map_err(|e| -(e as isize))
+        self.fds.get(fd).and_then(|f| f.as_ref()).map(|_| ()).ok_or(-(SyscallErr::EBADF as isize))
     }
 
     pub fn get_soft_limit(&self) -> usize { self.soft_limit }
@@ -512,8 +601,8 @@ impl Drop for FdTable {
 pub struct File {
     /// 对应的 inode
     pub inode: Arc<dyn IndexNode>,
-    /// 文件偏移量（Arc 确保 clone/dup 后与源文件共享偏移量）
-    offset: Arc<AtomicUsize>,
+    /// 文件偏移量（AtomicUsize 直接内嵌，Arc<File> 共享跨 dup fd）
+    offset: AtomicUsize,
     /// 打开标志
     flags: Mutex<FileFlags>,
     /// 文件访问模式
@@ -522,11 +611,24 @@ pub struct File {
     file_type: FileType,
     /// 私有数据
     private_data: Mutex<FilePrivateData>,
+    /// 全局唯一的打开文件 id
+    open_file_id: usize,
+    /// POSIX 锁键（基于 metadata dev_id + inode_id）
+    posix_lock_key: (usize, usize),
+    /// 是否由 open 系统调用创建（vs socket/pipe 等）
+    created_by_open: bool,
+    /// 文件所有者（fcntl F_SETOWN）
+    owner: Mutex<FileOwner>,
+    /// 文件读写 hint
+    pub file_rw_hint: Mutex<u64>,
+    /// 文件 lease (fcntl F_SETLEASE / F_GETLEASE)
+    pub lease: Mutex<Option<i16>>,
 }
 
 impl fmt::Debug for File {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("File")
+            .field("open_file_id", &self.open_file_id)
             .field("offset", &self.offset.load(Ordering::Relaxed))
             .field("flags", &self.flags)
             .field("mode", &self.mode)
@@ -566,8 +668,8 @@ impl EventQueueHandle {
 }
 
 impl File {
-    /// 根据 inode 创建新 File
-    pub fn new(inode: Arc<dyn IndexNode>, flags: FileFlags) -> Result<Self, SyscallErr> {
+    /// 根据 inode 创建新 File，返回 Arc<Self>
+    pub fn new(inode: Arc<dyn IndexNode>, flags: FileFlags) -> Result<Arc<Self>, SyscallErr> {
         // 推导 mode
         let mut mode = FileMode::FMODE_LSEEK | FileMode::FMODE_PREAD | FileMode::FMODE_PWRITE;
 
@@ -597,16 +699,23 @@ impl File {
             mode |= FileMode::FMODE_STREAM;
         }
 
-        // 调用 inode 的 open
+        let posix_lock_key = (metadata.dev_id, metadata.inode_id);
+
         let private_data = FilePrivateData::default();
-        let file = File {
+        let file = Arc::new(File {
             inode,
-            offset: Arc::new(AtomicUsize::new(0)),
+            offset: AtomicUsize::new(0),
             flags: Mutex::new(flags),
             mode: Mutex::new(mode),
             file_type,
             private_data: Mutex::new(private_data),
-        };
+            open_file_id: alloc_open_file_id(),
+            posix_lock_key,
+            created_by_open: true,
+            owner: Mutex::new(FileOwner::default()),
+            file_rw_hint: Mutex::new(0),
+            lease: Mutex::new(None),
+        });
 
         file.inode.open(file.private_data.lock(), &flags)?;
         if file.tracks_write_busy() {
@@ -621,7 +730,7 @@ impl File {
         inode: Arc<dyn IndexNode>,
         flags: FileFlags,
         file_type: FileType,
-    ) -> Self {
+    ) -> Arc<Self> {
         let mut mode = FileMode::FMODE_LSEEK | FileMode::FMODE_PREAD | FileMode::FMODE_PWRITE;
         if flags.is_readable() {
             mode |= FileMode::FMODE_READ;
@@ -633,18 +742,136 @@ impl File {
             mode |= FileMode::FMODE_STREAM;
         }
 
-        let file = File {
+        let posix_lock_key = inode
+            .metadata()
+            .map(|m| (m.dev_id, m.inode_id))
+            .unwrap_or((0, 0));
+
+        let file = Arc::new(File {
             inode,
-            offset: Arc::new(AtomicUsize::new(0)),
+            offset: AtomicUsize::new(0),
             flags: Mutex::new(flags),
             mode: Mutex::new(mode),
             file_type,
             private_data: Mutex::new(FilePrivateData::default()),
-        };
+            open_file_id: alloc_open_file_id(),
+            posix_lock_key,
+            created_by_open: false,
+            owner: Mutex::new(FileOwner::default()),
+            file_rw_hint: Mutex::new(0),
+            lease: Mutex::new(None),
+        });
         if file.tracks_write_busy() {
             register_writable_inode(&file.inode);
         }
         file
+    }
+
+    /// 创建由 open 系统调用创建的 File（设置 created_by_open=true）。
+    /// 与 `File::new()` 的区别：不调用 inode.open（由调用方负责）。
+    pub fn new_created(
+        inode: Arc<dyn IndexNode>,
+        flags: FileFlags,
+        file_type: FileType,
+    ) -> Arc<Self> {
+        let mut mode = FileMode::FMODE_LSEEK | FileMode::FMODE_PREAD | FileMode::FMODE_PWRITE;
+        if flags.is_readable() {
+            mode |= FileMode::FMODE_READ;
+        }
+        if flags.is_writable() {
+            mode |= FileMode::FMODE_WRITE;
+        }
+        if matches!(file_type, FileType::Pipe | FileType::Socket) || inode.is_stream() {
+            mode |= FileMode::FMODE_STREAM;
+        }
+
+        let posix_lock_key = inode
+            .metadata()
+            .map(|m| (m.dev_id, m.inode_id))
+            .unwrap_or((0, 0));
+
+        let file = Arc::new(File {
+            inode,
+            offset: AtomicUsize::new(0),
+            flags: Mutex::new(flags),
+            mode: Mutex::new(mode),
+            file_type,
+            private_data: Mutex::new(FilePrivateData::default()),
+            open_file_id: alloc_open_file_id(),
+            posix_lock_key,
+            created_by_open: true,
+            owner: Mutex::new(FileOwner::default()),
+            file_rw_hint: Mutex::new(0),
+            lease: Mutex::new(None),
+        });
+        if file.tracks_write_busy() {
+            register_writable_inode(&file.inode);
+        }
+        file
+    }
+
+    // ── 访问器 ───────────────────────────────────────────────────────
+
+    #[inline]
+    pub fn open_file_id(&self) -> usize {
+        self.open_file_id
+    }
+
+    #[inline]
+    pub fn posix_lock_key(&self) -> (usize, usize) {
+        self.posix_lock_key
+    }
+
+    #[inline]
+    pub fn created_by_open(&self) -> bool {
+        self.created_by_open
+    }
+
+    #[inline]
+    pub fn owner_snapshot(&self) -> FileOwnerSnapshot {
+        let owner = self.owner.lock();
+        FileOwnerSnapshot {
+            target: owner.target.clone(),
+            signum: owner.signum,
+        }
+    }
+
+    #[inline]
+    pub fn set_owner_target(&self, target: FileOwnerTarget, raw_owner: i32) {
+        let mut owner = self.owner.lock();
+        owner.target = target;
+        owner.raw_owner = raw_owner;
+    }
+
+    #[inline]
+    pub fn owner_raw(&self) -> i32 {
+        self.owner.lock().raw_owner
+    }
+
+    #[inline]
+    pub fn owner_signum(&self) -> i32 {
+        self.owner.lock().signum
+    }
+
+    #[inline]
+    pub fn set_owner_signum(&self, signum: i32) {
+        self.owner.lock().signum = signum;
+    }
+
+    #[inline]
+    pub fn get_file_rw_hint(&self) -> u64 {
+        self.file_rw_hint.lock().clone()
+    }
+
+    #[inline]
+    pub fn set_file_rw_hint(&self, hint: u64) {
+        *self.file_rw_hint.lock() = hint;
+    }
+
+    /// description_id 返回全局唯一的 open_file_id
+    #[inline]
+    pub fn description_id(&self) -> usize {
+        self.open_file_id
     }
 
     // ── 读取 ───────────────────────────────────────────────────────
@@ -886,6 +1113,7 @@ impl File {
         }
         const SETFL_MASK: u32 = FileFlags::O_APPEND.bits()
             | FileFlags::O_NONBLOCK.bits()
+            | FileFlags::O_DSYNC.bits()
             | FileFlags::O_DIRECT.bits()
             | FileFlags::O_NOATIME.bits()
             | FileFlags::O_ASYNC.bits();
@@ -952,10 +1180,10 @@ impl File {
         let Some(seals) = self.memfd_seal_bits() else {
             return Ok(());
         };
-        if (seals & F_SEAL_WRITE) != 0 {
+        if (seals & super::fcntl::F_SEAL_WRITE) != 0 {
             return Err(SyscallErr::EPERM);
         }
-        if (seals & F_SEAL_GROW) != 0 {
+        if (seals & super::fcntl::F_SEAL_GROW) != 0 {
             let end = offset.checked_add(len).ok_or(SyscallErr::EFBIG)?;
             let size = self.metadata()?.size.max(0) as usize;
             if end > size {
@@ -967,35 +1195,6 @@ impl File {
 
     pub fn inode_as_any_ref(&self) -> &dyn Any {
         self.inode.as_any_ref()
-    }
-
-    // ── Clone ──────────────────────────────────────────────────────
-
-    /// 尝试克隆 File（dup 时用）
-    pub fn try_clone(&self) -> Option<Self> {
-        let inode = self.inode.clone();
-        let flags = *self.flags.lock();
-        let private_data = self.private_data.lock().clone();
-        let file = File {
-            inode,
-            offset: Arc::clone(&self.offset),
-            flags: Mutex::new(flags),
-            mode: Mutex::new(*self.mode.lock()),
-            file_type: self.file_type,
-            private_data: Mutex::new(private_data),
-        };
-        if file.tracks_write_busy() {
-            register_writable_inode(&file.inode);
-        }
-        Some(file)
-    }
-
-    pub fn description_id(&self) -> usize {
-        Arc::as_ptr(&self.offset) as usize
-    }
-
-    pub fn description_ref_count(&self) -> usize {
-        Arc::strong_count(&self.offset)
     }
 
     /// 获取 O_NONBLOCK 标志
@@ -1235,6 +1434,7 @@ impl File {
 
 impl Drop for File {
     fn drop(&mut self) {
+        crate::fs::vfs::posix_lock::release_ofd_for_file(self);
         if self.tracks_write_busy() {
             unregister_writable_inode(&self.inode);
         }

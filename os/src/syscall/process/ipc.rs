@@ -2663,12 +2663,11 @@ fn has_mq_permission(inner: &MqQueueInner, requested: u32) -> bool {
     available & requested == requested
 }
 
-fn mq_netlink_socket_from_fd(fd: usize) -> Result<File, isize> {
+fn mq_netlink_socket_from_fd(fd: usize) -> Result<Arc<File>, isize> {
     let task = current_task().ok_or(EBADF)?;
     let files = task.process.files();
     let fd_table = files.lock();
     let file = fd_table.get_file(fd).map_err(|err| -(err as isize))?;
-    let file = file.try_clone().ok_or(EBADF)?;
     let Some(socket_file) = file.inode_as_any_ref().downcast_ref::<SocketFile>() else {
         return Err(EBADF);
     };
@@ -2723,13 +2722,13 @@ fn mq_deliver_notification(notification: MqNotification) {
     }
 }
 
-fn mq_descriptor_from_fd(mqdes: usize) -> Result<(File, Arc<MqQueue>), isize> {
+fn mq_descriptor_from_fd(mqdes: usize) -> Result<(Arc<File>, Arc<MqQueue>), isize> {
     let task = current_task().ok_or(EBADF)?;
     let file = {
         let files = task.process.files();
         let fd_table = files.lock();
         let file = fd_table.get_file(mqdes).map_err(|err| -(err as isize))?;
-        file.try_clone().ok_or(EBADF)?
+        file
     };
     let queue = {
         let Some(desc) = file.inode_as_any_ref().downcast_ref::<MqDescriptor>() else {

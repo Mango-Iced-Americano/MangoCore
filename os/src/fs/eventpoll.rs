@@ -313,7 +313,7 @@ impl EventPoll {
     fn add(
         self: &Arc<Self>,
         fd: usize,
-        file: File,
+        file: Arc<File>,
         events: EPollEvent,
         data: u64,
     ) -> Result<(), SyscallErr> {
@@ -321,7 +321,6 @@ impl EventPoll {
             return Err(SyscallErr::EINVAL);
         }
 
-        let file = Arc::new(file);
         let event_queues = Self::collect_event_queues(&file);
         let item = EPollItem {
             file,
@@ -622,7 +621,7 @@ pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event: *const EpollUserE
         Ok(file) => file,
         Err(err) => return -(err as isize),
     };
-    let epoll = match eventpoll_from_file(epoll_file) {
+    let epoll = match eventpoll_from_file(&*epoll_file) {
         Some(epoll) => epoll,
         None => return -(SyscallErr::EINVAL as isize),
     };
@@ -652,7 +651,7 @@ pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event: *const EpollUserE
                 Ok(file) => file,
                 Err(err) => return -(err as isize),
             };
-            let target_epoll = eventpoll_from_file(file);
+            let target_epoll = eventpoll_from_file(&*file);
             if let Some(target_epoll) = target_epoll.as_ref() {
                 if let Err(err) = epoll.check_nested_epoll(target_epoll) {
                     return -(err as isize);
@@ -660,13 +659,9 @@ pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event: *const EpollUserE
             } else if !file.mode().contains(FileMode::FMODE_STREAM) {
                 return -(SyscallErr::EPERM as isize);
             }
-            let cloned = match file.try_clone() {
-                Some(file) => file,
-                None => return -(SyscallErr::EBADF as isize),
-            };
             let event = user_event.unwrap();
             let events = EPollEvent::from_bits_truncate(event.events as usize);
-            match epoll.add(fd, cloned, events, event.data) {
+            match epoll.add(fd, file, events, event.data) {
                 Ok(()) => SUCCESS,
                 Err(err) => -(err as isize),
             }
@@ -710,7 +705,7 @@ pub fn sys_epoll_pwait(
             Ok(file) => file,
             Err(err) => return -(err as isize),
         };
-        match eventpoll_from_file(epoll_file) {
+        match eventpoll_from_file(&*epoll_file) {
             Some(epoll) => epoll,
             None => return -(SyscallErr::EINVAL as isize),
         }

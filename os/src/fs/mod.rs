@@ -628,8 +628,8 @@ pub fn vfs_lookup_parent_for_start(
     Ok((parent_dir, leaf_name))
 }
 
-/// 使用新 VFS 创建或打开文件，返回 vfs::File
-fn create_or_open_file(path: &str) -> Result<self::vfs::File, isize> {
+/// 使用新 VFS 创建或打开文件，返回 Arc<vfs::File>
+fn create_or_open_file(path: &str) -> Result<Arc<self::vfs::File>, isize> {
     use self::vfs::{FileType, InodeMode};
     let (parent, name) = vfs_lookup_parent(path)?;
     let inode = match parent.find(&name) {

@@ -672,7 +672,7 @@ impl TaskControlBlock {
     /// !!!!!!!!!!!!!!!!WARNING!!!!!!!!!!!!!!!!!!!!!
     /// 当前仅用于initproc加载。如果在其他地方使用，必须更改bin_path。
     /// 任务创建（仅用于initproc）
-    pub fn new(elf: vfs::File) -> Arc<Self> {
+    pub fn new(elf: Arc<vfs::File>) -> Arc<Self> {
         // 将ELF文件映射到内核空间
         let elf_data = elf.map_to_kernel_space(MMAP_BASE);
         log::debug!(
@@ -768,7 +768,7 @@ impl TaskControlBlock {
             String::new(),
             Arc::new(Mutex::new(fd_table)),
             Arc::new(Mutex::new(FsStatus {
-                working_inode: Arc::new(cwd),
+                working_inode: cwd,
                 working_path: String::from("/"),
             })),
             Arc::new(Mutex::new(UtsNamespace::new())),
@@ -886,7 +886,7 @@ impl TaskControlBlock {
     /// 加载ELF文件
     pub fn load_elf(
         &self,
-        elf: vfs::File,
+        elf: Arc<vfs::File>,
         argv_vec: &Vec<String>,
         envp_vec: &Vec<String>,
     ) -> Result<(), isize> {

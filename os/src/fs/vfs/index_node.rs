@@ -321,6 +321,12 @@ pub trait IndexNode: Any + Send + Sync + Debug {
         false
     }
 
+    /// 返回此 inode 的 fasync 通知列表（用于 SIGIO）。
+    /// 仅 pipe / socket 等需要异步 I/O 通知的 inode 需要实现此方法。
+    fn fasync_items(&self) -> Option<&super::fasync::FAsyncItems> {
+        None
+    }
+
     /// 获取绝对路径
     fn absolute_path(&self) -> Result<String, SyscallErr> {
         Err(SyscallErr::ENOSYS)

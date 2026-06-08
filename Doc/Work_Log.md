@@ -2,6 +2,163 @@
 
 ---
 
+## 2026-06-08
+
+### Fix 6 LTP fcntl bugs: lock type, unlock wake, stale edges, pipe/fasync signals
+
+**涉及文件：**
+- `os/src/fs/vfs/posix_lock.rs` — **BUG 1**: `posix_lock_get()` 中冲突检测从硬编码 `LockType::Read` 改为从 `flock.l_type` 推导 `query_type`；**BUG 2**: `posix_lock_set()` 同样推导 `query_type`，用于 SETLKW 阻塞路径的 blocker 搜索；**BUG 3**: `F_UNLCK` 成功后唤醒 `entry.waitq.wake_all()`（非阻塞路径 + 阻塞路径顶部）；**BUG 4**: 阻塞循环顶部 `mgr().wait_graph.lock().remove(&waiter_id)` 清理上一轮迭代的过期边
+- `os/src/fs/dev/pipe.rs` — **BUG 5**: `read_at` 成功的 fasync 通知从 `self.fasync`（读端自己）改为 `write_end.fasync`（写端对端）；`write_at` 成功的 fasync 通知从 `self.fasync`（写端自己）改为 `read_end.fasync`（读端对端）
+- `os/src/fs/vfs/fasync.rs` — **BUG 6**: `send_sigio()` 新增 `FileOwnerTarget::Tid(tid)` 处理分支，通过 `find_task_by_tid` + `send_thread_signal` 向指定线程发送信号；新增 import `find_task_by_tid` 和 `send_thread_signal`
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：**
+- BUG 1/2 的根因：F_GETLK 和 F_SETLKW blocker 搜索都以 `Read` 类型做冲突检测，导致用户查询 `F_WRLCK` 时，父进程的 `F_RDLCK` 被错误跳过（Read vs Read = 无冲突，Write vs Read = 有冲突）
+- BUG 4 的修复确保每次循环迭代重新计算 blocker，避免 wait-graph 中累积过期边导致误报死锁
+- BUG 5: pipe 的 I/O 完成后应通知对端（读后通知写端有新空间；写后通知读端有新数据），之前错误地通知了自己端
+
+### Fix OFD lock ownership — LockOwner::Ofd + graph-safe ID tagging
+
+**涉及文件：**
+- `os/src/fs/vfs/posix_lock.rs` — `LockOwner` 新增 `Ofd{open_file_id}` 变体；`same_owner()` 新增 `Ofd` vs `Ofd` 匹配；新增 `owner_graph_id()` 对 OFD ID 打 bit-62 标签防碰撞；`posix_lock_get()` 签名从 `owner_id: usize` 改为 `owner: LockOwner`，用 `same_owner()` 做同类 owner 排除；`posix_lock_set()` 签名从 `(owner_id, owner_pid)` 改为 `owner: LockOwner`，waiter_id 改用 `owner_graph_id(owner)`，blocker 提取改用 `.map(|r| owner_graph_id(r.owner))`；新增 `release_ofd_for_file()` 在 File drop 时释放所有 OFD 锁
+- `os/src/fs/vfs/file.rs` — `Drop for File` 开头插入 `release_ofd_for_file(self)` 调用
+- `os/src/syscall/fs.rs` — import 加入 `LockOwner`；`fcntl_getlk`/`fcntl_setlk` 构造 `LockOwner::Posix`；新增 `fcntl_getlk_ofd`/`fcntl_setlk_ofd`（`Ofd` 变体，setlk 含 `l_pid == 0` 校验）；`sys_fcntl` dispatch 拆分 `GetLock` vs `OfdGetLock`、`SetLock`/`SetLockWait` vs `OfdSetLock`/`OfdSetLockWait` 四个独立 match arm；修复 2 处临时 `Arc` 生命周期 `E0716` 错误
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` — kernel cargo check ✅（user 程序因既存 loongarch64-linux-gnu-gcc linker 缺失未构建）
+
+**备注：**
+- POSIX 锁与 OFD 锁互相冲突（`same_owner` 对不同 variant 返回 `false`）
+- OFD 锁在 `File::Drop`（最后一个 `Arc<File>` 引用释放时）自动清除
+- POSIX 锁在 `FdTable::drop_fd`（fd close 时）通过 `release_posix_for_owner` 释放，保持不变
+- 死锁检测支持混合 POSIX/OFD：`owner_graph_id()` 对 OFD ID 异或 `1<<62` 避免与 POSIX `lock_owner_id` 碰撞
+
+### Phase 4: DragonOS-style fasync (SIGIO delivery) for pipes
+
+**涉及文件：**
+- `os/src/fs/vfs/fasync.rs` — **重写**：占位替换为完整实现（`FAsyncItem`, `FAsyncItems`, `send_sigio`, `set_file_fasync`）。`FAsyncItems` 用 `Mutex<Vec<FAsyncItem>>` 管理，`send_sigio` 遵循 DragonOS 模式（在释放 fasync 锁之前快照 owner 信息，仅对仍持有 `O_ASYNC` 的 fd 发送信号）。`set_file_fasync` 在 inode 不支持 fasync 时静默返回 Ok。
+- `os/src/fs/vfs/index_node.rs` — `IndexNode` trait 新增 `fasync_items()` 默认方法返回 `None`
+- `os/src/fs/dev/pipe.rs` — `Pipe` 新增 `fasync: FAsyncItems` 字段；`read_at`/`write_at` 成功路径调用 `self.fasync.send_sigio(None)`；实现 `IndexNode::fasync_items()`
+- `os/src/fs/vfs/mod.rs` — 导出 `set_file_fasync`, `FAsyncItem`, `FAsyncItems`
+- `os/src/syscall/fs.rs` — 修复 2 处既存 `E0716` 编译错误（临时 `Arc` 生命周期问题），与 fasync 功能无关
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` (kernel ✅, userspace: 既存 loongarch64-linux-gnu-gcc linker 缺失)
+
+**备注：** pipe 的 `send_sigio` 在自己的 I/O 成功路径上调用（写端写数据 → 写端 fasync 触发；读端读数据 → 读端 fasync 触发）。Socket 的 fasync 暂未接入。信号发送通过 `send_process_signal` / `ProcessManager::send_signal_to_group`；`FileOwnerTarget::None`/`Tid` 静默跳过。
+
+### Phase 1-3: fcntl 全面改进 — Arc\<File\> 迁移 + 命令完整性 + PosixLockManager
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU basic (musl+glibc) ✅
+- QEMU busybox (musl+glibc) ✅
+
+### Phase 1: FdTable 从值克隆 File 迁移到 Arc\<File\>
+
+**涉及文件 (16 files, +418/-267):**
+- `os/src/fs/vfs/fcntl.rs` — **新建**：完整 FcntlCommand 枚举 + PosixFlock + FOwnerEx + 常量
+- `os/src/fs/vfs/file.rs` — FdTable 存储 `Vec<Option<Arc<File>>>`；新增 open_file_id/posix_lock_key/created_by_open/owner/file_rw_hint/lock_owner_id；offset 从 Arc<AtomicUsize> 改为 AtomicUsize；删除 try_clone()
+- `os/src/syscall/fs.rs` — 删除旧 Fcntl_Command/Flock；全量 try_clone 移除；POSIX correct dup (Arc::clone)
+- `os/src/fs/eventpoll.rs`, `os/src/fs/poll.rs`, `os/src/fs/pidfd.rs` — &*file deref 适配
+- `os/src/syscall/process/{exec,ipc,signal,lifecycle,mm}.rs` — 返回类型/参数适配 Arc
+- `os/src/task/{process,task}.rs` — exe 字段/working_inode 类型更新
+
+### Phase 2: 命令完整性 + Flag 修正
+
+- F_GETFL 用 STATUS_MASK 直出（修复 O_DSYNC/O_SYNC/O_LARGEFILE 遗漏）
+- SETFL_MASK 加入 O_DSYNC
+- F_SETOWN/F_GETOWN/F_SETSIG/F_GETSIG/F_SETOWN_EX/F_GETOWN_EX 全部实现
+- F_SETLEASE/F_GETLEASE 基础存取、F_CREATED_QUERY、RW_HINT 命令实现
+- F_GETOWNER_UIDS/F_NOTIFY/F_CANCELLK 显式返回 ENOSYS
+- 新增 fasync.rs 占位 + lease 字段
+
+### Phase 3: DragonOS-style sharded PosixLockManager
+
+**涉及文件:**
+- `os/src/fs/vfs/posix_lock.rs` — **新建**：53 shard PosixLockManager + WaitQueue SETLKW + WaitGraph 死锁检测
+- `os/src/main.rs` — 初始化调用
+
+**涉及文件：**
+- `os/src/fs/vfs/posix_lock.rs` — **新建**。53 shard 的 PosixLockManager，键为 `(dev_id, inode_id)`。每个 shard 用 `BTreeMap<LockKey, Arc<PosixLockEntry>>` 存储。`PosixLockEntry` 含 `Mutex<EntryState>`（排好序的范围锁列表）和 `Mutex<WaitQueue>`（F_SETLKW 阻塞等待）。支持 F_SETLKW 阻塞（WaitQueue::wait_event_interruptible）+ 死锁检测（wait_graph 循环检测）。LockOwner::Posix{owner_id, owner_pid} 按 FdTable::lock_owner_id 区分 fork 后的进程。`resolve_range` 正确处理负 len（从文件尾往前移动）和溢出（EOVERFLOW）。
+- `os/src/fs/vfs/mod.rs` — 新加 `pub mod posix_lock;`
+- `os/src/syscall/fs.rs` — 删除 `FcntlLockKey`、`FcntlRecordLock`、`FCNTL_RECORD_LOCKS`、`fcntl_lock_key`、`resolve_flock_range`、`fcntl_lock_conflicts`、`fcntl_lock_ranges_touch`、`compact_fcntl_record_locks`、`validate_fcntl_lock_access`。`fcntl_getlk`/`fcntl_setlk` 替换为 thin wrapper 调用 `posix_lock_get`/`posix_lock_set`（用 `lock_owner_id` 替代 `owner_pid`）。`release_fcntl_locks_for_pid`/`release_fcntl_locks_for_pid_key` 改为空操作（释放交由 `drop_fd`）。`close_cloexec_and_release_fcntl_locks` 重写为调用 `release_posix_for_owner`。`sys_close`/`sys_close_range`/`sys_dup2`/`sys_dup3` 移除冗余的 `fcntl_lock_key` 和 `release_fcntl_locks_for_pid_key` 调用。`FlockLock.key` 类型从 `FcntlLockKey` 改为 `LockKey`（保持 flock 子系统运行）。
+- `os/src/fs/vfs/file.rs` — `FdTable::drop_fd()` 新增 `release_posix_for_owner(&file, self.lock_owner_id)` 调用，close fd 时自动释放该 owner 的所有 POSIX 锁。
+- `os/src/main.rs` — `rust_main()` 中在 `task::add_initproc()` 前调用 `init_posix_lock_manager()`。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：**
+- `posix_lock_set` 中 F_SETLKW 阻塞时使用 `WaitQueue::wait_event_interruptible`，cond 闭包重新获取 `entry.state.lock()` 检查 `apply_lock`。WaitQueue 和 EntryState 位于不同 Mutex 中避免死锁。
+- 死锁检测：每次进入阻塞前通过 wait_graph BFS 搜索；检测到环返回 EDEADLK。
+- `release_fcntl_locks_for_pid` 和 `release_fcntl_locks_for_pid_key` 当前为空操作。POSIX 锁释放依赖 `drop_fd`；dup2/dup3 中替换的 fd 的锁暂不会释放（已知限制，Phase 4 补充）。
+- flock（BSD lock）子系统完全保留不变：`FLOCK_LOCKS`、`record_flock_close`、`release_closed_flock_descriptions`、`release_flock_description` 均未改动。
+
+---
+
+### 补全 fcntl match arms：GETFL/SETFL 改进、owner/signal/lease/rw_hint 命令实现
+
+**涉及文件：**
+- `os/src/fs/vfs/file.rs` — 新增 `STATUS_MASK` 常量（O_APPEND|O_NONBLOCK|O_DSYNC|O_SYNC|O_ASYNC|O_DIRECT|O_LARGEFILE|O_NOATIME）；`SETFL_MASK` 新增 `O_DSYNC`；`File` 结构体新增 `lease: Mutex<Option<i16>>` 字段（三个构造函数均初始化 `Mutex::new(None)`）；`file_rw_hint` 字段改为 `pub`
+- `os/src/fs/vfs/fasync.rs` — **新建**。`set_file_fasync` placeholder 函数
+- `os/src/fs/vfs/mod.rs` — 新增 `pub mod fasync`；重导出 `STATUS_MASK`
+- `os/src/syscall/fs.rs` — **GETFL** 改用 mask 方式：`(bits & 0o3) | (bits & STATUS_MASK)`；**SETFL** 新增 O_ASYNC 变化检测，调用 `fasync::set_file_fasync`；新增 match arms：`SetOwn`/`GetOwn`/`SetSig`/`GetSig`（owner 信号管理）、`SetOwnEx`/`GetOwnEx`（F_SETOWN_EX/GETOWN_EX）、`SetLease`/`GetLease`（文件 lease）、`GetOwnerUids`（ENOSYS）、`Notify`（ENOSYS）、`CreatedQuery`、`CancelLock`（ENOSYS）、`GetRwHint`/`SetRwHint`/`GetFileRwHint`/`SetFileRwHint`（读写 hint）；import 新增 `find_process_by_pid, find_task_by_tid, F_UNLCK`
+- `os/src/fs/vfs/fcntl.rs` — 文件已包含所需所有常量/类型（`FOwnerEx`、`F_RDLCK`/`F_WRLCK`/`F_UNLCK`、`F_OWNER_TID`/`PID`/`PGRP` 等），无需修改
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ⚠️ 内核代码编译无错误，用户态链接失败（缺少 `loongarch64-linux-gnu-gcc` 交叉编译器，环境问题，非代码问题）
+- QEMU rv64 basic+busybox (mask=0x003) ✅ — 所有 busybox 测试通过
+
+**备注：**
+- `GetLease` 中 `MutexGuard` 临时值生命周期问题：`(*file.lease.lock()).unwrap_or(...)` 中 `MutexGuard` 在 `file` drop 前析构导致 borrow 冲突，需先绑定到局部变量
+- LA64 的 `make la64-kernel-build-only` 依赖用户态程序链接（需要 `loongarch64-linux-gnu-gcc`），当前 Docker 环境未安装；内核部分代码本身是架构无关的
+- `command =>` fallthrough arm 保持不动（按任务要求）
+
+---
+
+### File 迁移到 Arc<File> 模型 + fcntl 模块拆分
+
+**背景：** 原有 `FdTable` 存储 `Vec<Option<File>>`，`File::try_clone()` 值拷贝 flags/mode。dup'd fd 有独立状态标志 → 违反 POSIX（F_SETFL 应影响所有 dup'd fd）。迁移到 `Arc<File>` 后，dup'd fd 共享同一个 `Arc`，状态标志（O_NONBLOCK、O_APPEND）正确共享。
+
+**涉及文件：**
+- `os/src/fs/vfs/fcntl.rs` — **新建**。`FcntlCommand` 枚举（TryFromPrimitive）、`PosixFlock`、`FOwnerEx` 结构体和常量（F_SEAL_*、F_RDLCK/WRLCK/UNLCK、FD_CLOEXEC 等）
+- `os/src/fs/vfs/file.rs` — **重写**。`File` 新增字段：`open_file_id`（全局唯一 ID）、`posix_lock_key`、`created_by_open`、`owner: Mutex<FileOwner>`、`file_rw_hint`；`offset` 从 `Arc<AtomicUsize>` 改为 `AtomicUsize`；`File::new()` 返回 `Result<Arc<Self>, _>`；`File::new_without_open()` 返回 `Arc<Self>`；新增 `File::new_created()`；**删除** `File::try_clone()`；**删除** `description_ref_count()`；`description_id()` 返回 `open_file_id`；新增 `FileOwner`/`FileOwnerSnapshot`/`FileOwnerTarget` 类型；`FdTable` 存储 `Vec<Option<Arc<File>>>`，新增 `lock_owner_id`，所有方法适配 `Arc<File>`；`FdTable::try_clone()`（fork）分配新 `lock_owner_id`
+- `os/src/fs/vfs/mod.rs` — 新增 `pub mod fcntl`；从 fcntl 重导出所有类型和常量；从 file 重导出 `FileOwner`/`FileOwnerSnapshot`/`FileOwnerTarget`
+- `os/src/syscall/fs.rs` — 删除旧 `Fcntl_Command` 枚举、旧 `Flock` 结构体；移除局部 `F_RDLCK`/`F_WRLCK`/`F_UNLCK` 常量；`from_primitive` → `try_from_primitive`；`__openat` 返回 `Arc<File>`；所有 `.try_clone()` 模式移除（21 处）；`description_ref_count()` → `Arc::strong_count(&file)`；`Flock` → `PosixFlock`；`vfs::file::F_SEAL_*` → `vfs::F_SEAL_*`；`fcntl_lock_key()` 调用适配 Arc deref
+- `os/src/syscall/process/exec.rs` — `clone_fd_file`/`reopen_exec_fd`/`open_exec`/`open_exec_file`/`open_exec_with_follow`/`try_open_shell_fallback` 返回 `Arc<File>`；`exec_opened_file` 参数改为 `Arc<File>`
+- `os/src/syscall/process/ipc.rs` — `mq_descriptor_from_fd` 返回 `(Arc<File>, ...)`；`mq_netlink_socket_from_fd` 返回 `Arc<File>`；移除 `.try_clone()` 调用
+- `os/src/syscall/process/signal.rs` — 移除 `.try_clone()` 调用；`pidfd_file_target_pid` 调用适配 `&*file`
+- `os/src/syscall/process/lifecycle.rs` — `pidfd_file_target_pid` 调用适配 `&*file`
+- `os/src/syscall/process/mm.rs` — `vfs::file::F_SEAL_*` → `vfs::F_SEAL_*`
+- `os/src/task/process.rs` — `exe` 字段类型 `Arc<Mutex<vfs::File>>` → `Arc<Mutex<Arc<vfs::File>>>`；`exe()` 返回类型更新；`replace_exe` 参数改为 `Arc<File>`；`close_files_on_exit` 适配 Arc deref
+- `os/src/task/task.rs` — `TCB::new`/`load_elf` 参数改为 `Arc<File>`；移除 `working_inode` 的 `Arc::new` 双重包装
+- `os/src/fs/eventpoll.rs` — `EPollItem.add()` 参数改为 `Arc<File>`；移除 `.try_clone()`；`eventpoll_from_file` 调用适配 `&*file`
+- `os/src/fs/poll.rs` — `collect_wait_queues` 调用适配 `&*file`
+- `os/src/fs/pidfd.rs` — `new_pidfd_file`/`new_pidfd_file_with_flags` 返回 `Arc<File>`
+- `os/src/fs/mod.rs` — `create_or_open_file` 返回 `Arc<vfs::File>`
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU basic+busybox (mask=0x003) ✅ — 所有 busybox 测试通过（exit_code=0）
+
+**备注：**
+- `Arc<T>` 传递给 `&T` 参数的函数时需要显式 `&*file`（在闭包内或非直接参数位置）；直接参数位置 Rust 的 deref coercion 自动处理
+- `num_enum` 0.5 使用 `TryFromPrimitive::try_from_primitive()`，返回值需要处理 `Result`（旧版 `FromPrimitive::from_primitive()` 配合 `#[num_enum(default)]` 永不失败）
+- `FdTable::try_clone()`（fork 场景）仍然保留——这是 `FdTable` 自身的 `try_clone`，不是 `File::try_clone()`
+- `record_flock_close`/`release_flock_for_file_if_last` 签名改为接受 `&Arc<vfs::File>` 以便访问 `Arc::strong_count()`
+
+---
+
 ## 2026-06-06
 
 ### IPv6 Raw Socket 多栈注册 + ICMP6_FILTER 实现

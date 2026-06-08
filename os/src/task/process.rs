@@ -55,7 +55,7 @@ pub struct ProcessControlBlock {
 
 pub struct ProcessInner {
     /// 可执行文件描述符（新 VFS）。
-    exe: Arc<Mutex<vfs::File>>,
+    exe: Arc<Mutex<Arc<vfs::File>>>,
     /// 当前可执行文件的稳定 key，用于 open(O_TRUNC/O_WRONLY) 返回 ETXTBSY。
     exec_key: Option<InodeBusyKey>,
     /// 可执行文件路径（用于 /proc/self/exe）。
@@ -221,7 +221,7 @@ impl ProcessControlBlock {
         pgid: usize,
         sid: usize,
         parent: Option<Weak<ProcessControlBlock>>,
-        exe: Arc<Mutex<vfs::File>>,
+        exe: Arc<Mutex<Arc<vfs::File>>>,
         exe_path: String,
         files: Arc<Mutex<vfs::FdTable>>,
         fs: Arc<Mutex<FsStatus>>,
@@ -309,7 +309,7 @@ impl ProcessControlBlock {
         self._pid_handle.is_released()
     }
 
-    pub fn exe(&self) -> Arc<Mutex<vfs::File>> {
+    pub fn exe(&self) -> Arc<Mutex<Arc<vfs::File>>> {
         self.inner.lock().exe.clone()
     }
 
@@ -337,8 +337,8 @@ impl ProcessControlBlock {
         self.inner.lock().child_subreaper
     }
 
-    pub fn replace_exe(&self, exe: vfs::File) {
-        let new_key = exec_key_from_file(&exe);
+    pub fn replace_exe(&self, exe: Arc<vfs::File>) {
+        let new_key = exec_key_from_file(&*exe);
         let mut inner = self.inner.lock();
         if inner.exec_key != new_key {
             if let Some(old_key) = inner.exec_key.take() {

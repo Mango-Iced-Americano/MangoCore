@@ -307,7 +307,7 @@ fn scan_ppoll(fds: &spin::Mutex<FdTable>, poll_fds: &mut [PollFd], collect_wait:
                 if !poll_fd.revents.is_empty() {
                     ready += 1;
                 } else if collect_wait {
-                    collect_wait_queues(file, &mut wait_queues);
+                    collect_wait_queues(&*file, &mut wait_queues);
                 }
             }
             Err(_) => {
@@ -397,7 +397,7 @@ fn scan_pselect(
             fd_ready = true;
         }
         if !fd_ready && collect_wait {
-            collect_wait_queues(file, &mut wait_queues);
+            collect_wait_queues(&*file, &mut wait_queues);
         }
     }
 

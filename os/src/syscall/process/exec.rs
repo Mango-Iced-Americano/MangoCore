@@ -31,7 +31,7 @@ fn try_open_shell_fallback(
     cwd_inode: &Arc<dyn vfs::IndexNode>,
     argv_vec: &mut Vec<String>,
     script_path: &str,
-) -> Result<vfs::File, isize> {
+) -> Result<Arc<vfs::File>, isize> {
     for shell in &["/bin/sh", "/bin/bash"] {
         let file = match open_exec(cwd_inode, shell) {
             Ok(f) if is_valid_elf(&f) => f,
@@ -123,7 +123,7 @@ fn open_exec_file(
     cwd_inode: &Arc<dyn vfs::IndexNode>,
     path: &str,
     follow_final: bool,
-) -> Result<vfs::File, isize> {
+) -> Result<Arc<vfs::File>, isize> {
     validate_exec_path_len(path)?;
     let inode = vfs_lookup(cwd_inode, path, follow_final)?;
     if !follow_final
@@ -140,7 +140,7 @@ fn is_compat_shell_path(path: &str) -> bool {
     path == "/bin/sh" || path == "/bin/bash"
 }
 
-fn open_exec(cwd_inode: &Arc<dyn vfs::IndexNode>, path: &str) -> Result<vfs::File, isize> {
+fn open_exec(cwd_inode: &Arc<dyn vfs::IndexNode>, path: &str) -> Result<Arc<vfs::File>, isize> {
     open_exec_with_follow(cwd_inode, path, true)
 }
 
@@ -148,7 +148,7 @@ fn open_exec_with_follow(
     cwd_inode: &Arc<dyn vfs::IndexNode>,
     path: &str,
     follow_final: bool,
-) -> Result<vfs::File, isize> {
+) -> Result<Arc<vfs::File>, isize> {
     match open_exec_file(cwd_inode, path, follow_final) {
         Ok(file) => Ok(file),
         Err(errno) if follow_final && is_compat_shell_path(path) => {
@@ -288,7 +288,7 @@ fn exec_opened_file(
     cwd_inode: &Arc<dyn vfs::IndexNode>,
     path: &str,
     abs_path: String,
-    file: vfs::File,
+    file: Arc<vfs::File>,
     mut argv_vec: Vec<String>,
     envp_vec: Vec<String>,
 ) -> isize {
@@ -364,15 +364,15 @@ fn exec_opened_file(
     SUCCESS
 }
 
-fn clone_fd_file(fd: usize) -> Result<vfs::File, isize> {
+fn clone_fd_file(fd: usize) -> Result<Arc<vfs::File>, isize> {
     let task = current_task().unwrap();
     let files_ref = task.process.files();
     let fd_table = files_ref.lock();
     let file = fd_table.get_file(fd).map_err(|e| -(e as isize))?;
-    file.try_clone().ok_or(EBADF)
+    Ok(file)
 }
 
-fn reopen_exec_fd(file: &vfs::File) -> Result<vfs::File, isize> {
+fn reopen_exec_fd(file: &vfs::File) -> Result<Arc<vfs::File>, isize> {
     let exec_file =
         vfs::File::new(file.inode.clone(), vfs::FileFlags::O_RDONLY).map_err(|e| -(e as isize))?;
     check_exec_metadata(&exec_file)?;

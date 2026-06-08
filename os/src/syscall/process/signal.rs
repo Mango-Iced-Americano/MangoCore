@@ -82,7 +82,7 @@ fn pidfd_target_pid(pidfd: usize) -> Result<usize, isize> {
     let files_ref = task.process.files();
     let fd_table = files_ref.lock();
     let file = fd_table.get_file(pidfd).map_err(|err| -(err as isize))?;
-    pidfd_file_target_pid(file)
+    pidfd_file_target_pid(&*file)
 }
 
 const SFD_NONBLOCK: usize = FileFlags::O_NONBLOCK.bits() as usize;
@@ -431,10 +431,7 @@ pub fn sys_pidfd_getfd(pidfd: usize, targetfd: usize, flags: usize) -> isize {
             Ok(file) => file,
             Err(err) => return -(err as isize),
         };
-        match file.try_clone() {
-            Some(file) => file,
-            None => return ENOMEM,
-        }
+        file
     };
 
     let task = current_task().unwrap();

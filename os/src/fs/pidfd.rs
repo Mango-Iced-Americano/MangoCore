@@ -77,11 +77,11 @@ impl IndexNode for PidFd {
 pub fn new_pidfd_file_with_flags(
     target: &Arc<ProcessControlBlock>,
     flags: FileFlags,
-) -> Result<File, SyscallErr> {
+) -> Result<Arc<File>, SyscallErr> {
     let inode = Arc::new(PidFd::new(target)) as Arc<dyn IndexNode>;
     File::new(inode, flags)
 }
 
-pub fn new_pidfd_file(target: &Arc<ProcessControlBlock>) -> Result<File, SyscallErr> {
+pub fn new_pidfd_file(target: &Arc<ProcessControlBlock>) -> Result<Arc<File>, SyscallErr> {
     new_pidfd_file_with_flags(target, FileFlags::O_RDWR)
 }

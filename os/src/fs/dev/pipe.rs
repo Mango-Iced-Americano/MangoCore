@@ -25,6 +25,7 @@ pub struct Pipe {
     buffer: Arc<Mutex<PipeRingBuffer>>,
     read_wait: EventWaitQueue,
     write_wait: EventWaitQueue,
+    fasync: crate::fs::vfs::fasync::FAsyncItems,
 }
 
 impl core::fmt::Debug for Pipe {
@@ -71,6 +72,7 @@ impl IndexNode for Pipe {
                 write_end
                     .write_wait
                     .notify_events_at_most(EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM, 1);
+                write_end.fasync.send_sigio(None);
             }
         }
         result
@@ -113,6 +115,7 @@ impl IndexNode for Pipe {
                 read_end
                     .read_wait
                     .notify_events_at_most(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM, 1);
+                read_end.fasync.send_sigio(None);
             }
         }
         result
@@ -198,6 +201,10 @@ impl IndexNode for Pipe {
         Some(&self.write_wait)
     }
 
+    fn fasync_items(&self) -> Option<&crate::fs::vfs::fasync::FAsyncItems> {
+        Some(&self.fasync)
+    }
+
     fn fs(&self) -> Arc<dyn NewFileSystem> {
         DEV_FS.clone()
     }
@@ -258,6 +265,7 @@ impl Pipe {
             buffer,
             read_wait: EventWaitQueue::new(),
             write_wait: EventWaitQueue::new(),
+            fasync: crate::fs::vfs::fasync::FAsyncItems::new(),
         }
     }
     pub fn write_end_with_buffer(buffer: Arc<Mutex<PipeRingBuffer>>) -> Self {
@@ -267,6 +275,7 @@ impl Pipe {
             buffer,
             read_wait: EventWaitQueue::new(),
             write_wait: EventWaitQueue::new(),
+            fasync: crate::fs::vfs::fasync::FAsyncItems::new(),
         }
     }
 }

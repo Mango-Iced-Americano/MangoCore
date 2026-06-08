@@ -107,7 +107,7 @@ pub fn sys_waitid(
             Ok(file) => file,
             Err(err) => return -(err as isize),
         };
-        let target_pid = match super::signal::pidfd_file_target_pid(file) {
+        let target_pid = match super::signal::pidfd_file_target_pid(&*file) {
             Ok(pid) => pid,
             Err(errno) => return errno,
         };

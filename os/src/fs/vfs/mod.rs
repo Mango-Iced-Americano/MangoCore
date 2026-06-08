@@ -25,6 +25,9 @@
 
 pub mod dentry_cache;
 pub mod event;
+pub mod fasync;
+pub mod fcntl;
+pub mod posix_lock;
 pub mod file;
 pub mod file_system;
 pub mod index_node;
@@ -36,7 +39,9 @@ use alloc::{string::String, sync::Arc, vec::Vec};
 use core::any::Any;
 use core::fmt::Debug;
 
-pub use file::{EventQueueHandle, FdTable, File, FileFlags, FileMode, PollWaitQueue, SeekFrom};
+pub use file::{EventQueueHandle, FdTable, File, FileFlags, FileMode, FileOwner, FileOwnerSnapshot, FileOwnerTarget, PollWaitQueue, SeekFrom, STATUS_MASK};
+pub use fasync::{set_file_fasync, FAsyncItem, FAsyncItems};
+pub use fcntl::{FcntlCommand, PosixFlock, FOwnerEx, F_RDLCK, F_WRLCK, F_UNLCK, FD_CLOEXEC, F_SEAL_SEAL, F_SEAL_SHRINK, F_SEAL_GROW, F_SEAL_WRITE, F_SEAL_FUTURE_WRITE, F_OWNER_TID, F_OWNER_PID, F_OWNER_PGRP};
 pub use file_system::{FileSystem, FsInfo, SuperBlock};
 pub use index_node::IndexNode;
 pub use mount::{MountFS, MountFSInode, MountFlags, MountList, MountPath};

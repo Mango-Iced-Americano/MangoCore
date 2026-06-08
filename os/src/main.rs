@@ -142,6 +142,7 @@ pub fn rust_main() -> ! {
     #[cfg(feature = "initramfs")]
     {
         // 在 mm::init() 之后创建 VFS_ROOT: 创建 RamFS + 解包 cpio + 挂载 devfs/proc/tmp
+        crate::fs::vfs::posix_lock::init_posix_lock_manager();
         fs::initramfs_init();
 
         drivers::init_net_device();
@@ -170,6 +171,7 @@ pub fn rust_main() -> ! {
         fs::mount_tools_disk();
     }
 
+    crate::fs::vfs::posix_lock::init_posix_lock_manager();
     task::add_initproc();
     // note that in run_tasks(), there is yet *another* pre_start_init(),
     // which is used to turn on interrupts in some archs like LoongArch.

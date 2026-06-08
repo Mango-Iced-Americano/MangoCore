@@ -153,7 +153,7 @@ pub fn sys_mmap(
         }
         let seals = file.memfd_seal_bits().unwrap_or(0);
         let sealed_against_write = (seals
-            & (vfs::file::F_SEAL_WRITE | vfs::file::F_SEAL_FUTURE_WRITE))
+            & (vfs::F_SEAL_WRITE | vfs::F_SEAL_FUTURE_WRITE))
             != 0;
         if flags.contains(MapFlags::MAP_SHARED) && sealed_against_write {
             write_sealed = true;
