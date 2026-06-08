@@ -115,40 +115,22 @@ jobs:
       - name: Run QEMU (both arches in parallel)
         timeout-minutes: 35
         run: |
-          echo "Starting rv64 QEMU..."
+          echo "Starting rv64 QEMU via make..."
           docker run --rm --privileged --network host \
             -v "${GITHUB_WORKSPACE}:/app" \
-            -w /app \
+            -w /app/os \
             "$CI_IMAGE" \
-            bash -lc '
-              qemu-system-riscv64 \
-                -machine virt -kernel kernel-rv -m 1024 -nographic -smp 1 \
-                -bios default \
-                -drive file=sdcard-rv.img,if=none,format=raw,id=x0 \
-                -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-                -drive file=disk.img,if=none,format=raw,id=x1 \
-                -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
-                -no-reboot -rtc base=utc \
-                -device virtio-net-device,netdev=net -netdev user,id=net
-            ' > testresult/output-rv.txt 2>&1 &
+            bash -lc 'make -f make/rv64.mk comp MODE=release' \
+            > testresult/output-rv.txt 2>&1 &
           RV_PID=$!
 
-          echo "Starting la64 QEMU..."
+          echo "Starting la64 QEMU via make..."
           docker run --rm --privileged --network host \
             -v "${GITHUB_WORKSPACE}:/app" \
-            -w /app \
+            -w /app/os \
             "$CI_IMAGE" \
-            bash -lc '
-              qemu-system-loongarch64 \
-                -kernel kernel-la -m 1G -nographic -smp 1 \
-                -drive file=sdcard-la.img,if=none,format=raw,id=x0 \
-                -device virtio-blk-pci,drive=x0 \
-                -drive file=disk-la.img,if=none,format=raw,id=x1 \
-                -device virtio-blk-pci,drive=x1 \
-                -no-reboot \
-                -device virtio-net-pci,netdev=net0 -netdev user,id=net0 \
-                -rtc base=utc
-            ' > testresult/output-la.txt 2>&1 &
+            bash -lc 'make -f make/la64.mk comp MODE=release' \
+            > testresult/output-la.txt 2>&1 &
           LA_PID=$!
 
           echo "Waiting for rv64 (PID $RV_PID) and la64 (PID $LA_PID)..."
