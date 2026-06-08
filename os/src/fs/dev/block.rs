@@ -1,3 +1,4 @@
+use alloc::string::String;
 use alloc::sync::Arc;
 use core::fmt;
 use spin::{Mutex, MutexGuard};
@@ -13,19 +14,27 @@ use crate::utils::error::SyscallErr;
 
 const VIRTIO_BLK_MAJOR: u64 = 254;
 
+const BLKGETSIZE64: u32 = 0x8008_1272;
+const BLKSSZGET: u32 = 0x1268;
+const DEV_LOGICAL_SECTOR_SIZE: i32 = 512;
+
 pub struct BlockDevInode {
     inner: Arc<dyn BlockDevice>,
     raw_dev: u64,
-    pub label: &'static str,
+    pub label: String,
 }
 
 impl BlockDevInode {
-    pub fn new(inner: Arc<dyn BlockDevice>, minor: u64, label: &'static str) -> Arc<Self> {
+    pub fn new(inner: Arc<dyn BlockDevice>, minor: u64, label: String) -> Arc<Self> {
         Arc::new(Self {
             inner,
             raw_dev: crate::fs::dev::mkdev(VIRTIO_BLK_MAJOR, minor),
             label,
         })
+    }
+
+    fn size_usize(&self) -> Option<usize> {
+        self.inner.size_bytes().map(|b| b as usize)
     }
 }
 
@@ -67,19 +76,46 @@ impl IndexNode for BlockDevInode {
         buf: &mut [u8],
         _data: MutexGuard<FilePrivateData>,
     ) -> Result<usize, SyscallErr> {
-        if offset % BLOCK_SZ != 0 || len % BLOCK_SZ != 0 {
-            return Err(SyscallErr::EINVAL);
+        let total = core::cmp::min(len, buf.len());
+        if total == 0 {
+            return Ok(0);
         }
-        let start_block = offset / BLOCK_SZ;
-        let end_block = (offset + len + BLOCK_SZ - 1) / BLOCK_SZ;
-        let mut temp = alloc::vec![0u8; (end_block - start_block) * BLOCK_SZ];
-        for (i, chunk) in temp.chunks_mut(BLOCK_SZ).enumerate() {
-            self.inner.read_block(start_block + i, chunk);
+
+        if let Some(dev_size) = self.size_usize() {
+            if offset >= dev_size {
+                return Ok(0);
+            }
         }
-        let rel = offset % BLOCK_SZ;
-        let copy = core::cmp::min(len, temp.len().saturating_sub(rel));
-        buf[..copy].copy_from_slice(&temp[rel..rel + copy]);
-        Ok(copy)
+
+        let mut bounce = alloc::vec![0u8; BLOCK_SZ];
+        let mut done = 0;
+
+        while done < total {
+            let pos = offset + done;
+            let block_id = pos / BLOCK_SZ;
+            let in_block = pos % BLOCK_SZ;
+            let n = (BLOCK_SZ - in_block).min(total - done);
+
+            if let Some(dev_size) = self.size_usize() {
+                if pos >= dev_size {
+                    break;
+                }
+                let n = n.min(dev_size - pos);
+                if n == 0 {
+                    break;
+                }
+                self.inner.read_block(block_id, &mut bounce);
+                buf[done..done + n].copy_from_slice(&bounce[in_block..in_block + n]);
+                done += n;
+                break;
+            }
+
+            self.inner.read_block(block_id, &mut bounce);
+            buf[done..done + n].copy_from_slice(&bounce[in_block..in_block + n]);
+            done += n;
+        }
+
+        Ok(done)
     }
 
     fn write_at(
@@ -89,32 +125,77 @@ impl IndexNode for BlockDevInode {
         buf: &[u8],
         _data: MutexGuard<FilePrivateData>,
     ) -> Result<usize, SyscallErr> {
-        if offset % BLOCK_SZ != 0 || len % BLOCK_SZ != 0 {
-            return Err(SyscallErr::EINVAL);
+        let total = core::cmp::min(len, buf.len());
+        if total == 0 {
+            return Ok(0);
         }
-        let start_block = offset / BLOCK_SZ;
-        let end_block = (offset + len + BLOCK_SZ - 1) / BLOCK_SZ;
-        let block_bytes = (end_block - start_block) * BLOCK_SZ;
-        let mut temp = alloc::vec![0u8; block_bytes];
-        for (i, chunk) in temp.chunks_mut(BLOCK_SZ).enumerate() {
-            self.inner.read_block(start_block + i, chunk);
+
+        if let Some(dev_size) = self.size_usize() {
+            if offset >= dev_size {
+                return Err(SyscallErr::ENOSPC);
+            }
+            if total > dev_size - offset {
+                return Err(SyscallErr::ENOSPC);
+            }
         }
-        let rel = offset % BLOCK_SZ;
-        let copy = core::cmp::min(len, temp.len().saturating_sub(rel));
-        temp[rel..rel + copy].copy_from_slice(&buf[..copy]);
-        for (i, chunk) in temp.chunks(BLOCK_SZ).enumerate() {
-            self.inner.write_block(start_block + i, chunk);
+
+        let mut bounce = alloc::vec![0u8; BLOCK_SZ];
+        let mut done = 0;
+
+        while done < total {
+            let pos = offset + done;
+            let block_id = pos / BLOCK_SZ;
+            let in_block = pos % BLOCK_SZ;
+            let n = (BLOCK_SZ - in_block).min(total - done);
+
+            if in_block == 0 && n == BLOCK_SZ {
+                self.inner.write_block(block_id, &buf[done..done + n]);
+            } else {
+                self.inner.read_block(block_id, &mut bounce);
+                bounce[in_block..in_block + n].copy_from_slice(&buf[done..done + n]);
+                self.inner.write_block(block_id, &bounce);
+            }
+
+            done += n;
         }
-        Ok(copy)
+
+        Ok(done)
     }
 
     fn ioctl(
         &self,
-        _cmd: u32,
-        _data: usize,
+        cmd: u32,
+        data: usize,
         _private_data: MutexGuard<FilePrivateData>,
     ) -> Result<usize, SyscallErr> {
-        Err(SyscallErr::ENOTTY)
+        match cmd {
+            BLKGETSIZE64 => {
+                let size = self.inner.size_bytes().ok_or(SyscallErr::ENOTTY)?;
+                let token = crate::task::current_task()
+                    .ok_or(SyscallErr::ENOTTY)?
+                    .get_user_token();
+                match crate::mm::translated_refmut(token, data as *mut u64) {
+                    Ok(r) => {
+                        *r = size;
+                        Ok(0)
+                    }
+                    Err(_) => Err(SyscallErr::EFAULT),
+                }
+            }
+            BLKSSZGET => {
+                let token = crate::task::current_task()
+                    .ok_or(SyscallErr::ENOTTY)?
+                    .get_user_token();
+                match crate::mm::translated_refmut(token, data as *mut i32) {
+                    Ok(r) => {
+                        *r = DEV_LOGICAL_SECTOR_SIZE;
+                        Ok(0)
+                    }
+                    Err(_) => Err(SyscallErr::EFAULT),
+                }
+            }
+            _ => Err(SyscallErr::ENOTTY),
+        }
     }
 
     fn fs(&self) -> Arc<dyn FileSystem> {

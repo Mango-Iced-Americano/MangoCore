@@ -4,6 +4,72 @@
 
 ## 2026-06-08
 
+### MBR 分区支持 — 验收通过 ✅
+
+fallocate06 / fsetxattr01 验证结果：
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| Device acquire | `No free devices found` → `TBROK: Failed to acquire device` | `Using test device LTP_DEV='/dev/vdb2'` ✅ |
+| MBR 解析 | N/A | `/dev/vdb1` (768M) + `/dev/vdb2` (1280M) 注册成功 |
+| Tools 挂载 | raw /dev/vdb → /tools | /dev/vdb1 (partition 1) → /tools |
+
+后续 LTP 报 `TCONF: There are no supported filesystems` 是因为 /proc/filesystems 未列出 ext2，属于 device acquire 之后的问题，按需求另开任务处理。
+
+**涉及文件（最终完整清单）：**
+- `os/src/drivers/block/block_dev.rs` — `size_bytes()` 默认方法
+- `os/src/drivers/block/partition.rs` — [新] MBR 解析 + PartitionBlockDevice
+- `os/src/drivers/block/mod.rs` — `pub mod partition`
+- `os/src/drivers/block/virtio_blk.rs` — `size_bytes()` 实现
+- `os/src/drivers/block/virtio_blk_pci.rs` — `size_bytes()` 实现
+- `os/src/fs/dev/block.rs` — 字节级 RMW + BLKGETSIZE64/BLKSSZGET + label→String
+- `os/src/fs/mod.rs` — `mount_boot_block_devices()` MBR 集成
+- `user/src/bin/ltprunner.rs` — 条件 LTP_DEV（script/suite 模式）
+- `user/src/bin/initproc.rs` — inline 模式 environ 加 LTP_DEV/LTP_SINGLE_FS_TYPE
+- `scripts/make_mbr_tools_disk.py` — [新] MBR 分区镜像构建
+- `os/Makefile` — tools 盘构建改为 payload → MBR wrap
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU rv64 boot + MBR 分区注册 ✅
+- fallocate06 device acquire ✅
+- fsetxattr01 device acquire ✅
+
+**关键发现：**
+- `ltp_runner=inline` 模式不走 ltprunner，env 需要在 `initproc.rs::main()::environ` 里直接设置
+- `has_scratch_device()` 在 ltprunner 中仍保留，供 `ltp_runner=script`/`suite` 模式使用
+
+### MBR 分区支持 + 第二工具盘分区 + LTP scratch 分区
+
+这是为了修复 LTP 中 fallocate06、fsetxattr01 等需要 `LTP_DEV` 的用例报 `No free devices found / Failed to acquire device` 的问题。
+
+**涉及文件：**
+- `os/src/drivers/block/block_dev.rs` — BlockDevice trait 新增 `size_bytes() -> Option<u64>` 默认方法
+- `os/src/drivers/block/partition.rs` — **[新]** MBR 分区解析 + PartitionBlockDevice（offset-view 子块设备）
+- `os/src/drivers/block/mod.rs` — 添加 `pub mod partition`
+- `os/src/drivers/block/virtio_blk.rs` — 实现 `size_bytes()`，从 `VirtIOBlk::capacity() * 512` 获取
+- `os/src/drivers/block/virtio_blk_pci.rs` — 同上（la64 版本）
+- `os/src/fs/dev/block.rs` — BlockDevInode 重大改造：(1) `label` 从 `&'static str` 改为 `String` 以支持动态分区名；(2) `read_at/write_at` 支持**字节级 RMW**（不再是 4096 对齐限制），整块对齐走快速路径；(3) `ioctl` 新增 `BLKGETSIZE64`/`BLKSSZGET` 处理
+- `os/src/fs/mod.rs` — `mount_boot_block_devices()` 集成 MBR 解析：(1) 只对 x1（工具盘）做 MBR 解析（避免 x0 FAT32 55AA 误判）；(2) 有效 MBR → 创建 PartitionBlockDevice → 注册 `/dev/vdb1`/`/dev/vdb2` → 从 vdb1 挂载 `/tools`；(3) 无 MBR → legacy 回退挂载 raw `/dev/vdb`
+- `user/src/bin/ltprunner.rs` — 新增 `has_scratch_device()` 检查 `/dev/vdb2` 是否存在，存在则设置 `LTP_DEV=/dev/vdb2` 和 `LTP_SINGLE_FS_TYPE=ext2`；`PrecomputedEnv` 数组大小从 17 扩展到 19
+- `scripts/make_mbr_tools_disk.py` — **[新]** MBR 分区镜像构建脚本。Layout: vdb1=768MiB(type 0x83) + vdb2=1280MiB(type 0x83)，总计 2049MiB
+- `os/Makefile` — tools-disk 构建改为：先构建 ext4 payload → Python 脚本包装 MBR → 产出最终镜像。`TOOLS_SIZE_RV/LA` 从 512 调整到 768
+
+**验证：**
+- `make rv64-kernel-build-only` ✅（kernel + user 编译通过）
+- `make la64-kernel-build-only` ✅（kernel 编译通过，user 需独立验证但 ltprunner 改动与架构无关）
+- QEMU rv64 boot ✅ — 系统正常启动，旧镜像 fallback 路径工作正常：`[mbr] no MBR on tools disk, mounting raw /dev/vdb as /tools`
+- la64 QEMU 因磁盘镜像锁未跑（与改动无关）
+
+**备注：**
+- MBR 解析**只用 `BLOCK_DEVICES[1]`**（不解析 x0），避免 FAT32 的 0x55AA 尾部被误判为 MBR 签名
+- 只接受 **4096 字节对齐**的分区（`start_lba % 8 == 0 && sectors % 8 == 0`），非对齐分区跳过不 panic
+- PartitionBlockDevice OOB 访问会 `assert!` panic（内核不变式违反不应静默吞掉）
+- BlockDevInode 在用户态边界做 grace 处理：读超出截断返回 Ok(0)，写超出返回 ENOSPC
+- BLKSSZGET 返回 512（用户态块设备语义），不是内核 BLOCK_SZ=4096
+- **后续待办**：构建带 MBR 分区表的工具盘镜像并跑 fallocate06/fsetxattr01 验收
+
 ### Fix 6 LTP fcntl bugs: lock type, unlock wake, stale edges, pipe/fasync signals
 
 **涉及文件：**

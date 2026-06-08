@@ -45,6 +45,12 @@ impl BlockDevice for VirtIOBlock {
                 .expect("Error when writing VirtIOBlk");
         }
     }
+
+    fn size_bytes(&self) -> Option<u64> {
+        let sectors = self.0.lock().capacity();
+        let bytes = sectors.saturating_mul(512);
+        Some(bytes / BLOCK_SZ as u64 * BLOCK_SZ as u64)
+    }
 }
 
 impl VirtIOBlock {

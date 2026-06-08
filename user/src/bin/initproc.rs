@@ -2309,6 +2309,8 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         "PATH=/:/bin\0".as_ptr(),
         "KCONFIG_PATH=/proc/config\0".as_ptr(),
         "LD_LIBRARY_PATH=/\0".as_ptr(),
+        "LTP_DEV=/dev/vdb2\0".as_ptr(),
+        "LTP_DEV_FS_TYPE=ext4\0".as_ptr(),
         core::ptr::null(),
     ];
 

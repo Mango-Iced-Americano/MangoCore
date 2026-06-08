@@ -24,6 +24,12 @@ pub trait BlockDevice: Send + Sync + Any {
     /// 当buf大小不为BLOCK_SZ的整数倍的时候，该函数会崩溃
     fn write_block(&self, block_id: usize, buf: &[u8]);
 
+    /// 返回块设备的可用字节大小。
+    /// 默认返回 None（未知大小）。有能力报告大小的驱动应 override。
+    fn size_bytes(&self) -> Option<u64> {
+        None
+    }
+
     /// # 注意
     /// 需要为K210重新编写API,因为其支持原生的multi-block清除
     fn clear_block(&self, block_id: usize, num: u8) {
