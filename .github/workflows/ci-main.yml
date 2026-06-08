@@ -90,6 +90,7 @@ jobs:
           mkdir -p ci-artifacts
           cp -f os_test.conf ci-artifacts/ 2>/dev/null || true
           cp -f kernel-rv kernel-la ci-artifacts/ 2>/dev/null || true
+          cp -f disk.img disk-la.img ci-artifacts/ 2>/dev/null || true
           cp -f testresult/full-test.log ci-artifacts/ 2>/dev/null || true
           cp -f testresult/output-rv.txt ci-artifacts/ 2>/dev/null || true
           cp -f testresult/output-la.txt ci-artifacts/ 2>/dev/null || true

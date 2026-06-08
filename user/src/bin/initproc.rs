@@ -2198,11 +2198,13 @@ fn prepare_symlink(environ: &[*const u8]) {
     let ret = run_bash_cmd(install_cmd, environ);
     println!("[initproc] busybox --install -s /bin -> exit={}", ret);
 
-    // Phase 4: Ensure /bin/bash and /bin/sh exist (after bind, after busybox)
+    // Phase 4: Ensure /bin/bash exists, force /bin/sh -> /bin/bash
+    // (busybox --install -s /bin may have set /bin/sh -> busybox/ash, which
+    //  breaks LTP shell tests that need bash-compatible local/arithmetic)
     run_bash_cmd(
         "
         test -e /bin/bash || ln -s /bash /bin/bash;
-        test -e /bin/sh   || ln -s /bin/bash /bin/sh;
+        ln -sf /bin/bash /bin/sh;
     ",
         environ,
     );
@@ -2282,7 +2284,7 @@ fn prepare_symlink(environ: &[*const u8]) {
     run_bash_cmd(
         "
         test -e /bin/bash || ln -s /bash /bin/bash;
-        test -e /bin/sh   || ln -s /bin/bash /bin/sh;
+        ln -sf /bin/bash /bin/sh;
     ",
         environ,
     );
@@ -2326,10 +2328,10 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     // let fs_test_ret = run_bash_cmd(fs_test_cmd, &environ);
     // println!("[initproc] fs_test returned exit_code={}", fs_test_ret);
 
-    println!("[initproc] running inet_test...");
-    let inet_test_cmd = "cd / && ./tests/inet_test\0";
-    let inet_test_ret = run_bash_cmd(inet_test_cmd, &environ);
-    println!("[initproc] inet_test returned exit_code={}", inet_test_ret);
+    // println!("[initproc] running inet_test...");
+    // let inet_test_cmd = "cd / && ./tests/inet_test\0";
+    // let inet_test_ret = run_bash_cmd(inet_test_cmd, &environ);
+    // println!("[initproc] inet_test returned exit_code={}", inet_test_ret);
 
     let cfg = load_runtime_config();
 

@@ -126,6 +126,8 @@ jobs:
                 -bios default \
                 -drive file=sdcard-rv.img,if=none,format=raw,id=x0 \
                 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+                -drive file=disk.img,if=none,format=raw,id=x1 \
+                -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
                 -no-reboot -rtc base=utc \
                 -device virtio-net-device,netdev=net -netdev user,id=net
             ' > testresult/output-rv.txt 2>&1 &
@@ -141,6 +143,8 @@ jobs:
                 -kernel kernel-la -m 1G -nographic -smp 1 \
                 -drive file=sdcard-la.img,if=none,format=raw,id=x0 \
                 -device virtio-blk-pci,drive=x0 \
+                -drive file=disk-la.img,if=none,format=raw,id=x1 \
+                -device virtio-blk-pci,drive=x1 \
                 -no-reboot \
                 -device virtio-net-pci,netdev=net0 -netdev user,id=net0 \
                 -rtc base=utc
@@ -162,6 +166,7 @@ jobs:
           mkdir -p ci-artifacts
           cp -f os_test_develop.conf ci-artifacts/ 2>/dev/null || true
           cp -f kernel-rv kernel-la ci-artifacts/ 2>/dev/null || true
+          cp -f disk.img disk-la.img ci-artifacts/ 2>/dev/null || true
           cp -f testresult/output-rv.txt ci-artifacts/ 2>/dev/null || true
           cp -f testresult/output-la.txt ci-artifacts/ 2>/dev/null || true
           cp -f testresult/ci-summary.md ci-artifacts/ 2>/dev/null || true
