@@ -96,14 +96,21 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     println!("[init] /dev /proc /tmp mounted by kernel, setting up bind mounts...");
 
     // 内核已将 x0→/sdcard, x1→/tools 挂载好，直接 bind
+    // mkdir 保底：确保 target 目录存在（initramfs cpio 可能不含这些目录）
+    let _ = sys_mkdirat(AT_FDCWD, "/bin\0", 0o755);
     try_bind("/tools/bin", "/bin");
+    let _ = sys_mkdirat(AT_FDCWD, "/sbin\0", 0o755);
     try_bind("/tools/sbin", "/sbin");
+    let _ = sys_mkdirat(AT_FDCWD, "/lib\0", 0o755);
     try_bind("/tools/lib", "/lib");
+    let _ = sys_mkdirat(AT_FDCWD, "/usr\0", 0o755);
     try_bind("/tools/usr", "/usr");
     let _ = sys_mkdirat(AT_FDCWD, "/tests\0", 0o755);
     try_bind("/tools/tests", "/tests");
     // 不 bind /tools/etc — initramfs 已有完整 /etc，bind 会覆盖
+    let _ = sys_mkdirat(AT_FDCWD, "/musl\0", 0o755);
     try_bind("/sdcard/musl", "/musl");
+    let _ = sys_mkdirat(AT_FDCWD, "/glibc\0", 0o755);
     try_bind("/sdcard/glibc", "/glibc");
 
     // /lib 已 bind 到 /tools/lib (ext4)，创建 apk db 目录使其持久化
