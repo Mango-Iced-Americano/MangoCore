@@ -49,12 +49,13 @@ impl fmt::Debug for BlockDevInode {
 impl IndexNode for BlockDevInode {
     fn metadata(&self) -> Result<Metadata, SyscallErr> {
         let now = TimeSpec::new();
+        let dev_size = self.inner.size_bytes().unwrap_or(0);
         Ok(Metadata {
             dev_id: 0,
             inode_id: crate::fs::vfs::generate_inode_id(),
-            size: 0,
+            size: dev_size as i64,
             blk_size: BLOCK_SZ,
-            blocks: 0,
+            blocks: (dev_size as usize) / BLOCK_SZ,
             atime: now,
             mtime: now,
             ctime: now,
@@ -200,6 +201,10 @@ impl IndexNode for BlockDevInode {
 
     fn fs(&self) -> Arc<dyn FileSystem> {
         crate::fs::dev::DEV_FS.clone()
+    }
+
+    fn resize(&self, _len: usize) -> Result<(), SyscallErr> {
+        Ok(())
     }
 
     fn as_any_ref(&self) -> &dyn core::any::Any {

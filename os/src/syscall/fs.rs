@@ -3712,7 +3712,14 @@ pub fn sys_mount(
                 .expect("procfs: failed to register root entries");
             p
         }
-        _ => return -(SyscallErr::ENODEV as isize),
+        _ => {
+            match filesystemtype.as_str() {
+                "ext2" | "ext3" | "ext4" | "vfat" | "fat32" | "exfat" | "btrfs" | "xfs" | "ntfs" => {
+                    return -(SyscallErr::EINVAL as isize)
+                }
+                _ => return -(SyscallErr::ENODEV as isize),
+            }
+        }
     };
     let root_inode = new_fs.root_inode();
     let mnt_flags = vfs::MountFlags::from_bits_truncate(mountflags.bits() as u32);
