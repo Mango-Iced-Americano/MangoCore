@@ -197,10 +197,10 @@ impl Ext4FileSystem {
         bgid: usize,
         super_block: &super::superblock::Ext4Superblock,
     ) {
-        let dsc_cnt = self.block_size / super_block.desc_size as usize;
+        let dsc_cnt = self.block_size / super_block.desc_size() as usize;
         let dsc_id = bgid / dsc_cnt;
         let block_id = super_block.first_data_block as usize + dsc_id + 1;
-        let offset = (bgid % dsc_cnt) * super_block.desc_size as usize;
+        let offset = (bgid % dsc_cnt) * super_block.desc_size() as usize;
         let data = unsafe {
             core::slice::from_raw_parts(bg as *const _ as *const u8, core::mem::size_of::<super::block_group::Ext4BlockGroup>())
         };
@@ -216,10 +216,10 @@ impl Ext4FileSystem {
         super_block: &super::superblock::Ext4Superblock,
         block_group_idx: usize,
     ) -> super::block_group::Ext4BlockGroup {
-        let dsc_cnt = self.block_size / super_block.desc_size as usize;
+        let dsc_cnt = self.block_size / super_block.desc_size() as usize;
         let dsc_id = block_group_idx / dsc_cnt;
         let block_id = super_block.first_data_block as usize + dsc_id + 1;
-        let offset = (block_group_idx % dsc_cnt) * super_block.desc_size as usize;
+        let offset = (block_group_idx % dsc_cnt) * super_block.desc_size() as usize;
         let ext4block = self.load_metadata_block(block_id);
         super::counters::inc_counter!(super::counters::GROUP_DESC_READ);
         ext4block.read_offset_as(offset)

@@ -51,7 +51,7 @@ impl Ext4BlockGroup {
         block_group_idx: usize,
         block_size: usize,
     ) -> Self {
-        let dsc_cnt = block_size / super_block.desc_size as usize;
+        let dsc_cnt = block_size / super_block.desc_size() as usize;
         // 计算块组描述符在第几个块
         let dsc_id = block_group_idx / dsc_cnt;
         // 从超级块中获取第一个数据块的块号
@@ -62,7 +62,7 @@ impl Ext4BlockGroup {
         // 计算块内偏移量
         // 计算公式为：
         // 块组中的偏移量 = (块组中的索引 % 每个块的块组描述符数量) * 块组描述符大小
-        let offset = (block_group_idx % dsc_cnt) * super_block.desc_size as usize;
+        let offset = (block_group_idx % dsc_cnt) * super_block.desc_size() as usize;
         // 从块设备读取块
         let ext4block = Block::load_offset(block_device, block_id * block_size, block_size);
         super::counters::inc_counter!(super::counters::GROUP_DESC_READ);
@@ -235,7 +235,7 @@ impl Ext4BlockGroup {
         block_size: usize,
     ) {
         // 获取每块上组描述符的数量
-        let dsc_cnt = block_size / super_block.desc_size as usize;
+        let dsc_cnt = block_size / super_block.desc_size() as usize;
         // let dsc_per_block = dsc_cnt;
         // 获取块组描述符在第几个块
         let dsc_id = bgid / dsc_cnt;
@@ -244,7 +244,7 @@ impl Ext4BlockGroup {
         // 计算块组描述符在第几个块
         let block_id = first_data_block as usize + dsc_id + 1;
         // 计算偏移量
-        let offset = (bgid % dsc_cnt) * super_block.desc_size as usize;
+        let offset = (bgid % dsc_cnt) * super_block.desc_size() as usize;
 
         let data = unsafe {
             core::slice::from_raw_parts(
