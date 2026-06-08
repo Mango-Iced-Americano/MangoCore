@@ -35,6 +35,7 @@ pub use self::layout::*;
 
 pub use self::fat32::DiskInodeType;
 pub use crate::drivers::block::BlockDevice;
+pub use self::filesystem::{detect_fs, FS_Type};
 
 use alloc::{string::String, sync::Arc};
 use core::sync::atomic::{AtomicBool, Ordering};

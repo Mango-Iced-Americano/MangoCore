@@ -3714,7 +3714,63 @@ pub fn sys_mount(
         }
         _ => {
             match filesystemtype.as_str() {
-                "ext2" | "ext3" | "ext4" | "vfat" | "fat32" | "exfat" | "btrfs" | "xfs" | "ntfs" => {
+                "ext2" | "ext3" | "ext4" | "vfat" | "fat32" => {
+                    // 1. Resolve source device path → BlockDevice
+                    let dev_inode = match vfs_lookup(&lookup_inode, &source, false) {
+                        Ok(i) => i,
+                        Err(errno) => return errno,
+                    };
+                    // Unwrap through MountFS if the inode is a mount-point wrapper
+                    let dev_inode = match dev_inode
+                        .as_any_ref()
+                        .downcast_ref::<vfs::MountFSInode>()
+                    {
+                        Some(mfsi) => mfsi.inner_inode.clone(),
+                        None => dev_inode,
+                    };
+                    let bdi = match dev_inode.as_any_ref()
+                        .downcast_ref::<crate::fs::dev::block::BlockDevInode>()
+                    {
+                        Some(b) => b,
+                        None => return -(SyscallErr::ENOTBLK as isize),
+                    };
+                    let blk_dev = &bdi.inner;
+
+                    // 2. Detect actual FS type from superblock
+                    let detected = crate::fs::detect_fs(blk_dev);
+
+                    // 3. Validate FS type matches user request
+                    let is_ext = matches!(filesystemtype.as_str(), "ext2" | "ext3" | "ext4");
+                    match (&detected, is_ext) {
+                        (crate::fs::FS_Type::Ext4, true) => {}
+                        (crate::fs::FS_Type::Fat32, false) => {}
+                        _ => return -(SyscallErr::EINVAL as isize),
+                    }
+
+                    // 4. Open the filesystem
+                    let new_fs: Arc<dyn vfs::FileSystem> = match detected {
+                        crate::fs::FS_Type::Ext4 => {
+                            crate::fs::ext4::ext4fs::Ext4FileSystem::open_ext4rs(blk_dev.clone())
+                        }
+                        crate::fs::FS_Type::Fat32 => {
+                            crate::fs::fat32::EasyFileSystem::open(blk_dev.clone())
+                        }
+                        _ => return -(SyscallErr::EINVAL as isize),
+                    };
+
+                    // 5. Insert into mount tree
+                    let root_inode = new_fs.root_inode();
+                    let mnt_flags = vfs::MountFlags::from_bits_truncate(mountflags.bits() as u32);
+                    let mnt = match target_mfs_inode.mount_subtree_inner(
+                        new_fs, root_inode, mnt_flags, Some(lookup_path.clone()), true,
+                    ) {
+                        Ok(m) => m,
+                        Err(e) => return -(e as isize),
+                    };
+                    let _ = mnt;
+                    return SUCCESS;
+                }
+                "exfat" | "btrfs" | "xfs" | "ntfs" => {
                     return -(SyscallErr::EINVAL as isize)
                 }
                 _ => return -(SyscallErr::ENODEV as isize),

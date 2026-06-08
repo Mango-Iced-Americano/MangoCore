@@ -19,7 +19,7 @@ const BLKSSZGET: u32 = 0x1268;
 const DEV_LOGICAL_SECTOR_SIZE: i32 = 512;
 
 pub struct BlockDevInode {
-    inner: Arc<dyn BlockDevice>,
+    pub inner: Arc<dyn BlockDevice>,
     raw_dev: u64,
     pub label: String,
 }
