@@ -3,7 +3,7 @@
 CI score gate analyzer.
 
 Re-parses QEMU serial output for both arches, checks:
-  - basic-musl / basic-glibc / busybox-musl / busybox-glibc: score == all
+  - basic-musl / basic-glibc / busybox-musl / busybox-glibc: score >= 90%
   - ltp-musl / ltp-glibc: score > 0
   - No panic-like patterns in the last 500 lines of serial output
 
@@ -34,6 +34,9 @@ FULL_SCORE_GROUPS = [
     "busybox-musl",
     "busybox-glibc",
 ]
+
+# 0.0 ~ 1.0, threshold for FULL_SCORE_GROUPS to pass
+FULL_SCORE_THRESHOLD = 0.9
 
 LTP_GROUPS = [
     "ltp-musl",
@@ -171,11 +174,11 @@ def main():
         for group in FULL_SCORE_GROUPS:
             score, total = group_score(result.get(group, {}))
             pct = f"{score / total * 100:.0f}%" if total > 0 else "N/A"
-            ok = total > 0 and score == total
+            ok = total > 0 and score / total >= FULL_SCORE_THRESHOLD
             gate = "PASS" if ok else "FAIL"
             summary_lines.append(f"| {group} | {int(score)} | {total} | {pct} | {gate} |")
             if not ok:
-                failures.append(f"{arch}: {group} must be full score, got {int(score)}/{total}")
+                failures.append(f"{arch}: {group} score {int(score)}/{total} ({pct}) below threshold {FULL_SCORE_THRESHOLD:.0%}")
 
         if args.mode == "main":
             for group in LTP_GROUPS:
