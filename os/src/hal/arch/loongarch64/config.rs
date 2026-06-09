@@ -4,14 +4,15 @@ pub const MEMORY_SIZE: usize = 0x3000_0000;
 pub const USER_STACK_SIZE: usize = PAGE_SIZE * 0x40;
 pub const USER_HEAP_SIZE: usize = PAGE_SIZE * 0x100;
 pub const SYSTEM_TASK_LIMIT: usize = {
-    // la64 kernel stacks 分配在 kernel heap 上。
+    // la64 kernel stacks are mapped in a guarded kernel VA window.
     let by_ram = MEMORY_SIZE / (KERNEL_STACK_SIZE * 4);
-    let by_heap = KERNEL_HEAP_SIZE / (KERNEL_STACK_SIZE * 2);
-    let limit = if by_ram < by_heap { by_ram } else { by_heap };
+    let limit = if by_ram < KERNEL_STACK_MAX_SLOTS {
+        by_ram
+    } else {
+        KERNEL_STACK_MAX_SLOTS
+    };
     if limit < 512 {
         512
-    } else if limit > 4096 {
-        4096
     } else {
         limit
     }
@@ -29,9 +30,9 @@ pub const KSTACK_PG_NUM_SHIFT: usize = 16usize.trailing_zeros() as usize;
 #[cfg(not(debug_assertions))]
 pub const KSTACK_PG_NUM_SHIFT: usize = 16usize.trailing_zeros() as usize;
 
-// LA64 keeps per-task kernel stacks in the kernel heap.  128K stacks make
-// 1000-waiter fork/futex tests exhaust the 128M heap before wait can reap.
-pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 0x10;
+pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 0x20;
+pub const KERNEL_STACK_SLOT_SIZE: usize = KERNEL_STACK_SIZE + PAGE_SIZE;
+pub const KERNEL_STACK_MAX_SLOTS: usize = 1024;
 pub const BOOT_STACK_SIZE: usize = PAGE_SIZE * 0x20;
 pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x10000;
 
@@ -84,6 +85,9 @@ pub const ELF_DYN_BASE: usize = (((TASK_SIZE - LA_START) / 3 * 2) | LA_START) & 
 // 512G的虚拟内存？
 pub const MMAP_BASE: usize = 0xFFFF_FF80_0000_0000;
 pub const MMAP_END: usize = 0xFFFF_FFFF_FFFF_0000;
+pub const KERNEL_STACK_TOP: usize = MMAP_BASE - PAGE_SIZE;
+pub const KERNEL_STACK_BOTTOM: usize =
+    KERNEL_STACK_TOP - KERNEL_STACK_SLOT_SIZE * KERNEL_STACK_MAX_SLOTS;
 pub const SKIP_NUM: usize = 1;
 
 // 0x98000000

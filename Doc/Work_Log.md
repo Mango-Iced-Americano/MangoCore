@@ -2,7 +2,65 @@
 
 ---
 
+## 2026-06-09
+
+### la64 全量回归暴露 kernel stack slot 上限 panic
+
+**涉及文件：**
+- `os/src/hal/arch/loongarch64/config.rs` — 本次验证覆盖 128KiB la64 kernel stack 配置；`KERNEL_STACK_MAX_SLOTS` 仍为 1024，`SYSTEM_TASK_LIMIT` 被该上限截断
+- `os/src/hal/arch/loongarch64/kern_stack.rs` — panic 来自 `kernel_stack_position()` 的 slot 边界检查：`la64 kernel stack slot 1024 exceeds max 1024`
+- `sdcard-la.img` — 临时注入全量配置：`mask=0xFFF`、`ltp_runner=suite`、`ltp_libc=both`
+
+**验证：**
+- `cd os && make la64-run` ❌ — 全量跑到 LTP syscalls 尾段后在 `futex_cmp_requeue01` 压力用例触发 panic
+- la64 full suite 中 `clone09` ✅ — musl/glibc 均 `TPASS`，未复现之前的 BTreeMap/heap 随机 panic
+- 长序列 basic/busybox/lua/libctest/netperf/cyclictest/hackbench 与 LTP 大量 fork/wait/timer/signal/mm/sysv IPC 用例执行过程中未出现 kernel stack guard 命中、BTreeMap panic 或 heap panic
+
+**备注：** 这次失败不是原先 la64 栈溢出后的随机内存破坏，而是栈改为 VM slot 后的确定性容量边界：`futex_cmp_requeue01` 留下大量未唤醒 waiter，日志先出现 `[task_quota] SOFT LIMIT reached: used=921/1024`，随后 `clone` 分配到第 1025 个 kernel stack slot 并 panic。后续修复应让 la64 kernel stack 分配走 fallible 路径返回 `EAGAIN/ENOMEM`，或重新校准 task quota、slot 上限和 waiter 回收关系。
+
+### la64 kernel stack 扩大到 128KiB 并验证 clone09
+
+**涉及文件：**
+- `os/src/hal/arch/loongarch64/config.rs` — `KERNEL_STACK_SIZE` 从 `PAGE_SIZE * 0x10` 调整为 `PAGE_SIZE * 0x20`，la64 VM-mapped guarded kernel stack 与 rv64 保持 128KiB 栈容量
+
+**验证：**
+- `cd os && make la64-kernel-build-only` ✅
+- la64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=clone09` ✅ — musl/glibc `clone09` 均 `TPASS`，`exit_code=0`，未出现 BTreeMap/heap panic
+- `cd os && make rv64-kernel-build-only` ✅
+
+**备注：** 64KiB la64 kernel stack 下 `clone09` 停在 `CLONE_NEWNET` 后无 LTP timeout 输出；扩大到 128KiB 后同一用例正常返回，说明 netns clone 路径对 la64 内核栈深度敏感。
+
+### la64 VM-mapped kernel stack + guard page
+
+**涉及文件：**
+- `os/src/mm/kernel_space.rs` — 为 kernel space 临时映射增加 `Program`/`KernelStack`/`Generic` kind；新增 `insert_kernel_stack_area()`；`highest_addr()` 只统计 `Program` 映射，无 program 映射时回落到 `MMAP_BASE`
+- `os/src/hal/arch/riscv/kern_stack.rs` — rv64 kernel stack 改走 `insert_kernel_stack_area()`，避免影响 ELF interpreter 临时映射基址
+- `os/src/hal/arch/loongarch64/config.rs` — 新增 la64 kernel stack 固定虚拟窗口常量，`SYSTEM_TASK_LIMIT` 改为按物理内存与 `KERNEL_STACK_MAX_SLOTS` 取保守上限
+- `os/src/hal/arch/loongarch64/kern_stack.rs` — kernel stack 从 heap `Vec<u8>`/cache 改为 slot id；每 slot 映射 64KiB 栈页并保留向下增长方向 guard page；drop 时解除映射并回收 slot
+- `os/src/hal/arch/loongarch64/mod.rs`、`os/src/hal/arch/loongarch64/trap/mod.rs` — kernel trap panic 前检测 bad addr 是否命中 stack guard page，命中时打印 `kernel stack overflow`、slot id 和 bad addr
+
+**验证：**
+- `docker compose ps` 未执行成功（当前会话无 `/var/run/docker.sock` 权限；提升后仍被 Docker daemon socket 拒绝）
+- `docker compose exec os-dev make -C os rv64-kernel-build-only` 未执行成功（同上，无法连接 Docker daemon socket）
+- `make rv64-kernel-build-only` / `make la64-kernel-build-only` 未执行（遵守 Docker 优先规则，未在宿主机直接编译）
+
+**备注：** 本轮保留 la64 `KERNEL_STACK_SIZE = 64KiB`，目标是把栈溢出从静默 heap corruption 变成确定性的 kernel page fault；暂不实现 emergency stack。
+
 ## 2026-06-08
+
+### Switch Docker dev image to overrideable contest registry
+
+**涉及文件：**
+- `Makefile` — 将默认 `DOCKER_IMAGE` 改为 `docker.educg.net/cg/os-contest:20250614`，并在 `make docker` 调用 `docker compose` 时显式传递该变量
+- `docker-compose.yml` — `os-dev.image` 改为 `${DOCKER_IMAGE:-...}`，支持通过环境变量覆盖镜像
+- `scripts/run_test_docker_parallel.sh` — 并行 Docker 测试默认镜像与 compose 保持一致，并更新帮助文字
+- `how-to-run.md` — 同步默认 Docker 镜像说明
+
+**验证：**
+- `docker compose config` ✅
+- `docker compose pull os-dev` 未执行成功（当前会话无 `/var/run/docker.sock` 权限；`sudo docker compose pull os-dev` 需要用户本机输入 sudo 密码）
+
+**备注：** Docker CE APT 源只影响 Docker 软件包安装；`make docker` 拉取开发镜像走容器 registry。公共 Docker Hub 代理可能提示镜像不在白名单，因此默认改用比赛镜像仓库。
 
 ### Fix 6 LTP fcntl bugs: lock type, unlock wake, stale edges, pipe/fasync signals
 

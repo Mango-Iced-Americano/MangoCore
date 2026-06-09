@@ -455,6 +455,13 @@ pub extern "C" fn trap_from_kernel(gr: &mut GeneralRegs) {
     let cause = get_exception_cause();
     // 读取异常子代码（二级编号）
     let sub_code = EStat::read().exception_sub_code();
+    let bad_addr = get_bad_addr();
+    if let Some(slot) = super::kernel_stack_guard_slot(bad_addr) {
+        println!(
+            "[kernel] kernel stack overflow: slot={}, bad addr={:#x}",
+            slot, bad_addr
+        );
+    }
     // 模式匹配Trap原因并进行处理
     match cause {
         // TLB重填
@@ -541,7 +548,7 @@ pub extern "C" fn trap_from_kernel(gr: &mut GeneralRegs) {
     panic!(
         "a trap {:?} from kernel! bad addr = {:#x}, bad instruction = {:#x}, pc:{:#x}, (subcode:{}), PGDH: {:?}, PGDL: {:?}, {}",
         cause,
-        get_bad_addr(),
+        bad_addr,
         get_bad_instruction(),
         get_bad_ins_addr(),
         sub_code,

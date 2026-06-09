@@ -1,49 +1,80 @@
 use super::config::{
-    KERNEL_STACK_SIZE, PAGE_SIZE, TRAP_CONTEXT_BASE, USER_STACK_BASE, USER_STACK_SIZE,
+    KERNEL_STACK_BOTTOM, KERNEL_STACK_MAX_SLOTS, KERNEL_STACK_SIZE, KERNEL_STACK_SLOT_SIZE,
+    KERNEL_STACK_TOP, PAGE_SIZE, TRAP_CONTEXT_BASE, USER_STACK_BASE, USER_STACK_SIZE,
 };
-use alloc::vec::Vec;
+use crate::mm::{MapPermission, VirtAddr, KERNEL_SPACE};
+use crate::task::pid::RecycleAllocator;
 use lazy_static::*;
 use spin::Mutex;
 
-const KERNEL_STACK_CACHE_BYTES: usize = 4 * 1024 * 1024;
-const KERNEL_STACK_CACHE_LIMIT: usize = KERNEL_STACK_CACHE_BYTES / KERNEL_STACK_SIZE;
-
 lazy_static! {
-    static ref KERNEL_STACK_CACHE: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+    static ref KSTACK_ALLOCATOR: Mutex<RecycleAllocator> = Mutex::new(RecycleAllocator::new());
 }
 
-pub struct KernelStack(Vec<u8>);
+/// Return (bottom, top) of a kernel stack in kernel virtual space.
+pub fn kernel_stack_position(kstack_id: usize) -> (usize, usize) {
+    if kstack_id >= KERNEL_STACK_MAX_SLOTS {
+        panic!(
+            "la64 kernel stack slot {} exceeds max {}",
+            kstack_id, KERNEL_STACK_MAX_SLOTS
+        );
+    }
+    let slot_offset = kstack_id
+        .checked_mul(KERNEL_STACK_SLOT_SIZE)
+        .expect("la64 kernel stack slot offset overflow");
+    let top = KERNEL_STACK_TOP
+        .checked_sub(slot_offset)
+        .expect("la64 kernel stack top underflow");
+    let bottom = top - KERNEL_STACK_SIZE;
+    (bottom, top)
+}
+
+pub fn kernel_stack_guard_slot(addr: usize) -> Option<usize> {
+    if addr < KERNEL_STACK_BOTTOM || addr >= KERNEL_STACK_TOP {
+        return None;
+    }
+    let distance_from_top = KERNEL_STACK_TOP - 1 - addr;
+    let slot = distance_from_top / KERNEL_STACK_SLOT_SIZE;
+    let offset_in_slot = distance_from_top % KERNEL_STACK_SLOT_SIZE;
+    if slot < KERNEL_STACK_MAX_SLOTS && offset_in_slot >= KERNEL_STACK_SIZE {
+        Some(slot)
+    } else {
+        None
+    }
+}
+
+pub struct KernelStack(pub usize);
+
+pub fn kstack_alloc() -> KernelStack {
+    let alloc_id = KSTACK_ALLOCATOR.lock().alloc();
+    let kstack_id = alloc_id
+        .checked_sub(1)
+        .expect("la64 kernel stack allocator returned zero");
+    let (kstack_bottom, kstack_top) = kernel_stack_position(kstack_id);
+    KERNEL_SPACE.lock().insert_kernel_stack_area(
+        kstack_bottom.into(),
+        kstack_top.into(),
+        MapPermission::R | MapPermission::W,
+    );
+    KernelStack(kstack_id)
+}
+
 impl KernelStack {
-    pub fn new() -> Self {
-        if let Some(stack) = KERNEL_STACK_CACHE.lock().pop() {
-            return Self(stack);
-        }
-        Self(alloc::vec![0_u8; KERNEL_STACK_SIZE])
-    }
     pub fn get_top(&self) -> usize {
-        let (_, kernel_stack_top) = Self::kernel_stack_position(&self.0);
+        let (_, kernel_stack_top) = kernel_stack_position(self.0);
         kernel_stack_top
-    }
-    /// Return (bottom, top) of a kernel stack in kernel space.
-    fn kernel_stack_position(v: &Vec<u8>) -> (usize, usize) {
-        /* let top: usize = TRAMPOLINE - kstack_id * (KERNEL_STACK_SIZE + PAGE_SIZE); */
-        let bottom = &v[0] as *const u8 as usize;
-        let top: usize = bottom + KERNEL_STACK_SIZE;
-        (bottom, top)
     }
 }
 
 impl Drop for KernelStack {
     fn drop(&mut self) {
-        let mut stack = Vec::new();
-        core::mem::swap(&mut stack, &mut self.0);
-        if stack.len() != KERNEL_STACK_SIZE {
-            return;
-        }
-        let mut cache = KERNEL_STACK_CACHE.lock();
-        if cache.len() < KERNEL_STACK_CACHE_LIMIT && cache.try_reserve(1).is_ok() {
-            cache.push(stack);
-        }
+        let (kernel_stack_bottom, _) = kernel_stack_position(self.0);
+        let kernel_stack_bottom_va: VirtAddr = kernel_stack_bottom.into();
+        KERNEL_SPACE
+            .lock()
+            .remove_area_with_start_vpn(kernel_stack_bottom_va.into())
+            .unwrap();
+        KSTACK_ALLOCATOR.lock().dealloc(self.0 + 1)
     }
 }
 
@@ -55,10 +86,4 @@ pub fn trap_cx_bottom_from_tid(tid: usize) -> usize {
 /// 根据线程id计算用户栈的地址
 pub fn ustack_bottom_from_tid(tid: usize) -> usize {
     USER_STACK_BASE - tid * (PAGE_SIZE + USER_STACK_SIZE)
-}
-
-#[inline(always)]
-/// 分配一个内核栈
-pub fn kstack_alloc() -> KernelStack {
-    KernelStack::new()
 }
