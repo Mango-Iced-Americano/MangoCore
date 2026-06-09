@@ -17,6 +17,8 @@ const DEFAULT_CASE_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_CASE_TIMEOUT_SECS: u64 = 60;
 #[cfg(target_arch = "loongarch64")]
 const LTP_TIMEOUT_MUL_ENV: &str = "LTP_TIMEOUT_MUL=2\0";
+#[cfg(not(target_arch = "loongarch64"))]
+const LTP_TIMEOUT_MUL_ENV: &str = "LTP_TIMEOUT_MUL=2\0";
 const DEFAULT_CASE_TERM_GRACE_MS: u64 = 1500;
 const LTP_EXIT_TCONF: i32 = 32;
 const DEFAULT_LTP_EXCLUDE: &[&str] = &["rt_sigtimedwait01", "timerfd04", "timerfd_settime02"];
@@ -572,7 +574,7 @@ fn precompute_env(ltproot: &str, tmpdir: &str) -> PrecomputedEnv {
         "LTP_IPC_PATH=/tmp\0".as_ptr(),
         "LANG=C.UTF-8\0".as_ptr(),
         "LTP_REPRODUCIBLE_OUTPUT=n\0".as_ptr(),
-        null_ptr,
+        LTP_TIMEOUT_MUL_ENV.as_ptr(),
         "KCONFIG_PATH=/proc/config\0".as_ptr(),
         ld_preload_ptr,
         ltp_dev_ptr,
@@ -617,7 +619,7 @@ fn precompute_env(ltproot: &str, tmpdir: &str) -> PrecomputedEnv {
         "LTP_IPC_PATH=/tmp\0".as_ptr(),
         "LANG=C.UTF-8\0".as_ptr(),
         "LTP_REPRODUCIBLE_OUTPUT=n\0".as_ptr(),
-        null_ptr,
+        LTP_TIMEOUT_MUL_ENV.as_ptr(),
         "KCONFIG_PATH=/proc/config\0".as_ptr(),
         null_ptr,
         ltp_dev_ptr,
