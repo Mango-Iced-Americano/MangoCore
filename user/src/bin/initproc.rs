@@ -2300,21 +2300,21 @@ fn prepare_symlink(environ: &[*const u8]) {
 }
 
 fn install_apk_packages(environ: &[*const u8]) {
-    run_bash_cmd(
-        "rm -f /bin/mkfs.ext2 /bin/mkfs.ext3 /bin/mkfs.ext4 /bin/mke2fs\0",
-        environ,
-    );
     let apk = "/tools/bin/apk.static\0";
     let pkgs = "e2fsprogs\0";
     let cmd = alloc::format!(
-        "{} update && {} add {}",
+        "{} update && {} add {} && rm -f /bin/mkfs.ext2 /bin/mkfs.ext3 /bin/mkfs.ext4 /bin/mke2fs\0",
         apk.trim_end_matches('\0'),
         apk.trim_end_matches('\0'),
         pkgs.trim_end_matches('\0'),
     );
     println!("[initproc] apk add {} ...", pkgs.trim_end_matches('\0'));
     let ret = run_bash_cmd(&cmd, environ);
-    println!("[initproc] apk add -> exit={}", ret);
+    if ret != 0 {
+        println!("[initproc] apk add failed (ret={}), keeping busybox mkfs fallback", ret);
+    } else {
+        println!("[initproc] apk add -> exit=0");
+    }
 }
 
 #[no_mangle]

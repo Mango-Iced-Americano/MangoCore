@@ -515,7 +515,7 @@ fn has_scratch_device() -> bool {
 fn precompute_env(ltproot: &str, tmpdir: &str) -> PrecomputedEnv {
     let ltp_root_s = format!("LTPROOT={}\0", ltproot);
     let path_s = format!(
-        "PATH=/bin:/usr/bin:{}/testcases/bin:{}/bin:{}/testcases/lib\0",
+        "PATH=/bin:/sbin:/usr/bin:{}/testcases/bin:{}/bin:{}/testcases/lib\0",
         ltproot, ltproot, ltproot
     );
     let tmpdir_s = format!("TMPDIR={}\0", tmpdir);
