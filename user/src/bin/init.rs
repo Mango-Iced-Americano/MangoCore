@@ -20,42 +20,61 @@ fn try_mount(source: &str, target: &str, fstype: &str, flags: usize, data: usize
 
 /// 用 busybox ntpd 通过 NTP 同步时间；失败则回退到硬编码时间以防 TLS 失败
 fn try_ntp_sync() {
-    let pid = fork();
-    if pid < 0 {
-        // fork 失败，回退到硬编码时间
-        set_system_time(1749049200, 0);
-        return;
-    }
-    if pid == 0 {
-        // child: run busybox ntpd
-        let path = "/rescue/sh\0";
-        let applet = "ntpd\0";
-        let bg = "-n\0";
-        let quit = "-q\0";
-        let flag_p = "-p\0";
-        let peer = "time.cloudflare.com\0";
-        let args: [*const u8; 6] = [
-            applet.as_ptr(),
-            bg.as_ptr(),
-            quit.as_ptr(),
-            flag_p.as_ptr(),
-            peer.as_ptr(),
-            core::ptr::null(),
-        ];
-        exec(path, &args, &[core::ptr::null()]);
-        // exec only returns on error
-        exit(-1);
-    } else {
-        // parent: wait for ntpd
-        let mut status: i32 = 0;
-        let ret = waitpid(pid as usize, &mut status);
-        if ret >= 0 && status == 0 {
-            println!("[init] ntpd time sync ok");
-        } else {
-            println!("[init] ntpd failed (ret={}, status={}), fallback to hardcoded time", ret, status);
+    for attempt in 0..3 {
+        if attempt > 0 {
+            let sleep_args = [
+                "sleep\0".as_ptr(),
+                "2\0".as_ptr(),
+                core::ptr::null(),
+            ];
+            let sleep_pid = fork();
+            if sleep_pid == 0 {
+                exec("/rescue/sh\0", &sleep_args, &[core::ptr::null()]);
+                exit(-1);
+            } else if sleep_pid > 0 {
+                let mut s: i32 = 0;
+                waitpid(sleep_pid as usize, &mut s);
+            }
+        }
+
+        let pid = fork();
+        if pid < 0 {
+            // fork 失败，回退到硬编码时间
             set_system_time(1749049200, 0);
+            return;
+        }
+        if pid == 0 {
+            // child: run busybox ntpd
+            let path = "/rescue/sh\0";
+            let applet = "ntpd\0";
+            let bg = "-n\0";
+            let quit = "-q\0";
+            let flag_p = "-p\0";
+            let peer = "time.cloudflare.com\0";
+            let args: [*const u8; 6] = [
+                applet.as_ptr(),
+                bg.as_ptr(),
+                quit.as_ptr(),
+                flag_p.as_ptr(),
+                peer.as_ptr(),
+                core::ptr::null(),
+            ];
+            exec(path, &args, &[core::ptr::null()]);
+            // exec only returns on error
+            exit(-1);
+        } else {
+            // parent: wait for ntpd
+            let mut status: i32 = 0;
+            let ret = waitpid(pid as usize, &mut status);
+            if ret >= 0 && status == 0 {
+                println!("[init] ntpd time sync ok");
+                return;
+            }
+            println!("[init] ntpd attempt {} failed (ret={}, status={})", attempt, ret, status);
         }
     }
+    println!("[init] ntpd all attempts failed, fallback to hardcoded time");
+    set_system_time(1749049200, 0);
 }
 
 fn try_bind(source: &str, target: &str) {
