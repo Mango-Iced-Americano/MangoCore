@@ -49,6 +49,14 @@ struct KernelMappingSet {
 struct KernelMapping {
     vpn_range: VPNRange,
     frames: BTreeMap<VirtPageNum, Arc<FrameTracker>>,
+    kind: KernelMappingKind,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum KernelMappingKind {
+    Generic,
+    KernelStack,
+    Program,
 }
 
 impl KernelMappingSet {
@@ -64,8 +72,12 @@ impl KernelMappingSet {
             .map_err(|_| MemoryError::OutOfMemory)
     }
 
-    fn last(&self) -> Option<&KernelMapping> {
-        self.mappings.last()
+    fn highest_program_end(&self) -> Option<VirtAddr> {
+        self.mappings
+            .iter()
+            .filter(|mapping| mapping.kind == KernelMappingKind::Program)
+            .map(KernelMapping::end_va)
+            .max()
     }
 
     fn has_overlap(&self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> bool {
@@ -102,8 +114,16 @@ impl KernelMappingSet {
 }
 
 impl KernelMapping {
-    fn new(vpn_range: VPNRange, frames: BTreeMap<VirtPageNum, Arc<FrameTracker>>) -> Self {
-        Self { vpn_range, frames }
+    fn new(
+        vpn_range: VPNRange,
+        frames: BTreeMap<VirtPageNum, Arc<FrameTracker>>,
+        kind: KernelMappingKind,
+    ) -> Self {
+        Self {
+            vpn_range,
+            frames,
+            kind,
+        }
     }
 
     fn start(&self) -> VirtPageNum {
@@ -222,8 +242,23 @@ impl<T: PageTable> KernelSpace<T> {
         end_va: VirtAddr,
         permission: MapPermission,
     ) {
-        self.try_insert_framed_area(start_va, end_va, permission)
+        self.try_insert_framed_area(start_va, end_va, permission, KernelMappingKind::Generic)
             .unwrap();
+    }
+
+    pub fn insert_kernel_stack_area(
+        &mut self,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        permission: MapPermission,
+    ) {
+        self.try_insert_framed_area(
+            start_va,
+            end_va,
+            permission,
+            KernelMappingKind::KernelStack,
+        )
+        .unwrap();
     }
 
     fn try_insert_framed_area(
@@ -231,6 +266,7 @@ impl<T: PageTable> KernelSpace<T> {
         start_va: VirtAddr,
         end_va: VirtAddr,
         permission: MapPermission,
+        kind: KernelMappingKind,
     ) -> Result<(), MemoryError> {
         let start_vpn = start_va.floor();
         let end_vpn = end_va.ceil();
@@ -263,7 +299,7 @@ impl<T: PageTable> KernelSpace<T> {
             frames.insert(vpn, frame);
         }
         self.kernel_mappings
-            .insert(KernelMapping::new(VPNRange::new(start_vpn, end_vpn), frames))
+            .insert(KernelMapping::new(VPNRange::new(start_vpn, end_vpn), frames, kind))
     }
 
     pub fn insert_program_area(
@@ -310,7 +346,11 @@ impl<T: PageTable> KernelSpace<T> {
             frame_map.insert(vpn, frame);
         }
         self.kernel_mappings
-            .insert(KernelMapping::new(VPNRange::new(start_vpn, end_vpn), frame_map))
+            .insert(KernelMapping::new(
+                VPNRange::new(start_vpn, end_vpn),
+                frame_map,
+                KernelMappingKind::Program,
+            ))
     }
 
     pub fn remove_area_with_start_vpn(
@@ -330,8 +370,7 @@ impl<T: PageTable> KernelSpace<T> {
     /// 返回最高处地址
     pub fn highest_addr(&self) -> VirtAddr {
         self.kernel_mappings
-            .last()
-            .map(|mapping| mapping.end_va())
+            .highest_program_end()
             .unwrap_or_else(|| VirtAddr::from(MMAP_BASE))
     }
 

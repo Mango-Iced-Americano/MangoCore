@@ -26,7 +26,10 @@ use crate::{
 
 use self::{time::get_timer_freq_first_time, trap::strampoline};
 pub use board::BLOCK_SZ;
-pub use kern_stack::{kstack_alloc, trap_cx_bottom_from_tid, ustack_bottom_from_tid, KernelStack};
+pub use kern_stack::{
+    kernel_stack_guard_slot, kstack_alloc, trap_cx_bottom_from_tid, ustack_bottom_from_tid,
+    KernelStack,
+};
 pub use register::*;
 mod kern_stack;
 mod la_libc_import;

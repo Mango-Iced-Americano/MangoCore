@@ -82,6 +82,12 @@
 - **修复**: 使用 `try_reserve` 并返回 `ENOMEM`
 - **相关文件**: `os/src/syscall/process/exec.rs`
 
+### kernel stack 溢出静默破坏 heap
+- **根因**: 架构把每线程 kernel stack 直接放在 kernel heap 的 `Vec<u8>` 中时，向下增长的栈一旦越界会先写坏相邻 heap 对象，后续常表现为随机 `BTreeMap`/allocator panic，而不是在真实溢出点 fault。
+- **修复**: 将 kernel stack 放到页表映射的固定 kernel VA 窗口，每个 slot 只映射实际栈页，并在增长方向保留未映射 guard page；栈映射需标记为 kernel-stack 类别，避免干扰 ELF/interpreter 临时 program 映射的 `highest_addr()`。
+- **教训**: 大规模 clone/futex 压力下出现随机 heap 元数据损坏时，要优先排查 per-task kernel stack 的存放位置和溢出保护；guard page 能把“延迟随机崩溃”收敛成可定位的 kernel trap。
+- **相关文件**: `os/src/hal/arch/loongarch64/kern_stack.rs`, `os/src/mm/kernel_space.rs`
+
 ## 文件系统
 
 ### ext4 sparse file hole 处理
