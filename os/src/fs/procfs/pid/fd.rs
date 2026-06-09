@@ -1,21 +1,32 @@
 use alloc::{format, string::String, sync::Arc, vec::Vec, vec};
 use crate::fs::procfs::{LockedProcInode, proc_read_str};
-use crate::fs::vfs::InodeMode;
+use crate::fs::vfs::IndexNode as _;
 
 fn get_pid(inode: &LockedProcInode) -> usize {
     inode.0.lock().extra_data
 }
 
 fn fd_content_fn(extra: usize, offset: usize, len: usize, buf: &mut [u8]) -> Result<usize, crate::utils::error::SyscallErr> {
+    if offset != 0 {
+        return Ok(0);
+    }
     let pid = extra >> 16;
     let fd = extra & 0xFFFF;
     let target = match crate::task::find_process_by_pid(pid) {
         Some(task) => {
             let files = task.files();
             let guard = files.lock();
-            match guard.get_file(fd) {
-                Ok(_) => format!("/proc/{}/fd/{}", pid, fd),
-                Err(_) => String::new(),
+            let file = match guard.get_file(fd) {
+                Ok(f) => f,
+                Err(_) => return Ok(0),
+            };
+            // Clone Arc first, then drop the fd table lock before calling absolute_path()
+            // to avoid potential deadlocks with VFS operations.
+            let inode = file.inode.clone();
+            drop(guard);
+            match inode.absolute_path() {
+                Ok(p) => p,
+                Err(_) => format!("/proc/{}/fd/{}", pid, fd),
             }
         }
         None => String::new(),
@@ -42,7 +53,6 @@ pub fn fd_list_hook(inode: &LockedProcInode) -> Vec<String> {
 pub fn fd_find_hook(inode: &LockedProcInode, name: &str) -> Option<Arc<dyn crate::fs::vfs::IndexNode>> {
     let pid = get_pid(inode);
     let fd: usize = name.parse().ok()?;
-    // 验证 fd 确实存在 — 无效 fd 应返回 ENOENT
     let task = crate::task::find_process_by_pid(pid)?;
     let files = task.files();
     let guard = files.lock();
@@ -54,12 +64,11 @@ pub fn fd_find_hook(inode: &LockedProcInode, name: &str) -> Option<Arc<dyn crate
         let dir_lock = inode.0.lock();
         (dir_lock.self_ref.clone(), dir_lock.fs.clone())
     };
-    let file = LockedProcInode::new_file_wired(
+    let symlink = LockedProcInode::new_dynamic_symlink_wired(
         parent_weak,
         fs_weak,
-        InodeMode::from_bits_truncate(0o444),
         fd_content_fn,
         extra,
     );
-    Some(file as Arc<dyn crate::fs::vfs::IndexNode>)
+    Some(symlink as Arc<dyn crate::fs::vfs::IndexNode>)
 }

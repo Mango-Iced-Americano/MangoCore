@@ -255,6 +255,26 @@ impl LockedProcInode {
         })
     }
 
+    /// 创建动态符号链接 inode（内容由 content_fn 动态生成）
+    pub(crate) fn new_dynamic_symlink_wired(
+        parent: Weak<LockedProcInode>,
+        fs: Weak<ProcFS>,
+        content_fn: ProcContentFn,
+        extra_data: usize,
+    ) -> Arc<Self> {
+        let mut data = ProcInodeData::new_symlink("");
+        data.parent = parent;
+        data.fs = fs;
+        data.extra_data = extra_data;
+        data.content_fn = Some(content_fn);
+        data.symlink_target = None; // dynamic: use content_fn
+        data.metadata.size = 256i64; // reasonable default for path
+        Arc::new_cyclic(|weak| {
+            data.self_ref = weak.clone();
+            LockedProcInode(Mutex::new(data))
+        })
+    }
+
     /// 创建符号链接 inode
     fn new_symlink_wired(
         parent: Weak<LockedProcInode>,
