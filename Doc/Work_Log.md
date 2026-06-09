@@ -4,25 +4,33 @@
 
 ## 2026-06-09
 
-### Fix: apk libeconf.so.0 被 lib linking 步骤删除 + 边界断言
+### Fix: ltprunner envp 提前截断导致 KCONFIG_PATH/LTP_DEV 失效
 
-**问题：** `install_apk_packages()` 在 lib linking 之前执行，apk 安装的 libeconf.so.0 到 `/usr/lib/`，随后 lib linking step 执行 `rm -rf /usr/lib; ln -sf /lib /usr/lib` 将其删除，导致 mkfs.ext4 运行时 `Error loading shared library libeconf.so.0`。LTP `tst_system("mkfs.ext4 >/dev/null 2>&1")` 只看到非零退出码，报 "mkfs.ext4 does not exist"。
+**问题：** rv64 的 `env_preload`/`env_no_preload` 数组 index 13 是 `null_ptr`，作为 envp 终止符把后面的 `KCONFIG_PATH`、`LTP_DEV`、`LTP_SINGLE_FS_TYPE`、`LD_PRELOAD` 全部截断。导致 LTP 二进制收不到这些环境变量。
+
+**根因：** index 13 本应是 `LTP_TIMEOUT_MUL_ENV`（跟 la64 对齐），但该 const 只在 la64 下定义，rv64 编译不到，于是留了 `null_ptr` 占位。
+
+**症状：**
+- `tst_kconfig: Couldn't locate kernel config! / Cannot parse .config`（KCONFIG_PATH 没传进去）
+- `tst_device: No free devices found`（LTP_DEV 没传进去，creat09 等测例需要）
 
 **涉及文件：**
-- `user/src/bin/initproc.rs` — `install_apk_packages()` 移到 lib linking 之后；新增 `install_apk_packages()` 函数；`PATH` 添加 `/sbin`
-- `os/src/fs/page_cache.rs` — 所有 6 个 `read_page`/`write_page` 实现添加 `start + block_size <= PAGE_SIZE` 断言
-- `os/src/lang_items.rs` / `user/src/lang_items.rs` — `info.message().unwrap()` → `info.message()`（Rust nightly API 变更兼容）
-- `os/Makefile` — Alpine 包下载缓存（避免重复下载）、移除 tools 盘的 mkfs.ext4 symlink
+- `user/src/bin/ltprunner.rs` — 两处 `null_ptr` 改为 `LTP_TIMEOUT_MUL_ENV.as_ptr()`；`LTP_TIMEOUT_MUL_ENV` 加 rv64 定义
 
 **验证：**
 - `make rv64-kernel-build-only` ✅
 - `make la64-kernel-build-only` ✅
-- QEMU rv64 boot: `mkfs.ext4 does exist` ✅, fallocate06 3 TPASS (Case 1) + 1 TFAIL + 1 TBROK (Case 2 timeout)
-- 断言未触发（block 边界正确）
 
-**备注：**
-- `lld` linker arg `--no-warn-rwx-segments` 因 rustc nightly 更新不再支持（被忽略），待清理
-- fallocate06 Case 2 (fill FS) timeout 是 ext4 写入性能问题，非本次范围
+### Fix: ntpd 时间同步加重试逻辑
+
+**问题：** ntpd 单次失败（DNS 瞬时不可达）直接回退硬编码时间（2025），导致 apk TLS 证书验证失败（时钟不在证书有效期）。
+
+**涉及文件：**
+- `user/src/bin/init.rs` — `try_ntp_sync()` 改为 3 次重试（间隔 2s），全失败才回退
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
 
 ---
 
