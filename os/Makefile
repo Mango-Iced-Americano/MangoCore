@@ -257,9 +257,9 @@ define build_tools_disk
 			ln -sf busybox $$applet 2>/dev/null; \
 		done
 	@cd /tmp/tools-mnt/bin && ln -sf bash sh 2>/dev/null || true
-	@# mkfs applets for LTP device tests (ext4 only — ext2/3 indirect blocks not supported)
+	@# mkfs applets for LTP device tests
 	@cd /tmp/tools-mnt/bin && \
-		for applet in mkfs.ext4 mkfs.vfat mke2fs; do \
+		for applet in mkfs.vfat; do \
 			ln -sf busybox $$applet 2>/dev/null; \
 		done
 	@umount /tmp/tools-mnt
@@ -304,9 +304,11 @@ tools-alpine-rv:
 		fi; \
 		apk=$$(curl -sL "$(ALPINE_MIRROR)/riscv64/" | grep -oP "\"$$pkg-[0-9][^\"]*\.apk\"" | tr -d '"' | sort -V | tail -1); \
 		if [ -z "$$apk" ]; then echo "  [skip] $$pkg not found"; continue; fi; \
-		echo "  fetching $$apk..."; \
-		curl -sL "$(ALPINE_MIRROR)/riscv64/$$apk" -o /tmp/alpine-rv/$$apk && \
-		tar -xzf /tmp/alpine-rv/$$apk -C /tmp/alpine-rv 2>/dev/null && \
+		if [ ! -f "/tmp/alpine-rv/$$apk" ]; then \
+			echo "  fetching $$apk..."; \
+			curl -sL "$(ALPINE_MIRROR)/riscv64/$$apk" -o "/tmp/alpine-rv/$$apk"; \
+		fi; \
+		tar -xzf "/tmp/alpine-rv/$$apk" -C /tmp/alpine-rv 2>/dev/null; \
 		cp /tmp/alpine-rv/$$apath "$$dest" 2>/dev/null && echo "  [done] $$oname"; \
 	done
 	@rm -rf /tmp/alpine-rv
@@ -331,9 +333,11 @@ tools-alpine-la:
 		fi; \
 		apk=$$(curl -sL "$(ALPINE_MIRROR)/loongarch64/" | grep -oP "\"$$pkg-[0-9][^\"]*\.apk\"" | tr -d '"' | sort -V | tail -1); \
 		if [ -z "$$apk" ]; then echo "  [skip] $$pkg not found"; continue; fi; \
-		echo "  fetching $$apk..."; \
-		curl -sL "$(ALPINE_MIRROR)/loongarch64/$$apk" -o /tmp/alpine-la/$$apk && \
-		tar -xzf /tmp/alpine-la/$$apk -C /tmp/alpine-la 2>/dev/null && \
+		if [ ! -f "/tmp/alpine-la/$$apk" ]; then \
+			echo "  fetching $$apk..."; \
+			curl -sL "$(ALPINE_MIRROR)/loongarch64/$$apk" -o "/tmp/alpine-la/$$apk"; \
+		fi; \
+		tar -xzf "/tmp/alpine-la/$$apk" -C /tmp/alpine-la 2>/dev/null; \
 		cp /tmp/alpine-la/$$apath "$$dest" 2>/dev/null && echo "  [done] $$oname"; \
 	done
 	@rm -rf /tmp/alpine-la

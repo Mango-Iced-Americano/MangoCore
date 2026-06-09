@@ -2,6 +2,30 @@
 
 ---
 
+## 2026-06-09
+
+### Fix: apk libeconf.so.0 被 lib linking 步骤删除 + 边界断言
+
+**问题：** `install_apk_packages()` 在 lib linking 之前执行，apk 安装的 libeconf.so.0 到 `/usr/lib/`，随后 lib linking step 执行 `rm -rf /usr/lib; ln -sf /lib /usr/lib` 将其删除，导致 mkfs.ext4 运行时 `Error loading shared library libeconf.so.0`。LTP `tst_system("mkfs.ext4 >/dev/null 2>&1")` 只看到非零退出码，报 "mkfs.ext4 does not exist"。
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — `install_apk_packages()` 移到 lib linking 之后；新增 `install_apk_packages()` 函数；`PATH` 添加 `/sbin`
+- `os/src/fs/page_cache.rs` — 所有 6 个 `read_page`/`write_page` 实现添加 `start + block_size <= PAGE_SIZE` 断言
+- `os/src/lang_items.rs` / `user/src/lang_items.rs` — `info.message().unwrap()` → `info.message()`（Rust nightly API 变更兼容）
+- `os/Makefile` — Alpine 包下载缓存（避免重复下载）、移除 tools 盘的 mkfs.ext4 symlink
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU rv64 boot: `mkfs.ext4 does exist` ✅, fallocate06 3 TPASS (Case 1) + 1 TFAIL + 1 TBROK (Case 2 timeout)
+- 断言未触发（block 边界正确）
+
+**备注：**
+- `lld` linker arg `--no-warn-rwx-segments` 因 rustc nightly 更新不再支持（被忽略），待清理
+- fallocate06 Case 2 (fill FS) timeout 是 ext4 写入性能问题，非本次范围
+
+---
+
 ## 2026-06-08
 
 ### MBR 分区支持 — 验收通过 ✅

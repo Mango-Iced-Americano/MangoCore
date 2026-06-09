@@ -2227,6 +2227,9 @@ fn prepare_symlink(environ: &[*const u8]) {
     // Step 1.7: /lib/modules/ — merged into Step 2 (after /lib exists)
 
     // Step 2: musl/glibc 动态库 + /lib/modules/ — 单次 shell 调用
+    // WARNING: Step 2 does `rm -rf /usr/lib; ln -sf /lib /usr/lib`, so any
+    // apk-installed libs in /usr/lib (e.g. libeconf.so.0 from e2fsprogs)
+    // would be destroyed. install_apk_packages must run AFTER this step.
     println!("[initproc] linking musl/glibc libs to /lib ...");
     let lib_cmd = "\
         mkdir -p /lib /usr /lib64 /usr/lib /usr/lib64; \
@@ -2257,6 +2260,12 @@ fn prepare_symlink(environ: &[*const u8]) {
     \0";
     let ret = run_bash_cmd(lib_cmd, environ);
     println!("[initproc] lib linking done, exit={}", ret);
+
+    // Phase 5.5: Install Alpine packages via apk (mkfs.ext4 etc.)
+    // Must run AFTER lib linking (Step 2), because Step 2 does
+    // `rm -rf /usr/lib; ln -sf /lib /usr/lib` which would destroy
+    // any apk-installed libraries in /usr/lib/.
+    install_apk_packages(environ);
 
     // la64 测试镜像内 musl libc 的 sched_getparam/sched_getscheduler 是 ENOSYS stub，
     // cyclictest 不会进入内核 syscall；这里仅对该测试入口复用 glibc 二进制。
@@ -2290,6 +2299,24 @@ fn prepare_symlink(environ: &[*const u8]) {
     );
 }
 
+fn install_apk_packages(environ: &[*const u8]) {
+    run_bash_cmd(
+        "rm -f /bin/mkfs.ext2 /bin/mkfs.ext3 /bin/mkfs.ext4 /bin/mke2fs\0",
+        environ,
+    );
+    let apk = "/tools/bin/apk.static\0";
+    let pkgs = "e2fsprogs\0";
+    let cmd = alloc::format!(
+        "{} update && {} add {}",
+        apk.trim_end_matches('\0'),
+        apk.trim_end_matches('\0'),
+        pkgs.trim_end_matches('\0'),
+    );
+    println!("[initproc] apk add {} ...", pkgs.trim_end_matches('\0'));
+    let ret = run_bash_cmd(&cmd, environ);
+    println!("[initproc] apk add -> exit={}", ret);
+}
+
 #[no_mangle]
 fn main(_argc: usize, _argv: &[&str]) -> i32 {
     let path = "/bin/bash\0";
@@ -2306,7 +2333,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         "OLDPWD=/root\0".as_ptr(),
         "PS1=\x1b[1m\x1b[33mMangoCore\x1b[0m:\x1b[1m\x1b[34m\\w\x1b[0m\\$ \0".as_ptr(),
         "_=/bin/bash\0".as_ptr(),
-        "PATH=/:/bin\0".as_ptr(),
+        "PATH=/:/bin:/sbin\0".as_ptr(),
         "KCONFIG_PATH=/proc/config\0".as_ptr(),
         "LD_LIBRARY_PATH=/\0".as_ptr(),
         "LTP_DEV=/dev/vdb2\0".as_ptr(),
