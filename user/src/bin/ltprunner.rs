@@ -529,7 +529,11 @@ fn precompute_env(ltproot: &str, tmpdir: &str) -> PrecomputedEnv {
         null_ptr
     };
 
-    let ltp_single_fs_ptr: *const u8 = null_ptr;
+    let ltp_single_fs_ptr: *const u8 = if has_scratch_device() {
+        "LTP_SINGLE_FS_TYPE=ext4\0".as_ptr()
+    } else {
+        null_ptr
+    };
 
     #[cfg(target_arch = "loongarch64")]
     let env_preload: [*const u8; 19] = [

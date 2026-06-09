@@ -277,7 +277,6 @@ impl MountFSInode {
             let self_arc = self.self_arc();
             let top = MountFSInode::overlaid_inode(self_arc.clone());
             if !Arc::ptr_eq(&top, &self_arc) {
-                log::warn!("[do_find] self-overlay: redirecting find('{}') to mounted FS root", name);
                 return top.do_find(name);
             }
         }
@@ -514,14 +513,12 @@ impl IndexNode for MountFSInode {
         let self_arc = self.self_arc();
         let top = MountFSInode::overlaid_inode(self_arc.clone());
         if !Arc::ptr_eq(&top, &self_arc) {
-            log::warn!("[create] self-overlay: redirecting create('{}') to mounted FS root", name);
             return top.create(name, file_type, mode);
         }
 
         self.ensure_mount_writable()?;
         self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
         let parent_ino = self.inner_inode.metadata().ok().map(|m| m.inode_id);
-        log::warn!("[create] creating '{}' in inode_id={:?}", name, parent_ino);
         let inner_inode = self.inner_inode.create(name, file_type, mode)?;
         let wrapper = MountFSInode::new(inner_inode, self.mount_fs.clone());
         if let Some(parent_ino) = parent_ino {

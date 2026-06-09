@@ -257,9 +257,9 @@ define build_tools_disk
 			ln -sf busybox $$applet 2>/dev/null; \
 		done
 	@cd /tmp/tools-mnt/bin && ln -sf bash sh 2>/dev/null || true
-	@# mkfs applets for LTP device tests
+	@# mkfs applets for LTP device tests (ext4 only — ext2/3 indirect blocks not supported)
 	@cd /tmp/tools-mnt/bin && \
-		for applet in mkfs.ext2 mkfs.ext3 mkfs.ext4 mkfs.vfat mke2fs; do \
+		for applet in mkfs.ext4 mkfs.vfat mke2fs; do \
 			ln -sf busybox $$applet 2>/dev/null; \
 		done
 	@umount /tmp/tools-mnt
