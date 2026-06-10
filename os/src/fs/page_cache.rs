@@ -783,6 +783,7 @@ impl PageCacheBackend for BlockPageCacheBackend {
                 .page_to_block(index, block_off)
                 .ok_or(SyscallErr::EINVAL)?;
             let start = block_off * self.block_size;
+            assert!(start + self.block_size <= PAGE_SIZE);
             self.block_device
                 .read_block(block_id, &mut buf[start..start + self.block_size]);
         }
@@ -800,6 +801,7 @@ impl PageCacheBackend for BlockPageCacheBackend {
                 .page_to_block(index, block_off)
                 .ok_or(SyscallErr::EINVAL)?;
             let start = block_off * self.block_size;
+            assert!(start + self.block_size <= PAGE_SIZE);
             self.block_device
                 .write_block(block_id, &buf[start..start + self.block_size]);
         }
@@ -866,6 +868,7 @@ impl PageCacheBackend for FatPageCacheBackend {
         let ratio = crate::config::PAGE_SIZE / self.block_size;
         for block_off in 0..self.blocks_per_page {
             let start = block_off * self.block_size;
+            assert!(start + self.block_size <= crate::config::PAGE_SIZE);
             match self.block_id_for_offset(index, block_off) {
                 Some(sec_id) => {
                     // FAT32 sector 是 512 字节，BlockDevice 以 PAGE_SIZE/BLOCK_SZ(4096) 为单位
@@ -893,6 +896,7 @@ impl PageCacheBackend for FatPageCacheBackend {
         let ratio = crate::config::PAGE_SIZE / self.block_size;
         for block_off in 0..self.blocks_per_page {
             let start = block_off * self.block_size;
+            assert!(start + self.block_size <= crate::config::PAGE_SIZE);
             if let Some(sec_id) = self.block_id_for_offset(index, block_off) {
                 let blk_id = sec_id / ratio;
                 let blk_off = (sec_id % ratio) * self.block_size;
@@ -970,6 +974,7 @@ impl PageCacheBackend for Ext4PageCacheBackend {
         let fs = self.ext4fs.upgrade().ok_or(SyscallErr::EIO)?;
         for block_off in 0..self.blocks_per_page {
             let start = block_off * self.block_size;
+            assert!(start + self.block_size <= crate::config::PAGE_SIZE);
             match self.block_id_for_offset(index, block_off) {
                 Some(block_id) => {
                     fs.block_device
@@ -992,6 +997,7 @@ impl PageCacheBackend for Ext4PageCacheBackend {
         let fs = self.ext4fs.upgrade().ok_or(SyscallErr::EIO)?;
         for block_off in 0..self.blocks_per_page {
             let start = block_off * self.block_size;
+            assert!(start + self.block_size <= crate::config::PAGE_SIZE);
             match self.block_id_for_offset(index, block_off) {
                 Some(block_id) => {
                     fs.block_device

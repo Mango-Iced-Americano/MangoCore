@@ -199,26 +199,28 @@ inject-test:
 
 TOOLS_IMG_RV := ../disk.img
 TOOLS_IMG_LA := ../disk-la.img
-TOOLS_SIZE_RV := 512
-TOOLS_SIZE_LA := 512
+TOOLS_SIZE_RV := 768
+TOOLS_SIZE_LA := 768
 TOOLS_SRC_RV := ../user/tools/riscv64
 TOOLS_SRC_LA := ../user/tools/loongarch64
 
+# MBR 脚本路径
+MBR_SCRIPT := ../scripts/make_mbr_tools_disk.py
+
 # 构建 tools 目录的通用配方
-# $(1)=镜像路径 $(2)=大小MB $(3)=源目录 $(4)=架构后缀(rv|la)
+# $(1)=最终盘镜像路径 $(2)=payload 大小MB $(3)=源目录 $(4)=架构后缀(rv|la)
 define build_tools_disk
-	@echo "[tools-disk] Building $(1) ($(2)MB)..."
-	@dd if=/dev/zero of=$(1) bs=1M count=$(2) 2>/dev/null
-	@mkfs.ext4 -F $(1) -b 4096 2>/dev/null
+	@echo "[tools-disk] Building $(4) tools payload ($(2)MB)..."
+	@dd if=/dev/zero of=/tmp/tools-pl-$(4).img bs=1M count=$(2) 2>/dev/null
+	@mkfs.ext4 -F /tmp/tools-pl-$(4).img -b 4096 2>/dev/null
 	@mkdir -p /tmp/tools-mnt
-	@mount -o loop $(1) /tmp/tools-mnt
+	@mount -o loop /tmp/tools-pl-$(4).img /tmp/tools-mnt
 	@mkdir -p /tmp/tools-mnt/bin /tmp/tools-mnt/lib /tmp/tools-mnt/usr/bin /tmp/tools-mnt/usr/sbin /tmp/tools-mnt/etc /tmp/tools-mnt/tests
 	@echo "  copying files..."
 	@cp -a $(3)/bin/* /tmp/tools-mnt/bin/ 2>/dev/null || true
 	@cp -a $(3)/lib/* /tmp/tools-mnt/lib/ 2>/dev/null || true
 	@cp -a $(3)/sbin/* /tmp/tools-mnt/sbin/ 2>/dev/null || true
 	@cp -a $(3)/etc/* /tmp/tools-mnt/etc/ 2>/dev/null || true
-	@# Copy user-space test binaries into /tests
 	@echo "  copying test binaries..."
 	@case "$(4)" in rv) target=riscv64gc-unknown-none-elf ;; la) target=loongarch64-unknown-linux-gnu ;; esac; \
 	for t in inet_test fs_test unix_test; do \
@@ -255,8 +257,16 @@ define build_tools_disk
 			ln -sf busybox $$applet 2>/dev/null; \
 		done
 	@cd /tmp/tools-mnt/bin && ln -sf bash sh 2>/dev/null || true
+	@# mkfs applets for LTP device tests
+	@cd /tmp/tools-mnt/bin && \
+		for applet in mkfs.vfat; do \
+			ln -sf busybox $$applet 2>/dev/null; \
+		done
 	@umount /tmp/tools-mnt
 	@rmdir /tmp/tools-mnt
+	@echo "[tools-disk] Wrapping with MBR → $(1)..."
+	@python3 $(MBR_SCRIPT) /tmp/tools-pl-$(4).img $(1)
+	@rm -f /tmp/tools-pl-$(4).img
 	@echo "[tools-disk] $(1) ready."
 endef
 
@@ -294,9 +304,11 @@ tools-alpine-rv:
 		fi; \
 		apk=$$(curl -sL "$(ALPINE_MIRROR)/riscv64/" | grep -oP "\"$$pkg-[0-9][^\"]*\.apk\"" | tr -d '"' | sort -V | tail -1); \
 		if [ -z "$$apk" ]; then echo "  [skip] $$pkg not found"; continue; fi; \
-		echo "  fetching $$apk..."; \
-		curl -sL "$(ALPINE_MIRROR)/riscv64/$$apk" -o /tmp/alpine-rv/$$apk && \
-		tar -xzf /tmp/alpine-rv/$$apk -C /tmp/alpine-rv 2>/dev/null && \
+		if [ ! -f "/tmp/alpine-rv/$$apk" ]; then \
+			echo "  fetching $$apk..."; \
+			curl -sL "$(ALPINE_MIRROR)/riscv64/$$apk" -o "/tmp/alpine-rv/$$apk"; \
+		fi; \
+		tar -xzf "/tmp/alpine-rv/$$apk" -C /tmp/alpine-rv 2>/dev/null; \
 		cp /tmp/alpine-rv/$$apath "$$dest" 2>/dev/null && echo "  [done] $$oname"; \
 	done
 	@rm -rf /tmp/alpine-rv
@@ -321,9 +333,11 @@ tools-alpine-la:
 		fi; \
 		apk=$$(curl -sL "$(ALPINE_MIRROR)/loongarch64/" | grep -oP "\"$$pkg-[0-9][^\"]*\.apk\"" | tr -d '"' | sort -V | tail -1); \
 		if [ -z "$$apk" ]; then echo "  [skip] $$pkg not found"; continue; fi; \
-		echo "  fetching $$apk..."; \
-		curl -sL "$(ALPINE_MIRROR)/loongarch64/$$apk" -o /tmp/alpine-la/$$apk && \
-		tar -xzf /tmp/alpine-la/$$apk -C /tmp/alpine-la 2>/dev/null && \
+		if [ ! -f "/tmp/alpine-la/$$apk" ]; then \
+			echo "  fetching $$apk..."; \
+			curl -sL "$(ALPINE_MIRROR)/loongarch64/$$apk" -o "/tmp/alpine-la/$$apk"; \
+		fi; \
+		tar -xzf "/tmp/alpine-la/$$apk" -C /tmp/alpine-la 2>/dev/null; \
 		cp /tmp/alpine-la/$$apath "$$dest" 2>/dev/null && echo "  [done] $$oname"; \
 	done
 	@rm -rf /tmp/alpine-la

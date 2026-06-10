@@ -1,5 +1,6 @@
 mod block_dev;
 mod mem_blk;
+pub mod partition;
 mod sata_blk;
 #[cfg(feature = "block_virt")]
 pub mod virtio_blk;

@@ -269,6 +269,18 @@ impl MountFSInode {
 
     /// 逐级查找子项（带挂载点交叉和 dentry 缓存）
     fn do_find(&self, name: &str) -> Result<Arc<MountFSInode>, SyscallErr> {
+        // Self-overlay: if this inode itself is a mountpoint, redirect to
+        // the mounted filesystem's root before looking up children.
+        // Without this, find("test_file") on a covered mountpoint directory
+        // would search the old (hidden) directory instead of the mounted FS.
+        if name != ".." {
+            let self_arc = self.self_arc();
+            let top = MountFSInode::overlaid_inode(self_arc.clone());
+            if !Arc::ptr_eq(&top, &self_arc) {
+                return top.do_find(name);
+            }
+        }
+
         // Shortcut: skip dentry cache for dynamic filesystems (procfs)
         if self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
             let parent_ino = self.inner_inode.metadata()?.inode_id;
@@ -496,6 +508,14 @@ impl IndexNode for MountFSInode {
         file_type: FileType,
         mode: InodeMode,
     ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+        // Self-overlay: if this inode is a mountpoint, redirect create to
+        // the mounted filesystem's root.
+        let self_arc = self.self_arc();
+        let top = MountFSInode::overlaid_inode(self_arc.clone());
+        if !Arc::ptr_eq(&top, &self_arc) {
+            return top.create(name, file_type, mode);
+        }
+
         self.ensure_mount_writable()?;
         self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
         let parent_ino = self.inner_inode.metadata().ok().map(|m| m.inode_id);
