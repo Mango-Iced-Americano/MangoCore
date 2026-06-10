@@ -850,14 +850,42 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: u32) -> isize {
         Ok(file) => file,
         Err(e) => return -(e as isize),
     };
-    let seek_from = match whence.bits() {
-        0 => SeekFrom::SeekSet(offset as i64),
-        2 => SeekFrom::SeekEnd(offset as i64),
-        _ => SeekFrom::SeekCurrent(offset as i64),
-    };
-    match file.lseek(seek_from) {
-        Ok(pos) => pos as isize,
-        Err(e) => -(e as isize),
+    let whence_bits = whence.bits();
+    // SEEK_DATA (3) and SEEK_HOLE (4) for non-sparse (dense) files
+    if whence_bits == 3 || whence_bits == 4 {
+        let off = offset as i64;
+        if off < 0 {
+            return EINVAL;
+        }
+        let md = match file.metadata() {
+            Ok(md) => md,
+            Err(e) => return -(e as isize),
+        };
+        let file_size = md.size;
+        if off >= file_size {
+            return ENXIO;
+        }
+        match whence_bits {
+            3 => { // SEEK_DATA: return current offset (entire file is data)
+                file.set_offset(off as usize);
+                off as isize
+            }
+            4 => { // SEEK_HOLE: return file_size (hole at EOF)
+                file.set_offset(file_size as usize);
+                file_size as isize
+            }
+            _ => unreachable!(),
+        }
+    } else {
+        let seek_from = match whence_bits {
+            0 => SeekFrom::SeekSet(offset as i64),
+            2 => SeekFrom::SeekEnd(offset as i64),
+            _ => SeekFrom::SeekCurrent(offset as i64),
+        };
+        match file.lseek(seek_from) {
+            Ok(pos) => pos as isize,
+            Err(e) => -(e as isize),
+        }
     }
 }
 
@@ -2223,16 +2251,17 @@ pub fn sys_fstatfs(fd: usize, buf: *mut Statfs) -> isize {
 
 pub fn sys_fsync(fd: usize) -> isize {
     let task = current_task().unwrap();
-
-    info!("[sys_fsync] fd: {}", fd);
     let files_ref = task.process.files();
-        let fd_table = files_ref.lock();
-    let inode = match fd_table.get_file(fd) {
-        Ok(file) => file.inode.clone(),
+    let fd_table = files_ref.lock();
+    let file = match fd_table.get_file(fd) {
+        Ok(file) => file,
         Err(e) => return -(e as isize),
     };
+    if !matches!(file.file_type(), FileType::File | FileType::Dir) {
+        return EINVAL;
+    }
     drop(fd_table);
-    match inode.sync() {
+    match file.inode.sync() {
         Ok(()) => SUCCESS,
         Err(e) => -(e as isize),
     }
@@ -2253,7 +2282,7 @@ pub fn sys_fdatasync(fd: usize) -> isize {
         return EINVAL;
     }
 
-    match file.inode.sync() {
+    match file.inode.datasync() {
         Ok(()) => SUCCESS,
         Err(e) => -(e as isize),
     }
@@ -2272,8 +2301,26 @@ pub fn sys_sync() -> isize {
     SUCCESS
 }
 
-pub fn sys_syncfs(_fd: usize) -> isize {
-    ENOSYS
+pub fn sys_syncfs(fd: usize) -> isize {
+    let task = current_task().unwrap();
+    let files_ref = task.process.files();
+    let fd_table = files_ref.lock();
+    let file = match fd_table.get_file(fd) {
+        Ok(file) => file,
+        Err(_e) => return EBADF,
+    };
+    drop(fd_table);
+
+    // Flush all page caches (global, but correct for single-fs system)
+    crate::fs::flush_all_page_caches();
+
+    // Flush ext4 metadata caches for the filesystem containing this fd
+    let fs = file.inode.fs();
+    if let Some(ext4) = fs.as_any_ref().downcast_ref::<crate::fs::ext4::ext4fs::Ext4FileSystem>() {
+        ext4.flush_metadata_cache();
+    }
+
+    SUCCESS
 }
 
 pub fn sys_fchmodat(dirfd: usize, path: *const u8, mode: u32, _flags: u32) -> isize {
@@ -5088,7 +5135,7 @@ pub fn sys_fallocate(fd: usize, mode: u32, offset: isize, len: isize) -> isize {
 
     let end = match offset.checked_add(len) {
         Some(end) => end,
-        None => return EFBIG,
+        None => return EINVAL,
     };
 
     let task = current_task().unwrap();
@@ -5098,11 +5145,19 @@ pub fn sys_fallocate(fd: usize, mode: u32, offset: isize, len: isize) -> isize {
         Ok(file) => file,
         Err(e) => return -(e as isize),
     };
+
+    // ENODEV if not a regular file
+    if file.file_type() != FileType::File {
+        return ENODEV;
+    }
+
     info!(
         "[sys_fallocate] fd: {}, mode: {:#x}, offset: {}, len: {}, end: {}",
         fd, mode, offset, len, end
     );
 
+    // Supported modes: 0 (allocate), FALLOC_FL_KEEP_SIZE (allocate keep size),
+    // FALLOC_PUNCH_HOLE|KEEP_SIZE (punch hole, no-op)
     if mode == FALLOC_PUNCH_HOLE_KEEP_SIZE {
         let seals = file.memfd_seal_bits().unwrap_or(0);
         if (seals & vfs::F_SEAL_WRITE) != 0 {
@@ -5110,22 +5165,28 @@ pub fn sys_fallocate(fd: usize, mode: u32, offset: isize, len: isize) -> isize {
         }
         return SUCCESS;
     }
-    if mode != 0 {
+    if mode != 0 && mode != FALLOC_FL_KEEP_SIZE {
         warn!("[sys_fallocate] unsupported mode: {:#x}", mode);
         return EOPNOTSUPP;
     }
 
-    if file.get_size() >= end as usize {
-        return SUCCESS;
-    }
-    if let Some(seals) = file.memfd_seal_bits() {
-        if (seals & vfs::F_SEAL_GROW) != 0 {
-            return EPERM;
+    if mode == 0 {
+        if file.get_size() >= end as usize {
+            return SUCCESS;
         }
-    }
-    match file.truncate_size(end as usize) {
-        Ok(()) => SUCCESS,
-        Err(e) => -(e as isize),
+        if let Some(seals) = file.memfd_seal_bits() {
+            if (seals & vfs::F_SEAL_GROW) != 0 {
+                return EPERM;
+            }
+        }
+        match file.truncate_size(end as usize) {
+            Ok(()) => SUCCESS,
+            Err(e) => -(e as isize),
+        }
+    } else {
+        // mode == FALLOC_FL_KEEP_SIZE: allocate without extending file size.
+        // No actual block preallocation support, just return success.
+        SUCCESS
     }
 }
 

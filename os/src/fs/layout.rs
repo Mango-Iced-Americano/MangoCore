@@ -33,6 +33,8 @@ bitflags! {
         const SEEK_SET  =   0; /* set to offset bytes.  */
         const SEEK_CUR  =   1; /* set to its current location plus offset bytes.  */
         const SEEK_END  =   2; /* set to the size of the file plus offset bytes.  */
+        const SEEK_DATA =   3; /* set to next data region after offset.  */
+        const SEEK_HOLE =   4; /* set to next hole after offset.  */
     }
 }
 
