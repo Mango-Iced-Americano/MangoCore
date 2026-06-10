@@ -60,6 +60,10 @@ lazy_static! {
 }
 
 pub const AT_FDCWD: usize = 100usize.wrapping_neg();
+pub const AT_EMPTY_PATH: u32 = 0x1000;
+pub const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+pub const AT_REMOVEDIR: u32 = 0x200;
+pub const AT_SYMLINK_FOLLOW: u32 = 0x400;
 
 /// 将旧的 OpenFlags 转换为新的 VFS FileFlags
 fn _open_flags_to_vfs_flags(o: OpenFlags) -> vfs::FileFlags {
@@ -322,8 +326,14 @@ fn open_file_at(
                 };
             }
             if md.file_type == FileType::Dir
-                && (flags.contains(OpenFlags::O_WRONLY) || flags.contains(OpenFlags::O_RDWR))
+                && (flags.contains(OpenFlags::O_WRONLY)
+                    || flags.contains(OpenFlags::O_RDWR)
+                    || flags.contains(OpenFlags::O_CREAT))
             {
+                // Linux 6.6+: O_CREAT|O_DIRECTORY is EINVAL, not EISDIR
+                if flags.contains(OpenFlags::O_CREAT) && flags.contains(OpenFlags::O_DIRECTORY) {
+                    return Err(EINVAL);
+                }
                 return Err(EISDIR);
             }
             if md.file_type != FileType::Dir && flags.contains(OpenFlags::O_DIRECTORY) {
@@ -1804,9 +1814,48 @@ pub fn sys_readlinkat(dirfd: usize, pathname: *const u8, buf: *mut u8, bufsiz: u
     if bufsiz == 0 {
         return EINVAL;
     }
+
+    // Linux: readlinkat(fd, "", buf, size) operates on the symlink fd itself, unconditionally
     if path.is_empty() {
-        return ENOENT;
+        let inode = match resolve_start_inode(dirfd) {
+            Ok(inode) => inode,
+            Err(e) => return e,
+        };
+        let md = match inode.metadata() {
+            Ok(md) => md,
+            Err(_) => return EINVAL,
+        };
+        if md.file_type != vfs::FileType::SymLink {
+            return EINVAL;
+        }
+        let link_len = (md.size.max(0) as usize).min(4096);
+        let mut link_buf = alloc::vec![0u8; link_len];
+        let n = match inode.read_at(
+            0,
+            link_buf.len(),
+            &mut link_buf,
+            spin::Mutex::new(vfs::FilePrivateData::Unused).lock(),
+        ) {
+            Ok(n) => n,
+            Err(_) => return EINVAL,
+        };
+        unsafe { link_buf.set_len(n) };
+        let real_path = match String::from_utf8(link_buf) {
+            Ok(s) => alloc::string::String::from(s.trim_end_matches('\0')),
+            Err(_) => return EINVAL,
+        };
+        let len = real_path.len().min(bufsiz);
+        let bytes = real_path.as_bytes();
+        let mut user_buf = match UserBufferWriter::new(token, buf, len) {
+            Ok(writer) => writer,
+            Err(_) => return EFAULT,
+        };
+        if user_buf.write_from(&bytes[..len]).is_err() {
+            return EFAULT;
+        }
+        return len as isize;
     }
+
     let real_path = if path.as_str() == "/proc/self/exe" {
         let exe_path = task.process.exe_path();
         if exe_path.is_empty() {
@@ -2932,6 +2981,13 @@ pub fn sys_unlinkat(dirfd: usize, path: *const u8, flags: u32) -> isize {
 
     if let Err(errno) = validate_path_len(&path) {
         return errno;
+    }
+
+    if flags.contains(UnlinkatFlags::AT_REMOVEDIR) {
+        let trimmed = path.trim_end_matches('/');
+        if trimmed == "." || trimmed.ends_with("/.") {
+            return EINVAL;
+        }
     }
 
     let start = match resolve_start_inode(dirfd) {
@@ -5159,8 +5215,12 @@ pub fn sys_linkat(
     oldpath: *const u8,
     newdirfd: usize,
     newpath: *const u8,
-    _flags: u32,
+    flags: u32,
 ) -> isize {
+    if flags & !(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH) != 0 {
+        return EINVAL;
+    }
+
     let task = current_task().unwrap();
     let token = task.get_user_token();
 
@@ -5188,9 +5248,14 @@ pub fn sys_linkat(
         newpath_str
     );
 
-    let old_start = match resolve_start_inode(olddirfd) {
-        Ok(inode) => inode,
-        Err(errno) => return errno,
+    // Linux: when path is absolute, dirfd is ignored — skip fd resolution
+    let old_start = if oldpath_str.starts_with('/') {
+        crate::fs::current_root_inode()
+    } else {
+        match resolve_start_inode(olddirfd) {
+            Ok(inode) => inode,
+            Err(errno) => return errno,
+        }
     };
 
     if oldpath_str.is_empty() {
@@ -5213,9 +5278,14 @@ pub fn sys_linkat(
     }
 
     // 解析新路径：获取父目录 + 叶子名
-    let new_start = match resolve_start_inode(newdirfd) {
-        Ok(inode) => inode,
-        Err(errno) => return errno,
+    // Linux: when path is absolute, dirfd is ignored — skip fd resolution
+    let new_start = if newpath_str.starts_with('/') {
+        crate::fs::current_root_inode()
+    } else {
+        match resolve_start_inode(newdirfd) {
+            Ok(inode) => inode,
+            Err(errno) => return errno,
+        }
     };
 
     // Resolve target parent directory and leaf name
