@@ -1,3 +1,4 @@
+pub mod full;
 pub mod null;
 pub mod pipe;
 pub mod pty;

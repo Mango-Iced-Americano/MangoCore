@@ -63,6 +63,9 @@ pub struct FsStatus {
     pub working_inode: Arc<vfs::File>,
     /// 当前工作目录的绝对路径字符串（用于 getcwd，避免依赖 broken 的 absolute_path()）
     pub working_path: String,
+    /// chroot 的根目录 inode，如果设置了 chroot。
+    /// None 表示使用全局 VFS 根目录。
+    pub root_inode: Option<Arc<dyn vfs::IndexNode>>,
 }
 
 #[derive(Clone)]
@@ -198,6 +201,8 @@ pub struct TaskControlBlockInner {
     pub egid: u32,
     pub sgid: u32,
     pub fsgid: u32,
+    /// Process umask for file mode creation (default 0o022).
+    pub umask: u32,
     /// Linux supplementary group list, used by getgroups/setgroups compatibility.
     pub groups: Vec<u32>,
     /// Linux capability 兼容字段。当前内核只做权限语义判定，不实现真实权能隔离。
@@ -770,6 +775,7 @@ impl TaskControlBlock {
             Arc::new(Mutex::new(FsStatus {
                 working_inode: cwd,
                 working_path: String::from("/"),
+                root_inode: None,
             })),
             Arc::new(Mutex::new(UtsNamespace::new())),
             INIT_NET_NAMESPACE.clone(),
@@ -844,6 +850,7 @@ impl TaskControlBlock {
                 egid: 0,
                 sgid: 0,
                 fsgid: 0,
+                umask: 0o022,
                 groups: default_groups(),
                 cap_effective: TASK_CAP_FULL_SET,
                 cap_permitted: TASK_CAP_FULL_SET,
@@ -1289,6 +1296,7 @@ impl TaskControlBlock {
                 egid: parent_inner.egid,
                 sgid: parent_inner.sgid,
                 fsgid: parent_inner.fsgid,
+                umask: parent_inner.umask,
                 groups: parent_inner.groups.clone(),
                 cap_effective: parent_inner.cap_effective,
                 cap_permitted: parent_inner.cap_permitted,

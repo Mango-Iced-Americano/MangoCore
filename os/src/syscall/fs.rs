@@ -287,7 +287,8 @@ fn open_file_at(
     let follow_final = !flags.contains(OpenFlags::O_NOFOLLOW);
     match vfs_lookup(&start, path, follow_final) {
         Ok(target) => {
-            if !follow_final {
+            // O_PATH + O_NOFOLLOW opens the symlink itself, not ELOOP (Linux semantics)
+            if !follow_final && !flags.contains(OpenFlags::O_PATH) {
                 if let Ok(md) = target.metadata() {
                     if md.file_type == FileType::SymLink {
                         return Err(ELOOP);
@@ -348,10 +349,17 @@ fn open_file_at(
             let (parent, leaf) = vfs_lookup_parent_for_start(&start, path)?;
             let parent_meta = parent.metadata().map_err(|e| -(e as isize))?;
             check_parent_write_search_access(&parent, uid, gid)?;
+            let task = current_task().unwrap();
+            let umask = task.acquire_inner_lock().umask;
+            let effective_mode = mode & !vfs::InodeMode::from_bits_truncate(umask);
             let inode = parent
-                .create(&leaf, FileType::File, mode & vfs::InodeMode::S_IALLUGO)
+                .create(
+                    &leaf,
+                    FileType::File,
+                    effective_mode & vfs::InodeMode::S_IALLUGO,
+                )
                 .map_err(|e| -(e as isize))?;
-            apply_created_inode_metadata(&parent_meta, &inode, mode, uid, gid)?;
+            apply_created_inode_metadata(&parent_meta, &inode, effective_mode, uid, gid)?;
             vfs::File::new(inode, _open_flags_to_vfs_flags(flags)).map_err(|e| -(e as isize))
         }
         Err(errno) => Err(errno),
@@ -1808,19 +1816,34 @@ pub fn sys_readlinkat(dirfd: usize, pathname: *const u8, buf: *mut u8, bufsiz: u
     } else {
         let start = match resolve_start_inode(dirfd) { Ok(s) => s, Err(e) => return e, };
 
+        let (uid, gid) = open_subject_ids();
+        let perm_result = check_parent_search_access(&start, &path, uid, gid);
+        if perm_result != SUCCESS {
+            return perm_result;
+        }
+
         // 使用新 VFS 路径解析 (不跟随最终符号链接)
         let inode = match vfs_lookup(&start, &path, false) {
             Ok(inode) => inode,
             Err(errno) => return errno,
         };
         let md = match inode.metadata() {
-            Ok(md) => md,
-            Err(_) => return EINVAL,
+            Ok(md) => {
+                info!(
+                    "[sys_readlinkat] vfs_lookup OK: path={}, file_type={:?}, size={}",
+                    path, md.file_type, md.size
+                );
+                md
+            }
+            Err(e) => {
+                warn!("[sys_readlinkat] metadata() failed: path={}, err={:?}", path, e);
+                return EINVAL;
+            }
         };
         if md.file_type != vfs::FileType::SymLink {
-            warn!(
-                "[sys_readlinkat] not a symbolic link! dirfd: {}, path: {}",
-                dirfd as isize, path
+            debug!(
+                "[sys_readlinkat] not a symlink: path={}, file_type={:?}",
+                path, md.file_type
             );
             return EINVAL;
         }
@@ -1877,6 +1900,9 @@ pub fn sys_fstatat(dirfd: usize, path: *const u8, buf: *mut u8, flags: u32) -> i
         Ok(path) => path,
         Err(errno) => return errno,
     };
+    if let Err(errno) = validate_path_len(&path) {
+        return errno;
+    }
     let flags = match FstatatFlags::from_bits(flags) {
         Some(flags) => flags,
         None => {
@@ -1884,17 +1910,43 @@ pub fn sys_fstatat(dirfd: usize, path: *const u8, buf: *mut u8, flags: u32) -> i
             return EINVAL;
         }
     };
+    if path.is_empty() && !flags.contains(FstatatFlags::AT_EMPTY_PATH) {
+        return ENOENT;
+    }
 
     info!(
         "[sys_fstatat] dirfd: {}, path: {:?}, flags: {:?}",
         dirfd as isize, path, flags,
     );
 
+    // AT_EMPTY_PATH + empty path: stat the dirfd itself, skip path resolution
+    if path.is_empty() && flags.contains(FstatatFlags::AT_EMPTY_PATH) {
+        let inode = match resolve_start_inode(dirfd) {
+            Ok(inode) => inode,
+            Err(errno) => return errno,
+        };
+        let stat = match inode.metadata() {
+            Ok(meta) => metadata_to_stat(&meta),
+            Err(e) => return -(e as isize),
+        };
+        if UserPtrMut::new(buf as *mut Stat).write(token, &stat).is_err() {
+            return EFAULT;
+        }
+        return SUCCESS;
+    }
+
     let no_follow = flags.contains(FstatatFlags::AT_SYMLINK_NOFOLLOW);
     let start = match resolve_start_inode(dirfd) {
         Ok(inode) => inode,
         Err(errno) => return errno,
     };
+
+    // Check search permission on all parent directories (EACCES)
+    let (uid, gid) = open_subject_ids();
+    let perm_result = check_parent_search_access(&start, &path, uid, gid);
+    if perm_result != SUCCESS {
+        return perm_result;
+    }
 
     if no_follow {
         // AT_SYMLINK_NOFOLLOW: 使用新 VFS 路径解析
@@ -1934,6 +1986,9 @@ pub fn sys_statx(dirfd: usize, path: *const u8, flags: u32, mask: u32, buf: *mut
         Ok(path) => path,
         Err(errno) => return errno,
     };
+    if let Err(errno) = validate_path_len(&path) {
+        return errno;
+    }
     let flags = match FstatatFlags::from_bits(flags) {
         Some(flags) => flags,
         None => {
@@ -2077,6 +2132,9 @@ pub fn sys_statfs(pathname: *const u8, buf: *mut Statfs) -> isize {
     if path.is_empty() {
         return ENOENT;
     }
+    if let Err(errno) = validate_path_len(&path) {
+        return errno;
+    }
     let start = current_task()
         .map(|t| t.process.fs().lock().working_inode.inode.clone())
         .unwrap_or_else(|| crate::fs::vfs_root().mountpoint_root_inode());
@@ -2204,6 +2262,11 @@ pub fn sys_fchmodat(dirfd: usize, path: *const u8, mode: u32, _flags: u32) -> is
     };
     let file_type = meta.mode & vfs::InodeMode::S_IFMT;
     meta.mode = file_type | (new_mode & vfs::InodeMode::S_IALLUGO);
+    // Permission check: owner or root (DAC)
+    let (caller_uid, _) = open_subject_ids();
+    if caller_uid != 0 && caller_uid != meta.uid {
+        return EPERM;
+    }
     match inode.set_metadata(&meta) {
         Ok(()) => 0,
         Err(e) => -(e as isize),
@@ -2225,6 +2288,11 @@ pub fn sys_fchmod(fd: usize, mode: u32) -> isize {
     };
     let file_type = meta.mode & vfs::InodeMode::S_IFMT;
     meta.mode = file_type | (new_mode & vfs::InodeMode::S_IALLUGO);
+    // Permission check: owner or root (DAC)
+    let (caller_uid, _) = open_subject_ids();
+    if caller_uid != 0 && caller_uid != meta.uid {
+        return EPERM;
+    }
     match file.inode.set_metadata(&meta) {
         Ok(()) => 0,
         Err(e) => -(e as isize),
@@ -2258,6 +2326,20 @@ pub fn sys_fchown(fd: usize, owner: u32, group: u32) -> isize {
         Ok(meta) => meta,
         Err(e) => return -(e as isize),
     };
+
+    // Check read-only filesystem (must precede EPERM per Linux semantics:
+    // EROFS takes priority over EPERM)
+    if let Some(mnt) = file.inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+        if mnt.mount_fs.mount_flags().contains(vfs::MountFlags::RDONLY) {
+            return EROFS;
+        }
+    }
+
+    // Permission check: root-only (simplified DAC, no CAP_CHOWN)
+    let (caller_uid, _) = open_subject_ids();
+    if caller_uid != 0 {
+        return EPERM;
+    }
 
     let chown_requested = owner != CHOWN_ID_NO_CHANGE || group != CHOWN_ID_NO_CHANGE;
     if owner != CHOWN_ID_NO_CHANGE {
@@ -2313,7 +2395,7 @@ pub fn sys_fchownat(
         }
     } else {
         let start = if path.starts_with('/') {
-            vfs_root().mountpoint_root_inode()
+            crate::fs::current_root_inode()
         } else {
             match resolve_start_inode(dirfd) {
                 Ok(inode) => inode,
@@ -2330,6 +2412,20 @@ pub fn sys_fchownat(
         Ok(meta) => meta,
         Err(e) => return -(e as isize),
     };
+
+    // Check read-only filesystem (must precede EPERM per Linux semantics:
+    // EROFS takes priority over EPERM)
+    if let Some(mnt) = inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+        if mnt.mount_fs.mount_flags().contains(vfs::MountFlags::RDONLY) {
+            return EROFS;
+        }
+    }
+
+    // Permission check: root-only (simplified DAC, no CAP_CHOWN)
+    let (caller_uid, _) = open_subject_ids();
+    if caller_uid != 0 {
+        return EPERM;
+    }
 
     let chown_requested = owner != CHOWN_ID_NO_CHANGE || group != CHOWN_ID_NO_CHANGE;
     if owner != CHOWN_ID_NO_CHANGE {
@@ -2377,7 +2473,9 @@ pub fn sys_mknodat(dirfd: usize, path: *const u8, mode: u32, dev: usize) -> isiz
         m if m == vfs::InodeMode::S_IFREG || m == vfs::InodeMode::S_IFDIR => return EINVAL,
         _ => return EINVAL,
     };
-    let perm = vfs::InodeMode::from_bits_truncate(mode) & vfs::InodeMode::S_IALLUGO;
+    let perm = vfs::InodeMode::from_bits_truncate(mode)
+        & vfs::InodeMode::S_IALLUGO
+        & !vfs::InodeMode::from_bits_truncate(task.acquire_inner_lock().umask);
     // Only pass device number for CHR/BLK; FIFO/socket use 0
     let rdev = if file_type == FileType::CharDevice || file_type == FileType::BlockDevice {
         dev
@@ -2413,10 +2511,21 @@ pub fn sys_chdir(path: *const u8) -> isize {
     };
 
     let target = match vfs_lookup(&cwd_inode.inode, &path, true) {
-        Ok(inode) => match vfs::File::new(inode, vfs::FileFlags::O_RDONLY) {
-            Ok(f) => f,
-            Err(e) => return -(e as isize),
-        },
+        Ok(inode) => {
+            // ENOTDIR: chdir target must be a directory
+            let md = match inode.metadata() {
+                Ok(md) => md,
+                Err(e) => return -(e as isize),
+            };
+            if md.file_type != vfs::FileType::Dir {
+                warn!("[sys_chdir] not a directory: {:?}", md.file_type);
+                return ENOTDIR;
+            }
+            match vfs::File::new(inode, vfs::FileFlags::O_RDONLY) {
+                Ok(f) => f,
+                Err(e) => return -(e as isize),
+            }
+        }
         Err(errno) => return errno,
     };
     let working_path = target
@@ -2462,6 +2571,62 @@ pub fn sys_fchdir(fd: usize) -> isize {
     if let Some(path) = working_path {
         lock.working_path = path;
     }
+    SUCCESS
+}
+
+/// Change root directory for the calling process.
+/// Only root (uid == 0) may call this. The target must be a directory.
+pub fn sys_chroot(path: *const u8) -> isize {
+    let task = current_task().unwrap();
+    let token = task.get_user_token();
+    let path = match user_cstring(token, path) {
+        Ok(path) => path,
+        Err(errno) => return errno,
+    };
+    info!("[sys_chroot] path: {}", path);
+    if path.is_empty() {
+        return ENOENT;
+    }
+    if let Err(errno) = validate_path_len(&path) {
+        return errno;
+    }
+
+    // only root may chroot
+    let (uid, _) = open_subject_ids();
+    if uid != 0 {
+        return EPERM;
+    }
+
+    // clone cwd while not holding fs lock
+    let cwd_inode = {
+        let fs_ref = task.process.fs();
+        let lock = fs_ref.lock();
+        lock.working_inode.inode.clone()
+    };
+
+    let target = match vfs_lookup(&cwd_inode, &path, true) {
+        Ok(inode) => {
+            let md = match inode.metadata() {
+                Ok(md) => md,
+                Err(e) => return -(e as isize),
+            };
+            if md.file_type != vfs::FileType::Dir {
+                return ENOTDIR;
+            }
+            match vfs::File::new(inode, vfs::FileFlags::O_RDONLY) {
+                Ok(f) => f,
+                Err(e) => return -(e as isize),
+            }
+        }
+        Err(errno) => return errno,
+    };
+
+    let target_inode = target.inode.clone();
+    let fs_ref = task.process.fs();
+    let mut lock = fs_ref.lock();
+    lock.working_inode = target;
+    lock.working_path = alloc::string::String::from("/");
+    lock.root_inode = Some(target_inode);
     SUCCESS
 }
 
@@ -2632,6 +2797,24 @@ pub fn sys_renameat2(
         }
     }
 
+    // sticky bit check on source directory: only file owner, dir owner, or root may rename
+    let old_parent_meta = match old_parent.metadata() {
+        Ok(m) => m,
+        Err(e) => return -(e as isize),
+    };
+    if old_parent_meta.mode.contains(vfs::InodeMode::S_ISVTX) {
+        let (uid, _) = open_subject_ids();
+        if uid != 0 && uid != old_parent_meta.uid {
+            if let Ok(file_inode) = old_parent.find(&old_leaf) {
+                if let Ok(file_meta) = file_inode.metadata() {
+                    if uid != file_meta.uid {
+                        return -(SyscallErr::EACCES as isize);
+                    }
+                }
+            }
+        }
+    }
+
     match old_parent.rename(&old_leaf, &new_parent, &new_leaf, flags) {
         Ok(_) => SUCCESS,
         Err(e) => -(e as isize),
@@ -2711,7 +2894,9 @@ pub fn sys_mkdirat(dirfd: usize, path: *const u8, mode: u32) -> isize {
         Ok(result) => result,
         Err(errno) => return errno,
     };
-    let dir_mode = vfs::InodeMode::from_bits_truncate(mode) & vfs::InodeMode::S_IALLUGO;
+    let umask = task.acquire_inner_lock().umask;
+    let dir_mode =
+        vfs::InodeMode::from_bits_truncate(mode) & vfs::InodeMode::S_IALLUGO & !vfs::InodeMode::from_bits_truncate(umask);
     match parent.mkdir(&leaf, dir_mode) {
         Ok(_) => SUCCESS,
         Err(e) => -(e as isize),
@@ -2764,6 +2949,21 @@ pub fn sys_unlinkat(dirfd: usize, path: *const u8, flags: u32) -> isize {
     };
     if let Err(errno) = check_parent_write_search_access(&parent, uid, gid) {
         return errno;
+    }
+    // sticky bit: only file owner, dir owner, or root may delete from sticky dir
+    let parent_meta = match parent.metadata() {
+        Ok(m) => m,
+        Err(e) => return -(e as isize),
+    };
+    if parent_meta.mode.contains(vfs::InodeMode::S_ISVTX) && uid != 0 && uid != parent_meta.uid
+    {
+        if let Ok(file_inode) = parent.find(&leaf) {
+            if let Ok(file_meta) = file_inode.metadata() {
+                if uid != file_meta.uid {
+                    return EACCES;
+                }
+            }
+        }
     }
     let result = if flags.contains(UnlinkatFlags::AT_REMOVEDIR) {
         parent.rmdir(&leaf)
@@ -4448,14 +4648,13 @@ pub fn sys_pselect(
 /// umask() sets the calling process's file mode creation mask (umask) to
 /// mask & 0777 (i.e., only the file permission bits of mask are used),
 /// and returns the previous value of the mask.
-/// # WARNING
-/// In current implementation, umask is always 0. This syscall won't do anything.
 pub fn sys_umask(mask: u32) -> isize {
     info!("[sys_umask] mask: {:o}", mask);
-    warn!(
-        "[sys_umask] In current implementation, umask is always 0. This syscall won't do anything."
-    );
-    0
+    let task = current_task().unwrap();
+    let mut inner = task.acquire_inner_lock();
+    let old_mask = inner.umask;
+    inner.umask = mask & 0o777;
+    old_mask as isize
 }
 
 bitflags! {
@@ -4525,7 +4724,7 @@ fn check_parent_search_access(
 ) -> isize {
     let components = parse_path(path);
     let base = if path.starts_with('/') {
-        vfs_root().mountpoint_root_inode()
+        crate::fs::current_root_inode()
     } else {
         start.clone()
     };
@@ -4624,7 +4823,7 @@ pub fn sys_faccessat2(dirfd: usize, pathname: *const u8, mode: u32, flags: u32) 
 
     let nofollow = flags.contains(FaccessatFlags::AT_SYMLINK_NOFOLLOW);
     let start_inode = if pathname.starts_with('/') {
-        vfs_root().mountpoint_root_inode()
+        crate::fs::current_root_inode()
     } else {
         match resolve_start_inode(dirfd) {
             Ok(inode) => inode,
@@ -4778,7 +4977,7 @@ pub fn sys_truncate(path: *const u8, length: isize) -> isize {
     // Check parent directory search permission before lookup (correct errno order)
     let (uid, gid) = open_subject_ids();
     let start = if path.starts_with('/') {
-        vfs_root().mountpoint_root_inode()
+        crate::fs::current_root_inode()
     } else {
         cwd_inode.clone()
     };
@@ -4921,7 +5120,7 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: usize, linkpath: *const u8) ->
 
     let parent_dir = if components.len() == 1 {
         if linkpath_str.starts_with('/') {
-            crate::fs::vfs_root().mountpoint_root_inode()
+            crate::fs::current_root_inode()
         } else {
             start
         }
@@ -5010,7 +5209,7 @@ pub fn sys_linkat(
         Err(e) => return -(e as isize),
     };
     if meta.file_type == crate::fs::vfs::FileType::Dir {
-        return -(SyscallErr::EISDIR as isize);
+        return EPERM;
     }
 
     // 解析新路径：获取父目录 + 叶子名
@@ -5019,6 +5218,7 @@ pub fn sys_linkat(
         Err(errno) => return errno,
     };
 
+    // Resolve target parent directory and leaf name
     let components = crate::fs::parse_path(&newpath_str);
     let leaf = if let Some(n) = components.last() {
         n.clone()
@@ -5028,7 +5228,7 @@ pub fn sys_linkat(
 
     let parent_dir = if components.len() == 1 {
         if newpath_str.starts_with('/') {
-            crate::fs::vfs_root().mountpoint_root_inode()
+            crate::fs::current_root_inode()
         } else {
             new_start
         }
@@ -5053,6 +5253,16 @@ pub fn sys_linkat(
             Err(errno) => return errno,
         }
     };
+
+    // Check if leaf already exists in parent directory (mandated by Linux link(2): EEXIST)
+    // Use list_dirents() instead of find() — find can miss entries in some VFS edge cases
+    if let Ok(entries) = parent_dir.list_dirents() {
+        for (name, _ino, _ftype) in &entries {
+            if name == &leaf {
+                return EEXIST;
+            }
+        }
+    }
 
     match parent_dir.link(&leaf, &existing) {
         Ok(_) => SUCCESS,

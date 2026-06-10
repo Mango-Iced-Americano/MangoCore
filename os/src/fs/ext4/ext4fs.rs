@@ -1209,6 +1209,13 @@ impl IndexNode for layout::Ext4OSInode {
         if !alloc::sync::Arc::ptr_eq(&self.ext4fs, &other_ext4.ext4fs) { return Err(SyscallErr::EXDEV); }
         let parent_num = self.inode.lock().inode_num;
         let child_num = other_ext4.inode.lock().inode_num;
+
+        // 防重复：link(2) 要求 newname 不存在，已在目标目录检查
+        let mut find_result = Ext4DirSearchResult::new(Ext4DirEntry::default());
+        if self.ext4fs.dir_find_entry(parent_num, name, &mut find_result).is_ok() {
+            return Err(SyscallErr::EEXIST);
+        }
+
         let mut parent_ref = self.ext4fs.get_inode_ref(parent_num);
         let mut child_ref = self.ext4fs.get_inode_ref(child_num);
         self.ext4fs.link(&mut parent_ref, &mut child_ref, name).map_err(|_| SyscallErr::EIO)?;

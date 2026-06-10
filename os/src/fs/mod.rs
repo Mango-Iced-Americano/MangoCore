@@ -134,6 +134,8 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
             .expect("devfs: failed to register /dev/zero");
         devfs.add_dev("urandom", alloc::sync::Arc::new(crate::fs::dev::urandom::Urandom) as Arc<dyn self::vfs::IndexNode>)
             .expect("devfs: failed to register /dev/urandom");
+        devfs.add_dev("full", alloc::sync::Arc::new(crate::fs::dev::full::Full) as Arc<dyn self::vfs::IndexNode>)
+            .expect("devfs: failed to register /dev/full");
         devfs.add_dev("random", alloc::sync::Arc::new(crate::fs::dev::urandom::Urandom) as Arc<dyn self::vfs::IndexNode>)
             .expect("devfs: failed to register /dev/random");
         devfs.add_dev("console", crate::fs::dev::tty::TTY.clone() as Arc<dyn self::vfs::IndexNode>)
@@ -264,6 +266,32 @@ fn mount_common_filesystems(mfs: &Arc<self::vfs::MountFS>) {
         }
         mfs.add_mount(tmp_inode_id, tmpfs_mnt)
             .expect("failed to mount tmpfs at /tmp");
+    }
+    // ── /mnt — 挂载点目录 ──
+    {
+        root.find("mnt").unwrap_or_else(|_| {
+            root.create("mnt", self::vfs::FileType::Dir, self::vfs::InodeMode::from_bits_truncate(0o755))
+                .expect("failed to create /mnt")
+        });
+    }
+    // ── /run — 运行时文件 ──
+    {
+        root.find("run").unwrap_or_else(|_| {
+            root.create("run", self::vfs::FileType::Dir, self::vfs::InodeMode::from_bits_truncate(0o755))
+                .expect("failed to create /run")
+        });
+    }
+    // ── /var/tmp — 临时文件备选 ──
+    {
+        root.find("var").unwrap_or_else(|_| {
+            root.create("var", self::vfs::FileType::Dir, self::vfs::InodeMode::from_bits_truncate(0o755))
+                .expect("failed to create /var")
+        });
+        let var = root.find("var").unwrap();
+        var.find("tmp").unwrap_or_else(|_| {
+            var.create("tmp", self::vfs::FileType::Dir, self::vfs::InodeMode::from_bits_truncate(0o1777))
+                .expect("failed to create /var/tmp")
+        });
     }
 }
 
@@ -493,6 +521,18 @@ const MAX_SYMLINK_FOLLOW: usize = 40;
 
 /// 核心路径查找 — 支持符号链接跟随。
 ///
+/// Resolve the effective root inode for absolute paths:
+/// uses per-process chroot root if set, otherwise falls back to the global VFS root.
+pub fn current_root_inode() -> Arc<dyn self::vfs::IndexNode> {
+    crate::task::current_task()
+        .and_then(|t| {
+            let fs = t.process.fs();
+            let lock = fs.lock();
+            lock.root_inode.clone()
+        })
+        .unwrap_or_else(|| vfs_root().mountpoint_root_inode())
+}
+
 /// 对标 DragonOS `IndexNode::do_lookup_follow_symlink`。
 ///
 /// - `start`: 查找起点（对于绝对路径传入 `vfs_root().root_inode()`）
@@ -504,13 +544,20 @@ pub fn vfs_lookup(
     follow_final: bool,
 ) -> Result<Arc<dyn self::vfs::IndexNode>, isize> {
     use self::vfs::{FileType, FilePrivateData, IndexNode as _};
-    let root_inode: Arc<dyn self::vfs::IndexNode> = vfs_root().mountpoint_root_inode();
+    let root_inode: Arc<dyn self::vfs::IndexNode> = current_root_inode();
+
+    let has_trailing_slash = path.ends_with('/') && path != "/";
 
     let (mut current, mut components) = if let Some(rest) = path.strip_prefix('/') {
         (root_inode.clone(), parse_path(rest))
     } else {
         (start.clone(), parse_path(path))
     };
+
+    // Linux returns -1/ENOENT for empty path (including empty relative path)
+    if components.is_empty() && !path.starts_with('/') && path != "." && path != ".." {
+        return Err(crate::syscall::errno::ENOENT);
+    }
 
     let mut symlink_count = 0;
     let mut comp_idx = 0;
@@ -526,6 +573,11 @@ pub fn vfs_lookup(
 
         // ".." 解析：先尝试 find("..")，失败后通过 absolute_path() 回退
         if name == ".." {
+            // 在 chroot 根目录或全局根目录阻止 ".." 逃逸
+            if alloc::sync::Arc::ptr_eq(&current, &root_inode) {
+                comp_idx += 1;
+                continue;
+            }
             if let Ok(parent) = current.find("..") {
                 current = parent;
             } else if let Ok(abs) = current.absolute_path() {
@@ -542,6 +594,10 @@ pub fn vfs_lookup(
 
         let next = current.find(name).map_err(|e| -(e as isize))?;
         let file_type = next.metadata().map_err(|e| -(e as isize))?.file_type;
+
+        if !is_last && file_type != FileType::Dir && file_type != FileType::SymLink {
+            return Err(crate::syscall::errno::ENOTDIR);
+        }
 
         if is_last && !follow_final && file_type == FileType::SymLink {
             return Ok(next);
@@ -605,13 +661,19 @@ pub fn vfs_lookup(
         }
     }
 
+    if has_trailing_slash {
+        let final_type = current.metadata().map_err(|e| -(e as isize))?.file_type;
+        if final_type != FileType::Dir {
+            return Err(crate::syscall::errno::ENOTDIR);
+        }
+    }
+
     Ok(current)
 }
 
 /// 使用新 VFS 解析绝对路径，跟随所有符号链接，返回目标 IndexNode。
 pub fn vfs_lookup_absolute(path: &str) -> Result<Arc<dyn self::vfs::IndexNode>, isize> {
-    let root: Arc<dyn self::vfs::IndexNode> = vfs_root().mountpoint_root_inode();
-    vfs_lookup(&root, path, true)
+    vfs_lookup(&current_root_inode(), path, true)
 }
 
 /// 使用新 VFS 解析路径，返回 (父目录 IndexNode, 最后一级文件名)。
@@ -644,8 +706,7 @@ pub fn vfs_lookup_parent(path: &str) -> Result<(Arc<dyn self::vfs::IndexNode>, S
         }
     };
 
-    let root: Arc<dyn self::vfs::IndexNode> = vfs_root().mountpoint_root_inode();
-    vfs_lookup(&root, &parent_path, true).map(|parent| (parent, leaf_name))
+    vfs_lookup(&current_root_inode(), &parent_path, true).map(|parent| (parent, leaf_name))
 }
 
 /// `vfs_lookup_parent` 的变体：支持指定起始 inode（用于相对路径+dirfd 场景）
@@ -659,7 +720,7 @@ pub fn vfs_lookup_parent_for_start(
 
     let parent_dir = if components.len() == 1 {
         if path.starts_with('/') {
-            vfs_root().mountpoint_root_inode()
+            current_root_inode()
         } else {
             start.clone()
         }
@@ -742,6 +803,7 @@ root:x:0:0:root:/root:/bin/sh\n\
 nobody:x:65534:65534:nobody:/nonexistent:/sbin/nologin\n";
     const GROUP: &str = "\
 root:x:0:\n\
+daemon:x:1:\n\
 nogroup:x:65534:nobody\n\
 nobody:x:65534:\n";
     const HOSTS: &str = "\
