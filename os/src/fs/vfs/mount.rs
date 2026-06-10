@@ -760,6 +760,21 @@ impl IndexNode for MountFSInode {
         self.inner_inode.set_metadata(metadata)
     }
 
+    fn setxattr(
+        &self,
+        name: &str,
+        value: &[u8],
+        flags: u32,
+    ) -> Result<usize, SyscallErr> {
+        self.ensure_mount_writable()?;
+        self.inner_inode.setxattr(name, value, flags)
+    }
+
+    fn removexattr(&self, name: &str) -> Result<usize, SyscallErr> {
+        self.ensure_mount_writable()?;
+        self.inner_inode.removexattr(name)
+    }
+
     fn get_entry_name(&self, ino: InodeId) -> Result<String, SyscallErr> {
         if !self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
             if let Ok(parent_md) = self.inner_inode.metadata() {

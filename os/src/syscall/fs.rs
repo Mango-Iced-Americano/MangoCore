@@ -2372,6 +2372,13 @@ pub fn sys_fchmodat(dirfd: usize, path: *const u8, mode: u32, _flags: u32) -> is
         Ok(m) => m,
         Err(e) => return -(e as isize),
     };
+    // Check read-only filesystem (must precede EPERM per Linux semantics:
+    // EROFS takes priority over EPERM)
+    if let Some(mnt) = inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+        if mnt.mount_fs.mount_flags().contains(vfs::MountFlags::RDONLY) {
+            return EROFS;
+        }
+    }
     let file_type = meta.mode & vfs::InodeMode::S_IFMT;
     meta.mode = file_type | (new_mode & vfs::InodeMode::S_IALLUGO);
     // Permission check: owner or root (DAC)
@@ -2398,6 +2405,13 @@ pub fn sys_fchmod(fd: usize, mode: u32) -> isize {
         Ok(m) => m,
         Err(e) => return -(e as isize),
     };
+    // Check read-only filesystem (must precede EPERM per Linux semantics:
+    // EROFS takes priority over EPERM)
+    if let Some(mnt) = file.inode.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+        if mnt.mount_fs.mount_flags().contains(vfs::MountFlags::RDONLY) {
+            return EROFS;
+        }
+    }
     let file_type = meta.mode & vfs::InodeMode::S_IFMT;
     meta.mode = file_type | (new_mode & vfs::InodeMode::S_IALLUGO);
     // Permission check: owner or root (DAC)
@@ -3624,6 +3638,11 @@ pub fn sys_mount(
     mountflags_raw: usize,
     data: *const u8,
 ) -> isize {
+    // Permission check: only root can mount
+    let (uid, _) = open_subject_ids();
+    if uid != 0 {
+        return EPERM;
+    }
     if target.is_null() {
         return EINVAL;
     }
@@ -4090,7 +4109,7 @@ pub fn sys_mount(
                     return SUCCESS;
                 }
                 "exfat" | "btrfs" | "xfs" | "ntfs" => {
-                    return -(SyscallErr::EINVAL as isize)
+                    return -(SyscallErr::ENODEV as isize)
                 }
                 _ => return -(SyscallErr::ENODEV as isize),
             }
