@@ -3122,6 +3122,11 @@ pub fn sys_umount2(target: *const u8, flags: u32) -> isize {
     if target.is_null() {
         return EINVAL;
     }
+    // Permission check: umount requires root (CAP_SYS_ADMIN)
+    let task = current_task().unwrap();
+    if task.acquire_inner_lock().euid != 0 {
+        return EPERM;
+    }
     let token = current_user_token();
     let target = match user_cstring(token, target) {
         Ok(target) => target,
@@ -3638,9 +3643,10 @@ pub fn sys_mount(
     mountflags_raw: usize,
     data: *const u8,
 ) -> isize {
-    // Permission check: only root can mount
-    let (uid, _) = open_subject_ids();
-    if uid != 0 {
+    // Permission check: mount requires root (CAP_SYS_ADMIN)
+    let task = current_task().unwrap();
+    let is_root = task.acquire_inner_lock().euid == 0;
+    if !is_root {
         return EPERM;
     }
     if target.is_null() {
@@ -4210,7 +4216,9 @@ pub fn sys_utimensat(
             if let Some(mtime) = mtime {
                 metadata.mtime = TimeSpec::from_s(mtime);
             }
-            let _ = _file.inode.set_metadata(&metadata);
+            if let Err(e) = _file.inode.set_metadata(&metadata) {
+                return -(e as isize);
+            }
         }
     }
     SUCCESS

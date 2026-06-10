@@ -628,6 +628,12 @@ impl IndexNode for MountFSInode {
     ) -> Result<(), SyscallErr> {
         self.ensure_mount_writable()?;
         self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
+
+        // Also check destination parent mount is writable
+        if let Some(new_mnt) = new_parent.as_any_ref().downcast_ref::<MountFSInode>() {
+            new_mnt.ensure_mount_writable()?;
+        }
+
         let renamed_ino = self
             .inner_inode
             .find(old_name)
