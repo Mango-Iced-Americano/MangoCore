@@ -5433,16 +5433,34 @@ fn validate_xattr_name(name: &str) -> Result<&str, isize> {
     if name.len() <= XATTR_USER_PREFIX.len() {
         return Err(EINVAL);
     }
+    if name.len() > 255 {
+        return Err(ERANGE);
+    }
     Ok(name)
 }
 
+fn validate_xattr_flags(flags: u32) -> Result<(), isize> {
+    const XATTR_CREATE: u32 = 1;
+    const XATTR_REPLACE: u32 = 2;
+    match flags {
+        0 | XATTR_CREATE | XATTR_REPLACE => Ok(()),
+        _ => Err(EINVAL),
+    }
+}
+
 fn resolve_path_inode(path: &str, follow_final: bool) -> Result<Arc<dyn vfs::IndexNode>, isize> {
-    let start = if path.starts_with('/') {
-        crate::fs::current_root_inode()
-    } else {
-        let task = current_task().unwrap();
-        task.process.fs().lock().working_inode.inode.clone()
+    if let Err(errno) = validate_path_len(path) {
+        return Err(errno);
+    }
+    let start = match resolve_start_inode(AT_FDCWD) {
+        Ok(inode) => inode,
+        Err(errno) => return Err(errno),
     };
+    let (uid, gid) = open_subject_ids();
+    let perm_err = check_parent_search_access(&start, path, uid, gid);
+    if perm_err != SUCCESS {
+        return Err(perm_err);
+    }
     crate::fs::vfs_lookup(&start, path, follow_final)
 }
 
@@ -5473,6 +5491,9 @@ pub fn sys_setxattr(
         Ok(n) => n,
         Err(e) => return e,
     };
+    if let Err(e) = validate_xattr_flags(flags) {
+        return e;
+    }
     let value_slice = if size > 0 {
         let reader = match UserBufferReader::new(token, value, size) {
             Ok(r) => r,
@@ -5517,6 +5538,9 @@ pub fn sys_lsetxattr(
         Ok(n) => n,
         Err(e) => return e,
     };
+    if let Err(e) = validate_xattr_flags(flags) {
+        return e;
+    }
     let value_slice = if size > 0 {
         let reader = match UserBufferReader::new(token, value, size) {
             Ok(r) => r,
@@ -5551,6 +5575,9 @@ pub fn sys_fsetxattr(fd: usize, name: *const u8, value: *const u8, size: usize, 
         Ok(n) => n,
         Err(e) => return e,
     };
+    if let Err(e) = validate_xattr_flags(flags) {
+        return e;
+    }
     let value_slice = if size > 0 {
         let reader = match UserBufferReader::new(token, value, size) {
             Ok(r) => r,
@@ -5607,7 +5634,8 @@ pub fn sys_getxattr(
         }
     }
 
-    let mut kernel_buf = alloc::vec![0u8; size];
+    let buf_size = size.min(MAX_SYSCALL_BUFFER_SIZE);
+    let mut kernel_buf = alloc::vec![0u8; buf_size];
     match inode.getxattr(validated, &mut kernel_buf) {
         Ok(len) => {
             let mut writer = match UserBufferWriter::new(token, value, len) {
@@ -5656,7 +5684,8 @@ pub fn sys_lgetxattr(
         }
     }
 
-    let mut kernel_buf = alloc::vec![0u8; size];
+    let buf_size = size.min(MAX_SYSCALL_BUFFER_SIZE);
+    let mut kernel_buf = alloc::vec![0u8; buf_size];
     match inode.getxattr(validated, &mut kernel_buf) {
         Ok(len) => {
             let mut writer = match UserBufferWriter::new(token, value, len) {
@@ -5696,7 +5725,8 @@ pub fn sys_fgetxattr(fd: usize, name: *const u8, value: *mut u8, size: usize) ->
         }
     }
 
-    let mut kernel_buf = alloc::vec![0u8; size];
+    let buf_size = size.min(MAX_SYSCALL_BUFFER_SIZE);
+    let mut kernel_buf = alloc::vec![0u8; buf_size];
     match inode.getxattr(validated, &mut kernel_buf) {
         Ok(len) => {
             let mut writer = match UserBufferWriter::new(token, value, len) {
@@ -5732,7 +5762,8 @@ pub fn sys_listxattr(path: *const u8, list: *mut u8, size: usize) -> isize {
         }
     }
 
-    let mut kernel_buf = alloc::vec![0u8; size];
+    let buf_size = size.min(MAX_SYSCALL_BUFFER_SIZE);
+    let mut kernel_buf = alloc::vec![0u8; buf_size];
     match inode.listxattr(&mut kernel_buf) {
         Ok(len) => {
             let mut writer = match UserBufferWriter::new(token, list, len) {
@@ -5768,7 +5799,8 @@ pub fn sys_llistxattr(path: *const u8, list: *mut u8, size: usize) -> isize {
         }
     }
 
-    let mut kernel_buf = alloc::vec![0u8; size];
+    let buf_size = size.min(MAX_SYSCALL_BUFFER_SIZE);
+    let mut kernel_buf = alloc::vec![0u8; buf_size];
     match inode.listxattr(&mut kernel_buf) {
         Ok(len) => {
             let mut writer = match UserBufferWriter::new(token, list, len) {
@@ -5799,7 +5831,8 @@ pub fn sys_flistxattr(fd: usize, list: *mut u8, size: usize) -> isize {
         }
     }
 
-    let mut kernel_buf = alloc::vec![0u8; size];
+    let buf_size = size.min(MAX_SYSCALL_BUFFER_SIZE);
+    let mut kernel_buf = alloc::vec![0u8; buf_size];
     match inode.listxattr(&mut kernel_buf) {
         Ok(len) => {
             let mut writer = match UserBufferWriter::new(token, list, len) {

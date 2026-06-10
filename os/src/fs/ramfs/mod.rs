@@ -859,6 +859,9 @@ impl IndexNode for LockedRamFSInode {
         if total == 0 {
             return Ok(0);
         }
+        if buf.is_empty() {
+            return Ok(total);
+        }
         if buf.len() < total {
             return Err(SyscallErr::ERANGE);
         }
