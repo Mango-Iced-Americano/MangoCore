@@ -380,13 +380,32 @@ pub trait IndexNode: Any + Send + Sync + Debug {
     }
 
     /// 获取扩展属性
+    /// 返回属性值的字节数；属性不存在→ENODATA；buf太小→ERANGE
     fn getxattr(&self, _name: &str, _buf: &mut [u8]) -> Result<usize, SyscallErr> {
-        Err(SyscallErr::ENOSYS)
+        Err(SyscallErr::EOPNOTSUPP)
     }
 
     /// 设置扩展属性
-    fn setxattr(&self, _name: &str, _value: &[u8]) -> Result<usize, SyscallErr> {
-        Err(SyscallErr::ENOSYS)
+    /// flags: XATTR_CREATE(1) / XATTR_REPLACE(2) / 0
+    fn setxattr(
+        &self,
+        _name: &str,
+        _value: &[u8],
+        _flags: u32,
+    ) -> Result<usize, SyscallErr> {
+        Err(SyscallErr::EOPNOTSUPP)
+    }
+
+    /// 列出所有扩展属性的名称（null-separated）
+    /// 返回名称列表的总字节数；buf太小→ERANGE
+    fn listxattr(&self, _buf: &mut [u8]) -> Result<usize, SyscallErr> {
+        Err(SyscallErr::EOPNOTSUPP)
+    }
+
+    /// 删除扩展属性
+    /// 返回 0 表示成功；属性不存在→ENODATA
+    fn removexattr(&self, _name: &str) -> Result<usize, SyscallErr> {
+        Err(SyscallErr::EOPNOTSUPP)
     }
 }
 

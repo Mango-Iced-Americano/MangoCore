@@ -96,6 +96,8 @@ pub struct TmpFSInode {
     children: BTreeMap<String, Arc<LockedTmpFSInode>>,
     /// PageCache（普通文件和符号链接在创建时初始化）
     page_cache: Option<Arc<PageCache>>,
+    /// 扩展属性 (user.* only)
+    xattrs: BTreeMap<String, Vec<u8>>,
     /// 逻辑文件大小（字节）
     file_size: usize,
     /// 元数据
@@ -123,6 +125,7 @@ impl TmpFSInode {
             self_ref: Weak::default(),
             children: BTreeMap::new(),
             page_cache: None,
+            xattrs: BTreeMap::new(),
             file_size: 0,
             metadata: Metadata {
                 dev_id: 0,
@@ -524,6 +527,7 @@ impl IndexNode for LockedTmpFSInode {
             self_ref: Weak::default(),
             children: BTreeMap::new(),
             page_cache: None,
+            xattrs: BTreeMap::new(),
             file_size: 0,
             metadata: Metadata {
                 dev_id: 0,
@@ -1038,6 +1042,76 @@ impl IndexNode for LockedTmpFSInode {
             0 => Err(SyscallErr::ENOENT),
             1 => Ok(keys.remove(0)),
             _ => panic!("tmpfs get_entry_name: multiple entries with same inode_id"),
+        }
+    }
+
+    fn getxattr(&self, name: &str, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+        let inode = self.0.lock();
+        let value = inode.xattrs.get(name).ok_or(SyscallErr::ENODATA)?;
+        let len = value.len();
+        if buf.is_empty() {
+            return Ok(len);
+        }
+        if buf.len() < len {
+            return Err(SyscallErr::ERANGE);
+        }
+        buf[..len].copy_from_slice(value);
+        Ok(len)
+    }
+
+    fn setxattr(
+        &self,
+        name: &str,
+        value: &[u8],
+        flags: u32,
+    ) -> Result<usize, SyscallErr> {
+        const XATTR_CREATE: u32 = 1;
+        const XATTR_REPLACE: u32 = 2;
+        let mut inode = self.0.lock();
+        let exists = inode.xattrs.contains_key(name);
+        if flags & XATTR_CREATE != 0 {
+            if exists {
+                return Err(SyscallErr::EEXIST);
+            }
+        }
+        if flags & XATTR_REPLACE != 0 {
+            if !exists {
+                return Err(SyscallErr::ENODATA);
+            }
+        }
+        inode.xattrs.insert(String::from(name), value.to_vec());
+        Ok(0)
+    }
+
+    fn listxattr(&self, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+        let inode = self.0.lock();
+        let names: Vec<&String> = inode.xattrs.keys().collect();
+        let mut total = 0usize;
+        for name in &names {
+            total += name.len() + 1;
+        }
+        if total == 0 {
+            return Ok(0);
+        }
+        if buf.len() < total {
+            return Err(SyscallErr::ERANGE);
+        }
+        let mut pos = 0;
+        for name in &names {
+            let bytes = name.as_bytes();
+            buf[pos..pos + bytes.len()].copy_from_slice(bytes);
+            pos += bytes.len();
+            buf[pos] = 0;
+            pos += 1;
+        }
+        Ok(total)
+    }
+
+    fn removexattr(&self, name: &str) -> Result<usize, SyscallErr> {
+        let mut inode = self.0.lock();
+        match inode.xattrs.remove(name) {
+            Some(_) => Ok(0),
+            None => Err(SyscallErr::ENODATA),
         }
     }
 

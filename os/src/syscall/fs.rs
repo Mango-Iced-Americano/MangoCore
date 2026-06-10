@@ -5421,3 +5421,470 @@ pub fn sys_linkat(
         Err(e) => -(e as isize),
     }
 }
+
+// ── xattr (Extended Attributes) ───────────────────────────────────────
+
+const XATTR_USER_PREFIX: &str = "user.";
+
+fn validate_xattr_name(name: &str) -> Result<&str, isize> {
+    if !name.starts_with("user.") {
+        return Err(ENOTSUP);
+    }
+    if name.len() <= XATTR_USER_PREFIX.len() {
+        return Err(EINVAL);
+    }
+    Ok(name)
+}
+
+fn resolve_path_inode(path: &str, follow_final: bool) -> Result<Arc<dyn vfs::IndexNode>, isize> {
+    let start = if path.starts_with('/') {
+        crate::fs::current_root_inode()
+    } else {
+        let task = current_task().unwrap();
+        task.process.fs().lock().working_inode.inode.clone()
+    };
+    crate::fs::vfs_lookup(&start, path, follow_final)
+}
+
+fn fd_to_inode(fd: usize) -> Result<Arc<dyn vfs::IndexNode>, isize> {
+    let task = current_task().unwrap();
+    let files_ref = task.process.files();
+    let fd_table = files_ref.lock();
+    fd_table.get_file(fd).map_err(|e| -(e as isize)).map(|f| f.inode.clone())
+}
+
+pub fn sys_setxattr(
+    path: *const u8,
+    name: *const u8,
+    value: *const u8,
+    size: usize,
+    flags: u32,
+) -> isize {
+    let token = current_user_token();
+    let path_str = match user_cstring(token, path) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let name_str = match user_cstring(token, name) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let validated = match validate_xattr_name(&name_str) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    let value_slice = if size > 0 {
+        let reader = match UserBufferReader::new(token, value, size) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+        match reader.read_to_vec(MAX_SYSCALL_BUFFER_SIZE) {
+            Ok(v) => v,
+            Err(e) => return e,
+        }
+    } else {
+        alloc::vec![]
+    };
+
+    let inode = match resolve_path_inode(&path_str, true) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+
+    match inode.setxattr(validated, &value_slice, flags) {
+        Ok(_) => SUCCESS,
+        Err(e) => -(e as isize),
+    }
+}
+
+pub fn sys_lsetxattr(
+    path: *const u8,
+    name: *const u8,
+    value: *const u8,
+    size: usize,
+    flags: u32,
+) -> isize {
+    let token = current_user_token();
+    let path_str = match user_cstring(token, path) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let name_str = match user_cstring(token, name) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let validated = match validate_xattr_name(&name_str) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    let value_slice = if size > 0 {
+        let reader = match UserBufferReader::new(token, value, size) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+        match reader.read_to_vec(MAX_SYSCALL_BUFFER_SIZE) {
+            Ok(v) => v,
+            Err(e) => return e,
+        }
+    } else {
+        alloc::vec![]
+    };
+
+    let inode = match resolve_path_inode(&path_str, false) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+
+    match inode.setxattr(validated, &value_slice, flags) {
+        Ok(_) => SUCCESS,
+        Err(e) => -(e as isize),
+    }
+}
+
+pub fn sys_fsetxattr(fd: usize, name: *const u8, value: *const u8, size: usize, flags: u32) -> isize {
+    let token = current_user_token();
+    let name_str = match user_cstring(token, name) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let validated = match validate_xattr_name(&name_str) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    let value_slice = if size > 0 {
+        let reader = match UserBufferReader::new(token, value, size) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+        match reader.read_to_vec(MAX_SYSCALL_BUFFER_SIZE) {
+            Ok(v) => v,
+            Err(e) => return e,
+        }
+    } else {
+        alloc::vec![]
+    };
+    let inode = match fd_to_inode(fd) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+
+    match inode.setxattr(validated, &value_slice, flags) {
+        Ok(_) => SUCCESS,
+        Err(e) => -(e as isize),
+    }
+}
+
+pub fn sys_getxattr(
+    path: *const u8,
+    name: *const u8,
+    value: *mut u8,
+    size: usize,
+) -> isize {
+    let token = current_user_token();
+    let path_str = match user_cstring(token, path) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let name_str = match user_cstring(token, name) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let validated = match validate_xattr_name(&name_str) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+
+    let inode = match resolve_path_inode(&path_str, true) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+
+    if size == 0 {
+        let mut dummy = [];
+        match inode.getxattr(validated, &mut dummy) {
+            Ok(len) => return len as isize,
+            Err(e) => return -(e as isize),
+        }
+    }
+
+    let mut kernel_buf = alloc::vec![0u8; size];
+    match inode.getxattr(validated, &mut kernel_buf) {
+        Ok(len) => {
+            let mut writer = match UserBufferWriter::new(token, value, len) {
+                Ok(w) => w,
+                Err(e) => return e,
+            };
+            match writer.write_from(&kernel_buf[..len]) {
+                Ok(_) => len as isize,
+                Err(e) => e,
+            }
+        }
+        Err(e) => -(e as isize),
+    }
+}
+
+pub fn sys_lgetxattr(
+    path: *const u8,
+    name: *const u8,
+    value: *mut u8,
+    size: usize,
+) -> isize {
+    let token = current_user_token();
+    let path_str = match user_cstring(token, path) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let name_str = match user_cstring(token, name) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let validated = match validate_xattr_name(&name_str) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+
+    let inode = match resolve_path_inode(&path_str, false) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+
+    if size == 0 {
+        let mut dummy = [];
+        match inode.getxattr(validated, &mut dummy) {
+            Ok(len) => return len as isize,
+            Err(e) => return -(e as isize),
+        }
+    }
+
+    let mut kernel_buf = alloc::vec![0u8; size];
+    match inode.getxattr(validated, &mut kernel_buf) {
+        Ok(len) => {
+            let mut writer = match UserBufferWriter::new(token, value, len) {
+                Ok(w) => w,
+                Err(e) => return e,
+            };
+            match writer.write_from(&kernel_buf[..len]) {
+                Ok(_) => len as isize,
+                Err(e) => e,
+            }
+        }
+        Err(e) => -(e as isize),
+    }
+}
+
+pub fn sys_fgetxattr(fd: usize, name: *const u8, value: *mut u8, size: usize) -> isize {
+    let token = current_user_token();
+    let name_str = match user_cstring(token, name) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let validated = match validate_xattr_name(&name_str) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+
+    let inode = match fd_to_inode(fd) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+
+    if size == 0 {
+        let mut dummy = [];
+        match inode.getxattr(validated, &mut dummy) {
+            Ok(len) => return len as isize,
+            Err(e) => return -(e as isize),
+        }
+    }
+
+    let mut kernel_buf = alloc::vec![0u8; size];
+    match inode.getxattr(validated, &mut kernel_buf) {
+        Ok(len) => {
+            let mut writer = match UserBufferWriter::new(token, value, len) {
+                Ok(w) => w,
+                Err(e) => return e,
+            };
+            match writer.write_from(&kernel_buf[..len]) {
+                Ok(_) => len as isize,
+                Err(e) => e,
+            }
+        }
+        Err(e) => -(e as isize),
+    }
+}
+
+pub fn sys_listxattr(path: *const u8, list: *mut u8, size: usize) -> isize {
+    let token = current_user_token();
+    let path_str = match user_cstring(token, path) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+
+    let inode = match resolve_path_inode(&path_str, true) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+
+    if size == 0 {
+        let mut dummy = [];
+        match inode.listxattr(&mut dummy) {
+            Ok(len) => return len as isize,
+            Err(e) => return -(e as isize),
+        }
+    }
+
+    let mut kernel_buf = alloc::vec![0u8; size];
+    match inode.listxattr(&mut kernel_buf) {
+        Ok(len) => {
+            let mut writer = match UserBufferWriter::new(token, list, len) {
+                Ok(w) => w,
+                Err(e) => return e,
+            };
+            match writer.write_from(&kernel_buf[..len]) {
+                Ok(_) => len as isize,
+                Err(e) => e,
+            }
+        }
+        Err(e) => -(e as isize),
+    }
+}
+
+pub fn sys_llistxattr(path: *const u8, list: *mut u8, size: usize) -> isize {
+    let token = current_user_token();
+    let path_str = match user_cstring(token, path) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+
+    let inode = match resolve_path_inode(&path_str, false) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+
+    if size == 0 {
+        let mut dummy = [];
+        match inode.listxattr(&mut dummy) {
+            Ok(len) => return len as isize,
+            Err(e) => return -(e as isize),
+        }
+    }
+
+    let mut kernel_buf = alloc::vec![0u8; size];
+    match inode.listxattr(&mut kernel_buf) {
+        Ok(len) => {
+            let mut writer = match UserBufferWriter::new(token, list, len) {
+                Ok(w) => w,
+                Err(e) => return e,
+            };
+            match writer.write_from(&kernel_buf[..len]) {
+                Ok(_) => len as isize,
+                Err(e) => e,
+            }
+        }
+        Err(e) => -(e as isize),
+    }
+}
+
+pub fn sys_flistxattr(fd: usize, list: *mut u8, size: usize) -> isize {
+    let token = current_user_token();
+    let inode = match fd_to_inode(fd) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+
+    if size == 0 {
+        let mut dummy = [];
+        match inode.listxattr(&mut dummy) {
+            Ok(len) => return len as isize,
+            Err(e) => return -(e as isize),
+        }
+    }
+
+    let mut kernel_buf = alloc::vec![0u8; size];
+    match inode.listxattr(&mut kernel_buf) {
+        Ok(len) => {
+            let mut writer = match UserBufferWriter::new(token, list, len) {
+                Ok(w) => w,
+                Err(e) => return e,
+            };
+            match writer.write_from(&kernel_buf[..len]) {
+                Ok(_) => len as isize,
+                Err(e) => e,
+            }
+        }
+        Err(e) => -(e as isize),
+    }
+}
+
+pub fn sys_removexattr(path: *const u8, name: *const u8) -> isize {
+    let token = current_user_token();
+    let path_str = match user_cstring(token, path) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let name_str = match user_cstring(token, name) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let validated = match validate_xattr_name(&name_str) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+
+    let inode = match resolve_path_inode(&path_str, true) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+
+    match inode.removexattr(validated) {
+        Ok(_) => SUCCESS,
+        Err(e) => -(e as isize),
+    }
+}
+
+pub fn sys_lremovexattr(path: *const u8, name: *const u8) -> isize {
+    let token = current_user_token();
+    let path_str = match user_cstring(token, path) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let name_str = match user_cstring(token, name) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let validated = match validate_xattr_name(&name_str) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+
+    let inode = match resolve_path_inode(&path_str, false) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+
+    match inode.removexattr(validated) {
+        Ok(_) => SUCCESS,
+        Err(e) => -(e as isize),
+    }
+}
+
+pub fn sys_fremovexattr(fd: usize, name: *const u8) -> isize {
+    let token = current_user_token();
+    let name_str = match user_cstring(token, name) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let validated = match validate_xattr_name(&name_str) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+
+    let inode = match fd_to_inode(fd) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+
+    match inode.removexattr(validated) {
+        Ok(_) => SUCCESS,
+        Err(e) => -(e as isize),
+    }
+}

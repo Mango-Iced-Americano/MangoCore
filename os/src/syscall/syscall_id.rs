@@ -1,3 +1,15 @@
+pub const SYSCALL_SETXATTR: usize = 5;
+pub const SYSCALL_LSETXATTR: usize = 6;
+pub const SYSCALL_FSETXATTR: usize = 7;
+pub const SYSCALL_GETXATTR: usize = 8;
+pub const SYSCALL_LGETXATTR: usize = 9;
+pub const SYSCALL_FGETXATTR: usize = 10;
+pub const SYSCALL_LISTXATTR: usize = 11;
+pub const SYSCALL_LLISTXATTR: usize = 12;
+pub const SYSCALL_FLISTXATTR: usize = 13;
+pub const SYSCALL_REMOVEXATTR: usize = 14;
+pub const SYSCALL_LREMOVEXATTR: usize = 15;
+pub const SYSCALL_FREMOVEXATTR: usize = 16;
 pub const SYSCALL_GETCWD: usize = 17;
 pub const SYSCALL_EVENTFD2: usize = 19;
 pub const SYSCALL_EPOLL_CREATE1: usize = 20;
