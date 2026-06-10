@@ -2596,6 +2596,7 @@ pub fn sys_mknodat(dirfd: usize, path: *const u8, mode: u32, dev: usize) -> isiz
         m if m == vfs::InodeMode::S_IFBLK => FileType::BlockDevice,
         m if m == vfs::InodeMode::S_IFCHR => FileType::CharDevice,
         m if m == vfs::InodeMode::S_IFSOCK => FileType::Socket,
+        m if m == vfs::InodeMode::S_IFREG || m.is_empty() => FileType::File,
         m if m == vfs::InodeMode::S_IFDIR => return EINVAL,
         _ => return EINVAL,
     };
@@ -5488,14 +5489,32 @@ fn resolve_path_inode(path: &str, follow_final: bool) -> Result<Arc<dyn vfs::Ind
     if perm_err != SUCCESS {
         return Err(perm_err);
     }
-    crate::fs::vfs_lookup(&start, path, follow_final)
+    let inode = crate::fs::vfs_lookup(&start, path, follow_final)?;
+
+    // xattrs are only valid on regular files and directories
+    if let Ok(md) = inode.metadata() {
+        if md.file_type != FileType::File && md.file_type != FileType::Dir {
+            return Err(EOPNOTSUPP);
+        }
+    }
+
+    Ok(inode)
 }
 
 fn fd_to_inode(fd: usize) -> Result<Arc<dyn vfs::IndexNode>, isize> {
     let task = current_task().unwrap();
     let files_ref = task.process.files();
     let fd_table = files_ref.lock();
-    fd_table.get_file(fd).map_err(|e| -(e as isize)).map(|f| f.inode.clone())
+    let file = fd_table.get_file(fd).map_err(|e| -(e as isize))?;
+    let inode = file.inode.clone();
+    drop(fd_table);
+
+    // xattrs are only valid on regular files and directories
+    if file.file_type() != FileType::File && file.file_type() != FileType::Dir {
+        return Err(EOPNOTSUPP);
+    }
+
+    Ok(inode)
 }
 
 pub fn sys_setxattr(

@@ -776,6 +776,14 @@ impl IndexNode for MountFSInode {
         self.inner_inode.setxattr(name, value, flags)
     }
 
+    fn getxattr(&self, name: &str, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+        self.inner_inode.getxattr(name, buf)
+    }
+
+    fn listxattr(&self, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+        self.inner_inode.listxattr(buf)
+    }
+
     fn removexattr(&self, name: &str) -> Result<usize, SyscallErr> {
         self.ensure_mount_writable()?;
         self.inner_inode.removexattr(name)
