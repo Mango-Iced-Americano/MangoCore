@@ -4,6 +4,36 @@
 
 ## 2026-06-10
 
+### rmdir02: sys_unlinkat 添加 "." 最后组件 EINVAL 检查
+
+**涉及文件：**
+- `os/src/syscall/fs.rs` — `sys_unlinkat` 中 `AT_REMOVEDIR` 路径下，在路径解析前添加最后组件是否为 `.` 的检查，命中返回 EINVAL
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU 运行 rmdir02：9/9 TPASS（原 8/9 TFAIL → 第 9 子用例 EINVAL 通过）
+
+**备注：**
+- `parse_path()` 会过滤掉 `.` 组件，导致 `vfs_lookup_parent_for_start` 无法感知 `.` 的存在
+- EINVAL 检查放在 `validate_path_len` 之后、`resolve_start_inode` 之前，符合 Linux 语义（在 path lookup 前返回）
+- 仅对 `AT_REMOVEDIR` 生效，不影响普通 `unlink`
+
+### linkat01 cases 14-15: 绝对路径时忽略 dirfd（Linux 语义对齐）
+
+**涉及文件：**
+- `os/src/syscall/fs.rs` — `sys_linkat` 中，当 `oldpath_str` 或 `newpath_str` 以 `/` 开头（绝对路径）时，跳过 `resolve_start_inode(dirfd)` 调用，直接使用 `crate::fs::current_root_inode()`
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ⚠️ 预存错误（`asm!` in naked function），与本次修改无关
+- QEMU rv64: linkat01 21/22 TPASS（cases 14-15 从 TFAIL EBADF → TPASS）
+
+**备注：**
+- 根因：LTP case 14 用 `badfd=-1` + 绝对路径 `spathname`，case 15 用 `badfd=-1` + 绝对路径 `dpathname`。Linux 语义：路径绝对时忽略 dirfd，但 Mango 在路径检查前先调用了 `resolve_start_inode(-1)` 导致 EBADF
+- `vfs_lookup()` 内部已有绝对路径处理（`path.strip_prefix('/')` → 使用 `root_inode`），本次修复确保在进入 `vfs_lookup` 之前不因 bad dirfd 提前失败
+- la64 构建失败为预存问题（`#[naked]` + `asm!` 不兼容 `nightly-2024-05-01`），独立修复，不影响本次修改的正确性
+
 ### Stage 2-7: VFS correctness 修复（第三轮 — Oracle 审查通过后的补全）
 
 **涉及文件：**
@@ -18,7 +48,7 @@
 
 **备注：**
 - linkat01 case 22 (EEXIST) 仍 TFAIL，已定位为预存 mkfifo→ext4 持久化 bug，非本次引入。详见下文分析
-- linkat01 cases 14-15 (EBADF on real fd) — 预存 fd 管理问题
+- linkat01 cases 14-15 (EBADF with absolute path) — 已修复：绝对路径时 dirfd 被忽略
 
 ### linkat01 case 22 根因分析 (Oracle)
 
@@ -2370,3 +2400,28 @@ a = sum(x.get("all", x.get("total", 1)) for x in r)
 **验证**: rv64 kernel build 零错误, 124 预存 warning, QEMU 启动无 panic, basic 测试通过
 
 **备注**: 16 处硬编码 IP 清零; RawSocket todo→EOPNOTSUPP; adapter 本地投递检查; watchdog 30s 每测例超时; API 余额不足无法补全高级测试
+
+---
+
+## 2026-06-10
+
+### Stage 2.x: Fix readlinkat01 TFAIL — AT_EMPTY_PATH support
+
+**涉及文件：**
+- `os/src/syscall/mod.rs` — `sys_readlinkat` dispatch: 添加 `args[4] as u32` flags 参数传递
+- `os/src/syscall/fs.rs` — `sys_readlinkat`: 新增 AT_EMPTY_PATH 处理逻辑
+
+**Bug — readlinkat01: 2 TFAILs**
+1. `TFAIL: readlinkat(5, , , 1024) failed: ENOENT (2)` — 空路径无条件返回 ENOENT
+2. `TFAIL: Wrong filename in buffer ''` — 缓冲区未填充
+
+**根因：** `sys_readlinkat` 对空路径无条件返回 `ENOENT`，未实现 `AT_EMPTY_PATH` flag 支持。LTP 测试调用 `readlinkat(fd, "", buf, 1024)` 期望通过 `AT_EMPTY_PATH` 语义读取 fd 所引用符号链接的目标。
+
+**修复：**
+1. 添加 `flags: u32` 参数到 `sys_readlinkat`（dispatch 层传递 `args[4]`）
+2. 空路径 + `flags & AT_EMPTY_PATH` → 解析 dirfd 的 inode，读取符号链接目标→填充用户缓冲区
+3. 空路径 + 无 `AT_EMPTY_PATH` → 返回 `ENOENT`（保留原行为）
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
