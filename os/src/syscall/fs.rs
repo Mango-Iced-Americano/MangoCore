@@ -831,32 +831,45 @@ pub fn sys_getcwd(buf: usize, size: usize) -> isize {
 }
 
 pub fn sys_lseek(fd: usize, offset: isize, whence: u32) -> isize {
-    // whence is not valid
-    let whence = match SeekWhence::from_bits(whence) {
-        Some(whence) => whence,
-        None => {
-            warn!("[sys_lseek] unknown flags");
-            return EINVAL;
-        }
-    };
     info!(
-        "[sys_lseek] fd: {}, offset: {}, whence: {:?}",
+        "[sys_lseek] fd: {}, offset: {}, whence: {}",
         fd, offset, whence,
     );
     let task = current_task().unwrap();
     let files_ref = task.process.files();
-        let fd_table = files_ref.lock();
+    let fd_table = files_ref.lock();
     let file = match fd_table.get_file(fd) {
         Ok(file) => file,
         Err(e) => return -(e as isize),
     };
-    let whence_bits = whence.bits();
-    // SEEK_DATA (3) and SEEK_HOLE (4) for non-sparse (dense) files
-    if whence_bits == 3 || whence_bits == 4 {
+
+    // Explicit numeric match — SeekWhence bitflags lets 5,6,7 slip through
+    match whence {
+        0 => { /* SEEK_SET */ }
+        1 => { /* SEEK_CUR */ }
+        2 => { /* SEEK_END */ }
+        3 | 4 => { /* SEEK_DATA / SEEK_HOLE */ }
+        _ => {
+            warn!("[sys_lseek] unknown whence: {}", whence);
+            return EINVAL;
+        }
+    }
+
+    // SEEK_DATA(3) / SEEK_HOLE(4): non-sparse files (treat all as dense)
+    if whence == 3 || whence == 4 {
         let off = offset as i64;
         if off < 0 {
             return EINVAL;
         }
+        // Release fd_table before I/O
+        drop(fd_table);
+
+        // Seekability: same check as File::lseek — non-seekable FDs return ESPIPE
+        let ftype = file.file_type();
+        if ftype != FileType::File && ftype != FileType::Dir {
+            return ESPIPE;
+        }
+
         let md = match file.metadata() {
             Ok(md) => md,
             Err(e) => return -(e as isize),
@@ -865,27 +878,28 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: u32) -> isize {
         if off >= file_size {
             return ENXIO;
         }
-        match whence_bits {
+        match whence {
             3 => { // SEEK_DATA: return current offset (entire file is data)
                 file.set_offset(off as usize);
-                off as isize
+                return off as isize;
             }
             4 => { // SEEK_HOLE: return file_size (hole at EOF)
                 file.set_offset(file_size as usize);
-                file_size as isize
+                return file_size as isize;
             }
             _ => unreachable!(),
         }
-    } else {
-        let seek_from = match whence_bits {
-            0 => SeekFrom::SeekSet(offset as i64),
-            2 => SeekFrom::SeekEnd(offset as i64),
-            _ => SeekFrom::SeekCurrent(offset as i64),
-        };
-        match file.lseek(seek_from) {
-            Ok(pos) => pos as isize,
-            Err(e) => -(e as isize),
-        }
+    }
+
+    drop(fd_table);
+    let seek_from = match whence {
+        0 => SeekFrom::SeekSet(offset as i64),
+        2 => SeekFrom::SeekEnd(offset as i64),
+        _ => SeekFrom::SeekCurrent(offset as i64),
+    };
+    match file.lseek(seek_from) {
+        Ok(pos) => pos as isize,
+        Err(e) => -(e as isize),
     }
 }
 
@@ -2314,8 +2328,10 @@ pub fn sys_syncfs(fd: usize) -> isize {
     // Flush all page caches (global, but correct for single-fs system)
     crate::fs::flush_all_page_caches();
 
-    // Flush ext4 metadata caches for the filesystem containing this fd
-    let fs = file.inode.fs();
+    // Flush ext4 metadata caches for the filesystem containing this fd.
+    // Must unwrap MountFSInode to reach the real Ext4FileSystem.
+    let inode = vfs::MountFSInode::unwrap_inode(&file.inode);
+    let fs = inode.fs();
     if let Some(ext4) = fs.as_any_ref().downcast_ref::<crate::fs::ext4::ext4fs::Ext4FileSystem>() {
         ext4.flush_metadata_cache();
     }
@@ -5140,14 +5156,19 @@ pub fn sys_fallocate(fd: usize, mode: u32, offset: isize, len: isize) -> isize {
 
     let task = current_task().unwrap();
     let files_ref = task.process.files();
+    let (file, is_regular) = {
         let fd_table = files_ref.lock();
-    let file = match fd_table.get_file(fd) {
-        Ok(file) => file,
-        Err(e) => return -(e as isize),
+        let file = match fd_table.get_file(fd) {
+            Ok(file) => file,
+            Err(e) => return -(e as isize),
+        };
+        let is_regular = file.file_type() == FileType::File;
+        (file, is_regular)
     };
+    drop(files_ref);
 
     // ENODEV if not a regular file
-    if file.file_type() != FileType::File {
+    if !is_regular {
         return ENODEV;
     }
 
