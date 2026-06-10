@@ -2,6 +2,21 @@
 
 > 跨对话可复用的 bug 根因 → 修复模式。按子系统分类。
 
+## 路径解析
+
+### `parse_path()` 滤除 "." 组件，"." 检测必须用原始路径字符串
+
+- **根因**: `parse_path()` 在 `os/src/fs/mod.rs` 将 `"."` 组件（`"" | "." => {}`）忽略，导致 `vfs_lookup_parent_for_start` 等函数无法感知路径最后组件是否为 `.`
+- **修复**: 在调用 `vfs_lookup_parent_for_start` 前，用原始 `path` 字符串检测最后组件是否为 `.`：
+  ```rust
+  let trimmed = path.trim_end_matches('/');
+  if trimmed == "." || trimmed.ends_with("/.") {
+      return EINVAL;
+  }
+  ```
+- **教训**: 任何需要对 `.` 进行语义判断的地方（EINVAL for rmdir/unlink、禁止 "." 作为文件名等），都不能依赖 `parse_path()` 的输出，必须在原始路径字符串上做检查。
+- **相关文件**: `os/src/fs/mod.rs` (parse_path), `os/src/syscall/fs.rs` (sys_unlinkat)
+
 ## 测试 Harness / LTP
 
 ### LTP suite/inline 结果标签不能混用
@@ -425,3 +440,14 @@
 - **修复**: 用 `parent_dir.find(&leaf)` 或 `list_dirents()` 做非跟随的目录项存在性检查。link(2) 只需要目标名在目录中存在（无论其指向什么），不关心指向的实体是否存在
 - **教训**: POSIX EEXIST 检查语义是"目录项已存在"，不是"目录项指向的实体存在"。vfs_lookup 的 `follow_final` 和目录项的 `find` 是不同的语义层次
 - **相关文件**: `os/src/syscall/fs.rs`（`sys_linkat`）、`os/src/fs/ext4/ext4fs.rs`（`Ext4OSInode::link`）
+
+### readlinkat(2) AT_EMPTY_PATH 空路径处理
+
+- **根因**: `sys_readlinkat` 对空路径无条件返回 `ENOENT`，未实现 `AT_EMPTY_PATH` flag。当 LTP 测试调用 `readlinkat(fd, "", buf, size)`（flags 通过寄存器传递），空路径本应触发 AT_EMPTY_PATH 语义：对 fd 所引用的符号链接自身执行 readlink，而非路径查找
+- **症状**: LTP readlinkat01 出现 2 TFAIL — `ENOENT(2)` + "Wrong filename in buffer ''"
+- **修复**: 
+  1. 更新 dispatch 传递 `args[4] as u32` 作为 flags 参数
+  2. 空路径 + `flags & AT_EMPTY_PATH` → `resolve_start_inode(dirfd)` 获取 fd 的 inode → 读符号链接目标 → 填充用户缓冲区
+  3. 空路径 + 无 `AT_EMPTY_PATH` → 返回 `ENOENT`（保留原行为）
+- **教训**: `readlinkat` 的 Linux 内核接口从 5.9 起支持 5 参数（含 flags）。glibc 封装传递 0 作为默认 flags，但寄存器中的无效值可能非零。必须先检查 flags 再决定空路径行为。`resolve_start_inode` 可同时处理 AT_FDCWD 和真实 fd，是 AT_EMPTY_PATH 场景的正确入口
+- **相关文件**: `os/src/syscall/mod.rs`（dispatch）、`os/src/syscall/fs.rs`（`sys_readlinkat`）
