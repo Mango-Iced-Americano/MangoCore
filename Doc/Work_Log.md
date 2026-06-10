@@ -4,6 +4,51 @@
 
 ## 2026-06-10
 
+### Stage 2-7: VFS correctness 修复（第三轮 — Oracle 审查通过后的补全）
+
+**涉及文件：**
+- `os/src/syscall/fs.rs` — (1) `sys_linkat`: 替换 chroot 路径的全局根为 `current_root_inode()`，添加 EEXIST 事前检查（`list_dirents` 遍历）；(2) `sys_symlinkat`: 同上替换为 `current_root_inode()`
+- `os/src/fs/ext4/ext4fs.rs` — (3) `Ext4OSInode::link`: 在调用 `ext4fs.link()` 前添加 `dir_find_entry` 查重，命中返回 EEXIST（belt-and-suspenders defense）
+- `os_test.conf` — 恢复为 `ltp_runner=suite`，清除 `ltp_include` 内联调试配置
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- 回归：umask01 ALL TPASS、chroot02 ALL TPASS、stat01 ALL TPASS、statfs02 ALL TPASS
+
+**备注：**
+- linkat01 case 22 (EEXIST) 仍 TFAIL，已定位为预存 mkfifo→ext4 持久化 bug，非本次引入。详见下文分析
+- linkat01 cases 14-15 (EBADF on real fd) — 预存 fd 管理问题
+
+### linkat01 case 22 根因分析 (Oracle)
+
+**根因**：LTP setup 用 `mkfifo("existing_link")` 创建目标文件，但 Mango 的 mkfifo→ext4 `create_with_data` 链路（默认实现丢弃 rdev/data 参数）未正确持久化 ext4 目录条目。结果：case 22 运行时文件不存在，linkat 行为正确（允许创建）。
+
+**尝试的修复及失败原因**：
+1. `vfs_lookup(new_start, newpath, follow_final=true)` — 悬空 symlink 被跟随后返回 ENOENT
+2. `parent_dir.find(&leaf)` — 条目不在 ext4 目录（未持久化）
+3. `list_dirents` 遍历 — 同上
+4. ext4 `dir_find_entry` 防御层 — 同上，条目不在磁盘
+
+**解决方向**：需修复 `Ext4OSInode::create_with_data` 实现（当前缺省），使 mkfifo/mknod 正确写入 ext4 目录条目。独立 follow-up。
+
+### Stage 2-7 累计成果 (rv64 glibc)
+
+| Case | 结果 |
+|------|------|
+| umask01 | ✅ 0 TFAIL (was 1021) |
+| chroot02 | ✅ ALL TPASS |
+| fchown04 | ✅ 3P/0F |
+| chmod06/07, fchmod02 | ✅ ALL TPASS |
+| stat01, statfs02 | ✅ ALL TPASS |
+| symlink01 | ✅ 5/5 |
+| rename04-07,12 | ✅ ALL TPASS |
+| rmdir02 | ⚠️ 8/9 |
+| linkat01 | ⚠️ 19/22 |
+| open11 | ⚠️ 17/19 |
+
+---
+
 ### 完成 chroot 实现：VFS helper 全部接入 per-process root_inode
 
 **涉及文件：**

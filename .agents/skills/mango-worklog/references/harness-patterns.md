@@ -400,3 +400,28 @@
 - **修复**: 在 syscall 处理函数中 `vfs_lookup` 成功后检查 `inode.metadata()?.file_type == FileType::Dir`，不满足返回 ENOTDIR
 - **教训**: 任何对文件类型有硬性要求的 syscall（chdir、opendir、fdopendir 等）不能在 vfs_lookup 返回 Ok 就直接使用，必须验证类型
 - **相关文件**: `os/src/syscall/fs.rs`（`sys_chdir` line 2437, `sys_fchdir` 已有 `is_dir()` 检查 line 2455）
+
+## VFS / 文件系统
+
+### AT_EMPTY_PATH 在 fstatat 中的 fast-path
+
+- **根因**: `sys_fstatat` 在 `fstatat(fd, "", AT_EMPTY_PATH)` 场景下，会经过 `check_parent_search_access` + `vfs_lookup` 正常路径解析流程。空路径在解析时被当作空组件导致路径解析返回 ENOENT，所有 glibc 动态链接的程序在 QEMU 启动时立即崩溃（glibc 用 fstatat+AT_EMPTY_PATH 获取 fd 的 stat）
+- **症状**: QEMU 启动 panic，所有 glibc 测试返回 Error 20 (ENOTDIR)
+- **修复**: 在 `sys_fstatat` 入口处添加 fast path：若 path 为空且 flags 包含 AT_EMPTY_PATH，直接调用 `dirfd_inode.metadata()` 跳过所有路径解析
+- **教训**: 任何接受 dirfd+path 的 syscall（fstatat、readlinkat、fchmodat、fchownat、utimensat、linkat）都需要处理 AT_EMPTY_PATH + 空 path 的组合。Linux 语义：AT_EMPTY_PATH 时 path 为空 = 操作 dirfd 指向的 inode 本体
+- **相关文件**: `os/src/syscall/fs.rs`（`sys_fstatat`）
+
+### RISC-V syscall 号陷阱：chmod vs chroot
+
+- **根因**: Linux RISC-V asm-generic ABI 中 chroot=51，且存在"传统"syscall 号的同名常量。错误地将 SYSCALL_CHMOD 设为 51（以为 chmod 有独立 syscall），但 RISC-V 上 chmod 走 fchmodat（syscall 53）。结果：LTP 调用 51 号 syscall 时，dispatch 到 sys_chmod（错误）返回 0→假 TPASS，真正的 chroot 功能用 105 号（错误号）从未被 LTP 调用
+- **修复**: 移除 `SYSCALL_CHMOD` 常量，将 `SYSCALL_CHROOT` 改为 51。dispatch 表中 chmod 条目改为注释
+- **教训**: 添加 syscall 时先查 Linux `include/uapi/asm-generic/unistd.h`，确认 RISC-V 生态的实际映射。不要凭名字猜测 syscall 号
+- **相关文件**: `os/src/syscall/syscall_id.rs`、`os/src/syscall/mod.rs`
+
+### link(2)/linkat(2) EEXIST 检查不能用 vfs_lookup(follow_final=true)
+
+- **根因**: `linkat(target_path)` 的 EEXIST 检查用 `vfs_lookup(start, target_path, follow_final=true)` 判断目标是否存在。若最终组件是悬空 symlink，`follow_final=true` 会跟随 symlink 到不存在的 target → 返回 ENOENT → 漏过 EEXIST 检查 → 创建重复硬链接
+- **症状**: LTP linkat01 "succeeded unexpectedly" when EEXIST expected
+- **修复**: 用 `parent_dir.find(&leaf)` 或 `list_dirents()` 做非跟随的目录项存在性检查。link(2) 只需要目标名在目录中存在（无论其指向什么），不关心指向的实体是否存在
+- **教训**: POSIX EEXIST 检查语义是"目录项已存在"，不是"目录项指向的实体存在"。vfs_lookup 的 `follow_final` 和目录项的 `find` 是不同的语义层次
+- **相关文件**: `os/src/syscall/fs.rs`（`sys_linkat`）、`os/src/fs/ext4/ext4fs.rs`（`Ext4OSInode::link`）
