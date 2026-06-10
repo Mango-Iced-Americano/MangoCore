@@ -1,5 +1,6 @@
 //! procfs 文件实现 — /proc/* 的各个文件
 
+pub mod cmdline;
 pub mod config;
 pub mod cpuinfo;
 pub mod filesystems;
@@ -30,6 +31,7 @@ use crate::fs::vfs::InodeMode;
 use crate::utils::error::SyscallErr;
 
 pub fn register_all(root: &Arc<crate::fs::procfs::LockedProcInode>) -> Result<(), SyscallErr> {
+    root.add_file("cmdline", InodeMode::from_bits_truncate(0o444), cmdline::cmdline_content, 0)?;
     root.add_file("version", InodeMode::from_bits_truncate(0o444), version::version_content, 0)?;
     root.add_file("uptime", InodeMode::from_bits_truncate(0o444), uptime::uptime_content, 0)?;
     root.add_file("meminfo", InodeMode::from_bits_truncate(0o444), meminfo::meminfo_content, 0)?;

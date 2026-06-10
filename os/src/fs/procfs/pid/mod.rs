@@ -3,8 +3,10 @@
 pub mod cmdline;
 pub mod exe;
 pub mod fd;
+pub mod io;
 pub mod maps;
 pub mod ns;
+pub mod pagemap;
 pub mod smaps;
 pub mod stat;
 pub mod status;
@@ -143,6 +145,27 @@ fn create_pid_dir(
         "mounts",
         InodeMode::from_bits_truncate(0o444),
         crate::fs::procfs::files::mounts::mounts_content,
+        pid,
+    )?;
+
+    dir.add_file(
+        "mountinfo",
+        InodeMode::from_bits_truncate(0o444),
+        crate::fs::procfs::files::mounts::mountinfo_content,
+        pid,
+    )?;
+
+    dir.add_file(
+        "io",
+        InodeMode::from_bits_truncate(0o444),
+        io::pid_io_content,
+        pid,
+    )?;
+
+    dir.add_file(
+        "pagemap",
+        InodeMode::from_bits_truncate(0o444),
+        pagemap::pid_pagemap_content,
         pid,
     )?;
 

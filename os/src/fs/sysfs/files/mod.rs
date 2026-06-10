@@ -17,6 +17,8 @@ pub fn register_all(root: &Arc<SysInode>) -> Result<(), SyscallErr> {
     let net_dir = class_dir.add_dir_inner("net", InodeMode::from_bits_truncate(0o555))?;
     net_dir.set_hooks(net_class_find_hook, net_class_list_hook);
     warn!("[sysfs] register_all: /sys/class/net hooks installed");
+    root.add_dir("block", InodeMode::from_bits_truncate(0o555))?;
+    warn!("[sysfs] register_all: /sys/block created");
     Ok(())
 }
 
