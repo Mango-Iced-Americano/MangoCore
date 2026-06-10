@@ -2519,7 +2519,7 @@ pub fn sys_mknodat(dirfd: usize, path: *const u8, mode: u32, dev: usize) -> isiz
         m if m == vfs::InodeMode::S_IFBLK => FileType::BlockDevice,
         m if m == vfs::InodeMode::S_IFCHR => FileType::CharDevice,
         m if m == vfs::InodeMode::S_IFSOCK => FileType::Socket,
-        m if m == vfs::InodeMode::S_IFREG || m == vfs::InodeMode::S_IFDIR => return EINVAL,
+        m if m == vfs::InodeMode::S_IFDIR => return EINVAL,
         _ => return EINVAL,
     };
     let perm = vfs::InodeMode::from_bits_truncate(mode)
