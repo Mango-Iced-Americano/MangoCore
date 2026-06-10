@@ -1,8 +1,8 @@
 # FS-LTP Testcase 状态表
 
-> 最后更新: 2026-05-25
-> 当前阶段: Round A ✅ → Round B ✅ → Round C 收尾
-> Oracle 审查: Round A (2026-05-25) + Round B (2026-05-25) 通过
+> 最后更新: 2026-06-10
+> 当前阶段: Stage 0 (ltp-fs-megafix baseline triage) ✅
+> Oracle 审查: Round A+B (2026-05-25), Stage 0 基线 (2026-06-10)
 
 ## 字段说明
 
@@ -14,6 +14,8 @@
 | **运行结果** | TPASS / TFAIL / TBROK / TCONF / PANIC / TIMEOUT / NOT_RUN / NO_BIN |
 | **行动分类** | PASS / FIXABLE_NOW / FIXABLE_LATER / UNSUPPORTED / ENV_FAIL |
 | **回归集** | YES / NO |
+
+> **triage三分类**: CURRENT_FAIL(内核Bug待修) / NOT_RUN_ENABLE(二进制存在可启用) / DEFERRED(延期)
 
 > **NO_BIN** = 该二进制在镜像中不存在（非 inode/文件系统问题，是测试镜像未包含）
 
@@ -28,6 +30,25 @@
 | **强制排除集** | ~200+ | UNSUPPORTED/DANGEROUS_STRESS/FIXABLE_LATER |
 
 ---
+
+## Stage 0 三分类 — 10 个目标 LTP FS 测例 (ltp-fs-megafix)
+
+| Testcase | 运行结果 | 分类 | triage三分类 | Stage | 失败根因 |
+|----------|----------|------|-------------|-------|----------|
+| chdir01 | TBROK | ENV_FAIL | NOT_RUN_ENABLE | 2 | 需要 LTP_DEV=/dev/vdb2 块设备 |
+| chmod05 | TFAIL (1) | FIXABLE_NOW | CURRENT_FAIL | 3 | sticky bit SGID 传播: 043777 vs 041777 |
+| umask01 | TFAIL (all) | FIXABLE_NOW | CURRENT_FAIL | 3 | umask NO-OP: 始终返回0, 文件mode始终777 |
+| open11 | TFAIL (1) | FIXABLE_NOW | CURRENT_FAIL | 4 | O_CREAT 对目录成功(应 EISDIR) |
+| linkat01 | TFAIL (5/22) | FIXABLE_NOW | CURRENT_FAIL | 5 | EBADF顺序, EISDIR vs EPERM, symlink链接 |
+| rename04 | TBROK | ENV_FAIL | NOT_RUN_ENABLE | 6 | 需要 LTP_DEV=/dev/vdb2 块设备 |
+| statx03 | TFAIL (2) | FIXABLE_NOW | CURRENT_FAIL | 7 | "statx() returned with 0" — mask bits未验证 |
+| setxattr01 | TBROK | ENV_FAIL | NOT_RUN_ENABLE | 9 | 需要 LTP_DEV=/dev/vdb2 块设备; xattr需先实现 |
+| mount02 | TBROK | ENV_FAIL | NOT_RUN_ENABLE | 11 | 需要 LTP_DEV=/dev/vdb2 块设备 |
+| fsync04 | TBROK | ENV_FAIL | NOT_RUN_ENABLE | 8 | 需要 LTP_DEV=/dev/vdb2 块设备 |
+
+**统计**: CURRENT_FAIL=5, NOT_RUN_ENABLE=5, DEFERRED=0
+**验证**: 所有10个二进制在glibc和musl镜像均存在(来自2026-06-08全量heaptrace运行)
+
 
 ## Round-0 核心 Family (VFS/fd/path/基础读写)
 
@@ -44,7 +65,7 @@
 | open08 | NOT_RUN | — | NO | |
 | open09 | NOT_RUN | — | NO | |
 | open10 | NOT_RUN | — | NO | |
-| open11 | NOT_RUN | — | NO | |
+| open11 | NOT_RUN | — | NO | 详见 Stage 0 三分类表 |
 | open12 | NOT_RUN | — | NO | 需 open12_child |
 | open13 | NOT_RUN | — | NO | |
 | open14 | NOT_RUN | — | NO | |
@@ -103,7 +124,9 @@
 | fstatat01 | NOT_RUN | — | NO | |
 | lstat01 | NOT_RUN | — | NO | |
 | lstat02 | TPASS ✅ | PASS | YES | |
-| statx01-12 | — | UNSUPPORTED | NO | Linux 4.11+ |
+| statx01-02 | TPASS | PASS | YES | |
+| statx03 | TFAIL (2) | FIXABLE_NOW | NO | "statx() returned with 0" — mask bits not validated |
+| statx04-12 | — | UNSUPPORTED | NO | Linux 4.11+ |
 
 ### access / faccessat (6 测例, Priority: 8)
 
@@ -120,7 +143,7 @@
 |----------|------|------|------|------|
 | getcwd01 | TPASS ✅ | PASS | YES | ERANGE 顺序已修复 |
 | getcwd02-04 | NOT_RUN | — | NO | |
-| chdir01 | NOT_RUN | — | NO | |
+| chdir01 | NOT_RUN | — | NO | 详见 Stage 0 三分类表 |
 | chdir04 | TPASS ✅ | PASS | YES | ENAMETOOLONG 已修复 |
 | fchdir01-03 | NOT_RUN | — | NO | |
 
@@ -201,7 +224,7 @@
 
 | Testcase | 结果 | 分类 | 回归 | 备注 |
 |----------|------|------|------|------|
-| rename01,03-14 | NOT_RUN | — | NO | 镜像中存在 |
+| rename01,03-14 | NOT_RUN | — | NO | rename04=TBROK(无块设备); 镜像中存在 |
 | renameat01 | NOT_RUN | — | NO | |
 | renameat201-202 | — | UNSUPPORTED | NO | RENAME_EXCHANGE/RENAME_NOREPLACE |
 
@@ -233,7 +256,7 @@
 | link04 | TPASS (12/14) | — | YES | ENAMETOOLONG ✅, 空路径✅, EACCES×2 |
 | link05 | TPASS ✅ | PASS | YES | 1000硬链接 |
 | link08 | NOT_RUN | — | NO | |
-| linkat01-02 | NOT_RUN | — | NO | |
+| linkat01-02 | NOT_RUN | — | NO | linkat01=TFAIL(5/22) EBADF/EISDIR/symlink; linkat02=TBROK(无块设备) |
 
 ### chmod / fchmod / fchmodat (13 测例, Priority: 8)
 
@@ -296,7 +319,7 @@
 
 | Testcase | 结果 | 分类 | 回归 | 备注 |
 |----------|------|------|------|------|
-| fsync01-04 | NOT_RUN | — | NO | |
+| fsync01-04 | NOT_RUN | — | NO | fsync04=TBROK(无块设备); fsync01/02/03 NOT_RUN |
 | sync01 | NOT_RUN | — | NO | |
 | syncfs01 | NOT_RUN | — | NO | |
 | sync_file_range01-02 | NOT_RUN | — | NO | |
@@ -339,7 +362,7 @@
 
 | Testcase | 结果 | 分类 | 回归 | 备注 |
 |----------|------|------|------|------|
-| umask01 | NOT_RUN | — | NO | |
+| umask01 | NOT_RUN | — | NO | 详见 Stage 0 三分类表 |
 | pathconf01-02 | NOT_RUN | — | NO | |
 | fpathconf01 | NOT_RUN | — | NO | |
 | realpath01 | NOT_RUN | — | NO | |

@@ -356,3 +356,47 @@
   ```
 - **注意**: 如果 `MutexGuard` 不赋值给变量（仅用于链式调用如 `.clone()`、`.fill_default()`），临时 `Arc` 在 `MutexGuard` 被丢弃后释放，是安全的
 - **相关文件**: `os/src/net/socket/netlink/route/route.rs`（lines 127, 169）
+
+## VFS / 文件系统
+
+### 路径相关 syscall 遗漏 validate_path_len
+
+- **根因**: 新增路径类 syscall 时忘记在 `vfs_lookup` 前调用 `validate_path_len()`，导致过长路径返回 ENOENT（因为 `find()` 找不到该名）而非 Linux ABI 要求的 ENAMETOOLONG
+- **症状**: LTP 测试 "Expected ENAMETOOLONG got ENOENT"
+- **修复**: 在每个接收 `path: *const u8` 的 syscall 中，`user_cstring` 成功后、`vfs_lookup`/`resolve_start_inode` 前插入：
+  ```rust
+  if let Err(errno) = validate_path_len(&path) {
+      return errno;
+  }
+  ```
+- **受影响的 syscall**: `sys_fstatat`, `sys_statx`, `sys_statfs` 等（已修复前两者）
+- **教训**: 新增路径操作时必须检查是否调用了 `validate_path_len`；建议在 code review checklist 中显式检查
+- **相关文件**: `os/src/syscall/fs.rs`（`validate_path_len` 定义在 line 160）
+
+### parse_path 静默丢弃尾部斜杠
+
+- **根因**: `parse_path(path)` 通过 `split('/')` 分割路径，空串被 `"" | "." => {}` 静默丢弃，导致 `"file/"` 被解析为 `["file"]`，丢失尾部斜杠信息
+- **症状**: `open("regular_file/")` 成功而不是返回 ENOTDIR（`O_DIRECTORY` 设置时除外）。LTP 期望尾随 `/` 触发的 ENOTDIR 不生效
+- **修复**: 在 `vfs_lookup` 入口捕获 `has_trailing_slash = path.ends_with('/') && path != "/"`，解析完成且循环结束后检查：若目标 `file_type != Dir` 则返回 ENOTDIR
+- **关键**: 不能仅依赖 `parse_path` 返回值的长度变化（`"dir/"` 和 `"dir"` 解析结果完全相同）。原始路径的尾部斜杠是独立信号
+- **相关文件**: `os/src/fs/mod.rs`（`parse_path` line 501, `vfs_lookup` line 529）
+
+### 中间路径组件非目录 → ENOTDIR 检查时机
+
+- **根因**: `vfs_lookup` 循环仅在**下次迭代开头**检查 `current` 是否为目录（line 552-555），中间组件通过 `current = next` 赋值后才在下轮捕获。当 `next` 为符号链接时，应在 follow 前先判断：若 `!is_last` 且非 Dir 且非 SymLink → 立即返回 ENOTDIR
+- **修复**: 在 `current.find(name)` 返回 `next` 并读取 `file_type` 后，立即检查：
+  ```rust
+  if !is_last && file_type != FileType::Dir && file_type != FileType::SymLink {
+      return Err(crate::syscall::errno::ENOTDIR);
+  }
+  ```
+- **注意**: SymLink 必须排除（`!= FileType::SymLink`），因为 symlink-to-dir 在 follow 后才应判断类型
+- **相关文件**: `os/src/fs/mod.rs`（`vfs_lookup` line 573-578）
+
+### FileType::Dir 检查在 syscall 层 vs vfs_lookup
+
+- **根因**: `vfs_lookup` 只负责**找到** inode，不负责**验证类型**。像 `sys_chdir` 对目录的硬性要求必须在 syscall 层显式检查
+- **症状**: `chdir("regular_file")` 成功（vfs_lookup 返回 Ok），进程 CWD 变成普通文件，后续操作混乱
+- **修复**: 在 syscall 处理函数中 `vfs_lookup` 成功后检查 `inode.metadata()?.file_type == FileType::Dir`，不满足返回 ENOTDIR
+- **教训**: 任何对文件类型有硬性要求的 syscall（chdir、opendir、fdopendir 等）不能在 vfs_lookup 返回 Ok 就直接使用，必须验证类型
+- **相关文件**: `os/src/syscall/fs.rs`（`sys_chdir` line 2437, `sys_fchdir` 已有 `is_dir()` 检查 line 2455）
