@@ -4,6 +4,19 @@
 
 ## 2026-06-11
 
+### LTP setns01 CAP_SYS_ADMIN 权限校验
+
+**涉及文件：**
+- `os/src/syscall/process/clone.rs` — `setns()` 在切换 net/mount/ipc namespace 前检查调用者 euid；非 root 按 Linux ABI 返回 `EPERM`
+
+**验证：**
+- `docker compose exec os-dev bash -lc 'make -C os rv64-kernel-build-only'` ✅
+- `docker compose exec os-dev bash -lc 'make -C os la64-kernel-build-only'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=setns01` ✅ — musl/glibc `setns01` 均 `passed 15 / failed 0 / broken 0`
+- la64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=setns01` ✅ — musl/glibc `setns01` 均 `passed 15 / failed 0 / broken 0`
+
+**备注：** 修复前 `setns01` 的 `without CAP_SYS_ADMIN` 子项在三类 namespace fd 上意外成功；同批 `setns02` 失败涉及 IPC namespace 下 SysV SHM 隔离，范围更大，先按复杂适配跳过。
+
 ### LTP clone302 CLONE_NEWNS/CLONE_FS 组合校验
 
 **涉及文件：**
