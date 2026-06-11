@@ -4,6 +4,21 @@
 
 ## 2026-06-11
 
+### LTP sigrelse01 musl 实时信号 wrapper 兼容
+
+**涉及文件：**
+- `os/ltp_proto_compat.c` — 增加 `signal()`、`sighold()`、`sigrelse()` preload wrapper；对应用可用信号直接走 `rt_sigaction/rt_sigprocmask`，绕过 musl 对内部保留实时信号 34 的 libc 层拒绝
+- `user/tools/riscv64/lib/ltp_proto_compat-rv.so`、`user/tools/loongarch64/lib/ltp_proto_compat-la.so` — 重新生成双架构 preload 共享库
+
+**验证：**
+- `docker compose exec os-dev bash -lc 'cd os && make rv64-kernel-build-only'` ✅
+- `docker compose exec os-dev bash -lc 'cd os && make la64-kernel-build-only'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=sigrelse01` ✅ — musl/glibc 均 `TPASS`
+- la64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=sigrelse01` ✅ — musl/glibc 均 `TPASS`
+- rv64/la64 信号回归：`signal01..06,sigaction01,sigaction02,rt_sigaction01..03,sigprocmask01,sigsuspend01,sigwait01,sigrelse01` ✅ — musl/glibc 均无 `TFAIL/TBROK`，`signal06` 维持既有 excluded
+
+**备注：** 本次不改 initproc、不触碰 net/fs；按当前要求未运行 LTP 全量。
+
 ### LTP umask01 inline broad-skip 解除
 
 **涉及文件：**

@@ -1,6 +1,7 @@
 #include <netdb.h>
 #include <errno.h>
 #include <stdint.h>
+#include <signal.h>
 #include <sched.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -24,6 +25,45 @@
 #ifndef SYS_sched_getparam
 #define SYS_sched_getparam 121
 #endif
+
+#ifndef SYS_rt_sigaction
+#define SYS_rt_sigaction 134
+#endif
+
+#ifndef SYS_rt_sigprocmask
+#define SYS_rt_sigprocmask 135
+#endif
+
+#ifndef SA_RESTART
+#define SA_RESTART 0x10000000
+#endif
+
+typedef void (*mango_sighandler_t)(int);
+
+struct mango_kernel_sigaction {
+    mango_sighandler_t handler;
+    unsigned long flags;
+    void (*restorer)(void);
+    unsigned long mask;
+};
+
+static int invalid_app_signal(int signum)
+{
+    return signum <= 0 || signum > 64 || signum == 32 || signum == 33;
+}
+
+static int change_signal_mask(int signum, int how)
+{
+    unsigned long mask;
+
+    if (invalid_app_signal(signum)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    mask = 1UL << (signum - 1);
+    return syscall(SYS_rt_sigprocmask, how, &mask, NULL, sizeof(mask));
+}
 
 struct proto_entry {
     const char *name;
@@ -207,4 +247,36 @@ int sched_getscheduler(pid_t pid)
 int sched_getparam(pid_t pid, struct sched_param *param)
 {
     return syscall(SYS_sched_getparam, pid, param);
+}
+
+mango_sighandler_t signal(int signum, mango_sighandler_t handler)
+{
+    struct mango_kernel_sigaction act = {
+        .handler = handler,
+        .flags = SA_RESTART,
+        .restorer = NULL,
+        .mask = 0,
+    };
+    struct mango_kernel_sigaction oldact;
+
+    if (invalid_app_signal(signum)) {
+        errno = EINVAL;
+        return SIG_ERR;
+    }
+
+    if (syscall(SYS_rt_sigaction, signum, &act, &oldact, sizeof(oldact.mask)) < 0) {
+        return SIG_ERR;
+    }
+
+    return oldact.handler;
+}
+
+int sighold(int signum)
+{
+    return change_signal_mask(signum, SIG_BLOCK);
+}
+
+int sigrelse(int signum)
+{
+    return change_signal_mask(signum, SIG_UNBLOCK);
 }
