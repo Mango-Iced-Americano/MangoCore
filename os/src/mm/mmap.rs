@@ -1,7 +1,7 @@
 use super::address_space::{AddressSpace, MemoryError};
 use super::page_table::PageTable;
 use super::vma::{MapFlags, MapPermission, Vma};
-use super::VirtAddr;
+use super::{FrameTracker, VirtAddr};
 use crate::config::*;
 use crate::fs::vfs::IndexNode;
 use crate::syscall::errno::*;
@@ -265,6 +265,86 @@ pub(super) fn do_mmap<T: PageTable>(
         address_space.set_locked_pages(start_vpn, end_vpn, true);
     }
 
+    start_va.0 as isize
+}
+
+pub(super) fn do_shm_mmap<T: PageTable>(
+    address_space: &mut AddressSpace<T>,
+    start: usize,
+    len: usize,
+    prot: MapPermission,
+    flags: MapFlags,
+    frames: &[Arc<FrameTracker>],
+    may_write: bool,
+) -> isize {
+    if start & (PAGE_SIZE - 1) != 0 {
+        return EINVAL;
+    }
+    let (start_hint, requested_end) = match checked_user_range(start, len) {
+        Ok(range) => range,
+        Err(errno) => return errno,
+    };
+    let fixed =
+        flags.contains(MapFlags::MAP_FIXED) || flags.contains(MapFlags::MAP_FIXED_NOREPLACE);
+    let start_va = if fixed {
+        let start_vpn = start_hint.floor();
+        let end_vpn = requested_end.ceil();
+        if flags.contains(MapFlags::MAP_FIXED_NOREPLACE)
+            && address_space.vmas.has_overlap(start_vpn, end_vpn)
+        {
+            return EEXIST;
+        }
+        if let Err(errno) =
+            address_space
+                .vmas
+                .unmap_range(&mut address_space.page_table, start_vpn, end_vpn, true)
+        {
+            return errno;
+        }
+        address_space.set_locked_pages(start_vpn, end_vpn, false);
+        start_hint
+    } else {
+        match address_space.vmas.find_free_mmap_range(len, PAGE_SIZE) {
+            Ok(start_va) => start_va,
+            Err(errno) => return errno,
+        }
+    };
+    let end = match start_va.0.checked_add(len) {
+        Some(end) => end,
+        None => return EINVAL,
+    };
+    let end_va = VirtAddr::from(end);
+    let start_vpn = start_va.floor();
+    let end_vpn = end_va.ceil();
+    if frames.len() != end_vpn.0.saturating_sub(start_vpn.0) {
+        return EINVAL;
+    }
+    if address_space.vmas.has_overlap(start_vpn, end_vpn) {
+        return EINVAL;
+    }
+    if let Err(errno) = address_space.vmas.try_reserve(1) {
+        return errno;
+    }
+    let mut new_area = match Vma::try_new(start_va, end_va, prot, None, 0) {
+        Ok(area) => area,
+        Err(e) => return e,
+    };
+    new_area.flags = flags;
+    new_area.may_write = may_write;
+    let mut frame_index = 0;
+    for vpn in new_area.inner.vpn_range {
+        if new_area
+            .inner
+            .alloc_in_memory(vpn, frames[frame_index].clone())
+            .is_err()
+        {
+            return EINVAL;
+        }
+        frame_index += 1;
+    }
+    if address_space.push_no_alloc(new_area).is_err() {
+        return ENOMEM;
+    }
     start_va.0 as isize
 }
 

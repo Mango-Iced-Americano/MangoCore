@@ -3,7 +3,7 @@ use super::page_table::{FaultAccess, PageTable, UserAccess};
 use super::user_mapper::UserMapper;
 use super::vma::*;
 use super::vma_set::VmaSet;
-use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum, VPNRange, KERNEL_SPACE};
+use super::{FrameTracker, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum, VPNRange, KERNEL_SPACE};
 use crate::config::*;
 use crate::hal::TrapContext;
 use crate::hal::TICKS_PER_SEC;
@@ -861,6 +861,18 @@ impl<T: PageTable> AddressSpace<T> {
             may_write,
             write_sealed,
         )
+    }
+
+    pub fn shm_mmap(
+        &mut self,
+        start: usize,
+        len: usize,
+        prot: MapPermission,
+        flags: MapFlags,
+        frames: &[Arc<FrameTracker>],
+        may_write: bool,
+    ) -> isize {
+        super::mmap::do_shm_mmap(self, start, len, prot, flags, frames, may_write)
     }
 
     pub fn munmap(&mut self, start: usize, len: usize) -> Result<(), isize> {

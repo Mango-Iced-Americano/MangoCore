@@ -1,4 +1,4 @@
-use super::mm::{sys_mmap, sys_munmap};
+use super::mm::sys_munmap;
 use crate::fs::{
     dev::DEV_FS,
     vfs::{
@@ -8,7 +8,7 @@ use crate::fs::{
 };
 use crate::mm::{
     copy_from_user, copy_from_user_array, copy_to_user, copy_to_user_array, translated_str,
-    MapFlags,
+    frames_alloc, FrameTracker, MapFlags, MapPermission,
 };
 use crate::net::socket::SocketFile;
 use crate::syscall::errno::*;
@@ -139,9 +139,6 @@ struct SemLimits {
     semopm: usize,
     semmni: usize,
 }
-
-const PROT_READ: usize = 0x1;
-const PROT_WRITE: usize = 0x2;
 
 #[cfg(target_arch = "riscv64")]
 type LinuxIpcMode = u16;
@@ -581,6 +578,7 @@ struct ShmSegment {
     ctime: usize,
     removed: bool,
     locked: bool,
+    frames: Vec<Arc<FrameTracker>>,
     attachments: Vec<ShmAttachment>,
 }
 
@@ -602,6 +600,7 @@ impl ShmSegment {
             ctime: now,
             removed: false,
             locked: false,
+            frames: Vec::new(),
             attachments: Vec::new(),
         }
     }
@@ -751,9 +750,9 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: usize) -> isize {
     if shmaddr == 0 && shmflg & SHM_REMAP != 0 {
         return EINVAL;
     }
-    let (size, removed) = {
-        let registry = SHM_REGISTRY.lock();
-        let Some(seg) = registry.segments.get(&shmid) else {
+    let (size, removed, frames) = {
+        let mut registry = SHM_REGISTRY.lock();
+        let Some(seg) = registry.segments.get_mut(&shmid) else {
             return EINVAL;
         };
         let requested = if shmflg & SHM_RDONLY != 0 {
@@ -764,7 +763,19 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: usize) -> isize {
         if !has_shm_permission(seg, requested) {
             return EACCES;
         }
-        (seg.size, seg.removed)
+        if seg.frames.is_empty() {
+            let page_count = (seg.size + crate::config::PAGE_SIZE - 1) / crate::config::PAGE_SIZE;
+            let Some(frames) = frames_alloc(page_count) else {
+                return ENOMEM;
+            };
+            seg.frames = frames;
+        }
+        let mut frames = Vec::new();
+        if frames.try_reserve(seg.frames.len()).is_err() {
+            return ENOMEM;
+        }
+        frames.extend(seg.frames.iter().cloned());
+        (seg.size, seg.removed, frames)
     };
     if removed {
         return EIDRM;
@@ -785,11 +796,14 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: usize) -> isize {
     if fixed && attach_addr < 0x10000 {
         return EINVAL;
     }
-    let prot = if shmflg & SHM_RDONLY != 0 {
-        PROT_READ
+    let mut prot = if shmflg & SHM_RDONLY != 0 {
+        MapPermission::R | MapPermission::U
     } else {
-        PROT_READ | PROT_WRITE
+        MapPermission::R | MapPermission::W | MapPermission::U
     };
+    if shmflg & SHM_EXEC != 0 {
+        prot |= MapPermission::X;
+    }
     let mut flags = MapFlags::MAP_SHARED | MapFlags::MAP_ANONYMOUS;
     if fixed {
         flags |= if shmflg & SHM_REMAP != 0 {
@@ -799,7 +813,12 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: usize) -> isize {
         };
     }
 
-    let mapped = sys_mmap(attach_addr, size, prot, flags.bits(), usize::MAX, 0);
+    let mapped = current_task()
+        .unwrap()
+        .process
+        .vm()
+        .lock()
+        .shm_mmap(attach_addr, size, prot, flags, &frames, shmflg & SHM_RDONLY == 0);
     if mapped < 0 {
         return mapped;
     }

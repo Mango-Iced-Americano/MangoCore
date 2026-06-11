@@ -4,6 +4,22 @@
 
 ## 2026-06-11
 
+### LTP shmt03/shmt04/shmt06 SysV SHM backing 共享修复
+
+**涉及文件：**
+- `os/src/syscall/process/ipc.rs` — `ShmSegment` 懒分配并持有共享物理页；`shmat()` 改为把同一 `shmid` 的 backing frames 映射到每个 attach VMA
+- `os/src/mm/mmap.rs` — 新增 SysV SHM 专用映射入口，复用 mmap 地址选择和 VMA 插入逻辑，但不改变普通 `mmap()` 行为
+- `os/src/mm/address_space.rs` — 暴露窄范围 `shm_mmap()` 包装供 IPC 层使用
+
+**验证：**
+- `docker compose exec os-dev bash -lc 'make -C os rv64-kernel-build-only'` ✅
+- `docker compose exec os-dev bash -lc 'make -C os la64-kernel-build-only'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=shmt03,shmt04,shmt06` ✅ — musl/glibc 均 TPASS
+- la64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=shmt03,shmt04,shmt06` ✅ — musl/glibc 均 TPASS
+- rv64/la64 SysV IPC 扩展回归：`msgget05,shmctl03,shmt02,shmt03,shmt04,shmt05,shmt06,shmt07,shmt08,shmt10,sem_nstest,semtest_2ns,shmnstest,shmem_2nstest` ✅ — musl/glibc 均无 TFAIL/TBROK
+
+**备注：** 修复前 `shmt03` 的第二次 `shmat()` 与第一次 attach 分配到不同匿名共享页，导致内容不互通；`shmt04`/`shmt06` 也会在子进程检查共享内容时失败。本次不处理 `shmt09` 的 brk/attach 边界期望，也不修改 IPC namespace 隔离。
+
 ### LTP setns01 CAP_SYS_ADMIN 权限校验
 
 **涉及文件：**

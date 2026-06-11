@@ -61,6 +61,12 @@
 - **修复**: MAP_SHARED 页面跳过 CoW，fork 时恢复 W 权限，缺页时只恢复 W 不做 CoW
 - **相关文件**: `os/src/mm/memory_set.rs`
 
+### SysV SHM 每次 shmat 分配独立匿名页
+- **根因**: `shmat()` 若直接复用匿名 `MAP_SHARED` 并让每个 VMA 自行分配物理页，同一 `shmid` 的多次 attach 会得到不同 backing，写入内容无法互通；fork 继承只能共享已有 VMA，不能修复独立 attach 的共享语义。
+- **修复**: 在 SysV SHM segment 级别维护 backing frames，`shmat()` 为新 VMA 映射同一组 frames；只把地址选择和 VMA 插入复用到 SHM 专用 mmap 路径，不改变普通匿名 mmap 行为。
+- **教训**: LTP `shmt03/shmt04/shmt06` 这类用例要同时验证“同进程多 attach”和“fork 后读写同一 segment”；通过 fork 共享不代表独立 attach 已符合 SysV SHM 语义。
+- **相关文件**: `os/src/syscall/process/ipc.rs`, `os/src/mm/mmap.rs`
+
 ### 无界队列导致 OOM
 - **根因**: 生产者-消费者队列（`VecDeque`、`Vec` 等）无上界，消费者慢于生产者时持续堆积，底层存储重分配触发大块内存请求超出堆容量
 - **症状**: 运行一段时间后 `alloc` 返回 `Err`，分配请求异常大（~96MB），远超单次正常分配
