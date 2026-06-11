@@ -1324,7 +1324,7 @@ impl TaskControlBlock {
         trap_cx.gp.a0 = 0;
         // 修改陷阱上下文中的内核栈指针
         trap_cx.kernel_sp = kstack_top;
-        if !flags.contains(CloneFlags::CLONE_THREAD) {
+        if !flags.contains(CloneFlags::CLONE_THREAD) && !flags.contains(CloneFlags::CLONE_NEWIPC) {
             shm_clone_attachments(self.pid(), task_control_block.pid())?;
         }
         task_control_block.process.add_thread(&task_control_block);

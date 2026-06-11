@@ -4,6 +4,21 @@
 
 ## 2026-06-11
 
+### LTP setns02 SysV SHM IPC namespace 隔离
+
+**涉及文件：**
+- `os/src/syscall/process/ipc.rs` — `ShmSegment` 记录创建时 IPC namespace id；`shmget/shmat/shmctl`、`/proc/sysvipc/shm` snapshot 和 `SHM_INFO` 只暴露当前 namespace 的 SHM segment
+- `os/src/task/task.rs` — `CLONE_NEWIPC` 创建新进程时不继承父进程 SysV SHM attach 元数据，普通 fork/clone 继承保持不变
+
+**验证：**
+- `docker compose exec os-dev bash -lc 'make -C os rv64-kernel-build-only'` ✅
+- `docker compose exec os-dev bash -lc 'make -C os la64-kernel-build-only'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=setns02` ✅ — musl/glibc `setns02` 均 `passed 4 / failed 0 / broken 0`
+- la64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=setns02` ✅ — musl/glibc `setns02` 均 `passed 4 / failed 0 / broken 0`
+- rv64/la64 SysV IPC 扩展回归：`setns01,setns02,msgget05,shmctl03,shmt02,shmt03,shmt04,shmt05,shmt06,shmt07,shmt08,shmt10,sem_nstest,semtest_2ns,shmnstest,shmem_2nstest` ✅ — musl/glibc 均无 TFAIL/TBROK
+
+**备注：** 修复前 `setns02` 在切到另一个 IPC namespace 后仍可用旧 namespace 的 `shmid` 成功 `shmat()`，因为 `IpcNamespace` 只有 ID，SHM registry 仍全局可见。本次只隔离 SysV SHM 可见性；既有 sem/msg namespace 用例保持通过，后续若出现 sem/msg 跨 namespace 泄漏再按同一模式扩展。
+
 ### LTP shmt03/shmt04/shmt06 SysV SHM backing 共享修复
 
 **涉及文件：**

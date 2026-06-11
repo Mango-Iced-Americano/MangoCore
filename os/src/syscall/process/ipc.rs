@@ -564,6 +564,7 @@ struct ShmAttachment {
 }
 
 struct ShmSegment {
+    ns_id: u64,
     key: isize,
     size: usize,
     uid: u32,
@@ -583,9 +584,10 @@ struct ShmSegment {
 }
 
 impl ShmSegment {
-    fn new(key: isize, size: usize, mode: usize, uid: u32, gid: u32) -> Self {
+    fn new(ns_id: u64, key: isize, size: usize, mode: usize, uid: u32, gid: u32) -> Self {
         let now = now_sec();
         Self {
+            ns_id,
             key,
             size,
             uid,
@@ -649,10 +651,10 @@ impl ShmRegistry {
         id
     }
 
-    fn find_by_key(&self, key: isize) -> Option<(i32, &ShmSegment)> {
+    fn find_by_key(&self, ns_id: u64, key: isize) -> Option<(i32, &ShmSegment)> {
         self.segments
             .iter()
-            .find(|(_, seg)| !seg.removed && seg.key == key)
+            .find(|(_, seg)| seg.ns_id == ns_id && !seg.removed && seg.key == key)
             .map(|(id, seg)| (*id, seg))
     }
 
@@ -667,24 +669,41 @@ impl ShmRegistry {
         }
     }
 
-    fn id_by_index(&self, index: i32) -> Option<i32> {
+    fn id_by_index(&self, ns_id: u64, index: i32) -> Option<i32> {
         if index < 0 {
             return None;
         }
-        self.segments.keys().nth(index as usize).copied()
+        self.segments
+            .iter()
+            .filter(|(_, seg)| seg.ns_id == ns_id)
+            .map(|(id, _)| *id)
+            .nth(index as usize)
     }
 
-    fn highest_index(&self) -> isize {
-        if self.segments.is_empty() {
+    fn highest_index(&self, ns_id: u64) -> isize {
+        let count = self
+            .segments
+            .values()
+            .filter(|seg| seg.ns_id == ns_id)
+            .count();
+        if count == 0 {
             0
         } else {
-            self.segments.len() as isize - 1
+            count as isize - 1
         }
     }
 
-    fn total_pages(&self) -> usize {
+    fn ns_segment_count(&self, ns_id: u64) -> usize {
         self.segments
             .values()
+            .filter(|seg| seg.ns_id == ns_id)
+            .count()
+    }
+
+    fn total_pages(&self, ns_id: u64) -> usize {
+        self.segments
+            .values()
+            .filter(|seg| seg.ns_id == ns_id)
             .map(|seg| (seg.size + crate::config::PAGE_SIZE - 1) / crate::config::PAGE_SIZE)
             .sum()
     }
@@ -708,9 +727,10 @@ lazy_static! {
 }
 
 pub fn sys_shmget(key: isize, size: usize, shmflg: usize) -> isize {
+    let ns_id = current_ipc_ns_id();
     let mut registry = SHM_REGISTRY.lock();
     if key != IPC_PRIVATE {
-        if let Some((id, seg)) = registry.find_by_key(key) {
+        if let Some((id, seg)) = registry.find_by_key(ns_id, key) {
             if shmflg & IPC_CREAT != 0 && shmflg & IPC_EXCL != 0 {
                 return EEXIST;
             }
@@ -730,14 +750,14 @@ pub fn sys_shmget(key: isize, size: usize, shmflg: usize) -> isize {
     if size == 0 || size > MAX_SHM_SIZE {
         return EINVAL;
     }
-    if registry.segments.len() >= SHMMNI {
+    if registry.ns_segment_count(ns_id) >= SHMMNI {
         return ENOSPC;
     }
     let (uid, gid) = current_ipc_ids();
     let id = registry.alloc_id();
     registry.segments.insert(
         id,
-        ShmSegment::new(key, size, shmflg & 0o777, uid, gid),
+        ShmSegment::new(ns_id, key, size, shmflg & 0o777, uid, gid),
     );
     id as isize
 }
@@ -750,11 +770,15 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: usize) -> isize {
     if shmaddr == 0 && shmflg & SHM_REMAP != 0 {
         return EINVAL;
     }
+    let ns_id = current_ipc_ns_id();
     let (size, removed, frames) = {
         let mut registry = SHM_REGISTRY.lock();
         let Some(seg) = registry.segments.get_mut(&shmid) else {
             return EINVAL;
         };
+        if seg.ns_id != ns_id {
+            return EINVAL;
+        }
         let requested = if shmflg & SHM_RDONLY != 0 {
             SHM_R
         } else {
@@ -827,6 +851,10 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: usize) -> isize {
     let current_pid = current_pid_i32();
     let mut registry = SHM_REGISTRY.lock();
     if let Some(seg) = registry.segments.get_mut(&shmid) {
+        if seg.ns_id != ns_id {
+            let _ = sys_munmap(mapped, size);
+            return EIDRM;
+        }
         if seg.removed {
             let _ = sys_munmap(mapped, size);
             return EIDRM;
@@ -901,11 +929,16 @@ pub fn sysv_shmall() -> usize {
 }
 
 pub fn sysv_shm_proc_snapshot() -> String {
+    let ns_id = current_ipc_ns_id();
     let registry = SHM_REGISTRY.lock();
     let mut out = String::from(
         "       key      shmid perms                  size  cpid  lpid nattch   uid   gid  cuid  cgid      atime      dtime      ctime                   rss                  swap\n",
     );
-    for (id, seg) in registry.segments.iter() {
+    for (id, seg) in registry
+        .segments
+        .iter()
+        .filter(|(_, seg)| seg.ns_id == ns_id)
+    {
         let ds = seg.to_shmid_ds();
         let _ = writeln!(
             out,
@@ -1048,10 +1081,10 @@ pub fn sysv_sem_proc_snapshot() -> String {
     out
 }
 
-fn shm_usage_snapshot(registry: &ShmRegistry) -> LinuxShmUsageInfo {
+fn shm_usage_snapshot(registry: &ShmRegistry, ns_id: u64) -> LinuxShmUsageInfo {
     LinuxShmUsageInfo {
-        used_ids: registry.segments.len() as i32,
-        shm_tot: registry.total_pages(),
+        used_ids: registry.ns_segment_count(ns_id) as i32,
+        shm_tot: registry.total_pages(ns_id),
         shm_rss: 0,
         shm_swp: 0,
         swap_attempts: 0,
@@ -1060,12 +1093,17 @@ fn shm_usage_snapshot(registry: &ShmRegistry) -> LinuxShmUsageInfo {
 }
 
 fn shmctl_copy_stat(shmid: i32, cmd: usize, buf: usize) -> isize {
+    let ns_id = current_ipc_ns_id();
     let (real_id, ds) = {
         let registry = SHM_REGISTRY.lock();
         let id = if cmd == SHM_STAT || cmd == SHM_STAT_ANY {
-            let id = registry
-                .id_by_index(shmid)
-                .or_else(|| registry.segments.contains_key(&shmid).then_some(shmid));
+            let id = registry.id_by_index(ns_id, shmid).or_else(|| {
+                registry
+                    .segments
+                    .get(&shmid)
+                    .filter(|seg| seg.ns_id == ns_id)
+                    .map(|_| shmid)
+            });
             match id {
                 Some(id) => id,
                 None => return EINVAL,
@@ -1076,6 +1114,9 @@ fn shmctl_copy_stat(shmid: i32, cmd: usize, buf: usize) -> isize {
         let Some(seg) = registry.segments.get(&id) else {
             return EINVAL;
         };
+        if seg.ns_id != ns_id {
+            return EINVAL;
+        }
         if cmd != SHM_STAT_ANY && !has_shm_permission(seg, SHM_R) {
             return EACCES;
         }
@@ -1094,10 +1135,11 @@ fn shmctl_copy_stat(shmid: i32, cmd: usize, buf: usize) -> isize {
 
 pub fn sys_shmctl(shmid: i32, cmd: usize, buf: usize) -> isize {
     let cmd = normalize_ipc_cmd(cmd);
+    let ns_id = current_ipc_ns_id();
     match cmd {
         IPC_INFO => {
             let info = shminfo_snapshot();
-            let highest = SHM_REGISTRY.lock().highest_index();
+            let highest = SHM_REGISTRY.lock().highest_index(ns_id);
             return match copy_to_user(
                 current_user_token(),
                 &info as *const LinuxShmInfo,
@@ -1110,7 +1152,10 @@ pub fn sys_shmctl(shmid: i32, cmd: usize, buf: usize) -> isize {
         SHM_INFO => {
             let (info, highest) = {
                 let registry = SHM_REGISTRY.lock();
-                (shm_usage_snapshot(&registry), registry.highest_index())
+                (
+                    shm_usage_snapshot(&registry, ns_id),
+                    registry.highest_index(ns_id),
+                )
             };
             return match copy_to_user(
                 current_user_token(),
@@ -1146,6 +1191,9 @@ pub fn sys_shmctl(shmid: i32, cmd: usize, buf: usize) -> isize {
             let Some(seg) = registry.segments.get_mut(&shmid) else {
                 return EINVAL;
             };
+            if seg.ns_id != ns_id {
+                return EINVAL;
+            }
             if !can_modify_shm_segment(seg) {
                 return EPERM;
             }
@@ -1163,6 +1211,9 @@ pub fn sys_shmctl(shmid: i32, cmd: usize, buf: usize) -> isize {
     let Some(seg) = registry.segments.get_mut(&shmid) else {
         return EINVAL;
     };
+    if seg.ns_id != ns_id {
+        return EINVAL;
+    }
     if !can_modify_shm_segment(seg) {
         return EPERM;
     }
@@ -1249,6 +1300,12 @@ fn current_ipc_ids() -> (u32, u32) {
     let task = current_task().unwrap();
     let inner = task.acquire_inner_lock();
     (inner.euid, inner.egid)
+}
+
+fn current_ipc_ns_id() -> u64 {
+    current_task()
+        .map(|task| task.process.ipc().id)
+        .unwrap_or(0)
 }
 
 fn now_sec() -> usize {
