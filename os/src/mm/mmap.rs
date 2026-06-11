@@ -30,6 +30,15 @@ fn charges_overcommit(prot: MapPermission, flags: MapFlags) -> bool {
     flags.contains(MapFlags::MAP_ANONYMOUS) && prot.contains(MapPermission::W)
 }
 
+fn brk_overlap_blocks(area: &Vma) -> bool {
+    let map_type = area.flags.bits() & MapFlags::MAP_TYPE.bits();
+    let private_mapping = map_type == MapFlags::MAP_PRIVATE.bits();
+    let writable_user = area
+        .map_perm
+        .contains(MapPermission::R | MapPermission::W | MapPermission::U);
+    !area.vm_is_user() || area.map_file.is_some() || !private_mapping || !writable_user
+}
+
 pub(super) fn do_sbrk<T: PageTable>(
     address_space: &mut AddressSpace<T>,
     increment: isize,
@@ -103,6 +112,20 @@ pub(super) fn do_sbrk<T: PageTable>(
     if new_pt > old_pt {
         if new_page_end > old_page_end {
             let len = new_page_end - old_page_end;
+            let start_vpn = VirtAddr::from(old_page_end).floor();
+            let end_vpn = VirtAddr::from(new_page_end).ceil();
+            if address_space
+                .vmas
+                .iter()
+                .any(|area| area.vm_overlaps(start_vpn, end_vpn) && brk_overlap_blocks(area))
+            {
+                trace!(
+                    "[sbrk] heap grow overlaps non-heap mapping: start={:X}, len={:X}",
+                    old_page_end,
+                    len
+                );
+                return old_pt;
+            }
             if !crate::mm::overcommit_allows(address_space.committed_bytes(), len) {
                 return old_pt;
             }

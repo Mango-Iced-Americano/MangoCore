@@ -675,7 +675,10 @@ impl<T: PageTable> AddressSpace<T> {
                             });
                         };
                     }
-                    program_break = Some(VirtAddr::from(end_va.ceil()).0);
+                    let segment_end = VirtAddr::from(end_va.ceil()).0;
+                    program_break = Some(program_break.map_or(segment_end, |brk| {
+                        brk.max(segment_end)
+                    }));
                     trace!(
                         "[map_elf] start_va = 0x{:X}; end_va = 0x{:X}, offset = 0x{:X}",
                         start_va.0,

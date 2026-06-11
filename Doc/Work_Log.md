@@ -4,6 +4,20 @@
 
 ## 2026-06-11
 
+### LTP shmt09 brk/SHM VMA 碰撞语义修复
+
+**涉及文件：**
+- `os/src/mm/mmap.rs` — `sbrk` 扩堆前先检查目标范围内是否存在非 heap 私有匿名映射；遇到 SysV SHM 等共享/外部 VMA 时拒绝扩堆，避免 `MAP_FIXED` 覆盖已有映射
+- `os/src/mm/address_space.rs` — ELF 加载阶段用所有 `PT_LOAD` 段页尾最大值初始化 program break，避免初始 break 落在已有 load 段之前
+
+**验证：**
+- `docker compose exec os-dev bash -lc 'cd os && make rv64-kernel-build-only'` ✅
+- `docker compose exec os-dev bash -lc 'cd os && make la64-kernel-build-only'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=shmt09,brk01,brk02,shmat01,shmt02,shmt03,shmt04,shmt05,shmt06,shmt07,shmt08,shmt10` ✅ — musl/glibc 均无 TFAIL/TBROK
+- la64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=shmt09,brk01,brk02,shmat01,shmt02,shmt03,shmt04,shmt05,shmt06,shmt07,shmt08,shmt10` ✅ — musl/glibc 均无 TFAIL/TBROK
+
+**备注：** 修复前 `sbrk(INCREMENT)` 会通过 `MAP_FIXED` 覆盖 break 上方的 SHM attach VMA，导致 `shmt09` 认为扩堆意外成功；直接拒绝所有 overlap 又会挡住历史 brk/ELF bss 形成的 heap 私有匿名 VMA，导致 `brk01/brk02` 回归。本次只把共享/文件/非可写用户映射视为扩堆阻挡。
+
 ### LTP pipe02/pipe08 closed-reader SIGPIPE 语义修复
 
 **涉及文件：**
