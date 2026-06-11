@@ -4,6 +4,19 @@
 
 ## 2026-06-11
 
+### LTP umask01 inline broad-skip 解除
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — 删除 `should_skip_ltp_helper()` 中已经过期的 `umask01` 跳过规则，使修复后的用例可进入 inline 宽窗口
+
+**验证：**
+- `docker compose exec os-dev bash -lc 'cd os && make rv64-kernel-build-only'` ✅
+- `docker compose exec os-dev bash -lc 'cd os && make la64-kernel-build-only'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=umask01` ✅ — musl/glibc 均 `TPASS`，无 `SKIP LTP CASE umask01`
+- la64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=umask01` ✅ — musl/glibc 均 `TPASS`，无 `SKIP LTP CASE umask01`
+
+**备注：** 本次只维护已验证用例的旧过滤，不新增 initproc workaround。
+
 ### LTP umask01 文件创建掩码语义修复
 
 **涉及文件：**

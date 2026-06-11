@@ -1235,7 +1235,6 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
             Some("filesystem truncate edge cases skipped in LTP syscall scan")
         }
         "uaccess" => Some("requires LTP kernel module environment"),
-        "umask01" => Some("filesystem umask/create-mode semantics skipped in LTP syscall scan"),
         "umip_basic_test" => Some("x86_64-only UMIP testcase"),
         "unshare01.sh" => Some("standalone namespace shell helper skipped in broad scan"),
         "unzip01.sh" => Some("standalone unzip shell helper skipped in LTP syscall scan"),
