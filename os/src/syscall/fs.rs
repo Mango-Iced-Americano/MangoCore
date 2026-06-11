@@ -224,6 +224,13 @@ fn apply_created_inode_metadata(
     }
 }
 
+fn apply_current_umask(mode: vfs::InodeMode) -> vfs::InodeMode {
+    let task = current_task().unwrap();
+    let fs_ref = task.process.fs();
+    let mask = fs_ref.lock().umask & 0o777;
+    mode & vfs::InodeMode::S_IALLUGO & !vfs::InodeMode::from_bits_truncate(mask)
+}
+
 fn metadata_to_stat(meta: &vfs::Metadata) -> Stat {
     Stat {
         st_dev: meta.dev_id as u64,
@@ -2377,7 +2384,7 @@ pub fn sys_mknodat(dirfd: usize, path: *const u8, mode: u32, dev: usize) -> isiz
         m if m == vfs::InodeMode::S_IFREG || m == vfs::InodeMode::S_IFDIR => return EINVAL,
         _ => return EINVAL,
     };
-    let perm = vfs::InodeMode::from_bits_truncate(mode) & vfs::InodeMode::S_IALLUGO;
+    let perm = apply_current_umask(vfs::InodeMode::from_bits_truncate(mode));
     // Only pass device number for CHR/BLK; FIFO/socket use 0
     let rdev = if file_type == FileType::CharDevice || file_type == FileType::BlockDevice {
         dev
@@ -2500,7 +2507,7 @@ pub fn sys_openat(dirfd: usize, path: *const u8, flags: u32, mode: u32) -> isize
             Err(e) => -(e as isize),
         };
     }
-    let create_mode = vfs::InodeMode::from_bits_truncate(mode_bits) & vfs::InodeMode::S_IALLUGO;
+    let create_mode = apply_current_umask(vfs::InodeMode::from_bits_truncate(mode_bits));
     let new_file = match open_file_at(dirfd, &path, flags, create_mode) {
         Ok(file) => file,
         Err(errno) => return errno,
@@ -2711,7 +2718,7 @@ pub fn sys_mkdirat(dirfd: usize, path: *const u8, mode: u32) -> isize {
         Ok(result) => result,
         Err(errno) => return errno,
     };
-    let dir_mode = vfs::InodeMode::from_bits_truncate(mode) & vfs::InodeMode::S_IALLUGO;
+    let dir_mode = apply_current_umask(vfs::InodeMode::from_bits_truncate(mode));
     match parent.mkdir(&leaf, dir_mode) {
         Ok(_) => SUCCESS,
         Err(e) => -(e as isize),
@@ -4448,14 +4455,14 @@ pub fn sys_pselect(
 /// umask() sets the calling process's file mode creation mask (umask) to
 /// mask & 0777 (i.e., only the file permission bits of mask are used),
 /// and returns the previous value of the mask.
-/// # WARNING
-/// In current implementation, umask is always 0. This syscall won't do anything.
 pub fn sys_umask(mask: u32) -> isize {
     info!("[sys_umask] mask: {:o}", mask);
-    warn!(
-        "[sys_umask] In current implementation, umask is always 0. This syscall won't do anything."
-    );
-    0
+    let task = current_task().unwrap();
+    let fs_ref = task.process.fs();
+    let mut fs = fs_ref.lock();
+    let old_mask = fs.umask & 0o777;
+    fs.umask = mask & 0o777;
+    old_mask as isize
 }
 
 bitflags! {

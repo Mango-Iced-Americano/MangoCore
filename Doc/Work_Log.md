@@ -4,6 +4,20 @@
 
 ## 2026-06-11
 
+### LTP umask01 文件创建掩码语义修复
+
+**涉及文件：**
+- `os/src/task/task.rs` — 在进程 FS 状态中保存 `umask`，fork/clone/unshare 复用既有 `FsStatus` clone/share 语义
+- `os/src/syscall/fs.rs` — `sys_umask()` 返回旧掩码并保存 `mask & 0777`；`openat(O_CREAT)`、`mkdirat()`、`mknodat()` 创建入口按当前 umask 裁剪权限位
+
+**验证：**
+- `docker compose exec os-dev bash -lc 'cd os && make rv64-kernel-build-only'` ✅
+- `docker compose exec os-dev bash -lc 'cd os && make la64-kernel-build-only'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=umask01` ✅ — musl/glibc 均 `TPASS`
+- la64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=umask01` ✅ — musl/glibc 均 `TPASS`
+
+**备注：** `memfd_create()` 继续使用内部固定创建模式，不套用户态 umask；本次只修进程文件模式创建掩码，不调整 initproc 过滤表。
+
 ### LTP shmt09 brk/SHM VMA 碰撞语义修复
 
 **涉及文件：**

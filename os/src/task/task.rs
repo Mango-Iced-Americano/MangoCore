@@ -63,6 +63,8 @@ pub struct FsStatus {
     pub working_inode: Arc<vfs::File>,
     /// 当前工作目录的绝对路径字符串（用于 getcwd，避免依赖 broken 的 absolute_path()）
     pub working_path: String,
+    /// Process file mode creation mask.
+    pub umask: u32,
 }
 
 #[derive(Clone)]
@@ -770,6 +772,7 @@ impl TaskControlBlock {
             Arc::new(Mutex::new(FsStatus {
                 working_inode: cwd,
                 working_path: String::from("/"),
+                umask: 0,
             })),
             Arc::new(Mutex::new(UtsNamespace::new())),
             INIT_NET_NAMESPACE.clone(),
