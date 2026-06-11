@@ -12,6 +12,20 @@ const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
 const PROT_EXEC: usize = 0x4;
 const CAP_IPC_LOCK: usize = 14;
+const SYS_RISCV_FLUSH_ICACHE_LOCAL: usize = 1;
+
+pub fn sys_riscv_flush_icache(_start: usize, _end: usize, flags: usize) -> isize {
+    if flags & !SYS_RISCV_FLUSH_ICACHE_LOCAL != 0 {
+        return EINVAL;
+    }
+
+    #[cfg(target_arch = "riscv64")]
+    unsafe {
+        core::arch::asm!("fence.i", options(nostack, preserves_flags));
+    }
+
+    SUCCESS
+}
 
 pub fn sys_sbrk(increment: isize) -> isize {
     let task = current_task().unwrap();

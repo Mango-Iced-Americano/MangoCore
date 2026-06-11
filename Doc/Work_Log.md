@@ -4,6 +4,21 @@
 
 ## 2026-06-12
 
+### LTP mprotect04 RISC-V icache flush syscall 补齐
+
+**涉及文件：**
+- `os/src/syscall/syscall_id.rs` — 增加 RISC-V arch-specific syscall `riscv_flush_icache(259)` 编号
+- `os/src/syscall/process/mm.rs` — 实现 `sys_riscv_flush_icache()`，校验 flags 后在 rv64 执行 `fence.i`
+- `os/src/syscall/process/mod.rs`、`os/src/syscall/mod.rs` — 导出并接入 syscall name/dispatch
+
+**验证：**
+- `docker compose exec os-dev bash -lc 'make -C os rv64-kernel-build-only >/tmp/mango-rv64-icache-kernel.log 2>&1 ...'` ✅
+- `docker compose exec os-dev bash -lc 'make -C os la64-kernel-build-only >/tmp/mango-la64-icache-kernel.log 2>&1 ...'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=cacheflush01,mprotect04` ✅ — `mprotect04` musl/glibc 均 `TPASS`，glibc 路径不再打印 `Unsupported syscall 259`；`cacheflush01` 仍为当前 LTP 架构/库层 `TCONF`
+- la64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=mprotect04` ✅ — musl/glibc 均 `TPASS`
+
+**备注：** 本次只补 RISC-V libc 在可执行映射路径会调用的 arch-specific syscall；不修改 net/fs，不跑 LTP 全量，且不解除 `cacheflush01` 的既有过滤。
+
 ### LTP setfsgid03 gid 1 账号数据库补齐
 
 **涉及文件：**
