@@ -2,6 +2,24 @@
 
 ---
 
+## 2026-06-12
+
+### LTP setfsgid03 gid 1 账号数据库补齐
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — `/etc/group` 不存在时创建包含 `daemon:x:1:` 的默认组表；镜像中已有 `/etc/group` 但缺少 gid 1 组时幂等追加 `daemon:x:1:`
+- `.agents/skills/mango-worklog/references/harness-patterns.md` — 记录 LTP 账号数据库已有文件需要做幂等迁移的排查模式
+
+**验证：**
+- `docker compose exec os-dev bash -lc 'make -C os inject-test >/tmp/mango-rv64-inject-test.log 2>&1 ...'` ✅
+- `docker compose exec os-dev bash -lc 'make -C os rv64-kernel-build-only >/tmp/mango-rv64-kernel.log 2>&1 ...'` ✅
+- `docker compose exec os-dev bash -lc 'make -C os la64-inject-runtime MODE=release >/tmp/mango-la64-inject-runtime.log 2>&1 ...'` ✅
+- `docker compose exec os-dev bash -lc 'make -C os la64-kernel-build-only >/tmp/mango-la64-kernel.log 2>&1 ...'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=setfsgid03` ✅ — musl/glibc 均 `TPASS`
+- la64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=setfsgid03` ✅ — musl/glibc 均 `TPASS`
+
+**备注：** `setfsgid03` 会从 gid 1 起用 `getgrgid()` 查找可用组；旧镜像只有 `root(0)` 和 `nogroup(65534)` 时会长时间遍历并被 runner 杀掉，表现为 137。本次不修改 net/fs，不跑 LTP 全量。
+
 ## 2026-06-11
 
 ### LTP sigrelse01 musl 实时信号 wrapper 兼容
