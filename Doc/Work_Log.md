@@ -4,6 +4,20 @@
 
 ## 2026-06-11
 
+### LTP shmctl01 fork 继承 SysV SHM attach 修复
+
+**涉及文件：**
+- `os/src/task/task.rs` — 非线程 `clone`/`fork` 创建新进程时调用 `shm_clone_attachments()`，同步登记子进程继承的 SysV SHM attach 元数据
+- `os/src/syscall/mod.rs` — re-export `shm_clone_attachments`，供任务创建路径复用既有 SysV SHM registry helper
+
+**验证：**
+- `docker compose exec os-dev make -C os rv64-kernel-build-only` ✅
+- `docker compose exec os-dev make -C os la64-kernel-build-only` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=shmctl01` ✅ — musl/glibc `shmctl01` 均 `passed 12 / failed 0 / broken 0`
+- la64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=shmctl01` ✅ — musl/glibc `shmctl01` 均 `passed 12 / failed 0 / broken 0`
+
+**备注：** 修复前 `shmctl01` 在 fork 继承阶段只看到 `shm_nattch=1`，预期为 `21`，随后子进程批量 `shmdt()` 因 registry 中没有子进程 attach 记录返回 `EINVAL`。本轮只修内核 SHM/fork 元数据继承；同批扫描中 `shmget02`/`shmget05` 依赖 `/proc/sys/kernel/shmmax`、`shm_next_id` 可写，属于 procfs/sysctl 环境问题，按边界暂不处理。
+
 ### LTP nice05 rv64 glibc 环境失败过滤
 
 **涉及文件：**

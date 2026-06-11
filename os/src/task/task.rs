@@ -14,7 +14,7 @@ use crate::hal::{kstack_alloc, KernelStack};
 use crate::hal::{trap_handler, TrapContext};
 use crate::mm::PageTableImpl;
 use crate::mm::{AddressSpace, FaultAccess, PhysPageNum, VirtAddr, KERNEL_SPACE};
-use crate::syscall::CloneFlags;
+use crate::syscall::{shm_clone_attachments, CloneFlags};
 use crate::syscall::errno::{EISDIR, ENOEXEC, ENOMEM};
 use crate::timer::{ITimerVal, TimeSpec, TimeVal, USEC_PER_SEC};
 use alloc::string::String;
@@ -1324,6 +1324,9 @@ impl TaskControlBlock {
         trap_cx.gp.a0 = 0;
         // 修改陷阱上下文中的内核栈指针
         trap_cx.kernel_sp = kstack_top;
+        if !flags.contains(CloneFlags::CLONE_THREAD) {
+            shm_clone_attachments(self.pid(), task_control_block.pid())?;
+        }
         task_control_block.process.add_thread(&task_control_block);
         if !flags.contains(CloneFlags::CLONE_THREAD) {
             task_control_block.process.set_sched_state(
