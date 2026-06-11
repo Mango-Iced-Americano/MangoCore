@@ -4,6 +4,21 @@
 
 ## 2026-06-12
 
+### LTP vma01 fork 继承 VMA 合并语义修复
+
+**涉及文件：**
+- `os/src/mm/vma.rs` — 为 VMA 增加 `fork_inherited` 标记；fork 继承来的匿名私有 VMA 不再参与后续 lazy private mmap 合并
+- `os/src/mm/address_space.rs` — `AddressSpace::from_existing_user()` 复制用户 VMA 到子进程时标记为 fork 继承
+- `os/src/mm/mmap.rs`、`os/src/mm/vma_set.rs` — 非 `MAP_FIXED` 的 `mmap(addr_hint, ...)` 在 hint 区间完整空闲时优先按 hint 放置，再回退到自动找空洞
+
+**验证：**
+- `docker compose exec os-dev bash -lc 'make -C os rv64-kernel-build-only >/tmp/mango-rv64-vma01-build2.log 2>&1 ...'` ✅
+- `docker compose exec os-dev bash -lc 'make -C os la64-kernel-build-only >/tmp/mango-la64-vma01-build2.log 2>&1 ...'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=vma01,mmap01,mmap05,mmap10,brk01,fork01` ✅ — musl/glibc 均无 `TFAIL/TBROK`
+- la64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=vma01,mmap01,mmap05,mmap10,brk01,fork01` ✅ — musl/glibc 均无 `TFAIL/TBROK`
+
+**备注：** 修复前 `vma01` 在子进程中把 fork 继承的 3 页匿名 VMA 与随后新建的相邻 3 页匿名 VMA 合并为 6 页；glibc 路径还会因非 fixed mmap 忽略 hint，把父进程初始映射放到其它空洞并与前驱 VMA 合并，导致 `/proc/self/maps` 找不到 LTP 记录的起始地址。本次只修 mm 层 VMA 合并和 hint 放置语义，不修改 net/fs/procfs。
+
 ### LTP mprotect04 RISC-V icache flush syscall 补齐
 
 **涉及文件：**

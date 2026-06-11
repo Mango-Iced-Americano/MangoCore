@@ -210,22 +210,35 @@ pub(super) fn do_mmap<T: PageTable>(
         address_space.set_locked_pages(start_vpn, end_vpn, false);
         start_hint
     } else {
-        match address_space.vmas.find_free_mmap_range(len, PAGE_SIZE) {
-            Ok(start_va) => {
-                if !flags.contains(MapFlags::MAP_LOCKED) {
-                    match address_space
-                        .vmas
-                        .try_merge_lazy_private_mmap::<T>(start_va, len, prot, flags)
-                    {
-                        Ok(Some(end_va)) => return end_va.0 as isize,
-                        Ok(None) => {}
-                        Err(errno) => return errno,
-                    }
-                }
-                start_va
+        let hinted_start = if start != 0 {
+            let start_vpn = start_hint.floor();
+            let end_vpn = requested_end.ceil();
+            if address_space.vmas.is_mmap_range_free(start_vpn, end_vpn) {
+                Some(start_hint)
+            } else {
+                None
             }
-            Err(errno) => return errno,
+        } else {
+            None
+        };
+        let start_va = match hinted_start {
+            Some(start_va) => start_va,
+            None => match address_space.vmas.find_free_mmap_range(len, PAGE_SIZE) {
+                Ok(start_va) => start_va,
+                Err(errno) => return errno,
+            },
+        };
+        if !flags.contains(MapFlags::MAP_LOCKED) {
+            match address_space
+                .vmas
+                .try_merge_lazy_private_mmap::<T>(start_va, len, prot, flags)
+            {
+                Ok(Some(end_va)) => return end_va.0 as isize,
+                Ok(None) => {}
+                Err(errno) => return errno,
+            }
         }
+        start_va
     };
     let end = match start_va.0.checked_add(len) {
         Some(end) => end,

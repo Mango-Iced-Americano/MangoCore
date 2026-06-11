@@ -771,7 +771,7 @@ impl<T: PageTable> AddressSpace<T> {
             return Err(crate::syscall::errno::ENOMEM);
         }
         for area in user_space.vmas.iter().filter(|area| area.vm_is_user()) {
-            let new_area = if area.wipe_on_fork {
+            let mut new_area = if area.wipe_on_fork {
                 Vma::from_another(area)
             } else {
                 let mut cloned = area.try_clone()?;
@@ -783,6 +783,7 @@ impl<T: PageTable> AddressSpace<T> {
                     .map_err(|_| crate::syscall::errno::ENOMEM)?;
                 cloned
             };
+            new_area.mark_fork_inherited();
             address_space.vmas.push(new_area)?;
             debug!(
                 "[fork] map shared area: {:?}",

@@ -802,7 +802,7 @@ impl VmaSet {
         }
     }
 
-    fn is_mmap_range_free(&self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> bool {
+    pub(super) fn is_mmap_range_free(&self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> bool {
         let Some((clipped_start, clipped_end)) = self.clip_mmap_range(start_vpn, end_vpn) else {
             return false;
         };
