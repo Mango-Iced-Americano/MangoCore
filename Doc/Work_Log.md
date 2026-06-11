@@ -4,6 +4,19 @@
 
 ## 2026-06-11
 
+### LTP clone302 CLONE_NEWNS/CLONE_FS 组合校验
+
+**涉及文件：**
+- `os/src/syscall/process/clone.rs` — 在 clone 公共参数校验中拒绝 `CLONE_NEWNS | CLONE_FS`，按 Linux ABI 返回 `EINVAL`
+
+**验证：**
+- `docker compose exec os-dev bash -lc 'make -C os rv64-kernel-build-only'` ✅
+- `docker compose exec os-dev bash -lc 'make -C os la64-kernel-build-only'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=clone302` ✅ — musl/glibc `clone302` 均 `passed 12 / failed 0 / broken 0`
+- la64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=clone302` ✅ — musl/glibc `clone302` 均 `passed 12 / failed 0 / broken 0`
+
+**备注：** 修复前 `clone302` 的 `fs-newns` 子项因 `clone3(CLONE_FS | CLONE_NEWNS)` 意外成功而 TFAIL；本次只补 clone flag 组合校验，不实现或修改 mount namespace / VFS 行为。
+
 ### LTP shmctl01 fork 继承 SysV SHM attach 修复
 
 **涉及文件：**

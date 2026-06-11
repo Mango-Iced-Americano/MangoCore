@@ -188,6 +188,9 @@ fn sys_clone_inner(
     if flags.contains(CloneFlags::CLONE_VFORK) && flags.contains(CloneFlags::CLONE_THREAD) {
         return EINVAL;
     }
+    if flags.contains(CloneFlags::CLONE_NEWNS) && flags.contains(CloneFlags::CLONE_FS) {
+        return EINVAL;
+    }
     if (flags.contains(CloneFlags::CLONE_NEWUTS) || flags.contains(CloneFlags::CLONE_NEWNET)
         || flags.contains(CloneFlags::CLONE_NEWNS) || flags.contains(CloneFlags::CLONE_NEWIPC))
         && parent.acquire_inner_lock().euid != 0
