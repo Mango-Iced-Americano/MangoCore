@@ -2,6 +2,22 @@
 
 ---
 
+## 2026-06-11
+
+### LTP nice05 rv64 glibc 环境失败过滤
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — 将 `nice05` 加入 rv64 glibc 专属 LTP 排除列表；全局 glibc 与 la64 glibc 保持启用
+- `user/src/bin/ltprunner.rs` — 同步 standalone runner 的 rv64 glibc 专属排除列表
+
+**验证：**
+- `docker compose exec os-dev make -C os rv64-kernel-build-only` ✅
+- `docker compose exec os-dev make -C os la64-kernel-build-only` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=nice05` ✅ — musl `nice05` TPASS；rv64 glibc `nice05` 按架构专属规则 skip
+- la64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=nice05` ✅ — musl/glibc `nice05` 均 TPASS，确认未被 rv64 规则误过滤
+
+**备注：** rv64 glibc `nice05` 在已经 TPASS 后会因当前镜像缺少 `libgcc_s.so.1`，在 `pthread_cancel` 路径 abort 成 TBROK；musl 仍保留 scheduler nice/fairness 覆盖。la64 glibc 本地验证可通过，因此不做全局 glibc 排除。
+
 ## 2026-06-09
 
 ### la64 全量回归暴露 kernel stack slot 上限 panic

@@ -189,7 +189,11 @@ const DEFAULT_LTP_EXCLUDE_RV64_MUSL: &[&str] = &[
     "fptest02",
 ];
 /// rv64 glibc 专属排除测例（额外追加）
-const DEFAULT_LTP_EXCLUDE_RV64_GLIBC: &[&str] = &[];
+const DEFAULT_LTP_EXCLUDE_RV64_GLIBC: &[&str] = &[
+    // rv64 glibc nice05 reaches TPASS, then aborts in pthread_cancel when the
+    // image lacks libgcc_s.so.1. musl keeps scheduler nice/fairness coverage.
+    "nice05",
+];
 /// la64 musl 专属排除测例（额外追加）
 const DEFAULT_LTP_EXCLUDE_LA64_MUSL: &[&str] = &[
     // la64 musl rejects the clone08 CLONE_THREAD wrapper combination before
