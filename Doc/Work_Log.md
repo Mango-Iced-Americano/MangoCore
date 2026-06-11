@@ -4,6 +4,20 @@
 
 ## 2026-06-12
 
+### LTP pipe15 RLIMIT_NOFILE fd 上限适配
+
+**涉及文件：**
+- `os/src/hal/arch/riscv/config.rs`、`os/src/hal/arch/loongarch64/config.rs` — 将双架构 `SYSTEM_FD_LIMIT` 从 256 提升到 4096；`FdTable` 初始容量仍为 32，保持按需扩容
+- `os/src/fs/procfs/pid/status.rs` — `/proc/[pid]/status` 的 `FDSize` 改为跟随 `SYSTEM_FD_LIMIT`，避免配置和状态报告不一致
+
+**验证：**
+- `docker compose exec os-dev bash -lc 'make -C os rv64-kernel-build-only >/tmp/mango-rv64-fdlimit3.log 2>&1 ...'` ✅
+- `docker compose exec os-dev bash -lc 'make -C os la64-kernel-build-only >/tmp/mango-la64-fdlimit3.log 2>&1 ...'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=pipe15,pipe2_01,pipe2_02,pipe2_04,getrlimit01,getrlimit02,getrlimit03,setrlimit01,setrlimit02,setrlimit03,setrlimit04,setrlimit05,setrlimit06` ✅ — musl/glibc 均无 `TFAIL/TBROK`；`pipe15` 从 `TCONF: NOFILE limit max too low` 变为 `TPASS`
+- la64 QEMU focused：同上用例集 ✅ — musl/glibc 均无 `TFAIL/TBROK`；`pipe15` 均 `TPASS`
+
+**备注：** `pipe15` 会根据 `/proc/sys/fs/pipe-user-pages-soft` 创建 1024 根 pipe，需要超过 2050 个 fd；旧 256/1024/2048 上限都会在前置检查阶段 TCONF。当前只提升 fd 表上限，不改变 pipe 缓冲区实现，不修改 net/fs 测试点，也未运行 LTP 全量。
+
 ### LTP vma01 fork 继承 VMA 合并语义修复
 
 **涉及文件：**

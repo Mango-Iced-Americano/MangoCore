@@ -1,6 +1,7 @@
 //! /proc/<pid>/status — 进程状态
 
 use crate::fs::procfs::proc_read_str;
+use crate::config::SYSTEM_FD_LIMIT;
 use crate::utils::error::SyscallErr;
 use alloc::string::{String, ToString};
 
@@ -108,7 +109,7 @@ pub fn pid_status_content(
          PPid:\t{}\n\
          Uid:\t{}\t{}\t{}\t{}\n\
          Gid:\t{}\t{}\t{}\t{}\n\
-         FDSize:\t256\n\
+         FDSize:\t{}\n\
          VmSize:\t       0 kB\n\
          VmHWM:\t{:9} kB\n\
          VmRSS:\t{:9} kB\n\
@@ -146,6 +147,7 @@ pub fn pid_status_content(
         egid,
         sgid,
         fsgid,
+        SYSTEM_FD_LIMIT,
         vm_rss_kb,
         vm_rss_kb,
         vm_lck_kb,
