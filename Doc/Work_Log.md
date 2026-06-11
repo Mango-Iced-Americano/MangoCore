@@ -4,6 +4,19 @@
 
 ## 2026-06-11
 
+### LTP pipe02/pipe08 closed-reader SIGPIPE 语义修复
+
+**涉及文件：**
+- `os/src/fs/dev/pipe.rs` — pipe 写端在所有读端关闭时立即返回 `EPIPE`，并向当前任务投递 `SIGPIPE`
+
+**验证：**
+- `docker compose exec os-dev bash -lc 'cd os && make rv64-kernel-build-only'` ✅
+- `docker compose exec os-dev bash -lc 'cd os && make la64-kernel-build-only'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=pipe01,pipe02,pipe03,pipe04,pipe08,pipe09,pipe12,pipe13,pipe2_01,pipe2_04` ✅ — musl/glibc 均无 TFAIL/TBROK
+- la64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=pipe01,pipe02,pipe03,pipe04,pipe08,pipe09,pipe12,pipe13,pipe2_01,pipe2_04` ✅ — musl/glibc 均无 TFAIL/TBROK
+
+**备注：** 修复前只在 pipe ring buffer 已满时检查读端是否全部关闭，导致读端关闭但缓冲区未满时 `write()` 可能成功，且不会触发 `SIGPIPE`；本次将 closed-reader 检查前移到实际写入前，并在释放 ring lock 后投递信号。
+
 ### LTP setns02 SysV SHM IPC namespace 隔离
 
 **涉及文件：**

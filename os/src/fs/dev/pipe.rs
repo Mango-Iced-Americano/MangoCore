@@ -11,13 +11,19 @@ use crate::fs::vfs::{
 use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::fs::vfs::file_system::FileSystem as NewFileSystem;
 use crate::fs::dev::DEV_FS;
-use crate::task::{current_task, WaitQueue};
+use crate::task::{current_task, Signals, WaitQueue};
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
 
 const FIONREAD: u32 = 0x541B;
 const CAP_SYS_RESOURCE: usize = 24;
 const PIPE_SET_SIZE_MAX: usize = 1usize << 31;
+
+fn send_sigpipe_to_current() {
+    if let Some(task) = current_task() {
+        task.acquire_inner_lock().add_signal(Signals::SIGPIPE);
+    }
+}
 
 pub struct Pipe {
     readable: bool,
@@ -93,23 +99,25 @@ impl IndexNode for Pipe {
         }
         let result = {
             let mut ring = self.buffer.lock();
-            if ring.status == RingBufferStatus::FULL {
-                if ring.all_read_ends_closed() {
-                    return Err(SyscallErr::EPIPE); // Broken pipe
-                }
-                return Err(SyscallErr::EAGAIN);
-            }
-            if buf.len() <= PAGE_SIZE && ring.get_free_size() < buf.len() {
-                return Err(SyscallErr::EAGAIN);
-            }
-            let write_bytes = ring.buffer_write(buf);
-            ring.status = if ring.head == ring.tail {
-                RingBufferStatus::FULL
+            if ring.all_read_ends_closed() {
+                Err(SyscallErr::EPIPE)
+            } else if ring.status == RingBufferStatus::FULL {
+                Err(SyscallErr::EAGAIN)
+            } else if buf.len() <= PAGE_SIZE && ring.get_free_size() < buf.len() {
+                Err(SyscallErr::EAGAIN)
             } else {
-                RingBufferStatus::NORMAL
-            };
-            Ok(write_bytes)
+                let write_bytes = ring.buffer_write(buf);
+                ring.status = if ring.head == ring.tail {
+                    RingBufferStatus::FULL
+                } else {
+                    RingBufferStatus::NORMAL
+                };
+                Ok(write_bytes)
+            }
         };
+        if matches!(result, Err(SyscallErr::EPIPE)) {
+            send_sigpipe_to_current();
+        }
         if let Ok(_n) = &result {
             if let Some(read_end) = self.peer_read_end() {
                 read_end
