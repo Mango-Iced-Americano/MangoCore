@@ -2556,6 +2556,25 @@ pub fn sys_statx(dirfd: usize, path: *const u8, flags: u32, mask: u32, buf: *mut
         dirfd as isize, path, flags,
     );
 
+    // AT_EMPTY_PATH: stat the dirfd itself (glibc dynamic linker on la64)
+    if path.is_empty() {
+        if !flags.contains(FstatatFlags::AT_EMPTY_PATH) {
+            return ENOENT;
+        }
+        let start = match resolve_start_inode(dirfd) {
+            Ok(inode) => inode,
+            Err(errno) => return errno,
+        };
+        let statx = match start.metadata() {
+            Ok(meta) => metadata_to_statx(&meta, mask),
+            Err(e) => return -(e as isize),
+        };
+        if UserPtrMut::new(buf as *mut Statx).write(token, &statx).is_err() {
+            return EFAULT;
+        }
+        return SUCCESS;
+    }
+
     let start = match resolve_start_inode(dirfd) {
         Ok(inode) => inode,
         Err(errno) => return errno,
