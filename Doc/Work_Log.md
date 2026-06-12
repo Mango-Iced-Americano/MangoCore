@@ -4,6 +4,19 @@
 
 ## 2026-06-12
 
+### LTP madvise01 hint advice 兼容
+
+**涉及文件：**
+- `os/src/syscall/process/mm.rs` — `sys_madvise()` 增加 `MADV_HUGEPAGE`、`MADV_NOHUGEPAGE`、`MADV_COLD`、`MADV_PAGEOUT` 的已映射区间兼容 no-op 支持；保留 `MADV_FREE`、`MADV_DONTDUMP/DODUMP`、`MADV_DONTFORK/DOFORK` 等需要完整语义的 advice 继续返回 `EINVAL`
+
+**验证：**
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make rv64-kernel-build-only ...'` ✅
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make la64-kernel-build-only ...'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=madvise01,madvise02,madvise03,madvise05,madvise10` ✅ — musl/glibc 均无 `TFAIL/TBROK`；`madvise01` 每个 libc 从 6 个 `TPASS` 提升到 10 个 `TPASS`
+- la64 QEMU focused：同上用例集 ✅ — musl/glibc 均无 `TFAIL/TBROK`；`madvise01` 每个 libc 均为 10 个 `TPASS`
+
+**备注：** 本次只增加 Linux 允许的 hint/no-op advice ABI 成功路径，不实现内存回收、core dump 或 fork 过滤语义；`MADV_FREE`、`MADV_DONTDUMP/DODUMP`、`MADV_DONTFORK/DOFORK`、`MADV_REMOVE` 等仍按较复杂语义跳过；未运行 LTP 全量。
+
 ### LTP epoll_pwait01 pending signal EINTR 语义修复
 
 **涉及文件：**

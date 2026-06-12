@@ -595,8 +595,12 @@ pub fn sys_madvise(addr: usize, length: usize, advice: usize) -> isize {
     const MADV_SEQUENTIAL: usize = 2;
     const MADV_WILLNEED: usize = 3;
     const MADV_DONTNEED: usize = 4;
+    const MADV_HUGEPAGE: usize = 14;
+    const MADV_NOHUGEPAGE: usize = 15;
     const MADV_WIPEONFORK: usize = 18;
     const MADV_KEEPONFORK: usize = 19;
+    const MADV_COLD: usize = 20;
+    const MADV_PAGEOUT: usize = 21;
 
     if addr & (PAGE_SIZE - 1) != 0 {
         return EINVAL;
@@ -619,8 +623,12 @@ pub fn sys_madvise(addr: usize, length: usize, advice: usize) -> isize {
         | MADV_SEQUENTIAL
         | MADV_WILLNEED
         | MADV_DONTNEED
+        | MADV_HUGEPAGE
+        | MADV_NOHUGEPAGE
         | MADV_WIPEONFORK
-        | MADV_KEEPONFORK => {
+        | MADV_KEEPONFORK
+        | MADV_COLD
+        | MADV_PAGEOUT => {
             match current_task()
                 .unwrap()
                 .process
