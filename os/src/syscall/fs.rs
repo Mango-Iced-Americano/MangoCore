@@ -2753,7 +2753,7 @@ pub fn sys_fsync(fd: usize) -> isize {
         Ok(file) => file,
         Err(e) => return -(e as isize),
     };
-    if !matches!(file.file_type(), FileType::File | FileType::Dir) {
+    if !matches!(file.file_type(), FileType::File | FileType::Dir | FileType::BlockDevice) {
         return EINVAL;
     }
     drop(fd_table);
@@ -2774,7 +2774,7 @@ pub fn sys_fdatasync(fd: usize) -> isize {
     };
     drop(fd_table);
 
-    if !matches!(file.file_type(), FileType::File | FileType::Dir) {
+    if !matches!(file.file_type(), FileType::File | FileType::Dir | FileType::BlockDevice) {
         return EINVAL;
     }
 
