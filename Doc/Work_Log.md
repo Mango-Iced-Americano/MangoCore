@@ -4,6 +4,20 @@
 
 ## 2026-06-12
 
+### LTP sysconf01 兼容资源上限补齐
+
+**涉及文件：**
+- `os/ltp_proto_compat.c` — `sysconf()` preload wrapper 先委托 libc 原实现；仅在 libc 对 LTP 枚举资源返回“无限/未实现且 errno=0”时，为 `TZNAME_MAX/PASS_MAX/STREAM_MAX/ATEXIT_MAX/EXPR_NEST_MAX/LINE_MAX/TIMER_MAX/SEM_NSEMS_MAX` 补 ABI 可见值
+- `user/tools/riscv64/lib/ltp_proto_compat-rv.so`、`user/tools/loongarch64/lib/ltp_proto_compat-la.so` — 重新生成双架构 preload 共享库
+
+**验证：**
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make rv64-kernel-build-only ...'` ✅
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make la64-kernel-build-only ...'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=sysconf01,confstr01,timer_create01,semget01`、`ltp_libc=both` ✅ — 无 `TFAIL/TBROK`；`sysconf01` 从本轮基线 `83 TPASS / 29 TCONF` 提升到 `92 TPASS / 20 TCONF`
+- la64 QEMU focused：同上配置 ✅ — 无 `TFAIL/TBROK`；`sysconf01` 为 `92 TPASS / 20 TCONF`
+
+**备注：** 本次不伪装当前不真实支持的 AIO、XSI 工具链、XBS5 ILP32、crypt 等资源，因此仍保留对应 `TCONF`；未修改 net/fs 测试点，也未运行 LTP 全量。
+
 ### LTP ptrace11 attach/detach 最小兼容
 
 **涉及文件：**

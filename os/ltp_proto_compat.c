@@ -1,3 +1,6 @@
+#define _GNU_SOURCE 1
+
+#include <dlfcn.h>
 #include <netdb.h>
 #include <errno.h>
 #include <stdint.h>
@@ -111,6 +114,82 @@ static struct protoent *make_protoent(const struct proto_entry *entry)
     proto.p_aliases = empty_aliases;
     proto.p_proto = entry->proto;
     return &proto;
+}
+
+static long fallback_sysconf_value(int name, int *handled)
+{
+    *handled = 1;
+
+    switch (name) {
+#ifdef _SC_TZNAME_MAX
+    case _SC_TZNAME_MAX:
+        return 6;
+#endif
+#ifdef _SC_PASS_MAX
+    case _SC_PASS_MAX:
+        return 8192;
+#endif
+#ifdef _SC_STREAM_MAX
+    case _SC_STREAM_MAX:
+        return 16;
+#endif
+#ifdef _SC_ATEXIT_MAX
+    case _SC_ATEXIT_MAX:
+        return 32;
+#endif
+#ifdef _SC_EXPR_NEST_MAX
+    case _SC_EXPR_NEST_MAX:
+        return 32;
+#endif
+#ifdef _SC_LINE_MAX
+    case _SC_LINE_MAX:
+        return 2048;
+#endif
+#ifdef _SC_TIMER_MAX
+    case _SC_TIMER_MAX:
+        return 32;
+#endif
+#ifdef _SC_SEM_NSEMS_MAX
+    case _SC_SEM_NSEMS_MAX:
+        return 32000;
+#endif
+    default:
+        *handled = 0;
+        return -1;
+    }
+}
+
+long sysconf(int name)
+{
+    typedef long (*sysconf_fn_t)(int);
+    static sysconf_fn_t next_sysconf;
+    static int looked_up;
+    int saved_errno;
+    long ret;
+
+    if (!looked_up) {
+        next_sysconf = (sysconf_fn_t)dlsym(RTLD_NEXT, "sysconf");
+        looked_up = 1;
+    }
+
+    if (next_sysconf) {
+        errno = 0;
+        ret = next_sysconf(name);
+        saved_errno = errno;
+        if (ret != -1 || saved_errno != 0) {
+            errno = saved_errno;
+            return ret;
+        }
+    }
+
+    ret = fallback_sysconf_value(name, &saved_errno);
+    if (saved_errno) {
+        errno = 0;
+        return ret;
+    }
+
+    errno = 0;
+    return -1;
 }
 
 struct protoent *getprotobyname(const char *name)
