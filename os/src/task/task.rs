@@ -191,8 +191,8 @@ pub struct TaskControlBlockInner {
     /// Timer slack compatibility state in nanoseconds.
     pub timer_slack_ns: usize,
     pub timer_slack_default_ns: usize,
-    /// Minimal ptrace(TRACEME) compatibility state.
-    /// Full trace-stop semantics are not implemented yet.
+    /// Minimal ptrace(TRACEME) compatibility state for signal-delivery stops.
+    /// Full debugger register/memory access semantics are not implemented yet.
     pub ptrace_traceme: bool,
     /// POSIX 用户/组 ID 兼容字段，供 LTP 权限类用例和 capability 查询使用。
     pub uid: u32,

@@ -4,6 +4,22 @@
 
 ## 2026-06-12
 
+### LTP ptrace01 trace-stop 兼容
+
+**涉及文件：**
+- `os/src/syscall/process/ids.rs` — 增加 `PTRACE_CONT`、`PTRACE_KILL` 的最小 TRACEME 子进程控制语义，并限制目标必须是当前进程的 traced child
+- `os/src/task/signal/mod.rs` — traced 任务在信号递送前进入 stopped 状态，`SIGCONT`/`SIGKILL` 可唤醒 stopped wait；恢复后重新处理 pending 信号
+- `os/src/task/process_manager.rs` — `waitpid(..., 0)` 对 TRACEME stopped child 兼容 Linux ptrace wait 语义，普通 stopped child 仍需 `WSTOPPED/WUNTRACED`
+- `os/src/task/task.rs` — 更新 `ptrace_traceme` 状态注释，说明当前只覆盖信号递送 stop 子集
+
+**验证：**
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make rv64-kernel-build-only ...'` ✅
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make la64-kernel-build-only ...'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=ptrace01,ptrace02,ptrace03` ✅ — musl/glibc 均无 `TFAIL/TBROK`；`ptrace01` 每个 libc 4 个 `TPASS`，`ptrace02/03` 保持 `TPASS`
+- la64 QEMU focused：同上用例集 ✅ — musl/glibc 均无 `TFAIL/TBROK`；`ptrace01` 每个 libc 4 个 `TPASS`，`ptrace02/03` 保持 `TPASS`
+
+**备注：** 本次只实现 LTP `ptrace01` 覆盖的 TRACEME 信号停顿、继续和杀死子集，不实现寄存器访问、内存访问、`PTRACE_ATTACH` 真实附加等完整调试器语义；未修改 net/fs 测试点，也未运行 LTP 全量。
+
 ### LTP madvise01 DONTNEED 共享映射兼容
 
 **涉及文件：**

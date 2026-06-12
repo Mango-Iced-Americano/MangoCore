@@ -100,6 +100,13 @@ impl ProcessManager {
             }
         }
 
+        fn child_is_ptraced(child: &Arc<ProcessControlBlock>) -> bool {
+            child
+                .any_live_thread()
+                .map(|task| task.acquire_inner_lock().ptrace_traceme)
+                .unwrap_or(false)
+        }
+
         let wait_status = Cell::new(0);
         let try_reap_child = || -> Option<isize> {
             let mut process_inner = process.acquire_inner_lock();
@@ -113,25 +120,23 @@ impl ProcessManager {
                 return Some(ECHILD);
             }
 
-            if report_stopped || report_continued {
-                for child in process_inner.children.iter() {
-                    let child_inner = child.acquire_inner_lock();
-                    let matched = child_matches_pid(child.pid, child_inner.pgid, caller_pgid, pid);
-                    drop(child_inner);
-                    if !matched {
-                        continue;
+            for child in process_inner.children.iter() {
+                let child_inner = child.acquire_inner_lock();
+                let matched = child_matches_pid(child.pid, child_inner.pgid, caller_pgid, pid);
+                drop(child_inner);
+                if !matched {
+                    continue;
+                }
+                if report_stopped || (report_exited && child_is_ptraced(child)) {
+                    if let Some(status) = child.take_stopped_status(nowait) {
+                        wait_status.set(status);
+                        return Some(child.pid as isize);
                     }
-                    if report_stopped {
-                        if let Some(status) = child.take_stopped_status(nowait) {
-                            wait_status.set(status);
-                            return Some(child.pid as isize);
-                        }
-                    }
-                    if report_continued {
-                        if let Some(status) = child.take_continued_status(nowait) {
-                            wait_status.set(status);
-                            return Some(child.pid as isize);
-                        }
+                }
+                if report_continued {
+                    if let Some(status) = child.take_continued_status(nowait) {
+                        wait_status.set(status);
+                        return Some(child.pid as isize);
                     }
                 }
             }

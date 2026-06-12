@@ -72,6 +72,8 @@ const PR_GET_SPECULATION_CTRL: usize = 52;
 const PR_TASK_COMM_LEN: usize = 16;
 const PR_MAX_SIGNAL: usize = 64;
 const PTRACE_TRACEME: usize = 0;
+const PTRACE_CONT: usize = 7;
+const PTRACE_KILL: usize = 8;
 const PTRACE_ATTACH: usize = 16;
 const SECCOMP_MODE_DISABLED: usize = 0;
 const SECCOMP_MODE_STRICT: usize = 1;
@@ -108,6 +110,23 @@ const IOPRIO_CLASS_RT: usize = 1;
 const IOPRIO_CLASS_BE: usize = 2;
 const IOPRIO_CLASS_IDLE: usize = 3;
 
+fn ptrace_traceme_target(pid: usize) -> Result<Arc<ProcessControlBlock>, isize> {
+    let current = current_task().unwrap();
+    let target = ProcessManager::find_process(pid).ok_or(ESRCH)?;
+    if target.parent_pid() != current.pid() {
+        return Err(ESRCH);
+    }
+    let traced = target
+        .any_live_thread()
+        .map(|task| task.acquire_inner_lock().ptrace_traceme)
+        .unwrap_or(false);
+    if traced {
+        Ok(target)
+    } else {
+        Err(ESRCH)
+    }
+}
+
 pub fn sys_personality(persona: usize) -> isize {
     let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
@@ -129,6 +148,20 @@ pub fn sys_ptrace(request: usize, pid: usize, _addr: usize, _data: usize) -> isi
             inner.ptrace_traceme = true;
             SUCCESS
         }
+        PTRACE_CONT => match ptrace_traceme_target(pid) {
+            Ok(process) => {
+                crate::task::signal::send_process_signal(&process, Signals::SIGCONT);
+                SUCCESS
+            }
+            Err(errno) => errno,
+        },
+        PTRACE_KILL => match ptrace_traceme_target(pid) {
+            Ok(process) => {
+                crate::task::signal::send_process_signal(&process, Signals::SIGKILL);
+                SUCCESS
+            }
+            Err(errno) => errno,
+        },
         PTRACE_ATTACH => {
             if ProcessManager::find_process(pid).is_none() {
                 ESRCH
