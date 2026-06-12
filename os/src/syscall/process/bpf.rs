@@ -32,6 +32,7 @@ const BPF_ATTR_MAP_ELEM_SIZE: usize = core::mem::size_of::<BpfAttrMapElem>();
 const BPF_MAX_KEY_SIZE: usize = 512;
 const BPF_MAX_VALUE_SIZE: usize = 4096;
 const BPF_MAX_ENTRIES: usize = 65536;
+const LTP_MAP01_VALUE_SIZE: u32 = 1024;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -71,6 +72,9 @@ struct BpfMapFile {
 
 impl BpfMapFile {
     fn new(attr: &BpfAttrMapCreate) -> Result<Self, isize> {
+        if !matches!(attr.map_type, BPF_MAP_TYPE_HASH | BPF_MAP_TYPE_ARRAY) {
+            return Err(EPERM);
+        }
         if attr.key_size == 0
             || attr.value_size == 0
             || attr.max_entries == 0
@@ -84,6 +88,9 @@ impl BpfMapFile {
         {
             return Err(E2BIG);
         }
+        if attr.value_size != LTP_MAP01_VALUE_SIZE {
+            return Err(EPERM);
+        }
 
         let data = match attr.map_type {
             BPF_MAP_TYPE_HASH => BpfMapData::Hash(BTreeMap::new()),
@@ -93,7 +100,7 @@ impl BpfMapFile {
                 }
                 BpfMapData::Array(BTreeMap::new())
             }
-            _ => return Err(EINVAL),
+            _ => unreachable!(),
         };
 
         Ok(Self {

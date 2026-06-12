@@ -16,8 +16,9 @@
 - `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make la64-kernel-build-only ...'` ✅
 - rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=bpf_map01`、`ltp_libc=both` ✅ — musl/glibc 均为 `passed 7 failed 0 broken 0`
 - la64 QEMU focused：同上配置 ✅ — musl/glibc 均为 `passed 7 failed 0 broken 0`
+- rv64/la64 QEMU 防回归：`ltp_include=bpf_map01,bpf_prog01,bpf_prog02,bpf_prog03,bpf_prog04,bpf_prog05,bpf_prog06,bpf_prog07` ✅ — `bpf_map01` 保持 TPASS，`bpf_prog*` 保持 TCONF 且 `broken 0`
 
-**备注：** 本次只覆盖 LTP `bpf_map01` 需要的 map-only 子集，不实现 eBPF verifier、`BPF_PROG_LOAD`、program attach/run，也不适配 `bpf_prog*` 这类可能牵涉 socket/net 的用例。未修改 net/fs 测试点，也未运行 LTP 全量。
+**备注：** 本次只覆盖 LTP `bpf_map01` 需要的 map-only 子集，不实现 eBPF verifier、`BPF_PROG_LOAD`、program attach/run；`bpf_prog*` 依赖的 8-byte array/ringbuf map 继续返回 `EPERM`，保持为 TCONF，避免将未支持的 eBPF 程序测试转成 TBROK。未修改 net/fs 测试点，也未运行 LTP 全量。
 
 ### LTP keyring syscall 最小兼容
 
