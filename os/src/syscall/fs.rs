@@ -437,6 +437,47 @@ fn open_proc_self_fd(path: &str, flags: OpenFlags) -> Option<Result<Arc<vfs::Fil
     Some(Ok(reopened))
 }
 
+#[inline]
+fn writable_len_for_read(token: usize, user_addr: usize, want: usize) -> Result<usize, isize> {
+    let accessible = crate::mm::user_accessible_len(
+        token,
+        user_addr as *const u8,
+        want,
+        crate::mm::UserAccess::Write,
+    );
+    if accessible != 0 {
+        return Ok(accessible);
+    }
+    // Fault-in before consuming file data: lazy page succeeds, bad pointer
+    // fails without advancing the file offset.
+    UserBufferWriter::new(token, user_addr as *mut u8, 1).map(|_| ())?;
+    let accessible = crate::mm::user_accessible_len(
+        token,
+        user_addr as *const u8,
+        want,
+        crate::mm::UserAccess::Write,
+    );
+    Ok(accessible.max(1).min(want))
+}
+
+#[inline]
+fn iov_writable_len_for_read(
+    user_iov: &UserIoVec,
+    offset: usize,
+    want: usize,
+) -> Result<usize, isize> {
+    let accessible = user_iov.accessible_len_at(offset, want, crate::mm::UserAccess::Write);
+    if accessible != 0 {
+        return Ok(accessible);
+    }
+    let ubuf = user_iov.writer_buffer_at(offset, 1)?;
+    if ubuf.len() == 0 {
+        return Err(EFAULT);
+    }
+    let accessible = user_iov.accessible_len_at(offset, want, crate::mm::UserAccess::Write);
+    Ok(accessible.max(1).min(want))
+}
+
 fn read_into_user(file: &vfs::File, token: usize, buf: usize, count: usize) -> isize {
     if count == 0 {
         return match file.read(&mut []) {
@@ -461,18 +502,10 @@ fn read_into_user(file: &vfs::File, token: usize, buf: usize, count: usize) -> i
             Some(v) => v,
             None => return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) },
         };
-        let mut accessible = crate::mm::user_accessible_len(
-            token,
-            user_addr as *const u8,
-            want,
-            crate::mm::UserAccess::Write,
-        );
-        if accessible == 0 {
-            if total > 0 {
-                return total as isize;
-            }
-            accessible = want.min(crate::config::PAGE_SIZE);
-        }
+        let accessible = match writable_len_for_read(token, user_addr, want) {
+            Ok(n) => n,
+            Err(errno) => return if total > 0 { total as isize } else { errno },
+        };
 
         let n = match file.read(&mut kbuf[..accessible]) {
             Ok(n) => n,
@@ -550,18 +583,10 @@ fn pread_into_user(file: &vfs::File, token: usize, buf: usize, count: usize, off
             Some(v) => v,
             None => return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) },
         };
-        let mut accessible = crate::mm::user_accessible_len(
-            token,
-            user_addr as *const u8,
-            want,
-            crate::mm::UserAccess::Write,
-        );
-        if accessible == 0 {
-            if total > 0 {
-                return total as isize;
-            }
-            accessible = want.min(crate::config::PAGE_SIZE);
-        }
+        let accessible = match writable_len_for_read(token, user_addr, want) {
+            Ok(n) => n,
+            Err(errno) => return if total > 0 { total as isize } else { errno },
+        };
 
         let n = match file.pread(file_off, &mut kbuf[..accessible]) {
             Ok(n) => n,
@@ -1290,13 +1315,10 @@ pub fn sys_preadv(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize 
             Some(v) => v,
             None => return if done > 0 { done as isize } else { -(SyscallErr::EINVAL as isize) },
         };
-        let mut accessible = user_iov.accessible_len_at(done, want, crate::mm::UserAccess::Write);
-        if accessible == 0 {
-            if done > 0 {
-                return done as isize;
-            }
-            accessible = want.min(crate::config::PAGE_SIZE);
-        }
+        let accessible = match iov_writable_len_for_read(&user_iov, done, want) {
+            Ok(n) => n,
+            Err(errno) => return if done > 0 { done as isize } else { errno },
+        };
 
         let n = match file.pread(file_off, &mut kbuf[..accessible]) {
             Ok(n) => n,
@@ -1514,13 +1536,10 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
     let mut done = 0usize;
     while done < total_len {
         let want = (total_len - done).min(chunk_cap);
-        let mut accessible = user_iov.accessible_len_at(done, want, crate::mm::UserAccess::Write);
-        if accessible == 0 {
-            if done > 0 {
-                return done as isize;
-            }
-            accessible = want.min(crate::config::PAGE_SIZE);
-        }
+        let accessible = match iov_writable_len_for_read(&user_iov, done, want) {
+            Ok(n) => n,
+            Err(errno) => return if done > 0 { done as isize } else { errno },
+        };
 
         let n = match file.read(&mut kbuf[..accessible]) {
             Ok(n) => n,

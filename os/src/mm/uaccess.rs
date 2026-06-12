@@ -408,7 +408,13 @@ impl UserIoVec {
     pub fn accessible_len_at(&self, offset: usize, len: usize, access: UserAccess) -> usize {
         let mut remaining = len;
         let mut logical_off = 0usize;
+        let mut total_accessible = 0usize;
+
         for iovec in self.iovecs.iter() {
+            if remaining == 0 {
+                break;
+            }
+
             let iov_end = match logical_off.checked_add(iovec.iov_len) {
                 Some(v) => v,
                 None => break,
@@ -417,25 +423,31 @@ impl UserIoVec {
                 logical_off = iov_end;
                 continue;
             }
+
             let inner_off = offset.saturating_sub(logical_off);
             let take = remaining.min(iovec.iov_len.saturating_sub(inner_off));
             if take == 0 {
                 logical_off = iov_end;
                 continue;
             }
+
             let base = iovec.iov_base as usize;
             let ptr = match base.checked_add(inner_off) {
                 Some(v) => v,
                 None => break,
             };
+
             let accessible = user_accessible_len(self.token, ptr as *const u8, take, access);
-            remaining -= take.saturating_sub(accessible);
+            total_accessible = total_accessible.saturating_add(accessible);
             if accessible < take {
                 break;
             }
+
+            remaining -= take;
             logical_off = iov_end;
         }
-        len.saturating_sub(remaining)
+
+        total_accessible.min(len)
     }
 
     /// Build a read-only UserBuffer for logical range [offset, offset+len).
