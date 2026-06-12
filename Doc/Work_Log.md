@@ -4,6 +4,21 @@
 
 ## 2026-06-12
 
+### LTP ptrace02/03 errno 子集兼容
+
+**涉及文件：**
+- `os/src/syscall/syscall_id.rs`、`os/src/syscall/mod.rs`、`os/src/syscall/process/mod.rs` — 增加 asm-generic `ptrace(117)` syscall 编号、名称和分发
+- `os/src/task/task.rs` — 增加 per-task `ptrace_traceme` 兼容状态，fork/clone 后不继承
+- `os/src/syscall/process/ids.rs` — 实现 `PTRACE_TRACEME` 的重复调用 `EPERM`，以及 `PTRACE_ATTACH` 对不存在目标返回 `ESRCH`、存在目标返回 `EPERM` 的基础 errno 路径
+
+**验证：**
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make rv64-kernel-build-only ...'` ✅
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make la64-kernel-build-only ...'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=ptrace02,ptrace03` ✅ — musl/glibc 均无 `TFAIL/TBROK`；`ptrace02` 为 `TPASS: EPERM`，`ptrace03` 为 `TPASS: ESRCH/EPERM`
+- la64 QEMU focused：同上用例集 ✅ — musl/glibc 均无 `TFAIL/TBROK`
+
+**备注：** 本次只补 LTP error-path 覆盖的 ptrace ABI 子集，不实现 trace-stop、寄存器访问、`PTRACE_CONT/KILL` 等完整调试语义；`ptrace01/05/06/11` 仍属于后续较大改动，未纳入本次适配。未修改 net/fs 测试点，也未运行 LTP 全量。
+
 ### LTP madvise01 dump advice 兼容
 
 **涉及文件：**

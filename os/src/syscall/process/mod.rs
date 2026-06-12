@@ -17,6 +17,7 @@ pub use ids::{
     sys_geteuid, sys_getgid, sys_getcpu, sys_getgroups, sys_getpgid, sys_getpid, sys_getppid,
     sys_getpriority, sys_getresgid, sys_getresuid, sys_getrlimit, sys_getsid, sys_gettid,
     sys_getuid, sys_ioprio_get, sys_ioprio_set, sys_personality, sys_prctl, sys_prlimit,
+    sys_ptrace,
     sys_process_vm_readv, sys_process_vm_writev, sys_sched_get_priority_max,
     sys_sched_get_priority_min, sys_sched_getaffinity, sys_sched_getattr, sys_sched_getparam,
     sys_sched_getscheduler, sys_sched_rr_get_interval, sys_sched_setaffinity, sys_sched_setattr,

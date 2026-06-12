@@ -85,6 +85,7 @@ pub const SYSCALL_CLOCK_GETTIME: usize = 113;
 pub const SYSCALL_CLOCK_GETRES: usize = 114;
 pub const SYSCALL_CLOCK_NANOSLEEP: usize = 115;
 pub const SYSCALL_SYSLOG: usize = 116;
+pub const SYSCALL_PTRACE: usize = 117;
 pub const SYSCALL_SCHED_SETPARAM: usize = 118;
 pub const SYSCALL_SCHED_SETSCHEDULER: usize = 119;
 pub const SYSCALL_SCHED_GETSCHEDULER: usize = 120;

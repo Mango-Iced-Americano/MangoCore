@@ -191,6 +191,9 @@ pub struct TaskControlBlockInner {
     /// Timer slack compatibility state in nanoseconds.
     pub timer_slack_ns: usize,
     pub timer_slack_default_ns: usize,
+    /// Minimal ptrace(TRACEME) compatibility state.
+    /// Full trace-stop semantics are not implemented yet.
+    pub ptrace_traceme: bool,
     /// POSIX 用户/组 ID 兼容字段，供 LTP 权限类用例和 capability 查询使用。
     pub uid: u32,
     pub euid: u32,
@@ -839,6 +842,7 @@ impl TaskControlBlock {
                 task_comm: default_task_comm(),
                 timer_slack_ns: DEFAULT_TIMER_SLACK_NS,
                 timer_slack_default_ns: DEFAULT_TIMER_SLACK_NS,
+                ptrace_traceme: false,
                 uid: 0,
                 euid: 0,
                 suid: 0,
@@ -1284,6 +1288,7 @@ impl TaskControlBlock {
                 task_comm: parent_inner.task_comm,
                 timer_slack_ns: parent_inner.timer_slack_ns,
                 timer_slack_default_ns: parent_inner.timer_slack_ns,
+                ptrace_traceme: false,
                 uid: parent_inner.uid,
                 euid: parent_inner.euid,
                 suid: parent_inner.suid,

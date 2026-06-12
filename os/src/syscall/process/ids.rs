@@ -71,6 +71,8 @@ const PR_CAP_AMBIENT_CLEAR_ALL: usize = 4;
 const PR_GET_SPECULATION_CTRL: usize = 52;
 const PR_TASK_COMM_LEN: usize = 16;
 const PR_MAX_SIGNAL: usize = 64;
+const PTRACE_TRACEME: usize = 0;
+const PTRACE_ATTACH: usize = 16;
 const SECCOMP_MODE_DISABLED: usize = 0;
 const SECCOMP_MODE_STRICT: usize = 1;
 const SECCOMP_MODE_FILTER: usize = 2;
@@ -114,6 +116,28 @@ pub fn sys_personality(persona: usize) -> isize {
         inner.personality = persona & PERSONALITY_GET;
     }
     old as isize
+}
+
+pub fn sys_ptrace(request: usize, pid: usize, _addr: usize, _data: usize) -> isize {
+    match request {
+        PTRACE_TRACEME => {
+            let task = current_task().unwrap();
+            let mut inner = task.acquire_inner_lock();
+            if inner.ptrace_traceme {
+                return EPERM;
+            }
+            inner.ptrace_traceme = true;
+            SUCCESS
+        }
+        PTRACE_ATTACH => {
+            if ProcessManager::find_process(pid).is_none() {
+                ESRCH
+            } else {
+                EPERM
+            }
+        }
+        _ => EIO,
+    }
 }
 
 fn valid_ioprio(class: usize, prio: usize) -> bool {
