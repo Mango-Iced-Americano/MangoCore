@@ -4,6 +4,21 @@
 
 ## 2026-06-12
 
+### LTP bpf_map01 map-only 兼容
+
+**涉及文件：**
+- `os/src/syscall/syscall_id.rs` — 增加 asm-generic `bpf(280)` syscall 编号
+- `os/src/syscall/mod.rs`、`os/src/syscall/process/mod.rs` — 接入 bpf syscall name、dispatch 和导出
+- `os/src/syscall/process/bpf.rs` — 新增最小 BPF map fd 对象，支持 `BPF_MAP_TYPE_HASH`、`BPF_MAP_TYPE_ARRAY` 以及 `BPF_MAP_CREATE/LOOKUP_ELEM/UPDATE_ELEM/DELETE_ELEM` 的内存态语义
+
+**验证：**
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make rv64-kernel-build-only ...'` ✅
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make la64-kernel-build-only ...'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=bpf_map01`、`ltp_libc=both` ✅ — musl/glibc 均为 `passed 7 failed 0 broken 0`
+- la64 QEMU focused：同上配置 ✅ — musl/glibc 均为 `passed 7 failed 0 broken 0`
+
+**备注：** 本次只覆盖 LTP `bpf_map01` 需要的 map-only 子集，不实现 eBPF verifier、`BPF_PROG_LOAD`、program attach/run，也不适配 `bpf_prog*` 这类可能牵涉 socket/net 的用例。未修改 net/fs 测试点，也未运行 LTP 全量。
+
 ### LTP keyring syscall 最小兼容
 
 **涉及文件：**

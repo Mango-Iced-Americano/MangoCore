@@ -1,3 +1,4 @@
+mod bpf;
 mod clone;
 mod exec;
 mod futex;
@@ -10,6 +11,7 @@ mod mm;
 mod signal;
 mod time;
 
+pub use bpf::sys_bpf;
 pub use clone::{sys_clone, sys_clone3, sys_setns, sys_unshare, CloneFlags};
 pub use exec::{sys_execve, sys_execveat};
 pub use futex::{sys_futex, sys_futex_waitv, FutexWaitV};
