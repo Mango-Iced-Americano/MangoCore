@@ -495,7 +495,7 @@ fn read_into_user(file: &vfs::File, token: usize, buf: usize, count: usize) -> i
         };
 
         total += copied;
-        if copied < n || n < accessible || accessible < want {
+        if copied < n {
             break;
         }
 
@@ -569,7 +569,7 @@ fn pread_into_user(file: &vfs::File, token: usize, buf: usize, count: usize, off
         };
 
         total += copied;
-        if copied < n || n < accessible || accessible < want {
+        if copied < n {
             break;
         }
 
@@ -636,7 +636,7 @@ fn write_from_user(file: &vfs::File, token: usize, buf: usize, count: usize) -> 
         };
 
         total += n;
-        if n == 0 || n < copied || accessible < want {
+        if n == 0 || n < copied {
             break;
         }
 
@@ -708,7 +708,7 @@ fn pwrite_from_user(file: &vfs::File, token: usize, buf: usize, count: usize, of
         };
 
         total += n;
-        if n == 0 || n < copied || accessible < want {
+        if n == 0 || n < copied {
             break;
         }
 
@@ -1286,7 +1286,7 @@ pub fn sys_preadv(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize 
         let copied = ubuf.write_at(0, &kbuf[..n]);
 
         done += copied;
-        if copied < n || n < accessible || accessible < want {
+        if copied < n {
             break;
         }
 
@@ -1381,7 +1381,7 @@ pub fn sys_pwritev(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize
         };
 
         done += n;
-        if n == 0 || n < copied || accessible < want {
+        if n == 0 || n < copied {
             break;
         }
 
@@ -1500,7 +1500,7 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
         let copied = ubuf.write_at(0, &kbuf[..n]);
 
         done += copied;
-        if copied < n || n < accessible || accessible < want {
+        if copied < n {
             break;
         }
 
@@ -1585,7 +1585,7 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
         };
 
         done += n;
-        if n == 0 || n < copied || accessible < want {
+        if n == 0 || n < copied {
             break;
         }
 
