@@ -197,6 +197,7 @@ pub const SYSCALL_MUNLOCK: usize = 229;
 pub const SYSCALL_MLOCKALL: usize = 230;
 pub const SYSCALL_MUNLOCKALL: usize = 231;
 pub const SYSCALL_MINCORE: usize = 232;
+pub const SYSCALL_REMAP_FILE_PAGES: usize = 234;
 pub const SYSCALL_GET_MEMPOLICY: usize = 236;
 pub const SYSCALL_RISCV_FLUSH_ICACHE: usize = 259;
 pub const SYSCALL_WAIT4: usize = 260; // wait is implemented as wait4(pid, status, options, 0) in pub lib.

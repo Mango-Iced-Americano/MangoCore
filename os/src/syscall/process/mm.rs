@@ -420,6 +420,30 @@ pub fn sys_mremap(
     mapped as isize
 }
 
+pub fn sys_remap_file_pages(
+    addr: usize,
+    size: usize,
+    prot: usize,
+    _pgoff: usize,
+    flags: usize,
+) -> isize {
+    const MAP_NONBLOCK: usize = 0x10000;
+
+    if prot != 0 || flags & !MAP_NONBLOCK != 0 {
+        return EINVAL;
+    }
+    let start = addr & !(PAGE_SIZE - 1);
+    let len = match page_round_up_len(size) {
+        Some(0) | None => return EINVAL,
+        Some(len) => len,
+    };
+    if checked_page_range(start, len).is_err() {
+        return EINVAL;
+    }
+
+    EINVAL
+}
+
 pub fn sys_mprotect(addr: usize, len: usize, prot: usize) -> isize {
     let task = current_task().unwrap();
     let prot = match parse_mmap_prot(prot) {

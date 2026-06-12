@@ -248,6 +248,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_GETRANDOM => "getrandom",
         SYSCALL_MEMFD_CREATE => "memfd_create",
         SYSCALL_MADVISE => "madvise",
+        SYSCALL_REMAP_FILE_PAGES => "remap_file_pages",
         SYSCALL_CLONE3 => "clone3",
         SYSCALL_GET_MEMPOLICY => "get_mempolicy",
         SYSCALL_CLOCK_ADJTIME => "clock_adjtime",
@@ -677,6 +678,9 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_MMAP => sys_mmap(args[0], args[1], args[2], args[3], args[4], args[5]),
         SYSCALL_MUNMAP => sys_munmap(args[0], args[1]),
         SYSCALL_MREMAP => sys_mremap(args[0], args[1], args[2], args[3], args[4]),
+        SYSCALL_REMAP_FILE_PAGES => {
+            sys_remap_file_pages(args[0], args[1], args[2], args[3], args[4])
+        }
         SYSCALL_MPROTECT => sys_mprotect(args[0], args[1], args[2]),
         SYSCALL_PSELECT6 => sys_pselect(
             args[0],

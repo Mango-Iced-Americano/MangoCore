@@ -4,6 +4,21 @@
 
 ## 2026-06-12
 
+### LTP shmctl05 remap_file_pages ABI 入口兼容
+
+**涉及文件：**
+- `os/src/syscall/syscall_id.rs` — 增加 asm-generic `remap_file_pages(234)` syscall 编号
+- `os/src/syscall/process/mm.rs` — 增加 `sys_remap_file_pages()`，完成基础参数/地址区间校验后，当前对废弃的非线性文件页重映射语义按不支持路径返回 `EINVAL`
+- `os/src/syscall/process/mod.rs`、`os/src/syscall/mod.rs` — 导出并接入 syscall name/dispatch，避免 LTP 将该 ABI 判定为 `ENOSYS`
+
+**验证：**
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make rv64-kernel-build-only ...'` ✅
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make la64-kernel-build-only ...'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=shmctl01,shmctl02,shmctl03,shmctl04,shmctl05,shmctl06,shmctl07,shmctl08` ✅ — musl/glibc 均无 `TFAIL/TBROK`；`shmctl05` 从 `TCONF: __NR_remap_file_pages not supported` 变为 `TPASS: didn't crash`
+- la64 QEMU focused：同上用例集 ✅ — musl/glibc 均无 `TFAIL/TBROK`；`shmctl05` 均 `TPASS`
+
+**备注：** 本次只补 mm ABI 入口和错误收敛，不实现完整 `remap_file_pages` 非线性映射，不修改 SysV SHM、net/fs 逻辑，也未运行 LTP 全量。
+
 ### LTP madvise01 hint advice 兼容
 
 **涉及文件：**
