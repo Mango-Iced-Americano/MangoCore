@@ -4,6 +4,21 @@
 
 ## 2026-06-12
 
+### LTP keyring syscall 最小兼容
+
+**涉及文件：**
+- `os/src/syscall/syscall_id.rs` — 增加 asm-generic `add_key(217)`、`request_key(218)`、`keyctl(219)` syscall 编号
+- `os/src/syscall/mod.rs`、`os/src/syscall/process/mod.rs` — 接入 keyring syscall name、dispatch 和导出
+- `os/src/syscall/process/keyring.rs` — 新增内存态最小 key/keyring registry，覆盖 LTP 所需的 `keyring/user/logon/big_key` 类型、特殊 keyring ID、`KEYCTL_READ/REVOKE/SETPERM/CLEAR/UNLINK/SET_TIMEOUT/SET_REQKEY_KEYRING` 以及 negative key 错误路径
+
+**验证：**
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make rv64-kernel-build-only ...'` ✅
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make la64-kernel-build-only ...'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=add_key01,add_key02,add_key03,add_key04,keyctl01,keyctl03,keyctl04,keyctl06,keyctl07,keyctl08,request_key01,request_key02,request_key03,request_key04,request_key05` ✅ — musl/glibc 均无 `TFAIL/TBROK`
+- la64 QEMU focused：同上用例集 ✅ — musl/glibc 均无 `TFAIL/TBROK`
+
+**备注：** 本次不实现完整 Linux key retention service、不接入 `/proc/sys/kernel/keys` 或模块相关能力；`add_key05`、`keyctl02/05/09` 仍属于测试环境/proc/modprobe 前置问题，未纳入本次 syscall 适配。未修改 net/fs 测试点，也未运行 LTP 全量。
+
 ### LTP pkey01 基础权限键兼容
 
 **涉及文件：**

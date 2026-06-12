@@ -3,6 +3,7 @@ mod exec;
 mod futex;
 mod ids;
 mod ipc;
+mod keyring;
 mod lifecycle;
 mod misc;
 mod mm;
@@ -39,6 +40,7 @@ pub use ipc::{
     sysv_msg_proc_snapshot, sysv_msgmax, sysv_msgmnb, sysv_msgmni, sysv_sem_limits,
     sysv_sem_proc_snapshot, sysv_shmall, sysv_shm_proc_snapshot, sysv_shmmax, sysv_shmmni,
 };
+pub use keyring::{sys_add_key, sys_keyctl, sys_request_key};
 pub use lifecycle::{
     sys_exit, sys_exit_group, sys_get_robust_list, sys_set_robust_list, sys_set_tid_address,
     sys_wait4, sys_waitid,

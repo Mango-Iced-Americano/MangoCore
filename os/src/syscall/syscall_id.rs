@@ -186,6 +186,9 @@ pub const SYSCALL_SBRK: usize = 213;
 pub const SYSCALL_BRK: usize = 214;
 pub const SYSCALL_MUNMAP: usize = 215;
 pub const SYSCALL_MREMAP: usize = 216;
+pub const SYSCALL_ADD_KEY: usize = 217;
+pub const SYSCALL_REQUEST_KEY: usize = 218;
+pub const SYSCALL_KEYCTL: usize = 219;
 // Warning, we don't implement clone, we implement fork instead.
 pub const SYSCALL_CLONE: usize = 220; // fork is implemented as clone(SIGCHLD, 0) in lib.
 pub const SYSCALL_EXECVE: usize = 221;

@@ -220,6 +220,9 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_BRK => "brk",
         SYSCALL_MUNMAP => "munmap",
         SYSCALL_MREMAP => "mremap",
+        SYSCALL_ADD_KEY => "add_key",
+        SYSCALL_REQUEST_KEY => "request_key",
+        SYSCALL_KEYCTL => "keyctl",
         SYSCALL_CLONE => "clone",
         SYSCALL_EXECVE => "execve",
         SYSCALL_EXECVEAT => "execveat",
@@ -683,6 +686,20 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_MMAP => sys_mmap(args[0], args[1], args[2], args[3], args[4], args[5]),
         SYSCALL_MUNMAP => sys_munmap(args[0], args[1]),
         SYSCALL_MREMAP => sys_mremap(args[0], args[1], args[2], args[3], args[4]),
+        SYSCALL_ADD_KEY => sys_add_key(
+            args[0] as *const u8,
+            args[1] as *const u8,
+            args[2] as *const u8,
+            args[3],
+            args[4] as i32,
+        ),
+        SYSCALL_REQUEST_KEY => sys_request_key(
+            args[0] as *const u8,
+            args[1] as *const u8,
+            args[2] as *const u8,
+            args[3] as i32,
+        ),
+        SYSCALL_KEYCTL => sys_keyctl(args[0] as u32, args[1], args[2], args[3], args[4]),
         SYSCALL_REMAP_FILE_PAGES => {
             sys_remap_file_pages(args[0], args[1], args[2], args[3], args[4])
         }
