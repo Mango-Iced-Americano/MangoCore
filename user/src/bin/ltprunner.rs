@@ -28,7 +28,6 @@ const DEFAULT_LTP_EXCLUDE_UNSUPPORTED: &[&str] = &[
     "acct02_helper",
     "cacheflush01",
     "clock_gettime03",
-    "clock_gettime04",
     "clock_nanosleep03",
     "clone303",
     "eventfd06",

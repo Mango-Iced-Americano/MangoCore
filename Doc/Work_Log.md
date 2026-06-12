@@ -4,6 +4,21 @@
 
 ## 2026-06-12
 
+### LTP suite 启用 clock_gettime04 稳定用例
+
+**涉及文件：**
+- `user/src/bin/ltprunner.rs` — 从 suite runner 默认 unsupported 排除表移除 `clock_gettime04`，让当前已稳定通过的 clock_gettime 连续读时钟测试在 suite 模式中计入 TPASS
+
+**验证：**
+- rv64 用户态构建：`docker compose exec -T os-dev bash -lc 'cd os && LOG=error make -f make/rv64.mk user MODE=release BOARD=rvqemu ...'` ✅
+- rv64 kernel 构建：`docker compose exec -T os-dev bash -lc 'cd os && LOG=error make rv64-kernel-build-only ...'` ✅
+- la64 用户态构建：`docker compose exec -T os-dev bash -lc 'cd os && LOG=error make -f make/la64.mk user MODE=release BOARD=laqemu ...'` ✅
+- la64 kernel 构建：`docker compose exec -T os-dev bash -lc 'cd os && LOG=error make la64-kernel-build-only ...'` ✅
+- rv64 QEMU suite focused：`mask=0x800`、`ltp_runner=suite`、`ltp_suites=syscalls`、`ltp_include=clock_gettime04`、`ltp_libc=both` ✅ — musl/glibc 均 `RUN LTP CASE clock_gettime04`，每个 libc `passed 6 failed 0 broken 0 skipped 0`，suite 记录 `PASS LTP CASE clock_gettime04 : 0`
+- la64 QEMU suite focused：同上配置 ✅ — musl/glibc 均 `RUN LTP CASE clock_gettime04`，每个 libc `passed 6 failed 0 broken 0 skipped 0`，suite 记录 `PASS LTP CASE clock_gettime04 : 0`
+
+**备注：** 本次仅删除过时 suite skip，不修改 time syscall 内核语义；未修改 net/fs 测试点，也未运行 LTP 全量。扫描过 `rt_tgsigqueueinfo01`、`timer_create01/02` 发现当前镜像缺二进制，`msgctl05/semctl08` 为用户态 ABI 条件 TCONF，均未纳入提交。
+
 ### LTP suite 启用 pkey01 已支持用例
 
 **涉及文件：**
