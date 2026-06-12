@@ -900,8 +900,14 @@ impl<T: PageTable> AddressSpace<T> {
     }
 
     pub fn madvise(&mut self, start: usize, len: usize, advice: usize) -> Result<(), isize> {
+        const MADV_DONTNEED: usize = 4;
+
         let start_vpn = VirtAddr::from(start).floor();
         let end_vpn = VirtAddr::from(start + len).ceil();
+        if advice == MADV_DONTNEED && self.locked_pages.range(start_vpn..end_vpn).next().is_some()
+        {
+            return Err(EINVAL);
+        }
         self.vmas
             .advise_range(&mut self.page_table, start_vpn, end_vpn, advice)
     }

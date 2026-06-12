@@ -438,11 +438,10 @@ impl VmaSet {
 
             if advice == MADV_DONTNEED {
                 let area = self.vmas.get_mut(&area_start).ok_or(ENOMEM)?;
-                if area.map_file.is_some() || !area.flags.contains(MapFlags::MAP_PRIVATE) {
-                    return Err(EINVAL);
+                if area.map_file.is_none() && area.flags.contains(MapFlags::MAP_PRIVATE) {
+                    area.discard_range(page_table, cursor, advise_end)
+                        .map_err(|_| EINVAL)?;
                 }
-                area.discard_range(page_table, cursor, advise_end)
-                    .map_err(|_| EINVAL)?;
             }
             if advice == MADV_FREE {
                 let area = self.vmas.get(&area_start).ok_or(ENOMEM)?;

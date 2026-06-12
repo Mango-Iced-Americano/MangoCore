@@ -4,6 +4,20 @@
 
 ## 2026-06-12
 
+### LTP madvise01 DONTNEED 共享映射兼容
+
+**涉及文件：**
+- `os/src/mm/address_space.rs` — `MADV_DONTNEED` 先按 `locked_pages` 检查目标范围，命中锁页时返回 `EINVAL`
+- `os/src/mm/vma_set.rs` — `MADV_DONTNEED` 对匿名私有映射继续 discard 驻留页；对已映射的 file-backed/shared 区间兼容 no-op 成功
+
+**验证：**
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make rv64-kernel-build-only ...'` ✅
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make la64-kernel-build-only ...'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=madvise01,madvise02,madvise03,madvise10` ✅ — musl/glibc 均无 `TFAIL/TBROK`；`madvise01` 每个 libc 为 16 个 `TPASS`，`MADV_DONTNEED` 变为 `TPASS`
+- la64 QEMU focused：同上用例集 ✅ — musl/glibc 均无 `TFAIL/TBROK`；`madvise01` 每个 libc 为 16 个 `TPASS`
+
+**备注：** 本次保留 `madvise02` 对 locked shared file mapping 的 `EINVAL` 预期，同时不实现 file-backed/shared page-cache discard；未修改 net/fs 测试点，也未运行 LTP 全量。
+
 ### LTP madvise01 DONTFORK/DOFORK 兼容
 
 **涉及文件：**
