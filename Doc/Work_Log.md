@@ -4,6 +4,21 @@
 
 ## 2026-06-12
 
+### LTP inline 启用 clock_gettime04 稳定用例
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — 从 inline LTP 默认排除表移除已验证稳定的 `clock_gettime04`，与 suite runner 行为对齐
+
+**验证：**
+- rv64 用户态构建：`docker compose exec -T os-dev bash -lc 'cd os && LOG=error make -f make/rv64.mk user MODE=release BOARD=rvqemu ...'` ✅
+- rv64 kernel 构建：`docker compose exec -T os-dev bash -lc 'cd os && LOG=error make rv64-kernel-build-only ...'` ✅
+- la64 用户态构建：`docker compose exec -T os-dev bash -lc 'cd os && LOG=error make -f make/la64.mk user MODE=release BOARD=laqemu ...'` ✅
+- la64 kernel 构建：`docker compose exec -T os-dev bash -lc 'cd os && LOG=error make la64-kernel-build-only ...'` ✅
+- rv64 QEMU inline focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=clock_gettime04`、`ltp_libc=both` ✅ — musl/glibc 均 `RUN LTP CASE clock_gettime04`，每个 libc `passed 6 failed 0 broken 0 skipped 0`，inline 记录 `DONE LTP CASE clock_gettime04 : 0`
+- la64 QEMU inline focused：同上配置 ✅ — musl/glibc 均 `RUN LTP CASE clock_gettime04`，每个 libc `passed 6 failed 0 broken 0 skipped 0`，inline 记录 `DONE LTP CASE clock_gettime04 : 0`
+
+**备注：** 本次只补齐 inline runner 的过期 skip；未修改 clock/time 内核语义，未修改 net/fs 测试点，也未运行 LTP 全量。
+
 ### LTP suite 启用 clock_gettime04 稳定用例
 
 **涉及文件：**

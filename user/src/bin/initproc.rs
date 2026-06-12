@@ -130,11 +130,6 @@ const DEFAULT_LTP_EXCLUDE: &[&str] = &[
     // eventually received; regular msgctl/msgget/msgrcv/msgsnd cases keep the
     // IPC syscall coverage.
     "msgstress01",
-    // clock_gettime04 uses a strict 5ms successive CLOCK_MONOTONIC_COARSE
-    // threshold. Under heap_trace QEMU the LTP image cannot detect
-    // virtualization, so both libc paths can report scheduling jitter as TFAIL.
-    // clock_gettime01/02 keep the syscall semantics covered.
-    "clock_gettime04",
     // The current LTP image lists this runtest entry without shipping the test
     // binary. rt_sigqueueinfo/tkill/tgkill cases still cover signal delivery.
     "rt_tgsigqueueinfo01",
