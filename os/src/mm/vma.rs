@@ -23,6 +23,7 @@ impl Debug for Vma {
                 &if self.map_file.is_some() { "yes" } else { "no" },
             )
             .field("wipe_on_fork", &self.wipe_on_fork)
+            .field("dont_fork", &self.dont_fork)
             .field("fork_inherited", &self.fork_inherited)
             .finish()
     }
@@ -45,6 +46,7 @@ pub struct Vma {
 
     pub flags: MapFlags,
     pub wipe_on_fork: bool,
+    pub dont_fork: bool,
     /// Anonymous VMAs copied by fork must not be merged with a later child-only
     /// mmap, matching Linux anon_vma merge constraints.
     pub fork_inherited: bool,
@@ -62,6 +64,7 @@ impl Vma {
             write_sealed: self.write_sealed,
             flags: self.flags,
             wipe_on_fork: self.wipe_on_fork,
+            dont_fork: self.dont_fork,
             fork_inherited: self.fork_inherited,
         })
     }
@@ -100,6 +103,7 @@ impl Vma {
             write_sealed: false,
             flags: MapFlags::empty(),
             wipe_on_fork: false,
+            dont_fork: false,
             fork_inherited: false,
         })
     }
@@ -118,6 +122,7 @@ impl Vma {
             write_sealed: another.write_sealed,
             flags: another.flags,
             wipe_on_fork: another.wipe_on_fork,
+            dont_fork: another.dont_fork,
             fork_inherited: another.fork_inherited,
         }
     }
@@ -601,6 +606,7 @@ impl Vma {
             write_sealed: self.write_sealed,
             flags: self.flags,
             wipe_on_fork: self.wipe_on_fork,
+            dont_fork: self.dont_fork,
             fork_inherited: self.fork_inherited,
         })
     }
@@ -825,6 +831,7 @@ impl Vma {
             && prot == self.map_perm
             && self.map_file.is_none()
             && !self.wipe_on_fork
+            && !self.dont_fork
             && !self.fork_inherited
     }
 

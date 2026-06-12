@@ -4,6 +4,22 @@
 
 ## 2026-06-12
 
+### LTP madvise01 DONTFORK/DOFORK 兼容
+
+**涉及文件：**
+- `os/src/syscall/process/mm.rs` — `sys_madvise()` 增加 Linux `MADV_DONTFORK(10)`、`MADV_DOFORK(11)` advice 入口
+- `os/src/mm/vma.rs` — 为 VMA 增加 `dont_fork` 标记，clone/split 时继承，并禁止与后续 lazy anonymous mmap 错误合并
+- `os/src/mm/vma_set.rs` — `madvise` 按目标范围 split VMA 后设置或清除 `dont_fork`
+- `os/src/mm/address_space.rs` — fork 复制独立地址空间时跳过 `dont_fork` 用户 VMA
+
+**验证：**
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make rv64-kernel-build-only ...'` ✅
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make la64-kernel-build-only ...'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=madvise01,madvise02,madvise10` ✅ — musl/glibc 均无 `TFAIL/TBROK`；`madvise01` 每个 libc 为 15 个 `TPASS`，`MADV_DONTFORK/MADV_DOFORK` 变为 `TPASS`
+- la64 QEMU focused：同上用例集 ✅ — musl/glibc 均无 `TFAIL/TBROK`；`madvise01` 每个 libc 为 15 个 `TPASS`
+
+**备注：** 本次实现 fork 继承控制的最小真实语义，不触碰 net/fs 测试点，也未运行 LTP 全量。
+
 ### LTP madvise01 MADV_FREE 兼容
 
 **涉及文件：**

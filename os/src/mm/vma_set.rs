@@ -421,6 +421,8 @@ impl VmaSet {
     ) -> Result<(), isize> {
         const MADV_DONTNEED: usize = 4;
         const MADV_FREE: usize = 8;
+        const MADV_DONTFORK: usize = 10;
+        const MADV_DOFORK: usize = 11;
         const MADV_WIPEONFORK: usize = 18;
         const MADV_KEEPONFORK: usize = 19;
 
@@ -447,6 +449,11 @@ impl VmaSet {
                 if !is_anonymous_private(area) {
                     return Err(EINVAL);
                 }
+            }
+            if advice == MADV_DONTFORK || advice == MADV_DOFORK {
+                let target_start = self.split_for_range(area_start, cursor, advise_end)?;
+                let area = self.vmas.get_mut(&target_start).ok_or(ENOMEM)?;
+                area.dont_fork = advice == MADV_DONTFORK;
             }
             if advice == MADV_WIPEONFORK || advice == MADV_KEEPONFORK {
                 if advice == MADV_WIPEONFORK {

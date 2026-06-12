@@ -770,7 +770,11 @@ impl<T: PageTable> AddressSpace<T> {
         {
             return Err(crate::syscall::errno::ENOMEM);
         }
-        for area in user_space.vmas.iter().filter(|area| area.vm_is_user()) {
+        for area in user_space
+            .vmas
+            .iter()
+            .filter(|area| area.vm_is_user() && !area.dont_fork)
+        {
             let mut new_area = if area.wipe_on_fork {
                 Vma::from_another(area)
             } else {
