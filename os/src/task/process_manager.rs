@@ -108,6 +108,22 @@ impl ProcessManager {
         }
 
         let wait_status = Cell::new(0);
+        let try_wait_attached_tracee = || -> Option<isize> {
+            if pid <= 0 {
+                return None;
+            }
+            let tracee = Self::find_process(pid as usize)?;
+            if !tracee.ptrace_traced_by(process.pid) {
+                return None;
+            }
+            if report_stopped || report_exited {
+                if let Some(status) = tracee.take_stopped_status(nowait) {
+                    wait_status.set(status);
+                    return Some(tracee.pid as isize);
+                }
+            }
+            None
+        };
         let try_reap_child = || -> Option<isize> {
             let mut process_inner = process.acquire_inner_lock();
             let caller_pgid = process_inner.pgid;
@@ -117,6 +133,9 @@ impl ProcessManager {
                 child_matches_pid(child.pid, child_inner.pgid, caller_pgid, pid)
             });
             if !has_child {
+                if let Some(value) = try_wait_attached_tracee() {
+                    return Some(value);
+                }
                 return Some(ECHILD);
             }
 
@@ -178,6 +197,9 @@ impl ProcessManager {
                 }
                 Some(found_pid as isize)
             } else {
+                if let Some(value) = try_wait_attached_tracee() {
+                    return Some(value);
+                }
                 None
             }
         };

@@ -75,6 +75,7 @@ const PTRACE_TRACEME: usize = 0;
 const PTRACE_CONT: usize = 7;
 const PTRACE_KILL: usize = 8;
 const PTRACE_ATTACH: usize = 16;
+const PTRACE_DETACH: usize = 17;
 const SECCOMP_MODE_DISABLED: usize = 0;
 const SECCOMP_MODE_STRICT: usize = 1;
 const SECCOMP_MODE_FILTER: usize = 2;
@@ -163,10 +164,31 @@ pub fn sys_ptrace(request: usize, pid: usize, _addr: usize, _data: usize) -> isi
             Err(errno) => errno,
         },
         PTRACE_ATTACH => {
-            if ProcessManager::find_process(pid).is_none() {
-                ESRCH
-            } else {
-                EPERM
+            let task = current_task().unwrap();
+            if pid == task.pid() {
+                return EPERM;
+            }
+            let target = match ProcessManager::find_process(pid) {
+                Some(process) => process,
+                None => return ESRCH,
+            };
+            if task.acquire_inner_lock().euid != 0 {
+                return EPERM;
+            }
+            match target.ptrace_attach(task.pid(), 19) {
+                Ok(()) => SUCCESS,
+                Err(errno) => -(errno as isize),
+            }
+        }
+        PTRACE_DETACH => {
+            let task = current_task().unwrap();
+            let target = match ProcessManager::find_process(pid) {
+                Some(process) => process,
+                None => return ESRCH,
+            };
+            match target.ptrace_detach(task.pid()) {
+                Ok(()) => SUCCESS,
+                Err(errno) => -(errno as isize),
             }
         }
         _ => EIO,

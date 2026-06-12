@@ -4,6 +4,21 @@
 
 ## 2026-06-12
 
+### LTP ptrace11 attach/detach 最小兼容
+
+**涉及文件：**
+- `os/src/syscall/process/ids.rs` — `PTRACE_ATTACH` 对 root tracer 允许 attach 目标进程并产生 stop 事件，新增 `PTRACE_DETACH` 释放 attach 状态
+- `os/src/task/process.rs` — 为进程增加 `ptrace_tracer_pid` 兼容状态，并在 stopped/continued 状态变化时唤醒 tracer
+- `os/src/task/process_manager.rs` — `waitpid(pid)` 对当前进程 attach 的非子进程 tracee 允许消费 stopped status，普通 child wait 路径保持不变
+
+**验证：**
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make rv64-kernel-build-only ...'` ✅
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make la64-kernel-build-only ...'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=ptrace01,ptrace02,ptrace03,ptrace11,waitid08,waitid09,waitpid09`、`ltp_libc=both` ✅ — musl/glibc 均无 `TFAIL/TBROK`，`ptrace11` 为 `passed 1 failed 0 broken 0`
+- la64 QEMU focused：同上配置 ✅ — musl/glibc 均无 `TFAIL/TBROK`，`ptrace11` 为 `passed 1 failed 0 broken 0`
+
+**备注：** 本次只覆盖 `ptrace11` 所需的 attach-stop-wait-detach 子集，不实现寄存器/内存访问、单步等完整 ptrace 调试器语义；`ptrace05/06` 等复杂 trace 行为仍暂不展开。未修改 net/fs 测试点，也未运行 LTP 全量。
+
 ### LTP bpf_map01 map-only 兼容
 
 **涉及文件：**
