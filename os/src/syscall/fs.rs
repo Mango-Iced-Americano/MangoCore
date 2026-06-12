@@ -28,8 +28,6 @@ use lazy_static::lazy_static;
 use log::{debug, error, info, trace, warn};
 use num_enum::TryFromPrimitive;
 
-// 防止用户传入过大参数导致内核 OOM 或者长时间阻塞
-const MAX_SYSCALL_BUFFER_SIZE: usize = 2 * 1024 * 1024; // 限制为 2 MiB
 const OPEN_ACCMODE_MASK: u32 = 0o3;
 const MFD_CLOEXEC: u32 = 0x0001;
 const MFD_ALLOW_SEALING: u32 = 0x0002;
@@ -440,96 +438,275 @@ fn open_proc_self_fd(path: &str, flags: OpenFlags) -> Option<Result<Arc<vfs::Fil
 }
 
 fn read_into_user(file: &vfs::File, token: usize, buf: usize, count: usize) -> isize {
-    let mut kernel_buf = alloc::vec![0u8; count];
-    let n = match file.read(&mut kernel_buf) {
-        Ok(n) => n,
-        Err(e) => return -(e as isize),
-    };
-    let mut writer = match UserBufferWriter::new(token, buf as *mut u8, n) {
-        Ok(writer) => writer,
-        Err(errno) => return errno,
-    };
-    // Temporary: check kernel_buf content before copy-out
-    if n >= 60 {
-        log::info!(
-            "[read_into_user] count={} n={} kbuf[50..60]={:02x?}",
-            count, n, &kernel_buf[50..60]
+    if count == 0 {
+        return match file.read(&mut []) {
+            Ok(n) => n as isize,
+            Err(e) => -(e as isize),
+        };
+    }
+
+    let chunk_cap = count.min(crate::hal::IO_CHUNK_SIZE);
+    let mut kbuf = alloc::vec::Vec::new();
+    if kbuf.try_reserve(chunk_cap).is_err() {
+        return -(SyscallErr::ENOMEM as isize);
+    }
+    unsafe { kbuf.set_len(chunk_cap); }
+
+    let mut total = 0usize;
+    while total < count {
+        let want = (count - total).min(chunk_cap);
+
+        // Validate destination chunk BEFORE reading from file
+        let user_addr = match buf.checked_add(total) {
+            Some(v) => v,
+            None => return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) },
+        };
+        let accessible = crate::mm::user_accessible_len(
+            token,
+            user_addr as *const u8,
+            want,
+            crate::mm::UserAccess::Write,
         );
-    }
-    match writer.write_from(&kernel_buf[..n]) {
-        Ok(m) => {
-            if m != n {
-                warn!("read_into_user: copy-out {} bytes, expected {}", m, n);
-            }
-            // Temporary: read back user buffer to check for TLB incoherence
-            if n >= 60 {
-                if let Ok(reader) = UserBufferReader::new(token, buf as *const u8, n) {
-                    let readback = reader.read_to_vec(512).unwrap_or_default();
-                    if readback.len() >= 60 {
-                        log::info!(
-                            "[read_into_user] READBACK[50..60]={:02x?} kbuf[50..60]={:02x?} match={}",
-                            &readback[50..60],
-                            &kernel_buf[50..60],
-                            readback[50..60] == kernel_buf[50..60],
-                        );
-                    }
-                }
-            }
-            m as isize
+        if accessible == 0 {
+            return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) };
         }
-        Err(errno) => errno,
+
+        let n = match file.read(&mut kbuf[..accessible]) {
+            Ok(n) => n,
+            Err(e) => {
+                let ret = -(e as isize);
+                return if total > 0 { total as isize } else { ret };
+            }
+        };
+        if n == 0 {
+            break;
+        }
+
+        let mut writer = match UserBufferWriter::new(token, user_addr as *mut u8, n) {
+            Ok(w) => w,
+            Err(errno) => return if total > 0 { total as isize } else { errno },
+        };
+        let copied = match writer.write_from(&kbuf[..n]) {
+            Ok(c) => c,
+            Err(errno) => return if total > 0 { total as isize } else { errno },
+        };
+
+        total += copied;
+        if copied < n || n < accessible || accessible < want {
+            break;
+        }
+
+        if let Some(task) = current_task() {
+            if crate::task::has_actionable_signal(&task) {
+                break;
+            }
+        }
     }
+    total as isize
 }
 
 fn pread_into_user(file: &vfs::File, token: usize, buf: usize, count: usize, offset: usize) -> isize {
-    let mut kernel_buf = alloc::vec![0u8; count];
-    let n = match file.pread(offset, &mut kernel_buf) {
-        Ok(n) => n,
-        Err(e) => return -(e as isize),
-    };
-    let mut writer = match UserBufferWriter::new(token, buf as *mut u8, n) {
-        Ok(writer) => writer,
-        Err(errno) => return errno,
-    };
-    match writer.write_from(&kernel_buf[..n]) {
-        Ok(m) => {
-            if m != n {
-                warn!("pread_into_user: copy-out {} bytes, expected {}", m, n);
-            }
-            m as isize
-        }
-        Err(errno) => errno,
+    if count == 0 {
+        return match file.pread(offset, &mut []) {
+            Ok(n) => n as isize,
+            Err(e) => -(e as isize),
+        };
     }
+
+    let chunk_cap = count.min(crate::hal::IO_CHUNK_SIZE);
+    let mut kbuf = alloc::vec::Vec::new();
+    if kbuf.try_reserve(chunk_cap).is_err() {
+        return -(SyscallErr::ENOMEM as isize);
+    }
+    unsafe { kbuf.set_len(chunk_cap); }
+
+    let mut total = 0usize;
+    while total < count {
+        let want = (count - total).min(chunk_cap);
+        let file_off = match offset.checked_add(total) {
+            Some(v) => v,
+            None => return if total > 0 { total as isize } else { -(SyscallErr::EINVAL as isize) },
+        };
+
+        let user_addr = match buf.checked_add(total) {
+            Some(v) => v,
+            None => return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) },
+        };
+        let accessible = crate::mm::user_accessible_len(
+            token,
+            user_addr as *const u8,
+            want,
+            crate::mm::UserAccess::Write,
+        );
+        if accessible == 0 {
+            return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) };
+        }
+
+        let n = match file.pread(file_off, &mut kbuf[..accessible]) {
+            Ok(n) => n,
+            Err(e) => {
+                let ret = -(e as isize);
+                return if total > 0 { total as isize } else { ret };
+            }
+        };
+        if n == 0 {
+            break;
+        }
+
+        let mut writer = match UserBufferWriter::new(token, user_addr as *mut u8, n) {
+            Ok(w) => w,
+            Err(errno) => return if total > 0 { total as isize } else { errno },
+        };
+        let copied = match writer.write_from(&kbuf[..n]) {
+            Ok(c) => c,
+            Err(errno) => return if total > 0 { total as isize } else { errno },
+        };
+
+        total += copied;
+        if copied < n || n < accessible || accessible < want {
+            break;
+        }
+
+        if let Some(task) = current_task() {
+            if crate::task::has_actionable_signal(&task) {
+                break;
+            }
+        }
+    }
+    total as isize
 }
 
 fn write_from_user(file: &vfs::File, token: usize, buf: usize, count: usize) -> isize {
-    let reader = match UserBufferReader::new(token, buf as *const u8, count) {
-        Ok(reader) => reader,
-        Err(errno) => return errno,
-    };
-    let kernel_buf = match reader.read_to_vec(MAX_SYSCALL_BUFFER_SIZE) {
-        Ok(buf) => buf,
-        Err(errno) => return errno,
-    };
-    match file.write(&kernel_buf) {
-        Ok(n) => n as isize,
-        Err(e) => -(e as isize),
+    if count == 0 {
+        return match file.write(&[]) {
+            Ok(n) => n as isize,
+            Err(e) => -(e as isize),
+        };
     }
+
+    let chunk_cap = count.min(crate::hal::IO_CHUNK_SIZE);
+    let mut kbuf = alloc::vec::Vec::new();
+    if kbuf.try_reserve(chunk_cap).is_err() {
+        return -(SyscallErr::ENOMEM as isize);
+    }
+    unsafe { kbuf.set_len(chunk_cap); }
+
+    let mut total = 0usize;
+    while total < count {
+        let want = (count - total).min(chunk_cap);
+        let user_addr = match buf.checked_add(total) {
+            Some(v) => v,
+            None => return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) },
+        };
+
+        let accessible = crate::mm::user_accessible_len(
+            token,
+            user_addr as *const u8,
+            want,
+            crate::mm::UserAccess::Read,
+        );
+        if accessible == 0 {
+            return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) };
+        }
+
+        let reader = match UserBufferReader::new(token, user_addr as *const u8, accessible) {
+            Ok(r) => r,
+            Err(errno) => return if total > 0 { total as isize } else { errno },
+        };
+        let copied = match reader.read_into(&mut kbuf[..accessible]) {
+            Ok(n) => n,
+            Err(errno) => return if total > 0 { total as isize } else { errno },
+        };
+
+        let n = match file.write(&kbuf[..copied]) {
+            Ok(n) => n,
+            Err(e) => {
+                let ret = -(e as isize);
+                return if total > 0 { total as isize } else { ret };
+            }
+        };
+
+        total += n;
+        if n == 0 || n < copied || accessible < want {
+            break;
+        }
+
+        if let Some(task) = current_task() {
+            if crate::task::has_actionable_signal(&task) {
+                break;
+            }
+        }
+    }
+    total as isize
 }
 
 fn pwrite_from_user(file: &vfs::File, token: usize, buf: usize, count: usize, offset: usize) -> isize {
-    let reader = match UserBufferReader::new(token, buf as *const u8, count) {
-        Ok(reader) => reader,
-        Err(errno) => return errno,
-    };
-    let kernel_buf = match reader.read_to_vec(MAX_SYSCALL_BUFFER_SIZE) {
-        Ok(buf) => buf,
-        Err(errno) => return errno,
-    };
-    match file.pwrite(offset, &kernel_buf) {
-        Ok(n) => n as isize,
-        Err(e) => -(e as isize),
+    if count == 0 {
+        return match file.pwrite(offset, &[]) {
+            Ok(n) => n as isize,
+            Err(e) => -(e as isize),
+        };
     }
+
+    let chunk_cap = count.min(crate::hal::IO_CHUNK_SIZE);
+    let mut kbuf = alloc::vec::Vec::new();
+    if kbuf.try_reserve(chunk_cap).is_err() {
+        return -(SyscallErr::ENOMEM as isize);
+    }
+    unsafe { kbuf.set_len(chunk_cap); }
+
+    let mut total = 0usize;
+    while total < count {
+        let want = (count - total).min(chunk_cap);
+        let file_off = match offset.checked_add(total) {
+            Some(v) => v,
+            None => return if total > 0 { total as isize } else { -(SyscallErr::EINVAL as isize) },
+        };
+
+        let user_addr = match buf.checked_add(total) {
+            Some(v) => v,
+            None => return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) },
+        };
+
+        let accessible = crate::mm::user_accessible_len(
+            token,
+            user_addr as *const u8,
+            want,
+            crate::mm::UserAccess::Read,
+        );
+        if accessible == 0 {
+            return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) };
+        }
+
+        let reader = match UserBufferReader::new(token, user_addr as *const u8, accessible) {
+            Ok(r) => r,
+            Err(errno) => return if total > 0 { total as isize } else { errno },
+        };
+        let copied = match reader.read_into(&mut kbuf[..accessible]) {
+            Ok(n) => n,
+            Err(errno) => return if total > 0 { total as isize } else { errno },
+        };
+
+        let n = match file.pwrite(file_off, &kbuf[..copied]) {
+            Ok(n) => n,
+            Err(e) => {
+                let ret = -(e as isize);
+                return if total > 0 { total as isize } else { ret };
+            }
+        };
+
+        total += n;
+        if n == 0 || n < copied || accessible < want {
+            break;
+        }
+
+        if let Some(task) = current_task() {
+            if crate::task::has_actionable_signal(&task) {
+                break;
+            }
+        }
+    }
+    total as isize
 }
 
 fn write_start_offset(file: &vfs::File) -> usize {
@@ -904,13 +1081,13 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: u32) -> isize {
 }
 
 pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
-    let count = count.min(MAX_SYSCALL_BUFFER_SIZE);
+    let count = count.min(crate::hal::MAX_RW_COUNT);
     let task = current_task().unwrap();
     let file = {
         let files_ref = task.process.files();
         let fd_table = files_ref.lock();
         match fd_table.get_file(fd) {
-            Ok(fd_ref) => fd_ref,
+            Ok(fd_ref) => Arc::clone(&fd_ref),
             Err(e) => return -(e as isize),
         }
     };
@@ -937,13 +1114,13 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
 }
 
 pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
-    let mut count = count.min(MAX_SYSCALL_BUFFER_SIZE);
+    let mut count = count.min(crate::hal::MAX_RW_COUNT);
     let task = current_task().unwrap();
     let file = {
         let files_ref = task.process.files();
         let fd_table = files_ref.lock();
         match fd_table.get_file(fd) {
-            Ok(fd_ref) => fd_ref,
+            Ok(fd_ref) => Arc::clone(&fd_ref),
             Err(e) => return -(e as isize),
         }
     };
@@ -975,13 +1152,15 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
 }
 
 pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
-    let count = count.min(MAX_SYSCALL_BUFFER_SIZE);
+    let count = count.min(crate::hal::MAX_RW_COUNT);
     let task = current_task().unwrap();
-    let files_ref = task.process.files();
+    let file = {
+        let files_ref = task.process.files();
         let fd_table = files_ref.lock();
-    let file = match fd_table.get_file(fd) {
-        Ok(file) => file,
-        Err(e) => return -(e as isize),
+        match fd_table.get_file(fd) {
+            Ok(fd_ref) => Arc::clone(&fd_ref),
+            Err(e) => return -(e as isize),
+        }
     };
     // fd is not open for reading
     if file.readable().is_err() {
@@ -995,13 +1174,15 @@ pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
 }
 
 pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
-    let mut count = count.min(MAX_SYSCALL_BUFFER_SIZE);
+    let mut count = count.min(crate::hal::MAX_RW_COUNT);
     let task = current_task().unwrap();
-    let files_ref = task.process.files();
+    let file = {
+        let files_ref = task.process.files();
         let fd_table = files_ref.lock();
-    let file = match fd_table.get_file(fd) {
-        Ok(file) => file,
-        Err(e) => return -(e as isize),
+        match fd_table.get_file(fd) {
+            Ok(fd_ref) => Arc::clone(&fd_ref),
+            Err(e) => return -(e as isize),
+        }
     };
     if offset_is_negative(offset) {
         return EINVAL;
@@ -1024,11 +1205,13 @@ pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
 
 pub fn sys_preadv(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize {
     let task = current_task().unwrap();
-    let files_ref = task.process.files();
+    let file = {
+        let files_ref = task.process.files();
         let fd_table = files_ref.lock();
-    let file = match fd_table.get_file(fd) {
-        Ok(file) => file,
-        Err(e) => return -(e as isize),
+        match fd_table.get_file(fd) {
+            Ok(fd_ref) => Arc::clone(&fd_ref),
+            Err(e) => return -(e as isize),
+        }
     };
     if file.readable().is_err() {
         return EBADF;
@@ -1041,33 +1224,75 @@ pub fn sys_preadv(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize 
         token,
         iov as *const crate::fs::iov::IOVec,
         iovcnt,
-        MAX_SYSCALL_BUFFER_SIZE,
+        crate::hal::MAX_RW_COUNT,
     ) {
         Ok(iov) => iov,
         Err(errno) => return errno,
     };
-    let user_buf = match user_iov.writer_buffer() {
-        Ok(buffer) => buffer,
-        Err(errno) => return errno,
-    };
-    let count = user_buf.len();
-    let mut kernel_buf = alloc::vec![0u8; count];
-    let n = match file.pread(offset, &mut kernel_buf) {
-        Ok(n) => n,
-        Err(e) => return -(e as isize),
-    };
-    let mut user_buf = user_buf;
-    user_buf.write(&kernel_buf[..n]);
-    n as isize
+    let total_len = user_iov.capped_len();
+    if total_len == 0 {
+        return 0;
+    }
+
+    let chunk_cap = total_len.min(crate::hal::IO_CHUNK_SIZE);
+    let mut kbuf = alloc::vec::Vec::new();
+    if kbuf.try_reserve(chunk_cap).is_err() {
+        return -(SyscallErr::ENOMEM as isize);
+    }
+    unsafe { kbuf.set_len(chunk_cap); }
+
+    let mut done = 0usize;
+    while done < total_len {
+        let want = (total_len - done).min(chunk_cap);
+        let file_off = match offset.checked_add(done) {
+            Some(v) => v,
+            None => return if done > 0 { done as isize } else { -(SyscallErr::EINVAL as isize) },
+        };
+        let accessible = user_iov.accessible_len_at(done, want, crate::mm::UserAccess::Write);
+        if accessible == 0 {
+            return if done > 0 { done as isize } else { -(SyscallErr::EFAULT as isize) };
+        }
+
+        let n = match file.pread(file_off, &mut kbuf[..accessible]) {
+            Ok(n) => n,
+            Err(e) => {
+                let ret = -(e as isize);
+                return if done > 0 { done as isize } else { ret };
+            }
+        };
+        if n == 0 {
+            break;
+        }
+
+        let mut ubuf = match user_iov.writer_buffer_at(done, n) {
+            Ok(b) => b,
+            Err(errno) => return if done > 0 { done as isize } else { errno },
+        };
+        let copied = ubuf.write_at(0, &kbuf[..n]);
+
+        done += copied;
+        if copied < n || n < accessible || accessible < want {
+            break;
+        }
+
+        if let Some(task) = current_task() {
+            if crate::task::has_actionable_signal(&task) {
+                break;
+            }
+        }
+    }
+    done as isize
 }
 
 pub fn sys_pwritev(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize {
     let task = current_task().unwrap();
-    let files_ref = task.process.files();
+    let file = {
+        let files_ref = task.process.files();
         let fd_table = files_ref.lock();
-    let file = match fd_table.get_file(fd) {
-        Ok(file) => file,
-        Err(e) => return -(e as isize),
+        match fd_table.get_file(fd) {
+            Ok(fd_ref) => Arc::clone(&fd_ref),
+            Err(e) => return -(e as isize),
+        }
     };
     if offset_is_negative(offset) {
         return EINVAL;
@@ -1083,32 +1308,72 @@ pub fn sys_pwritev(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize
         token,
         iov as *const crate::fs::iov::IOVec,
         iovcnt,
-        MAX_SYSCALL_BUFFER_SIZE,
+        crate::hal::MAX_RW_COUNT,
     ) {
         Ok(iov) => iov,
         Err(errno) => return errno,
     };
-    let user_buf = match user_iov.reader_buffer() {
-        Ok(buffer) => buffer,
-        Err(errno) => return errno,
-    };
-    let mut kernel_buf = alloc::vec![0u8; user_buf.len()];
-    user_buf.read(&mut kernel_buf);
+    let total_len = user_iov.capped_len();
+    if total_len == 0 {
+        return 0;
+    }
+
     let fsize_limit = task.acquire_inner_lock().fsize_limit_cur;
     let allowed = match apply_fsize_limit(
         &file,
-        kernel_buf.len(),
+        total_len,
         pwrite_start_offset(&file, offset),
         fsize_limit,
     ) {
         Ok(count) => count,
         Err(errno) => return errno,
     };
-    kernel_buf.truncate(allowed);
-    match file.pwrite(offset, &kernel_buf) {
-        Ok(n) => n as isize,
-        Err(e) => -(e as isize),
+
+    let chunk_cap = allowed.min(crate::hal::IO_CHUNK_SIZE);
+    let mut kbuf = alloc::vec::Vec::new();
+    if kbuf.try_reserve(chunk_cap).is_err() {
+        return -(SyscallErr::ENOMEM as isize);
     }
+    unsafe { kbuf.set_len(chunk_cap); }
+
+    let mut done = 0usize;
+    while done < allowed {
+        let want = (allowed - done).min(chunk_cap);
+        let file_off = match offset.checked_add(done) {
+            Some(v) => v,
+            None => return if done > 0 { done as isize } else { -(SyscallErr::EINVAL as isize) },
+        };
+        let accessible = user_iov.accessible_len_at(done, want, crate::mm::UserAccess::Read);
+        if accessible == 0 {
+            return if done > 0 { done as isize } else { -(SyscallErr::EFAULT as isize) };
+        }
+
+        let ubuf = match user_iov.reader_buffer_at(done, accessible) {
+            Ok(b) => b,
+            Err(errno) => return if done > 0 { done as isize } else { errno },
+        };
+        let copied = ubuf.read(&mut kbuf[..accessible]);
+
+        let n = match file.pwrite(file_off, &kbuf[..copied.min(accessible)]) {
+            Ok(n) => n,
+            Err(e) => {
+                let ret = -(e as isize);
+                return if done > 0 { done as isize } else { ret };
+            }
+        };
+
+        done += n;
+        if n == 0 || n < copied || accessible < want {
+            break;
+        }
+
+        if let Some(task) = current_task() {
+            if crate::task::has_actionable_signal(&task) {
+                break;
+            }
+        }
+    }
+    done as isize
 }
 
 fn split_offset64(offset_low: usize, offset_high: usize) -> usize {
@@ -1155,13 +1420,14 @@ pub fn sys_pwritev2(
 
 pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
     let task = current_task().unwrap();
-    let files_ref = task.process.files();
+    let file = {
+        let files_ref = task.process.files();
         let fd_table = files_ref.lock();
-    let file = match fd_table.get_file(fd) {
-        Ok(file) => file,
-        Err(e) => return -(e as isize),
+        match fd_table.get_file(fd) {
+            Ok(fd_ref) => Arc::clone(&fd_ref),
+            Err(e) => return -(e as isize),
+        }
     };
-    // fd is not open for reading
     if file.readable().is_err() {
         return EBADF;
     }
@@ -1170,35 +1436,72 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
         token,
         iov as *const crate::fs::iov::IOVec,
         iovcnt,
-        MAX_SYSCALL_BUFFER_SIZE,
+        crate::hal::MAX_RW_COUNT,
     ) {
         Ok(iov) => iov,
         Err(errno) => return errno,
     };
-    let user_buf = match user_iov.writer_buffer() {
-        Ok(buffer) => buffer,
-        Err(errno) => return errno,
-    };
-    let count = user_buf.len();
-    let mut kernel_buf = alloc::vec![0u8; count];
-    let n = match file.read(&mut kernel_buf) {
-        Ok(n) => n,
-        Err(e) => return -(e as isize),
-    };
-    let mut user_buf = user_buf;
-    user_buf.write(&kernel_buf[..n]);
-    n as isize
+    let total_len = user_iov.capped_len();
+    if total_len == 0 {
+        return 0;
+    }
+
+    let chunk_cap = total_len.min(crate::hal::IO_CHUNK_SIZE);
+    let mut kbuf = alloc::vec::Vec::new();
+    if kbuf.try_reserve(chunk_cap).is_err() {
+        return -(SyscallErr::ENOMEM as isize);
+    }
+    unsafe { kbuf.set_len(chunk_cap); }
+
+    let mut done = 0usize;
+    while done < total_len {
+        let want = (total_len - done).min(chunk_cap);
+        let accessible = user_iov.accessible_len_at(done, want, crate::mm::UserAccess::Write);
+        if accessible == 0 {
+            return if done > 0 { done as isize } else { -(SyscallErr::EFAULT as isize) };
+        }
+
+        let n = match file.read(&mut kbuf[..accessible]) {
+            Ok(n) => n,
+            Err(e) => {
+                let ret = -(e as isize);
+                return if done > 0 { done as isize } else { ret };
+            }
+        };
+        if n == 0 {
+            break;
+        }
+
+        let mut ubuf = match user_iov.writer_buffer_at(done, n) {
+            Ok(b) => b,
+            Err(errno) => return if done > 0 { done as isize } else { errno },
+        };
+        let copied = ubuf.write_at(0, &kbuf[..n]);
+
+        done += copied;
+        if copied < n || n < accessible || accessible < want {
+            break;
+        }
+
+        if let Some(task) = current_task() {
+            if crate::task::has_actionable_signal(&task) {
+                break;
+            }
+        }
+    }
+    done as isize
 }
 
 pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
     let task = current_task().unwrap();
-    let files_ref = task.process.files();
+    let file = {
+        let files_ref = task.process.files();
         let fd_table = files_ref.lock();
-    let file = match fd_table.get_file(fd) {
-        Ok(file) => file,
-        Err(e) => return -(e as isize),
+        match fd_table.get_file(fd) {
+            Ok(fd_ref) => Arc::clone(&fd_ref),
+            Err(e) => return -(e as isize),
+        }
     };
-    // fd is not open for writing
     if file.writable().is_err() {
         return EBADF;
     }
@@ -1207,32 +1510,68 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
         token,
         iov as *const crate::fs::iov::IOVec,
         iovcnt,
-        MAX_SYSCALL_BUFFER_SIZE,
+        crate::hal::MAX_RW_COUNT,
     ) {
         Ok(iov) => iov,
         Err(errno) => return errno,
     };
-    let user_buf = match user_iov.reader_buffer() {
-        Ok(buffer) => buffer,
-        Err(errno) => return errno,
-    };
-    let mut kernel_buf = alloc::vec![0u8; user_buf.len()];
-    user_buf.read(&mut kernel_buf);
+    let total_len = user_iov.capped_len();
+    if total_len == 0 {
+        return 0;
+    }
+
     let fsize_limit = task.acquire_inner_lock().fsize_limit_cur;
     let allowed = match apply_fsize_limit(
         &file,
-        kernel_buf.len(),
+        total_len,
         write_start_offset(&file),
         fsize_limit,
     ) {
         Ok(count) => count,
         Err(errno) => return errno,
     };
-    kernel_buf.truncate(allowed);
-    match file.write(&kernel_buf) {
-        Ok(n) => n as isize,
-        Err(e) => -(e as isize),
+
+    let chunk_cap = allowed.min(crate::hal::IO_CHUNK_SIZE);
+    let mut kbuf = alloc::vec::Vec::new();
+    if kbuf.try_reserve(chunk_cap).is_err() {
+        return -(SyscallErr::ENOMEM as isize);
     }
+    unsafe { kbuf.set_len(chunk_cap); }
+
+    let mut done = 0usize;
+    while done < allowed {
+        let want = (allowed - done).min(chunk_cap);
+        let accessible = user_iov.accessible_len_at(done, want, crate::mm::UserAccess::Read);
+        if accessible == 0 {
+            return if done > 0 { done as isize } else { -(SyscallErr::EFAULT as isize) };
+        }
+
+        let ubuf = match user_iov.reader_buffer_at(done, accessible) {
+            Ok(b) => b,
+            Err(errno) => return if done > 0 { done as isize } else { errno },
+        };
+        let copied = ubuf.read(&mut kbuf[..accessible]);
+
+        let n = match file.write(&kbuf[..copied.min(accessible)]) {
+            Ok(n) => n,
+            Err(e) => {
+                let ret = -(e as isize);
+                return if done > 0 { done as isize } else { ret };
+            }
+        };
+
+        done += n;
+        if n == 0 || n < copied || accessible < want {
+            break;
+        }
+
+        if let Some(task) = current_task() {
+            if crate::task::has_actionable_signal(&task) {
+                break;
+            }
+        }
+    }
+    done as isize
 }
 
 const SPLICE_F_MOVE: u32 = 0x01;
@@ -1251,7 +1590,7 @@ pub fn sys_vmsplice(fd: usize, iov: usize, iovcnt: usize, flags: u32) -> isize {
         let files_ref = task.process.files();
         let fd_table = files_ref.lock();
         match fd_table.get_file(fd) {
-            Ok(file) => file,
+            Ok(fd_ref) => Arc::clone(&fd_ref),
             Err(e) => return -(e as isize),
         }
     };
@@ -1267,7 +1606,7 @@ pub fn sys_vmsplice(fd: usize, iov: usize, iovcnt: usize, flags: u32) -> isize {
         token,
         iov as *const crate::fs::iov::IOVec,
         iovcnt,
-        MAX_SYSCALL_BUFFER_SIZE,
+        crate::hal::MAX_RW_COUNT,
     ) {
         Ok(iov) => iov,
         Err(errno) => return errno,
@@ -1320,7 +1659,7 @@ pub fn sys_vmsplice(fd: usize, iov: usize, iovcnt: usize, flags: u32) -> isize {
 /// If offset is NULL, then data will be read from in_fd starting at
 /// the file offset, and the file offset will be updated by the call.
 pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset: *mut usize, count: usize) -> isize {
-    let count = count.min(64 * 1024 * 1024);
+    let count = count.min(crate::hal::MAX_RW_COUNT);
     let task = current_task().unwrap();
     let files_ref = task.process.files();
         let fd_table = files_ref.lock();
@@ -1371,14 +1710,26 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset: *mut usize, count: usiz
                             in_file.private_data(),
                         ) {
                             Ok(n) => n,
-                            Err(e) => return -(e as isize),
+                            Err(e) => {
+                                let ret = -(e as isize);
+                                if count - left_bytes > 0 {
+                                    break;
+                                }
+                                return ret;
+                            }
                         };
                         *off_val += n;
                         n
                     } else {
                         match in_file.read(buffer.as_mut_slice()) {
                             Ok(n) => n,
-                            Err(e) => return -(e as isize),
+                            Err(e) => {
+                                let ret = -(e as isize);
+                                if count - left_bytes > 0 {
+                                    break;
+                                }
+                                return ret;
+                            }
                         }
                     }
                 };
@@ -1407,8 +1758,11 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset: *mut usize, count: usiz
         let write_size = match out_file.write(write_buffer) {
             Ok(n) => n,
             Err(e) => {
-                fallback(read_size);
-                return -(e as isize);
+                if count - left_bytes == 0 {
+                    return -(e as isize);
+                }
+                fallback(write_buffer.len());
+                break;
             }
         };
         if write_size == 0 {
@@ -1444,7 +1798,7 @@ pub fn sys_copy_file_range(
     if flags != 0 {
         return EINVAL;
     }
-    let len = len.min(64 * 1024 * 1024);
+    let len = len.min(crate::hal::MAX_RW_COUNT);
     let task = current_task().unwrap();
     let files_ref = task.process.files();
     let fd_table = files_ref.lock();
@@ -1491,12 +1845,22 @@ pub fn sys_copy_file_range(
         let read_size = if let Some(offset) = in_offset {
             match in_file.pread(offset, buffer.as_mut_slice()) {
                 Ok(n) => n,
-                Err(e) => return -(e as isize),
+                Err(e) => {
+                    if copied > 0 {
+                        break;
+                    }
+                    return -(e as isize);
+                }
             }
         } else {
             match in_file.read(buffer.as_mut_slice()) {
                 Ok(n) => n,
-                Err(e) => return -(e as isize),
+                Err(e) => {
+                    if copied > 0 {
+                        break;
+                    }
+                    return -(e as isize);
+                }
             }
         };
         if read_size == 0 {
@@ -1508,8 +1872,11 @@ pub fn sys_copy_file_range(
             match out_file.pwrite(offset, buffer.as_slice()) {
                 Ok(n) => n,
                 Err(e) => {
-                    if in_offset.is_none() {
-                        let _ = in_file.lseek(SeekFrom::SeekCurrent(-(read_size as i64)));
+                    if copied > 0 {
+                        if in_offset.is_none() {
+                            let _ = in_file.lseek(SeekFrom::SeekCurrent(-(read_size as i64)));
+                        }
+                        break;
                     }
                     return -(e as isize);
                 }
@@ -1518,8 +1885,11 @@ pub fn sys_copy_file_range(
             match out_file.write(buffer.as_slice()) {
                 Ok(n) => n,
                 Err(e) => {
-                    if in_offset.is_none() {
-                        let _ = in_file.lseek(SeekFrom::SeekCurrent(-(read_size as i64)));
+                    if copied > 0 {
+                        if in_offset.is_none() {
+                            let _ = in_file.lseek(SeekFrom::SeekCurrent(-(read_size as i64)));
+                        }
+                        break;
                     }
                     return -(e as isize);
                 }
@@ -5550,7 +5920,7 @@ pub fn sys_setxattr(
             Ok(r) => r,
             Err(e) => return e,
         };
-        match reader.read_to_vec(MAX_SYSCALL_BUFFER_SIZE) {
+        match reader.read_to_vec(crate::hal::MAX_RW_COUNT) {
             Ok(v) => v,
             Err(e) => return e,
         }
@@ -5597,7 +5967,7 @@ pub fn sys_lsetxattr(
             Ok(r) => r,
             Err(e) => return e,
         };
-        match reader.read_to_vec(MAX_SYSCALL_BUFFER_SIZE) {
+        match reader.read_to_vec(crate::hal::MAX_RW_COUNT) {
             Ok(v) => v,
             Err(e) => return e,
         }
@@ -5634,7 +6004,7 @@ pub fn sys_fsetxattr(fd: usize, name: *const u8, value: *const u8, size: usize, 
             Ok(r) => r,
             Err(e) => return e,
         };
-        match reader.read_to_vec(MAX_SYSCALL_BUFFER_SIZE) {
+        match reader.read_to_vec(crate::hal::MAX_RW_COUNT) {
             Ok(v) => v,
             Err(e) => return e,
         }
@@ -5685,7 +6055,7 @@ pub fn sys_getxattr(
         }
     }
 
-    let buf_size = size.min(MAX_SYSCALL_BUFFER_SIZE);
+    let buf_size = size.min(crate::hal::MAX_RW_COUNT);
     let mut kernel_buf = alloc::vec![0u8; buf_size];
     match inode.getxattr(validated, &mut kernel_buf) {
         Ok(len) => {
@@ -5735,7 +6105,7 @@ pub fn sys_lgetxattr(
         }
     }
 
-    let buf_size = size.min(MAX_SYSCALL_BUFFER_SIZE);
+    let buf_size = size.min(crate::hal::MAX_RW_COUNT);
     let mut kernel_buf = alloc::vec![0u8; buf_size];
     match inode.getxattr(validated, &mut kernel_buf) {
         Ok(len) => {
@@ -5776,7 +6146,7 @@ pub fn sys_fgetxattr(fd: usize, name: *const u8, value: *mut u8, size: usize) ->
         }
     }
 
-    let buf_size = size.min(MAX_SYSCALL_BUFFER_SIZE);
+    let buf_size = size.min(crate::hal::MAX_RW_COUNT);
     let mut kernel_buf = alloc::vec![0u8; buf_size];
     match inode.getxattr(validated, &mut kernel_buf) {
         Ok(len) => {
@@ -5813,7 +6183,7 @@ pub fn sys_listxattr(path: *const u8, list: *mut u8, size: usize) -> isize {
         }
     }
 
-    let buf_size = size.min(MAX_SYSCALL_BUFFER_SIZE);
+    let buf_size = size.min(crate::hal::MAX_RW_COUNT);
     let mut kernel_buf = alloc::vec![0u8; buf_size];
     match inode.listxattr(&mut kernel_buf) {
         Ok(len) => {
@@ -5850,7 +6220,7 @@ pub fn sys_llistxattr(path: *const u8, list: *mut u8, size: usize) -> isize {
         }
     }
 
-    let buf_size = size.min(MAX_SYSCALL_BUFFER_SIZE);
+    let buf_size = size.min(crate::hal::MAX_RW_COUNT);
     let mut kernel_buf = alloc::vec![0u8; buf_size];
     match inode.listxattr(&mut kernel_buf) {
         Ok(len) => {
@@ -5882,7 +6252,7 @@ pub fn sys_flistxattr(fd: usize, list: *mut u8, size: usize) -> isize {
         }
     }
 
-    let buf_size = size.min(MAX_SYSCALL_BUFFER_SIZE);
+    let buf_size = size.min(crate::hal::MAX_RW_COUNT);
     let mut kernel_buf = alloc::vec![0u8; buf_size];
     match inode.listxattr(&mut kernel_buf) {
         Ok(len) => {

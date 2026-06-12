@@ -1,5 +1,3 @@
-use alloc::vec::Vec;
-
 use crate::mm::{UserIoVec, UserPtr, UserPtrMut};
 use crate::net::config::NET_INTERFACE;
 use crate::net::posix::MsgHdr;
@@ -9,8 +7,6 @@ use crate::task::WaitQueue;
 use crate::utils::error::SyscallErr;
 
 use super::common::MsgFlags;
-
-const MAX_MSG_IO_SIZE: usize = 64 * 1024 * 1024;
 
 pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
     let msg_flags = MsgFlags::from_bits_truncate(flags);
@@ -31,44 +27,40 @@ pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
             .unwrap_or(false)
     } || msgdontwait;
 
-    // 读取 MsgHdr
     let msg = match UserPtr::<MsgHdr>::from_addr(msg_ptr).read(token) {
         Ok(m) => m,
         Err(_) => return -(SyscallErr::EFAULT as isize),
     };
 
-    // 读取 iovec 数组
     let user_iov = match UserIoVec::read_user_iovecs(
         token,
         msg.msg_iov as *const crate::fs::iov::IOVec,
         msg.msg_iovlen,
-        MAX_MSG_IO_SIZE,
+        crate::hal::MAX_RW_COUNT,
     ) {
         Ok(iov) => iov,
         Err(errno) => return errno,
     };
 
-    // 分配接收缓冲区
-    if user_iov.total_len() > MAX_MSG_IO_SIZE {
-        return -(SyscallErr::ENOBUFS as isize);
-    }
-    let mut buf = Vec::new();
-    if buf.try_reserve(user_iov.total_len()).is_err() {
+    let recv_cap = user_iov.total_len().min(crate::hal::IO_CHUNK_SIZE);
+    let mut buf = alloc::vec::Vec::new();
+    if buf.try_reserve(recv_cap).is_err() {
         return -(SyscallErr::ENOBUFS as isize);
     }
     unsafe {
-        buf.set_len(user_iov.total_len());
+        buf.set_len(recv_cap);
     }
 
     let socket = crate::get_socket!(sockfd);
-    let mut try_recv = || if is_peek {
-        socket.try_peek_recvmsg(&mut buf)
-    } else {
-        socket.try_recvmsg(&mut buf)
+    let mut try_recv = || {
+        if is_peek {
+            socket.try_peek_recvmsg(&mut buf)
+        } else {
+            socket.try_recvmsg(&mut buf)
+        }
     };
     let ret = if let Some(wq) = socket.recv_wait_queue() {
         if is_nonblock {
-            // Non-blocking: poll before recv to prevent tight-loop starvation
             NET_INTERFACE.try_poll();
             match try_recv() {
                 Ok((n, _)) => n as isize,
@@ -87,26 +79,21 @@ pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
     };
 
     if ret < 0 {
-        log::warn!("[netlink] sys_recvmsg: returning error {}", ret);
         return ret;
     }
     let nbytes = ret as usize;
-    log::warn!("[netlink] sys_recvmsg: got {} bytes from socket", nbytes);
 
-    // 将接收到的数据分散写入用户 iovec
-    // Cap write at buffer size: try_recv returns orig_len, copy_len is min(orig_len, buf.len())
     let copy_len = nbytes.min(buf.len());
-    let mut write_buf = match user_iov.writer_buffer() {
-        Ok(buffer) => buffer,
-        Err(errno) => return errno,
-    };
-    write_buf.write(&buf[..copy_len]);
+    if copy_len > 0 {
+        let mut write_buf = match user_iov.writer_buffer_at(0, copy_len) {
+            Ok(buffer) => buffer,
+            Err(errno) => return errno,
+        };
+        write_buf.write(&buf[..copy_len]);
+    }
 
-    // MSG_TRUNC: data was larger than user buffer
     let truncated = nbytes > buf.len();
 
-    // 写回源地址（msg_name）
-    // sockaddr_nl is 12 bytes, sockaddr_in is 16 bytes — accept both.
     if !msg.msg_name.is_null() && msg.msg_namelen >= 12 {
         if let Some(src_addr) = socket.last_recv_addr() {
             let namelen_field_offset = msg_ptr + core::mem::offset_of!(MsgHdr, msg_namelen);
@@ -114,7 +101,6 @@ pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
         }
     }
 
-    // 写回 msg_controllen = 0, msg_flags = 0
     let msg_controllen = 0usize;
     if UserPtrMut::from_addr(msg_ptr + core::mem::offset_of!(MsgHdr, msg_controllen))
         .write(token, &msg_controllen)
@@ -122,9 +108,13 @@ pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
     {
         return -(SyscallErr::EFAULT as isize);
     }
-    let msg_flags = if truncated { (MsgFlags::MSG_TRUNC).bits() as i32 } else { 0i32 };
+    let ret_flags: i32 = if truncated {
+        (MsgFlags::MSG_TRUNC).bits() as i32
+    } else {
+        0i32
+    };
     if UserPtrMut::from_addr(msg_ptr + core::mem::offset_of!(MsgHdr, msg_flags))
-        .write(token, &msg_flags)
+        .write(token, &ret_flags)
         .is_err()
     {
         return -(SyscallErr::EFAULT as isize);

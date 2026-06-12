@@ -10,6 +10,38 @@ use alloc::vec::Vec;
 const MAX_BUFFER_SIZE: usize = 1024 * 1024 * 8;
 const MAX_IOVEC_COUNT: usize = 1024;
 
+/// Walk user pages from `ptr` to `ptr+len`, return bytes before first inaccessible page.
+/// Uses translate_user_va_checked per page; stops on fault or overflow.
+pub fn user_accessible_len(
+    token: usize,
+    ptr: *const u8,
+    len: usize,
+    access: UserAccess,
+) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let start = ptr as usize;
+    let end = match start.checked_add(len) {
+        Some(v) => v,
+        None => return 0,
+    };
+    if !uaccess_user_range_ok(start, end) {
+        return 0;
+    }
+    let mut cur = start;
+    while cur < end {
+        let va = VirtAddr::from(cur);
+        if translate_user_va_checked(token, va, access).is_err() {
+            break;
+        }
+        // Advance to next page boundary or end
+        let next_page = (va.floor().0 + crate::config::PAGE_SIZE).min(end);
+        cur = next_page;
+    }
+    cur.saturating_sub(start)
+}
+
 #[derive(Clone, Copy)]
 pub struct UserPtr<T> {
     ptr: *const T,
@@ -348,6 +380,96 @@ impl UserIoVec {
         }
         Ok(UserBuffer::new(buffers))
     }
+
+    /// Return how many logical bytes starting at `offset` are accessible in user memory.
+    /// Stops at the first inaccessible byte due to page fault or overflow.
+    pub fn accessible_len_at(&self, offset: usize, len: usize, access: UserAccess) -> usize {
+        let mut remaining = len;
+        let mut logical_off = 0usize;
+        for iovec in self.iovecs.iter() {
+            let iov_end = match logical_off.checked_add(iovec.iov_len) {
+                Some(v) => v,
+                None => break,
+            };
+            if iov_end <= offset {
+                logical_off = iov_end;
+                continue;
+            }
+            let inner_off = offset.saturating_sub(logical_off);
+            let take = remaining.min(iovec.iov_len.saturating_sub(inner_off));
+            if take == 0 {
+                logical_off = iov_end;
+                continue;
+            }
+            let base = iovec.iov_base as usize;
+            let ptr = match base.checked_add(inner_off) {
+                Some(v) => v,
+                None => break,
+            };
+            let accessible = user_accessible_len(self.token, ptr as *const u8, take, access);
+            remaining -= take.saturating_sub(accessible);
+            if accessible < take {
+                break;
+            }
+            logical_off = iov_end;
+        }
+        len.saturating_sub(remaining)
+    }
+
+    /// Build a read-only UserBuffer for logical range [offset, offset+len).
+    pub fn reader_buffer_at(&self, offset: usize, len: usize) -> Result<UserBuffer, isize> {
+        self.build_user_buffer_at(offset, len, UserAccess::Read)
+    }
+
+    /// Build a write-only UserBuffer for logical range [offset, offset+len).
+    pub fn writer_buffer_at(&self, offset: usize, len: usize) -> Result<UserBuffer, isize> {
+        self.build_user_buffer_at(offset, len, UserAccess::Write)
+    }
+
+    fn build_user_buffer_at(
+        &self,
+        offset: usize,
+        len: usize,
+        access: UserAccess,
+    ) -> Result<UserBuffer, isize> {
+        let mut buffers = Vec::with_capacity(32);
+        let mut remaining = len;
+        let mut logical_off = 0usize;
+        for iovec in self.iovecs.iter() {
+            let iov_end = match logical_off.checked_add(iovec.iov_len) {
+                Some(v) => v,
+                None => break,
+            };
+            if iov_end <= offset {
+                logical_off = iov_end;
+                continue;
+            }
+            let inner_off = offset.saturating_sub(logical_off);
+            let take = remaining.min(iovec.iov_len.saturating_sub(inner_off));
+            if take == 0 {
+                logical_off = iov_end;
+                continue;
+            }
+            let base = iovec.iov_base as usize;
+            let ptr = match base.checked_add(inner_off) {
+                Some(v) => v,
+                None => break,
+            };
+            translated_byte_buffer_append_to_existing_vec(
+                &mut buffers,
+                self.token,
+                ptr as *const u8,
+                take,
+                access,
+            )?;
+            logical_off = iov_end;
+            remaining = remaining.saturating_sub(take);
+            if remaining == 0 {
+                break;
+            }
+        }
+        Ok(UserBuffer::new(buffers))
+    }
 }
 
 // Check only user range bounds and arithmetic overflow.
@@ -362,7 +484,7 @@ pub fn check_user_range(ptr: usize, len: usize) -> Result<usize, isize> {
     Ok(end)
 }
 
-fn uaccess_user_range_ok(ptr: usize, end: usize) -> bool {
+pub(crate) fn uaccess_user_range_ok(ptr: usize, end: usize) -> bool {
     // la64 可能传入低地址用户指针；真实合法性由后续页表权限检查决定。
     ptr < crate::config::USER_VA_END && end <= crate::config::USER_VA_END
 }

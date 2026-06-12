@@ -64,6 +64,7 @@ pub use uaccess::{
     UserIoVec,
     UserPtr,
     UserPtrMut,
+    user_accessible_len,
     UserSlice,
     // UserBufferIterator,
 };

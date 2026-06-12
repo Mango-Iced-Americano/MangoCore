@@ -1,8 +1,12 @@
 # I/O Chunking — 消除用户驱动的大连续堆分配
 
+> **状态：✅ 已实现**（2026-06-11）
+> Oracle 审查 DragonOS 对比后修正方案，三路并行 deep agent 实施完成。
+> 双架构编译通过，内核启动验证通过。具体实现可能与以下原始计划有差异（如 IO_CHUNK_SIZE 修正为 heap/128）。
+
 ## 问题背景
 
-**现象**：LTP openat02 测试中，`write` 系统调用触发 heap OOM。
+**现象 1**：LTP openat02 测试中，`write` 系统调用触发 heap OOM。
 
 ```
 === HEAP ALLOCATION FAILED (FATAL) ===
@@ -11,7 +15,9 @@ layout: size=16777216, align=8
 KERNEL_HEAP_SIZE: 33554432 bytes
 ```
 
-**根因**：`write` 路径中 `write_from_user` → `UserBufferReader::read_to_vec` 一次性分配 `count` 字节的连续内核堆缓冲区。用户传入 16MB count，但 32MB buddy heap 不存在 16MB 连续空闲块（~17MB 总空闲但碎片化，最大连续仅 8MB）。
+**现象 2**：`mkfs.ext4 /dev/vdb2` 4MiB journal 写入被截断为 2MiB → "short write" 错误。
+
+**根因**：`write` 路径中 `write_from_user` → `UserBufferReader::read_to_vec` 一次性分配 `count` 字节的连续内核堆缓冲区。用户传入 16MB count，但 32MB buddy heap 不存在 16MB 连续空闲块。同时 `MAX_SYSCALL_BUFFER_SIZE = 2MiB` 在 syscall 入口处静默截断，导致 4MiB 写被限为 2MiB。
 
 ## 碎片化分析
 
@@ -81,3 +87,39 @@ pub const IO_CHUNK_SIZE: usize = {
 - [ ] QEMU la64 smoke ✅
 - [ ] LTP 定向测试（read01/write01/readv01/writev01）
 - [ ] 16MB write reproducer 不触发 buddy OOM
+
+---
+
+## 实现记录（2026-06-11）
+
+### Oracle 审查 DragonOS 对比分析
+
+DragonOS 没有完整的 I/O 分块方案：chunk 了 `read`/`pread`/`pwrite`/`readv`(非socket) 和 `sendfile`/`copy_file_range`，但 **`write`**/**`writev`**/**`pwritev`**/**`sendmsg`**/**`recvmsg`** 仍然全量分配连续内核缓冲。Mango 的方案更全面。
+
+### 方案修正（Oracle 建议）
+
+| 项 | 原始计划 | 修正后 | 理由 |
+|----|----------|--------|------|
+| `IO_CHUNK_SIZE` 上限 | 2 MiB (heap/16) | **256 KiB** (heap/128) | 2MiB 仍受碎片影响 |
+| 用户可见上限 | 无 | **`MAX_RW_COUNT`** = `i32::MAX & !0xFFF` | Linux 兼容 |
+| EFAULT 语义 | 未明确 | **分 chunk 检查可访问性，已传部分返回进度** | DragonOS `pread_pwrite_common` 模式 |
+
+### 实现范围
+
+| 文件 | 改动量 | 关键变更 |
+|------|--------|----------|
+| `hal/mod.rs` | +2 常量 | `IO_CHUNK_SIZE`, `MAX_RW_COUNT` |
+| `mm/uaccess.rs` | +4 方法 +1 fn | `accessible_len_at`, `reader_buffer_at`, `writer_buffer_at`, `build_user_buffer_at`, `user_accessible_len` |
+| `mm/mod.rs` | +1 导出 | `user_accessible_len` |
+| `syscall/fs.rs` | ~500 行变更 | 16 个 I/O 路径全部重写（read/write/pread/pwrite/readv/writev/preadv/pwritev 分块 + sendfile/copy_file_range cap/错误语义修复） |
+| `net/syscall/sendmsg.rs` | 完全重写 | stream chunk / datagram 单包 |
+| `net/syscall/recvmsg.rs` | 完全重写 | recv_cap 限 IO_CHUNK_SIZE |
+
+### 编译验证
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- 零新增编译错误
+
+### 残留问题
+- `mkfs.ext4 4MiB write` 需专用测试镜像验证（不在当前环境）
+- `linkat01 case 22`（mkfifo→ext4 create_with_data）已 defer
