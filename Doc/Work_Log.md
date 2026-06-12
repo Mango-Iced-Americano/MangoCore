@@ -4,6 +4,21 @@
 
 ## 2026-06-12
 
+### LTP pkey01 基础权限键兼容
+
+**涉及文件：**
+- `os/src/syscall/syscall_id.rs` — 增加 asm-generic `pkey_mprotect(288)`、`pkey_alloc(289)`、`pkey_free(290)` syscall 编号
+- `os/src/syscall/mod.rs`、`os/src/syscall/process/mod.rs` — 接入 pkey syscall name、dispatch 和导出
+- `os/src/syscall/process/mm.rs` — 为 pkey syscall 增加轻量兼容语义：固定 key 表示无额外限制、禁止访问、禁止写入；`pkey_mprotect()` 复用现有 `mprotect` 权限更新路径，`PKEY_DISABLE_EXECUTE` 返回 `EINVAL` 供 LTP 跳过
+
+**验证：**
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make rv64-kernel-build-only ...'` ✅
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make la64-kernel-build-only ...'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=pkey01,mprotect01,mprotect02,mprotect03,mprotect04,mprotect05` ✅ — musl/glibc 均无 `TFAIL/TBROK`；`pkey01` 每个 libc 为 `passed 72 failed 0 broken 0`
+- la64 QEMU focused：同上用例集 ✅ — musl/glibc 均无 `TFAIL/TBROK`；`pkey01` 每个 libc 为 `passed 72 failed 0 broken 0`
+
+**备注：** 本次不实现硬件 PKU/MPK 状态和真实 per-process key allocator，只覆盖 LTP `pkey01` 所需的数据访问/写入降权路径；未修改 net/fs 测试点，也未运行 LTP 全量。
+
 ### LTP ptrace01 trace-stop 兼容
 
 **涉及文件：**

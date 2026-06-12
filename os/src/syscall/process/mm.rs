@@ -11,6 +11,13 @@ use log::{info, warn};
 const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
 const PROT_EXEC: usize = 0x4;
+const PKEY_DISABLE_ACCESS: usize = 0x1;
+const PKEY_DISABLE_WRITE: usize = 0x2;
+const PKEY_DISABLE_ACCESS_WRITE: usize = PKEY_DISABLE_ACCESS | PKEY_DISABLE_WRITE;
+const PKEY_DISABLE_EXECUTE: usize = 0x4;
+const PKEY_NO_ACCESS_RIGHTS_KEY: isize = 1;
+const PKEY_ACCESS_KEY: isize = 2;
+const PKEY_WRITE_KEY: isize = 3;
 const CAP_IPC_LOCK: usize = 14;
 const SYS_RISCV_FLUSH_ICACHE_LOCAL: usize = 1;
 
@@ -454,6 +461,40 @@ pub fn sys_mprotect(addr: usize, len: usize, prot: usize) -> isize {
     match result {
         Ok(_) => SUCCESS,
         Err(errno) => errno,
+    }
+}
+
+pub fn sys_pkey_mprotect(addr: usize, len: usize, prot: usize, pkey: isize) -> isize {
+    let effective_prot = match pkey {
+        0 => prot,
+        PKEY_NO_ACCESS_RIGHTS_KEY => prot,
+        PKEY_ACCESS_KEY => 0,
+        PKEY_WRITE_KEY => prot & !PROT_WRITE,
+        _ => return EINVAL,
+    };
+
+    sys_mprotect(addr, len, effective_prot)
+}
+
+pub fn sys_pkey_alloc(flags: usize, access_rights: usize) -> isize {
+    if flags != 0 {
+        return EINVAL;
+    }
+
+    match access_rights {
+        0 => PKEY_NO_ACCESS_RIGHTS_KEY,
+        PKEY_DISABLE_ACCESS => PKEY_ACCESS_KEY,
+        PKEY_DISABLE_WRITE => PKEY_WRITE_KEY,
+        PKEY_DISABLE_ACCESS_WRITE => PKEY_ACCESS_KEY,
+        rights if rights & PKEY_DISABLE_EXECUTE != 0 => EINVAL,
+        _ => EINVAL,
+    }
+}
+
+pub fn sys_pkey_free(pkey: isize) -> isize {
+    match pkey {
+        PKEY_NO_ACCESS_RIGHTS_KEY | PKEY_ACCESS_KEY | PKEY_WRITE_KEY => SUCCESS,
+        _ => EINVAL,
     }
 }
 

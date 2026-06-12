@@ -225,6 +225,9 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_EXECVEAT => "execveat",
         SYSCALL_MMAP => "mmap",
         SYSCALL_MPROTECT => "mprotect",
+        SYSCALL_PKEY_MPROTECT => "pkey_mprotect",
+        SYSCALL_PKEY_ALLOC => "pkey_alloc",
+        SYSCALL_PKEY_FREE => "pkey_free",
         SYSCALL_MSYNC => "msync",
         SYSCALL_MLOCK => "mlock",
         SYSCALL_MUNLOCK => "munlock",
@@ -684,6 +687,11 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             sys_remap_file_pages(args[0], args[1], args[2], args[3], args[4])
         }
         SYSCALL_MPROTECT => sys_mprotect(args[0], args[1], args[2]),
+        SYSCALL_PKEY_MPROTECT => {
+            sys_pkey_mprotect(args[0], args[1], args[2], args[3] as isize)
+        }
+        SYSCALL_PKEY_ALLOC => sys_pkey_alloc(args[0], args[1]),
+        SYSCALL_PKEY_FREE => sys_pkey_free(args[0] as isize),
         SYSCALL_PSELECT6 => sys_pselect(
             args[0],
             args[1] as *mut FdSet,
