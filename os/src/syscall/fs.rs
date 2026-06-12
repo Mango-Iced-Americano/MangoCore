@@ -485,14 +485,29 @@ fn read_into_user(file: &vfs::File, token: usize, buf: usize, count: usize) -> i
             break;
         }
 
-        let mut writer = match UserBufferWriter::new(token, user_addr as *mut u8, n) {
-            Ok(w) => w,
-            Err(errno) => return if total > 0 { total as isize } else { errno },
-        };
-        let copied = match writer.write_from(&kbuf[..n]) {
-            Ok(c) => c,
-            Err(errno) => return if total > 0 { total as isize } else { errno },
-        };
+        // Write to user one page at a time — each page fault-in is independent
+        let mut copied = 0usize;
+        while copied < n {
+            let this_addr = user_addr.saturating_add(copied);
+            let page_remain = crate::config::PAGE_SIZE - (this_addr & (crate::config::PAGE_SIZE - 1));
+            let chunk = (n - copied).min(page_remain.max(1));
+            let mut writer = match UserBufferWriter::new(token, this_addr as *mut u8, chunk) {
+                Ok(w) => w,
+                Err(errno) => {
+                    if copied > 0 { total += copied; }
+                    return if total > 0 { total as isize } else { errno };
+                }
+            };
+            let c = match writer.write_from(&kbuf[copied..copied + chunk]) {
+                Ok(c) => c,
+                Err(errno) => {
+                    if copied > 0 { total += copied; }
+                    return if total > 0 { total as isize } else { errno };
+                }
+            };
+            copied += c;
+            if c < chunk { break; }
+        }
 
         total += copied;
         if copied < n {
@@ -559,14 +574,29 @@ fn pread_into_user(file: &vfs::File, token: usize, buf: usize, count: usize, off
             break;
         }
 
-        let mut writer = match UserBufferWriter::new(token, user_addr as *mut u8, n) {
-            Ok(w) => w,
-            Err(errno) => return if total > 0 { total as isize } else { errno },
-        };
-        let copied = match writer.write_from(&kbuf[..n]) {
-            Ok(c) => c,
-            Err(errno) => return if total > 0 { total as isize } else { errno },
-        };
+        // Write to user one page at a time — each page fault-in is independent
+        let mut copied = 0usize;
+        while copied < n {
+            let this_addr = user_addr.saturating_add(copied);
+            let page_remain = crate::config::PAGE_SIZE - (this_addr & (crate::config::PAGE_SIZE - 1));
+            let chunk = (n - copied).min(page_remain.max(1));
+            let mut writer = match UserBufferWriter::new(token, this_addr as *mut u8, chunk) {
+                Ok(w) => w,
+                Err(errno) => {
+                    if copied > 0 { total += copied; }
+                    return if total > 0 { total as isize } else { errno };
+                }
+            };
+            let c = match writer.write_from(&kbuf[copied..copied + chunk]) {
+                Ok(c) => c,
+                Err(errno) => {
+                    if copied > 0 { total += copied; }
+                    return if total > 0 { total as isize } else { errno };
+                }
+            };
+            copied += c;
+            if c < chunk { break; }
+        }
 
         total += copied;
         if copied < n {
@@ -1279,11 +1309,21 @@ pub fn sys_preadv(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize 
             break;
         }
 
-        let mut ubuf = match user_iov.writer_buffer_at(done, n) {
-            Ok(b) => b,
-            Err(errno) => return if done > 0 { done as isize } else { errno },
-        };
-        let copied = ubuf.write_at(0, &kbuf[..n]);
+        // Write to user iovec one page at a time for cross-page fault-in
+        let mut copied = 0usize;
+        while copied < n {
+            let chunk = (n - copied).min(crate::config::PAGE_SIZE);
+            let mut ubuf = match user_iov.writer_buffer_at(done + copied, chunk) {
+                Ok(b) => b,
+                Err(errno) => {
+                    if copied > 0 { done += copied; }
+                    return if done > 0 { done as isize } else { errno };
+                }
+            };
+            let c = ubuf.write_at(0, &kbuf[copied..copied + chunk]);
+            copied += c;
+            if c < chunk { break; }
+        }
 
         done += copied;
         if copied < n {
@@ -1493,11 +1533,21 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
             break;
         }
 
-        let mut ubuf = match user_iov.writer_buffer_at(done, n) {
-            Ok(b) => b,
-            Err(errno) => return if done > 0 { done as isize } else { errno },
-        };
-        let copied = ubuf.write_at(0, &kbuf[..n]);
+        // Write to user iovec one page at a time for cross-page fault-in
+        let mut copied = 0usize;
+        while copied < n {
+            let chunk = (n - copied).min(crate::config::PAGE_SIZE);
+            let mut ubuf = match user_iov.writer_buffer_at(done + copied, chunk) {
+                Ok(b) => b,
+                Err(errno) => {
+                    if copied > 0 { done += copied; }
+                    return if done > 0 { done as isize } else { errno };
+                }
+            };
+            let c = ubuf.write_at(0, &kbuf[copied..copied + chunk]);
+            copied += c;
+            if c < chunk { break; }
+        }
 
         done += copied;
         if copied < n {
