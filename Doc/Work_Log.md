@@ -4,6 +4,19 @@
 
 ## 2026-06-12
 
+### LTP epoll_pwait01 pending signal EINTR 语义修复
+
+**涉及文件：**
+- `os/src/fs/eventpoll.rs` — `epoll_pwait` 应用临时 sigmask 后先检查当前未屏蔽的 pending actionable signal；若存在则恢复旧 sigmask 并返回 `EINTR`，避免 ready event 抢先返回吞掉信号打断语义
+
+**验证：**
+- `docker compose exec os-dev bash -lc 'make -C os rv64-kernel-build-only >/tmp/mango-rv64-epoll-pwait-build.log 2>&1 ...'` ✅
+- `docker compose exec os-dev bash -lc 'make -C os la64-kernel-build-only >/tmp/mango-la64-epoll-pwait-build.log 2>&1 ...'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=epoll_pwait01,epoll_pwait02,epoll_pwait04,epoll_pwait05,epoll_wait03,epoll_wait04,epoll_wait06,epoll_wait07` ✅ — musl/glibc 均无 `TFAIL/TBROK`；`epoll_pwait01` 从 pending signal 场景返回 ready event 变为 `EINTR`
+- la64 QEMU focused：同上用例集 ✅ — musl/glibc 均无 `TFAIL/TBROK`
+
+**备注：** 本次只处理 `epoll_pwait` 的临时信号掩码与 pending signal 优先级，不修改 socket/RDHUP/net readiness；`epoll_wait02`、`epoll_pwait03` 的短 timeout 睡眠过长仍归为计时精度问题，未纳入本次修复；未运行 LTP 全量。
+
 ### LTP pipe15 RLIMIT_NOFILE fd 上限适配
 
 **涉及文件：**

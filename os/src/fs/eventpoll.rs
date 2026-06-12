@@ -22,7 +22,11 @@ use crate::{
     net::config::NET_INTERFACE,
     signal_type,
     syscall::errno::{EFAULT, SUCCESS},
-    task::{current_task, signal::Signals, WaitQueue, WaitResult},
+    task::{
+        current_task,
+        signal::{has_actionable_signal, Signals},
+        WaitQueue, WaitResult,
+    },
     timer::TimeSpec,
     utils::error::SyscallErr,
 };
@@ -716,6 +720,13 @@ pub fn sys_epoll_pwait(
         Ok(old_mask) => old_mask,
         Err(errno) => return errno,
     };
+
+    if let Some(task) = current_task() {
+        if has_actionable_signal(&task) {
+            restore_sigmask(old_mask);
+            return -(SyscallErr::EINTR as isize);
+        }
+    }
 
     let ready = epoll.wait(maxevents as usize, timeout);
     restore_sigmask(old_mask);
