@@ -4,6 +4,21 @@
 
 ## 2026-06-12
 
+### LTP suite 启用 pkey01 已支持用例
+
+**涉及文件：**
+- `user/src/bin/ltprunner.rs` — 从 suite runner 默认 unsupported 排除表移除 `pkey01`，让已实现的 pkey syscall 兼容路径在提交评测的 suite 模式中实际执行并计入 TPASS
+
+**验证：**
+- rv64 用户态构建：`docker compose exec -T os-dev bash -lc 'cd os && LOG=error make -f make/rv64.mk user MODE=release BOARD=rvqemu ...'` ✅
+- rv64 kernel 构建：`docker compose exec -T os-dev bash -lc 'cd os && LOG=error make rv64-kernel-build-only ...'` ✅
+- la64 用户态构建：`docker compose exec -T os-dev bash -lc 'cd os && LOG=error make -f make/la64.mk user MODE=release BOARD=laqemu ...'` ✅
+- la64 kernel 构建：`docker compose exec -T os-dev bash -lc 'cd os && LOG=error make la64-kernel-build-only ...'` ✅
+- rv64 QEMU suite focused：`mask=0x800`、`ltp_runner=suite`、`ltp_suites=syscalls`、`ltp_include=pkey01`、`ltp_libc=both` ✅ — musl/glibc 均 `RUN LTP CASE pkey01`，每个 libc `passed 72 failed 0 broken 0 skipped 0`，suite 记录 `PASS LTP CASE pkey01 : 0`
+- la64 QEMU suite focused：同上配置 ✅ — musl/glibc 均 `RUN LTP CASE pkey01`，每个 libc `passed 72 failed 0 broken 0 skipped 0`，suite 记录 `PASS LTP CASE pkey01 : 0`
+
+**备注：** 本次不是新增跳过项，而是删除过时 suite skip；`pkey01` 的内核 pkey 兼容语义已由先前提交实现。尝试 `make rv64-only` 时用户态编译已完成，但 rootfs 制作阶段因当前 Docker 缺少 loop mount 权限失败，因此改用独立用户态构建、kernel-build-only 与 debugfs 注入现有 sdcard 镜像完成验证。未修改 net/fs 测试点，也未运行 LTP 全量。
+
 ### LTP madvise01 KSM hint advice 兼容
 
 **涉及文件：**
