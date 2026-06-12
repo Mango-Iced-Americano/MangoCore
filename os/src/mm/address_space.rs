@@ -3,7 +3,7 @@ use super::page_table::{FaultAccess, PageTable, UserAccess};
 use super::user_mapper::UserMapper;
 use super::vma::*;
 use super::vma_set::VmaSet;
-use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum, VPNRange, KERNEL_SPACE};
+use super::{FrameTracker, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum, VPNRange, KERNEL_SPACE};
 use crate::config::*;
 use crate::hal::TrapContext;
 use crate::hal::TICKS_PER_SEC;
@@ -675,7 +675,10 @@ impl<T: PageTable> AddressSpace<T> {
                             });
                         };
                     }
-                    program_break = Some(VirtAddr::from(end_va.ceil()).0);
+                    let segment_end = VirtAddr::from(end_va.ceil()).0;
+                    program_break = Some(program_break.map_or(segment_end, |brk| {
+                        brk.max(segment_end)
+                    }));
                     trace!(
                         "[map_elf] start_va = 0x{:X}; end_va = 0x{:X}, offset = 0x{:X}",
                         start_va.0,
@@ -767,8 +770,12 @@ impl<T: PageTable> AddressSpace<T> {
         {
             return Err(crate::syscall::errno::ENOMEM);
         }
-        for area in user_space.vmas.iter().filter(|area| area.vm_is_user()) {
-            let new_area = if area.wipe_on_fork {
+        for area in user_space
+            .vmas
+            .iter()
+            .filter(|area| area.vm_is_user() && !area.dont_fork)
+        {
+            let mut new_area = if area.wipe_on_fork {
                 Vma::from_another(area)
             } else {
                 let mut cloned = area.try_clone()?;
@@ -780,6 +787,7 @@ impl<T: PageTable> AddressSpace<T> {
                     .map_err(|_| crate::syscall::errno::ENOMEM)?;
                 cloned
             };
+            new_area.mark_fork_inherited();
             address_space.vmas.push(new_area)?;
             debug!(
                 "[fork] map shared area: {:?}",
@@ -863,6 +871,18 @@ impl<T: PageTable> AddressSpace<T> {
         )
     }
 
+    pub fn shm_mmap(
+        &mut self,
+        start: usize,
+        len: usize,
+        prot: MapPermission,
+        flags: MapFlags,
+        frames: &[Arc<FrameTracker>],
+        may_write: bool,
+    ) -> isize {
+        super::mmap::do_shm_mmap(self, start, len, prot, flags, frames, may_write)
+    }
+
     pub fn munmap(&mut self, start: usize, len: usize) -> Result<(), isize> {
         let result = super::mmap::do_munmap(self, start, len);
         if result.is_ok() {
@@ -880,8 +900,14 @@ impl<T: PageTable> AddressSpace<T> {
     }
 
     pub fn madvise(&mut self, start: usize, len: usize, advice: usize) -> Result<(), isize> {
+        const MADV_DONTNEED: usize = 4;
+
         let start_vpn = VirtAddr::from(start).floor();
         let end_vpn = VirtAddr::from(start + len).ceil();
+        if advice == MADV_DONTNEED && self.locked_pages.range(start_vpn..end_vpn).next().is_some()
+        {
+            return Err(EINVAL);
+        }
         self.vmas
             .advise_range(&mut self.page_table, start_vpn, end_vpn, advice)
     }

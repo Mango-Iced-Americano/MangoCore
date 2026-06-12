@@ -188,6 +188,9 @@ fn sys_clone_inner(
     if flags.contains(CloneFlags::CLONE_VFORK) && flags.contains(CloneFlags::CLONE_THREAD) {
         return EINVAL;
     }
+    if flags.contains(CloneFlags::CLONE_NEWNS) && flags.contains(CloneFlags::CLONE_FS) {
+        return EINVAL;
+    }
     if (flags.contains(CloneFlags::CLONE_NEWUTS) || flags.contains(CloneFlags::CLONE_NEWNET)
         || flags.contains(CloneFlags::CLONE_NEWNS) || flags.contains(CloneFlags::CLONE_NEWIPC))
         && parent.acquire_inner_lock().euid != 0
@@ -437,6 +440,7 @@ pub fn sys_setns(fd: usize, nstype: usize) -> isize {
     }
 
     let task = current_task().unwrap();
+    let euid = task.acquire_inner_lock().euid;
     let files_ref = task.process.files();
     let fd_table = files_ref.lock();
     let file = match fd_table.get_file(fd) {
@@ -453,6 +457,9 @@ pub fn sys_setns(fd: usize, nstype: usize) -> isize {
         if nstype != 0 && nstype != CLONE_NEWNET_VAL {
             return EINVAL;
         }
+        if euid != 0 {
+            return EPERM;
+        }
         let new_ns = ns_inode.netns().clone();
         drop(fd_table);
         task.process.set_net(new_ns);
@@ -466,6 +473,9 @@ pub fn sys_setns(fd: usize, nstype: usize) -> isize {
 
     if let Some(ns_inode) = inode.as_any_ref().downcast_ref::<ProcNsMntInode>() {
         if nstype != 0 && nstype != CLONE_NEWNS_VAL { return EINVAL; }
+        if euid != 0 {
+            return EPERM;
+        }
         let new_ns = ns_inode.mntns().clone();
         drop(fd_table);
         task.process.set_mnt(new_ns);
@@ -474,6 +484,9 @@ pub fn sys_setns(fd: usize, nstype: usize) -> isize {
 
     if let Some(ns_inode) = inode.as_any_ref().downcast_ref::<ProcNsIpcInode>() {
         if nstype != 0 && nstype != CLONE_NEWIPC_VAL { return EINVAL; }
+        if euid != 0 {
+            return EPERM;
+        }
         let new_ns = ns_inode.ipcns().clone();
         drop(fd_table);
         task.process.set_ipc(new_ns);

@@ -1,6 +1,10 @@
+#define _GNU_SOURCE 1
+
+#include <dlfcn.h>
 #include <netdb.h>
 #include <errno.h>
 #include <stdint.h>
+#include <signal.h>
 #include <sched.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -24,6 +28,45 @@
 #ifndef SYS_sched_getparam
 #define SYS_sched_getparam 121
 #endif
+
+#ifndef SYS_rt_sigaction
+#define SYS_rt_sigaction 134
+#endif
+
+#ifndef SYS_rt_sigprocmask
+#define SYS_rt_sigprocmask 135
+#endif
+
+#ifndef SA_RESTART
+#define SA_RESTART 0x10000000
+#endif
+
+typedef void (*mango_sighandler_t)(int);
+
+struct mango_kernel_sigaction {
+    mango_sighandler_t handler;
+    unsigned long flags;
+    void (*restorer)(void);
+    unsigned long mask;
+};
+
+static int invalid_app_signal(int signum)
+{
+    return signum <= 0 || signum > 64 || signum == 32 || signum == 33;
+}
+
+static int change_signal_mask(int signum, int how)
+{
+    unsigned long mask;
+
+    if (invalid_app_signal(signum)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    mask = 1UL << (signum - 1);
+    return syscall(SYS_rt_sigprocmask, how, &mask, NULL, sizeof(mask));
+}
 
 struct proto_entry {
     const char *name;
@@ -71,6 +114,82 @@ static struct protoent *make_protoent(const struct proto_entry *entry)
     proto.p_aliases = empty_aliases;
     proto.p_proto = entry->proto;
     return &proto;
+}
+
+static long fallback_sysconf_value(int name, int *handled)
+{
+    *handled = 1;
+
+    switch (name) {
+#ifdef _SC_TZNAME_MAX
+    case _SC_TZNAME_MAX:
+        return 6;
+#endif
+#ifdef _SC_PASS_MAX
+    case _SC_PASS_MAX:
+        return 8192;
+#endif
+#ifdef _SC_STREAM_MAX
+    case _SC_STREAM_MAX:
+        return 16;
+#endif
+#ifdef _SC_ATEXIT_MAX
+    case _SC_ATEXIT_MAX:
+        return 32;
+#endif
+#ifdef _SC_EXPR_NEST_MAX
+    case _SC_EXPR_NEST_MAX:
+        return 32;
+#endif
+#ifdef _SC_LINE_MAX
+    case _SC_LINE_MAX:
+        return 2048;
+#endif
+#ifdef _SC_TIMER_MAX
+    case _SC_TIMER_MAX:
+        return 32;
+#endif
+#ifdef _SC_SEM_NSEMS_MAX
+    case _SC_SEM_NSEMS_MAX:
+        return 32000;
+#endif
+    default:
+        *handled = 0;
+        return -1;
+    }
+}
+
+long sysconf(int name)
+{
+    typedef long (*sysconf_fn_t)(int);
+    static sysconf_fn_t next_sysconf;
+    static int looked_up;
+    int saved_errno;
+    long ret;
+
+    if (!looked_up) {
+        next_sysconf = (sysconf_fn_t)dlsym(RTLD_NEXT, "sysconf");
+        looked_up = 1;
+    }
+
+    if (next_sysconf) {
+        errno = 0;
+        ret = next_sysconf(name);
+        saved_errno = errno;
+        if (ret != -1 || saved_errno != 0) {
+            errno = saved_errno;
+            return ret;
+        }
+    }
+
+    ret = fallback_sysconf_value(name, &saved_errno);
+    if (saved_errno) {
+        errno = 0;
+        return ret;
+    }
+
+    errno = 0;
+    return -1;
 }
 
 struct protoent *getprotobyname(const char *name)
@@ -207,4 +326,36 @@ int sched_getscheduler(pid_t pid)
 int sched_getparam(pid_t pid, struct sched_param *param)
 {
     return syscall(SYS_sched_getparam, pid, param);
+}
+
+mango_sighandler_t signal(int signum, mango_sighandler_t handler)
+{
+    struct mango_kernel_sigaction act = {
+        .handler = handler,
+        .flags = SA_RESTART,
+        .restorer = NULL,
+        .mask = 0,
+    };
+    struct mango_kernel_sigaction oldact;
+
+    if (invalid_app_signal(signum)) {
+        errno = EINVAL;
+        return SIG_ERR;
+    }
+
+    if (syscall(SYS_rt_sigaction, signum, &act, &oldact, sizeof(oldact.mask)) < 0) {
+        return SIG_ERR;
+    }
+
+    return oldact.handler;
+}
+
+int sighold(int signum)
+{
+    return change_signal_mask(signum, SIG_BLOCK);
+}
+
+int sigrelse(int signum)
+{
+    return change_signal_mask(signum, SIG_UNBLOCK);
 }

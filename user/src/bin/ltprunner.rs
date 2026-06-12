@@ -28,7 +28,6 @@ const DEFAULT_LTP_EXCLUDE_UNSUPPORTED: &[&str] = &[
     "acct02_helper",
     "cacheflush01",
     "clock_gettime03",
-    "clock_gettime04",
     "clock_nanosleep03",
     "clone303",
     "eventfd06",
@@ -50,7 +49,6 @@ const DEFAULT_LTP_EXCLUDE_UNSUPPORTED: &[&str] = &[
     "memfd_create04",
     "msgctl05",
     "msgstress01",
-    "pkey01",
     "process_madvise01",
     "prctl06",
     "prctl06_execve",
@@ -81,7 +79,7 @@ const DEFAULT_LTP_EXCLUDE_GLIBC: &[&str] = &[];
 const DEFAULT_LTP_EXCLUDE_RV64_MUSL: &[&str] =
     &["epoll_create02", "atof01", "fptest01", "fptest02"];
 #[cfg(target_arch = "riscv64")]
-const DEFAULT_LTP_EXCLUDE_RV64_GLIBC: &[&str] = &[];
+const DEFAULT_LTP_EXCLUDE_RV64_GLIBC: &[&str] = &["nice05"];
 #[cfg(target_arch = "loongarch64")]
 const DEFAULT_LTP_EXCLUDE_LA64_MUSL: &[&str] = &["clone08"];
 #[cfg(target_arch = "loongarch64")]

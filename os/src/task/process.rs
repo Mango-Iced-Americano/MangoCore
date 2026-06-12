@@ -103,6 +103,8 @@ pub struct ProcessInner {
     pub stopped_reported: bool,
     /// 最近一次可被 waitpid(WCONTINUED)/waitid(WCONTINUED) 观察到的继续事件。
     pub continued_pending: bool,
+    /// PTRACE_ATTACH tracer pid. This does not change process parentage.
+    pub ptrace_tracer_pid: Option<usize>,
     /// 进程退出时记录的 leader CPU 时间快照。
     pub rusage: Rusage,
     /// 已由 wait/waitid 回收的子进程 CPU 时间累计。
@@ -277,6 +279,7 @@ impl ProcessControlBlock {
                 stopped_signal: None,
                 stopped_reported: false,
                 continued_pending: false,
+                ptrace_tracer_pid: None,
                 rusage: Rusage::new(),
                 child_rusage: Rusage::new(),
                 sched_policy: 0,
@@ -597,6 +600,10 @@ impl ProcessControlBlock {
     }
 
     pub fn mark_stopped(&self, signum: usize) {
+        let tracer_pid = {
+            let inner = self.inner.lock();
+            inner.ptrace_tracer_pid
+        };
         {
             let mut inner = self.inner.lock();
             if inner.state == ProcessState::Zombie {
@@ -609,6 +616,11 @@ impl ProcessControlBlock {
         }
         if let Some(parent) = self.parent() {
             parent.child_exit_wait.lock().wake_all();
+        }
+        if let Some(tracer_pid) = tracer_pid {
+            if let Some(tracer) = registry::find_process_by_pid(tracer_pid) {
+                tracer.child_exit_wait.lock().wake_all();
+            }
         }
     }
 
@@ -642,6 +654,43 @@ impl ProcessControlBlock {
             inner.stopped_reported = true;
         }
         Some(((signum as u32) << 8) | 0x7f)
+    }
+
+    pub fn ptrace_attach(&self, tracer_pid: usize, stop_signum: usize) -> Result<(), SyscallErr> {
+        {
+            let mut inner = self.inner.lock();
+            if inner.state == ProcessState::Zombie {
+                return Err(SyscallErr::ESRCH);
+            }
+            if inner.ptrace_tracer_pid.is_some() {
+                return Err(SyscallErr::EPERM);
+            }
+            inner.ptrace_tracer_pid = Some(tracer_pid);
+            inner.state = ProcessState::Stopped;
+            inner.stopped_signal = Some(stop_signum);
+            inner.stopped_reported = false;
+            inner.continued_pending = false;
+        }
+        if let Some(tracer) = registry::find_process_by_pid(tracer_pid) {
+            tracer.child_exit_wait.lock().wake_all();
+        }
+        Ok(())
+    }
+
+    pub fn ptrace_detach(&self, tracer_pid: usize) -> Result<(), SyscallErr> {
+        {
+            let mut inner = self.inner.lock();
+            if inner.ptrace_tracer_pid != Some(tracer_pid) {
+                return Err(SyscallErr::ESRCH);
+            }
+            inner.ptrace_tracer_pid = None;
+        }
+        self.mark_continued();
+        Ok(())
+    }
+
+    pub fn ptrace_traced_by(&self, tracer_pid: usize) -> bool {
+        self.inner.lock().ptrace_tracer_pid == Some(tracer_pid)
     }
 
     pub fn take_continued_status(&self, nowait: bool) -> Option<u32> {

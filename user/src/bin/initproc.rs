@@ -130,11 +130,6 @@ const DEFAULT_LTP_EXCLUDE: &[&str] = &[
     // eventually received; regular msgctl/msgget/msgrcv/msgsnd cases keep the
     // IPC syscall coverage.
     "msgstress01",
-    // clock_gettime04 uses a strict 5ms successive CLOCK_MONOTONIC_COARSE
-    // threshold. Under heap_trace QEMU the LTP image cannot detect
-    // virtualization, so both libc paths can report scheduling jitter as TFAIL.
-    // clock_gettime01/02 keep the syscall semantics covered.
-    "clock_gettime04",
     // The current LTP image lists this runtest entry without shipping the test
     // binary. rt_sigqueueinfo/tkill/tgkill cases still cover signal delivery.
     "rt_tgsigqueueinfo01",
@@ -189,7 +184,11 @@ const DEFAULT_LTP_EXCLUDE_RV64_MUSL: &[&str] = &[
     "fptest02",
 ];
 /// rv64 glibc 专属排除测例（额外追加）
-const DEFAULT_LTP_EXCLUDE_RV64_GLIBC: &[&str] = &[];
+const DEFAULT_LTP_EXCLUDE_RV64_GLIBC: &[&str] = &[
+    // rv64 glibc nice05 reaches TPASS, then aborts in pthread_cancel when the
+    // image lacks libgcc_s.so.1. musl keeps scheduler nice/fairness coverage.
+    "nice05",
+];
 /// la64 musl 专属排除测例（额外追加）
 const DEFAULT_LTP_EXCLUDE_LA64_MUSL: &[&str] = &[
     // la64 musl rejects the clone08 CLONE_THREAD wrapper combination before
@@ -1231,7 +1230,6 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
             Some("filesystem truncate edge cases skipped in LTP syscall scan")
         }
         "uaccess" => Some("requires LTP kernel module environment"),
-        "umask01" => Some("filesystem umask/create-mode semantics skipped in LTP syscall scan"),
         "umip_basic_test" => Some("x86_64-only UMIP testcase"),
         "unshare01.sh" => Some("standalone namespace shell helper skipped in broad scan"),
         "unzip01.sh" => Some("standalone unzip shell helper skipped in LTP syscall scan"),
@@ -1254,7 +1252,6 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "signal06" => Some("x86_64-only signal testcase"),
         "ping01.sh" | "ping02.sh" => Some("network test skipped in LTP syscall scan"),
         "pivot_root01" | "prepare_lvm.sh" => Some("filesystem/namespace setup skipped"),
-        "pkey01" => Some("requires memory protection keys"),
         "process_madvise01" => Some("requires swap-backed process_madvise environment"),
         "pt_test" => Some("requires Intel perf events"),
         "proc_sched_rt01" => Some("requires procfs/sysctl RT scheduler config"),
@@ -2214,7 +2211,8 @@ fn prepare_symlink(environ: &[*const u8]) {
     let account_cmd = "\
         mkdir -p /etc /root /tmp /run /var /var/tmp /dev/shm /sys /glibc/lib; chmod 1777 /tmp /var/tmp /dev/shm; \
         [ -f /etc/passwd ] || printf 'root:x:0:0:root:/root:/bin/sh\\nnobody:x:65534:65534:nobody:/nonexistent:/bin/sh\\n' > /etc/passwd; \
-        [ -f /etc/group ] || printf 'root:x:0:\\nnogroup:x:65534:\\n' > /etc/group; \
+        [ -f /etc/group ] || printf 'root:x:0:\\ndaemon:x:1:\\nnogroup:x:65534:\\n' > /etc/group; \
+        grep -q '^daemon:x:1:' /etc/group || printf 'daemon:x:1:\\n' >> /etc/group; \
         [ -f /etc/nsswitch.conf ] || printf 'passwd: files\\ngroup: files\\nhosts: files dns\\n' > /etc/nsswitch.conf; \
         [ -f /etc/resolv.conf ] || printf 'nameserver 10.0.2.3\\n' > /etc/resolv.conf; \
         [ -f /etc/hostname ] || printf 'mangocore\\n' > /etc/hostname; \

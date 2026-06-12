@@ -14,7 +14,7 @@ use crate::hal::{kstack_alloc, KernelStack};
 use crate::hal::{trap_handler, TrapContext};
 use crate::mm::PageTableImpl;
 use crate::mm::{AddressSpace, FaultAccess, PhysPageNum, VirtAddr, KERNEL_SPACE};
-use crate::syscall::CloneFlags;
+use crate::syscall::{shm_clone_attachments, CloneFlags};
 use crate::syscall::errno::{EISDIR, ENOEXEC, ENOMEM};
 use crate::timer::{ITimerVal, TimeSpec, TimeVal, USEC_PER_SEC};
 use alloc::string::String;
@@ -66,6 +66,8 @@ pub struct FsStatus {
     /// chroot 的根目录 inode，如果设置了 chroot。
     /// None 表示使用全局 VFS 根目录。
     pub root_inode: Option<Arc<dyn vfs::IndexNode>>,
+    /// Process file mode creation mask.
+    pub umask: u32,
 }
 
 #[derive(Clone)]
@@ -192,6 +194,9 @@ pub struct TaskControlBlockInner {
     /// Timer slack compatibility state in nanoseconds.
     pub timer_slack_ns: usize,
     pub timer_slack_default_ns: usize,
+    /// Minimal ptrace(TRACEME) compatibility state for signal-delivery stops.
+    /// Full debugger register/memory access semantics are not implemented yet.
+    pub ptrace_traceme: bool,
     /// POSIX 用户/组 ID 兼容字段，供 LTP 权限类用例和 capability 查询使用。
     pub uid: u32,
     pub euid: u32,
@@ -776,6 +781,7 @@ impl TaskControlBlock {
                 working_inode: cwd,
                 working_path: String::from("/"),
                 root_inode: None,
+                umask: 0,
             })),
             Arc::new(Mutex::new(UtsNamespace::new())),
             INIT_NET_NAMESPACE.clone(),
@@ -842,6 +848,7 @@ impl TaskControlBlock {
                 task_comm: default_task_comm(),
                 timer_slack_ns: DEFAULT_TIMER_SLACK_NS,
                 timer_slack_default_ns: DEFAULT_TIMER_SLACK_NS,
+                ptrace_traceme: false,
                 uid: 0,
                 euid: 0,
                 suid: 0,
@@ -1288,6 +1295,7 @@ impl TaskControlBlock {
                 task_comm: parent_inner.task_comm,
                 timer_slack_ns: parent_inner.timer_slack_ns,
                 timer_slack_default_ns: parent_inner.timer_slack_ns,
+                ptrace_traceme: false,
                 uid: parent_inner.uid,
                 euid: parent_inner.euid,
                 suid: parent_inner.suid,
@@ -1332,6 +1340,9 @@ impl TaskControlBlock {
         trap_cx.gp.a0 = 0;
         // 修改陷阱上下文中的内核栈指针
         trap_cx.kernel_sp = kstack_top;
+        if !flags.contains(CloneFlags::CLONE_THREAD) && !flags.contains(CloneFlags::CLONE_NEWIPC) {
+            shm_clone_attachments(self.pid(), task_control_block.pid())?;
+        }
         task_control_block.process.add_thread(&task_control_block);
         if !flags.contains(CloneFlags::CLONE_THREAD) {
             task_control_block.process.set_sched_state(

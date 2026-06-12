@@ -504,10 +504,11 @@ fn pending_signals(task: &TaskControlBlock) -> Signals {
     inner.sigpending.pending() | task.process.shared_pending()
 }
 
-fn has_pending_sigcont(task: &TaskControlBlock) -> bool {
+fn has_pending_stop_release_signal(task: &TaskControlBlock) -> bool {
     // SIGCONT resumes a stopped task even if the signal is currently masked;
-    // delivery can remain pending, but the stopped wait itself must end.
-    pending_signals(task).contains(Signals::SIGCONT)
+    // SIGKILL must also break a stopped wait so the task can terminate.
+    let pending = pending_signals(task);
+    pending.contains(Signals::SIGCONT) || pending.contains(Signals::SIGKILL)
 }
 
 fn signal_is_actionable(sighand: &Sighand, signum: usize, signal: Signals) -> bool {
@@ -618,20 +619,20 @@ fn wait_for_default_stop_signal() {
     let wait_queue = spin::Mutex::new(WaitQueue::new());
     loop {
         let task = current_task().unwrap();
-        if has_pending_sigcont(&task) {
+        if has_pending_stop_release_signal(&task) {
             break;
         }
 
         let mut guard = wait_queue.lock();
         guard.prepare_to_wait(Arc::downgrade(&task));
-        if has_pending_sigcont(&task) {
+        if has_pending_stop_release_signal(&task) {
             guard.finish_wait(&task);
             break;
         }
         drop(task);
 
         block_current_and_run_next_with_lock_checked(guard, |task| {
-            !has_pending_sigcont(task)
+            !has_pending_stop_release_signal(task)
         });
 
         let task = current_task().unwrap();
@@ -645,6 +646,13 @@ fn stop_current_process_for_signal(signum: usize) {
     process.mark_stopped(signum);
     drop(task);
     wait_for_default_stop_signal();
+}
+
+fn signal_should_ptrace_stop(
+    inner: &super::task::TaskControlBlockInner,
+    signal: Signals,
+) -> bool {
+    inner.ptrace_traceme && signal != Signals::SIGKILL && signal != Signals::SIGCONT
 }
 
 /// 执行信号处理
@@ -665,6 +673,14 @@ pub fn do_signal() {
         );
         let sighand_ref = task.process.sighand();
         let mut sighand = sighand_ref.lock();
+        if signal_should_ptrace_stop(&inner, signal) {
+            drop(sighand);
+            drop(inner);
+            drop(task);
+            stop_current_process_for_signal(signum);
+            do_signal();
+            return;
+        }
         // user-defined handler
         if let Some(act) = sighand.get(signum).copied() {
             // SIG_IGN → discard this signal (POSIX: ignored signals are not delivered)

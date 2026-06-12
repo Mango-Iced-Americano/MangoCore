@@ -19,6 +19,12 @@
 
 ## 测试 Harness / LTP
 
+### LTP 账号数据库已有文件要幂等补齐
+- **根因**: LTP 用例可能依赖 `/etc/passwd`、`/etc/group` 里的具体账号/组存在；如果 init 逻辑只在文件不存在时写默认内容，持久测试镜像里的旧文件不会被更新。`setfsgid03` 会从 gid 1 起调用 `getgrgid()` 查找一个存在的普通组，缺少 gid 1 组时会长时间遍历并最终被 runner 超时杀掉，表现为 137。
+- **修复**: 对新增账号数据库前置条件使用幂等迁移：文件不存在时创建默认内容，文件已存在时只补缺失条目，避免覆盖镜像中已有账号配置。
+- **教训**: 遇到 LTP 用例启动后没有内核断言、只在 libc/账号查询阶段超时，应先检查镜像内 `/etc/passwd`、`/etc/group`、`nsswitch.conf` 的实际内容，而不是直接把用例加入排除表。
+- **相关文件**: `user/src/bin/initproc.rs`
+
 ### LTP suite/inline 结果标签不能混用
 - **根因**: suite runner 通过 `/ltprunner` 逐用例等待子进程，返回码可用于 `PASS/FAIL` 标签；inline runner 直接跑 LTP 二进制时，部分用例即使 summary 有 `failed > 0` 也可能返回 0，仅凭退出码会把真实 TFAIL 误标成 PASS。
 - **修复**: suite 路径按 `run_case()` 返回码输出 `PASS LTP CASE`/`FAIL LTP CASE`；inline 路径的过滤项输出 `SKIP LTP CASE`，成功退出只输出中性 `DONE LTP CASE`，真实非零退出才输出 `FAIL LTP CASE`。
@@ -34,6 +40,12 @@
 - **修复**: `run_case()` 返回 32 时输出 `SKIP LTP CASE` 并递增 skipped，其他非零才算 failed。
 - **教训**: 扩大 LTP include 时先区分 `TFAIL/TBROK` 与 `TCONF`，否则会把可接受的环境跳过项混入内核适配清单。
 - **相关文件**: `user/src/bin/ltprunner.rs`
+
+### LTP libc wrapper 先于 syscall 拒绝参数
+- **根因**: musl/glibc 的高层 libc wrapper 可能在进入内核前先做私有 ABI 校验；例如 musl 会把 34 号实时信号视为内部保留信号，`signal()/sighold()/sigrelse()` 直接返回 `EINVAL`，即使内核 `rt_sigaction/rt_sigprocmask` 已兼容该信号。LTP 此时表现为 libc API `TBROK`，trace 中看不到对应 syscall。
+- **修复**: 对确认属于 libc wrapper 差异、且内核 ABI 已正确的普通 LTP 二进制，在 `ltp_proto_compat.so` 中补窄范围 preload wrapper，直接调用 raw syscall，并同步重新生成 rv64/la64 两份 `.so` 供内核 `.incbin` 嵌入。
+- **教训**: 修这类问题前先确认失败是否发生在 syscall 之前；改完 `.so` 后必须重建内核镜像，否则 QEMU 仍会运行旧的嵌入版 preload。
+- **相关文件**: `os/ltp_proto_compat.c`, `user/tools/riscv64/lib/ltp_proto_compat-rv.so`, `user/tools/loongarch64/lib/ltp_proto_compat-la.so`
 
 ## 信号/进程
 
@@ -75,6 +87,18 @@
 - **根因**: fork 时 MAP_SHARED 页面被标记 CoW，破坏共享语义
 - **修复**: MAP_SHARED 页面跳过 CoW，fork 时恢复 W 权限，缺页时只恢复 W 不做 CoW
 - **相关文件**: `os/src/mm/memory_set.rs`
+
+### SysV SHM 每次 shmat 分配独立匿名页
+- **根因**: `shmat()` 若直接复用匿名 `MAP_SHARED` 并让每个 VMA 自行分配物理页，同一 `shmid` 的多次 attach 会得到不同 backing，写入内容无法互通；fork 继承只能共享已有 VMA，不能修复独立 attach 的共享语义。
+- **修复**: 在 SysV SHM segment 级别维护 backing frames，`shmat()` 为新 VMA 映射同一组 frames；只把地址选择和 VMA 插入复用到 SHM 专用 mmap 路径，不改变普通匿名 mmap 行为。
+- **教训**: LTP `shmt03/shmt04/shmt06` 这类用例要同时验证“同进程多 attach”和“fork 后读写同一 segment”；通过 fork 共享不代表独立 attach 已符合 SysV SHM 语义。
+- **相关文件**: `os/src/syscall/process/ipc.rs`, `os/src/mm/mmap.rs`
+
+### brk 扩堆不能无条件 MAP_FIXED 覆盖外部 VMA
+- **根因**: `sbrk/brk` 扩堆如果直接用 `MAP_FIXED` 映射新增范围，会先 unmap 目标区间；当 SysV SHM 等外部 VMA attach 在 break 上方时，heap 会把它覆盖掉，LTP `shmt09` 会发现本应 `ENOMEM` 的扩堆意外成功。
+- **修复**: 扩堆前扫描目标范围，只允许覆盖/合并已有的私有匿名可写用户 VMA；遇到共享映射、文件映射或非可写用户映射时返回旧 break。ELF program break 初始化也应取所有 `PT_LOAD` 页尾最大值，避免初始 break 落在已有 load 段之前。
+- **教训**: 不能简单把所有 overlap 都视为失败；glibc/musl 启动和历史 brk 可能已经在 heap 边界留下私有匿名 VMA。需要区分 heap 自身 VMA 与 SHM/mmap 外部阻挡，否则会修好 `shmt09` 但打坏 `brk01/brk02`。
+- **相关文件**: `os/src/mm/mmap.rs`, `os/src/mm/address_space.rs`
 
 ### 无界队列导致 OOM
 - **根因**: 生产者-消费者队列（`VecDeque`、`Vec` 等）无上界，消费者慢于生产者时持续堆积，底层存储重分配触发大块内存请求超出堆容量
@@ -235,6 +259,13 @@
 - **教训**: 不要扩大到全 musl/全架构，也不要在内核里伪造用户态 wrapper 行为；Work_Log 必须写清楚哪个组合仍实际运行该用例。
 - **相关文件**: `user/src/bin/initproc.rs`, `user/src/bin/ltprunner.rs`
 
+## SysV SHM fork 继承不只复制 VMA
+
+- **根因**: `fork` 复制地址空间后，子进程拥有了 SHM 映射 VMA，但 SysV SHM registry 仍只记录父进程 attach；`shmctl(IPC_STAT)` 的 `shm_nattch` 少计，子进程 `shmdt()` 也会因查不到 `(pid, addr)` attachment 返回 `EINVAL`。
+- **修复**: 在非 `CLONE_THREAD` 的 clone/fork 成功初始化新进程后，调用 SHM registry helper 按父 pid 复制 attachment 元数据到子 pid；线程 clone 不新增进程级 attachment。
+- **教训**: fork 语义需要同时复制用户页表和进程级内核元数据。LTP 看到 “nattch 计数不对 + 子进程 detach EINVAL” 时，优先检查 registry/owner 表是否接入 clone 路径，而不是只查 VMA 映射。
+- **相关文件**: `os/src/task/task.rs`, `os/src/syscall/process/ipc.rs`
+
 ## signal ucontext sigset padding 偏移
 
 - **根因**: Linux/glibc 用户态 `ucontext_t.uc_sigmask` 对外占固定 128 字节；内核若先写较小的自定义 `UserSignalMask`，又额外固定补 128 字节 padding，会把后续 `uc_mcontext` 整体后移。SA_SIGINFO handler 读取 PC 时会落到 padding，LTP `profil01` 表现为 glibc 无法记录任何 profile bucket。
@@ -347,6 +378,13 @@
 - **教训**: 遇到 IPC/mm/process syscall 用例在 `/proc/sys/...` 处 broken，先判断它是不是目标 ABI 的配置面。若是，应实现最小可写 sysctl 并接入真实行为；不要只加只读文件，也不要把它简单归类成通用 FS 问题跳过。
 - **相关文件**: `os/src/syscall/process/ipc.rs`, `os/src/fs/procfs/files/sys.rs`, `os/src/fs/procfs/files/mod.rs`
 
+## IPC namespace ID 不等于 IPC 对象隔离
+
+- **根因**: `IpcNamespace` 只提供唯一 ID 时，`setns(CLONE_NEWIPC)`/`CLONE_NEWIPC` 可以通过 procfs namespace fd 切换成功，但 SysV IPC registry 若仍是全局查找，子进程会在新 IPC namespace 中用旧 namespace 的 `shmid` 成功 `shmat()`。
+- **修复**: IPC 对象创建时记录 namespace id，`shmget/shmat/shmctl` 和 `/proc/sysvipc` snapshot 只匹配当前 namespace；`CLONE_NEWIPC` 不继承父进程 SHM attach 元数据，普通 fork 继承保持不变。
+- **教训**: namespace 测例通过 `setns01` 这类 fd/errno 校验不代表隔离语义正确；遇到 `setns02`、`*_nstest` 要检查 registry 可见性，而不是只看 namespace fd 类型是否存在。
+- **相关文件**: `os/src/task/ipc_namespace.rs`, `os/src/syscall/process/ipc.rs`, `os/src/task/task.rs`
+
 ## 网络
 
 ### 硬编码 IPv4 地址替换为 net_core 动态查询
@@ -372,82 +410,16 @@
 - **注意**: 如果 `MutexGuard` 不赋值给变量（仅用于链式调用如 `.clone()`、`.fill_default()`），临时 `Arc` 在 `MutexGuard` 被丢弃后释放，是安全的
 - **相关文件**: `os/src/net/socket/netlink/route/route.rs`（lines 127, 169）
 
-## VFS / 文件系统
+## LTP umask/create mode 用例要区分用户创建入口和内核内部文件
 
-### 路径相关 syscall 遗漏 validate_path_len
+- **根因**: `umask()` 是进程 FS 状态，不是全局常量；`openat(O_CREAT)`、`mkdirat()`、`mknodat()` 等用户创建入口必须用当前 umask 清除权限位。若 `sys_umask()` 只返回 0 或创建路径不套掩码，`umask01` 会表现为新文件/目录模式总是原始 `mode`，且旧掩码返回值错误。
+- **修复**: 在 `FsStatus` 保存 `umask`，让 fork/clone/unshare 复用既有 FS 状态复制/共享语义；只在用户态创建入口应用 `mode & ~umask`，避免影响 `memfd_create()` 等内核内部固定模式文件。
+- **教训**: 创建模式类失败不要只看 inode 后端；先确认 syscall 层是否已经按 Linux ABI 处理进程级状态、旧值返回和内部对象例外。
+- **相关文件**: `os/src/task/task.rs`, `os/src/syscall/fs.rs`
 
-- **根因**: 新增路径类 syscall 时忘记在 `vfs_lookup` 前调用 `validate_path_len()`，导致过长路径返回 ENOENT（因为 `find()` 找不到该名）而非 Linux ABI 要求的 ENAMETOOLONG
-- **症状**: LTP 测试 "Expected ENAMETOOLONG got ENOENT"
-- **修复**: 在每个接收 `path: *const u8` 的 syscall 中，`user_cstring` 成功后、`vfs_lookup`/`resolve_start_inode` 前插入：
-  ```rust
-  if let Err(errno) = validate_path_len(&path) {
-      return errno;
-  }
-  ```
-- **受影响的 syscall**: `sys_fstatat`, `sys_statx`, `sys_statfs` 等（已修复前两者）
-- **教训**: 新增路径操作时必须检查是否调用了 `validate_path_len`；建议在 code review checklist 中显式检查
-- **相关文件**: `os/src/syscall/fs.rs`（`validate_path_len` 定义在 line 160）
+## LTP vma01 要同时检查 mmap hint 与 fork 继承 VMA 合并
 
-### parse_path 静默丢弃尾部斜杠
-
-- **根因**: `parse_path(path)` 通过 `split('/')` 分割路径，空串被 `"" | "." => {}` 静默丢弃，导致 `"file/"` 被解析为 `["file"]`，丢失尾部斜杠信息
-- **症状**: `open("regular_file/")` 成功而不是返回 ENOTDIR（`O_DIRECTORY` 设置时除外）。LTP 期望尾随 `/` 触发的 ENOTDIR 不生效
-- **修复**: 在 `vfs_lookup` 入口捕获 `has_trailing_slash = path.ends_with('/') && path != "/"`，解析完成且循环结束后检查：若目标 `file_type != Dir` 则返回 ENOTDIR
-- **关键**: 不能仅依赖 `parse_path` 返回值的长度变化（`"dir/"` 和 `"dir"` 解析结果完全相同）。原始路径的尾部斜杠是独立信号
-- **相关文件**: `os/src/fs/mod.rs`（`parse_path` line 501, `vfs_lookup` line 529）
-
-### 中间路径组件非目录 → ENOTDIR 检查时机
-
-- **根因**: `vfs_lookup` 循环仅在**下次迭代开头**检查 `current` 是否为目录（line 552-555），中间组件通过 `current = next` 赋值后才在下轮捕获。当 `next` 为符号链接时，应在 follow 前先判断：若 `!is_last` 且非 Dir 且非 SymLink → 立即返回 ENOTDIR
-- **修复**: 在 `current.find(name)` 返回 `next` 并读取 `file_type` 后，立即检查：
-  ```rust
-  if !is_last && file_type != FileType::Dir && file_type != FileType::SymLink {
-      return Err(crate::syscall::errno::ENOTDIR);
-  }
-  ```
-- **注意**: SymLink 必须排除（`!= FileType::SymLink`），因为 symlink-to-dir 在 follow 后才应判断类型
-- **相关文件**: `os/src/fs/mod.rs`（`vfs_lookup` line 573-578）
-
-### FileType::Dir 检查在 syscall 层 vs vfs_lookup
-
-- **根因**: `vfs_lookup` 只负责**找到** inode，不负责**验证类型**。像 `sys_chdir` 对目录的硬性要求必须在 syscall 层显式检查
-- **症状**: `chdir("regular_file")` 成功（vfs_lookup 返回 Ok），进程 CWD 变成普通文件，后续操作混乱
-- **修复**: 在 syscall 处理函数中 `vfs_lookup` 成功后检查 `inode.metadata()?.file_type == FileType::Dir`，不满足返回 ENOTDIR
-- **教训**: 任何对文件类型有硬性要求的 syscall（chdir、opendir、fdopendir 等）不能在 vfs_lookup 返回 Ok 就直接使用，必须验证类型
-- **相关文件**: `os/src/syscall/fs.rs`（`sys_chdir` line 2437, `sys_fchdir` 已有 `is_dir()` 检查 line 2455）
-
-## VFS / 文件系统
-
-### AT_EMPTY_PATH 在 fstatat 中的 fast-path
-
-- **根因**: `sys_fstatat` 在 `fstatat(fd, "", AT_EMPTY_PATH)` 场景下，会经过 `check_parent_search_access` + `vfs_lookup` 正常路径解析流程。空路径在解析时被当作空组件导致路径解析返回 ENOENT，所有 glibc 动态链接的程序在 QEMU 启动时立即崩溃（glibc 用 fstatat+AT_EMPTY_PATH 获取 fd 的 stat）
-- **症状**: QEMU 启动 panic，所有 glibc 测试返回 Error 20 (ENOTDIR)
-- **修复**: 在 `sys_fstatat` 入口处添加 fast path：若 path 为空且 flags 包含 AT_EMPTY_PATH，直接调用 `dirfd_inode.metadata()` 跳过所有路径解析
-- **教训**: 任何接受 dirfd+path 的 syscall（fstatat、readlinkat、fchmodat、fchownat、utimensat、linkat）都需要处理 AT_EMPTY_PATH + 空 path 的组合。Linux 语义：AT_EMPTY_PATH 时 path 为空 = 操作 dirfd 指向的 inode 本体
-- **相关文件**: `os/src/syscall/fs.rs`（`sys_fstatat`）
-
-### RISC-V syscall 号陷阱：chmod vs chroot
-
-- **根因**: Linux RISC-V asm-generic ABI 中 chroot=51，且存在"传统"syscall 号的同名常量。错误地将 SYSCALL_CHMOD 设为 51（以为 chmod 有独立 syscall），但 RISC-V 上 chmod 走 fchmodat（syscall 53）。结果：LTP 调用 51 号 syscall 时，dispatch 到 sys_chmod（错误）返回 0→假 TPASS，真正的 chroot 功能用 105 号（错误号）从未被 LTP 调用
-- **修复**: 移除 `SYSCALL_CHMOD` 常量，将 `SYSCALL_CHROOT` 改为 51。dispatch 表中 chmod 条目改为注释
-- **教训**: 添加 syscall 时先查 Linux `include/uapi/asm-generic/unistd.h`，确认 RISC-V 生态的实际映射。不要凭名字猜测 syscall 号
-- **相关文件**: `os/src/syscall/syscall_id.rs`、`os/src/syscall/mod.rs`
-
-### link(2)/linkat(2) EEXIST 检查不能用 vfs_lookup(follow_final=true)
-
-- **根因**: `linkat(target_path)` 的 EEXIST 检查用 `vfs_lookup(start, target_path, follow_final=true)` 判断目标是否存在。若最终组件是悬空 symlink，`follow_final=true` 会跟随 symlink 到不存在的 target → 返回 ENOENT → 漏过 EEXIST 检查 → 创建重复硬链接
-- **症状**: LTP linkat01 "succeeded unexpectedly" when EEXIST expected
-- **修复**: 用 `parent_dir.find(&leaf)` 或 `list_dirents()` 做非跟随的目录项存在性检查。link(2) 只需要目标名在目录中存在（无论其指向什么），不关心指向的实体是否存在
-- **教训**: POSIX EEXIST 检查语义是"目录项已存在"，不是"目录项指向的实体存在"。vfs_lookup 的 `follow_final` 和目录项的 `find` 是不同的语义层次
-- **相关文件**: `os/src/syscall/fs.rs`（`sys_linkat`）、`os/src/fs/ext4/ext4fs.rs`（`Ext4OSInode::link`）
-
-### readlinkat(2) AT_EMPTY_PATH 空路径处理
-
-- **根因**: `sys_readlinkat` 对空路径无条件返回 `ENOENT`，未实现 `AT_EMPTY_PATH` flag。当 LTP 测试调用 `readlinkat(fd, "", buf, size)`（flags 通过寄存器传递），空路径本应触发 AT_EMPTY_PATH 语义：对 fd 所引用的符号链接自身执行 readlink，而非路径查找
-- **症状**: LTP readlinkat01 出现 2 TFAIL — `ENOENT(2)` + "Wrong filename in buffer ''"
-- **修复**: 
-  1. 更新 dispatch 传递 `args[4] as u32` 作为 flags 参数
-  2. 空路径 + `flags & AT_EMPTY_PATH` → `resolve_start_inode(dirfd)` 获取 fd 的 inode → 读符号链接目标 → 填充用户缓冲区
-  3. 空路径 + 无 `AT_EMPTY_PATH` → 返回 `ENOENT`（保留原行为）
-- **教训**: `readlinkat` 的 Linux 内核接口从 5.9 起支持 5 参数（含 flags）。glibc 封装传递 0 作为默认 flags，但寄存器中的无效值可能非零。必须先检查 flags 再决定空路径行为。`resolve_start_inode` 可同时处理 AT_FDCWD 和真实 fd，是 AT_EMPTY_PATH 场景的正确入口
-- **相关文件**: `os/src/syscall/mod.rs`（dispatch）、`os/src/syscall/fs.rs`（`sys_readlinkat`）
+- **根因**: `vma01` 先用 `mmap(NULL, 9*page)` 制造空洞，再用非 `MAP_FIXED` 的 `mmap(addr_hint, 3*page)` 期望落到该空洞中；fork 后子进程再在相邻地址新建匿名私有 VMA。若内核忽略可用 hint，初始映射可能落到别的空洞并和前驱合并；若 fork 继承 VMA 仍允许和子进程新 mmap 合并，则 `/proc/self/maps` 只看到单个 6 页 VMA。
+- **修复**: 非 fixed mmap 在 hint 区间完整空闲时优先按 hint 放置；fork 复制到子进程的用户 VMA 标记为继承来源，并在匿名私有 lazy mmap merge 条件中排除这类 VMA。
+- **教训**: VMA 类 LTP 失败不要只看 `/proc/self/maps` 输出格式；先确认 mmap 放置策略、VMA 起点以及 fork 后的合并条件。glibc/musl 的既有映射布局不同，忽略 hint 的 bug 可能只在其中一个 libc 暴露。
+- **相关文件**: `os/src/mm/mmap.rs`, `os/src/mm/vma.rs`, `os/src/mm/vma_set.rs`, `os/src/mm/address_space.rs`

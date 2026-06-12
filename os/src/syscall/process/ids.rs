@@ -71,6 +71,11 @@ const PR_CAP_AMBIENT_CLEAR_ALL: usize = 4;
 const PR_GET_SPECULATION_CTRL: usize = 52;
 const PR_TASK_COMM_LEN: usize = 16;
 const PR_MAX_SIGNAL: usize = 64;
+const PTRACE_TRACEME: usize = 0;
+const PTRACE_CONT: usize = 7;
+const PTRACE_KILL: usize = 8;
+const PTRACE_ATTACH: usize = 16;
+const PTRACE_DETACH: usize = 17;
 const SECCOMP_MODE_DISABLED: usize = 0;
 const SECCOMP_MODE_STRICT: usize = 1;
 const SECCOMP_MODE_FILTER: usize = 2;
@@ -106,6 +111,23 @@ const IOPRIO_CLASS_RT: usize = 1;
 const IOPRIO_CLASS_BE: usize = 2;
 const IOPRIO_CLASS_IDLE: usize = 3;
 
+fn ptrace_traceme_target(pid: usize) -> Result<Arc<ProcessControlBlock>, isize> {
+    let current = current_task().unwrap();
+    let target = ProcessManager::find_process(pid).ok_or(ESRCH)?;
+    if target.parent_pid() != current.pid() {
+        return Err(ESRCH);
+    }
+    let traced = target
+        .any_live_thread()
+        .map(|task| task.acquire_inner_lock().ptrace_traceme)
+        .unwrap_or(false);
+    if traced {
+        Ok(target)
+    } else {
+        Err(ESRCH)
+    }
+}
+
 pub fn sys_personality(persona: usize) -> isize {
     let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
@@ -114,6 +136,63 @@ pub fn sys_personality(persona: usize) -> isize {
         inner.personality = persona & PERSONALITY_GET;
     }
     old as isize
+}
+
+pub fn sys_ptrace(request: usize, pid: usize, _addr: usize, _data: usize) -> isize {
+    match request {
+        PTRACE_TRACEME => {
+            let task = current_task().unwrap();
+            let mut inner = task.acquire_inner_lock();
+            if inner.ptrace_traceme {
+                return EPERM;
+            }
+            inner.ptrace_traceme = true;
+            SUCCESS
+        }
+        PTRACE_CONT => match ptrace_traceme_target(pid) {
+            Ok(process) => {
+                crate::task::signal::send_process_signal(&process, Signals::SIGCONT);
+                SUCCESS
+            }
+            Err(errno) => errno,
+        },
+        PTRACE_KILL => match ptrace_traceme_target(pid) {
+            Ok(process) => {
+                crate::task::signal::send_process_signal(&process, Signals::SIGKILL);
+                SUCCESS
+            }
+            Err(errno) => errno,
+        },
+        PTRACE_ATTACH => {
+            let task = current_task().unwrap();
+            if pid == task.pid() {
+                return EPERM;
+            }
+            let target = match ProcessManager::find_process(pid) {
+                Some(process) => process,
+                None => return ESRCH,
+            };
+            if task.acquire_inner_lock().euid != 0 {
+                return EPERM;
+            }
+            match target.ptrace_attach(task.pid(), 19) {
+                Ok(()) => SUCCESS,
+                Err(errno) => -(errno as isize),
+            }
+        }
+        PTRACE_DETACH => {
+            let task = current_task().unwrap();
+            let target = match ProcessManager::find_process(pid) {
+                Some(process) => process,
+                None => return ESRCH,
+            };
+            match target.ptrace_detach(task.pid()) {
+                Ok(()) => SUCCESS,
+                Err(errno) => -(errno as isize),
+            }
+        }
+        _ => EIO,
+    }
 }
 
 fn valid_ioprio(class: usize, prio: usize) -> bool {

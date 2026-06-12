@@ -11,7 +11,28 @@ use log::{info, warn};
 const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
 const PROT_EXEC: usize = 0x4;
+const PKEY_DISABLE_ACCESS: usize = 0x1;
+const PKEY_DISABLE_WRITE: usize = 0x2;
+const PKEY_DISABLE_ACCESS_WRITE: usize = PKEY_DISABLE_ACCESS | PKEY_DISABLE_WRITE;
+const PKEY_DISABLE_EXECUTE: usize = 0x4;
+const PKEY_NO_ACCESS_RIGHTS_KEY: isize = 1;
+const PKEY_ACCESS_KEY: isize = 2;
+const PKEY_WRITE_KEY: isize = 3;
 const CAP_IPC_LOCK: usize = 14;
+const SYS_RISCV_FLUSH_ICACHE_LOCAL: usize = 1;
+
+pub fn sys_riscv_flush_icache(_start: usize, _end: usize, flags: usize) -> isize {
+    if flags & !SYS_RISCV_FLUSH_ICACHE_LOCAL != 0 {
+        return EINVAL;
+    }
+
+    #[cfg(target_arch = "riscv64")]
+    unsafe {
+        core::arch::asm!("fence.i", options(nostack, preserves_flags));
+    }
+
+    SUCCESS
+}
 
 pub fn sys_sbrk(increment: isize) -> isize {
     let task = current_task().unwrap();
@@ -406,6 +427,30 @@ pub fn sys_mremap(
     mapped as isize
 }
 
+pub fn sys_remap_file_pages(
+    addr: usize,
+    size: usize,
+    prot: usize,
+    _pgoff: usize,
+    flags: usize,
+) -> isize {
+    const MAP_NONBLOCK: usize = 0x10000;
+
+    if prot != 0 || flags & !MAP_NONBLOCK != 0 {
+        return EINVAL;
+    }
+    let start = addr & !(PAGE_SIZE - 1);
+    let len = match page_round_up_len(size) {
+        Some(0) | None => return EINVAL,
+        Some(len) => len,
+    };
+    if checked_page_range(start, len).is_err() {
+        return EINVAL;
+    }
+
+    EINVAL
+}
+
 pub fn sys_mprotect(addr: usize, len: usize, prot: usize) -> isize {
     let task = current_task().unwrap();
     let prot = match parse_mmap_prot(prot) {
@@ -416,6 +461,40 @@ pub fn sys_mprotect(addr: usize, len: usize, prot: usize) -> isize {
     match result {
         Ok(_) => SUCCESS,
         Err(errno) => errno,
+    }
+}
+
+pub fn sys_pkey_mprotect(addr: usize, len: usize, prot: usize, pkey: isize) -> isize {
+    let effective_prot = match pkey {
+        0 => prot,
+        PKEY_NO_ACCESS_RIGHTS_KEY => prot,
+        PKEY_ACCESS_KEY => 0,
+        PKEY_WRITE_KEY => prot & !PROT_WRITE,
+        _ => return EINVAL,
+    };
+
+    sys_mprotect(addr, len, effective_prot)
+}
+
+pub fn sys_pkey_alloc(flags: usize, access_rights: usize) -> isize {
+    if flags != 0 {
+        return EINVAL;
+    }
+
+    match access_rights {
+        0 => PKEY_NO_ACCESS_RIGHTS_KEY,
+        PKEY_DISABLE_ACCESS => PKEY_ACCESS_KEY,
+        PKEY_DISABLE_WRITE => PKEY_WRITE_KEY,
+        PKEY_DISABLE_ACCESS_WRITE => PKEY_ACCESS_KEY,
+        rights if rights & PKEY_DISABLE_EXECUTE != 0 => EINVAL,
+        _ => EINVAL,
+    }
+}
+
+pub fn sys_pkey_free(pkey: isize) -> isize {
+    match pkey {
+        PKEY_NO_ACCESS_RIGHTS_KEY | PKEY_ACCESS_KEY | PKEY_WRITE_KEY => SUCCESS,
+        _ => EINVAL,
     }
 }
 
@@ -581,8 +660,19 @@ pub fn sys_madvise(addr: usize, length: usize, advice: usize) -> isize {
     const MADV_SEQUENTIAL: usize = 2;
     const MADV_WILLNEED: usize = 3;
     const MADV_DONTNEED: usize = 4;
+    const MADV_FREE: usize = 8;
+    const MADV_DONTFORK: usize = 10;
+    const MADV_DOFORK: usize = 11;
+    const MADV_MERGEABLE: usize = 12;
+    const MADV_UNMERGEABLE: usize = 13;
+    const MADV_HUGEPAGE: usize = 14;
+    const MADV_NOHUGEPAGE: usize = 15;
+    const MADV_DONTDUMP: usize = 16;
+    const MADV_DODUMP: usize = 17;
     const MADV_WIPEONFORK: usize = 18;
     const MADV_KEEPONFORK: usize = 19;
+    const MADV_COLD: usize = 20;
+    const MADV_PAGEOUT: usize = 21;
 
     if addr & (PAGE_SIZE - 1) != 0 {
         return EINVAL;
@@ -605,8 +695,19 @@ pub fn sys_madvise(addr: usize, length: usize, advice: usize) -> isize {
         | MADV_SEQUENTIAL
         | MADV_WILLNEED
         | MADV_DONTNEED
+        | MADV_FREE
+        | MADV_DONTFORK
+        | MADV_DOFORK
+        | MADV_MERGEABLE
+        | MADV_UNMERGEABLE
+        | MADV_HUGEPAGE
+        | MADV_NOHUGEPAGE
+        | MADV_DONTDUMP
+        | MADV_DODUMP
         | MADV_WIPEONFORK
-        | MADV_KEEPONFORK => {
+        | MADV_KEEPONFORK
+        | MADV_COLD
+        | MADV_PAGEOUT => {
             match current_task()
                 .unwrap()
                 .process

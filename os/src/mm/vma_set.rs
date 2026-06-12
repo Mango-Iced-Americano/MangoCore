@@ -55,6 +55,14 @@ fn file_backed_page_resident(area: &Vma, vpn: VirtPageNum) -> bool {
         .unwrap_or(false)
 }
 
+fn is_anonymous_private(area: &Vma) -> bool {
+    area.map_file.is_none()
+        && area
+            .flags
+            .contains(MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS)
+        && !area.flags.contains(MapFlags::MAP_SHARED)
+}
+
 fn errno_to_memory_error(errno: isize) -> MemoryError {
     match errno {
         ENOMEM => MemoryError::OutOfMemory,
@@ -412,6 +420,11 @@ impl VmaSet {
         advice: usize,
     ) -> Result<(), isize> {
         const MADV_DONTNEED: usize = 4;
+        const MADV_FREE: usize = 8;
+        const MADV_DONTFORK: usize = 10;
+        const MADV_DOFORK: usize = 11;
+        const MADV_MERGEABLE: usize = 12;
+        const MADV_UNMERGEABLE: usize = 13;
         const MADV_WIPEONFORK: usize = 18;
         const MADV_KEEPONFORK: usize = 19;
 
@@ -427,21 +440,32 @@ impl VmaSet {
 
             if advice == MADV_DONTNEED {
                 let area = self.vmas.get_mut(&area_start).ok_or(ENOMEM)?;
-                if area.map_file.is_some() || !area.flags.contains(MapFlags::MAP_PRIVATE) {
+                if area.map_file.is_none() && area.flags.contains(MapFlags::MAP_PRIVATE) {
+                    area.discard_range(page_table, cursor, advise_end)
+                        .map_err(|_| EINVAL)?;
+                }
+            }
+            if advice == MADV_FREE {
+                let area = self.vmas.get(&area_start).ok_or(ENOMEM)?;
+                if !is_anonymous_private(area) {
                     return Err(EINVAL);
                 }
-                area.discard_range(page_table, cursor, advise_end)
-                    .map_err(|_| EINVAL)?;
+            }
+            if advice == MADV_MERGEABLE || advice == MADV_UNMERGEABLE {
+                let area = self.vmas.get(&area_start).ok_or(ENOMEM)?;
+                if !area.map_perm.contains(MapPermission::W) {
+                    return Err(EINVAL);
+                }
+            }
+            if advice == MADV_DONTFORK || advice == MADV_DOFORK {
+                let target_start = self.split_for_range(area_start, cursor, advise_end)?;
+                let area = self.vmas.get_mut(&target_start).ok_or(ENOMEM)?;
+                area.dont_fork = advice == MADV_DONTFORK;
             }
             if advice == MADV_WIPEONFORK || advice == MADV_KEEPONFORK {
                 if advice == MADV_WIPEONFORK {
                     let area = self.vmas.get(&area_start).ok_or(ENOMEM)?;
-                    let is_anonymous_private = area.map_file.is_none()
-                        && area
-                            .flags
-                            .contains(MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS)
-                        && !area.flags.contains(MapFlags::MAP_SHARED);
-                    if !is_anonymous_private {
+                    if !is_anonymous_private(area) {
                         return Err(EINVAL);
                     }
                 }
@@ -802,7 +826,7 @@ impl VmaSet {
         }
     }
 
-    fn is_mmap_range_free(&self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> bool {
+    pub(super) fn is_mmap_range_free(&self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> bool {
         let Some((clipped_start, clipped_end)) = self.clip_mmap_range(start_vpn, end_vpn) else {
             return false;
         };

@@ -1,14 +1,17 @@
+mod bpf;
 mod clone;
 mod exec;
 mod futex;
 mod ids;
 mod ipc;
+mod keyring;
 mod lifecycle;
 mod misc;
 mod mm;
 mod signal;
 mod time;
 
+pub use bpf::sys_bpf;
 pub use clone::{sys_clone, sys_clone3, sys_setns, sys_unshare, CloneFlags};
 pub use exec::{sys_execve, sys_execveat};
 pub use futex::{sys_futex, sys_futex_waitv, FutexWaitV};
@@ -17,6 +20,7 @@ pub use ids::{
     sys_geteuid, sys_getgid, sys_getcpu, sys_getgroups, sys_getpgid, sys_getpid, sys_getppid,
     sys_getpriority, sys_getresgid, sys_getresuid, sys_getrlimit, sys_getsid, sys_gettid,
     sys_getuid, sys_ioprio_get, sys_ioprio_set, sys_personality, sys_prctl, sys_prlimit,
+    sys_ptrace,
     sys_process_vm_readv, sys_process_vm_writev, sys_sched_get_priority_max,
     sys_sched_get_priority_min, sys_sched_getaffinity, sys_sched_getattr, sys_sched_getparam,
     sys_sched_getscheduler, sys_sched_rr_get_interval, sys_sched_setaffinity, sys_sched_setattr,
@@ -38,6 +42,7 @@ pub use ipc::{
     sysv_msg_proc_snapshot, sysv_msgmax, sysv_msgmnb, sysv_msgmni, sysv_sem_limits,
     sysv_sem_proc_snapshot, sysv_shmall, sysv_shm_proc_snapshot, sysv_shmmax, sysv_shmmni,
 };
+pub use keyring::{sys_add_key, sys_keyctl, sys_request_key};
 pub use lifecycle::{
     sys_exit, sys_exit_group, sys_get_robust_list, sys_set_robust_list, sys_set_tid_address,
     sys_wait4, sys_waitid,
@@ -46,7 +51,8 @@ pub use misc::{sys_delete_module, sys_reboot, sys_shutdown, sys_syslog, sys_yiel
 pub use mm::{
     sys_brk, sys_madvise, sys_memorybarrier, sys_mincore, sys_mlock, sys_mlock2,
     sys_mlockall, sys_mmap, sys_mprotect, sys_mremap, sys_munlock, sys_munlockall,
-    sys_munmap, sys_sbrk,
+    sys_munmap, sys_pkey_alloc, sys_pkey_free, sys_pkey_mprotect, sys_remap_file_pages,
+    sys_riscv_flush_icache, sys_sbrk,
 };
 pub use signal::{
     sys_kcmp, sys_kill, sys_pidfd_getfd, sys_pidfd_open, sys_pidfd_send_signal, sys_rt_sigpending,
