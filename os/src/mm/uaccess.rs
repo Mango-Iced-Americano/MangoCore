@@ -1,7 +1,8 @@
 use core::{marker::PhantomData, ops::IndexMut};
 
-use super::page_table::{FaultAccess, UserAccess};
+use super::page_table::{FaultAccess, PageTable, UserAccess};
 use super::{PhysAddr, StepByOne, VirtAddr};
+use crate::hal::PageTableImpl;
 use crate::fs::iov::IOVec;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -10,8 +11,11 @@ use alloc::vec::Vec;
 const MAX_BUFFER_SIZE: usize = 1024 * 1024 * 8;
 const MAX_IOVEC_COUNT: usize = 1024;
 
-/// Walk user pages from `ptr` to `ptr+len`, return bytes before first inaccessible page.
-/// Uses translate_user_va_checked per page; stops on fault or overflow.
+/// Walk user pages from `ptr` to `ptr + len`, returning bytes before the
+/// first page that is not already mapped with the requested user permission.
+///
+/// This is a non-faulting probe: it only walks existing PTEs and must not
+/// allocate, fault-in, or trigger CoW/lazy population.
 pub fn user_accessible_len(
     token: usize,
     ptr: *const u8,
@@ -21,6 +25,7 @@ pub fn user_accessible_len(
     if len == 0 {
         return 0;
     }
+
     let start = ptr as usize;
     let end = match start.checked_add(len) {
         Some(v) => v,
@@ -29,16 +34,33 @@ pub fn user_accessible_len(
     if !uaccess_user_range_ok(start, end) {
         return 0;
     }
+
+    // Keep the same current-task-only safety contract as faulting uaccess.
+    if !is_current_user_token(token) {
+        return 0;
+    }
+
+    let page_table = PageTableImpl::from_token(token);
     let mut cur = start;
+
     while cur < end {
         let va = VirtAddr::from(cur);
-        if translate_user_va_checked(token, va, access).is_err() {
+        let vpn = va.floor();
+
+        if !page_table.user_access_ok(vpn, access).unwrap_or(false) {
             break;
         }
-        // Advance to next page boundary or end
-        let next_page = (va.floor().0 + crate::config::PAGE_SIZE).min(end);
+
+        let next_page = match vpn.start_addr().0.checked_add(crate::config::PAGE_SIZE) {
+            Some(v) => v.min(end),
+            None => end,
+        };
+        if next_page <= cur {
+            break;
+        }
         cur = next_page;
     }
+
     cur.saturating_sub(start)
 }
 
