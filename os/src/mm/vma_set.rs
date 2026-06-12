@@ -423,6 +423,8 @@ impl VmaSet {
         const MADV_FREE: usize = 8;
         const MADV_DONTFORK: usize = 10;
         const MADV_DOFORK: usize = 11;
+        const MADV_MERGEABLE: usize = 12;
+        const MADV_UNMERGEABLE: usize = 13;
         const MADV_WIPEONFORK: usize = 18;
         const MADV_KEEPONFORK: usize = 19;
 
@@ -446,6 +448,12 @@ impl VmaSet {
             if advice == MADV_FREE {
                 let area = self.vmas.get(&area_start).ok_or(ENOMEM)?;
                 if !is_anonymous_private(area) {
+                    return Err(EINVAL);
+                }
+            }
+            if advice == MADV_MERGEABLE || advice == MADV_UNMERGEABLE {
+                let area = self.vmas.get(&area_start).ok_or(ENOMEM)?;
+                if !area.map_perm.contains(MapPermission::W) {
                     return Err(EINVAL);
                 }
             }

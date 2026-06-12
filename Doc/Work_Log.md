@@ -4,6 +4,20 @@
 
 ## 2026-06-12
 
+### LTP madvise01 KSM hint advice 兼容
+
+**涉及文件：**
+- `os/src/syscall/process/mm.rs` — `sys_madvise()` 接受 Linux `MADV_MERGEABLE(12)`、`MADV_UNMERGEABLE(13)` advice
+- `os/src/mm/vma_set.rs` — 将 `MADV_MERGEABLE/UNMERGEABLE` 作为 KSM policy hint 处理；writable 用户区间 no-op 成功，只读区间仍返回 `EINVAL`，保持 `madvise02` 错误路径
+
+**验证：**
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make rv64-kernel-build-only ...'` ✅
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make la64-kernel-build-only ...'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=madvise01,madvise02,madvise10`、`ltp_libc=both` ✅ — 无 `TFAIL/TBROK`；`madvise01` 每个 libc 为 `18 TPASS / 2 TCONF`，`madvise02` 保持 `12 TPASS / 1 TCONF`
+- la64 QEMU focused：同上配置 ✅ — 无 `TFAIL/TBROK`；`madvise01` 每个 libc 为 `18 TPASS / 2 TCONF`，`madvise02` 保持 `12 TPASS / 1 TCONF`
+
+**备注：** 本次只补 KSM hint advice 的 ABI 成功路径，不实现真实页合并；`MADV_REMOVE`、`MADV_HWPOISON` 仍按未支持能力保留 `TCONF`。未修改 net/fs 测试点，也未运行 LTP 全量。
+
 ### LTP sysconf01 兼容资源上限补齐
 
 **涉及文件：**
