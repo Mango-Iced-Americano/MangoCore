@@ -4,6 +4,21 @@
 
 ## 2026-06-12
 
+### LTP inline broad-scan 启用 pkey01 已支持用例
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — 从 inline broad-scan helper skip 移除 `pkey01`，让已支持的 pkey 用例在非 focused inline 枚举中不再被跳过
+
+**验证：**
+- rv64 用户态构建：`docker compose exec -T os-dev bash -lc 'cd os && LOG=error make -f make/rv64.mk user MODE=release BOARD=rvqemu ...'` ✅
+- rv64 kernel 构建：`docker compose exec -T os-dev bash -lc 'cd os && LOG=error make rv64-kernel-build-only ...'` ✅
+- la64 用户态构建：`docker compose exec -T os-dev bash -lc 'cd os && LOG=error make -f make/la64.mk user MODE=release BOARD=laqemu ...'` ✅
+- la64 kernel 构建：`docker compose exec -T os-dev bash -lc 'cd os && LOG=error make la64-kernel-build-only ...'` ✅
+- rv64 QEMU inline focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=pkey01`、`ltp_libc=both` ✅ — musl/glibc 均 `RUN LTP CASE pkey01`，每个 libc `passed 72 failed 0 broken 0 skipped 0`，inline 记录 `DONE LTP CASE pkey01 : 0`
+- la64 QEMU inline focused：同上配置 ✅ — musl/glibc 均 `RUN LTP CASE pkey01`，每个 libc `passed 72 failed 0 broken 0 skipped 0`，inline 记录 `DONE LTP CASE pkey01 : 0`
+
+**备注：** 本次只清理 inline broad-scan helper 的过期跳过逻辑；focused include 本来会绕过 helper skip。未修改 pkey 内核语义，未修改 net/fs 测试点，也未运行 LTP 全量。
+
 ### LTP inline 启用 clock_gettime04 稳定用例
 
 **涉及文件：**

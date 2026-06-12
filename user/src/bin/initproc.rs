@@ -1252,7 +1252,6 @@ fn should_skip_ltp_helper(libc_suffix: &str, name: &str) -> Option<&'static str>
         "signal06" => Some("x86_64-only signal testcase"),
         "ping01.sh" | "ping02.sh" => Some("network test skipped in LTP syscall scan"),
         "pivot_root01" | "prepare_lvm.sh" => Some("filesystem/namespace setup skipped"),
-        "pkey01" => Some("requires memory protection keys"),
         "process_madvise01" => Some("requires swap-backed process_madvise environment"),
         "pt_test" => Some("requires Intel perf events"),
         "proc_sched_rt01" => Some("requires procfs/sysctl RT scheduler config"),
