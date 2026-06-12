@@ -461,14 +461,17 @@ fn read_into_user(file: &vfs::File, token: usize, buf: usize, count: usize) -> i
             Some(v) => v,
             None => return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) },
         };
-        let accessible = crate::mm::user_accessible_len(
+        let mut accessible = crate::mm::user_accessible_len(
             token,
             user_addr as *const u8,
             want,
             crate::mm::UserAccess::Write,
         );
         if accessible == 0 {
-            return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) };
+            if total > 0 {
+                return total as isize;
+            }
+            accessible = want.min(crate::config::PAGE_SIZE);
         }
 
         let n = match file.read(&mut kbuf[..accessible]) {
@@ -532,14 +535,17 @@ fn pread_into_user(file: &vfs::File, token: usize, buf: usize, count: usize, off
             Some(v) => v,
             None => return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) },
         };
-        let accessible = crate::mm::user_accessible_len(
+        let mut accessible = crate::mm::user_accessible_len(
             token,
             user_addr as *const u8,
             want,
             crate::mm::UserAccess::Write,
         );
         if accessible == 0 {
-            return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) };
+            if total > 0 {
+                return total as isize;
+            }
+            accessible = want.min(crate::config::PAGE_SIZE);
         }
 
         let n = match file.pread(file_off, &mut kbuf[..accessible]) {
@@ -599,14 +605,17 @@ fn write_from_user(file: &vfs::File, token: usize, buf: usize, count: usize) -> 
             None => return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) },
         };
 
-        let accessible = crate::mm::user_accessible_len(
+        let mut accessible = crate::mm::user_accessible_len(
             token,
             user_addr as *const u8,
             want,
             crate::mm::UserAccess::Read,
         );
         if accessible == 0 {
-            return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) };
+            if total > 0 {
+                return total as isize;
+            }
+            accessible = want.min(crate::config::PAGE_SIZE);
         }
 
         let reader = match UserBufferReader::new(token, user_addr as *const u8, accessible) {
@@ -668,14 +677,17 @@ fn pwrite_from_user(file: &vfs::File, token: usize, buf: usize, count: usize, of
             None => return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) },
         };
 
-        let accessible = crate::mm::user_accessible_len(
+        let mut accessible = crate::mm::user_accessible_len(
             token,
             user_addr as *const u8,
             want,
             crate::mm::UserAccess::Read,
         );
         if accessible == 0 {
-            return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) };
+            if total > 0 {
+                return total as isize;
+            }
+            accessible = want.min(crate::config::PAGE_SIZE);
         }
 
         let reader = match UserBufferReader::new(token, user_addr as *const u8, accessible) {
@@ -1248,9 +1260,12 @@ pub fn sys_preadv(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize 
             Some(v) => v,
             None => return if done > 0 { done as isize } else { -(SyscallErr::EINVAL as isize) },
         };
-        let accessible = user_iov.accessible_len_at(done, want, crate::mm::UserAccess::Write);
+        let mut accessible = user_iov.accessible_len_at(done, want, crate::mm::UserAccess::Write);
         if accessible == 0 {
-            return if done > 0 { done as isize } else { -(SyscallErr::EFAULT as isize) };
+            if done > 0 {
+                return done as isize;
+            }
+            accessible = want.min(crate::config::PAGE_SIZE);
         }
 
         let n = match file.pread(file_off, &mut kbuf[..accessible]) {
@@ -1343,9 +1358,12 @@ pub fn sys_pwritev(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize
             Some(v) => v,
             None => return if done > 0 { done as isize } else { -(SyscallErr::EINVAL as isize) },
         };
-        let accessible = user_iov.accessible_len_at(done, want, crate::mm::UserAccess::Read);
+        let mut accessible = user_iov.accessible_len_at(done, want, crate::mm::UserAccess::Read);
         if accessible == 0 {
-            return if done > 0 { done as isize } else { -(SyscallErr::EFAULT as isize) };
+            if done > 0 {
+                return done as isize;
+            }
+            accessible = want.min(crate::config::PAGE_SIZE);
         }
 
         let ubuf = match user_iov.reader_buffer_at(done, accessible) {
@@ -1456,9 +1474,12 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
     let mut done = 0usize;
     while done < total_len {
         let want = (total_len - done).min(chunk_cap);
-        let accessible = user_iov.accessible_len_at(done, want, crate::mm::UserAccess::Write);
+        let mut accessible = user_iov.accessible_len_at(done, want, crate::mm::UserAccess::Write);
         if accessible == 0 {
-            return if done > 0 { done as isize } else { -(SyscallErr::EFAULT as isize) };
+            if done > 0 {
+                return done as isize;
+            }
+            accessible = want.min(crate::config::PAGE_SIZE);
         }
 
         let n = match file.read(&mut kbuf[..accessible]) {
@@ -1541,9 +1562,12 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
     let mut done = 0usize;
     while done < allowed {
         let want = (allowed - done).min(chunk_cap);
-        let accessible = user_iov.accessible_len_at(done, want, crate::mm::UserAccess::Read);
+        let mut accessible = user_iov.accessible_len_at(done, want, crate::mm::UserAccess::Read);
         if accessible == 0 {
-            return if done > 0 { done as isize } else { -(SyscallErr::EFAULT as isize) };
+            if done > 0 {
+                return done as isize;
+            }
+            accessible = want.min(crate::config::PAGE_SIZE);
         }
 
         let ubuf = match user_iov.reader_buffer_at(done, accessible) {
