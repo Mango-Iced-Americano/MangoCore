@@ -4,6 +4,20 @@
 
 ## 2026-06-12
 
+### LTP madvise01 MADV_FREE 兼容
+
+**涉及文件：**
+- `os/src/syscall/process/mm.rs` — `sys_madvise()` 增加 Linux `MADV_FREE(8)` advice 入口
+- `os/src/mm/vma_set.rs` — 抽出匿名私有 VMA 判定，`MADV_FREE` 仅对匿名私有映射 no-op 成功；file-backed、shared 等非法映射继续返回 `EINVAL`
+
+**验证：**
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make rv64-kernel-build-only ...'` ✅
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make la64-kernel-build-only ...'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=madvise01,madvise02,madvise03,madvise05,madvise10` ✅ — musl/glibc 均无 `TFAIL/TBROK`；`madvise01` 每个 libc 为 13 个 `TPASS`，`MADV_FREE` 变为 `TPASS`
+- la64 QEMU focused：同上用例集 ✅ — musl/glibc 均无 `TFAIL/TBROK`；`madvise01` 每个 libc 为 13 个 `TPASS`
+
+**备注：** 本次不实现实际 lazy-free 回收，仅补 LTP 覆盖的匿名私有映射 ABI 成功路径，并保留 `madvise02` 对非法 `MADV_FREE` 场景的 `EINVAL` 预期。未修改 net/fs 测试点，也未运行 LTP 全量。
+
 ### LTP ptrace02/03 errno 子集兼容
 
 **涉及文件：**

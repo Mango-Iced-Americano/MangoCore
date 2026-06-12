@@ -55,6 +55,14 @@ fn file_backed_page_resident(area: &Vma, vpn: VirtPageNum) -> bool {
         .unwrap_or(false)
 }
 
+fn is_anonymous_private(area: &Vma) -> bool {
+    area.map_file.is_none()
+        && area
+            .flags
+            .contains(MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS)
+        && !area.flags.contains(MapFlags::MAP_SHARED)
+}
+
 fn errno_to_memory_error(errno: isize) -> MemoryError {
     match errno {
         ENOMEM => MemoryError::OutOfMemory,
@@ -412,6 +420,7 @@ impl VmaSet {
         advice: usize,
     ) -> Result<(), isize> {
         const MADV_DONTNEED: usize = 4;
+        const MADV_FREE: usize = 8;
         const MADV_WIPEONFORK: usize = 18;
         const MADV_KEEPONFORK: usize = 19;
 
@@ -433,15 +442,16 @@ impl VmaSet {
                 area.discard_range(page_table, cursor, advise_end)
                     .map_err(|_| EINVAL)?;
             }
+            if advice == MADV_FREE {
+                let area = self.vmas.get(&area_start).ok_or(ENOMEM)?;
+                if !is_anonymous_private(area) {
+                    return Err(EINVAL);
+                }
+            }
             if advice == MADV_WIPEONFORK || advice == MADV_KEEPONFORK {
                 if advice == MADV_WIPEONFORK {
                     let area = self.vmas.get(&area_start).ok_or(ENOMEM)?;
-                    let is_anonymous_private = area.map_file.is_none()
-                        && area
-                            .flags
-                            .contains(MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS)
-                        && !area.flags.contains(MapFlags::MAP_SHARED);
-                    if !is_anonymous_private {
+                    if !is_anonymous_private(area) {
                         return Err(EINVAL);
                     }
                 }

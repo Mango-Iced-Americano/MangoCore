@@ -619,6 +619,7 @@ pub fn sys_madvise(addr: usize, length: usize, advice: usize) -> isize {
     const MADV_SEQUENTIAL: usize = 2;
     const MADV_WILLNEED: usize = 3;
     const MADV_DONTNEED: usize = 4;
+    const MADV_FREE: usize = 8;
     const MADV_HUGEPAGE: usize = 14;
     const MADV_NOHUGEPAGE: usize = 15;
     const MADV_DONTDUMP: usize = 16;
@@ -649,6 +650,7 @@ pub fn sys_madvise(addr: usize, length: usize, advice: usize) -> isize {
         | MADV_SEQUENTIAL
         | MADV_WILLNEED
         | MADV_DONTNEED
+        | MADV_FREE
         | MADV_HUGEPAGE
         | MADV_NOHUGEPAGE
         | MADV_DONTDUMP
