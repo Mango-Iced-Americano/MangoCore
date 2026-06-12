@@ -621,6 +621,8 @@ pub fn sys_madvise(addr: usize, length: usize, advice: usize) -> isize {
     const MADV_DONTNEED: usize = 4;
     const MADV_HUGEPAGE: usize = 14;
     const MADV_NOHUGEPAGE: usize = 15;
+    const MADV_DONTDUMP: usize = 16;
+    const MADV_DODUMP: usize = 17;
     const MADV_WIPEONFORK: usize = 18;
     const MADV_KEEPONFORK: usize = 19;
     const MADV_COLD: usize = 20;
@@ -649,6 +651,8 @@ pub fn sys_madvise(addr: usize, length: usize, advice: usize) -> isize {
         | MADV_DONTNEED
         | MADV_HUGEPAGE
         | MADV_NOHUGEPAGE
+        | MADV_DONTDUMP
+        | MADV_DODUMP
         | MADV_WIPEONFORK
         | MADV_KEEPONFORK
         | MADV_COLD

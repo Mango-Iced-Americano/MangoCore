@@ -4,6 +4,19 @@
 
 ## 2026-06-12
 
+### LTP madvise01 dump advice 兼容
+
+**涉及文件：**
+- `os/src/syscall/process/mm.rs` — `sys_madvise()` 增加 `MADV_DONTDUMP`、`MADV_DODUMP` 的已映射区间兼容 no-op 支持；底层仍按 VMA 覆盖检查区间，未映射洞继续返回 `ENOMEM`
+
+**验证：**
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make rv64-kernel-build-only ...'` ✅
+- `docker compose exec -T os-dev bash -lc 'cd os && LOG=error make la64-kernel-build-only ...'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=madvise01,madvise02,madvise03,madvise05,madvise10` ✅ — musl/glibc 均无 `TFAIL/TBROK`；`madvise01` 每个 libc 从 10 个 `TPASS` 提升到 12 个 `TPASS`
+- la64 QEMU focused：同上用例集 ✅ — musl/glibc 均无 `TFAIL/TBROK`；`madvise01` 每个 libc 均为 12 个 `TPASS`
+
+**备注：** MangoCore 当前不生成 core dump，本次仅接受 dump policy advice 作为 Linux ABI 兼容提示，不实现 `/proc/self/coredump_filter` 或实际 core dump 过滤语义；未修改 net/fs 测试点，也未运行 LTP 全量。
+
 ### LTP shmctl05 remap_file_pages ABI 入口兼容
 
 **涉及文件：**
