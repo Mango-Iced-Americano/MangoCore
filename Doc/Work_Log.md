@@ -2,6 +2,22 @@
 
 ---
 
+## 2026-06-13
+
+### LTP rv64 musl timeout multiplier 兼容
+
+**涉及文件：**
+- `user/src/bin/ltprunner.rs` — suite runner 在 `rv64 + musl` 下不再导出 `LTP_TIMEOUT_MUL`，改用无害占位环境变量，避免当前 LTP/musl 镜像的 `strtod()` 路径把 timeout 解析成 `UINT_MAX`；其它 libc/架构继续保留 2 倍 timeout，并整理 preload/no-preload 环境数组顺序
+
+**验证：**
+- `docker compose exec -T os-dev bash -lc 'cd /app/os && LOG=error make rv64-kernel-build-only ...'` ✅
+- `docker compose exec -T os-dev bash -lc 'cd /app/os && LOG=error make la64-kernel-build-only ...'` ✅
+- rv64 QEMU suite focused：`mask=0x800`、`timeout_ltp=900`、`ltp_runner=suite`、`ltp_suites=syscalls`、`ltp_include=bpf_map01,bpf_prog01,bpf_prog02,bpf_prog03,bpf_prog04,bpf_prog05,bpf_prog06,bpf_prog07`、`ltp_libc=musl` ✅ — `bpf_map01` PASS，`bpf_prog01-07` 快速 `TCONF/SKIP`，内部 `Timeout per run` 从 `1193046h 28m 15s` 恢复为 `0h 00m 30s`
+- rv64 QEMU suite focused：同一用例集、`ltp_libc=glibc` ✅ — `bpf_map01` PASS，`bpf_prog01-07` 保持 `TCONF/SKIP`，内部 `Timeout per run` 保持 `0h 01m 00s`
+- la64 QEMU suite focused：同一用例集、`ltp_libc=both` ✅ — musl/glibc 均 `bpf_map01` PASS、`bpf_prog01-07` `TCONF/SKIP`，内部 `Timeout per run` 均为 `0h 01m 00s`
+
+**备注：** 本次修复的是 rv64 musl suite runner 环境导致的 retry helper 无限重试问题，不实现 eBPF program/verifier，不修改 net/fs 测试点，也未运行 LTP 全量。
+
 ## 2026-06-12
 
 ### develop 与 LTP 分支冲突解决

@@ -19,6 +19,7 @@ const DEFAULT_CASE_TIMEOUT_SECS: u64 = 60;
 const LTP_TIMEOUT_MUL_ENV: &str = "LTP_TIMEOUT_MUL=2\0";
 #[cfg(not(target_arch = "loongarch64"))]
 const LTP_TIMEOUT_MUL_ENV: &str = "LTP_TIMEOUT_MUL=2\0";
+const LTP_TIMEOUT_MUL_DISABLED_ENV: &str = "MANGO_LTP_TIMEOUT_MUL_DISABLED=1\0";
 const DEFAULT_CASE_TERM_GRACE_MS: u64 = 1500;
 const LTP_EXIT_TCONF: i32 = 32;
 const DEFAULT_LTP_EXCLUDE: &[&str] = &["rt_sigtimedwait01", "timerfd04", "timerfd_settime02"];
@@ -510,7 +511,7 @@ fn has_scratch_device() -> bool {
     }
 }
 
-fn precompute_env(ltproot: &str, tmpdir: &str) -> PrecomputedEnv {
+fn precompute_env(ltproot: &str, tmpdir: &str, libc: &str) -> PrecomputedEnv {
     let ltp_root_s = format!("LTPROOT={}\0", ltproot);
     let path_s = format!(
         "PATH=/bin:/sbin:/usr/bin:{}/testcases/bin:{}/bin:{}/testcases/lib\0",
@@ -522,6 +523,13 @@ fn precompute_env(ltproot: &str, tmpdir: &str) -> PrecomputedEnv {
 
     let ld_preload_ptr: *const u8 = "LD_PRELOAD=/ltp_proto_compat.so\0".as_ptr();
     let null_ptr: *const u8 = core::ptr::null();
+    let ltp_timeout_mul_ptr: *const u8 = if cfg!(target_arch = "riscv64") && libc == "musl" {
+        // rv64 musl in the current LTP image misparses this float env via strtod(),
+        // which turns retry helpers into UINT_MAX-second loops.
+        LTP_TIMEOUT_MUL_DISABLED_ENV.as_ptr()
+    } else {
+        LTP_TIMEOUT_MUL_ENV.as_ptr()
+    };
 
     let ltp_dev_ptr: *const u8 = if has_scratch_device() {
         "LTP_DEV=/dev/vdb2\0".as_ptr()
@@ -535,7 +543,6 @@ fn precompute_env(ltproot: &str, tmpdir: &str) -> PrecomputedEnv {
         null_ptr
     };
 
-    #[cfg(target_arch = "loongarch64")]
     let env_preload: [*const u8; 19] = [
         ltp_root_s.as_ptr(),
         path_s.as_ptr(),
@@ -550,29 +557,7 @@ fn precompute_env(ltproot: &str, tmpdir: &str) -> PrecomputedEnv {
         "LTP_IPC_PATH=/tmp\0".as_ptr(),
         "LANG=C.UTF-8\0".as_ptr(),
         "LTP_REPRODUCIBLE_OUTPUT=n\0".as_ptr(),
-        LTP_TIMEOUT_MUL_ENV.as_ptr(),
-        "KCONFIG_PATH=/proc/config\0".as_ptr(),
-        ld_preload_ptr,
-        ltp_dev_ptr,
-        ltp_single_fs_ptr,
-        null_ptr,
-    ];
-    #[cfg(not(target_arch = "loongarch64"))]
-    let env_preload: [*const u8; 19] = [
-        ltp_root_s.as_ptr(),
-        path_s.as_ptr(),
-        tmpdir_s.as_ptr(),
-        tmpbase_s.as_ptr(),
-        "HOME=/\0".as_ptr(),
-        pwd_s.as_ptr(),
-        "SHELL=/bin/bash\0".as_ptr(),
-        "TERM=dumb\0".as_ptr(),
-        "LTP_COLORIZE_OUTPUT=y\0".as_ptr(),
-        "LTP_DEV_FS_TYPE=ext4\0".as_ptr(),
-        "LTP_IPC_PATH=/tmp\0".as_ptr(),
-        "LANG=C.UTF-8\0".as_ptr(),
-        "LTP_REPRODUCIBLE_OUTPUT=n\0".as_ptr(),
-        LTP_TIMEOUT_MUL_ENV.as_ptr(),
+        ltp_timeout_mul_ptr,
         "KCONFIG_PATH=/proc/config\0".as_ptr(),
         ld_preload_ptr,
         ltp_dev_ptr,
@@ -580,7 +565,6 @@ fn precompute_env(ltproot: &str, tmpdir: &str) -> PrecomputedEnv {
         null_ptr,
     ];
 
-    #[cfg(target_arch = "loongarch64")]
     let env_no_preload: [*const u8; 19] = [
         ltp_root_s.as_ptr(),
         path_s.as_ptr(),
@@ -595,33 +579,11 @@ fn precompute_env(ltproot: &str, tmpdir: &str) -> PrecomputedEnv {
         "LTP_IPC_PATH=/tmp\0".as_ptr(),
         "LANG=C.UTF-8\0".as_ptr(),
         "LTP_REPRODUCIBLE_OUTPUT=n\0".as_ptr(),
-        LTP_TIMEOUT_MUL_ENV.as_ptr(),
+        ltp_timeout_mul_ptr,
         "KCONFIG_PATH=/proc/config\0".as_ptr(),
         ltp_dev_ptr,
         ltp_single_fs_ptr,
         null_ptr,
-        null_ptr,
-    ];
-    #[cfg(not(target_arch = "loongarch64"))]
-    let env_no_preload: [*const u8; 19] = [
-        ltp_root_s.as_ptr(),
-        path_s.as_ptr(),
-        tmpdir_s.as_ptr(),
-        tmpbase_s.as_ptr(),
-        "HOME=/\0".as_ptr(),
-        pwd_s.as_ptr(),
-        "SHELL=/bin/sh\0".as_ptr(),
-        "TERM=dumb\0".as_ptr(),
-        "LTP_COLORIZE_OUTPUT=y\0".as_ptr(),
-        "LTP_DEV_FS_TYPE=ext4\0".as_ptr(),
-        "LTP_IPC_PATH=/tmp\0".as_ptr(),
-        "LANG=C.UTF-8\0".as_ptr(),
-        "LTP_REPRODUCIBLE_OUTPUT=n\0".as_ptr(),
-        LTP_TIMEOUT_MUL_ENV.as_ptr(),
-        "KCONFIG_PATH=/proc/config\0".as_ptr(),
-        null_ptr,
-        ltp_dev_ptr,
-        ltp_single_fs_ptr,
         null_ptr,
     ];
 
@@ -783,7 +745,7 @@ fn main(_argc: usize, argv: &[&str]) -> i32 {
     }
 
     let own_pgid = getpgid(0);
-    let penv = precompute_env(&cli.ltproot, &cli.tmpdir);
+    let penv = precompute_env(&cli.ltproot, &cli.tmpdir, &cli.libc);
     let mut raw_cases: Vec<LtpCase> = Vec::new();
     for suite in &cfg.ltp_suites {
         if suite.is_empty() {
