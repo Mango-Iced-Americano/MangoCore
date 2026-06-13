@@ -4,6 +4,21 @@
 
 ## 2026-06-13
 
+### uaccess 单页小对象拷贝快路径
+
+**涉及文件：**
+- `os/src/mm/uaccess.rs` — 为 `copy_from_user()`、`copy_from_user_array()`、`copy_to_user()`、`copy_to_user_array()` 和 `copy_to_user_string()` 增加单页快路径；单页内直接翻译一次并复制，跨页仍回退原 `UserBuffer` 路径，保留后续页失败时不产生部分拷贝的既有语义
+
+**验证：**
+- `docker compose exec -T -w /app/os os-dev env LOG=error make rv64-kernel-build-only` ✅ — `testresult/uaccess-single-page-20260613/rv64-build.log`
+- `docker compose exec -T -w /app/os os-dev env LOG=error make la64-kernel-build-only` ✅ — `testresult/uaccess-single-page-20260613/la64-build.log`
+- rv64 QEMU basic：`mask=0x001` ✅ — `testresult/uaccess-single-page-20260613/rv64-basic.log`，无 `panic/FAIL/TFAIL/TBROK`
+- la64 QEMU basic：`mask=0x001` ✅ — `testresult/uaccess-single-page-20260613/la64-basic.log`，无 `panic/FAIL/TFAIL/TBROK`
+- rv64 QEMU LTP focused：`clock_getres/clock_gettime/gettimeofday/uname/getrlimit/setrlimit/getrusage/sysinfo/rt_sigaction/rt_sigprocmask/prctl`，`ltp_libc=both` ✅ — `testresult/uaccess-single-page-20260613/rv64-ltp.log`，46 个 `DONE LTP CASE ... : 0`，无 `TFAIL/TBROK`
+- la64 QEMU LTP focused：同一用例集，`ltp_libc=both` ✅ — `testresult/uaccess-single-page-20260613/la64-ltp.log`，46 个 `DONE LTP CASE ... : 0`，无 `TFAIL/TBROK`
+
+**备注：** 旁观者视角复核时发现全量跨页直接拷贝会改变错误路径的部分拷贝语义，因此本次仅优化单页场景；重复的 unsafe 拷贝逻辑已收敛到 helper，未修改 net/fs 测试点，也未运行 LTP 全量。
+
 ### translated_str 按页扫描优化
 
 **涉及文件：**

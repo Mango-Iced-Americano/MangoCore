@@ -934,6 +934,70 @@ impl Iterator for UserBufferIterator {
     }
 }
 
+fn translate_single_page_user_bytes(
+    token: usize,
+    ptr: *const u8,
+    len: usize,
+    access: UserAccess,
+) -> Result<Option<&'static mut [u8]>, isize> {
+    if len == 0 {
+        return Ok(None);
+    }
+    if ptr.is_null() {
+        return Err(crate::syscall::errno::EFAULT);
+    }
+
+    let start = ptr as usize;
+    let end = check_user_range(start, len)?;
+    let start_va = VirtAddr::from(start);
+    let last_va = VirtAddr::from(end - 1);
+    if start_va.floor() != last_va.floor() {
+        return Ok(None);
+    }
+
+    let pa = translate_user_va_checked(token, start_va, access)?;
+    let page_offset = start_va.page_offset();
+    Ok(Some(
+        &mut pa.floor().get_bytes_array()[page_offset..page_offset + len],
+    ))
+}
+
+fn copy_single_page_from_user(
+    token: usize,
+    src: *const u8,
+    dst: *mut u8,
+    len: usize,
+) -> Result<bool, isize> {
+    if let Some(user_bytes) =
+        translate_single_page_user_bytes(token, src, len, UserAccess::Read)?
+    {
+        unsafe {
+            core::ptr::copy_nonoverlapping(user_bytes.as_ptr(), dst, len);
+        }
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+fn copy_single_page_to_user(
+    token: usize,
+    src: *const u8,
+    dst: *mut u8,
+    len: usize,
+) -> Result<bool, isize> {
+    if let Some(user_bytes) =
+        translate_single_page_user_bytes(token, dst as *const u8, len, UserAccess::Write)?
+    {
+        unsafe {
+            core::ptr::copy_nonoverlapping(src, user_bytes.as_mut_ptr(), len);
+        }
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 /// Copy `*src: T` to kernel space.
 /// `src` is a pointer in user space, `dst` is a pointer in kernel space.
 pub fn copy_from_user<T: 'static + Copy>(
@@ -943,6 +1007,9 @@ pub fn copy_from_user<T: 'static + Copy>(
 ) -> Result<(), isize> {
     let size = core::mem::size_of::<T>();
     if size == 0 {
+        return Ok(());
+    }
+    if copy_single_page_from_user(token, src as *const u8, dst as *mut u8, size)? {
         return Ok(());
     }
     UserBuffer::new(translated_byte_buffer(
@@ -969,6 +1036,9 @@ pub fn copy_from_user_array<T: 'static + Copy>(
     if size == 0 {
         return Ok(());
     }
+    if copy_single_page_from_user(token, src as *const u8, dst as *mut u8, size)? {
+        return Ok(());
+    }
     UserBuffer::new(translated_byte_buffer(
         token,
         src as *const u8,
@@ -988,6 +1058,9 @@ pub fn copy_to_user<T: 'static + Copy>(
 ) -> Result<(), isize> {
     let size = core::mem::size_of::<T>();
     if size == 0 {
+        return Ok(());
+    }
+    if copy_single_page_to_user(token, src as *const u8, dst as *mut u8, size)? {
         return Ok(());
     }
     UserBuffer::new(translated_byte_buffer(
@@ -1037,6 +1110,9 @@ pub fn copy_to_user_array<T: 'static + Copy>(
     if size == 0 {
         return Ok(());
     }
+    if copy_single_page_to_user(token, src as *const u8, dst as *mut u8, size)? {
+        return Ok(());
+    }
     UserBuffer::new(translated_byte_buffer(
         token,
         dst as *const u8,
@@ -1056,6 +1132,13 @@ pub fn copy_to_user_string(token: usize, src: &str, dst: *mut u8) -> Result<(), 
         .len()
         .checked_add(1)
         .ok_or(crate::syscall::errno::EFAULT)?;
+    if let Some(user_bytes) =
+        translate_single_page_user_bytes(token, dst as *const u8, size, UserAccess::Write)?
+    {
+        user_bytes[..src.len()].copy_from_slice(src.as_bytes());
+        user_bytes[src.len()] = 0;
+        return Ok(());
+    }
     let mut user_buf = UserBuffer::new(translated_byte_buffer(
         token,
         dst as *const u8,
