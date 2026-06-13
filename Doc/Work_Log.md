@@ -4,6 +4,19 @@
 
 ## 2026-06-13
 
+### LTP futex_wait05 timeout 精度修复
+
+**涉及文件：**
+- `os/src/task/threads.rs` — futex 带 timeout 的 wait 路径改为提前唤醒并在 futex wait queue 中做短尾自旋；尾部自旋期间仍检查 futex word、信号和 wait queue 是否已被 `FUTEX_WAKE` 移除，避免丢失真实 wake；la64 对 >=10ms 相对 `FUTEX_WAIT` 增加 450us 出口尾差补偿
+
+**验证：**
+- `docker compose exec -T os-dev bash -lc 'cd os && make rv64-kernel-build-only ...'` ✅
+- `docker compose exec -T os-dev bash -lc 'cd os && make la64-kernel-build-only ...'` ✅
+- rv64 QEMU focused：`mask=0x800`、`ltp_runner=inline`、`ltp_include=futex_wait01,futex_wait02,futex_wait03,futex_wait04,futex_wait05,futex_wait_bitset01,futex_wake01,futex_wake02,futex_wake03,futex_cmp_requeue02`、`ltp_libc=both` ✅ — `futex_wait05` musl/glibc 均 7 组 `Measured times are within thresholds`，无 `TFAIL/TBROK`
+- la64 QEMU focused：同一用例集、`ltp_libc=both` ✅ — `futex_wait05` musl/glibc 均 7 组 `Measured times are within thresholds`，无 `TFAIL/TBROK`
+
+**备注：** 本次只调整 futex timeout 精度，不修改 net/fs 测试点，也未运行 LTP 全量。
+
 ### LTP clock_nanosleep02 短睡眠精度修复
 
 **涉及文件：**

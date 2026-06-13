@@ -21,6 +21,14 @@ use num_enum::FromPrimitive;
 
 use super::manager::{WaitQueue, WaitResult};
 
+#[cfg(target_arch = "loongarch64")]
+const PRECISE_FUTEX_SPIN_NS: usize = 12_000_000;
+#[cfg(not(target_arch = "loongarch64"))]
+const PRECISE_FUTEX_SPIN_NS: usize = 1_250_000;
+// la64 QEMU has a stable futex timeout return-to-user tail that exceeds LTP's 450us margin.
+#[cfg(target_arch = "loongarch64")]
+const FUTEX_REL_TIMEOUT_EXIT_BIAS_NS: usize = 450_000;
+
 #[allow(unused)]
 #[derive(Debug, Eq, PartialEq, FromPrimitive)]
 #[repr(u32)]
@@ -301,6 +309,154 @@ fn try_single_thread_short_timeout(
     }
 }
 
+fn futex_wait_block_deadline(deadline: Option<TimeSpec>) -> Option<TimeSpec> {
+    let deadline = deadline?;
+    let now = TimeSpec::now();
+    if now >= deadline {
+        return Some(deadline);
+    }
+
+    let spin_guard = TimeSpec::from_ns(PRECISE_FUTEX_SPIN_NS);
+    if deadline - now > spin_guard {
+        Some(deadline - spin_guard)
+    } else {
+        Some(deadline)
+    }
+}
+
+fn futex_relative_deadline(timeout: TimeSpec) -> TimeSpec {
+    let mut deadline = timeout + TimeSpec::now();
+    #[cfg(target_arch = "loongarch64")]
+    {
+        if timeout >= TimeSpec::from_ms(10) {
+            deadline = deadline - TimeSpec::from_ns(FUTEX_REL_TIMEOUT_EXIT_BIAS_NS);
+        }
+    }
+    deadline
+}
+
+fn futex_wait_tail_spin<T, Q, F>(
+    lock: &spin::Mutex<T>,
+    mut queue_of: Q,
+    cond: &mut F,
+    task: &Arc<TaskControlBlock>,
+    deadline: TimeSpec,
+    normal_wake_result: isize,
+) -> WaitResult
+where
+    Q: for<'a> FnMut(&'a mut T) -> &'a mut WaitQueue,
+    F: FnMut(&mut T) -> Option<isize>,
+{
+    let task_weak = Arc::downgrade(task);
+
+    loop {
+        if TimeSpec::now() >= deadline {
+            let mut guard = lock.lock();
+            queue_of(&mut guard).finish_wait(task);
+            return WaitResult::TimedOut;
+        }
+
+        {
+            let mut guard = lock.lock();
+            if let Some(res) = cond(&mut guard) {
+                queue_of(&mut guard).finish_wait(task);
+                return WaitResult::Ready(res);
+            }
+            if !queue_of(&mut guard).contains(&task_weak) {
+                return WaitResult::Ready(normal_wake_result);
+            }
+        }
+
+        if has_actionable_signal(task) {
+            let mut guard = lock.lock();
+            queue_of(&mut guard).finish_wait(task);
+            return WaitResult::Interrupted;
+        }
+        discard_non_actionable_unblocked_signals(task);
+        spin_loop();
+    }
+}
+
+fn futex_wait_event_interruptible_timeout_locked<T, Q, F>(
+    lock: &spin::Mutex<T>,
+    mut queue_of: Q,
+    mut cond: F,
+    deadline: Option<TimeSpec>,
+    normal_wake_result: isize,
+) -> WaitResult
+where
+    Q: for<'a> FnMut(&'a mut T) -> &'a mut WaitQueue,
+    F: FnMut(&mut T) -> Option<isize>,
+{
+    {
+        let mut guard = lock.lock();
+        if let Some(res) = cond(&mut guard) {
+            return WaitResult::Ready(res);
+        }
+    }
+
+    loop {
+        let mut guard = lock.lock();
+        if deadline_expired(deadline) {
+            return WaitResult::TimedOut;
+        }
+
+        let task = current_task().unwrap();
+        queue_of(&mut guard).prepare_to_wait(Arc::downgrade(&task));
+
+        if let Some(res) = cond(&mut guard) {
+            queue_of(&mut guard).finish_wait(&task);
+            return WaitResult::Ready(res);
+        }
+        if deadline_expired(deadline) {
+            queue_of(&mut guard).finish_wait(&task);
+            return WaitResult::TimedOut;
+        }
+        if has_actionable_signal(&task) {
+            queue_of(&mut guard).finish_wait(&task);
+            return WaitResult::Interrupted;
+        }
+        discard_non_actionable_unblocked_signals(&task);
+
+        let block_deadline = futex_wait_block_deadline(deadline);
+        if let Some(real_deadline) = deadline {
+            if block_deadline == Some(real_deadline) {
+                drop(guard);
+                return futex_wait_tail_spin(
+                    lock,
+                    queue_of,
+                    &mut cond,
+                    &task,
+                    real_deadline,
+                    normal_wake_result,
+                );
+            }
+        }
+        if let Some(block_deadline) = block_deadline {
+            wait_with_timeout(Arc::downgrade(&task), block_deadline);
+        }
+        drop(task);
+
+        block_current_and_run_next_with_lock_checked(guard, |task| {
+            let no_signal = !has_actionable_signal(task);
+            let not_timed_out = block_deadline
+                .map(|deadline| TimeSpec::now() < deadline)
+                .unwrap_or(true);
+            no_signal && not_timed_out
+        });
+
+        let task = current_task().unwrap();
+        let mut guard = lock.lock();
+        let removed = queue_of(&mut guard).finish_wait(&task);
+        drop(guard);
+        task.acquire_inner_lock().refresh_real_timer();
+
+        if !removed {
+            return WaitResult::Ready(normal_wake_result);
+        }
+    }
+}
+
 // Futex wait 只读用户 word
 fn do_futex_wait_until(
     futex_word: UserPtr<u32>,
@@ -317,7 +473,7 @@ fn do_futex_wait_until(
         return futex_wait_result_to_errno(wait_result);
     }
 
-    let wait_result = WaitQueue::wait_event_interruptible_timeout_locked_with_wake_result(
+    let wait_result = futex_wait_event_interruptible_timeout_locked(
         &futex_table,
         |futex| futex.wait_queue_mut(futex_key),
         |_: &mut Futex| match futex_word.read(token) {
@@ -353,7 +509,7 @@ pub fn do_futex_wait(
         token,
         futex_key,
         val,
-        timeout.map(|t| t + TimeSpec::now()),
+        timeout.map(futex_relative_deadline),
     )
 }
 
@@ -505,7 +661,7 @@ fn do_futex_wait_shared_until(
         return futex_wait_result_to_errno(wait_result);
     }
 
-    let wait_result = WaitQueue::wait_event_interruptible_timeout_locked_with_wake_result(
+    let wait_result = futex_wait_event_interruptible_timeout_locked(
         &PROCESS_SHARED_FUTEX,
         |shared| wait_queue_for_key(shared, phys_key),
         |_: &mut BTreeMap<usize, WaitQueue>| match futex_word.read(token) {
@@ -539,7 +695,7 @@ pub fn do_futex_wait_shared(
         futex_word,
         token,
         val,
-        timeout.map(|t| t + TimeSpec::now()),
+        timeout.map(futex_relative_deadline),
         phys_key,
     )
 }
