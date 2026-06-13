@@ -99,10 +99,7 @@ pub struct FutexWaitEntry {
 }
 
 fn wait_queue_for_key(map: &mut BTreeMap<usize, WaitQueue>, key: usize) -> &mut WaitQueue {
-    if !map.contains_key(&key) {
-        map.insert(key, WaitQueue::new());
-    }
-    map.get_mut(&key).unwrap()
+    map.entry(key).or_insert_with(WaitQueue::new)
 }
 
 /// 清理 PROCESS_SHARED_FUTEX 中所有空 WaitQueue 条目。

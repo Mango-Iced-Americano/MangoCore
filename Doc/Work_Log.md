@@ -4,6 +4,21 @@
 
 ## 2026-06-13
 
+### futex wait queue 查表优化
+
+**涉及文件：**
+- `os/src/task/threads.rs` — `wait_queue_for_key()` 从 `contains_key`/`insert`/`get_mut` 多次 BTreeMap 查找改为 `entry().or_insert_with()` 单次查找，保持缺失 key 时创建空 `WaitQueue` 的语义不变
+
+**验证：**
+- `docker compose exec -T -w /app/os os-dev env LOG=error make rv64-kernel-build-only` ✅ — `testresult/futex-entry-20260613/rv64-build.log`
+- `docker compose exec -T -w /app/os os-dev env LOG=error make la64-kernel-build-only` ✅ — `testresult/futex-entry-20260613/la64-build.log`
+- rv64 QEMU basic：`mask=0x001` ✅ — `testresult/futex-entry-20260613/rv64-basic.log`，无 `panic/FAIL/TFAIL/TBROK`
+- la64 QEMU basic：`mask=0x001` ✅ — `testresult/futex-entry-20260613/la64-basic.log`，无 `panic/FAIL/TFAIL/TBROK`
+- rv64 QEMU LTP focused：`futex_wait* / futex_wake* / futex_wait_bitset`，`ltp_libc=both` ✅ — `testresult/futex-entry-20260613/rv64-ltp.log`，20 个 `DONE LTP CASE ... : 0`，无 `TFAIL/TBROK`
+- la64 QEMU LTP focused：同一用例集，`ltp_libc=both` ✅ — `testresult/futex-entry-20260613/la64-ltp.log`，20 个 `DONE LTP CASE ... : 0`，无 `TFAIL/TBROK`
+
+**备注：** 本次是纯等价查表路径优化，未修改 futex 错误码、等待、唤醒或 requeue 语义；未修改 net/fs 测试点，也未运行 LTP 全量。
+
 ### wait_child 子进程单次扫描优化
 
 **涉及文件：**
