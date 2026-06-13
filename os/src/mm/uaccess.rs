@@ -632,6 +632,33 @@ pub fn get_right_aligned_bytes<T>(ptr: *const T) -> usize {
     (align - (ptr & mask)) & mask
 }
 
+fn append_user_cstr_bytes(dst: &mut String, bytes: &[u8], max_len: usize) -> Result<(), isize> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+
+    if bytes.iter().all(u8::is_ascii) {
+        let remaining = max_len.saturating_sub(dst.len());
+        if bytes.len() >= remaining {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+        let s = core::str::from_utf8(bytes).map_err(|_| crate::syscall::errno::EFAULT)?;
+        dst.push_str(s);
+        return Ok(());
+    }
+
+    for &ch in bytes {
+        if dst.len() >= max_len {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+        dst.push(ch as char);
+        if dst.len() >= max_len {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+    }
+    Ok(())
+}
+
 // Read a C string from user space.
 pub fn translated_str(token: usize, ptr: *const u8) -> Result<String, isize> {
     let mut string = String::new();
@@ -641,16 +668,28 @@ pub fn translated_str(token: usize, ptr: *const u8) -> Result<String, isize> {
         if string.len() >= max_len {
             return Err(crate::syscall::errno::EFAULT);
         }
-        let ch: u8 = *({
-            let va = VirtAddr::from(cur);
-            let pa = translate_user_va_checked(token, va, UserAccess::Read)?;
-            pa.get_ref()
-        });
-        if ch == 0 {
+
+        let va = VirtAddr::from(cur);
+        let pa = translate_user_va_checked(token, va, UserAccess::Read)?;
+        let page_offset = va.page_offset();
+        let page_len = (crate::config::PAGE_SIZE - page_offset).min(
+            crate::config::USER_VA_END
+                .checked_sub(cur)
+                .ok_or(crate::syscall::errno::EFAULT)?,
+        );
+        if page_len == 0 {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+
+        let bytes = &pa.floor().get_bytes_array()[page_offset..page_offset + page_len];
+        if let Some(nul_pos) = bytes.iter().position(|&ch| ch == 0) {
+            append_user_cstr_bytes(&mut string, &bytes[..nul_pos], max_len)?;
             break;
         }
-        string.push(ch as char);
-        cur = cur.checked_add(1).ok_or(crate::syscall::errno::EFAULT)?;
+        append_user_cstr_bytes(&mut string, bytes, max_len)?;
+        cur = cur
+            .checked_add(page_len)
+            .ok_or(crate::syscall::errno::EFAULT)?;
     }
     Ok(string)
 }

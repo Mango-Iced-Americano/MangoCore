@@ -4,6 +4,21 @@
 
 ## 2026-06-13
 
+### translated_str 按页扫描优化
+
+**涉及文件：**
+- `os/src/mm/uaccess.rs` — `translated_str()` 从逐字节 `translate_user_va_checked()` 改为每页 fault/translate 一次并在页内扫描 NUL；ASCII 页片段批量追加，非 ASCII 回退逐字节追加，保留旧的 `MAX_BUFFER_SIZE`/`EFAULT` 边界语义
+
+**验证：**
+- `docker compose exec -T -w /app/os os-dev env LOG=error make rv64-kernel-build-only` ✅ — `testresult/translated-str-20260613/rv64-build.log`
+- `docker compose exec -T -w /app/os os-dev env LOG=error make la64-kernel-build-only` ✅ — `testresult/translated-str-20260613/la64-build.log`
+- rv64 QEMU basic：`mask=0x001` ✅ — `testresult/translated-str-20260613/rv64-basic.log`，无 `panic/FAIL/TFAIL/TBROK`
+- la64 QEMU basic：`mask=0x001` ✅ — `testresult/translated-str-20260613/la64-basic.log`，无 `panic/FAIL/TFAIL/TBROK`
+- rv64 QEMU LTP focused：`sethostname/setdomainname/uname/add_key/keyctl/request_key`，`ltp_libc=both` ✅ — `testresult/translated-str-20260613/rv64-ltp-clean.log`，48 个 `DONE LTP CASE ... : 0`，无 `TFAIL/TBROK`
+- la64 QEMU LTP focused：同一用例集，`ltp_libc=both` ✅ — `testresult/translated-str-20260613/la64-ltp-clean.log`，48 个 `DONE LTP CASE ... : 0`，无 `TFAIL/TBROK`
+
+**备注：** 初版 focused 集合加入 `syslog11/12` 时因 `/proc/sys/kernel/printk` 缺失触发既有 `TBROK`，最终验证移除 syslog 用例；本次未修改 net/fs 测试点，也未运行 LTP 全量。
+
 ### KernelTimerQueue WakeTask 热路径优化
 
 **涉及文件：**
