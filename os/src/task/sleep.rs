@@ -4,6 +4,8 @@ use crate::timer::TimeSpec;
 
 use super::{WaitQueue, WaitResult};
 
+const PRECISE_SLEEP_SPIN_NS: usize = 750_000;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SleepInterrupted {
     pub remaining: TimeSpec,
@@ -22,20 +24,34 @@ fn sleep_until_deadline(
     deadline: TimeSpec,
     report_remaining: bool,
 ) -> Result<(), SleepInterrupted> {
-    if TimeSpec::now() >= deadline {
+    let now = TimeSpec::now();
+    if now >= deadline {
         return Ok(());
     }
 
-    let wait_queue = Mutex::new(WaitQueue::new());
-    match WaitQueue::wait_event_interruptible_timeout(&wait_queue, || None::<isize>, deadline) {
-        WaitResult::Interrupted => {
-            let remaining = if report_remaining {
-                deadline - TimeSpec::now()
-            } else {
-                TimeSpec::new()
-            };
-            Err(SleepInterrupted { remaining })
+    let spin_guard = TimeSpec::from_ns(PRECISE_SLEEP_SPIN_NS);
+    if deadline - now > spin_guard {
+        let wait_deadline = deadline - spin_guard;
+        let wait_queue = Mutex::new(WaitQueue::new());
+        match WaitQueue::wait_event_interruptible_timeout(
+            &wait_queue,
+            || None::<isize>,
+            wait_deadline,
+        ) {
+            WaitResult::Interrupted => {
+                let remaining = if report_remaining {
+                    deadline - TimeSpec::now()
+                } else {
+                    TimeSpec::new()
+                };
+                return Err(SleepInterrupted { remaining });
+            }
+            WaitResult::Ready(_) | WaitResult::TimedOut => {}
         }
-        WaitResult::Ready(_) | WaitResult::TimedOut => Ok(()),
     }
+
+    while TimeSpec::now() < deadline {
+        core::hint::spin_loop();
+    }
+    Ok(())
 }

@@ -4,6 +4,21 @@
 
 ## 2026-06-13
 
+### LTP clock_nanosleep02 短睡眠精度修复
+
+**涉及文件：**
+- `os/src/task/sleep.rs` — 相对/绝对 sleep 在全局 timeout 队列唤醒前预留 750us 精确等待窗口，最后一小段用 `spin_loop()` 等到真实 deadline，避免固定调度延迟导致 `clock_nanosleep02`/`nanosleep01` 统计均值超过 LTP 阈值
+
+**验证：**
+- `docker compose exec -T os-dev bash -lc 'cd /app/os && LOG=error make rv64-kernel-build-only ...'` ✅
+- `docker compose exec -T os-dev bash -lc 'cd /app/os && LOG=error make la64-kernel-build-only ...'` ✅
+- rv64 QEMU suite focused：`mask=0x800`、`timeout_ltp=420`、`ltp_runner=suite`、`ltp_suites=syscalls`、`ltp_include=clock_nanosleep02`、`ltp_libc=both` ✅ — musl/glibc 均 `PASS LTP CASE clock_nanosleep02 : 0`，1ms sleep 截断均值约 1.21ms
+- la64 QEMU suite focused：同上配置 ✅ — musl/glibc 均 `PASS LTP CASE clock_nanosleep02 : 0`
+- rv64 QEMU suite 防回归：`ltp_include=nanosleep01,nanosleep02,clock_nanosleep01,clock_nanosleep02`、`ltp_libc=both` ✅ — 全部 PASS
+- la64 QEMU suite 防回归：同一用例集、`ltp_libc=both` ✅ — 全部 PASS
+
+**备注：** 本次只调整通用 task sleep 的短尾精度，不修改 timerfd/epoll/net/fs 行为，也未运行 LTP 全量。
+
 ### LTP rv64 musl timeout multiplier 兼容
 
 **涉及文件：**
