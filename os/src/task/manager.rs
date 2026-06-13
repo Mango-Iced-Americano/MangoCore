@@ -1135,33 +1135,27 @@ impl PartialEq for KernelTimer {
     }
 }
 
+impl KernelTimer {
+    fn is_live(&self) -> bool {
+        match &self.action {
+            TimerAction::WakeTask { task, generation } => match task.upgrade() {
+                Some(task) => {
+                    // WakeTask entries are intentionally not deduplicated on insertion.
+                    // A newer wait bumps the generation; older entries are stale and can be
+                    // dropped by compact() or ignored when their deadline expires.
+                    task.wait_timer_generation.load(AtomicOrdering::Acquire) == *generation
+                }
+                None => false,
+            },
+            TimerAction::SendSignal { task, .. }
+            | TimerAction::PosixTimerSignal { task, .. } => task.strong_count() > 0,
+        }
+    }
+}
+
 //计数器触发队列
 pub struct KernelTimerQueue {
     inner: BinaryHeap<KernelTimer>,
-}
-
-/// 判断两个 TimerAction 是否指向同一个"槽位"（用于去重）：
-/// - WakeTask：比较 task 指针
-/// - SendSignal：比较 task 指针 + 信号类型
-fn same_action_slot(a: &TimerAction, b: &TimerAction) -> bool {
-    match (a, b) {
-        (TimerAction::WakeTask { task: ta, .. }, TimerAction::WakeTask { task: tb, .. }) => {
-            Weak::as_ptr(ta) == Weak::as_ptr(tb)
-        }
-        (
-            TimerAction::SendSignal {
-                task: ta,
-                signal: sa,
-                ..
-            },
-            TimerAction::SendSignal {
-                task: tb,
-                signal: sb,
-                ..
-            },
-        ) => Weak::as_ptr(ta) == Weak::as_ptr(tb) && *sa == *sb,
-        _ => false,
-    }
 }
 
 impl KernelTimerQueue {
@@ -1180,44 +1174,11 @@ impl KernelTimerQueue {
     }
 
     pub fn add_action(&mut self, action: TimerAction, deadline: TimeSpec) {
-        // 去重：扫描已有条目，相同 slot 只保留 deadline 最早的
-        // 用 Option 包装 action，避免 borrow checker 的移动语义问题
-        let old_entries: Vec<KernelTimer> = self.inner.drain().collect();
-        let mut action = Some(action);
-        for entry in old_entries {
-            if let Some(ref new_action) = action {
-                if same_action_slot(&entry.action, new_action) {
-                    // 相同 slot，保留 deadline 更早的
-                    if deadline < entry.deadline {
-                        // 新的更早：替换旧的
-                        self.inner.push(KernelTimer {
-                            action: action.take().unwrap(),
-                            deadline,
-                        });
-                    } else {
-                        // 旧得更早：保留旧的，丢弃新的
-                        self.inner.push(entry);
-                        action = None;
-                    }
-                    continue;
-                }
-            }
-            self.inner.push(entry);
-        }
-        // action 未被消耗 → 没有匹配的 slot，直接加入
-        if let Some(action) = action {
-            self.inner.push(KernelTimer { action, deadline });
-        }
-
-        // 容量上限：丢弃 deadline 最远的条目
-        while self.inner.len() > Self::MAX_TIMERS {
-            if let Some(t) = self.inner.pop() {
-                log::warn!(
-                    "[KernelTimerQueue] capacity limit ({}) reached, discarding deadline={:?}",
-                    Self::MAX_TIMERS,
-                    t.deadline
-                );
-            }
+        // Keep the hot path O(log n).  WakeTask stale entries are filtered by
+        // generation, while signal timers validate their generation/deadline in run_timer().
+        self.inner.push(KernelTimer { action, deadline });
+        if self.inner.len() > Self::MAX_TIMERS {
+            self.enforce_capacity();
         }
     }
     pub fn wake_expired(&mut self, now: TimeSpec) {
@@ -1236,27 +1197,45 @@ impl KernelTimerQueue {
         }
         let entries: Vec<KernelTimer> = self.inner.drain().collect();
         for timer in entries {
-            let task = match &timer.action {
-                TimerAction::WakeTask { task, .. }
-                | TimerAction::SendSignal { task, .. }
-                | TimerAction::PosixTimerSignal { task, .. } => task,
-            };
-            if task.strong_count() > 0 {
+            if timer.is_live() {
                 self.inner.push(timer);
             }
+        }
+    }
+    fn enforce_capacity(&mut self) {
+        self.compact();
+        if self.inner.len() <= Self::MAX_TIMERS {
+            return;
+        }
+
+        let mut entries: Vec<KernelTimer> = self.inner.drain().collect();
+        entries.sort_unstable_by(|a, b| a.deadline.cmp(&b.deadline));
+        let dropped = entries.len().saturating_sub(Self::MAX_TIMERS);
+        for timer in entries.into_iter().take(Self::MAX_TIMERS) {
+            self.inner.push(timer);
+        }
+        if dropped > 0 {
+            log::warn!(
+                "[KernelTimerQueue] capacity limit ({}) reached, dropped {} farthest timers",
+                Self::MAX_TIMERS,
+                dropped
+            );
         }
     }
     fn run_timer(&mut self, timer: KernelTimer, now: TimeSpec) {
         match timer.action {
             TimerAction::WakeTask {
                 task,
-                generation: _,
+                generation,
             } => {
                 if let Some(task) = task.upgrade() {
                     // Option A：无条件清除 pending 标志。
                     // 无论任务是否已被提前唤醒，定时器既已触发，槽位即释放。
                     task.wait_io_timer_pending
                         .store(false, AtomicOrdering::Release);
+                    if task.wait_timer_generation.load(AtomicOrdering::Acquire) != generation {
+                        return;
+                    }
 
                     let mut inner = task.acquire_inner_lock();
                     let should_wake = inner.task_status == super::TaskStatus::Interruptible;
@@ -1516,10 +1495,17 @@ pub fn add_kernel_timer(action: TimerAction, deadline: TimeSpec) {
 /// 这个函数会将一个`task`添加到全局超时等待队列中，但是不会阻塞它
 /// 如果想要阻塞一个任务，使用`block_current_and_run_next()`函数
 pub fn wait_with_timeout(task: Weak<TaskControlBlock>, timeout: TimeSpec) {
+    let Some(task) = task.upgrade() else {
+        return;
+    };
+    let generation = task
+        .wait_timer_generation
+        .fetch_add(1, AtomicOrdering::AcqRel)
+        .wrapping_add(1);
     KERNEL_TIMER_QUEUE.lock().add_action(
         TimerAction::WakeTask {
-            task,
-            generation: 0,
+            task: Arc::downgrade(&task),
+            generation,
         },
         timeout,
     )

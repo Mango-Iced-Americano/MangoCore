@@ -4,6 +4,23 @@
 
 ## 2026-06-13
 
+### KernelTimerQueue WakeTask 热路径优化
+
+**涉及文件：**
+- `os/src/task/manager.rs` — 移除 `KernelTimerQueue::add_action()` 每次插入时的全堆 `drain`/重建去重，改为 O(log n) 直接入堆；`WakeTask` 通过 task 级 generation 过滤陈旧定时器，容量溢出时再集中 compact 并保留最早 deadline
+- `os/src/task/task.rs` — 为 `TaskControlBlock` 增加 `wait_timer_generation`，让超时唤醒定时器能区分当前等待和历史等待
+- `os/src/task/threads.rs` — 旁观者视角复核后发现 timer queue 变快会暴露 la64 futex 相对超时 450us 出口补偿过大的问题，将 la64 `FUTEX_REL_TIMEOUT_EXIT_BIAS_NS` 调整为 180us，避免 `futex_wait05` musl 早醒和 glibc 长睡
+
+**验证：**
+- `docker compose exec -T os-dev bash -lc 'cd /app/os && LOG=error make rv64-kernel-build-only'` ✅ — `testresult/timerqueue-step1-20260613/rv64-build-final.log`
+- `docker compose exec -T os-dev bash -lc 'cd /app/os && LOG=error make la64-kernel-build-only'` ✅ — `testresult/timerqueue-step1-20260613/la64-build-final.log`
+- rv64 QEMU basic：`mask=0x001` ✅ — `testresult/timerqueue-step1-20260613/rv64-basic-final.log`，无 `panic/FAIL/TFAIL/TBROK`
+- la64 QEMU basic：`mask=0x001` ✅ — `testresult/timerqueue-step1-20260613/la64-basic-final.log`，无 `panic/FAIL/TFAIL/TBROK`
+- rv64 QEMU LTP core：`mask=0x800`、`ltp_runner=inline`、`ltp_libc=both`、`alarm/getitimer/setitimer/timer_* / nanosleep / clock_nanosleep / futex_wait*` ✅ — 56 个 `DONE LTP CASE ... : 0`，无 `TFAIL/TBROK`
+- la64 QEMU LTP core：同一用例集 ✅ — 56 个 `DONE LTP CASE ... : 0`，无 `TFAIL/TBROK`
+
+**备注：** 本次只优化 task/timer/futex 路径，不修改 net/fs 测试点，也未运行 LTP 全量。自审阶段先跑过一版 rv64 broad wait-mux 压测，`poll02/pselect01/select02/select01` 仍有既有短 timeout/EBADF 问题；该问题不属于本次提交范围，最终提交验证使用 timer/futex core 用例集闭环。
+
 ### LTP futex_wait05 timeout 精度修复
 
 **涉及文件：**
