@@ -4,6 +4,21 @@
 
 ## 2026-06-13
 
+### wait_child 子进程单次扫描优化
+
+**涉及文件：**
+- `os/src/task/process_manager.rs` — `ProcessManager::wait_child()` 的 `try_reap_child` 从最多三次遍历 children（匹配性检查、stopped/continued 检查、zombie 查找）合并为一次扫描；仍保留 stopped/continued 优先于 zombie、ptrace attached tracee fallback 和 `WNOWAIT` 行为
+
+**验证：**
+- `docker compose exec -T -w /app/os os-dev env LOG=error make rv64-kernel-build-only` ✅ — `testresult/wait-child-single-scan-20260613/rv64-build.log`
+- `docker compose exec -T -w /app/os os-dev env LOG=error make la64-kernel-build-only` ✅ — `testresult/wait-child-single-scan-20260613/la64-build.log`
+- rv64 QEMU basic：`mask=0x001` ✅ — `testresult/wait-child-single-scan-20260613/rv64-basic.log`，无 `panic/FAIL/TFAIL/TBROK`
+- la64 QEMU basic：`mask=0x001` ✅ — `testresult/wait-child-single-scan-20260613/la64-basic.log`，无 `panic/FAIL/TFAIL/TBROK`
+- rv64 QEMU LTP focused：`wait/waitpid/waitid` 核心用例，`ltp_libc=both` ✅ — `testresult/wait-child-single-scan-20260613/rv64-ltp.log`，30 个 `DONE LTP CASE ... : 0`，无 `TFAIL/TBROK`
+- la64 QEMU LTP focused：同一用例集，`ltp_libc=both` ✅ — `testresult/wait-child-single-scan-20260613/la64-ltp.log`，30 个 `DONE LTP CASE ... : 0`，无 `TFAIL/TBROK`
+
+**备注：** 旁观者视角复核确认本次只减少重复遍历/锁获取，不改变 wait 状态报告顺序；未修改 net/fs 测试点，也未运行 LTP 全量。
+
 ### WaitQueue 单个唤醒快路径
 
 **涉及文件：**

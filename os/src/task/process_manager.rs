@@ -128,24 +128,17 @@ impl ProcessManager {
             let mut process_inner = process.acquire_inner_lock();
             let caller_pgid = process_inner.pgid;
 
-            let has_child = process_inner.children.iter().any(|child| {
-                let child_inner = child.acquire_inner_lock();
-                child_matches_pid(child.pid, child_inner.pgid, caller_pgid, pid)
-            });
-            if !has_child {
-                if let Some(value) = try_wait_attached_tracee() {
-                    return Some(value);
-                }
-                return Some(ECHILD);
-            }
-
-            for child in process_inner.children.iter() {
+            let mut has_matching_child = false;
+            let mut zombie_idx = None;
+            for (idx, child) in process_inner.children.iter().enumerate() {
                 let child_inner = child.acquire_inner_lock();
                 let matched = child_matches_pid(child.pid, child_inner.pgid, caller_pgid, pid);
+                let is_zombie = child_inner.state == ProcessState::Zombie;
                 drop(child_inner);
                 if !matched {
                     continue;
                 }
+                has_matching_child = true;
                 if report_stopped || (report_exited && child_is_ptraced(child)) {
                     if let Some(status) = child.take_stopped_status(nowait) {
                         wait_status.set(status);
@@ -158,19 +151,21 @@ impl ProcessManager {
                         return Some(child.pid as isize);
                     }
                 }
+                if report_exited && is_zombie && zombie_idx.is_none() {
+                    zombie_idx = Some(idx);
+                }
             }
 
+            if !has_matching_child {
+                if let Some(value) = try_wait_attached_tracee() {
+                    return Some(value);
+                }
+                return Some(ECHILD);
+            }
             if !report_exited {
                 return None;
             }
-
-            let pair = process_inner.children.iter().enumerate().find(|(_, child)| {
-                let child_inner = child.acquire_inner_lock();
-                child_inner.state == ProcessState::Zombie
-                    && child_matches_pid(child.pid, child_inner.pgid, caller_pgid, pid)
-            });
-
-            if let Some((idx, _)) = pair {
+            if let Some(idx) = zombie_idx {
                 let child = if nowait {
                     process_inner.children[idx].clone()
                 } else {
