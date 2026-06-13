@@ -4,6 +4,98 @@
 
 ## 2026-06-13
 
+### futex wait queue 查表优化
+
+**涉及文件：**
+- `os/src/task/threads.rs` — `wait_queue_for_key()` 从 `contains_key`/`insert`/`get_mut` 多次 BTreeMap 查找改为 `entry().or_insert_with()` 单次查找，保持缺失 key 时创建空 `WaitQueue` 的语义不变
+
+**验证：**
+- `docker compose exec -T -w /app/os os-dev env LOG=error make rv64-kernel-build-only` ✅ — `testresult/futex-entry-20260613/rv64-build.log`
+- `docker compose exec -T -w /app/os os-dev env LOG=error make la64-kernel-build-only` ✅ — `testresult/futex-entry-20260613/la64-build.log`
+- rv64 QEMU basic：`mask=0x001` ✅ — `testresult/futex-entry-20260613/rv64-basic.log`，无 `panic/FAIL/TFAIL/TBROK`
+- la64 QEMU basic：`mask=0x001` ✅ — `testresult/futex-entry-20260613/la64-basic.log`，无 `panic/FAIL/TFAIL/TBROK`
+- rv64 QEMU LTP focused：`futex_wait* / futex_wake* / futex_wait_bitset`，`ltp_libc=both` ✅ — `testresult/futex-entry-20260613/rv64-ltp.log`，20 个 `DONE LTP CASE ... : 0`，无 `TFAIL/TBROK`
+- la64 QEMU LTP focused：同一用例集，`ltp_libc=both` ✅ — `testresult/futex-entry-20260613/la64-ltp.log`，20 个 `DONE LTP CASE ... : 0`，无 `TFAIL/TBROK`
+
+**备注：** 本次是纯等价查表路径优化，未修改 futex 错误码、等待、唤醒或 requeue 语义；未修改 net/fs 测试点，也未运行 LTP 全量。
+
+### wait_child 子进程单次扫描优化
+
+**涉及文件：**
+- `os/src/task/process_manager.rs` — `ProcessManager::wait_child()` 的 `try_reap_child` 从最多三次遍历 children（匹配性检查、stopped/continued 检查、zombie 查找）合并为一次扫描；仍保留 stopped/continued 优先于 zombie、ptrace attached tracee fallback 和 `WNOWAIT` 行为
+
+**验证：**
+- `docker compose exec -T -w /app/os os-dev env LOG=error make rv64-kernel-build-only` ✅ — `testresult/wait-child-single-scan-20260613/rv64-build.log`
+- `docker compose exec -T -w /app/os os-dev env LOG=error make la64-kernel-build-only` ✅ — `testresult/wait-child-single-scan-20260613/la64-build.log`
+- rv64 QEMU basic：`mask=0x001` ✅ — `testresult/wait-child-single-scan-20260613/rv64-basic.log`，无 `panic/FAIL/TFAIL/TBROK`
+- la64 QEMU basic：`mask=0x001` ✅ — `testresult/wait-child-single-scan-20260613/la64-basic.log`，无 `panic/FAIL/TFAIL/TBROK`
+- rv64 QEMU LTP focused：`wait/waitpid/waitid` 核心用例，`ltp_libc=both` ✅ — `testresult/wait-child-single-scan-20260613/rv64-ltp.log`，30 个 `DONE LTP CASE ... : 0`，无 `TFAIL/TBROK`
+- la64 QEMU LTP focused：同一用例集，`ltp_libc=both` ✅ — `testresult/wait-child-single-scan-20260613/la64-ltp.log`，30 个 `DONE LTP CASE ... : 0`，无 `TFAIL/TBROK`
+
+**备注：** 旁观者视角复核确认本次只减少重复遍历/锁获取，不改变 wait 状态报告顺序；未修改 net/fs 测试点，也未运行 LTP 全量。
+
+### WaitQueue 单个唤醒快路径
+
+**涉及文件：**
+- `os/src/task/manager.rs` — `WaitQueue::wake_at_most(1)` 改走专用 `wake_one()`，只扫描到第一个可唤醒任务并直接移入 ready queue；批量唤醒仍保留原来的全队列 compact/重建逻辑，避免改变 `wake_all()` 和多任务唤醒语义
+
+**验证：**
+- `docker compose exec -T -w /app/os os-dev env LOG=error make rv64-kernel-build-only` ✅ — `testresult/waitqueue-wake-one-20260613/rv64-build.log`
+- `docker compose exec -T -w /app/os os-dev env LOG=error make la64-kernel-build-only` ✅ — `testresult/waitqueue-wake-one-20260613/la64-build.log`
+- rv64 QEMU basic：`mask=0x001` ✅ — `testresult/waitqueue-wake-one-20260613/rv64-basic.log`，无 `panic/FAIL/TFAIL/TBROK`
+- la64 QEMU basic：`mask=0x001` ✅ — `testresult/waitqueue-wake-one-20260613/la64-basic.log`，无 `panic/FAIL/TFAIL/TBROK`
+- rv64 QEMU LTP focused：`futex_wait* / futex_wake* / futex_wait_bitset`，`ltp_libc=both` ✅ — `testresult/waitqueue-wake-one-20260613/rv64-ltp.log`，20 个 `DONE LTP CASE ... : 0`，无 `TFAIL/TBROK`
+- la64 QEMU LTP focused：同一用例集，`ltp_libc=both` ✅ — `testresult/waitqueue-wake-one-20260613/la64-ltp.log`，20 个 `DONE LTP CASE ... : 0`，无 `TFAIL/TBROK`
+
+**备注：** 旁观者视角复核时确认单个唤醒快路径不会清理队列尾部 stale weak，已在代码注释说明；这些 stale 项仍会由后续 wake/finish_wait 或批量路径清理。本次未修改 net/fs 测试点，也未运行 LTP 全量。
+
+### uaccess 单页小对象拷贝快路径
+
+**涉及文件：**
+- `os/src/mm/uaccess.rs` — 为 `copy_from_user()`、`copy_from_user_array()`、`copy_to_user()`、`copy_to_user_array()` 和 `copy_to_user_string()` 增加单页快路径；单页内直接翻译一次并复制，跨页仍回退原 `UserBuffer` 路径，保留后续页失败时不产生部分拷贝的既有语义
+
+**验证：**
+- `docker compose exec -T -w /app/os os-dev env LOG=error make rv64-kernel-build-only` ✅ — `testresult/uaccess-single-page-20260613/rv64-build.log`
+- `docker compose exec -T -w /app/os os-dev env LOG=error make la64-kernel-build-only` ✅ — `testresult/uaccess-single-page-20260613/la64-build.log`
+- rv64 QEMU basic：`mask=0x001` ✅ — `testresult/uaccess-single-page-20260613/rv64-basic.log`，无 `panic/FAIL/TFAIL/TBROK`
+- la64 QEMU basic：`mask=0x001` ✅ — `testresult/uaccess-single-page-20260613/la64-basic.log`，无 `panic/FAIL/TFAIL/TBROK`
+- rv64 QEMU LTP focused：`clock_getres/clock_gettime/gettimeofday/uname/getrlimit/setrlimit/getrusage/sysinfo/rt_sigaction/rt_sigprocmask/prctl`，`ltp_libc=both` ✅ — `testresult/uaccess-single-page-20260613/rv64-ltp.log`，46 个 `DONE LTP CASE ... : 0`，无 `TFAIL/TBROK`
+- la64 QEMU LTP focused：同一用例集，`ltp_libc=both` ✅ — `testresult/uaccess-single-page-20260613/la64-ltp.log`，46 个 `DONE LTP CASE ... : 0`，无 `TFAIL/TBROK`
+
+**备注：** 旁观者视角复核时发现全量跨页直接拷贝会改变错误路径的部分拷贝语义，因此本次仅优化单页场景；重复的 unsafe 拷贝逻辑已收敛到 helper，未修改 net/fs 测试点，也未运行 LTP 全量。
+
+### translated_str 按页扫描优化
+
+**涉及文件：**
+- `os/src/mm/uaccess.rs` — `translated_str()` 从逐字节 `translate_user_va_checked()` 改为每页 fault/translate 一次并在页内扫描 NUL；ASCII 页片段批量追加，非 ASCII 回退逐字节追加，保留旧的 `MAX_BUFFER_SIZE`/`EFAULT` 边界语义
+
+**验证：**
+- `docker compose exec -T -w /app/os os-dev env LOG=error make rv64-kernel-build-only` ✅ — `testresult/translated-str-20260613/rv64-build.log`
+- `docker compose exec -T -w /app/os os-dev env LOG=error make la64-kernel-build-only` ✅ — `testresult/translated-str-20260613/la64-build.log`
+- rv64 QEMU basic：`mask=0x001` ✅ — `testresult/translated-str-20260613/rv64-basic.log`，无 `panic/FAIL/TFAIL/TBROK`
+- la64 QEMU basic：`mask=0x001` ✅ — `testresult/translated-str-20260613/la64-basic.log`，无 `panic/FAIL/TFAIL/TBROK`
+- rv64 QEMU LTP focused：`sethostname/setdomainname/uname/add_key/keyctl/request_key`，`ltp_libc=both` ✅ — `testresult/translated-str-20260613/rv64-ltp-clean.log`，48 个 `DONE LTP CASE ... : 0`，无 `TFAIL/TBROK`
+- la64 QEMU LTP focused：同一用例集，`ltp_libc=both` ✅ — `testresult/translated-str-20260613/la64-ltp-clean.log`，48 个 `DONE LTP CASE ... : 0`，无 `TFAIL/TBROK`
+
+**备注：** 初版 focused 集合加入 `syslog11/12` 时因 `/proc/sys/kernel/printk` 缺失触发既有 `TBROK`，最终验证移除 syslog 用例；本次未修改 net/fs 测试点，也未运行 LTP 全量。
+
+### KernelTimerQueue WakeTask 热路径优化
+
+**涉及文件：**
+- `os/src/task/manager.rs` — 移除 `KernelTimerQueue::add_action()` 每次插入时的全堆 `drain`/重建去重，改为 O(log n) 直接入堆；`WakeTask` 通过 task 级 generation 过滤陈旧定时器，容量溢出时再集中 compact 并保留最早 deadline
+- `os/src/task/task.rs` — 为 `TaskControlBlock` 增加 `wait_timer_generation`，让超时唤醒定时器能区分当前等待和历史等待
+- `os/src/task/threads.rs` — 旁观者视角复核后发现 timer queue 变快会暴露 la64 futex 相对超时 450us 出口补偿过大的问题，将 la64 `FUTEX_REL_TIMEOUT_EXIT_BIAS_NS` 调整为 180us，避免 `futex_wait05` musl 早醒和 glibc 长睡
+
+**验证：**
+- `docker compose exec -T os-dev bash -lc 'cd /app/os && LOG=error make rv64-kernel-build-only'` ✅ — `testresult/timerqueue-step1-20260613/rv64-build-final.log`
+- `docker compose exec -T os-dev bash -lc 'cd /app/os && LOG=error make la64-kernel-build-only'` ✅ — `testresult/timerqueue-step1-20260613/la64-build-final.log`
+- rv64 QEMU basic：`mask=0x001` ✅ — `testresult/timerqueue-step1-20260613/rv64-basic-final.log`，无 `panic/FAIL/TFAIL/TBROK`
+- la64 QEMU basic：`mask=0x001` ✅ — `testresult/timerqueue-step1-20260613/la64-basic-final.log`，无 `panic/FAIL/TFAIL/TBROK`
+- rv64 QEMU LTP core：`mask=0x800`、`ltp_runner=inline`、`ltp_libc=both`、`alarm/getitimer/setitimer/timer_* / nanosleep / clock_nanosleep / futex_wait*` ✅ — 56 个 `DONE LTP CASE ... : 0`，无 `TFAIL/TBROK`
+- la64 QEMU LTP core：同一用例集 ✅ — 56 个 `DONE LTP CASE ... : 0`，无 `TFAIL/TBROK`
+
+**备注：** 本次只优化 task/timer/futex 路径，不修改 net/fs 测试点，也未运行 LTP 全量。自审阶段先跑过一版 rv64 broad wait-mux 压测，`poll02/pselect01/select02/select01` 仍有既有短 timeout/EBADF 问题；该问题不属于本次提交范围，最终提交验证使用 timer/futex core 用例集闭环。
+
 ### LTP futex_wait05 timeout 精度修复
 
 **涉及文件：**

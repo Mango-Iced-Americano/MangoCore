@@ -632,6 +632,33 @@ pub fn get_right_aligned_bytes<T>(ptr: *const T) -> usize {
     (align - (ptr & mask)) & mask
 }
 
+fn append_user_cstr_bytes(dst: &mut String, bytes: &[u8], max_len: usize) -> Result<(), isize> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+
+    if bytes.iter().all(u8::is_ascii) {
+        let remaining = max_len.saturating_sub(dst.len());
+        if bytes.len() >= remaining {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+        let s = core::str::from_utf8(bytes).map_err(|_| crate::syscall::errno::EFAULT)?;
+        dst.push_str(s);
+        return Ok(());
+    }
+
+    for &ch in bytes {
+        if dst.len() >= max_len {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+        dst.push(ch as char);
+        if dst.len() >= max_len {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+    }
+    Ok(())
+}
+
 // Read a C string from user space.
 pub fn translated_str(token: usize, ptr: *const u8) -> Result<String, isize> {
     let mut string = String::new();
@@ -641,16 +668,28 @@ pub fn translated_str(token: usize, ptr: *const u8) -> Result<String, isize> {
         if string.len() >= max_len {
             return Err(crate::syscall::errno::EFAULT);
         }
-        let ch: u8 = *({
-            let va = VirtAddr::from(cur);
-            let pa = translate_user_va_checked(token, va, UserAccess::Read)?;
-            pa.get_ref()
-        });
-        if ch == 0 {
+
+        let va = VirtAddr::from(cur);
+        let pa = translate_user_va_checked(token, va, UserAccess::Read)?;
+        let page_offset = va.page_offset();
+        let page_len = (crate::config::PAGE_SIZE - page_offset).min(
+            crate::config::USER_VA_END
+                .checked_sub(cur)
+                .ok_or(crate::syscall::errno::EFAULT)?,
+        );
+        if page_len == 0 {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+
+        let bytes = &pa.floor().get_bytes_array()[page_offset..page_offset + page_len];
+        if let Some(nul_pos) = bytes.iter().position(|&ch| ch == 0) {
+            append_user_cstr_bytes(&mut string, &bytes[..nul_pos], max_len)?;
             break;
         }
-        string.push(ch as char);
-        cur = cur.checked_add(1).ok_or(crate::syscall::errno::EFAULT)?;
+        append_user_cstr_bytes(&mut string, bytes, max_len)?;
+        cur = cur
+            .checked_add(page_len)
+            .ok_or(crate::syscall::errno::EFAULT)?;
     }
     Ok(string)
 }
@@ -895,6 +934,70 @@ impl Iterator for UserBufferIterator {
     }
 }
 
+fn translate_single_page_user_bytes(
+    token: usize,
+    ptr: *const u8,
+    len: usize,
+    access: UserAccess,
+) -> Result<Option<&'static mut [u8]>, isize> {
+    if len == 0 {
+        return Ok(None);
+    }
+    if ptr.is_null() {
+        return Err(crate::syscall::errno::EFAULT);
+    }
+
+    let start = ptr as usize;
+    let end = check_user_range(start, len)?;
+    let start_va = VirtAddr::from(start);
+    let last_va = VirtAddr::from(end - 1);
+    if start_va.floor() != last_va.floor() {
+        return Ok(None);
+    }
+
+    let pa = translate_user_va_checked(token, start_va, access)?;
+    let page_offset = start_va.page_offset();
+    Ok(Some(
+        &mut pa.floor().get_bytes_array()[page_offset..page_offset + len],
+    ))
+}
+
+fn copy_single_page_from_user(
+    token: usize,
+    src: *const u8,
+    dst: *mut u8,
+    len: usize,
+) -> Result<bool, isize> {
+    if let Some(user_bytes) =
+        translate_single_page_user_bytes(token, src, len, UserAccess::Read)?
+    {
+        unsafe {
+            core::ptr::copy_nonoverlapping(user_bytes.as_ptr(), dst, len);
+        }
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+fn copy_single_page_to_user(
+    token: usize,
+    src: *const u8,
+    dst: *mut u8,
+    len: usize,
+) -> Result<bool, isize> {
+    if let Some(user_bytes) =
+        translate_single_page_user_bytes(token, dst as *const u8, len, UserAccess::Write)?
+    {
+        unsafe {
+            core::ptr::copy_nonoverlapping(src, user_bytes.as_mut_ptr(), len);
+        }
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 /// Copy `*src: T` to kernel space.
 /// `src` is a pointer in user space, `dst` is a pointer in kernel space.
 pub fn copy_from_user<T: 'static + Copy>(
@@ -904,6 +1007,9 @@ pub fn copy_from_user<T: 'static + Copy>(
 ) -> Result<(), isize> {
     let size = core::mem::size_of::<T>();
     if size == 0 {
+        return Ok(());
+    }
+    if copy_single_page_from_user(token, src as *const u8, dst as *mut u8, size)? {
         return Ok(());
     }
     UserBuffer::new(translated_byte_buffer(
@@ -930,6 +1036,9 @@ pub fn copy_from_user_array<T: 'static + Copy>(
     if size == 0 {
         return Ok(());
     }
+    if copy_single_page_from_user(token, src as *const u8, dst as *mut u8, size)? {
+        return Ok(());
+    }
     UserBuffer::new(translated_byte_buffer(
         token,
         src as *const u8,
@@ -949,6 +1058,9 @@ pub fn copy_to_user<T: 'static + Copy>(
 ) -> Result<(), isize> {
     let size = core::mem::size_of::<T>();
     if size == 0 {
+        return Ok(());
+    }
+    if copy_single_page_to_user(token, src as *const u8, dst as *mut u8, size)? {
         return Ok(());
     }
     UserBuffer::new(translated_byte_buffer(
@@ -998,6 +1110,9 @@ pub fn copy_to_user_array<T: 'static + Copy>(
     if size == 0 {
         return Ok(());
     }
+    if copy_single_page_to_user(token, src as *const u8, dst as *mut u8, size)? {
+        return Ok(());
+    }
     UserBuffer::new(translated_byte_buffer(
         token,
         dst as *const u8,
@@ -1017,6 +1132,13 @@ pub fn copy_to_user_string(token: usize, src: &str, dst: *mut u8) -> Result<(), 
         .len()
         .checked_add(1)
         .ok_or(crate::syscall::errno::EFAULT)?;
+    if let Some(user_bytes) =
+        translate_single_page_user_bytes(token, dst as *const u8, size, UserAccess::Write)?
+    {
+        user_bytes[..src.len()].copy_from_slice(src.as_bytes());
+        user_bytes[src.len()] = 0;
+        return Ok(());
+    }
     let mut user_buf = UserBuffer::new(translated_byte_buffer(
         token,
         dst as *const u8,

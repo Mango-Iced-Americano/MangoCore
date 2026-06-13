@@ -25,9 +25,10 @@ use super::manager::{WaitQueue, WaitResult};
 const PRECISE_FUTEX_SPIN_NS: usize = 12_000_000;
 #[cfg(not(target_arch = "loongarch64"))]
 const PRECISE_FUTEX_SPIN_NS: usize = 1_250_000;
-// la64 QEMU has a stable futex timeout return-to-user tail that exceeds LTP's 450us margin.
+// la64 QEMU has a stable futex timeout return-to-user tail.  Keep a small
+// bias, but leave enough room so LTP does not observe an early timeout.
 #[cfg(target_arch = "loongarch64")]
-const FUTEX_REL_TIMEOUT_EXIT_BIAS_NS: usize = 450_000;
+const FUTEX_REL_TIMEOUT_EXIT_BIAS_NS: usize = 180_000;
 
 #[allow(unused)]
 #[derive(Debug, Eq, PartialEq, FromPrimitive)]
@@ -98,10 +99,7 @@ pub struct FutexWaitEntry {
 }
 
 fn wait_queue_for_key(map: &mut BTreeMap<usize, WaitQueue>, key: usize) -> &mut WaitQueue {
-    if !map.contains_key(&key) {
-        map.insert(key, WaitQueue::new());
-    }
-    map.get_mut(&key).unwrap()
+    map.entry(key).or_insert_with(WaitQueue::new)
 }
 
 /// 清理 PROCESS_SHARED_FUTEX 中所有空 WaitQueue 条目。
