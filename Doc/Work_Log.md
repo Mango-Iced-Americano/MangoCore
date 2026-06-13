@@ -4,6 +4,21 @@
 
 ## 2026-06-13
 
+### WaitQueue 单个唤醒快路径
+
+**涉及文件：**
+- `os/src/task/manager.rs` — `WaitQueue::wake_at_most(1)` 改走专用 `wake_one()`，只扫描到第一个可唤醒任务并直接移入 ready queue；批量唤醒仍保留原来的全队列 compact/重建逻辑，避免改变 `wake_all()` 和多任务唤醒语义
+
+**验证：**
+- `docker compose exec -T -w /app/os os-dev env LOG=error make rv64-kernel-build-only` ✅ — `testresult/waitqueue-wake-one-20260613/rv64-build.log`
+- `docker compose exec -T -w /app/os os-dev env LOG=error make la64-kernel-build-only` ✅ — `testresult/waitqueue-wake-one-20260613/la64-build.log`
+- rv64 QEMU basic：`mask=0x001` ✅ — `testresult/waitqueue-wake-one-20260613/rv64-basic.log`，无 `panic/FAIL/TFAIL/TBROK`
+- la64 QEMU basic：`mask=0x001` ✅ — `testresult/waitqueue-wake-one-20260613/la64-basic.log`，无 `panic/FAIL/TFAIL/TBROK`
+- rv64 QEMU LTP focused：`futex_wait* / futex_wake* / futex_wait_bitset`，`ltp_libc=both` ✅ — `testresult/waitqueue-wake-one-20260613/rv64-ltp.log`，20 个 `DONE LTP CASE ... : 0`，无 `TFAIL/TBROK`
+- la64 QEMU LTP focused：同一用例集，`ltp_libc=both` ✅ — `testresult/waitqueue-wake-one-20260613/la64-ltp.log`，20 个 `DONE LTP CASE ... : 0`，无 `TFAIL/TBROK`
+
+**备注：** 旁观者视角复核时确认单个唤醒快路径不会清理队列尾部 stale weak，已在代码注释说明；这些 stale 项仍会由后续 wake/finish_wait 或批量路径清理。本次未修改 net/fs 测试点，也未运行 LTP 全量。
+
 ### uaccess 单页小对象拷贝快路径
 
 **涉及文件：**

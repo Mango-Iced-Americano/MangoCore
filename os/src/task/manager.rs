@@ -617,7 +617,10 @@ impl WaitQueue {
         if limit == 0 {
             return 0;
         }
-        let mut tasks_to_wake = Vec::new();
+        if limit == 1 {
+            return self.wake_one();
+        }
+        let mut tasks_to_wake = Vec::with_capacity(limit.min(self.inner.len()));
         let mut remaining = VecDeque::new();
         let mut wake_count = 0usize;
         // 遍历全部条目以自动 compact 失效 Weak，但只唤醒 ≤limit 个任务。
@@ -657,6 +660,32 @@ impl WaitQueue {
         self.inner = remaining;
         enqueue_ready_batch(tasks_to_wake);
         wake_count
+    }
+    fn wake_one(&mut self) -> usize {
+        // Single wake is a hot path for futex/event waiters.  It only removes
+        // entries up to the first wakeable task; later stale entries are compacted
+        // by future wake/finish_wait calls or the batch path.
+        while let Some(waiter) = self.inner.pop_front() {
+            let task = match waiter.upgrade() {
+                Some(task) => task,
+                None => continue,
+            };
+            let mut inner = task.acquire_inner_lock();
+            match inner.task_status {
+                super::TaskStatus::Interruptible => {
+                    inner.task_status = super::task::TaskStatus::Ready;
+                    drop(inner);
+                    let _ = TASK_MANAGER.lock().try_wake_interruptible(task);
+                    return 1;
+                }
+                super::TaskStatus::Ready => {
+                    drop(inner);
+                    return 1;
+                }
+                _ => drop(inner),
+            }
+        }
+        0
     }
     pub fn prepare_to_wait(&mut self, task: Weak<TaskControlBlock>) {
         match task.upgrade() {
