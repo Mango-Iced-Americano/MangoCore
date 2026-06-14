@@ -6,8 +6,8 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use user_lib::{
-    chdir, close, exec, exit, fork, getdents64, getpgid, kill, mount, open, println, read, setpgid,
-    shutdown, sleep, wait, waitpid, waitpid_wnohang, write, OpenFlags, SIGKILL,
+    chdir, close, exec, exit, fork, get_time, getdents64, getpgid, kill, mount, open, println,
+    read, setpgid, shutdown, sleep, wait, waitpid, waitpid_wnohang, write, OpenFlags, SIGKILL,
 };
 
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -55,32 +55,32 @@ const DEFAULT_ORDER: &[&str] = &[
     "basic",
     "busybox",
     "lua",
+    "ltp",
     "libctest",
     "netperf",
     "cyclictest",
     "iozone",
     "libcbench",
     "iperf",
-    "ltp",
-    // "lmbench",
+    "lmbench",
     // "unixbench",
 ];
 
 /// 每组默认超时（秒），索引 0..11 与 TEST_GROUPS 一一对应
 /// 例如 [6]=90 表示 TEST_GROUPS[6] (iperf) 的超时时间为 90 秒
 const DEFAULT_TIMEOUTS: [u64; 12] = [
-    60,    // [0]  basic
-    60,    // [1]  busybox
-    60,    // [2]  lua
-    120,   // [3]  libctest
-    120,   // [4]  iozone
-    90,    // [5]  unixbench
-    40,    // [6]  iperf
-    120,   // [7]  libcbench
-    1800,  // [8]  lmbench
-    90,    // [9]  netperf
-    60,    // [10] cyclictest
-    18000, // [11] ltp
+    60,   // [0]  basic
+    60,   // [1]  busybox
+    60,   // [2]  lua
+    120,  // [3]  libctest
+    240,  // [4]  iozone
+    90,   // [5]  unixbench
+    40,   // [6]  iperf
+    120,  // [7]  libcbench
+    1800, // [8]  lmbench
+    90,   // [9]  netperf
+    60,   // [10] cyclictest
+    1800, // [11] ltp
 ];
 
 /// LTP 默认排除测例名列表
@@ -731,6 +731,7 @@ fn run_group_in_dir(
     timeout_secs: u64,
     max_retries: usize,
 ) {
+    let group_start_ms = get_time() as u64;
     let log_dir = display_path(dir);
     // 构造比赛的 START/END 标记
     let libc_suffix = if log_dir.contains("musl") {
@@ -750,7 +751,12 @@ fn run_group_in_dir(
             log_dir,
             libc_suffix,
         );
+        let elapsed_s = (get_time() as u64 - group_start_ms) / 1000;
         if last_exit_code == 0 {
+            println!(
+                "[timer] group {} in {} took {}s",
+                group_name, log_dir, elapsed_s
+            );
             return; // 成功，直接返回
         }
         // SIGKILL 是 initproc 超时后主动发送的，说明我们故意要终止它，不重试
@@ -758,6 +764,10 @@ fn run_group_in_dir(
             println!(
                 "[initproc] {} in {} was killed by SIGKILL, skipping retry",
                 script, log_dir
+            );
+            println!(
+                "[timer] group {} in {} took {}s (killed)",
+                group_name, log_dir, elapsed_s
             );
             return;
         }
@@ -770,9 +780,14 @@ fn run_group_in_dir(
         }
     }
     // 所有重试均失败
+    let elapsed_s = (get_time() as u64 - group_start_ms) / 1000;
     println!(
         "[initproc] {} in {} failed after {} retries, final exit_code={}",
         script, log_dir, max_retries, last_exit_code
+    );
+    println!(
+        "[timer] group {} in {} took {}s (failed)",
+        group_name, log_dir, elapsed_s
     );
 }
 
@@ -1484,6 +1499,7 @@ fn run_ltp_binaries(
         exit(0);
     } else {
         // parent: 超时 + 强杀（与 run_group_in_dir 一致）
+        let ltp_start_ms = get_time() as u64;
         let mut exit_code: i32 = 0;
         let timeout_ms = timeout_secs * 1000;
         let mut elapsed_ms: u64 = 0;
@@ -1520,10 +1536,12 @@ fn run_ltp_binaries(
         if timed_out {
             println!("#### OS COMP TEST GROUP END ltp-{} ####", libc_suffix);
         }
+        let ltp_elapsed_s = (get_time() as u64 - ltp_start_ms) / 1000;
         println!(
             "[initproc] done ltp_testcode.sh in {} exit_code={}",
             log_dir, exit_code
         );
+        println!("[timer] group ltp in {} took {}s", log_dir, ltp_elapsed_s);
     }
 }
 
@@ -1595,6 +1613,7 @@ fn run_ltp_suite_runner(
         exit(127);
     }
 
+    let ltp_start_ms = get_time() as u64;
     let mut code: i32 = 0;
     let timeout_ms = timeout_secs * 1000;
     let mut elapsed_ms: u64 = 0;
@@ -1632,11 +1651,13 @@ fn run_ltp_suite_runner(
     if timed_out {
         println!("#### OS COMP TEST GROUP END ltp-{} ####", libc_suffix);
     }
+    let ltprunner_elapsed_s = (get_time() as u64 - ltp_start_ms) / 1000;
     println!(
         "[initproc] done ltprunner (libc={}) exit_code={}",
         libc_suffix,
         exit_code_from_waitpid_status(code)
     );
+    println!("[timer] group ltprunner (libc={}) took {}s", libc_suffix, ltprunner_elapsed_s);
 }
 
 fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
@@ -2259,6 +2280,14 @@ fn prepare_symlink(environ: &[*const u8]) {
     let ret = run_bash_cmd(lib_cmd, environ);
     println!("[initproc] lib linking done, exit={}", ret);
 
+    println!("prepare lmbench compatibility ...");
+    let lmbench_cmd = "\
+        mkdir -p /code/lmbench_src/bin/build; \
+        ln -s /musl/lmbench_all /code/lmbench_src/bin/build/lmbench_all \
+    \0";
+    let ret = run_bash_cmd(lmbench_cmd, environ);
+    println!("[initproc] lmbench compatibility done, exit={}", ret);
+
     // Phase 5.5: Install Alpine packages via apk (mkfs.ext4 etc.)
     // Must run AFTER lib linking (Step 2), because Step 2 does
     // `rm -rf /usr/lib; ln -sf /lib /usr/lib` which would destroy
@@ -2309,7 +2338,10 @@ fn install_apk_packages(environ: &[*const u8]) {
     println!("[initproc] apk add {} ...", pkgs.trim_end_matches('\0'));
     let ret = run_bash_cmd(&cmd, environ);
     if ret != 0 {
-        println!("[initproc] apk add failed (ret={}), keeping busybox mkfs fallback", ret);
+        println!(
+            "[initproc] apk add failed (ret={}), keeping busybox mkfs fallback",
+            ret
+        );
     } else {
         println!("[initproc] apk add -> exit=0");
     }
