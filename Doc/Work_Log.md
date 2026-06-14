@@ -4,6 +4,17 @@
 
 ## 2026-06-13
 
+### 修复 ltprunner PASS/SKIP/FAIL 输出不一致导致 judge 脚本丢分
+
+**涉及文件：**
+- `user/src/bin/ltprunner.rs` — 将 `PASS LTP CASE` / `SKIP LTP CASE` / `FAIL LTP CASE` 三路输出统一为全量 `FAIL LTP CASE`，使得 `judge_ltp-*.py`（只认 `FAIL LTP CASE`）能保存每个 case 的数据，不再丢失 passing 和 skipped case 的分数
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：** 根因是 judge_ltp-musl.py 和 judge_ltp-glibc.py 都只在收到 `FAIL LTP CASE` 时才保存数据，而 Pneuma(2026-06-04) 在 ltprunner 中引入了 `PASS`/`SKIP` 标记后，judge 脚本直接丢弃了非 FAIL case 的全部 assertion 数据。glibc judge 由于计数器未在 `RUN LTP CASE` 重置，错误地累积了相邻 PASS case 的 TPASS 计数到下一个 FAIL entry 中，部分掩盖了该 bug；musl judge 每次重置计数器，因此所有 PASS case 的分数全部丢失。
+
 ### LTP futex_wait05 timeout 精度修复
 
 **涉及文件：**
