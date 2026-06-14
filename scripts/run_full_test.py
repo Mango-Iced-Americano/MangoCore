@@ -19,6 +19,7 @@ import os
 import sys
 import time
 import json
+import math
 import shutil
 from datetime import datetime
 
@@ -289,6 +290,13 @@ def parse_judge_table(judge_stdout):
 
 # ======================== 主流程 ========================
 
+def _ltp_adjust(name, raw):
+    """LTP 对数映射：500*log10(1+9*raw/10000)，raw∈[0,10000]"""
+    if "ltp" in name.lower():
+        clipped = max(0.0, min(float(raw), 10000.0))
+        return 500.0 * math.log10(1 + 9 * clipped / 10000.0)
+    return float(raw)
+
 def main():
     os.chdir(PROJECT_ROOT)
     log("=" * 60, BOLD)
@@ -466,18 +474,22 @@ def main():
                 all_groups[name][2] += p
                 all_groups[name][3] += a
 
-    grand_pass = 0
+    grand_pass = 0.0
     grand_all = 0
     for name in sorted(all_groups.keys()):
         rv_p, rv_a, la_p, la_a = all_groups[name]
         total_p = rv_p + la_p
         total_a = rv_a + la_a
-        grand_pass += total_p
+        grand_pass += _ltp_adjust(name, total_p)
         grand_all += total_a
-        print(f"  {name:<28}  {total_p:>6} {total_a:>6}")
+        adj = _ltp_adjust(name, total_p)
+        if "ltp" in name.lower():
+            print(f"  {name:<28}  {total_p:>6} {total_a:>6}  (adj: {adj:.1f})")
+        else:
+            print(f"  {name:<28}  {int(adj):>6} {total_a:>6}")
 
     print(f"  {'─' * 42}")
-    print(f"  {'TOTAL':<28}  {grand_pass:>6} {grand_all:>6}")
+    print(f"  {'TOTAL':<28}  {grand_pass:>8.1f} {grand_all:>6}")
     print(f"  {'═' * 42}")
     print()
 
