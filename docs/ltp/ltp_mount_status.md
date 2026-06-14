@@ -2,7 +2,7 @@
 
 > 创建: 2026-05-25
 > 分支: `fs`
-> 对应计划: `Doc/ltp_mount_plan.md`
+> 对应计划: `docs/ltp_mount_plan.md`
 
 ## 1. 当前基线
 

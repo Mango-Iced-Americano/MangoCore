@@ -191,7 +191,7 @@ pub fn dump_cache_stats() {
 
 | Phase | 内容 | 涉及文件 | 风险 |
 |-------|------|---------|------|
-| **0** | 本文档 + counter 框架 | `doc/ext4-cache-design.md`, `os/src/fs/ext4/counters.rs` | 无 |
+| **0** | 本文档 + counter 框架 | `docs/ext4-cache-design.md`, `os/src/fs/ext4/counters.rs` | 无 |
 | **1** | filesystem-level inode object cache | `os/src/fs/ext4/ext4fs.rs` (Ext4FileSystem), `os/src/fs/ext4/layout.rs` (Ext4OSInode) | hardlink/rename 语义 |
 | **2** | directory children cache | `os/src/fs/ext4/layout.rs` (Ext4OSInode), `os/src/fs/ext4/ext4fs.rs` (find/create/unlink/rename) | 锁顺序、缓存一致性 |
 | **3** | per-inode metadata cache | `os/src/fs/ext4/layout.rs`, `os/src/fs/ext4/ext4fs.rs` (read_at/write_at/symlink/truncate) | PageCache 边界 |

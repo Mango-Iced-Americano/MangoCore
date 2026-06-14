@@ -2,7 +2,7 @@
 
 > 最后更新: 2026-05-22
 > 状态: Phase 0 — 体系建设中
-> 参考: 沿袭 FS-LTP 计划 (Doc/ltp_fs_plan.md) 的框架设计
+> 参考: 沿袭 FS-LTP 计划 (docs/ltp_fs_plan.md) 的框架设计
 
 ## 0. 核心原则
 

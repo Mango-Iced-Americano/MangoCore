@@ -19,8 +19,8 @@ Phase 0: 体系建设 → Phase 1: 发现扫 + 修 → Phase 2: 稳定 + 回归
 |------|------|--------|
 | 0.1 | 本地摸底：`debugfs ls /musl/ltp/testcases/bin/` 列出所有可用 LTP 二进制 | 二进制清单 |
 | 0.2 | 上游调研：launch 3-5 个 `librarian` agent 扫 `linux-test-project/ltp` `testcases/kernel/syscalls/` | 上游测例清单 + 分类 |
-| 0.3 | 写 `Doc/ltp_<module>_plan.md`：Round 设计、排除规则、晋级条件 | 计划文档 |
-| 0.4 | 写 `Doc/ltp_<module>_status.md`：每测例状态表（Round/结果/分类/备注） | 状态文档 |
+| 0.3 | 写 `docs/ltp_<module>_plan.md`：Round 设计、排除规则、晋级条件 | 计划文档 |
+| 0.4 | 写 `docs/ltp_<module>_status.md`：每测例状态表（Round/结果/分类/备注） | 状态文档 |
 | 0.5 | 预处理：ramfs 配额、LTP_IPC_PATH、/etc/passwd 等环境问题 | 环境就绪 |
 
 **关键约束**:
@@ -130,8 +130,8 @@ make -C os conf-inject ... && nohup docker exec ... make rv64-run > /tmp/full_te
 #### 2.2 文档更新
 
 每轮完成后必须更新：
-- `Doc/ltp_<module>_status.md`：更新测例结果、行动分类、回归集
-- `Doc/ltp_<module>_plan.md`：更新阶段状态
+- `docs/ltp_<module>_status.md`：更新测例结果、行动分类、回归集
+- `docs/ltp_<module>_plan.md`：更新阶段状态
 - `os_test.conf`：include 列表同步
 - git commit 记录修复细节
 
@@ -216,7 +216,7 @@ git checkout <module>
 git merge fs
 
 # 3. 写计划 + 状态文档
-# 参考: Doc/ltp_fs_plan.md, Doc/ltp_fs_status.md
+# 参考: docs/ltp_fs_plan.md, docs/ltp_fs_status.md
 
 # 4. 本地摸排
 docker exec ... debugfs -R "ls -l /musl/ltp/testcases/bin/" sdcard-rv.img | grep -oE "<pattern>"

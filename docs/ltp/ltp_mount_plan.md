@@ -3,7 +3,7 @@
 > 创建: 2026-05-22 | 更新: 2026-05-25
 > Oracle 审查: 已通过 (2026-05-22, 2026-05-25)
 > 分支: `fs`
-> 配套文档: `Doc/ltp_mount_status.md`
+> 配套文档: `docs/ltp_mount_status.md`
 
 ## 1. 动机
 
@@ -48,8 +48,8 @@ MountFS 基础设施已就绪。Bug 修复量小（~50 行），完成后直接�
 ### Phase 0: 文档体系建设 ✅
 **已完成: 2026-05-25**
 
-- ✅ 创建 `Doc/ltp_mount_status.md` — 94 测例状态表
-- ✅ 更新 `Doc/ltp_mount_plan.md` — 反映当前实现状态
+- ✅ 创建 `docs/ltp_mount_status.md` — 94 测例状态表
+- ✅ 更新 `docs/ltp_mount_plan.md` — 反映当前实现状态
 - 后续: 记录内存基准指标
 
 ---

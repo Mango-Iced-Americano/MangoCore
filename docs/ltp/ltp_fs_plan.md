@@ -128,7 +128,7 @@ LTP 每个 testcase 有两层属性，必须分开记录：
 2. ltp_include/ltp_exclude/ltp_from 配置机制生效
 3. PANIC/TIMEOUT 检测和隔离正确工作
 4. 镜像恢复机制正常（每轮或每次修复后镜像状态可控）
-5. 用户可触达路径 `panic!()/todo!()/unwrap()` 基本清零（关注 `Doc/LTP_BOTTOM_UP_GUIDE.md` 中 P0 风险点）
+5. 用户可触达路径 `panic!()/todo!()/unwrap()` 基本清零（关注 `docs/LTP_BOTTOM_UP_GUIDE.md` 中 P0 风险点）
 6. 未实现功能返回明确 errno（ENOSYS/EINVAL/EOPNOTSUPP），不触发 kernel panic
 
 **通过标准**:
@@ -266,7 +266,7 @@ LTP 每个 testcase 有两层属性，必须分开记录：
 ### 4.5 FS-Round-MNT: Mount 子系统 (Bind/Recursive/Move)
 
 > **目标**: 实现 mount 动态挂载功能，打通 fs_bind 测试系列。
-> **详细计划**: `Doc/ltp_mount_plan.md`
+> **详细计划**: `docs/ltp_mount_plan.md`
 > **Oracle 审查**: 已通过 (2026-05-22)
 
 **当前状态**: `sys_mount(40)` 已存在，但只支持"创建新 tmpfs 挂载"一种操作。
@@ -324,7 +324,7 @@ LTP 每个 testcase 有两层属性，必须分开记录：
 3. **无 unexplained timeout**: 所有超时均已分类（DANGEROUS_STRESS / ENV_FAIL / FIXABLE_LATER）
 4. **无 regression**: 已通过测例（回归集）无回退
 5. **剩余 case 已分类**: 非 PASS 的 case 均已标注 FIXABLE_LATER / UNSUPPORTED / ENV_FAIL / DANGEROUS_STRESS
-6. **文档已更新**: Doc/ltp_fs_status.md 已更新
+6. **文档已更新**: docs/ltp_fs_status.md 已更新
 
 ### 5.2 辅助指标
 - 通过率 >= 85% 可作为参考，但**不能替代核心 family gate**
@@ -352,7 +352,7 @@ LTP 每个 testcase 有两层属性，必须分开记录：
 7. 生成 os_test.conf: ltp_include = 探索集 + 回归集, ltp_exclude = 强制排除集
 8. 运行当前 round（每次只跑一个 family，例如先 open* → 全稳定 → read* → …）
 9. 解析每个 testcase 的运行结果（TPASS/TFAIL/TBROK/TCONF/PANIC/TIMEOUT）
-10. 更新 Doc/ltp_fs_status.md（记录 arch/libc/run_id/log/结果/分类/失败层次）
+10. 更新 docs/ltp_fs_status.md（记录 arch/libc/run_id/log/结果/分类/失败层次）
 11. 选择第一个 FIXABLE_NOW testcase
 12. 阅读 testcase 源码或日志，说明它期望的 Linux 语义
 13. 定位 MangoCore 当前行为与期望语义的差异（在哪一层？）
@@ -397,7 +397,7 @@ Mount Round 因涉及基础设施改动（路径解析跨 mountpoint、sys_mount
 | `scripts/run_full_test.py` | 全量编译+测试+评分+归档 | 评分部分（judge/run_parse.py）可复用 |
 | `user/src/bin/initproc.rs` | 内联 LTP runner，支持 include/exclude/from | 直接使用 `run_ltp_binaries()` |
 | `judge/judge_ltp-musl.py` / `judge_ltp-glibc.py` | 解析 RUN/FAIL LTP CASE 输出 | 可用于结果解析 |
-| `Doc/LTP_BOTTOM_UP_GUIDE.md` | 自底向上适配指导 | 参考 P0-P8 优先级和代码审计结论 |
+| `docs/LTP_BOTTOM_UP_GUIDE.md` | 自底向上适配指导 | 参考 P0-P8 优先级和代码审计结论 |
 
 ---
 
@@ -539,11 +539,11 @@ Mount Round 因涉及基础设施改动（路径解析跨 mountpoint、sys_mount
 
 ## 9. 文档维护
 
-- `Doc/ltp_fs_plan.md` — 本文档，阶段设计+规则
-- `Doc/ltp_fs_status.md` — 每个 testcase 的实时状态表
+- `docs/ltp_fs_plan.md` — 本文档，阶段设计+规则
+- `docs/ltp_fs_status.md` — 每个 testcase 的实时状态表
 - `os_test.conf` — include/exclude 配置（通过脚本更新）
 
-每轮完成后必须更新 `Doc/ltp_fs_status.md`。
+每轮完成后必须更新 `docs/ltp_fs_status.md`。
 
 ---
 

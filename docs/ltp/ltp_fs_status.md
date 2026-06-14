@@ -404,7 +404,7 @@
 
 ### Mount 系统状态（FS-Round-MNT）
 
-> **详细计划**: `Doc/ltp_mount_plan.md`
+> **详细计划**: `docs/ltp_mount_plan.md`
 
 | syscall | 当前能力 | 缺失 |
 |---------|---------|------|
@@ -485,6 +485,6 @@
 | 日期 | 变更内容 |
 |------|----------|
 | 2026-05-25 | Round A+B: 修复 14 个 TFAIL→TPASS (O_APPEND, fchown, fcntl GETFL/SETFL, truncate EACCES+EFBIG+search, symlink ENAMETOOLONG+权限, rename/rmdir skip 移除) |
-| 2026-05-22 | Mount 专项: fs_bind 从 UNSUPPORTED 移到 FS-Round-MNT, 新增 mount 系统状态表, 创建 `Doc/ltp_mount_plan.md` |
+| 2026-05-22 | Mount 专项: fs_bind 从 UNSUPPORTED 移到 FS-Round-MNT, 新增 mount 系统状态表, 创建 `docs/ltp_mount_plan.md` |
 | 2026-05-22 | 重写: Round-0 全PASS, Round-1 部分PASS, 本地摸底360个二进制清单, 回归集~50 |
 | 2026-05-20 | 创建文档, Oracle审查通过 |

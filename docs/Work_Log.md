@@ -4,6 +4,22 @@
 
 ## 2026-06-14
 
+### 完全重写 README.md 为竞赛级项目入口文档
+
+**涉及文件：**
+- `README.md` — 从旧版学生项目文档（NPUcore-BLOSSOM）完全重写为 MangoCore 竞赛级 README
+
+**变更内容：**
+- 移除 YAML header、团队介绍、Baidu pan 链接、旧项目名称、分支说明
+- 新增 9 个结构化章节：项目概览、系统架构（ASCII 流程图）、功能矩阵表、快速开始（Docker-only）、测试配置、项目结构、文档索引、开发规则、参考资料
+- 所有内容英文撰写，专业工程语气，约 127 行
+- 保持与 AGENTS.md 语义一致
+
+**验证：**
+- `README.md` 格式/渲染验证通过（纯 markdown，无 YAML 头）
+
+**备注：** 旧版保留了大量侵入式学生竞赛项目痕迹（团队成员、网盘链接、致谢等），新版本定位为独立的专业工程入口文档。
+
 ### 同步上游评分脚本：LTP 总分改为对数映射
 
 **涉及文件：**
@@ -1754,7 +1770,7 @@ cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE)
 
 **方案：** I/O chunking — 用动态计算的 `IO_CHUNK_SIZE`（heap/16，clamp 64KB-2MB）做单 bounce buffer 循环，取代一次性大分配。覆盖 `write/pwrite/read/pread/readv/writev/preadv/pwritev/sendfile/copy_file_range/sendmsg/recvmsg`。
 
-**详细方案：** `Doc/io-chunking-plan.md`
+**详细方案：** `docs/io-chunking-plan.md`
 
 **状态：** 方案已设计，待后续实施。
 
@@ -1950,8 +1966,8 @@ VFS_ROOT MountFS
 ### FS-LTP 分诊体系建设与 Round-0 适配
 
 **涉及文件：**
-- `Doc/ltp_fs_plan.md` — **新增**，FS-LTP 四阶段计划（Preflight→Round-0/1/2/3），硬门禁+评分选择规则，晋级条件
-- `Doc/ltp_fs_status.md` — **新增**，testcase 状态跟踪表（arch/libc/运行结果/行动分类/失败层次）
+- `docs/ltp_fs_plan.md` — **新增**，FS-LTP 四阶段计划（Preflight→Round-0/1/2/3），硬门禁+评分选择规则，晋级条件
+- `docs/ltp_fs_status.md` — **新增**，testcase 状态跟踪表（arch/libc/运行结果/行动分类/失败层次）
 - `os/src/syscall/fs.rs` — 修复 splice panic(log::error)、mount unwrap(match+EINVAL)、dup3 flags(位掩码)、getcwd ERANGE 检查顺序、fcntl F_GETFL(读取FileFlags)、chdir ENAMETOOLONG 路径长度检查、openat mode 传递
 - `os/src/fs/ext4/extent.rs` — 外科去 panic: load_from_data→try_load_from_data(Result)、消除 8 个 unwrap(ok_or_else)、find_extent 冗余路径移除、remove_space hole 场景处理
 - `os/src/fs/ext4/ext4_inode.rs` — get_file_type() panic→DiskInodeType::Unknown
@@ -2022,7 +2038,7 @@ VFS_ROOT MountFS
 
 **涉及文件：**
 - `user/src/bin/fs_test.rs` — 在 D 组压力测试与 E 组 fork 测试之间新增 5 个性能测试：1000 文件 getdents、1000 文件 stat/access、重复 lookup cache、200 symlink 批量验证、1000 文件大目录 open/negative lookup；全部使用 `run_split_test()` + 子场景 `dump_sub_profile()`。
-- `Doc/Work_Log.md` — 记录本次测试扩展。
+- `docs/Work_Log.md` — 记录本次测试扩展。
 
 **验证：** `lsp_diagnostics user/src/bin/fs_test.rs` 无 error；仅保留文件原有 rust-analyzer warning（unused braces、fork 测试局部 const 命名）。
 
@@ -2048,7 +2064,7 @@ VFS_ROOT MountFS
 - `os/src/main.rs` — flush_preload 后调用 smoke::run_boot_smoke()（已注释，需要时取消）
 - `user/src/bin/fs_test.rs` — 新增 `run_test()` 辅助函数，51 个测试点全部套上 counter reset+dump；`main` 加 `#[no_mangle]`
 - `user/src/syscall.rs` — 新增 `SYSCALL_EXT4_COUNTERS = 503` + `sys_ext4_counters()` 封装
-- `doc/ext4-cache-design.md` — 完整设计文档（DragonOS 对照表 + 缓存边界 + counter 框架 + 实施计划）
+- `docs/ext4-cache-design.md` — 完整设计文档（DragonOS 对照表 + 缓存边界 + counter 框架 + 实施计划）
 
 **Oracle 审查：** 每阶段完成后经 Oracle review，累计修复 ~15 项（递归 blocker、双副本不一致、Weak→Arc、rename 缓存顺序、canonical 竞态等）
 
@@ -2557,7 +2573,7 @@ Phase 4-6 (适配具体FS / syscall层 / QEMU测试) 待后续完成。
 
 ### 文档
 
-- 新增 `Doc/vfs-migration-plan.md` — Phase 1-5 详细迁移计划
+- 新增 `docs/vfs-migration-plan.md` — Phase 1-5 详细迁移计划
 
 
 ---
