@@ -1657,7 +1657,10 @@ fn run_ltp_suite_runner(
         libc_suffix,
         exit_code_from_waitpid_status(code)
     );
-    println!("[timer] group ltprunner (libc={}) took {}s", libc_suffix, ltprunner_elapsed_s);
+    println!(
+        "[timer] group ltprunner (libc={}) took {}s",
+        libc_suffix, ltprunner_elapsed_s
+    );
 }
 
 fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
@@ -2292,7 +2295,7 @@ fn prepare_symlink(environ: &[*const u8]) {
     // Must run AFTER lib linking (Step 2), because Step 2 does
     // `rm -rf /usr/lib; ln -sf /lib /usr/lib` which would destroy
     // any apk-installed libraries in /usr/lib/.
-    install_apk_packages(environ);
+    // install_apk_packages(environ);
 
     // la64 测试镜像内 musl libc 的 sched_getparam/sched_getscheduler 是 ENOSYS stub，
     // cyclictest 不会进入内核 syscall；这里仅对该测试入口复用 glibc 二进制。
