@@ -7,6 +7,7 @@
 """
 import re
 import json
+import math
 import subprocess
 import os
 import sys
@@ -79,6 +80,15 @@ def parse_serial_out_new(config, filename):
             ans[g] = {"pass": 0, "all": 0}
     return ans
 
+def _ltp_adjust(name, raw):
+    """LTP 对数映射：raw([0,10000]) → score([0,500])
+       公式: 500 * log10(1 + 9 * raw/10000)
+       参考: https://github.com/oscomp/autotest-for-oskernel/blob/main/kernel/LTP_SCORING.md"""
+    if "ltp" in name.lower():
+        clipped = max(0.0, min(float(raw), 10000.0))
+        return 500.0 * math.log10(1 + 9 * clipped / 10000.0)
+    return float(raw)
+
 # ============ 以上是官方代码，以下是参数处理+汇总打印 ============
 
 if __name__ == "__main__":
@@ -126,7 +136,7 @@ if __name__ == "__main__":
             p = 0
             a = 0
         total_all += a
-        total_pass += int(p)
+        total_pass += _ltp_adjust(name, p)
         print(f"  {name:<28}  {int(p):>6} {a:>6}")
     print("=" * 70)
     print(f"  {'TOTAL':<28}  {total_pass:>6} {total_all:>6}")

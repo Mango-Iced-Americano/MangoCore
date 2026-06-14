@@ -8,9 +8,16 @@
   #### OS COMP TEST GROUP END xxx-yyy ####
 并把每段输出喂给同目录下的 judge_xxx-yyy.py，汇总打印结果。
 """
-import re, json, subprocess, os, sys
+import re, json, math, subprocess, os, sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def _ltp_adjust(name, raw):
+    """LTP raw([0,10000]) → score([0,500]): 500*log10(1+9*raw/10000)"""
+    if "ltp" in name.lower():
+        clipped = max(0.0, min(float(raw), 10000.0))
+        return 500.0 * math.log10(1 + 9 * clipped / 10000.0)
+    return float(raw)
 
 def find_judges():
     """返回 {group: script_path}"""
@@ -101,12 +108,12 @@ def main():
         a = r.get("all", 0)
         p = r.get("pass", 0)
         total_all += a
-        total_pass += p
+        total_pass += _ltp_adjust(name, p)
         pct = f"{p/a*100:.0f}%" if a > 0 else "N/A"
         print(f"  {name:<26}  {p:>5} {a:>5}  {pct}")
     print("=" * 60)
-    print(f"  {'TOTAL':<26}  {total_pass:>5} {total_all:>5}")
-    print(f"  {'SCORE':<26}  {total_pass:>5}")
+    print(f"  {'TOTAL':<26}  {total_pass:>7.1f} {total_all:>5}")
+    print(f"  {'SCORE':<26}  {total_pass:>7.1f}")
 
 if __name__ == "__main__":
     main()

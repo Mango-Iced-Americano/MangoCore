@@ -2,6 +2,39 @@
 
 ---
 
+## 2026-06-14
+
+### 同步上游评分脚本：LTP 总分改为对数映射
+
+**涉及文件：**
+- `judge/run_parse.py` — 新增 `_ltp_adjust()` 和 `import math`，LTP 组 score 从直接累加改为 `500*log10(1+9*raw/10000)` 映射
+- `judge/run_judge.py` — 同上
+
+**验证：**
+- Python 语法验证通过
+- 对数公式与 `LTP_SCORING.md` 对照表一致（`raw=100→18.7`, `raw=5000→370.2`, `raw=10000→500` 封顶）
+- 非 LTP 组不受影响
+
+**备注：** 上游 oscomp/autotest-for-oskernel 在 `kernel/postwork.py` 中对 `"ltp" in group.lower()` 做了对数映射，本地 `judge/postwork.py` 为空，评分聚合在 `run_parse.py`/`run_judge.py` 中，需同步此逻辑。`judge_ltp-glibc.py` 已与上游一致（逐行 TPASS 解析），无需改动。
+`judge_ltp-musl.py` 上下游均为旧版 Summary 解析，官方未更新，无需改动。
+
+### 用昨日 LTP 测试 log 验证评分
+
+用 `testresult/output-rv.txt` / `output-la.txt`（LTP 专项）跑 `run_parse.py` 验证对数映射：
+
+| 架构 | 组 | 原始分 (raw) | 对数调整分 |
+|:---:|:---:|:-----:|:---------:|
+| rv64 | ltp-glibc | 7293 | 439.4 |
+| rv64 | ltp-musl | 2202 | 237.2 |
+| **rv64 总分** | | **9495** | **676.6** |
+| la64 | ltp-glibc | 7298 | 439.5 |
+| la64 | ltp-musl | 3007 | 284.5 |
+| **la64 总分** | | **10305** | **724.0** |
+
+**验证：** 对数映射结果与 `500*log10(1+9*raw/10000)` 公式一致，非 LTP 组（basic/busybox 等）保持原值。Musl LTP 维持旧 Summary 解析（与官方一致），未出现异常。
+
+---
+
 ## 2026-06-13
 
 ### 修复 ltprunner PASS/SKIP/FAIL 输出不一致导致 judge 脚本丢分
