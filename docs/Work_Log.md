@@ -88,6 +88,27 @@
 
 ## 2026-06-14
 
+### 按 Linux/DragonOS cyclic PID 思路修复长测 PID 越界
+
+**涉及文件：**
+- `os/src/task/pid.rs` — `alloc_fresh()` 增加高水位复用路径，`release_fresh_id()` 将已释放用户可见 PID/TID 记录到复用池
+
+**变更内容：**
+- 参考 Linux 6.6 `kernel/pid.c` 的 `idr_alloc_cyclic/free_pid` 与 DragonOS `process/pid.rs`、`pid_namespace.rs` 的 PID namespace 分配/释放模型
+- 保留用户可见 PID/TID 的线性分配快路径，避免过早复用导致并发线程创建测试观察到重复 TID
+- 当分配游标接近 `/proc/sys/kernel/pid_max=32768` 时，开始复用已 release 的 PID/TID，并跳过 1..299 低位保留区
+- `get_allocated()` 改为按 bitmap 标记统计，避免复用池中陈旧条目影响计数
+
+**验证：**
+- `docker compose exec os-dev bash -lc 'cd /app/os && make rv64-kernel-build-only'` ✅
+- `docker compose exec os-dev bash -lc 'cd /app/os && make la64-kernel-build-only'` ✅
+- `git diff --check` ✅
+- rv64 QEMU LTP focused：`getpid01`，`ltp_libc=both` ✅ — musl/glibc 各 `passed 100 failed 0`
+- la64 QEMU LTP focused：`getpid01`，`ltp_libc=both` ✅ — musl/glibc 各 `passed 100 failed 0`
+- focused 测试后已将 rv64/la64 sdcard 镜像内 `/os_test.conf` 恢复为仓库默认配置
+
+**备注：** 本次针对最新全量日志中第二轮 LTP `getpid01` 因 PID 超过 32768 失败的问题；未修改 net/fs 路径。focused 测试只覆盖正常低水位 `getpid01`，高水位复用仍需通过下一轮长测或专门 PID 压力用例确认。
+
 ### 完全重写 README.md 为竞赛级项目入口文档
 
 **涉及文件：**

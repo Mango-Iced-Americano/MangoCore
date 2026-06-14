@@ -5,6 +5,11 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use lazy_static::*;
 use spin::Mutex;
 
+/// Matches the `/proc/sys/kernel/pid_max` value exposed by procfs.
+pub const DEFAULT_PID_MAX: usize = 32_768;
+const RESERVED_PID_REUSE_FLOOR: usize = 300;
+const FRESH_REUSE_WATERMARK: usize = DEFAULT_PID_MAX - 1024;
+
 /// 用于分配可回收 id 的结构体
 pub struct RecycleAllocator {
     /// 当前分配的id
@@ -43,11 +48,8 @@ impl RecycleAllocator {
     /// 分配一个新的id
     pub fn alloc(&mut self) -> usize {
         // 从回收的id中取出一个，如果没有则分配一个新的
-        while let Some(id) = self.recycled.pop() {
-            if self.is_recycled(id) {
-                self.mark_recycled(id, false);
-                return id;
-            }
+        if let Some(id) = self.alloc_recycled() {
+            return id;
         }
         // 当前分配的id数量加1
         self.current += 1;
@@ -58,11 +60,18 @@ impl RecycleAllocator {
     }
     /// 分配一个新的id，不立即复用已回收id。
     ///
-    /// 用户可见 pid/tid 过早复用会让并发创建线程的测试观察到重复 TID。
+    /// Linux/DragonOS 在 PID 空间高位使用循环分配并跳过低位保留 PID。
+    /// 这里保留线性快路径，避免用户可见 pid/tid 过早复用让并发创建
+    /// 线程的测试观察到重复 TID；接近 pid_max 后再消费已释放 ID。
     pub fn alloc_fresh(&mut self) -> usize {
         if let Some(id) = self.fresh_reuse_hint.take() {
             if id < self.current && self.is_recycled(id) {
                 self.mark_recycled(id, false);
+                return id;
+            }
+        }
+        if self.current >= FRESH_REUSE_WATERMARK {
+            if let Some(id) = self.alloc_recycled_for_fresh() {
                 return id;
             }
         }
@@ -101,15 +110,19 @@ impl RecycleAllocator {
         self.recycled.push(id);
     }
     /// Mark an ID allocated by `alloc_fresh()` as reusable only by an explicit
-    /// `ns_last_pid` hint, without growing the normal free-list.
+    /// `ns_last_pid` hint or by the high-watermark cyclic PID path.
     pub fn release_fresh_id(&mut self, id: usize) {
         assert!(id < self.current);
-        self.mark_recycled(id, true);
+        if !self.is_recycled(id) {
+            self.mark_recycled(id, true);
+            self.recycled.push(id);
+        }
     }
     /// 获取已经分配的id数量
     pub fn get_allocated(&self) -> usize {
         // 返回当前分配的id数量减去已经回收的id数量
-        self.current.saturating_sub(1).saturating_sub(self.recycled.len())
+        let recycled_count = self.recycled_flags.iter().filter(|flag| **flag).count();
+        self.current.saturating_sub(1).saturating_sub(recycled_count)
     }
 
     fn ensure_flag_capacity(&mut self, id: usize) {
@@ -126,6 +139,37 @@ impl RecycleAllocator {
         self.ensure_flag_capacity(id);
         self.recycled_flags[id] = value;
     }
+
+    fn alloc_recycled(&mut self) -> Option<usize> {
+        while let Some(id) = self.recycled.pop() {
+            if self.is_recycled(id) {
+                self.mark_recycled(id, false);
+                return Some(id);
+            }
+        }
+        None
+    }
+
+    fn alloc_recycled_for_fresh(&mut self) -> Option<usize> {
+        let mut skipped_reserved = Vec::new();
+        let mut allocated = None;
+        while let Some(id) = self.recycled.pop() {
+            if !self.is_recycled(id) {
+                continue;
+            }
+            if id >= RESERVED_PID_REUSE_FLOOR {
+                self.mark_recycled(id, false);
+                allocated = Some(id);
+                break;
+            } else {
+                skipped_reserved.push(id);
+            }
+        }
+        while let Some(id) = skipped_reserved.pop() {
+            self.recycled.push(id);
+        }
+        allocated
+    }
 }
 
 lazy_static! {
@@ -139,8 +183,8 @@ pub struct TidHandle(pub usize, AtomicBool);
 impl TidHandle {
     pub fn release(&self) {
         if !self.1.swap(true, Ordering::AcqRel) {
-            // Normal tid_alloc() remains monotonic, but ns_last_pid needs to
-            // reuse a released PID on explicit request.
+            // Normal tid_alloc() stays monotonic until the high watermark, but
+            // ns_last_pid and long-running suites need released IDs recorded.
             TID_ALLOCATOR.lock().release_fresh_id(self.0);
         }
     }
