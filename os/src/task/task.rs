@@ -21,7 +21,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
-use core::sync::atomic::AtomicBool;
+use core::sync::atomic::{AtomicBool, AtomicUsize};
 use log::{trace, warn};
 use spin::{Mutex, MutexGuard};
 
@@ -115,6 +115,9 @@ pub struct TaskControlBlock {
     /// 防止在 log=off 的高频 loopback accept/connect 循环中 KERNEL_TIMER_QUEUE 无限增长。
     /// 定时器触发后，run_timer 会无条件清回 false（Option A）。
     pub wait_io_timer_pending: AtomicBool,
+    /// Generation for timeout wake timers.  Each newly armed wake timer bumps
+    /// this value so older stale timers can expire without waking the task.
+    pub wait_timer_generation: AtomicUsize,
 }
 
 /// 任务控制块内部状态
@@ -803,6 +806,7 @@ impl TaskControlBlock {
             exit_signal: Signals::empty(),
             _thread_quota: None,
             wait_io_timer_pending: AtomicBool::new(false),
+            wait_timer_generation: AtomicUsize::new(0),
             inner: Mutex::new(TaskControlBlockInner {
                 sigmask: Signals::empty(),
                 sigmask_to_restore: None,
@@ -1233,6 +1237,7 @@ impl TaskControlBlock {
             exit_signal,
             _thread_quota: thread_quota,
             wait_io_timer_pending: AtomicBool::new(false),
+            wait_timer_generation: AtomicUsize::new(0),
             inner: Mutex::new(TaskControlBlockInner {
                 // clone
                 sigpending: SignalQueue::empty(),
