@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### syscall trap 优化：复用当前任务引用
+
+**涉及文件：**
+- `os/src/hal/arch/riscv/trap/mod.rs` — syscall trap 分支复用进入时取得的当前任务 `Arc`，返回阶段仍重新获取最新 trap context
+- `os/src/hal/arch/loongarch64/trap/mod.rs` — 同步 LoongArch syscall trap 分支，减少每次 syscall 的当前任务引用增减
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅（首次因 cargo 依赖 rlib 产物缺失失败，重跑通过）
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — busybox 已进入文件操作测试后由外层 `timeout 75s` 结束，无 panic
+
+**备注：** 面向 `lat_syscall`、`lat_sig`、短系统调用密集场景；execve/sigreturn 后仍通过同一 TCB 重新读取 trap context，不缓存 trap context 指针。
+
 ### 当前任务 helper 优化：标注热路径内联
 
 **涉及文件：**
