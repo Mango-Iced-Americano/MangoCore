@@ -1370,6 +1370,7 @@ impl File {
         let mut written = 0usize;
 
         for (name, ino, ft) in dirents {
+            log::info!("[get_dirent64] entry name={:?}, d_ino={}, type={:?}", name, ino, ft);
             let name_bytes = name.as_bytes();
             let name_len = name_bytes.len().min(255);
             let raw_size = 8 + 8 + 2 + 1 + name_len + 1;

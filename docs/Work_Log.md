@@ -2,6 +2,34 @@
 
 ---
 
+## 2026-06-15
+
+### 修复 sys_getcwd 返回值 ABI（LA64 shell-init EINVAL）
+
+**涉及文件：**
+- `os/src/syscall/fs.rs:1081` — 成功返回从 `buf as isize` 改为 `write_len as isize`
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：** Linux raw syscall 语义要求 getcwd 成功时返回写入字节数（含 NUL），而非 buf 指针。LA64 的 bash/libc 对此更严格，异常的大正数返回值被解释为错误码（EINVAL）。RV64 因用户地址范围不同未触发。
+
+### 修复 oscomp basic mount/umount 测试（/dev/vda2 缺失 + 分区无文件系统）
+
+**涉及文件：**
+- `os/src/fs/mod.rs:450-455` — MBR 分区注册时同步注册 `/dev/vda{N}` 兼容别名
+- `scripts/make_mbr_tools_disk.py` — 分区 2 类型改为 0x0C，新增 mkfs.vfat FAT32 格式化
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU rv64 basic: mount 5/5, umount 5/5 ✅
+
+**备注：** oscomp basic 测试硬编码 `/dev/vda2`，但内核只对 tools disk (x1) 做 MBR 扫描注册 `/dev/vdb{N}`，且分区 2 原为全零（LTP scratch）。修复分两步：(1) 内核注册 vda{N} 别名指向同个 PartitionBlockDevice；(2) 构建脚本对分区 2 执行 mkfs.vfat -F 32。
+
+---
+
 ## 2026-06-14
 
 ### 完全重写 README.md 为竞赛级项目入口文档
