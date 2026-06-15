@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### 时间换算热路径优化：减少频率重复读取并强制内联
+
+**涉及文件：**
+- `os/src/timer.rs` — `TimeSpec/TimeVal` tick 换算缓存 `get_clock_freq()` 到局部变量，并为时间读取、换算、判零等热路径小函数添加 `#[inline(always)]`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — busybox 进入文件操作测试后由外层 `timeout 75s` 结束，无 panic
+
+**备注：** 面向 syscall trap CPU accounting、`clock_gettime/gettimeofday/times/getrusage` 等高频时间路径；保持原有 tick 到 sec/usec/nsec 的换算语义不变。
+
 ### la64 trap return 优化：删除无效 pre_start_init 调用
 
 **涉及文件：**

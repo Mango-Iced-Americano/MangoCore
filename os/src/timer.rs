@@ -16,6 +16,7 @@ pub const NSEC_PER_MSEC: usize = 1_000_000;
 pub const NSEC_PER_USEC: usize = 1_000;
 
 /// Return current time measured by seconds.
+#[inline(always)]
 pub fn get_time_sec() -> usize {
     let i = get_time() / (get_clock_freq());
     //log::info!("[timer.rs] get_time(): {},sec: {}", get_time(), i);
@@ -23,6 +24,7 @@ pub fn get_time_sec() -> usize {
 }
 
 /// Return current time measured by ms.
+#[inline(always)]
 pub fn get_time_ms() -> usize {
     let i = get_time() / (get_clock_freq() / MSEC_PER_SEC);
     //log::info!("[timer.rs] get_time(): {},ms: {}", get_time(), i);
@@ -30,6 +32,7 @@ pub fn get_time_ms() -> usize {
 }
 
 /// Return current time measured by us.
+#[inline(always)]
 pub fn get_time_us() -> usize {
     let i = get_time() / (get_clock_freq() / USEC_PER_SEC);
     //log::info!("[timer.rs] get_time(): {},us: {}", get_time(), i);
@@ -37,6 +40,7 @@ pub fn get_time_us() -> usize {
 }
 
 /// Return current time measured by nano seconds.
+#[inline(always)]
 pub fn get_time_ns() -> usize {
     let i = get_time() * NSEC_PER_SEC / (get_clock_freq());
     //log::info!("[timer.rs] get_time(): {},ns: {}", get_time(), i);
@@ -110,48 +114,58 @@ impl PartialOrd for TimeSpec {
 }
 
 impl TimeSpec {
+    #[inline(always)]
     pub fn new() -> Self {
         Self {
             tv_sec: 0,
             tv_nsec: 0,
         }
     }
+    #[inline(always)]
     pub fn from_tick(tick: usize) -> Self {
+        let freq = get_clock_freq();
         Self {
-            tv_sec: tick / get_clock_freq(),
-            tv_nsec: (tick % get_clock_freq()) * NSEC_PER_SEC / get_clock_freq(),
+            tv_sec: tick / freq,
+            tv_nsec: (tick % freq) * NSEC_PER_SEC / freq,
         }
     }
+    #[inline(always)]
     pub fn from_s(s: usize) -> Self {
         Self {
             tv_sec: s,
             tv_nsec: 0,
         }
     }
+    #[inline(always)]
     pub fn from_ms(ms: usize) -> Self {
         Self {
             tv_sec: ms / MSEC_PER_SEC,
             tv_nsec: (ms % MSEC_PER_SEC) * NSEC_PER_MSEC,
         }
     }
+    #[inline(always)]
     pub fn from_us(us: usize) -> Self {
         Self {
             tv_sec: us / USEC_PER_SEC,
             tv_nsec: (us % USEC_PER_SEC) * NSEC_PER_USEC,
         }
     }
+    #[inline(always)]
     pub fn from_ns(ns: usize) -> Self {
         Self {
             tv_sec: ns / NSEC_PER_SEC,
             tv_nsec: ns % NSEC_PER_SEC,
         }
     }
+    #[inline(always)]
     pub fn to_ns(&self) -> usize {
         self.tv_sec * NSEC_PER_SEC + self.tv_nsec
     }
+    #[inline(always)]
     pub fn is_zero(&self) -> bool {
         self.tv_sec == 0 && self.tv_nsec == 0
     }
+    #[inline(always)]
     pub fn now() -> Self {
         TimeSpec::from_tick(get_time())
     }
@@ -170,45 +184,56 @@ pub struct TimeVal {
 }
 
 impl TimeVal {
+    #[inline(always)]
     pub fn new() -> Self {
         Self {
             tv_sec: 0,
             tv_usec: 0,
         }
     }
+    #[inline(always)]
     pub fn from_tick(tick: usize) -> Self {
+        let freq = get_clock_freq();
         Self {
-            tv_sec: tick / get_clock_freq(),
-            tv_usec: (tick % get_clock_freq()) * USEC_PER_SEC / get_clock_freq(),
+            tv_sec: tick / freq,
+            tv_usec: (tick % freq) * USEC_PER_SEC / freq,
         }
     }
+    #[inline(always)]
     pub fn to_tick(&self) -> usize {
-        return self.tv_sec * get_clock_freq() + self.tv_usec * get_clock_freq() / USEC_PER_SEC;
+        let freq = get_clock_freq();
+        self.tv_sec * freq + self.tv_usec * freq / USEC_PER_SEC
     }
+    #[inline(always)]
     pub fn from_s(s: usize) -> Self {
         Self {
             tv_sec: s,
             tv_usec: 0,
         }
     }
+    #[inline(always)]
     pub fn from_ms(ms: usize) -> Self {
         Self {
             tv_sec: ms / MSEC_PER_SEC,
             tv_usec: (ms % MSEC_PER_SEC) * USEC_PER_MSEC,
         }
     }
+    #[inline(always)]
     pub fn from_us(us: usize) -> Self {
         Self {
             tv_sec: us / USEC_PER_SEC,
             tv_usec: us % USEC_PER_SEC,
         }
     }
+    #[inline(always)]
     pub fn to_us(&self) -> usize {
         self.tv_sec * USEC_PER_SEC + self.tv_usec
     }
+    #[inline(always)]
     pub fn is_zero(&self) -> bool {
         self.tv_sec == 0 && self.tv_usec == 0
     }
+    #[inline(always)]
     pub fn now() -> Self {
         TimeVal::from_tick(get_time())
     }
