@@ -1540,27 +1540,27 @@ impl TaskControlBlock {
     }
 
     pub fn uid(&self) -> u32 {
-        self.uid_hint.load(Ordering::Acquire) as u32
+        self.uid_hint.load(Ordering::Relaxed) as u32
     }
 
     pub fn euid(&self) -> u32 {
-        self.euid_hint.load(Ordering::Acquire) as u32
+        self.euid_hint.load(Ordering::Relaxed) as u32
     }
 
     pub fn suid(&self) -> u32 {
-        self.suid_hint.load(Ordering::Acquire) as u32
+        self.suid_hint.load(Ordering::Relaxed) as u32
     }
 
     pub fn gid(&self) -> u32 {
-        self.gid_hint.load(Ordering::Acquire) as u32
+        self.gid_hint.load(Ordering::Relaxed) as u32
     }
 
     pub fn egid(&self) -> u32 {
-        self.egid_hint.load(Ordering::Acquire) as u32
+        self.egid_hint.load(Ordering::Relaxed) as u32
     }
 
     pub fn sgid(&self) -> u32 {
-        self.sgid_hint.load(Ordering::Acquire) as u32
+        self.sgid_hint.load(Ordering::Relaxed) as u32
     }
 
     pub fn store_identity_hint(
@@ -1572,12 +1572,12 @@ impl TaskControlBlock {
         egid: u32,
         sgid: u32,
     ) {
-        self.uid_hint.store(uid as usize, Ordering::Release);
-        self.euid_hint.store(euid as usize, Ordering::Release);
-        self.suid_hint.store(suid as usize, Ordering::Release);
-        self.gid_hint.store(gid as usize, Ordering::Release);
-        self.egid_hint.store(egid as usize, Ordering::Release);
-        self.sgid_hint.store(sgid as usize, Ordering::Release);
+        self.uid_hint.store(uid as usize, Ordering::Relaxed);
+        self.euid_hint.store(euid as usize, Ordering::Relaxed);
+        self.suid_hint.store(suid as usize, Ordering::Relaxed);
+        self.gid_hint.store(gid as usize, Ordering::Relaxed);
+        self.egid_hint.store(egid as usize, Ordering::Relaxed);
+        self.sgid_hint.store(sgid as usize, Ordering::Relaxed);
         super::refresh_current_identity_hints_for_task(self.gettid(), uid, euid, gid, egid);
     }
 

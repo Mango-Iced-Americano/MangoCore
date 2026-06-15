@@ -150,7 +150,7 @@ pub fn run_tasks() {
                 &task_inner.task_cx as *const TaskContext
             };
             // 设置当前正在运行的任务
-            CURRENT_TASK_PTR.store(Arc::as_ptr(&task) as *mut TaskControlBlock, Ordering::Release);
+            CURRENT_TASK_PTR.store(Arc::as_ptr(&task) as *mut TaskControlBlock, Ordering::Relaxed);
             CURRENT_PID.store(task.pid(), Ordering::Relaxed);
             CURRENT_TID.store(task.gettid(), Ordering::Relaxed);
             CURRENT_PARENT_PID.store(task.process.parent_pid(), Ordering::Relaxed);
@@ -180,7 +180,7 @@ pub fn run_tasks() {
 
 /// 取出当前正在运行的任务
 pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
-    CURRENT_TASK_PTR.store(ptr::null_mut(), Ordering::Release);
+    CURRENT_TASK_PTR.store(ptr::null_mut(), Ordering::Relaxed);
     CURRENT_PID.store(0, Ordering::Relaxed);
     CURRENT_TID.store(0, Ordering::Relaxed);
     CURRENT_PARENT_PID.store(0, Ordering::Relaxed);
@@ -202,7 +202,7 @@ pub fn current_task() -> Option<Arc<TaskControlBlock>> {
 /// MangoCore 当前是单核；调度器在 `PROCESSOR.current` 持有 Arc 时同步发布这个指针，
 /// `take_current_task()` 会在切走当前任务前清空它。调用者不能把引用跨调度点保存。
 pub fn current_task_ref() -> Option<&'static TaskControlBlock> {
-    let ptr = CURRENT_TASK_PTR.load(Ordering::Acquire);
+    let ptr = CURRENT_TASK_PTR.load(Ordering::Relaxed);
     if ptr.is_null() {
         None
     } else {

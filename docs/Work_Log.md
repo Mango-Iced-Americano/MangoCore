@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### current 快路径原子放松：减少 syscall 当前任务读取开销
+
+**涉及文件：**
+- `os/src/task/processor.rs` — `CURRENT_TASK_PTR` 发布/读取改为 `Relaxed`，匹配当前单核调度下的当前任务快指针语义
+- `os/src/task/task.rs` — uid/euid/gid/egid/suid/sgid hint 读写改为 `Relaxed`，避免身份只读 syscall 额外 acquire/release 屏障
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 当前内核为单核，真实任务状态和身份更新仍由原有锁保护；这些原子只提供当前任务/身份快照，不承担跨核内存发布语义。
+
 ### 当前身份快照：加速 getuid/getgid 类 syscall
 
 **涉及文件：**
