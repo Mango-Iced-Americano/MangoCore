@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### syscall 入口优化：默认构建跳过诊断 ID 原子写
+
+**涉及文件：**
+- `os/src/task/processor.rs` — `set_current_syscall_id` 仅在 `heap_trace`/`perf_stats` 诊断 feature 下写入 `CURRENT_SYSCALL_ID`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 已启动后由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 面向 `lat_syscall` 和 syscall 密集型测试；默认 release/log_off 路径避免每次 syscall 入口原子 store，诊断构建仍保留 syscall 名追踪。
+
 ### exec/signal/la64 页表热路径降噪：删除普通 debug/trace
 
 **涉及文件：**

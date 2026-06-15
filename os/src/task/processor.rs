@@ -55,10 +55,10 @@ impl Processor {
     }
 }
 
-/// 当前正在执行的系统调用 ID（用于 OOM 诊断追踪）。
+/// 当前正在执行的系统调用 ID（用于诊断构建）。
 ///
-/// MangoCore 当前是单核调度，syscall 入口用全局原子即可避免每次 syscall
-/// 都竞争 PROCESSOR 锁；0 表示无记录，实际 syscall id 存为 id + 1。
+/// 默认性能构建不维护该字段，避免每次 syscall 入口产生原子写开销。
+/// 诊断构建中 0 表示无记录，实际 syscall id 存为 id + 1。
 static CURRENT_SYSCALL_ID: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_TASK_PTR: AtomicPtr<TaskControlBlock> = AtomicPtr::new(ptr::null_mut());
 static CURRENT_PID: AtomicUsize = AtomicUsize::new(0);
@@ -275,8 +275,11 @@ pub fn current_syscall_name() -> &'static str {
 }
 
 /// 设置当前系统调用 ID
+#[inline(always)]
 pub fn set_current_syscall_id(id: Option<usize>) {
-    CURRENT_SYSCALL_ID.store(id.map(|id| id + 1).unwrap_or(0), Ordering::Relaxed);
+    if cfg!(any(feature = "heap_trace", feature = "perf_stats")) {
+        CURRENT_SYSCALL_ID.store(id.map(|id| id + 1).unwrap_or(0), Ordering::Relaxed);
+    }
 }
 
 /// 获取当前正在运行的任务的用户态页表令牌
