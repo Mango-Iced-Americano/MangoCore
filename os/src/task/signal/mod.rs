@@ -655,8 +655,8 @@ fn signal_should_ptrace_stop(inner: &super::task::TaskControlBlockInner, signal:
 
 /// 执行信号处理
 /// 在从内核返回到用户空间前调用
-pub fn do_signal() -> Arc<TaskControlBlock> {
-    let task = current_task().unwrap();
+pub fn do_signal() -> &'static TaskControlBlock {
+    let task = current_task_ref().unwrap();
     let mut inner = task.acquire_inner_lock();
     if inner.pending_oom_kill {
         inner.pending_oom_kill = false;
@@ -667,7 +667,7 @@ pub fn do_signal() -> Arc<TaskControlBlock> {
             task.pid()
         );
     }
-    while let Some((pending, from_process)) = take_next_pending_signal(&task, &mut inner) {
+    while let Some((pending, from_process)) = take_next_pending_signal(task, &mut inner) {
         let signum = pending.signum();
         let signal = pending.signal;
         trace!(
@@ -683,7 +683,6 @@ pub fn do_signal() -> Arc<TaskControlBlock> {
         if signal_should_ptrace_stop(&inner, signal) {
             drop(sighand);
             drop(inner);
-            drop(task);
             stop_current_process_for_signal(signum);
             return do_signal();
         }
@@ -766,7 +765,6 @@ pub fn do_signal() -> Arc<TaskControlBlock> {
                             error!("[do_signal] Failed to write UserContext to user stack. Send SIGSEGV.");
                             drop(inner);
                             drop(sighand);
-                            drop(task);
                             exit_current_with_sigsegv();
                         }
                         if UserPtrMut::from_addr(siginfo_addr)
@@ -778,7 +776,6 @@ pub fn do_signal() -> Arc<TaskControlBlock> {
                             );
                             drop(inner);
                             drop(sighand);
-                            drop(task);
                             exit_current_with_sigsegv();
                         }
                         let trap_cx = inner.get_trap_cx();
@@ -801,7 +798,6 @@ pub fn do_signal() -> Arc<TaskControlBlock> {
                             );
                                 drop(inner);
                                 drop(sighand);
-                                drop(task);
                                 exit_current_with_sigsegv();
                             }
                         }
@@ -821,7 +817,6 @@ pub fn do_signal() -> Arc<TaskControlBlock> {
                         );
                             drop(inner);
                             drop(sighand);
-                            drop(task);
                             exit_current_with_sigsegv();
                         }
                     }
@@ -841,7 +836,6 @@ pub fn do_signal() -> Arc<TaskControlBlock> {
                 );
                     drop(inner);
                     drop(sighand);
-                    drop(task);
                     exit_current_with_sigsegv();
                 }
                 let (trace_ra, trace_sp) = {
@@ -900,7 +894,6 @@ pub fn do_signal() -> Arc<TaskControlBlock> {
                 }
                 drop(inner);
                 drop(sighand);
-                drop(task);
                 exit_group_and_run_next(default_signal_wait_status(signal));
             }
             // the current process we are handing is sure to be in RUNNING status, so just ignore SIGCONT
@@ -913,7 +906,6 @@ pub fn do_signal() -> Arc<TaskControlBlock> {
             Signals::SIGSTOP | Signals::SIGTSTP | Signals::SIGTTIN | Signals::SIGTTOU => {
                 drop(inner);
                 drop(sighand);
-                drop(task);
                 stop_current_process_for_signal(signum);
                 return do_signal();
             }
@@ -922,7 +914,6 @@ pub fn do_signal() -> Arc<TaskControlBlock> {
                 warn!("[do_signal] process terminated due to {:?}", signal);
                 drop(inner);
                 drop(sighand);
-                drop(task);
                 exit_group_and_run_next(default_signal_wait_status(signal));
             }
         }

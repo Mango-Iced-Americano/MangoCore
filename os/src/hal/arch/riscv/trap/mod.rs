@@ -203,7 +203,6 @@ pub fn trap_return() -> ! {
     set_user_trap_entry();
     let trap_cx_ptr = task.trap_cx_user_va();
     let user_satp = task.get_user_token();
-    drop(task);
     let restore_va = __restore as usize - __alltraps as usize + TRAMPOLINE;
     unsafe {
         asm!(

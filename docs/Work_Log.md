@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### trap_return 信号检查优化：do_signal 返回当前任务短引用
+
+**涉及文件：**
+- `os/src/task/signal/mod.rs` — `do_signal()` 返回值从 `Arc<TaskControlBlock>` 收窄为 `&'static TaskControlBlock`，常态无信号返回路径通过 `current_task_ref()` 避免每次 trap_return 额外 clone 当前任务 `Arc`
+- `os/src/hal/arch/riscv/trap/mod.rs`、`os/src/hal/arch/loongarch64/trap/mod.rs` — `trap_return()` 适配 `do_signal()` 的短引用返回值，去除原先释放 `Arc` 的 `drop(task)`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 参考成熟内核 current task 快速访问思路，当前任务在返回用户态前不需要通过引用计数延长生命周期；信号处理、stop、默认终止和 SIGSEGV 退出路径仍保持原有控制流。
+
 ### trap 返回热路径优化：未启用 ITIMER_REAL 时跳过实时定时器刷新
 
 **涉及文件：**
