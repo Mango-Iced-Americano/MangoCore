@@ -14,7 +14,7 @@ use crate::mm::{copy_from_user, UserPtr, UserPtrMut};
 use crate::signal_type;
 use crate::syscall::errno::*;
 use crate::task::{
-    current_syscall_name, current_task, current_task_ref, exit_current_and_run_next, signal::*,
+    current_syscall_name, current_task_ref, exit_current_and_run_next, signal::*,
     ProcessControlBlock, ProcessManager, TaskControlBlock,
 };
 use crate::timer::TimeSpec;
@@ -359,8 +359,7 @@ pub fn sys_kill(pid: usize, sig: usize) -> isize {
     if pid_signed > 0 {
         if let Some(task_ref) = current_task_ref() {
             if task_ref.pid() == pid && task_ref.process.live_thread_count() == 1 {
-                let task = current_task().unwrap();
-                send_process_signal_to_task(&task.process, &task, signal);
+                send_process_signal_to_current_task(&task_ref.process, signal);
                 return SUCCESS;
             }
         }
@@ -770,7 +769,7 @@ pub fn sys_sigaltstack(ss: usize, old_ss: usize) -> isize {
 
 pub fn sys_sigreturn() -> isize {
     // mark not processing signal handler
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let mut inner = task.acquire_inner_lock();
     let token = task.get_user_token();
     info!("[sys_sigreturn] tid: {}, pid: {}", task.tid.0, task.pid());
@@ -785,7 +784,6 @@ pub fn sys_sigreturn() -> isize {
         None => {
             error!("[sys_sigreturn] invalid signal frame address, send SIGSEGV");
             drop(inner);
-            drop(task);
             exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
         }
     };
@@ -797,7 +795,6 @@ pub fn sys_sigreturn() -> isize {
         None => {
             error!("[sys_sigreturn] invalid sigmask address, send SIGSEGV");
             drop(inner);
-            drop(task);
             exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
         }
     };
@@ -809,7 +806,6 @@ pub fn sys_sigreturn() -> isize {
         None => {
             error!("[sys_sigreturn] invalid machine context address, send SIGSEGV");
             drop(inner);
-            drop(task);
             exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
         }
     };
@@ -818,7 +814,6 @@ pub fn sys_sigreturn() -> isize {
         Err(_) => {
             error!("[sys_sigreturn] bad sigmask in signal frame, send SIGSEGV");
             drop(inner);
-            drop(task);
             exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
         }
     };
@@ -832,7 +827,6 @@ pub fn sys_sigreturn() -> isize {
     {
         error!("[sys_sigreturn] bad machine context in signal frame, send SIGSEGV");
         drop(inner);
-        drop(task);
         exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
     }
     inner.sigmask = restored_sigmask;

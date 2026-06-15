@@ -4,6 +4,20 @@
 
 ## 2026-06-15
 
+### 信号热路径优化：self-kill 与 sigreturn 减少当前任务 Arc clone
+
+**涉及文件：**
+- `os/src/task/signal/delivery.rs` — 新增 `send_process_signal_to_current_task()`，用于当前单线程进程给自身发送 process signal 时只入队 pending signal，避免通用路径扫描线程并 clone 当前任务 `Arc`
+- `os/src/task/signal/mod.rs` — 导出当前任务专用 signal helper
+- `os/src/syscall/process/signal.rs` — `kill(pid=self)` 单线程快路径改用专用 helper；`sys_sigreturn()` 改用 `current_task_ref()`，错误路径保持先释放 `task.inner` 锁再退出当前任务
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 该优化面向 lmbench `lat_sig`/signal handler overhead；多线程或非当前进程信号发送仍走原有权限检查、目标选择与唤醒路径。
+
 ### 通用阻塞 I/O 兜底路径优化：wait_io_core 返回后短引用化
 
 **涉及文件：**
