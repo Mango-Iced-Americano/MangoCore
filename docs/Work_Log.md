@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### timeval syscall：空指针路径延后 token 读取
+
+**涉及文件：**
+- `os/src/syscall/process/time.rs` — `gettimeofday(NULL, NULL)` 与 `settimeofday(NULL, NULL)` 直接返回成功，避免无用户访问时读取当前用户 token
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 保持 Linux 兼容的空指针 no-op 语义；非空参数路径仍按原顺序复制用户内存并校验权限。
+
 ### robust_list 权限检查：复用身份 hint
 
 **涉及文件：**

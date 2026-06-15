@@ -551,6 +551,9 @@ fn current_posix_itimerspec(timer: &PosixTimer) -> ITimerSpec {
 }
 
 pub fn sys_gettimeofday(tv: *mut TimeVal, tz: *mut TimeZone) -> isize {
+    if tv.is_null() && tz.is_null() {
+        return SUCCESS;
+    }
     let token = current_user_token();
     if !tv.is_null() {
         let timeval = current_timeval();
@@ -577,6 +580,9 @@ fn is_valid_timeval(timeval: TimeVal) -> bool {
 }
 
 pub fn sys_settimeofday(tv: *const TimeVal, tz: *const TimeZone) -> isize {
+    if tv.is_null() && tz.is_null() {
+        return SUCCESS;
+    }
     let token = current_user_token();
     if !tz.is_null() {
         if let Err(errno) = UserPtr::new(tz).read(token) {
