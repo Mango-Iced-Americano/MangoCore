@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### lmbench/UnixBench signalfd 短路径优化：减少当前任务 clone
+
+**涉及文件：**
+- `os/src/syscall/process/signal.rs` — `SignalFd::read_at/poll` 改用 `current_task_ref()` 直接检查/取出当前任务 pending signal；`sys_signalfd4()` 只用短引用读取 token 和 files 句柄，减少 signalfd 创建、更新和轮询路径中的当前任务 `Arc` clone
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** `sigreturn/do_signal/stop` 等需要当前任务拥有权或跨等待点的路径继续保留 `current_task()`。
+
 ### lmbench/UnixBench mmap syscall 优化：复用 fd 与 VM 句柄
 
 **涉及文件：**

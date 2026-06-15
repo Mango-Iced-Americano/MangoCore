@@ -201,11 +201,11 @@ impl IndexNode for SignalFd {
         }
 
         let count = core::cmp::min(len, buf.len()) / info_size;
-        let task = current_task().ok_or(SyscallErr::ESRCH)?;
+        let task = current_task_ref().ok_or(SyscallErr::ESRCH)?;
         let mask = self.pending_mask();
         let mut written = 0usize;
         for slot in 0..count {
-            let Some(pending) = take_pending_signal_matching(&task, mask) else {
+            let Some(pending) = take_pending_signal_matching(task, mask) else {
                 break;
             };
             let info = SignalfdSiginfo::from_siginfo(pending.siginfo);
@@ -236,8 +236,8 @@ impl IndexNode for SignalFd {
     }
 
     fn poll(&self, _private_data: &FilePrivateData) -> Result<usize, SyscallErr> {
-        let task = current_task().ok_or(SyscallErr::ESRCH)?;
-        if has_pending_signal_matching(&task, self.pending_mask()) {
+        let task = current_task_ref().ok_or(SyscallErr::ESRCH)?;
+        if has_pending_signal_matching(task, self.pending_mask()) {
             Ok((EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM).bits())
         } else {
             Ok(0)
@@ -289,8 +289,11 @@ pub fn sys_signalfd4(fd: usize, mask: usize, sigsetsize: usize, flags: usize) ->
         return EINVAL;
     }
 
-    let task = current_task().unwrap();
-    let sigmask = match read_signalfd_mask(task.get_user_token(), mask, sigsetsize) {
+    let (token, files_ref) = {
+        let task = current_task_ref().unwrap();
+        (task.get_user_token(), task.process.files())
+    };
+    let sigmask = match read_signalfd_mask(token, mask, sigsetsize) {
         Ok(mask) => mask,
         Err(errno) => return errno,
     };
@@ -310,7 +313,6 @@ pub fn sys_signalfd4(fd: usize, mask: usize, sigsetsize: usize, flags: usize) ->
             Ok(file) => file,
             Err(err) => return -(err as isize),
         };
-        let files_ref = task.process.files();
         let mut fd_table = files_ref.lock();
         return match fd_table.alloc_fd(file, flags & SFD_CLOEXEC != 0) {
             Ok(new_fd) => new_fd as isize,
@@ -322,7 +324,6 @@ pub fn sys_signalfd4(fd: usize, mask: usize, sigsetsize: usize, flags: usize) ->
         return EBADF;
     }
 
-    let files_ref = task.process.files();
     let fd_table = files_ref.lock();
     let file = match fd_table.get_file(fd) {
         Ok(file) => file,
