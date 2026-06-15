@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### 当前任务获取优化：current_task 避开调度器锁
+
+**涉及文件：**
+- `os/src/task/processor.rs` — `current_task()` 基于已发布的 `CURRENT_TASK_PTR` 增加强引用构造 `Arc`，避免每次获取当前任务都锁 `PROCESSOR`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic 已通过，busybox 进入文件操作测试后由外层 `timeout 75s` 结束，无 panic
+
+**备注：** 面向 `lat_proc`、`lat_sig`、syscall 密集路径和 clone/exit 辅助路径；依赖当前单核调度模型，`PROCESSOR.current` 在指针发布期间持有强引用。
+
 ### 调度切换优化：移除全局身份 hint 写入
 
 **涉及文件：**

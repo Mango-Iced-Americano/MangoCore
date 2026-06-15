@@ -184,7 +184,17 @@ pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
 
 /// 获取当前正在运行的任务
 pub fn current_task() -> Option<Arc<TaskControlBlock>> {
-    PROCESSOR.lock().current()
+    let ptr = CURRENT_TASK_PTR.load(Ordering::Relaxed);
+    if ptr.is_null() {
+        return None;
+    }
+    // MangoCore is single-core. PROCESSOR.current owns a strong reference while
+    // CURRENT_TASK_PTR is published, so cloning from the raw pointer avoids the
+    // scheduler lock on hot syscall paths.
+    unsafe {
+        Arc::increment_strong_count(ptr);
+        Some(Arc::from_raw(ptr))
+    }
 }
 
 /// 获取当前正在运行任务的短生命周期引用。
