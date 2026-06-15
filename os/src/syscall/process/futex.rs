@@ -5,7 +5,7 @@ use crate::task::threads::{
     do_futex_waitv, do_futex_waitv_shared, futex_requeue_shared, futex_wake_shared, FutexCmd,
     FutexWaitEntry,
 };
-use crate::task::{current_task_ref, threads, TaskControlBlock};
+use crate::task::{current_task_ref, current_user_token, threads, TaskControlBlock};
 use crate::timer::{current_timespec, TimeSpec, NSEC_PER_SEC};
 use alloc::vec::Vec;
 use core::mem::size_of;
@@ -155,7 +155,7 @@ pub fn sys_futex(
     uaddr2: *mut u32,
     val3: u32,
 ) -> isize {
-    let token = current_task_ref().unwrap().get_user_token();
+    let token = current_user_token();
     // uaddr is always used
     if uaddr.is_null() || uaddr.align_offset(4) != 0 {
         return EINVAL;
@@ -300,7 +300,7 @@ pub fn sys_futex_waitv(
         return EFAULT;
     }
 
-    let token = current_task_ref().unwrap().get_user_token();
+    let token = current_user_token();
     let deadline = match futex_waitv_deadline(timeout, token, clockid) {
         Ok(deadline) => deadline,
         Err(errno) => return errno,

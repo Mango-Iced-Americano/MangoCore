@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### futex 用户指针 token 快路径：复用当前 token 快照
+
+**涉及文件：**
+- `os/src/syscall/process/futex.rs` — `sys_futex()` 与 `sys_futex_waitv()` 使用 `current_user_token()` 读取当前任务用户指针，避免每次入口锁 PCB/VM 获取 token
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** shared futex key 仍通过当前 VM 判断虚拟地址是否使用共享物理 key；本次只优化用户 timeout/waiter/futex word 读写所需的 token 获取。
+
 ### trap 返回 token 快路径：避免每次返回用户态锁 VM
 
 **涉及文件：**
