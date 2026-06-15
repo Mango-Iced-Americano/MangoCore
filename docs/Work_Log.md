@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### trap 返回热路径优化：未启用 ITIMER_REAL 时跳过实时定时器刷新
+
+**涉及文件：**
+- `os/src/task/task.rs` — `refresh_real_timer()` 在 `real_timer_deadline` 为空时直接返回，避免无 real timer 的 syscall/trap 返回路径无条件读取时间、计算差值并更新锚点
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 该优化针对 lmbench `simple syscall/read/write/signal` 等高频 trap 返回场景；`setitimer(ITIMER_REAL)` 启用时仍保留原有刷新逻辑，禁用或过期一次性 timer 时由 `real_timer_deadline=None` 走快路径。
+
 ### timer syscall 优化：延迟获取当前任务 Arc
 
 **涉及文件：**

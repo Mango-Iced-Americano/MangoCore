@@ -592,6 +592,9 @@ impl TaskControlBlockInner {
     }
 
     pub fn refresh_real_timer(&mut self) {
+        if self.real_timer_deadline.is_none() {
+            return;
+        }
         let now = TimeVal::now();
         let diff = now - self.clock.last_real_timer_update;
         log::debug!("real_timer refreshing...");
