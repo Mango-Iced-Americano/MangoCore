@@ -4,6 +4,20 @@
 
 ## 2026-06-15
 
+### 轻量进程组 syscall 优化：缓存当前 pgid/sid
+
+**涉及文件：**
+- `os/src/task/processor.rs` — context switch 时发布当前进程 pgid/sid 缓存，并提供 `current_pgid/current_sid`
+- `os/src/task/process.rs` — `setpgid/setsid` 在当前进程变更时同步刷新处理器缓存
+- `os/src/task/mod.rs`、`os/src/syscall/process/ids.rs` — `getpgid(0)`/`getsid(0)` 走当前缓存，避免取当前 task/process
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev sh -lc 'timeout 75s make rv64-run ...'` ✅ — busybox 进入文件操作测试后由外层 timeout 结束，无 panic
+
+**备注：** 面向轻量进程标识类 syscall；非当前 pid 查询仍走 `ProcessManager`，语义保持不变。
+
 ### 轻量 ID syscall 优化：缓存当前任务身份字段
 
 **涉及文件：**

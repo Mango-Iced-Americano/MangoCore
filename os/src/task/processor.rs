@@ -69,6 +69,8 @@ static CURRENT_UID: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_EUID: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_GID: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_EGID: AtomicUsize = AtomicUsize::new(0);
+static CURRENT_PGID: AtomicUsize = AtomicUsize::new(0);
+static CURRENT_SID: AtomicUsize = AtomicUsize::new(0);
 
 lazy_static! {
     /// 全局的处理器对象
@@ -161,6 +163,8 @@ pub fn run_tasks() {
             CURRENT_EUID.store(task.euid() as usize, Ordering::Relaxed);
             CURRENT_GID.store(task.gid() as usize, Ordering::Relaxed);
             CURRENT_EGID.store(task.egid() as usize, Ordering::Relaxed);
+            CURRENT_PGID.store(task.process.getpgid(), Ordering::Relaxed);
+            CURRENT_SID.store(task.process.getsid(), Ordering::Relaxed);
             processor.current = Some(task);
             // 手动释放处理器
             drop(processor);
@@ -192,6 +196,8 @@ pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
     CURRENT_EUID.store(0, Ordering::Relaxed);
     CURRENT_GID.store(0, Ordering::Relaxed);
     CURRENT_EGID.store(0, Ordering::Relaxed);
+    CURRENT_PGID.store(0, Ordering::Relaxed);
+    CURRENT_SID.store(0, Ordering::Relaxed);
     PROCESSOR.lock().take_current()
 }
 
@@ -241,6 +247,16 @@ pub fn current_parent_pid() -> usize {
 }
 
 #[inline(always)]
+pub fn current_pgid() -> usize {
+    CURRENT_PGID.load(Ordering::Relaxed)
+}
+
+#[inline(always)]
+pub fn current_sid() -> usize {
+    CURRENT_SID.load(Ordering::Relaxed)
+}
+
+#[inline(always)]
 pub fn current_uid() -> u32 {
     CURRENT_UID.load(Ordering::Relaxed) as u32
 }
@@ -273,6 +289,14 @@ pub(super) fn refresh_current_identity_hints(
         CURRENT_EUID.store(euid as usize, Ordering::Relaxed);
         CURRENT_GID.store(gid as usize, Ordering::Relaxed);
         CURRENT_EGID.store(egid as usize, Ordering::Relaxed);
+    }
+}
+
+#[inline(always)]
+pub(super) fn refresh_current_process_group_hints(pid: usize, pgid: usize, sid: usize) {
+    if CURRENT_PID.load(Ordering::Relaxed) == pid {
+        CURRENT_PGID.store(pgid, Ordering::Relaxed);
+        CURRENT_SID.store(sid, Ordering::Relaxed);
     }
 }
 

@@ -7,8 +7,9 @@ use crate::mm::{
 };
 use crate::syscall::errno::*;
 use crate::task::{
-    current_egid, current_euid, current_gid, current_parent_pid, current_pid, current_task,
-    current_task_ref, current_tid, current_uid, current_user_token, update_ready_nice,
+    current_egid, current_euid, current_gid, current_parent_pid, current_pgid, current_pid,
+    current_sid, current_task, current_task_ref, current_tid, current_uid, current_user_token,
+    update_ready_nice,
     ProcessControlBlock, ProcessManager, SeccompFilterInsn, Signals, TaskControlBlock,
 };
 use crate::timer::{get_time_sec, TimeSpec};
@@ -1637,7 +1638,7 @@ pub fn sys_getpgid(pid: usize) -> isize {
         return ESRCH;
     }
     if pid == 0 {
-        return current_task_ref().unwrap().process.getpgid() as isize;
+        return current_pgid() as isize;
     }
     match ProcessManager::find_process(pid) {
         Some(process) => process.getpgid() as isize,
@@ -1650,7 +1651,7 @@ pub fn sys_getsid(pid: usize) -> isize {
         return ESRCH;
     }
     if pid == 0 {
-        return current_task_ref().unwrap().process.getsid() as isize;
+        return current_sid() as isize;
     }
     match ProcessManager::find_process(pid) {
         Some(process) => process.getsid() as isize,
