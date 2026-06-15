@@ -217,21 +217,6 @@ pub fn trap_handler() -> ! {
             let task = current_task_ref().unwrap();
             let mut inner = task.acquire_inner_lock();
             let addr = VirtAddr::from(get_bad_addr());
-            log::debug!(
-                "[page_fault] tid: {}, pid: {}, type: {:?}",
-                task.tid.0,
-                task.pid(),
-                cause
-            );
-            log::debug!(
-                "[page_fault] {:?}, {:?}, {:?}, {:?}, {:?}, {:?}",
-                TLBRERA::read(),
-                TLBRBadV::read(),
-                TLBREHi::read(),
-                TLBRELo0::read(),
-                TLBRELo1::read(),
-                PWCL::read(),
-            );
             // This is where we handle the page fault.
             frame_reserve(3);
             let vm_ref = task.process.vm();

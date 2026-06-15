@@ -116,12 +116,6 @@ pub fn trap_handler() -> ! {
             let task = current_task_ref().unwrap();
             let mut inner = task.acquire_inner_lock();
             let addr = VirtAddr::from(stval);
-            log::debug!(
-                "[page_fault] tid: {}, pid: {}, type: {:?}",
-                task.tid.0,
-                task.pid(),
-                scause.cause()
-            );
             // This is where we handle the page fault.
             frame_reserve(3);
             let access = match scause.cause() {

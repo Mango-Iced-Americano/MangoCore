@@ -4,6 +4,20 @@
 
 ## 2026-06-15
 
+### page fault 热路径降噪：删除普通修复路径 debug 日志
+
+**涉及文件：**
+- `os/src/mm/page_fault.rs` — 删除 resident/lazy/COW/decompress/swap-in 等正常缺页修复路径 debug 输出
+- `os/src/hal/arch/riscv/trap/mod.rs` — 删除 rv64 普通 page fault 入口 debug 输出
+- `os/src/hal/arch/loongarch64/trap/mod.rs` — 删除 la64 普通 page fault 入口与 TLB 寄存器 debug dump
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 面向 `lat_pagefault`/`lat_mmap` 类性能测试；保留权限失败 `error!`、stale pte `warn!` 和 LoongArch 异常兜底打印。
+
 ### trap/syscall 入口降噪：删除无条件 debug 日志
 
 **涉及文件：**

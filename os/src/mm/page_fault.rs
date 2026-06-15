@@ -4,7 +4,7 @@ use super::vma::Vma;
 use super::vma::{VmAreaKind, VmAreaMapping, VmPageState};
 use super::{FaultAccess, MemoryError, PageTable, PhysAddr, VirtAddr, VirtPageNum};
 use crate::utils::error::SyscallErr;
-use log::{debug, error, warn};
+use log::{error, warn};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct FaultContext {
@@ -152,12 +152,6 @@ fn map_existing_resident_page<T: PageTable>(
     page_table: &mut T,
     ctx: FaultContext,
 ) -> Result<super::PhysPageNum, MemoryError> {
-    debug!(
-        "[do_page_fault] map resident page without pte: addr={:?}, vpn={:?}, state={:?}",
-        ctx.addr,
-        ctx.vpn,
-        area.vm_page_state(ctx.vpn)
-    );
     area.map_existing_in_memory(page_table, ctx.vpn)
 }
 
@@ -166,14 +160,7 @@ fn map_lazy_zero_page<T: PageTable>(
     page_table: &mut T,
     ctx: FaultContext,
 ) -> Result<super::PhysPageNum, MemoryError> {
-    debug!("[do_page_fault] addr: {:?}, solution: lazy alloc", ctx.addr);
     let ppn = area.map_one_zeroed_unchecked(page_table, ctx.vpn)?;
-    debug!(
-        "[do_page_fault map_one] addr: {:?}, vpn: {:?}, state: {:?}",
-        ctx.addr,
-        ctx.vpn,
-        area.vm_page_state(ctx.vpn)
-    );
     Ok(ppn)
 }
 
@@ -187,7 +174,6 @@ fn finish_decompress_page<T: PageTable>(
     UserMapper::new(page_table).map_user_page(ctx.vpn, ppn, area.vm_perm())?;
     area.vm_record_resident_page::<T>(ctx.vpn)?;
     area.vm_dec_compressed();
-    debug!("[do_page_fault] addr: {:?}, solution: decompress", ctx.addr);
     Ok(ppn)
 }
 
@@ -201,7 +187,6 @@ fn finish_swap_in_page<T: PageTable>(
     UserMapper::new(page_table).map_user_page(ctx.vpn, ppn, area.vm_perm())?;
     area.vm_record_resident_page::<T>(ctx.vpn)?;
     area.vm_dec_swapped();
-    debug!("[do_page_fault] addr: {:?}, solution: swap in", ctx.addr);
     Ok(ppn)
 }
 
@@ -248,7 +233,6 @@ fn repair_stale_lazy_pte<T: PageTable>(
     }
 
     let allocated_ppn = area.map_one_zeroed_unchecked(page_table, ctx.vpn)?;
-    debug!("[do_page_fault] addr: {:?}, solution: lazy alloc", ctx.addr);
     Ok(ctx.offset_phys(allocated_ppn))
 }
 
@@ -258,10 +242,6 @@ fn copy_private_page<T: PageTable>(
     ctx: FaultContext,
 ) -> Result<PhysAddr, MemoryError> {
     let allocated_ppn = area.copy_on_write(page_table, ctx.vpn)?;
-    debug!(
-        "[do_page_fault] addr: {:?}, solution: copy on write",
-        ctx.addr
-    );
     Ok(ctx.offset_phys(allocated_ppn))
 }
 
