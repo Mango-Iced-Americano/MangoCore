@@ -4,6 +4,20 @@
 
 ## 2026-06-15
 
+### uaccess 当前 token 快速判断：减少重复 current task 查询
+
+**涉及文件：**
+- `os/src/task/processor.rs` — 增加 `try_current_user_token()`，优先读取 `CURRENT_USER_TOKEN` hint，无 hint 时再回退到当前任务
+- `os/src/task/mod.rs` — 导出 `try_current_user_token()` 供内存访问路径复用
+- `os/src/mm/uaccess.rs` — `is_current_user_token()` 改用 `try_current_user_token()`，避免先查 current task 再读 token 的重复工作
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** `current_user_token()` 仍保持原有必有当前任务的 unwrap 语义；新 helper 用于需要安全判断当前 token 的 fast path。
+
 ### 用户 token hint：减少调度切入 VM 锁
 
 **涉及文件：**

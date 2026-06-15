@@ -525,7 +525,7 @@ pub(crate) fn uaccess_user_range_ok(ptr: usize, end: usize) -> bool {
 }
 
 fn is_current_user_token(token: usize) -> bool {
-    current_task_ref().is_some() && crate::task::current_user_token() == token
+    crate::task::try_current_user_token() == Some(token)
 }
 
 fn current_user_vm(

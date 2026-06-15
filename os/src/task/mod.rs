@@ -50,7 +50,7 @@ pub use processor::{
     current_egid, current_euid, current_gid, current_parent_pid, current_pid,
     current_syscall_name, current_task, current_task_ref, current_tid, current_trap_cx,
     current_uid, current_user_token, refresh_current_identity_hints_for_task, run_tasks, schedule,
-    set_current_syscall_id, take_current_task,
+    set_current_syscall_id, take_current_task, try_current_user_token,
 };
 pub use registry::{
     all_processes, find_process_by_pid, find_processes_by_pgid, find_task_by_pid_tid,

@@ -280,13 +280,18 @@ pub fn set_current_syscall_id(id: Option<usize>) {
 }
 
 /// 获取当前正在运行的任务的用户态页表令牌
-pub fn current_user_token() -> usize {
+pub fn try_current_user_token() -> Option<usize> {
     let token = CURRENT_USER_TOKEN.load(Ordering::Relaxed);
     if token != 0 {
-        token
+        Some(token)
     } else {
-        current_task_ref().unwrap().get_user_token()
+        current_task_ref().map(|task| task.get_user_token())
     }
+}
+
+/// 获取当前正在运行的任务的用户态页表令牌
+pub fn current_user_token() -> usize {
+    try_current_user_token().unwrap()
 }
 
 /// 获取当前正在运行的任务的陷阱上下文
