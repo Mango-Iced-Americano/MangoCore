@@ -53,6 +53,8 @@ pub struct ProcessControlBlock {
     /// 是否被 init 收养（通过 adopt_children_by_init）。用于 finish_exit
     /// 中区分 init 直接 fork 的子进程和被收养的孤儿，只对后者自动回收。
     pub adopted_by_init: AtomicBool,
+    pgid_hint: AtomicUsize,
+    sid_hint: AtomicUsize,
     parent_pid_hint: AtomicUsize,
     inner: Mutex<ProcessInner>,
     signal: Mutex<ProcessSignalState>,
@@ -271,6 +273,8 @@ impl ProcessControlBlock {
             vfork_parent: Mutex::new(None),
             vfork_done: Completion::new(),
             adopted_by_init: AtomicBool::new(false),
+            pgid_hint: AtomicUsize::new(pgid),
+            sid_hint: AtomicUsize::new(sid),
             parent_pid_hint: AtomicUsize::new(parent_pid_hint),
             inner: Mutex::new(ProcessInner {
                 exe,
@@ -603,22 +607,25 @@ impl ProcessControlBlock {
             return -1;
         }
         self.inner.lock().pgid = pgid;
+        self.pgid_hint.store(pgid, Ordering::Relaxed);
         0
     }
 
     pub fn getpgid(&self) -> usize {
-        self.inner.lock().pgid
+        self.pgid_hint.load(Ordering::Relaxed)
     }
 
     pub fn setsid(&self, sid: usize) -> isize {
         let mut inner = self.inner.lock();
         inner.sid = sid;
         inner.pgid = sid;
+        self.sid_hint.store(sid, Ordering::Relaxed);
+        self.pgid_hint.store(sid, Ordering::Relaxed);
         0
     }
 
     pub fn getsid(&self) -> usize {
-        self.inner.lock().sid
+        self.sid_hint.load(Ordering::Relaxed)
     }
 
     pub fn parent(&self) -> Option<Arc<ProcessControlBlock>> {

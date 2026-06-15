@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### pgid/sid hint：减少进程组与会话查询锁
+
+**涉及文件：**
+- `os/src/task/process.rs` — 为 `pgid`/`sid` 增加 `Relaxed` 原子 hint，`getpgid()`/`getsid()` 改为无锁读取，`setpgid()`/`setsid()` 同步更新 hint
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** `pgid`/`sid` 真实字段仍保存在 `ProcessInner` 中，修改路径仍加锁；hint 与已有 `parent_pid_hint` 模式一致，用于只读查询和进程组扫描快路径。
+
 ### task lifecycle/quota 原子序：减少 clone/exit 屏障
 
 **涉及文件：**
