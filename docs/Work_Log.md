@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### 轻量 ID syscall 优化：缓存当前任务身份字段
+
+**涉及文件：**
+- `os/src/task/processor.rs` — context switch 时发布当前任务 uid/euid/gid/egid 缓存，`current_uid/euid/gid/egid` 直接读原子缓存
+- `os/src/task/task.rs` — `store_identity_hint` 在当前线程身份变更时同步刷新处理器缓存
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev sh -lc 'timeout 75s make rv64-run ...'` ✅ — busybox 进入文件操作测试后由外层 timeout 结束，无 panic
+
+**备注：** 面向 `getuid/geteuid/getgid/getegid` 等轻量 syscall；身份变更仍由原有 hint 更新点驱动，当前运行线程缓存同步刷新。
+
 ### futex 优化：短超时自旋使用 tick 比较
 
 **涉及文件：**
