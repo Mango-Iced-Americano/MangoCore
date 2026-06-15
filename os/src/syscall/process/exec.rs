@@ -7,7 +7,9 @@ use crate::fs::{vfs, vfs_lookup};
 use crate::mm::{UserCString, UserPtr};
 use crate::show_frame_consumption;
 use crate::syscall::errno::*;
-use crate::task::{current_task, exit_current_and_run_next, is_writable_inode_busy, AuxvEntry};
+use crate::task::{
+    current_task_ref, exit_current_and_run_next, is_writable_inode_busy, AuxvEntry,
+};
 use log::{debug, info};
 
 const MAX_EXEC_ARG_ENV_BYTES: usize = USER_STACK_INIT_SIZE / 2;
@@ -103,7 +105,7 @@ fn check_exec_metadata(file: &vfs::File) -> Result<(), isize> {
 fn has_exec_access(metadata: &vfs::Metadata) -> bool {
     let mode = metadata.mode.bits() & 0o777;
     let exec_any = (mode & 0o111) != 0;
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let inner = task.acquire_inner_lock();
 
     if inner.fsuid == 0 {
@@ -351,7 +353,7 @@ fn exec_opened_file(
         return EISDIR;
     }
 
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     show_frame_consumption! {
         "load_elf";
         if let Err(_errno) = task.load_elf(elf, &argv_vec, &envp_vec) {
@@ -365,7 +367,7 @@ fn exec_opened_file(
 }
 
 fn clone_fd_file(fd: usize) -> Result<Arc<vfs::File>, isize> {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let files_ref = task.process.files();
     let fd_table = files_ref.lock();
     let file = fd_table.get_file(fd).map_err(|e| -(e as isize))?;
@@ -380,7 +382,7 @@ fn reopen_exec_fd(file: &vfs::File) -> Result<Arc<vfs::File>, isize> {
 }
 
 fn resolve_exec_start_inode(dirfd: usize, path: &str) -> Result<Arc<dyn vfs::IndexNode>, isize> {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     if path.starts_with('/') || dirfd == crate::syscall::fs::AT_FDCWD {
         return Ok(task.process.fs().lock().working_inode.inode.clone());
     }
@@ -394,8 +396,9 @@ fn resolve_exec_start_inode(dirfd: usize, path: &str) -> Result<Arc<dyn vfs::Ind
 }
 
 pub fn sys_execve(pathname: *const u8, argv: *const *const u8, envp: *const *const u8) -> isize {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let token = task.get_user_token();
+    let fs_ref = task.process.fs();
     let path = match UserCString::new(pathname).read(token) {
         Ok(path) => path,
         Err(errno) => return errno,
@@ -415,7 +418,6 @@ pub fn sys_execve(pathname: *const u8, argv: *const *const u8, envp: *const *con
         envp_vec.len()
     );
     let (working_inode, working_path) = {
-        let fs_ref = task.process.fs();
         let lock = fs_ref.lock();
         (lock.working_inode.clone(), lock.working_path.clone())
     };
@@ -445,8 +447,9 @@ pub fn sys_execveat(
     const AT_EMPTY_PATH: u32 = 0x1000;
     const VALID_FLAGS: u32 = AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH;
 
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let token = task.get_user_token();
+    let fs_ref = task.process.fs();
     let path = match UserCString::new(pathname).read(token) {
         Ok(path) => path,
         Err(errno) => return errno,
@@ -491,7 +494,7 @@ pub fn sys_execveat(
     let follow_final = (flags & AT_SYMLINK_NOFOLLOW) == 0;
     let base_path = start_inode
         .absolute_path()
-        .unwrap_or_else(|_| task.process.fs().lock().working_path.clone());
+        .unwrap_or_else(|_| fs_ref.lock().working_path.clone());
     let abs_path = make_abs_exec_path(&path, &base_path);
     match open_exec_with_follow(&start_inode, &path, follow_final) {
         Ok(file) => exec_opened_file(&start_inode, &path, abs_path, file, argv_vec, envp_vec),

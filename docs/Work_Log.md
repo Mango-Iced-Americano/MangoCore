@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### lmbench lat_proc exec 前置路径优化：减少当前任务 clone
+
+**涉及文件：**
+- `os/src/syscall/process/exec.rs` — exec 权限检查、fd 克隆、起始目录解析与 `execve/execveat` 用户参数读取改用 `current_task_ref()`；复用 `fs_ref` 获取 working path，减少 exec 前置路径中的当前任务 `Arc` clone
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束
+
+**备注：** `load_elf()` 为同步构造并提交新地址空间路径，未跨调度等待点；exec 参数解析、路径解析、权限检查和错误码语义保持不变。
+
 ### seccomp syscall 判定优化：减少启用后每次 syscall 的当前任务 clone
 
 **涉及文件：**
