@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### 调度循环 timer 空路径优化：pending flag 跳过无定时器锁
+
+**涉及文件：**
+- `os/src/task/manager.rs` — 为全局 timeout wait queue 与 kernel timer queue 增加 pending flag；`do_wake_expired()` 在完全无 pending timer/timerfd 时直接返回，避免每轮调度固定拿 timer 队列锁和读取时间
+- `os/src/fs/timerfd.rs` — 为 timerfd registry 增加 maybe-nonempty 原子快判，并在 registry 清空时回收 flag
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** pending flag 只作为空路径快判；一旦存在未来定时器仍走原有 `wake_expired`、generation 校验、timerfd 扫描与唤醒逻辑，避免改变超时语义。
+
 ### 调度器 ready queue 优化：nice=0 判断改用原子 hint
 
 **涉及文件：**

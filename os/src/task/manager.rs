@@ -3,7 +3,7 @@
     内容与RISCV版本相同，无需修改
 */
 use core::cmp::Ordering;
-use core::sync::atomic::Ordering as AtomicOrdering;
+use core::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 #[cfg(feature = "oom_handler")]
 use crate::config::SYSTEM_TASK_LIMIT;
@@ -1326,6 +1326,7 @@ impl KernelTimerQueue {
         // Keep the hot path O(log n).  WakeTask stale entries are filtered by
         // generation, while signal timers validate their generation/deadline in run_timer().
         self.inner.push(KernelTimer { action, deadline });
+        KERNEL_TIMER_QUEUE_PENDING.store(true, AtomicOrdering::Release);
         if self.inner.len() > Self::MAX_TIMERS {
             self.enforce_capacity();
         }
@@ -1577,6 +1578,7 @@ impl TimeoutWaitQueue {
     /// 如果想要阻塞一个`task`，使用`block_current_and_run_next()`函数
     pub fn add_task(&mut self, task: Weak<TaskControlBlock>, timeout: TimeSpec) {
         self.inner.push(TimeoutWaiter { task, timeout });
+        TIMEOUT_WAITQUEUE_PENDING.store(true, AtomicOrdering::Release);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1638,6 +1640,9 @@ impl TimeoutWaitQueue {
             }
         }
         enqueue_ready_batch(tasks_to_wake);
+        if self.inner.is_empty() {
+            TIMEOUT_WAITQUEUE_PENDING.store(false, AtomicOrdering::Release);
+        }
     }
     #[allow(unused)]
     // debug use only
@@ -1655,6 +1660,9 @@ lazy_static! {
     pub static ref KERNEL_TIMER_QUEUE: Mutex<KernelTimerQueue> =
         Mutex::new(KernelTimerQueue::new());
 }
+
+static TIMEOUT_WAITQUEUE_PENDING: AtomicBool = AtomicBool::new(false);
+static KERNEL_TIMER_QUEUE_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// 加入一个内核计时器动作
 pub fn add_kernel_timer(action: TimerAction, deadline: TimeSpec) {
@@ -1682,26 +1690,49 @@ pub fn wait_with_timeout(task: Weak<TaskControlBlock>, timeout: TimeSpec) {
 
 /// 唤醒全局超时等待队列中所有已超时的任务
 pub fn do_wake_expired() {
-    let timeout_queue_empty = TIMEOUT_WAITQUEUE.lock().is_empty();
-    let kernel_timer_queue_empty = KERNEL_TIMER_QUEUE.lock().is_empty();
-    let timerfd_registry_empty = crate::fs::timerfd::timerfd_registry_is_empty();
-    if timeout_queue_empty && kernel_timer_queue_empty && timerfd_registry_empty {
+    let timeout_pending = TIMEOUT_WAITQUEUE_PENDING.load(AtomicOrdering::Acquire);
+    let kernel_timer_pending = KERNEL_TIMER_QUEUE_PENDING.load(AtomicOrdering::Acquire);
+    let timerfd_pending = crate::fs::timerfd::timerfd_registry_maybe_nonempty();
+    if !timeout_pending && !kernel_timer_pending && !timerfd_pending {
         return;
     }
 
-    let now = crate::timer::TimeSpec::now();
-    TIMEOUT_WAITQUEUE.lock().wake_expired(now);
-    let mut ktq = KERNEL_TIMER_QUEUE.lock();
-    ktq.wake_expired(now);
-    // compact 涉及 BinaryHeap::drain → Vec 堆分配，降频执行：
-    // 仅在队列半满时每 64 个 tick 执行一次。
-    static COMPACT_TICK: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-    let tick = COMPACT_TICK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    if tick % 64 == 0 && ktq.len() > KernelTimerQueue::MAX_TIMERS / 2 {
-        ktq.compact();
+    let mut now = None;
+    if timeout_pending {
+        let mut timeout_queue = TIMEOUT_WAITQUEUE.lock();
+        if timeout_queue.is_empty() {
+            TIMEOUT_WAITQUEUE_PENDING.store(false, AtomicOrdering::Release);
+        } else {
+            let now = *now.get_or_insert_with(crate::timer::TimeSpec::now);
+            timeout_queue.wake_expired(now);
+        }
     }
-    drop(ktq);
-    crate::fs::timerfd::wake_expired_timerfds(now);
+
+    if kernel_timer_pending {
+        let mut ktq = KERNEL_TIMER_QUEUE.lock();
+        if ktq.is_empty() {
+            KERNEL_TIMER_QUEUE_PENDING.store(false, AtomicOrdering::Release);
+        } else {
+            let now = *now.get_or_insert_with(crate::timer::TimeSpec::now);
+            ktq.wake_expired(now);
+            // compact 涉及 BinaryHeap::drain → Vec 堆分配，降频执行：
+            // 仅在队列半满时每 64 个 tick 执行一次。
+            static COMPACT_TICK: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let tick = COMPACT_TICK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if tick % 64 == 0 && ktq.len() > KernelTimerQueue::MAX_TIMERS / 2 {
+                ktq.compact();
+            }
+            if ktq.is_empty() {
+                KERNEL_TIMER_QUEUE_PENDING.store(false, AtomicOrdering::Release);
+            }
+        }
+    }
+
+    if timerfd_pending && !crate::fs::timerfd::timerfd_registry_is_empty() {
+        let now = *now.get_or_insert_with(crate::timer::TimeSpec::now);
+        crate::fs::timerfd::wake_expired_timerfds(now);
+    }
 }
 
 /// 获取内核计时器队列长度（诊断用，尝试获取锁）

@@ -3,7 +3,7 @@ use alloc::{
     vec::Vec,
 };
 use core::any::Any;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::{Mutex, MutexGuard};
 
 use crate::{
@@ -35,6 +35,7 @@ const TFD_TIMER_CANCEL_ON_SET: u32 = 2;
 const TFD_SETTIME_VALID_FLAGS: u32 = TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET;
 
 static TIMERFD_REGISTRY: Mutex<Vec<Weak<TimerFd>>> = Mutex::new(Vec::new());
+static TIMERFD_REGISTRY_MAYBE_NONEMPTY: AtomicBool = AtomicBool::new(false);
 static TIMERFD_SWEEP_TICKS: AtomicUsize = AtomicUsize::new(0);
 
 #[repr(C)]
@@ -303,13 +304,31 @@ fn timerfd_clock_now(clock_id: usize) -> TimeSpec {
 
 fn register_timerfd(timerfd: &Arc<TimerFd>) {
     TIMERFD_REGISTRY.lock().push(Arc::downgrade(timerfd));
+    TIMERFD_REGISTRY_MAYBE_NONEMPTY.store(true, Ordering::Release);
+}
+
+pub fn timerfd_registry_maybe_nonempty() -> bool {
+    TIMERFD_REGISTRY_MAYBE_NONEMPTY.load(Ordering::Acquire)
 }
 
 pub fn timerfd_registry_is_empty() -> bool {
-    TIMERFD_REGISTRY.lock().is_empty()
+    if !timerfd_registry_maybe_nonempty() {
+        return true;
+    }
+
+    let registry = TIMERFD_REGISTRY.lock();
+    if registry.is_empty() {
+        TIMERFD_REGISTRY_MAYBE_NONEMPTY.store(false, Ordering::Release);
+        return true;
+    }
+    false
 }
 
 pub fn wake_expired_timerfds(now: TimeSpec) {
+    if !timerfd_registry_maybe_nonempty() {
+        return;
+    }
+
     let mut registry = TIMERFD_REGISTRY.lock();
     for weak in registry.iter() {
         if let Some(timerfd) = weak.upgrade() {
@@ -319,6 +338,9 @@ pub fn wake_expired_timerfds(now: TimeSpec) {
 
     if TIMERFD_SWEEP_TICKS.fetch_add(1, Ordering::Relaxed) % 64 == 0 {
         registry.retain(|weak| weak.strong_count() > 0);
+        if registry.is_empty() {
+            TIMERFD_REGISTRY_MAYBE_NONEMPTY.store(false, Ordering::Release);
+        }
     }
 }
 
