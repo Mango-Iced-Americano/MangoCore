@@ -3,7 +3,7 @@ use crate::fs::flush_all_page_caches;
 use crate::hal::shutdown;
 use crate::mm::{copy_to_user_array, translated_str};
 use crate::syscall::errno::*;
-use crate::task::{current_task, current_user_token, suspend_current_and_run_next};
+use crate::task::{current_task, current_user_token, has_ready_task, suspend_current_and_run_next};
 use core::sync::atomic::{AtomicBool, Ordering};
 use log::info;
 use num_enum::FromPrimitive;
@@ -168,12 +168,13 @@ fn syslog_requires_privilege(action: SyslogAction) -> bool {
 fn has_syslog_privilege() -> bool {
     let task = current_task().unwrap();
     let inner = task.acquire_inner_lock();
-    inner.euid == 0
-        || (inner.cap_effective & ((1u64 << CAP_SYS_ADMIN) | (1u64 << CAP_SYSLOG))) != 0
+    inner.euid == 0 || (inner.cap_effective & ((1u64 << CAP_SYS_ADMIN) | (1u64 << CAP_SYSLOG))) != 0
 }
 
 pub fn sys_yield() -> isize {
-    suspend_current_and_run_next();
+    if has_ready_task() {
+        suspend_current_and_run_next();
+    }
     SUCCESS
 }
 

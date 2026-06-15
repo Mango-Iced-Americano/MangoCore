@@ -36,7 +36,11 @@ pub fn unregister_task(tid: usize) {
 
 pub fn unregister_task_if_match(task: &TaskControlBlock) {
     let mut registry = TASK_REGISTRY.lock();
-    let remove = match registry.tasks.get(&task.tid.0).and_then(|entry| entry.upgrade()) {
+    let remove = match registry
+        .tasks
+        .get(&task.tid.0)
+        .and_then(|entry| entry.upgrade())
+    {
         Some(registered) => core::ptr::eq(Arc::as_ptr(&registered), task as *const _),
         None => true,
     };

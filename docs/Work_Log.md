@@ -88,6 +88,40 @@
 
 ## 2026-06-14
 
+### libcbench pthread 超时：为 `/proc/self/smaps` 增加按 fd 快照缓存
+
+**涉及文件：**
+- `os/src/mm/address_space.rs` — 拆分 smaps header/segment 格式化，新增高 VMA 数量下的 compact smaps 输出，并提供窗口读取备用路径
+- `os/src/fs/procfs/mod.rs` — 新增 cached text proc inode 入口，按打开文件缓存一次性生成的 proc 文本
+- `os/src/fs/procfs/pid/mod.rs` — 将 `/proc/[pid]/smaps` 注册为 cached text 文件
+- `os/src/fs/procfs/pid/smaps.rs` — 新增 `pid_smaps_snapshot()`，保留 offset/len 读取入口作为备用
+- `os/src/fs/vfs/mod.rs` — `FilePrivateData` 新增 `ProcText`，用于保存 per-open procfs 文本快照
+- `os/src/task/manager.rs`、`os/src/task/processor.rs` — 优化无过期 timer 快路径，并降低调度循环中后台 net/console poll 频率
+- `os/src/task/perf.rs`、`os/src/task/threads.rs`、`os/Cargo.toml` — 新增 `perf_stats` 诊断计数，用于确认 futex wait/wake 不是 pthread 超时根因
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only EXTRA_FEATURES=perf_stats` ✅
+- rv64 QEMU libcbench（perf_stats）：musl 27s、glibc 23s，二者均 `exit_code=0` ✅
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU libcbench（默认内核）：musl 28s、glibc 23s，二者均 `exit_code=0` ✅
+
+**备注：** 根因不是 futex 阻塞：计数显示 `fut_wait == fut_ready` 且无 timeout/intr，线程 clone/exit 已完成；超时点的 `last_sys=read last_ret=1024` 指向 libcbench `print_stats()` 以 1KiB 分块反复读取 `/proc/self/smaps`。仅按 offset 窗口生成仍要从第一个 VMA 扫到目标 offset，musl 仍会 120s 超时；按 fd 快照缓存后同一 open 只生成一次 smaps，解除 pthread create-only 超时。regex search 的用户态 StorePageFault 仍存在，但 libcbench 脚本退出码为 0，非本轮性能瓶颈。
+
+### libcbench regex StorePageFault：扩大默认用户栈窗口
+
+**涉及文件：**
+- `os/src/hal/arch/riscv/config.rs`、`os/src/hal/arch/loongarch64/config.rs` — 默认用户栈虚拟窗口从 256KiB 扩到 1MiB，新增 `USER_STACK_INIT_SIZE=256KiB`
+- `os/src/mm/address_space.rs` — 默认用户栈 VMA 覆盖完整窗口，但只预映射顶部 256KiB，其余页面由匿名缺页按需分配
+- `os/src/syscall/process/exec.rs` — exec argv/env 校验继续按预映射区大小限制，避免启动栈写入未映射页面
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 libcbench QEMU 定向验证已确认可读取 `mask=0x080`，但当前 `rootfs-rv.img` 缺 `/musl`/`/glibc` 下 libcbench 脚本，测试脚本执行失败，未作为通过结果采信
+
+**备注：** regex search 的 StorePageFault 地址距栈顶约 528KiB，超过旧 256KiB 默认栈。这里不直接预映射 1MiB，避免 pthread/clone 压测下无谓增加常驻页；保持 256KiB 初始映射并扩大 VMA 窗口，让深递归按需分配页面。
+
 ### 按 Linux/DragonOS cyclic PID 思路修复长测 PID 越界
 
 **涉及文件：**

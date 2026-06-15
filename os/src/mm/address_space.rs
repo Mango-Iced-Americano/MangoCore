@@ -3,8 +3,9 @@ use super::page_table::{FaultAccess, PageTable, UserAccess};
 use super::user_mapper::UserMapper;
 use super::vma::*;
 use super::vma_set::VmaSet;
-use super::{FrameTracker, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum, VPNRange, KERNEL_SPACE};
+use super::{FrameTracker, PhysAddr, PhysPageNum, VPNRange, VirtAddr, VirtPageNum, KERNEL_SPACE};
 use crate::config::*;
+use crate::fs::vfs::IndexNode;
 use crate::hal::TrapContext;
 use crate::hal::TICKS_PER_SEC;
 use crate::should_map_trampoline;
@@ -12,7 +13,6 @@ use crate::syscall::errno::*;
 use crate::task::{
     current_task, trap_cx_bottom_from_slot, ustack_bottom_from_slot, AuxvEntry, AuxvType, ELFInfo,
 };
-use crate::fs::vfs::IndexNode;
 use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -24,6 +24,10 @@ extern "C" {
     fn strampoline();
     fn ssignaltrampoline();
 }
+
+const PROC_SMAPS_DENSE_VMA_THRESHOLD: usize = 1024;
+const PROC_SMAPS_FULL_ENTRY_ESTIMATE: usize = 1024;
+const PROC_SMAPS_COMPACT_ENTRY_ESTIMATE: usize = 256;
 
 #[allow(unused)]
 #[derive(Debug)]
@@ -100,6 +104,42 @@ impl<T: PageTable> AddressSpace<T> {
         area.flags = MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS;
         self.push(area, None).unwrap();
     }
+    fn insert_user_stack_area(
+        &mut self,
+        stack_bottom: VirtAddr,
+    ) -> Result<(), (MemoryError, VirtPageNum)> {
+        let stack_top = VirtAddr::from(stack_bottom.0.saturating_sub(USER_STACK_SIZE));
+        let init_top = VirtAddr::from(stack_bottom.0.saturating_sub(USER_STACK_INIT_SIZE));
+        let start_vpn = stack_top.floor();
+        self.vmas
+            .try_reserve(1)
+            .map_err(|_| (MemoryError::OutOfMemory, start_vpn))?;
+        let mut area = Vma::new(
+            stack_top,
+            stack_bottom,
+            MapPermission::R | MapPermission::W | MapPermission::U,
+            None,
+            0,
+        );
+        area.flags = MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS | MapFlags::MAP_STACK;
+        for vpn in VPNRange::new(init_top.floor(), stack_bottom.ceil()) {
+            area.map_one(&mut self.page_table, vpn)?;
+        }
+        self.vmas
+            .push(area)
+            .map_err(|_| (MemoryError::OutOfMemory, start_vpn))
+    }
+    fn insert_framed_area_first_ppn(
+        &mut self,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        permission: MapPermission,
+    ) -> Result<PhysPageNum, (MemoryError, VirtPageNum)> {
+        let mut area = Vma::new(start_va, end_va, permission, None, 0);
+        area.flags = MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS;
+        self.push_with_first_ppn(area, None)?
+            .ok_or((MemoryError::BadAddress, start_va.floor()))
+    }
     pub fn remove_area_with_start_vpn(
         &mut self,
         start_vpn: VirtPageNum,
@@ -108,21 +148,30 @@ impl<T: PageTable> AddressSpace<T> {
             .remove_area_with_start(&mut self.page_table, start_vpn)
     }
     /// Push a not-yet-mapped VMA into current address space and copy the data into it if any.
-    fn push(
+    fn push(&mut self, vma: Vma, data: Option<&[u8]>) -> Result<(), (MemoryError, VirtPageNum)> {
+        self.push_with_first_ppn(vma, data).map(|_| ())
+    }
+
+    /// Push a VMA and return the first physical page that was allocated.
+    /// This lets hot paths such as thread clone keep the PPN produced during
+    /// mapping instead of immediately doing a second page-table walk.
+    fn push_with_first_ppn(
         &mut self,
         mut vma: Vma,
         data: Option<&[u8]>,
-    ) -> Result<(), (MemoryError, VirtPageNum)> {
+    ) -> Result<Option<PhysPageNum>, (MemoryError, VirtPageNum)> {
         let start_vpn = vma.inner.vpn_range.get_start();
         self.vmas
             .try_reserve(1)
             .map_err(|_| (MemoryError::OutOfMemory, start_vpn))?;
+        let mut first_ppn = None;
         match data {
             Some(data) => {
                 let mut start = 0;
                 let len = data.len();
                 for vpn in vma.inner.vpn_range {
                     let ppn = vma.map_one(&mut self.page_table, vpn)?;
+                    first_ppn.get_or_insert(ppn);
                     let end = start + PAGE_SIZE;
                     let src = &data[start..len.min(end)];
                     ppn.get_bytes_array()[..src.len()].copy_from_slice(src);
@@ -131,14 +180,15 @@ impl<T: PageTable> AddressSpace<T> {
             }
             None => {
                 for vpn in vma.inner.vpn_range {
-                    vma.map_one(&mut self.page_table, vpn)?;
+                    let ppn = vma.map_one(&mut self.page_table, vpn)?;
+                    first_ppn.get_or_insert(ppn);
                 }
             }
         }
         self.vmas
             .push(vma)
             .map_err(|_| (MemoryError::OutOfMemory, start_vpn))?;
-        Ok(())
+        Ok(first_ppn)
     }
     /// other parts will be zeroed
     fn push_with_offset(
@@ -284,9 +334,21 @@ impl<T: PageTable> AddressSpace<T> {
                 "{:016x}-{:016x} {}{}{}{} {:08x} 00:00 0",
                 start,
                 end,
-                if perm.contains(MapPermission::R) { 'r' } else { '-' },
-                if perm.contains(MapPermission::W) { 'w' } else { '-' },
-                if perm.contains(MapPermission::X) { 'x' } else { '-' },
+                if perm.contains(MapPermission::R) {
+                    'r'
+                } else {
+                    '-'
+                },
+                if perm.contains(MapPermission::W) {
+                    'w'
+                } else {
+                    '-'
+                },
+                if perm.contains(MapPermission::X) {
+                    'x'
+                } else {
+                    '-'
+                },
                 mapping,
                 vma.map_file_offset,
             );
@@ -301,33 +363,7 @@ impl<T: PageTable> AddressSpace<T> {
         end_vpn: VirtPageNum,
         locked_kb: usize,
     ) {
-        let start = start_vpn.0 * PAGE_SIZE;
-        let end = end_vpn.0 * PAGE_SIZE;
-        let size_kb = (end - start) / 1024;
-        let mut rss_pages = 0usize;
-        for vpn in VPNRange::new(start_vpn, end_vpn) {
-            if vma.inner.get_in_memory(&vpn).is_some() {
-                rss_pages += 1;
-            }
-        }
-        let rss_kb = rss_pages * PAGE_SIZE / 1024;
-        let perm = vma.vm_perm();
-        let mapping = if vma.vm_mapping() == VmAreaMapping::Shared {
-            's'
-        } else {
-            'p'
-        };
-        let _ = writeln!(
-            s,
-            "{:016x}-{:016x} {}{}{}{} {:08x} 00:00 0",
-            start,
-            end,
-            if perm.contains(MapPermission::R) { 'r' } else { '-' },
-            if perm.contains(MapPermission::W) { 'w' } else { '-' },
-            if perm.contains(MapPermission::X) { 'x' } else { '-' },
-            mapping,
-            vma.map_file_offset,
-        );
+        let (size_kb, rss_kb) = Self::write_proc_smaps_header(s, vma, start_vpn, end_vpn);
         let _ = writeln!(s, "Size:           {:8} kB", size_kb);
         let _ = writeln!(s, "KernelPageSize: {:7} kB", PAGE_SIZE / 1024);
         let _ = writeln!(s, "MMUPageSize:    {:7} kB", PAGE_SIZE / 1024);
@@ -352,8 +388,219 @@ impl<T: PageTable> AddressSpace<T> {
         let _ = writeln!(s, "VmFlags: rd wr mr mw me ac sd");
     }
 
+    fn write_proc_smaps_header(
+        s: &mut String,
+        vma: &Vma,
+        start_vpn: VirtPageNum,
+        end_vpn: VirtPageNum,
+    ) -> (usize, usize) {
+        let start = start_vpn.0 * PAGE_SIZE;
+        let end = end_vpn.0 * PAGE_SIZE;
+        let size_kb = (end - start) / 1024;
+        let rss_pages = vma.inner.in_memory_len_in_range(start_vpn, end_vpn);
+        let rss_kb = rss_pages * PAGE_SIZE / 1024;
+        let perm = vma.vm_perm();
+        let mapping = if vma.vm_mapping() == VmAreaMapping::Shared {
+            's'
+        } else {
+            'p'
+        };
+        let _ = writeln!(
+            s,
+            "{:016x}-{:016x} {}{}{}{} {:08x} 00:00 0",
+            start,
+            end,
+            if perm.contains(MapPermission::R) {
+                'r'
+            } else {
+                '-'
+            },
+            if perm.contains(MapPermission::W) {
+                'w'
+            } else {
+                '-'
+            },
+            if perm.contains(MapPermission::X) {
+                'x'
+            } else {
+                '-'
+            },
+            mapping,
+            vma.map_file_offset,
+        );
+        (size_kb, rss_kb)
+    }
+
+    fn write_proc_smaps_segment_compact(
+        s: &mut String,
+        vma: &Vma,
+        start_vpn: VirtPageNum,
+        end_vpn: VirtPageNum,
+    ) {
+        let (size_kb, rss_kb) = Self::write_proc_smaps_header(s, vma, start_vpn, end_vpn);
+        let _ = writeln!(s, "Size:           {:8} kB", size_kb);
+        let _ = writeln!(s, "Rss:            {:7} kB", rss_kb);
+        let _ = writeln!(s, "Pss:            {:7} kB", rss_kb);
+        let _ = writeln!(s, "Private_Dirty:  {:7} kB", rss_kb);
+        let _ = writeln!(s, "Referenced:     {:7} kB", rss_kb);
+        let _ = writeln!(s, "Anonymous:      {:7} kB", rss_kb);
+        let _ = writeln!(s, "Locked:               0 kB");
+        let _ = writeln!(s, "VmFlags: rd wr mr mw me ac sd");
+    }
+
+    fn copy_proc_smaps_window(
+        buf: &mut [u8],
+        copied: &mut usize,
+        emitted: &mut usize,
+        offset: usize,
+        limit: usize,
+        segment: &str,
+    ) -> bool {
+        let start = *emitted;
+        let end = start.saturating_add(segment.len());
+        *emitted = end;
+
+        if end <= offset {
+            return false;
+        }
+        if start >= limit {
+            return true;
+        }
+
+        let bytes = segment.as_bytes();
+        let src_start = offset.saturating_sub(start);
+        let src_end = limit.min(end).saturating_sub(start).min(bytes.len());
+        if src_start >= src_end {
+            return false;
+        }
+
+        let room = buf.len().saturating_sub(*copied);
+        let copy_len = (src_end - src_start).min(room);
+        if copy_len > 0 {
+            buf[*copied..*copied + copy_len]
+                .copy_from_slice(&bytes[src_start..src_start + copy_len]);
+            *copied += copy_len;
+        }
+        *copied >= buf.len()
+    }
+
+    pub fn proc_smaps_read(&self, offset: usize, len: usize, buf: &mut [u8]) -> usize {
+        let want = len.min(buf.len());
+        if want == 0 {
+            return 0;
+        }
+
+        let limit = offset.saturating_add(want);
+        let user_vma_count = self.vmas.iter().filter(|vma| vma.vm_is_user()).count();
+        let compact = self.locked_pages.is_empty() && user_vma_count >= PROC_SMAPS_DENSE_VMA_THRESHOLD;
+        let entry_estimate = if compact {
+            PROC_SMAPS_COMPACT_ENTRY_ESTIMATE
+        } else {
+            PROC_SMAPS_FULL_ENTRY_ESTIMATE
+        };
+        let mut segment = String::with_capacity(entry_estimate);
+        let mut emitted = 0;
+        let mut copied = 0;
+
+        if compact {
+            for vma in self.vmas.iter().filter(|vma| vma.vm_is_user()) {
+                segment.clear();
+                Self::write_proc_smaps_segment_compact(
+                    &mut segment,
+                    vma,
+                    vma.vm_start(),
+                    vma.vm_end(),
+                );
+                if Self::copy_proc_smaps_window(
+                    buf,
+                    &mut copied,
+                    &mut emitted,
+                    offset,
+                    limit,
+                    &segment,
+                ) {
+                    return copied;
+                }
+            }
+            return copied;
+        }
+
+        if self.locked_pages.is_empty() {
+            for vma in self.vmas.iter().filter(|vma| vma.vm_is_user()) {
+                segment.clear();
+                Self::write_proc_smaps_segment(&mut segment, vma, vma.vm_start(), vma.vm_end(), 0);
+                if Self::copy_proc_smaps_window(
+                    buf,
+                    &mut copied,
+                    &mut emitted,
+                    offset,
+                    limit,
+                    &segment,
+                ) {
+                    return copied;
+                }
+            }
+            return copied;
+        }
+
+        for vma in self.vmas.iter().filter(|vma| vma.vm_is_user()) {
+            let mut segment_start = vma.vm_start();
+            let end_vpn = vma.vm_end();
+            while segment_start < end_vpn {
+                let segment_locked = self.locked_pages.contains(&segment_start);
+                let mut segment_end = VirtPageNum(segment_start.0 + 1);
+                while segment_end < end_vpn
+                    && self.locked_pages.contains(&segment_end) == segment_locked
+                {
+                    segment_end.0 += 1;
+                }
+                let locked_pages = if segment_locked {
+                    segment_end.0 - segment_start.0
+                } else {
+                    0
+                };
+                let locked_kb = locked_pages * PAGE_SIZE / 1024;
+                segment.clear();
+                Self::write_proc_smaps_segment(
+                    &mut segment,
+                    vma,
+                    segment_start,
+                    segment_end,
+                    locked_kb,
+                );
+                if Self::copy_proc_smaps_window(
+                    buf,
+                    &mut copied,
+                    &mut emitted,
+                    offset,
+                    limit,
+                    &segment,
+                ) {
+                    return copied;
+                }
+                segment_start = segment_end;
+            }
+        }
+        copied
+    }
+
     pub fn proc_smaps_content(&self) -> String {
-        let mut s = String::with_capacity(self.vmas.len() * 512);
+        let user_vma_count = self.vmas.iter().filter(|vma| vma.vm_is_user()).count();
+        if self.locked_pages.is_empty() && user_vma_count >= PROC_SMAPS_DENSE_VMA_THRESHOLD {
+            let mut s = String::with_capacity(user_vma_count * PROC_SMAPS_COMPACT_ENTRY_ESTIMATE);
+            for vma in self.vmas.iter().filter(|vma| vma.vm_is_user()) {
+                Self::write_proc_smaps_segment_compact(&mut s, vma, vma.vm_start(), vma.vm_end());
+            }
+            return s;
+        }
+
+        let mut s = String::with_capacity(user_vma_count * PROC_SMAPS_FULL_ENTRY_ESTIMATE);
+        if self.locked_pages.is_empty() {
+            for vma in self.vmas.iter().filter(|vma| vma.vm_is_user()) {
+                Self::write_proc_smaps_segment(&mut s, vma, vma.vm_start(), vma.vm_end(), 0);
+            }
+            return s;
+        }
         for vma in self.vmas.iter().filter(|vma| vma.vm_is_user()) {
             let mut segment_start = vma.vm_start();
             let end_vpn = vma.vm_end();
@@ -425,7 +672,8 @@ impl<T: PageTable> AddressSpace<T> {
         access: FaultAccess,
     ) -> Result<PhysAddr, isize> {
         super::frame_reserve(3);
-        self.do_page_fault(addr, access).map_err(memory_error_to_errno)
+        self.do_page_fault(addr, access)
+            .map_err(memory_error_to_errno)
     }
 
     fn validate_fault_phys_addr(
@@ -615,11 +863,10 @@ impl<T: PageTable> AddressSpace<T> {
                     if load_addr.is_none() {
                         load_addr = Some(start_va.into());
                     }
-                    let mut vma =
-                        match Vma::try_new(start_va, end_va, map_perm, None, 0) {
-                            Ok(area) => area,
-                            Err(e) => return Err(e),
-                        };
+                    let mut vma = match Vma::try_new(start_va, end_va, map_perm, None, 0) {
+                        Ok(area) => area,
+                        Err(e) => return Err(e),
+                    };
                     vma.flags = MapFlags::MAP_PRIVATE;
                     let file_offset = ph.offset() as usize;
                     let file_size = ph.file_size() as usize;
@@ -665,10 +912,7 @@ impl<T: PageTable> AddressSpace<T> {
                         if let Err((err, vpn)) =
                             self.push_with_offset(vma, start_va_page_offset, segment_data)
                         {
-                            error!(
-                                "[map_elf] copy load failed: err={:?}, vpn={:?}",
-                                err, vpn
-                            );
+                            error!("[map_elf] copy load failed: err={:?}, vpn={:?}", err, vpn);
                             return Err(match err {
                                 MemoryError::OutOfMemory => ENOMEM,
                                 _ => ENOEXEC,
@@ -676,9 +920,8 @@ impl<T: PageTable> AddressSpace<T> {
                         };
                     }
                     let segment_end = VirtAddr::from(end_va.ceil()).0;
-                    program_break = Some(program_break.map_or(segment_end, |brk| {
-                        brk.max(segment_end)
-                    }));
+                    program_break =
+                        Some(program_break.map_or(segment_end, |brk| brk.max(segment_end)));
                     trace!(
                         "[map_elf] start_va = 0x{:X}; end_va = 0x{:X}, offset = 0x{:X}",
                         start_va.0,
@@ -738,8 +981,11 @@ impl<T: PageTable> AddressSpace<T> {
         // map signaltrampoline
         address_space.map_signaltrampoline();
         let elf = xmas_elf::ElfFile::new(elf_data).map_err(|_| {
-            log::warn!("[from_elf] invalid ELF: {} bytes, first 16: {:02x?}",
-                elf_data.len(), &elf_data[..16.min(elf_data.len())]);
+            log::warn!(
+                "[from_elf] invalid ELF: {} bytes, first 16: {:02x?}",
+                elf_data.len(),
+                &elf_data[..16.min(elf_data.len())]
+            );
             ENOEXEC
         })?;
         let (program_break, elf_info) = address_space.map_elf(&elf)?;
@@ -789,10 +1035,7 @@ impl<T: PageTable> AddressSpace<T> {
             };
             new_area.mark_fork_inherited();
             address_space.vmas.push(new_area)?;
-            debug!(
-                "[fork] map shared area: {:?}",
-                area.inner.vpn_range
-            );
+            debug!("[fork] map shared area: {:?}", area.inner.vpn_range);
         }
         // Copy the current task's trap context.  A process can have stale or
         // higher-numbered non-user VMAs after clone/exit churn, so do not guess
@@ -829,6 +1072,18 @@ impl<T: PageTable> AddressSpace<T> {
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PhysPageNum> {
         translate_page(&self.page_table, vpn)
     }
+
+    /// Return whether a non-private futex at `addr` must use the global shared key table.
+    ///
+    /// Linux uses an mm/address key for private mappings even when userspace does not pass
+    /// FUTEX_PRIVATE_FLAG; only mappings that are actually shared need an object/page based key.
+    pub fn futex_uses_shared_key(&self, addr: VirtAddr) -> Result<bool, isize> {
+        let vpn = addr.floor();
+        let start = self.vmas.find_user_vma_key(vpn).ok_or(EFAULT)?;
+        let area = self.vmas.get_by_start(start).ok_or(EFAULT)?;
+        Ok(area.vm_mapping_type() == VmAreaMapping::Shared)
+    }
+
     pub fn recycle_data_pages(&mut self) {
         //*self = Self::new_bare();
         self.vmas.clear();
@@ -904,8 +1159,7 @@ impl<T: PageTable> AddressSpace<T> {
 
         let start_vpn = VirtAddr::from(start).floor();
         let end_vpn = VirtAddr::from(start + len).ceil();
-        if advice == MADV_DONTNEED && self.locked_pages.range(start_vpn..end_vpn).next().is_some()
-        {
+        if advice == MADV_DONTNEED && self.locked_pages.range(start_vpn..end_vpn).next().is_some() {
             return Err(EINVAL);
         }
         self.vmas
@@ -989,14 +1243,12 @@ impl<T: PageTable> AddressSpace<T> {
     }
 
     pub fn resident_user_bytes(&self) -> usize {
-        let mut resident_pages = 0usize;
-        for vma in self.vmas.iter().filter(|vma| vma.vm_is_user()) {
-            for vpn in VPNRange::new(vma.vm_start(), vma.vm_end()) {
-                if vma.inner.get_in_memory(&vpn).is_some() {
-                    resident_pages = resident_pages.saturating_add(1);
-                }
-            }
-        }
+        let resident_pages = self
+            .vmas
+            .iter()
+            .filter(|vma| vma.vm_is_user())
+            .map(|vma| vma.inner.in_memory_len())
+            .fold(0usize, |acc, pages| acc.saturating_add(pages));
         resident_pages.saturating_mul(PAGE_SIZE)
     }
 
@@ -1051,9 +1303,7 @@ impl<T: PageTable> AddressSpace<T> {
             mut src: &[u8],
         ) -> Result<(), isize> {
             while !src.is_empty() {
-                let pa = page_table
-                    .translate_va(VirtAddr::from(dst))
-                    .ok_or(EFAULT)?;
+                let pa = page_table.translate_va(VirtAddr::from(dst)).ok_or(EFAULT)?;
                 let page_offset = pa.page_offset();
                 let copy_len = (PAGE_SIZE - page_offset).min(src.len());
                 let page = pa.floor().get_bytes_array();
@@ -1134,8 +1384,7 @@ impl<T: PageTable> AddressSpace<T> {
         write_user_slice(&self.page_table, random_bits_ptr, &random_bits)?;
         // padding
         let zero = 0usize;
-        let padding_ptr =
-            push_stack(&mut user_sp, stack_bottom, core::mem::size_of::<usize>())?;
+        let padding_ptr = push_stack(&mut user_sp, stack_bottom, core::mem::size_of::<usize>())?;
         write_user_slice(&self.page_table, padding_ptr, core::slice::from_ref(&zero))?;
         let auxv = [
             // AuxvEntry::new(AuxvType::SYSINFO_EHDR, vDSO_mapping);
@@ -1203,6 +1452,20 @@ impl<T: PageTable> AddressSpace<T> {
         Ok(user_sp)
     }
     pub fn alloc_user_res(&mut self, slot: usize, alloc_stack: bool) {
+        self.alloc_user_res_with_trap_ppn(slot, alloc_stack)
+            .unwrap_or_else(|err| {
+                panic!(
+                    "[alloc_user_res] failed to allocate user resources for slot {}: {:?}",
+                    slot, err
+                )
+            });
+    }
+
+    pub fn alloc_user_res_with_trap_ppn(
+        &mut self,
+        slot: usize,
+        alloc_stack: bool,
+    ) -> Result<PhysPageNum, MemoryError> {
         if alloc_stack {
             let ustack_bottom = ustack_bottom_from_slot(slot);
             let ustack_top = ustack_bottom - USER_STACK_SIZE;
@@ -1212,12 +1475,8 @@ impl<T: PageTable> AddressSpace<T> {
                 ustack_top,
                 ustack_bottom
             );
-            // alloc user stack
-            self.insert_framed_area(
-                ustack_top.into(),
-                ustack_bottom.into(),
-                MapPermission::R | MapPermission::W | MapPermission::U,
-            );
+            self.insert_user_stack_area(ustack_bottom.into())
+                .map_err(|(err, _)| err)?;
             trace!("[alloc_user_res] done");
         } else {
             debug!(
@@ -1227,35 +1486,71 @@ impl<T: PageTable> AddressSpace<T> {
         // alloc trap_cx
         let trap_cx_bottom = trap_cx_bottom_from_slot(slot);
         let trap_cx_top = trap_cx_bottom + PAGE_SIZE;
-        self.insert_framed_area(
-            trap_cx_bottom.into(),
-            trap_cx_top.into(),
-            MapPermission::R | MapPermission::W,
-        );
+        if let Some(ppn) = self.translate(VirtAddr::from(trap_cx_bottom).into()) {
+            trace!(
+                "[alloc_user_res] slot {}, trap context reused: {:X}",
+                slot,
+                trap_cx_bottom
+            );
+            return Ok(ppn);
+        }
+        let trap_cx_ppn = self
+            .insert_framed_area_first_ppn(
+                trap_cx_bottom.into(),
+                trap_cx_top.into(),
+                MapPermission::R | MapPermission::W,
+            )
+            .map_err(|(err, _)| err)?;
         trace!(
             "[alloc_user_res] slot {}, trap context start_va: {:X}, end_va: {:X}",
             slot,
             trap_cx_bottom,
             trap_cx_top
         );
+        Ok(trap_cx_ppn)
     }
 
     pub fn dealloc_user_res(&mut self, slot: usize) {
+        self.dealloc_user_res_with_stack(slot, true);
+    }
+
+    pub fn dealloc_user_res_with_stack(&mut self, slot: usize, dealloc_stack: bool) {
+        self.dealloc_user_res_with_stack_inner(slot, dealloc_stack, false);
+    }
+
+    pub fn dealloc_user_res_keep_trap(&mut self, slot: usize, dealloc_stack: bool) {
+        self.dealloc_user_res_with_stack_inner(slot, dealloc_stack, true);
+    }
+
+    fn dealloc_user_res_with_stack_inner(
+        &mut self,
+        slot: usize,
+        dealloc_stack: bool,
+        keep_trap: bool,
+    ) {
         // dealloc ustack manually
-        let ustack_top_va: VirtAddr = (ustack_bottom_from_slot(slot) - USER_STACK_SIZE).into();
-        if let Err(err) = self.remove_area_with_start_vpn(ustack_top_va.into()) {
-            match err {
-                MemoryError::AreaNotFound => {
-                    warn!("[dealloc_user_res] slot {}, user stack is not allocated", slot)
+        if dealloc_stack {
+            let ustack_top_va: VirtAddr = (ustack_bottom_from_slot(slot) - USER_STACK_SIZE).into();
+            if let Err(err) = self.remove_area_with_start_vpn(ustack_top_va.into()) {
+                match err {
+                    MemoryError::AreaNotFound => {
+                        warn!(
+                            "[dealloc_user_res] slot {}, user stack is not allocated",
+                            slot
+                        )
+                    }
+                    MemoryError::NotMapped => {
+                        warn!(
+                            "[dealloc_user_res] slot {}, user stack is partially unmapped, is it caused by oom?",
+                            slot
+                        )
+                    }
+                    _ => {} //忽略非致命错误
                 }
-                MemoryError::NotMapped => {
-                    warn!(
-                        "[dealloc_user_res] slot {}, user stack is partially unmapped, is it caused by oom?",
-                        slot
-                    )
-                }
-                _ => {} //忽略非致命错误
             }
+        }
+        if keep_trap {
+            return;
         }
         // 处理 trap_cx 回收
         let trap_cx_bottom_va: VirtAddr = trap_cx_bottom_from_slot(slot).into();
@@ -1288,7 +1583,6 @@ impl<T: PageTable> AddressSpace<T> {
         // self.remove_area_with_start_vpn(trap_cx_bottom_va.into())
         //     .unwrap();
     }
-
 }
 
 fn memory_error_to_errno(err: MemoryError) -> isize {

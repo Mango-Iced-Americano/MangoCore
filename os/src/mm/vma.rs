@@ -2,16 +2,17 @@ use core::fmt::Debug;
 
 use super::frame_store::{Frame, FrameState, VmPageStore};
 use super::page_table::PageTable;
+use super::user_mapper::UserMapper;
 use super::VPNRange;
 use super::KERNEL_SPACE;
 use super::{frame_alloc, FrameTracker};
-use super::user_mapper::UserMapper;
 use super::{FaultAccess, MemoryError};
 use super::{PhysPageNum, VirtAddr, VirtPageNum};
 use crate::fs::vfs::IndexNode;
 use crate::mm::frame_allocator::frame_alloc_uninit;
 
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use log::{error, trace, warn};
 impl Debug for Vma {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -249,15 +250,20 @@ impl Vma {
         start_vpn: VirtPageNum,
         end_vpn: VirtPageNum,
     ) -> Result<(), MemoryError> {
-        for vpn in VPNRange::new(start_vpn, end_vpn) {
-            if !self.vm_contains(vpn) {
-                return Err(MemoryError::BadAddress);
-            }
-            if let Err(err) = self.unmap_one(page_table, vpn) {
-                if !matches!(err, MemoryError::NotMapped) {
-                    return Err(err);
-                }
-            }
+        if start_vpn < self.vm_start() || end_vpn > self.vm_end() {
+            return Err(MemoryError::BadAddress);
+        }
+        let mut resident_vpns = Vec::new();
+        resident_vpns
+            .try_reserve(self.inner.in_memory_len_in_range(start_vpn, end_vpn))
+            .map_err(|_| MemoryError::OutOfMemory)?;
+        self.inner
+            .for_each_in_memory_vpn_in_range(start_vpn, end_vpn, |vpn| resident_vpns.push(vpn));
+
+        let mut mapper = UserMapper::new(page_table);
+        for vpn in resident_vpns {
+            let _ = mapper.unmap_user_page_if_mapped(vpn)?;
+            self.inner.remove_in_memory(&vpn);
         }
         Ok(())
     }
@@ -269,26 +275,44 @@ impl Vma {
     ) -> Result<(), MemoryError> {
         let is_shared = self.flags.contains(MapFlags::MAP_SHARED);
         let is_file_backed = self.map_file.is_some();
-        let map_perm = if is_shared && is_file_backed && self.map_perm.contains(MapPermission::W) {
+        let is_writable = self.map_perm.contains(MapPermission::W);
+        let protect_parent_for_cow = !is_shared && is_writable;
+        let map_perm = if is_shared && is_file_backed && is_writable {
             self.map_perm.difference(MapPermission::W)
-        } else if is_shared {
-            self.map_perm
+        } else if protect_parent_for_cow {
+            self.map_perm.difference(MapPermission::W)
         } else {
-            self.map_perm.difference(MapPermission::W)
+            self.map_perm
         };
+        let mut parent_tlb_dirty = false;
+        let mut first_error = None;
         for vpn in self.inner.vpn_range {
-            if let Some(ppn) = src_page_table.block_and_ret_mut(vpn) {
+            let ppn = if protect_parent_for_cow {
+                let ppn = src_page_table.block_and_ret_mut_no_flush(vpn);
+                parent_tlb_dirty |= ppn.is_some();
+                ppn
+            } else {
+                src_page_table.translate(vpn)
+            };
+            if let Some(ppn) = ppn {
                 if !UserMapper::new(dst_page_table).is_mapped(vpn) {
-                    self.map_page_with_perm(dst_page_table, vpn, ppn, map_perm)?;
+                    if let Err(err) = self.map_page_with_perm(dst_page_table, vpn, ppn, map_perm) {
+                        first_error = Some(err);
+                        break;
+                    }
                 } else {
-                    return Err(MemoryError::AlreadyMapped);
-                }
-                if is_shared && self.map_perm.contains(MapPermission::W) {
-                    let _ = UserMapper::new(src_page_table).set_user_flags(vpn, self.map_perm);
+                    first_error = Some(MemoryError::AlreadyMapped);
+                    break;
                 }
             }
         }
-        Ok(())
+        if parent_tlb_dirty {
+            src_page_table.flush_tlb();
+        }
+        match first_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
     pub fn get_inner(&self) -> &VmPageStore {
         &self.inner
@@ -349,21 +373,20 @@ impl Vma {
         }
         Ok(())
     }
-    /// Unmap all pages in `self` from `page_table` using unmap_one()
+    /// Unmap resident pages in `self` from `page_table`.
     pub fn unmap<T: PageTable>(&mut self, page_table: &mut T) -> Result<(), MemoryError> {
-        let mut has_unmapped_page = false;
-        for vpn in self.inner.vpn_range {
-            // it's normal to get an `Error` because we are using lazy alloc strategy
-            // we still need to unmap remaining pages of `self`, just throw this `Error` to caller
-            if let Err(MemoryError::NotMapped) = self.unmap_one(page_table, vpn) {
-                has_unmapped_page = true;
-            }
+        let mut resident_vpns = Vec::new();
+        resident_vpns
+            .try_reserve(self.inner.in_memory_len())
+            .map_err(|_| MemoryError::OutOfMemory)?;
+        self.inner
+            .for_each_in_memory_vpn(|vpn| resident_vpns.push(vpn));
+        let mut mapper = UserMapper::new(page_table);
+        for vpn in resident_vpns {
+            let _ = mapper.unmap_user_page_if_mapped(vpn)?;
+            self.inner.remove_in_memory(&vpn);
         }
-        if has_unmapped_page {
-            Err(MemoryError::NotMapped)
-        } else {
-            Ok(())
-        }
+        Ok(())
     }
     fn cow_source_frame<T: PageTable>(
         &mut self,
@@ -590,9 +613,11 @@ impl Vma {
     pub fn into_two(&mut self, cut: VirtPageNum) -> Result<Self, ()> {
         let second_file = self.map_file.clone();
         let second_offset = if self.map_file.is_some() {
-            self.map_file_offset.checked_add(
-                VirtAddr::from(cut).0 - VirtAddr::from(self.inner.vpn_range.get_start()).0,
-            ).ok_or(())?
+            self.map_file_offset
+                .checked_add(
+                    VirtAddr::from(cut).0 - VirtAddr::from(self.inner.vpn_range.get_start()).0,
+                )
+                .ok_or(())?
         } else {
             0
         };
@@ -654,7 +679,11 @@ impl Vma {
                         log::warn!("[do_oom] compressed frame has no mapped pte: vpn={:?}", vpn);
                     }
                     self.inner.inc_compressed();
-                    trace!("[do_oom] compress frame: vpn={:?}, zram_id: {}", vpn, zram_id);
+                    trace!(
+                        "[do_oom] compress frame: vpn={:?}, zram_id: {}",
+                        vpn,
+                        zram_id
+                    );
                     continue;
                 }
                 Err(MemoryError::SharedPage) => continue,
@@ -682,7 +711,11 @@ impl Vma {
                         log::warn!("[do_oom] swapped frame has no mapped pte: vpn={:?}", vpn);
                     }
                     self.inner.inc_swapped();
-                    trace!("[do_oom] swap out frame: vpn={:?}, swap_id: {}", vpn, swap_id);
+                    trace!(
+                        "[do_oom] swap out frame: vpn={:?}, swap_id: {}",
+                        vpn,
+                        swap_id
+                    );
                     continue;
                 }
                 Err(MemoryError::SharedPage) => continue,
@@ -690,7 +723,10 @@ impl Vma {
                 Err(MemoryError::OutOfMemory)
                 | Err(MemoryError::SwapIsFull)
                 | Err(MemoryError::BackingStoreFailure) => {
-                    log::warn!("[do_oom] swap unavailable/full, stop reclaim: vpn={:?}", vpn);
+                    log::warn!(
+                        "[do_oom] swap unavailable/full, stop reclaim: vpn={:?}",
+                        vpn
+                    );
                     break;
                 }
                 Err(e) => {
@@ -734,14 +770,18 @@ impl Vma {
                     self.inner.inc_swapped();
                     trace!(
                         "[force_swap] swap out frame: vpn={:?}, swap_id: {}",
-                        vpn, swap_id
+                        vpn,
+                        swap_id
                     );
                     continue;
                 }
                 Err(MemoryError::OutOfMemory)
                 | Err(MemoryError::SwapIsFull)
                 | Err(MemoryError::BackingStoreFailure) => {
-                    log::warn!("[force_swap] swap unavailable/full, stop reclaim: vpn={:?}", vpn);
+                    log::warn!(
+                        "[force_swap] swap unavailable/full, stop reclaim: vpn={:?}",
+                        vpn
+                    );
                     break;
                 }
                 Err(MemoryError::SharedPage)
@@ -820,11 +860,7 @@ impl Vma {
         self.vm_mapping_type()
     }
 
-    pub(super) fn vm_can_merge_lazy_private(
-        &self,
-        prot: MapPermission,
-        flags: MapFlags,
-    ) -> bool {
+    pub(super) fn vm_can_merge_lazy_private(&self, prot: MapPermission, flags: MapFlags) -> bool {
         self.flags
             .contains(MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS)
             && flags.contains(MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS)

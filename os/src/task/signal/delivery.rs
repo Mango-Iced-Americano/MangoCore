@@ -109,11 +109,15 @@ fn send_thread_signal_info(
         return Err(EAGAIN);
     }
     if let Some(siginfo) = siginfo {
-        inner.sigpending.enqueue(PendingSignal { signal, siginfo })?;
-    } else {
         inner
             .sigpending
-            .enqueue_signal_with_sender(signal, SigInfo::SI_TKILL as usize, current_sender_pid())?;
+            .enqueue(PendingSignal { signal, siginfo })?;
+    } else {
+        inner.sigpending.enqueue_signal_with_sender(
+            signal,
+            SigInfo::SI_TKILL as usize,
+            current_sender_pid(),
+        )?;
     }
     if signal.contains(Signals::SIGCONT) {
         drop(inner);

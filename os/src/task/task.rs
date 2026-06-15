@@ -5,8 +5,11 @@ use super::registry;
 use super::signal::*;
 use super::threads::{futex_wake_shared, Futex};
 use super::TaskContext;
-use super::{tid_alloc, trap_cx_bottom_from_slot, ustack_bottom_from_slot, TidHandle, INIT_IPC_NAMESPACE, INIT_MOUNT_NAMESPACE, IpcNamespace, MountNamespace, NetNamespace};
-use crate::config::{MMAP_BASE, SYSTEM_TASK_LIMIT, USER_STACK_SIZE};
+use super::{
+    tid_alloc, trap_cx_bottom_from_slot, ustack_bottom_from_slot, IpcNamespace, MountNamespace,
+    NetNamespace, TidHandle, INIT_IPC_NAMESPACE, INIT_MOUNT_NAMESPACE,
+};
+use crate::config::{MMAP_BASE, PAGE_SIZE, SYSTEM_TASK_LIMIT, USER_STACK_SIZE};
 use crate::fs::vfs;
 use crate::fs::{vfs_lookup_absolute, vfs_root};
 use crate::hal::TrapImpl;
@@ -14,14 +17,14 @@ use crate::hal::{kstack_alloc, KernelStack};
 use crate::hal::{trap_handler, TrapContext};
 use crate::mm::PageTableImpl;
 use crate::mm::{AddressSpace, FaultAccess, PhysPageNum, VirtAddr, KERNEL_SPACE};
+use crate::syscall::errno::{EFAULT, EISDIR, ENOEXEC, ENOMEM};
 use crate::syscall::{shm_clone_attachments, CloneFlags};
-use crate::syscall::errno::{EISDIR, ENOEXEC, ENOMEM};
 use crate::timer::{ITimerVal, TimeSpec, TimeVal, USEC_PER_SEC};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
-use core::sync::atomic::{AtomicBool, AtomicUsize};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use log::{trace, warn};
 use spin::{Mutex, MutexGuard};
 
@@ -42,10 +45,10 @@ fn default_task_comm() -> [u8; 16] {
     comm
 }
 
-fn default_groups() -> Vec<u32> {
+fn default_groups() -> Arc<Vec<u32>> {
     let mut groups = Vec::new();
     groups.push(0);
-    groups
+    Arc::new(groups)
 }
 
 fn cpu_limit_to_us(limit_secs: usize) -> Option<usize> {
@@ -102,6 +105,10 @@ pub struct TaskControlBlock {
     pub kstack: KernelStack,
     /// 用户栈基址
     pub ustack_base: usize,
+    /// Whether this task owns a kernel-managed default user stack area.
+    pub user_stack_allocated: AtomicBool,
+    /// Whether this task is counted in its process live-thread counter.
+    pub(crate) thread_live_counted: AtomicBool,
     /// 退出信号
     pub exit_signal: Signals,
     /// CLONE_THREAD 线程的 quota。非线程 clone 的 quota 在 PCB 上。
@@ -212,7 +219,7 @@ pub struct TaskControlBlockInner {
     /// Process umask for file mode creation (default 0o022).
     pub umask: u32,
     /// Linux supplementary group list, used by getgroups/setgroups compatibility.
-    pub groups: Vec<u32>,
+    pub groups: Arc<Vec<u32>>,
     /// Linux capability 兼容字段。当前内核只做权限语义判定，不实现真实权能隔离。
     pub cap_effective: u64,
     pub cap_permitted: u64,
@@ -278,10 +285,7 @@ impl PosixTimer {
     }
 
     pub fn add_overrun(&mut self, count: usize) {
-        self.overrun = self
-            .overrun
-            .saturating_add(count)
-            .min(Self::OVERRUN_MAX);
+        self.overrun = self.overrun.saturating_add(count).min(Self::OVERRUN_MAX);
     }
 
     pub fn overrun(&self) -> usize {
@@ -412,8 +416,8 @@ impl Rusage {
 const SCHED_NICE_0_LOAD: u64 = 1024;
 const SCHED_NICE_TO_WEIGHT: [u64; 40] = [
     88761, 71755, 56483, 46273, 36291, 29154, 23254, 18705, 14949, 11916, 9548, 7620, 6100, 4904,
-    3906, 3121, 2501, 1991, 1586, 1277, 1024, 820, 655, 526, 423, 335, 272, 215, 172, 137, 110,
-    87, 70, 56, 45, 36, 29, 23, 18, 15,
+    3906, 3121, 2501, 1991, 1586, 1277, 1024, 820, 655, 526, 423, 335, 272, 215, 172, 137, 110, 87,
+    70, 56, 45, 36, 29, 23, 18, 15,
 ];
 
 fn sched_vruntime_delta_us(nice: i32, runtime_us: usize) -> u64 {
@@ -589,26 +593,45 @@ fn align_up(addr: usize, align: usize) -> usize {
 }
 
 impl TaskControlBlock {
-    fn write_clear_child_tid_word(&self, addr: usize) -> Result<(Option<usize>, usize), isize> {
+    fn write_clear_child_tid_word(
+        &self,
+        addr: usize,
+    ) -> Result<(bool, Option<usize>, usize), isize> {
         let bytes = 0u32.to_ne_bytes();
         let vm = self.process.vm();
         let mut vm = vm.lock();
         let base_va = VirtAddr::from(addr);
-        let before_key = vm
-            .translate(base_va.floor())
-            .map(|ppn| (ppn.0 << 12) + base_va.page_offset());
+        let uses_shared_key = vm.futex_uses_shared_key(base_va)?;
+        let before_key = if uses_shared_key {
+            vm.translate(base_va.floor())
+                .map(|ppn| (ppn.0 << 12) + base_va.page_offset())
+        } else {
+            None
+        };
+
+        if base_va.page_offset() + bytes.len() <= PAGE_SIZE {
+            let pa = vm.fault_in_user_va(base_va, FaultAccess::Store)?;
+            let page_offset = pa.page_offset();
+            let page = pa.floor().get_bytes_array();
+            page[page_offset..page_offset + bytes.len()].copy_from_slice(&bytes);
+            let after_key = if uses_shared_key {
+                (pa.floor().0 << 12) + page_offset
+            } else {
+                0
+            };
+            return Ok((uses_shared_key, before_key, after_key));
+        }
+
         let mut after_key = None;
         for (offset, byte) in bytes.iter().enumerate() {
-            let va = VirtAddr::from(addr + offset);
+            let va = addr.checked_add(offset).map(VirtAddr::from).ok_or(EFAULT)?;
             let pa = vm.fault_in_user_va(va, FaultAccess::Store)?;
-            if offset == 0 {
+            if uses_shared_key && offset == 0 {
                 after_key = Some((pa.floor().0 << 12) + pa.page_offset());
             }
             pa.floor().get_bytes_array()[pa.page_offset()] = *byte;
         }
-        after_key
-            .map(|key| (before_key, key))
-            .ok_or(crate::syscall::errno::EFAULT)
+        Ok((uses_shared_key, before_key, after_key.unwrap_or(0)))
     }
 
     /// 获取任务内部状态的互斥锁
@@ -648,29 +671,46 @@ impl TaskControlBlock {
             clear_child_tid
         };
 
+        self.process.remove_thread(self);
+
         if clear_child_tid != 0 {
             log::debug!(
                 "[do_exit] do futex wake on clear_child_tid: {:X}",
                 clear_child_tid
             );
             match self.write_clear_child_tid_word(clear_child_tid) {
-                Ok((before_key, after_key)) => {
+                Ok((uses_shared_key, before_key, after_key)) => {
                     self.process.futex().lock().wake(clear_child_tid, 1);
-                    if let Some(before_key) = before_key {
-                        futex_wake_shared(before_key, 1);
-                    }
-                    if before_key != Some(after_key) {
-                        futex_wake_shared(after_key, 1);
+                    if uses_shared_key {
+                        if let Some(before_key) = before_key {
+                            futex_wake_shared(before_key, 1);
+                        }
+                        if before_key != Some(after_key) {
+                            futex_wake_shared(after_key, 1);
+                        }
                     }
                 }
-                Err(_) => log::warn!("invalid clear_child_tid"),
+                Err(errno) => {
+                    log::warn!("invalid clear_child_tid: {}", errno);
+                }
             };
         }
 
-        self.process
-            .vm()
-            .lock()
-            .dealloc_user_res(self.user_res_slot);
+        let keep_trap_context = self.process.try_cache_trap_context_slot(self.user_res_slot);
+        super::perf::record_exit_thread(clear_child_tid != 0, keep_trap_context);
+        let vm = self.process.vm();
+        let mut vm = vm.lock();
+        if keep_trap_context {
+            vm.dealloc_user_res_keep_trap(
+                self.user_res_slot,
+                self.user_stack_allocated.load(Ordering::Acquire),
+            );
+        } else {
+            vm.dealloc_user_res_with_stack(
+                self.user_res_slot,
+                self.user_stack_allocated.load(Ordering::Acquire),
+            );
+        }
 
         log::info!(
             "[exit_thread] tid {} pid {} exited with {}",
@@ -720,8 +760,10 @@ impl TaskControlBlock {
         // 获取内核栈的顶部
         let kstack_top = kstack.get_top();
 
-        // 为当前线程分配用户资源
-        memory_set.alloc_user_res(user_res_slot, true);
+        // 为当前线程分配用户资源，并保留 trap context PPN，避免再次页表遍历。
+        let trap_cx_ppn = memory_set
+            .alloc_user_res_with_trap_ppn(user_res_slot, true)
+            .expect("init task user resource allocation failed");
 
         // 构造初始进程的 argc/argv/envp 栈
         let init_sp = {
@@ -740,10 +782,6 @@ impl TaskControlBlock {
                 )
                 .expect("init task stack setup failed")
         };
-        // 获取陷阱上下文的物理页号
-        let trap_cx_ppn = memory_set
-            .translate(VirtAddr::from(trap_cx_bottom_from_slot(user_res_slot)).into())
-            .unwrap();
         log::trace!("[TCB::new]trap_cx_ppn{:?}", trap_cx_ppn);
 
         // 初始化新 VFS 文件描述符表
@@ -803,6 +841,8 @@ impl TaskControlBlock {
             process,
             kstack,
             ustack_base: ustack_bottom_from_slot(user_res_slot),
+            user_stack_allocated: AtomicBool::new(true),
+            thread_live_counted: AtomicBool::new(false),
             exit_signal: Signals::empty(),
             _thread_quota: None,
             wait_io_timer_pending: AtomicBool::new(false),
@@ -958,8 +998,11 @@ impl TaskControlBlock {
             heap_end
         );
 
-        // 为当前线程分配用户资源
-        memory_set.alloc_user_res(self.user_res_slot, true);
+        // 为当前线程分配用户资源，并保留 trap context PPN，避免再次页表遍历。
+        let trap_cx_ppn = memory_set
+            .alloc_user_res_with_trap_ppn(self.user_res_slot, true)
+            .map_err(|_| ENOMEM)?;
+        self.user_stack_allocated.store(true, Ordering::Release);
         // 创建ELF参数表
         let user_sp =
             memory_set.create_elf_tables(self.ustack_bottom_va(), argv_vec, envp_vec, &elf_info)?;
@@ -996,9 +1039,7 @@ impl TaskControlBlock {
             // **** 保持当前PCB锁
             let mut inner = self.acquire_inner_lock();
             // 更新陷阱上下文的物理页号
-            inner.trap_cx_ppn = (&memory_set)
-                .translate(VirtAddr::from(self.trap_cx_user_va()).into())
-                .unwrap();
+            inner.trap_cx_ppn = trap_cx_ppn;
             // 更新任务上下文
             *inner.get_trap_cx() = trap_cx;
             // 重置clear_child_tid
@@ -1012,7 +1053,10 @@ impl TaskControlBlock {
             // CLONE_VM/vfork 子进程 exec 后会脱离旧地址空间。这里仅从旧 VM
             // 中移除当前线程的 trap context/默认栈映射，不释放 slot 号本身；
             // 新 VM 仍使用同一个 user_res_slot，避免父 VM 留下孤儿映射。
-            current_vm.lock().dealloc_user_res(self.user_res_slot);
+            current_vm.lock().dealloc_user_res_with_stack(
+                self.user_res_slot,
+                self.user_stack_allocated.load(Ordering::Acquire),
+            );
         }
         // 更新可执行文件描述符
         self.process.replace_exe(elf);
@@ -1112,6 +1156,13 @@ impl TaskControlBlock {
         } else {
             self.user_res_slot
         };
+        let user_stack_allocated =
+            !share_vm || (stack.is_null() && !flags.contains(CloneFlags::CLONE_VFORK));
+        super::perf::record_clone(
+            flags.contains(CloneFlags::CLONE_THREAD),
+            share_vm,
+            user_stack_allocated,
+        );
         let (process, thread_quota) = if flags.contains(CloneFlags::CLONE_THREAD) {
             (self.process.clone(), Some(quota))
         } else {
@@ -1198,27 +1249,43 @@ impl TaskControlBlock {
         let kstack_top = kstack.get_top();
 
         // 共享 VM 的任务需要独立 trap context；用户栈只在未指定 child stack 时分配。
-        if share_vm {
-            memory_set.lock().alloc_user_res(
-                user_res_slot,
-                stack.is_null() && !flags.contains(CloneFlags::CLONE_VFORK),
-            );
-        }
-        // 获取陷阱上下文的物理页号
         let trap_cx_va = trap_cx_bottom_from_slot(user_res_slot);
-        let trap_cx_ppn = match memory_set
-            .lock()
-            .translate(VirtAddr::from(trap_cx_va).into())
-        {
-            Some(ppn) => ppn,
-            None => {
-                warn!(
-                    "[sys_clone] trap context is not mapped after alloc_user_res: slot={}, va={:#x}",
-                    user_res_slot, trap_cx_va
-                );
-                memory_set.lock().dealloc_user_res(user_res_slot);
-                user_res_slot_allocator.lock().dealloc(user_res_slot);
-                return Err(ENOMEM);
+        let trap_cx_ppn = if share_vm {
+            if flags.contains(CloneFlags::CLONE_THREAD) {
+                process.take_cached_trap_context_slot(user_res_slot);
+            }
+            let mut locked_vm = memory_set.lock();
+            match locked_vm.alloc_user_res_with_trap_ppn(user_res_slot, user_stack_allocated) {
+                Ok(ppn) => ppn,
+                Err(err) => {
+                    warn!(
+                        "[sys_clone] failed to allocate trap context: slot={}, va={:#x}, err={:?}",
+                        user_res_slot, trap_cx_va, err
+                    );
+                    locked_vm.dealloc_user_res_with_stack(user_res_slot, user_stack_allocated);
+                    drop(locked_vm);
+                    user_res_slot_allocator.lock().dealloc(user_res_slot);
+                    return Err(ENOMEM);
+                }
+            }
+        } else {
+            // fork copied the parent's trap context into the new address space already.
+            match memory_set
+                .lock()
+                .translate(VirtAddr::from(trap_cx_va).into())
+            {
+                Some(ppn) => ppn,
+                None => {
+                    warn!(
+                        "[sys_clone] trap context is not mapped after fork copy: slot={}, va={:#x}",
+                        user_res_slot, trap_cx_va
+                    );
+                    memory_set
+                        .lock()
+                        .dealloc_user_res_with_stack(user_res_slot, user_stack_allocated);
+                    user_res_slot_allocator.lock().dealloc(user_res_slot);
+                    return Err(ENOMEM);
+                }
             }
         };
 
@@ -1234,6 +1301,8 @@ impl TaskControlBlock {
             } else {
                 ustack_bottom_from_slot(user_res_slot)
             },
+            user_stack_allocated: AtomicBool::new(user_stack_allocated),
+            thread_live_counted: AtomicBool::new(false),
             exit_signal,
             _thread_quota: thread_quota,
             wait_io_timer_pending: AtomicBool::new(false),
@@ -1392,7 +1461,10 @@ impl TaskControlBlock {
     /// Drop resources allocated for a clone that has not been published.
     pub fn cleanup_unpublished_clone(&self, shared_vm: bool) {
         if shared_vm {
-            self.process.vm().lock().dealloc_user_res(self.user_res_slot);
+            self.process.vm().lock().dealloc_user_res_with_stack(
+                self.user_res_slot,
+                self.user_stack_allocated.load(Ordering::Acquire),
+            );
         }
     }
 
@@ -1401,7 +1473,7 @@ impl TaskControlBlock {
         self.tid.0
     }
 
-        /// 获取用户可见进程 ID。
+    /// 获取用户可见进程 ID。
     pub fn getpid(&self) -> usize {
         self.process.pid
     }
@@ -1434,8 +1506,8 @@ impl TaskControlBlock {
 impl Drop for TaskControlBlock {
     /// 当任务控制块被销毁时，释放用户资源槽位
     fn drop(&mut self) {
-        registry::unregister_task_if_match(self);
-        self.process.remove_thread(self.tid.0);
+        registry::unregister_task(self.tid.0);
+        self.process.remove_thread(self);
         self.process
             .user_res_slot_allocator()
             .lock()

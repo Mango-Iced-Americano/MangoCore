@@ -227,20 +227,15 @@ fn run_bash_cmd_timeout(cmd: &str, environ: &[*const u8], timeout_secs: u64) -> 
     }
     if pid > 0 {
         let mut code = 0;
-        let max_loops = if timeout_secs > 0 {
-            timeout_secs.saturating_mul(100)
-        } else {
-            u64::MAX
-        };
-        let mut loops: u64 = 0;
+        let start_ms = get_time() as u64;
+        let timeout_ms = timeout_secs.saturating_mul(1000);
         loop {
             reap_orphans();
             let ret = waitpid_wnohang(pid as isize, &mut code);
             if ret == pid as isize || ret < 0 {
                 break;
             }
-            loops += 1;
-            if loops >= max_loops {
+            if timeout_secs > 0 && (get_time() as u64).saturating_sub(start_ms) >= timeout_ms {
                 let _ = kill(pid as usize, SIGKILL);
                 loop {
                     let ret2 = waitpid_wnohang(pid as isize, &mut code);
@@ -872,9 +867,9 @@ fn run_group_once(
         // parent: 超时循环 + 强杀
         let mut code: i32 = 0;
         let timeout_ms = timeout_secs * 1000;
-        let mut elapsed_ms: u64 = 0;
         const POLL_MS: u64 = 100;
         let mut timed_out = false;
+        let start_ms = get_time() as u64;
 
         loop {
             let ret = waitpid_wnohang(pid as isize, &mut code);
@@ -890,7 +885,7 @@ fn run_group_once(
                 break;
             }
 
-            elapsed_ms += POLL_MS;
+            let elapsed_ms = (get_time() as u64).saturating_sub(start_ms);
             if elapsed_ms >= timeout_ms {
                 timed_out = true;
                 println!(
@@ -1502,7 +1497,6 @@ fn run_ltp_binaries(
         let ltp_start_ms = get_time() as u64;
         let mut exit_code: i32 = 0;
         let timeout_ms = timeout_secs * 1000;
-        let mut elapsed_ms: u64 = 0;
         const POLL_MS: u64 = 100;
         let mut timed_out = false;
 
@@ -1516,7 +1510,7 @@ fn run_ltp_binaries(
                 break;
             }
 
-            elapsed_ms += POLL_MS;
+            let elapsed_ms = (get_time() as u64).saturating_sub(ltp_start_ms);
             if elapsed_ms >= timeout_ms {
                 timed_out = true;
                 println!(
@@ -1616,7 +1610,6 @@ fn run_ltp_suite_runner(
     let ltp_start_ms = get_time() as u64;
     let mut code: i32 = 0;
     let timeout_ms = timeout_secs * 1000;
-    let mut elapsed_ms: u64 = 0;
     const POLL_MS: u64 = 100;
     let mut timed_out = false;
 
@@ -1629,7 +1622,7 @@ fn run_ltp_suite_runner(
             println!("[initproc] ltprunner pid={} vanished", pid);
             break;
         }
-        elapsed_ms += POLL_MS;
+        let elapsed_ms = (get_time() as u64).saturating_sub(ltp_start_ms);
         if elapsed_ms >= timeout_ms {
             timed_out = true;
             println!(

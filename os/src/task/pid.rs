@@ -100,11 +100,7 @@ impl RecycleAllocator {
         // 检查id是否合法
         assert!(id < self.current);
         // 检查id是否已经被回收
-        assert!(
-            !self.is_recycled(id),
-            "id {} has been deallocated!",
-            id
-        );
+        assert!(!self.is_recycled(id), "id {} has been deallocated!", id);
         // 将id回收，放入回收向量中
         self.mark_recycled(id, true);
         self.recycled.push(id);
@@ -122,7 +118,9 @@ impl RecycleAllocator {
     pub fn get_allocated(&self) -> usize {
         // 返回当前分配的id数量减去已经回收的id数量
         let recycled_count = self.recycled_flags.iter().filter(|flag| **flag).count();
-        self.current.saturating_sub(1).saturating_sub(recycled_count)
+        self.current
+            .saturating_sub(1)
+            .saturating_sub(recycled_count)
     }
 
     fn ensure_flag_capacity(&mut self, id: usize) {

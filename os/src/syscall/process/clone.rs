@@ -8,7 +8,9 @@ use crate::mm::{
 };
 use crate::show_frame_consumption;
 use crate::syscall::errno::*;
-use crate::task::{current_task, signal::Signals, IpcNamespace, MountNamespace, ProcessManager, TaskControlBlock};
+use crate::task::{
+    current_task, signal::Signals, IpcNamespace, MountNamespace, ProcessManager, TaskControlBlock,
+};
 use crate::utils::error::SyscallErr;
 use log::{info, warn};
 
@@ -137,8 +139,17 @@ fn write_u32_to_task_user(
     let bytes = value.to_ne_bytes();
     let vm = task.process.vm();
     let mut vm = vm.lock();
+    let base = ptr as usize;
+    let page_offset = base & (PAGE_SIZE - 1);
+    if page_offset <= PAGE_SIZE - bytes.len() {
+        let pa = vm.fault_in_user_va(VirtAddr::from(base), FaultAccess::Store)?;
+        let page = pa.floor().get_bytes_array();
+        let offset = pa.page_offset();
+        page[offset..offset + bytes.len()].copy_from_slice(&bytes);
+        return Ok(());
+    }
     for (offset, byte) in bytes.iter().enumerate() {
-        let pa = vm.fault_in_user_va(VirtAddr::from(ptr as usize + offset), FaultAccess::Store)?;
+        let pa = vm.fault_in_user_va(VirtAddr::from(base + offset), FaultAccess::Store)?;
         pa.floor().get_bytes_array()[pa.page_offset()] = *byte;
     }
     Ok(())
@@ -191,8 +202,10 @@ fn sys_clone_inner(
     if flags.contains(CloneFlags::CLONE_NEWNS) && flags.contains(CloneFlags::CLONE_FS) {
         return EINVAL;
     }
-    if (flags.contains(CloneFlags::CLONE_NEWUTS) || flags.contains(CloneFlags::CLONE_NEWNET)
-        || flags.contains(CloneFlags::CLONE_NEWNS) || flags.contains(CloneFlags::CLONE_NEWIPC))
+    if (flags.contains(CloneFlags::CLONE_NEWUTS)
+        || flags.contains(CloneFlags::CLONE_NEWNET)
+        || flags.contains(CloneFlags::CLONE_NEWNS)
+        || flags.contains(CloneFlags::CLONE_NEWIPC))
         && parent.acquire_inner_lock().euid != 0
     {
         return EPERM;
@@ -333,8 +346,10 @@ pub fn sys_unshare(flags: u32) -> isize {
     }
 
     let task = current_task().unwrap();
-    if (flags.contains(CloneFlags::CLONE_NEWUTS) || flags.contains(CloneFlags::CLONE_NEWNET)
-        || flags.contains(CloneFlags::CLONE_NEWNS) || flags.contains(CloneFlags::CLONE_NEWIPC))
+    if (flags.contains(CloneFlags::CLONE_NEWUTS)
+        || flags.contains(CloneFlags::CLONE_NEWNET)
+        || flags.contains(CloneFlags::CLONE_NEWNS)
+        || flags.contains(CloneFlags::CLONE_NEWIPC))
         && task.acquire_inner_lock().euid != 0
     {
         return EPERM;
@@ -433,8 +448,10 @@ pub fn sys_setns(fd: usize, nstype: usize) -> isize {
     const CLONE_NEWNET_VAL: usize = 0x40000000;
     const CLONE_NEWNS_VAL: usize = 0x00020000;
     const CLONE_NEWIPC_VAL: usize = 0x08000000;
-    if nstype != 0 && nstype != CLONE_NEWNET_VAL
-        && nstype != CLONE_NEWNS_VAL && nstype != CLONE_NEWIPC_VAL
+    if nstype != 0
+        && nstype != CLONE_NEWNET_VAL
+        && nstype != CLONE_NEWNS_VAL
+        && nstype != CLONE_NEWIPC_VAL
     {
         return EINVAL;
     }
@@ -469,10 +486,12 @@ pub fn sys_setns(fd: usize, nstype: usize) -> isize {
     // ProcNsMntInode / ProcNsIpcInode to be added in a separate task;
     // setns branches for those will be wired once the inode types exist.
 
-    use crate::fs::procfs::pid::ns::{ProcNsMntInode, ProcNsIpcInode};
+    use crate::fs::procfs::pid::ns::{ProcNsIpcInode, ProcNsMntInode};
 
     if let Some(ns_inode) = inode.as_any_ref().downcast_ref::<ProcNsMntInode>() {
-        if nstype != 0 && nstype != CLONE_NEWNS_VAL { return EINVAL; }
+        if nstype != 0 && nstype != CLONE_NEWNS_VAL {
+            return EINVAL;
+        }
         if euid != 0 {
             return EPERM;
         }
@@ -483,7 +502,9 @@ pub fn sys_setns(fd: usize, nstype: usize) -> isize {
     }
 
     if let Some(ns_inode) = inode.as_any_ref().downcast_ref::<ProcNsIpcInode>() {
-        if nstype != 0 && nstype != CLONE_NEWIPC_VAL { return EINVAL; }
+        if nstype != 0 && nstype != CLONE_NEWIPC_VAL {
+            return EINVAL;
+        }
         if euid != 0 {
             return EPERM;
         }

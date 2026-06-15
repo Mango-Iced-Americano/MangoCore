@@ -291,6 +291,7 @@ pub fn trap_handler() -> ! {
             inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_MAPERR);
         }
         Trap::Interrupt(Interrupt::Timer) => {
+            crate::task::perf::record_timer_interrupt();
             do_wake_expired();
             NET_INTERFACE.try_poll();
             TIClr::read().clear_timer().write();

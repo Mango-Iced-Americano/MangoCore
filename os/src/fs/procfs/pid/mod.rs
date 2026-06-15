@@ -134,10 +134,10 @@ fn create_pid_dir(
         pid,
     )?;
 
-    dir.add_file(
+    dir.add_cached_text_file(
         "smaps",
         InodeMode::from_bits_truncate(0o444),
-        smaps::pid_smaps_content,
+        smaps::pid_smaps_snapshot,
         pid,
     )?;
 

@@ -158,6 +158,7 @@ pub fn trap_handler() -> ! {
             inner.add_signal_with_code(Signals::SIGILL, SigInfo::ILL_ILLOPC);
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
+            crate::task::perf::record_timer_interrupt();
             do_wake_expired();
             NET_INTERFACE.try_poll();
             unsafe {

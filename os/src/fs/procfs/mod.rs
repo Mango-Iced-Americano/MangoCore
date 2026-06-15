@@ -42,7 +42,18 @@ pub type ProcContentFn = fn(
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr>;
 
+pub type ProcTextFn = fn(extra_data: usize) -> Result<String, SyscallErr>;
+
 pub type ProcWriteFn = fn(extra_data: usize, offset: usize, buf: &[u8]) -> Result<usize, SyscallErr>;
+
+fn empty_content(
+    _extra_data: usize,
+    _offset: usize,
+    _len: usize,
+    _buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    Ok(0)
+}
 
 /// 动态查找钩子：当 children BTreeMap 中找不到时调用
 pub type FindHookFn = fn(inode: &LockedProcInode, name: &str) -> Option<Arc<dyn IndexNode>>;
@@ -73,6 +84,7 @@ pub struct ProcInodeData {
     pub metadata: Metadata,
     pub children: BTreeMap<String, Arc<dyn IndexNode>>,
     pub content_fn: Option<ProcContentFn>,
+    pub text_fn: Option<ProcTextFn>,
     pub write_fn: Option<ProcWriteFn>,
     pub extra_data: usize,
     pub process_ref: Option<Weak<ProcessControlBlock>>,
@@ -112,6 +124,7 @@ impl ProcInodeData {
             },
             children: BTreeMap::new(),
             content_fn: None,
+            text_fn: None,
             write_fn: None,
             extra_data: 0,
             process_ref: None,
@@ -146,6 +159,7 @@ impl ProcInodeData {
             },
             children: BTreeMap::new(),
             content_fn: Some(content_fn),
+            text_fn: None,
             write_fn: None,
             extra_data: 0,
             process_ref: None,
@@ -181,6 +195,7 @@ impl ProcInodeData {
             },
             children: BTreeMap::new(),
             content_fn: None,
+            text_fn: None,
             write_fn: None,
             extra_data: 0,
             process_ref: None,
@@ -228,6 +243,25 @@ impl LockedProcInode {
         let mut data = ProcInodeData::new_file(mode, content_fn);
         data.parent = parent;
         data.fs = fs;
+        data.extra_data = extra_data;
+        Arc::new_cyclic(|weak| {
+            data.self_ref = weak.clone();
+            LockedProcInode(Mutex::new(data))
+        })
+    }
+
+    pub(crate) fn new_cached_text_file_wired(
+        parent: Weak<LockedProcInode>,
+        fs: Weak<ProcFS>,
+        mode: InodeMode,
+        text_fn: ProcTextFn,
+        extra_data: usize,
+    ) -> Arc<Self> {
+        let mut data = ProcInodeData::new_file(mode, empty_content);
+        data.parent = parent;
+        data.fs = fs;
+        data.content_fn = None;
+        data.text_fn = Some(text_fn);
         data.extra_data = extra_data;
         Arc::new_cyclic(|weak| {
             data.self_ref = weak.clone();
@@ -349,6 +383,34 @@ impl LockedProcInode {
             this.fs.clone(),
             mode,
             content_fn,
+            extra_data,
+        );
+        this.children.insert(String::from(name), child.clone());
+        Ok(child)
+    }
+
+    pub fn add_cached_text_file(
+        self: &Arc<Self>,
+        name: &str,
+        mode: InodeMode,
+        text_fn: ProcTextFn,
+        extra_data: usize,
+    ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+        let mut this = self.0.lock();
+        if this.metadata.file_type != FileType::Dir {
+            return Err(SyscallErr::ENOTDIR);
+        }
+        if this.children.contains_key(name) {
+            return Err(SyscallErr::EEXIST);
+        }
+        if name.len() > PROCFS_MAX_NAMELEN as usize {
+            return Err(SyscallErr::ENAMETOOLONG);
+        }
+        let child = LockedProcInode::new_cached_text_file_wired(
+            this.self_ref.clone(),
+            this.fs.clone(),
+            mode,
+            text_fn,
             extra_data,
         );
         this.children.insert(String::from(name), child.clone());
@@ -574,7 +636,7 @@ impl IndexNode for LockedProcInode {
         offset: usize,
         len: usize,
         buf: &mut [u8],
-        _data: MutexGuard<FilePrivateData>,
+        mut private_data: MutexGuard<FilePrivateData>,
     ) -> Result<usize, SyscallErr> {
         if buf.len() < len {
             return Err(SyscallErr::EINVAL);
@@ -582,10 +644,11 @@ impl IndexNode for LockedProcInode {
 
         // Extract data without holding lock (prevents deadlock if content_fn
         // needs to access other kernel state)
-        let (content_fn, extra_data, file_type, symlink_target) = {
+        let (content_fn, text_fn, extra_data, file_type, symlink_target) = {
             let data = self.0.lock();
             (
                 data.content_fn,
+                data.text_fn,
                 data.extra_data,
                 data.metadata.file_type,
                 data.symlink_target.clone(),
@@ -607,16 +670,32 @@ impl IndexNode for LockedProcInode {
                     Err(SyscallErr::ENOSYS)
                 }
             }
-            _ => match content_fn {
-                Some(f) => {
-                    let n = f(extra_data, offset, len, buf)?;
-                    if n > len || n > buf.len() {
-                        return Err(SyscallErr::EIO);
+            _ => {
+                if let Some(f) = text_fn {
+                    let content = match &*private_data {
+                        FilePrivateData::ProcText { content } => content.clone(),
+                        _ => {
+                            let content = Arc::new(f(extra_data)?);
+                            *private_data = FilePrivateData::ProcText {
+                                content: content.clone(),
+                            };
+                            content
+                        }
+                    };
+                    proc_read_str(offset, len, buf, content.as_str())
+                } else {
+                    match content_fn {
+                        Some(f) => {
+                            let n = f(extra_data, offset, len, buf)?;
+                            if n > len || n > buf.len() {
+                                return Err(SyscallErr::EIO);
+                            }
+                            Ok(n)
+                        }
+                        None => Err(SyscallErr::ENOSYS),
                     }
-                    Ok(n)
                 }
-                None => Err(SyscallErr::ENOSYS),
-            },
+            }
         }
     }
 

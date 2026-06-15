@@ -276,6 +276,17 @@ impl PageTable for Sv39PageTable {
             None
         }
     }
+    fn block_and_ret_mut_no_flush(&self, vpn: VirtPageNum) -> Option<PhysPageNum> {
+        if let Some(pte) = self.find_pte_refmut(vpn) {
+            pte.revoke_write();
+            Some(pte.ppn())
+        } else {
+            None
+        }
+    }
+    fn flush_tlb(&self) {
+        tlb_invalidate();
+    }
     /// Return the physical token to current page.
     fn token(&self) -> usize {
         8usize << 60 | self.root_ppn.0

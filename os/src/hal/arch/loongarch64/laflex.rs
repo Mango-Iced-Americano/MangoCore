@@ -1,4 +1,4 @@
-use super::{tlb::tlb_invalidate_page, tlb_global_invalidate};
+use super::{tlb::{tlb_invalidate, tlb_invalidate_page}, tlb_global_invalidate};
 use crate::{
     config::{
         MEMORY_HIGH_BASE_VPN, MEMORY_SIZE, PAGE_SIZE, PAGE_SIZE_BITS, PALEN, VA_MASK,
@@ -426,6 +426,18 @@ impl PageTable for LAFlexPageTable {
         } else {
             None
         }
+    }
+    fn block_and_ret_mut_no_flush(&self, vpn: VirtPageNum) -> Option<PhysPageNum> {
+        if let Some(pte) = self.find_pte_refmut(vpn) {
+            pte.clear_dirty();
+            pte.revoke_write();
+            Some(pte.ppn())
+        } else {
+            None
+        }
+    }
+    fn flush_tlb(&self) {
+        tlb_invalidate();
     }
     /// Return the physical token to current page.
     /// NOTE: NEVER use this token to fill a PGD!

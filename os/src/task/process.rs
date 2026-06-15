@@ -2,20 +2,19 @@ use super::{
     pid::{RecycleAllocator, TidHandle},
     quota::TaskQuotaGuard,
     registry,
-    signal::{sigchld_requests_auto_reap, PendingSignal, SignalQueue, Sighand, Signals},
+    signal::{sigchld_requests_auto_reap, PendingSignal, Sighand, SignalQueue, Signals},
     threads::Futex,
-    wake_interruptible, Completion, FsStatus, IpcNamespace, MountNamespace, NetNamespace,
-    TaskControlBlock, TaskStatus,
-    UtsNamespace, Rusage, WaitQueue, INITPROC,
+    wake_interruptible, Completion, FsStatus, IpcNamespace, MountNamespace, NetNamespace, Rusage,
+    TaskControlBlock, TaskStatus, UtsNamespace, WaitQueue, INITPROC,
 };
 use crate::fs::vfs;
 use crate::mm::{AddressSpace, PageTableImpl};
 use crate::utils::error::SyscallErr;
 use alloc::collections::BTreeMap;
-use alloc::sync::{Arc, Weak};
-use core::sync::atomic::{AtomicBool, Ordering};
 use alloc::string::String;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 use log::warn;
 use spin::{Mutex, MutexGuard};
@@ -40,6 +39,10 @@ pub struct ProcessControlBlock {
     process_quota: Mutex<Option<TaskQuotaGuard>>,
     /// 属于该进程的线程列表。
     pub threads: Mutex<Vec<Weak<TaskControlBlock>>>,
+    /// Number of threads currently counted as live in this process.
+    live_threads: AtomicUsize,
+    /// Reusable user-resource slots whose trap context page is still mapped.
+    trap_context_cache: Mutex<Vec<usize>>,
     /// 父进程 wait4() 等待子进程退出的等待队列。
     pub child_exit_wait: Mutex<WaitQueue>,
     /// CLONE_VFORK 父线程。Some 表示当前进程来自 vfork，且尚未完成。
@@ -130,20 +133,24 @@ pub struct ProcessSignalState {
 }
 
 type InodeBusyKey = (usize, vfs::InodeId);
+const TRAP_CONTEXT_CACHE_LIMIT: usize = 256;
 
 lazy_static! {
-    static ref EXEC_INODE_REFS: Mutex<BTreeMap<InodeBusyKey, usize>> =
-        Mutex::new(BTreeMap::new());
-    static ref WRITE_INODE_REFS: Mutex<BTreeMap<InodeBusyKey, usize>> =
-        Mutex::new(BTreeMap::new());
+    static ref EXEC_INODE_REFS: Mutex<BTreeMap<InodeBusyKey, usize>> = Mutex::new(BTreeMap::new());
+    static ref WRITE_INODE_REFS: Mutex<BTreeMap<InodeBusyKey, usize>> = Mutex::new(BTreeMap::new());
 }
 
 fn inode_busy_key(inode: &Arc<dyn vfs::IndexNode>) -> Option<InodeBusyKey> {
-    inode.metadata().ok().map(|meta| (meta.dev_id, meta.inode_id))
+    inode
+        .metadata()
+        .ok()
+        .map(|meta| (meta.dev_id, meta.inode_id))
 }
 
 fn exec_key_from_file(file: &vfs::File) -> Option<InodeBusyKey> {
-    file.metadata().ok().map(|meta| (meta.dev_id, meta.inode_id))
+    file.metadata()
+        .ok()
+        .map(|meta| (meta.dev_id, meta.inode_id))
 }
 
 fn register_busy_key(refs: &Mutex<BTreeMap<InodeBusyKey, usize>>, key: InodeBusyKey) {
@@ -250,6 +257,8 @@ impl ProcessControlBlock {
             _pid_handle: pid_handle,
             process_quota: Mutex::new(Some(process_quota)),
             threads: Mutex::new(Vec::new()),
+            live_threads: AtomicUsize::new(0),
+            trap_context_cache: Mutex::new(Vec::new()),
             child_exit_wait: Mutex::new(WaitQueue::new()),
             vfork_parent: Mutex::new(None),
             vfork_done: Completion::new(),
@@ -429,6 +438,7 @@ impl ProcessControlBlock {
     }
 
     pub fn replace_vm(&self, vm: AddressSpace<PageTableImpl>) {
+        self.trap_context_cache.lock().clear();
         self.inner.lock().vm = Arc::new(Mutex::new(vm));
     }
 
@@ -487,13 +497,35 @@ impl ProcessControlBlock {
 
     pub fn add_thread(&self, task: &Arc<TaskControlBlock>) {
         self.threads.lock().push(Arc::downgrade(task));
+        if !task.thread_live_counted.swap(true, Ordering::AcqRel) {
+            self.live_threads.fetch_add(1, Ordering::AcqRel);
+        }
     }
 
-    pub fn remove_thread(&self, tid: usize) {
-        self.threads.lock().retain(|thread| {
+    pub fn remove_thread(&self, task: &TaskControlBlock) -> bool {
+        let removed = if task.thread_live_counted.swap(false, Ordering::AcqRel) {
+            self.live_threads.fetch_sub(1, Ordering::AcqRel);
+            true
+        } else {
+            false
+        };
+        if removed {
+            self.compact_threads_if_sparse();
+        }
+        removed
+    }
+
+    fn compact_threads_if_sparse(&self) {
+        let live = self.live_thread_count();
+        let mut threads = self.threads.lock();
+        let compact_threshold = live.saturating_mul(4).saturating_add(128);
+        if threads.len() <= compact_threshold {
+            return;
+        }
+        threads.retain(|thread| {
             thread
                 .upgrade()
-                .map(|task| task.tid.0 != tid)
+                .map(|task| task.thread_live_counted.load(Ordering::Acquire))
                 .unwrap_or(false)
         });
     }
@@ -503,8 +535,12 @@ impl ProcessControlBlock {
         let mut live_threads = Vec::new();
         threads.retain(|thread| {
             if let Some(task) = thread.upgrade() {
-                live_threads.push(task);
-                true
+                if task.thread_live_counted.load(Ordering::Acquire) {
+                    live_threads.push(task);
+                    true
+                } else {
+                    false
+                }
             } else {
                 false
             }
@@ -520,10 +556,34 @@ impl ProcessControlBlock {
     }
 
     pub fn live_thread_count(&self) -> usize {
-        self.threads()
-            .into_iter()
-            .filter(|task| task.acquire_inner_lock().task_status != TaskStatus::Zombie)
-            .count()
+        self.live_threads.load(Ordering::Acquire)
+    }
+
+    pub fn try_cache_trap_context_slot(&self, slot: usize) -> bool {
+        if self.is_group_exiting() || self.live_thread_count() == 0 {
+            super::perf::record_trap_cache_store(false);
+            return false;
+        }
+        let mut cache = self.trap_context_cache.lock();
+        if cache.len() >= TRAP_CONTEXT_CACHE_LIMIT || cache.iter().any(|cached| *cached == slot) {
+            super::perf::record_trap_cache_store(false);
+            return false;
+        }
+        cache.push(slot);
+        super::perf::record_trap_cache_store(true);
+        true
+    }
+
+    pub fn take_cached_trap_context_slot(&self, slot: usize) -> bool {
+        let mut cache = self.trap_context_cache.lock();
+        if let Some(pos) = cache.iter().position(|cached| *cached == slot) {
+            cache.swap_remove(pos);
+            super::perf::record_trap_cache_take(true);
+            true
+        } else {
+            super::perf::record_trap_cache_take(false);
+            false
+        }
     }
 
     pub fn setpgid(&self, pgid: usize) -> isize {
@@ -821,9 +881,7 @@ impl ProcessControlBlock {
         }
     }
 
-    fn nearest_child_reaper(
-        parent: Option<Arc<ProcessControlBlock>>,
-    ) -> Arc<ProcessControlBlock> {
+    fn nearest_child_reaper(parent: Option<Arc<ProcessControlBlock>>) -> Arc<ProcessControlBlock> {
         let mut cursor = parent;
         while let Some(process) = cursor {
             if !process.is_zombie() && process.is_child_subreaper() {
@@ -985,6 +1043,6 @@ impl Drop for ProcessControlBlock {
         if let Some(key) = self.inner.get_mut().exec_key.take() {
             unregister_exec_key(key);
         }
-        registry::unregister_process_if_match(self);
+        registry::unregister_process(self.pid);
     }
 }

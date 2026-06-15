@@ -700,7 +700,7 @@ pub fn sys_setgroups(size: usize, list: *const u32) -> isize {
             }
         }
     }
-    task.acquire_inner_lock().groups = groups;
+    task.acquire_inner_lock().groups = Arc::new(groups);
     SUCCESS
 }
 

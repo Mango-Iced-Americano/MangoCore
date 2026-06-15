@@ -5,7 +5,7 @@ use crate::task::threads::{
     do_futex_waitv, do_futex_waitv_shared, futex_requeue_shared, futex_wake_shared, FutexCmd,
     FutexWaitEntry,
 };
-use crate::task::{current_task, threads};
+use crate::task::{current_task, threads, TaskControlBlock};
 use crate::timer::{current_timespec, TimeSpec, NSEC_PER_SEC};
 use alloc::vec::Vec;
 use core::mem::size_of;
@@ -45,15 +45,43 @@ fn va_to_phys_key(
     vm.translate(vpn).map(|ppn| (ppn.0 << 12) + offset)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FutexKey {
+    Private(usize),
+    Shared(usize),
+}
+
+fn futex_key_for(
+    task: &TaskControlBlock,
+    uaddr: usize,
+    is_private: bool,
+) -> Result<FutexKey, isize> {
+    if is_private {
+        return Ok(FutexKey::Private(uaddr));
+    }
+
+    let vm_ref = task.process.vm();
+    let vm = vm_ref.lock();
+    if vm.futex_uses_shared_key(VirtAddr::from(uaddr))? {
+        va_to_phys_key(&vm, uaddr)
+            .map(FutexKey::Shared)
+            .ok_or(EFAULT)
+    } else {
+        Ok(FutexKey::Private(uaddr))
+    }
+}
+
 fn read_timeout(timeout: *const TimeSpec, token: usize) -> Result<Option<TimeSpec>, isize> {
-    UserPtr::new(timeout).read_optional(token).and_then(|timeout| {
-        if let Some(timeout) = timeout {
-            if timeout.tv_sec > isize::MAX as usize || timeout.tv_nsec >= NSEC_PER_SEC {
-                return Err(EINVAL);
+    UserPtr::new(timeout)
+        .read_optional(token)
+        .and_then(|timeout| {
+            if let Some(timeout) = timeout {
+                if timeout.tv_sec > isize::MAX as usize || timeout.tv_nsec >= NSEC_PER_SEC {
+                    return Err(EINVAL);
+                }
             }
-        }
-        Ok(timeout)
-    })
+            Ok(timeout)
+        })
 }
 
 fn realtime_deadline(deadline: TimeSpec) -> TimeSpec {
@@ -129,10 +157,6 @@ pub fn sys_futex(
         return EINVAL;
     }
     let futex_word = UserPtr::new(uaddr as *const u32);
-    let futex_value = match futex_word.read(token) {
-        Ok(value) => value,
-        Err(errno) => return errno,
-    };
     let cmd = threads::FutexCmd::from_primitive(futex_op & 0x7fu32);
     let option = FutexOption::from_bits_truncate(futex_op);
     let is_private = option.contains(FutexOption::PRIVATE);
@@ -152,18 +176,20 @@ pub fn sys_futex(
                 Err(errno) => return errno,
             };
             if !is_private {
-                let vm_ref = task.process.vm();
-                let vm = vm_ref.lock();
-                let phys_key = match va_to_phys_key(&vm, uaddr as usize) {
-                    Some(k) => k,
-                    None => return EFAULT,
-                };
-                drop(vm);
-                drop(task);
-                do_futex_wait_shared(futex_word, token, val, timeout, phys_key)
-            } else {
-                drop(task);
-                do_futex_wait(futex_word, token, private_key, val, timeout)
+                if let Err(errno) = futex_word.read(token) {
+                    return errno;
+                }
+            }
+            match futex_key_for(&task, private_key, is_private) {
+                Ok(FutexKey::Shared(phys_key)) => {
+                    drop(task);
+                    do_futex_wait_shared(futex_word, token, val, timeout, phys_key)
+                }
+                Ok(FutexKey::Private(key)) => {
+                    drop(task);
+                    do_futex_wait(futex_word, token, key, val, timeout)
+                }
+                Err(errno) => errno,
             }
         }
         FutexCmd::WaitBitset => {
@@ -175,18 +201,20 @@ pub fn sys_futex(
                 Err(errno) => return errno,
             };
             if !is_private {
-                let vm_ref = task.process.vm();
-                let vm = vm_ref.lock();
-                let phys_key = match va_to_phys_key(&vm, uaddr as usize) {
-                    Some(k) => k,
-                    None => return EFAULT,
-                };
-                drop(vm);
-                drop(task);
-                do_futex_wait_bitset_shared(futex_word, token, val, deadline, phys_key)
-            } else {
-                drop(task);
-                do_futex_wait_bitset(futex_word, token, private_key, val, deadline)
+                if let Err(errno) = futex_word.read(token) {
+                    return errno;
+                }
+            }
+            match futex_key_for(&task, private_key, is_private) {
+                Ok(FutexKey::Shared(phys_key)) => {
+                    drop(task);
+                    do_futex_wait_bitset_shared(futex_word, token, val, deadline, phys_key)
+                }
+                Ok(FutexKey::Private(key)) => {
+                    drop(task);
+                    do_futex_wait_bitset(futex_word, token, key, val, deadline)
+                }
+                Err(errno) => errno,
             }
         }
         FutexCmd::Wake | FutexCmd::WakeBitset => {
@@ -196,17 +224,15 @@ pub fn sys_futex(
             if cmd == FutexCmd::WakeBitset && val3 == 0 {
                 return EINVAL;
             }
-            if is_private {
-                task.process.futex().lock().wake(private_key, val)
-            } else {
-                let vm_ref = task.process.vm();
-                let vm = vm_ref.lock();
-                let phys_key = match va_to_phys_key(&vm, uaddr as usize) {
-                    Some(k) => k,
-                    None => return EFAULT,
-                };
-                drop(vm);
-                futex_wake_shared(phys_key, val)
+            if !is_private {
+                if let Err(errno) = futex_word.read(token) {
+                    return errno;
+                }
+            }
+            match futex_key_for(&task, private_key, is_private) {
+                Ok(FutexKey::Private(key)) => task.process.futex().lock().wake(key, val),
+                Ok(FutexKey::Shared(phys_key)) => futex_wake_shared(phys_key, val),
+                Err(errno) => errno,
             }
         }
         FutexCmd::Requeue | FutexCmd::CmpRequeue => {
@@ -217,36 +243,37 @@ pub fn sys_futex(
                 Ok(_) => {}
                 Err(errno) => return errno,
             };
-            if cmd == FutexCmd::CmpRequeue && futex_value != val3 {
-                return EAGAIN;
+            if cmd == FutexCmd::CmpRequeue {
+                match futex_word.read(token) {
+                    Ok(value) if value == val3 => {}
+                    Ok(_) => return EAGAIN,
+                    Err(errno) => return errno,
+                }
+            } else if !is_private {
+                if let Err(errno) = futex_word.read(token) {
+                    return errno;
+                }
             }
             let val2 = timeout as usize;
             if val > i32::MAX as u32 || val2 > i32::MAX as usize {
                 return EINVAL;
             }
-            if is_private {
-                task.process
-                    .futex()
-                    .lock()
-                    .requeue(private_key, uaddr2 as usize, val, val2)
-            } else {
-                let phys_key = {
-                    let vm_ref = task.process.vm();
-                    let vm = vm_ref.lock();
-                    match va_to_phys_key(&vm, uaddr as usize) {
-                        Some(k) => k,
-                        None => return EFAULT,
-                    }
-                };
-                let phys_key2 = {
-                    let vm_ref = task.process.vm();
-                    let vm = vm_ref.lock();
-                    match va_to_phys_key(&vm, uaddr2 as usize) {
-                        Some(k) => k,
-                        None => return EFAULT,
-                    }
-                };
-                futex_requeue_shared(phys_key, phys_key2, val, val2)
+            let key = match futex_key_for(&task, private_key, is_private) {
+                Ok(key) => key,
+                Err(errno) => return errno,
+            };
+            let key2 = match futex_key_for(&task, uaddr2 as usize, is_private) {
+                Ok(key) => key,
+                Err(errno) => return errno,
+            };
+            match (key, key2) {
+                (FutexKey::Private(key), FutexKey::Private(key2)) => {
+                    task.process.futex().lock().requeue(key, key2, val, val2)
+                }
+                (FutexKey::Shared(key), FutexKey::Shared(key2)) => {
+                    futex_requeue_shared(key, key2, val, val2)
+                }
+                _ => EINVAL,
             }
         }
         FutexCmd::Invalid => EINVAL,
@@ -279,7 +306,8 @@ pub fn sys_futex_waitv(
     if entries.try_reserve(nr_futexes).is_err() {
         return ENOMEM;
     }
-    let mut all_private = None;
+    let mut requested_private = None;
+    let mut private_table = None;
 
     for index in 0..nr_futexes {
         let waiter_addr = match (waiters as usize).checked_add(index * size_of::<FutexWaitV>()) {
@@ -310,21 +338,22 @@ pub fn sys_futex_waitv(
         }
 
         let is_private = (waiter.flags & FutexOption::PRIVATE.bits()) != 0;
-        match all_private {
+        match requested_private {
             Some(private) if private != is_private => return EINVAL,
-            None => all_private = Some(is_private),
+            None => requested_private = Some(is_private),
             _ => {}
         }
 
-        let futex_key = if is_private {
-            waiter.uaddr as usize
-        } else {
-            let vm_ref = task.process.vm();
-            let vm = vm_ref.lock();
-            match va_to_phys_key(&vm, waiter.uaddr as usize) {
-                Some(key) => key,
-                None => return EFAULT,
-            }
+        let (uses_private_table, futex_key) =
+            match futex_key_for(&task, waiter.uaddr as usize, is_private) {
+                Ok(FutexKey::Private(key)) => (true, key),
+                Ok(FutexKey::Shared(key)) => (false, key),
+                Err(errno) => return errno,
+            };
+        match private_table {
+            Some(private) if private != uses_private_table => return EINVAL,
+            None => private_table = Some(uses_private_table),
+            _ => {}
         };
 
         entries.push(FutexWaitEntry {
@@ -334,10 +363,10 @@ pub fn sys_futex_waitv(
         });
     }
 
-    let is_private = all_private.unwrap_or(true);
+    let use_private_table = private_table.unwrap_or(true);
     drop(task);
 
-    if is_private {
+    if use_private_table {
         do_futex_waitv(&entries, token, deadline)
     } else {
         do_futex_waitv_shared(&entries, token, deadline)

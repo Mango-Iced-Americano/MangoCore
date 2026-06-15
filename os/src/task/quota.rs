@@ -19,8 +19,7 @@ impl TaskQuotaGuard {
             if current >= SYSTEM_TASK_LIMIT {
                 println!(
                     "[task_quota] HARD LIMIT hit: used={}/{} returning EAGAIN",
-                    current,
-                    SYSTEM_TASK_LIMIT
+                    current, SYSTEM_TASK_LIMIT
                 );
                 return Err(EAGAIN);
             }
@@ -38,8 +37,7 @@ impl TaskQuotaGuard {
                     {
                         println!(
                             "[task_quota] SOFT LIMIT reached: used={}/{}",
-                            next,
-                            SYSTEM_TASK_LIMIT
+                            next, SYSTEM_TASK_LIMIT
                         );
                     }
                     return Ok(Self { _private: () });

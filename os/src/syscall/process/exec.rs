@@ -2,7 +2,7 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use crate::config::{PAGE_SIZE, USER_STACK_SIZE};
+use crate::config::{PAGE_SIZE, USER_STACK_INIT_SIZE};
 use crate::fs::{vfs, vfs_lookup};
 use crate::mm::{UserCString, UserPtr};
 use crate::show_frame_consumption;
@@ -10,7 +10,7 @@ use crate::syscall::errno::*;
 use crate::task::{current_task, exit_current_and_run_next, is_writable_inode_busy, AuxvEntry};
 use log::{debug, info};
 
-const MAX_EXEC_ARG_ENV_BYTES: usize = USER_STACK_SIZE / 2;
+const MAX_EXEC_ARG_ENV_BYTES: usize = USER_STACK_INIT_SIZE / 2;
 const EXEC_AUXV_ENTRY_COUNT: usize = 17;
 
 /// 验证文件是否为有效 ELF（前4字节为 \x7fELF 魔数）
@@ -204,7 +204,7 @@ fn validate_exec_stack_usage(argv_vec: &[String], envp_vec: &[String]) -> Result
             .ok_or(E2BIG)?,
     )?;
     checked_add_exec_bytes(&mut bytes, word)?; // argc
-    if bytes > USER_STACK_SIZE.saturating_sub(PAGE_SIZE) {
+    if bytes > USER_STACK_INIT_SIZE.saturating_sub(PAGE_SIZE) {
         return Err(E2BIG);
     }
     Ok(())

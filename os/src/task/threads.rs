@@ -463,11 +463,13 @@ fn do_futex_wait_until(
     val: u32,
     deadline: Option<TimeSpec>,
 ) -> isize {
+    super::perf::record_futex_wait(false, deadline.is_some());
     let task = current_task().unwrap();
     let futex_table = task.process.futex().clone();
     drop(task);
 
     if let Some(wait_result) = try_single_thread_short_timeout(futex_word, token, val, deadline) {
+        super::perf::record_futex_wait_result(wait_result);
         return futex_wait_result_to_errno(wait_result);
     }
 
@@ -490,6 +492,7 @@ fn do_futex_wait_until(
         SUCCESS,
     );
     futex_table.lock().remove_empty(futex_key);
+    super::perf::record_futex_wait_result(wait_result);
 
     futex_wait_result_to_errno(wait_result)
 }
@@ -522,7 +525,11 @@ pub fn do_futex_wait_bitset(
     do_futex_wait_until(futex_word, token, futex_key, val, deadline)
 }
 
-pub fn do_futex_waitv(entries: &[FutexWaitEntry], token: usize, deadline: Option<TimeSpec>) -> isize {
+pub fn do_futex_waitv(
+    entries: &[FutexWaitEntry],
+    token: usize,
+    deadline: Option<TimeSpec>,
+) -> isize {
     if let Some(result) = check_waitv_values(entries, token) {
         return result;
     }
@@ -583,7 +590,9 @@ pub fn do_futex_waitv(entries: &[FutexWaitEntry], token: usize, deadline: Option
 /// 唤醒等待在全局 process-shared futex（物理地址 key）上的最多 val 个任务
 pub fn futex_wake_shared(phys_key: usize, val: u32) -> isize {
     let mut shared = PROCESS_SHARED_FUTEX.lock();
-    wake_waiters(&mut shared, phys_key, val)
+    let woke = wake_waiters(&mut shared, phys_key, val);
+    super::perf::record_futex_wake(true, woke);
+    woke
 }
 
 pub fn futex_requeue_shared(phys_key: usize, phys_key_2: usize, val: u32, val2: usize) -> isize {
@@ -655,7 +664,9 @@ fn do_futex_wait_shared_until(
     deadline: Option<TimeSpec>,
     phys_key: usize,
 ) -> isize {
+    super::perf::record_futex_wait(true, deadline.is_some());
     if let Some(wait_result) = try_single_thread_short_timeout(futex_word, token, val, deadline) {
+        super::perf::record_futex_wait_result(wait_result);
         return futex_wait_result_to_errno(wait_result);
     }
 
@@ -678,6 +689,7 @@ fn do_futex_wait_shared_until(
         SUCCESS,
     );
     remove_empty_wait_queue(&mut PROCESS_SHARED_FUTEX.lock(), phys_key);
+    super::perf::record_futex_wait_result(wait_result);
 
     futex_wait_result_to_errno(wait_result)
 }
@@ -719,7 +731,9 @@ impl Futex {
 
     /// 唤醒等待在指定 Futex 地址上的最多 val 个任务
     pub fn wake(&mut self, futex_key: usize, val: u32) -> isize {
-        wake_waiters(&mut self.inner, futex_key, val)
+        let woke = wake_waiters(&mut self.inner, futex_key, val);
+        super::perf::record_futex_wake(false, woke);
+        woke
     }
 
     fn wait_queue_mut(&mut self, futex_key: usize) -> &mut WaitQueue {

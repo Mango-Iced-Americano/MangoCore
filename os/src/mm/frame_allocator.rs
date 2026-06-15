@@ -359,18 +359,30 @@ pub fn unallocated_frames() -> usize {
 /// * `before`:
 /// 用于测量代码块的帧消耗情况
 macro_rules! show_frame_consumption {
-    ($place:literal; $($statement:stmt); *;) => {
-        let __frame_consumption_before = crate::mm::unallocated_frames();
-        $($statement)*
-        let __frame_consumption_after = crate::mm::unallocated_frames();
-        log::debug!("[{}] consumed frames: {}, last frames: {}", $place, (__frame_consumption_before - __frame_consumption_after) as isize, __frame_consumption_after)
-    };
-    ($place:literal, $before:ident) => {
-        log::debug!(
-            "[{}] consumed frames:{}, last frames:{}",
-            $place,
-            ($before - crate::mm::unallocated_frames()) as isize,
-            crate::mm::unallocated_frames()
-        );
-    };
+    ($place:literal; $($statement:stmt); *;) => {{
+        if log::log_enabled!(log::Level::Debug) {
+            let __frame_consumption_before = crate::mm::unallocated_frames();
+            $($statement)*
+            let __frame_consumption_after = crate::mm::unallocated_frames();
+            log::debug!(
+                "[{}] consumed frames: {}, last frames: {}",
+                $place,
+                __frame_consumption_before as isize - __frame_consumption_after as isize,
+                __frame_consumption_after
+            );
+        } else {
+            $($statement)*
+        }
+    }};
+    ($place:literal, $before:ident) => {{
+        if log::log_enabled!(log::Level::Debug) {
+            let __frame_consumption_after = crate::mm::unallocated_frames();
+            log::debug!(
+                "[{}] consumed frames:{}, last frames:{}",
+                $place,
+                $before as isize - __frame_consumption_after as isize,
+                __frame_consumption_after
+            );
+        }
+    }};
 }

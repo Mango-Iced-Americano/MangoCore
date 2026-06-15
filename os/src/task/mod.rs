@@ -1,52 +1,55 @@
 mod completion;
 mod context;
 mod elf;
-mod manager;
-pub mod net_namespace;
-pub mod mount_namespace;
 pub mod ipc_namespace;
+mod manager;
+pub mod mount_namespace;
+pub mod net_namespace;
 use spin::MutexGuard;
 pub mod pid;
 mod process;
 mod process_manager;
 mod processor;
+pub mod perf;
 pub mod quota;
 mod registry;
-mod sleep;
 pub mod signal;
+mod sleep;
 mod task;
 pub mod threads;
 
-use crate::hal::__switch;
 use crate::fs::{self, vfs_lookup_absolute};
+use crate::hal::__switch;
 use alloc::{sync::Arc, vec::Vec};
+pub use completion::Completion;
 pub use context::TaskContext;
 pub use elf::{load_elf_interp, AuxvEntry, AuxvType, ELFInfo};
 use lazy_static::*;
 use manager::fetch_task;
-pub use completion::Completion;
 pub use manager::{
-    add_kernel_timer, add_task, all_pids, do_oom, do_wake_expired,
-    remove_zombie_tasks_by_pid,
-    take_one_interruptible_zombie, take_one_ready_zombie,
-    kernel_timer_queue_len, procs_count, remove_tasks_from_queues,
-    send_signal_to_interruptible, sleep_interruptible, task_manager_counts, update_ready_nice,
+    add_kernel_timer, add_task, add_zombie_task, all_pids, do_oom, do_wake_expired, has_ready_task,
+    kernel_timer_queue_len, procs_count, remove_tasks_from_queues, remove_zombie_tasks_by_pid,
+    send_signal_to_interruptible, sleep_interruptible, take_one_interruptible_zombie,
+    take_one_ready_zombie, take_one_zombie_task, task_manager_counts, update_ready_nice,
     wait_with_timeout, wake_interruptible, zombie_count, TimerAction, WaitQueue, WaitResult,
 };
 // pub use pid::RecycleAllocator;
+pub use ipc_namespace::{IpcNamespace, INIT_IPC_NAMESPACE};
+pub use mount_namespace::{MountNamespace, INIT_MOUNT_NAMESPACE};
+pub use net_namespace::{NetNamespace, INIT_NET_NAMESPACE};
 pub use pid::{
     ns_last_pid, set_ns_last_pid, tid_alloc, trap_cx_bottom_from_slot, ustack_bottom_from_slot,
     TidHandle,
-};
-pub use processor::{
-    check_oom_kill, current_syscall_name, current_task, current_trap_cx, current_user_token,
-    run_tasks, schedule, set_current_syscall_id, take_current_task,
 };
 pub use process::{
     is_executable_inode_busy, is_writable_inode_busy, register_writable_inode,
     unregister_writable_inode, ProcessControlBlock, ProcessState,
 };
 pub use process_manager::ProcessManager;
+pub use processor::{
+    check_oom_kill, current_syscall_name, current_task, current_trap_cx, current_user_token,
+    run_tasks, schedule, set_current_syscall_id, take_current_task,
+};
 pub use registry::{
     all_processes, find_process_by_pid, find_processes_by_pgid, find_task_by_pid_tid,
     find_task_by_tid,
@@ -57,9 +60,6 @@ pub use task::{
     FsStatus, PosixTimer, RobustList, Rusage, SeccompFilterInsn, TaskControlBlock, TaskStatus,
     UtsNamespace,
 };
-pub use net_namespace::{INIT_NET_NAMESPACE, NetNamespace};
-pub use mount_namespace::{INIT_MOUNT_NAMESPACE, MountNamespace};
-pub use ipc_namespace::{INIT_IPC_NAMESPACE, IpcNamespace};
 
 pub use self::processor::PROCESSOR;
 #[allow(unused)]
@@ -190,14 +190,12 @@ pub(crate) fn block_current_and_run_next_with_lock_checked<T>(
 }
 
 fn do_exit(task: Arc<TaskControlBlock>, exit_code: u32) {
-    // 先从 process.threads 列表中移除此线程，否则 live_thread_count()
-    // 会因为 do_exit 持有的这个 Arc 参数而永远 ≥1，导致 finish_exit
-    // （PCB zombie、父进程 wait 唤醒、子进程收养）从未被触发。
-    task.process.remove_thread(task.tid.0);
-    if task.exit_thread_resources(exit_code) && task.process.live_thread_count() == 0 {
-        crate::syscall::fs::release_fcntl_locks_for_pid(task.pid());
-        crate::syscall::shm_detach_process(task.pid());
-        task.process.finish_exit(&task, exit_code);
+    if task.exit_thread_resources(exit_code) {
+        if task.process.live_thread_count() == 0 {
+            crate::syscall::fs::release_fcntl_locks_for_pid(task.pid());
+            crate::syscall::shm_detach_process(task.pid());
+            task.process.finish_exit(&task, exit_code);
+        }
     }
 }
 
@@ -205,7 +203,7 @@ pub fn exit_current_and_run_next(exit_code: u32) -> ! {
     let task = take_current_task().unwrap();
     do_exit(task.clone(), exit_code);
     // 当前任务仍在自己的内核栈上运行，不能在切栈前释放最后一个 Arc。
-    add_task(task);
+    add_zombie_task(task);
     let mut _unused = TaskContext::zero_init();
     schedule(&mut _unused as *mut _);
     panic!("Unreachable");
@@ -233,7 +231,7 @@ pub fn exit_group_and_run_next(exit_code: u32) -> ! {
     }
     do_exit(task.clone(), exit_code);
     // 当前任务仍在自己的内核栈上运行，不能在切栈前释放最后一个 Arc。
-    add_task(task);
+    add_zombie_task(task);
     let mut _unused = TaskContext::zero_init();
     schedule(&mut _unused as *mut _);
     panic!("Unreachable");

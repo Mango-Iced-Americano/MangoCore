@@ -1,13 +1,22 @@
-use super::{__switch, do_wake_expired, take_one_interruptible_zombie, take_one_ready_zombie};
+use super::{
+    __switch, do_wake_expired, take_one_interruptible_zombie, take_one_ready_zombie,
+    take_one_zombie_task,
+};
 use super::{fetch_task, TaskStatus};
 use super::{TaskContext, TaskControlBlock};
 use crate::hal::TrapContext;
 use crate::net::config::NET_INTERFACE;
 use crate::task::signal::Signals;
 use alloc::sync::Arc;
+use core::hint::spin_loop;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_static::*;
 use log;
 use spin::Mutex;
+
+const BACKGROUND_NET_POLL_INTERVAL: usize = 64;
+const IDLE_NET_POLL_INTERVAL: usize = 64;
+const RV64_CONSOLE_POLL_INTERVAL: usize = 64;
 
 /// 处理器对象
 pub struct Processor {
@@ -15,8 +24,6 @@ pub struct Processor {
     current: Option<Arc<TaskControlBlock>>,
     /// 空闲任务的上下文，用于在任务切换时保存和恢复状态
     idle_task_cx: TaskContext,
-    /// 当前正在执行的系统调用 ID（用于 OOM 诊断追踪）
-    current_syscall_id: Option<usize>,
 }
 
 impl Processor {
@@ -27,7 +34,6 @@ impl Processor {
             current: None,
             // 空闲任务的上下文
             idle_task_cx: TaskContext::zero_init(),
-            current_syscall_id: None,
         }
     }
     /// 获取空闲任务的上下文指针
@@ -43,19 +49,17 @@ impl Processor {
     pub fn current(&self) -> Option<Arc<TaskControlBlock>> {
         self.current.as_ref().map(Arc::clone)
     }
-    /// 获取当前系统调用 ID
-    pub fn get_syscall_id(&self) -> Option<usize> {
-        self.current_syscall_id
-    }
-    /// 设置当前系统调用 ID
-    pub fn set_syscall_id(&mut self, id: Option<usize>) {
-        self.current_syscall_id = id;
-    }
     /// 检查当前 Processor 是否为空闲
     pub fn is_vacant(&self) -> bool {
         self.current.is_none()
     }
 }
+
+/// 当前正在执行的系统调用 ID（用于 OOM 诊断追踪）。
+///
+/// MangoCore 当前是单核调度，syscall 入口用全局原子即可避免每次 syscall
+/// 都竞争 PROCESSOR 锁；0 表示无记录，实际 syscall id 存为 id + 1。
+static CURRENT_SYSCALL_ID: AtomicUsize = AtomicUsize::new(0);
 
 lazy_static! {
     /// 全局的处理器对象
@@ -67,42 +71,69 @@ lazy_static! {
 /// # 作用
 /// 运行任务调度器，不断从任务队列中取出任务并运行
 pub fn run_tasks() {
+    let mut schedule_tick = 0usize;
     loop {
+        schedule_tick = schedule_tick.wrapping_add(1);
         // Read one character from UART per iteration. Handle in priority order:
         // 1. Magic key (Ctrl+T) → trace dump + shutdown
         // 2. VINTR (Ctrl+C) → SIGINT to foreground/blocked task
         // 3. Normal character → stash for TTY
-        let ch = crate::hal::console_getchar() as u8;
-        if ch != 0xFF {
-            if crate::trace::check_magic_key(ch, "schedule") {
-                // check_magic_key → dump_from → shutdown, never returns.
-            } else if crate::fs::dev::tty::Teletype::handle_vintr(ch) {
-                log::info!("[vintr-poll] SIGINT sent! ch={:#x}", ch);
-            } else {
-                crate::trace::stash_char(ch);
-                crate::fs::dev::tty::Teletype::wake_readers();
+        //
+        // On rv64 this is an SBI ecall, so do not pay it on every context
+        // switch. TTY read paths still poll the console directly.
+        #[cfg(target_arch = "riscv64")]
+        let should_poll_console = schedule_tick % RV64_CONSOLE_POLL_INTERVAL == 0;
+        #[cfg(not(target_arch = "riscv64"))]
+        let should_poll_console = true;
+        if should_poll_console {
+            let ch = crate::hal::console_getchar() as u8;
+            if ch != 0xFF {
+                if crate::trace::check_magic_key(ch, "schedule") {
+                    // check_magic_key → dump_from → shutdown, never returns.
+                } else if crate::fs::dev::tty::Teletype::handle_vintr(ch) {
+                    log::info!("[vintr-poll] SIGINT sent! ch={:#x}", ch);
+                } else {
+                    crate::trace::stash_char(ch);
+                    crate::fs::dev::tty::Teletype::wake_readers();
+                }
             }
         }
         // 处理到期内核定时器（SIGALRM 等），防止忙等待/轮询任务阻塞定时器投递。
         do_wake_expired();
-        NET_INTERFACE.try_poll();
+        if schedule_tick % BACKGROUND_NET_POLL_INTERVAL == 0 {
+            NET_INTERFACE.try_poll();
+        }
         crate::fs::reclaim::maybe_reclaim_fs_caches();
-        // 在取任务前先清理僵尸，防止 zombie TCB 因 nice-aware
-        // 调度策略长期不被选中而导致 TCB/PCB 整链内存泄漏。
-        // 每次最多 drain 64 个，避免锁持有时间过长。
+        // 当前任务退出后先进入专用 zombie 队列；切回 idle 后即可安全 drop。
+        // 这样避免把不可运行的 TCB 塞进 ready_queue 再扫描剔除。
+        let mut drained_zombies = 0usize;
         for _ in 0..64 {
-            let a = take_one_ready_zombie();
-            let b = take_one_interruptible_zombie();
-            if a.is_none() && b.is_none() {
+            let zombie = take_one_zombie_task();
+            if zombie.is_none() {
                 break;
             }
-            drop(a);
-            drop(b);
+            drained_zombies += 1;
+            drop(zombie);
+        }
+        super::perf::record_zombie_drain(drained_zombies);
+        // 兜底清理旧队列中的 zombie，避免异常路径留下不可运行任务。
+        if schedule_tick % 64 == 0 {
+            for _ in 0..8 {
+                let a = take_one_ready_zombie();
+                let b = take_one_interruptible_zombie();
+                if a.is_none() && b.is_none() {
+                    break;
+                }
+                drop(a);
+                drop(b);
+            }
         }
         // 降频清理 PROCESS_SHARED_FUTEX 空 WaitQueue 键
         super::threads::compact_shared_futex();
         let mut processor = PROCESSOR.lock();
-        if let Some(task) = fetch_task() {
+        let next_task = fetch_task();
+        super::perf::record_schedule_loop(next_task.is_some());
+        if let Some(task) = next_task {
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
             // 独占地访问即将运行的任务的 TCB
             let next_task_cx_ptr = {
@@ -126,7 +157,11 @@ pub fn run_tasks() {
         } else {
             // 没有就绪的任务 → CPU idle
             drop(processor);
-            NET_INTERFACE.poll();
+            if schedule_tick % IDLE_NET_POLL_INTERVAL == 0 {
+                NET_INTERFACE.poll();
+            } else {
+                spin_loop();
+            }
         }
     }
 }
@@ -143,16 +178,15 @@ pub fn current_task() -> Option<Arc<TaskControlBlock>> {
 
 /// 获取当前系统调用名称（用于 OOM 诊断）
 pub fn current_syscall_name() -> &'static str {
-    let id = PROCESSOR.lock().get_syscall_id();
-    match id {
-        Some(id) => crate::syscall::syscall_name(id),
-        None => "<none>",
+    match CURRENT_SYSCALL_ID.load(Ordering::Relaxed) {
+        0 => "<none>",
+        id => crate::syscall::syscall_name(id - 1),
     }
 }
 
 /// 设置当前系统调用 ID
 pub fn set_current_syscall_id(id: Option<usize>) {
-    PROCESSOR.lock().set_syscall_id(id);
+    CURRENT_SYSCALL_ID.store(id.map(|id| id + 1).unwrap_or(0), Ordering::Relaxed);
 }
 
 /// 检查当前任务是否有 OOM kill pending 标志。

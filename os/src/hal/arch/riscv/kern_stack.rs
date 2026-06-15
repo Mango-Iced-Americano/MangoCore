@@ -3,10 +3,15 @@ use super::config::{
 };
 use crate::mm::{MapPermission, VirtAddr, KERNEL_SPACE};
 use crate::task::pid::RecycleAllocator;
+use alloc::vec::Vec;
 use lazy_static::*;
 use spin::Mutex;
+
+const KSTACK_CACHE_LIMIT: usize = 128;
+
 lazy_static! {
     static ref KSTACK_ALLOCATOR: Mutex<RecycleAllocator> = Mutex::new(RecycleAllocator::new());
+    static ref KSTACK_CACHE: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 }
 
 /// Return (bottom, top) of a kernel stack in kernel space.
@@ -19,6 +24,11 @@ pub fn kernel_stack_position(kstack_id: usize) -> (usize, usize) {
 pub struct KernelStack(pub usize);
 
 pub fn kstack_alloc() -> KernelStack {
+    if let Some(kstack_id) = KSTACK_CACHE.lock().pop() {
+        crate::task::perf::record_kstack_alloc(true);
+        return KernelStack(kstack_id);
+    }
+    crate::task::perf::record_kstack_alloc(false);
     let kstack_id = KSTACK_ALLOCATOR.lock().alloc();
     let (kstack_bottom, kstack_top) = kernel_stack_position(kstack_id);
     KERNEL_SPACE.lock().insert_kernel_stack_area(
@@ -31,6 +41,14 @@ pub fn kstack_alloc() -> KernelStack {
 
 impl Drop for KernelStack {
     fn drop(&mut self) {
+        let mut cache = KSTACK_CACHE.lock();
+        if cache.len() < KSTACK_CACHE_LIMIT {
+            cache.push(self.0);
+            crate::task::perf::record_kstack_drop(true);
+            return;
+        }
+        drop(cache);
+        crate::task::perf::record_kstack_drop(false);
         let (kernel_stack_bottom, _) = kernel_stack_position(self.0);
         let kernel_stack_bottom_va: VirtAddr = kernel_stack_bottom.into();
         KERNEL_SPACE

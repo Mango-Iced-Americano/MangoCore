@@ -1,6 +1,6 @@
-use crate::signal_type;
 use crate::config::PAGE_SIZE;
 use crate::mm::{UserPtr, UserPtrMut};
+use crate::signal_type;
 use crate::syscall::errno::*;
 use crate::task::{current_task, TaskControlBlock, WaitQueue, WaitResult};
 use crate::timer::{TimeSpec, NSEC_PER_SEC};
@@ -95,9 +95,7 @@ pub fn sigsuspend(set: *const Signals) -> isize {
     let task = current_task().unwrap();
     let token = task.get_user_token();
     let new_mask = match read_user_sigset(token, set) {
-        Ok(mask) => {
-            mask - Signals::CAN_NOT_BE_MASKED
-        }
+        Ok(mask) => mask - Signals::CAN_NOT_BE_MASKED,
         Err(errno) => return errno,
     };
     {

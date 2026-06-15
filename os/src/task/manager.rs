@@ -13,7 +13,8 @@ use crate::timer::{TimeSpec, TimeVal};
 
 use super::{
     block_current_and_run_next_checked, block_current_and_run_next_with_lock_checked, current_task,
-    discard_non_actionable_unblocked_signals, has_actionable_signal, signal::{SigInfo, Signals},
+    discard_non_actionable_unblocked_signals, has_actionable_signal,
+    signal::{SigInfo, Signals},
     TaskControlBlock, TaskStatus,
 };
 use crate::utils::error::SyscallErr;
@@ -85,6 +86,7 @@ pub struct TaskManager {
     pub ready_queue: VecDeque<Arc<TaskControlBlock>>,
     /// 一个双端队列，用于存储可中断状态任务
     pub interruptible_queue: VecDeque<Arc<TaskControlBlock>>,
+    zombie_queue: VecDeque<Arc<TaskControlBlock>>,
     ready_nonzero_nice_count: usize,
     /// 任务激活状态跟踪器，用于跟踪任务的激活状态，并在OOM时释放内存
     pub active_tracker: ActiveTracker,
@@ -94,6 +96,7 @@ pub struct TaskManager {
 pub struct TaskManager {
     pub ready_queue: VecDeque<Arc<TaskControlBlock>>,
     pub interruptible_queue: VecDeque<Arc<TaskControlBlock>>,
+    zombie_queue: VecDeque<Arc<TaskControlBlock>>,
     ready_nonzero_nice_count: usize,
 }
 
@@ -107,7 +110,10 @@ fn task_has_nonzero_nice(task: &Arc<TaskControlBlock>) -> bool {
 }
 
 fn count_ready_nonzero_nice(queue: &VecDeque<Arc<TaskControlBlock>>) -> usize {
-    queue.iter().filter(|task| task_has_nonzero_nice(task)).count()
+    queue
+        .iter()
+        .filter(|task| task_has_nonzero_nice(task))
+        .count()
 }
 
 fn pop_fair_ready(queue: &mut VecDeque<Arc<TaskControlBlock>>) -> Option<Arc<TaskControlBlock>> {
@@ -150,6 +156,7 @@ impl TaskManager {
         Self {
             ready_queue: VecDeque::new(),
             interruptible_queue: VecDeque::new(),
+            zombie_queue: VecDeque::new(),
             ready_nonzero_nice_count: 0,
             active_tracker: ActiveTracker::new(),
         }
@@ -159,6 +166,7 @@ impl TaskManager {
         Self {
             ready_queue: VecDeque::new(),
             interruptible_queue: VecDeque::new(),
+            zombie_queue: VecDeque::new(),
             ready_nonzero_nice_count: 0,
         }
     }
@@ -168,6 +176,12 @@ impl TaskManager {
             self.ready_nonzero_nice_count += 1;
         }
         self.ready_queue.push_back(task);
+    }
+    fn add_front(&mut self, task: Arc<TaskControlBlock>) {
+        if task_has_nonzero_nice(&task) {
+            self.ready_nonzero_nice_count += 1;
+        }
+        self.ready_queue.push_front(task);
     }
     fn pop_next_ready(&mut self) -> Option<Arc<TaskControlBlock>> {
         let task = if self.ready_nonzero_nice_count == 0 {
@@ -183,13 +197,42 @@ impl TaskManager {
     fn recompute_ready_nice_count(&mut self) {
         self.ready_nonzero_nice_count = count_ready_nonzero_nice(&self.ready_queue);
     }
+    fn note_ready_removed(&mut self, task: &Arc<TaskControlBlock>) {
+        if task_has_nonzero_nice(task) {
+            self.ready_nonzero_nice_count = self.ready_nonzero_nice_count.saturating_sub(1);
+        }
+    }
     /// 从就绪队列中逐出一个僵尸任务（零堆分配）。
     /// 每次调用最多 remove 一个元素，drop 发生在锁外。
     fn take_one_ready_zombie(&mut self) -> Option<Arc<TaskControlBlock>> {
+        if self
+            .ready_queue
+            .front()
+            .map(|task| task.acquire_inner_lock().is_zombie())
+            .unwrap_or(false)
+        {
+            let zombie = self.ready_queue.pop_front();
+            if let Some(task) = zombie.as_ref() {
+                self.note_ready_removed(task);
+            }
+            return zombie;
+        }
+        if self
+            .ready_queue
+            .back()
+            .map(|task| task.acquire_inner_lock().is_zombie())
+            .unwrap_or(false)
+        {
+            let zombie = self.ready_queue.pop_back();
+            if let Some(task) = zombie.as_ref() {
+                self.note_ready_removed(task);
+            }
+            return zombie;
+        }
         for i in 0..self.ready_queue.len() {
             if self.ready_queue[i].acquire_inner_lock().is_zombie() {
                 let zombie = self.ready_queue.remove(i).unwrap();
-                self.recompute_ready_nice_count();
+                self.note_ready_removed(&zombie);
                 return Some(zombie);
             }
         }
@@ -203,6 +246,13 @@ impl TaskManager {
             }
         }
         None
+    }
+    fn add_zombie(&mut self, task: Arc<TaskControlBlock>) {
+        super::perf::record_zombie_enqueue();
+        self.zombie_queue.push_back(task);
+    }
+    fn take_one_zombie(&mut self) -> Option<Arc<TaskControlBlock>> {
+        self.zombie_queue.pop_front()
     }
     /// 从就绪 + 可中断队列中移除属于指定 pid 的所有 zombie TCB。
     /// 返回收集到的 zombie Arc，由调用者负责在锁外 drop。
@@ -233,7 +283,11 @@ impl TaskManager {
         if (old_nice == 0) == (new_nice == 0) {
             return;
         }
-        if !self.ready_queue.iter().any(|queued| task_ptr_eq(queued, task)) {
+        if !self
+            .ready_queue
+            .iter()
+            .any(|queued| task_ptr_eq(queued, task))
+        {
             return;
         }
         if old_nice == 0 {
@@ -264,9 +318,27 @@ impl TaskManager {
     }
     /// 从可中断队列中删除一个任务
     pub fn drop_interruptible(&mut self, task: &Arc<TaskControlBlock>) {
+        if self
+            .interruptible_queue
+            .front()
+            .map(|task_in_queue| task_ptr_eq(task_in_queue, task))
+            .unwrap_or(false)
+        {
+            self.interruptible_queue.pop_front();
+            return;
+        }
+        if self
+            .interruptible_queue
+            .back()
+            .map(|task_in_queue| task_ptr_eq(task_in_queue, task))
+            .unwrap_or(false)
+        {
+            self.interruptible_queue.pop_back();
+            return;
+        }
         self.interruptible_queue
             // 使用retain过滤掉与指定任务相同的任务
-            .retain(|task_in_queue| Arc::as_ptr(task_in_queue) != Arc::as_ptr(task));
+            .retain(|task_in_queue| !task_ptr_eq(task_in_queue, task));
     }
     fn enqueue_ready_batch(&mut self, tasks: Vec<Arc<TaskControlBlock>>) -> usize {
         if tasks.is_empty() {
@@ -276,8 +348,8 @@ impl TaskManager {
         self.interruptible_queue
             .retain(|task| !task_ptr_in(&ptrs, task));
         let count = tasks.len();
-        for task in tasks {
-            self.add(task);
+        for task in tasks.into_iter().rev() {
+            self.add_front(task);
         }
         count
     }
@@ -287,8 +359,7 @@ impl TaskManager {
         let ptrs = sorted_task_ptrs(tasks);
 
         let old_ready_len = self.ready_queue.len();
-        self.ready_queue
-            .retain(|task| !task_ptr_in(&ptrs, task));
+        self.ready_queue.retain(|task| !task_ptr_in(&ptrs, task));
         self.recompute_ready_nice_count();
         let old_interruptible_len = self.interruptible_queue.len();
         self.interruptible_queue
@@ -347,7 +418,7 @@ impl TaskManager {
             .iter()
             .any(|task_in_queue| Arc::as_ptr(task_in_queue) == Arc::as_ptr(&task))
         {
-            self.add(task);
+            self.add_front(task);
             Ok(())
         } else {
             Err(WaitQueueError::AlreadyWaken)
@@ -395,9 +466,17 @@ pub fn add_task(task: Arc<TaskControlBlock>) {
     TASK_MANAGER.lock().add(task);
 }
 
+pub fn add_zombie_task(task: Arc<TaskControlBlock>) {
+    TASK_MANAGER.lock().add_zombie(task);
+}
+
 /// 从任务管理器中取出一个任务
 pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
     TASK_MANAGER.lock().fetch()
+}
+
+pub fn take_one_zombie_task() -> Option<Arc<TaskControlBlock>> {
+    TASK_MANAGER.lock().take_one_zombie()
 }
 
 /// 从就绪队列中逐出一个僵尸任务（零堆分配），返回后在锁外 drop。
@@ -504,6 +583,10 @@ pub fn remove_tasks_from_queues(tasks: &[Arc<TaskControlBlock>]) -> usize {
 pub fn procs_count() -> u16 {
     let manager = TASK_MANAGER.lock();
     manager.ready_count() + manager.interruptible_count()
+}
+
+pub fn has_ready_task() -> bool {
+    TASK_MANAGER.lock().ready_count() != 0
 }
 
 /// 返回僵尸任务数量
@@ -698,10 +781,29 @@ impl WaitQueue {
         self.add_task(task);
     }
     pub fn finish_wait(&mut self, task: &Arc<TaskControlBlock>) -> bool {
-        let old_len = self.inner.len();
-        self.inner
-            .retain(|task_in_queue| Weak::as_ptr(task_in_queue) != Arc::as_ptr(task));
-        let removed = self.inner.len() != old_len;
+        let task_ptr = Arc::as_ptr(task);
+        let removed = if self
+            .inner
+            .back()
+            .map(|task_in_queue| Weak::as_ptr(task_in_queue) == task_ptr)
+            .unwrap_or(false)
+        {
+            self.inner.pop_back();
+            true
+        } else if self
+            .inner
+            .front()
+            .map(|task_in_queue| Weak::as_ptr(task_in_queue) == task_ptr)
+            .unwrap_or(false)
+        {
+            self.inner.pop_front();
+            true
+        } else {
+            let old_len = self.inner.len();
+            self.inner
+                .retain(|task_in_queue| Weak::as_ptr(task_in_queue) != task_ptr);
+            self.inner.len() != old_len
+        };
         let mut task_inner = task.acquire_inner_lock();
         if task_inner.task_status == super::TaskStatus::Interruptible {
             task_inner.task_status = super::TaskStatus::Ready;
@@ -891,7 +993,8 @@ impl WaitQueue {
                 let next_deadline = match deadline {
                     Some(deadline) if TimeSpec::now() >= deadline => return WaitResult::TimedOut,
                     Some(deadline) => {
-                        let fallback = TimeSpec::now() + TimeSpec::from_ms(Self::WAIT_IO_FALLBACK_MS);
+                        let fallback =
+                            TimeSpec::now() + TimeSpec::from_ms(Self::WAIT_IO_FALLBACK_MS);
                         if fallback < deadline {
                             fallback
                         } else {
@@ -900,7 +1003,8 @@ impl WaitQueue {
                     }
                     None => TimeSpec::now() + TimeSpec::from_ms(Self::WAIT_IO_FALLBACK_MS),
                 };
-                match Self::wait_event_interruptible_timeout(&wait_queue, &mut cond, next_deadline) {
+                match Self::wait_event_interruptible_timeout(&wait_queue, &mut cond, next_deadline)
+                {
                     WaitResult::Ready(value) => return WaitResult::Ready(value),
                     WaitResult::Interrupted => return WaitResult::Interrupted,
                     WaitResult::TimedOut => {
@@ -1026,11 +1130,7 @@ impl WaitQueue {
         Self::wait_event_impl(wq, &mut cond, true, None, None)
     }
 
-    pub fn wait_event_timeout<F>(
-        wq: &Mutex<Self>,
-        mut cond: F,
-        deadline: TimeSpec,
-    ) -> WaitResult
+    pub fn wait_event_timeout<F>(wq: &Mutex<Self>, mut cond: F, deadline: TimeSpec) -> WaitResult
     where
         F: FnMut() -> Option<isize>,
     {
@@ -1060,11 +1160,7 @@ impl WaitQueue {
         Self::wait_event_locked_impl(lock, queue_of, &mut cond, true, None, None)
     }
 
-    pub fn wait_event_locked<T, Q, F>(
-        lock: &Mutex<T>,
-        queue_of: Q,
-        mut cond: F,
-    ) -> WaitResult
+    pub fn wait_event_locked<T, Q, F>(lock: &Mutex<T>, queue_of: Q, mut cond: F) -> WaitResult
     where
         Q: for<'a> FnMut(&'a mut T) -> &'a mut WaitQueue,
         F: FnMut(&mut T) -> Option<isize>,
@@ -1176,8 +1272,9 @@ impl KernelTimer {
                 }
                 None => false,
             },
-            TimerAction::SendSignal { task, .. }
-            | TimerAction::PosixTimerSignal { task, .. } => task.strong_count() > 0,
+            TimerAction::SendSignal { task, .. } | TimerAction::PosixTimerSignal { task, .. } => {
+                task.strong_count() > 0
+            }
         }
     }
 }
@@ -1211,6 +1308,14 @@ impl KernelTimerQueue {
         }
     }
     pub fn wake_expired(&mut self, now: TimeSpec) {
+        if self
+            .inner
+            .peek()
+            .map(|timer| timer.deadline > now)
+            .unwrap_or(true)
+        {
+            return;
+        }
         while let Some(timer) = self.inner.pop() {
             if timer.deadline > now {
                 self.inner.push(timer);
@@ -1253,10 +1358,7 @@ impl KernelTimerQueue {
     }
     fn run_timer(&mut self, timer: KernelTimer, now: TimeSpec) {
         match timer.action {
-            TimerAction::WakeTask {
-                task,
-                generation,
-            } => {
+            TimerAction::WakeTask { task, generation } => {
                 if let Some(task) = task.upgrade() {
                     // Option A：无条件清除 pending 标志。
                     // 无论任务是否已被提前唤醒，定时器既已触发，槽位即释放。
@@ -1383,9 +1485,11 @@ impl KernelTimerQueue {
                             let _ = inner
                                 .sigpending
                                 .enqueue_signal(signal, SigInfo::SI_TIMER as usize);
-                            if signal
-                                .wakes_interruptible(inner.sigmask, inner.signal_wait_mask, true)
-                                && inner.task_status == super::TaskStatus::Interruptible
+                            if signal.wakes_interruptible(
+                                inner.sigmask,
+                                inner.signal_wait_mask,
+                                true,
+                            ) && inner.task_status == super::TaskStatus::Interruptible
                             {
                                 inner.task_status = super::TaskStatus::Ready;
                                 should_wake = true;
@@ -1453,6 +1557,14 @@ impl TimeoutWaitQueue {
     }
     /// 唤醒所有超时的任务
     pub fn wake_expired(&mut self, now: TimeSpec) {
+        if self
+            .inner
+            .peek()
+            .map(|waiter| waiter.timeout > now)
+            .unwrap_or(true)
+        {
+            return;
+        }
         let mut tasks_to_wake = Vec::new();
         // 循环处理超时任务
         while let Some(waiter) = self.inner.pop() {
