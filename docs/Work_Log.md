@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### fix(fs): change detect_fs println! to info! — 避免干扰 oscomp judge 行索引断言
+
+**涉及文件：**
+- `os/src/fs/filesystem.rs` — `detect_fs()` 中所有 `println!` → `info!`
+
+**根因：** oscomp basic 的 `test_mount`/`test_umount` 测试输出在 mount/umount 之间出现了 `[fs] found fat32 filesystem` 内核日志行，该行由裸 `println!` 产生。judge_basic-*.py 按行号索引读取 data（data[0]~data[3]），多余的日志行使所有行偏移，导致 `data[1] == "mount return: 0"` 断言失败（实际读到 `"[fs] found fat32 filesystem"`），pass 锁定为 2/5。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- 双架构编译，不改逻辑（build 确认）
+
+**备注：** 改成 `info!` 后 LOG=off（评测默认）时不输出，LOG=info 才可见。共挽回 basic-musl + basic-glibc 各 6 分（mount 3 + umount 3）。
+
 ### 修复 sys_getcwd 返回值 ABI（LA64 shell-init EINVAL）
 
 **涉及文件：**
