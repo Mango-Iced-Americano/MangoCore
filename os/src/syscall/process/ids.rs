@@ -279,7 +279,7 @@ pub fn sys_uname(buf: *mut u8) -> isize {
     buffer.write_at(FIELD_OFFSET * 4, b"rv64\0");
     #[cfg(feature = "loongarch64")]
     buffer.write_at(FIELD_OFFSET * 4, b"la64\0");
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let uts_ref = task.process.uts();
     let uts = uts_ref.lock();
     buffer.write_at(FIELD_OFFSET * 1, &uts.nodename[..]);
@@ -305,8 +305,8 @@ fn copy_uts_field(name: *const u8, len: usize) -> Result<[u8; 65], isize> {
 }
 
 pub fn sys_sethostname(name: *const u8, len: usize) -> isize {
-    let task = current_task().unwrap();
-    if task.acquire_inner_lock().euid != 0 {
+    let task = current_task_ref().unwrap();
+    if task.euid() != 0 {
         return EPERM;
     }
     let hostname = match copy_uts_field(name, len) {
@@ -319,8 +319,8 @@ pub fn sys_sethostname(name: *const u8, len: usize) -> isize {
 }
 
 pub fn sys_setdomainname(name: *const u8, len: usize) -> isize {
-    let task = current_task().unwrap();
-    if task.acquire_inner_lock().euid != 0 {
+    let task = current_task_ref().unwrap();
+    if task.euid() != 0 {
         return EPERM;
     }
     let domainname = match copy_uts_field(name, len) {

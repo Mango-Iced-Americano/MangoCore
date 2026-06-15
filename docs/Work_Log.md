@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### lmbench/UnixBench UTS syscall 优化：短引用访问当前任务
+
+**涉及文件：**
+- `os/src/syscall/process/ids.rs` — `uname/sethostname/setdomainname` 的当前任务读取改用 `current_task_ref()`，权限判断复用 euid hint，减少 UTS 短路径中的 `Arc` clone 和 inner lock
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** 本次只替换 UTS namespace 只读/短改路径；会跨等待、发布任务或需要 `Arc::downgrade` 的路径不动。
+
 ### lmbench/UnixBench CPU clock 查询优化：当前任务短引用化
 
 **涉及文件：**
