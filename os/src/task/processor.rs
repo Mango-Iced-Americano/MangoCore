@@ -64,6 +64,7 @@ static CURRENT_TASK_PTR: AtomicPtr<TaskControlBlock> = AtomicPtr::new(ptr::null_
 static CURRENT_PID: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_TID: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_PARENT_PID: AtomicUsize = AtomicUsize::new(0);
+static CURRENT_USER_TOKEN: AtomicUsize = AtomicUsize::new(0);
 
 lazy_static! {
     /// 全局的处理器对象
@@ -149,6 +150,7 @@ pub fn run_tasks() {
             CURRENT_PID.store(task.pid(), Ordering::Release);
             CURRENT_TID.store(task.gettid(), Ordering::Release);
             CURRENT_PARENT_PID.store(task.process.parent_pid(), Ordering::Release);
+            CURRENT_USER_TOKEN.store(task.get_user_token(), Ordering::Release);
             processor.current = Some(task);
             // 手动释放处理器
             drop(processor);
@@ -174,6 +176,7 @@ pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
     CURRENT_PID.store(0, Ordering::Release);
     CURRENT_TID.store(0, Ordering::Release);
     CURRENT_PARENT_PID.store(0, Ordering::Release);
+    CURRENT_USER_TOKEN.store(0, Ordering::Release);
     PROCESSOR.lock().take_current()
 }
 
@@ -210,6 +213,12 @@ pub fn current_parent_pid() -> usize {
     CURRENT_PARENT_PID.load(Ordering::Acquire)
 }
 
+pub fn refresh_current_user_token_for_process(pid: usize, token: usize) {
+    if CURRENT_PID.load(Ordering::Acquire) == pid {
+        CURRENT_USER_TOKEN.store(token, Ordering::Release);
+    }
+}
+
 /// 获取当前系统调用名称（用于 OOM 诊断）
 pub fn current_syscall_name() -> &'static str {
     match CURRENT_SYSCALL_ID.load(Ordering::Relaxed) {
@@ -225,7 +234,12 @@ pub fn set_current_syscall_id(id: Option<usize>) {
 
 /// 获取当前正在运行的任务的用户态页表令牌
 pub fn current_user_token() -> usize {
-    current_task_ref().unwrap().get_user_token()
+    let token = CURRENT_USER_TOKEN.load(Ordering::Acquire);
+    if token != 0 {
+        token
+    } else {
+        current_task_ref().unwrap().get_user_token()
+    }
 }
 
 /// 获取当前正在运行的任务的陷阱上下文

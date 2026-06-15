@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### 用户页表 token 快路径：缓存当前任务 token
+
+**涉及文件：**
+- `os/src/task/processor.rs` — 在任务切入 CPU 时缓存当前用户页表 token；`current_user_token()` 优先返回缓存值，避免用户指针 syscall 每次锁 PCB/VM 读取 token
+- `os/src/task/process.rs` — `replace_vm()` 在 exec 等地址空间替换后刷新当前进程的 token 缓存，保证返回用户态使用新页表
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 缓存只覆盖当前正在 CPU 上运行的任务；非当前任务仍通过 `TaskControlBlock::get_user_token()` 读取真实 VM token。
+
 ### ID 类 syscall 快路径：调度切入时缓存当前 pid/tid/ppid
 
 **涉及文件：**

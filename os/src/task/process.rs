@@ -448,8 +448,10 @@ impl ProcessControlBlock {
     }
 
     pub fn replace_vm(&self, vm: AddressSpace<PageTableImpl>) {
+        let token = vm.token();
         self.trap_context_cache.lock().clear();
         self.inner.lock().vm = Arc::new(Mutex::new(vm));
+        super::processor::refresh_current_user_token_for_process(self.pid, token);
     }
 
     pub fn sighand(&self) -> Arc<Mutex<Sighand>> {
