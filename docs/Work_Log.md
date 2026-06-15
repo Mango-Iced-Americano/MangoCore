@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### 时间运算热路径优化：TimeSpec/TimeVal 直接借位相减
+
+**涉及文件：**
+- `os/src/timer.rs` — 为 `TimeSpec`/`TimeVal` 加减运算补充内联，并将减法从“转总 ns/us 再还原”改为直接结构体借位相减
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev sh -lc 'timeout 75s make rv64-run ...'` ✅ — busybox 进入文件操作测试后由外层 timeout 结束，无 panic
+
+**备注：** 面向 trap 计时、sleep/futex/poll deadline 判断等高频路径；饱和到 0 的语义保持不变。
+
 ### uaccess 优化：UserBuffer 单页读写快路径
 
 **涉及文件：**

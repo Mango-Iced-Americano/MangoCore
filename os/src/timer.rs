@@ -63,6 +63,7 @@ pub struct TimeSpec {
     pub tv_nsec: usize,
 }
 impl AddAssign for TimeSpec {
+    #[inline(always)]
     fn add_assign(&mut self, rhs: Self) {
         self.tv_sec += rhs.tv_sec;
         self.tv_nsec += rhs.tv_nsec;
@@ -71,6 +72,7 @@ impl AddAssign for TimeSpec {
 impl Add for TimeSpec {
     type Output = Self;
 
+    #[inline(always)]
     fn add(self, other: Self) -> Self {
         let mut sec = self.tv_sec + other.tv_sec;
         let mut nsec = self.tv_nsec + other.tv_nsec;
@@ -86,13 +88,21 @@ impl Add for TimeSpec {
 impl Sub for TimeSpec {
     type Output = Self;
 
+    #[inline(always)]
     fn sub(self, other: Self) -> Self {
-        let self_ns = self.to_ns();
-        let other_ns = other.to_ns();
-        if self_ns <= other_ns {
-            TimeSpec::new()
+        if self <= other {
+            return TimeSpec::new();
+        }
+        let mut sec = self.tv_sec - other.tv_sec;
+        let nsec = if self.tv_nsec >= other.tv_nsec {
+            self.tv_nsec - other.tv_nsec
         } else {
-            TimeSpec::from_ns(self_ns - other_ns)
+            sec -= 1;
+            self.tv_nsec + NSEC_PER_SEC - other.tv_nsec
+        };
+        Self {
+            tv_sec: sec,
+            tv_nsec: nsec,
         }
     }
 }
@@ -242,6 +252,7 @@ impl TimeVal {
 impl Add for TimeVal {
     type Output = Self;
 
+    #[inline(always)]
     fn add(self, other: Self) -> Self {
         let mut sec = self.tv_sec + other.tv_sec;
         let mut usec = self.tv_usec + other.tv_usec;
@@ -257,13 +268,21 @@ impl Add for TimeVal {
 impl Sub for TimeVal {
     type Output = Self;
 
+    #[inline(always)]
     fn sub(self, other: Self) -> Self {
-        let self_us = self.to_us();
-        let other_us = other.to_us();
-        if self_us <= other_us {
-            TimeVal::new()
+        if self <= other {
+            return TimeVal::new();
+        }
+        let mut sec = self.tv_sec - other.tv_sec;
+        let usec = if self.tv_usec >= other.tv_usec {
+            self.tv_usec - other.tv_usec
         } else {
-            TimeVal::from_us(self_us - other_us)
+            sec -= 1;
+            self.tv_usec + USEC_PER_SEC - other.tv_usec
+        };
+        Self {
+            tv_sec: sec,
+            tv_usec: usec,
         }
     }
 }
