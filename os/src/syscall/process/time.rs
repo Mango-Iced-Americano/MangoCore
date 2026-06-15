@@ -180,7 +180,7 @@ pub fn sys_setitimer(
         return EINVAL;
     }
     let task = current_task_ref().unwrap();
-    let token = task.get_user_token();
+    let token = current_user_token();
     let new_timer = match UserPtr::new(new_value).read_optional(token) {
         Ok(value) => value,
         Err(e) => {
@@ -263,7 +263,7 @@ pub fn sys_getitimer(which: usize, curr_value: *mut ITimerVal) -> isize {
     }
 
     let task = current_task_ref().unwrap();
-    let token = task.get_user_token();
+    let token = current_user_token();
     let now = TimeSpec::now();
     let value = {
         let inner = task.acquire_inner_lock();
@@ -453,7 +453,7 @@ pub fn sys_timer_gettime(timer_id: usize, curr_value: *mut ITimerSpec) -> isize 
         };
         current_posix_itimerspec(timer)
     };
-    match UserPtrMut::new(curr_value).write(task.get_user_token(), &value) {
+    match UserPtrMut::new(curr_value).write(current_user_token(), &value) {
         Ok(()) => SUCCESS,
         Err(errno) => errno,
     }
@@ -1041,7 +1041,7 @@ pub fn sys_times(buf: *mut Times) -> isize {
         )
     };
     let child_rusage = task.process.child_rusage();
-    let token = task.get_user_token();
+    let token = current_user_token();
     let times = Times {
         tms_utime: utime,
         tms_stime: stime,
@@ -1062,7 +1062,7 @@ pub fn sys_getrusage(who: isize, usage: *mut Rusage) -> isize {
     const RUSAGE_THREAD: isize = 1;
 
     let task = current_task_ref().unwrap();
-    let token = task.get_user_token();
+    let token = current_user_token();
     let rusage = match who {
         RUSAGE_SELF | RUSAGE_THREAD => {
             let resident_kb = task.process.vm().lock().resident_user_bytes() / 1024;

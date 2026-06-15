@@ -2,7 +2,7 @@ use crate::config::PAGE_SIZE;
 use crate::mm::{UserPtr, UserPtrMut};
 use crate::signal_type;
 use crate::syscall::errno::*;
-use crate::task::{current_task_ref, TaskControlBlock, WaitQueue, WaitResult};
+use crate::task::{current_task_ref, current_user_token, TaskControlBlock, WaitQueue, WaitResult};
 use crate::timer::{TimeSpec, NSEC_PER_SEC};
 
 use super::{PendingSignal, SigHandler, SigInfo, Signals, SIG_DFL_IGNORE};
@@ -92,7 +92,7 @@ fn take_sigtimedwait_interrupt(task: &TaskControlBlock, wait_set: Signals) -> bo
 }
 
 pub fn sigsuspend(set: *const Signals) -> isize {
-    let token = current_task_ref().unwrap().get_user_token();
+    let token = current_user_token();
     let new_mask = match read_user_sigset(token, set) {
         Ok(mask) => mask - Signals::CAN_NOT_BE_MASKED,
         Err(errno) => return errno,
@@ -114,7 +114,7 @@ pub fn sigsuspend(set: *const Signals) -> isize {
 }
 
 pub fn sigtimedwait(set: *const Signals, info: *mut SigInfo, timeout: *const TimeSpec) -> isize {
-    let token = current_task_ref().unwrap().get_user_token();
+    let token = current_user_token();
     let set = match read_user_sigset(token, set) {
         Ok(set) => set - Signals::CAN_NOT_BE_MASKED,
         Err(errno) => return errno,

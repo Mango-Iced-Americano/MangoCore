@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### 时间与信号等待 token 快路径：复用当前 token 快照
+
+**涉及文件：**
+- `os/src/syscall/process/time.rs` — `setitimer/getitimer/timer_gettime/times/getrusage` 的用户指针读写使用 `current_user_token()`，避免为 token 额外锁 VM
+- `os/src/task/signal/wait.rs` — `sigsuspend()` 与 `sigtimedwait()` 读取用户 sigset/timeout 时复用当前 token 快照
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 任务状态、计时器状态、信号 pending/mask 仍按原路径加锁读取；本次只优化当前用户地址空间 token 获取。
+
 ### futex 用户指针 token 快路径：复用当前 token 快照
 
 **涉及文件：**
