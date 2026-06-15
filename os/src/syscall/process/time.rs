@@ -3,8 +3,8 @@ use alloc::sync::Arc;
 use crate::mm::{UserPtr, UserPtrMut};
 use crate::syscall::errno::*;
 use crate::task::{
-    add_kernel_timer, current_task, current_user_token, find_process_by_pid, find_task_by_tid,
-    signal::{SigInfo, Signals},
+    add_kernel_timer, current_task, current_task_ref, current_user_token, find_process_by_pid,
+    find_task_by_tid, signal::{SigInfo, Signals},
     PosixTimer, sleep_relative_interruptible, Rusage, TimerAction,
 };
 use crate::timer::{
@@ -609,7 +609,7 @@ fn valid_timex_value(timex: &Timex) -> bool {
 }
 
 fn has_time_adjust_permission() -> bool {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let inner = task.acquire_inner_lock();
     (inner.cap_effective & (1u64 << CAP_SYS_TIME)) != 0
 }
@@ -1020,7 +1020,7 @@ fn check_sleep_clock(clk_id: usize) -> Result<(), isize> {
 }
 
 pub fn sys_times(buf: *mut Times) -> isize {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let (utime, stime) = {
         let inner = task.acquire_inner_lock();
         (
@@ -1049,7 +1049,7 @@ pub fn sys_getrusage(who: isize, usage: *mut Rusage) -> isize {
     const RUSAGE_SELF: isize = 0;
     const RUSAGE_THREAD: isize = 1;
 
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let token = task.get_user_token();
     let rusage = match who {
         RUSAGE_SELF | RUSAGE_THREAD => {

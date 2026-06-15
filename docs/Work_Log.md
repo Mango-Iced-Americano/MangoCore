@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### lmbench/UnixBench 时间 syscall 优化：短路径复用当前任务引用
+
+**涉及文件：**
+- `os/src/syscall/process/time.rs` — `times/getrusage` 以及时间调整权限检查改用 `current_task_ref()`，避免只读当前任务路径额外锁 `PROCESSOR` 并 clone `Arc`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 启动后由外层 `timeout 60s` 结束
+
+**备注：** 只替换不跨阻塞/调度点保存引用的短路径；`setitimer` 等需要 `Arc::downgrade` 或拥有权的路径仍保留 `current_task()`。
+
 ### lmbench syscall 优化：用户 token/trap context helper 复用当前任务短引用
 
 **涉及文件：**
