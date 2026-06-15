@@ -3,6 +3,7 @@ use alloc::sync::Arc;
 use alloc::vec;
 use core::ops::AddAssign;
 use lazy_static::*;
+use log::info;
 use spin::Mutex;
 
 use crate::drivers::BLOCK_DEVICE;
@@ -38,7 +39,7 @@ pub fn detect_fs(block_device: &Arc<dyn BlockDevice>) -> FS_Type {
     let mut buf = vec![0u8; BLOCK_SIZE];
     block_device.read_block(0, &mut buf);
     if buf[510] == 0x55 && buf[511] == 0xAA {
-        println!("[fs] found fat32 filesystem");
+        info!("[fs] found fat32 filesystem");
         FS_Type::Fat32
     } else {
         let superblock_offset = 1024;
@@ -46,12 +47,12 @@ pub fn detect_fs(block_device: &Arc<dyn BlockDevice>) -> FS_Type {
         let magic_number_low_index = superblock_offset + 57;
         let magic_number =
             u16::from_le_bytes([buf[magic_number_high_index], buf[magic_number_low_index]]);
-        println!("[fs] read magic number: {}", magic_number);
+        info!("[fs] read magic number: {}", magic_number);
         if magic_number == 0xEF53 {
-            println!("[fs] found ext4 filesystem");
+            info!("[fs] found ext4 filesystem");
             FS_Type::Ext4
         } else {
-            println!("[fs] no filesystem found");
+            info!("[fs] no filesystem found");
             FS_Type::Null
         }
     }

@@ -334,8 +334,13 @@ pub fn mount_block_fs(
     });
     let inode_id = mount_inode.metadata().expect("mount_inode metadata failed").inode_id;
 
-    let mount_path = alloc::string::String::from(mount_point);
-    mfs.set_mount_path(Some(mount_path));
+    let mount_path = if mount_point.starts_with('/') {
+        alloc::string::String::from(mount_point)
+    } else {
+        alloc::format!("/{}", mount_point)
+    };
+    mfs.set_mount_path(Some(mount_path.clone()));
+    mfs.set_mount_source(Some(mount_path));
 
     if let Some(mfsi) = mount_inode.as_any_ref().downcast_ref::<self::vfs::MountFSInode>() {
         let backref = self::vfs::MountFSInode::new(
