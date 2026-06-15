@@ -1351,7 +1351,7 @@ pub fn seccomp_action_for_syscall(syscall_id: usize) -> SeccompSyscallAction {
         return SeccompSyscallAction::Allow;
     }
 
-    let task = match current_task() {
+    let task = match current_task_ref() {
         Some(task) => task,
         None => return SeccompSyscallAction::Allow,
     };
@@ -1371,7 +1371,7 @@ pub fn seccomp_action_for_syscall(syscall_id: usize) -> SeccompSyscallAction {
 
 fn sys_prctl_set_seccomp(mode: usize, filter: usize) -> isize {
     if mode == SECCOMP_MODE_STRICT {
-        let task = current_task().unwrap();
+        let task = current_task_ref().unwrap();
         let mut inner = task.acquire_inner_lock();
         if inner.seccomp_mode != SECCOMP_MODE_DISABLED {
             return EINVAL;
@@ -1389,7 +1389,7 @@ fn sys_prctl_set_seccomp(mode: usize, filter: usize) -> isize {
         Ok(insns) => insns,
         Err(errno) => return errno,
     };
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let mut inner = task.acquire_inner_lock();
     if inner.seccomp_mode != SECCOMP_MODE_DISABLED {
         return EINVAL;

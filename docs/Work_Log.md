@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### seccomp syscall 判定优化：减少启用后每次 syscall 的当前任务 clone
+
+**涉及文件：**
+- `os/src/syscall/process/ids.rs` — `seccomp_action_for_syscall()` 与 `sys_prctl_set_seccomp()` 改用 `current_task_ref()`，避免 seccomp 全局启用后每次 syscall 判定都 clone 当前任务 `Arc`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — 首次 `timeout 60s` 因 ntpd 三次失败只跑到 basic-musl；重跑 `timeout 90s` 后 basic musl/glibc、busybox musl/glibc、lua-musl 均 `exit_code=0`，随后由外层 timeout 结束
+
+**备注：** seccomp filter 解释、strict mode 允许列表、`prctl(PR_SET_SECCOMP)` 错误码和计数逻辑保持不变；本次只缩短当前任务引用路径。
+
 ### LTP/BPF fd 路径优化：当前任务短引用化
 
 **涉及文件：**
