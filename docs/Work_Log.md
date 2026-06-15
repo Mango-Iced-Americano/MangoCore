@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### timer syscall 优化：延迟获取当前任务 Arc
+
+**涉及文件：**
+- `os/src/syscall/process/time.rs` — `setitimer()` 与 `timer_settime()` 主体改用 `current_task_ref()`，仅在确实需要注册内核定时器并生成 `Weak<TaskControlBlock>` 时再获取当前任务 `Arc`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 该路径保留 `Arc::downgrade()` 注册 timer 的必要语义；关闭 timer、读取 old value、即时触发 signal 等不注册 timer 的路径避免额外当前任务 clone。
+
 ### 信号热路径优化：self-kill 与 sigreturn 减少当前任务 Arc clone
 
 **涉及文件：**

@@ -179,7 +179,7 @@ pub fn sys_setitimer(
     if which > 2 {
         return EINVAL;
     }
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let token = task.get_user_token();
     let new_timer = match UserPtr::new(new_value).read_optional(token) {
         Ok(value) => value,
@@ -222,6 +222,7 @@ pub fn sys_setitimer(
                 }
             }
             if let Some((deadline, generation)) = register_timer {
+                let task = current_task().unwrap();
                 add_kernel_timer(
                     TimerAction::SendSignal {
                         //降为弱引用
@@ -371,7 +372,7 @@ pub fn sys_timer_settime(
         return EINVAL;
     }
 
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let mut register_timer = None;
     {
         let mut inner = task.acquire_inner_lock();
@@ -426,6 +427,7 @@ pub fn sys_timer_settime(
     }
 
     if let Some((deadline, signal, generation)) = register_timer {
+        let task = current_task().unwrap();
         add_kernel_timer(
             TimerAction::PosixTimerSignal {
                 task: Arc::downgrade(&task),
