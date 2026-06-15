@@ -493,13 +493,13 @@ pub(super) const SIG_DFL_IGNORE: Signals = Signals::from_bits_truncate(
 fn pending_unblocked_signals(task: &TaskControlBlock) -> Signals {
     let inner = task.acquire_inner_lock();
     let sigmask = inner.sigmask;
-    let pending = inner.sigpending.pending() | task.process.shared_pending();
+    let pending = inner.sigpending.pending() | task.process.shared_pending_hint();
     pending.difference(sigmask)
 }
 
 fn pending_signals(task: &TaskControlBlock) -> Signals {
     let inner = task.acquire_inner_lock();
-    inner.sigpending.pending() | task.process.shared_pending()
+    inner.sigpending.pending() | task.process.shared_pending_hint()
 }
 
 fn has_pending_stop_release_signal(task: &TaskControlBlock) -> bool {
@@ -527,7 +527,10 @@ fn take_next_pending_signal(
         return Some((pending, false));
     }
 
-    let shared_pending = task.process.shared_pending().difference(inner.sigmask);
+    let shared_pending = task.process.shared_pending_hint().difference(inner.sigmask);
+    if shared_pending.is_empty() {
+        return None;
+    }
     task.process
         .take_shared_matching(shared_pending)
         .map(|pending| (pending, true))
@@ -541,7 +544,7 @@ pub fn discard_non_actionable_unblocked_signals(task: &TaskControlBlock) {
             inner.sigmask,
         )
     };
-    let shared_pending = task.process.shared_pending().difference(sigmask);
+    let shared_pending = task.process.shared_pending_hint().difference(sigmask);
     let mut discard_thread = Signals::empty();
     let mut discard_shared = Signals::empty();
     let sighand_ref = task.process.sighand();

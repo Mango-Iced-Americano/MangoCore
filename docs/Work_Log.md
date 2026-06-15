@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### lmbench syscall/signal 优化：shared pending 信号空路径免锁
+
+**涉及文件：**
+- `os/src/task/process.rs` — 为进程级 shared pending signal 维护 `AtomicU64` bitmap hint，并在 enqueue/dequeue/remove 后同步刷新
+- `os/src/task/signal/mod.rs` — `do_signal()`、actionable signal 检查和忽略信号清理优先使用 hint，空 shared pending 场景不再锁 `ProcessSignalState`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+
+**备注：** hint 只用于位图判断和跳过空锁；真正取出 shared pending signal 仍走原 `SignalQueue` 锁，且每次队列修改后刷新 hint，避免出现漏投递的假阴性。
+
 ### lmbench syscall/signal 优化：合并 trap_return OOM 与 signal 检查
 
 **涉及文件：**

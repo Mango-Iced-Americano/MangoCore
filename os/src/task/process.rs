@@ -9,12 +9,13 @@ use super::{
 };
 use crate::fs::vfs;
 use crate::mm::{AddressSpace, PageTableImpl};
+use crate::signal_type;
 use crate::utils::error::SyscallErr;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 use log::warn;
 use spin::{Mutex, MutexGuard};
@@ -54,6 +55,7 @@ pub struct ProcessControlBlock {
     pub adopted_by_init: AtomicBool,
     inner: Mutex<ProcessInner>,
     signal: Mutex<ProcessSignalState>,
+    shared_pending_hint: AtomicU64,
 }
 
 pub struct ProcessInner {
@@ -304,6 +306,7 @@ impl ProcessControlBlock {
                 group_exit_code: None,
                 group_exiting: false,
             }),
+            shared_pending_hint: AtomicU64::new(0),
         };
         super::net_namespace::register_ns_for_pid(pid, &net_for_registry);
         pcb
@@ -784,19 +787,45 @@ impl ProcessControlBlock {
     }
 
     pub fn enqueue_process_signal(&self, pending: PendingSignal) {
-        let _ = self.signal.lock().shared_pending.enqueue(pending);
+        let pending_bits = {
+            let mut state = self.signal.lock();
+            let _ = state.shared_pending.enqueue(pending);
+            state.shared_pending.pending().bits() as u64
+        };
+        self.shared_pending_hint
+            .store(pending_bits, Ordering::Release);
     }
 
     pub fn shared_pending(&self) -> Signals {
         self.signal.lock().shared_pending.pending()
     }
 
+    pub fn shared_pending_hint(&self) -> Signals {
+        Signals::from_bits_truncate(
+            self.shared_pending_hint.load(Ordering::Acquire) as signal_type!()
+        )
+    }
+
     pub fn take_shared_signal(&self, signal: Signals) -> bool {
-        self.signal.lock().shared_pending.remove_signal(signal)
+        let (removed, pending_bits) = {
+            let mut state = self.signal.lock();
+            let removed = state.shared_pending.remove_signal(signal);
+            (removed, state.shared_pending.pending().bits() as u64)
+        };
+        self.shared_pending_hint
+            .store(pending_bits, Ordering::Release);
+        removed
     }
 
     pub fn take_shared_matching(&self, set: Signals) -> Option<PendingSignal> {
-        self.signal.lock().shared_pending.dequeue_matching(set)
+        let (pending, pending_bits) = {
+            let mut state = self.signal.lock();
+            let pending = state.shared_pending.dequeue_matching(set);
+            (pending, state.shared_pending.pending().bits() as u64)
+        };
+        self.shared_pending_hint
+            .store(pending_bits, Ordering::Release);
+        pending
     }
 
     pub fn request_group_exit(&self, exit_code: u32) {
