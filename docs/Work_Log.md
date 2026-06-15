@@ -4,6 +4,20 @@
 
 ## 2026-06-15
 
+### ID 类 syscall 快路径：调度切入时缓存当前 pid/tid/ppid
+
+**涉及文件：**
+- `os/src/task/processor.rs` — 在当前任务切入 CPU 时同步维护 `CURRENT_PID`、`CURRENT_TID`、`CURRENT_PARENT_PID` 原子快照，切出时清零
+- `os/src/task/mod.rs` — 导出当前 pid/tid/ppid 快照读取接口
+- `os/src/syscall/process/ids.rs` — `getpid()`、`getppid()`、`gettid()` 改为直接读取快照，避免极短 syscall 中加载 current task 指针并解引用 PCB/TCB
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** `parent_pid_hint` 仍在 reparent/set_parent 路径维护；任务重新调度进入时刷新 ppid 快照，不改变 wait/reparent 的真实 PCB 语义。
+
 ### syscall 入口 seccomp 空路径优化：未启用时跳过过滤分支
 
 **涉及文件：**

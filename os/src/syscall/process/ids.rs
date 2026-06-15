@@ -7,8 +7,9 @@ use crate::mm::{
 };
 use crate::syscall::errno::*;
 use crate::task::{
-    current_task, current_task_ref, current_user_token, ProcessControlBlock, ProcessManager,
-    SeccompFilterInsn, Signals, TaskControlBlock, update_ready_nice,
+    current_parent_pid, current_pid, current_task, current_task_ref, current_tid,
+    current_user_token, update_ready_nice, ProcessControlBlock, ProcessManager,
+    SeccompFilterInsn, Signals, TaskControlBlock,
 };
 use crate::timer::{get_time_sec, TimeSpec};
 use alloc::{sync::Arc, vec::Vec};
@@ -333,13 +334,11 @@ pub fn sys_setdomainname(name: *const u8, len: usize) -> isize {
 }
 
 pub fn sys_getpid() -> isize {
-    let pid = current_task_ref().unwrap().pid();
-    pid as isize
+    current_pid() as isize
 }
 
 pub fn sys_getppid() -> isize {
-    let task = current_task_ref().unwrap();
-    task.process.parent_pid() as isize
+    current_parent_pid() as isize
 }
 
 pub fn sys_getuid() -> isize {
@@ -1672,7 +1671,7 @@ pub fn sys_setsid() -> isize {
 }
 
 pub fn sys_gettid() -> isize {
-    current_task_ref().unwrap().tid.0 as isize
+    current_tid() as isize
 }
 
 #[derive(Clone, Copy, Debug)]

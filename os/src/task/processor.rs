@@ -61,6 +61,9 @@ impl Processor {
 /// 都竞争 PROCESSOR 锁；0 表示无记录，实际 syscall id 存为 id + 1。
 static CURRENT_SYSCALL_ID: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_TASK_PTR: AtomicPtr<TaskControlBlock> = AtomicPtr::new(ptr::null_mut());
+static CURRENT_PID: AtomicUsize = AtomicUsize::new(0);
+static CURRENT_TID: AtomicUsize = AtomicUsize::new(0);
+static CURRENT_PARENT_PID: AtomicUsize = AtomicUsize::new(0);
 
 lazy_static! {
     /// 全局的处理器对象
@@ -143,6 +146,9 @@ pub fn run_tasks() {
             };
             // 设置当前正在运行的任务
             CURRENT_TASK_PTR.store(Arc::as_ptr(&task) as *mut TaskControlBlock, Ordering::Release);
+            CURRENT_PID.store(task.pid(), Ordering::Release);
+            CURRENT_TID.store(task.gettid(), Ordering::Release);
+            CURRENT_PARENT_PID.store(task.process.parent_pid(), Ordering::Release);
             processor.current = Some(task);
             // 手动释放处理器
             drop(processor);
@@ -165,6 +171,9 @@ pub fn run_tasks() {
 /// 取出当前正在运行的任务
 pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
     CURRENT_TASK_PTR.store(ptr::null_mut(), Ordering::Release);
+    CURRENT_PID.store(0, Ordering::Release);
+    CURRENT_TID.store(0, Ordering::Release);
+    CURRENT_PARENT_PID.store(0, Ordering::Release);
     PROCESSOR.lock().take_current()
 }
 
@@ -184,6 +193,21 @@ pub fn current_task_ref() -> Option<&'static TaskControlBlock> {
     } else {
         Some(unsafe { &*ptr })
     }
+}
+
+#[inline(always)]
+pub fn current_pid() -> usize {
+    CURRENT_PID.load(Ordering::Acquire)
+}
+
+#[inline(always)]
+pub fn current_tid() -> usize {
+    CURRENT_TID.load(Ordering::Acquire)
+}
+
+#[inline(always)]
+pub fn current_parent_pid() -> usize {
+    CURRENT_PARENT_PID.load(Ordering::Acquire)
 }
 
 /// 获取当前系统调用名称（用于 OOM 诊断）
