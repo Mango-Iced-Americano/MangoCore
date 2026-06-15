@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### process hint/counter 原子序：减少信号与线程生命周期屏障
+
+**涉及文件：**
+- `os/src/task/process.rs` — 线程 live 计数、父 pid hint、进程 shared signal pending hint 改为 `Relaxed` 原子访问，减少 signal/wait/clone/exit 热路径上的 acquire/release 屏障
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 这些原子只承担计数或快速 hint 作用；线程列表、父子关系和 shared signal 队列的真实状态仍由各自锁保护，hint 命中后的实际出队也会重新加锁确认。
+
 ### shared futex compact 提示：放松非空标志原子序
 
 **涉及文件：**

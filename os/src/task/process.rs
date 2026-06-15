@@ -509,14 +509,14 @@ impl ProcessControlBlock {
 
     pub fn add_thread(&self, task: &Arc<TaskControlBlock>) {
         self.threads.lock().push(Arc::downgrade(task));
-        if !task.thread_live_counted.swap(true, Ordering::AcqRel) {
-            self.live_threads.fetch_add(1, Ordering::AcqRel);
+        if !task.thread_live_counted.swap(true, Ordering::Relaxed) {
+            self.live_threads.fetch_add(1, Ordering::Relaxed);
         }
     }
 
     pub fn remove_thread(&self, task: &TaskControlBlock) -> bool {
-        let removed = if task.thread_live_counted.swap(false, Ordering::AcqRel) {
-            self.live_threads.fetch_sub(1, Ordering::AcqRel);
+        let removed = if task.thread_live_counted.swap(false, Ordering::Relaxed) {
+            self.live_threads.fetch_sub(1, Ordering::Relaxed);
             true
         } else {
             false
@@ -537,7 +537,7 @@ impl ProcessControlBlock {
         threads.retain(|thread| {
             thread
                 .upgrade()
-                .map(|task| task.thread_live_counted.load(Ordering::Acquire))
+                .map(|task| task.thread_live_counted.load(Ordering::Relaxed))
                 .unwrap_or(false)
         });
     }
@@ -547,7 +547,7 @@ impl ProcessControlBlock {
         let mut live_threads = Vec::new();
         threads.retain(|thread| {
             if let Some(task) = thread.upgrade() {
-                if task.thread_live_counted.load(Ordering::Acquire) {
+                if task.thread_live_counted.load(Ordering::Relaxed) {
                     live_threads.push(task);
                     true
                 } else {
@@ -568,7 +568,7 @@ impl ProcessControlBlock {
     }
 
     pub fn live_thread_count(&self) -> usize {
-        self.live_threads.load(Ordering::Acquire)
+        self.live_threads.load(Ordering::Relaxed)
     }
 
     pub fn try_cache_trap_context_slot(&self, slot: usize) -> bool {
@@ -630,7 +630,7 @@ impl ProcessControlBlock {
     }
 
     pub fn parent_pid(&self) -> usize {
-        self.parent_pid_hint.load(Ordering::Acquire)
+        self.parent_pid_hint.load(Ordering::Relaxed)
     }
 
     pub fn is_zombie(&self) -> bool {
@@ -802,7 +802,7 @@ impl ProcessControlBlock {
             state.shared_pending.pending().bits() as u64
         };
         self.shared_pending_hint
-            .store(pending_bits, Ordering::Release);
+            .store(pending_bits, Ordering::Relaxed);
     }
 
     pub fn shared_pending(&self) -> Signals {
@@ -811,7 +811,7 @@ impl ProcessControlBlock {
 
     pub fn shared_pending_hint(&self) -> Signals {
         Signals::from_bits_truncate(
-            self.shared_pending_hint.load(Ordering::Acquire) as signal_type!()
+            self.shared_pending_hint.load(Ordering::Relaxed) as signal_type!()
         )
     }
 
@@ -822,7 +822,7 @@ impl ProcessControlBlock {
             (removed, state.shared_pending.pending().bits() as u64)
         };
         self.shared_pending_hint
-            .store(pending_bits, Ordering::Release);
+            .store(pending_bits, Ordering::Relaxed);
         removed
     }
 
@@ -833,7 +833,7 @@ impl ProcessControlBlock {
             (pending, state.shared_pending.pending().bits() as u64)
         };
         self.shared_pending_hint
-            .store(pending_bits, Ordering::Release);
+            .store(pending_bits, Ordering::Relaxed);
         pending
     }
 
@@ -887,7 +887,7 @@ impl ProcessControlBlock {
             .map(|parent| parent.pid)
             .unwrap_or(0);
         self.inner.lock().parent = parent;
-        self.parent_pid_hint.store(parent_pid, Ordering::Release);
+        self.parent_pid_hint.store(parent_pid, Ordering::Relaxed);
     }
 
     pub fn set_vfork_parent(&self, parent: &Arc<TaskControlBlock>) {
