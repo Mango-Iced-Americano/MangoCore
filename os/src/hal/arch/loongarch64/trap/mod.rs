@@ -165,37 +165,49 @@ pub fn trap_handler() -> ! {
     }
     set_kernel_trap_entry();
 
+    let cause = get_exception_cause();
+    let stval = get_bad_addr();
+    let badi = get_bad_instruction();
+    log::debug!("[trap_handler]Cause:{:?}", cause);
+
+    if let Trap::Exception(Exception::Syscall) = cause {
+        let (syscall_id, args) = {
+            let task = current_task().unwrap();
+            let mut inner = task.acquire_inner_lock();
+            inner.update_process_times_enter_trap();
+            let cx = inner.get_trap_cx();
+            ERA::read().next_ins().write();
+            cx.gp.pc += 4;
+            cx.origin_a0 = cx.gp.a0; // 保存重启参数
+            let syscall_id = cx.gp.a7;
+            (
+                syscall_id,
+                [cx.gp.a0, cx.gp.a1, cx.gp.a2, cx.gp.a3, cx.gp.a4, cx.gp.a5],
+            )
+        };
+        let result = syscall(syscall_id, args);
+        // The trap context may be replaced by execve or restored by sigreturn,
+        // so fetch it again after syscall returns.
+        {
+            let task = current_task().unwrap();
+            let mut inner = task.acquire_inner_lock();
+            let cx = inner.get_trap_cx();
+            // sigreturn(139) already restored the full trap context (including a0).
+            if syscall_id != 139 {
+                cx.gp.a0 = result as usize;
+            }
+            inner.update_process_times_leave_trap(cause);
+        }
+        trap_return();
+    }
+
     {
         let task = current_task().unwrap();
         let mut inner = task.acquire_inner_lock();
         inner.update_process_times_enter_trap();
     }
 
-    let cause = get_exception_cause();
-    let stval = get_bad_addr();
-    let badi = get_bad_instruction();
-    log::debug!("[trap_handler]Cause:{:?}", cause);
     match cause {
-        Trap::Exception(Exception::Syscall) => {
-            // jump to next instruction anyway
-            let mut cx = current_trap_cx();
-            ERA::read().next_ins().write();
-            cx.gp.pc += 4;
-            cx.origin_a0 = cx.gp.a0; // 保存重启参数
-            let syscall_id = cx.gp.a7;
-            // get system call return value
-            let result = syscall(
-                syscall_id,
-                [cx.gp.a0, cx.gp.a1, cx.gp.a2, cx.gp.a3, cx.gp.a4, cx.gp.a5],
-            );
-            // cx is changed during sys_exec (or restored by sigreturn), so we have to call it again
-            cx = current_trap_cx();
-            // sigreturn(139) already restored the full trap context (including a0) from the signal frame.
-            // Overwriting a0 here would corrupt the restored value — skip it.
-            if syscall_id != 139 {
-                cx.gp.a0 = result as usize;
-            }
-        }
         Trap::Exception(Exception::PagePrivilegeIllegal)
         | Trap::Exception(Exception::PageInvalidFetch)
         | Trap::Exception(Exception::PageInvalidStore)

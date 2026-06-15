@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### lmbench syscall 优化：合并 syscall trap 入口/返回锁获取
+
+**涉及文件：**
+- `os/src/hal/arch/riscv/trap/mod.rs` — syscall 分支在一次 task inner 锁内完成进入 trap 计时和参数快照，返回后一次锁内写回 a0、刷新 real timer 并记录离开 trap
+- `os/src/hal/arch/loongarch64/trap/mod.rs` — 同步 la64 syscall trap 分支，避免 syscall 热路径重复 `current_trap_cx()` 获取
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — 内核启动到 initproc，basic/busybox/lua musl+glibc 均 `exit_code=0`；因镜像内 `/os_test.conf` 仍为 `mask=0xFFF`，进入 LTP fs_bind 后由外层 `timeout 180s` 结束
+
+**备注：** 参考 Linux/xv6 syscall trapframe 入口/返回点处理方式，但不把 `Arc<TaskControlBlock>` 持有跨过 `syscall()`，避免 exit/schedule 等路径留下引用；异常、page fault、timer interrupt 分支保持原语义。
+
 ### lmbench syscall/signal 优化：trap_return 复用 do_signal 当前任务
 
 **涉及文件：**

@@ -8,8 +8,8 @@ use crate::mm::{frame_reserve, FaultAccess, MemoryError, VirtAddr};
 use crate::net::config::NET_INTERFACE;
 use crate::syscall::syscall;
 use crate::task::{
-    current_task, current_trap_cx, do_signal, do_wake_expired, signal::SigInfo,
-    suspend_current_and_run_next, Signals,
+    current_task, do_signal, do_wake_expired, signal::SigInfo, suspend_current_and_run_next,
+    Signals,
 };
 use crate::timer::{ITimerVal, TimeVal};
 use alloc::format;
@@ -66,39 +66,52 @@ pub fn enable_timer_interrupt() {
 
 #[no_mangle]
 pub fn trap_handler() -> ! {
+    let scause = scause::read();
     log::debug!(
         "[trap_handler] trapped >> scause {:?}",
-        scause::read().bits()
+        scause.bits()
     );
     set_kernel_trap_entry();
+    let stval = stval::read();
+
+    if let Trap::Exception(Exception::UserEnvCall) = scause.cause() {
+        let (syscall_id, args) = {
+            let task = current_task().unwrap();
+            let mut inner = task.acquire_inner_lock();
+            inner.update_process_times_enter_trap();
+            let cx = inner.get_trap_cx();
+            cx.gp.pc += 4;
+            cx.origin_a0 = cx.gp.a0; // 保存重启参数
+            let syscall_id = cx.gp.a7; //debug 用
+            log::debug!(">>> Syscall ID: {}", syscall_id);
+            (
+                syscall_id,
+                [cx.gp.a0, cx.gp.a1, cx.gp.a2, cx.gp.a3, cx.gp.a4, cx.gp.a5],
+            )
+        };
+        let result = syscall(syscall_id, args);
+        // The trap context may be replaced by execve or restored by sigreturn,
+        // so fetch it again after syscall returns.
+        {
+            let task = current_task().unwrap();
+            let mut inner = task.acquire_inner_lock();
+            let cx = inner.get_trap_cx();
+            // sigreturn(139) already restored the full trap context (including a0).
+            if syscall_id != 139 {
+                cx.gp.a0 = result as usize;
+            }
+            inner.refresh_real_timer();
+            inner.update_process_times_leave_trap(scause.cause());
+        }
+        trap_return();
+    }
+
     {
         let task = current_task().unwrap();
         let mut inner = task.acquire_inner_lock();
         inner.update_process_times_enter_trap();
     }
-    let scause = scause::read();
-    let stval = stval::read();
     match scause.cause() {
-        Trap::Exception(Exception::UserEnvCall) => {
-            // jump to next instruction anyway
-            let mut cx = current_trap_cx();
-            cx.gp.pc += 4;
-            cx.origin_a0 = cx.gp.a0; // 保存重启参数
-            let syscall_id = cx.gp.a7; //debug 用
-            log::debug!(">>> Syscall ID: {}", syscall_id);
-            // get system call return value
-            let result = syscall(
-                syscall_id,
-                [cx.gp.a0, cx.gp.a1, cx.gp.a2, cx.gp.a3, cx.gp.a4, cx.gp.a5],
-            );
-            // cx is changed during sys_exec (or restored by sigreturn), so we have to call it again
-            cx = current_trap_cx();
-            // sigreturn(139) already restored the full trap context (including a0) from the signal frame.
-            // Overwriting a0 here would corrupt the restored value — skip it.
-            if syscall_id != 139 {
-                cx.gp.a0 = result as usize;
-            }
-        }
         Trap::Exception(Exception::StoreFault)
         | Trap::Exception(Exception::StorePageFault)
         | Trap::Exception(Exception::InstructionFault)
