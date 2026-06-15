@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### lmbench syscall 优化：缓存基础 uid/gid 查询
+
+**涉及文件：**
+- `os/src/task/task.rs` — 为 TCB 增加 `uid/euid/gid/egid` 原子缓存，clone 时从父任务初始化，提供免 inner 锁读取接口
+- `os/src/syscall/process/ids.rs` — `getuid/geteuid/getgid/getegid` 改为读取缓存，`setuid/setreuid/setresuid/setgid/setregid/setresgid` 成功写入后同步刷新缓存
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 75s` 结束
+
+**备注：** 缓存只服务只读身份 syscall；权限检查、capability 刷新和 set* 语义仍使用原锁内字段，避免改变凭据判定路径。
+
 ### lmbench null syscall 优化：缓存 getppid 父 PID
 
 **涉及文件：**

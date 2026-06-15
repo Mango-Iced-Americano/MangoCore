@@ -343,19 +343,19 @@ pub fn sys_getppid() -> isize {
 }
 
 pub fn sys_getuid() -> isize {
-    current_task().unwrap().acquire_inner_lock().uid as isize
+    current_task().unwrap().uid() as isize
 }
 
 pub fn sys_geteuid() -> isize {
-    current_task().unwrap().acquire_inner_lock().euid as isize
+    current_task().unwrap().euid() as isize
 }
 
 pub fn sys_getgid() -> isize {
-    current_task().unwrap().acquire_inner_lock().gid as isize
+    current_task().unwrap().gid() as isize
 }
 
 pub fn sys_getegid() -> isize {
-    current_task().unwrap().acquire_inner_lock().egid as isize
+    current_task().unwrap().egid() as isize
 }
 
 fn parse_id(arg: usize) -> Result<u32, isize> {
@@ -403,6 +403,7 @@ pub fn sys_setuid(uid: usize) -> isize {
     }
     let cap_permitted = inner.cap_permitted;
     refresh_effective_caps(inner.euid, cap_permitted, &mut inner.cap_effective);
+    task.store_identity_hint(inner.uid, inner.euid, inner.gid, inner.egid);
     SUCCESS
 }
 
@@ -443,6 +444,7 @@ pub fn sys_setreuid(ruid: usize, euid: usize) -> isize {
     }
     let cap_permitted = inner.cap_permitted;
     refresh_effective_caps(inner.euid, cap_permitted, &mut inner.cap_effective);
+    task.store_identity_hint(inner.uid, inner.euid, inner.gid, inner.egid);
     SUCCESS
 }
 
@@ -480,6 +482,7 @@ pub fn sys_setresuid(ruid: usize, euid: usize, suid: usize) -> isize {
     }
     let cap_permitted = inner.cap_permitted;
     refresh_effective_caps(inner.euid, cap_permitted, &mut inner.cap_effective);
+    task.store_identity_hint(inner.uid, inner.euid, inner.gid, inner.egid);
     SUCCESS
 }
 
@@ -517,6 +520,7 @@ pub fn sys_setgid(gid: usize) -> isize {
         inner.egid = gid;
         inner.fsgid = gid;
     }
+    task.store_identity_hint(inner.uid, inner.euid, inner.gid, inner.egid);
     SUCCESS
 }
 
@@ -555,6 +559,7 @@ pub fn sys_setregid(rgid: usize, egid: usize) -> isize {
     if rgid.is_some() || egid.map_or(false, |id| id != old_gid) {
         inner.sgid = inner.egid;
     }
+    task.store_identity_hint(inner.uid, inner.euid, inner.gid, inner.egid);
     SUCCESS
 }
 
@@ -590,6 +595,7 @@ pub fn sys_setresgid(rgid: usize, egid: usize, sgid: usize) -> isize {
     if let Some(id) = sgid {
         inner.sgid = id;
     }
+    task.store_identity_hint(inner.uid, inner.euid, inner.gid, inner.egid);
     SUCCESS
 }
 
