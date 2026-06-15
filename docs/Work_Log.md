@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### lmbench/UnixBench 调度查询优化：当前任务短引用
+
+**涉及文件：**
+- `os/src/syscall/process/ids.rs` — `getpgid/getsid(pid=0)`、`setsid`、`sched_getaffinity(pid=0)` 和调度只读查询 helper 改用 `current_task_ref()`，减少当前任务查询的 `PROCESSOR` 锁与 `Arc` clone
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行到 `du` 后由外层 `timeout 60s` 结束
+
+**备注：** 调度设置类 syscall 仍保留 `Arc<TaskControlBlock>` 路径，因为后续需要更新 ready 队列和同步进程调度状态。
+
 ### lmbench/UnixBench VM syscall 优化：当前任务短引用
 
 **涉及文件：**

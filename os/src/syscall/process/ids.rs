@@ -1637,40 +1637,33 @@ pub fn sys_getpgid(pid: usize) -> isize {
     if (pid as isize) < 0 {
         return ESRCH;
     }
-    let process = if pid == 0 {
-        current_task().unwrap().process.clone()
-    } else {
-        match ProcessManager::find_process(pid) {
-            Some(process) => process,
-            None => return ESRCH,
-        }
-    };
-
-    process.getpgid() as isize
+    if pid == 0 {
+        return current_task_ref().unwrap().process.getpgid() as isize;
+    }
+    match ProcessManager::find_process(pid) {
+        Some(process) => process.getpgid() as isize,
+        None => ESRCH,
+    }
 }
 
 pub fn sys_getsid(pid: usize) -> isize {
     if (pid as isize) < 0 {
         return ESRCH;
     }
-    let process = if pid == 0 {
-        current_task().unwrap().process.clone()
-    } else {
-        match ProcessManager::find_process(pid) {
-            Some(process) => process,
-            None => return ESRCH,
-        }
-    };
-
-    process.getsid() as isize
+    if pid == 0 {
+        return current_task_ref().unwrap().process.getsid() as isize;
+    }
+    match ProcessManager::find_process(pid) {
+        Some(process) => process.getsid() as isize,
+        None => ESRCH,
+    }
 }
 
 /// creates a new session if the calling process is not a process group leader.
 /// The calling process is the leader of the new session, and its pgid is set to its pid.
 /// 当前进程脱离父进程，从父进程的子进程列表中移除当前进程，当前进程的父进程设置为空。
 pub fn sys_setsid() -> isize {
-    let task = current_task().unwrap();
-    let process = task.process.clone();
+    let process = &current_task_ref().unwrap().process;
     if !ProcessManager::find_processes_by_pgid(process.pid).is_empty() {
         return EPERM;
     }
@@ -2151,15 +2144,10 @@ pub fn sys_sched_getaffinity(pid: usize, cpusetsize: usize, mask: *mut u8) -> is
     if cpusetsize < core::mem::size_of::<usize>() {
         return EINVAL;
     }
-    let task = if pid == 0 {
-        current_task().unwrap()
-    } else {
-        match ProcessManager::find_task(pid) {
-            Some(task) => task,
-            None => return ESRCH,
-        }
-    };
-    let token = current_task().unwrap().get_user_token();
+    if pid != 0 && ProcessManager::find_task(pid).is_none() {
+        return ESRCH;
+    }
+    let token = current_user_token();
     match UserPtrMut::from_addr(mask as usize).write(token, &(1 as usize)) {
         Ok(()) => core::mem::size_of::<usize>() as isize,
         Err(_) => EFAULT,
@@ -2212,7 +2200,7 @@ struct SchedState {
     period: u64,
 }
 
-fn task_sched_state(task: &Arc<TaskControlBlock>) -> SchedState {
+fn task_sched_state(task: &TaskControlBlock) -> SchedState {
     let inner = task.acquire_inner_lock();
     SchedState {
         policy: inner.sched_policy,
@@ -2275,9 +2263,9 @@ fn find_task_for_pid_or_current(pid: usize) -> Result<Arc<TaskControlBlock>, isi
 }
 
 fn find_sched_state_for_pid_or_current(pid: usize) -> Result<SchedState, isize> {
-    if let Some(task) = current_task() {
+    if let Some(task) = current_task_ref() {
         if pid == 0 || pid == task.pid() {
-            return Ok(task_sched_state(&task));
+            return Ok(task_sched_state(task));
         }
     }
     if let Some(task) = ProcessManager::find_task(pid) {
@@ -2304,7 +2292,7 @@ fn valid_sched_priority(policy: usize, priority: i32) -> bool {
 }
 
 fn current_sched_access() -> SchedAccess {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let inner = task.acquire_inner_lock();
     SchedAccess {
         euid: inner.euid,
