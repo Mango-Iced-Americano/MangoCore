@@ -30,7 +30,7 @@ pub use manager::{
     add_kernel_timer, add_task, add_zombie_task, all_pids, do_oom, do_wake_expired, has_ready_task,
     kernel_timer_queue_len, procs_count, remove_tasks_from_queues, remove_zombie_tasks_by_pid,
     send_signal_to_interruptible, sleep_interruptible, take_one_interruptible_zombie,
-    take_one_ready_zombie, take_one_zombie_task, task_manager_counts, update_ready_nice,
+    take_one_ready_zombie, take_zombie_tasks, task_manager_counts, update_ready_nice,
     wait_with_timeout, wake_interruptible, zombie_count, TimerAction, WaitQueue, WaitResult,
 };
 // pub use pid::RecycleAllocator;

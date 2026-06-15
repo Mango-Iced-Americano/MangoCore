@@ -254,6 +254,16 @@ impl TaskManager {
     fn take_one_zombie(&mut self) -> Option<Arc<TaskControlBlock>> {
         self.zombie_queue.pop_front()
     }
+    fn take_zombies(&mut self, limit: usize) -> Vec<Arc<TaskControlBlock>> {
+        let mut zombies = Vec::with_capacity(limit.min(self.zombie_queue.len()));
+        while zombies.len() < limit {
+            let Some(task) = self.zombie_queue.pop_front() else {
+                break;
+            };
+            zombies.push(task);
+        }
+        zombies
+    }
     /// 从就绪 + 可中断队列中移除属于指定 pid 的所有 zombie TCB。
     /// 返回收集到的 zombie Arc，由调用者负责在锁外 drop。
     fn remove_zombie_tasks_by_pid(&mut self, pid: usize) -> alloc::vec::Vec<Arc<TaskControlBlock>> {
@@ -482,6 +492,10 @@ pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
 
 pub fn take_one_zombie_task() -> Option<Arc<TaskControlBlock>> {
     TASK_MANAGER.lock().take_one_zombie()
+}
+
+pub fn take_zombie_tasks(limit: usize) -> Vec<Arc<TaskControlBlock>> {
+    TASK_MANAGER.lock().take_zombies(limit)
 }
 
 /// 从就绪队列中逐出一个僵尸任务（零堆分配），返回后在锁外 drop。

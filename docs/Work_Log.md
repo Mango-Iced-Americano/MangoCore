@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### lmbench fork+exit 优化：调度器批量回收 zombie
+
+**涉及文件：**
+- `os/src/task/manager.rs` — 新增一次锁内最多取出 N 个 zombie TCB 的批量接口，并预留 Vec 容量
+- `os/src/task/processor.rs` — 调度循环从逐个加锁 pop zombie 改为一次批量取出、锁外 drop
+- `os/src/task/mod.rs` — 导出批量 zombie drain helper，移除未使用的单个 helper re-export
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+
+**备注：** fork+exit 压测会高频产生 zombie；保持锁外 drop 语义不变，只减少多 zombie 场景下 `TASK_MANAGER` 反复加锁。
+
 ### lmbench wait/wake 优化：唤醒已睡眠任务时跳过 ready 队列扫描
 
 **涉及文件：**
