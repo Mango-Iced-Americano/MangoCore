@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### timer pending 快路径：放松调度循环原子屏障
+
+**涉及文件：**
+- `os/src/task/manager.rs` — `do_wake_expired()` 快速判断用的 timeout/kernel timer pending 标志改为 `Relaxed`；等待超时 generation 与 fallback timer pending 标志同步改为 `Relaxed`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** pending/generation 只用于“可能有定时器”和“旧 WakeTask 是否失效”的提示判断；真实队列内容由对应队列锁保护，任务状态由 task inner 锁保护，不依赖 acquire/release 发布语义。
+
 ### exit 路径：借用当前任务完成退出处理
 
 **涉及文件：**

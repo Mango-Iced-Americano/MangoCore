@@ -981,7 +981,7 @@ impl WaitQueue {
             } else if let Some(ms) = fallback_ms {
                 if !task
                     .wait_io_timer_pending
-                    .swap(true, AtomicOrdering::AcqRel)
+                    .swap(true, AtomicOrdering::Relaxed)
                 {
                     wait_with_timeout(
                         Arc::downgrade(&task),
@@ -1382,7 +1382,7 @@ impl KernelTimer {
                     // WakeTask entries are intentionally not deduplicated on insertion.
                     // A newer wait bumps the generation; older entries are stale and can be
                     // dropped by compact() or ignored when their deadline expires.
-                    task.wait_timer_generation.load(AtomicOrdering::Acquire) == *generation
+                    task.wait_timer_generation.load(AtomicOrdering::Relaxed) == *generation
                 }
                 None => false,
             },
@@ -1421,7 +1421,7 @@ impl KernelTimerQueue {
         // Keep the hot path O(log n).  WakeTask stale entries are filtered by
         // generation, while signal timers validate their generation/deadline in run_timer().
         self.inner.push(KernelTimer { action, deadline });
-        KERNEL_TIMER_QUEUE_PENDING.store(true, AtomicOrdering::Release);
+        KERNEL_TIMER_QUEUE_PENDING.store(true, AtomicOrdering::Relaxed);
         if self.inner.len() > Self::MAX_TIMERS {
             self.enforce_capacity();
         }
@@ -1482,8 +1482,8 @@ impl KernelTimerQueue {
                     // Option A：无条件清除 pending 标志。
                     // 无论任务是否已被提前唤醒，定时器既已触发，槽位即释放。
                     task.wait_io_timer_pending
-                        .store(false, AtomicOrdering::Release);
-                    if task.wait_timer_generation.load(AtomicOrdering::Acquire) != generation {
+                        .store(false, AtomicOrdering::Relaxed);
+                    if task.wait_timer_generation.load(AtomicOrdering::Relaxed) != generation {
                         return;
                     }
 
@@ -1673,7 +1673,7 @@ impl TimeoutWaitQueue {
     /// 如果想要阻塞一个`task`，使用`block_current_and_run_next()`函数
     pub fn add_task(&mut self, task: Weak<TaskControlBlock>, timeout: TimeSpec) {
         self.inner.push(TimeoutWaiter { task, timeout });
-        TIMEOUT_WAITQUEUE_PENDING.store(true, AtomicOrdering::Release);
+        TIMEOUT_WAITQUEUE_PENDING.store(true, AtomicOrdering::Relaxed);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1736,7 +1736,7 @@ impl TimeoutWaitQueue {
         }
         enqueue_ready_batch(tasks_to_wake);
         if self.inner.is_empty() {
-            TIMEOUT_WAITQUEUE_PENDING.store(false, AtomicOrdering::Release);
+            TIMEOUT_WAITQUEUE_PENDING.store(false, AtomicOrdering::Relaxed);
         }
     }
     #[allow(unused)]
@@ -1772,7 +1772,7 @@ pub fn wait_with_timeout(task: Weak<TaskControlBlock>, timeout: TimeSpec) {
     };
     let generation = task
         .wait_timer_generation
-        .fetch_add(1, AtomicOrdering::AcqRel)
+        .fetch_add(1, AtomicOrdering::Relaxed)
         .wrapping_add(1);
     KERNEL_TIMER_QUEUE.lock().add_action(
         TimerAction::WakeTask {
@@ -1785,8 +1785,8 @@ pub fn wait_with_timeout(task: Weak<TaskControlBlock>, timeout: TimeSpec) {
 
 /// 唤醒全局超时等待队列中所有已超时的任务
 pub fn do_wake_expired() {
-    let timeout_pending = TIMEOUT_WAITQUEUE_PENDING.load(AtomicOrdering::Acquire);
-    let kernel_timer_pending = KERNEL_TIMER_QUEUE_PENDING.load(AtomicOrdering::Acquire);
+    let timeout_pending = TIMEOUT_WAITQUEUE_PENDING.load(AtomicOrdering::Relaxed);
+    let kernel_timer_pending = KERNEL_TIMER_QUEUE_PENDING.load(AtomicOrdering::Relaxed);
     let timerfd_pending = crate::fs::timerfd::timerfd_registry_maybe_nonempty();
     if !timeout_pending && !kernel_timer_pending && !timerfd_pending {
         return;
@@ -1796,7 +1796,7 @@ pub fn do_wake_expired() {
     if timeout_pending {
         let mut timeout_queue = TIMEOUT_WAITQUEUE.lock();
         if timeout_queue.is_empty() {
-            TIMEOUT_WAITQUEUE_PENDING.store(false, AtomicOrdering::Release);
+            TIMEOUT_WAITQUEUE_PENDING.store(false, AtomicOrdering::Relaxed);
         } else {
             let now = *now.get_or_insert_with(crate::timer::TimeSpec::now);
             timeout_queue.wake_expired(now);
@@ -1806,7 +1806,7 @@ pub fn do_wake_expired() {
     if kernel_timer_pending {
         let mut ktq = KERNEL_TIMER_QUEUE.lock();
         if ktq.is_empty() {
-            KERNEL_TIMER_QUEUE_PENDING.store(false, AtomicOrdering::Release);
+            KERNEL_TIMER_QUEUE_PENDING.store(false, AtomicOrdering::Relaxed);
         } else {
             let now = *now.get_or_insert_with(crate::timer::TimeSpec::now);
             ktq.wake_expired(now);
@@ -1819,7 +1819,7 @@ pub fn do_wake_expired() {
                 ktq.compact();
             }
             if ktq.is_empty() {
-                KERNEL_TIMER_QUEUE_PENDING.store(false, AtomicOrdering::Release);
+                KERNEL_TIMER_QUEUE_PENDING.store(false, AtomicOrdering::Relaxed);
             }
         }
     }
