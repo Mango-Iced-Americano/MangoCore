@@ -13,7 +13,7 @@ use crate::mm::frame_allocator::frame_alloc_uninit;
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use log::{error, trace, warn};
+use log::{error, warn};
 impl Debug for Vma {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Vma")
@@ -88,12 +88,6 @@ impl Vma {
     ) -> Result<Self, isize> {
         let start_vpn: VirtPageNum = start_va.floor();
         let end_vpn: VirtPageNum = end_va.ceil();
-        trace!(
-            "[Vma new] start_vpn:{:X}; end_vpn:{:X}; map_perm:{:?}",
-            start_vpn.0,
-            end_vpn.0,
-            map_perm
-        );
         let inner = VmPageStore::try_new(VPNRange::new(start_vpn, end_vpn))?;
         Ok(Self {
             inner,
@@ -469,8 +463,6 @@ impl Vma {
         if Arc::strong_count(&old_frame) == 1 {
             let old_ppn = old_frame.ppn;
             UserMapper::new(page_table).set_user_flags(vpn, self.map_perm)?;
-
-            trace!("[copy_on_write] no copy occurred");
             Ok(old_ppn)
         } else {
             // do copy in this case
@@ -511,7 +503,6 @@ impl Vma {
                 let _ = self.inner.alloc_in_memory(vpn, old_frame);
                 return Err(MemoryError::NotMapped);
             }
-            trace!("[copy_on_write] copy occurred");
             Ok(new_ppn)
         }
     }
@@ -685,11 +676,6 @@ impl Vma {
                         log::warn!("[do_oom] compressed frame has no mapped pte: vpn={:?}", vpn);
                     }
                     self.inner.inc_compressed();
-                    trace!(
-                        "[do_oom] compress frame: vpn={:?}, zram_id: {}",
-                        vpn,
-                        zram_id
-                    );
                     continue;
                 }
                 Err(MemoryError::SharedPage) => continue,
@@ -717,11 +703,6 @@ impl Vma {
                         log::warn!("[do_oom] swapped frame has no mapped pte: vpn={:?}", vpn);
                     }
                     self.inner.inc_swapped();
-                    trace!(
-                        "[do_oom] swap out frame: vpn={:?}, swap_id: {}",
-                        vpn,
-                        swap_id
-                    );
                     continue;
                 }
                 Err(MemoryError::SharedPage) => continue,
@@ -774,11 +755,6 @@ impl Vma {
                         );
                     }
                     self.inner.inc_swapped();
-                    trace!(
-                        "[force_swap] swap out frame: vpn={:?}, swap_id: {}",
-                        vpn,
-                        swap_id
-                    );
                     continue;
                 }
                 Err(MemoryError::OutOfMemory)

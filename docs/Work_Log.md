@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### VMA/mmap 热路径降噪：删除正常路径 trace 日志
+
+**涉及文件：**
+- `os/src/mm/mmap.rs` — 删除 `sbrk` 扩展/重叠返回、文件映射创建等正常路径 trace 输出
+- `os/src/mm/vma.rs` — 删除 VMA 创建、COW 成功分支、OOM reclaim 成功分支 trace 输出
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 面向 `brk`/`mmap`/`fork`/COW 相关性能测试；失败路径的 `warn!`/`error!` 保持不变。
+
 ### page fault 热路径降噪：删除普通修复路径 debug 日志
 
 **涉及文件：**
