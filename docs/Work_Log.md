@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### lmbench/UnixBench signal wait 优化：缩短当前任务拥有权
+
+**涉及文件：**
+- `os/src/task/signal/wait.rs` — `sigsuspend/sigtimedwait` 的用户参数读取、mask 设置和清理改用 `current_task_ref()`，避免把当前任务 `Arc` 持有到 WaitQueue 等待周期之外
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** WaitQueue 入队/阻塞仍由等待原语内部持有当前任务 `Arc`；本次只收窄 syscall 前后 signal mask 操作的 TCB 引用生命周期。
+
 ### lmbench/UnixBench signalfd 短路径优化：减少当前任务 clone
 
 **涉及文件：**
