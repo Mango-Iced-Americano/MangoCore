@@ -56,6 +56,7 @@ pub struct ProcessControlBlock {
     pgid_hint: AtomicUsize,
     sid_hint: AtomicUsize,
     parent_pid_hint: AtomicUsize,
+    user_token_hint: AtomicUsize,
     inner: Mutex<ProcessInner>,
     signal: Mutex<ProcessSignalState>,
     shared_pending_hint: AtomicU64,
@@ -261,6 +262,7 @@ impl ProcessControlBlock {
             .and_then(|parent| parent.upgrade())
             .map(|parent| parent.pid)
             .unwrap_or(0);
+        let user_token = vm.lock().token();
         let pcb = Self {
             pid,
             leader_tid,
@@ -276,6 +278,7 @@ impl ProcessControlBlock {
             pgid_hint: AtomicUsize::new(pgid),
             sid_hint: AtomicUsize::new(sid),
             parent_pid_hint: AtomicUsize::new(parent_pid_hint),
+            user_token_hint: AtomicUsize::new(user_token),
             inner: Mutex::new(ProcessInner {
                 exe,
                 exec_key,
@@ -455,7 +458,12 @@ impl ProcessControlBlock {
         let token = vm.token();
         self.trap_context_cache.lock().clear();
         self.inner.lock().vm = Arc::new(Mutex::new(vm));
+        self.user_token_hint.store(token, Ordering::Relaxed);
         super::processor::refresh_current_user_token_for_process(self.pid, token);
+    }
+
+    pub fn user_token(&self) -> usize {
+        self.user_token_hint.load(Ordering::Relaxed)
     }
 
     pub fn sighand(&self) -> Arc<Mutex<Sighand>> {

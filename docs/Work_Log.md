@@ -4,6 +4,20 @@
 
 ## 2026-06-15
 
+### 用户 token hint：减少调度切入 VM 锁
+
+**涉及文件：**
+- `os/src/task/process.rs` — 为 `ProcessControlBlock` 增加 `user_token_hint`，初始化和 `replace_vm()` 时同步页表 token
+- `os/src/task/processor.rs` — 调度切入发布 `CURRENT_USER_TOKEN` 时改用进程 token hint，避免每次 context switch 锁 VM
+- `os/src/task/task.rs` — `TaskControlBlock::get_user_token()` 改为读取进程 token hint，保留调用接口兼容现有路径
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** VM 本体仍由 `ProcessInner::vm` 持有；hint 只缓存 `AddressSpace::token()`，在 exec/replace_vm 时先替换 VM 再发布新 hint。
+
 ### timeval syscall：空指针路径延后 token 读取
 
 **涉及文件：**

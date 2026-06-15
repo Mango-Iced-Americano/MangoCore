@@ -1603,7 +1603,7 @@ impl TaskControlBlock {
     }
     /// 获取用户空间的token
     pub fn get_user_token(&self) -> usize {
-        self.process.vm().lock().token()
+        self.process.user_token()
     }
 }
 

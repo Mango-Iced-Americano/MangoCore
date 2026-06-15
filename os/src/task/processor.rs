@@ -154,7 +154,7 @@ pub fn run_tasks() {
             CURRENT_PID.store(task.pid(), Ordering::Relaxed);
             CURRENT_TID.store(task.gettid(), Ordering::Relaxed);
             CURRENT_PARENT_PID.store(task.process.parent_pid(), Ordering::Relaxed);
-            CURRENT_USER_TOKEN.store(task.get_user_token(), Ordering::Relaxed);
+            CURRENT_USER_TOKEN.store(task.process.user_token(), Ordering::Relaxed);
             CURRENT_UID.store(task.uid() as usize, Ordering::Relaxed);
             CURRENT_EUID.store(task.euid() as usize, Ordering::Relaxed);
             CURRENT_GID.store(task.gid() as usize, Ordering::Relaxed);
