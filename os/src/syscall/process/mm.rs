@@ -4,7 +4,7 @@ use crate::mm::{
     copy_to_user_array, translated_byte_buffer, MapFlags, MapPermission, UserAccess,
 };
 use crate::syscall::errno::*;
-use crate::task::{current_task, current_task_ref, current_user_token};
+use crate::task::{current_task_ref, current_user_token};
 use alloc::vec::Vec;
 use log::{info, warn};
 
@@ -124,14 +124,19 @@ pub fn sys_mmap(
     fd: usize,
     offset: usize,
 ) -> isize {
-    let task = current_task().unwrap();
-    if flags & MapFlags::MAP_ANONYMOUS.bits() == 0 {
-        let files_ref = task.process.files();
+    let (files_ref, vm_ref) = {
+        let task = current_task_ref().unwrap();
+        (task.process.files(), task.process.vm())
+    };
+    let fd_file = if flags & MapFlags::MAP_ANONYMOUS.bits() == 0 {
         let fd_table = files_ref.lock();
-        if fd_table.get_file(fd).is_err() {
-            return EBADF;
+        match fd_table.get_file(fd) {
+            Ok(file) => Some(file),
+            Err(_) => return EBADF,
         }
-    }
+    } else {
+        None
+    };
     if len == 0 {
         return EINVAL;
     }
@@ -156,12 +161,7 @@ pub fn sys_mmap(
         if offset & (PAGE_SIZE - 1) != 0 || offset > isize::MAX as usize {
             return EINVAL;
         }
-        let files_ref = task.process.files();
-        let fd_table = files_ref.lock();
-        let file = match fd_table.get_file(fd) {
-            Ok(file) => file,
-            Err(e) => return -(e as isize),
-        };
+        let file = fd_file.as_ref().unwrap();
         if file.readable().is_err() {
             return EACCES;
         }
@@ -198,7 +198,6 @@ pub fn sys_mmap(
         }
     };
 
-    let vm_ref = task.process.vm();
     let mut memory_set = vm_ref.lock();
     memory_set.mmap(
         start,

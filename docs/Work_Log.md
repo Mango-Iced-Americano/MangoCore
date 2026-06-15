@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### lmbench/UnixBench mmap syscall 优化：复用 fd 与 VM 句柄
+
+**涉及文件：**
+- `os/src/syscall/process/mm.rs` — `sys_mmap()` 使用 `current_task_ref()` 一次性 clone 当前进程 files/VM 句柄；非匿名映射只查一次 fd table 并复用 `Arc<File>`，减少 mmap 热路径中的当前任务 `Arc` clone、进程 inner lock 和重复 fd 查找
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** 保持原有错误优先级：非匿名坏 fd 仍早于 len/prot/flags 校验返回 `EBADF`；本次不改 mmap 权限与 VFS 语义。
+
 ### lmbench/UnixBench 用户内存访问优化：当前任务短引用化
 
 **涉及文件：**
