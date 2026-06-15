@@ -57,11 +57,12 @@ impl IndexNode for Pipe {
         if buf.is_empty() {
             return Ok(0);
         }
-        let result = {
+        let (result, write_end) = {
             let mut ring = self.buffer.lock();
+            let write_end = ring.write_end.as_ref().and_then(Weak::upgrade);
             if ring.status == RingBufferStatus::EMPTY {
-                if ring.all_write_ends_closed() {
-                    return Ok(0); // EOF
+                if write_end.is_none() {
+                    return Ok(0);
                 }
                 return Err(SyscallErr::EAGAIN);
             }
@@ -71,14 +72,16 @@ impl IndexNode for Pipe {
             } else {
                 RingBufferStatus::NORMAL
             };
-            Ok(read_bytes)
+            (Ok(read_bytes), write_end)
         };
         if let Ok(_n) = &result {
-            if let Some(write_end) = self.peer_write_end() {
+            if let Some(write_end) = write_end {
                 write_end
                     .write_wait
                     .notify_events_at_most(EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM, 1);
-                write_end.fasync.send_sigio(None);
+                if !write_end.fasync.is_empty() {
+                    write_end.fasync.send_sigio(None);
+                }
             }
         }
         result
@@ -97,14 +100,15 @@ impl IndexNode for Pipe {
         if buf.is_empty() {
             return Ok(0);
         }
-        let result = {
+        let (result, read_end) = {
             let mut ring = self.buffer.lock();
-            if ring.all_read_ends_closed() {
-                Err(SyscallErr::EPIPE)
+            let read_end = ring.read_end.as_ref().and_then(Weak::upgrade);
+            if read_end.is_none() {
+                (Err(SyscallErr::EPIPE), None)
             } else if ring.status == RingBufferStatus::FULL {
-                Err(SyscallErr::EAGAIN)
+                (Err(SyscallErr::EAGAIN), read_end)
             } else if buf.len() <= PAGE_SIZE && ring.get_free_size() < buf.len() {
-                Err(SyscallErr::EAGAIN)
+                (Err(SyscallErr::EAGAIN), read_end)
             } else {
                 let write_bytes = ring.buffer_write(buf);
                 ring.status = if ring.head == ring.tail {
@@ -112,18 +116,20 @@ impl IndexNode for Pipe {
                 } else {
                     RingBufferStatus::NORMAL
                 };
-                Ok(write_bytes)
+                (Ok(write_bytes), read_end)
             }
         };
         if matches!(result, Err(SyscallErr::EPIPE)) {
             send_sigpipe_to_current();
         }
         if let Ok(_n) = &result {
-            if let Some(read_end) = self.peer_read_end() {
+            if let Some(read_end) = read_end {
                 read_end
                     .read_wait
                     .notify_events_at_most(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM, 1);
-                read_end.fasync.send_sigio(None);
+                if !read_end.fasync.is_empty() {
+                    read_end.fasync.send_sigio(None);
+                }
             }
         }
         result

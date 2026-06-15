@@ -88,6 +88,19 @@
 
 ## 2026-06-14
 
+### lmbench pipe 路径优化：减少 stream fd 的 offset/notify 开销
+
+**涉及文件：**
+- `os/src/fs/vfs/file.rs` — `FMODE_STREAM` 文件在 `read/write` 中绕过 offset 原子更新、`O_APPEND`/seal 检查和 mtime 更新，直接调用底层 stream inode
+- `os/src/fs/dev/pipe.rs` — pipe 读写时复用已持有 ring 锁期间取得的 peer 端，避免成功读写后再次锁 ring 查询 `Weak<Pipe>`
+- `os/src/fs/vfs/fasync.rs` — 新增 `FAsyncItems::is_empty()`，pipe 默认无 `O_ASYNC` 监听者时跳过空列表 `SIGIO` 分发路径
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+
+**备注：** 最新日志显示 lmbench `Pipe latency`/`Pipe bandwidth` 明显偏慢；本轮只做低风险路径缩短，不改变 pipe 阻塞、poll、EPIPE/SIGPIPE 语义。尚未完成 QEMU lmbench 前后对比，后续需用相同镜像定向跑 lmbench pipe 项确认收益。
+
 ### libcbench pthread 超时：为 `/proc/self/smaps` 增加按 fd 快照缓存
 
 **涉及文件：**

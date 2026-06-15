@@ -878,14 +878,23 @@ impl File {
 
     /// 从文件当前位置读取（并推进 offset）
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, SyscallErr> {
-        self.readable()?;
-        let offset = self.offset.load(Ordering::SeqCst);
+        let mode = *self.mode.lock();
+        if mode.contains(FileMode::FMODE_PATH) || !mode.contains(FileMode::FMODE_READ) {
+            return Err(SyscallErr::EBADF);
+        }
         let len = buf.len();
 
         if len == 0 {
             return Ok(0);
         }
 
+        if mode.contains(FileMode::FMODE_STREAM) {
+            return self
+                .inode
+                .read_at(0, len, buf, self.private_data.lock());
+        }
+
+        let offset = self.offset.load(Ordering::SeqCst);
         let n = self
             .inode
             .read_at(offset, len, buf, self.private_data.lock())?;
@@ -913,14 +922,23 @@ impl File {
 
     /// 从文件当前位置写入（并推进 offset）
     pub fn write(&self, buf: &[u8]) -> Result<usize, SyscallErr> {
-        self.writable()?;
-        let flags = *self.flags.lock();
+        let mode = *self.mode.lock();
+        if mode.contains(FileMode::FMODE_PATH) || !mode.contains(FileMode::FMODE_WRITE) {
+            return Err(SyscallErr::EBADF);
+        }
         let len = buf.len();
 
         if len == 0 {
             return Ok(0);
         }
 
+        if mode.contains(FileMode::FMODE_STREAM) {
+            return self
+                .inode
+                .write_at(0, len, buf, self.private_data.lock());
+        }
+
+        let flags = *self.flags.lock();
         let offset = if flags.contains(FileFlags::O_APPEND) {
             // O_APPEND: 写入到文件末尾
             let md = self.inode.metadata()?;
