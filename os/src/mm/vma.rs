@@ -286,6 +286,7 @@ impl Vma {
         };
         let mut parent_tlb_dirty = false;
         let mut first_error = None;
+        let mut dst_mapper = UserMapper::new(dst_page_table);
         for vpn in self.inner.vpn_range {
             let ppn = if protect_parent_for_cow {
                 let ppn = src_page_table.block_and_ret_mut_no_flush(vpn);
@@ -295,8 +296,13 @@ impl Vma {
                 src_page_table.translate(vpn)
             };
             if let Some(ppn) = ppn {
-                if !UserMapper::new(dst_page_table).is_mapped(vpn) {
-                    if let Err(err) = self.map_page_with_perm(dst_page_table, vpn, ppn, map_perm) {
+                if !dst_mapper.is_mapped(vpn) {
+                    let map_result = if map_perm.contains(MapPermission::U) {
+                        dst_mapper.map_user_page(vpn, ppn, map_perm)
+                    } else {
+                        dst_mapper.map_privileged_user_page(vpn, ppn, map_perm)
+                    };
+                    if let Err(err) = map_result {
                         first_error = Some(err);
                         break;
                     }

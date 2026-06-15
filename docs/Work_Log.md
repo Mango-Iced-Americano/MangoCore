@@ -4,6 +4,17 @@
 
 ## 2026-06-15
 
+### lmbench fork 路径优化：复用 COW 映射 mapper
+
+**涉及文件：**
+- `os/src/mm/vma.rs` — `map_from_existing_page_table()` 在 fork COW 复制页表时复用同一个目标 `UserMapper`，避免每个已映射页重复构造 mapper
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+
+**备注：** 该改动不改变 COW 权限、MAP_SHARED 写保护、父页表批量 TLB flush 或错误处理，只减少 fork 逐页映射循环中的辅助对象构造开销。参考 Linux fork 路径中尽量复用 task/mm 辅助结构、避免热路径重复分配/初始化的思路。
+
 ### lmbench signal overhead 优化：单线程 `kill(getpid(), sig)` 快路径
 
 **涉及文件：**
