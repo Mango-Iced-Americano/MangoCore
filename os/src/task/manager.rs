@@ -150,6 +150,7 @@ fn task_ptr_in(ptrs: &[usize], task: &Arc<TaskControlBlock>) -> bool {
 
 static READY_TASK_COUNT: AtomicUsize = AtomicUsize::new(0);
 static INTERRUPTIBLE_TASK_COUNT: AtomicUsize = AtomicUsize::new(0);
+static ZOMBIE_QUEUE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 fn add_ready_count() {
     READY_TASK_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
@@ -187,6 +188,24 @@ fn interruptible_count_fast() -> u16 {
     INTERRUPTIBLE_TASK_COUNT
         .load(AtomicOrdering::Relaxed)
         .min(u16::MAX as usize) as u16
+}
+
+fn add_zombie_queue_count() {
+    ZOMBIE_QUEUE_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+}
+
+fn sub_zombie_queue_count(count: usize) {
+    if count != 0 {
+        let _ = ZOMBIE_QUEUE_COUNT.fetch_update(
+            AtomicOrdering::Relaxed,
+            AtomicOrdering::Relaxed,
+            |value| Some(value.saturating_sub(count)),
+        );
+    }
+}
+
+fn has_zombie_queue_tasks() -> bool {
+    ZOMBIE_QUEUE_COUNT.load(AtomicOrdering::Relaxed) != 0
 }
 
 /// 简化的 nice-aware 调度器。
@@ -301,9 +320,14 @@ impl TaskManager {
     fn add_zombie(&mut self, task: Arc<TaskControlBlock>) {
         super::perf::record_zombie_enqueue();
         self.zombie_queue.push_back(task);
+        add_zombie_queue_count();
     }
     fn take_one_zombie(&mut self) -> Option<Arc<TaskControlBlock>> {
-        self.zombie_queue.pop_front()
+        let zombie = self.zombie_queue.pop_front();
+        if zombie.is_some() {
+            sub_zombie_queue_count(1);
+        }
+        zombie
     }
     fn take_zombies(&mut self, limit: usize) -> Vec<Arc<TaskControlBlock>> {
         let mut zombies = Vec::with_capacity(limit.min(self.zombie_queue.len()));
@@ -313,6 +337,7 @@ impl TaskManager {
             };
             zombies.push(task);
         }
+        sub_zombie_queue_count(zombies.len());
         zombies
     }
     /// 从就绪 + 可中断队列中移除属于指定 pid 的所有 zombie TCB。
@@ -556,10 +581,16 @@ pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
 }
 
 pub fn take_one_zombie_task() -> Option<Arc<TaskControlBlock>> {
+    if !has_zombie_queue_tasks() {
+        return None;
+    }
     TASK_MANAGER.lock().take_one_zombie()
 }
 
 pub fn take_zombie_tasks(limit: usize) -> Vec<Arc<TaskControlBlock>> {
+    if limit == 0 || !has_zombie_queue_tasks() {
+        return Vec::new();
+    }
     TASK_MANAGER.lock().take_zombies(limit)
 }
 

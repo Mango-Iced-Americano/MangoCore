@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### 调度循环 zombie drain 优化：空 zombie 队列跳过 TASK_MANAGER 锁
+
+**涉及文件：**
+- `os/src/task/manager.rs` — 为专用 `zombie_queue` 增加原子长度快照；exit 入队、单个/批量 drain 时维护计数
+- `os/src/task/manager.rs` — `take_zombie_tasks()` 与 `take_one_zombie_task()` 在 zombie 队列计数为 0 时直接返回，避免调度循环每轮无 zombie 时仍拿 `TASK_MANAGER` 锁
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 该计数只覆盖退出后等待 drop 的专用 zombie 队列；ready/interruptible 队列中的兜底 zombie 清理逻辑保持原样。
+
 ### 调度队列状态读取优化：ready/interruptible 长度改为原子快照
 
 **涉及文件：**
