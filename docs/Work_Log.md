@@ -4,6 +4,17 @@
 
 ## 2026-06-15
 
+### lmbench wait/wake 优化：唤醒已睡眠任务时跳过 ready 队列扫描
+
+**涉及文件：**
+- `os/src/task/manager.rs` — `drop_interruptible()` 返回是否实际移除了任务；`try_wake_interruptible()` 在确认任务来自 interruptible 队列时直接入 ready 队列，避免再扫描 ready 队列查重
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+
+**备注：** wait queue/futex/pipe 等唤醒路径的正常情况是任务只存在于 interruptible 队列；保留未移除时的 ready 队列查重回退，兼容 already-woken 路径。
+
 ### lmbench context switch 优化：调度循环无 timer 快返回
 
 **涉及文件：**

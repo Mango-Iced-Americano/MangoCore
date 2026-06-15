@@ -317,7 +317,7 @@ impl TaskManager {
         self.interruptible_queue.push_back(task);
     }
     /// 从可中断队列中删除一个任务
-    pub fn drop_interruptible(&mut self, task: &Arc<TaskControlBlock>) {
+    pub fn drop_interruptible(&mut self, task: &Arc<TaskControlBlock>) -> bool {
         if self
             .interruptible_queue
             .front()
@@ -325,7 +325,7 @@ impl TaskManager {
             .unwrap_or(false)
         {
             self.interruptible_queue.pop_front();
-            return;
+            return true;
         }
         if self
             .interruptible_queue
@@ -334,11 +334,13 @@ impl TaskManager {
             .unwrap_or(false)
         {
             self.interruptible_queue.pop_back();
-            return;
+            return true;
         }
+        let old_len = self.interruptible_queue.len();
         self.interruptible_queue
             // 使用retain过滤掉与指定任务相同的任务
             .retain(|task_in_queue| !task_ptr_eq(task_in_queue, task));
+        self.interruptible_queue.len() != old_len
     }
     fn enqueue_ready_batch(&mut self, tasks: Vec<Arc<TaskControlBlock>>) -> usize {
         if tasks.is_empty() {
@@ -411,7 +413,10 @@ impl TaskManager {
         task: Arc<TaskControlBlock>,
     ) -> Result<(), WaitQueueError> {
         // 从可中断队列中删除指定任务
-        self.drop_interruptible(&task);
+        if self.drop_interruptible(&task) {
+            self.add_front(task);
+            return Ok(());
+        }
         // 如果任务不在就绪队列中，将其加入就绪队列
         if !self
             .ready_queue
