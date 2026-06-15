@@ -4,6 +4,27 @@
 
 ## 2026-06-15
 
+### perf(fs): 消除 read/write 热路径 kbuf 中转 — PageCache ↔ UserBuffer 直连
+
+**涉及文件：**
+- `os/src/mm/uaccess.rs` — 删除 UserBufferWriter::write_from() 热路径 info log；UserBuffer 内部 copy_from_slice 全部替换为 core::ptr::copy（memmove 语义，防止 MAP_SHARED mmap alias 重叠 UB）
+- `os/src/fs/page_cache.rs` — 新增 read_user(offset, len, dst) / write_user(offset, len, src)，显式 len 参数，Phase 2 通过 UserBuffer::write_at/read_at 直连拷贝
+- `os/src/fs/vfs/index_node.rs` — 新增 read_at_user / write_at_user trait 方法，默认返回 ENOSYS（由 File 层 fallback）
+- `os/src/fs/vfs/file.rs` — 新增 read_user / pread_user / write_user / pwrite_user，尝试 inode.*_user 直连，ENOSYS 时走 kbuf fallback（用户页拷贝不持锁）
+- `os/src/fs/ext4/ext4fs.rs` — override read_at_user / write_at_user：有 page_cache 的普通文件直连 PageCache::*_user，symlink 返回 ENOSYS；删除 read_at/write_at 临时诊断 log
+- `os/src/syscall/fs.rs` — read_into_user / pread_into_user / write_from_user / pwrite_from_user 改为构造 UserBuffer 后调用 File::*_user，消除 kbuf Vec 分配和二次 copy
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU basic: 待验证（MCP kernel-dev 工具超时）
+
+**备注：**
+- 数据流从 PageCache → kbuf → UserBuffer → 用户页 变为 PageCache → UserBuffer → 用户页（read），write 同理
+- 非 PageCache inode（pipe/socket/devfs/procfs）走 ENOSYS → File fallback kbuf 路径，语义不变
+- 首版仅 ext4 提供 override，tmpfs/FAT32 后续阶段
+- 提交 hash: af1a785
+
 ### 修复 sys_getcwd 返回值 ABI（LA64 shell-init EINVAL）
 
 **涉及文件：**
