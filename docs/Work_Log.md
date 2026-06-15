@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### priority/nice hint：减少调度优先级查询锁
+
+**涉及文件：**
+- `os/src/task/task.rs` — 增加 `TaskControlBlock::sched_nice()`，复用已有 `sched_nice_hint` 作为只读 fast path
+- `os/src/syscall/process/ids.rs` — `getpriority`/`setpriority` 预检查改用 nice hint；调度权限 owner 判断改用 uid/euid hint
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 对照 Linux `getpriority`/`setpriority` 语义，nice 查询取目标集合中的最高优先级，owner 检查比较当前 euid 与目标 uid/euid；本次只替换只读字段访问，写路径仍持锁更新 `sched_nice` 并同步 hint。
+
 ### euid 权限门禁：使用当前身份 hint 避免锁
 
 **涉及文件：**

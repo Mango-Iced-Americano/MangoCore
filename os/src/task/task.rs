@@ -1563,6 +1563,10 @@ impl TaskControlBlock {
         self.sgid_hint.load(Ordering::Relaxed) as u32
     }
 
+    pub fn sched_nice(&self) -> i32 {
+        self.sched_nice_hint.load(Ordering::Relaxed)
+    }
+
     pub fn store_identity_hint(
         &self,
         uid: u32,

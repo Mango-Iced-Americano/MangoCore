@@ -2091,7 +2091,7 @@ pub fn sys_getpriority(which: usize, who: usize) -> isize {
     };
     let mut best_nice = i32::MAX;
     for task in targets {
-        best_nice = best_nice.min(task.acquire_inner_lock().sched_nice);
+        best_nice = best_nice.min(task.sched_nice());
     }
     (20 - best_nice) as isize
 }
@@ -2107,7 +2107,7 @@ pub fn sys_setpriority(which: usize, who: usize, prio: usize) -> isize {
         if !access.has_sys_nice && !sched_same_owner(access, task) {
             return EPERM;
         }
-        let old_nice = task.acquire_inner_lock().sched_nice;
+        let old_nice = task.sched_nice();
         if nice < old_nice && !access.has_sys_nice {
             return EACCES;
         }
@@ -2302,8 +2302,7 @@ fn current_sched_access() -> SchedAccess {
 }
 
 fn sched_same_owner(access: SchedAccess, task: &Arc<TaskControlBlock>) -> bool {
-    let inner = task.acquire_inner_lock();
-    access.euid == inner.euid || access.euid == inner.uid
+    access.euid == task.euid() || access.euid == task.uid()
 }
 
 fn can_apply_sched_change(
