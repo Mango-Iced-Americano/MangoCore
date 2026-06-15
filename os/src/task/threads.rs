@@ -13,7 +13,7 @@ use crate::{
         discard_non_actionable_unblocked_signals, has_actionable_signal, task_manager_counts,
         wait_with_timeout, TaskControlBlock,
     },
-    timer::TimeSpec,
+    timer::{get_clock_freq, get_time, TimeSpec, NSEC_PER_SEC},
 };
 use alloc::{collections::BTreeMap, sync::Arc};
 use lazy_static::lazy_static;
@@ -217,6 +217,13 @@ fn deadline_expired(deadline: Option<TimeSpec>) -> bool {
         .unwrap_or(false)
 }
 
+#[inline(always)]
+fn timespec_to_ticks(time: TimeSpec) -> usize {
+    time.tv_sec
+        .saturating_mul(get_clock_freq())
+        .saturating_add(time.tv_nsec.saturating_mul(get_clock_freq()) / NSEC_PER_SEC)
+}
+
 fn finish_waitv_private(
     futex: &mut Futex,
     entries: &[FutexWaitEntry],
@@ -295,6 +302,7 @@ fn try_single_thread_short_timeout(
         return None;
     }
 
+    let deadline_ticks = timespec_to_ticks(deadline);
     let mut spins = 0usize;
     loop {
         match futex_word.read(token) {
@@ -302,7 +310,7 @@ fn try_single_thread_short_timeout(
             Ok(_) => return Some(WaitResult::Ready(EAGAIN)),
             Err(errno) => return Some(WaitResult::Ready(errno)),
         }
-        if TimeSpec::now() >= deadline {
+        if get_time() >= deadline_ticks {
             return Some(WaitResult::TimedOut);
         }
         if has_actionable_signal(&task) {
@@ -361,9 +369,10 @@ where
     F: FnMut(&mut T) -> Option<isize>,
 {
     let task_weak = Arc::downgrade(task);
+    let deadline_ticks = timespec_to_ticks(deadline);
 
     loop {
-        if TimeSpec::now() >= deadline {
+        if get_time() >= deadline_ticks {
             let mut guard = lock.lock();
             queue_of(&mut guard).finish_wait(task.as_ref());
             return WaitResult::TimedOut;

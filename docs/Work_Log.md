@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### futex 优化：短超时自旋使用 tick 比较
+
+**涉及文件：**
+- `os/src/task/threads.rs` — futex 短 timeout 和 tail spin 路径预先把 deadline 转为 tick，循环内用 `get_time()` 比较，避免反复构造 `TimeSpec`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev sh -lc 'timeout 75s make rv64-run ...'` ✅ — busybox 进入文件操作测试后由外层 timeout 结束，无 panic
+
+**备注：** 面向 lmbench/pthread 中 futex timeout、条件等待尾段自旋等路径；deadline 仍来自单调时钟，超时语义保持不变。
+
 ### 时间运算热路径优化：TimeSpec/TimeVal 直接借位相减
 
 **涉及文件：**
