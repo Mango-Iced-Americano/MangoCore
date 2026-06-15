@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### 通用阻塞 I/O 兜底路径优化：wait_io_core 返回后短引用化
+
+**涉及文件：**
+- `os/src/syscall/utils.rs` — `wait_io_core()` 在 `suspend_current_and_run_next()` 返回后的信号检查与 real timer 刷新改用 `current_task_ref()`，避免每次 EAGAIN 阻塞唤醒后 clone 当前任务 `Arc`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束
+
+**备注：** `suspend_current_and_run_next()` 的调度语义保持不变；本次只优化当前任务返回后检查信号/刷新 timer 的引用获取方式。
+
 ### 进程属性 syscall 优化：cap/prctl/prlimit 当前任务短引用化
 
 **涉及文件：**
