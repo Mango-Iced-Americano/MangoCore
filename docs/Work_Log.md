@@ -4,6 +4,20 @@
 
 ## 2026-06-15
 
+### 轻量 saved ID syscall 优化：缓存当前 suid/sgid
+
+**涉及文件：**
+- `os/src/task/processor.rs` — context switch 时发布当前线程 suid/sgid 缓存，并在身份变更时同步刷新
+- `os/src/task/task.rs`、`os/src/task/mod.rs` — 扩展身份 hint 刷新参数和导出当前 suid/sgid 读取函数
+- `os/src/syscall/process/ids.rs` — `getresuid/getresgid` 使用当前缓存，避免读取当前 TCB
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev sh -lc 'timeout 75s make rv64-run ...'` ✅ — busybox 基础与 sleep 流程通过，随后进入文件操作测试，由外层 timeout 结束，无 panic
+
+**备注：** saved uid/gid 的真实来源仍是 `TaskControlBlock` identity hint；所有 set*id 路径继续通过 `store_identity_hint` 统一刷新。
+
 ### nanosleep 短尾部自旋优化：使用 tick 比较
 
 **涉及文件：**

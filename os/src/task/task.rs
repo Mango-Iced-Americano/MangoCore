@@ -1549,7 +1549,15 @@ impl TaskControlBlock {
         self.gid_hint.store(gid as usize, Ordering::Relaxed);
         self.egid_hint.store(egid as usize, Ordering::Relaxed);
         self.sgid_hint.store(sgid as usize, Ordering::Relaxed);
-        super::processor::refresh_current_identity_hints(self.gettid(), uid, euid, gid, egid);
+        super::processor::refresh_current_identity_hints(
+            self.gettid(),
+            uid,
+            euid,
+            suid,
+            gid,
+            egid,
+            sgid,
+        );
     }
 
     /// 获取线程组 ID（当前简化为进程 ID）

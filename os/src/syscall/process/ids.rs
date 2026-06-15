@@ -8,8 +8,8 @@ use crate::mm::{
 use crate::syscall::errno::*;
 use crate::task::{
     current_egid, current_euid, current_gid, current_parent_pid, current_pgid, current_pid,
-    current_sid, current_task, current_task_ref, current_tid, current_uid, current_user_token,
-    update_ready_nice,
+    current_sgid, current_sid, current_suid, current_task, current_task_ref, current_tid,
+    current_uid, current_user_token, update_ready_nice,
     ProcessControlBlock, ProcessManager, SeccompFilterInsn, Signals, TaskControlBlock,
 };
 use crate::timer::{get_time_sec, TimeSpec};
@@ -494,8 +494,11 @@ pub fn sys_setresuid(ruid: usize, euid: usize, suid: usize) -> isize {
 
 pub fn sys_getresuid(ruid: *mut u32, euid: *mut u32, suid: *mut u32) -> isize {
     let token = current_user_token();
-    let task = current_task_ref().unwrap();
-    let values = [(ruid, task.uid()), (euid, task.euid()), (suid, task.suid())];
+    let values = [
+        (ruid, current_uid()),
+        (euid, current_euid()),
+        (suid, current_suid()),
+    ];
     for (ptr, value) in values {
         if !ptr.is_null() {
             if let Err(errno) = UserPtrMut::new(ptr).write(token, &value) {
@@ -612,8 +615,11 @@ pub fn sys_setresgid(rgid: usize, egid: usize, sgid: usize) -> isize {
 
 pub fn sys_getresgid(rgid: *mut u32, egid: *mut u32, sgid: *mut u32) -> isize {
     let token = current_user_token();
-    let task = current_task_ref().unwrap();
-    let values = [(rgid, task.gid()), (egid, task.egid()), (sgid, task.sgid())];
+    let values = [
+        (rgid, current_gid()),
+        (egid, current_egid()),
+        (sgid, current_sgid()),
+    ];
     for (ptr, value) in values {
         if !ptr.is_null() {
             if let Err(errno) = UserPtrMut::new(ptr).write(token, &value) {

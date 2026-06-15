@@ -67,8 +67,10 @@ static CURRENT_PARENT_PID: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_USER_TOKEN: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_UID: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_EUID: AtomicUsize = AtomicUsize::new(0);
+static CURRENT_SUID: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_GID: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_EGID: AtomicUsize = AtomicUsize::new(0);
+static CURRENT_SGID: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_PGID: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_SID: AtomicUsize = AtomicUsize::new(0);
 
@@ -161,8 +163,10 @@ pub fn run_tasks() {
             CURRENT_USER_TOKEN.store(task.process.user_token(), Ordering::Relaxed);
             CURRENT_UID.store(task.uid() as usize, Ordering::Relaxed);
             CURRENT_EUID.store(task.euid() as usize, Ordering::Relaxed);
+            CURRENT_SUID.store(task.suid() as usize, Ordering::Relaxed);
             CURRENT_GID.store(task.gid() as usize, Ordering::Relaxed);
             CURRENT_EGID.store(task.egid() as usize, Ordering::Relaxed);
+            CURRENT_SGID.store(task.sgid() as usize, Ordering::Relaxed);
             CURRENT_PGID.store(task.process.getpgid(), Ordering::Relaxed);
             CURRENT_SID.store(task.process.getsid(), Ordering::Relaxed);
             processor.current = Some(task);
@@ -194,8 +198,10 @@ pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
     CURRENT_USER_TOKEN.store(0, Ordering::Relaxed);
     CURRENT_UID.store(0, Ordering::Relaxed);
     CURRENT_EUID.store(0, Ordering::Relaxed);
+    CURRENT_SUID.store(0, Ordering::Relaxed);
     CURRENT_GID.store(0, Ordering::Relaxed);
     CURRENT_EGID.store(0, Ordering::Relaxed);
+    CURRENT_SGID.store(0, Ordering::Relaxed);
     CURRENT_PGID.store(0, Ordering::Relaxed);
     CURRENT_SID.store(0, Ordering::Relaxed);
     PROCESSOR.lock().take_current()
@@ -267,6 +273,11 @@ pub fn current_euid() -> u32 {
 }
 
 #[inline(always)]
+pub fn current_suid() -> u32 {
+    CURRENT_SUID.load(Ordering::Relaxed) as u32
+}
+
+#[inline(always)]
 pub fn current_gid() -> u32 {
     CURRENT_GID.load(Ordering::Relaxed) as u32
 }
@@ -277,18 +288,27 @@ pub fn current_egid() -> u32 {
 }
 
 #[inline(always)]
+pub fn current_sgid() -> u32 {
+    CURRENT_SGID.load(Ordering::Relaxed) as u32
+}
+
+#[inline(always)]
 pub(super) fn refresh_current_identity_hints(
     tid: usize,
     uid: u32,
     euid: u32,
+    suid: u32,
     gid: u32,
     egid: u32,
+    sgid: u32,
 ) {
     if CURRENT_TID.load(Ordering::Relaxed) == tid {
         CURRENT_UID.store(uid as usize, Ordering::Relaxed);
         CURRENT_EUID.store(euid as usize, Ordering::Relaxed);
+        CURRENT_SUID.store(suid as usize, Ordering::Relaxed);
         CURRENT_GID.store(gid as usize, Ordering::Relaxed);
         CURRENT_EGID.store(egid as usize, Ordering::Relaxed);
+        CURRENT_SGID.store(sgid as usize, Ordering::Relaxed);
     }
 }
 
