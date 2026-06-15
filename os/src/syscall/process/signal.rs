@@ -14,8 +14,8 @@ use crate::mm::{copy_from_user, UserPtr, UserPtrMut};
 use crate::signal_type;
 use crate::syscall::errno::*;
 use crate::task::{
-    current_syscall_name, current_task_ref, current_user_token, exit_current_and_run_next, signal::*,
-    ProcessControlBlock, ProcessManager, TaskControlBlock,
+    current_euid, current_syscall_name, current_task_ref, current_uid, current_user_token,
+    exit_current_and_run_next, signal::*, ProcessControlBlock, ProcessManager, TaskControlBlock,
 };
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
@@ -31,10 +31,8 @@ fn can_signal_process(target: &ProcessControlBlock) -> bool {
     if sender.pid() == target.pid {
         return true;
     }
-    let sender_inner = sender.acquire_inner_lock();
-    let sender_uid = sender_inner.uid;
-    let sender_euid = sender_inner.euid;
-    drop(sender_inner);
+    let sender_uid = current_uid();
+    let sender_euid = current_euid();
 
     if sender_euid == 0 {
         return true;

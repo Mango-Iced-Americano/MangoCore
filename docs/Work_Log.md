@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### signal 权限检查身份快照：减少 kill 路径当前任务锁
+
+**涉及文件：**
+- `os/src/syscall/process/signal.rs` — `can_signal_process()` 使用当前 uid/euid 快照进行发送者权限判断，避免每次 signal 权限检查锁当前任务 inner
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 目标进程身份仍读取目标线程真实 inner；当前任务身份快照在 setuid/setgid 系列 syscall 后同步刷新。
+
 ### trap 当前任务快路径：减少 page fault/timer 慢路径引用计数
 
 **涉及文件：**
