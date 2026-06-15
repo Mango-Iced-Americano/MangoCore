@@ -8,6 +8,7 @@ pub const SOL_SOCKET: u32 = 1;
 pub const SOL_TCP: u32 = 6;
 pub const SOL_IP: u32 = 0;
 pub const SOL_IPV6: u32 = 41;
+pub const IPV6_V6ONLY: u32 = 26;
 pub const SOL_ICMPV6: u32 = 58;
 pub const IP_HDRINCL: u32 = 3;
 pub const IPV6_RECVPKTINFO: u32 = 49;

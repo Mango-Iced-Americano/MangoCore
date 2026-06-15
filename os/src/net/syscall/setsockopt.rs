@@ -6,7 +6,7 @@ use crate::utils::error::SyscallErr;
 use super::common::{
     MCAST_JOIN_GROUP, MCAST_LEAVE_GROUP, SO_BINDTODEVICE, SO_DONTROUTE, SO_KEEPALIVE, SO_RCVBUF, SO_RCVTIMEO,
     SO_REUSEADDR, SO_SNDBUF, SO_SNDTIMEO, SOL_ICMPV6, SOL_IP, SOL_IPV6, SOL_RAW, SOL_SOCKET, SOL_TCP, TCP_NODELAY,
-    ICMP6_FILTER, IPV6_CHECKSUM, IPV6_RECVHOPLIMIT, IPV6_RECVPKTINFO, IP_HDRINCL,
+    ICMP6_FILTER, IPV6_CHECKSUM, IPV6_RECVHOPLIMIT, IPV6_RECVPKTINFO, IPV6_V6ONLY, IP_HDRINCL,
 };
 
 pub fn sys_setsockopt(
@@ -60,6 +60,10 @@ pub fn sys_setsockopt(
         (SOL_IPV6, IPV6_CHECKSUM) => {
             // IPV6_CHECKSUM is documented at SOL_RAW, but some apps (LTP asapi_01)
             // call it at SOL_IPV6 on UDP/TCP sockets. Accept and no-op.
+        }
+        (SOL_IPV6, IPV6_V6ONLY) => {
+            // Accept IPV6_V6ONLY (iperf3 daemon requires this); kernel does not
+            // differentiate between IPv4-mapped and native IPv6 for binding.
         }
         (SOL_ICMPV6, ICMP6_FILTER) => {
             if (optlen as usize) < 32 {
