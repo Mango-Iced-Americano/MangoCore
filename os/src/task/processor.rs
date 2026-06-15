@@ -8,7 +8,8 @@ use crate::hal::TrapContext;
 use crate::net::config::NET_INTERFACE;
 use alloc::sync::Arc;
 use core::hint::spin_loop;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::ptr;
+use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use lazy_static::*;
 use log;
 use spin::Mutex;
@@ -59,6 +60,7 @@ impl Processor {
 /// MangoCore 当前是单核调度，syscall 入口用全局原子即可避免每次 syscall
 /// 都竞争 PROCESSOR 锁；0 表示无记录，实际 syscall id 存为 id + 1。
 static CURRENT_SYSCALL_ID: AtomicUsize = AtomicUsize::new(0);
+static CURRENT_TASK_PTR: AtomicPtr<TaskControlBlock> = AtomicPtr::new(ptr::null_mut());
 
 lazy_static! {
     /// 全局的处理器对象
@@ -140,6 +142,7 @@ pub fn run_tasks() {
                 &task_inner.task_cx as *const TaskContext
             };
             // 设置当前正在运行的任务
+            CURRENT_TASK_PTR.store(Arc::as_ptr(&task) as *mut TaskControlBlock, Ordering::Release);
             processor.current = Some(task);
             // 手动释放处理器
             drop(processor);
@@ -161,12 +164,26 @@ pub fn run_tasks() {
 
 /// 取出当前正在运行的任务
 pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
+    CURRENT_TASK_PTR.store(ptr::null_mut(), Ordering::Release);
     PROCESSOR.lock().take_current()
 }
 
 /// 获取当前正在运行的任务
 pub fn current_task() -> Option<Arc<TaskControlBlock>> {
     PROCESSOR.lock().current()
+}
+
+/// 获取当前正在运行任务的短生命周期引用。
+///
+/// MangoCore 当前是单核；调度器在 `PROCESSOR.current` 持有 Arc 时同步发布这个指针，
+/// `take_current_task()` 会在切走当前任务前清空它。调用者不能把引用跨调度点保存。
+pub fn current_task_ref() -> Option<&'static TaskControlBlock> {
+    let ptr = CURRENT_TASK_PTR.load(Ordering::Acquire);
+    if ptr.is_null() {
+        None
+    } else {
+        Some(unsafe { &*ptr })
+    }
 }
 
 /// 获取当前系统调用名称（用于 OOM 诊断）

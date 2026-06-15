@@ -4,6 +4,22 @@
 
 ## 2026-06-15
 
+### lmbench syscall 优化：当前任务无锁短引用
+
+**涉及文件：**
+- `os/src/task/processor.rs` — 调度器发布单核当前任务原始指针，`take_current_task()` 切走前清空，新增短生命周期 `current_task_ref()`
+- `os/src/task/mod.rs` — 导出 `current_task_ref()`
+- `os/src/hal/arch/riscv/trap/mod.rs` — syscall trap 入口/返回使用当前任务短引用，避免每次 syscall 额外锁 `PROCESSOR` 并 clone `Arc`
+- `os/src/hal/arch/loongarch64/trap/mod.rs` — 同步 la64 syscall trap 热路径
+- `os/src/syscall/process/ids.rs` — `getpid/getppid/getuid/geteuid/getgid/getegid/gettid` 使用短引用读取
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 跑到文件操作后由外层 `timeout 75s` 结束
+
+**备注：** 该接口只用于不跨调度点保存的短读路径；需要拥有权或可能跨阻塞点的代码仍使用原 `current_task()` 返回 `Arc`。
+
 ### lmbench syscall 优化：缓存基础 uid/gid 查询
 
 **涉及文件：**

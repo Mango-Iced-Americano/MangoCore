@@ -47,8 +47,8 @@ pub use process::{
 };
 pub use process_manager::ProcessManager;
 pub use processor::{
-    current_syscall_name, current_task, current_trap_cx, current_user_token, run_tasks, schedule,
-    set_current_syscall_id, take_current_task,
+    current_syscall_name, current_task, current_task_ref, current_trap_cx, current_user_token,
+    run_tasks, schedule, set_current_syscall_id, take_current_task,
 };
 pub use registry::{
     all_processes, find_process_by_pid, find_processes_by_pgid, find_task_by_pid_tid,

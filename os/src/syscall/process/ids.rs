@@ -7,8 +7,8 @@ use crate::mm::{
 };
 use crate::syscall::errno::*;
 use crate::task::{
-    current_task, current_user_token, ProcessControlBlock, ProcessManager, SeccompFilterInsn,
-    Signals, TaskControlBlock, update_ready_nice,
+    current_task, current_task_ref, current_user_token, ProcessControlBlock, ProcessManager,
+    SeccompFilterInsn, Signals, TaskControlBlock, update_ready_nice,
 };
 use crate::timer::{get_time_sec, TimeSpec};
 use alloc::{sync::Arc, vec::Vec};
@@ -333,29 +333,29 @@ pub fn sys_setdomainname(name: *const u8, len: usize) -> isize {
 }
 
 pub fn sys_getpid() -> isize {
-    let pid = current_task().unwrap().pid();
+    let pid = current_task_ref().unwrap().pid();
     pid as isize
 }
 
 pub fn sys_getppid() -> isize {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     task.process.parent_pid() as isize
 }
 
 pub fn sys_getuid() -> isize {
-    current_task().unwrap().uid() as isize
+    current_task_ref().unwrap().uid() as isize
 }
 
 pub fn sys_geteuid() -> isize {
-    current_task().unwrap().euid() as isize
+    current_task_ref().unwrap().euid() as isize
 }
 
 pub fn sys_getgid() -> isize {
-    current_task().unwrap().gid() as isize
+    current_task_ref().unwrap().gid() as isize
 }
 
 pub fn sys_getegid() -> isize {
-    current_task().unwrap().egid() as isize
+    current_task_ref().unwrap().egid() as isize
 }
 
 fn parse_id(arg: usize) -> Result<u32, isize> {
@@ -1654,7 +1654,7 @@ pub fn sys_setsid() -> isize {
 }
 
 pub fn sys_gettid() -> isize {
-    current_task().unwrap().tid.0 as isize
+    current_task_ref().unwrap().tid.0 as isize
 }
 
 #[derive(Clone, Copy, Debug)]

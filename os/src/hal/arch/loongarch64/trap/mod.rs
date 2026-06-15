@@ -15,7 +15,7 @@ use crate::mm::{
 use crate::net::config::NET_INTERFACE;
 use crate::syscall::syscall;
 use crate::task::{
-    current_task, current_trap_cx, current_user_token, do_signal, do_wake_expired,
+    current_task, current_task_ref, current_trap_cx, current_user_token, do_signal, do_wake_expired,
     signal::SigInfo, suspend_current_and_run_next, Signals,
 };
 use core::arch::{asm, global_asm};
@@ -172,7 +172,7 @@ pub fn trap_handler() -> ! {
 
     if let Trap::Exception(Exception::Syscall) = cause {
         let (syscall_id, args) = {
-            let task = current_task().unwrap();
+            let task = current_task_ref().unwrap();
             let mut inner = task.acquire_inner_lock();
             inner.update_process_times_enter_trap();
             let cx = inner.get_trap_cx();
@@ -189,7 +189,7 @@ pub fn trap_handler() -> ! {
         // The trap context may be replaced by execve or restored by sigreturn,
         // so fetch it again after syscall returns.
         {
-            let task = current_task().unwrap();
+            let task = current_task_ref().unwrap();
             let mut inner = task.acquire_inner_lock();
             let cx = inner.get_trap_cx();
             // sigreturn(139) already restored the full trap context (including a0).
