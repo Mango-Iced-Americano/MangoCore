@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### lmbench/UnixBench 信号 syscall 优化：当前任务短引用
+
+**涉及文件：**
+- `os/src/syscall/process/signal.rs` — `kill/tkill/tgkill` 诊断、pidfd fd 表访问、`rt_sigpending/rt_sigqueueinfo` 和信号权限检查改用 `current_task_ref()`，减少当前任务查询的 `PROCESSOR` 锁与 `Arc` clone
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** `signalfd`、`sigreturn` 以及需要保存 `Arc<TaskControlBlock>` 的阻塞/发送路径保留原实现，避免跨调度点持有短生命周期引用。
+
 ### lmbench/UnixBench 调度查询优化：当前任务短引用
 
 **涉及文件：**

@@ -14,8 +14,8 @@ use crate::mm::{copy_from_user, UserPtr, UserPtrMut};
 use crate::signal_type;
 use crate::syscall::errno::*;
 use crate::task::{
-    current_syscall_name, current_task, exit_current_and_run_next, signal::*, ProcessControlBlock,
-    ProcessManager, TaskControlBlock,
+    current_syscall_name, current_task, current_task_ref, exit_current_and_run_next, signal::*,
+    ProcessControlBlock, ProcessManager, TaskControlBlock,
 };
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
@@ -25,7 +25,7 @@ use log::{error, info, trace};
 use spin::{Mutex, MutexGuard};
 
 fn can_signal_process(target: &ProcessControlBlock) -> bool {
-    let Some(sender) = current_task() else {
+    let Some(sender) = current_task_ref() else {
         return false;
     };
     if sender.pid() == target.pid {
@@ -78,7 +78,7 @@ pub(super) fn pidfd_file_target_pid(file: &File) -> Result<usize, isize> {
 }
 
 fn pidfd_target_pid(pidfd: usize) -> Result<usize, isize> {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let files_ref = task.process.files();
     let fd_table = files_ref.lock();
     let file = fd_table.get_file(pidfd).map_err(|err| -(err as isize))?;
@@ -343,7 +343,7 @@ pub fn sys_kill(pid: usize, sig: usize) -> isize {
         Err(_) => return EINVAL,
     };
     if signal.contains(Signals::SIGKILL) {
-        let (sender_tid, sender_pid) = current_task()
+        let (sender_tid, sender_pid) = current_task_ref()
             .map(|task| (task.gettid(), task.pid()))
             .unwrap_or((0, 0));
         log::warn!(
@@ -356,8 +356,9 @@ pub fn sys_kill(pid: usize, sig: usize) -> isize {
     }
     let pid_signed = pid as isize;
     if pid_signed > 0 {
-        if let Some(task) = current_task() {
-            if task.pid() == pid && task.process.live_thread_count() == 1 {
+        if let Some(task_ref) = current_task_ref() {
+            if task_ref.pid() == pid && task_ref.process.live_thread_count() == 1 {
+                let task = current_task().unwrap();
                 send_process_signal_to_task(&task.process, &task, signal);
                 return SUCCESS;
             }
@@ -402,7 +403,7 @@ pub fn sys_pidfd_open(pid: usize, flags: usize) -> isize {
         Err(err) => return -(err as isize),
     };
 
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let files_ref = task.process.files();
     let mut fd_table = files_ref.lock();
     match fd_table.alloc_fd(file, true) {
@@ -440,7 +441,7 @@ pub fn sys_pidfd_getfd(pidfd: usize, targetfd: usize, flags: usize) -> isize {
         file
     };
 
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let files_ref = task.process.files();
     let mut fd_table = files_ref.lock();
     match fd_table.alloc_fd(remote_file, true) {
@@ -520,7 +521,7 @@ pub fn sys_tkill(tid: usize, sig: usize) -> isize {
         Err(_) => return EINVAL,
     };
     if signal.contains(Signals::SIGKILL) {
-        let (sender_tid, sender_pid) = current_task()
+        let (sender_tid, sender_pid) = current_task_ref()
             .map(|task| (task.gettid(), task.pid()))
             .unwrap_or((0, 0));
         log::warn!(
@@ -550,7 +551,7 @@ pub fn sys_tgkill(pid: usize, tid: usize, sig: usize) -> isize {
         Err(_) => return EINVAL,
     };
     if signal.contains(Signals::SIGKILL) {
-        let (sender_tid, sender_pid) = current_task()
+        let (sender_tid, sender_pid) = current_task_ref()
             .map(|task| (task.gettid(), task.pid()))
             .unwrap_or((0, 0));
         log::warn!(
@@ -581,7 +582,7 @@ pub fn sys_pidfd_send_signal(pidfd: usize, sig: usize, info: usize, flags: usize
         Err(_) => return EINVAL,
     };
 
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let token = task.get_user_token();
     let queued_siginfo = if info != 0 {
         match UserPtr::<SigInfo>::from_addr(info).read(token) {
@@ -678,10 +679,12 @@ pub fn sys_rt_sigpending(set: usize, sigsetsize: usize) -> isize {
     if !valid_rt_sigset_size(sigsetsize) {
         return -(SyscallErr::EINVAL as isize);
     }
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let token = task.get_user_token();
-    let inner = task.acquire_inner_lock();
-    let pending = inner.sigpending.pending() | task.process.shared_pending();
+    let pending = {
+        let inner = task.acquire_inner_lock();
+        inner.sigpending.pending() | task.process.shared_pending()
+    };
     let pending_bits = pending.bits() as u64;
     trace!(
         "[sys_rt_sigpending] tid: {}, pid: {}, pending: {:?}",
@@ -712,7 +715,7 @@ pub fn sys_rt_sigqueueinfo(pid: usize, sig: usize, info: usize) -> isize {
         Err(_) => return EINVAL,
     };
 
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let siginfo = match UserPtr::<SigInfo>::from_addr(info).read(task.get_user_token()) {
         Ok(siginfo) => siginfo,
         Err(_) => return EFAULT,
