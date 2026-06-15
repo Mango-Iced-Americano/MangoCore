@@ -118,8 +118,10 @@ pub struct TaskControlBlock {
     seccomp_counted: AtomicBool,
     uid_hint: AtomicUsize,
     euid_hint: AtomicUsize,
+    suid_hint: AtomicUsize,
     gid_hint: AtomicUsize,
     egid_hint: AtomicUsize,
+    sgid_hint: AtomicUsize,
     /// 退出信号
     pub exit_signal: Signals,
     /// CLONE_THREAD 线程的 quota。非线程 clone 的 quota 在 PCB 上。
@@ -867,8 +869,10 @@ impl TaskControlBlock {
             seccomp_counted: AtomicBool::new(false),
             uid_hint: AtomicUsize::new(0),
             euid_hint: AtomicUsize::new(0),
+            suid_hint: AtomicUsize::new(0),
             gid_hint: AtomicUsize::new(0),
             egid_hint: AtomicUsize::new(0),
+            sgid_hint: AtomicUsize::new(0),
             exit_signal: Signals::empty(),
             _thread_quota: None,
             wait_io_timer_pending: AtomicBool::new(false),
@@ -1332,8 +1336,10 @@ impl TaskControlBlock {
             seccomp_counted: AtomicBool::new(false),
             uid_hint: AtomicUsize::new(parent_inner.uid as usize),
             euid_hint: AtomicUsize::new(parent_inner.euid as usize),
+            suid_hint: AtomicUsize::new(parent_inner.suid as usize),
             gid_hint: AtomicUsize::new(parent_inner.gid as usize),
             egid_hint: AtomicUsize::new(parent_inner.egid as usize),
+            sgid_hint: AtomicUsize::new(parent_inner.sgid as usize),
             exit_signal,
             _thread_quota: thread_quota,
             wait_io_timer_pending: AtomicBool::new(false),
@@ -1524,6 +1530,10 @@ impl TaskControlBlock {
         self.euid_hint.load(Ordering::Acquire) as u32
     }
 
+    pub fn suid(&self) -> u32 {
+        self.suid_hint.load(Ordering::Acquire) as u32
+    }
+
     pub fn gid(&self) -> u32 {
         self.gid_hint.load(Ordering::Acquire) as u32
     }
@@ -1532,11 +1542,25 @@ impl TaskControlBlock {
         self.egid_hint.load(Ordering::Acquire) as u32
     }
 
-    pub fn store_identity_hint(&self, uid: u32, euid: u32, gid: u32, egid: u32) {
+    pub fn sgid(&self) -> u32 {
+        self.sgid_hint.load(Ordering::Acquire) as u32
+    }
+
+    pub fn store_identity_hint(
+        &self,
+        uid: u32,
+        euid: u32,
+        suid: u32,
+        gid: u32,
+        egid: u32,
+        sgid: u32,
+    ) {
         self.uid_hint.store(uid as usize, Ordering::Release);
         self.euid_hint.store(euid as usize, Ordering::Release);
+        self.suid_hint.store(suid as usize, Ordering::Release);
         self.gid_hint.store(gid as usize, Ordering::Release);
         self.egid_hint.store(egid as usize, Ordering::Release);
+        self.sgid_hint.store(sgid as usize, Ordering::Release);
     }
 
     /// 获取线程组 ID（当前简化为进程 ID）

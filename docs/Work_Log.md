@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### lmbench syscall 优化：缓存 getresuid/getresgid 凭据字段
+
+**涉及文件：**
+- `os/src/task/task.rs` — 在现有 uid/euid/gid/egid hint 基础上增加 suid/sgid hint，clone 时继承父任务凭据缓存，set*id 成功后统一刷新
+- `os/src/syscall/process/ids.rs` — `getresuid/getresgid` 改为直接读取凭据 hint；`getgroups/capget(pid=0)` 以及若干短 identity/prctl 查询路径改用 `current_task_ref()`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行到 `du` 后由外层 `timeout 60s` 结束
+
+**备注：** 缓存只服务当前任务只读 identity syscall；权限检查、capability 判定、跨进程查询仍读取锁内状态或走原 `ProcessManager` 路径。
+
 ### lmbench/UnixBench 时间 syscall 优化：短路径复用当前任务引用
 
 **涉及文件：**

@@ -129,7 +129,7 @@ fn ptrace_traceme_target(pid: usize) -> Result<Arc<ProcessControlBlock>, isize> 
 }
 
 pub fn sys_personality(persona: usize) -> isize {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let mut inner = task.acquire_inner_lock();
     let old = inner.personality;
     if persona != PERSONALITY_GET && persona != usize::MAX {
@@ -207,7 +207,7 @@ pub fn sys_ioprio_get(which: usize, who: usize) -> isize {
     if which != IOPRIO_WHO_PROCESS {
         return EINVAL;
     }
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     if who != 0 && who != task.pid() {
         return ESRCH;
     }
@@ -219,7 +219,7 @@ pub fn sys_ioprio_set(which: usize, who: usize, ioprio: usize) -> isize {
     if which != IOPRIO_WHO_PROCESS {
         return EINVAL;
     }
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     if who != 0 && who != task.pid() {
         return ESRCH;
     }
@@ -235,7 +235,7 @@ pub fn sys_ioprio_set(which: usize, who: usize, ioprio: usize) -> isize {
 }
 
 pub fn sys_vhangup() -> isize {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let inner = task.acquire_inner_lock();
     if inner.euid == 0 || (inner.cap_effective & (1u64 << CAP_SYS_TTY_CONFIG)) != 0 {
         SUCCESS
@@ -403,7 +403,9 @@ pub fn sys_setuid(uid: usize) -> isize {
     }
     let cap_permitted = inner.cap_permitted;
     refresh_effective_caps(inner.euid, cap_permitted, &mut inner.cap_effective);
-    task.store_identity_hint(inner.uid, inner.euid, inner.gid, inner.egid);
+    task.store_identity_hint(
+        inner.uid, inner.euid, inner.suid, inner.gid, inner.egid, inner.sgid,
+    );
     SUCCESS
 }
 
@@ -444,7 +446,9 @@ pub fn sys_setreuid(ruid: usize, euid: usize) -> isize {
     }
     let cap_permitted = inner.cap_permitted;
     refresh_effective_caps(inner.euid, cap_permitted, &mut inner.cap_effective);
-    task.store_identity_hint(inner.uid, inner.euid, inner.gid, inner.egid);
+    task.store_identity_hint(
+        inner.uid, inner.euid, inner.suid, inner.gid, inner.egid, inner.sgid,
+    );
     SUCCESS
 }
 
@@ -482,15 +486,16 @@ pub fn sys_setresuid(ruid: usize, euid: usize, suid: usize) -> isize {
     }
     let cap_permitted = inner.cap_permitted;
     refresh_effective_caps(inner.euid, cap_permitted, &mut inner.cap_effective);
-    task.store_identity_hint(inner.uid, inner.euid, inner.gid, inner.egid);
+    task.store_identity_hint(
+        inner.uid, inner.euid, inner.suid, inner.gid, inner.egid, inner.sgid,
+    );
     SUCCESS
 }
 
 pub fn sys_getresuid(ruid: *mut u32, euid: *mut u32, suid: *mut u32) -> isize {
     let token = current_user_token();
-    let task = current_task().unwrap();
-    let inner = task.acquire_inner_lock();
-    let values = [(ruid, inner.uid), (euid, inner.euid), (suid, inner.suid)];
+    let task = current_task_ref().unwrap();
+    let values = [(ruid, task.uid()), (euid, task.euid()), (suid, task.suid())];
     for (ptr, value) in values {
         if !ptr.is_null() {
             if let Err(errno) = UserPtrMut::new(ptr).write(token, &value) {
@@ -520,7 +525,9 @@ pub fn sys_setgid(gid: usize) -> isize {
         inner.egid = gid;
         inner.fsgid = gid;
     }
-    task.store_identity_hint(inner.uid, inner.euid, inner.gid, inner.egid);
+    task.store_identity_hint(
+        inner.uid, inner.euid, inner.suid, inner.gid, inner.egid, inner.sgid,
+    );
     SUCCESS
 }
 
@@ -559,7 +566,9 @@ pub fn sys_setregid(rgid: usize, egid: usize) -> isize {
     if rgid.is_some() || egid.map_or(false, |id| id != old_gid) {
         inner.sgid = inner.egid;
     }
-    task.store_identity_hint(inner.uid, inner.euid, inner.gid, inner.egid);
+    task.store_identity_hint(
+        inner.uid, inner.euid, inner.suid, inner.gid, inner.egid, inner.sgid,
+    );
     SUCCESS
 }
 
@@ -595,15 +604,16 @@ pub fn sys_setresgid(rgid: usize, egid: usize, sgid: usize) -> isize {
     if let Some(id) = sgid {
         inner.sgid = id;
     }
-    task.store_identity_hint(inner.uid, inner.euid, inner.gid, inner.egid);
+    task.store_identity_hint(
+        inner.uid, inner.euid, inner.suid, inner.gid, inner.egid, inner.sgid,
+    );
     SUCCESS
 }
 
 pub fn sys_getresgid(rgid: *mut u32, egid: *mut u32, sgid: *mut u32) -> isize {
     let token = current_user_token();
-    let task = current_task().unwrap();
-    let inner = task.acquire_inner_lock();
-    let values = [(rgid, inner.gid), (egid, inner.egid), (sgid, inner.sgid)];
+    let task = current_task_ref().unwrap();
+    let values = [(rgid, task.gid()), (egid, task.egid()), (sgid, task.sgid())];
     for (ptr, value) in values {
         if !ptr.is_null() {
             if let Err(errno) = UserPtrMut::new(ptr).write(token, &value) {
@@ -617,7 +627,7 @@ pub fn sys_getresgid(rgid: *mut u32, egid: *mut u32, sgid: *mut u32) -> isize {
 pub fn sys_setfsuid(fsuid: usize) -> isize {
     let fsuid = match parse_optional_id(fsuid) {
         Ok(Some(fsuid)) => fsuid,
-        Ok(None) | Err(_) => return current_task().unwrap().acquire_inner_lock().fsuid as isize,
+        Ok(None) | Err(_) => return current_task_ref().unwrap().acquire_inner_lock().fsuid as isize,
     };
     let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
@@ -631,7 +641,7 @@ pub fn sys_setfsuid(fsuid: usize) -> isize {
 pub fn sys_setfsgid(fsgid: usize) -> isize {
     let fsgid = match parse_optional_id(fsgid) {
         Ok(Some(fsgid)) => fsgid,
-        Ok(None) | Err(_) => return current_task().unwrap().acquire_inner_lock().fsgid as isize,
+        Ok(None) | Err(_) => return current_task_ref().unwrap().acquire_inner_lock().fsgid as isize,
     };
     let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
@@ -643,7 +653,7 @@ pub fn sys_setfsgid(fsgid: usize) -> isize {
 }
 
 pub fn sys_getgroups(size: usize, list: *mut u32) -> isize {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let groups = task.acquire_inner_lock().groups.clone();
     if size == 0 {
         return groups.len() as isize;
@@ -806,18 +816,33 @@ pub fn sys_capget(header: *mut CapUserHeader, data: *mut CapUserData) -> isize {
             return EINVAL;
         }
     };
-    let task = match find_task_for_cap_pid(header_value.pid) {
-        Ok(task) => task,
-        Err(errno) => return errno,
+    let (effective, permitted, inheritable) = if header_value.pid == 0 {
+        let task = current_task_ref().unwrap();
+        let inner = task.acquire_inner_lock();
+        (
+            inner.cap_effective,
+            inner.cap_permitted,
+            inner.cap_inheritable,
+        )
+    } else {
+        let task = match find_task_for_cap_pid(header_value.pid) {
+            Ok(task) => task,
+            Err(errno) => return errno,
+        };
+        let inner = task.acquire_inner_lock();
+        (
+            inner.cap_effective,
+            inner.cap_permitted,
+            inner.cap_inheritable,
+        )
     };
-    let inner = task.acquire_inner_lock();
     match write_cap_data(
         token,
         data,
         words,
-        inner.cap_effective,
-        inner.cap_permitted,
-        inner.cap_inheritable,
+        effective,
+        permitted,
+        inheritable,
     ) {
         Ok(()) => SUCCESS,
         Err(errno) => errno,
