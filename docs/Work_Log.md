@@ -4,6 +4,20 @@
 
 ## 2026-06-15
 
+### 地址空间/uaccess 热路径降噪：删除普通路径日志
+
+**涉及文件：**
+- `os/src/mm/address_space.rs` — 删除 `map_elf` 段映射/interp、fork VMA/trap context、用户栈与 trap context 分配/回收正常路径日志
+- `os/src/mm/uaccess.rs` — 删除 `UserBufferWriter::write_from` 大块写入普通 info 日志
+- `os/src/mm/vma_set.rs` — 删除 mmap 与前序 VMA 合并成功路径 debug 日志
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 已启动后由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 目标路径覆盖 exec/fork/mmap/clone 与用户内存写入；仅删除普通成功路径日志，保留 ELF 解析失败、映射失败、mprotect/munmap 异常等 `warn!`/`error!` 诊断。
+
 ### 帧分配器热路径降噪：删除普通 trace 日志
 
 **涉及文件：**

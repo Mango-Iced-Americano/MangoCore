@@ -7,7 +7,7 @@ use crate::syscall::errno::{EACCES, EINVAL, ENOMEM, EPERM};
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use log::{debug, warn};
+use log::warn;
 
 const STACK_GUARD_GAP_PAGES: usize = 256;
 const GROWSDOWN_MAX_FAULT_GAP_PAGES: usize = USER_STACK_SIZE / PAGE_SIZE;
@@ -763,7 +763,6 @@ impl VmaSet {
                 .user_page_count
                 .saturating_add(area_page_count(area).saturating_sub(old_pages));
         }
-        debug!("[mmap] merge with previous area, call expand_to");
         self.debug_assert_invariants();
         Ok(Some(start_va))
     }

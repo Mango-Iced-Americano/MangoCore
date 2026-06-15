@@ -19,7 +19,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt::Write;
-use log::{debug, error, trace, warn};
+use log::{debug, error, warn};
 
 extern "C" {
     fn strampoline();
@@ -923,12 +923,6 @@ impl<T: PageTable> AddressSpace<T> {
                     let segment_end = VirtAddr::from(end_va.ceil()).0;
                     program_break =
                         Some(program_break.map_or(segment_end, |brk| brk.max(segment_end)));
-                    trace!(
-                        "[map_elf] start_va = 0x{:X}; end_va = 0x{:X}, offset = 0x{:X}",
-                        start_va.0,
-                        end_va.0,
-                        start_va_page_offset
-                    );
                 }
                 xmas_elf::program::Type::Interp => {
                     //assert!(elf.input[(ph.offset() + ph.file_size()) as usize] == b'\0');
@@ -936,7 +930,6 @@ impl<T: PageTable> AddressSpace<T> {
                         &elf.input
                             [ph.offset() as usize..(ph.offset() + ph.file_size() - 1) as usize],
                     );
-                    debug!("[map_elf] Found interpreter path: {}", path);
                     let interp_data = crate::task::load_elf_interp(&path)?;
                     let interp = xmas_elf::ElfFile::new(interp_data).map_err(|_| ENOEXEC)?;
                     let (_, interp_info) = self.map_elf(&interp)?;
@@ -1036,7 +1029,6 @@ impl<T: PageTable> AddressSpace<T> {
             };
             new_area.mark_fork_inherited();
             address_space.vmas.push(new_area)?;
-            debug!("[fork] map shared area: {:?}", area.inner.vpn_range);
         }
         // Copy the current task's trap context.  A process can have stale or
         // higher-numbered non-user VMAs after clone/exit churn, so do not guess
@@ -1059,10 +1051,6 @@ impl<T: PageTable> AddressSpace<T> {
             .push(area, Some(trap_cx_data))
             .map_err(|_| crate::syscall::errno::ENOMEM)?;
 
-        debug!(
-            "[fork] copy trap_cx area: {:?}",
-            trap_cx_area.inner.vpn_range
-        );
         Ok(address_space)
     }
     pub fn activate(&self) {
@@ -1469,30 +1457,13 @@ impl<T: PageTable> AddressSpace<T> {
     ) -> Result<PhysPageNum, MemoryError> {
         if alloc_stack {
             let ustack_bottom = ustack_bottom_from_slot(slot);
-            let ustack_top = ustack_bottom - USER_STACK_SIZE;
-            trace!(
-                "[alloc_user_res] slot {}, user stack start_va: {:X}, end_va: {:X}",
-                slot,
-                ustack_top,
-                ustack_bottom
-            );
             self.insert_user_stack_area(ustack_bottom.into())
                 .map_err(|(err, _)| err)?;
-            trace!("[alloc_user_res] done");
-        } else {
-            debug!(
-                "[alloc_user_res] user stack is not allocated (stack is designated in sys_clone)"
-            );
         }
         // alloc trap_cx
         let trap_cx_bottom = trap_cx_bottom_from_slot(slot);
         let trap_cx_top = trap_cx_bottom + PAGE_SIZE;
         if let Some(ppn) = self.translate(VirtAddr::from(trap_cx_bottom).into()) {
-            trace!(
-                "[alloc_user_res] slot {}, trap context reused: {:X}",
-                slot,
-                trap_cx_bottom
-            );
             return Ok(ppn);
         }
         let trap_cx_ppn = self
@@ -1502,12 +1473,6 @@ impl<T: PageTable> AddressSpace<T> {
                 MapPermission::R | MapPermission::W,
             )
             .map_err(|(err, _)| err)?;
-        trace!(
-            "[alloc_user_res] slot {}, trap context start_va: {:X}, end_va: {:X}",
-            slot,
-            trap_cx_bottom,
-            trap_cx_top
-        );
         Ok(trap_cx_ppn)
     }
 
@@ -1561,17 +1526,9 @@ impl<T: PageTable> AddressSpace<T> {
             match err {
                 MemoryError::AreaNotFound => {
                     // 如果没找到该区域，可能是在之前的清理中整个 Area 都删了
-                    trace!(
-                        "[dealloc_user_res] trap_cx area not found for slot {}",
-                        slot
-                    );
                 }
                 MemoryError::NotMapped => {
                     // 如果页面已经不在页表里（被 OOM 换出），这在回收逻辑中是正常的
-                    trace!(
-                        "[dealloc_user_res] trap_cx already unmapped for slot {}",
-                        slot
-                    );
                 }
                 _ => {
                     // 其他错误也可以记录一下，但没必要 Panic 导致整个系统崩溃
