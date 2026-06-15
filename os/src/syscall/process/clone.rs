@@ -9,7 +9,8 @@ use crate::mm::{
 use crate::show_frame_consumption;
 use crate::syscall::errno::*;
 use crate::task::{
-    current_task, signal::Signals, IpcNamespace, MountNamespace, ProcessManager, TaskControlBlock,
+    current_task, current_task_ref, signal::Signals, IpcNamespace, MountNamespace, ProcessManager,
+    TaskControlBlock,
 };
 use crate::utils::error::SyscallErr;
 use log::{info, warn};
@@ -387,7 +388,7 @@ pub fn sys_unshare(flags: u32) -> isize {
 }
 
 pub fn sys_clone3(uargs: *const u8, size: usize) -> isize {
-    let token = current_task().unwrap().get_user_token();
+    let token = current_task_ref().unwrap().get_user_token();
     let args = match read_clone3_args(uargs, size, token) {
         Ok(args) => args,
         Err(errno) => return errno,

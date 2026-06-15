@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### lmbench/UnixBench 线程生命周期 syscall 优化：robust list 当前任务短引用
+
+**涉及文件：**
+- `os/src/syscall/process/lifecycle.rs` — `set_tid_address/set_robust_list/get_robust_list(pid=0)` 改用 `current_task_ref()`，跨进程 robust list 查询仍走 `ProcessManager::find_task`
+- `os/src/syscall/process/clone.rs` — `clone3` 参数解析前的用户 token 读取改用 `current_task_ref()`，主 clone 发布/调度路径保留 `Arc<TaskControlBlock>`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** 该优化覆盖 pthread/futex 初始化常见短路径；`wait4/waitid/clone/unshare/setns` 等需要拥有权、发布子任务或复杂命名空间语义的路径未改。
+
 ### lmbench/UnixBench IPC 与杂项 syscall 优化：当前任务短引用
 
 **涉及文件：**
