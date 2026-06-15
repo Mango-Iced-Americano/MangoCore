@@ -4,6 +4,23 @@
 
 ## 2026-06-15
 
+### 高频 syscall 入口降噪：删除普通参数 info 日志
+
+**涉及文件：**
+- `os/src/syscall/process/lifecycle.rs` — 删除 `wait4` 普通入口参数日志
+- `os/src/syscall/process/clone.rs` — 删除 `clone` 普通入口参数日志，保留失败诊断输出
+- `os/src/syscall/process/mm.rs` — 删除 `brk`/`mmap` 普通入口参数日志
+- `os/src/syscall/process/ids.rs` — 删除 `prlimit` 普通入口参数日志
+- `os/src/syscall/process/time.rs` — 删除 `setitimer`/`clock_nanosleep` 普通入口参数日志
+- `os/src/syscall/process/signal.rs` — 删除 `sigprocmask`/`sigreturn` 普通入口日志
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 本次只清理运行时日志关闭下仍会进入宏级别判断的高频正常路径；`warn!`/`error!` 和 clone 失败诊断保持不变。
+
 ### futex 热路径降噪：删除每次调用参数 info 日志
 
 **涉及文件：**

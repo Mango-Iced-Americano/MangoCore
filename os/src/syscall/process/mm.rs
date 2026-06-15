@@ -6,7 +6,7 @@ use crate::mm::{
 use crate::syscall::errno::*;
 use crate::task::{current_task_ref, current_user_token};
 use alloc::vec::Vec;
-use log::{info, warn};
+use log::warn;
 
 const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
@@ -75,10 +75,6 @@ pub fn sys_brk(brk_addr: usize) -> isize {
         memory_set.sbrk(grow_size)
     };
 
-    info!(
-        "[sys_brk] brk_addr: {:X}; new_addr: {:X}",
-        brk_addr, new_addr
-    );
     new_addr as isize
 }
 
@@ -148,11 +144,6 @@ pub fn sys_mmap(
         Ok(flags) => flags,
         Err(errno) => return errno,
     };
-    info!(
-        "[mmap] start:{:X}; len:{:X}; prot:{:?}; flags:{:?}; fd:{}; offset:{:X}",
-        start, len, prot, flags, fd as isize, offset
-    );
-
     let mut may_write = true;
     let mut write_sealed = false;
     let map_file = if flags.contains(MapFlags::MAP_ANONYMOUS) {

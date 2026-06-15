@@ -21,7 +21,7 @@ use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
 use core::any::Any;
 use core::mem::size_of;
-use log::{error, info, trace};
+use log::{error, trace};
 use spin::{Mutex, MutexGuard};
 
 fn can_signal_process(target: &ProcessControlBlock) -> bool {
@@ -654,10 +654,6 @@ pub fn sys_sigprocmask(how: u32, set: usize, oldset: usize, sigsetsize: usize) -
     if !valid_rt_sigset_size(sigsetsize) {
         return EINVAL;
     }
-    info!(
-        "[sys_sigprocmask] how: {:?}; set: {:X}, oldset: {:X}, sigsetsize: {}",
-        how, set, oldset, sigsetsize
-    );
     sigprocmask(how, set as *const Signals, oldset as *mut Signals)
 }
 
@@ -770,7 +766,6 @@ pub fn sys_sigreturn() -> isize {
     let task = current_task_ref().unwrap();
     let token = current_user_token();
     let mut inner = task.acquire_inner_lock();
-    info!("[sys_sigreturn] tid: {}, pid: {}", task.tid.0, task.pid());
 
     let sp = inner.get_trap_cx().gp.sp;
     // restore sigmask & trap context

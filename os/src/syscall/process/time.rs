@@ -11,7 +11,7 @@ use crate::timer::{
     current_timespec, current_timeval, get_time_ms, set_current_timespec, ITimerVal, TimeSpec,
     TimeVal, TimeZone, Times, NSEC_PER_SEC, USEC_PER_SEC,
 };
-use log::{info, trace};
+use log::trace;
 use spin::Mutex;
 
 const CLOCK_REALTIME: usize = 0;
@@ -172,10 +172,6 @@ pub fn sys_setitimer(
     new_value: *const ITimerVal,
     old_value: *mut ITimerVal,
 ) -> isize {
-    info!(
-        "[sys_setitimer] which: {}, new_value: {:?}, old_value: {:?}",
-        which, new_value, old_value
-    );
     if which > 2 {
         return EINVAL;
     }
@@ -966,11 +962,6 @@ pub fn sys_clock_nanosleep(
     if !is_valid_timespec(req) {
         return EINVAL;
     }
-
-    info!(
-        "[sys_clock_nanosleep] clk_id: {}, flags: {:?}, rqtp: {:?}, rmtp: {:?}",
-        clk_id, flags, req, rmtp
-    );
 
     if flags & TIMER_ABSTIME != 0 {
         // 绝对睡眠的时间点属于传入的 clock，等待队列内部只使用单调时间。

@@ -13,7 +13,7 @@ use crate::task::{
     ProcessManager, TaskControlBlock,
 };
 use crate::utils::error::SyscallErr;
-use log::{info, warn};
+use log::warn;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -211,10 +211,6 @@ fn sys_clone_inner(
     {
         return EPERM;
     }
-    info!(
-        "[sys_clone] flags: {:?}, stack: {:?}, exit_signal: {:?}, ptid: {:?}, tls: {:?}, ctid: {:?}",
-        flags, stack, exit_signal, ptid, tls, ctid
-    );
     let mut child: Option<Arc<TaskControlBlock>> = None;
     show_frame_consumption! {
         "clone";

@@ -6,8 +6,6 @@ use crate::task::{
     current_task_ref, current_user_token, exit_current_and_run_next, exit_group_and_run_next,
     signal::SigInfo, ProcessControlBlock, ProcessManager, Rusage,
 };
-use log::info;
-
 const CAP_SYS_PTRACE: usize = 19;
 
 pub fn sys_exit(exit_code: u32) -> ! {
@@ -47,7 +45,6 @@ pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) ->
         Some(option) => option,
         None => return EINVAL,
     };
-    info!("[sys_wait4] pid: {}, option: {:?}", pid, option);
     let task = current_task_ref().unwrap();
     let token = current_user_token();
     let process = task.process.clone();

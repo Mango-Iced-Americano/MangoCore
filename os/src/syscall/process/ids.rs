@@ -14,7 +14,7 @@ use crate::task::{
 use crate::timer::{get_time_sec, TimeSpec};
 use alloc::{sync::Arc, vec::Vec};
 use core::{mem::size_of, ptr};
-use log::{info, warn};
+use log::warn;
 use num_enum::FromPrimitive;
 
 #[allow(unused)]
@@ -1875,11 +1875,6 @@ pub fn sys_prlimit(
 
     let token = current_user_token();
     let resource = Resource::from_primitive(resource);
-    info!(
-        "[sys_prlimit] pid: {}, resource: {:?}, new_limit: {:?}, old_limit: {:?}",
-        pid, resource, new_limit, old_limit
-    );
-
     if resource == Resource::ILLEAGAL || resource == Resource::NLIMITS {
         return EINVAL;
     }
