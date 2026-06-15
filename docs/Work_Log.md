@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### shared futex compact 提示：放松非空标志原子序
+
+**涉及文件：**
+- `os/src/task/threads.rs` — `PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY` 改为 `Relaxed` 读写，减少调度循环中 shared futex compact 快速跳过路径的屏障开销
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 该标志只表示 PROCESS_SHARED_FUTEX 可能非空；实际 BTreeMap 内容和 WaitQueue 状态仍由 `PROCESS_SHARED_FUTEX` 锁保护。
+
 ### timer pending 快路径：放松调度循环原子屏障
 
 **涉及文件：**

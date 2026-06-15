@@ -105,18 +105,18 @@ fn wait_queue_for_key(map: &mut BTreeMap<usize, WaitQueue>, key: usize) -> &mut 
 }
 
 fn shared_wait_queue_for_key(map: &mut BTreeMap<usize, WaitQueue>, key: usize) -> &mut WaitQueue {
-    PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY.store(true, Ordering::Release);
+    PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY.store(true, Ordering::Relaxed);
     wait_queue_for_key(map, key)
 }
 
 fn refresh_shared_futex_nonempty(map: &BTreeMap<usize, WaitQueue>) {
-    PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY.store(!map.is_empty(), Ordering::Release);
+    PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY.store(!map.is_empty(), Ordering::Relaxed);
 }
 
 /// 清理 PROCESS_SHARED_FUTEX 中所有空 WaitQueue 条目。
 /// 降频至每 64 个 tick 执行一次，避免频繁扫描 BTreeMap。
 pub fn compact_shared_futex() {
-    if !PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY.load(Ordering::Acquire) {
+    if !PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY.load(Ordering::Relaxed) {
         return;
     }
     static TICK: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
