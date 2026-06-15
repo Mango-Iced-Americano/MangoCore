@@ -9,7 +9,6 @@ use crate::{
 use _core::convert::TryFrom;
 use alloc::{sync::Arc, vec::Vec};
 use bitflags::*;
-use log::trace;
 // todo: 因之前默认vpn从0开始，所以DIRTY数组相当于vpn从零到size，但是移到高地址启动后，DIRTY位有偏移
 // todo: 相当于低位无效，这里粗暴的增大整个数组长度
 const DIRTY_LEN: usize = MEMORY_SIZE * 10 / PAGE_SIZE;
@@ -299,7 +298,6 @@ impl PageTable for LAFlexPageTable {
         Self: Sized,
     {
         let frame = frame_alloc().unwrap();
-        trace!("root ppn:{:?}", frame);
         LAFlexPageTable {
             root_ppn: LAPTRoot(frame.ppn.0 << 32),
             frames: {
@@ -311,7 +309,6 @@ impl PageTable for LAFlexPageTable {
     }
     fn new() -> Self {
         let frame = frame_alloc().unwrap();
-        trace!("root ppn:{:?}", frame);
         LAFlexPageTable {
             root_ppn: LAPTRoot(frame.ppn.0),
             frames: {

@@ -5,7 +5,7 @@ use crate::hal::{
 use crate::signal_type;
 use core::fmt::{self, Debug, Formatter};
 use core::mem::size_of;
-use log::{debug, error, warn};
+use log::{error, warn};
 
 use crate::config::*;
 use crate::mm::{UserPtr, UserPtrMut};
@@ -588,13 +588,6 @@ pub fn has_actionable_signal(task: &TaskControlBlock) -> bool {
     if pending.is_empty() {
         return false;
     }
-    log::debug!(
-        "Task tid {} pid {} has pending: {:x}, mask: {:x}",
-        task.tid.0,
-        task.pid(),
-        pending.bits(),
-        task.acquire_inner_lock().sigmask.bits()
-    );
     let sighand_ref = task.process.sighand();
     let sighand = sighand_ref.lock();
     for signum in 1..=64usize {
@@ -690,13 +683,11 @@ pub fn do_signal() -> &'static TaskControlBlock {
                         && trap_cx.gp.a7 != SYSCALL_SIGTIMEDWAIT
                         && trap_cx.gp.a7 != SYSCALL_RT_SIGSUSPEND
                     {
-                        debug!("[do_signal] syscall will restart after sigreturn");
                         // back to `ecall`
                         trap_cx.gp.pc -= 4;
                         // restore syscall parameter `a0`
                         trap_cx.gp.a0 = trap_cx.origin_a0;
                     } else {
-                        debug!("[do_signal] syscall was interrupted");
                         // will return EINTR after sigreturn
                         trap_cx.gp.a0 = EINTR as usize;
                     }

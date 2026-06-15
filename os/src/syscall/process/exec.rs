@@ -11,7 +11,6 @@ use crate::task::{
     current_task_ref, current_user_token, exit_current_and_run_next, is_writable_inode_busy,
     AuxvEntry,
 };
-use log::{debug, info};
 
 const MAX_EXEC_ARG_ENV_BYTES: usize = USER_STACK_INIT_SIZE / 2;
 const EXEC_AUXV_ENTRY_COUNT: usize = 17;
@@ -411,13 +410,6 @@ pub fn sys_execve(pathname: *const u8, argv: *const *const u8, envp: *const *con
         Ok(v) => v,
         Err(errno) => return errno,
     };
-    debug!(
-        "[exec] argv: {:?} /* {} vars */, envp: {:?} /* {} vars */",
-        argv_vec,
-        argv_vec.len(),
-        envp_vec,
-        envp_vec.len()
-    );
     let (working_inode, working_path) = {
         let lock = fs_ref.lock();
         (lock.working_inode.clone(), lock.working_path.clone())
@@ -427,13 +419,7 @@ pub fn sys_execve(pathname: *const u8, argv: *const *const u8, envp: *const *con
 
     match open_exec(&cwd_inode, &path) {
         Ok(file) => exec_opened_file(&cwd_inode, &path, abs_path, file, argv_vec, envp_vec),
-        Err(errno) => {
-            info!(
-                "[sys_execve] open_path(\"{}\") failed: errno={}",
-                path, errno
-            );
-            errno
-        }
+        Err(errno) => errno,
     }
 }
 
@@ -499,12 +485,6 @@ pub fn sys_execveat(
     let abs_path = make_abs_exec_path(&path, &base_path);
     match open_exec_with_follow(&start_inode, &path, follow_final) {
         Ok(file) => exec_opened_file(&start_inode, &path, abs_path, file, argv_vec, envp_vec),
-        Err(errno) => {
-            info!(
-                "[sys_execveat] open_path(\"{}\") failed: errno={}",
-                path, errno
-            );
-            errno
-        }
+        Err(errno) => errno,
     }
 }

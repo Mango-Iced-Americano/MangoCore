@@ -4,6 +4,20 @@
 
 ## 2026-06-15
 
+### exec/signal/la64 页表热路径降噪：删除普通 debug/trace
+
+**涉及文件：**
+- `os/src/syscall/process/exec.rs` — 删除 `execve` 参数 dump 和打开失败普通 info 输出
+- `os/src/task/signal/mod.rs` — 删除 pending signal/actionable 检查、syscall restart/EINTR 普通 debug 输出
+- `os/src/hal/arch/loongarch64/laflex.rs` — 删除 LoongArch 页表根页分配普通 trace 输出
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 已启动后由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 面向 `lat_proc`、`lat_sig`、exec 失败探测和 la64 地址空间创建路径；保留 OOM kill、非法信号帧、异常 trap 等错误诊断。
+
 ### 退出路径统计开关：默认构建消除 heap_trace 调用
 
 **涉及文件：**
