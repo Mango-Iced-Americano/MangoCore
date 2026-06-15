@@ -3,7 +3,7 @@
     内容与RISCV版本相同，无需修改
 */
 use core::cmp::Ordering;
-use core::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 
 #[cfg(feature = "oom_handler")]
 use crate::config::SYSTEM_TASK_LIMIT;
@@ -148,6 +148,47 @@ fn task_ptr_in(ptrs: &[usize], task: &Arc<TaskControlBlock>) -> bool {
     ptrs.binary_search(&task_ptr(task)).is_ok()
 }
 
+static READY_TASK_COUNT: AtomicUsize = AtomicUsize::new(0);
+static INTERRUPTIBLE_TASK_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+fn add_ready_count() {
+    READY_TASK_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+}
+
+fn sub_ready_count(count: usize) {
+    if count != 0 {
+        let _ = READY_TASK_COUNT.fetch_update(
+            AtomicOrdering::Relaxed,
+            AtomicOrdering::Relaxed,
+            |value| Some(value.saturating_sub(count)),
+        );
+    }
+}
+
+fn add_interruptible_count() {
+    INTERRUPTIBLE_TASK_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+}
+
+fn sub_interruptible_count(count: usize) {
+    if count != 0 {
+        let _ = INTERRUPTIBLE_TASK_COUNT.fetch_update(
+            AtomicOrdering::Relaxed,
+            AtomicOrdering::Relaxed,
+            |value| Some(value.saturating_sub(count)),
+        );
+    }
+}
+
+fn ready_count_fast() -> u16 {
+    READY_TASK_COUNT.load(AtomicOrdering::Relaxed).min(u16::MAX as usize) as u16
+}
+
+fn interruptible_count_fast() -> u16 {
+    INTERRUPTIBLE_TASK_COUNT
+        .load(AtomicOrdering::Relaxed)
+        .min(u16::MAX as usize) as u16
+}
+
 /// 简化的 nice-aware 调度器。
 impl TaskManager {
     #[cfg(feature = "oom_handler")]
@@ -176,12 +217,14 @@ impl TaskManager {
             self.ready_nonzero_nice_count += 1;
         }
         self.ready_queue.push_back(task);
+        add_ready_count();
     }
     fn add_front(&mut self, task: Arc<TaskControlBlock>) {
         if task_has_nonzero_nice(&task) {
             self.ready_nonzero_nice_count += 1;
         }
         self.ready_queue.push_front(task);
+        add_ready_count();
     }
     fn pop_next_ready(&mut self) -> Option<Arc<TaskControlBlock>> {
         let task = if self.ready_nonzero_nice_count == 0 {
@@ -189,6 +232,7 @@ impl TaskManager {
         } else {
             pop_fair_ready(&mut self.ready_queue)
         }?;
+        sub_ready_count(1);
         if task_has_nonzero_nice(&task) {
             self.ready_nonzero_nice_count = self.ready_nonzero_nice_count.saturating_sub(1);
         }
@@ -214,6 +258,7 @@ impl TaskManager {
             let zombie = self.ready_queue.pop_front();
             if let Some(task) = zombie.as_ref() {
                 self.note_ready_removed(task);
+                sub_ready_count(1);
             }
             return zombie;
         }
@@ -226,6 +271,7 @@ impl TaskManager {
             let zombie = self.ready_queue.pop_back();
             if let Some(task) = zombie.as_ref() {
                 self.note_ready_removed(task);
+                sub_ready_count(1);
             }
             return zombie;
         }
@@ -233,6 +279,7 @@ impl TaskManager {
             if self.ready_queue[i].acquire_inner_lock().is_zombie() {
                 let zombie = self.ready_queue.remove(i).unwrap();
                 self.note_ready_removed(&zombie);
+                sub_ready_count(1);
                 return Some(zombie);
             }
         }
@@ -242,7 +289,11 @@ impl TaskManager {
     fn take_one_interruptible_zombie(&mut self) -> Option<Arc<TaskControlBlock>> {
         for i in 0..self.interruptible_queue.len() {
             if self.interruptible_queue[i].acquire_inner_lock().is_zombie() {
-                return self.interruptible_queue.remove(i);
+                let zombie = self.interruptible_queue.remove(i);
+                if zombie.is_some() {
+                    sub_interruptible_count(1);
+                }
+                return zombie;
             }
         }
         None
@@ -268,6 +319,7 @@ impl TaskManager {
     /// 返回收集到的 zombie Arc，由调用者负责在锁外 drop。
     fn remove_zombie_tasks_by_pid(&mut self, pid: usize) -> alloc::vec::Vec<Arc<TaskControlBlock>> {
         let mut zombies = alloc::vec::Vec::new();
+        let old_ready_len = self.ready_queue.len();
         self.ready_queue.retain(|task| {
             let is_match = task.acquire_inner_lock().is_zombie() && task.process.pid == pid;
             if is_match {
@@ -277,6 +329,8 @@ impl TaskManager {
                 true
             }
         });
+        sub_ready_count(old_ready_len - self.ready_queue.len());
+        let old_interruptible_len = self.interruptible_queue.len();
         self.interruptible_queue.retain(|task| {
             let is_match = task.acquire_inner_lock().is_zombie() && task.process.pid == pid;
             if is_match {
@@ -286,6 +340,7 @@ impl TaskManager {
                 true
             }
         });
+        sub_interruptible_count(old_interruptible_len - self.interruptible_queue.len());
         self.recompute_ready_nice_count();
         zombies
     }
@@ -325,6 +380,7 @@ impl TaskManager {
     /// 添加一个任务到可中断队列
     pub fn add_interruptible(&mut self, task: Arc<TaskControlBlock>) {
         self.interruptible_queue.push_back(task);
+        add_interruptible_count();
     }
     /// 从可中断队列中删除一个任务
     pub fn drop_interruptible(&mut self, task: &Arc<TaskControlBlock>) -> bool {
@@ -335,6 +391,7 @@ impl TaskManager {
             .unwrap_or(false)
         {
             self.interruptible_queue.pop_front();
+            sub_interruptible_count(1);
             return true;
         }
         if self
@@ -344,21 +401,26 @@ impl TaskManager {
             .unwrap_or(false)
         {
             self.interruptible_queue.pop_back();
+            sub_interruptible_count(1);
             return true;
         }
         let old_len = self.interruptible_queue.len();
         self.interruptible_queue
             // 使用retain过滤掉与指定任务相同的任务
             .retain(|task_in_queue| !task_ptr_eq(task_in_queue, task));
-        self.interruptible_queue.len() != old_len
+        let removed = old_len - self.interruptible_queue.len();
+        sub_interruptible_count(removed);
+        removed != 0
     }
     fn enqueue_ready_batch(&mut self, tasks: Vec<Arc<TaskControlBlock>>) -> usize {
         if tasks.is_empty() {
             return 0;
         }
         let ptrs = sorted_task_ptrs(&tasks);
+        let old_interruptible_len = self.interruptible_queue.len();
         self.interruptible_queue
             .retain(|task| !task_ptr_in(&ptrs, task));
+        sub_interruptible_count(old_interruptible_len - self.interruptible_queue.len());
         let count = tasks.len();
         for task in tasks.into_iter().rev() {
             self.add_front(task);
@@ -372,13 +434,16 @@ impl TaskManager {
 
         let old_ready_len = self.ready_queue.len();
         self.ready_queue.retain(|task| !task_ptr_in(&ptrs, task));
+        let removed_ready = old_ready_len - self.ready_queue.len();
+        sub_ready_count(removed_ready);
         self.recompute_ready_nice_count();
         let old_interruptible_len = self.interruptible_queue.len();
         self.interruptible_queue
             .retain(|task| !task_ptr_in(&ptrs, task));
+        let removed_interruptible = old_interruptible_len - self.interruptible_queue.len();
+        sub_interruptible_count(removed_interruptible);
 
-        (old_ready_len - self.ready_queue.len())
-            + (old_interruptible_len - self.interruptible_queue.len())
+        removed_ready + removed_interruptible
     }
     /// 就绪队列中任务数量
     pub fn ready_count(&self) -> u16 {
@@ -600,12 +665,11 @@ pub fn remove_tasks_from_queues(tasks: &[Arc<TaskControlBlock>]) -> usize {
 
 /// 返回就绪队列中的任务数量
 pub fn procs_count() -> u16 {
-    let manager = TASK_MANAGER.lock();
-    manager.ready_count() + manager.interruptible_count()
+    ready_count_fast().saturating_add(interruptible_count_fast())
 }
 
 pub fn has_ready_task() -> bool {
-    TASK_MANAGER.lock().ready_count() != 0
+    READY_TASK_COUNT.load(AtomicOrdering::Relaxed) != 0
 }
 
 /// 返回僵尸任务数量
@@ -1742,9 +1806,7 @@ pub fn kernel_timer_queue_len() -> Option<usize> {
 
 /// 获取任务管理器中就绪和可中断任务数量（诊断用，尝试获取锁）
 pub fn task_manager_counts() -> Option<(u16, u16)> {
-    TASK_MANAGER
-        .try_lock()
-        .map(|m| (m.ready_count(), m.interruptible_count()))
+    Some((ready_count_fast(), interruptible_count_fast()))
 }
 
 /// 返回所有活跃的 PID 列表

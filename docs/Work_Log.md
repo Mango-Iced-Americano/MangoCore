@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### 调度队列状态读取优化：ready/interruptible 长度改为原子快照
+
+**涉及文件：**
+- `os/src/task/manager.rs` — 为 ready 与 interruptible 队列维护原子长度快照；入队、出队、批量唤醒、retain 清理和 zombie 清理路径同步更新计数
+- `os/src/task/manager.rs` — `has_ready_task()`、`procs_count()`、`task_manager_counts()` 改为无锁读取快照，减少 `sched_yield()`、短超时 futex/poll 自旋和 `/proc/stat` 诊断路径的 `TASK_MANAGER` 锁竞争
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 原子长度只作为调度状态快照；真实队列增删、唤醒和公平选择仍由 `TASK_MANAGER` 锁保护，读路径允许短暂近似但不影响队列一致性。
+
 ### 调度循环 timer 空路径优化：pending flag 跳过无定时器锁
 
 **涉及文件：**
