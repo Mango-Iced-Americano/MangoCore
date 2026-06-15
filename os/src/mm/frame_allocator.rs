@@ -116,7 +116,6 @@ impl FrameAllocator for StackFrameAllocator {
         if let Some(ppn) = self.recycled.pop() {
             self.mark_recycled(ppn, false);
             let frame_tracker = FrameTracker::new(ppn.into());
-            log::trace!("[frame_alloc] {:?}", frame_tracker);
             Some(frame_tracker)
         } else if self.current == self.end {
             // 无可用帧
@@ -128,7 +127,6 @@ impl FrameAllocator for StackFrameAllocator {
             let frame_tracker = FrameTracker::new((self.current - 1).into());
             #[cfg(feature = "zero_init")]
             let frame_tracker = unsafe { FrameTracker::new_uninit((self.current - 1).into()) };
-            log::trace!("[frame_alloc] {:?}", frame_tracker);
             Some(frame_tracker)
         }
     }
@@ -143,13 +141,11 @@ impl FrameAllocator for StackFrameAllocator {
         } else {
             self.current += 1;
             let frame_tracker = FrameTracker::new_uninit((self.current - 1).into());
-            log::trace!("[frame_alloc_uninit] {:?}", frame_tracker);
             Some(frame_tracker)
         }
     }
     /// 释放一个物理页
     fn dealloc(&mut self, ppn: PhysPageNum) {
-        log::trace!("[frame_dealloc] {:?}", ppn);
         let ppn = ppn.0;
         let alloc_start = PhysAddr::from(MEMORY_START).floor().0;
         if ppn < alloc_start || ppn >= self.end || ppn >= self.current {

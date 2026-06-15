@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### 帧分配器热路径降噪：删除普通 trace 日志
+
+**涉及文件：**
+- `os/src/mm/frame_allocator.rs` — 删除 frame alloc/frame alloc uninit/frame dealloc 正常路径 trace 输出，保留 invalid/duplicate dealloc 与 OOM recovery 的 warn 诊断
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 已启动后由外层 `timeout 60s` 结束，无 panic
+
+**备注：** `frame_alloc`/`frame_dealloc` 被 page fault、fork、mmap、exec 等路径频繁调用；本次只清理普通路径日志宏开销，不改变分配器状态检查、OOM recovery 或错误诊断。
+
 ### VMA/mmap 热路径降噪：删除正常路径 trace 日志
 
 **涉及文件：**
