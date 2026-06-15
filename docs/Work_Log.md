@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### signal 用户指针 token 快路径：减少信号 syscall VM 锁
+
+**涉及文件：**
+- `os/src/syscall/process/signal.rs` — `signalfd4/pidfd_send_signal/rt_sigpending/rt_sigqueueinfo/sigreturn` 的当前任务用户指针访问复用 `current_user_token()`
+- `os/src/task/signal/mod.rs` — `sigaction/sigaltstack/sigprocmask` 使用当前 token 快照，避免信号安装与信号掩码热路径额外锁 VM
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 保留 sighand、task inner、signal frame 恢复等原有锁语义；本次只替换当前任务用户地址空间 token 的获取方式。
+
 ### 时间与信号等待 token 快路径：复用当前 token 快照
 
 **涉及文件：**

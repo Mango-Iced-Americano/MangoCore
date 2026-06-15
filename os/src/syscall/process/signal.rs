@@ -14,7 +14,7 @@ use crate::mm::{copy_from_user, UserPtr, UserPtrMut};
 use crate::signal_type;
 use crate::syscall::errno::*;
 use crate::task::{
-    current_syscall_name, current_task_ref, exit_current_and_run_next, signal::*,
+    current_syscall_name, current_task_ref, current_user_token, exit_current_and_run_next, signal::*,
     ProcessControlBlock, ProcessManager, TaskControlBlock,
 };
 use crate::timer::TimeSpec;
@@ -291,7 +291,7 @@ pub fn sys_signalfd4(fd: usize, mask: usize, sigsetsize: usize, flags: usize) ->
 
     let (token, files_ref) = {
         let task = current_task_ref().unwrap();
-        (task.get_user_token(), task.process.files())
+        (current_user_token(), task.process.files())
     };
     let sigmask = match read_signalfd_mask(token, mask, sigsetsize) {
         Ok(mask) => mask,
@@ -583,7 +583,7 @@ pub fn sys_pidfd_send_signal(pidfd: usize, sig: usize, info: usize, flags: usize
     };
 
     let task = current_task_ref().unwrap();
-    let token = task.get_user_token();
+    let token = current_user_token();
     let queued_siginfo = if info != 0 {
         match UserPtr::<SigInfo>::from_addr(info).read(token) {
             Ok(siginfo) => {
@@ -680,7 +680,7 @@ pub fn sys_rt_sigpending(set: usize, sigsetsize: usize) -> isize {
         return -(SyscallErr::EINVAL as isize);
     }
     let task = current_task_ref().unwrap();
-    let token = task.get_user_token();
+    let token = current_user_token();
     let pending = {
         let inner = task.acquire_inner_lock();
         inner.sigpending.pending() | task.process.shared_pending()
@@ -716,7 +716,7 @@ pub fn sys_rt_sigqueueinfo(pid: usize, sig: usize, info: usize) -> isize {
     };
 
     let task = current_task_ref().unwrap();
-    let siginfo = match UserPtr::<SigInfo>::from_addr(info).read(task.get_user_token()) {
+    let siginfo = match UserPtr::<SigInfo>::from_addr(info).read(current_user_token()) {
         Ok(siginfo) => siginfo,
         Err(_) => return EFAULT,
     };
@@ -770,8 +770,8 @@ pub fn sys_sigaltstack(ss: usize, old_ss: usize) -> isize {
 pub fn sys_sigreturn() -> isize {
     // mark not processing signal handler
     let task = current_task_ref().unwrap();
+    let token = current_user_token();
     let mut inner = task.acquire_inner_lock();
-    let token = task.get_user_token();
     info!("[sys_sigreturn] tid: {}, pid: {}", task.tid.0, task.pid());
 
     let sp = inner.get_trap_cx().gp.sp;

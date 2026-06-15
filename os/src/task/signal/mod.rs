@@ -16,7 +16,7 @@ use crate::task::{
 };
 use alloc::sync::Arc;
 
-use super::{current_task, current_task_ref};
+use super::{current_task, current_task_ref, current_user_token};
 use super::task::TaskControlBlock;
 use crate::utils::error::SyscallErr;
 
@@ -327,7 +327,7 @@ pub fn sigaction(signum: usize, act: *const UserSigAction, oldact: *mut UserSigA
         }
         signum => {
             trace!("[sigaction] signal: {:?}", Signals::from_signum(signum));
-            let token = task.get_user_token();
+            let token = current_user_token();
             if !oldact.is_null() {
                 let sighand_ref = task.process.sighand();
                 let sighand = sighand_ref.lock();
@@ -924,7 +924,7 @@ pub fn do_signal() -> &'static TaskControlBlock {
 
 pub fn sigaltstack(ss: *const SignalStack, old_ss: *mut SignalStack) -> isize {
     let task = current_task_ref().unwrap();
-    let token = task.get_user_token();
+    let token = current_user_token();
     let new_stack = match UserPtr::new(ss).read_optional(token) {
         Ok(stack) => stack,
         Err(errno) => return errno,
@@ -980,8 +980,8 @@ bitflags! {
 /// For the sake of performance, we use `Signals` instead.
 pub fn sigprocmask(how: u32, set: *const Signals, oldset: *mut Signals) -> isize {
     let task = current_task_ref().unwrap();
+    let token = current_user_token();
     let mut inner = task.acquire_inner_lock();
-    let token = task.get_user_token();
     // If oldset is non-NULL, the previous value of the signal mask is stored in oldset
     if oldset as usize != 0 {
         let old_bits = inner.sigmask.bits() as u64;
