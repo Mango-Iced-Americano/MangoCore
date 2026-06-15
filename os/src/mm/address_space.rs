@@ -11,7 +11,8 @@ use crate::hal::TICKS_PER_SEC;
 use crate::should_map_trampoline;
 use crate::syscall::errno::*;
 use crate::task::{
-    current_task, trap_cx_bottom_from_slot, ustack_bottom_from_slot, AuxvEntry, AuxvType, ELFInfo,
+    current_task_ref, trap_cx_bottom_from_slot, ustack_bottom_from_slot, AuxvEntry, AuxvType,
+    ELFInfo,
 };
 use alloc::collections::BTreeSet;
 use alloc::string::String;
@@ -1602,14 +1603,13 @@ fn memory_error_to_errno(err: MemoryError) -> isize {
 
 pub(super) fn check_page_fault(addr: VirtAddr, access: FaultAccess) -> Result<PhysAddr, isize> {
     // This is where we handle the page fault.
-    let task = match current_task() {
-        Some(task) => task,
+    let vm = match current_task_ref() {
+        Some(task) => task.process.vm(),
         None => {
             log::warn!("[check_page_fault] No current task found, page fault in kernel?");
             return Err(EFAULT);
         }
     };
-    let vm = task.process.vm();
     let result = vm.lock().fault_in_trap_va(addr, access);
     result
 }

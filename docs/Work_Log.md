@@ -4,6 +4,21 @@
 
 ## 2026-06-15
 
+### lmbench/UnixBench 用户内存访问优化：当前任务短引用化
+
+**涉及文件：**
+- `os/src/mm/uaccess.rs` — `is_current_user_token()` 与用户地址 fault-in 改用 `current_task_ref()`，校验当前 token 后只 clone VM 句柄再进入缺页处理，减少 copy_from_user/copy_to_user 高频路径中的当前任务 `Arc` clone
+- `os/src/mm/address_space.rs` — trap page fault 当前任务读取改用短引用并 clone VM 后再加锁
+- `os/src/mm/sysctl.rs` — committed_AS 当前进程 VM 读取改用短引用
+- `os/src/mm/frame_allocator.rs` — OOM handler 当前进程 VM 清理路径改用短引用
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** 短引用只用于读取 token/clone VM Arc，不跨 VM 锁、缺页处理或调度等待点保存。
+
 ### lmbench/UnixBench UTS syscall 优化：短引用访问当前任务
 
 **涉及文件：**

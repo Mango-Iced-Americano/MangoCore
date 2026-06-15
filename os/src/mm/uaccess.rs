@@ -2,8 +2,9 @@ use core::{marker::PhantomData, ops::IndexMut};
 
 use super::page_table::{FaultAccess, PageTable, UserAccess};
 use super::{PhysAddr, StepByOne, VirtAddr};
-use crate::hal::PageTableImpl;
 use crate::fs::iov::IOVec;
+use crate::hal::PageTableImpl;
+use crate::task::current_task_ref;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -524,7 +525,7 @@ pub(crate) fn uaccess_user_range_ok(ptr: usize, end: usize) -> bool {
 }
 
 fn is_current_user_token(token: usize) -> bool {
-    crate::task::current_task()
+    current_task_ref()
         .map(|task| task.get_user_token() == token)
         .unwrap_or(false)
 }
@@ -538,11 +539,10 @@ fn fault_in_current_user_va(
     access: FaultAccess,
 ) -> Result<PhysAddr, isize> {
     // fault-in 只能由当前任务 token 处理；跨进程 token 只能返回 EFAULT。
-    if !is_current_user_token(token) {
-        return Err(crate::syscall::errno::EFAULT);
-    }
-    let task = crate::task::current_task().ok_or(crate::syscall::errno::EFAULT)?;
-    let vm = task.process.vm();
+    let vm = current_task_ref()
+        .filter(|task| task.get_user_token() == token)
+        .map(|task| task.process.vm())
+        .ok_or(crate::syscall::errno::EFAULT)?;
     let result = vm.lock().fault_in_user_va(va, access);
     result
 }
