@@ -4,6 +4,20 @@
 
 ## 2026-06-15
 
+### task lifecycle/quota 原子序：减少 clone/exit 屏障
+
+**涉及文件：**
+- `os/src/task/quota.rs` — 任务配额计数和 soft-limit 告警 latch 改为 `Relaxed` 原子访问
+- `os/src/task/pid.rs` — TID 释放一次性标志改为 `Relaxed`
+- `os/src/task/task.rs` — `user_stack_allocated` 布尔标志改为 `Relaxed` 读写，降低 clone/exec/exit 资源路径屏障开销
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 配额与 TID 释放只需要原子 RMW 保证计数/latch 正确；TID 回收到全局分配器仍由 `TID_ALLOCATOR` 锁保护。`user_stack_allocated` 只作为资源释放参数，不发布地址空间内容。
+
 ### process hint/counter 原子序：减少信号与线程生命周期屏障
 
 **涉及文件：**

@@ -741,12 +741,12 @@ impl TaskControlBlock {
         if keep_trap_context {
             vm.dealloc_user_res_keep_trap(
                 self.user_res_slot,
-                self.user_stack_allocated.load(Ordering::Acquire),
+                self.user_stack_allocated.load(Ordering::Relaxed),
             );
         } else {
             vm.dealloc_user_res_with_stack(
                 self.user_res_slot,
-                self.user_stack_allocated.load(Ordering::Acquire),
+                self.user_stack_allocated.load(Ordering::Relaxed),
             );
         }
 
@@ -1048,7 +1048,7 @@ impl TaskControlBlock {
         let trap_cx_ppn = memory_set
             .alloc_user_res_with_trap_ppn(self.user_res_slot, true)
             .map_err(|_| ENOMEM)?;
-        self.user_stack_allocated.store(true, Ordering::Release);
+        self.user_stack_allocated.store(true, Ordering::Relaxed);
         // 创建ELF参数表
         let user_sp =
             memory_set.create_elf_tables(self.ustack_bottom_va(), argv_vec, envp_vec, &elf_info)?;
@@ -1101,7 +1101,7 @@ impl TaskControlBlock {
             // 新 VM 仍使用同一个 user_res_slot，避免父 VM 留下孤儿映射。
             current_vm.lock().dealloc_user_res_with_stack(
                 self.user_res_slot,
-                self.user_stack_allocated.load(Ordering::Acquire),
+                self.user_stack_allocated.load(Ordering::Relaxed),
             );
         }
         // 更新可执行文件描述符
@@ -1520,7 +1520,7 @@ impl TaskControlBlock {
         if shared_vm {
             self.process.vm().lock().dealloc_user_res_with_stack(
                 self.user_res_slot,
-                self.user_stack_allocated.load(Ordering::Acquire),
+                self.user_stack_allocated.load(Ordering::Relaxed),
             );
         }
     }

@@ -180,7 +180,7 @@ pub struct TidHandle(pub usize, AtomicBool);
 
 impl TidHandle {
     pub fn release(&self) {
-        if !self.1.swap(true, Ordering::AcqRel) {
+        if !self.1.swap(true, Ordering::Relaxed) {
             // Normal tid_alloc() stays monotonic until the high watermark, but
             // ns_last_pid and long-running suites need released IDs recorded.
             TID_ALLOCATOR.lock().release_fresh_id(self.0);
@@ -188,7 +188,7 @@ impl TidHandle {
     }
 
     pub fn is_released(&self) -> bool {
-        self.1.load(Ordering::Acquire)
+        self.1.load(Ordering::Relaxed)
     }
 }
 
