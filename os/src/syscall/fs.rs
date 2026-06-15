@@ -3937,20 +3937,22 @@ fn collect_rbind_snapshot(
 
     // Seed: submounts directly reachable from source_subtree_root
     {
-        let mps = source_mfs.mountpoints.lock();
-        for (&ino, child_mfs) in mps.iter() {
+        let entries: Vec<(usize, Arc<vfs::MountFS>)> = {
+            let mps = source_mfs.mountpoints.lock();
+            mps.iter().map(|(k, v)| (*k, v.clone())).collect()
+        };
+        for (ino, child_mfs) in &entries {
             let ptr = Arc::as_ptr(child_mfs) as usize;
             if seen.contains(&ptr) { continue; }
-            // Find the name of this mountpoint under subtree_root
             if let Ok(dirents) = source_subtree_root.list_dirents() {
-                if let Some((name, _, _)) = dirents.iter().find(|(_, i, _)| *i == ino) {
+                if let Some((name, _, _)) = dirents.iter().find(|(_, i, _)| *i == *ino) {
                     seen.push(ptr);
                     queue.push_back((child_mfs.clone(), child_mfs.mountpoint_root_inode()));
                     result.push(RbindEntry {
                         child_mfs: child_mfs.clone(),
                         source_parent_mfs: source_mfs.clone(),
                         child_name: name.clone(),
-                        mountpoint_id: ino,
+                        mountpoint_id: *ino,
                     });
                 }
             }
