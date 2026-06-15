@@ -269,6 +269,18 @@ impl MountFSInode {
 
     /// 逐级查找子项（带挂载点交叉和 dentry 缓存）
     fn do_find(&self, name: &str) -> Result<Arc<MountFSInode>, SyscallErr> {
+        let parent_ino = self.inner_inode.metadata()?.inode_id;
+        self.do_find_with_parent_ino(name, parent_ino)
+    }
+
+    /// Same as do_find, but caller supplies parent_ino to avoid a redundant
+    /// inner_inode.metadata() call. Used by vfs_lookup which already has the
+    /// metadata from its own directory-type check.
+    pub(crate) fn do_find_with_parent_ino(
+        &self,
+        name: &str,
+        parent_ino: usize,
+    ) -> Result<Arc<MountFSInode>, SyscallErr> {
         // ".." goes through do_parent() which handles mountpoint boundary crossing;
         // bypass dentry cache to avoid stale cached entries for mount root "..".
         if name == ".." {
@@ -287,7 +299,6 @@ impl MountFSInode {
 
         // Shortcut: skip dentry cache for dynamic filesystems (procfs)
         if self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
-            let parent_ino = self.inner_inode.metadata()?.inode_id;
             let inner_inode = self.inner_inode.find(name)?;
             let result = MountFSInode::overlaid_inode(MountFSInode::new(
                 inner_inode,
@@ -298,7 +309,6 @@ impl MountFSInode {
             return Ok(result);
         }
 
-        let parent_ino = self.inner_inode.metadata()?.inode_id;
         let key = super::dentry_cache::DentryKey {
             parent_ino,
             name: String::from(name),

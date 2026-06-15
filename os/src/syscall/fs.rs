@@ -355,7 +355,8 @@ fn open_file_at(
             if flags.contains(OpenFlags::O_TRUNC) {
                 target.resize(0).map_err(|e| -(e as isize))?;
             }
-            vfs::File::new(target, _open_flags_to_vfs_flags(flags)).map_err(|e| -(e as isize))
+            vfs::File::new_with_metadata(target, _open_flags_to_vfs_flags(flags), md)
+                .map_err(|e| -(e as isize))
         }
         Err(errno) if errno == ENOENT => {
             if !flags.contains(OpenFlags::O_CREAT) || flags.contains(OpenFlags::O_DIRECTORY) {

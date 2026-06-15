@@ -726,6 +726,57 @@ impl File {
         Ok(file)
     }
 
+    /// 根据 inode 创建新 File，复用已有的 metadata 避免重复调用 inode.metadata()。
+    /// 用于 open_file_at 等调用方已经持有 metadata 的路径。
+    pub fn new_with_metadata(
+        inode: Arc<dyn IndexNode>,
+        flags: FileFlags,
+        metadata: Metadata,
+    ) -> Result<Arc<Self>, SyscallErr> {
+        let mut mode = FileMode::FMODE_LSEEK | FileMode::FMODE_PREAD | FileMode::FMODE_PWRITE;
+
+        if flags.is_readable() {
+            mode |= FileMode::FMODE_READ;
+        }
+        if flags.is_writable() {
+            mode |= FileMode::FMODE_WRITE;
+        }
+        if flags.contains(FileFlags::O_PATH) {
+            mode |= FileMode::FMODE_PATH;
+        }
+
+        let file_type = metadata.file_type;
+
+        if matches!(file_type, FileType::Pipe | FileType::Socket) || inode.is_stream() {
+            mode |= FileMode::FMODE_STREAM;
+        }
+
+        let posix_lock_key = (metadata.dev_id, metadata.inode_id);
+
+        let private_data = FilePrivateData::default();
+        let file = Arc::new(File {
+            inode,
+            offset: AtomicUsize::new(0),
+            flags: Mutex::new(flags),
+            mode: Mutex::new(mode),
+            file_type,
+            private_data: Mutex::new(private_data),
+            open_file_id: alloc_open_file_id(),
+            posix_lock_key,
+            created_by_open: true,
+            owner: Mutex::new(FileOwner::default()),
+            file_rw_hint: Mutex::new(0),
+            lease: Mutex::new(None),
+        });
+
+        file.inode.open(file.private_data.lock(), &flags)?;
+        if file.tracks_write_busy() {
+            register_writable_inode(&file.inode);
+        }
+
+        Ok(file)
+    }
+
     /// 创建新 File，不调用 inode.open（用于 socket create 等场景）
     pub fn new_without_open(
         inode: Arc<dyn IndexNode>,

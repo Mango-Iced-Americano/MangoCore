@@ -23,7 +23,7 @@ use core::sync::atomic::AtomicUsize;
 use super::mount::MountFSInode;
 
 /// Maximum number of entries in the dentry cache.
-pub const DENTRY_CACHE_LIMIT: usize = 256;
+pub const DENTRY_CACHE_LIMIT: usize = 1024;
 
 /// Global eviction counters for diagnostics.
 pub mod dcache_stats {
