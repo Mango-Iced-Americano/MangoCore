@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### clone 调度发布路径：减少子任务 Arc clone
+
+**涉及文件：**
+- `os/src/syscall/process/clone.rs` — clone/fork 成功 publish 后将 `child` 直接移交给调度发布路径，避免 caller 侧额外 `Arc` clone/drop
+- `os/src/task/process_manager.rs` — `schedule_clone_child()` 在非 `CLONE_VFORK` 路径直接 move child 到 ready queue；vfork 路径保留一份引用用于 completion 等待
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** publish 失败回滚仍保留原有 `child` 引用；成功后 caller 不再使用 `child`。`CLONE_VFORK` 仍需在入队后等待子进程完成 vfork。
+
 ### signal 权限检查身份快照：减少 kill 路径当前任务锁
 
 **涉及文件：**

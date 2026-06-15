@@ -67,10 +67,10 @@ impl ProcessManager {
     ) {
         if flags.contains(CloneFlags::CLONE_VFORK) {
             child.process.set_vfork_parent(parent);
-        }
-        add_task(child.clone());
-        if flags.contains(CloneFlags::CLONE_VFORK) {
+            add_task(child.clone());
             child.process.wait_vfork_done_uninterruptible();
+        } else {
+            add_task(child);
         }
     }
 

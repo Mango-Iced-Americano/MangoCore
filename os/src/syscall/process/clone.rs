@@ -299,7 +299,7 @@ fn sys_clone_inner(
         child.cleanup_unpublished_clone(flags.contains(CloneFlags::CLONE_VM));
         return errno;
     }
-    ProcessManager::schedule_clone_child(&parent, child.clone(), flags);
+    ProcessManager::schedule_clone_child(&parent, child, flags);
     new_tid as isize
 }
 
