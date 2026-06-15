@@ -11,7 +11,6 @@ use crate::timer::{
     current_timespec, current_timeval, get_time_ms, set_current_timespec, ITimerVal, TimeSpec,
     TimeVal, TimeZone, Times, NSEC_PER_SEC, USEC_PER_SEC,
 };
-use log::trace;
 use spin::Mutex;
 
 const CLOCK_REALTIME: usize = 0;
@@ -199,7 +198,6 @@ pub fn sys_setitimer(
                     if let Err(e) = UserPtrMut::new(old_value).write(token, &inner.timer[0]) {
                         return e;
                     }
-                    trace!("[sys_setitimer] *old_value: {:?}", inner.timer[0]);
                 }
                 if let Some(value) = new_timer {
                     //防止generation溢出
@@ -237,11 +235,9 @@ pub fn sys_setitimer(
                 if let Err(e) = UserPtrMut::new(old_value).write(token, &inner.timer[which]) {
                     return e;
                 }
-                trace!("[sys_setitimer] *old_value: {:?}", inner.timer[which]);
             }
             if let Some(value) = new_timer {
                 inner.timer[which] = value;
-                trace!("[sys_setitimer] *new_value: {:?}", inner.timer[which]);
                 inner.clock.last_real_timer_update = TimeVal::now();
             }
             SUCCESS
@@ -902,7 +898,6 @@ pub fn sys_clock_gettime(clk_id: usize, tp: *mut TimeSpec) -> isize {
             log::error!("[sys_clock_gettime] Failed to copy to {:?}", tp);
             return EFAULT;
         };
-        log::trace!("[sys_clock_gettime] clk_id: {}, tp: {:?}", clk_id, timespec);
     }
     SUCCESS
 }

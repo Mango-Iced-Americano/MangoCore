@@ -4,6 +4,20 @@
 
 ## 2026-06-15
 
+### 时间/信号热路径降噪：删除普通 trace 日志
+
+**涉及文件：**
+- `os/src/syscall/process/time.rs` — 删除 `setitimer`/`clock_gettime` 正常路径 trace 输出
+- `os/src/syscall/process/signal.rs` — 删除 `sigaction`/`rt_sigpending` syscall 入口与普通结果 trace 输出
+- `os/src/task/signal/mod.rs` — 删除 `sigaction`、`sigprocmask`、`do_signal` 正常投递/忽略路径 trace 输出，保留异常诊断日志
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 本次不改变信号处理语义、锁顺序或错误码，只清理高频正常路径的 trace 宏分支；`warn!`/`error!`/关键 `debug!` 诊断保留。
+
 ### 高频 syscall 入口降噪：删除普通参数 info 日志
 
 **涉及文件：**

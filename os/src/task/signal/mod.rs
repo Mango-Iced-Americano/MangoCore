@@ -5,7 +5,7 @@ use crate::hal::{
 use crate::signal_type;
 use core::fmt::{self, Debug, Formatter};
 use core::mem::size_of;
-use log::{debug, error, trace, warn};
+use log::{debug, error, warn};
 
 use crate::config::*;
 use crate::mm::{UserPtr, UserPtrMut};
@@ -326,16 +326,13 @@ pub fn sigaction(signum: usize, act: *const UserSigAction, oldact: *mut UserSigA
             EINVAL
         }
         signum => {
-            trace!("[sigaction] signal: {:?}", Signals::from_signum(signum));
             let token = current_user_token();
             if !oldact.is_null() {
                 let sighand_ref = task.process.sighand();
                 let sighand = sighand_ref.lock();
                 let suc = if let Some(sigact) = sighand.get(signum) {
-                    trace!("[sigaction] *oldact: {:?}", sigact);
                     UserPtrMut::new(oldact).write(token, &UserSigAction::from_kernel(*sigact))
                 } else {
-                    trace!("[sigaction] *oldact: not found");
                     UserPtrMut::new(oldact)
                         .write(token, &UserSigAction::from_kernel(SigAction::new()))
                 };
@@ -362,7 +359,6 @@ pub fn sigaction(signum: usize, act: *const UserSigAction, oldact: *mut UserSigA
                 } else {
                     sighand.set(signum, Some(sigact));
                 }
-                trace!("[sigaction] *act: {:?}", sigact);
             }
             SUCCESS
         }
@@ -670,14 +666,6 @@ pub fn do_signal() -> &'static TaskControlBlock {
     while let Some((pending, from_process)) = take_next_pending_signal(task, &mut inner) {
         let signum = pending.signum();
         let signal = pending.signal;
-        trace!(
-            "[do_signal] signal: {:?}, from_process: {}, thread_pending: {:?}, process_pending: {:?}, sigmask: {:?}",
-            signal,
-            from_process,
-            inner.sigpending.pending(),
-            task.process.shared_pending(),
-            inner.sigmask
-        );
         let sighand_ref = task.process.sighand();
         let mut sighand = sighand_ref.lock();
         if signal_should_ptrace_stop(&inner, signal) {
@@ -690,7 +678,6 @@ pub fn do_signal() -> &'static TaskControlBlock {
         if let Some(act) = sighand.get(signum).copied() {
             // SIG_IGN → discard this signal (POSIX: ignored signals are not delivered)
             if act.handler == SigHandler::SIG_IGN {
-                trace!("[do_signal] Ignore {:?} (SIG_IGN)", signal);
                 continue;
             }
             if act.handler != SigHandler::SIG_DFL {
@@ -838,18 +825,6 @@ pub fn do_signal() -> &'static TaskControlBlock {
                     drop(sighand);
                     exit_current_with_sigsegv();
                 }
-                let (trace_ra, trace_sp) = {
-                    let trap_cx = inner.get_trap_cx();
-                    (trap_cx.gp.ra, trap_cx.gp.sp)
-                };
-                trace!(
-                "[do_signal] signal: {:?}, signum: {:?}, handler: {:?} (ra: 0x{:X}, sp: 0x{:X})",
-                signal,
-                signum,
-                act.handler,
-                trace_ra,
-                trace_sp
-            );
                 // mask some signals
                 inner.sigmask |= if act.flags.contains(SigActionFlags::SA_NODEFER) {
                     act.mask - Signals::CAN_NOT_BE_MASKED
@@ -899,7 +874,6 @@ pub fn do_signal() -> &'static TaskControlBlock {
             // the current process we are handing is sure to be in RUNNING status, so just ignore SIGCONT
             // where we really wake up this process is where we sent SIGCONT, such as `sys_kill()`
             Signals::SIGCHLD | Signals::SIGCONT | Signals::SIGURG | Signals::SIGWINCH => {
-                trace!("[do_signal] Ignore {:?}", signal);
                 continue;
             }
             // stop (or we should say block) current process
@@ -989,7 +963,6 @@ pub fn sigprocmask(how: u32, set: *const Signals, oldset: *mut Signals) -> isize
             Ok(()) => {}
             Err(errno) => return errno,
         }
-        trace!("[sigprocmask] *oldset: ({:?})", inner.sigmask);
     }
     // If set is NULL, then the signal mask is unchanged
     if set as usize != 0 {
@@ -998,7 +971,6 @@ pub fn sigprocmask(how: u32, set: *const Signals, oldset: *mut Signals) -> isize
             Ok(bits) => Signals::from_bits_truncate(bits as signal_type!()),
             Err(errno) => return errno,
         };
-        trace!("[sigprocmask] how: {:?}, *set: ({:?})", how, signal_set);
         match how {
             // add the signals not yet blocked in the given set to the mask
             Some(SigMaskHow::SIG_BLOCK) => {

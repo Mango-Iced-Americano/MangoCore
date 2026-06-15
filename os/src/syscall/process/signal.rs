@@ -21,7 +21,7 @@ use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
 use core::any::Any;
 use core::mem::size_of;
-use log::{error, trace};
+use log::error;
 use spin::{Mutex, MutexGuard};
 
 fn can_signal_process(target: &ProcessControlBlock) -> bool {
@@ -632,13 +632,6 @@ pub fn sys_pidfd_send_signal(pidfd: usize, sig: usize, info: usize, flags: usize
 }
 
 pub fn sys_sigaction(signum: usize, act: usize, oldact: usize, sigsetsize: usize) -> isize {
-    trace!(
-        "[sys_sigaction] signum: {:?}, act: {:X}, oldact: {:X}, sigsetsize: {}",
-        signum,
-        act,
-        oldact,
-        sigsetsize
-    );
     if !valid_rt_sigaction_size(sigsetsize) {
         return EINVAL;
     }
@@ -680,12 +673,6 @@ pub fn sys_rt_sigpending(set: usize, sigsetsize: usize) -> isize {
         inner.sigpending.pending() | task.process.shared_pending()
     };
     let pending_bits = pending.bits() as u64;
-    trace!(
-        "[sys_rt_sigpending] tid: {}, pid: {}, pending: {:?}",
-        task.tid.0,
-        task.pid(),
-        pending
-    );
     match UserPtrMut::from_addr(set).write(token, &pending_bits) {
         Ok(()) => SUCCESS,
         Err(errno) => errno,
