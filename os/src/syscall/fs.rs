@@ -563,6 +563,39 @@ fn read_into_user(file: &vfs::File, token: usize, buf: usize, count: usize) -> i
     total as isize
 }
 
+fn read_zero_into_user(token: usize, buf: usize, count: usize) -> isize {
+    if count == 0 {
+        return 0;
+    }
+
+    let chunk_cap = count.min(crate::hal::IO_CHUNK_SIZE);
+    let mut total = 0usize;
+    while total < count {
+        let want = (count - total).min(chunk_cap);
+        let user_addr = match buf.checked_add(total) {
+            Some(v) => v,
+            None => return if total > 0 { total as isize } else { EFAULT },
+        };
+        let accessible = match writable_len_for_read(token, user_addr, want) {
+            Ok(n) => n,
+            Err(errno) => return if total > 0 { total as isize } else { errno },
+        };
+        let mut user_buf = match UserBufferWriter::new(token, user_addr as *mut u8, accessible) {
+            Ok(writer) => writer.into_user_buffer(),
+            Err(errno) => return if total > 0 { total as isize } else { errno },
+        };
+        user_buf.clear();
+        total += accessible;
+
+        if let Some(task) = current_task() {
+            if crate::task::has_actionable_signal(&task) {
+                break;
+            }
+        }
+    }
+    total as isize
+}
+
 fn pread_into_user(file: &vfs::File, token: usize, buf: usize, count: usize, offset: usize) -> isize {
     if count == 0 {
         return match file.pread(offset, &mut []) {
@@ -1169,8 +1202,14 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
     if file.readable().is_err() {
         return EBADF;
     }
-    let is_nonblock = file.is_nonblock();
     let token = task.get_user_token();
+    if file.is_dev_null() {
+        return 0;
+    }
+    if file.is_dev_zero() {
+        return read_zero_into_user(token, buf, count);
+    }
+    let is_nonblock = file.is_nonblock();
     if is_nonblock {
         read_into_user(&file, token, buf, count)
     } else if let Some(wq) = file.inode.read_wait_queue() {
@@ -1201,6 +1240,9 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
     };
     if file.writable().is_err() {
         return EBADF;
+    }
+    if file.is_dev_null() || file.is_dev_zero() {
+        return count as isize;
     }
     let fsize_limit = task.acquire_inner_lock().fsize_limit_cur;
     count = match apply_fsize_limit(&file, count, write_start_offset(&file), fsize_limit) {

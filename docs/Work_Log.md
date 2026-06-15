@@ -88,6 +88,19 @@
 
 ## 2026-06-14
 
+### lmbench simple read/write 优化：为 `/dev/null` 和 `/dev/zero` 增加 syscall 快路径
+
+**涉及文件：**
+- `os/src/fs/vfs/file.rs` — 根据 char device `raw_dev` 在 open 时标记 `/dev/null`、`/dev/zero`，避免运行时穿透 MountFS downcast
+- `os/src/syscall/fs.rs` — `read(/dev/null)` 直接返回 EOF，`write(/dev/null|/dev/zero)` 按 Linux mem 设备语义直接返回 count，`read(/dev/zero)` 直接清零用户页并跳过 kernel bounce buffer 分配
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU boot smoke ✅ — 内核启动、挂载 rootfs/tools、进入 initproc 并按 `mask=0x001` 结束；当前 `rootfs-rv.img` 缺 `/musl`/`/glibc` 下 basic 脚本，basic 用例未作为通过结果采信
+
+**备注：** 最新 lmbench 日志中 `Simple read/write` 明显偏慢，常见实现会使用 `/dev/zero` 和 `/dev/null`。本次快路径避免无意义的 `Vec` 分配、用户态到内核 bounce copy、普通文件 fsize/offset 计算；普通文件、pipe、tty/socket 路径不受影响。
+
 ### lmbench pipe 路径优化：减少 stream fd 的 offset/notify 开销
 
 **涉及文件：**

@@ -189,6 +189,22 @@ bitflags! {
         const FMODE_STREAM = 0x40;
         /// 支持随机访问
         const FMODE_RANDOM = 0x80;
+        /// Linux mem major 1 minor 3: /dev/null
+        const FMODE_DEV_NULL = 0x100;
+        /// Linux mem major 1 minor 5: /dev/zero
+        const FMODE_DEV_ZERO = 0x200;
+    }
+}
+
+#[inline]
+fn special_device_mode(metadata: &Metadata) -> FileMode {
+    if metadata.file_type != FileType::CharDevice {
+        return FileMode::empty();
+    }
+    match metadata.raw_dev {
+        dev if dev == crate::makedev!(1, 3) => FileMode::FMODE_DEV_NULL,
+        dev if dev == crate::makedev!(1, 5) => FileMode::FMODE_DEV_ZERO,
+        _ => FileMode::empty(),
     }
 }
 
@@ -693,6 +709,7 @@ impl File {
         };
 
         let file_type = metadata.file_type;
+        mode |= special_device_mode(&metadata);
 
         // 对于流式文件（pipe/socket），设置 FMODE_STREAM
         if matches!(file_type, FileType::Pipe | FileType::Socket) || inode.is_stream() {
@@ -742,8 +759,12 @@ impl File {
             mode |= FileMode::FMODE_STREAM;
         }
 
-        let posix_lock_key = inode
-            .metadata()
+        let metadata = inode.metadata().ok();
+        if let Some(metadata) = metadata.as_ref() {
+            mode |= special_device_mode(metadata);
+        }
+        let posix_lock_key = metadata
+            .as_ref()
             .map(|m| (m.dev_id, m.inode_id))
             .unwrap_or((0, 0));
 
@@ -785,8 +806,12 @@ impl File {
             mode |= FileMode::FMODE_STREAM;
         }
 
-        let posix_lock_key = inode
-            .metadata()
+        let metadata = inode.metadata().ok();
+        if let Some(metadata) = metadata.as_ref() {
+            mode |= special_device_mode(metadata);
+        }
+        let posix_lock_key = metadata
+            .as_ref()
             .map(|m| (m.dev_id, m.inode_id))
             .unwrap_or((0, 0));
 
@@ -1148,6 +1173,16 @@ impl File {
     #[inline]
     pub fn file_type(&self) -> FileType {
         self.file_type
+    }
+
+    #[inline]
+    pub fn is_dev_null(&self) -> bool {
+        self.mode().contains(FileMode::FMODE_DEV_NULL)
+    }
+
+    #[inline]
+    pub fn is_dev_zero(&self) -> bool {
+        self.mode().contains(FileMode::FMODE_DEV_ZERO)
     }
 
     #[inline]
