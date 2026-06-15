@@ -1,6 +1,6 @@
 use super::{
-    __switch, do_wake_expired, take_one_interruptible_zombie, take_one_ready_zombie,
-    take_zombie_tasks,
+    __switch, do_wake_expired, has_zombie_queue_tasks_fast, take_one_interruptible_zombie,
+    take_one_ready_zombie, take_zombie_tasks,
 };
 use super::{fetch_task, TaskStatus};
 use super::{TaskContext, TaskControlBlock};
@@ -115,10 +115,12 @@ pub fn run_tasks() {
         crate::fs::reclaim::maybe_reclaim_fs_caches();
         // 当前任务退出后先进入专用 zombie 队列；切回 idle 后即可安全 drop。
         // 这样避免把不可运行的 TCB 塞进 ready_queue 再扫描剔除。
-        let zombies = take_zombie_tasks(64);
-        let drained_zombies = zombies.len();
-        drop(zombies);
-        super::perf::record_zombie_drain(drained_zombies);
+        if has_zombie_queue_tasks_fast() {
+            let zombies = take_zombie_tasks(64);
+            let drained_zombies = zombies.len();
+            drop(zombies);
+            super::perf::record_zombie_drain(drained_zombies);
+        }
         // 兜底清理旧队列中的 zombie，避免异常路径留下不可运行任务。
         if schedule_tick % 64 == 0 {
             for _ in 0..8 {

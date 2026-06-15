@@ -4,6 +4,20 @@
 
 ## 2026-06-15
 
+### 调度循环优化：跳过空 zombie 队列 drain
+
+**涉及文件：**
+- `os/src/task/manager.rs` — 暴露 zombie 专用队列计数 fast check
+- `os/src/task/mod.rs` — 导出 `has_zombie_queue_tasks_fast`
+- `os/src/task/processor.rs` — 调度循环仅在 zombie 队列非空时批量 drain，避免空队列每轮构造 `Vec`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`；busybox 已进入文件操作测试后由外层 `timeout 75s` 结束，无 panic
+
+**备注：** 面向 `lat_ctx`、pipe latency、fork/exit 等调度密集测试；不改变 zombie 回收语义，竞态下最多退化为一次空 drain。
+
 ### syscall 入口优化：默认构建跳过诊断 ID 原子写
 
 **涉及文件：**

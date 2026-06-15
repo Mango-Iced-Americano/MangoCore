@@ -208,6 +208,10 @@ fn has_zombie_queue_tasks() -> bool {
     ZOMBIE_QUEUE_COUNT.load(AtomicOrdering::Relaxed) != 0
 }
 
+pub fn has_zombie_queue_tasks_fast() -> bool {
+    has_zombie_queue_tasks()
+}
+
 /// 简化的 nice-aware 调度器。
 impl TaskManager {
     #[cfg(feature = "oom_handler")]
