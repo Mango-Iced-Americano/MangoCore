@@ -28,6 +28,33 @@
 
 **备注：** oscomp basic 测试硬编码 `/dev/vda2`，但内核只对 tools disk (x1) 做 MBR 扫描注册 `/dev/vdb{N}`，且分区 2 原为全零（LTP scratch）。修复分两步：(1) 内核注册 vda{N} 别名指向同个 PartitionBlockDevice；(2) 构建脚本对分区 2 执行 mkfs.vfat -F 32。
 
+### 修复 MountFS .. 跨挂载边界与 dirent inode overlay（LA64 shell-init）
+
+**涉及文件：**
+- `os/src/fs/vfs/mount.rs` — `do_find("..")` 直接走 `do_parent()` 绕过 dentry cache；`do_parent()` mount root 调用 `mountpoint.do_parent()` 而非返回 mountpoint 自身；`list_dirents()` overlay 子挂载点 inode ID
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU la64: shell-init 错误消失 ✅
+
+**备注：** bash 的 internal getcwd 通过 `readdir("..")` 的 `d_ino` 与 `stat(".")` 的 `st_ino` 匹配来重建路径。原 MountFS 的 `..` 在 mount root 返回自身（形成死循环），且 dirent 未对 bind mount overlay inode ID，导致 bash 找不到匹配条目。参考 DragonOS 语义修复。
+
+### 修复 iperf3 IPv6 socket 拒绝 IPv4 地址（EAFNOSUPPORT）
+
+**涉及文件：**
+- `os/src/net/socket/mod.rs` — Socket trait 新增 `set_ipv6_v6only()` 默认方法
+- `os/src/net/socket/inet/datagram/udp.rs` — UdpSocket 加 `ipv6_v6only` 字段、`normalize_ipv4_mapped` helper、`addr_family_matches` 放宽、bind/connect/try_sendmsg 规范化
+- `os/src/net/socket/inet/stream/mod.rs` — TcpSocket 同上 + accept 复制 v6only flag
+- `os/src/net/syscall/setsockopt.rs` — IPV6_V6ONLY 从 no-op 改为调用 `socket.set_ipv6_v6only()`
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU iperf 待测
+
+**备注：** iperf3 创建 AF_INET6 socket 并设 IPV6_V6ONLY=0 允许双栈，随后 connect 到 IPv4 地址时原 `addr_family_matches` 严格按 IP version 拒绝。修复采用"内部保持 native IPv4"策略：`addr_family_matches` 在 `!v6only` 时接受 IPv4、`normalize_ipv4_mapped` 把用户传入的 `::ffff:a.b.c.d` 转 native IPv4 再给 smoltcp，而非反向转换。
+
 ---
 
 ## 2026-06-14

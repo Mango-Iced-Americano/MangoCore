@@ -12,6 +12,7 @@ use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 use log::info;
 use smoltcp::{
     iface::SocketSet,
@@ -40,6 +41,7 @@ pub struct UdpSocket {
     recv_waiters: EventWaitQueue,
     send_waiters: EventWaitQueue,
     pub ip_version: IpVersion,
+    ipv6_v6only: AtomicBool,
 }
 
 struct UdpSocketInner {
@@ -60,6 +62,7 @@ impl Socket for UdpSocket {
         let Endpoint::Ip(ep) = endpoint else {
             return Err(SyscallErr::EINVAL);
         };
+        let ep = IpEndpoint::new(self.normalize_ipv4_mapped(ep.addr), ep.port);
         if !ep.addr.is_unspecified() && !self.addr_family_matches(ep.addr) {
             return Err(SyscallErr::EAFNOSUPPORT);
         }
@@ -106,18 +109,18 @@ impl Socket for UdpSocket {
         let Endpoint::Ip(ep) = endpoint else {
             return Err(SyscallErr::EINVAL);
         };
+        let ep = IpEndpoint::new(self.normalize_ipv4_mapped(ep.addr), ep.port);
         if !self.addr_family_matches(ep.addr) {
             return Err(SyscallErr::EAFNOSUPPORT);
         }
-        // Linux: connect() to INADDR_ANY is treated as localhost
         let remote_endpoint = if ep.addr.is_unspecified() {
-            let loopback_addr = match self.ip_version {
-                IpVersion::Ipv4 => IpAddress::v4(127, 0, 0, 1),
-                IpVersion::Ipv6 => IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1),
+            let loopback_addr = match ep.addr {
+                IpAddress::Ipv4(_) => IpAddress::v4(127, 0, 0, 1),
+                IpAddress::Ipv6(_) => IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1),
             };
             IpEndpoint::new(loopback_addr, ep.port)
         } else {
-            *ep
+            ep
         };
         log::info!("[Udp::connect] connect to {:?}", remote_endpoint);
         {
@@ -376,6 +379,7 @@ impl Socket for UdpSocket {
                     .ok_or(SyscallErr::ENOTCONN),
             };
             let remote = res?;
+            let remote = IpEndpoint::new(self.normalize_ipv4_mapped(remote.addr), remote.port);
             if !self.addr_family_matches(remote.addr) {
                 return Err(SyscallErr::EAFNOSUPPORT);
             }
@@ -466,6 +470,14 @@ impl Socket for UdpSocket {
     fn send_ready(&self) -> bool {
         self.socket_w_ready()
     }
+
+    fn set_ipv6_v6only(&self, enabled: bool) -> SyscallRet {
+        if self.ip_version != IpVersion::Ipv6 {
+            return Err(SyscallErr::ENOPROTOOPT);
+        }
+        self.ipv6_v6only.store(enabled, Ordering::Release);
+        Ok(0)
+    }
 }
 
 impl UdpSocket {
@@ -501,6 +513,7 @@ impl UdpSocket {
             recv_waiters: EventWaitQueue::new(),
             send_waiters: EventWaitQueue::new(),
             ip_version: ver,
+            ipv6_v6only: AtomicBool::new(false),
         }
     }
     pub fn bound_inner(&self) -> BoundInner {
@@ -510,8 +523,22 @@ impl UdpSocket {
     fn addr_family_matches(&self, addr: IpAddress) -> bool {
         match self.ip_version {
             IpVersion::Ipv4 => matches!(addr, IpAddress::Ipv4(_)),
-            IpVersion::Ipv6 => matches!(addr, IpAddress::Ipv6(_)),
+            IpVersion::Ipv6 => {
+                if !self.ipv6_v6only.load(Ordering::Acquire) && matches!(addr, IpAddress::Ipv4(_)) {
+                    return true;
+                }
+                matches!(addr, IpAddress::Ipv6(_))
+            }
         }
+    }
+
+    fn normalize_ipv4_mapped(&self, addr: IpAddress) -> IpAddress {
+        if let IpAddress::Ipv6(v6) = addr {
+            if let Some(ipv4) = v6.as_ipv4() {
+                return IpAddress::Ipv4(ipv4);
+            }
+        }
+        addr
     }
 
     pub fn register_udp_socket(socket: &Arc<Self>) {

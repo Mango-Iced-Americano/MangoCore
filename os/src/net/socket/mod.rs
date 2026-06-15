@@ -425,6 +425,9 @@ pub trait Socket: Send + Sync {
     fn set_bind_to_device(&self, _ifname: &str) -> SyscallRet {
         Err(SyscallErr::EOPNOTSUPP)
     }
+    fn set_ipv6_v6only(&self, _enabled: bool) -> SyscallRet {
+        Err(SyscallErr::ENOPROTOOPT)
+    }
     fn set_ipv6_checksum(&self, _offset: u32) -> SyscallRet {
         Ok(0)
     }

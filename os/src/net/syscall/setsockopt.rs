@@ -62,8 +62,9 @@ pub fn sys_setsockopt(
             // call it at SOL_IPV6 on UDP/TCP sockets. Accept and no-op.
         }
         (SOL_IPV6, IPV6_V6ONLY) => {
-            // Accept IPV6_V6ONLY (iperf3 daemon requires this); kernel does not
-            // differentiate between IPv4-mapped and native IPv6 for binding.
+            if let Err(e) = socket.set_ipv6_v6only(optval != 0) {
+                return -(e as isize);
+            }
         }
         (SOL_ICMPV6, ICMP6_FILTER) => {
             if (optlen as usize) < 32 {

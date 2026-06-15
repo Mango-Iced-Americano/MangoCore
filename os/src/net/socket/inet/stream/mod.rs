@@ -55,6 +55,7 @@ pub struct TcpSocket {
     pub connect_waiters: EventWaitQueue,
     pub accept_waiters: EventWaitQueue,
     pub ip_version: IpVersion,
+    ipv6_v6only: AtomicBool,
 }
 
 impl TcpSocket {
@@ -73,6 +74,7 @@ impl TcpSocket {
             connect_waiters: EventWaitQueue::new(),
             accept_waiters: EventWaitQueue::new(),
             ip_version: ver,
+            ipv6_v6only: AtomicBool::new(false),
         }
     }
 
@@ -83,8 +85,22 @@ impl TcpSocket {
     fn addr_family_matches(&self, addr: IpAddress) -> bool {
         match self.ip_version {
             IpVersion::Ipv4 => matches!(addr, IpAddress::Ipv4(_)),
-            IpVersion::Ipv6 => matches!(addr, IpAddress::Ipv6(_)),
+            IpVersion::Ipv6 => {
+                if !self.ipv6_v6only.load(Ordering::Acquire) && matches!(addr, IpAddress::Ipv4(_)) {
+                    return true;
+                }
+                matches!(addr, IpAddress::Ipv6(_))
+            }
         }
+    }
+
+    fn normalize_ipv4_mapped(&self, addr: IpAddress) -> IpAddress {
+        if let IpAddress::Ipv6(v6) = addr {
+            if let Some(ipv4) = v6.as_ipv4() {
+                return IpAddress::Ipv4(ipv4);
+            }
+        }
+        addr
     }
 
     /// 注册到全局 TCP_SOCKETS 表
@@ -183,6 +199,7 @@ impl Socket for TcpSocket {
         let Endpoint::Ip(ep) = endpoint else {
             return Err(SyscallErr::EINVAL);
         };
+        let ep = IpEndpoint::new(self.normalize_ipv4_mapped(ep.addr), ep.port);
         if !ep.addr.is_unspecified() && !self.addr_family_matches(ep.addr) {
             return Err(SyscallErr::EAFNOSUPPORT);
         }
@@ -254,18 +271,18 @@ impl Socket for TcpSocket {
         let Endpoint::Ip(ep) = endpoint else {
             return Err(SyscallErr::EINVAL);
         };
+        let ep = IpEndpoint::new(self.normalize_ipv4_mapped(ep.addr), ep.port);
         if !self.addr_family_matches(ep.addr) {
             return Err(SyscallErr::EAFNOSUPPORT);
         }
-        // Linux: connect() to INADDR_ANY is treated as localhost
         let remote_endpoint = if ep.addr.is_unspecified() {
-            let loopback_addr = match self.ip_version {
-                IpVersion::Ipv4 => IpAddress::v4(127, 0, 0, 1),
-                IpVersion::Ipv6 => IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1),
+            let loopback_addr = match ep.addr {
+                IpAddress::Ipv4(_) => IpAddress::v4(127, 0, 0, 1),
+                IpAddress::Ipv6(_) => IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1),
             };
             IpEndpoint::new(loopback_addr, ep.port)
         } else {
-            *ep
+            ep
         };
         let mut inner = self.inner.lock();
         let new_inner = core::mem::replace(
@@ -405,6 +422,7 @@ impl Socket for TcpSocket {
             connect_waiters: EventWaitQueue::new(),
             accept_waiters: EventWaitQueue::new(),
             ip_version: self.ip_version,
+            ipv6_v6only: AtomicBool::new(self.ipv6_v6only.load(Ordering::Acquire)),
         });
 
         // 新 accept 的连接也必须注册到全局 TCP_SOCKETS，否则 pselect/epoll 永远等不到事件
@@ -644,6 +662,14 @@ impl Socket for TcpSocket {
 
     fn tcp_state(&self) -> Option<u8> {
         Some(self.inner.lock().tcp_state_code())
+    }
+
+    fn set_ipv6_v6only(&self, enabled: bool) -> SyscallRet {
+        if self.ip_version != IpVersion::Ipv6 {
+            return Err(SyscallErr::ENOPROTOOPT);
+        }
+        self.ipv6_v6only.store(enabled, Ordering::Release);
+        Ok(0)
     }
 }
 
