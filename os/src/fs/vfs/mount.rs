@@ -269,16 +269,20 @@ impl MountFSInode {
 
     /// 逐级查找子项（带挂载点交叉和 dentry 缓存）
     fn do_find(&self, name: &str) -> Result<Arc<MountFSInode>, SyscallErr> {
+        // ".." goes through do_parent() which handles mountpoint boundary crossing;
+        // bypass dentry cache to avoid stale cached entries for mount root "..".
+        if name == ".." {
+            return self.do_parent();
+        }
+
         // Self-overlay: if this inode itself is a mountpoint, redirect to
         // the mounted filesystem's root before looking up children.
         // Without this, find("test_file") on a covered mountpoint directory
         // would search the old (hidden) directory instead of the mounted FS.
-        if name != ".." {
-            let self_arc = self.self_arc();
-            let top = MountFSInode::overlaid_inode(self_arc.clone());
-            if !Arc::ptr_eq(&top, &self_arc) {
-                return top.do_find(name);
-            }
+        let self_arc = self.self_arc();
+        let top = MountFSInode::overlaid_inode(self_arc.clone());
+        if !Arc::ptr_eq(&top, &self_arc) {
+            return top.do_find(name);
         }
 
         // Shortcut: skip dentry cache for dynamic filesystems (procfs)
@@ -339,18 +343,15 @@ impl MountFSInode {
     /// 查找父目录
     fn do_parent(&self) -> Result<Arc<MountFSInode>, SyscallErr> {
         if self.is_mountpoint_root() {
-            // 如果当前是挂载点根，父目录在其父文件系统的挂载点
             if let Some(mountpoint) = self.mount_fs.self_mountpoint() {
-                return Ok(mountpoint);
+                return mountpoint.do_parent();
             }
-            // 没有挂载点，返回自己（全局根）
             return Ok(self.self_arc());
         }
-        // 向 inner_inode 请求父目录
         let parent_inner = self.inner_inode.find("..")?;
-        let inode = MountFSInode::new(parent_inner, self.mount_fs.clone());
+        let parent = MountFSInode::new(parent_inner, self.mount_fs.clone());
         counters::MFSI_FROM_PARENT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        Ok(inode)
+        Ok(MountFSInode::overlaid_inode(parent))
     }
 
     /// Create a new MountFS and attach it as a child of this inode's parent
@@ -499,7 +500,16 @@ impl IndexNode for MountFSInode {
     }
 
     fn list_dirents(&self) -> Result<Vec<(String, InodeId, FileType)>, SyscallErr> {
-        self.inner_inode.list_dirents()
+        let mut entries = self.inner_inode.list_dirents()?;
+        let mountpoints = self.mount_fs.mountpoints.lock();
+        for (name, ino, _ft) in entries.iter_mut() {
+            if let Some(child_mfs) = mountpoints.get(ino) {
+                if let Ok(root_md) = child_mfs.root_inner_inode().metadata() {
+                    *ino = root_md.inode_id;
+                }
+            }
+        }
+        Ok(entries)
     }
 
     fn create(
