@@ -3,7 +3,7 @@ mod mem_access;
 use self::context::GeneralRegs;
 
 use super::register::{self, Exception, Interrupt, Trap, ERA};
-use super::{pre_start_init, MErrEntry};
+use super::MErrEntry;
 use crate::hal::arch::get_clock_freq;
 use crate::hal::arch::loongarch64::laflex::LAFlexPageTable;
 use crate::hal::arch::loongarch64::register::{CrMd, ECfg, LineBasedInterrupt, PrMd, TCfg, TIClr};
@@ -419,7 +419,6 @@ pub fn trap_return() -> ! {
     let user_satp = current_user_token();
     //log::debug!("[trap_return] trap_cx_ptr:{:#x}, user_satp:{:#x}", trap_cx_ptr, user_satp);
     let restore_va = __restore as usize - __alltraps as usize + strampoline as usize;
-    pre_start_init();
     unsafe {
         asm!(
             "ibar 0",

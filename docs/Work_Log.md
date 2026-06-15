@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### la64 trap return 优化：删除无效 pre_start_init 调用
+
+**涉及文件：**
+- `os/src/hal/arch/loongarch64/trap/mod.rs` — 删除 `trap_return()` 中无状态效果的 `pre_start_init()` 调用，返回用户态前已由 `set_user_trap_entry()` 写入 EEntry
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- la64 QEMU smoke ✅ — basic-glibc 通过并进入 busybox-musl 后由外层 `timeout 75s` 结束，无 panic
+
+**备注：** 面向 la64 syscall/trap 返回热路径；`pre_start_init()` 当前只修改临时 `EEntry::empty()` 且没有 `.write()`，不会改变硬件状态。
+
 ### syscall trap 优化：复用当前任务引用
 
 **涉及文件：**
