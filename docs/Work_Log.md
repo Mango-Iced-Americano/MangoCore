@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### 用户访存跨页翻译优化：每次 uaccess 只获取一次当前 VM
+
+**涉及文件：**
+- `os/src/mm/uaccess.rs` — 新增 `current_user_vm()` 与 VM 复用版单页翻译；`translate_user_buffer_checked()` 和 `translated_str()` 在进入循环前完成 token 校验并获取一次当前 VM Arc，跨页循环中不再重复锁 PCB inner 获取 VM
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 仍保持 fault-in 只能作用于当前任务 token；优化目标是 read/write/iovec/pathname 等跨页或字符串用户访存路径的重复 PCB 锁。
+
 ### 用户访存 token 校验优化：uaccess 复用当前 token 缓存
 
 **涉及文件：**

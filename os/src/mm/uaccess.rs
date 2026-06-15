@@ -1,12 +1,12 @@
 use core::{marker::PhantomData, ops::IndexMut};
 
 use super::page_table::{FaultAccess, PageTable, UserAccess};
-use super::{PhysAddr, StepByOne, VirtAddr};
+use super::{AddressSpace, PhysAddr, StepByOne, VirtAddr};
 use crate::fs::iov::IOVec;
 use crate::hal::PageTableImpl;
 use crate::task::current_task_ref;
-use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::{string::String, sync::Arc, vec::Vec};
+use spin::Mutex;
 
 // Cap a single user buffer translation to avoid kernel OOM.
 const MAX_BUFFER_SIZE: usize = 1024 * 1024 * 8;
@@ -528,22 +528,42 @@ fn is_current_user_token(token: usize) -> bool {
     current_task_ref().is_some() && crate::task::current_user_token() == token
 }
 
-// 区分用户触发缺页时的权限
-// 例如：copy_from_user - Read; copy_to_user - Write; 获得可变引用-ReadWrite等
-// 通过不同权限的区分使得缺页处理更灵活更稳定
-fn fault_in_current_user_va(
+fn current_user_vm(
     token: usize,
-    va: VirtAddr,
-    access: FaultAccess,
-) -> Result<PhysAddr, isize> {
-    // fault-in 只能由当前任务 token 处理；跨进程 token 只能返回 EFAULT。
+) -> Result<Arc<Mutex<AddressSpace<PageTableImpl>>>, isize> {
     let task = current_task_ref().ok_or(crate::syscall::errno::EFAULT)?;
     if crate::task::current_user_token() != token {
         return Err(crate::syscall::errno::EFAULT);
     }
-    let vm = task.process.vm();
-    let result = vm.lock().fault_in_user_va(va, access);
-    result
+    Ok(task.process.vm())
+}
+
+// 区分用户触发缺页时的权限
+// 例如：copy_from_user - Read; copy_to_user - Write; 获得可变引用-ReadWrite等
+// 通过不同权限的区分使得缺页处理更灵活更稳定
+fn fault_in_user_va_with_vm(
+    vm: &Mutex<AddressSpace<PageTableImpl>>,
+    va: VirtAddr,
+    access: FaultAccess,
+) -> Result<PhysAddr, isize> {
+    vm.lock().fault_in_user_va(va, access)
+}
+
+fn translate_user_va_checked_with_vm(
+    vm: &Mutex<AddressSpace<PageTableImpl>>,
+    va: VirtAddr,
+    access: UserAccess,
+) -> Result<PhysAddr, isize> {
+    check_user_range(va.0, 1)?;
+
+    match access {
+        UserAccess::Read => fault_in_user_va_with_vm(vm, va, FaultAccess::Load),
+        UserAccess::Write => fault_in_user_va_with_vm(vm, va, FaultAccess::Store),
+        UserAccess::ReadWrite => {
+            fault_in_user_va_with_vm(vm, va, FaultAccess::Load)?;
+            fault_in_user_va_with_vm(vm, va, FaultAccess::Store)
+        }
+    }
 }
 
 // 将用户va翻译为pa
@@ -552,16 +572,8 @@ pub fn translate_user_va_checked(
     va: VirtAddr,
     access: UserAccess,
 ) -> Result<PhysAddr, isize> {
-    check_user_range(va.0, 1)?;
-
-    match access {
-        UserAccess::Read => fault_in_current_user_va(token, va, FaultAccess::Load),
-        UserAccess::Write => fault_in_current_user_va(token, va, FaultAccess::Store),
-        UserAccess::ReadWrite => {
-            fault_in_current_user_va(token, va, FaultAccess::Load)?;
-            fault_in_current_user_va(token, va, FaultAccess::Store)
-        }
-    }
+    let vm = current_user_vm(token)?;
+    translate_user_va_checked_with_vm(&vm, va, access)
 }
 
 // Split a user buffer by page.
@@ -583,10 +595,11 @@ pub fn translate_user_buffer_checked(
     }
     let mut start = ptr as usize;
     let end = check_user_range(start, len)?;
+    let vm = current_user_vm(token)?;
     let mut v = Vec::with_capacity(32);
     while start < end {
         let start_va = VirtAddr::from(start);
-        let pa = translate_user_va_checked(token, start_va, access)?;
+        let pa = translate_user_va_checked_with_vm(&vm, start_va, access)?;
         let ppn = pa.floor();
         let mut next_vpn = start_va.floor();
         next_vpn.step();
@@ -663,13 +676,14 @@ pub fn translated_str(token: usize, ptr: *const u8) -> Result<String, isize> {
     let mut string = String::new();
     let mut cur = ptr as usize;
     let max_len = MAX_BUFFER_SIZE;
+    let vm = current_user_vm(token)?;
     loop {
         if string.len() >= max_len {
             return Err(crate::syscall::errno::EFAULT);
         }
 
         let va = VirtAddr::from(cur);
-        let pa = translate_user_va_checked(token, va, UserAccess::Read)?;
+        let pa = translate_user_va_checked_with_vm(&vm, va, UserAccess::Read)?;
         let page_offset = va.page_offset();
         let page_len = (crate::config::PAGE_SIZE - page_offset).min(
             crate::config::USER_VA_END
