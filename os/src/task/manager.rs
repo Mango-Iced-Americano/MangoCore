@@ -13,7 +13,7 @@ use crate::timer::{TimeSpec, TimeVal};
 
 use super::{
     block_current_and_run_next_checked, block_current_and_run_next_with_lock_checked, current_task,
-    discard_non_actionable_unblocked_signals, has_actionable_signal,
+    current_task_ref, discard_non_actionable_unblocked_signals, has_actionable_signal,
     signal::{SigInfo, Signals},
     TaskControlBlock, TaskStatus,
 };
@@ -799,8 +799,8 @@ impl WaitQueue {
         }
         self.add_task(task);
     }
-    pub fn finish_wait(&mut self, task: &Arc<TaskControlBlock>) -> bool {
-        let task_ptr = Arc::as_ptr(task);
+    pub fn finish_wait(&mut self, task: &TaskControlBlock) -> bool {
+        let task_ptr = task as *const TaskControlBlock;
         let removed = if self
             .inner
             .back()
@@ -863,19 +863,19 @@ impl WaitQueue {
             guard.prepare_to_wait(Arc::downgrade(&task));
 
             if let Some(res) = cond() {
-                guard.finish_wait(&task);
+                guard.finish_wait(task.as_ref());
                 return WaitResult::Ready(res);
             }
             if deadline
                 .map(|deadline| TimeSpec::now() >= deadline)
                 .unwrap_or(false)
             {
-                guard.finish_wait(&task);
+                guard.finish_wait(task.as_ref());
                 return WaitResult::TimedOut;
             }
             if signal_check {
                 if has_actionable_signal(&task) {
-                    guard.finish_wait(&task);
+                    guard.finish_wait(task.as_ref());
                     return WaitResult::Interrupted;
                 }
                 discard_non_actionable_unblocked_signals(&task);
@@ -904,8 +904,8 @@ impl WaitQueue {
                 no_signal && not_timed_out
             });
 
-            let task = current_task().unwrap();
-            wq.lock().finish_wait(&task);
+            let task = current_task_ref().unwrap();
+            wq.lock().finish_wait(task);
             task.acquire_inner_lock().refresh_real_timer();
         }
     }
@@ -942,19 +942,19 @@ impl WaitQueue {
 
             queue_of(&mut guard).prepare_to_wait(Arc::downgrade(&task));
             if let Some(res) = cond(&mut guard) {
-                queue_of(&mut guard).finish_wait(&task);
+                queue_of(&mut guard).finish_wait(task.as_ref());
                 return WaitResult::Ready(res);
             }
             if deadline
                 .map(|deadline| TimeSpec::now() >= deadline)
                 .unwrap_or(false)
             {
-                queue_of(&mut guard).finish_wait(&task);
+                queue_of(&mut guard).finish_wait(task.as_ref());
                 return WaitResult::TimedOut;
             }
             if signal_check {
                 if has_actionable_signal(&task) {
-                    queue_of(&mut guard).finish_wait(&task);
+                    queue_of(&mut guard).finish_wait(task.as_ref());
                     return WaitResult::Interrupted;
                 }
                 discard_non_actionable_unblocked_signals(&task);
@@ -972,9 +972,9 @@ impl WaitQueue {
                 no_signal && not_timed_out
             });
 
-            let task = current_task().unwrap();
+            let task = current_task_ref().unwrap();
             let mut guard = lock.lock();
-            let removed = queue_of(&mut guard).finish_wait(&task);
+            let removed = queue_of(&mut guard).finish_wait(task);
             drop(guard);
             task.acquire_inner_lock().refresh_real_timer();
 
@@ -986,7 +986,7 @@ impl WaitQueue {
         }
     }
 
-    fn finish_wait_on_queues(queues: &[&Mutex<Self>], task: &Arc<TaskControlBlock>) {
+    fn finish_wait_on_queues(queues: &[&Mutex<Self>], task: &TaskControlBlock) {
         for queue in queues {
             queue.lock().finish_wait(task);
         }
@@ -1052,18 +1052,18 @@ impl WaitQueue {
             }
 
             if let Some(res) = cond() {
-                Self::finish_wait_on_queues(queues, &task);
+                Self::finish_wait_on_queues(queues, task.as_ref());
                 return WaitResult::Ready(res);
             }
             if deadline
                 .map(|deadline| TimeSpec::now() >= deadline)
                 .unwrap_or(false)
             {
-                Self::finish_wait_on_queues(queues, &task);
+                Self::finish_wait_on_queues(queues, task.as_ref());
                 return WaitResult::TimedOut;
             }
             if has_actionable_signal(&task) {
-                Self::finish_wait_on_queues(queues, &task);
+                Self::finish_wait_on_queues(queues, task.as_ref());
                 return WaitResult::Interrupted;
             }
             discard_non_actionable_unblocked_signals(&task);
@@ -1081,8 +1081,8 @@ impl WaitQueue {
                 no_signal && not_timed_out && cond().is_none()
             });
 
-            let task = current_task().unwrap();
-            Self::finish_wait_on_queues(queues, &task);
+            let task = current_task_ref().unwrap();
+            Self::finish_wait_on_queues(queues, task);
             task.acquire_inner_lock().refresh_real_timer();
         }
     }

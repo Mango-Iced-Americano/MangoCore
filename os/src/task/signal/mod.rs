@@ -627,7 +627,7 @@ fn wait_for_default_stop_signal() {
         let mut guard = wait_queue.lock();
         guard.prepare_to_wait(Arc::downgrade(&task));
         if has_pending_stop_release_signal(&task) {
-            guard.finish_wait(&task);
+            guard.finish_wait(task.as_ref());
             break;
         }
         drop(task);
@@ -636,8 +636,8 @@ fn wait_for_default_stop_signal() {
             !has_pending_stop_release_signal(task)
         });
 
-        let task = current_task().unwrap();
-        wait_queue.lock().finish_wait(&task);
+        let task = current_task_ref().unwrap();
+        wait_queue.lock().finish_wait(task);
     }
 }
 

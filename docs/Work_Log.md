@@ -4,6 +4,20 @@
 
 ## 2026-06-15
 
+### futex/WaitQueue 返回路径优化：finish_wait 改用任务短引用
+
+**涉及文件：**
+- `os/src/task/manager.rs` — `WaitQueue::finish_wait()` 入参从 `&Arc<TaskControlBlock>` 收窄为 `&TaskControlBlock`，等待返回后的队列清理路径改用 `current_task_ref()`，减少唤醒后额外当前任务 `Arc` clone
+- `os/src/task/threads.rs` — futex 普通等待、waitv 私有/共享等待的返回清理路径改用短引用；入队和超时注册仍保留 `Arc` 以生成 `Weak`
+- `os/src/task/signal/mod.rs` — 默认 stop signal 等待返回清理改用 `current_task_ref()`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束
+
+**备注：** 参考 Linux `finish_wait` 的职责边界，清理等待队列并恢复当前任务运行态不需要额外拥有任务引用；MangoCore 入队前仍用 `Arc::downgrade()`，等待生命周期和信号/超时检查语义不变。
+
 ### lmbench lat_proc exec 前置路径优化：减少当前任务 clone
 
 **涉及文件：**

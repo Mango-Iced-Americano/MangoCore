@@ -206,7 +206,7 @@ fn deadline_expired(deadline: Option<TimeSpec>) -> bool {
 fn finish_waitv_private(
     futex: &mut Futex,
     entries: &[FutexWaitEntry],
-    task: &Arc<TaskControlBlock>,
+    task: &TaskControlBlock,
 ) -> Option<usize> {
     let mut woken_key = None;
 
@@ -233,7 +233,7 @@ fn finish_waitv_private(
 fn finish_waitv_shared(
     futex: &mut BTreeMap<usize, WaitQueue>,
     entries: &[FutexWaitEntry],
-    task: &Arc<TaskControlBlock>,
+    task: &TaskControlBlock,
 ) -> Option<usize> {
     let mut woken_key = None;
 
@@ -350,14 +350,14 @@ where
     loop {
         if TimeSpec::now() >= deadline {
             let mut guard = lock.lock();
-            queue_of(&mut guard).finish_wait(task);
+            queue_of(&mut guard).finish_wait(task.as_ref());
             return WaitResult::TimedOut;
         }
 
         {
             let mut guard = lock.lock();
             if let Some(res) = cond(&mut guard) {
-                queue_of(&mut guard).finish_wait(task);
+                queue_of(&mut guard).finish_wait(task.as_ref());
                 return WaitResult::Ready(res);
             }
             if !queue_of(&mut guard).contains(&task_weak) {
@@ -367,7 +367,7 @@ where
 
         if has_actionable_signal(task) {
             let mut guard = lock.lock();
-            queue_of(&mut guard).finish_wait(task);
+            queue_of(&mut guard).finish_wait(task.as_ref());
             return WaitResult::Interrupted;
         }
         discard_non_actionable_unblocked_signals(task);
@@ -403,15 +403,15 @@ where
         queue_of(&mut guard).prepare_to_wait(Arc::downgrade(&task));
 
         if let Some(res) = cond(&mut guard) {
-            queue_of(&mut guard).finish_wait(&task);
+            queue_of(&mut guard).finish_wait(task.as_ref());
             return WaitResult::Ready(res);
         }
         if deadline_expired(deadline) {
-            queue_of(&mut guard).finish_wait(&task);
+            queue_of(&mut guard).finish_wait(task.as_ref());
             return WaitResult::TimedOut;
         }
         if has_actionable_signal(&task) {
-            queue_of(&mut guard).finish_wait(&task);
+            queue_of(&mut guard).finish_wait(task.as_ref());
             return WaitResult::Interrupted;
         }
         discard_non_actionable_unblocked_signals(&task);
@@ -443,9 +443,9 @@ where
             no_signal && not_timed_out
         });
 
-        let task = current_task().unwrap();
+        let task = current_task_ref().unwrap();
         let mut guard = lock.lock();
-        let removed = queue_of(&mut guard).finish_wait(&task);
+        let removed = queue_of(&mut guard).finish_wait(task);
         drop(guard);
         task.acquire_inner_lock().refresh_real_timer();
 
@@ -548,15 +548,15 @@ pub fn do_futex_waitv(
         }
 
         if let Some(result) = check_waitv_values(entries, token) {
-            finish_waitv_private(&mut guard, entries, &task);
+            finish_waitv_private(&mut guard, entries, task.as_ref());
             return result;
         }
         if deadline_expired(deadline) {
-            finish_waitv_private(&mut guard, entries, &task);
+            finish_waitv_private(&mut guard, entries, task.as_ref());
             return ETIMEDOUT;
         }
         if has_actionable_signal(&task) {
-            finish_waitv_private(&mut guard, entries, &task);
+            finish_waitv_private(&mut guard, entries, task.as_ref());
             return EINTR;
         }
         discard_non_actionable_unblocked_signals(&task);
@@ -572,9 +572,9 @@ pub fn do_futex_waitv(
                 && check_waitv_values(entries, token).is_none()
         });
 
-        let task = current_task().unwrap();
+        let task = current_task_ref().unwrap();
         let mut guard = futex_table.lock();
-        if let Some(index) = finish_waitv_private(&mut guard, entries, &task) {
+        if let Some(index) = finish_waitv_private(&mut guard, entries, task) {
             task.acquire_inner_lock().refresh_real_timer();
             return index as isize;
         }
@@ -617,15 +617,15 @@ pub fn do_futex_waitv_shared(
         }
 
         if let Some(result) = check_waitv_values(entries, token) {
-            finish_waitv_shared(&mut guard, entries, &task);
+            finish_waitv_shared(&mut guard, entries, task.as_ref());
             return result;
         }
         if deadline_expired(deadline) {
-            finish_waitv_shared(&mut guard, entries, &task);
+            finish_waitv_shared(&mut guard, entries, task.as_ref());
             return ETIMEDOUT;
         }
         if has_actionable_signal(&task) {
-            finish_waitv_shared(&mut guard, entries, &task);
+            finish_waitv_shared(&mut guard, entries, task.as_ref());
             return EINTR;
         }
         discard_non_actionable_unblocked_signals(&task);
@@ -641,9 +641,9 @@ pub fn do_futex_waitv_shared(
                 && check_waitv_values(entries, token).is_none()
         });
 
-        let task = current_task().unwrap();
+        let task = current_task_ref().unwrap();
         let mut guard = PROCESS_SHARED_FUTEX.lock();
-        if let Some(index) = finish_waitv_shared(&mut guard, entries, &task) {
+        if let Some(index) = finish_waitv_shared(&mut guard, entries, task) {
             task.acquire_inner_lock().refresh_real_timer();
             return index as isize;
         }
