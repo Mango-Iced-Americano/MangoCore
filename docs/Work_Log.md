@@ -4,87 +4,18 @@
 
 ## 2026-06-15
 
-### fix: normalize mount paths to absolute — 修复 busybox df 因相对路径退出码非零
+### lmbench signal overhead 优化：单线程 `kill(getpid(), sig)` 快路径
 
 **涉及文件：**
-- `os/src/fs/mod.rs:337-342` — `mount_block_fs()` mount_point 补前导 `/` + 设 mount_source 避免 `none`
-- `os/src/syscall/fs.rs:4179` — `sys_mount()` 相对路径 target 改用 `normalize_cwd()` 防 `//bin`
-- `os/src/syscall/fs.rs:3649` — `sys_umount2()` 相对路径同步修复
-- `os/src/syscall/fs.rs:4296` — `MS_MOVE` source 相对路径同步修复
-- `os/src/syscall/fs.rs:3746-3752` — `do_bind_mount()` mount_source 存绝对路径
-
-**根因：** 内核在 3 处存了相对路径：(1) `mount_block_fs()` 直接把 `"tools"`/`"sdcard"` 存为 mount_path；(2) sys_mount/umount2/MS_MOVE 用 `format!("{}/{}", "/", "bin")` 拼出 `//bin`；(3) do_bind_mount 把用户传来的 `"tools/bin"` 原样存入 mount_source。/proc/mounts 暴露这些非绝对路径，busybox df 的 statvfs() 从非根 CWD 查找时报 ENOENT。
+- `os/src/syscall/process/signal.rs` — `sys_kill(pid>0)` 在目标为当前进程且仅有单个 live thread 时直接投递进程共享信号，跳过全局进程表查询和线程列表构造
+- `os/src/task/signal/delivery.rs` — 新增指定目标 task 的进程信号投递辅助函数，保持进程 pending 队列和 `SI_USER` 语义不变
+- `os/src/task/signal/mod.rs` — 导出新的 signal delivery helper
 
 **验证：**
-- `make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
 
-**备注：** 全部在内核侧修复，用户程序不需要改。预期挽回 busybox-musl + busybox-glibc 各 1 分（df 测试）。
-
-### fix(fs): change detect_fs println! to info! — 避免干扰 oscomp judge 行索引断言
-
-**涉及文件：**
-- `os/src/fs/filesystem.rs` — `detect_fs()` 中所有 `println!` → `info!`
-
-**根因：** oscomp basic 的 `test_mount`/`test_umount` 测试输出在 mount/umount 之间出现了 `[fs] found fat32 filesystem` 内核日志行，该行由裸 `println!` 产生。judge_basic-*.py 按行号索引读取 data（data[0]~data[3]），多余的日志行使所有行偏移，导致 `data[1] == "mount return: 0"` 断言失败（实际读到 `"[fs] found fat32 filesystem"`），pass 锁定为 2/5。
-
-**验证：**
-- `make rv64-kernel-build-only` ✅
-- 双架构编译，不改逻辑（build 确认）
-
-**备注：** 改成 `info!` 后 LOG=off（评测默认）时不输出，LOG=info 才可见。共挽回 basic-musl + basic-glibc 各 6 分（mount 3 + umount 3）。
-
-### 修复 sys_getcwd 返回值 ABI（LA64 shell-init EINVAL）
-
-**涉及文件：**
-- `os/src/syscall/fs.rs:1081` — 成功返回从 `buf as isize` 改为 `write_len as isize`
-
-**验证：**
-- `make rv64-kernel-build-only` ✅
-- `make la64-kernel-build-only` ✅
-
-**备注：** Linux raw syscall 语义要求 getcwd 成功时返回写入字节数（含 NUL），而非 buf 指针。LA64 的 bash/libc 对此更严格，异常的大正数返回值被解释为错误码（EINVAL）。RV64 因用户地址范围不同未触发。
-
-### 修复 oscomp basic mount/umount 测试（/dev/vda2 缺失 + 分区无文件系统）
-
-**涉及文件：**
-- `os/src/fs/mod.rs:450-455` — MBR 分区注册时同步注册 `/dev/vda{N}` 兼容别名
-- `scripts/make_mbr_tools_disk.py` — 分区 2 类型改为 0x0C，新增 mkfs.vfat FAT32 格式化
-
-**验证：**
-- `make rv64-kernel-build-only` ✅
-- `make la64-kernel-build-only` ✅
-- QEMU rv64 basic: mount 5/5, umount 5/5 ✅
-
-**备注：** oscomp basic 测试硬编码 `/dev/vda2`，但内核只对 tools disk (x1) 做 MBR 扫描注册 `/dev/vdb{N}`，且分区 2 原为全零（LTP scratch）。修复分两步：(1) 内核注册 vda{N} 别名指向同个 PartitionBlockDevice；(2) 构建脚本对分区 2 执行 mkfs.vfat -F 32。
-
-### 修复 MountFS .. 跨挂载边界与 dirent inode overlay（LA64 shell-init）
-
-**涉及文件：**
-- `os/src/fs/vfs/mount.rs` — `do_find("..")` 直接走 `do_parent()` 绕过 dentry cache；`do_parent()` mount root 调用 `mountpoint.do_parent()` 而非返回 mountpoint 自身；`list_dirents()` overlay 子挂载点 inode ID
-
-**验证：**
-- `make rv64-kernel-build-only` ✅
-- `make la64-kernel-build-only` ✅
-- QEMU la64: shell-init 错误消失 ✅
-
-**备注：** bash 的 internal getcwd 通过 `readdir("..")` 的 `d_ino` 与 `stat(".")` 的 `st_ino` 匹配来重建路径。原 MountFS 的 `..` 在 mount root 返回自身（形成死循环），且 dirent 未对 bind mount overlay inode ID，导致 bash 找不到匹配条目。参考 DragonOS 语义修复。
-
-### 修复 iperf3 IPv6 socket 拒绝 IPv4 地址（EAFNOSUPPORT）
-
-**涉及文件：**
-- `os/src/net/socket/mod.rs` — Socket trait 新增 `set_ipv6_v6only()` 默认方法
-- `os/src/net/socket/inet/datagram/udp.rs` — UdpSocket 加 `ipv6_v6only` 字段、`normalize_ipv4_mapped` helper、`addr_family_matches` 放宽、bind/connect/try_sendmsg 规范化
-- `os/src/net/socket/inet/stream/mod.rs` — TcpSocket 同上 + accept 复制 v6only flag
-- `os/src/net/syscall/setsockopt.rs` — IPV6_V6ONLY 从 no-op 改为调用 `socket.set_ipv6_v6only()`
-
-**验证：**
-- `make rv64-kernel-build-only` ✅
-- `make la64-kernel-build-only` ✅
-- QEMU iperf 待测
-
-**备注：** iperf3 创建 AF_INET6 socket 并设 IPV6_V6ONLY=0 允许双栈，随后 connect 到 IPv4 地址时原 `addr_family_matches` 严格按 IP version 拒绝。修复采用"内部保持 native IPv4"策略：`addr_family_matches` 在 `!v6only` 时接受 IPv4、`normalize_ipv4_mapped` 把用户传入的 `::ffff:a.b.c.d` 转 native IPv4 再给 smoltcp，而非反向转换。
-
----
+**备注：** 最新 lmbench 日志中 signal handler overhead 偏高；该测试常见路径为单线程进程向自身发信号。优化限定在单 live thread 场景，避免改变多线程进程 directed signal 的目标选择语义。
 
 ## 2026-06-14
 

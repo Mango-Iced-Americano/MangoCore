@@ -42,6 +42,20 @@ fn wake_process_interruptible_threads(process: &ProcessControlBlock) {
     }
 }
 
+fn wake_process_signal_target(task: &Arc<TaskControlBlock>, signal: Signals) {
+    let mut inner = task.acquire_inner_lock();
+    if inner.task_status == TaskStatus::Zombie {
+        return;
+    }
+    if inner.task_status == TaskStatus::Interruptible
+        && signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, true)
+    {
+        inner.task_status = TaskStatus::Ready;
+        drop(inner);
+        wake_interruptible(task.clone());
+    }
+}
+
 pub fn send_process_signal(process: &ProcessControlBlock, signal: Signals) -> bool {
     if signal.is_empty() {
         return true;
@@ -73,6 +87,33 @@ pub fn send_process_signal_info(
     process.enqueue_process_signal(PendingSignal { signal, siginfo });
     if let Some(task) = process_signal_target(process, signal) {
         wake_task_if_interruptible(task);
+    }
+    true
+}
+
+pub fn send_process_signal_to_task(
+    process: &ProcessControlBlock,
+    task: &Arc<TaskControlBlock>,
+    signal: Signals,
+) -> bool {
+    if signal.is_empty() {
+        return true;
+    }
+    let Ok(pending) = PendingSignal::from_signal_with_sender(
+        signal,
+        SigInfo::SI_USER as usize,
+        current_sender_pid(),
+    ) else {
+        return false;
+    };
+    if signal.contains(Signals::SIGCONT) {
+        process.mark_continued();
+    }
+    process.enqueue_process_signal(pending);
+    if signal.contains(Signals::SIGCONT) {
+        wake_task_if_interruptible(task.clone());
+    } else {
+        wake_process_signal_target(task, signal);
     }
     true
 }

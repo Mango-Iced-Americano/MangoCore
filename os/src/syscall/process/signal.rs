@@ -356,6 +356,12 @@ pub fn sys_kill(pid: usize, sig: usize) -> isize {
     }
     let pid_signed = pid as isize;
     if pid_signed > 0 {
+        if let Some(task) = current_task() {
+            if task.pid() == pid && task.process.live_thread_count() == 1 {
+                send_process_signal_to_task(&task.process, &task, signal);
+                return SUCCESS;
+            }
+        }
         let Some(process) = ProcessManager::find_process(pid) else {
             return ESRCH;
         };
