@@ -3740,21 +3740,19 @@ fn do_bind_mount(
     target_inode: Arc<dyn vfs::IndexNode>,
     mountflags: MountFlags,
 ) -> Result<Arc<vfs::MountFS>, isize> {
-    let source_path = if source.is_null() {
+    let source_path_raw = if source.is_null() {
         return Err(EINVAL);
     } else {
         match user_cstring(token, source) {
-            Ok(s) => {
-                if s.starts_with('/') { s } else { alloc::format!("/{}", s) }
-            }
+            Ok(s) => s,
             Err(errno) => return Err(errno),
         }
     };
 
-    let source_inode = match vfs_lookup(lookup_inode, &source_path, true) {
+    let source_inode = match vfs_lookup(lookup_inode, &source_path_raw, true) {
         Ok(inode) => inode,
         Err(errno) => {
-            error!("[do_bind_mount] vfs_lookup source '{}' failed: {}", source_path, errno);
+            error!("[do_bind_mount] vfs_lookup source '{}' failed: {}", source_path_raw, errno);
             return Err(errno);
         }
     };
@@ -3768,7 +3766,7 @@ fn do_bind_mount(
 
     // Reject bind mount from unbindable source
     if source_mount_fs.propagation().is_unbindable() {
-        warn!("[do_bind_mount] source mount '{}' is unbindable, refusing bind", source_path);
+        warn!("[do_bind_mount] source mount '{}' is unbindable, refusing bind", source_path_raw);
         return Err(EINVAL);
     }
 
@@ -3802,6 +3800,11 @@ fn do_bind_mount(
     ) {
         Ok(fs) => fs,
         Err(e) => return Err(-(e as isize)),
+    };
+    let source_path = if source_path_raw.starts_with('/') {
+        source_path_raw
+    } else {
+        alloc::format!("/{}", source_path_raw)
     };
     mnt_fs.set_mount_source(Some(source_path));
 
