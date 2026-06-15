@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### nanosleep 短尾部自旋优化：使用 tick 比较
+
+**涉及文件：**
+- `os/src/task/sleep.rs` — 将短精度等待尾部循环从反复构造 `TimeSpec::now()` 改为 tick deadline 比较，减少频繁除法/取模
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev sh -lc 'timeout 75s make rv64-run ...'` ✅ — busybox `sleep 1` 与后台 `sleep 5` kill 流程通过，随后进入文件操作测试，由外层 timeout 结束，无 panic
+
+**备注：** 阻塞等待、信号中断和 remaining 计算仍沿用原有 `TimeSpec` 路径；只优化最后 `PRECISE_SLEEP_SPIN_NS` 窗口内的忙等判断。
+
 ### 轻量进程组 syscall 优化：缓存当前 pgid/sid
 
 **涉及文件：**

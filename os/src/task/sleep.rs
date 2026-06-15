@@ -1,6 +1,6 @@
 use spin::Mutex;
 
-use crate::timer::TimeSpec;
+use crate::timer::{get_clock_freq, get_time, TimeSpec, NSEC_PER_SEC};
 
 use super::{WaitQueue, WaitResult};
 
@@ -9,6 +9,14 @@ const PRECISE_SLEEP_SPIN_NS: usize = 750_000;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SleepInterrupted {
     pub remaining: TimeSpec,
+}
+
+#[inline(always)]
+fn timespec_to_ticks(time: TimeSpec) -> usize {
+    let freq = get_clock_freq();
+    time.tv_sec
+        .saturating_mul(freq)
+        .saturating_add(time.tv_nsec.saturating_mul(freq) / NSEC_PER_SEC)
 }
 
 pub fn sleep_relative_interruptible(req: TimeSpec) -> Result<(), SleepInterrupted> {
@@ -50,7 +58,8 @@ fn sleep_until_deadline(
         }
     }
 
-    while TimeSpec::now() < deadline {
+    let deadline_ticks = timespec_to_ticks(deadline);
+    while get_time() < deadline_ticks {
         core::hint::spin_loop();
     }
     Ok(())
