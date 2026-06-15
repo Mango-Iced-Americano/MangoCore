@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### lmbench/UnixBench 凭证 syscall 优化：减少当前任务 clone
+
+**涉及文件：**
+- `os/src/syscall/process/ids.rs` — `setuid/setreuid/setresuid/setgid/setregid/setresgid/setfsuid/setfsgid/setgroups` 改用 `current_task_ref()`，凭证锁内修改和 identity hint 更新不再额外 clone 当前任务 `Arc`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** 本次只处理当前任务自身凭证/组列表修改路径；ptrace、cap pid 查询、process_vm 等跨任务权限检查仍保留原有拥有权路径。
+
 ### lmbench lat_proc 优化：收窄 wait 当前任务生命周期
 
 **涉及文件：**

@@ -387,7 +387,7 @@ pub fn sys_setuid(uid: usize) -> isize {
         Ok(uid) => uid,
         Err(errno) => return errno,
     };
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let mut inner = task.acquire_inner_lock();
     if inner.euid != 0 && uid != inner.uid && uid != inner.euid && uid != inner.suid {
         return EPERM;
@@ -418,7 +418,7 @@ pub fn sys_setreuid(ruid: usize, euid: usize) -> isize {
         Ok(value) => value,
         Err(errno) => return errno,
     };
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let mut inner = task.acquire_inner_lock();
     let privileged = inner.euid == 0;
     let old_uid = inner.uid;
@@ -465,7 +465,7 @@ pub fn sys_setresuid(ruid: usize, euid: usize, suid: usize) -> isize {
         Ok(value) => value,
         Err(errno) => return errno,
     };
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let mut inner = task.acquire_inner_lock();
     if inner.euid != 0 {
         for id in [ruid, euid, suid].iter().copied().flatten() {
@@ -511,7 +511,7 @@ pub fn sys_setgid(gid: usize) -> isize {
         Ok(gid) => gid,
         Err(errno) => return errno,
     };
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let mut inner = task.acquire_inner_lock();
     if inner.euid != 0 && gid != inner.gid && gid != inner.egid && gid != inner.sgid {
         return EPERM;
@@ -540,7 +540,7 @@ pub fn sys_setregid(rgid: usize, egid: usize) -> isize {
         Ok(value) => value,
         Err(errno) => return errno,
     };
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let mut inner = task.acquire_inner_lock();
     let privileged = inner.euid == 0;
     let old_gid = inner.gid;
@@ -585,7 +585,7 @@ pub fn sys_setresgid(rgid: usize, egid: usize, sgid: usize) -> isize {
         Ok(value) => value,
         Err(errno) => return errno,
     };
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let mut inner = task.acquire_inner_lock();
     if inner.euid != 0 {
         for id in [rgid, egid, sgid].iter().copied().flatten() {
@@ -629,7 +629,7 @@ pub fn sys_setfsuid(fsuid: usize) -> isize {
         Ok(Some(fsuid)) => fsuid,
         Ok(None) | Err(_) => return current_task_ref().unwrap().acquire_inner_lock().fsuid as isize,
     };
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let mut inner = task.acquire_inner_lock();
     let old = inner.fsuid;
     if inner.euid == 0 || fsuid == inner.uid || fsuid == inner.euid || fsuid == inner.suid {
@@ -643,7 +643,7 @@ pub fn sys_setfsgid(fsgid: usize) -> isize {
         Ok(Some(fsgid)) => fsgid,
         Ok(None) | Err(_) => return current_task_ref().unwrap().acquire_inner_lock().fsgid as isize,
     };
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let mut inner = task.acquire_inner_lock();
     let old = inner.fsgid;
     if inner.euid == 0 || fsgid == inner.gid || fsgid == inner.egid || fsgid == inner.sgid {
@@ -675,7 +675,7 @@ pub fn sys_getgroups(size: usize, list: *mut u32) -> isize {
 }
 
 pub fn sys_setgroups(size: usize, list: *const u32) -> isize {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     if task.acquire_inner_lock().euid != 0 {
         return EPERM;
     }
