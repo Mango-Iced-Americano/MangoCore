@@ -575,8 +575,8 @@ pub fn vfs_lookup(
         let name = &components[comp_idx];
         let is_last = comp_idx == components.len() - 1;
 
-        let cur_md = current.metadata().map_err(|e| -(e as isize))?;
-        if cur_md.file_type != FileType::Dir {
+        let cur_type = current.metadata().map_err(|e| -(e as isize))?.file_type;
+        if cur_type != FileType::Dir {
             return Err(crate::syscall::errno::ENOTDIR);
         }
 
@@ -601,19 +601,7 @@ pub fn vfs_lookup(
             continue;
         }
 
-        // Use do_find_with_parent_ino when current is a MountFSInode to
-        // avoid redundant inner_inode.metadata() inside do_find.
-        let next: Arc<dyn self::vfs::IndexNode> = if let Some(mfsi) = current
-            .as_any_ref()
-                .downcast_ref::<self::vfs::MountFSInode>()
-        {
-            mfsi
-                .do_find_with_parent_ino(name, cur_md.inode_id as usize)
-                .map(|mnt| mnt as Arc<dyn self::vfs::IndexNode>)
-                .map_err(|e| -(e as isize))?
-        } else {
-            current.find(name).map_err(|e| -(e as isize))?
-        };
+        let next = current.find(name).map_err(|e| -(e as isize))?;
 
         let next_md = next.metadata().map_err(|e| -(e as isize))?;
         let file_type = next_md.file_type;

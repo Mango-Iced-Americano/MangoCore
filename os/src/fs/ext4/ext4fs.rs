@@ -897,6 +897,10 @@ impl IndexNode for layout::Ext4OSInode {
         self.get_new_page_cache()
     }
 
+    fn supports_user_buffer_io(&self) -> bool {
+        self.get_new_page_cache().is_some()
+    }
+
     fn sync(&self) -> Result<(), SyscallErr> {
         if let Some(pc) = self.new_page_cache.lock().clone() {
             pc.writeback_all()?;

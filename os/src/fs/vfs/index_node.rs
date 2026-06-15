@@ -96,6 +96,12 @@ pub trait IndexNode: Any + Send + Sync + Debug {
         Err(SyscallErr::ENOSYS)
     }
 
+    /// 是否支持直连 UserBuffer I/O。有 PageCache 的普通文件返回 true；
+    /// pipe/socket/devfs/procfs 保持默认 false，继续走 kbuf 路径。
+    fn supports_user_buffer_io(&self) -> bool {
+        false
+    }
+
     /// 直接读取（绕过 page cache），用于 O_DIRECT 和回写
     fn read_direct(
         &self,
