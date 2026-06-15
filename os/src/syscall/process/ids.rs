@@ -863,7 +863,7 @@ pub fn sys_capset(header: *mut CapUserHeader, data: *const CapUserData) -> isize
             return EINVAL;
         }
     };
-    let current = current_task().unwrap();
+    let current = current_task_ref().unwrap();
     let current_pid = current.pid() as i32;
     if header_value.pid != 0 && header_value.pid != current.tid.0 as i32 && header_value.pid != current_pid {
         return match find_task_for_cap_pid(header_value.pid) {
@@ -1053,7 +1053,7 @@ fn check_process_vm_access(
     if current_process.pid == target_process.pid {
         return Ok(());
     }
-    let current = current_task().unwrap();
+    let current = current_task_ref().unwrap();
     let (uid, euid, suid, gid, egid, sgid, cap_effective) = {
         let inner = current.acquire_inner_lock();
         (
@@ -1134,7 +1134,7 @@ fn sys_process_vm_transfer(
         Some(process) => process,
         None => return ESRCH,
     };
-    let current_process = current_task().unwrap().process.clone();
+    let current_process = current_task_ref().unwrap().process.clone();
     if let Err(errno) = check_process_vm_access(&current_process, &remote_process) {
         return errno;
     }
@@ -1409,7 +1409,7 @@ fn sys_prctl_cap_ambient(op: usize, cap: usize, arg4: usize, arg5: usize) -> isi
     if arg4 != 0 || arg5 != 0 {
         return EINVAL;
     }
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let mut inner = task.acquire_inner_lock();
     match op {
         PR_CAP_AMBIENT_IS_SET => {
@@ -1451,7 +1451,7 @@ fn sys_prctl_cap_ambient(op: usize, cap: usize, arg4: usize, arg5: usize) -> isi
 }
 
 pub fn sys_prctl(option: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize) -> isize {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     match option {
         PR_SET_PDEATHSIG => {
             if arg2 > PR_MAX_SIGNAL {
@@ -1597,7 +1597,7 @@ pub fn sys_setpgid(pid: usize, pgid: usize) -> isize {
     if (pid as isize) < 0 || (pgid as isize) < 0 {
         return EINVAL;
     }
-    let current = current_task().unwrap().process.clone();
+    let current = current_task_ref().unwrap().process.clone();
     let process = if pid == 0 {
         current.clone()
     } else {
@@ -1766,7 +1766,7 @@ pub enum Resource {
     ILLEAGAL,
 }
 
-fn current_rlimit_for(task: &Arc<TaskControlBlock>, resource: Resource) -> Option<RLimit> {
+fn current_rlimit_for(task: &TaskControlBlock, resource: Resource) -> Option<RLimit> {
     let unlimited = RLimit {
         rlim_cur: usize::MAX,
         rlim_max: usize::MAX,
@@ -1855,7 +1855,7 @@ fn current_rlimit_for(task: &Arc<TaskControlBlock>, resource: Resource) -> Optio
     Some(limit)
 }
 
-fn task_has_capability(task: &Arc<TaskControlBlock>, cap: usize) -> bool {
+fn task_has_capability(task: &TaskControlBlock, cap: usize) -> bool {
     let inner = task.acquire_inner_lock();
     inner.euid == 0 || (inner.cap_effective & (1u64 << cap)) != 0
 }
@@ -1869,7 +1869,7 @@ pub fn sys_prlimit(
     new_limit: *const RLimit,
     old_limit: *mut RLimit,
 ) -> isize {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     if pid != 0 && pid != task.pid() {
         return ESRCH;
     }
@@ -1886,7 +1886,7 @@ pub fn sys_prlimit(
     }
 
     if !old_limit.is_null() {
-        let Some(limit) = current_rlimit_for(&task, resource) else {
+        let Some(limit) = current_rlimit_for(task, resource) else {
             return EINVAL;
         };
         if UserPtrMut::new(old_limit).write(token, &limit).is_err() {
@@ -1906,11 +1906,11 @@ pub fn sys_prlimit(
         if rlimit.rlim_cur > rlimit.rlim_max {
             return EINVAL;
         }
-        let Some(current_limit) = current_rlimit_for(&task, resource) else {
+        let Some(current_limit) = current_rlimit_for(task, resource) else {
             return EINVAL;
         };
         if rlimit.rlim_max > current_limit.rlim_max
-            && !task_has_capability(&task, CAP_SYS_RESOURCE)
+            && !task_has_capability(task, CAP_SYS_RESOURCE)
         {
             return EPERM;
         }

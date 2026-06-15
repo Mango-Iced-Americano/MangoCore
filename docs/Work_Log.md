@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### 进程属性 syscall 优化：cap/prctl/prlimit 当前任务短引用化
+
+**涉及文件：**
+- `os/src/syscall/process/ids.rs` — `capset/process_vm_{readv,writev}/prctl/setpgid/prlimit64` 中仅读取当前 TCB 字段或 clone 当前进程句柄的路径改用 `current_task_ref()`；`current_rlimit_for()` 与 `task_has_capability()` 参数收窄为 `&TaskControlBlock`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束
+
+**备注：** ptrace、priority target、返回当前任务 `Arc` 的 pid lookup helper 保持原有拥有权路径；本次不改变权限检查顺序和 errno 语义。
+
 ### futex/WaitQueue 返回路径优化：finish_wait 改用任务短引用
 
 **涉及文件：**
