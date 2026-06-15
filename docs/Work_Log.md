@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### syscall 入口 seccomp 空路径优化：未启用时跳过过滤分支
+
+**涉及文件：**
+- `os/src/syscall/mod.rs` — 在 syscall 分发入口先检查全局 `any_seccomp_enabled()`；没有任务启用 seccomp 时直接跳过 `seccomp_action_for_syscall()` 调用和 match 分支
+- `os/src/task/task.rs` — 将 `any_seccomp_enabled()` 标记为 `#[inline(always)]`，让 syscall 热路径上的全局计数读取保持极短
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 该策略参考 Linux seccomp 的按任务启用模型；MangoCore 仍在任务启用 strict/filter 后走原有 `seccomp_action_for_syscall()` 语义，空路径只减少 lmbench simple syscall 等常态负担。
+
 ### 调度循环 shared futex compact 优化：空全局表跳过 tick 写入
 
 **涉及文件：**

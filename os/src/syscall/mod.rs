@@ -336,15 +336,17 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[5],
         );
     }
-    match seccomp_action_for_syscall(syscall_id) {
-        SeccompSyscallAction::Allow => {}
-        SeccompSyscallAction::KillThread(signal) => {
-            let signum = signal.to_signum().unwrap() as u32;
-            exit_current_and_run_next(signum);
-        }
-        SeccompSyscallAction::KillProcess(signal) => {
-            let signum = signal.to_signum().unwrap() as u32;
-            exit_group_and_run_next(signum);
+    if crate::task::any_seccomp_enabled() {
+        match seccomp_action_for_syscall(syscall_id) {
+            SeccompSyscallAction::Allow => {}
+            SeccompSyscallAction::KillThread(signal) => {
+                let signum = signal.to_signum().unwrap() as u32;
+                exit_current_and_run_next(signum);
+            }
+            SeccompSyscallAction::KillProcess(signal) => {
+                let signum = signal.to_signum().unwrap() as u32;
+                exit_group_and_run_next(signum);
+            }
         }
     }
     let ret = match syscall_id {

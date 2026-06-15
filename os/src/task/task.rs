@@ -32,6 +32,7 @@ const TASK_CAP_FULL_SET: u64 = (1u64 << 41) - 1;
 const DEFAULT_TIMER_SLACK_NS: usize = 50_000;
 static ACTIVE_SECCOMP_TASKS: AtomicUsize = AtomicUsize::new(0);
 
+#[inline(always)]
 pub fn any_seccomp_enabled() -> bool {
     ACTIVE_SECCOMP_TASKS.load(Ordering::Acquire) != 0
 }
