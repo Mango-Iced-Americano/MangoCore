@@ -4,6 +4,21 @@
 
 ## 2026-06-15
 
+### lmbench syscall/signal 优化：合并 trap_return OOM 与 signal 检查
+
+**涉及文件：**
+- `os/src/hal/arch/riscv/trap/mod.rs` — `trap_return()` 不再单独调用 OOM pending 检查，避免每次返回用户态重复获取当前任务
+- `os/src/hal/arch/loongarch64/trap/mod.rs` — 同步 la64 `trap_return()` 路径
+- `os/src/task/signal/mod.rs` — 在 `do_signal()` 起始处处理 `pending_oom_kill` 并投递 `SIGKILL`
+- `os/src/task/processor.rs`、`os/src/task/mod.rs` — 移除独立 `check_oom_kill()` helper 及导出
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — 内核启动到 initproc，basic musl/glibc 均 `exit_code=0`，busybox/lua 继续运行；因镜像内 `/os_test.conf` 仍读取到 `mask=0xFFF`，进入 LTP 后手动结束，命令最终 `timeout` 退出
+
+**备注：** 该改动保留 OOM kill 在返回用户态前转为 `SIGKILL` 的语义，只把原先连续两次 `current_task()`/task inner lock 合并为一次 `do_signal()` 入口处理，降低所有 syscall return 的固定成本。
+
 ### lmbench fork+exit 优化：调度器批量回收 zombie
 
 **涉及文件：**

@@ -655,6 +655,15 @@ fn signal_should_ptrace_stop(inner: &super::task::TaskControlBlockInner, signal:
 pub fn do_signal() {
     let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
+    if inner.pending_oom_kill {
+        inner.pending_oom_kill = false;
+        inner.add_signal(Signals::SIGKILL);
+        warn!(
+            "[OOM killer] tid {} pid {} marked for OOM kill, sending SIGKILL",
+            task.tid.0,
+            task.pid()
+        );
+    }
     while let Some((pending, from_process)) = take_next_pending_signal(&task, &mut inner) {
         let signum = pending.signum();
         let signal = pending.signal;
