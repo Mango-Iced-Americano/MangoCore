@@ -186,7 +186,7 @@ pub fn sys_delete_module(name: *const u8, _flags: u32) -> isize {
         return EPERM;
     }
 
-    match translated_str(task.get_user_token(), name) {
+    match translated_str(current_user_token(), name) {
         Ok(_) => ENOENT,
         Err(errno) => errno,
     }

@@ -8,7 +8,8 @@ use crate::mm::{UserCString, UserPtr};
 use crate::show_frame_consumption;
 use crate::syscall::errno::*;
 use crate::task::{
-    current_task_ref, exit_current_and_run_next, is_writable_inode_busy, AuxvEntry,
+    current_task_ref, current_user_token, exit_current_and_run_next, is_writable_inode_busy,
+    AuxvEntry,
 };
 use log::{debug, info};
 
@@ -397,7 +398,7 @@ fn resolve_exec_start_inode(dirfd: usize, path: &str) -> Result<Arc<dyn vfs::Ind
 
 pub fn sys_execve(pathname: *const u8, argv: *const *const u8, envp: *const *const u8) -> isize {
     let task = current_task_ref().unwrap();
-    let token = task.get_user_token();
+    let token = current_user_token();
     let fs_ref = task.process.fs();
     let path = match UserCString::new(pathname).read(token) {
         Ok(path) => path,
@@ -448,7 +449,7 @@ pub fn sys_execveat(
     const VALID_FLAGS: u32 = AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH;
 
     let task = current_task_ref().unwrap();
-    let token = task.get_user_token();
+    let token = current_user_token();
     let fs_ref = task.process.fs();
     let path = match UserCString::new(pathname).read(token) {
         Ok(path) => path,

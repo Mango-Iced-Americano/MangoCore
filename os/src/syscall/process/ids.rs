@@ -1873,7 +1873,7 @@ pub fn sys_prlimit(
         return ESRCH;
     }
 
-    let token = task.get_user_token();
+    let token = current_user_token();
     let resource = Resource::from_primitive(resource);
     info!(
         "[sys_prlimit] pid: {}, resource: {:?}, new_limit: {:?}, old_limit: {:?}",
