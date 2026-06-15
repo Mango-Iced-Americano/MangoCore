@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### lmbench/UnixBench futex fast-path 优化：短引用获取当前任务
+
+**涉及文件：**
+- `os/src/task/threads.rs` — 私有 futex 表获取和单线程短超时自旋路径改用 `current_task_ref()`，减少 futex wait 热路径中的当前任务 `Arc` clone
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** 实际入等待队列、`Arc::downgrade`、唤醒后 `finish_wait` 的路径保留 `current_task()`；syscall 层 futex key 分发暂不重构，避免短引用跨等待调用。
+
 ### lmbench/UnixBench 信号内部 helper 优化：短引用读取当前任务
 
 **涉及文件：**

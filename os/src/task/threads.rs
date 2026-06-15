@@ -8,7 +8,7 @@ use crate::{
     mm::UserPtr,
     syscall::errno::*,
     task::{
-        block_current_and_run_next_with_lock_checked, current_task,
+        block_current_and_run_next_with_lock_checked, current_task, current_task_ref,
         discard_non_actionable_unblocked_signals, has_actionable_signal, task_manager_counts,
         wait_with_timeout, TaskControlBlock,
     },
@@ -269,7 +269,7 @@ fn try_single_thread_short_timeout(
         return None;
     }
 
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     if task.process.live_thread_count() != 1 {
         return None;
     }
@@ -464,9 +464,7 @@ fn do_futex_wait_until(
     deadline: Option<TimeSpec>,
 ) -> isize {
     super::perf::record_futex_wait(false, deadline.is_some());
-    let task = current_task().unwrap();
-    let futex_table = task.process.futex().clone();
-    drop(task);
+    let futex_table = current_task_ref().unwrap().process.futex().clone();
 
     if let Some(wait_result) = try_single_thread_short_timeout(futex_word, token, val, deadline) {
         super::perf::record_futex_wait_result(wait_result);
@@ -534,9 +532,7 @@ pub fn do_futex_waitv(
         return result;
     }
 
-    let task = current_task().unwrap();
-    let futex_table = task.process.futex().clone();
-    drop(task);
+    let futex_table = current_task_ref().unwrap().process.futex().clone();
 
     loop {
         if deadline_expired(deadline) {
