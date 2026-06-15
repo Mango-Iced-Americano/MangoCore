@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### 用户访存 token 校验优化：uaccess 复用当前 token 缓存
+
+**涉及文件：**
+- `os/src/mm/uaccess.rs` — `is_current_user_token()` 和 `fault_in_current_user_va()` 改为使用已缓存的 `current_user_token()` 做当前地址空间校验，避免每页用户指针翻译时再次通过 `TaskControlBlock::get_user_token()` 锁 VM
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** fault-in 仍只允许当前任务 token，跨进程/陈旧 token 继续返回 `EFAULT`；优化只去掉重复 VM token 读取。
+
 ### 当前任务快照内存序优化：标量 fast path 使用 Relaxed
 
 **涉及文件：**

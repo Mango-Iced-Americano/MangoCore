@@ -525,9 +525,7 @@ pub(crate) fn uaccess_user_range_ok(ptr: usize, end: usize) -> bool {
 }
 
 fn is_current_user_token(token: usize) -> bool {
-    current_task_ref()
-        .map(|task| task.get_user_token() == token)
-        .unwrap_or(false)
+    current_task_ref().is_some() && crate::task::current_user_token() == token
 }
 
 // 区分用户触发缺页时的权限
@@ -539,10 +537,11 @@ fn fault_in_current_user_va(
     access: FaultAccess,
 ) -> Result<PhysAddr, isize> {
     // fault-in 只能由当前任务 token 处理；跨进程 token 只能返回 EFAULT。
-    let vm = current_task_ref()
-        .filter(|task| task.get_user_token() == token)
-        .map(|task| task.process.vm())
-        .ok_or(crate::syscall::errno::EFAULT)?;
+    let task = current_task_ref().ok_or(crate::syscall::errno::EFAULT)?;
+    if crate::task::current_user_token() != token {
+        return Err(crate::syscall::errno::EFAULT);
+    }
+    let vm = task.process.vm();
     let result = vm.lock().fault_in_user_va(va, access);
     result
 }
