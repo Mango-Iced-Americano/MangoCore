@@ -8,7 +8,7 @@ use crate::mm::{frame_reserve, FaultAccess, MemoryError, VirtAddr};
 use crate::net::config::NET_INTERFACE;
 use crate::syscall::syscall;
 use crate::task::{
-    current_task, current_task_ref, current_user_token, do_signal, do_wake_expired, signal::SigInfo,
+    current_task_ref, current_user_token, do_signal, do_wake_expired, signal::SigInfo,
     suspend_current_and_run_next, Signals,
 };
 use crate::timer::{ITimerVal, TimeVal};
@@ -107,7 +107,7 @@ pub fn trap_handler() -> ! {
     }
 
     {
-        let task = current_task().unwrap();
+        let task = current_task_ref().unwrap();
         let mut inner = task.acquire_inner_lock();
         inner.update_process_times_enter_trap();
     }
@@ -118,7 +118,7 @@ pub fn trap_handler() -> ! {
         | Trap::Exception(Exception::InstructionPageFault)
         | Trap::Exception(Exception::LoadFault)
         | Trap::Exception(Exception::LoadPageFault) => {
-            let task = current_task().unwrap();
+            let task = current_task_ref().unwrap();
             let mut inner = task.acquire_inner_lock();
             let addr = VirtAddr::from(stval);
             log::debug!(
@@ -165,7 +165,7 @@ pub fn trap_handler() -> ! {
         }
         Trap::Exception(Exception::IllegalInstruction)
         | Trap::Exception(Exception::InstructionMisaligned) => {
-            let task = current_task().unwrap();
+            let task = current_task_ref().unwrap();
             let mut inner = task.acquire_inner_lock();
             inner.sigmask.remove(Signals::SIGILL);
             inner.add_signal_with_code(Signals::SIGILL, SigInfo::ILL_ILLOPC);
@@ -189,7 +189,7 @@ pub fn trap_handler() -> ! {
         }
     }
     {
-        let task = current_task().unwrap();
+        let task = current_task_ref().unwrap();
         let mut inner = task.acquire_inner_lock();
         inner.refresh_real_timer();
         inner.update_process_times_leave_trap(scause.cause());

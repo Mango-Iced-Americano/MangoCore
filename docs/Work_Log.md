@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### trap 当前任务快路径：减少 page fault/timer 慢路径引用计数
+
+**涉及文件：**
+- `os/src/hal/arch/riscv/trap/mod.rs` — 非 syscall trap 路径改用 `current_task_ref()`，避免 page fault、非法指令和 trap 退出阶段额外 clone 当前 `Arc<TaskControlBlock>`
+- `os/src/hal/arch/loongarch64/trap/mod.rs` — 同步 la64 trap 慢路径当前任务读取方式，保持双架构一致
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** `current_task_ref()` 只在当前 trap 处理栈内短生命周期使用，不跨 `suspend_current_and_run_next()` 保存；调度器仍持有当前任务 `Arc`。
+
 ### seccomp 活跃计数原子放松：减少 syscall 入口固定开销
 
 **涉及文件：**

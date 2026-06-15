@@ -15,7 +15,7 @@ use crate::mm::{
 use crate::net::config::NET_INTERFACE;
 use crate::syscall::syscall;
 use crate::task::{
-    current_task, current_task_ref, current_trap_cx, current_user_token, do_signal, do_wake_expired,
+    current_task_ref, current_trap_cx, current_user_token, do_signal, do_wake_expired,
     signal::SigInfo, suspend_current_and_run_next, Signals,
 };
 use core::arch::{asm, global_asm};
@@ -202,7 +202,7 @@ pub fn trap_handler() -> ! {
     }
 
     {
-        let task = current_task().unwrap();
+        let task = current_task_ref().unwrap();
         let mut inner = task.acquire_inner_lock();
         inner.update_process_times_enter_trap();
     }
@@ -215,7 +215,7 @@ pub fn trap_handler() -> ! {
         | Trap::Exception(Exception::PageModifyFault)
         | Trap::Exception(Exception::PageNonReadableFault)
         | Trap::Exception(Exception::PageNonExecutableFault) => {
-            let task = current_task().unwrap();
+            let task = current_task_ref().unwrap();
             let mut inner = task.acquire_inner_lock();
             let addr = VirtAddr::from(get_bad_addr());
             log::debug!(
@@ -290,14 +290,14 @@ pub fn trap_handler() -> ! {
         | Trap::Exception(Exception::FloatingPointUnavailable)
         | Trap::Exception(Exception::InstructionPrivilegeIllegal) => {
             log::info!("[trap] trigger SIGILL/FPU from exception {:?}", cause);
-            let task = current_task().unwrap();
+            let task = current_task_ref().unwrap();
             let mut inner = task.acquire_inner_lock();
             inner.sigmask.remove(Signals::SIGILL);
             inner.add_signal_with_code(Signals::SIGILL, SigInfo::ILL_ILLOPC);
         }
         Trap::Exception(Exception::AddressError) => {
             log::info!("[trap] trigger SIGSEGV from address error");
-            let task = current_task().unwrap();
+            let task = current_task_ref().unwrap();
             let mut inner = task.acquire_inner_lock();
             inner.sigmask.remove(Signals::SIGSEGV);
             inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_MAPERR);
@@ -387,7 +387,7 @@ pub fn trap_handler() -> ! {
         }
     }
     {
-        let task = current_task().unwrap();
+        let task = current_task_ref().unwrap();
         let mut inner = task.acquire_inner_lock();
         inner.update_process_times_leave_trap(cause);
     }
