@@ -186,9 +186,8 @@ pub fn trap_handler() -> ! {
 
 #[no_mangle]
 pub fn trap_return() -> ! {
-    do_signal();
+    let task = do_signal();
     set_user_trap_entry();
-    let task = current_task().unwrap();
     let trap_cx_ptr = task.trap_cx_user_va();
     let user_satp = task.get_user_token();
     drop(task);

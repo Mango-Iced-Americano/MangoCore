@@ -655,7 +655,7 @@ fn signal_should_ptrace_stop(inner: &super::task::TaskControlBlockInner, signal:
 
 /// 执行信号处理
 /// 在从内核返回到用户空间前调用
-pub fn do_signal() {
+pub fn do_signal() -> Arc<TaskControlBlock> {
     let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
     if inner.pending_oom_kill {
@@ -685,8 +685,7 @@ pub fn do_signal() {
             drop(inner);
             drop(task);
             stop_current_process_for_signal(signum);
-            do_signal();
-            return;
+            return do_signal();
         }
         // user-defined handler
         if let Some(act) = sighand.get(signum).copied() {
@@ -869,7 +868,9 @@ pub fn do_signal() {
                     sighand.set(signum, Some(reset_action));
                 }
                 // go back to `trap_return`
-                return;
+                drop(sighand);
+                drop(inner);
+                return task;
             }
         }
         // user program doesn't register a handler for this signal, use our default handler
@@ -914,10 +915,7 @@ pub fn do_signal() {
                 drop(sighand);
                 drop(task);
                 stop_current_process_for_signal(signum);
-                // because this loop require `inner`, and we have `drop(inner)` above, so `break` is compulsory
-                // this would cause some signals won't be handled immediately when this process resumes
-                // but it doesn't matter, maybe
-                break;
+                return do_signal();
             }
             // for all other signals, we should terminate current process
             _ => {
@@ -929,6 +927,8 @@ pub fn do_signal() {
             }
         }
     }
+    drop(inner);
+    task
 }
 
 pub fn sigaltstack(ss: *const SignalStack, old_ss: *mut SignalStack) -> isize {

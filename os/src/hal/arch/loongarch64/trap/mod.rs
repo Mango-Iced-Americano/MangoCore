@@ -415,9 +415,8 @@ fn read_bp() {
 }
 #[no_mangle]
 pub fn trap_return() -> ! {
-    do_signal();
+    let task = do_signal();
     set_user_trap_entry();
-    let task = current_task().unwrap();
     let trap_cx = task.acquire_inner_lock().get_trap_cx();
     let trap_cx_ptr = trap_cx as *const TrapContext as usize;
     trap_cx.sstatus.set_pplv(3).set_pie(true);

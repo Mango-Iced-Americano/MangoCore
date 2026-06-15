@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### lmbench syscall/signal 优化：trap_return 复用 do_signal 当前任务
+
+**涉及文件：**
+- `os/src/task/signal/mod.rs` — `do_signal()` 返回当前 `TaskControlBlock`，处理 ptrace/stop 后重新进入信号检查并返回恢复后的当前任务
+- `os/src/hal/arch/riscv/trap/mod.rs` — `trap_return()` 复用 `do_signal()` 返回的 task，避免再次 `current_task()`
+- `os/src/hal/arch/loongarch64/trap/mod.rs` — 同步 la64 返回用户态路径
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+
+**备注：** 该改动不改变信号投递、默认 stop 或退出语义，只减少每次返回用户态前的一次 `PROCESSOR` 锁和 `Arc` clone。
+
 ### lmbench syscall/signal 优化：shared pending 信号空路径免锁
 
 **涉及文件：**
