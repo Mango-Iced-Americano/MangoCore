@@ -22,6 +22,7 @@ use spin::{Mutex, MutexGuard};
 
 use super::{FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata};
 use super::event::EventWaitQueue;
+use crate::mm::UserBuffer;
 use crate::task::{register_writable_inode, unregister_writable_inode, WaitQueue};
 use crate::config::SYSTEM_FD_LIMIT;
 
@@ -969,6 +970,177 @@ impl File {
             self.touch_modified();
         }
         Ok(n)
+    }
+
+    // ── UserBuffer 读写 ────────────────────────────────────────────
+
+    /// 从文件当前位置读取到 UserBuffer（直连版本，省去 kbuf 中转）。
+    pub fn read_user(&self, dst: &mut UserBuffer) -> Result<usize, SyscallErr> {
+        self.readable()?;
+        let offset = self.offset.load(Ordering::SeqCst);
+        let len = dst.len();
+        if len == 0 {
+            return Ok(0);
+        }
+
+        match self.inode.read_at_user(offset, len, dst) {
+            Ok(n) => {
+                if n > 0 {
+                    self.offset.fetch_add(n, Ordering::SeqCst);
+                }
+                Ok(n)
+            }
+            Err(SyscallErr::ENOSYS) => {
+                let mut kbuf = Vec::new();
+                kbuf.try_reserve(len).map_err(|_| SyscallErr::ENOMEM)?;
+                unsafe { kbuf.set_len(len); }
+                let n = self
+                    .inode
+                    .read_at(offset, len, &mut kbuf, self.private_data.lock())?;
+                if n > 0 {
+                    dst.write_at(0, &kbuf[..n]);
+                    self.offset.fetch_add(n, Ordering::SeqCst);
+                }
+                Ok(n)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// 从指定位置读取到 UserBuffer（不推进 offset）。
+    pub fn pread_user(&self, offset: usize, dst: &mut UserBuffer) -> Result<usize, SyscallErr> {
+        let mode = *self.mode.lock();
+        if mode.contains(FileMode::FMODE_PATH) {
+            return Err(SyscallErr::EBADF);
+        }
+        if mode.contains(FileMode::FMODE_STREAM) {
+            return Err(SyscallErr::ESPIPE);
+        }
+        let len = dst.len();
+        if len == 0 {
+            return Ok(0);
+        }
+
+        match self.inode.read_at_user(offset, len, dst) {
+            Ok(n) => Ok(n),
+            Err(SyscallErr::ENOSYS) => {
+                let mut kbuf = Vec::new();
+                kbuf.try_reserve(len).map_err(|_| SyscallErr::ENOMEM)?;
+                unsafe { kbuf.set_len(len); }
+                let n = self
+                    .inode
+                    .read_at(offset, len, &mut kbuf, self.private_data.lock())?;
+                if n > 0 {
+                    dst.write_at(0, &kbuf[..n]);
+                }
+                Ok(n)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// 从 UserBuffer 写入文件当前位置（直连版本，省去 kbuf 中转）。
+    pub fn write_user(&self, src: &UserBuffer) -> Result<usize, SyscallErr> {
+        self.writable()?;
+        let flags = *self.flags.lock();
+        let len = src.len();
+        if len == 0 {
+            return Ok(0);
+        }
+
+        let offset = if flags.contains(FileFlags::O_APPEND) {
+            let md = self.inode.metadata()?;
+            md.size.max(0) as usize
+        } else {
+            self.offset.load(Ordering::SeqCst)
+        };
+        self.check_memfd_write_seals(offset, len)?;
+
+        match self.inode.write_at_user(offset, len, src) {
+            Ok(n) => {
+                if n > 0 {
+                    if flags.contains(FileFlags::O_APPEND) {
+                        self.offset.store(offset + n, Ordering::SeqCst);
+                    } else {
+                        self.offset.fetch_add(n, Ordering::SeqCst);
+                    }
+                    self.touch_modified();
+                }
+                Ok(n)
+            }
+            Err(SyscallErr::ENOSYS) => {
+                let mut kbuf = Vec::new();
+                kbuf.try_reserve(len).map_err(|_| SyscallErr::ENOMEM)?;
+                unsafe { kbuf.set_len(len); }
+                let copied = src.read_at(0, &mut kbuf);
+                let n = self.inode.write_at(
+                    offset,
+                    copied,
+                    &kbuf[..copied],
+                    self.private_data.lock(),
+                )?;
+                if n > 0 {
+                    if flags.contains(FileFlags::O_APPEND) {
+                        self.offset.store(offset + n, Ordering::SeqCst);
+                    } else {
+                        self.offset.fetch_add(n, Ordering::SeqCst);
+                    }
+                    self.touch_modified();
+                }
+                Ok(n)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// 从 UserBuffer 写入文件指定位置（不推进 offset）。
+    pub fn pwrite_user(&self, offset: usize, src: &UserBuffer) -> Result<usize, SyscallErr> {
+        let mode = *self.mode.lock();
+        if mode.contains(FileMode::FMODE_PATH) {
+            return Err(SyscallErr::EBADF);
+        }
+        if mode.contains(FileMode::FMODE_STREAM) {
+            return Err(SyscallErr::ESPIPE);
+        }
+        let flags = *self.flags.lock();
+        let len = src.len();
+        if len == 0 {
+            return Ok(0);
+        }
+
+        let offset = if flags.contains(FileFlags::O_APPEND) {
+            let md = self.inode.metadata()?;
+            md.size.max(0) as usize
+        } else {
+            offset
+        };
+        self.check_memfd_write_seals(offset, len)?;
+
+        match self.inode.write_at_user(offset, len, src) {
+            Ok(n) => {
+                if n > 0 {
+                    self.touch_modified();
+                }
+                Ok(n)
+            }
+            Err(SyscallErr::ENOSYS) => {
+                let mut kbuf = Vec::new();
+                kbuf.try_reserve(len).map_err(|_| SyscallErr::ENOMEM)?;
+                unsafe { kbuf.set_len(len); }
+                let copied = src.read_at(0, &mut kbuf);
+                let n = self.inode.write_at(
+                    offset,
+                    copied,
+                    &kbuf[..copied],
+                    self.private_data.lock(),
+                )?;
+                if n > 0 {
+                    self.touch_modified();
+                }
+                Ok(n)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     // ── Seek ───────────────────────────────────────────────────────

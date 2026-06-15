@@ -494,17 +494,11 @@ fn read_into_user(file: &vfs::File, token: usize, buf: usize, count: usize) -> i
     }
 
     let chunk_cap = count.min(crate::hal::IO_CHUNK_SIZE);
-    let mut kbuf = alloc::vec::Vec::new();
-    if kbuf.try_reserve(chunk_cap).is_err() {
-        return -(SyscallErr::ENOMEM as isize);
-    }
-    unsafe { kbuf.set_len(chunk_cap); }
-
     let mut total = 0usize;
     while total < count {
         let want = (count - total).min(chunk_cap);
 
-        // Validate destination chunk BEFORE reading from file
+        // Validate destination BEFORE reading from file
         let user_addr = match buf.checked_add(total) {
             Some(v) => v,
             None => return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) },
@@ -514,43 +508,25 @@ fn read_into_user(file: &vfs::File, token: usize, buf: usize, count: usize) -> i
             Err(errno) => return if total > 0 { total as isize } else { errno },
         };
 
-        let n = match file.read(&mut kbuf[..accessible]) {
+        // Translate user pages BEFORE file read (preserve offset semantics:
+        // bad user address → EFAULT without advancing file offset).
+        let mut ubuf = match UserBufferWriter::new(token, user_addr as *mut u8, accessible) {
+            Ok(w) => w.into_user_buffer(),
+            Err(errno) => return if total > 0 { total as isize } else { errno },
+        };
+
+        let n = match file.read_user(&mut ubuf) {
             Ok(n) => n,
             Err(e) => {
-                let ret = -(e as isize);
-                return if total > 0 { total as isize } else { ret };
+                return if total > 0 { total as isize } else { -(e as isize) };
             }
         };
         if n == 0 {
             break;
         }
 
-        // Write to user one page at a time — each page fault-in is independent
-        let mut copied = 0usize;
-        while copied < n {
-            let this_addr = user_addr.saturating_add(copied);
-            let page_remain = crate::config::PAGE_SIZE - (this_addr & (crate::config::PAGE_SIZE - 1));
-            let chunk = (n - copied).min(page_remain.max(1));
-            let mut writer = match UserBufferWriter::new(token, this_addr as *mut u8, chunk) {
-                Ok(w) => w,
-                Err(errno) => {
-                    if copied > 0 { total += copied; }
-                    return if total > 0 { total as isize } else { errno };
-                }
-            };
-            let c = match writer.write_from(&kbuf[copied..copied + chunk]) {
-                Ok(c) => c,
-                Err(errno) => {
-                    if copied > 0 { total += copied; }
-                    return if total > 0 { total as isize } else { errno };
-                }
-            };
-            copied += c;
-            if c < chunk { break; }
-        }
-
-        total += copied;
-        if copied < n {
+        total += n;
+        if n < accessible {
             break;
         }
 
@@ -572,12 +548,6 @@ fn pread_into_user(file: &vfs::File, token: usize, buf: usize, count: usize, off
     }
 
     let chunk_cap = count.min(crate::hal::IO_CHUNK_SIZE);
-    let mut kbuf = alloc::vec::Vec::new();
-    if kbuf.try_reserve(chunk_cap).is_err() {
-        return -(SyscallErr::ENOMEM as isize);
-    }
-    unsafe { kbuf.set_len(chunk_cap); }
-
     let mut total = 0usize;
     while total < count {
         let want = (count - total).min(chunk_cap);
@@ -595,43 +565,23 @@ fn pread_into_user(file: &vfs::File, token: usize, buf: usize, count: usize, off
             Err(errno) => return if total > 0 { total as isize } else { errno },
         };
 
-        let n = match file.pread(file_off, &mut kbuf[..accessible]) {
+        let mut ubuf = match UserBufferWriter::new(token, user_addr as *mut u8, accessible) {
+            Ok(w) => w.into_user_buffer(),
+            Err(errno) => return if total > 0 { total as isize } else { errno },
+        };
+
+        let n = match file.pread_user(file_off, &mut ubuf) {
             Ok(n) => n,
             Err(e) => {
-                let ret = -(e as isize);
-                return if total > 0 { total as isize } else { ret };
+                return if total > 0 { total as isize } else { -(e as isize) };
             }
         };
         if n == 0 {
             break;
         }
 
-        // Write to user one page at a time — each page fault-in is independent
-        let mut copied = 0usize;
-        while copied < n {
-            let this_addr = user_addr.saturating_add(copied);
-            let page_remain = crate::config::PAGE_SIZE - (this_addr & (crate::config::PAGE_SIZE - 1));
-            let chunk = (n - copied).min(page_remain.max(1));
-            let mut writer = match UserBufferWriter::new(token, this_addr as *mut u8, chunk) {
-                Ok(w) => w,
-                Err(errno) => {
-                    if copied > 0 { total += copied; }
-                    return if total > 0 { total as isize } else { errno };
-                }
-            };
-            let c = match writer.write_from(&kbuf[copied..copied + chunk]) {
-                Ok(c) => c,
-                Err(errno) => {
-                    if copied > 0 { total += copied; }
-                    return if total > 0 { total as isize } else { errno };
-                }
-            };
-            copied += c;
-            if c < chunk { break; }
-        }
-
-        total += copied;
-        if copied < n {
+        total += n;
+        if n < accessible {
             break;
         }
 
@@ -653,12 +603,6 @@ fn write_from_user(file: &vfs::File, token: usize, buf: usize, count: usize) -> 
     }
 
     let chunk_cap = count.min(crate::hal::IO_CHUNK_SIZE);
-    let mut kbuf = alloc::vec::Vec::new();
-    if kbuf.try_reserve(chunk_cap).is_err() {
-        return -(SyscallErr::ENOMEM as isize);
-    }
-    unsafe { kbuf.set_len(chunk_cap); }
-
     let mut total = 0usize;
     while total < count {
         let want = (count - total).min(chunk_cap);
@@ -680,25 +624,20 @@ fn write_from_user(file: &vfs::File, token: usize, buf: usize, count: usize) -> 
             accessible = want.min(crate::config::PAGE_SIZE);
         }
 
-        let reader = match UserBufferReader::new(token, user_addr as *const u8, accessible) {
-            Ok(r) => r,
-            Err(errno) => return if total > 0 { total as isize } else { errno },
-        };
-        let copied = match reader.read_into(&mut kbuf[..accessible]) {
-            Ok(n) => n,
+        let ubuf = match UserBufferReader::new(token, user_addr as *const u8, accessible) {
+            Ok(r) => r.into_user_buffer(),
             Err(errno) => return if total > 0 { total as isize } else { errno },
         };
 
-        let n = match file.write(&kbuf[..copied]) {
+        let n = match file.write_user(&ubuf) {
             Ok(n) => n,
             Err(e) => {
-                let ret = -(e as isize);
-                return if total > 0 { total as isize } else { ret };
+                return if total > 0 { total as isize } else { -(e as isize) };
             }
         };
 
         total += n;
-        if n == 0 || n < copied {
+        if n == 0 || n < accessible {
             break;
         }
 
@@ -720,12 +659,6 @@ fn pwrite_from_user(file: &vfs::File, token: usize, buf: usize, count: usize, of
     }
 
     let chunk_cap = count.min(crate::hal::IO_CHUNK_SIZE);
-    let mut kbuf = alloc::vec::Vec::new();
-    if kbuf.try_reserve(chunk_cap).is_err() {
-        return -(SyscallErr::ENOMEM as isize);
-    }
-    unsafe { kbuf.set_len(chunk_cap); }
-
     let mut total = 0usize;
     while total < count {
         let want = (count - total).min(chunk_cap);
@@ -752,25 +685,20 @@ fn pwrite_from_user(file: &vfs::File, token: usize, buf: usize, count: usize, of
             accessible = want.min(crate::config::PAGE_SIZE);
         }
 
-        let reader = match UserBufferReader::new(token, user_addr as *const u8, accessible) {
-            Ok(r) => r,
-            Err(errno) => return if total > 0 { total as isize } else { errno },
-        };
-        let copied = match reader.read_into(&mut kbuf[..accessible]) {
-            Ok(n) => n,
+        let ubuf = match UserBufferReader::new(token, user_addr as *const u8, accessible) {
+            Ok(r) => r.into_user_buffer(),
             Err(errno) => return if total > 0 { total as isize } else { errno },
         };
 
-        let n = match file.pwrite(file_off, &kbuf[..copied]) {
+        let n = match file.pwrite_user(file_off, &ubuf) {
             Ok(n) => n,
             Err(e) => {
-                let ret = -(e as isize);
-                return if total > 0 { total as isize } else { ret };
+                return if total > 0 { total as isize } else { -(e as isize) };
             }
         };
 
         total += n;
-        if n == 0 || n < copied {
+        if n == 0 || n < accessible {
             break;
         }
 

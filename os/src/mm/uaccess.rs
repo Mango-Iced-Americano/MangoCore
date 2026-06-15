@@ -309,15 +309,6 @@ impl UserBufferWriter {
     }
 
     pub fn write_from(&mut self, src: &[u8]) -> Result<usize, isize> {
-        let total_buf_len = self.buffer.len;
-        if src.len() >= 60 {
-            log::info!(
-                "[UserBufferWriter] write_from src_len={} buf_total_len={} n_bufs={}",
-                src.len(),
-                total_buf_len,
-                self.buffer.buffers.len(),
-            );
-        }
         Ok(self.buffer.write(src))
     }
 }
@@ -772,10 +763,18 @@ impl UserBuffer {
         for buffer in self.buffers.iter() {
             let end = start + buffer.len();
             if end > dst_len {
-                dst[start..].copy_from_slice(&buffer[..dst_len - start]);
+                let n = dst_len - start;
+                // SAFETY: ptr::copy handles overlapping src/dst (memmove semantics),
+                // needed when MAP_SHARED mmap aliases the same physical page.
+                unsafe {
+                    core::ptr::copy(buffer.as_ptr(), dst.as_mut_ptr().add(start), n);
+                }
                 return dst_len;
             } else {
-                dst[start..end].copy_from_slice(buffer);
+                let n = buffer.len();
+                unsafe {
+                    core::ptr::copy(buffer.as_ptr(), dst.as_mut_ptr().add(start), n);
+                }
             }
             start = end;
         }
@@ -788,10 +787,16 @@ impl UserBuffer {
         for buffer in self.buffers.iter_mut() {
             let end = start + buffer.len();
             if end > src_len {
-                buffer[..src_len - start].copy_from_slice(&src[start..]);
+                let n = src_len - start;
+                unsafe {
+                    core::ptr::copy(src.as_ptr().add(start), buffer.as_mut_ptr(), n);
+                }
                 return src_len;
             } else {
-                buffer.copy_from_slice(&src[start..end]);
+                let n = buffer.len();
+                unsafe {
+                    core::ptr::copy(src.as_ptr().add(start), buffer.as_mut_ptr(), n);
+                }
             }
             start = end;
         }
@@ -817,8 +822,14 @@ impl UserBuffer {
             let copy_src_end = copy_dst_end - offset;
             let copy_buffer_start = copy_dst_start - dst_start;
             let copy_buffer_end = copy_dst_end - dst_start;
-            dst[copy_src_start..copy_src_end]
-                .copy_from_slice(&buffer[copy_buffer_start..copy_buffer_end]);
+            let n = copy_src_end - copy_src_start;
+            unsafe {
+                core::ptr::copy(
+                    buffer.as_ptr().add(copy_buffer_start),
+                    dst.as_mut_ptr().add(copy_src_start),
+                    n,
+                );
+            }
             read_bytes += copy_dst_end - copy_dst_start;
             dst_start = dst_end;
         }
@@ -844,8 +855,14 @@ impl UserBuffer {
             let copy_src_end = copy_dst_end - offset;
             let copy_buffer_start = copy_dst_start - dst_start;
             let copy_buffer_end = copy_dst_end - dst_start;
-            buffer[copy_buffer_start..copy_buffer_end]
-                .copy_from_slice(&src[copy_src_start..copy_src_end]);
+            let n = copy_src_end - copy_src_start;
+            unsafe {
+                core::ptr::copy(
+                    src.as_ptr().add(copy_src_start),
+                    buffer.as_mut_ptr().add(copy_buffer_start),
+                    n,
+                );
+            }
             write_bytes += copy_dst_end - copy_dst_start;
             dst_start = dst_end;
         }

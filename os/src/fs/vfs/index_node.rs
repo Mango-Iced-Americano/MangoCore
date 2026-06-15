@@ -73,6 +73,29 @@ pub trait IndexNode: Any + Send + Sync + Debug {
         Err(SyscallErr::ENOSYS)
     }
 
+    /// 从 inode 读取数据直连到 UserBuffer，省去 kbuf 中转。
+    /// 默认返回 ENOSYS，由 File 层 fallback 到 kbuf 路径。
+    /// 有 PageCache 的 inode 应 override 此方法直接调用 PageCache::read_user。
+    fn read_at_user(
+        &self,
+        _offset: usize,
+        _len: usize,
+        _dst: &mut crate::mm::UserBuffer,
+    ) -> Result<usize, SyscallErr> {
+        Err(SyscallErr::ENOSYS)
+    }
+
+    /// 从 UserBuffer 直连写入 inode，省去 kbuf 中转。
+    /// 默认返回 ENOSYS，由 File 层 fallback 到 kbuf 路径。
+    fn write_at_user(
+        &self,
+        _offset: usize,
+        _len: usize,
+        _src: &crate::mm::UserBuffer,
+    ) -> Result<usize, SyscallErr> {
+        Err(SyscallErr::ENOSYS)
+    }
+
     /// 直接读取（绕过 page cache），用于 O_DIRECT 和回写
     fn read_direct(
         &self,
