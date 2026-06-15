@@ -4,6 +4,21 @@
 
 ## 2026-06-15
 
+### 当前身份快照：加速 getuid/getgid 类 syscall
+
+**涉及文件：**
+- `os/src/task/processor.rs` — 调度切入时缓存当前任务 uid/euid/gid/egid，并在身份 hint 更新时刷新当前任务快照
+- `os/src/task/task.rs` — `store_identity_hint()` 同步刷新当前任务身份快照
+- `os/src/task/mod.rs` — 导出当前身份快照读取与刷新函数
+- `os/src/syscall/process/ids.rs` — `getuid/geteuid/getgid/getegid` 直接读取当前身份快照，避免每次读取当前 TCB hint
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** setuid/setgid/setres* 仍先更新真实 task inner，再调用 `store_identity_hint()`；快照只服务当前任务只读 syscall。
+
 ### signal frame token 快路径：减少信号递送 VM 锁
 
 **涉及文件：**

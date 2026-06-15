@@ -7,9 +7,9 @@ use crate::mm::{
 };
 use crate::syscall::errno::*;
 use crate::task::{
-    current_parent_pid, current_pid, current_task, current_task_ref, current_tid,
-    current_user_token, update_ready_nice, ProcessControlBlock, ProcessManager,
-    SeccompFilterInsn, Signals, TaskControlBlock,
+    current_egid, current_euid, current_gid, current_parent_pid, current_pid, current_task,
+    current_task_ref, current_tid, current_uid, current_user_token, update_ready_nice,
+    ProcessControlBlock, ProcessManager, SeccompFilterInsn, Signals, TaskControlBlock,
 };
 use crate::timer::{get_time_sec, TimeSpec};
 use alloc::{sync::Arc, vec::Vec};
@@ -342,19 +342,19 @@ pub fn sys_getppid() -> isize {
 }
 
 pub fn sys_getuid() -> isize {
-    current_task_ref().unwrap().uid() as isize
+    current_uid() as isize
 }
 
 pub fn sys_geteuid() -> isize {
-    current_task_ref().unwrap().euid() as isize
+    current_euid() as isize
 }
 
 pub fn sys_getgid() -> isize {
-    current_task_ref().unwrap().gid() as isize
+    current_gid() as isize
 }
 
 pub fn sys_getegid() -> isize {
-    current_task_ref().unwrap().egid() as isize
+    current_egid() as isize
 }
 
 fn parse_id(arg: usize) -> Result<u32, isize> {

@@ -65,6 +65,10 @@ static CURRENT_PID: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_TID: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_PARENT_PID: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_USER_TOKEN: AtomicUsize = AtomicUsize::new(0);
+static CURRENT_UID: AtomicUsize = AtomicUsize::new(0);
+static CURRENT_EUID: AtomicUsize = AtomicUsize::new(0);
+static CURRENT_GID: AtomicUsize = AtomicUsize::new(0);
+static CURRENT_EGID: AtomicUsize = AtomicUsize::new(0);
 
 lazy_static! {
     /// 全局的处理器对象
@@ -151,6 +155,10 @@ pub fn run_tasks() {
             CURRENT_TID.store(task.gettid(), Ordering::Relaxed);
             CURRENT_PARENT_PID.store(task.process.parent_pid(), Ordering::Relaxed);
             CURRENT_USER_TOKEN.store(task.get_user_token(), Ordering::Relaxed);
+            CURRENT_UID.store(task.uid() as usize, Ordering::Relaxed);
+            CURRENT_EUID.store(task.euid() as usize, Ordering::Relaxed);
+            CURRENT_GID.store(task.gid() as usize, Ordering::Relaxed);
+            CURRENT_EGID.store(task.egid() as usize, Ordering::Relaxed);
             processor.current = Some(task);
             // 手动释放处理器
             drop(processor);
@@ -177,6 +185,10 @@ pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
     CURRENT_TID.store(0, Ordering::Relaxed);
     CURRENT_PARENT_PID.store(0, Ordering::Relaxed);
     CURRENT_USER_TOKEN.store(0, Ordering::Relaxed);
+    CURRENT_UID.store(0, Ordering::Relaxed);
+    CURRENT_EUID.store(0, Ordering::Relaxed);
+    CURRENT_GID.store(0, Ordering::Relaxed);
+    CURRENT_EGID.store(0, Ordering::Relaxed);
     PROCESSOR.lock().take_current()
 }
 
@@ -213,9 +225,44 @@ pub fn current_parent_pid() -> usize {
     CURRENT_PARENT_PID.load(Ordering::Relaxed)
 }
 
+#[inline(always)]
+pub fn current_uid() -> u32 {
+    CURRENT_UID.load(Ordering::Relaxed) as u32
+}
+
+#[inline(always)]
+pub fn current_euid() -> u32 {
+    CURRENT_EUID.load(Ordering::Relaxed) as u32
+}
+
+#[inline(always)]
+pub fn current_gid() -> u32 {
+    CURRENT_GID.load(Ordering::Relaxed) as u32
+}
+
+#[inline(always)]
+pub fn current_egid() -> u32 {
+    CURRENT_EGID.load(Ordering::Relaxed) as u32
+}
+
 pub fn refresh_current_user_token_for_process(pid: usize, token: usize) {
     if CURRENT_PID.load(Ordering::Relaxed) == pid {
         CURRENT_USER_TOKEN.store(token, Ordering::Relaxed);
+    }
+}
+
+pub fn refresh_current_identity_hints_for_task(
+    tid: usize,
+    uid: u32,
+    euid: u32,
+    gid: u32,
+    egid: u32,
+) {
+    if CURRENT_TID.load(Ordering::Relaxed) == tid {
+        CURRENT_UID.store(uid as usize, Ordering::Relaxed);
+        CURRENT_EUID.store(euid as usize, Ordering::Relaxed);
+        CURRENT_GID.store(gid as usize, Ordering::Relaxed);
+        CURRENT_EGID.store(egid as usize, Ordering::Relaxed);
     }
 }
 
