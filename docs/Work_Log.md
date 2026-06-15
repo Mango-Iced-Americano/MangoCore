@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### 退出路径统计开关：默认构建消除 heap_trace 调用
+
+**涉及文件：**
+- `os/src/task/task.rs` — `exit_thread_resources` 中仅在 `heap_trace` feature 打开时调用 `print_resource_stats`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 已启动后由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 默认 release/log_off 性能路径避免每个线程退出都进入资源统计诊断函数；`heap_trace` 诊断构建行为保持不变。
+
 ### task/futex/exec 热路径降噪：删除普通调度与生命周期日志
 
 **涉及文件：**
