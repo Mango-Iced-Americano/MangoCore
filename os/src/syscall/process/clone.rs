@@ -9,7 +9,7 @@ use crate::mm::{
 use crate::show_frame_consumption;
 use crate::syscall::errno::*;
 use crate::task::{
-    current_task, current_task_ref, signal::Signals, IpcNamespace, MountNamespace, ProcessManager,
+    current_task, current_user_token, signal::Signals, IpcNamespace, MountNamespace, ProcessManager,
     TaskControlBlock,
 };
 use crate::utils::error::SyscallErr;
@@ -241,7 +241,7 @@ fn sys_clone_inner(
     };
     let new_tid = child.tid.0;
     if flags.contains(CloneFlags::CLONE_PARENT_SETTID) {
-        match UserPtrMut::new(ptid).write(parent.get_user_token(), &(new_tid as u32)) {
+        match UserPtrMut::new(ptid).write(current_user_token(), &(new_tid as u32)) {
             Ok(()) => {}
             Err(errno) => {
                 child.cleanup_unpublished_clone(flags.contains(CloneFlags::CLONE_VM));
@@ -283,7 +283,7 @@ fn sys_clone_inner(
                 return -(err as isize);
             }
         };
-        match UserPtrMut::new(pidfd_ptr).write(parent.get_user_token(), &(pidfd as u32)) {
+        match UserPtrMut::new(pidfd_ptr).write(current_user_token(), &(pidfd as u32)) {
             Ok(()) => allocated_pidfd = Some(pidfd),
             Err(errno) => {
                 drop_parent_fd(&parent, pidfd);
@@ -388,7 +388,7 @@ pub fn sys_unshare(flags: u32) -> isize {
 }
 
 pub fn sys_clone3(uargs: *const u8, size: usize) -> isize {
-    let token = current_task_ref().unwrap().get_user_token();
+    let token = current_user_token();
     let args = match read_clone3_args(uargs, size, token) {
         Ok(args) => args,
         Err(errno) => return errno,

@@ -3,7 +3,7 @@ use alloc::sync::Arc;
 use crate::mm::{copy_to_user, UserPtrMut};
 use crate::syscall::errno::*;
 use crate::task::{
-    current_task_ref, exit_current_and_run_next, exit_group_and_run_next,
+    current_task_ref, current_user_token, exit_current_and_run_next, exit_group_and_run_next,
     signal::SigInfo, ProcessControlBlock, ProcessManager, Rusage,
 };
 use log::info;
@@ -49,7 +49,7 @@ pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) ->
     };
     info!("[sys_wait4] pid: {}, option: {:?}", pid, option);
     let task = current_task_ref().unwrap();
-    let token = task.get_user_token();
+    let token = current_user_token();
     let process = task.process.clone();
     match ProcessManager::wait_child(
         &process,
@@ -91,7 +91,7 @@ pub fn sys_waitid(
     }
 
     let task = current_task_ref().unwrap();
-    let token = task.get_user_token();
+    let token = current_user_token();
     let process = task.process.clone();
     if idtype != P_PIDFD {
         let wait_pid = match waitid_target_pid(idtype, id, &process) {
@@ -295,7 +295,7 @@ pub fn sys_set_robust_list(head: usize, len: usize) -> isize {
 
 pub fn sys_get_robust_list(pid: u32, head_ptr: *mut usize, len_ptr: *mut usize) -> isize {
     let current = current_task_ref().unwrap();
-    let token = current.get_user_token();
+    let token = current_user_token();
     if pid == 0 {
         let inner = current.acquire_inner_lock();
         if copy_to_user(token, &inner.robust_list.head, head_ptr).is_err() {

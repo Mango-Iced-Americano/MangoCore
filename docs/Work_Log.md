@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### clone/wait token 快路径：减少进程生命周期 syscall VM 锁
+
+**涉及文件：**
+- `os/src/syscall/process/clone.rs` — `clone`/`clone3` 当前任务用户参数读取与 parent tid/pidfd 写回复用 `current_user_token()`
+- `os/src/syscall/process/lifecycle.rs` — `wait4`/`waitid`/`get_robust_list` 用户写回复用当前 token 快照
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** `CLONE_CHILD_SETTID` 仍通过 child VM 写入子线程地址空间；本次只优化当前父任务地址空间相关的用户访问。
+
 ### signal 用户指针 token 快路径：减少信号 syscall VM 锁
 
 **涉及文件：**
