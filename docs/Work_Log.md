@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### 调度循环 shared futex compact 优化：空全局表跳过 tick 写入
+
+**涉及文件：**
+- `os/src/task/threads.rs` — 为 `PROCESS_SHARED_FUTEX` 增加 maybe-nonempty 原子 flag；共享 futex wait 入全局表时置位，wake/requeue/remove/compact 后按表是否为空刷新 flag
+- `os/src/task/threads.rs` — `compact_shared_futex()` 在全局共享 futex 表为空时直接返回，避免调度循环每轮执行 `AtomicUsize::fetch_add` 和后续降频检查
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 私有 futex 路径不使用该全局 flag；共享 futex 的真实等待队列仍由 `PROCESS_SHARED_FUTEX` 锁保护，flag 只用于跳过空表维护。
+
 ### 调度循环 zombie drain 优化：空 zombie 队列跳过 TASK_MANAGER 锁
 
 **涉及文件：**

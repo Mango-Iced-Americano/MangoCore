@@ -3,6 +3,7 @@
     内容与RISCV版本相同，无需修改
 */
 use core::hint::spin_loop;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{
     mm::UserPtr,
@@ -79,6 +80,7 @@ lazy_static! {
     pub static ref PROCESS_SHARED_FUTEX: spin::Mutex<BTreeMap<usize, WaitQueue>> =
         spin::Mutex::new(BTreeMap::new());
 }
+static PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY: AtomicBool = AtomicBool::new(false);
 
 /// Fast Userspace Mutex
 /// 快速用户空间互斥锁
@@ -102,9 +104,21 @@ fn wait_queue_for_key(map: &mut BTreeMap<usize, WaitQueue>, key: usize) -> &mut 
     map.entry(key).or_insert_with(WaitQueue::new)
 }
 
+fn shared_wait_queue_for_key(map: &mut BTreeMap<usize, WaitQueue>, key: usize) -> &mut WaitQueue {
+    PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY.store(true, Ordering::Release);
+    wait_queue_for_key(map, key)
+}
+
+fn refresh_shared_futex_nonempty(map: &BTreeMap<usize, WaitQueue>) {
+    PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY.store(!map.is_empty(), Ordering::Release);
+}
+
 /// 清理 PROCESS_SHARED_FUTEX 中所有空 WaitQueue 条目。
 /// 降频至每 64 个 tick 执行一次，避免频繁扫描 BTreeMap。
 pub fn compact_shared_futex() {
+    if !PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY.load(Ordering::Acquire) {
+        return;
+    }
     static TICK: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
     let t = TICK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     if t % 64 != 0 {
@@ -115,6 +129,7 @@ pub fn compact_shared_futex() {
         wq.compact_stale();
         !wq.is_empty()
     });
+    refresh_shared_futex_nonempty(&map);
 }
 
 fn remove_empty_wait_queue(map: &mut BTreeMap<usize, WaitQueue>, key: usize) {
@@ -254,6 +269,7 @@ fn finish_waitv_shared(
         remove_empty_wait_queue(futex, entry.futex_key);
     }
 
+    refresh_shared_futex_nonempty(futex);
     woken_key.and_then(|key| entries.iter().position(|entry| entry.futex_key == key))
 }
 
@@ -587,13 +603,16 @@ pub fn do_futex_waitv(
 pub fn futex_wake_shared(phys_key: usize, val: u32) -> isize {
     let mut shared = PROCESS_SHARED_FUTEX.lock();
     let woke = wake_waiters(&mut shared, phys_key, val);
+    refresh_shared_futex_nonempty(&shared);
     super::perf::record_futex_wake(true, woke);
     woke
 }
 
 pub fn futex_requeue_shared(phys_key: usize, phys_key_2: usize, val: u32, val2: usize) -> isize {
     let mut shared = PROCESS_SHARED_FUTEX.lock();
-    requeue_waiters(&mut shared, phys_key, phys_key_2, val, val2)
+    let ret = requeue_waiters(&mut shared, phys_key, phys_key_2, val, val2);
+    refresh_shared_futex_nonempty(&shared);
+    ret
 }
 
 pub fn do_futex_waitv_shared(
@@ -613,7 +632,8 @@ pub fn do_futex_waitv_shared(
         let task = current_task().unwrap();
         let mut guard = PROCESS_SHARED_FUTEX.lock();
         for entry in entries {
-            wait_queue_for_key(&mut guard, entry.futex_key).prepare_to_wait(Arc::downgrade(&task));
+            shared_wait_queue_for_key(&mut guard, entry.futex_key)
+                .prepare_to_wait(Arc::downgrade(&task));
         }
 
         if let Some(result) = check_waitv_values(entries, token) {
@@ -668,7 +688,7 @@ fn do_futex_wait_shared_until(
 
     let wait_result = futex_wait_event_interruptible_timeout_locked(
         &PROCESS_SHARED_FUTEX,
-        |shared| wait_queue_for_key(shared, phys_key),
+        |shared| shared_wait_queue_for_key(shared, phys_key),
         |_: &mut BTreeMap<usize, WaitQueue>| match futex_word.read(token) {
             Ok(value) if value == val => None,
             Ok(value) => {
@@ -684,7 +704,11 @@ fn do_futex_wait_shared_until(
         deadline,
         SUCCESS,
     );
-    remove_empty_wait_queue(&mut PROCESS_SHARED_FUTEX.lock(), phys_key);
+    {
+        let mut shared = PROCESS_SHARED_FUTEX.lock();
+        remove_empty_wait_queue(&mut shared, phys_key);
+        refresh_shared_futex_nonempty(&shared);
+    }
     super::perf::record_futex_wait_result(wait_result);
 
     futex_wait_result_to_errno(wait_result)
