@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### robust_list 权限检查：复用身份 hint
+
+**涉及文件：**
+- `os/src/syscall/process/lifecycle.rs` — `get_robust_list` 跨线程权限比较改用当前/目标 uid、euid、gid、egid hint，避免为目标身份读取额外持锁
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** `CAP_SYS_PTRACE` 仍从当前任务锁内读取，robust list 内容也保持锁内读取；本次只优化只读 credential 比较。
+
 ### priority/nice hint：减少调度优先级查询锁
 
 **涉及文件：**

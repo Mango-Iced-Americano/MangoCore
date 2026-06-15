@@ -314,22 +314,16 @@ pub fn sys_get_robust_list(pid: u32, head_ptr: *mut usize, len_ptr: *mut usize) 
         None => return ESRCH,
     };
     if current.gettid() != task.gettid() {
-        let (uid, euid, gid, egid, cap_effective) = {
-            let inner = current.acquire_inner_lock();
-            (
-                inner.uid,
-                inner.euid,
-                inner.gid,
-                inner.egid,
-                inner.cap_effective,
-            )
-        };
-        let (target_uid, target_euid, target_gid, target_egid) = {
-            let inner = task.acquire_inner_lock();
-            (inner.uid, inner.euid, inner.gid, inner.egid)
-        };
-        let privileged =
-            euid == 0 || (cap_effective & (1u64 << CAP_SYS_PTRACE)) != 0;
+        let uid = current.uid();
+        let euid = current.euid();
+        let gid = current.gid();
+        let egid = current.egid();
+        let cap_effective = current.acquire_inner_lock().cap_effective;
+        let target_uid = task.uid();
+        let target_euid = task.euid();
+        let target_gid = task.gid();
+        let target_egid = task.egid();
+        let privileged = euid == 0 || (cap_effective & (1u64 << CAP_SYS_PTRACE)) != 0;
         let same_creds = uid == target_uid
             && euid == target_euid
             && gid == target_gid
