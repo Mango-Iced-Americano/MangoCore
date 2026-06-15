@@ -4,7 +4,7 @@ use crate::mm::{
     copy_to_user_array, translated_byte_buffer, MapFlags, MapPermission, UserAccess,
 };
 use crate::syscall::errno::*;
-use crate::task::{current_task, current_user_token};
+use crate::task::{current_task, current_task_ref, current_user_token};
 use alloc::vec::Vec;
 use log::{info, warn};
 
@@ -35,14 +35,14 @@ pub fn sys_riscv_flush_icache(_start: usize, _end: usize, flags: usize) -> isize
 }
 
 pub fn sys_sbrk(increment: isize) -> isize {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let vm = task.process.vm();
     let new_addr = vm.lock().sbrk(increment);
     new_addr as isize
 }
 
 pub fn sys_brk(brk_addr: usize) -> isize {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let vm = task.process.vm();
     let mut memory_set = vm.lock();
     let new_addr = if brk_addr == 0 {
@@ -233,14 +233,14 @@ pub fn sys_memorybarrier(cmd: usize, flags: usize, _cpu_id: usize) -> isize {
         MEMBARRIER_CMD_QUERY => MEMBARRIER_SUPPORTED_CMDS as isize,
         MEMBARRIER_CMD_GLOBAL => SUCCESS,
         MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED => {
-            current_task()
+            current_task_ref()
                 .unwrap()
                 .acquire_inner_lock()
                 .membarrier_private_expedited_registered = true;
             SUCCESS
         }
         MEMBARRIER_CMD_PRIVATE_EXPEDITED => {
-            if current_task()
+            if current_task_ref()
                 .unwrap()
                 .acquire_inner_lock()
                 .membarrier_private_expedited_registered
@@ -255,7 +255,7 @@ pub fn sys_memorybarrier(cmd: usize, flags: usize, _cpu_id: usize) -> isize {
 }
 
 pub fn sys_munmap(start: usize, len: usize) -> isize {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let result = task.process.vm().lock().munmap(start, len);
     match result {
         Ok(_) => SUCCESS,
@@ -452,7 +452,7 @@ pub fn sys_remap_file_pages(
 }
 
 pub fn sys_mprotect(addr: usize, len: usize, prot: usize) -> isize {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let prot = match parse_mmap_prot(prot) {
         Ok(prot) => prot,
         Err(errno) => return errno,
@@ -499,7 +499,7 @@ pub fn sys_pkey_free(pkey: isize) -> isize {
 }
 
 pub fn sys_mlock(addr: usize, len: usize) -> isize {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let privileged = {
         let inner = task.acquire_inner_lock();
         inner.euid == 0 || (inner.cap_effective & (1u64 << CAP_IPC_LOCK)) != 0
@@ -529,7 +529,7 @@ pub fn sys_mlock2(addr: usize, len: usize, flags: usize) -> isize {
         return sys_mlock(addr, len);
     }
 
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let (privileged, memlock_limit) = {
         let inner = task.acquire_inner_lock();
         (
@@ -553,7 +553,7 @@ pub fn sys_mlock2(addr: usize, len: usize, flags: usize) -> isize {
 }
 
 pub fn sys_munlock(addr: usize, len: usize) -> isize {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     match task.process.vm().lock().munlock(addr, len) {
         Ok(_) => SUCCESS,
         Err(errno) => errno,
@@ -567,7 +567,7 @@ pub fn sys_mlockall(flags: usize) -> isize {
     if flags == 0 || flags & !(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) != 0 {
         return EINVAL;
     }
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let (privileged, memlock_limit) = {
         let inner = task.acquire_inner_lock();
         (
@@ -591,7 +591,7 @@ pub fn sys_mlockall(flags: usize) -> isize {
 }
 
 pub fn sys_munlockall() -> isize {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     task.process.vm().lock().munlockall();
     SUCCESS
 }
@@ -633,7 +633,7 @@ pub fn sys_mincore(addr: usize, len: usize, vec: usize) -> isize {
     }
     residency.resize(page_count, 0);
 
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     if let Err(errno) = task
         .process
         .vm()
@@ -708,7 +708,7 @@ pub fn sys_madvise(addr: usize, length: usize, advice: usize) -> isize {
         | MADV_KEEPONFORK
         | MADV_COLD
         | MADV_PAGEOUT => {
-            match current_task()
+            match current_task_ref()
                 .unwrap()
                 .process
                 .vm()

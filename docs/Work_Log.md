@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### lmbench/UnixBench VM syscall 优化：当前任务短引用
+
+**涉及文件：**
+- `os/src/syscall/process/mm.rs` — `brk/sbrk/munmap/mprotect/mlock/mincore/madvise/membarrier` 等当前进程 VM 短路径改用 `current_task_ref()`，避免仅为读取当前任务而锁 `PROCESSOR` 并 clone `Arc`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行到 `du` 后由外层 `timeout 60s` 结束
+
+**备注：** 文件映射 `mmap` 路径暂不改动，避免把本轮非 fs/net 优化扩展到 VFS/inode 语义。
+
 ### lmbench syscall 优化：缓存 getresuid/getresgid 凭据字段
 
 **涉及文件：**
