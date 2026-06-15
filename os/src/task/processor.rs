@@ -173,6 +173,7 @@ pub fn run_tasks() {
 }
 
 /// 取出当前正在运行的任务
+#[inline(always)]
 pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
     CURRENT_TASK_PTR.store(ptr::null_mut(), Ordering::Relaxed);
     CURRENT_PID.store(0, Ordering::Relaxed);
@@ -183,6 +184,7 @@ pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
 }
 
 /// 获取当前正在运行的任务
+#[inline(always)]
 pub fn current_task() -> Option<Arc<TaskControlBlock>> {
     let ptr = CURRENT_TASK_PTR.load(Ordering::Relaxed);
     if ptr.is_null() {
@@ -201,6 +203,7 @@ pub fn current_task() -> Option<Arc<TaskControlBlock>> {
 ///
 /// MangoCore 当前是单核；调度器在 `PROCESSOR.current` 持有 Arc 时同步发布这个指针，
 /// `take_current_task()` 会在切走当前任务前清空它。调用者不能把引用跨调度点保存。
+#[inline(always)]
 pub fn current_task_ref() -> Option<&'static TaskControlBlock> {
     let ptr = CURRENT_TASK_PTR.load(Ordering::Relaxed);
     if ptr.is_null() {
@@ -268,6 +271,7 @@ pub fn set_current_syscall_id(id: Option<usize>) {
 }
 
 /// 获取当前正在运行的任务的用户态页表令牌
+#[inline(always)]
 pub fn try_current_user_token() -> Option<usize> {
     let token = CURRENT_USER_TOKEN.load(Ordering::Relaxed);
     if token != 0 {
@@ -278,6 +282,7 @@ pub fn try_current_user_token() -> Option<usize> {
 }
 
 /// 获取当前正在运行的任务的用户态页表令牌
+#[inline(always)]
 pub fn current_user_token() -> usize {
     try_current_user_token().unwrap()
 }

@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### 当前任务 helper 优化：标注热路径内联
+
+**涉及文件：**
+- `os/src/task/processor.rs` — 为 `take_current_task`、`current_task`、`current_task_ref`、`try_current_user_token`、`current_user_token` 添加 `#[inline(always)]`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic 已通过，busybox 进入文件操作测试后由外层 `timeout 75s` 结束，无 panic
+
+**备注：** 面向 syscall、uaccess、clone/exit、等待队列等频繁调用路径；不改变调度和引用计数语义。
+
 ### 当前任务获取优化：current_task 避开调度器锁
 
 **涉及文件：**
