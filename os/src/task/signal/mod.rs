@@ -16,7 +16,7 @@ use crate::task::{
 };
 use alloc::sync::Arc;
 
-use super::current_task;
+use super::{current_task, current_task_ref};
 use super::task::TaskControlBlock;
 use crate::utils::error::SyscallErr;
 
@@ -319,7 +319,7 @@ impl Debug for SigAction {
 /// * `oldact`: old action
 /// 此函数与RV版本略有不同，但是可以不处理，因为此版本的这个函数鲁棒性更强
 pub fn sigaction(signum: usize, act: *const UserSigAction, oldact: *mut UserSigAction) -> isize {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     match signum {
         0 /* None */ | 9 /* SIGKILL */ | 19 /* SIGSTOP */ | 65.. /* Unsupported */ => {
             warn!("[sigaction] bad signum: {}", signum);
@@ -469,7 +469,7 @@ fn signal_default_dumps_core(signum: u32) -> bool {
 }
 
 fn current_core_dump_enabled() -> bool {
-    current_task()
+    current_task_ref()
         .map(|task| {
             let inner = task.acquire_inner_lock();
             inner.core_limit_cur > 0 && inner.dumpable != 0
@@ -932,7 +932,7 @@ pub fn do_signal() -> Arc<TaskControlBlock> {
 }
 
 pub fn sigaltstack(ss: *const SignalStack, old_ss: *mut SignalStack) -> isize {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let token = task.get_user_token();
     let new_stack = match UserPtr::new(ss).read_optional(token) {
         Ok(stack) => stack,
@@ -988,7 +988,7 @@ bitflags! {
 /// In fact, `set` & `oldset` should be 1024 bits `sigset_t`, but we only support 64 signals now.
 /// For the sake of performance, we use `Signals` instead.
 pub fn sigprocmask(how: u32, set: *const Signals, oldset: *mut Signals) -> isize {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let mut inner = task.acquire_inner_lock();
     let token = task.get_user_token();
     // If oldset is non-NULL, the previous value of the signal mask is stored in oldset

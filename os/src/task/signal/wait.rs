@@ -2,7 +2,7 @@ use crate::config::PAGE_SIZE;
 use crate::mm::{UserPtr, UserPtrMut};
 use crate::signal_type;
 use crate::syscall::errno::*;
-use crate::task::{current_task, TaskControlBlock, WaitQueue, WaitResult};
+use crate::task::{current_task, current_task_ref, TaskControlBlock, WaitQueue, WaitResult};
 use crate::timer::{TimeSpec, NSEC_PER_SEC};
 
 use super::{PendingSignal, SigHandler, SigInfo, Signals, SIG_DFL_IGNORE};
@@ -138,8 +138,8 @@ pub fn sigtimedwait(set: *const Signals, info: *mut SigInfo, timeout: *const Tim
         inner.signal_wait_mask = set;
     }
     let mut wait_condition = || -> Option<isize> {
-        let task = current_task().unwrap();
-        if let Some(pending) = take_pending_signal_matching(&task, set) {
+        let task = current_task_ref().unwrap();
+        if let Some(pending) = take_pending_signal_matching(task, set) {
             if !info.is_null() {
                 if UserPtrMut::new(info)
                     .write(token, &pending.siginfo)
@@ -151,7 +151,7 @@ pub fn sigtimedwait(set: *const Signals, info: *mut SigInfo, timeout: *const Tim
             }
             return Some(pending.signum() as isize);
         }
-        if take_sigtimedwait_interrupt(&task, set) {
+        if take_sigtimedwait_interrupt(task, set) {
             return Some(ERESTART);
         }
         None

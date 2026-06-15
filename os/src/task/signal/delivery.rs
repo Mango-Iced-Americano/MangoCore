@@ -2,13 +2,13 @@ use alloc::sync::Arc;
 
 use crate::syscall::errno::EAGAIN;
 use crate::task::{
-    current_task, wake_interruptible, ProcessControlBlock, TaskControlBlock, TaskStatus,
+    current_task_ref, wake_interruptible, ProcessControlBlock, TaskControlBlock, TaskStatus,
 };
 
 use super::{is_realtime_signal, PendingSignal, SigInfo, Signals};
 
 fn current_sender_pid() -> usize {
-    current_task().map(|task| task.pid()).unwrap_or(0)
+    current_task_ref().map(|task| task.pid()).unwrap_or(0)
 }
 
 fn process_signal_target(

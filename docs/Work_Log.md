@@ -4,6 +4,20 @@
 
 ## 2026-06-15
 
+### lmbench/UnixBench 信号内部 helper 优化：短引用读取当前任务
+
+**涉及文件：**
+- `os/src/task/signal/mod.rs` — `sigaction/sigaltstack/sigprocmask` 和 core dump 状态查询改用 `current_task_ref()`，减少信号相关 syscall 辅助路径的当前任务 `Arc` clone
+- `os/src/task/signal/delivery.rs` — 信号发送者 pid 读取改用 `current_task_ref()`
+- `os/src/task/signal/wait.rs` — `sigtimedwait` 轮询闭包内的当前任务检查改用短引用，外层跨 wait 的 `Arc` 保留
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** `do_signal`、默认 stop、`sigsuspend/sigtimedwait` 外层等待路径仍保留 `Arc<TaskControlBlock>`，避免短引用跨调度点。
+
 ### lmbench/UnixBench 线程生命周期 syscall 优化：robust list 当前任务短引用
 
 **涉及文件：**
