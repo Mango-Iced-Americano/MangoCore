@@ -1299,6 +1299,10 @@ impl KernelTimerQueue {
         self.inner.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
     pub fn add_action(&mut self, action: TimerAction, deadline: TimeSpec) {
         // Keep the hot path O(log n).  WakeTask stale entries are filtered by
         // generation, while signal timers validate their generation/deadline in run_timer().
@@ -1555,6 +1559,11 @@ impl TimeoutWaitQueue {
     pub fn add_task(&mut self, task: Weak<TaskControlBlock>, timeout: TimeSpec) {
         self.inner.push(TimeoutWaiter { task, timeout });
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
     /// 唤醒所有超时的任务
     pub fn wake_expired(&mut self, now: TimeSpec) {
         if self
@@ -1654,6 +1663,13 @@ pub fn wait_with_timeout(task: Weak<TaskControlBlock>, timeout: TimeSpec) {
 
 /// 唤醒全局超时等待队列中所有已超时的任务
 pub fn do_wake_expired() {
+    let timeout_queue_empty = TIMEOUT_WAITQUEUE.lock().is_empty();
+    let kernel_timer_queue_empty = KERNEL_TIMER_QUEUE.lock().is_empty();
+    let timerfd_registry_empty = crate::fs::timerfd::timerfd_registry_is_empty();
+    if timeout_queue_empty && kernel_timer_queue_empty && timerfd_registry_empty {
+        return;
+    }
+
     let now = crate::timer::TimeSpec::now();
     TIMEOUT_WAITQUEUE.lock().wake_expired(now);
     let mut ktq = KERNEL_TIMER_QUEUE.lock();

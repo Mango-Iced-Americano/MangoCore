@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### lmbench context switch 优化：调度循环无 timer 快返回
+
+**涉及文件：**
+- `os/src/task/manager.rs` — `do_wake_expired()` 在 timeout wait queue、kernel timer queue、timerfd registry 全空时直接返回，避免每次调度循环都读取时钟并进入 timer 扫描
+- `os/src/fs/timerfd.rs` — 新增 timerfd registry empty 查询辅助函数，供调度 timer 快路径判断
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+
+**备注：** 最新 lmbench 日志中 context switch 延迟明显偏高；该改动只跳过“确定无任何 timer/timerfd”的轮次，不改变有超时任务、itimer/POSIX timer 或 timerfd 时的到期投递语义。
+
 ### lmbench fork 路径优化：复用 COW 映射 mapper
 
 **涉及文件：**

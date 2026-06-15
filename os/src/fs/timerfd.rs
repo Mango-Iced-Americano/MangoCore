@@ -305,6 +305,10 @@ fn register_timerfd(timerfd: &Arc<TimerFd>) {
     TIMERFD_REGISTRY.lock().push(Arc::downgrade(timerfd));
 }
 
+pub fn timerfd_registry_is_empty() -> bool {
+    TIMERFD_REGISTRY.lock().is_empty()
+}
+
 pub fn wake_expired_timerfds(now: TimeSpec) {
     let mut registry = TIMERFD_REGISTRY.lock();
     for weak in registry.iter() {
