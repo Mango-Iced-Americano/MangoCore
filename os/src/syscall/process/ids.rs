@@ -2011,12 +2011,11 @@ fn process_main_task(pid: usize) -> Option<Arc<TaskControlBlock>> {
 }
 
 fn priority_targets(which: i32, who: i32) -> Result<Vec<Arc<TaskControlBlock>>, isize> {
-    let current = current_task().unwrap();
     let mut targets = Vec::new();
     match which {
         PRIO_PROCESS => {
             if who == 0 {
-                targets.push(current);
+                targets.push(current_task().unwrap());
             } else if who < 0 {
                 return Err(ESRCH);
             } else if let Some(task) = process_main_task(who as usize) {
@@ -2025,7 +2024,7 @@ fn priority_targets(which: i32, who: i32) -> Result<Vec<Arc<TaskControlBlock>>, 
         }
         PRIO_PGRP => {
             let pgid = if who == 0 {
-                current.process.getpgid()
+                current_task_ref().unwrap().process.getpgid()
             } else if who < 0 {
                 return Err(ESRCH);
             } else {
@@ -2037,7 +2036,7 @@ fn priority_targets(which: i32, who: i32) -> Result<Vec<Arc<TaskControlBlock>>, 
         }
         PRIO_USER => {
             let uid = if who == 0 {
-                current.acquire_inner_lock().euid
+                current_euid()
             } else if who < 0 {
                 return Err(ESRCH);
             } else {

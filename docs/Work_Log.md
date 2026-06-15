@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### priority 目标解析快路径：按需获取当前任务
+
+**涉及文件：**
+- `os/src/syscall/process/ids.rs` — `priority_targets()` 不再无条件 clone 当前任务；显式 pid/pgid/user 查询跳过当前任务引用计数，`PRIO_USER who=0` 使用当前 euid 快照
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** `PRIO_PROCESS who=0` 仍返回当前任务 `Arc` 作为操作目标；`PRIO_PGRP who=0` 只短期借用当前任务读取 pgid。
+
 ### clone 调度发布路径：减少子任务 Arc clone
 
 **涉及文件：**
