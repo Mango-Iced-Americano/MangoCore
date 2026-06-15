@@ -799,13 +799,13 @@ fn cpu_clock_from_rusage(rusage: Rusage, which: i32, nice: i32) -> TimeSpec {
 
 fn validate_cpu_clock_id(clk_id: usize) -> Result<CpuClockId, isize> {
     let clock = decode_cpu_clock_id(clk_id)?;
-    let current = current_task().unwrap();
     if clock.pid == 0 {
         return Ok(clock);
     }
     let exists = if clock.per_thread {
         find_task_by_tid(clock.pid).is_some()
     } else {
+        let current = current_task_ref().unwrap();
         find_process_by_pid(clock.pid).is_some()
             || (clock.pid == current.gettid() && find_process_by_pid(current.pid()).is_some())
     };
@@ -818,25 +818,35 @@ fn validate_cpu_clock_id(clk_id: usize) -> Result<CpuClockId, isize> {
 
 fn cpu_clock_timespec(clk_id: usize) -> Result<TimeSpec, isize> {
     let clock = validate_cpu_clock_id(clk_id)?;
-    let current = current_task().unwrap();
     if clock.per_thread {
-        let task = if clock.pid == 0 {
-            current
+        if clock.pid == 0 {
+            let task = current_task_ref().unwrap();
+            let inner = task.acquire_inner_lock();
+            return Ok(cpu_clock_from_rusage(
+                inner.rusage,
+                clock.which,
+                inner.sched_nice,
+            ));
         } else {
-            find_task_by_tid(clock.pid).ok_or(EINVAL)?
-        };
-        let inner = task.acquire_inner_lock();
-        return Ok(cpu_clock_from_rusage(
-            inner.rusage,
-            clock.which,
-            inner.sched_nice,
-        ));
+            let task = find_task_by_tid(clock.pid).ok_or(EINVAL)?;
+            let inner = task.acquire_inner_lock();
+            return Ok(cpu_clock_from_rusage(
+                inner.rusage,
+                clock.which,
+                inner.sched_nice,
+            ));
+        }
     }
 
-    let process = if clock.pid == 0 || clock.pid == current.gettid() {
-        current.process.clone()
+    let process = if clock.pid == 0 {
+        current_task_ref().unwrap().process.clone()
     } else {
-        find_process_by_pid(clock.pid).ok_or(EINVAL)?
+        let current = current_task_ref().unwrap();
+        if clock.pid == current.gettid() {
+            current.process.clone()
+        } else {
+            find_process_by_pid(clock.pid).ok_or(EINVAL)?
+        }
     };
     let mut cpu_us = 0usize;
     let mut saw_thread = false;

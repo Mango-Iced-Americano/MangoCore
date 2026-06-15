@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### lmbench/UnixBench CPU clock 查询优化：当前任务短引用化
+
+**涉及文件：**
+- `os/src/syscall/process/time.rs` — CPU clock id 校验和 `clock_gettime` CPU clock 分支改用 `current_task_ref()` 读取当前 tid/process，当前线程 rusage 读取不再 clone 当前任务 `Arc`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** 跨线程/跨进程 CPU clock 查询仍通过 `find_task_by_tid` / `find_process_by_pid` 获取拥有权；本次只减少当前任务分支的 `Arc` clone。
+
 ### lmbench/UnixBench time/keyring 短路径优化：复用当前任务短引用
 
 **涉及文件：**
