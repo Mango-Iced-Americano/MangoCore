@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### LTP/BPF fd 路径优化：当前任务短引用化
+
+**涉及文件：**
+- `os/src/syscall/process/bpf.rs` — BPF map fd lookup/create 只用 `current_task_ref()` 获取当前进程 fd table，减少 BPF map 操作中的当前任务 `Arc` clone
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** 本次只调整 fd table 访问方式，不改变 BPF map 类型、key/value 校验和用户缓冲区读写逻辑。
+
 ### lmbench/UnixBench 凭证 syscall 优化：减少当前任务 clone
 
 **涉及文件：**
