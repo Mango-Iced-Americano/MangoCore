@@ -4,6 +4,20 @@
 
 ## 2026-06-15
 
+### 调度切换优化：移除全局身份 hint 写入
+
+**涉及文件：**
+- `os/src/task/processor.rs` — 删除 `CURRENT_UID/EUID/GID/EGID` 全局缓存，调度切换不再写入 4 个身份原子
+- `os/src/task/task.rs` — 身份更新仅刷新 TCB 自身 hint
+- `os/src/task/mod.rs` — 移除已废弃的身份 hint refresh 导出
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic 已通过，busybox 进入文件操作测试后由外层 `timeout 75s` 结束，无 panic
+
+**备注：** 面向 `lat_ctx`、pipe latency、fork/exit 等调度密集测试；`current_uid/euid/gid/egid` 仍走当前 TCB 的 Relaxed hint，身份语义保持不变。
+
 ### 调度循环优化：跳过空 zombie 队列 drain
 
 **涉及文件：**
