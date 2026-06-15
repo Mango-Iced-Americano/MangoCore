@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### lmbench lat_proc 优化：收窄 wait 当前任务生命周期
+
+**涉及文件：**
+- `os/src/syscall/process/lifecycle.rs` — `wait4/waitid` 改用 `current_task_ref()` 读取 token，并在进入 `ProcessManager::wait_child()` 前只保留当前进程 `Arc`；P_PIDFD 路径复用同一个进程句柄取得 fd table
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** `wait_child()` 可能进入等待，本次避免把当前任务 `Arc` 持有到等待路径；wait 目标选择、P_PIDFD 非阻塞检查和用户态 siginfo/status 写回语义保持不变。
+
 ### lmbench/UnixBench signal wait 优化：缩短当前任务拥有权
 
 **涉及文件：**

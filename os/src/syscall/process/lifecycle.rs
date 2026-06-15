@@ -3,7 +3,7 @@ use alloc::sync::Arc;
 use crate::mm::{copy_to_user, UserPtrMut};
 use crate::syscall::errno::*;
 use crate::task::{
-    current_task, current_task_ref, exit_current_and_run_next, exit_group_and_run_next,
+    current_task_ref, exit_current_and_run_next, exit_group_and_run_next,
     signal::SigInfo, ProcessControlBlock, ProcessManager, Rusage,
 };
 use log::info;
@@ -48,7 +48,7 @@ pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) ->
         None => return EINVAL,
     };
     info!("[sys_wait4] pid: {}, option: {:?}", pid, option);
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let token = task.get_user_token();
     let process = task.process.clone();
     match ProcessManager::wait_child(
@@ -90,18 +90,19 @@ pub fn sys_waitid(
         return EINVAL;
     }
 
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let token = task.get_user_token();
+    let process = task.process.clone();
     if idtype != P_PIDFD {
-        let wait_pid = match waitid_target_pid(idtype, id, &task.process) {
+        let wait_pid = match waitid_target_pid(idtype, id, &process) {
             Ok(pid) => pid,
             Err(errno) => return errno,
         };
-        return waitid_wait_child(&task.process, wait_pid, infop, option, token);
+        return waitid_wait_child(&process, wait_pid, infop, option, token);
     }
 
     let (target_pid, nonblock) = {
-        let files_ref = task.process.files();
+        let files_ref = process.files();
         let fd_table = files_ref.lock();
         let file = match fd_table.get_file(id) {
             Ok(file) => file,
@@ -123,7 +124,7 @@ pub fn sys_waitid(
     }
 
     match ProcessManager::wait_child(
-        &task.process,
+        &process,
         target_pid as isize,
         nonblock || option.contains(WaitOption::WNOHANG),
         option.contains(WaitOption::WEXITED),
