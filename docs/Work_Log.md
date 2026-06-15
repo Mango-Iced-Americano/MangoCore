@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### 当前任务快照内存序优化：标量 fast path 使用 Relaxed
+
+**涉及文件：**
+- `os/src/task/processor.rs` — 将当前 pid/tid/ppid/user-token 快照的 load/store 从 Acquire/Release 收紧为 Relaxed，保留 `CURRENT_TASK_PTR` 的发布/读取内存序
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** MangoCore 当前是单核调度，这些标量只是当前 CPU 上任务状态的快照，不承担跨核对象发布语义；裸指针快路径仍保持 Acquire/Release。
+
 ### 用户页表 token 快路径：缓存当前任务 token
 
 **涉及文件：**

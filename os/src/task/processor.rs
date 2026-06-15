@@ -147,10 +147,10 @@ pub fn run_tasks() {
             };
             // 设置当前正在运行的任务
             CURRENT_TASK_PTR.store(Arc::as_ptr(&task) as *mut TaskControlBlock, Ordering::Release);
-            CURRENT_PID.store(task.pid(), Ordering::Release);
-            CURRENT_TID.store(task.gettid(), Ordering::Release);
-            CURRENT_PARENT_PID.store(task.process.parent_pid(), Ordering::Release);
-            CURRENT_USER_TOKEN.store(task.get_user_token(), Ordering::Release);
+            CURRENT_PID.store(task.pid(), Ordering::Relaxed);
+            CURRENT_TID.store(task.gettid(), Ordering::Relaxed);
+            CURRENT_PARENT_PID.store(task.process.parent_pid(), Ordering::Relaxed);
+            CURRENT_USER_TOKEN.store(task.get_user_token(), Ordering::Relaxed);
             processor.current = Some(task);
             // 手动释放处理器
             drop(processor);
@@ -173,10 +173,10 @@ pub fn run_tasks() {
 /// 取出当前正在运行的任务
 pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
     CURRENT_TASK_PTR.store(ptr::null_mut(), Ordering::Release);
-    CURRENT_PID.store(0, Ordering::Release);
-    CURRENT_TID.store(0, Ordering::Release);
-    CURRENT_PARENT_PID.store(0, Ordering::Release);
-    CURRENT_USER_TOKEN.store(0, Ordering::Release);
+    CURRENT_PID.store(0, Ordering::Relaxed);
+    CURRENT_TID.store(0, Ordering::Relaxed);
+    CURRENT_PARENT_PID.store(0, Ordering::Relaxed);
+    CURRENT_USER_TOKEN.store(0, Ordering::Relaxed);
     PROCESSOR.lock().take_current()
 }
 
@@ -200,22 +200,22 @@ pub fn current_task_ref() -> Option<&'static TaskControlBlock> {
 
 #[inline(always)]
 pub fn current_pid() -> usize {
-    CURRENT_PID.load(Ordering::Acquire)
+    CURRENT_PID.load(Ordering::Relaxed)
 }
 
 #[inline(always)]
 pub fn current_tid() -> usize {
-    CURRENT_TID.load(Ordering::Acquire)
+    CURRENT_TID.load(Ordering::Relaxed)
 }
 
 #[inline(always)]
 pub fn current_parent_pid() -> usize {
-    CURRENT_PARENT_PID.load(Ordering::Acquire)
+    CURRENT_PARENT_PID.load(Ordering::Relaxed)
 }
 
 pub fn refresh_current_user_token_for_process(pid: usize, token: usize) {
-    if CURRENT_PID.load(Ordering::Acquire) == pid {
-        CURRENT_USER_TOKEN.store(token, Ordering::Release);
+    if CURRENT_PID.load(Ordering::Relaxed) == pid {
+        CURRENT_USER_TOKEN.store(token, Ordering::Relaxed);
     }
 }
 
@@ -234,7 +234,7 @@ pub fn set_current_syscall_id(id: Option<usize>) {
 
 /// 获取当前正在运行的任务的用户态页表令牌
 pub fn current_user_token() -> usize {
-    let token = CURRENT_USER_TOKEN.load(Ordering::Acquire);
+    let token = CURRENT_USER_TOKEN.load(Ordering::Relaxed);
     if token != 0 {
         token
     } else {
