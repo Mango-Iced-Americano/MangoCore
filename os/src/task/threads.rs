@@ -219,9 +219,10 @@ fn deadline_expired(deadline: Option<TimeSpec>) -> bool {
 
 #[inline(always)]
 fn timespec_to_ticks(time: TimeSpec) -> usize {
+    let freq = get_clock_freq();
     time.tv_sec
-        .saturating_mul(get_clock_freq())
-        .saturating_add(time.tv_nsec.saturating_mul(get_clock_freq()) / NSEC_PER_SEC)
+        .saturating_mul(freq)
+        .saturating_add(time.tv_nsec.saturating_mul(freq) / NSEC_PER_SEC)
 }
 
 fn finish_waitv_private(

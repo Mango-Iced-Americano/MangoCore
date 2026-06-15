@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### futex tick 换算微优化：缓存时钟频率
+
+**涉及文件：**
+- `os/src/task/threads.rs` — `timespec_to_ticks` 单次读取 `get_clock_freq()` 后复用，避免 futex 短超时路径重复读取频率
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev sh -lc 'timeout 75s make rv64-run ...'` ✅ — busybox 基础与 sleep 流程通过，随后进入文件操作测试，由外层 timeout 结束，无 panic
+
+**备注：** 仅消除重复读取，deadline/tick 计算公式和等待语义不变。
+
 ### 轻量 saved ID syscall 优化：缓存当前 suid/sgid
 
 **涉及文件：**
