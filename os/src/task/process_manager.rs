@@ -1,7 +1,6 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::Cell;
-use log::trace;
 
 use crate::syscall::{errno::*, CloneFlags};
 
@@ -171,13 +170,6 @@ impl ProcessManager {
                 } else {
                     process_inner.children.swap_remove(idx)
                 };
-                if !nowait {
-                    trace!(
-                        "[wait4] release zombie process, leader_tid: {}, pid: {}",
-                        child.leader_tid,
-                        child.pid
-                    );
-                }
                 let found_pid = child.pid;
                 wait_status.set(child.exit_code());
                 if !nowait {

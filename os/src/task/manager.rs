@@ -499,9 +499,7 @@ impl TaskManager {
     pub fn wake_interruptible(&mut self, task: Arc<TaskControlBlock>) {
         match self.try_wake_interruptible(task) {
             Ok(_) => {}
-            Err(_) => {
-                log::trace!("[wake_interruptible] already waken");
-            }
+            Err(_) => {}
         }
     }
     /// 这个函数会将`task`从`interruptible_queue`中删除，并加入`ready_queue`。
@@ -1696,11 +1694,6 @@ impl TimeoutWaitQueue {
             // 堆中剩下的任务还没有超时
             if waiter.timeout > now {
                 // 若超时时间大于当前时间，说明后面的任务都没有超时
-                log::trace!(
-                    "[wake_expired] no more expired, next pending task timeout: {:?}, now: {:?}",
-                    waiter.timeout,
-                    now
-                );
                 self.inner.push(waiter);
                 break;
             // 唤醒超时任务
@@ -1721,12 +1714,6 @@ impl TimeoutWaitQueue {
                         }
                         // 释放锁
                         drop(inner);
-                        log::trace!(
-                            "[wake_expired] tid: {}, pid: {}, timeout: {:?}",
-                            task.tid.0,
-                            task.pid(),
-                            waiter.timeout
-                        );
                         tasks_to_wake.push(task);
                     }
                     // task is dead, just ignore

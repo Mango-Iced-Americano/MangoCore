@@ -4,6 +4,23 @@
 
 ## 2026-06-15
 
+### task/futex/exec 热路径降噪：删除普通调度与生命周期日志
+
+**涉及文件：**
+- `os/src/task/manager.rs` — 删除 `wake_interruptible` 已唤醒分支和 timeout wait queue 正常唤醒 trace 输出
+- `os/src/task/threads.rs` — 删除 futex wait 值不匹配正常返回 `EAGAIN` 的 trace 输出
+- `os/src/syscall/process/futex.rs` — 删除 process-shared futex 普通入口 trace 输出
+- `os/src/task/process_manager.rs` — 删除 `wait4` 回收 zombie 子进程普通 trace 输出
+- `os/src/task/elf.rs` — 删除 ELF interpreter 加载普通 info 输出
+- `os/src/task/task.rs` — 删除 real timer refresh、线程退出、init TCB 创建、exec ELF/heap/user_sp 等普通路径日志
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 已启动后由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 面向 `lat_proc`、`lat_ctx`、`lat_futex`、exec/clone/exit 密集场景；保留 clear_child_tid 错误、ELF 空文件、clone parent 缺失等异常诊断。
+
 ### 地址空间/uaccess 热路径降噪：删除普通路径日志
 
 **涉及文件：**

@@ -9,7 +9,6 @@ use crate::task::{current_task_ref, current_user_token, threads, TaskControlBloc
 use crate::timer::{current_timespec, TimeSpec, NSEC_PER_SEC};
 use alloc::vec::Vec;
 use core::mem::size_of;
-use log::trace;
 use num_enum::FromPrimitive;
 
 bitflags! {
@@ -165,10 +164,6 @@ pub fn sys_futex(
     let option = FutexOption::from_bits_truncate(futex_op);
     let is_private = option.contains(FutexOption::PRIVATE);
     let private_key = uaddr as usize;
-    if !is_private {
-        trace!("[futex] process-shared futex, cmd={:?}", cmd);
-    }
-
     match cmd {
         FutexCmd::Wait => {
             let timeout = match read_timeout(timeout, token) {

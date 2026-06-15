@@ -17,7 +17,6 @@ use crate::{
 };
 use alloc::{collections::BTreeMap, sync::Arc};
 use lazy_static::lazy_static;
-use log::*;
 use num_enum::FromPrimitive;
 
 use super::manager::{WaitQueue, WaitResult};
@@ -493,11 +492,6 @@ fn do_futex_wait_until(
         |_: &mut Futex| match futex_word.read(token) {
             Ok(value) if value == val => None,
             Ok(value) => {
-                trace!(
-                    "[futex] --wait-- **not match** futex: {:X}, val: {:X}",
-                    value,
-                    val
-                );
                 Some(EAGAIN)
             }
             Err(errno) => Some(errno),
@@ -692,11 +686,6 @@ fn do_futex_wait_shared_until(
         |_: &mut BTreeMap<usize, WaitQueue>| match futex_word.read(token) {
             Ok(value) if value == val => None,
             Ok(value) => {
-                trace!(
-                    "[futex-shared] --wait-- **not match** futex: {:X}, val: {:X}",
-                    value,
-                    val
-                );
                 Some(EAGAIN)
             }
             Err(errno) => Some(errno),

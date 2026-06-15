@@ -25,7 +25,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
-use log::{trace, warn};
+use log::warn;
 use spin::{Mutex, MutexGuard};
 
 const TASK_CAP_FULL_SET: u64 = (1u64 << 41) - 1;
@@ -572,7 +572,6 @@ impl TaskControlBlockInner {
             if self.timer[0].it_value.is_zero() {
                 // 添加信号
                 self.add_signal(Signals::SIGALRM);
-                log::info!("Task's real timer expired, sending SIGALRM");
                 // 重置定时器
                 self.timer[0].it_value = self.timer[0].it_interval;
             }
@@ -609,7 +608,6 @@ impl TaskControlBlockInner {
         }
         let now = TimeVal::now();
         let diff = now - self.clock.last_real_timer_update;
-        log::debug!("real_timer refreshing...");
         self.update_itimer_real_if_exists(diff);
         // 更新锚点，防止重复计算
         self.clock.last_real_timer_update = now;
@@ -690,12 +688,6 @@ impl TaskControlBlock {
     /// 这里不处理父子进程、进程 zombie、fd/vm 整体回收等进程级生命周期，
     /// 那些属于 ProcessControlBlock 的退出收尾。
     pub(crate) fn exit_thread_resources(&self, exit_code: u32) -> bool {
-        log::trace!(
-            "[exit_thread] Trying to exit tid {} pid {} with {}",
-            self.tid.0,
-            self.pid(),
-            exit_code
-        );
         let clear_child_tid = {
             let mut inner = self.acquire_inner_lock();
             if inner.task_status == TaskStatus::Zombie {
@@ -712,10 +704,6 @@ impl TaskControlBlock {
         self.process.remove_thread(self);
 
         if clear_child_tid != 0 {
-            log::debug!(
-                "[do_exit] do futex wake on clear_child_tid: {:X}",
-                clear_child_tid
-            );
             match self.write_clear_child_tid_word(clear_child_tid) {
                 Ok((uses_shared_key, before_key, after_key)) => {
                     self.process.futex().lock().wake(clear_child_tid, 1);
@@ -750,12 +738,6 @@ impl TaskControlBlock {
             );
         }
 
-        log::info!(
-            "[exit_thread] tid {} pid {} exited with {}",
-            self.tid.0,
-            self.pid(),
-            exit_code
-        );
         crate::utils::stats::print_resource_stats(Some(self));
         true
     }
@@ -766,11 +748,6 @@ impl TaskControlBlock {
     pub fn new(elf: Arc<vfs::File>) -> Arc<Self> {
         // 将ELF文件映射到内核空间
         let elf_data = elf.map_to_kernel_space(MMAP_BASE);
-        log::debug!(
-            "[TCB::new] elf_data.len() = {} (first 16 bytes: {:02X?})",
-            elf_data.len(),
-            &elf_data[..16.min(elf_data.len())]
-        );
         if elf_data.is_empty() {
             panic!("[TCB::new] initproc ELF is empty");
         }
@@ -820,8 +797,6 @@ impl TaskControlBlock {
                 )
                 .expect("init task stack setup failed")
         };
-        log::trace!("[TCB::new]trap_cx_ppn{:?}", trap_cx_ppn);
-
         // 初始化新 VFS 文件描述符表
         let mut fd_table = vfs::FdTable::new();
         // 打开 /dev/tty 并分配 stdin/stdout/stderr（fd 0, 1, 2）
@@ -983,7 +958,6 @@ impl TaskControlBlock {
             kstack_top,
             trap_handler as usize,
         );
-        trace!("[new] trap_cx:{:?}", *trap_cx);
         task_control_block
     }
 
@@ -1025,8 +999,6 @@ impl TaskControlBlock {
             Ok(result) => result,
             Err(e) => return Err(e),
         };
-        log::trace!("[load_elf] ELF file mapped");
-
         // 为 glibc 分配用户 heap 空间（0x1c0000 ~ 0x1c4000）
         use crate::mm::{MapPermission, VirtAddr};
 
@@ -1038,12 +1010,6 @@ impl TaskControlBlock {
             VirtAddr::from(heap_end),
             MapPermission::R | MapPermission::W | MapPermission::U,
         );
-        log::info!(
-            "[load_elf] mapped user heap from program_break: {:#x} ~ {:#x}",
-            heap_start,
-            heap_end
-        );
-
         // 为当前线程分配用户资源，并保留 trap context PPN，避免再次页表遍历。
         let trap_cx_ppn = memory_set
             .alloc_user_res_with_trap_ppn(self.user_res_slot, true)
@@ -1052,7 +1018,6 @@ impl TaskControlBlock {
         // 创建ELF参数表
         let user_sp =
             memory_set.create_elf_tables(self.ustack_bottom_va(), argv_vec, envp_vec, &elf_info)?;
-        log::trace!("[load_elf] user sp after pushing parameters: {:X}", user_sp);
         // 初始化陷阱上下文
         let trap_cx = TrapContext::app_init_context(
             if let Some(interp_entry) = elf_info.interp_entry {
