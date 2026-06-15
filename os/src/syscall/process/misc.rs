@@ -3,7 +3,9 @@ use crate::fs::flush_all_page_caches;
 use crate::hal::shutdown;
 use crate::mm::{copy_to_user_array, translated_str};
 use crate::syscall::errno::*;
-use crate::task::{current_task, current_user_token, has_ready_task, suspend_current_and_run_next};
+use crate::task::{
+    current_task_ref, current_user_token, has_ready_task, suspend_current_and_run_next,
+};
 use core::sync::atomic::{AtomicBool, Ordering};
 use log::info;
 use num_enum::FromPrimitive;
@@ -77,7 +79,7 @@ pub fn sys_reboot(magic: usize, magic2: usize, cmd: usize, _arg: usize) -> isize
         return EINVAL;
     }
 
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     if task.acquire_inner_lock().euid != 0 {
         return EPERM;
     }
@@ -166,7 +168,7 @@ fn syslog_requires_privilege(action: SyslogAction) -> bool {
 }
 
 fn has_syslog_privilege() -> bool {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let inner = task.acquire_inner_lock();
     inner.euid == 0 || (inner.cap_effective & ((1u64 << CAP_SYS_ADMIN) | (1u64 << CAP_SYSLOG))) != 0
 }
@@ -179,12 +181,12 @@ pub fn sys_yield() -> isize {
 }
 
 pub fn sys_delete_module(name: *const u8, _flags: u32) -> isize {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     if task.acquire_inner_lock().euid != 0 {
         return EPERM;
     }
 
-    match translated_str(current_user_token(), name) {
+    match translated_str(task.get_user_token(), name) {
         Ok(_) => ENOENT,
         Err(errno) => errno,
     }

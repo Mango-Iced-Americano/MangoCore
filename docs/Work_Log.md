@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### lmbench/UnixBench IPC 与杂项 syscall 优化：当前任务短引用
+
+**涉及文件：**
+- `os/src/syscall/process/ipc.rs` — SysV shm pid/ns/id helper、mqueue fd 表访问、`mq_open/mq_notify` 当前 pid 读取改用 `current_task_ref()`，减少 IPC 权限检查和 fd 分配路径的 `PROCESSOR` 锁与 `Arc` clone
+- `os/src/syscall/process/misc.rs` — `reboot/syslog/delete_module` 权限检查改用 `current_task_ref()`，并在 `delete_module` 中复用当前任务 token
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** mq netlink 投递、wait queue 和阻塞收发逻辑未改动，只替换不跨调度点保存的当前任务只读/短 fd 表路径。
+
 ### lmbench/UnixBench 信号 syscall 优化：当前任务短引用
 
 **涉及文件：**
