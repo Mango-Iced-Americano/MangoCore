@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### uaccess 优化：UserBuffer 单页读写快路径
+
+**涉及文件：**
+- `os/src/mm/uaccess.rs` — `UserBuffer::read/write` 在只有一个物理页片段时直接拷贝，跳过通用跨页循环
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev sh -lc 'timeout 75s make rv64-run ...'` ✅ — busybox 进入文件操作测试后由外层 timeout 结束，无 panic
+
+**备注：** 面向 simple read/write、stat/sigaction 等单页用户缓冲区高频路径；返回长度仍等价于 `min(src_or_dst.len(), user_buffer.len())`。
+
 ### 时间换算热路径优化：减少频率重复读取并强制内联
 
 **涉及文件：**

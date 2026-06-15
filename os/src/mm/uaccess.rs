@@ -771,6 +771,11 @@ impl UserBuffer {
     }
 
     pub fn read(&self, dst: &mut [u8]) -> usize {
+        if let [buffer] = self.buffers.as_slice() {
+            let len = dst.len().min(buffer.len());
+            dst[..len].copy_from_slice(&buffer[..len]);
+            return len;
+        }
         let mut start = 0;
         let dst_len = dst.len();
         for buffer in self.buffers.iter() {
@@ -787,6 +792,11 @@ impl UserBuffer {
     }
 
     pub fn write(&mut self, src: &[u8]) -> usize {
+        if let [buffer] = self.buffers.as_mut_slice() {
+            let len = src.len().min(buffer.len());
+            buffer[..len].copy_from_slice(&src[..len]);
+            return len;
+        }
         let mut start = 0;
         let src_len = src.len();
         for buffer in self.buffers.iter_mut() {
