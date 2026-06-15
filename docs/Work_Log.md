@@ -4,6 +4,22 @@
 
 ## 2026-06-15
 
+### fix: normalize mount paths to absolute — 修复 busybox df 因相对路径退出码非零
+
+**涉及文件：**
+- `os/src/fs/mod.rs:337-342` — `mount_block_fs()` mount_point 补前导 `/` + 设 mount_source 避免 `none`
+- `os/src/syscall/fs.rs:4179` — `sys_mount()` 相对路径 target 改用 `normalize_cwd()` 防 `//bin`
+- `os/src/syscall/fs.rs:3649` — `sys_umount2()` 相对路径同步修复
+- `os/src/syscall/fs.rs:4296` — `MS_MOVE` source 相对路径同步修复
+- `os/src/syscall/fs.rs:3746-3752` — `do_bind_mount()` mount_source 存绝对路径
+
+**根因：** 内核在 3 处存了相对路径：(1) `mount_block_fs()` 直接把 `"tools"`/`"sdcard"` 存为 mount_path；(2) sys_mount/umount2/MS_MOVE 用 `format!("{}/{}", "/", "bin")` 拼出 `//bin`；(3) do_bind_mount 把用户传来的 `"tools/bin"` 原样存入 mount_source。/proc/mounts 暴露这些非绝对路径，busybox df 的 statvfs() 从非根 CWD 查找时报 ENOENT。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+
+**备注：** 全部在内核侧修复，用户程序不需要改。预期挽回 busybox-musl + busybox-glibc 各 1 分（df 测试）。
+
 ### fix(fs): change detect_fs println! to info! — 避免干扰 oscomp judge 行索引断言
 
 **涉及文件：**

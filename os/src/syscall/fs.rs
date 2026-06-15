@@ -3646,7 +3646,7 @@ pub fn sys_umount2(target: *const u8, flags: u32) -> isize {
             (root, target)
         } else {
             let cwd_inode: Arc<dyn vfs::IndexNode> = fs.working_inode.inode.clone();
-            let path = alloc::format!("{}/{}", fs.working_path, target);
+            let path = normalize_cwd(&fs.working_path, &target);
             (cwd_inode, path)
         }
     };
@@ -3744,7 +3744,9 @@ fn do_bind_mount(
         return Err(EINVAL);
     } else {
         match user_cstring(token, source) {
-            Ok(s) => s,
+            Ok(s) => {
+                if s.starts_with('/') { s } else { alloc::format!("/{}", s) }
+            }
             Err(errno) => return Err(errno),
         }
     };
@@ -4176,7 +4178,7 @@ pub fn sys_mount(
             (root, target)
         } else {
             let cwd_inode: Arc<dyn vfs::IndexNode> = fs.working_inode.inode.clone();
-            let path = alloc::format!("{}/{}", fs.working_path, target);
+            let path = normalize_cwd(&fs.working_path, &target);
             (cwd_inode, path)
         }
     };
@@ -4293,7 +4295,7 @@ pub fn sys_mount(
                 (root, source_path)
             } else {
                 let cwd: Arc<dyn vfs::IndexNode> = fs.working_inode.inode.clone();
-                let path = alloc::format!("{}/{}", fs.working_path, source_path);
+                let path = normalize_cwd(&fs.working_path, &source_path);
                 (cwd, path)
             }
         };
