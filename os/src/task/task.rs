@@ -30,6 +30,11 @@ use spin::{Mutex, MutexGuard};
 
 const TASK_CAP_FULL_SET: u64 = (1u64 << 41) - 1;
 const DEFAULT_TIMER_SLACK_NS: usize = 50_000;
+static ACTIVE_SECCOMP_TASKS: AtomicUsize = AtomicUsize::new(0);
+
+pub fn any_seccomp_enabled() -> bool {
+    ACTIVE_SECCOMP_TASKS.load(Ordering::Acquire) != 0
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct SeccompFilterInsn {
@@ -109,6 +114,8 @@ pub struct TaskControlBlock {
     pub user_stack_allocated: AtomicBool,
     /// Whether this task is counted in its process live-thread counter.
     pub(crate) thread_live_counted: AtomicBool,
+    /// Whether this task contributes to ACTIVE_SECCOMP_TASKS.
+    seccomp_counted: AtomicBool,
     /// 退出信号
     pub exit_signal: Signals,
     /// CLONE_THREAD 线程的 quota。非线程 clone 的 quota 在 PCB 上。
@@ -638,6 +645,16 @@ impl TaskControlBlock {
     pub fn acquire_inner_lock(&self) -> MutexGuard<TaskControlBlockInner> {
         self.inner.lock()
     }
+    pub fn account_seccomp_enabled(&self) {
+        if !self.seccomp_counted.swap(true, Ordering::AcqRel) {
+            ACTIVE_SECCOMP_TASKS.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+    fn unaccount_seccomp_enabled(&self) {
+        if self.seccomp_counted.swap(false, Ordering::AcqRel) {
+            ACTIVE_SECCOMP_TASKS.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
     /// 获取陷阱上下文的用户虚拟地址
     pub fn trap_cx_user_va(&self) -> usize {
         trap_cx_bottom_from_slot(self.user_res_slot)
@@ -843,6 +860,7 @@ impl TaskControlBlock {
             ustack_base: ustack_bottom_from_slot(user_res_slot),
             user_stack_allocated: AtomicBool::new(true),
             thread_live_counted: AtomicBool::new(false),
+            seccomp_counted: AtomicBool::new(false),
             exit_signal: Signals::empty(),
             _thread_quota: None,
             wait_io_timer_pending: AtomicBool::new(false),
@@ -1303,6 +1321,7 @@ impl TaskControlBlock {
             },
             user_stack_allocated: AtomicBool::new(user_stack_allocated),
             thread_live_counted: AtomicBool::new(false),
+            seccomp_counted: AtomicBool::new(false),
             exit_signal,
             _thread_quota: thread_quota,
             wait_io_timer_pending: AtomicBool::new(false),
@@ -1417,6 +1436,9 @@ impl TaskControlBlock {
         if !flags.contains(CloneFlags::CLONE_THREAD) && !flags.contains(CloneFlags::CLONE_NEWIPC) {
             shm_clone_attachments(self.pid(), task_control_block.pid())?;
         }
+        if parent_inner.seccomp_mode != 0 {
+            task_control_block.account_seccomp_enabled();
+        }
         task_control_block.process.add_thread(&task_control_block);
         if !flags.contains(CloneFlags::CLONE_THREAD) {
             task_control_block.process.set_sched_state(
@@ -1506,6 +1528,7 @@ impl TaskControlBlock {
 impl Drop for TaskControlBlock {
     /// 当任务控制块被销毁时，释放用户资源槽位
     fn drop(&mut self) {
+        self.unaccount_seccomp_enabled();
         registry::unregister_task(self.tid.0);
         self.process.remove_thread(self);
         self.process

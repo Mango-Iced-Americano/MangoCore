@@ -4,6 +4,20 @@
 
 ## 2026-06-15
 
+### lmbench syscall 优化：seccomp 未启用时零锁早退
+
+**涉及文件：**
+- `os/src/syscall/process/ids.rs` — `seccomp_action_for_syscall()` 在全局 active seccomp task 计数为 0 时直接 `Allow`，避免每次 syscall 获取当前 task 并锁 inner
+- `os/src/task/task.rs` — 为启用/继承 seccomp 的 TCB 做 active 计账，并在 TCB drop 时回收计数
+- `os/src/task/mod.rs` — 导出 seccomp active 查询 helper
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic/busybox/lua musl+glibc 均 `exit_code=0`，随后因 `/os_test.conf` 为 `mask=0xFFF` 进入 LTP fs_bind，由外层 `timeout 150s` 结束
+
+**备注：** 普通评测进程默认不启用 seccomp；该优化只跳过全局没有 seccomp task 时的空检查。一旦 prctl 启用 seccomp 或 clone 继承 seccomp，仍进入原锁内严格模式/BPF 解释逻辑。
+
 ### lmbench syscall 优化：合并 syscall trap 入口/返回锁获取
 
 **涉及文件：**

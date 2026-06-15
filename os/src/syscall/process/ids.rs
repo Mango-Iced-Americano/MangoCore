@@ -1316,6 +1316,10 @@ pub fn seccomp_action_for_syscall(syscall_id: usize) -> SeccompSyscallAction {
         SYSCALL_EXIT, SYSCALL_READ, SYSCALL_SIGRETURN, SYSCALL_WRITE,
     };
 
+    if !crate::task::any_seccomp_enabled() {
+        return SeccompSyscallAction::Allow;
+    }
+
     let task = match current_task() {
         Some(task) => task,
         None => return SeccompSyscallAction::Allow,
@@ -1343,6 +1347,8 @@ fn sys_prctl_set_seccomp(mode: usize, filter: usize) -> isize {
         }
         inner.seccomp_mode = SECCOMP_MODE_STRICT;
         inner.seccomp_filter.clear();
+        drop(inner);
+        task.account_seccomp_enabled();
         return SUCCESS;
     }
     if mode != SECCOMP_MODE_FILTER {
@@ -1362,6 +1368,8 @@ fn sys_prctl_set_seccomp(mode: usize, filter: usize) -> isize {
     } else {
         inner.seccomp_mode = SECCOMP_MODE_FILTER;
         inner.seccomp_filter = filter_insns;
+        drop(inner);
+        task.account_seccomp_enabled();
         SUCCESS
     }
 }

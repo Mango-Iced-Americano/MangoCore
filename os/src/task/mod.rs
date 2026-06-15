@@ -57,8 +57,8 @@ pub use registry::{
 pub use signal::*;
 pub use sleep::{sleep_relative_interruptible, sleep_until_interruptible};
 pub use task::{
-    FsStatus, PosixTimer, RobustList, Rusage, SeccompFilterInsn, TaskControlBlock, TaskStatus,
-    UtsNamespace,
+    any_seccomp_enabled, FsStatus, PosixTimer, RobustList, Rusage, SeccompFilterInsn,
+    TaskControlBlock, TaskStatus, UtsNamespace,
 };
 
 pub use self::processor::PROCESSOR;
