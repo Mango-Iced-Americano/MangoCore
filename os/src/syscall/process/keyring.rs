@@ -1,6 +1,6 @@
 use crate::mm::{translated_str, UserBufferReader, UserBufferWriter};
 use crate::syscall::errno::*;
-use crate::task::{current_task, current_user_token};
+use crate::task::{current_task_ref, current_user_token};
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -308,10 +308,8 @@ fn format_keyring_name(prefix: &str, id: usize) -> String {
 }
 
 fn current_key_context() -> (usize, u32) {
-    let task = current_task().unwrap();
-    let pid = task.pid();
-    let euid = task.acquire_inner_lock().euid;
-    (pid, euid)
+    let task = current_task_ref().unwrap();
+    (task.pid(), task.euid())
 }
 
 fn read_key_string(ptr: *const u8) -> Result<String, isize> {

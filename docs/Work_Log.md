@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### lmbench/UnixBench time/keyring 短路径优化：复用当前任务短引用
+
+**涉及文件：**
+- `os/src/syscall/process/time.rs` — `getitimer/timer_create/timer_gettime/timer_getoverrun/timer_delete` 的当前任务访问改用 `current_task_ref()`，保留 `setitimer/timer_settime` 中需要 `Arc::downgrade` 的路径
+- `os/src/syscall/process/keyring.rs` — keyring 当前上下文读取改用 `current_task_ref()` 和 euid hint，减少 inner lock 与 `Arc` clone
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** 本次只替换不注册内核 timer、不保存弱引用、不跨阻塞点的短路径；`setitimer/timer_settime` 继续使用 `Arc<TaskControlBlock>`。
+
 ### lmbench/UnixBench futex syscall 优化：key 计算短引用化
 
 **涉及文件：**

@@ -261,7 +261,7 @@ pub fn sys_getitimer(which: usize, curr_value: *mut ITimerVal) -> isize {
         return EFAULT;
     }
 
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let token = task.get_user_token();
     let now = TimeSpec::now();
     let value = {
@@ -312,7 +312,7 @@ pub fn sys_timer_create(
         }
     };
 
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let id = {
         let mut inner = task.acquire_inner_lock();
         if let Some((id, slot)) = inner
@@ -443,7 +443,7 @@ pub fn sys_timer_gettime(timer_id: usize, curr_value: *mut ITimerSpec) -> isize 
     if curr_value.is_null() {
         return EFAULT;
     }
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let value = {
         let inner = task.acquire_inner_lock();
         let Some(Some(timer)) = inner.posix_timers.get(timer_id) else {
@@ -458,7 +458,7 @@ pub fn sys_timer_gettime(timer_id: usize, curr_value: *mut ITimerSpec) -> isize 
 }
 
 pub fn sys_timer_getoverrun(timer_id: usize) -> isize {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let inner = task.acquire_inner_lock();
     match inner.posix_timers.get(timer_id) {
         Some(Some(timer)) => timer.overrun() as isize,
@@ -467,7 +467,7 @@ pub fn sys_timer_getoverrun(timer_id: usize) -> isize {
 }
 
 pub fn sys_timer_delete(timer_id: usize) -> isize {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let mut inner = task.acquire_inner_lock();
     match inner.posix_timers.get_mut(timer_id) {
         Some(slot @ Some(_)) => {
