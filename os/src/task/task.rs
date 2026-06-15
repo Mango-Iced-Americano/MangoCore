@@ -437,6 +437,9 @@ fn sched_vruntime_delta_us(nice: i32, runtime_us: usize) -> u64 {
     if runtime_us == 0 {
         return 0;
     }
+    if nice == 0 {
+        return runtime_us as u64;
+    }
     let nice = nice.clamp(-20, 19);
     let weight = SCHED_NICE_TO_WEIGHT[(nice + 20) as usize];
     (runtime_us as u64)
@@ -484,6 +487,9 @@ impl TaskControlBlockInner {
         self.clock.last_enter_s_mode = now;
         // 计算时间差
         let diff = now - self.clock.last_enter_u_mode;
+        if diff.is_zero() {
+            return;
+        }
         // 更新用户CPU时间
         self.rusage.ru_utime = self.rusage.ru_utime + diff;
         self.sched_vruntime = self
@@ -524,6 +530,9 @@ impl TaskControlBlockInner {
     }
 
     fn enforce_cpu_rlimit(&mut self) {
+        if self.cpu_limit_cur == usize::MAX && self.cpu_limit_max == usize::MAX {
+            return;
+        }
         let cpu_us = self
             .rusage
             .ru_utime

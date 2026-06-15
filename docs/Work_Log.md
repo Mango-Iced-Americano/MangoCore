@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### 进程时间统计热路径优化：默认 nice 与 CPU rlimit 快路径
+
+**涉及文件：**
+- `os/src/task/task.rs` — `sched_vruntime_delta_us()` 为 `nice=0` 增加直接返回路径，避免默认调度权重下每次用户态时间结算都查表、乘除；`update_process_times_enter_trap()` 在用户态时间差为 0 时提前返回；`enforce_cpu_rlimit()` 在 soft/hard limit 均无限制时直接返回
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 该优化面向 lmbench simple syscall/pipe/signal 等高频 trap 路径；不改变 rusage 累计、非零 nice 权重、虚拟/性能定时器或显式 CPU rlimit 的语义。
+
 ### trap_return 信号检查优化：do_signal 返回当前任务短引用
 
 **涉及文件：**
