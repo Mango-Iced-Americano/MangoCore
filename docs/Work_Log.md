@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### trap/syscall 入口降噪：删除无条件 debug 日志
+
+**涉及文件：**
+- `os/src/hal/arch/riscv/trap/mod.rs` — 删除每次 trap 的 scause debug 与每次 syscall 的 syscall id debug
+- `os/src/hal/arch/loongarch64/trap/mod.rs` — 删除每次 trap 的 cause debug
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** trap 入口是所有 syscall、缺页和中断共同路径；本次仅删除无条件正常入口日志，保留页错误与异常诊断输出。
+
 ### 时间/信号热路径降噪：删除普通 trace 日志
 
 **涉及文件：**

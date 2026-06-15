@@ -67,10 +67,6 @@ pub fn enable_timer_interrupt() {
 #[no_mangle]
 pub fn trap_handler() -> ! {
     let scause = scause::read();
-    log::debug!(
-        "[trap_handler] trapped >> scause {:?}",
-        scause.bits()
-    );
     set_kernel_trap_entry();
     let stval = stval::read();
 
@@ -82,8 +78,7 @@ pub fn trap_handler() -> ! {
             let cx = inner.get_trap_cx();
             cx.gp.pc += 4;
             cx.origin_a0 = cx.gp.a0; // 保存重启参数
-            let syscall_id = cx.gp.a7; //debug 用
-            log::debug!(">>> Syscall ID: {}", syscall_id);
+            let syscall_id = cx.gp.a7;
             (
                 syscall_id,
                 [cx.gp.a0, cx.gp.a1, cx.gp.a2, cx.gp.a3, cx.gp.a4, cx.gp.a5],

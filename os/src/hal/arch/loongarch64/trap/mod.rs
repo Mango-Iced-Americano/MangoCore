@@ -168,7 +168,6 @@ pub fn trap_handler() -> ! {
     let cause = get_exception_cause();
     let stval = get_bad_addr();
     let badi = get_bad_instruction();
-    log::debug!("[trap_handler]Cause:{:?}", cause);
 
     if let Trap::Exception(Exception::Syscall) = cause {
         let (syscall_id, args) = {
