@@ -201,12 +201,12 @@ pub fn set_current_syscall_id(id: Option<usize>) {
 
 /// 获取当前正在运行的任务的用户态页表令牌
 pub fn current_user_token() -> usize {
-    current_task().unwrap().get_user_token()
+    current_task_ref().unwrap().get_user_token()
 }
 
 /// 获取当前正在运行的任务的陷阱上下文
 pub fn current_trap_cx() -> &'static mut TrapContext {
-    current_task().unwrap().acquire_inner_lock().get_trap_cx()
+    current_task_ref().unwrap().acquire_inner_lock().get_trap_cx()
 }
 
 /// 切换到空闲任务上下文

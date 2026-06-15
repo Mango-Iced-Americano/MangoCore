@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### lmbench syscall 优化：用户 token/trap context helper 复用当前任务短引用
+
+**涉及文件：**
+- `os/src/task/processor.rs` — `current_user_token()` 与 `current_trap_cx()` 改为通过 `current_task_ref()` 读取当前任务，避免通用用户内存访问 helper 每次额外锁 `PROCESSOR` 并 clone `Arc`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 启动后由外层 `timeout 60s` 结束
+
+**备注：** 该改动只复用上一条引入的短生命周期 current 指针；需要拥有权的路径仍使用 `current_task()`。
+
 ### lmbench syscall 优化：当前任务无锁短引用
 
 **涉及文件：**
