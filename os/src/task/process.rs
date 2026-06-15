@@ -53,6 +53,7 @@ pub struct ProcessControlBlock {
     /// 是否被 init 收养（通过 adopt_children_by_init）。用于 finish_exit
     /// 中区分 init 直接 fork 的子进程和被收养的孤儿，只对后者自动回收。
     pub adopted_by_init: AtomicBool,
+    parent_pid_hint: AtomicUsize,
     inner: Mutex<ProcessInner>,
     signal: Mutex<ProcessSignalState>,
     shared_pending_hint: AtomicU64,
@@ -253,6 +254,11 @@ impl ProcessControlBlock {
             register_exec_key(key);
         }
         let net_for_registry = net.clone();
+        let parent_pid_hint = parent
+            .as_ref()
+            .and_then(|parent| parent.upgrade())
+            .map(|parent| parent.pid)
+            .unwrap_or(0);
         let pcb = Self {
             pid,
             leader_tid,
@@ -265,6 +271,7 @@ impl ProcessControlBlock {
             vfork_parent: Mutex::new(None),
             vfork_done: Completion::new(),
             adopted_by_init: AtomicBool::new(false),
+            parent_pid_hint: AtomicUsize::new(parent_pid_hint),
             inner: Mutex::new(ProcessInner {
                 exe,
                 exec_key,
@@ -621,7 +628,7 @@ impl ProcessControlBlock {
     }
 
     pub fn parent_pid(&self) -> usize {
-        self.parent().map(|parent| parent.pid).unwrap_or(0)
+        self.parent_pid_hint.load(Ordering::Acquire)
     }
 
     pub fn is_zombie(&self) -> bool {
@@ -872,7 +879,13 @@ impl ProcessControlBlock {
     }
 
     pub fn set_parent(&self, parent: Option<Weak<ProcessControlBlock>>) {
+        let parent_pid = parent
+            .as_ref()
+            .and_then(|parent| parent.upgrade())
+            .map(|parent| parent.pid)
+            .unwrap_or(0);
         self.inner.lock().parent = parent;
+        self.parent_pid_hint.store(parent_pid, Ordering::Release);
     }
 
     pub fn set_vfork_parent(&self, parent: &Arc<TaskControlBlock>) {

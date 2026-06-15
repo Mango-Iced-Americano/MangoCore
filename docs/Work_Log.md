@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### lmbench null syscall 优化：缓存 getppid 父 PID
+
+**涉及文件：**
+- `os/src/task/process.rs` — 为 PCB 维护 `parent_pid_hint` 原子缓存，`parent_pid()` 直接读取缓存，`set_parent()` 同步刷新，避免 `getppid()` 锁 inner 并升级 Weak
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，`getppid` 用例通过；随后进入 busybox 并由外层 `timeout 75s` 结束
+
+**备注：** wait/reparent 仍保留原 Weak parent 关系；缓存只用于 getppid 这类只需要父 PID 的热路径，并在 reparent/set_parent 时刷新。
+
 ### lmbench syscall 优化：seccomp 未启用时零锁早退
 
 **涉及文件：**
