@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### futex 热路径降噪：删除每次调用参数 info 日志
+
+**涉及文件：**
+- `os/src/syscall/process/futex.rs` — 删除 `sys_futex` 每次调用的完整参数 `info!` 日志，保留 process-shared futex 的低频 `trace!`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** futex 是 pthread/bench 常见热路径；运行时日志关闭时宏仍有级别判断开销，本次只去掉高频普通路径日志入口。
+
 ### uaccess 当前 token 快速判断：减少重复 current task 查询
 
 **涉及文件：**

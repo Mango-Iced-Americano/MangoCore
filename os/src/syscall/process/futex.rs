@@ -9,7 +9,7 @@ use crate::task::{current_task_ref, current_user_token, threads, TaskControlBloc
 use crate::timer::{current_timespec, TimeSpec, NSEC_PER_SEC};
 use alloc::vec::Vec;
 use core::mem::size_of;
-use log::{info, trace};
+use log::trace;
 use num_enum::FromPrimitive;
 
 bitflags! {
@@ -168,10 +168,6 @@ pub fn sys_futex(
     if !is_private {
         trace!("[futex] process-shared futex, cmd={:?}", cmd);
     }
-    info!(
-        "[futex] uaddr: {:?}, futex_op: {:?}, option: {:?}, val: {:X}, timeout: {:?}, uaddr2: {:?}, val3: {:X}",
-        uaddr, cmd, option, val, timeout, uaddr2, val3
-    );
 
     match cmd {
         FutexCmd::Wait => {
