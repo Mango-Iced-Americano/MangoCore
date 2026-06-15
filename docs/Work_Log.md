@@ -88,6 +88,17 @@
 
 ## 2026-06-14
 
+### lmbench signal install 优化：去掉 `Sighand` 单 action 堆分配
+
+**涉及文件：**
+- `os/src/task/signal/action.rs` — `Sighand` 从 `Vec<Option<Box<SigAction>>>` 改为 `Vec<Option<SigAction>>`，保留按需扩容但避免每次 `sigaction()` 安装 handler 时分配一个小对象
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+
+**备注：** 最新 lmbench 日志中 `Signal handler installation`/`Signal handler overhead` 偏慢；该测试会高频重复安装信号处理器，原实现每次 `set()` 都 `Box::new`，会把 allocator 和 clone/fork 中 `Sighand` 复制成本放大。
+
 ### lmbench simple read/write 优化：为 `/dev/null` 和 `/dev/zero` 增加 syscall 快路径
 
 **涉及文件：**

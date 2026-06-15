@@ -1,11 +1,10 @@
-use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use super::SigAction;
 
 #[derive(Clone)]
 pub struct Sighand {
-    actions: Vec<Option<Box<SigAction>>>,
+    actions: Vec<Option<SigAction>>,
 }
 
 impl Sighand {
@@ -25,7 +24,7 @@ impl Sighand {
     pub fn get(&self, signum: usize) -> Option<&SigAction> {
         self.actions
             .get(signum.checked_sub(1)?)
-            .and_then(|action| action.as_deref())
+            .and_then(|action| action.as_ref())
     }
 
     pub fn set(&mut self, signum: usize, action: Option<SigAction>) {
@@ -34,7 +33,7 @@ impl Sighand {
             // Resize on demand: 扩展到足够容纳该信号编号
             self.actions.resize_with(idx + 1, || None);
         }
-        self.actions[idx] = action.map(Box::new);
+        self.actions[idx] = action;
     }
 
     pub fn reset(&mut self) {
