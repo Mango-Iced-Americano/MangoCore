@@ -1039,6 +1039,7 @@ fn __openat(dirfd: usize, path: &str) -> Result<Arc<vfs::File>, isize> {
 }
 
 pub fn sys_getcwd(buf: usize, size: usize) -> isize {
+    info!("[sys_getcwd] buf={:#x}, size={}", buf, size);
     let task = current_task().unwrap();
     let fs_ref = task.process.fs();
     let (cwd_inode, cached_path) = {
@@ -1078,7 +1079,7 @@ pub fn sys_getcwd(buf: usize, size: usize) -> isize {
     if let Err(errno) = user_buf.write_from(&cwd) {
         return errno;
     }
-    buf as isize
+    write_len as isize
 }
 
 pub fn sys_lseek(fd: usize, offset: isize, whence: u32) -> isize {
@@ -2519,6 +2520,10 @@ pub fn sys_fstatat(dirfd: usize, path: *const u8, buf: *mut u8, flags: u32) -> i
             Ok(meta) => metadata_to_stat(&meta),
             Err(e) => return -(e as isize),
         };
+        info!(
+            "[sys_fstatat] dirfd: {}, path: {:?}, flags: {:?}, st_ino: {}",
+            dirfd as isize, path, flags, stat.st_ino,
+        );
         if UserPtrMut::new(buf as *mut Stat).write(token, &stat).is_err() {
             return EFAULT;
         }
@@ -2532,6 +2537,10 @@ pub fn sys_fstatat(dirfd: usize, path: *const u8, buf: *mut u8, flags: u32) -> i
             Ok(meta) => metadata_to_stat(&meta),
             Err(e) => return -(e as isize),
         };
+        info!(
+            "[sys_fstatat] dirfd: {}, path: {:?}, flags: {:?}, st_ino: {}",
+            dirfd as isize, path, flags, stat.st_ino,
+        );
         if UserPtrMut::new(buf as *mut Stat).write(token, &stat).is_err() {
             log::error!("[sys_fstatat] Failed to copy to {:?}", buf);
             return EFAULT;

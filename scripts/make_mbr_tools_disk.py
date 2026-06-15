@@ -5,7 +5,7 @@ Layout:
   MBR sector 0
   gap: 1 MiB (2048 sectors)
   partition 1: 768 MiB, type 0x83 — tools files (payload from existing ext4 image)
-  partition 2: 1280 MiB, type 0x83 — LTP scratch (zero-filled)
+  partition 2: 1280 MiB, type 0x0C — vfat for oscomp mount test
   total: 2049 MiB
 
 Usage:
@@ -15,6 +15,7 @@ Usage:
 import argparse
 import os
 import struct
+import subprocess
 import sys
 
 SECTOR = 512
@@ -69,7 +70,7 @@ def main() -> None:
         # Write MBR at sector 0
         mbr = bytearray(512)
         put_partition_entry(mbr, 0, 0x83, P1_START, P1_SECTORS)
-        put_partition_entry(mbr, 1, 0x83, P2_START, P2_SECTORS)
+        put_partition_entry(mbr, 1, 0x0C, P2_START, P2_SECTORS)
         mbr[510] = 0x55
         mbr[511] = 0xAA
 
@@ -90,7 +91,14 @@ def main() -> None:
     print(f"  partition 1: start={P1_START} sectors={P1_SECTORS} "
           f"({P1_MIB} MiB) type=0x83")
     print(f"  partition 2: start={P2_START} sectors={P2_SECTORS} "
-          f"({P2_MIB} MiB) type=0x83")
+          f"({P2_MIB} MiB) type=0x0C")
+
+    # Format partition 2 as FAT32 for oscomp mount test
+    p2_blocks = P2_SECTORS * SECTOR // 1024
+    cmd = ["mkfs.vfat", "-F", "32", "--offset", str(P2_START),
+           args.out_img, str(p2_blocks)]
+    print(f"[mbr-disk] formatting partition 2: {' '.join(cmd)}")
+    subprocess.run(cmd, check=True)
 
 
 if __name__ == "__main__":

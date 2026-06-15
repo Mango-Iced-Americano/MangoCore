@@ -343,6 +343,8 @@ pub fn mount_block_fs(
             mfsi.mount_fs.clone(),
         );
         mfs.set_self_mountpoint(Some(backref));
+    } else {
+        println!("[kernel] WARNING: mount_block_fs {} — mount_inode not a MountFSInode, self_mountpoint NOT set", label);
     }
 
     if let Err(e) = parent_mfs.add_mount(inode_id, mfs.clone()) {
@@ -446,6 +448,13 @@ pub fn mount_boot_block_devices() {
                             p.type_code,
                             p.sectors * 512 / (1024 * 1024)
                         );
+
+                        let alias = alloc::format!("vda{}", p.partno);
+                        let alias_minor = 100 + p.partno as u64;
+                        let alias_inode = crate::fs::dev::block::BlockDevInode::new(
+                            part_dev.clone(), alias_minor, alias.clone(),
+                        );
+                        let _ = crate::fs::dev::DEV_FS.add_dev(&alias, alias_inode);
 
                         if p.partno == 1 {
                             vdb1_dev = Some(part_dev);
