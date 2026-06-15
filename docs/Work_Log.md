@@ -4,6 +4,20 @@
 
 ## 2026-06-15
 
+### euid 权限门禁：使用当前身份 hint 避免锁
+
+**涉及文件：**
+- `os/src/syscall/process/misc.rs` — `reboot`/`delete_module` euid 检查改用 `current_euid()` hint
+- `os/src/syscall/process/ids.rs` — `ptrace_attach`/`setgroups` euid 检查改用任务身份 hint
+- `os/src/syscall/process/clone.rs` — clone/unshare/setns namespace 权限检查改用 euid hint
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 本次只替换单字段 euid 读；需要同时检查 capability bitmap 的 syslog 权限路径继续保留锁内读取，避免把多字段一致性拆散。
+
 ### pgid/sid hint：减少进程组与会话查询锁
 
 **涉及文件：**

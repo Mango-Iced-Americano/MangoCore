@@ -9,8 +9,8 @@ use crate::mm::{
 use crate::show_frame_consumption;
 use crate::syscall::errno::*;
 use crate::task::{
-    current_task, current_user_token, signal::Signals, IpcNamespace, MountNamespace, ProcessManager,
-    TaskControlBlock,
+    current_euid, current_task, current_user_token, signal::Signals, IpcNamespace, MountNamespace,
+    ProcessManager, TaskControlBlock,
 };
 use crate::utils::error::SyscallErr;
 use log::{info, warn};
@@ -207,7 +207,7 @@ fn sys_clone_inner(
         || flags.contains(CloneFlags::CLONE_NEWNET)
         || flags.contains(CloneFlags::CLONE_NEWNS)
         || flags.contains(CloneFlags::CLONE_NEWIPC))
-        && parent.acquire_inner_lock().euid != 0
+        && parent.euid() != 0
     {
         return EPERM;
     }
@@ -351,7 +351,7 @@ pub fn sys_unshare(flags: u32) -> isize {
         || flags.contains(CloneFlags::CLONE_NEWNET)
         || flags.contains(CloneFlags::CLONE_NEWNS)
         || flags.contains(CloneFlags::CLONE_NEWIPC))
-        && task.acquire_inner_lock().euid != 0
+        && task.euid() != 0
     {
         return EPERM;
     }
@@ -458,7 +458,7 @@ pub fn sys_setns(fd: usize, nstype: usize) -> isize {
     }
 
     let task = current_task().unwrap();
-    let euid = task.acquire_inner_lock().euid;
+    let euid = current_euid();
     let files_ref = task.process.files();
     let fd_table = files_ref.lock();
     let file = match fd_table.get_file(fd) {

@@ -4,7 +4,8 @@ use crate::hal::shutdown;
 use crate::mm::{copy_to_user_array, translated_str};
 use crate::syscall::errno::*;
 use crate::task::{
-    current_task_ref, current_user_token, has_ready_task, suspend_current_and_run_next,
+    current_euid, current_task_ref, current_user_token, has_ready_task,
+    suspend_current_and_run_next,
 };
 use core::sync::atomic::{AtomicBool, Ordering};
 use log::info;
@@ -79,8 +80,7 @@ pub fn sys_reboot(magic: usize, magic2: usize, cmd: usize, _arg: usize) -> isize
         return EINVAL;
     }
 
-    let task = current_task_ref().unwrap();
-    if task.acquire_inner_lock().euid != 0 {
+    if current_euid() != 0 {
         return EPERM;
     }
 
@@ -181,8 +181,7 @@ pub fn sys_yield() -> isize {
 }
 
 pub fn sys_delete_module(name: *const u8, _flags: u32) -> isize {
-    let task = current_task_ref().unwrap();
-    if task.acquire_inner_lock().euid != 0 {
+    if current_euid() != 0 {
         return EPERM;
     }
 

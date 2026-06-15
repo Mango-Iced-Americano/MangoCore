@@ -173,7 +173,7 @@ pub fn sys_ptrace(request: usize, pid: usize, _addr: usize, _data: usize) -> isi
                 Some(process) => process,
                 None => return ESRCH,
             };
-            if task.acquire_inner_lock().euid != 0 {
+            if task.euid() != 0 {
                 return EPERM;
             }
             match target.ptrace_attach(task.pid(), 19) {
@@ -675,7 +675,7 @@ pub fn sys_getgroups(size: usize, list: *mut u32) -> isize {
 
 pub fn sys_setgroups(size: usize, list: *const u32) -> isize {
     let task = current_task_ref().unwrap();
-    if task.acquire_inner_lock().euid != 0 {
+    if current_euid() != 0 {
         return EPERM;
     }
     if size > NGROUPS_MAX {
