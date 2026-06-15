@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### seccomp 活跃计数原子放松：减少 syscall 入口固定开销
+
+**涉及文件：**
+- `os/src/task/task.rs` — `ACTIVE_SECCOMP_TASKS` 与 `seccomp_counted` 的读改写使用 `Relaxed`，保留计数语义但去掉单核下不需要的 acquire/release 屏障
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** seccomp 规则本体仍由 task inner 锁保护；该计数只用于 syscall 入口快速判断是否需要进入 seccomp 检查。
+
 ### current 快路径原子放松：减少 syscall 当前任务读取开销
 
 **涉及文件：**

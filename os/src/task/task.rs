@@ -34,7 +34,7 @@ static ACTIVE_SECCOMP_TASKS: AtomicUsize = AtomicUsize::new(0);
 
 #[inline(always)]
 pub fn any_seccomp_enabled() -> bool {
-    ACTIVE_SECCOMP_TASKS.load(Ordering::Acquire) != 0
+    ACTIVE_SECCOMP_TASKS.load(Ordering::Relaxed) != 0
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -667,13 +667,13 @@ impl TaskControlBlock {
         self.inner.lock()
     }
     pub fn account_seccomp_enabled(&self) {
-        if !self.seccomp_counted.swap(true, Ordering::AcqRel) {
-            ACTIVE_SECCOMP_TASKS.fetch_add(1, Ordering::AcqRel);
+        if !self.seccomp_counted.swap(true, Ordering::Relaxed) {
+            ACTIVE_SECCOMP_TASKS.fetch_add(1, Ordering::Relaxed);
         }
     }
     fn unaccount_seccomp_enabled(&self) {
-        if self.seccomp_counted.swap(false, Ordering::AcqRel) {
-            ACTIVE_SECCOMP_TASKS.fetch_sub(1, Ordering::AcqRel);
+        if self.seccomp_counted.swap(false, Ordering::Relaxed) {
+            ACTIVE_SECCOMP_TASKS.fetch_sub(1, Ordering::Relaxed);
         }
     }
     /// 获取陷阱上下文的用户虚拟地址
