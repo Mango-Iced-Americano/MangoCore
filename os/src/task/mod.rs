@@ -191,19 +191,19 @@ pub(crate) fn block_current_and_run_next_with_lock_checked<T>(
     schedule(task_cx_ptr);
 }
 
-fn do_exit(task: Arc<TaskControlBlock>, exit_code: u32) {
+fn do_exit(task: &Arc<TaskControlBlock>, exit_code: u32) {
     if task.exit_thread_resources(exit_code) {
         if task.process.live_thread_count() == 0 {
             crate::syscall::fs::release_fcntl_locks_for_pid(task.pid());
             crate::syscall::shm_detach_process(task.pid());
-            task.process.finish_exit(&task, exit_code);
+            task.process.finish_exit(task.as_ref(), exit_code);
         }
     }
 }
 
 pub fn exit_current_and_run_next(exit_code: u32) -> ! {
     let task = take_current_task().unwrap();
-    do_exit(task.clone(), exit_code);
+    do_exit(&task, exit_code);
     // 当前任务仍在自己的内核栈上运行，不能在切栈前释放最后一个 Arc。
     add_zombie_task(task);
     let mut _unused = TaskContext::zero_init();
@@ -231,7 +231,7 @@ pub fn exit_group_and_run_next(exit_code: u32) -> ! {
     for task in exit_list.into_iter() {
         task.exit_thread_resources(exit_code);
     }
-    do_exit(task.clone(), exit_code);
+    do_exit(&task, exit_code);
     // 当前任务仍在自己的内核栈上运行，不能在切栈前释放最后一个 Arc。
     add_zombie_task(task);
     let mut _unused = TaskContext::zero_init();

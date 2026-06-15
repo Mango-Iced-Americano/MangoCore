@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### exit 路径：借用当前任务完成退出处理
+
+**涉及文件：**
+- `os/src/task/mod.rs` — `do_exit()` 改为借用当前任务，`exit/exit_group` 路径不再为退出处理额外 clone/drop 当前任务 `Arc`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 当前任务仍在自身内核栈上运行，切栈前保留原有 `add_zombie_task(task)` 所需所有权；本次只去掉 `do_exit()` 内部不需要的临时引用计数。
+
 ### priority 目标解析快路径：按需获取当前任务
 
 **涉及文件：**
