@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### lmbench/UnixBench futex syscall 优化：key 计算短引用化
+
+**涉及文件：**
+- `os/src/syscall/process/futex.rs` — `sys_futex()` 与 `sys_futex_waitv()` 的 token/key/private futex table 访问改用 `current_task_ref()` 短作用域，减少 futex syscall 层的当前任务 `Arc` clone
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** `current_task_ref()` 只用于读取 token、计算 futex key 和短暂访问私有 futex 表；`do_futex_wait*` / `do_futex_waitv*` 阻塞调用前不保留当前任务短引用。
+
 ### lmbench/UnixBench ProcessManager helper 优化：当前任务短引用
 
 **涉及文件：**
