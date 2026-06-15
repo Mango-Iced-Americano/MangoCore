@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### signal frame token 快路径：减少信号递送 VM 锁
+
+**涉及文件：**
+- `os/src/task/signal/mod.rs` — `do_signal()` 构造用户 signal frame 时复用当前 token 快照，避免每次递送信号额外锁进程 VM 获取页表 token
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 信号选择、sighand 锁、sigmask 恢复和用户栈写入布局保持不变；本次只优化当前任务 token 获取。
+
 ### exec/prlimit token 快路径：减少当前任务用户参数读取锁
 
 **涉及文件：**

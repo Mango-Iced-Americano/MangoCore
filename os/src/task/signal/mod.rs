@@ -741,7 +741,7 @@ pub fn do_signal() -> &'static TaskControlBlock {
                 if let Some((ucontext_addr, siginfo_addr, sig_sp, sig_size)) =
                     signal_frame_layout(frame_base_sp, stack_bottom)
                 {
-                    let token = task.get_user_token();
+                    let token = current_user_token();
                     let saved_sigmask = inner.sigmask_to_restore.take().unwrap_or(inner.sigmask);
                     let mcontext = unsafe {
                         *(inner.get_trap_cx() as *const TrapContext).cast::<MachineContext>()
