@@ -106,7 +106,7 @@ fn sched_pick_key(task: &Arc<TaskControlBlock>) -> (u64, i32, usize) {
 }
 
 fn task_has_nonzero_nice(task: &Arc<TaskControlBlock>) -> bool {
-    task.acquire_inner_lock().sched_nice != 0
+    task.sched_nice_hint.load(AtomicOrdering::Relaxed) != 0
 }
 
 fn count_ready_nonzero_nice(queue: &VecDeque<Arc<TaskControlBlock>>) -> usize {

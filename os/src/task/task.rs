@@ -24,7 +24,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use log::{trace, warn};
 use spin::{Mutex, MutexGuard};
 
@@ -138,6 +138,8 @@ pub struct TaskControlBlock {
     /// Generation for timeout wake timers.  Each newly armed wake timer bumps
     /// this value so older stale timers can expire without waking the task.
     pub wait_timer_generation: AtomicUsize,
+    /// Lockless scheduler hint for the common nice=0 ready-queue path.
+    pub sched_nice_hint: AtomicI32,
 }
 
 /// 任务控制块内部状态
@@ -889,6 +891,7 @@ impl TaskControlBlock {
             _thread_quota: None,
             wait_io_timer_pending: AtomicBool::new(false),
             wait_timer_generation: AtomicUsize::new(0),
+            sched_nice_hint: AtomicI32::new(0),
             inner: Mutex::new(TaskControlBlockInner {
                 sigmask: Signals::empty(),
                 sigmask_to_restore: None,
@@ -1356,6 +1359,7 @@ impl TaskControlBlock {
             _thread_quota: thread_quota,
             wait_io_timer_pending: AtomicBool::new(false),
             wait_timer_generation: AtomicUsize::new(0),
+            sched_nice_hint: AtomicI32::new(child_sched_nice),
             inner: Mutex::new(TaskControlBlockInner {
                 // clone
                 sigpending: SignalQueue::empty(),

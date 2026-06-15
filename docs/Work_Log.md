@@ -4,6 +4,20 @@
 
 ## 2026-06-15
 
+### 调度器 ready queue 优化：nice=0 判断改用原子 hint
+
+**涉及文件：**
+- `os/src/task/task.rs` — 在 `TaskControlBlock` 增加 `sched_nice_hint`，初始化和 fork 子任务时同步当前 nice 值
+- `os/src/task/manager.rs` — ready queue 入队/出队的 `task_has_nonzero_nice()` 改为读取原子 hint，避免默认 nice=0 任务每次调度队列操作都拿 `task.inner` 锁
+- `os/src/syscall/process/ids.rs` — `setpriority()` 与 `sched_setattr()` 修改 `sched_nice` 时同步更新调度 hint
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 真实 ABI 状态仍以 `inner.sched_nice` 为准；hint 只用于调度器默认 FIFO 快路径判断，非零 nice 的公平选择仍读取完整 `sched_vruntime/sched_nice`。
+
 ### 进程时间统计热路径优化：默认 nice 与 CPU rlimit 快路径
 
 **涉及文件：**

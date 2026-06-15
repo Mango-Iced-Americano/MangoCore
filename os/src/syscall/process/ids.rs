@@ -2069,6 +2069,8 @@ fn set_task_nice(task: &Arc<TaskControlBlock>, nice: i32) {
         let mut inner = task.acquire_inner_lock();
         let old_nice = inner.sched_nice;
         inner.sched_nice = nice;
+        task.sched_nice_hint
+            .store(inner.sched_nice, core::sync::atomic::Ordering::Relaxed);
         let state = SchedState {
             policy: inner.sched_policy,
             priority: inner.sched_priority,
@@ -2606,6 +2608,8 @@ pub fn sys_sched_setattr(pid: usize, attr: *const SchedAttr, flags: usize) -> is
         inner.sched_priority = priority;
         inner.sched_reset_on_fork = new_reset_on_fork;
         inner.sched_nice = attr.sched_nice;
+        task.sched_nice_hint
+            .store(inner.sched_nice, core::sync::atomic::Ordering::Relaxed);
         inner.sched_runtime = attr.sched_runtime;
         inner.sched_deadline = attr.sched_deadline;
         inner.sched_period = attr.sched_period;
