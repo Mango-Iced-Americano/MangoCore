@@ -4,6 +4,18 @@
 
 ## 2026-06-15
 
+### lmbench/UnixBench ProcessManager helper 优化：当前任务短引用
+
+**涉及文件：**
+- `os/src/task/process_manager.rs` — `current_process()` 和 `send_signal_to_all()` 的当前任务读取改用 `current_task_ref()`，减少纯 helper 路径的 `PROCESSOR` 锁与 `Arc` clone
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** `task/manager.rs` 中 wait queue 入队、`Arc::downgrade`、唤醒后 `finish_wait` 相关路径继续保留 `current_task()`。
+
 ### lmbench/UnixBench futex fast-path 优化：短引用获取当前任务
 
 **涉及文件：**

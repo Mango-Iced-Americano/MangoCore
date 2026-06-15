@@ -7,8 +7,8 @@ use crate::syscall::{errno::*, CloneFlags};
 
 use super::signal::Signals;
 use super::{
-    add_task, current_task, quota, registry, signal::send_process_signal, ProcessControlBlock,
-    ProcessState, TaskControlBlock, WaitQueue, WaitResult,
+    add_task, current_task_ref, quota, registry, signal::send_process_signal,
+    ProcessControlBlock, ProcessState, TaskControlBlock, WaitQueue, WaitResult,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -21,7 +21,7 @@ pub struct ProcessManager;
 
 impl ProcessManager {
     pub fn current_process() -> Option<Arc<ProcessControlBlock>> {
-        current_task().map(|task| task.process.clone())
+        current_task_ref().map(|task| task.process.clone())
     }
 
     pub fn find_process(pid: usize) -> Option<Arc<ProcessControlBlock>> {
@@ -254,7 +254,7 @@ impl ProcessManager {
     }
 
     pub fn send_signal_to_all(signal: Signals) -> isize {
-        let current_pid = current_task().map(|task| task.pid()).unwrap_or(0);
+        let current_pid = current_task_ref().map(|task| task.pid()).unwrap_or(0);
         let mut sent = false;
         for process in Self::all_processes() {
             if process.pid == 1 || process.pid == current_pid {
