@@ -433,7 +433,7 @@ pub fn trap_return() -> ! {
     let trap_cx_ptr = trap_cx as *const TrapContext as usize;
     trap_cx.sstatus.set_pplv(3).set_pie(true);
     //log::debug!("[trap_return] trap_cx:{:?}", trap_cx);
-    let user_satp = task.get_user_token();
+    let user_satp = current_user_token();
     //log::debug!("[trap_return] trap_cx_ptr:{:#x}, user_satp:{:#x}", trap_cx_ptr, user_satp);
     let restore_va = __restore as usize - __alltraps as usize + strampoline as usize;
     pre_start_init();

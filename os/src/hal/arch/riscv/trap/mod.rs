@@ -8,7 +8,7 @@ use crate::mm::{frame_reserve, FaultAccess, MemoryError, VirtAddr};
 use crate::net::config::NET_INTERFACE;
 use crate::syscall::syscall;
 use crate::task::{
-    current_task, current_task_ref, do_signal, do_wake_expired, signal::SigInfo,
+    current_task, current_task_ref, current_user_token, do_signal, do_wake_expired, signal::SigInfo,
     suspend_current_and_run_next, Signals,
 };
 use crate::timer::{ITimerVal, TimeVal};
@@ -202,7 +202,7 @@ pub fn trap_return() -> ! {
     let task = do_signal();
     set_user_trap_entry();
     let trap_cx_ptr = task.trap_cx_user_va();
-    let user_satp = task.get_user_token();
+    let user_satp = current_user_token();
     let restore_va = __restore as usize - __alltraps as usize + TRAMPOLINE;
     unsafe {
         asm!(

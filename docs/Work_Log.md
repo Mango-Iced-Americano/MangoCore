@@ -4,6 +4,19 @@
 
 ## 2026-06-15
 
+### trap 返回 token 快路径：避免每次返回用户态锁 VM
+
+**涉及文件：**
+- `os/src/hal/arch/riscv/trap/mod.rs` — `trap_return()` 使用当前任务 token 快照作为 `satp`，不再调用 `TaskControlBlock::get_user_token()`
+- `os/src/hal/arch/loongarch64/trap/mod.rs` — `trap_return()` 使用当前任务 token 快照作为用户页表 token，保持双架构一致
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** token 快照在调度切入时刷新，`replace_vm()` 会在 exec 等地址空间替换后刷新当前进程快照；trap 返回不再为获取 token 额外锁 PCB/VM。
+
 ### 用户访存跨页翻译优化：每次 uaccess 只获取一次当前 VM
 
 **涉及文件：**
