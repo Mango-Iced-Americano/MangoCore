@@ -809,14 +809,16 @@ impl IndexNode for layout::Ext4OSInode {
             self.cached_file_size.store(new_size, core::sync::atomic::Ordering::Relaxed);
             self.metadata_dirty.store(true, core::sync::atomic::Ordering::Relaxed);
             super::counters::inc_counter!(super::counters::METADATA_DIRTY_MARK);
+
+            // Push updated inode (with new size/mtime/extents) into
+            // inode_cache so sync/fsync can flush it later.
+            self.ext4fs.push_dirty_inode_to_cache(inode_num, &inode_lock.inode);
         }
 
         // Write data through PageCache; physical blocks are already mapped.
         let pc = self.get_new_page_cache().ok_or(SyscallErr::EIO)?;
         pc.write(offset, &buf[..write_len])?;
 
-        // Defer metadata flush — metadata_dirty was already set above.
-        // write_back_inode() will happen on sync/fsync, not on every write.
         Ok(write_len)
     }
 
@@ -859,14 +861,13 @@ impl IndexNode for layout::Ext4OSInode {
             self.metadata_dirty
                 .store(true, core::sync::atomic::Ordering::Relaxed);
             super::counters::inc_counter!(super::counters::METADATA_DIRTY_MARK);
+
+            self.ext4fs.push_dirty_inode_to_cache(inode_num, &inode_lock.inode);
         }
 
         // Write data through PageCache; physical blocks are already mapped.
         let pc = self.get_new_page_cache().ok_or(SyscallErr::EIO)?;
         pc.write_user(offset, len, src)?;
-
-        // Defer metadata flush — metadata_dirty was already set above.
-        // write_back_inode() will happen on sync/fsync, not on every write.
 
         Ok(len)
     }
@@ -891,17 +892,8 @@ impl IndexNode for layout::Ext4OSInode {
         if let Some(pc) = self.new_page_cache.lock().clone() {
             pc.writeback_all()?;
         }
-        // Phase 3: flush per-inode metadata if dirty
-        if self.metadata_dirty.swap(false, core::sync::atomic::Ordering::Relaxed) {
-            let inode_num = self.inode.lock().inode_num;
-            let mut fresh = self.ext4fs.get_inode_ref(inode_num);
-            {
-                let inode_lock = self.inode.lock();
-                fresh.inode = inode_lock.inode;
-            }
-            self.ext4fs.write_back_inode(&mut fresh);
-            super::counters::inc_counter!(super::counters::METADATA_FLUSH_COUNT);
-        }
+        // Flush dirty inodes via inode_cache (set by push_dirty_inode_to_cache)
+        let _ = self.ext4fs.flush_dirty_inodes();
         self.ext4fs.flush_metadata_cache();
         Ok(())
     }
@@ -910,6 +902,8 @@ impl IndexNode for layout::Ext4OSInode {
         if let Some(pc) = self.new_page_cache.lock().clone() {
             pc.writeback_all()?;
         }
+        // fdatasync must flush size/extent metadata for data integrity
+        let _ = self.ext4fs.flush_dirty_inodes();
         Ok(())
     }
 
@@ -2093,6 +2087,21 @@ impl Ext4FileSystem {
             self.flush_inode(ino)?;
         }
         Ok(())
+    }
+
+    /// Push an in-memory inode into the inode_cache and mark it dirty,
+    /// without writing to disk. Subsequent flush_dirty_inodes() / sync()
+    /// will persist it.
+    pub(crate) fn push_dirty_inode_to_cache(
+        &self,
+        ino: u32,
+        inode: &super::ext4_inode::Ext4Inode,
+    ) {
+        let cached = self.get_inode_cached(ino);
+        let mut guard = cached.lock();
+        guard.inode = inode.clone();
+        guard.dirty = true;
+        super::counters::inc_counter!(super::counters::INODE_DIRTY_COUNT);
     }
 }
 
