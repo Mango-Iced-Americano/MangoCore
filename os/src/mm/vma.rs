@@ -941,6 +941,8 @@ bitflags! {
         const W = 1 << 2;
         const X = 1 << 3;
         const U = 1 << 4;
+        /// Global mapping: survives non-global TLB invalidations.
+        const G = 1 << 5;
     }
 }
 impl MapPermission {
