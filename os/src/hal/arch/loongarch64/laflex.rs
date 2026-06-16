@@ -380,7 +380,9 @@ impl PageTable for LAFlexPageTable {
         if flags.contains(MapPermission::U) {
             flag |= LAPTEFlagBits::PLV3;
         }
-        //flag |= LAPTEFlagBits::D;
+        if flags.contains(MapPermission::G) {
+            flag |= LAPTEFlagBits::G;
+        }
         let pte_new = LAFlexPageTableEntry::new(ppn, flag);
         //log::trace!("[laflex::map] pre_wr");
         *pte = pte_new;
@@ -516,10 +518,24 @@ impl PageTable for LAFlexPageTable {
         }
     }
     fn activate(&self) {
-        tlb_global_invalidate();
         if self.is_kernel_pt() {
+            tlb_global_invalidate();
             super::register::PGDH::from(self.get_root_ppn().0 << PAGE_SIZE_BITS).write();
         } else {
+            // 1. Flush old process's non-global TLB entries (current ASID)
+            super::tlb::tlb_invalidate();
+            // 2. Allocate ASID for the incoming process if needed
+            if let Some(task) = crate::task::current_task() {
+                let mut asid = task.asid.load(core::sync::atomic::Ordering::Relaxed);
+                if asid == 0 {
+                    asid = super::tlb::asid_alloc();
+                    task.asid.store(asid, core::sync::atomic::Ordering::Relaxed);
+                }
+                if asid != super::tlb::ASID_NONE {
+                    super::tlb::set_asid(asid);
+                }
+            }
+            // 4. Set user page table base
             super::register::PGDL::from(self.get_root_ppn().0 << PAGE_SIZE_BITS).write();
         }
     }

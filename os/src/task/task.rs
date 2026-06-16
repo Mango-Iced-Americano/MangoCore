@@ -141,6 +141,8 @@ pub struct TaskControlBlock {
     pub wait_timer_generation: AtomicUsize,
     /// Lockless scheduler hint for the common nice=0 ready-queue path.
     pub sched_nice_hint: AtomicI32,
+    /// ASID allocated for this task (la64 only).  For rv64 it stays 0.
+    pub asid: core::sync::atomic::AtomicU16,
 }
 
 /// 任务控制块内部状态
@@ -870,6 +872,7 @@ impl TaskControlBlock {
             wait_io_timer_pending: AtomicBool::new(false),
             wait_timer_generation: AtomicUsize::new(0),
             sched_nice_hint: AtomicI32::new(0),
+            asid: core::sync::atomic::AtomicU16::new(0),
             inner: Mutex::new(TaskControlBlockInner {
                 sigmask: Signals::empty(),
                 sigmask_to_restore: None,
@@ -1328,6 +1331,7 @@ impl TaskControlBlock {
             wait_io_timer_pending: AtomicBool::new(false),
             wait_timer_generation: AtomicUsize::new(0),
             sched_nice_hint: AtomicI32::new(child_sched_nice),
+            asid: core::sync::atomic::AtomicU16::new(0),
             inner: Mutex::new(TaskControlBlockInner {
                 // clone
                 sigpending: SignalQueue::empty(),
@@ -1592,6 +1596,12 @@ impl Drop for TaskControlBlock {
             .user_res_slot_allocator()
             .lock()
             .dealloc(self.user_res_slot);
+        // Free ASID if one was allocated (la64 only; no-op on rv64)
+        let asid = self.asid.load(core::sync::atomic::Ordering::Relaxed);
+        if asid != 0 {
+            #[cfg(target_arch = "loongarch64")]
+            crate::hal::arch::loongarch64::tlb::asid_free(asid);
+        }
     }
 }
 

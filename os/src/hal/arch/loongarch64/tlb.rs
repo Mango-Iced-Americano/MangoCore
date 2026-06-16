@@ -2,16 +2,60 @@ use super::{ASId, TLBEHi, TLBIdx, TLBEL, TLBELO0, TLBELO1};
 use crate::config::PAGE_SIZE_BITS;
 use crate::mm::{PhysPageNum, VirtPageNum};
 use core::arch::asm;
-#[allow(unused)]
-pub const USR_ASID: usize = 0;
-#[allow(unused)]
-pub const KERN_ASID: usize = (1 << 10) - 1;
+use core::sync::atomic::{AtomicU16, Ordering};
+use spin::Mutex;
+
+/// Kernel ASID — never assigned to user processes.
+pub const KERN_ASID: u16 = 0;
+/// First user-available ASID.
+const USER_ASID_BASE: u16 = 1;
+/// Maximum user ASIDs (exclusive).
+const USER_ASID_MAX: u16 = 256;
+/// Sentinel for "no ASID assigned".
+pub const ASID_NONE: u16 = u16::MAX;
+
+/// Simple bitmap ASID allocator.  ASIDs recycle when exhausted.
+static ASID_BITMAP: Mutex<[u64; 4]> = Mutex::new([0u64; 4]);
+static ASID_NEXT_HINT: AtomicU16 = AtomicU16::new(USER_ASID_BASE);
+
+/// Allocate a free user ASID.  Returns `ASID_NONE` if exhausted.
+pub fn asid_alloc() -> u16 {
+    let mut map = ASID_BITMAP.lock();
+    let start = ASID_NEXT_HINT.load(Ordering::Relaxed);
+    for offset in 0..(USER_ASID_MAX - USER_ASID_BASE) {
+        let id = USER_ASID_BASE + ((start - USER_ASID_BASE + offset) % (USER_ASID_MAX - USER_ASID_BASE));
+        let word = (id as usize) / 64;
+        let bit = (id as usize) % 64;
+        if map[word] & (1u64 << bit) == 0 {
+            map[word] |= 1u64 << bit;
+            ASID_NEXT_HINT.store(id.wrapping_add(1).min(USER_ASID_MAX - 1).max(USER_ASID_BASE), Ordering::Relaxed);
+            return id;
+        }
+    }
+    ASID_NONE
+}
+
+/// Free a user ASID so it can be reused.
+pub fn asid_free(id: u16) {
+    if id >= USER_ASID_BASE && id < USER_ASID_MAX {
+        let mut map = ASID_BITMAP.lock();
+        let word = (id as usize) / 64;
+        let bit = (id as usize) % 64;
+        map[word] &= !(1u64 << bit);
+    }
+}
+
+/// Set Address Space ID of current core.
 #[inline(always)]
-#[allow(unused)]
-/// Set Adress Space ID of current core to the low 10 bits of `asid`
-pub fn set_asid(asid: usize) {
+pub fn set_asid(asid: u16) {
     let mut id = ASId::read();
-    id.set_asid(asid & (1 << id.get_asid_width() - 1)).write();
+    id.set_asid(asid as usize).write();
+}
+
+/// Get current ASID.
+#[inline(always)]
+pub fn current_asid() -> u16 {
+    ASId::read().get_asid() as u16
 }
 #[allow(unused)]
 pub fn tlb_addr_allow_write(vpn: VirtPageNum, ppn: PhysPageNum) -> Result<(), ()> {
@@ -35,6 +79,7 @@ pub fn tlb_invalidate() {
     unsafe {
         asm!("invtlb 0x3,$zero, $zero");
     }
+    crate::task::perf::record_tlb_flush();
 }
 #[inline(always)]
 pub fn tlb_invalidate_page(vpn: VirtPageNum) {
@@ -46,12 +91,14 @@ pub fn tlb_invalidate_page(vpn: VirtPageNum) {
             options(nostack)
         );
     }
+    crate::task::perf::record_tlb_flush();
 }
 #[inline(always)]
 pub fn tlb_global_invalidate() {
     unsafe {
         asm!("invtlb 0x0,$zero, $zero");
     }
+    crate::task::perf::record_tlb_flush();
 }
 #[allow(unused)]
 pub fn tlb_read(idx: usize) -> Result<(PhysPageNum, PhysPageNum), ()> {

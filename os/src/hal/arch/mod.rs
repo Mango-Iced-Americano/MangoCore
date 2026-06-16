@@ -1,5 +1,5 @@
 #[cfg(feature = "loongarch64")]
-mod loongarch64;
+pub mod loongarch64;
 #[cfg(feature = "loongarch64")]
 pub use loongarch64::{
     board,
