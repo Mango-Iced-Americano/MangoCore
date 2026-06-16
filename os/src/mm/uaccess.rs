@@ -874,6 +874,34 @@ impl UserBuffer {
             buffer.fill(0);
         })
     }
+
+    /// Fill a range of bytes within this UserBuffer with `value`.
+    /// Works across page-segment boundaries. Returns actual bytes filled.
+    pub fn fill_at(&mut self, offset: usize, len: usize, value: u8) -> usize {
+        if len == 0 || offset >= self.len {
+            return 0;
+        }
+        let limit = offset.saturating_add(len).min(self.len);
+        let mut logical = 0usize;
+        let mut filled = 0usize;
+
+        for buffer in self.buffers.iter_mut() {
+            let next = logical + buffer.len();
+            let start = logical.max(offset);
+            let end = next.min(limit);
+            if start < end {
+                let b0 = start - logical;
+                let b1 = end - logical;
+                buffer[b0..b1].fill(value);
+                filled += end - start;
+            }
+            logical = next;
+            if logical >= limit {
+                break;
+            }
+        }
+        filled
+    }
 }
 
 //There may be better implementations here to cover more types

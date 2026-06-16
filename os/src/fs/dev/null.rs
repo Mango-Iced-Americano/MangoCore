@@ -26,6 +26,15 @@ impl IndexNode for Null {
         Ok(0) // 总是返回 EOF
     }
 
+    fn read_at_user(
+        &self,
+        _offset: usize,
+        _len: usize,
+        _dst: &mut crate::mm::UserBuffer,
+    ) -> Result<usize, SyscallErr> {
+        Ok(0) // EOF, same semantics as read_at
+    }
+
     fn write_at(
         &self,
         _offset: usize,
@@ -34,6 +43,20 @@ impl IndexNode for Null {
         _data: spin::MutexGuard<FilePrivateData>,
     ) -> Result<usize, SyscallErr> {
         Ok(buf.len()) // 丢弃所有写入数据
+    }
+
+    fn write_at_user(
+        &self,
+        _offset: usize,
+        len: usize,
+        _src: &crate::mm::UserBuffer,
+    ) -> Result<usize, SyscallErr> {
+        // discard — /dev/null semantics: ignore all written data
+        Ok(len)
+    }
+
+    fn supports_user_buffer_io(&self) -> bool {
+        true
     }
 
     fn resize(&self, _len: usize) -> Result<(), SyscallErr> {
