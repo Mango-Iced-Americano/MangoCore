@@ -81,12 +81,10 @@ impl DentryCache {
     }
 
     /// Look up a cached entry. On hit, sets `referenced = true`.
-    /// If cache is at or above limit, advances CLOCK hand by one step
-    /// to prevent cold entries from staying forever on cache-hit-only workloads.
+    /// Does NOT trigger eviction on cache-hit paths — eviction is only
+    /// done on insertion (insert_or_get). This avoids O(N) CLOCK scanning
+    /// on open/close-heavy workloads where the cache is full.
     pub fn get(&mut self, key: &DentryKey) -> Option<Arc<MountFSInode>> {
-        if self.map.len() >= DENTRY_CACHE_LIMIT {
-            self.advance_clock_one();
-        }
         let entry = self.map.get_mut(key)?;
         entry.referenced = true;
         if crate::fs::ext4::counters::counters_enabled() {
@@ -182,24 +180,41 @@ impl DentryCache {
     }
 
     /// CLOCK eviction: remove cold entries until within limit.
+    /// Does at most one pass over the queue; if all entries are referenced
+    /// (all second-chance), falls back to evicting the front entry to avoid
+    /// O(N) scanning on unique-create workloads.
     fn evict_locked(&mut self, evicted: &mut Vec<Arc<MountFSInode>>) {
+        let mut scanned = 0usize;
+        let queue_len = self.order.len();
+
         while self.map.len() > DENTRY_CACHE_LIMIT {
+            if scanned >= queue_len {
+                // All entries have been given a second chance — evict the front
+                // entry unconditionally to bound the loop.
+                if let Some(key) = self.order.pop_front() {
+                    if let Some(entry) = self.map.remove(&key) {
+                        dcache_stats::EVICT_TOTAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        evicted.push(entry.node);
+                    }
+                }
+                break;
+            }
+
             let Some(key) = self.order.pop_front() else {
                 break;
             };
+            scanned += 1;
 
             let Some(entry) = self.map.get_mut(&key) else {
                 continue;
             };
 
             if entry.referenced {
-                // Give a second chance: clear referenced and move to back
                 entry.referenced = false;
                 self.order.push_back(key);
                 continue;
             }
 
-            // Cold entry: evict
             if let Some(entry) = self.map.remove(&key) {
                 let sc = Arc::strong_count(&entry.node);
                 dcache_stats::EVICT_TOTAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);

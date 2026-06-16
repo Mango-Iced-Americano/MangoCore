@@ -898,7 +898,9 @@ impl IndexNode for layout::Ext4OSInode {
     }
 
     fn supports_user_buffer_io(&self) -> bool {
-        self.get_new_page_cache().is_some()
+        // Use read-only page_cache() to avoid creating a PageCache as a side effect.
+        // get_new_page_cache() would allocate on miss, which is wrong for a predicate.
+        self.page_cache().is_some()
     }
 
     fn sync(&self) -> Result<(), SyscallErr> {
