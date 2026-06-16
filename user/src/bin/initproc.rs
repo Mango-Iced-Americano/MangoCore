@@ -76,7 +76,7 @@ const DEFAULT_TIMEOUTS: [u64; 12] = [
     240,  // [4]  iozone
     90,   // [5]  unixbench
     40,   // [6]  iperf
-    120,  // [7]  libcbench
+    240,  // [7]  libcbench
     1800, // [8]  lmbench
     90,   // [9]  netperf
     60,   // [10] cyclictest
