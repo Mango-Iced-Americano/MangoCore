@@ -462,6 +462,29 @@ impl IndexNode for MountFSInode {
         self.inner_inode.write_at(offset, len, buf, data)
     }
 
+    fn read_at_user(
+        &self,
+        offset: usize,
+        len: usize,
+        dst: &mut crate::mm::UserBuffer,
+    ) -> Result<usize, SyscallErr> {
+        self.inner_inode.read_at_user(offset, len, dst)
+    }
+
+    fn write_at_user(
+        &self,
+        offset: usize,
+        len: usize,
+        src: &crate::mm::UserBuffer,
+    ) -> Result<usize, SyscallErr> {
+        self.ensure_mount_writable()?;
+        self.inner_inode.write_at_user(offset, len, src)
+    }
+
+    fn supports_user_buffer_io(&self) -> bool {
+        self.inner_inode.supports_user_buffer_io()
+    }
+
     fn read_direct(
         &self,
         offset: usize,

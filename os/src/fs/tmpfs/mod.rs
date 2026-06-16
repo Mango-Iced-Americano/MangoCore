@@ -374,16 +374,35 @@ impl IndexNode for LockedTmpFSInode {
         pc.read(offset, read_buf)
     }
 
-    fn write_at(
+    fn read_at_user(
         &self,
         offset: usize,
         len: usize,
-        buf: &[u8],
-        _data: MutexGuard<FilePrivateData>,
+        dst: &mut crate::mm::UserBuffer,
     ) -> Result<usize, SyscallErr> {
-        if buf.len() < len {
-            return Err(SyscallErr::EINVAL);
+        let inode: MutexGuard<TmpFSInode> = self.0.lock();
+        if inode.metadata.file_type == FileType::Dir {
+            return Err(SyscallErr::EISDIR);
         }
+        if offset >= inode.file_size {
+            return Ok(0);
+        }
+        let read_len = len.min(inode.file_size - offset);
+        let pc = inode.page_cache.as_ref().ok_or(SyscallErr::EIO)?;
+        // Clone Arc to release inode lock before PageCache accesses
+        let pc = pc.clone();
+        drop(inode);
+        // Pre-fill with zeros so holes return zero
+        dst.fill_at(0, read_len, 0);
+        pc.read_user(offset, read_len, dst)
+    }
+
+    fn write_at_user(
+        &self,
+        offset: usize,
+        len: usize,
+        src: &crate::mm::UserBuffer,
+    ) -> Result<usize, SyscallErr> {
         if len == 0 {
             return Ok(0);
         }
@@ -394,18 +413,19 @@ impl IndexNode for LockedTmpFSInode {
         }
 
         let pc = inode.page_cache.as_ref().ok_or(SyscallErr::EIO)?;
+        let pc = pc.clone();
+
+        let new_size = offset.checked_add(len).ok_or(SyscallErr::EINVAL)?;
 
         // 检查空间配额
-        let new_size = offset + len;
         if new_size > inode.file_size {
             let delta = (new_size - inode.file_size) as u64;
-            // 获取 fs 引用以检查配额
             let fs = inode.fs.upgrade().ok_or(SyscallErr::EIO)?;
             fs.check_space(delta)?;
         }
 
-        // 使用 PageCache 写入
-        pc.write(offset, &buf[..len])?;
+        // Hold inode lock through write + size update to avoid race with truncate/resize
+        let n = pc.write_user(offset, len, src)?;
 
         // 更新文件大小
         if new_size > inode.file_size {
@@ -417,7 +437,13 @@ impl IndexNode for LockedTmpFSInode {
             }
         }
 
-        Ok(len)
+        Ok(n)
+    }
+
+    fn supports_user_buffer_io(&self) -> bool {
+        let inode = self.0.lock();
+        let ft = inode.metadata.file_type;
+        (ft == FileType::File || ft == FileType::SymLink) && inode.page_cache.is_some()
     }
 
     fn metadata(&self) -> Result<Metadata, SyscallErr> {
