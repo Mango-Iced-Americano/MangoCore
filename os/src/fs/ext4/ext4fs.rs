@@ -892,8 +892,10 @@ impl IndexNode for layout::Ext4OSInode {
         if let Some(pc) = self.new_page_cache.lock().clone() {
             pc.writeback_all()?;
         }
-        // Flush dirty inodes via inode_cache (set by push_dirty_inode_to_cache)
-        let _ = self.ext4fs.flush_dirty_inodes();
+        // Per-inode flush: write this inode to disk, not all dirty inodes.
+        // flush_metadata_cache() handles bitmap/superblock writes separately.
+        let inode_num = self.inode.lock().inode_num;
+        let _ = self.ext4fs.flush_inode(inode_num);
         self.ext4fs.flush_metadata_cache();
         Ok(())
     }
@@ -902,8 +904,10 @@ impl IndexNode for layout::Ext4OSInode {
         if let Some(pc) = self.new_page_cache.lock().clone() {
             pc.writeback_all()?;
         }
-        // fdatasync must flush size/extent metadata for data integrity
-        let _ = self.ext4fs.flush_dirty_inodes();
+        // Per-inode flush for size/extent metadata integrity
+        let inode_num = self.inode.lock().inode_num;
+        let _ = self.ext4fs.flush_inode(inode_num);
+        self.ext4fs.flush_metadata_cache();
         Ok(())
     }
 
@@ -2090,18 +2094,21 @@ impl Ext4FileSystem {
     }
 
     /// Push an in-memory inode into the inode_cache and mark it dirty,
-    /// without writing to disk. Subsequent flush_dirty_inodes() / sync()
-    /// will persist it.
+    /// without writing to disk. Only updates if entry already exists in
+    /// cache (normal case: ensure_blocks_allocated already inserted it).
+    /// Does NOT read from disk on miss — avoids get_inode_cached() I/O.
     pub(crate) fn push_dirty_inode_to_cache(
         &self,
         ino: u32,
         inode: &super::ext4_inode::Ext4Inode,
     ) {
-        let cached = self.get_inode_cached(ino);
-        let mut guard = cached.lock();
-        guard.inode = inode.clone();
-        guard.dirty = true;
-        super::counters::inc_counter!(super::counters::INODE_DIRTY_COUNT);
+        let cache = self.inode_cache.lock();
+        if let Some(cached) = cache.get(&ino) {
+            let mut guard = cached.lock();
+            guard.inode = inode.clone();
+            guard.dirty = true;
+            super::counters::inc_counter!(super::counters::INODE_DIRTY_COUNT);
+        }
     }
 }
 
