@@ -2,6 +2,51 @@
 
 ---
 
+## 2026-06-16
+
+### perf(fs): 多维度降低 I/O 固定开销 — flags/mode 去锁、stream offset 跳过、dev/null/zero UserBuffer 直连、PageCache 单页 fast path、readv/writev/tmpfs 接入 UserBuffer
+
+**涉及文件：**
+- `os/src/fs/vfs/file.rs` — File.flags: Mutex<FileFlags> → AtomicU32（F_SETFL 用 cur-based fetch_update）；File.mode: Mutex<FileMode> → FileMode（open 后不可变）；stream I/O 跳过 offset load/fetch_add；is_stream 优先于 O_APPEND 选 offset
+- `os/src/mm/uaccess.rs` — 新增 UserBuffer::fill_at(offset, len, value)，跨页分段填充，返回实际填充字节数
+- `os/src/fs/dev/zero.rs` — 新增 read_at_user（dst.fill_at 直填零）、write_at_user（discard）、supports_user_buffer_io → true
+- `os/src/fs/dev/null.rs` — 新增 read_at_user（Ok(0) EOF）、write_at_user（discard）、supports_user_buffer_io → true
+- `os/src/fs/page_cache.rs` — read/write/read_user/write_user 新增 start_page==end_page 单页 fast path，跳过 Vec<CopyItem> 构造；持 entries 锁取 Arc 后释放再 copy（保持两阶段设计）
+- `os/src/syscall/fs.rs` — sys_readv/sys_writev/sys_preadv/sys_pwritev 新增 UserBuffer fast path 分支（supports_user_buffer_io 时构造 UserBuffer 直连 File::*_user，绕过 kbuf 分配和 copy）
+- `os/src/fs/tmpfs/mod.rs` — 新增 read_at_user/write_at_user（PageCache 直连）；write_at_user 持 inode lock 完成 pc.write_user+file_size 更新（防 truncate 竞态）；offset+len 用 checked_add 防溢出；supports_user_buffer_io 仅普通文件/symlink 且有 page_cache 时返回 true
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU 测试：待验证
+
+**Oracle 审查修复：**
+1. `File::set_flags` 的 `fetch_update` closure 从基于 stale `old_flags/new_bits` 快照改为基于 `cur` 参数，防止并发 set_nonblock/F_SETFL 被覆盖
+2. stream write offset 选择顺序从 O_APPEND 优先改为 is_stream 优先（stream 文件无文件 EOF 语义）
+3. tmpfs write_at_user 从"解锁写 PageCache 后回锁更新 size"改为"持 inode lock 完成整个 write+size 更新"，消除 truncate/resize 竞态
+4. tmpfs 新增 `checked_add` 防 offset+len 溢出
+5. tmpfs supports_user_buffer_io 从无条件 true 改为仅对 File/SymLink 且有 page_cache 返回 true
+6. /dev/null 补 read_at_user → Ok(0)，避免 ENOSYS fallback
+
+**备注：**
+- 暂缓：full-page overwrite skip populate（需 copy-before-publish 或 Loading/waiter/page-lock 机制）
+- 暂缓：PageCache miss 并发和全局 Mutex→RwLock（需先做 cache-hit fast path + miss 慢路径拆分）
+
+### fix: MountFSInode 转发 read_at_user/write_at_user/supports_user_buffer_io
+
+**涉及文件：**
+- `os/src/fs/vfs/mount.rs` — MountFSInode 新增 read_at_user（转发到 inner_inode）、write_at_user（先 ensure_mount_writable 再转发）、supports_user_buffer_io（转发到 inner_inode）
+
+**根因：** 所有通过正常路径打开的文件（ext4/tmpfs/devfs）都包在 MountFSInode 里，但 MountFSInode 没有转发 UserBuffer 方法。sys_read/sys_write 问 `file.inode.supports_user_buffer_io()` 实际问的是 MountFSInode，永远返回 false，导致全部走 kbuf fallback。这是上一轮 `bw_file_rd` 从 219 掉回 59 的直接原因。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**预期效果：** 恢复普通文件 read/write fast path，bw_file_rd 应从 ~59 回到 ~200MB/s 级别，File write bandwidth 从 76K 回到 100K+，同时不影响已修复的 stat/open/pipe/shell fork。
+
+---
+
 ## 2026-06-15
 
 ### perf(fs): 消除 read/write 热路径 kbuf 中转 — PageCache ↔ UserBuffer 直连
