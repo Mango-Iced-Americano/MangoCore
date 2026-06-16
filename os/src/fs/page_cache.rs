@@ -454,6 +454,17 @@ impl PageCache {
         let start_page = offset >> PAGE_SIZE_BITS;
         let end_page = (offset + buf.len() - 1) >> PAGE_SIZE_BITS;
 
+        // Single-page fast path: bypass Vec<CopyItem> construction
+        if start_page == end_page {
+            let page_start = start_page << PAGE_SIZE_BITS;
+            let page_offset = offset - page_start;
+            let sub_len = buf.len().min(PAGE_SIZE - page_offset);
+            let entry = self.get_page_for_read(start_page)?;
+            let src = entry.as_slice();
+            buf[..sub_len].copy_from_slice(&src[page_offset..page_offset + sub_len]);
+            return Ok(sub_len);
+        }
+
         // Phase 1: 收集拷贝项（持锁）
         struct CopyItem {
             entry: Arc<PageEntry>,
@@ -508,6 +519,17 @@ impl PageCache {
 
         let start_page = offset >> PAGE_SIZE_BITS;
         let end_page = (offset + buf.len() - 1) >> PAGE_SIZE_BITS;
+
+        // Single-page fast path: bypass Vec<CopyItem> construction
+        if start_page == end_page {
+            let page_start = start_page << PAGE_SIZE_BITS;
+            let page_offset = offset - page_start;
+            let sub_len = buf.len().min(PAGE_SIZE - page_offset);
+            let entry = self.get_page_for_write(start_page)?;
+            let dst = entry.as_slice_mut();
+            dst[page_offset..page_offset + sub_len].copy_from_slice(&buf[..sub_len]);
+            return Ok(sub_len);
+        }
 
         struct CopyItem {
             entry: Arc<PageEntry>,
@@ -569,6 +591,17 @@ impl PageCache {
         let start_page = offset >> PAGE_SIZE_BITS;
         let end_page = (offset + len - 1) >> PAGE_SIZE_BITS;
 
+        // Single-page fast path: bypass Vec<CopyItem> construction
+        if start_page == end_page {
+            let page_start = start_page << PAGE_SIZE_BITS;
+            let page_offset = offset - page_start;
+            let sub_len = len.min(PAGE_SIZE - page_offset);
+            let entry = self.get_page_for_read(start_page)?;
+            let src = entry.as_slice();
+            dst.write_at(0, &src[page_offset..page_offset + sub_len]);
+            return Ok(sub_len);
+        }
+
         struct CopyItem {
             entry: Arc<PageEntry>,
             page_offset: usize,
@@ -625,6 +658,17 @@ impl PageCache {
 
         let start_page = offset >> PAGE_SIZE_BITS;
         let end_page = (offset + len - 1) >> PAGE_SIZE_BITS;
+
+        // Single-page fast path: bypass Vec<CopyItem> construction
+        if start_page == end_page {
+            let page_start = start_page << PAGE_SIZE_BITS;
+            let page_offset = offset - page_start;
+            let sub_len = len.min(PAGE_SIZE - page_offset);
+            let entry = self.get_page_for_write(start_page)?;
+            let dst = entry.as_slice_mut();
+            src.read_at(0, &mut dst[page_offset..page_offset + sub_len]);
+            return Ok(sub_len);
+        }
 
         struct CopyItem {
             entry: Arc<PageEntry>,
