@@ -371,12 +371,14 @@ impl Ext4FileSystem {
         end_lblock: u32,
     ) -> Result<Vec<u32>, isize> {
         let mut allocated = Vec::new();
+
+        // Find consecutive hole runs and batch-allocate them.
         for lblock in start_lblock..end_lblock {
-            if self.get_pblock_idx(inode_ref, lblock).is_err() {
-                // Block not yet mapped — allocate and insert extent
-                self.insert_inode_pblk_deferred(inode_ref, lblock)?;
-                allocated.push(lblock);
+            if self.get_pblock_idx(inode_ref, lblock).is_ok() {
+                continue;
             }
+            self.insert_inode_pblk_deferred(inode_ref, lblock)?;
+            allocated.push(lblock);
         }
         Ok(allocated)
     }
@@ -813,17 +815,8 @@ impl IndexNode for layout::Ext4OSInode {
         let pc = self.get_new_page_cache().ok_or(SyscallErr::EIO)?;
         pc.write(offset, &buf[..write_len])?;
 
-        // Persist metadata changes (mtime/ctime/size/extent) — flush once
-        // after all data + allocation work.
-        let mut fresh2 = self.ext4fs.get_inode_ref(inode_num);
-        {
-            let inode_lock = self.inode.lock();
-            fresh2.inode = inode_lock.inode;
-        }
-        self.ext4fs.write_back_inode(&mut fresh2);
-        self.metadata_dirty.store(false, core::sync::atomic::Ordering::Relaxed);
-        super::counters::inc_counter!(super::counters::METADATA_FLUSH_COUNT);
-
+        // Defer metadata flush — metadata_dirty was already set above.
+        // write_back_inode() will happen on sync/fsync, not on every write.
         Ok(write_len)
     }
 
@@ -872,17 +865,8 @@ impl IndexNode for layout::Ext4OSInode {
         let pc = self.get_new_page_cache().ok_or(SyscallErr::EIO)?;
         pc.write_user(offset, len, src)?;
 
-        // Persist metadata changes (mtime/ctime/size/extent) — flush once
-        // after all data + allocation work.
-        let mut fresh2 = self.ext4fs.get_inode_ref(inode_num);
-        {
-            let inode_lock = self.inode.lock();
-            fresh2.inode = inode_lock.inode;
-        }
-        self.ext4fs.write_back_inode(&mut fresh2);
-        self.metadata_dirty
-            .store(false, core::sync::atomic::Ordering::Relaxed);
-        super::counters::inc_counter!(super::counters::METADATA_FLUSH_COUNT);
+        // Defer metadata flush — metadata_dirty was already set above.
+        // write_back_inode() will happen on sync/fsync, not on every write.
 
         Ok(len)
     }
