@@ -288,9 +288,12 @@ fn open_file_at(
     }
 
     let (uid, gid) = open_subject_ids();
-    let parent_result = check_parent_search_access(&start, path, uid, gid);
-    if parent_result != SUCCESS {
-        return Err(parent_result);
+    // uid==0 (root) bypasses DAC — skip the redundant path walk
+    if uid != 0 {
+        let parent_result = check_parent_search_access(&start, path, uid, gid);
+        if parent_result != SUCCESS {
+            return Err(parent_result);
+        }
     }
 
     let follow_final = !flags.contains(OpenFlags::O_NOFOLLOW);
@@ -367,15 +370,24 @@ fn open_file_at(
             check_parent_write_search_access(&parent, uid, gid)?;
             let task = current_task().unwrap();
             let umask = task.acquire_inner_lock().umask;
-            let effective_mode = mode & !vfs::InodeMode::from_bits_truncate(umask);
+            let create_mode = (mode & !vfs::InodeMode::from_bits_truncate(umask))
+                & vfs::InodeMode::S_IALLUGO;
+
+            let setgid = parent_meta.mode.contains(vfs::InodeMode::S_ISGID);
+            let child_gid = if setgid { parent_meta.gid } else { gid };
+
+            let mut effective_mode = create_mode;
+            if effective_mode.contains(vfs::InodeMode::S_ISGID) && uid != 0 && gid != child_gid {
+                effective_mode.remove(vfs::InodeMode::S_ISGID);
+            }
+
             let inode = parent
-                .create(
+                .create_with_attrs(
                     &leaf,
                     FileType::File,
-                    effective_mode & vfs::InodeMode::S_IALLUGO,
+                    vfs::CreateAttrs { mode: effective_mode, uid, gid: child_gid },
                 )
                 .map_err(|e| -(e as isize))?;
-            apply_created_inode_metadata(&parent_meta, &inode, effective_mode, uid, gid)?;
             vfs::File::new(inode, _open_flags_to_vfs_flags(flags)).map_err(|e| -(e as isize))
         }
         Err(errno) => Err(errno),
@@ -705,6 +717,14 @@ fn pread_into_user(file: &vfs::File, token: usize, buf: usize, count: usize, off
 fn write_from_user(file: &vfs::File, token: usize, buf: usize, count: usize) -> isize {
     if count == 0 {
         return match file.write(&[]) {
+            Ok(n) => n as isize,
+            Err(e) => -(e as isize),
+        };
+    }
+
+    // Fast path for /dev/null, /dev/zero — skip UserBuffer construction
+    if file.inode.is_discard_write() {
+        return match file.write_discard(count) {
             Ok(n) => n as isize,
             Err(e) => -(e as isize),
         };
@@ -2746,11 +2766,15 @@ pub fn sys_fstatat(dirfd: usize, path: *const u8, buf: *mut u8, flags: u32) -> i
         Err(errno) => return errno,
     };
 
-    // Check search permission on all parent directories (EACCES)
+    // Check search permission on all parent directories (EACCES).
+    // uid==0 (root) bypasses DAC — skip the full path walk to avoid
+    // duplicate work with vfs_lookup() below.
     let (uid, gid) = open_subject_ids();
-    let perm_result = check_parent_search_access(&start, &path, uid, gid);
-    if perm_result != SUCCESS {
-        return perm_result;
+    if uid != 0 {
+        let perm_result = check_parent_search_access(&start, &path, uid, gid);
+        if perm_result != SUCCESS {
+            return perm_result;
+        }
     }
 
     if no_follow {

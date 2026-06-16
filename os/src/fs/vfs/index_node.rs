@@ -19,6 +19,14 @@ use super::{
     Metadata,
 };
 
+/// Attributes passed to create_with_attrs for one-shot inode initialization.
+#[derive(Clone, Copy, Debug)]
+pub struct CreateAttrs {
+    pub mode: InodeMode,
+    pub uid: u32,
+    pub gid: u32,
+}
+
 /// IndexNode trait — 所有 inode 实现必须满足的接口
 ///
 /// 方法分为几类：
@@ -100,6 +108,28 @@ pub trait IndexNode: Any + Send + Sync + Debug {
     /// pipe/socket/devfs/procfs 保持默认 false，继续走 kbuf 路径。
     fn supports_user_buffer_io(&self) -> bool {
         false
+    }
+
+    /// 写操作是否丢弃所有数据（如 /dev/null, /dev/zero write）。
+    /// 如果返回 true，syscall 层可以在验证权限后直接返回 count，
+    /// 跳过 UserBuffer 构造和 copy。
+    fn is_discard_write(&self) -> bool {
+        false
+    }
+
+    /// 丢弃写入：不做任何 I/O，只验证 offset/len 合法性。
+    /// 默认通过 is_discard_write() 判断；覆盖此方法可直接返回 Ok(len)。
+    fn discard_write_at(
+        &self,
+        _offset: usize,
+        len: usize,
+        _data: MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        if self.is_discard_write() {
+            Ok(len)
+        } else {
+            Err(SyscallErr::ENOSYS)
+        }
     }
 
     /// 直接读取（绕过 page cache），用于 O_DIRECT 和回写
@@ -197,6 +227,26 @@ pub trait IndexNode: Any + Send + Sync + Debug {
         _data: usize,
     ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
         self.create(name, file_type, mode)
+    }
+
+    /// 创建文件并一次性设置 uid/gid/mode，避免 post-create set_metadata 二次写。
+    /// 默认 fallback 调用 create() 后 set_metadata()，ext4/tmpfs 应 override。
+    fn create_with_attrs(
+        &self,
+        name: &str,
+        file_type: FileType,
+        attrs: CreateAttrs,
+    ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+        let inode = self.create(name, file_type, attrs.mode)?;
+        let mut meta = inode.metadata()?;
+        meta.uid = attrs.uid;
+        meta.gid = attrs.gid;
+        meta.mode = InodeMode::from(file_type) | (attrs.mode & InodeMode::S_IALLUGO);
+        if meta.mode.contains(InodeMode::S_ISGID) && attrs.uid != 0 && attrs.uid != attrs.gid {
+            meta.mode.remove(InodeMode::S_ISGID);
+        }
+        inode.set_metadata(&meta).ok();
+        Ok(inode)
     }
 
     /// 创建符号链接

@@ -59,6 +59,10 @@ impl IndexNode for Null {
         true
     }
 
+    fn is_discard_write(&self) -> bool {
+        true
+    }
+
     fn resize(&self, _len: usize) -> Result<(), SyscallErr> {
         Ok(()) // /dev/null 无需实际截断，O_TRUNC 不报错即可
     }

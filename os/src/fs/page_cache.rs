@@ -397,11 +397,20 @@ impl PageCache {
 
     /// 获取页面用于写入
     pub fn get_page_for_write(&self, page_index: usize) -> Result<Arc<PageEntry>, SyscallErr> {
-        let entry = self.get_or_create_entry(page_index, true)?;
-        // 标记为脏
+        self.get_page_for_write_populate(page_index, true)
+    }
+
+    /// 获取页面用于写入，可选择是否从后端 populate。
+    /// populate=false 用于整页覆盖写：直接分配新帧并标记 dirty，
+    /// 跳过 backend read_page 减少 I/O。
+    fn get_page_for_write_populate(
+        &self,
+        page_index: usize,
+        populate: bool,
+    ) -> Result<Arc<PageEntry>, SyscallErr> {
+        let entry = self.get_or_create_entry(page_index, populate)?;
         let mut inner = self.inner.lock();
         inner.mark_dirty(page_index);
-        // 更新状态
         if entry.state() == PageState::UpToDate {
             entry.set_state(PageState::Dirty);
         }
@@ -525,7 +534,8 @@ impl PageCache {
             let page_start = start_page << PAGE_SIZE_BITS;
             let page_offset = offset - page_start;
             let sub_len = buf.len().min(PAGE_SIZE - page_offset);
-            let entry = self.get_page_for_write(start_page)?;
+            let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
+            let entry = self.get_page_for_write_populate(start_page, !full_page_overwrite)?;
             let dst = entry.as_slice_mut();
             dst[page_offset..page_offset + sub_len].copy_from_slice(&buf[..sub_len]);
             return Ok(sub_len);
@@ -551,10 +561,12 @@ impl PageCache {
                 continue;
             }
 
-            let entry = self.get_page_for_write(page_index)?;
+            let page_offset = write_start - page_start;
+            let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
+            let entry = self.get_page_for_write_populate(page_index, !full_page_overwrite)?;
             copies.push(CopyItem {
                 entry,
-                page_offset: write_start - page_start,
+                page_offset,
                 sub_len,
             });
             total_written += sub_len;
@@ -664,7 +676,8 @@ impl PageCache {
             let page_start = start_page << PAGE_SIZE_BITS;
             let page_offset = offset - page_start;
             let sub_len = len.min(PAGE_SIZE - page_offset);
-            let entry = self.get_page_for_write(start_page)?;
+            let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
+            let entry = self.get_page_for_write_populate(start_page, !full_page_overwrite)?;
             let dst = entry.as_slice_mut();
             src.read_at(0, &mut dst[page_offset..page_offset + sub_len]);
             return Ok(sub_len);
@@ -690,7 +703,9 @@ impl PageCache {
                 continue;
             }
 
-            let entry = self.get_page_for_write(page_index)?;
+            let page_offset = write_start - page_start;
+            let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
+            let entry = self.get_page_for_write_populate(page_index, !full_page_overwrite)?;
             copies.push(CopyItem {
                 entry,
                 page_offset: write_start - page_start,

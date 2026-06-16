@@ -485,6 +485,20 @@ impl IndexNode for MountFSInode {
         self.inner_inode.supports_user_buffer_io()
     }
 
+    fn is_discard_write(&self) -> bool {
+        self.inner_inode.is_discard_write()
+    }
+
+    fn discard_write_at(
+        &self,
+        offset: usize,
+        len: usize,
+        data: MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        self.ensure_mount_writable()?;
+        self.inner_inode.discard_write_at(offset, len, data)
+    }
+
     fn read_direct(
         &self,
         offset: usize,
@@ -595,6 +609,35 @@ impl IndexNode for MountFSInode {
         self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
         let parent_ino = self.inner_inode.metadata().ok().map(|m| m.inode_id);
         let inner_inode = self.inner_inode.create_with_data(name, file_type, mode, data)?;
+        let wrapper = MountFSInode::new(inner_inode, self.mount_fs.clone());
+        if let Some(parent_ino) = parent_ino {
+            wrapper.remember_path_hint(parent_ino, name);
+        }
+        counters::MFSI_FROM_CREATE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if !self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
+            if let Ok(parent_md) = self.inner_inode.metadata() {
+                let key = super::dentry_cache::DentryKey {
+                    parent_ino: parent_md.inode_id,
+                    name: String::from(name),
+                };
+                let (_, evicted) = self.mount_fs.dentry_cache.lock()
+                    .insert_or_get(key, wrapper.clone());
+                drop(evicted);
+            }
+        }
+        Ok(wrapper)
+    }
+
+    fn create_with_attrs(
+        &self,
+        name: &str,
+        file_type: FileType,
+        attrs: super::index_node::CreateAttrs,
+    ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+        self.ensure_mount_writable()?;
+        self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
+        let parent_ino = self.inner_inode.metadata().ok().map(|m| m.inode_id);
+        let inner_inode = self.inner_inode.create_with_attrs(name, file_type, attrs)?;
         let wrapper = MountFSInode::new(inner_inode, self.mount_fs.clone());
         if let Some(parent_ino) = parent_ino {
             wrapper.remember_path_hint(parent_ino, name);

@@ -1207,6 +1207,33 @@ impl File {
         }
     }
 
+    /// 丢弃写入：用于 /dev/null, /dev/zero 等无条件忽略数据的设备。
+    /// 不做 UserBuffer 构造和 copy，只检查权限和 offset 语义。
+    pub fn write_discard(&self, len: usize) -> Result<usize, SyscallErr> {
+        self.writable()?;
+        if len == 0 {
+            return Ok(0);
+        }
+
+        let is_stream = self.mode.contains(FileMode::FMODE_STREAM);
+        let offset = if is_stream {
+            0
+        } else {
+            self.offset.load(Ordering::SeqCst)
+        };
+
+        self.check_memfd_write_seals(offset, len)?;
+        let n = self.inode.discard_write_at(offset, len, self.private_data.lock())?;
+
+        if n > 0 && !is_stream {
+            self.offset.fetch_add(n, Ordering::SeqCst);
+        }
+        if n > 0 {
+            self.touch_modified();
+        }
+        Ok(n)
+    }
+
     // ── Seek ───────────────────────────────────────────────────────
 
     /// 调整文件偏移量

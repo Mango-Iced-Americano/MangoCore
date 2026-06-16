@@ -61,6 +61,10 @@ impl IndexNode for Zero {
         true
     }
 
+    fn is_discard_write(&self) -> bool {
+        true
+    }
+
     fn metadata(&self) -> Result<Metadata, SyscallErr> {
         Ok(Metadata {
             dev_id: 0,

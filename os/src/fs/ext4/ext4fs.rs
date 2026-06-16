@@ -1120,6 +1120,42 @@ impl IndexNode for layout::Ext4OSInode {
         Ok(child_inode)
     }
 
+    fn create_with_attrs(
+        &self,
+        name: &str,
+        file_type: VfsFileType,
+        attrs: crate::fs::vfs::CreateAttrs,
+    ) -> Result<alloc::sync::Arc<dyn IndexNode>, SyscallErr> {
+        let parent = self.inode.lock().inode_num;
+        let inode_mode = vfs_type_to_inode_mode(file_type)
+            | (attrs.mode & InodeMode::S_IALLUGO).bits() as u16;
+        // Pass uid/gid directly through to ext4 create, avoiding
+        // a post-create set_metadata() round-trip.
+        let new_ref = self
+            .ext4fs
+            .create(parent, name, inode_mode, attrs.uid as u16, attrs.gid as u16)
+            .map_err(|e| {
+                if e == crate::syscall::errno::ENOENT { SyscallErr::ENOENT }
+                else if e == crate::syscall::errno::EEXIST { SyscallErr::EEXIST }
+                else { SyscallErr::ENOSYS }
+            })?;
+        self.bump_dir_version();
+        self.clear_negative_dentry(name);
+        let child_ino = new_ref.inode_num;
+        let child_inode: alloc::sync::Arc<dyn IndexNode> = layout::Ext4OSInode::new_vfs(
+            alloc::sync::Arc::new(spin::Mutex::new(new_ref)),
+            self.ext4fs.clone(),
+        );
+        self.ext4fs.insert_inode_object(child_ino, &child_inode);
+        if !is_special_dot(name) {
+            let mut children = self.children.lock();
+            children.insert(alloc::string::String::from(name), alloc::sync::Arc::downgrade(&child_inode));
+            drop(children);
+            super::counters::inc_counter!(super::counters::DIR_CHILDREN_INSERT);
+        }
+        Ok(child_inode)
+    }
+
     fn set_metadata(&self, metadata: &Metadata) -> Result<(), SyscallErr> {
         let inode_num = self.inode.lock().inode_num;
         let mut fresh = self.ext4fs.get_inode_ref(inode_num);
