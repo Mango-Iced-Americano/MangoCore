@@ -49,14 +49,95 @@ mod enabled {
     static SYSCALL_YIELD: AtomicUsize = AtomicUsize::new(0);
     static LAST_SYSCALL_ID: AtomicUsize = AtomicUsize::new(0);
     static LAST_SYSCALL_RET: AtomicUsize = AtomicUsize::new(0);
+    // Fine-grained TLB counters
+    static TLB_FLUSHES: AtomicUsize = AtomicUsize::new(0);       // total
+    static TLB_FULL: AtomicUsize = AtomicUsize::new(0);           // full inval (invtlb 0x3 / sfence.vma no-arg)
+    static TLB_PAGE: AtomicUsize = AtomicUsize::new(0);           // single-page (invtlb 0x5 / sfence.vma addr)
+    static TLB_ACTIVATE: AtomicUsize = AtomicUsize::new(0);       // address-space switch
+    static TLB_GLOBAL: AtomicUsize = AtomicUsize::new(0);         // global inval (invtlb 0x0)
+    static FRAME_ALLOC_HITS: AtomicUsize = AtomicUsize::new(0);
+    static FRAME_FREE_HITS: AtomicUsize = AtomicUsize::new(0);
+    static PAGE_FAULTS: AtomicUsize = AtomicUsize::new(0);
+    static VFS_LOOKUPS: AtomicUsize = AtomicUsize::new(0);
+    static VFS_LOOKUP_TIME_TICKS: AtomicUsize = AtomicUsize::new(0);
+    static VFS_LOOKUP_TIME_COUNT: AtomicUsize = AtomicUsize::new(0);
+    // Timing accumulators (raw ticks from get_time)
+    static CLONE_TIME_TICKS: AtomicUsize = AtomicUsize::new(0);
+    static PAGEFAULT_TIME_TICKS: AtomicUsize = AtomicUsize::new(0);
+    static FRAME_ALLOC_TIME_TICKS: AtomicUsize = AtomicUsize::new(0);
+    static CLONE_TIME_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static PAGEFAULT_TIME_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static FRAME_ALLOC_TIME_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    /// Print accumulated timing stats, then reset.
+    pub fn perf_dump_timings(label: &str) {
+        let freq = crate::hal::get_clock_freq();
+        let to_ms = |ticks: usize| -> usize {
+            if freq > 0 { ticks.saturating_mul(1000) / freq } else { 0 }
+        };
+        let c_ms = to_ms(CLONE_TIME_TICKS.swap(0, Ordering::Relaxed));
+        let c_n = CLONE_TIME_COUNT.swap(0, Ordering::Relaxed);
+        let p_ms = to_ms(PAGEFAULT_TIME_TICKS.swap(0, Ordering::Relaxed));
+        let p_n = PAGEFAULT_TIME_COUNT.swap(0, Ordering::Relaxed);
+        let f_ms = to_ms(FRAME_ALLOC_TIME_TICKS.swap(0, Ordering::Relaxed));
+        let f_n = FRAME_ALLOC_TIME_COUNT.swap(0, Ordering::Relaxed);
+        let v_ms = to_ms(VFS_LOOKUP_TIME_TICKS.swap(0, Ordering::Relaxed));
+        let v_n = VFS_LOOKUP_TIME_COUNT.swap(0, Ordering::Relaxed);
+        let v_total = VFS_LOOKUPS.swap(0, Ordering::Relaxed);
+        crate::println!(
+            "[timing] {} clone={}ms/{}calls avg={}us pf={}ms/{}calls avg={}us falloc={}ms/{}calls avg={}us vfs={}total/{}timed avg={}us",
+            label,
+            c_ms, c_n, if c_n > 0 { c_ms.saturating_mul(1000) / c_n } else { 0 },
+            p_ms, p_n, if p_n > 0 { p_ms.saturating_mul(1000) / p_n } else { 0 },
+            f_ms, f_n, if f_n > 0 { f_ms.saturating_mul(1000) / f_n } else { 0 },
+            v_total, v_n, if v_n > 0 { v_ms.saturating_mul(1000) / v_n } else { 0 },
+        );
+    }
+
+    #[inline(always)]
+    pub fn record_clone_time_us(ticks: usize) {
+        CLONE_TIME_TICKS.fetch_add(ticks, Ordering::Relaxed);
+        CLONE_TIME_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_pagefault_time_us(ticks: usize) {
+        PAGEFAULT_TIME_TICKS.fetch_add(ticks, Ordering::Relaxed);
+        PAGEFAULT_TIME_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_frame_alloc_time_us(ticks: usize) {
+        FRAME_ALLOC_TIME_TICKS.fetch_add(ticks, Ordering::Relaxed);
+        FRAME_ALLOC_TIME_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Read the RISC-V cycle CSR (or la64 rdtime) — single instruction, zero overhead.
+    pub fn perf_time_now() -> usize {
+        #[cfg(target_arch = "riscv64")]
+        {
+            let cycles: usize;
+            unsafe { core::arch::asm!("rdcycle {}", out(reg) cycles) };
+            cycles
+        }
+        #[cfg(target_arch = "loongarch64")]
+        {
+            let mut lo: usize; let mut hi: usize;
+            unsafe { core::arch::asm!("rdtime.d {},{}", out(reg) lo, out(reg) hi) };
+            lo
+        }
+        #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
+        { 0 }
+    }
 
     fn load(counter: &AtomicUsize) -> usize {
         counter.load(Ordering::Relaxed)
     }
 
     fn print_snapshot(reason: &str) {
+        let (fr_total, fr_fresh, fr_recycled, fr_ratio) = crate::mm::frame_frag_diag();
         crate::println!(
-            "[perf] {} clone={} thread={} share_vm={} stack_alloc={} exit={} clear_tid={} keep_trap={} trap_store={} trap_skip={} trap_hit={} trap_miss={} kstack_hit={} kstack_miss={} kstack_store={} kstack_drop={} zombie_enq={} zombie_drain={} sched={} fetch={} idle={} timer={} fut_wait={} fut_wait_shared={} fut_wait_deadline={} fut_ready={} fut_timeout={} fut_intr={} fut_wake={} fut_wake_shared={} fut_wake_hit={} sc_clone={} sc_futex={} sc_mmap={} sc_munmap={} sc_mprotect={} sc_settid={} sc_robust={} sc_exit={} sc_yield={} last_sys={} last_ret={}",
+            "[perf] {} clone={} thread={} share_vm={} stack_alloc={} exit={} clear_tid={} keep_trap={} trap_store={} trap_skip={} trap_hit={} trap_miss={} kstack_hit={} kstack_miss={} kstack_store={} kstack_drop={} zombie_enq={} zombie_drain={} sched={} fetch={} idle={} timer={} fut_wait={} fut_wait_shared={} fut_wait_deadline={} fut_ready={} fut_timeout={} fut_intr={} fut_wake={} fut_wake_shared={} fut_wake_hit={} sc_clone={} sc_futex={} sc_mmap={} sc_munmap={} sc_mprotect={} sc_settid={} sc_robust={} sc_exit={} sc_yield={} tlb={} tlb_full={} tlb_page={} tlb_act={} tlb_glob={} frame_alloc={} frame_free={} pgfault={} vfs={} fr_total={} fr_fresh={} fr_recycled={} fr_ratio={:.4} last_sys={} last_ret={}",
             reason,
             load(&CLONE_TOTAL),
             load(&CLONE_THREAD),
@@ -97,9 +178,88 @@ mod enabled {
             load(&SYSCALL_SET_ROBUST_LIST),
             load(&SYSCALL_EXIT),
             load(&SYSCALL_YIELD),
+            load(&TLB_FLUSHES),
+            load(&TLB_FULL),
+            load(&TLB_PAGE),
+            load(&TLB_ACTIVATE),
+            load(&TLB_GLOBAL),
+            load(&FRAME_ALLOC_HITS),
+            load(&FRAME_FREE_HITS),
+            load(&PAGE_FAULTS),
+            load(&VFS_LOOKUPS),
+            fr_total,
+            fr_fresh,
+            fr_recycled,
+            fr_ratio,
             load(&LAST_SYSCALL_ID),
             load(&LAST_SYSCALL_RET),
         );
+        // VFS find diagnostics
+        let (f_calls, f_ticks, f_overlay, f_hit, f_miss, f_lock, f_inner, f_insert, f_ov_ticks) = crate::fs::vfs::mount::counters::find_snapshot();
+        let freq = crate::hal::get_clock_freq();
+        let us = |t: usize| -> usize { if freq > 0 { t.saturating_mul(1000000) / freq } else { 0 } };
+        let f_us = if f_calls > 0 { us(f_ticks) / f_calls } else { 0 };
+        let lock_us = if f_calls > 0 { us(f_lock) / f_calls } else { 0 };
+        let inner_us = if f_miss > 0 { us(f_inner) / f_miss } else { 0 };
+        let insert_us = if f_miss > 0 { us(f_insert) / f_miss } else { 0 };
+        crate::println!("[vfs-find] {} calls={} hit={} miss={} avg={}us lock={}us inner={}us insert={}us",
+            reason, f_calls, f_hit, f_miss, f_us, lock_us, inner_us, insert_us);
+    }
+
+    /// Unconditionally print a perf snapshot (for group-boundary instrumentation).
+    pub fn perf_snapshot(reason: &str) {
+        print_snapshot(reason);
+    }
+
+    #[inline(always)]
+    pub fn record_tlb_full() {
+        TLB_FLUSHES.fetch_add(1, Ordering::Relaxed);
+        TLB_FULL.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_tlb_page() {
+        TLB_FLUSHES.fetch_add(1, Ordering::Relaxed);
+        TLB_PAGE.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_tlb_activate() {
+        // NOTE: only increments the category counter, not TLB_FLUSHES.
+        // The underlying tlb_invalidate()/sfence.vma already accounts for the total.
+        TLB_ACTIVATE.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_tlb_global() {
+        TLB_FLUSHES.fetch_add(1, Ordering::Relaxed);
+        TLB_GLOBAL.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_page_fault() {
+        PAGE_FAULTS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_vfs_lookup() {
+        VFS_LOOKUPS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_vfs_lookup_time_us(ticks: usize) {
+        VFS_LOOKUP_TIME_TICKS.fetch_add(ticks, Ordering::Relaxed);
+        VFS_LOOKUP_TIME_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_frame_alloc() {
+        FRAME_ALLOC_HITS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_frame_free() {
+        FRAME_FREE_HITS.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline(always)]
@@ -340,3 +500,67 @@ pub fn record_futex_wake(_shared: bool, _woke: isize) {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
 pub fn record_syscall(_syscall_id: usize, _ret: isize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn perf_snapshot(_reason: &str) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_tlb_full() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_tlb_page() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_tlb_activate() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_tlb_global() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_tlb_flush() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_frame_alloc() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_frame_free() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_page_fault() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_vfs_lookup() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_vfs_lookup_time_us(_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn perf_dump_timings(_label: &str) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_clone_time_us(_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pagefault_time_us(_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_frame_alloc_time_us(_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn perf_time_now() -> usize { 0 }

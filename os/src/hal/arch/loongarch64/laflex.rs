@@ -524,6 +524,7 @@ impl PageTable for LAFlexPageTable {
         } else {
             // 1. Flush old process's non-global TLB entries (current ASID)
             super::tlb::tlb_invalidate();
+            crate::task::perf::record_tlb_activate();
             // 2. Allocate ASID for the incoming process if needed
             if let Some(task) = crate::task::current_task() {
                 let mut asid = task.asid.load(core::sync::atomic::Ordering::Relaxed);

@@ -100,7 +100,7 @@ __restore:
     csrwr  $a1, CSR_PGDL
     # ASID: read-modify-write to preserve ASID-width field (bits 16-23)
     csrrd  $t1, CSR_ASID
-    andi   $t1, $t1, 0xFF0000    # keep only bits 16-23 (ASID width)
+    bstrpick.d $t1, $t1, 23, 16  # extract bits 16-23 (ASID width)
     or     $a2, $a2, $t1         # combine with new ASID (bits 0-9)
     csrwr  $a2, CSR_ASID
     invtlb 0x3, $zero, $zero

@@ -24,7 +24,7 @@ pub use address::PPNRange;
 use address::VPNRange;
 pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 pub use frame_allocator::{
-    frame_alloc, frame_alloc_uninit, frame_dealloc, frame_reserve, frames_alloc,
+    frame_alloc, frame_alloc_uninit, frame_dealloc, frame_frag_diag, frame_reserve, frames_alloc,
     unallocated_frames, FrameTracker,
 };
 pub use frame_store::Frame;

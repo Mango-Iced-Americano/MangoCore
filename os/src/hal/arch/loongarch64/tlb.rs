@@ -79,7 +79,7 @@ pub fn tlb_invalidate() {
     unsafe {
         asm!("invtlb 0x3,$zero, $zero");
     }
-    crate::task::perf::record_tlb_flush();
+    crate::task::perf::record_tlb_full();
 }
 #[inline(always)]
 pub fn tlb_invalidate_page(vpn: VirtPageNum) {
@@ -91,14 +91,14 @@ pub fn tlb_invalidate_page(vpn: VirtPageNum) {
             options(nostack)
         );
     }
-    crate::task::perf::record_tlb_flush();
+    crate::task::perf::record_tlb_page();
 }
 #[inline(always)]
 pub fn tlb_global_invalidate() {
     unsafe {
         asm!("invtlb 0x0,$zero, $zero");
     }
-    crate::task::perf::record_tlb_flush();
+    crate::task::perf::record_tlb_global();
 }
 #[allow(unused)]
 pub fn tlb_read(idx: usize) -> Result<(PhysPageNum, PhysPageNum), ()> {

@@ -557,6 +557,7 @@ pub fn vfs_lookup(
     path: &str,
     follow_final: bool,
 ) -> Result<Arc<dyn self::vfs::IndexNode>, isize> {
+    crate::task::perf::record_vfs_lookup();
     use self::vfs::{FileType, FilePrivateData, IndexNode as _};
     let root_inode: Arc<dyn self::vfs::IndexNode> = current_root_inode();
 

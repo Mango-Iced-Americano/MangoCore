@@ -20,7 +20,7 @@ pub fn tlb_invalidate() {
     unsafe {
         asm!("sfence.vma");
     }
-    crate::task::perf::record_tlb_flush();
+    crate::task::perf::record_tlb_full();
 }
 
 /// 只刷指定虚拟地址对应的 TLB 条目，不影响其他条目
@@ -29,7 +29,7 @@ pub fn tlb_invalidate_addr(vaddr: usize) {
     unsafe {
         asm!("sfence.vma {}, zero", in(reg) vaddr);
     }
-    crate::task::perf::record_tlb_flush();
+    crate::task::perf::record_tlb_page();
 }
 bitflags! {
     /// Page Table Entry flags
@@ -379,7 +379,7 @@ impl PageTable for Sv39PageTable {
         unsafe {
             satp::write(satp);
             asm!("sfence.vma");
-            crate::task::perf::record_tlb_flush();
+            crate::task::perf::record_tlb_activate();
         };
     }
     fn is_valid(&self, vpn: VirtPageNum) -> Option<bool> {

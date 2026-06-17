@@ -97,6 +97,19 @@ impl StackFrameAllocator {
     pub fn unallocated_frames(&self) -> usize {
         self.end - self.current + self.recycled.len()
     }
+
+    /// 诊断：帧分配器碎片化程度
+    pub fn frag_diagnostic(&self) -> (usize, usize, usize, f64) {
+        let fresh = self.end.saturating_sub(self.current);
+        let recycled = self.recycled.len();
+        let total = fresh + recycled;
+        let ratio = if total > 0 {
+            recycled as f64 / total as f64
+        } else {
+            0.0
+        };
+        (total, fresh, recycled, ratio)
+    }
 }
 
 impl FrameAllocator for StackFrameAllocator {
@@ -112,23 +125,24 @@ impl FrameAllocator for StackFrameAllocator {
 
     /// 分配一个物理页
     fn alloc(&mut self) -> Option<FrameTracker> {
+        let _start = crate::task::perf::perf_time_now();
+        crate::task::perf::record_frame_alloc();
         // 优先使用回收的帧
-        if let Some(ppn) = self.recycled.pop() {
+        let result = if let Some(ppn) = self.recycled.pop() {
             self.mark_recycled(ppn, false);
-            let frame_tracker = FrameTracker::new(ppn.into());
-            Some(frame_tracker)
+            Some(FrameTracker::new(ppn.into()))
         } else if self.current == self.end {
-            // 无可用帧
             None
         } else {
-            // 否则分配当前页
             self.current += 1;
             #[cfg(not(feature = "zero_init"))]
-            let frame_tracker = FrameTracker::new((self.current - 1).into());
+            let ft = FrameTracker::new((self.current - 1).into());
             #[cfg(feature = "zero_init")]
-            let frame_tracker = unsafe { FrameTracker::new_uninit((self.current - 1).into()) };
-            Some(frame_tracker)
-        }
+            let ft = unsafe { FrameTracker::new_uninit((self.current - 1).into()) };
+            Some(ft)
+        };
+        crate::task::perf::record_frame_alloc_time_us(crate::task::perf::perf_time_now().saturating_sub(_start));
+        result
     }
     unsafe fn alloc_uninit(&mut self) -> Option<FrameTracker> {
         if let Some(ppn) = self.recycled.pop() {
@@ -341,12 +355,18 @@ pub unsafe fn frame_alloc_uninit() -> Option<Arc<FrameTracker>> {
 
 /// 释放帧
 pub fn frame_dealloc(ppn: PhysPageNum) {
+    crate::task::perf::record_frame_free();
     FRAME_ALLOCATOR.write().dealloc(ppn);
 }
 
 /// 计算可用帧数量
 pub fn unallocated_frames() -> usize {
     FRAME_ALLOCATOR.read().unallocated_frames()
+}
+
+/// 诊断：帧分配器碎片化 (total_free, fresh, recycled, recycled_ratio)
+pub fn frame_frag_diag() -> (usize, usize, usize, f64) {
+    FRAME_ALLOCATOR.read().frag_diagnostic()
 }
 
 #[macro_export]

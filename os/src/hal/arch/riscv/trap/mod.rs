@@ -124,7 +124,11 @@ pub fn trap_handler() -> ! {
                 | Trap::Exception(Exception::InstructionPageFault) => FaultAccess::Execute,
                 _ => FaultAccess::Load,
             };
-            if let Err(error) = task.process.vm().lock().do_page_fault(addr, access) {
+            let _pf_start = crate::task::perf::perf_time_now();
+            crate::task::perf::record_page_fault();
+            let pf_result = task.process.vm().lock().do_page_fault(addr, access);
+            crate::task::perf::record_pagefault_time_us(crate::task::perf::perf_time_now().saturating_sub(_pf_start));
+            if let Err(error) = pf_result {
                 match error {
                     MemoryError::BeyondEOF | MemoryError::BackingStoreFailure => {
                         inner.add_signal(Signals::SIGBUS);
