@@ -235,6 +235,14 @@ fn sys_clone_inner(
         Some(task) => task,
         None => return ENOMEM,
     };
+    // Allocate ASID on la64 at task creation (safe to take locks here).
+    #[cfg(target_arch = "loongarch64")]
+    {
+        child.asid.store(
+            crate::hal::arch::loongarch64::tlb::asid_alloc(),
+            core::sync::atomic::Ordering::Relaxed,
+        );
+    }
     let new_tid = child.tid.0;
     if flags.contains(CloneFlags::CLONE_PARENT_SETTID) {
         match UserPtrMut::new(ptid).write(current_user_token(), &(new_tid as u32)) {

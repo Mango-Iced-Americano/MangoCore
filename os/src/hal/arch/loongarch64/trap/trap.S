@@ -19,6 +19,7 @@ FP_START = 32
 .equ CSR_SAVE, 0x30    
 .equ CSR_ERA, 0x6
 .equ CSR_PRMD, 0x1
+.equ CSR_ASID, 0x18
 .equ CSR_PGDL, 0x19
 .equ CSR_PGD, 0x1b
 __alltraps:
@@ -88,14 +89,20 @@ __alltraps:
     jr $t1
 
 __restore:
-    # a0: *TrapContext in user space(Constant), 
+    # a0: *TrapContext in user space(Constant),
     # a1: user space token
+    # a2: ASID (0 if not allocated)
 
-    # switch to user space
     slli.d $a1, $a1, 12
     csrrd  $t0, CSR_PGDL
     beq    $t0, $a1, 1f
+    # PGDL changed → write PGDL + ASID atomically (PTW requires no branch between them)
     csrwr  $a1, CSR_PGDL
+    # ASID: read-modify-write to preserve ASID-width field (bits 16-23)
+    csrrd  $t1, CSR_ASID
+    andi   $t1, $t1, 0xFF0000    # keep only bits 16-23 (ASID width)
+    or     $a2, $a2, $t1         # combine with new ASID (bits 0-9)
+    csrwr  $a2, CSR_ASID
     invtlb 0x3, $zero, $zero
 1:
     move $sp, $a0

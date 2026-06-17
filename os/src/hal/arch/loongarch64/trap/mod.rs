@@ -227,6 +227,7 @@ pub fn trap_handler() -> ! {
                 | Trap::Exception(Exception::PageNonExecutableFault) => FaultAccess::Execute,
                 _ => FaultAccess::Load,
             };
+            crate::task::perf::record_page_fault();
             match mset_lock.do_page_fault(addr, access) {
                 Err(error) => match error {
                     MemoryError::BeyondEOF | MemoryError::BackingStoreFailure => {
@@ -415,9 +416,11 @@ pub fn trap_return() -> ! {
     let trap_cx = task.acquire_inner_lock().get_trap_cx();
     let trap_cx_ptr = trap_cx as *const TrapContext as usize;
     trap_cx.sstatus.set_pplv(3).set_pie(true);
-    //log::debug!("[trap_return] trap_cx:{:?}", trap_cx);
+    let asid = task.asid.load(core::sync::atomic::Ordering::Relaxed);
+    if asid != 0 {
+        crate::task::perf::record_tlb_activate();
+    }
     let user_satp = current_user_token();
-    //log::debug!("[trap_return] trap_cx_ptr:{:#x}, user_satp:{:#x}", trap_cx_ptr, user_satp);
     let restore_va = __restore as usize - __alltraps as usize + strampoline as usize;
     unsafe {
         asm!(
@@ -425,10 +428,12 @@ pub fn trap_return() -> ! {
             "move $ra, {0}",
             "move $a0, {1}",
             "move $a1, {2}",
+            "move $a2, {3}",
             "jr $ra",
             in(reg) restore_va,
             in(reg) trap_cx_ptr,
             in(reg) user_satp,
+            in(reg) asid as usize,
             options(noreturn)
         );
     }
