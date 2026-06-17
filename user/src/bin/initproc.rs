@@ -892,8 +892,18 @@ fn run_group_once(
                     "[initproc] TIMEOUT ({}s) for {} in {}, sending SIGKILL to pid={}",
                     timeout_secs, script, log_dir, pid
                 );
+                let t_kill = get_time() as u64;
                 let _ = kill(pid as usize, SIGKILL);
+                println!(
+                    "[diag] kill sent, entering waitpid at ms={}",
+                    t_kill
+                );
                 let _ = waitpid(pid as usize, &mut code);
+                let t_waited = get_time() as u64;
+                println!(
+                    "[diag] waitpid returned after {}ms",
+                    t_waited.saturating_sub(t_kill)
+                );
                 println!(
                     "[initproc] killed pid={} for {} in {}",
                     pid, script, log_dir

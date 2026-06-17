@@ -2,6 +2,58 @@
 
 ---
 
+## 2026-06-18
+
+### Phase 1: 修复时间换算溢出 + us 精度损失 + KERNEL_TIMER_QUEUE irq-safety
+
+**问题定位：**
+- `get_time_ns()` 使用 `ticks * 1e9 / freq` 先乘后除，RV 12.5MHz 下 ~24.6 分钟溢出，LA 100MHz 下 ~3 分钟溢出。溢出导致 wrapping，CLOCK_MONOTONIC/REALTIME 跳变
+- `get_time_us()` 使用 `ticks / (freq / 1e6)`，RV `12500000/1000000 = 12`（应为 12.5），系统性偏快 4.17%
+- `TimeSpec::from_tick` 使用 `(tick % freq) * NSEC_PER_SEC / freq`，高时钟频率下存在溢出风险
+- `KERNEL_TIMER_QUEUE` 使用 `spin::Mutex`，`add_kernel_timer()` (syscall 上下文) 和 `do_wake_expired()` (timer interrupt 上下文) 共享同一把锁，单核下存在 interrupt 打断持锁代码 → 自旋死锁风险
+- `wake_expired()` 在持锁状态下直接调用 `run_timer()` 回调，回调内可能通过 `self.add_action()` 重新入队 timer → 再入锁 → 即死锁
+
+**修复内容：**
+
+`os/src/timer.rs`:
+- 新增 `ticks_to_ns/ticks_to_us/ticks_to_ms/ns_to_ticks_ceil/now_ns` 安全换算函数，使用商+余数分离 + u128 中间乘积，永不超过 u64
+- `get_time_sec/ms/us/ns` 内部改用安全换算
+- `TimeSpec::from_tick`/`TimeVal::from_tick` 通过安全路径转换
+- `TimeSpec::now`/`TimeVal::now` 直接用安全换算
+- 新增 `TimeSpec::to_ns_saturating` 安全版本
+- `current_timespec`/`current_timeval`/`set_current_timespec` 全部使用安全路径 + saturating 操作
+
+`os/src/task/manager.rs`:
+- `add_kernel_timer()` / `wait_with_timeout()` 使用已有的 `local_irq_save()/local_irq_restore()` 关中断，消除 syscall 上下文与 timer interrupt 的锁竞争
+- `wake_expired()` 拆分为 `pop_expired()`（持锁收集过期 timer，批量上限 64）+ 锁外执行回调
+- `run_timer()` 从 `&mut self` 方法改为静态方法 `fn(TimerAction, TimeSpec) -> bool`，内部 `self.add_action()` 改为调用全局 `add_kernel_timer()`
+- `do_wake_expired()` 改为先持锁 `pop_expired()` → 释放锁 → 再执行回调 `KernelTimerQueue::run_timer()`
+
+`user/src/bin/initproc.rs`:
+- 在 `kill`→`waitpid` 路径增加 `[diag]` 计时日志
+
+**验证：**
+- `docker exec make rv64-kernel-build-only` ✅
+- `docker exec make la64-kernel-build-only` ✅
+- QEMU basic smoke test (mask=0x001): musl 4s, glibc 4s ✅ 无回归
+- QEMU cyclictest (4 modes): musl 14s, glibc 15s ✅ 全部通过
+- QEMU libcbench timeout-kill: kill→waitpid 28ms ✅ 无死锁
+- diag 输出正常: `[diag] kill sent, entering waitpid at ms=X` / `[diag] waitpid returned after Yms`
+
+**效果对比：**
+
+| 指标 | 修复前 | 修复后 |
+|------|--------|--------|
+| `get_time_us()` 精度 (RV) | 偏快 4.17% | 无偏差 |
+| `get_time_ns()` 长跑 | ~24.6min(RV)/~3min(LA) 溢出 | 永不溢出 |
+| `KERNEL_TIMER_QUEUE` 死锁风险 | 存在（syscall×IRQ 竞争） | 已消除 |
+| `wake_expired` 内回调重入锁 | 可能死锁 | 已消除 |
+
+**备注：** 此提交是计时器三阶段修复的 Phase 1，解决了安全换算和 irq-safety 基础问题。Phase 2 (one-shot timer + 高精度唤醒) 和 Phase 3 (clock_getres 修正 + net poll 拆分) 待后续 PR 实现。
+
+---
+
+
 ## 2026-06-15
 
 ### futex tick 换算微优化：缓存时钟频率

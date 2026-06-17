@@ -9,6 +9,7 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 use crate::config::SYSTEM_TASK_LIMIT;
 use alloc::vec::Vec;
 
+use crate::hal::{local_irq_restore, local_irq_save};
 use crate::timer::{TimeSpec, TimeVal};
 
 use super::{
@@ -1428,22 +1429,22 @@ impl KernelTimerQueue {
             self.enforce_capacity();
         }
     }
-    pub fn wake_expired(&mut self, now: TimeSpec) {
-        if self
-            .inner
-            .peek()
-            .map(|timer| timer.deadline > now)
-            .unwrap_or(true)
-        {
-            return;
-        }
+    /// Pop all expired timers (up to a batch limit).
+    /// Callers must hold the lock. Run callbacks OUTSIDE the lock.
+    pub fn pop_expired(&mut self, now: TimeSpec) -> Vec<KernelTimer> {
+        const MAX_BATCH: usize = 64;
+        let mut expired = Vec::new();
         while let Some(timer) = self.inner.pop() {
             if timer.deadline > now {
                 self.inner.push(timer);
                 break;
             }
-            self.run_timer(timer, now);
+            expired.push(timer);
+            if expired.len() >= MAX_BATCH {
+                break;
+            }
         }
+        expired
     }
     /// 清理所有失效 Weak 引用的定时器条目，释放堆槽位。
     pub fn compact(&mut self) {
@@ -1477,28 +1478,27 @@ impl KernelTimerQueue {
             );
         }
     }
-    fn run_timer(&mut self, timer: KernelTimer, now: TimeSpec) {
+    /// Run a single timer callback. Must be called WITHOUT holding KERNEL_TIMER_QUEUE.
+    pub fn run_timer(timer: KernelTimer, now: TimeSpec) -> bool {
         match timer.action {
             TimerAction::WakeTask { task, generation } => {
-                if let Some(task) = task.upgrade() {
-                    // Option A：无条件清除 pending 标志。
-                    // 无论任务是否已被提前唤醒，定时器既已触发，槽位即释放。
-                    task.wait_io_timer_pending
-                        .store(false, AtomicOrdering::Relaxed);
-                    if task.wait_timer_generation.load(AtomicOrdering::Relaxed) != generation {
-                        return;
-                    }
-
-                    let mut inner = task.acquire_inner_lock();
-                    let should_wake = inner.task_status == super::TaskStatus::Interruptible;
-                    if should_wake {
-                        inner.task_status = super::task::TaskStatus::Ready;
-                    }
-                    drop(inner);
-                    if should_wake {
-                        wake_interruptible(task);
-                    }
+                let Some(task) = task.upgrade() else { return false };
+                task.wait_io_timer_pending
+                    .store(false, AtomicOrdering::Relaxed);
+                if task.wait_timer_generation.load(AtomicOrdering::Relaxed) != generation {
+                    return false;
                 }
+
+                let mut inner = task.acquire_inner_lock();
+                let should_wake = inner.task_status == super::TaskStatus::Interruptible;
+                if should_wake {
+                    inner.task_status = super::task::TaskStatus::Ready;
+                }
+                drop(inner);
+                if should_wake {
+                    wake_interruptible(task);
+                }
+                should_wake
             }
             TimerAction::SendSignal {
                 task,
@@ -1506,58 +1506,58 @@ impl KernelTimerQueue {
                 generation,
             } => {
                 if signal.is_empty() {
-                    return;
+                    return false;
                 }
-                if let Some(task) = task.upgrade() {
-                    let mut should_wake = false;
-                    let mut next_real_timer = None;
-                    {
-                        let mut inner = task.acquire_inner_lock();
-                        if signal == Signals::SIGALRM {
-                            if inner.real_timer_generation != generation
-                                || inner.real_timer_deadline != Some(timer.deadline)
-                            {
-                                return;
-                            }
-                        }
-                        inner.add_signal(signal);
-                        if signal == Signals::SIGALRM {
-                            if inner.timer[0].it_interval.is_zero() {
-                                inner.real_timer_deadline = None;
-                                inner.timer[0].it_value = TimeVal::new();
-                            } else {
-                                let interval =
-                                    TimeSpec::from_us(inner.timer[0].it_interval.to_us());
-                                let deadline = now + interval;
-                                inner.real_timer_generation =
-                                    inner.real_timer_generation.wrapping_add(1);
-                                let next_generation = inner.real_timer_generation;
-                                inner.real_timer_deadline = Some(deadline);
-                                inner.timer[0].it_value = inner.timer[0].it_interval;
-                                next_real_timer = Some((deadline, next_generation));
-                            }
-                        }
-                        if signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, true)
-                            && inner.task_status == super::TaskStatus::Interruptible
+                let Some(task) = task.upgrade() else { return false };
+                let mut should_wake = false;
+                let mut next_real_timer = None;
+                {
+                    let mut inner = task.acquire_inner_lock();
+                    if signal == Signals::SIGALRM {
+                        if inner.real_timer_generation != generation
+                            || inner.real_timer_deadline != Some(timer.deadline)
                         {
-                            inner.task_status = super::TaskStatus::Ready;
-                            should_wake = true;
+                            return false;
                         }
                     }
-                    if should_wake {
-                        wake_interruptible(task.clone());
+                    inner.add_signal(signal);
+                    if signal == Signals::SIGALRM {
+                        if inner.timer[0].it_interval.is_zero() {
+                            inner.real_timer_deadline = None;
+                            inner.timer[0].it_value = TimeVal::new();
+                        } else {
+                            let interval =
+                                TimeSpec::from_us(inner.timer[0].it_interval.to_us());
+                            let deadline = now + interval;
+                            inner.real_timer_generation =
+                                inner.real_timer_generation.wrapping_add(1);
+                            let next_generation = inner.real_timer_generation;
+                            inner.real_timer_deadline = Some(deadline);
+                            inner.timer[0].it_value = inner.timer[0].it_interval;
+                            next_real_timer = Some((deadline, next_generation));
+                        }
                     }
-                    if let Some((deadline, next_generation)) = next_real_timer {
-                        self.add_action(
-                            TimerAction::SendSignal {
-                                task: Arc::downgrade(&task),
-                                signal,
-                                generation: next_generation,
-                            },
-                            deadline,
-                        );
+                    if signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, true)
+                        && inner.task_status == super::TaskStatus::Interruptible
+                    {
+                        inner.task_status = super::TaskStatus::Ready;
+                        should_wake = true;
                     }
                 }
+                if should_wake {
+                    wake_interruptible(task.clone());
+                }
+                if let Some((deadline, next_generation)) = next_real_timer {
+                    add_kernel_timer(
+                        TimerAction::SendSignal {
+                            task: Arc::downgrade(&task),
+                            signal,
+                            generation: next_generation,
+                        },
+                        deadline,
+                    );
+                }
+                should_wake
             }
             TimerAction::PosixTimerSignal {
                 task,
@@ -1565,20 +1565,20 @@ impl KernelTimerQueue {
                 signal,
                 generation,
             } => {
-                if let Some(task) = task.upgrade() {
-                    let mut should_wake = false;
-                    let mut next_timer = None;
+                let Some(task) = task.upgrade() else { return false };
+                let mut should_wake = false;
+                let mut next_timer = None;
                     {
                         let mut inner = task.acquire_inner_lock();
                         let signal_pending =
                             !signal.is_empty() && inner.sigpending.contains(signal);
                         let Some(Some(timer_state)) = inner.posix_timers.get_mut(timer_id) else {
-                            return;
+                            return false;
                         };
                         if timer_state.generation != generation
                             || timer_state.deadline != Some(timer.deadline)
                         {
-                            return;
+                            return false;
                         }
                         if timer_state.interval.is_zero() {
                             timer_state.value = TimeSpec::new();
@@ -1621,7 +1621,7 @@ impl KernelTimerQueue {
                         wake_interruptible(task.clone());
                     }
                     if let Some((deadline, next_generation)) = next_timer {
-                        self.add_action(
+                        add_kernel_timer(
                             TimerAction::PosixTimerSignal {
                                 task: Arc::downgrade(&task),
                                 timer_id,
@@ -1631,8 +1631,9 @@ impl KernelTimerQueue {
                             deadline,
                         );
                     }
-                }
+                    should_wake
             }
+            _ => false,
         }
     }
 }
@@ -1752,7 +1753,9 @@ static KERNEL_TIMER_QUEUE_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// 加入一个内核计时器动作
 pub fn add_kernel_timer(action: TimerAction, deadline: TimeSpec) {
+    let _flags = local_irq_save();
     KERNEL_TIMER_QUEUE.lock().add_action(action, deadline);
+    local_irq_restore(_flags);
 }
 
 /// 这个函数会将一个`task`添加到全局超时等待队列中，但是不会阻塞它
@@ -1765,13 +1768,15 @@ pub fn wait_with_timeout(task: Weak<TaskControlBlock>, timeout: TimeSpec) {
         .wait_timer_generation
         .fetch_add(1, AtomicOrdering::Relaxed)
         .wrapping_add(1);
+    let _flags = local_irq_save();
     KERNEL_TIMER_QUEUE.lock().add_action(
         TimerAction::WakeTask {
             task: Arc::downgrade(&task),
             generation,
         },
         timeout,
-    )
+    );
+    local_irq_restore(_flags);
 }
 
 /// 唤醒全局超时等待队列中所有已超时的任务
@@ -1795,23 +1800,32 @@ pub fn do_wake_expired() {
     }
 
     if kernel_timer_pending {
-        let mut ktq = KERNEL_TIMER_QUEUE.lock();
-        if ktq.is_empty() {
-            KERNEL_TIMER_QUEUE_PENDING.store(false, AtomicOrdering::Relaxed);
-        } else {
-            let now = *now.get_or_insert_with(crate::timer::TimeSpec::now);
-            ktq.wake_expired(now);
-            // compact 涉及 BinaryHeap::drain → Vec 堆分配，降频执行：
-            // 仅在队列半满时每 64 个 tick 执行一次。
-            static COMPACT_TICK: core::sync::atomic::AtomicUsize =
-                core::sync::atomic::AtomicUsize::new(0);
-            let tick = COMPACT_TICK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            if tick % 64 == 0 && ktq.len() > KernelTimerQueue::MAX_TIMERS / 2 {
-                ktq.compact();
-            }
+        let expired_timers = {
+            let mut ktq = KERNEL_TIMER_QUEUE.lock();
             if ktq.is_empty() {
                 KERNEL_TIMER_QUEUE_PENDING.store(false, AtomicOrdering::Relaxed);
+                Vec::new()
+            } else {
+                let now = *now.get_or_insert_with(crate::timer::TimeSpec::now);
+                let expired = ktq.pop_expired(now);
+                // compact 涉及 BinaryHeap::drain → Vec 堆分配，降频执行：
+                static COMPACT_TICK: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                let tick = COMPACT_TICK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if tick % 64 == 0 && ktq.len() > KernelTimerQueue::MAX_TIMERS / 2 {
+                    ktq.compact();
+                }
+                if ktq.is_empty() {
+                    KERNEL_TIMER_QUEUE_PENDING.store(false, AtomicOrdering::Relaxed);
+                }
+                expired
             }
+        }; // ← lock released
+
+        // Run callbacks outside the lock
+        let now = now.unwrap_or_else(crate::timer::TimeSpec::now);
+        for timer in expired_timers {
+            KernelTimerQueue::run_timer(timer, now);
         }
     }
 
