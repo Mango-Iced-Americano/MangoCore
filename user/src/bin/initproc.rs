@@ -495,7 +495,12 @@ fn parse_csv_with_defaults(defaults: &[&str], val: &[u8]) -> Option<Vec<String>>
     Some(list)
 }
 
+fn parse_bool_flag(val: &[u8]) -> bool {
+    matches!(trim_ascii(val), b"1" | b"true" | b"yes" | b"on")
+}
+
 fn apply_conf_bytes(data: &[u8], cfg: &mut RuntimeConfig) {
+    let mut ltp_exclude_reset = false;
     for raw_line in data.split(|b| *b == b'\n') {
         let line = trim_ascii(raw_line);
         if line.is_empty() || line[0] == b'#' {
@@ -564,6 +569,8 @@ fn apply_conf_bytes(data: &[u8], cfg: &mut RuntimeConfig) {
             if let Some(list) = parse_csv_with_defaults(DEFAULT_LTP_EXCLUDE_LA64_GLIBC, val) {
                 cfg.ltp_exclude_la64_glibc = list;
             }
+        } else if key == b"ltp_exclude_reset" {
+            ltp_exclude_reset = parse_bool_flag(val);
         } else if key == b"ltp_include" {
             if let Some(list) = parse_csv_list(val) {
                 cfg.ltp_include = list;
@@ -602,6 +609,15 @@ fn apply_conf_bytes(data: &[u8], cfg: &mut RuntimeConfig) {
                 }
             }
         }
+    }
+    if ltp_exclude_reset {
+        cfg.ltp_exclude.clear();
+        cfg.ltp_exclude_musl.clear();
+        cfg.ltp_exclude_glibc.clear();
+        cfg.ltp_exclude_rv64_musl.clear();
+        cfg.ltp_exclude_rv64_glibc.clear();
+        cfg.ltp_exclude_la64_musl.clear();
+        cfg.ltp_exclude_la64_glibc.clear();
     }
 }
 

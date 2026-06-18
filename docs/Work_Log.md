@@ -4,6 +4,26 @@
 
 ## 2026-06-18
 
+### LTP timer 历史过滤项复测：reset exclude + 可配置 case timeout
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — 新增 `ltp_exclude_reset=1` 配置开关，focused 调试时可清空默认 LTP exclude
+- `user/src/bin/ltprunner.rs` — 支持 `ltp_exclude_reset=1`；新增 `ltp_case_timeout_secs`；修正 suite runner 按返回码打印 `PASS/SKIP/FAIL LTP CASE`
+- `.agents/skills/mango-worklog/references/harness-patterns.md` — 补充 TCONF 输出标签和外层 case timeout 经验
+
+**验证：**
+- `docker compose exec -T -w /app/os os-dev env LOG=error make rv64-only` ✅
+- `docker compose exec -T -w /app/os os-dev env LOG=error make la64-only` ✅
+- QEMU basic smoke `mask=0x001`: rv64 musl/glibc ✅；la64 musl/glibc ✅
+- focused LTP suite `ltp_exclude_reset=1, ltp_case_timeout_secs=240, ltp_include=timerfd04,timerfd_settime02`: rv64 glibc ✅；la64 glibc ✅
+
+**效果对比：**
+- 修复前：`timerfd04` 的 `TCONF(32)` 被日志标成 `FAIL LTP CASE`；`timerfd_settime02` 被 ltprunner 固定 60s 外层 timeout 杀掉，无法判断真实 timerfd 语义
+- 修复后：`timerfd04` 正确标记为 `SKIP`（缺 `CONFIG_TIME_NS` 前置条件）；`timerfd_settime02` 在 rv64/la64 glibc 下均运行到 LTP 自身结束并 `PASS`
+
+**备注：** `timer_create01/02` 仍是当前 LTP 镜像缺二进制的测试环境限制；本轮不修改内核 timerfd/POSIX timer 语义。
+
+
 ### Timer deadline/TLB 收尾修复与 la64 COW fault 定位
 
 **涉及文件：**
