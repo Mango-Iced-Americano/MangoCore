@@ -49,7 +49,12 @@ pub struct TimerFdSpec {
 #[derive(Debug)]
 struct TimerFdState {
     interval: TimeSpec,
+    /// Monotonic deadline used by the kernel timer queue.
     deadline: Option<TimeSpec>,
+    /// Original realtime absolute deadline.  Only set for CLOCK_REALTIME
+    /// timers armed with TFD_TIMER_ABSTIME; relative timers must not move when
+    /// wall-clock time is adjusted.
+    realtime_abs_deadline: Option<TimeSpec>,
     expirations: u64,
 }
 
@@ -75,6 +80,7 @@ impl TimerFd {
             inner: Mutex::new(TimerFdState {
                 interval: TimeSpec::new(),
                 deadline: None,
+                realtime_abs_deadline: None,
                 expirations: 0,
             }),
             read_wait: EventWaitQueue::new(),
@@ -96,6 +102,7 @@ impl TimerFd {
         if inner.interval.is_zero() {
             inner.expirations = inner.expirations.saturating_add(1);
             inner.deadline = None;
+            inner.realtime_abs_deadline = None;
             return;
         }
 
@@ -106,6 +113,12 @@ impl TimerFd {
         inner.expirations = inner.expirations.saturating_add(count as u64);
         let next_ns = deadline_ns.saturating_add(count.saturating_mul(interval_ns));
         inner.deadline = Some(TimeSpec::from_ns(next_ns));
+        if let Some(abs_deadline) = inner.realtime_abs_deadline {
+            let abs_ns = abs_deadline
+                .to_ns_saturating()
+                .saturating_add(count.saturating_mul(interval_ns) as u64);
+            inner.realtime_abs_deadline = Some(TimeSpec::from_ns(abs_ns as usize));
+        }
     }
 
     fn current_spec_locked(inner: &TimerFdState, now: TimeSpec) -> TimerFdSpec {
@@ -125,15 +138,10 @@ impl TimerFd {
     }
 
     fn wake_if_expired(&self, now_hint: TimeSpec) -> usize {
-        let now = if matches!(self.clock_id, CLOCK_REALTIME | CLOCK_REALTIME_ALARM) {
-            timerfd_clock_now(self.clock_id)
-        } else {
-            now_hint
-        };
         let became_readable = {
             let mut inner = self.inner.lock();
             let was_empty = inner.expirations == 0;
-            Self::update_locked(&mut inner, now);
+            Self::update_locked(&mut inner, now_hint);
             was_empty && inner.expirations > 0
         };
         if became_readable {
@@ -145,13 +153,11 @@ impl TimerFd {
 
     fn next_sweep_deadline(&self) -> Option<TimeSpec> {
         let inner = self.inner.lock();
-        inner
-            .deadline
-            .map(|deadline| timerfd_deadline_to_monotonic(self.clock_id, deadline))
+        inner.deadline
     }
 
     fn get_time(&self) -> TimerFdSpec {
-        let now = timerfd_clock_now(self.clock_id);
+        let now = TimeSpec::now();
         let mut inner = self.inner.lock();
         Self::update_locked(&mut inner, now);
         Self::current_spec_locked(&inner, now)
@@ -170,19 +176,24 @@ impl TimerFd {
         validate_timespec(new_value.it_value)?;
 
         let armed = !new_value.it_value.is_zero();
-        let now = if need_old_value || armed {
-            Some(timerfd_clock_now(self.clock_id))
+        let now_monotonic = if need_old_value || armed {
+            Some(TimeSpec::now())
         } else {
             None
+        };
+        let now_clock = if armed && matches!(self.clock_id, CLOCK_REALTIME | CLOCK_REALTIME_ALARM) {
+            Some(timerfd_clock_now(self.clock_id))
+        } else {
+            now_monotonic
         };
         let mut notify_readable = false;
         let old_value = {
             let mut inner = self.inner.lock();
-            if let Some(now) = now {
+            if let Some(now) = now_monotonic {
                 Self::update_locked(&mut inner, now);
             }
             let old_value = if need_old_value {
-                Self::current_spec_locked(&inner, now.unwrap())
+                Self::current_spec_locked(&inner, now_monotonic.unwrap())
             } else {
                 TimerFdSpec {
                     it_interval: TimeSpec::new(),
@@ -191,14 +202,24 @@ impl TimerFd {
             };
             inner.interval = new_value.it_interval;
             inner.expirations = 0;
+            inner.realtime_abs_deadline = None;
             inner.deadline = if new_value.it_value.is_zero() {
                 None
             } else if (flags & TFD_TIMER_ABSTIME) != 0 {
-                Some(new_value.it_value)
+                if matches!(self.clock_id, CLOCK_REALTIME | CLOCK_REALTIME_ALARM) {
+                    inner.realtime_abs_deadline = Some(new_value.it_value);
+                    Some(timerfd_realtime_deadline_to_monotonic(
+                        new_value.it_value,
+                        now_clock.unwrap(),
+                        now_monotonic.unwrap(),
+                    ))
+                } else {
+                    Some(new_value.it_value)
+                }
             } else {
-                Some(now.unwrap() + new_value.it_value)
+                Some(now_monotonic.unwrap() + new_value.it_value)
             };
-            if let (Some(deadline), Some(now)) = (inner.deadline, now) {
+            if let (Some(deadline), Some(now)) = (inner.deadline, now_monotonic) {
                 if now >= deadline {
                     Self::update_locked(&mut inner, now);
                     notify_readable = inner.expirations > 0;
@@ -211,6 +232,35 @@ impl TimerFd {
         }
         rearm_timerfd_sweep();
         Ok(old_value)
+    }
+
+    fn sync_realtime_deadline_after_clock_set(
+        &self,
+        now_realtime: TimeSpec,
+        now_monotonic: TimeSpec,
+    ) -> usize {
+        if !matches!(self.clock_id, CLOCK_REALTIME | CLOCK_REALTIME_ALARM) {
+            return 0;
+        }
+        let became_readable = {
+            let mut inner = self.inner.lock();
+            let Some(abs_deadline) = inner.realtime_abs_deadline else {
+                return 0;
+            };
+            let was_empty = inner.expirations == 0;
+            inner.deadline = Some(timerfd_realtime_deadline_to_monotonic(
+                abs_deadline,
+                now_realtime,
+                now_monotonic,
+            ));
+            Self::update_locked(&mut inner, now_monotonic);
+            was_empty && inner.expirations > 0
+        };
+        if became_readable {
+            self.notify_readable()
+        } else {
+            0
+        }
     }
 }
 
@@ -228,7 +278,7 @@ impl IndexNode for TimerFd {
 
         let expirations = {
             let mut inner = self.inner.lock();
-            Self::update_locked(&mut inner, timerfd_clock_now(self.clock_id));
+            Self::update_locked(&mut inner, TimeSpec::now());
             if inner.expirations == 0 {
                 return Err(SyscallErr::EAGAIN);
             }
@@ -257,7 +307,7 @@ impl IndexNode for TimerFd {
 
     fn poll(&self, _private_data: &FilePrivateData) -> Result<usize, SyscallErr> {
         let mut inner = self.inner.lock();
-        Self::update_locked(&mut inner, timerfd_clock_now(self.clock_id));
+        Self::update_locked(&mut inner, TimeSpec::now());
         let events = if inner.expirations > 0 {
             EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM
         } else {
@@ -312,14 +362,15 @@ fn timerfd_clock_now(clock_id: usize) -> TimeSpec {
     }
 }
 
-fn timerfd_deadline_to_monotonic(clock_id: usize, deadline: TimeSpec) -> TimeSpec {
-    match clock_id {
-        CLOCK_REALTIME | CLOCK_REALTIME_ALARM => {
-            let now_realtime = current_timespec();
-            let now_monotonic = TimeSpec::now();
-            now_monotonic + (deadline - now_realtime)
-        }
-        _ => deadline,
+fn timerfd_realtime_deadline_to_monotonic(
+    deadline: TimeSpec,
+    now_realtime: TimeSpec,
+    now_monotonic: TimeSpec,
+) -> TimeSpec {
+    if deadline >= now_realtime {
+        now_monotonic + (deadline - now_realtime)
+    } else {
+        now_monotonic - (now_realtime - deadline)
     }
 }
 
@@ -404,6 +455,37 @@ pub fn wake_expired_timerfds(now: TimeSpec) -> usize {
             TIMERFD_REGISTRY_MAYBE_NONEMPTY.store(false, Ordering::Release);
         }
     }
+    woke
+}
+
+pub fn handle_realtime_clock_was_set() -> usize {
+    if !timerfd_registry_maybe_nonempty() {
+        return 0;
+    }
+
+    let now_realtime = current_timespec();
+    let now_monotonic = TimeSpec::now();
+    let woke = {
+        let mut registry = TIMERFD_REGISTRY.lock();
+        let mut woke = 0usize;
+        registry.retain(|weak| weak.strong_count() > 0);
+        if registry.is_empty() {
+            TIMERFD_REGISTRY_MAYBE_NONEMPTY.store(false, Ordering::Release);
+        } else {
+            for weak in registry.iter() {
+                if let Some(timerfd) = weak.upgrade() {
+                    woke = woke.saturating_add(
+                        timerfd.sync_realtime_deadline_after_clock_set(
+                            now_realtime,
+                            now_monotonic,
+                        ),
+                    );
+                }
+            }
+        }
+        woke
+    };
+    rearm_timerfd_sweep();
     woke
 }
 

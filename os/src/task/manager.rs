@@ -1601,6 +1601,7 @@ impl KernelTimerQueue {
                         if timer_state.interval.is_zero() {
                             timer_state.value = TimeSpec::new();
                             timer_state.deadline = None;
+                            timer_state.realtime_abs_deadline = None;
                         } else {
                             let interval_ns =
                                 timer_state.interval.to_ns_saturating().max(1) as usize;
@@ -1617,6 +1618,13 @@ impl KernelTimerQueue {
                             let next_ns =
                                 deadline_ns.saturating_add(expirations.saturating_mul(interval_ns));
                             let deadline = TimeSpec::from_ns(next_ns);
+                            if let Some(abs_deadline) = timer_state.realtime_abs_deadline {
+                                let abs_ns = abs_deadline
+                                    .to_ns_saturating()
+                                    .saturating_add(expirations.saturating_mul(interval_ns) as u64);
+                                timer_state.realtime_abs_deadline =
+                                    Some(TimeSpec::from_ns(abs_ns as usize));
+                            }
                             timer_state.generation = timer_state.generation.wrapping_add(1);
                             timer_state.value = timer_state.interval;
                             timer_state.deadline = Some(deadline);

@@ -279,6 +279,9 @@ pub struct PosixTimer {
     pub interval: TimeSpec,
     pub value: TimeSpec,
     pub deadline: Option<TimeSpec>,
+    /// Original absolute deadline for CLOCK_REALTIME-style POSIX timers.
+    /// Relative timers and monotonic timers must not move on wall-clock jumps.
+    pub realtime_abs_deadline: Option<TimeSpec>,
     pub generation: usize,
     overrun: usize,
 }
@@ -293,6 +296,7 @@ impl PosixTimer {
             interval: TimeSpec::new(),
             value: TimeSpec::new(),
             deadline: None,
+            realtime_abs_deadline: None,
             generation: 0,
             overrun: 0,
         }

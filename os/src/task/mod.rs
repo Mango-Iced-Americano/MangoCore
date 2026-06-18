@@ -60,7 +60,10 @@ pub use registry::{
     find_task_by_tid,
 };
 pub use signal::*;
-pub use sleep::{sleep_relative_interruptible, sleep_until_interruptible};
+pub use sleep::{
+    sleep_relative_interruptible, sleep_until_interruptible,
+    sleep_until_realtime_interruptible, wake_realtime_abstime_sleepers_after_clock_set,
+};
 pub use task::{
     any_seccomp_enabled, FsStatus, PosixTimer, RobustList, Rusage, SeccompFilterInsn,
     TaskControlBlock, TaskStatus, UtsNamespace,
