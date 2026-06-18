@@ -31,6 +31,7 @@ use alloc::{
 };
 use core::any::Any;
 use core::convert::TryFrom;
+use core::sync::atomic::Ordering;
 
 use crate::net::routing::RouteSocketHandle;
 use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint, Ipv4Address, Ipv6Address};
@@ -143,6 +144,11 @@ pub static TCP_SOCKETS: Mutex<Vec<Weak<TcpSocket>>> = Mutex::new(Vec::new());
 pub static TCP_SOCKETS_TO_REMOVE: Mutex<Vec<RouteSocketHandle>> = Mutex::new(Vec::new());
 /// Listening-only TCP sockets — used for unconditional accept scan after every poll cycle.
 pub static TCP_LISTENERS: Mutex<Vec<Weak<TcpSocket>>> = Mutex::new(Vec::new());
+
+/// Number of tasks currently blocking in accept(). When zero, the
+/// unconditional accept scan in poll_once() is skipped entirely.
+pub static ACCEPT_WAITER_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 // raw
 pub static RAW_SOCKETS: Mutex<Vec<(RouteSocketHandle, Weak<RawSocket>)>> = Mutex::new(Vec::new());
@@ -932,6 +938,11 @@ pub fn wake_tcp_waiters() {
 /// regardless of smoltcp progress. Only iterates listening sockets, not
 /// all TCP sockets. Returns count of ready listeners.
 pub fn wake_tcp_accept_waiters() -> usize {
+    // P3: skip expensive listener scan when no task is blocked in accept()
+    if ACCEPT_WAITER_COUNT.load(Ordering::Relaxed) == 0 {
+        return 0;
+    }
+
     let listeners: Vec<Arc<TcpSocket>> = {
         let guard = TCP_LISTENERS.lock();
         guard.iter().filter_map(|w| w.upgrade()).collect()

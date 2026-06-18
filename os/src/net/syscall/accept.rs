@@ -1,9 +1,11 @@
 use crate::net::config::NET_INTERFACE;
+use crate::net::socket::ACCEPT_WAITER_COUNT;
 use crate::syscall::utils::wait_io;
 use crate::task::current_task;
 use crate::task::WaitQueue;
 use crate::task::WaitResult;
 use crate::utils::error::SyscallErr;
+use core::sync::atomic::Ordering;
 
 pub fn sys_accept(sockfd: u32, addr: usize, addrlen: usize) -> isize {
     let socket = crate::get_socket!(sockfd);
@@ -24,7 +26,8 @@ pub fn sys_accept(sockfd: u32, addr: usize, addrlen: usize) -> isize {
             // never put poll inside WaitQueue condition closure.
             NET_INTERFACE.try_poll();
 
-            loop {
+            ACCEPT_WAITER_COUNT.fetch_add(1, Ordering::Relaxed);
+            let result = loop {
                 match WaitQueue::wait_until_interruptible(wait_queue, || {
                     // NO poll inside closure — only accept
                     match socket.accept(sockfd, addr, addrlen) {
@@ -37,7 +40,9 @@ pub fn sys_accept(sockfd: u32, addr: usize, addrlen: usize) -> isize {
                     WaitResult::Interrupted => break -(SyscallErr::ERESTART as isize),
                     WaitResult::TimedOut => continue,
                 }
-            }
+            };
+            ACCEPT_WAITER_COUNT.fetch_sub(1, Ordering::Relaxed);
+            result
         }
     } else {
         wait_io(
