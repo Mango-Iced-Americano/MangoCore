@@ -29,6 +29,7 @@ use crate::net::syscall::common::MsgFlags;
 use crate::net::{config::NET_INTERFACE, Endpoint, Socket, SocketFile, PSOCK};
 use crate::{
     fs::vfs::{self, FileFlags},
+    mm::UserBuffer,
     task::{current_task, WaitQueue},
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
 };
@@ -604,6 +605,41 @@ impl Socket for TcpSocket {
         }
         let inner = self.inner.lock();
         inner.try_send(buf)
+    }
+
+    fn try_recv_user(&self, buf: &mut UserBuffer, flags: MsgFlags) -> Result<isize, SyscallErr> {
+        NET_INTERFACE.try_poll();
+        if self.read_shutdown.load(Ordering::Acquire) {
+            return Ok(0);
+        }
+        let inner = self.inner.lock();
+        let _ = flags;
+        inner
+            .recv_to_user(buf, 0, buf.len())
+            .map(|n| n as isize)
+    }
+
+    fn try_send_user(&self, buf: &UserBuffer, flags: MsgFlags) -> Result<isize, SyscallErr> {
+        NET_INTERFACE.try_poll();
+        if self.write_shutdown.load(Ordering::Acquire) {
+            return Err(SyscallErr::EPIPE);
+        }
+        let is_connecting = {
+            let inner = self.inner.lock();
+            matches!(&*inner, Inner::Connecting(_))
+        };
+        if is_connecting {
+            let _ = self.try_connect();
+        }
+        let total = buf.len().min(crate::hal::IO_CHUNK_SIZE);
+        if total == 0 {
+            let inner = self.inner.lock();
+            return inner.try_send(&[]);
+        }
+        let mut tmp = alloc::vec![0u8; total];
+        let n = buf.read_at(0, &mut tmp);
+        let inner = self.inner.lock();
+        inner.try_send(&tmp[..n])
     }
 
     fn socket_r_ready(&self) -> bool {

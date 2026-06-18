@@ -712,7 +712,7 @@ impl WaitQueue {
     // ==================== wait_until 方法族（DragonOS 架构） ====================
 
     /// 兜底定时器的超时毫秒数，防止丢失唤醒导致永久阻塞。
-    const WAIT_IO_FALLBACK_MS: usize = 10;
+    const WAIT_IO_FALLBACK_MS: usize = 1;
 
     fn wait_event_impl<F>(
         wq: &Mutex<Self>,
