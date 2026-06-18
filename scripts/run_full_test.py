@@ -47,13 +47,22 @@ judge_results = {}      # threading-safe dict for judge results
 # ======================== Helpers ========================
 
 def _sync_container_time():
-    """尽可能同步容器时间到宿主机。"""
+    """通过 HTTP Date 响应头同步容器时间。"""
     try:
-        subprocess.run(["date", "-s", "@" + str(int(time.time()))],
-                       timeout=3, capture_output=True)
-        log("时间同步完成", GREEN)
+        r = subprocess.run(
+            ["curl", "-sI", "--max-time", "5", "http://baidu.com"],
+            timeout=6, capture_output=True, text=True,
+        )
+        for line in r.stdout.splitlines():
+            if line.lower().startswith("date:"):
+                date_str = line.split(":", 1)[1].strip()
+                subprocess.run(["date", "-s", date_str],
+                               timeout=3, capture_output=True)
+                log(f"时间同步完成 -> {date_str}", GREEN)
+                return
+        log("时间同步失败：Date 头未找到", YELLOW)
     except Exception:
-        pass  # 非关键，/etc/localtime 挂载已处理
+        log("时间同步失败（非关键，可手动 make sync-time）", YELLOW)
 
 
 def log(msg, color=""):
