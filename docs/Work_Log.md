@@ -86,98 +86,23 @@
 
 **备注：** 缓存失效策略：create/link/symlink → invalidate name + insert 新 child_ino；unlink → invalidate name only（负 dentry 负责其余）；rmdir → invalidate name + remove_dir_cache(child_ino)；rename → 分别 invalidate old/new name 于各自 parent。`bump_dir_version()` 内的 `self.inode.lock()` 在所有调用点均已释放（Lock→get ino→Drop），无死锁风险。
 
-## 2026-06-17
-
-### feat(fs/ext4): 添加 7 个 DIR_CACHE_* 目录 lookup 缓存计数器
+### Timer/timekeeping 对照实验报告整理与提交留痕
 
 **涉及文件：**
-- `os/src/fs/ext4/counters.rs` — 新增 `DIR_CACHE_HIT/MISS/FULL_INDEX_BUILD/ENTRY_COUNT/LINEAR_SCAN/SCANNED_ENTRIES/SCANNED_MAX` 7 个 AtomicU64 声明，接入 `reset_counters()` 数组和 `dump_scenario()` 输出
+- `docs/09_debug/timer-timekeeping-contrast-experiment-20260618.md` — 新增 timer/timekeeping 修复对照实验报告，记录实验目标、控制变量、有效/无效样本、rv64 原版失败与候选通过结果、la64 原版 hang 记录和 push 前验证建议
+- `docs/Work_Log.md` — 追加本次实验报告提交记录
+- `.agents/skills/mango-worklog/references/debugging-patterns.md` — 沉淀 `kernel-build-only` 不会更新 sdcard `/initproc`、`make *-run` 可能复用旧 kernel/initproc 的对照实验坑
 
 **验证：**
-- 文件结构验证通过（3 处修改：声明/复位/输出，模式与现有计数器一致）
+- 原版 `1096f4d2 + 用户态 probe` rv64 timer smoke 对照 ✅：`timerfd CLOCK_MONOTONIC 2ms` 为 4ms PASS；`CLOCK_REALTIME` 相对 80ms + `clock_settime(+2s)` 为 1ms FAIL
+- 候选 `e894ee1e` rv64/la64 timer smoke ✅：rv64 realtime relative 81ms PASS；la64 realtime relative 80ms PASS；realtime absolute periodic、POSIX realtime absolute、`clock_nanosleep` 全部 PASS
+- 候选 `e894ee1e` rv64/la64 basic smoke ✅：rv64 musl/glibc `exit_code=0` 4s/4s；la64 musl/glibc `exit_code=0` 11s/12s
+- 对照后已切回 `develop`，并重建候选 rv64/la64 kernel 产物 ✅
+- `git diff --check` ✅
+- `git diff -- os/src/lang_items.rs user/src/lang_items.rs` ✅ 无残留差异
 
-**备注：** 这些计数器用于追踪新的目录 lookup 缓存层的命中率、全量索引构建次数、线性扫描情况等性能指标。
+**备注：** la64 原版基线在 stage-1 后超过 90s 无新增输出，已作为 hang 记录写入报告；该样本未进入 timer assertion，不作为 timer 语义定量对照。当前分支仍为 `ahead 6, behind 21`，push 前需同步远端并重跑候选验证。
 
-### feat(fs/ext4): 新建 dir_cache.rs — Ext4DirectoryLookupCache 目录 lookup 缓存模块
-
-**涉及文件：**
-- `os/src/fs/ext4/dir_cache.rs` — 新建文件，实现 `Ext4DirectoryLookupCache`（per-directory name→ino BTreeMap 缓存）、LRU 驱逐（global_tick + last_access）、目录版本管理（bump_version/current_version）
-- `os/src/fs/ext4/counters.rs` — （已在上一提交中添加 DIR_CACHE_* 计数器，本模块将使用）
-
-**验证：**
-- 文件结构验证通过（struct 定义、9 个方法、锁规范符合 dir_versions→dirs 顺序）
-- 编译待 T3 接入 `mod dir_cache;` 后验证
-
-**备注：** 锁规范：当同时需要 dirs 和 dir_versions 锁时，始终先锁 dir_versions 再锁 dirs（防死锁）。insert/build_full_index 内联处理 per-dir 溢出后释放 dirs，再调用 evict_if_needed()（该方法需同时持有两把锁）。无 unsafe、无 std、无外部符号依赖。
-
-### feat(fs/ext4): 完整 ext4 dir lookup cache — T3-T6 集成、编译验证通过、reclaim 接入
-
-**涉及文件：**
-- `os/src/fs/ext4/mod.rs` — 新增 `mod dir_cache;`
-- `os/src/fs/ext4/ext4fs.rs` — `Ext4FileSystem` 新增 `dir_lookup_cache: Ext4DirectoryLookupCache` 字段并在 `open_ext4rs()` 初始化；`bump_dir_version()` 新增 FS 级 `dir_lookup_cache.bump_version(ino)`；`Ext4OSInode::find()` 新增 Phase 3.5 FS 级目录缓存查找（在 negative dentry 后、磁盘扫描前，命中后版本重检+最多一次重试）；大目录（≥2 blocks）一次全量扫描构建 name→ino 完整索引；`create`/`create_with_attrs`/`symlink`/`link` 在 bump 后 invalidate name + 插入新 child_ino；`unlink` 在 bump 后 invalidate name；`rmdir` 在 bump 后 invalidate name + `remove_dir_cache(child_ino)`；`rename` 在 old/new 两个 parent 的 bump 后分别 invalidate old_name 和 new_name；新增 `pub fn evict_dir_cache()` 公开方法供 reclaim 调用
-- `os/src/fs/reclaim.rs` — 每 64 tick 在 per-fs 循环中调用 `fs.evict_dir_cache()` 淘汰冷目录
-- `os/src/fs/ext4/counters.rs` — 新增 7 个 DIR_CACHE_* AtomicU64 计数器，已接入 `reset_counters()` 和 `dump_scenario()`
-
-**编译验证：**
-- `make rv64-kernel-build-only` ✅（166 warnings，0 errors）
-- `make la64-kernel-build-only` ✅（150 warnings，0 errors）
-
-**新增缓存操作统计（29 个调用点）：**
-- `bump_version` 1 处（bump_dir_version）
-- `lookup` 2 处（Phase 3.5 主路径 + 重试）
-- `current_version` 8 处
-- `insert` 4 处（create/create_with_attrs/symlink/link）
-- `invalidate_name` 9 处（create/create_with_attrs/symlink/link/unlink/rmdir/rename×2+same-parent）
-- `build_full_index` 1 处（大目录全量扫描）
-- `remove_dir_cache` 1 处（rmdir）
-- `evict_if_needed` 1 处（reclaim 路径通过 evict_dir_cache 间接调用）
-
-**性能预期：** 大目录场景下，首次访问触发全量索引构建（O(n) 一次性开销），后续所有 find() 走缓存命中 O(log n)。小目录按需增量缓存。所有目录修改操作自动失效相关缓存条目，保证 POSIX 语义。
-
-**待验证：** QEMU 集成测试（lmbench mask=0xFFF 全量 + mask=0x100 lmbench）、basic 回归、busybox --install -s。
-
-## 2026-06-16
-
-### perf(fs): 多维度降低 I/O 固定开销 — flags/mode 去锁、stream offset 跳过、dev/null/zero UserBuffer 直连、PageCache 单页 fast path、readv/writev/tmpfs 接入 UserBuffer
-
-**涉及文件：**
-- `os/src/fs/vfs/file.rs` — File.flags: Mutex<FileFlags> → AtomicU32（F_SETFL 用 cur-based fetch_update）；File.mode: Mutex<FileMode> → FileMode（open 后不可变）；stream I/O 跳过 offset load/fetch_add；is_stream 优先于 O_APPEND 选 offset
-- `os/src/mm/uaccess.rs` — 新增 UserBuffer::fill_at(offset, len, value)，跨页分段填充，返回实际填充字节数
-- `os/src/fs/dev/zero.rs` — 新增 read_at_user（dst.fill_at 直填零）、write_at_user（discard）、supports_user_buffer_io → true
-- `os/src/fs/dev/null.rs` — 新增 read_at_user（Ok(0) EOF）、write_at_user（discard）、supports_user_buffer_io → true
-- `os/src/fs/page_cache.rs` — read/write/read_user/write_user 新增 start_page==end_page 单页 fast path，跳过 Vec<CopyItem> 构造；持 entries 锁取 Arc 后释放再 copy（保持两阶段设计）
-- `os/src/syscall/fs.rs` — sys_readv/sys_writev/sys_preadv/sys_pwritev 新增 UserBuffer fast path 分支（supports_user_buffer_io 时构造 UserBuffer 直连 File::*_user，绕过 kbuf 分配和 copy）
-- `os/src/fs/tmpfs/mod.rs` — 新增 read_at_user/write_at_user（PageCache 直连）；write_at_user 持 inode lock 完成 pc.write_user+file_size 更新（防 truncate 竞态）；offset+len 用 checked_add 防溢出；supports_user_buffer_io 仅普通文件/symlink 且有 page_cache 时返回 true
-
-**验证：**
-- `make rv64-kernel-build-only` ✅
-- `make la64-kernel-build-only` ✅
-- QEMU 测试：待验证
-
-**Oracle 审查修复：**
-1. `File::set_flags` 的 `fetch_update` closure 从基于 stale `old_flags/new_bits` 快照改为基于 `cur` 参数，防止并发 set_nonblock/F_SETFL 被覆盖
-2. stream write offset 选择顺序从 O_APPEND 优先改为 is_stream 优先（stream 文件无文件 EOF 语义）
-3. tmpfs write_at_user 从"解锁写 PageCache 后回锁更新 size"改为"持 inode lock 完成整个 write+size 更新"，消除 truncate/resize 竞态
-4. tmpfs 新增 `checked_add` 防 offset+len 溢出
-5. tmpfs supports_user_buffer_io 从无条件 true 改为仅对 File/SymLink 且有 page_cache 返回 true
-6. /dev/null 补 read_at_user → Ok(0)，避免 ENOSYS fallback
-
-**备注：**
-- 暂缓：full-page overwrite skip populate（需 copy-before-publish 或 Loading/waiter/page-lock 机制）
-- 暂缓：PageCache miss 并发和全局 Mutex→RwLock（需先做 cache-hit fast path + miss 慢路径拆分）
-
-### fix: MountFSInode 转发 read_at_user/write_at_user/supports_user_buffer_io
-
-**涉及文件：**
-- `os/src/fs/vfs/mount.rs` — MountFSInode 新增 read_at_user（转发到 inner_inode）、write_at_user（先 ensure_mount_writable 再转发）、supports_user_buffer_io（转发到 inner_inode）
-
-**根因：** 所有通过正常路径打开的文件（ext4/tmpfs/devfs）都包在 MountFSInode 里，但 MountFSInode 没有转发 UserBuffer 方法。sys_read/sys_write 问 `file.inode.supports_user_buffer_io()` 实际问的是 MountFSInode，永远返回 false，导致全部走 kbuf fallback。这是上一轮 `bw_file_rd` 从 219 掉回 59 的直接原因。
-
-**验证：**
-- `make rv64-kernel-build-only` ✅
-- `make la64-kernel-build-only` ✅
-
-**预期效果：** 恢复普通文件 read/write fast path，bw_file_rd 应从 ~59 回到 ~200MB/s 级别，File write bandwidth 从 76K 回到 100K+，同时不影响已修复的 stat/open/pipe/shell fork。
 ### realtime clock 跳变下 timerfd/POSIX timer deadline 语义修复
 
 **涉及文件：**
@@ -365,6 +290,99 @@
 | KERNEL_TIMER_QUEUE 回调 | 锁内执行 (Phase 1 已修复) | 锁外执行 ✅ |
 
 **备注：** one-shot timer 替代了原有固定 25Hz(RV)/100Hz(LA) tick 模型，硬件仅在最早 KernelTimer deadline 或下一个 sched tick 时触发中断。sched tick 保持 100Hz(10ms) 用于调度记账和网络 poll。至此计时器三阶段修复全部完成。
+
+## 2026-06-17
+
+### feat(fs/ext4): 添加 7 个 DIR_CACHE_* 目录 lookup 缓存计数器
+
+**涉及文件：**
+- `os/src/fs/ext4/counters.rs` — 新增 `DIR_CACHE_HIT/MISS/FULL_INDEX_BUILD/ENTRY_COUNT/LINEAR_SCAN/SCANNED_ENTRIES/SCANNED_MAX` 7 个 AtomicU64 声明，接入 `reset_counters()` 数组和 `dump_scenario()` 输出
+
+**验证：**
+- 文件结构验证通过（3 处修改：声明/复位/输出，模式与现有计数器一致）
+
+**备注：** 这些计数器用于追踪新的目录 lookup 缓存层的命中率、全量索引构建次数、线性扫描情况等性能指标。
+
+### feat(fs/ext4): 新建 dir_cache.rs — Ext4DirectoryLookupCache 目录 lookup 缓存模块
+
+**涉及文件：**
+- `os/src/fs/ext4/dir_cache.rs` — 新建文件，实现 `Ext4DirectoryLookupCache`（per-directory name→ino BTreeMap 缓存）、LRU 驱逐（global_tick + last_access）、目录版本管理（bump_version/current_version）
+- `os/src/fs/ext4/counters.rs` — （已在上一提交中添加 DIR_CACHE_* 计数器，本模块将使用）
+
+**验证：**
+- 文件结构验证通过（struct 定义、9 个方法、锁规范符合 dir_versions→dirs 顺序）
+- 编译待 T3 接入 `mod dir_cache;` 后验证
+
+**备注：** 锁规范：当同时需要 dirs 和 dir_versions 锁时，始终先锁 dir_versions 再锁 dirs（防死锁）。insert/build_full_index 内联处理 per-dir 溢出后释放 dirs，再调用 evict_if_needed()（该方法需同时持有两把锁）。无 unsafe、无 std、无外部符号依赖。
+
+### feat(fs/ext4): 完整 ext4 dir lookup cache — T3-T6 集成、编译验证通过、reclaim 接入
+
+**涉及文件：**
+- `os/src/fs/ext4/mod.rs` — 新增 `mod dir_cache;`
+- `os/src/fs/ext4/ext4fs.rs` — `Ext4FileSystem` 新增 `dir_lookup_cache: Ext4DirectoryLookupCache` 字段并在 `open_ext4rs()` 初始化；`bump_dir_version()` 新增 FS 级 `dir_lookup_cache.bump_version(ino)`；`Ext4OSInode::find()` 新增 Phase 3.5 FS 级目录缓存查找（在 negative dentry 后、磁盘扫描前，命中后版本重检+最多一次重试）；大目录（≥2 blocks）一次全量扫描构建 name→ino 完整索引；`create`/`create_with_attrs`/`symlink`/`link` 在 bump 后 invalidate name + 插入新 child_ino；`unlink` 在 bump 后 invalidate name；`rmdir` 在 bump 后 invalidate name + `remove_dir_cache(child_ino)`；`rename` 在 old/new 两个 parent 的 bump 后分别 invalidate old_name 和 new_name；新增 `pub fn evict_dir_cache()` 公开方法供 reclaim 调用
+- `os/src/fs/reclaim.rs` — 每 64 tick 在 per-fs 循环中调用 `fs.evict_dir_cache()` 淘汰冷目录
+- `os/src/fs/ext4/counters.rs` — 新增 7 个 DIR_CACHE_* AtomicU64 计数器，已接入 `reset_counters()` 和 `dump_scenario()`
+
+**编译验证：**
+- `make rv64-kernel-build-only` ✅（166 warnings，0 errors）
+- `make la64-kernel-build-only` ✅（150 warnings，0 errors）
+
+**新增缓存操作统计（29 个调用点）：**
+- `bump_version` 1 处（bump_dir_version）
+- `lookup` 2 处（Phase 3.5 主路径 + 重试）
+- `current_version` 8 处
+- `insert` 4 处（create/create_with_attrs/symlink/link）
+- `invalidate_name` 9 处（create/create_with_attrs/symlink/link/unlink/rmdir/rename×2+same-parent）
+- `build_full_index` 1 处（大目录全量扫描）
+- `remove_dir_cache` 1 处（rmdir）
+- `evict_if_needed` 1 处（reclaim 路径通过 evict_dir_cache 间接调用）
+
+**性能预期：** 大目录场景下，首次访问触发全量索引构建（O(n) 一次性开销），后续所有 find() 走缓存命中 O(log n)。小目录按需增量缓存。所有目录修改操作自动失效相关缓存条目，保证 POSIX 语义。
+
+**待验证：** QEMU 集成测试（lmbench mask=0xFFF 全量 + mask=0x100 lmbench）、basic 回归、busybox --install -s。
+
+## 2026-06-16
+
+### perf(fs): 多维度降低 I/O 固定开销 — flags/mode 去锁、stream offset 跳过、dev/null/zero UserBuffer 直连、PageCache 单页 fast path、readv/writev/tmpfs 接入 UserBuffer
+
+**涉及文件：**
+- `os/src/fs/vfs/file.rs` — File.flags: Mutex<FileFlags> → AtomicU32（F_SETFL 用 cur-based fetch_update）；File.mode: Mutex<FileMode> → FileMode（open 后不可变）；stream I/O 跳过 offset load/fetch_add；is_stream 优先于 O_APPEND 选 offset
+- `os/src/mm/uaccess.rs` — 新增 UserBuffer::fill_at(offset, len, value)，跨页分段填充，返回实际填充字节数
+- `os/src/fs/dev/zero.rs` — 新增 read_at_user（dst.fill_at 直填零）、write_at_user（discard）、supports_user_buffer_io → true
+- `os/src/fs/dev/null.rs` — 新增 read_at_user（Ok(0) EOF）、write_at_user（discard）、supports_user_buffer_io → true
+- `os/src/fs/page_cache.rs` — read/write/read_user/write_user 新增 start_page==end_page 单页 fast path，跳过 Vec<CopyItem> 构造；持 entries 锁取 Arc 后释放再 copy（保持两阶段设计）
+- `os/src/syscall/fs.rs` — sys_readv/sys_writev/sys_preadv/sys_pwritev 新增 UserBuffer fast path 分支（supports_user_buffer_io 时构造 UserBuffer 直连 File::*_user，绕过 kbuf 分配和 copy）
+- `os/src/fs/tmpfs/mod.rs` — 新增 read_at_user/write_at_user（PageCache 直连）；write_at_user 持 inode lock 完成 pc.write_user+file_size 更新（防 truncate 竞态）；offset+len 用 checked_add 防溢出；supports_user_buffer_io 仅普通文件/symlink 且有 page_cache 时返回 true
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU 测试：待验证
+
+**Oracle 审查修复：**
+1. `File::set_flags` 的 `fetch_update` closure 从基于 stale `old_flags/new_bits` 快照改为基于 `cur` 参数，防止并发 set_nonblock/F_SETFL 被覆盖
+2. stream write offset 选择顺序从 O_APPEND 优先改为 is_stream 优先（stream 文件无文件 EOF 语义）
+3. tmpfs write_at_user 从"解锁写 PageCache 后回锁更新 size"改为"持 inode lock 完成整个 write+size 更新"，消除 truncate/resize 竞态
+4. tmpfs 新增 `checked_add` 防 offset+len 溢出
+5. tmpfs supports_user_buffer_io 从无条件 true 改为仅对 File/SymLink 且有 page_cache 返回 true
+6. /dev/null 补 read_at_user → Ok(0)，避免 ENOSYS fallback
+
+**备注：**
+- 暂缓：full-page overwrite skip populate（需 copy-before-publish 或 Loading/waiter/page-lock 机制）
+- 暂缓：PageCache miss 并发和全局 Mutex→RwLock（需先做 cache-hit fast path + miss 慢路径拆分）
+
+### fix: MountFSInode 转发 read_at_user/write_at_user/supports_user_buffer_io
+
+**涉及文件：**
+- `os/src/fs/vfs/mount.rs` — MountFSInode 新增 read_at_user（转发到 inner_inode）、write_at_user（先 ensure_mount_writable 再转发）、supports_user_buffer_io（转发到 inner_inode）
+
+**根因：** 所有通过正常路径打开的文件（ext4/tmpfs/devfs）都包在 MountFSInode 里，但 MountFSInode 没有转发 UserBuffer 方法。sys_read/sys_write 问 `file.inode.supports_user_buffer_io()` 实际问的是 MountFSInode，永远返回 false，导致全部走 kbuf fallback。这是上一轮 `bw_file_rd` 从 219 掉回 59 的直接原因。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**预期效果：** 恢复普通文件 read/write fast path，bw_file_rd 应从 ~59 回到 ~200MB/s 级别，File write bandwidth 从 76K 回到 100K+，同时不影响已修复的 stat/open/pipe/shell fork。
 
 ---
 
