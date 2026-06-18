@@ -9,17 +9,8 @@ pub fn dump_panic_context() {
 }
 
 fn print_syscall_context() {
-    if let Some(proc) = crate::task::PROCESSOR.try_lock() {
-        let name = match proc.get_syscall_id() {
-            Some(id) => crate::syscall::syscall_name(id),
-            None => "<none>",
-        };
-        println!("--- SYSCTX ---");
-        println!("syscall: {}", name);
-    } else {
-        println!("--- SYSCTX ---");
-        println!("syscall: <locked>");
-    }
+    println!("--- SYSCTX ---");
+    println!("syscall: {}", crate::task::current_syscall_name());
 }
 
 fn print_kernel_memory() {

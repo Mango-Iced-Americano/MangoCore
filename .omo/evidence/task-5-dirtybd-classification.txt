@@ -1,0 +1,14 @@
+Task 5 DirtyBlockDevice classification
+
+Search target: DirtyBlockDevice / dirty_bd / flush_dirty_blocks
+
+Classified references:
+- os/src/fs/ext4/ext4fs.rs:27 `dirty_bd: Arc<DirtyBlockDevice>` -> remove in T14.
+- os/src/fs/ext4/ext4fs.rs:46 `DirtyBlockDevice::new(...)` -> remove in T14.
+- os/src/fs/ext4/ext4fs.rs:54 `block_device: dirty_bd.clone()` -> remove in T14; block_device should become real device.
+- os/src/fs/ext4/ext4fs.rs:55 `dirty_bd` field init -> remove in T14.
+- os/src/fs/ext4/ext4fs.rs:64-65 `flush_dirty_blocks()` -> remove/replace in T13/T14.
+- os/src/fs/ext4/ext4fs.rs:755 `sync_fs() -> self.flush_dirty_blocks()` -> temporary dependency until T13.
+- os/src/fs/ext4/dirty_block_device.rs -> quarantine/remove; not final architecture.
+
+Classification status: PASS. Every current DirtyBlockDevice normal-path reference has a target disposition.

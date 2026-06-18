@@ -38,6 +38,11 @@ impl FAsyncItems {
         }
     }
 
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.items.lock().is_empty()
+    }
+
     /// Register a file descriptor for async notification.
     /// Replaces any existing entry for the same fd.
     pub fn add(&self, file: &Arc<File>, fd: i32) {

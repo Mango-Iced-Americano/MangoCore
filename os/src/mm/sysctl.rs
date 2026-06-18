@@ -78,9 +78,12 @@ pub fn commit_limit_kbytes() -> usize {
 }
 
 pub fn committed_as_kbytes() -> usize {
-    crate::task::current_task()
-        .map(|task| task.process.vm().lock().committed_bytes() / 1024)
-        .unwrap_or(0)
+    let vm = match crate::task::current_task_ref() {
+        Some(task) => task.process.vm(),
+        None => return 0,
+    };
+    let committed = vm.lock().committed_bytes() / 1024;
+    committed
 }
 
 pub fn overcommit_allows(current_committed_bytes: usize, additional_bytes: usize) -> bool {

@@ -190,6 +190,10 @@ bitflags! {
         const FMODE_STREAM = 0x40;
         /// 支持随机访问
         const FMODE_RANDOM = 0x80;
+        /// /dev/null — 读立即返回 EOF，写丢弃数据
+        const FMODE_DEV_NULL = 0x100;
+        /// /dev/zero — 读返回零，写丢弃数据
+        const FMODE_DEV_ZERO = 0x200;
     }
 }
 
@@ -1285,6 +1289,16 @@ impl File {
             return Err(SyscallErr::EBADF);
         }
         Ok(())
+    }
+
+    #[inline]
+    pub fn is_dev_null(&self) -> bool {
+        self.mode().contains(FileMode::FMODE_DEV_NULL)
+    }
+
+    #[inline]
+    pub fn is_dev_zero(&self) -> bool {
+        self.mode().contains(FileMode::FMODE_DEV_ZERO)
     }
 
     /// 读就绪检查（poll 用）

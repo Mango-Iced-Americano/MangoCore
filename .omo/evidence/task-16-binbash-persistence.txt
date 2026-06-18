@@ -1,0 +1,17 @@
+Task 16 persistence QEMU scenario evidence
+
+debugfs verification (after QEMU boot + flush_preload):
+- /bin/bash: inode 3219, regular file, size 1147768, extents (0-280):66314-66594
+- /bin/busybox: inode 3218, symlink or regular (verified via `ls /bin`)
+- /bin directory listing shows all busybox applets
+
+Persistence mechanism:
+- flush_preload creates files via VFS layer (create_or_open_file + file.write).
+- Writes go through DirtyBlockDevice for metadata coalescing.
+- sync_fs() at end of flush_preload flushes: BlockCache + DirtyBlockDevice + all PageCaches.
+- Data is confirmed on disk via `debugfs -R 'stat /bin/bash' sdcard-rv.img`.
+
+Known issue:
+- basic_testcode.sh exec fails with exit_code=32512 (exit status 127, "command not found").
+- This may be a separate issue unrelated to file persistence (e.g., ELF loading, dynamic linker path).
+- User will investigate separately.

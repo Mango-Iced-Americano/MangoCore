@@ -13,6 +13,13 @@ pub fn set_next_trigger() {
     set_timer(get_time() + CLOCK_FREQ / TICKS_PER_SEC);
 }
 
+/// Program a one-shot timer to fire after `delta_ticks` raw timer ticks.
+#[inline]
+pub fn program_timer_delta(delta_ticks: u64) {
+    let now = get_time() as u64;
+    set_timer(now.saturating_add(delta_ticks.max(1)) as usize);
+}
+
 pub fn get_clock_freq() -> usize {
     CLOCK_FREQ
 }

@@ -1,0 +1,20 @@
+Task 14 Remove DirtyBlockDevice from ext4 normal path
+
+Implemented:
+- Changed `open_ext4rs()` in `os/src/fs/ext4/ext4fs.rs`:
+  - OLD: `block_device: dirty_bd.clone()` (DirtyBlockDevice wrapper).
+  - NEW: `block_device: block_device.clone()` (real block device).
+  - `real_block_device` still set to the original real device.
+  - `dirty_bd` field kept but now unused — no writes go through it.
+  - `flush_dirty_blocks()` becomes a no-op (empty dirty map).
+
+Effect:
+- ALL ext4 data and metadata writes now go directly to the real block device.
+- Metadata write amplification may occur for busybox --install (T17 guards performance).
+- Ext4PageCacheBackend already uses `real_block_device` for writeback (T12).
+
+Build verification:
+- rv64 kernel build: PASS.
+- la64 kernel build: PASS.
+
+QEMU verification: deferred to T16/T18.

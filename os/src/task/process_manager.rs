@@ -1,13 +1,12 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::Cell;
-use log::trace;
 
 use crate::syscall::{errno::*, CloneFlags};
 
 use super::signal::Signals;
 use super::{
-    add_task, current_task, quota, registry, signal::send_process_signal,
+    add_task, current_task_ref, quota, registry, signal::send_process_signal,
     ProcessControlBlock, ProcessState, TaskControlBlock, WaitQueue, WaitResult,
 };
 
@@ -21,7 +20,7 @@ pub struct ProcessManager;
 
 impl ProcessManager {
     pub fn current_process() -> Option<Arc<ProcessControlBlock>> {
-        current_task().map(|task| task.process.clone())
+        current_task_ref().map(|task| task.process.clone())
     }
 
     pub fn find_process(pid: usize) -> Option<Arc<ProcessControlBlock>> {
@@ -67,10 +66,10 @@ impl ProcessManager {
     ) {
         if flags.contains(CloneFlags::CLONE_VFORK) {
             child.process.set_vfork_parent(parent);
-        }
-        add_task(child.clone());
-        if flags.contains(CloneFlags::CLONE_VFORK) {
+            add_task(child.clone());
             child.process.wait_vfork_done_uninterruptible();
+        } else {
+            add_task(child);
         }
     }
 
@@ -171,13 +170,6 @@ impl ProcessManager {
                 } else {
                     process_inner.children.swap_remove(idx)
                 };
-                if !nowait {
-                    trace!(
-                        "[wait4] release zombie process, leader_tid: {}, pid: {}",
-                        child.leader_tid,
-                        child.pid
-                    );
-                }
                 let found_pid = child.pid;
                 wait_status.set(child.exit_code());
                 if !nowait {
@@ -254,7 +246,7 @@ impl ProcessManager {
     }
 
     pub fn send_signal_to_all(signal: Signals) -> isize {
-        let current_pid = current_task().map(|task| task.pid()).unwrap_or(0);
+        let current_pid = current_task_ref().map(|task| task.pid()).unwrap_or(0);
         let mut sent = false;
         for process in Self::all_processes() {
             if process.pid == 1 || process.pid == current_pid {

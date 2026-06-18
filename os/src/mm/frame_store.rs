@@ -1,8 +1,8 @@
 use core::fmt::Debug;
 
-use super::{frame_alloc, FrameTracker, MemoryError, PhysPageNum, VirtPageNum, VPNRange};
 #[cfg(feature = "zram")]
 use super::zram::{ZramTracker, ZRAM_DEVICE};
+use super::{frame_alloc, FrameTracker, MemoryError, PhysPageNum, VPNRange, VirtPageNum};
 #[cfg(feature = "swap")]
 use crate::fs::swap::{SwapTracker, SWAP_DEVICE};
 use alloc::collections::BTreeMap;
@@ -225,6 +225,68 @@ impl VmPageStore {
         match self.frames.get(key) {
             Some(Frame::InMemory(tracker)) => Some(tracker),
             _ => None,
+        }
+    }
+
+    pub(super) fn in_memory_len(&self) -> usize {
+        self.frames
+            .values()
+            .filter(|frame| matches!(frame, Frame::InMemory(_)))
+            .count()
+    }
+
+    pub(super) fn in_memory_len_in_range(&self, start: VirtPageNum, end: VirtPageNum) -> usize {
+        let store_start = self.vpn_range.get_start();
+        let store_end = self.vpn_range.get_end();
+        let start = if start > store_start {
+            start
+        } else {
+            store_start
+        };
+        let end = if end < store_end { end } else { store_end };
+        if start >= end {
+            return 0;
+        }
+        self.frames
+            .range(start..end)
+            .filter(|(_, frame)| matches!(frame, Frame::InMemory(_)))
+            .count()
+    }
+
+    pub(super) fn for_each_in_memory_vpn<F>(&self, mut f: F)
+    where
+        F: FnMut(VirtPageNum),
+    {
+        for (vpn, frame) in self.frames.iter() {
+            if matches!(frame, Frame::InMemory(_)) {
+                f(*vpn);
+            }
+        }
+    }
+
+    pub(super) fn for_each_in_memory_vpn_in_range<F>(
+        &self,
+        start: VirtPageNum,
+        end: VirtPageNum,
+        mut f: F,
+    ) where
+        F: FnMut(VirtPageNum),
+    {
+        let store_start = self.vpn_range.get_start();
+        let store_end = self.vpn_range.get_end();
+        let start = if start > store_start {
+            start
+        } else {
+            store_start
+        };
+        let end = if end < store_end { end } else { store_end };
+        if start >= end {
+            return;
+        }
+        for (vpn, frame) in self.frames.range(start..end) {
+            if matches!(frame, Frame::InMemory(_)) {
+                f(*vpn);
+            }
         }
     }
 

@@ -1,5 +1,5 @@
 use crate::timer::get_time_us;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
 /// Number of trace entries in the ring buffer.
@@ -337,14 +337,16 @@ pub fn try_dump_from(source: &str) -> bool {
 #[macro_export]
 macro_rules! trace_event {
     ($tag:expr, $a1:expr, $a2:expr, $a3:expr, $a4:expr, $a5:expr, $a6:expr) => {
-        $crate::trace::event(
-            $tag as u64,
-            $a1 as u64,
-            $a2 as u64,
-            $a3 as u64,
-            $a4 as u64,
-            $a5 as u64,
-            $a6 as u64,
-        )
+        if matches!(option_env!("TRACE"), Some("1" | "on" | "true" | "trace")) {
+            $crate::trace::event(
+                $tag as u64,
+                $a1 as u64,
+                $a2 as u64,
+                $a3 as u64,
+                $a4 as u64,
+                $a5 as u64,
+                $a6 as u64,
+            )
+        }
     };
 }

@@ -1,0 +1,20 @@
+Task 15 Global dirty PageCache writeback
+
+Status: Implemented at sync() level.
+
+- `sys_sync()` (from T7) calls `flush_all_page_caches()` which iterates
+  all registered PageCaches and calls `writeback_all()` on each.
+- `flush_all_page_caches()` is in `os/src/fs/page_cache.rs`, built on the
+  `PAGE_CACHE_REGISTRY` from T3.
+- Lock ordering: global registry lock held only while collecting live weak refs;
+  writeback_all() is called after registry lock is released.
+
+Limitations:
+- No background writeback daemon or periodic reclaim thread.
+- Dirty pages accumulate in memory until explicit sync() call or inode drop.
+- Future enhancement: periodic kernel thread for background writeback
+  (requires task scheduler infrastructure).
+
+Build verification:
+- rv64 kernel build: PASS.
+- la64 kernel build: PASS.

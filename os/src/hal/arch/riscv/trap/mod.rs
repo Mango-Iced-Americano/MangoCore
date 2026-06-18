@@ -8,8 +8,8 @@ use crate::mm::{frame_reserve, FaultAccess, MemoryError, VirtAddr};
 use crate::net::config::NET_INTERFACE;
 use crate::syscall::syscall;
 use crate::task::{
-    check_oom_kill, current_task, current_trap_cx, do_signal, do_wake_expired,
-    signal::SigInfo, suspend_current_and_run_next, Signals,
+    current_task_ref, current_user_token, do_signal, do_wake_expired, signal::SigInfo,
+    suspend_current_and_run_next, Signals,
 };
 use crate::timer::{ITimerVal, TimeVal};
 use alloc::format;
@@ -66,54 +66,55 @@ pub fn enable_timer_interrupt() {
 
 #[no_mangle]
 pub fn trap_handler() -> ! {
-    log::debug!(
-        "[trap_handler] trapped >> scause {:?}",
-        scause::read().bits()
-    );
-    set_kernel_trap_entry();
-    {
-        let task = current_task().unwrap();
-        let mut inner = task.acquire_inner_lock();
-        inner.update_process_times_enter_trap();
-    }
     let scause = scause::read();
+    set_kernel_trap_entry();
     let stval = stval::read();
-    match scause.cause() {
-        Trap::Exception(Exception::UserEnvCall) => {
-            // jump to next instruction anyway
-            let mut cx = current_trap_cx();
+
+    if let Trap::Exception(Exception::UserEnvCall) = scause.cause() {
+        let task = current_task_ref().unwrap();
+        let (syscall_id, args) = {
+            let mut inner = task.acquire_inner_lock();
+            inner.update_process_times_enter_trap();
+            let cx = inner.get_trap_cx();
             cx.gp.pc += 4;
             cx.origin_a0 = cx.gp.a0; // 保存重启参数
-            let syscall_id = cx.gp.a7; //debug 用
-            log::debug!(">>> Syscall ID: {}", syscall_id);
-            // get system call return value
-            let result = syscall(
+            let syscall_id = cx.gp.a7;
+            (
                 syscall_id,
                 [cx.gp.a0, cx.gp.a1, cx.gp.a2, cx.gp.a3, cx.gp.a4, cx.gp.a5],
-            );
-            // cx is changed during sys_exec (or restored by sigreturn), so we have to call it again
-            cx = current_trap_cx();
-            // sigreturn(139) already restored the full trap context (including a0) from the signal frame.
-            // Overwriting a0 here would corrupt the restored value — skip it.
+            )
+        };
+        let result = syscall(syscall_id, args);
+        // The trap context may be replaced by execve or restored by sigreturn,
+        // so fetch it again after syscall returns.
+        {
+            let mut inner = task.acquire_inner_lock();
+            let cx = inner.get_trap_cx();
+            // sigreturn(139) already restored the full trap context (including a0).
             if syscall_id != 139 {
                 cx.gp.a0 = result as usize;
             }
+            inner.refresh_real_timer();
+            inner.update_process_times_leave_trap(scause.cause());
         }
+        trap_return();
+    }
+
+    {
+        let task = current_task_ref().unwrap();
+        let mut inner = task.acquire_inner_lock();
+        inner.update_process_times_enter_trap();
+    }
+    match scause.cause() {
         Trap::Exception(Exception::StoreFault)
         | Trap::Exception(Exception::StorePageFault)
         | Trap::Exception(Exception::InstructionFault)
         | Trap::Exception(Exception::InstructionPageFault)
         | Trap::Exception(Exception::LoadFault)
         | Trap::Exception(Exception::LoadPageFault) => {
-            let task = current_task().unwrap();
+            let task = current_task_ref().unwrap();
             let mut inner = task.acquire_inner_lock();
             let addr = VirtAddr::from(stval);
-            log::debug!(
-                "[page_fault] tid: {}, pid: {}, type: {:?}",
-                task.tid.0,
-                task.pid(),
-                scause.cause()
-            );
             // This is where we handle the page fault.
             frame_reserve(3);
             let access = match scause.cause() {
@@ -123,7 +124,11 @@ pub fn trap_handler() -> ! {
                 | Trap::Exception(Exception::InstructionPageFault) => FaultAccess::Execute,
                 _ => FaultAccess::Load,
             };
-            if let Err(error) = task.process.vm().lock().do_page_fault(addr, access) {
+            let _pf_start = crate::task::perf::perf_time_now();
+            crate::task::perf::record_page_fault();
+            let pf_result = task.process.vm().lock().do_page_fault(addr, access);
+            crate::task::perf::record_pagefault_time_us(crate::task::perf::perf_time_now().saturating_sub(_pf_start));
+            if let Err(error) = pf_result {
                 match error {
                     MemoryError::BeyondEOF | MemoryError::BackingStoreFailure => {
                         inner.add_signal(Signals::SIGBUS);
@@ -152,19 +157,15 @@ pub fn trap_handler() -> ! {
         }
         Trap::Exception(Exception::IllegalInstruction)
         | Trap::Exception(Exception::InstructionMisaligned) => {
-            let task = current_task().unwrap();
+            let task = current_task_ref().unwrap();
             let mut inner = task.acquire_inner_lock();
             inner.sigmask.remove(Signals::SIGILL);
             inner.add_signal_with_code(Signals::SIGILL, SigInfo::ILL_ILLOPC);
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
-            do_wake_expired();
-            NET_INTERFACE.try_poll();
-            unsafe {
-                TIMER_INTERRUPT += 1;
-            }
-            set_next_trigger();
-            suspend_current_and_run_next();
+            crate::task::perf::record_timer_interrupt();
+            unsafe { TIMER_INTERRUPT += 1; }
+            crate::task::timer_interrupt_handler();
         }
         _ => {
             panic!(
@@ -175,7 +176,7 @@ pub fn trap_handler() -> ! {
         }
     }
     {
-        let task = current_task().unwrap();
+        let task = current_task_ref().unwrap();
         let mut inner = task.acquire_inner_lock();
         inner.refresh_real_timer();
         inner.update_process_times_leave_trap(scause.cause());
@@ -185,15 +186,10 @@ pub fn trap_handler() -> ! {
 
 #[no_mangle]
 pub fn trap_return() -> ! {
-    // 检查 OOM kill pending：若分配器耗尽时本进程被标记，在此发送 SIGKILL，
-    // do_signal 将干净地杀掉本进程（释放所有锁、文件、内存），不会有死锁问题。
-    check_oom_kill();
-    do_signal();
+    let task = do_signal();
     set_user_trap_entry();
-    let task = current_task().unwrap();
     let trap_cx_ptr = task.trap_cx_user_va();
-    let user_satp = task.get_user_token();
-    drop(task);
+    let user_satp = current_user_token();
     let restore_va = __restore as usize - __alltraps as usize + TRAMPOLINE;
     unsafe {
         asm!(

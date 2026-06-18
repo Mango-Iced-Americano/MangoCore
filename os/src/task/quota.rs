@@ -14,13 +14,12 @@ pub(crate) struct TaskQuotaGuard {
 
 impl TaskQuotaGuard {
     pub(crate) fn try_acquire() -> Result<Self, isize> {
-        let mut current = TASK_QUOTA_USED.load(Ordering::Acquire);
+        let mut current = TASK_QUOTA_USED.load(Ordering::Relaxed);
         loop {
             if current >= SYSTEM_TASK_LIMIT {
                 println!(
                     "[task_quota] HARD LIMIT hit: used={}/{} returning EAGAIN",
-                    current,
-                    SYSTEM_TASK_LIMIT
+                    current, SYSTEM_TASK_LIMIT
                 );
                 return Err(EAGAIN);
             }
@@ -29,17 +28,16 @@ impl TaskQuotaGuard {
             match TASK_QUOTA_USED.compare_exchange_weak(
                 current,
                 next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
             ) {
                 Ok(_) => {
                     if next >= SYSTEM_TASK_SOFT_LIMIT
-                        && !TASK_QUOTA_SOFT_WARNED.swap(true, Ordering::AcqRel)
+                        && !TASK_QUOTA_SOFT_WARNED.swap(true, Ordering::Relaxed)
                     {
                         println!(
                             "[task_quota] SOFT LIMIT reached: used={}/{}",
-                            next,
-                            SYSTEM_TASK_LIMIT
+                            next, SYSTEM_TASK_LIMIT
                         );
                     }
                     return Ok(Self { _private: () });
@@ -56,14 +54,14 @@ impl TaskQuotaGuard {
 
 impl Drop for TaskQuotaGuard {
     fn drop(&mut self) {
-        let old = TASK_QUOTA_USED.fetch_sub(1, Ordering::AcqRel);
+        let old = TASK_QUOTA_USED.fetch_sub(1, Ordering::Relaxed);
         debug_assert!(old > 0, "task quota underflow");
         if old <= SYSTEM_TASK_SOFT_LIMIT {
-            TASK_QUOTA_SOFT_WARNED.store(false, Ordering::Release);
+            TASK_QUOTA_SOFT_WARNED.store(false, Ordering::Relaxed);
         }
     }
 }
 
 pub(crate) fn allocated_task_count() -> usize {
-    TASK_QUOTA_USED.load(Ordering::Acquire)
+    TASK_QUOTA_USED.load(Ordering::Relaxed)
 }

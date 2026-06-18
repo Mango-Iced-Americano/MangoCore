@@ -184,26 +184,26 @@ impl<T: PageTable> KernelSpace<T> {
             ".text section",
             stext,
             etext,
-            MapPermission::R | MapPermission::X
+            MapPermission::R | MapPermission::X | MapPermission::G
         );
         kernel_identical_map!(".rodata section", srodata, erodata, MapPermission::R); // read only section
         kernel_identical_map!(
             ".data section",
             sdata,
             edata,
-            MapPermission::R | MapPermission::W
+            MapPermission::R | MapPermission::W | MapPermission::G
         );
         kernel_identical_map!(
             ".bss section",
             sbss_with_stack,
             ebss,
-            MapPermission::R | MapPermission::W
+            MapPermission::R | MapPermission::W | MapPermission::G
         );
         kernel_identical_map!(
             "physical memory",
             ekernel,
             MEMORY_END,
-            MapPermission::R | MapPermission::W
+            MapPermission::R | MapPermission::W | MapPermission::G
         );
 
         println!("mapping memory-mapped registers");
@@ -211,7 +211,7 @@ impl<T: PageTable> KernelSpace<T> {
             kernel_identical_map!(
                 (*pair).0,
                 ((*pair).0 + (*pair).1),
-                MapPermission::R | MapPermission::W
+                MapPermission::R | MapPermission::W | MapPermission::G
             );
         }
         kernel_space
@@ -223,7 +223,7 @@ impl<T: PageTable> KernelSpace<T> {
             .map_page(
                 VirtAddr::from(TRAMPOLINE).into(),
                 PhysAddr::from(strampoline as usize).into(),
-                MapPermission::R | MapPermission::X,
+                MapPermission::R | MapPermission::X | MapPermission::G,
             )
             .unwrap();
     }

@@ -15,8 +15,7 @@ pub struct IpcNamespace {
 }
 
 lazy_static! {
-    pub static ref INIT_IPC_NAMESPACE: Arc<IpcNamespace> =
-        Arc::new(IpcNamespace { id: 0 });
+    pub static ref INIT_IPC_NAMESPACE: Arc<IpcNamespace> = Arc::new(IpcNamespace { id: 0 });
 }
 
 static NEXT_IPC_NS_ID: AtomicU64 = AtomicU64::new(1);

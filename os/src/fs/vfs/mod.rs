@@ -255,6 +255,10 @@ pub enum FilePrivateData {
     PtyMaster {
         inner: alloc::sync::Arc<crate::fs::dev::pty::PtyInner>,
     },
+    /// Per-open procfs text snapshot.
+    ProcText {
+        content: Arc<String>,
+    },
 }
 
 impl Default for FilePrivateData {

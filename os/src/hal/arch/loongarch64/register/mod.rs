@@ -1,7 +1,7 @@
 #[macro_use]
 mod csr_macros;
 mod base;
-mod mmu;
+pub mod mmu;
 mod ras;
 mod timer;
 pub use base::{

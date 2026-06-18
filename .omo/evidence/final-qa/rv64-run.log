@@ -1,0 +1,9 @@
+info: override toolchain for /root/projects/oskernel2026-mango/os set to nightly-2025-01-18-x86_64-unknown-linux-gnu
+cp ./src/lang_items.rs.rv ./src/lang_items.rs
+cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
+make -f make/rv64.mk comp
+make[1]: Entering directory '/root/projects/oskernel2026-mango/os'
+make[1]: qemu-system-riscv64: No such file or directory
+make[1]: *** [make/rv64.mk:148: comp] Error 127
+make[1]: Leaving directory '/root/projects/oskernel2026-mango/os'
+make: *** [Makefile:66: rv64-run] Error 2

@@ -2,7 +2,7 @@ use super::{PhysAddr, PhysPageNum};
 use crate::config::{MEMORY_START, PAGE_SIZE};
 use crate::hal::MEMORY_END;
 #[cfg(feature = "oom_handler")]
-use crate::task::current_task;
+use crate::task::current_task_ref;
 
 use alloc::{sync::Arc, vec::Vec};
 use core::fmt::{self, Debug, Formatter};
@@ -97,6 +97,19 @@ impl StackFrameAllocator {
     pub fn unallocated_frames(&self) -> usize {
         self.end - self.current + self.recycled.len()
     }
+
+    /// 诊断：帧分配器碎片化程度
+    pub fn frag_diagnostic(&self) -> (usize, usize, usize, f64) {
+        let fresh = self.end.saturating_sub(self.current);
+        let recycled = self.recycled.len();
+        let total = fresh + recycled;
+        let ratio = if total > 0 {
+            recycled as f64 / total as f64
+        } else {
+            0.0
+        };
+        (total, fresh, recycled, ratio)
+    }
 }
 
 impl FrameAllocator for StackFrameAllocator {
@@ -112,25 +125,24 @@ impl FrameAllocator for StackFrameAllocator {
 
     /// 分配一个物理页
     fn alloc(&mut self) -> Option<FrameTracker> {
+        let _start = crate::task::perf::perf_time_now();
+        crate::task::perf::record_frame_alloc();
         // 优先使用回收的帧
-        if let Some(ppn) = self.recycled.pop() {
+        let result = if let Some(ppn) = self.recycled.pop() {
             self.mark_recycled(ppn, false);
-            let frame_tracker = FrameTracker::new(ppn.into());
-            log::trace!("[frame_alloc] {:?}", frame_tracker);
-            Some(frame_tracker)
+            Some(FrameTracker::new(ppn.into()))
         } else if self.current == self.end {
-            // 无可用帧
             None
         } else {
-            // 否则分配当前页
             self.current += 1;
             #[cfg(not(feature = "zero_init"))]
-            let frame_tracker = FrameTracker::new((self.current - 1).into());
+            let ft = FrameTracker::new((self.current - 1).into());
             #[cfg(feature = "zero_init")]
-            let frame_tracker = unsafe { FrameTracker::new_uninit((self.current - 1).into()) };
-            log::trace!("[frame_alloc] {:?}", frame_tracker);
-            Some(frame_tracker)
-        }
+            let ft = unsafe { FrameTracker::new_uninit((self.current - 1).into()) };
+            Some(ft)
+        };
+        crate::task::perf::record_frame_alloc_time_us(crate::task::perf::perf_time_now().saturating_sub(_start));
+        result
     }
     unsafe fn alloc_uninit(&mut self) -> Option<FrameTracker> {
         if let Some(ppn) = self.recycled.pop() {
@@ -143,13 +155,11 @@ impl FrameAllocator for StackFrameAllocator {
         } else {
             self.current += 1;
             let frame_tracker = FrameTracker::new_uninit((self.current - 1).into());
-            log::trace!("[frame_alloc_uninit] {:?}", frame_tracker);
             Some(frame_tracker)
         }
     }
     /// 释放一个物理页
     fn dealloc(&mut self, ppn: PhysPageNum) {
-        log::trace!("[frame_dealloc] {:?}", ppn);
         let ppn = ppn.0;
         let alloc_start = PhysAddr::from(MEMORY_START).floor().0;
         if ppn < alloc_start || ppn >= self.end || ppn >= self.current {
@@ -227,7 +237,7 @@ pub fn oom_handler(req: usize) -> Result<(), ()> {
         return Ok(());
     }
     // step 2: 清理当前任务的内存
-    if let Some(task) = current_task() {
+    if let Some(task) = current_task_ref() {
         let vm_ref = task.process.vm();
         let mut maybe_guard = vm_ref.try_lock();
         if let Some(address_space) = maybe_guard.as_mut() {
@@ -345,6 +355,7 @@ pub unsafe fn frame_alloc_uninit() -> Option<Arc<FrameTracker>> {
 
 /// 释放帧
 pub fn frame_dealloc(ppn: PhysPageNum) {
+    crate::task::perf::record_frame_free();
     FRAME_ALLOCATOR.write().dealloc(ppn);
 }
 
@@ -353,24 +364,41 @@ pub fn unallocated_frames() -> usize {
     FRAME_ALLOCATOR.read().unallocated_frames()
 }
 
+/// 诊断：帧分配器碎片化 (total_free, fresh, recycled, recycled_ratio)
+pub fn frame_frag_diag() -> (usize, usize, usize, f64) {
+    FRAME_ALLOCATOR.read().frag_diagnostic()
+}
+
 #[macro_export]
 /// * `$place`: the name tag for the promotion.
 /// * `statement`: the enclosed
 /// * `before`:
 /// 用于测量代码块的帧消耗情况
 macro_rules! show_frame_consumption {
-    ($place:literal; $($statement:stmt); *;) => {
-        let __frame_consumption_before = crate::mm::unallocated_frames();
-        $($statement)*
-        let __frame_consumption_after = crate::mm::unallocated_frames();
-        log::debug!("[{}] consumed frames: {}, last frames: {}", $place, (__frame_consumption_before - __frame_consumption_after) as isize, __frame_consumption_after)
-    };
-    ($place:literal, $before:ident) => {
-        log::debug!(
-            "[{}] consumed frames:{}, last frames:{}",
-            $place,
-            ($before - crate::mm::unallocated_frames()) as isize,
-            crate::mm::unallocated_frames()
-        );
-    };
+    ($place:literal; $($statement:stmt); *;) => {{
+        if log::log_enabled!(log::Level::Debug) {
+            let __frame_consumption_before = crate::mm::unallocated_frames();
+            $($statement)*
+            let __frame_consumption_after = crate::mm::unallocated_frames();
+            log::debug!(
+                "[{}] consumed frames: {}, last frames: {}",
+                $place,
+                __frame_consumption_before as isize - __frame_consumption_after as isize,
+                __frame_consumption_after
+            );
+        } else {
+            $($statement)*
+        }
+    }};
+    ($place:literal, $before:ident) => {{
+        if log::log_enabled!(log::Level::Debug) {
+            let __frame_consumption_after = crate::mm::unallocated_frames();
+            log::debug!(
+                "[{}] consumed frames:{}, last frames:{}",
+                $place,
+                $before as isize - __frame_consumption_after as isize,
+                __frame_consumption_after
+            );
+        }
+    }};
 }

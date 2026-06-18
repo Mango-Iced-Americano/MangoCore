@@ -1,11 +1,12 @@
 use core::{marker::PhantomData, ops::IndexMut};
 
 use super::page_table::{FaultAccess, PageTable, UserAccess};
-use super::{PhysAddr, StepByOne, VirtAddr};
-use crate::hal::PageTableImpl;
+use super::{AddressSpace, PhysAddr, StepByOne, VirtAddr};
 use crate::fs::iov::IOVec;
-use alloc::string::String;
-use alloc::vec::Vec;
+use crate::hal::PageTableImpl;
+use crate::task::current_task_ref;
+use alloc::{string::String, sync::Arc, vec::Vec};
+use spin::Mutex;
 
 // Cap a single user buffer translation to avoid kernel OOM.
 const MAX_BUFFER_SIZE: usize = 1024 * 1024 * 8;
@@ -260,12 +261,9 @@ pub struct UserBufferReader {
 
 impl UserBufferReader {
     pub fn new(token: usize, ptr: *const u8, len: usize) -> Result<Self, isize> {
-        // Try single-page fast path first; fall back to Vec of page slices
-        let buffer = match translate_single_page_user_bytes(token, ptr, len, UserAccess::Read)? {
-            Some(slice) => UserBuffer::single(slice),
-            None => UserBuffer::new(translated_byte_buffer(token, ptr, len, UserAccess::Read)?),
-        };
-        Ok(Self { buffer })
+        Ok(Self {
+            buffer: UserBuffer::new(translated_byte_buffer(token, ptr, len, UserAccess::Read)?),
+        })
     }
 
     pub fn into_user_buffer(self) -> UserBuffer {
@@ -297,13 +295,14 @@ pub struct UserBufferWriter {
 
 impl UserBufferWriter {
     pub fn new(token: usize, ptr: *mut u8, len: usize) -> Result<Self, isize> {
-        let buffer = match translate_single_page_user_bytes(token, ptr as *const u8, len, UserAccess::Write)? {
-            Some(slice) => UserBuffer::single(slice),
-            None => UserBuffer::new(translated_byte_buffer(
-                token, ptr as *const u8, len, UserAccess::Write,
+        Ok(Self {
+            buffer: UserBuffer::new(translated_byte_buffer(
+                token,
+                ptr as *const u8,
+                len,
+                UserAccess::Write,
             )?),
-        };
-        Ok(Self { buffer })
+        })
     }
 
     pub fn into_user_buffer(self) -> UserBuffer {
@@ -517,27 +516,45 @@ pub(crate) fn uaccess_user_range_ok(ptr: usize, end: usize) -> bool {
 }
 
 fn is_current_user_token(token: usize) -> bool {
-    crate::task::current_task()
-        .map(|task| task.get_user_token() == token)
-        .unwrap_or(false)
+    crate::task::try_current_user_token() == Some(token)
+}
+
+fn current_user_vm(
+    token: usize,
+) -> Result<Arc<Mutex<AddressSpace<PageTableImpl>>>, isize> {
+    let task = current_task_ref().ok_or(crate::syscall::errno::EFAULT)?;
+    if crate::task::current_user_token() != token {
+        return Err(crate::syscall::errno::EFAULT);
+    }
+    Ok(task.process.vm())
 }
 
 // 区分用户触发缺页时的权限
 // 例如：copy_from_user - Read; copy_to_user - Write; 获得可变引用-ReadWrite等
 // 通过不同权限的区分使得缺页处理更灵活更稳定
-fn fault_in_current_user_va(
-    token: usize,
+fn fault_in_user_va_with_vm(
+    vm: &Mutex<AddressSpace<PageTableImpl>>,
     va: VirtAddr,
     access: FaultAccess,
 ) -> Result<PhysAddr, isize> {
-    // fault-in 只能由当前任务 token 处理；跨进程 token 只能返回 EFAULT。
-    if !is_current_user_token(token) {
-        return Err(crate::syscall::errno::EFAULT);
+    vm.lock().fault_in_user_va(va, access)
+}
+
+fn translate_user_va_checked_with_vm(
+    vm: &Mutex<AddressSpace<PageTableImpl>>,
+    va: VirtAddr,
+    access: UserAccess,
+) -> Result<PhysAddr, isize> {
+    check_user_range(va.0, 1)?;
+
+    match access {
+        UserAccess::Read => fault_in_user_va_with_vm(vm, va, FaultAccess::Load),
+        UserAccess::Write => fault_in_user_va_with_vm(vm, va, FaultAccess::Store),
+        UserAccess::ReadWrite => {
+            fault_in_user_va_with_vm(vm, va, FaultAccess::Load)?;
+            fault_in_user_va_with_vm(vm, va, FaultAccess::Store)
+        }
     }
-    let task = crate::task::current_task().ok_or(crate::syscall::errno::EFAULT)?;
-    let vm = task.process.vm();
-    let result = vm.lock().fault_in_user_va(va, access);
-    result
 }
 
 // 将用户va翻译为pa
@@ -546,16 +563,8 @@ pub fn translate_user_va_checked(
     va: VirtAddr,
     access: UserAccess,
 ) -> Result<PhysAddr, isize> {
-    check_user_range(va.0, 1)?;
-
-    match access {
-        UserAccess::Read => fault_in_current_user_va(token, va, FaultAccess::Load),
-        UserAccess::Write => fault_in_current_user_va(token, va, FaultAccess::Store),
-        UserAccess::ReadWrite => {
-            fault_in_current_user_va(token, va, FaultAccess::Load)?;
-            fault_in_current_user_va(token, va, FaultAccess::Store)
-        }
-    }
+    let vm = current_user_vm(token)?;
+    translate_user_va_checked_with_vm(&vm, va, access)
 }
 
 // Split a user buffer by page.
@@ -577,10 +586,11 @@ pub fn translate_user_buffer_checked(
     }
     let mut start = ptr as usize;
     let end = check_user_range(start, len)?;
+    let vm = current_user_vm(token)?;
     let mut v = Vec::with_capacity(32);
     while start < end {
         let start_va = VirtAddr::from(start);
-        let pa = translate_user_va_checked(token, start_va, access)?;
+        let pa = translate_user_va_checked_with_vm(&vm, start_va, access)?;
         let ppn = pa.floor();
         let mut next_vpn = start_va.floor();
         next_vpn.step();
@@ -657,13 +667,14 @@ pub fn translated_str(token: usize, ptr: *const u8) -> Result<String, isize> {
     let mut string = String::new();
     let mut cur = ptr as usize;
     let max_len = MAX_BUFFER_SIZE;
+    let vm = current_user_vm(token)?;
     loop {
         if string.len() >= max_len {
             return Err(crate::syscall::errno::EFAULT);
         }
 
         let va = VirtAddr::from(cur);
-        let pa = translate_user_va_checked(token, va, UserAccess::Read)?;
+        let pa = translate_user_va_checked_with_vm(&vm, va, UserAccess::Read)?;
         let page_offset = va.page_offset();
         let page_len = (crate::config::PAGE_SIZE - page_offset).min(
             crate::config::USER_VA_END
@@ -742,33 +753,17 @@ pub fn translated_ref_write<T>(token: usize, ptr: *mut T) -> Result<&'static mut
 }
 
 // 用户缓冲区，可能跨页
-enum UserBufferSegments {
-    Empty,
-    Single(&'static mut [u8]),
-    Multi(Vec<&'static mut [u8]>),
-}
-
 pub struct UserBuffer {
-    segments: UserBufferSegments,
+    pub buffers: Vec<&'static mut [u8]>,
     pub len: usize,
 }
 
 impl UserBuffer {
     pub fn new(buffers: Vec<&'static mut [u8]>) -> Self {
-        let len = buffers.iter().map(|buffer| buffer.len()).sum();
-        if buffers.len() == 0 {
-            return Self { segments: UserBufferSegments::Empty, len };
+        Self {
+            len: buffers.iter().map(|buffer| buffer.len()).sum(),
+            buffers,
         }
-        if buffers.len() == 1 {
-            let single = buffers.into_iter().next().unwrap();
-            return Self { segments: UserBufferSegments::Single(single), len };
-        }
-        Self { segments: UserBufferSegments::Multi(buffers), len }
-    }
-
-    pub(crate) fn single(slice: &'static mut [u8]) -> Self {
-        let len = slice.len();
-        Self { segments: UserBufferSegments::Single(slice), len }
     }
 
     pub fn len(&self) -> usize {
@@ -776,235 +771,138 @@ impl UserBuffer {
     }
 
     pub fn read(&self, dst: &mut [u8]) -> usize {
-        match &self.segments {
-            UserBufferSegments::Empty => 0,
-            UserBufferSegments::Single(buf) => {
-                let n = buf.len().min(dst.len());
-                unsafe { core::ptr::copy(buf.as_ptr(), dst.as_mut_ptr(), n); }
-                n
-            }
-            UserBufferSegments::Multi(buffers) => {
-                let mut start = 0;
-                let dst_len = dst.len();
-                for buffer in buffers.iter() {
-                    let end = start + buffer.len();
-                    if end > dst_len {
-                        let n = dst_len - start;
-                        unsafe { core::ptr::copy(buffer.as_ptr(), dst.as_mut_ptr().add(start), n); }
-                        return dst_len;
-                    } else {
-                        let n = buffer.len();
-                        unsafe { core::ptr::copy(buffer.as_ptr(), dst.as_mut_ptr().add(start), n); }
-                    }
-                    start = end;
-                }
-                self.len
-            }
+        if let [buffer] = self.buffers.as_slice() {
+            let len = dst.len().min(buffer.len());
+            dst[..len].copy_from_slice(&buffer[..len]);
+            return len;
         }
+        let mut start = 0;
+        let dst_len = dst.len();
+        for buffer in self.buffers.iter() {
+            let end = start + buffer.len();
+            if end > dst_len {
+                dst[start..].copy_from_slice(&buffer[..dst_len - start]);
+                return dst_len;
+            } else {
+                dst[start..end].copy_from_slice(buffer);
+            }
+            start = end;
+        }
+        self.len
     }
 
     pub fn write(&mut self, src: &[u8]) -> usize {
-        match &mut self.segments {
-            UserBufferSegments::Empty => 0,
-            UserBufferSegments::Single(buf) => {
-                let n = buf.len().min(src.len());
-                unsafe { core::ptr::copy(src.as_ptr(), buf.as_mut_ptr(), n); }
-                n
-            }
-            UserBufferSegments::Multi(buffers) => {
-                let mut start = 0;
-                let src_len = src.len();
-                for buffer in buffers.iter_mut() {
-                    let end = start + buffer.len();
-                    if end > src_len {
-                        let n = src_len - start;
-                        unsafe { core::ptr::copy(src.as_ptr().add(start), buffer.as_mut_ptr(), n); }
-                        return src_len;
-                    } else {
-                        let n = buffer.len();
-                        unsafe { core::ptr::copy(src.as_ptr().add(start), buffer.as_mut_ptr(), n); }
-                    }
-                    start = end;
-                }
-                self.len
-            }
+        if let [buffer] = self.buffers.as_mut_slice() {
+            let len = src.len().min(buffer.len());
+            buffer[..len].copy_from_slice(&src[..len]);
+            return len;
         }
+        let mut start = 0;
+        let src_len = src.len();
+        for buffer in self.buffers.iter_mut() {
+            let end = start + buffer.len();
+            if end > src_len {
+                buffer[..src_len - start].copy_from_slice(&src[start..]);
+                return src_len;
+            } else {
+                buffer.copy_from_slice(&src[start..end]);
+            }
+            start = end;
+        }
+        self.len
     }
 
     pub fn read_at(&self, offset: usize, dst: &mut [u8]) -> usize {
         if offset >= self.len {
             return 0;
         }
-        match &self.segments {
-            UserBufferSegments::Empty => 0,
-            UserBufferSegments::Single(buf) => {
-                let start = offset;
-                let n = (buf.len() - start).min(dst.len());
-                unsafe { core::ptr::copy(buf.as_ptr().add(start), dst.as_mut_ptr(), n); }
-                n
+        let mut read_bytes = 0usize;
+        let mut dst_start = 0usize;
+        let copy_limit = dst.len().saturating_add(offset);
+        for buffer in self.buffers.iter() {
+            let dst_end = dst_start + buffer.len();
+            let copy_dst_start = dst_start.max(offset);
+            let copy_dst_end = dst_end.min(copy_limit);
+            if copy_dst_start >= copy_dst_end {
+                dst_start = dst_end;
+                continue;
             }
-            UserBufferSegments::Multi(buffers) => {
-                let mut read_bytes = 0usize;
-                let mut dst_start = 0usize;
-                let copy_limit = dst.len().saturating_add(offset);
-                for buffer in buffers.iter() {
-                    let dst_end = dst_start + buffer.len();
-                    let copy_dst_start = dst_start.max(offset);
-                    let copy_dst_end = dst_end.min(copy_limit);
-                    if copy_dst_start >= copy_dst_end {
-                        dst_start = dst_end;
-                        continue;
-                    }
-                    let copy_src_start = copy_dst_start - offset;
-                    let copy_src_end = copy_dst_end - offset;
-                    let copy_buffer_start = copy_dst_start - dst_start;
-                    let copy_buffer_end = copy_dst_end - dst_start;
-                    let n = copy_src_end - copy_src_start;
-                    unsafe {
-                        core::ptr::copy(
-                            buffer.as_ptr().add(copy_buffer_start),
-                            dst.as_mut_ptr().add(copy_src_start),
-                            n,
-                        );
-                    }
-                    read_bytes += copy_dst_end - copy_dst_start;
-                    dst_start = dst_end;
-                }
-                read_bytes
-            }
+            let copy_src_start = copy_dst_start - offset;
+            let copy_src_end = copy_dst_end - offset;
+            let copy_buffer_start = copy_dst_start - dst_start;
+            let copy_buffer_end = copy_dst_end - dst_start;
+            dst[copy_src_start..copy_src_end]
+                .copy_from_slice(&buffer[copy_buffer_start..copy_buffer_end]);
+            read_bytes += copy_dst_end - copy_dst_start;
+            dst_start = dst_end;
         }
+        read_bytes
     }
 
     pub fn write_at(&mut self, offset: usize, src: &[u8]) -> usize {
         if offset >= self.len {
             return 0;
         }
-        match &mut self.segments {
-            UserBufferSegments::Empty => 0,
-            UserBufferSegments::Single(buf) => {
-                let start = offset;
-                let n = (buf.len() - start).min(src.len());
-                unsafe { core::ptr::copy(src.as_ptr(), buf.as_mut_ptr().add(start), n); }
-                n
+        let mut write_bytes = 0usize;
+        let mut dst_start = 0usize;
+        let copy_limit = src.len().saturating_add(offset);
+        for buffer in self.buffers.iter_mut() {
+            let dst_end = dst_start + buffer.len();
+            let copy_dst_start = dst_start.max(offset);
+            let copy_dst_end = dst_end.min(copy_limit);
+            if copy_dst_start >= copy_dst_end {
+                dst_start = dst_end;
+                continue;
             }
-            UserBufferSegments::Multi(buffers) => {
-                let mut write_bytes = 0usize;
-                let mut dst_start = 0usize;
-                let copy_limit = src.len().saturating_add(offset);
-                for buffer in buffers.iter_mut() {
-                    let dst_end = dst_start + buffer.len();
-                    let copy_dst_start = dst_start.max(offset);
-                    let copy_dst_end = dst_end.min(copy_limit);
-                    if copy_dst_start >= copy_dst_end {
-                        dst_start = dst_end;
-                        continue;
-                    }
-                    let copy_src_start = copy_dst_start - offset;
-                    let copy_src_end = copy_dst_end - offset;
-                    let copy_buffer_start = copy_dst_start - dst_start;
-                    let copy_buffer_end = copy_dst_end - dst_start;
-                    let n = copy_src_end - copy_src_start;
-                    unsafe {
-                        core::ptr::copy(
-                            src.as_ptr().add(copy_src_start),
-                            buffer.as_mut_ptr().add(copy_buffer_start),
-                            n,
-                        );
-                    }
-                    write_bytes += copy_dst_end - copy_dst_start;
-                    dst_start = dst_end;
-                }
-                write_bytes
-            }
+            let copy_src_start = copy_dst_start - offset;
+            let copy_src_end = copy_dst_end - offset;
+            let copy_buffer_start = copy_dst_start - dst_start;
+            let copy_buffer_end = copy_dst_end - dst_start;
+            buffer[copy_buffer_start..copy_buffer_end]
+                .copy_from_slice(&src[copy_src_start..copy_src_end]);
+            write_bytes += copy_dst_end - copy_dst_start;
+            dst_start = dst_end;
         }
+        write_bytes
     }
 
     pub fn clear(&mut self) {
-        match &mut self.segments {
-            UserBufferSegments::Empty => {}
-            UserBufferSegments::Single(buf) => buf.fill(0),
-            UserBufferSegments::Multi(buffers) => {
-                buffers.iter_mut().for_each(|buffer| { buffer.fill(0); })
-            }
-        }
-    }
-
-    pub fn fill_at(&mut self, offset: usize, len: usize, value: u8) -> usize {
-        if len == 0 || offset >= self.len {
-            return 0;
-        }
-        match &mut self.segments {
-            UserBufferSegments::Empty => 0,
-            UserBufferSegments::Single(buf) => {
-                let start = offset;
-                let n = (buf.len() - start).min(len);
-                buf[start..start + n].fill(value);
-                n
-            }
-            UserBufferSegments::Multi(buffers) => {
-                let limit = offset.saturating_add(len).min(self.len);
-                let mut logical = 0usize;
-                let mut filled = 0usize;
-                for buffer in buffers.iter_mut() {
-                    let next = logical + buffer.len();
-                    let start = logical.max(offset);
-                    let end = next.min(limit);
-                    if start < end {
-                        let b0 = start - logical;
-                        let b1 = end - logical;
-                        buffer[b0..b1].fill(value);
-                        filled += end - start;
-                    }
-                    logical = next;
-                    if logical >= limit {
-                        break;
-                    }
-                }
-                filled
-            }
-        }
+        self.buffers.iter_mut().for_each(|buffer| {
+            buffer.fill(0);
+        })
     }
 }
 
+//There may be better implementations here to cover more types
 impl core::ops::Index<usize> for UserBuffer {
     type Output = u8;
 
     fn index(&self, index: usize) -> &Self::Output {
-        assert!(index < self.len);
-        match &self.segments {
-            UserBufferSegments::Empty => unreachable!(),
-            UserBufferSegments::Single(buf) => &buf[index],
-            UserBufferSegments::Multi(buffers) => {
-                let mut left = index;
-                for buffer in buffers {
-                    if left < buffer.len() {
-                        return &buffer[left];
-                    }
-                    left -= buffer.len();
-                }
-                unreachable!();
+        assert!((index as usize) < self.len);
+        let mut left = index;
+        for buffer in &self.buffers {
+            if (left as usize) < buffer.len() {
+                return &buffer[left];
+            } else {
+                left -= buffer.len();
             }
         }
+        unreachable!();
     }
 }
 
 impl IndexMut<usize> for UserBuffer {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        assert!(index < self.len);
-        match &mut self.segments {
-            UserBufferSegments::Empty => unreachable!(),
-            UserBufferSegments::Single(buf) => &mut buf[index],
-            UserBufferSegments::Multi(buffers) => {
-                let mut left = index;
-                for buffer in buffers {
-                    if left < buffer.len() {
-                        return &mut buffer[left];
-                    }
-                    left -= buffer.len();
-                }
-                unreachable!();
+        assert!((index as usize) < self.len);
+        let mut left = index;
+        for buffer in &mut self.buffers {
+            if (left as usize) < buffer.len() {
+                return &mut buffer[left];
+            } else {
+                left -= buffer.len();
             }
         }
+        unreachable!();
     }
 }
 
@@ -1012,14 +910,10 @@ impl IntoIterator for UserBuffer {
     type Item = *mut u8;
     type IntoIter = UserBufferIterator;
     fn into_iter(self) -> Self::IntoIter {
-        match self.segments {
-            UserBufferSegments::Empty => UserBufferIterator { buffers: Vec::new(), current_buffer: 0, current_idx: 0 },
-            UserBufferSegments::Single(buf) => {
-                let mut v = alloc::vec::Vec::new();
-                v.push(buf);
-                UserBufferIterator { buffers: v, current_buffer: 0, current_idx: 0 }
-            },
-            UserBufferSegments::Multi(buffers) => UserBufferIterator { buffers, current_buffer: 0, current_idx: 0 },
+        UserBufferIterator {
+            buffers: self.buffers,
+            current_buffer: 0,
+            current_idx: 0,
         }
     }
 }
@@ -1054,7 +948,7 @@ impl Iterator for UserBufferIterator {
     }
 }
 
-pub fn translate_single_page_user_bytes(
+fn translate_single_page_user_bytes(
     token: usize,
     ptr: *const u8,
     len: usize,

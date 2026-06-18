@@ -1,17 +1,17 @@
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 
 use crate::mm::{UserPtr, UserPtrMut};
 use crate::syscall::errno::*;
 use crate::task::{
-    add_kernel_timer, current_task, current_user_token, find_process_by_pid, find_task_by_tid,
-    signal::{SigInfo, Signals},
-    PosixTimer, sleep_relative_interruptible, Rusage, TimerAction,
+    add_kernel_timer, all_processes, current_task, current_task_ref, current_user_token,
+    find_process_by_pid, find_task_by_tid, signal::{SigInfo, Signals},
+    sleep_relative_interruptible, sleep_until_realtime_interruptible, wake_interruptible,
+    wake_realtime_abstime_sleepers_after_clock_set, PosixTimer, Rusage, TaskStatus, TimerAction,
 };
 use crate::timer::{
     current_timespec, current_timeval, get_time_ms, set_current_timespec, ITimerVal, TimeSpec,
     TimeVal, TimeZone, Times, NSEC_PER_SEC, USEC_PER_SEC,
 };
-use log::{info, trace};
 use spin::Mutex;
 
 const CLOCK_REALTIME: usize = 0;
@@ -172,15 +172,11 @@ pub fn sys_setitimer(
     new_value: *const ITimerVal,
     old_value: *mut ITimerVal,
 ) -> isize {
-    info!(
-        "[sys_setitimer] which: {}, new_value: {:?}, old_value: {:?}",
-        which, new_value, old_value
-    );
     if which > 2 {
         return EINVAL;
     }
-    let task = current_task().unwrap();
-    let token = task.get_user_token();
+    let task = current_task_ref().unwrap();
+    let token = current_user_token();
     let new_timer = match UserPtr::new(new_value).read_optional(token) {
         Ok(value) => value,
         Err(e) => {
@@ -203,7 +199,6 @@ pub fn sys_setitimer(
                     if let Err(e) = UserPtrMut::new(old_value).write(token, &inner.timer[0]) {
                         return e;
                     }
-                    trace!("[sys_setitimer] *old_value: {:?}", inner.timer[0]);
                 }
                 if let Some(value) = new_timer {
                     //防止generation溢出
@@ -222,6 +217,7 @@ pub fn sys_setitimer(
                 }
             }
             if let Some((deadline, generation)) = register_timer {
+                let task = current_task().unwrap();
                 add_kernel_timer(
                     TimerAction::SendSignal {
                         //降为弱引用
@@ -240,11 +236,9 @@ pub fn sys_setitimer(
                 if let Err(e) = UserPtrMut::new(old_value).write(token, &inner.timer[which]) {
                     return e;
                 }
-                trace!("[sys_setitimer] *old_value: {:?}", inner.timer[which]);
             }
             if let Some(value) = new_timer {
                 inner.timer[which] = value;
-                trace!("[sys_setitimer] *new_value: {:?}", inner.timer[which]);
                 inner.clock.last_real_timer_update = TimeVal::now();
             }
             SUCCESS
@@ -261,8 +255,8 @@ pub fn sys_getitimer(which: usize, curr_value: *mut ITimerVal) -> isize {
         return EFAULT;
     }
 
-    let task = current_task().unwrap();
-    let token = task.get_user_token();
+    let task = current_task_ref().unwrap();
+    let token = current_user_token();
     let now = TimeSpec::now();
     let value = {
         let inner = task.acquire_inner_lock();
@@ -312,7 +306,7 @@ pub fn sys_timer_create(
         }
     };
 
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let id = {
         let mut inner = task.acquire_inner_lock();
         if let Some((id, slot)) = inner
@@ -371,7 +365,7 @@ pub fn sys_timer_settime(
         return EINVAL;
     }
 
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let mut register_timer = None;
     {
         let mut inner = task.acquire_inner_lock();
@@ -391,30 +385,47 @@ pub fn sys_timer_settime(
             timer.value = new_spec.it_value;
             timer.generation = timer.generation.wrapping_add(1);
             timer.reset_overrun();
+            timer.realtime_abs_deadline = None;
             if timer.value.is_zero() {
                 timer.deadline = None;
-            } else if flags & TIMER_ABSTIME != 0
-                && timer.value <= posix_timer_clock_now(timer.clock_id)
-            {
+            } else {
                 let clock_now = posix_timer_clock_now(timer.clock_id);
-                deliver_signal = timer.signal;
-                if timer.interval.is_zero() {
-                    timer.value = TimeSpec::new();
-                    timer.deadline = None;
+                let now_monotonic = TimeSpec::now();
+                if flags & TIMER_ABSTIME != 0 && timer.value <= clock_now {
+                    deliver_signal = timer.signal;
+                    if timer.interval.is_zero() {
+                        timer.value = TimeSpec::new();
+                        timer.deadline = None;
+                        timer.realtime_abs_deadline = None;
+                    } else {
+                        let (deadline, overrun, next_abs_deadline) =
+                            posix_timer_deadline_after_absolute_overrun(
+                                timer.value,
+                                timer.interval,
+                                clock_now,
+                                now_monotonic,
+                            );
+                        timer.add_overrun(overrun);
+                        if is_realtime_posix_timer_clock(timer.clock_id) {
+                            timer.realtime_abs_deadline = Some(next_abs_deadline);
+                        }
+                        timer.deadline = Some(deadline);
+                        register_timer = Some((deadline, timer.signal, timer.generation));
+                    }
                 } else {
-                    let (deadline, overrun) = posix_timer_deadline_after_absolute_overrun(
+                    let deadline = posix_timer_deadline(
+                        timer.clock_id,
+                        flags,
                         timer.value,
-                        timer.interval,
                         clock_now,
+                        now_monotonic,
                     );
-                    timer.add_overrun(overrun);
+                    if flags & TIMER_ABSTIME != 0 && is_realtime_posix_timer_clock(timer.clock_id) {
+                        timer.realtime_abs_deadline = Some(timer.value);
+                    }
                     timer.deadline = Some(deadline);
                     register_timer = Some((deadline, timer.signal, timer.generation));
                 }
-            } else {
-                let deadline = posix_timer_deadline(timer.clock_id, flags, timer.value);
-                timer.deadline = Some(deadline);
-                register_timer = Some((deadline, timer.signal, timer.generation));
             }
             deliver_signal
         };
@@ -426,6 +437,7 @@ pub fn sys_timer_settime(
     }
 
     if let Some((deadline, signal, generation)) = register_timer {
+        let task = current_task().unwrap();
         add_kernel_timer(
             TimerAction::PosixTimerSignal {
                 task: Arc::downgrade(&task),
@@ -443,7 +455,7 @@ pub fn sys_timer_gettime(timer_id: usize, curr_value: *mut ITimerSpec) -> isize 
     if curr_value.is_null() {
         return EFAULT;
     }
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let value = {
         let inner = task.acquire_inner_lock();
         let Some(Some(timer)) = inner.posix_timers.get(timer_id) else {
@@ -451,14 +463,14 @@ pub fn sys_timer_gettime(timer_id: usize, curr_value: *mut ITimerSpec) -> isize 
         };
         current_posix_itimerspec(timer)
     };
-    match UserPtrMut::new(curr_value).write(task.get_user_token(), &value) {
+    match UserPtrMut::new(curr_value).write(current_user_token(), &value) {
         Ok(()) => SUCCESS,
         Err(errno) => errno,
     }
 }
 
 pub fn sys_timer_getoverrun(timer_id: usize) -> isize {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let inner = task.acquire_inner_lock();
     match inner.posix_timers.get(timer_id) {
         Some(Some(timer)) => timer.overrun() as isize,
@@ -467,7 +479,7 @@ pub fn sys_timer_getoverrun(timer_id: usize) -> isize {
 }
 
 pub fn sys_timer_delete(timer_id: usize) -> isize {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let mut inner = task.acquire_inner_lock();
     match inner.posix_timers.get_mut(timer_id) {
         Some(slot @ Some(_)) => {
@@ -483,7 +495,7 @@ fn timeval_to_timespec(value: TimeVal) -> TimeSpec {
 }
 
 fn timespec_to_timeval(value: TimeSpec) -> TimeVal {
-    TimeVal::from_us(value.to_ns() / 1000)
+    TimeVal::from_us((value.to_ns_saturating() / 1000) as usize)
 }
 
 fn valid_posix_timer_clock(clock_id: usize) -> bool {
@@ -512,29 +524,56 @@ fn posix_timer_clock_now(clock_id: usize) -> TimeSpec {
     }
 }
 
-fn posix_timer_deadline(clock_id: usize, flags: u32, value: TimeSpec) -> TimeSpec {
+fn is_realtime_posix_timer_clock(clock_id: usize) -> bool {
+    matches!(clock_id, CLOCK_REALTIME | CLOCK_REALTIME_ALARM | CLOCK_TAI)
+}
+
+fn realtime_deadline_to_monotonic(
+    deadline: TimeSpec,
+    now_realtime: TimeSpec,
+    now_monotonic: TimeSpec,
+) -> TimeSpec {
+    if deadline >= now_realtime {
+        now_monotonic + (deadline - now_realtime)
+    } else {
+        now_monotonic - (now_realtime - deadline)
+    }
+}
+
+fn posix_timer_deadline(
+    clock_id: usize,
+    flags: u32,
+    value: TimeSpec,
+    clock_now: TimeSpec,
+    now_monotonic: TimeSpec,
+) -> TimeSpec {
+    if flags & TIMER_ABSTIME != 0 && is_realtime_posix_timer_clock(clock_id) {
+        return realtime_deadline_to_monotonic(value, clock_now, now_monotonic);
+    }
     let duration = if flags & TIMER_ABSTIME != 0 {
-        timespec_saturating_sub(value, posix_timer_clock_now(clock_id))
+        timespec_saturating_sub(value, clock_now)
     } else {
         value
     };
-    TimeSpec::now() + duration
+    now_monotonic + duration
 }
 
 fn posix_timer_deadline_after_absolute_overrun(
     value: TimeSpec,
     interval: TimeSpec,
     clock_now: TimeSpec,
-) -> (TimeSpec, usize) {
-    let interval_ns = interval.to_ns().max(1);
-    let elapsed_ns = clock_now.to_ns().saturating_sub(value.to_ns());
+    now_monotonic: TimeSpec,
+) -> (TimeSpec, usize, TimeSpec) {
+    let interval_ns = interval.to_ns_saturating().max(1) as usize;
+    let elapsed_ns = (clock_now.to_ns_saturating() as usize)
+        .saturating_sub(value.to_ns_saturating() as usize);
     let expirations = 1usize.saturating_add(elapsed_ns / interval_ns);
-    let next_clock_ns = value
-        .to_ns()
+    let next_clock_ns = (value.to_ns_saturating() as usize)
         .saturating_add(expirations.saturating_mul(interval_ns));
-    let duration = timespec_saturating_sub(TimeSpec::from_ns(next_clock_ns), clock_now);
-    let deadline = TimeSpec::now() + duration;
-    (deadline, expirations.saturating_sub(1))
+    let next_abs_deadline = TimeSpec::from_ns(next_clock_ns);
+    let duration = timespec_saturating_sub(next_abs_deadline, clock_now);
+    let deadline = now_monotonic + duration;
+    (deadline, expirations.saturating_sub(1), next_abs_deadline)
 }
 
 fn current_posix_itimerspec(timer: &PosixTimer) -> ITimerSpec {
@@ -548,7 +587,111 @@ fn current_posix_itimerspec(timer: &PosixTimer) -> ITimerSpec {
     }
 }
 
+fn rearm_posix_realtime_timers_after_clock_set() -> usize {
+    let now_realtime = current_timespec();
+    let now_monotonic = TimeSpec::now();
+    let mut registrations = Vec::new();
+
+    for process in all_processes() {
+        for task in process.threads() {
+            let mut should_wake_task = false;
+            {
+                let mut inner = task.acquire_inner_lock();
+                let mut deliver_signals = Vec::new();
+                for (timer_id, timer_slot) in inner.posix_timers.iter_mut().enumerate() {
+                    let Some(timer) = timer_slot.as_mut() else {
+                        continue;
+                    };
+                    if !is_realtime_posix_timer_clock(timer.clock_id) {
+                        continue;
+                    }
+                    let Some(abs_deadline) = timer.realtime_abs_deadline else {
+                        continue;
+                    };
+                    if timer.deadline.is_none() {
+                        timer.realtime_abs_deadline = None;
+                        continue;
+                    }
+
+                    timer.generation = timer.generation.wrapping_add(1);
+                    if abs_deadline <= now_realtime {
+                        let signal = timer.signal;
+                        deliver_signals.push(signal);
+                        if timer.interval.is_zero() {
+                            timer.value = TimeSpec::new();
+                            timer.deadline = None;
+                            timer.realtime_abs_deadline = None;
+                            continue;
+                        }
+                        let (deadline, overrun, next_abs_deadline) =
+                            posix_timer_deadline_after_absolute_overrun(
+                                abs_deadline,
+                                timer.interval,
+                                now_realtime,
+                                now_monotonic,
+                            );
+                        timer.add_overrun(overrun);
+                        timer.value = timer.interval;
+                        timer.deadline = Some(deadline);
+                        timer.realtime_abs_deadline = Some(next_abs_deadline);
+                        registrations.push((task.clone(), timer_id, signal, timer.generation, deadline));
+                    } else {
+                        let deadline =
+                            realtime_deadline_to_monotonic(abs_deadline, now_realtime, now_monotonic);
+                        timer.deadline = Some(deadline);
+                        registrations.push((
+                            task.clone(),
+                            timer_id,
+                            timer.signal,
+                            timer.generation,
+                            deadline,
+                        ));
+                    }
+                }
+
+                for signal in deliver_signals {
+                    if signal.is_empty() {
+                        continue;
+                    }
+                    let _ = inner
+                        .sigpending
+                        .enqueue_signal(signal, SigInfo::SI_TIMER as usize);
+                    if signal.wakes_interruptible(
+                        inner.sigmask,
+                        inner.signal_wait_mask,
+                        true,
+                    ) && inner.task_status == TaskStatus::Interruptible
+                    {
+                        inner.task_status = TaskStatus::Ready;
+                        should_wake_task = true;
+                    }
+                }
+            }
+            if should_wake_task {
+                wake_interruptible(task.clone());
+            }
+        }
+    }
+
+    let count = registrations.len();
+    for (task, timer_id, signal, generation, deadline) in registrations {
+        add_kernel_timer(
+            TimerAction::PosixTimerSignal {
+                task: Arc::downgrade(&task),
+                timer_id,
+                signal,
+                generation,
+            },
+            deadline,
+        );
+    }
+    count
+}
+
 pub fn sys_gettimeofday(tv: *mut TimeVal, tz: *mut TimeZone) -> isize {
+    if tv.is_null() && tz.is_null() {
+        return SUCCESS;
+    }
     let token = current_user_token();
     if !tv.is_null() {
         let timeval = current_timeval();
@@ -575,6 +718,9 @@ fn is_valid_timeval(timeval: TimeVal) -> bool {
 }
 
 pub fn sys_settimeofday(tv: *const TimeVal, tz: *const TimeZone) -> isize {
+    if tv.is_null() && tz.is_null() {
+        return SUCCESS;
+    }
     let token = current_user_token();
     if !tz.is_null() {
         if let Err(errno) = UserPtr::new(tz).read(token) {
@@ -595,6 +741,7 @@ pub fn sys_settimeofday(tv: *const TimeVal, tz: *const TimeZone) -> isize {
         return EPERM;
     }
     set_current_timespec(timeval_to_timespec(timeval));
+    handle_realtime_clock_was_set();
     SUCCESS
 }
 
@@ -609,14 +756,15 @@ fn valid_timex_value(timex: &Timex) -> bool {
 }
 
 fn has_time_adjust_permission() -> bool {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let inner = task.acquire_inner_lock();
     (inner.cap_effective & (1u64 << CAP_SYS_TIME)) != 0
 }
 
-fn update_timex_state(state: &mut TimexState, timex: &Timex) {
+fn update_timex_state(state: &mut TimexState, timex: &Timex) -> bool {
+    let mut realtime_changed = false;
     if timex.modes == ADJ_OFFSET_SINGLESHOT || timex.modes == ADJ_OFFSET_SS_READ {
-        return;
+        return realtime_changed;
     }
     if timex.modes & ADJ_OFFSET != 0 {
         state.offset = timex.offset;
@@ -651,7 +799,9 @@ fn update_timex_state(state: &mut TimexState, timex: &Timex) {
     if timex.modes & ADJ_SETOFFSET != 0 {
         let target = current_timespec() + TimeSpec::from_us(timex.time.to_us());
         set_current_timespec(target);
+        realtime_changed = true;
     }
+    realtime_changed
 }
 
 fn timex_return_state(status: i32) -> isize {
@@ -700,13 +850,16 @@ fn do_adjtimex(timex_ptr: *mut Timex) -> isize {
     if timex.modes != 0 && !has_time_adjust_permission() {
         return EPERM;
     }
-    let ret = {
+    let (ret, realtime_changed) = {
         let mut state = TIMEX_STATE.lock();
-        update_timex_state(&mut state, &timex);
+        let realtime_changed = update_timex_state(&mut state, &timex);
         let snapshot = *state;
         fill_timex_snapshot(&mut timex, snapshot);
-        timex_return_state(snapshot.status)
+        (timex_return_state(snapshot.status), realtime_changed)
     };
+    if realtime_changed {
+        handle_realtime_clock_was_set();
+    }
     match UserPtrMut::new(timex_ptr).write(token, &timex) {
         Ok(()) => ret,
         Err(errno) => errno,
@@ -740,7 +893,14 @@ pub fn sys_clock_settime(clk_id: usize, tp: *const TimeSpec) -> isize {
         return EPERM;
     }
     set_current_timespec(timespec);
+    handle_realtime_clock_was_set();
     SUCCESS
+}
+
+fn handle_realtime_clock_was_set() {
+    let _ = crate::fs::timerfd::handle_realtime_clock_was_set();
+    let _ = rearm_posix_realtime_timers_after_clock_set();
+    let _ = wake_realtime_abstime_sleepers_after_clock_set();
 }
 
 pub fn sys_get_time() -> isize {
@@ -799,13 +959,13 @@ fn cpu_clock_from_rusage(rusage: Rusage, which: i32, nice: i32) -> TimeSpec {
 
 fn validate_cpu_clock_id(clk_id: usize) -> Result<CpuClockId, isize> {
     let clock = decode_cpu_clock_id(clk_id)?;
-    let current = current_task().unwrap();
     if clock.pid == 0 {
         return Ok(clock);
     }
     let exists = if clock.per_thread {
         find_task_by_tid(clock.pid).is_some()
     } else {
+        let current = current_task_ref().unwrap();
         find_process_by_pid(clock.pid).is_some()
             || (clock.pid == current.gettid() && find_process_by_pid(current.pid()).is_some())
     };
@@ -818,25 +978,35 @@ fn validate_cpu_clock_id(clk_id: usize) -> Result<CpuClockId, isize> {
 
 fn cpu_clock_timespec(clk_id: usize) -> Result<TimeSpec, isize> {
     let clock = validate_cpu_clock_id(clk_id)?;
-    let current = current_task().unwrap();
     if clock.per_thread {
-        let task = if clock.pid == 0 {
-            current
+        if clock.pid == 0 {
+            let task = current_task_ref().unwrap();
+            let inner = task.acquire_inner_lock();
+            return Ok(cpu_clock_from_rusage(
+                inner.rusage,
+                clock.which,
+                inner.sched_nice,
+            ));
         } else {
-            find_task_by_tid(clock.pid).ok_or(EINVAL)?
-        };
-        let inner = task.acquire_inner_lock();
-        return Ok(cpu_clock_from_rusage(
-            inner.rusage,
-            clock.which,
-            inner.sched_nice,
-        ));
+            let task = find_task_by_tid(clock.pid).ok_or(EINVAL)?;
+            let inner = task.acquire_inner_lock();
+            return Ok(cpu_clock_from_rusage(
+                inner.rusage,
+                clock.which,
+                inner.sched_nice,
+            ));
+        }
     }
 
-    let process = if clock.pid == 0 || clock.pid == current.gettid() {
-        current.process.clone()
+    let process = if clock.pid == 0 {
+        current_task_ref().unwrap().process.clone()
     } else {
-        find_process_by_pid(clock.pid).ok_or(EINVAL)?
+        let current = current_task_ref().unwrap();
+        if clock.pid == current.gettid() {
+            current.process.clone()
+        } else {
+            find_process_by_pid(clock.pid).ok_or(EINVAL)?
+        }
     };
     let mut cpu_us = 0usize;
     let mut saw_thread = false;
@@ -888,34 +1058,40 @@ pub fn sys_clock_gettime(clk_id: usize, tp: *mut TimeSpec) -> isize {
             log::error!("[sys_clock_gettime] Failed to copy to {:?}", tp);
             return EFAULT;
         };
-        log::trace!("[sys_clock_gettime] clk_id: {}, tp: {:?}", clk_id, timespec);
     }
     SUCCESS
 }
 
 pub fn sys_clock_getres(clk_id: usize, tp: *mut TimeSpec) -> isize {
-    match clk_id {
-        CLOCK_REALTIME
-        | CLOCK_MONOTONIC
-        | CLOCK_PROCESS_CPUTIME_ID
-        | CLOCK_THREAD_CPUTIME_ID
-        | CLOCK_MONOTONIC_RAW
-        | CLOCK_REALTIME_COARSE
-        | CLOCK_MONOTONIC_COARSE
-        | CLOCK_BOOTTIME
-        | CLOCK_REALTIME_ALARM
-        | CLOCK_BOOTTIME_ALARM
-        | CLOCK_TAI => {}
+    let ns = match clk_id {
+        CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW
+        | CLOCK_BOOTTIME | CLOCK_REALTIME_ALARM | CLOCK_BOOTTIME_ALARM
+        | CLOCK_TAI => {
+            // hardware counter resolution: ceil(1e9 / freq)
+            let freq = crate::timer::clock_freq();
+            ((1_000_000_000u128 + freq as u128 - 1) / freq as u128) as usize
+        }
+        CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE => {
+            // sched tick granularity
+            10_000_000 // 10 ms
+        }
+        CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
+            // CPU accounting currently approximates to ~1 us
+            1_000
+        }
         _ => {
             if let Err(errno) = validate_cpu_clock_id(clk_id) {
                 return errno;
             }
+            // default: hardware counter resolution
+            let freq = crate::timer::clock_freq();
+            ((1_000_000_000u128 + freq as u128 - 1) / freq as u128) as usize
         }
-    }
+    };
     if !tp.is_null() {
         let resolution = TimeSpec {
             tv_sec: 0,
-            tv_nsec: 1,
+            tv_nsec: ns,
         };
         if UserPtrMut::new(tp)
             .write(current_user_token(), &resolution)
@@ -949,12 +1125,13 @@ pub fn sys_clock_nanosleep(
         return EINVAL;
     }
 
-    info!(
-        "[sys_clock_nanosleep] clk_id: {}, flags: {:?}, rqtp: {:?}, rmtp: {:?}",
-        clk_id, flags, req, rmtp
-    );
-
     if flags & TIMER_ABSTIME != 0 {
+        if clk_id == CLOCK_REALTIME {
+            return match sleep_until_realtime_interruptible(req) {
+                Ok(()) => SUCCESS,
+                Err(_) => EINTR,
+            };
+        }
         // 绝对睡眠的时间点属于传入的 clock，等待队列内部只使用单调时间。
         let duration = timespec_saturating_sub(req, sleep_clock_now(clk_id));
         match sleep_relative_interruptible(duration) {
@@ -1020,7 +1197,7 @@ fn check_sleep_clock(clk_id: usize) -> Result<(), isize> {
 }
 
 pub fn sys_times(buf: *mut Times) -> isize {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let (utime, stime) = {
         let inner = task.acquire_inner_lock();
         (
@@ -1029,7 +1206,7 @@ pub fn sys_times(buf: *mut Times) -> isize {
         )
     };
     let child_rusage = task.process.child_rusage();
-    let token = task.get_user_token();
+    let token = current_user_token();
     let times = Times {
         tms_utime: utime,
         tms_stime: stime,
@@ -1049,8 +1226,8 @@ pub fn sys_getrusage(who: isize, usage: *mut Rusage) -> isize {
     const RUSAGE_SELF: isize = 0;
     const RUSAGE_THREAD: isize = 1;
 
-    let task = current_task().unwrap();
-    let token = task.get_user_token();
+    let task = current_task_ref().unwrap();
+    let token = current_user_token();
     let rusage = match who {
         RUSAGE_SELF | RUSAGE_THREAD => {
             let resident_kb = task.process.vm().lock().resident_user_bytes() / 1024;

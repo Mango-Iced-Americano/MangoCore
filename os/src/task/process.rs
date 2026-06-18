@@ -2,20 +2,20 @@ use super::{
     pid::{RecycleAllocator, TidHandle},
     quota::TaskQuotaGuard,
     registry,
-    signal::{sigchld_requests_auto_reap, PendingSignal, SignalQueue, Sighand, Signals},
+    signal::{sigchld_requests_auto_reap, PendingSignal, Sighand, SignalQueue, Signals},
     threads::Futex,
-    wake_interruptible, Completion, FsStatus, IpcNamespace, MountNamespace, NetNamespace,
-    TaskControlBlock, TaskStatus,
-    UtsNamespace, Rusage, WaitQueue, INITPROC,
+    wake_interruptible, Completion, FsStatus, IpcNamespace, MountNamespace, NetNamespace, Rusage,
+    TaskControlBlock, TaskStatus, UtsNamespace, WaitQueue, INITPROC,
 };
 use crate::fs::vfs;
 use crate::mm::{AddressSpace, PageTableImpl};
+use crate::signal_type;
 use crate::utils::error::SyscallErr;
 use alloc::collections::BTreeMap;
-use alloc::sync::{Arc, Weak};
-use core::sync::atomic::{AtomicBool, Ordering};
 use alloc::string::String;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 use log::warn;
 use spin::{Mutex, MutexGuard};
@@ -40,6 +40,10 @@ pub struct ProcessControlBlock {
     process_quota: Mutex<Option<TaskQuotaGuard>>,
     /// 属于该进程的线程列表。
     pub threads: Mutex<Vec<Weak<TaskControlBlock>>>,
+    /// Number of threads currently counted as live in this process.
+    live_threads: AtomicUsize,
+    /// Reusable user-resource slots whose trap context page is still mapped.
+    trap_context_cache: Mutex<Vec<usize>>,
     /// 父进程 wait4() 等待子进程退出的等待队列。
     pub child_exit_wait: Mutex<WaitQueue>,
     /// CLONE_VFORK 父线程。Some 表示当前进程来自 vfork，且尚未完成。
@@ -49,8 +53,13 @@ pub struct ProcessControlBlock {
     /// 是否被 init 收养（通过 adopt_children_by_init）。用于 finish_exit
     /// 中区分 init 直接 fork 的子进程和被收养的孤儿，只对后者自动回收。
     pub adopted_by_init: AtomicBool,
+    pgid_hint: AtomicUsize,
+    sid_hint: AtomicUsize,
+    parent_pid_hint: AtomicUsize,
+    user_token_hint: AtomicUsize,
     inner: Mutex<ProcessInner>,
     signal: Mutex<ProcessSignalState>,
+    shared_pending_hint: AtomicU64,
 }
 
 pub struct ProcessInner {
@@ -130,20 +139,24 @@ pub struct ProcessSignalState {
 }
 
 type InodeBusyKey = (usize, vfs::InodeId);
+const TRAP_CONTEXT_CACHE_LIMIT: usize = 256;
 
 lazy_static! {
-    static ref EXEC_INODE_REFS: Mutex<BTreeMap<InodeBusyKey, usize>> =
-        Mutex::new(BTreeMap::new());
-    static ref WRITE_INODE_REFS: Mutex<BTreeMap<InodeBusyKey, usize>> =
-        Mutex::new(BTreeMap::new());
+    static ref EXEC_INODE_REFS: Mutex<BTreeMap<InodeBusyKey, usize>> = Mutex::new(BTreeMap::new());
+    static ref WRITE_INODE_REFS: Mutex<BTreeMap<InodeBusyKey, usize>> = Mutex::new(BTreeMap::new());
 }
 
 fn inode_busy_key(inode: &Arc<dyn vfs::IndexNode>) -> Option<InodeBusyKey> {
-    inode.metadata().ok().map(|meta| (meta.dev_id, meta.inode_id))
+    inode
+        .metadata()
+        .ok()
+        .map(|meta| (meta.dev_id, meta.inode_id))
 }
 
 fn exec_key_from_file(file: &vfs::File) -> Option<InodeBusyKey> {
-    file.metadata().ok().map(|meta| (meta.dev_id, meta.inode_id))
+    file.metadata()
+        .ok()
+        .map(|meta| (meta.dev_id, meta.inode_id))
 }
 
 fn register_busy_key(refs: &Mutex<BTreeMap<InodeBusyKey, usize>>, key: InodeBusyKey) {
@@ -244,16 +257,28 @@ impl ProcessControlBlock {
             register_exec_key(key);
         }
         let net_for_registry = net.clone();
+        let parent_pid_hint = parent
+            .as_ref()
+            .and_then(|parent| parent.upgrade())
+            .map(|parent| parent.pid)
+            .unwrap_or(0);
+        let user_token = vm.lock().token();
         let pcb = Self {
             pid,
             leader_tid,
             _pid_handle: pid_handle,
             process_quota: Mutex::new(Some(process_quota)),
             threads: Mutex::new(Vec::new()),
+            live_threads: AtomicUsize::new(0),
+            trap_context_cache: Mutex::new(Vec::new()),
             child_exit_wait: Mutex::new(WaitQueue::new()),
             vfork_parent: Mutex::new(None),
             vfork_done: Completion::new(),
             adopted_by_init: AtomicBool::new(false),
+            pgid_hint: AtomicUsize::new(pgid),
+            sid_hint: AtomicUsize::new(sid),
+            parent_pid_hint: AtomicUsize::new(parent_pid_hint),
+            user_token_hint: AtomicUsize::new(user_token),
             inner: Mutex::new(ProcessInner {
                 exe,
                 exec_key,
@@ -295,6 +320,7 @@ impl ProcessControlBlock {
                 group_exit_code: None,
                 group_exiting: false,
             }),
+            shared_pending_hint: AtomicU64::new(0),
         };
         super::net_namespace::register_ns_for_pid(pid, &net_for_registry);
         pcb
@@ -429,7 +455,15 @@ impl ProcessControlBlock {
     }
 
     pub fn replace_vm(&self, vm: AddressSpace<PageTableImpl>) {
+        let token = vm.token();
+        self.trap_context_cache.lock().clear();
         self.inner.lock().vm = Arc::new(Mutex::new(vm));
+        self.user_token_hint.store(token, Ordering::Relaxed);
+        super::processor::refresh_current_user_token_for_process(self.pid, token);
+    }
+
+    pub fn user_token(&self) -> usize {
+        self.user_token_hint.load(Ordering::Relaxed)
     }
 
     pub fn sighand(&self) -> Arc<Mutex<Sighand>> {
@@ -487,13 +521,35 @@ impl ProcessControlBlock {
 
     pub fn add_thread(&self, task: &Arc<TaskControlBlock>) {
         self.threads.lock().push(Arc::downgrade(task));
+        if !task.thread_live_counted.swap(true, Ordering::Relaxed) {
+            self.live_threads.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
-    pub fn remove_thread(&self, tid: usize) {
-        self.threads.lock().retain(|thread| {
+    pub fn remove_thread(&self, task: &TaskControlBlock) -> bool {
+        let removed = if task.thread_live_counted.swap(false, Ordering::Relaxed) {
+            self.live_threads.fetch_sub(1, Ordering::Relaxed);
+            true
+        } else {
+            false
+        };
+        if removed {
+            self.compact_threads_if_sparse();
+        }
+        removed
+    }
+
+    fn compact_threads_if_sparse(&self) {
+        let live = self.live_thread_count();
+        let mut threads = self.threads.lock();
+        let compact_threshold = live.saturating_mul(4).saturating_add(128);
+        if threads.len() <= compact_threshold {
+            return;
+        }
+        threads.retain(|thread| {
             thread
                 .upgrade()
-                .map(|task| task.tid.0 != tid)
+                .map(|task| task.thread_live_counted.load(Ordering::Relaxed))
                 .unwrap_or(false)
         });
     }
@@ -503,8 +559,12 @@ impl ProcessControlBlock {
         let mut live_threads = Vec::new();
         threads.retain(|thread| {
             if let Some(task) = thread.upgrade() {
-                live_threads.push(task);
-                true
+                if task.thread_live_counted.load(Ordering::Relaxed) {
+                    live_threads.push(task);
+                    true
+                } else {
+                    false
+                }
             } else {
                 false
             }
@@ -520,10 +580,34 @@ impl ProcessControlBlock {
     }
 
     pub fn live_thread_count(&self) -> usize {
-        self.threads()
-            .into_iter()
-            .filter(|task| task.acquire_inner_lock().task_status != TaskStatus::Zombie)
-            .count()
+        self.live_threads.load(Ordering::Relaxed)
+    }
+
+    pub fn try_cache_trap_context_slot(&self, slot: usize) -> bool {
+        if self.is_group_exiting() || self.live_thread_count() == 0 {
+            super::perf::record_trap_cache_store(false);
+            return false;
+        }
+        let mut cache = self.trap_context_cache.lock();
+        if cache.len() >= TRAP_CONTEXT_CACHE_LIMIT || cache.iter().any(|cached| *cached == slot) {
+            super::perf::record_trap_cache_store(false);
+            return false;
+        }
+        cache.push(slot);
+        super::perf::record_trap_cache_store(true);
+        true
+    }
+
+    pub fn take_cached_trap_context_slot(&self, slot: usize) -> bool {
+        let mut cache = self.trap_context_cache.lock();
+        if let Some(pos) = cache.iter().position(|cached| *cached == slot) {
+            cache.swap_remove(pos);
+            super::perf::record_trap_cache_take(true);
+            true
+        } else {
+            super::perf::record_trap_cache_take(false);
+            false
+        }
     }
 
     pub fn setpgid(&self, pgid: usize) -> isize {
@@ -531,22 +615,27 @@ impl ProcessControlBlock {
             return -1;
         }
         self.inner.lock().pgid = pgid;
+        self.pgid_hint.store(pgid, Ordering::Relaxed);
+        super::processor::refresh_current_process_group_hints(self.pid, pgid, self.getsid());
         0
     }
 
     pub fn getpgid(&self) -> usize {
-        self.inner.lock().pgid
+        self.pgid_hint.load(Ordering::Relaxed)
     }
 
     pub fn setsid(&self, sid: usize) -> isize {
         let mut inner = self.inner.lock();
         inner.sid = sid;
         inner.pgid = sid;
+        self.sid_hint.store(sid, Ordering::Relaxed);
+        self.pgid_hint.store(sid, Ordering::Relaxed);
+        super::processor::refresh_current_process_group_hints(self.pid, sid, sid);
         0
     }
 
     pub fn getsid(&self) -> usize {
-        self.inner.lock().sid
+        self.sid_hint.load(Ordering::Relaxed)
     }
 
     pub fn parent(&self) -> Option<Arc<ProcessControlBlock>> {
@@ -558,7 +647,7 @@ impl ProcessControlBlock {
     }
 
     pub fn parent_pid(&self) -> usize {
-        self.parent().map(|parent| parent.pid).unwrap_or(0)
+        self.parent_pid_hint.load(Ordering::Relaxed)
     }
 
     pub fn is_zombie(&self) -> bool {
@@ -724,19 +813,45 @@ impl ProcessControlBlock {
     }
 
     pub fn enqueue_process_signal(&self, pending: PendingSignal) {
-        let _ = self.signal.lock().shared_pending.enqueue(pending);
+        let pending_bits = {
+            let mut state = self.signal.lock();
+            let _ = state.shared_pending.enqueue(pending);
+            state.shared_pending.pending().bits() as u64
+        };
+        self.shared_pending_hint
+            .store(pending_bits, Ordering::Relaxed);
     }
 
     pub fn shared_pending(&self) -> Signals {
         self.signal.lock().shared_pending.pending()
     }
 
+    pub fn shared_pending_hint(&self) -> Signals {
+        Signals::from_bits_truncate(
+            self.shared_pending_hint.load(Ordering::Relaxed) as signal_type!()
+        )
+    }
+
     pub fn take_shared_signal(&self, signal: Signals) -> bool {
-        self.signal.lock().shared_pending.remove_signal(signal)
+        let (removed, pending_bits) = {
+            let mut state = self.signal.lock();
+            let removed = state.shared_pending.remove_signal(signal);
+            (removed, state.shared_pending.pending().bits() as u64)
+        };
+        self.shared_pending_hint
+            .store(pending_bits, Ordering::Relaxed);
+        removed
     }
 
     pub fn take_shared_matching(&self, set: Signals) -> Option<PendingSignal> {
-        self.signal.lock().shared_pending.dequeue_matching(set)
+        let (pending, pending_bits) = {
+            let mut state = self.signal.lock();
+            let pending = state.shared_pending.dequeue_matching(set);
+            (pending, state.shared_pending.pending().bits() as u64)
+        };
+        self.shared_pending_hint
+            .store(pending_bits, Ordering::Relaxed);
+        pending
     }
 
     pub fn request_group_exit(&self, exit_code: u32) {
@@ -783,7 +898,13 @@ impl ProcessControlBlock {
     }
 
     pub fn set_parent(&self, parent: Option<Weak<ProcessControlBlock>>) {
+        let parent_pid = parent
+            .as_ref()
+            .and_then(|parent| parent.upgrade())
+            .map(|parent| parent.pid)
+            .unwrap_or(0);
         self.inner.lock().parent = parent;
+        self.parent_pid_hint.store(parent_pid, Ordering::Relaxed);
     }
 
     pub fn set_vfork_parent(&self, parent: &Arc<TaskControlBlock>) {
@@ -821,9 +942,7 @@ impl ProcessControlBlock {
         }
     }
 
-    fn nearest_child_reaper(
-        parent: Option<Arc<ProcessControlBlock>>,
-    ) -> Arc<ProcessControlBlock> {
+    fn nearest_child_reaper(parent: Option<Arc<ProcessControlBlock>>) -> Arc<ProcessControlBlock> {
         let mut cursor = parent;
         while let Some(process) = cursor {
             if !process.is_zombie() && process.is_child_subreaper() {
@@ -985,6 +1104,6 @@ impl Drop for ProcessControlBlock {
         if let Some(key) = self.inner.get_mut().exec_key.take() {
             unregister_exec_key(key);
         }
-        registry::unregister_process_if_match(self);
+        registry::unregister_process(self.pid);
     }
 }

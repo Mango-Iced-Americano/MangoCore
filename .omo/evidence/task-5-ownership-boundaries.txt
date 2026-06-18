@@ -1,0 +1,13 @@
+Task 5 ownership boundary check
+
+Required sections present in task-5-ext4-write-ownership.md:
+- File data writes: yes (`文件数据写路径`)
+- Metadata writes: yes (`inode / 文件大小 / metadata 写路径`, `目录项写路径`, `block/inode bitmap...`)
+- Final device I/O: yes (`最终设备 I/O owner`)
+
+Concrete owners:
+- File data -> VFS PageCache dirty/writeback (T10/T11/T12)
+- Metadata -> ext4/BlockCache metadata flush (T9/T13)
+- Final block device writes -> real `Arc<dyn BlockDevice>` after DirtyBlockDevice removal (T14)
+
+Boundary status: PASS.

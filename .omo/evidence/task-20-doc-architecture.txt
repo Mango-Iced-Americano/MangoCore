@@ -1,0 +1,51 @@
+Task 20 Architecture documentation
+
+New writeback architecture (Wave 1-4 implemented):
+
+1. VFS sync contracts (T2):
+   - File::fsync()/fdatasync() bridge methods added.
+   - FileSystem::on_umount() returns Result, defaults to sync_fs().
+   - MountFS::umount() propagates on_umount() errors.
+
+2. PageCache registry (T3):
+   - Global PAGE_CACHE_REGISTRY for tracking active page caches.
+   - flush_all_page_caches() iterates registered caches and writebacks dirty pages.
+   - Lock order: registry lock released before writeback I/O.
+
+3. BlockCache metadata flush (T4):
+   - BlockCacheManager::flush_dirty_blocks() added.
+   - Copies dirty buffer data before device writes to avoid holding buffer locks during I/O.
+
+4. Syscall bridge (T7):
+   - SYSCALL_SYNC=81, SYSCALL_FDATASYNC=83 added.
+   - fsync/fdatasync route through File::sync_target() -> IndexNode sync/datasync.
+   - sys_sync() calls VFS_ROOT.inner_filesystem().sync_fs() + flush_all_page_caches().
+
+5. umount2 (T8):
+   - Replaced fake success with VFS mountpoint validation + MountFS::umount().
+   - Root unmount returns EBUSY, unsupported flags return EINVAL.
+
+6. ext4 inode sync (T9):
+   - Ext4OSInode::datasync() -> PageCache writeback.
+   - Ext4OSInode::sync() -> datasync() + ext4fs.sync_fs().
+
+7. Ext4PageCacheBackend fix (T12):
+   - Added real_block_device field to Ext4FileSystem.
+   - Backend now writes to real_block_device (not DirtyBlockDevice).
+
+8. sync_fs integration (T13):
+   - sync_fs() calls: BlockCache flush (real device) + DirtyBlockDevice flush + PageCache flush.
+
+9. DirtyBlockDevice status (T14):
+   - Retained as transitional metadata write-coalescing layer.
+   - block_device = dirty_bd (for metadata-heavy operations like busybox --install).
+   - File data path goes through PageCache -> real_block_device writeback.
+   - NOT the final architecture; future optimization should eliminate DirtyBlockDevice
+     by implementing proper per-metadata-type batching.
+
+Limitations:
+- No background writeback daemon (requires task scheduler infrastructure).
+- No ext4 journaling (not in scope of this plan).
+- DirtyBlockDevice still present as transitional safe-net for metadata write performance.
+
+Build: rv64 PASS, la64 PASS.

@@ -1,4 +1,7 @@
-use super::{tlb::tlb_invalidate_page, tlb_global_invalidate};
+use super::{
+    tlb::{tlb_invalidate, tlb_invalidate_global_page, tlb_invalidate_page},
+    tlb_global_invalidate,
+};
 use crate::{
     config::{
         MEMORY_HIGH_BASE_VPN, MEMORY_SIZE, PAGE_SIZE, PAGE_SIZE_BITS, PALEN, VA_MASK,
@@ -9,7 +12,6 @@ use crate::{
 use _core::convert::TryFrom;
 use alloc::{sync::Arc, vec::Vec};
 use bitflags::*;
-use log::trace;
 // todo: 因之前默认vpn从0开始，所以DIRTY数组相当于vpn从零到size，但是移到高地址启动后，DIRTY位有偏移
 // todo: 相当于低位无效，这里粗暴的增大整个数组长度
 const DIRTY_LEN: usize = MEMORY_SIZE * 10 / PAGE_SIZE;
@@ -204,6 +206,14 @@ impl LAFlexPageTable {
             PhysPageNum(self.token())
         }
     }
+    #[inline(always)]
+    fn invalidate_page(&self, vpn: VirtPageNum) {
+        if self.is_kernel_pt() {
+            tlb_invalidate_global_page(vpn);
+        } else {
+            tlb_invalidate_page(vpn);
+        }
+    }
     /// Find the page in the page table, creating the page on the way if not exists.
     /// Note: It does NOT create the terminal node. The caller must verify its validity and create according to his own needs.
     fn find_pte_create(
@@ -275,7 +285,7 @@ impl LAFlexPageTable {
                     }
                     DIRTY[idx] = true;
                 }
-                tlb_invalidate_page(vpn);
+                self.invalidate_page(vpn);
                 return Ok(());
             }
             return Err(());
@@ -285,7 +295,7 @@ impl LAFlexPageTable {
                 return Ok(());
             }
             pte.set_dirty();
-            tlb_invalidate_page(vpn);
+            self.invalidate_page(vpn);
             Ok(())
         } else {
             Err(())
@@ -299,7 +309,6 @@ impl PageTable for LAFlexPageTable {
         Self: Sized,
     {
         let frame = frame_alloc().unwrap();
-        trace!("root ppn:{:?}", frame);
         LAFlexPageTable {
             root_ppn: LAPTRoot(frame.ppn.0 << 32),
             frames: {
@@ -311,7 +320,6 @@ impl PageTable for LAFlexPageTable {
     }
     fn new() -> Self {
         let frame = frame_alloc().unwrap();
-        trace!("root ppn:{:?}", frame);
         LAFlexPageTable {
             root_ppn: LAPTRoot(frame.ppn.0),
             frames: {
@@ -383,11 +391,13 @@ impl PageTable for LAFlexPageTable {
         if flags.contains(MapPermission::U) {
             flag |= LAPTEFlagBits::PLV3;
         }
-        //flag |= LAPTEFlagBits::D;
+        if flags.contains(MapPermission::G) {
+            flag |= LAPTEFlagBits::G;
+        }
         let pte_new = LAFlexPageTableEntry::new(ppn, flag);
         //log::trace!("[laflex::map] pre_wr");
         *pte = pte_new;
-        tlb_invalidate_page(vpn);
+        self.invalidate_page(vpn);
         Ok(())
     }
     #[allow(unused)]
@@ -398,7 +408,7 @@ impl PageTable for LAFlexPageTable {
         let pte = self.find_pte_refmut(vpn).unwrap();
         debug_assert!(pte.is_valid(), "vpn {:?} is invalid before unmapping", vpn);
         *pte = LAFlexPageTableEntry { bits: 0 };
-        tlb_invalidate_page(vpn);
+        self.invalidate_page(vpn);
     }
     /// Translate the `vpn` into its corresponding `Some(PageTableEntry)` if exists
     /// `None` is returned if nothing is found.
@@ -421,11 +431,23 @@ impl PageTable for LAFlexPageTable {
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.clear_dirty();
             pte.revoke_write();
-            tlb_invalidate_page(vpn);
+            self.invalidate_page(vpn);
             Some(pte.ppn())
         } else {
             None
         }
+    }
+    fn block_and_ret_mut_no_flush(&self, vpn: VirtPageNum) -> Option<PhysPageNum> {
+        if let Some(pte) = self.find_pte_refmut(vpn) {
+            pte.clear_dirty();
+            pte.revoke_write();
+            Some(pte.ppn())
+        } else {
+            None
+        }
+    }
+    fn flush_tlb(&self) {
+        tlb_invalidate();
     }
     /// Return the physical token to current page.
     /// NOTE: NEVER use this token to fill a PGD!
@@ -436,7 +458,7 @@ impl PageTable for LAFlexPageTable {
     fn revoke_read(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.revoke_read();
-            tlb_invalidate_page(vpn);
+            self.invalidate_page(vpn);
             Ok(())
         } else {
             Err(())
@@ -445,7 +467,7 @@ impl PageTable for LAFlexPageTable {
     fn revoke_write(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.revoke_write();
-            tlb_invalidate_page(vpn);
+            self.invalidate_page(vpn);
             Ok(())
         } else {
             Err(())
@@ -454,7 +476,7 @@ impl PageTable for LAFlexPageTable {
     fn revoke_execute(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.revoke_execute();
-            tlb_invalidate_page(vpn);
+            self.invalidate_page(vpn);
             Ok(())
         } else {
             Err(())
@@ -463,7 +485,7 @@ impl PageTable for LAFlexPageTable {
     fn set_ppn(&mut self, vpn: VirtPageNum, ppn: PhysPageNum) -> Result<(), ()> {
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.set_ppn(ppn);
-            tlb_invalidate_page(vpn);
+            self.invalidate_page(vpn);
             Ok(())
         } else {
             Err(())
@@ -472,7 +494,7 @@ impl PageTable for LAFlexPageTable {
     fn set_pte_flags(&mut self, vpn: VirtPageNum, flags: MapPermission) -> Result<(), ()> {
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.set_permission(flags);
-            tlb_invalidate_page(vpn);
+            self.invalidate_page(vpn);
             Ok(())
         } else {
             Err(())
@@ -481,7 +503,7 @@ impl PageTable for LAFlexPageTable {
     fn clear_access_bit(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.clear_access();
-            tlb_invalidate_page(vpn);
+            self.invalidate_page(vpn);
             Ok(())
         } else {
             Err(())
@@ -493,24 +515,39 @@ impl PageTable for LAFlexPageTable {
                 unsafe {
                     DIRTY[idx] = false;
                 }
-                tlb_invalidate_page(vpn);
+                self.invalidate_page(vpn);
                 return Ok(());
             }
             return Err(());
         }
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.clear_dirty();
-            tlb_invalidate_page(vpn);
+            self.invalidate_page(vpn);
             Ok(())
         } else {
             Err(())
         }
     }
     fn activate(&self) {
-        tlb_global_invalidate();
         if self.is_kernel_pt() {
+            tlb_global_invalidate();
             super::register::PGDH::from(self.get_root_ppn().0 << PAGE_SIZE_BITS).write();
         } else {
+            // 1. Flush old process's non-global TLB entries (current ASID)
+            super::tlb::tlb_invalidate();
+            crate::task::perf::record_tlb_activate();
+            // 2. Allocate ASID for the incoming process if needed
+            if let Some(task) = crate::task::current_task() {
+                let mut asid = task.asid.load(core::sync::atomic::Ordering::Relaxed);
+                if asid == 0 {
+                    asid = super::tlb::asid_alloc();
+                    task.asid.store(asid, core::sync::atomic::Ordering::Relaxed);
+                }
+                if asid != super::tlb::ASID_NONE {
+                    super::tlb::set_asid(asid);
+                }
+            }
+            // 4. Set user page table base
             super::register::PGDL::from(self.get_root_ppn().0 << PAGE_SIZE_BITS).write();
         }
     }

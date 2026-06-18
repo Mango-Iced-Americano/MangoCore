@@ -34,6 +34,9 @@ const SYSCALL_NEW_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_SYNC: usize = 81;
 const SYSCALL_FSYNC: usize = 82;
+const SYSCALL_TIMERFD_CREATE: usize = 85;
+const SYSCALL_TIMERFD_SETTIME: usize = 86;
+const SYSCALL_TIMERFD_GETTIME: usize = 87;
 const SYSCALL_UTIMENSAT: usize = 88;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GRUOP: usize = 94;
@@ -41,8 +44,13 @@ const SYSCALL_SET_TID_ADDRESS: usize = 96;
 const SYSCALL_NANOSLEEP: usize = 101;
 const SYSCALL_GETITIMER: usize = 102;
 const SYSCALL_SETITIMER: usize = 103;
+const SYSCALL_TIMER_CREATE: usize = 107;
+const SYSCALL_TIMER_GETTIME: usize = 108;
+const SYSCALL_TIMER_SETTIME: usize = 110;
+const SYSCALL_TIMER_DELETE: usize = 111;
 const SYSCALL_CLOCK_GETTIME: usize = 113;
 const SYSCALL_CLOCK_SETTIME: usize = 112;
+const SYSCALL_CLOCK_NANOSLEEP: usize = 115;
 const SYSCALL_YIELD: usize = 124;
 const SYSCALL_KILL: usize = 129;
 const SYSCALL_SIGACTION: usize = 134;
@@ -415,6 +423,71 @@ pub struct TimeSpec {
 
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
+pub struct TimerFdSpec {
+    pub it_interval: TimeSpec,
+    pub it_value: TimeSpec,
+}
+
+pub fn sys_timerfd_create(clock_id: usize, flags: u32) -> isize {
+    syscall(SYSCALL_TIMERFD_CREATE, [clock_id, flags as usize, 0])
+}
+
+pub fn sys_timerfd_settime(
+    fd: usize,
+    flags: u32,
+    new_value: *const TimerFdSpec,
+    old_value: *mut TimerFdSpec,
+) -> isize {
+    syscall4(
+        SYSCALL_TIMERFD_SETTIME,
+        [fd, flags as usize, new_value as usize, old_value as usize],
+    )
+}
+
+pub fn sys_timerfd_gettime(fd: usize, curr_value: *mut TimerFdSpec) -> isize {
+    syscall(SYSCALL_TIMERFD_GETTIME, [fd, curr_value as usize, 0])
+}
+
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct ITimerSpec {
+    pub it_interval: TimeSpec,
+    pub it_value: TimeSpec,
+}
+
+pub fn sys_timer_create(clock_id: usize, sevp: *const u8, timerid: *mut i32) -> isize {
+    syscall(
+        SYSCALL_TIMER_CREATE,
+        [clock_id, sevp as usize, timerid as usize],
+    )
+}
+
+pub fn sys_timer_settime(
+    timer_id: usize,
+    flags: u32,
+    new_value: *const ITimerSpec,
+    old_value: *mut ITimerSpec,
+) -> isize {
+    syscall4(
+        SYSCALL_TIMER_SETTIME,
+        [timer_id, flags as usize, new_value as usize, old_value as usize],
+    )
+}
+
+pub fn sys_timer_gettime(timer_id: usize, curr_value: *mut ITimerSpec) -> isize {
+    syscall(SYSCALL_TIMER_GETTIME, [timer_id, curr_value as usize, 0])
+}
+
+pub fn sys_timer_delete(timer_id: usize) -> isize {
+    syscall(SYSCALL_TIMER_DELETE, [timer_id, 0, 0])
+}
+
+pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> isize {
+    syscall(SYSCALL_CLOCK_GETTIME, [clock_id, tp as usize, 0])
+}
+
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
 pub struct Stat {
     pub st_dev: u64,
     pub st_ino: u64,
@@ -543,4 +616,16 @@ pub fn sys_faccessat2(dirfd: isize, path: &str, mode: u32, flags: u32) -> isize 
 
 pub fn sys_clock_settime(clock_id: usize, tp: *const TimeSpec) -> isize {
     syscall(SYSCALL_CLOCK_SETTIME, [clock_id, tp as usize, 0])
+}
+
+pub fn sys_clock_nanosleep(
+    clock_id: usize,
+    flags: u32,
+    req: *const TimeSpec,
+    rem: *mut TimeSpec,
+) -> isize {
+    syscall4(
+        SYSCALL_CLOCK_NANOSLEEP,
+        [clock_id, flags as usize, req as usize, rem as usize],
+    )
 }

@@ -1,0 +1,19 @@
+Task 2 generic sync bridge evidence
+
+Changes made:
+- Added `File::fsync()` and `File::fdatasync()` in `os/src/fs/vfs/file.rs`.
+- Changed `FileSystem::on_umount()` in `os/src/fs/vfs/file_system.rs` to return `Result<(), SyscallErr>` and default to `sync_fs()`.
+- Updated `MountFS::umount()` in `os/src/fs/vfs/mount.rs` to propagate `on_umount()` errors.
+
+Search checks:
+- `downcast_ref::<Ext4FileSystem>` under `os/src/syscall`: no matches.
+- `downcast_ref::<Ext4FileSystem>` under `os/src/fs/vfs`: no matches.
+- syscall-layer calls to `.fsync()`, `.fdatasync()`, `.sync()`, `.datasync()`: no matches yet. This is expected after T2 because syscall bridge wiring belongs to T7.
+
+Build verification:
+- rv64 kernel build: PASS.
+- la64 kernel build: PASS.
+
+Notes:
+- LSP diagnostics could not run because this workspace toolchain lacks rust-analyzer for nightly-2025-01-18.
+- Verification relied on dual-architecture kernel builds as required by AGENTS.md.

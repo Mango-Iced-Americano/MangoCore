@@ -1,0 +1,10 @@
+Task 6 no silent success check
+
+Silent/fake/no-op findings:
+- `sys_fsync(fd)` currently checks fd and returns SUCCESS without writeback. Classified as BUG TO FIX in T7.
+- `sys_umount2(target, flags)` currently logs `fake implementation` and returns SUCCESS. Classified as BUG TO FIX in T8.
+- `sys_msync(addr, length, flags)` validates arguments and returns SUCCESS without actual writeback. Classified as INCOMPLETE; not a blocker for T7/T8 but must not be treated as persistence guarantee.
+
+No silent-success behavior is endorsed as final architecture.
+
+Status: PASS.

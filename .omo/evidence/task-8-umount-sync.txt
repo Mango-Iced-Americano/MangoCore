@@ -1,0 +1,21 @@
+Task 8 umount sync evidence
+
+Implemented:
+- Replaced fake `sys_umount2()` success path in `os/src/syscall/fs.rs`.
+- New behavior:
+  - null target -> `EINVAL`
+  - invalid flags -> `EINVAL`
+  - non-empty supported-bit flags -> currently unsupported, returns `EINVAL`
+  - target path is resolved through `vfs_lookup_absolute()`
+  - target must resolve to `vfs::MountFSInode`
+  - target must be a mountpoint root
+  - root filesystem cannot be unmounted and returns `EBUSY`
+  - non-root mountpoint calls `mount_inode.mount_fs.umount()`
+- `MountFS::umount()` already calls `inner_filesystem.on_umount()?`, so successful umount triggers generic filesystem sync hook.
+
+Build verification:
+- rv64 kernel build: PASS.
+- la64 kernel build: PASS.
+
+Manual QA status:
+- A full mounted-subfilesystem persistence test is deferred to T16/T18/T19 because current `sys_mount()` is still fake and there may be no runtime mountpoint scenario yet.

@@ -19,6 +19,12 @@
 
 ## 测试 Harness / LTP
 
+### 长测第二轮 PID 超过 `/proc/sys/kernel/pid_max`
+- **根因**: 用户可见 PID/TID 只线性增长，释放时只为 `ns_last_pid` 打标记而不进入可复用池。全量 LTP/bench 多轮创建进程后，`getpid01` 会观察到 PID 超过内核暴露的 `/proc/sys/kernel/pid_max=32768`。
+- **修复**: 参考 Linux `idr_alloc_cyclic/free_pid` 和 DragonOS PID namespace 分配/释放模型：释放后记录可复用 ID，普通路径仍保持线性分配；接近 `pid_max` 高水位后再复用已释放 ID，并跳过低位保留 PID。
+- **教训**: 长测日志里如果第一轮通过、第二轮 `getpid01` 或 PID 边界类用例失败，应先检查 PID allocator 的 wrap/reuse 语义，而不是调高 `/proc/sys/kernel/pid_max` 规避。
+- **相关文件**: `os/src/task/pid.rs`
+
 ### LTP 账号数据库已有文件要幂等补齐
 - **根因**: LTP 用例可能依赖 `/etc/passwd`、`/etc/group` 里的具体账号/组存在；如果 init 逻辑只在文件不存在时写默认内容，持久测试镜像里的旧文件不会被更新。`setfsgid03` 会从 gid 1 起调用 `getgrgid()` 查找一个存在的普通组，缺少 gid 1 组时会长时间遍历并最终被 runner 超时杀掉，表现为 137。
 - **修复**: 对新增账号数据库前置条件使用幂等迁移：文件不存在时创建默认内容，文件已存在时只补缺失条目，避免覆盖镜像中已有账号配置。
@@ -37,8 +43,15 @@
 
 ### LTP TCONF 不能计为 FAIL
 - **根因**: LTP 新 API 用退出码 32 表示 `TCONF`，即测试因 libc/架构/配置前置条件不满足而跳过。suite runner 若把所有非零返回码都记为 `FAIL LTP CASE`，会把 musl 缺少 `getcontext/sethostid` 这类库能力误算成内核失败。
-- **修复**: `run_case()` 返回 32 时输出 `SKIP LTP CASE` 并递增 skipped，其他非零才算 failed。
+- **修复**: `run_case()` 返回 32 时输出 `SKIP LTP CASE` 并递增 skipped，其他非零才算 failed；输出标签也必须按返回码分支打印，不能只修计数但仍无条件打印 `FAIL LTP CASE`。
 - **教训**: 扩大 LTP include 时先区分 `TFAIL/TBROK` 与 `TCONF`，否则会把可接受的环境跳过项混入内核适配清单。
+- **相关文件**: `user/src/bin/ltprunner.rs`
+
+### LTP runner 外层 case timeout 要能覆盖用例自身 timeout
+
+- **根因**: LTP 二进制内部会根据 `LTP_TIMEOUT_MUL` 放大自己的 timeout，例如 fuzzy-sync 用例 `timerfd_settime02` 会把内部 timeout 提到 3m30s；suite runner 如果仍固定 60s 外层 case timeout，会在内核语义还未失败前先杀掉测试，表现为 `TBROK Test killed`。
+- **修复**: 为 suite runner 增加显式 `ltp_case_timeout_secs` 配置，focused 调试长耗时用例时让外层 timeout 大于 LTP 内部 timeout；常规配置保持默认 60s，避免全量回归被单个异常 case 拖长。
+- **教训**: 遇到 LTP 提示 “try exporting LTP_TIMEOUT_MUL” 或日志显示内部 timeout 已放大时，先比较 harness 外层 timeout 和 LTP 内部 timeout，再判断是否为内核卡死。
 - **相关文件**: `user/src/bin/ltprunner.rs`
 
 ### LTP libc wrapper 先于 syscall 拒绝参数
@@ -47,7 +60,19 @@
 - **教训**: 修这类问题前先确认失败是否发生在 syscall 之前；改完 `.so` 后必须重建内核镜像，否则 QEMU 仍会运行旧的嵌入版 preload。
 - **相关文件**: `os/ltp_proto_compat.c`, `user/tools/riscv64/lib/ltp_proto_compat-rv.so`, `user/tools/loongarch64/lib/ltp_proto_compat-la.so`
 
+### initramfs 新构建产物不能被测试盘旧二进制遮蔽
+- **根因**: stage-1 init 如果优先执行 `/sdcard/initproc`，下载的测试镜像里可能保留旧 runner；即使 `make rv64-only/la64-only` 已重建 initramfs 和内嵌 `/initproc`，QEMU 仍会跑测试盘旧二进制，表现为新增配置项或 smoke 分支完全不生效。
+- **修复**: initramfs 模式优先 `exec /initproc`，仅在缺失时 fallback 到 `/sdcard/initproc`；定位时可用输出字符串或二进制大小变化确认实际运行的是哪份应用。
+- **教训**: 修改 `user/src/bin/initproc.rs` 后，如果 QEMU 日志仍是旧格式，先检查 stage-1 exec 顺序和镜像内同名二进制，而不是继续怀疑配置注入。
+- **相关文件**: `user/src/bin/init.rs`, `user/src/bin/initproc.rs`
+
 ## 信号/进程
+
+### 事件型 fd 定时器必须接入统一 deadline queue
+- **根因**: timerfd 这类 fd 状态机如果只在周期性 timer interrupt 中扫描 registry，而 `timerfd_settime()` 不向统一 high-res timer queue 注册下一次 deadline，就会把短 timeout 退化为调度 tick 粒度；更严重时，如果扫描路径没有把“唤醒了等待者”反馈给调度器，阻塞读者可能延迟到后续调度点才运行。
+- **修复**: arm/disarm timerfd 后扫描 registry 找到最早 deadline，注册一个全局 sweep timer action；用 generation 让旧 sweep 自动失效；sweep 过期后唤醒所有已到期 timerfd，返回实际 wake 数并重新计算下一次 sweep。
+- **教训**: 任何“fd 可读状态由时间推进触发”的对象都不能只靠周期性兜底扫描；状态更新点必须驱动统一 deadline queue，wake 路径必须把是否唤醒任务反馈给调度器。
+- **相关文件**: `os/src/fs/timerfd.rs`, `os/src/task/manager.rs`
 
 ### futex wake 与信号唤醒竞态
 - **根因**: waiter 被信号或 timeout 先置为 Ready 后，仍可能暂时留在 futex waitqueue 中；随后 `FUTEX_WAKE` 移除该 waiter 时如果因状态非 Interruptible 不计数，用户态 checkpoint 会认为没有唤醒到等待者并重试到超时，而 waiter 本身又会把 waitqueue 条目被移除解释成正常 wake。
@@ -423,3 +448,24 @@
 - **修复**: 非 fixed mmap 在 hint 区间完整空闲时优先按 hint 放置；fork 复制到子进程的用户 VMA 标记为继承来源，并在匿名私有 lazy mmap merge 条件中排除这类 VMA。
 - **教训**: VMA 类 LTP 失败不要只看 `/proc/self/maps` 输出格式；先确认 mmap 放置策略、VMA 起点以及 fork 后的合并条件。glibc/musl 的既有映射布局不同，忽略 hint 的 bug 可能只在其中一个 libc 暴露。
 - **相关文件**: `os/src/mm/mmap.rs`, `os/src/mm/vma.rs`, `os/src/mm/vma_set.rs`, `os/src/mm/address_space.rs`
+
+## la64 页级 TLB invalidate 必须携带当前 ASID
+
+- **根因**: LoongArch `invtlb 0x5` (`INVTLB_ADDR_GFALSE_AND_ASID`) 的 `rj` 操作数是目标 ASID；若传 `$zero`，只会刷新 ASID 0 的非 global 页。用户进程使用非 0 ASID 时，COW/dirty/write 权限更新后的旧 TLB 项仍保留，表现为同一用户地址反复 Store page fault。
+- **修复**: `tlb_invalidate_page()` 读取当前 ASID 并传给 `invtlb 0x5`；kernel page table 修改走单独的 global-page invalidate (`invtlb 0x6`)。
+- **教训**: “PTE 已改且 full TLB flush 能修复，但 page flush 不能修复”时，应优先检查页级 flush 的 ASID/global 操作数，而不是继续放大全局 flush。
+- **相关文件**: `os/src/hal/arch/loongarch64/tlb.rs`, `os/src/hal/arch/loongarch64/laflex.rs`
+
+## COW 源帧 helper 返回克隆 Arc 时 strong_count 基准要加一
+
+- **根因**: `cow_source_frame()` 返回的是克隆后的 `Arc<FrameTracker>`。如果 VMA 中只有一个真实 owner，函数返回后也会有 VMA entry + 本地变量两个强引用；用 `strong_count == 1` 判断唯一页会永远失败，导致本可原地恢复写权限的 COW 页不断走复制/换页路径。
+- **修复**: 在该 helper 语义下把唯一 owner 判断改为 `strong_count <= 2`，并在原地恢复 PTE 写权限后执行对应架构的页级 TLB 刷新。
+- **教训**: 用 `Arc::strong_count()` 判断共享/唯一时，必须把当前函数已经克隆出来的临时强引用计入阈值；否则调试现象会像 TLB/COW fault storm，但根因是引用计数基准错。
+- **相关文件**: `os/src/mm/vma.rs`
+
+## timer queue deadline 与 wall-clock 绝对目标要分离
+
+- **根因**: timerfd/POSIX timer 的内核队列使用 monotonic deadline 驱动，但 `CLOCK_REALTIME` 绝对 timer 又需要在 wall-clock 跳变时按原始 realtime 目标重定位。若同一个字段混存 wall-clock deadline 和 monotonic deadline，相对 timer 会被 `clock_settime()` 提前/延后触发，绝对 realtime timer 又无法在 clock 跳变后重算。
+- **修复**: 内核队列字段只保存 monotonic deadline；只对 realtime absolute timer 额外保存原始 wall-clock 目标。`clock_settime/settimeofday/adjtimex(ADJ_SETOFFSET)` 后扫描 active timer，重算 monotonic deadline 并通过 generation 让旧队列节点失效。周期 realtime absolute timer 到期推进时要同步推进保存的 wall-clock 绝对目标，不能在首次到期后丢弃。没有持久 timer 对象的 `clock_nanosleep(CLOCK_REALTIME, TIMER_ABSTIME)` 需要独立的 clock-change generation 与等待队列，收到 wall-clock 跳变通知后立即重判定。`read/poll/gettime/sweep` 等到期判定路径必须全部使用 monotonic now。
+- **教训**: 修复 clock-domain bug 时要检查所有到期判定入口，不只检查 arm/sweep 路径；本次 rv64 对照中 `timerfd_settime()` 已写入 monotonic deadline，但 `read_at()`/`poll()` 仍用 realtime now，导致 `clock_settime(+2s)` 后 80ms 相对 timer 2ms 到期。绝对 sleep 这类“一次性等待”也不能只在入睡时把 realtime 目标换算为相对时长，否则 clock 前跳不会唤醒。周期 timer 修复还要检查“第一次到期后”的状态推进，否则后续 clock 跳变又会退化成相对 monotonic timer。
+- **相关文件**: `os/src/fs/timerfd.rs`, `os/src/syscall/process/time.rs`, `os/src/task/sleep.rs`, `os/src/task/task.rs`, `os/src/task/manager.rs`, `user/src/bin/initproc.rs`
