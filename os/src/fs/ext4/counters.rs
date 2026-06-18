@@ -368,6 +368,15 @@ pub fn sys_ext4_counters(cmd: usize, label_ptr: usize, label_len: usize) -> isiz
             let stats = fs.reclaim_fs_caches(label_len);
             stats.clean_pages_freed as isize
         }
+        12 => {
+            crate::fs::reclaim::reset_reclaim_stats();
+            0
+        }
+        13 => {
+            let label = read_label(label_ptr, label_len);
+            crate::fs::reclaim::dump_reclaim_stats(&label);
+            0
+        }
         _ => -22, // EINVAL
     }
 }

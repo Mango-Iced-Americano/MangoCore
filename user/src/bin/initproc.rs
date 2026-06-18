@@ -346,6 +346,10 @@ struct RuntimeConfig {
     diag: bool,
     /// 非 LTP timerfd smoke：直接验证 timerfd 阻塞读能由 high-res timer 唤醒
     timer_smoke: bool,
+    /// 插桩：lmbench 前后 dump ext4 counters profile
+    ext4_profile: bool,
+    /// 插桩：lmbench 前后 dump reclaim stats profile
+    reclaim_profile: bool,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -422,6 +426,8 @@ impl RuntimeConfig {
             conf_source: None,
             diag: false,
             timer_smoke: false,
+            ext4_profile: false,
+            reclaim_profile: false,
         }
     }
 }
@@ -606,6 +612,10 @@ fn apply_conf_bytes(data: &[u8], cfg: &mut RuntimeConfig) {
             cfg.diag = val == b"1" || val == b"true";
         } else if key == b"timer_smoke" {
             cfg.timer_smoke = parse_bool_flag(val);
+        } else if key == b"ext4_profile" {
+            cfg.ext4_profile = parse_bool_flag(val);
+        } else if key == b"reclaim_profile" {
+            cfg.reclaim_profile = parse_bool_flag(val);
         } else if key == b"ltp_from" {
             let s = core::str::from_utf8(val).ok();
             if let Some(s) = s {
@@ -663,12 +673,14 @@ fn load_runtime_config() -> RuntimeConfig {
     };
     cfg.conf_source = Some(format!("{}\0", source).into_bytes());
     println!(
-        "[initproc] config source={} mode={} mask=0x{:03X} ltp_runner={} timer_smoke={}",
+        "[initproc] config source={} mode={} mask=0x{:03X} ltp_runner={} timer_smoke={} ext4_profile={} reclaim_profile={}",
         source,
         mode_name(cfg.mode),
         cfg.mask,
         ltp_runner_name(cfg.ltp_runner),
-        cfg.timer_smoke
+        cfg.timer_smoke,
+        cfg.ext4_profile,
+        cfg.reclaim_profile
     );
     println!("[initproc] LTP exclude list: {:?}", cfg.ltp_exclude);
     if !cfg.ltp_include.is_empty() {
@@ -741,6 +753,39 @@ const MAX_GROUP_RETRIES: usize = 3;
 
 /// 运行测试脚本，失败时自动重试（最多 max_retries 次）。
 /// 若进程被 SIGKILL 终止（由 initproc 超时逻辑主动发送），则不重试。
+fn profile_label(group: &str, libc: &str, phase: &str) -> String {
+    format!("{}-{}-{}", group, libc, phase)
+}
+
+fn profile_before(group_name: &str, libc_suffix: &str, cfg: &RuntimeConfig) {
+    if group_name != "lmbench" {
+        return;
+    }
+    if cfg.ext4_profile {
+        user_lib::syscall::sys_ext4_counters(0, 0, 0); // enable
+        user_lib::syscall::sys_ext4_counters(2, 0, 0); // reset ext4 counters
+    }
+    if cfg.reclaim_profile {
+        user_lib::syscall::sys_ext4_counters(12, 0, 0); // reset reclaim stats
+    }
+    let label = profile_label(group_name, libc_suffix, "begin");
+    println!("[profile] begin {}", label);
+}
+
+fn profile_after(group_name: &str, libc_suffix: &str, cfg: &RuntimeConfig) {
+    if group_name != "lmbench" {
+        return;
+    }
+    let label = profile_label(group_name, libc_suffix, "end");
+    println!("[profile] end {}", label);
+    if cfg.ext4_profile {
+        user_lib::syscall::sys_ext4_counters(3, label.as_ptr() as usize, label.len());
+    }
+    if cfg.reclaim_profile {
+        user_lib::syscall::sys_ext4_counters(13, label.as_ptr() as usize, label.len());
+    }
+}
+
 fn run_group_in_dir(
     environ: &[*const u8],
     dir: &str,
@@ -748,6 +793,7 @@ fn run_group_in_dir(
     script: &str,
     timeout_secs: u64,
     max_retries: usize,
+    cfg: &RuntimeConfig,
 ) {
     let group_start_ms = get_time() as u64;
     let log_dir = display_path(dir);
@@ -759,6 +805,7 @@ fn run_group_in_dir(
     };
 
     let mut last_exit_code: i32 = 0;
+    profile_before(group_name, libc_suffix, cfg);
     for attempt in 1..=max_retries {
         last_exit_code = run_group_once(
             environ,
@@ -775,6 +822,7 @@ fn run_group_in_dir(
                 "[timer] group {} in {} took {}s",
                 group_name, log_dir, elapsed_s
             );
+            profile_after(group_name, libc_suffix, cfg);
             return; // 成功，直接返回
         }
         // SIGKILL 是 initproc 超时后主动发送的，说明我们故意要终止它，不重试
@@ -787,6 +835,7 @@ fn run_group_in_dir(
                 "[timer] group {} in {} took {}s (killed)",
                 group_name, log_dir, elapsed_s
             );
+            profile_after(group_name, libc_suffix, cfg);
             return;
         }
         if attempt < max_retries {
@@ -807,6 +856,7 @@ fn run_group_in_dir(
         "[timer] group {} in {} took {}s (failed)",
         group_name, log_dir, elapsed_s
     );
+    profile_after(group_name, libc_suffix, cfg);
 }
 
 /// 单次执行测试脚本（无重试），返回子进程退出码。
@@ -1772,19 +1822,21 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
             // LTP 不重试——超时说明内核有问题，重试没有意义。
             let libc = cfg.ltp_libc;
             if libc == LtpLibc::Musl || libc == LtpLibc::Both {
-                run_group_in_dir(environ, "/musl\0", group_name, script, timeout_secs, 1);
+                run_group_in_dir(environ, "/musl\0", group_name, script, timeout_secs, 1, cfg);
             }
             if libc == LtpLibc::Glibc || libc == LtpLibc::Both {
-                run_group_in_dir(environ, "/glibc\0", group_name, script, timeout_secs, 1);
+                run_group_in_dir(environ, "/glibc\0", group_name, script, timeout_secs, 1, cfg);
             }
         } else {
+            let retries = if group_name == "lmbench" { 1 } else { MAX_GROUP_RETRIES };
             run_group_in_dir(
                 environ,
                 "/musl\0",
                 group_name,
                 script,
                 timeout_secs,
-                MAX_GROUP_RETRIES,
+                retries,
+                cfg,
             );
             run_group_in_dir(
                 environ,
@@ -1792,7 +1844,8 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
                 group_name,
                 script,
                 timeout_secs,
-                MAX_GROUP_RETRIES,
+                retries,
+                cfg,
             );
         }
         // 诊断模式：每组完成后打印标记，配合内核 STATS_ENABLED 输出定位资源变化

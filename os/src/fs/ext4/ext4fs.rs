@@ -1,7 +1,9 @@
 #![allow(unused)]
 use core::arch::asm;
 use core::convert::TryFrom;
+use core::ops::Bound::{Excluded, Unbounded};
 use core::ptr::addr_of;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::block_group::{Block, Ext4BlockGroup};
 use super::direntry::{Ext4DirEntry, Ext4DirSearchResult};
@@ -20,6 +22,42 @@ use layout::Ext4OSInode;
 use super::dir_cache::Ext4DirectoryLookupCache;
 use spin::Mutex;
 type SuperBlock = Ext4Superblock;
+
+#[derive(Default)]
+pub struct Ext4BudgetPruneStats {
+    pub scanned: usize,
+    pub removed: usize,
+    pub budget_hit: bool,
+    pub skipped: bool,
+}
+
+#[derive(Default)]
+pub struct Ext4ChildrenBudgetPruneStats {
+    pub parents_scanned: usize,
+    pub entries_scanned: usize,
+    pub removed: usize,
+    pub budget_hit: bool,
+    pub skipped: bool,
+}
+
+struct Ext4ReclaimCursor {
+    /// Owned by prune_inode_objects_budgeted.
+    inode_objects_ino: u32,
+    /// Owned by prune_children_stale_entries_budgeted.
+    children_ino: u32,
+    /// Non-empty means resume inside children_ino after this child name.
+    children_name: String,
+}
+
+impl Ext4ReclaimCursor {
+    fn new() -> Self {
+        Self {
+            inode_objects_ino: 0,
+            children_ino: 0,
+            children_name: String::new(),
+        }
+    }
+}
 
 /// Ext4文件系统对象实例
 pub struct Ext4FileSystem {
@@ -54,6 +92,11 @@ pub struct Ext4FileSystem {
     // children cache 和 inode_objects 都只是加速查找的 opportunistic cache，不保活 inode。
     /// 全局 VFS inode object 弱引用表 (ino → Weak<dyn IndexNode>)
     pub(super) inode_objects: spin::Mutex<BTreeMap<u32, alloc::sync::Weak<dyn crate::fs::vfs::IndexNode>>>,
+    reclaim_cursor: spin::Mutex<Ext4ReclaimCursor>,
+    inode_objects_prune_gen: AtomicU64,
+    inode_objects_pruned_gen: AtomicU64,
+    children_prune_gen: AtomicU64,
+    children_pruned_gen: AtomicU64,
 
     // ── Phase 4: 底层 ext4 inode table 读缓存 ──
     // 减少 get_inode_ref 的磁盘 I/O。write_back_inode 改为先更新缓存再写回。
@@ -249,6 +292,11 @@ impl Ext4FileSystem {
                 __self_ref: spin::Mutex::new(weak.clone()),
                 page_caches: spin::Mutex::new(BTreeMap::new()),
                 inode_objects: spin::Mutex::new(BTreeMap::new()),
+                reclaim_cursor: spin::Mutex::new(Ext4ReclaimCursor::new()),
+                inode_objects_prune_gen: AtomicU64::new(0),
+                inode_objects_pruned_gen: AtomicU64::new(0),
+                children_prune_gen: AtomicU64::new(0),
+                children_pruned_gen: AtomicU64::new(0),
                 inode_cache: spin::Mutex::new(BTreeMap::new()),
                 meta_block_cache: MetaBlockCache::new(256, block_size),
                 meta_batch_active: core::sync::atomic::AtomicBool::new(false),
@@ -1004,6 +1052,7 @@ impl IndexNode for layout::Ext4OSInode {
                         }
                         None => {
                             children.remove(name);
+                            self.ext4fs.mark_children_prune_pending();
                             super::counters::inc_counter!(super::counters::DIR_CHILDREN_STALE_WEAK);
                             super::counters::inc_counter!(super::counters::DIR_CHILDREN_INVALIDATE);
                             None
@@ -1168,6 +1217,7 @@ impl IndexNode for layout::Ext4OSInode {
                     alloc::string::String::from(name),
                     alloc::sync::Arc::downgrade(&child_inode),
                 );
+                self.ext4fs.mark_children_prune_pending();
                 super::counters::inc_counter!(super::counters::DIR_CHILDREN_INSERT);
             }
             drop(children);
@@ -1204,6 +1254,7 @@ impl IndexNode for layout::Ext4OSInode {
             let mut children = self.children.lock();
             children.insert(alloc::string::String::from(name), alloc::sync::Arc::downgrade(&child_inode));
             drop(children);
+            self.ext4fs.mark_children_prune_pending();
             super::counters::inc_counter!(super::counters::DIR_CHILDREN_INSERT);
         }
         Ok(child_inode)
@@ -1240,6 +1291,7 @@ impl IndexNode for layout::Ext4OSInode {
             let mut children = self.children.lock();
             children.insert(alloc::string::String::from(name), alloc::sync::Arc::downgrade(&child_inode));
             drop(children);
+            self.ext4fs.mark_children_prune_pending();
             super::counters::inc_counter!(super::counters::DIR_CHILDREN_INSERT);
         }
         Ok(child_inode)
@@ -1301,6 +1353,7 @@ impl IndexNode for layout::Ext4OSInode {
             let mut children = self.children.lock();
             children.insert(alloc::string::String::from(name), alloc::sync::Arc::downgrade(&child_inode));
             drop(children);
+            self.ext4fs.mark_children_prune_pending();
             super::counters::inc_counter!(super::counters::DIR_CHILDREN_INSERT);
         }
         Ok(child_inode)
@@ -1364,7 +1417,12 @@ impl IndexNode for layout::Ext4OSInode {
             let mut children = self.children.lock();
             let child_weak = children.remove(old_name);
             if new_name != old_name { if children.remove(new_name).is_some() { super::counters::inc_counter!(super::counters::DIR_CHILDREN_REMOVE); } }
-            if let Some(weak) = child_weak { if !is_special_dot(new_name) { children.insert(alloc::string::String::from(new_name), weak); } }
+            if let Some(weak) = child_weak {
+                if !is_special_dot(new_name) {
+                    children.insert(alloc::string::String::from(new_name), weak);
+                    self.ext4fs.mark_children_prune_pending();
+                }
+            }
             Ok(())
         } else {
             let mut new_parent_ref = self.ext4fs.get_inode_ref(new_parent_num);
@@ -1400,7 +1458,11 @@ impl IndexNode for layout::Ext4OSInode {
             let mut new_children = new_parent_ext4.children.lock();
             if new_children.remove(new_name).is_some() { super::counters::inc_counter!(super::counters::DIR_CHILDREN_REMOVE); }
             if let Some(weak) = child_weak {
-                if !is_special_dot(new_name) { new_children.insert(alloc::string::String::from(new_name), weak); super::counters::inc_counter!(super::counters::DIR_CHILDREN_INSERT); }
+                if !is_special_dot(new_name) {
+                    new_children.insert(alloc::string::String::from(new_name), weak);
+                    new_parent_ext4.ext4fs.mark_children_prune_pending();
+                    super::counters::inc_counter!(super::counters::DIR_CHILDREN_INSERT);
+                }
             }
             Ok(())
         }
@@ -1428,6 +1490,7 @@ impl IndexNode for layout::Ext4OSInode {
             let mut children = self.children.lock();
             children.insert(alloc::string::String::from(name), alloc::sync::Arc::downgrade(other));
             drop(children);
+            self.ext4fs.mark_children_prune_pending();
             super::counters::inc_counter!(super::counters::DIR_CHILDREN_INSERT);
         }
         self.ext4fs.insert_inode_object(child_num, other);
@@ -1681,6 +1744,7 @@ impl IndexNode for layout::Ext4OSInode {
                 for name in stale {
                     children.remove(&name);
                 }
+                self.ext4fs.mark_children_prune_pending();
             }
         }
 
@@ -1716,6 +1780,16 @@ impl core::fmt::Debug for Ext4FileSystem {
 // ── Phase 1: inode_objects helpers (framework-only) ───────────────────────
 
 impl Ext4FileSystem {
+    #[inline]
+    fn mark_inode_objects_prune_pending(&self) {
+        self.inode_objects_prune_gen.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn mark_children_prune_pending(&self) {
+        self.children_prune_gen.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// 从 inode_objects 表中查找已有的 VFS inode object（Weak 引用）。
     /// 仅返回仍有效的 Arc；Weak 失效则惰性清理并返回 None。
     pub(crate) fn lookup_inode_object(
@@ -1733,6 +1807,7 @@ impl Ext4FileSystem {
                 None => {
                     table.remove(&ino);
                     drop(table);
+                    self.mark_inode_objects_prune_pending();
                     super::counters::inc_counter!(super::counters::INODE_OBJ_INVALIDATE);
                     None
                 }
@@ -1761,6 +1836,7 @@ impl Ext4FileSystem {
         if should_insert {
             table.insert(ino, alloc::sync::Arc::downgrade(inode));
             drop(table);
+            self.mark_inode_objects_prune_pending();
             super::counters::inc_counter!(super::counters::INODE_OBJ_INSERT);
         }
     }
@@ -1809,6 +1885,7 @@ impl Ext4FileSystem {
     /// 从 inode_objects 表中移除指定 ino 的 entry。
     pub(crate) fn remove_inode_object(&self, ino: u32) {
         if self.inode_objects.lock().remove(&ino).is_some() {
+            self.mark_inode_objects_prune_pending();
             super::counters::inc_counter!(super::counters::INODE_OBJ_REMOVE);
         }
     }
@@ -1833,6 +1910,96 @@ impl Ext4FileSystem {
             alive
         });
         before - table.len()
+    }
+
+    /// Incrementally clean stale entries in inode_objects.
+    ///
+    /// The scheduler reclaim path must not retain-scan the whole registry in
+    /// one run: full scans create long latency spikes after busy workloads.
+    pub fn prune_inode_objects_budgeted(
+        &self,
+        max_entries: usize,
+        force: bool,
+    ) -> Ext4BudgetPruneStats {
+        if max_entries == 0 {
+            return Ext4BudgetPruneStats::default();
+        }
+
+        let target_gen = self.inode_objects_prune_gen.load(Ordering::Relaxed);
+        if !force && target_gen == self.inode_objects_pruned_gen.load(Ordering::Relaxed) {
+            return Ext4BudgetPruneStats {
+                skipped: true,
+                ..Ext4BudgetPruneStats::default()
+            };
+        }
+
+        let start_ino = self.reclaim_cursor.lock().inode_objects_ino;
+        let mut table = self.inode_objects.lock();
+        if table.is_empty() {
+            self.reclaim_cursor.lock().inode_objects_ino = 0;
+            self.inode_objects_pruned_gen
+                .store(target_gen, Ordering::Relaxed);
+            return Ext4BudgetPruneStats::default();
+        }
+
+        let table_len_before = table.len();
+        let mut keys = alloc::vec::Vec::new();
+        for (&ino, _) in table.range((Excluded(start_ino), Unbounded)) {
+            keys.push(ino);
+            if keys.len() >= max_entries {
+                break;
+            }
+        }
+        let mut wrapped = false;
+        if start_ino != 0 && keys.len() < max_entries {
+            wrapped = true;
+            for (&ino, _) in table.range(..start_ino) {
+                keys.push(ino);
+                if keys.len() >= max_entries {
+                    break;
+                }
+            }
+        }
+
+        let scanned = keys.len();
+        let last_ino = keys.last().copied();
+        let mut removed = 0usize;
+        if scanned == 0 {
+            self.reclaim_cursor.lock().inode_objects_ino = 0;
+            self.inode_objects_pruned_gen
+                .store(target_gen, Ordering::Relaxed);
+            return Ext4BudgetPruneStats::default();
+        }
+        for ino in keys {
+            let stale = table
+                .get(&ino)
+                .map(|weak| weak.upgrade().is_none())
+                .unwrap_or(false);
+            if stale && table.remove(&ino).is_some() {
+                removed += 1;
+                super::counters::inc_counter!(super::counters::INODE_OBJ_STALE);
+            }
+        }
+
+        let mut cursor = self.reclaim_cursor.lock();
+        cursor.inode_objects_ino = if table.is_empty() {
+            0
+        } else {
+            last_ino.unwrap_or(start_ino)
+        };
+        let completed_pass = wrapped || scanned >= table_len_before;
+        let budget_hit = !completed_pass && scanned >= max_entries && !table.is_empty();
+        if completed_pass {
+            self.inode_objects_pruned_gen
+                .store(target_gen, Ordering::Relaxed);
+        }
+
+        Ext4BudgetPruneStats {
+            scanned,
+            removed,
+            budget_hit,
+            skipped: false,
+        }
     }
 
     /// 清理 page_caches registry 中所有 stale Weak entry
@@ -1893,6 +2060,216 @@ impl Ext4FileSystem {
             }
         }
         total
+    }
+
+    /// Incrementally clean stale Weak entries from directory children caches.
+    ///
+    /// The cursor has two states:
+    /// - `children_name == ""`: the last parent inode was completed; continue
+    ///   with the next inode.
+    /// - non-empty `children_name`: resume inside that parent after this name.
+    pub fn prune_children_stale_entries_budgeted(
+        &self,
+        max_parent_inodes: usize,
+        max_child_entries: usize,
+        force: bool,
+    ) -> Ext4ChildrenBudgetPruneStats {
+        if max_parent_inodes == 0 || max_child_entries == 0 {
+            return Ext4ChildrenBudgetPruneStats::default();
+        }
+
+        let target_gen = self.children_prune_gen.load(Ordering::Relaxed);
+        if !force && target_gen == self.children_pruned_gen.load(Ordering::Relaxed) {
+            return Ext4ChildrenBudgetPruneStats {
+                skipped: true,
+                ..Ext4ChildrenBudgetPruneStats::default()
+            };
+        }
+
+        let (start_ino, start_name) = {
+            let cursor = self.reclaim_cursor.lock();
+            (cursor.children_ino, cursor.children_name.clone())
+        };
+
+        let guard = self.inode_objects.lock();
+        if guard.is_empty() {
+            let mut cursor = self.reclaim_cursor.lock();
+            cursor.children_ino = 0;
+            cursor.children_name.clear();
+            self.children_pruned_gen
+                .store(target_gen, Ordering::Relaxed);
+            return Ext4ChildrenBudgetPruneStats::default();
+        }
+
+        let parent_table_len = guard.len();
+        let mut parents = alloc::vec::Vec::new();
+        let mut parents_scanned = 0usize;
+        let mut last_seen_ino = start_ino;
+        if !start_name.is_empty() {
+            parents_scanned += 1;
+            last_seen_ino = start_ino;
+            if let Some(arc) = guard.get(&start_ino).and_then(|w| w.upgrade()) {
+                parents.push((start_ino, arc));
+            }
+        }
+        for (&ino, weak) in guard.range((Excluded(start_ino), Unbounded)) {
+            if parents_scanned >= max_parent_inodes {
+                break;
+            }
+            parents_scanned += 1;
+            last_seen_ino = ino;
+            if let Some(arc) = weak.upgrade() {
+                parents.push((ino, arc));
+            }
+        }
+        let mut parent_wrapped = false;
+        if start_ino != 0 && parents_scanned < max_parent_inodes {
+            parent_wrapped = true;
+            for (&ino, weak) in guard.range(..start_ino) {
+                if parents_scanned >= max_parent_inodes {
+                    break;
+                }
+                parents_scanned += 1;
+                last_seen_ino = ino;
+                if let Some(arc) = weak.upgrade() {
+                    parents.push((ino, arc));
+                }
+            }
+        }
+        drop(guard);
+
+        if parents.is_empty() {
+            let completed_pass = parent_wrapped || parents_scanned >= parent_table_len;
+            let budget_hit = !completed_pass && parents_scanned >= max_parent_inodes;
+            let mut cursor = self.reclaim_cursor.lock();
+            cursor.children_ino = if budget_hit {
+                last_seen_ino
+            } else {
+                0
+            };
+            cursor.children_name.clear();
+            if !budget_hit {
+                self.children_pruned_gen
+                    .store(target_gen, Ordering::Relaxed);
+            }
+            return Ext4ChildrenBudgetPruneStats {
+                parents_scanned,
+                entries_scanned: 0,
+                removed: 0,
+                budget_hit,
+                skipped: false,
+            };
+        }
+
+        let mut stats = Ext4ChildrenBudgetPruneStats::default();
+        stats.parents_scanned = parents_scanned;
+        let mut remaining_entries = max_child_entries;
+        let mut last_completed_ino = start_ino;
+        let mut resume_ino = 0u32;
+        let mut resume_name = String::new();
+        let mut entry_budget_hit = false;
+
+        for (ino, arc) in parents {
+            if remaining_entries == 0 {
+                entry_budget_hit = true;
+                break;
+            }
+
+            let osi = match arc.as_any_ref().downcast_ref::<layout::Ext4OSInode>() {
+                Some(osi) => osi,
+                None => {
+                    last_completed_ino = ino;
+                    continue;
+                }
+            };
+
+            let scan_after = if ino == start_ino && !start_name.is_empty() {
+                Some(start_name.clone())
+            } else {
+                None
+            };
+
+            let names: alloc::vec::Vec<String> = {
+                let kids = osi.children.lock();
+                let mut names = alloc::vec::Vec::new();
+                match scan_after {
+                    Some(ref name) => {
+                        for (child_name, _) in kids.range((Excluded(name.clone()), Unbounded)) {
+                            names.push(child_name.clone());
+                            if names.len() >= remaining_entries {
+                                break;
+                            }
+                        }
+                    }
+                    None => {
+                        for child_name in kids.keys() {
+                            names.push(child_name.clone());
+                            if names.len() >= remaining_entries {
+                                break;
+                            }
+                        }
+                    }
+                }
+                names
+            };
+
+            if names.is_empty() {
+                last_completed_ino = ino;
+                continue;
+            }
+
+            let mut last_name = String::new();
+            {
+                let mut kids = osi.children.lock();
+                for name in names {
+                    stats.entries_scanned += 1;
+                    remaining_entries -= 1;
+                    last_name = name.clone();
+                    let stale = kids
+                        .get(&name)
+                        .map(|weak| weak.upgrade().is_none())
+                        .unwrap_or(false);
+                    if stale && kids.remove(&name).is_some() {
+                        stats.removed += 1;
+                    }
+                    if remaining_entries == 0 {
+                        break;
+                    }
+                }
+            }
+
+            if remaining_entries == 0 {
+                entry_budget_hit = true;
+                resume_ino = ino;
+                resume_name = last_name;
+                break;
+            }
+            last_completed_ino = ino;
+        }
+
+        let completed_parent_pass =
+            !entry_budget_hit && (parent_wrapped || stats.parents_scanned >= parent_table_len);
+        stats.budget_hit =
+            entry_budget_hit || (!completed_parent_pass && stats.parents_scanned >= max_parent_inodes);
+
+        let mut cursor = self.reclaim_cursor.lock();
+        if entry_budget_hit {
+            cursor.children_ino = resume_ino;
+            cursor.children_name = resume_name;
+        } else {
+            cursor.children_ino = if stats.budget_hit {
+                last_seen_ino
+            } else {
+                last_completed_ino
+            };
+            cursor.children_name.clear();
+        }
+
+        if completed_parent_pass {
+            self.children_pruned_gen
+                .store(target_gen, Ordering::Relaxed);
+        }
+        stats
     }
 
     /// 淘汰目录查找缓存中冷条目（LRU 策略）
@@ -2053,6 +2430,7 @@ impl Ext4FileSystem {
         }
         table.insert(ino, alloc::sync::Arc::downgrade(&obj));
         drop(table);
+        self.mark_inode_objects_prune_pending();
         super::counters::inc_counter!(super::counters::INODE_OBJ_INSERT);
         obj
     }

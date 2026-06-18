@@ -4,6 +4,61 @@
 
 ## 2026-06-18
 
+### perf(fs/reclaim): 记录 dirty-skip 复测结果，确认 S2b 空扫税下降
+
+**涉及文件：**
+- `docs/Work_Log.md` — 记录 DS 对 dirty/event-driven reclaim skip 的 rv64 S0/S1/S2b 复测结果
+
+**验证：**
+- DS 复测 `cc-codex/results-20260618-dirty-skip/`：S0/S1/S2b raw 均有效，无 panic，`dir_full_scan_count=0`
+- S1 musl：`open/close=442.1667us`，`stat=283.1053us`，`prune_kids cycles_total=825,414,702`，`kids_skipped=3274/3450`
+- S2b musl：`open/close=2080.3333us`，`stat=1626.75us`，`pipe latency=3177.1346us`，`prune_kids cycles_total=356,360,954`，相比 incremental prune 的 `4.4B` 下降约 92%
+
+**备注：** dirty generation 机制已生效，S1/S2b `kids_skipped` 分别约 94.9%/96.0%，说明此前 S2b 的主要剩余问题确实是 repeated empty/near-empty prune。S1 `prune_kids cycles_max=278,671,908` 仍超理想阈值，但 raw 显示这是少数 force cleanup spike，不是 sustained 成本；下一步如继续收敛 P0，应优先让 force cleanup 也按更小预算或独立 epoch 分摊。
+
+### fix(fs/reclaim): 为 ext4 weak cache prune 增加 dirty generation skip，减少 S2b 空扫税
+
+**涉及文件：**
+- `os/src/fs/ext4/ext4fs.rs` — 在 `Ext4FileSystem` 中增加 inode_objects/children prune generation；cache 插入、删除、rename/link/create 及 stale invalidation 标记 pending；`prune_inode_objects_budgeted()` / `prune_children_stale_entries_budgeted()` 支持 `force` 与 `skipped`，normal reclaim 在 generation 追平后跳过扫描，heap pressure/critical 仍 force 清理
+- `os/src/fs/reclaim.rs` — budgeted prune 调用改为 normal 非强制、heap pressure/critical 强制；`reclaim_budget` 新增 `io_skipped` / `kids_skipped`，用于判断 dirty-skip 是否减少空扫
+- `cc-codex/comms/2026-06-18-ds-dirty-reclaim-skip-validation.md` — 给 DS 的第二阶段复测任务书，限定 S0/S1/S2b/S2a/F5 矩阵、raw 解析字段、P0/P1/P2 判定和交付目录
+- `.agents/skills/mango-worklog/references/debugging-patterns.md` — 沉淀 budgeted reclaim 中 `budget_hit`、`removed`、`skipped` 与 `cycles_total` 的联合判读方法
+
+**验证：**
+- `git diff --check` ✅
+- `docker compose exec -T os-dev bash -lc 'cd /tmp/mango-build.apdYbA/os && make rv64-kernel-build-only'` ✅
+- `docker compose exec -T os-dev bash -lc 'cd /tmp/mango-build.apdYbA/os && make la64-kernel-build-only'` ✅
+- QEMU 性能复测未在本轮执行：已交付 DS 使用 clean image 跑 S0/S1/S2b，重点观察 `io_skipped/kids_skipped`、`prune_kids cycles_total/max`、`kids_removed` 和 S2b lmbench open/stat/pipe/group time
+
+**备注：** DS 的 incremental prune 复测确认 S1 长尾从 `780M` 降到 `103M`，但 S2b raw 中 `kids_removed=4`、`prune_kids cycles_total=4.4B`、open/pipe/group 仍明显退化，说明剩余主因更像反复空扫/近空扫而非旧目录 O(n) 或单纯 budget 太小。本次修复优先跳过 clean generation；Weak 自然过期没有回调，因此在 heap pressure/critical 下保留 force scan 作为兜底。
+
+### fix(fs/reclaim): 将 ext4 weak cache 清理改为 cursor/budget 增量回收
+
+**涉及文件：**
+- `os/src/fs/ext4/ext4fs.rs` — 为 `Ext4FileSystem` 增加 per-FS reclaim cursor，新增 `prune_inode_objects_budgeted()` 与 `prune_children_stale_entries_budgeted()`，按 inode/children cursor 分摊 stale weak 清理；保留原全量 prune 函数供 debug syscall/manual reclaim 使用
+- `os/src/fs/reclaim.rs` — scheduler-loop reclaim 改用 budgeted prune，移除“每 16 次全量清理一次”的 batching 策略；新增 `reclaim_budget` profile 行，输出 inode/children scanned 与 budget_hit 汇总
+- `cc-codex/comms/2026-06-18-ds-incremental-prune-validation.md` — 给 DS 的复测任务书，限定 S0/S1/S2b/S2a/full 验证路径、数据字段与判定阈值
+
+**验证：**
+- `docker compose exec -T os-dev bash -lc 'cd /tmp/mango-build.apdYbA/os && make rv64-kernel-build-only'` ✅
+- `docker compose exec -T os-dev bash -lc 'cd /tmp/mango-build.apdYbA/os && make la64-kernel-build-only'` ✅
+- `git diff --check` ✅
+- QEMU 性能复测未在本轮执行：已交付 DS 使用 clean image 跑 S0/S1/S2b，重点观察 `prune_kids cycles_max`、`reclaim_budget` 和 lmbench open/stat/pipe/read/write/bw_file_rd
+
+**备注：** DS 的 16 次 batching 复测显示 S0 平均 reclaim 成本显著下降，但 S1 出现 `prune_kids cycles_max=779,770,056` 与 open/stat/pipe 同步退化。本次改动目标是降低 cycles_max 长尾，而不是单纯降低 total cycles。DS review 指出的 inode cursor wrap off-by-one 已修正为 `..start_ino`；children parent 预算按 raw `inode_objects` entry 计数，避免大量 stale Weak 绕开预算；容器 `/app` 当前与宿主工作区存在漂移，因此编译验证使用 `/tmp` 临时副本覆盖当前源码后执行。
+
+### fix(fs/reclaim): 降低 scheduler-loop stale weak 全量清理频率，缓解 lmbench 污染退化
+
+**涉及文件：**
+- `os/src/fs/reclaim.rs` — 将 `prune_inode_objects()` / `prune_children_stale_entries()` 从每 64 个调度 tick 无条件执行，改为每 16 次 reclaim run 或 heap pressure/critical 时执行；保留 page cache 水位检查与 clean page shrink 的原有节奏；整理 DS 临时 stage profile 插桩中的长行和无用 macro
+
+**验证：**
+- `docker compose exec -T os-dev bash -lc 'cd /app/os && make rv64-kernel-build-only'` ✅
+- `docker compose exec -T os-dev bash -lc 'cd /app/os && make la64-kernel-build-only'` ✅
+- QEMU 性能复测未在本轮执行：当前 `os_test.conf` 为 `mask=0xFFF` 全量配置，下一步交给 DS 用 clean image + profile 配置跑最小 S0/S1/S2b 对照
+
+**备注：** DS 补充实验显示 `prune_children_stale_entries` 在污染后占 reclaim stage cycles 约 64%，`prune_inode_objects` 约 28%，且旧 O(n) 目录扫描 counters 未复发。本次先做低风险降频，不改变 lookup/PageCache/scheduler 语义；后续可再考虑 dirty flag / incremental prune。
+
 ### hotfix(fs/ext4): 禁用 eager full-index + 删除 create/link/symlink 冗余 FS cache 操作 → lmbench fork/create 回归修复
 
 **根因**: Oracle 分析确认 eager full-index（`total_blocks >= 2` 首次 miss 全目录扫描建索引）导致 fork+execve（+165%）和 fs create（3×）回归。目录首次 miss → 分配 Vec/BTreeMap 建完整索引 → 下次 mutation bump 立即失效 → 纯开销。
