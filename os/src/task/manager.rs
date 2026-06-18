@@ -935,7 +935,7 @@ impl WaitQueue {
     // ==================== wait_until 方法族（DragonOS 架构） ====================
 
     /// 兜底定时器的超时毫秒数，防止丢失唤醒导致永久阻塞。
-    const WAIT_IO_FALLBACK_MS: usize = 1;
+    const WAIT_IO_FALLBACK_MS: usize = 10;
 
     fn wait_event_impl<F>(
         wq: &Mutex<Self>,
@@ -990,8 +990,22 @@ impl WaitQueue {
                     .wait_io_timer_pending
                     .swap(true, AtomicOrdering::Relaxed)
                 {
-                    wait_with_timeout(
-                        Arc::downgrade(&task),
+                    // I/O fallback timer: arm with fallback_ms set so stale
+                    // fallback timers can be detected and re-armed in run_timer().
+                    // Using add_kernel_timer directly instead of wait_with_timeout
+                    // because wait_with_timeout always sets fallback_ms to None,
+                    // which causes stale fallback timers to be silently dropped
+                    // instead of re-armed, leading to permanent task blockage.
+                    let generation = task
+                        .wait_timer_generation
+                        .fetch_add(1, AtomicOrdering::Relaxed)
+                        .wrapping_add(1);
+                    add_kernel_timer(
+                        TimerAction::WakeTask {
+                            task: Arc::downgrade(&task),
+                            generation,
+                            fallback_ms: Some(ms),
+                        },
                         TimeSpec::now() + TimeSpec::from_ms(ms),
                     );
                 }
@@ -1556,6 +1570,32 @@ impl KernelTimerQueue {
                         return false; // Don't wake — stale timer
                     }
                     // active == generation: current fallback, wake normally
+                    //
+                    // But first: check if the task is actually interruptible.
+                    // If not, the timer fired between arm (in wait_event_impl)
+                    // and the task becoming Interruptible (in
+                    // block_current_and_run_next_with_lock_checked).
+                    // Re-arm instead of consuming the timer, or the task
+                    // will sleep forever with no wakeup.
+                    let inner = task.acquire_inner_lock();
+                    if inner.task_status != super::TaskStatus::Interruptible {
+                        drop(inner);
+                        if !task.wait_io_timer_pending.swap(true, AtomicOrdering::Relaxed) {
+                            let new_gen = task.wait_timer_generation.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+                            add_kernel_timer(
+                                TimerAction::WakeTask {
+                                    task: Arc::downgrade(&task),
+                                    generation: new_gen,
+                                    fallback_ms: Some(ms),
+                                },
+                                TimeSpec::now() + TimeSpec::from_ms(ms),
+                            );
+                            task.wait_io_fallback_active_generation.store(new_gen, AtomicOrdering::Release);
+                        }
+                        return false;
+                    }
+                    drop(inner);
+                    // Task is Interruptible — fall through to normal wake below
                 }
 
                 // Normal wake (deadline or current fallback)

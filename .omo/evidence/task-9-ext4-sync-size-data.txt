@@ -1,0 +1,17 @@
+Task 9 ext4 IndexNode sync/datasync evidence
+
+Implemented:
+- Added `Ext4OSInode::datasync()` in `os/src/fs/ext4/ext4fs.rs`:
+  - Locks new_page_cache, if Some(pc) calls pc.writeback_all()?.
+  - Returns Ok(()) if no page cache (e.g. directory).
+- Added `Ext4OSInode::sync()`:
+  - Calls self.datasync()? first.
+  - Then calls self.ext4fs.sync_fs() for filesystem-level metadata sync.
+- The fsync syscall bridge (T7) routes through File::sync_target() -> IndexNode::sync(),
+  so user-space fsync(fd) now reaches this code path.
+
+Build verification:
+- rv64 kernel build: PASS.
+- la64 kernel build: PASS.
+
+Persistence test: deferred to T16 (full QEMU+debugfs verification).

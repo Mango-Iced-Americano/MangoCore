@@ -1,0 +1,16 @@
+Task 7 invalid fd behavior evidence
+
+Code path:
+- `sys_fsync(fd)` locks fd table only for lookup and `File::sync_target()`.
+- Invalid fd returns `Err(SyscallErr::EBADF)` from `FdTable::get_file()`.
+- The syscall converts that to `-(e as isize)`, preserving existing fd-table errno behavior.
+
+Equivalent behavior added for:
+- `sys_fdatasync(fd)`
+
+Manual runtime check:
+- Deferred to T16/T18 QEMU syscall scenario because this kernel does not have a standalone host-side syscall test harness.
+
+Build verification:
+- rv64 kernel build: PASS.
+- la64 kernel build: PASS.

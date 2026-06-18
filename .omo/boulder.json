@@ -1,0 +1,53 @@
+{
+  "active_plan": "/root/projects/oskernel2026-mango/.sisyphus/plans/ltp-fs-megafix.md",
+  "started_at": "2026-06-10T13:05:00.000Z",
+  "session_ids": [
+    "ses_15048a0bbffep5UFUFIPTxDClC",
+    "ses_15012a287ffeFuk1sIc70A2Pfw"
+  ],
+  "plan_name": "ltp-fs-megafix",
+  "status": "active",
+  "schema_version": 2,
+  "works": {
+    "ltp-fs-megafix": {
+      "work_id": "ltp-fs-megafix",
+      "active_plan": "/root/projects/oskernel2026-mango/.sisyphus/plans/ltp-fs-megafix.md",
+      "plan_name": "ltp-fs-megafix",
+      "status": "active",
+      "started_at": "2026-06-10T13:05:00.000Z",
+      "session_ids": [
+        "ses_15048a0bbffep5UFUFIPTxDClC",
+        "ses_15012a287ffeFuk1sIc70A2Pfw"
+      ],
+      "session_origins": {
+        "ses_15012a287ffeFuk1sIc70A2Pfw": "appended"
+      },
+      "updated_at": "2026-06-10T05:07:09.423Z",
+      "task_sessions": {
+        "final-wave:f1": {
+          "task_key": "final-wave:f1",
+          "task_label": "F1",
+          "task_title": "**Plan Compliance Audit** — oracle",
+          "session_id": "ses_15012a287ffeFuk1sIc70A2Pfw",
+          "agent": "explore",
+          "updated_at": "2026-06-10T05:07:09.423Z"
+        }
+      }
+    }
+  },
+  "session_origins": {
+    "ses_15012a287ffeFuk1sIc70A2Pfw": "appended"
+  },
+  "task_sessions": {
+    "final-wave:f1": {
+      "task_key": "final-wave:f1",
+      "task_label": "F1",
+      "task_title": "**Plan Compliance Audit** — oracle",
+      "session_id": "ses_15012a287ffeFuk1sIc70A2Pfw",
+      "agent": "explore",
+      "updated_at": "2026-06-10T05:07:09.423Z"
+    }
+  },
+  "active_work_id": "ltp-fs-megafix",
+  "updated_at": "2026-06-10T05:07:09.423Z"
+}

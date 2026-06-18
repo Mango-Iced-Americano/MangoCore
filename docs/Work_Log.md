@@ -4,6 +4,20 @@
 
 ## 2026-06-18
 
+### fix(timer): I/O fallback timer fallback_ms=None 导致 lmbench context switch 挂死
+
+**涉及文件：**
+- `os/src/task/manager.rs` — `wait_event_impl()` fallback 路径：将 `wait_with_timeout()` 替换为直接 `add_kernel_timer(TimerAction::WakeTask { fallback_ms: Some(ms) })`
+
+**根因：** `wait_event_impl` 的 I/O fallback 路径调用 `wait_with_timeout()`，后者始终创建 `TimerAction::WakeTask { fallback_ms: None }`。`run_timer()` 的 stale fallback re-arm 逻辑只在 `fallback_ms: Some(ms)` 时生效。当任务因 pipe 阻塞被 1ms fallback timer 唤醒后重新阻塞时，`wait_io_timer_pending` 仍为 true 阻止新 timer 创建，旧 timer 因 generation 不匹配被静默丢弃（`fallback_ms: None` 跳过 re-arm 分支，掉到 generation check 返回 false），任务永久阻塞。lmbench context switch 测试中所有子进程先后进入此状态 → ready_queue 为空 → scheduler trace 0 条目。
+
+**为什么机器相关：** 快/慢主机（或 KVM vs TCG）的 pipe 读写时序差异决定任务是否在 1ms fallback timer 触发前收到数据，从而命中或绕过重新阻塞的竞态窗口。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU lmbench 测试待用户验证
+
 ### perf(net): 网络栈系统性优化 — P0/P1/P3/E/C/A（iperf TCP 吞吐 34x，netperf CRR +19%）
 
 **背景：** 在 `perf/net-userbuf` 分支上，从 develop 基线出发，通过 6 轮逐步优化，将 iperf PARALLEL_TCP 从 4.2 Mbps 提升至 144 Mbps（34x），netperf CRR 从 458 提升至 546（+19%）。每轮均独立测试，零回退。

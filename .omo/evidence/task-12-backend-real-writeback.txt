@@ -1,0 +1,14 @@
+Task 12 Fix Ext4PageCacheBackend evidence
+
+Implemented:
+- Added `real_block_device: Arc<dyn BlockDevice>` field to `Ext4FileSystem` in `os/src/fs/ext4/ext4fs.rs`.
+- In `open_ext4rs()`, set `real_block_device: block_device.clone()` (the original real device).
+- In `os/src/fs/page_cache.rs`, changed `Ext4PageCacheBackend::read_page()` and `write_page()`:
+  - OLD: used `fs.block_device.read_block/write_block()` (which was DirtyBlockDevice).
+  - NEW: use `fs.real_block_device.read_block/write_block()` (direct to real device).
+- This eliminates the double-deferral risk where PageCache writeback would write into
+  DirtyBlockDevice's memory cache instead of the real block device.
+
+Build verification:
+- rv64 kernel build: PASS.
+- la64 kernel build: PASS.

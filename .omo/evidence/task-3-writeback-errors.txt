@@ -1,0 +1,22 @@
+Task 3 writeback error evidence
+
+Writeback API signatures:
+- `PageCache::writeback_page(&self, page_index: usize) -> Result<(), SyscallErr>`
+- `PageCache::writeback_all(&self) -> Result<(), SyscallErr>`
+- `PageCache::writeback_range(&self, start_index: usize, end_index: usize) -> Result<(), SyscallErr>`
+- `flush_all_page_caches() -> Result<usize, SyscallErr>`
+
+Result propagation:
+- `flush_all_page_caches()` calls `cache.writeback_all()?` and returns the first writeback error.
+
+Existing ignored writeback results found for downstream cleanup:
+- `os/src/fs/fat32/fat_inode.rs:150` uses `let _ = pc.writeback_all();`
+- `os/src/fs/ext4/layout.rs:85` uses `let _ = pc.writeback_all();`
+
+Interpretation:
+- The new global flush path propagates errors.
+- Existing drop/cleanup paths still ignore errors; T9/T13/T15/F2 should revisit these because drop cannot easily return errors.
+
+Build verification:
+- rv64 kernel build: PASS.
+- la64 kernel build: PASS.

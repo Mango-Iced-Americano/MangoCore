@@ -1,0 +1,23 @@
+Task 7 fsync/sync/fdatasync bridge evidence
+
+Implemented:
+- Added `SYSCALL_SYNC = 81` and `SYSCALL_FDATASYNC = 83` in `os/src/syscall/syscall_id.rs`.
+- Added syscall name mapping for `sync` and `fdatasync` in `os/src/syscall/mod.rs`.
+- Added dispatch for `sync`, `fsync`, and `fdatasync` in `os/src/syscall/mod.rs`.
+- Replaced `sys_fsync(fd)` no-op with fd lookup -> `File::sync_target()` -> `IndexNode::sync()`.
+- Added `sys_fdatasync(fd)` -> `IndexNode::datasync()`.
+- Added `sys_sync()` -> `VFS_ROOT.inner_filesystem().sync_fs()` + `flush_all_page_caches()`.
+- Avoided holding fd table lock across writeback by cloning the inode Arc before calling `sync()`/`datasync()`.
+
+Search checks:
+- `SYSCALL_SYNC`, `SYSCALL_FSYNC`, and `SYSCALL_FDATASYNC` are defined and dispatched.
+- No `downcast_ref::<Ext4FileSystem>` in `os/src/syscall`.
+- No `flush_dirty_blocks(` call in `os/src/syscall`.
+
+Build verification:
+- rv64 kernel build: PASS.
+- la64 kernel build: PASS.
+
+Manual QA status:
+- Full debugfs persistence proof is deferred to T16, after ext4 `IndexNode::sync()` and metadata sync are implemented.
+- T7 only wires the generic syscall bridge; current ext4 inode sync semantics are still T9/T13 work.
