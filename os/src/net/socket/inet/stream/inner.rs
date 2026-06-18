@@ -28,8 +28,8 @@ use spin::Mutex;
 
 // ── TCP Socket 大小常量 ──────────────────────────────────────────────
 
-pub const DEFAULT_RX_BUF_SIZE: usize = 16 * 1024;
-pub const DEFAULT_TX_BUF_SIZE: usize = 16 * 1024;
+pub const DEFAULT_RX_BUF_SIZE: usize = 64 * 1024;
+pub const DEFAULT_TX_BUF_SIZE: usize = 64 * 1024;
 pub const TCP_MSS_DEFAULT: u32 = 1 << 15;
 /// TCP maximum segment size
 pub const TCP_MSS: u32 = if TCP_MSS_DEFAULT > 65536 {
@@ -38,7 +38,7 @@ pub const TCP_MSS: u32 = if TCP_MSS_DEFAULT > 65536 {
     TCP_MSS_DEFAULT
 };
 pub const BACKLOG_SIZE: u32 = 16;
-pub const LISTEN_BUFFER_SIZE: usize = 2048;
+pub const LISTEN_BUFFER_SIZE: usize = 32 * 1024;
 
 // EPollEvent 已移至 fs/vfs/event.rs，全内核统一使用该定义。
 pub use crate::fs::vfs::event::EPollEvent;
