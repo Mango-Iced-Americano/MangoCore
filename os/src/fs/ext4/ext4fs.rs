@@ -1,5 +1,6 @@
 #![allow(unused)]
 use core::arch::asm;
+use core::convert::TryFrom;
 use core::ptr::addr_of;
 
 use super::block_group::{Block, Ext4BlockGroup};
@@ -16,6 +17,7 @@ use crate::hal::BLOCK_SZ;
 use alloc::{string::String, sync::Arc, sync::Weak, vec::Vec};
 use alloc::collections::BTreeMap;
 use layout::Ext4OSInode;
+use super::dir_cache::Ext4DirectoryLookupCache;
 use spin::Mutex;
 type SuperBlock = Ext4Superblock;
 
@@ -66,6 +68,11 @@ pub struct Ext4FileSystem {
     pub(super) meta_batch_active: core::sync::atomic::AtomicBool,
     pub(super) meta_batch_sb: spin::Mutex<Option<super::superblock::Ext4Superblock>>,
     pub(super) meta_batch_bgs: spin::Mutex<alloc::collections::BTreeMap<u32, super::block_group::Ext4BlockGroup>>,
+
+    // ── Directory lookup cache ──
+    // Per-directory name→ino cache to avoid O(n) linear scans in dir_find_entry.
+    // Keyed by parent_ino, version-checked on lookup, invalidated on directory modification.
+    pub(super) dir_lookup_cache: Ext4DirectoryLookupCache,
 }
 
 /// 全局 Ext4FileSystem 注册表（用于 sync / reclaim / stats）。
@@ -247,6 +254,7 @@ impl Ext4FileSystem {
                 meta_batch_active: core::sync::atomic::AtomicBool::new(false),
                 meta_batch_sb: spin::Mutex::new(None),
                 meta_batch_bgs: spin::Mutex::new(alloc::collections::BTreeMap::new()),
+                dir_lookup_cache: Ext4DirectoryLookupCache::new(),
             };
             fs
         });
@@ -371,12 +379,14 @@ impl Ext4FileSystem {
         end_lblock: u32,
     ) -> Result<Vec<u32>, isize> {
         let mut allocated = Vec::new();
+
+        // Find consecutive hole runs and batch-allocate them.
         for lblock in start_lblock..end_lblock {
-            if self.get_pblock_idx(inode_ref, lblock).is_err() {
-                // Block not yet mapped — allocate and insert extent
-                self.insert_inode_pblk_deferred(inode_ref, lblock)?;
-                allocated.push(lblock);
+            if self.get_pblock_idx(inode_ref, lblock).is_ok() {
+                continue;
             }
+            self.insert_inode_pblk_deferred(inode_ref, lblock)?;
+            allocated.push(lblock);
         }
         Ok(allocated)
     }
@@ -575,6 +585,10 @@ impl layout::Ext4OSInode {
     }
 
     fn bump_dir_version(&self) -> u64 {
+        // Synchronize FS-level directory version for dir_lookup_cache coherence
+        let ino = self.inode.lock().inode_num;
+        self.ext4fs.dir_lookup_cache.bump_version(ino);
+        // Existing per-inode version bump
         self.dir_version
             .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
             .wrapping_add(1)
@@ -685,15 +699,6 @@ impl IndexNode for layout::Ext4OSInode {
         // skip the page cache so the direct I/O fallback reads from i_block.
         if !is_symlink {
             if let Some(pc) = self.get_new_page_cache() {
-                if read_len <= 64 {
-                    let pg = offset >> crate::config::PAGE_SIZE_BITS;
-                    log::info!(
-                        "[read_at] ino={} offset={} len={} file_size={} page={} cached={} pc={:p}",
-                        inode_num, offset, read_len, file_size, pg,
-                        pc.contains_page(pg),
-                        Arc::as_ptr(&pc),
-                    );
-                }
                 return pc.read(offset, &mut buf[..read_len]).map_err(|_| SyscallErr::EIO);
             }
         }
@@ -723,6 +728,49 @@ impl IndexNode for layout::Ext4OSInode {
             }
         }
         result
+    }
+
+    fn read_at_user(
+        &self,
+        offset: usize,
+        len: usize,
+        dst: &mut crate::mm::UserBuffer,
+    ) -> Result<usize, SyscallErr> {
+        let inode_lock = self.inode.lock();
+        if inode_lock.inode.is_dir() {
+            return Err(SyscallErr::EISDIR);
+        }
+        let is_symlink = inode_lock.inode.is_link();
+        let file_size = {
+            let cached = self.cached_file_size.load(core::sync::atomic::Ordering::Relaxed);
+            if cached != u64::MAX {
+                cached
+            } else {
+                let sz = inode_lock.inode.size();
+                self.cached_file_size
+                    .store(sz, core::sync::atomic::Ordering::Relaxed);
+                sz
+            }
+        } as usize;
+        drop(inode_lock);
+
+        if offset >= file_size {
+            return Ok(0);
+        }
+        let read_len = len.min(file_size - offset);
+
+        // Fast symlinks have no data pages — let File fallback handle them.
+        if is_symlink {
+            return Err(SyscallErr::ENOSYS);
+        }
+
+        if let Some(pc) = self.get_new_page_cache() {
+            return pc
+                .read_user(offset, read_len, dst)
+                .map_err(|_| SyscallErr::EIO);
+        }
+
+        Err(SyscallErr::ENOSYS)
     }
 
     fn write_at(
@@ -773,58 +821,67 @@ impl IndexNode for layout::Ext4OSInode {
             self.cached_file_size.store(new_size, core::sync::atomic::Ordering::Relaxed);
             self.metadata_dirty.store(true, core::sync::atomic::Ordering::Relaxed);
             super::counters::inc_counter!(super::counters::METADATA_DIRTY_MARK);
+
+            // Push updated inode (with new size/mtime/extents) into
+            // inode_cache so sync/fsync can flush it later.
+            self.ext4fs.push_dirty_inode_to_cache(inode_num, &inode_lock.inode);
         }
 
         // Write data through PageCache; physical blocks are already mapped.
         let pc = self.get_new_page_cache().ok_or(SyscallErr::EIO)?;
+        pc.write(offset, &buf[..write_len])?;
 
-        // Temporary diagnostic for hole-read debugging
-        if write_len <= 64 {
-            let pg = offset >> crate::config::PAGE_SIZE_BITS;
-            log::info!(
-                "[write_at] ino={} offset={} len={} old_size={} new_size={} blk={}..{} page={} cached={} pc={:p}",
-                inode_num, offset, write_len, old_size,
-                core::cmp::max(old_size, offset + write_len),
-                start_lblock, end_lblock, pg,
-                pc.contains_page(pg),
-                Arc::as_ptr(&pc),
-            );
+        Ok(write_len)
+    }
+
+    fn write_at_user(
+        &self,
+        offset: usize,
+        len: usize,
+        src: &crate::mm::UserBuffer,
+    ) -> Result<usize, SyscallErr> {
+        let mut inode_lock = self.inode.lock();
+        if inode_lock.inode.is_dir() {
+            return Err(SyscallErr::EISDIR);
         }
-        let write_result = pc.write(offset, &buf[..write_len]);
+        let inode_num = inode_lock.inode_num;
+        let old_size = inode_lock.inode.size() as usize;
+        drop(inode_lock);
 
-        // Temporary: check if page data is corrupted after write
-        if old_size > 0 && offset > old_size {
-            let mut snap = [0u8; 64];
-            let _ = pc.read(0, &mut snap[..60]);
-            log::info!(
-                "[write_at] after_pc_write offset={} snap[50..60]={:02x?}",
-                offset, &snap[50..60]
-            );
-        }
+        // nodelalloc: ensure every logical block in the write range has a
+        // physical block allocated BEFORE copying data into the page cache.
+        let block_size = self.ext4fs.block_size;
+        let start_lblock = (offset / block_size) as u32;
+        let end_lblock = ((offset + len + block_size - 1) / block_size) as u32;
 
-        // Persist metadata changes (mtime/ctime/size/extent) — flush once
-        // after all data + allocation work, even if data write partially failed.
-        // This ensures allocated blocks are reflected in the inode extent tree.
-        let mut fresh2 = self.ext4fs.get_inode_ref(inode_num);
+        let mut fresh = self.ext4fs.get_inode_ref(inode_num);
+        self.ext4fs
+            .ensure_blocks_allocated(&mut fresh, start_lblock, end_lblock)
+            .map_err(|_| SyscallErr::EIO)?;
+
         {
-            let inode_lock = self.inode.lock();
-            fresh2.inode = inode_lock.inode;
-        }
-        self.ext4fs.write_back_inode(&mut fresh2);
-        self.metadata_dirty.store(false, core::sync::atomic::Ordering::Relaxed);
-        super::counters::inc_counter!(super::counters::METADATA_FLUSH_COUNT);
+            let mut inode_lock = self.inode.lock();
+            inode_lock.inode = fresh.inode;
+            let new_end = offset + len;
+            let new_size = core::cmp::max(old_size, new_end) as u64;
+            inode_lock.inode.set_size(new_size);
+            let now = crate::timer::current_time_safe() as u32;
+            inode_lock.inode.set_mtime(now);
+            inode_lock.inode.set_ctime(now);
+            self.cached_file_size
+                .store(new_size, core::sync::atomic::Ordering::Relaxed);
+            self.metadata_dirty
+                .store(true, core::sync::atomic::Ordering::Relaxed);
+            super::counters::inc_counter!(super::counters::METADATA_DIRTY_MARK);
 
-        // Temporary: check if metadata flush corrupted page data
-        if old_size > 0 && offset > old_size {
-            let mut snap2 = [0u8; 64];
-            let _ = pc.read(0, &mut snap2[..60]);
-            log::info!(
-                "[write_at] after_flush offset={} snap2[50..60]={:02x?}",
-                offset, &snap2[50..60]
-            );
+            self.ext4fs.push_dirty_inode_to_cache(inode_num, &inode_lock.inode);
         }
 
-        write_result.map(|_| write_len).map_err(|_| SyscallErr::EIO)
+        // Write data through PageCache; physical blocks are already mapped.
+        let pc = self.get_new_page_cache().ok_or(SyscallErr::EIO)?;
+        pc.write_user(offset, len, src)?;
+
+        Ok(len)
     }
 
     /// 只读查询已有 page cache，不创建新 cache（用于 sync/datasync/debug）
@@ -837,21 +894,20 @@ impl IndexNode for layout::Ext4OSInode {
         self.get_new_page_cache()
     }
 
+    fn supports_user_buffer_io(&self) -> bool {
+        // Use read-only page_cache() to avoid creating a PageCache as a side effect.
+        // get_new_page_cache() would allocate on miss, which is wrong for a predicate.
+        self.page_cache().is_some()
+    }
+
     fn sync(&self) -> Result<(), SyscallErr> {
         if let Some(pc) = self.new_page_cache.lock().clone() {
             pc.writeback_all()?;
         }
-        // Phase 3: flush per-inode metadata if dirty
-        if self.metadata_dirty.swap(false, core::sync::atomic::Ordering::Relaxed) {
-            let inode_num = self.inode.lock().inode_num;
-            let mut fresh = self.ext4fs.get_inode_ref(inode_num);
-            {
-                let inode_lock = self.inode.lock();
-                fresh.inode = inode_lock.inode;
-            }
-            self.ext4fs.write_back_inode(&mut fresh);
-            super::counters::inc_counter!(super::counters::METADATA_FLUSH_COUNT);
-        }
+        // Per-inode flush: write this inode to disk, not all dirty inodes.
+        // flush_metadata_cache() handles bitmap/superblock writes separately.
+        let inode_num = self.inode.lock().inode_num;
+        let _ = self.ext4fs.flush_inode(inode_num);
         self.ext4fs.flush_metadata_cache();
         Ok(())
     }
@@ -860,6 +916,10 @@ impl IndexNode for layout::Ext4OSInode {
         if let Some(pc) = self.new_page_cache.lock().clone() {
             pc.writeback_all()?;
         }
+        // Per-inode flush for size/extent metadata integrity
+        let inode_num = self.inode.lock().inode_num;
+        let _ = self.ext4fs.flush_inode(inode_num);
+        self.ext4fs.flush_metadata_cache();
         Ok(())
     }
 
@@ -972,34 +1032,129 @@ impl IndexNode for layout::Ext4OSInode {
             }
         }
 
-        // Phase 4: record version BEFORE disk lookup for stable recheck
+        // Phase 3.5: FS-level directory lookup cache (name → ino)
+        // Unlike children Weak cache, this stores ino numbers keyed by version,
+        // surviving inode object eviction. Lock is held only for BTreeMap ops.
+        {
+            let version = self.ext4fs.dir_lookup_cache.current_version(inode_num);
+            if let Some(cached_ino) = self.ext4fs.dir_lookup_cache.lookup(inode_num, name, version) {
+                // Cache hit — resolve inode number outside cache lock
+                let child_inode = self.ext4fs.canonical_inode_object(cached_ino);
+                // Recheck: if version changed during resolution, retry once
+                let current_version = self.ext4fs.dir_lookup_cache.current_version(inode_num);
+                if current_version == version {
+                    super::counters::inc_counter!(super::counters::DIR_CACHE_HIT);
+                    return Ok(child_inode);
+                }
+                // Version changed — bounded retry (once)
+                if let Some(cached_ino2) = self.ext4fs.dir_lookup_cache.lookup(inode_num, name, current_version) {
+                    super::counters::inc_counter!(super::counters::DIR_CACHE_HIT);
+                    return Ok(self.ext4fs.canonical_inode_object(cached_ino2));
+                }
+                // Still mismatch — fall through to disk scan
+            }
+            super::counters::inc_counter!(super::counters::DIR_CACHE_MISS);
+        }
+
         let lookup_version = self.dir_version.load(core::sync::atomic::Ordering::Relaxed);
 
+        // Disk scan with lazy full-index for large directories
+        let pre_scan_version = self.ext4fs.dir_lookup_cache.current_version(inode_num);
         let mut result = Ext4DirSearchResult::new(Ext4DirEntry::default());
-        self.ext4fs
-            .dir_find_entry(inode_num, name, &mut result)
-            .map_err(|_| {
-                // Phase 4: insert negative dentry only if dir_version unchanged during lookup
+
+        // Check directory size to decide: full index vs linear scan
+        let parent_ref = self.ext4fs.get_inode_ref(inode_num);
+        let total_blocks = parent_ref.inode.size() as usize / self.ext4fs.block_size;
+
+        // HOTFIX: disable eager full-index scan — it was causing 2.7× fork+/bin/sh regression.
+        // Reason: first miss on large dirs scanned ALL blocks + allocated Vec/BTreeMap,
+        // then the next mutation invalidated the index (bump_version → cache cleared).
+        // For unique-filename creates, this was pure overhead with zero cache reuse.
+        //
+        // Adaptive strategy (future): full-index only after N misses on same version,
+        // with cap on collected entries to prevent OOM. Currently disabled.
+        let child_ino = if total_blocks >= 10000 /* disabled: was >=2 */ {
+            // Large directory: scan ALL blocks, build complete name→ino index
+            // NOTE: this path is DISABLED pending adaptive re-enablement.
+            let mut all_entries: alloc::vec::Vec<(alloc::string::String, u32)> = alloc::vec::Vec::new();
+            let mut found_ino: Option<u32> = None;
+            let mut scanned = 0u64;
+
+            for iblock in 0..total_blocks {
+                let fblock = match self.ext4fs.get_pblock_idx(&parent_ref, iblock as u32) {
+                    Ok(fb) => fb,
+                    Err(_) => continue,
+                };
+                let ext4block = self.ext4fs.load_metadata_block(fblock as usize);
+                super::counters::inc_counter!(super::counters::DIR_BLOCK_READ);
+                let mut offset = 0usize;
+                while offset < self.ext4fs.block_size - core::mem::size_of::<super::direntry::Ext4DirEntryTail>() {
+                    if let Ok(de) = super::direntry::Ext4DirEntry::try_from(&ext4block.data[offset..]) {
+                        if !de.unused() {
+                            scanned += 1;
+                            let entry_name = de.get_name_str();
+                            if entry_name == name {
+                                found_ino = Some(de.inode);
+                            }
+                            all_entries.push((alloc::string::String::from(entry_name), de.inode));
+                        }
+                        let entry_len = de.entry_len() as usize;
+                        if entry_len < 8 { break; }
+                        offset += entry_len;
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            // Track scanned entries count (FIX5: use actual count, not just increment)
+            super::counters::DIR_CACHE_SCANNED_ENTRIES.fetch_add(scanned, core::sync::atomic::Ordering::Relaxed);
+            // Track max scanned entries
+            {
+                let current_max = super::counters::DIR_CACHE_SCANNED_MAX.load(core::sync::atomic::Ordering::Relaxed);
+                if scanned > current_max {
+                    super::counters::DIR_CACHE_SCANNED_MAX.store(scanned, core::sync::atomic::Ordering::Relaxed);
+                }
+            }
+
+            // Build full index (if version unchanged)
+            let post_scan_version = self.ext4fs.dir_lookup_cache.current_version(inode_num);
+            if post_scan_version == pre_scan_version && !all_entries.is_empty() {
+                self.ext4fs.dir_lookup_cache.build_full_index(inode_num, all_entries, post_scan_version);
+                super::counters::inc_counter!(super::counters::DIR_CACHE_FULL_INDEX_BUILD);
+            }
+
+            found_ino
+        } else {
+            // Small directory: normal linear scan
+            super::counters::inc_counter!(super::counters::DIR_CACHE_LINEAR_SCAN);
+            let mut found: Option<u32> = None;
+            if let Ok(_) = self.ext4fs.dir_find_entry(inode_num, name, &mut result) {
+                found = Some(result.dentry.inode);
+            }
+            found
+        };
+
+        match child_ino {
+            Some(ino) => {
+                // Found — insert into cache if version unchanged
+                let current_version = self.ext4fs.dir_lookup_cache.current_version(inode_num);
+                if current_version == pre_scan_version {
+                    self.ext4fs.dir_lookup_cache.insert(inode_num, name, ino, current_version);
+                }
+            }
+            None => {
+                // Not found — use existing negative dentry logic
                 let current_version = self.dir_version.load(core::sync::atomic::Ordering::Relaxed);
                 if current_version == lookup_version {
                     self.insert_negative_dentry(name, current_version);
                     super::counters::inc_counter!(super::counters::NEGATIVE_DENTRY_INSERT);
                 }
-                SyscallErr::ENOENT
-            })?;
-        let child_ino = result.dentry.inode;
-
-        // Phase 4: positive dentry stable recheck — if dir_version changed during disk lookup,
-        // the entry we found may be stale (concurrent unlink+create race). Retry once.
-        {
-            let current_version = self.dir_version.load(core::sync::atomic::Ordering::Relaxed);
-            if current_version != lookup_version {
-                // Version changed — potential race. Fall through to retry by recursing.
-                // Simple approach: clear the stale result and let caller retry.
-                // For the hot path, just accept and insert; version mismatch is rare.
-                // Full retry would need a loop with bounded attempts.
+                return Err(SyscallErr::ENOENT);
             }
         }
+
+        let child_ino = child_ino.unwrap(); // Safe: we returned Err above on None
 
         // 通过 inode_objects canonicalize: 同一 ino 返回同一 VFS inode object
         let child_inode = self.ext4fs.canonical_inode_object(child_ino);
@@ -1032,6 +1187,42 @@ impl IndexNode for layout::Ext4OSInode {
         let new_ref = self
             .ext4fs
             .create(parent, name, inode_mode, 0, 0)
+            .map_err(|e| {
+                if e == crate::syscall::errno::ENOENT { SyscallErr::ENOENT }
+                else if e == crate::syscall::errno::EEXIST { SyscallErr::EEXIST }
+                else { SyscallErr::ENOSYS }
+            })?;
+        self.bump_dir_version();
+        self.clear_negative_dentry(name);
+        let child_ino = new_ref.inode_num;
+        let child_inode: alloc::sync::Arc<dyn IndexNode> = layout::Ext4OSInode::new_vfs(
+            alloc::sync::Arc::new(spin::Mutex::new(new_ref)),
+            self.ext4fs.clone(),
+        );
+        self.ext4fs.insert_inode_object(child_ino, &child_inode);
+        if !is_special_dot(name) {
+            let mut children = self.children.lock();
+            children.insert(alloc::string::String::from(name), alloc::sync::Arc::downgrade(&child_inode));
+            drop(children);
+            super::counters::inc_counter!(super::counters::DIR_CHILDREN_INSERT);
+        }
+        Ok(child_inode)
+    }
+
+    fn create_with_attrs(
+        &self,
+        name: &str,
+        file_type: VfsFileType,
+        attrs: crate::fs::vfs::CreateAttrs,
+    ) -> Result<alloc::sync::Arc<dyn IndexNode>, SyscallErr> {
+        let parent = self.inode.lock().inode_num;
+        let inode_mode = vfs_type_to_inode_mode(file_type)
+            | (attrs.mode & InodeMode::S_IALLUGO).bits() as u16;
+        // Pass uid/gid directly through to ext4 create, avoiding
+        // a post-create set_metadata() round-trip.
+        let new_ref = self
+            .ext4fs
+            .create(parent, name, inode_mode, attrs.uid as u16, attrs.gid as u16)
             .map_err(|e| {
                 if e == crate::syscall::errno::ENOENT { SyscallErr::ENOENT }
                 else if e == crate::syscall::errno::EEXIST { SyscallErr::EEXIST }
@@ -1153,6 +1344,10 @@ impl IndexNode for layout::Ext4OSInode {
                 old_target.inode.set_links_count(links - 1);
                 self.ext4fs.write_back_inode(&mut old_target);
             }
+            // FIX3: if overwriting a directory, remove its dir lookup cache
+            if old_target.inode.is_dir() {
+                self.ext4fs.dir_lookup_cache.remove_dir_cache(old_target_num);
+            }
         }
 
         if old_parent_num == new_parent_num {
@@ -1161,6 +1356,9 @@ impl IndexNode for layout::Ext4OSInode {
             let mut parent_ref2 = self.ext4fs.get_inode_ref(old_parent_num);
             self.ext4fs.dir_remove_entry(&mut parent_ref2, old_name).map_err(|_| SyscallErr::EIO)?;
             let v = self.bump_dir_version();
+            // Invalidate dir cache for old_name and new_name
+            self.ext4fs.dir_lookup_cache.invalidate_name(old_parent_num, old_name);
+            self.ext4fs.dir_lookup_cache.invalidate_name(old_parent_num, new_name);
             self.clear_negative_dentry(new_name);
             self.insert_negative_dentry(old_name, v);
             let mut children = self.children.lock();
@@ -1191,8 +1389,12 @@ impl IndexNode for layout::Ext4OSInode {
             let child_weak = old_children.remove(old_name);
             drop(old_children);
             let old_v = self.bump_dir_version();
+            // Invalidate dir cache for old_name on old parent
+            self.ext4fs.dir_lookup_cache.invalidate_name(old_parent_num, old_name);
             self.insert_negative_dentry(old_name, old_v);
             new_parent_ext4.bump_dir_version();
+            // Invalidate dir cache for new_name on new parent
+            new_parent_ext4.ext4fs.dir_lookup_cache.invalidate_name(new_parent_num, new_name);
             new_parent_ext4.clear_negative_dentry(new_name);
             if child_weak.is_some() { super::counters::inc_counter!(super::counters::DIR_CHILDREN_REMOVE); }
             let mut new_children = new_parent_ext4.children.lock();
@@ -1297,6 +1499,8 @@ impl IndexNode for layout::Ext4OSInode {
 
         // Phase 4: after successful unlink
         let v = self.bump_dir_version();
+        // Invalidate dir cache entry for this name
+        self.ext4fs.dir_lookup_cache.invalidate_name(parent_num, name);
         self.insert_negative_dentry(name, v);
 
         Ok(())
@@ -1373,6 +1577,10 @@ impl IndexNode for layout::Ext4OSInode {
 
         // Phase 4: after successful rmdir
         let v = self.bump_dir_version();
+        // Invalidate dir cache entry for this name
+        self.ext4fs.dir_lookup_cache.invalidate_name(parent_num, name);
+        // Remove the deleted directory's cache
+        self.ext4fs.dir_lookup_cache.remove_dir_cache(child_ino);
         self.insert_negative_dentry(name, v);
         if let Some(child_obj) = self.ext4fs.lookup_inode_object(child_ino) {
             if let Some(osi) = child_obj.as_any_ref().downcast_ref::<layout::Ext4OSInode>() {
@@ -1685,6 +1893,11 @@ impl Ext4FileSystem {
             }
         }
         total
+    }
+
+    /// 淘汰目录查找缓存中冷条目（LRU 策略）
+    pub fn evict_dir_cache(&self) {
+        self.dir_lookup_cache.evict_if_needed();
     }
 
     /// 遍历所有 alive PageCache，回收最多 max_pages 个干净页
@@ -2007,6 +2220,24 @@ impl Ext4FileSystem {
             self.flush_inode(ino)?;
         }
         Ok(())
+    }
+
+    /// Push an in-memory inode into the inode_cache and mark it dirty,
+    /// without writing to disk. Only updates if entry already exists in
+    /// cache (normal case: ensure_blocks_allocated already inserted it).
+    /// Does NOT read from disk on miss — avoids get_inode_cached() I/O.
+    pub(crate) fn push_dirty_inode_to_cache(
+        &self,
+        ino: u32,
+        inode: &super::ext4_inode::Ext4Inode,
+    ) {
+        let cache = self.inode_cache.lock();
+        if let Some(cached) = cache.get(&ino) {
+            let mut guard = cached.lock();
+            guard.inode = inode.clone();
+            guard.dirty = true;
+            super::counters::inc_counter!(super::counters::INODE_DIRTY_COUNT);
+        }
     }
 }
 

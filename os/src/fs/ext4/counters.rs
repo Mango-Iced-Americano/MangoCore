@@ -95,6 +95,16 @@ pub static CACHE_ALL_SUBFILE_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static CACHE_ALL_SUBFILE_ENTRIES_LOADED: AtomicU64 = AtomicU64::new(0);
 pub static CACHE_ALL_SUBFILE_INODE_LOADS: AtomicU64 = AtomicU64::new(0);
 
+// ── Directory lookup cache ────────────────────────────────────────────────
+
+pub static DIR_CACHE_HIT: AtomicU64 = AtomicU64::new(0);
+pub static DIR_CACHE_MISS: AtomicU64 = AtomicU64::new(0);
+pub static DIR_CACHE_FULL_INDEX_BUILD: AtomicU64 = AtomicU64::new(0);
+pub static DIR_CACHE_ENTRY_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static DIR_CACHE_LINEAR_SCAN: AtomicU64 = AtomicU64::new(0);
+pub static DIR_CACHE_SCANNED_ENTRIES: AtomicU64 = AtomicU64::new(0);
+pub static DIR_CACHE_SCANNED_MAX: AtomicU64 = AtomicU64::new(0);
+
 // ── Getdents ─────────────────────────────────────────────────────────────
 
 pub static GETDENTS_CALL_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -179,6 +189,9 @@ pub fn reset_counters() {
         &DIR_LOOKUP_COUNT, &DIR_FULL_SCAN_COUNT, &DIR_FULL_SCAN_ENTRIES,
         &CACHE_ALL_SUBFILE_COUNT, &CACHE_ALL_SUBFILE_ENTRIES_LOADED,
         &CACHE_ALL_SUBFILE_INODE_LOADS,
+        &DIR_CACHE_HIT, &DIR_CACHE_MISS, &DIR_CACHE_FULL_INDEX_BUILD,
+        &DIR_CACHE_ENTRY_COUNT, &DIR_CACHE_LINEAR_SCAN,
+        &DIR_CACHE_SCANNED_ENTRIES, &DIR_CACHE_SCANNED_MAX,
         &GETDENTS_CALL_COUNT, &GETDENTS_RETURNED_ENTRIES,
         &GETDENTS_RETURNED_BYTES, &GETDENTS_INVALID_RECLEN_COUNT,
         &INODE_TABLE_READ, &INODE_TABLE_WRITE,
@@ -258,6 +271,14 @@ pub fn dump_scenario(label: &str) {
         DIR_LOOKUP_COUNT.load(Ordering::Relaxed),
         DIR_FULL_SCAN_COUNT.load(Ordering::Relaxed),
         DIR_FULL_SCAN_ENTRIES.load(Ordering::Relaxed));
+    println!("dir_cache_hit={} dir_cache_miss={} dir_cache_full_index_build={} dir_cache_entry_count={} dir_cache_linear_scan={} dir_cache_scanned_entries={} dir_cache_scanned_max={}",
+        DIR_CACHE_HIT.load(Ordering::Relaxed),
+        DIR_CACHE_MISS.load(Ordering::Relaxed),
+        DIR_CACHE_FULL_INDEX_BUILD.load(Ordering::Relaxed),
+        DIR_CACHE_ENTRY_COUNT.load(Ordering::Relaxed),
+        DIR_CACHE_LINEAR_SCAN.load(Ordering::Relaxed),
+        DIR_CACHE_SCANNED_ENTRIES.load(Ordering::Relaxed),
+        DIR_CACHE_SCANNED_MAX.load(Ordering::Relaxed));
     println!("cache_all_subfile_count={} cache_all_subfile_entries_loaded={} cache_all_subfile_inode_loads={}",
         CACHE_ALL_SUBFILE_COUNT.load(Ordering::Relaxed),
         CACHE_ALL_SUBFILE_ENTRIES_LOADED.load(Ordering::Relaxed),

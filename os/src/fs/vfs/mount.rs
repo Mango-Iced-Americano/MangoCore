@@ -293,8 +293,25 @@ impl MountFSInode {
 
     /// 逐级查找子项（带挂载点交叉和 dentry 缓存）
     fn do_find(&self, name: &str) -> Result<Arc<MountFSInode>, SyscallErr> {
-        let _t0 = crate::task::perf::perf_time_now();
         counters::FIND_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let parent_ino = self.inner_inode.metadata()?.inode_id;
+        self.do_find_with_parent_ino(name, parent_ino)
+    }
+
+    /// Same as do_find, but caller supplies parent_ino to avoid a redundant
+    /// inner_inode.metadata() call. Used by vfs_lookup which already has the
+    /// metadata from its own directory-type check.
+    pub(crate) fn do_find_with_parent_ino(
+        &self,
+        name: &str,
+        parent_ino: usize,
+    ) -> Result<Arc<MountFSInode>, SyscallErr> {
+        let _t0 = crate::task::perf::perf_time_now();
+        // ".." goes through do_parent() which handles mountpoint boundary crossing;
+        // bypass dentry cache to avoid stale cached entries for mount root "..".
+        if name == ".." {
+            return self.do_parent();
+        }
         // Self-overlay: if this inode itself is a mountpoint, redirect to
         // the mounted filesystem's root before looking up children.
         // Without this, find("test_file") on a covered mountpoint directory
@@ -310,7 +327,6 @@ impl MountFSInode {
 
         // Shortcut: skip dentry cache for dynamic filesystems (procfs)
         if self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
-            let parent_ino = self.inner_inode.metadata()?.inode_id;
             let inner_inode = self.inner_inode.find(name)?;
             let result = MountFSInode::overlaid_inode(MountFSInode::new(
                 inner_inode,
@@ -321,7 +337,6 @@ impl MountFSInode {
             return Ok(result);
         }
 
-        let parent_ino = self.inner_inode.metadata()?.inode_id;
         let key = super::dentry_cache::DentryKey {
             parent_ino,
             name: String::from(name),
@@ -490,6 +505,43 @@ impl IndexNode for MountFSInode {
         self.inner_inode.write_at(offset, len, buf, data)
     }
 
+    fn read_at_user(
+        &self,
+        offset: usize,
+        len: usize,
+        dst: &mut crate::mm::UserBuffer,
+    ) -> Result<usize, SyscallErr> {
+        self.inner_inode.read_at_user(offset, len, dst)
+    }
+
+    fn write_at_user(
+        &self,
+        offset: usize,
+        len: usize,
+        src: &crate::mm::UserBuffer,
+    ) -> Result<usize, SyscallErr> {
+        self.ensure_mount_writable()?;
+        self.inner_inode.write_at_user(offset, len, src)
+    }
+
+    fn supports_user_buffer_io(&self) -> bool {
+        self.inner_inode.supports_user_buffer_io()
+    }
+
+    fn is_discard_write(&self) -> bool {
+        self.inner_inode.is_discard_write()
+    }
+
+    fn discard_write_at(
+        &self,
+        offset: usize,
+        len: usize,
+        data: MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        self.ensure_mount_writable()?;
+        self.inner_inode.discard_write_at(offset, len, data)
+    }
+
     fn read_direct(
         &self,
         offset: usize,
@@ -591,6 +643,35 @@ impl IndexNode for MountFSInode {
         self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
         let parent_ino = self.inner_inode.metadata().ok().map(|m| m.inode_id);
         let inner_inode = self.inner_inode.create_with_data(name, file_type, mode, data)?;
+        let wrapper = MountFSInode::new(inner_inode, self.mount_fs.clone());
+        if let Some(parent_ino) = parent_ino {
+            wrapper.remember_path_hint(parent_ino, name);
+        }
+        counters::MFSI_FROM_CREATE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if !self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
+            if let Ok(parent_md) = self.inner_inode.metadata() {
+                let key = super::dentry_cache::DentryKey {
+                    parent_ino: parent_md.inode_id,
+                    name: String::from(name),
+                };
+                let (_, evicted) = self.mount_fs.dentry_cache.lock()
+                    .insert_or_get(key, wrapper.clone());
+                drop(evicted);
+            }
+        }
+        Ok(wrapper)
+    }
+
+    fn create_with_attrs(
+        &self,
+        name: &str,
+        file_type: FileType,
+        attrs: super::index_node::CreateAttrs,
+    ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+        self.ensure_mount_writable()?;
+        self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
+        let parent_ino = self.inner_inode.metadata().ok().map(|m| m.inode_id);
+        let inner_inode = self.inner_inode.create_with_attrs(name, file_type, attrs)?;
         let wrapper = MountFSInode::new(inner_inode, self.mount_fs.clone());
         if let Some(parent_ino) = parent_ino {
             wrapper.remember_path_hint(parent_ino, name);

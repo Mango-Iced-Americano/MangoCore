@@ -41,3 +41,5 @@ __pycache__/
 .sisyphus/
 sdcard-rv-noconf.img
 /tools/
+.omo/
+.env

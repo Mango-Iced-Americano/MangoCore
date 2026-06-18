@@ -288,9 +288,12 @@ fn open_file_at(
     }
 
     let (uid, gid) = open_subject_ids();
-    let parent_result = check_parent_search_access(&start, path, uid, gid);
-    if parent_result != SUCCESS {
-        return Err(parent_result);
+    // uid==0 (root) bypasses DAC — skip the redundant path walk
+    if uid != 0 {
+        let parent_result = check_parent_search_access(&start, path, uid, gid);
+        if parent_result != SUCCESS {
+            return Err(parent_result);
+        }
     }
 
     let follow_final = !flags.contains(OpenFlags::O_NOFOLLOW);
@@ -355,7 +358,8 @@ fn open_file_at(
             if flags.contains(OpenFlags::O_TRUNC) {
                 target.resize(0).map_err(|e| -(e as isize))?;
             }
-            vfs::File::new(target, _open_flags_to_vfs_flags(flags)).map_err(|e| -(e as isize))
+            vfs::File::new_with_metadata(target, _open_flags_to_vfs_flags(flags), md)
+                .map_err(|e| -(e as isize))
         }
         Err(errno) if errno == ENOENT => {
             if !flags.contains(OpenFlags::O_CREAT) || flags.contains(OpenFlags::O_DIRECTORY) {
@@ -366,15 +370,24 @@ fn open_file_at(
             check_parent_write_search_access(&parent, uid, gid)?;
             let task = current_task().unwrap();
             let umask = task.acquire_inner_lock().umask;
-            let effective_mode = mode & !vfs::InodeMode::from_bits_truncate(umask);
+            let create_mode = (mode & !vfs::InodeMode::from_bits_truncate(umask))
+                & vfs::InodeMode::S_IALLUGO;
+
+            let setgid = parent_meta.mode.contains(vfs::InodeMode::S_ISGID);
+            let child_gid = if setgid { parent_meta.gid } else { gid };
+
+            let mut effective_mode = create_mode;
+            if effective_mode.contains(vfs::InodeMode::S_ISGID) && uid != 0 && gid != child_gid {
+                effective_mode.remove(vfs::InodeMode::S_ISGID);
+            }
+
             let inode = parent
-                .create(
+                .create_with_attrs(
                     &leaf,
                     FileType::File,
-                    effective_mode & vfs::InodeMode::S_IALLUGO,
+                    vfs::CreateAttrs { mode: effective_mode, uid, gid: child_gid },
                 )
                 .map_err(|e| -(e as isize))?;
-            apply_created_inode_metadata(&parent_meta, &inode, effective_mode, uid, gid)?;
             vfs::File::new(inode, _open_flags_to_vfs_flags(flags)).map_err(|e| -(e as isize))
         }
         Err(errno) => Err(errno),
@@ -493,6 +506,41 @@ fn read_into_user(file: &vfs::File, token: usize, buf: usize, count: usize) -> i
         };
     }
 
+    if file.inode.supports_user_buffer_io() {
+        let chunk_cap = count.min(crate::hal::IO_CHUNK_SIZE);
+        let mut total = 0usize;
+        while total < count {
+            let want = (count - total).min(chunk_cap);
+
+            let user_addr = match buf.checked_add(total) {
+                Some(v) => v,
+                None => return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) },
+            };
+            let accessible = match writable_len_for_read(token, user_addr, want) {
+                Ok(n) => n,
+                Err(errno) => return if total > 0 { total as isize } else { errno },
+            };
+
+            let mut ubuf = match UserBufferWriter::new(token, user_addr as *mut u8, accessible) {
+                Ok(w) => w.into_user_buffer(),
+                Err(errno) => return if total > 0 { total as isize } else { errno },
+            };
+
+            let n = match file.read_user(&mut ubuf) {
+                Ok(n) => n,
+                Err(e) => return if total > 0 { total as isize } else { -(e as isize) },
+            };
+            if n == 0 { break; }
+            total += n;
+            if n < accessible { break; }
+            if let Some(task) = current_task() {
+                if crate::task::has_actionable_signal(&task) { break; }
+            }
+        }
+        return total as isize;
+    }
+
+    // kbuf path for pipe/socket/devfs/procfs — avoids ENOSYS probe overhead
     let chunk_cap = count.min(crate::hal::IO_CHUNK_SIZE);
     let mut kbuf = alloc::vec::Vec::new();
     if kbuf.try_reserve(chunk_cap).is_err() {
@@ -503,8 +551,6 @@ fn read_into_user(file: &vfs::File, token: usize, buf: usize, count: usize) -> i
     let mut total = 0usize;
     while total < count {
         let want = (count - total).min(chunk_cap);
-
-        // Validate destination chunk BEFORE reading from file
         let user_addr = match buf.checked_add(total) {
             Some(v) => v,
             None => return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) },
@@ -525,11 +571,11 @@ fn read_into_user(file: &vfs::File, token: usize, buf: usize, count: usize) -> i
             break;
         }
 
-        // Write to user one page at a time — each page fault-in is independent
         let mut copied = 0usize;
         while copied < n {
             let this_addr = user_addr.saturating_add(copied);
-            let page_remain = crate::config::PAGE_SIZE - (this_addr & (crate::config::PAGE_SIZE - 1));
+            let page_remain =
+                crate::config::PAGE_SIZE - (this_addr & (crate::config::PAGE_SIZE - 1));
             let chunk = (n - copied).min(page_remain.max(1));
             let mut writer = match UserBufferWriter::new(token, this_addr as *mut u8, chunk) {
                 Ok(w) => w,
@@ -550,14 +596,9 @@ fn read_into_user(file: &vfs::File, token: usize, buf: usize, count: usize) -> i
         }
 
         total += copied;
-        if copied < n {
-            break;
-        }
-
+        if copied < n { break; }
         if let Some(task) = current_task() {
-            if crate::task::has_actionable_signal(&task) {
-                break;
-            }
+            if crate::task::has_actionable_signal(&task) { break; }
         }
     }
     total as isize
@@ -604,6 +645,43 @@ fn pread_into_user(file: &vfs::File, token: usize, buf: usize, count: usize, off
         };
     }
 
+    if file.inode.supports_user_buffer_io() {
+        let chunk_cap = count.min(crate::hal::IO_CHUNK_SIZE);
+        let mut total = 0usize;
+        while total < count {
+            let want = (count - total).min(chunk_cap);
+            let file_off = match offset.checked_add(total) {
+                Some(v) => v,
+                None => return if total > 0 { total as isize } else { -(SyscallErr::EINVAL as isize) },
+            };
+            let user_addr = match buf.checked_add(total) {
+                Some(v) => v,
+                None => return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) },
+            };
+            let accessible = match writable_len_for_read(token, user_addr, want) {
+                Ok(n) => n,
+                Err(errno) => return if total > 0 { total as isize } else { errno },
+            };
+
+            let mut ubuf = match UserBufferWriter::new(token, user_addr as *mut u8, accessible) {
+                Ok(w) => w.into_user_buffer(),
+                Err(errno) => return if total > 0 { total as isize } else { errno },
+            };
+
+            let n = match file.pread_user(file_off, &mut ubuf) {
+                Ok(n) => n,
+                Err(e) => return if total > 0 { total as isize } else { -(e as isize) },
+            };
+            if n == 0 { break; }
+            total += n;
+            if n < accessible { break; }
+            if let Some(task) = current_task() {
+                if crate::task::has_actionable_signal(&task) { break; }
+            }
+        }
+        return total as isize;
+    }
+
     let chunk_cap = count.min(crate::hal::IO_CHUNK_SIZE);
     let mut kbuf = alloc::vec::Vec::new();
     if kbuf.try_reserve(chunk_cap).is_err() {
@@ -618,7 +696,6 @@ fn pread_into_user(file: &vfs::File, token: usize, buf: usize, count: usize, off
             Some(v) => v,
             None => return if total > 0 { total as isize } else { -(SyscallErr::EINVAL as isize) },
         };
-
         let user_addr = match buf.checked_add(total) {
             Some(v) => v,
             None => return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) },
@@ -635,15 +712,13 @@ fn pread_into_user(file: &vfs::File, token: usize, buf: usize, count: usize, off
                 return if total > 0 { total as isize } else { ret };
             }
         };
-        if n == 0 {
-            break;
-        }
+        if n == 0 { break; }
 
-        // Write to user one page at a time — each page fault-in is independent
         let mut copied = 0usize;
         while copied < n {
             let this_addr = user_addr.saturating_add(copied);
-            let page_remain = crate::config::PAGE_SIZE - (this_addr & (crate::config::PAGE_SIZE - 1));
+            let page_remain =
+                crate::config::PAGE_SIZE - (this_addr & (crate::config::PAGE_SIZE - 1));
             let chunk = (n - copied).min(page_remain.max(1));
             let mut writer = match UserBufferWriter::new(token, this_addr as *mut u8, chunk) {
                 Ok(w) => w,
@@ -664,14 +739,9 @@ fn pread_into_user(file: &vfs::File, token: usize, buf: usize, count: usize, off
         }
 
         total += copied;
-        if copied < n {
-            break;
-        }
-
+        if copied < n { break; }
         if let Some(task) = current_task() {
-            if crate::task::has_actionable_signal(&task) {
-                break;
-            }
+            if crate::task::has_actionable_signal(&task) { break; }
         }
     }
     total as isize
@@ -683,6 +753,50 @@ fn write_from_user(file: &vfs::File, token: usize, buf: usize, count: usize) -> 
             Ok(n) => n as isize,
             Err(e) => -(e as isize),
         };
+    }
+
+    // Fast path for /dev/null, /dev/zero — skip UserBuffer construction
+    if file.inode.is_discard_write() {
+        return match file.write_discard(count) {
+            Ok(n) => n as isize,
+            Err(e) => -(e as isize),
+        };
+    }
+
+    if file.inode.supports_user_buffer_io() {
+        let chunk_cap = count.min(crate::hal::IO_CHUNK_SIZE);
+        let mut total = 0usize;
+        while total < count {
+            let want = (count - total).min(chunk_cap);
+            let user_addr = match buf.checked_add(total) {
+                Some(v) => v,
+                None => return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) },
+            };
+
+            let mut accessible = crate::mm::user_accessible_len(
+                token, user_addr as *const u8, want, crate::mm::UserAccess::Read,
+            );
+            if accessible == 0 {
+                if total > 0 { return total as isize; }
+                accessible = want.min(crate::config::PAGE_SIZE);
+            }
+
+            let ubuf = match UserBufferReader::new(token, user_addr as *const u8, accessible) {
+                Ok(r) => r.into_user_buffer(),
+                Err(errno) => return if total > 0 { total as isize } else { errno },
+            };
+
+            let n = match file.write_user(&ubuf) {
+                Ok(n) => n,
+                Err(e) => return if total > 0 { total as isize } else { -(e as isize) },
+            };
+            total += n;
+            if n == 0 || n < accessible { break; }
+            if let Some(task) = current_task() {
+                if crate::task::has_actionable_signal(&task) { break; }
+            }
+        }
+        return total as isize;
     }
 
     let chunk_cap = count.min(crate::hal::IO_CHUNK_SIZE);
@@ -701,15 +815,10 @@ fn write_from_user(file: &vfs::File, token: usize, buf: usize, count: usize) -> 
         };
 
         let mut accessible = crate::mm::user_accessible_len(
-            token,
-            user_addr as *const u8,
-            want,
-            crate::mm::UserAccess::Read,
+            token, user_addr as *const u8, want, crate::mm::UserAccess::Read,
         );
         if accessible == 0 {
-            if total > 0 {
-                return total as isize;
-            }
+            if total > 0 { return total as isize; }
             accessible = want.min(crate::config::PAGE_SIZE);
         }
 
@@ -729,16 +838,10 @@ fn write_from_user(file: &vfs::File, token: usize, buf: usize, count: usize) -> 
                 return if total > 0 { total as isize } else { ret };
             }
         };
-
         total += n;
-        if n == 0 || n < copied {
-            break;
-        }
-
+        if n == 0 || n < copied { break; }
         if let Some(task) = current_task() {
-            if crate::task::has_actionable_signal(&task) {
-                break;
-            }
+            if crate::task::has_actionable_signal(&task) { break; }
         }
     }
     total as isize
@@ -750,6 +853,46 @@ fn pwrite_from_user(file: &vfs::File, token: usize, buf: usize, count: usize, of
             Ok(n) => n as isize,
             Err(e) => -(e as isize),
         };
+    }
+
+    if file.inode.supports_user_buffer_io() {
+        let chunk_cap = count.min(crate::hal::IO_CHUNK_SIZE);
+        let mut total = 0usize;
+        while total < count {
+            let want = (count - total).min(chunk_cap);
+            let file_off = match offset.checked_add(total) {
+                Some(v) => v,
+                None => return if total > 0 { total as isize } else { -(SyscallErr::EINVAL as isize) },
+            };
+            let user_addr = match buf.checked_add(total) {
+                Some(v) => v,
+                None => return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) },
+            };
+
+            let mut accessible = crate::mm::user_accessible_len(
+                token, user_addr as *const u8, want, crate::mm::UserAccess::Read,
+            );
+            if accessible == 0 {
+                if total > 0 { return total as isize; }
+                accessible = want.min(crate::config::PAGE_SIZE);
+            }
+
+            let ubuf = match UserBufferReader::new(token, user_addr as *const u8, accessible) {
+                Ok(r) => r.into_user_buffer(),
+                Err(errno) => return if total > 0 { total as isize } else { errno },
+            };
+
+            let n = match file.pwrite_user(file_off, &ubuf) {
+                Ok(n) => n,
+                Err(e) => return if total > 0 { total as isize } else { -(e as isize) },
+            };
+            total += n;
+            if n == 0 || n < accessible { break; }
+            if let Some(task) = current_task() {
+                if crate::task::has_actionable_signal(&task) { break; }
+            }
+        }
+        return total as isize;
     }
 
     let chunk_cap = count.min(crate::hal::IO_CHUNK_SIZE);
@@ -766,22 +909,16 @@ fn pwrite_from_user(file: &vfs::File, token: usize, buf: usize, count: usize, of
             Some(v) => v,
             None => return if total > 0 { total as isize } else { -(SyscallErr::EINVAL as isize) },
         };
-
         let user_addr = match buf.checked_add(total) {
             Some(v) => v,
             None => return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) },
         };
 
         let mut accessible = crate::mm::user_accessible_len(
-            token,
-            user_addr as *const u8,
-            want,
-            crate::mm::UserAccess::Read,
+            token, user_addr as *const u8, want, crate::mm::UserAccess::Read,
         );
         if accessible == 0 {
-            if total > 0 {
-                return total as isize;
-            }
+            if total > 0 { return total as isize; }
             accessible = want.min(crate::config::PAGE_SIZE);
         }
 
@@ -801,16 +938,10 @@ fn pwrite_from_user(file: &vfs::File, token: usize, buf: usize, count: usize, of
                 return if total > 0 { total as isize } else { ret };
             }
         };
-
         total += n;
-        if n == 0 || n < copied {
-            break;
-        }
-
+        if n == 0 || n < copied { break; }
         if let Some(task) = current_task() {
-            if crate::task::has_actionable_signal(&task) {
-                break;
-            }
+            if crate::task::has_actionable_signal(&task) { break; }
         }
     }
     total as isize
@@ -1222,8 +1353,9 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
             WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
         }
     } else {
-        // Fallback: regular files and legacy File implementations may not expose a WaitQueue yet.
-        wait_io_core(|| read_into_user(&file, token, buf, count), is_nonblock)
+        // Regular files: no WaitQueue, I/O completes immediately — skip
+        // wait_io_core() overhead (poll/yield loop not needed for PageCache).
+        read_into_user(&file, token, buf, count)
     }
 }
 
@@ -1263,8 +1395,8 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
             WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
         }
     } else {
-        // Fallback: regular files and legacy File implementations may not expose a WaitQueue yet.
-        wait_io_core(|| write_from_user(&file, token, buf, count), is_nonblock)
+        // Regular files: skip wait_io_core() overhead.
+        write_from_user(&file, token, buf, count)
     }
 }
 
@@ -1351,6 +1483,40 @@ pub fn sys_preadv(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize 
         return 0;
     }
 
+    // UserBuffer fast path for inodes that support direct user I/O
+    if file.inode.supports_user_buffer_io() {
+        let chunk_cap = total_len.min(crate::hal::IO_CHUNK_SIZE);
+        let mut done = 0usize;
+        while done < total_len {
+            let want = (total_len - done).min(chunk_cap);
+            let file_off = match offset.checked_add(done) {
+                Some(v) => v,
+                None => return if done > 0 { done as isize } else { -(SyscallErr::EINVAL as isize) },
+            };
+            let accessible = match iov_writable_len_for_read(&user_iov, done, want) {
+                Ok(n) => n,
+                Err(errno) => return if done > 0 { done as isize } else { errno },
+            };
+
+            let mut ubuf = match user_iov.writer_buffer_at(done, accessible) {
+                Ok(b) => b,
+                Err(errno) => return if done > 0 { done as isize } else { errno },
+            };
+
+            let n = match file.pread_user(file_off, &mut ubuf) {
+                Ok(n) => n,
+                Err(e) => return if done > 0 { done as isize } else { -(e as isize) },
+            };
+            if n == 0 { break; }
+            done += n;
+            if n < accessible { break; }
+            if let Some(task) = current_task() {
+                if crate::task::has_actionable_signal(&task) { break; }
+            }
+        }
+        return done as isize;
+    }
+
     let chunk_cap = total_len.min(crate::hal::IO_CHUNK_SIZE);
     let mut kbuf = alloc::vec::Vec::new();
     if kbuf.try_reserve(chunk_cap).is_err() {
@@ -1358,7 +1524,7 @@ pub fn sys_preadv(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize 
     }
     unsafe { kbuf.set_len(chunk_cap); }
 
-    let mut done = 0usize;
+    let mut done = 0usize;  // ← re-declare for kbuf path
     while done < total_len {
         let want = (total_len - done).min(chunk_cap);
         let file_off = match offset.checked_add(done) {
@@ -1456,6 +1622,42 @@ pub fn sys_pwritev(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize
         Err(errno) => return errno,
     };
 
+    // UserBuffer fast path for inodes that support direct user I/O
+    if file.inode.supports_user_buffer_io() {
+        let chunk_cap = allowed.min(crate::hal::IO_CHUNK_SIZE);
+        let mut done = 0usize;
+        while done < allowed {
+            let want = (allowed - done).min(chunk_cap);
+            let file_off = match offset.checked_add(done) {
+                Some(v) => v,
+                None => return if done > 0 { done as isize } else { -(SyscallErr::EINVAL as isize) },
+            };
+            let mut accessible = user_iov.accessible_len_at(done, want, crate::mm::UserAccess::Read);
+            if accessible == 0 {
+                if done > 0 { return done as isize; }
+                accessible = want.min(crate::config::PAGE_SIZE);
+            }
+
+            let ubuf = match user_iov.reader_buffer_at(done, accessible) {
+                Ok(b) => b,
+                Err(errno) => return if done > 0 { done as isize } else { errno },
+            };
+
+            let n = match file.pwrite_user(file_off, &ubuf) {
+                Ok(n) => n,
+                Err(e) => return if done > 0 { done as isize } else { -(e as isize) },
+            };
+
+            done += n;
+            if n == 0 || n < accessible { break; }
+
+            if let Some(task) = current_task() {
+                if crate::task::has_actionable_signal(&task) { break; }
+            }
+        }
+        return done as isize;
+    }
+
     let chunk_cap = allowed.min(crate::hal::IO_CHUNK_SIZE);
     let mut kbuf = alloc::vec::Vec::new();
     if kbuf.try_reserve(chunk_cap).is_err() {
@@ -1463,7 +1665,7 @@ pub fn sys_pwritev(fd: usize, iov: usize, iovcnt: usize, offset: usize) -> isize
     }
     unsafe { kbuf.set_len(chunk_cap); }
 
-    let mut done = 0usize;
+    let mut done = 0usize;  // ← re-declare for kbuf path
     while done < allowed {
         let want = (allowed - done).min(chunk_cap);
         let file_off = match offset.checked_add(done) {
@@ -1576,6 +1778,36 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
         return 0;
     }
 
+    // UserBuffer fast path for inodes that support direct user I/O
+    if file.inode.supports_user_buffer_io() {
+        let chunk_cap = total_len.min(crate::hal::IO_CHUNK_SIZE);
+        let mut done = 0usize;
+        while done < total_len {
+            let want = (total_len - done).min(chunk_cap);
+            let accessible = match iov_writable_len_for_read(&user_iov, done, want) {
+                Ok(n) => n,
+                Err(errno) => return if done > 0 { done as isize } else { errno },
+            };
+
+            let mut ubuf = match user_iov.writer_buffer_at(done, accessible) {
+                Ok(b) => b,
+                Err(errno) => return if done > 0 { done as isize } else { errno },
+            };
+
+            let n = match file.read_user(&mut ubuf) {
+                Ok(n) => n,
+                Err(e) => return if done > 0 { done as isize } else { -(e as isize) },
+            };
+            if n == 0 { break; }
+            done += n;
+            if n < accessible { break; }
+            if let Some(task) = current_task() {
+                if crate::task::has_actionable_signal(&task) { break; }
+            }
+        }
+        return done as isize;
+    }
+
     let chunk_cap = total_len.min(crate::hal::IO_CHUNK_SIZE);
     let mut kbuf = alloc::vec::Vec::new();
     if kbuf.try_reserve(chunk_cap).is_err() {
@@ -1670,6 +1902,38 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
         Ok(count) => count,
         Err(errno) => return errno,
     };
+
+    // UserBuffer fast path for inodes that support direct user I/O
+    if file.inode.supports_user_buffer_io() {
+        let chunk_cap = allowed.min(crate::hal::IO_CHUNK_SIZE);
+        let mut done = 0usize;
+        while done < allowed {
+            let want = (allowed - done).min(chunk_cap);
+            let mut accessible = user_iov.accessible_len_at(done, want, crate::mm::UserAccess::Read);
+            if accessible == 0 {
+                if done > 0 { return done as isize; }
+                accessible = want.min(crate::config::PAGE_SIZE);
+            }
+
+            let ubuf = match user_iov.reader_buffer_at(done, accessible) {
+                Ok(b) => b,
+                Err(errno) => return if done > 0 { done as isize } else { errno },
+            };
+
+            let n = match file.write_user(&ubuf) {
+                Ok(n) => n,
+                Err(e) => return if done > 0 { done as isize } else { -(e as isize) },
+            };
+
+            done += n;
+            if n == 0 || n < accessible { break; }
+
+            if let Some(task) = current_task() {
+                if crate::task::has_actionable_signal(&task) { break; }
+            }
+        }
+        return done as isize;
+    }
 
     let chunk_cap = allowed.min(crate::hal::IO_CHUNK_SIZE);
     let mut kbuf = alloc::vec::Vec::new();
@@ -2545,11 +2809,15 @@ pub fn sys_fstatat(dirfd: usize, path: *const u8, buf: *mut u8, flags: u32) -> i
         Err(errno) => return errno,
     };
 
-    // Check search permission on all parent directories (EACCES)
+    // Check search permission on all parent directories (EACCES).
+    // uid==0 (root) bypasses DAC — skip the full path walk to avoid
+    // duplicate work with vfs_lookup() below.
     let (uid, gid) = open_subject_ids();
-    let perm_result = check_parent_search_access(&start, &path, uid, gid);
-    if perm_result != SUCCESS {
-        return perm_result;
+    if uid != 0 {
+        let perm_result = check_parent_search_access(&start, &path, uid, gid);
+        if perm_result != SUCCESS {
+            return perm_result;
+        }
     }
 
     if no_follow {
