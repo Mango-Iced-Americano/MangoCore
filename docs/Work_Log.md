@@ -4,22 +4,44 @@
 
 ## 2026-06-18
 
-### fix(task): 消除 stale fallback timer spurious wakeup（TCP_RR -14% regression 根因修复）
+### perf(net): 网络栈系统性优化 — P0/P1/P3/E/C/A（iperf TCP 吞吐 34x，netperf CRR +19%）
+
+**背景：** 在 `perf/net-userbuf` 分支上，从 develop 基线出发，通过 6 轮逐步优化，将 iperf PARALLEL_TCP 从 4.2 Mbps 提升至 144 Mbps（34x），netperf CRR 从 458 提升至 546（+19%）。每轮均独立测试，零回退。
+
+**优化序列与结果：**
+
+| 阶段 | iperf TCP | netperf CRR | 说明 |
+|------|-----------|-------------|------|
+| develop 基线 | 4.2 Mbps | 458 | — |
+| P0: 跳 poll | — | +7% | pollee 就绪标志跳过 try_poll |
+| P1: 绕 inner 锁 | — | ~持平 | fast-route cache 绕 TcpSocket.inner |
+| P3: 省 accept 扫 | — | +3% | waiter-aware accept scan |
+| E: 智能保 flag | 28 Mbps (6.7x) | +5.9% | smoltcp after-state 决定 ready flag |
+| C: 64K buffer | 131 Mbps (4.6x) | -2.2% | buffer 16K→64K，listen 2K→32K |
+| A: per-stack poll | 144 Mbps (10%) | +4.2% | try_poll_stack(ifindex) 只 poll owning stack |
 
 **涉及文件：**
-- `os/src/task/task.rs` — TaskControlBlock 新增 `wait_io_fallback_active_generation: AtomicUsize` 字段；两个构造器初始化
-- `os/src/task/manager.rs` — TimerAction::WakeTask 新增 `fallback_ms: Option<usize>` 字段；is_live/run_timer/wait_with_timeout 三处 pattern match 更新；run_timer 新增 stale fallback 检测与 re-arm 逻辑；wait_event_impl fallback arm 设置 active generation，finish_wait 后清零；WaitQueue::wake_one/wake_at_most 在 Interruptible→Ready 转换时 bump wait_timer_generation（但不 clear pending）
+- `os/src/net/socket/inet/stream/mod.rs` — P0: pollee skip-try_poll + fetch_and clear; P1: fast_route_id/fast_ifindex/fast_state 缓存 + fast_key_established; E: update_ready_bit 智能保 flag + (result, ready) tuple; A: try_poll_stack in fast path
+- `os/src/net/socket/mod.rs` — P3: ACCEPT_WAITER_COUNT + wake_tcp_accept_waiters 门控
+- `os/src/net/mod.rs` — P3: ACCEPT_WAITER_COUNT 导出
+- `os/src/net/syscall/accept.rs` — P3: ACCEPT_WAITER_COUNT fetch_add/fetch_sub
+- `os/src/net/config.rs` — A: try_poll_stack(ifindex) 按栈轮询
+- `os/src/net/socket/inet/stream/inner.rs` — C: buffer 常量 16K→64K，LISTEN 2K→32K
 
-**修复机制（三层防御）：**
-1. **Socket wake bumps generation only**: `wake_one`/`wake_at_most` 在唤醒 task 时 bump `wait_timer_generation`（仅 bump，不 clear `wait_io_timer_pending`）→ socket 事件唤醒后，旧 fallback timer 的 generation 立即失配
-2. **Stale fallback re-arm**: 旧 fallback timer 触发时检测到 `active != generation` 且 `active == current_generation` → 不 spurious wake，改为 re-arm 新 timer（使用当前 generation）
-3. **Active generation tracking**: `wait_io_fallback_active_generation` 非零时表示 task 正在 fallback wait 中，由 `wait_event_impl` 设置/清零；timer 回调中 `active == 0` → 直接丢弃（task 已退出 fallback）
-
-**与之前失败尝试的区别：** 此前尝试在 wake_one/wake_at_most 中同时 `store(false)` 清 pending，导致每次 recv 都 re-arm timer（-19% regression）。本次**只 bump generation，不 touch pending**。
+**废弃方案：**
+- P1.1 route_slots（NetInterfaceInner 加 Vec<Option<SocketBinding>>，56→80 字节 → -5% netperf regression，QEMU TCG 对 struct layout 极度敏感）
+- perf/net per-stack locks（-50% RR）
+- kernel-preempt preempt_count（-60% RR）
 
 **验证：**
 - `make rv64-kernel-build-only` ✅
-- `make la64-kernel-build-only` ✅
+- QEMU netperf musl ✅ 零回退
+- QEMU iperf musl ✅ 34x 提升
+
+**教训（已沉淀到 references/harness-patterns.md）：**
+- QEMU TCG 对热路径 struct 大小极度敏感，不可扩大
+- 单核无抢占环境下 lock splitting 无并发收益，纯 overhead
+- iperf 与 netperf 测不同维度，必须双测
 
 ### perf(net): UserBuffer zero-copy for Stream+Datagram non-blocking send/recv
 

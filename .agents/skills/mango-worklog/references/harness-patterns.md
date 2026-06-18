@@ -2,6 +2,26 @@
 
 > 跨对话可复用的 bug 根因 → 修复模式。按子系统分类。
 
+## 网络绩效
+
+### QEMU TCG 对热路径 struct 大小极度敏感（P1.1 教训）
+
+- **根因**: 在 `NetInterfaceInner`（全局 `spin::Mutex` 包裹的 struct）上加 24 字节的 `route_slots: Vec<...>`，struct 从 56→80 字节。功能等价（fast path 未接入），但 netperf -5% regression。
+- **修复**: 放弃全局 mirror 方案，改为在 `TcpSocket`（每连接独立）上缓存 3 个 Atomic 字段（24 字节/连接），不动全局 struct。
+- **教训**: 单核 QEMU TCG 对 `spin::Mutex<T>` 中的 T 大小非常敏感。大结构改变 inline layout → 影响锁操作的内存足迹 → 宏观性能回退。永远不要扩大全局热路径 struct。
+- **相关文件**: `os/src/net/config.rs` (NetInterfaceInner), `os/src/net/socket/inet/stream/mod.rs`
+
+### 单核无抢占环境 lock splitting 无并发收益（perf/net 教训）
+
+- **根因**: perf/net 分支引入 per-stack locks + WaitQueue 重构 + cooperative poll → -50% netperf RR。单核环境下没有真正的并发，锁拆分的额外 atomic 操作是纯 overhead。
+- **修复**: 放弃 per-stack locking，改为减少锁次数（P0 skip poll、P1 绕 inner 锁）。
+- **教训**: 单核优化方向是**减少原子操作和锁次数**，不是**拆锁增加并发度**。
+
+### iperf 与 netperf 必须双测
+
+- **根因**: netperf RR 测小包往返延迟（syscall 开销主导），iperf 测 TCP 吞吐（buffer/window/poll 频率主导）。P0+P1+P3 对 netperf 提升 +10%，但对 iperf 提升仅 +74%。E（智能保 flag）+C（64K buffer）对 netperf 几乎中性，但 iperf 提升 6.7x + 4.6x。
+- **教训**: 每次网络栈修改后必须同时跑 netperf（mask=0x200）和 iperf（mask=0x040），禁止只看一个。
+
 ## 路径解析
 
 ### `parse_path()` 滤除 "." 组件，"." 检测必须用原始路径字符串
