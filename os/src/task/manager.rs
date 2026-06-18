@@ -1348,6 +1348,11 @@ pub enum TimerAction {
         signal: Signals,
         generation: usize,
     },
+    // Global timerfd sweep. Individual timerfds are kept in fs::timerfd's
+    // registry; this action exists only to drive high-resolution wakeups.
+    TimerFdSweep {
+        generation: usize,
+    },
 }
 
 //内核中的统一计时器，目前用于itimer_real
@@ -1391,6 +1396,9 @@ impl KernelTimer {
             },
             TimerAction::SendSignal { task, .. } | TimerAction::PosixTimerSignal { task, .. } => {
                 task.strong_count() > 0
+            }
+            TimerAction::TimerFdSweep { generation } => {
+                crate::fs::timerfd::timerfd_sweep_is_current(*generation)
             }
         }
     }
@@ -1645,7 +1653,14 @@ impl KernelTimerQueue {
                     }
                     should_wake
             }
-            _ => false,
+            TimerAction::TimerFdSweep { generation } => {
+                if !crate::fs::timerfd::timerfd_sweep_is_current(generation) {
+                    return false;
+                }
+                let woke = crate::fs::timerfd::wake_expired_timerfds(now) > 0;
+                crate::fs::timerfd::rearm_timerfd_sweep();
+                woke
+            }
         }
     }
 }
@@ -1864,7 +1879,9 @@ pub fn timer_interrupt_handler() {
     if crate::fs::timerfd::timerfd_registry_maybe_nonempty()
         && !crate::fs::timerfd::timerfd_registry_is_empty()
     {
-        crate::fs::timerfd::wake_expired_timerfds(now);
+        if crate::fs::timerfd::wake_expired_timerfds(now) > 0 {
+            woke_task = true;
+        }
     }
 
     // 2. Sched tick

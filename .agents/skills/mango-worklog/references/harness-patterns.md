@@ -60,7 +60,19 @@
 - **教训**: 修这类问题前先确认失败是否发生在 syscall 之前；改完 `.so` 后必须重建内核镜像，否则 QEMU 仍会运行旧的嵌入版 preload。
 - **相关文件**: `os/ltp_proto_compat.c`, `user/tools/riscv64/lib/ltp_proto_compat-rv.so`, `user/tools/loongarch64/lib/ltp_proto_compat-la.so`
 
+### initramfs 新构建产物不能被测试盘旧二进制遮蔽
+- **根因**: stage-1 init 如果优先执行 `/sdcard/initproc`，下载的测试镜像里可能保留旧 runner；即使 `make rv64-only/la64-only` 已重建 initramfs 和内嵌 `/initproc`，QEMU 仍会跑测试盘旧二进制，表现为新增配置项或 smoke 分支完全不生效。
+- **修复**: initramfs 模式优先 `exec /initproc`，仅在缺失时 fallback 到 `/sdcard/initproc`；定位时可用输出字符串或二进制大小变化确认实际运行的是哪份应用。
+- **教训**: 修改 `user/src/bin/initproc.rs` 后，如果 QEMU 日志仍是旧格式，先检查 stage-1 exec 顺序和镜像内同名二进制，而不是继续怀疑配置注入。
+- **相关文件**: `user/src/bin/init.rs`, `user/src/bin/initproc.rs`
+
 ## 信号/进程
+
+### 事件型 fd 定时器必须接入统一 deadline queue
+- **根因**: timerfd 这类 fd 状态机如果只在周期性 timer interrupt 中扫描 registry，而 `timerfd_settime()` 不向统一 high-res timer queue 注册下一次 deadline，就会把短 timeout 退化为调度 tick 粒度；更严重时，如果扫描路径没有把“唤醒了等待者”反馈给调度器，阻塞读者可能延迟到后续调度点才运行。
+- **修复**: arm/disarm timerfd 后扫描 registry 找到最早 deadline，注册一个全局 sweep timer action；用 generation 让旧 sweep 自动失效；sweep 过期后唤醒所有已到期 timerfd，返回实际 wake 数并重新计算下一次 sweep。
+- **教训**: 任何“fd 可读状态由时间推进触发”的对象都不能只靠周期性兜底扫描；状态更新点必须驱动统一 deadline queue，wake 路径必须把是否唤醒任务反馈给调度器。
+- **相关文件**: `os/src/fs/timerfd.rs`, `os/src/task/manager.rs`
 
 ### futex wake 与信号唤醒竞态
 - **根因**: waiter 被信号或 timeout 先置为 Ready 后，仍可能暂时留在 futex waitqueue 中；随后 `FUTEX_WAKE` 移除该 waiter 时如果因状态非 Interruptible 不计数，用户态 checkpoint 会认为没有唤醒到等待者并重试到超时，而 waiter 本身又会把 waitqueue 条目被移除解释成正常 wake。

@@ -344,6 +344,8 @@ struct RuntimeConfig {
     conf_source: Option<Vec<u8>>,
     /// 诊断模式：每完成一组测试后打印资源统计标记
     diag: bool,
+    /// 非 LTP timerfd smoke：直接验证 timerfd 阻塞读能由 high-res timer 唤醒
+    timer_smoke: bool,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -419,6 +421,7 @@ impl RuntimeConfig {
             ltp_suites: Vec::new(),
             conf_source: None,
             diag: false,
+            timer_smoke: false,
         }
     }
 }
@@ -496,7 +499,8 @@ fn parse_csv_with_defaults(defaults: &[&str], val: &[u8]) -> Option<Vec<String>>
 }
 
 fn parse_bool_flag(val: &[u8]) -> bool {
-    matches!(trim_ascii(val), b"1" | b"true" | b"yes" | b"on")
+    let val = trim_ascii(val);
+    val == b"1" || val == b"true" || val == b"yes" || val == b"on"
 }
 
 fn apply_conf_bytes(data: &[u8], cfg: &mut RuntimeConfig) {
@@ -600,6 +604,8 @@ fn apply_conf_bytes(data: &[u8], cfg: &mut RuntimeConfig) {
             }
         } else if key == b"diag" {
             cfg.diag = val == b"1" || val == b"true";
+        } else if key == b"timer_smoke" {
+            cfg.timer_smoke = parse_bool_flag(val);
         } else if key == b"ltp_from" {
             let s = core::str::from_utf8(val).ok();
             if let Some(s) = s {
@@ -657,11 +663,12 @@ fn load_runtime_config() -> RuntimeConfig {
     };
     cfg.conf_source = Some(format!("{}\0", source).into_bytes());
     println!(
-        "[initproc] config source={} mode={} mask=0x{:03X} ltp_runner={}",
+        "[initproc] config source={} mode={} mask=0x{:03X} ltp_runner={} timer_smoke={}",
         source,
         mode_name(cfg.mode),
         cfg.mask,
-        ltp_runner_name(cfg.ltp_runner)
+        ltp_runner_name(cfg.ltp_runner),
+        cfg.timer_smoke
     );
     println!("[initproc] LTP exclude list: {:?}", cfg.ltp_exclude);
     if !cfg.ltp_include.is_empty() {
@@ -2128,6 +2135,66 @@ fn should_enter_debug_shell() -> bool {
     }
 }
 
+fn run_timerfd_smoke() -> bool {
+    use user_lib::syscall::{
+        sys_close, sys_get_time, sys_read, sys_timerfd_create, sys_timerfd_settime, TimerFdSpec,
+        TimeSpec,
+    };
+
+    const CLOCK_MONOTONIC: usize = 1;
+    const TIMER_NSEC: usize = 2_000_000;
+    const MAX_EXPECTED_MS: isize = 50;
+
+    println!("[timer_smoke] timerfd monotonic one-shot begin");
+    let fd = sys_timerfd_create(CLOCK_MONOTONIC, 0);
+    if fd < 0 {
+        println!("[timer_smoke] timerfd_create failed ret={}", fd);
+        return false;
+    }
+
+    let spec = TimerFdSpec {
+        it_interval: TimeSpec { tv_sec: 0, tv_nsec: 0 },
+        it_value: TimeSpec {
+            tv_sec: 0,
+            tv_nsec: TIMER_NSEC,
+        },
+    };
+    let start_ms = sys_get_time();
+    let ret = sys_timerfd_settime(
+        fd as usize,
+        0,
+        &spec as *const TimerFdSpec,
+        core::ptr::null_mut(),
+    );
+    if ret < 0 {
+        println!("[timer_smoke] timerfd_settime failed ret={}", ret);
+        let _ = sys_close(fd as usize);
+        return false;
+    }
+
+    let mut buf = [0u8; 8];
+    let nread = sys_read(fd as usize, &mut buf);
+    let end_ms = sys_get_time();
+    let _ = sys_close(fd as usize);
+
+    if nread != 8 {
+        println!("[timer_smoke] read failed ret={}", nread);
+        return false;
+    }
+    let expirations = u64::from_ne_bytes(buf);
+    let elapsed_ms = end_ms.saturating_sub(start_ms);
+    println!(
+        "[timer_smoke] read expirations={} elapsed_ms={}",
+        expirations, elapsed_ms
+    );
+    if expirations == 0 || elapsed_ms > MAX_EXPECTED_MS {
+        println!("[timer_smoke] result out of range");
+        return false;
+    }
+    println!("[timer_smoke] PASS");
+    true
+}
+
 #[no_mangle]
 #[link_section = ".text.entry"]
 pub extern "C" fn _start() -> ! {
@@ -2416,6 +2483,12 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     // println!("[initproc] inet_test returned exit_code={}", inet_test_ret);
 
     let cfg = load_runtime_config();
+
+    if cfg.timer_smoke && !run_timerfd_smoke() {
+        println!("[initproc] timer_smoke failed");
+        shutdown();
+        return 1;
+    }
 
     if cfg.mode == RunMode::Shell {
         /*

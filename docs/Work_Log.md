@@ -4,6 +4,31 @@
 
 ## 2026-06-18
 
+### timerfd 接入 high-res timer queue 与 initproc smoke
+
+**涉及文件：**
+- `os/src/fs/timerfd.rs` — `timerfd_settime()` 更新状态后重新计算全局最早 timerfd deadline，并注册到 `KERNEL_TIMER_QUEUE`；timerfd wake 返回实际唤醒数；缩短 `with_timerfd()` 的 fd table 锁作用域
+- `os/src/task/manager.rs` — 新增 `TimerFdSweep` timer action，过期后扫描 timerfd registry 并按实际唤醒触发调度；保留 timer interrupt 中的兼容扫描
+- `user/src/syscall.rs` — 增加 timerfd syscall wrapper 和 `TimerFdSpec`
+- `user/src/bin/initproc.rs` — 增加默认关闭的 `timer_smoke=1` 非 LTP smoke，用阻塞 `timerfd` read 验证 high-res wake 路径
+- `user/src/bin/init.rs` — initramfs stage-1 优先执行新构建的 `/initproc`，避免测试镜像中旧 `/sdcard/initproc` 遮蔽上层修复
+- `.agents/skills/mango-worklog/references/harness-patterns.md` — 沉淀事件型 fd 定时器必须接入统一 deadline queue 的经验
+
+**验证：**
+- `docker compose exec -T -w /app/os os-dev env LOG=error make rv64-only` ✅
+- `docker compose exec -T -w /app/os os-dev env LOG=error make la64-only` ✅
+- QEMU timerfd smoke `timer_smoke=1, mask=0x000`: rv64 ✅ (`expirations=1 elapsed_ms=4`)，la64 ✅ (`expirations=1 elapsed_ms=3`)
+- QEMU basic smoke `mask=0x001`: rv64 musl/glibc ✅ (`exit_code=0`, 4s/4s)，la64 musl/glibc ✅ (`exit_code=0`, 11s/12s)
+- `git diff --check` ✅
+
+**效果对比：**
+- 修复前：timerfd 只依赖周期性 timer interrupt 扫描 registry，`timerfd_settime()` 本身不会把新 deadline 接入 high-res one-shot timer queue；短 timerfd 可能被调度 tick 粒度拖延，且 timerfd wake 不会显式触发 `woke_task`
+- 修复后：每次 arm/disarm timerfd 都生成新的 sweep generation 并把最早 deadline 注册进统一 `KERNEL_TIMER_QUEUE`；过期时按 registry 状态唤醒等待者并重新计算下一次 sweep，旧 sweep 由 generation 自动失效
+- 上层对照：修复 stage-1 前，QEMU 实际执行测试盘里的旧 `/sdcard/initproc`，新加的 `timer_smoke=1` 配置不会进入分支；修复后优先执行 initramfs 内新构建的 `/initproc`
+
+**备注：** 本轮按用户要求不继续推进 LTP 适配，只保留 initproc 自带的非 LTP 定向 smoke 来验证底层 timerfd wake 语义。
+
+
 ### LTP timer 历史过滤项复测：reset exclude + 可配置 case timeout
 
 **涉及文件：**

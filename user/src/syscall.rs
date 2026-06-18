@@ -34,6 +34,9 @@ const SYSCALL_NEW_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_SYNC: usize = 81;
 const SYSCALL_FSYNC: usize = 82;
+const SYSCALL_TIMERFD_CREATE: usize = 85;
+const SYSCALL_TIMERFD_SETTIME: usize = 86;
+const SYSCALL_TIMERFD_GETTIME: usize = 87;
 const SYSCALL_UTIMENSAT: usize = 88;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GRUOP: usize = 94;
@@ -411,6 +414,33 @@ pub const AT_FDCWD: isize = -100;
 pub struct TimeSpec {
     pub tv_sec: usize,
     pub tv_nsec: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct TimerFdSpec {
+    pub it_interval: TimeSpec,
+    pub it_value: TimeSpec,
+}
+
+pub fn sys_timerfd_create(clock_id: usize, flags: u32) -> isize {
+    syscall(SYSCALL_TIMERFD_CREATE, [clock_id, flags as usize, 0])
+}
+
+pub fn sys_timerfd_settime(
+    fd: usize,
+    flags: u32,
+    new_value: *const TimerFdSpec,
+    old_value: *mut TimerFdSpec,
+) -> isize {
+    syscall4(
+        SYSCALL_TIMERFD_SETTIME,
+        [fd, flags as usize, new_value as usize, old_value as usize],
+    )
+}
+
+pub fn sys_timerfd_gettime(fd: usize, curr_value: *mut TimerFdSpec) -> isize {
+    syscall(SYSCALL_TIMERFD_GETTIME, [fd, curr_value as usize, 0])
 }
 
 #[derive(Clone, Copy, Debug)]
