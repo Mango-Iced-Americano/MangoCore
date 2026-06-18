@@ -4,55 +4,6 @@
 
 ## 2026-06-18
 
-### perf(net): 网络栈系统性优化 — P0/P1/P3/E/C/A（iperf TCP 吞吐 34x，netperf CRR +19%）
-
-**背景：** 在 `perf/net-userbuf` 分支上，从 develop 基线出发，通过 6 轮逐步优化，将 iperf PARALLEL_TCP 从 4.2 Mbps 提升至 144 Mbps（34x），netperf CRR 从 458 提升至 546（+19%）。每轮均独立测试，零回退。
-
-**优化序列与结果：**
-
-| 阶段 | iperf TCP | netperf CRR | 说明 |
-|------|-----------|-------------|------|
-| develop 基线 | 4.2 Mbps | 458 | — |
-| P0: 跳 poll | — | +7% | pollee 就绪标志跳过 try_poll |
-| P1: 绕 inner 锁 | — | ~持平 | fast-route cache 绕 TcpSocket.inner |
-| P3: 省 accept 扫 | — | +3% | waiter-aware accept scan |
-| E: 智能保 flag | 28 Mbps (6.7x) | +5.9% | smoltcp after-state 决定 ready flag |
-| C: 64K buffer | 131 Mbps (4.6x) | -2.2% | buffer 16K→64K，listen 2K→32K |
-| A: per-stack poll | 144 Mbps (10%) | +4.2% | try_poll_stack(ifindex) 只 poll owning stack |
-
-**涉及文件：**
-- `os/src/net/socket/inet/stream/mod.rs` — P0: pollee skip-try_poll + fetch_and clear; P1: fast_route_id/fast_ifindex/fast_state 缓存 + fast_key_established; E: update_ready_bit 智能保 flag + (result, ready) tuple; A: try_poll_stack in fast path
-- `os/src/net/socket/mod.rs` — P3: ACCEPT_WAITER_COUNT + wake_tcp_accept_waiters 门控
-- `os/src/net/mod.rs` — P3: ACCEPT_WAITER_COUNT 导出
-- `os/src/net/syscall/accept.rs` — P3: ACCEPT_WAITER_COUNT fetch_add/fetch_sub
-- `os/src/net/config.rs` — A: try_poll_stack(ifindex) 按栈轮询
-- `os/src/net/socket/inet/stream/inner.rs` — C: buffer 常量 16K→64K，LISTEN 2K→32K
-
-**废弃方案：**
-- P1.1 route_slots（NetInterfaceInner 加 Vec<Option<SocketBinding>>，56→80 字节 → -5% netperf regression，QEMU TCG 对 struct layout 极度敏感）
-- perf/net per-stack locks（-50% RR）
-- kernel-preempt preempt_count（-60% RR）
-
-**验证：**
-- `make rv64-kernel-build-only` ✅
-- QEMU netperf musl ✅ 零回退
-- QEMU iperf musl ✅ 34x 提升
-
-**教训（已沉淀到 references/harness-patterns.md）：**
-- QEMU TCG 对热路径 struct 大小极度敏感，不可扩大
-- 单核无抢占环境下 lock splitting 无并发收益，纯 overhead
-- iperf 与 netperf 测不同维度，必须双测
-
-### perf(net): UserBuffer zero-copy for Stream+Datagram non-blocking send/recv
-
-**涉及文件：**
-- `os/src/net/socket/mod.rs` — Socket trait 新增 `try_recv_user`、`try_send_user`、`try_sendmsg_user` 默认实现（fallback 到 scratch buffer + try_recv/try_send）
-- `os/src/net/socket/inet/stream/mod.rs` — TcpSocket 覆写 `try_recv_user`（委托 Inner::recv_to_user）、`try_send_user`（read_at → Inner::try_send），新增 `use crate::mm::UserBuffer`
-- `os/src/net/syscall/sendto.rs` — Stream/Datagram non-blocking 使用 `UserBufferReader` + `try_send_user`/`try_sendmsg_user`；blocking 路径保留 kbuf+copy_from_user_array；Raw 保持 kbuf
-- `os/src/net/syscall/recvfrom.rs` — Stream non-blocking 新增 `UserBufferWriter` → `try_recv_user` 快速路径（early return），Datagram/blocking 保持 kbuf
-- `os/src/net/syscall/sendmsg.rs` — `send_stream_chunked` 拆分为 non-blocking 零拷贝路径（try_sendmsg_user 直接传 UserBuffer）和 blocking kbuf 路径
-- `os/src/net/syscall/recvmsg.rs` — Stream non-blocking+非 peek 新增 `writer_buffer_at` → `try_recv_user` 快速路径，其余保持 kbuf
-- `os/src/task/manager.rs` — `WAIT_IO_FALLBACK_MS` 从 10 改为 1
 ### hotfix(fs/ext4): 禁用 eager full-index + 删除 create/link/symlink 冗余 FS cache 操作 → lmbench fork/create 回归修复
 
 **根因**: Oracle 分析确认 eager full-index（`total_blocks >= 2` 首次 miss 全目录扫描建索引）导致 fork+execve（+165%）和 fs create（3×）回归。目录首次 miss → 分配 Vec/BTreeMap 建完整索引 → 下次 mutation bump 立即失效 → 纯开销。
@@ -80,34 +31,6 @@
 **验证：**
 - `make rv64-kernel-build-only` ✅
 - `make la64-kernel-build-only` ✅
-
-**备注：**
-- UserBuffer 仅在 non-blocking 路径使用（不跨 sleep points）
-- Datagram recv 保持 kbuf（无 try_recvmsg_user trait method）
-- 未引入 PollReason/poll_cooperate/WaitResult 等新抽象，保持现有 wait_io/WaitQueue::wait_until_interruptible 模式
-- TCP try_recv_user 复用已有的 Inner::recv_to_user 方法，SelfConnected 直接出队写 UserBuffer，其他状态走 try_recv+write_at
-
-### fix(net): unconditional listener accept scan, remove poll from accept closure
-
-**涉及文件：**
-- `os/src/net/socket/mod.rs` — 新增 `TCP_LISTENERS` 全局注册表、`wake_tcp_accept_waiters()` 无条件监听扫描函数
-- `os/src/net/socket/inet/stream/mod.rs` — 新增 `TcpSocket::register_as_listener()`（通过 TCP_SOCKETS 指针比对查找 Weak）、`refresh_accept_ready_after_poll()`（检查 backlog 并唤醒 accept waiters）；`listen()` 成功后调用 register_as_listener；`accept()` 内删除 `NET_INTERFACE.poll()` 调用
-- `os/src/net/socket/inet/stream/inner.rs` — `Listening` 新增 `has_pending_connection()` 检查 backlog handle 是否有 Established/CloseWait 连接
-- `os/src/net/config.rs` — `poll_once()` 中无条件调用 `wake_tcp_accept_waiters()`（不依赖 smoltcp progressed 标志）
-- `os/src/net/mod.rs` — 重新导出 `wake_tcp_accept_waiters`、`TCP_LISTENERS`
-- `os/src/net/syscall/accept.rs` — 重构 `sys_accept`：`NET_INTERFACE.try_poll()` 移至 WaitQueue 闭包外部（遵循 harness-patterns 规则），闭包内只做 accept
-
-**验证：**
-- `make rv64-kernel-build-only` ✅
-- `make la64-kernel-build-only` ❌ (toolchain missing — linker `loongarch64-linux-gnu-gcc` not found in env)
-
-**备注：**
-- 根因：smoltcp SYN 处理不设置 `progressed=true`，导致 `should_scan` 守卫跳过 TCP 事件收集，首个客户端连接永久阻塞 accept
-- Harness-patterns 规则：WaitQueue 闭包内不得 poll，否则 `notify_events_all_if_unlocked` 在队列锁持有时静默丢弃唤醒
-- `register_as_listener` 通过指针比对在 TCP_SOCKETS 中查找 Weak（避免需要 `Arc<Self>` 引用）
-- la64 编译失败为环境缺少交叉编译工具链，非代码问题
-
----
 - QEMU lmbench mask=0x100（hotfix后）: musl 70s glibc 76s ✅
 
 **已知延期项（同前）：**

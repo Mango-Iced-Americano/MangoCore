@@ -833,7 +833,6 @@ impl WaitQueue {
                             if wake_count < limit {
                                 inner.task_status = super::task::TaskStatus::Ready;
                                 drop(inner);
-                                task.wait_timer_generation.fetch_add(1, AtomicOrdering::Relaxed);
                                 wake_count += 1;
                                 tasks_to_wake.push(task);
                             } else {
@@ -845,7 +844,6 @@ impl WaitQueue {
                             if wake_count < limit {
                                 wake_count += 1;
                                 drop(inner);
-                                task.wait_timer_generation.fetch_add(1, AtomicOrdering::Relaxed);
                             } else {
                                 drop(inner);
                                 remaining.push_back(Arc::downgrade(&task));
@@ -877,13 +875,11 @@ impl WaitQueue {
                 super::TaskStatus::Interruptible => {
                     inner.task_status = super::task::TaskStatus::Ready;
                     drop(inner);
-                    task.wait_timer_generation.fetch_add(1, AtomicOrdering::Relaxed);
                     let _ = TASK_MANAGER.lock().try_wake_interruptible(task);
                     return 1;
                 }
                 super::TaskStatus::Ready => {
                     drop(inner);
-                    task.wait_timer_generation.fetch_add(1, AtomicOrdering::Relaxed);
                     return 1;
                 }
                 _ => drop(inner),
@@ -935,7 +931,7 @@ impl WaitQueue {
     // ==================== wait_until 方法族（DragonOS 架构） ====================
 
     /// 兜底定时器的超时毫秒数，防止丢失唤醒导致永久阻塞。
-    const WAIT_IO_FALLBACK_MS: usize = 1;
+    const WAIT_IO_FALLBACK_MS: usize = 10;
 
     fn wait_event_impl<F>(
         wq: &Mutex<Self>,
@@ -995,13 +991,6 @@ impl WaitQueue {
                         TimeSpec::now() + TimeSpec::from_ms(ms),
                     );
                 }
-                // Record the generation for stale-timer detection.
-                // Always set (even when pending was already true), so that
-                // stale fallback timers know the task is still in a
-                // fallback wait and can re-arm with current generation.
-                let gen = task.wait_timer_generation.load(AtomicOrdering::Relaxed);
-                task.wait_io_fallback_active_generation
-                    .store(gen, AtomicOrdering::Release);
             }
             drop(task);
 
@@ -1015,8 +1004,6 @@ impl WaitQueue {
 
             let task = current_task_ref().unwrap();
             wq.lock().finish_wait(task);
-            task.wait_io_fallback_active_generation
-                .store(0, AtomicOrdering::Release);
             task.acquire_inner_lock().refresh_real_timer();
         }
     }
@@ -1347,10 +1334,6 @@ pub enum TimerAction {
     WakeTask {
         task: Weak<TaskControlBlock>,
         generation: usize,
-        /// Some(ms) when this is an I/O fallback timer (1ms safety net);
-        /// None when this is a deadline timer.  Stale fallback timers are
-        /// re-armed with the current generation instead of spurious-waking.
-        fallback_ms: Option<usize>,
     },
     //向某个task发送signal
     SendSignal {
@@ -1402,7 +1385,7 @@ impl PartialEq for KernelTimer {
 impl KernelTimer {
     fn is_live(&self) -> bool {
         match &self.action {
-            TimerAction::WakeTask { task, generation, .. } => match task.upgrade() {
+            TimerAction::WakeTask { task, generation } => match task.upgrade() {
                 Some(task) => {
                     // WakeTask entries are intentionally not deduplicated on insertion.
                     // A newer wait bumps the generation; older entries are stale and can be
@@ -1516,51 +1499,12 @@ impl KernelTimerQueue {
     /// Run a single timer callback. Must be called WITHOUT holding KERNEL_TIMER_QUEUE.
     pub fn run_timer(timer: KernelTimer, now: TimeSpec) -> bool {
         match timer.action {
-            TimerAction::WakeTask { task, generation, fallback_ms } => {
+            TimerAction::WakeTask { task, generation } => {
                 let Some(task) = task.upgrade() else { return false };
                 task.wait_io_timer_pending
                     .store(false, AtomicOrdering::Relaxed);
-
-                if let Some(ms) = fallback_ms {
-                    // I/O fallback timer — check if stale
-                    let active = task
-                        .wait_io_fallback_active_generation
-                        .load(AtomicOrdering::Acquire);
-                    if active == 0 {
-                        return false; // task not in fallback wait, discard
-                    }
-                    if active != generation {
-                        // Stale timer. If task is in a new fallback wait,
-                        // re-arm with current generation instead of waking.
-                        let current =
-                            task.wait_timer_generation.load(AtomicOrdering::Relaxed);
-                        if active == current {
-                            // Task waiting with new generation but no timer armed
-                            if !task.wait_io_timer_pending.swap(true, AtomicOrdering::Relaxed) {
-                                let new_gen = task
-                                    .wait_timer_generation
-                                    .fetch_add(1, AtomicOrdering::Relaxed)
-                                    + 1;
-                                add_kernel_timer(
-                                    TimerAction::WakeTask {
-                                        task: Arc::downgrade(&task),
-                                        generation: new_gen,
-                                        fallback_ms: Some(ms),
-                                    },
-                                    TimeSpec::now() + TimeSpec::from_ms(ms),
-                                );
-                                task.wait_io_fallback_active_generation
-                                    .store(new_gen, AtomicOrdering::Release);
-                            }
-                        }
-                        return false; // Don't wake — stale timer
-                    }
-                    // active == generation: current fallback, wake normally
-                }
-
-                // Normal wake (deadline or current fallback)
                 if task.wait_timer_generation.load(AtomicOrdering::Relaxed) != generation {
-                    return false; // generation mismatch, stale
+                    return false;
                 }
 
                 let mut inner = task.acquire_inner_lock();
@@ -1903,7 +1847,6 @@ pub fn wait_with_timeout(task: Weak<TaskControlBlock>, timeout: TimeSpec) {
         TimerAction::WakeTask {
             task: Arc::downgrade(&task),
             generation,
-            fallback_ms: None,
         },
         timeout,
     );

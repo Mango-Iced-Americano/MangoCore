@@ -1,6 +1,6 @@
 use log::info;
 
-use crate::mm::{copy_to_user_array, UserBufferWriter, UserPtr};
+use crate::mm::{copy_to_user_array, UserPtr};
 use crate::net::config::NET_INTERFACE;
 use crate::net::PSOCK;
 use crate::syscall::utils::wait_io;
@@ -55,26 +55,11 @@ pub fn sys_recvfrom(
     info!("[sys_recvfrom] get socket sockfd: {}", sockfd);
     log::info!("[sys_recvfrom] is nonblock:{:?}", is_nonblock);
 
-    let token = task.get_user_token();
-    let len_usize = len as usize;
-
-    // Stream non-blocking zero-copy fast path
-    if is_nonblock && matches!(socket.socket_type(), PSOCK::Stream) {
-        NET_INTERFACE.try_poll();
-        let mut ubuf = match UserBufferWriter::new(token, buf as *mut u8, len_usize) {
-            Ok(w) => w.into_user_buffer(),
-            Err(e) => return e,
-        };
-        let n = match socket.try_recv_user(&mut ubuf, msg_flags) {
-            Ok(n) => n,
-            Err(e) => return -(e as isize),
-        };
-        return n;
-    }
-
     // 使用 kernel buffer 中转，避免 trans_refmut! 跨页时返回非连续物理内存的 bug。
     // trans_refmut! 验证了所有用户页，但只返回第一页的切片指针，超出第一页边界
     // 的数据会写到错误地址。
+    let token = task.get_user_token();
+    let len_usize = len as usize;
     let (result, kernel_buf) = {
         let mut kernel_buf = alloc::vec![0u8; len_usize];
 

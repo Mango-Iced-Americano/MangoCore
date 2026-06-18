@@ -1,6 +1,6 @@
 use log::info;
 
-use crate::mm::{copy_from_user_array, UserBufferReader};
+use crate::mm::copy_from_user_array;
 use crate::net::config::NET_INTERFACE;
 use crate::net::{Endpoint, PSOCK};
 use crate::syscall::utils::wait_io;
@@ -27,7 +27,20 @@ pub fn sys_sendto(
     };
 
     let task = current_task().unwrap();
+    // 使用 kernel buffer 中转发送数据，避免 trans_ref! 跨页 bug：
+    // trans_ref! 验证所有用户页但只返回第一页的切片指针，导致跨页数据读到错误内存。
     let token = task.get_user_token();
+    let mut kernel_buf = alloc::vec![0u8; len];
+    if copy_from_user_array(
+        token,
+        buf as *const u8,
+        kernel_buf.as_mut_ptr(),
+        len,
+    )
+    .is_err()
+    {
+        return -(SyscallErr::EFAULT as isize);
+    }
     let socket = crate::get_socket!(sockfd);
     log::info!("[sys_sendto] get socket sockfd: {}", sockfd);
     let is_nonblock = {
@@ -88,29 +101,13 @@ pub fn sys_sendto(
             if let Some(wait_queue) = socket.send_wait_queue() {
                 if is_nonblock {
                     NET_INTERFACE.try_poll();
-                    let reader = match UserBufferReader::new(token, buf as *const u8, len) {
-                        Ok(r) => r,
-                        Err(e) => return e,
-                    };
-                    let ubuf = reader.into_user_buffer();
-                    let ret = match socket.try_sendmsg_user(&ubuf, dest_endpoint, msg_flags) {
+                    let ret = match socket.try_sendmsg(&kernel_buf, dest_endpoint, msg_flags) {
                         Ok(n) => n as isize,
                         Err(e) => -(e as isize),
                     };
                     NET_INTERFACE.try_poll();
                     ret
                 } else {
-                    let mut kernel_buf = alloc::vec![0u8; len];
-                    if copy_from_user_array(
-                        token,
-                        buf as *const u8,
-                        kernel_buf.as_mut_ptr(),
-                        len,
-                    )
-                    .is_err()
-                    {
-                        return -(SyscallErr::EFAULT as isize);
-                    }
                     let ret = WaitQueue::wait_until_interruptible(wait_queue, || {
                         match socket.try_sendmsg(&kernel_buf, dest_endpoint.clone(), msg_flags) {
                             Ok(n) => Some(n as isize),
@@ -123,17 +120,6 @@ pub fn sys_sendto(
                     ret
                 }
             } else {
-                let mut kernel_buf = alloc::vec![0u8; len];
-                if copy_from_user_array(
-                    token,
-                    buf as *const u8,
-                    kernel_buf.as_mut_ptr(),
-                    len,
-                )
-                .is_err()
-                {
-                    return -(SyscallErr::EFAULT as isize);
-                }
                 wait_io(
                     || socket.try_sendmsg(&kernel_buf, dest_endpoint.clone(), msg_flags),
                     is_nonblock,
@@ -144,29 +130,13 @@ pub fn sys_sendto(
             if let Some(wait_queue) = socket.send_wait_queue() {
                 if is_nonblock {
                     NET_INTERFACE.try_poll();
-                    let reader = match UserBufferReader::new(token, buf as *const u8, len) {
-                        Ok(r) => r,
-                        Err(e) => return e,
-                    };
-                    let ubuf = reader.into_user_buffer();
-                    let ret = match socket.try_send_user(&ubuf, msg_flags) {
+                    let ret = match socket.try_send(&kernel_buf, msg_flags) {
                         Ok(n) => n as isize,
                         Err(e) => -(e as isize),
                     };
                     NET_INTERFACE.try_poll();
                     ret
                 } else {
-                    let mut kernel_buf = alloc::vec![0u8; len];
-                    if copy_from_user_array(
-                        token,
-                        buf as *const u8,
-                        kernel_buf.as_mut_ptr(),
-                        len,
-                    )
-                    .is_err()
-                    {
-                        return -(SyscallErr::EFAULT as isize);
-                    }
                     let ret = WaitQueue::wait_until_interruptible(wait_queue, || {
                         match socket.try_send(&kernel_buf, msg_flags) {
                             Ok(n) => Some(n as isize),
@@ -179,17 +149,6 @@ pub fn sys_sendto(
                     ret
                 }
             } else {
-                let mut kernel_buf = alloc::vec![0u8; len];
-                if copy_from_user_array(
-                    token,
-                    buf as *const u8,
-                    kernel_buf.as_mut_ptr(),
-                    len,
-                )
-                .is_err()
-                {
-                    return -(SyscallErr::EFAULT as isize);
-                }
                 wait_io(|| socket.try_send(&kernel_buf, msg_flags), is_nonblock)
             }
         }
@@ -204,17 +163,6 @@ pub fn sys_sendto(
             } else {
                 None
             };
-            let mut kernel_buf = alloc::vec![0u8; len];
-            if copy_from_user_array(
-                token,
-                buf as *const u8,
-                kernel_buf.as_mut_ptr(),
-                len,
-            )
-            .is_err()
-            {
-                return -(SyscallErr::EFAULT as isize);
-            }
             if let Some(wait_queue) = socket.send_wait_queue() {
                 if is_nonblock {
                     NET_INTERFACE.try_poll();

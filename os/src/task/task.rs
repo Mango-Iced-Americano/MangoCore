@@ -139,11 +139,6 @@ pub struct TaskControlBlock {
     /// Generation for timeout wake timers.  Each newly armed wake timer bumps
     /// this value so older stale timers can expire without waking the task.
     pub wait_timer_generation: AtomicUsize,
-    /// Non-zero when the task is sleeping in a fallback wait (wait_event_impl
-    /// with fallback_ms). Stores the generation of the current fallback timer.
-    /// Zero when not in a fallback wait. Used by stale timer callbacks to
-    /// re-arm instead of spurious-wake.
-    pub wait_io_fallback_active_generation: AtomicUsize,
     /// Lockless scheduler hint for the common nice=0 ready-queue path.
     pub sched_nice_hint: AtomicI32,
     /// ASID allocated for this task (la64 only).  For rv64 it stays 0.
@@ -880,7 +875,6 @@ impl TaskControlBlock {
             _thread_quota: None,
             wait_io_timer_pending: AtomicBool::new(false),
             wait_timer_generation: AtomicUsize::new(0),
-            wait_io_fallback_active_generation: AtomicUsize::new(0),
             sched_nice_hint: AtomicI32::new(0),
             asid: core::sync::atomic::AtomicU16::new(0),
             inner: Mutex::new(TaskControlBlockInner {
@@ -1340,7 +1334,6 @@ impl TaskControlBlock {
             _thread_quota: thread_quota,
             wait_io_timer_pending: AtomicBool::new(false),
             wait_timer_generation: AtomicUsize::new(0),
-            wait_io_fallback_active_generation: AtomicUsize::new(0),
             sched_nice_hint: AtomicI32::new(child_sched_nice),
             asid: core::sync::atomic::AtomicU16::new(0),
             inner: Mutex::new(TaskControlBlockInner {

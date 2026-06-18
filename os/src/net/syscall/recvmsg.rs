@@ -1,7 +1,6 @@
 use crate::mm::{UserIoVec, UserPtr, UserPtrMut};
 use crate::net::config::NET_INTERFACE;
 use crate::net::posix::MsgHdr;
-use crate::net::PSOCK;
 use crate::syscall::utils::wait_io;
 use crate::task::current_task;
 use crate::task::WaitQueue;
@@ -44,52 +43,6 @@ pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
     };
 
     let recv_cap = user_iov.total_len().min(crate::hal::IO_CHUNK_SIZE);
-    let socket = crate::get_socket!(sockfd);
-
-    // Stream non-blocking zero-copy fast path
-    if is_nonblock && !is_peek && matches!(socket.socket_type(), PSOCK::Stream) {
-        let mut ubuf = match user_iov.writer_buffer_at(0, recv_cap) {
-            Ok(b) => b,
-            Err(errno) => return errno,
-        };
-        NET_INTERFACE.try_poll();
-        let nbytes = match socket.try_recv_user(&mut ubuf, msg_flags) {
-            Ok(n) if n >= 0 => n as usize,
-            Ok(_) => 0usize,
-            Err(e) => return -(e as isize),
-        };
-
-        let truncated = nbytes > recv_cap;
-
-        if !msg.msg_name.is_null() && msg.msg_namelen >= 12 {
-            if let Some(src_addr) = socket.last_recv_addr() {
-                let namelen_field_offset = msg_ptr + core::mem::offset_of!(MsgHdr, msg_namelen);
-                let _ = src_addr.fill_sockaddr(msg.msg_name as usize, namelen_field_offset);
-            }
-        }
-
-        let msg_controllen = 0usize;
-        if UserPtrMut::from_addr(msg_ptr + core::mem::offset_of!(MsgHdr, msg_controllen))
-            .write(token, &msg_controllen)
-            .is_err()
-        {
-            return -(SyscallErr::EFAULT as isize);
-        }
-        let ret_flags: i32 = if truncated {
-            (MsgFlags::MSG_TRUNC).bits() as i32
-        } else {
-            0i32
-        };
-        if UserPtrMut::from_addr(msg_ptr + core::mem::offset_of!(MsgHdr, msg_flags))
-            .write(token, &ret_flags)
-            .is_err()
-        {
-            return -(SyscallErr::EFAULT as isize);
-        }
-
-        return nbytes as isize;
-    }
-
     let mut buf = alloc::vec::Vec::new();
     if buf.try_reserve(recv_cap).is_err() {
         return -(SyscallErr::ENOBUFS as isize);
@@ -98,6 +51,7 @@ pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
         buf.set_len(recv_cap);
     }
 
+    let socket = crate::get_socket!(sockfd);
     let mut try_recv = || {
         if is_peek {
             socket.try_peek_recvmsg(&mut buf)

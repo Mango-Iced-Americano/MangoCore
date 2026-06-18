@@ -2,26 +2,6 @@
 
 > 跨对话可复用的 bug 根因 → 修复模式。按子系统分类。
 
-## 网络绩效
-
-### QEMU TCG 对热路径 struct 大小极度敏感（P1.1 教训）
-
-- **根因**: 在 `NetInterfaceInner`（全局 `spin::Mutex` 包裹的 struct）上加 24 字节的 `route_slots: Vec<...>`，struct 从 56→80 字节。功能等价（fast path 未接入），但 netperf -5% regression。
-- **修复**: 放弃全局 mirror 方案，改为在 `TcpSocket`（每连接独立）上缓存 3 个 Atomic 字段（24 字节/连接），不动全局 struct。
-- **教训**: 单核 QEMU TCG 对 `spin::Mutex<T>` 中的 T 大小非常敏感。大结构改变 inline layout → 影响锁操作的内存足迹 → 宏观性能回退。永远不要扩大全局热路径 struct。
-- **相关文件**: `os/src/net/config.rs` (NetInterfaceInner), `os/src/net/socket/inet/stream/mod.rs`
-
-### 单核无抢占环境 lock splitting 无并发收益（perf/net 教训）
-
-- **根因**: perf/net 分支引入 per-stack locks + WaitQueue 重构 + cooperative poll → -50% netperf RR。单核环境下没有真正的并发，锁拆分的额外 atomic 操作是纯 overhead。
-- **修复**: 放弃 per-stack locking，改为减少锁次数（P0 skip poll、P1 绕 inner 锁）。
-- **教训**: 单核优化方向是**减少原子操作和锁次数**，不是**拆锁增加并发度**。
-
-### iperf 与 netperf 必须双测
-
-- **根因**: netperf RR 测小包往返延迟（syscall 开销主导），iperf 测 TCP 吞吐（buffer/window/poll 频率主导）。P0+P1+P3 对 netperf 提升 +10%，但对 iperf 提升仅 +74%。E（智能保 flag）+C（64K buffer）对 netperf 几乎中性，但 iperf 提升 6.7x + 4.6x。
-- **教训**: 每次网络栈修改后必须同时跑 netperf（mask=0x200）和 iperf（mask=0x040），禁止只看一个。
-
 ## 路径解析
 
 ### `parse_path()` 滤除 "." 组件，"." 检测必须用原始路径字符串
@@ -198,15 +178,6 @@
 - **根因**: 紧循环 EAGAIN 阻止定时器中断
 - **修复**: 非阻塞路径 `try_xxx` 前先调用 `NET_INTERFACE.try_poll()`
 - **相关文件**: `os/src/net/syscall/`
-
-### WaitQueue 闭包内 poll 导致唤醒丢失（accept 永久阻塞）
-- **根因**: `WaitQueue::wait_until_interruptible()` 的 condition 闭包在队列锁持有时执行；如果在闭包内调用 `NET_INTERFACE.poll()`，轮询路径中 `notify_events_all_if_unlocked` 会因为队列锁已持有而静默丢弃唤醒，导致阻塞的 waiter 永久睡眠。TCP accept() 在闭包内 poll 会错过首个 SYN 连接。
-- **修复**: 
-  1. `NET_INTERFACE.try_poll()` 必须在 WaitQueue 闭包外部调用（pre-poll）
-  2. 使用无条件监听扫描（`wake_tcp_accept_waiters()`）在每次 poll 后唤醒 accept waiters，不依赖 smoltcp 的 poll 返回值
-  3. WaitQueue 闭包内只做纯状态检查（accept），不做任何会触发唤醒的操作
-- **教训**: 所有 WaitQueue condition 闭包必须是无副作用的纯检查函数；任何可能触发唤醒操作（poll、dispatch、notification）都必须在闭包外部执行
-- **相关文件**: `os/src/net/syscall/accept.rs`, `os/src/net/config.rs`, `os/src/net/socket/inet/stream/mod.rs`
 
 ## 错误码对齐（Linux 语义）
 

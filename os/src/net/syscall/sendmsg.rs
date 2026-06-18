@@ -127,59 +127,6 @@ fn send_stream_chunked(
     is_nonblock: bool,
 ) -> isize {
     let chunk_cap = total_len.min(crate::hal::IO_CHUNK_SIZE);
-
-    if is_nonblock {
-        // Zero-copy path: use UserBuffer directly, no kernel scratch buffer
-        let mut done = 0usize;
-        while done < total_len {
-            let want = (total_len - done).min(chunk_cap);
-            let accessible = user_iov.accessible_len_at(done, want, crate::mm::UserAccess::Read);
-            if accessible == 0 {
-                return if done > 0 {
-                    done as isize
-                } else {
-                    -(SyscallErr::EFAULT as isize)
-                };
-            }
-
-            let ubuf = match user_iov.reader_buffer_at(done, accessible) {
-                Ok(b) => b,
-                Err(errno) => return if done > 0 { done as isize } else { errno },
-            };
-
-            NET_INTERFACE.try_poll();
-            let sent = match socket.try_sendmsg_user(&ubuf, dest.clone(), msg_flags) {
-                Ok(n) => {
-                    if n <= 0 {
-                        return if done > 0 { done as isize } else { n };
-                    }
-                    n
-                }
-                Err(e) => {
-                    return if done > 0 {
-                        done as isize
-                    } else {
-                        -(e as isize)
-                    };
-                }
-            };
-
-            done += sent as usize;
-
-            if (sent as usize) < accessible || accessible < want {
-                break;
-            }
-
-            if let Some(task) = current_task() {
-                if crate::task::has_actionable_signal(&task) {
-                    break;
-                }
-            }
-        }
-        return done as isize;
-    }
-
-    // Blocking path: use kernel scratch buffer
     let mut kbuf = alloc::vec::Vec::new();
     if kbuf.try_reserve(chunk_cap).is_err() {
         return -(SyscallErr::ENOBUFS as isize);
@@ -209,7 +156,24 @@ fn send_stream_chunked(
         let send_fn =
             || socket.try_sendmsg(&kbuf[..copied.min(accessible)], dest.clone(), msg_flags);
 
-        let sent: isize = if let Some(wq) = socket.send_wait_queue() {
+        let sent: isize = if is_nonblock {
+            NET_INTERFACE.try_poll();
+            match send_fn() {
+                Ok(n) => {
+                    if n <= 0 {
+                        return if done > 0 { done as isize } else { n };
+                    }
+                    n
+                }
+                Err(e) => {
+                    return if done > 0 {
+                        done as isize
+                    } else {
+                        -(e as isize)
+                    };
+                }
+            }
+        } else if let Some(wq) = socket.send_wait_queue() {
             let result = WaitQueue::wait_until_interruptible(wq, || match send_fn() {
                 Ok(n) => Some(n),
                 Err(SyscallErr::EAGAIN) => None,
