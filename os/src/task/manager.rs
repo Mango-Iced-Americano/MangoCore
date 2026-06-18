@@ -3,7 +3,7 @@
     内容与RISCV版本相同，无需修改
 */
 use core::cmp::Ordering;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 
 #[cfg(feature = "oom_handler")]
 use crate::config::SYSTEM_TASK_LIMIT;
@@ -1420,7 +1420,13 @@ impl KernelTimerQueue {
         self.inner.is_empty()
     }
 
-    pub fn add_action(&mut self, action: TimerAction, deadline: TimeSpec) {
+    /// Returns the earliest deadline (ns), or 0 if the queue is empty.
+    pub fn earliest_deadline_ns(&self) -> u64 {
+        self.inner.peek().map(|t| t.deadline.to_ns_saturating()).unwrap_or(0)
+    }
+
+    pub fn add_action(&mut self, action: TimerAction, deadline: TimeSpec) -> bool {
+        let old_earliest = self.earliest_deadline_ns();
         // Keep the hot path O(log n).  WakeTask stale entries are filtered by
         // generation, while signal timers validate their generation/deadline in run_timer().
         self.inner.push(KernelTimer { action, deadline });
@@ -1428,6 +1434,10 @@ impl KernelTimerQueue {
         if self.inner.len() > Self::MAX_TIMERS {
             self.enforce_capacity();
         }
+        let new_earliest = self.earliest_deadline_ns();
+        // Return true if this new timer is now the earliest (or if the queue
+        // was empty before, meaning a previously-idle queue now has work).
+        old_earliest == 0 || new_earliest < old_earliest
     }
     /// Pop all expired timers (up to a batch limit).
     /// Callers must hold the lock. Run callbacks OUTSIDE the lock.
@@ -1751,11 +1761,45 @@ lazy_static! {
 static TIMEOUT_WAITQUEUE_PENDING: AtomicBool = AtomicBool::new(false);
 static KERNEL_TIMER_QUEUE_PENDING: AtomicBool = AtomicBool::new(false);
 
+// ── High-res / sched tick state ──
+static NEXT_SCHED_TICK_NS: AtomicU64 = AtomicU64::new(0);
+const SCHED_TICK_NS: u64 = 10_000_000; // 100 Hz = 10 ms
+
+/// (Re-)program the hardware timer to fire at the earliest of:
+///   - the next sched tick, and
+///   - the earliest KernelTimer deadline.
+fn reprogram_timer() {
+    let now_ns = crate::timer::now_ns();
+    let next_sched_ns = NEXT_SCHED_TICK_NS.load(AtomicOrdering::Relaxed);
+
+    let next_timer_ns = {
+        let ns = KERNEL_TIMER_QUEUE.lock().earliest_deadline_ns();
+        if ns == 0 { u64::MAX } else { ns }
+    };
+
+    let next_ns = next_timer_ns.min(next_sched_ns.max(now_ns.saturating_add(1)));
+    let delta_ns = next_ns.saturating_sub(now_ns).max(1);
+    let delta_ticks = crate::timer::ns_to_ticks_ceil(delta_ns);
+
+    crate::hal::program_timer_delta(delta_ticks);
+}
+
+/// Initialise the timer subsystem: set the first sched tick and program the
+/// hardware for the first event.
+pub fn timer_subsystem_init() {
+    let now_ns = crate::timer::now_ns();
+    NEXT_SCHED_TICK_NS.store(now_ns + SCHED_TICK_NS, AtomicOrdering::Relaxed);
+    reprogram_timer();
+}
+
 /// 加入一个内核计时器动作
 pub fn add_kernel_timer(action: TimerAction, deadline: TimeSpec) {
     let _flags = local_irq_save();
-    KERNEL_TIMER_QUEUE.lock().add_action(action, deadline);
+    let new_is_earliest = KERNEL_TIMER_QUEUE.lock().add_action(action, deadline);
     local_irq_restore(_flags);
+    if new_is_earliest {
+        reprogram_timer();
+    }
 }
 
 /// 这个函数会将一个`task`添加到全局超时等待队列中，但是不会阻塞它
@@ -1779,7 +1823,70 @@ pub fn wait_with_timeout(task: Weak<TaskControlBlock>, timeout: TimeSpec) {
     local_irq_restore(_flags);
 }
 
-/// 唤醒全局超时等待队列中所有已超时的任务
+/// Unified timer interrupt handler — replaces the old fixed-tick
+/// do_wake_expired() + set_next_trigger() pattern.
+///
+/// 1. Process all expired KernelTimers (callbacks run outside the lock).
+/// 2. Advance the sched tick if its deadline has passed; do periodic
+///    housekeeping (net poll, etc.) only on sched-tick boundaries.
+/// 3. Re-program the hardware for the next deadline.
+/// 4. Yield the CPU only if a task was woken or the sched tick demands it.
+pub fn timer_interrupt_handler() {
+    let now = crate::timer::TimeSpec::now();
+    let now_ns = now.to_ns_saturating();
+
+    // 1. Expired kernel timers
+    let expired_timers = { KERNEL_TIMER_QUEUE.lock().pop_expired(now) };
+    let mut woke_task = false;
+    for timer in expired_timers {
+        if KernelTimerQueue::run_timer(timer, now) {
+            woke_task = true;
+        }
+    }
+
+    // Also handle timeout-waitqueue expiry (kept for compatibility)
+    if TIMEOUT_WAITQUEUE_PENDING.load(AtomicOrdering::Relaxed) {
+        let mut timeout_queue = TIMEOUT_WAITQUEUE.lock();
+        if !timeout_queue.is_empty() {
+            timeout_queue.wake_expired(now);
+        } else {
+            TIMEOUT_WAITQUEUE_PENDING.store(false, AtomicOrdering::Relaxed);
+        }
+    }
+
+    // timerfd
+    if crate::fs::timerfd::timerfd_registry_maybe_nonempty()
+        && !crate::fs::timerfd::timerfd_registry_is_empty()
+    {
+        crate::fs::timerfd::wake_expired_timerfds(now);
+    }
+
+    // 2. Sched tick
+    let mut need_resched = false;
+    let mut next_tick = NEXT_SCHED_TICK_NS.load(AtomicOrdering::Relaxed);
+    if now_ns >= next_tick {
+        // Advance tick, but don't let it fall behind by more than one period.
+        next_tick = next_tick.saturating_add(SCHED_TICK_NS);
+        if now_ns >= next_tick {
+            next_tick = now_ns.saturating_add(SCHED_TICK_NS);
+        }
+        NEXT_SCHED_TICK_NS.store(next_tick, AtomicOrdering::Relaxed);
+
+        // Periodic housekeeping — only once per sched tick
+        crate::net::config::NET_INTERFACE.try_poll();
+        need_resched = true;
+    }
+
+    // 3. Re-program hardware
+    reprogram_timer();
+
+    // 4. Yield if needed
+    if need_resched || woke_task {
+        crate::task::suspend_current_and_run_next();
+    }
+}
+
+/// 唤醒全局超时等待队列中所有已超时的任务 (legacy — now handled by timer_interrupt_handler)
 pub fn do_wake_expired() {
     let timeout_pending = TIMEOUT_WAITQUEUE_PENDING.load(AtomicOrdering::Relaxed);
     let kernel_timer_pending = KERNEL_TIMER_QUEUE_PENDING.load(AtomicOrdering::Relaxed);

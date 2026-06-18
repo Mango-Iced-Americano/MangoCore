@@ -49,7 +49,54 @@
 | `KERNEL_TIMER_QUEUE` 死锁风险 | 存在（syscall×IRQ 竞争） | 已消除 |
 | `wake_expired` 内回调重入锁 | 可能死锁 | 已消除 |
 
-**备注：** 此提交是计时器三阶段修复的 Phase 1，解决了安全换算和 irq-safety 基础问题。Phase 2 (one-shot timer + 高精度唤醒) 和 Phase 3 (clock_getres 修正 + net poll 拆分) 待后续 PR 实现。
+**备注：** 此提交是计时器三阶段修复的 Phase 1，解决了安全换算和 irq-safety 基础问题。
+
+### Phase 2 & 3: one-shot high-res timer + clock_getres 修复
+
+**Phase 2 — one-shot timer + high-res 唤醒：**
+
+- `os/src/hal/arch/riscv/time.rs` — 新增 `program_timer_delta(delta_ticks)`，通过 SBI `set_timer(now + delta)` 实现
+- `os/src/hal/arch/loongarch64/time.rs` — 新增 `program_timer_delta(delta_ticks)`，通过 `TCfg` 写 one-shot init_val
+- `os/src/hal/arch/mod.rs` — 双架构导出 `program_timer_delta`
+- `os/src/task/manager.rs`:
+  - `add_action()` 返回 `bool`，表示新 timer 是否为最早 deadline；若最早则触发 `reprogram_timer()`
+  - `earliest_deadline_ns()` 查询最早到期时间
+  - `reprogram_timer()` 计算 `min(earliest_timer, next_sched_tick)` → `ns_to_ticks_ceil` → `program_timer_delta`
+  - `timer_interrupt_handler()` 统一中断处理：过期回调(锁外执行) + sched tick 推进(含 net poll) + 重编程 + 按需调度
+  - `timer_subsystem_init()` 初始化首个 sched tick 并编程硬件
+  - `add_kernel_timer()` 在返回前触发 `reprogram_timer()`（若新 timer 最早）
+- `os/src/hal/arch/riscv/trap/mod.rs` — timer interrupt 改用 `timer_interrupt_handler()`
+- `os/src/hal/arch/loongarch64/trap/mod.rs` — 同上；`enable_timer_interrupt()` 只开中断向量，不写 timer 值
+- `os/src/hal/arch/riscv/mod.rs` — `machine_init()` 移除 `set_next_trigger()`（由 `timer_subsystem_init()` 替代）
+- `os/src/main.rs` — 在 `machine_init()` 后调用 `timer_subsystem_init()`
+
+**Phase 3 — clock_getres 修复：**
+
+- `os/src/syscall/process/time.rs` — `sys_clock_getres()`:
+  - `CLOCK_MONOTONIC/REALTIME/BOOTTIME/TAI` → `ceil(1e9/freq)` (RV: 80ns, LA: 10ns)
+  - `CLOCK_*_COARSE` → 10ms (sched tick 粒度)
+  - `CLOCK_PROCESS/THREAD_CPUTIME_ID` → 1µs
+  - 不再对所有时钟返回虚报的 1ns
+
+**验证：**
+- RV/LA 双架构编译 ✅
+- QEMU basic smoke test ✅ (musl 4s, glibc 4s)
+- QEMU cyclictest (4 modes) ✅ (musl 12s, glibc 18s)
+- QEMU libcbench timeout-kill ✅ (waitpid 48ms, 无死锁)
+
+**效果对比：**
+
+| 指标 | Phase 1 (固定tick) | Phase 2+3 (one-shot) |
+|------|-------------------|---------------------|
+| nanosleep 最小精度 | RV 40ms | ~80ns (硬件分辨率) |
+| timer interrupt 模式 | 固定 25Hz（每 40ms 无条件触发） | 按需触发（最早 deadline） |
+| cyclictest musl | 14s | 12s (↓14%) |
+| net poll 触发 | 每次 timer IRQ (25Hz) | 仅 sched tick (100Hz 边界) |
+| clock_getres MONOTONIC | 虚报 1ns | RV 80ns / LA 10ns |
+| add_kernel_timer | 不重编程硬件 | 最早 deadline 变更时重编程 |
+| KERNEL_TIMER_QUEUE 回调 | 锁内执行 (Phase 1 已修复) | 锁外执行 ✅ |
+
+**备注：** one-shot timer 替代了原有固定 25Hz(RV)/100Hz(LA) tick 模型，硬件仅在最早 KernelTimer deadline 或下一个 sched tick 时触发中断。sched tick 保持 100Hz(10ms) 用于调度记账和网络 poll。至此计时器三阶段修复全部完成。
 
 ---
 

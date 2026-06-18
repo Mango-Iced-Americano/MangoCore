@@ -903,28 +903,35 @@ pub fn sys_clock_gettime(clk_id: usize, tp: *mut TimeSpec) -> isize {
 }
 
 pub fn sys_clock_getres(clk_id: usize, tp: *mut TimeSpec) -> isize {
-    match clk_id {
-        CLOCK_REALTIME
-        | CLOCK_MONOTONIC
-        | CLOCK_PROCESS_CPUTIME_ID
-        | CLOCK_THREAD_CPUTIME_ID
-        | CLOCK_MONOTONIC_RAW
-        | CLOCK_REALTIME_COARSE
-        | CLOCK_MONOTONIC_COARSE
-        | CLOCK_BOOTTIME
-        | CLOCK_REALTIME_ALARM
-        | CLOCK_BOOTTIME_ALARM
-        | CLOCK_TAI => {}
+    let ns = match clk_id {
+        CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW
+        | CLOCK_BOOTTIME | CLOCK_REALTIME_ALARM | CLOCK_BOOTTIME_ALARM
+        | CLOCK_TAI => {
+            // hardware counter resolution: ceil(1e9 / freq)
+            let freq = crate::timer::clock_freq();
+            ((1_000_000_000u128 + freq as u128 - 1) / freq as u128) as usize
+        }
+        CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE => {
+            // sched tick granularity
+            10_000_000 // 10 ms
+        }
+        CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
+            // CPU accounting currently approximates to ~1 us
+            1_000
+        }
         _ => {
             if let Err(errno) = validate_cpu_clock_id(clk_id) {
                 return errno;
             }
+            // default: hardware counter resolution
+            let freq = crate::timer::clock_freq();
+            ((1_000_000_000u128 + freq as u128 - 1) / freq as u128) as usize
         }
-    }
+    };
     if !tp.is_null() {
         let resolution = TimeSpec {
             tv_sec: 0,
-            tv_nsec: 1,
+            tv_nsec: ns,
         };
         if UserPtrMut::new(tp)
             .write(current_user_token(), &resolution)

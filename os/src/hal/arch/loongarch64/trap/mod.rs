@@ -147,12 +147,8 @@ fn set_user_trap_entry() {
 }
 
 pub fn enable_timer_interrupt() {
-    let timer_freq = get_clock_freq();
-    TCfg::read()
-        .set_enable(true)
-        .set_periodic(false)
-        .set_init_val(timer_freq / TICKS_PER_SEC)
-        .write();
+    // Only enable the interrupt vector — the actual timer deadline is
+    // programmed later by timer_subsystem_init() → program_timer_delta().
     ECfg::empty()
         .set_line_based_interrupt_vector(LineBasedInterrupt::TIMER)
         .write();
@@ -288,11 +284,8 @@ pub fn trap_handler() -> ! {
         }
         Trap::Interrupt(Interrupt::Timer) => {
             crate::task::perf::record_timer_interrupt();
-            do_wake_expired();
-            NET_INTERFACE.try_poll();
             TIClr::read().clear_timer().write();
-            enable_timer_interrupt();
-            suspend_current_and_run_next();
+            crate::task::timer_interrupt_handler();
         }
         Trap::Exception(Exception::Breakpoint) => {
             read_bp();

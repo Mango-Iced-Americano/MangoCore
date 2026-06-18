@@ -137,6 +137,7 @@ pub fn rust_main() -> ! {
     // mm::remap_test();
 
     machine_init();
+    crate::task::timer_subsystem_init();
 
     // ── Initramfs 启动路径 ──
     #[cfg(feature = "initramfs")]

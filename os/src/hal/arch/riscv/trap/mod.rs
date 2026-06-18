@@ -164,13 +164,8 @@ pub fn trap_handler() -> ! {
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
             crate::task::perf::record_timer_interrupt();
-            do_wake_expired();
-            NET_INTERFACE.try_poll();
-            unsafe {
-                TIMER_INTERRUPT += 1;
-            }
-            set_next_trigger();
-            suspend_current_and_run_next();
+            unsafe { TIMER_INTERRUPT += 1; }
+            crate::task::timer_interrupt_handler();
         }
         _ => {
             panic!(
