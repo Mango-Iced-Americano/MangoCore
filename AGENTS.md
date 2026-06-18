@@ -25,7 +25,7 @@
 6. **修改 PTE 后必须刷新 TLB** — `sfence.vma`（riscv）/ `invtlb`（la64），这是最常见 bug 来源
 7. **不要跨越等待点持锁** — 锁 → clone Arc → 释放锁 → 执行操作
 8. **不要 workaround** — 从根因解决问题，不做临时绕过
-9. **代码修改后必须更新 `docs/Work_Log.md`** — 按 `mango-worklog` Skill 规定的格式（见 §工作日志与知识维护）
+9. **代码修改后必须调用 `skill(name="mango-worklog")`** — 自动更新 `docs/Work_Log.md`（见 §工作日志与知识维护）
 
 ---
 
@@ -270,7 +270,7 @@ impl_file_for_socket!(MySocket);
 
 ### 自动 Worklog
 
-每次代码修改后，按 `.agents/skills/mango-worklog/SKILL.md` 规定的格式更新 `docs/Work_Log.md`。不要等待用户提示——这是强制性规则。
+每次代码修改完成后，**必须调用 `skill(name="mango-worklog")`** 加载工作日志指令并执行。该 Skill 会读取当前对话上下文中的修改内容，自动按格式更新 `docs/Work_Log.md`，并判断是否需要沉淀经验到 `references/`。不要等待用户提示——这是强制性规则。
 
 格式：日期戳条目 → 涉及文件 → 验证结果 → 备注。
 
