@@ -31,6 +31,7 @@ use alloc::{
 };
 use core::any::Any;
 use core::convert::TryFrom;
+use core::sync::atomic::Ordering;
 
 use crate::net::routing::RouteSocketHandle;
 use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint, Ipv4Address, Ipv6Address};
@@ -141,6 +142,13 @@ pub static UDP_SOCKETS_TO_REMOVE: Mutex<Vec<RouteSocketHandle>> = Mutex::new(Vec
 // tcp
 pub static TCP_SOCKETS: Mutex<Vec<Weak<TcpSocket>>> = Mutex::new(Vec::new());
 pub static TCP_SOCKETS_TO_REMOVE: Mutex<Vec<RouteSocketHandle>> = Mutex::new(Vec::new());
+/// Listening-only TCP sockets — used for unconditional accept scan after every poll cycle.
+pub static TCP_LISTENERS: Mutex<Vec<Weak<TcpSocket>>> = Mutex::new(Vec::new());
+
+/// Number of tasks currently blocking in accept(). When zero, the
+/// unconditional accept scan in poll_once() is skipped entirely.
+pub static ACCEPT_WAITER_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 // raw
 pub static RAW_SOCKETS: Mutex<Vec<(RouteSocketHandle, Weak<RawSocket>)>> = Mutex::new(Vec::new());
@@ -484,6 +492,51 @@ pub trait Socket: Send + Sync {
     /// 尝试发送数据，不阻塞。
     /// 不会调用 poll、不会睡眠、不会调度。成功时返回发送的字节数 (isize)。
     fn try_send(&self, buf: &[u8], _flags: MsgFlags) -> Result<isize, SyscallErr>;
+
+    /// 零拷贝接收: 直接从用户态 UserBuffer 接收，non-blocking 路径使用。
+    fn try_recv_user(
+        &self,
+        buf: &mut crate::mm::UserBuffer,
+        flags: MsgFlags,
+    ) -> Result<isize, SyscallErr> {
+        let available = buf.len().min(4096);
+        if available == 0 {
+            return Ok(0);
+        }
+        let mut scratch = [0u8; 4096];
+        let n = self.try_recv(&mut scratch[..available])?;
+        if n > 0 {
+            buf.write_at(0, &scratch[..n as usize]);
+        }
+        let _ = flags;
+        Ok(n)
+    }
+
+    /// 零拷贝发送: 直接从用户态 UserBuffer 发送，non-blocking 路径使用。
+    fn try_send_user(
+        &self,
+        buf: &crate::mm::UserBuffer,
+        flags: MsgFlags,
+    ) -> Result<isize, SyscallErr> {
+        let total = buf.len().min(65536);
+        if total == 0 {
+            return self.try_send(&[], flags);
+        }
+        let mut scratch = alloc::vec![0u8; total];
+        let n = buf.read(&mut scratch);
+        self.try_send(&scratch[..n], flags)
+    }
+
+    /// 零拷贝 sendmsg: 默认委托给 try_send_user。
+    fn try_sendmsg_user(
+        &self,
+        buf: &crate::mm::UserBuffer,
+        dest: Option<Endpoint>,
+        flags: MsgFlags,
+    ) -> Result<isize, SyscallErr> {
+        let _ = dest;
+        self.try_send_user(buf, flags)
+    }
 
     fn push_netlink_message(&self, _data: Vec<u8>) -> Result<(), SyscallErr> {
         Err(SyscallErr::EOPNOTSUPP)
@@ -879,6 +932,36 @@ pub fn wake_tcp_waiters() {
             }
         }
     }
+}
+
+/// Unconditional listener-only accept scan. Called after every poll cycle,
+/// regardless of smoltcp progress. Only iterates listening sockets, not
+/// all TCP sockets. Returns count of ready listeners.
+pub fn wake_tcp_accept_waiters() -> usize {
+    // P3: skip expensive listener scan when no task is blocked in accept()
+    if ACCEPT_WAITER_COUNT.load(Ordering::Relaxed) == 0 {
+        return 0;
+    }
+
+    let listeners: Vec<Arc<TcpSocket>> = {
+        let guard = TCP_LISTENERS.lock();
+        guard.iter().filter_map(|w| w.upgrade()).collect()
+    };
+
+    let mut ready = 0;
+    for sock in &listeners {
+        if sock.refresh_accept_ready_after_poll() {
+            ready += 1;
+        }
+    }
+
+    // Clean up dead weak refs
+    if listeners.len() < TCP_LISTENERS.lock().len() {
+        let mut guard = TCP_LISTENERS.lock();
+        guard.retain(|w| w.upgrade().is_some());
+    }
+
+    ready
 }
 
 /// 在每次 poll 后，遍历所有 RAW_SOCKETS，唤醒其等待队列

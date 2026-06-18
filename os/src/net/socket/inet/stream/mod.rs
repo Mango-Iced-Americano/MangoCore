@@ -21,14 +21,17 @@ pub use tcp_info::TcpInfo;
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering};
+use smoltcp::socket::tcp;
 use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint, IpVersion};
 use spin::Mutex;
 
+use crate::net::routing::RouteSocketHandle;
 use crate::net::syscall::common::MsgFlags;
 use crate::net::{config::NET_INTERFACE, Endpoint, Socket, SocketFile, PSOCK};
 use crate::{
     fs::vfs::{self, FileFlags},
+    mm::UserBuffer,
     task::{current_task, WaitQueue},
     utils::error::{GeneralRet, SyscallErr, SyscallRet},
 };
@@ -56,6 +59,9 @@ pub struct TcpSocket {
     pub accept_waiters: EventWaitQueue,
     pub ip_version: IpVersion,
     ipv6_v6only: AtomicBool,
+    fast_route_id: AtomicUsize,
+    fast_ifindex: AtomicU32,
+    fast_state: AtomicU8,
 }
 
 impl TcpSocket {
@@ -75,6 +81,9 @@ impl TcpSocket {
             accept_waiters: EventWaitQueue::new(),
             ip_version: ver,
             ipv6_v6only: AtomicBool::new(false),
+            fast_route_id: AtomicUsize::new(0),
+            fast_ifindex: AtomicU32::new(0),
+            fast_state: AtomicU8::new(0),
         }
     }
 
@@ -106,6 +115,54 @@ impl TcpSocket {
     /// 注册到全局 TCP_SOCKETS 表
     pub fn register_tcp_socket(socket: &Arc<Self>) {
         crate::net::TCP_SOCKETS.lock().push(Arc::downgrade(socket));
+    }
+
+    /// Register this listening socket in the global TCP_LISTENERS table.
+    /// Called from listen() after transitioning to Listening state.
+    pub(crate) fn register_as_listener(&self) {
+        let self_ptr = self as *const Self;
+        let weak = {
+            let sockets = crate::net::TCP_SOCKETS.lock();
+            sockets.iter().find_map(|w| {
+                w.upgrade().and_then(|s| {
+                    if Arc::as_ptr(&s) == self_ptr {
+                        Some(w.clone())
+                    } else {
+                        None
+                    }
+                })
+            })
+        };
+        if let Some(weak) = weak {
+            let mut listeners = crate::net::TCP_LISTENERS.lock();
+            let already = listeners.iter().any(|w| {
+                w.upgrade()
+                    .map(|s| Arc::as_ptr(&s) == self_ptr)
+                    .unwrap_or(false)
+            });
+            if !already {
+                listeners.push(weak);
+            }
+        }
+    }
+
+    /// Check if this listening socket has a pending connection.
+    /// Called unconditionally after every poll cycle.
+    pub(crate) fn refresh_accept_ready_after_poll(&self) -> bool {
+        let ready = {
+            let inner = self.inner.lock();
+            match &*inner {
+                Inner::Listening(l) => l.has_pending_connection(),
+                _ => false,
+            }
+        };
+
+        if ready {
+            self.accept_waiters
+                .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM);
+        }
+
+        ready
     }
 
     /// 在 NET_INTERFACE.poll() 之后刷新各状态的事件
@@ -192,6 +249,47 @@ impl TcpSocket {
             Err(SyscallErr::EAGAIN)
         }
     }
+
+    pub(crate) fn publish_fast_established(&self, route: RouteSocketHandle, ifindex: u32) {
+        self.fast_route_id.store(route.0, Ordering::Relaxed);
+        self.fast_ifindex.store(ifindex, Ordering::Relaxed);
+        self.fast_state.store(2, Ordering::Release);
+    }
+
+    fn invalidate_fast(&self) {
+        self.fast_state.store(0, Ordering::Release);
+    }
+
+    fn fast_key_established(&self) -> Option<(RouteSocketHandle, u32)> {
+        if self.fast_state.load(Ordering::Acquire) != 2 {
+            return None;
+        }
+        let h = self.fast_route_id.load(Ordering::Relaxed);
+        let ifidx = self.fast_ifindex.load(Ordering::Relaxed);
+        if h == 0 || ifidx == 0 {
+            return None;
+        }
+        Some((RouteSocketHandle(h), ifidx))
+    }
+
+    fn try_publish_fast_from_bound(&self) {
+        let bound = self.bound.lock();
+        let route = match bound.socket_handle {
+            Some(h) => h,
+            None => return,
+        };
+        let ifindex = bound.ifindex;
+        drop(bound);
+        self.publish_fast_established(route, ifindex);
+    }
+}
+
+fn update_ready_bit(pollee: &AtomicUsize, bit: usize, ready: bool) {
+    if ready {
+        pollee.fetch_or(bit, Ordering::Relaxed);
+    } else {
+        pollee.fetch_and(!bit, Ordering::Relaxed);
+    }
 }
 
 impl Socket for TcpSocket {
@@ -258,6 +356,8 @@ impl Socket for TcpSocket {
                         .bind(handle, ifindex, listen_addr.addr, listen_addr.port);
                 }
                 *inner = Inner::Listening(listening);
+                drop(inner);
+                Self::register_as_listener(self);
                 Ok(0)
             }
             Err((revert, err)) => {
@@ -357,7 +457,11 @@ impl Socket for TcpSocket {
                         *c.result.lock() = ConnectResult::Connected;
                     }
                     drop(inner);
-                    self.finish_connecting().map(|v| v as isize)
+                    let ret = self.finish_connecting().map(|v| v as isize);
+                    if ret.is_ok() {
+                        self.try_publish_fast_from_bound();
+                    }
+                    ret
                 } else if state == smoltcp::socket::tcp::State::Closed {
                     drop(inner);
                     let _ = self.finish_connecting(); // 转换状态以触发正确的事件
@@ -382,7 +486,6 @@ impl Socket for TcpSocket {
     }
 
     fn accept(&self, sockfd: u32, addr: usize, addrlen: usize) -> SyscallRet {
-        NET_INTERFACE.poll();
         let mut inner = self.inner.lock();
         if !matches!(&*inner, Inner::Listening(_)) {
             return Err(SyscallErr::EINVAL);
@@ -392,15 +495,18 @@ impl Socket for TcpSocket {
             Err(e) => return Err(e),
         };
 
+        let mut fast_route: Option<RouteSocketHandle> = None;
+        let mut fast_ifindex: u32 = 0;
+
         let accepted_bound = if let Inner::Established(ref est) = connected_inner {
-            let ifindex = NET_INTERFACE
-                .inner_handler(|inner_ref| {
-                    inner_ref.bindings.get(&est.handle).map(|b| b.ifindex)
-                })
-                .flatten()
-                .unwrap_or_else(|| {
-                    crate::net::net_core::ifindex_for_local_addr(Some(est.local.addr))
-                });
+            if let Some(binding) = NET_INTERFACE.inner_handler(|inner_ref| {
+                inner_ref.bindings.get(&est.handle).copied()
+            }).flatten()
+            {
+                fast_route = Some(est.handle);
+                fast_ifindex = binding.ifindex;
+            }
+            let ifindex = fast_ifindex;
             let mut b = BoundInner::new();
             b.bind(est.handle, ifindex, Some(est.local.addr), est.local.port);
             b
@@ -423,7 +529,14 @@ impl Socket for TcpSocket {
             accept_waiters: EventWaitQueue::new(),
             ip_version: self.ip_version,
             ipv6_v6only: AtomicBool::new(self.ipv6_v6only.load(Ordering::Acquire)),
+            fast_route_id: AtomicUsize::new(0),
+            fast_ifindex: AtomicU32::new(0),
+            fast_state: AtomicU8::new(0),
         });
+
+        if let Some(handle) = fast_route {
+            connected_socket.publish_fast_established(handle, fast_ifindex);
+        }
 
         // 新 accept 的连接也必须注册到全局 TCP_SOCKETS，否则 pselect/epoll 永远等不到事件
         Self::register_tcp_socket(&connected_socket);
@@ -581,20 +694,80 @@ impl Socket for TcpSocket {
     }
 
     fn try_recv(&self, buf: &mut [u8]) -> Result<isize, SyscallErr> {
-        NET_INTERFACE.try_poll();
-        if self.read_shutdown.load(Ordering::Acquire) {
-            return Ok(0); // EOF after read shutdown
+        let fast = self.fast_key_established();
+        if self.pollee.load(Ordering::Relaxed) & EPollEvent::EPOLLIN.bits() == 0 {
+            if let Some((_route, ifindex)) = fast {
+                NET_INTERFACE.try_poll_stack(ifindex);
+            } else {
+                NET_INTERFACE.try_poll();
+            }
         }
+        if self.read_shutdown.load(Ordering::Acquire) {
+            return Ok(0);
+        }
+
+        if let Some((route, _ifindex)) = fast {
+            if let Some((ret, ready_after)) =
+                NET_INTERFACE.tcp_routed_socket(route, |tcp_sock| {
+                    let result = if tcp_sock.can_recv() {
+                        tcp_sock
+                            .recv_slice(buf)
+                            .map(|n| n as isize)
+                            .map_err(|_| SyscallErr::ENOTCONN)
+                    } else {
+                        match tcp_sock.state() {
+                            tcp::State::CloseWait
+                            | tcp::State::Closing
+                            | tcp::State::LastAck
+                            | tcp::State::TimeWait => Ok(0),
+                            tcp::State::Closed => Err(SyscallErr::ECONNRESET),
+                            _ if !tcp_sock.may_recv() => Ok(0),
+                            _ => Err(SyscallErr::EAGAIN),
+                        }
+                    };
+                    let readable = tcp_sock.can_recv()
+                        || !tcp_sock.may_recv()
+                        || matches!(
+                            tcp_sock.state(),
+                            tcp::State::CloseWait
+                                | tcp::State::Closing
+                                | tcp::State::LastAck
+                                | tcp::State::TimeWait
+                                | tcp::State::Closed
+                        );
+                    (result, readable)
+                })
+            {
+                update_ready_bit(&self.pollee, EPollEvent::EPOLLIN.bits(), ready_after);
+                return ret;
+            }
+            self.invalidate_fast();
+        }
+
         let inner = self.inner.lock();
-        inner.try_recv(buf)
+        let ret = inner.try_recv(buf);
+        drop(inner);
+        update_ready_bit(
+            &self.pollee,
+            EPollEvent::EPOLLIN.bits(),
+            !matches!(ret, Err(SyscallErr::EAGAIN)),
+        );
+        ret
     }
 
     fn try_send(&self, buf: &[u8], _flags: MsgFlags) -> Result<isize, SyscallErr> {
-        NET_INTERFACE.try_poll();
+        let fast = self.fast_key_established();
+        if self.pollee.load(Ordering::Relaxed) & EPollEvent::EPOLLOUT.bits() == 0 {
+            if let Some((_route, ifindex)) = fast {
+                NET_INTERFACE.try_poll_stack(ifindex);
+            } else {
+                NET_INTERFACE.try_poll();
+            }
+        }
         if self.write_shutdown.load(Ordering::Acquire) {
             return Err(SyscallErr::EPIPE);
         }
-        // 非阻塞 connect 后 socket 可能仍在 Connecting 状态，先完成过渡
+
         let is_connecting = {
             let inner = self.inner.lock();
             matches!(&*inner, Inner::Connecting(_))
@@ -602,8 +775,110 @@ impl Socket for TcpSocket {
         if is_connecting {
             let _ = self.try_connect();
         }
+
+        if let Some((route, _ifindex)) = fast {
+            if let Some((ret, ready_after)) =
+                NET_INTERFACE.tcp_routed_socket(route, |tcp_sock| {
+                    let result = if tcp_sock.can_send() {
+                        tcp_sock
+                            .send_slice(buf)
+                            .map(|n| n as isize)
+                            .map_err(|_| SyscallErr::ECONNABORTED)
+                    } else {
+                        match tcp_sock.state() {
+                            tcp::State::Closed => Err(SyscallErr::ECONNRESET),
+                            tcp::State::TimeWait
+                            | tcp::State::Closing
+                            | tcp::State::LastAck => Err(SyscallErr::EPIPE),
+                            _ => Err(SyscallErr::EAGAIN),
+                        }
+                    };
+                    let writable = tcp_sock.can_send()
+                        && !matches!(
+                            tcp_sock.state(),
+                            tcp::State::Closed
+                                | tcp::State::TimeWait
+                                | tcp::State::Closing
+                                | tcp::State::LastAck
+                        );
+                    (result, writable)
+                })
+            {
+                update_ready_bit(&self.pollee, EPollEvent::EPOLLOUT.bits(), ready_after);
+                return ret;
+            }
+            self.invalidate_fast();
+        }
+
         let inner = self.inner.lock();
-        inner.try_send(buf)
+        let ret = inner.try_send(buf);
+        drop(inner);
+        update_ready_bit(
+            &self.pollee,
+            EPollEvent::EPOLLOUT.bits(),
+            !matches!(ret, Err(SyscallErr::EAGAIN)),
+        );
+        ret
+    }
+
+    fn try_recv_user(&self, buf: &mut UserBuffer, flags: MsgFlags) -> Result<isize, SyscallErr> {
+        if self.pollee.load(Ordering::Relaxed) & EPollEvent::EPOLLIN.bits() == 0 {
+            NET_INTERFACE.try_poll();
+        }
+        if self.read_shutdown.load(Ordering::Acquire) {
+            return Ok(0);
+        }
+        let inner = self.inner.lock();
+        let _ = flags;
+        let ret = inner
+            .recv_to_user(buf, 0, buf.len())
+            .map(|n| n as isize);
+        drop(inner);
+        update_ready_bit(
+            &self.pollee,
+            EPollEvent::EPOLLIN.bits(),
+            !matches!(ret, Err(SyscallErr::EAGAIN)),
+        );
+        ret
+    }
+
+    fn try_send_user(&self, buf: &UserBuffer, flags: MsgFlags) -> Result<isize, SyscallErr> {
+        if self.pollee.load(Ordering::Relaxed) & EPollEvent::EPOLLOUT.bits() == 0 {
+            NET_INTERFACE.try_poll();
+        }
+        if self.write_shutdown.load(Ordering::Acquire) {
+            return Err(SyscallErr::EPIPE);
+        }
+        let is_connecting = {
+            let inner = self.inner.lock();
+            matches!(&*inner, Inner::Connecting(_))
+        };
+        if is_connecting {
+            let _ = self.try_connect();
+        }
+        let total = buf.len().min(crate::hal::IO_CHUNK_SIZE);
+        if total == 0 {
+            let inner = self.inner.lock();
+            let ret = inner.try_send(&[]);
+            drop(inner);
+            update_ready_bit(
+                &self.pollee,
+                EPollEvent::EPOLLOUT.bits(),
+                !matches!(ret, Err(SyscallErr::EAGAIN)),
+            );
+            return ret;
+        }
+        let mut tmp = alloc::vec![0u8; total];
+        let n = buf.read_at(0, &mut tmp);
+        let inner = self.inner.lock();
+        let ret = inner.try_send(&tmp[..n]);
+        drop(inner);
+        update_ready_bit(
+            &self.pollee,
+            EPollEvent::EPOLLOUT.bits(),
+            !matches!(ret, Err(SyscallErr::EAGAIN)),
+        );
+        ret
     }
 
     fn socket_r_ready(&self) -> bool {
@@ -678,6 +953,7 @@ unsafe impl Sync for TcpSocket {}
 
 impl Drop for TcpSocket {
     fn drop(&mut self) {
+        self.invalidate_fast();
         {
             let inner = self.inner.lock();
             let state_name = match &*inner {
