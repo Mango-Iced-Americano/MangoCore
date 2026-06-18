@@ -2,6 +2,51 @@
 
 ---
 
+## 2026-06-18
+
+### perf(net): UserBuffer zero-copy for Stream+Datagram non-blocking send/recv
+
+**涉及文件：**
+- `os/src/net/socket/mod.rs` — Socket trait 新增 `try_recv_user`、`try_send_user`、`try_sendmsg_user` 默认实现（fallback 到 scratch buffer + try_recv/try_send）
+- `os/src/net/socket/inet/stream/mod.rs` — TcpSocket 覆写 `try_recv_user`（委托 Inner::recv_to_user）、`try_send_user`（read_at → Inner::try_send），新增 `use crate::mm::UserBuffer`
+- `os/src/net/syscall/sendto.rs` — Stream/Datagram non-blocking 使用 `UserBufferReader` + `try_send_user`/`try_sendmsg_user`；blocking 路径保留 kbuf+copy_from_user_array；Raw 保持 kbuf
+- `os/src/net/syscall/recvfrom.rs` — Stream non-blocking 新增 `UserBufferWriter` → `try_recv_user` 快速路径（early return），Datagram/blocking 保持 kbuf
+- `os/src/net/syscall/sendmsg.rs` — `send_stream_chunked` 拆分为 non-blocking 零拷贝路径（try_sendmsg_user 直接传 UserBuffer）和 blocking kbuf 路径
+- `os/src/net/syscall/recvmsg.rs` — Stream non-blocking+非 peek 新增 `writer_buffer_at` → `try_recv_user` 快速路径，其余保持 kbuf
+- `os/src/task/manager.rs` — `WAIT_IO_FALLBACK_MS` 从 10 改为 1
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：**
+- UserBuffer 仅在 non-blocking 路径使用（不跨 sleep points）
+- Datagram recv 保持 kbuf（无 try_recvmsg_user trait method）
+- 未引入 PollReason/poll_cooperate/WaitResult 等新抽象，保持现有 wait_io/WaitQueue::wait_until_interruptible 模式
+- TCP try_recv_user 复用已有的 Inner::recv_to_user 方法，SelfConnected 直接出队写 UserBuffer，其他状态走 try_recv+write_at
+
+### fix(net): unconditional listener accept scan, remove poll from accept closure
+
+**涉及文件：**
+- `os/src/net/socket/mod.rs` — 新增 `TCP_LISTENERS` 全局注册表、`wake_tcp_accept_waiters()` 无条件监听扫描函数
+- `os/src/net/socket/inet/stream/mod.rs` — 新增 `TcpSocket::register_as_listener()`（通过 TCP_SOCKETS 指针比对查找 Weak）、`refresh_accept_ready_after_poll()`（检查 backlog 并唤醒 accept waiters）；`listen()` 成功后调用 register_as_listener；`accept()` 内删除 `NET_INTERFACE.poll()` 调用
+- `os/src/net/socket/inet/stream/inner.rs` — `Listening` 新增 `has_pending_connection()` 检查 backlog handle 是否有 Established/CloseWait 连接
+- `os/src/net/config.rs` — `poll_once()` 中无条件调用 `wake_tcp_accept_waiters()`（不依赖 smoltcp progressed 标志）
+- `os/src/net/mod.rs` — 重新导出 `wake_tcp_accept_waiters`、`TCP_LISTENERS`
+- `os/src/net/syscall/accept.rs` — 重构 `sys_accept`：`NET_INTERFACE.try_poll()` 移至 WaitQueue 闭包外部（遵循 harness-patterns 规则），闭包内只做 accept
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ❌ (toolchain missing — linker `loongarch64-linux-gnu-gcc` not found in env)
+
+**备注：**
+- 根因：smoltcp SYN 处理不设置 `progressed=true`，导致 `should_scan` 守卫跳过 TCP 事件收集，首个客户端连接永久阻塞 accept
+- Harness-patterns 规则：WaitQueue 闭包内不得 poll，否则 `notify_events_all_if_unlocked` 在队列锁持有时静默丢弃唤醒
+- `register_as_listener` 通过指针比对在 TCP_SOCKETS 中查找 Weak（避免需要 `Arc<Self>` 引用）
+- la64 编译失败为环境缺少交叉编译工具链，非代码问题
+
+---
+
 ## 2026-06-16
 
 ### perf(fs): 多维度降低 I/O 固定开销 — flags/mode 去锁、stream offset 跳过、dev/null/zero UserBuffer 直连、PageCache 单页 fast path、readv/writev/tmpfs 接入 UserBuffer

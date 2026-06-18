@@ -154,6 +154,15 @@
 - **修复**: 非阻塞路径 `try_xxx` 前先调用 `NET_INTERFACE.try_poll()`
 - **相关文件**: `os/src/net/syscall/`
 
+### WaitQueue 闭包内 poll 导致唤醒丢失（accept 永久阻塞）
+- **根因**: `WaitQueue::wait_until_interruptible()` 的 condition 闭包在队列锁持有时执行；如果在闭包内调用 `NET_INTERFACE.poll()`，轮询路径中 `notify_events_all_if_unlocked` 会因为队列锁已持有而静默丢弃唤醒，导致阻塞的 waiter 永久睡眠。TCP accept() 在闭包内 poll 会错过首个 SYN 连接。
+- **修复**: 
+  1. `NET_INTERFACE.try_poll()` 必须在 WaitQueue 闭包外部调用（pre-poll）
+  2. 使用无条件监听扫描（`wake_tcp_accept_waiters()`）在每次 poll 后唤醒 accept waiters，不依赖 smoltcp 的 poll 返回值
+  3. WaitQueue 闭包内只做纯状态检查（accept），不做任何会触发唤醒的操作
+- **教训**: 所有 WaitQueue condition 闭包必须是无副作用的纯检查函数；任何可能触发唤醒操作（poll、dispatch、notification）都必须在闭包外部执行
+- **相关文件**: `os/src/net/syscall/accept.rs`, `os/src/net/config.rs`, `os/src/net/socket/inet/stream/mod.rs`
+
 ## 错误码对齐（Linux 语义）
 
 - setsockopt 未知 level → **ENOPROTOOPT(92)**，不是 EOPNOTSUPP(95)
