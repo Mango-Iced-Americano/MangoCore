@@ -534,8 +534,17 @@ pub trait Socket: Send + Sync {
         dest: Option<Endpoint>,
         flags: MsgFlags,
     ) -> Result<isize, SyscallErr> {
-        let _ = dest;
-        self.try_send_user(buf, flags)
+        if let Some(d) = dest {
+            let total = buf.len().min(65536);
+            if total == 0 {
+                return self.try_sendmsg(&[], Some(d), flags);
+            }
+            let mut scratch = alloc::vec![0u8; total];
+            let n = buf.read(&mut scratch);
+            self.try_sendmsg(&scratch[..n], Some(d), flags)
+        } else {
+            self.try_send_user(buf, flags)
+        }
     }
 
     fn push_netlink_message(&self, _data: Vec<u8>) -> Result<(), SyscallErr> {
