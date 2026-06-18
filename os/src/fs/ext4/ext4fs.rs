@@ -1,5 +1,6 @@
 #![allow(unused)]
 use core::arch::asm;
+use core::convert::TryFrom;
 use core::ptr::addr_of;
 
 use super::block_group::{Block, Ext4BlockGroup};
@@ -16,6 +17,7 @@ use crate::hal::BLOCK_SZ;
 use alloc::{string::String, sync::Arc, sync::Weak, vec::Vec};
 use alloc::collections::BTreeMap;
 use layout::Ext4OSInode;
+use super::dir_cache::Ext4DirectoryLookupCache;
 use spin::Mutex;
 type SuperBlock = Ext4Superblock;
 
@@ -66,6 +68,11 @@ pub struct Ext4FileSystem {
     pub(super) meta_batch_active: core::sync::atomic::AtomicBool,
     pub(super) meta_batch_sb: spin::Mutex<Option<super::superblock::Ext4Superblock>>,
     pub(super) meta_batch_bgs: spin::Mutex<alloc::collections::BTreeMap<u32, super::block_group::Ext4BlockGroup>>,
+
+    // ── Directory lookup cache ──
+    // Per-directory name→ino cache to avoid O(n) linear scans in dir_find_entry.
+    // Keyed by parent_ino, version-checked on lookup, invalidated on directory modification.
+    pub(super) dir_lookup_cache: Ext4DirectoryLookupCache,
 }
 
 /// 全局 Ext4FileSystem 注册表（用于 sync / reclaim / stats）。
@@ -247,6 +254,7 @@ impl Ext4FileSystem {
                 meta_batch_active: core::sync::atomic::AtomicBool::new(false),
                 meta_batch_sb: spin::Mutex::new(None),
                 meta_batch_bgs: spin::Mutex::new(alloc::collections::BTreeMap::new()),
+                dir_lookup_cache: Ext4DirectoryLookupCache::new(),
             };
             fs
         });
@@ -577,6 +585,10 @@ impl layout::Ext4OSInode {
     }
 
     fn bump_dir_version(&self) -> u64 {
+        // Synchronize FS-level directory version for dir_lookup_cache coherence
+        let ino = self.inode.lock().inode_num;
+        self.ext4fs.dir_lookup_cache.bump_version(ino);
+        // Existing per-inode version bump
         self.dir_version
             .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
             .wrapping_add(1)
@@ -1020,34 +1032,129 @@ impl IndexNode for layout::Ext4OSInode {
             }
         }
 
-        // Phase 4: record version BEFORE disk lookup for stable recheck
+        // Phase 3.5: FS-level directory lookup cache (name → ino)
+        // Unlike children Weak cache, this stores ino numbers keyed by version,
+        // surviving inode object eviction. Lock is held only for BTreeMap ops.
+        {
+            let version = self.ext4fs.dir_lookup_cache.current_version(inode_num);
+            if let Some(cached_ino) = self.ext4fs.dir_lookup_cache.lookup(inode_num, name, version) {
+                // Cache hit — resolve inode number outside cache lock
+                let child_inode = self.ext4fs.canonical_inode_object(cached_ino);
+                // Recheck: if version changed during resolution, retry once
+                let current_version = self.ext4fs.dir_lookup_cache.current_version(inode_num);
+                if current_version == version {
+                    super::counters::inc_counter!(super::counters::DIR_CACHE_HIT);
+                    return Ok(child_inode);
+                }
+                // Version changed — bounded retry (once)
+                if let Some(cached_ino2) = self.ext4fs.dir_lookup_cache.lookup(inode_num, name, current_version) {
+                    super::counters::inc_counter!(super::counters::DIR_CACHE_HIT);
+                    return Ok(self.ext4fs.canonical_inode_object(cached_ino2));
+                }
+                // Still mismatch — fall through to disk scan
+            }
+            super::counters::inc_counter!(super::counters::DIR_CACHE_MISS);
+        }
+
         let lookup_version = self.dir_version.load(core::sync::atomic::Ordering::Relaxed);
 
+        // Disk scan with lazy full-index for large directories
+        let pre_scan_version = self.ext4fs.dir_lookup_cache.current_version(inode_num);
         let mut result = Ext4DirSearchResult::new(Ext4DirEntry::default());
-        self.ext4fs
-            .dir_find_entry(inode_num, name, &mut result)
-            .map_err(|_| {
-                // Phase 4: insert negative dentry only if dir_version unchanged during lookup
+
+        // Check directory size to decide: full index vs linear scan
+        let parent_ref = self.ext4fs.get_inode_ref(inode_num);
+        let total_blocks = parent_ref.inode.size() as usize / self.ext4fs.block_size;
+
+        // HOTFIX: disable eager full-index scan — it was causing 2.7× fork+/bin/sh regression.
+        // Reason: first miss on large dirs scanned ALL blocks + allocated Vec/BTreeMap,
+        // then the next mutation invalidated the index (bump_version → cache cleared).
+        // For unique-filename creates, this was pure overhead with zero cache reuse.
+        //
+        // Adaptive strategy (future): full-index only after N misses on same version,
+        // with cap on collected entries to prevent OOM. Currently disabled.
+        let child_ino = if total_blocks >= 10000 /* disabled: was >=2 */ {
+            // Large directory: scan ALL blocks, build complete name→ino index
+            // NOTE: this path is DISABLED pending adaptive re-enablement.
+            let mut all_entries: alloc::vec::Vec<(alloc::string::String, u32)> = alloc::vec::Vec::new();
+            let mut found_ino: Option<u32> = None;
+            let mut scanned = 0u64;
+
+            for iblock in 0..total_blocks {
+                let fblock = match self.ext4fs.get_pblock_idx(&parent_ref, iblock as u32) {
+                    Ok(fb) => fb,
+                    Err(_) => continue,
+                };
+                let ext4block = self.ext4fs.load_metadata_block(fblock as usize);
+                super::counters::inc_counter!(super::counters::DIR_BLOCK_READ);
+                let mut offset = 0usize;
+                while offset < self.ext4fs.block_size - core::mem::size_of::<super::direntry::Ext4DirEntryTail>() {
+                    if let Ok(de) = super::direntry::Ext4DirEntry::try_from(&ext4block.data[offset..]) {
+                        if !de.unused() {
+                            scanned += 1;
+                            let entry_name = de.get_name_str();
+                            if entry_name == name {
+                                found_ino = Some(de.inode);
+                            }
+                            all_entries.push((alloc::string::String::from(entry_name), de.inode));
+                        }
+                        let entry_len = de.entry_len() as usize;
+                        if entry_len < 8 { break; }
+                        offset += entry_len;
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            // Track scanned entries count (FIX5: use actual count, not just increment)
+            super::counters::DIR_CACHE_SCANNED_ENTRIES.fetch_add(scanned, core::sync::atomic::Ordering::Relaxed);
+            // Track max scanned entries
+            {
+                let current_max = super::counters::DIR_CACHE_SCANNED_MAX.load(core::sync::atomic::Ordering::Relaxed);
+                if scanned > current_max {
+                    super::counters::DIR_CACHE_SCANNED_MAX.store(scanned, core::sync::atomic::Ordering::Relaxed);
+                }
+            }
+
+            // Build full index (if version unchanged)
+            let post_scan_version = self.ext4fs.dir_lookup_cache.current_version(inode_num);
+            if post_scan_version == pre_scan_version && !all_entries.is_empty() {
+                self.ext4fs.dir_lookup_cache.build_full_index(inode_num, all_entries, post_scan_version);
+                super::counters::inc_counter!(super::counters::DIR_CACHE_FULL_INDEX_BUILD);
+            }
+
+            found_ino
+        } else {
+            // Small directory: normal linear scan
+            super::counters::inc_counter!(super::counters::DIR_CACHE_LINEAR_SCAN);
+            let mut found: Option<u32> = None;
+            if let Ok(_) = self.ext4fs.dir_find_entry(inode_num, name, &mut result) {
+                found = Some(result.dentry.inode);
+            }
+            found
+        };
+
+        match child_ino {
+            Some(ino) => {
+                // Found — insert into cache if version unchanged
+                let current_version = self.ext4fs.dir_lookup_cache.current_version(inode_num);
+                if current_version == pre_scan_version {
+                    self.ext4fs.dir_lookup_cache.insert(inode_num, name, ino, current_version);
+                }
+            }
+            None => {
+                // Not found — use existing negative dentry logic
                 let current_version = self.dir_version.load(core::sync::atomic::Ordering::Relaxed);
                 if current_version == lookup_version {
                     self.insert_negative_dentry(name, current_version);
                     super::counters::inc_counter!(super::counters::NEGATIVE_DENTRY_INSERT);
                 }
-                SyscallErr::ENOENT
-            })?;
-        let child_ino = result.dentry.inode;
-
-        // Phase 4: positive dentry stable recheck — if dir_version changed during disk lookup,
-        // the entry we found may be stale (concurrent unlink+create race). Retry once.
-        {
-            let current_version = self.dir_version.load(core::sync::atomic::Ordering::Relaxed);
-            if current_version != lookup_version {
-                // Version changed — potential race. Fall through to retry by recursing.
-                // Simple approach: clear the stale result and let caller retry.
-                // For the hot path, just accept and insert; version mismatch is rare.
-                // Full retry would need a loop with bounded attempts.
+                return Err(SyscallErr::ENOENT);
             }
         }
+
+        let child_ino = child_ino.unwrap(); // Safe: we returned Err above on None
 
         // 通过 inode_objects canonicalize: 同一 ino 返回同一 VFS inode object
         let child_inode = self.ext4fs.canonical_inode_object(child_ino);
@@ -1237,6 +1344,10 @@ impl IndexNode for layout::Ext4OSInode {
                 old_target.inode.set_links_count(links - 1);
                 self.ext4fs.write_back_inode(&mut old_target);
             }
+            // FIX3: if overwriting a directory, remove its dir lookup cache
+            if old_target.inode.is_dir() {
+                self.ext4fs.dir_lookup_cache.remove_dir_cache(old_target_num);
+            }
         }
 
         if old_parent_num == new_parent_num {
@@ -1245,6 +1356,9 @@ impl IndexNode for layout::Ext4OSInode {
             let mut parent_ref2 = self.ext4fs.get_inode_ref(old_parent_num);
             self.ext4fs.dir_remove_entry(&mut parent_ref2, old_name).map_err(|_| SyscallErr::EIO)?;
             let v = self.bump_dir_version();
+            // Invalidate dir cache for old_name and new_name
+            self.ext4fs.dir_lookup_cache.invalidate_name(old_parent_num, old_name);
+            self.ext4fs.dir_lookup_cache.invalidate_name(old_parent_num, new_name);
             self.clear_negative_dentry(new_name);
             self.insert_negative_dentry(old_name, v);
             let mut children = self.children.lock();
@@ -1275,8 +1389,12 @@ impl IndexNode for layout::Ext4OSInode {
             let child_weak = old_children.remove(old_name);
             drop(old_children);
             let old_v = self.bump_dir_version();
+            // Invalidate dir cache for old_name on old parent
+            self.ext4fs.dir_lookup_cache.invalidate_name(old_parent_num, old_name);
             self.insert_negative_dentry(old_name, old_v);
             new_parent_ext4.bump_dir_version();
+            // Invalidate dir cache for new_name on new parent
+            new_parent_ext4.ext4fs.dir_lookup_cache.invalidate_name(new_parent_num, new_name);
             new_parent_ext4.clear_negative_dentry(new_name);
             if child_weak.is_some() { super::counters::inc_counter!(super::counters::DIR_CHILDREN_REMOVE); }
             let mut new_children = new_parent_ext4.children.lock();
@@ -1381,6 +1499,8 @@ impl IndexNode for layout::Ext4OSInode {
 
         // Phase 4: after successful unlink
         let v = self.bump_dir_version();
+        // Invalidate dir cache entry for this name
+        self.ext4fs.dir_lookup_cache.invalidate_name(parent_num, name);
         self.insert_negative_dentry(name, v);
 
         Ok(())
@@ -1457,6 +1577,10 @@ impl IndexNode for layout::Ext4OSInode {
 
         // Phase 4: after successful rmdir
         let v = self.bump_dir_version();
+        // Invalidate dir cache entry for this name
+        self.ext4fs.dir_lookup_cache.invalidate_name(parent_num, name);
+        // Remove the deleted directory's cache
+        self.ext4fs.dir_lookup_cache.remove_dir_cache(child_ino);
         self.insert_negative_dentry(name, v);
         if let Some(child_obj) = self.ext4fs.lookup_inode_object(child_ino) {
             if let Some(osi) = child_obj.as_any_ref().downcast_ref::<layout::Ext4OSInode>() {
@@ -1769,6 +1893,11 @@ impl Ext4FileSystem {
             }
         }
         total
+    }
+
+    /// 淘汰目录查找缓存中冷条目（LRU 策略）
+    pub fn evict_dir_cache(&self) {
+        self.dir_lookup_cache.evict_if_needed();
     }
 
     /// 遍历所有 alive PageCache，回收最多 max_pages 个干净页

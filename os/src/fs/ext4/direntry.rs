@@ -727,9 +727,10 @@ impl Ext4FileSystem {
             parent.inode.mode
         );
         // let r = self.dir_find_entry(parent.inode_num, path, &mut result)?;
-        let r = self.dir_find_entry(parent.inode_num, path, &mut result);
+        let _r = self.dir_find_entry(parent.inode_num, path, &mut result)
+            .map_err(|_| Errno::EIO as isize)?;
 
-        log::debug!("[dir_remove_entry] After dir_find_entry. r: {:?}", r);
+        log::debug!("[dir_remove_entry] After dir_find_entry. r: {:?}", _r);
         let mut ext4block = self.load_metadata_block(result.pblock_id);
         super::counters::inc_counter!(super::counters::DIR_BLOCK_READ);
 

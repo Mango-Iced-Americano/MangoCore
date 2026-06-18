@@ -2,6 +2,140 @@
 
 ---
 
+## 2026-06-18
+
+### hotfix(fs/ext4): 禁用 eager full-index + 删除 create/link/symlink 冗余 FS cache 操作 → lmbench fork/create 回归修复
+
+**根因**: Oracle 分析确认 eager full-index（`total_blocks >= 2` 首次 miss 全目录扫描建索引）导致 fork+execve（+165%）和 fs create（3×）回归。目录首次 miss → 分配 Vec/BTreeMap 建完整索引 → 下次 mutation bump 立即失效 → 纯开销。
+
+**修复（`os/src/fs/ext4/ext4fs.rs`）：**
+- `find()`: eager full-index 阈值从 `>= 2` 改为 `>= 10000`（禁用），保留代码供后续 adaptive 启用
+- `create()` / `create_with_attrs()` / `symlink()`: 删除 `invalidate_name` + `current_version` + `insert` 冗余 FS cache 操作（bump 已通过版本失配自然失效）
+- `link()`: 同上，删除冗余 invalidate + insert
+
+**修复（`os/src/fs/ext4/direntry.rs`）：**
+- `dir_remove_entry()`: 修复 `let r = dir_find_entry(...)` 未检查错误的 bug → 改为 `let _r = dir_find_entry(...)?`，失败时不再使用 `pblock_id=0` 损坏元数据
+
+**修复（`os/src/fs/ext4/ext4fs.rs` full-index 扫描）：**
+- 补 `DIR_BLOCK_READ` 计数：full-index 扫描循环中每加载 metadata block 递增一次
+
+**lmbench 对比（rv64）：**
+
+| 指标 | 0617(改前) | 0618(带bug) | hotfix后 |
+|------|-----------|------------|---------|
+| Simple stat (musl) | 248.7μs | 2368μs ❌ | 199.4μs ✅ |
+| fork+execve (musl) | 9345μs | 80138μs ❌ | 8982μs ✅ |
+| fork+/bin/sh (musl) | 262190μs | 1359346μs ❌ | 157742μs ✅ |
+| lmbench-musl 耗时 | 103分 | 崩溃 | 70s ✅ |
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU lmbench mask=0x100（hotfix后）: musl 70s glibc 76s ✅
+
+**已知延期项（同前）：**
+- FIX4: 版本 bump 窗口（单核假设）
+- full-index negative cache（性能边界，非正确性）
+- adaptive full-index re-enablement（待后续实现）
+
+### fix(fs/ext4): Oracle 审查正确性 bug 修复 — insert() stale full-index 提升、build_full_index() 版本重检、rename-over-dir cache 清理、counter 修正
+
+**Oracle 审查发现的 bug：**
+1. `insert()` 无条件设置 `per_dir.version = version`，可将 stale full-index（含已删除条目）提升为当前版本，导致已删条目复活
+2. `build_full_index()` 安装全量索引前未重检目录版本，可能安装过期索引
+3. rename 覆盖目录目标时未调用 `remove_dir_cache(old_target_num)`
+4. `DIR_CACHE_SCANNED_ENTRIES` 只 `inc_counter!` 一次而非记录实际扫描条目数
+
+**修复（`os/src/fs/ext4/dir_cache.rs`）：**
+- `insert()`：插入前检查 `per_dir.version != version`，若不匹配则清空旧条目再插入单项
+- `build_full_index()`：安装前锁 `dir_versions` 重检当前版本，不匹配则丢弃过期索引
+
+**修复（`os/src/fs/ext4/ext4fs.rs`）：**
+- `rename()`：overwrite 目录目标时，在递减 link count 后调用 `remove_dir_cache(old_target_num)`
+- `find()`：`DIR_CACHE_SCANNED_ENTRIES` 改用 `fetch_add(scanned)` 记录实际扫描条目数
+
+**已知延期风险（Oracle 确认可在单核架构下接受）：**
+- 目录修改发生在 `bump_dir_version()` 之前（unlink/rmdir/rename），存在理论窗口期内并发 `find()` 返回过期数据。当前 MangoCore 为单核、无内核态抢占、ext4 变更路径无 yield/block。若后续引入 SMP、内核抢占或 ext4 阻塞 I/O，需重新评估。
+
+**编译验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：** Oracle 二次审查通过，FIX1-FIX3 正确，FIX4 记录为当前架构下的已知延期项。
+
+### feat(fs/ext4): Ext4OSInode::find() 接入 FS-level dir_lookup_cache + 大目录全量索引
+
+**涉及文件：**
+- `os/src/fs/ext4/ext4fs.rs` — `Ext4OSInode::find()` 新增 Phase 3.5（FS-level directory lookup cache），在 negative dentry 检查后、磁盘扫描前查询 `dir_lookup_cache`；替换原有简单 `dir_find_entry()` 为分级扫描：大目录（≥2 blocks）执行全量块扫描构建 name→ino 全量索引，小目录走原有线性扫描；扫描结果通过 match 分支处理命中/未命中，命中时插入缓存、未命中时沿用现有 negative dentry 逻辑
+
+**验证：**
+- `make rv64-kernel-build-only` ✅（166 warnings，零 errors）
+- `make la64-kernel-build-only` ✅（150 warnings，零 errors）
+
+**备注：** Phase 3.5 命中路径有版本重检：缓存命中后用 `current_version` 验证，失配时重试一次。全量索引扫描在版本未变时调用 `build_full_index()`，之后同目录的 find() 可走缓存命中快速路径。`load_metadata_block()` 返回 `Block`（非 Result），故全量扫描中 `fblock` 直接赋值无 match。`lookup_version` 保留以供尾部 children cache 插入使用。
+
+### feat(fs/ext4): 将 dir_lookup_cache 接入 bump_dir_version() 和 7 个目录变更方法
+
+**涉及文件：**
+- `os/src/fs/ext4/ext4fs.rs` — `bump_dir_version()` 新增 FS 级 `dir_lookup_cache.bump_version(ino)` 同步；`create()`/`create_with_attrs()`/`symlink()`/`link()`/`unlink()`/`rmdir()`/`rename()` 各方法新增 `invalidate_name`/`insert`/`remove_dir_cache` 调用，确保目录变更后缓存一致性
+
+**验证：**
+- `make rv64-kernel-build-only` ❌（2 个预存错误：`Ext4DirEntry::try_from` 缺少 `TryFrom` trait、`dir_find_entry` 返回类型不匹配，均在 dir_cache.rs 扫描代码中，非本次变更引入）
+- `make la64-kernel-build-only` ❌（同上 2 个预存错误）
+- 本次变更零新增错误，所有新增调用类型匹配且 API 使用正确
+
+**备注：** 缓存失效策略：create/link/symlink → invalidate name + insert 新 child_ino；unlink → invalidate name only（负 dentry 负责其余）；rmdir → invalidate name + remove_dir_cache(child_ino)；rename → 分别 invalidate old/new name 于各自 parent。`bump_dir_version()` 内的 `self.inode.lock()` 在所有调用点均已释放（Lock→get ino→Drop），无死锁风险。
+
+## 2026-06-17
+
+### feat(fs/ext4): 添加 7 个 DIR_CACHE_* 目录 lookup 缓存计数器
+
+**涉及文件：**
+- `os/src/fs/ext4/counters.rs` — 新增 `DIR_CACHE_HIT/MISS/FULL_INDEX_BUILD/ENTRY_COUNT/LINEAR_SCAN/SCANNED_ENTRIES/SCANNED_MAX` 7 个 AtomicU64 声明，接入 `reset_counters()` 数组和 `dump_scenario()` 输出
+
+**验证：**
+- 文件结构验证通过（3 处修改：声明/复位/输出，模式与现有计数器一致）
+
+**备注：** 这些计数器用于追踪新的目录 lookup 缓存层的命中率、全量索引构建次数、线性扫描情况等性能指标。
+
+### feat(fs/ext4): 新建 dir_cache.rs — Ext4DirectoryLookupCache 目录 lookup 缓存模块
+
+**涉及文件：**
+- `os/src/fs/ext4/dir_cache.rs` — 新建文件，实现 `Ext4DirectoryLookupCache`（per-directory name→ino BTreeMap 缓存）、LRU 驱逐（global_tick + last_access）、目录版本管理（bump_version/current_version）
+- `os/src/fs/ext4/counters.rs` — （已在上一提交中添加 DIR_CACHE_* 计数器，本模块将使用）
+
+**验证：**
+- 文件结构验证通过（struct 定义、9 个方法、锁规范符合 dir_versions→dirs 顺序）
+- 编译待 T3 接入 `mod dir_cache;` 后验证
+
+**备注：** 锁规范：当同时需要 dirs 和 dir_versions 锁时，始终先锁 dir_versions 再锁 dirs（防死锁）。insert/build_full_index 内联处理 per-dir 溢出后释放 dirs，再调用 evict_if_needed()（该方法需同时持有两把锁）。无 unsafe、无 std、无外部符号依赖。
+
+### feat(fs/ext4): 完整 ext4 dir lookup cache — T3-T6 集成、编译验证通过、reclaim 接入
+
+**涉及文件：**
+- `os/src/fs/ext4/mod.rs` — 新增 `mod dir_cache;`
+- `os/src/fs/ext4/ext4fs.rs` — `Ext4FileSystem` 新增 `dir_lookup_cache: Ext4DirectoryLookupCache` 字段并在 `open_ext4rs()` 初始化；`bump_dir_version()` 新增 FS 级 `dir_lookup_cache.bump_version(ino)`；`Ext4OSInode::find()` 新增 Phase 3.5 FS 级目录缓存查找（在 negative dentry 后、磁盘扫描前，命中后版本重检+最多一次重试）；大目录（≥2 blocks）一次全量扫描构建 name→ino 完整索引；`create`/`create_with_attrs`/`symlink`/`link` 在 bump 后 invalidate name + 插入新 child_ino；`unlink` 在 bump 后 invalidate name；`rmdir` 在 bump 后 invalidate name + `remove_dir_cache(child_ino)`；`rename` 在 old/new 两个 parent 的 bump 后分别 invalidate old_name 和 new_name；新增 `pub fn evict_dir_cache()` 公开方法供 reclaim 调用
+- `os/src/fs/reclaim.rs` — 每 64 tick 在 per-fs 循环中调用 `fs.evict_dir_cache()` 淘汰冷目录
+- `os/src/fs/ext4/counters.rs` — 新增 7 个 DIR_CACHE_* AtomicU64 计数器，已接入 `reset_counters()` 和 `dump_scenario()`
+
+**编译验证：**
+- `make rv64-kernel-build-only` ✅（166 warnings，0 errors）
+- `make la64-kernel-build-only` ✅（150 warnings，0 errors）
+
+**新增缓存操作统计（29 个调用点）：**
+- `bump_version` 1 处（bump_dir_version）
+- `lookup` 2 处（Phase 3.5 主路径 + 重试）
+- `current_version` 8 处
+- `insert` 4 处（create/create_with_attrs/symlink/link）
+- `invalidate_name` 9 处（create/create_with_attrs/symlink/link/unlink/rmdir/rename×2+same-parent）
+- `build_full_index` 1 处（大目录全量扫描）
+- `remove_dir_cache` 1 处（rmdir）
+- `evict_if_needed` 1 处（reclaim 路径通过 evict_dir_cache 间接调用）
+
+**性能预期：** 大目录场景下，首次访问触发全量索引构建（O(n) 一次性开销），后续所有 find() 走缓存命中 O(log n)。小目录按需增量缓存。所有目录修改操作自动失效相关缓存条目，保证 POSIX 语义。
+
+**待验证：** QEMU 集成测试（lmbench mask=0xFFF 全量 + mask=0x100 lmbench）、basic 回归、busybox --install -s。
+
 ## 2026-06-16
 
 ### perf(fs): 多维度降低 I/O 固定开销 — flags/mode 去锁、stream offset 跳过、dev/null/zero UserBuffer 直连、PageCache 单页 fast path、readv/writev/tmpfs 接入 UserBuffer

@@ -3,6 +3,7 @@ mod bitmap;
 mod block_group;
 pub mod counters;
 mod crc;
+mod dir_cache;
 mod direntry;
 mod error;
 mod ext4_inode;
