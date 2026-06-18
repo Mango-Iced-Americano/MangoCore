@@ -477,7 +477,7 @@ fn timeval_to_timespec(value: TimeVal) -> TimeSpec {
 }
 
 fn timespec_to_timeval(value: TimeSpec) -> TimeVal {
-    TimeVal::from_us(value.to_ns() / 1000)
+    TimeVal::from_us((value.to_ns_saturating() / 1000) as usize)
 }
 
 fn valid_posix_timer_clock(clock_id: usize) -> bool {
@@ -520,11 +520,11 @@ fn posix_timer_deadline_after_absolute_overrun(
     interval: TimeSpec,
     clock_now: TimeSpec,
 ) -> (TimeSpec, usize) {
-    let interval_ns = interval.to_ns().max(1);
-    let elapsed_ns = clock_now.to_ns().saturating_sub(value.to_ns());
+    let interval_ns = interval.to_ns_saturating().max(1) as usize;
+    let elapsed_ns = (clock_now.to_ns_saturating() as usize)
+        .saturating_sub(value.to_ns_saturating() as usize);
     let expirations = 1usize.saturating_add(elapsed_ns / interval_ns);
-    let next_clock_ns = value
-        .to_ns()
+    let next_clock_ns = (value.to_ns_saturating() as usize)
         .saturating_add(expirations.saturating_mul(interval_ns));
     let duration = timespec_saturating_sub(TimeSpec::from_ns(next_clock_ns), clock_now);
     let deadline = TimeSpec::now() + duration;

@@ -460,7 +460,9 @@ impl Vma {
                 return Err(err);
             }
         };
-        if Arc::strong_count(&old_frame) == 1 {
+        // cow_source_frame() returns a cloned Arc, so a page owned only by this
+        // VMA has two strong refs here: the VMA entry and this local handle.
+        if Arc::strong_count(&old_frame) <= 2 {
             let old_ppn = old_frame.ppn;
             UserMapper::new(page_table).set_user_flags(vpn, self.map_perm)?;
             Ok(old_ppn)

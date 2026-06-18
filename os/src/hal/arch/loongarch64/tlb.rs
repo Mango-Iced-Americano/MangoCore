@@ -83,10 +83,26 @@ pub fn tlb_invalidate() {
 }
 #[inline(always)]
 pub fn tlb_invalidate_page(vpn: VirtPageNum) {
+    // INVTLB_ADDR_GFALSE_AND_ASID requires the target ASID in rj.
+    let vaddr = (vpn.0 & !1) << PAGE_SIZE_BITS;
+    let asid = current_asid() as usize;
+    unsafe {
+        asm!(
+            "invtlb 0x5, {asid}, {vaddr}",
+            asid = in(reg) asid,
+            vaddr = in(reg) vaddr,
+            options(nostack)
+        );
+    }
+    crate::task::perf::record_tlb_page();
+}
+#[inline(always)]
+pub fn tlb_invalidate_global_page(vpn: VirtPageNum) {
+    // INVTLB_ADDR_GTRUE_OR_ASID with ASID 0 covers global kernel mappings.
     let vaddr = (vpn.0 & !1) << PAGE_SIZE_BITS;
     unsafe {
         asm!(
-            "invtlb 0x5, $zero, {vaddr}",
+            "invtlb 0x6, $zero, {vaddr}",
             vaddr = in(reg) vaddr,
             options(nostack)
         );

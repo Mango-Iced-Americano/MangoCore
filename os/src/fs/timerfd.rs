@@ -98,13 +98,12 @@ impl TimerFd {
             return;
         }
 
-        let interval_ns = inner.interval.to_ns().max(1);
-        let elapsed_ns = now.to_ns().saturating_sub(deadline.to_ns());
+        let interval_ns = inner.interval.to_ns_saturating().max(1) as usize;
+        let deadline_ns = deadline.to_ns_saturating() as usize;
+        let elapsed_ns = (now.to_ns_saturating() as usize).saturating_sub(deadline_ns);
         let count = 1usize.saturating_add(elapsed_ns / interval_ns);
         inner.expirations = inner.expirations.saturating_add(count as u64);
-        let next_ns = deadline
-            .to_ns()
-            .saturating_add(count.saturating_mul(interval_ns));
+        let next_ns = deadline_ns.saturating_add(count.saturating_mul(interval_ns));
         inner.deadline = Some(TimeSpec::from_ns(next_ns));
     }
 

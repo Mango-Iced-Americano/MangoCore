@@ -4,6 +4,31 @@
 
 ## 2026-06-18
 
+### Timer deadline/TLB 收尾修复与 la64 COW fault 定位
+
+**涉及文件：**
+- `os/src/timer.rs` — 新增 `TimeSpec::to_ticks_ceil()` / `timespec_to_ticks_ceil()`，统一绝对 deadline 到硬件 tick 的向上取整换算
+- `os/src/task/sleep.rs`、`os/src/task/threads.rs`、`os/src/fs/poll.rs` — 短超时自旋路径改用统一向上取整，避免 floor 换算导致提前超时
+- `os/src/task/manager.rs` — timer 重编程路径改为 irq-off 调用，`wait_with_timeout()` 统一走 `add_kernel_timer()`；POSIX timer overrun 计算改用 saturating ns
+- `os/src/fs/timerfd.rs`、`os/src/syscall/process/time.rs` — timerfd/POSIX timer 周期推进改用 saturating ns，避免大时间值溢出
+- `os/src/hal/arch/loongarch64/time.rs` — one-shot timer init_val 按 4-tick 边界向上对齐，避免短 deadline 被向下截断
+- `os/src/hal/arch/loongarch64/tlb.rs`、`os/src/hal/arch/loongarch64/laflex.rs` — la64 页级 TLB invalidate 传当前 ASID；kernel page table 使用 global-page invalidate
+- `os/src/mm/vma.rs` — 修正 COW 唯一页的 `Arc::strong_count` 判断，考虑 helper 返回的本地克隆引用
+
+**验证：**
+- `docker compose exec -T -w /app/os os-dev env LOG=error make rv64-kernel-build-only` ✅
+- `docker compose exec -T -w /app/os os-dev env LOG=error make la64-kernel-build-only` ✅
+- QEMU basic smoke `mask=0x001`: rv64 musl/glibc ✅；la64 musl/glibc ✅
+- 定向 LTP inline `clock_getres01,clock_gettime01,clock_nanosleep01,clock_nanosleep02,nanosleep01,nanosleep02,poll01,ppoll01,pselect01,timerfd_create01,timerfd_gettime01,timerfd_settime01`: rv64 musl/glibc ✅；la64 musl/glibc ✅
+- `git diff --check` ✅；调试日志关键字扫描 ✅
+
+**效果对比：**
+- 修复前：la64 basic 在 init stage-1 后卡住，调试定位到 pid2 对 COW 页反复 Store fault；临时 full TLB flush 对照实验可解除 fault storm，说明页级 invalidate 未命中目标 ASID
+- 修复后：la64 basic 正常完成；timer/nanosleep/pselect/timerfd 定向 LTP 双架构通过，短 deadline 未再出现 floor 截断或 la64 COW stale TLB 重复 fault
+
+**备注：** rv64 定向测试中额外观察到 `select01` 存在既有 `write(..., fd=6) failed: EBADF`，该问题不属于本轮 timer deadline/TLB 修复范围，后续应按 select/pipe fd 生命周期单独跟进。
+
+
 ### Phase 1: 修复时间换算溢出 + us 精度损失 + KERNEL_TIMER_QUEUE irq-safety
 
 **问题定位：**

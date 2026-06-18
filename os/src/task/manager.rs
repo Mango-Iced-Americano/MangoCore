@@ -1594,9 +1594,11 @@ impl KernelTimerQueue {
                             timer_state.value = TimeSpec::new();
                             timer_state.deadline = None;
                         } else {
-                            let interval_ns = timer_state.interval.to_ns().max(1);
-                            let deadline_ns = timer.deadline.to_ns();
-                            let elapsed_ns = now.to_ns().saturating_sub(deadline_ns);
+                            let interval_ns =
+                                timer_state.interval.to_ns_saturating().max(1) as usize;
+                            let deadline_ns = timer.deadline.to_ns_saturating() as usize;
+                            let elapsed_ns =
+                                (now.to_ns_saturating() as usize).saturating_sub(deadline_ns);
                             let expirations = 1usize.saturating_add(elapsed_ns / interval_ns);
                             let missed = if signal_pending {
                                 expirations
@@ -1765,17 +1767,10 @@ static KERNEL_TIMER_QUEUE_PENDING: AtomicBool = AtomicBool::new(false);
 static NEXT_SCHED_TICK_NS: AtomicU64 = AtomicU64::new(0);
 const SCHED_TICK_NS: u64 = 10_000_000; // 100 Hz = 10 ms
 
-/// (Re-)program the hardware timer to fire at the earliest of:
-///   - the next sched tick, and
-///   - the earliest KernelTimer deadline.
-fn reprogram_timer() {
+fn program_next_event(next_timer_ns: u64) {
     let now_ns = crate::timer::now_ns();
     let next_sched_ns = NEXT_SCHED_TICK_NS.load(AtomicOrdering::Relaxed);
-
-    let next_timer_ns = {
-        let ns = KERNEL_TIMER_QUEUE.lock().earliest_deadline_ns();
-        if ns == 0 { u64::MAX } else { ns }
-    };
+    let next_timer_ns = if next_timer_ns == 0 { u64::MAX } else { next_timer_ns };
 
     let next_ns = next_timer_ns.min(next_sched_ns.max(now_ns.saturating_add(1)));
     let delta_ns = next_ns.saturating_sub(now_ns).max(1);
@@ -1784,22 +1779,35 @@ fn reprogram_timer() {
     crate::hal::program_timer_delta(delta_ticks);
 }
 
+/// (Re-)program the hardware timer to fire at the earliest of:
+///   - the next sched tick, and
+///   - the earliest KernelTimer deadline.
+///
+/// Caller must have local timer interrupts disabled before entering this
+/// function.  It shares KERNEL_TIMER_QUEUE with the timer interrupt path.
+fn reprogram_timer_irqoff() {
+    let next_timer_ns = KERNEL_TIMER_QUEUE.lock().earliest_deadline_ns();
+    program_next_event(next_timer_ns);
+}
+
 /// Initialise the timer subsystem: set the first sched tick and program the
 /// hardware for the first event.
 pub fn timer_subsystem_init() {
+    let flags = local_irq_save();
     let now_ns = crate::timer::now_ns();
     NEXT_SCHED_TICK_NS.store(now_ns + SCHED_TICK_NS, AtomicOrdering::Relaxed);
-    reprogram_timer();
+    reprogram_timer_irqoff();
+    local_irq_restore(flags);
 }
 
 /// 加入一个内核计时器动作
 pub fn add_kernel_timer(action: TimerAction, deadline: TimeSpec) {
-    let _flags = local_irq_save();
+    let flags = local_irq_save();
     let new_is_earliest = KERNEL_TIMER_QUEUE.lock().add_action(action, deadline);
-    local_irq_restore(_flags);
     if new_is_earliest {
-        reprogram_timer();
+        reprogram_timer_irqoff();
     }
+    local_irq_restore(flags);
 }
 
 /// 这个函数会将一个`task`添加到全局超时等待队列中，但是不会阻塞它
@@ -1812,15 +1820,13 @@ pub fn wait_with_timeout(task: Weak<TaskControlBlock>, timeout: TimeSpec) {
         .wait_timer_generation
         .fetch_add(1, AtomicOrdering::Relaxed)
         .wrapping_add(1);
-    let _flags = local_irq_save();
-    KERNEL_TIMER_QUEUE.lock().add_action(
+    add_kernel_timer(
         TimerAction::WakeTask {
             task: Arc::downgrade(&task),
             generation,
         },
         timeout,
     );
-    local_irq_restore(_flags);
 }
 
 /// Unified timer interrupt handler — replaces the old fixed-tick
@@ -1878,7 +1884,7 @@ pub fn timer_interrupt_handler() {
     }
 
     // 3. Re-program hardware
-    reprogram_timer();
+    reprogram_timer_irqoff();
 
     // 4. Yield if needed
     if need_resched || woke_task {
@@ -1897,6 +1903,7 @@ pub fn do_wake_expired() {
 
     let mut now = None;
     if timeout_pending {
+        let flags = local_irq_save();
         let mut timeout_queue = TIMEOUT_WAITQUEUE.lock();
         if timeout_queue.is_empty() {
             TIMEOUT_WAITQUEUE_PENDING.store(false, AtomicOrdering::Relaxed);
@@ -1904,12 +1911,15 @@ pub fn do_wake_expired() {
             let now = *now.get_or_insert_with(crate::timer::TimeSpec::now);
             timeout_queue.wake_expired(now);
         }
+        drop(timeout_queue);
+        local_irq_restore(flags);
     }
 
     if kernel_timer_pending {
         let expired_timers = {
+            let flags = local_irq_save();
             let mut ktq = KERNEL_TIMER_QUEUE.lock();
-            if ktq.is_empty() {
+            let expired = if ktq.is_empty() {
                 KERNEL_TIMER_QUEUE_PENDING.store(false, AtomicOrdering::Relaxed);
                 Vec::new()
             } else {
@@ -1926,7 +1936,10 @@ pub fn do_wake_expired() {
                     KERNEL_TIMER_QUEUE_PENDING.store(false, AtomicOrdering::Relaxed);
                 }
                 expired
-            }
+            };
+            drop(ktq);
+            local_irq_restore(flags);
+            expired
         }; // ← lock released
 
         // Run callbacks outside the lock

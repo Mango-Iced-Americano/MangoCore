@@ -248,6 +248,12 @@ impl TimeSpec {
             .saturating_add(self.tv_nsec as u64)
     }
 
+    /// Convert an absolute TimeSpec deadline to hardware ticks, rounding up.
+    #[inline(always)]
+    pub fn to_ticks_ceil(&self) -> usize {
+        ns_to_ticks_ceil(self.to_ns_saturating()) as usize
+    }
+
     #[inline(always)]
     pub fn is_zero(&self) -> bool {
         self.tv_sec == 0 && self.tv_nsec == 0
@@ -258,6 +264,11 @@ impl TimeSpec {
     pub fn now() -> Self {
         TimeSpec::from_ns(now_ns() as usize)
     }
+}
+
+#[inline(always)]
+pub fn timespec_to_ticks_ceil(time: TimeSpec) -> usize {
+    time.to_ticks_ceil()
 }
 
 // ─────────────────────────────────────────────────────────
