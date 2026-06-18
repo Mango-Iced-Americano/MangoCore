@@ -4,6 +4,23 @@
 
 ## 2026-06-18
 
+### fix(task): 消除 stale fallback timer spurious wakeup（TCP_RR -14% regression 根因修复）
+
+**涉及文件：**
+- `os/src/task/task.rs` — TaskControlBlock 新增 `wait_io_fallback_active_generation: AtomicUsize` 字段；两个构造器初始化
+- `os/src/task/manager.rs` — TimerAction::WakeTask 新增 `fallback_ms: Option<usize>` 字段；is_live/run_timer/wait_with_timeout 三处 pattern match 更新；run_timer 新增 stale fallback 检测与 re-arm 逻辑；wait_event_impl fallback arm 设置 active generation，finish_wait 后清零；WaitQueue::wake_one/wake_at_most 在 Interruptible→Ready 转换时 bump wait_timer_generation（但不 clear pending）
+
+**修复机制（三层防御）：**
+1. **Socket wake bumps generation only**: `wake_one`/`wake_at_most` 在唤醒 task 时 bump `wait_timer_generation`（仅 bump，不 clear `wait_io_timer_pending`）→ socket 事件唤醒后，旧 fallback timer 的 generation 立即失配
+2. **Stale fallback re-arm**: 旧 fallback timer 触发时检测到 `active != generation` 且 `active == current_generation` → 不 spurious wake，改为 re-arm 新 timer（使用当前 generation）
+3. **Active generation tracking**: `wait_io_fallback_active_generation` 非零时表示 task 正在 fallback wait 中，由 `wait_event_impl` 设置/清零；timer 回调中 `active == 0` → 直接丢弃（task 已退出 fallback）
+
+**与之前失败尝试的区别：** 此前尝试在 wake_one/wake_at_most 中同时 `store(false)` 清 pending，导致每次 recv 都 re-arm timer（-19% regression）。本次**只 bump generation，不 touch pending**。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
 ### perf(net): UserBuffer zero-copy for Stream+Datagram non-blocking send/recv
 
 **涉及文件：**
