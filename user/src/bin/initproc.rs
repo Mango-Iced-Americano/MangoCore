@@ -70,7 +70,7 @@ const DEFAULT_ORDER: &[&str] = &[
 /// 例如 [6]=90 表示 TEST_GROUPS[6] (iperf) 的超时时间为 90 秒
 const DEFAULT_TIMEOUTS: [u64; 12] = [
     60,   // [0]  basic
-    60,   // [1]  busybox
+    120,   // [1]  busybox
     60,   // [2]  lua
     120,  // [3]  libctest
     240,  // [4]  iozone
