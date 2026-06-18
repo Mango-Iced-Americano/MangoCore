@@ -55,14 +55,14 @@ const DEFAULT_ORDER: &[&str] = &[
     "basic",
     "busybox",
     "lua",
-    "ltp",
-    "libctest",
-    "netperf",
-    "cyclictest",
+    "lmbench",
     "iozone",
     "libcbench",
+    "netperf",
     "iperf",
-    "lmbench",
+    "libctest",
+    "cyclictest",
+    "ltp",
     // "unixbench",
 ];
 
@@ -73,14 +73,14 @@ const DEFAULT_TIMEOUTS: [u64; 12] = [
     120,   // [1]  busybox
     60,   // [2]  lua
     120,  // [3]  libctest
-    240,  // [4]  iozone
+    480,  // [4]  iozone
     90,   // [5]  unixbench
     40,   // [6]  iperf
     120,  // [7]  libcbench
-    1800, // [8]  lmbench
+    1200, // [8]  lmbench
     90,   // [9]  netperf
     60,   // [10] cyclictest
-    1800, // [11] ltp
+    2700, // [11] ltp
 ];
 
 /// LTP 默认排除测例名列表
