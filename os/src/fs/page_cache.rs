@@ -397,20 +397,11 @@ impl PageCache {
 
     /// 获取页面用于写入
     pub fn get_page_for_write(&self, page_index: usize) -> Result<Arc<PageEntry>, SyscallErr> {
-        self.get_page_for_write_populate(page_index, true)
-    }
-
-    /// 获取页面用于写入，可选择是否从后端 populate。
-    /// populate=false 用于整页覆盖写：直接分配新帧并标记 dirty，
-    /// 跳过 backend read_page 减少 I/O。
-    fn get_page_for_write_populate(
-        &self,
-        page_index: usize,
-        populate: bool,
-    ) -> Result<Arc<PageEntry>, SyscallErr> {
-        let entry = self.get_or_create_entry(page_index, populate)?;
+        let entry = self.get_or_create_entry(page_index, true)?;
+        // 标记为脏
         let mut inner = self.inner.lock();
         inner.mark_dirty(page_index);
+        // 更新状态
         if entry.state() == PageState::UpToDate {
             entry.set_state(PageState::Dirty);
         }
@@ -462,17 +453,6 @@ impl PageCache {
 
         let start_page = offset >> PAGE_SIZE_BITS;
         let end_page = (offset + buf.len() - 1) >> PAGE_SIZE_BITS;
-
-        // Single-page fast path: bypass Vec<CopyItem> construction
-        if start_page == end_page {
-            let page_start = start_page << PAGE_SIZE_BITS;
-            let page_offset = offset - page_start;
-            let sub_len = buf.len().min(PAGE_SIZE - page_offset);
-            let entry = self.get_page_for_read(start_page)?;
-            let src = entry.as_slice();
-            buf[..sub_len].copy_from_slice(&src[page_offset..page_offset + sub_len]);
-            return Ok(sub_len);
-        }
 
         // Phase 1: 收集拷贝项（持锁）
         struct CopyItem {
@@ -529,18 +509,6 @@ impl PageCache {
         let start_page = offset >> PAGE_SIZE_BITS;
         let end_page = (offset + buf.len() - 1) >> PAGE_SIZE_BITS;
 
-        // Single-page fast path: bypass Vec<CopyItem> construction
-        if start_page == end_page {
-            let page_start = start_page << PAGE_SIZE_BITS;
-            let page_offset = offset - page_start;
-            let sub_len = buf.len().min(PAGE_SIZE - page_offset);
-            let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
-            let entry = self.get_page_for_write_populate(start_page, !full_page_overwrite)?;
-            let dst = entry.as_slice_mut();
-            dst[page_offset..page_offset + sub_len].copy_from_slice(&buf[..sub_len]);
-            return Ok(sub_len);
-        }
-
         struct CopyItem {
             entry: Arc<PageEntry>,
             page_offset: usize,
@@ -561,12 +529,10 @@ impl PageCache {
                 continue;
             }
 
-            let page_offset = write_start - page_start;
-            let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
-            let entry = self.get_page_for_write_populate(page_index, !full_page_overwrite)?;
+            let entry = self.get_page_for_write(page_index)?;
             copies.push(CopyItem {
                 entry,
-                page_offset,
+                page_offset: write_start - page_start,
                 sub_len,
             });
             total_written += sub_len;
@@ -579,147 +545,6 @@ impl PageCache {
             let dst_start = item.page_offset;
             dst[dst_start..dst_start + item.sub_len]
                 .copy_from_slice(&buf[src_offset..src_offset + item.sub_len]);
-            src_offset += item.sub_len;
-        }
-
-        Ok(total_written)
-    }
-
-    // ── UserBuffer 读写 ──────────────────────────────────────────────
-
-    /// 从指定偏移量读取数据到 UserBuffer。
-    /// 两阶段读取：持锁收集拷贝项 → 解锁拷贝到 UserBuffer。
-    /// `len` 由调用者按文件大小等限制，不从此 buffer 的长度推断。
-    pub fn read_user(
-        &self,
-        offset: usize,
-        len: usize,
-        dst: &mut crate::mm::UserBuffer,
-    ) -> Result<usize, SyscallErr> {
-        if len == 0 {
-            return Ok(0);
-        }
-
-        let start_page = offset >> PAGE_SIZE_BITS;
-        let end_page = (offset + len - 1) >> PAGE_SIZE_BITS;
-
-        // Single-page fast path: bypass Vec<CopyItem> construction
-        if start_page == end_page {
-            let page_start = start_page << PAGE_SIZE_BITS;
-            let page_offset = offset - page_start;
-            let sub_len = len.min(PAGE_SIZE - page_offset);
-            let entry = self.get_page_for_read(start_page)?;
-            let src = entry.as_slice();
-            dst.write_at(0, &src[page_offset..page_offset + sub_len]);
-            return Ok(sub_len);
-        }
-
-        struct CopyItem {
-            entry: Arc<PageEntry>,
-            page_offset: usize,
-            sub_len: usize,
-        }
-
-        let mut copies: Vec<CopyItem> = Vec::new();
-        let mut total_read = 0usize;
-
-        for page_index in start_page..=end_page {
-            let page_start = page_index << PAGE_SIZE_BITS;
-            let page_end = page_start + PAGE_SIZE;
-            let read_start = core::cmp::max(offset, page_start);
-            let read_end = core::cmp::min(offset + len, page_end);
-            let sub_len = read_end.saturating_sub(read_start);
-
-            if sub_len == 0 {
-                continue;
-            }
-
-            let entry = self.get_page_for_read(page_index)?;
-            copies.push(CopyItem {
-                entry,
-                page_offset: read_start - page_start,
-                sub_len,
-            });
-            total_read += sub_len;
-        }
-
-        // Phase 2: copy page data into UserBuffer (no locks held)
-        let mut dst_offset = 0;
-        for item in &copies {
-            let src = item.entry.as_slice();
-            let src_start = item.page_offset;
-            dst.write_at(dst_offset, &src[src_start..src_start + item.sub_len]);
-            dst_offset += item.sub_len;
-        }
-
-        Ok(total_read)
-    }
-
-    /// 从 UserBuffer 写入数据到指定偏移量。
-    /// 两阶段写入：持锁收集目标页 → 解锁从 UserBuffer 拷贝。
-    /// `len` 由调用者计算，不从此 buffer 的长度推断。
-    pub fn write_user(
-        &self,
-        offset: usize,
-        len: usize,
-        src: &crate::mm::UserBuffer,
-    ) -> Result<usize, SyscallErr> {
-        if len == 0 {
-            return Ok(0);
-        }
-
-        let start_page = offset >> PAGE_SIZE_BITS;
-        let end_page = (offset + len - 1) >> PAGE_SIZE_BITS;
-
-        // Single-page fast path: bypass Vec<CopyItem> construction
-        if start_page == end_page {
-            let page_start = start_page << PAGE_SIZE_BITS;
-            let page_offset = offset - page_start;
-            let sub_len = len.min(PAGE_SIZE - page_offset);
-            let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
-            let entry = self.get_page_for_write_populate(start_page, !full_page_overwrite)?;
-            let dst = entry.as_slice_mut();
-            src.read_at(0, &mut dst[page_offset..page_offset + sub_len]);
-            return Ok(sub_len);
-        }
-
-        struct CopyItem {
-            entry: Arc<PageEntry>,
-            page_offset: usize,
-            sub_len: usize,
-        }
-
-        let mut copies: Vec<CopyItem> = Vec::new();
-        let mut total_written = 0usize;
-
-        for page_index in start_page..=end_page {
-            let page_start = page_index << PAGE_SIZE_BITS;
-            let page_end = page_start + PAGE_SIZE;
-            let write_start = core::cmp::max(offset, page_start);
-            let write_end = core::cmp::min(offset + len, page_end);
-            let sub_len = write_end.saturating_sub(write_start);
-
-            if sub_len == 0 {
-                continue;
-            }
-
-            let page_offset = write_start - page_start;
-            let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
-            let entry = self.get_page_for_write_populate(page_index, !full_page_overwrite)?;
-            copies.push(CopyItem {
-                entry,
-                page_offset: write_start - page_start,
-                sub_len,
-            });
-            total_written += sub_len;
-        }
-
-        // Phase 2: copy data from UserBuffer into pages (no locks held)
-        let mut src_offset = 0;
-        for item in &copies {
-            let dst = item.entry.as_slice_mut();
-            let dst_start = item.page_offset;
-            src.read_at(src_offset, &mut dst[dst_start..dst_start + item.sub_len]);
             src_offset += item.sub_len;
         }
 

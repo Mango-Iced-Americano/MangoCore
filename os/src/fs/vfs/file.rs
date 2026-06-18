@@ -17,12 +17,11 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 use core::fmt;
-use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::{Mutex, MutexGuard};
 
 use super::{FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata};
 use super::event::EventWaitQueue;
-use crate::mm::UserBuffer;
 use crate::task::{register_writable_inode, unregister_writable_inode, WaitQueue};
 use crate::config::SYSTEM_FD_LIMIT;
 
@@ -620,10 +619,10 @@ pub struct File {
     pub inode: Arc<dyn IndexNode>,
     /// 文件偏移量（AtomicUsize 直接内嵌，Arc<File> 共享跨 dup fd）
     offset: AtomicUsize,
-    /// 打开标志（AtomicU32：fcntl F_SETFL 只改 O_NONBLOCK/O_APPEND 等状态 flags）
-    flags: AtomicU32,
-    /// 文件访问模式（open 后不变，直接存值去锁）
-    mode: FileMode,
+    /// 打开标志
+    flags: Mutex<FileFlags>,
+    /// 文件访问模式
+    mode: Mutex<FileMode>,
     /// 文件类型
     file_type: FileType,
     /// 私有数据
@@ -647,7 +646,7 @@ impl fmt::Debug for File {
         f.debug_struct("File")
             .field("open_file_id", &self.open_file_id)
             .field("offset", &self.offset.load(Ordering::Relaxed))
-            .field("flags", &self.flags())
+            .field("flags", &self.flags)
             .field("mode", &self.mode)
             .field("file_type", &self.file_type)
             .finish()
@@ -723,59 +722,8 @@ impl File {
         let file = Arc::new(File {
             inode,
             offset: AtomicUsize::new(0),
-            flags: AtomicU32::new(flags.bits()),
-            mode,
-            file_type,
-            private_data: Mutex::new(private_data),
-            open_file_id: alloc_open_file_id(),
-            posix_lock_key,
-            created_by_open: true,
-            owner: Mutex::new(FileOwner::default()),
-            file_rw_hint: Mutex::new(0),
-            lease: Mutex::new(None),
-        });
-
-        file.inode.open(file.private_data.lock(), &flags)?;
-        if file.tracks_write_busy() {
-            register_writable_inode(&file.inode);
-        }
-
-        Ok(file)
-    }
-
-    /// 根据 inode 创建新 File，复用已有的 metadata 避免重复调用 inode.metadata()。
-    /// 用于 open_file_at 等调用方已经持有 metadata 的路径。
-    pub fn new_with_metadata(
-        inode: Arc<dyn IndexNode>,
-        flags: FileFlags,
-        metadata: Metadata,
-    ) -> Result<Arc<Self>, SyscallErr> {
-        let mut mode = FileMode::FMODE_LSEEK | FileMode::FMODE_PREAD | FileMode::FMODE_PWRITE;
-
-        if flags.is_readable() {
-            mode |= FileMode::FMODE_READ;
-        }
-        if flags.is_writable() {
-            mode |= FileMode::FMODE_WRITE;
-        }
-        if flags.contains(FileFlags::O_PATH) {
-            mode |= FileMode::FMODE_PATH;
-        }
-
-        let file_type = metadata.file_type;
-
-        if matches!(file_type, FileType::Pipe | FileType::Socket) || inode.is_stream() {
-            mode |= FileMode::FMODE_STREAM;
-        }
-
-        let posix_lock_key = (metadata.dev_id, metadata.inode_id);
-
-        let private_data = FilePrivateData::default();
-        let file = Arc::new(File {
-            inode,
-            offset: AtomicUsize::new(0),
-            flags: AtomicU32::new(flags.bits()),
-            mode,
+            flags: Mutex::new(flags),
+            mode: Mutex::new(mode),
             file_type,
             private_data: Mutex::new(private_data),
             open_file_id: alloc_open_file_id(),
@@ -823,8 +771,8 @@ impl File {
         let file = Arc::new(File {
             inode,
             offset: AtomicUsize::new(0),
-            flags: AtomicU32::new(flags.bits()),
-            mode,
+            flags: Mutex::new(flags),
+            mode: Mutex::new(mode),
             file_type,
             private_data: Mutex::new(FilePrivateData::default()),
             open_file_id: alloc_open_file_id(),
@@ -870,8 +818,8 @@ impl File {
         let file = Arc::new(File {
             inode,
             offset: AtomicUsize::new(0),
-            flags: AtomicU32::new(flags.bits()),
-            mode,
+            flags: Mutex::new(flags),
+            mode: Mutex::new(mode),
             file_type,
             private_data: Mutex::new(FilePrivateData::default()),
             open_file_id: alloc_open_file_id(),
@@ -955,19 +903,28 @@ impl File {
 
     /// 从文件当前位置读取（并推进 offset）
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, SyscallErr> {
-        self.readable()?;
+        let mode = *self.mode.lock();
+        if mode.contains(FileMode::FMODE_PATH) || !mode.contains(FileMode::FMODE_READ) {
+            return Err(SyscallErr::EBADF);
+        }
         let len = buf.len();
+
         if len == 0 {
             return Ok(0);
         }
 
-        let is_stream = self.mode.contains(FileMode::FMODE_STREAM);
-        let offset = if is_stream { 0 } else { self.offset.load(Ordering::SeqCst) };
+        if mode.contains(FileMode::FMODE_STREAM) {
+            return self
+                .inode
+                .read_at(0, len, buf, self.private_data.lock());
+        }
+
+        let offset = self.offset.load(Ordering::SeqCst);
         let n = self
             .inode
             .read_at(offset, len, buf, self.private_data.lock())?;
 
-        if n > 0 && !is_stream {
+        if n > 0 {
             self.offset.fetch_add(n, Ordering::SeqCst);
         }
         Ok(n)
@@ -975,10 +932,11 @@ impl File {
 
     /// 从指定位置读取（不推进 offset）
     pub fn pread(&self, offset: usize, buf: &mut [u8]) -> Result<usize, SyscallErr> {
-        if self.mode.contains(FileMode::FMODE_PATH) {
+        let mode = *self.mode.lock();
+        if mode.contains(FileMode::FMODE_PATH) {
             return Err(SyscallErr::EBADF);
         }
-        if self.mode.contains(FileMode::FMODE_STREAM) {
+        if mode.contains(FileMode::FMODE_STREAM) {
             return Err(SyscallErr::ESPIPE);
         }
         self.inode
@@ -989,18 +947,24 @@ impl File {
 
     /// 从文件当前位置写入（并推进 offset）
     pub fn write(&self, buf: &[u8]) -> Result<usize, SyscallErr> {
-        self.writable()?;
-        let flags = self.flags();
+        let mode = *self.mode.lock();
+        if mode.contains(FileMode::FMODE_PATH) || !mode.contains(FileMode::FMODE_WRITE) {
+            return Err(SyscallErr::EBADF);
+        }
         let len = buf.len();
 
         if len == 0 {
             return Ok(0);
         }
 
-        let is_stream = self.mode.contains(FileMode::FMODE_STREAM);
-        let offset = if is_stream {
-            0
-        } else if flags.contains(FileFlags::O_APPEND) {
+        if mode.contains(FileMode::FMODE_STREAM) {
+            return self
+                .inode
+                .write_at(0, len, buf, self.private_data.lock());
+        }
+
+        let flags = *self.flags.lock();
+        let offset = if flags.contains(FileFlags::O_APPEND) {
             // O_APPEND: 写入到文件末尾
             let md = self.inode.metadata()?;
             md.size.max(0) as usize
@@ -1014,12 +978,10 @@ impl File {
             .write_at(offset, len, buf, self.private_data.lock())?;
 
         if n > 0 {
-            if !is_stream {
-                if flags.contains(FileFlags::O_APPEND) {
-                    self.offset.store(offset + n, Ordering::SeqCst);
-                } else {
-                    self.offset.fetch_add(n, Ordering::SeqCst);
-                }
+            if flags.contains(FileFlags::O_APPEND) {
+                self.offset.store(offset + n, Ordering::SeqCst);
+            } else {
+                self.offset.fetch_add(n, Ordering::SeqCst);
             }
             self.touch_modified();
         }
@@ -1028,13 +990,14 @@ impl File {
 
     /// 从指定位置写入（不推进 offset）
     pub fn pwrite(&self, offset: usize, buf: &[u8]) -> Result<usize, SyscallErr> {
-        if self.mode.contains(FileMode::FMODE_PATH) {
+        let mode = *self.mode.lock();
+        if mode.contains(FileMode::FMODE_PATH) {
             return Err(SyscallErr::EBADF);
         }
-        if self.mode.contains(FileMode::FMODE_STREAM) {
+        if mode.contains(FileMode::FMODE_STREAM) {
             return Err(SyscallErr::ESPIPE);
         }
-        let flags = self.flags();
+        let flags = *self.flags.lock();
         let offset = if flags.contains(FileFlags::O_APPEND) {
             let md = self.inode.metadata()?;
             md.size.max(0) as usize
@@ -1051,221 +1014,15 @@ impl File {
         Ok(n)
     }
 
-    // ── UserBuffer 读写 ────────────────────────────────────────────
-
-    /// 从文件当前位置读取到 UserBuffer（直连版本，省去 kbuf 中转）。
-    pub fn read_user(&self, dst: &mut UserBuffer) -> Result<usize, SyscallErr> {
-        self.readable()?;
-        let len = dst.len();
-        if len == 0 {
-            return Ok(0);
-        }
-
-        let is_stream = self.mode.contains(FileMode::FMODE_STREAM);
-        let offset = if is_stream { 0 } else { self.offset.load(Ordering::SeqCst) };
-
-        match self.inode.read_at_user(offset, len, dst) {
-            Ok(n) => {
-                if n > 0 && !is_stream {
-                    self.offset.fetch_add(n, Ordering::SeqCst);
-                }
-                Ok(n)
-            }
-            Err(SyscallErr::ENOSYS) => {
-                let mut kbuf = Vec::new();
-                kbuf.try_reserve(len).map_err(|_| SyscallErr::ENOMEM)?;
-                unsafe { kbuf.set_len(len); }
-                let n = self
-                    .inode
-                    .read_at(offset, len, &mut kbuf, self.private_data.lock())?;
-                if n > 0 {
-                    dst.write_at(0, &kbuf[..n]);
-                    if !is_stream {
-                        self.offset.fetch_add(n, Ordering::SeqCst);
-                    }
-                }
-                Ok(n)
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    /// 从指定位置读取到 UserBuffer（不推进 offset）。
-    pub fn pread_user(&self, offset: usize, dst: &mut UserBuffer) -> Result<usize, SyscallErr> {
-        if self.mode.contains(FileMode::FMODE_PATH) {
-            return Err(SyscallErr::EBADF);
-        }
-        if self.mode.contains(FileMode::FMODE_STREAM) {
-            return Err(SyscallErr::ESPIPE);
-        }
-        let len = dst.len();
-        if len == 0 {
-            return Ok(0);
-        }
-
-        match self.inode.read_at_user(offset, len, dst) {
-            Ok(n) => Ok(n),
-            Err(SyscallErr::ENOSYS) => {
-                let mut kbuf = Vec::new();
-                kbuf.try_reserve(len).map_err(|_| SyscallErr::ENOMEM)?;
-                unsafe { kbuf.set_len(len); }
-                let n = self
-                    .inode
-                    .read_at(offset, len, &mut kbuf, self.private_data.lock())?;
-                if n > 0 {
-                    dst.write_at(0, &kbuf[..n]);
-                }
-                Ok(n)
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    /// 从 UserBuffer 写入文件当前位置（直连版本，省去 kbuf 中转）。
-    pub fn write_user(&self, src: &UserBuffer) -> Result<usize, SyscallErr> {
-        self.writable()?;
-        let flags = self.flags();
-        let len = src.len();
-        if len == 0 {
-            return Ok(0);
-        }
-
-        let is_stream = self.mode.contains(FileMode::FMODE_STREAM);
-        let offset = if is_stream {
-            0
-        } else if flags.contains(FileFlags::O_APPEND) {
-            let md = self.inode.metadata()?;
-            md.size.max(0) as usize
-        } else {
-            self.offset.load(Ordering::SeqCst)
-        };
-        self.check_memfd_write_seals(offset, len)?;
-
-        match self.inode.write_at_user(offset, len, src) {
-            Ok(n) => {
-                if n > 0 {
-                    if !is_stream {
-                        if flags.contains(FileFlags::O_APPEND) {
-                            self.offset.store(offset + n, Ordering::SeqCst);
-                        } else {
-                            self.offset.fetch_add(n, Ordering::SeqCst);
-                        }
-                    }
-                    self.touch_modified();
-                }
-                Ok(n)
-            }
-            Err(SyscallErr::ENOSYS) => {
-                let mut kbuf = Vec::new();
-                kbuf.try_reserve(len).map_err(|_| SyscallErr::ENOMEM)?;
-                unsafe { kbuf.set_len(len); }
-                let copied = src.read_at(0, &mut kbuf);
-                let n = self.inode.write_at(
-                    offset,
-                    copied,
-                    &kbuf[..copied],
-                    self.private_data.lock(),
-                )?;
-                if n > 0 {
-                    if !is_stream {
-                        if flags.contains(FileFlags::O_APPEND) {
-                            self.offset.store(offset + n, Ordering::SeqCst);
-                        } else {
-                            self.offset.fetch_add(n, Ordering::SeqCst);
-                        }
-                    }
-                    self.touch_modified();
-                }
-                Ok(n)
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    /// 从 UserBuffer 写入文件指定位置（不推进 offset）。
-    pub fn pwrite_user(&self, offset: usize, src: &UserBuffer) -> Result<usize, SyscallErr> {
-        if self.mode.contains(FileMode::FMODE_PATH) {
-            return Err(SyscallErr::EBADF);
-        }
-        if self.mode.contains(FileMode::FMODE_STREAM) {
-            return Err(SyscallErr::ESPIPE);
-        }
-        let flags = self.flags();
-        let len = src.len();
-        if len == 0 {
-            return Ok(0);
-        }
-
-        let offset = if flags.contains(FileFlags::O_APPEND) {
-            let md = self.inode.metadata()?;
-            md.size.max(0) as usize
-        } else {
-            offset
-        };
-        self.check_memfd_write_seals(offset, len)?;
-
-        match self.inode.write_at_user(offset, len, src) {
-            Ok(n) => {
-                if n > 0 {
-                    self.touch_modified();
-                }
-                Ok(n)
-            }
-            Err(SyscallErr::ENOSYS) => {
-                let mut kbuf = Vec::new();
-                kbuf.try_reserve(len).map_err(|_| SyscallErr::ENOMEM)?;
-                unsafe { kbuf.set_len(len); }
-                let copied = src.read_at(0, &mut kbuf);
-                let n = self.inode.write_at(
-                    offset,
-                    copied,
-                    &kbuf[..copied],
-                    self.private_data.lock(),
-                )?;
-                if n > 0 {
-                    self.touch_modified();
-                }
-                Ok(n)
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    /// 丢弃写入：用于 /dev/null, /dev/zero 等无条件忽略数据的设备。
-    /// 不做 UserBuffer 构造和 copy，只检查权限和 offset 语义。
-    pub fn write_discard(&self, len: usize) -> Result<usize, SyscallErr> {
-        self.writable()?;
-        if len == 0 {
-            return Ok(0);
-        }
-
-        let is_stream = self.mode.contains(FileMode::FMODE_STREAM);
-        let offset = if is_stream {
-            0
-        } else {
-            self.offset.load(Ordering::SeqCst)
-        };
-
-        self.check_memfd_write_seals(offset, len)?;
-        let n = self.inode.discard_write_at(offset, len, self.private_data.lock())?;
-
-        if n > 0 && !is_stream {
-            self.offset.fetch_add(n, Ordering::SeqCst);
-        }
-        if n > 0 {
-            self.touch_modified();
-        }
-        Ok(n)
-    }
-
     // ── Seek ───────────────────────────────────────────────────────
 
     /// 调整文件偏移量
     pub fn lseek(&self, whence: SeekFrom) -> Result<usize, SyscallErr> {
-        if self.mode.contains(FileMode::FMODE_STREAM) {
+        let mode = *self.mode.lock();
+        if mode.contains(FileMode::FMODE_STREAM) {
             return Err(SyscallErr::ESPIPE);
         }
-        if !self.mode.contains(FileMode::FMODE_LSEEK) {
+        if !mode.contains(FileMode::FMODE_LSEEK) {
             return Err(SyscallErr::ESPIPE);
         }
 
@@ -1291,10 +1048,11 @@ impl File {
 
     #[inline]
     pub fn readable(&self) -> Result<(), SyscallErr> {
-        if self.mode.contains(FileMode::FMODE_PATH) {
+        let mode = *self.mode.lock();
+        if mode.contains(FileMode::FMODE_PATH) {
             return Err(SyscallErr::EBADF);
         }
-        if !self.mode.contains(FileMode::FMODE_READ) {
+        if !mode.contains(FileMode::FMODE_READ) {
             return Err(SyscallErr::EBADF);
         }
         Ok(())
@@ -1302,10 +1060,11 @@ impl File {
 
     #[inline]
     pub fn writable(&self) -> Result<(), SyscallErr> {
-        if self.mode.contains(FileMode::FMODE_PATH) {
+        let mode = *self.mode.lock();
+        if mode.contains(FileMode::FMODE_PATH) {
             return Err(SyscallErr::EBADF);
         }
-        if !self.mode.contains(FileMode::FMODE_WRITE) {
+        if !mode.contains(FileMode::FMODE_WRITE) {
             return Err(SyscallErr::EBADF);
         }
         Ok(())
@@ -1385,7 +1144,7 @@ impl File {
 
     #[inline]
     pub fn flags(&self) -> FileFlags {
-        FileFlags::from_bits_truncate(self.flags.load(Ordering::Relaxed))
+        *self.flags.lock()
     }
 
     #[inline]
@@ -1402,17 +1161,13 @@ impl File {
             | FileFlags::O_NOATIME.bits()
             | FileFlags::O_ASYNC.bits();
         let new_bits = old_flags.bits() & !SETFL_MASK | new_flags.bits() & SETFL_MASK;
-        // Use fetch_update with cur-based closure to avoid overwriting concurrent
-        // nonblock/F_SETFL changes with a stale snapshot.
-        let _ = self.flags.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-            Some((cur & !SETFL_MASK) | (new_flags.bits() & SETFL_MASK))
-        });
+        *self.flags.lock() = FileFlags::from_bits_truncate(new_bits);
         Ok(())
     }
 
     #[inline]
     pub fn mode(&self) -> FileMode {
-        self.mode
+        *self.mode.lock()
     }
 
     #[inline]
@@ -1502,10 +1257,11 @@ impl File {
 
     /// 设置 O_NONBLOCK 标志
     pub fn set_nonblock(&self, nonblock: bool) {
+        let mut flags = self.flags.lock();
         if nonblock {
-            self.flags.fetch_or(FileFlags::O_NONBLOCK.bits(), Ordering::Relaxed);
+            flags.insert(FileFlags::O_NONBLOCK);
         } else {
-            self.flags.fetch_and(!FileFlags::O_NONBLOCK.bits(), Ordering::Relaxed);
+            flags.remove(FileFlags::O_NONBLOCK);
         }
     }
 

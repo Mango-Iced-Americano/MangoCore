@@ -53,9 +53,6 @@ pub fn maybe_reclaim_fs_caches() {
         let pc_removed = fs.prune_page_caches();
         let kids_removed = fs.prune_children_stale_entries();
 
-        // Periodically evict stale directory lookup cache entries
-        fs.evict_dir_cache();
-
         let cached = fs.get_cache_metric(6); // page_cache_cached_pages
 
         if heap_critical() {

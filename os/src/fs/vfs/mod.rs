@@ -43,7 +43,7 @@ pub use file::{EventQueueHandle, FdTable, File, FileFlags, FileMode, FileOwner, 
 pub use fasync::{set_file_fasync, FAsyncItem, FAsyncItems};
 pub use fcntl::{FcntlCommand, PosixFlock, FOwnerEx, F_RDLCK, F_WRLCK, F_UNLCK, FD_CLOEXEC, F_SEAL_SEAL, F_SEAL_SHRINK, F_SEAL_GROW, F_SEAL_WRITE, F_SEAL_FUTURE_WRITE, F_OWNER_TID, F_OWNER_PID, F_OWNER_PGRP};
 pub use file_system::{FileSystem, FsInfo, SuperBlock};
-pub use index_node::{CreateAttrs, IndexNode};
+pub use index_node::IndexNode;
 pub use mount::{MountFS, MountFSInode, MountFlags, MountList, MountPath};
 pub use propagation::{MountPropagation, PropagationType, configure_propagation_no_register, get_slaves, install_propagation, propagate_mount, propagate_umount, register_current_propagation, register_peer, register_slave, set_propagation_type, unregister_peer_mount, unregister_slave_mount};
 
