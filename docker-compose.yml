@@ -17,6 +17,7 @@ services:
       - apparmor:unconfined
     volumes:
       - .:/app
+      - /etc/localtime:/etc/localtime:ro
     environment:
       - MODE=release
     tty: true

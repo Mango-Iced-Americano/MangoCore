@@ -124,3 +124,23 @@ cd os && make la64-kernel-build-only
 # (配置 os_test.conf 为 mask=0x001, ltp_include=clone09, ltp_runner=inline)
 make la64-run
 ```
+
+---
+
+## 2026-06-18 更新
+
+### 临时缓解
+
+将 LA64 `KERNEL_STACK_SIZE` 从 `PAGE_SIZE * 0x10` (64KB) 恢复为 `PAGE_SIZE * 0x20` (128KB)，确保 LTP `clone09` (`CLONE_NEWNET`) 不再触发栈溢出。
+
+### Pending: 根治 CLONE_NEWNET 路径栈压力
+
+`clone09` 即使有 128KB 也有风险，因为 `sys_clone` → `NetNamespace::new_isolated()` → `NetDeviceEntry::new()` 会在内核栈上构造 smoltcp 大临时对象（`Loopback` + `Interface` + `SocketSet`）。
+
+**待优化方向：**
+- 将 `NetDeviceEntry::new()` 中的 smoltcp 对象改为堆分配（`Box` / `Arc`）
+- 或拆分 `new_isolated()` 为更细粒度的阶段，减少单次调用栈深度
+
+**验证状态：**
+- 2026-06-18: 64KB 栈 `clone09` 必现溢出 → 临时调至 128KB 绕过
+- 128KB 是否足够其他深调用场景（LTP 全量）：待跑全量验证

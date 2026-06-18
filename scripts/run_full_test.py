@@ -46,6 +46,16 @@ judge_results = {}      # threading-safe dict for judge results
 
 # ======================== Helpers ========================
 
+def _sync_container_time():
+    """尽可能同步容器时间到宿主机。"""
+    try:
+        subprocess.run(["date", "-s", "@" + str(int(time.time()))],
+                       timeout=3, capture_output=True)
+        log("时间同步完成", GREEN)
+    except Exception:
+        pass  # 非关键，/etc/localtime 挂载已处理
+
+
 def log(msg, color=""):
     """带时间戳的日志打印。"""
     ts = datetime.now().strftime("%H:%M:%S")
@@ -299,6 +309,10 @@ def _ltp_adjust(name, raw):
 
 def main():
     os.chdir(PROJECT_ROOT)
+
+    # 同步容器时间（依赖于 docker-compose 挂载 /etc/localtime:ro）
+    _sync_container_time()
+
     log("=" * 60, BOLD)
     log("  MangoCore (oskernel2026) — 全量测试脚本", BOLD)
     log(f"  项目根目录: {PROJECT_ROOT}", BOLD)

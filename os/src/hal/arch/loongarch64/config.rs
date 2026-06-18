@@ -31,7 +31,7 @@ pub const KSTACK_PG_NUM_SHIFT: usize = 16usize.trailing_zeros() as usize;
 #[cfg(not(debug_assertions))]
 pub const KSTACK_PG_NUM_SHIFT: usize = 16usize.trailing_zeros() as usize;
 
-pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 0x10;
+pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 0x20;
 pub const KERNEL_STACK_SLOT_SIZE: usize = KERNEL_STACK_SIZE + PAGE_SIZE;
 pub const KERNEL_STACK_MAX_SLOTS: usize = 1024;
 pub const BOOT_STACK_SIZE: usize = PAGE_SIZE * 0x40;
