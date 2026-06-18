@@ -491,13 +491,10 @@ impl<'a> NetInterface<'a> {
             crate::net::wake_raw_waiters();
         }
 
-        // Trace: 记录 poll 后仍在连接中的 TCP socket 数
-        // {
-        //     let sockets = TCP_SOCKETS.lock();
-        //     trace_event!(0xB033, sockets.len() as u64, 0, 0, 0, 0, 0);
-        // }
-        // config.rs poll_once() 中，在 poll 调用后加：
-        // trace_event!(0xB036, progressed as u64, 0, 0, 0, 0, 0); // 5. 更新所有 TCP/RAW socket 事件并唤醒等待者
+        // Unconditional listener accept scan — catches new connections
+        // even when smoltcp didn't report poll progress.
+        crate::net::wake_tcp_accept_waiters();
+
         progressed
     }
 

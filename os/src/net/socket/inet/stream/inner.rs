@@ -511,6 +511,18 @@ impl Listening {
         Ok((connected_handle, remote_endpoint))
     }
 
+    /// Check if any backlog handle has an established/active connection.
+    /// Returns true when accept() would succeed without EAGAIN.
+    pub fn has_pending_connection(&self) -> bool {
+        self.handles.iter().any(|&h| {
+            with_tcp(h, |socket| {
+                socket.state() == smoltcp::socket::tcp::State::Established
+                    || socket.state() == smoltcp::socket::tcp::State::CloseWait
+            })
+            .unwrap_or(false)
+        })
+    }
+
     pub fn update_io_events(&self, pollee: &AtomicUsize) {
         let position = self
             .handles

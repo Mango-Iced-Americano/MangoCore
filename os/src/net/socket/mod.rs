@@ -141,6 +141,8 @@ pub static UDP_SOCKETS_TO_REMOVE: Mutex<Vec<RouteSocketHandle>> = Mutex::new(Vec
 // tcp
 pub static TCP_SOCKETS: Mutex<Vec<Weak<TcpSocket>>> = Mutex::new(Vec::new());
 pub static TCP_SOCKETS_TO_REMOVE: Mutex<Vec<RouteSocketHandle>> = Mutex::new(Vec::new());
+/// Listening-only TCP sockets — used for unconditional accept scan after every poll cycle.
+pub static TCP_LISTENERS: Mutex<Vec<Weak<TcpSocket>>> = Mutex::new(Vec::new());
 
 // raw
 pub static RAW_SOCKETS: Mutex<Vec<(RouteSocketHandle, Weak<RawSocket>)>> = Mutex::new(Vec::new());
@@ -924,6 +926,31 @@ pub fn wake_tcp_waiters() {
             }
         }
     }
+}
+
+/// Unconditional listener-only accept scan. Called after every poll cycle,
+/// regardless of smoltcp progress. Only iterates listening sockets, not
+/// all TCP sockets. Returns count of ready listeners.
+pub fn wake_tcp_accept_waiters() -> usize {
+    let listeners: Vec<Arc<TcpSocket>> = {
+        let guard = TCP_LISTENERS.lock();
+        guard.iter().filter_map(|w| w.upgrade()).collect()
+    };
+
+    let mut ready = 0;
+    for sock in &listeners {
+        if sock.refresh_accept_ready_after_poll() {
+            ready += 1;
+        }
+    }
+
+    // Clean up dead weak refs
+    if listeners.len() < TCP_LISTENERS.lock().len() {
+        let mut guard = TCP_LISTENERS.lock();
+        guard.retain(|w| w.upgrade().is_some());
+    }
+
+    ready
 }
 
 /// 在每次 poll 后，遍历所有 RAW_SOCKETS，唤醒其等待队列

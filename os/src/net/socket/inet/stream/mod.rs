@@ -109,6 +109,54 @@ impl TcpSocket {
         crate::net::TCP_SOCKETS.lock().push(Arc::downgrade(socket));
     }
 
+    /// Register this listening socket in the global TCP_LISTENERS table.
+    /// Called from listen() after transitioning to Listening state.
+    pub(crate) fn register_as_listener(&self) {
+        let self_ptr = self as *const Self;
+        let weak = {
+            let sockets = crate::net::TCP_SOCKETS.lock();
+            sockets.iter().find_map(|w| {
+                w.upgrade().and_then(|s| {
+                    if Arc::as_ptr(&s) == self_ptr {
+                        Some(w.clone())
+                    } else {
+                        None
+                    }
+                })
+            })
+        };
+        if let Some(weak) = weak {
+            let mut listeners = crate::net::TCP_LISTENERS.lock();
+            let already = listeners.iter().any(|w| {
+                w.upgrade()
+                    .map(|s| Arc::as_ptr(&s) == self_ptr)
+                    .unwrap_or(false)
+            });
+            if !already {
+                listeners.push(weak);
+            }
+        }
+    }
+
+    /// Check if this listening socket has a pending connection.
+    /// Called unconditionally after every poll cycle.
+    pub(crate) fn refresh_accept_ready_after_poll(&self) -> bool {
+        let ready = {
+            let inner = self.inner.lock();
+            match &*inner {
+                Inner::Listening(l) => l.has_pending_connection(),
+                _ => false,
+            }
+        };
+
+        if ready {
+            self.accept_waiters
+                .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM);
+        }
+
+        ready
+    }
+
     /// 在 NET_INTERFACE.poll() 之后刷新各状态的事件
     pub fn update_io_events(&self) {
         // NET_INTERFACE.try_poll();
@@ -259,6 +307,8 @@ impl Socket for TcpSocket {
                         .bind(handle, ifindex, listen_addr.addr, listen_addr.port);
                 }
                 *inner = Inner::Listening(listening);
+                drop(inner);
+                Self::register_as_listener(self);
                 Ok(0)
             }
             Err((revert, err)) => {
@@ -383,7 +433,6 @@ impl Socket for TcpSocket {
     }
 
     fn accept(&self, sockfd: u32, addr: usize, addrlen: usize) -> SyscallRet {
-        NET_INTERFACE.poll();
         let mut inner = self.inner.lock();
         if !matches!(&*inner, Inner::Listening(_)) {
             return Err(SyscallErr::EINVAL);
