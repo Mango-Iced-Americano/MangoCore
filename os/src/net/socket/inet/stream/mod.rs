@@ -694,14 +694,19 @@ impl Socket for TcpSocket {
     }
 
     fn try_recv(&self, buf: &mut [u8]) -> Result<isize, SyscallErr> {
+        let fast = self.fast_key_established();
         if self.pollee.load(Ordering::Relaxed) & EPollEvent::EPOLLIN.bits() == 0 {
-            NET_INTERFACE.try_poll();
+            if let Some((_route, ifindex)) = fast {
+                NET_INTERFACE.try_poll_stack(ifindex);
+            } else {
+                NET_INTERFACE.try_poll();
+            }
         }
         if self.read_shutdown.load(Ordering::Acquire) {
             return Ok(0);
         }
 
-        if let Some((route, _ifindex)) = self.fast_key_established() {
+        if let Some((route, _ifindex)) = fast {
             if let Some((ret, ready_after)) =
                 NET_INTERFACE.tcp_routed_socket(route, |tcp_sock| {
                     let result = if tcp_sock.can_recv() {
@@ -751,8 +756,13 @@ impl Socket for TcpSocket {
     }
 
     fn try_send(&self, buf: &[u8], _flags: MsgFlags) -> Result<isize, SyscallErr> {
+        let fast = self.fast_key_established();
         if self.pollee.load(Ordering::Relaxed) & EPollEvent::EPOLLOUT.bits() == 0 {
-            NET_INTERFACE.try_poll();
+            if let Some((_route, ifindex)) = fast {
+                NET_INTERFACE.try_poll_stack(ifindex);
+            } else {
+                NET_INTERFACE.try_poll();
+            }
         }
         if self.write_shutdown.load(Ordering::Acquire) {
             return Err(SyscallErr::EPIPE);
@@ -766,7 +776,7 @@ impl Socket for TcpSocket {
             let _ = self.try_connect();
         }
 
-        if let Some((route, _ifindex)) = self.fast_key_established() {
+        if let Some((route, _ifindex)) = fast {
             if let Some((ret, ready_after)) =
                 NET_INTERFACE.tcp_routed_socket(route, |tcp_sock| {
                     let result = if tcp_sock.can_send() {

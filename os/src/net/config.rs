@@ -408,6 +408,42 @@ impl<'a> NetInterface<'a> {
             _ => false, // lock held by another context, or NetInterface not yet initialized
         }
     }
+    /// Non-blocking poll ONLY the specified stack (by ifindex).
+    /// Skips remove-list draining and accept scanning — those are handled by
+    /// the periodic full poll in the idle loop.
+    pub fn try_poll_stack(&self, ifindex: u32) -> bool {
+        let mut guard = match self.inner.try_lock() {
+            Some(g) => g,
+            None => return false,
+        };
+        let inner = match guard.as_mut() {
+            Some(i) => i,
+            None => return false,
+        };
+        let stack = match inner.stack_mut(ifindex) {
+            Some(s) => s,
+            None => return false,
+        };
+
+        use crate::net::neighbour::CURRENT_POLL_IFINDEX;
+        use crate::net::socket::inet::datagram::udp::dispatch_udp_packets;
+        use smoltcp::time::Instant;
+
+        *CURRENT_POLL_IFINDEX.lock() = stack.nic.nic_id() as u32;
+
+        let now = Instant::from_millis(current_time_duration().as_millis() as i64);
+        let progressed = stack.iface.poll(now, &mut stack.device, &mut stack.sockets);
+        dispatch_udp_packets(&mut stack.sockets);
+        drop(guard);
+
+        if progressed {
+            crate::net::wake_tcp_waiters();
+            crate::net::wake_raw_waiters();
+        }
+        crate::net::wake_tcp_accept_waiters();
+        progressed
+    }
+
     fn poll_once(&self) -> bool {
         let mut progressed = false;
         self.inner_handler(|inner| {
