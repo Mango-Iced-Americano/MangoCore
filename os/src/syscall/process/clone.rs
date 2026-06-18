@@ -8,9 +8,12 @@ use crate::mm::{
 };
 use crate::show_frame_consumption;
 use crate::syscall::errno::*;
-use crate::task::{current_task, signal::Signals, IpcNamespace, MountNamespace, ProcessManager, TaskControlBlock};
+use crate::task::{
+    current_euid, current_task, current_user_token, signal::Signals, IpcNamespace, MountNamespace,
+    ProcessManager, TaskControlBlock,
+};
 use crate::utils::error::SyscallErr;
-use log::{info, warn};
+use log::warn;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -137,8 +140,17 @@ fn write_u32_to_task_user(
     let bytes = value.to_ne_bytes();
     let vm = task.process.vm();
     let mut vm = vm.lock();
+    let base = ptr as usize;
+    let page_offset = base & (PAGE_SIZE - 1);
+    if page_offset <= PAGE_SIZE - bytes.len() {
+        let pa = vm.fault_in_user_va(VirtAddr::from(base), FaultAccess::Store)?;
+        let page = pa.floor().get_bytes_array();
+        let offset = pa.page_offset();
+        page[offset..offset + bytes.len()].copy_from_slice(&bytes);
+        return Ok(());
+    }
     for (offset, byte) in bytes.iter().enumerate() {
-        let pa = vm.fault_in_user_va(VirtAddr::from(ptr as usize + offset), FaultAccess::Store)?;
+        let pa = vm.fault_in_user_va(VirtAddr::from(base + offset), FaultAccess::Store)?;
         pa.floor().get_bytes_array()[pa.page_offset()] = *byte;
     }
     Ok(())
@@ -191,16 +203,14 @@ fn sys_clone_inner(
     if flags.contains(CloneFlags::CLONE_NEWNS) && flags.contains(CloneFlags::CLONE_FS) {
         return EINVAL;
     }
-    if (flags.contains(CloneFlags::CLONE_NEWUTS) || flags.contains(CloneFlags::CLONE_NEWNET)
-        || flags.contains(CloneFlags::CLONE_NEWNS) || flags.contains(CloneFlags::CLONE_NEWIPC))
-        && parent.acquire_inner_lock().euid != 0
+    if (flags.contains(CloneFlags::CLONE_NEWUTS)
+        || flags.contains(CloneFlags::CLONE_NEWNET)
+        || flags.contains(CloneFlags::CLONE_NEWNS)
+        || flags.contains(CloneFlags::CLONE_NEWIPC))
+        && parent.euid() != 0
     {
         return EPERM;
     }
-    info!(
-        "[sys_clone] flags: {:?}, stack: {:?}, exit_signal: {:?}, ptid: {:?}, tls: {:?}, ctid: {:?}",
-        flags, stack, exit_signal, ptid, tls, ctid
-    );
     let mut child: Option<Arc<TaskControlBlock>> = None;
     show_frame_consumption! {
         "clone";
@@ -225,9 +235,17 @@ fn sys_clone_inner(
         Some(task) => task,
         None => return ENOMEM,
     };
+    // Allocate ASID on la64 at task creation (safe to take locks here).
+    #[cfg(target_arch = "loongarch64")]
+    {
+        child.asid.store(
+            crate::hal::arch::loongarch64::tlb::asid_alloc(),
+            core::sync::atomic::Ordering::Relaxed,
+        );
+    }
     let new_tid = child.tid.0;
     if flags.contains(CloneFlags::CLONE_PARENT_SETTID) {
-        match UserPtrMut::new(ptid).write(parent.get_user_token(), &(new_tid as u32)) {
+        match UserPtrMut::new(ptid).write(current_user_token(), &(new_tid as u32)) {
             Ok(()) => {}
             Err(errno) => {
                 child.cleanup_unpublished_clone(flags.contains(CloneFlags::CLONE_VM));
@@ -269,7 +287,7 @@ fn sys_clone_inner(
                 return -(err as isize);
             }
         };
-        match UserPtrMut::new(pidfd_ptr).write(parent.get_user_token(), &(pidfd as u32)) {
+        match UserPtrMut::new(pidfd_ptr).write(current_user_token(), &(pidfd as u32)) {
             Ok(()) => allocated_pidfd = Some(pidfd),
             Err(errno) => {
                 drop_parent_fd(&parent, pidfd);
@@ -285,7 +303,7 @@ fn sys_clone_inner(
         child.cleanup_unpublished_clone(flags.contains(CloneFlags::CLONE_VM));
         return errno;
     }
-    ProcessManager::schedule_clone_child(&parent, child.clone(), flags);
+    ProcessManager::schedule_clone_child(&parent, child, flags);
     new_tid as isize
 }
 
@@ -333,9 +351,11 @@ pub fn sys_unshare(flags: u32) -> isize {
     }
 
     let task = current_task().unwrap();
-    if (flags.contains(CloneFlags::CLONE_NEWUTS) || flags.contains(CloneFlags::CLONE_NEWNET)
-        || flags.contains(CloneFlags::CLONE_NEWNS) || flags.contains(CloneFlags::CLONE_NEWIPC))
-        && task.acquire_inner_lock().euid != 0
+    if (flags.contains(CloneFlags::CLONE_NEWUTS)
+        || flags.contains(CloneFlags::CLONE_NEWNET)
+        || flags.contains(CloneFlags::CLONE_NEWNS)
+        || flags.contains(CloneFlags::CLONE_NEWIPC))
+        && task.euid() != 0
     {
         return EPERM;
     }
@@ -372,7 +392,7 @@ pub fn sys_unshare(flags: u32) -> isize {
 }
 
 pub fn sys_clone3(uargs: *const u8, size: usize) -> isize {
-    let token = current_task().unwrap().get_user_token();
+    let token = current_user_token();
     let args = match read_clone3_args(uargs, size, token) {
         Ok(args) => args,
         Err(errno) => return errno,
@@ -433,14 +453,16 @@ pub fn sys_setns(fd: usize, nstype: usize) -> isize {
     const CLONE_NEWNET_VAL: usize = 0x40000000;
     const CLONE_NEWNS_VAL: usize = 0x00020000;
     const CLONE_NEWIPC_VAL: usize = 0x08000000;
-    if nstype != 0 && nstype != CLONE_NEWNET_VAL
-        && nstype != CLONE_NEWNS_VAL && nstype != CLONE_NEWIPC_VAL
+    if nstype != 0
+        && nstype != CLONE_NEWNET_VAL
+        && nstype != CLONE_NEWNS_VAL
+        && nstype != CLONE_NEWIPC_VAL
     {
         return EINVAL;
     }
 
     let task = current_task().unwrap();
-    let euid = task.acquire_inner_lock().euid;
+    let euid = current_euid();
     let files_ref = task.process.files();
     let fd_table = files_ref.lock();
     let file = match fd_table.get_file(fd) {
@@ -469,10 +491,12 @@ pub fn sys_setns(fd: usize, nstype: usize) -> isize {
     // ProcNsMntInode / ProcNsIpcInode to be added in a separate task;
     // setns branches for those will be wired once the inode types exist.
 
-    use crate::fs::procfs::pid::ns::{ProcNsMntInode, ProcNsIpcInode};
+    use crate::fs::procfs::pid::ns::{ProcNsIpcInode, ProcNsMntInode};
 
     if let Some(ns_inode) = inode.as_any_ref().downcast_ref::<ProcNsMntInode>() {
-        if nstype != 0 && nstype != CLONE_NEWNS_VAL { return EINVAL; }
+        if nstype != 0 && nstype != CLONE_NEWNS_VAL {
+            return EINVAL;
+        }
         if euid != 0 {
             return EPERM;
         }
@@ -483,7 +507,9 @@ pub fn sys_setns(fd: usize, nstype: usize) -> isize {
     }
 
     if let Some(ns_inode) = inode.as_any_ref().downcast_ref::<ProcNsIpcInode>() {
-        if nstype != 0 && nstype != CLONE_NEWIPC_VAL { return EINVAL; }
+        if nstype != 0 && nstype != CLONE_NEWIPC_VAL {
+            return EINVAL;
+        }
         if euid != 0 {
             return EPERM;
         }

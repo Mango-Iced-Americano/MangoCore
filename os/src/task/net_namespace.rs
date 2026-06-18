@@ -3,13 +3,13 @@
 //! Each [`NetNamespace`] owns its own set of network devices and routing table,
 //! providing network stack isolation between namespaces.
 
+use crate::net::iface::{DeviceKind, Iface};
+use crate::net::net_core::{NetDeviceEntry, IFF_LOOPBACK, IFF_RUNNING, IFF_UP, IF_OPER_UP};
+use crate::net::routing::Router;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
-use crate::net::iface::{DeviceKind, Iface};
-use crate::net::net_core::{NetDeviceEntry, IF_OPER_UP, IFF_LOOPBACK, IFF_RUNNING, IFF_UP};
-use crate::net::routing::Router;
 use core::sync::atomic::{AtomicU64, Ordering};
 use lazy_static::lazy_static;
 use smoltcp::wire::{IpAddress, IpCidr};

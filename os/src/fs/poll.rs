@@ -8,7 +8,7 @@ use crate::{
     signal_type,
     syscall::errno::EFAULT,
     task::signal::Signals,
-    timer::{get_clock_freq, get_time, TimeSpec, NSEC_PER_SEC},
+    timer::{get_time, timespec_to_ticks_ceil, TimeSpec, NSEC_PER_SEC},
     utils::error::SyscallErr,
 };
 use alloc::vec::Vec;
@@ -158,12 +158,6 @@ fn poll_wait_empty(deadline: Option<TimeSpec>) -> WaitResult {
     WaitQueue::wait_on_queues_interruptible_timeout(&[], || None, deadline)
 }
 
-fn timespec_to_ticks(time: TimeSpec) -> usize {
-    time.tv_sec
-        .saturating_mul(get_clock_freq())
-        .saturating_add(time.tv_nsec.saturating_mul(get_clock_freq()) / NSEC_PER_SEC)
-}
-
 fn try_short_empty_timeout(deadline: Option<TimeSpec>) -> Option<WaitResult> {
     let deadline = deadline?;
     let now = TimeSpec::now();
@@ -180,7 +174,7 @@ fn try_short_empty_timeout(deadline: Option<TimeSpec>) -> Option<WaitResult> {
         return None;
     }
 
-    let deadline_ticks = timespec_to_ticks(deadline);
+    let deadline_ticks = timespec_to_ticks_ceil(deadline);
     let task = current_task().unwrap();
     let mut spins = 0usize;
     loop {

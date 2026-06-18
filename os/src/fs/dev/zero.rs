@@ -37,34 +37,6 @@ impl IndexNode for Zero {
         Ok(buf.len())
     }
 
-    fn read_at_user(
-        &self,
-        _offset: usize,
-        len: usize,
-        dst: &mut crate::mm::UserBuffer,
-    ) -> Result<usize, SyscallErr> {
-        let n = dst.fill_at(0, len, 0);
-        Ok(n)
-    }
-
-    fn write_at_user(
-        &self,
-        _offset: usize,
-        len: usize,
-        _src: &crate::mm::UserBuffer,
-    ) -> Result<usize, SyscallErr> {
-        // discard — same semantics as /dev/null write
-        Ok(len)
-    }
-
-    fn supports_user_buffer_io(&self) -> bool {
-        true
-    }
-
-    fn is_discard_write(&self) -> bool {
-        true
-    }
-
     fn metadata(&self) -> Result<Metadata, SyscallErr> {
         Ok(Metadata {
             dev_id: 0,

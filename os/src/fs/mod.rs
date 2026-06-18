@@ -557,6 +557,7 @@ pub fn vfs_lookup(
     path: &str,
     follow_final: bool,
 ) -> Result<Arc<dyn self::vfs::IndexNode>, isize> {
+    crate::task::perf::record_vfs_lookup();
     use self::vfs::{FileType, FilePrivateData, IndexNode as _};
     let root_inode: Arc<dyn self::vfs::IndexNode> = current_root_inode();
 
@@ -607,9 +608,7 @@ pub fn vfs_lookup(
         }
 
         let next = current.find(name).map_err(|e| -(e as isize))?;
-
-        let next_md = next.metadata().map_err(|e| -(e as isize))?;
-        let file_type = next_md.file_type;
+        let file_type = next.metadata().map_err(|e| -(e as isize))?.file_type;
 
         if !is_last && file_type != FileType::Dir && file_type != FileType::SymLink {
             return Err(crate::syscall::errno::ENOTDIR);
@@ -627,7 +626,8 @@ pub fn vfs_lookup(
 
             // 读取符号链接内容（所有 inode 现在都原生实现 IndexNode）
             let target: String = {
-                let link_len = next_md.size.max(0) as usize;
+                let md = next.metadata().map_err(|e| -(e as isize))?;
+                let link_len = md.size.max(0) as usize;
                 let mut link_buf = alloc::vec![0u8; link_len.min(4096)];
                 let n = next
                     .read_at(

@@ -6,11 +6,30 @@ use bitflags::*;
 use core::arch::asm;
 use riscv::register::satp;
 
+/// 将 vpn 转换为字节地址后做单页 TLB 刷新
+macro_rules! tlb_invalidate_vpn {
+    ($vpn:expr) => {
+        $crate::hal::arch::riscv::sv39::tlb_invalidate_addr(
+            usize::from($crate::mm::VirtAddr::from($vpn)),
+        )
+    };
+}
+
 #[inline(always)]
 pub fn tlb_invalidate() {
     unsafe {
         asm!("sfence.vma");
     }
+    crate::task::perf::record_tlb_full();
+}
+
+/// 只刷指定虚拟地址对应的 TLB 条目，不影响其他条目
+#[inline(always)]
+pub fn tlb_invalidate_addr(vaddr: usize) {
+    unsafe {
+        asm!("sfence.vma {}, zero", in(reg) vaddr);
+    }
+    crate::task::perf::record_tlb_page();
 }
 bitflags! {
     /// Page Table Entry flags
@@ -231,13 +250,12 @@ impl PageTable for Sv39PageTable {
         if pte.is_valid() {
             return Err(MemoryError::AlreadyMapped);
         }
-        *pte = Sv39PageTableEntry::new(
-            ppn,
-            // xein TODO:
-            PTEFlags::from_bits(flags.bits()).unwrap() | PTEFlags::V | PTEFlags::A | PTEFlags::D,
-            // PTEFlags::from_bits(flags.bits()).unwrap() | PTEFlags::V,
-        );
-        tlb_invalidate();
+        let mut pte_flags = PTEFlags::from_bits(flags.bits()).unwrap() | PTEFlags::V | PTEFlags::A | PTEFlags::D;
+        if flags.contains(MapPermission::G) {
+            pte_flags |= PTEFlags::G;
+        }
+        *pte = Sv39PageTableEntry::new(ppn, pte_flags);
+        tlb_invalidate_vpn!(vpn);
         Ok(())
     }
     #[allow(unused)]
@@ -248,7 +266,7 @@ impl PageTable for Sv39PageTable {
         let pte = self.find_pte_refmut(vpn).unwrap();
         assert!(pte.is_valid(), "vpn {:?} is invalid before unmapping", vpn);
         *pte = Sv39PageTableEntry::empty();
-        tlb_invalidate();
+        tlb_invalidate_vpn!(vpn);
     }
     /// Translate the `vpn` into its corresponding `Some(PageTableEntry)` if exists
     /// `None` is returned if nothing is found.
@@ -270,11 +288,22 @@ impl PageTable for Sv39PageTable {
     fn block_and_ret_mut(&self, vpn: VirtPageNum) -> Option<PhysPageNum> {
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.revoke_write();
-            tlb_invalidate();
+            tlb_invalidate_vpn!(vpn);
             Some(pte.ppn())
         } else {
             None
         }
+    }
+    fn block_and_ret_mut_no_flush(&self, vpn: VirtPageNum) -> Option<PhysPageNum> {
+        if let Some(pte) = self.find_pte_refmut(vpn) {
+            pte.revoke_write();
+            Some(pte.ppn())
+        } else {
+            None
+        }
+    }
+    fn flush_tlb(&self) {
+        tlb_invalidate();
     }
     /// Return the physical token to current page.
     fn token(&self) -> usize {
@@ -283,7 +312,7 @@ impl PageTable for Sv39PageTable {
     fn revoke_read(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.revoke_read();
-            tlb_invalidate();
+            tlb_invalidate_vpn!(vpn);
             Ok(())
         } else {
             Err(())
@@ -292,7 +321,7 @@ impl PageTable for Sv39PageTable {
     fn revoke_write(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.revoke_write();
-            tlb_invalidate();
+            tlb_invalidate_vpn!(vpn);
             Ok(())
         } else {
             Err(())
@@ -301,7 +330,7 @@ impl PageTable for Sv39PageTable {
     fn revoke_execute(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.revoke_execute();
-            tlb_invalidate();
+            tlb_invalidate_vpn!(vpn);
             Ok(())
         } else {
             Err(())
@@ -310,7 +339,7 @@ impl PageTable for Sv39PageTable {
     fn set_ppn(&mut self, vpn: VirtPageNum, ppn: PhysPageNum) -> Result<(), ()> {
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.set_ppn(ppn);
-            tlb_invalidate();
+            tlb_invalidate_vpn!(vpn);
             Ok(())
         } else {
             Err(())
@@ -319,7 +348,7 @@ impl PageTable for Sv39PageTable {
     fn set_pte_flags(&mut self, vpn: VirtPageNum, flags: MapPermission) -> Result<(), ()> {
         if let Some(pte) = self.find_pte_refmut(vpn) {
             pte.set_permission(flags);
-            tlb_invalidate();
+            tlb_invalidate_vpn!(vpn);
             Ok(())
         } else {
             Err(())
@@ -350,6 +379,7 @@ impl PageTable for Sv39PageTable {
         unsafe {
             satp::write(satp);
             asm!("sfence.vma");
+            crate::task::perf::record_tlb_activate();
         };
     }
     fn is_valid(&self, vpn: VirtPageNum) -> Option<bool> {

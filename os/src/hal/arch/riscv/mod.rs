@@ -12,7 +12,7 @@ pub mod rv_board;
 pub fn machine_init() {
     trap::init();
     trap::enable_timer_interrupt();
-    set_next_trigger();
+    // First timer deadline is set by timer_subsystem_init() after boot.
 }
 
 use time::set_next_trigger;

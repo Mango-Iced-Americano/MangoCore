@@ -3,20 +3,20 @@
     内容与RISCV版本相同，无需修改
 */
 use core::hint::spin_loop;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{
     mm::UserPtr,
     syscall::errno::*,
     task::{
-        block_current_and_run_next_with_lock_checked, current_task,
+        block_current_and_run_next_with_lock_checked, current_task, current_task_ref,
         discard_non_actionable_unblocked_signals, has_actionable_signal, task_manager_counts,
         wait_with_timeout, TaskControlBlock,
     },
-    timer::TimeSpec,
+    timer::{get_time, timespec_to_ticks_ceil, TimeSpec},
 };
 use alloc::{collections::BTreeMap, sync::Arc};
 use lazy_static::lazy_static;
-use log::*;
 use num_enum::FromPrimitive;
 
 use super::manager::{WaitQueue, WaitResult};
@@ -79,6 +79,7 @@ lazy_static! {
     pub static ref PROCESS_SHARED_FUTEX: spin::Mutex<BTreeMap<usize, WaitQueue>> =
         spin::Mutex::new(BTreeMap::new());
 }
+static PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY: AtomicBool = AtomicBool::new(false);
 
 /// Fast Userspace Mutex
 /// 快速用户空间互斥锁
@@ -102,9 +103,21 @@ fn wait_queue_for_key(map: &mut BTreeMap<usize, WaitQueue>, key: usize) -> &mut 
     map.entry(key).or_insert_with(WaitQueue::new)
 }
 
+fn shared_wait_queue_for_key(map: &mut BTreeMap<usize, WaitQueue>, key: usize) -> &mut WaitQueue {
+    PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY.store(true, Ordering::Relaxed);
+    wait_queue_for_key(map, key)
+}
+
+fn refresh_shared_futex_nonempty(map: &BTreeMap<usize, WaitQueue>) {
+    PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY.store(!map.is_empty(), Ordering::Relaxed);
+}
+
 /// 清理 PROCESS_SHARED_FUTEX 中所有空 WaitQueue 条目。
 /// 降频至每 64 个 tick 执行一次，避免频繁扫描 BTreeMap。
 pub fn compact_shared_futex() {
+    if !PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY.load(Ordering::Relaxed) {
+        return;
+    }
     static TICK: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
     let t = TICK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     if t % 64 != 0 {
@@ -115,6 +128,7 @@ pub fn compact_shared_futex() {
         wq.compact_stale();
         !wq.is_empty()
     });
+    refresh_shared_futex_nonempty(&map);
 }
 
 fn remove_empty_wait_queue(map: &mut BTreeMap<usize, WaitQueue>, key: usize) {
@@ -206,7 +220,7 @@ fn deadline_expired(deadline: Option<TimeSpec>) -> bool {
 fn finish_waitv_private(
     futex: &mut Futex,
     entries: &[FutexWaitEntry],
-    task: &Arc<TaskControlBlock>,
+    task: &TaskControlBlock,
 ) -> Option<usize> {
     let mut woken_key = None;
 
@@ -233,7 +247,7 @@ fn finish_waitv_private(
 fn finish_waitv_shared(
     futex: &mut BTreeMap<usize, WaitQueue>,
     entries: &[FutexWaitEntry],
-    task: &Arc<TaskControlBlock>,
+    task: &TaskControlBlock,
 ) -> Option<usize> {
     let mut woken_key = None;
 
@@ -254,6 +268,7 @@ fn finish_waitv_shared(
         remove_empty_wait_queue(futex, entry.futex_key);
     }
 
+    refresh_shared_futex_nonempty(futex);
     woken_key.and_then(|key| entries.iter().position(|entry| entry.futex_key == key))
 }
 
@@ -269,7 +284,7 @@ fn try_single_thread_short_timeout(
         return None;
     }
 
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     if task.process.live_thread_count() != 1 {
         return None;
     }
@@ -280,6 +295,7 @@ fn try_single_thread_short_timeout(
         return None;
     }
 
+    let deadline_ticks = timespec_to_ticks_ceil(deadline);
     let mut spins = 0usize;
     loop {
         match futex_word.read(token) {
@@ -287,7 +303,7 @@ fn try_single_thread_short_timeout(
             Ok(_) => return Some(WaitResult::Ready(EAGAIN)),
             Err(errno) => return Some(WaitResult::Ready(errno)),
         }
-        if TimeSpec::now() >= deadline {
+        if get_time() >= deadline_ticks {
             return Some(WaitResult::TimedOut);
         }
         if has_actionable_signal(&task) {
@@ -346,18 +362,19 @@ where
     F: FnMut(&mut T) -> Option<isize>,
 {
     let task_weak = Arc::downgrade(task);
+    let deadline_ticks = timespec_to_ticks_ceil(deadline);
 
     loop {
-        if TimeSpec::now() >= deadline {
+        if get_time() >= deadline_ticks {
             let mut guard = lock.lock();
-            queue_of(&mut guard).finish_wait(task);
+            queue_of(&mut guard).finish_wait(task.as_ref());
             return WaitResult::TimedOut;
         }
 
         {
             let mut guard = lock.lock();
             if let Some(res) = cond(&mut guard) {
-                queue_of(&mut guard).finish_wait(task);
+                queue_of(&mut guard).finish_wait(task.as_ref());
                 return WaitResult::Ready(res);
             }
             if !queue_of(&mut guard).contains(&task_weak) {
@@ -367,7 +384,7 @@ where
 
         if has_actionable_signal(task) {
             let mut guard = lock.lock();
-            queue_of(&mut guard).finish_wait(task);
+            queue_of(&mut guard).finish_wait(task.as_ref());
             return WaitResult::Interrupted;
         }
         discard_non_actionable_unblocked_signals(task);
@@ -403,15 +420,15 @@ where
         queue_of(&mut guard).prepare_to_wait(Arc::downgrade(&task));
 
         if let Some(res) = cond(&mut guard) {
-            queue_of(&mut guard).finish_wait(&task);
+            queue_of(&mut guard).finish_wait(task.as_ref());
             return WaitResult::Ready(res);
         }
         if deadline_expired(deadline) {
-            queue_of(&mut guard).finish_wait(&task);
+            queue_of(&mut guard).finish_wait(task.as_ref());
             return WaitResult::TimedOut;
         }
         if has_actionable_signal(&task) {
-            queue_of(&mut guard).finish_wait(&task);
+            queue_of(&mut guard).finish_wait(task.as_ref());
             return WaitResult::Interrupted;
         }
         discard_non_actionable_unblocked_signals(&task);
@@ -443,9 +460,9 @@ where
             no_signal && not_timed_out
         });
 
-        let task = current_task().unwrap();
+        let task = current_task_ref().unwrap();
         let mut guard = lock.lock();
-        let removed = queue_of(&mut guard).finish_wait(&task);
+        let removed = queue_of(&mut guard).finish_wait(task);
         drop(guard);
         task.acquire_inner_lock().refresh_real_timer();
 
@@ -463,11 +480,11 @@ fn do_futex_wait_until(
     val: u32,
     deadline: Option<TimeSpec>,
 ) -> isize {
-    let task = current_task().unwrap();
-    let futex_table = task.process.futex().clone();
-    drop(task);
+    super::perf::record_futex_wait(false, deadline.is_some());
+    let futex_table = current_task_ref().unwrap().process.futex().clone();
 
     if let Some(wait_result) = try_single_thread_short_timeout(futex_word, token, val, deadline) {
+        super::perf::record_futex_wait_result(wait_result);
         return futex_wait_result_to_errno(wait_result);
     }
 
@@ -477,11 +494,6 @@ fn do_futex_wait_until(
         |_: &mut Futex| match futex_word.read(token) {
             Ok(value) if value == val => None,
             Ok(value) => {
-                trace!(
-                    "[futex] --wait-- **not match** futex: {:X}, val: {:X}",
-                    value,
-                    val
-                );
                 Some(EAGAIN)
             }
             Err(errno) => Some(errno),
@@ -490,6 +502,7 @@ fn do_futex_wait_until(
         SUCCESS,
     );
     futex_table.lock().remove_empty(futex_key);
+    super::perf::record_futex_wait_result(wait_result);
 
     futex_wait_result_to_errno(wait_result)
 }
@@ -522,14 +535,16 @@ pub fn do_futex_wait_bitset(
     do_futex_wait_until(futex_word, token, futex_key, val, deadline)
 }
 
-pub fn do_futex_waitv(entries: &[FutexWaitEntry], token: usize, deadline: Option<TimeSpec>) -> isize {
+pub fn do_futex_waitv(
+    entries: &[FutexWaitEntry],
+    token: usize,
+    deadline: Option<TimeSpec>,
+) -> isize {
     if let Some(result) = check_waitv_values(entries, token) {
         return result;
     }
 
-    let task = current_task().unwrap();
-    let futex_table = task.process.futex().clone();
-    drop(task);
+    let futex_table = current_task_ref().unwrap().process.futex().clone();
 
     loop {
         if deadline_expired(deadline) {
@@ -545,15 +560,15 @@ pub fn do_futex_waitv(entries: &[FutexWaitEntry], token: usize, deadline: Option
         }
 
         if let Some(result) = check_waitv_values(entries, token) {
-            finish_waitv_private(&mut guard, entries, &task);
+            finish_waitv_private(&mut guard, entries, task.as_ref());
             return result;
         }
         if deadline_expired(deadline) {
-            finish_waitv_private(&mut guard, entries, &task);
+            finish_waitv_private(&mut guard, entries, task.as_ref());
             return ETIMEDOUT;
         }
         if has_actionable_signal(&task) {
-            finish_waitv_private(&mut guard, entries, &task);
+            finish_waitv_private(&mut guard, entries, task.as_ref());
             return EINTR;
         }
         discard_non_actionable_unblocked_signals(&task);
@@ -569,9 +584,9 @@ pub fn do_futex_waitv(entries: &[FutexWaitEntry], token: usize, deadline: Option
                 && check_waitv_values(entries, token).is_none()
         });
 
-        let task = current_task().unwrap();
+        let task = current_task_ref().unwrap();
         let mut guard = futex_table.lock();
-        if let Some(index) = finish_waitv_private(&mut guard, entries, &task) {
+        if let Some(index) = finish_waitv_private(&mut guard, entries, task) {
             task.acquire_inner_lock().refresh_real_timer();
             return index as isize;
         }
@@ -583,12 +598,17 @@ pub fn do_futex_waitv(entries: &[FutexWaitEntry], token: usize, deadline: Option
 /// 唤醒等待在全局 process-shared futex（物理地址 key）上的最多 val 个任务
 pub fn futex_wake_shared(phys_key: usize, val: u32) -> isize {
     let mut shared = PROCESS_SHARED_FUTEX.lock();
-    wake_waiters(&mut shared, phys_key, val)
+    let woke = wake_waiters(&mut shared, phys_key, val);
+    refresh_shared_futex_nonempty(&shared);
+    super::perf::record_futex_wake(true, woke);
+    woke
 }
 
 pub fn futex_requeue_shared(phys_key: usize, phys_key_2: usize, val: u32, val2: usize) -> isize {
     let mut shared = PROCESS_SHARED_FUTEX.lock();
-    requeue_waiters(&mut shared, phys_key, phys_key_2, val, val2)
+    let ret = requeue_waiters(&mut shared, phys_key, phys_key_2, val, val2);
+    refresh_shared_futex_nonempty(&shared);
+    ret
 }
 
 pub fn do_futex_waitv_shared(
@@ -608,19 +628,20 @@ pub fn do_futex_waitv_shared(
         let task = current_task().unwrap();
         let mut guard = PROCESS_SHARED_FUTEX.lock();
         for entry in entries {
-            wait_queue_for_key(&mut guard, entry.futex_key).prepare_to_wait(Arc::downgrade(&task));
+            shared_wait_queue_for_key(&mut guard, entry.futex_key)
+                .prepare_to_wait(Arc::downgrade(&task));
         }
 
         if let Some(result) = check_waitv_values(entries, token) {
-            finish_waitv_shared(&mut guard, entries, &task);
+            finish_waitv_shared(&mut guard, entries, task.as_ref());
             return result;
         }
         if deadline_expired(deadline) {
-            finish_waitv_shared(&mut guard, entries, &task);
+            finish_waitv_shared(&mut guard, entries, task.as_ref());
             return ETIMEDOUT;
         }
         if has_actionable_signal(&task) {
-            finish_waitv_shared(&mut guard, entries, &task);
+            finish_waitv_shared(&mut guard, entries, task.as_ref());
             return EINTR;
         }
         discard_non_actionable_unblocked_signals(&task);
@@ -636,9 +657,9 @@ pub fn do_futex_waitv_shared(
                 && check_waitv_values(entries, token).is_none()
         });
 
-        let task = current_task().unwrap();
+        let task = current_task_ref().unwrap();
         let mut guard = PROCESS_SHARED_FUTEX.lock();
-        if let Some(index) = finish_waitv_shared(&mut guard, entries, &task) {
+        if let Some(index) = finish_waitv_shared(&mut guard, entries, task) {
             task.acquire_inner_lock().refresh_real_timer();
             return index as isize;
         }
@@ -655,21 +676,18 @@ fn do_futex_wait_shared_until(
     deadline: Option<TimeSpec>,
     phys_key: usize,
 ) -> isize {
+    super::perf::record_futex_wait(true, deadline.is_some());
     if let Some(wait_result) = try_single_thread_short_timeout(futex_word, token, val, deadline) {
+        super::perf::record_futex_wait_result(wait_result);
         return futex_wait_result_to_errno(wait_result);
     }
 
     let wait_result = futex_wait_event_interruptible_timeout_locked(
         &PROCESS_SHARED_FUTEX,
-        |shared| wait_queue_for_key(shared, phys_key),
+        |shared| shared_wait_queue_for_key(shared, phys_key),
         |_: &mut BTreeMap<usize, WaitQueue>| match futex_word.read(token) {
             Ok(value) if value == val => None,
             Ok(value) => {
-                trace!(
-                    "[futex-shared] --wait-- **not match** futex: {:X}, val: {:X}",
-                    value,
-                    val
-                );
                 Some(EAGAIN)
             }
             Err(errno) => Some(errno),
@@ -677,7 +695,12 @@ fn do_futex_wait_shared_until(
         deadline,
         SUCCESS,
     );
-    remove_empty_wait_queue(&mut PROCESS_SHARED_FUTEX.lock(), phys_key);
+    {
+        let mut shared = PROCESS_SHARED_FUTEX.lock();
+        remove_empty_wait_queue(&mut shared, phys_key);
+        refresh_shared_futex_nonempty(&shared);
+    }
+    super::perf::record_futex_wait_result(wait_result);
 
     futex_wait_result_to_errno(wait_result)
 }
@@ -719,7 +742,9 @@ impl Futex {
 
     /// 唤醒等待在指定 Futex 地址上的最多 val 个任务
     pub fn wake(&mut self, futex_key: usize, val: u32) -> isize {
-        wake_waiters(&mut self.inner, futex_key, val)
+        let woke = wake_waiters(&mut self.inner, futex_key, val);
+        super::perf::record_futex_wake(false, woke);
+        woke
     }
 
     fn wait_queue_mut(&mut self, futex_key: usize) -> &mut WaitQueue {

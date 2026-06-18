@@ -9,6 +9,7 @@ pub use arch::{console_flush, console_getchar, console_putchar};
 pub use arch::{local_irq_restore, local_irq_save};
 pub use arch::{get_bad_addr, get_bad_instruction, get_exception_cause};
 pub use arch::{get_clock_freq, get_time};
+pub use arch::program_timer_delta;
 pub use arch::{trap_cx_bottom_from_tid, ustack_bottom_from_tid};
 pub use arch::{trap_handler, trap_return};
 pub use arch::{

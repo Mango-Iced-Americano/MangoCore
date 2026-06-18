@@ -66,6 +66,12 @@ pub trait PageTable {
     /// `None` is returned if nothing is found.
     fn translate_va(&self, va: VirtAddr) -> Option<PhysAddr>;
     fn block_and_ret_mut(&self, vpn: VirtPageNum) -> Option<PhysPageNum>;
+    /// Revoke writable permission and return the mapped PPN without flushing TLB.
+    ///
+    /// Callers that batch multiple PTE updates must call `flush_tlb()` once after
+    /// finishing the batch.
+    fn block_and_ret_mut_no_flush(&self, vpn: VirtPageNum) -> Option<PhysPageNum>;
+    fn flush_tlb(&self);
     /// Return the physical token to current page.
     fn token(&self) -> usize;
     fn revoke_read(&mut self, vpn: VirtPageNum) -> Result<(), ()>;

@@ -15,8 +15,7 @@ pub struct MountNamespace {
 }
 
 lazy_static! {
-    pub static ref INIT_MOUNT_NAMESPACE: Arc<MountNamespace> =
-        Arc::new(MountNamespace { id: 0 });
+    pub static ref INIT_MOUNT_NAMESPACE: Arc<MountNamespace> = Arc::new(MountNamespace { id: 0 });
 }
 
 static NEXT_MNT_NS_ID: AtomicU64 = AtomicU64::new(1);

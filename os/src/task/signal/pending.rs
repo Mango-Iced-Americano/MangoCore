@@ -158,5 +158,8 @@ impl Default for SignalQueue {
 }
 
 pub fn is_realtime_signal(signal: Signals) -> bool {
-    signal.to_signum().map(|signum| signum >= 32).unwrap_or(false)
+    signal
+        .to_signum()
+        .map(|signum| signum >= 32)
+        .unwrap_or(false)
 }

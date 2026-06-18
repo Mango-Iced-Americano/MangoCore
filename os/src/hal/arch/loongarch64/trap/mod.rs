@@ -3,7 +3,7 @@ mod mem_access;
 use self::context::GeneralRegs;
 
 use super::register::{self, Exception, Interrupt, Trap, ERA};
-use super::{pre_start_init, MErrEntry};
+use super::MErrEntry;
 use crate::hal::arch::get_clock_freq;
 use crate::hal::arch::loongarch64::laflex::LAFlexPageTable;
 use crate::hal::arch::loongarch64::register::{CrMd, ECfg, LineBasedInterrupt, PrMd, TCfg, TIClr};
@@ -15,7 +15,7 @@ use crate::mm::{
 use crate::net::config::NET_INTERFACE;
 use crate::syscall::syscall;
 use crate::task::{
-    check_oom_kill, current_task, current_trap_cx, current_user_token, do_signal, do_wake_expired,
+    current_task_ref, current_trap_cx, current_user_token, do_signal, do_wake_expired,
     signal::SigInfo, suspend_current_and_run_next, Signals,
 };
 use core::arch::{asm, global_asm};
@@ -147,12 +147,8 @@ fn set_user_trap_entry() {
 }
 
 pub fn enable_timer_interrupt() {
-    let timer_freq = get_clock_freq();
-    TCfg::read()
-        .set_enable(true)
-        .set_periodic(false)
-        .set_init_val(timer_freq / TICKS_PER_SEC)
-        .write();
+    // Only enable the interrupt vector — the actual timer deadline is
+    // programmed later by timer_subsystem_init() → program_timer_delta().
     ECfg::empty()
         .set_line_based_interrupt_vector(LineBasedInterrupt::TIMER)
         .write();
@@ -165,37 +161,47 @@ pub fn trap_handler() -> ! {
     }
     set_kernel_trap_entry();
 
-    {
-        let task = current_task().unwrap();
-        let mut inner = task.acquire_inner_lock();
-        inner.update_process_times_enter_trap();
-    }
-
     let cause = get_exception_cause();
     let stval = get_bad_addr();
     let badi = get_bad_instruction();
-    log::debug!("[trap_handler]Cause:{:?}", cause);
-    match cause {
-        Trap::Exception(Exception::Syscall) => {
-            // jump to next instruction anyway
-            let mut cx = current_trap_cx();
+
+    if let Trap::Exception(Exception::Syscall) = cause {
+        let task = current_task_ref().unwrap();
+        let (syscall_id, args) = {
+            let mut inner = task.acquire_inner_lock();
+            inner.update_process_times_enter_trap();
+            let cx = inner.get_trap_cx();
             ERA::read().next_ins().write();
             cx.gp.pc += 4;
             cx.origin_a0 = cx.gp.a0; // 保存重启参数
             let syscall_id = cx.gp.a7;
-            // get system call return value
-            let result = syscall(
+            (
                 syscall_id,
                 [cx.gp.a0, cx.gp.a1, cx.gp.a2, cx.gp.a3, cx.gp.a4, cx.gp.a5],
-            );
-            // cx is changed during sys_exec (or restored by sigreturn), so we have to call it again
-            cx = current_trap_cx();
-            // sigreturn(139) already restored the full trap context (including a0) from the signal frame.
-            // Overwriting a0 here would corrupt the restored value — skip it.
+            )
+        };
+        let result = syscall(syscall_id, args);
+        // The trap context may be replaced by execve or restored by sigreturn,
+        // so fetch it again after syscall returns.
+        {
+            let mut inner = task.acquire_inner_lock();
+            let cx = inner.get_trap_cx();
+            // sigreturn(139) already restored the full trap context (including a0).
             if syscall_id != 139 {
                 cx.gp.a0 = result as usize;
             }
+            inner.update_process_times_leave_trap(cause);
         }
+        trap_return();
+    }
+
+    {
+        let task = current_task_ref().unwrap();
+        let mut inner = task.acquire_inner_lock();
+        inner.update_process_times_enter_trap();
+    }
+
+    match cause {
         Trap::Exception(Exception::PagePrivilegeIllegal)
         | Trap::Exception(Exception::PageInvalidFetch)
         | Trap::Exception(Exception::PageInvalidStore)
@@ -203,24 +209,9 @@ pub fn trap_handler() -> ! {
         | Trap::Exception(Exception::PageModifyFault)
         | Trap::Exception(Exception::PageNonReadableFault)
         | Trap::Exception(Exception::PageNonExecutableFault) => {
-            let task = current_task().unwrap();
+            let task = current_task_ref().unwrap();
             let mut inner = task.acquire_inner_lock();
             let addr = VirtAddr::from(get_bad_addr());
-            log::debug!(
-                "[page_fault] tid: {}, pid: {}, type: {:?}",
-                task.tid.0,
-                task.pid(),
-                cause
-            );
-            log::debug!(
-                "[page_fault] {:?}, {:?}, {:?}, {:?}, {:?}, {:?}",
-                TLBRERA::read(),
-                TLBRBadV::read(),
-                TLBREHi::read(),
-                TLBRELo0::read(),
-                TLBRELo1::read(),
-                PWCL::read(),
-            );
             // This is where we handle the page fault.
             frame_reserve(3);
             let vm_ref = task.process.vm();
@@ -232,6 +223,7 @@ pub fn trap_handler() -> ! {
                 | Trap::Exception(Exception::PageNonExecutableFault) => FaultAccess::Execute,
                 _ => FaultAccess::Load,
             };
+            crate::task::perf::record_page_fault();
             match mset_lock.do_page_fault(addr, access) {
                 Err(error) => match error {
                     MemoryError::BeyondEOF | MemoryError::BackingStoreFailure => {
@@ -278,24 +270,22 @@ pub fn trap_handler() -> ! {
         | Trap::Exception(Exception::FloatingPointUnavailable)
         | Trap::Exception(Exception::InstructionPrivilegeIllegal) => {
             log::info!("[trap] trigger SIGILL/FPU from exception {:?}", cause);
-            let task = current_task().unwrap();
+            let task = current_task_ref().unwrap();
             let mut inner = task.acquire_inner_lock();
             inner.sigmask.remove(Signals::SIGILL);
             inner.add_signal_with_code(Signals::SIGILL, SigInfo::ILL_ILLOPC);
         }
         Trap::Exception(Exception::AddressError) => {
             log::info!("[trap] trigger SIGSEGV from address error");
-            let task = current_task().unwrap();
+            let task = current_task_ref().unwrap();
             let mut inner = task.acquire_inner_lock();
             inner.sigmask.remove(Signals::SIGSEGV);
             inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_MAPERR);
         }
         Trap::Interrupt(Interrupt::Timer) => {
-            do_wake_expired();
-            NET_INTERFACE.try_poll();
+            crate::task::perf::record_timer_interrupt();
             TIClr::read().clear_timer().write();
-            enable_timer_interrupt();
-            suspend_current_and_run_next();
+            crate::task::timer_interrupt_handler();
         }
         Trap::Exception(Exception::Breakpoint) => {
             read_bp();
@@ -374,7 +364,7 @@ pub fn trap_handler() -> ! {
         }
     }
     {
-        let task = current_task().unwrap();
+        let task = current_task_ref().unwrap();
         let mut inner = task.acquire_inner_lock();
         inner.update_process_times_leave_trap(cause);
     }
@@ -414,31 +404,29 @@ fn read_bp() {
 }
 #[no_mangle]
 pub fn trap_return() -> ! {
-    // 检查 OOM kill pending：若分配器耗尽时本进程被标记，在此发送 SIGKILL，
-    // do_signal 将干净地杀掉本进程，不会有死锁问题。
-    check_oom_kill();
-    do_signal();
+    let task = do_signal();
     set_user_trap_entry();
-    let task = current_task().unwrap();
     let trap_cx = task.acquire_inner_lock().get_trap_cx();
     let trap_cx_ptr = trap_cx as *const TrapContext as usize;
     trap_cx.sstatus.set_pplv(3).set_pie(true);
-    //log::debug!("[trap_return] trap_cx:{:?}", trap_cx);
-    let user_satp = task.get_user_token();
-    //log::debug!("[trap_return] trap_cx_ptr:{:#x}, user_satp:{:#x}", trap_cx_ptr, user_satp);
-    drop(task);
+    let asid = task.asid.load(core::sync::atomic::Ordering::Relaxed);
+    if asid != 0 {
+        crate::task::perf::record_tlb_activate();
+    }
+    let user_satp = current_user_token();
     let restore_va = __restore as usize - __alltraps as usize + strampoline as usize;
-    pre_start_init();
     unsafe {
         asm!(
             "ibar 0",
             "move $ra, {0}",
             "move $a0, {1}",
             "move $a1, {2}",
+            "move $a2, {3}",
             "jr $ra",
             in(reg) restore_va,
             in(reg) trap_cx_ptr,
             in(reg) user_satp,
+            in(reg) asid as usize,
             options(noreturn)
         );
     }

@@ -6,7 +6,7 @@ use crate::config::*;
 use crate::fs::vfs::IndexNode;
 use crate::syscall::errno::*;
 use alloc::sync::Arc;
-use log::{trace, warn};
+use log::warn;
 
 const MAX_EAGER_MMAP_SIZE: usize = 1024 * 1024 * 1024;
 
@@ -119,11 +119,6 @@ pub(super) fn do_sbrk<T: PageTable>(
                 .iter()
                 .any(|area| area.vm_overlaps(start_vpn, end_vpn) && brk_overlap_blocks(area))
             {
-                trace!(
-                    "[sbrk] heap grow overlaps non-heap mapping: start={:X}, len={:X}",
-                    old_page_end,
-                    len
-                );
                 return old_pt;
             }
             if !crate::mm::overcommit_allows(address_space.committed_bytes(), len) {
@@ -148,7 +143,6 @@ pub(super) fn do_sbrk<T: PageTable>(
                 return old_pt;
             }
         }
-        trace!("[sbrk] heap area expanded to {:X}", new_pt);
     } else if old_page_end > new_page_end {
         let len = old_page_end - new_page_end;
         if let Err(err) = do_munmap(address_space, new_page_end, len) {
@@ -264,7 +258,6 @@ pub(super) fn do_mmap<T: PageTable>(
         if offset & (PAGE_SIZE - 1) != 0 || offset > isize::MAX as usize {
             return EINVAL;
         }
-        trace!("[mmap] file-backed map!");
         let Some(inode) = map_file else {
             return EBADF;
         };

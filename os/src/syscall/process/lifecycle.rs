@@ -3,11 +3,9 @@ use alloc::sync::Arc;
 use crate::mm::{copy_to_user, UserPtrMut};
 use crate::syscall::errno::*;
 use crate::task::{
-    current_task, current_user_token, exit_current_and_run_next, exit_group_and_run_next,
+    current_task_ref, current_user_token, exit_current_and_run_next, exit_group_and_run_next,
     signal::SigInfo, ProcessControlBlock, ProcessManager, Rusage,
 };
-use log::info;
-
 const CAP_SYS_PTRACE: usize = 19;
 
 pub fn sys_exit(exit_code: u32) -> ! {
@@ -47,9 +45,8 @@ pub fn sys_wait4(pid: isize, status: *mut u32, option: u32, _ru: *mut Rusage) ->
         Some(option) => option,
         None => return EINVAL,
     };
-    info!("[sys_wait4] pid: {}, option: {:?}", pid, option);
-    let task = current_task().unwrap();
-    let token = task.get_user_token();
+    let task = current_task_ref().unwrap();
+    let token = current_user_token();
     let process = task.process.clone();
     match ProcessManager::wait_child(
         &process,
@@ -90,18 +87,19 @@ pub fn sys_waitid(
         return EINVAL;
     }
 
-    let task = current_task().unwrap();
-    let token = task.get_user_token();
+    let task = current_task_ref().unwrap();
+    let token = current_user_token();
+    let process = task.process.clone();
     if idtype != P_PIDFD {
-        let wait_pid = match waitid_target_pid(idtype, id, &task.process) {
+        let wait_pid = match waitid_target_pid(idtype, id, &process) {
             Ok(pid) => pid,
             Err(errno) => return errno,
         };
-        return waitid_wait_child(&task.process, wait_pid, infop, option, token);
+        return waitid_wait_child(&process, wait_pid, infop, option, token);
     }
 
     let (target_pid, nonblock) = {
-        let files_ref = task.process.files();
+        let files_ref = process.files();
         let fd_table = files_ref.lock();
         let file = match fd_table.get_file(id) {
             Ok(file) => file,
@@ -123,7 +121,7 @@ pub fn sys_waitid(
     }
 
     match ProcessManager::wait_child(
-        &task.process,
+        &process,
         target_pid as isize,
         nonblock || option.contains(WaitOption::WNOHANG),
         option.contains(WaitOption::WEXITED),
@@ -276,7 +274,7 @@ fn waitid_siginfo(pid: usize, wait_status: u32) -> SigInfo {
 }
 
 pub fn sys_set_tid_address(tidptr: usize) -> isize {
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     task.acquire_inner_lock().clear_child_tid = tidptr;
     task.tid.0 as isize
 }
@@ -285,7 +283,7 @@ pub fn sys_set_robust_list(head: usize, len: usize) -> isize {
     if len != crate::task::RobustList::HEAD_SIZE {
         return EINVAL;
     }
-    let task = current_task().unwrap();
+    let task = current_task_ref().unwrap();
     let mut inner = task.acquire_inner_lock();
     inner.robust_list.head = head;
     //inner.robust_list.len = len;
@@ -293,32 +291,36 @@ pub fn sys_set_robust_list(head: usize, len: usize) -> isize {
 }
 
 pub fn sys_get_robust_list(pid: u32, head_ptr: *mut usize, len_ptr: *mut usize) -> isize {
-    let task = if pid == 0 {
-        current_task().unwrap()
-    } else {
-        match ProcessManager::find_task(pid as usize) {
-            Some(task) => task,
-            None => return ESRCH,
-        }
+    let current = current_task_ref().unwrap();
+    let token = current_user_token();
+    if pid == 0 {
+        let inner = current.acquire_inner_lock();
+        if copy_to_user(token, &inner.robust_list.head, head_ptr).is_err() {
+            log::error!("[sys_get_robust_list] Failed to copy to {:?}", head_ptr);
+            return EFAULT;
+        };
+        if copy_to_user(token, &inner.robust_list.len, len_ptr).is_err() {
+            log::error!("[sys_get_robust_list] Failed to copy to {:?}", len_ptr);
+            return EFAULT;
+        };
+        return SUCCESS;
+    }
+
+    let task = match ProcessManager::find_task(pid as usize) {
+        Some(task) => task,
+        None => return ESRCH,
     };
-    let current = current_task().unwrap();
     if current.gettid() != task.gettid() {
-        let (uid, euid, gid, egid, cap_effective) = {
-            let inner = current.acquire_inner_lock();
-            (
-                inner.uid,
-                inner.euid,
-                inner.gid,
-                inner.egid,
-                inner.cap_effective,
-            )
-        };
-        let (target_uid, target_euid, target_gid, target_egid) = {
-            let inner = task.acquire_inner_lock();
-            (inner.uid, inner.euid, inner.gid, inner.egid)
-        };
-        let privileged =
-            euid == 0 || (cap_effective & (1u64 << CAP_SYS_PTRACE)) != 0;
+        let uid = current.uid();
+        let euid = current.euid();
+        let gid = current.gid();
+        let egid = current.egid();
+        let cap_effective = current.acquire_inner_lock().cap_effective;
+        let target_uid = task.uid();
+        let target_euid = task.euid();
+        let target_gid = task.gid();
+        let target_egid = task.egid();
+        let privileged = euid == 0 || (cap_effective & (1u64 << CAP_SYS_PTRACE)) != 0;
         let same_creds = uid == target_uid
             && euid == target_euid
             && gid == target_gid
@@ -328,7 +330,6 @@ pub fn sys_get_robust_list(pid: u32, head_ptr: *mut usize, len_ptr: *mut usize) 
         }
     }
     let inner = task.acquire_inner_lock();
-    let token = current_user_token();
     if copy_to_user(token, &inner.robust_list.head, head_ptr).is_err() {
         log::error!("[sys_get_robust_list] Failed to copy to {:?}", head_ptr);
         return EFAULT;

@@ -7,7 +7,7 @@ use crate::syscall::errno::{EACCES, EINVAL, ENOMEM, EPERM};
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use log::{debug, warn};
+use log::warn;
 
 const STACK_GUARD_GAP_PAGES: usize = 256;
 const GROWSDOWN_MAX_FAULT_GAP_PAGES: usize = USER_STACK_SIZE / PAGE_SIZE;
@@ -15,6 +15,8 @@ const GROWSDOWN_MAX_FAULT_GAP_PAGES: usize = USER_STACK_SIZE / PAGE_SIZE;
 pub(super) struct VmaSet {
     vmas: BTreeMap<VirtPageNum, Vma>,
     mmap_holes: BTreeMap<VirtPageNum, VirtPageNum>,
+    user_area_count: usize,
+    user_page_count: usize,
 }
 
 #[cfg(feature = "loongarch64")]
@@ -63,6 +65,10 @@ fn is_anonymous_private(area: &Vma) -> bool {
         && !area.flags.contains(MapFlags::MAP_SHARED)
 }
 
+fn area_page_count(area: &Vma) -> usize {
+    area.vm_end().0.saturating_sub(area.vm_start().0)
+}
+
 fn errno_to_memory_error(errno: isize) -> MemoryError {
     match errno {
         ENOMEM => MemoryError::OutOfMemory,
@@ -83,6 +89,8 @@ impl VmaSet {
         let set = Self {
             vmas: BTreeMap::new(),
             mmap_holes,
+            user_area_count: 0,
+            user_page_count: 0,
         };
         set.debug_assert_invariants();
         set
@@ -93,10 +101,7 @@ impl VmaSet {
     }
 
     fn accounted_len(&self) -> usize {
-        self.vmas
-            .values()
-            .filter(|area| area.vm_is_user())
-            .count()
+        self.user_area_count
     }
 
     pub(super) fn has_shared_writable_mapping(&self, inode: &Arc<dyn IndexNode>) -> bool {
@@ -145,6 +150,8 @@ impl VmaSet {
     pub(super) fn clear(&mut self) {
         self.vmas.clear();
         self.mmap_holes.clear();
+        self.user_area_count = 0;
+        self.user_page_count = 0;
         let (mmap_start, mmap_end) = mmap_bounds();
         self.mmap_holes.insert(mmap_start, mmap_end);
         self.debug_assert_invariants();
@@ -153,6 +160,8 @@ impl VmaSet {
     pub(super) fn clear_no_hole(&mut self) {
         self.vmas.clear();
         self.mmap_holes.clear();
+        self.user_area_count = 0;
+        self.user_page_count = 0;
     }
 
     pub(super) fn try_reserve(&mut self, additional: usize) -> Result<(), isize> {
@@ -238,12 +247,19 @@ impl VmaSet {
         self.reserve_mmap_range(fault_vpn, old_start)
             .map_err(errno_to_memory_error)?;
         let mut area = self.vmas.remove(&old_start).ok_or(MemoryError::BadAddress)?;
+        let old_pages = area_page_count(&area);
+        let is_user = area.vm_is_user();
         if let Err(errno) = area.expand_down_to(VirtAddr::from(fault_vpn)) {
             self.vmas.insert(old_start, area);
             let _ = self.release_mmap_range(fault_vpn, old_start);
             return Err(errno_to_memory_error(errno));
         }
         let new_start = area.vm_start();
+        if is_user {
+            self.user_page_count = self
+                .user_page_count
+                .saturating_add(area_page_count(&area).saturating_sub(old_pages));
+        }
         self.vmas.insert(new_start, area);
         self.debug_assert_invariants();
         Ok(Some(new_start))
@@ -279,7 +295,13 @@ impl VmaSet {
         }
         self.try_reserve(1)?;
         self.reserve_mmap_range(start, end)?;
+        let is_user = new_area.vm_is_user();
+        let pages = area_page_count(&new_area);
         self.vmas.insert(start, new_area);
+        if is_user {
+            self.user_area_count += 1;
+            self.user_page_count += pages;
+        }
         self.debug_assert_invariants();
         Ok(())
     }
@@ -292,6 +314,7 @@ impl VmaSet {
         if let Some(mut area) = self.vmas.remove(&start_vpn) {
             let start = area.vm_start();
             let end = area.vm_end();
+            self.untrack_area(&area);
             let result = area.unmap(page_table);
             let _ = self.release_mmap_range(start, end);
             self.debug_assert_invariants();
@@ -308,6 +331,7 @@ impl VmaSet {
         end_vpn: VirtPageNum,
     ) -> Result<VirtPageNum, isize> {
         let area = self.vmas.get(&area_start).ok_or(EINVAL)?;
+        let split_is_user = area.vm_is_user();
         let area_start_vpn = area.vm_start();
         let area_end_vpn = area.vm_end();
         if start_vpn < area_start_vpn || end_vpn > area_end_vpn || start_vpn >= end_vpn {
@@ -337,6 +361,9 @@ impl VmaSet {
             let target_start = area.vm_start();
             self.insert_split_piece(area);
             self.insert_split_piece(second);
+            if split_is_user {
+                self.user_area_count += 1;
+            }
             self.debug_assert_invariants();
             Ok(target_start)
         } else if end_vpn == area_end_vpn {
@@ -350,6 +377,9 @@ impl VmaSet {
             let target_start = second.vm_start();
             self.insert_split_piece(area);
             self.insert_split_piece(second);
+            if split_is_user {
+                self.user_area_count += 1;
+            }
             self.debug_assert_invariants();
             Ok(target_start)
         } else {
@@ -364,6 +394,9 @@ impl VmaSet {
             self.insert_split_piece(area);
             self.insert_split_piece(second);
             self.insert_split_piece(third);
+            if split_is_user {
+                self.user_area_count += 2;
+            }
             self.debug_assert_invariants();
             Ok(target_start)
         }
@@ -399,6 +432,7 @@ impl VmaSet {
             let mut target = self.vmas.remove(&target_start).ok_or(EINVAL)?;
             let released_start = target.vm_start();
             let released_end = target.vm_end();
+            self.untrack_area(&target);
             if target.unmap(page_table).is_err() {
                 warn!("[munmap] Some pages are already unmapped, is it caused by lazy alloc?");
             }
@@ -541,11 +575,7 @@ impl VmaSet {
     }
 
     pub(super) fn user_mapped_bytes(&self) -> usize {
-        self.vmas
-            .values()
-            .filter(|area| area.vm_is_user())
-            .map(|area| (area.vm_end().0 - area.vm_start().0).saturating_mul(PAGE_SIZE))
-            .fold(0usize, |acc, len| acc.saturating_add(len))
+        self.user_page_count.saturating_mul(PAGE_SIZE)
     }
 
     pub(super) fn protect_range<T: PageTable>(
@@ -716,6 +746,8 @@ impl VmaSet {
             return Ok(None);
         }
         let key = *key;
+        let old_pages = area_page_count(area);
+        let is_user = area.vm_is_user();
         self.reserve_mmap_range(start_vpn, end_vpn)?;
         let expand_result = {
             let area = self.vmas.get_mut(&key).ok_or(EINVAL)?;
@@ -725,7 +757,12 @@ impl VmaSet {
             let _ = self.release_mmap_range(start_vpn, end_vpn);
             return Err(errno);
         }
-        debug!("[mmap] merge with previous area, call expand_to");
+        if is_user {
+            let area = self.vmas.get(&key).ok_or(EINVAL)?;
+            self.user_page_count = self
+                .user_page_count
+                .saturating_add(area_page_count(area).saturating_sub(old_pages));
+        }
         self.debug_assert_invariants();
         Ok(Some(start_va))
     }
@@ -737,32 +774,22 @@ impl VmaSet {
         prot: MapPermission,
     ) -> Result<(), isize> {
         let area = self.vmas.get_mut(&area_start).ok_or(EINVAL)?;
-        let mut has_unmapped_page = false;
         let actual_prot = if area.flags.contains(MapFlags::MAP_SHARED) {
             prot
         } else {
             prot - MapPermission::W
         };
-        for vpn in area.inner.vpn_range {
-            if area.frame_is_unallocated(vpn) {
-                if area.clear_stale_pte(page_table, vpn) {
-                    warn!(
-                        "[mprotect] clear stale lazy pte: vpn={:?}, area={:?}",
-                        vpn, area
-                    );
-                }
-                has_unmapped_page = true;
-                continue;
-            }
+        let mut failed_mapped_page = false;
+        area.inner.for_each_in_memory_vpn(|vpn| {
             if UserMapper::new(page_table)
                 .set_user_flags(vpn, actual_prot)
                 .is_err()
             {
-                has_unmapped_page = true;
+                failed_mapped_page = true;
             }
-        }
-        if has_unmapped_page {
-            warn!("[mprotect] Some pages are not mapped, is it caused by lazy alloc?");
+        });
+        if failed_mapped_page {
+            warn!("[mprotect] failed to update flags for some resident pages");
         }
         area.map_perm = prot;
         Ok(())
@@ -785,6 +812,13 @@ impl VmaSet {
 
     fn insert_split_piece(&mut self, area: Vma) {
         self.vmas.insert(area.vm_start(), area);
+    }
+
+    fn untrack_area(&mut self, area: &Vma) {
+        if area.vm_is_user() {
+            self.user_area_count = self.user_area_count.saturating_sub(1);
+            self.user_page_count = self.user_page_count.saturating_sub(area_page_count(area));
+        }
     }
 
     fn first_overlap_key(
@@ -908,5 +942,21 @@ impl VmaSet {
             }
             prev_hole_end = Some(*hole_end);
         }
+
+        let user_area_count = self.vmas.values().filter(|area| area.vm_is_user()).count();
+        let user_page_count = self
+            .vmas
+            .values()
+            .filter(|area| area.vm_is_user())
+            .map(area_page_count)
+            .fold(0usize, |acc, pages| acc.saturating_add(pages));
+        debug_assert_eq!(
+            self.user_area_count, user_area_count,
+            "cached user VMA count drifted"
+        );
+        debug_assert_eq!(
+            self.user_page_count, user_page_count,
+            "cached user mapped pages drifted"
+        );
     }
 }

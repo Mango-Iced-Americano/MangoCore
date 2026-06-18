@@ -146,8 +146,9 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         core::ptr::null(),
     ];
 
-    // 尝试进入测试模式
-    if try_exec("/sdcard/initproc", environ) || try_exec("/initproc", environ) {
+    // Initramfs carries the freshly built runner; sdcard may still contain an
+    // older initproc from the downloaded test image.
+    if try_exec("/initproc", environ) || try_exec("/sdcard/initproc", environ) {
         println!("[init] test runner started");
     } else {
         println!("[init] no test runner, entering rescue mode");

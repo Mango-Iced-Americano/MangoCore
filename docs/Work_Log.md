@@ -14,6 +14,29 @@
 - `os/src/net/syscall/sendmsg.rs` — `send_stream_chunked` 拆分为 non-blocking 零拷贝路径（try_sendmsg_user 直接传 UserBuffer）和 blocking kbuf 路径
 - `os/src/net/syscall/recvmsg.rs` — Stream non-blocking+非 peek 新增 `writer_buffer_at` → `try_recv_user` 快速路径，其余保持 kbuf
 - `os/src/task/manager.rs` — `WAIT_IO_FALLBACK_MS` 从 10 改为 1
+### hotfix(fs/ext4): 禁用 eager full-index + 删除 create/link/symlink 冗余 FS cache 操作 → lmbench fork/create 回归修复
+
+**根因**: Oracle 分析确认 eager full-index（`total_blocks >= 2` 首次 miss 全目录扫描建索引）导致 fork+execve（+165%）和 fs create（3×）回归。目录首次 miss → 分配 Vec/BTreeMap 建完整索引 → 下次 mutation bump 立即失效 → 纯开销。
+
+**修复（`os/src/fs/ext4/ext4fs.rs`）：**
+- `find()`: eager full-index 阈值从 `>= 2` 改为 `>= 10000`（禁用），保留代码供后续 adaptive 启用
+- `create()` / `create_with_attrs()` / `symlink()`: 删除 `invalidate_name` + `current_version` + `insert` 冗余 FS cache 操作（bump 已通过版本失配自然失效）
+- `link()`: 同上，删除冗余 invalidate + insert
+
+**修复（`os/src/fs/ext4/direntry.rs`）：**
+- `dir_remove_entry()`: 修复 `let r = dir_find_entry(...)` 未检查错误的 bug → 改为 `let _r = dir_find_entry(...)?`，失败时不再使用 `pblock_id=0` 损坏元数据
+
+**修复（`os/src/fs/ext4/ext4fs.rs` full-index 扫描）：**
+- 补 `DIR_BLOCK_READ` 计数：full-index 扫描循环中每加载 metadata block 递增一次
+
+**lmbench 对比（rv64）：**
+
+| 指标 | 0617(改前) | 0618(带bug) | hotfix后 |
+|------|-----------|------------|---------|
+| Simple stat (musl) | 248.7μs | 2368μs ❌ | 199.4μs ✅ |
+| fork+execve (musl) | 9345μs | 80138μs ❌ | 8982μs ✅ |
+| fork+/bin/sh (musl) | 262190μs | 1359346μs ❌ | 157742μs ✅ |
+| lmbench-musl 耗时 | 103分 | 崩溃 | 70s ✅ |
 
 **验证：**
 - `make rv64-kernel-build-only` ✅
@@ -46,6 +69,315 @@
 - la64 编译失败为环境缺少交叉编译工具链，非代码问题
 
 ---
+- QEMU lmbench mask=0x100（hotfix后）: musl 70s glibc 76s ✅
+
+**已知延期项（同前）：**
+- FIX4: 版本 bump 窗口（单核假设）
+- full-index negative cache（性能边界，非正确性）
+- adaptive full-index re-enablement（待后续实现）
+
+### fix(fs/ext4): Oracle 审查正确性 bug 修复 — insert() stale full-index 提升、build_full_index() 版本重检、rename-over-dir cache 清理、counter 修正
+
+**Oracle 审查发现的 bug：**
+1. `insert()` 无条件设置 `per_dir.version = version`，可将 stale full-index（含已删除条目）提升为当前版本，导致已删条目复活
+2. `build_full_index()` 安装全量索引前未重检目录版本，可能安装过期索引
+3. rename 覆盖目录目标时未调用 `remove_dir_cache(old_target_num)`
+4. `DIR_CACHE_SCANNED_ENTRIES` 只 `inc_counter!` 一次而非记录实际扫描条目数
+
+**修复（`os/src/fs/ext4/dir_cache.rs`）：**
+- `insert()`：插入前检查 `per_dir.version != version`，若不匹配则清空旧条目再插入单项
+- `build_full_index()`：安装前锁 `dir_versions` 重检当前版本，不匹配则丢弃过期索引
+
+**修复（`os/src/fs/ext4/ext4fs.rs`）：**
+- `rename()`：overwrite 目录目标时，在递减 link count 后调用 `remove_dir_cache(old_target_num)`
+- `find()`：`DIR_CACHE_SCANNED_ENTRIES` 改用 `fetch_add(scanned)` 记录实际扫描条目数
+
+**已知延期风险（Oracle 确认可在单核架构下接受）：**
+- 目录修改发生在 `bump_dir_version()` 之前（unlink/rmdir/rename），存在理论窗口期内并发 `find()` 返回过期数据。当前 MangoCore 为单核、无内核态抢占、ext4 变更路径无 yield/block。若后续引入 SMP、内核抢占或 ext4 阻塞 I/O，需重新评估。
+
+**编译验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：** Oracle 二次审查通过，FIX1-FIX3 正确，FIX4 记录为当前架构下的已知延期项。
+
+### feat(fs/ext4): Ext4OSInode::find() 接入 FS-level dir_lookup_cache + 大目录全量索引
+
+**涉及文件：**
+- `os/src/fs/ext4/ext4fs.rs` — `Ext4OSInode::find()` 新增 Phase 3.5（FS-level directory lookup cache），在 negative dentry 检查后、磁盘扫描前查询 `dir_lookup_cache`；替换原有简单 `dir_find_entry()` 为分级扫描：大目录（≥2 blocks）执行全量块扫描构建 name→ino 全量索引，小目录走原有线性扫描；扫描结果通过 match 分支处理命中/未命中，命中时插入缓存、未命中时沿用现有 negative dentry 逻辑
+
+**验证：**
+- `make rv64-kernel-build-only` ✅（166 warnings，零 errors）
+- `make la64-kernel-build-only` ✅（150 warnings，零 errors）
+
+**备注：** Phase 3.5 命中路径有版本重检：缓存命中后用 `current_version` 验证，失配时重试一次。全量索引扫描在版本未变时调用 `build_full_index()`，之后同目录的 find() 可走缓存命中快速路径。`load_metadata_block()` 返回 `Block`（非 Result），故全量扫描中 `fblock` 直接赋值无 match。`lookup_version` 保留以供尾部 children cache 插入使用。
+
+### feat(fs/ext4): 将 dir_lookup_cache 接入 bump_dir_version() 和 7 个目录变更方法
+
+**涉及文件：**
+- `os/src/fs/ext4/ext4fs.rs` — `bump_dir_version()` 新增 FS 级 `dir_lookup_cache.bump_version(ino)` 同步；`create()`/`create_with_attrs()`/`symlink()`/`link()`/`unlink()`/`rmdir()`/`rename()` 各方法新增 `invalidate_name`/`insert`/`remove_dir_cache` 调用，确保目录变更后缓存一致性
+
+**验证：**
+- `make rv64-kernel-build-only` ❌（2 个预存错误：`Ext4DirEntry::try_from` 缺少 `TryFrom` trait、`dir_find_entry` 返回类型不匹配，均在 dir_cache.rs 扫描代码中，非本次变更引入）
+- `make la64-kernel-build-only` ❌（同上 2 个预存错误）
+- 本次变更零新增错误，所有新增调用类型匹配且 API 使用正确
+
+**备注：** 缓存失效策略：create/link/symlink → invalidate name + insert 新 child_ino；unlink → invalidate name only（负 dentry 负责其余）；rmdir → invalidate name + remove_dir_cache(child_ino)；rename → 分别 invalidate old/new name 于各自 parent。`bump_dir_version()` 内的 `self.inode.lock()` 在所有调用点均已释放（Lock→get ino→Drop），无死锁风险。
+
+### Timer/timekeeping 对照实验报告整理与提交留痕
+
+**涉及文件：**
+- `docs/09_debug/timer-timekeeping-contrast-experiment-20260618.md` — 新增 timer/timekeeping 修复对照实验报告，记录实验目标、控制变量、有效/无效样本、rv64 原版失败与候选通过结果、la64 原版 hang 记录和 push 前验证建议
+- `docs/Work_Log.md` — 追加本次实验报告提交记录
+- `.agents/skills/mango-worklog/references/debugging-patterns.md` — 沉淀 `kernel-build-only` 不会更新 sdcard `/initproc`、`make *-run` 可能复用旧 kernel/initproc 的对照实验坑
+
+**验证：**
+- 原版 `1096f4d2 + 用户态 probe` rv64 timer smoke 对照 ✅：`timerfd CLOCK_MONOTONIC 2ms` 为 4ms PASS；`CLOCK_REALTIME` 相对 80ms + `clock_settime(+2s)` 为 1ms FAIL
+- 候选 `e894ee1e` rv64/la64 timer smoke ✅：rv64 realtime relative 81ms PASS；la64 realtime relative 80ms PASS；realtime absolute periodic、POSIX realtime absolute、`clock_nanosleep` 全部 PASS
+- 候选 `e894ee1e` rv64/la64 basic smoke ✅：rv64 musl/glibc `exit_code=0` 4s/4s；la64 musl/glibc `exit_code=0` 11s/12s
+- 对照后已切回 `develop`，并重建候选 rv64/la64 kernel 产物 ✅
+- `git diff --check` ✅
+- `git diff -- os/src/lang_items.rs user/src/lang_items.rs` ✅ 无残留差异
+
+**备注：** la64 原版基线在 stage-1 后超过 90s 无新增输出，已作为 hang 记录写入报告；该样本未进入 timer assertion，不作为 timer 语义定量对照。当前分支仍为 `ahead 6, behind 21`，push 前需同步远端并重跑候选验证。
+
+### realtime clock 跳变下 timerfd/POSIX timer deadline 语义修复
+
+**涉及文件：**
+- `os/src/fs/timerfd.rs` — 将 timerfd 内核队列 deadline 统一保存为 monotonic deadline；仅对 `CLOCK_REALTIME`/`CLOCK_REALTIME_ALARM` 的 `TFD_TIMER_ABSTIME` 保存原始 wall-clock 绝对目标；`read_at()`/`poll()`/sweep 全部按 monotonic 判定到期；`clock_settime` 后扫描绝对 realtime timerfd 并重定位；周期 realtime absolute timerfd 到期推进时同步推进保存的 wall-clock 绝对目标
+- `os/src/syscall/process/time.rs` — `settimeofday`/`clock_settime`/`adjtimex(ADJ_SETOFFSET)` 后通知 timerfd、POSIX realtime timer 与 realtime abstime sleep；POSIX timer 保存 `realtime_abs_deadline`，wall-clock 跳变后递增 generation、重算 monotonic deadline 并重新入队；`clock_nanosleep(CLOCK_REALTIME, TIMER_ABSTIME)` 改为可被 wall-clock 跳变唤醒后重判定
+- `os/src/task/task.rs`、`os/src/task/manager.rs` — `PosixTimer` 增加 realtime 绝对目标字段；周期 POSIX timer 到期推进时同步推进该绝对目标，旧 `TimerAction` 继续通过 generation/deadline 校验失效
+- `os/src/task/sleep.rs`、`os/src/task/mod.rs` — 增加 realtime absolute sleep 等待队列与 clock-change generation，避免 `clock_nanosleep` 在 `clock_settime` 后继续睡旧 monotonic deadline
+- `user/src/syscall.rs` — 增加 `clock_gettime`、`clock_nanosleep` 与 POSIX `timer_create/timer_settime/timer_gettime/timer_delete` wrapper
+- `user/src/bin/initproc.rs` — 扩展 `timer_smoke=1`：覆盖 timerfd `CLOCK_REALTIME` 相对 timer 不受 `clock_settime(+2s)` 影响、timerfd `CLOCK_REALTIME|TFD_TIMER_ABSTIME` 周期 timer 首次到期后仍可被 wall-clock 跳变重定位、POSIX `CLOCK_REALTIME` 绝对 timer 在 wall-clock 跳变后立即重定位、`clock_nanosleep(CLOCK_REALTIME, TIMER_ABSTIME)` 在 realtime 前跳越过目标后快速返回
+- `.agents/skills/mango-worklog/references/harness-patterns.md` — 沉淀“内核 timer queue deadline 与 wall-clock 目标分离”的复用模式
+
+**验证：**
+- `git diff --check` ✅
+- `docker compose exec -T -w /app/os os-dev env LOG=error make rv64-kernel-build-only` ✅
+- `docker compose exec -T -w /app/os os-dev env LOG=error make la64-kernel-build-only` ✅
+- QEMU timer smoke `timer_smoke=1, mask=0x000`: rv64 ✅ (`timerfd monotonic elapsed_ms=3`, `timerfd realtime relative elapsed_ms=80`, `timerfd realtime absolute periodic first=1 second=10 elapsed_ms=0`, `posix remaining_ms=0`, `clock_nanosleep elapsed_ms=20`)，la64 ✅ (`timerfd monotonic elapsed_ms=3`, `timerfd realtime relative elapsed_ms=80`, `timerfd realtime absolute periodic first=1 second=10 elapsed_ms=1`, `posix remaining_ms=0`, `clock_nanosleep elapsed_ms=22`)
+- QEMU basic smoke `mask=0x001`: rv64 musl/glibc ✅ (`exit_code=0`, 4s/4s)，la64 musl/glibc ✅ (`exit_code=0`, 11s/12s)
+
+**效果对比：**
+- 修复前：rv64 对照实验中 `CLOCK_REALTIME` 相对 timerfd 在 `clock_settime(+2s)` 后 `elapsed_ms=2` 即到期，说明 read/poll 路径仍按 wall-clock 判定；POSIX `CLOCK_REALTIME` 绝对 timer 保存的是一次性 monotonic deadline，clock 跳变后不会重定位
+- 修复后：timerfd 相对 timer 只保存 monotonic deadline，wall-clock 跳变不影响相对等待；realtime 绝对 timerfd/POSIX timer 保留原始 wall-clock 目标，在 `clock_settime` 后重算 monotonic deadline 并让旧队列节点自然失效；周期 timerfd/POSIX timer 到期推进时同步推进 wall-clock 绝对目标；realtime absolute sleep 通过 clock-change generation 唤醒重判定，不再被旧 monotonic deadline 卡住
+
+**备注：** 本轮按用户最新要求不跑 LTP；只保留非 LTP 定向 smoke 与 basic smoke 验证底层 timer 语义和相关上层 initproc 应用路径。
+
+### timerfd 接入 high-res timer queue 与 initproc smoke
+
+**涉及文件：**
+- `os/src/fs/timerfd.rs` — `timerfd_settime()` 更新状态后重新计算全局最早 timerfd deadline，并注册到 `KERNEL_TIMER_QUEUE`；timerfd wake 返回实际唤醒数；缩短 `with_timerfd()` 的 fd table 锁作用域
+- `os/src/task/manager.rs` — 新增 `TimerFdSweep` timer action，过期后扫描 timerfd registry 并按实际唤醒触发调度；保留 timer interrupt 中的兼容扫描
+- `user/src/syscall.rs` — 增加 timerfd syscall wrapper 和 `TimerFdSpec`
+- `user/src/bin/initproc.rs` — 增加默认关闭的 `timer_smoke=1` 非 LTP smoke，用阻塞 `timerfd` read 验证 high-res wake 路径
+- `user/src/bin/init.rs` — initramfs stage-1 优先执行新构建的 `/initproc`，避免测试镜像中旧 `/sdcard/initproc` 遮蔽上层修复
+- `.agents/skills/mango-worklog/references/harness-patterns.md` — 沉淀事件型 fd 定时器必须接入统一 deadline queue 的经验
+
+**验证：**
+- `docker compose exec -T -w /app/os os-dev env LOG=error make rv64-only` ✅
+- `docker compose exec -T -w /app/os os-dev env LOG=error make la64-only` ✅
+- QEMU timerfd smoke `timer_smoke=1, mask=0x000`: rv64 ✅ (`expirations=1 elapsed_ms=4`)，la64 ✅ (`expirations=1 elapsed_ms=3`)
+- QEMU basic smoke `mask=0x001`: rv64 musl/glibc ✅ (`exit_code=0`, 4s/4s)，la64 musl/glibc ✅ (`exit_code=0`, 11s/12s)
+- `git diff --check` ✅
+
+**效果对比：**
+- 修复前：timerfd 只依赖周期性 timer interrupt 扫描 registry，`timerfd_settime()` 本身不会把新 deadline 接入 high-res one-shot timer queue；短 timerfd 可能被调度 tick 粒度拖延，且 timerfd wake 不会显式触发 `woke_task`
+- 修复后：每次 arm/disarm timerfd 都生成新的 sweep generation 并把最早 deadline 注册进统一 `KERNEL_TIMER_QUEUE`；过期时按 registry 状态唤醒等待者并重新计算下一次 sweep，旧 sweep 由 generation 自动失效
+- 上层对照：修复 stage-1 前，QEMU 实际执行测试盘里的旧 `/sdcard/initproc`，新加的 `timer_smoke=1` 配置不会进入分支；修复后优先执行 initramfs 内新构建的 `/initproc`
+
+**备注：** 本轮按用户要求不继续推进 LTP 适配，只保留 initproc 自带的非 LTP 定向 smoke 来验证底层 timerfd wake 语义。
+
+
+### LTP timer 历史过滤项复测：reset exclude + 可配置 case timeout
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — 新增 `ltp_exclude_reset=1` 配置开关，focused 调试时可清空默认 LTP exclude
+- `user/src/bin/ltprunner.rs` — 支持 `ltp_exclude_reset=1`；新增 `ltp_case_timeout_secs`；修正 suite runner 按返回码打印 `PASS/SKIP/FAIL LTP CASE`
+- `.agents/skills/mango-worklog/references/harness-patterns.md` — 补充 TCONF 输出标签和外层 case timeout 经验
+
+**验证：**
+- `docker compose exec -T -w /app/os os-dev env LOG=error make rv64-only` ✅
+- `docker compose exec -T -w /app/os os-dev env LOG=error make la64-only` ✅
+- QEMU basic smoke `mask=0x001`: rv64 musl/glibc ✅；la64 musl/glibc ✅
+- focused LTP suite `ltp_exclude_reset=1, ltp_case_timeout_secs=240, ltp_include=timerfd04,timerfd_settime02`: rv64 glibc ✅；la64 glibc ✅
+
+**效果对比：**
+- 修复前：`timerfd04` 的 `TCONF(32)` 被日志标成 `FAIL LTP CASE`；`timerfd_settime02` 被 ltprunner 固定 60s 外层 timeout 杀掉，无法判断真实 timerfd 语义
+- 修复后：`timerfd04` 正确标记为 `SKIP`（缺 `CONFIG_TIME_NS` 前置条件）；`timerfd_settime02` 在 rv64/la64 glibc 下均运行到 LTP 自身结束并 `PASS`
+
+**备注：** `timer_create01/02` 仍是当前 LTP 镜像缺二进制的测试环境限制；本轮不修改内核 timerfd/POSIX timer 语义。
+
+
+### Timer deadline/TLB 收尾修复与 la64 COW fault 定位
+
+**涉及文件：**
+- `os/src/timer.rs` — 新增 `TimeSpec::to_ticks_ceil()` / `timespec_to_ticks_ceil()`，统一绝对 deadline 到硬件 tick 的向上取整换算
+- `os/src/task/sleep.rs`、`os/src/task/threads.rs`、`os/src/fs/poll.rs` — 短超时自旋路径改用统一向上取整，避免 floor 换算导致提前超时
+- `os/src/task/manager.rs` — timer 重编程路径改为 irq-off 调用，`wait_with_timeout()` 统一走 `add_kernel_timer()`；POSIX timer overrun 计算改用 saturating ns
+- `os/src/fs/timerfd.rs`、`os/src/syscall/process/time.rs` — timerfd/POSIX timer 周期推进改用 saturating ns，避免大时间值溢出
+- `os/src/hal/arch/loongarch64/time.rs` — one-shot timer init_val 按 4-tick 边界向上对齐，避免短 deadline 被向下截断
+- `os/src/hal/arch/loongarch64/tlb.rs`、`os/src/hal/arch/loongarch64/laflex.rs` — la64 页级 TLB invalidate 传当前 ASID；kernel page table 使用 global-page invalidate
+- `os/src/mm/vma.rs` — 修正 COW 唯一页的 `Arc::strong_count` 判断，考虑 helper 返回的本地克隆引用
+
+**验证：**
+- `docker compose exec -T -w /app/os os-dev env LOG=error make rv64-kernel-build-only` ✅
+- `docker compose exec -T -w /app/os os-dev env LOG=error make la64-kernel-build-only` ✅
+- QEMU basic smoke `mask=0x001`: rv64 musl/glibc ✅；la64 musl/glibc ✅
+- 定向 LTP inline `clock_getres01,clock_gettime01,clock_nanosleep01,clock_nanosleep02,nanosleep01,nanosleep02,poll01,ppoll01,pselect01,timerfd_create01,timerfd_gettime01,timerfd_settime01`: rv64 musl/glibc ✅；la64 musl/glibc ✅
+- `git diff --check` ✅；调试日志关键字扫描 ✅
+
+**效果对比：**
+- 修复前：la64 basic 在 init stage-1 后卡住，调试定位到 pid2 对 COW 页反复 Store fault；临时 full TLB flush 对照实验可解除 fault storm，说明页级 invalidate 未命中目标 ASID
+- 修复后：la64 basic 正常完成；timer/nanosleep/pselect/timerfd 定向 LTP 双架构通过，短 deadline 未再出现 floor 截断或 la64 COW stale TLB 重复 fault
+
+**备注：** rv64 定向测试中额外观察到 `select01` 存在既有 `write(..., fd=6) failed: EBADF`，该问题不属于本轮 timer deadline/TLB 修复范围，后续应按 select/pipe fd 生命周期单独跟进。
+
+
+### Phase 1: 修复时间换算溢出 + us 精度损失 + KERNEL_TIMER_QUEUE irq-safety
+
+**问题定位：**
+- `get_time_ns()` 使用 `ticks * 1e9 / freq` 先乘后除，RV 12.5MHz 下 ~24.6 分钟溢出，LA 100MHz 下 ~3 分钟溢出。溢出导致 wrapping，CLOCK_MONOTONIC/REALTIME 跳变
+- `get_time_us()` 使用 `ticks / (freq / 1e6)`，RV `12500000/1000000 = 12`（应为 12.5），系统性偏快 4.17%
+- `TimeSpec::from_tick` 使用 `(tick % freq) * NSEC_PER_SEC / freq`，高时钟频率下存在溢出风险
+- `KERNEL_TIMER_QUEUE` 使用 `spin::Mutex`，`add_kernel_timer()` (syscall 上下文) 和 `do_wake_expired()` (timer interrupt 上下文) 共享同一把锁，单核下存在 interrupt 打断持锁代码 → 自旋死锁风险
+- `wake_expired()` 在持锁状态下直接调用 `run_timer()` 回调，回调内可能通过 `self.add_action()` 重新入队 timer → 再入锁 → 即死锁
+
+**修复内容：**
+
+`os/src/timer.rs`:
+- 新增 `ticks_to_ns/ticks_to_us/ticks_to_ms/ns_to_ticks_ceil/now_ns` 安全换算函数，使用商+余数分离 + u128 中间乘积，永不超过 u64
+- `get_time_sec/ms/us/ns` 内部改用安全换算
+- `TimeSpec::from_tick`/`TimeVal::from_tick` 通过安全路径转换
+- `TimeSpec::now`/`TimeVal::now` 直接用安全换算
+- 新增 `TimeSpec::to_ns_saturating` 安全版本
+- `current_timespec`/`current_timeval`/`set_current_timespec` 全部使用安全路径 + saturating 操作
+
+`os/src/task/manager.rs`:
+- `add_kernel_timer()` / `wait_with_timeout()` 使用已有的 `local_irq_save()/local_irq_restore()` 关中断，消除 syscall 上下文与 timer interrupt 的锁竞争
+- `wake_expired()` 拆分为 `pop_expired()`（持锁收集过期 timer，批量上限 64）+ 锁外执行回调
+- `run_timer()` 从 `&mut self` 方法改为静态方法 `fn(TimerAction, TimeSpec) -> bool`，内部 `self.add_action()` 改为调用全局 `add_kernel_timer()`
+- `do_wake_expired()` 改为先持锁 `pop_expired()` → 释放锁 → 再执行回调 `KernelTimerQueue::run_timer()`
+
+`user/src/bin/initproc.rs`:
+- 在 `kill`→`waitpid` 路径增加 `[diag]` 计时日志
+
+**验证：**
+- `docker exec make rv64-kernel-build-only` ✅
+- `docker exec make la64-kernel-build-only` ✅
+- QEMU basic smoke test (mask=0x001): musl 4s, glibc 4s ✅ 无回归
+- QEMU cyclictest (4 modes): musl 14s, glibc 15s ✅ 全部通过
+- QEMU libcbench timeout-kill: kill→waitpid 28ms ✅ 无死锁
+- diag 输出正常: `[diag] kill sent, entering waitpid at ms=X` / `[diag] waitpid returned after Yms`
+
+**效果对比：**
+
+| 指标 | 修复前 | 修复后 |
+|------|--------|--------|
+| `get_time_us()` 精度 (RV) | 偏快 4.17% | 无偏差 |
+| `get_time_ns()` 长跑 | ~24.6min(RV)/~3min(LA) 溢出 | 永不溢出 |
+| `KERNEL_TIMER_QUEUE` 死锁风险 | 存在（syscall×IRQ 竞争） | 已消除 |
+| `wake_expired` 内回调重入锁 | 可能死锁 | 已消除 |
+
+**备注：** 此提交是计时器三阶段修复的 Phase 1，解决了安全换算和 irq-safety 基础问题。
+
+### Phase 2 & 3: one-shot high-res timer + clock_getres 修复
+
+**Phase 2 — one-shot timer + high-res 唤醒：**
+
+- `os/src/hal/arch/riscv/time.rs` — 新增 `program_timer_delta(delta_ticks)`，通过 SBI `set_timer(now + delta)` 实现
+- `os/src/hal/arch/loongarch64/time.rs` — 新增 `program_timer_delta(delta_ticks)`，通过 `TCfg` 写 one-shot init_val
+- `os/src/hal/arch/mod.rs` — 双架构导出 `program_timer_delta`
+- `os/src/task/manager.rs`:
+  - `add_action()` 返回 `bool`，表示新 timer 是否为最早 deadline；若最早则触发 `reprogram_timer()`
+  - `earliest_deadline_ns()` 查询最早到期时间
+  - `reprogram_timer()` 计算 `min(earliest_timer, next_sched_tick)` → `ns_to_ticks_ceil` → `program_timer_delta`
+  - `timer_interrupt_handler()` 统一中断处理：过期回调(锁外执行) + sched tick 推进(含 net poll) + 重编程 + 按需调度
+  - `timer_subsystem_init()` 初始化首个 sched tick 并编程硬件
+  - `add_kernel_timer()` 在返回前触发 `reprogram_timer()`（若新 timer 最早）
+- `os/src/hal/arch/riscv/trap/mod.rs` — timer interrupt 改用 `timer_interrupt_handler()`
+- `os/src/hal/arch/loongarch64/trap/mod.rs` — 同上；`enable_timer_interrupt()` 只开中断向量，不写 timer 值
+- `os/src/hal/arch/riscv/mod.rs` — `machine_init()` 移除 `set_next_trigger()`（由 `timer_subsystem_init()` 替代）
+- `os/src/main.rs` — 在 `machine_init()` 后调用 `timer_subsystem_init()`
+
+**Phase 3 — clock_getres 修复：**
+
+- `os/src/syscall/process/time.rs` — `sys_clock_getres()`:
+  - `CLOCK_MONOTONIC/REALTIME/BOOTTIME/TAI` → `ceil(1e9/freq)` (RV: 80ns, LA: 10ns)
+  - `CLOCK_*_COARSE` → 10ms (sched tick 粒度)
+  - `CLOCK_PROCESS/THREAD_CPUTIME_ID` → 1µs
+  - 不再对所有时钟返回虚报的 1ns
+
+**验证：**
+- RV/LA 双架构编译 ✅
+- QEMU basic smoke test ✅ (musl 4s, glibc 4s)
+- QEMU cyclictest (4 modes) ✅ (musl 12s, glibc 18s)
+- QEMU libcbench timeout-kill ✅ (waitpid 48ms, 无死锁)
+
+**效果对比：**
+
+| 指标 | Phase 1 (固定tick) | Phase 2+3 (one-shot) |
+|------|-------------------|---------------------|
+| nanosleep 最小精度 | RV 40ms | ~80ns (硬件分辨率) |
+| timer interrupt 模式 | 固定 25Hz（每 40ms 无条件触发） | 按需触发（最早 deadline） |
+| cyclictest musl | 14s | 12s (↓14%) |
+| net poll 触发 | 每次 timer IRQ (25Hz) | 仅 sched tick (100Hz 边界) |
+| clock_getres MONOTONIC | 虚报 1ns | RV 80ns / LA 10ns |
+| add_kernel_timer | 不重编程硬件 | 最早 deadline 变更时重编程 |
+| KERNEL_TIMER_QUEUE 回调 | 锁内执行 (Phase 1 已修复) | 锁外执行 ✅ |
+
+**备注：** one-shot timer 替代了原有固定 25Hz(RV)/100Hz(LA) tick 模型，硬件仅在最早 KernelTimer deadline 或下一个 sched tick 时触发中断。sched tick 保持 100Hz(10ms) 用于调度记账和网络 poll。至此计时器三阶段修复全部完成。
+
+## 2026-06-17
+
+### feat(fs/ext4): 添加 7 个 DIR_CACHE_* 目录 lookup 缓存计数器
+
+**涉及文件：**
+- `os/src/fs/ext4/counters.rs` — 新增 `DIR_CACHE_HIT/MISS/FULL_INDEX_BUILD/ENTRY_COUNT/LINEAR_SCAN/SCANNED_ENTRIES/SCANNED_MAX` 7 个 AtomicU64 声明，接入 `reset_counters()` 数组和 `dump_scenario()` 输出
+
+**验证：**
+- 文件结构验证通过（3 处修改：声明/复位/输出，模式与现有计数器一致）
+
+**备注：** 这些计数器用于追踪新的目录 lookup 缓存层的命中率、全量索引构建次数、线性扫描情况等性能指标。
+
+### feat(fs/ext4): 新建 dir_cache.rs — Ext4DirectoryLookupCache 目录 lookup 缓存模块
+
+**涉及文件：**
+- `os/src/fs/ext4/dir_cache.rs` — 新建文件，实现 `Ext4DirectoryLookupCache`（per-directory name→ino BTreeMap 缓存）、LRU 驱逐（global_tick + last_access）、目录版本管理（bump_version/current_version）
+- `os/src/fs/ext4/counters.rs` — （已在上一提交中添加 DIR_CACHE_* 计数器，本模块将使用）
+
+**验证：**
+- 文件结构验证通过（struct 定义、9 个方法、锁规范符合 dir_versions→dirs 顺序）
+- 编译待 T3 接入 `mod dir_cache;` 后验证
+
+**备注：** 锁规范：当同时需要 dirs 和 dir_versions 锁时，始终先锁 dir_versions 再锁 dirs（防死锁）。insert/build_full_index 内联处理 per-dir 溢出后释放 dirs，再调用 evict_if_needed()（该方法需同时持有两把锁）。无 unsafe、无 std、无外部符号依赖。
+
+### feat(fs/ext4): 完整 ext4 dir lookup cache — T3-T6 集成、编译验证通过、reclaim 接入
+
+**涉及文件：**
+- `os/src/fs/ext4/mod.rs` — 新增 `mod dir_cache;`
+- `os/src/fs/ext4/ext4fs.rs` — `Ext4FileSystem` 新增 `dir_lookup_cache: Ext4DirectoryLookupCache` 字段并在 `open_ext4rs()` 初始化；`bump_dir_version()` 新增 FS 级 `dir_lookup_cache.bump_version(ino)`；`Ext4OSInode::find()` 新增 Phase 3.5 FS 级目录缓存查找（在 negative dentry 后、磁盘扫描前，命中后版本重检+最多一次重试）；大目录（≥2 blocks）一次全量扫描构建 name→ino 完整索引；`create`/`create_with_attrs`/`symlink`/`link` 在 bump 后 invalidate name + 插入新 child_ino；`unlink` 在 bump 后 invalidate name；`rmdir` 在 bump 后 invalidate name + `remove_dir_cache(child_ino)`；`rename` 在 old/new 两个 parent 的 bump 后分别 invalidate old_name 和 new_name；新增 `pub fn evict_dir_cache()` 公开方法供 reclaim 调用
+- `os/src/fs/reclaim.rs` — 每 64 tick 在 per-fs 循环中调用 `fs.evict_dir_cache()` 淘汰冷目录
+- `os/src/fs/ext4/counters.rs` — 新增 7 个 DIR_CACHE_* AtomicU64 计数器，已接入 `reset_counters()` 和 `dump_scenario()`
+
+**编译验证：**
+- `make rv64-kernel-build-only` ✅（166 warnings，0 errors）
+- `make la64-kernel-build-only` ✅（150 warnings，0 errors）
+
+**新增缓存操作统计（29 个调用点）：**
+- `bump_version` 1 处（bump_dir_version）
+- `lookup` 2 处（Phase 3.5 主路径 + 重试）
+- `current_version` 8 处
+- `insert` 4 处（create/create_with_attrs/symlink/link）
+- `invalidate_name` 9 处（create/create_with_attrs/symlink/link/unlink/rmdir/rename×2+same-parent）
+- `build_full_index` 1 处（大目录全量扫描）
+- `remove_dir_cache` 1 处（rmdir）
+- `evict_if_needed` 1 处（reclaim 路径通过 evict_dir_cache 间接调用）
+
+**性能预期：** 大目录场景下，首次访问触发全量索引构建（O(n) 一次性开销），后续所有 find() 走缓存命中 O(log n)。小目录按需增量缓存。所有目录修改操作自动失效相关缓存条目，保证 POSIX 语义。
+
+**待验证：** QEMU 集成测试（lmbench mask=0xFFF 全量 + mask=0x100 lmbench）、basic 回归、busybox --install -s。
 
 ## 2026-06-16
 
@@ -92,112 +424,1497 @@
 
 ---
 
+
 ## 2026-06-15
 
-### perf(fs): 消除 read/write 热路径 kbuf 中转 — PageCache ↔ UserBuffer 直连
+### futex tick 换算微优化：缓存时钟频率
 
 **涉及文件：**
-- `os/src/mm/uaccess.rs` — 删除 UserBufferWriter::write_from() 热路径 info log；UserBuffer 内部 copy_from_slice 全部替换为 core::ptr::copy（memmove 语义，防止 MAP_SHARED mmap alias 重叠 UB）
-- `os/src/fs/page_cache.rs` — 新增 read_user(offset, len, dst) / write_user(offset, len, src)，显式 len 参数，Phase 2 通过 UserBuffer::write_at/read_at 直连拷贝
-- `os/src/fs/vfs/index_node.rs` — 新增 read_at_user / write_at_user trait 方法，默认返回 ENOSYS（由 File 层 fallback）
-- `os/src/fs/vfs/file.rs` — 新增 read_user / pread_user / write_user / pwrite_user，尝试 inode.*_user 直连，ENOSYS 时走 kbuf fallback（用户页拷贝不持锁）
-- `os/src/fs/ext4/ext4fs.rs` — override read_at_user / write_at_user：有 page_cache 的普通文件直连 PageCache::*_user，symlink 返回 ENOSYS；删除 read_at/write_at 临时诊断 log
-- `os/src/syscall/fs.rs` — read_into_user / pread_into_user / write_from_user / pwrite_from_user 改为构造 UserBuffer 后调用 File::*_user，消除 kbuf Vec 分配和二次 copy
+- `os/src/task/threads.rs` — `timespec_to_ticks` 单次读取 `get_clock_freq()` 后复用，避免 futex 短超时路径重复读取频率
 
 **验证：**
-- `make rv64-kernel-build-only` ✅
-- `make la64-kernel-build-only` ✅
-- QEMU basic: 待验证（MCP kernel-dev 工具超时）
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev sh -lc 'timeout 75s make rv64-run ...'` ✅ — busybox 基础与 sleep 流程通过，随后进入文件操作测试，由外层 timeout 结束，无 panic
 
-**备注：**
-- 数据流从 PageCache → kbuf → UserBuffer → 用户页 变为 PageCache → UserBuffer → 用户页（read），write 同理
-- 非 PageCache inode（pipe/socket/devfs/procfs）走 ENOSYS → File fallback kbuf 路径，语义不变
-- 首版仅 ext4 提供 override，tmpfs/FAT32 后续阶段
-- 提交 hash: af1a785
+**备注：** 仅消除重复读取，deadline/tick 计算公式和等待语义不变。
 
-### fix: normalize mount paths to absolute — 修复 busybox df 因相对路径退出码非零
+### 轻量 saved ID syscall 优化：缓存当前 suid/sgid
 
 **涉及文件：**
-- `os/src/fs/mod.rs:337-342` — `mount_block_fs()` mount_point 补前导 `/` + 设 mount_source 避免 `none`
-- `os/src/syscall/fs.rs:4179` — `sys_mount()` 相对路径 target 改用 `normalize_cwd()` 防 `//bin`
-- `os/src/syscall/fs.rs:3649` — `sys_umount2()` 相对路径同步修复
-- `os/src/syscall/fs.rs:4296` — `MS_MOVE` source 相对路径同步修复
-- `os/src/syscall/fs.rs:3746-3752` — `do_bind_mount()` mount_source 存绝对路径
-
-**根因：** 内核在 3 处存了相对路径：(1) `mount_block_fs()` 直接把 `"tools"`/`"sdcard"` 存为 mount_path；(2) sys_mount/umount2/MS_MOVE 用 `format!("{}/{}", "/", "bin")` 拼出 `//bin`；(3) do_bind_mount 把用户传来的 `"tools/bin"` 原样存入 mount_source。/proc/mounts 暴露这些非绝对路径，busybox df 的 statvfs() 从非根 CWD 查找时报 ENOENT。
+- `os/src/task/processor.rs` — context switch 时发布当前线程 suid/sgid 缓存，并在身份变更时同步刷新
+- `os/src/task/task.rs`、`os/src/task/mod.rs` — 扩展身份 hint 刷新参数和导出当前 suid/sgid 读取函数
+- `os/src/syscall/process/ids.rs` — `getresuid/getresgid` 使用当前缓存，避免读取当前 TCB
 
 **验证：**
-- `make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev sh -lc 'timeout 75s make rv64-run ...'` ✅ — busybox 基础与 sleep 流程通过，随后进入文件操作测试，由外层 timeout 结束，无 panic
 
-**备注：** 全部在内核侧修复，用户程序不需要改。预期挽回 busybox-musl + busybox-glibc 各 1 分（df 测试）。
+**备注：** saved uid/gid 的真实来源仍是 `TaskControlBlock` identity hint；所有 set*id 路径继续通过 `store_identity_hint` 统一刷新。
 
-### fix(fs): change detect_fs println! to info! — 避免干扰 oscomp judge 行索引断言
+### nanosleep 短尾部自旋优化：使用 tick 比较
 
 **涉及文件：**
-- `os/src/fs/filesystem.rs` — `detect_fs()` 中所有 `println!` → `info!`
-
-**根因：** oscomp basic 的 `test_mount`/`test_umount` 测试输出在 mount/umount 之间出现了 `[fs] found fat32 filesystem` 内核日志行，该行由裸 `println!` 产生。judge_basic-*.py 按行号索引读取 data（data[0]~data[3]），多余的日志行使所有行偏移，导致 `data[1] == "mount return: 0"` 断言失败（实际读到 `"[fs] found fat32 filesystem"`），pass 锁定为 2/5。
+- `os/src/task/sleep.rs` — 将短精度等待尾部循环从反复构造 `TimeSpec::now()` 改为 tick deadline 比较，减少频繁除法/取模
 
 **验证：**
-- `make rv64-kernel-build-only` ✅
-- 双架构编译，不改逻辑（build 确认）
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev sh -lc 'timeout 75s make rv64-run ...'` ✅ — busybox `sleep 1` 与后台 `sleep 5` kill 流程通过，随后进入文件操作测试，由外层 timeout 结束，无 panic
 
-**备注：** 改成 `info!` 后 LOG=off（评测默认）时不输出，LOG=info 才可见。共挽回 basic-musl + basic-glibc 各 6 分（mount 3 + umount 3）。
+**备注：** 阻塞等待、信号中断和 remaining 计算仍沿用原有 `TimeSpec` 路径；只优化最后 `PRECISE_SLEEP_SPIN_NS` 窗口内的忙等判断。
 
-### 修复 sys_getcwd 返回值 ABI（LA64 shell-init EINVAL）
+### 轻量进程组 syscall 优化：缓存当前 pgid/sid
 
 **涉及文件：**
-- `os/src/syscall/fs.rs:1081` — 成功返回从 `buf as isize` 改为 `write_len as isize`
+- `os/src/task/processor.rs` — context switch 时发布当前进程 pgid/sid 缓存，并提供 `current_pgid/current_sid`
+- `os/src/task/process.rs` — `setpgid/setsid` 在当前进程变更时同步刷新处理器缓存
+- `os/src/task/mod.rs`、`os/src/syscall/process/ids.rs` — `getpgid(0)`/`getsid(0)` 走当前缓存，避免取当前 task/process
 
 **验证：**
-- `make rv64-kernel-build-only` ✅
-- `make la64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev sh -lc 'timeout 75s make rv64-run ...'` ✅ — busybox 进入文件操作测试后由外层 timeout 结束，无 panic
 
-**备注：** Linux raw syscall 语义要求 getcwd 成功时返回写入字节数（含 NUL），而非 buf 指针。LA64 的 bash/libc 对此更严格，异常的大正数返回值被解释为错误码（EINVAL）。RV64 因用户地址范围不同未触发。
+**备注：** 面向轻量进程标识类 syscall；非当前 pid 查询仍走 `ProcessManager`，语义保持不变。
 
-### 修复 oscomp basic mount/umount 测试（/dev/vda2 缺失 + 分区无文件系统）
+### 轻量 ID syscall 优化：缓存当前任务身份字段
 
 **涉及文件：**
-- `os/src/fs/mod.rs:450-455` — MBR 分区注册时同步注册 `/dev/vda{N}` 兼容别名
-- `scripts/make_mbr_tools_disk.py` — 分区 2 类型改为 0x0C，新增 mkfs.vfat FAT32 格式化
+- `os/src/task/processor.rs` — context switch 时发布当前任务 uid/euid/gid/egid 缓存，`current_uid/euid/gid/egid` 直接读原子缓存
+- `os/src/task/task.rs` — `store_identity_hint` 在当前线程身份变更时同步刷新处理器缓存
 
 **验证：**
-- `make rv64-kernel-build-only` ✅
-- `make la64-kernel-build-only` ✅
-- QEMU rv64 basic: mount 5/5, umount 5/5 ✅
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev sh -lc 'timeout 75s make rv64-run ...'` ✅ — busybox 进入文件操作测试后由外层 timeout 结束，无 panic
 
-**备注：** oscomp basic 测试硬编码 `/dev/vda2`，但内核只对 tools disk (x1) 做 MBR 扫描注册 `/dev/vdb{N}`，且分区 2 原为全零（LTP scratch）。修复分两步：(1) 内核注册 vda{N} 别名指向同个 PartitionBlockDevice；(2) 构建脚本对分区 2 执行 mkfs.vfat -F 32。
+**备注：** 面向 `getuid/geteuid/getgid/getegid` 等轻量 syscall；身份变更仍由原有 hint 更新点驱动，当前运行线程缓存同步刷新。
 
-### 修复 MountFS .. 跨挂载边界与 dirent inode overlay（LA64 shell-init）
+### futex 优化：短超时自旋使用 tick 比较
 
 **涉及文件：**
-- `os/src/fs/vfs/mount.rs` — `do_find("..")` 直接走 `do_parent()` 绕过 dentry cache；`do_parent()` mount root 调用 `mountpoint.do_parent()` 而非返回 mountpoint 自身；`list_dirents()` overlay 子挂载点 inode ID
+- `os/src/task/threads.rs` — futex 短 timeout 和 tail spin 路径预先把 deadline 转为 tick，循环内用 `get_time()` 比较，避免反复构造 `TimeSpec`
 
 **验证：**
-- `make rv64-kernel-build-only` ✅
-- `make la64-kernel-build-only` ✅
-- QEMU la64: shell-init 错误消失 ✅
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev sh -lc 'timeout 75s make rv64-run ...'` ✅ — busybox 进入文件操作测试后由外层 timeout 结束，无 panic
 
-**备注：** bash 的 internal getcwd 通过 `readdir("..")` 的 `d_ino` 与 `stat(".")` 的 `st_ino` 匹配来重建路径。原 MountFS 的 `..` 在 mount root 返回自身（形成死循环），且 dirent 未对 bind mount overlay inode ID，导致 bash 找不到匹配条目。参考 DragonOS 语义修复。
+**备注：** 面向 lmbench/pthread 中 futex timeout、条件等待尾段自旋等路径；deadline 仍来自单调时钟，超时语义保持不变。
 
-### 修复 iperf3 IPv6 socket 拒绝 IPv4 地址（EAFNOSUPPORT）
+### 时间运算热路径优化：TimeSpec/TimeVal 直接借位相减
 
 **涉及文件：**
-- `os/src/net/socket/mod.rs` — Socket trait 新增 `set_ipv6_v6only()` 默认方法
-- `os/src/net/socket/inet/datagram/udp.rs` — UdpSocket 加 `ipv6_v6only` 字段、`normalize_ipv4_mapped` helper、`addr_family_matches` 放宽、bind/connect/try_sendmsg 规范化
-- `os/src/net/socket/inet/stream/mod.rs` — TcpSocket 同上 + accept 复制 v6only flag
-- `os/src/net/syscall/setsockopt.rs` — IPV6_V6ONLY 从 no-op 改为调用 `socket.set_ipv6_v6only()`
+- `os/src/timer.rs` — 为 `TimeSpec`/`TimeVal` 加减运算补充内联，并将减法从“转总 ns/us 再还原”改为直接结构体借位相减
 
 **验证：**
-- `make rv64-kernel-build-only` ✅
-- `make la64-kernel-build-only` ✅
-- QEMU iperf 待测
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev sh -lc 'timeout 75s make rv64-run ...'` ✅ — busybox 进入文件操作测试后由外层 timeout 结束，无 panic
 
-**备注：** iperf3 创建 AF_INET6 socket 并设 IPV6_V6ONLY=0 允许双栈，随后 connect 到 IPv4 地址时原 `addr_family_matches` 严格按 IP version 拒绝。修复采用"内部保持 native IPv4"策略：`addr_family_matches` 在 `!v6only` 时接受 IPv4、`normalize_ipv4_mapped` 把用户传入的 `::ffff:a.b.c.d` 转 native IPv4 再给 smoltcp，而非反向转换。
+**备注：** 面向 trap 计时、sleep/futex/poll deadline 判断等高频路径；饱和到 0 的语义保持不变。
 
----
+### uaccess 优化：UserBuffer 单页读写快路径
+
+**涉及文件：**
+- `os/src/mm/uaccess.rs` — `UserBuffer::read/write` 在只有一个物理页片段时直接拷贝，跳过通用跨页循环
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev sh -lc 'timeout 75s make rv64-run ...'` ✅ — busybox 进入文件操作测试后由外层 timeout 结束，无 panic
+
+**备注：** 面向 simple read/write、stat/sigaction 等单页用户缓冲区高频路径；返回长度仍等价于 `min(src_or_dst.len(), user_buffer.len())`。
+
+### 时间换算热路径优化：减少频率重复读取并强制内联
+
+**涉及文件：**
+- `os/src/timer.rs` — `TimeSpec/TimeVal` tick 换算缓存 `get_clock_freq()` 到局部变量，并为时间读取、换算、判零等热路径小函数添加 `#[inline(always)]`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — busybox 进入文件操作测试后由外层 `timeout 75s` 结束，无 panic
+
+**备注：** 面向 syscall trap CPU accounting、`clock_gettime/gettimeofday/times/getrusage` 等高频时间路径；保持原有 tick 到 sec/usec/nsec 的换算语义不变。
+
+### la64 trap return 优化：删除无效 pre_start_init 调用
+
+**涉及文件：**
+- `os/src/hal/arch/loongarch64/trap/mod.rs` — 删除 `trap_return()` 中无状态效果的 `pre_start_init()` 调用，返回用户态前已由 `set_user_trap_entry()` 写入 EEntry
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- la64 QEMU smoke ✅ — basic-glibc 通过并进入 busybox-musl 后由外层 `timeout 75s` 结束，无 panic
+
+**备注：** 面向 la64 syscall/trap 返回热路径；`pre_start_init()` 当前只修改临时 `EEntry::empty()` 且没有 `.write()`，不会改变硬件状态。
+
+### syscall trap 优化：复用当前任务引用
+
+**涉及文件：**
+- `os/src/hal/arch/riscv/trap/mod.rs` — syscall trap 分支复用进入时取得的当前任务 `Arc`，返回阶段仍重新获取最新 trap context
+- `os/src/hal/arch/loongarch64/trap/mod.rs` — 同步 LoongArch syscall trap 分支，减少每次 syscall 的当前任务引用增减
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅（首次因 cargo 依赖 rlib 产物缺失失败，重跑通过）
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — busybox 已进入文件操作测试后由外层 `timeout 75s` 结束，无 panic
+
+**备注：** 面向 `lat_syscall`、`lat_sig`、短系统调用密集场景；execve/sigreturn 后仍通过同一 TCB 重新读取 trap context，不缓存 trap context 指针。
+
+### 当前任务 helper 优化：标注热路径内联
+
+**涉及文件：**
+- `os/src/task/processor.rs` — 为 `take_current_task`、`current_task`、`current_task_ref`、`try_current_user_token`、`current_user_token` 添加 `#[inline(always)]`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic 已通过，busybox 进入文件操作测试后由外层 `timeout 75s` 结束，无 panic
+
+**备注：** 面向 syscall、uaccess、clone/exit、等待队列等频繁调用路径；不改变调度和引用计数语义。
+
+### 当前任务获取优化：current_task 避开调度器锁
+
+**涉及文件：**
+- `os/src/task/processor.rs` — `current_task()` 基于已发布的 `CURRENT_TASK_PTR` 增加强引用构造 `Arc`，避免每次获取当前任务都锁 `PROCESSOR`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic 已通过，busybox 进入文件操作测试后由外层 `timeout 75s` 结束，无 panic
+
+**备注：** 面向 `lat_proc`、`lat_sig`、syscall 密集路径和 clone/exit 辅助路径；依赖当前单核调度模型，`PROCESSOR.current` 在指针发布期间持有强引用。
+
+### 调度切换优化：移除全局身份 hint 写入
+
+**涉及文件：**
+- `os/src/task/processor.rs` — 删除 `CURRENT_UID/EUID/GID/EGID` 全局缓存，调度切换不再写入 4 个身份原子
+- `os/src/task/task.rs` — 身份更新仅刷新 TCB 自身 hint
+- `os/src/task/mod.rs` — 移除已废弃的身份 hint refresh 导出
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic 已通过，busybox 进入文件操作测试后由外层 `timeout 75s` 结束，无 panic
+
+**备注：** 面向 `lat_ctx`、pipe latency、fork/exit 等调度密集测试；`current_uid/euid/gid/egid` 仍走当前 TCB 的 Relaxed hint，身份语义保持不变。
+
+### 调度循环优化：跳过空 zombie 队列 drain
+
+**涉及文件：**
+- `os/src/task/manager.rs` — 暴露 zombie 专用队列计数 fast check
+- `os/src/task/mod.rs` — 导出 `has_zombie_queue_tasks_fast`
+- `os/src/task/processor.rs` — 调度循环仅在 zombie 队列非空时批量 drain，避免空队列每轮构造 `Vec`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`；busybox 已进入文件操作测试后由外层 `timeout 75s` 结束，无 panic
+
+**备注：** 面向 `lat_ctx`、pipe latency、fork/exit 等调度密集测试；不改变 zombie 回收语义，竞态下最多退化为一次空 drain。
+
+### syscall 入口优化：默认构建跳过诊断 ID 原子写
+
+**涉及文件：**
+- `os/src/task/processor.rs` — `set_current_syscall_id` 仅在 `heap_trace`/`perf_stats` 诊断 feature 下写入 `CURRENT_SYSCALL_ID`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 已启动后由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 面向 `lat_syscall` 和 syscall 密集型测试；默认 release/log_off 路径避免每次 syscall 入口原子 store，诊断构建仍保留 syscall 名追踪。
+
+### exec/signal/la64 页表热路径降噪：删除普通 debug/trace
+
+**涉及文件：**
+- `os/src/syscall/process/exec.rs` — 删除 `execve` 参数 dump 和打开失败普通 info 输出
+- `os/src/task/signal/mod.rs` — 删除 pending signal/actionable 检查、syscall restart/EINTR 普通 debug 输出
+- `os/src/hal/arch/loongarch64/laflex.rs` — 删除 LoongArch 页表根页分配普通 trace 输出
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 已启动后由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 面向 `lat_proc`、`lat_sig`、exec 失败探测和 la64 地址空间创建路径；保留 OOM kill、非法信号帧、异常 trap 等错误诊断。
+
+### 退出路径统计开关：默认构建消除 heap_trace 调用
+
+**涉及文件：**
+- `os/src/task/task.rs` — `exit_thread_resources` 中仅在 `heap_trace` feature 打开时调用 `print_resource_stats`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 已启动后由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 默认 release/log_off 性能路径避免每个线程退出都进入资源统计诊断函数；`heap_trace` 诊断构建行为保持不变。
+
+### task/futex/exec 热路径降噪：删除普通调度与生命周期日志
+
+**涉及文件：**
+- `os/src/task/manager.rs` — 删除 `wake_interruptible` 已唤醒分支和 timeout wait queue 正常唤醒 trace 输出
+- `os/src/task/threads.rs` — 删除 futex wait 值不匹配正常返回 `EAGAIN` 的 trace 输出
+- `os/src/syscall/process/futex.rs` — 删除 process-shared futex 普通入口 trace 输出
+- `os/src/task/process_manager.rs` — 删除 `wait4` 回收 zombie 子进程普通 trace 输出
+- `os/src/task/elf.rs` — 删除 ELF interpreter 加载普通 info 输出
+- `os/src/task/task.rs` — 删除 real timer refresh、线程退出、init TCB 创建、exec ELF/heap/user_sp 等普通路径日志
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 已启动后由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 面向 `lat_proc`、`lat_ctx`、`lat_futex`、exec/clone/exit 密集场景；保留 clear_child_tid 错误、ELF 空文件、clone parent 缺失等异常诊断。
+
+### 地址空间/uaccess 热路径降噪：删除普通路径日志
+
+**涉及文件：**
+- `os/src/mm/address_space.rs` — 删除 `map_elf` 段映射/interp、fork VMA/trap context、用户栈与 trap context 分配/回收正常路径日志
+- `os/src/mm/uaccess.rs` — 删除 `UserBufferWriter::write_from` 大块写入普通 info 日志
+- `os/src/mm/vma_set.rs` — 删除 mmap 与前序 VMA 合并成功路径 debug 日志
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 已启动后由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 目标路径覆盖 exec/fork/mmap/clone 与用户内存写入；仅删除普通成功路径日志，保留 ELF 解析失败、映射失败、mprotect/munmap 异常等 `warn!`/`error!` 诊断。
+
+### 帧分配器热路径降噪：删除普通 trace 日志
+
+**涉及文件：**
+- `os/src/mm/frame_allocator.rs` — 删除 frame alloc/frame alloc uninit/frame dealloc 正常路径 trace 输出，保留 invalid/duplicate dealloc 与 OOM recovery 的 warn 诊断
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 已启动后由外层 `timeout 60s` 结束，无 panic
+
+**备注：** `frame_alloc`/`frame_dealloc` 被 page fault、fork、mmap、exec 等路径频繁调用；本次只清理普通路径日志宏开销，不改变分配器状态检查、OOM recovery 或错误诊断。
+
+### VMA/mmap 热路径降噪：删除正常路径 trace 日志
+
+**涉及文件：**
+- `os/src/mm/mmap.rs` — 删除 `sbrk` 扩展/重叠返回、文件映射创建等正常路径 trace 输出
+- `os/src/mm/vma.rs` — 删除 VMA 创建、COW 成功分支、OOM reclaim 成功分支 trace 输出
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 面向 `brk`/`mmap`/`fork`/COW 相关性能测试；失败路径的 `warn!`/`error!` 保持不变。
+
+### page fault 热路径降噪：删除普通修复路径 debug 日志
+
+**涉及文件：**
+- `os/src/mm/page_fault.rs` — 删除 resident/lazy/COW/decompress/swap-in 等正常缺页修复路径 debug 输出
+- `os/src/hal/arch/riscv/trap/mod.rs` — 删除 rv64 普通 page fault 入口 debug 输出
+- `os/src/hal/arch/loongarch64/trap/mod.rs` — 删除 la64 普通 page fault 入口与 TLB 寄存器 debug dump
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 面向 `lat_pagefault`/`lat_mmap` 类性能测试；保留权限失败 `error!`、stale pte `warn!` 和 LoongArch 异常兜底打印。
+
+### trap/syscall 入口降噪：删除无条件 debug 日志
+
+**涉及文件：**
+- `os/src/hal/arch/riscv/trap/mod.rs` — 删除每次 trap 的 scause debug 与每次 syscall 的 syscall id debug
+- `os/src/hal/arch/loongarch64/trap/mod.rs` — 删除每次 trap 的 cause debug
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** trap 入口是所有 syscall、缺页和中断共同路径；本次仅删除无条件正常入口日志，保留页错误与异常诊断输出。
+
+### 时间/信号热路径降噪：删除普通 trace 日志
+
+**涉及文件：**
+- `os/src/syscall/process/time.rs` — 删除 `setitimer`/`clock_gettime` 正常路径 trace 输出
+- `os/src/syscall/process/signal.rs` — 删除 `sigaction`/`rt_sigpending` syscall 入口与普通结果 trace 输出
+- `os/src/task/signal/mod.rs` — 删除 `sigaction`、`sigprocmask`、`do_signal` 正常投递/忽略路径 trace 输出，保留异常诊断日志
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 本次不改变信号处理语义、锁顺序或错误码，只清理高频正常路径的 trace 宏分支；`warn!`/`error!`/关键 `debug!` 诊断保留。
+
+### 高频 syscall 入口降噪：删除普通参数 info 日志
+
+**涉及文件：**
+- `os/src/syscall/process/lifecycle.rs` — 删除 `wait4` 普通入口参数日志
+- `os/src/syscall/process/clone.rs` — 删除 `clone` 普通入口参数日志，保留失败诊断输出
+- `os/src/syscall/process/mm.rs` — 删除 `brk`/`mmap` 普通入口参数日志
+- `os/src/syscall/process/ids.rs` — 删除 `prlimit` 普通入口参数日志
+- `os/src/syscall/process/time.rs` — 删除 `setitimer`/`clock_nanosleep` 普通入口参数日志
+- `os/src/syscall/process/signal.rs` — 删除 `sigprocmask`/`sigreturn` 普通入口日志
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 本次只清理运行时日志关闭下仍会进入宏级别判断的高频正常路径；`warn!`/`error!` 和 clone 失败诊断保持不变。
+
+### futex 热路径降噪：删除每次调用参数 info 日志
+
+**涉及文件：**
+- `os/src/syscall/process/futex.rs` — 删除 `sys_futex` 每次调用的完整参数 `info!` 日志，保留 process-shared futex 的低频 `trace!`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** futex 是 pthread/bench 常见热路径；运行时日志关闭时宏仍有级别判断开销，本次只去掉高频普通路径日志入口。
+
+### uaccess 当前 token 快速判断：减少重复 current task 查询
+
+**涉及文件：**
+- `os/src/task/processor.rs` — 增加 `try_current_user_token()`，优先读取 `CURRENT_USER_TOKEN` hint，无 hint 时再回退到当前任务
+- `os/src/task/mod.rs` — 导出 `try_current_user_token()` 供内存访问路径复用
+- `os/src/mm/uaccess.rs` — `is_current_user_token()` 改用 `try_current_user_token()`，避免先查 current task 再读 token 的重复工作
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** `current_user_token()` 仍保持原有必有当前任务的 unwrap 语义；新 helper 用于需要安全判断当前 token 的 fast path。
+
+### 用户 token hint：减少调度切入 VM 锁
+
+**涉及文件：**
+- `os/src/task/process.rs` — 为 `ProcessControlBlock` 增加 `user_token_hint`，初始化和 `replace_vm()` 时同步页表 token
+- `os/src/task/processor.rs` — 调度切入发布 `CURRENT_USER_TOKEN` 时改用进程 token hint，避免每次 context switch 锁 VM
+- `os/src/task/task.rs` — `TaskControlBlock::get_user_token()` 改为读取进程 token hint，保留调用接口兼容现有路径
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** VM 本体仍由 `ProcessInner::vm` 持有；hint 只缓存 `AddressSpace::token()`，在 exec/replace_vm 时先替换 VM 再发布新 hint。
+
+### timeval syscall：空指针路径延后 token 读取
+
+**涉及文件：**
+- `os/src/syscall/process/time.rs` — `gettimeofday(NULL, NULL)` 与 `settimeofday(NULL, NULL)` 直接返回成功，避免无用户访问时读取当前用户 token
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 保持 Linux 兼容的空指针 no-op 语义；非空参数路径仍按原顺序复制用户内存并校验权限。
+
+### robust_list 权限检查：复用身份 hint
+
+**涉及文件：**
+- `os/src/syscall/process/lifecycle.rs` — `get_robust_list` 跨线程权限比较改用当前/目标 uid、euid、gid、egid hint，避免为目标身份读取额外持锁
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** `CAP_SYS_PTRACE` 仍从当前任务锁内读取，robust list 内容也保持锁内读取；本次只优化只读 credential 比较。
+
+### priority/nice hint：减少调度优先级查询锁
+
+**涉及文件：**
+- `os/src/task/task.rs` — 增加 `TaskControlBlock::sched_nice()`，复用已有 `sched_nice_hint` 作为只读 fast path
+- `os/src/syscall/process/ids.rs` — `getpriority`/`setpriority` 预检查改用 nice hint；调度权限 owner 判断改用 uid/euid hint
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 对照 Linux `getpriority`/`setpriority` 语义，nice 查询取目标集合中的最高优先级，owner 检查比较当前 euid 与目标 uid/euid；本次只替换只读字段访问，写路径仍持锁更新 `sched_nice` 并同步 hint。
+
+### euid 权限门禁：使用当前身份 hint 避免锁
+
+**涉及文件：**
+- `os/src/syscall/process/misc.rs` — `reboot`/`delete_module` euid 检查改用 `current_euid()` hint
+- `os/src/syscall/process/ids.rs` — `ptrace_attach`/`setgroups` euid 检查改用任务身份 hint
+- `os/src/syscall/process/clone.rs` — clone/unshare/setns namespace 权限检查改用 euid hint
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 本次只替换单字段 euid 读；需要同时检查 capability bitmap 的 syslog 权限路径继续保留锁内读取，避免把多字段一致性拆散。
+
+### pgid/sid hint：减少进程组与会话查询锁
+
+**涉及文件：**
+- `os/src/task/process.rs` — 为 `pgid`/`sid` 增加 `Relaxed` 原子 hint，`getpgid()`/`getsid()` 改为无锁读取，`setpgid()`/`setsid()` 同步更新 hint
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** `pgid`/`sid` 真实字段仍保存在 `ProcessInner` 中，修改路径仍加锁；hint 与已有 `parent_pid_hint` 模式一致，用于只读查询和进程组扫描快路径。
+
+### task lifecycle/quota 原子序：减少 clone/exit 屏障
+
+**涉及文件：**
+- `os/src/task/quota.rs` — 任务配额计数和 soft-limit 告警 latch 改为 `Relaxed` 原子访问
+- `os/src/task/pid.rs` — TID 释放一次性标志改为 `Relaxed`
+- `os/src/task/task.rs` — `user_stack_allocated` 布尔标志改为 `Relaxed` 读写，降低 clone/exec/exit 资源路径屏障开销
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 配额与 TID 释放只需要原子 RMW 保证计数/latch 正确；TID 回收到全局分配器仍由 `TID_ALLOCATOR` 锁保护。`user_stack_allocated` 只作为资源释放参数，不发布地址空间内容。
+
+### process hint/counter 原子序：减少信号与线程生命周期屏障
+
+**涉及文件：**
+- `os/src/task/process.rs` — 线程 live 计数、父 pid hint、进程 shared signal pending hint 改为 `Relaxed` 原子访问，减少 signal/wait/clone/exit 热路径上的 acquire/release 屏障
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 这些原子只承担计数或快速 hint 作用；线程列表、父子关系和 shared signal 队列的真实状态仍由各自锁保护，hint 命中后的实际出队也会重新加锁确认。
+
+### shared futex compact 提示：放松非空标志原子序
+
+**涉及文件：**
+- `os/src/task/threads.rs` — `PROCESS_SHARED_FUTEX_MAYBE_NONEMPTY` 改为 `Relaxed` 读写，减少调度循环中 shared futex compact 快速跳过路径的屏障开销
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 该标志只表示 PROCESS_SHARED_FUTEX 可能非空；实际 BTreeMap 内容和 WaitQueue 状态仍由 `PROCESS_SHARED_FUTEX` 锁保护。
+
+### timer pending 快路径：放松调度循环原子屏障
+
+**涉及文件：**
+- `os/src/task/manager.rs` — `do_wake_expired()` 快速判断用的 timeout/kernel timer pending 标志改为 `Relaxed`；等待超时 generation 与 fallback timer pending 标志同步改为 `Relaxed`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** pending/generation 只用于“可能有定时器”和“旧 WakeTask 是否失效”的提示判断；真实队列内容由对应队列锁保护，任务状态由 task inner 锁保护，不依赖 acquire/release 发布语义。
+
+### exit 路径：借用当前任务完成退出处理
+
+**涉及文件：**
+- `os/src/task/mod.rs` — `do_exit()` 改为借用当前任务，`exit/exit_group` 路径不再为退出处理额外 clone/drop 当前任务 `Arc`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 当前任务仍在自身内核栈上运行，切栈前保留原有 `add_zombie_task(task)` 所需所有权；本次只去掉 `do_exit()` 内部不需要的临时引用计数。
+
+### priority 目标解析快路径：按需获取当前任务
+
+**涉及文件：**
+- `os/src/syscall/process/ids.rs` — `priority_targets()` 不再无条件 clone 当前任务；显式 pid/pgid/user 查询跳过当前任务引用计数，`PRIO_USER who=0` 使用当前 euid 快照
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** `PRIO_PROCESS who=0` 仍返回当前任务 `Arc` 作为操作目标；`PRIO_PGRP who=0` 只短期借用当前任务读取 pgid。
+
+### clone 调度发布路径：减少子任务 Arc clone
+
+**涉及文件：**
+- `os/src/syscall/process/clone.rs` — clone/fork 成功 publish 后将 `child` 直接移交给调度发布路径，避免 caller 侧额外 `Arc` clone/drop
+- `os/src/task/process_manager.rs` — `schedule_clone_child()` 在非 `CLONE_VFORK` 路径直接 move child 到 ready queue；vfork 路径保留一份引用用于 completion 等待
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** publish 失败回滚仍保留原有 `child` 引用；成功后 caller 不再使用 `child`。`CLONE_VFORK` 仍需在入队后等待子进程完成 vfork。
+
+### signal 权限检查身份快照：减少 kill 路径当前任务锁
+
+**涉及文件：**
+- `os/src/syscall/process/signal.rs` — `can_signal_process()` 使用当前 uid/euid 快照进行发送者权限判断，避免每次 signal 权限检查锁当前任务 inner
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 目标进程身份仍读取目标线程真实 inner；当前任务身份快照在 setuid/setgid 系列 syscall 后同步刷新。
+
+### trap 当前任务快路径：减少 page fault/timer 慢路径引用计数
+
+**涉及文件：**
+- `os/src/hal/arch/riscv/trap/mod.rs` — 非 syscall trap 路径改用 `current_task_ref()`，避免 page fault、非法指令和 trap 退出阶段额外 clone 当前 `Arc<TaskControlBlock>`
+- `os/src/hal/arch/loongarch64/trap/mod.rs` — 同步 la64 trap 慢路径当前任务读取方式，保持双架构一致
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** `current_task_ref()` 只在当前 trap 处理栈内短生命周期使用，不跨 `suspend_current_and_run_next()` 保存；调度器仍持有当前任务 `Arc`。
+
+### seccomp 活跃计数原子放松：减少 syscall 入口固定开销
+
+**涉及文件：**
+- `os/src/task/task.rs` — `ACTIVE_SECCOMP_TASKS` 与 `seccomp_counted` 的读改写使用 `Relaxed`，保留计数语义但去掉单核下不需要的 acquire/release 屏障
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** seccomp 规则本体仍由 task inner 锁保护；该计数只用于 syscall 入口快速判断是否需要进入 seccomp 检查。
+
+### current 快路径原子放松：减少 syscall 当前任务读取开销
+
+**涉及文件：**
+- `os/src/task/processor.rs` — `CURRENT_TASK_PTR` 发布/读取改为 `Relaxed`，匹配当前单核调度下的当前任务快指针语义
+- `os/src/task/task.rs` — uid/euid/gid/egid/suid/sgid hint 读写改为 `Relaxed`，避免身份只读 syscall 额外 acquire/release 屏障
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 当前内核为单核，真实任务状态和身份更新仍由原有锁保护；这些原子只提供当前任务/身份快照，不承担跨核内存发布语义。
+
+### 当前身份快照：加速 getuid/getgid 类 syscall
+
+**涉及文件：**
+- `os/src/task/processor.rs` — 调度切入时缓存当前任务 uid/euid/gid/egid，并在身份 hint 更新时刷新当前任务快照
+- `os/src/task/task.rs` — `store_identity_hint()` 同步刷新当前任务身份快照
+- `os/src/task/mod.rs` — 导出当前身份快照读取与刷新函数
+- `os/src/syscall/process/ids.rs` — `getuid/geteuid/getgid/getegid` 直接读取当前身份快照，避免每次读取当前 TCB hint
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** setuid/setgid/setres* 仍先更新真实 task inner，再调用 `store_identity_hint()`；快照只服务当前任务只读 syscall。
+
+### signal frame token 快路径：减少信号递送 VM 锁
+
+**涉及文件：**
+- `os/src/task/signal/mod.rs` — `do_signal()` 构造用户 signal frame 时复用当前 token 快照，避免每次递送信号额外锁进程 VM 获取页表 token
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 信号选择、sighand 锁、sigmask 恢复和用户栈写入布局保持不变；本次只优化当前任务 token 获取。
+
+### exec/prlimit token 快路径：减少当前任务用户参数读取锁
+
+**涉及文件：**
+- `os/src/syscall/process/exec.rs` — `execve`/`execveat` 读取路径、argv、envp 时复用当前 token 快照
+- `os/src/syscall/process/misc.rs` — `delete_module` 读取模块名时复用当前 token 快照
+- `os/src/syscall/process/ids.rs` — `prlimit` 读写 rlimit 用户指针时复用当前 token 快照
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 保留 exec 路径解析、资源限制权限检查和 task inner 锁语义；本次只优化当前地址空间 token 获取。
+
+### clone/wait token 快路径：减少进程生命周期 syscall VM 锁
+
+**涉及文件：**
+- `os/src/syscall/process/clone.rs` — `clone`/`clone3` 当前任务用户参数读取与 parent tid/pidfd 写回复用 `current_user_token()`
+- `os/src/syscall/process/lifecycle.rs` — `wait4`/`waitid`/`get_robust_list` 用户写回复用当前 token 快照
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** `CLONE_CHILD_SETTID` 仍通过 child VM 写入子线程地址空间；本次只优化当前父任务地址空间相关的用户访问。
+
+### signal 用户指针 token 快路径：减少信号 syscall VM 锁
+
+**涉及文件：**
+- `os/src/syscall/process/signal.rs` — `signalfd4/pidfd_send_signal/rt_sigpending/rt_sigqueueinfo/sigreturn` 的当前任务用户指针访问复用 `current_user_token()`
+- `os/src/task/signal/mod.rs` — `sigaction/sigaltstack/sigprocmask` 使用当前 token 快照，避免信号安装与信号掩码热路径额外锁 VM
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 保留 sighand、task inner、signal frame 恢复等原有锁语义；本次只替换当前任务用户地址空间 token 的获取方式。
+
+### 时间与信号等待 token 快路径：复用当前 token 快照
+
+**涉及文件：**
+- `os/src/syscall/process/time.rs` — `setitimer/getitimer/timer_gettime/times/getrusage` 的用户指针读写使用 `current_user_token()`，避免为 token 额外锁 VM
+- `os/src/task/signal/wait.rs` — `sigsuspend()` 与 `sigtimedwait()` 读取用户 sigset/timeout 时复用当前 token 快照
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 任务状态、计时器状态、信号 pending/mask 仍按原路径加锁读取；本次只优化当前用户地址空间 token 获取。
+
+### futex 用户指针 token 快路径：复用当前 token 快照
+
+**涉及文件：**
+- `os/src/syscall/process/futex.rs` — `sys_futex()` 与 `sys_futex_waitv()` 使用 `current_user_token()` 读取当前任务用户指针，避免每次入口锁 PCB/VM 获取 token
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** shared futex key 仍通过当前 VM 判断虚拟地址是否使用共享物理 key；本次只优化用户 timeout/waiter/futex word 读写所需的 token 获取。
+
+### trap 返回 token 快路径：避免每次返回用户态锁 VM
+
+**涉及文件：**
+- `os/src/hal/arch/riscv/trap/mod.rs` — `trap_return()` 使用当前任务 token 快照作为 `satp`，不再调用 `TaskControlBlock::get_user_token()`
+- `os/src/hal/arch/loongarch64/trap/mod.rs` — `trap_return()` 使用当前任务 token 快照作为用户页表 token，保持双架构一致
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** token 快照在调度切入时刷新，`replace_vm()` 会在 exec 等地址空间替换后刷新当前进程快照；trap 返回不再为获取 token 额外锁 PCB/VM。
+
+### 用户访存跨页翻译优化：每次 uaccess 只获取一次当前 VM
+
+**涉及文件：**
+- `os/src/mm/uaccess.rs` — 新增 `current_user_vm()` 与 VM 复用版单页翻译；`translate_user_buffer_checked()` 和 `translated_str()` 在进入循环前完成 token 校验并获取一次当前 VM Arc，跨页循环中不再重复锁 PCB inner 获取 VM
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 仍保持 fault-in 只能作用于当前任务 token；优化目标是 read/write/iovec/pathname 等跨页或字符串用户访存路径的重复 PCB 锁。
+
+### 用户访存 token 校验优化：uaccess 复用当前 token 缓存
+
+**涉及文件：**
+- `os/src/mm/uaccess.rs` — `is_current_user_token()` 和 `fault_in_current_user_va()` 改为使用已缓存的 `current_user_token()` 做当前地址空间校验，避免每页用户指针翻译时再次通过 `TaskControlBlock::get_user_token()` 锁 VM
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** fault-in 仍只允许当前任务 token，跨进程/陈旧 token 继续返回 `EFAULT`；优化只去掉重复 VM token 读取。
+
+### 当前任务快照内存序优化：标量 fast path 使用 Relaxed
+
+**涉及文件：**
+- `os/src/task/processor.rs` — 将当前 pid/tid/ppid/user-token 快照的 load/store 从 Acquire/Release 收紧为 Relaxed，保留 `CURRENT_TASK_PTR` 的发布/读取内存序
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** MangoCore 当前是单核调度，这些标量只是当前 CPU 上任务状态的快照，不承担跨核对象发布语义；裸指针快路径仍保持 Acquire/Release。
+
+### 用户页表 token 快路径：缓存当前任务 token
+
+**涉及文件：**
+- `os/src/task/processor.rs` — 在任务切入 CPU 时缓存当前用户页表 token；`current_user_token()` 优先返回缓存值，避免用户指针 syscall 每次锁 PCB/VM 读取 token
+- `os/src/task/process.rs` — `replace_vm()` 在 exec 等地址空间替换后刷新当前进程的 token 缓存，保证返回用户态使用新页表
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 缓存只覆盖当前正在 CPU 上运行的任务；非当前任务仍通过 `TaskControlBlock::get_user_token()` 读取真实 VM token。
+
+### ID 类 syscall 快路径：调度切入时缓存当前 pid/tid/ppid
+
+**涉及文件：**
+- `os/src/task/processor.rs` — 在当前任务切入 CPU 时同步维护 `CURRENT_PID`、`CURRENT_TID`、`CURRENT_PARENT_PID` 原子快照，切出时清零
+- `os/src/task/mod.rs` — 导出当前 pid/tid/ppid 快照读取接口
+- `os/src/syscall/process/ids.rs` — `getpid()`、`getppid()`、`gettid()` 改为直接读取快照，避免极短 syscall 中加载 current task 指针并解引用 PCB/TCB
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** `parent_pid_hint` 仍在 reparent/set_parent 路径维护；任务重新调度进入时刷新 ppid 快照，不改变 wait/reparent 的真实 PCB 语义。
+
+### syscall 入口 seccomp 空路径优化：未启用时跳过过滤分支
+
+**涉及文件：**
+- `os/src/syscall/mod.rs` — 在 syscall 分发入口先检查全局 `any_seccomp_enabled()`；没有任务启用 seccomp 时直接跳过 `seccomp_action_for_syscall()` 调用和 match 分支
+- `os/src/task/task.rs` — 将 `any_seccomp_enabled()` 标记为 `#[inline(always)]`，让 syscall 热路径上的全局计数读取保持极短
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 该策略参考 Linux seccomp 的按任务启用模型；MangoCore 仍在任务启用 strict/filter 后走原有 `seccomp_action_for_syscall()` 语义，空路径只减少 lmbench simple syscall 等常态负担。
+
+### 调度循环 shared futex compact 优化：空全局表跳过 tick 写入
+
+**涉及文件：**
+- `os/src/task/threads.rs` — 为 `PROCESS_SHARED_FUTEX` 增加 maybe-nonempty 原子 flag；共享 futex wait 入全局表时置位，wake/requeue/remove/compact 后按表是否为空刷新 flag
+- `os/src/task/threads.rs` — `compact_shared_futex()` 在全局共享 futex 表为空时直接返回，避免调度循环每轮执行 `AtomicUsize::fetch_add` 和后续降频检查
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 私有 futex 路径不使用该全局 flag；共享 futex 的真实等待队列仍由 `PROCESS_SHARED_FUTEX` 锁保护，flag 只用于跳过空表维护。
+
+### 调度循环 zombie drain 优化：空 zombie 队列跳过 TASK_MANAGER 锁
+
+**涉及文件：**
+- `os/src/task/manager.rs` — 为专用 `zombie_queue` 增加原子长度快照；exit 入队、单个/批量 drain 时维护计数
+- `os/src/task/manager.rs` — `take_zombie_tasks()` 与 `take_one_zombie_task()` 在 zombie 队列计数为 0 时直接返回，避免调度循环每轮无 zombie 时仍拿 `TASK_MANAGER` 锁
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 该计数只覆盖退出后等待 drop 的专用 zombie 队列；ready/interruptible 队列中的兜底 zombie 清理逻辑保持原样。
+
+### 调度队列状态读取优化：ready/interruptible 长度改为原子快照
+
+**涉及文件：**
+- `os/src/task/manager.rs` — 为 ready 与 interruptible 队列维护原子长度快照；入队、出队、批量唤醒、retain 清理和 zombie 清理路径同步更新计数
+- `os/src/task/manager.rs` — `has_ready_task()`、`procs_count()`、`task_manager_counts()` 改为无锁读取快照，减少 `sched_yield()`、短超时 futex/poll 自旋和 `/proc/stat` 诊断路径的 `TASK_MANAGER` 锁竞争
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 原子长度只作为调度状态快照；真实队列增删、唤醒和公平选择仍由 `TASK_MANAGER` 锁保护，读路径允许短暂近似但不影响队列一致性。
+
+### 调度循环 timer 空路径优化：pending flag 跳过无定时器锁
+
+**涉及文件：**
+- `os/src/task/manager.rs` — 为全局 timeout wait queue 与 kernel timer queue 增加 pending flag；`do_wake_expired()` 在完全无 pending timer/timerfd 时直接返回，避免每轮调度固定拿 timer 队列锁和读取时间
+- `os/src/fs/timerfd.rs` — 为 timerfd registry 增加 maybe-nonempty 原子快判，并在 registry 清空时回收 flag
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** pending flag 只作为空路径快判；一旦存在未来定时器仍走原有 `wake_expired`、generation 校验、timerfd 扫描与唤醒逻辑，避免改变超时语义。
+
+### 调度器 ready queue 优化：nice=0 判断改用原子 hint
+
+**涉及文件：**
+- `os/src/task/task.rs` — 在 `TaskControlBlock` 增加 `sched_nice_hint`，初始化和 fork 子任务时同步当前 nice 值
+- `os/src/task/manager.rs` — ready queue 入队/出队的 `task_has_nonzero_nice()` 改为读取原子 hint，避免默认 nice=0 任务每次调度队列操作都拿 `task.inner` 锁
+- `os/src/syscall/process/ids.rs` — `setpriority()` 与 `sched_setattr()` 修改 `sched_nice` 时同步更新调度 hint
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 真实 ABI 状态仍以 `inner.sched_nice` 为准；hint 只用于调度器默认 FIFO 快路径判断，非零 nice 的公平选择仍读取完整 `sched_vruntime/sched_nice`。
+
+### 进程时间统计热路径优化：默认 nice 与 CPU rlimit 快路径
+
+**涉及文件：**
+- `os/src/task/task.rs` — `sched_vruntime_delta_us()` 为 `nice=0` 增加直接返回路径，避免默认调度权重下每次用户态时间结算都查表、乘除；`update_process_times_enter_trap()` 在用户态时间差为 0 时提前返回；`enforce_cpu_rlimit()` 在 soft/hard limit 均无限制时直接返回
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 该优化面向 lmbench simple syscall/pipe/signal 等高频 trap 路径；不改变 rusage 累计、非零 nice 权重、虚拟/性能定时器或显式 CPU rlimit 的语义。
+
+### trap_return 信号检查优化：do_signal 返回当前任务短引用
+
+**涉及文件：**
+- `os/src/task/signal/mod.rs` — `do_signal()` 返回值从 `Arc<TaskControlBlock>` 收窄为 `&'static TaskControlBlock`，常态无信号返回路径通过 `current_task_ref()` 避免每次 trap_return 额外 clone 当前任务 `Arc`
+- `os/src/hal/arch/riscv/trap/mod.rs`、`os/src/hal/arch/loongarch64/trap/mod.rs` — `trap_return()` 适配 `do_signal()` 的短引用返回值，去除原先释放 `Arc` 的 `drop(task)`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 参考成熟内核 current task 快速访问思路，当前任务在返回用户态前不需要通过引用计数延长生命周期；信号处理、stop、默认终止和 SIGSEGV 退出路径仍保持原有控制流。
+
+### trap 返回热路径优化：未启用 ITIMER_REAL 时跳过实时定时器刷新
+
+**涉及文件：**
+- `os/src/task/task.rs` — `refresh_real_timer()` 在 `real_timer_deadline` 为空时直接返回，避免无 real timer 的 syscall/trap 返回路径无条件读取时间、计算差值并更新锚点
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 该优化针对 lmbench `simple syscall/read/write/signal` 等高频 trap 返回场景；`setitimer(ITIMER_REAL)` 启用时仍保留原有刷新逻辑，禁用或过期一次性 timer 时由 `real_timer_deadline=None` 走快路径。
+
+### timer syscall 优化：延迟获取当前任务 Arc
+
+**涉及文件：**
+- `os/src/syscall/process/time.rs` — `setitimer()` 与 `timer_settime()` 主体改用 `current_task_ref()`，仅在确实需要注册内核定时器并生成 `Weak<TaskControlBlock>` 时再获取当前任务 `Arc`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 该路径保留 `Arc::downgrade()` 注册 timer 的必要语义；关闭 timer、读取 old value、即时触发 signal 等不注册 timer 的路径避免额外当前任务 clone。
+
+### 信号热路径优化：self-kill 与 sigreturn 减少当前任务 Arc clone
+
+**涉及文件：**
+- `os/src/task/signal/delivery.rs` — 新增 `send_process_signal_to_current_task()`，用于当前单线程进程给自身发送 process signal 时只入队 pending signal，避免通用路径扫描线程并 clone 当前任务 `Arc`
+- `os/src/task/signal/mod.rs` — 导出当前任务专用 signal helper
+- `os/src/syscall/process/signal.rs` — `kill(pid=self)` 单线程快路径改用专用 helper；`sys_sigreturn()` 改用 `current_task_ref()`，错误路径保持先释放 `task.inner` 锁再退出当前任务
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束，无 panic
+
+**备注：** 该优化面向 lmbench `lat_sig`/signal handler overhead；多线程或非当前进程信号发送仍走原有权限检查、目标选择与唤醒路径。
+
+### 通用阻塞 I/O 兜底路径优化：wait_io_core 返回后短引用化
+
+**涉及文件：**
+- `os/src/syscall/utils.rs` — `wait_io_core()` 在 `suspend_current_and_run_next()` 返回后的信号检查与 real timer 刷新改用 `current_task_ref()`，避免每次 EAGAIN 阻塞唤醒后 clone 当前任务 `Arc`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束
+
+**备注：** `suspend_current_and_run_next()` 的调度语义保持不变；本次只优化当前任务返回后检查信号/刷新 timer 的引用获取方式。
+
+### 进程属性 syscall 优化：cap/prctl/prlimit 当前任务短引用化
+
+**涉及文件：**
+- `os/src/syscall/process/ids.rs` — `capset/process_vm_{readv,writev}/prctl/setpgid/prlimit64` 中仅读取当前 TCB 字段或 clone 当前进程句柄的路径改用 `current_task_ref()`；`current_rlimit_for()` 与 `task_has_capability()` 参数收窄为 `&TaskControlBlock`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束
+
+**备注：** ptrace、priority target、返回当前任务 `Arc` 的 pid lookup helper 保持原有拥有权路径；本次不改变权限检查顺序和 errno 语义。
+
+### futex/WaitQueue 返回路径优化：finish_wait 改用任务短引用
+
+**涉及文件：**
+- `os/src/task/manager.rs` — `WaitQueue::finish_wait()` 入参从 `&Arc<TaskControlBlock>` 收窄为 `&TaskControlBlock`，等待返回后的队列清理路径改用 `current_task_ref()`，减少唤醒后额外当前任务 `Arc` clone
+- `os/src/task/threads.rs` — futex 普通等待、waitv 私有/共享等待的返回清理路径改用短引用；入队和超时注册仍保留 `Arc` 以生成 `Weak`
+- `os/src/task/signal/mod.rs` — 默认 stop signal 等待返回清理改用 `current_task_ref()`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束
+
+**备注：** 参考 Linux `finish_wait` 的职责边界，清理等待队列并恢复当前任务运行态不需要额外拥有任务引用；MangoCore 入队前仍用 `Arc::downgrade()`，等待生命周期和信号/超时检查语义不变。
+
+### lmbench lat_proc exec 前置路径优化：减少当前任务 clone
+
+**涉及文件：**
+- `os/src/syscall/process/exec.rs` — exec 权限检查、fd 克隆、起始目录解析与 `execve/execveat` 用户参数读取改用 `current_task_ref()`；复用 `fs_ref` 获取 working path，减少 exec 前置路径中的当前任务 `Arc` clone
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 60s` 结束
+
+**备注：** `load_elf()` 为同步构造并提交新地址空间路径，未跨调度等待点；exec 参数解析、路径解析、权限检查和错误码语义保持不变。
+
+### seccomp syscall 判定优化：减少启用后每次 syscall 的当前任务 clone
+
+**涉及文件：**
+- `os/src/syscall/process/ids.rs` — `seccomp_action_for_syscall()` 与 `sys_prctl_set_seccomp()` 改用 `current_task_ref()`，避免 seccomp 全局启用后每次 syscall 判定都 clone 当前任务 `Arc`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — 首次 `timeout 60s` 因 ntpd 三次失败只跑到 basic-musl；重跑 `timeout 90s` 后 basic musl/glibc、busybox musl/glibc、lua-musl 均 `exit_code=0`，随后由外层 timeout 结束
+
+**备注：** seccomp filter 解释、strict mode 允许列表、`prctl(PR_SET_SECCOMP)` 错误码和计数逻辑保持不变；本次只缩短当前任务引用路径。
+
+### LTP/BPF fd 路径优化：当前任务短引用化
+
+**涉及文件：**
+- `os/src/syscall/process/bpf.rs` — BPF map fd lookup/create 只用 `current_task_ref()` 获取当前进程 fd table，减少 BPF map 操作中的当前任务 `Arc` clone
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** 本次只调整 fd table 访问方式，不改变 BPF map 类型、key/value 校验和用户缓冲区读写逻辑。
+
+### lmbench/UnixBench 凭证 syscall 优化：减少当前任务 clone
+
+**涉及文件：**
+- `os/src/syscall/process/ids.rs` — `setuid/setreuid/setresuid/setgid/setregid/setresgid/setfsuid/setfsgid/setgroups` 改用 `current_task_ref()`，凭证锁内修改和 identity hint 更新不再额外 clone 当前任务 `Arc`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** 本次只处理当前任务自身凭证/组列表修改路径；ptrace、cap pid 查询、process_vm 等跨任务权限检查仍保留原有拥有权路径。
+
+### lmbench lat_proc 优化：收窄 wait 当前任务生命周期
+
+**涉及文件：**
+- `os/src/syscall/process/lifecycle.rs` — `wait4/waitid` 改用 `current_task_ref()` 读取 token，并在进入 `ProcessManager::wait_child()` 前只保留当前进程 `Arc`；P_PIDFD 路径复用同一个进程句柄取得 fd table
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** `wait_child()` 可能进入等待，本次避免把当前任务 `Arc` 持有到等待路径；wait 目标选择、P_PIDFD 非阻塞检查和用户态 siginfo/status 写回语义保持不变。
+
+### lmbench/UnixBench signal wait 优化：缩短当前任务拥有权
+
+**涉及文件：**
+- `os/src/task/signal/wait.rs` — `sigsuspend/sigtimedwait` 的用户参数读取、mask 设置和清理改用 `current_task_ref()`，避免把当前任务 `Arc` 持有到 WaitQueue 等待周期之外
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** WaitQueue 入队/阻塞仍由等待原语内部持有当前任务 `Arc`；本次只收窄 syscall 前后 signal mask 操作的 TCB 引用生命周期。
+
+### lmbench/UnixBench signalfd 短路径优化：减少当前任务 clone
+
+**涉及文件：**
+- `os/src/syscall/process/signal.rs` — `SignalFd::read_at/poll` 改用 `current_task_ref()` 直接检查/取出当前任务 pending signal；`sys_signalfd4()` 只用短引用读取 token 和 files 句柄，减少 signalfd 创建、更新和轮询路径中的当前任务 `Arc` clone
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** `sigreturn/do_signal/stop` 等需要当前任务拥有权或跨等待点的路径继续保留 `current_task()`。
+
+### lmbench/UnixBench mmap syscall 优化：复用 fd 与 VM 句柄
+
+**涉及文件：**
+- `os/src/syscall/process/mm.rs` — `sys_mmap()` 使用 `current_task_ref()` 一次性 clone 当前进程 files/VM 句柄；非匿名映射只查一次 fd table 并复用 `Arc<File>`，减少 mmap 热路径中的当前任务 `Arc` clone、进程 inner lock 和重复 fd 查找
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** 保持原有错误优先级：非匿名坏 fd 仍早于 len/prot/flags 校验返回 `EBADF`；本次不改 mmap 权限与 VFS 语义。
+
+### lmbench/UnixBench 用户内存访问优化：当前任务短引用化
+
+**涉及文件：**
+- `os/src/mm/uaccess.rs` — `is_current_user_token()` 与用户地址 fault-in 改用 `current_task_ref()`，校验当前 token 后只 clone VM 句柄再进入缺页处理，减少 copy_from_user/copy_to_user 高频路径中的当前任务 `Arc` clone
+- `os/src/mm/address_space.rs` — trap page fault 当前任务读取改用短引用并 clone VM 后再加锁
+- `os/src/mm/sysctl.rs` — committed_AS 当前进程 VM 读取改用短引用
+- `os/src/mm/frame_allocator.rs` — OOM handler 当前进程 VM 清理路径改用短引用
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** 短引用只用于读取 token/clone VM Arc，不跨 VM 锁、缺页处理或调度等待点保存。
+
+### lmbench/UnixBench UTS syscall 优化：短引用访问当前任务
+
+**涉及文件：**
+- `os/src/syscall/process/ids.rs` — `uname/sethostname/setdomainname` 的当前任务读取改用 `current_task_ref()`，权限判断复用 euid hint，减少 UTS 短路径中的 `Arc` clone 和 inner lock
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** 本次只替换 UTS namespace 只读/短改路径；会跨等待、发布任务或需要 `Arc::downgrade` 的路径不动。
+
+### lmbench/UnixBench CPU clock 查询优化：当前任务短引用化
+
+**涉及文件：**
+- `os/src/syscall/process/time.rs` — CPU clock id 校验和 `clock_gettime` CPU clock 分支改用 `current_task_ref()` 读取当前 tid/process，当前线程 rusage 读取不再 clone 当前任务 `Arc`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** 跨线程/跨进程 CPU clock 查询仍通过 `find_task_by_tid` / `find_process_by_pid` 获取拥有权；本次只减少当前任务分支的 `Arc` clone。
+
+### lmbench/UnixBench time/keyring 短路径优化：复用当前任务短引用
+
+**涉及文件：**
+- `os/src/syscall/process/time.rs` — `getitimer/timer_create/timer_gettime/timer_getoverrun/timer_delete` 的当前任务访问改用 `current_task_ref()`，保留 `setitimer/timer_settime` 中需要 `Arc::downgrade` 的路径
+- `os/src/syscall/process/keyring.rs` — keyring 当前上下文读取改用 `current_task_ref()` 和 euid hint，减少 inner lock 与 `Arc` clone
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** 本次只替换不注册内核 timer、不保存弱引用、不跨阻塞点的短路径；`setitimer/timer_settime` 继续使用 `Arc<TaskControlBlock>`。
+
+### lmbench/UnixBench futex syscall 优化：key 计算短引用化
+
+**涉及文件：**
+- `os/src/syscall/process/futex.rs` — `sys_futex()` 与 `sys_futex_waitv()` 的 token/key/private futex table 访问改用 `current_task_ref()` 短作用域，减少 futex syscall 层的当前任务 `Arc` clone
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** `current_task_ref()` 只用于读取 token、计算 futex key 和短暂访问私有 futex 表；`do_futex_wait*` / `do_futex_waitv*` 阻塞调用前不保留当前任务短引用。
+
+### lmbench/UnixBench ProcessManager helper 优化：当前任务短引用
+
+**涉及文件：**
+- `os/src/task/process_manager.rs` — `current_process()` 和 `send_signal_to_all()` 的当前任务读取改用 `current_task_ref()`，减少纯 helper 路径的 `PROCESSOR` 锁与 `Arc` clone
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** `task/manager.rs` 中 wait queue 入队、`Arc::downgrade`、唤醒后 `finish_wait` 相关路径继续保留 `current_task()`。
+
+### lmbench/UnixBench futex fast-path 优化：短引用获取当前任务
+
+**涉及文件：**
+- `os/src/task/threads.rs` — 私有 futex 表获取和单线程短超时自旋路径改用 `current_task_ref()`，减少 futex wait 热路径中的当前任务 `Arc` clone
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** 实际入等待队列、`Arc::downgrade`、唤醒后 `finish_wait` 的路径保留 `current_task()`；syscall 层 futex key 分发暂不重构，避免短引用跨等待调用。
+
+### lmbench/UnixBench 信号内部 helper 优化：短引用读取当前任务
+
+**涉及文件：**
+- `os/src/task/signal/mod.rs` — `sigaction/sigaltstack/sigprocmask` 和 core dump 状态查询改用 `current_task_ref()`，减少信号相关 syscall 辅助路径的当前任务 `Arc` clone
+- `os/src/task/signal/delivery.rs` — 信号发送者 pid 读取改用 `current_task_ref()`
+- `os/src/task/signal/wait.rs` — `sigtimedwait` 轮询闭包内的当前任务检查改用短引用，外层跨 wait 的 `Arc` 保留
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** `do_signal`、默认 stop、`sigsuspend/sigtimedwait` 外层等待路径仍保留 `Arc<TaskControlBlock>`，避免短引用跨调度点。
+
+### lmbench/UnixBench 线程生命周期 syscall 优化：robust list 当前任务短引用
+
+**涉及文件：**
+- `os/src/syscall/process/lifecycle.rs` — `set_tid_address/set_robust_list/get_robust_list(pid=0)` 改用 `current_task_ref()`，跨进程 robust list 查询仍走 `ProcessManager::find_task`
+- `os/src/syscall/process/clone.rs` — `clone3` 参数解析前的用户 token 读取改用 `current_task_ref()`，主 clone 发布/调度路径保留 `Arc<TaskControlBlock>`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** 该优化覆盖 pthread/futex 初始化常见短路径；`wait4/waitid/clone/unshare/setns` 等需要拥有权、发布子任务或复杂命名空间语义的路径未改。
+
+### lmbench/UnixBench IPC 与杂项 syscall 优化：当前任务短引用
+
+**涉及文件：**
+- `os/src/syscall/process/ipc.rs` — SysV shm pid/ns/id helper、mqueue fd 表访问、`mq_open/mq_notify` 当前 pid 读取改用 `current_task_ref()`，减少 IPC 权限检查和 fd 分配路径的 `PROCESSOR` 锁与 `Arc` clone
+- `os/src/syscall/process/misc.rs` — `reboot/syslog/delete_module` 权限检查改用 `current_task_ref()`，并在 `delete_module` 中复用当前任务 token
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** mq netlink 投递、wait queue 和阻塞收发逻辑未改动，只替换不跨调度点保存的当前任务只读/短 fd 表路径。
+
+### lmbench/UnixBench 信号 syscall 优化：当前任务短引用
+
+**涉及文件：**
+- `os/src/syscall/process/signal.rs` — `kill/tkill/tgkill` 诊断、pidfd fd 表访问、`rt_sigpending/rt_sigqueueinfo` 和信号权限检查改用 `current_task_ref()`，减少当前任务查询的 `PROCESSOR` 锁与 `Arc` clone
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 进入后由外层 `timeout 60s` 结束
+
+**备注：** `signalfd`、`sigreturn` 以及需要保存 `Arc<TaskControlBlock>` 的阻塞/发送路径保留原实现，避免跨调度点持有短生命周期引用。
+
+### lmbench/UnixBench 调度查询优化：当前任务短引用
+
+**涉及文件：**
+- `os/src/syscall/process/ids.rs` — `getpgid/getsid(pid=0)`、`setsid`、`sched_getaffinity(pid=0)` 和调度只读查询 helper 改用 `current_task_ref()`，减少当前任务查询的 `PROCESSOR` 锁与 `Arc` clone
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行到 `du` 后由外层 `timeout 60s` 结束
+
+**备注：** 调度设置类 syscall 仍保留 `Arc<TaskControlBlock>` 路径，因为后续需要更新 ready 队列和同步进程调度状态。
+
+### lmbench/UnixBench VM syscall 优化：当前任务短引用
+
+**涉及文件：**
+- `os/src/syscall/process/mm.rs` — `brk/sbrk/munmap/mprotect/mlock/mincore/madvise/membarrier` 等当前进程 VM 短路径改用 `current_task_ref()`，避免仅为读取当前任务而锁 `PROCESSOR` 并 clone `Arc`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行到 `du` 后由外层 `timeout 60s` 结束
+
+**备注：** 文件映射 `mmap` 路径暂不改动，避免把本轮非 fs/net 优化扩展到 VFS/inode 语义。
+
+### lmbench syscall 优化：缓存 getresuid/getresgid 凭据字段
+
+**涉及文件：**
+- `os/src/task/task.rs` — 在现有 uid/euid/gid/egid hint 基础上增加 suid/sgid hint，clone 时继承父任务凭据缓存，set*id 成功后统一刷新
+- `os/src/syscall/process/ids.rs` — `getresuid/getresgid` 改为直接读取凭据 hint；`getgroups/capget(pid=0)` 以及若干短 identity/prctl 查询路径改用 `current_task_ref()`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行到 `du` 后由外层 `timeout 60s` 结束
+
+**备注：** 缓存只服务当前任务只读 identity syscall；权限检查、capability 判定、跨进程查询仍读取锁内状态或走原 `ProcessManager` 路径。
+
+### lmbench/UnixBench 时间 syscall 优化：短路径复用当前任务引用
+
+**涉及文件：**
+- `os/src/syscall/process/time.rs` — `times/getrusage` 以及时间调整权限检查改用 `current_task_ref()`，避免只读当前任务路径额外锁 `PROCESSOR` 并 clone `Arc`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 启动后由外层 `timeout 60s` 结束
+
+**备注：** 只替换不跨阻塞/调度点保存引用的短路径；`setitimer` 等需要 `Arc::downgrade` 或拥有权的路径仍保留 `current_task()`。
+
+### lmbench syscall 优化：用户 token/trap context helper 复用当前任务短引用
+
+**涉及文件：**
+- `os/src/task/processor.rs` — `current_user_token()` 与 `current_trap_cx()` 改为通过 `current_task_ref()` 读取当前任务，避免通用用户内存访问 helper 每次额外锁 `PROCESSOR` 并 clone `Arc`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 启动后由外层 `timeout 60s` 结束
+
+**备注：** 该改动只复用上一条引入的短生命周期 current 指针；需要拥有权的路径仍使用 `current_task()`。
+
+### lmbench syscall 优化：当前任务无锁短引用
+
+**涉及文件：**
+- `os/src/task/processor.rs` — 调度器发布单核当前任务原始指针，`take_current_task()` 切走前清空，新增短生命周期 `current_task_ref()`
+- `os/src/task/mod.rs` — 导出 `current_task_ref()`
+- `os/src/hal/arch/riscv/trap/mod.rs` — syscall trap 入口/返回使用当前任务短引用，避免每次 syscall 额外锁 `PROCESSOR` 并 clone `Arc`
+- `os/src/hal/arch/loongarch64/trap/mod.rs` — 同步 la64 syscall trap 热路径
+- `os/src/syscall/process/ids.rs` — `getpid/getppid/getuid/geteuid/getgid/getegid/gettid` 使用短引用读取
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 跑到文件操作后由外层 `timeout 75s` 结束
+
+**备注：** 该接口只用于不跨调度点保存的短读路径；需要拥有权或可能跨阻塞点的代码仍使用原 `current_task()` 返回 `Arc`。
+
+### lmbench syscall 优化：缓存基础 uid/gid 查询
+
+**涉及文件：**
+- `os/src/task/task.rs` — 为 TCB 增加 `uid/euid/gid/egid` 原子缓存，clone 时从父任务初始化，提供免 inner 锁读取接口
+- `os/src/syscall/process/ids.rs` — `getuid/geteuid/getgid/getegid` 改为读取缓存，`setuid/setreuid/setresuid/setgid/setregid/setresgid` 成功写入后同步刷新缓存
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，busybox-musl `exit_code=0`；busybox-glibc 运行中由外层 `timeout 75s` 结束
+
+**备注：** 缓存只服务只读身份 syscall；权限检查、capability 刷新和 set* 语义仍使用原锁内字段，避免改变凭据判定路径。
+
+### lmbench null syscall 优化：缓存 getppid 父 PID
+
+**涉及文件：**
+- `os/src/task/process.rs` — 为 PCB 维护 `parent_pid_hint` 原子缓存，`parent_pid()` 直接读取缓存，`set_parent()` 同步刷新，避免 `getppid()` 锁 inner 并升级 Weak
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic musl/glibc 均 `exit_code=0`，`getppid` 用例通过；随后进入 busybox 并由外层 `timeout 75s` 结束
+
+**备注：** wait/reparent 仍保留原 Weak parent 关系；缓存只用于 getppid 这类只需要父 PID 的热路径，并在 reparent/set_parent 时刷新。
+
+### lmbench syscall 优化：seccomp 未启用时零锁早退
+
+**涉及文件：**
+- `os/src/syscall/process/ids.rs` — `seccomp_action_for_syscall()` 在全局 active seccomp task 计数为 0 时直接 `Allow`，避免每次 syscall 获取当前 task 并锁 inner
+- `os/src/task/task.rs` — 为启用/继承 seccomp 的 TCB 做 active 计账，并在 TCB drop 时回收计数
+- `os/src/task/mod.rs` — 导出 seccomp active 查询 helper
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — basic/busybox/lua musl+glibc 均 `exit_code=0`，随后因 `/os_test.conf` 为 `mask=0xFFF` 进入 LTP fs_bind，由外层 `timeout 150s` 结束
+
+**备注：** 普通评测进程默认不启用 seccomp；该优化只跳过全局没有 seccomp task 时的空检查。一旦 prctl 启用 seccomp 或 clone 继承 seccomp，仍进入原锁内严格模式/BPF 解释逻辑。
+
+### lmbench syscall 优化：合并 syscall trap 入口/返回锁获取
+
+**涉及文件：**
+- `os/src/hal/arch/riscv/trap/mod.rs` — syscall 分支在一次 task inner 锁内完成进入 trap 计时和参数快照，返回后一次锁内写回 a0、刷新 real timer 并记录离开 trap
+- `os/src/hal/arch/loongarch64/trap/mod.rs` — 同步 la64 syscall trap 分支，避免 syscall 热路径重复 `current_trap_cx()` 获取
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — 内核启动到 initproc，basic/busybox/lua musl+glibc 均 `exit_code=0`；因镜像内 `/os_test.conf` 仍为 `mask=0xFFF`，进入 LTP fs_bind 后由外层 `timeout 180s` 结束
+
+**备注：** 参考 Linux/xv6 syscall trapframe 入口/返回点处理方式，但不把 `Arc<TaskControlBlock>` 持有跨过 `syscall()`，避免 exit/schedule 等路径留下引用；异常、page fault、timer interrupt 分支保持原语义。
+
+### lmbench syscall/signal 优化：trap_return 复用 do_signal 当前任务
+
+**涉及文件：**
+- `os/src/task/signal/mod.rs` — `do_signal()` 返回当前 `TaskControlBlock`，处理 ptrace/stop 后重新进入信号检查并返回恢复后的当前任务
+- `os/src/hal/arch/riscv/trap/mod.rs` — `trap_return()` 复用 `do_signal()` 返回的 task，避免再次 `current_task()`
+- `os/src/hal/arch/loongarch64/trap/mod.rs` — 同步 la64 返回用户态路径
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+
+**备注：** 该改动不改变信号投递、默认 stop 或退出语义，只减少每次返回用户态前的一次 `PROCESSOR` 锁和 `Arc` clone。
+
+### lmbench syscall/signal 优化：shared pending 信号空路径免锁
+
+**涉及文件：**
+- `os/src/task/process.rs` — 为进程级 shared pending signal 维护 `AtomicU64` bitmap hint，并在 enqueue/dequeue/remove 后同步刷新
+- `os/src/task/signal/mod.rs` — `do_signal()`、actionable signal 检查和忽略信号清理优先使用 hint，空 shared pending 场景不再锁 `ProcessSignalState`
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+
+**备注：** hint 只用于位图判断和跳过空锁；真正取出 shared pending signal 仍走原 `SignalQueue` 锁，且每次队列修改后刷新 hint，避免出现漏投递的假阴性。
+
+### lmbench syscall/signal 优化：合并 trap_return OOM 与 signal 检查
+
+**涉及文件：**
+- `os/src/hal/arch/riscv/trap/mod.rs` — `trap_return()` 不再单独调用 OOM pending 检查，避免每次返回用户态重复获取当前任务
+- `os/src/hal/arch/loongarch64/trap/mod.rs` — 同步 la64 `trap_return()` 路径
+- `os/src/task/signal/mod.rs` — 在 `do_signal()` 起始处处理 `pending_oom_kill` 并投递 `SIGKILL`
+- `os/src/task/processor.rs`、`os/src/task/mod.rs` — 移除独立 `check_oom_kill()` helper 及导出
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU smoke ✅ — 内核启动到 initproc，basic musl/glibc 均 `exit_code=0`，busybox/lua 继续运行；因镜像内 `/os_test.conf` 仍读取到 `mask=0xFFF`，进入 LTP 后手动结束，命令最终 `timeout` 退出
+
+**备注：** 该改动保留 OOM kill 在返回用户态前转为 `SIGKILL` 的语义，只把原先连续两次 `current_task()`/task inner lock 合并为一次 `do_signal()` 入口处理，降低所有 syscall return 的固定成本。
+
+### lmbench fork+exit 优化：调度器批量回收 zombie
+
+**涉及文件：**
+- `os/src/task/manager.rs` — 新增一次锁内最多取出 N 个 zombie TCB 的批量接口，并预留 Vec 容量
+- `os/src/task/processor.rs` — 调度循环从逐个加锁 pop zombie 改为一次批量取出、锁外 drop
+- `os/src/task/mod.rs` — 导出批量 zombie drain helper，移除未使用的单个 helper re-export
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+
+**备注：** fork+exit 压测会高频产生 zombie；保持锁外 drop 语义不变，只减少多 zombie 场景下 `TASK_MANAGER` 反复加锁。
+
+### lmbench wait/wake 优化：唤醒已睡眠任务时跳过 ready 队列扫描
+
+**涉及文件：**
+- `os/src/task/manager.rs` — `drop_interruptible()` 返回是否实际移除了任务；`try_wake_interruptible()` 在确认任务来自 interruptible 队列时直接入 ready 队列，避免再扫描 ready 队列查重
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+
+**备注：** wait queue/futex/pipe 等唤醒路径的正常情况是任务只存在于 interruptible 队列；保留未移除时的 ready 队列查重回退，兼容 already-woken 路径。
+
+### lmbench context switch 优化：调度循环无 timer 快返回
+
+**涉及文件：**
+- `os/src/task/manager.rs` — `do_wake_expired()` 在 timeout wait queue、kernel timer queue、timerfd registry 全空时直接返回，避免每次调度循环都读取时钟并进入 timer 扫描
+- `os/src/fs/timerfd.rs` — 新增 timerfd registry empty 查询辅助函数，供调度 timer 快路径判断
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+
+**备注：** 最新 lmbench 日志中 context switch 延迟明显偏高；该改动只跳过“确定无任何 timer/timerfd”的轮次，不改变有超时任务、itimer/POSIX timer 或 timerfd 时的到期投递语义。
+
+### lmbench fork 路径优化：复用 COW 映射 mapper
+
+**涉及文件：**
+- `os/src/mm/vma.rs` — `map_from_existing_page_table()` 在 fork COW 复制页表时复用同一个目标 `UserMapper`，避免每个已映射页重复构造 mapper
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+
+**备注：** 该改动不改变 COW 权限、MAP_SHARED 写保护、父页表批量 TLB flush 或错误处理，只减少 fork 逐页映射循环中的辅助对象构造开销。参考 Linux fork 路径中尽量复用 task/mm 辅助结构、避免热路径重复分配/初始化的思路。
+
+### lmbench signal overhead 优化：单线程 `kill(getpid(), sig)` 快路径
+
+**涉及文件：**
+- `os/src/syscall/process/signal.rs` — `sys_kill(pid>0)` 在目标为当前进程且仅有单个 live thread 时直接投递进程共享信号，跳过全局进程表查询和线程列表构造
+- `os/src/task/signal/delivery.rs` — 新增指定目标 task 的进程信号投递辅助函数，保持进程 pending 队列和 `SI_USER` 语义不变
+- `os/src/task/signal/mod.rs` — 导出新的 signal delivery helper
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+
+**备注：** 最新 lmbench 日志中 signal handler overhead 偏高；该测试常见路径为单线程进程向自身发信号。优化限定在单 live thread 场景，避免改变多线程进程 directed signal 的目标选择语义。
 
 ## 2026-06-14
+
+### lmbench signal install 优化：去掉 `Sighand` 单 action 堆分配
+
+**涉及文件：**
+- `os/src/task/signal/action.rs` — `Sighand` 从 `Vec<Option<Box<SigAction>>>` 改为 `Vec<Option<SigAction>>`，保留按需扩容但避免每次 `sigaction()` 安装 handler 时分配一个小对象
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+
+**备注：** 最新 lmbench 日志中 `Signal handler installation`/`Signal handler overhead` 偏慢；该测试会高频重复安装信号处理器，原实现每次 `set()` 都 `Box::new`，会把 allocator 和 clone/fork 中 `Sighand` 复制成本放大。
+
+### lmbench simple read/write 优化：为 `/dev/null` 和 `/dev/zero` 增加 syscall 快路径
+
+**涉及文件：**
+- `os/src/fs/vfs/file.rs` — 根据 char device `raw_dev` 在 open 时标记 `/dev/null`、`/dev/zero`，避免运行时穿透 MountFS downcast
+- `os/src/syscall/fs.rs` — `read(/dev/null)` 直接返回 EOF，`write(/dev/null|/dev/zero)` 按 Linux mem 设备语义直接返回 count，`read(/dev/zero)` 直接清零用户页并跳过 kernel bounce buffer 分配
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU boot smoke ✅ — 内核启动、挂载 rootfs/tools、进入 initproc 并按 `mask=0x001` 结束；当前 `rootfs-rv.img` 缺 `/musl`/`/glibc` 下 basic 脚本，basic 用例未作为通过结果采信
+
+**备注：** 最新 lmbench 日志中 `Simple read/write` 明显偏慢，常见实现会使用 `/dev/zero` 和 `/dev/null`。本次快路径避免无意义的 `Vec` 分配、用户态到内核 bounce copy、普通文件 fsize/offset 计算；普通文件、pipe、tty/socket 路径不受影响。
+
+### lmbench pipe 路径优化：减少 stream fd 的 offset/notify 开销
+
+**涉及文件：**
+- `os/src/fs/vfs/file.rs` — `FMODE_STREAM` 文件在 `read/write` 中绕过 offset 原子更新、`O_APPEND`/seal 检查和 mtime 更新，直接调用底层 stream inode
+- `os/src/fs/dev/pipe.rs` — pipe 读写时复用已持有 ring 锁期间取得的 peer 端，避免成功读写后再次锁 ring 查询 `Weak<Pipe>`
+- `os/src/fs/vfs/fasync.rs` — 新增 `FAsyncItems::is_empty()`，pipe 默认无 `O_ASYNC` 监听者时跳过空列表 `SIGIO` 分发路径
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+
+**备注：** 最新日志显示 lmbench `Pipe latency`/`Pipe bandwidth` 明显偏慢；本轮只做低风险路径缩短，不改变 pipe 阻塞、poll、EPIPE/SIGPIPE 语义。尚未完成 QEMU lmbench 前后对比，后续需用相同镜像定向跑 lmbench pipe 项确认收益。
+
+### libcbench pthread 超时：为 `/proc/self/smaps` 增加按 fd 快照缓存
+
+**涉及文件：**
+- `os/src/mm/address_space.rs` — 拆分 smaps header/segment 格式化，新增高 VMA 数量下的 compact smaps 输出，并提供窗口读取备用路径
+- `os/src/fs/procfs/mod.rs` — 新增 cached text proc inode 入口，按打开文件缓存一次性生成的 proc 文本
+- `os/src/fs/procfs/pid/mod.rs` — 将 `/proc/[pid]/smaps` 注册为 cached text 文件
+- `os/src/fs/procfs/pid/smaps.rs` — 新增 `pid_smaps_snapshot()`，保留 offset/len 读取入口作为备用
+- `os/src/fs/vfs/mod.rs` — `FilePrivateData` 新增 `ProcText`，用于保存 per-open procfs 文本快照
+- `os/src/task/manager.rs`、`os/src/task/processor.rs` — 优化无过期 timer 快路径，并降低调度循环中后台 net/console poll 频率
+- `os/src/task/perf.rs`、`os/src/task/threads.rs`、`os/Cargo.toml` — 新增 `perf_stats` 诊断计数，用于确认 futex wait/wake 不是 pthread 超时根因
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only EXTRA_FEATURES=perf_stats` ✅
+- rv64 QEMU libcbench（perf_stats）：musl 27s、glibc 23s，二者均 `exit_code=0` ✅
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 QEMU libcbench（默认内核）：musl 28s、glibc 23s，二者均 `exit_code=0` ✅
+
+**备注：** 根因不是 futex 阻塞：计数显示 `fut_wait == fut_ready` 且无 timeout/intr，线程 clone/exit 已完成；超时点的 `last_sys=read last_ret=1024` 指向 libcbench `print_stats()` 以 1KiB 分块反复读取 `/proc/self/smaps`。仅按 offset 窗口生成仍要从第一个 VMA 扫到目标 offset，musl 仍会 120s 超时；按 fd 快照缓存后同一 open 只生成一次 smaps，解除 pthread create-only 超时。regex search 的用户态 StorePageFault 仍存在，但 libcbench 脚本退出码为 0，非本轮性能瓶颈。
+
+### libcbench regex StorePageFault：扩大默认用户栈窗口
+
+**涉及文件：**
+- `os/src/hal/arch/riscv/config.rs`、`os/src/hal/arch/loongarch64/config.rs` — 默认用户栈虚拟窗口从 256KiB 扩到 1MiB，新增 `USER_STACK_INIT_SIZE=256KiB`
+- `os/src/mm/address_space.rs` — 默认用户栈 VMA 覆盖完整窗口，但只预映射顶部 256KiB，其余页面由匿名缺页按需分配
+- `os/src/syscall/process/exec.rs` — exec argv/env 校验继续按预映射区大小限制，避免启动栈写入未映射页面
+
+**验证：**
+- `docker compose exec -w /app/os os-dev make rv64-kernel-build-only` ✅
+- `docker compose exec -w /app/os os-dev make la64-kernel-build-only` ✅
+- rv64 libcbench QEMU 定向验证已确认可读取 `mask=0x080`，但当前 `rootfs-rv.img` 缺 `/musl`/`/glibc` 下 libcbench 脚本，测试脚本执行失败，未作为通过结果采信
+
+**备注：** regex search 的 StorePageFault 地址距栈顶约 528KiB，超过旧 256KiB 默认栈。这里不直接预映射 1MiB，避免 pthread/clone 压测下无谓增加常驻页；保持 256KiB 初始映射并扩大 VMA 窗口，让深递归按需分配页面。
+
+### 按 Linux/DragonOS cyclic PID 思路修复长测 PID 越界
+
+**涉及文件：**
+- `os/src/task/pid.rs` — `alloc_fresh()` 增加高水位复用路径，`release_fresh_id()` 将已释放用户可见 PID/TID 记录到复用池
+
+**变更内容：**
+- 参考 Linux 6.6 `kernel/pid.c` 的 `idr_alloc_cyclic/free_pid` 与 DragonOS `process/pid.rs`、`pid_namespace.rs` 的 PID namespace 分配/释放模型
+- 保留用户可见 PID/TID 的线性分配快路径，避免过早复用导致并发线程创建测试观察到重复 TID
+- 当分配游标接近 `/proc/sys/kernel/pid_max=32768` 时，开始复用已 release 的 PID/TID，并跳过 1..299 低位保留区
+- `get_allocated()` 改为按 bitmap 标记统计，避免复用池中陈旧条目影响计数
+
+**验证：**
+- `docker compose exec os-dev bash -lc 'cd /app/os && make rv64-kernel-build-only'` ✅
+- `docker compose exec os-dev bash -lc 'cd /app/os && make la64-kernel-build-only'` ✅
+- `git diff --check` ✅
+- rv64 QEMU LTP focused：`getpid01`，`ltp_libc=both` ✅ — musl/glibc 各 `passed 100 failed 0`
+- la64 QEMU LTP focused：`getpid01`，`ltp_libc=both` ✅ — musl/glibc 各 `passed 100 failed 0`
+- focused 测试后已将 rv64/la64 sdcard 镜像内 `/os_test.conf` 恢复为仓库默认配置
+
+**备注：** 本次针对最新全量日志中第二轮 LTP `getpid01` 因 PID 超过 32768 失败的问题；未修改 net/fs 路径。focused 测试只覆盖正常低水位 `getpid01`，高水位复用仍需通过下一轮长测或专门 PID 压力用例确认。
 
 ### 完全重写 README.md 为竞赛级项目入口文档
 

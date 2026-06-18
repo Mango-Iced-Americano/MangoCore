@@ -99,6 +99,7 @@ struct LtpConfig {
     ltp_from: String,
     ltp_include: Vec<String>,
     ltp_exclude: Vec<String>,
+    case_timeout_secs: u64,
 }
 
 struct CliArgs {
@@ -198,6 +199,10 @@ fn comma_split(s: &str) -> Vec<String> {
         .collect()
 }
 
+fn parse_bool_flag(s: &str) -> bool {
+    matches!(s.trim(), "1" | "true" | "yes" | "on")
+}
+
 fn default_excludes(libc: &str) -> Vec<String> {
     let mut list: Vec<String> = DEFAULT_LTP_EXCLUDE
         .iter()
@@ -248,10 +253,12 @@ fn load_conf(path: &str, libc: &str) -> LtpConfig {
         ltp_from: String::new(),
         ltp_include: Vec::new(),
         ltp_exclude: default_excludes(libc),
+        case_timeout_secs: DEFAULT_CASE_TIMEOUT_SECS,
     };
     let mut conf_exclude = Vec::new();
     let mut conf_libc_exclude = Vec::new();
     let mut conf_arch_libc_exclude = Vec::new();
+    let mut ltp_exclude_reset = false;
 
     let fd = open(path, OpenFlags::RDONLY);
     if fd < 0 {
@@ -298,6 +305,12 @@ fn load_conf(path: &str, libc: &str) -> LtpConfig {
             cfg.ltp_from = String::from(val_str.trim());
         } else if key == b"ltp_include" {
             cfg.ltp_include = comma_split(val_str);
+        } else if key == b"ltp_exclude_reset" {
+            ltp_exclude_reset = parse_bool_flag(val_str);
+        } else if key == b"ltp_case_timeout_secs" {
+            if let Ok(secs) = val_str.trim().parse::<u64>() {
+                cfg.case_timeout_secs = secs.max(1);
+            }
         } else if key == b"ltp_exclude" {
             conf_exclude = comma_split(val_str);
         } else if key == b"ltp_exclude_musl" && libc == "musl" {
@@ -325,10 +338,14 @@ fn load_conf(path: &str, libc: &str) -> LtpConfig {
         }
     }
 
-    cfg.ltp_exclude = default_excludes(libc);
-    cfg.ltp_exclude.extend(conf_exclude);
-    cfg.ltp_exclude.extend(conf_libc_exclude);
-    cfg.ltp_exclude.extend(conf_arch_libc_exclude);
+    if ltp_exclude_reset {
+        cfg.ltp_exclude.clear();
+    } else {
+        cfg.ltp_exclude = default_excludes(libc);
+        cfg.ltp_exclude.extend(conf_exclude);
+        cfg.ltp_exclude.extend(conf_libc_exclude);
+        cfg.ltp_exclude.extend(conf_arch_libc_exclude);
+    }
     cfg
 }
 
@@ -438,6 +455,7 @@ fn print_plan(
         filtered, actual_start_idx
     );
     println!("[ltprunner] group_timeout_secs={}", cli.group_timeout_secs);
+    println!("[ltprunner] case_timeout_secs={}", cfg.case_timeout_secs);
 }
 
 fn exit_code_status(raw: i32) -> i32 {
@@ -598,7 +616,13 @@ fn precompute_env(ltproot: &str, tmpdir: &str, libc: &str) -> PrecomputedEnv {
     }
 }
 
-fn run_case(case: &LtpCase, deadline_ms: u64, own_pgid: isize, penv: &PrecomputedEnv) -> i32 {
+fn run_case(
+    case: &LtpCase,
+    deadline_ms: u64,
+    own_pgid: isize,
+    penv: &PrecomputedEnv,
+    case_timeout_secs: u64,
+) -> i32 {
     let is_elf = !case.case_name.as_bytes().iter().any(|b| *b == b'.');
     let env: &[*const u8] = if is_elf {
         &penv.env_preload
@@ -648,7 +672,7 @@ fn run_case(case: &LtpCase, deadline_ms: u64, own_pgid: isize, penv: &Precompute
         return 137;
     }
 
-    let timeout_ms = DEFAULT_CASE_TIMEOUT_SECS * 1000;
+    let timeout_ms = case_timeout_secs * 1000;
     let mut elapsed_ms: u64 = 0;
     let poll_ms: u64 = 50;
     let mut code: i32 = 0;
@@ -677,7 +701,7 @@ fn run_case(case: &LtpCase, deadline_ms: u64, own_pgid: isize, penv: &Precompute
             timed_out = true;
             println!(
                 "[ltprunner] case {} timeout ({}s), sending SIGTERM to pgid={}",
-                case.case_name, DEFAULT_CASE_TIMEOUT_SECS, case_pgid
+                case.case_name, case_timeout_secs, case_pgid
             );
             break;
         }
@@ -853,16 +877,25 @@ fn main(_argc: usize, argv: &[&str]) -> i32 {
 
         println!("RUN LTP CASE {}", case.case_name);
 
-        let ret = run_case(case, deadline_ms, own_pgid, &penv);
+        let ret = run_case(
+            case,
+            deadline_ms,
+            own_pgid,
+            &penv,
+            cfg.case_timeout_secs,
+        );
 
-        if ret == 0 {
+        let label = if ret == 0 {
             passed += 1;
+            "PASS"
         } else if ret == LTP_EXIT_TCONF {
             skipped += 1;
+            "SKIP"
         } else {
             failed += 1;
-        }
-        println!("FAIL LTP CASE {} : {}", case.case_name, ret);
+            "FAIL"
+        };
+        println!("{} LTP CASE {} : {}", label, case.case_name, ret);
         executed += 1;
 
         reap_orphans();

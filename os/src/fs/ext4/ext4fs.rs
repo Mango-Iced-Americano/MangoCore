@@ -371,14 +371,12 @@ impl Ext4FileSystem {
         end_lblock: u32,
     ) -> Result<Vec<u32>, isize> {
         let mut allocated = Vec::new();
-
-        // Find consecutive hole runs and batch-allocate them.
         for lblock in start_lblock..end_lblock {
-            if self.get_pblock_idx(inode_ref, lblock).is_ok() {
-                continue;
+            if self.get_pblock_idx(inode_ref, lblock).is_err() {
+                // Block not yet mapped — allocate and insert extent
+                self.insert_inode_pblk_deferred(inode_ref, lblock)?;
+                allocated.push(lblock);
             }
-            self.insert_inode_pblk_deferred(inode_ref, lblock)?;
-            allocated.push(lblock);
         }
         Ok(allocated)
     }
@@ -687,6 +685,15 @@ impl IndexNode for layout::Ext4OSInode {
         // skip the page cache so the direct I/O fallback reads from i_block.
         if !is_symlink {
             if let Some(pc) = self.get_new_page_cache() {
+                if read_len <= 64 {
+                    let pg = offset >> crate::config::PAGE_SIZE_BITS;
+                    log::info!(
+                        "[read_at] ino={} offset={} len={} file_size={} page={} cached={} pc={:p}",
+                        inode_num, offset, read_len, file_size, pg,
+                        pc.contains_page(pg),
+                        Arc::as_ptr(&pc),
+                    );
+                }
                 return pc.read(offset, &mut buf[..read_len]).map_err(|_| SyscallErr::EIO);
             }
         }
@@ -716,49 +723,6 @@ impl IndexNode for layout::Ext4OSInode {
             }
         }
         result
-    }
-
-    fn read_at_user(
-        &self,
-        offset: usize,
-        len: usize,
-        dst: &mut crate::mm::UserBuffer,
-    ) -> Result<usize, SyscallErr> {
-        let inode_lock = self.inode.lock();
-        if inode_lock.inode.is_dir() {
-            return Err(SyscallErr::EISDIR);
-        }
-        let is_symlink = inode_lock.inode.is_link();
-        let file_size = {
-            let cached = self.cached_file_size.load(core::sync::atomic::Ordering::Relaxed);
-            if cached != u64::MAX {
-                cached
-            } else {
-                let sz = inode_lock.inode.size();
-                self.cached_file_size
-                    .store(sz, core::sync::atomic::Ordering::Relaxed);
-                sz
-            }
-        } as usize;
-        drop(inode_lock);
-
-        if offset >= file_size {
-            return Ok(0);
-        }
-        let read_len = len.min(file_size - offset);
-
-        // Fast symlinks have no data pages — let File fallback handle them.
-        if is_symlink {
-            return Err(SyscallErr::ENOSYS);
-        }
-
-        if let Some(pc) = self.get_new_page_cache() {
-            return pc
-                .read_user(offset, read_len, dst)
-                .map_err(|_| SyscallErr::EIO);
-        }
-
-        Err(SyscallErr::ENOSYS)
     }
 
     fn write_at(
@@ -809,67 +773,58 @@ impl IndexNode for layout::Ext4OSInode {
             self.cached_file_size.store(new_size, core::sync::atomic::Ordering::Relaxed);
             self.metadata_dirty.store(true, core::sync::atomic::Ordering::Relaxed);
             super::counters::inc_counter!(super::counters::METADATA_DIRTY_MARK);
-
-            // Push updated inode (with new size/mtime/extents) into
-            // inode_cache so sync/fsync can flush it later.
-            self.ext4fs.push_dirty_inode_to_cache(inode_num, &inode_lock.inode);
         }
 
         // Write data through PageCache; physical blocks are already mapped.
         let pc = self.get_new_page_cache().ok_or(SyscallErr::EIO)?;
-        pc.write(offset, &buf[..write_len])?;
 
-        Ok(write_len)
-    }
-
-    fn write_at_user(
-        &self,
-        offset: usize,
-        len: usize,
-        src: &crate::mm::UserBuffer,
-    ) -> Result<usize, SyscallErr> {
-        let mut inode_lock = self.inode.lock();
-        if inode_lock.inode.is_dir() {
-            return Err(SyscallErr::EISDIR);
+        // Temporary diagnostic for hole-read debugging
+        if write_len <= 64 {
+            let pg = offset >> crate::config::PAGE_SIZE_BITS;
+            log::info!(
+                "[write_at] ino={} offset={} len={} old_size={} new_size={} blk={}..{} page={} cached={} pc={:p}",
+                inode_num, offset, write_len, old_size,
+                core::cmp::max(old_size, offset + write_len),
+                start_lblock, end_lblock, pg,
+                pc.contains_page(pg),
+                Arc::as_ptr(&pc),
+            );
         }
-        let inode_num = inode_lock.inode_num;
-        let old_size = inode_lock.inode.size() as usize;
-        drop(inode_lock);
+        let write_result = pc.write(offset, &buf[..write_len]);
 
-        // nodelalloc: ensure every logical block in the write range has a
-        // physical block allocated BEFORE copying data into the page cache.
-        let block_size = self.ext4fs.block_size;
-        let start_lblock = (offset / block_size) as u32;
-        let end_lblock = ((offset + len + block_size - 1) / block_size) as u32;
+        // Temporary: check if page data is corrupted after write
+        if old_size > 0 && offset > old_size {
+            let mut snap = [0u8; 64];
+            let _ = pc.read(0, &mut snap[..60]);
+            log::info!(
+                "[write_at] after_pc_write offset={} snap[50..60]={:02x?}",
+                offset, &snap[50..60]
+            );
+        }
 
-        let mut fresh = self.ext4fs.get_inode_ref(inode_num);
-        self.ext4fs
-            .ensure_blocks_allocated(&mut fresh, start_lblock, end_lblock)
-            .map_err(|_| SyscallErr::EIO)?;
-
+        // Persist metadata changes (mtime/ctime/size/extent) — flush once
+        // after all data + allocation work, even if data write partially failed.
+        // This ensures allocated blocks are reflected in the inode extent tree.
+        let mut fresh2 = self.ext4fs.get_inode_ref(inode_num);
         {
-            let mut inode_lock = self.inode.lock();
-            inode_lock.inode = fresh.inode;
-            let new_end = offset + len;
-            let new_size = core::cmp::max(old_size, new_end) as u64;
-            inode_lock.inode.set_size(new_size);
-            let now = crate::timer::current_time_safe() as u32;
-            inode_lock.inode.set_mtime(now);
-            inode_lock.inode.set_ctime(now);
-            self.cached_file_size
-                .store(new_size, core::sync::atomic::Ordering::Relaxed);
-            self.metadata_dirty
-                .store(true, core::sync::atomic::Ordering::Relaxed);
-            super::counters::inc_counter!(super::counters::METADATA_DIRTY_MARK);
+            let inode_lock = self.inode.lock();
+            fresh2.inode = inode_lock.inode;
+        }
+        self.ext4fs.write_back_inode(&mut fresh2);
+        self.metadata_dirty.store(false, core::sync::atomic::Ordering::Relaxed);
+        super::counters::inc_counter!(super::counters::METADATA_FLUSH_COUNT);
 
-            self.ext4fs.push_dirty_inode_to_cache(inode_num, &inode_lock.inode);
+        // Temporary: check if metadata flush corrupted page data
+        if old_size > 0 && offset > old_size {
+            let mut snap2 = [0u8; 64];
+            let _ = pc.read(0, &mut snap2[..60]);
+            log::info!(
+                "[write_at] after_flush offset={} snap2[50..60]={:02x?}",
+                offset, &snap2[50..60]
+            );
         }
 
-        // Write data through PageCache; physical blocks are already mapped.
-        let pc = self.get_new_page_cache().ok_or(SyscallErr::EIO)?;
-        pc.write_user(offset, len, src)?;
-
-        Ok(len)
+        write_result.map(|_| write_len).map_err(|_| SyscallErr::EIO)
     }
 
     /// 只读查询已有 page cache，不创建新 cache（用于 sync/datasync/debug）
@@ -882,20 +837,21 @@ impl IndexNode for layout::Ext4OSInode {
         self.get_new_page_cache()
     }
 
-    fn supports_user_buffer_io(&self) -> bool {
-        // Use read-only page_cache() to avoid creating a PageCache as a side effect.
-        // get_new_page_cache() would allocate on miss, which is wrong for a predicate.
-        self.page_cache().is_some()
-    }
-
     fn sync(&self) -> Result<(), SyscallErr> {
         if let Some(pc) = self.new_page_cache.lock().clone() {
             pc.writeback_all()?;
         }
-        // Per-inode flush: write this inode to disk, not all dirty inodes.
-        // flush_metadata_cache() handles bitmap/superblock writes separately.
-        let inode_num = self.inode.lock().inode_num;
-        let _ = self.ext4fs.flush_inode(inode_num);
+        // Phase 3: flush per-inode metadata if dirty
+        if self.metadata_dirty.swap(false, core::sync::atomic::Ordering::Relaxed) {
+            let inode_num = self.inode.lock().inode_num;
+            let mut fresh = self.ext4fs.get_inode_ref(inode_num);
+            {
+                let inode_lock = self.inode.lock();
+                fresh.inode = inode_lock.inode;
+            }
+            self.ext4fs.write_back_inode(&mut fresh);
+            super::counters::inc_counter!(super::counters::METADATA_FLUSH_COUNT);
+        }
         self.ext4fs.flush_metadata_cache();
         Ok(())
     }
@@ -904,10 +860,6 @@ impl IndexNode for layout::Ext4OSInode {
         if let Some(pc) = self.new_page_cache.lock().clone() {
             pc.writeback_all()?;
         }
-        // Per-inode flush for size/extent metadata integrity
-        let inode_num = self.inode.lock().inode_num;
-        let _ = self.ext4fs.flush_inode(inode_num);
-        self.ext4fs.flush_metadata_cache();
         Ok(())
     }
 
@@ -1080,42 +1032,6 @@ impl IndexNode for layout::Ext4OSInode {
         let new_ref = self
             .ext4fs
             .create(parent, name, inode_mode, 0, 0)
-            .map_err(|e| {
-                if e == crate::syscall::errno::ENOENT { SyscallErr::ENOENT }
-                else if e == crate::syscall::errno::EEXIST { SyscallErr::EEXIST }
-                else { SyscallErr::ENOSYS }
-            })?;
-        self.bump_dir_version();
-        self.clear_negative_dentry(name);
-        let child_ino = new_ref.inode_num;
-        let child_inode: alloc::sync::Arc<dyn IndexNode> = layout::Ext4OSInode::new_vfs(
-            alloc::sync::Arc::new(spin::Mutex::new(new_ref)),
-            self.ext4fs.clone(),
-        );
-        self.ext4fs.insert_inode_object(child_ino, &child_inode);
-        if !is_special_dot(name) {
-            let mut children = self.children.lock();
-            children.insert(alloc::string::String::from(name), alloc::sync::Arc::downgrade(&child_inode));
-            drop(children);
-            super::counters::inc_counter!(super::counters::DIR_CHILDREN_INSERT);
-        }
-        Ok(child_inode)
-    }
-
-    fn create_with_attrs(
-        &self,
-        name: &str,
-        file_type: VfsFileType,
-        attrs: crate::fs::vfs::CreateAttrs,
-    ) -> Result<alloc::sync::Arc<dyn IndexNode>, SyscallErr> {
-        let parent = self.inode.lock().inode_num;
-        let inode_mode = vfs_type_to_inode_mode(file_type)
-            | (attrs.mode & InodeMode::S_IALLUGO).bits() as u16;
-        // Pass uid/gid directly through to ext4 create, avoiding
-        // a post-create set_metadata() round-trip.
-        let new_ref = self
-            .ext4fs
-            .create(parent, name, inode_mode, attrs.uid as u16, attrs.gid as u16)
             .map_err(|e| {
                 if e == crate::syscall::errno::ENOENT { SyscallErr::ENOENT }
                 else if e == crate::syscall::errno::EEXIST { SyscallErr::EEXIST }
@@ -2091,24 +2007,6 @@ impl Ext4FileSystem {
             self.flush_inode(ino)?;
         }
         Ok(())
-    }
-
-    /// Push an in-memory inode into the inode_cache and mark it dirty,
-    /// without writing to disk. Only updates if entry already exists in
-    /// cache (normal case: ensure_blocks_allocated already inserted it).
-    /// Does NOT read from disk on miss — avoids get_inode_cached() I/O.
-    pub(crate) fn push_dirty_inode_to_cache(
-        &self,
-        ino: u32,
-        inode: &super::ext4_inode::Ext4Inode,
-    ) {
-        let cache = self.inode_cache.lock();
-        if let Some(cached) = cache.get(&ino) {
-            let mut guard = cached.lock();
-            guard.inode = inode.clone();
-            guard.dirty = true;
-            super::counters::inc_counter!(super::counters::INODE_DIRTY_COUNT);
-        }
     }
 }
 

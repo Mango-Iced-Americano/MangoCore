@@ -17,6 +17,20 @@ pub fn get_time() -> usize {
     counter
 }
 
+/// Program a one-shot timer to fire after `delta_ticks` timer counter ticks.
+/// The hardware timer counts down at CLOCK_FREQ / 4, so delta_ticks is in
+/// those units.  HW requires init_val to be a multiple of 4.
+#[inline]
+pub fn program_timer_delta(delta_ticks: u64) {
+    use super::register::TCfg;
+    let val = (delta_ticks.max(1).saturating_add(3) & !3).max(4) as usize;
+    let mut cfg = TCfg::read();
+    cfg.set_enable(true)
+        .set_periodic(false)
+        .set_init_val(val);
+    cfg.write();
+}
+
 #[inline(always)]
 pub fn get_clock_freq() -> usize {
     unsafe { super::config::CLOCK_FREQ }

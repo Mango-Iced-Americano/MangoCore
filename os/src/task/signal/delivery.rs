@@ -2,13 +2,13 @@ use alloc::sync::Arc;
 
 use crate::syscall::errno::EAGAIN;
 use crate::task::{
-    current_task, wake_interruptible, ProcessControlBlock, TaskControlBlock, TaskStatus,
+    current_task_ref, wake_interruptible, ProcessControlBlock, TaskControlBlock, TaskStatus,
 };
 
 use super::{is_realtime_signal, PendingSignal, SigInfo, Signals};
 
 fn current_sender_pid() -> usize {
-    current_task().map(|task| task.pid()).unwrap_or(0)
+    current_task_ref().map(|task| task.pid()).unwrap_or(0)
 }
 
 fn process_signal_target(
@@ -77,6 +77,24 @@ pub fn send_process_signal_info(
     true
 }
 
+pub fn send_process_signal_to_current_task(process: &ProcessControlBlock, signal: Signals) -> bool {
+    if signal.is_empty() {
+        return true;
+    }
+    let Ok(pending) = PendingSignal::from_signal_with_sender(
+        signal,
+        SigInfo::SI_USER as usize,
+        current_sender_pid(),
+    ) else {
+        return false;
+    };
+    if signal.contains(Signals::SIGCONT) {
+        process.mark_continued();
+    }
+    process.enqueue_process_signal(pending);
+    true
+}
+
 pub fn send_thread_signal(task: &Arc<TaskControlBlock>, signal: Signals) -> Result<(), isize> {
     if signal.is_empty() {
         return Ok(());
@@ -109,11 +127,15 @@ fn send_thread_signal_info(
         return Err(EAGAIN);
     }
     if let Some(siginfo) = siginfo {
-        inner.sigpending.enqueue(PendingSignal { signal, siginfo })?;
-    } else {
         inner
             .sigpending
-            .enqueue_signal_with_sender(signal, SigInfo::SI_TKILL as usize, current_sender_pid())?;
+            .enqueue(PendingSignal { signal, siginfo })?;
+    } else {
+        inner.sigpending.enqueue_signal_with_sender(
+            signal,
+            SigInfo::SI_TKILL as usize,
+            current_sender_pid(),
+        )?;
     }
     if signal.contains(Signals::SIGCONT) {
         drop(inner);

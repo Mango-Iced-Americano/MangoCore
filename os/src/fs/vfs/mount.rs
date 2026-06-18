@@ -111,6 +111,30 @@ pub mod counters {
     pub fn mountfs_alive() -> usize { MOUNTFS_ALIVE.load(core::sync::atomic::Ordering::Relaxed) }
     pub fn mountfsinode_alive() -> usize { MOUNTFSINODE_ALIVE.load(core::sync::atomic::Ordering::Relaxed) }
 
+    // VFS find diagnostic counters
+    pub static FIND_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static FIND_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static FIND_SELF_OVERLAY: AtomicUsize = AtomicUsize::new(0);
+    pub static FIND_DENTRY_HIT: AtomicUsize = AtomicUsize::new(0);
+    pub static FIND_DENTRY_MISS: AtomicUsize = AtomicUsize::new(0);
+    pub static FIND_LOCK_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static FIND_INNER_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static FIND_INSERT_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static FIND_OVERLAY_TICKS: AtomicUsize = AtomicUsize::new(0);
+
+    pub fn find_snapshot() -> (usize, usize, usize, usize, usize, usize, usize, usize, usize) {
+        let calls = FIND_CALLS.load(core::sync::atomic::Ordering::Relaxed);
+        let ticks = FIND_TICKS.load(core::sync::atomic::Ordering::Relaxed);
+        let overlay = FIND_SELF_OVERLAY.load(core::sync::atomic::Ordering::Relaxed);
+        let hit = FIND_DENTRY_HIT.load(core::sync::atomic::Ordering::Relaxed);
+        let miss = FIND_DENTRY_MISS.load(core::sync::atomic::Ordering::Relaxed);
+        let lock = FIND_LOCK_TICKS.load(core::sync::atomic::Ordering::Relaxed);
+        let inner = FIND_INNER_TICKS.load(core::sync::atomic::Ordering::Relaxed);
+        let insert = FIND_INSERT_TICKS.load(core::sync::atomic::Ordering::Relaxed);
+        let ov_ticks = FIND_OVERLAY_TICKS.load(core::sync::atomic::Ordering::Relaxed);
+        (calls, ticks, overlay, hit, miss, lock, inner, insert, ov_ticks)
+    }
+
     // MountFSInode creation source counters
     pub static MFSI_FROM_FIND: AtomicUsize = AtomicUsize::new(0);
     pub static MFSI_FROM_OVERLAY: AtomicUsize = AtomicUsize::new(0);
@@ -269,36 +293,24 @@ impl MountFSInode {
 
     /// 逐级查找子项（带挂载点交叉和 dentry 缓存）
     fn do_find(&self, name: &str) -> Result<Arc<MountFSInode>, SyscallErr> {
-        let parent_ino = self.inner_inode.metadata()?.inode_id;
-        self.do_find_with_parent_ino(name, parent_ino)
-    }
-
-    /// Same as do_find, but caller supplies parent_ino to avoid a redundant
-    /// inner_inode.metadata() call. Used by vfs_lookup which already has the
-    /// metadata from its own directory-type check.
-    pub(crate) fn do_find_with_parent_ino(
-        &self,
-        name: &str,
-        parent_ino: usize,
-    ) -> Result<Arc<MountFSInode>, SyscallErr> {
-        // ".." goes through do_parent() which handles mountpoint boundary crossing;
-        // bypass dentry cache to avoid stale cached entries for mount root "..".
-        if name == ".." {
-            return self.do_parent();
-        }
-
+        let _t0 = crate::task::perf::perf_time_now();
+        counters::FIND_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         // Self-overlay: if this inode itself is a mountpoint, redirect to
         // the mounted filesystem's root before looking up children.
         // Without this, find("test_file") on a covered mountpoint directory
         // would search the old (hidden) directory instead of the mounted FS.
-        let self_arc = self.self_arc();
-        let top = MountFSInode::overlaid_inode(self_arc.clone());
-        if !Arc::ptr_eq(&top, &self_arc) {
-            return top.do_find(name);
+        if name != ".." {
+            let self_arc = self.self_arc();
+            let top = MountFSInode::overlaid_inode(self_arc.clone());
+            if !Arc::ptr_eq(&top, &self_arc) {
+                counters::FIND_SELF_OVERLAY.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                return top.do_find(name);
+            }
         }
 
         // Shortcut: skip dentry cache for dynamic filesystems (procfs)
         if self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
+            let parent_ino = self.inner_inode.metadata()?.inode_id;
             let inner_inode = self.inner_inode.find(name)?;
             let result = MountFSInode::overlaid_inode(MountFSInode::new(
                 inner_inode,
@@ -309,17 +321,24 @@ impl MountFSInode {
             return Ok(result);
         }
 
+        let parent_ino = self.inner_inode.metadata()?.inode_id;
         let key = super::dentry_cache::DentryKey {
             parent_ino,
             name: String::from(name),
         };
 
         // Check dentry cache — returns covered dentry
+        let _t_lock = crate::task::perf::perf_time_now();
         if let Some(cached) = self.mount_fs.dentry_cache.lock().get(&key) {
+            counters::FIND_LOCK_TICKS.fetch_add(crate::task::perf::perf_time_now().saturating_sub(_t_lock), core::sync::atomic::Ordering::Relaxed);
             cached.remember_path_hint(parent_ino, name);
+            counters::FIND_DENTRY_HIT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            counters::FIND_TICKS.fetch_add(crate::task::perf::perf_time_now().saturating_sub(_t0), core::sync::atomic::Ordering::Relaxed);
             return Ok(MountFSInode::overlaid_inode(cached));
         }
+        counters::FIND_LOCK_TICKS.fetch_add(crate::task::perf::perf_time_now().saturating_sub(_t_lock), core::sync::atomic::Ordering::Relaxed);
 
+        counters::FIND_DENTRY_MISS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         // Cache miss: record generation before disk I/O
         if crate::fs::ext4::counters::counters_enabled() {
             crate::fs::ext4::counters::DENTRY_LOOKUP_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -328,7 +347,9 @@ impl MountFSInode {
         let gen_before = self.mount_fs.dentry_gen.load(core::sync::atomic::Ordering::Acquire);
 
         // Release cache lock, perform actual filesystem lookup
+        let _t_inner = crate::task::perf::perf_time_now();
         let inner_inode = self.inner_inode.find(name)?;
+        counters::FIND_INNER_TICKS.fetch_add(crate::task::perf::perf_time_now().saturating_sub(_t_inner), core::sync::atomic::Ordering::Relaxed);
 
         // Create covered dentry (before mount-point overlay)
         let covered = MountFSInode::new(inner_inode, self.mount_fs.clone());
@@ -337,7 +358,8 @@ impl MountFSInode {
 
         // Insert into cache — only if directory was not modified concurrently
         let gen_after = self.mount_fs.dentry_gen.load(core::sync::atomic::Ordering::Acquire);
-        if gen_before == gen_after {
+        let _t_insert = crate::task::perf::perf_time_now();
+        let result = if gen_before == gen_after {
             let (entry, evicted) = {
                 let mut cache = self.mount_fs.dentry_cache.lock();
                 cache.insert_or_get(key, covered)
@@ -347,21 +369,27 @@ impl MountFSInode {
         } else {
             // Directory was modified (unlink/rename/etc.), don't cache stale dentry
             Ok(MountFSInode::overlaid_inode(covered))
-        }
+        };
+        counters::FIND_INSERT_TICKS.fetch_add(crate::task::perf::perf_time_now().saturating_sub(_t_insert), core::sync::atomic::Ordering::Relaxed);
+        counters::FIND_TICKS.fetch_add(crate::task::perf::perf_time_now().saturating_sub(_t0), core::sync::atomic::Ordering::Relaxed);
+        result
     }
 
     /// 查找父目录
     fn do_parent(&self) -> Result<Arc<MountFSInode>, SyscallErr> {
         if self.is_mountpoint_root() {
+            // 如果当前是挂载点根，父目录在其父文件系统的挂载点
             if let Some(mountpoint) = self.mount_fs.self_mountpoint() {
-                return mountpoint.do_parent();
+                return Ok(mountpoint);
             }
+            // 没有挂载点，返回自己（全局根）
             return Ok(self.self_arc());
         }
+        // 向 inner_inode 请求父目录
         let parent_inner = self.inner_inode.find("..")?;
-        let parent = MountFSInode::new(parent_inner, self.mount_fs.clone());
+        let inode = MountFSInode::new(parent_inner, self.mount_fs.clone());
         counters::MFSI_FROM_PARENT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        Ok(MountFSInode::overlaid_inode(parent))
+        Ok(inode)
     }
 
     /// Create a new MountFS and attach it as a child of this inode's parent
@@ -462,43 +490,6 @@ impl IndexNode for MountFSInode {
         self.inner_inode.write_at(offset, len, buf, data)
     }
 
-    fn read_at_user(
-        &self,
-        offset: usize,
-        len: usize,
-        dst: &mut crate::mm::UserBuffer,
-    ) -> Result<usize, SyscallErr> {
-        self.inner_inode.read_at_user(offset, len, dst)
-    }
-
-    fn write_at_user(
-        &self,
-        offset: usize,
-        len: usize,
-        src: &crate::mm::UserBuffer,
-    ) -> Result<usize, SyscallErr> {
-        self.ensure_mount_writable()?;
-        self.inner_inode.write_at_user(offset, len, src)
-    }
-
-    fn supports_user_buffer_io(&self) -> bool {
-        self.inner_inode.supports_user_buffer_io()
-    }
-
-    fn is_discard_write(&self) -> bool {
-        self.inner_inode.is_discard_write()
-    }
-
-    fn discard_write_at(
-        &self,
-        offset: usize,
-        len: usize,
-        data: MutexGuard<FilePrivateData>,
-    ) -> Result<usize, SyscallErr> {
-        self.ensure_mount_writable()?;
-        self.inner_inode.discard_write_at(offset, len, data)
-    }
-
     fn read_direct(
         &self,
         offset: usize,
@@ -547,16 +538,7 @@ impl IndexNode for MountFSInode {
     }
 
     fn list_dirents(&self) -> Result<Vec<(String, InodeId, FileType)>, SyscallErr> {
-        let mut entries = self.inner_inode.list_dirents()?;
-        let mountpoints = self.mount_fs.mountpoints.lock();
-        for (name, ino, _ft) in entries.iter_mut() {
-            if let Some(child_mfs) = mountpoints.get(ino) {
-                if let Ok(root_md) = child_mfs.root_inner_inode().metadata() {
-                    *ino = root_md.inode_id;
-                }
-            }
-        }
-        Ok(entries)
+        self.inner_inode.list_dirents()
     }
 
     fn create(
@@ -609,35 +591,6 @@ impl IndexNode for MountFSInode {
         self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
         let parent_ino = self.inner_inode.metadata().ok().map(|m| m.inode_id);
         let inner_inode = self.inner_inode.create_with_data(name, file_type, mode, data)?;
-        let wrapper = MountFSInode::new(inner_inode, self.mount_fs.clone());
-        if let Some(parent_ino) = parent_ino {
-            wrapper.remember_path_hint(parent_ino, name);
-        }
-        counters::MFSI_FROM_CREATE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if !self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
-            if let Ok(parent_md) = self.inner_inode.metadata() {
-                let key = super::dentry_cache::DentryKey {
-                    parent_ino: parent_md.inode_id,
-                    name: String::from(name),
-                };
-                let (_, evicted) = self.mount_fs.dentry_cache.lock()
-                    .insert_or_get(key, wrapper.clone());
-                drop(evicted);
-            }
-        }
-        Ok(wrapper)
-    }
-
-    fn create_with_attrs(
-        &self,
-        name: &str,
-        file_type: FileType,
-        attrs: super::index_node::CreateAttrs,
-    ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
-        self.ensure_mount_writable()?;
-        self.mount_fs.dentry_gen.fetch_add(1, core::sync::atomic::Ordering::Release);
-        let parent_ino = self.inner_inode.metadata().ok().map(|m| m.inode_id);
-        let inner_inode = self.inner_inode.create_with_attrs(name, file_type, attrs)?;
         let wrapper = MountFSInode::new(inner_inode, self.mount_fs.clone());
         if let Some(parent_ino) = parent_ino {
             wrapper.remember_path_hint(parent_ino, name);

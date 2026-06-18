@@ -3,17 +3,19 @@
     内容与RISCV版本相同，无需修改
 */
 use core::cmp::Ordering;
-use core::sync::atomic::Ordering as AtomicOrdering;
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 
 #[cfg(feature = "oom_handler")]
 use crate::config::SYSTEM_TASK_LIMIT;
 use alloc::vec::Vec;
 
+use crate::hal::{local_irq_restore, local_irq_save};
 use crate::timer::{TimeSpec, TimeVal};
 
 use super::{
     block_current_and_run_next_checked, block_current_and_run_next_with_lock_checked, current_task,
-    discard_non_actionable_unblocked_signals, has_actionable_signal, signal::{SigInfo, Signals},
+    current_task_ref, discard_non_actionable_unblocked_signals, has_actionable_signal,
+    signal::{SigInfo, Signals},
     TaskControlBlock, TaskStatus,
 };
 use crate::utils::error::SyscallErr;
@@ -85,6 +87,7 @@ pub struct TaskManager {
     pub ready_queue: VecDeque<Arc<TaskControlBlock>>,
     /// 一个双端队列，用于存储可中断状态任务
     pub interruptible_queue: VecDeque<Arc<TaskControlBlock>>,
+    zombie_queue: VecDeque<Arc<TaskControlBlock>>,
     ready_nonzero_nice_count: usize,
     /// 任务激活状态跟踪器，用于跟踪任务的激活状态，并在OOM时释放内存
     pub active_tracker: ActiveTracker,
@@ -94,6 +97,7 @@ pub struct TaskManager {
 pub struct TaskManager {
     pub ready_queue: VecDeque<Arc<TaskControlBlock>>,
     pub interruptible_queue: VecDeque<Arc<TaskControlBlock>>,
+    zombie_queue: VecDeque<Arc<TaskControlBlock>>,
     ready_nonzero_nice_count: usize,
 }
 
@@ -103,11 +107,14 @@ fn sched_pick_key(task: &Arc<TaskControlBlock>) -> (u64, i32, usize) {
 }
 
 fn task_has_nonzero_nice(task: &Arc<TaskControlBlock>) -> bool {
-    task.acquire_inner_lock().sched_nice != 0
+    task.sched_nice_hint.load(AtomicOrdering::Relaxed) != 0
 }
 
 fn count_ready_nonzero_nice(queue: &VecDeque<Arc<TaskControlBlock>>) -> usize {
-    queue.iter().filter(|task| task_has_nonzero_nice(task)).count()
+    queue
+        .iter()
+        .filter(|task| task_has_nonzero_nice(task))
+        .count()
 }
 
 fn pop_fair_ready(queue: &mut VecDeque<Arc<TaskControlBlock>>) -> Option<Arc<TaskControlBlock>> {
@@ -142,6 +149,70 @@ fn task_ptr_in(ptrs: &[usize], task: &Arc<TaskControlBlock>) -> bool {
     ptrs.binary_search(&task_ptr(task)).is_ok()
 }
 
+static READY_TASK_COUNT: AtomicUsize = AtomicUsize::new(0);
+static INTERRUPTIBLE_TASK_COUNT: AtomicUsize = AtomicUsize::new(0);
+static ZOMBIE_QUEUE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+fn add_ready_count() {
+    READY_TASK_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+}
+
+fn sub_ready_count(count: usize) {
+    if count != 0 {
+        let _ = READY_TASK_COUNT.fetch_update(
+            AtomicOrdering::Relaxed,
+            AtomicOrdering::Relaxed,
+            |value| Some(value.saturating_sub(count)),
+        );
+    }
+}
+
+fn add_interruptible_count() {
+    INTERRUPTIBLE_TASK_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+}
+
+fn sub_interruptible_count(count: usize) {
+    if count != 0 {
+        let _ = INTERRUPTIBLE_TASK_COUNT.fetch_update(
+            AtomicOrdering::Relaxed,
+            AtomicOrdering::Relaxed,
+            |value| Some(value.saturating_sub(count)),
+        );
+    }
+}
+
+fn ready_count_fast() -> u16 {
+    READY_TASK_COUNT.load(AtomicOrdering::Relaxed).min(u16::MAX as usize) as u16
+}
+
+fn interruptible_count_fast() -> u16 {
+    INTERRUPTIBLE_TASK_COUNT
+        .load(AtomicOrdering::Relaxed)
+        .min(u16::MAX as usize) as u16
+}
+
+fn add_zombie_queue_count() {
+    ZOMBIE_QUEUE_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+}
+
+fn sub_zombie_queue_count(count: usize) {
+    if count != 0 {
+        let _ = ZOMBIE_QUEUE_COUNT.fetch_update(
+            AtomicOrdering::Relaxed,
+            AtomicOrdering::Relaxed,
+            |value| Some(value.saturating_sub(count)),
+        );
+    }
+}
+
+fn has_zombie_queue_tasks() -> bool {
+    ZOMBIE_QUEUE_COUNT.load(AtomicOrdering::Relaxed) != 0
+}
+
+pub fn has_zombie_queue_tasks_fast() -> bool {
+    has_zombie_queue_tasks()
+}
+
 /// 简化的 nice-aware 调度器。
 impl TaskManager {
     #[cfg(feature = "oom_handler")]
@@ -150,6 +221,7 @@ impl TaskManager {
         Self {
             ready_queue: VecDeque::new(),
             interruptible_queue: VecDeque::new(),
+            zombie_queue: VecDeque::new(),
             ready_nonzero_nice_count: 0,
             active_tracker: ActiveTracker::new(),
         }
@@ -159,6 +231,7 @@ impl TaskManager {
         Self {
             ready_queue: VecDeque::new(),
             interruptible_queue: VecDeque::new(),
+            zombie_queue: VecDeque::new(),
             ready_nonzero_nice_count: 0,
         }
     }
@@ -168,6 +241,14 @@ impl TaskManager {
             self.ready_nonzero_nice_count += 1;
         }
         self.ready_queue.push_back(task);
+        add_ready_count();
+    }
+    fn add_front(&mut self, task: Arc<TaskControlBlock>) {
+        if task_has_nonzero_nice(&task) {
+            self.ready_nonzero_nice_count += 1;
+        }
+        self.ready_queue.push_front(task);
+        add_ready_count();
     }
     fn pop_next_ready(&mut self) -> Option<Arc<TaskControlBlock>> {
         let task = if self.ready_nonzero_nice_count == 0 {
@@ -175,6 +256,7 @@ impl TaskManager {
         } else {
             pop_fair_ready(&mut self.ready_queue)
         }?;
+        sub_ready_count(1);
         if task_has_nonzero_nice(&task) {
             self.ready_nonzero_nice_count = self.ready_nonzero_nice_count.saturating_sub(1);
         }
@@ -183,13 +265,45 @@ impl TaskManager {
     fn recompute_ready_nice_count(&mut self) {
         self.ready_nonzero_nice_count = count_ready_nonzero_nice(&self.ready_queue);
     }
+    fn note_ready_removed(&mut self, task: &Arc<TaskControlBlock>) {
+        if task_has_nonzero_nice(task) {
+            self.ready_nonzero_nice_count = self.ready_nonzero_nice_count.saturating_sub(1);
+        }
+    }
     /// 从就绪队列中逐出一个僵尸任务（零堆分配）。
     /// 每次调用最多 remove 一个元素，drop 发生在锁外。
     fn take_one_ready_zombie(&mut self) -> Option<Arc<TaskControlBlock>> {
+        if self
+            .ready_queue
+            .front()
+            .map(|task| task.acquire_inner_lock().is_zombie())
+            .unwrap_or(false)
+        {
+            let zombie = self.ready_queue.pop_front();
+            if let Some(task) = zombie.as_ref() {
+                self.note_ready_removed(task);
+                sub_ready_count(1);
+            }
+            return zombie;
+        }
+        if self
+            .ready_queue
+            .back()
+            .map(|task| task.acquire_inner_lock().is_zombie())
+            .unwrap_or(false)
+        {
+            let zombie = self.ready_queue.pop_back();
+            if let Some(task) = zombie.as_ref() {
+                self.note_ready_removed(task);
+                sub_ready_count(1);
+            }
+            return zombie;
+        }
         for i in 0..self.ready_queue.len() {
             if self.ready_queue[i].acquire_inner_lock().is_zombie() {
                 let zombie = self.ready_queue.remove(i).unwrap();
-                self.recompute_ready_nice_count();
+                self.note_ready_removed(&zombie);
+                sub_ready_count(1);
                 return Some(zombie);
             }
         }
@@ -199,15 +313,43 @@ impl TaskManager {
     fn take_one_interruptible_zombie(&mut self) -> Option<Arc<TaskControlBlock>> {
         for i in 0..self.interruptible_queue.len() {
             if self.interruptible_queue[i].acquire_inner_lock().is_zombie() {
-                return self.interruptible_queue.remove(i);
+                let zombie = self.interruptible_queue.remove(i);
+                if zombie.is_some() {
+                    sub_interruptible_count(1);
+                }
+                return zombie;
             }
         }
         None
+    }
+    fn add_zombie(&mut self, task: Arc<TaskControlBlock>) {
+        super::perf::record_zombie_enqueue();
+        self.zombie_queue.push_back(task);
+        add_zombie_queue_count();
+    }
+    fn take_one_zombie(&mut self) -> Option<Arc<TaskControlBlock>> {
+        let zombie = self.zombie_queue.pop_front();
+        if zombie.is_some() {
+            sub_zombie_queue_count(1);
+        }
+        zombie
+    }
+    fn take_zombies(&mut self, limit: usize) -> Vec<Arc<TaskControlBlock>> {
+        let mut zombies = Vec::with_capacity(limit.min(self.zombie_queue.len()));
+        while zombies.len() < limit {
+            let Some(task) = self.zombie_queue.pop_front() else {
+                break;
+            };
+            zombies.push(task);
+        }
+        sub_zombie_queue_count(zombies.len());
+        zombies
     }
     /// 从就绪 + 可中断队列中移除属于指定 pid 的所有 zombie TCB。
     /// 返回收集到的 zombie Arc，由调用者负责在锁外 drop。
     fn remove_zombie_tasks_by_pid(&mut self, pid: usize) -> alloc::vec::Vec<Arc<TaskControlBlock>> {
         let mut zombies = alloc::vec::Vec::new();
+        let old_ready_len = self.ready_queue.len();
         self.ready_queue.retain(|task| {
             let is_match = task.acquire_inner_lock().is_zombie() && task.process.pid == pid;
             if is_match {
@@ -217,6 +359,8 @@ impl TaskManager {
                 true
             }
         });
+        sub_ready_count(old_ready_len - self.ready_queue.len());
+        let old_interruptible_len = self.interruptible_queue.len();
         self.interruptible_queue.retain(|task| {
             let is_match = task.acquire_inner_lock().is_zombie() && task.process.pid == pid;
             if is_match {
@@ -226,6 +370,7 @@ impl TaskManager {
                 true
             }
         });
+        sub_interruptible_count(old_interruptible_len - self.interruptible_queue.len());
         self.recompute_ready_nice_count();
         zombies
     }
@@ -233,7 +378,11 @@ impl TaskManager {
         if (old_nice == 0) == (new_nice == 0) {
             return;
         }
-        if !self.ready_queue.iter().any(|queued| task_ptr_eq(queued, task)) {
+        if !self
+            .ready_queue
+            .iter()
+            .any(|queued| task_ptr_eq(queued, task))
+        {
             return;
         }
         if old_nice == 0 {
@@ -261,23 +410,50 @@ impl TaskManager {
     /// 添加一个任务到可中断队列
     pub fn add_interruptible(&mut self, task: Arc<TaskControlBlock>) {
         self.interruptible_queue.push_back(task);
+        add_interruptible_count();
     }
     /// 从可中断队列中删除一个任务
-    pub fn drop_interruptible(&mut self, task: &Arc<TaskControlBlock>) {
+    pub fn drop_interruptible(&mut self, task: &Arc<TaskControlBlock>) -> bool {
+        if self
+            .interruptible_queue
+            .front()
+            .map(|task_in_queue| task_ptr_eq(task_in_queue, task))
+            .unwrap_or(false)
+        {
+            self.interruptible_queue.pop_front();
+            sub_interruptible_count(1);
+            return true;
+        }
+        if self
+            .interruptible_queue
+            .back()
+            .map(|task_in_queue| task_ptr_eq(task_in_queue, task))
+            .unwrap_or(false)
+        {
+            self.interruptible_queue.pop_back();
+            sub_interruptible_count(1);
+            return true;
+        }
+        let old_len = self.interruptible_queue.len();
         self.interruptible_queue
             // 使用retain过滤掉与指定任务相同的任务
-            .retain(|task_in_queue| Arc::as_ptr(task_in_queue) != Arc::as_ptr(task));
+            .retain(|task_in_queue| !task_ptr_eq(task_in_queue, task));
+        let removed = old_len - self.interruptible_queue.len();
+        sub_interruptible_count(removed);
+        removed != 0
     }
     fn enqueue_ready_batch(&mut self, tasks: Vec<Arc<TaskControlBlock>>) -> usize {
         if tasks.is_empty() {
             return 0;
         }
         let ptrs = sorted_task_ptrs(&tasks);
+        let old_interruptible_len = self.interruptible_queue.len();
         self.interruptible_queue
             .retain(|task| !task_ptr_in(&ptrs, task));
+        sub_interruptible_count(old_interruptible_len - self.interruptible_queue.len());
         let count = tasks.len();
-        for task in tasks {
-            self.add(task);
+        for task in tasks.into_iter().rev() {
+            self.add_front(task);
         }
         count
     }
@@ -287,15 +463,17 @@ impl TaskManager {
         let ptrs = sorted_task_ptrs(tasks);
 
         let old_ready_len = self.ready_queue.len();
-        self.ready_queue
-            .retain(|task| !task_ptr_in(&ptrs, task));
+        self.ready_queue.retain(|task| !task_ptr_in(&ptrs, task));
+        let removed_ready = old_ready_len - self.ready_queue.len();
+        sub_ready_count(removed_ready);
         self.recompute_ready_nice_count();
         let old_interruptible_len = self.interruptible_queue.len();
         self.interruptible_queue
             .retain(|task| !task_ptr_in(&ptrs, task));
+        let removed_interruptible = old_interruptible_len - self.interruptible_queue.len();
+        sub_interruptible_count(removed_interruptible);
 
-        (old_ready_len - self.ready_queue.len())
-            + (old_interruptible_len - self.interruptible_queue.len())
+        removed_ready + removed_interruptible
     }
     /// 就绪队列中任务数量
     pub fn ready_count(&self) -> u16 {
@@ -326,9 +504,7 @@ impl TaskManager {
     pub fn wake_interruptible(&mut self, task: Arc<TaskControlBlock>) {
         match self.try_wake_interruptible(task) {
             Ok(_) => {}
-            Err(_) => {
-                log::trace!("[wake_interruptible] already waken");
-            }
+            Err(_) => {}
         }
     }
     /// 这个函数会将`task`从`interruptible_queue`中删除，并加入`ready_queue`。
@@ -340,14 +516,17 @@ impl TaskManager {
         task: Arc<TaskControlBlock>,
     ) -> Result<(), WaitQueueError> {
         // 从可中断队列中删除指定任务
-        self.drop_interruptible(&task);
+        if self.drop_interruptible(&task) {
+            self.add_front(task);
+            return Ok(());
+        }
         // 如果任务不在就绪队列中，将其加入就绪队列
         if !self
             .ready_queue
             .iter()
             .any(|task_in_queue| Arc::as_ptr(task_in_queue) == Arc::as_ptr(&task))
         {
-            self.add(task);
+            self.add_front(task);
             Ok(())
         } else {
             Err(WaitQueueError::AlreadyWaken)
@@ -395,9 +574,27 @@ pub fn add_task(task: Arc<TaskControlBlock>) {
     TASK_MANAGER.lock().add(task);
 }
 
+pub fn add_zombie_task(task: Arc<TaskControlBlock>) {
+    TASK_MANAGER.lock().add_zombie(task);
+}
+
 /// 从任务管理器中取出一个任务
 pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
     TASK_MANAGER.lock().fetch()
+}
+
+pub fn take_one_zombie_task() -> Option<Arc<TaskControlBlock>> {
+    if !has_zombie_queue_tasks() {
+        return None;
+    }
+    TASK_MANAGER.lock().take_one_zombie()
+}
+
+pub fn take_zombie_tasks(limit: usize) -> Vec<Arc<TaskControlBlock>> {
+    if limit == 0 || !has_zombie_queue_tasks() {
+        return Vec::new();
+    }
+    TASK_MANAGER.lock().take_zombies(limit)
 }
 
 /// 从就绪队列中逐出一个僵尸任务（零堆分配），返回后在锁外 drop。
@@ -502,8 +699,11 @@ pub fn remove_tasks_from_queues(tasks: &[Arc<TaskControlBlock>]) -> usize {
 
 /// 返回就绪队列中的任务数量
 pub fn procs_count() -> u16 {
-    let manager = TASK_MANAGER.lock();
-    manager.ready_count() + manager.interruptible_count()
+    ready_count_fast().saturating_add(interruptible_count_fast())
+}
+
+pub fn has_ready_task() -> bool {
+    READY_TASK_COUNT.load(AtomicOrdering::Relaxed) != 0
 }
 
 /// 返回僵尸任务数量
@@ -697,11 +897,30 @@ impl WaitQueue {
         }
         self.add_task(task);
     }
-    pub fn finish_wait(&mut self, task: &Arc<TaskControlBlock>) -> bool {
-        let old_len = self.inner.len();
-        self.inner
-            .retain(|task_in_queue| Weak::as_ptr(task_in_queue) != Arc::as_ptr(task));
-        let removed = self.inner.len() != old_len;
+    pub fn finish_wait(&mut self, task: &TaskControlBlock) -> bool {
+        let task_ptr = task as *const TaskControlBlock;
+        let removed = if self
+            .inner
+            .back()
+            .map(|task_in_queue| Weak::as_ptr(task_in_queue) == task_ptr)
+            .unwrap_or(false)
+        {
+            self.inner.pop_back();
+            true
+        } else if self
+            .inner
+            .front()
+            .map(|task_in_queue| Weak::as_ptr(task_in_queue) == task_ptr)
+            .unwrap_or(false)
+        {
+            self.inner.pop_front();
+            true
+        } else {
+            let old_len = self.inner.len();
+            self.inner
+                .retain(|task_in_queue| Weak::as_ptr(task_in_queue) != task_ptr);
+            self.inner.len() != old_len
+        };
         let mut task_inner = task.acquire_inner_lock();
         if task_inner.task_status == super::TaskStatus::Interruptible {
             task_inner.task_status = super::TaskStatus::Ready;
@@ -742,19 +961,19 @@ impl WaitQueue {
             guard.prepare_to_wait(Arc::downgrade(&task));
 
             if let Some(res) = cond() {
-                guard.finish_wait(&task);
+                guard.finish_wait(task.as_ref());
                 return WaitResult::Ready(res);
             }
             if deadline
                 .map(|deadline| TimeSpec::now() >= deadline)
                 .unwrap_or(false)
             {
-                guard.finish_wait(&task);
+                guard.finish_wait(task.as_ref());
                 return WaitResult::TimedOut;
             }
             if signal_check {
                 if has_actionable_signal(&task) {
-                    guard.finish_wait(&task);
+                    guard.finish_wait(task.as_ref());
                     return WaitResult::Interrupted;
                 }
                 discard_non_actionable_unblocked_signals(&task);
@@ -765,7 +984,7 @@ impl WaitQueue {
             } else if let Some(ms) = fallback_ms {
                 if !task
                     .wait_io_timer_pending
-                    .swap(true, AtomicOrdering::AcqRel)
+                    .swap(true, AtomicOrdering::Relaxed)
                 {
                     wait_with_timeout(
                         Arc::downgrade(&task),
@@ -783,8 +1002,8 @@ impl WaitQueue {
                 no_signal && not_timed_out
             });
 
-            let task = current_task().unwrap();
-            wq.lock().finish_wait(&task);
+            let task = current_task_ref().unwrap();
+            wq.lock().finish_wait(task);
             task.acquire_inner_lock().refresh_real_timer();
         }
     }
@@ -821,19 +1040,19 @@ impl WaitQueue {
 
             queue_of(&mut guard).prepare_to_wait(Arc::downgrade(&task));
             if let Some(res) = cond(&mut guard) {
-                queue_of(&mut guard).finish_wait(&task);
+                queue_of(&mut guard).finish_wait(task.as_ref());
                 return WaitResult::Ready(res);
             }
             if deadline
                 .map(|deadline| TimeSpec::now() >= deadline)
                 .unwrap_or(false)
             {
-                queue_of(&mut guard).finish_wait(&task);
+                queue_of(&mut guard).finish_wait(task.as_ref());
                 return WaitResult::TimedOut;
             }
             if signal_check {
                 if has_actionable_signal(&task) {
-                    queue_of(&mut guard).finish_wait(&task);
+                    queue_of(&mut guard).finish_wait(task.as_ref());
                     return WaitResult::Interrupted;
                 }
                 discard_non_actionable_unblocked_signals(&task);
@@ -851,9 +1070,9 @@ impl WaitQueue {
                 no_signal && not_timed_out
             });
 
-            let task = current_task().unwrap();
+            let task = current_task_ref().unwrap();
             let mut guard = lock.lock();
-            let removed = queue_of(&mut guard).finish_wait(&task);
+            let removed = queue_of(&mut guard).finish_wait(task);
             drop(guard);
             task.acquire_inner_lock().refresh_real_timer();
 
@@ -865,7 +1084,7 @@ impl WaitQueue {
         }
     }
 
-    fn finish_wait_on_queues(queues: &[&Mutex<Self>], task: &Arc<TaskControlBlock>) {
+    fn finish_wait_on_queues(queues: &[&Mutex<Self>], task: &TaskControlBlock) {
         for queue in queues {
             queue.lock().finish_wait(task);
         }
@@ -891,7 +1110,8 @@ impl WaitQueue {
                 let next_deadline = match deadline {
                     Some(deadline) if TimeSpec::now() >= deadline => return WaitResult::TimedOut,
                     Some(deadline) => {
-                        let fallback = TimeSpec::now() + TimeSpec::from_ms(Self::WAIT_IO_FALLBACK_MS);
+                        let fallback =
+                            TimeSpec::now() + TimeSpec::from_ms(Self::WAIT_IO_FALLBACK_MS);
                         if fallback < deadline {
                             fallback
                         } else {
@@ -900,7 +1120,8 @@ impl WaitQueue {
                     }
                     None => TimeSpec::now() + TimeSpec::from_ms(Self::WAIT_IO_FALLBACK_MS),
                 };
-                match Self::wait_event_interruptible_timeout(&wait_queue, &mut cond, next_deadline) {
+                match Self::wait_event_interruptible_timeout(&wait_queue, &mut cond, next_deadline)
+                {
                     WaitResult::Ready(value) => return WaitResult::Ready(value),
                     WaitResult::Interrupted => return WaitResult::Interrupted,
                     WaitResult::TimedOut => {
@@ -929,18 +1150,18 @@ impl WaitQueue {
             }
 
             if let Some(res) = cond() {
-                Self::finish_wait_on_queues(queues, &task);
+                Self::finish_wait_on_queues(queues, task.as_ref());
                 return WaitResult::Ready(res);
             }
             if deadline
                 .map(|deadline| TimeSpec::now() >= deadline)
                 .unwrap_or(false)
             {
-                Self::finish_wait_on_queues(queues, &task);
+                Self::finish_wait_on_queues(queues, task.as_ref());
                 return WaitResult::TimedOut;
             }
             if has_actionable_signal(&task) {
-                Self::finish_wait_on_queues(queues, &task);
+                Self::finish_wait_on_queues(queues, task.as_ref());
                 return WaitResult::Interrupted;
             }
             discard_non_actionable_unblocked_signals(&task);
@@ -958,8 +1179,8 @@ impl WaitQueue {
                 no_signal && not_timed_out && cond().is_none()
             });
 
-            let task = current_task().unwrap();
-            Self::finish_wait_on_queues(queues, &task);
+            let task = current_task_ref().unwrap();
+            Self::finish_wait_on_queues(queues, task);
             task.acquire_inner_lock().refresh_real_timer();
         }
     }
@@ -1026,11 +1247,7 @@ impl WaitQueue {
         Self::wait_event_impl(wq, &mut cond, true, None, None)
     }
 
-    pub fn wait_event_timeout<F>(
-        wq: &Mutex<Self>,
-        mut cond: F,
-        deadline: TimeSpec,
-    ) -> WaitResult
+    pub fn wait_event_timeout<F>(wq: &Mutex<Self>, mut cond: F, deadline: TimeSpec) -> WaitResult
     where
         F: FnMut() -> Option<isize>,
     {
@@ -1060,11 +1277,7 @@ impl WaitQueue {
         Self::wait_event_locked_impl(lock, queue_of, &mut cond, true, None, None)
     }
 
-    pub fn wait_event_locked<T, Q, F>(
-        lock: &Mutex<T>,
-        queue_of: Q,
-        mut cond: F,
-    ) -> WaitResult
+    pub fn wait_event_locked<T, Q, F>(lock: &Mutex<T>, queue_of: Q, mut cond: F) -> WaitResult
     where
         Q: for<'a> FnMut(&'a mut T) -> &'a mut WaitQueue,
         F: FnMut(&mut T) -> Option<isize>,
@@ -1135,6 +1348,11 @@ pub enum TimerAction {
         signal: Signals,
         generation: usize,
     },
+    // Global timerfd sweep. Individual timerfds are kept in fs::timerfd's
+    // registry; this action exists only to drive high-resolution wakeups.
+    TimerFdSweep {
+        generation: usize,
+    },
 }
 
 //内核中的统一计时器，目前用于itimer_real
@@ -1172,12 +1390,16 @@ impl KernelTimer {
                     // WakeTask entries are intentionally not deduplicated on insertion.
                     // A newer wait bumps the generation; older entries are stale and can be
                     // dropped by compact() or ignored when their deadline expires.
-                    task.wait_timer_generation.load(AtomicOrdering::Acquire) == *generation
+                    task.wait_timer_generation.load(AtomicOrdering::Relaxed) == *generation
                 }
                 None => false,
             },
-            TimerAction::SendSignal { task, .. }
-            | TimerAction::PosixTimerSignal { task, .. } => task.strong_count() > 0,
+            TimerAction::SendSignal { task, .. } | TimerAction::PosixTimerSignal { task, .. } => {
+                task.strong_count() > 0
+            }
+            TimerAction::TimerFdSweep { generation } => {
+                crate::fs::timerfd::timerfd_sweep_is_current(*generation)
+            }
         }
     }
 }
@@ -1202,22 +1424,45 @@ impl KernelTimerQueue {
         self.inner.len()
     }
 
-    pub fn add_action(&mut self, action: TimerAction, deadline: TimeSpec) {
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Returns the earliest deadline (ns), or 0 if the queue is empty.
+    pub fn earliest_deadline_ns(&self) -> u64 {
+        self.inner.peek().map(|t| t.deadline.to_ns_saturating()).unwrap_or(0)
+    }
+
+    pub fn add_action(&mut self, action: TimerAction, deadline: TimeSpec) -> bool {
+        let old_earliest = self.earliest_deadline_ns();
         // Keep the hot path O(log n).  WakeTask stale entries are filtered by
         // generation, while signal timers validate their generation/deadline in run_timer().
         self.inner.push(KernelTimer { action, deadline });
+        KERNEL_TIMER_QUEUE_PENDING.store(true, AtomicOrdering::Relaxed);
         if self.inner.len() > Self::MAX_TIMERS {
             self.enforce_capacity();
         }
+        let new_earliest = self.earliest_deadline_ns();
+        // Return true if this new timer is now the earliest (or if the queue
+        // was empty before, meaning a previously-idle queue now has work).
+        old_earliest == 0 || new_earliest < old_earliest
     }
-    pub fn wake_expired(&mut self, now: TimeSpec) {
+    /// Pop all expired timers (up to a batch limit).
+    /// Callers must hold the lock. Run callbacks OUTSIDE the lock.
+    pub fn pop_expired(&mut self, now: TimeSpec) -> Vec<KernelTimer> {
+        const MAX_BATCH: usize = 64;
+        let mut expired = Vec::new();
         while let Some(timer) = self.inner.pop() {
             if timer.deadline > now {
                 self.inner.push(timer);
                 break;
             }
-            self.run_timer(timer, now);
+            expired.push(timer);
+            if expired.len() >= MAX_BATCH {
+                break;
+            }
         }
+        expired
     }
     /// 清理所有失效 Weak 引用的定时器条目，释放堆槽位。
     pub fn compact(&mut self) {
@@ -1251,31 +1496,27 @@ impl KernelTimerQueue {
             );
         }
     }
-    fn run_timer(&mut self, timer: KernelTimer, now: TimeSpec) {
+    /// Run a single timer callback. Must be called WITHOUT holding KERNEL_TIMER_QUEUE.
+    pub fn run_timer(timer: KernelTimer, now: TimeSpec) -> bool {
         match timer.action {
-            TimerAction::WakeTask {
-                task,
-                generation,
-            } => {
-                if let Some(task) = task.upgrade() {
-                    // Option A：无条件清除 pending 标志。
-                    // 无论任务是否已被提前唤醒，定时器既已触发，槽位即释放。
-                    task.wait_io_timer_pending
-                        .store(false, AtomicOrdering::Release);
-                    if task.wait_timer_generation.load(AtomicOrdering::Acquire) != generation {
-                        return;
-                    }
-
-                    let mut inner = task.acquire_inner_lock();
-                    let should_wake = inner.task_status == super::TaskStatus::Interruptible;
-                    if should_wake {
-                        inner.task_status = super::task::TaskStatus::Ready;
-                    }
-                    drop(inner);
-                    if should_wake {
-                        wake_interruptible(task);
-                    }
+            TimerAction::WakeTask { task, generation } => {
+                let Some(task) = task.upgrade() else { return false };
+                task.wait_io_timer_pending
+                    .store(false, AtomicOrdering::Relaxed);
+                if task.wait_timer_generation.load(AtomicOrdering::Relaxed) != generation {
+                    return false;
                 }
+
+                let mut inner = task.acquire_inner_lock();
+                let should_wake = inner.task_status == super::TaskStatus::Interruptible;
+                if should_wake {
+                    inner.task_status = super::task::TaskStatus::Ready;
+                }
+                drop(inner);
+                if should_wake {
+                    wake_interruptible(task);
+                }
+                should_wake
             }
             TimerAction::SendSignal {
                 task,
@@ -1283,58 +1524,58 @@ impl KernelTimerQueue {
                 generation,
             } => {
                 if signal.is_empty() {
-                    return;
+                    return false;
                 }
-                if let Some(task) = task.upgrade() {
-                    let mut should_wake = false;
-                    let mut next_real_timer = None;
-                    {
-                        let mut inner = task.acquire_inner_lock();
-                        if signal == Signals::SIGALRM {
-                            if inner.real_timer_generation != generation
-                                || inner.real_timer_deadline != Some(timer.deadline)
-                            {
-                                return;
-                            }
-                        }
-                        inner.add_signal(signal);
-                        if signal == Signals::SIGALRM {
-                            if inner.timer[0].it_interval.is_zero() {
-                                inner.real_timer_deadline = None;
-                                inner.timer[0].it_value = TimeVal::new();
-                            } else {
-                                let interval =
-                                    TimeSpec::from_us(inner.timer[0].it_interval.to_us());
-                                let deadline = now + interval;
-                                inner.real_timer_generation =
-                                    inner.real_timer_generation.wrapping_add(1);
-                                let next_generation = inner.real_timer_generation;
-                                inner.real_timer_deadline = Some(deadline);
-                                inner.timer[0].it_value = inner.timer[0].it_interval;
-                                next_real_timer = Some((deadline, next_generation));
-                            }
-                        }
-                        if signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, true)
-                            && inner.task_status == super::TaskStatus::Interruptible
+                let Some(task) = task.upgrade() else { return false };
+                let mut should_wake = false;
+                let mut next_real_timer = None;
+                {
+                    let mut inner = task.acquire_inner_lock();
+                    if signal == Signals::SIGALRM {
+                        if inner.real_timer_generation != generation
+                            || inner.real_timer_deadline != Some(timer.deadline)
                         {
-                            inner.task_status = super::TaskStatus::Ready;
-                            should_wake = true;
+                            return false;
                         }
                     }
-                    if should_wake {
-                        wake_interruptible(task.clone());
+                    inner.add_signal(signal);
+                    if signal == Signals::SIGALRM {
+                        if inner.timer[0].it_interval.is_zero() {
+                            inner.real_timer_deadline = None;
+                            inner.timer[0].it_value = TimeVal::new();
+                        } else {
+                            let interval =
+                                TimeSpec::from_us(inner.timer[0].it_interval.to_us());
+                            let deadline = now + interval;
+                            inner.real_timer_generation =
+                                inner.real_timer_generation.wrapping_add(1);
+                            let next_generation = inner.real_timer_generation;
+                            inner.real_timer_deadline = Some(deadline);
+                            inner.timer[0].it_value = inner.timer[0].it_interval;
+                            next_real_timer = Some((deadline, next_generation));
+                        }
                     }
-                    if let Some((deadline, next_generation)) = next_real_timer {
-                        self.add_action(
-                            TimerAction::SendSignal {
-                                task: Arc::downgrade(&task),
-                                signal,
-                                generation: next_generation,
-                            },
-                            deadline,
-                        );
+                    if signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, true)
+                        && inner.task_status == super::TaskStatus::Interruptible
+                    {
+                        inner.task_status = super::TaskStatus::Ready;
+                        should_wake = true;
                     }
                 }
+                if should_wake {
+                    wake_interruptible(task.clone());
+                }
+                if let Some((deadline, next_generation)) = next_real_timer {
+                    add_kernel_timer(
+                        TimerAction::SendSignal {
+                            task: Arc::downgrade(&task),
+                            signal,
+                            generation: next_generation,
+                        },
+                        deadline,
+                    );
+                }
+                should_wake
             }
             TimerAction::PosixTimerSignal {
                 task,
@@ -1342,28 +1583,31 @@ impl KernelTimerQueue {
                 signal,
                 generation,
             } => {
-                if let Some(task) = task.upgrade() {
-                    let mut should_wake = false;
-                    let mut next_timer = None;
+                let Some(task) = task.upgrade() else { return false };
+                let mut should_wake = false;
+                let mut next_timer = None;
                     {
                         let mut inner = task.acquire_inner_lock();
                         let signal_pending =
                             !signal.is_empty() && inner.sigpending.contains(signal);
                         let Some(Some(timer_state)) = inner.posix_timers.get_mut(timer_id) else {
-                            return;
+                            return false;
                         };
                         if timer_state.generation != generation
                             || timer_state.deadline != Some(timer.deadline)
                         {
-                            return;
+                            return false;
                         }
                         if timer_state.interval.is_zero() {
                             timer_state.value = TimeSpec::new();
                             timer_state.deadline = None;
+                            timer_state.realtime_abs_deadline = None;
                         } else {
-                            let interval_ns = timer_state.interval.to_ns().max(1);
-                            let deadline_ns = timer.deadline.to_ns();
-                            let elapsed_ns = now.to_ns().saturating_sub(deadline_ns);
+                            let interval_ns =
+                                timer_state.interval.to_ns_saturating().max(1) as usize;
+                            let deadline_ns = timer.deadline.to_ns_saturating() as usize;
+                            let elapsed_ns =
+                                (now.to_ns_saturating() as usize).saturating_sub(deadline_ns);
                             let expirations = 1usize.saturating_add(elapsed_ns / interval_ns);
                             let missed = if signal_pending {
                                 expirations
@@ -1374,6 +1618,13 @@ impl KernelTimerQueue {
                             let next_ns =
                                 deadline_ns.saturating_add(expirations.saturating_mul(interval_ns));
                             let deadline = TimeSpec::from_ns(next_ns);
+                            if let Some(abs_deadline) = timer_state.realtime_abs_deadline {
+                                let abs_ns = abs_deadline
+                                    .to_ns_saturating()
+                                    .saturating_add(expirations.saturating_mul(interval_ns) as u64);
+                                timer_state.realtime_abs_deadline =
+                                    Some(TimeSpec::from_ns(abs_ns as usize));
+                            }
                             timer_state.generation = timer_state.generation.wrapping_add(1);
                             timer_state.value = timer_state.interval;
                             timer_state.deadline = Some(deadline);
@@ -1383,9 +1634,11 @@ impl KernelTimerQueue {
                             let _ = inner
                                 .sigpending
                                 .enqueue_signal(signal, SigInfo::SI_TIMER as usize);
-                            if signal
-                                .wakes_interruptible(inner.sigmask, inner.signal_wait_mask, true)
-                                && inner.task_status == super::TaskStatus::Interruptible
+                            if signal.wakes_interruptible(
+                                inner.sigmask,
+                                inner.signal_wait_mask,
+                                true,
+                            ) && inner.task_status == super::TaskStatus::Interruptible
                             {
                                 inner.task_status = super::TaskStatus::Ready;
                                 should_wake = true;
@@ -1396,7 +1649,7 @@ impl KernelTimerQueue {
                         wake_interruptible(task.clone());
                     }
                     if let Some((deadline, next_generation)) = next_timer {
-                        self.add_action(
+                        add_kernel_timer(
                             TimerAction::PosixTimerSignal {
                                 task: Arc::downgrade(&task),
                                 timer_id,
@@ -1406,7 +1659,15 @@ impl KernelTimerQueue {
                             deadline,
                         );
                     }
+                    should_wake
+            }
+            TimerAction::TimerFdSweep { generation } => {
+                if !crate::fs::timerfd::timerfd_sweep_is_current(generation) {
+                    return false;
                 }
+                let woke = crate::fs::timerfd::wake_expired_timerfds(now) > 0;
+                crate::fs::timerfd::rearm_timerfd_sweep();
+                woke
             }
         }
     }
@@ -1450,20 +1711,29 @@ impl TimeoutWaitQueue {
     /// 如果想要阻塞一个`task`，使用`block_current_and_run_next()`函数
     pub fn add_task(&mut self, task: Weak<TaskControlBlock>, timeout: TimeSpec) {
         self.inner.push(TimeoutWaiter { task, timeout });
+        TIMEOUT_WAITQUEUE_PENDING.store(true, AtomicOrdering::Relaxed);
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
     /// 唤醒所有超时的任务
     pub fn wake_expired(&mut self, now: TimeSpec) {
+        if self
+            .inner
+            .peek()
+            .map(|waiter| waiter.timeout > now)
+            .unwrap_or(true)
+        {
+            return;
+        }
         let mut tasks_to_wake = Vec::new();
         // 循环处理超时任务
         while let Some(waiter) = self.inner.pop() {
             // 堆中剩下的任务还没有超时
             if waiter.timeout > now {
                 // 若超时时间大于当前时间，说明后面的任务都没有超时
-                log::trace!(
-                    "[wake_expired] no more expired, next pending task timeout: {:?}, now: {:?}",
-                    waiter.timeout,
-                    now
-                );
                 self.inner.push(waiter);
                 break;
             // 唤醒超时任务
@@ -1484,12 +1754,6 @@ impl TimeoutWaitQueue {
                         }
                         // 释放锁
                         drop(inner);
-                        log::trace!(
-                            "[wake_expired] tid: {}, pid: {}, timeout: {:?}",
-                            task.tid.0,
-                            task.pid(),
-                            waiter.timeout
-                        );
                         tasks_to_wake.push(task);
                     }
                     // task is dead, just ignore
@@ -1498,6 +1762,9 @@ impl TimeoutWaitQueue {
             }
         }
         enqueue_ready_batch(tasks_to_wake);
+        if self.inner.is_empty() {
+            TIMEOUT_WAITQUEUE_PENDING.store(false, AtomicOrdering::Relaxed);
+        }
     }
     #[allow(unused)]
     // debug use only
@@ -1516,9 +1783,54 @@ lazy_static! {
         Mutex::new(KernelTimerQueue::new());
 }
 
+static TIMEOUT_WAITQUEUE_PENDING: AtomicBool = AtomicBool::new(false);
+static KERNEL_TIMER_QUEUE_PENDING: AtomicBool = AtomicBool::new(false);
+
+// ── High-res / sched tick state ──
+static NEXT_SCHED_TICK_NS: AtomicU64 = AtomicU64::new(0);
+const SCHED_TICK_NS: u64 = 10_000_000; // 100 Hz = 10 ms
+
+fn program_next_event(next_timer_ns: u64) {
+    let now_ns = crate::timer::now_ns();
+    let next_sched_ns = NEXT_SCHED_TICK_NS.load(AtomicOrdering::Relaxed);
+    let next_timer_ns = if next_timer_ns == 0 { u64::MAX } else { next_timer_ns };
+
+    let next_ns = next_timer_ns.min(next_sched_ns.max(now_ns.saturating_add(1)));
+    let delta_ns = next_ns.saturating_sub(now_ns).max(1);
+    let delta_ticks = crate::timer::ns_to_ticks_ceil(delta_ns);
+
+    crate::hal::program_timer_delta(delta_ticks);
+}
+
+/// (Re-)program the hardware timer to fire at the earliest of:
+///   - the next sched tick, and
+///   - the earliest KernelTimer deadline.
+///
+/// Caller must have local timer interrupts disabled before entering this
+/// function.  It shares KERNEL_TIMER_QUEUE with the timer interrupt path.
+fn reprogram_timer_irqoff() {
+    let next_timer_ns = KERNEL_TIMER_QUEUE.lock().earliest_deadline_ns();
+    program_next_event(next_timer_ns);
+}
+
+/// Initialise the timer subsystem: set the first sched tick and program the
+/// hardware for the first event.
+pub fn timer_subsystem_init() {
+    let flags = local_irq_save();
+    let now_ns = crate::timer::now_ns();
+    NEXT_SCHED_TICK_NS.store(now_ns + SCHED_TICK_NS, AtomicOrdering::Relaxed);
+    reprogram_timer_irqoff();
+    local_irq_restore(flags);
+}
+
 /// 加入一个内核计时器动作
 pub fn add_kernel_timer(action: TimerAction, deadline: TimeSpec) {
-    KERNEL_TIMER_QUEUE.lock().add_action(action, deadline);
+    let flags = local_irq_save();
+    let new_is_earliest = KERNEL_TIMER_QUEUE.lock().add_action(action, deadline);
+    if new_is_earliest {
+        reprogram_timer_irqoff();
+    }
+    local_irq_restore(flags);
 }
 
 /// 这个函数会将一个`task`添加到全局超时等待队列中，但是不会阻塞它
@@ -1529,32 +1841,143 @@ pub fn wait_with_timeout(task: Weak<TaskControlBlock>, timeout: TimeSpec) {
     };
     let generation = task
         .wait_timer_generation
-        .fetch_add(1, AtomicOrdering::AcqRel)
+        .fetch_add(1, AtomicOrdering::Relaxed)
         .wrapping_add(1);
-    KERNEL_TIMER_QUEUE.lock().add_action(
+    add_kernel_timer(
         TimerAction::WakeTask {
             task: Arc::downgrade(&task),
             generation,
         },
         timeout,
-    )
+    );
 }
 
-/// 唤醒全局超时等待队列中所有已超时的任务
-pub fn do_wake_expired() {
+/// Unified timer interrupt handler — replaces the old fixed-tick
+/// do_wake_expired() + set_next_trigger() pattern.
+///
+/// 1. Process all expired KernelTimers (callbacks run outside the lock).
+/// 2. Advance the sched tick if its deadline has passed; do periodic
+///    housekeeping (net poll, etc.) only on sched-tick boundaries.
+/// 3. Re-program the hardware for the next deadline.
+/// 4. Yield the CPU only if a task was woken or the sched tick demands it.
+pub fn timer_interrupt_handler() {
     let now = crate::timer::TimeSpec::now();
-    TIMEOUT_WAITQUEUE.lock().wake_expired(now);
-    let mut ktq = KERNEL_TIMER_QUEUE.lock();
-    ktq.wake_expired(now);
-    // compact 涉及 BinaryHeap::drain → Vec 堆分配，降频执行：
-    // 仅在队列半满时每 64 个 tick 执行一次。
-    static COMPACT_TICK: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-    let tick = COMPACT_TICK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    if tick % 64 == 0 && ktq.len() > KernelTimerQueue::MAX_TIMERS / 2 {
-        ktq.compact();
+    let now_ns = now.to_ns_saturating();
+
+    // 1. Expired kernel timers
+    let expired_timers = { KERNEL_TIMER_QUEUE.lock().pop_expired(now) };
+    let mut woke_task = false;
+    for timer in expired_timers {
+        if KernelTimerQueue::run_timer(timer, now) {
+            woke_task = true;
+        }
     }
-    drop(ktq);
-    crate::fs::timerfd::wake_expired_timerfds(now);
+
+    // Also handle timeout-waitqueue expiry (kept for compatibility)
+    if TIMEOUT_WAITQUEUE_PENDING.load(AtomicOrdering::Relaxed) {
+        let mut timeout_queue = TIMEOUT_WAITQUEUE.lock();
+        if !timeout_queue.is_empty() {
+            timeout_queue.wake_expired(now);
+        } else {
+            TIMEOUT_WAITQUEUE_PENDING.store(false, AtomicOrdering::Relaxed);
+        }
+    }
+
+    // timerfd
+    if crate::fs::timerfd::timerfd_registry_maybe_nonempty()
+        && !crate::fs::timerfd::timerfd_registry_is_empty()
+    {
+        if crate::fs::timerfd::wake_expired_timerfds(now) > 0 {
+            woke_task = true;
+        }
+    }
+
+    // 2. Sched tick
+    let mut need_resched = false;
+    let mut next_tick = NEXT_SCHED_TICK_NS.load(AtomicOrdering::Relaxed);
+    if now_ns >= next_tick {
+        // Advance tick, but don't let it fall behind by more than one period.
+        next_tick = next_tick.saturating_add(SCHED_TICK_NS);
+        if now_ns >= next_tick {
+            next_tick = now_ns.saturating_add(SCHED_TICK_NS);
+        }
+        NEXT_SCHED_TICK_NS.store(next_tick, AtomicOrdering::Relaxed);
+
+        // Periodic housekeeping — only once per sched tick
+        crate::net::config::NET_INTERFACE.try_poll();
+        need_resched = true;
+    }
+
+    // 3. Re-program hardware
+    reprogram_timer_irqoff();
+
+    // 4. Yield if needed
+    if need_resched || woke_task {
+        crate::task::suspend_current_and_run_next();
+    }
+}
+
+/// 唤醒全局超时等待队列中所有已超时的任务 (legacy — now handled by timer_interrupt_handler)
+pub fn do_wake_expired() {
+    let timeout_pending = TIMEOUT_WAITQUEUE_PENDING.load(AtomicOrdering::Relaxed);
+    let kernel_timer_pending = KERNEL_TIMER_QUEUE_PENDING.load(AtomicOrdering::Relaxed);
+    let timerfd_pending = crate::fs::timerfd::timerfd_registry_maybe_nonempty();
+    if !timeout_pending && !kernel_timer_pending && !timerfd_pending {
+        return;
+    }
+
+    let mut now = None;
+    if timeout_pending {
+        let flags = local_irq_save();
+        let mut timeout_queue = TIMEOUT_WAITQUEUE.lock();
+        if timeout_queue.is_empty() {
+            TIMEOUT_WAITQUEUE_PENDING.store(false, AtomicOrdering::Relaxed);
+        } else {
+            let now = *now.get_or_insert_with(crate::timer::TimeSpec::now);
+            timeout_queue.wake_expired(now);
+        }
+        drop(timeout_queue);
+        local_irq_restore(flags);
+    }
+
+    if kernel_timer_pending {
+        let expired_timers = {
+            let flags = local_irq_save();
+            let mut ktq = KERNEL_TIMER_QUEUE.lock();
+            let expired = if ktq.is_empty() {
+                KERNEL_TIMER_QUEUE_PENDING.store(false, AtomicOrdering::Relaxed);
+                Vec::new()
+            } else {
+                let now = *now.get_or_insert_with(crate::timer::TimeSpec::now);
+                let expired = ktq.pop_expired(now);
+                // compact 涉及 BinaryHeap::drain → Vec 堆分配，降频执行：
+                static COMPACT_TICK: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                let tick = COMPACT_TICK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if tick % 64 == 0 && ktq.len() > KernelTimerQueue::MAX_TIMERS / 2 {
+                    ktq.compact();
+                }
+                if ktq.is_empty() {
+                    KERNEL_TIMER_QUEUE_PENDING.store(false, AtomicOrdering::Relaxed);
+                }
+                expired
+            };
+            drop(ktq);
+            local_irq_restore(flags);
+            expired
+        }; // ← lock released
+
+        // Run callbacks outside the lock
+        let now = now.unwrap_or_else(crate::timer::TimeSpec::now);
+        for timer in expired_timers {
+            KernelTimerQueue::run_timer(timer, now);
+        }
+    }
+
+    if timerfd_pending && !crate::fs::timerfd::timerfd_registry_is_empty() {
+        let now = *now.get_or_insert_with(crate::timer::TimeSpec::now);
+        crate::fs::timerfd::wake_expired_timerfds(now);
+    }
 }
 
 /// 获取内核计时器队列长度（诊断用，尝试获取锁）
@@ -1564,9 +1987,7 @@ pub fn kernel_timer_queue_len() -> Option<usize> {
 
 /// 获取任务管理器中就绪和可中断任务数量（诊断用，尝试获取锁）
 pub fn task_manager_counts() -> Option<(u16, u16)> {
-    TASK_MANAGER
-        .try_lock()
-        .map(|m| (m.ready_count(), m.interruptible_count()))
+    Some((ready_count_fast(), interruptible_count_fast()))
 }
 
 /// 返回所有活跃的 PID 列表

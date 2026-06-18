@@ -94,7 +94,6 @@ pub struct ELFInfo {
 
 /// 加载ELF解释器（使用新 VFS）
 pub fn load_elf_interp(path: &str) -> Result<&'static [u8], isize> {
-    log::info!("[load_elf_interp]Loading ELF interpreter: {}", path);
     // 使用新 VFS 查找并打开解释器文件
     let inode = vfs_lookup_absolute(path)?;
     let file = vfs::File::new(inode, vfs::FileFlags::O_RDONLY).map_err(|e| e as isize)?;
