@@ -631,16 +631,28 @@ impl Socket for TcpSocket {
     }
 
     fn try_recv(&self, buf: &mut [u8]) -> Result<isize, SyscallErr> {
-        NET_INTERFACE.try_poll();
+        // P0: skip poll if pollee already indicates readable (data buffered)
+        if self.pollee.load(Ordering::Relaxed) & EPollEvent::EPOLLIN.bits() == 0 {
+            NET_INTERFACE.try_poll();
+        }
         if self.read_shutdown.load(Ordering::Acquire) {
             return Ok(0); // EOF after read shutdown
         }
         let inner = self.inner.lock();
-        inner.try_recv(buf)
+        let ret = inner.try_recv(buf);
+        drop(inner);
+        // Clear EPOLLIN to force a poll next time (data may be drained).
+        // Avoids stale-pollee false-positive causing one wasted EAGAIN cycle.
+        // The real pollee is refreshed by NET_INTERFACE.poll() periodically.
+        self.pollee
+            .fetch_and(!EPollEvent::EPOLLIN.bits(), Ordering::Relaxed);
+        ret
     }
 
     fn try_send(&self, buf: &[u8], _flags: MsgFlags) -> Result<isize, SyscallErr> {
-        NET_INTERFACE.try_poll();
+        if self.pollee.load(Ordering::Relaxed) & EPollEvent::EPOLLOUT.bits() == 0 {
+            NET_INTERFACE.try_poll();
+        }
         if self.write_shutdown.load(Ordering::Acquire) {
             return Err(SyscallErr::EPIPE);
         }
@@ -653,23 +665,35 @@ impl Socket for TcpSocket {
             let _ = self.try_connect();
         }
         let inner = self.inner.lock();
-        inner.try_send(buf)
+        let ret = inner.try_send(buf);
+        drop(inner);
+        self.pollee
+            .fetch_and(!EPollEvent::EPOLLOUT.bits(), Ordering::Relaxed);
+        ret
     }
 
     fn try_recv_user(&self, buf: &mut UserBuffer, flags: MsgFlags) -> Result<isize, SyscallErr> {
-        NET_INTERFACE.try_poll();
+        if self.pollee.load(Ordering::Relaxed) & EPollEvent::EPOLLIN.bits() == 0 {
+            NET_INTERFACE.try_poll();
+        }
         if self.read_shutdown.load(Ordering::Acquire) {
             return Ok(0);
         }
         let inner = self.inner.lock();
         let _ = flags;
-        inner
+        let ret = inner
             .recv_to_user(buf, 0, buf.len())
-            .map(|n| n as isize)
+            .map(|n| n as isize);
+        drop(inner);
+        self.pollee
+            .fetch_and(!EPollEvent::EPOLLIN.bits(), Ordering::Relaxed);
+        ret
     }
 
     fn try_send_user(&self, buf: &UserBuffer, flags: MsgFlags) -> Result<isize, SyscallErr> {
-        NET_INTERFACE.try_poll();
+        if self.pollee.load(Ordering::Relaxed) & EPollEvent::EPOLLOUT.bits() == 0 {
+            NET_INTERFACE.try_poll();
+        }
         if self.write_shutdown.load(Ordering::Acquire) {
             return Err(SyscallErr::EPIPE);
         }
@@ -683,12 +707,20 @@ impl Socket for TcpSocket {
         let total = buf.len().min(crate::hal::IO_CHUNK_SIZE);
         if total == 0 {
             let inner = self.inner.lock();
-            return inner.try_send(&[]);
+            let ret = inner.try_send(&[]);
+            drop(inner);
+            self.pollee
+                .fetch_and(!EPollEvent::EPOLLOUT.bits(), Ordering::Relaxed);
+            return ret;
         }
         let mut tmp = alloc::vec![0u8; total];
         let n = buf.read_at(0, &mut tmp);
         let inner = self.inner.lock();
-        inner.try_send(&tmp[..n])
+        let ret = inner.try_send(&tmp[..n]);
+        drop(inner);
+        self.pollee
+            .fetch_and(!EPollEvent::EPOLLOUT.bits(), Ordering::Relaxed);
+        ret
     }
 
     fn socket_r_ready(&self) -> bool {
