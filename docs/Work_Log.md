@@ -5238,3 +5238,18 @@ a = sum(x.get("all", x.get("total", 1)) for x in r)
 **验证：**
 - `make rv64-kernel-build-only` ✅
 - `make la64-kernel-build-only` ✅
+
+### fix(alloc): Oracle-reviewed safety & correctness fixes (3 rounds)
+
+**涉及文件：**
+- `os/vendor/buddy_system_allocator/src/lib.rs` — init() guard ordering fix + no-bitmap merge fallback + heap_start/heap_end bounds + alignment + underflow guard + small-heap add_to_heap fallback
+- `user/src/bin/initproc.rs` — snapshot_diag guard cleanup
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- rv64 6-window QEMU: open/close 245-280μs 零退化
+- la64 4-window QEMU: open/close 89-95μs 零退化
+
+**备注：** Oracle 3轮审查发现的 issue 已全部修复。详细报告见 `docs/09_debug/buddy-allocator-scan-drift.md`
+
