@@ -2,7 +2,62 @@
 
 ---
 
-## 2026-06-18
+## 2026-06-19
+
+### fix(mount): bind mount 根 ".." 解析错误转义到源文件系统，导致 musl getcwd manual walk 失败
+
+**涉及文件：**
+- `os/src/fs/vfs/mount.rs` — 两处修改：
+  1. 新增 `MountFSInode::lookup_dotdot()` 方法：挂载边界感知的 ".." 解析
+     - 挂载点根 → 通过 `self_mountpoint` 跨越到父文件系统中挂载点的父目录
+     - 全局根 → 返回自身
+     - 普通目录 → 委托 `inner_inode.find("..")`，结果包 `overlaid_inode()`
+  2. `do_find()` 开头 special-case `name == ".."` → 调用 `lookup_dotdot()`，放在 self-overlay 和 dentry cache 之前
+
+**根因：** `MountFSInode::find("..")` 直接从 bind mount 根穿过 mount 边界，调用 `inner_inode.find("..")` 返回到源 ext4 文件系统的父目录（ino=2），而非 VFS 树中 mountpoint 的父目录 `/`（ramfs root, ino=1）。musl libc 的 manual getcwd 回退路径用 `fstatat("/")`（ino=1）和 `fstatat("..")`（ino=2）比较来判定是否到达文件系统根，ino 不匹配导致无限循环失败 `EINVAL`。`cb9053a4` 只在 `sys_getcwd` 中绕过该问题，但未修复底层 VFS ".." 语义。
+
+**la64 特异性说明：** 底层 bug 双架构均存在。la64 上 musl 的 `getcwd()` 不调用 syscall 而走 manual walk（`openat("..")`/`getdents64`），因此触发。glibc 的 `getcwd()` 直接用 syscall 走 `working_path` 缓存路径不受影响。
+
+**Oracle 审查：** fix plan reviewed by Oracle (ses_121fc9e43ffeEmOsDd2r1ET3iN)
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU la64 测试：待用户确认
+
+**备注：** `do_parent()` 未改动 — 它服务于 `absolute_path()` 路径重建，返回 mountpoint 自身是有意的。
+
+### fix(mount): getdents64 d_ino overlay 校正 — bind mount 目录项 ino 与 stat 不一致（第二轮）
+
+**涉及文件：**
+- `os/src/fs/vfs/mount.rs` — `MountFSInode::list_dirents()` 增加 overlay 校正逻辑：
+  - 从 inner filesystem 获取原始 dirent 列表后，对每个条目检查 `mountpoints` 表
+  - 如果有 child mount 覆盖该 inode，将 `d_ino` 替换为 mount root inode 的实际 inode_id
+  - 修复 ramfs `/` 的 `getdents64` 返回 `musl: d_ino=31` 而 `fstatat("/musl")` 返回 `st_ino=12` 的不一致
+
+**根因：** 第一阶段修复让 `fstatat("..")` 正确返回 VFS root ino=1，musl 能正确到达根目录。但 musl manual walk 的下一步是在父目录（`/`）的 `getdents64` 中找 `d_ino == st_ino("./")` 的条目来确定当前目录的名称。ramfs `/` 的 `list_dirents()` 直接委托给 inner filesystem，返回 mountpoint 自身（ino=31）而非被 ext4 bind mount 覆盖后的实际 inode（ino=12），导致 musl 遍历完所有条目也找不到匹配 → 同样失败 `EINVAL`。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU la64 测试：待用户确认
+
+
+### fix(timer): I/O fallback timer re-arm race 导致 lmbench context switch 挂死（已修复）
+
+**涉及文件：**
+- `os/src/task/manager.rs` — 三处修改：
+  1. `wait_event_impl()` fallback 路径：`wait_with_timeout()` 替换为直接 `add_kernel_timer(WakeTask { fallback_ms: Some(ms) })`
+  2. `run_timer()`：fallback timer 触发但 `task_status != Interruptible` 时 re-arm 而非消费
+  3. `WAIT_IO_FALLBACK_MS` 从 1 改回 10（1ms 在慢机器上太激进）
+
+**根因：** Bug 1: `wait_with_timeout()` 始终设 `fallback_ms: None`，`run_timer()` stale re-arm 逻辑只对 `Some(ms)` 生效。Bug 2: timer 在 arm（`wait_event_impl`）和任务进 `Interruptible`（`block_current_and_run_next_with_lock_checked`）之间的窗口触发，被消费但不唤醒。叠加 1ms 频繁触发 → CPU 被 timer 唤醒-检查-睡眠循环吃满，pipe 写者饥饿。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ⚠️ 预存 `lang_items.rs` 编译问题，非本次修改导致
+- QEMU lmbench-musl 完整通过 ✅
+- 详细 postmortem: `docs/09_debug/bug-fallback-timer-lmbench-hang.md`
 
 ### hotfix(fs/ext4): 禁用 eager full-index + 删除 create/link/symlink 冗余 FS cache 操作 → lmbench fork/create 回归修复
 

@@ -917,10 +917,7 @@ fn run_group_once(
                 );
                 let t_kill = get_time() as u64;
                 let _ = kill(pid as usize, SIGKILL);
-                println!(
-                    "[diag] kill sent, entering waitpid at ms={}",
-                    t_kill
-                );
+                println!("[diag] kill sent, entering waitpid at ms={}", t_kill);
                 let _ = waitpid(pid as usize, &mut code);
                 let t_waited = get_time() as u64;
                 println!(
@@ -2139,7 +2136,7 @@ fn run_timerfd_smoke() -> bool {
     use user_lib::syscall::{
         sys_clock_gettime, sys_clock_nanosleep, sys_clock_settime, sys_close, sys_get_time,
         sys_read, sys_timer_create, sys_timer_delete, sys_timer_gettime, sys_timer_settime,
-        sys_timerfd_create, sys_timerfd_settime, ITimerSpec, TimerFdSpec, TimeSpec,
+        sys_timerfd_create, sys_timerfd_settime, ITimerSpec, TimeSpec, TimerFdSpec,
     };
 
     const CLOCK_REALTIME: usize = 0;
@@ -2188,7 +2185,10 @@ fn run_timerfd_smoke() -> bool {
         } else {
             0
         };
-        TimeSpec { tv_sec: sec, tv_nsec: nsec }
+        TimeSpec {
+            tv_sec: sec,
+            tv_nsec: nsec,
+        }
     }
 
     println!("[timer_smoke] timerfd monotonic one-shot begin");
@@ -2199,7 +2199,10 @@ fn run_timerfd_smoke() -> bool {
     }
 
     let spec = TimerFdSpec {
-        it_interval: TimeSpec { tv_sec: 0, tv_nsec: 0 },
+        it_interval: TimeSpec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        },
         it_value: TimeSpec {
             tv_sec: 0,
             tv_nsec: TIMER_NSEC,
@@ -2240,7 +2243,10 @@ fn run_timerfd_smoke() -> bool {
     println!("[timer_smoke] PASS");
 
     println!("[timer_smoke] realtime relative settime isolation begin");
-    let mut realtime_before = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    let mut realtime_before = TimeSpec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     if sys_clock_gettime(CLOCK_REALTIME, &mut realtime_before as *mut TimeSpec) < 0 {
         println!("[timer_smoke] clock_gettime realtime failed");
         return false;
@@ -2251,7 +2257,10 @@ fn run_timerfd_smoke() -> bool {
         return false;
     }
     let spec = TimerFdSpec {
-        it_interval: TimeSpec { tv_sec: 0, tv_nsec: 0 },
+        it_interval: TimeSpec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        },
         it_value: TimeSpec {
             tv_sec: 0,
             tv_nsec: REALTIME_REL_NSEC,
@@ -2278,7 +2287,10 @@ fn run_timerfd_smoke() -> bool {
     let mut buf = [0u8; 8];
     let nread = sys_read(fd as usize, &mut buf);
     let end_ms = sys_get_time();
-    let mut realtime_after = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    let mut realtime_after = TimeSpec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     let _ = sys_clock_gettime(CLOCK_REALTIME, &mut realtime_after as *mut TimeSpec);
     let restore = sub_ns(realtime_after, REALTIME_FORWARD_NSEC);
     let _ = sys_clock_settime(CLOCK_REALTIME, &restore as *const TimeSpec);
@@ -2294,17 +2306,17 @@ fn run_timerfd_smoke() -> bool {
         "[timer_smoke] realtime relative expirations={} elapsed_ms={}",
         expirations, elapsed_ms
     );
-    if expirations == 0
-        || elapsed_ms < REALTIME_REL_MIN_MS
-        || elapsed_ms > REALTIME_REL_MAX_MS
-    {
+    if expirations == 0 || elapsed_ms < REALTIME_REL_MIN_MS || elapsed_ms > REALTIME_REL_MAX_MS {
         println!("[timer_smoke] realtime relative result out of range");
         return false;
     }
     println!("[timer_smoke] realtime relative PASS");
 
     println!("[timer_smoke] realtime absolute periodic rearm begin");
-    let mut realtime_before = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    let mut realtime_before = TimeSpec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     if sys_clock_gettime(CLOCK_REALTIME, &mut realtime_before as *mut TimeSpec) < 0 {
         println!("[timer_smoke] periodic clock_gettime realtime failed");
         return false;
@@ -2335,12 +2347,18 @@ fn run_timerfd_smoke() -> bool {
     let mut buf = [0u8; 8];
     let first_read = sys_read(fd as usize, &mut buf);
     if first_read != 8 {
-        println!("[timer_smoke] periodic first read failed ret={}", first_read);
+        println!(
+            "[timer_smoke] periodic first read failed ret={}",
+            first_read
+        );
         let _ = sys_close(fd as usize);
         return false;
     }
     let first_expirations = u64::from_ne_bytes(buf);
-    let mut realtime_after_first = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    let mut realtime_after_first = TimeSpec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     let _ = sys_clock_gettime(CLOCK_REALTIME, &mut realtime_after_first as *mut TimeSpec);
     let jumped = add_ns(realtime_after_first, REALTIME_FORWARD_NSEC);
     let start_ms = sys_get_time();
@@ -2352,13 +2370,19 @@ fn run_timerfd_smoke() -> bool {
     buf = [0u8; 8];
     let second_read = sys_read(fd as usize, &mut buf);
     let end_ms = sys_get_time();
-    let mut realtime_after = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    let mut realtime_after = TimeSpec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     let _ = sys_clock_gettime(CLOCK_REALTIME, &mut realtime_after as *mut TimeSpec);
     let restore = sub_ns(realtime_after, REALTIME_FORWARD_NSEC);
     let _ = sys_clock_settime(CLOCK_REALTIME, &restore as *const TimeSpec);
     let _ = sys_close(fd as usize);
     if second_read != 8 {
-        println!("[timer_smoke] periodic second read failed ret={}", second_read);
+        println!(
+            "[timer_smoke] periodic second read failed ret={}",
+            second_read
+        );
         return false;
     }
     let second_expirations = u64::from_ne_bytes(buf);
@@ -2367,9 +2391,7 @@ fn run_timerfd_smoke() -> bool {
         "[timer_smoke] realtime absolute periodic first={} second={} elapsed_ms={}",
         first_expirations, second_expirations, elapsed_ms
     );
-    if first_expirations == 0
-        || second_expirations == 0
-        || elapsed_ms > REALTIME_ABS_PERIOD_MAX_MS
+    if first_expirations == 0 || second_expirations == 0 || elapsed_ms > REALTIME_ABS_PERIOD_MAX_MS
     {
         println!("[timer_smoke] realtime absolute periodic not rearmed");
         return false;
@@ -2377,7 +2399,10 @@ fn run_timerfd_smoke() -> bool {
     println!("[timer_smoke] realtime absolute periodic PASS");
 
     println!("[timer_smoke] posix realtime absolute settime rearm begin");
-    let mut realtime_before = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    let mut realtime_before = TimeSpec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     if sys_clock_gettime(CLOCK_REALTIME, &mut realtime_before as *mut TimeSpec) < 0 {
         println!("[timer_smoke] posix clock_gettime realtime failed");
         return false;
@@ -2398,7 +2423,10 @@ fn run_timerfd_smoke() -> bool {
         return false;
     }
     let spec = ITimerSpec {
-        it_interval: TimeSpec { tv_sec: 0, tv_nsec: 0 },
+        it_interval: TimeSpec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        },
         it_value: add_ns(realtime_before, POSIX_ABS_NSEC),
     };
     let ret = sys_timer_settime(
@@ -2420,11 +2448,20 @@ fn run_timerfd_smoke() -> bool {
     }
     sleep(POSIX_SETTLE_MS);
     let mut curr = ITimerSpec {
-        it_interval: TimeSpec { tv_sec: 0, tv_nsec: 0 },
-        it_value: TimeSpec { tv_sec: 0, tv_nsec: 0 },
+        it_interval: TimeSpec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        },
+        it_value: TimeSpec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        },
     };
     let get_ret = sys_timer_gettime(timer_id as usize, &mut curr as *mut ITimerSpec);
-    let mut realtime_after = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    let mut realtime_after = TimeSpec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     let _ = sys_clock_gettime(CLOCK_REALTIME, &mut realtime_after as *mut TimeSpec);
     let restore = sub_ns(realtime_after, REALTIME_FORWARD_NSEC);
     let _ = sys_clock_settime(CLOCK_REALTIME, &restore as *const TimeSpec);
@@ -2433,8 +2470,8 @@ fn run_timerfd_smoke() -> bool {
         println!("[timer_smoke] posix timer_gettime failed ret={}", get_ret);
         return false;
     }
-    let remaining_ms = curr.it_value.tv_sec.saturating_mul(1000)
-        + curr.it_value.tv_nsec / 1_000_000;
+    let remaining_ms =
+        curr.it_value.tv_sec.saturating_mul(1000) + curr.it_value.tv_nsec / 1_000_000;
     println!(
         "[timer_smoke] posix realtime absolute remaining_ms={}",
         remaining_ms
@@ -2446,7 +2483,10 @@ fn run_timerfd_smoke() -> bool {
     println!("[timer_smoke] posix realtime absolute PASS");
 
     println!("[timer_smoke] clock_nanosleep realtime absolute recheck begin");
-    let mut realtime_before = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    let mut realtime_before = TimeSpec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     if sys_clock_gettime(CLOCK_REALTIME, &mut realtime_before as *mut TimeSpec) < 0 {
         println!("[timer_smoke] nanosleep clock_gettime realtime failed");
         return false;
@@ -2481,7 +2521,10 @@ fn run_timerfd_smoke() -> bool {
     let set_ret = sys_clock_settime(CLOCK_REALTIME, &jumped as *const TimeSpec);
     let mut child_status = 1;
     let wait_ret = waitpid(pid as usize, &mut child_status);
-    let mut realtime_after = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    let mut realtime_after = TimeSpec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     let _ = sys_clock_gettime(CLOCK_REALTIME, &mut realtime_after as *mut TimeSpec);
     let restore = sub_ns(realtime_after, REALTIME_FORWARD_NSEC);
     let _ = sys_clock_settime(CLOCK_REALTIME, &restore as *const TimeSpec);

@@ -469,3 +469,20 @@
 - **修复**: 内核队列字段只保存 monotonic deadline；只对 realtime absolute timer 额外保存原始 wall-clock 目标。`clock_settime/settimeofday/adjtimex(ADJ_SETOFFSET)` 后扫描 active timer，重算 monotonic deadline 并通过 generation 让旧队列节点失效。周期 realtime absolute timer 到期推进时要同步推进保存的 wall-clock 绝对目标，不能在首次到期后丢弃。没有持久 timer 对象的 `clock_nanosleep(CLOCK_REALTIME, TIMER_ABSTIME)` 需要独立的 clock-change generation 与等待队列，收到 wall-clock 跳变通知后立即重判定。`read/poll/gettime/sweep` 等到期判定路径必须全部使用 monotonic now。
 - **教训**: 修复 clock-domain bug 时要检查所有到期判定入口，不只检查 arm/sweep 路径；本次 rv64 对照中 `timerfd_settime()` 已写入 monotonic deadline，但 `read_at()`/`poll()` 仍用 realtime now，导致 `clock_settime(+2s)` 后 80ms 相对 timer 2ms 到期。绝对 sleep 这类“一次性等待”也不能只在入睡时把 realtime 目标换算为相对时长，否则 clock 前跳不会唤醒。周期 timer 修复还要检查“第一次到期后”的状态推进，否则后续 clock 跳变又会退化成相对 monotonic timer。
 - **相关文件**: `os/src/fs/timerfd.rs`, `os/src/syscall/process/time.rs`, `os/src/task/sleep.rs`, `os/src/task/task.rs`, `os/src/task/manager.rs`, `user/src/bin/initproc.rs`
+
+## I/O fallback timer `fallback_ms: None` 导致 stale timer 无法 re-arm，任务永久阻塞
+
+- **根因**: `wait_event_impl` 的 I/O fallback 路径（1ms 安全网）调用 `wait_with_timeout()` arm timer，但该函数始终创建 `TimerAction::WakeTask { fallback_ms: None }`。`run_timer()` 中 stale fallback re-arm 逻辑只在 `fallback_ms: Some(ms)` 时生效。当 fallback timer 到期后任务重新阻塞，旧 timer 因 generation 不匹配被静默丢弃 → 任务永久阻塞，ready_queue 为空，scheduler trace 0 条目但系统不 crash。
+- **症状**: 多进程通过 pipe 相互唤醒的 benchmark（如 lmbench context switch 测试）运行到某个点后整个系统挂死，不 panic、不 trace abort、不响应，但 trace 触发仍可工作，调度 trace 条目为 0。
+- **修复**: I/O fallback timer 必须直接调用 `add_kernel_timer(TimerAction::WakeTask { fallback_ms: Some(ms) })`，不要复用 `wait_with_timeout()`（后者生成 `fallback_ms: None`，专用于有 deadline 的单次超时）。
+- **机器差异原因**: 快/慢主机（或 KVM vs TCG）的 pipe I/O 时序差异决定任务是否在 1ms fallback 到期前收到数据，从而命中或绕过重新阻塞的竞态窗口 → 同一 Docker 镜像在不同机器表现不同。
+- **排障线索**: (1) 系统不 crash 但无 task 切换 → 检查 ready_queue 是否为空；(2) trace 0 条目 → 非活锁，纯空闲阻塞；(3) 机器相关 → 很可能时序/竞态 bug；(4) 检查是否所有任务都在 interruptible 等待状态。
+- **相关文件**: `os/src/task/manager.rs`
+
+## bind mount 根 ".." 解析跨越挂载边界逃逸到源文件系统
+
+- **根因**: `MountFSInode::find("..")` 通过 `do_find()` 直接调用 `inner_inode.find("..")`，在 bind mount 根上穿透 mount 边界回到源 FS 的父目录。该 inode 编号与 VFS 全局根（通过 `current_root_inode()` 获取）不同，导致依赖 inode 一致性判断根位置的调用者（如 musl getcwd manual walk）误判未到根。
+- **症状**: musl `getcwd()` 报 "cannot access parent directories: Invalid argument"（`EINVAL`）；`fstatat("/")` 与 `fstatat("..")` 从根子目录返回不同 inode。
+- **修复**: 在 `do_find()` 开头 special-case `name == ".."`，调用 `lookup_dotdot()`：挂载点根时先拿到 `self_mountpoint`（在父 FS 中的 backref），再对该 backref 的 `inner_inode.find("..")` 求值 → 结果在父 FS 的 MountFS 上下文中。全局根返回自身。普通目录走原路径。
+- **教训**: VFS mount-boundary 穿越需要区分两个方向 — (1) 正向：`overlaid_inode()` 覆盖子挂载；(2) 反向 ".."：需通过 `self_mountpoint` backref 回到挂载点所在父 FS。不能用同一个 `inner_inode.find("..")` 处理这两种语义；`do_parent()`（服务于 `absolute_path()`）有不同需求，不应混用。
+- **相关文件**: `os/src/fs/vfs/mount.rs` (`do_find`, `lookup_dotdot`, `do_parent`)

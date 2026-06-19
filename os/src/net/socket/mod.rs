@@ -485,6 +485,60 @@ pub trait Socket: Send + Sync {
     /// 不会调用 poll、不会睡眠、不会调度。成功时返回发送的字节数 (isize)。
     fn try_send(&self, buf: &[u8], _flags: MsgFlags) -> Result<isize, SyscallErr>;
 
+    /// 零拷贝接收: 直接从用户态 UserBuffer 接收，non-blocking 路径使用。
+    fn try_recv_user(
+        &self,
+        buf: &mut crate::mm::UserBuffer,
+        flags: MsgFlags,
+    ) -> Result<isize, SyscallErr> {
+        let available = buf.len().min(4096);
+        if available == 0 {
+            return Ok(0);
+        }
+        let mut scratch = [0u8; 4096];
+        let n = self.try_recv(&mut scratch[..available])?;
+        if n > 0 {
+            buf.write_at(0, &scratch[..n as usize]);
+        }
+        let _ = flags;
+        Ok(n)
+    }
+
+    /// 零拷贝发送: 直接从用户态 UserBuffer 发送，non-blocking 路径使用。
+    fn try_send_user(
+        &self,
+        buf: &crate::mm::UserBuffer,
+        flags: MsgFlags,
+    ) -> Result<isize, SyscallErr> {
+        let total = buf.len().min(65536);
+        if total == 0 {
+            return self.try_send(&[], flags);
+        }
+        let mut scratch = alloc::vec![0u8; total];
+        let n = buf.read(&mut scratch);
+        self.try_send(&scratch[..n], flags)
+    }
+
+    /// 零拷贝 sendmsg: 默认委托给 try_send_user。
+    fn try_sendmsg_user(
+        &self,
+        buf: &crate::mm::UserBuffer,
+        dest: Option<Endpoint>,
+        flags: MsgFlags,
+    ) -> Result<isize, SyscallErr> {
+        if let Some(d) = dest {
+            let total = buf.len().min(65536);
+            if total == 0 {
+                return self.try_sendmsg(&[], Some(d), flags);
+            }
+            let mut scratch = alloc::vec![0u8; total];
+            let n = buf.read(&mut scratch);
+            self.try_sendmsg(&scratch[..n], Some(d), flags)
+        } else {
+            self.try_send_user(buf, flags)
+        }
+    }
+
     fn push_netlink_message(&self, _data: Vec<u8>) -> Result<(), SyscallErr> {
         Err(SyscallErr::EOPNOTSUPP)
     }
