@@ -4,6 +4,21 @@
 
 ## 2026-06-19
 
+### feat(debug): 创建 MangoCore drift 分析脚本 scripts/analyze_drift.py
+
+**涉及文件：**
+- `scripts/analyze_drift.py` — 新增漂移调试分析脚本：解析 QEMU serial 输出中的 drift_window 快照标记，计算每窗口计数器增量，检测性能漂移异常（getppid 成本、调度器退化、timer 膨胀、TLB 异常、内存泄漏等），输出 CSV + Markdown 报告。
+
+**验证：**
+- Python 3 语法检查 ✅
+- 单元测试（模拟 W0/W1 musl 数据）：解析、增量计算、派生指标、异常检测、CSV 输出全部通过 ✅
+
+**备注：**
+- 纯 Python 3 脚本，零外部依赖
+- 支持 musl/glibc 交错输出
+- 缺失字段容错（fallback to 0）
+- 异常检测实现 Oracle 决策树规则
+
 ### docs(perf_diag): 编写统一内核观测系统使用文档 + 空目录 .gitkeep
 
 **涉及文件：**
