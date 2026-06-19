@@ -1693,6 +1693,23 @@ fn run_ltp_suite_runner(
     );
 }
 
+fn snapshot_diag(diag: bool, n: usize, group: &str, libc: &str, environ: &[*const u8]) {
+    if !diag {
+        return;
+    }
+    println!(
+        "[initproc] [diag] === stats T{} {}:{} ===",
+        n, group, libc
+    );
+    let _ = run_bash_cmd("cat /sys/kernel/stats/taskq\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/timer\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/syscall\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/resource\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/buddyinfo\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/zombies\0", environ);
+    println!("[initproc] [diag] === stats T{} {}:{} end ===", n, group, libc);
+}
+
 fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
     println!(
         "[initproc] run_selected_groups start mask=0x{:03X} order={:?}",
@@ -1702,7 +1719,7 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
             .map(|i| TEST_GROUPS[*i].0)
             .collect::<Vec<_>>()
     );
-    for &idx in &cfg.order {
+    for (n, &idx) in cfg.order.iter().enumerate() {
         let (group_name, script) = TEST_GROUPS[idx];
         // mask 作为过滤器
         if (cfg.mask & (1u16 << idx as u16)) == 0 {
@@ -1714,6 +1731,15 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
             "[initproc] select group={} timeout={}s",
             group_name, timeout_secs
         );
+        // Diag: enable stats and reset counters before each group
+        if cfg.diag {
+            let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/stats_on\0", environ);
+            let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/reset\0", environ);
+            println!(
+                "[initproc] [diag] stats enabled + reset for group '{}'",
+                group_name
+            );
+        }
         if group_name == "ltp" && cfg.ltp_runner == LtpRunner::Suite {
             let libc = cfg.ltp_libc;
             if libc == LtpLibc::Glibc || libc == LtpLibc::Both {
@@ -1753,6 +1779,7 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
                     cfg.ltp_from.as_deref(),
                     timeout_secs,
                 );
+                snapshot_diag(cfg.diag, n, group_name, "musl", environ);
             }
             if libc == LtpLibc::Glibc || libc == LtpLibc::Both {
                 let exclude_glibc: Vec<String> = cfg
@@ -1770,6 +1797,7 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
                     cfg.ltp_from.as_deref(),
                     timeout_secs,
                 );
+                snapshot_diag(cfg.diag, n, group_name, "glibc", environ);
             }
         } else if group_name == "ltp" {
             // 提交默认路径：运行镜像内官方 ltp_testcode.sh，保持评测器期望的串口协议。
@@ -1777,9 +1805,11 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
             let libc = cfg.ltp_libc;
             if libc == LtpLibc::Musl || libc == LtpLibc::Both {
                 run_group_in_dir(environ, "/musl\0", group_name, script, timeout_secs, 1);
+                snapshot_diag(cfg.diag, n, group_name, "musl", environ);
             }
             if libc == LtpLibc::Glibc || libc == LtpLibc::Both {
                 run_group_in_dir(environ, "/glibc\0", group_name, script, timeout_secs, 1);
+                snapshot_diag(cfg.diag, n, group_name, "glibc", environ);
             }
         } else {
             run_group_in_dir(
@@ -1790,6 +1820,7 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
                 timeout_secs,
                 MAX_GROUP_RETRIES,
             );
+            snapshot_diag(cfg.diag, n, group_name, "musl", environ);
             run_group_in_dir(
                 environ,
                 "/glibc\0",
@@ -1798,13 +1829,7 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
                 timeout_secs,
                 MAX_GROUP_RETRIES,
             );
-        }
-        // 诊断模式：每组完成后打印标记，配合内核 STATS_ENABLED 输出定位资源变化
-        if cfg.diag {
-            println!(
-                "[initproc] [diag] === group '{}' finished, kernel stats above (if STATS_ENABLED) ===",
-                group_name
-            );
+            snapshot_diag(cfg.diag, n, group_name, "glibc", environ);
         }
         // 每组之间休息一会，清理孤儿进程、让网络连接完全关闭
         println!("[initproc] sleep 1s before next group");

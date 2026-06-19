@@ -749,9 +749,6 @@ impl TaskControlBlock {
             );
         }
 
-        if cfg!(feature = "heap_trace") {
-            crate::utils::stats::print_resource_stats(Some(self));
-        }
         true
     }
 
