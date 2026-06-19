@@ -4,6 +4,20 @@
 
 ## 2026-06-19
 
+### fix(heap): add boundary/null/alignment/underflow safety guards to bitmap buddy allocator
+
+**涉及文件：**
+- `os/vendor/buddy_system_allocator/src/lib.rs` — Heap struct 新增 `heap_start: usize` 和 `heap_end: usize` 字段记录托管堆数据区域边界（bitmap carve 之后）；`new()` 初始化为 0；`init()` 新增三个安全修复：(1) 对齐 — 在 carve bitmap 前将 `start` 向上对齐到 `size_of::<usize>()` 避免未对齐 usize 写入 UB；(2) 下溢 — `bitmap_offset >= size` 时提前返回（无 bitmap 模式），防止 `size - bitmap_offset` unsigned wrapping；(3) 边界 — 设置 `self.heap_start/heap_end` 为 carve 后的堆数据区域；`bitmap_set/clear/test` 三个方法新增三层防护：(1) null 指针检查 — `free_bits[c].is_null()` 时静默跳过，兼容不通过 `init()` 的直接 `add_to_heap()` 调用路径；(2) 地址范围检查 — `addr < heap_start || addr >= heap_end` 时跳过；(3) 块索引上限检查 — `idx >= (heap_end - heap_start) >> c` 时跳过；`bitmap_test` 越界返回 `false`；bitmap 索引基址从 `self.start`（完整区域起始）迁移到 `self.heap_start`（托管堆数据起始），使索引空间与托管区域精确对应
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：**
+- 修复了 4 个正确性/安全性问题：bitmap 越界访问、未对齐 usize 写入 UB、小堆 size 下溢、bitmap 未初始化时的空指针解引用
+- bitmap 索引基址变更为 `heap_start` 而非 `start`：bitmap 在 `init()` 中仍按 `size >> c` 块分配（足够覆盖更小的 `heap_size`），索引偏移后仅访问托管堆数据区域对应的位，bitmap 区自身的位永不触及
+- `add_to_heap()` 直接路径（不经 `init()`）：`heap_start/heap_end` 保持 0，null 检查首先触发，bitmap 操作静默跳过——allocator 退化到无 bitmap 模式，功能不受影响
+
 ### perf(heap): add per-class free-membership bitmap to eliminate O(n) free-list scan in dealloc()
 
 **涉及文件：**

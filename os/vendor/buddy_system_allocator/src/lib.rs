@@ -61,12 +61,17 @@ pub struct Heap<const ORDER: usize> {
     allocated: usize,
     total: usize,
 
-    // heap base address (for bitmap indexing)
+    // base address of the full allocated region (start of bitmaps)
     start: usize,
+
+    // heap data region boundaries (after bitmap carving)
+    // These define the managed region: [heap_start, heap_end)
+    heap_start: usize,
+    heap_end: usize,
 
     // per-class free-membership bitmap pointers
     // Bit i for block at addr in class c is set when the block is in free_list[c].
-    // Block index = (addr - start) >> c.
+    // Block index = (addr - heap_start) >> c.
     free_bits: [*mut usize; ORDER],
 }
 
@@ -84,6 +89,8 @@ impl<const ORDER: usize> Heap<ORDER> {
             allocated: 0,
             total: 0,
             start: 0,
+            heap_start: 0,
+            heap_end: 0,
             free_bits: [core::ptr::null_mut::<usize>(); ORDER],
         }
     }
@@ -98,7 +105,17 @@ impl<const ORDER: usize> Heap<ORDER> {
 
     /// Set bitmap bit for block at `addr` in class `c`
     fn bitmap_set(&mut self, c: usize, addr: usize) {
-        let idx = (addr - self.start) >> c;
+        if self.free_bits[c].is_null() {
+            return;
+        }
+        if addr < self.heap_start || addr >= self.heap_end {
+            return;
+        }
+        let idx = (addr - self.heap_start) >> c;
+        let block_count = (self.heap_end - self.heap_start) >> c;
+        if idx >= block_count {
+            return;
+        }
         let word = idx / Self::BITS_PER_WORD;
         let bit = idx % Self::BITS_PER_WORD;
         unsafe { *self.free_bits[c].add(word) |= 1usize << bit; }
@@ -106,7 +123,17 @@ impl<const ORDER: usize> Heap<ORDER> {
 
     /// Clear bitmap bit for block at `addr` in class `c`
     fn bitmap_clear(&mut self, c: usize, addr: usize) {
-        let idx = (addr - self.start) >> c;
+        if self.free_bits[c].is_null() {
+            return;
+        }
+        if addr < self.heap_start || addr >= self.heap_end {
+            return;
+        }
+        let idx = (addr - self.heap_start) >> c;
+        let block_count = (self.heap_end - self.heap_start) >> c;
+        if idx >= block_count {
+            return;
+        }
         let word = idx / Self::BITS_PER_WORD;
         let bit = idx % Self::BITS_PER_WORD;
         unsafe { *self.free_bits[c].add(word) &= !(1usize << bit); }
@@ -114,7 +141,17 @@ impl<const ORDER: usize> Heap<ORDER> {
 
     /// Check if block at `addr` is in the free list for class `c`
     fn bitmap_test(&self, c: usize, addr: usize) -> bool {
-        let idx = (addr - self.start) >> c;
+        if self.free_bits[c].is_null() {
+            return false;
+        }
+        if addr < self.heap_start || addr >= self.heap_end {
+            return false;
+        }
+        let idx = (addr - self.heap_start) >> c;
+        let block_count = (self.heap_end - self.heap_start) >> c;
+        if idx >= block_count {
+            return false;
+        }
         let word = idx / Self::BITS_PER_WORD;
         let bit = idx % Self::BITS_PER_WORD;
         unsafe { (*self.free_bits[c].add(word)) & (1usize << bit) != 0 }
@@ -145,7 +182,9 @@ impl<const ORDER: usize> Heap<ORDER> {
     }
 
     /// Initialize the heap with a memory region, carving bitmap storage from its beginning.
-    pub unsafe fn init(&mut self, start: usize, size: usize) {
+    pub unsafe fn init(&mut self, mut start: usize, size: usize) {
+        // Align start to usize boundary to avoid UB on unaligned bitmap word access
+        start = (start + size_of::<usize>() - 1) & !(size_of::<usize>() - 1);
         self.start = start;
 
         // Compute and zero bitmap memory, one per class
@@ -163,8 +202,19 @@ impl<const ORDER: usize> Heap<ORDER> {
             bitmap_offset += word_count * core::mem::size_of::<usize>();
         }
 
+        // Underflow guard: if bitmap overhead >= size, fall back to no-bitmap mode
+        if bitmap_offset >= size {
+            self.heap_start = start;
+            self.heap_end = start + size;
+            return;
+        }
+
         let heap_start = start + bitmap_offset;
         let heap_size = size - bitmap_offset;
+
+        self.heap_start = heap_start;
+        self.heap_end = heap_start + heap_size;
+
         self.add_to_heap(heap_start, heap_start + heap_size);
     }
 
