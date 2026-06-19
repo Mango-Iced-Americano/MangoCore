@@ -352,6 +352,8 @@ struct RuntimeConfig {
     drift_windows: u64,
     /// drift_window 模式：musl | glibc | both
     drift_libc: String,
+    /// drift_window 模式：每窗口 lmbench 前运行的测试组（"none" | "basic"）
+    drift_pre_workload: String,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -430,6 +432,7 @@ impl RuntimeConfig {
             timer_smoke: false,
             drift_windows: 6,
             drift_libc: String::from("both"),
+            drift_pre_workload: String::from("none"),
         }
     }
 }
@@ -626,6 +629,11 @@ fn apply_conf_bytes(data: &[u8], cfg: &mut RuntimeConfig) {
             let s = core::str::from_utf8(val).ok();
             if let Some(s) = s {
                 cfg.drift_libc = String::from(s.trim());
+            }
+        } else if key == b"drift_pre_workload" {
+            let s = core::str::from_utf8(val).ok();
+            if let Some(s) = s {
+                cfg.drift_pre_workload = String::from(s.trim());
             }
         } else if key == b"ltp_from" {
             let s = core::str::from_utf8(val).ok();
@@ -1727,6 +1735,7 @@ fn drift_snapshot(window: u64, libc: &str, stage: &str, environ: &[*const u8]) {
     let _ = run_bash_cmd("cat /sys/kernel/stats/tlb\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/heap\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/resource\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/seccomp\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/buddyinfo\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/zombies\0", environ);
     println!(
@@ -1753,6 +1762,45 @@ fn run_drift_windows(environ: &[*const u8], cfg: &RuntimeConfig) {
         );
         for w in 0..total_windows {
             let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/reset\0", environ);
+
+            // Run pre-workload to accumulate system state before this window
+            if cfg.drift_pre_workload == "basic" {
+                let libc_dir = alloc::format!("/{}\0", libc);
+                run_group_in_dir(environ, &libc_dir, "basic", "basic_testcode.sh", 60, 1);
+                // Reset counters again so the snapshot below only captures
+                // lmbench activity; system state (zombies, heap, page cache)
+                // continues to accumulate across windows.
+                let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/reset\0", environ);
+            } else if cfg.drift_pre_workload == "lat_proc" {
+                // Run lmbench process-creation benchmarks to accumulate
+                // process state (zombies, scheduler pressure, timer queue).
+                let _ = run_bash_cmd(
+                    &alloc::format!("cd /{} && ./lat_proc -P 1 fork\0", libc),
+                    environ,
+                );
+                let _ = run_bash_cmd(
+                    &alloc::format!("cd /{} && ./lat_proc -P 1 exec\0", libc),
+                    environ,
+                );
+                let _ = run_bash_cmd(
+                    &alloc::format!("cd /{} && ./lat_proc -P 1 shell\0", libc),
+                    environ,
+                );
+                let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/reset\0", environ);
+            } else if cfg.drift_pre_workload == "ltp" {
+                // Run LTP test group to create heavy accumulated state
+                let libc_dir = alloc::format!("/{}\0", libc);
+                run_group_in_dir(environ, &libc_dir, "ltp", "ltp_testcode.sh", 2700, 1);
+                let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/reset\0", environ);
+            } else if cfg.drift_pre_workload == "lmbench" {
+                // Run full lmbench suite to accumulate file-I/O + process state
+                let _ = run_bash_cmd(
+                    &alloc::format!("cd /{} && ./lmbench_all\0", libc),
+                    environ,
+                );
+                let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/reset\0", environ);
+            }
+
             drift_snapshot(w, libc, "pre", environ);
             let cmd = alloc::format!("cd /{} && ./lmbench_all lat_syscall -P 1 null\0", libc);
             let _ = run_bash_cmd(&cmd, environ);
@@ -1780,6 +1828,7 @@ fn snapshot_diag(diag: bool, n: usize, group: &str, libc: &str, environ: &[*cons
     let _ = run_bash_cmd("cat /sys/kernel/stats/tlb\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/heap\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/resource\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/seccomp\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/buddyinfo\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/zombies\0", environ);
     println!("[initproc] [diag] === stats T{} {}:{} end ===", n, group, libc);

@@ -4,6 +4,25 @@
 
 ## 2026-06-19
 
+### feat(perf_diag): add seccomp + timer IRQ/pop cost performance counters for lmbench drift debugging
+
+**涉及文件：**
+- `os/src/task/perf.rs` — 新增 9 个 AtomicUsize 计数器（SECCOMP_CHECK_CALLS, SECCOMP_CHECK_TICKS_TOTAL/MAX, SECCOMP_DISABLED_BYPASS, TIMER_IRQ_TICKS_TOTAL/MAX, TIMER_POP_NODES_TOTAL, TIMER_POP_TICKS_TOTAL/MAX）；新增 record_seccomp_check_call/check/disabled_bypass + record_timer_irq_cost/pop_cost 5 个 record 函数；更新 reset_all_counters；添加非 perf_stats 零值桩和函数桩
+- `os/src/fs/sysfs/files/diag.rs` — 新增 /sys/kernel/stats/seccomp 文件（stats_seccomp_content）；扩展 /sys/kernel/stats/timer 追加 timer_irq_ticks_total/max, timer_pop_nodes_total, timer_pop_ticks_total/max 字段
+- `os/src/syscall/mod.rs` — seccomp 检查点：any_seccomp_enabled 分支内加 perf_time_now + record_seccomp_check_call + 各 match 臂 record_seccomp_check
+- `os/src/syscall/process/ids.rs` — seccomp_action_for_syscall 中 SECCOMP_MODE_DISABLED 分支加 record_seccomp_disabled_bypass
+- `os/src/task/manager.rs` — timer_interrupt_handler 入口加 _irq_start 计时 + yield 前 record_timer_irq_cost；pop_expired 加 _pop_start 计时 + nodes 计数 + 末尾 record_timer_pop_cost
+
+**验证：**
+- rv64 kernel-only 编译 ✅
+- la64 kernel-only 编译 ✅
+
+**备注：**
+- 计数器均使用 AtomicUsize::new(0) + Ordering::Relaxed，与现有模式完全一致
+- record 函数均在 #[cfg(feature = "perf_stats")] gated 的 mod enabled 内；非 gated 版本为空桩
+- 所有静态计数器在 not(feature = "perf_stats") 下具有零值桩，保证 sysfs 可读
+- timer_irq_cost 记录在 reprogram_timer_irqoff 之后、yield 之前，避免将上下文切换时间计入
+
 ### feat(perf_diag): add P1 syscall/trap/ctxsw/reclaim cost counters
 
 **涉及文件：**

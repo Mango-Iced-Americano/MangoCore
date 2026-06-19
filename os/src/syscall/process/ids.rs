@@ -1363,7 +1363,10 @@ pub fn seccomp_action_for_syscall(syscall_id: usize) -> SeccompSyscallAction {
     };
     let inner = task.acquire_inner_lock();
     match inner.seccomp_mode {
-        SECCOMP_MODE_DISABLED => SeccompSyscallAction::Allow,
+        SECCOMP_MODE_DISABLED => {
+            crate::task::perf::record_seccomp_disabled_bypass();
+            SeccompSyscallAction::Allow
+        }
         SECCOMP_MODE_STRICT => match syscall_id {
             SYSCALL_READ | SYSCALL_WRITE | SYSCALL_EXIT | SYSCALL_SIGRETURN => {
                 SeccompSyscallAction::Allow

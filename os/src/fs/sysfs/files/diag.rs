@@ -69,7 +69,7 @@ fn stats_timer_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    let mut s = String::with_capacity(384);
+    let mut s = String::with_capacity(512);
     let _ = writeln!(s, "ktimer_len_max={}", read_counter(&crate::task::perf::KTIMER_LEN_MAX));
     let _ = writeln!(s, "ktimer_add_total={}", read_counter(&crate::task::perf::KTIMER_ADD_TOTAL));
     let _ = writeln!(s, "ktimer_pop_max={}", read_counter(&crate::task::perf::KTIMER_POP_MAX));
@@ -79,6 +79,29 @@ fn stats_timer_content(
     let _ = writeln!(s, "ktimer_compact_calls={}", read_counter(&crate::task::perf::KTIMER_COMPACT_CALLS));
     let _ = writeln!(s, "ktimer_stale_removed={}", read_counter(&crate::task::perf::KTIMER_STALE_REMOVED));
     let _ = writeln!(s, "wait_with_timeout_total={}", read_counter(&crate::task::perf::WAIT_WITH_TIMEOUT_TOTAL));
+    let _ = writeln!(s, "timer_irq_ticks_total={}", read_counter(&crate::task::perf::TIMER_IRQ_TICKS_TOTAL));
+    let _ = writeln!(s, "timer_irq_ticks_max={}", read_counter(&crate::task::perf::TIMER_IRQ_TICKS_MAX));
+    let _ = writeln!(s, "timer_pop_nodes_total={}", read_counter(&crate::task::perf::TIMER_POP_NODES_TOTAL));
+    let _ = writeln!(s, "timer_pop_ticks_total={}", read_counter(&crate::task::perf::TIMER_POP_TICKS_TOTAL));
+    let _ = writeln!(s, "timer_pop_ticks_max={}", read_counter(&crate::task::perf::TIMER_POP_TICKS_MAX));
+    write_str(offset, len, buf, &s)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  STATS: Seccomp
+// ═══════════════════════════════════════════════════════════════════════
+
+fn stats_seccomp_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let mut s = String::with_capacity(256);
+    let _ = writeln!(s, "seccomp_check_calls={}", read_counter(&crate::task::perf::SECCOMP_CHECK_CALLS));
+    let _ = writeln!(s, "seccomp_check_ticks_total={}", read_counter(&crate::task::perf::SECCOMP_CHECK_TICKS_TOTAL));
+    let _ = writeln!(s, "seccomp_check_ticks_max={}", read_counter(&crate::task::perf::SECCOMP_CHECK_TICKS_MAX));
+    let _ = writeln!(s, "seccomp_disabled_bypass={}", read_counter(&crate::task::perf::SECCOMP_DISABLED_BYPASS));
     write_str(offset, len, buf, &s)
 }
 
@@ -391,6 +414,7 @@ pub fn register_all(kernel_dir: &Arc<SysInode>) -> Result<(), SyscallErr> {
     )?;
     stats_dir.add_file("taskq", ro_mode, stats_taskq_content)?;
     stats_dir.add_file("timer", ro_mode, stats_timer_content)?;
+    stats_dir.add_file("seccomp", ro_mode, stats_seccomp_content)?;
     stats_dir.add_file("syscall", ro_mode, stats_syscall_content)?;
     stats_dir.add_file("ctxsw", ro_mode, stats_ctxsw_content)?;
     stats_dir.add_file("reclaim", ro_mode, stats_reclaim_content)?;

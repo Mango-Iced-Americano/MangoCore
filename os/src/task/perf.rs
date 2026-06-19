@@ -113,6 +113,19 @@ mod enabled {
     pub static KTIMER_STALE_REMOVED: AtomicUsize = AtomicUsize::new(0);
     pub static WAIT_WITH_TIMEOUT_TOTAL: AtomicUsize = AtomicUsize::new(0);
 
+    // ── P0: Timer IRQ / Pop Cost ──
+    pub static TIMER_IRQ_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static TIMER_IRQ_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static TIMER_POP_NODES_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static TIMER_POP_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static TIMER_POP_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+
+    // ── P0: Seccomp ──
+    pub static SECCOMP_CHECK_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static SECCOMP_CHECK_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static SECCOMP_CHECK_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static SECCOMP_DISABLED_BYPASS: AtomicUsize = AtomicUsize::new(0);
+
     // ── P0: Syscall / Trap ──
     pub static SYSCALL_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static SYSCALL_GETPPID_TOTAL: AtomicUsize = AtomicUsize::new(0);
@@ -216,6 +229,46 @@ mod enabled {
     pub fn record_wait_with_timeout() { if !stats_enabled() { return; } WAIT_WITH_TIMEOUT_TOTAL.fetch_add(1, Ordering::Relaxed); }
 
     #[inline(always)]
+    pub fn record_timer_irq_cost(start: usize) {
+        if !stats_enabled() { return; }
+        let elapsed = perf_time_now().wrapping_sub(start);
+        TIMER_IRQ_TICKS_TOTAL.fetch_add(elapsed, Ordering::Relaxed);
+        update_max(&TIMER_IRQ_TICKS_MAX, elapsed);
+    }
+
+    #[inline(always)]
+    pub fn record_timer_pop_cost(start: usize, nodes_popped: usize) {
+        if !stats_enabled() { return; }
+        let elapsed = perf_time_now().wrapping_sub(start);
+        TIMER_POP_NODES_TOTAL.fetch_add(nodes_popped, Ordering::Relaxed);
+        TIMER_POP_TICKS_TOTAL.fetch_add(elapsed, Ordering::Relaxed);
+        update_max(&TIMER_POP_TICKS_MAX, elapsed);
+    }
+
+    #[inline(always)]
+    pub fn record_seccomp_check_call() {
+        if !stats_enabled() { return; }
+        SECCOMP_CHECK_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_seccomp_check(start: usize, bypass: bool) {
+        if !stats_enabled() { return; }
+        let elapsed = perf_time_now().wrapping_sub(start);
+        SECCOMP_CHECK_TICKS_TOTAL.fetch_add(elapsed, Ordering::Relaxed);
+        update_max(&SECCOMP_CHECK_TICKS_MAX, elapsed);
+        if bypass {
+            SECCOMP_DISABLED_BYPASS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_seccomp_disabled_bypass() {
+        if !stats_enabled() { return; }
+        SECCOMP_DISABLED_BYPASS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
     pub fn record_syscall_enter(syscall_id: usize) {
         if !stats_enabled() { return; }
         SYSCALL_TOTAL.fetch_add(1, Ordering::Relaxed);
@@ -298,6 +351,17 @@ mod enabled {
         KTIMER_COMPACT_CALLS.store(0, Ordering::Relaxed);
         KTIMER_STALE_REMOVED.store(0, Ordering::Relaxed);
         WAIT_WITH_TIMEOUT_TOTAL.store(0, Ordering::Relaxed);
+        // Timer IRQ / Pop Cost
+        TIMER_IRQ_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        TIMER_IRQ_TICKS_MAX.store(0, Ordering::Relaxed);
+        TIMER_POP_NODES_TOTAL.store(0, Ordering::Relaxed);
+        TIMER_POP_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        TIMER_POP_TICKS_MAX.store(0, Ordering::Relaxed);
+        // Seccomp
+        SECCOMP_CHECK_CALLS.store(0, Ordering::Relaxed);
+        SECCOMP_CHECK_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        SECCOMP_CHECK_TICKS_MAX.store(0, Ordering::Relaxed);
+        SECCOMP_DISABLED_BYPASS.store(0, Ordering::Relaxed);
         // Syscall / Trap (P0)
         SYSCALL_TOTAL.store(0, Ordering::Relaxed);
         SYSCALL_GETPPID_TOTAL.store(0, Ordering::Relaxed);
@@ -871,6 +935,26 @@ pub fn record_wait_with_timeout() {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
+pub fn record_timer_irq_cost(_start: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_timer_pop_cost(_start: usize, _nodes_popped: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_seccomp_check_call() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_seccomp_check(_start: usize, _bypass: bool) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_seccomp_disabled_bypass() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
 pub fn record_syscall_enter(_syscall_id: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
@@ -984,6 +1068,28 @@ pub static RECLAIM_RUNS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::ato
 pub static RECLAIM_PAGES_SCANNED_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static RECLAIM_PAGES_FREED_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── Timer IRQ / Pop Cost stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub static TIMER_IRQ_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TIMER_IRQ_TICKS_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TIMER_POP_NODES_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TIMER_POP_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TIMER_POP_TICKS_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── Seccomp stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub static SECCOMP_CHECK_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static SECCOMP_CHECK_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static SECCOMP_CHECK_TICKS_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static SECCOMP_DISABLED_BYPASS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 // ── TLB counter stubs (zero-valued when perf_stats disabled) ──
 #[cfg(not(feature = "perf_stats"))]
