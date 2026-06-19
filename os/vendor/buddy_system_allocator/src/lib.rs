@@ -196,10 +196,12 @@ impl<const ORDER: usize> Heap<ORDER> {
             bitmap_offset += word_count * core::mem::size_of::<usize>();
         }
 
-        // Underflow guard: if bitmap overhead >= size, fall back to no-bitmap mode
+        // Underflow guard: if bitmap overhead >= size, fall back to no-bitmap mode.
+        // Still register the full memory region via add_to_heap (without bitmaps).
         if bitmap_offset >= size {
             self.heap_start = start;
             self.heap_end = start + size;
+            self.add_to_heap(start, start + size);
             return;
         }
 
