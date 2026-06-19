@@ -91,8 +91,11 @@ rv64-only:
 	make -C os rv64-only BLK_MODE=${BLK_MODE}
 
 docker:
-	docker compose up -d && \
-	docker compose exec -it os-dev bash
+	@if docker compose ps --status running 2>/dev/null | grep -q os-dev; then \
+		docker compose exec -it os-dev bash; \
+	else \
+		docker compose up -d && docker compose exec -it os-dev bash; \
+	fi
 
 docker-test-parallel:
 	bash scripts/run_test_docker_parallel.sh
