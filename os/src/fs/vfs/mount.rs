@@ -111,6 +111,30 @@ pub mod counters {
     pub fn mountfs_alive() -> usize { MOUNTFS_ALIVE.load(core::sync::atomic::Ordering::Relaxed) }
     pub fn mountfsinode_alive() -> usize { MOUNTFSINODE_ALIVE.load(core::sync::atomic::Ordering::Relaxed) }
 
+    // VFS find diagnostic counters
+    pub static FIND_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static FIND_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static FIND_SELF_OVERLAY: AtomicUsize = AtomicUsize::new(0);
+    pub static FIND_DENTRY_HIT: AtomicUsize = AtomicUsize::new(0);
+    pub static FIND_DENTRY_MISS: AtomicUsize = AtomicUsize::new(0);
+    pub static FIND_LOCK_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static FIND_INNER_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static FIND_INSERT_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static FIND_OVERLAY_TICKS: AtomicUsize = AtomicUsize::new(0);
+
+    pub fn find_snapshot() -> (usize, usize, usize, usize, usize, usize, usize, usize, usize) {
+        let calls = FIND_CALLS.load(core::sync::atomic::Ordering::Relaxed);
+        let ticks = FIND_TICKS.load(core::sync::atomic::Ordering::Relaxed);
+        let overlay = FIND_SELF_OVERLAY.load(core::sync::atomic::Ordering::Relaxed);
+        let hit = FIND_DENTRY_HIT.load(core::sync::atomic::Ordering::Relaxed);
+        let miss = FIND_DENTRY_MISS.load(core::sync::atomic::Ordering::Relaxed);
+        let lock = FIND_LOCK_TICKS.load(core::sync::atomic::Ordering::Relaxed);
+        let inner = FIND_INNER_TICKS.load(core::sync::atomic::Ordering::Relaxed);
+        let insert = FIND_INSERT_TICKS.load(core::sync::atomic::Ordering::Relaxed);
+        let ov_ticks = FIND_OVERLAY_TICKS.load(core::sync::atomic::Ordering::Relaxed);
+        (calls, ticks, overlay, hit, miss, lock, inner, insert, ov_ticks)
+    }
+
     // MountFSInode creation source counters
     pub static MFSI_FROM_FIND: AtomicUsize = AtomicUsize::new(0);
     pub static MFSI_FROM_OVERLAY: AtomicUsize = AtomicUsize::new(0);
