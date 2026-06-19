@@ -4,6 +4,37 @@
 
 ## 2026-06-19
 
+### feat(perf_diag): add P1 syscall/trap/ctxsw/reclaim cost counters
+
+**涉及文件：**
+- `os/src/task/perf.rs` — 新增 9 个 P1 AtomicUsize 计数器（getppid_cost_ticks_total/max, syscall_cost_ticks_total, ecall_trap_cost_ticks_total/max, context_switch_total, reclaim_runs/pages_scanned/pages_freed total）；修改 record_syscall_cost_ticks/record_trap_cost_ticks 同时更新 total + max；TLB 计数器改为 pub；添加非 perf_stats 零值桩
+- `os/src/syscall/mod.rs` — sys_getppid 后记录 getppid 耗时
+- `os/src/task/processor.rs` — __switch 前后记录 context_switch_total
+- `os/src/fs/reclaim.rs` — maybe_reclaim_fs_caches 入口记录 reclaim_run
+- `os/src/fs/page_cache.rs` — evict_clean_pages 循环中记录 scanned + freed
+- `os/src/mm/heap_allocator.rs` — 新增 KERNEL_HEAP_CURRENT_BYTES/MAX_BYTES 无锁 gauge，alloc 路径 CAS 更新 peak，dealloc 路径 fetch_sub
+- `os/src/mm/mod.rs` — re-export heap gauge statics
+- `os/src/fs/sysfs/files/diag.rs` — 新增 /sys/kernel/stats/{ctxsw,reclaim,tlb,heap} 四个文件 + 扩展 syscall 文件字段 + reset 改为 reset_all_counters
+- `user/src/bin/initproc.rs` — snapshot_diag 新增 ctxsw/reclaim/tlb/heap 读取；新增 RunMode::DriftWindow + drift_windows/drift_libc 配置 + run_drift_windows 执行循环
+- `os_test.conf` — 添加 drift_window 示例配置（注释）
+- `scripts/analyze_drift.py` — 新增漂移自动分析脚本（655行），解析窗口快照→计算 delta→派生指标→异常检测→CSV+Markdown 报告
+- `docs/Work_Log.md` — 更新本条目
+
+**验证：**
+- rv64 kernel-only 编译 ✅
+- la64 kernel-only 编译 ✅
+- rv64 全量构建（kernel + user + 镜像） ✅
+- Oracle 方案设计审查 ✅
+- Bug 修复：reset_all_counters 重复桩、TLB 非 perf_stats 缺失被零值 static、heap_allocator 私有模块访问 → 加 re-export ✅
+
+**备注：**
+- perf_diag = ["perf_stats"] 分层设计：perf_stats 控制 AtomicUsize 计数器何时更新，perf_diag 控制 /sys/kernel/ 目录何时创建
+- drift_window 模式只跑 lat_syscall null（不跑整套 lmbench），每窗口 pre/post snapshot 用独立标记 `=== drift_window W{i} {libc} {pre|post} ===`
+- 分析脚本实现 Oracle 决策树：getppid cost 单调增长、fast_path_ratio < 0.99、tlb_flush > 0（null syscall 不应触发 TLB flush）等异常检测
+- Lab 服务器循环执行 prompt 见 `.sisyphus/drift-loop-prompt.md`
+
+---
+
 ### feat(debug): 创建 MangoCore drift 分析脚本 scripts/analyze_drift.py
 
 **涉及文件：**
