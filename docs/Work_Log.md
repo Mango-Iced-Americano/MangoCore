@@ -2,6 +2,21 @@
 
 ---
 
+## 2026-06-20
+
+### docs(debug): add comprehensive buddy-allocator-scan-drift debugging report
+
+**涉及文件：**
+- `docs/09_debug/buddy-allocator-scan-drift.md` — 新增调试报告，完整记录 heap allocator dealloc() 线性扫描退化问题的发现、排查、根因分析与修复验证全过程
+
+**备注：**
+- 报告涵盖 5 轮迭代式调试（drift_window 基础设施 → basic/lat_proc pre-workload → 全量 lmbench 测量 → heap 计数器精确定位 → bitmap guard 修复验证）
+- 记录了 O(1) bitmap guard 方案的设计原理、代码变更与边界保护
+- 包含修复前后 rv64/la64 双架构完整数据对比（scan_steps 减少 130 倍）
+- 提炼 6 条可复用经验（渐进退化排查策略、null syscall 隔离技术、bitmap guard 模式等）
+
+---
+
 ## 2026-06-19
 
 ### fix(heap): add boundary/null/alignment/underflow safety guards to bitmap buddy allocator
