@@ -763,6 +763,7 @@ impl File {
         }
 
         let file_type = metadata.file_type;
+        mode |= special_device_mode(&metadata);
 
         if matches!(file_type, FileType::Pipe | FileType::Socket) || inode.is_stream() {
             mode |= FileMode::FMODE_STREAM;

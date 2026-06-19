@@ -602,11 +602,13 @@ impl IndexNode for LockedTmpFSInode {
         attrs: crate::fs::vfs::CreateAttrs,
     ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
         // Delegate to create_with_data for the heavy lifting, then
-        // fix up uid/gid to avoid a second set_metadata round-trip.
+        // fix up uid/gid on the child (NOT self/parent).
         let inode = self.create_with_data(name, file_type, attrs.mode, 0)?;
-        let mut inner = self.0.lock();
-        inner.metadata.uid = attrs.uid;
-        inner.metadata.gid = attrs.gid;
+        if let Some(child) = inode.as_any_ref().downcast_ref::<LockedTmpFSInode>() {
+            let mut child_inner = child.0.lock();
+            child_inner.metadata.uid = attrs.uid;
+            child_inner.metadata.gid = attrs.gid;
+        }
         Ok(inode)
     }
 

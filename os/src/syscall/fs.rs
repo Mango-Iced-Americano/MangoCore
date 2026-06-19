@@ -1903,6 +1903,14 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
         Err(errno) => return errno,
     };
 
+    // Fast path for /dev/null, /dev/zero — skip UserBuffer construction
+    if file.inode.is_discard_write() {
+        return match file.write_discard(allowed) {
+            Ok(n) => n as isize,
+            Err(e) => -(e as isize),
+        };
+    }
+
     // UserBuffer fast path for inodes that support direct user I/O
     if file.inode.supports_user_buffer_io() {
         let chunk_cap = allowed.min(crate::hal::IO_CHUNK_SIZE);
