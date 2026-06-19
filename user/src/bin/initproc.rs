@@ -298,6 +298,7 @@ enum RunMode {
     Run,
     Shell,
     RunThenShell,
+    DriftWindow,
 }
 
 fn mode_name(mode: RunMode) -> &'static str {
@@ -305,6 +306,7 @@ fn mode_name(mode: RunMode) -> &'static str {
         RunMode::Run => "run",
         RunMode::Shell => "shell",
         RunMode::RunThenShell => "run_then_shell",
+        RunMode::DriftWindow => "drift_window",
     }
 }
 
@@ -346,6 +348,10 @@ struct RuntimeConfig {
     diag: bool,
     /// 非 LTP timerfd smoke：直接验证 timerfd 阻塞读能由 high-res timer 唤醒
     timer_smoke: bool,
+    /// drift_window 模式：窗口数量
+    drift_windows: u64,
+    /// drift_window 模式：musl | glibc | both
+    drift_libc: String,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -422,6 +428,8 @@ impl RuntimeConfig {
             conf_source: None,
             diag: false,
             timer_smoke: false,
+            drift_windows: 6,
+            drift_libc: String::from("both"),
         }
     }
 }
@@ -460,6 +468,7 @@ fn parse_mode(bytes: &[u8]) -> Option<RunMode> {
         b"run" => Some(RunMode::Run),
         b"shell" => Some(RunMode::Shell),
         b"run_then_shell" => Some(RunMode::RunThenShell),
+        b"drift_window" => Some(RunMode::DriftWindow),
         _ => None,
     }
 }
@@ -606,6 +615,18 @@ fn apply_conf_bytes(data: &[u8], cfg: &mut RuntimeConfig) {
             cfg.diag = val == b"1" || val == b"true";
         } else if key == b"timer_smoke" {
             cfg.timer_smoke = parse_bool_flag(val);
+        } else if key == b"drift_windows" {
+            let s = core::str::from_utf8(val).ok();
+            if let Some(s) = s {
+                if let Ok(n) = s.parse::<u64>() {
+                    cfg.drift_windows = n;
+                }
+            }
+        } else if key == b"drift_libc" {
+            let s = core::str::from_utf8(val).ok();
+            if let Some(s) = s {
+                cfg.drift_libc = String::from(s.trim());
+            }
         } else if key == b"ltp_from" {
             let s = core::str::from_utf8(val).ok();
             if let Some(s) = s {
@@ -1693,6 +1714,56 @@ fn run_ltp_suite_runner(
     );
 }
 
+fn drift_snapshot(window: u64, libc: &str, stage: &str, environ: &[*const u8]) {
+    println!(
+        "[initproc] [drift] === drift_window W{} {} {} ===",
+        window, libc, stage
+    );
+    let _ = run_bash_cmd("cat /sys/kernel/stats/taskq\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/timer\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/syscall\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/ctxsw\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/reclaim\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/tlb\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/heap\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/resource\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/buddyinfo\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/zombies\0", environ);
+    println!(
+        "[initproc] [drift] === drift_window W{} {} {} end ===",
+        window, libc, stage
+    );
+}
+
+fn run_drift_windows(environ: &[*const u8], cfg: &RuntimeConfig) {
+    let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/stats_on\0", environ);
+    let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/reset\0", environ);
+
+    let libc_list: &[&str] = match cfg.drift_libc.as_str() {
+        "musl" => &["musl"],
+        "glibc" => &["glibc"],
+        _ => &["musl", "glibc"],
+    };
+
+    let total_windows = cfg.drift_windows;
+    for libc in libc_list {
+        println!(
+            "[initproc] drift_window: start libc={} windows={}",
+            libc, total_windows
+        );
+        for w in 0..total_windows {
+            let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/reset\0", environ);
+            drift_snapshot(w, libc, "pre", environ);
+            let cmd = alloc::format!("cd /{} && ./lmbench_all lat_syscall -P 1 null\0", libc);
+            let _ = run_bash_cmd(&cmd, environ);
+            drift_snapshot(w, libc, "post", environ);
+            sleep(100); // 100ms between windows
+        }
+    }
+
+    println!("[initproc] drift_window: all done");
+}
+
 fn snapshot_diag(diag: bool, n: usize, group: &str, libc: &str, environ: &[*const u8]) {
     if !diag {
         return;
@@ -1704,6 +1775,10 @@ fn snapshot_diag(diag: bool, n: usize, group: &str, libc: &str, environ: &[*cons
     let _ = run_bash_cmd("cat /sys/kernel/stats/taskq\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/timer\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/syscall\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/ctxsw\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/reclaim\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/tlb\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/heap\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/resource\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/buddyinfo\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/zombies\0", environ);
@@ -2896,6 +2971,12 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         */
         println!("[initproc] entering shell mode");
         enter_shell(path, &environ);
+        shutdown();
+        return 0;
+    }
+
+    if cfg.mode == RunMode::DriftWindow {
+        run_drift_windows(&environ, &cfg);
         shutdown();
         return 0;
     }
