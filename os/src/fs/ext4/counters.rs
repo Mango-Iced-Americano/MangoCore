@@ -389,6 +389,8 @@ pub fn sys_ext4_counters(cmd: usize, label_ptr: usize, label_len: usize) -> isiz
             crate::task::processor::dump_sched_profile(&label);
             0
         }
+        18 => { crate::fs::dev::pipe::disable_pipe_profile(); 0 }
+        19 => { crate::task::processor::disable_sched_profile(); 0 }
         _ => -22, // EINVAL
     }
 }

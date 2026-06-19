@@ -1,5 +1,7 @@
 .vscode
 
+docker-compose.override.yml
+
 os/target/
 
 os/qemu.log
@@ -25,6 +27,8 @@ sdcard-rv.img
 disk.img
 
 disk-la.img
+
+cc-codex/*.clean.img
 
 *digest.txt
  

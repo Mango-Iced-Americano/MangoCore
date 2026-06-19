@@ -1433,16 +1433,22 @@ impl KernelTimerQueue {
         self.inner.peek().map(|t| t.deadline.to_ns_saturating()).unwrap_or(0)
     }
 
+    fn refresh_deadline_state(&self) {
+        let next_ns = self.earliest_deadline_ns();
+        KERNEL_TIMER_QUEUE_NEXT_NS.store(next_ns, AtomicOrdering::Relaxed);
+        KERNEL_TIMER_QUEUE_PENDING.store(!self.inner.is_empty(), AtomicOrdering::Relaxed);
+    }
+
     pub fn add_action(&mut self, action: TimerAction, deadline: TimeSpec) -> bool {
         let old_earliest = self.earliest_deadline_ns();
         // Keep the hot path O(log n).  WakeTask stale entries are filtered by
         // generation, while signal timers validate their generation/deadline in run_timer().
         self.inner.push(KernelTimer { action, deadline });
-        KERNEL_TIMER_QUEUE_PENDING.store(true, AtomicOrdering::Relaxed);
         if self.inner.len() > Self::MAX_TIMERS {
             self.enforce_capacity();
         }
         let new_earliest = self.earliest_deadline_ns();
+        self.refresh_deadline_state();
         // Return true if this new timer is now the earliest (or if the queue
         // was empty before, meaning a previously-idle queue now has work).
         old_earliest == 0 || new_earliest < old_earliest
@@ -1462,11 +1468,13 @@ impl KernelTimerQueue {
                 break;
             }
         }
+        self.refresh_deadline_state();
         expired
     }
     /// 清理所有失效 Weak 引用的定时器条目，释放堆槽位。
     pub fn compact(&mut self) {
         if self.inner.is_empty() {
+            self.refresh_deadline_state();
             return;
         }
         let entries: Vec<KernelTimer> = self.inner.drain().collect();
@@ -1475,6 +1483,7 @@ impl KernelTimerQueue {
                 self.inner.push(timer);
             }
         }
+        self.refresh_deadline_state();
     }
     fn enforce_capacity(&mut self) {
         self.compact();
@@ -1711,11 +1720,21 @@ impl TimeoutWaitQueue {
     /// 如果想要阻塞一个`task`，使用`block_current_and_run_next()`函数
     pub fn add_task(&mut self, task: Weak<TaskControlBlock>, timeout: TimeSpec) {
         self.inner.push(TimeoutWaiter { task, timeout });
-        TIMEOUT_WAITQUEUE_PENDING.store(true, AtomicOrdering::Relaxed);
+        self.refresh_deadline_state();
     }
 
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
+    }
+
+    fn earliest_deadline_ns(&self) -> u64 {
+        self.inner.peek().map(|waiter| waiter.timeout.to_ns_saturating()).unwrap_or(0)
+    }
+
+    fn refresh_deadline_state(&self) {
+        let next_ns = self.earliest_deadline_ns();
+        TIMEOUT_WAITQUEUE_NEXT_NS.store(next_ns, AtomicOrdering::Relaxed);
+        TIMEOUT_WAITQUEUE_PENDING.store(!self.inner.is_empty(), AtomicOrdering::Relaxed);
     }
 
     /// 唤醒所有超时的任务
@@ -1726,6 +1745,7 @@ impl TimeoutWaitQueue {
             .map(|waiter| waiter.timeout > now)
             .unwrap_or(true)
         {
+            self.refresh_deadline_state();
             return;
         }
         let mut tasks_to_wake = Vec::new();
@@ -1762,9 +1782,7 @@ impl TimeoutWaitQueue {
             }
         }
         enqueue_ready_batch(tasks_to_wake);
-        if self.inner.is_empty() {
-            TIMEOUT_WAITQUEUE_PENDING.store(false, AtomicOrdering::Relaxed);
-        }
+        self.refresh_deadline_state();
     }
     #[allow(unused)]
     // debug use only
@@ -1785,6 +1803,8 @@ lazy_static! {
 
 static TIMEOUT_WAITQUEUE_PENDING: AtomicBool = AtomicBool::new(false);
 static KERNEL_TIMER_QUEUE_PENDING: AtomicBool = AtomicBool::new(false);
+static TIMEOUT_WAITQUEUE_NEXT_NS: AtomicU64 = AtomicU64::new(0);
+static KERNEL_TIMER_QUEUE_NEXT_NS: AtomicU64 = AtomicU64::new(0);
 
 // ── High-res / sched tick state ──
 static NEXT_SCHED_TICK_NS: AtomicU64 = AtomicU64::new(0);
@@ -1861,6 +1881,7 @@ pub fn wait_with_timeout(task: Weak<TaskControlBlock>, timeout: TimeSpec) {
 /// 3. Re-program the hardware for the next deadline.
 /// 4. Yield the CPU only if a task was woken or the sched tick demands it.
 pub fn timer_interrupt_handler() {
+    let handler_profile_start = crate::task::processor::sched_profile_cycle_start();
     let now = crate::timer::TimeSpec::now();
     let now_ns = now.to_ns_saturating();
 
@@ -1912,6 +1933,7 @@ pub fn timer_interrupt_handler() {
     reprogram_timer_irqoff();
 
     // 4. Yield if needed
+    crate::task::processor::record_sched_timer_handler_cycles(handler_profile_start);
     if need_resched || woke_task {
         crate::task::suspend_current_and_run_next();
     }
@@ -1921,17 +1943,26 @@ pub fn timer_interrupt_handler() {
 pub fn do_wake_expired() {
     let timeout_pending = TIMEOUT_WAITQUEUE_PENDING.load(AtomicOrdering::Relaxed);
     let kernel_timer_pending = KERNEL_TIMER_QUEUE_PENDING.load(AtomicOrdering::Relaxed);
-    let timerfd_pending = crate::fs::timerfd::timerfd_registry_maybe_nonempty();
-    if !timeout_pending && !kernel_timer_pending && !timerfd_pending {
+    if !timeout_pending && !kernel_timer_pending {
         return;
     }
 
-    let mut now = None;
-    if timeout_pending {
+    let now_ns = crate::timer::now_ns();
+    let timeout_next_ns = TIMEOUT_WAITQUEUE_NEXT_NS.load(AtomicOrdering::Relaxed);
+    let kernel_next_ns = KERNEL_TIMER_QUEUE_NEXT_NS.load(AtomicOrdering::Relaxed);
+    let timeout_due = timeout_pending && (timeout_next_ns == 0 || now_ns >= timeout_next_ns);
+    let kernel_due = kernel_timer_pending && (kernel_next_ns == 0 || now_ns >= kernel_next_ns);
+    if !timeout_due && !kernel_due {
+        return;
+    }
+
+    let mut now = Some(crate::timer::TimeSpec::from_ns(now_ns as usize));
+    if timeout_due {
         let flags = local_irq_save();
         let mut timeout_queue = TIMEOUT_WAITQUEUE.lock();
         if timeout_queue.is_empty() {
             TIMEOUT_WAITQUEUE_PENDING.store(false, AtomicOrdering::Relaxed);
+            TIMEOUT_WAITQUEUE_NEXT_NS.store(0, AtomicOrdering::Relaxed);
         } else {
             let now = *now.get_or_insert_with(crate::timer::TimeSpec::now);
             timeout_queue.wake_expired(now);
@@ -1940,12 +1971,13 @@ pub fn do_wake_expired() {
         local_irq_restore(flags);
     }
 
-    if kernel_timer_pending {
+    if kernel_due {
         let expired_timers = {
             let flags = local_irq_save();
             let mut ktq = KERNEL_TIMER_QUEUE.lock();
             let expired = if ktq.is_empty() {
                 KERNEL_TIMER_QUEUE_PENDING.store(false, AtomicOrdering::Relaxed);
+                KERNEL_TIMER_QUEUE_NEXT_NS.store(0, AtomicOrdering::Relaxed);
                 Vec::new()
             } else {
                 let now = *now.get_or_insert_with(crate::timer::TimeSpec::now);
@@ -1959,6 +1991,7 @@ pub fn do_wake_expired() {
                 }
                 if ktq.is_empty() {
                     KERNEL_TIMER_QUEUE_PENDING.store(false, AtomicOrdering::Relaxed);
+                    KERNEL_TIMER_QUEUE_NEXT_NS.store(0, AtomicOrdering::Relaxed);
                 }
                 expired
             };
@@ -1972,11 +2005,6 @@ pub fn do_wake_expired() {
         for timer in expired_timers {
             KernelTimerQueue::run_timer(timer, now);
         }
-    }
-
-    if timerfd_pending && !crate::fs::timerfd::timerfd_registry_is_empty() {
-        let now = *now.get_or_insert_with(crate::timer::TimeSpec::now);
-        crate::fs::timerfd::wake_expired_timerfds(now);
     }
 }
 

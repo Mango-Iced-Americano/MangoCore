@@ -801,6 +801,8 @@ fn profile_dump(group_name: &str, libc_suffix: &str, phase: &str, cfg: &RuntimeC
         user_lib::syscall::sys_ext4_counters(13, label.as_ptr() as usize, label.len()); // reclaim
         user_lib::syscall::sys_ext4_counters(15, label.as_ptr() as usize, label.len()); // pipe
         user_lib::syscall::sys_ext4_counters(17, label.as_ptr() as usize, label.len()); // sched
+        user_lib::syscall::sys_ext4_counters(18, 0, 0); // disable pipe
+        user_lib::syscall::sys_ext4_counters(19, 0, 0); // disable sched
     }
 }
 

@@ -10,6 +10,9 @@ use user_lib::syscall::TimeSpec;
 
 const MS_BIND: usize = 4096;
 const AT_FDCWD: isize = -100;
+const NTP_ATTEMPTS: usize = 2;
+const NTP_TIMEOUT_MS: usize = 3_000;
+const NTP_POLL_MS: usize = 50;
 
 fn try_mount(source: &str, target: &str, fstype: &str, flags: usize, data: usize) -> isize {
     let src_c = format!("{}\0", source);
@@ -18,23 +21,43 @@ fn try_mount(source: &str, target: &str, fstype: &str, flags: usize, data: usize
     mount(src_c.as_ptr(), tgt_c.as_ptr(), fs_c.as_ptr(), flags, data)
 }
 
-/// 用 busybox ntpd 通过 NTP 同步时间；失败则回退到硬编码时间以防 TLS 失败
+fn wait_child_bounded(pid: isize, timeout_ms: usize) -> Option<i32> {
+    let mut status: i32 = 0;
+    let mut waited = 0usize;
+    while waited < timeout_ms {
+        let ret = waitpid_wnohang(pid, &mut status);
+        if ret == pid {
+            return Some(status);
+        }
+        if ret < 0 {
+            println!("[init] waitpid_wnohang pid={} failed ret={}", pid, ret);
+            return None;
+        }
+        sleep(NTP_POLL_MS);
+        waited += NTP_POLL_MS;
+    }
+
+    println!("[init] ntpd pid={} timed out after {}ms, killing", pid, timeout_ms);
+    let _ = kill(pid as usize, SIGKILL);
+    for _ in 0..20 {
+        let ret = waitpid_wnohang(pid, &mut status);
+        if ret == pid {
+            return Some(status);
+        }
+        if ret < 0 {
+            return None;
+        }
+        sleep(10);
+    }
+    None
+}
+
+/// 用 busybox ntpd 通过 NTP 同步时间；失败则回退到硬编码时间以防 TLS 失败。
+/// NTP is best-effort: early boot must continue even when guest networking or DNS stalls.
 fn try_ntp_sync() {
-    for attempt in 0..3 {
+    for attempt in 0..NTP_ATTEMPTS {
         if attempt > 0 {
-            let sleep_args = [
-                "sleep\0".as_ptr(),
-                "2\0".as_ptr(),
-                core::ptr::null(),
-            ];
-            let sleep_pid = fork();
-            if sleep_pid == 0 {
-                exec("/rescue/sh\0", &sleep_args, &[core::ptr::null()]);
-                exit(-1);
-            } else if sleep_pid > 0 {
-                let mut s: i32 = 0;
-                waitpid(sleep_pid as usize, &mut s);
-            }
+            sleep(200);
         }
 
         let pid = fork();
@@ -63,14 +86,18 @@ fn try_ntp_sync() {
             // exec only returns on error
             exit(-1);
         } else {
-            // parent: wait for ntpd
-            let mut status: i32 = 0;
-            let ret = waitpid(pid as usize, &mut status);
-            if ret >= 0 && status == 0 {
-                println!("[init] ntpd time sync ok");
-                return;
+            match wait_child_bounded(pid, NTP_TIMEOUT_MS) {
+                Some(0) => {
+                    println!("[init] ntpd time sync ok");
+                    return;
+                }
+                Some(status) => {
+                    println!("[init] ntpd attempt {} failed (status={})", attempt, status);
+                }
+                None => {
+                    println!("[init] ntpd attempt {} did not exit cleanly", attempt);
+                }
             }
-            println!("[init] ntpd attempt {} failed (ret={}, status={})", attempt, ret, status);
         }
     }
     println!("[init] ntpd all attempts failed, fallback to hardcoded time");

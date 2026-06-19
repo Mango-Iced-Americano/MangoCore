@@ -4,6 +4,70 @@
 
 ## 2026-06-19
 
+### fix(task/timer): 用 next-deadline gate 降低 scheduler wake_expired 热路径成本
+
+**涉及文件：**
+- `os/src/task/manager.rs` — 为 `KERNEL_TIMER_QUEUE` 和 legacy `TIMEOUT_WAITQUEUE` 增加 cached next-deadline 原子状态；`do_wake_expired()` 先用 pending + next deadline 判断是否真的到期，未到期时直接返回，不再每轮锁 heap/queue；保留 timeout sweep 正确性兜底，避免直接移除后 stage-1/NTP 等等待路径卡死
+- `os/src/task/processor.rs` — 保留 `run_tasks()` 中的 `do_wake_expired()` 调用和 `sched_stage_wake_expired` 计数，用 profile 验证 gate 后该阶段成本是否明显下降
+- `.agents/skills/mango-worklog/references/debugging-patterns.md` — 沉淀“保留兜底语义，用 next-deadline gate 降低轮询税”的可复用性能修复模式
+
+**验证：**
+- `git diff --check -- os/src/task/manager.rs os/src/task/processor.rs user/src/bin/init.rs .env docs/Work_Log.md .agents/skills/mango-worklog/references/debugging-patterns.md` ✅
+- `docker compose exec -T os-dev bash -lc 'cd /app/os && make rv64-kernel-build-only'` ✅
+- `docker compose exec -T os-dev bash -lc 'cd /app/os && make la64-kernel-build-only'` ✅
+- rv64 QEMU 45s smoke ✅：stage-1 NTP 超时后第二次同步成功，完成 `/tools`/`/sdcard` bind mount，进入 `initproc` 并开始 `lmbench-musl`；timeout 为人为截断，未留下 QEMU 残留进程
+- DS merge-gate 复测 ✅：`cc-codex/results-20260619-merge-gate/` 判定 `MERGE_GO`，双架构编译通过，4/4 stage-1 恢复，`dir_full_scan_count=0`，rv64 S1 `reclaim_call_cycles_max=65.5M < 100M`，rv64 S1 musl group time `99s`
+
+**备注：** Linux timer/hrtimer 路径不是每个 scheduler loop 全量扫 timer 队列，而是维护下一次到期时间，再按最早 deadline 决定是否重编程/处理。本轮采用同一类思路：不删除 `do_wake_expired()` 这个兼容兜底，只让它在没有任何已到期 timeout/timer 时廉价跳过。前一轮“直接移除 scheduler loop legacy sweep”的实验已被 stage-1 卡死否定，不能作为最终修复。
+
+### fix(init/sched): 修复 stage-1 NTP 卡死并恢复 legacy timeout sweep
+
+**涉及文件：**
+- `user/src/bin/init.rs` — 将 stage-1 NTP 同步改为 bounded best-effort：每次 `ntpd` 最多等待 3000ms，超时后发送 `SIGKILL` 并继续下一次/最终 fallback，避免网络或 DNS 卡住时启动永久停在 `[init] MangoCore stage-1 boot`
+- `os/src/task/processor.rs` — 恢复 `run_tasks()` 热循环中的 `do_wake_expired()`，并保留 `sched_stage_wake_expired` 计数；上一轮移除 legacy sweep 的实验 raw 仅停在 stage-1，不能视为有效性能修复
+- `.env` — 将默认 `COMPOSE_PROJECT_NAME` 改为 `lzm-mangocore`，避免本工作区直接 `docker compose exec` 时进入 DS 容器；DS 后续应显式使用 `docker compose -p ds-mangocore ...`
+- `.agents/skills/mango-worklog/references/debugging-patterns.md` — 沉淀 init stage-1 后无输出时先检查 init 首个外部等待点的排查模式
+
+**验证：**
+- `docker compose -p lzm-mangocore up -d --force-recreate` ✅，确认独立容器挂载 `/home/lzm/projects/MangoCore -> /app` 和 `/mnt/nvme/mangocore-runtime/lzm -> /mnt/nvme/mangocore-runtime/lzm`
+- `docker compose -p lzm-mangocore exec -T os-dev bash -lc 'cd /app/os && make rv64-only'` ✅
+- `docker compose -p lzm-mangocore exec -T os-dev bash -lc 'cd /app/os && make la64-only'` ✅
+- rv64 QEMU 有界启动验证 ✅：stage-1 后输出 `ntpd pid=... timed out after 3000ms, killing`，随后第二次 NTP 成功并继续 bind `/tools`、进入 `initproc` 和 lmbench；验证残留 QEMU 已清理
+
+**备注：** 当前宿主/容器挂载排查显示 `/mnt/nvme` 在宿主为 `rw`，`lzm-mangocore-os-dev-1` 与 `ds-mangocore-os-dev-1` 都正确挂载当前工作区和 NVMe runtime；卡在 stage-1 不是块设备或 `/tools` 挂载问题。旧成功日志中 stage-1 后第一行就是 `ntpd: setting time ...`，本次卡住发生在任何 bind mount 前，因此根因收敛到 init 的 NTP 等待和未验证的 scheduler timeout sweep 移除。
+
+### fix(task/timer): 移除 scheduler loop 中 legacy wake_expired 轮询，并修正 timer profile 计时口径
+
+**涉及文件：**
+- `os/src/task/processor.rs` — 从 `run_tasks()` 热循环移除每轮 `do_wake_expired()` 调用；保留 `sched_stage_wake_expired` counter 作为验证项，下一轮 profile 中该 stage 应为 0
+- `os/src/task/manager.rs` — 将 timer handler profile 记录移入 `timer_interrupt_handler()` 内，并在可能 `suspend_current_and_run_next()` 之前记录，避免把任务被调度走的时间计入 handler cycles
+- `os/src/hal/arch/riscv/trap/mod.rs`、`os/src/hal/arch/loongarch64/trap/mod.rs` — timer trap profile 改为只记录进入 handler 前的 trap 入口成本，避免跨任务切换计时
+- `.agents/skills/mango-worklog/references/debugging-patterns.md` — 沉淀“trap 计时跨 context switch 会虚高”的调试经验
+
+**验证：**
+- `git diff --check -- os/src/task/processor.rs os/src/task/manager.rs os/src/hal/arch/riscv/trap/mod.rs os/src/hal/arch/loongarch64/trap/mod.rs` ✅
+- `docker compose exec os-dev bash -lc 'cd /app/os && make rv64-kernel-build-only'` ✅
+- `docker compose exec os-dev bash -lc 'cd /app/os && make la64-kernel-build-only'` ✅
+
+**备注：** DS 的 low-overhead profile 显示 rv64 S1 `sched_stage_wake_expired=3.93B cycles`，占 scheduler loop 49.5%。代码复核确认 `timer_interrupt_handler()` 已处理 `KERNEL_TIMER_QUEUE`、legacy timeout waitqueue 和 timerfd，scheduler loop 中的 `do_wake_expired()` 属于旧轮询路径，污染态下会在 `KERNEL_TIMER_QUEUE_PENDING=true` 时每轮锁 timer heap 并读时间。SBI `set_timer` 仍是后续优化方向，但其 rv64 S1 成本约 `1.16B cycles`，低于 wake_expired 轮询税；本轮优先处理更大且更确定的瓶颈。
+
+### debug(perf): 为 pipe/sched profile 增加开关并拆分 scheduler/timer 热点
+
+**涉及文件：**
+- `os/src/fs/dev/pipe.rs` — pipe profile 默认关闭，`reset_pipe_profile()` 时开启、dump 后可关闭；热路径 read/write/poll/FIFO debug 计数只在 profile 开启时记录，降低非 profile 场景探针污染
+- `os/src/task/processor.rs` — sched profile 默认关闭，新增 run loop 分阶段 counters：console、wake_expired、net_poll、reclaim、zombie_queue、stale_zombie、futex_compact、fetch_task、queue_sample、switch_prep、idle；新增 timer trap、timer handler、program_timer、rv64 SBI set_timer 统计出口
+- `os/src/hal/arch/riscv/{trap,time,sbi}.rs`、`os/src/hal/arch/loongarch64/{trap,time}.rs` — 接入 timer/trap/program_timer profile 记录，rv64 额外记录 SBI `set_timer` ecall 成本
+- `os/src/fs/ext4/counters.rs`、`user/src/bin/initproc.rs` — debug syscall 增加 pipe/sched profile disable 命令；lmbench profile dump 后关闭 pipe/sched profile，下一轮 profile_before 再 reset+enable
+- `.agents/skills/mango-worklog/references/debugging-patterns.md` — 沉淀性能探针必须先量化自身开销的调试经验
+
+**验证：**
+- `git diff --check -- os/src/fs/dev/pipe.rs os/src/task/processor.rs os/src/hal/arch/riscv/trap/mod.rs os/src/hal/arch/loongarch64/trap/mod.rs os/src/hal/arch/riscv/time.rs os/src/hal/arch/loongarch64/time.rs os/src/hal/arch/riscv/sbi.rs os/src/fs/ext4/counters.rs user/src/bin/initproc.rs` ✅
+- Docker 隔离确认：`COMPOSE_PROJECT_NAME=ds-mangocore`，`ds-mangocore-os-dev-1` 挂载 `/home/lzm/projects/MangoCore -> /app` ✅
+- `docker compose exec os-dev bash -lc 'cd /app/os && make rv64-kernel-build-only'` ✅
+- `docker compose exec os-dev bash -lc 'cd /app/os && make la64-kernel-build-only'` ✅
+
+**备注：** DS 的 sched-arch-compare 报告方向有效，但本轮 raw/parsed 不完整，且 rv64 S1 raw 为 240s timeout 样本；不能直接把“non-reclaim”归因到 SBI/trap/TLB。本次只补观测面：下一轮需要在低负载下重跑 rv64/la64 S0/S1，并用分阶段 counters 判断 scheduler loop delta 是 console/SBI、timer reprogram、wake/futex/zombie、fetch/switch_prep 还是 reclaim 残余。
+
 ### perf(fs/reclaim): cycle-slice 最终复测通过，确认 reclaim 长尾被压到 P0 阈值内
 
 **涉及文件：**
