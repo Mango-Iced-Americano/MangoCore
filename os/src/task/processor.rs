@@ -124,8 +124,10 @@ pub fn run_tasks() {
             let drained_zombies = zombies.len();
             drop(zombies);
             super::perf::record_zombie_drain(drained_zombies);
+            crate::task::perf::record_zombie_drain_full(0, 1, drained_zombies);
         }
         // 兜底清理旧队列中的 zombie，避免异常路径留下不可运行任务。
+        // Also do full queue scan for stats zombie/nice counters every 64 ticks.
         if schedule_tick % 64 == 0 {
             for _ in 0..8 {
                 let a = take_one_ready_zombie();
@@ -136,6 +138,31 @@ pub fn run_tasks() {
                 drop(a);
                 drop(b);
             }
+            let (ready_z, int_z, nnice) = {
+                let manager = crate::task::manager::TASK_MANAGER.lock();
+                let mut ready_zombie = 0usize;
+                let mut int_zombie = 0usize;
+                let mut nonzero_nice = 0usize;
+                for t in &manager.ready_queue {
+                    if t.acquire_inner_lock().is_zombie() { ready_zombie += 1; }
+                    if t.sched_nice_hint.load(Ordering::Relaxed) != 0 { nonzero_nice += 1; }
+                }
+                for t in &manager.interruptible_queue {
+                    if t.acquire_inner_lock().is_zombie() { int_zombie += 1; }
+                }
+                (ready_zombie, int_zombie, nonzero_nice)
+            };
+            crate::task::perf::record_taskq_queue_lens(
+                crate::task::manager::ready_count_fast() as usize,
+                crate::task::manager::interruptible_count_fast() as usize,
+                ready_z, int_z, nnice,
+            );
+        } else {
+            crate::task::perf::record_taskq_queue_lens(
+                crate::task::manager::ready_count_fast() as usize,
+                crate::task::manager::interruptible_count_fast() as usize,
+                0, 0, 0,
+            );
         }
         // 降频清理 PROCESS_SHARED_FUTEX 空 WaitQueue 键
         super::threads::compact_shared_futex();
