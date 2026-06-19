@@ -1916,7 +1916,9 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
                     cfg.ltp_from.as_deref(),
                     timeout_secs,
                 );
-                snapshot_diag(cfg.diag, n, group_name, "glibc", environ);
+                if(cfg.diag) {
+                    snapshot_diag(cfg.diag, n, group_name, "glibc", environ);
+                }
             }
         } else if group_name == "ltp" {
             // 提交默认路径：运行镜像内官方 ltp_testcode.sh，保持评测器期望的串口协议。
@@ -1924,11 +1926,15 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
             let libc = cfg.ltp_libc;
             if libc == LtpLibc::Musl || libc == LtpLibc::Both {
                 run_group_in_dir(environ, "/musl\0", group_name, script, timeout_secs, 1);
-                snapshot_diag(cfg.diag, n, group_name, "musl", environ);
+                if(cfg.diag) {
+                    snapshot_diag(cfg.diag, n, group_name, "musl", environ);
+                }
             }
             if libc == LtpLibc::Glibc || libc == LtpLibc::Both {
                 run_group_in_dir(environ, "/glibc\0", group_name, script, timeout_secs, 1);
-                snapshot_diag(cfg.diag, n, group_name, "glibc", environ);
+                if(cfg.diag) {
+                    snapshot_diag(cfg.diag, n, group_name, "glibc", environ);
+                }
             }
         } else {
             run_group_in_dir(
@@ -1939,7 +1945,9 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
                 timeout_secs,
                 MAX_GROUP_RETRIES,
             );
-            snapshot_diag(cfg.diag, n, group_name, "musl", environ);
+            if(cfg.diag) {
+                snapshot_diag(cfg.diag, n, group_name, "musl", environ);
+            }
             run_group_in_dir(
                 environ,
                 "/glibc\0",
@@ -1948,7 +1956,9 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
                 timeout_secs,
                 MAX_GROUP_RETRIES,
             );
-            snapshot_diag(cfg.diag, n, group_name, "glibc", environ);
+            if(cfg.diag) {
+                snapshot_diag(cfg.diag, n, group_name, "glibc", environ);
+            }
         }
         // 每组之间休息一会，清理孤儿进程、让网络连接完全关闭
         println!("[initproc] sleep 1s before next group");

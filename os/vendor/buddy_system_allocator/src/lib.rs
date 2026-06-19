@@ -187,18 +187,12 @@ impl<const ORDER: usize> Heap<ORDER> {
         start = (start + size_of::<usize>() - 1) & !(size_of::<usize>() - 1);
         self.start = start;
 
-        // Compute and zero bitmap memory, one per class
+        // Compute bitmap memory needed, one per class
         let mut bitmap_offset: usize = 0;
         for c in 0..ORDER {
             let block_count = size >> c;
             let word_count = (block_count + Self::BITS_PER_WORD - 1) / Self::BITS_PER_WORD;
             let word_count = word_count.max(1); // at least 1 word per class
-            let bitmap_addr = start + bitmap_offset;
-            // Zero the bitmap
-            for i in 0..word_count {
-                (bitmap_addr as *mut usize).add(i).write(0);
-            }
-            self.free_bits[c] = bitmap_addr as *mut usize;
             bitmap_offset += word_count * core::mem::size_of::<usize>();
         }
 
@@ -207,6 +201,20 @@ impl<const ORDER: usize> Heap<ORDER> {
             self.heap_start = start;
             self.heap_end = start + size;
             return;
+        }
+
+        // Now zero bitmap memory and store pointers
+        let mut offset: usize = 0;
+        for c in 0..ORDER {
+            let block_count = size >> c;
+            let word_count = (block_count + Self::BITS_PER_WORD - 1) / Self::BITS_PER_WORD;
+            let word_count = word_count.max(1);
+            let bitmap_addr = start + offset;
+            for i in 0..word_count {
+                (bitmap_addr as *mut usize).add(i).write(0);
+            }
+            self.free_bits[c] = bitmap_addr as *mut usize;
+            offset += word_count * core::mem::size_of::<usize>();
         }
 
         let heap_start = start + bitmap_offset;
@@ -284,8 +292,11 @@ impl<const ORDER: usize> Heap<ORDER> {
             while current_class < self.free_list.len() {
                 let buddy = current_ptr ^ (1 << current_class);
 
-                // Fast path: bitmap guard — skip scan if buddy is not free
-                if !self.bitmap_test(current_class, buddy) {
+                // Fast path: bitmap guard — skip scan if buddy is not free.
+                // Only active when bitmaps are initialized; falls back to full
+                // scan for the legacy add_to_heap()-without-init() path.
+                let bitmap_available = !self.free_bits[current_class].is_null();
+                if bitmap_available && !self.bitmap_test(current_class, buddy) {
                     break;
                 }
 
