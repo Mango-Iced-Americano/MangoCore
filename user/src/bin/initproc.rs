@@ -837,6 +837,9 @@ fn run_group_once(
         // 脚本会自动输出 START 标记，无需 initproc 打印
         // println!("{}", group_start_marker);
 
+        // 创建独立进程组，让 parent timeout 时可以用 kill(-pgid) 清理整棵进程树
+        let _ = setpgid(0, 0);
+
         let cd_ret = chdir(dir);
         if cd_ret < 0 {
             println!(
@@ -911,11 +914,16 @@ fn run_group_once(
             let elapsed_ms = (get_time() as u64).saturating_sub(start_ms);
             if elapsed_ms >= timeout_ms {
                 timed_out = true;
+                let pgid = getpgid(pid as usize);
                 println!(
-                    "[initproc] TIMEOUT ({}s) for {} in {}, sending SIGKILL to pid={}",
-                    timeout_secs, script, log_dir, pid
+                    "[initproc] TIMEOUT ({}s) for {} in {}, sending SIGKILL to pgid={} (pid={})",
+                    timeout_secs, script, log_dir, pgid, pid
                 );
                 let t_kill = get_time() as u64;
+                // kill 整个进程组，消灭 script fork 出来的子进程
+                if pgid > 0 {
+                    let _ = kill(!(pgid as usize) + 1, SIGKILL);
+                }
                 let _ = kill(pid as usize, SIGKILL);
                 println!("[diag] kill sent, entering waitpid at ms={}", t_kill);
                 let _ = waitpid(pid as usize, &mut code);
@@ -1671,9 +1679,8 @@ fn run_ltp_suite_runner(
     }
 
     reap_orphans();
-    if timed_out {
-        println!("#### OS COMP TEST GROUP END ltp-{} ####", libc_suffix);
-    }
+    // 无论超时还是正常退出，都要补打 END 标记（ltprunner 传了 --no-group-marker）
+    println!("#### OS COMP TEST GROUP END ltp-{} ####", libc_suffix);
     let ltprunner_elapsed_s = (get_time() as u64 - ltp_start_ms) / 1000;
     println!(
         "[initproc] done ltprunner (libc={}) exit_code={}",
