@@ -164,6 +164,7 @@ pub fn trap_handler() -> ! {
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
             crate::task::perf::record_timer_interrupt();
+            crate::task::processor::record_sched_timer_interrupt();
             unsafe { TIMER_INTERRUPT += 1; }
             crate::task::timer_interrupt_handler();
         }

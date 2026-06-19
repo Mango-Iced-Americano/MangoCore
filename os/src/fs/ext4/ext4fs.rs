@@ -37,6 +37,7 @@ pub struct Ext4ChildrenBudgetPruneStats {
     pub entries_scanned: usize,
     pub removed: usize,
     pub budget_hit: bool,
+    pub time_budget_hit: bool,
     pub skipped: bool,
 }
 
@@ -57,6 +58,32 @@ impl Ext4ReclaimCursor {
             children_name: String::new(),
         }
     }
+}
+
+#[inline(always)]
+fn ext4_prune_cycle_now() -> u64 {
+    #[cfg(target_arch = "riscv64")]
+    {
+        let cycles: usize;
+        unsafe { asm!("rdcycle {}", out(reg) cycles) };
+        cycles as u64
+    }
+    #[cfg(target_arch = "loongarch64")]
+    {
+        let lo: usize;
+        let hi: usize;
+        unsafe { asm!("rdtime.d {}, {}", out(reg) lo, out(reg) hi) };
+        lo as u64
+    }
+    #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
+    {
+        0
+    }
+}
+
+#[inline(always)]
+fn ext4_prune_cycle_budget_hit(start: u64, budget: u64) -> bool {
+    budget != 0 && ext4_prune_cycle_now().saturating_sub(start) >= budget
 }
 
 /// Ext4文件系统对象实例
@@ -2072,11 +2099,13 @@ impl Ext4FileSystem {
         &self,
         max_parent_inodes: usize,
         max_child_entries: usize,
+        cycle_budget: u64,
         force: bool,
     ) -> Ext4ChildrenBudgetPruneStats {
         if max_parent_inodes == 0 || max_child_entries == 0 {
             return Ext4ChildrenBudgetPruneStats::default();
         }
+        let cycle_start = ext4_prune_cycle_now();
 
         let target_gen = self.children_prune_gen.load(Ordering::Relaxed);
         if !force && target_gen == self.children_pruned_gen.load(Ordering::Relaxed) {
@@ -2157,6 +2186,7 @@ impl Ext4FileSystem {
                 entries_scanned: 0,
                 removed: 0,
                 budget_hit,
+                time_budget_hit: false,
                 skipped: false,
             };
         }
@@ -2168,6 +2198,7 @@ impl Ext4FileSystem {
         let mut resume_ino = 0u32;
         let mut resume_name = String::new();
         let mut entry_budget_hit = false;
+        let mut time_budget_hit = false;
 
         for (ino, arc) in parents {
             if remaining_entries == 0 {
@@ -2232,13 +2263,17 @@ impl Ext4FileSystem {
                     if stale && kids.remove(&name).is_some() {
                         stats.removed += 1;
                     }
+                    if ext4_prune_cycle_budget_hit(cycle_start, cycle_budget) {
+                        time_budget_hit = true;
+                        break;
+                    }
                     if remaining_entries == 0 {
                         break;
                     }
                 }
             }
 
-            if remaining_entries == 0 {
+            if time_budget_hit || remaining_entries == 0 {
                 entry_budget_hit = true;
                 resume_ino = ino;
                 resume_name = last_name;
@@ -2251,6 +2286,7 @@ impl Ext4FileSystem {
             !entry_budget_hit && (parent_wrapped || stats.parents_scanned >= parent_table_len);
         stats.budget_hit =
             entry_budget_hit || (!completed_parent_pass && stats.parents_scanned >= max_parent_inodes);
+        stats.time_budget_hit = time_budget_hit;
 
         let mut cursor = self.reclaim_cursor.lock();
         if entry_budget_hit {

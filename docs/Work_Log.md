@@ -2,6 +2,89 @@
 
 ---
 
+## 2026-06-19
+
+### perf(fs/reclaim): cycle-slice 最终复测通过，确认 reclaim 长尾被压到 P0 阈值内
+
+**涉及文件：**
+- `docs/Work_Log.md` — 记录 DS 在 Docker 隔离修复后对 cycle-slice 版本的最终复测结果
+- `.agents/skills/mango-worklog/references/debugging-patterns.md` — 沉淀 Docker Compose project name 冲突导致进入他人容器的排查模式
+
+**验证：**
+- DS 复测 `cc-codex/results-20260619-final-rerun/`：Docker project 为 `ds-mangocore`，容器挂载确认 `/home/lzm/projects/MangoCore -> /app`
+- 双架构编译已在隔离容器内通过；样本有效性：rv64 S0 `68s/68s`、rv64 S1 `93s/98s`、la64 S0 `87s/106s`、la64 S1 `100s/113s`
+- P0 通过：rv64 S1 `reclaim_call_cycles_max=49.2M`，低于 100M 阈值；`kids_time_hit=43` 首次非零，证明 children prune cycle-slice 生效；`dir_full_scan_count=0` 持续排除旧 ext4 O(n) 复发
+
+**备注：** 当前提交解决的是 scheduler-loop reclaim 的单次长尾尖刺：此前 rv64 S1 `reclaim_call_cycles_max` 约 `268M`，现在降到 `49.2M`。剩余问题仍存在：rv64 S1 pipe latency 约 `6.5x`，但 pipe 本体 read/write cycles 未变慢，主要指向 rv64 scheduler loop `1.82x` 与仍可见的 reclaim 49M spike；la64 对应 `reclaim_call_cycles_max` 仅 `1.63M`，下一步应做 rv64/la64 scheduler、timer/trap、SBI set_timer 路径分解对比。
+
+### debug(initproc): lmbench timeout 前抢先 dump profile，避免 C1 卡死丢失 reclaim 数据
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — 将 lmbench profile dump 抽成 `profile_dump()`，在 group timeout 触发、发送 SIGKILL/等待子进程前输出 `lmbench-*-timeout` 的 ext4/reclaim/pipe/sched profile；`reap_orphans()` 增加单次 256 个 zombie 的上限和 diag 输出，避免异常 orphan 回收拖住后续 `profile_after`
+
+**验证：**
+- `git diff --check -- user/src/bin/initproc.rs` ✅
+- `docker compose exec os-dev bash -lc 'cd /app/os && make rv64-kernel-build-only'` ✅
+- `docker compose exec os-dev bash -lc 'cd /app/os && make la64-kernel-build-only'` ✅
+
+**备注：** DS 的 cycle-slice C1 raw 实际已跑过 basic/busybox 并进入 lmbench-musl，不是 report 中写的 basic-glibc 卡死；日志在 lmbench timeout 后停于 `waitpid returned` / `killed pid` 附近，尚未打印 `profile_after`，因此无法判断 `kids_time_hit` 和 reclaim max。本次改动保证即使 lmbench 后续 wait/reap 慢，也能在 timeout 当刻留下可分析 profile。
+
+### perf(fs/reclaim): 为 ext4 children weak prune 增加 cycle 时间片，限制 reclaim 单次长尾
+
+**涉及文件：**
+- `os/src/fs/ext4/ext4fs.rs` — `prune_children_stale_entries_budgeted()` 新增 cycle budget 参数，在遍历 children stale Weak 时超过时间片立即保存 `(children_ino, children_name)` 游标并返回；新增 `time_budget_hit` 统计，用于区分条目预算命中和时间片命中
+- `os/src/fs/reclaim.rs` — children prune 调用传入 `CHILDREN_PRUNE_CYCLE_BUDGET=8_000_000`，`reclaim_budget` 输出新增 `kids_time_hit`，用于 DS 验证单次 `prune_kids` spike 是否被主动切片压低
+
+**验证：**
+- `git diff --check -- os/src/fs/ext4/ext4fs.rs os/src/fs/reclaim.rs` ✅
+- `docker compose exec os-dev bash -lc 'cd /app/os && make rv64-kernel-build-only'` ✅
+- `docker compose exec os-dev bash -lc 'cd /app/os && make la64-kernel-build-only'` ✅
+- QEMU 性能复测未在本轮执行：下一步交给 DS 跑 rv64 S0/S1 最小矩阵，重点观察 `kids_time_hit`、`reclaim_stage_prune_kids cycles_max`、`reclaim_call_cycles_max`、`sched loop_avg_cycles`、pipe latency/bandwidth
+
+**备注：** DS 的 force-budget 复测显示 P0 未通过：`reclaim_call_cycles_max=264M`、`prune_kids cycles_max=258M`，但 `io_removed/kids_removed` 大幅增加，说明尖刺不是空扫，而是大量 stale children 清理集中在单次 reclaim run。继续调小 entry budget 不能保证 max latency，本次改为直接限制 reclaim children prune 的 cycle 时间片，做法参考 Linux shrinker/dcache 的 batch + resched 思路：未完成工作留给下轮，而不是在 scheduler loop 中长时间占用。
+
+### perf(fs/reclaim): 缩小 heap pressure 下 weak prune 强制切片，降低 scheduler reclaim 长尾
+
+**涉及文件：**
+- `os/src/fs/reclaim.rs` — 将 heap pressure/critical 下的 ext4 weak cache 强制清理改为独立小预算：pressure 下 inode budget `32`、children parent/entry `4/32`，critical 下 `64`、`8/64`；不再把 pressure 状态的 weak prune budget 放大到 normal 的 2x/4x
+
+**验证：**
+- `git diff --check -- os/src/fs/reclaim.rs` ✅
+- `docker compose exec os-dev bash -lc 'cd /app/os && make rv64-kernel-build-only'` ✅
+- `docker compose exec os-dev bash -lc 'cd /app/os && make la64-kernel-build-only'` ✅
+- QEMU 性能复测未在本轮执行：下一步交给 DS 跑 rv64 S0/S1 最小矩阵，重点观察 `reclaim_call_cycles_max`、`reclaim_stage_prune_kids cycles_max`、`sched loop_avg_cycles`、pipe latency/bandwidth、lat_ctx 64/96
+
+**备注：** DS 的 counter 修复后复测显示 R1 rv64 S1 `pipe read_avg_cycles` 反而下降（13.4k→8.1k），pipe 本体可排除；主退化来自 scheduler loop 变慢（32k→63k cycles）和 `prune_kids/reclaim_call` 单次尖刺（约 268M cycles）。weak children cache 是 opportunistic 加速缓存，不是 page cache 这类内存保命路径，因此压力态下应分摊清理，避免在调度热循环形成 pipe/context-switch 长尾。
+
+### debug(perf): 修复 rv64 pipe/context 残余退化探针连线
+
+**涉及文件：**
+- `os/src/fs/dev/pipe.rs` — 将 DS 调试 counter 接入 `Pipe::read_at/write_at/poll`、`PipeRingBuffer` 生命周期、FIFO open/compact 路径，输出 read/write/poll cycles、EAGAIN、notify、buffer/FIFO 水位
+- `os/src/task/processor.rs` — 将 scheduler profile 接入 run loop，记录 loops/fetch/idle/switches、loop cycles、reclaim call cycles、ready/interruptible queue 采样
+- `os/src/hal/arch/riscv/trap/mod.rs`、`os/src/hal/arch/loongarch64/trap/mod.rs` — timer interrupt 进入 scheduler debug counter，便于 rv64/la64 对比
+- `os/src/fs/ext4/counters.rs`、`user/src/bin/initproc.rs`、`os/src/task/mod.rs` — 通过现有 ext4 counter debug syscall 在 lmbench profile 边界 reset/dump pipe/sched profile
+
+**验证：**
+- `git diff --check -- os/src/fs/dev/pipe.rs os/src/task/processor.rs os/src/hal/arch/riscv/trap/mod.rs os/src/hal/arch/loongarch64/trap/mod.rs os/src/fs/ext4/counters.rs user/src/bin/initproc.rs` ✅
+- `docker compose exec os-dev bash -lc 'cd /app/os && make rv64-kernel-build-only'` ✅
+- `docker compose exec os-dev bash -lc 'cd /app/os && make la64-kernel-build-only'` ✅
+
+**备注：** DS 的 `cc-codex/results-20260619-rv64-pipe-debug/` 首轮报告中 pipe/sched counters 全零，原因是 counter 只定义/打印但未接入热路径。当前改动仅用于下一轮定位 rv64 S1 pipe latency 7x 残余，不改变 reclaim/pipe/scheduler 核心策略；QEMU 复测交给 DS 按最小矩阵执行。
+
+### perf(fs/reclaim): 记录 final-quant round2，确认主线退化收敛与 rv64 pipe 残余
+
+**涉及文件：**
+- `docs/Work_Log.md` — 记录 DS 最终量化复测结果与 Codex 对 report 的 raw 复核修正
+- `cc-codex/results-20260618-final-quant/report.md` — 修正 round1 异常样本和 la64 round2 结论，改用 rv64 S1 round2 作为主线判断
+
+**验证：**
+- rv64 S0/S1-r2 raw 有效，无 panic，`dir_full_scan_count=0`
+- rv64 S1-r2 musl：`open/close=424.6429us`（S0 `276.3810us`，1.54x），`stat=283.0952us`（S0 `238.0us`，1.19x），`pipe latency=3210.5748us`（S0 `457.7810us`，7.0x），group time `93s`（S0 `65s`，1.43x），`kids_skipped=3399/3576`
+- la64 S1-r2 raw 有效：musl group time `84s` vs S0 `83s`，open/close `96.1475us` vs S0 `65.7531us`，pipe latency `397.5411us` vs S0 `342.4463us`
+- S2b 压力场景仍确认 reclaim 空扫已解：`prune_kids cycles_total` 从 incremental prune `4.4B` 降至 dirty-skip `356M`
+
+**备注：** rv64 S1 round1 的 `502s/460s` 是异常样本，已排除主结论。dirty generation skip 在有效样本中稳定（S1-r2 `kids_skipped` 约 95%），旧 ext4 O(n) 继续排除。当前主线剩余问题不再是 FS lookup 或 repeated empty prune，而是 rv64 pipe/context-switch 类指标仍明显退化；la64 未复现同等幅度，下一步优先查 rv64 pipe/scheduler/reclaim force spike 交互。
+
 ## 2026-06-18
 
 ### perf(fs/reclaim): 记录 dirty-skip 复测结果，确认 S2b 空扫税下降

@@ -9,7 +9,7 @@ use spin::MutexGuard;
 pub mod pid;
 mod process;
 mod process_manager;
-mod processor;
+pub(crate) mod processor;
 pub mod perf;
 pub mod quota;
 mod registry;

@@ -22,6 +22,7 @@ static RECLAIM_KIDS_REMOVED: AtomicU64 = AtomicU64::new(0);
 static RECLAIM_KIDS_PARENTS_SCANNED: AtomicU64 = AtomicU64::new(0);
 static RECLAIM_KIDS_ENTRIES_SCANNED: AtomicU64 = AtomicU64::new(0);
 static RECLAIM_KIDS_BUDGET_HIT: AtomicU64 = AtomicU64::new(0);
+static RECLAIM_KIDS_TIME_BUDGET_HIT: AtomicU64 = AtomicU64::new(0);
 static RECLAIM_KIDS_SKIPPED: AtomicU64 = AtomicU64::new(0);
 static RECLAIM_CLEAN_FREED: AtomicU64 = AtomicU64::new(0);
 static RECLAIM_CACHED_PAGES_MAX: AtomicUsize = AtomicUsize::new(0);
@@ -125,6 +126,7 @@ pub fn reset_reclaim_stats() {
     RECLAIM_KIDS_PARENTS_SCANNED.store(0, Ordering::Relaxed);
     RECLAIM_KIDS_ENTRIES_SCANNED.store(0, Ordering::Relaxed);
     RECLAIM_KIDS_BUDGET_HIT.store(0, Ordering::Relaxed);
+    RECLAIM_KIDS_TIME_BUDGET_HIT.store(0, Ordering::Relaxed);
     RECLAIM_KIDS_SKIPPED.store(0, Ordering::Relaxed);
     RECLAIM_CLEAN_FREED.store(0, Ordering::Relaxed);
     RECLAIM_CACHED_PAGES_MAX.store(0, Ordering::Relaxed);
@@ -183,13 +185,14 @@ pub fn dump_reclaim_stats(label: &str) {
         RECLAIM_HEAP_CRITICAL_RUNS.load(Ordering::Relaxed),
     );
     println!(
-        "reclaim_budget io_scanned={} io_budget_hit={} io_skipped={} kids_parents_scanned={} kids_entries_scanned={} kids_budget_hit={} kids_skipped={}",
+        "reclaim_budget io_scanned={} io_budget_hit={} io_skipped={} kids_parents_scanned={} kids_entries_scanned={} kids_budget_hit={} kids_time_hit={} kids_skipped={}",
         RECLAIM_IO_SCANNED.load(Ordering::Relaxed),
         RECLAIM_IO_BUDGET_HIT.load(Ordering::Relaxed),
         RECLAIM_IO_SKIPPED.load(Ordering::Relaxed),
         RECLAIM_KIDS_PARENTS_SCANNED.load(Ordering::Relaxed),
         RECLAIM_KIDS_ENTRIES_SCANNED.load(Ordering::Relaxed),
         RECLAIM_KIDS_BUDGET_HIT.load(Ordering::Relaxed),
+        RECLAIM_KIDS_TIME_BUDGET_HIT.load(Ordering::Relaxed),
         RECLAIM_KIDS_SKIPPED.load(Ordering::Relaxed),
     );
     // Stage breakdown
@@ -262,14 +265,15 @@ const CRITICAL_BATCH_PAGES: usize = 32;
 const HEAP_PRESSURE_PCT: usize = 75;   // trigger eviction when >75% heap used
 const HEAP_CRITICAL_PCT: usize = 90;   // aggressive multi-cache eviction
 const INODE_PRUNE_BUDGET: usize = 64;
-const INODE_PRUNE_PRESSURE_BUDGET: usize = 128;
-const INODE_PRUNE_CRITICAL_BUDGET: usize = 256;
 const CHILDREN_PRUNE_PARENT_BUDGET: usize = 8;
-const CHILDREN_PRUNE_PARENT_PRESSURE_BUDGET: usize = 16;
-const CHILDREN_PRUNE_PARENT_CRITICAL_BUDGET: usize = 32;
 const CHILDREN_PRUNE_ENTRY_BUDGET: usize = 64;
-const CHILDREN_PRUNE_ENTRY_PRESSURE_BUDGET: usize = 128;
-const CHILDREN_PRUNE_ENTRY_CRITICAL_BUDGET: usize = 256;
+const INODE_PRUNE_FORCE_PRESSURE_BUDGET: usize = 32;
+const INODE_PRUNE_FORCE_CRITICAL_BUDGET: usize = 64;
+const CHILDREN_PRUNE_PARENT_FORCE_PRESSURE_BUDGET: usize = 4;
+const CHILDREN_PRUNE_PARENT_FORCE_CRITICAL_BUDGET: usize = 8;
+const CHILDREN_PRUNE_ENTRY_FORCE_PRESSURE_BUDGET: usize = 32;
+const CHILDREN_PRUNE_ENTRY_FORCE_CRITICAL_BUDGET: usize = 64;
+const CHILDREN_PRUNE_CYCLE_BUDGET: u64 = 8_000_000;
 
 fn heap_used_pct() -> usize {
     let (free, total, _, _, _) = crate::mm::heap_stats();
@@ -302,28 +306,31 @@ pub fn maybe_reclaim_fs_caches() {
 
     let under_pressure = heap_under_pressure();
     let critical = heap_critical();
+    let force_weak_prune = under_pressure || critical;
+    // Weak cache cleanup is not the memory-safety path. Keep forced sweeps
+    // small even under heap pressure so scheduler-loop reclaim cannot build
+    // a long pipe/context-switch latency spike.
     let inode_budget = if critical {
-        INODE_PRUNE_CRITICAL_BUDGET
+        INODE_PRUNE_FORCE_CRITICAL_BUDGET
     } else if under_pressure {
-        INODE_PRUNE_PRESSURE_BUDGET
+        INODE_PRUNE_FORCE_PRESSURE_BUDGET
     } else {
         INODE_PRUNE_BUDGET
     };
     let children_parent_budget = if critical {
-        CHILDREN_PRUNE_PARENT_CRITICAL_BUDGET
+        CHILDREN_PRUNE_PARENT_FORCE_CRITICAL_BUDGET
     } else if under_pressure {
-        CHILDREN_PRUNE_PARENT_PRESSURE_BUDGET
+        CHILDREN_PRUNE_PARENT_FORCE_PRESSURE_BUDGET
     } else {
         CHILDREN_PRUNE_PARENT_BUDGET
     };
     let children_entry_budget = if critical {
-        CHILDREN_PRUNE_ENTRY_CRITICAL_BUDGET
+        CHILDREN_PRUNE_ENTRY_FORCE_CRITICAL_BUDGET
     } else if under_pressure {
-        CHILDREN_PRUNE_ENTRY_PRESSURE_BUDGET
+        CHILDREN_PRUNE_ENTRY_FORCE_PRESSURE_BUDGET
     } else {
         CHILDREN_PRUNE_ENTRY_BUDGET
     };
-    let force_weak_prune = under_pressure || critical;
 
     // Stage 1: compact_fifo_registry
     let t1 = reclaim_cycle_now();
@@ -380,6 +387,7 @@ pub fn maybe_reclaim_fs_caches() {
         let kids_stats = fs.prune_children_stale_entries_budgeted(
             children_parent_budget,
             children_entry_budget,
+            CHILDREN_PRUNE_CYCLE_BUDGET,
             force_weak_prune,
         );
         let te = reclaim_cycle_now();
@@ -407,6 +415,9 @@ pub fn maybe_reclaim_fs_caches() {
             .fetch_add(kids_stats.entries_scanned as u64, Ordering::Relaxed);
         if kids_stats.budget_hit {
             RECLAIM_KIDS_BUDGET_HIT.fetch_add(1, Ordering::Relaxed);
+        }
+        if kids_stats.time_budget_hit {
+            RECLAIM_KIDS_TIME_BUDGET_HIT.fetch_add(1, Ordering::Relaxed);
         }
         if kids_stats.skipped {
             RECLAIM_KIDS_SKIPPED.fetch_add(1, Ordering::Relaxed);

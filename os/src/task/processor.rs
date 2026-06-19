@@ -86,6 +86,8 @@ lazy_static! {
 pub fn run_tasks() {
     let mut schedule_tick = 0usize;
     loop {
+        SCHED_LOOPS.fetch_add(1, SchedOrdering::Relaxed);
+        let _loop_t0 = sched_rdcycle();
         schedule_tick = schedule_tick.wrapping_add(1);
         // Read one character from UART per iteration. Handle in priority order:
         // 1. Magic key (Ctrl+T) → trace dump + shutdown
@@ -116,7 +118,11 @@ pub fn run_tasks() {
         if schedule_tick % BACKGROUND_NET_POLL_INTERVAL == 0 {
             NET_INTERFACE.try_poll();
         }
+        let _rec_t0 = sched_rdcycle();
         crate::fs::reclaim::maybe_reclaim_fs_caches();
+        let _rec_dt = sched_rdcycle().saturating_sub(_rec_t0);
+        SCHED_RECLAIM_CALL_CYCLES_TOTAL.fetch_add(_rec_dt, SchedOrdering::Relaxed);
+        sched_atomic_max(&SCHED_RECLAIM_CALL_CYCLES_MAX, _rec_dt);
         // 当前任务退出后先进入专用 zombie 队列；切回 idle 后即可安全 drop。
         // 这样避免把不可运行的 TCB 塞进 ready_queue 再扫描剔除。
         if has_zombie_queue_tasks_fast() {
@@ -141,6 +147,14 @@ pub fn run_tasks() {
         super::threads::compact_shared_futex();
         let mut processor = PROCESSOR.lock();
         let next_task = fetch_task();
+        if let Some((ready_len, interruptible_len)) = super::task_manager_counts() {
+            sched_record_queue_sample(ready_len as u64, interruptible_len as u64);
+        }
+        if next_task.is_some() {
+            SCHED_FETCH.fetch_add(1, SchedOrdering::Relaxed);
+        } else {
+            SCHED_IDLE.fetch_add(1, SchedOrdering::Relaxed);
+        }
         super::perf::record_schedule_loop(next_task.is_some());
         if let Some(task) = next_task {
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
@@ -149,6 +163,7 @@ pub fn run_tasks() {
                 let mut task_inner = task.acquire_inner_lock();
                 if task_inner.task_status == TaskStatus::Zombie {
                     drop(task_inner);
+                    sched_record_loop_cycles(_loop_t0);
                     continue;
                 }
                 task_inner.task_status = TaskStatus::Running;
@@ -172,6 +187,8 @@ pub fn run_tasks() {
             processor.current = Some(task);
             // 手动释放处理器
             drop(processor);
+            SCHED_SWITCHES.fetch_add(1, SchedOrdering::Relaxed);
+            sched_record_loop_cycles(_loop_t0);
             unsafe {
                 // 调用__switch 函数(汇编)切换任务
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
@@ -184,6 +201,7 @@ pub fn run_tasks() {
             } else {
                 spin_loop();
             }
+            sched_record_loop_cycles(_loop_t0);
         }
     }
 }
@@ -368,8 +386,112 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
     // 获取空闲任务的上下文指针
     let idle_task_cx_ptr = PROCESSOR.lock().get_idle_task_cx_ptr();
+    SCHED_SWITCHES.fetch_add(1, SchedOrdering::Relaxed);
     unsafe {
         // 调用__switch 函数(汇编)切换任务
         __switch(switched_task_cx_ptr, idle_task_cx_ptr);
     }
+}
+
+// ── sched debug profile counters ────────────────────────────────────────
+use core::sync::atomic::{AtomicU64, Ordering as SchedOrdering};
+
+static SCHED_LOOPS: AtomicU64 = AtomicU64::new(0);
+static SCHED_FETCH: AtomicU64 = AtomicU64::new(0);
+static SCHED_IDLE: AtomicU64 = AtomicU64::new(0);
+static SCHED_SWITCHES: AtomicU64 = AtomicU64::new(0);
+static SCHED_TIMER_INTS: AtomicU64 = AtomicU64::new(0);
+static SCHED_LOOP_CYCLES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static SCHED_LOOP_CYCLES_MAX: AtomicU64 = AtomicU64::new(0);
+static SCHED_RECLAIM_CALL_CYCLES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static SCHED_RECLAIM_CALL_CYCLES_MAX: AtomicU64 = AtomicU64::new(0);
+static SCHED_READY_LEN_SUM: AtomicU64 = AtomicU64::new(0);
+static SCHED_READY_LEN_SAMPLES: AtomicU64 = AtomicU64::new(0);
+static SCHED_READY_LEN_MAX: AtomicU64 = AtomicU64::new(0);
+static SCHED_INTERRUPTIBLE_LEN_SUM: AtomicU64 = AtomicU64::new(0);
+static SCHED_INTERRUPTIBLE_LEN_SAMPLES: AtomicU64 = AtomicU64::new(0);
+static SCHED_INTERRUPTIBLE_LEN_MAX: AtomicU64 = AtomicU64::new(0);
+
+#[inline(always)]
+fn sched_rdcycle() -> u64 {
+    #[cfg(target_arch = "riscv64")]
+    { let cycles: usize; unsafe { core::arch::asm!("rdcycle {}", out(reg) cycles) }; cycles as u64 }
+    #[cfg(target_arch = "loongarch64")]
+    { let lo: usize; let hi: usize; unsafe { core::arch::asm!("rdtime.d {}, {}", out(reg) lo, out(reg) hi) }; lo as u64 }
+    #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
+    { 0 }
+}
+fn sched_atomic_max(slot: &AtomicU64, v: u64) {
+    let mut cur = slot.load(SchedOrdering::Relaxed);
+    while v > cur { match slot.compare_exchange_weak(cur, v, SchedOrdering::Relaxed, SchedOrdering::Relaxed) { Ok(_) => break, Err(n) => cur = n } }
+}
+
+#[inline(always)]
+fn sched_record_loop_cycles(start: u64) {
+    let dt = sched_rdcycle().saturating_sub(start);
+    SCHED_LOOP_CYCLES_TOTAL.fetch_add(dt, SchedOrdering::Relaxed);
+    sched_atomic_max(&SCHED_LOOP_CYCLES_MAX, dt);
+}
+
+#[inline(always)]
+fn sched_record_queue_sample(ready_len: u64, interruptible_len: u64) {
+    SCHED_READY_LEN_SUM.fetch_add(ready_len, SchedOrdering::Relaxed);
+    SCHED_READY_LEN_SAMPLES.fetch_add(1, SchedOrdering::Relaxed);
+    sched_atomic_max(&SCHED_READY_LEN_MAX, ready_len);
+    SCHED_INTERRUPTIBLE_LEN_SUM.fetch_add(interruptible_len, SchedOrdering::Relaxed);
+    SCHED_INTERRUPTIBLE_LEN_SAMPLES.fetch_add(1, SchedOrdering::Relaxed);
+    sched_atomic_max(&SCHED_INTERRUPTIBLE_LEN_MAX, interruptible_len);
+}
+
+#[inline(always)]
+pub(crate) fn record_sched_timer_interrupt() {
+    SCHED_TIMER_INTS.fetch_add(1, SchedOrdering::Relaxed);
+}
+
+pub fn reset_sched_profile() {
+    SCHED_LOOPS.store(0, SchedOrdering::Relaxed);
+    SCHED_FETCH.store(0, SchedOrdering::Relaxed);
+    SCHED_IDLE.store(0, SchedOrdering::Relaxed);
+    SCHED_SWITCHES.store(0, SchedOrdering::Relaxed);
+    SCHED_TIMER_INTS.store(0, SchedOrdering::Relaxed);
+    SCHED_LOOP_CYCLES_TOTAL.store(0, SchedOrdering::Relaxed);
+    SCHED_LOOP_CYCLES_MAX.store(0, SchedOrdering::Relaxed);
+    SCHED_RECLAIM_CALL_CYCLES_TOTAL.store(0, SchedOrdering::Relaxed);
+    SCHED_RECLAIM_CALL_CYCLES_MAX.store(0, SchedOrdering::Relaxed);
+    SCHED_READY_LEN_SUM.store(0, SchedOrdering::Relaxed);
+    SCHED_READY_LEN_SAMPLES.store(0, SchedOrdering::Relaxed);
+    SCHED_READY_LEN_MAX.store(0, SchedOrdering::Relaxed);
+    SCHED_INTERRUPTIBLE_LEN_SUM.store(0, SchedOrdering::Relaxed);
+    SCHED_INTERRUPTIBLE_LEN_SAMPLES.store(0, SchedOrdering::Relaxed);
+    SCHED_INTERRUPTIBLE_LEN_MAX.store(0, SchedOrdering::Relaxed);
+}
+
+pub fn dump_sched_profile(label: &str) {
+    println!("[sched_profile] {}", label);
+    println!("sched loops={} fetch={} idle={} switches={} timer_ints={}",
+        SCHED_LOOPS.load(SchedOrdering::Relaxed), SCHED_FETCH.load(SchedOrdering::Relaxed),
+        SCHED_IDLE.load(SchedOrdering::Relaxed), SCHED_SWITCHES.load(SchedOrdering::Relaxed),
+        SCHED_TIMER_INTS.load(SchedOrdering::Relaxed));
+    println!("sched loop_cycles_total={} loop_cycles_max={} reclaim_call_cycles_total={} reclaim_call_cycles_max={}",
+        SCHED_LOOP_CYCLES_TOTAL.load(SchedOrdering::Relaxed), SCHED_LOOP_CYCLES_MAX.load(SchedOrdering::Relaxed),
+        SCHED_RECLAIM_CALL_CYCLES_TOTAL.load(SchedOrdering::Relaxed), SCHED_RECLAIM_CALL_CYCLES_MAX.load(SchedOrdering::Relaxed));
+    let ready_samples = SCHED_READY_LEN_SAMPLES.load(SchedOrdering::Relaxed);
+    let interruptible_samples = SCHED_INTERRUPTIBLE_LEN_SAMPLES.load(SchedOrdering::Relaxed);
+    println!("sched ready_len_sum={} ready_len_samples={} ready_len_max={} ready_len_avg={} interruptible_len_sum={} interruptible_len_samples={} interruptible_len_max={} interruptible_len_avg={}",
+        SCHED_READY_LEN_SUM.load(SchedOrdering::Relaxed),
+        ready_samples,
+        SCHED_READY_LEN_MAX.load(SchedOrdering::Relaxed),
+        if ready_samples > 0 {
+            SCHED_READY_LEN_SUM.load(SchedOrdering::Relaxed) / ready_samples
+        } else {
+            0
+        },
+        SCHED_INTERRUPTIBLE_LEN_SUM.load(SchedOrdering::Relaxed),
+        interruptible_samples,
+        SCHED_INTERRUPTIBLE_LEN_MAX.load(SchedOrdering::Relaxed),
+        if interruptible_samples > 0 {
+            SCHED_INTERRUPTIBLE_LEN_SUM.load(SchedOrdering::Relaxed) / interruptible_samples
+        } else {
+            0
+        });
 }

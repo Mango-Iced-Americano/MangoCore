@@ -271,10 +271,20 @@ fn exit_code_from_waitpid_status(status: i32) -> i32 {
 
 // 非阻塞收割所有僵尸孤儿（WNOHANG = 1）
 fn reap_orphans() {
+    const MAX_REAP_PER_PASS: usize = 256;
+    let mut reaped = 0usize;
     loop {
         let mut status = 0i32;
         let ret = waitpid_wnohang(-1, &mut status);
         if ret <= 0 {
+            break;
+        }
+        reaped += 1;
+        if reaped >= MAX_REAP_PER_PASS {
+            println!(
+                "[diag] reap_orphans hit per-pass limit={} last_pid={}",
+                MAX_REAP_PER_PASS, ret
+            );
             break;
         }
     }
@@ -762,27 +772,35 @@ fn profile_before(group_name: &str, libc_suffix: &str, cfg: &RuntimeConfig) {
         return;
     }
     if cfg.ext4_profile {
-        user_lib::syscall::sys_ext4_counters(0, 0, 0); // enable
-        user_lib::syscall::sys_ext4_counters(2, 0, 0); // reset ext4 counters
+        user_lib::syscall::sys_ext4_counters(0, 0, 0); // enable ext4
+        user_lib::syscall::sys_ext4_counters(2, 0, 0); // reset ext4
     }
     if cfg.reclaim_profile {
-        user_lib::syscall::sys_ext4_counters(12, 0, 0); // reset reclaim stats
+        user_lib::syscall::sys_ext4_counters(12, 0, 0); // reset reclaim
+        user_lib::syscall::sys_ext4_counters(14, 0, 0); // reset pipe
+        user_lib::syscall::sys_ext4_counters(16, 0, 0); // reset sched
     }
     let label = profile_label(group_name, libc_suffix, "begin");
     println!("[profile] begin {}", label);
 }
 
 fn profile_after(group_name: &str, libc_suffix: &str, cfg: &RuntimeConfig) {
+    profile_dump(group_name, libc_suffix, "end", cfg);
+}
+
+fn profile_dump(group_name: &str, libc_suffix: &str, phase: &str, cfg: &RuntimeConfig) {
     if group_name != "lmbench" {
         return;
     }
-    let label = profile_label(group_name, libc_suffix, "end");
-    println!("[profile] end {}", label);
+    let label = profile_label(group_name, libc_suffix, phase);
+    println!("[profile] {} {}", phase, label);
     if cfg.ext4_profile {
         user_lib::syscall::sys_ext4_counters(3, label.as_ptr() as usize, label.len());
     }
     if cfg.reclaim_profile {
-        user_lib::syscall::sys_ext4_counters(13, label.as_ptr() as usize, label.len());
+        user_lib::syscall::sys_ext4_counters(13, label.as_ptr() as usize, label.len()); // reclaim
+        user_lib::syscall::sys_ext4_counters(15, label.as_ptr() as usize, label.len()); // pipe
+        user_lib::syscall::sys_ext4_counters(17, label.as_ptr() as usize, label.len()); // sched
     }
 }
 
@@ -815,6 +833,7 @@ fn run_group_in_dir(
             timeout_secs,
             log_dir,
             libc_suffix,
+            cfg,
         );
         let elapsed_s = (get_time() as u64 - group_start_ms) / 1000;
         if last_exit_code == 0 {
@@ -868,6 +887,7 @@ fn run_group_once(
     timeout_secs: u64,
     log_dir: &str,
     libc_suffix: &str,
+    cfg: &RuntimeConfig,
 ) -> i32 {
     // 比赛评测依赖此标记格式，超时 kill 后需自己补打 END
     let group_end_marker = format!(
@@ -965,6 +985,7 @@ fn run_group_once(
                     "[initproc] TIMEOUT ({}s) for {} in {}, sending SIGKILL to pid={}",
                     timeout_secs, script, log_dir, pid
                 );
+                profile_dump(group_name, libc_suffix, "timeout", cfg);
                 let t_kill = get_time() as u64;
                 let _ = kill(pid as usize, SIGKILL);
                 println!(

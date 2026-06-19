@@ -284,6 +284,7 @@ pub fn trap_handler() -> ! {
         }
         Trap::Interrupt(Interrupt::Timer) => {
             crate::task::perf::record_timer_interrupt();
+            crate::task::processor::record_sched_timer_interrupt();
             TIClr::read().clear_timer().write();
             crate::task::timer_interrupt_handler();
         }

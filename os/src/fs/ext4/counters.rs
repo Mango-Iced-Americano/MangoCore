@@ -377,6 +377,18 @@ pub fn sys_ext4_counters(cmd: usize, label_ptr: usize, label_len: usize) -> isiz
             crate::fs::reclaim::dump_reclaim_stats(&label);
             0
         }
+        14 => { crate::fs::dev::pipe::reset_pipe_profile(); 0 }
+        15 => {
+            let label = read_label(label_ptr, label_len);
+            crate::fs::dev::pipe::dump_pipe_profile(&label);
+            0
+        }
+        16 => { crate::task::processor::reset_sched_profile(); 0 }
+        17 => {
+            let label = read_label(label_ptr, label_len);
+            crate::task::processor::dump_sched_profile(&label);
+            0
+        }
         _ => -22, // EINVAL
     }
 }
