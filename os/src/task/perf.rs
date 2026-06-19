@@ -1,3 +1,14 @@
+/// Runtime gate: 0 = counters frozen (no-op), 1 = recording.
+/// Toggled via /sys/kernel/stats/stats_on. Always present so sysfs can
+/// read/write it even when `perf_stats` is disabled at compile time.
+pub static STATS_ON: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+fn stats_enabled() -> bool {
+    false
+}
+
 #[cfg(feature = "perf_stats")]
 mod enabled {
     use super::super::WaitResult;
@@ -68,6 +79,174 @@ mod enabled {
     static CLONE_TIME_COUNT: AtomicUsize = AtomicUsize::new(0);
     static PAGEFAULT_TIME_COUNT: AtomicUsize = AtomicUsize::new(0);
     static FRAME_ALLOC_TIME_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    #[inline(always)]
+    fn stats_enabled() -> bool {
+        super::STATS_ON.load(Ordering::Relaxed)
+    }
+
+    // ── P0: Scheduler / Task Queue ──
+    pub static FAIR_PICK_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static FAST_PATH_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static FAIR_SCAN_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static DUPLICATE_READY_ENQUEUE: AtomicUsize = AtomicUsize::new(0);
+    pub static ADD_READY_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static ADD_INTERRUPTIBLE_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static WAKE_INTERRUPTIBLE_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static READY_LEN_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static INTERRUPTIBLE_LEN_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static READY_ZOMBIE_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static INTERRUPTIBLE_ZOMBIE_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static ZOMBIE_DRAIN_SCAN_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static ZOMBIE_DRAIN_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static ZOMBIE_DRAIN_REMOVED: AtomicUsize = AtomicUsize::new(0);
+    pub static READY_NONZERO_NICE_CUR: AtomicUsize = AtomicUsize::new(0);
+
+    // ── P0: Kernel Timer ──
+    pub static KTIMER_LEN_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static KTIMER_ADD_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static KTIMER_POP_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static KTIMER_POP_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static KTIMER_STALE_WAKETASK: AtomicUsize = AtomicUsize::new(0);
+    pub static KTIMER_REAL_WAKE: AtomicUsize = AtomicUsize::new(0);
+    pub static KTIMER_COMPACT_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static KTIMER_STALE_REMOVED: AtomicUsize = AtomicUsize::new(0);
+    pub static WAIT_WITH_TIMEOUT_TOTAL: AtomicUsize = AtomicUsize::new(0);
+
+    // ── P0: Syscall / Trap ──
+    pub static SYSCALL_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static SYSCALL_GETPPID_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static SYSCALL_COST_MAX_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static TRAP_ENTER_COST_MAX_TICKS: AtomicUsize = AtomicUsize::new(0);
+
+    #[inline(always)]
+    fn update_max(counter: &AtomicUsize, val: usize) {
+        let mut cur = counter.load(Ordering::Relaxed);
+        while val > cur {
+            match counter.compare_exchange_weak(cur, val, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => break,
+                Err(v) => cur = v,
+            }
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_taskq_add_ready() { if !stats_enabled() { return; } ADD_READY_TOTAL.fetch_add(1, Ordering::Relaxed); }
+
+    #[inline(always)]
+    pub fn record_taskq_add_interruptible() { if !stats_enabled() { return; } ADD_INTERRUPTIBLE_TOTAL.fetch_add(1, Ordering::Relaxed); }
+
+    #[inline(always)]
+    pub fn record_taskq_wake_interruptible() { if !stats_enabled() { return; } WAKE_INTERRUPTIBLE_TOTAL.fetch_add(1, Ordering::Relaxed); }
+
+    #[inline(always)]
+    pub fn record_taskq_dup_enqueue() { if !stats_enabled() { return; } DUPLICATE_READY_ENQUEUE.fetch_add(1, Ordering::Relaxed); }
+
+    #[inline(always)]
+    pub fn record_taskq_fetch(fair_pick: bool, scan_depth: usize) {
+        if !stats_enabled() { return; }
+        if fair_pick {
+            FAIR_PICK_CALLS.fetch_add(1, Ordering::Relaxed);
+            update_max(&FAIR_SCAN_MAX, scan_depth);
+        } else {
+            FAST_PATH_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_taskq_queue_lens(ready: usize, interruptible: usize, ready_zombie: usize, int_zombie: usize, nonzero_nice: usize) {
+        if !stats_enabled() { return; }
+        update_max(&READY_LEN_MAX, ready);
+        update_max(&INTERRUPTIBLE_LEN_MAX, interruptible);
+        update_max(&READY_ZOMBIE_MAX, ready_zombie);
+        update_max(&INTERRUPTIBLE_ZOMBIE_MAX, int_zombie);
+        READY_NONZERO_NICE_CUR.store(nonzero_nice, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_zombie_drain_full(scan_total: usize, calls: usize, removed: usize) {
+        if !stats_enabled() { return; }
+        if scan_total != 0 { ZOMBIE_DRAIN_SCAN_TOTAL.fetch_add(scan_total, Ordering::Relaxed); }
+        if calls != 0 { ZOMBIE_DRAIN_CALLS.fetch_add(calls, Ordering::Relaxed); }
+        if removed != 0 { ZOMBIE_DRAIN_REMOVED.fetch_add(removed, Ordering::Relaxed); }
+    }
+
+    #[inline(always)]
+    pub fn record_ktimer_add() { if !stats_enabled() { return; } KTIMER_ADD_TOTAL.fetch_add(1, Ordering::Relaxed); }
+
+    #[inline(always)]
+    pub fn record_ktimer_len(len: usize) { if !stats_enabled() { return; } update_max(&KTIMER_LEN_MAX, len); }
+
+    #[inline(always)]
+    pub fn record_ktimer_pop(pop_count: usize) {
+        if !stats_enabled() { return; }
+        KTIMER_POP_TOTAL.fetch_add(1, Ordering::Relaxed);
+        update_max(&KTIMER_POP_MAX, pop_count);
+    }
+
+    #[inline(always)]
+    pub fn record_ktimer_stale_waketask() { if !stats_enabled() { return; } KTIMER_STALE_WAKETASK.fetch_add(1, Ordering::Relaxed); }
+
+    #[inline(always)]
+    pub fn record_ktimer_real_wake() { if !stats_enabled() { return; } KTIMER_REAL_WAKE.fetch_add(1, Ordering::Relaxed); }
+
+    #[inline(always)]
+    pub fn record_ktimer_compact(stale_removed: usize) {
+        if !stats_enabled() { return; }
+        KTIMER_COMPACT_CALLS.fetch_add(1, Ordering::Relaxed);
+        if stale_removed != 0 { KTIMER_STALE_REMOVED.fetch_add(stale_removed, Ordering::Relaxed); }
+    }
+
+    #[inline(always)]
+    pub fn record_wait_with_timeout() { if !stats_enabled() { return; } WAIT_WITH_TIMEOUT_TOTAL.fetch_add(1, Ordering::Relaxed); }
+
+    #[inline(always)]
+    pub fn record_syscall_enter(syscall_id: usize) {
+        if !stats_enabled() { return; }
+        SYSCALL_TOTAL.fetch_add(1, Ordering::Relaxed);
+        if syscall_id == 173 { SYSCALL_GETPPID_TOTAL.fetch_add(1, Ordering::Relaxed); }
+    }
+
+    #[inline(always)]
+    pub fn record_syscall_cost_ticks(ticks: usize) { if !stats_enabled() { return; } update_max(&SYSCALL_COST_MAX_TICKS, ticks); }
+
+    #[inline(always)]
+    pub fn record_trap_cost_ticks(ticks: usize) { if !stats_enabled() { return; } update_max(&TRAP_ENTER_COST_MAX_TICKS, ticks); }
+
+    /// Reset all P0 performance counters (writable via /sys/kernel/stats/reset).
+    pub fn reset_p0_counters() {
+        // Scheduler / Task Queue
+        FAIR_PICK_CALLS.store(0, Ordering::Relaxed);
+        FAST_PATH_CALLS.store(0, Ordering::Relaxed);
+        FAIR_SCAN_MAX.store(0, Ordering::Relaxed);
+        DUPLICATE_READY_ENQUEUE.store(0, Ordering::Relaxed);
+        ADD_READY_TOTAL.store(0, Ordering::Relaxed);
+        ADD_INTERRUPTIBLE_TOTAL.store(0, Ordering::Relaxed);
+        WAKE_INTERRUPTIBLE_TOTAL.store(0, Ordering::Relaxed);
+        READY_LEN_MAX.store(0, Ordering::Relaxed);
+        INTERRUPTIBLE_LEN_MAX.store(0, Ordering::Relaxed);
+        READY_ZOMBIE_MAX.store(0, Ordering::Relaxed);
+        INTERRUPTIBLE_ZOMBIE_MAX.store(0, Ordering::Relaxed);
+        ZOMBIE_DRAIN_SCAN_TOTAL.store(0, Ordering::Relaxed);
+        ZOMBIE_DRAIN_CALLS.store(0, Ordering::Relaxed);
+        ZOMBIE_DRAIN_REMOVED.store(0, Ordering::Relaxed);
+        READY_NONZERO_NICE_CUR.store(0, Ordering::Relaxed);
+        // Kernel Timer
+        KTIMER_LEN_MAX.store(0, Ordering::Relaxed);
+        KTIMER_ADD_TOTAL.store(0, Ordering::Relaxed);
+        KTIMER_POP_MAX.store(0, Ordering::Relaxed);
+        KTIMER_POP_TOTAL.store(0, Ordering::Relaxed);
+        KTIMER_STALE_WAKETASK.store(0, Ordering::Relaxed);
+        KTIMER_REAL_WAKE.store(0, Ordering::Relaxed);
+        KTIMER_COMPACT_CALLS.store(0, Ordering::Relaxed);
+        KTIMER_STALE_REMOVED.store(0, Ordering::Relaxed);
+        WAIT_WITH_TIMEOUT_TOTAL.store(0, Ordering::Relaxed);
+        // Syscall / Trap
+        SYSCALL_TOTAL.store(0, Ordering::Relaxed);
+        SYSCALL_GETPPID_TOTAL.store(0, Ordering::Relaxed);
+        SYSCALL_COST_MAX_TICKS.store(0, Ordering::Relaxed);
+        TRAP_ENTER_COST_MAX_TICKS.store(0, Ordering::Relaxed);
+    }
 
     /// Print accumulated timing stats, then reset.
     pub fn perf_dump_timings(label: &str) {
@@ -564,3 +743,136 @@ pub fn record_frame_alloc_time_us(_ticks: usize) {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
 pub fn perf_time_now() -> usize { 0 }
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_taskq_add_ready() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_taskq_add_interruptible() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_taskq_wake_interruptible() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_taskq_dup_enqueue() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_taskq_fetch(_fair_pick: bool, _scan_depth: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_taskq_queue_lens(_ready: usize, _interruptible: usize, _ready_zombie: usize, _int_zombie: usize, _nonzero_nice: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_zombie_drain_full(_scan_total: usize, _calls: usize, _removed: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ktimer_add() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ktimer_len(_len: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ktimer_pop(_pop_count: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ktimer_stale_waketask() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ktimer_real_wake() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ktimer_compact(_stale_removed: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_wait_with_timeout() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_syscall_enter(_syscall_id: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_syscall_cost_ticks(_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_trap_cost_ticks(_ticks: usize) {}
+
+// ── P0 counter stubs (zero-valued when perf_stats disabled) ──
+
+#[cfg(not(feature = "perf_stats"))]
+pub static FAIR_PICK_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static FAST_PATH_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static FAIR_SCAN_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static DUPLICATE_READY_ENQUEUE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static ADD_READY_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static ADD_INTERRUPTIBLE_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static WAKE_INTERRUPTIBLE_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static READY_LEN_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static INTERRUPTIBLE_LEN_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static READY_ZOMBIE_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static INTERRUPTIBLE_ZOMBIE_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static ZOMBIE_DRAIN_SCAN_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static ZOMBIE_DRAIN_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static ZOMBIE_DRAIN_REMOVED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static READY_NONZERO_NICE_CUR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(not(feature = "perf_stats"))]
+pub static KTIMER_LEN_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static KTIMER_ADD_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static KTIMER_POP_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static KTIMER_POP_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static KTIMER_STALE_WAKETASK: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static KTIMER_REAL_WAKE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static KTIMER_COMPACT_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static KTIMER_STALE_REMOVED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static WAIT_WITH_TIMEOUT_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(not(feature = "perf_stats"))]
+pub static SYSCALL_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static SYSCALL_GETPPID_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static SYSCALL_COST_MAX_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TRAP_ENTER_COST_MAX_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn reset_p0_counters() {}
