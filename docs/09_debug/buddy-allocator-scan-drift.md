@@ -276,7 +276,22 @@ self.bitmap_set(j - 1, buddy_addr);
 
 la64 上退化同样消除，全部窗口稳定。
 
-### 5.3 编译验证
+### 5.3 rv64 6 窗口扩展验证
+
+**配置**：basic+busybox pre-workload，全量 lmbench，6 窗口
+
+| 指标 | W0 | W1 | W2 | W3 | W4 | W5 |
+|------|-----|-----|-----|-----|-----|-----|
+| open/close | 280 μs | 267 μs | 262 μs | 262 μs | 258 μs | 246 μs |
+| null syscall | 38.3 μs | 37.5 μs | 37.6 μs | 39.6 μs | 37.2 μs | 38.6 μs |
+
+| 计数器 | W0 | W1 | W2 | W3 | W4 | W5 |
+|--------|-----|-----|-----|-----|-----|-----|
+| scan_steps (post) | 1.38M | 502K | 516K | 513K | 530K | 338K |
+
+open/close 略有下趋势（280→246 μs），无退化。scan steps 稳定在 338K-1.38M 范围，是修复前（14M-70M）的 1/50 以下。
+
+### 5.4 编译验证
 
 - `make rv64-kernel-build-only` ✅
 - `make la64-kernel-build-only` ✅
