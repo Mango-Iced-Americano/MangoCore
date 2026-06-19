@@ -86,6 +86,11 @@ lazy_static! {
 pub fn run_tasks() {
     let mut schedule_tick = 0usize;
     loop {
+        let sched_profile = sched_profile_enabled();
+        if sched_profile {
+            SCHED_LOOPS.fetch_add(1, SchedOrdering::Relaxed);
+        }
+        let loop_t0 = sched_profile_start(sched_profile);
         schedule_tick = schedule_tick.wrapping_add(1);
         // Read one character from UART per iteration. Handle in priority order:
         // 1. Magic key (Ctrl+T) → trace dump + shutdown
@@ -99,6 +104,7 @@ pub fn run_tasks() {
         #[cfg(not(target_arch = "riscv64"))]
         let should_poll_console = true;
         if should_poll_console {
+            let stage_t0 = sched_profile_start(sched_profile);
             let ch = crate::hal::console_getchar() as u8;
             if ch != 0xFF {
                 if crate::trace::check_magic_key(ch, "schedule") {
@@ -110,15 +116,54 @@ pub fn run_tasks() {
                     crate::fs::dev::tty::Teletype::wake_readers();
                 }
             }
+            sched_record_stage(
+                sched_profile,
+                &SCHED_STAGE_CONSOLE_CALLS,
+                &SCHED_STAGE_CONSOLE_CYCLES_TOTAL,
+                &SCHED_STAGE_CONSOLE_CYCLES_MAX,
+                stage_t0,
+            );
         }
-        // 处理到期内核定时器（SIGALRM 等），防止忙等待/轮询任务阻塞定时器投递。
+        // Keep the legacy timeout sweep until every wait path has been proven
+        // to be driven solely by timer interrupts. Removing it can strand early
+        // boot networking waits before init reaches the test runner.
+        let stage_t0 = sched_profile_start(sched_profile);
         do_wake_expired();
+        sched_record_stage(
+            sched_profile,
+            &SCHED_STAGE_WAKE_EXPIRED_CALLS,
+            &SCHED_STAGE_WAKE_EXPIRED_CYCLES_TOTAL,
+            &SCHED_STAGE_WAKE_EXPIRED_CYCLES_MAX,
+            stage_t0,
+        );
         if schedule_tick % BACKGROUND_NET_POLL_INTERVAL == 0 {
+            let stage_t0 = sched_profile_start(sched_profile);
             NET_INTERFACE.try_poll();
+            sched_record_stage(
+                sched_profile,
+                &SCHED_STAGE_NET_POLL_CALLS,
+                &SCHED_STAGE_NET_POLL_CYCLES_TOTAL,
+                &SCHED_STAGE_NET_POLL_CYCLES_MAX,
+                stage_t0,
+            );
         }
+        let rec_t0 = sched_profile_start(sched_profile);
         crate::fs::reclaim::maybe_reclaim_fs_caches();
+        sched_record_stage(
+            sched_profile,
+            &SCHED_STAGE_RECLAIM_CALLS,
+            &SCHED_STAGE_RECLAIM_CYCLES_TOTAL,
+            &SCHED_STAGE_RECLAIM_CYCLES_MAX,
+            rec_t0,
+        );
+        if sched_profile {
+            let rec_dt = sched_rdcycle().saturating_sub(rec_t0);
+            SCHED_RECLAIM_CALL_CYCLES_TOTAL.fetch_add(rec_dt, SchedOrdering::Relaxed);
+            sched_atomic_max(&SCHED_RECLAIM_CALL_CYCLES_MAX, rec_dt);
+        }
         // 当前任务退出后先进入专用 zombie 队列；切回 idle 后即可安全 drop。
         // 这样避免把不可运行的 TCB 塞进 ready_queue 再扫描剔除。
+        let stage_t0 = sched_profile_start(sched_profile);
         if has_zombie_queue_tasks_fast() {
             let zombies = take_zombie_tasks(64);
             let drained_zombies = zombies.len();
@@ -126,9 +171,17 @@ pub fn run_tasks() {
             super::perf::record_zombie_drain(drained_zombies);
             crate::task::perf::record_zombie_drain_full(0, 1, drained_zombies);
         }
+        sched_record_stage(
+            sched_profile,
+            &SCHED_STAGE_ZOMBIE_QUEUE_CALLS,
+            &SCHED_STAGE_ZOMBIE_QUEUE_CYCLES_TOTAL,
+            &SCHED_STAGE_ZOMBIE_QUEUE_CYCLES_MAX,
+            stage_t0,
+        );
         // 兜底清理旧队列中的 zombie，避免异常路径留下不可运行任务。
         // Also do full queue scan for stats zombie/nice counters every 64 ticks.
         if schedule_tick % 64 == 0 {
+            let stage_t0 = sched_profile_start(sched_profile);
             for _ in 0..8 {
                 let a = take_one_ready_zombie();
                 let b = take_one_interruptible_zombie();
@@ -157,6 +210,13 @@ pub fn run_tasks() {
                 crate::task::manager::interruptible_count_fast() as usize,
                 ready_z, int_z, nnice,
             );
+            sched_record_stage(
+                sched_profile,
+                &SCHED_STAGE_STALE_ZOMBIE_CALLS,
+                &SCHED_STAGE_STALE_ZOMBIE_CYCLES_TOTAL,
+                &SCHED_STAGE_STALE_ZOMBIE_CYCLES_MAX,
+                stage_t0,
+            );
         } else {
             crate::task::perf::record_taskq_queue_lens(
                 crate::task::manager::ready_count_fast() as usize,
@@ -165,17 +225,60 @@ pub fn run_tasks() {
             );
         }
         // 降频清理 PROCESS_SHARED_FUTEX 空 WaitQueue 键
+        let stage_t0 = sched_profile_start(sched_profile);
         super::threads::compact_shared_futex();
+        sched_record_stage(
+            sched_profile,
+            &SCHED_STAGE_FUTEX_COMPACT_CALLS,
+            &SCHED_STAGE_FUTEX_COMPACT_CYCLES_TOTAL,
+            &SCHED_STAGE_FUTEX_COMPACT_CYCLES_MAX,
+            stage_t0,
+        );
+        let stage_t0 = sched_profile_start(sched_profile);
         let mut processor = PROCESSOR.lock();
         let next_task = fetch_task();
+        sched_record_stage(
+            sched_profile,
+            &SCHED_STAGE_FETCH_TASK_CALLS,
+            &SCHED_STAGE_FETCH_TASK_CYCLES_TOTAL,
+            &SCHED_STAGE_FETCH_TASK_CYCLES_MAX,
+            stage_t0,
+        );
+        let stage_t0 = sched_profile_start(sched_profile);
+        if let Some((ready_len, interruptible_len)) = super::task_manager_counts() {
+            sched_record_queue_sample(ready_len as u64, interruptible_len as u64);
+        }
+        sched_record_stage(
+            sched_profile,
+            &SCHED_STAGE_QUEUE_SAMPLE_CALLS,
+            &SCHED_STAGE_QUEUE_SAMPLE_CYCLES_TOTAL,
+            &SCHED_STAGE_QUEUE_SAMPLE_CYCLES_MAX,
+            stage_t0,
+        );
+        if sched_profile {
+            if next_task.is_some() {
+                SCHED_FETCH.fetch_add(1, SchedOrdering::Relaxed);
+            } else {
+                SCHED_IDLE.fetch_add(1, SchedOrdering::Relaxed);
+            }
+        }
         super::perf::record_schedule_loop(next_task.is_some());
         if let Some(task) = next_task {
+            let stage_t0 = sched_profile_start(sched_profile);
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
             // 独占地访问即将运行的任务的 TCB
             let next_task_cx_ptr = {
                 let mut task_inner = task.acquire_inner_lock();
                 if task_inner.task_status == TaskStatus::Zombie {
                     drop(task_inner);
+                    sched_record_stage(
+                        sched_profile,
+                        &SCHED_STAGE_SWITCH_PREP_CALLS,
+                        &SCHED_STAGE_SWITCH_PREP_CYCLES_TOTAL,
+                        &SCHED_STAGE_SWITCH_PREP_CYCLES_MAX,
+                        stage_t0,
+                    );
+                    sched_record_loop_cycles(sched_profile, loop_t0);
                     continue;
                 }
                 task_inner.task_status = TaskStatus::Running;
@@ -199,6 +302,17 @@ pub fn run_tasks() {
             processor.current = Some(task);
             // 手动释放处理器
             drop(processor);
+            sched_record_stage(
+                sched_profile,
+                &SCHED_STAGE_SWITCH_PREP_CALLS,
+                &SCHED_STAGE_SWITCH_PREP_CYCLES_TOTAL,
+                &SCHED_STAGE_SWITCH_PREP_CYCLES_MAX,
+                stage_t0,
+            );
+            if sched_profile {
+                SCHED_SWITCHES.fetch_add(1, SchedOrdering::Relaxed);
+            }
+            sched_record_loop_cycles(sched_profile, loop_t0);
             unsafe {
                 // 调用__switch 函数(汇编)切换任务
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
@@ -206,11 +320,20 @@ pub fn run_tasks() {
         } else {
             // 没有就绪的任务 → CPU idle
             drop(processor);
+            let stage_t0 = sched_profile_start(sched_profile);
             if schedule_tick % IDLE_NET_POLL_INTERVAL == 0 {
                 NET_INTERFACE.poll();
             } else {
                 spin_loop();
             }
+            sched_record_stage(
+                sched_profile,
+                &SCHED_STAGE_IDLE_CALLS,
+                &SCHED_STAGE_IDLE_CYCLES_TOTAL,
+                &SCHED_STAGE_IDLE_CYCLES_MAX,
+                stage_t0,
+            );
+            sched_record_loop_cycles(sched_profile, loop_t0);
         }
     }
 }
@@ -395,8 +518,327 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
     // 获取空闲任务的上下文指针
     let idle_task_cx_ptr = PROCESSOR.lock().get_idle_task_cx_ptr();
+    if sched_profile_enabled() {
+        SCHED_SWITCHES.fetch_add(1, SchedOrdering::Relaxed);
+    }
     unsafe {
         // 调用__switch 函数(汇编)切换任务
         __switch(switched_task_cx_ptr, idle_task_cx_ptr);
     }
+}
+
+// ── sched debug profile counters ────────────────────────────────────────
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering as SchedOrdering};
+
+static SCHED_PROFILE_ENABLED: AtomicBool = AtomicBool::new(false);
+static SCHED_LOOPS: AtomicU64 = AtomicU64::new(0);
+static SCHED_FETCH: AtomicU64 = AtomicU64::new(0);
+static SCHED_IDLE: AtomicU64 = AtomicU64::new(0);
+static SCHED_SWITCHES: AtomicU64 = AtomicU64::new(0);
+static SCHED_TIMER_INTS: AtomicU64 = AtomicU64::new(0);
+static SCHED_LOOP_CYCLES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static SCHED_LOOP_CYCLES_MAX: AtomicU64 = AtomicU64::new(0);
+static SCHED_RECLAIM_CALL_CYCLES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static SCHED_RECLAIM_CALL_CYCLES_MAX: AtomicU64 = AtomicU64::new(0);
+static SCHED_READY_LEN_SUM: AtomicU64 = AtomicU64::new(0);
+static SCHED_READY_LEN_SAMPLES: AtomicU64 = AtomicU64::new(0);
+static SCHED_READY_LEN_MAX: AtomicU64 = AtomicU64::new(0);
+static SCHED_INTERRUPTIBLE_LEN_SUM: AtomicU64 = AtomicU64::new(0);
+static SCHED_INTERRUPTIBLE_LEN_SAMPLES: AtomicU64 = AtomicU64::new(0);
+static SCHED_INTERRUPTIBLE_LEN_MAX: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_CONSOLE_CALLS: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_CONSOLE_CYCLES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_CONSOLE_CYCLES_MAX: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_WAKE_EXPIRED_CALLS: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_WAKE_EXPIRED_CYCLES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_WAKE_EXPIRED_CYCLES_MAX: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_NET_POLL_CALLS: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_NET_POLL_CYCLES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_NET_POLL_CYCLES_MAX: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_RECLAIM_CALLS: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_RECLAIM_CYCLES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_RECLAIM_CYCLES_MAX: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_ZOMBIE_QUEUE_CALLS: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_ZOMBIE_QUEUE_CYCLES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_ZOMBIE_QUEUE_CYCLES_MAX: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_STALE_ZOMBIE_CALLS: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_STALE_ZOMBIE_CYCLES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_STALE_ZOMBIE_CYCLES_MAX: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_FUTEX_COMPACT_CALLS: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_FUTEX_COMPACT_CYCLES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_FUTEX_COMPACT_CYCLES_MAX: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_FETCH_TASK_CALLS: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_FETCH_TASK_CYCLES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_FETCH_TASK_CYCLES_MAX: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_QUEUE_SAMPLE_CALLS: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_QUEUE_SAMPLE_CYCLES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_QUEUE_SAMPLE_CYCLES_MAX: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_SWITCH_PREP_CALLS: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_SWITCH_PREP_CYCLES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_SWITCH_PREP_CYCLES_MAX: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_IDLE_CALLS: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_IDLE_CYCLES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static SCHED_STAGE_IDLE_CYCLES_MAX: AtomicU64 = AtomicU64::new(0);
+static SCHED_TIMER_TRAP_CYCLES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static SCHED_TIMER_TRAP_CYCLES_MAX: AtomicU64 = AtomicU64::new(0);
+static SCHED_TIMER_HANDLER_CYCLES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static SCHED_TIMER_HANDLER_CYCLES_MAX: AtomicU64 = AtomicU64::new(0);
+static SCHED_PROGRAM_TIMER_CALLS: AtomicU64 = AtomicU64::new(0);
+static SCHED_PROGRAM_TIMER_CYCLES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static SCHED_PROGRAM_TIMER_CYCLES_MAX: AtomicU64 = AtomicU64::new(0);
+static SCHED_SBI_SET_TIMER_CALLS: AtomicU64 = AtomicU64::new(0);
+static SCHED_SBI_SET_TIMER_CYCLES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static SCHED_SBI_SET_TIMER_CYCLES_MAX: AtomicU64 = AtomicU64::new(0);
+
+#[inline(always)]
+fn sched_profile_enabled() -> bool {
+    SCHED_PROFILE_ENABLED.load(SchedOrdering::Relaxed)
+}
+
+#[inline(always)]
+fn sched_rdcycle() -> u64 {
+    #[cfg(target_arch = "riscv64")]
+    { let cycles: usize; unsafe { core::arch::asm!("rdcycle {}", out(reg) cycles) }; cycles as u64 }
+    #[cfg(target_arch = "loongarch64")]
+    { let lo: usize; let hi: usize; unsafe { core::arch::asm!("rdtime.d {}, {}", out(reg) lo, out(reg) hi) }; lo as u64 }
+    #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
+    { 0 }
+}
+fn sched_atomic_max(slot: &AtomicU64, v: u64) {
+    let mut cur = slot.load(SchedOrdering::Relaxed);
+    while v > cur { match slot.compare_exchange_weak(cur, v, SchedOrdering::Relaxed, SchedOrdering::Relaxed) { Ok(_) => break, Err(n) => cur = n } }
+}
+
+#[inline(always)]
+fn sched_profile_start(enabled: bool) -> u64 {
+    if enabled {
+        sched_rdcycle()
+    } else {
+        0
+    }
+}
+
+#[inline(always)]
+pub(crate) fn sched_profile_cycle_start() -> u64 {
+    sched_profile_start(sched_profile_enabled())
+}
+
+#[inline(always)]
+fn sched_record_cycles(enabled: bool, total: &AtomicU64, max: &AtomicU64, start: u64) {
+    if !enabled {
+        return;
+    }
+    let dt = sched_rdcycle().saturating_sub(start);
+    total.fetch_add(dt, SchedOrdering::Relaxed);
+    sched_atomic_max(max, dt);
+}
+
+#[inline(always)]
+fn sched_record_stage(
+    enabled: bool,
+    calls: &AtomicU64,
+    total: &AtomicU64,
+    max: &AtomicU64,
+    start: u64,
+) {
+    if !enabled {
+        return;
+    }
+    calls.fetch_add(1, SchedOrdering::Relaxed);
+    sched_record_cycles(true, total, max, start);
+}
+
+#[inline(always)]
+fn sched_record_loop_cycles(enabled: bool, start: u64) {
+    sched_record_cycles(
+        enabled,
+        &SCHED_LOOP_CYCLES_TOTAL,
+        &SCHED_LOOP_CYCLES_MAX,
+        start,
+    );
+}
+
+#[inline(always)]
+fn sched_record_queue_sample(ready_len: u64, interruptible_len: u64) {
+    if !sched_profile_enabled() {
+        return;
+    }
+    SCHED_READY_LEN_SUM.fetch_add(ready_len, SchedOrdering::Relaxed);
+    SCHED_READY_LEN_SAMPLES.fetch_add(1, SchedOrdering::Relaxed);
+    sched_atomic_max(&SCHED_READY_LEN_MAX, ready_len);
+    SCHED_INTERRUPTIBLE_LEN_SUM.fetch_add(interruptible_len, SchedOrdering::Relaxed);
+    SCHED_INTERRUPTIBLE_LEN_SAMPLES.fetch_add(1, SchedOrdering::Relaxed);
+    sched_atomic_max(&SCHED_INTERRUPTIBLE_LEN_MAX, interruptible_len);
+}
+
+#[inline(always)]
+pub(crate) fn record_sched_timer_interrupt() {
+    if !sched_profile_enabled() {
+        return;
+    }
+    SCHED_TIMER_INTS.fetch_add(1, SchedOrdering::Relaxed);
+}
+
+#[inline(always)]
+pub(crate) fn record_sched_timer_trap_cycles(start: u64) {
+    sched_record_cycles(
+        sched_profile_enabled(),
+        &SCHED_TIMER_TRAP_CYCLES_TOTAL,
+        &SCHED_TIMER_TRAP_CYCLES_MAX,
+        start,
+    );
+}
+
+#[inline(always)]
+pub(crate) fn record_sched_timer_handler_cycles(start: u64) {
+    sched_record_cycles(
+        sched_profile_enabled(),
+        &SCHED_TIMER_HANDLER_CYCLES_TOTAL,
+        &SCHED_TIMER_HANDLER_CYCLES_MAX,
+        start,
+    );
+}
+
+#[inline(always)]
+pub(crate) fn record_sched_program_timer_cycles(start: u64) {
+    if !sched_profile_enabled() {
+        return;
+    }
+    SCHED_PROGRAM_TIMER_CALLS.fetch_add(1, SchedOrdering::Relaxed);
+    sched_record_cycles(
+        true,
+        &SCHED_PROGRAM_TIMER_CYCLES_TOTAL,
+        &SCHED_PROGRAM_TIMER_CYCLES_MAX,
+        start,
+    );
+}
+
+#[inline(always)]
+pub(crate) fn record_sched_sbi_set_timer_cycles(start: u64) {
+    if !sched_profile_enabled() {
+        return;
+    }
+    SCHED_SBI_SET_TIMER_CALLS.fetch_add(1, SchedOrdering::Relaxed);
+    sched_record_cycles(
+        true,
+        &SCHED_SBI_SET_TIMER_CYCLES_TOTAL,
+        &SCHED_SBI_SET_TIMER_CYCLES_MAX,
+        start,
+    );
+}
+
+#[inline(always)]
+fn reset_stage(calls: &AtomicU64, total: &AtomicU64, max: &AtomicU64) {
+    calls.store(0, SchedOrdering::Relaxed);
+    total.store(0, SchedOrdering::Relaxed);
+    max.store(0, SchedOrdering::Relaxed);
+}
+
+pub fn reset_sched_profile() {
+    SCHED_PROFILE_ENABLED.store(false, SchedOrdering::Relaxed);
+    SCHED_LOOPS.store(0, SchedOrdering::Relaxed);
+    SCHED_FETCH.store(0, SchedOrdering::Relaxed);
+    SCHED_IDLE.store(0, SchedOrdering::Relaxed);
+    SCHED_SWITCHES.store(0, SchedOrdering::Relaxed);
+    SCHED_TIMER_INTS.store(0, SchedOrdering::Relaxed);
+    SCHED_LOOP_CYCLES_TOTAL.store(0, SchedOrdering::Relaxed);
+    SCHED_LOOP_CYCLES_MAX.store(0, SchedOrdering::Relaxed);
+    SCHED_RECLAIM_CALL_CYCLES_TOTAL.store(0, SchedOrdering::Relaxed);
+    SCHED_RECLAIM_CALL_CYCLES_MAX.store(0, SchedOrdering::Relaxed);
+    SCHED_READY_LEN_SUM.store(0, SchedOrdering::Relaxed);
+    SCHED_READY_LEN_SAMPLES.store(0, SchedOrdering::Relaxed);
+    SCHED_READY_LEN_MAX.store(0, SchedOrdering::Relaxed);
+    SCHED_INTERRUPTIBLE_LEN_SUM.store(0, SchedOrdering::Relaxed);
+    SCHED_INTERRUPTIBLE_LEN_SAMPLES.store(0, SchedOrdering::Relaxed);
+    SCHED_INTERRUPTIBLE_LEN_MAX.store(0, SchedOrdering::Relaxed);
+    reset_stage(&SCHED_STAGE_CONSOLE_CALLS, &SCHED_STAGE_CONSOLE_CYCLES_TOTAL, &SCHED_STAGE_CONSOLE_CYCLES_MAX);
+    reset_stage(&SCHED_STAGE_WAKE_EXPIRED_CALLS, &SCHED_STAGE_WAKE_EXPIRED_CYCLES_TOTAL, &SCHED_STAGE_WAKE_EXPIRED_CYCLES_MAX);
+    reset_stage(&SCHED_STAGE_NET_POLL_CALLS, &SCHED_STAGE_NET_POLL_CYCLES_TOTAL, &SCHED_STAGE_NET_POLL_CYCLES_MAX);
+    reset_stage(&SCHED_STAGE_RECLAIM_CALLS, &SCHED_STAGE_RECLAIM_CYCLES_TOTAL, &SCHED_STAGE_RECLAIM_CYCLES_MAX);
+    reset_stage(&SCHED_STAGE_ZOMBIE_QUEUE_CALLS, &SCHED_STAGE_ZOMBIE_QUEUE_CYCLES_TOTAL, &SCHED_STAGE_ZOMBIE_QUEUE_CYCLES_MAX);
+    reset_stage(&SCHED_STAGE_STALE_ZOMBIE_CALLS, &SCHED_STAGE_STALE_ZOMBIE_CYCLES_TOTAL, &SCHED_STAGE_STALE_ZOMBIE_CYCLES_MAX);
+    reset_stage(&SCHED_STAGE_FUTEX_COMPACT_CALLS, &SCHED_STAGE_FUTEX_COMPACT_CYCLES_TOTAL, &SCHED_STAGE_FUTEX_COMPACT_CYCLES_MAX);
+    reset_stage(&SCHED_STAGE_FETCH_TASK_CALLS, &SCHED_STAGE_FETCH_TASK_CYCLES_TOTAL, &SCHED_STAGE_FETCH_TASK_CYCLES_MAX);
+    reset_stage(&SCHED_STAGE_QUEUE_SAMPLE_CALLS, &SCHED_STAGE_QUEUE_SAMPLE_CYCLES_TOTAL, &SCHED_STAGE_QUEUE_SAMPLE_CYCLES_MAX);
+    reset_stage(&SCHED_STAGE_SWITCH_PREP_CALLS, &SCHED_STAGE_SWITCH_PREP_CYCLES_TOTAL, &SCHED_STAGE_SWITCH_PREP_CYCLES_MAX);
+    reset_stage(&SCHED_STAGE_IDLE_CALLS, &SCHED_STAGE_IDLE_CYCLES_TOTAL, &SCHED_STAGE_IDLE_CYCLES_MAX);
+    SCHED_TIMER_TRAP_CYCLES_TOTAL.store(0, SchedOrdering::Relaxed);
+    SCHED_TIMER_TRAP_CYCLES_MAX.store(0, SchedOrdering::Relaxed);
+    SCHED_TIMER_HANDLER_CYCLES_TOTAL.store(0, SchedOrdering::Relaxed);
+    SCHED_TIMER_HANDLER_CYCLES_MAX.store(0, SchedOrdering::Relaxed);
+    reset_stage(&SCHED_PROGRAM_TIMER_CALLS, &SCHED_PROGRAM_TIMER_CYCLES_TOTAL, &SCHED_PROGRAM_TIMER_CYCLES_MAX);
+    reset_stage(&SCHED_SBI_SET_TIMER_CALLS, &SCHED_SBI_SET_TIMER_CYCLES_TOTAL, &SCHED_SBI_SET_TIMER_CYCLES_MAX);
+    SCHED_PROFILE_ENABLED.store(true, SchedOrdering::Relaxed);
+}
+
+pub fn disable_sched_profile() {
+    SCHED_PROFILE_ENABLED.store(false, SchedOrdering::Relaxed);
+}
+
+fn dump_stage(label: &str, calls: &AtomicU64, total: &AtomicU64, max: &AtomicU64) {
+    println!(
+        "sched_stage_{} calls={} cycles_total={} cycles_max={}",
+        label,
+        calls.load(SchedOrdering::Relaxed),
+        total.load(SchedOrdering::Relaxed),
+        max.load(SchedOrdering::Relaxed)
+    );
+}
+
+pub fn dump_sched_profile(label: &str) {
+    println!("[sched_profile] {}", label);
+    println!(
+        "sched_profile enabled={}",
+        SCHED_PROFILE_ENABLED.load(SchedOrdering::Relaxed) as usize
+    );
+    println!("sched loops={} fetch={} idle={} switches={} timer_ints={}",
+        SCHED_LOOPS.load(SchedOrdering::Relaxed), SCHED_FETCH.load(SchedOrdering::Relaxed),
+        SCHED_IDLE.load(SchedOrdering::Relaxed), SCHED_SWITCHES.load(SchedOrdering::Relaxed),
+        SCHED_TIMER_INTS.load(SchedOrdering::Relaxed));
+    println!("sched loop_cycles_total={} loop_cycles_max={} reclaim_call_cycles_total={} reclaim_call_cycles_max={}",
+        SCHED_LOOP_CYCLES_TOTAL.load(SchedOrdering::Relaxed), SCHED_LOOP_CYCLES_MAX.load(SchedOrdering::Relaxed),
+        SCHED_RECLAIM_CALL_CYCLES_TOTAL.load(SchedOrdering::Relaxed), SCHED_RECLAIM_CALL_CYCLES_MAX.load(SchedOrdering::Relaxed));
+    let ready_samples = SCHED_READY_LEN_SAMPLES.load(SchedOrdering::Relaxed);
+    let interruptible_samples = SCHED_INTERRUPTIBLE_LEN_SAMPLES.load(SchedOrdering::Relaxed);
+    println!("sched ready_len_sum={} ready_len_samples={} ready_len_max={} ready_len_avg={} interruptible_len_sum={} interruptible_len_samples={} interruptible_len_max={} interruptible_len_avg={}",
+        SCHED_READY_LEN_SUM.load(SchedOrdering::Relaxed),
+        ready_samples,
+        SCHED_READY_LEN_MAX.load(SchedOrdering::Relaxed),
+        if ready_samples > 0 {
+            SCHED_READY_LEN_SUM.load(SchedOrdering::Relaxed) / ready_samples
+        } else {
+            0
+        },
+        SCHED_INTERRUPTIBLE_LEN_SUM.load(SchedOrdering::Relaxed),
+        interruptible_samples,
+        SCHED_INTERRUPTIBLE_LEN_MAX.load(SchedOrdering::Relaxed),
+        if interruptible_samples > 0 {
+            SCHED_INTERRUPTIBLE_LEN_SUM.load(SchedOrdering::Relaxed) / interruptible_samples
+        } else {
+            0
+        });
+    dump_stage("console", &SCHED_STAGE_CONSOLE_CALLS, &SCHED_STAGE_CONSOLE_CYCLES_TOTAL, &SCHED_STAGE_CONSOLE_CYCLES_MAX);
+    dump_stage("wake_expired", &SCHED_STAGE_WAKE_EXPIRED_CALLS, &SCHED_STAGE_WAKE_EXPIRED_CYCLES_TOTAL, &SCHED_STAGE_WAKE_EXPIRED_CYCLES_MAX);
+    dump_stage("net_poll", &SCHED_STAGE_NET_POLL_CALLS, &SCHED_STAGE_NET_POLL_CYCLES_TOTAL, &SCHED_STAGE_NET_POLL_CYCLES_MAX);
+    dump_stage("reclaim", &SCHED_STAGE_RECLAIM_CALLS, &SCHED_STAGE_RECLAIM_CYCLES_TOTAL, &SCHED_STAGE_RECLAIM_CYCLES_MAX);
+    dump_stage("zombie_queue", &SCHED_STAGE_ZOMBIE_QUEUE_CALLS, &SCHED_STAGE_ZOMBIE_QUEUE_CYCLES_TOTAL, &SCHED_STAGE_ZOMBIE_QUEUE_CYCLES_MAX);
+    dump_stage("stale_zombie", &SCHED_STAGE_STALE_ZOMBIE_CALLS, &SCHED_STAGE_STALE_ZOMBIE_CYCLES_TOTAL, &SCHED_STAGE_STALE_ZOMBIE_CYCLES_MAX);
+    dump_stage("futex_compact", &SCHED_STAGE_FUTEX_COMPACT_CALLS, &SCHED_STAGE_FUTEX_COMPACT_CYCLES_TOTAL, &SCHED_STAGE_FUTEX_COMPACT_CYCLES_MAX);
+    dump_stage("fetch_task", &SCHED_STAGE_FETCH_TASK_CALLS, &SCHED_STAGE_FETCH_TASK_CYCLES_TOTAL, &SCHED_STAGE_FETCH_TASK_CYCLES_MAX);
+    dump_stage("queue_sample", &SCHED_STAGE_QUEUE_SAMPLE_CALLS, &SCHED_STAGE_QUEUE_SAMPLE_CYCLES_TOTAL, &SCHED_STAGE_QUEUE_SAMPLE_CYCLES_MAX);
+    dump_stage("switch_prep", &SCHED_STAGE_SWITCH_PREP_CALLS, &SCHED_STAGE_SWITCH_PREP_CYCLES_TOTAL, &SCHED_STAGE_SWITCH_PREP_CYCLES_MAX);
+    dump_stage("idle", &SCHED_STAGE_IDLE_CALLS, &SCHED_STAGE_IDLE_CYCLES_TOTAL, &SCHED_STAGE_IDLE_CYCLES_MAX);
+    println!(
+        "sched_timer trap_cycles_total={} trap_cycles_max={} handler_cycles_total={} handler_cycles_max={} program_timer_calls={} program_timer_cycles_total={} program_timer_cycles_max={} sbi_set_timer_calls={} sbi_set_timer_cycles_total={} sbi_set_timer_cycles_max={}",
+        SCHED_TIMER_TRAP_CYCLES_TOTAL.load(SchedOrdering::Relaxed),
+        SCHED_TIMER_TRAP_CYCLES_MAX.load(SchedOrdering::Relaxed),
+        SCHED_TIMER_HANDLER_CYCLES_TOTAL.load(SchedOrdering::Relaxed),
+        SCHED_TIMER_HANDLER_CYCLES_MAX.load(SchedOrdering::Relaxed),
+        SCHED_PROGRAM_TIMER_CALLS.load(SchedOrdering::Relaxed),
+        SCHED_PROGRAM_TIMER_CYCLES_TOTAL.load(SchedOrdering::Relaxed),
+        SCHED_PROGRAM_TIMER_CYCLES_MAX.load(SchedOrdering::Relaxed),
+        SCHED_SBI_SET_TIMER_CALLS.load(SchedOrdering::Relaxed),
+        SCHED_SBI_SET_TIMER_CYCLES_TOTAL.load(SchedOrdering::Relaxed),
+        SCHED_SBI_SET_TIMER_CYCLES_MAX.load(SchedOrdering::Relaxed)
+    );
 }

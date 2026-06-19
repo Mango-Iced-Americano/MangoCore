@@ -166,8 +166,11 @@ pub fn trap_handler() -> ! {
             inner.add_signal_with_code(Signals::SIGILL, SigInfo::ILL_ILLOPC);
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
+            let trap_profile_start = crate::task::processor::sched_profile_cycle_start();
             crate::task::perf::record_timer_interrupt();
+            crate::task::processor::record_sched_timer_interrupt();
             unsafe { TIMER_INTERRUPT += 1; }
+            crate::task::processor::record_sched_timer_trap_cycles(trap_profile_start);
             crate::task::timer_interrupt_handler();
         }
         _ => {

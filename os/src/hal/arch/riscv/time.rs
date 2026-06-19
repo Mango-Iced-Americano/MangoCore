@@ -16,8 +16,10 @@ pub fn set_next_trigger() {
 /// Program a one-shot timer to fire after `delta_ticks` raw timer ticks.
 #[inline]
 pub fn program_timer_delta(delta_ticks: u64) {
+    let profile_start = crate::task::processor::sched_profile_cycle_start();
     let now = get_time() as u64;
     set_timer(now.saturating_add(delta_ticks.max(1)) as usize);
+    crate::task::processor::record_sched_program_timer_cycles(profile_start);
 }
 
 pub fn get_clock_freq() -> usize {

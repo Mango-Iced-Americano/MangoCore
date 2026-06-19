@@ -30,7 +30,9 @@ fn sbi_call(which: usize, arg0: usize, arg1: usize, arg2: usize) -> usize {
 }
 
 pub fn set_timer(timer: usize) {
+    let profile_start = crate::task::processor::sched_profile_cycle_start();
     sbi_call(SBI_SET_TIMER, timer, 0, 0);
+    crate::task::processor::record_sched_sbi_set_timer_cycles(profile_start);
 }
 
 pub fn console_putchar(c: usize) {

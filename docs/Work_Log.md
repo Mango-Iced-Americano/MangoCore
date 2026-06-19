@@ -4,6 +4,21 @@
 
 ## 2026-06-19
 
+### merge(exp/develop): 解决 perf_diag 与 timer/reclaim 修复合并冲突
+
+**涉及文件：**
+- `os/src/task/manager.rs` — 合并 develop 的 `perf_diag` ktimer pop/compact 计数与 exp 的 timer queue cached next-deadline 刷新，确保观测和 deadline gate 同时保留
+- `os/src/task/processor.rs` — 合并 develop 的 taskq queue lens/zombie/nice 统计与 exp 的 `sched_stage_stale_zombie` 分阶段计时
+- `user/src/bin/initproc.rs` — LTP 官方脚本路径同时保留 `run_group_in_dir(..., cfg)` profile 参数和 develop 的 `snapshot_diag()` 输出
+- `docs/Work_Log.md`、`.agents/skills/mango-worklog/references/debugging-patterns.md` — 合并 develop 的 perf_diag/sysfs 记录与 exp 的 stage-1/timer gate 调试经验，去除冲突标记
+
+**验证：**
+- `git diff --check -- .agents/skills/mango-worklog/references/debugging-patterns.md docs/Work_Log.md os/src/task/manager.rs os/src/task/processor.rs user/src/bin/initproc.rs` ✅
+- `docker compose -p lzm-mangocore exec -T os-dev bash -lc 'cd /app/os && make rv64-kernel-build-only'` ✅
+- `docker compose -p lzm-mangocore exec -T os-dev bash -lc 'cd /app/os && make la64-kernel-build-only'` ✅
+
+**备注：** 当前合并语义以 `develop` 为 ours、`exp` 为 theirs；保留双方功能，不把 `.env`、`os_test.conf` 或 `cc-codex/results-*` 实验产物纳入冲突提交。
+
 ### docs(perf_diag): 编写统一内核观测系统使用文档 + 空目录 .gitkeep
 
 **涉及文件：**
@@ -287,6 +302,209 @@
 - `os/src/net/syscall/sendmsg.rs` — `send_stream_chunked` 拆分为 non-blocking 零拷贝路径（try_sendmsg_user 直接传 UserBuffer）和 blocking kbuf 路径
 - `os/src/net/syscall/recvmsg.rs` — Stream non-blocking+非 peek 新增 `writer_buffer_at` → `try_recv_user` 快速路径，其余保持 kbuf
 - `os/src/task/manager.rs` — `WAIT_IO_FALLBACK_MS` 从 10 改为 1
+
+### fix(task/timer): 用 next-deadline gate 降低 scheduler wake_expired 热路径成本
+
+**涉及文件：**
+- `os/src/task/manager.rs` — 为 `KERNEL_TIMER_QUEUE` 和 legacy `TIMEOUT_WAITQUEUE` 增加 cached next-deadline 原子状态；`do_wake_expired()` 先用 pending + next deadline 判断是否真的到期，未到期时直接返回，不再每轮锁 heap/queue；保留 timeout sweep 正确性兜底，避免直接移除后 stage-1/NTP 等等待路径卡死
+- `os/src/task/processor.rs` — 保留 `run_tasks()` 中的 `do_wake_expired()` 调用和 `sched_stage_wake_expired` 计数，用 profile 验证 gate 后该阶段成本是否明显下降
+- `.agents/skills/mango-worklog/references/debugging-patterns.md` — 沉淀“保留兜底语义，用 next-deadline gate 降低轮询税”的可复用性能修复模式
+
+**验证：**
+- `git diff --check -- os/src/task/manager.rs os/src/task/processor.rs user/src/bin/init.rs .env docs/Work_Log.md .agents/skills/mango-worklog/references/debugging-patterns.md` ✅
+- `docker compose exec -T os-dev bash -lc 'cd /app/os && make rv64-kernel-build-only'` ✅
+- `docker compose exec -T os-dev bash -lc 'cd /app/os && make la64-kernel-build-only'` ✅
+- rv64 QEMU 45s smoke ✅：stage-1 NTP 超时后第二次同步成功，完成 `/tools`/`/sdcard` bind mount，进入 `initproc` 并开始 `lmbench-musl`；timeout 为人为截断，未留下 QEMU 残留进程
+- DS merge-gate 复测 ✅：`cc-codex/results-20260619-merge-gate/` 判定 `MERGE_GO`，双架构编译通过，4/4 stage-1 恢复，`dir_full_scan_count=0`，rv64 S1 `reclaim_call_cycles_max=65.5M < 100M`，rv64 S1 musl group time `99s`
+
+**备注：** Linux timer/hrtimer 路径不是每个 scheduler loop 全量扫 timer 队列，而是维护下一次到期时间，再按最早 deadline 决定是否重编程/处理。本轮采用同一类思路：不删除 `do_wake_expired()` 这个兼容兜底，只让它在没有任何已到期 timeout/timer 时廉价跳过。前一轮“直接移除 scheduler loop legacy sweep”的实验已被 stage-1 卡死否定，不能作为最终修复。
+
+### fix(init/sched): 修复 stage-1 NTP 卡死并恢复 legacy timeout sweep
+
+**涉及文件：**
+- `user/src/bin/init.rs` — 将 stage-1 NTP 同步改为 bounded best-effort：每次 `ntpd` 最多等待 3000ms，超时后发送 `SIGKILL` 并继续下一次/最终 fallback，避免网络或 DNS 卡住时启动永久停在 `[init] MangoCore stage-1 boot`
+- `os/src/task/processor.rs` — 恢复 `run_tasks()` 热循环中的 `do_wake_expired()`，并保留 `sched_stage_wake_expired` 计数；上一轮移除 legacy sweep 的实验 raw 仅停在 stage-1，不能视为有效性能修复
+- `.env` — 将默认 `COMPOSE_PROJECT_NAME` 改为 `lzm-mangocore`，避免本工作区直接 `docker compose exec` 时进入 DS 容器；DS 后续应显式使用 `docker compose -p ds-mangocore ...`
+- `.agents/skills/mango-worklog/references/debugging-patterns.md` — 沉淀 init stage-1 后无输出时先检查 init 首个外部等待点的排查模式
+
+**验证：**
+- `docker compose -p lzm-mangocore up -d --force-recreate` ✅，确认独立容器挂载 `/home/lzm/projects/MangoCore -> /app` 和 `/mnt/nvme/mangocore-runtime/lzm -> /mnt/nvme/mangocore-runtime/lzm`
+- `docker compose -p lzm-mangocore exec -T os-dev bash -lc 'cd /app/os && make rv64-only'` ✅
+- `docker compose -p lzm-mangocore exec -T os-dev bash -lc 'cd /app/os && make la64-only'` ✅
+- rv64 QEMU 有界启动验证 ✅：stage-1 后输出 `ntpd pid=... timed out after 3000ms, killing`，随后第二次 NTP 成功并继续 bind `/tools`、进入 `initproc` 和 lmbench；验证残留 QEMU 已清理
+
+**备注：** 当前宿主/容器挂载排查显示 `/mnt/nvme` 在宿主为 `rw`，`lzm-mangocore-os-dev-1` 与 `ds-mangocore-os-dev-1` 都正确挂载当前工作区和 NVMe runtime；卡在 stage-1 不是块设备或 `/tools` 挂载问题。旧成功日志中 stage-1 后第一行就是 `ntpd: setting time ...`，本次卡住发生在任何 bind mount 前，因此根因收敛到 init 的 NTP 等待和未验证的 scheduler timeout sweep 移除。
+
+### fix(task/timer): 移除 scheduler loop 中 legacy wake_expired 轮询，并修正 timer profile 计时口径
+
+**涉及文件：**
+- `os/src/task/processor.rs` — 从 `run_tasks()` 热循环移除每轮 `do_wake_expired()` 调用；保留 `sched_stage_wake_expired` counter 作为验证项，下一轮 profile 中该 stage 应为 0
+- `os/src/task/manager.rs` — 将 timer handler profile 记录移入 `timer_interrupt_handler()` 内，并在可能 `suspend_current_and_run_next()` 之前记录，避免把任务被调度走的时间计入 handler cycles
+- `os/src/hal/arch/riscv/trap/mod.rs`、`os/src/hal/arch/loongarch64/trap/mod.rs` — timer trap profile 改为只记录进入 handler 前的 trap 入口成本，避免跨任务切换计时
+- `.agents/skills/mango-worklog/references/debugging-patterns.md` — 沉淀“trap 计时跨 context switch 会虚高”的调试经验
+
+**验证：**
+- `git diff --check -- os/src/task/processor.rs os/src/task/manager.rs os/src/hal/arch/riscv/trap/mod.rs os/src/hal/arch/loongarch64/trap/mod.rs` ✅
+- `docker compose exec os-dev bash -lc 'cd /app/os && make rv64-kernel-build-only'` ✅
+- `docker compose exec os-dev bash -lc 'cd /app/os && make la64-kernel-build-only'` ✅
+
+**备注：** DS 的 low-overhead profile 显示 rv64 S1 `sched_stage_wake_expired=3.93B cycles`，占 scheduler loop 49.5%。代码复核确认 `timer_interrupt_handler()` 已处理 `KERNEL_TIMER_QUEUE`、legacy timeout waitqueue 和 timerfd，scheduler loop 中的 `do_wake_expired()` 属于旧轮询路径，污染态下会在 `KERNEL_TIMER_QUEUE_PENDING=true` 时每轮锁 timer heap 并读时间。SBI `set_timer` 仍是后续优化方向，但其 rv64 S1 成本约 `1.16B cycles`，低于 wake_expired 轮询税；本轮优先处理更大且更确定的瓶颈。
+
+### debug(perf): 为 pipe/sched profile 增加开关并拆分 scheduler/timer 热点
+
+**涉及文件：**
+- `os/src/fs/dev/pipe.rs` — pipe profile 默认关闭，`reset_pipe_profile()` 时开启、dump 后可关闭；热路径 read/write/poll/FIFO debug 计数只在 profile 开启时记录，降低非 profile 场景探针污染
+- `os/src/task/processor.rs` — sched profile 默认关闭，新增 run loop 分阶段 counters：console、wake_expired、net_poll、reclaim、zombie_queue、stale_zombie、futex_compact、fetch_task、queue_sample、switch_prep、idle；新增 timer trap、timer handler、program_timer、rv64 SBI set_timer 统计出口
+- `os/src/hal/arch/riscv/{trap,time,sbi}.rs`、`os/src/hal/arch/loongarch64/{trap,time}.rs` — 接入 timer/trap/program_timer profile 记录，rv64 额外记录 SBI `set_timer` ecall 成本
+- `os/src/fs/ext4/counters.rs`、`user/src/bin/initproc.rs` — debug syscall 增加 pipe/sched profile disable 命令；lmbench profile dump 后关闭 pipe/sched profile，下一轮 profile_before 再 reset+enable
+- `.agents/skills/mango-worklog/references/debugging-patterns.md` — 沉淀性能探针必须先量化自身开销的调试经验
+
+**验证：**
+- `git diff --check -- os/src/fs/dev/pipe.rs os/src/task/processor.rs os/src/hal/arch/riscv/trap/mod.rs os/src/hal/arch/loongarch64/trap/mod.rs os/src/hal/arch/riscv/time.rs os/src/hal/arch/loongarch64/time.rs os/src/hal/arch/riscv/sbi.rs os/src/fs/ext4/counters.rs user/src/bin/initproc.rs` ✅
+- Docker 隔离确认：`COMPOSE_PROJECT_NAME=ds-mangocore`，`ds-mangocore-os-dev-1` 挂载 `/home/lzm/projects/MangoCore -> /app` ✅
+- `docker compose exec os-dev bash -lc 'cd /app/os && make rv64-kernel-build-only'` ✅
+- `docker compose exec os-dev bash -lc 'cd /app/os && make la64-kernel-build-only'` ✅
+
+**备注：** DS 的 sched-arch-compare 报告方向有效，但本轮 raw/parsed 不完整，且 rv64 S1 raw 为 240s timeout 样本；不能直接把“non-reclaim”归因到 SBI/trap/TLB。本次只补观测面：下一轮需要在低负载下重跑 rv64/la64 S0/S1，并用分阶段 counters 判断 scheduler loop delta 是 console/SBI、timer reprogram、wake/futex/zombie、fetch/switch_prep 还是 reclaim 残余。
+
+### perf(fs/reclaim): cycle-slice 最终复测通过，确认 reclaim 长尾被压到 P0 阈值内
+
+**涉及文件：**
+- `docs/Work_Log.md` — 记录 DS 在 Docker 隔离修复后对 cycle-slice 版本的最终复测结果
+- `.agents/skills/mango-worklog/references/debugging-patterns.md` — 沉淀 Docker Compose project name 冲突导致进入他人容器的排查模式
+
+**验证：**
+- DS 复测 `cc-codex/results-20260619-final-rerun/`：Docker project 为 `ds-mangocore`，容器挂载确认 `/home/lzm/projects/MangoCore -> /app`
+- 双架构编译已在隔离容器内通过；样本有效性：rv64 S0 `68s/68s`、rv64 S1 `93s/98s`、la64 S0 `87s/106s`、la64 S1 `100s/113s`
+- P0 通过：rv64 S1 `reclaim_call_cycles_max=49.2M`，低于 100M 阈值；`kids_time_hit=43` 首次非零，证明 children prune cycle-slice 生效；`dir_full_scan_count=0` 持续排除旧 ext4 O(n) 复发
+
+**备注：** 当前提交解决的是 scheduler-loop reclaim 的单次长尾尖刺：此前 rv64 S1 `reclaim_call_cycles_max` 约 `268M`，现在降到 `49.2M`。剩余问题仍存在：rv64 S1 pipe latency 约 `6.5x`，但 pipe 本体 read/write cycles 未变慢，主要指向 rv64 scheduler loop `1.82x` 与仍可见的 reclaim 49M spike；la64 对应 `reclaim_call_cycles_max` 仅 `1.63M`，下一步应做 rv64/la64 scheduler、timer/trap、SBI set_timer 路径分解对比。
+
+### debug(initproc): lmbench timeout 前抢先 dump profile，避免 C1 卡死丢失 reclaim 数据
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — 将 lmbench profile dump 抽成 `profile_dump()`，在 group timeout 触发、发送 SIGKILL/等待子进程前输出 `lmbench-*-timeout` 的 ext4/reclaim/pipe/sched profile；`reap_orphans()` 增加单次 256 个 zombie 的上限和 diag 输出，避免异常 orphan 回收拖住后续 `profile_after`
+
+**验证：**
+- `git diff --check -- user/src/bin/initproc.rs` ✅
+- `docker compose exec os-dev bash -lc 'cd /app/os && make rv64-kernel-build-only'` ✅
+- `docker compose exec os-dev bash -lc 'cd /app/os && make la64-kernel-build-only'` ✅
+
+**备注：** DS 的 cycle-slice C1 raw 实际已跑过 basic/busybox 并进入 lmbench-musl，不是 report 中写的 basic-glibc 卡死；日志在 lmbench timeout 后停于 `waitpid returned` / `killed pid` 附近，尚未打印 `profile_after`，因此无法判断 `kids_time_hit` 和 reclaim max。本次改动保证即使 lmbench 后续 wait/reap 慢，也能在 timeout 当刻留下可分析 profile。
+
+### perf(fs/reclaim): 为 ext4 children weak prune 增加 cycle 时间片，限制 reclaim 单次长尾
+
+**涉及文件：**
+- `os/src/fs/ext4/ext4fs.rs` — `prune_children_stale_entries_budgeted()` 新增 cycle budget 参数，在遍历 children stale Weak 时超过时间片立即保存 `(children_ino, children_name)` 游标并返回；新增 `time_budget_hit` 统计，用于区分条目预算命中和时间片命中
+- `os/src/fs/reclaim.rs` — children prune 调用传入 `CHILDREN_PRUNE_CYCLE_BUDGET=8_000_000`，`reclaim_budget` 输出新增 `kids_time_hit`，用于 DS 验证单次 `prune_kids` spike 是否被主动切片压低
+
+**验证：**
+- `git diff --check -- os/src/fs/ext4/ext4fs.rs os/src/fs/reclaim.rs` ✅
+- `docker compose exec os-dev bash -lc 'cd /app/os && make rv64-kernel-build-only'` ✅
+- `docker compose exec os-dev bash -lc 'cd /app/os && make la64-kernel-build-only'` ✅
+- QEMU 性能复测未在本轮执行：下一步交给 DS 跑 rv64 S0/S1 最小矩阵，重点观察 `kids_time_hit`、`reclaim_stage_prune_kids cycles_max`、`reclaim_call_cycles_max`、`sched loop_avg_cycles`、pipe latency/bandwidth
+
+**备注：** DS 的 force-budget 复测显示 P0 未通过：`reclaim_call_cycles_max=264M`、`prune_kids cycles_max=258M`，但 `io_removed/kids_removed` 大幅增加，说明尖刺不是空扫，而是大量 stale children 清理集中在单次 reclaim run。继续调小 entry budget 不能保证 max latency，本次改为直接限制 reclaim children prune 的 cycle 时间片，做法参考 Linux shrinker/dcache 的 batch + resched 思路：未完成工作留给下轮，而不是在 scheduler loop 中长时间占用。
+
+### perf(fs/reclaim): 缩小 heap pressure 下 weak prune 强制切片，降低 scheduler reclaim 长尾
+
+**涉及文件：**
+- `os/src/fs/reclaim.rs` — 将 heap pressure/critical 下的 ext4 weak cache 强制清理改为独立小预算：pressure 下 inode budget `32`、children parent/entry `4/32`，critical 下 `64`、`8/64`；不再把 pressure 状态的 weak prune budget 放大到 normal 的 2x/4x
+
+**验证：**
+- `git diff --check -- os/src/fs/reclaim.rs` ✅
+- `docker compose exec os-dev bash -lc 'cd /app/os && make rv64-kernel-build-only'` ✅
+- `docker compose exec os-dev bash -lc 'cd /app/os && make la64-kernel-build-only'` ✅
+- QEMU 性能复测未在本轮执行：下一步交给 DS 跑 rv64 S0/S1 最小矩阵，重点观察 `reclaim_call_cycles_max`、`reclaim_stage_prune_kids cycles_max`、`sched loop_avg_cycles`、pipe latency/bandwidth、lat_ctx 64/96
+
+**备注：** DS 的 counter 修复后复测显示 R1 rv64 S1 `pipe read_avg_cycles` 反而下降（13.4k→8.1k），pipe 本体可排除；主退化来自 scheduler loop 变慢（32k→63k cycles）和 `prune_kids/reclaim_call` 单次尖刺（约 268M cycles）。weak children cache 是 opportunistic 加速缓存，不是 page cache 这类内存保命路径，因此压力态下应分摊清理，避免在调度热循环形成 pipe/context-switch 长尾。
+
+### debug(perf): 修复 rv64 pipe/context 残余退化探针连线
+
+**涉及文件：**
+- `os/src/fs/dev/pipe.rs` — 将 DS 调试 counter 接入 `Pipe::read_at/write_at/poll`、`PipeRingBuffer` 生命周期、FIFO open/compact 路径，输出 read/write/poll cycles、EAGAIN、notify、buffer/FIFO 水位
+- `os/src/task/processor.rs` — 将 scheduler profile 接入 run loop，记录 loops/fetch/idle/switches、loop cycles、reclaim call cycles、ready/interruptible queue 采样
+- `os/src/hal/arch/riscv/trap/mod.rs`、`os/src/hal/arch/loongarch64/trap/mod.rs` — timer interrupt 进入 scheduler debug counter，便于 rv64/la64 对比
+- `os/src/fs/ext4/counters.rs`、`user/src/bin/initproc.rs`、`os/src/task/mod.rs` — 通过现有 ext4 counter debug syscall 在 lmbench profile 边界 reset/dump pipe/sched profile
+
+**验证：**
+- `git diff --check -- os/src/fs/dev/pipe.rs os/src/task/processor.rs os/src/hal/arch/riscv/trap/mod.rs os/src/hal/arch/loongarch64/trap/mod.rs os/src/fs/ext4/counters.rs user/src/bin/initproc.rs` ✅
+- `docker compose exec os-dev bash -lc 'cd /app/os && make rv64-kernel-build-only'` ✅
+- `docker compose exec os-dev bash -lc 'cd /app/os && make la64-kernel-build-only'` ✅
+
+**备注：** DS 的 `cc-codex/results-20260619-rv64-pipe-debug/` 首轮报告中 pipe/sched counters 全零，原因是 counter 只定义/打印但未接入热路径。当前改动仅用于下一轮定位 rv64 S1 pipe latency 7x 残余，不改变 reclaim/pipe/scheduler 核心策略；QEMU 复测交给 DS 按最小矩阵执行。
+
+### perf(fs/reclaim): 记录 final-quant round2，确认主线退化收敛与 rv64 pipe 残余
+
+**涉及文件：**
+- `docs/Work_Log.md` — 记录 DS 最终量化复测结果与 Codex 对 report 的 raw 复核修正
+- `cc-codex/results-20260618-final-quant/report.md` — 修正 round1 异常样本和 la64 round2 结论，改用 rv64 S1 round2 作为主线判断
+
+**验证：**
+- rv64 S0/S1-r2 raw 有效，无 panic，`dir_full_scan_count=0`
+- rv64 S1-r2 musl：`open/close=424.6429us`（S0 `276.3810us`，1.54x），`stat=283.0952us`（S0 `238.0us`，1.19x），`pipe latency=3210.5748us`（S0 `457.7810us`，7.0x），group time `93s`（S0 `65s`，1.43x），`kids_skipped=3399/3576`
+- la64 S1-r2 raw 有效：musl group time `84s` vs S0 `83s`，open/close `96.1475us` vs S0 `65.7531us`，pipe latency `397.5411us` vs S0 `342.4463us`
+- S2b 压力场景仍确认 reclaim 空扫已解：`prune_kids cycles_total` 从 incremental prune `4.4B` 降至 dirty-skip `356M`
+
+**备注：** rv64 S1 round1 的 `502s/460s` 是异常样本，已排除主结论。dirty generation skip 在有效样本中稳定（S1-r2 `kids_skipped` 约 95%），旧 ext4 O(n) 继续排除。当前主线剩余问题不再是 FS lookup 或 repeated empty prune，而是 rv64 pipe/context-switch 类指标仍明显退化；la64 未复现同等幅度，下一步优先查 rv64 pipe/scheduler/reclaim force spike 交互。
+
+## 2026-06-18
+
+### perf(fs/reclaim): 记录 dirty-skip 复测结果，确认 S2b 空扫税下降
+
+**涉及文件：**
+- `docs/Work_Log.md` — 记录 DS 对 dirty/event-driven reclaim skip 的 rv64 S0/S1/S2b 复测结果
+
+**验证：**
+- DS 复测 `cc-codex/results-20260618-dirty-skip/`：S0/S1/S2b raw 均有效，无 panic，`dir_full_scan_count=0`
+- S1 musl：`open/close=442.1667us`，`stat=283.1053us`，`prune_kids cycles_total=825,414,702`，`kids_skipped=3274/3450`
+- S2b musl：`open/close=2080.3333us`，`stat=1626.75us`，`pipe latency=3177.1346us`，`prune_kids cycles_total=356,360,954`，相比 incremental prune 的 `4.4B` 下降约 92%
+
+**备注：** dirty generation 机制已生效，S1/S2b `kids_skipped` 分别约 94.9%/96.0%，说明此前 S2b 的主要剩余问题确实是 repeated empty/near-empty prune。S1 `prune_kids cycles_max=278,671,908` 仍超理想阈值，但 raw 显示这是少数 force cleanup spike，不是 sustained 成本；下一步如继续收敛 P0，应优先让 force cleanup 也按更小预算或独立 epoch 分摊。
+
+### fix(fs/reclaim): 为 ext4 weak cache prune 增加 dirty generation skip，减少 S2b 空扫税
+
+**涉及文件：**
+- `os/src/fs/ext4/ext4fs.rs` — 在 `Ext4FileSystem` 中增加 inode_objects/children prune generation；cache 插入、删除、rename/link/create 及 stale invalidation 标记 pending；`prune_inode_objects_budgeted()` / `prune_children_stale_entries_budgeted()` 支持 `force` 与 `skipped`，normal reclaim 在 generation 追平后跳过扫描，heap pressure/critical 仍 force 清理
+- `os/src/fs/reclaim.rs` — budgeted prune 调用改为 normal 非强制、heap pressure/critical 强制；`reclaim_budget` 新增 `io_skipped` / `kids_skipped`，用于判断 dirty-skip 是否减少空扫
+- `cc-codex/comms/2026-06-18-ds-dirty-reclaim-skip-validation.md` — 给 DS 的第二阶段复测任务书，限定 S0/S1/S2b/S2a/F5 矩阵、raw 解析字段、P0/P1/P2 判定和交付目录
+- `.agents/skills/mango-worklog/references/debugging-patterns.md` — 沉淀 budgeted reclaim 中 `budget_hit`、`removed`、`skipped` 与 `cycles_total` 的联合判读方法
+
+**验证：**
+- `git diff --check` ✅
+- `docker compose exec -T os-dev bash -lc 'cd /tmp/mango-build.apdYbA/os && make rv64-kernel-build-only'` ✅
+- `docker compose exec -T os-dev bash -lc 'cd /tmp/mango-build.apdYbA/os && make la64-kernel-build-only'` ✅
+- QEMU 性能复测未在本轮执行：已交付 DS 使用 clean image 跑 S0/S1/S2b，重点观察 `io_skipped/kids_skipped`、`prune_kids cycles_total/max`、`kids_removed` 和 S2b lmbench open/stat/pipe/group time
+
+**备注：** DS 的 incremental prune 复测确认 S1 长尾从 `780M` 降到 `103M`，但 S2b raw 中 `kids_removed=4`、`prune_kids cycles_total=4.4B`、open/pipe/group 仍明显退化，说明剩余主因更像反复空扫/近空扫而非旧目录 O(n) 或单纯 budget 太小。本次修复优先跳过 clean generation；Weak 自然过期没有回调，因此在 heap pressure/critical 下保留 force scan 作为兜底。
+
+### fix(fs/reclaim): 将 ext4 weak cache 清理改为 cursor/budget 增量回收
+
+**涉及文件：**
+- `os/src/fs/ext4/ext4fs.rs` — 为 `Ext4FileSystem` 增加 per-FS reclaim cursor，新增 `prune_inode_objects_budgeted()` 与 `prune_children_stale_entries_budgeted()`，按 inode/children cursor 分摊 stale weak 清理；保留原全量 prune 函数供 debug syscall/manual reclaim 使用
+- `os/src/fs/reclaim.rs` — scheduler-loop reclaim 改用 budgeted prune，移除“每 16 次全量清理一次”的 batching 策略；新增 `reclaim_budget` profile 行，输出 inode/children scanned 与 budget_hit 汇总
+- `cc-codex/comms/2026-06-18-ds-incremental-prune-validation.md` — 给 DS 的复测任务书，限定 S0/S1/S2b/S2a/full 验证路径、数据字段与判定阈值
+
+**验证：**
+- `docker compose exec -T os-dev bash -lc 'cd /tmp/mango-build.apdYbA/os && make rv64-kernel-build-only'` ✅
+- `docker compose exec -T os-dev bash -lc 'cd /tmp/mango-build.apdYbA/os && make la64-kernel-build-only'` ✅
+- `git diff --check` ✅
+- QEMU 性能复测未在本轮执行：已交付 DS 使用 clean image 跑 S0/S1/S2b，重点观察 `prune_kids cycles_max`、`reclaim_budget` 和 lmbench open/stat/pipe/read/write/bw_file_rd
+
+**备注：** DS 的 16 次 batching 复测显示 S0 平均 reclaim 成本显著下降，但 S1 出现 `prune_kids cycles_max=779,770,056` 与 open/stat/pipe 同步退化。本次改动目标是降低 cycles_max 长尾，而不是单纯降低 total cycles。DS review 指出的 inode cursor wrap off-by-one 已修正为 `..start_ino`；children parent 预算按 raw `inode_objects` entry 计数，避免大量 stale Weak 绕开预算；容器 `/app` 当前与宿主工作区存在漂移，因此编译验证使用 `/tmp` 临时副本覆盖当前源码后执行。
+
+### fix(fs/reclaim): 降低 scheduler-loop stale weak 全量清理频率，缓解 lmbench 污染退化
+
+**涉及文件：**
+- `os/src/fs/reclaim.rs` — 将 `prune_inode_objects()` / `prune_children_stale_entries()` 从每 64 个调度 tick 无条件执行，改为每 16 次 reclaim run 或 heap pressure/critical 时执行；保留 page cache 水位检查与 clean page shrink 的原有节奏；整理 DS 临时 stage profile 插桩中的长行和无用 macro
+
+**验证：**
+- `docker compose exec -T os-dev bash -lc 'cd /app/os && make rv64-kernel-build-only'` ✅
+- `docker compose exec -T os-dev bash -lc 'cd /app/os && make la64-kernel-build-only'` ✅
+- QEMU 性能复测未在本轮执行：当前 `os_test.conf` 为 `mask=0xFFF` 全量配置，下一步交给 DS 用 clean image + profile 配置跑最小 S0/S1/S2b 对照
+
+**备注：** DS 补充实验显示 `prune_children_stale_entries` 在污染后占 reclaim stage cycles 约 64%，`prune_inode_objects` 约 28%，且旧 O(n) 目录扫描 counters 未复发。本次先做低风险降频，不改变 lookup/PageCache/scheduler 语义；后续可再考虑 dirty flag / incremental prune。
+
 ### hotfix(fs/ext4): 禁用 eager full-index + 删除 create/link/symlink 冗余 FS cache 操作 → lmbench fork/create 回归修复
 
 **根因**: Oracle 分析确认 eager full-index（`total_blocks >= 2` 首次 miss 全目录扫描建索引）导致 fork+execve（+165%）和 fs create（3×）回归。目录首次 miss → 分配 Vec/BTreeMap 建完整索引 → 下次 mutation bump 立即失效 → 纯开销。

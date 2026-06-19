@@ -286,8 +286,11 @@ pub fn trap_handler() -> ! {
             inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_MAPERR);
         }
         Trap::Interrupt(Interrupt::Timer) => {
+            let trap_profile_start = crate::task::processor::sched_profile_cycle_start();
             crate::task::perf::record_timer_interrupt();
+            crate::task::processor::record_sched_timer_interrupt();
             TIClr::read().clear_timer().write();
+            crate::task::processor::record_sched_timer_trap_cycles(trap_profile_start);
             crate::task::timer_interrupt_handler();
         }
         Trap::Exception(Exception::Breakpoint) => {

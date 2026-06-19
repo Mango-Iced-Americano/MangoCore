@@ -15,6 +15,205 @@ use crate::task::{current_task, Signals, WaitQueue};
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
 
+
+// ── pipe debug profile counters ─────────────────────────────────────────
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+static PIPE_PROFILE_ENABLED: AtomicBool = AtomicBool::new(false);
+static PIPE_READ_CALLS: AtomicU64 = AtomicU64::new(0);
+static PIPE_READ_BYTES: AtomicU64 = AtomicU64::new(0);
+static PIPE_READ_EAGAIN: AtomicU64 = AtomicU64::new(0);
+static PIPE_READ_EOF: AtomicU64 = AtomicU64::new(0);
+static PIPE_READ_CYCLES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static PIPE_READ_CYCLES_MAX: AtomicU64 = AtomicU64::new(0);
+static PIPE_WRITE_CALLS: AtomicU64 = AtomicU64::new(0);
+static PIPE_WRITE_BYTES: AtomicU64 = AtomicU64::new(0);
+static PIPE_WRITE_EAGAIN: AtomicU64 = AtomicU64::new(0);
+static PIPE_WRITE_EPIPE: AtomicU64 = AtomicU64::new(0);
+static PIPE_WRITE_CYCLES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static PIPE_WRITE_CYCLES_MAX: AtomicU64 = AtomicU64::new(0);
+static PIPE_POLL_CALLS: AtomicU64 = AtomicU64::new(0);
+static PIPE_POLL_CYCLES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static PIPE_POLL_CYCLES_MAX: AtomicU64 = AtomicU64::new(0);
+static PIPE_NOTIFY_READ: AtomicU64 = AtomicU64::new(0);
+static PIPE_NOTIFY_WRITE: AtomicU64 = AtomicU64::new(0);
+static PIPE_BUF_ALLOC: AtomicU64 = AtomicU64::new(0);
+static PIPE_BUF_DROP: AtomicU64 = AtomicU64::new(0);
+static PIPE_BUF_ALIVE_MAX: AtomicU64 = AtomicU64::new(0);
+static PIPE_BUF_BYTES_MAX: AtomicU64 = AtomicU64::new(0);
+static PIPE_RING_USED_MAX: AtomicU64 = AtomicU64::new(0);
+static PIPE_RING_FREE_MIN: AtomicU64 = AtomicU64::new(u64::MAX);
+static PIPE_FIFO_OPEN: AtomicU64 = AtomicU64::new(0);
+static PIPE_FIFO_COMPACT_CALLS: AtomicU64 = AtomicU64::new(0);
+static PIPE_FIFO_COMPACT_REMOVED: AtomicU64 = AtomicU64::new(0);
+static PIPE_FIFO_REGISTRY_LEN_MAX: AtomicU64 = AtomicU64::new(0);
+static PIPE_FIFO_HIT_READ: AtomicU64 = AtomicU64::new(0);
+static PIPE_FIFO_HIT_WRITE: AtomicU64 = AtomicU64::new(0);
+
+pub fn reset_pipe_profile() {
+    PIPE_PROFILE_ENABLED.store(false, Ordering::Relaxed);
+    let all: [&AtomicU64; 28] = [
+        &PIPE_READ_CALLS, &PIPE_READ_BYTES, &PIPE_READ_EAGAIN, &PIPE_READ_EOF,
+        &PIPE_READ_CYCLES_TOTAL, &PIPE_READ_CYCLES_MAX,
+        &PIPE_WRITE_CALLS, &PIPE_WRITE_BYTES, &PIPE_WRITE_EAGAIN, &PIPE_WRITE_EPIPE,
+        &PIPE_WRITE_CYCLES_TOTAL, &PIPE_WRITE_CYCLES_MAX,
+        &PIPE_POLL_CALLS, &PIPE_POLL_CYCLES_TOTAL, &PIPE_POLL_CYCLES_MAX,
+        &PIPE_NOTIFY_READ, &PIPE_NOTIFY_WRITE,
+        &PIPE_BUF_ALLOC, &PIPE_BUF_DROP, &PIPE_BUF_ALIVE_MAX, &PIPE_BUF_BYTES_MAX,
+        &PIPE_RING_USED_MAX,
+        &PIPE_FIFO_OPEN, &PIPE_FIFO_COMPACT_CALLS, &PIPE_FIFO_COMPACT_REMOVED,
+        &PIPE_FIFO_REGISTRY_LEN_MAX, &PIPE_FIFO_HIT_READ, &PIPE_FIFO_HIT_WRITE,
+    ];
+    for c in &all { c.store(0, Ordering::Relaxed); }
+    PIPE_RING_FREE_MIN.store(u64::MAX, Ordering::Relaxed);
+    PIPE_PROFILE_ENABLED.store(true, Ordering::Relaxed);
+}
+
+pub fn disable_pipe_profile() {
+    PIPE_PROFILE_ENABLED.store(false, Ordering::Relaxed);
+}
+
+pub fn dump_pipe_profile(label: &str) {
+    println!("[pipe_profile] {}", label);
+    println!(
+        "pipe_profile enabled={}",
+        PIPE_PROFILE_ENABLED.load(Ordering::Relaxed) as usize
+    );
+    println!("pipe read_calls={} read_bytes={} read_eagain={} read_eof={} read_cycles_total={} read_cycles_max={}",
+        PIPE_READ_CALLS.load(Ordering::Relaxed), PIPE_READ_BYTES.load(Ordering::Relaxed),
+        PIPE_READ_EAGAIN.load(Ordering::Relaxed), PIPE_READ_EOF.load(Ordering::Relaxed),
+        PIPE_READ_CYCLES_TOTAL.load(Ordering::Relaxed), PIPE_READ_CYCLES_MAX.load(Ordering::Relaxed));
+    println!("pipe write_calls={} write_bytes={} write_eagain={} write_epipe={} write_cycles_total={} write_cycles_max={}",
+        PIPE_WRITE_CALLS.load(Ordering::Relaxed), PIPE_WRITE_BYTES.load(Ordering::Relaxed),
+        PIPE_WRITE_EAGAIN.load(Ordering::Relaxed), PIPE_WRITE_EPIPE.load(Ordering::Relaxed),
+        PIPE_WRITE_CYCLES_TOTAL.load(Ordering::Relaxed), PIPE_WRITE_CYCLES_MAX.load(Ordering::Relaxed));
+    println!("pipe poll_calls={} poll_cycles_total={} poll_cycles_max={} notify_read={} notify_write={}",
+        PIPE_POLL_CALLS.load(Ordering::Relaxed), PIPE_POLL_CYCLES_TOTAL.load(Ordering::Relaxed),
+        PIPE_POLL_CYCLES_MAX.load(Ordering::Relaxed), PIPE_NOTIFY_READ.load(Ordering::Relaxed),
+        PIPE_NOTIFY_WRITE.load(Ordering::Relaxed));
+    let ring_free_min = PIPE_RING_FREE_MIN.load(Ordering::Relaxed);
+    println!("pipe buf_alloc={} buf_drop={} buf_alive_max={} buf_bytes_max={} ring_used_max={} ring_free_min={} fifo_open={} fifo_hit_read={} fifo_hit_write={}",
+        PIPE_BUF_ALLOC.load(Ordering::Relaxed), PIPE_BUF_DROP.load(Ordering::Relaxed),
+        PIPE_BUF_ALIVE_MAX.load(Ordering::Relaxed), PIPE_BUF_BYTES_MAX.load(Ordering::Relaxed),
+        PIPE_RING_USED_MAX.load(Ordering::Relaxed),
+        if ring_free_min == u64::MAX { 0 } else { ring_free_min },
+        PIPE_FIFO_OPEN.load(Ordering::Relaxed), PIPE_FIFO_HIT_READ.load(Ordering::Relaxed),
+        PIPE_FIFO_HIT_WRITE.load(Ordering::Relaxed));
+    println!("pipe fifo_compact_calls={} fifo_compact_removed={} fifo_registry_len_max={}",
+        PIPE_FIFO_COMPACT_CALLS.load(Ordering::Relaxed), PIPE_FIFO_COMPACT_REMOVED.load(Ordering::Relaxed),
+        PIPE_FIFO_REGISTRY_LEN_MAX.load(Ordering::Relaxed));
+}
+
+#[inline(always)]
+fn pipe_profile_enabled() -> bool {
+    PIPE_PROFILE_ENABLED.load(Ordering::Relaxed)
+}
+
+#[inline(always)]
+fn pipe_rdcycle() -> u64 {
+    #[cfg(target_arch = "riscv64")]
+    { let cycles: usize; unsafe { core::arch::asm!("rdcycle {}", out(reg) cycles) }; cycles as u64 }
+    #[cfg(target_arch = "loongarch64")]
+    { let lo: usize; let hi: usize; unsafe { core::arch::asm!("rdtime.d {}, {}", out(reg) lo, out(reg) hi) }; lo as u64 }
+    #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
+    { 0 }
+}
+
+#[inline(always)]
+fn pipe_profile_start(enabled: bool) -> u64 {
+    if enabled {
+        pipe_rdcycle()
+    } else {
+        0
+    }
+}
+
+#[inline(always)]
+fn pipe_inc(enabled: bool, slot: &AtomicU64) {
+    if enabled {
+        slot.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[inline(always)]
+fn pipe_add(enabled: bool, slot: &AtomicU64, value: u64) {
+    if enabled {
+        slot.fetch_add(value, Ordering::Relaxed);
+    }
+}
+
+fn pipe_atomic_max(slot: &AtomicU64, v: u64) {
+    let mut cur = slot.load(Ordering::Relaxed);
+    while v > cur { match slot.compare_exchange_weak(cur, v, Ordering::Relaxed, Ordering::Relaxed) { Ok(_) => break, Err(n) => cur = n } }
+}
+
+fn pipe_atomic_min(slot: &AtomicU64, v: u64) {
+    let mut cur = slot.load(Ordering::Relaxed);
+    while v < cur {
+        match slot.compare_exchange_weak(cur, v, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(n) => cur = n,
+        }
+    }
+}
+
+#[inline(always)]
+fn pipe_record_cycles(total: &AtomicU64, max: &AtomicU64, start: u64) {
+    if !pipe_profile_enabled() {
+        return;
+    }
+    let dt = pipe_rdcycle().saturating_sub(start);
+    total.fetch_add(dt, Ordering::Relaxed);
+    pipe_atomic_max(max, dt);
+}
+
+#[inline(always)]
+fn pipe_record_ring_sizes(used: usize, free: usize) {
+    if !pipe_profile_enabled() {
+        return;
+    }
+    pipe_atomic_max(&PIPE_RING_USED_MAX, used as u64);
+    pipe_atomic_min(&PIPE_RING_FREE_MIN, free as u64);
+}
+
+fn pipe_finish_read(start: u64, result: &Result<usize, SyscallErr>) {
+    if !pipe_profile_enabled() {
+        return;
+    }
+    match result {
+        Ok(n) => {
+            PIPE_READ_BYTES.fetch_add(*n as u64, Ordering::Relaxed);
+            if *n == 0 {
+                PIPE_READ_EOF.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        Err(SyscallErr::EAGAIN) => {
+            PIPE_READ_EAGAIN.fetch_add(1, Ordering::Relaxed);
+        }
+        _ => {}
+    }
+    pipe_record_cycles(&PIPE_READ_CYCLES_TOTAL, &PIPE_READ_CYCLES_MAX, start);
+}
+
+fn pipe_finish_write(start: u64, result: &Result<usize, SyscallErr>) {
+    if !pipe_profile_enabled() {
+        return;
+    }
+    match result {
+        Ok(n) => {
+            PIPE_WRITE_BYTES.fetch_add(*n as u64, Ordering::Relaxed);
+        }
+        Err(SyscallErr::EAGAIN) => {
+            PIPE_WRITE_EAGAIN.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(SyscallErr::EPIPE) => {
+            PIPE_WRITE_EPIPE.fetch_add(1, Ordering::Relaxed);
+        }
+        _ => {}
+    }
+    pipe_record_cycles(&PIPE_WRITE_CYCLES_TOTAL, &PIPE_WRITE_CYCLES_MAX, start);
+}
+
 const FIONREAD: u32 = 0x541B;
 const CAP_SYS_RESOURCE: usize = 24;
 const PIPE_SET_SIZE_MAX: usize = 1usize << 31;
@@ -51,20 +250,33 @@ impl IndexNode for Pipe {
         buf: &mut [u8],
         _data: spin::MutexGuard<FilePrivateData>,
     ) -> Result<usize, SyscallErr> {
+        let profiling = pipe_profile_enabled();
+        pipe_inc(profiling, &PIPE_READ_CALLS);
+        let profile_start = pipe_profile_start(profiling);
         if !self.readable {
-            return Err(SyscallErr::EBADF);
+            let result = Err(SyscallErr::EBADF);
+            pipe_finish_read(profile_start, &result);
+            return result;
         }
         if buf.is_empty() {
-            return Ok(0);
+            let result = Ok(0);
+            pipe_finish_read(profile_start, &result);
+            return result;
         }
         let (result, write_end) = {
             let mut ring = self.buffer.lock();
             let write_end = ring.write_end.as_ref().and_then(Weak::upgrade);
             if ring.status == RingBufferStatus::EMPTY {
                 if write_end.is_none() {
-                    return Ok(0);
+                    pipe_record_ring_sizes(0, ring.get_free_size());
+                    let result = Ok(0);
+                    pipe_finish_read(profile_start, &result);
+                    return result;
                 }
-                return Err(SyscallErr::EAGAIN);
+                pipe_record_ring_sizes(0, ring.get_free_size());
+                let result = Err(SyscallErr::EAGAIN);
+                pipe_finish_read(profile_start, &result);
+                return result;
             }
             let read_bytes = ring.buffer_read(buf);
             ring.status = if ring.head == ring.tail {
@@ -72,6 +284,7 @@ impl IndexNode for Pipe {
             } else {
                 RingBufferStatus::NORMAL
             };
+            pipe_record_ring_sizes(ring.get_used_size(), ring.get_free_size());
             (Ok(read_bytes), write_end)
         };
         if let Ok(_n) = &result {
@@ -79,11 +292,13 @@ impl IndexNode for Pipe {
                 write_end
                     .write_wait
                     .notify_events_at_most(EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM, 1);
+                pipe_inc(profiling, &PIPE_NOTIFY_WRITE);
                 if !write_end.fasync.is_empty() {
                     write_end.fasync.send_sigio(None);
                 }
             }
         }
+        pipe_finish_read(profile_start, &result);
         result
     }
 
@@ -94,20 +309,30 @@ impl IndexNode for Pipe {
         buf: &[u8],
         _data: spin::MutexGuard<FilePrivateData>,
     ) -> Result<usize, SyscallErr> {
+        let profiling = pipe_profile_enabled();
+        pipe_inc(profiling, &PIPE_WRITE_CALLS);
+        let profile_start = pipe_profile_start(profiling);
         if !self.writable {
-            return Err(SyscallErr::EBADF);
+            let result = Err(SyscallErr::EBADF);
+            pipe_finish_write(profile_start, &result);
+            return result;
         }
         if buf.is_empty() {
-            return Ok(0);
+            let result = Ok(0);
+            pipe_finish_write(profile_start, &result);
+            return result;
         }
         let (result, read_end) = {
             let mut ring = self.buffer.lock();
             let read_end = ring.read_end.as_ref().and_then(Weak::upgrade);
             if read_end.is_none() {
+                pipe_record_ring_sizes(ring.get_used_size(), ring.get_free_size());
                 (Err(SyscallErr::EPIPE), None)
             } else if ring.status == RingBufferStatus::FULL {
+                pipe_record_ring_sizes(ring.get_used_size(), 0);
                 (Err(SyscallErr::EAGAIN), read_end)
             } else if buf.len() <= PAGE_SIZE && ring.get_free_size() < buf.len() {
+                pipe_record_ring_sizes(ring.get_used_size(), ring.get_free_size());
                 (Err(SyscallErr::EAGAIN), read_end)
             } else {
                 let write_bytes = ring.buffer_write(buf);
@@ -116,6 +341,7 @@ impl IndexNode for Pipe {
                 } else {
                     RingBufferStatus::NORMAL
                 };
+                pipe_record_ring_sizes(ring.get_used_size(), ring.get_free_size());
                 (Ok(write_bytes), read_end)
             }
         };
@@ -127,11 +353,13 @@ impl IndexNode for Pipe {
                 read_end
                     .read_wait
                     .notify_events_at_most(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM, 1);
+                pipe_inc(profiling, &PIPE_NOTIFY_READ);
                 if !read_end.fasync.is_empty() {
                     read_end.fasync.send_sigio(None);
                 }
             }
         }
+        pipe_finish_write(profile_start, &result);
         result
     }
 
@@ -160,6 +388,9 @@ impl IndexNode for Pipe {
     }
 
     fn poll(&self, _private_data: &FilePrivateData) -> Result<usize, SyscallErr> {
+        let profiling = pipe_profile_enabled();
+        pipe_inc(profiling, &PIPE_POLL_CALLS);
+        let profile_start = pipe_profile_start(profiling);
         let ring = self.buffer.lock();
         let mut revents: usize = 0;
         if self.readable {
@@ -175,6 +406,8 @@ impl IndexNode for Pipe {
         if ring.all_write_ends_closed() && ring.all_read_ends_closed() {
             revents |= EPollEvent::EPOLLHUP.bits();
         }
+        pipe_record_ring_sizes(ring.get_used_size(), ring.get_free_size());
+        pipe_record_cycles(&PIPE_POLL_CYCLES_TOTAL, &PIPE_POLL_CYCLES_MAX, profile_start);
         Ok(revents)
     }
 
@@ -299,7 +532,7 @@ const RING_DEFAULT_BUFFER_SIZE: usize = 4096 * 16;
 #[cfg(not(feature = "board_fu740"))]
 const RING_DEFAULT_BUFFER_SIZE: usize = 4096 * 16;
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::AtomicUsize;
 static PIPE_BUF_COUNT: AtomicUsize = AtomicUsize::new(0);
 static PIPE_BUF_BYTES: AtomicUsize = AtomicUsize::new(0);
 static PIPE_MAX_SIZE: AtomicUsize = AtomicUsize::new(RING_DEFAULT_BUFFER_SIZE);
@@ -335,8 +568,15 @@ pub struct PipeRingBuffer {
 
 impl PipeRingBuffer {
     fn new() -> Self {
-        PIPE_BUF_COUNT.fetch_add(1, Ordering::Relaxed);
-        PIPE_BUF_BYTES.fetch_add(RING_DEFAULT_BUFFER_SIZE, Ordering::Relaxed);
+        let alive = PIPE_BUF_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        let bytes = PIPE_BUF_BYTES.fetch_add(RING_DEFAULT_BUFFER_SIZE, Ordering::Relaxed)
+            + RING_DEFAULT_BUFFER_SIZE;
+        let profiling = pipe_profile_enabled();
+        pipe_inc(profiling, &PIPE_BUF_ALLOC);
+        if profiling {
+            pipe_atomic_max(&PIPE_BUF_ALIVE_MAX, alive as u64);
+            pipe_atomic_max(&PIPE_BUF_BYTES_MAX, bytes as u64);
+        }
         Self {
             arr: Box::new([0u8; RING_DEFAULT_BUFFER_SIZE]),
             capacity: initial_pipe_capacity(),
@@ -484,6 +724,7 @@ impl PipeRingBuffer {
 
 impl Drop for PipeRingBuffer {
     fn drop(&mut self) {
+        pipe_inc(pipe_profile_enabled(), &PIPE_BUF_DROP);
         PIPE_BUF_COUNT.fetch_sub(1, Ordering::Relaxed);
         PIPE_BUF_BYTES.fetch_sub(RING_DEFAULT_BUFFER_SIZE, Ordering::Relaxed);
     }
@@ -539,12 +780,18 @@ static FIFO_REGISTRY: spin::Mutex<BTreeMap<(usize, usize), FifoEntry>> = spin::M
 /// `dev_inode` identifies the FIFO (dev_id, inode_id).
 /// `for_read` selects the read end; `for_write` selects the write end.
 pub fn fifo_open(dev_inode: (usize, usize), for_read: bool, for_write: bool) -> Option<Arc<Pipe>> {
+    let profiling = pipe_profile_enabled();
+    pipe_inc(profiling, &PIPE_FIFO_OPEN);
     let mut reg = FIFO_REGISTRY.lock();
     // 清理两端都已关闭的陈旧条目，防止 64KB PipeRingBuffer 永久泄漏。
     if let Some(entry) = reg.get(&dev_inode) {
         if entry.read_end.strong_count() == 0 && entry.write_end.strong_count() == 0 {
             reg.remove(&dev_inode);
         }
+    }
+    let len_after_entry = reg.len() + usize::from(!reg.contains_key(&dev_inode));
+    if profiling {
+        pipe_atomic_max(&PIPE_FIFO_REGISTRY_LEN_MAX, len_after_entry as u64);
     }
     let entry = reg.entry(dev_inode).or_insert_with(|| {
         // Create ring buffer without linking ends yet
@@ -560,6 +807,7 @@ pub fn fifo_open(dev_inode: (usize, usize), for_read: bool, for_write: bool) -> 
 
     if for_read {
         if let Some(r) = entry.read_end.upgrade() {
+            pipe_inc(profiling, &PIPE_FIFO_HIT_READ);
             return Some(r);
         }
         let r = Arc::new(Pipe::read_end_with_buffer(buffer.clone()));
@@ -570,6 +818,7 @@ pub fn fifo_open(dev_inode: (usize, usize), for_read: bool, for_write: bool) -> 
 
     if for_write {
         if let Some(w) = entry.write_end.upgrade() {
+            pipe_inc(profiling, &PIPE_FIFO_HIT_WRITE);
             return Some(w);
         }
         let w = Arc::new(Pipe::write_end_with_buffer(buffer.clone()));
@@ -580,6 +829,7 @@ pub fn fifo_open(dev_inode: (usize, usize), for_read: bool, for_write: bool) -> 
 
     // O_RDWR: return write end (rare case)
     if let Some(w) = entry.write_end.upgrade() {
+        pipe_inc(profiling, &PIPE_FIFO_HIT_WRITE);
         return Some(w);
     }
     let w = Arc::new(Pipe::write_end_with_buffer(buffer.clone()));
@@ -591,10 +841,17 @@ pub fn fifo_open(dev_inode: (usize, usize), for_read: bool, for_write: bool) -> 
 /// 清理 FIFO_REGISTRY 中所有两端都已关闭的陈旧条目，
 /// 释放持有的 64KB PipeRingBuffer。由 reclaim 周期性触发。
 pub fn compact_fifo_registry() -> usize {
+    let profiling = pipe_profile_enabled();
+    pipe_inc(profiling, &PIPE_FIFO_COMPACT_CALLS);
     let mut reg = FIFO_REGISTRY.lock();
     let before = reg.len();
     reg.retain(|_, entry| {
         entry.read_end.strong_count() > 0 || entry.write_end.strong_count() > 0
     });
-    before - reg.len()
+    let removed = before - reg.len();
+    pipe_add(profiling, &PIPE_FIFO_COMPACT_REMOVED, removed as u64);
+    if profiling {
+        pipe_atomic_max(&PIPE_FIFO_REGISTRY_LEN_MAX, reg.len() as u64);
+    }
+    removed
 }
