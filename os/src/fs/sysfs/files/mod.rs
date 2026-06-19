@@ -12,6 +12,8 @@ use crate::net::iface::Iface;
 use crate::net::net_core::current_netns;
 use crate::utils::error::SyscallErr;
 
+pub mod diag;
+
 pub fn register_all(root: &Arc<SysInode>) -> Result<(), SyscallErr> {
     let class_dir = root.add_dir_inner("class", InodeMode::from_bits_truncate(0o555))?;
     let net_dir = class_dir.add_dir_inner("net", InodeMode::from_bits_truncate(0o555))?;
@@ -19,6 +21,14 @@ pub fn register_all(root: &Arc<SysInode>) -> Result<(), SyscallErr> {
     warn!("[sysfs] register_all: /sys/class/net hooks installed");
     root.add_dir("block", InodeMode::from_bits_truncate(0o555))?;
     warn!("[sysfs] register_all: /sys/block created");
+
+    #[cfg(feature = "perf_diag")]
+    {
+        let kernel_dir = root.add_dir_inner("kernel", InodeMode::from_bits_truncate(0o555))?;
+        diag::register_all(&kernel_dir)?;
+        warn!("[sysfs] register_all: /sys/kernel/stats and /sys/kernel/tracing created");
+    }
+
     Ok(())
 }
 
