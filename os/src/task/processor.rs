@@ -201,6 +201,7 @@ pub fn run_tasks() {
             drop(processor);
             unsafe {
                 // 调用__switch 函数(汇编)切换任务
+                crate::task::perf::record_context_switch();
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
             }
         } else {
@@ -397,6 +398,7 @@ pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
     let idle_task_cx_ptr = PROCESSOR.lock().get_idle_task_cx_ptr();
     unsafe {
         // 调用__switch 函数(汇编)切换任务
+        crate::task::perf::record_context_switch();
         __switch(switched_task_cx_ptr, idle_task_cx_ptr);
     }
 }

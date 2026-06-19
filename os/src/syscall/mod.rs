@@ -932,6 +932,9 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     }
     let _syscall_ticks = crate::task::perf::perf_time_now() - _syscall_start;
     crate::task::perf::record_syscall_cost_ticks(_syscall_ticks);
+    if syscall_id == 173 {
+        crate::task::perf::record_getppid_cost(_syscall_ticks);
+    }
     crate::task::perf::record_syscall(syscall_id, ret);
     ret
 }

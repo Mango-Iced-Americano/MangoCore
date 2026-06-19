@@ -1,7 +1,7 @@
 use crate::{config::PAGE_SIZE, hal::KERNEL_HEAP_SIZE};
 use buddy_system_allocator::Heap;
 use core::alloc::{GlobalAlloc, Layout};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::Mutex;
 
 /// 全局堆分配器。
@@ -14,6 +14,9 @@ pub struct OomAwareAllocator {
 }
 
 static OOM_RECOVERY_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+pub static KERNEL_HEAP_CURRENT_BYTES: AtomicUsize = AtomicUsize::new(0);
+pub static KERNEL_HEAP_MAX_BYTES: AtomicUsize = AtomicUsize::new(0);
 
 impl OomAwareAllocator {
     pub const fn empty() -> Self {
@@ -78,6 +81,16 @@ unsafe impl GlobalAlloc for OomAwareAllocator {
                     .max(core::mem::size_of::<usize>())
                     .next_power_of_two();
                 drop(inner);
+                // Perf gauge: track current allocation and peak
+                let prev = KERNEL_HEAP_CURRENT_BYTES.fetch_add(block_size, Ordering::Relaxed);
+                let new_total = prev + block_size;
+                let mut cur_max = KERNEL_HEAP_MAX_BYTES.load(Ordering::Relaxed);
+                while new_total > cur_max {
+                    match KERNEL_HEAP_MAX_BYTES.compare_exchange_weak(cur_max, new_total, Ordering::Relaxed, Ordering::Relaxed) {
+                        Ok(_) => break,
+                        Err(v) => cur_max = v,
+                    }
+                }
                 #[cfg(feature = "heap_trace")]
                 crate::mm::heap_trace::record_alloc(ptr.as_ptr(), layout, block_size);
                 return ptr.as_ptr();
@@ -94,7 +107,12 @@ unsafe impl GlobalAlloc for OomAwareAllocator {
         if let Some(ptr) = core::ptr::NonNull::new(ptr) {
             #[cfg(feature = "heap_trace")]
             crate::mm::heap_trace::record_dealloc(ptr.as_ptr());
+            let block_size = layout.size()
+                .max(layout.align())
+                .max(core::mem::size_of::<usize>())
+                .next_power_of_two();
             self.inner.lock().dealloc(ptr, layout);
+            KERNEL_HEAP_CURRENT_BYTES.fetch_sub(block_size, Ordering::Relaxed);
         }
     }
 }
@@ -154,6 +172,8 @@ pub fn init_heap() {
         // 起始地址和大小
         HEAP_ALLOCATOR.init(HEAP_SPACE.as_ptr() as usize, KERNEL_HEAP_SIZE);
     }
+    KERNEL_HEAP_CURRENT_BYTES.store(0, Ordering::Relaxed);
+    KERNEL_HEAP_MAX_BYTES.store(0, Ordering::Relaxed);
 }
 
 #[allow(unused)]
