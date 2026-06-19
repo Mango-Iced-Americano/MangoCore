@@ -4,6 +4,185 @@
 
 ## 2026-06-19
 
+### docs(perf_diag): 编写统一内核观测系统使用文档 + 空目录 .gitkeep
+
+**涉及文件：**
+- `docs/09_debug/perf_diag.md` — 新增完整使用指南：架构图、构建指令、文件参考、计数器说明、initproc 集成、故障排查、实现文件清单
+- `docs/00_overview/.gitkeep` — 空目录占位
+- `docs/01_architecture/.gitkeep` — 空目录占位
+- `docs/02_syscall/.gitkeep` — 空目录占位
+- `docs/03_fs/.gitkeep` — 空目录占位
+- `docs/04_mm/.gitkeep` — 空目录占位
+- `docs/05_process/.gitkeep` — 空目录占位
+- `docs/07_driver/.gitkeep` — 空目录占位
+
+**验证：** 纯文档变更，无代码修改，无需编译。
+
+**备注：** 文档覆盖全部 9 个 stats 文件 + 6 个 tracing 文件的说明；计数器参考含 taskq(15项)、timer(9项)、syscall(4项)、resource(27项)；遵循项目 YAML front matter 规范。
+
+### feat(diag): 新增 /sys/kernel/stats/{resource,buddyinfo,zombies} 和 /sys/kernel/tracing/trigger，gate diag 注册到 perf_diag
+
+**涉及文件：**
+- `os/src/fs/sysfs/files/diag.rs` — 新增 `stats_resource_content`（汇总内存/任务/套接字/管道/挂载/页面缓存计数器）、`stats_buddyinfo_content`（堆空闲块阶数直方图）、`stats_zombies_content`（僵尸进程按父 PID 分组）、`tracing_trigger_write`（写触发命令：buddy/zombie/heap）四个函数；`register_all()` 中注册 resource/buddyinfo/zombies/trigger 文件
+- `os/src/fs/sysfs/files/mod.rs` — `#[cfg(feature = "perf_diag")]` 包裹 diag 注册块（模块始终编译，仅注册受 feature gate 控制）
+- `os/src/task/task.rs` — 删除 `exit_thread_resources()` 中的 `crate::utils::stats::print_resource_stats(Some(self))` 调用（及其 `#[cfg(feature = "heap_trace")]` gate）
+- `os/src/trace.rs` — 新增 `HTRACE_RESOURCE_BASE: u64 = 0xD000` 常量，预留给 buddy histogram / zombie grouping / heap trace 事件标签
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make rv64-kernel-build-only EXTRA_FEATURES=perf_diag` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：** 无 `perf_diag` feature 时 `/sys/kernel/` 目录不创建；有 feature 时三个 ro 文件 + 一个 wo trigger 文件正常注册。旧 `print_resource_stats` 调用已移除（功能由 `/sys/kernel/stats/resource` 取代）。
+
+### fix(sysfs): 补充 resize 覆盖 — 修复 O_TRUNC 导致 writable file 返回 ENOSYS
+
+**根因：** bash `echo > /sys/...` 重定向带 `O_TRUNC`，VFS `sys_openat` 在 `write_at` 之前先调 `IndexNode::resize(0)`。`SysInode` 未覆盖 `resize`，命中 trait 默认 `ENOSYS`，写操作未开始即失败。
+
+**涉及文件：**
+- `os/src/fs/sysfs/mod.rs` — `impl IndexNode for SysInode` 新增 `resize()` 覆盖：目录返回 `EISDIR`，`len==0` 返回 `Ok(())`，其他返回 `EINVAL`
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：** 不存盘（sysfs 伪文件），`resize(0)` 只做 no-op，不改变 inode 内容。`O_TRUNC` 兼容性与 procfs 行为一致。
+
+### feat(perf_diag): 统一内核观测面 Phase 1+2 完成 — 基础实施、4项修正、用户态集成
+
+**概要：** 将内核中散落的 trace/perf/stats/ext4 四套观测机制统一收敛到 `perf_diag` feature gate 下，通过 `/sys/kernel/stats/` 和 `/sys/kernel/tracing/` 文件接口暴露，不再依赖串口输出。
+
+**涉及文件（11 个修改 + 2 个新建）：**
+- `os/Cargo.toml` — 新增 `perf_diag = ["perf_stats"]` feature
+- `os/src/task/perf.rs` — 新增 28 个 P0 AtomicUsize 计数器 (scheduler/timer/syscall) + `update_max()` + `stats_enabled()` 运行时门控 + 17 个 record 函数
+- `os/src/task/manager.rs` — 在 `add`/`add_front`/`pop_next_ready`/`add_interruptible`/`wake_interruptible`/`add_kernel_timer`/`pop_expired`/`compact`/`run_timer`/`wait_with_timeout` 插入 record 调用
+- `os/src/task/processor.rs` — `run_tasks()` 中每 64 tick 全队列扫描 (zombie/nonzero_nice) + zombie drain 统计
+- `os/src/syscall/mod.rs` — syscall 入口/出口计时 + `record_syscall_enter`
+- `os/src/hal/arch/riscv/trap/mod.rs` + la64 — trap ecall 路径计时
+- `os/src/trace.rs` — TRACING_ON/TRACE_DROPPED 运行时开关 + `dump_to_string(max_entries)` 内存边界 + `clear_ring()`
+- `os/src/fs/sysfs/mod.rs` — 新增 `SysWriteFn`/`write_fn`/`writable`/`add_writable_file_with_write`/`write_at` 写支持
+- `os/src/fs/sysfs/files/diag.rs` — **新建** `/sys/kernel/stats/{stats_on,reset,taskq,timer,syscall}` + `/sys/kernel/tracing/{tracing_on,trace,dropped,buffer_size,clear}`
+- `os/src/fs/sysfs/files/mod.rs` — 注册 `/sys/kernel/` 目录
+- `user/src/bin/initproc.rs` — diag=1 时每组测试前后 snapshot stats 到 `/tmp/perf_diag/`
+- `scripts/diag_smoke_test.sh` — **新建** QEMU 端到端验证脚本
+- `.sisyphus/plans/unified-perf-diag.md` — **新建** 完整方案文档
+
+**Oracle 审查发现及修正 (4 项)：**
+1. `stats_on` 门控未接通 → 移至 `perf.rs` 并在 17 个 record 函数顶部检查
+2. `KTIMER_LEN_MAX`/`DUPLICATE_READY_ENQUEUE`/`record_zombie_drain_full` 无调用点 → 全部接线
+3. processor.rs 传 `0,0,0` → 每 64 tick 全队列扫描传真实 zombie/nonzero_nice
+4. trace dropped 语义不完整 → try_lock 失败 + ring 覆写均递增；dump 截断 512 条目防 OOM
+
+**验证：** rv64 ✅ la64 ✅ rv64-only ✅ la64-only ✅ (全量构建，零新增 warning)
+
+### feat(initproc): diag 模式下自动快照 stats 到 /tmp/perf_diag/
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — `run_selected_groups()` 循环：新增 `enumerate()` 序号 `n`；每组执行前启用 stats + 重置计数器（`mkdir -p /tmp/perf_diag`、`echo 1 > stats_on`、`cat reset`）；每组执行后通过 `cat` 快照 `taskq`/`timer`/`syscall` 到 `/tmp/perf_diag/T{n}__{group}_{counter}.txt`
+- `scripts/diag_smoke_test.sh` — **新建**：shell 脚本验证 `/sys/kernel/stats/` 端到端可用（检查接口存在、启用 stats、产生负载、读取计数器、断言非零）
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- `make rv64-only`（含用户程序） ✅
+- LSP diagnostics: 仅 cfg-inactive hints（正常）
+
+**备注：** 快照嵌套在已有 `if cfg.diag` 块内，不影响非 diag 模式。`n` 为 `cfg.order.iter().enumerate()` 序号（被 mask 跳过的组不执行 diag 代码，但序号仍递增——文件名会有间隙，属设计预期）。
+
+### fix(diag): Oracle review 4 项修复 — stats_on 门控、死计数器、队列透镜、trace 丢弃语义
+
+**涉及文件：**
+- `os/src/task/perf.rs` — `STATS_ON` AtomicBool 从 `#[cfg(feature = "perf_stats")]` 块移至模块根级（sysfs 接口无条件可读写）；新增 `stats_enabled()` 辅助函数（perf_stats 开启时读 STATS_ON，关闭时恒 false）；所有 17 个 P0 `record_*` 函数顶部添加 `if !stats_enabled() { return; }` 运行时门控
+- `os/src/fs/sysfs/files/diag.rs` — `stats_on_content`/`stats_on_write` 改用 `crate::task::perf::STATS_ON` 替代本地 static；`trace_content` 调用 `dump_to_string(512)` 传入条目上限
+- `os/src/task/manager.rs` — `add_kernel_timer()` 新增 `record_ktimer_len(timer_len)` 调用；`try_wake_interruptible()` 的 `Err(AlreadyWaken)` 分支新增 `record_taskq_dup_enqueue()` 调用
+- `os/src/task/processor.rs` — zombie drain 快路径新增 `record_zombie_drain_full(0, 1, drained_zombies)`；`record_taskq_queue_lens()` 改为每 64 tick 执行一次全队列扫描（计数 zombie + nonzero_nice），普通 tick 传零
+- `os/src/trace.rs` — 移除 `inner_event()` 并内联入 `event()`：try_lock 失败和 ring write_pos >= TRACE_SIZE 时均递增 `TRACE_DROPPED`；`dump_to_string()` 新增 `max_entries` 参数（上限 512 条目，约 80KB），超出部分从最新条目截取
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- LSP diagnostics: 所有修改文件 clean（仅 trace.rs 预存 macro-error，与本次修改无关）
+
+**备注：** STATS_ON 安置在 `#[cfg]` 外以保证 sysfs 始终可访问；compile-time disable 时 `stats_enabled()` 恒返回 false。全队列 zombie/nice 扫描使用已验模式 `acquire_inner_lock().is_zombie()`（与 `zombie_count()` 及 `take_one_ready_zombie()` 一致）。trace dump 上限取 512 均衡信息量与内存安全。
+
+### feat(sysfs): 添加 /sys/kernel/stats/ 和 /sys/kernel/tracing/ — 统一内核诊断接口
+
+**涉及文件：**
+- `os/src/fs/sysfs/files/diag.rs` — **新建**：完整的 `/sys/kernel/` 注册。`/sys/kernel/stats/` 下 3 个只读文件（`taskq`/`timer`/`syscall`，读自 `crate::task::perf` P0 计数器，格式化为 `key=value\n`）、1 个 rw 控制文件（`stats_on`）、1 个 write-only 文件（`reset`）。`/sys/kernel/tracing/` 下 1 个 rw 文件（`tracing_on`）、3 个只读文件（`trace`/`dropped`/`buffer_size`）、1 个 write-only 文件（`clear`）。
+- `os/src/task/perf.rs` — 28 个 P0 计数器从 `static` 改为 `pub static`、新增 `pub fn reset_p0_counters()`、新增 `#[cfg(not(feature = "perf_stats"))]` 零值桩（28 个计数器 + reset 空函数）
+- `os/src/trace.rs` — `TRACE_SIZE` 改为 `pub(crate) const`；新增 `pub static TRACING_ON`/`TRACE_DROPPED`（带 `AtomicUsize` import）；`event()` 增加 `TRACING_ON` 运行时开关检查；新增 `pub fn clear_ring()`、`pub(crate) fn dump_to_string()`；`tag_name()` 改为 `pub(crate)`
+- `os/src/fs/sysfs/files/mod.rs` — 新增 `pub mod diag;`，`register_all()` 中创建 `/sys/kernel/` 目录并调用 `diag::register_all()`
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- LSP diagnostics: 所有修改文件 clean（仅 trace.rs 有预存 `crate::newline` 误报）
+
+**备注：** `TRACING_ON` 关闭时事件被丢弃并计入 `TRACE_DROPPED`。`reset` 和 `clear` 是 write-only trigger 文件（mode `0o200`）。`dump_to_string()` 持锁格式化最多 2048 条 trace 条目。
+
+### feat(sysfs): 添加 write 支持 — SysWriteFn、write_at、可写文件构造器
+
+**涉及文件：**
+- `os/src/fs/sysfs/mod.rs` — 新增 `SysWriteFn` 类型别名、`SysInodeData` 新增 `write_fn`/`writable` 字段、新增 `add_writable_file_with_write()`/`add_write_only_file()` 构造器、`IndexNode` impl 新增 `write_at()` 方法；所有构造函数（`new_inner`、`new_dir_wired`、`SysFS::new()` 的 root inode 初始化）补充新字段默认值
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- LSP diagnostics: clean
+
+**备注：** 完全参照 procfs write 模式实现：`write_at` 先短锁提取 `(file_type, writable, write_fn)` 再释放锁执行写入，写入后再次加锁更新 `mtime`/`ctime`。非可写文件返回 `EPERM`。`add_write_only_file` 复用 `add_writable_file_with_write` 传递空读函数。
+
+### feat(perf): P0 计数器热路径接入 — 16 个 record_* 函数上线
+
+**涉及文件：**
+- `os/src/task/manager.rs` — 10 处热路径插入：
+  - `add()` / `add_front()` → `record_taskq_add_ready()`
+  - `pop_next_ready()` → `record_taskq_fetch()`（fast path / fair scan 分支）
+  - `add_interruptible()` → `record_taskq_add_interruptible()`
+  - `wake_interruptible()` → `record_taskq_wake_interruptible()`
+  - `add_kernel_timer()` → `record_ktimer_add()`
+  - `pop_expired()` → `record_ktimer_pop(expired.len())`
+  - `compact()` → `record_ktimer_compact(stale_count)`（新增 stale 计数逻辑）
+  - `run_timer()` WakeTask → `record_ktimer_stale_waketask()` + `record_ktimer_real_wake()`
+  - `wait_with_timeout()` → `record_wait_with_timeout()`
+  - `ready_count_fast()` / `interruptible_count_fast()` 改为 `pub(crate)`（供 processor 调用）
+- `os/src/task/processor.rs` — zombie drain 后插入 `record_taskq_queue_lens()` 快照
+- `os/src/syscall/mod.rs` — `syscall()` 入口插入 `record_syscall_enter()` + 开始计时；出口插入 `record_syscall_cost_ticks()`
+- `os/src/hal/arch/riscv/trap/mod.rs` — ecall 路径插入 trap 开始计时 + 出口插入 `record_trap_cost_ticks()`
+- `os/src/hal/arch/loongarch64/trap/mod.rs` — 同上（双架构一致）
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- LSP diagnostics: clean（仅 pre-existing `println!` macro 解析问题）
+
+**备注：** 所有 record 调用均无 `#[cfg]` gate（函数内部已有 cfg），零串行输出。新增 stale 计数变量仅用于 compact() 的 record 参数，不影响原有逻辑。
+
+### feat(perf): P0 诊断计数器 — 调度队列、内核定时器、系统调用/陷阱
+
+**涉及文件：**
+- `os/src/task/perf.rs` — 新增 29 个 `AtomicUsize` 计数器、`update_max()` 辅助函数、18 个热路径 `record_*` 函数、18 个对应 no-op stub（`#[cfg(not(feature = "perf_stats"))]`）
+
+**新增计数器分组：**
+| 分组 | 计数器 | 说明 |
+|------|------|------|
+| P0: Scheduler | 15 个 (`FAIR_PICK_CALLS` ~ `READY_NONZERO_NICE_CUR`) | fair/fast path 选取、队列深度 max/max_zombie、zombie drain 统计、non-zero nice 计数 |
+| P0: Kernel Timer | 9 个 (`KTIMER_LEN_MAX` ~ `WAIT_WITH_TIMEOUT_TOTAL`) | ktimer 队列深度、add/pop/stale/compact/real_wake 统计 |
+| P0: Syscall/Trap | 5 个 (`SYSCALL_TOTAL` ~ `TRAP_ENTER_COST_MAX_TICKS`) | 全局 syscall 计数、getppid 专项、syscall/trap 耗时 max |
+
+**新增辅助函数：** `update_max(&AtomicUsize, val)` — CAS 循环更新最大值（`Ordering::Relaxed`）
+
+**新增记录函数（18 个）：** `record_taskq_add_ready`, `record_taskq_add_interruptible`, `record_taskq_wake_interruptible`, `record_taskq_dup_enqueue`, `record_taskq_fetch(fair_pick, scan_depth)`, `record_taskq_queue_lens(ready, int, rz, iz, nn)`, `record_zombie_drain_full(scan, calls, removed)`, `record_ktimer_add`, `record_ktimer_len(len)`, `record_ktimer_pop(pop_count)`, `record_ktimer_stale_waketask`, `record_ktimer_real_wake`, `record_ktimer_compact(stale_removed)`, `record_wait_with_timeout`, `record_syscall_enter(syscall_id)`, `record_syscall_cost_ticks(ticks)`, `record_trap_cost_ticks(ticks)`
+
+**设计约束：** 所有 hot-path 函数 `#[inline(always)]`，零串行输出；所有原子操作用 `Ordering::Relaxed`；`update_max` 为 `fn`（非 `pub`），仅内部使用。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- LSP diagnostics: clean ✅
+
+**备注：** 所有现有计数器和函数完全未变。新计数器不参与 `print_snapshot()`（未增加序列化开销），预留给后续 hook 点接入使用。
+
 ### fix(mount): bind mount 根 ".." 解析错误转义到源文件系统，导致 musl getcwd manual walk 失败
 
 **涉及文件：**
