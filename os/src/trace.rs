@@ -1,9 +1,9 @@
 use crate::timer::get_time_us;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::Mutex;
 
 /// Number of trace entries in the ring buffer.
-const TRACE_SIZE: usize = 2048;
+pub(crate) const TRACE_SIZE: usize = 2048;
 
 /// Magic key: Ctrl+T (0x14). Pressing this key triggers a trace dump.
 pub const MAGIC_KEY: u8 = 0x14;
@@ -129,29 +129,20 @@ static TRACE: Mutex<RingInner> = Mutex::new(RingInner {
     write_pos: 0,
 });
 
-/// Record a trace event with up to 6 payload fields.
-fn inner_event(tag: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64, arg6: u64) {
-    let entry = TraceEntry {
-        timestamp: get_time_us() as u64,
-        tag,
-        arg1,
-        arg2,
-        arg3,
-        arg4,
-        arg5,
-        arg6,
-    };
-    match TRACE.try_lock() {
-        Some(mut ring) => ring.push(entry),
-        None => {
-            // If we can't acquire the lock, it means a dump is in progress.
-            // We can safely skip recording this event since the dump will read the old entries anyway.
-        }
-    }
-}
+/// Runtime trace on/off switch. Writable via /sys/kernel/tracing/tracing_on.
+/// When false, trace events are silently dropped.
+pub static TRACING_ON: AtomicBool = AtomicBool::new(true);
+
+/// Count of events dropped because TRACING_ON was false or ring was full.
+pub static TRACE_DROPPED: AtomicUsize = AtomicUsize::new(0);
+
+/// Resource scan events (buddy histogram, zombie grouping, heap trace)
+pub const HTRACE_RESOURCE_BASE: u64 = 0xD000;
+
+
 
 /// Decode a tag to a human-readable short label.
-fn tag_name(tag: u64) -> &'static str {
+pub(crate) fn tag_name(tag: u64) -> &'static str {
     // Syscall IDs — try the syscall name table first (works for any ID range)
     let name = crate::syscall::syscall_name(tag as usize);
     if name != "unknown" {
@@ -258,14 +249,80 @@ fn inner_clear() {
     }
 }
 
+/// Format the ring buffer into a String for sysfs read.
+/// Held lock during formatting; capped to `max_entries` to bound allocation
+/// (each entry ≈160 bytes; 512 entries ≈ 80KB, well within kernel heap).
+pub(crate) fn dump_to_string(max_entries: usize) -> alloc::string::String {
+    let ring = TRACE.lock();
+    let count = ring.count();
+    let start = ring.start();
+    let dump_count = count.min(max_entries);
+    // If capped, start from the most recent entries.
+    let offset = count.saturating_sub(dump_count);
+
+    let cap = dump_count.saturating_mul(160).min(65536);
+    let mut s = alloc::string::String::with_capacity(cap);
+
+    use core::fmt::Write;
+    let _ = writeln!(s, "# trace buffer: {} entries (ring size {}), showing {}", count, TRACE_SIZE, dump_count);
+    let _ = writeln!(s, "# format: timestamp_us tag=HEX a1..a6");
+
+    for i in 0..dump_count {
+        let e = &ring.buf[(start + offset + i) % TRACE_SIZE];
+        let sec = e.timestamp / 1_000_000;
+        let us = e.timestamp % 1_000_000;
+        let name = tag_name(e.tag);
+        let _ = writeln!(
+            s,
+            "[{}.{:06}] {:16} tag=0x{:04X} a1=0x{:X} a2=0x{:X} a3=0x{:X} a4=0x{:X} a5=0x{:X} a6=0x{:X}",
+            sec, us,
+            name,
+            e.tag,
+            e.arg1, e.arg2, e.arg3, e.arg4, e.arg5, e.arg6,
+        );
+    }
+
+    s
+}
+
 // ── Public API ────────────────────────────────────────────────
 
 pub fn init() {
     inner_clear();
 }
 
+pub fn clear_ring() {
+    inner_clear();
+}
+
 pub fn event(tag: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64, arg6: u64) {
-    inner_event(tag, arg1, arg2, arg3, arg4, arg5, arg6);
+    if !TRACING_ON.load(Ordering::Relaxed) {
+        TRACE_DROPPED.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    let entry = TraceEntry {
+        timestamp: get_time_us() as u64,
+        tag,
+        arg1,
+        arg2,
+        arg3,
+        arg4,
+        arg5,
+        arg6,
+    };
+    match TRACE.try_lock() {
+        Some(mut ring) => {
+            // Ring overwrite: an old entry is being evicted for this new one.
+            if ring.write_pos >= TRACE_SIZE {
+                TRACE_DROPPED.fetch_add(1, Ordering::Relaxed);
+            }
+            ring.push(entry);
+        }
+        None => {
+            // Lock contention (dump in progress).
+            TRACE_DROPPED.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 /// Dump the trace buffer. `source` is a short label shown in the header
