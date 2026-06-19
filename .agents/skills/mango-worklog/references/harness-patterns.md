@@ -507,3 +507,11 @@
 - **机器差异原因**: 快/慢主机（或 KVM vs TCG）的 pipe I/O 时序差异决定任务是否在 1ms fallback 到期前收到数据，从而命中或绕过重新阻塞的竞态窗口 → 同一 Docker 镜像在不同机器表现不同。
 - **排障线索**: (1) 系统不 crash 但无 task 切换 → 检查 ready_queue 是否为空；(2) trace 0 条目 → 非活锁，纯空闲阻塞；(3) 机器相关 → 很可能时序/竞态 bug；(4) 检查是否所有任务都在 interruptible 等待状态。
 - **相关文件**: `os/src/task/manager.rs`
+
+## bind mount 根 ".." 解析跨越挂载边界逃逸到源文件系统
+
+- **根因**: `MountFSInode::find("..")` 通过 `do_find()` 直接调用 `inner_inode.find("..")`，在 bind mount 根上穿透 mount 边界回到源 FS 的父目录。该 inode 编号与 VFS 全局根（通过 `current_root_inode()` 获取）不同，导致依赖 inode 一致性判断根位置的调用者（如 musl getcwd manual walk）误判未到根。
+- **症状**: musl `getcwd()` 报 "cannot access parent directories: Invalid argument"（`EINVAL`）；`fstatat("/")` 与 `fstatat("..")` 从根子目录返回不同 inode。
+- **修复**: 在 `do_find()` 开头 special-case `name == ".."`，调用 `lookup_dotdot()`：挂载点根时先拿到 `self_mountpoint`（在父 FS 中的 backref），再对该 backref 的 `inner_inode.find("..")` 求值 → 结果在父 FS 的 MountFS 上下文中。全局根返回自身。普通目录走原路径。
+- **教训**: VFS mount-boundary 穿越需要区分两个方向 — (1) 正向：`overlaid_inode()` 覆盖子挂载；(2) 反向 ".."：需通过 `self_mountpoint` backref 回到挂载点所在父 FS。不能用同一个 `inner_inode.find("..")` 处理这两种语义；`do_parent()`（服务于 `absolute_path()`）有不同需求，不应混用。
+- **相关文件**: `os/src/fs/vfs/mount.rs` (`do_find`, `lookup_dotdot`, `do_parent`)
