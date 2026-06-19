@@ -181,11 +181,11 @@ fn sub_interruptible_count(count: usize) {
     }
 }
 
-fn ready_count_fast() -> u16 {
+pub(crate) fn ready_count_fast() -> u16 {
     READY_TASK_COUNT.load(AtomicOrdering::Relaxed).min(u16::MAX as usize) as u16
 }
 
-fn interruptible_count_fast() -> u16 {
+pub(crate) fn interruptible_count_fast() -> u16 {
     INTERRUPTIBLE_TASK_COUNT
         .load(AtomicOrdering::Relaxed)
         .min(u16::MAX as usize) as u16
@@ -241,6 +241,7 @@ impl TaskManager {
             self.ready_nonzero_nice_count += 1;
         }
         self.ready_queue.push_back(task);
+        crate::task::perf::record_taskq_add_ready();
         add_ready_count();
     }
     fn add_front(&mut self, task: Arc<TaskControlBlock>) {
@@ -248,12 +249,16 @@ impl TaskManager {
             self.ready_nonzero_nice_count += 1;
         }
         self.ready_queue.push_front(task);
+        crate::task::perf::record_taskq_add_ready();
         add_ready_count();
     }
     fn pop_next_ready(&mut self) -> Option<Arc<TaskControlBlock>> {
         let task = if self.ready_nonzero_nice_count == 0 {
+            crate::task::perf::record_taskq_fetch(false, 0);
             self.ready_queue.pop_front()
         } else {
+            let scan_depth = self.ready_queue.len();
+            crate::task::perf::record_taskq_fetch(true, scan_depth);
             pop_fair_ready(&mut self.ready_queue)
         }?;
         sub_ready_count(1);
@@ -410,6 +415,7 @@ impl TaskManager {
     /// 添加一个任务到可中断队列
     pub fn add_interruptible(&mut self, task: Arc<TaskControlBlock>) {
         self.interruptible_queue.push_back(task);
+        crate::task::perf::record_taskq_add_interruptible();
         add_interruptible_count();
     }
     /// 从可中断队列中删除一个任务
@@ -502,6 +508,7 @@ impl TaskManager {
     /// # 注意
     /// 这个函数不会改变`task_status`，你应该手动改变它以保持一致性。
     pub fn wake_interruptible(&mut self, task: Arc<TaskControlBlock>) {
+        crate::task::perf::record_taskq_wake_interruptible();
         match self.try_wake_interruptible(task) {
             Ok(_) => {}
             Err(_) => {}
@@ -529,6 +536,7 @@ impl TaskManager {
             self.add_front(task);
             Ok(())
         } else {
+            crate::task::perf::record_taskq_dup_enqueue();
             Err(WaitQueueError::AlreadyWaken)
         }
     }
@@ -1493,6 +1501,7 @@ impl KernelTimerQueue {
                 break;
             }
         }
+        crate::task::perf::record_ktimer_pop(expired.len());
         expired
     }
     /// 清理所有失效 Weak 引用的定时器条目，释放堆槽位。
@@ -1501,11 +1510,15 @@ impl KernelTimerQueue {
             return;
         }
         let entries: Vec<KernelTimer> = self.inner.drain().collect();
+        let total = entries.len();
+        let mut live_inserted = 0usize;
         for timer in entries {
             if timer.is_live() {
                 self.inner.push(timer);
+                live_inserted += 1;
             }
         }
+        crate::task::perf::record_ktimer_compact(total - live_inserted);
     }
     fn enforce_capacity(&mut self) {
         self.compact();
@@ -1601,6 +1614,7 @@ impl KernelTimerQueue {
                 // Normal wake (deadline or current fallback)
 
                 if task.wait_timer_generation.load(AtomicOrdering::Relaxed) != generation {
+                    crate::task::perf::record_ktimer_stale_waketask();
                     return false; // generation mismatch, stale
                 }
 
@@ -1611,6 +1625,7 @@ impl KernelTimerQueue {
                 }
                 drop(inner);
                 if should_wake {
+                    crate::task::perf::record_ktimer_real_wake();
                     wake_interruptible(task);
                 }
                 should_wake
@@ -1924,6 +1939,9 @@ pub fn timer_subsystem_init() {
 pub fn add_kernel_timer(action: TimerAction, deadline: TimeSpec) {
     let flags = local_irq_save();
     let new_is_earliest = KERNEL_TIMER_QUEUE.lock().add_action(action, deadline);
+    crate::task::perf::record_ktimer_add();
+    let timer_len = { KERNEL_TIMER_QUEUE.lock().len() };
+    crate::task::perf::record_ktimer_len(timer_len);
     if new_is_earliest {
         reprogram_timer_irqoff();
     }
@@ -1933,6 +1951,7 @@ pub fn add_kernel_timer(action: TimerAction, deadline: TimeSpec) {
 /// 这个函数会将一个`task`添加到全局超时等待队列中，但是不会阻塞它
 /// 如果想要阻塞一个任务，使用`block_current_and_run_next()`函数
 pub fn wait_with_timeout(task: Weak<TaskControlBlock>, timeout: TimeSpec) {
+    crate::task::perf::record_wait_with_timeout();
     let Some(task) = task.upgrade() else {
         return;
     };

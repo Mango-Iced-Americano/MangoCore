@@ -300,6 +300,8 @@ use crate::{
 };
 
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
+    crate::task::perf::record_syscall_enter(syscall_id);
+    let _syscall_start = crate::task::perf::perf_time_now();
     crate::trace_event!(syscall_id, args[0], args[1], args[2], args[3], args[4], args[5]);
     // 记录当前系统调用 ID，供 OOM 诊断使用
     crate::task::set_current_syscall_id(Some(syscall_id));
@@ -928,6 +930,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             ),
         }
     }
+    let _syscall_ticks = crate::task::perf::perf_time_now() - _syscall_start;
+    crate::task::perf::record_syscall_cost_ticks(_syscall_ticks);
     crate::task::perf::record_syscall(syscall_id, ret);
     ret
 }

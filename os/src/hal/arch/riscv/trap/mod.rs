@@ -71,6 +71,7 @@ pub fn trap_handler() -> ! {
     let stval = stval::read();
 
     if let Trap::Exception(Exception::UserEnvCall) = scause.cause() {
+        let _trap_start = crate::task::perf::perf_time_now();
         let task = current_task_ref().unwrap();
         let (syscall_id, args) = {
             let mut inner = task.acquire_inner_lock();
@@ -97,6 +98,8 @@ pub fn trap_handler() -> ! {
             inner.refresh_real_timer();
             inner.update_process_times_leave_trap(scause.cause());
         }
+        let _trap_ticks = crate::task::perf::perf_time_now() - _trap_start;
+        crate::task::perf::record_trap_cost_ticks(_trap_ticks);
         trap_return();
     }
 
