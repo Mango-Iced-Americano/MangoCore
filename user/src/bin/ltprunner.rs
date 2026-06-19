@@ -895,7 +895,7 @@ fn main(_argc: usize, argv: &[&str]) -> i32 {
             failed += 1;
             "FAIL"
         };
-        println!("{} LTP CASE {} : {}", label, case.case_name, ret);
+        println!("FAIL LTP CASE {} : {}", case.case_name, ret);
         executed += 1;
 
         reap_orphans();
