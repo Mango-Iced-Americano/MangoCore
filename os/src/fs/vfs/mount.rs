@@ -269,6 +269,7 @@ impl MountFSInode {
 
     /// 逐级查找子项（带挂载点交叉和 dentry 缓存）
     fn do_find(&self, name: &str) -> Result<Arc<MountFSInode>, SyscallErr> {
+        counters::FIND_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let parent_ino = self.inner_inode.metadata()?.inode_id;
         self.do_find_with_parent_ino(name, parent_ino)
     }
@@ -288,7 +289,6 @@ impl MountFSInode {
         if name == ".." {
             return self.lookup_dotdot();
         }
-
         // Self-overlay: if this inode itself is a mountpoint, redirect to
         // the mounted filesystem's root before looking up children.
         // Without this, find("test_file") on a covered mountpoint directory

@@ -197,6 +197,18 @@ bitflags! {
     }
 }
 
+#[inline]
+fn special_device_mode(metadata: &Metadata) -> FileMode {
+    if metadata.file_type != FileType::CharDevice {
+        return FileMode::empty();
+    }
+    match metadata.raw_dev {
+        dev if dev == crate::makedev!(1, 3) => FileMode::FMODE_DEV_NULL,
+        dev if dev == crate::makedev!(1, 5) => FileMode::FMODE_DEV_ZERO,
+        _ => FileMode::empty(),
+    }
+}
+
 // ── SeekFrom ────────────────────────────────────────────────────────────
 
 /// seek 操作的起始位置
@@ -698,6 +710,7 @@ impl File {
         };
 
         let file_type = metadata.file_type;
+        mode |= special_device_mode(&metadata);
 
         // 对于流式文件（pipe/socket），设置 FMODE_STREAM
         if matches!(file_type, FileType::Pipe | FileType::Socket) || inode.is_stream() {
@@ -798,8 +811,12 @@ impl File {
             mode |= FileMode::FMODE_STREAM;
         }
 
-        let posix_lock_key = inode
-            .metadata()
+        let metadata = inode.metadata().ok();
+        if let Some(ref m) = metadata {
+            mode |= special_device_mode(m);
+        }
+        let posix_lock_key = metadata
+            .as_ref()
             .map(|m| (m.dev_id, m.inode_id))
             .unwrap_or((0, 0));
 
@@ -841,8 +858,12 @@ impl File {
             mode |= FileMode::FMODE_STREAM;
         }
 
-        let posix_lock_key = inode
-            .metadata()
+        let metadata = inode.metadata().ok();
+        if let Some(ref m) = metadata {
+            mode |= special_device_mode(m);
+        }
+        let posix_lock_key = metadata
+            .as_ref()
             .map(|m| (m.dev_id, m.inode_id))
             .unwrap_or((0, 0));
 
