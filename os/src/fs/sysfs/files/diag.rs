@@ -92,11 +92,49 @@ fn stats_syscall_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    let mut s = String::with_capacity(256);
+    let mut s = String::with_capacity(384);
     let _ = writeln!(s, "syscall_total={}", read_counter(&crate::task::perf::SYSCALL_TOTAL));
     let _ = writeln!(s, "syscall_getppid_total={}", read_counter(&crate::task::perf::SYSCALL_GETPPID_TOTAL));
     let _ = writeln!(s, "syscall_cost_max_ticks={}", read_counter(&crate::task::perf::SYSCALL_COST_MAX_TICKS));
-    let _ = writeln!(s, "trap_enter_cost_max_ticks={}", read_counter(&crate::task::perf::TRAP_ENTER_COST_MAX_TICKS));
+    let _ = writeln!(s, "syscall_cost_ticks_total={}", read_counter(&crate::task::perf::SYSCALL_COST_TICKS_TOTAL));
+    let _ = writeln!(s, "getppid_cost_ticks_total={}", read_counter(&crate::task::perf::GETPPID_COST_TICKS_TOTAL));
+    let _ = writeln!(s, "getppid_cost_ticks_max={}", read_counter(&crate::task::perf::GETPPID_COST_TICKS_MAX));
+    let _ = writeln!(s, "ecall_trap_cost_ticks_total={}", read_counter(&crate::task::perf::ECALL_TRAP_COST_TICKS_TOTAL));
+    let _ = writeln!(s, "ecall_trap_cost_ticks_max={}", read_counter(&crate::task::perf::ECALL_TRAP_COST_TICKS_MAX));
+    write_str(offset, len, buf, &s)
+}
+
+fn stats_ctxsw_content(_extra: usize, offset: usize, len: usize, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+    let mut s = String::with_capacity(128);
+    let _ = writeln!(s, "context_switch_total={}", read_counter(&crate::task::perf::CONTEXT_SWITCH_TOTAL));
+    write_str(offset, len, buf, &s)
+}
+
+fn stats_reclaim_content(_extra: usize, offset: usize, len: usize, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+    let mut s = String::with_capacity(192);
+    let _ = writeln!(s, "reclaim_runs_total={}", read_counter(&crate::task::perf::RECLAIM_RUNS_TOTAL));
+    let _ = writeln!(s, "reclaim_pages_scanned_total={}", read_counter(&crate::task::perf::RECLAIM_PAGES_SCANNED_TOTAL));
+    let _ = writeln!(s, "reclaim_pages_freed_total={}", read_counter(&crate::task::perf::RECLAIM_PAGES_FREED_TOTAL));
+    write_str(offset, len, buf, &s)
+}
+
+fn stats_tlb_content(_extra: usize, offset: usize, len: usize, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+    let mut s = String::with_capacity(192);
+    let _ = writeln!(s, "tlb_flushes={}", read_counter(&crate::task::perf::TLB_FLUSHES));
+    let _ = writeln!(s, "tlb_full={}", read_counter(&crate::task::perf::TLB_FULL));
+    let _ = writeln!(s, "tlb_page={}", read_counter(&crate::task::perf::TLB_PAGE));
+    let _ = writeln!(s, "tlb_activate={}", read_counter(&crate::task::perf::TLB_ACTIVATE));
+    let _ = writeln!(s, "tlb_global={}", read_counter(&crate::task::perf::TLB_GLOBAL));
+    write_str(offset, len, buf, &s)
+}
+
+fn stats_heap_content(_extra: usize, offset: usize, len: usize, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+    let mut s = String::with_capacity(192);
+    let (free, total, _, _, _) = crate::mm::heap_stats();
+    let _ = writeln!(s, "heap_current_bytes={}", crate::mm::KERNEL_HEAP_CURRENT_BYTES.load(Ordering::Relaxed));
+    let _ = writeln!(s, "heap_max_bytes={}", crate::mm::KERNEL_HEAP_MAX_BYTES.load(Ordering::Relaxed));
+    let _ = writeln!(s, "heap_free_kb={}", free >> 10);
+    let _ = writeln!(s, "heap_total_kb={}", total >> 10);
     write_str(offset, len, buf, &s)
 }
 
@@ -240,7 +278,7 @@ fn stats_on_write(_extra: usize, _offset: usize, buf: &[u8]) -> Result<usize, Sy
 // ═══════════════════════════════════════════════════════════════════════
 
 fn stats_reset_write(_extra: usize, _offset: usize, buf: &[u8]) -> Result<usize, SyscallErr> {
-    crate::task::perf::reset_p0_counters();
+    crate::task::perf::reset_all_counters();
     Ok(buf.len())
 }
 
@@ -354,6 +392,10 @@ pub fn register_all(kernel_dir: &Arc<SysInode>) -> Result<(), SyscallErr> {
     stats_dir.add_file("taskq", ro_mode, stats_taskq_content)?;
     stats_dir.add_file("timer", ro_mode, stats_timer_content)?;
     stats_dir.add_file("syscall", ro_mode, stats_syscall_content)?;
+    stats_dir.add_file("ctxsw", ro_mode, stats_ctxsw_content)?;
+    stats_dir.add_file("reclaim", ro_mode, stats_reclaim_content)?;
+    stats_dir.add_file("tlb", ro_mode, stats_tlb_content)?;
+    stats_dir.add_file("heap", ro_mode, stats_heap_content)?;
     stats_dir.add_file("resource", ro_mode, stats_resource_content)?;
     stats_dir.add_file("buddyinfo", ro_mode, stats_buddyinfo_content)?;
     stats_dir.add_file("zombies", ro_mode, stats_zombies_content)?;
