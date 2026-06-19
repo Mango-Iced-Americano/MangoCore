@@ -47,6 +47,11 @@ pub type FindHookFn = fn(inode: &SysInode, name: &str) -> Option<Arc<dyn IndexNo
 /// 动态列表钩子：在 list() 时返回额外的子项名称
 pub type ListHookFn = fn(inode: &SysInode) -> Vec<String>;
 
+/// 写入函数，用于可写 sysfs 文件
+/// `extra_data` 由 inode 携带。`offset` 为写入偏移量，`buf` 为待写入数据。
+/// 返回实际写入字节数。
+pub type SysWriteFn = fn(extra_data: usize, offset: usize, buf: &[u8]) -> Result<usize, SyscallErr>;
+
 // ── SysInodeData ───────────────────────────────────────────────────────
 
 pub struct SysInodeData {
@@ -58,6 +63,8 @@ pub struct SysInodeData {
     pub content_fn: Option<SysContentFn>,
     /// Owned file content — no leak, freed when inode is dropped.
     pub owned_content: Option<String>,
+    pub write_fn: Option<SysWriteFn>,
+    pub writable: bool,
     pub find_hook: Option<FindHookFn>,
     pub list_hook: Option<ListHookFn>,
 }
@@ -89,6 +96,8 @@ impl SysInode {
                     children: BTreeMap::new(),
                     content_fn: None,
                     owned_content: None,
+                    write_fn: None,
+                    writable: false,
                     find_hook: None,
                     list_hook: None,
                 }),
@@ -133,6 +142,8 @@ impl SysInode {
                     children: BTreeMap::new(),
                     content_fn: None,
                     owned_content: None,
+                    write_fn: None,
+                    writable: false,
                     find_hook: None,
                     list_hook: None,
                 }),
@@ -213,6 +224,56 @@ impl SysInode {
         Ok(())
     }
 
+    /// 添加可写文件（含独立的读/写函数）
+    pub fn add_writable_file_with_write(
+        self: &Arc<Self>,
+        name: &str,
+        mode: InodeMode,
+        content_fn: SysContentFn,
+        write_fn: SysWriteFn,
+    ) -> Result<(), SyscallErr> {
+        let mut this = self.inner.lock();
+        if this.metadata.file_type != FileType::Dir {
+            return Err(SyscallErr::ENOTDIR);
+        }
+        if this.children.contains_key(name) {
+            return Err(SyscallErr::EEXIST);
+        }
+        let mut metadata = Metadata::new(FileType::File, mode);
+        metadata.nlinks = 1;
+        let parent_weak = this.self_ref.clone();
+        let fs_weak = this.fs.clone();
+        let child = Arc::new_cyclic(|weak| {
+            SysInode {
+                inner: Mutex::new(SysInodeData {
+                    parent: parent_weak,
+                    self_ref: weak.clone(),
+                    fs: fs_weak,
+                    metadata,
+                    children: BTreeMap::new(),
+                    content_fn: Some(content_fn),
+                    owned_content: None,
+                    write_fn: Some(write_fn),
+                    writable: true,
+                    find_hook: None,
+                    list_hook: None,
+                }),
+            }
+        });
+        this.children.insert(String::from(name), child);
+        Ok(())
+    }
+
+    /// 添加仅可写的文件（无读内容，read_at 返回 0）
+    pub fn add_write_only_file(
+        self: &Arc<Self>,
+        name: &str,
+        mode: InodeMode,
+        write_fn: SysWriteFn,
+    ) -> Result<(), SyscallErr> {
+        self.add_writable_file_with_write(name, mode, |_, _, _, _| Ok(0), write_fn)
+    }
+
     /// 设置动态查找/列表钩子
     pub fn set_hooks(&self, find_hook: FindHookFn, list_hook: ListHookFn) {
         let mut this = self.inner.lock();
@@ -236,6 +297,48 @@ impl IndexNode for SysInode {
 
     fn close(&self, _data: MutexGuard<FilePrivateData>) -> Result<(), SyscallErr> {
         Ok(())
+    }
+
+    fn write_at(
+        &self,
+        offset: usize,
+        len: usize,
+        buf: &[u8],
+        _data: MutexGuard<FilePrivateData>,
+    ) -> Result<usize, SyscallErr> {
+        if buf.len() < len {
+            return Err(SyscallErr::EINVAL);
+        }
+        let (file_type, writable, write_fn) = {
+            let data = self.inner.lock();
+            (data.metadata.file_type, data.writable, data.write_fn)
+        };
+        if file_type == FileType::File && writable {
+            let written = if let Some(f) = write_fn {
+                f(0, offset, &buf[..len])?
+            } else {
+                len
+            };
+            let now = crate::timer::TimeSpec::new();
+            let mut data = self.inner.lock();
+            data.metadata.mtime = now;
+            data.metadata.ctime = now;
+            Ok(written)
+        } else {
+            Err(SyscallErr::EPERM)
+        }
+    }
+
+    fn resize(&self, len: usize) -> Result<(), SyscallErr> {
+        let file_type = self.inner.lock().metadata.file_type;
+        if file_type == FileType::Dir {
+            return Err(SyscallErr::EISDIR);
+        }
+        if len == 0 {
+            Ok(())
+        } else {
+            Err(SyscallErr::EINVAL)
+        }
     }
 
     fn read_at(
@@ -499,6 +602,8 @@ impl SysFS {
                     children: BTreeMap::new(),
                     content_fn: None,
                     owned_content: None,
+                    write_fn: None,
+                    writable: false,
                     find_hook: None,
                     list_hook: None,
                 }),
