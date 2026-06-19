@@ -23,3 +23,13 @@ services:
     tty: true
     stdin_open: true
     working_dir: /app
+
+    # IO 限速：每人 40MB/s，磁盘顺序写 ~94MB/s
+    # 注意：必须用整盘 /dev/sdb 而非分区 /dev/sdb2，blkio 对分区不生效
+    blkio_config:
+      device_read_bps:
+        - path: /dev/sdb
+          rate: "40m"
+      device_write_bps:
+        - path: /dev/sdb
+          rate: "40m"
