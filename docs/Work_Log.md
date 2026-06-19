@@ -4,6 +4,22 @@
 
 ## 2026-06-19
 
+### perf(heap): add per-class free-membership bitmap to eliminate O(n) free-list scan in dealloc()
+
+**涉及文件：**
+- `os/vendor/buddy_system_allocator/src/lib.rs` — Heap struct 新增 `start: usize` 和 `free_bits: [*mut usize; ORDER]` 字段；新增 `BITS_PER_WORD` const 及 `bitmap_set/clear/test` 三个 inline 辅助方法；`init()` 改为从区域头部 carve bitmap 内存（每 class 1 个 word，按 `size >> c` 位 + BITS_PER_WORD 向上取整），写入零并存储指针，剩余空间传给原有的 `add_to_heap`；`add_to_heap` 每次 push 同步 `bitmap_set`；`alloc()` 拆分时 `pop` → `bitmap_clear`，`push` 拆分块 → `bitmap_set`，最终取块时 pop → `bitmap_clear`；`dealloc()` 归还块后立即 `bitmap_set`，merge 循环内先用 `bitmap_test(buddy)` 做 O(1) 守卫——buddy 不在 free_list 则直接 break 跳过扫描——仅在 bitmap 断言 buddy 存在时才 fallthrough 到原有线性扫描；buddy 找到并移除后 `bitmap_clear(buddy)` 和 `bitmap_clear(old_ptr)`，合并后 `push` 同步 `bitmap_set`
+- `os/vendor/buddy_system_allocator/src/linked_list.rs` — 无修改
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：**
+- bitmap 从 Heap 区域的起始地址 carve，每个 class 至少分配 1 个 word，通过 `word_count.max(1)` 保证指针非空
+- bitmap 操作全部为 `unsafe` 指针运算，不引入任何堆分配（Vec/Box）
+- 需为 `Heap<ORDER>` 显式添加 `unsafe impl Send`，因 raw pointer 字段破坏自动 Send 推导（`LockedHeap` 需要）
+- 常用路径（buddy 已分配）降至 O(1)，仅 buddy 恰为空闲时才触发线性扫描进行归并——消除碎片增长导致的扫描步数膨胀（从 19 到 114 的 6x 退化）
+
 ### feat(perf_diag): add seccomp + timer IRQ/pop cost performance counters for lmbench drift debugging
 
 **涉及文件：**
@@ -22,6 +38,23 @@
 - record 函数均在 #[cfg(feature = "perf_stats")] gated 的 mod enabled 内；非 gated 版本为空桩
 - 所有静态计数器在 not(feature = "perf_stats") 下具有零值桩，保证 sysfs 可读
 - timer_irq_cost 记录在 reprogram_timer_irqoff 之后、yield 之前，避免将上下文切换时间计入
+
+### feat(perf_diag): add 7 heap allocator timing counters for lmbench drift debugging
+
+**涉及文件：**
+- `os/src/task/perf.rs` — 新增 7 个 AtomicUsize 计数器（HEAP_ALLOC_CALLS, HEAP_ALLOC_TICKS_TOTAL/MAX, HEAP_DEALLOC_CALLS, HEAP_DEALLOC_TICKS_TOTAL/MAX, HEAP_DEALLOC_SCAN_STEPS_TOTAL）；新增 5 个 record 函数（record_heap_alloc, record_heap_alloc_cost, record_heap_dealloc, record_heap_dealloc_cost, record_heap_dealloc_scan_steps）；更新 reset_all_counters；添加非 perf_stats 零值桩和函数桩
+- `os/src/mm/heap_allocator.rs` — alloc() 和 dealloc() 路径加 perf_time_now 计时 + record_heap_alloc/dealloc + record_heap_alloc/dealloc_cost；init_heap 中注册 buddy 系统 dealloc scan steps hook
+- `os/vendor/buddy_system_allocator/src/lib.rs` — 新增 DEALLOC_SCAN_HOOK 函数指针（默认 noop）；dealloc() buddy merge 循环内加 scan_steps 计数器，循环结束后调用 hook 记录
+- `os/src/fs/sysfs/files/diag.rs` — /sys/kernel/stats/heap 扩展 7 个新字段：heap_alloc_calls, heap_alloc_ticks_total/max, heap_dealloc_calls, heap_dealloc_ticks_total/max, heap_dealloc_scan_steps_total
+
+**验证：**
+- rv64 kernel-only 编译 ✅
+- la64 kernel-only 编译 ✅
+
+**备注：**
+- buddy_system_allocator 是独立 crate，无法直接调用 kernel crate 的 record 函数，使用 static mut DEALLOC_SCAN_HOOK 函数指针桥接，kernel 在 init_heap 时设置
+- 所有计时使用 perf_time_now().wrapping_sub() 模式，与 frame_allocator 一致
+- 计数器遵循现有 P0 模式：AtomicUsize + Relaxed ordering + stats_enabled() 门控
 
 ### feat(perf_diag): add P1 syscall/trap/ctxsw/reclaim cost counters
 

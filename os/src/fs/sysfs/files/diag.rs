@@ -152,12 +152,19 @@ fn stats_tlb_content(_extra: usize, offset: usize, len: usize, buf: &mut [u8]) -
 }
 
 fn stats_heap_content(_extra: usize, offset: usize, len: usize, buf: &mut [u8]) -> Result<usize, SyscallErr> {
-    let mut s = String::with_capacity(192);
+    let mut s = String::with_capacity(512);
     let (free, total, _, _, _) = crate::mm::heap_stats();
     let _ = writeln!(s, "heap_current_bytes={}", crate::mm::KERNEL_HEAP_CURRENT_BYTES.load(Ordering::Relaxed));
     let _ = writeln!(s, "heap_max_bytes={}", crate::mm::KERNEL_HEAP_MAX_BYTES.load(Ordering::Relaxed));
     let _ = writeln!(s, "heap_free_kb={}", free >> 10);
     let _ = writeln!(s, "heap_total_kb={}", total >> 10);
+    let _ = writeln!(s, "heap_alloc_calls={}", read_counter(&crate::task::perf::HEAP_ALLOC_CALLS));
+    let _ = writeln!(s, "heap_alloc_ticks_total={}", read_counter(&crate::task::perf::HEAP_ALLOC_TICKS_TOTAL));
+    let _ = writeln!(s, "heap_alloc_ticks_max={}", read_counter(&crate::task::perf::HEAP_ALLOC_TICKS_MAX));
+    let _ = writeln!(s, "heap_dealloc_calls={}", read_counter(&crate::task::perf::HEAP_DEALLOC_CALLS));
+    let _ = writeln!(s, "heap_dealloc_ticks_total={}", read_counter(&crate::task::perf::HEAP_DEALLOC_TICKS_TOTAL));
+    let _ = writeln!(s, "heap_dealloc_ticks_max={}", read_counter(&crate::task::perf::HEAP_DEALLOC_TICKS_MAX));
+    let _ = writeln!(s, "heap_dealloc_scan_steps_total={}", read_counter(&crate::task::perf::HEAP_DEALLOC_SCAN_STEPS_TOTAL));
     write_str(offset, len, buf, &s)
 }
 

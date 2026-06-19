@@ -352,8 +352,10 @@ struct RuntimeConfig {
     drift_windows: u64,
     /// drift_window 模式：musl | glibc | both
     drift_libc: String,
-    /// drift_window 模式：每窗口 lmbench 前运行的测试组（"none" | "basic"）
-    drift_pre_workload: String,
+    /// drift_window 模式：每窗口 lmbench 前运行的测试组 mask（bit0=basic, bit1=busybox, ...）
+    drift_pre_mask: u16,
+    /// drift_window 模式：测量目标 "null"（lat_syscall null）| "full"（全量 lmbench）
+    drift_measure: String,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -432,7 +434,8 @@ impl RuntimeConfig {
             timer_smoke: false,
             drift_windows: 6,
             drift_libc: String::from("both"),
-            drift_pre_workload: String::from("none"),
+            drift_pre_mask: 0,
+            drift_measure: String::from("null"),
         }
     }
 }
@@ -630,10 +633,14 @@ fn apply_conf_bytes(data: &[u8], cfg: &mut RuntimeConfig) {
             if let Some(s) = s {
                 cfg.drift_libc = String::from(s.trim());
             }
-        } else if key == b"drift_pre_workload" {
+        } else if key == b"drift_pre_mask" {
+            if let Some(m) = parse_mask(val) {
+                cfg.drift_pre_mask = m;
+            }
+        } else if key == b"drift_measure" {
             let s = core::str::from_utf8(val).ok();
             if let Some(s) = s {
-                cfg.drift_pre_workload = String::from(s.trim());
+                cfg.drift_measure = String::from(s.trim());
             }
         } else if key == b"ltp_from" {
             let s = core::str::from_utf8(val).ok();
@@ -1763,47 +1770,35 @@ fn run_drift_windows(environ: &[*const u8], cfg: &RuntimeConfig) {
         for w in 0..total_windows {
             let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/reset\0", environ);
 
-            // Run pre-workload to accumulate system state before this window
-            if cfg.drift_pre_workload == "basic" {
-                let libc_dir = alloc::format!("/{}\0", libc);
-                run_group_in_dir(environ, &libc_dir, "basic", "basic_testcode.sh", 60, 1);
-                // Reset counters again so the snapshot below only captures
-                // lmbench activity; system state (zombies, heap, page cache)
-                // continues to accumulate across windows.
-                let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/reset\0", environ);
-            } else if cfg.drift_pre_workload == "lat_proc" {
-                // Run lmbench process-creation benchmarks to accumulate
-                // process state (zombies, scheduler pressure, timer queue).
-                let _ = run_bash_cmd(
-                    &alloc::format!("cd /{} && ./lat_proc -P 1 fork\0", libc),
-                    environ,
-                );
-                let _ = run_bash_cmd(
-                    &alloc::format!("cd /{} && ./lat_proc -P 1 exec\0", libc),
-                    environ,
-                );
-                let _ = run_bash_cmd(
-                    &alloc::format!("cd /{} && ./lat_proc -P 1 shell\0", libc),
-                    environ,
-                );
-                let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/reset\0", environ);
-            } else if cfg.drift_pre_workload == "ltp" {
-                // Run LTP test group to create heavy accumulated state
-                let libc_dir = alloc::format!("/{}\0", libc);
-                run_group_in_dir(environ, &libc_dir, "ltp", "ltp_testcode.sh", 2700, 1);
-                let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/reset\0", environ);
-            } else if cfg.drift_pre_workload == "lmbench" {
-                // Run full lmbench suite to accumulate file-I/O + process state
-                let _ = run_bash_cmd(
-                    &alloc::format!("cd /{} && ./lmbench_all\0", libc),
-                    environ,
-                );
+            // Run pre-workload test groups selected by drift_pre_mask.
+            // Each bit corresponds to TEST_GROUPS index (bit0=basic, bit1=busybox, …).
+            if cfg.drift_pre_mask != 0 {
+                for (idx, &(name, script)) in TEST_GROUPS.iter().enumerate() {
+                    if (cfg.drift_pre_mask & (1u16 << idx as u16)) != 0 {
+                        let libc_dir = alloc::format!("/{}\0", libc);
+                        run_group_in_dir(
+                            environ,
+                            &libc_dir,
+                            name,
+                            script,
+                            cfg.timeouts[idx],
+                            1,
+                        );
+                    }
+                }
                 let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/reset\0", environ);
             }
 
             drift_snapshot(w, libc, "pre", environ);
-            let cmd = alloc::format!("cd /{} && ./lmbench_all lat_syscall -P 1 null\0", libc);
+
+            // Measurement command: null (lat_syscall null) or full (all lmbench)
+            let cmd = if cfg.drift_measure == "full" {
+                alloc::format!("cd /{} && sh lmbench_testcode.sh\0", libc)
+            } else {
+                alloc::format!("cd /{} && ./lmbench_all lat_syscall -P 1 null\0", libc)
+            };
             let _ = run_bash_cmd(&cmd, environ);
+
             drift_snapshot(w, libc, "post", environ);
             sleep(100); // 100ms between windows
         }

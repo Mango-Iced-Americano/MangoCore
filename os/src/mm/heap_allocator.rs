@@ -75,7 +75,11 @@ unsafe impl GlobalAlloc for OomAwareAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         for _ in 0..3 {
             let mut inner = self.inner.lock();
+            let _alloc_start = crate::task::perf::perf_time_now();
             if let Ok(ptr) = inner.alloc(layout) {
+                let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_alloc_start);
+                crate::task::perf::record_heap_alloc();
+                crate::task::perf::record_heap_alloc_cost(elapsed);
                 let block_size = layout.size()
                     .max(layout.align())
                     .max(core::mem::size_of::<usize>())
@@ -95,6 +99,9 @@ unsafe impl GlobalAlloc for OomAwareAllocator {
                 crate::mm::heap_trace::record_alloc(ptr.as_ptr(), layout, block_size);
                 return ptr.as_ptr();
             }
+            let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_alloc_start);
+            crate::task::perf::record_heap_alloc();
+            crate::task::perf::record_heap_alloc_cost(elapsed);
             drop(inner);
             if !self.recover_for(layout) {
                 break;
@@ -111,7 +118,11 @@ unsafe impl GlobalAlloc for OomAwareAllocator {
                 .max(layout.align())
                 .max(core::mem::size_of::<usize>())
                 .next_power_of_two();
+            crate::task::perf::record_heap_dealloc();
+            let _dealloc_start = crate::task::perf::perf_time_now();
             self.inner.lock().dealloc(ptr, layout);
+            let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_dealloc_start);
+            crate::task::perf::record_heap_dealloc_cost(elapsed);
             KERNEL_HEAP_CURRENT_BYTES.fetch_sub(block_size, Ordering::Relaxed);
         }
     }
@@ -174,6 +185,10 @@ pub fn init_heap() {
     }
     KERNEL_HEAP_CURRENT_BYTES.store(0, Ordering::Relaxed);
     KERNEL_HEAP_MAX_BYTES.store(0, Ordering::Relaxed);
+    // Register dealloc scan steps hook for perf stats
+    unsafe {
+        buddy_system_allocator::DEALLOC_SCAN_HOOK = crate::task::perf::record_heap_dealloc_scan_steps;
+    }
 }
 
 #[allow(unused)]

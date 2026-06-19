@@ -147,6 +147,15 @@ mod enabled {
     pub static RECLAIM_PAGES_SCANNED_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static RECLAIM_PAGES_FREED_TOTAL: AtomicUsize = AtomicUsize::new(0);
 
+    // ── P0: Heap Allocator Cost ──
+    pub static HEAP_ALLOC_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_ALLOC_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_ALLOC_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_DEALLOC_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_DEALLOC_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_DEALLOC_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_DEALLOC_SCAN_STEPS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+
     #[inline(always)]
     fn update_max(counter: &AtomicUsize, val: usize) {
         let mut cur = counter.load(Ordering::Relaxed);
@@ -323,6 +332,38 @@ mod enabled {
         RECLAIM_PAGES_FREED_TOTAL.fetch_add(n, Ordering::Relaxed);
     }
 
+    #[inline(always)]
+    pub fn record_heap_alloc() {
+        if !stats_enabled() { return; }
+        HEAP_ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_heap_alloc_cost(ticks: usize) {
+        if !stats_enabled() { return; }
+        HEAP_ALLOC_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
+        update_max(&HEAP_ALLOC_TICKS_MAX, ticks);
+    }
+
+    #[inline(always)]
+    pub fn record_heap_dealloc() {
+        if !stats_enabled() { return; }
+        HEAP_DEALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_heap_dealloc_cost(ticks: usize) {
+        if !stats_enabled() { return; }
+        HEAP_DEALLOC_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
+        update_max(&HEAP_DEALLOC_TICKS_MAX, ticks);
+    }
+
+    #[inline(always)]
+    pub fn record_heap_dealloc_scan_steps(steps: usize) {
+        if !stats_enabled() { return; }
+        HEAP_DEALLOC_SCAN_STEPS_TOTAL.fetch_add(steps, Ordering::Relaxed);
+    }
+
     /// Reset all P0+P1 performance counters (writable via /sys/kernel/stats/reset).
     pub fn reset_all_counters() {
         // Scheduler / Task Queue
@@ -379,6 +420,14 @@ mod enabled {
         RECLAIM_RUNS_TOTAL.store(0, Ordering::Relaxed);
         RECLAIM_PAGES_SCANNED_TOTAL.store(0, Ordering::Relaxed);
         RECLAIM_PAGES_FREED_TOTAL.store(0, Ordering::Relaxed);
+        // Heap Allocator Cost (P0)
+        HEAP_ALLOC_CALLS.store(0, Ordering::Relaxed);
+        HEAP_ALLOC_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        HEAP_ALLOC_TICKS_MAX.store(0, Ordering::Relaxed);
+        HEAP_DEALLOC_CALLS.store(0, Ordering::Relaxed);
+        HEAP_DEALLOC_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        HEAP_DEALLOC_TICKS_MAX.store(0, Ordering::Relaxed);
+        HEAP_DEALLOC_SCAN_STEPS_TOTAL.store(0, Ordering::Relaxed);
     }
 
     /// Print accumulated timing stats, then reset.
@@ -987,6 +1036,26 @@ pub fn record_reclaim_pages_freed(_n: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
+pub fn record_heap_alloc() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_heap_alloc_cost(_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_heap_dealloc() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_heap_dealloc_cost(_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_heap_dealloc_scan_steps(_steps: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
 pub fn reset_all_counters() {}
 
 // ── P0 counter stubs (zero-valued when perf_stats disabled) ──
@@ -1090,6 +1159,22 @@ pub static SECCOMP_CHECK_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sy
 pub static SECCOMP_CHECK_TICKS_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static SECCOMP_DISABLED_BYPASS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── Heap Allocator Cost stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub static HEAP_ALLOC_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static HEAP_ALLOC_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static HEAP_ALLOC_TICKS_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static HEAP_DEALLOC_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static HEAP_DEALLOC_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static HEAP_DEALLOC_TICKS_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static HEAP_DEALLOC_SCAN_STEPS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 // ── TLB counter stubs (zero-valued when perf_stats disabled) ──
 #[cfg(not(feature = "perf_stats"))]
