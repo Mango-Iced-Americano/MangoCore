@@ -98,7 +98,7 @@ category 枚举值：`overview`、`architecture`、`syscall`、`fs`、`mm`、`pr
 
 修改架构设计时，更新 `docs/01_architecture/` 下对应架构文档，以及所有受影响的子模块文档。
 
-所有代码修改必须同步更新 `docs/Work_Log.md`，按 mango-worklog skill 规则格式记录。更新内容包括修改的文件列表、验证结果（编译 + 运行）、相关 commit hash。
+所有代码修改必须同步更新 `docs/Work_Log.md`，按 mango-workflow skill 规则格式记录。更新内容包括修改的文件列表、验证结果（编译 + 运行）、相关 commit hash。
 
 ## 禁止事项
 

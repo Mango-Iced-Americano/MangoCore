@@ -1,5 +1,5 @@
 ---
-name: mango-worklog
+name: mango-workflow
 description: 自动维护 oskernel2026-mango 项目的工作日志、可复用经验模式，以及性能调试知识库。每次代码修改后触发：更新 Doc/Work_Log.md；调试/性能任务前加载 references/ 作为前置参考；发现可复用模式时沉淀到 references/。
 version: 1.1.0
 allowed-tools: Read, Write, Edit, Grep, Bash, Glob

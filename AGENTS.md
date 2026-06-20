@@ -25,7 +25,7 @@
 6. **修改 PTE 后必须刷新 TLB** — `sfence.vma`（riscv）/ `invtlb`（la64），这是最常见 bug 来源
 7. **不要跨越等待点持锁** — 锁 → clone Arc → 释放锁 → 执行操作
 8. **不要 workaround** — 从根因解决问题，不做临时绕过
-9. **代码修改后必须调用 `skill(name="mango-worklog")`** — 自动更新 `docs/Work_Log.md`（见 §工作日志与知识维护）
+9. **代码修改后必须调用 `skill(name="mango-workflow")`** — 自动更新 `docs/Work_Log.md`（见 §工作日志与知识维护）
 
 ---
 
@@ -262,7 +262,7 @@ impl_file_for_socket!(MySocket);
 - [ ] `make la64-kernel-build-only` ✅
 - [ ] QEMU 启动不 panic
 - [ ] 相关测试组通过
-- [ ] 更新 `docs/Work_Log.md`（按 mango-worklog Skill 格式）
+- [ ] 更新 `docs/Work_Log.md`（按 mango-workflow Skill 格式）
 
 ---
 
@@ -272,14 +272,14 @@ impl_file_for_socket!(MySocket);
 
 调试性能退化、非确定性 bug、或遇到可疑模式时，先读取以下已沉淀的经验：
 
-- **性能退化调试工作流** → `.agents/skills/mango-worklog/references/harness-patterns.md`（§渐进性能退化调试方法论）
-- **常见调试模式和技巧** → `.agents/skills/mango-worklog/references/debugging-patterns.md`
+- **性能退化调试工作流** → `.agents/skills/mango-workflow/references/harness-patterns.md`（§渐进性能退化调试方法论）
+- **常见调试模式和技巧** → `.agents/skills/mango-workflow/references/debugging-patterns.md`
 
 这些文件记录了之前跨多个对话验证过的调试策略和修复模式，可以帮助快速定位问题类型并避免重复试错。
 
 ### 自动 Worklog
 
-每次代码修改完成后，**必须调用 `skill(name="mango-worklog")`** 加载工作日志指令并执行。该 Skill 会读取当前对话上下文中的修改内容，自动按格式更新 `docs/Work_Log.md`，并判断是否需要沉淀经验到 `references/`。不要等待用户提示——这是强制性规则。
+每次代码修改完成后，**必须调用 `skill(name="mango-workflow")`** 加载工作日志指令并执行。该 Skill 会读取当前对话上下文中的修改内容，自动按格式更新 `docs/Work_Log.md`，并判断是否需要沉淀经验到 `references/`。不要等待用户提示——这是强制性规则。
 
 格式：日期戳条目 → 涉及文件 → 验证结果 → 备注。
 
@@ -287,8 +287,8 @@ impl_file_for_socket!(MySocket);
 
 发现**可能跨对话复用**的 bug 模式或调试技巧时，追加到对应 reference 文件：
 
-- Bug 根因 → 修复模式 → `.agents/skills/mango-worklog/references/harness-patterns.md`
-- 调试技巧 → `.agents/skills/mango-worklog/references/debugging-patterns.md`
+- Bug 根因 → 修复模式 → `.agents/skills/mango-workflow/references/harness-patterns.md`
+- 调试技巧 → `.agents/skills/mango-workflow/references/debugging-patterns.md`
 
 注意：已经在本文档「关键易错点」中覆盖的内容无需重复沉淀。
 

@@ -115,7 +115,7 @@ Makefile       顶层构建编排
 - **每次 PTE 修改后必须刷新 TLB：** 使用 `sfence.vma`（riscv64）或 `invtlb`（loongarch64）。这是最常见的内存 bug 来源。
 - **不要在等待点持有锁：** 克隆 Arc，释放锁，再执行操作。
 - **修复根因：** 永远不要采用临时绕过方案。
-- **更新 `docs/Work_Log.md`：** 每次代码修改后必须按 mango-worklog 格式更新。
+- **更新 `docs/Work_Log.md`：** 每次代码修改后必须按 mango-workflow 格式更新。
 - **双架构编译验证：** 每次变更必须同时通过 `make rv64-kernel-build-only` 和 `make la64-kernel-build-only`。
 - **返回值约定：** 系统调用处理函数成功返回 `>= 0`，失败返回负 errno（例如 `-11` 表示 EAGAIN）。
 
