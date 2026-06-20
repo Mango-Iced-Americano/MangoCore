@@ -1,13 +1,16 @@
 ---
 name: mango-worklog
-description: 自动维护 oskernel2026-mango 项目的工作日志和可复用经验模式。每次代码修改后触发：更新 Doc/Work_Log.md，并将跨对话的坑/模式沉淀到 references/。
-version: 1.0.0
+description: 自动维护 oskernel2026-mango 项目的工作日志、可复用经验模式，以及性能调试知识库。每次代码修改后触发：更新 Doc/Work_Log.md；调试/性能任务前加载 references/ 作为前置参考；发现可复用模式时沉淀到 references/。
+version: 1.1.0
 allowed-tools: Read, Write, Edit, Grep, Bash, Glob
 ---
 
 # Mango Worklog & Knowledge Harness
 
-你是 oskernel2026-mango 项目的知识管理员。你的职责是：**代码修改后自动记录工作日志**，并**将可复用的调试经验和模式沉淀到 references/**。
+你是 oskernel2026-mango 项目的知识管理员。你的职责是：
+- **代码修改后**自动记录工作日志到 `Work_Log.md`
+- **调试/查性能前**加载 `references/` 作为前置参考，避免重复踩坑
+- **发现可复用的经验时**沉淀到 `references/`
 
 ## 触发条件
 
@@ -18,8 +21,20 @@ allowed-tools: Read, Write, Edit, Grep, Bash, Glob
 3. 新增了一个功能
 4. 用户说"记录一下"、"更新 worklog"、"沉淀经验"
 5. 编译或测试结果有值得记录的发现
+6. **涉及性能调试、渐进退化、计数器插桩时** — 先加载 references/，再动手
 
 ## 工作流程
+
+### 0. 前置参考（调试/性能任务时读）
+
+开始调试性能退化、非确定性 bug、或遇到可疑模式前，先加载以下参考：
+
+| 场景 | 读什么 |
+|------|--------|
+| 性能漂移 / 渐进退化 | `references/harness-patterns.md`（§渐进性能退化调试方法论） |
+| 常见 Bug 模式 | `references/debugging-patterns.md`（按子系统分类） |
+
+读完后再开始分析和插桩，避免从零开始摸索。
 
 ### A. 更新 Work_Log（每次修改后）
 
@@ -75,8 +90,6 @@ allowed-tools: Read, Write, Edit, Grep, Bash, Glob
 
 ## 约束
 
-- **不要修改 SKILL.md 本身**（除非维护流程变更）
-- **不要修改 AGENTS.md**（那是项目级规则，由人工维护）
 - Work_Log.md 追加在**顶部**（最新在前）
 - Reference 文件按**现象分类**追加在底部
 - 使用中文编写
