@@ -291,6 +291,7 @@ impl PageCache {
                 break;
             }
             if let Some(entry) = &entries[i] {
+                crate::task::perf::record_reclaim_pages_scanned(1);
                 if entry.state() != PageState::UpToDate {
                     continue;
                 }
@@ -307,6 +308,7 @@ impl PageCache {
                 inner.pages.remove(&i);
                 inner.dirty_pages.remove(&i);
                 entries[i] = None;
+                crate::task::perf::record_reclaim_pages_freed(1);
                 evicted += 1;
             }
         }

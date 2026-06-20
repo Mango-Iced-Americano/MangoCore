@@ -2,6 +2,15 @@
 
 > 跨对话可复用的调试技巧和排查方法。
 
+## 堆分配器性能退化
+
+### buddy allocator free-list 线性扫描导致渐进退化
+
+- **根因**: `Heap::dealloc()` 在合并 buddy 时线性遍历 size-class 的 free-list（`for block in free_list.iter_mut()`）。heap 碎片化后 free-list 变长，每次 dealloc 扫描步数从 19 爆炸到 114（6x），导致 open/close 退化 2.6x、fork+exit 退化 1.8x。
+- **修复**: 加 per-class free-membership bitmap。dealloc 前 O(1) 查 bitmap — buddy 不在 free-list 中就直接跳过扫描。bitmap 内存从 heap region 前端 carve 出来（~4MB / 256MB heap）。
+- **教训**: 渐进退化优先怀疑"有状态的数据结构"（free-list、hash table、LRU list）而非纯计算路径。用 per-call scan_steps 计数器可以精准定位。
+- **相关文件**: `os/vendor/buddy_system_allocator/src/lib.rs:161`
+
 ## 启动/Panic 排查
 
 ### QEMU 启动无显示

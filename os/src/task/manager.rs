@@ -1495,6 +1495,8 @@ impl KernelTimerQueue {
     /// Pop all expired timers (up to a batch limit).
     /// Callers must hold the lock. Run callbacks OUTSIDE the lock.
     pub fn pop_expired(&mut self, now: TimeSpec) -> Vec<KernelTimer> {
+        let _pop_start = crate::task::perf::perf_time_now();
+        let mut nodes = 0usize;
         const MAX_BATCH: usize = 64;
         let mut expired = Vec::new();
         while let Some(timer) = self.inner.pop() {
@@ -1503,12 +1505,14 @@ impl KernelTimerQueue {
                 break;
             }
             expired.push(timer);
+            nodes += 1;
             if expired.len() >= MAX_BATCH {
                 break;
             }
         }
         crate::task::perf::record_ktimer_pop(expired.len());
         self.refresh_deadline_state();
+        crate::task::perf::record_timer_pop_cost(_pop_start, nodes);
         expired
     }
     /// 清理所有失效 Weak 引用的定时器条目，释放堆槽位。
@@ -1999,6 +2003,7 @@ pub fn wait_with_timeout(task: Weak<TaskControlBlock>, timeout: TimeSpec) {
 /// 4. Yield the CPU only if a task was woken or the sched tick demands it.
 pub fn timer_interrupt_handler() {
     let handler_profile_start = crate::task::processor::sched_profile_cycle_start();
+    let _irq_start = crate::task::perf::perf_time_now();
     let now = crate::timer::TimeSpec::now();
     let now_ns = now.to_ns_saturating();
 
@@ -2048,6 +2053,8 @@ pub fn timer_interrupt_handler() {
 
     // 3. Re-program hardware
     reprogram_timer_irqoff();
+
+    crate::task::perf::record_timer_irq_cost(_irq_start);
 
     // 4. Yield if needed
     crate::task::processor::record_sched_timer_handler_cycles(handler_profile_start);

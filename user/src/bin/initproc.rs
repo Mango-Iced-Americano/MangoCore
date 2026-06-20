@@ -308,6 +308,7 @@ enum RunMode {
     Run,
     Shell,
     RunThenShell,
+    DriftWindow,
 }
 
 fn mode_name(mode: RunMode) -> &'static str {
@@ -315,6 +316,7 @@ fn mode_name(mode: RunMode) -> &'static str {
         RunMode::Run => "run",
         RunMode::Shell => "shell",
         RunMode::RunThenShell => "run_then_shell",
+        RunMode::DriftWindow => "drift_window",
     }
 }
 
@@ -360,6 +362,14 @@ struct RuntimeConfig {
     ext4_profile: bool,
     /// 插桩：lmbench 前后 dump reclaim stats profile
     reclaim_profile: bool,
+    /// drift_window 模式：窗口数量
+    drift_windows: u64,
+    /// drift_window 模式：musl | glibc | both
+    drift_libc: String,
+    /// drift_window 模式：每窗口 lmbench 前运行的测试组 mask（bit0=basic, bit1=busybox, ...）
+    drift_pre_mask: u16,
+    /// drift_window 模式：测量目标 "null"（lat_syscall null）| "full"（全量 lmbench）
+    drift_measure: String,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -438,6 +448,10 @@ impl RuntimeConfig {
             timer_smoke: false,
             ext4_profile: false,
             reclaim_profile: false,
+            drift_windows: 6,
+            drift_libc: String::from("both"),
+            drift_pre_mask: 0,
+            drift_measure: String::from("null"),
         }
     }
 }
@@ -476,6 +490,7 @@ fn parse_mode(bytes: &[u8]) -> Option<RunMode> {
         b"run" => Some(RunMode::Run),
         b"shell" => Some(RunMode::Shell),
         b"run_then_shell" => Some(RunMode::RunThenShell),
+        b"drift_window" => Some(RunMode::DriftWindow),
         _ => None,
     }
 }
@@ -626,6 +641,27 @@ fn apply_conf_bytes(data: &[u8], cfg: &mut RuntimeConfig) {
             cfg.ext4_profile = parse_bool_flag(val);
         } else if key == b"reclaim_profile" {
             cfg.reclaim_profile = parse_bool_flag(val);
+        } else if key == b"drift_windows" {
+            let s = core::str::from_utf8(val).ok();
+            if let Some(s) = s {
+                if let Ok(n) = s.parse::<u64>() {
+                    cfg.drift_windows = n;
+                }
+            }
+        } else if key == b"drift_libc" {
+            let s = core::str::from_utf8(val).ok();
+            if let Some(s) = s {
+                cfg.drift_libc = String::from(s.trim());
+            }
+        } else if key == b"drift_pre_mask" {
+            if let Some(m) = parse_mask(val) {
+                cfg.drift_pre_mask = m;
+            }
+        } else if key == b"drift_measure" {
+            let s = core::str::from_utf8(val).ok();
+            if let Some(s) = s {
+                cfg.drift_measure = String::from(s.trim());
+            }
         } else if key == b"ltp_from" {
             let s = core::str::from_utf8(val).ok();
             if let Some(s) = s {
@@ -1766,6 +1802,84 @@ fn run_ltp_suite_runner(
     );
 }
 
+fn drift_snapshot(window: u64, libc: &str, stage: &str, environ: &[*const u8]) {
+    println!(
+        "[initproc] [drift] === drift_window W{} {} {} ===",
+        window, libc, stage
+    );
+    let _ = run_bash_cmd("cat /sys/kernel/stats/taskq\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/timer\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/syscall\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/ctxsw\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/reclaim\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/tlb\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/heap\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/resource\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/seccomp\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/buddyinfo\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/zombies\0", environ);
+    println!(
+        "[initproc] [drift] === drift_window W{} {} {} end ===",
+        window, libc, stage
+    );
+}
+
+fn run_drift_windows(environ: &[*const u8], cfg: &RuntimeConfig) {
+    let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/stats_on\0", environ);
+    let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/reset\0", environ);
+
+    let libc_list: &[&str] = match cfg.drift_libc.as_str() {
+        "musl" => &["musl"],
+        "glibc" => &["glibc"],
+        _ => &["musl", "glibc"],
+    };
+
+    let total_windows = cfg.drift_windows;
+    for libc in libc_list {
+        println!(
+            "[initproc] drift_window: start libc={} windows={}",
+            libc, total_windows
+        );
+        for w in 0..total_windows {
+            let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/reset\0", environ);
+
+            // Run pre-workload test groups selected by drift_pre_mask.
+            // Each bit corresponds to TEST_GROUPS index (bit0=basic, bit1=busybox, …).
+            if cfg.drift_pre_mask != 0 {
+                for (idx, &(name, script)) in TEST_GROUPS.iter().enumerate() {
+                    if (cfg.drift_pre_mask & (1u16 << idx as u16)) != 0 {
+                        let libc_dir = alloc::format!("/{}\0", libc);
+                        run_group_in_dir(
+                            environ,
+                            &libc_dir,
+                            name,
+                            script,
+                            cfg.timeouts[idx],
+                            1,
+                        );
+                    }
+                }
+                let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/reset\0", environ);
+            }
+
+            drift_snapshot(w, libc, "pre", environ);
+
+            // Measurement command: null (lat_syscall null) or full (all lmbench)
+            let cmd = if cfg.drift_measure == "full" {
+                alloc::format!("cd /{} && sh lmbench_testcode.sh\0", libc)
+            } else {
+                alloc::format!("cd /{} && ./lmbench_all lat_syscall -P 1 null\0", libc)
+            };
+            let _ = run_bash_cmd(&cmd, environ);
+
+            drift_snapshot(w, libc, "post", environ);
+            sleep(100); // 100ms between windows
+        }
+    }
+
+    println!("[initproc] drift_window: all done");
+}
+
 fn snapshot_diag(diag: bool, n: usize, group: &str, libc: &str, environ: &[*const u8]) {
     if !diag {
         return;
@@ -1777,7 +1891,12 @@ fn snapshot_diag(diag: bool, n: usize, group: &str, libc: &str, environ: &[*cons
     let _ = run_bash_cmd("cat /sys/kernel/stats/taskq\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/timer\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/syscall\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/ctxsw\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/reclaim\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/tlb\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/heap\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/resource\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/seccomp\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/buddyinfo\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/zombies\0", environ);
     println!("[initproc] [diag] === stats T{} {}:{} end ===", n, group, libc);
@@ -1870,7 +1989,9 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
                     cfg.ltp_from.as_deref(),
                     timeout_secs,
                 );
-                snapshot_diag(cfg.diag, n, group_name, "glibc", environ);
+                if(cfg.diag) {
+                    snapshot_diag(cfg.diag, n, group_name, "glibc", environ);
+                }
             }
         } else if group_name == "ltp" {
             // 提交默认路径：运行镜像内官方 ltp_testcode.sh，保持评测器期望的串口协议。
@@ -1883,6 +2004,16 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
             if libc == LtpLibc::Glibc || libc == LtpLibc::Both {
                 run_group_in_dir(environ, "/glibc\0", group_name, script, timeout_secs, 1, cfg);
                 snapshot_diag(cfg.diag, n, group_name, "glibc", environ);
+                run_group_in_dir(environ, "/musl\0", group_name, script, timeout_secs, 1);
+                if(cfg.diag) {
+                    snapshot_diag(cfg.diag, n, group_name, "musl", environ);
+                }
+            }
+            if libc == LtpLibc::Glibc || libc == LtpLibc::Both {
+                run_group_in_dir(environ, "/glibc\0", group_name, script, timeout_secs, 1);
+                if(cfg.diag) {
+                    snapshot_diag(cfg.diag, n, group_name, "glibc", environ);
+                }
             }
         } else {
             let retries = if group_name == "lmbench" { 1 } else { MAX_GROUP_RETRIES };
@@ -1895,7 +2026,9 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
                 retries,
                 cfg,
             );
-            snapshot_diag(cfg.diag, n, group_name, "musl", environ);
+            if(cfg.diag) {
+                snapshot_diag(cfg.diag, n, group_name, "musl", environ);
+            }
             run_group_in_dir(
                 environ,
                 "/glibc\0",
@@ -1905,7 +2038,9 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
                 retries,
                 cfg,
             );
-            snapshot_diag(cfg.diag, n, group_name, "glibc", environ);
+            if(cfg.diag) {
+                snapshot_diag(cfg.diag, n, group_name, "glibc", environ);
+            }
         }
         // 每组之间休息一会，清理孤儿进程、让网络连接完全关闭
         println!("[initproc] sleep 1s before next group");
@@ -2972,6 +3107,12 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         */
         println!("[initproc] entering shell mode");
         enter_shell(path, &environ);
+        shutdown();
+        return 0;
+    }
+
+    if cfg.mode == RunMode::DriftWindow {
+        run_drift_windows(&environ, &cfg);
         shutdown();
         return 0;
     }

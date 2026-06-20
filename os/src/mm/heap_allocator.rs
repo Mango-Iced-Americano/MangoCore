@@ -1,7 +1,7 @@
 use crate::{config::PAGE_SIZE, hal::KERNEL_HEAP_SIZE};
 use buddy_system_allocator::Heap;
 use core::alloc::{GlobalAlloc, Layout};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::Mutex;
 
 /// 全局堆分配器。
@@ -14,6 +14,9 @@ pub struct OomAwareAllocator {
 }
 
 static OOM_RECOVERY_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+pub static KERNEL_HEAP_CURRENT_BYTES: AtomicUsize = AtomicUsize::new(0);
+pub static KERNEL_HEAP_MAX_BYTES: AtomicUsize = AtomicUsize::new(0);
 
 impl OomAwareAllocator {
     pub const fn empty() -> Self {
@@ -72,16 +75,33 @@ unsafe impl GlobalAlloc for OomAwareAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         for _ in 0..3 {
             let mut inner = self.inner.lock();
+            let _alloc_start = crate::task::perf::perf_time_now();
             if let Ok(ptr) = inner.alloc(layout) {
+                let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_alloc_start);
+                crate::task::perf::record_heap_alloc();
+                crate::task::perf::record_heap_alloc_cost(elapsed);
                 let block_size = layout.size()
                     .max(layout.align())
                     .max(core::mem::size_of::<usize>())
                     .next_power_of_two();
                 drop(inner);
+                // Perf gauge: track current allocation and peak
+                let prev = KERNEL_HEAP_CURRENT_BYTES.fetch_add(block_size, Ordering::Relaxed);
+                let new_total = prev + block_size;
+                let mut cur_max = KERNEL_HEAP_MAX_BYTES.load(Ordering::Relaxed);
+                while new_total > cur_max {
+                    match KERNEL_HEAP_MAX_BYTES.compare_exchange_weak(cur_max, new_total, Ordering::Relaxed, Ordering::Relaxed) {
+                        Ok(_) => break,
+                        Err(v) => cur_max = v,
+                    }
+                }
                 #[cfg(feature = "heap_trace")]
                 crate::mm::heap_trace::record_alloc(ptr.as_ptr(), layout, block_size);
                 return ptr.as_ptr();
             }
+            let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_alloc_start);
+            crate::task::perf::record_heap_alloc();
+            crate::task::perf::record_heap_alloc_cost(elapsed);
             drop(inner);
             if !self.recover_for(layout) {
                 break;
@@ -94,7 +114,16 @@ unsafe impl GlobalAlloc for OomAwareAllocator {
         if let Some(ptr) = core::ptr::NonNull::new(ptr) {
             #[cfg(feature = "heap_trace")]
             crate::mm::heap_trace::record_dealloc(ptr.as_ptr());
+            let block_size = layout.size()
+                .max(layout.align())
+                .max(core::mem::size_of::<usize>())
+                .next_power_of_two();
+            crate::task::perf::record_heap_dealloc();
+            let _dealloc_start = crate::task::perf::perf_time_now();
             self.inner.lock().dealloc(ptr, layout);
+            let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_dealloc_start);
+            crate::task::perf::record_heap_dealloc_cost(elapsed);
+            KERNEL_HEAP_CURRENT_BYTES.fetch_sub(block_size, Ordering::Relaxed);
         }
     }
 }
@@ -153,6 +182,12 @@ pub fn init_heap() {
     unsafe {
         // 起始地址和大小
         HEAP_ALLOCATOR.init(HEAP_SPACE.as_ptr() as usize, KERNEL_HEAP_SIZE);
+    }
+    KERNEL_HEAP_CURRENT_BYTES.store(0, Ordering::Relaxed);
+    KERNEL_HEAP_MAX_BYTES.store(0, Ordering::Relaxed);
+    // Register dealloc scan steps hook for perf stats
+    unsafe {
+        buddy_system_allocator::DEALLOC_SCAN_HOOK = crate::task::perf::record_heap_dealloc_scan_steps;
     }
 }
 

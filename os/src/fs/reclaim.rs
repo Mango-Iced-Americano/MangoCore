@@ -293,7 +293,7 @@ fn heap_critical() -> bool {
 
 pub fn maybe_reclaim_fs_caches() {
     RECLAIM_CALLS.fetch_add(1, Ordering::Relaxed);
-
+    crate::task::perf::record_reclaim_run();
     static TICK: AtomicUsize = AtomicUsize::new(0);
 
     let tick = TICK.fetch_add(1, Ordering::Relaxed);

@@ -2,6 +2,21 @@
 
 ---
 
+## 2026-06-20
+
+### docs(debug): add comprehensive buddy-allocator-scan-drift debugging report
+
+**涉及文件：**
+- `docs/09_debug/buddy-allocator-scan-drift.md` — 新增调试报告，完整记录 heap allocator dealloc() 线性扫描退化问题的发现、排查、根因分析与修复验证全过程
+
+**备注：**
+- 报告涵盖 5 轮迭代式调试（drift_window 基础设施 → basic/lat_proc pre-workload → 全量 lmbench 测量 → heap 计数器精确定位 → bitmap guard 修复验证）
+- 记录了 O(1) bitmap guard 方案的设计原理、代码变更与边界保护
+- 包含修复前后 rv64/la64 双架构完整数据对比（scan_steps 减少 130 倍）
+- 提炼 6 条可复用经验（渐进退化排查策略、null syscall 隔离技术、bitmap guard 模式等）
+
+---
+
 ## 2026-06-19
 
 ### merge(exp/develop): 解决 perf_diag 与 timer/reclaim 修复合并冲突
@@ -18,6 +33,118 @@
 - `docker compose -p lzm-mangocore exec -T os-dev bash -lc 'cd /app/os && make la64-kernel-build-only'` ✅
 
 **备注：** 当前合并语义以 `develop` 为 ours、`exp` 为 theirs；保留双方功能，不把 `.env`、`os_test.conf` 或 `cc-codex/results-*` 实验产物纳入冲突提交。
+
+### fix(heap): add boundary/null/alignment/underflow safety guards to bitmap buddy allocator
+
+**涉及文件：**
+- `os/vendor/buddy_system_allocator/src/lib.rs` — Heap struct 新增 `heap_start: usize` 和 `heap_end: usize` 字段记录托管堆数据区域边界（bitmap carve 之后）；`new()` 初始化为 0；`init()` 新增三个安全修复：(1) 对齐 — 在 carve bitmap 前将 `start` 向上对齐到 `size_of::<usize>()` 避免未对齐 usize 写入 UB；(2) 下溢 — `bitmap_offset >= size` 时提前返回（无 bitmap 模式），防止 `size - bitmap_offset` unsigned wrapping；(3) 边界 — 设置 `self.heap_start/heap_end` 为 carve 后的堆数据区域；`bitmap_set/clear/test` 三个方法新增三层防护：(1) null 指针检查 — `free_bits[c].is_null()` 时静默跳过，兼容不通过 `init()` 的直接 `add_to_heap()` 调用路径；(2) 地址范围检查 — `addr < heap_start || addr >= heap_end` 时跳过；(3) 块索引上限检查 — `idx >= (heap_end - heap_start) >> c` 时跳过；`bitmap_test` 越界返回 `false`；bitmap 索引基址从 `self.start`（完整区域起始）迁移到 `self.heap_start`（托管堆数据起始），使索引空间与托管区域精确对应
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：**
+- 修复了 4 个正确性/安全性问题：bitmap 越界访问、未对齐 usize 写入 UB、小堆 size 下溢、bitmap 未初始化时的空指针解引用
+- bitmap 索引基址变更为 `heap_start` 而非 `start`：bitmap 在 `init()` 中仍按 `size >> c` 块分配（足够覆盖更小的 `heap_size`），索引偏移后仅访问托管堆数据区域对应的位，bitmap 区自身的位永不触及
+- `add_to_heap()` 直接路径（不经 `init()`）：`heap_start/heap_end` 保持 0，null 检查首先触发，bitmap 操作静默跳过——allocator 退化到无 bitmap 模式，功能不受影响
+
+### perf(heap): add per-class free-membership bitmap to eliminate O(n) free-list scan in dealloc()
+
+**涉及文件：**
+- `os/vendor/buddy_system_allocator/src/lib.rs` — Heap struct 新增 `start: usize` 和 `free_bits: [*mut usize; ORDER]` 字段；新增 `BITS_PER_WORD` const 及 `bitmap_set/clear/test` 三个 inline 辅助方法；`init()` 改为从区域头部 carve bitmap 内存（每 class 1 个 word，按 `size >> c` 位 + BITS_PER_WORD 向上取整），写入零并存储指针，剩余空间传给原有的 `add_to_heap`；`add_to_heap` 每次 push 同步 `bitmap_set`；`alloc()` 拆分时 `pop` → `bitmap_clear`，`push` 拆分块 → `bitmap_set`，最终取块时 pop → `bitmap_clear`；`dealloc()` 归还块后立即 `bitmap_set`，merge 循环内先用 `bitmap_test(buddy)` 做 O(1) 守卫——buddy 不在 free_list 则直接 break 跳过扫描——仅在 bitmap 断言 buddy 存在时才 fallthrough 到原有线性扫描；buddy 找到并移除后 `bitmap_clear(buddy)` 和 `bitmap_clear(old_ptr)`，合并后 `push` 同步 `bitmap_set`
+- `os/vendor/buddy_system_allocator/src/linked_list.rs` — 无修改
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：**
+- bitmap 从 Heap 区域的起始地址 carve，每个 class 至少分配 1 个 word，通过 `word_count.max(1)` 保证指针非空
+- bitmap 操作全部为 `unsafe` 指针运算，不引入任何堆分配（Vec/Box）
+- 需为 `Heap<ORDER>` 显式添加 `unsafe impl Send`，因 raw pointer 字段破坏自动 Send 推导（`LockedHeap` 需要）
+- 常用路径（buddy 已分配）降至 O(1)，仅 buddy 恰为空闲时才触发线性扫描进行归并——消除碎片增长导致的扫描步数膨胀（从 19 到 114 的 6x 退化）
+
+### feat(perf_diag): add seccomp + timer IRQ/pop cost performance counters for lmbench drift debugging
+
+**涉及文件：**
+- `os/src/task/perf.rs` — 新增 9 个 AtomicUsize 计数器（SECCOMP_CHECK_CALLS, SECCOMP_CHECK_TICKS_TOTAL/MAX, SECCOMP_DISABLED_BYPASS, TIMER_IRQ_TICKS_TOTAL/MAX, TIMER_POP_NODES_TOTAL, TIMER_POP_TICKS_TOTAL/MAX）；新增 record_seccomp_check_call/check/disabled_bypass + record_timer_irq_cost/pop_cost 5 个 record 函数；更新 reset_all_counters；添加非 perf_stats 零值桩和函数桩
+- `os/src/fs/sysfs/files/diag.rs` — 新增 /sys/kernel/stats/seccomp 文件（stats_seccomp_content）；扩展 /sys/kernel/stats/timer 追加 timer_irq_ticks_total/max, timer_pop_nodes_total, timer_pop_ticks_total/max 字段
+- `os/src/syscall/mod.rs` — seccomp 检查点：any_seccomp_enabled 分支内加 perf_time_now + record_seccomp_check_call + 各 match 臂 record_seccomp_check
+- `os/src/syscall/process/ids.rs` — seccomp_action_for_syscall 中 SECCOMP_MODE_DISABLED 分支加 record_seccomp_disabled_bypass
+- `os/src/task/manager.rs` — timer_interrupt_handler 入口加 _irq_start 计时 + yield 前 record_timer_irq_cost；pop_expired 加 _pop_start 计时 + nodes 计数 + 末尾 record_timer_pop_cost
+
+**验证：**
+- rv64 kernel-only 编译 ✅
+- la64 kernel-only 编译 ✅
+
+**备注：**
+- 计数器均使用 AtomicUsize::new(0) + Ordering::Relaxed，与现有模式完全一致
+- record 函数均在 #[cfg(feature = "perf_stats")] gated 的 mod enabled 内；非 gated 版本为空桩
+- 所有静态计数器在 not(feature = "perf_stats") 下具有零值桩，保证 sysfs 可读
+- timer_irq_cost 记录在 reprogram_timer_irqoff 之后、yield 之前，避免将上下文切换时间计入
+
+### feat(perf_diag): add 7 heap allocator timing counters for lmbench drift debugging
+
+**涉及文件：**
+- `os/src/task/perf.rs` — 新增 7 个 AtomicUsize 计数器（HEAP_ALLOC_CALLS, HEAP_ALLOC_TICKS_TOTAL/MAX, HEAP_DEALLOC_CALLS, HEAP_DEALLOC_TICKS_TOTAL/MAX, HEAP_DEALLOC_SCAN_STEPS_TOTAL）；新增 5 个 record 函数（record_heap_alloc, record_heap_alloc_cost, record_heap_dealloc, record_heap_dealloc_cost, record_heap_dealloc_scan_steps）；更新 reset_all_counters；添加非 perf_stats 零值桩和函数桩
+- `os/src/mm/heap_allocator.rs` — alloc() 和 dealloc() 路径加 perf_time_now 计时 + record_heap_alloc/dealloc + record_heap_alloc/dealloc_cost；init_heap 中注册 buddy 系统 dealloc scan steps hook
+- `os/vendor/buddy_system_allocator/src/lib.rs` — 新增 DEALLOC_SCAN_HOOK 函数指针（默认 noop）；dealloc() buddy merge 循环内加 scan_steps 计数器，循环结束后调用 hook 记录
+- `os/src/fs/sysfs/files/diag.rs` — /sys/kernel/stats/heap 扩展 7 个新字段：heap_alloc_calls, heap_alloc_ticks_total/max, heap_dealloc_calls, heap_dealloc_ticks_total/max, heap_dealloc_scan_steps_total
+
+**验证：**
+- rv64 kernel-only 编译 ✅
+- la64 kernel-only 编译 ✅
+
+**备注：**
+- buddy_system_allocator 是独立 crate，无法直接调用 kernel crate 的 record 函数，使用 static mut DEALLOC_SCAN_HOOK 函数指针桥接，kernel 在 init_heap 时设置
+- 所有计时使用 perf_time_now().wrapping_sub() 模式，与 frame_allocator 一致
+- 计数器遵循现有 P0 模式：AtomicUsize + Relaxed ordering + stats_enabled() 门控
+
+### feat(perf_diag): add P1 syscall/trap/ctxsw/reclaim cost counters
+
+**涉及文件：**
+- `os/src/task/perf.rs` — 新增 9 个 P1 AtomicUsize 计数器（getppid_cost_ticks_total/max, syscall_cost_ticks_total, ecall_trap_cost_ticks_total/max, context_switch_total, reclaim_runs/pages_scanned/pages_freed total）；修改 record_syscall_cost_ticks/record_trap_cost_ticks 同时更新 total + max；TLB 计数器改为 pub；添加非 perf_stats 零值桩
+- `os/src/syscall/mod.rs` — sys_getppid 后记录 getppid 耗时
+- `os/src/task/processor.rs` — __switch 前后记录 context_switch_total
+- `os/src/fs/reclaim.rs` — maybe_reclaim_fs_caches 入口记录 reclaim_run
+- `os/src/fs/page_cache.rs` — evict_clean_pages 循环中记录 scanned + freed
+- `os/src/mm/heap_allocator.rs` — 新增 KERNEL_HEAP_CURRENT_BYTES/MAX_BYTES 无锁 gauge，alloc 路径 CAS 更新 peak，dealloc 路径 fetch_sub
+- `os/src/mm/mod.rs` — re-export heap gauge statics
+- `os/src/fs/sysfs/files/diag.rs` — 新增 /sys/kernel/stats/{ctxsw,reclaim,tlb,heap} 四个文件 + 扩展 syscall 文件字段 + reset 改为 reset_all_counters
+- `user/src/bin/initproc.rs` — snapshot_diag 新增 ctxsw/reclaim/tlb/heap 读取；新增 RunMode::DriftWindow + drift_windows/drift_libc 配置 + run_drift_windows 执行循环
+- `os_test.conf` — 添加 drift_window 示例配置（注释）
+- `scripts/analyze_drift.py` — 新增漂移自动分析脚本（655行），解析窗口快照→计算 delta→派生指标→异常检测→CSV+Markdown 报告
+- `docs/Work_Log.md` — 更新本条目
+
+**验证：**
+- rv64 kernel-only 编译 ✅
+- la64 kernel-only 编译 ✅
+- rv64 全量构建（kernel + user + 镜像） ✅
+- Oracle 方案设计审查 ✅
+- Bug 修复：reset_all_counters 重复桩、TLB 非 perf_stats 缺失被零值 static、heap_allocator 私有模块访问 → 加 re-export ✅
+
+**备注：**
+- perf_diag = ["perf_stats"] 分层设计：perf_stats 控制 AtomicUsize 计数器何时更新，perf_diag 控制 /sys/kernel/ 目录何时创建
+- drift_window 模式只跑 lat_syscall null（不跑整套 lmbench），每窗口 pre/post snapshot 用独立标记 `=== drift_window W{i} {libc} {pre|post} ===`
+- 分析脚本实现 Oracle 决策树：getppid cost 单调增长、fast_path_ratio < 0.99、tlb_flush > 0（null syscall 不应触发 TLB flush）等异常检测
+- Lab 服务器循环执行 prompt 见 `.sisyphus/drift-loop-prompt.md`
+
+---
+
+### feat(debug): 创建 MangoCore drift 分析脚本 scripts/analyze_drift.py
+
+**涉及文件：**
+- `scripts/analyze_drift.py` — 新增漂移调试分析脚本：解析 QEMU serial 输出中的 drift_window 快照标记，计算每窗口计数器增量，检测性能漂移异常（getppid 成本、调度器退化、timer 膨胀、TLB 异常、内存泄漏等），输出 CSV + Markdown 报告。
+
+**验证：**
+- Python 3 语法检查 ✅
+- 单元测试（模拟 W0/W1 musl 数据）：解析、增量计算、派生指标、异常检测、CSV 输出全部通过 ✅
+
+**备注：**
+- 纯 Python 3 脚本，零外部依赖
+- 支持 musl/glibc 交错输出
+- 缺失字段容错（fallback to 0）
+- 异常检测实现 Oracle 决策树规则
 
 ### docs(perf_diag): 编写统一内核观测系统使用文档 + 空目录 .gitkeep
 
@@ -5329,3 +5456,18 @@ a = sum(x.get("all", x.get("total", 1)) for x in r)
 **验证：**
 - `make rv64-kernel-build-only` ✅
 - `make la64-kernel-build-only` ✅
+
+### fix(alloc): Oracle-reviewed safety & correctness fixes (3 rounds)
+
+**涉及文件：**
+- `os/vendor/buddy_system_allocator/src/lib.rs` — init() guard ordering fix + no-bitmap merge fallback + heap_start/heap_end bounds + alignment + underflow guard + small-heap add_to_heap fallback
+- `user/src/bin/initproc.rs` — snapshot_diag guard cleanup
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- rv64 6-window QEMU: open/close 245-280μs 零退化
+- la64 4-window QEMU: open/close 89-95μs 零退化
+
+**备注：** Oracle 3轮审查发现的 issue 已全部修复。详细报告见 `docs/09_debug/buddy-allocator-scan-drift.md`
+

@@ -315,6 +315,7 @@ pub fn run_tasks() {
             sched_record_loop_cycles(sched_profile, loop_t0);
             unsafe {
                 // 调用__switch 函数(汇编)切换任务
+                crate::task::perf::record_context_switch();
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
             }
         } else {
@@ -523,6 +524,7 @@ pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
     }
     unsafe {
         // 调用__switch 函数(汇编)切换任务
+        crate::task::perf::record_context_switch();
         __switch(switched_task_cx_ptr, idle_task_cx_ptr);
     }
 }

@@ -61,11 +61,11 @@ mod enabled {
     static LAST_SYSCALL_ID: AtomicUsize = AtomicUsize::new(0);
     static LAST_SYSCALL_RET: AtomicUsize = AtomicUsize::new(0);
     // Fine-grained TLB counters
-    static TLB_FLUSHES: AtomicUsize = AtomicUsize::new(0);       // total
-    static TLB_FULL: AtomicUsize = AtomicUsize::new(0);           // full inval (invtlb 0x3 / sfence.vma no-arg)
-    static TLB_PAGE: AtomicUsize = AtomicUsize::new(0);           // single-page (invtlb 0x5 / sfence.vma addr)
-    static TLB_ACTIVATE: AtomicUsize = AtomicUsize::new(0);       // address-space switch
-    static TLB_GLOBAL: AtomicUsize = AtomicUsize::new(0);         // global inval (invtlb 0x0)
+    pub static TLB_FLUSHES: AtomicUsize = AtomicUsize::new(0);    // total
+    pub static TLB_FULL: AtomicUsize = AtomicUsize::new(0);       // full inval (invtlb 0x3 / sfence.vma no-arg)
+    pub static TLB_PAGE: AtomicUsize = AtomicUsize::new(0);       // single-page (invtlb 0x5 / sfence.vma addr)
+    pub static TLB_ACTIVATE: AtomicUsize = AtomicUsize::new(0);   // address-space switch
+    pub static TLB_GLOBAL: AtomicUsize = AtomicUsize::new(0);     // global inval (invtlb 0x0)
     static FRAME_ALLOC_HITS: AtomicUsize = AtomicUsize::new(0);
     static FRAME_FREE_HITS: AtomicUsize = AtomicUsize::new(0);
     static PAGE_FAULTS: AtomicUsize = AtomicUsize::new(0);
@@ -113,11 +113,48 @@ mod enabled {
     pub static KTIMER_STALE_REMOVED: AtomicUsize = AtomicUsize::new(0);
     pub static WAIT_WITH_TIMEOUT_TOTAL: AtomicUsize = AtomicUsize::new(0);
 
+    // ── P0: Timer IRQ / Pop Cost ──
+    pub static TIMER_IRQ_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static TIMER_IRQ_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static TIMER_POP_NODES_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static TIMER_POP_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static TIMER_POP_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+
+    // ── P0: Seccomp ──
+    pub static SECCOMP_CHECK_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static SECCOMP_CHECK_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static SECCOMP_CHECK_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static SECCOMP_DISABLED_BYPASS: AtomicUsize = AtomicUsize::new(0);
+
     // ── P0: Syscall / Trap ──
     pub static SYSCALL_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static SYSCALL_GETPPID_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static SYSCALL_COST_MAX_TICKS: AtomicUsize = AtomicUsize::new(0);
     pub static TRAP_ENTER_COST_MAX_TICKS: AtomicUsize = AtomicUsize::new(0);
+
+    // ── P1: Syscall Cost (average + total) ──
+    pub static GETPPID_COST_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static GETPPID_COST_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static SYSCALL_COST_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static ECALL_TRAP_COST_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static ECALL_TRAP_COST_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+
+    // ── P1: Context Switch ──
+    pub static CONTEXT_SWITCH_TOTAL: AtomicUsize = AtomicUsize::new(0);
+
+    // ── P1: Page Reclaim ──
+    pub static RECLAIM_RUNS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static RECLAIM_PAGES_SCANNED_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static RECLAIM_PAGES_FREED_TOTAL: AtomicUsize = AtomicUsize::new(0);
+
+    // ── P0: Heap Allocator Cost ──
+    pub static HEAP_ALLOC_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_ALLOC_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_ALLOC_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_DEALLOC_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_DEALLOC_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_DEALLOC_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_DEALLOC_SCAN_STEPS_TOTAL: AtomicUsize = AtomicUsize::new(0);
 
     #[inline(always)]
     fn update_max(counter: &AtomicUsize, val: usize) {
@@ -201,6 +238,46 @@ mod enabled {
     pub fn record_wait_with_timeout() { if !stats_enabled() { return; } WAIT_WITH_TIMEOUT_TOTAL.fetch_add(1, Ordering::Relaxed); }
 
     #[inline(always)]
+    pub fn record_timer_irq_cost(start: usize) {
+        if !stats_enabled() { return; }
+        let elapsed = perf_time_now().wrapping_sub(start);
+        TIMER_IRQ_TICKS_TOTAL.fetch_add(elapsed, Ordering::Relaxed);
+        update_max(&TIMER_IRQ_TICKS_MAX, elapsed);
+    }
+
+    #[inline(always)]
+    pub fn record_timer_pop_cost(start: usize, nodes_popped: usize) {
+        if !stats_enabled() { return; }
+        let elapsed = perf_time_now().wrapping_sub(start);
+        TIMER_POP_NODES_TOTAL.fetch_add(nodes_popped, Ordering::Relaxed);
+        TIMER_POP_TICKS_TOTAL.fetch_add(elapsed, Ordering::Relaxed);
+        update_max(&TIMER_POP_TICKS_MAX, elapsed);
+    }
+
+    #[inline(always)]
+    pub fn record_seccomp_check_call() {
+        if !stats_enabled() { return; }
+        SECCOMP_CHECK_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_seccomp_check(start: usize, bypass: bool) {
+        if !stats_enabled() { return; }
+        let elapsed = perf_time_now().wrapping_sub(start);
+        SECCOMP_CHECK_TICKS_TOTAL.fetch_add(elapsed, Ordering::Relaxed);
+        update_max(&SECCOMP_CHECK_TICKS_MAX, elapsed);
+        if bypass {
+            SECCOMP_DISABLED_BYPASS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_seccomp_disabled_bypass() {
+        if !stats_enabled() { return; }
+        SECCOMP_DISABLED_BYPASS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
     pub fn record_syscall_enter(syscall_id: usize) {
         if !stats_enabled() { return; }
         SYSCALL_TOTAL.fetch_add(1, Ordering::Relaxed);
@@ -208,13 +285,87 @@ mod enabled {
     }
 
     #[inline(always)]
-    pub fn record_syscall_cost_ticks(ticks: usize) { if !stats_enabled() { return; } update_max(&SYSCALL_COST_MAX_TICKS, ticks); }
+    pub fn record_syscall_cost_ticks(ticks: usize) {
+        if !stats_enabled() { return; }
+        SYSCALL_COST_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
+        update_max(&SYSCALL_COST_MAX_TICKS, ticks);
+    }
 
     #[inline(always)]
-    pub fn record_trap_cost_ticks(ticks: usize) { if !stats_enabled() { return; } update_max(&TRAP_ENTER_COST_MAX_TICKS, ticks); }
+    pub fn record_trap_cost_ticks(ticks: usize) {
+        if !stats_enabled() { return; }
+        ECALL_TRAP_COST_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
+        update_max(&ECALL_TRAP_COST_TICKS_MAX, ticks);
+        update_max(&TRAP_ENTER_COST_MAX_TICKS, ticks);
+    }
 
-    /// Reset all P0 performance counters (writable via /sys/kernel/stats/reset).
-    pub fn reset_p0_counters() {
+    #[inline(always)]
+    pub fn record_getppid_cost(ticks: usize) {
+        if !stats_enabled() { return; }
+        GETPPID_COST_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
+        update_max(&GETPPID_COST_TICKS_MAX, ticks);
+    }
+
+    #[inline(always)]
+    pub fn record_context_switch() {
+        if !stats_enabled() { return; }
+        CONTEXT_SWITCH_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_reclaim_run() {
+        if !stats_enabled() { return; }
+        RECLAIM_RUNS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_reclaim_pages_scanned(n: usize) {
+        if n == 0 { return; }
+        if !stats_enabled() { return; }
+        RECLAIM_PAGES_SCANNED_TOTAL.fetch_add(n, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_reclaim_pages_freed(n: usize) {
+        if n == 0 { return; }
+        if !stats_enabled() { return; }
+        RECLAIM_PAGES_FREED_TOTAL.fetch_add(n, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_heap_alloc() {
+        if !stats_enabled() { return; }
+        HEAP_ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_heap_alloc_cost(ticks: usize) {
+        if !stats_enabled() { return; }
+        HEAP_ALLOC_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
+        update_max(&HEAP_ALLOC_TICKS_MAX, ticks);
+    }
+
+    #[inline(always)]
+    pub fn record_heap_dealloc() {
+        if !stats_enabled() { return; }
+        HEAP_DEALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_heap_dealloc_cost(ticks: usize) {
+        if !stats_enabled() { return; }
+        HEAP_DEALLOC_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
+        update_max(&HEAP_DEALLOC_TICKS_MAX, ticks);
+    }
+
+    #[inline(always)]
+    pub fn record_heap_dealloc_scan_steps(steps: usize) {
+        if !stats_enabled() { return; }
+        HEAP_DEALLOC_SCAN_STEPS_TOTAL.fetch_add(steps, Ordering::Relaxed);
+    }
+
+    /// Reset all P0+P1 performance counters (writable via /sys/kernel/stats/reset).
+    pub fn reset_all_counters() {
         // Scheduler / Task Queue
         FAIR_PICK_CALLS.store(0, Ordering::Relaxed);
         FAST_PATH_CALLS.store(0, Ordering::Relaxed);
@@ -241,11 +392,42 @@ mod enabled {
         KTIMER_COMPACT_CALLS.store(0, Ordering::Relaxed);
         KTIMER_STALE_REMOVED.store(0, Ordering::Relaxed);
         WAIT_WITH_TIMEOUT_TOTAL.store(0, Ordering::Relaxed);
-        // Syscall / Trap
+        // Timer IRQ / Pop Cost
+        TIMER_IRQ_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        TIMER_IRQ_TICKS_MAX.store(0, Ordering::Relaxed);
+        TIMER_POP_NODES_TOTAL.store(0, Ordering::Relaxed);
+        TIMER_POP_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        TIMER_POP_TICKS_MAX.store(0, Ordering::Relaxed);
+        // Seccomp
+        SECCOMP_CHECK_CALLS.store(0, Ordering::Relaxed);
+        SECCOMP_CHECK_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        SECCOMP_CHECK_TICKS_MAX.store(0, Ordering::Relaxed);
+        SECCOMP_DISABLED_BYPASS.store(0, Ordering::Relaxed);
+        // Syscall / Trap (P0)
         SYSCALL_TOTAL.store(0, Ordering::Relaxed);
         SYSCALL_GETPPID_TOTAL.store(0, Ordering::Relaxed);
         SYSCALL_COST_MAX_TICKS.store(0, Ordering::Relaxed);
         TRAP_ENTER_COST_MAX_TICKS.store(0, Ordering::Relaxed);
+        // Syscall Cost (P1)
+        GETPPID_COST_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        GETPPID_COST_TICKS_MAX.store(0, Ordering::Relaxed);
+        SYSCALL_COST_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        ECALL_TRAP_COST_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        ECALL_TRAP_COST_TICKS_MAX.store(0, Ordering::Relaxed);
+        // Context Switch (P1)
+        CONTEXT_SWITCH_TOTAL.store(0, Ordering::Relaxed);
+        // Page Reclaim (P1)
+        RECLAIM_RUNS_TOTAL.store(0, Ordering::Relaxed);
+        RECLAIM_PAGES_SCANNED_TOTAL.store(0, Ordering::Relaxed);
+        RECLAIM_PAGES_FREED_TOTAL.store(0, Ordering::Relaxed);
+        // Heap Allocator Cost (P0)
+        HEAP_ALLOC_CALLS.store(0, Ordering::Relaxed);
+        HEAP_ALLOC_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        HEAP_ALLOC_TICKS_MAX.store(0, Ordering::Relaxed);
+        HEAP_DEALLOC_CALLS.store(0, Ordering::Relaxed);
+        HEAP_DEALLOC_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        HEAP_DEALLOC_TICKS_MAX.store(0, Ordering::Relaxed);
+        HEAP_DEALLOC_SCAN_STEPS_TOTAL.store(0, Ordering::Relaxed);
     }
 
     /// Print accumulated timing stats, then reset.
@@ -802,6 +984,26 @@ pub fn record_wait_with_timeout() {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
+pub fn record_timer_irq_cost(_start: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_timer_pop_cost(_start: usize, _nodes_popped: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_seccomp_check_call() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_seccomp_check(_start: usize, _bypass: bool) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_seccomp_disabled_bypass() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
 pub fn record_syscall_enter(_syscall_id: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
@@ -811,6 +1013,50 @@ pub fn record_syscall_cost_ticks(_ticks: usize) {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
 pub fn record_trap_cost_ticks(_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_getppid_cost(_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_context_switch() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_reclaim_run() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_reclaim_pages_scanned(_n: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_reclaim_pages_freed(_n: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_heap_alloc() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_heap_alloc_cost(_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_heap_dealloc() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_heap_dealloc_cost(_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_heap_dealloc_scan_steps(_steps: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn reset_all_counters() {}
 
 // ── P0 counter stubs (zero-valued when perf_stats disabled) ──
 
@@ -874,5 +1120,70 @@ pub static SYSCALL_COST_MAX_TICKS: core::sync::atomic::AtomicUsize = core::sync:
 pub static TRAP_ENTER_COST_MAX_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(not(feature = "perf_stats"))]
-#[inline(always)]
-pub fn reset_p0_counters() {}
+pub static GETPPID_COST_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static GETPPID_COST_TICKS_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static SYSCALL_COST_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static ECALL_TRAP_COST_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static ECALL_TRAP_COST_TICKS_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static CONTEXT_SWITCH_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static RECLAIM_RUNS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static RECLAIM_PAGES_SCANNED_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static RECLAIM_PAGES_FREED_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── Timer IRQ / Pop Cost stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub static TIMER_IRQ_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TIMER_IRQ_TICKS_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TIMER_POP_NODES_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TIMER_POP_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TIMER_POP_TICKS_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── Seccomp stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub static SECCOMP_CHECK_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static SECCOMP_CHECK_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static SECCOMP_CHECK_TICKS_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static SECCOMP_DISABLED_BYPASS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── Heap Allocator Cost stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub static HEAP_ALLOC_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static HEAP_ALLOC_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static HEAP_ALLOC_TICKS_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static HEAP_DEALLOC_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static HEAP_DEALLOC_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static HEAP_DEALLOC_TICKS_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static HEAP_DEALLOC_SCAN_STEPS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── TLB counter stubs (zero-valued when perf_stats disabled) ──
+#[cfg(not(feature = "perf_stats"))]
+pub static TLB_FLUSHES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TLB_FULL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TLB_PAGE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TLB_ACTIVATE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TLB_GLOBAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);

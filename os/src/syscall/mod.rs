@@ -339,13 +339,19 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         );
     }
     if crate::task::any_seccomp_enabled() {
+        let _start = crate::task::perf::perf_time_now();
+        crate::task::perf::record_seccomp_check_call();
         match seccomp_action_for_syscall(syscall_id) {
-            SeccompSyscallAction::Allow => {}
+            SeccompSyscallAction::Allow => {
+                crate::task::perf::record_seccomp_check(_start, true);
+            }
             SeccompSyscallAction::KillThread(signal) => {
+                crate::task::perf::record_seccomp_check(_start, false);
                 let signum = signal.to_signum().unwrap() as u32;
                 exit_current_and_run_next(signum);
             }
             SeccompSyscallAction::KillProcess(signal) => {
+                crate::task::perf::record_seccomp_check(_start, false);
                 let signum = signal.to_signum().unwrap() as u32;
                 exit_group_and_run_next(signum);
             }
@@ -932,6 +938,9 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     }
     let _syscall_ticks = crate::task::perf::perf_time_now() - _syscall_start;
     crate::task::perf::record_syscall_cost_ticks(_syscall_ticks);
+    if syscall_id == 173 {
+        crate::task::perf::record_getppid_cost(_syscall_ticks);
+    }
     crate::task::perf::record_syscall(syscall_id, ret);
     ret
 }
