@@ -1856,6 +1856,7 @@ fn run_drift_windows(environ: &[*const u8], cfg: &RuntimeConfig) {
                             script,
                             cfg.timeouts[idx],
                             1,
+                            cfg,
                         );
                     }
                 }
@@ -2004,13 +2005,13 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
             if libc == LtpLibc::Glibc || libc == LtpLibc::Both {
                 run_group_in_dir(environ, "/glibc\0", group_name, script, timeout_secs, 1, cfg);
                 snapshot_diag(cfg.diag, n, group_name, "glibc", environ);
-                run_group_in_dir(environ, "/musl\0", group_name, script, timeout_secs, 1);
+                run_group_in_dir(environ, "/musl\0", group_name, script, timeout_secs, 1, cfg);
                 if(cfg.diag) {
                     snapshot_diag(cfg.diag, n, group_name, "musl", environ);
                 }
             }
             if libc == LtpLibc::Glibc || libc == LtpLibc::Both {
-                run_group_in_dir(environ, "/glibc\0", group_name, script, timeout_secs, 1);
+                run_group_in_dir(environ, "/glibc\0", group_name, script, timeout_secs, 1, cfg);
                 if(cfg.diag) {
                     snapshot_diag(cfg.diag, n, group_name, "glibc", environ);
                 }
