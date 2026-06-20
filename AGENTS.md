@@ -268,6 +268,15 @@ impl_file_for_socket!(MySocket);
 
 ## 工作日志与知识维护
 
+### 前置参考（调试前先读）
+
+调试性能退化、非确定性 bug、或遇到可疑模式时，先读取以下已沉淀的经验：
+
+- **性能退化调试工作流** → `.agents/skills/mango-worklog/references/harness-patterns.md`（§渐进性能退化调试方法论）
+- **常见调试模式和技巧** → `.agents/skills/mango-worklog/references/debugging-patterns.md`
+
+这些文件记录了之前跨多个对话验证过的调试策略和修复模式，可以帮助快速定位问题类型并避免重复试错。
+
 ### 自动 Worklog
 
 每次代码修改完成后，**必须调用 `skill(name="mango-worklog")`** 加载工作日志指令并执行。该 Skill 会读取当前对话上下文中的修改内容，自动按格式更新 `docs/Work_Log.md`，并判断是否需要沉淀经验到 `references/`。不要等待用户提示——这是强制性规则。
