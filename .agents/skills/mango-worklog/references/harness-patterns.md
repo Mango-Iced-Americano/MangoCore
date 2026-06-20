@@ -2,6 +2,150 @@
 
 > 跨对话可复用的 bug 根因 → 修复模式。按子系统分类。
 
+## 渐进性能退化调试方法论
+
+### 问题特征
+
+性能退化（performance drift / progressive degradation）不同于普通 bug——没有明确的"崩溃点"，而是在长时间运行中某个操作逐渐变慢。典型信号：
+- lmbench score 随窗口单调递减
+- `getppid_avg_ticks` 逐轮增长
+- open/close / fork+exit 等在创建+销毁路径上的操作越来越慢
+- 但纯读取操作（null syscall、read、write、pipe、signal handler）不受影响
+
+### 第一步：建立可重复测量框架（最关键）
+
+没有可重复的测量，后面所有分析都是猜。
+
+```
+构建 drift_window 模式：
+  for w in 0..N:
+    reset 性能计数器
+    run workload (触发退化的操作)
+    pre_snapshot (读取所有 /sys/kernel/stats/*)
+    run 被测操作 (lat_syscall null / full lmbench)
+    post_snapshot (再次读取所有 /sys/kernel/stats/*)
+    sleep(100ms)
+  delta = post - pre  (每窗口的增量)
+```
+
+关键设计决策：
+- **逐窗口 reset 计数器**：增量直接测量当前窗口的代价，避免累计误差
+- **pre/post snapshot**：每次快照读取所有计数器到同一行输出，方便分析脚本解析
+- **分析脚本**：`analyze_drift.py` 自动解析 serial 输出 → 计算 delta → 派生指标（getppid_avg_ticks、fast_path_ratio、tlb_per_getppid）→ 异常检测 → CSV+Markdown 报告
+- **决策树**：不同异常触发不同建议（如 tlb_anomaly > 0 建议加 TLB flush callsite tag）
+
+### 第二步：隔离退化所在层
+
+渐进退化最难的是要找到"什么在变慢"。分层隔离法：
+
+```
+Layer 0: null syscall (getppid)     → 测"纯读取"路径，应永远不变
+Layer 1: lat_syscall null            → 测 syscall 路径，应稳定  
+Layer 2: simple read/write           → 测文件 I/O，可能退化
+Layer 3: simple open/close           → 测 VFS + 对象创建，最可能退化
+Layer 4: fork+exit                   → 测进程创建，可能退化
+Layer 5: full lmbench                →  composite score
+```
+
+本案例的关键发现：**null syscall (getppid) 对几乎所有系统状态变化免疫**，因为它只读一个 `current.inner.parent_pid` 字段。当所有人都以为退化在 null syscall 时，实际上它在文件操作和进程创建——这一发现是通过切换测量目标（从 `lat_syscall null` 到 `full lmbench`）才获得的。
+
+**教训**：永远不要只盯着表面指标（null syscall），要把测量范围扩大到所有可能退化的路径。
+
+### 第三步：计数器驱动的迭代式精确定位
+
+这是最核心的模式。每轮只做三件事：
+1. **加计数器**（最多 15 个/budget，避免过度插桩扰动性能）
+2. **跑一轮测试**并收集数据
+3. **看数据决定下一轮方向**（不猜，让数据说话）
+
+```
+Round 0: 只有 P0 计数器（taskq/timer/syscall/buddy）
+  → 发现 TLB flush 异常（32K/window，null syscall 不应有任何 TLB flush）
+
+Round 1: 加 P1 计数器（ctxsw/reclaim/tlb/heap + syscall cost）
+  → 确认 null syscall 稳定（36-39μs），但 full lmbench 中 open/close 退化 2.6x
+
+Round 2: 加 seccomp + timer IRQ cost + timer pop cost
+  → 排除 seccomp（SECCOMP_CHECK_CALLS=0），排除 timer queue bloat
+
+Round 3: 加 heap allocator 计数器（alloc/dealloc ticks + dealloc scan_steps）
+  → **决定性突破**：scan_steps/dealloc 从 19→114（6x），dealloc ticks 从 10.8K→69.9K（6.5x）
+  → 根因确认为 buddy allocator dealloc() 中 `for block in free_list.iter_mut()` 线性扫描
+```
+
+**每轮必问的问题**：
+- 数据趋势是什么？（单调增长？稳定？下降？）
+- 哪个计数器和 lmbench 分数的变化趋势最吻合？
+- 如果数据不够区分，下一轮加什么计数器？
+
+### 第四步：Oracle 多轮咨询时机
+
+Oracle 很贵，不要一开始就问。正确节奏：
+
+| 时机 | 问什么 |
+|------|--------|
+| 有足够数据但不知道下一步方向时 | "基于这些数据，最可能根因是什么？下一步加什么计数器？" |
+| 数据强烈指向某个方向后 | "这个模式说明什么？最优修复方案是什么？" |
+| 实现修复后 | "审查这个改动，有没有安全/边界问题？" |
+| 修复加安全加固都做完后 | "最终验证：是否可以判定 DONE？" |
+
+本案例中 Oracle 用了 4 轮，每一轮都在关键分叉点。第 3 轮 Oracle 指出的 4 个安全缺口（对齐、边界、下溢、null 指针）直接阻止了线上 crash。
+
+### 第五步：bitmap guard 模式（可复用修复技术）
+
+当退化根因是**有状态数据结构的 O(n) 操作**时，bitmap guard 是通用修复：
+
+```
+before:                       after:
+  for item in list.iter_mut():   if !bitmap_test(key): break
+    if item.matches(key):          // O(1) 跳过 95%+ 的无效扫描
+      ...                          for item in list.iter_mut():
+                                     if item.matches(key):
+                                       ...
+```
+
+适用条件：
+- 有状态数据结构（free-list、hash table、LRU list）导致 O(n) 操作
+- 存储了全量成员信息但不支持 O(1) 查找
+- bitmap/cache 内存开销可接受
+
+本案例：buddy allocator 的 free-list 是 intrusive 单向链表，查找 buddy 需要遍历整个链表。加 per-class free-membership bitmap 后 O(1) 跳过无效扫描，scan steps 减少 130 倍。
+
+### 工作流总结
+
+```
+[问题信号] → [建测量框架] → [隔离退化层] → [加计数器] → [跑实验] → 
+[看数据决策] → {数据够了? → [问 Oracle] → [修根因] → [补安全] → [跑全量] → 完成
+              数据不够? → [加计数器] → [跑实验] → ...}
+```
+
+关键文件配置：
+```toml
+# os_test.conf
+mode=drift_window
+drift_windows=6
+drift_pre_mask=0x003  # basic + busybox pre-workload
+drift_measure=full    # 全量 lmbench 作为测量目标
+diag=1
+```
+
+相关文件：
+- `user/src/bin/initproc.rs` — drift_window 循环 + pre_mask + measure
+- `os/src/task/perf.rs` — 所有 AtomicUsize 计数器 + record 函数
+- `scripts/analyze_drift.py` — 自动分析脚本
+- `docs/09_debug/buddy-allocator-scan-drift.md` — 本案例完整报告
+
+### 关键原则
+
+1. **永远先建基础设施**：没有可重复的测量框架，不可能找到渐进退化。
+2. **null syscall 是最好的隔离指标**：它不动任何 kernel 对象，完美区分"创建"和"读取"两类操作。
+3. **渐进退化根因不在最明显的地方**：所有人都以为在 null syscall，实际在 heap dealloc。
+4. **不要依赖单一指标**：lmbench composite score + 每个子项 + 内核 P0/P1 计数器一起看。
+5. **计数器增减要与 lmbench 分数变化吻合**：如果 scan_steps 涨了但 lmbench 没变，说明不是根因。
+6. **Oracle 在关键分叉点问，不要每步问**：用数据排除大部分可能性后，让 Oracle 做最难的一跳。
+
+## 网络绩效
+
 ## 网络绩效
 
 ### QEMU TCG 对热路径 struct 大小极度敏感（P1.1 教训）
