@@ -77,10 +77,10 @@ const DEFAULT_TIMEOUTS: [u64; 12] = [
     90,   // [5]  unixbench
     40,   // [6]  iperf
     120,  // [7]  libcbench
-    1200, // [8]  lmbench
+    900, // [8]  lmbench
     90,   // [9]  netperf
     60,   // [10] cyclictest
-    3000, // [11] ltp
+    2400, // [11] ltp
 ];
 
 /// LTP 默认排除测例名列表
