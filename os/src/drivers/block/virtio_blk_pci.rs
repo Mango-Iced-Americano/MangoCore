@@ -21,7 +21,9 @@ use crate::hal::{
     config::{PAGE_SIZE, PAGE_SIZE_BITS},
     BLOCK_SZ,
 };
+use crate::task::perf;
 const BLOCK_RATIO: usize = BLOCK_SZ / VIRT_IO_BLOCK_SZ;
+const MAX_VIRTIO_REQ_BYTES: usize = BLOCK_SZ;
 const PCI_ECAM_BASE: usize = 0x2000_0000;
 const VIRT_PCI_BASE: usize = 0x4000_0000;
 const VIRT_PCI_SIZE: usize = 0x0002_0000;
@@ -37,18 +39,22 @@ lazy_static! {
 impl BlockDevice for VirtIOBlock {
     fn read_block(&self, block_id: usize, buf: &mut [u8]) {
         assert!(buf.len() % BLOCK_SZ == 0);
+        perf::record_blk_vread(buf.len() / VIRT_IO_BLOCK_SZ);
         let mut dev = self.0.lock();
-        for (i, chunk) in buf.chunks_mut(VIRT_IO_BLOCK_SZ).enumerate() {
-            dev.read_blocks(block_id * BLOCK_RATIO + i, chunk)
+        for (chunk_idx, chunk) in buf.chunks_mut(MAX_VIRTIO_REQ_BYTES).enumerate() {
+            let first_sector = (block_id + chunk_idx) * BLOCK_RATIO;
+            dev.read_blocks(first_sector, chunk)
                 .expect("read error");
         }
     }
 
     fn write_block(&self, block_id: usize, buf: &[u8]) {
         assert!(buf.len() % BLOCK_SZ == 0);
+        perf::record_blk_vwrite(buf.len() / VIRT_IO_BLOCK_SZ);
         let mut dev = self.0.lock();
-        for (i, chunk) in buf.chunks(VIRT_IO_BLOCK_SZ).enumerate() {
-            dev.write_blocks(block_id * BLOCK_RATIO + i, chunk)
+        for (chunk_idx, chunk) in buf.chunks(MAX_VIRTIO_REQ_BYTES).enumerate() {
+            let first_sector = (block_id + chunk_idx) * BLOCK_RATIO;
+            dev.write_blocks(first_sector, chunk)
                 .expect("write error");
         }
     }

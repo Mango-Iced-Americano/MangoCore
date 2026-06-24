@@ -318,6 +318,20 @@ diag=1
 
 ## 文件系统
 
+### VirtIO 块驱动 512B 拆分导致 8x I/O 请求放大
+
+- **根因**: `virtio-drivers` 库的 `read_blocks(sector, buf)` / `write_blocks(sector, buf)` 实际支持多扇区缓冲区（buf 可以是 N×512B），但 MangoCore 的 `VirtIOBlock::read_block/write_block` 用 `buf.chunks(512)` 把每个 4KB 块拆成了 8 次独立 VirtIO 请求
+- **修复**: 将 `buf.chunks(VIRT_IO_BLOCK_SZ)` 改为 `buf.chunks(BLOCK_SZ)`，扇区地址 = `(block_id + chunk_idx) * BLOCK_RATIO`。iozone writeback 请求数从 149K 降到 18.6K（8x），写吞吐提升 2.11x
+- **教训**: 底层驱动库的 API 能力可能与上层包装不一致；先确认库支持什么粒度的 I/O，再决定是否拆分。VirtIO 安全上限 = BLOCK_SZ（单页物理连续），跨页批量需先保证 DMA 缓冲区物理连续性
+- **相关文件**: `os/src/drivers/block/virtio_blk.rs`, `os/src/drivers/block/virtio_blk_pci.rs`
+
+### 性能计数器均值误导 — 必须拆 hit/miss
+
+- **根因**: `pc_read_cycles / pc_read_calls = 91K cycles/次` 看似 cache-hit 开销很大，但拆分 `PC_READ_HIT_CYCLES` / `PC_READ_MISS_CYCLES` 后发现：hit 仅 13K cycles，但 4.5% 的 miss 每次 1.8M cycles 拉高均值。iozone 场景 80% miss rate 更是完全改变了瓶颈判断
+- **修复**: 在读路径检测 `PC_READ_MISS` 计数器的前后变化来判断本次 read 是否有 miss，然后分别计入 hit/miss 周期桶；同时拆分 Phase1(lookup) / Phase2(copy) 子周期
+- **教训**: 带 miss 的 I/O 路径不能只看均值；必须同时有 miss_rate 和 hit/miss 各自耗时才能判断瓶颈是"快路径太慢"还是"慢路径太多"
+- **相关文件**: `os/src/task/perf.rs`, `os/src/fs/page_cache.rs`
+
 ### ext4 sparse file hole 处理
 - **根因**: `get_pblock_idx` 对 hole 返回垃圾物理地址
 - **修复**: hole 返回 `Err`，`read_at` 填零，`write_at` 分配新块

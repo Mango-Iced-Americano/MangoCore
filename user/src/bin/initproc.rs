@@ -1900,6 +1900,8 @@ fn snapshot_diag(diag: bool, n: usize, group: &str, libc: &str, environ: &[*cons
     let _ = run_bash_cmd("cat /sys/kernel/stats/seccomp\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/buddyinfo\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/zombies\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/pagecache\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/blockio\0", environ);
     println!("[initproc] [diag] === stats T{} {}:{} end ===", n, group, libc);
 }
 

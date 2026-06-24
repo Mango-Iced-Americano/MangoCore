@@ -396,7 +396,55 @@ fn trace_clear_write(_extra: usize, _offset: usize, buf: &[u8]) -> Result<usize,
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  REGISTRATION
+//  STATS: PageCache I/O
+// ═══════════════════════════════════════════════════════════════════════
+
+fn stats_pagecache_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let mut s = String::with_capacity(512);
+    let _ = writeln!(s, "pc_read_calls={}", read_counter(&crate::task::perf::PC_READ_CALLS));
+    let _ = writeln!(s, "pc_read_pages={}", read_counter(&crate::task::perf::PC_READ_PAGES));
+    let _ = writeln!(s, "pc_read_miss={}", read_counter(&crate::task::perf::PC_READ_MISS));
+    let _ = writeln!(s, "pc_read_cycles={}", read_counter(&crate::task::perf::PC_READ_CYCLES_TOTAL));
+    let _ = writeln!(s, "pc_read_hit_cycles={}", read_counter(&crate::task::perf::PC_READ_HIT_CYCLES));
+    let _ = writeln!(s, "pc_read_miss_cycles={}", read_counter(&crate::task::perf::PC_READ_MISS_CYCLES));
+    let _ = writeln!(s, "pc_copy_cycles={}", read_counter(&crate::task::perf::PC_COPY_CYCLES));
+    let _ = writeln!(s, "pc_lookup_cycles={}", read_counter(&crate::task::perf::PC_LOOKUP_CYCLES));
+    let _ = writeln!(s, "pc_write_calls={}", read_counter(&crate::task::perf::PC_WRITE_CALLS));
+    let _ = writeln!(s, "pc_write_pages={}", read_counter(&crate::task::perf::PC_WRITE_PAGES));
+    let _ = writeln!(s, "pc_write_overwrite={}", read_counter(&crate::task::perf::PC_WRITE_OVERWRITE));
+    let _ = writeln!(s, "pc_write_cycles={}", read_counter(&crate::task::perf::PC_WRITE_CYCLES_TOTAL));
+    let _ = writeln!(s, "pc_wb_calls={}", read_counter(&crate::task::perf::PC_WRITEBACK_CALLS));
+    let _ = writeln!(s, "pc_wb_pages={}", read_counter(&crate::task::perf::PC_WRITEBACK_PAGES));
+    let _ = writeln!(s, "pc_wb_cycles={}", read_counter(&crate::task::perf::PC_WRITEBACK_CYCLES_TOTAL));
+    let _ = writeln!(s, "pc_falloc_cycles={}", read_counter(&crate::task::perf::PC_FALLOC_CYCLES_TOTAL));
+    write_str(offset, len, buf, &s)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  STATS: Block I/O
+// ═══════════════════════════════════════════════════════════════════════
+
+fn stats_blockio_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let mut s = String::with_capacity(256);
+    let _ = writeln!(s, "blk_vread_reqs={}", read_counter(&crate::task::perf::BLK_VREAD_REQS));
+    let _ = writeln!(s, "blk_vread_secs={}", read_counter(&crate::task::perf::BLK_VREAD_SECS));
+    let _ = writeln!(s, "blk_vwrite_reqs={}", read_counter(&crate::task::perf::BLK_VWRITE_REQS));
+    let _ = writeln!(s, "blk_vwrite_secs={}", read_counter(&crate::task::perf::BLK_VWRITE_SECS));
+    write_str(offset, len, buf, &s)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Registration
 // ═══════════════════════════════════════════════════════════════════════
 
 pub fn register_all(kernel_dir: &Arc<SysInode>) -> Result<(), SyscallErr> {
@@ -427,6 +475,8 @@ pub fn register_all(kernel_dir: &Arc<SysInode>) -> Result<(), SyscallErr> {
     stats_dir.add_file("reclaim", ro_mode, stats_reclaim_content)?;
     stats_dir.add_file("tlb", ro_mode, stats_tlb_content)?;
     stats_dir.add_file("heap", ro_mode, stats_heap_content)?;
+    stats_dir.add_file("pagecache", ro_mode, stats_pagecache_content)?;
+    stats_dir.add_file("blockio", ro_mode, stats_blockio_content)?;
     stats_dir.add_file("resource", ro_mode, stats_resource_content)?;
     stats_dir.add_file("buddyinfo", ro_mode, stats_buddyinfo_content)?;
     stats_dir.add_file("zombies", ro_mode, stats_zombies_content)?;

@@ -147,6 +147,30 @@ mod enabled {
     pub static RECLAIM_PAGES_SCANNED_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static RECLAIM_PAGES_FREED_TOTAL: AtomicUsize = AtomicUsize::new(0);
 
+    // ── P0: PageCache I/O ──
+    pub static PC_READ_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_READ_PAGES: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_READ_MISS: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_READ_CYCLES_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_READ_HIT_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_READ_MISS_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_COPY_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_LOOKUP_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_WRITE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_WRITE_PAGES: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_WRITE_OVERWRITE: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_WRITE_CYCLES_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_WRITEBACK_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_WRITEBACK_PAGES: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_WRITEBACK_CYCLES_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_FALLOC_CYCLES_TOTAL: AtomicUsize = AtomicUsize::new(0);
+
+    // ── P0: Block Device I/O ──
+    pub static BLK_VREAD_REQS: AtomicUsize = AtomicUsize::new(0);
+    pub static BLK_VREAD_SECS: AtomicUsize = AtomicUsize::new(0);
+    pub static BLK_VWRITE_REQS: AtomicUsize = AtomicUsize::new(0);
+    pub static BLK_VWRITE_SECS: AtomicUsize = AtomicUsize::new(0);
+
     // ── P0: Heap Allocator Cost ──
     pub static HEAP_ALLOC_CALLS: AtomicUsize = AtomicUsize::new(0);
     pub static HEAP_ALLOC_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
@@ -364,6 +388,75 @@ mod enabled {
         HEAP_DEALLOC_SCAN_STEPS_TOTAL.fetch_add(steps, Ordering::Relaxed);
     }
 
+    // ── PageCache recorders ──
+
+    #[inline(always)]
+    pub fn record_pc_read(pages: usize, cycles: usize, hit_cycles: usize, miss_cycles: usize) {
+        if !stats_enabled() { return; }
+        PC_READ_CALLS.fetch_add(1, Ordering::Relaxed);
+        PC_READ_PAGES.fetch_add(pages, Ordering::Relaxed);
+        PC_READ_CYCLES_TOTAL.fetch_add(cycles, Ordering::Relaxed);
+        PC_READ_HIT_CYCLES.fetch_add(hit_cycles, Ordering::Relaxed);
+        PC_READ_MISS_CYCLES.fetch_add(miss_cycles, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_pc_copy_cycles(cycles: usize) {
+        if !stats_enabled() { return; }
+        PC_COPY_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_pc_lookup_cycles(cycles: usize) {
+        if !stats_enabled() { return; }
+        PC_LOOKUP_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_pc_write(pages: usize, full_overwrite: bool, cycles: usize) {
+        if !stats_enabled() { return; }
+        PC_WRITE_CALLS.fetch_add(1, Ordering::Relaxed);
+        PC_WRITE_PAGES.fetch_add(pages, Ordering::Relaxed);
+        if full_overwrite { PC_WRITE_OVERWRITE.fetch_add(1, Ordering::Relaxed); }
+        PC_WRITE_CYCLES_TOTAL.fetch_add(cycles, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_pc_writeback(pages: usize, cycles: usize) {
+        if !stats_enabled() { return; }
+        PC_WRITEBACK_CALLS.fetch_add(1, Ordering::Relaxed);
+        PC_WRITEBACK_PAGES.fetch_add(pages, Ordering::Relaxed);
+        PC_WRITEBACK_CYCLES_TOTAL.fetch_add(cycles, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_pc_miss() {
+        if !stats_enabled() { return; }
+        PC_READ_MISS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_pc_falloc_cycles(cycles: usize) {
+        if !stats_enabled() { return; }
+        PC_FALLOC_CYCLES_TOTAL.fetch_add(cycles, Ordering::Relaxed);
+    }
+
+    // ── Block device recorders ──
+
+    #[inline(always)]
+    pub fn record_blk_vread(sectors: usize) {
+        if !stats_enabled() { return; }
+        BLK_VREAD_REQS.fetch_add(1, Ordering::Relaxed);
+        BLK_VREAD_SECS.fetch_add(sectors, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_blk_vwrite(sectors: usize) {
+        if !stats_enabled() { return; }
+        BLK_VWRITE_REQS.fetch_add(1, Ordering::Relaxed);
+        BLK_VWRITE_SECS.fetch_add(sectors, Ordering::Relaxed);
+    }
+
     /// Reset all P0+P1 performance counters (writable via /sys/kernel/stats/reset).
     pub fn reset_all_counters() {
         // Scheduler / Task Queue
@@ -428,6 +521,28 @@ mod enabled {
         HEAP_DEALLOC_TICKS_TOTAL.store(0, Ordering::Relaxed);
         HEAP_DEALLOC_TICKS_MAX.store(0, Ordering::Relaxed);
         HEAP_DEALLOC_SCAN_STEPS_TOTAL.store(0, Ordering::Relaxed);
+        // PageCache I/O (P0)
+        PC_READ_CALLS.store(0, Ordering::Relaxed);
+        PC_READ_PAGES.store(0, Ordering::Relaxed);
+        PC_READ_MISS.store(0, Ordering::Relaxed);
+        PC_READ_CYCLES_TOTAL.store(0, Ordering::Relaxed);
+        PC_READ_HIT_CYCLES.store(0, Ordering::Relaxed);
+        PC_READ_MISS_CYCLES.store(0, Ordering::Relaxed);
+        PC_COPY_CYCLES.store(0, Ordering::Relaxed);
+        PC_LOOKUP_CYCLES.store(0, Ordering::Relaxed);
+        PC_WRITE_CALLS.store(0, Ordering::Relaxed);
+        PC_WRITE_PAGES.store(0, Ordering::Relaxed);
+        PC_WRITE_OVERWRITE.store(0, Ordering::Relaxed);
+        PC_WRITE_CYCLES_TOTAL.store(0, Ordering::Relaxed);
+        PC_WRITEBACK_CALLS.store(0, Ordering::Relaxed);
+        PC_WRITEBACK_PAGES.store(0, Ordering::Relaxed);
+        PC_WRITEBACK_CYCLES_TOTAL.store(0, Ordering::Relaxed);
+        PC_FALLOC_CYCLES_TOTAL.store(0, Ordering::Relaxed);
+        // Block Device I/O (P0)
+        BLK_VREAD_REQS.store(0, Ordering::Relaxed);
+        BLK_VREAD_SECS.store(0, Ordering::Relaxed);
+        BLK_VWRITE_REQS.store(0, Ordering::Relaxed);
+        BLK_VWRITE_SECS.store(0, Ordering::Relaxed);
     }
 
     /// Print accumulated timing stats, then reset.
@@ -1054,6 +1169,37 @@ pub fn record_heap_dealloc_cost(_ticks: usize) {}
 #[inline(always)]
 pub fn record_heap_dealloc_scan_steps(_steps: usize) {}
 
+// ── PageCache recorders (no-op when perf_stats disabled) ──
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pc_read(_pages: usize, _cycles: usize, _hit_cycles: usize, _miss_cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pc_copy_cycles(_cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pc_lookup_cycles(_cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pc_write(_pages: usize, _full_overwrite: bool, _cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pc_writeback(_pages: usize, _cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pc_miss() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pc_falloc_cycles(_cycles: usize) {}
+
+// ── Block device recorders (no-op when perf_stats disabled) ──
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_blk_vread(_sectors: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_blk_vwrite(_sectors: usize) {}
+
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
 pub fn reset_all_counters() {}
@@ -1175,6 +1321,50 @@ pub static HEAP_DEALLOC_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::syn
 pub static HEAP_DEALLOC_TICKS_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static HEAP_DEALLOC_SCAN_STEPS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── PageCache I/O stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_READ_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_READ_PAGES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_READ_MISS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_READ_CYCLES_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_READ_HIT_CYCLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_READ_MISS_CYCLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_COPY_CYCLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_LOOKUP_CYCLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_WRITE_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_WRITE_PAGES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_WRITE_OVERWRITE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_WRITE_CYCLES_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_WRITEBACK_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_WRITEBACK_PAGES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_WRITEBACK_CYCLES_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_FALLOC_CYCLES_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── Block Device I/O stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub static BLK_VREAD_REQS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static BLK_VREAD_SECS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static BLK_VWRITE_REQS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static BLK_VWRITE_SECS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 // ── TLB counter stubs (zero-valued when perf_stats disabled) ──
 #[cfg(not(feature = "perf_stats"))]

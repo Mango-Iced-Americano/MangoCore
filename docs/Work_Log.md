@@ -2,6 +2,109 @@
 
 ---
 
+## 2026-06-24
+
+### perf(fs): VirtIO 512B→4KB 合并 + 脏页回写批处理 — iozone 写吞吐 2.1x 提升
+
+**涉及文件：**
+- `os/src/drivers/block/virtio_blk.rs` — `chunks(512)`→`chunks(BLOCK_SZ)`，每次 4KB 1 个 VirtIO 请求替代 8 个，`MAX_VIRTIO_REQ_BYTES=BLOCK_SZ`
+- `os/src/drivers/block/virtio_blk_pci.rs` — 同上
+- `os/src/fs/page_cache.rs` — 脏页连续回写合并（见下一条）
+
+**iozone 吞吐量对比（riscv64 QEMU, 4进程, 1KB record, 1MB file）：**
+
+| 测试 | 优化前 | 优化后 | 提升 |
+|------|--------|--------|------|
+| Write (4 writers avg) | 441 KB/s | **931 KB/s** | **2.11x** |
+| Rewrite (4 rewriters avg) | 1,015 KB/s | **1,467 KB/s** | **1.45x** |
+| Read (4 readers avg) | 2,236 KB/s | 2,280 KB/s | 1.02x |
+| Re-read | 2,240 KB/s | 2,289 KB/s | 1.02x |
+
+**备注：** 读路径未动，符合预期。512B 合并安全上限 = BLOCK_SZ（单页物理连续）。rewrite 提升 1.45x 表明写回批处理对已分配块的场景也有收益。
+
+### PageCache 脏页批量回写 — write_pages 合并写入
+
+**涉及文件：**
+- `os/src/fs/page_cache.rs` — 核心修改文件，新增 write_pages trait 方法 + writeback_pages_run + 批量分组回写 + Ext4 覆盖
+
+**修改内容：**
+
+1. **`PageCacheBackend` trait 新增 `write_pages()`**（默认逐页回退）
+   - 签名：`fn write_pages(&self, start_index: usize, pages: &[&[u8]]) -> Result<usize, SyscallErr>`
+   - 默认实现逐页调用 `write_page()`，保持向后兼容
+
+2. **新增 `MAX_WRITEBACK_PAGES = 32` 常量和 `writeback_pages_run()` 私有方法**
+   - 持锁收集 `start..start+count` 范围内的 Dirty 页面，标记为 Writeback
+   - 调用 `backend.write_pages(actual_start, &slices)` 批量提交
+   - 成功 → UpToDate + clear_dirty；失败 → 恢复 Dirty 状态
+
+3. **`writeback_all()` 和 `writeback_range()` 改为分组运行**
+   - 遍历排序后的脏页索引，将连续页面分组为 run（最大 32 页/批次）
+   - 对每个 run 调用 `writeback_pages_run()` 代替逐个 `writeback_page()`
+
+4. **`Ext4PageCacheBackend` 覆盖 `write_pages()`**
+   - `blocks_per_page == 1` 时启用优化（标准 4KB 页 + 4KB 块）
+   - 解析所有页面的物理块号，将物理连续块分组
+   - 每组通过 staging `Vec<u8>` 拷贝后单次 `write_block(first_pblock, &staging)` 批量写入
+   - `blocks_per_page != 1` 时回退到默认逐页实现
+   - `writeback_page()` 公共 API 保持不变（个别调用者仍可使用）
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**预期效果：**
+- `writeback_page` 的 18K 独立调用 → 少量 `writeback_pages_run` 批量调用
+- EXT4 后端物理连续块进一步合并为单次 `write_block` 多块写入
+- Iozone 写回阶段（占 52.7B cycles / 89%）的 syscall 开销显著降低
+
+### analysis(fs): Oracle 全面 FS 性能优化方案
+
+**背景：** iozone/lmbench 文件系统性能优化，参照 DragonOS 和 Linux 6.6 设计。
+
+**Oracle 优先级矩阵（按收益/努力比排序）：**
+
+| # | 优化项 | 主要收益指标 | 预估提升 | 工作量 | 风险 |
+|---|--------|------------|---------|--------|------|
+| 1 | 修 VirtIO 512B 拆分 | iozone read/write/fsync | +50%~300%（打盘路径） | 小 | 低 |
+| 2 | PageCache 顺序预读 | lmbench bw_file_rd, iozone 顺序读 | +50%~300%（冷读） | 中 | 中 |
+| 3 | 脏页连续回写合并 | iozone write/rewrite/fsync | +20%~150% | 中 | 中 |
+| 4 | 后台 writeback + 脏页阈值 | 长写尾部延迟, sync 延迟 | +10%~50% | 中 | 中高 |
+| 5 | Clock 二次机会回收 | 大工作集, 重复 iozone | +5%~30% | 中 | 低中 |
+| 6 | ext4 多块分配 | 大顺序写, 碎片 | +10%~30% | 大 | 高 |
+| 7 | O_DIRECT | 仅 iozone direct 模式 | 0（不用则无效） | 中大 | 高 |
+
+**实施顺序：** Phase 1: #1 → #3（打基础）；Phase 2: #2 → #4（核心性能）；Phase 3: #5 → #6（精细化）；Phase ? #7（按需）
+
+**关键风险点：**
+- 后台 writeback 不能先于 redirty 语义修复（Writeback 状态下并发写入会被错误标记 clean）
+- ext4 nodelalloc 元数据顺序问题（块映射先于数据写入）
+- 多页 DMA 连续性：`frames_alloc()` 不保证物理连续，跨页批量 I/O 必须先修 HAL
+- #1 第一步只合并到一个 BLOCK_SZ（4KB），跨页留后面
+
+**备注：** Oracle 确认 iozone write 先写 PageCache（内存），块设备拆分对 cache-hot 测试影响有限。真正瓶颈可能在 PageCache 内部路径、reclaim 调度循环税。建议先用计数器迭代式精确定位后再动手。
+
+---
+
+### perf(driver): merge VirtIO 512B sector requests into 4KB BLOCK_SZ requests
+
+**涉及文件：**
+- `os/src/drivers/block/virtio_blk.rs` — `read_block`/`write_block`: 将 `buf.chunks_mut(VIRT_IO_BLOCK_SZ)` 循环替换为 `buf.chunks_mut(MAX_VIRTIO_REQ_BYTES)`（= BLOCK_SZ），一次 virtio 请求发送整个 4KB 块而非 8 次 512B 请求；新增 `MAX_VIRTIO_REQ_BYTES` 常量
+- `os/src/drivers/block/virtio_blk_pci.rs` — 同上（PCI 版本），`buf.chunks(MAX_VIRTIO_REQ_BYTES)`
+
+**变更前：** 每个 4KB `read_block`/`write_block` 调用产生 8 次独立的 virtio 请求（每次 512B），iozone 产生 ~149K virtio 写请求
+
+**变更后：** 每个 4KB 调用产生 1 次 virtio 请求（4096B），预期 `blk_vread_reqs`/`blk_vwrite_reqs` 计数器减少 8x
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- 绩效计数器：`record_blk_vread`/`record_blk_vwrite` 语义不变（仍记录 sector 总数）
+- `MAX_VIRTIO_REQ_BYTES = BLOCK_SZ = 4096`，不跨页合并，保持安全
+
+**备注：** 本次仅合并到单个 BLOCK_SZ，跨页多块合并需先解决 HAL `frames_alloc()` 物理连续性问题
+
+---
+
 ## 2026-06-20
 
 ### docs(debug): add comprehensive buddy-allocator-scan-drift debugging report
