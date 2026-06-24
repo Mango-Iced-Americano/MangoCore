@@ -425,7 +425,7 @@ impl IndexNode for LockedTmpFSInode {
         }
 
         // Hold inode lock through write + size update to avoid race with truncate/resize
-        let n = pc.write_user(offset, len, src)?;
+            let n = pc.write_user(offset, len, src, None)?;
 
         // 更新文件大小
         if new_size > inode.file_size {
@@ -1023,7 +1023,7 @@ impl IndexNode for LockedTmpFSInode {
             let tail_start = len;
             if tail_start < page_end {
                 let zero_buf = alloc::vec![0u8; page_end - tail_start];
-                let _ = pc.write(tail_start, &zero_buf);
+                let _ = pc.write(tail_start, &zero_buf, None);
             }
         }
 

@@ -301,6 +301,113 @@ impl Ext4FileSystem {
         return Err(Errno::ENOSPC as isize);
     }
 
+    /// Allocate a contiguous run of N blocks near the given goal.
+    ///
+    /// Tries to find `count` consecutive free blocks in block group bitmaps,
+    /// starting from the block group containing `goal`. Returns the full
+    /// vector of allocated physical block numbers.  If no contiguous run
+    /// is found, falls back to allocating blocks individually.
+    ///
+    /// # Arguments
+    /// * `inode_ref` - The inode to associate blocks with.
+    /// * `goal` - Absolute block address to start the search near.
+    /// * `count` - Number of contiguous blocks to allocate (≤ MAX_MBALLOC_BLOCKS).
+    ///
+    /// # Returns
+    /// `Vec<Ext4Fsblk>` - The allocated physical block numbers (may be less than `count` if fragmented).
+    pub fn balloc_alloc_contiguous_blocks(
+        &self,
+        inode_ref: &mut Ext4InodeRef,
+        goal: Ext4Fsblk,
+        count: u32,
+    ) -> Vec<Ext4Fsblk> {
+        if count == 0 {
+            return Vec::new();
+        }
+        let super_block = &self.superblock;
+        let blocks_per_group = super_block.blocks_per_group();
+        let block_group_count = super_block.block_group_count();
+        let goal_bgid = self.get_bgid_of_block(goal);
+
+        // Try block groups starting from goal's group
+        for bg_offset in 0..block_group_count {
+            let bgid = (goal_bgid + bg_offset) % block_group_count;
+            let mut block_group = self.load_block_group_cached(super_block, bgid as usize);
+            let free_blocks = block_group.get_free_blocks_count();
+            if free_blocks < count as u64 {
+                continue;
+            }
+
+            let bmp_blk = block_group.get_block_bitmap_block(super_block) as usize;
+            let bmp = self.load_metadata_block(bmp_blk);
+            super::counters::inc_counter!(super::counters::BLOCK_BITMAP_READ);
+            let bit_cnt = blocks_per_group.min(bmp.data.len() as u32 * 8);
+
+            // Start search near the goal's position in this group
+            let search_start = if bgid == goal_bgid {
+                self.addr_to_idx_bg(goal)
+            } else {
+                0
+            };
+
+            // Find a contiguous run of `count` free blocks
+            let mut run_start: Option<u32> = None;
+            let mut run_len: u32 = 0;
+            for idx in search_start..bit_cnt {
+                if ext4_bmap_is_bit_clr(&bmp.data, idx) {
+                    if run_start.is_none() {
+                        run_start = Some(idx);
+                    }
+                    run_len += 1;
+                    if run_len >= count {
+                        let start = run_start.unwrap();
+                        // Mark blocks as used
+                        let mut data = bmp.data.clone();
+                        for i in start..start + count {
+                            ext4_bmap_bit_set(&mut data, i);
+                        }
+                        block_group.set_block_group_balloc_bitmap_csum(super_block, &data);
+                        self.store_metadata_block_dirty(bmp_blk, &data);
+                        super::counters::inc_counter!(super::counters::BLOCK_BITMAP_WRITE);
+
+                        // Update block group free count
+                        block_group.set_free_blocks_count((free_blocks - count as u64) as u32);
+                        let mut sb = *super_block;
+                        let sb_free = sb.free_blocks_count();
+                        sb.set_free_blocks_count(sb_free - count as u64);
+                        self.defer_superblock_write(&sb);
+                        self.defer_bg_write(&block_group, bgid, &sb);
+
+                        // Update inode block count
+                        let mut inode_blocks = inode_ref.inode.blocks_count();
+                        inode_blocks += (self.block_size / 512) as u64 * count as u64;
+                        inode_ref.inode.set_blocks_count(inode_blocks);
+
+                        let base = self.get_block_of_bgid(bgid) as u64 + start as u64;
+                        let mut blocks = Vec::with_capacity(count as usize);
+                        for i in 0..count {
+                            blocks.push(base + i as u64);
+                        }
+                        return blocks;
+                    }
+                } else {
+                    run_start = None;
+                    run_len = 0;
+                }
+            }
+        }
+
+        // Fallback: allocate blocks individually if no contiguous run found
+        let mut blocks = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            match self.balloc_alloc_block(inode_ref, Some(goal)) {
+                Ok(blk) => blocks.push(blk),
+                Err(_) => break,
+            }
+        }
+        blocks
+    }
+
     fn update_free_block_counts(
         &self,
         inode_ref: &mut Ext4InodeRef,

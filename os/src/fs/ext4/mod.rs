@@ -67,6 +67,10 @@ pub const EXT_INIT_MAX_LEN: u16 = 32768;
 pub const EXT_UNWRITTEN_MAX_LEN: u16 = 65535;
 /// extent可以涵盖的最大块数
 pub const EXT_MAX_BLOCKS: Ext4Lblk = u32::MAX;
+
+/// Maximum blocks to allocate in a single mballoc batch.
+/// Matches IO_CHUNK_SIZE / BLOCK_SIZE (256KB / 4KB = 64).
+pub const MAX_MBALLOC_BLOCKS: u32 = 64;
 /// 表示extent结构体的魔数
 pub const EXT4_EXTENT_MAGIC: u16 = 0xF30A;
 /// 操作成功

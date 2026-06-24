@@ -1009,6 +1009,36 @@ impl Ext4FileSystem {
         Ok(new_block)
     }
 
+    /// Deferred batch extent insertion: creates a single extent covering
+    /// `[iblock_start .. iblock_start + block_count)` → `[pblock_start .. )`.
+    ///
+    /// The caller has already allocated the physical blocks and updated
+    /// the inode's block count.  This method only inserts the extent tree
+    /// entry and adjusts the inode size if the new range extends it.
+    ///
+    /// No write_back_inode — caller (ensure_blocks_allocated → write_at)
+    /// flushes the inode once after all extents are inserted.
+    pub fn insert_inode_pblk_deferred_batch(
+        &self,
+        inode_ref: &mut Ext4InodeRef,
+        iblock_start: u32,
+        pblock_start: Ext4Fsblk,
+        block_count: u32,
+    ) -> Result<(), isize> {
+        let mut newex: Ext4Extent = Ext4Extent::default();
+        newex.first_block = iblock_start;
+        newex.store_pblock(pblock_start);
+        newex.block_count = block_count as u16;
+        self.insert_extent(inode_ref, &mut newex)?;
+
+        let inode_size = inode_ref.inode.size();
+        let required_size = (iblock_start as u64 + block_count as u64) * self.block_size as u64;
+        if required_size > inode_size {
+            inode_ref.inode.set_size(required_size);
+        }
+        Ok(())
+    }
+
     /// Insert a new block at a specific logical block index, from a starting bgid.
     pub fn insert_inode_pblk_from(
         &self,

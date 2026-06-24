@@ -7,6 +7,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::block_group::{Block, Ext4BlockGroup};
 use super::direntry::{Ext4DirEntry, Ext4DirSearchResult};
+use super::extent::Ext4Extent;
 use super::meta_cache::MetaBlockCache;
 use super::path::path_check;
 use super::superblock::SUPERBLOCK_OFFSET;
@@ -446,6 +447,7 @@ impl Ext4FileSystem {
         Ok(dir_search_result.dentry.inode)
     }
     /// 确保指定逻辑块范围都已分配物理块（nodelalloc 策略：写入前分配）
+    /// 使用多块分配（mballoc）批量分配连续的物理块，减少extent碎片化。
     /// 返回分配了块的逻辑块号列表（用于日志/调试）
     pub fn ensure_blocks_allocated(
         &self,
@@ -454,14 +456,81 @@ impl Ext4FileSystem {
         end_lblock: u32,
     ) -> Result<Vec<u32>, isize> {
         let mut allocated = Vec::new();
+        let mut l = start_lblock;
 
-        // Find consecutive hole runs and batch-allocate them.
-        for lblock in start_lblock..end_lblock {
-            if self.get_pblock_idx(inode_ref, lblock).is_ok() {
+        const MBALLOC_BATCH: u32 = MAX_MBALLOC_BLOCKS;
+
+        while l < end_lblock {
+            // Skip already-mapped blocks
+            if self.get_pblock_idx(inode_ref, l).is_ok() {
+                l += 1;
                 continue;
             }
-            self.insert_inode_pblk_deferred(inode_ref, lblock)?;
-            allocated.push(lblock);
+
+            // Count consecutive unmapped logical blocks (the "hole run")
+            let run_start = l;
+            let mut run_len: u32 = 0;
+            while l < end_lblock
+                && run_len < MBALLOC_BATCH
+                && self.get_pblock_idx(inode_ref, l).is_err()
+            {
+                l += 1;
+                run_len += 1;
+            }
+
+            // Determine the goal physical block: use the block after the
+            // last mapped extent before run_start (if any) to encourage
+            // physical-logical locality.
+            let goal = if run_start > 0 {
+                match self.get_pblock_idx(inode_ref, run_start - 1) {
+                    Ok(p) => p + 1,
+                    Err(_) => 0,
+                }
+            } else {
+                0
+            };
+
+            // Try contiguous allocation first; falls back to individual
+            // blocks when no contiguous run is available.
+            let blocks = self.balloc_alloc_contiguous_blocks(inode_ref, goal, run_len);
+            if blocks.is_empty() {
+                return Err(Errno::ENOSPC as isize);
+            }
+
+            // Insert extents: group consecutive physical blocks into
+            // multi-block extents, single blocks get block_count=1.
+            let mut p: usize = 0;
+            while p < blocks.len() {
+                let pblock = blocks[p];
+                let mut count: usize = 1;
+                while p + count < blocks.len()
+                    && blocks[p + count] == pblock + count as u64
+                {
+                    count += 1;
+                }
+                if count > 1 {
+                    self.insert_inode_pblk_deferred_batch(
+                        inode_ref,
+                        run_start + p as u32,
+                        pblock,
+                        count as u32,
+                    )?;
+                } else {
+                    let mut newex: Ext4Extent = Ext4Extent::default();
+                    newex.first_block = run_start + p as u32;
+                    newex.store_pblock(pblock);
+                    newex.block_count = 1;
+                    self.insert_extent(inode_ref, &mut newex)?;
+                    let inode_size = inode_ref.inode.size();
+                    let required_size =
+                        (run_start as u64 + p as u64 + 1) * self.block_size as u64;
+                    if required_size > inode_size {
+                        inode_ref.inode.set_size(required_size);
+                    }
+                }
+                allocated.push(run_start + p as u32);
+                p += count;
+            }
         }
         Ok(allocated)
     }
@@ -903,8 +972,9 @@ impl IndexNode for layout::Ext4OSInode {
         }
 
         // Write data through PageCache; physical blocks are already mapped.
+        // Pass old_size so pages beyond old EOF skip unnecessary backend reads.
         let pc = self.get_new_page_cache().ok_or(SyscallErr::EIO)?;
-        pc.write(offset, &buf[..write_len])?;
+        pc.write(offset, &buf[..write_len], Some(old_size))?;
 
         Ok(write_len)
     }
@@ -953,8 +1023,9 @@ impl IndexNode for layout::Ext4OSInode {
         }
 
         // Write data through PageCache; physical blocks are already mapped.
+        // Pass old_size so pages beyond old EOF skip unnecessary backend reads.
         let pc = self.get_new_page_cache().ok_or(SyscallErr::EIO)?;
-        pc.write_user(offset, len, src)?;
+        pc.write_user(offset, len, src, Some(old_size))?;
 
         Ok(len)
     }

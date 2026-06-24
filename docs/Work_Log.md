@@ -4,6 +4,44 @@
 
 ## 2026-06-24
 
+### perf(fs): PageCache partial-write validity tracking — 跳过 EOF 外新页的不必要后端读取
+
+**涉及文件：**
+- `os/src/fs/page_cache.rs` — PageEntry 新增 `valid_mask: AtomicU8` 字段追踪 512B segment 有效性；新增 `mask_for_range`/`ensure_fully_valid`/`PageEntry::new_partial`/`mark_valid` 辅助函数；重写 `get_or_create_entry` 支持 `beyond_eof` 零填充路径；`get_page_for_write_populate` 接受 `old_file_size` + `full_overwrite` 参数；`write`/`write_user` 接受 `old_file_size: Option<usize>` 并在写入后更新 valid_mask；`read`/`read_user`/`writeback`/`frame_for_read`/`frame_for_write` 在访问页面前调用 `ensure_fully_valid`
+- `os/src/fs/ext4/ext4fs.rs` — `write_at`/`write_at_user` 传递 `old_size` 给 `pc.write`/`pc.write_user`，使超出旧 EOF 的页面跳过 backend read_page
+- `os/src/fs/tmpfs/mod.rs` — `pc.write`/`pc.write_user` 调用更新为 `None`（tmpfs 无需 beyond-eof 优化）
+- `os/src/fs/fat32/fat_inode.rs` — `pc.write` 调用更新为 `None`
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：**
+- VALID_SEG_SIZE=512, VALID_SEG_COUNT=8 (PAGE_SIZE=4096/512), VALID_ALL=0xFF
+- 优化效果：iozone 1KB 顺序写入场景，页内 offset=0 的首次写入不再触发 `record_pc_miss()`（~1.8M cycles），4 次 1KB 写入填充全页后 valid_mask=0xFF，无需任何后端读取
+- `ensure_fully_valid` 快速路径：`is_fully_valid()` 检查 AtomicU8 的 Acquire load，开销可忽略
+- 回退策略：超出 EOF 页面用 `PageEntry::new_partial`（valid_mask=0），后续 ensure_fully_valid 从后端逐 segment 合并缺失数据
+- 写回路径在调用 `backend.write_page` 前调用 `ensure_fully_valid`，确保部分写入页面不会覆盖磁盘上已有的旧数据段
+
+### feat(fs): ext4 多块分配 (mballoc) — 批量分配连续物理块减少 extent 碎片化
+
+**涉及文件：**
+- `os/src/fs/ext4/mod.rs` — 新增 `MAX_MBALLOC_BLOCKS = 64` 常量
+- `os/src/fs/ext4/balloc.rs` — 新增 `balloc_alloc_contiguous_blocks()` 扫描块组位图分配 N 个连续物理块，带 goal 提示和单块回退
+- `os/src/fs/ext4/ext4_inode.rs` — 新增 `insert_inode_pblk_deferred_batch()` 插入 `block_count > 1` 的 extent
+- `os/src/fs/ext4/ext4fs.rs` — 重写 `ensure_blocks_allocated()`：扫描连续空洞→批量分配→合并物理连续块为多块 extent
+
+**验证：**
+- `make rv64-kernel-build-only` ⚠️ (ext4 代码编译通过，5 个预存 page_cache.rs 错误与本修改无关)
+- `make la64-kernel-build-only` ⚠️ (同上，ext4 零错误)
+
+**备注：**
+- nodelalloc 语义不变：写入前分配，无延迟分配
+- extent 树结构不变，仅 `block_count` 字段支持多块（已有插入/合并逻辑）
+- `MAX_MBALLOC_BLOCKS = IO_CHUNK_SIZE / BLOCK_SZ = 256KB / 4KB = 64`，匹配 writeback 批处理上限
+- 目标效果：`blk_vwrite_secs/req` 从 ~68.6 sectors (8.6 页) 向 64 页靠近
+- 回退策略：无连续空闲块时回退到 `balloc_alloc_block()` 逐块分配
+
 ### perf(fs): VirtIO 512B→4KB 合并 + 脏页回写批处理 — iozone 写吞吐 2.1x 提升
 
 **涉及文件：**
