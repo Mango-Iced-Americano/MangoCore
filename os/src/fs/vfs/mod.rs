@@ -237,7 +237,7 @@ pub fn generate_inode_id() -> InodeId {
 
 /// 文件私有数据枚举
 /// 对标 DragonOS 的 `FilePrivateData`，用于文件系统特定的私有数据
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum FilePrivateData {
     /// 未使用 / 默认
     Unused,
@@ -259,6 +259,27 @@ pub enum FilePrivateData {
     ProcText {
         content: Arc<String>,
     },
+    /// Sequential read-ahead state (per-open-file description).
+    /// Used by PageCache to detect sequential reads and batch-prefetch pages.
+    Readahead {
+        ra_state: alloc::sync::Arc<spin::Mutex<crate::fs::page_cache::RaState>>,
+    },
+}
+
+impl Clone for FilePrivateData {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Unused => Self::Unused,
+            Self::Memfd { seals } => Self::Memfd { seals: seals.clone() },
+            Self::Pipe => Self::Pipe,
+            Self::SocketCreate => Self::SocketCreate,
+            Self::PtyMaster { inner } => Self::PtyMaster { inner: inner.clone() },
+            Self::ProcText { content } => Self::ProcText { content: content.clone() },
+            Self::Readahead { ra_state } => {
+                Self::Readahead { ra_state: ra_state.clone() }
+            }
+        }
+    }
 }
 
 impl Default for FilePrivateData {

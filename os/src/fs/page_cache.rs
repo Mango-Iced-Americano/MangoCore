@@ -31,6 +31,24 @@ const VALID_SEG_COUNT: usize = PAGE_SIZE >> VALID_SEG_SHIFT;
 /// 所有 segment 均有效的掩码（8 segments = 0xFF）
 const VALID_ALL: u8 = 0xFF;
 
+/// 根据页面在文件中的位置计算初始 valid_mask。
+/// 页面超出旧 EOF → VALID_ALL（零填充即有效数据）；
+/// 页面跨越 EOF → 仅超出部分为有效零填充；
+/// 页面在旧文件内 → 0（数据尚未从后端加载）。
+fn initial_valid_mask(page_index: usize, old_file_size: usize) -> u8 {
+    let page_start = page_index * PAGE_SIZE;
+    if page_start >= old_file_size {
+        return VALID_ALL; // entirely beyond EOF → all zeros = valid
+    }
+    let page_end = page_start + PAGE_SIZE;
+    if old_file_size < page_end {
+        // page spans EOF: bytes beyond EOF are valid zeros
+        let zero_start = old_file_size - page_start;
+        return mask_for_range(zero_start, PAGE_SIZE - zero_start);
+    }
+    0 // existing file page: old data not loaded yet
+}
+
 /// 计算 [page_offset, page_offset+len) 区间覆盖的 segment 位掩码
 /// 部分覆盖的 segment 也会被标记为有效
 fn mask_for_range(page_offset: usize, len: usize) -> u8 {
@@ -119,6 +137,40 @@ pub enum PageState {
     Error = 4,
 }
 
+// ── RaState (read-ahead state) ───────────────────────────────────────────
+
+/// 顺序读预取状态，对标 Linux `file_ra_state`
+///
+/// 每次 cache miss 时更新；检测到顺序访问后 ramps up 预取窗口。
+/// 当前为 per-inode（存储在 FilePrivateData 中，通过 read_at 路径传入）。
+#[derive(Debug, Clone)]
+pub struct RaState {
+    /// 上次访问的最后一页索引
+    pub prev_page: usize,
+    /// 当前顺序读预取窗口大小（页数）
+    pub ra_size: usize,
+}
+
+/// 最小预取页数（冷启动窗口）
+pub const MIN_RA_PAGES: usize = 4;
+/// 最大预取页数（= IO_CHUNK_SIZE / PAGE_SIZE = 64）
+pub const MAX_RA_PAGES: usize = crate::hal::IO_CHUNK_SIZE / PAGE_SIZE;
+
+impl RaState {
+    pub fn new() -> Self {
+        RaState {
+            prev_page: 0,
+            ra_size: MIN_RA_PAGES,
+        }
+    }
+}
+
+impl Default for RaState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── PageCacheBackend ─────────────────────────────────────────────────────
 
 /// 页面缓存后端 trait
@@ -138,6 +190,20 @@ pub trait PageCacheBackend: Send + Sync {
             written += self.write_page(start_index + i, page)?;
         }
         Ok(written)
+    }
+
+    /// 批量读取连续页面：start_index..start_index+pages.len()
+    /// pages 为可变切片（每个元素长度 = PAGE_SIZE），从后端批量读取填充。
+    /// 默认回退为逐页调用 read_page；支持合并读取的后端（如 EXT4）应覆盖此方法
+    fn read_pages(
+        &self,
+        start_index: usize,
+        pages: &mut [&mut [u8]],
+    ) -> Result<usize, SyscallErr> {
+        for (i, page) in pages.iter_mut().enumerate() {
+            self.read_page(start_index + i, *page)?;
+        }
+        Ok(pages.len() * PAGE_SIZE)
     }
 
     /// 返回后端的页数
@@ -167,13 +233,13 @@ impl PageEntry {
         }
     }
 
-    /// 创建一个部分有效的页面条目（valid_mask=0，跳过后端读取）
-    /// 用于页面超出旧 EOF 的场景
-    fn new_partial(page: Arc<FrameTracker>) -> Self {
+    /// 创建一个带指定 valid_mask 的页面条目（跳过后端读取）
+    /// 用于页面超出旧 EOF 的场景：valid_mask=VALID_ALL 表示全零页即有效
+    fn new_with_valid_mask(page: Arc<FrameTracker>, valid_mask: u8) -> Self {
         PageEntry {
             page,
             state: AtomicU8::new(PageState::UpToDate as u8),
-            valid_mask: AtomicU8::new(0),
+            valid_mask: AtomicU8::new(valid_mask),
         }
     }
 
@@ -207,6 +273,17 @@ impl PageEntry {
         if mask != 0 {
             self.valid_mask.fetch_or(mask, Ordering::Release);
         }
+    }
+
+    /// 标记写入范围内覆盖的 segment 为有效，并返回此操作后全部 segment 是否均已有效。
+    /// 用于检测 sequential writes 逐步填满页面的场景。
+    fn mark_valid_and_check_full(&self, page_offset: usize, len: usize) -> bool {
+        let mask = mask_for_range(page_offset, len);
+        if mask == 0 {
+            return self.is_fully_valid();
+        }
+        let old = self.valid_mask.fetch_or(mask, Ordering::Release);
+        (old | mask) == VALID_ALL
     }
 
     /// 标记整个页面为有效（用于 ensure_fully_valid 完成后）
@@ -420,13 +497,19 @@ impl PageCache {
 
     /// 获取或创建一个页面条目
     /// `populate`: 是否从后端读取数据填充
-    /// `beyond_eof`: 页面是否完全超出旧 EOF（用于跳过不必要的后端读取）
+    /// `old_file_size`: 旧文件大小，用于计算初始 valid_mask
+    ///   - 页面超出旧 EOF → valid_mask=VALID_ALL，不 populate
+    ///   - 页面跨越 EOF → 超出部分 valid_mask 标记，populate 后 OR 入
+    ///   - 页面完全在文件中 → valid_mask=0，populate 从后端加载
     fn get_or_create_entry(
         &self,
         page_index: usize,
         populate: bool,
-        beyond_eof: bool,
+        old_file_size: Option<usize>,
     ) -> Result<Arc<PageEntry>, SyscallErr> {
+        let init_mask = old_file_size.map_or(0, |s| initial_valid_mask(page_index, s));
+        let beyond_eof = init_mask == VALID_ALL;
+
         let mut entries = self.entries.lock();
 
         // 扩展 entries 数组
@@ -453,12 +536,18 @@ impl PageCache {
                     return Err(e);
                 }
             }
+            // 页面跨越 EOF：populate 从后端读取文件内的数据，超出部分为零填充
+            // 需要 OR 入超出部分的初始 valid_mask
+            if init_mask != 0 {
+                entry.valid_mask.fetch_or(init_mask, Ordering::Release);
+            }
             entry
         } else if beyond_eof {
-            // 页面超出旧 EOF：零填充（frame_alloc 已零填充），跳过 backend read
-            Arc::new(PageEntry::new_partial(frame))
+            // 页面超出旧 EOF：零填充（frame_alloc 已零填充），valid_mask=VALID_ALL
+            // 跳过 backend read — 所有字节的正确文件可见数据就是零
+            Arc::new(PageEntry::new_with_valid_mask(frame, VALID_ALL))
         } else {
-            // 整页覆写（populate=false）：跳过 backend read，后续写入会覆盖全部内容
+            // 整页覆写（populate=false）：跳过 backend read，后续写入覆盖全部内容
             Arc::new(PageEntry::new(frame, PageState::UpToDate))
         };
 
@@ -473,8 +562,8 @@ impl PageCache {
 
     /// 获取页面用于读取
     pub fn get_page_for_read(&self, page_index: usize) -> Result<Arc<PageEntry>, SyscallErr> {
-        // 读取路径：始终 popupate（不是 beyond_eof），后续 ensure_fully_valid 补齐空洞
-        self.get_or_create_entry(page_index, true, false)
+        // 读取路径：始终 populate（old_file_size=None → 全量从后端加载），后续 ensure_fully_valid 补齐空洞
+        self.get_or_create_entry(page_index, true, None)
     }
 
     /// 获取页面用于写入（默认行为：部分写时 populate）
@@ -485,10 +574,10 @@ impl PageCache {
     /// 获取页面用于写入，可选择是否从后端 populate。
     /// `old_file_size`：旧文件大小。对于 page_index * PAGE_SIZE >= old_file_size
     /// 的页面（完全超出旧 EOF），跳过 backend read_page 以减少 I/O，
-    /// 帧内存保持零填充。
+    /// 帧内存保持零填充，初始 valid_mask=VALID_ALL。
     /// `full_overwrite`：该页是否被完全覆盖写入（可跳过 populate）。
     /// - `None` + `false`: 当前 populate 逻辑（部分写入时从后端读取）
-    /// - `Some(size)` + `false`: 页面超出 EOF 时，zero-fill + valid_mask=0
+    /// - `Some(size)` + `false`: 页面超出 EOF 时，zero-fill + valid_mask=VALID_ALL
     /// - `true`: 整页覆写，跳过 populate
     pub fn get_page_for_write_populate(
         &self,
@@ -500,7 +589,7 @@ impl PageCache {
             .map(|s| page_index * PAGE_SIZE >= s)
             .unwrap_or(false);
         let populate = !full_overwrite && !beyond_eof;
-        let entry = self.get_or_create_entry(page_index, populate, beyond_eof)?;
+        let entry = self.get_or_create_entry(page_index, populate, old_file_size)?;
         let mut inner = self.inner.lock();
         inner.mark_dirty(page_index);
         if entry.state() == PageState::UpToDate {
@@ -513,7 +602,7 @@ impl PageCache {
     /// 返回 PageCache 中的 `Arc<FrameTracker>`，不标记脏。
     /// 只允许 UpToDate 或 Dirty 状态的页帧。
     pub fn frame_for_read(&self, page_index: usize) -> Result<Arc<FrameTracker>, SyscallErr> {
-        let entry = self.get_or_create_entry(page_index, true, false)?;
+        let entry = self.get_or_create_entry(page_index, true, None)?;
         // 保证部分写入的页面在映射前所有 segment 均有效
         self.ensure_fully_valid(page_index)?;
         let state = entry.state();
@@ -528,7 +617,7 @@ impl PageCache {
     /// 返回 PageCache 中的 `Arc<FrameTracker>`，自动标记脏页。
     /// 只允许 UpToDate 或 Dirty 状态的页帧。
     pub fn frame_for_write(&self, page_index: usize) -> Result<Arc<FrameTracker>, SyscallErr> {
-        let entry = self.get_or_create_entry(page_index, true, false)?;
+        let entry = self.get_or_create_entry(page_index, true, None)?;
         // 保证部分写入的页面在映射前所有 segment 均有效
         self.ensure_fully_valid(page_index)?;
         let state = entry.state();
@@ -716,7 +805,10 @@ impl PageCache {
             let entry = self.get_page_for_write_populate(start_page, old_file_size, full_page_overwrite)?;
             let dst = entry.as_slice_mut();
             dst[page_offset..page_offset + sub_len].copy_from_slice(&buf[..sub_len]);
-            entry.mark_valid(page_offset, sub_len);
+            let became_full = entry.mark_valid_and_check_full(page_offset, sub_len);
+            if became_full && !full_page_overwrite {
+                perf::record_pc_write_eventually_full();
+            }
             perf::record_pc_write(1, full_page_overwrite, perf::perf_time_now().wrapping_sub(_t0));
             return Ok(sub_len);
         }
@@ -725,6 +817,7 @@ impl PageCache {
             entry: Arc<PageEntry>,
             page_offset: usize,
             sub_len: usize,
+            full_page_overwrite: bool,
         }
 
         let mut copies: Vec<CopyItem> = Vec::new();
@@ -752,6 +845,7 @@ impl PageCache {
                 entry,
                 page_offset,
                 sub_len,
+                full_page_overwrite,
             });
             total_written += sub_len;
         }
@@ -763,7 +857,10 @@ impl PageCache {
             let dst_start = item.page_offset;
             dst[dst_start..dst_start + item.sub_len]
                 .copy_from_slice(&buf[src_offset..src_offset + item.sub_len]);
-            item.entry.mark_valid(item.page_offset, item.sub_len);
+            let became_full = item.entry.mark_valid_and_check_full(item.page_offset, item.sub_len);
+            if became_full && !item.full_page_overwrite {
+                perf::record_pc_write_eventually_full();
+            }
             src_offset += item.sub_len;
         }
 
@@ -870,7 +967,10 @@ impl PageCache {
             let entry = self.get_page_for_write_populate(start_page, old_file_size, full_page_overwrite)?;
             let dst = entry.as_slice_mut();
             src.read_at(0, &mut dst[page_offset..page_offset + sub_len]);
-            entry.mark_valid(page_offset, sub_len);
+            let became_full = entry.mark_valid_and_check_full(page_offset, sub_len);
+            if became_full && !full_page_overwrite {
+                perf::record_pc_write_eventually_full();
+            }
             return Ok(sub_len);
         }
 
@@ -878,6 +978,7 @@ impl PageCache {
             entry: Arc<PageEntry>,
             page_offset: usize,
             sub_len: usize,
+            full_page_overwrite: bool,
         }
 
         let mut copies: Vec<CopyItem> = Vec::new();
@@ -901,6 +1002,7 @@ impl PageCache {
                 entry,
                 page_offset: write_start - page_start,
                 sub_len,
+                full_page_overwrite,
             });
             total_written += sub_len;
         }
@@ -911,11 +1013,153 @@ impl PageCache {
             let dst = item.entry.as_slice_mut();
             let dst_start = item.page_offset;
             src.read_at(src_offset, &mut dst[dst_start..dst_start + item.sub_len]);
-            item.entry.mark_valid(item.page_offset, item.sub_len);
+            let became_full = item.entry.mark_valid_and_check_full(item.page_offset, item.sub_len);
+            if became_full && !item.full_page_overwrite {
+                perf::record_pc_write_eventually_full();
+            }
             src_offset += item.sub_len;
         }
 
         Ok(total_written)
+    }
+
+    // ── 顺序读预取 (readahead) ─────────────────────────────────────────
+
+    /// 同步批量预取页面：分配条目并通过 backend.read_pages() 批量从后端读取。
+    ///
+    /// 对 [start_page .. start_page+count) 中尚未缓存的页面：
+    /// 1. 分配帧并创建 Loading 状态的 PageEntry
+    /// 2. 通过 backend.read_pages() 批量读取
+    /// 3. 标记为 UpToDate 并插入 entries
+    ///
+    /// 超出后端 npages() 的页面会被零填充（sparse file hole）。
+    pub fn sync_batch_read_pages(
+        &self,
+        start_page: usize,
+        count: usize,
+    ) -> Result<usize, SyscallErr> {
+        if count == 0 {
+            return Ok(0);
+        }
+
+        let backend = match self.backend() {
+            Some(b) => b,
+            None => return Ok(0),
+        };
+        let backend_npages = backend.npages();
+
+        // Phase 1: 收集需要新建的页面，已缓存的跳过
+        struct PendingPage {
+            index: usize,       // absolute page index
+            entry: Arc<PageEntry>,
+        }
+        let mut pending: Vec<PendingPage> = Vec::new();
+        {
+            let entries = self.entries.lock();
+            for page_index in start_page..start_page + count {
+                // 跳过已缓存的页面
+                if page_index < entries.len() && entries[page_index].is_some() {
+                    continue;
+                }
+                // 分配新帧（frame_alloc 返回零填充页）
+                let frame = match frame_alloc() {
+                    Some(f) => f,
+                    None => return Err(SyscallErr::ENOMEM),
+                };
+                let entry = Arc::new(PageEntry::new(frame, PageState::Loading));
+                pending.push(PendingPage {
+                    index: page_index,
+                    entry,
+                });
+            }
+        }
+
+        if pending.is_empty() {
+            return Ok(0);
+        }
+
+        // Phase 2: 构建页缓冲区并调用后端批量读取
+        // 仅对在 backend 范围内的页面调用 read_pages
+        let mut page_bufs: Vec<&mut [u8]> = Vec::new();
+        let mut page_indices: Vec<usize> = Vec::new();
+        let mut first_page_idx: Option<usize> = None;
+
+        for p in &pending {
+            if p.index < backend_npages {
+                if first_page_idx.is_none() {
+                    first_page_idx = Some(p.index);
+                }
+                page_indices.push(p.index);
+                // SAFETY: 我们拥有这些帧的唯一可变引用
+                unsafe {
+                    page_bufs.push(&mut *(p.entry.as_slice_mut() as *mut [u8]));
+                }
+            }
+        }
+
+        if !page_bufs.is_empty() {
+            let start = first_page_idx.unwrap();
+            // 确保索引连续（调用者保证）
+            backend.read_pages(start, &mut page_bufs)?;
+        }
+
+        // Phase 3: 零填充超出 backend npages 的页面（sparse file holes）
+        for p in &pending {
+            if p.index >= backend_npages {
+                p.entry.as_slice_mut().fill(0);
+            }
+        }
+
+        // Phase 4: 标记 UpToDate 并插入到 entries
+        {
+            let mut entries = self.entries.lock();
+            let mut inner = self.inner.lock();
+            for p in &pending {
+                p.entry.set_state(PageState::UpToDate);
+                // 扩展 entries 数组
+                while entries.len() <= p.index {
+                    entries.push(None);
+                }
+                entries[p.index] = Some(p.entry.clone());
+                inner.pages.insert(p.index);
+            }
+        }
+
+        Ok(count * PAGE_SIZE)
+    }
+
+    /// 检查顺序访问模式并预取后续页面。
+    ///
+    /// 对标 Linux `mm/readahead.c::page_cache_sync_ra()` 的 on-demand 预取：
+    /// - 检测顺序访问（page_index == prev_page+1 或 page_index == prev_page）
+    /// - 顺序访问时指数增加窗口：ra_size = min(ra_size * 2, MAX_RA_PAGES)
+    /// - 非顺序访问时重置窗口：ra_size = MIN_RA_PAGES
+    /// - 更新 prev_page 记录
+    /// - 批量预取 ahead pages
+    pub fn maybe_readahead(
+        &self,
+        page_index: usize,
+        ra: &mut RaState,
+        req_pages: usize,
+    ) {
+        let sequential =
+            page_index == ra.prev_page + 1 || page_index == ra.prev_page;
+
+        if !sequential {
+            ra.ra_size = MIN_RA_PAGES;
+        } else {
+            ra.ra_size = (ra.ra_size * 2).min(MAX_RA_PAGES);
+        }
+        ra.prev_page = page_index + req_pages.saturating_sub(1);
+
+        // 预取 ahead pages
+        let ahead_start = page_index + req_pages;
+        let backend_npages = self.backend().map(|b| b.npages()).unwrap_or(0);
+        let ahead_end = (ahead_start + ra.ra_size).min(backend_npages);
+
+        if ahead_end > ahead_start {
+            let _ = self.sync_batch_read_pages(ahead_start, ahead_end - ahead_start);
+        }
     }
 
     // ── 脏页管理 ────────────────────────────────────────────────────
@@ -1573,6 +1817,97 @@ impl PageCacheBackend for Ext4PageCacheBackend {
                 crate::fs::ext4::counters::inc_counter!(
                     crate::fs::ext4::counters::BLOCK_WRITE_TOTAL
                 );
+            }
+        }
+
+        Ok(pages.len() * crate::config::PAGE_SIZE)
+    }
+
+    fn read_pages(
+        &self,
+        start_index: usize,
+        pages: &mut [&mut [u8]],
+    ) -> Result<usize, SyscallErr> {
+        // 只有 block_size == PAGE_SIZE 时才能做物理块级的批量合并
+        if self.blocks_per_page != 1 {
+            let mut total = 0;
+            for (i, page) in pages.iter_mut().enumerate() {
+                total += self.read_page(start_index + i, *page)?;
+            }
+            return Ok(total);
+        }
+
+        let fs = self.ext4fs.upgrade().ok_or(SyscallErr::EIO)?;
+        let block_sz = self.block_size;
+
+        // 第一阶段：解析所有物理块号，区分映射块和空洞
+        // block_map: (page_index_in_batch, physical_block_option)
+        let mut block_map: Vec<(usize, Option<usize>)> = Vec::new();
+        for (i, page) in pages.iter().enumerate() {
+            let page_index = start_index + i;
+            if page.len() < crate::config::PAGE_SIZE {
+                return Err(SyscallErr::ENOBUFS);
+            }
+            let pblock = self.block_id_for_offset(page_index, 0);
+            block_map.push((i, pblock));
+        }
+
+        // 第二阶段：将物理连续块分组为 run，批量读取
+        // 只对映射块做批量读取；空洞单独零填充
+        let mut idx = 0;
+        let blk = &fs.block_device;
+        while idx < block_map.len() {
+            // 跳过空洞（零填充在循环外统一处理）
+            if block_map[idx].1.is_none() {
+                idx += 1;
+                continue;
+            }
+
+            // 找到连续物理块的 run
+            let first_pblock = block_map[idx].1.unwrap();
+            let run_start = idx;
+            let mut run_len = 1;
+            let mut expected_pblock = first_pblock + 1;
+            idx += 1;
+            while idx < block_map.len() {
+                match block_map[idx].1 {
+                    Some(pb) if pb == expected_pblock => {
+                        run_len += 1;
+                        expected_pblock = pb + 1;
+                        idx += 1;
+                    }
+                    _ => break,
+                }
+            }
+
+            // 批量读取物理连续块到 staging buffer
+            let staging_size = run_len * block_sz;
+            let mut staging: Vec<u8> = alloc::vec![0u8; staging_size];
+            blk.read_block(first_pblock, &mut staging);
+
+            // 将 staging buffer 中的数据拷贝到各页面
+            for j in 0..run_len {
+                let page_idx = block_map[run_start + j].0;
+                let src_start = j * block_sz;
+                pages[page_idx][..block_sz]
+                    .copy_from_slice(&staging[src_start..src_start + block_sz]);
+            }
+
+            // 更新计数器
+            for _ in 0..run_len {
+                crate::fs::ext4::counters::inc_counter!(
+                    crate::fs::ext4::counters::DATA_BLOCK_READ
+                );
+                crate::fs::ext4::counters::inc_counter!(
+                    crate::fs::ext4::counters::BLOCK_READ_TOTAL
+                );
+            }
+        }
+
+        // 第三阶段：零填充所有空洞页面
+        for (page_idx, pblock_opt) in &block_map {
+            if pblock_opt.is_none() {
+                pages[*page_idx].fill(0);
             }
         }
 

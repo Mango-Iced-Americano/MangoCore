@@ -4,6 +4,49 @@
 
 ## 2026-06-24
 
+### fix(fs): PageEntry valid_mask semantics — beyond-EOF pages VALID_ALL + eventually-full detection
+
+**涉及文件：**
+- `os/src/fs/page_cache.rs` — 新增 `initial_valid_mask()` 函数（pages beyond EOF → VALID_ALL, pages spanning EOF → partial mask）；`PageEntry::new_partial` 重命名为 `new_with_valid_mask(page, mask)`；新增 `mark_valid_and_check_full()` 返回 page 刚变为完全有效；`get_or_create_entry` 接受 `old_file_size: Option<usize>` 替代 `beyond_eof: bool` 并依据 `initial_valid_mask` 决定初始 valid_mask（beyond-eof pages 从 backend read 免于调用；spanning pages populate 后 OR 入初始 mask）；`write()`/`write_user()` 单页与多页路径使用 `mark_valid_and_check_full`，当 sequential writes 填满页面时调用 `record_pc_write_eventually_full()`；所有 `get_or_create_entry` 调用点已更新新签名
+- `os/src/task/perf.rs` — 新增 `PC_WRITE_EVENTUALLY_FULL` 计数器及 `record_pc_write_eventually_full()` recorder（perf_stats 路径），非 perf_stats 零值 stub 静态变量；`reset_all_counters` 包含新计数器
+- `os/src/fs/sysfs/files/diag.rs` — 导出 `pc_write_eventually_full` 到 `/sys/kernel/stats/pagecache`
+- `os/src/fs/vfs/mod.rs` — `FilePrivateData` 手动实现 `Clone`（因 `spin::Mutex` 0.7 不支持 derive Clone）
+- `os/src/task/perf.rs` — `PC_WRITE_EVENTUALLY_FULL` 非 perf_stats stub 静态变量
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make rv64-kernel-build-only EXTRA_FEATURES="perf_diag"` ✅
+- `make la64-kernel-build-only` ✅
+- `make la64-kernel-build-only EXTRA_FEATURES="perf_diag"` ✅
+
+**备注：**
+- beyond-EOF pages 现在创建时 valid_mask=VALID_ALL，跳过 `ensure_fully_valid` 不必要的 backend read（zero-fill page 无需从磁盘读取）
+- `ensure_fully_valid` fast path（`is_fully_valid()` → `VALID_ALL` 检查）立即可用，无需任何 backend I/O
+- `PC_WRITE_EVENTUALLY_FULL` 计数当 sequential writes（如 iozone 4×1KB）逐步填满页面时递增——区别于 `PC_WRITE_OVERWRITE`（单次全页写入）
+- `initial_valid_mask` 正确三类场景：页超出旧 EOF（VALID_ALL）、跨 EOF（partial mask——先行 populate 后 OR 入）、已存文件页（0——populate 从 backend）
+- 手动实现 `Clone` for `FilePrivateData` 因 `spin::Mutex` v0.7 不支持 `#[derive(Clone)]`（`Readahead` 变体含 `ra_state: spin::Mutex<RaState>`）
+
+### feat(fs): PageCache 顺序读预取 (read-ahead) — 批量 read_pages 后端支持
+
+**涉及文件：**
+- `os/src/fs/page_cache.rs` — PageCacheBackend trait 新增 `read_pages()` 默认方法（逐页回退）；新增 `RaState` 结构体（`prev_page`/`ra_size`）及常量 `MIN_RA_PAGES=4`、`MAX_RA_PAGES=64`；新增 `sync_batch_read_pages()` 方法（分配帧→back end 批量读取→标记 UpToDate）；新增 `maybe_readahead()` 方法（顺序检测→指数窗口增长→批量 prefetch）；Ext4PageCacheBackend 新增 `read_pages()` override（物理连续块分组 staging → 批量 block_device 读取 → 零填充空洞）
+- `os/src/fs/vfs/mod.rs` — FilePrivateData 新增 `Readahead { ra_state: Arc<Mutex<RaState>> }` 变体，手动实现 Clone（Arc 共享）
+- `os/src/fs/vfs/file.rs` — `File::new()`/`new_with_metadata()`/`new_without_open()`/`new_created()` 对 `FileType::File && flags.is_readable()` 初始化 `FilePrivateData::Readahead`
+- `os/src/fs/ext4/ext4fs.rs` — `read_at()` 提取 `_data` 中的 RaState，调用 `pc.maybe_readahead()` 触发顺序预取
+
+**验证：**
+- `make rv64-kernel-build-only EXTRA_FEATURES="perf_diag"` ✅
+- `make la64-kernel-build-only EXTRA_FEATURES="perf_diag"` ✅
+
+**备注：**
+- 对标 Linux 6.6 `mm/readahead.c::page_cache_sync_ra()` 的 on-demand 预取 + DragonOS `PageCacheManager::prefetch_page()`
+- 同步批量预取（非异步）：cache miss 时在 read_at 路径中批量加载当前请求页 + ahead 窗口页
+- 顺序检测：`page_index == prev_page+1` 或 `page_index == prev_page`；顺序访问时指数增长（ra_size × 2，上限 MAX_RA_PAGES=64），非顺序时重置到 MIN_RA_PAGES=4
+- `read_pages` 批量读取优化（Ext4 后端）：对 `block_size == PAGE_SIZE` 文件，将逻辑连续页面映射为物理连续块 run，通过单次 `block_device.read_block()` 批量读取，减少 virtio 请求数
+- 空洞（sparse file hole）零填充：block_id_for_offset 返回 None 的页面自动填零
+- RaState 为 per-open-file 粒度（通过 FilePrivateData），多次 open 同一文件各独立追踪
+- read_at_user 路径暂未接入（IndexNode trait 的 read_at_user 不接收 FilePrivateData）
+
 ### perf(fs): PageCache partial-write validity tracking — 跳过 EOF 外新页的不必要后端读取
 
 **涉及文件：**

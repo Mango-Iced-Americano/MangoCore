@@ -159,6 +159,7 @@ mod enabled {
     pub static PC_WRITE_CALLS: AtomicUsize = AtomicUsize::new(0);
     pub static PC_WRITE_PAGES: AtomicUsize = AtomicUsize::new(0);
     pub static PC_WRITE_OVERWRITE: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_WRITE_EVENTUALLY_FULL: AtomicUsize = AtomicUsize::new(0);
     pub static PC_WRITE_CYCLES_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static PC_WRITEBACK_CALLS: AtomicUsize = AtomicUsize::new(0);
     pub static PC_WRITEBACK_PAGES: AtomicUsize = AtomicUsize::new(0);
@@ -422,6 +423,12 @@ mod enabled {
     }
 
     #[inline(always)]
+    pub fn record_pc_write_eventually_full() {
+        if !stats_enabled() { return; }
+        PC_WRITE_EVENTUALLY_FULL.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
     pub fn record_pc_writeback(pages: usize, cycles: usize) {
         if !stats_enabled() { return; }
         PC_WRITEBACK_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -533,6 +540,7 @@ mod enabled {
         PC_WRITE_CALLS.store(0, Ordering::Relaxed);
         PC_WRITE_PAGES.store(0, Ordering::Relaxed);
         PC_WRITE_OVERWRITE.store(0, Ordering::Relaxed);
+        PC_WRITE_EVENTUALLY_FULL.store(0, Ordering::Relaxed);
         PC_WRITE_CYCLES_TOTAL.store(0, Ordering::Relaxed);
         PC_WRITEBACK_CALLS.store(0, Ordering::Relaxed);
         PC_WRITEBACK_PAGES.store(0, Ordering::Relaxed);
@@ -1184,6 +1192,9 @@ pub fn record_pc_lookup_cycles(_cycles: usize) {}
 pub fn record_pc_write(_pages: usize, _full_overwrite: bool, _cycles: usize) {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
+pub fn record_pc_write_eventually_full() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
 pub fn record_pc_writeback(_pages: usize, _cycles: usize) {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
@@ -1345,6 +1356,8 @@ pub static PC_WRITE_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic:
 pub static PC_WRITE_PAGES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static PC_WRITE_OVERWRITE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_WRITE_EVENTUALLY_FULL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static PC_WRITE_CYCLES_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]

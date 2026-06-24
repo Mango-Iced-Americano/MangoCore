@@ -719,7 +719,13 @@ impl File {
 
         let posix_lock_key = (metadata.dev_id, metadata.inode_id);
 
-        let private_data = FilePrivateData::default();
+        let private_data = if file_type == FileType::File && flags.is_readable() {
+            FilePrivateData::Readahead {
+                ra_state: Arc::new(Mutex::new(crate::fs::page_cache::RaState::new())),
+            }
+        } else {
+            FilePrivateData::default()
+        };
         let file = Arc::new(File {
             inode,
             offset: AtomicUsize::new(0),
@@ -771,7 +777,13 @@ impl File {
 
         let posix_lock_key = (metadata.dev_id, metadata.inode_id);
 
-        let private_data = FilePrivateData::default();
+        let private_data = if file_type == FileType::File && flags.is_readable() {
+            FilePrivateData::Readahead {
+                ra_state: Arc::new(Mutex::new(crate::fs::page_cache::RaState::new())),
+            }
+        } else {
+            FilePrivateData::default()
+        };
         let file = Arc::new(File {
             inode,
             offset: AtomicUsize::new(0),
@@ -821,13 +833,21 @@ impl File {
             .map(|m| (m.dev_id, m.inode_id))
             .unwrap_or((0, 0));
 
+        let private_data = if file_type == FileType::File && flags.is_readable() {
+            FilePrivateData::Readahead {
+                ra_state: Arc::new(Mutex::new(crate::fs::page_cache::RaState::new())),
+            }
+        } else {
+            FilePrivateData::default()
+        };
+
         let file = Arc::new(File {
             inode,
             offset: AtomicUsize::new(0),
             flags: AtomicU32::new(flags.bits()),
             mode,
             file_type,
-            private_data: Mutex::new(FilePrivateData::default()),
+            private_data: Mutex::new(private_data),
             open_file_id: alloc_open_file_id(),
             posix_lock_key,
             created_by_open: false,
@@ -868,13 +888,21 @@ impl File {
             .map(|m| (m.dev_id, m.inode_id))
             .unwrap_or((0, 0));
 
+        let private_data = if file_type == FileType::File && flags.is_readable() {
+            FilePrivateData::Readahead {
+                ra_state: Arc::new(Mutex::new(crate::fs::page_cache::RaState::new())),
+            }
+        } else {
+            FilePrivateData::default()
+        };
+
         let file = Arc::new(File {
             inode,
             offset: AtomicUsize::new(0),
             flags: AtomicU32::new(flags.bits()),
             mode,
             file_type,
-            private_data: Mutex::new(FilePrivateData::default()),
+            private_data: Mutex::new(private_data),
             open_file_id: alloc_open_file_id(),
             posix_lock_key,
             created_by_open: true,

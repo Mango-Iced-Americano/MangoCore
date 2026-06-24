@@ -417,6 +417,7 @@ fn stats_pagecache_content(
     let _ = writeln!(s, "pc_write_calls={}", read_counter(&crate::task::perf::PC_WRITE_CALLS));
     let _ = writeln!(s, "pc_write_pages={}", read_counter(&crate::task::perf::PC_WRITE_PAGES));
     let _ = writeln!(s, "pc_write_overwrite={}", read_counter(&crate::task::perf::PC_WRITE_OVERWRITE));
+    let _ = writeln!(s, "pc_write_eventually_full={}", read_counter(&crate::task::perf::PC_WRITE_EVENTUALLY_FULL));
     let _ = writeln!(s, "pc_write_cycles={}", read_counter(&crate::task::perf::PC_WRITE_CYCLES_TOTAL));
     let _ = writeln!(s, "pc_wb_calls={}", read_counter(&crate::task::perf::PC_WRITEBACK_CALLS));
     let _ = writeln!(s, "pc_wb_pages={}", read_counter(&crate::task::perf::PC_WRITEBACK_PAGES));

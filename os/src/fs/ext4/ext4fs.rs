@@ -843,6 +843,14 @@ impl IndexNode for layout::Ext4OSInode {
         // skip the page cache so the direct I/O fallback reads from i_block.
         if !is_symlink {
             if let Some(pc) = self.get_new_page_cache() {
+                // Sequential read-ahead: trigger batch prefetch on cache miss
+                if let crate::fs::vfs::FilePrivateData::Readahead { ra_state } = &*_data {
+                    let start_page = offset >> crate::config::PAGE_SIZE_BITS;
+                    let end_page = (offset + read_len.saturating_sub(1)) >> crate::config::PAGE_SIZE_BITS;
+                    let req_pages = end_page.saturating_sub(start_page) + 1;
+                    let mut ra = ra_state.lock();
+                    pc.maybe_readahead(start_page, &mut ra, req_pages);
+                }
                 return pc.read(offset, &mut buf[..read_len]).map_err(|_| SyscallErr::EIO);
             }
         }
