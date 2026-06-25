@@ -32,14 +32,14 @@ static GLOBAL_WRITEBACK_PAGES: AtomicUsize = AtomicUsize::new(0);
 /// 后台写回互斥标志（防止并发写回）
 static WRITEBACK_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-/// 后台写回启动阈值（页数，约 2MB）
-const DIRTY_BACKGROUND: usize = 512;
-/// 写入者节流阈值（页数，约 4MB）
-const DIRTY_THROTTLE: usize = 1024;
+/// 后台写回启动阈值（页数，约 8MB，高于典型 4MB 测试集避免频繁触发）
+const DIRTY_BACKGROUND: usize = 2048;
+/// 写入者节流阈值（页数，约 16MB）
+const DIRTY_THROTTLE: usize = 4096;
 /// 正常后台写回批次大小
-const WB_BATCH_PAGES: usize = 32;
+const WB_BATCH_PAGES: usize = 64;
 /// 节流时的最大写回页数
-const WB_BG_MAX_PAGES: usize = 64;
+const WB_BG_MAX_PAGES: usize = 128;
 
 /// 全局脏页计数快照（用于诊断）
 pub fn global_dirty_pages() -> usize {
