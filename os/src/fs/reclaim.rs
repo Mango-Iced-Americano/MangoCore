@@ -304,6 +304,10 @@ pub fn maybe_reclaim_fs_caches() {
     RECLAIM_RUNS.fetch_add(1, Ordering::Relaxed);
     let _t0 = reclaim_cycle_now();
 
+    // Cooperative background writeback: flush dirty pages before
+    // reclaim stages so sync/fsync tail latency is smoothed.
+    crate::fs::page_cache::maybe_background_writeback();
+
     let under_pressure = heap_under_pressure();
     let critical = heap_critical();
     let force_weak_prune = under_pressure || critical;

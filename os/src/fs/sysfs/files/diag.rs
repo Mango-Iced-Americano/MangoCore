@@ -134,10 +134,13 @@ fn stats_ctxsw_content(_extra: usize, offset: usize, len: usize, buf: &mut [u8])
 }
 
 fn stats_reclaim_content(_extra: usize, offset: usize, len: usize, buf: &mut [u8]) -> Result<usize, SyscallErr> {
-    let mut s = String::with_capacity(192);
+    let mut s = String::with_capacity(256);
     let _ = writeln!(s, "reclaim_runs_total={}", read_counter(&crate::task::perf::RECLAIM_RUNS_TOTAL));
     let _ = writeln!(s, "reclaim_pages_scanned_total={}", read_counter(&crate::task::perf::RECLAIM_PAGES_SCANNED_TOTAL));
     let _ = writeln!(s, "reclaim_pages_freed_total={}", read_counter(&crate::task::perf::RECLAIM_PAGES_FREED_TOTAL));
+    let _ = writeln!(s, "clock_scanned={}", read_counter(&crate::task::perf::CLOCK_SCANNED));
+    let _ = writeln!(s, "clock_second_chance={}", read_counter(&crate::task::perf::CLOCK_SECOND_CHANCE));
+    let _ = writeln!(s, "clock_evicted={}", read_counter(&crate::task::perf::CLOCK_EVICTED));
     write_str(offset, len, buf, &s)
 }
 
@@ -423,6 +426,9 @@ fn stats_pagecache_content(
     let _ = writeln!(s, "pc_wb_pages={}", read_counter(&crate::task::perf::PC_WRITEBACK_PAGES));
     let _ = writeln!(s, "pc_wb_cycles={}", read_counter(&crate::task::perf::PC_WRITEBACK_CYCLES_TOTAL));
     let _ = writeln!(s, "pc_falloc_cycles={}", read_counter(&crate::task::perf::PC_FALLOC_CYCLES_TOTAL));
+    let _ = writeln!(s, "wb_bg_calls={}", read_counter(&crate::task::perf::WB_BG_CALLS));
+    let _ = writeln!(s, "wb_throttle_calls={}", read_counter(&crate::task::perf::WB_THROTTLE_CALLS));
+    let _ = writeln!(s, "wb_redirty_pages={}", read_counter(&crate::task::perf::WB_REDIRTY_PAGES));
     write_str(offset, len, buf, &s)
 }
 

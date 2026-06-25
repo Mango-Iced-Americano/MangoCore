@@ -147,6 +147,11 @@ mod enabled {
     pub static RECLAIM_PAGES_SCANNED_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static RECLAIM_PAGES_FREED_TOTAL: AtomicUsize = AtomicUsize::new(0);
 
+    // ── P1: Clock Eviction ──
+    pub static CLOCK_SCANNED: AtomicUsize = AtomicUsize::new(0);
+    pub static CLOCK_SECOND_CHANCE: AtomicUsize = AtomicUsize::new(0);
+    pub static CLOCK_EVICTED: AtomicUsize = AtomicUsize::new(0);
+
     // ── P0: PageCache I/O ──
     pub static PC_READ_CALLS: AtomicUsize = AtomicUsize::new(0);
     pub static PC_READ_PAGES: AtomicUsize = AtomicUsize::new(0);
@@ -165,6 +170,11 @@ mod enabled {
     pub static PC_WRITEBACK_PAGES: AtomicUsize = AtomicUsize::new(0);
     pub static PC_WRITEBACK_CYCLES_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static PC_FALLOC_CYCLES_TOTAL: AtomicUsize = AtomicUsize::new(0);
+
+    // ── P0: Writeback Throttling ──
+    pub static WB_BG_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static WB_THROTTLE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static WB_REDIRTY_PAGES: AtomicUsize = AtomicUsize::new(0);
 
     // ── P0: Block Device I/O ──
     pub static BLK_VREAD_REQS: AtomicUsize = AtomicUsize::new(0);
@@ -358,6 +368,27 @@ mod enabled {
     }
 
     #[inline(always)]
+    pub fn record_clock_scanned(n: usize) {
+        if n == 0 { return; }
+        if !stats_enabled() { return; }
+        CLOCK_SCANNED.fetch_add(n, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_clock_second_chance(n: usize) {
+        if n == 0 { return; }
+        if !stats_enabled() { return; }
+        CLOCK_SECOND_CHANCE.fetch_add(n, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_clock_evicted(n: usize) {
+        if n == 0 { return; }
+        if !stats_enabled() { return; }
+        CLOCK_EVICTED.fetch_add(n, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
     pub fn record_heap_alloc() {
         if !stats_enabled() { return; }
         HEAP_ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -448,6 +479,24 @@ mod enabled {
         PC_FALLOC_CYCLES_TOTAL.fetch_add(cycles, Ordering::Relaxed);
     }
 
+    #[inline(always)]
+    pub fn record_wb_bg_call() {
+        if !stats_enabled() { return; }
+        WB_BG_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_wb_throttle_call() {
+        if !stats_enabled() { return; }
+        WB_THROTTLE_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_wb_redirty() {
+        if !stats_enabled() { return; }
+        WB_REDIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
+    }
+
     // ── Block device recorders ──
 
     #[inline(always)]
@@ -520,6 +569,10 @@ mod enabled {
         RECLAIM_RUNS_TOTAL.store(0, Ordering::Relaxed);
         RECLAIM_PAGES_SCANNED_TOTAL.store(0, Ordering::Relaxed);
         RECLAIM_PAGES_FREED_TOTAL.store(0, Ordering::Relaxed);
+        // Clock Eviction (P1)
+        CLOCK_SCANNED.store(0, Ordering::Relaxed);
+        CLOCK_SECOND_CHANCE.store(0, Ordering::Relaxed);
+        CLOCK_EVICTED.store(0, Ordering::Relaxed);
         // Heap Allocator Cost (P0)
         HEAP_ALLOC_CALLS.store(0, Ordering::Relaxed);
         HEAP_ALLOC_TICKS_TOTAL.store(0, Ordering::Relaxed);
@@ -546,6 +599,10 @@ mod enabled {
         PC_WRITEBACK_PAGES.store(0, Ordering::Relaxed);
         PC_WRITEBACK_CYCLES_TOTAL.store(0, Ordering::Relaxed);
         PC_FALLOC_CYCLES_TOTAL.store(0, Ordering::Relaxed);
+        // Writeback Throttling (P0)
+        WB_BG_CALLS.store(0, Ordering::Relaxed);
+        WB_THROTTLE_CALLS.store(0, Ordering::Relaxed);
+        WB_REDIRTY_PAGES.store(0, Ordering::Relaxed);
         // Block Device I/O (P0)
         BLK_VREAD_REQS.store(0, Ordering::Relaxed);
         BLK_VREAD_SECS.store(0, Ordering::Relaxed);
@@ -1159,6 +1216,18 @@ pub fn record_reclaim_pages_freed(_n: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
+pub fn record_clock_scanned(_n: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_clock_second_chance(_n: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_clock_evicted(_n: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
 pub fn record_heap_alloc() {}
 
 #[cfg(not(feature = "perf_stats"))]
@@ -1202,6 +1271,18 @@ pub fn record_pc_miss() {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
 pub fn record_pc_falloc_cycles(_cycles: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_wb_bg_call() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_wb_throttle_call() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_wb_redirty() {}
 
 // ── Block device recorders (no-op when perf_stats disabled) ──
 #[cfg(not(feature = "perf_stats"))]
@@ -1295,6 +1376,14 @@ pub static RECLAIM_PAGES_SCANNED_TOTAL: core::sync::atomic::AtomicUsize = core::
 #[cfg(not(feature = "perf_stats"))]
 pub static RECLAIM_PAGES_FREED_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
+// ── Clock Eviction stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub static CLOCK_SCANNED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static CLOCK_SECOND_CHANCE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static CLOCK_EVICTED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
 // ── Timer IRQ / Pop Cost stubs ──
 #[cfg(not(feature = "perf_stats"))]
 pub static TIMER_IRQ_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
@@ -1368,6 +1457,14 @@ pub static PC_WRITEBACK_PAGES: core::sync::atomic::AtomicUsize = core::sync::ato
 pub static PC_WRITEBACK_CYCLES_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static PC_FALLOC_CYCLES_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── Writeback Throttling stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub static WB_BG_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static WB_THROTTLE_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static WB_REDIRTY_PAGES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 // ── Block Device I/O stubs ──
 #[cfg(not(feature = "perf_stats"))]
