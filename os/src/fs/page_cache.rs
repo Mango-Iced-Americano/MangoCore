@@ -1232,29 +1232,31 @@ impl PageCache {
             return Ok(0);
         }
 
-        // Phase 2: 构建页缓冲区并调用后端批量读取
-        // 仅对在 backend 范围内的页面调用 read_pages
-        let mut page_bufs: Vec<&mut [u8]> = Vec::new();
-        let mut page_indices: Vec<usize> = Vec::new();
-        let mut first_page_idx: Option<usize> = None;
-
-        for p in &pending {
-            if p.index < backend_npages {
-                if first_page_idx.is_none() {
-                    first_page_idx = Some(p.index);
-                }
-                page_indices.push(p.index);
+        // Phase 2: 将 pending 按索引连续性拆成多个 run，每个 run 调用一次 read_pages
+        // 跳过已缓存的页会制造空洞，不能假设 pending 索引连续
+        let mut i = 0;
+        while i < pending.len() {
+            // 跳过超出 backend 范围的页
+            if pending[i].index >= backend_npages {
+                i += 1;
+                continue;
+            }
+            // 收集一个连续 run
+            let run_start = pending[i].index;
+            let mut run_bufs: Vec<&mut [u8]> = Vec::new();
+            while i < pending.len()
+                && pending[i].index < backend_npages
+                && pending[i].index == run_start + run_bufs.len()
+            {
                 // SAFETY: 我们拥有这些帧的唯一可变引用
                 unsafe {
-                    page_bufs.push(&mut *(p.entry.as_slice_mut() as *mut [u8]));
+                    run_bufs.push(&mut *(pending[i].entry.as_slice_mut() as *mut [u8]));
                 }
+                i += 1;
             }
-        }
-
-        if !page_bufs.is_empty() {
-            let start = first_page_idx.unwrap();
-            // 确保索引连续（调用者保证）
-            backend.read_pages(start, &mut page_bufs)?;
+            if !run_bufs.is_empty() {
+                backend.read_pages(run_start, &mut run_bufs)?;
+            }
         }
 
         // Phase 3: 零填充超出 backend npages 的页面（sparse file holes）

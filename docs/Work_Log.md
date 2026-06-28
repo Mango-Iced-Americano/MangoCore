@@ -2,6 +2,43 @@
 
 ---
 
+## 2026-06-28
+
+### fix(fs): PageCache read-ahead batch 连续性假设破裂 → la64 InstructionNonDefined
+
+**根因**：`sync_batch_read_pages()` 跳过已缓存页后，把剩余的 pending pages 当成连续索引传给 `backend.read_pages(start, &bufs)`。但 clock eviction 会在 entries 里制造 `None` 空洞，pending 可能变成 `[N, N+2]` 这种非连续序列。`Ext4PageCacheBackend::read_pages()` 把 `bufs[i]` 解释为 `start + i` 的磁盘数据 → data for disk[N+1] 被错填到 entry[N+2]，导致 executable pages 被垃圾数据覆盖 → 所有子命令反复在同一 VA 执行同一份坏字节（`0xbd4cbd49`，非有效 la64 指令）。
+
+**为什么仅 la64 暴露**：rv64 也受影响但 clock eviction 模式掩盖了触发条件。la64 上 eviction 稳定触发空洞。
+
+**涉及文件：**
+- `os/src/fs/page_cache.rs:1235-1260` — `sync_batch_read_pages()` Phase 2：将 pending 按索引连续性拆成多个 run，每个 run 独立调用 `backend.read_pages(run_start, ...)`，替代原来的单次 `read_pages(start, all_bufs)` 调用。
+
+**修复代码**：
+```rust
+// 旧: 单次 read_pages(start, &page_bufs) — 假设 page_indices 连续
+// 新: 按 run 拆分，每个 run 的 start 等于该 run 第一页的 index
+while i < pending.len() {
+    let run_start = pending[i].index;
+    let mut run_bufs = Vec::new();
+    while pending[i].index == run_start + run_bufs.len() {
+        run_bufs.push(...);
+        i += 1;
+    }
+    backend.read_pages(run_start, &mut run_bufs)?;
+}
+```
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU la64 focused `fs_bind17.sh` 待测试 — 期望 `InstructionNonDefined` 从 ~3600 降为 0
+
+**备注：**
+- writeback 路径 (`writeback_dirty_pages_some` lines 1521-1545) 已正确按连续 run 分组，不需要修改
+- 已沉淀经验到 `harness-patterns.md`
+
+---
+
 ## 2026-06-25
 
 ### feat(fs): Cooperative background writeback + simplified dirty page throttling

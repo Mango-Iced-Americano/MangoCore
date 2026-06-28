@@ -672,4 +672,21 @@ diag=1
 - **症状**: musl `getcwd()` 报 "cannot access parent directories: Invalid argument"（`EINVAL`）；`fstatat("/")` 与 `fstatat("..")` 从根子目录返回不同 inode。
 - **修复**: 在 `do_find()` 开头 special-case `name == ".."`，调用 `lookup_dotdot()`：挂载点根时先拿到 `self_mountpoint`（在父 FS 中的 backref），再对该 backref 的 `inner_inode.find("..")` 求值 → 结果在父 FS 的 MountFS 上下文中。全局根返回自身。普通目录走原路径。
 - **教训**: VFS mount-boundary 穿越需要区分两个方向 — (1) 正向：`overlaid_inode()` 覆盖子挂载；(2) 反向 ".."：需通过 `self_mountpoint` backref 回到挂载点所在父 FS。不能用同一个 `inner_inode.find("..")` 处理这两种语义；`do_parent()`（服务于 `absolute_path()`）有不同需求，不应混用。
+
+---
+
+## Batch I/O 连续性假设破裂 — cache eviction 空洞导致数据错页
+
+- **根因**: `sync_batch_read_pages()` 在收集 pending pages 时跳过已缓存的页（`continue`），但后续调用 `backend.read_pages(start, &bufs)` 时假设所有 pending 索引连续。当 clock eviction 或其他回收机制在 page cache entries 中留下 `None` 空洞后，pending 集合可能变成 `[N, N+2, N+5]` 这样非连续序列。后端 `read_pages(start, bufs)` 把 `bufs[i]` 解释为 `start + i` 的磁盘内容 → 第 i+1 页得到错误数据。
+
+- **症状**: 文件读取返回错位数据；executable pages 被垃圾数据覆盖 → `InstructionNonDefined`（la64）/ `IllegalInstruction` 异常，所有通过该页执行的子命令反复在同一 VA 崩溃。
+
+- **修复**: 将 pending 按索引连续性拆成多个 run，每个 run 独立调用 `backend.read_pages(run_start, &run_bufs)`。用 `while` 循环扫描 pending，当 `pending[i].index != run_start + run_bufs.len()` 时结束当前 run 并开启新 run。
+
+- **教训**: 
+  1. 任何"收集候选 → 跳过部分 → 批量操作"的模式，必须在批操作前**验证连续性**（即使是"调用者保证"也需要在 callee 中加 debug_assert）
+  2. 回收子系统（eviction/reclaim）和预取子系统（read-ahead）的交互是**跨 commit** 的潜在 bug 源 — 单看每个 commit 正确，合在一起触发空洞
+  3. 双架构测试不能替代架构针对性测试 — la64 和 rv64 的 eviction 模式不同，rv64 正常不代表 la64 也正常
+
+- **相关文件**: `os/src/fs/page_cache.rs`（`sync_batch_read_pages`、`evict_clean_pages_clock`）
 - **相关文件**: `os/src/fs/vfs/mount.rs` (`do_find`, `lookup_dotdot`, `do_parent`)
