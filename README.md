@@ -4,6 +4,15 @@
 
 MangoCore 是一个 `#![no_std]` 裸机 Rust 内核，支持 **riscv64** 和 **loongarch64** 双架构，通过 OpenSBI 在 QEMU 上运行。项目面向操作系统内核竞赛开发，实现了约 218 个 Linux 兼容的系统调用，涵盖进程管理、虚拟内存、文件系统、网络、进程间通信和事件通知。架构设计参考了 DragonOS 的 VFS/MountFS 设计模式，行为语义以 Linux 6.6 为基准。
 
+## 评审材料（竞赛评委入口）
+
+项目为竞赛评审准备了两份深度文档，建议优先阅读：
+
+| 文档 | 说明 |
+|------|------|
+| [📄 Technical-Report-MangoCore.md](docs/Technical-Report-MangoCore.md) | **技术报告** — 架构设计、模块实现、工程实践与竞赛历程 |
+| [📄 Engineering-Casebook.md](docs/Engineering-Casebook.md) | **工程案例手册** — 以 Q&A 形式记录各模块设计权衡与调试过程 |
+
 ## 系统架构
 
 ```
@@ -102,8 +111,9 @@ Makefile       顶层构建编排
 
 ## 文档
 
+- `docs/Technical-Report-MangoCore.md` — **评审技术报告**（项目全貌与工程实践）
+- `docs/Engineering-Casebook.md` — **评审工程案例手册**（Q&A 与调试案例）
 - `docs/README.md` — 文档索引和导航
-- `docs/CONTRIBUTING.md` — 文档标准和约定
 - `docs/08_testing/` — LTP 和 OSComp 测试映射
 - `docs/Work_Log.md` — 开发日志和变更记录
 
