@@ -35,6 +35,11 @@ make rv64-run
 
 > ⚠️ 双架构使用不同的 Rust nightly 工具链，必须分开串行构建，禁止并行执行。
 
+<div align="center">
+  <img src="docs/diagrams/rv启动.png" alt="RISC-V QEMU 启动" width="45%">
+  <img src="docs/diagrams/rv运行测试.png" alt="RISC-V 运行测试" width="45%">
+</div>
+
 ### 快速迭代（仅编译内核）
 
 ```bash
@@ -139,14 +144,16 @@ make -C os conf-inject CONF_ARCH=rv64 CONF_BLK_MODE=virt CONF_FILE=../os_test.co
 
 ## 架构概览
 
-```
-QEMU → OpenSBI (M-mode) → entry.asm (S-mode) → rust_main()
-  → console/mm/drivers/fs/net/task → run_tasks()
-```
+![MangoCore 系统架构](docs/diagrams/arch.png)
 
 - **HAL 层**隔离 riscv64 和 loongarch64 的架构相关代码（陷阱处理、页表、TLB、控制寄存器）
 - **VFS/MountFS** 采用 DragonOS 启发的分层设计：`File` → `IndexNode` → `FileSystem` → `MountFS` → `PageCache`
 - **系统调用分发** 将约 218 个系统调用路由到进程、内存、文件系统、网络等子模块
+
+<div align="center">
+  <img src="docs/diagrams/net.png" alt="网络子系统架构" width="48%">
+  <img src="docs/diagrams/fs.png" alt="文件系统子系统架构" width="48%">
+</div>
 
 详细架构见[技术报告](docs/Technical-Report-MangoCore.md)。
 
