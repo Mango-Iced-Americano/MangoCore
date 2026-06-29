@@ -2,6 +2,189 @@
 
 ---
 
+## 2026-06-29
+
+### 新增文档: docs/03_fs/locks-fcntl-fasync.md
+
+**涉及文件：**
+- `docs/03_fs/locks-fcntl-fasync.md` — 新建文件锁、fcntl 与 fasync 文档，覆盖 POSIX 记录锁（sharded PosixLockManager、死锁检测 wait-graph、F_SETLK/F_SETLKW/F_GETLK）、BSD flock（全局 FLOCK_TABLE 简化实现）、fasync SIGIO 通知（FAsyncItems 数据结构与信号交付流程）、fcntl 命令表（DupFd/GetFd/SetFd/GetFlags/SetFlags/GetOwn/SetOwn/SetSig/SetLease 等）、memfd seal、管道大小控制、文件租约；含 YAML frontmatter、测试映射、已知问题
+
+**验证：**
+- 178 行，符合 100-250 行要求
+- YAML frontmatter 使用 last_updated=2026-06-29
+- entry_points 包含 FileLock, Fcntl, Fasync, Flock
+- 无 TODO/TBD/行号/绝对路径违规
+
+### 新增文档: docs/03_fs/sysfs.md
+
+**涉及文件：**
+- `docs/03_fs/sysfs.md` — 新建 sysfs 文档，覆盖动态内容生成模型（SysContentFn/SysWriteFn、owned_content 静态字符串）、SysInode 数据结构与 IndexNode 实现要点（read_at write_at find list hooks）、注册节点（/sys/class/net 动态接口目录含 address/mtu、/sys/block 预留、/sys/kernel/stats 含 15 个性能计数器文件、/sys/kernel/tracing 含 6 个追踪控制文件）、与 procfs 的架构对比表（核心 inode、内容生产、缓存策略、构造模式差异）、FS 注册流程、Test Mapping
+
+**验证：**
+- 159 行，符合 80-200 行要求
+- YAML frontmatter 使用 last_updated=2026-06-29
+- entry_points 包含 SysInode
+- 无 procfs/devfs/ext4 内容越界
+- 无 TODO/TBD/行号/绝对路径
+
+### 新增文档: docs/03_fs/procfs.md
+
+**涉及文件：**
+- `docs/03_fs/procfs.md` — 新建 procfs 文档，覆盖动态内容生成模型（ProcContentFn/ProcTextFn/ProcWriteFn）、目录结构（/proc 根级文件、/proc/[pid]/status/maps/fd、/proc/net/tcp/udp/unix/dev/route/arp、/proc/sys/ 内核参数）、LockedProcInode IndexNode 实现要点、缓存策略（ProcTextFn 缓存 vs ProcContentFn 实时生成、动态符号链接）、FS 注册流程、Test Mapping 和 8 项 Known Issues（loadavg 未实现、stat CPU 简化为零、meminfo 字段占位等）
+
+**验证：**
+- 186 行，符合 150-300 行范围
+- YAML frontmatter 使用 last_updated=2026-06-29
+- 无 devfs/sysfs/ext4 内容越界
+- 无 TODO/TBD/行号/绝对路径
+
+### 新增文档: docs/03_fs/devfs.md
+
+**涉及文件：**
+- `docs/03_fs/devfs.md` — 新建 DevFS 设备文件系统文档，覆盖 DevFS 数据结构（DevFSInode/LockedDevFSInode/Weak 引用/BTreeMap children）、全局 DEV_FS 单例、add_dev/add_dir 动态注册、设备列表（null/zero/urandom/random/full/tty/console/pipe/pty/ptmx/pts/rtc/block/cpu_dma_latency）、各设备关键 read/write/ioctl 行为分析（PipeRingBuffer 64KB 环形缓冲/Pty 双向 4KB RingBuffer/TTY 单字节串口 I/O/RTC 时间转换/BlockDevInode read-modify-write）、/dev/vda/vdb 及 MBR 分区节点动态注册流程、初始化流程、Test Mapping 和 5 项 Known Issues（urandom 零填充、pty 4KB 缓冲区、FIFO 注册表泄漏、pipe 容量上限、tty 单字节 I/O）
+
+**验证：**
+- 271 行，符合 150-350 行范围
+- YAML frontmatter 使用 last_updated=2026-06-29
+- entry_points 包含 DEV_FS/DevFS/add_dev/add_dir/LockedDevFSInode
+- 无 procfs/sysfs/ext4 内容越界
+- 无 TODO/TBD/行号/绝对路径
+
+### 新增文档: docs/03_fs/tmpfs.md
+
+**涉及文件：**
+- `docs/03_fs/tmpfs.md` — 新建 tmpfs 与 ramfs 内存文件系统文档，覆盖 TmpFS（PageCache-only/大小配额/size_limit/动态 statfs/祖先检测防死循环）、RamFS（FrameTracker 物理页/BTreeMap 页映射/写时按需分配/PageCache 桥接/缩容页回收）、两者在系统中的使用（/tmp, /dev/shm, initramfs root, force_ramfs fallback）、Test Mapping 和 Known Issues
+
+**验证：**
+- 201 行，符合 150-300 行范围
+- YAML frontmatter 使用 last_updated=2026-06-29
+- 无 ext4/FAT32/procfs 内容越界
+- 无 TODO/TBD/行号/绝对路径
+
+### 新增文档: docs/03_fs/ext4.md
+
+**涉及文件：**
+- `docs/03_fs/ext4.md` — 新建 ext4 文件系统文档，覆盖 Ext4FileSystem（块设备后端/超级块/目录查找缓存）、Ext4Inode（extent 树/稀疏文件/CachedExt4Inode）、目录项操作（dir_find_entry/create/link/unlink/rename/symlink）、文件 I/O（read_at/write_at 的 PageCache 集成与直接 I/O 回退）、块分配（balloc/ialloc/块组描述符）、元数据缓存（MetaBlockCache/defer mode）、已知缺失（日志未实现/nodelalloc/无 HTREE）、Test Mapping 和 Known Issues
+
+**验证：**
+- 199 行，符合 200-400 行范围
+- YAML frontmatter 使用 last_updated=2026-06-29
+- 无 FAT32/tmpfs/ramfs/procfs 内容越界
+- 无 TODO/TBD/行号/绝对路径
+
+### 新增文档: docs/03_fs/page-cache.md
+
+**涉及文件：**
+- `docs/03_fs/page-cache.md` — 新建 PageCache 文档，覆盖 PageState 状态机（Loading → UpToDate ↔ Dirty → Writeback → UpToDate）、PageEntry 与 partial-write 跟踪（valid_mask, 512B segment）、PageCacheBackend trait、二阶段读写模式（lock-collect-copy, unlock-copy-to-user）、脏页追踪（GLOBAL_DIRTY_PAGES, GLOBAL_WRITEBACK_PAGES）、写回阈值（DIRTY_BACKGROUND=2048, DIRTY_THROTTLE=4096）、Clock/Second-Chance eviction、三级水位回收、锁约束（禁止持 inode 锁 invalidate）、Test Mapping 和 Known Issues
+
+**验证：**
+- 265 行，符合 200-500 行范围
+- YAML frontmatter 使用 last_updated=2026-06-29
+- 无 ext4 或 VFS core 内容越界
+
+### 新增文档: docs/03_fs/vfs-core.md
+
+**涉及文件：**
+- `docs/03_fs/vfs-core.md` — 新建 VFS 核心类型文档，覆盖 File 结构体（inode/offset/flags/mode/read/write/lseek）、FdTable（alloc_fd/alloc_fd_at/drop_fd/try_clone）、IndexNode trait（全部 40+ 方法签名）、FileSystem trait 与 SuperBlock、辅助类型（FileFlags/FileMode/Metadata）、关键设计决策（File vs IndexNode 分离/offset 原子化/O_APPEND/流式语义）、Test Mapping 和 Known Issues
+
+**验证：**
+- 文档基于 os/src/fs/vfs/file.rs、index_node.rs、file_system.rs 源码
+- 324 行，符合 200-400 行范围
+- YAML frontmatter 使用 last_updated
+- 含 Test Mapping 和 Known Issues 章节
+- 无 TODO/TBD/行号/绝对路径
+- 不涉及 MountFS、PageCache、具体 FS 类型
+
+### 新增文档: docs/06_net/udp.md
+
+**涉及文件：**
+- `docs/06_net/udp.md` — 新建 UDP 专用文档，从旧 udp-raw-unix-netlink-packet.md 中提取 UDP 部分独立成文，覆盖 UdpSocket、UdpSocketInner、bind/connect/send/recv、try_deliver_local、dispatch_udp_packets、MSG_MORE、ephemeral port 范围、SO_REUSEADDR、全局跟踪，含 Test Mapping 和 Known Issues
+
+**验证：**
+- 文档准确反映 os/src/net/socket/inet/datagram/udp.rs 当前源码
+- 218 行，符合 100-250 行范围
+- YAML frontmatter 使用 last_updated
+
+### 新增文档: docs/06_net/raw.md
+
+**涉及文件：**
+- `docs/06_net/raw.md` — 新建 RAW 套接字文档，覆盖 RawSocket/RawSocketInner 结构、connected vs unconnected 模式（IP_HDRINCL）、IPv4/IPv6 头部构造、ICMP6_FILTER、IPV6_CHECKSUM、全局跟踪 RAW_SOCKETS、发送/接收流程、测试映射和已知问题
+
+**验证：**
+- 文档基于 os/src/net/socket/inet/raw/raw.rs 源码
+- 195 行，符合 80-200 行范围
+- YAML frontmatter 使用 last_updated
+- 含 Known Issues 和 Test Mapping 章节
+- 无 TODO/TBD/行号/绝对路径
+
+### 新增文档: docs/06_net/inet-common.md
+
+**涉及文件：**
+- `docs/06_net/inet-common.md` — 新建 INET 公共基础设施文档，覆盖 PortManager（临时端口分配、冲突检测、绑定表）、BoundInner（端点追踪）、Address 类型与转换（SocketAddrv4/6、IpEndpoint/IpListenEndpoint、fill_with_endpoint）、SO_REUSEADDR 语义跨 INET 类型对比，含 Test Mapping 和 Known Issues
+
+**验证：**
+- 文档基于 os/src/net/socket/inet/common/{address,port,bound}.rs 源码
+- 166 行，符合 80-200 行范围
+- YAML frontmatter 使用 last_updated
+- 无 TODO/TBD/行号/绝对路径
+- 不重复 socket-trait-and-fd.md 内容
+
+### 新增文档: docs/06_net/neighbour.md
+
+**涉及文件：**
+- `docs/06_net/neighbour.md` — 新建文档，从旧 smoltcp-device-routing.md 中拆分出 neighbour.rs 模块部分，覆盖 NEIGHBOUR_TABLE、NeighbourEntry、try_capture_arp_reply、CURRENT_POLL_IFINDEX、netlink RTM_GETNEIGH 和 /proc/net/arp 查询接口
+
+**验证：**
+- 文档准确反映 os/src/net/neighbour.rs 当前源码
+- 187 行，符合 80-200 行范围
+- YAML frontmatter 使用 last_updated
+- 含 Known Issues 和 Test Mapping 章节
+
+### 新增文档: docs/06_net/device-stack-and-poll.md
+
+**涉及文件：**
+- `docs/06_net/device-stack-and-poll.md` — 新建文档，从旧 smoltcp-device-routing.md 中拆分出 config.rs 模块部分，覆盖 NET_INTERFACE、DeviceStack、polling 基础设施、socket 管理 API
+
+**验证：**
+- 文档准确反映 os/src/net/config.rs 当前源码
+- 380 行，符合 200-500 行范围
+- YAML frontmatter 使用 last_updated
+
+**备注：** 这是拆分旧 832 行文档的第一步，后续需继续拆分 device-adapter.md、dhcp.md、neighbour.md、net-core-iface.md
+
+### 新增文档: docs/06_net/routing.md
+
+**涉及文件：**
+- `docs/06_net/routing.md` — 新建文档，从旧 smoltcp-device-routing.md 中拆分出 routing.rs + config.rs 路由相关部分（route_check、lookup_source_ip），覆盖 RouteSocketHandle、SocketBinding、Router/RouteTable、route_output()、LPM、fill_default
+
+**验证：**
+- 文档准确反映 os/src/net/routing.rs 和 os/src/net/config.rs 当前源码
+- 292 行，符合 150-300 行范围
+- YAML frontmatter 使用 last_updated
+
+### 新增文档: docs/06_net/net-core-iface.md
+
+**涉及文件：**
+- `docs/06_net/net-core-iface.md` — 新建文档，从旧 smoltcp-device-routing.md 中拆分出 iface.rs + net_core.rs + ioctl.rs 部分，覆盖 Iface trait、IfaceCommon、DeviceKind、SmoltcpDeviceAccess、NetDeviceEntry、设备注册中心、SIOCGIF* ioctl
+
+**验证：**
+- 文档准确反映 os/src/net/iface.rs、os/src/net/net_core.rs、os/src/net/ioctl.rs 当前源码
+- 334 行，未超过 350 行限制
+- YAML frontmatter 使用 last_updated
+
+**备注：** 这是拆分旧 832 行文档的第三步。`NetDeviceEntry::common()` 和 `as_smoltcp_device()` 当前为 panic! 状态（Wave 2 TODO），已在 Known Issues 中记录。
+
+### 更新入口文档: README.md + architecture.md，废弃 smoltcp-device-routing.md
+
+**涉及文件：**
+- `docs/06_net/README.md` — 更新前件 (status→draft, last_update→last_updated)；核心基础设施表增加"相关文档"列，引用 6 篇新拆分文档；文档索引增加 6 条新条目，原 smoltcp-device-routing.md 标记为 Deprecated
+- `docs/06_net/architecture.md` — 更新前件 (status→draft, last_update→last_updated)；第 1 节模块表增加"参考文档"列；增加提示信息指向新拆分文档
+- `docs/06_net/smoltcp-device-routing.md` — 替换为 23 行废弃重定向页面，内容指向 6 篇专题文档
+
+**验证：**
+- 前件字段名统一为 `last_updated`
+- 所有链接正确指向现有文件
+
 ## 2026-06-28
 
 ### fix(fs): PageCache read-ahead batch 连续性假设破裂 → la64 InstructionNonDefined

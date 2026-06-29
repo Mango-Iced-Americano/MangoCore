@@ -1,9 +1,9 @@
 ---
 title: "MangoCore 文档索引"
 category: overview
-status: stable
-author: MangoCore Team
-last_update: 2026-06-14
+status: draft
+owner: MangoCore Team
+last_updated: 2026-06-29
 tags: [docs, index, overview]
 ---
 
@@ -63,17 +63,10 @@ tags: [docs, index, overview]
 
 ## 模块文档
 
-| 目录 | 文档 | 模块 | 状态 | 最后更新 |
-|-----------|----------|--------|--------|-------------|
-| `06_net/` | `README.md` | 网络概览 | 稳定 | 2026-06-14 |
-| `06_net/` | `architecture.md` | 网络架构 | 稳定 | 2026-06-14 |
-| `06_net/` | `socket-trait-and-fd.md` | Socket trait 与 fd | 稳定 | 2026-06-14 |
-| `06_net/` | `syscall-layer.md` | 网络系统调用层 | 稳定 | 2026-06-14 |
-| `06_net/` | `smoltcp-device-routing.md` | 适配器与路由 | 稳定 | 2026-06-14 |
-| `06_net/` | `tcp.md` | TCP 实现 | 稳定 | 2026-06-14 |
-| `06_net/` | `udp-raw-unix-netlink-packet.md` | UDP、RAW、Unix、Netlink、Packet | 稳定 | 2026-06-14 |
-| `06_net/` | `test-map.md` | 网络测试映射 | 草稿 | 2026-06-14 |
-| `06_net/` | `debugging.md` | 网络调试 | 草稿 | 2026-06-14 |
+| 目录 | 文档索引 | 状态 | 说明 |
+|-----------|----------|--------|------|
+| `06_net/` | [README.md](06_net/README.md) | 草稿 | 网络子系统重构后含 21 篇文档，涵盖 socket 类型、设备层、路由、DHCP、调试等 |
+| `03_fs/` | [README.md](03_fs/README.md) | 草稿 | 文件系统子系统含 14 篇文档，涵盖 VFS、PageCache、ext4、FAT32、tmpfs、procfs 等 |
 
 ## 模板与规范
 
