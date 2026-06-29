@@ -1,10 +1,34 @@
 ---
 title: "网络子系统架构设计"
+module: "net"
 category: net
-status: stable
-author: MangoCore Team
-last_update: 2026-06-14
-tags: [net, architecture, smoltcp, routing]
+status: draft
+owner: MangoCore Team
+last_updated: 2026-06-29
+code_paths:
+  - "os/src/net/mod.rs"
+  - "os/src/net/config.rs"
+  - "os/src/net/routing.rs"
+  - "os/src/net/adapter.rs"
+entry_points:
+  - "rust_main() -> net::config::init()"
+  - "NET_INTERFACE"
+arch:
+  rv64: supported
+  la64: supported
+tests:
+  ltp:
+    - "socket01"
+    - "connect01"
+  oscomp:
+    - "basic"
+    - "busybox"
+related_docs:
+  - "docs/06_net/device-stack-and-poll.md"
+  - "docs/06_net/device-adapter.md"
+  - "docs/06_net/routing.md"
+  - "docs/06_net/socket-trait-and-fd.md"
+  - "docs/06_net/syscall-layer.md"
 ---
 
 # 网络子系统架构设计
@@ -15,18 +39,20 @@ tags: [net, architecture, smoltcp, routing]
 
 整个子系统位于 `os/src/net/` 目录下，共约 13 个模块：
 
-| 模块 | 职责 |
-|------|------|
-| `socket/` | 所有 Socket 类型的 trait 定义和具体实现（TCP/UDP/RAW/Unix/Netlink/Packet） |
-| `config.rs` | NetInterface 全局单例，per-device smoltcp 栈管理，poll 循环 |
-| `routing.rs` | 路由表、RouteSocketHandle、route_output 查路由 |
-| `adapter.rs` | smoltcp Device trait 适配层（IfaceDevice 枚举 + SmoltcpDeviceAdapter） |
-| `net_core.rs` | 设备注册中心，DHCP 状态，netns 辅助函数 |
-| `iface.rs` | Iface trait 定义（统一的网络接口抽象） |
-| `syscall/` | syscall 分发层（socket/bind/connect/sendto/recvfrom 等） |
-| `neighbour.rs` | ARP/NDP 邻居表 |
-| `ioctl.rs` | SIOCGIFxxx ioctl 分发 |
-| `posix.rs` | POSIX socket 参数解析 |
+| 模块 | 职责 | 参考文档 |
+|------|------|---------|
+| `socket/` | 所有 Socket 类型的 trait 定义和具体实现（TCP/UDP/RAW/Unix/Netlink/Packet） | — |
+| `config.rs` | NetInterface 全局单例，per-device smoltcp 栈管理，poll 循环 | [device-stack-and-poll.md](device-stack-and-poll.md) |
+| `routing.rs` | 路由表、RouteSocketHandle、route_output 查路由 | [routing.md](routing.md) |
+| `adapter.rs` | smoltcp Device trait 适配层（IfaceDevice 枚举 + SmoltcpDeviceAdapter） | [device-adapter.md](device-adapter.md) |
+| `net_core.rs` | 设备注册中心，DHCP 状态，netns 辅助函数 | [net-core-iface.md](net-core-iface.md), [dhcp.md](dhcp.md) |
+| `iface.rs` | Iface trait 定义（统一的网络接口抽象） | [net-core-iface.md](net-core-iface.md) |
+| `syscall/` | syscall 分发层（socket/bind/connect/sendto/recvfrom 等） | — |
+| `neighbour.rs` | ARP/NDP 邻居表 | [neighbour.md](neighbour.md) |
+| `ioctl.rs` | SIOCGIFxxx ioctl 分发 | [net-core-iface.md](net-core-iface.md) |
+| `posix.rs` | POSIX socket 参数解析 | — |
+
+> 各模块的详细实现说明已从原 `smoltcp-device-routing.md` 拆分为 6 篇专题文档，见上表参考文档列。如需深入阅读，可直接跳转对应文档。
 
 ---
 
@@ -561,16 +587,16 @@ try_capture_arp_reply(&self.buf, ifindex);
 
 | 功能域 | 测试 | 说明 |
 |--------|------|------|
-| TCP 收发 | libcbench TCP 吞吐测试 | `os_test.conf mask=0x008` |
-| UDP 收发 | libcbench UDP 延迟测试 | `os_test.conf mask=0x008` |
+| TCP 收发 | libcbench TCP 吞吐测试 | `os_test.conf mask=0x080` (libcbench) |
+| UDP 收发 | libcbench UDP 延迟测试 | `os_test.conf mask=0x080` (libcbench) |
 | 环回 | basic ping 127.0.0.1 | `os_test.conf mask=0x001` |
 | 并发连接 | unixbench 网络相关测试 | `os_test.conf mask=0x020` |
 | DHCP | busybox udhcpc | 内核内 DHCP 在启动阶段完成 |
 | ARP | busybox ping 同网段 IP | 依赖 neighbour.rs |
 | epoll 加网络 | libcbench epoll 测试 | 全测试集 |
 | 多设备 | veth 对测试 | `add_veth_stack` 和 `remove_veth_stack` |
-| 路由 | route_output 加 route_check | 单元测试在 routing.rs |
-| Socket 迁移 | rebind_routed_udp 跨设备栈 | net_core 集成测试 |
+| 路由 | route_output 加 route_check | QEMU 集成验证 (通过 ping/iperf 间接覆盖) |
+| Socket 迁移 | rebind_routed_udp 跨设备栈 | QEMU 集成验证 (跨接口 UDP 通信) |
 
 ---
 
@@ -584,7 +610,7 @@ try_capture_arp_reply(&self.buf, ifindex);
 
 4. **DHCP 超时无回退**：DHCP 探测超时（5 秒）后 eth0 无 IP 地址，系统继续运行但网络不可用。没有后续重试或无状态地址自动配置机制。
 
-5. **ARP 表持久化**：目前 neighbour 条目仅在单次 poll 的生命周期内有效，跨 poll 的 ARP 缓存依赖 smoltcp 内部实现。在高 ARP 压力下可能存在性能损失。
+5. **ARP 表老化机制缺失**：`NEIGHBOUR_TABLE` 是全局持久表（`BTreeMap`），条目不会自动过期。删除依赖 netlink `RTM_DELNEIGH` 或手动干预，缺少 Linux 内核的周期性 NUD 超时回收机制。高 ARP 压力场景下条目可能持续膨胀。
 
 ---
 
