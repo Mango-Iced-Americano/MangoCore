@@ -1,0 +1,466 @@
+---
+title: "信号、pidfd 与 signalfd"
+category: process
+status: stable
+author: MangoCore Team
+last_update: 2026-06-29
+tags: [process, signal, pidfd, signalfd]
+---
+
+# 信号、pidfd 与 signalfd
+
+## 1. 源码位置
+
+信号实现分两层：
+
+| 文件 | 内容 |
+|------|------|
+| `os/src/task/signal/` | 信号 action、pending queue、投递、frame、wait |
+| `os/src/syscall/process/signal.rs` | signal/pidfd/signalfd syscall |
+| `os/src/task/process.rs` | 进程级 shared pending、group exit、stopped/continued |
+| `os/src/task/task.rs` | 线程级 sigmask/pending/signal stack |
+
+syscall 层负责参数和权限校验；task/signal 层负责具体投递、取 pending、构造/恢复 signal frame。
+
+## 2. 线程级与进程级 pending
+
+| pending | 位置 | 来源 |
+|---------|------|------|
+| 线程级 | `TaskControlBlockInner::sigpending` | `tkill/tgkill`、同步异常信号、deferred thread signal |
+| 进程级 | `ProcessSignalState::shared_pending` | `kill(pid)`、`killpg`、`pidfd_send_signal` |
+
+`signalfd` 和 `sigtimedwait` 取 pending 时会先看线程队列，再看进程 shared pending。
+
+`SignalFd` 把这一语义暴露成一个可读的 `IndexNode`。结构体只保存 mask 和 metadata，pending 数据仍在 TCB/PCB 的信号队列里：
+
+```rust
+struct SignalFd {
+    mask: Mutex<Signals>,
+    metadata: Metadata,
+}
+
+impl SignalFd {
+    fn new(mask: Signals) -> Self {
+        Self {
+            mask: Mutex::new(mask),
+            metadata: Metadata::new(
+                FileType::File,
+                InodeMode::S_IFREG | InodeMode::from_bits_truncate(0o600),
+            ),
+        }
+    }
+
+    fn set_mask(&self, mask: Signals) {
+        *self.mask.lock() = mask;
+    }
+
+    fn pending_mask(&self) -> Signals {
+        *self.mask.lock()
+    }
+}
+```
+
+线程级 pending 和进程级 pending 的分离对应 Linux 的两个投递目标：`tkill/tgkill` 指向具体线程，所以进入 TCB；`kill(pid)` 指向线程组，所以进入 PCB 的 shared pending，之后由可接收该信号的线程在返回用户态或等待信号时取走。信号 mask 是线程级状态，因此同一个进程里的不同线程可能对 shared pending 信号有不同可接收性。
+
+读 signal 代码时要分清三张表：`sighand` 保存 handler/action，属于进程共享资源；`sigmask` 属于 TCB，决定当前线程屏蔽哪些信号；pending 队列保存已经投递但尚未交付的信号。`rt_sigreturn` 则是从用户信号帧恢复 trap context 和 mask 的返回路径。
+
+## 3. 信号权限
+
+`can_signal_process(target)`：
+
+| 条件 | 允许 |
+|------|------|
+| sender pid == target pid | 是 |
+| sender euid == 0 | 是 |
+| target 没有 live thread | 是 |
+| sender uid/euid 匹配 target uid/suid | 是 |
+| 其他 | 否 |
+
+不允许时返回 `EPERM`。目标不存在返回 `ESRCH`，信号号无效返回 `EINVAL`。
+
+权限判断源码如下：
+
+```rust
+fn can_signal_process(target: &ProcessControlBlock) -> bool {
+    let Some(sender) = current_task_ref() else {
+        return false;
+    };
+    if sender.pid() == target.pid {
+        return true;
+    }
+    let sender_uid = current_uid();
+    let sender_euid = current_euid();
+
+    if sender_euid == 0 {
+        return true;
+    }
+
+    let Some(target_task) = target.any_live_thread() else {
+        return true;
+    };
+    let target_inner = target_task.acquire_inner_lock();
+    sender_uid == target_inner.uid
+        || sender_uid == target_inner.suid
+        || sender_euid == target_inner.uid
+        || sender_euid == target_inner.suid
+}
+```
+
+这里没有检查 gid；允许条件只包含同进程、root euid、目标无 live thread、sender uid/euid 匹配目标 uid/suid。
+
+## 4. kill/tkill/tgkill
+
+`sys_kill(pid, sig)`：
+
+| pid | 行为 |
+|-----|------|
+| `> 0` | 向指定进程投递 |
+| `0` | 向当前进程组投递 |
+| `-1` | 向所有可投递进程投递 |
+| `< -1` | 向指定进程组投递 |
+
+`sys_tkill(tid, sig)` 查找 tid 并投递线程信号。`sys_tgkill(pid, tid, sig)` 要求 tid 属于 pid。
+
+`SIGKILL` 路径会打印诊断日志，包括 sender tid/pid、当前 syscall 和目标。
+
+## 5. pidfd
+
+pidfd 相关 syscall：
+
+| syscall | 行为 |
+|---------|------|
+| `pidfd_open(pid, flags)` | 为目标进程创建 pidfd 文件 |
+| `pidfd_send_signal(pidfd, sig, info, flags)` | 通过 pidfd 投递进程信号 |
+| `pidfd_getfd(pidfd, targetfd, flags)` | 复制目标进程 fd 到当前进程 |
+
+`pidfd_open`：
+
+| 条件 | 错误 |
+|------|------|
+| pid 为 0 或负数 | `EINVAL` |
+| flags 除 `O_NONBLOCK` 外非 0 | `EINVAL` |
+| 目标进程不存在 | `ESRCH` |
+
+pidfd 文件总是以 CLOEXEC 方式分配 fd。
+
+## 6. pidfd target 解析
+
+`pidfd_file_target_pid(file)` 支持两类 inode：
+
+1. `PidFd` inode。
+2. `/proc/[pid]` namespace 目录类 `LockedProcInode`，要求 file type 为 Dir 且 pid 非 0。
+
+如果 proc inode 里保存了 process weak ref，会确认 weak ref 仍指向相同 pid 且 pid 未释放；否则返回 `ESRCH`。
+
+解析函数既支持真实 pidfd，也支持 `/proc/[pid]` 目录 inode：
+
+```rust
+pub(super) fn pidfd_file_target_pid(file: &File) -> Result<usize, isize> {
+    let inode = MountFSInode::unwrap_inode(&file.inode);
+    if let Some(pidfd) = inode.as_any_ref().downcast_ref::<PidFd>() {
+        return pidfd.target_pid().map_err(|err| -(err as isize));
+    }
+    if let Some(proc_inode) = inode.as_any_ref().downcast_ref::<LockedProcInode>() {
+        let (file_type, pid, process_ref) = {
+            let data = proc_inode.0.lock();
+            (
+                data.metadata.file_type,
+                data.extra_data,
+                data.process_ref.clone(),
+            )
+        };
+        if file_type == FileType::Dir && pid != 0 {
+            if let Some(process_ref) = process_ref {
+                return match process_ref.upgrade() {
+                    Some(process) if process.pid == pid && !process.pid_released() => Ok(pid),
+                    _ => Err(ESRCH),
+                };
+            }
+            return Ok(pid);
+        }
+    }
+    Err(EBADF)
+}
+```
+
+因此 `waitid(P_PIDFD)` 和 `pidfd_send_signal()` 能共享同一套 fd 到 pid 的解析逻辑。
+
+## 7. pidfd_send_signal
+
+参数规则：
+
+| 条件 | 错误 |
+|------|------|
+| flags 非 0 | `EINVAL` |
+| sig 无效 | `EINVAL` |
+| info 指针非 0 但读取失败 | `EFAULT` |
+| info.signo 与 sig 不一致 | `EINVAL` |
+| target 不存在 | `ESRCH` |
+| 无权限 | `EPERM` |
+| 对其他进程发送 kernel-generated siginfo | `EPERM` |
+
+sig 为 0 时只做权限/存在性检查，成功返回 0。
+
+`sys_pidfd_send_signal()` 的主路径如下：
+
+```rust
+pub fn sys_pidfd_send_signal(pidfd: usize, sig: usize, info: usize, flags: usize) -> isize {
+    if flags != 0 {
+        return EINVAL;
+    }
+    let signal = match Signals::from_signum(sig) {
+        Ok(signal) => signal,
+        Err(_) => return EINVAL,
+    };
+
+    let task = current_task_ref().unwrap();
+    let token = current_user_token();
+    let queued_siginfo = if info != 0 {
+        match UserPtr::<SigInfo>::from_addr(info).read(token) {
+            Ok(siginfo) => {
+                if siginfo.signo() != sig {
+                    return EINVAL;
+                }
+                Some(siginfo)
+            }
+            Err(_) => return EFAULT,
+        }
+    } else {
+        None
+    };
+
+    let target_pid = match pidfd_target_pid(pidfd) {
+        Ok(pid) => pid,
+        Err(errno) => return errno,
+    };
+    let Some(process) = ProcessManager::find_process(target_pid) else {
+        return ESRCH;
+    };
+    if !can_signal_process(&process) {
+        return EPERM;
+    }
+    if signal.is_empty() {
+        return SUCCESS;
+    }
+    match queued_siginfo {
+        Some(siginfo) => {
+            if target_pid != task.pid() && siginfo.is_kernel_generated() {
+                return EPERM;
+            }
+            send_process_signal_info(&process, signal, siginfo.with_signal_sender(sig, task.pid()));
+            SUCCESS
+        }
+        None => ProcessManager::send_signal_to_process(target_pid, signal),
+    }
+}
+```
+
+这段代码的 errno 顺序是：先校验 flags 和信号号，再读取 siginfo，再解析 pidfd，再检查目标存在和权限。`sig == 0` 在 `Signals::from_signum(0)` 成功得到空信号后只做存在性和权限检查。
+
+## 8. pidfd_getfd
+
+`pidfd_getfd(pidfd, targetfd, flags)`：
+
+1. flags 必须为 0。
+2. 解析 pidfd 得到 target pid。
+3. 目标进程必须存在且不能是 zombie。
+4. 必须通过 `can_signal_process()` 权限检查。
+5. 从目标 fd table 获取 `targetfd`。
+6. 在当前 fd table 分配新 fd，CLOEXEC 为 true。
+
+它复制的是 `Arc<File>`，因此共享同一底层文件对象。
+
+## 9. signalfd
+
+`SignalFd` 是 devfs 下的 `IndexNode` 实现，内部保存一个信号 mask。
+
+`sys_signalfd4(fd, mask, sigsetsize, flags)`：
+
+| 参数 | 行为 |
+|------|------|
+| `fd == -1` | 创建新 signalfd |
+| `fd >= 0` | 更新已有 signalfd mask |
+| flags | 只允许 `SFD_NONBLOCK`、`SFD_CLOEXEC` |
+| sigsetsize | 必须至少容纳 u64 |
+
+读取 signalfd：
+
+| 条件 | 结果 |
+|------|------|
+| len 小于 `SignalfdSiginfo` | `EINVAL` |
+| 有 matching pending | 写一个或多个 `SignalfdSiginfo` |
+| 无 matching pending | `EAGAIN` |
+
+poll 在有 matching pending 时返回 `EPOLLIN | EPOLLRDNORM`。
+
+`SignalFd::read_at()` 每次读取一个或多个 `SignalfdSiginfo`，没有 matching pending 时直接返回 `EAGAIN`：
+
+```rust
+fn read_at(
+    &self,
+    _offset: usize,
+    len: usize,
+    buf: &mut [u8],
+    _data: MutexGuard<FilePrivateData>,
+) -> Result<usize, SyscallErr> {
+    let info_size = size_of::<SignalfdSiginfo>();
+    if len < info_size || buf.len() < info_size {
+        return Err(SyscallErr::EINVAL);
+    }
+
+    let count = core::cmp::min(len, buf.len()) / info_size;
+    let task = current_task_ref().ok_or(SyscallErr::ESRCH)?;
+    let mask = self.pending_mask();
+    let mut written = 0usize;
+    for slot in 0..count {
+        let Some(pending) = take_pending_signal_matching(task, mask) else {
+            break;
+        };
+        let info = SignalfdSiginfo::from_siginfo(pending.siginfo);
+        let start = slot * info_size;
+        buf[start..start + info_size].copy_from_slice(info.bytes());
+        written += info_size;
+    }
+
+    if written == 0 {
+        Err(SyscallErr::EAGAIN)
+    } else {
+        Ok(written)
+    }
+}
+```
+
+`poll()` 不消费 pending，只检查 mask 是否命中：
+
+```rust
+fn poll(&self, _private_data: &FilePrivateData) -> Result<usize, SyscallErr> {
+    let task = current_task_ref().ok_or(SyscallErr::ESRCH)?;
+    if has_pending_signal_matching(task, self.pending_mask()) {
+        Ok((EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM).bits())
+    } else {
+        Ok(0)
+    }
+}
+```
+
+## 10. sigaction 与 sigprocmask
+
+`sys_sigaction(signum, act, oldact, sigsetsize)` 要求 `sigsetsize == size_of::<u64>()`。
+
+`sigaction()` 对 `signum = 0`、`SIGKILL(9)`、`SIGSTOP(19)` 以及 `signum >= 65` 返回 `EINVAL`。其中 `signum = 0` 不作为 handler 查询入口处理；如果只需要权限或存在性检查，应使用 `kill(pid, 0)` 的信号发送语义。
+
+`sys_sigprocmask(how, set, oldset, sigsetsize)` 要求 `sigsetsize >= size_of::<u64>()`。
+
+信号 mask 会去掉不可屏蔽信号集合 `Signals::CAN_NOT_BE_MASKED`。
+
+## 11. sigpending、sigtimedwait、sigsuspend
+
+| syscall | 行为 |
+|---------|------|
+| `rt_sigpending` | 返回线程 pending 与进程 shared pending 的并集 |
+| `sigtimedwait` | 等待 set 中信号，支持 timeout |
+| `rt_sigsuspend` | 临时替换 sigmask 并等待信号 |
+
+等待路径使用 WaitQueue/调度器的可中断睡眠，信号到达会唤醒 Interruptible 任务。
+
+## 12. sigreturn
+
+`sys_sigreturn()` 从用户 signal frame 恢复：
+
+1. 根据当前 `sp` 计算 ucontext、sigmask、machine context 地址。
+2. 从用户 frame 读取 `UserSignalMask`。
+3. 拷贝 `MachineContext` 回 trap context。
+4. 恢复 sigmask。
+5. 返回 trap context 中保存的 `a0`。
+
+frame 地址溢出、sigmask 或 machine context 读取失败时，当前任务以 `SIGSEGV` 退出。
+
+`sys_sigreturn()` 不重新解释用户 handler 的返回值，而是恢复 machine context 后返回 trap context 中的 `a0`：
+
+```rust
+pub fn sys_sigreturn() -> isize {
+    let task = current_task_ref().unwrap();
+    let token = current_user_token();
+    let mut inner = task.acquire_inner_lock();
+
+    let sp = inner.get_trap_cx().gp.sp;
+    let ucontext_addr = match sp
+        .checked_add(size_of::<SigInfo>())
+        .and_then(|addr| addr.checked_add(0x7))
+    {
+        Some(addr) => addr & !0x7,
+        None => {
+            error!("[sys_sigreturn] invalid signal frame address, send SIGSEGV");
+            drop(inner);
+            exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
+        }
+    };
+    let sigmask_addr = match ucontext_addr
+        .checked_add(2 * size_of::<usize>())
+        .and_then(|addr| addr.checked_add(size_of::<SignalStack>()))
+    {
+        Some(addr) => addr,
+        None => {
+            error!("[sys_sigreturn] invalid sigmask address, send SIGSEGV");
+            drop(inner);
+            exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
+        }
+    };
+    let mcontext_addr = match sigmask_addr
+        .checked_add(size_of::<UserSignalMask>())
+        .and_then(|addr| addr.checked_add(crate::hal::UserContext::PADDING_SIZE))
+    {
+        Some(addr) => addr,
+        None => {
+            error!("[sys_sigreturn] invalid machine context address, send SIGSEGV");
+            drop(inner);
+            exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
+        }
+    };
+    let restored_sigmask = match UserPtr::<UserSignalMask>::from_addr(sigmask_addr).read(token) {
+        Ok(sigmask) => sigmask.to_signals() - Signals::CAN_NOT_BE_MASKED,
+        Err(_) => {
+            error!("[sys_sigreturn] bad sigmask in signal frame, send SIGSEGV");
+            drop(inner);
+            exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
+        }
+    };
+    let trap_cx_ptr = inner.get_trap_cx() as *mut TrapContext;
+    if copy_from_user(
+        token,
+        mcontext_addr as *mut MachineContext,
+        trap_cx_ptr.cast::<MachineContext>(),
+    )
+    .is_err()
+    {
+        error!("[sys_sigreturn] bad machine context in signal frame, send SIGSEGV");
+        drop(inner);
+        exit_current_and_run_next(Signals::SIGSEGV.to_signum().unwrap() as u32);
+    }
+    inner.sigmask = restored_sigmask;
+    inner.get_trap_cx().gp.a0 as isize
+}
+```
+
+该函数直接操作当前 TCB 的 trap context，因此必须持有 `task.inner`。所有用户地址计算都使用 `checked_add()`，任一溢出都会走 `SIGSEGV` 退出。
+
+## 13. stopped/continued 与 wait
+
+进程级停止和继续状态保存在 PCB：
+
+| 方法 | wait 可见状态 |
+|------|---------------|
+| `mark_stopped(signum)` | `((signum << 8) | 0x7f)` |
+| `mark_continued()` | `0xffff` |
+
+PCB 保留 stopped/continued 状态编码；wait option 解析接受 `WSTOPPED/WCONTINUED/WNOWAIT`，但完整 stopped/continued 子进程状态上报以 `exit-wait.md` 中的限制说明为准。
+
+## 14. 调试核对点
+
+| 现象 | 检查 |
+|------|------|
+| kill 返回 EPERM | uid/euid/suid 匹配和 euid 0 |
+| signalfd 一直 EAGAIN | mask 是否匹配 pending，信号是否被其他路径取走 |
+| pidfd 指向已回收进程 | pid handle 是否释放，proc inode weak ref 是否失效 |
+| sigreturn 后寄存器异常 | signal frame 地址计算和 MachineContext 拷贝 |
+| waitid stopped/continued 不出现 | PCB stopped_reported/continued_pending |
