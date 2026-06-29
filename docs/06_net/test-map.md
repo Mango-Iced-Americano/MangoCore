@@ -2,8 +2,8 @@
 title: "网络子系统测试映射"
 category: testing
 status: draft
-author: MangoCore Team
-last_update: 2026-06-14
+owner: MangoCore Team
+last_updated: 2026-06-29
 tags: [net, testing, ltp, oscomp]
 ---
 

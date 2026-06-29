@@ -1,9 +1,9 @@
 ---
 title: "TCP 协议实现"
 category: net
-status: stable
-author: MangoCore Team
-last_update: 2026-06-14
+status: draft
+owner: MangoCore Team
+last_updated: 2026-06-29
 tags: [net, tcp, smoltcp, state-machine]
 ---
 

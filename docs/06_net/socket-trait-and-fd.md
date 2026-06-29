@@ -1,10 +1,32 @@
 ---
 title: "Socket Trait 与文件描述符层"
+module: "net/socket"
 category: net
-status: stable
-author: MangoCore Team
-last_update: 2026-06-14
-tags: [net, socket, trait, fd, vfs]
+status: draft
+owner: MangoCore Team
+last_updated: 2026-06-29
+code_paths:
+  - "os/src/net/socket/mod.rs"
+entry_points:
+  - "Socket::alloc()"
+  - "SocketFile"
+  - "Endpoint"
+arch:
+  rv64: supported
+  la64: supported
+tests:
+  ltp:
+    - "socket01"
+    - "socketpair01"
+  oscomp:
+    - "basic"
+related_docs:
+  - "docs/06_net/tcp.md"
+  - "docs/06_net/udp.md"
+  - "docs/06_net/raw.md"
+  - "docs/06_net/unix.md"
+  - "docs/06_net/netlink.md"
+  - "docs/06_net/packet.md"
 ---
 
 ## 概述
@@ -13,13 +35,13 @@ Socket 子系统分为三层：
 
 | 层 | 位置 | 职责 |
 |----|------|------|
-| `Socket` trait | `net/socket/mod.rs:390` | 所有 socket 类型的统一接口 |
-| `SocketFile` | `net/socket/mod.rs:577` | 将 `Arc<dyn Socket>` 包装为 `IndexNode`，接入 VFS |
-| `Socket::alloc()` | `net/socket/mod.rs:698` | 根据 domain + PSOCK 分派创建具体 socket |
+| `Socket` trait | `os/src/net/socket/mod.rs` | 所有 socket 类型的统一接口 |
+| `SocketFile` | `os/src/net/socket/mod.rs` | 将 `Arc<dyn Socket>` 包装为 `IndexNode`，接入 VFS |
+| `Socket::alloc()` | `os/src/net/socket/mod.rs` | 根据 domain + PSOCK 分派创建具体 socket |
 
 ## 地址族常量
 
-定义在 `net/socket/mod.rs:78-83`：
+定义在 `os/src/net/socket/mod.rs`：
 
 ```rust
 pub const AF_UNSPEC: u16 = 0;
@@ -32,7 +54,7 @@ pub const AF_PACKET: u16 = 17;
 
 ## 关闭模式常量
 
-定义在 `net/socket/mod.rs:87-90`：
+定义在 `os/src/net/socket/mod.rs`：
 
 ```rust
 pub const SHUT_RD:   u32 = 0;
@@ -42,7 +64,7 @@ pub const SHUT_RDWR: u32 = 2;
 
 ## PSOCK 枚举
 
-定义在 `net/socket/mod.rs:96-111`。POSIX socket 纯类型枚举，仅包含类型不包含控制标志：
+定义在 `os/src/net/socket/mod.rs`。POSIX socket 纯类型枚举，仅包含类型不包含控制标志：
 
 | 变体 | 值 | 对应 POSIX 常量 | 用途 |
 |------|----|-----------------|------|
@@ -54,11 +76,11 @@ pub const SHUT_RDWR: u32 = 2;
 | `DCCP` | 6 | `SOCK_DCCP` | 保留 |
 | `Packet` | 10 | `SOCK_PACKET` | 保留 |
 
-`TryFrom<PosixArgsSocketType>` 实现（`mod.rs:113-127`）：从 syscall 参数 `types().bits()` 的低 4 位匹配映射，失败返回 `EINVAL`。
+`TryFrom<PosixArgsSocketType>` 实现：从 syscall 参数 `types().bits()` 的低 4 位匹配映射，失败返回 `EINVAL`。
 
 ## Endpoint 枚举
 
-定义在 `net/socket/mod.rs:180-191`。统一的 socket 端点抽象，覆盖所有地址族：
+定义在 `os/src/net/socket/mod.rs`。统一的 socket 端点抽象，覆盖所有地址族：
 
 ```rust
 pub enum Endpoint {
@@ -72,7 +94,7 @@ pub enum Endpoint {
 
 ### PacketEndpoint 结构体
 
-定义在 `net/socket/mod.rs:157-174`：
+定义在 `os/src/net/socket/mod.rs`：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -85,7 +107,7 @@ pub enum Endpoint {
 
 ### Endpoint::from_sockaddr()
 
-定义在 `mod.rs:195-273`。从原始 sockaddr 字节解析，根据 `sa_family` 自动分发：
+从原始 sockaddr 字节解析，根据 `sa_family` 自动分发：
 
 | 地址族 | 最小长度 | 解析方式 |
 |--------|----------|----------|
@@ -99,7 +121,7 @@ pub enum Endpoint {
 
 ### Endpoint::fill_sockaddr()
 
-定义在 `mod.rs:285-387`。将 Endpoint 写入用户空间 sockaddr 缓冲区并更新 addrlen。
+将 Endpoint 写入用户空间 sockaddr 缓冲区并更新 addrlen。
 
 | 变体 | 写回长度 | 特殊处理 |
 |------|----------|----------|
@@ -111,7 +133,7 @@ pub enum Endpoint {
 
 ## Socket Trait
 
-定义在 `net/socket/mod.rs:390-573`。`pub trait Socket: Send + Sync`，所有 socket 类型的统一接口。
+`pub trait Socket: Send + Sync`，所有 socket 类型的统一接口。
 
 ### 生命周期方法
 
@@ -212,7 +234,7 @@ pub enum Endpoint {
 
 ## SocketFile 结构体
 
-定义在 `net/socket/mod.rs:577-695`。统一的 Socket 文件包装类，所有 socket 类型通过此结构体对外体现为 `IndexNode`。
+定义在 `os/src/net/socket/mod.rs`。统一的 Socket 文件包装类，所有 socket 类型通过此结构体对外体现为 `IndexNode`。
 
 ```rust
 pub struct SocketFile {
@@ -238,7 +260,7 @@ pub struct SocketFile {
 
 ### SocketFS 文件系统
 
-定义在 `net/socket/mod.rs:49-61`。极简 `FileSystem` 实现，仅用于为 socket inode 提供 `fs()` 返回值：
+极简 `FileSystem` 实现，仅用于为 socket inode 提供 `fs()` 返回值：
 
 ```rust
 struct SocketFS;
@@ -255,7 +277,7 @@ impl FileSystem for SocketFS {
 }
 ```
 
-全局单例（`mod.rs:63-65`）：
+全局单例：
 
 ```rust
 lazy_static! {
@@ -265,7 +287,7 @@ lazy_static! {
 
 ## Socket::alloc() 分发逻辑
 
-定义在 `net/socket/mod.rs:698-785`。根据 domain + PSOCK 分派创建具体 socket 并分配 fd：
+根据 domain + PSOCK 分派创建具体 socket 并分配 fd：
 
 ```
 match domain:
@@ -296,7 +318,7 @@ match domain:
   _                             -> EAFNOSUPPORT
 ```
 
-辅助函数 `alloc_socket_fd`（`mod.rs:706-713`）：
+辅助函数 `alloc_socket_fd`：
 
 ```rust
 let alloc_socket_fd = |socket_file: Arc<dyn IndexNode>| -> GeneralRet<usize> {
@@ -310,7 +332,7 @@ let alloc_socket_fd = |socket_file: Arc<dyn IndexNode>| -> GeneralRet<usize> {
 
 ## Socket::addr() 与 Socket::peer_addr()
 
-定义在 `mod.rs:801-850`。获取 sockname / peername 的辅助方法，严格遵循 Linux 的优先级检查顺序：
+获取 sockname / peername 的辅助方法，严格遵循 Linux 的优先级检查顺序：
 
 ```
 addr():
@@ -331,19 +353,19 @@ peer_addr():
 
 | 变量 | 类型 | 文件位置 | 说明 |
 |------|------|----------|------|
-| `UDP_SOCKETS` | `Mutex<Vec<Weak<UdpSocket>>>` | `mod.rs:138` | 所有活跃 UDP socket |
-| `UDP_SOCKETS_TO_REMOVE` | `Mutex<Vec<RouteSocketHandle>>` | `mod.rs:139` | 待移除的 UDP route handle |
-| `TCP_SOCKETS` | `Mutex<Vec<Weak<TcpSocket>>>` | `mod.rs:142` | 所有活跃 TCP socket |
-| `TCP_SOCKETS_TO_REMOVE` | `Mutex<Vec<RouteSocketHandle>>` | `mod.rs:143` | 待移除的 TCP route handle |
-| `RAW_SOCKETS` | `Mutex<Vec<(RouteSocketHandle, Weak<RawSocket>)>>` | `mod.rs:146` | 所有活跃 Raw socket（带 route handle） |
-| `RAW_SOCKETS_TO_REMOVE` | `Mutex<Vec<RouteSocketHandle>>` | `mod.rs:147` | 待移除的 Raw route handle |
-| `PACKET_SOCKETS` | `Mutex<Vec<Weak<PacketSocket>>>` | `mod.rs:150` | 所有活跃 Packet socket |
+| `UDP_SOCKETS` | `Mutex<Vec<Weak<UdpSocket>>>` | `os/src/net/socket/mod.rs` | 所有活跃 UDP socket |
+| `UDP_SOCKETS_TO_REMOVE` | `Mutex<Vec<RouteSocketHandle>>` | `os/src/net/socket/mod.rs` | 待移除的 UDP route handle |
+| `TCP_SOCKETS` | `Mutex<Vec<Weak<TcpSocket>>>` | `os/src/net/socket/mod.rs` | 所有活跃 TCP socket |
+| `TCP_SOCKETS_TO_REMOVE` | `Mutex<Vec<RouteSocketHandle>>` | `os/src/net/socket/mod.rs` | 待移除的 TCP route handle |
+| `RAW_SOCKETS` | `Mutex<Vec<(RouteSocketHandle, Weak<RawSocket>)>>` | `os/src/net/socket/mod.rs` | 所有活跃 Raw socket（带 route handle） |
+| `RAW_SOCKETS_TO_REMOVE` | `Mutex<Vec<RouteSocketHandle>>` | `os/src/net/socket/mod.rs` | 待移除的 Raw route handle |
+| `PACKET_SOCKETS` | `Mutex<Vec<Weak<PacketSocket>>>` | `os/src/net/socket/mod.rs` | 所有活跃 Packet socket |
 
 全局遍历使用 `Weak` 引用，每次遍历时尝试 `upgrade()`，对已释放的条目记录索引延迟移除。
 
 ### wake_tcp_waiters()
 
-定义在 `mod.rs:854-879`。在每个网卡 poll 后调用，遍历 `TCP_SOCKETS` 唤醒等待队列。
+定义在 `os/src/net/socket/mod.rs`。在每个网卡 poll 后调用，遍历 `TCP_SOCKETS` 唤醒等待队列。
 
 ```rust
 pub fn wake_tcp_waiters() {
@@ -356,7 +378,7 @@ pub fn wake_tcp_waiters() {
 
 ### wake_raw_waiters()
 
-定义在 `mod.rs:882-917`。在每个网卡 poll 后调用，遍历 `RAW_SOCKETS` 检查原始 socket 就绪状态。
+定义在 `os/src/net/socket/mod.rs`。在每个网卡 poll 后调用，遍历 `RAW_SOCKETS` 检查原始 socket 就绪状态。
 
 ```rust
 pub fn wake_raw_waiters() {
@@ -370,7 +392,7 @@ pub fn wake_raw_waiters() {
 
 ## MAX_BUFFER_SIZE
 
-定义在 `mod.rs:135`：
+定义在 `os/src/net/socket/mod.rs`：
 
 ```rust
 pub const MAX_BUFFER_SIZE: usize = 64 * 1024;
@@ -381,10 +403,10 @@ pub const MAX_BUFFER_SIZE: usize = 64 * 1024;
 | 文件 | 内容 |
 |------|------|
 | `os/src/net/socket/mod.rs` | Socket trait、SocketFile、Endpoint、PSOCK、Socket::alloc()、全局列表 |
-| `os/src/net/socket/inet/` | TcpSocket、UdpSocket、RawSocket |
-| `os/src/net/socket/unix/` | UnixStreamSocket、UnixDatagramSocket、UnixEndpoint |
-| `os/src/net/socket/netlink/` | NetlinkSocket |
-| `os/src/net/socket/packet.rs` | PacketSocket |
+| `os/src/net/socket/inet/` | TcpSocket、UdpSocket、RawSocket（详见 [tcp.md](tcp.md)、[udp.md](udp.md)、[raw.md](raw.md)、[inet-common.md](inet-common.md)） |
+| `os/src/net/socket/unix/` | UnixStreamSocket、UnixDatagramSocket、UnixEndpoint（详见 [unix.md](unix.md)） |
+| `os/src/net/socket/netlink/` | NetlinkSocket（详见 [netlink.md](netlink.md)） |
+| `os/src/net/socket/packet.rs` | PacketSocket（详见 [packet.md](packet.md)） |
 | `os/src/net/macros.rs` | 废弃的 impl_file_for_socket! 宏说明 |
 | `os/src/net/ioctl.rs` | SIOCGIF* ioctl 分发 |
 | `os/src/net/routing/` | RouteSocketHandle |

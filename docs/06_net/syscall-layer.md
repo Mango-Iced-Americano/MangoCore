@@ -1,9 +1,9 @@
 ---
 title: "网络系统调用层"
 category: net
-status: stable
-author: MangoCore Team
-last_update: 2026-06-14
+status: draft
+owner: MangoCore Team
+last_updated: 2026-06-29
 tags: [net, syscall, socket, posix]
 ---
 

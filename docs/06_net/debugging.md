@@ -2,8 +2,8 @@
 title: "网络子系统调试指南"
 category: debugging
 status: draft
-author: MangoCore Team
-last_update: 2026-06-14
+owner: MangoCore Team
+last_updated: 2026-06-29
 tags: [net, debugging, qemu, gdb, troubleshooting]
 ---
 
