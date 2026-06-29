@@ -26,6 +26,14 @@
 
 **备注：** 基于 Oracle 第二轮交叉评审，定位到 12 处 Q&A 案例与源代码事实不匹配的问题。所有修复均为靶向替换，保持 Q&A 格式。
 
+### 添加 Technical-Report-MangoCore.md 目录（含 GitHub 锚点链接）
+
+**涉及文件：**
+- `docs/Technical-Report-MangoCore.md` — 在文档标题与第 1 章之间插入 `## 目录`，包含全部 183 个 `##` 和 `###` 标题及其 GitHub 自动锚点链接；2 空格缩进标识 `###` 子章节
+
+**验证：**
+- 纯文档编辑，无需编译验证
+
 ### 第三轮 Oracle 终审修复：Engineering-Casebook.md 10 处重大不准确 + 3 处绝对化措辞
 
 **涉及文件：**

@@ -1,44 +1,119 @@
 # MangoCore Engineering Casebook（Q\&A）
 
-# 目录
+## 目录
 
-第1章 Debug体系介绍
-
-第2章 Memory模块
-
-第3章 Scheduler模块
-
-第4章 VFS模块
-
-第5章 PageCache模块
-
-第6章 Network模块
-
-第7章 Driver模块
-
-第8章 Regression案例
-
-# Table of Contents
-
-Chapter1  Debug Philosophy
-
-Chapter2  Memory Research
-
-Chapter3  Process \& Scheduler Research
-
-Chapter4  VFS Research
-
-Chapter5  PageCache Research
-
-Chapter6  mmap Research
-
-Chapter7  Network Research
-
-Chapter8  Driver Research
-
-Chapter9  Regression Research
-
-Chapter10 Lessons Learned
+- [Chapter 1 Debug Philosophy](#chapter-1-debug-philosophy)
+  - [1.1 调试理念](#11-调试理念)
+  - [QA001 为什么不再依赖printk调试？](#qa001-为什么不再依赖printk调试)
+  - [QA002 为什么建立统一生命周期？](#qa002-为什么建立统一生命周期)
+  - [QA003 为什么坚持Benchmark驱动开发？](#qa003-为什么坚持benchmark驱动开发)
+  - [QA004 为什么建立Deep Research机制？](#qa004-为什么建立deep-research机制)
+  - [1.2 本章总结](#12-本章总结)
+- [Chapter 2 Memory Research](#chapter-2-memory-research)
+  - [从内存分配到生命周期管理](#从内存分配到生命周期管理)
+  - [2.1 Memory模块概述](#21-memory模块概述)
+  - [QA001 为什么内核堆 Buddy 分配器长时间运行后性能退化？](#qa001-为什么内核堆-buddy-分配器长时间运行后性能退化)
+  - [QA002 为什么Page一直无法释放？](#qa002-为什么page一直无法释放)
+  - [QA003 为什么AddressSpace映射会异常？](#qa003-为什么addressspace映射会异常)
+  - [QA004 为什么Heap占用持续增长？](#qa004-为什么heap占用持续增长)
+  - [QA005 为什么OOM提前发生？](#qa005-为什么oom提前发生)
+  - [QA006 为什么Reference容易出错？](#qa006-为什么reference容易出错)
+  - [QA007 为什么建立统一Memory Lifecycle？](#qa007-为什么建立统一memory-lifecycle)
+  - [2.2 本章总结](#22-本章总结)
+- [Chapter 3 Process & Scheduler Research](#chapter-3-process-scheduler-research)
+  - [从进程管理到资源生命周期统一](#从进程管理到资源生命周期统一)
+  - [3.1 Process模块概述](#31-process模块概述)
+  - [QA001 为什么fork后子进程文件异常？](#qa001-为什么fork后子进程文件异常)
+  - [QA002 为什么 Zombie PCB 持续累积？](#qa002-为什么-zombie-pcb-持续累积)
+  - [QA004 为什么Scheduler偶尔无法切换任务？](#qa004-为什么scheduler偶尔无法切换任务)
+  - [QA005 为什么文件描述符越来越多？](#qa005-为什么文件描述符越来越多)
+  - [QA006 为什么exec后资源没有更新？](#qa006-为什么exec后资源没有更新)
+  - [QA007 为什么建立统一Task Lifecycle？](#qa007-为什么建立统一task-lifecycle)
+  - [QA008 为什么建立统一Process Owner机制？](#qa008-为什么建立统一process-owner机制)
+  - [3.2 本章总结](#32-本章总结)
+- [Chapter 4 VFS Research](#chapter-4-vfs-research)
+  - [从文件访问到统一文件系统抽象](#从文件访问到统一文件系统抽象)
+  - [4.1 VFS模块概述](#41-vfs模块概述)
+  - [QA001 为什么需要统一File抽象？](#qa001-为什么需要统一file抽象)
+  - [QA002 为什么路径解析越来越慢？](#qa002-为什么路径解析越来越慢)
+  - [QA003 为什么IndexNode生命周期容易混乱？](#qa003-为什么indexnode生命周期容易混乱)
+  - [QA004 为什么Mount之后路径异常？](#qa004-为什么mount之后路径异常)
+  - [QA005 为什么File关闭后Page仍存在？](#qa005-为什么file关闭后page仍存在)
+  - [QA006 为什么建立统一File Operation？](#qa006-为什么建立统一file-operation)
+  - [QA007 为什么建立统一VFS Lifecycle？](#qa007-为什么建立统一vfs-lifecycle)
+  - [4.2 本章总结](#42-本章总结)
+- [Chapter 5 PageCache Research](#chapter-5-pagecache-research)
+  - [从数据缓存到统一缓存生命周期](#从数据缓存到统一缓存生命周期)
+  - [5.1 PageCache模块概述](#51-pagecache模块概述)
+  - [QA001 为什么需要独立PageCache？](#qa001-为什么需要独立pagecache)
+  - [QA002 为什么Page越来越多？](#qa002-为什么page越来越多)
+  - [QA003 为什么Dirty Page越来越多？](#qa003-为什么dirty-page越来越多)
+  - [QA004 为什么WriteBack性能下降？](#qa004-为什么writeback性能下降)
+  - [QA005 为什么Cache Hit率很低？](#qa005-为什么cache-hit率很低)
+  - [QA006 为什么建立统一Page State？](#qa006-为什么建立统一page-state)
+  - [QA007 为什么建立统一WriteBack机制？](#qa007-为什么建立统一writeback机制)
+  - [QA008 为什么删除BufferCache？](#qa008-为什么删除buffercache)
+  - [5.2 本章总结](#52-本章总结)
+- [Chapter 6 mmap Research](#chapter-6-mmap-research)
+  - [从地址映射到统一虚拟内存管理](#从地址映射到统一虚拟内存管理)
+  - [6.1 mmap模块概述](#61-mmap模块概述)
+  - [QA001 为什么需要mmap而不是read/write？](#qa001-为什么需要mmap而不是readwrite)
+  - [QA002 为什么映射区域会重复创建？](#qa002-为什么映射区域会重复创建)
+  - [QA003 为什么Page Fault越来越多？](#qa003-为什么page-fault越来越多)
+  - [QA004 为什么多个进程共享映射异常？](#qa004-为什么多个进程共享映射异常)
+  - [QA005 为什么munmap后Page没有释放？](#qa005-为什么munmap后page没有释放)
+  - [QA006 为什么建立统一VMA管理？](#qa006-为什么建立统一vma管理)
+  - [QA007 为什么建立统一Memory Mapping Lifecycle？](#qa007-为什么建立统一memory-mapping-lifecycle)
+  - [6.2 本章总结](#62-本章总结)
+- [Chapter 7 Network Research](#chapter-7-network-research)
+  - [从Socket通信到统一网络资源管理](#从socket通信到统一网络资源管理)
+  - [7.1 Network模块概述](#71-network模块概述)
+  - [QA001 为什么Socket关闭后资源没有释放？](#qa001-为什么socket关闭后资源没有释放)
+  - [QA002 为什么 fork 后端口分配碰撞（Heisenberg 问题）？](#qa002-为什么-fork-后端口分配碰撞heisenberg-问题)
+  - [QA003 为什么Accept越来越慢？](#qa003-为什么accept越来越慢)
+  - [QA004 为什么Buffer越来越多？](#qa004-为什么buffer越来越多)
+  - [QA005 实际路由结构是什么样的？](#qa005-实际路由结构是什么样的)
+  - [QA006 为什么Send/Recv路径仍有优化空间？](#qa006-为什么sendrecv路径仍有优化空间)
+  - [QA007 为什么建立统一Socket State？](#qa007-为什么建立统一socket-state)
+  - [QA008 为什么建立统一Network Owner？](#qa008-为什么建立统一network-owner)
+  - [QA009 为什么建立统一Network Regression？](#qa009-为什么建立统一network-regression)
+  - [7.2 本章总结](#72-本章总结)
+- [Chapter 8 Driver Research](#chapter-8-driver-research)
+  - [从设备访问到统一驱动资源管理](#从设备访问到统一驱动资源管理)
+  - [8.1 Driver模块概述](#81-driver模块概述)
+  - [QA001 为什么建立统一Driver接口？](#qa001-为什么建立统一driver接口)
+  - [QA002 为什么DMA Buffer越来越多？](#qa002-为什么dma-buffer越来越多)
+  - [QA003 为什么Interrupt越来越复杂？](#qa003-为什么interrupt越来越复杂)
+  - [QA004 为什么Block Driver与PageCache重复缓存？](#qa004-为什么block-driver与pagecache重复缓存)
+  - [QA005 为什么Device状态容易混乱？](#qa005-为什么device状态容易混乱)
+  - [QA006 为什么建立统一Driver Owner？](#qa006-为什么建立统一driver-owner)
+  - [QA007 为什么建立统一Driver Regression？](#qa007-为什么建立统一driver-regression)
+  - [8.2 本章总结](#82-本章总结)
+- [Chapter 9 Regression Research](#chapter-9-regression-research)
+  - [从功能验证到Benchmark驱动开发](#从功能验证到benchmark驱动开发)
+  - [9.1 Regression模块概述](#91-regression模块概述)
+  - [QA001 为什么不能只验证功能正确？](#qa001-为什么不能只验证功能正确)
+  - [QA002 为什么建立Benchmark驱动开发？](#qa002-为什么建立benchmark驱动开发)
+  - [QA003 为什么建立Long Running测试？](#qa003-为什么建立long-running测试)
+  - [QA004 为什么建立统一Regression Case？](#qa004-为什么建立统一regression-case)
+  - [QA005 为什么建立统一Benchmark Matrix？](#qa005-为什么建立统一benchmark-matrix)
+  - [QA006 为什么建立统一Resource Monitor？](#qa006-为什么建立统一resource-monitor)
+  - [QA007 为什么建立统一Performance Baseline？](#qa007-为什么建立统一performance-baseline)
+  - [QA008 为什么建立Benchmark驱动工程文化？](#qa008-为什么建立benchmark驱动工程文化)
+  - [9.2 本章总结](#92-本章总结)
+- [Chapter 10 Lessons Learned](#chapter-10-lessons-learned)
+  - [从功能实现到可验证的 Kernel 工程实践](#从功能实现到可验证的-kernel-工程实践)
+  - [10.1 本章概述](#101-本章概述)
+  - [Lesson 1 功能正确不代表系统正确](#lesson-1-功能正确不代表系统正确)
+  - [Lesson 2 生命周期比算法更加重要](#lesson-2-生命周期比算法更加重要)
+  - [Lesson 3 模块解耦优于局部优化](#lesson-3-模块解耦优于局部优化)
+  - [Lesson 4 Benchmark比经验更加可靠](#lesson-4-benchmark比经验更加可靠)
+  - [Lesson 5 Regression不是测试，而是开发流程](#lesson-5-regression不是测试而是开发流程)
+  - [Lesson 6 长时间稳定运行比一次Benchmark更重要](#lesson-6-长时间稳定运行比一次benchmark更重要)
+  - [Lesson 7 Kernel开发本质是资源管理](#lesson-7-kernel开发本质是资源管理)
+  - [Lesson 8 Benchmark驱动形成统一工程文化](#lesson-8-benchmark驱动形成统一工程文化)
+  - [Lesson 9 MangoCore的发展过程](#lesson-9-mangocore的发展过程)
+  - [10.2 全文总结](#102-全文总结)
 
 # Chapter 1 Debug Philosophy
 
