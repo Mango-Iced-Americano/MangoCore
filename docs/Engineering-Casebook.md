@@ -1,4 +1,4 @@
-# Engineering Casebook（Q\&A）\.md
+# MangoCore Engineering Casebook（Q\&A）
 
 # 目录
 
@@ -454,7 +454,7 @@ Question → Investigation → Root Cause → Fix → Benchmark → Regression �
 
 # 2\.1 Memory模块概述
 
-Memory是整个Kernel最基础的子系统，也是后续Task、VFS、PageCache、Network等模块运行的基础。项目开发过程中，大部分复杂Bug最终都可以归结到内存生命周期管理问题，包括Page无法释放、Buddy碎片增加、MemorySet映射异常以及引用计数错误等。
+Memory是整个Kernel最基础的子系统，也是后续Task、VFS、PageCache、Network等模块运行的基础。项目开发过程中，大部分复杂Bug最终都可以归结到内存生命周期管理问题，包括Page无法释放、Buddy碎片增加、AddressSpace映射异常以及引用计数错误等。
 
 因此，本章围绕Memory模块开发过程中的典型问题进行整理，展示MangoCore如何通过统一生命周期和统一Owner机制完成内存系统重构。
 
@@ -466,11 +466,11 @@ Memory Request → Allocation → Reference Analysis → Root Cause → Fix → 
 
 ---
 
-# QA001 为什么Buddy长时间运行后碎片越来越多？
+# QA001 为什么内核堆 Buddy 分配器长时间运行后碎片越来越多？
 
 ## Question
 
-系统连续运行后，大块连续内存申请失败，但统计显示系统仍存在大量空闲页。
+系统连续运行后，内核堆上大块连续内存申请失败，但统计显示 Buddy 分配器仍存在大量空闲页。注意此处讨论的 Buddy 分配器是内核堆分配器（`Heap<32>` / `OomAwareAllocator` 底层），而非物理页帧分配器（`StackFrameAllocator`）。物理页帧采用栈式分配器而非 Buddy 算法，不存在相同的外碎片问题。
 
 ---
 
@@ -540,10 +540,10 @@ Free Page → Find Buddy → Merge → Insert FreeList
 
 ## Verification
 
-连续执行：
+连续执行大量 Allocate/Free 操作：
 
 ```Plain Text
-100000 Allocate → 100000 Free
+Allocate → Free
 ```
 
 结果：
@@ -597,11 +597,7 @@ Buddy空闲页不断减少。
 heap\_trace显示：
 
 ```Plain Text
-Page
-
-Reference = 2
-
-Owner = IndexNode
+Unfreed: count=2, size=4096, call PC=0x...
 ```
 
 File已经关闭。
@@ -668,7 +664,7 @@ Page必须具有唯一Owner。
 
 ---
 
-# QA003 为什么MemorySet映射会异常？
+# QA003 为什么AddressSpace映射会异常？
 
 ## Question
 
@@ -702,7 +698,7 @@ Access Denied
 
 检查：
 
-MemoryArea；
+Vma；
 
 PageTable；
 
@@ -710,7 +706,7 @@ Virtual Address。
 
 发现：
 
-MemoryArea已经复制。
+Vma已经复制。
 
 PageTable正常。
 
@@ -720,7 +716,7 @@ Frame引用异常。
 
 ## Root Cause
 
-fork复制MemorySet时，仅复制映射关系，没有同步Frame引用计数。
+fork复制AddressSpace时，仅复制映射关系，没有同步Frame引用计数。
 
 导致Frame提前释放。
 
@@ -731,7 +727,7 @@ fork复制MemorySet时，仅复制映射关系，没有同步Frame引用计数�
 修改fork流程：
 
 ```Plain Text
-Copy MemoryArea → Copy Mapping → Increase Frame Reference
+Copy Vma → Copy Mapping → Increase Frame Reference
 ```
 
 统一维护Frame生命周期。
@@ -745,7 +741,7 @@ Copy MemoryArea → Copy Mapping → Increase Frame Reference
 ```Plain Text
 fork → exec → wait
 
-10000次
+大量迭代
 ```
 
 全部正常。
@@ -754,7 +750,7 @@ fork → exec → wait
 
 ## Lessons Learned
 
-MemorySet不仅复制地址空间，更需要维护底层Frame生命周期。
+AddressSpace不仅复制地址空间，更需要维护底层Frame生命周期。
 
 ---
 
@@ -797,11 +793,7 @@ Task数量无明显变化。
 heap\_trace统计：
 
 ```Plain Text
-Allocate
-
-Reference
-
-Owner
+Allocation count: N, size: M, call PC=0x...
 ```
 
 发现：
@@ -826,21 +818,13 @@ Heap申请没有统一Owner记录。
 
 ## Fix
 
-增加heap\_trace：
-
-统一记录：
+增加heap\_trace，按调用点（call PC）记录分配次数和未释放计数：
 
 ```Plain Text
-Allocate Site
-
-Owner
-
-Reference
-
-State
+Allocation: count=10, unfreed=3, call PC=0x...
 ```
 
-所有Heap对象均可追踪。
+从而可按调用点定位泄漏来源。
 
 ---
 
@@ -902,7 +886,7 @@ Buddy；
 
 Heap；
 
-MemorySet。
+AddressSpace。
 
 最终发现：
 
@@ -981,13 +965,7 @@ Kernel应统计真实可回收资源。
 heap\_trace：
 
 ```Plain Text
-Page
-
-Reference = 3
-
-Task退出后
-
-Reference = 1
+Allocation: count=3, unfreed=1, call PC=0x...
 ```
 
 无法释放。
@@ -1072,7 +1050,7 @@ Frame；
 
 Heap；
 
-MemorySet；
+AddressSpace；
 
 分别维护生命周期。
 
@@ -1094,7 +1072,7 @@ Zombie Page
 
 统计发现：
 
-超过70%的Memory Bug属于生命周期不一致。
+大量Memory Bug属于生命周期不一致（此比例为开发过程中的定性观察，非严格统计）。
 
 ---
 
@@ -1136,7 +1114,7 @@ Memory保持稳定。
 
 # 2\.2 本章总结
 
-Memory模块开发过程中，大部分问题并非来自分配算法，而是来自生命周期管理和对象引用关系。MangoCore通过重新设计Buddy释放策略、Page唯一Owner机制、MemorySet引用管理以及统一Memory Lifecycle，有效解决了碎片增加、Page泄漏、Frame异常和OOM误判等典型问题。
+Memory模块开发过程中，大部分问题并非来自分配算法，而是来自生命周期管理和对象引用关系。MangoCore通过重新设计Buddy释放策略、Page唯一Owner机制、AddressSpace引用管理以及统一Memory Lifecycle，有效解决了碎片增加、Page泄漏、Frame异常和OOM误判等典型问题。
 
 整个Memory模块最终形成统一开发模式：
 
@@ -1346,12 +1324,10 @@ Task Exit → Resource Release → Parent Notify → Remove Child → Recycle
 
 ## Verification
 
-连续执行：
+连续执行大量 fork/exit/wait 迭代：
 
 ```Plain Text
 fork → exit → wait
-
-50000次
 ```
 
 Zombie数量始终保持稳定。
@@ -1572,10 +1548,10 @@ Switch Context
 
 ## Verification
 
-连续执行：
+连续执行大量上下文切换：
 
 ```Plain Text
-100000 Context Switch
+Context Switch
 ```
 
 Ready Queue保持正常。
@@ -1722,7 +1698,7 @@ New Program
 
 观察：
 
-旧MemorySet仍然存在。
+旧AddressSpace仍然存在。
 
 ---
 
@@ -1763,7 +1739,7 @@ Release Old Memory
 
 ↓
 
-Create New MemorySet
+Create New AddressSpace
 
 ↓
 
@@ -1993,7 +1969,7 @@ Process
 
 ↓
 
-MemorySet
+AddressSpace
 
 ↓
 
@@ -3230,7 +3206,7 @@ Sequential Write
 Latency持续增加
 ```
 
-WriteBack线程占用CPU。
+WriteBack操作（通过 per-PageCache dirty 集合与后台批量刷新）占用大量 CPU。
 
 ---
 
@@ -3728,14 +3704,14 @@ Block Device
 
 # 6\.1 mmap模块概述
 
-mmap是连接用户虚拟地址空间与文件数据的重要机制，它允许用户程序直接通过内存访问文件，而无需频繁执行read/write系统调用。随着PageCache和MemorySet逐渐完善，传统read/write方式已经无法满足高性能访问需求，因此项目逐步实现了统一的Memory Mapping机制。
+mmap是连接用户虚拟地址空间与文件数据的重要机制，它允许用户程序直接通过内存访问文件，而无需频繁执行read/write系统调用。随着PageCache和AddressSpace逐渐完善，传统read/write方式已经无法满足高性能访问需求，因此项目逐步实现了统一的Memory Mapping机制。
 
-开发过程中，团队重点解决了映射重复创建、Page共享异常、Page Fault处理不一致以及映射生命周期混乱等问题，并建立了MemorySet、PageCache和VFS之间统一的映射关系。
+开发过程中，团队重点解决了映射重复创建、Page共享异常、Page Fault处理不一致以及映射生命周期混乱等问题，并建立了AddressSpace、PageCache和VFS之间统一的映射关系。
 
 统一分析流程如下：
 
 ```Plain Text
-mmap Request → MemorySet → VMA Lookup → PageCache Lookup → Page Fault → Mapping → Regression
+mmap Request → AddressSpace → VMA Lookup → PageCache Lookup → Page Fault → Mapping → Regression
 ```
 
 ---
@@ -3795,7 +3771,7 @@ read/write属于数据复制模型。
 建立统一映射：
 
 ```Plain Text
-Application Virtual Address → MemorySet → PageCache Page
+Application Virtual Address → AddressSpace → PageCache Page
 ```
 
 用户空间直接访问缓存页。
@@ -3824,7 +3800,7 @@ mmap不仅是映射机制，更是零拷贝访问机制。
 
 ## Question
 
-同一个文件多次mmap，MemorySet不断增长。
+同一个文件多次mmap，AddressSpace不断增长。
 
 ---
 
@@ -3847,7 +3823,7 @@ mmap
 观察：
 
 ```Plain Text
-MemorySet
+AddressSpace
 
 8
 
@@ -3868,7 +3844,7 @@ MemorySet
 
 检查：
 
-MemoryArea；
+Vma；
 
 VMA；
 
@@ -3884,7 +3860,7 @@ PageTable。
 
 munmap仅删除PageTable。
 
-没有同步删除MemoryArea。
+没有同步删除Vma。
 
 ---
 
@@ -3893,7 +3869,7 @@ munmap仅删除PageTable。
 统一释放流程：
 
 ```Plain Text
-munmap → Remove VMA → Release Mapping → Update MemorySet
+munmap → Remove VMA → Release Mapping → Update AddressSpace
 ```
 
 映射和地址空间同步释放。
@@ -3910,7 +3886,7 @@ mmap → munmap
 10000次
 ```
 
-MemorySet保持稳定。
+AddressSpace保持稳定。
 
 ---
 
@@ -4072,7 +4048,7 @@ write
 
 检查：
 
-MemorySet；
+AddressSpace；
 
 Page；
 
@@ -4171,7 +4147,7 @@ Memory没有回收。
 分析：
 
 ```Plain Text
-MemorySet
+AddressSpace
 
 ↓
 
@@ -4201,7 +4177,7 @@ Page生命周期错误绑定VMA。
 重新定义：
 
 ```Plain Text
-MemorySet → Mapping
+AddressSpace → Mapping
 
 PageCache → Owner(Page)
 ```
@@ -4283,7 +4259,7 @@ Mapping逻辑重复。
 建立统一VMA：
 
 ```Plain Text
-MemorySet
+AddressSpace
 
 ↓
 
@@ -4349,7 +4325,7 @@ Task
 
 ↓
 
-MemorySet
+AddressSpace
 
 ↓
 
@@ -4372,7 +4348,7 @@ Page
 
 Owner不明确。
 
-VMA、MemorySet、PageCache共同维护Page。
+VMA、AddressSpace、PageCache共同维护Page。
 
 导致引用混乱。
 
@@ -4418,7 +4394,7 @@ Mapping负责地址。
 
 PageCache负责数据。
 
-MemorySet负责组织。
+AddressSpace负责组织。
 
 职责统一后生命周期才能保持一致。
 
@@ -4435,7 +4411,7 @@ Application
       ↓
 Virtual Address
       ↓
-MemorySet
+AddressSpace
       ↓
 VMA Lookup
       ↓
@@ -5038,11 +5014,11 @@ Socket负责生命周期。
 
 ---
 
-# QA006 为什么Send/Recv存在重复Copy？
+# QA006 为什么Send/Recv路径仍有优化空间？
 
 ## Question
 
-数据已经存在PageCache，为什么Send仍需要Copy？
+Send 路径能否减少数据拷贝次数？
 
 ---
 
@@ -5076,57 +5052,29 @@ NIC
 
 CPU大量时间用于Memory Copy。
 
-真正发送耗时很少。
-
 ---
 
 ## Root Cause
 
-Network Buffer没有共享Page。
-
-每次Send重新复制数据。
+Send 过程中 UserBuffer → 临时 Vec → smoltcp 缓冲区的两次拷贝增加了 CPU 开销。当前 TCP try\_send\_user 路径仍需从 UserBuffer 拷贝到临时 Vec，不存在零拷贝发送。
 
 ---
 
 ## Fix
 
-重新设计：
-
-```Plain Text
-User Page
-
-↓
-
-Page Reference
-
-↓
-
-Network Buffer
-
-↓
-
-NIC
-```
-
-Buffer共享Page。
-
-避免重复Copy。
+部分 recv/send 路径减少了额外拷贝次数（如减少中间缓冲层），但不存在 PageCache 或网络的零拷贝发送。收发路径仍有优化空间。
 
 ---
 
 ## Verification
 
-iperf测试：
-
-吞吐率明显提升。
-
-CPU利用率下降。
+结构优化后中间缓冲层减少，iperf 测试吞吐率有改善。
 
 ---
 
 ## Lessons Learned
 
-真正的网络优化来自减少Copy，而不是优化Send函数。
+网络性能优化的核心是减少数据拷贝，但零拷贝需要更底层的页共享机制支持，当前尚未完全实现。
 
 ---
 
@@ -5348,9 +5296,7 @@ Long Running
 Regression
 ```
 
-Socket、Route、Buffer数量全部保持稳定。
-
-Regression全部通过。
+Socket、Route、Buffer数量保持稳定。模块级回归检查通过（覆盖网络核心路径的构造与析构）。
 
 ---
 
@@ -6334,7 +6280,7 @@ Block Device / Network Device / Console
 
 随着Memory、Process、VFS、PageCache、mmap、Network以及Driver模块逐步完善，Kernel开发逐渐进入持续优化阶段。然而，在实际开发过程中发现，大量Bug虽然能够快速修复，却经常导致其他模块性能下降或者资源管理异常，形成典型的Regression问题。
 
-因此，项目逐步建立了以Benchmark为核心、以Long Running为保障、以Regression为准入条件的统一测试体系。所有代码修改均必须经过完整测试验证，确保任何优化不会降低Kernel整体稳定性。
+因此，项目逐步建立了以Benchmark为核心、以Long Running为保障、以Regression为准入条件的统一测试体系。CI 自动执行编译与 basic/busybox 冒烟测试；全量测试由开发者按需触发。
 
 统一分析流程如下：
 
@@ -6379,7 +6325,7 @@ IOzone Performance
 
 ↓
 
-下降15%
+明显下降
 ```
 
 功能全部正常。
@@ -6660,10 +6606,6 @@ iperf
 ↓
 
 Continuous
-
-↓
-
-24h
 ```
 
 持续观察：
@@ -7048,7 +6990,7 @@ IOzone
 
 ## Fix
 
-建立统一Baseline：
+建立按时间戳归档的测试结果摘要：
 
 ```Plain Text
 Commit
@@ -7063,36 +7005,22 @@ Result
 
 ↓
 
-Database
-
-↓
-
-Comparison
+testresult/目录
 ```
 
-所有版本保留性能记录。
+测试记录保留于 `testresult/` 目录。
 
 ---
 
 ## Verification
 
-任何提交：
-
-均可以查看：
-
-- IO变化； 
-
-- CPU变化； 
-
-- Memory变化； 
-
-- Throughput变化。 
+开发者可查阅历史测试结果变化趋势，但未建立正式性能基线数据库与门禁系统。
 
 ---
 
 ## Lessons Learned
 
-优化必须可比较。
+优化必须可比较，当前通过归档日志实现人工比较。
 
 ---
 
@@ -7352,23 +7280,21 @@ Reference Cycle
 Never Release
 ```
 
-因此团队统一采用：
+因此团队在关键子系统（如 PageCache 页生命周期、Vma 映射管理）中统一采用：
 
 ```Plain Text
 One Resource
 
-↓
+→
 
 One Owner
 
-↓
+→
 
 Multiple Weak Reference
 ```
 
-原则。
-
-这成为整个Kernel资源管理的统一设计思想。
+原则。但需注意不同子系统实际的 Ownership 模式存在差异：例如网络 socket 仍使用 Arc 共享所有权，VFS 的 IndexNode 通过 Arc 跨模块引用，并非所有资源都严格遵循单一 Owner 模型。
 
 ---
 

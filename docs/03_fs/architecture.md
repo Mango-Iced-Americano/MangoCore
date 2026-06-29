@@ -239,7 +239,7 @@ Syscall 层通过 `FdTable` 提供的 `get_file(fd)` 获取 `Arc<File>`，然后
 
 ## PageCache 关系
 
-PageCache 位于 VFS 层与块设备之间，为普通文件系统（ext4、FAT32、tmpfs）提供页粒度的缓存。ramfs 和部分内存文件系统不使用块设备，直接通过物理页管理数据，不经过 PageCache。
+PageCache 位于 VFS 层与块设备之间，为普通文件系统（ext4、FAT32、tmpfs）提供页粒度的缓存。ramfs 主要将数据存储在物理页中，但为了支持 mmap/filemap 集成，对共享缺页路径也暴露了懒加载 PageCache。
 
 `IndexNode` trait 提供 `page_cache()` 和 `ensure_page_cache()` 方法，供 `File` 层在读写时获取该 inode 的 PageCache 实例：
 

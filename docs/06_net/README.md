@@ -204,7 +204,7 @@ MangoCore 网络子系统基于 smoltcp 实现了兼容 POSIX 的网络协议栈
 | 套接字 epoll 支持 | 已完成 | 通过 Socket::epoll_type() 集成事件 |
 | SIOCGIF* ioctl | 已完成 | SIOCGIFHWADDR、SIOCGIFADDR、SIOCGIFNETMASK 等 |
 | getsockopt TCP_INFO | 已完成 | 通过 tcp_info.rs 实现 |
-| IPv6 | 不支持 | 暂无计划 |
+| IPv6 | 部分支持 | AF_INET6 可创建套接字，路由可查询，但完整连接能力未充分测试 |
 
 ## 文档索引
 

@@ -424,7 +424,7 @@ pub fn wait_io_core(f: impl FnMut() -> isize, nonblock: bool) -> isize
 
 1. **MSG_DONTWAIT 覆盖 fd 标志**：`is_nonblock = fd_table.is_nonblock() || msg_dontwait`。
 2. **try_poll 防止 livelock**：非阻塞路径在调用 `try_xxx` 前必须调用 `NET_INTERFACE.try_poll()`。这防止了无数据时反复 syscall 空转，确保 smoltcp 能在数据到达后及时进入 TCP 状态机。
-3. **`try_xxx` 是纯尝试操作**：`try_recv`、`try_send`、`try_sendmsg`、`try_recvmsg` 都是单次非阻塞操作，内部从不执行 poll、sleep 或 yield。成功返回 `Ok(isize)`，失败返回 `Err(SyscallErr)`。
+3. **`try_xxx` 是纯尝试操作**（设计约定）：`try_recv`、`try_send`、`try_sendmsg`、`try_recvmsg` 都是单次非阻塞操作，内部从不执行 sleep 或 yield。成功返回 `Ok(isize)`，失败返回 `Err(SyscallErr)`。注意：RAW 和 UDP 路径当前在 `send_to()` 内部调用 `NET_INTERFACE.poll()`，与 TCP 路径的行为不同。
 4. **EAGAIN 处理**：阻塞路径通过 `WaitQueue` 或 `wait_io` 在 EAGAIN 时等待，非阻塞路径直接返回 `-EAGAIN`。
 
 ---

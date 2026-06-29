@@ -36,8 +36,8 @@ tags: [docs, index, overview]
 | `05_process/` | 进程与任务 | 调度、信号、futex、IPC、线程 |
 | `06_net/` | 网络 | smoltcp 集成、TCP/UDP/RAW/Unix 套接字、设备适配器 |
 | `07_driver/` | 驱动 | Virtio 块/网卡、设备 trait、HAL 后端 |
-| `08_testing/` | 测试 | 测试配置、QEMU 设置、CI 工作流 |
-| `09_debug/` | 调试 | GDB 设置、日志、常见调试技巧、Bug 事后分析（7 篇） |
+| `08_testing/` | 测试 | 待填充 |
+| `09_debug/` | 调试 | GDB 设置、日志、常见调试技巧、Bug 事后分析（多篇） |
 | `_templates/` | 模板 | 新模块文档的标准文档模板 |
 | `kernel/` | 遗留子系统文档 | 旧版模块文档（待迁移到 00-09 布局） |
 | `ltp/` | LTP 测试计划 | LTP 测试策略、各子系统状态、工作流 |
@@ -93,6 +93,6 @@ tags: [docs, index, overview]
 | `docs/kernel/net/` | `README.md`、`architecture.md`（迁移前版本）、`device-layer.md`、`multi-iface-routing.md`、`roadmap.md`、`socket-subsystem.md`、`syscalls.md`、`tcp-state-machine.md` |
 | `docs/kernel/` | `futex.md`、`Nanosleep.md`、`tgkill.md`、`信号.md` — 子系统深入分析 |
 | `docs/ltp/` | LTP 测试策略（`LTP_BOTTOM_UP_GUIDE.md`）、各子系统计划和状态（`ltp_fs_plan.md`、`ltp_fs_status.md`、`ltp_mount_plan.md`、`ltp_mount_status.md`、`ltp_net_plan.md`、`ltp_net_status.md`）、工作流（`ltp_workflow.md`）、完整堆追踪报告及 MM 重构指南 |
-| `docs/09_debug/` | 7 个已修复 Bug 的事后分析，包括 ext4 rename、mount bind 泄露、virtio 块对齐和内核栈溢出 |
+| `docs/09_debug/` | 多个已修复 Bug 的事后分析，包括 ext4 rename、mount bind 泄露、virtio 块对齐和内核栈溢出 |
 | `docs/plan/` | 架构提案：NET_PLAN、UDP 改进计划、VFS 迁移计划、I/O 分块计划 |
 | `docs/Work_Log.md` | 每日开发日志，涵盖所有重要内核变更及编译和 QEMU 验证结果 |

@@ -4,6 +4,42 @@
 
 ## 2026-06-29
 
+### 修复两篇评审文档的 21 处内容不准确（Oracle 评审修复）
+
+**涉及文件：**
+- `docs/Technical-Report-MangoCore.md` — 修正 Linux 兼容性描述、Boot 启动流程（区分 RISC-V/LA 路径）、swap 状态（非功能骨架）、Journal 元数据（仅解析）、ICMP 支持说明、PageCache 命中率统计状态、移除测试归档名称、泛化测试结果数字
+- `docs/Engineering-Casebook.md` — 修正标题（移除 .md 后缀）、Buddy 碎片说明（明确为内核堆）、heap_trace 输出格式（去除 Page/Owner/Reference 假字段）、MemorySet/MemoryArea 术语替换为 AddressSpace/VmaSet/Vma、移除未经验证的百分比和数字、WriteBack 模型说明、网络零拷贝声明、Regression 范围和 CI 流程、持续测试时长、性能基线数据库描述、所有权模式说明
+
+**验证：**
+- 文档编辑，无需编译验证
+
+**备注：** Oracle 综合评审发现的两份评审文档中的不准确之处，共计 21 处修复。所有修复均为纯文本调整，不影响内核行为。
+
+---
+
+### 修复文档不准确（Oracle 评审修复）
+
+**涉及文件：**
+- `docs/03_fs/ext4.md` — 移除虚假的特性标志挂载检查描述，说明当前仅检测魔数
+- `docs/06_net/raw.md` — 修正 IP_HDRINCL 语义描述为 MangoCore 特有 connected/unconnected 行为；修正 SOL_IPV6 为无实际操作；移除 "7 禁用校验和" 的不实描述
+- `README.md` — la64 架构固件由 "OpenSBI" 改为 "QEMU"；测试文档链接由 `docs/08_testing/` 改为 `docs/ltp/`
+- `docs/README.md` — 标记 `08_testing/` 为待填充；更新 bug 事后分析计数 "7 篇"→"多篇"
+- `docs/06_net/README.md` — IPv6 支持状态由 "不支持" 改为 "部分支持"
+- `docs/06_net/syscall-layer.md` — 补充 RAW/UDP 路径调用 poll() 的注意事项
+- `docs/03_fs/page-cache.md` — 区分脏页节流阈值与干净页回收水位线为两个独立机制
+- `docs/03_fs/architecture.md` — ramfs PageCache 描述补充懒加载细节
+- `docs/03_fs/README.md` — "四层 VFS 设计" 改为 "层次化 VFS 设计"
+- `docs/03_fs/init-and-rootfs.md` — detect_fs() 读取顺序描述修正为 MBR→ext4 魔数，给出准确偏移
+
+**验证：**
+- 文档编辑，无需编译验证
+
+**备注：** Oracle 综合评审发现的 12 项文档不准确一次性修复。所有修复均为纯文本调整，不影响内核行为。
+
+---
+
+## 2026-06-29
+
 ### 新增文档: docs/03_fs/locks-fcntl-fasync.md
 
 **涉及文件：**

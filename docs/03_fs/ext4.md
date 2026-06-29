@@ -63,7 +63,7 @@ ext4 是项目中最复杂的文件系统模块。代码位于 `os/src/fs/ext4/`
 
 `Ext4Superblock` 是对应 ext4 on-disk superblock 的 `#[repr(C)]` 结构体。`rust_main()` 初始化阶段在块偏移 1024 处读取超级块，验证魔数 `0xEF53`，提取块大小、每组块数、每组 inode 数等关键参数。支持 `rev_level` 为 0（经典）和 1（动态）两种格式，兼容 `EXT4_FEATURE_INCOMPAT_64BIT`、`EXT4_FEATURE_INCOMPAT_FLEX_BG`、`EXT4_FEATURE_INCOMPAT_EXTENTS` 等特性标志。
 
-挂载时检查 `features_incompatible`：不支持的特性直接拒绝挂载；`features_read_only` 中不支持的仅允许只读挂载。
+当前挂载路径仅检测 ext4 魔数 `0xEF53`，不强制执行特性兼容性检查。`rev_level` 支持 0（经典）和 1（动态）两种格式。
 
 ### 目录查找缓存
 

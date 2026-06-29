@@ -28,7 +28,7 @@ related_docs:
 
 ## 概述
 
-RAW 套接字提供对 IP 层协议的原始访问。MangoCore 通过 `RawSocket` 实现 `SOCK_RAW` 语义，支持 IPv4 和 IPv6，覆盖 `IPPROTO_ICMP`、`IPPROTO_TCP`、`IPPROTO_UDP`、`IPPROTO_RAW` 等所有协议号。内核自动构建 IP 头，除非套接字处于未连接模式 （`IP_HDRINCL` 语义）。
+RAW 套接字提供对 IP 层协议的原始访问。MangoCore 通过 `RawSocket` 实现 `SOCK_RAW` 语义，支持 IPv4 和 IPv6，覆盖 `IPPROTO_ICMP`、`IPPROTO_TCP`、`IPPROTO_UDP`、`IPPROTO_RAW` 等所有协议号。内核根据 `remote_endpoint` 是否存在决定行为：已连接时自动构造 IP 头，未连接时透传用户数据（MangoCore 特定语义，不等同于 Linux `IP_HDRINCL`）。
 
 实现文件位于 `os/src/net/socket/inet/raw/raw.rs`，通过 `Socket::alloc()` 工厂在 `AF_INET` / `AF_INET6` + `SOCK_RAW` 时创建。
 
@@ -94,11 +94,11 @@ ip_pkg.fill_checksum();
 
 接收时，`try_recv()` 返回完整 IP 数据包（含 IP 头）。IPv4 路径保留整个包（包括 IP 头），而 IPv6 路径剥离 40 字节的 IPv6 头，仅返回 payload。
 
-### Unconnected mode （IP_HDRINCL）
+### Unconnected mode（MangoCore 特定行为）
 
-当未调用 `connect()` 时，`try_send()` 将用户数据直接通过 smoltcp raw socket 发送，**不添加** IP 头。这与 Linux 的 `IP_HDRINCL` 语义一致：用户自行构建完整 IP 数据包。
+当未调用 `connect()` 时，`try_send()` 将用户数据直接通过 smoltcp raw socket 发送，**不添加** IP 头。这是 MangoCore 的 connected/unconnected 行为切换，不等同于 Linux `IP_HDRINCL` 语义。
 
-`setsockopt(SOL_IP, IP_HDRINCL)` 被接受（返回 OK），但不改变行为 — 判断依据是 remote_endpoint 是否存在。
+`setsockopt(SOL_IP, IP_HDRINCL)` 被接受（返回 OK），但被忽略 — 行为仅由 remote_endpoint 是否存在决定。
 
 ## 关键操作
 
@@ -117,7 +117,7 @@ ip_pkg.fill_checksum();
 
 ### IPV6_CHECKSUM
 
-`setsockopt(SOL_RAW, IPV6_CHECKSUM, &offset)` 或 `setsockopt(SOL_IPV6, IPV6_CHECKSUM, &offset)` 设置 IPv6 校验和偏移。offset 必须为偶数，否则返回 `EINVAL`。
+`setsockopt(SOL_RAW, IPV6_CHECKSUM, &offset)` 设置 IPv6 校验和偏移。仅 `SOL_RAW/IPV6_CHECKSUM` 是功能完整的；`setsockopt(SOL_IPV6, ...)` 被接受但无实际操作。
 
 IPv6 发送时调用 `ipv6_pseudo_header_checksum()` 计算 RFC 2460 第 8.1 节定义的伪头校验和，并写入 payload 的指定偏移位置。
 
@@ -131,7 +131,7 @@ let csum = ipv6_pseudo_header_checksum(
 );
 ```
 
-`IPV6_CHECKSUM` 的值为 7 表示禁用内核校验和计算（与 Linux 约定一致）。
+偶数偏移值被存储并用于校验和计算；奇数偏移值返回 `EINVAL`。
 
 ### SO_BINDTODEVICE
 

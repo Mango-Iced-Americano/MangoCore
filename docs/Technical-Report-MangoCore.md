@@ -22,7 +22,7 @@ MangoCore 的设计目标是实现具备 Linux 兼容能力、模块化结构和
 
 围绕这一目标，项目制定了以下四项核心设计原则。
 
-第一，保持 Linux 兼容能力。系统遵循 Linux 系统调用语义，支持标准 ELF 程序加载、BusyBox 运行、多进程管理、文件系统访问以及 TCP/UDP 网络通信。
+第一，保持 Linux 兼容能力。系统尽量对齐 Linux 语义，已覆盖竞赛与测试所需的大量子集，支持标准 ELF 程序加载、BusyBox 运行、多进程管理、文件系统访问以及 TCP/UDP 网络通信。
 
 第二，采用模块化架构设计。项目将内存管理、文件系统、网络协议栈、任务管理以及驱动层进行解耦，通过明确的模块边界和局部抽象降低模块之间的耦合程度。
 
@@ -230,14 +230,12 @@ MangoCore 的工程演进重点在于降低模块之间的耦合关系，并在�
 
 ## 2\.5 Boot启动流程
 
-系统启动遵循标准Rust内核初始化流程。
+系统启动遵循标准Rust内核初始化流程。RISC-V 架构通过 OpenSBI（M 态）引导，LoongArch 架构则直接进行架构级初始化后进入内核入口。
 
 ```Plain Text
-OpenSBI
-
-↓
-
-_start
+RISC-V:          OpenSBI (M-mode)     LoongArch:     QEMU (firmware)
+                       ↓                              ↓
+                   _start                          _start
 
 ↓
 
@@ -1089,7 +1087,7 @@ mmap(fd, MAP_PRIVATE)
 
 ## 5\.9 交换与压缩机制（feature\-gated）
 
-MangoCore 支持 feature\-gated 的 OOM handler、zram 压缩内存和 swap 交换机制。
+MangoCore 支持 feature\-gated 的 OOM handler、zram 压缩内存。zRAM 压缩交换已实现；交换设备后端为待实现骨架，当前非功能状态。
 
 源码位置：
 
@@ -1123,7 +1121,7 @@ Zram 在内存中维护一个压缩块设备，通过 LZ4 等算法压缩数据�
 // swap out/in 支持
 ```
 
-当物理内存不足时，系统可以将不活跃页面交换到交换分区（或 zram 设备），释放物理内存供其他进程使用。
+当前交换设备后端为待实现骨架（`block_ids` 为空、`active()=false`），因此交换功能尚未达到可用状态。
 
 OOM/zram/swap 均由 feature 控制。`Cargo.toml` 的 Cargo default features 不包含 `oom_handler`；项目常用的 board features 和 Makefile 构建路径会显式启用 `oom_handler`，并由该 feature 间接启用 `swap` 与 `zram`。
 
@@ -1165,7 +1163,7 @@ TLB 刷新发生在以下场景：
 
 ## 6\.1 设计背景
 
-文件系统连接应用程序与存储设备，承担路径解析、文件对象管理、缓存和设备访问等职责。MangoCore 支持 BusyBox、Shell、Lua 解释器以及标准 Linux 应用程序后，文件访问成为系统调用路径中的高频操作。
+文件系统连接应用程序与存储设备，承担路径解析、文件对象管理、缓存和设备访问等职责。MangoCore 支持 BusyBox、Shell、Lua 解释器以及 libc-test 与 LTP 子集等测试负载后，文件访问成为系统调用路径中的高频操作。
 
 MangoCore 的文件系统架构参考了 DragonOS 的 VFS/MountFS 设计模式，在此基础上进行适配和扩展。当前文件系统实现包括：
 
@@ -1445,7 +1443,7 @@ MangoCore 为 ext4 文件系统实现了专门的 metadata cache。
 
 ### 6\.6\.1 设计目的
 
-ext4 文件系统的元数据访问包括 inode、bitmap、directory、journal 等内容，metadata cache 用于减少这些路径上的重复块设备访问。
+ext4 文件系统的元数据访问包括 inode、bitmap、directory 等内容，metadata cache 用于减少这些路径上的重复块设备访问。journal 相关字段仅解析，语义未实现。
 
 ### 6\.6\.2 缓存范围
 
@@ -1461,8 +1459,7 @@ ext4 文件系统
        ├── Inode Table
        ├── Block Bitmap
        ├── Inode Bitmap
-       ├── Directory Entries
-       └── Journal Metadata
+       └── Directory Entries
 ```
 
 ### 6\.6\.3 与 PageCache 的关系
@@ -1636,7 +1633,7 @@ pub struct DeviceStack<'a> {
 
 - RAW：原始 IP 数据包
 
-- ICMP：网络控制消息协议（ping 等）
+- ICMP 流量通过 RawSocket 路径支持，非独立 ICMP 套接字子系统
 
 Unix Domain Socket 由 MangoCore 在内核内部单独实现，用于本机进程间通信。
 
@@ -2354,7 +2351,7 @@ IOzone 通过率较低，表明文件系统相关路径仍有未通过测试项�
 
 - PageCache 框架已实现；
 
-- 当前未实现 PageCache 命中率统计机制；
+- PageCache 命中率统计机制已实现（通过 sysfs 暴露），但未有归档的命中率测试报告；
 
 - 归档中未记录 PageCache 命中率数据，因而不报告命中率变化。
 
@@ -2402,19 +2399,19 @@ main push / workflow_dispatch
 
 ## 9\.8 本章小结
 
-本章报告 MangoCore 的 Benchmark 与兼容性测试数据。测试框架位于 `scripts/run_full_test.py`，本章引用的测试结果归档于 `testresult/archive_20260616_033630/`。
+本章报告 MangoCore 的 Benchmark 与兼容性测试数据。测试框架位于 `scripts/run_full_test.py`，测试结果存档于 `testresult/` 目录。
 
-关键测试结果：
+关键测试结果（基于最近归档的逐组数据）：
 
-- RV64 BusyBox：glibc 53/55，musl 53/55；
+- RV64 BusyBox：glibc 约 53/55，musl 约 53/55；
 
-- RV64 libctest：glibc 177/220，musl 213/220；
+- RV64 libctest：glibc 约 177/220，musl 约 213/220；
 
-- RV64 IOzone：glibc 5/20，musl 7/20；
+- RV64 IOzone：glibc 约 5/20，musl 约 7/20；
 
 - RV64 iperf：glibc 0/6，musl 0/6，日志中出现 Connection refused；
 
-- `summary.txt` 中存在 `lmbench-glibc 37/36` 和 TOTAL 浮点异常值，因此本文不引用总通过率，仅引用逐组 pass/all。
+- `summary.txt` 中存在 `lmbench-glibc 37/36` 等汇总异常，因此本文不引用总通过率，仅引用逐组 pass/all。
 
 本文只引用归档中直接可见的逐组 pass/all 数据；LA64 精确百分比需要补充可复现的解析 artifact。
 
@@ -2555,7 +2552,7 @@ User Space
 
 - Feature\-gated zram 压缩内存；
 
-- Feature\-gated swap 交换支持；
+- Feature\-gated swap 交换支持（后端骨架，非功能状态）；
 
 ### 10\.3\.6 进程管理
 
@@ -2629,23 +2626,7 @@ MangoCore 在设计和实现中参考/使用了以下开源项目：
 
 ---
 
-## 10\.6 当前测试结果
-
-基于归档数据（`testresult/archive_20260616_033630/`）：
-
-- RV64 BusyBox：glibc 53/55，musl 53/55；
-
-- RV64 libctest：glibc 177/220，musl 213/220；
-
-- RV64 IOzone：glibc 5/20，musl 7/20；
-
-- RV64 iperf：glibc 0/6，musl 0/6；
-
-- 该归档的 `summary.txt` 存在 lmbench 与 TOTAL 汇总异常，因此不引用总通过率。
-
----
-
-## 10\.7 后续发展规划
+## 10\.6 后续发展规划
 
 ### 10\.7\.1 已实现
 

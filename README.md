@@ -57,7 +57,7 @@ make docker
 | 架构 | 平台 | 固件 | 块/网 | 运行命令 |
 |------|------|------|--------|----------|
 | riscv64gc | QEMU virt | OpenSBI | virtio-blk / virtio-net | `make -C os rv64-run` |
-| loongarch64 | QEMU virt | OpenSBI | virtio / PCI | `make -C os la64-run` |
+| loongarch64 | QEMU virt | QEMU | virtio / PCI | `make -C os la64-run` |
 
 ---
 
@@ -170,7 +170,7 @@ docker-compose.yml 开发容器配置
 
 - **评审材料：** [技术报告](docs/Technical-Report-MangoCore.md) · [工程案例手册](docs/Engineering-Casebook.md)
 - [文档索引](docs/README.md) — 所有模块文档的入口
-- [测试映射](docs/08_testing/) — LTP 和 OSComp 测试覆盖详情
+- [测试映射](docs/ltp/) — LTP 和 OSComp 测试覆盖详情
 - [开发日志](docs/Work_Log.md) — 变更记录与调试总结
 
 ---
