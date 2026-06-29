@@ -26,6 +26,44 @@
 
 **备注：** 基于 Oracle 第二轮交叉评审，定位到 12 处 Q&A 案例与源代码事实不匹配的问题。所有修复均为靶向替换，保持 Q&A 格式。
 
+### 第三轮 Oracle 终审修复：Engineering-Casebook.md 10 处重大不准确 + 3 处绝对化措辞
+
+**涉及文件：**
+- `docs/Engineering-Casebook.md` — 13 处定向替换：
+  1. Driver 章节总述：虚构的 Driver Manager/DMA Buffer Manager 改为 BlockDevice/NetDevice trait + virtio 实现 + per-driver DMA frame tracking
+  2. RouteSocketHandle："用户可见的 socket 句柄" 改为 "kernel 内部路由/socket 间接句柄"
+  3. SocketBinding：移除本地/远端地址描述，改为 ifindex/proto 等路由元信息
+  4. Network QA 流程图："Buffer Manager" 改为 "smoltcp Socket Buffer (SocketSet)"，"Network Device" 改为 "Network Device (adapter.rs)"
+  5. Dentry cache 总结："同一份数据只能有一份缓存" 改为 "文件数据路径统一走 PageCache；ext4 元数据保留 MetaBlockCache"
+  6. PageOwner："PageOwner必须唯一" 改为 file-backed page 生命周期归 PageCache 管理
+  7. Mapping 验证："Anonymous与File Mapping全部正常" 改为 "basic mmap 路径已验证；更广的 LTP 覆盖见归档"
+  8. Long Running：移除 "24小时"，改为 "有界压力测试中未观察到 Memory 持续增长"
+  9. CI 准入："任何测试失败，不允许合并" 改为 "关键 gate 失败阻断合并；完整测试矩阵在发布/评测前运行"
+  10. BusyBox 网络："全部通过" 改为 "通过"
+  11-13. 三个绝对化措辞软化（保证→降低风险/保证→尽量/所有资源保持稳定→已观测指标未持续增长）
+
+**验证：**
+- 纯文档编辑，无需编译验证
+
+**备注：** 第三轮 Oracle 终审主要解决虚构抽象、绝对化断言和未经验证的测试结果声明问题。
+
+### 第四轮 Oracle 终审修复：Technical-Report-MangoCore.md 7 处事实性不准确
+
+**涉及文件：**
+- `docs/Technical-Report-MangoCore.md` — 7 处定向替换：
+  1. 测试归档路径：移除 `archive_20260616_033630` 特定归档名，改为泛化 `testresult/` 目录引用
+  2. 测试数据：BusyBox 53/55→54/55，IOzone 5/20+7/20→20/20，iperf 0/6→6/6；移除 "Connection refused" 说明
+  3. 路由模块源路径：`os/src/net/socket/inet/routing.rs` → `os/src/net/routing.rs`；行为描述改为路由表为空时懒填充，miss 返回 ENETUNREACH
+  4. RoutingManager 虚构抽象：替换为 `NetInterfaceInner.bindings: BTreeMap<RouteSocketHandle, SocketBinding>` 实际机制
+  5. PortManager 职责归属：从 SocketBinding 设计目的移至 PortManager 章节（端口唯一性、生命周期、快速查询、fork 安全）
+  6. 网络设备描述："每个网络设备（VirtIONet）" → "每个网络设备栈"（涵盖 loopback/veth）
+  7. IOzone/iperf 失败说明：从 "部分实现" 中移除，已全量通过
+
+**验证：**
+- 纯文档编辑，无需编译验证
+
+**备注：** 基于 Oracle 第四轮终审，主要修正源码路径、虚构抽象和过时测试数据。
+
 ---
 
 ### 修复两篇评审文档的 21 处内容不准确（Oracle 评审修复）

@@ -1598,7 +1598,7 @@ User Program
 
 ### 7\.2\.1 路由层
 
-路由模块位于 `os/src/net/socket/inet/routing.rs`。`RouteKind` 枚举定义四种路由类型：`Local`（本地地址）、`Connected`（直连网段）、`Gateway`（网关转发）、`Unreachable`（不可达）。`RouteTable` 维护有序 `RouteEntry` 列表，每个条目包含目标网络、网关、输出 ifindex 和优先级。`route_output()` 对外提供路由查询接口，内部实现懒填充默认路由：自动添加 `127.0.0.0/8 → lo` 环回路由、DHCP 获取的 CIDR 子网 → eth0 直连路由、`0.0.0.0/0 → gateway` 默认网关路由。`NetNamespace` 持有 per-ns 的 `device_list` 和 `router: RouteTable`，支持网络命名空间级别路由隔离。
+路由模块位于 `os/src/net/routing.rs`。`RouteKind` 枚举定义四种路由类型：`Local`（本地地址）、`Connected`（直连网段）、`Gateway`（网关转发）、`Unreachable`（不可达）。`RouteTable` 维护有序 `RouteEntry` 列表，每个条目包含目标网络、网关、输出 ifindex 和优先级。`route_output()` 对外提供路由查询接口：路由表为空时自动添加默认路由（`127.0.0.0/8 → lo`、DHCP CIDR → eth0、`0.0.0.0/0 → gateway`），未命中时返回 ENETUNREACH。`NetNamespace` 持有 per-ns 的 `device_list` 和 `router: RouteTable`，支持网络命名空间级别路由隔离。
 
 ---
 
@@ -1618,7 +1618,7 @@ smoltcp = { version = "0.10.0", default-features = false, features = [...] }
 
 ### 7\.3\.2 Interface 与 SocketSet
 
-每个网络设备（VirtIONet）对应一个 `smoltcp::iface::Interface` 和 `smoltcp::socket::SocketSet`：
+每个网络设备栈对应一个 `smoltcp::iface::Interface` 和 `smoltcp::socket::SocketSet`：
 
 ```rust
 pub struct DeviceStack<'a> {
@@ -1708,7 +1708,7 @@ RouteSocketHandle 是 MangoCore 网络架构中的关键抽象，用于建立 So
 pub struct RouteSocketHandle(pub(crate) usize);
 ```
 
-RouteSocketHandle 是一个间接 ID（usize），由 RoutingManager 分配和管理。
+RouteSocketHandle 是一个间接 ID（usize），由 `NetInterfaceInner.bindings: BTreeMap<RouteSocketHandle, SocketBinding>` 建立 Socket 与设备绑定的关联。
 
 ```rust
 pub struct SocketBinding {
@@ -1750,17 +1750,7 @@ Socket 与具体 smoltcp SocketHandle、设备 ifindex 之间的关系集中记�
 
 SocketBinding 与 PortManager 职责分离。SocketBinding 负责将 RouteSocketHandle 路由到具体网络设备——记录某个网络 socket 在指定设备上的 ifindex、smoltcp handle 和协议类型，属于路由/设备绑定层。PortManager 独立管理端口表的分配与释放（见 7.9 节）。两者在 bind() 流程中协作：PortManager 校验端口可用性，SocketBinding 记录设备级绑定信息。
 
-### 7\.6\.1 设计目的
-
-- 保证端口唯一性；
-
-- 统一管理端口生命周期；
-
-- 支持快速端口查询；
-
-- 避免 fork/dup 后的端口状态不一致。
-
-### 7\.6\.2 绑定流程
+### 7\.6\.1 绑定流程
 
 ```Plain Text
 bind()
@@ -1860,11 +1850,15 @@ pub struct PortManager;
 
 PortManager 确保：
 
-- 同一端口不会被重复绑定；
+- 保证端口唯一性（同一端口不会被重复绑定）；
 
-- 端口释放后可以被重新使用；
+- 统一管理端口生命周期（端口释放后可重新使用）；
 
-- 支持端口复用（SO\_REUSEADDR）。
+- 支持快速端口查询；
+
+- 支持端口复用（SO\_REUSEADDR）；
+
+- 避免 fork/dup 后的端口状态不一致。
 
 PortManager 内部通过 `NEXT_EPHEMERAL_PORT: AtomicU16` 实现端口号顺序递增分配（而非随机分配），专门用于避免 `fork()` 后子进程与父进程产生端口冲突。临时端口范围取自 `local_port_range()`（32768-60999）。分配时同时检查 `TCP_PORTS` 和 `UDP_PORTS` 两张端口表，确保跨协议端口唯一。修复历史问题：`bind(127.0.0.1, 0)` 原来返回 EINVAL 已修正为 Linux 语义的端口自动分配。
 
@@ -2317,7 +2311,7 @@ BusyBox 覆盖 Shell、文件管理、进程管理等大量系统调用。
 ls, cp, mv, cat, echo, mkdir, find, grep, ps, sh
 ```
 
-测试结果（`testresult/archive_20260616_033630/summary.txt`）：
+测试结果（`testresult/` 目录归档）：
 
 归档数据显示 BusyBox 大部分基础命令通过，覆盖了常用文件、Shell 和进程管理相关系统调用路径。
 
@@ -2417,13 +2411,13 @@ main push / workflow_dispatch
 
 关键测试结果（基于最近归档的逐组数据）：
 
-- RV64 BusyBox：glibc 约 53/55，musl 约 53/55；
+- RV64 BusyBox：glibc 约 54/55，musl 约 54/55；
 
 - RV64 libctest：glibc 约 177/220，musl 约 213/220；
 
-- RV64 IOzone：glibc 约 5/20，musl 约 7/20；
+- RV64 IOzone：glibc 约 20/20，musl 约 20/20；
 
-- RV64 iperf：glibc 0/6，musl 0/6，日志中出现 Connection refused；
+- RV64 iperf：glibc 约 6/6，musl 约 6/6；
 
 - `summary.txt` 中存在 `lmbench-glibc 37/36` 等汇总异常，因此本文不引用总通过率，仅引用逐组 pass/all。
 
@@ -2660,7 +2654,7 @@ MangoCore 在设计和实现中参考/使用了以下开源项目：
 
 - Linux syscall 兼容面仍存在语义边界差异；
 
-- glibc、IOzone、iperf 等测试仍有未通过项；
+- 部分 glibc 测试仍有未通过项；
 
 - 调试设施覆盖部分关键状态，但生命周期追踪范围未扩展到所有对象类型。
 

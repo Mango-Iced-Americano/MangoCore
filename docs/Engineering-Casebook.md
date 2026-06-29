@@ -54,7 +54,7 @@ MangoCore开发过程中，并未将Bug修复视为一次性的代码修改，�
 Question → Phenomenon → Investigation → Root Cause → Fix → Verification → Lessons Learned
 ```
 
-所有问题均按照这一流程进行分析，并结合Benchmark和Regression测试验证修复效果，保证优化不会引入新的问题。
+所有问题均按照这一流程进行分析，并结合Benchmark和Regression测试验证修复效果，降低优化引入回归的风险。
 
 ---
 
@@ -308,7 +308,7 @@ Memory → VFS → Scheduler → Network
 Compile → BusyBox → libc-test → IOzone → iperf → LongRunning → Regression → Merge
 ```
 
-任何测试失败，不允许合并。
+关键 gate 失败阻断合并；完整测试矩阵在发布/评测前运行。
 
 ---
 
@@ -434,7 +434,7 @@ MangoCore采用统一的工程调试方法，将问题定位、生命周期分�
 Question → Investigation → Root Cause → Fix → Benchmark → Regression → Knowledge
 ```
 
-这一方法保证了每一次Bug修复都能够形成可复用的工程经验，也为Memory、VFS、PageCache、Network等模块的持续重构提供了统一的方法基础。整个Kernel逐步由功能驱动开发演进为数据驱动、Benchmark驱动和知识驱动的工程开发模式。
+这一方法使每一次Bug修复都尽量沉淀为可复用工程经验，也为Memory、VFS、PageCache、Network等模块的持续重构提供了统一的方法基础。整个Kernel逐步由功能驱动开发演进为数据驱动、Benchmark驱动和知识驱动的工程开发模式。
 
 # Chapter 2 Memory Research
 
@@ -1090,11 +1090,9 @@ Allocate → Reference → Shared → Release → Recycle
 
 ## Verification
 
-连续Long Running：
+连续 Long Running：
 
-24小时。
-
-Memory保持稳定。
+有界压力测试中未观察到 Memory 持续增长。
 
 ---
 
@@ -2215,7 +2213,7 @@ IndexNode既负责文件信息，又负责缓存管理。
 
 ## Lessons Learned
 
-同一份数据只能有一份缓存。双缓存系统必然导致生命周期交叉。
+文件数据路径统一走 PageCache；ext4 元数据保留 MetaBlockCache。双缓存系统必然导致生命周期交叉。
 
 ---
 
@@ -4015,7 +4013,7 @@ Page数量稳定。
 
 解除映射不等于释放缓存。
 
-PageOwner必须唯一。
+file-backed page 生命周期归 PageCache 管理；VMA/munmap 只管理映射引用，不直接释放缓存页。
 
 ---
 
@@ -4089,7 +4087,7 @@ Shared
 
 ## Verification
 
-Anonymous与File Mapping全部正常。
+basic mmap 路径已验证；更广的 LTP mmap/munmap/mprotect 覆盖见归档测试结果。
 
 代码复杂度明显下降。
 
@@ -4249,8 +4247,8 @@ Network模块的核心架构基于 `NetInterfaceInner { stacks, bindings }`。�
 
 - `NetInterfaceInner`：全局网络状态，包含 stacks（设备栈集合）和 bindings（socket 绑定表）
 - `DeviceStack`：per-device smoltcp Interface + SocketSet
-- `RouteSocketHandle`：用户可见的 socket 句柄，关联到具体的 SocketBinding
-- `SocketBinding`：持有 smoltcp SocketHandle，封装协议类型和本地/远端地址
+- `RouteSocketHandle`：kernel 内部路由/socket 间接句柄，关联到具体的 SocketBinding
+- `SocketBinding`：持有 smoltcp SocketHandle 及 ifindex/proto 等路由元信息
 - `RouteTable`：`RouteEntry` 列表，支持 Local/Connected/Gateway/Unreachable 四种路由类型
 - `PortManager`：`NEXT_EPHEMERAL_PORT` 原子递增，32768-60999 范围
 
@@ -4922,7 +4920,7 @@ Closed
 
 ## Verification
 
-BusyBox网络测试全部通过。
+网络相关 BusyBox 测试通过。
 
 状态转换正常。
 
@@ -5011,11 +5009,11 @@ Route Lookup
 
 ↓
 
-Buffer Manager
+smoltcp Socket Buffer (SocketSet)
 
 ↓
 
-Network Device
+Network Device (adapter.rs)
 ```
 
 Socket作为唯一Owner。
@@ -5996,27 +5994,27 @@ Merge
 
 # 8\.2 本章总结
 
-Driver模块开发过程中，团队逐步完成了从"设备可访问"到"统一驱动资源管理"的架构演进。通过建立统一Driver接口、统一DMA管理、统一Interrupt处理、统一Device状态机以及统一Driver Owner模型，成功解决了DMA泄漏、重复缓存、设备状态混乱以及Interrupt复杂度持续增加等典型问题。
+Driver模块的开发围绕设备 trait 抽象展开。BlockDevice 和 NetDevice 两个核心 trait 定义了块/网设备的统一接口，virtio-blk 和 virtio-net 驱动分别实现对应 trait。驱动层内部使用 per-driver frame 跟踪管理 DMA 缓冲区生命周期，设备状态通过 HAL 层隔离架构差异。通过建立统一 Device trait 接口、统一 Interrupt 处理、统一 Device 状态机以及统一 Driver 资源管理（DMA frame 跟踪），成功解决了 DMA 泄漏、重复缓存、设备状态混乱以及 Interrupt 复杂度持续增加等典型问题。
 
-最终形成如下统一驱动架构：
+最终形成如下驱动架构：
 
 ```Plain Text
 Application
       ↓
 System Call
       ↓
-Driver Interface
+BlockDevice / NetDevice trait
       ↓
-Driver Manager
+virtio-blk / virtio-net (trait impl)
       ↓
-DMA / Buffer Manager
+DMA frame tracking (per-driver)
       ↓
-Interrupt Handler
+Interrupt Handler (HAL)
       ↓
-Block Device / Network Device / Console
+Device (QEMU virtio)
 ```
 
-整个Driver模块最终实现了Memory、PageCache、Network与Device之间资源生命周期的一致管理，使驱动系统逐步形成接口统一、状态统一、资源统一和Benchmark驱动优化的工程体系。模块级回归检查通过，见 testresult/ 目录归档。
+整个Driver模块基于 trait 接口实现了块/网设备的统一抽象，使各驱动在各自生命周期内独立管理资源，并通过 Benchmark 驱动优化持续提升性能。模块级回归检查通过，见 testresult/ 目录归档。
 
 # Chapter 9 Regression Research
 
@@ -6680,7 +6678,7 @@ Trend Analysis
 
 Long Running期间：
 
-所有资源保持稳定。
+已观测指标（Memory/Page/Task/Socket）在该测试窗口内未持续增长。
 
 ---
 
