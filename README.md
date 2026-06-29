@@ -1,6 +1,6 @@
 # MangoCore
 
-[![CI](https://github.com/oscamp-2025/mangocore/actions/workflows/ci-main.yml/badge.svg)](https://github.com/oscamp-2025/mangocore/actions/workflows/ci-main.yml)
+[![CI](https://github.com/Pan-Peach/MangoCore/actions/workflows/ci-main.yml/badge.svg)](https://github.com/Pan-Peach/MangoCore/actions/workflows/ci-main.yml)
 [![License](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 ![Rust](https://img.shields.io/badge/Rust-nightly-2025--01--18-orange)
 ![Arch](https://img.shields.io/badge/Arch-riscv64%20%7C%20loongarch64-purple)
