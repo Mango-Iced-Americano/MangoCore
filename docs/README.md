@@ -74,8 +74,12 @@ tags: [docs, index, overview]
 
 | 目录 | 文档索引 | 状态 | 说明 |
 |-----------|----------|--------|------|
-| `06_net/` | [README.md](06_net/README.md) | 草稿 | 网络子系统重构后含 21 篇文档，涵盖 socket 类型、设备层、路由、DHCP、调试等 |
+| `01_architecture/` | [README.md](01_architecture/README.md) | 稳定 | 架构文档含 11 篇文档，覆盖总体架构、初始化、trap/syscall 入口、HAL、双架构平台和调试映射 |
+| `02_syscall/` | [README.md](02_syscall/README.md) | 稳定 | 系统调用文档含 12 篇文档，覆盖 ABI、分发、syscall 表、文件/fd/event、进程、MM、signal/time/IPC、网络索引和错误码 |
 | `03_fs/` | [README.md](03_fs/README.md) | 草稿 | 文件系统子系统含 14 篇文档，涵盖 VFS、PageCache、ext4、FAT32、tmpfs、procfs 等 |
+| `04_mm/` | [README.md](04_mm/README.md) | 稳定 | 内存管理文档含 14 篇文档，覆盖 frame allocator、页表/TLB、AddressSpace/VMA、mmap/brk、fault/uaccess、CoW、filemap 和 OOM |
+| `05_process/` | [README.md](05_process/README.md) | 稳定 | 进程文档含 17 篇文档，覆盖 TCB/PCB、调度、WaitQueue、clone/namespace、exec、exit/wait、signal、futex、IPC 和 rlimit |
+| `06_net/` | [README.md](06_net/README.md) | 草稿 | 网络子系统重构后含 21 篇文档，涵盖 socket 类型、设备层、路由、DHCP、调试等 |
 
 ## 模板与规范
 

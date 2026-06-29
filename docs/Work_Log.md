@@ -4,6 +4,164 @@
 
 ## 2026-06-29
 
+### docs(core): 落地文档审计报告 P1/P2/P3 修正
+
+**涉及文件：**
+- `docs/04_mm/frame-allocator.md` — 补齐 `StackFrameAllocator::start` 字段及其 `recycled_flags` 下标语义。
+- `docs/01_architecture/module-map.md`、`docs/01_architecture/runtime-services.md`、`docs/02_syscall/syscall-layer.md`、`docs/02_syscall/dispatch-and-abi.md`、`docs/02_syscall/signal-time-ipc.md` — 修正不存在的 `task/timer.rs`、`task/seccomp.rs`、`task/futex.rs`、`task/ipc.rs` 路径，改为 `task/manager.rs`、`task/task.rs`、`task/threads.rs`、`task/ipc_namespace.rs`、`syscall/process/ids.rs` 等实际路径。
+- `docs/05_process/signal.md`、`docs/05_process/exit-wait.md`、`docs/02_syscall/process-lifecycle-and-ids.md` — 补充 `sigaction(signum=0/SIGKILL/SIGSTOP)` 返回 `EINVAL`、`WSTOPPED/WCONTINUED` 解析接受但 stopped/continued 状态上报未完整接入的限制。
+- `docs/05_process/exec.md`、`docs/05_process/clone-exec-exit-wait.md`、`docs/05_process/architecture.md` — 修正 exec 流程图，明确 `sys_execve()` 与 `sys_execveat()` 是独立入口并汇聚到 `exec_opened_file()`。
+- `docs/05_process/scheduler.md`、`docs/05_process/task-process-scheduler.md` — 补齐 `CURRENT_SUID/CURRENT_SGID`，并把 UID/GID 缓存类型修正为 `AtomicUsize`。
+- `docs/04_mm/debugging.md`、`docs/04_mm/filemap-and-page-cache.md`、`docs/04_mm/oom-and-locking.md`、`docs/04_mm/uaccess.md`、`docs/05_process/clone-and-namespace.md`、`docs/05_process/clone-exec-exit-wait.md`、`docs/05_process/signal-futex-ipc.md`、`docs/05_process/task-process-scheduler.md` — 增加或补强源码位置索引表；为 `cow-and-fork.md`、`oom-and-locking.md` 补实现状态表。
+
+**验证：**
+- 行数统计：`docs/01_architecture` 3555 行、`docs/02_syscall` 4661 行、`docs/04_mm` 4680 行、`docs/05_process` 6690 行 ✅
+- P1/P2/P3 专项扫描：不存在路径、`AtomicU32`、`当前代码/当前实现`、占位/伪代码等关键词无命中 ✅
+- 未运行内核编译；本次为文档-only 修改
+
+**备注：**
+- 本次依据 `cc-codex/comms/2026-06-29-docs-audit-report.md` 的审计结论修复，优先处理全部 P1，并顺带消化报告中列出的源码锚点、流程图和措辞类 P2/P3。
+
+### docs(core): 按 net 长文档风格补齐核心函数源码与逐段解释
+
+**涉及文件：**
+- `docs/01_architecture/README.md`、`docs/01_architecture/initialization-flow.md`、`docs/01_architecture/hal-and-platform.md`、`docs/01_architecture/trap-and-syscall-entry.md`、`docs/01_architecture/riscv64-platform.md`、`docs/01_architecture/loongarch64-platform.md` — 补入 `rust_main()`、HAL re-export、rv64/la64 trap/syscall/page fault/timer/return 入口和平台初始化源码，替换早期省略式代码块。
+- `docs/02_syscall/syscall-layer.md`、`docs/02_syscall/dispatch-and-abi.md`、`docs/02_syscall/fs-fd-event.md`、`docs/02_syscall/network-syscalls.md`、`docs/02_syscall/process-lifecycle-and-ids.md`、`docs/02_syscall/signal-time-ipc.md` — 补入 `syscall()` 公共段、文件/事件/网络分支、默认 `ENOSYS` 分支、`sys_read/sys_write/read_into_user`、epoll/eventfd、`sys_socket/sys_accept/sys_accept4`、clone/exec/wait/signal/time 等关键 syscall 源码。
+- `docs/04_mm/address-space-and-vma.md`、`docs/04_mm/mmap-and-brk.md`、`docs/04_mm/page-fault-and-usercopy.md`、`docs/04_mm/cow-and-fork.md`、`docs/04_mm/frame-and-pagetable.md`、`docs/04_mm/oom-and-locking.md`、`docs/04_mm/page-table-and-tlb.md` — 补入 `from_existing_user()`、`do_mmap()`、`do_sbrk()`、`do_munmap()`、`do_mprotect()`、`PageFaultHandler::handle/classify()`、uaccess fault-in、fork/COW、frame store、overcommit/OOM 等源码和解释。
+- `docs/05_process/*.md` — 加厚 clone、exec、exit/wait、signal、futex、IPC、WaitQueue/Completion、scheduler、time/sched/rlimit 等专题页，补充核心结构体、状态、等待/唤醒路径和关键函数源码；展开调度缓存中的 UID/GID 字段写法。
+
+**验证：**
+- 行数统计：`docs/01_architecture` 3555 行、`docs/02_syscall` 4660 行、`docs/04_mm` 4635 行、`docs/05_process` 6626 行 ✅
+- 不正式/免责声明式句式扫描无命中；剩余 `...` 均为函数签名、路径示意或普通参数省略表达 ✅
+- `.gitkeep` 残留检查无命中 ✅
+- 未运行内核编译；本次为文档-only 修改
+
+**备注：**
+- 本轮重点回应“源码太少、片段化严重、所有文档要按 net 粒度详细修改”的要求，优先把核心函数从概述型说明补成可直接对照仓库源码阅读的长文档结构。
+
+### docs(core): 补充关键结构体、状态地图和调试测试映射
+
+**涉及文件：**
+- `docs/01_architecture/debugging.md`、`docs/02_syscall/debugging.md`、`docs/04_mm/debugging.md`、`docs/05_process/debugging.md` — 新增四个调试与测试映射页，按症状、源码入口、关键状态和测试覆盖组织，吸收 `06_net/debugging.md` 与 `test-map.md` 的排查方式。
+- `docs/04_mm/address-space-and-vma.md`、`docs/04_mm/page-fault-and-usercopy.md` — 补充 `AddressSpace`、`Vma`、`VmaSet`、`FaultContext`、`FaultAction` 的源码行号、字段分类、方法地图和缺页分发代码解释。
+- `docs/05_process/task-control-block.md`、`docs/05_process/process-control-block.md`、`docs/05_process/scheduler.md` — 补充 TCB/PCB/TaskManager/Processor 的源码定义片段、状态图、资源共享矩阵和 current cache 说明。
+- `docs/02_syscall/syscall-layer.md` — 补充 `syscall()` 分发器的精确源码位置、公共记录、seccomp、match、fallback 和返回记录阶段。
+- `docs/01_architecture/README.md`、`docs/02_syscall/README.md`、`docs/04_mm/README.md`、`docs/05_process/README.md`、`docs/README.md` — 登记新增调试页。
+
+**验证：**
+- 行数统计：`01_architecture` 2957 行、`02_syscall` 3216 行、`04_mm` 3569 行、`05_process` 4072 行 ✅
+- 新增 `debugging.md` 已进入四个目录 README 和总索引 ✅
+- 不正式/占位/免责声明式句式扫描无命中 ✅
+- `.gitkeep` 残留检查无命中 ✅
+- 未运行内核编译；本次为文档-only 修改
+
+**备注：**
+- 本次不只参考 `tcp.md`，同时吸收 `06_net/architecture.md`、`syscall-layer.md`、`smoltcp-device-routing.md`、`debugging.md` 和 `test-map.md` 的组织方式：结构体/状态、数据流、入口链路、调试路径和测试映射并重。
+
+### docs(core): 在 06_net 布局内加厚原理流程与源码解释
+
+**涉及文件：**
+- `docs/01_architecture/*.md` — 在保持现有 `06_net` 风格章节的基础上，补充 `rust_main()` 逐步解析、syscall/缺页跨层路径、调度循环后台职责、初始化依赖链、HAL 契约、rv64/la64 后端阅读主线和运行期服务触发点。
+- `docs/02_syscall/*.md` — 补充 `syscall()` 公共步骤、`sys_read/sys_write` 源码顺序、用户指针安全边界、编号到分支的核对流程、errno 优先级、signal/time/IPC 状态路径和 tracing/perf 观测链路。
+- `docs/04_mm/*.md` — 补充 `AddressSpace::do_page_fault()`、`fault_in_user_va()`、`PageFaultHandler::classify()`、mmap 生命周期、frame/heap 区分、VMA/PTE/TLB 状态一致性、file-backed mmap、CoW、OOM 与锁顺序说明。
+- `docs/05_process/*.md` — 补充 TCB/PCB 分层、clone 发布边界、exec 成功前后状态替换、exit/wait 闭环、`run_tasks()` 源码阶段、WaitQueue/Completion 使用模式、signal/futex/IPC 等待与唤醒路径。
+
+**验证：**
+- 行数统计：`01_architecture` 2867 行、`02_syscall` 3104 行、`04_mm` 3414 行、`05_process` 3850 行 ✅
+- 不正式/占位/免责声明式句式扫描无命中 ✅
+- `.gitkeep` 残留检查无命中 ✅
+- 未运行内核编译；本次为文档-only 修改
+
+**备注：**
+- 本次没有另起“教学版”布局，而是在原有 `06_net` 式章节内增加源码导读、状态一致性解释、典型路径拆解和调试落点。
+
+### docs(core): 对齐 06_net 风格完整重写 01/02/04/05 文档
+
+**涉及文件：**
+- `docs/01_architecture/*.md` — 在完整阅读 `docs/06_net` 写法后，将架构目录扩展为 10 篇文档，覆盖模块地图、初始化、启动/trap、syscall 入口、HAL、rv64/la64 后端和运行期服务；各页补充源码位置、执行路径、代码片段、边界和测试映射。
+- `docs/02_syscall/*.md` — 将 syscall 目录扩展为 11 篇文档，覆盖 ABI/dispatch、完整 syscall 表、fs/fd/event、process/mm/signal/time/ipc/network 分层、错误码优先级和 tracing 入口。
+- `docs/04_mm/*.md` — 将 MM 目录扩展为 13 篇文档，覆盖初始化、frame allocator、PageTable/TLB、AddressSpace/VMA、mmap/brk、fault/uaccess、filemap/PageCache、CoW、OOM 和 locking 边界。
+- `docs/05_process/*.md` — 将进程目录扩展为 16 篇文档，覆盖 TCB/PCB、scheduler、WaitQueue/Completion、clone/namespace、exec、exit/wait、signal、futex、IPC、time/sched/rlimit/prctl。
+- `docs/README.md` — 更新总索引，登记四个目录新增的全部文档。
+- `docs/01_architecture/.gitkeep`、`docs/02_syscall/.gitkeep`、`docs/04_mm/.gitkeep`、`docs/05_process/.gitkeep` — 目录已有正式文档后删除占位文件。
+
+**验证：**
+- 已完整阅读 `docs/06_net/*.md`，按其“架构页 + 专题页 + 源码地图 + 路径解析 + 边界/测试映射”的组织方式重写 ✅
+- 行数统计：`01_architecture` 2704 行、`02_syscall` 2976 行、`04_mm` 3268 行、`05_process` 3682 行 ✅
+- 不正式/占位/免责声明式句式扫描无命中 ✅
+- `.gitkeep` 残留检查无命中 ✅
+- 未运行内核编译；本次为文档-only 修改
+
+**备注：**
+- 文档内容以 `os/src/main.rs`、`os/src/hal/`、`os/src/syscall/`、`os/src/mm/`、`os/src/task/`、`os/src/syscall/process/` 以及 `docs/06_net` 的组织方式为依据。
+
+### docs(core): 补齐 net 风格主干长文档
+
+**涉及文件：**
+- `docs/01_architecture/architecture.md` — 新增系统架构详解，按 `06_net/architecture.md` 层次展开设计目标、总体架构、HAL 后端、启动/syscall/缺页/timer 流程、接口、测试映射和已知边界
+- `docs/02_syscall/syscall-layer.md` — 新增系统调用层详解，按 `06_net/syscall-layer.md` 风格展开 ABI、分发、领域 syscall、重点调用流程、阻塞/重启、错误码和测试映射
+- `docs/04_mm/architecture.md` — 新增 MM 架构详解，展开 AddressSpace/VmaSet/Vma、frame/page table、mmap/brk、缺页、CoW、filemap、uaccess、接口和边界
+- `docs/05_process/architecture.md` — 新增进程与任务架构详解，展开 TCB/PCB、TaskManager、WaitQueue、clone、exec、exit/wait、signal、futex、IPC、time/sched/rlimit
+- `docs/01_architecture/README.md`、`docs/02_syscall/README.md`、`docs/04_mm/README.md`、`docs/05_process/README.md` — 将主干长文档加入模块内索引
+- `docs/README.md` — 将四个主干长文档加入总索引
+
+**验证：**
+- 与 `docs/06_net/*.md` 行数规模对比 ✅
+- Markdown frontmatter 扫描 ✅
+- 不正式/占位句式扫描 ✅
+- `.gitkeep` 残留检查 ✅
+- 未运行内核编译；本次为文档-only 修改
+
+**备注：**
+- 本次修正上一版“短页偏索引化”的问题，新增四个评审主入口长文档；短专题页保留作为细分索引和补充说明。
+
+### docs(core): 按 06_net 粒度拆细核心模块文档
+
+**涉及文件：**
+- `docs/01_architecture/module-map.md`、`initialization-flow.md`、`trap-and-syscall-entry.md`、`riscv64-platform.md`、`loongarch64-platform.md`、`runtime-services.md` — 将架构文档拆分为模块地图、初始化、trap/syscall 入口、双架构后端和运行期服务页
+- `docs/02_syscall/fs-fd-event.md`、`process-lifecycle-and-ids.md`、`mm-syscalls.md`、`signal-time-ipc.md`、`network-syscalls.md`、`compatibility-and-errors.md`、`tracing-and-dispatch.md` — 将 syscall 文档按领域拆分为 fd/event、进程身份、MM、signal/time/IPC、网络索引、错误兼容和观测调试页
+- `docs/04_mm/initialization-and-kernel-space.md`、`frame-allocator.md`、`page-table-and-tlb.md`、`mmap-and-brk.md`、`cow-and-fork.md`、`filemap-and-page-cache.md`、`uaccess.md`、`oom-and-locking.md` — 将 MM 文档拆分为初始化、frame、页表/TLB、mmap、CoW、filemap、uaccess 和 OOM/锁页页
+- `docs/05_process/task-control-block.md`、`process-control-block.md`、`scheduler.md`、`waitqueue-completion.md`、`clone-and-namespace.md`、`exec.md`、`exit-wait.md`、`signal.md`、`futex.md`、`ipc.md`、`time-sched-rlimit.md` — 将进程文档拆分为 TCB、PCB、调度、等待队列、clone、exec、exit/wait、signal、futex、IPC 和 time/sched/rlimit 页
+- `docs/01_architecture/README.md`、`docs/02_syscall/README.md`、`docs/04_mm/README.md`、`docs/05_process/README.md` — 更新各模块内文档索引
+- `docs/README.md` — 登记新增细粒度文档
+
+**验证：**
+- 新增文档 frontmatter 扫描 ✅
+- `.gitkeep` 残留检查 ✅
+- 关键不正式句式与占位词扫描 ✅
+- 未运行内核编译；本次为文档-only 修改
+
+**备注：**
+- 本次补充重点是让 01/02/04/05 的文档颗粒度接近 `docs/06_net/`，并继续以 `os/src/main.rs`、`os/src/hal/`、`os/src/syscall/`、`os/src/mm/`、`os/src/task/` 和 `os/src/syscall/process/` 为依据。
+
+### docs(core): 补齐架构、系统调用、内存管理和进程文档
+
+**涉及文件：**
+- `docs/01_architecture/README.md` — 新增系统架构概览、模块边界、启动主线和文档索引
+- `docs/01_architecture/boot-and-trap.md` — 新增启动流程、文件系统初始化分支、syscall/trap/缺页/定时器路径说明
+- `docs/01_architecture/hal-and-platform.md` — 新增 HAL 导出接口、rv64/la64 后端差异和 TLB 约束说明
+- `docs/02_syscall/README.md` — 新增系统调用子系统总览、文件地图和阅读索引
+- `docs/02_syscall/dispatch-and-abi.md` — 新增 syscall ABI、分发流程、返回值、用户内存访问和阻塞语义说明
+- `docs/02_syscall/syscall-map.md` — 新增按 `syscall/mod.rs` 分发表整理的已注册 syscall 索引
+- `docs/04_mm/README.md` — 新增内存管理总览、初始化、核心结构和功能矩阵
+- `docs/04_mm/address-space-and-vma.md` — 新增地址空间、ELF、用户栈、mmap/brk、fork VMA 语义说明
+- `docs/04_mm/page-fault-and-usercopy.md` — 新增缺页动作、CoW、文件映射 fault 和用户内存访问说明
+- `docs/04_mm/frame-and-pagetable.md` — 新增物理页分配、Frame store、PageTable trait 和 TLB 约束说明
+- `docs/05_process/README.md` — 新增进程与任务总览、核心对象和状态说明
+- `docs/05_process/task-process-scheduler.md` — 新增 TCB/PCB 字段、调度队列、WaitQueue 和主循环说明
+- `docs/05_process/clone-exec-exit-wait.md` — 新增 clone/clone3、unshare/setns、execve、exit 和 wait 说明
+- `docs/05_process/signal-futex-ipc.md` — 新增 signal、pidfd、signalfd、futex、SysV IPC 和 POSIX MQ 说明
+- `docs/README.md` — 更新文档索引日期和模块文档表
+- `docs/01_architecture/.gitkeep`、`docs/02_syscall/.gitkeep`、`docs/04_mm/.gitkeep`、`docs/05_process/.gitkeep` — 目录已有正式文档后删除占位文件
+
+**验证：**
+- Markdown frontmatter 和关键语气扫描 ✅
+- 新增文档文件清单检查 ✅
+- 未运行内核编译；本次为文档-only 修改
+
+**备注：**
+- 文档内容依据 `os/src/main.rs`、`os/src/hal/`、`os/src/syscall/`、`os/src/mm/`、`os/src/task/`、`os/src/syscall/process/` 当前实现整理。
+
 ### 第二轮 Oracle 交叉评审修复：Engineering-Casebook.md 12 处事实性不准确
 
 **涉及文件：**
@@ -5976,4 +6134,3 @@ a = sum(x.get("all", x.get("total", 1)) for x in r)
 - la64 4-window QEMU: open/close 89-95μs 零退化
 
 **备注：** Oracle 3轮审查发现的 issue 已全部修复。详细报告见 `docs/09_debug/buddy-allocator-scan-drift.md`
-
