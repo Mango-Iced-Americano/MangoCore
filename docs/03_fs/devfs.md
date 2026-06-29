@@ -1,0 +1,271 @@
+---
+title: "DevFS 设备文件系统"
+module: fs/dev
+category: fs
+status: draft
+owner: "MangoCore Team"
+last_updated: "2026-06-29"
+code_paths:
+  - "os/src/fs/dev/mod.rs"
+  - "os/src/fs/dev/null.rs"
+  - "os/src/fs/dev/zero.rs"
+  - "os/src/fs/dev/urandom.rs"
+  - "os/src/fs/dev/full.rs"
+  - "os/src/fs/dev/pipe.rs"
+  - "os/src/fs/dev/tty.rs"
+  - "os/src/fs/dev/pty.rs"
+  - "os/src/fs/dev/rtc.rs"
+  - "os/src/fs/dev/block.rs"
+entry_points:
+  - "DEV_FS"
+  - "DevFS"
+  - "add_dev"
+  - "add_dir"
+  - "LockedDevFSInode"
+arch:
+  rv64: supported
+  la64: supported
+tests:
+  ltp:
+    - "open05"
+    - "fcntl01"
+    - "getdents01"
+  oscomp:
+    - "basic"
+related_docs:
+  - "docs/03_fs/architecture.md"
+  - "docs/03_fs/vfs-core.md"
+  - "docs/03_fs/init-and-rootfs.md"
+---
+
+## 概述
+
+DevFS（设备文件系统）管理 `/dev/` 目录下的所有设备节点。它是一个纯内存虚拟文件系统，不关联任何块设备，所有 inode 通过 `add_dev` / `add_dir` 接口在初始化时或运行时动态注册。DevFS 的设计参考了 DragonOS 的 DevFS 实现，遵循 VFS 层 `IndexNode` trait 契约。
+
+DevFS 位于 VFS 四层模型的最底层，负责将字符设备、块设备、伪终端、管道等 I/O 操作接口统一呈现为文件系统目录树中的 inode 节点。
+
+## 数据结构
+
+### DevFSInode
+
+DevFSInode 是 DevFS 的目录 inode 内部数据，通过 `LockedDevFSInode`（`Arc<Mutex<DevFSInode>>`）提供并发访问：
+
+```rust
+pub struct DevFSInode {
+    parent: Weak<LockedDevFSInode>,
+    self_ref: Weak<LockedDevFSInode>,
+    children: BTreeMap<String, Arc<dyn IndexNode>>,
+    metadata: Metadata,
+    fs: Weak<DevFS>,
+}
+```
+
+核心字段说明：
+
+- **parent / self_ref** — 弱引用，避免循环引用，用于 `..` 和 `.` 目录项查找
+- **children** — 子节点 BTreeMap，键为设备名（如"null"、"zero"），值为实现了 `IndexNode` 的具体设备 inode
+- **metadata** — 标准 VFS Metadata，包含 inode_id、file_type、mode 等
+- **fs** — 所属 DevFS 实例的弱引用
+
+DevFS 本身只存储根目录 inode，所有动态注册的设备 inode 通过 Arc 托管，直接插入根目录的 children map。
+
+### 全局实例
+
+```rust
+lazy_static! {
+    pub static ref DEV_FS: Arc<DevFS> = DevFS::new();
+}
+```
+
+`DEV_FS` 是全局共享的单例，在 `mount_common_filesystems` 中通过 `DEV_FS.add_dev` 注册静态设备，在 `mount_boot_block_devices` 中注册块设备分区节点。
+
+## 设备注册
+
+### add_dev
+
+向 DevFS 根目录注册一个设备 inode。设备名作为 key 插入 children BTreeMap，后续通过 `find` 按名查找返回：
+
+```rust
+devfs.add_dev("null", Arc::new(Null) as Arc<dyn IndexNode>)
+```
+
+如果 name 已存在返回 `SyscallErr::EEXIST`，当前 inode 不是目录返回 `SyscallErr::ENOTDIR`。
+
+### add_dir
+
+在 DevFS 根目录下创建子目录 inode。每个子目录也是一个 `LockedDevFSInode`，独立持有自己的 children BTreeMap。典型用途是 `add_dir("misc")` 创建 `/dev/misc` 以容纳次要设备：
+
+```rust
+let misc_dir = devfs.add_dir("misc", InodeMode::from_bits_truncate(0o755))?;
+misc_dir.add_dev("rtc", Arc::new(Rtc) as Arc<dyn IndexNode>)?;
+```
+
+### IndexNode for LockedDevFSInode
+
+目录 inode 实现了 `find`、`list`、`list_dirents` 等标准 VFS 方法，将 lookup 委托给 `children` map 查找。非目录操作（`read_at`、`write_at`）返回 `ENOSYS`。
+
+## 设备列表
+
+### /dev/null
+
+数据汇。读总是返回 EOF（0 字节），写丢弃所有数据并返回写入长度。实现了 `is_discard_write`（true）和 `supports_user_buffer_io`（true），通过 `read_at_user` / `write_at_user` 路径直接操作用户缓冲区。`resize` 是空操作。主次设备号 makedev!(1, 3)。
+
+### /dev/zero
+
+零源。读用 0 填充缓冲区并返回长度，写丢弃所有数据（同 null 语义）。实现了 `read_at_user`（通过 `dst.fill_at` 快速填零）和 `supports_user_buffer_io`。主次设备号 makedev!(1, 5)。
+
+### /dev/urandom 和 /dev/random
+
+当前用 0 填充缓冲区（暂未实现真随机数生成器）。返回 `buf.len()` 而非 0（避免调用方误判为 EOF）。写完全丢弃。`/dev/random` 是 urandom 的别名，共享同一个 `Urandom` 类型实例。主次设备号 makedev!(1, 9)。
+
+### /dev/full
+
+总是满的假设备。读语义同 /dev/zero（填零返回），写始终返回 `ENOSPC`。用于测试程序在磁盘满时的行为。主次设备号 makedev!(1, 7)。
+
+### /dev/tty 和 /dev/console
+
+控制台终端。`/dev/console` 是 TTY 的别名。
+
+**读**：从物理串口（`console_getchar`）或 stashed 输入区取一个字符，写入用户缓冲区。如果字符匹配 VINTR（默认 Ctrl-C）且 ISIG 标志置位，向前台进程组发送 SIGINT 并返回 `EAGAIN`。ECHO 模式下回显字符（`\r` 转 `\n`）。
+
+**写**：将 UTF-8 字符串直接输出到串口（`print!`）。
+
+**ioctl**：支持 `TCGETS` / `TCSETS` / `TCGETA` / `TCSETA` 系列（termios 读写）、`TCXONC`（空操作）、`TIOCGPGRP` / `TIOCSPGRP`（前台进程组）、`TIOCGWINSZ` / `TIOCSWINSZ`（窗口大小）。`TIOCGPGRP` 在 foreground_pgid 从未设置时返回调用者的 pgid（Linux 兼容）。
+
+### Pipe（匿名管道）
+
+管道由 `make_pipe` 创建一对 `(read_end, write_end)`，共享同一个 `PipeRingBuffer`（64KB 环形缓冲区）。关键行为：
+
+- **读**：从环形缓冲区读取数据。缓冲区为空且写端已关闭返回 EOF（0）；缓冲区为空且写端打开返回 `EAGAIN`；读取后通知写端 `EPOLLOUT`。
+- **写**：写入环形缓冲区。读端已关闭发送 SIGPIPE 并返回 `EPIPE`；缓冲区满返回 `EAGAIN`；写入后通知读端 `EPOLLIN`。
+- **poll**：基于环形缓冲区状态和端对关闭情况计算可读/可写/挂起事件位。
+- **ioctl**：`FIONREAD` 用于读取当前缓冲区中可用字节数。
+
+PipeRingBuffer 状态机为 FULL / EMPTY / NORMAL。支持 `F_SETPIPE_SZ` 调整容量（需 `CAP_SYS_RESOURCE` 权限，上限 2GB 实际受 64KB 硬限制）。资源使用支持原子计数器跟踪。
+
+**Named FIFO**：通过 `fifo_open` 在全局 `FIFO_REGISTRY` 中以 `(dev_id, inode_id)` 标识建立管道端点。支持 `compact_fifo_registry` 周期回收两端已关闭的陈旧条目。
+
+### PTY（伪终端）
+
+Pty 系统由 `PtyManager` 管理，每对 PTY 包含一个 master（`PtmxMasterInode`）和一个 slave（`PtySlave`），通过 `PtyInner` 共享两个方向独立的 `RingBuffer`（各 4KB）。
+
+**Master /dev/ptmx**：
+
+- `open` 创建新的 PTY pair，初始化 `PtyInner` 并分配唯一 ID
+- 读（master_read）：从 slave_to_master 环形缓冲区取数据；读后通知 slave 写端
+- 写（master_write）：向 master_to_slave 环形缓冲区写数据；写后通知 slave 读端
+- 支持 ioctl：`TIOCGPTN`（获取从设备号）、`TIOCSPTLCK` / `TIOCGPTLCK`（锁定控制）
+
+**Slave /dev/pts/N**：
+
+- `open` 检查 master 是否锁定、master 是否关闭；更新打开计数，首次打开记录 uid
+- `close` 递减打开计数，最后一个 slave 关闭时唤醒 master 的读/写等待队列并通知 HUP
+- 读：从 master_to_slave 取数据。如果 master 已关闭且无数据返回 0（EOF）。
+- 写：向 slave_to_master 写数据。如果 master 已关闭返回 EIO。ONLCR 模式下 `\n` 自动扩展为 `\r\n`。
+- 支持 termios / winsize / foreground_pgid 全套 ioctl
+
+`PtsDirInode` 作为 `/dev/pts` 的动态目录，`find` 时根据数字 ID 从 `PtyManager` 获取对应 slave。
+
+### /dev/rtc
+
+实时时钟。仅支持 `RTC_RD_TIME` ioctl，将 `current_time_safe()` UNIX 时间戳转换为 `RtcTime` 结构（tm_sec / tm_min / tm_hour / tm_mday / tm_mon / tm_year / tm_wday / tm_yday / tm_isdst），闰年和月份天数正确处理。主次设备号 makedev!(10, 135)。
+
+多个 RTC 入口并存：`/dev/rtc`（devfs 根）和 `/dev/misc/rtc`（misc 子目录共享同类型的 Rtc inode）。
+
+### BlockDevInode（块设备节点）
+
+BlockDevInode 包装 `Arc<dyn BlockDevice>`，提供原始块设备访问。主设备号固定为 254（VIRTIO_BLK_MAJOR）。
+
+**读**：按 BLOCK_SZ 块对齐分片读取，通过 `read_block` 获取整块数据后拷贝子区间。超出设备大小返回 0。
+
+**写**：按块对齐写入。非整块写入时先读后写（read-modify-write）。超出设备大小返回 `ENOSPC`。
+
+**ioctl**：
+
+- `BLKGETSIZE64`：获取设备字节大小
+- `BLKSSZGET`：获取逻辑扇区大小（固定返回 512）
+
+**动态注册路径**：`mount_boot_block_devices` 在探测到底层块设备后依次注册：
+
+```
+/dev/vda       (原始根设备, minor=0)
+/dev/vdb       (工具盘, minor=1)
+/dev/vdb1..N   (MBR 分区, minor=2..)
+/dev/vda1..N   (别名, minor=100..)
+```
+
+分区节点通过 `probe_mbr` 解析 MBR 表，为每个有效分区创建 `PartitionBlockDevice` 包装器，再封装为 `BlockDevInode` 注册到 DEV_FS。
+
+### /dev/cpu_dma_latency
+
+Null 类型的别名。写入丢弃，读返回 EOF。用于需要打开 `/dev/cpu_dma_latency` 的测试程序。
+
+### PTMX 的随机数提升
+
+`/dev/random` 和 `/dev/urandom` 当前用零填充的实现是一个已知的暂时性限制。部分 LTP 和 libc 测试依赖随机数设备存在且可用，零填充保证它们不会因 EOF 假阳性而崩溃，但不提供真随机性。
+
+## 初始化流程
+
+```
+rust_main
+  -> fs::init()
+    -> mount_common_filesystems()
+      -> DEV_FS.add_dev("null")     // + tty, zero, urandom, random
+      -> DEV_FS.add_dev("full")     // /dev/full
+      -> DEV_FS.add_dev("ptmx")     // /dev/ptmx
+      -> DEV_FS.add_dev("pts")      // /dev/pts 动态目录
+      -> DEV_FS.add_dev("rtc")      // /dev/rtc
+      -> DEV_FS.add_dir("misc")     // /dev/misc
+        -> misc_dir.add_dev("rtc")  // /dev/misc/rtc
+      -> DEV_FS.add_dir("shm")      // /dev/shm 覆盖挂载点
+    -> mount_boot_block_devices()
+      -> DEV_FS.add_dev("vda")     // 原始块设备
+      -> DEV_FS.add_dev("vdb")     // 工具盘
+      -> probe_mbr -> DEV_FS.add_dev("vdb1")...  // 分区节点
+```
+
+## Test Mapping
+
+| 特性 | 设备 | 测试覆盖 | 状态 |
+|------|------|---------|------|
+| null 读写 | /dev/null | busybox dd, LTP open05 | pass |
+| zero 填零读 | /dev/zero | busybox dd, mmap 测试 | pass |
+| full 写返回 ENOSPC | /dev/full | LTP fcntl01 | pass |
+| urandom 读取 | /dev/urandom | openssl, LTP getdents01 | partial |
+| tty 字符 IO | /dev/tty | login, shell 交互 | pass |
+| pipe 环形缓冲 | pipe() syscall | LTP pipe*, libc 测试 | pass |
+| pty pair 创建 | /dev/ptmx | busybox, telnetd | pass |
+| rtc 时间查询 | /dev/rtc | hwclock, LTP | pass |
+| 块设备原始 IO | /dev/vda | dd, mkfs, mount | pass |
+
+## Known Issues
+
+1. **urandom 随机数质量**
+   - 现象：`/dev/urandom` 和 `/dev/random` 返回全零数据
+   - 根因：尚未集成硬件随机数生成器或软件 CSPRNG
+   - 影响：依赖真随机数的加密应用（openssl、ssh）行为不可预测
+   - 修复方向：集成 riscv64 Zkr 扩展或 loongarch64 的硬件随机指令；fallback 到软件 ChaCha20
+
+2. **pty 缓冲区大小固定**
+   - 现象：master 到 slave 和 slave 到 master 各只有 4KB 环形缓冲区
+   - 根因：`PTY_BUF_SIZE` 硬编码为 4096
+   - 影响：大量数据写入（如 `git push` 通过 ssh）容易阻塞
+   - 修复方向：参考 Linux N_TTY 缓冲策略，支持动态扩展或更大默认值
+
+3. **FIFO 注册表泄漏风险**
+   - 现象：系统长时间运行后 FIFO_REGISTRY 可能积累陈旧条目
+   - 根因：`compact_fifo_registry` 需要周期性由 reclaim 触发，触发频率不足时会持有已关闭的 PipeRingBuffer
+   - 当前缓解：每次 fifo_open 时检查并清理当前条目同 key 的脏数据；compact 在轮询中被调用
+   - 修复方向：确保 compact 高频周期化或在 pipe inode close 时主动清理注册表
+
+4. **pipe 匿名管道容量上限**
+   - 现象：`F_SETPIPE_SZ` 无法超过 64KB（RING_DEFAULT_BUFFER_SIZE）
+   - 根因：PipeRingBuffer 底层为固定大小 Box<[u8; 65536]>
+   - 影响：大块数据传输场景受限
+   - 修复方向：改为动态分配 Vec，支持按需扩容
+
+5. **tty 仅支持单字节 I/O**
+   - 现象：每次 read 最多返回 1 字节
+   - 根因：Teletype 的 `last_char` 暂存仅缓存一个字符，没有行缓冲或 raw 模式连续读取
+   - 影响：cat 等逐字节读取工作的应用性能差
+   - 修复方向：实现 ICANON 模式的行缓冲和 raw 模式的批量读取
