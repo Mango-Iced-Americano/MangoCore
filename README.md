@@ -168,6 +168,7 @@ docker-compose.yml 开发容器配置
 
 ## 参考资料
 
+- [NPUcore-Blossom](https://gitlab.eduxiji.net/educg-group-35806-2894282/oskernel2025-npucore-blossom) — 本项目基线（西北工业大学 2025 届 OS 竞赛作品）
 - [DragonOS](https://github.com/DragonOS-Community/DragonOS) — VFS/MountFS 架构参考
 - [smoltcp](https://github.com/smoltcp-rs/smoltcp) — TCP/IP 协议栈
 - [virtio-drivers](https://github.com/rcore-os/virtio-drivers) — Virtio 设备驱动
