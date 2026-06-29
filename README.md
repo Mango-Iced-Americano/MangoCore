@@ -77,6 +77,25 @@ make docker
 
 ---
 
+## 相比基线的增量
+
+MangoCore 基于 [NPUcore-Blossom](https://gitlab.eduxiji.net/educg-group-35806-2894282/oskernel2025-npucore-blossom)（西北工业大学 2025 届 OS 竞赛作品）开发，在以下方面进行了扩展和重构：
+
+| 领域 | NPUcore-Blossom | MangoCore |
+|------|----------------|-----------|
+| 系统调用 | 100+ | ~218 |
+| 网络协议栈 | 未实现 | TCP/UDP/RAW/Unix/Netlink/Packet，iperf/netperf |
+| I/O 多路复用 | 未实现 | epoll, eventfd, signalfd, pidfd, timerfd |
+| 进程间通信 | 未实现 | SysV msg/sem/shm |
+| 文件系统类型 | ext4, fat32 | ext4, fat32, tmpfs, ramfs, procfs, devfs, sysfs |
+| VFS 架构 | 基础 VFS | DragonOS 启发式 MountFS + 挂载传播 + 目录项缓存 |
+| 网络诊断 | 无 | /proc/net/tcp, /proc/net/udp, /proc/net/dev 等 |
+| 内核诊断 | 无 | /proc/[pid]/*, /sys/kernel/stats, heap_trace |
+| LTP 测试覆盖 | basic/busybox/lua/libctest/lmbench | 额外支持 iperf/netperf/cyclictest 等 |
+| 模块文档 | 少量 Markdown | 21 篇网络文档 + 14 篇文件系统文档 |
+
+---
+
 ## 测试
 
 ### 快速冒烟
