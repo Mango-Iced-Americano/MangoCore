@@ -350,7 +350,7 @@ TcpSocket UdpSocket RawSocket   Unix sockets
 
 MangoCore 网络子系统以 Socket trait 作为文件描述符层与具体协议实现之间的边界。TCP、UDP、RAW 等网络协议 socket 的 IPv4/IPv6 处理依赖 smoltcp 的 Interface 与 SocketSet；设备侧通过 DeviceStack 组织网卡设备、接口和 Socket 集合。
 
-对于已建立的TCP连接，TcpSocket内部维护 `fast_route_id`、`fast_ifindex`、`fast_state` 等原子字段，用作具体 socket 实现内部的路由缓存提示。
+对于已建立的TCP连接，TcpSocket内部维护 `fast_route_id`、`fast_ifindex`、`fast_state` 等原子字段，用作具体 socket 实现内部的路由缓存提示。此外，TCP 采用 lazy bind 策略：socket 创建后并不立即加入 smoltcp 的 SocketSet，而是将连接元数据暂存于 BoundInner 结构中，仅在首次实际连接操作（如 connect()）时才完成完整绑定。数据发送路径上通过 `try_poll_stack(ifindex)` 在发送前按设备触发性 poll，减少全局 poll 次数。历史 iperf TCP 吞吐从 4.2 Mbps 提升至 144 Mbps（约 34 倍），详见 Work\_Log 2026-06-19。
 
 Unix Domain Socket 通过 UnixStreamSocket、UnixDatagramSocket 等内核内部类型实现本机进程间通信，路径独立于网络协议 socket。
 
@@ -1343,6 +1343,8 @@ MountFS
 ├── mount_path: Mutex<Option<String>>
 └── dentry_cache: Mutex<DentryCache>
 
+该 dentry_cache 是 FS-local（每 MountFS 独立），与 Linux 全局 VFS dcache 不同。DentryCache 包含 negative_dentry 缓存（上限 512 条，超出时清空）、dir_version 和 dir_lookup_cache（目录级快速查找表）。回收策略采用 version-based 修剪：当目录版本号变化时，对应 dentry 失效并触发清理。negative_dentry 缓存通过容量封顶避免内存无限增长。
+
 MountList
 └── mounts: Mutex<BTreeMap<Arc<MountPath>, Vec<MountRecord>>>
 ```
@@ -1435,44 +1437,44 @@ pub fn writeback_all(&self) -> Result<(), SyscallErr> {
 
 Dirty 跟踪属于 PageCache 内部机制，由 `InnerPageCache.dirty_pages` 与 writeback 路径共同维护。
 
----
+### 6\.5\.4 PageEntry 状态机
 
-## 6\.6 ext4 元数据缓存
-
-MangoCore 为 ext4 文件系统实现了专门的 metadata cache。
-
-### 6\.6\.1 设计目的
-
-ext4 文件系统的元数据访问包括 inode、bitmap、directory 等内容，metadata cache 用于减少这些路径上的重复块设备访问。journal 相关字段仅解析，语义未实现。
-
-### 6\.6\.2 缓存范围
-
-ext4 metadata cache 仅缓存 ext4 文件系统的元数据：
+PageCache 底层由 PageEntry 管理每个缓存页的状态转换：
 
 ```Plain Text
-ext4 文件系统
-       │
-       ▼
-  ext4 metadata cache
-       │
-       ├── SuperBlock
-       ├── Inode Table
-       ├── Block Bitmap
-       ├── Inode Bitmap
-       └── Directory Entries
+Loading → UpToDate ↔ Dirty → Writeback / Error
 ```
 
-### 6\.6\.3 与 PageCache 的关系
+- **Loading**：缺页请求已提交后端，数据尚未就绪；
+- **UpToDate**：数据有效，可读；
+- **Dirty**：数据已修改，待写回；
+- **Writeback**：正在写回后端存储；
+- **Error**：后端读写失败。
 
-ext4 metadata cache 和 PageCache 是并列关系，而非上下层关系：
+`PageCacheBackend` trait 提供 `frame_for_read()` 和 `frame_for_write()` 两个方法，统一处理 mmap 文件缺页和共享文件写入——两者走同一状态机路径。
 
-- PageCache：缓存文件数据（普通文件内容）；
+---
 
-- ext4 metadata cache：缓存 ext4 文件系统的元数据（inode、bitmap 等）。
+## 6\.6 ext4 三层缓存架构
 
-两者各自独立，分别服务于不同的数据访问需求。
+ext4 文件系统采用三层缓存架构，分别覆盖文件数据、元数据和块设备访问。
 
-MetaBlockCache 仅在 ext4 上下文中存在，不适用于 tmpfs、procfs、sysfs 等文件系统。
+### 6\.6\.1 第一层：PageCache（文件数据）
+
+每个 ext4 inode 关联独立的 PageCache 实例。代码中 `page_cache()` 与 `ensure_page_cache()` 分离——前者仅查询现有缓存，后者在无缓存时创建新实例。PageCache 负责普通文件内容的缓存、mmap 文件映射和共享写路径（见 6.5 节）。
+
+### 6\.6\.2 第二层：inode_cache + Dirty Inode Flush
+
+inode_cache 缓存已打开的 ext4 inode 对象，避免重复从块设备读取 inode 结构。修改后的 inode 通过 dirty inode flush 路径写回磁盘。
+
+### 6\.6\.3 第三层：MetaBlockCache（元数据块）
+
+MetaBlockCache（容量 256 块）缓存 ext4 文件系统的元数据块，涵盖 inode table、block bitmap、inode bitmap、directory block、group descriptor 和 superblock。与 PageCache 是并列关系而非上下层关系：
+
+- PageCache：缓存普通文件数据；
+- MetaBlockCache：缓存 ext4 文件系统的元数据（inode table、bitmap、dir block 等）。
+
+`flush_metadata_cache()` 的刷新顺序为：先刷 dirty inodes，再刷 metadata block cache，确保一致性。MetaBlockCache 仅在 ext4 上下文中存在，不适用于 tmpfs、procfs、sysfs 等文件系统。
 
 ---
 
@@ -1593,6 +1595,10 @@ User Program
 ```
 
 该结构将用户态 Socket 接口、协议实现、设备选择和 VirtIO 网卡驱动分离。
+
+### 7\.2\.1 路由层
+
+路由模块位于 `os/src/net/socket/inet/routing.rs`。`RouteKind` 枚举定义四种路由类型：`Local`（本地地址）、`Connected`（直连网段）、`Gateway`（网关转发）、`Unreachable`（不可达）。`RouteTable` 维护有序 `RouteEntry` 列表，每个条目包含目标网络、网关、输出 ifindex 和优先级。`route_output()` 对外提供路由查询接口，内部实现懒填充默认路由：自动添加 `127.0.0.0/8 → lo` 环回路由、DHCP 获取的 CIDR 子网 → eth0 直连路由、`0.0.0.0/0 → gateway` 默认网关路由。`NetNamespace` 持有 per-ns 的 `device_list` 和 `router: RouteTable`，支持网络命名空间级别路由隔离。
 
 ---
 
@@ -1742,7 +1748,7 @@ Socket 与具体 smoltcp SocketHandle、设备 ifindex 之间的关系集中记�
 
 ## 7\.6 SocketBinding机制
 
-端口绑定是网络系统最容易出现冲突的位置。MangoCore 使用 PortManager 和全局端口表管理 TCP/UDP 端口分配；SocketBinding 主要记录某个网络 socket 在指定设备上的 smoltcp handle 和协议类型。
+SocketBinding 与 PortManager 职责分离。SocketBinding 负责将 RouteSocketHandle 路由到具体网络设备——记录某个网络 socket 在指定设备上的 ifindex、smoltcp handle 和协议类型，属于路由/设备绑定层。PortManager 独立管理端口表的分配与释放（见 7.9 节）。两者在 bind() 流程中协作：PortManager 校验端口可用性，SocketBinding 记录设备级绑定信息。
 
 ### 7\.6\.1 设计目的
 
@@ -1860,6 +1866,8 @@ PortManager 确保：
 
 - 支持端口复用（SO\_REUSEADDR）。
 
+PortManager 内部通过 `NEXT_EPHEMERAL_PORT: AtomicU16` 实现端口号顺序递增分配（而非随机分配），专门用于避免 `fork()` 后子进程与父进程产生端口冲突。临时端口范围取自 `local_port_range()`（32768-60999）。分配时同时检查 `TCP_PORTS` 和 `UDP_PORTS` 两张端口表，确保跨协议端口唯一。修复历史问题：`bind(127.0.0.1, 0)` 原来返回 EINVAL 已修正为 Linux 语义的端口自动分配。
+
 ---
 
 ## 7\.10 网络数据流流程
@@ -1945,7 +1953,7 @@ MangoCore 的调试与观测体系包括：
 
 4. procfs：Linux 兼容的 `/proc` 文件系统；
 
-5. sysfs：Linux 兼容的 `/sys` 文件系统（部分 feature\-gated）；
+5. sysfs 风格 `/sys` 子集，部分功能通过 feature 门控。
 
 6. panic diagnostics 与 OOM handler：panic 诊断输出和 feature-gated OOM 处理路径。
 
@@ -2175,6 +2183,10 @@ MangoCore 支持 task/process zombie 状态管理和检测。
 
 Zombie 状态管理限定在 Task/Process 层；Page、Socket、File、Route 等对象由各自子系统的生命周期和回收路径管理。
 
+### 8\.8\.4 Zombie PCB 完整回收案例
+
+`wait_child()` 消费 zombie 状态时，原实现存在三处遗漏：未调用 `release_pid()` 归还 PID、未清除 parent 引用、未调用 `unregister_process()` 从全局进程表移除。SIGCHLD=SIG_IGN 路径下的 auto-reap 同样缺失这些步骤。修复后：消费 zombie 时完整执行 release_pid()、clear parent、unregister_process()；auto-reap 路径直接丢弃 state 并释放对象。验证：LA64 stress 测试中 zpcb（zombie PCB 数量）在 1000-waiter 并发阶段后恢复为 0。
+
 ---
 
 ## 8\.9 Panic Diagnostics 与 OOM 处理
@@ -2215,7 +2227,7 @@ Zombie 状态管理限定在 Task/Process 层；Page、Socket、File、Route 等
 
 - procfs：Linux 兼容的 `/proc` 文件系统；
 
-- sysfs：Linux 兼容的 `/sys` 文件系统（部分 feature\-gated）；
+- sysfs 风格 `/sys` 子集，部分功能通过 feature 门控。
 
 - panic diagnostics 与 OOM handler：panic 时输出诊断信息，OOM 路径按 feature 和分配失败路径处理。
 
@@ -2360,6 +2372,8 @@ IOzone 通过率较低，表明文件系统相关路径仍有未通过测试项�
 ## 9\.6 网络 Benchmark 分析
 
 网络测试采用 iperf 进行吞吐测试。
+
+历史网络 fast path 优化记录：iperf TCP 吞吐从 4.2 Mbps 提升至 144 Mbps（约 34 倍），详见 Work\_Log 2026-06-19。
 
 ---
 
@@ -2588,7 +2602,7 @@ User Space
 
 - procfs Linux 兼容 `/proc`；
 
-- sysfs Linux 兼容 `/sys`（部分 feature\-gated）；
+- sysfs 风格 `/sys` 子集，部分功能通过 feature 门控。
 
 - panic diagnostics 与 OOM handler 相关诊断；
 
@@ -2690,7 +2704,7 @@ MangoCore 项目的主要工程成果包括：
 
 2. 双架构（RISCV64/LoongArch64）的统一工程化实践；
 
-3. 基于 smoltcp 和 DragonOS 参考设计的模块化网络与文件系统；
+3. 文件系统参考 DragonOS VFS/MountFS 分层设计；网络基于 smoltcp，并在 MangoCore 中自研 RouteSocketHandle/DeviceStack/fast-route 外壳以实现多接口解耦。
 
 4. 内核观测与调试工具；
 

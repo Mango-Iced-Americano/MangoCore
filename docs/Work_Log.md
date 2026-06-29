@@ -4,6 +4,30 @@
 
 ## 2026-06-29
 
+### 第二轮 Oracle 交叉评审修复：Engineering-Casebook.md 12 处事实性不准确
+
+**涉及文件：**
+- `docs/Engineering-Casebook.md` — 12 处定向替换：
+  1. Debug 框架：移除虚构的 Owner/Reference 输出，改为 heap_trace 热点定位描述
+  2. QA001 Buddy：碎片合并顺序错误改为 dealloc scan drift + bitmap guard 修复
+  3. QA002/QA003：两个泛化 zombie 案例合并为一个精确案例（release_pid/parent/unregister_process）
+  4. Dentry Cache：全局 dcache 改为 MountFS/FS-local 缓存（negative_dentry/dir_version/dir_lookup_cache）
+  5. 缓存所有权：虚构 Weak IndexNode/WeakReference 改为 VFS 重构事实（page_cache/ensure_page_cache）
+  6. WriteBack Manager：改为 dirt_pages + writeback_all + PageEntry 状态机
+  7. PageCache 状态机：Allocate→Cached→Dirty→WriteBack→Clean→Release 改为 Loading→UpToDate↔Dirty→Writeback/Error
+  8. BufferCache 删除："所有数据统一进入 PageCache" 改为文件数据走 PageCache，ext4 元数据走 MetaBlockCache
+  9. 网络章节主题：Buffer/Owner 叙事改为 NetInterfaceInner/DeviceStack/RouteSocketHandle/SocketBinding/RouteTable/PortManager
+  10. QA002 Bind：close 后 EADDRINUSE 改为 fork 端口 Heisenberg（atomic NEXT_EPHEMERAL_PORT）
+  11. QA005 Route：虚构的 lookup/forward/lifecycle/buffer 改为 RouteKind/RouteTable/route_output 结构
+  12. 移除绝对化断言："工业级"、"任何测试失败禁止合并"、"Long Running 全部通过"
+
+**验证：**
+- 纯文档编辑，无需编译验证
+
+**备注：** 基于 Oracle 第二轮交叉评审，定位到 12 处 Q&A 案例与源代码事实不匹配的问题。所有修复均为靶向替换，保持 Q&A 格式。
+
+---
+
 ### 修复两篇评审文档的 21 处内容不准确（Oracle 评审修复）
 
 **涉及文件：**

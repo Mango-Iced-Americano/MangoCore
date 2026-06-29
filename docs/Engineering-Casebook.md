@@ -118,35 +118,25 @@ Reference = 2
 
 ## Fix
 
-建立统一调试框架：
+建立辅助分析框架：
 
 ```Plain Text
-procfs → sysfs → heap_trace → Lifecycle Trace
+procfs → sysfs → heap_trace → log
 ```
 
-所有对象统一输出：
+- heap\_trace 定位分配热点（alloc/free 次数与调用 PC），非完整引用追踪
 
-- Owner 
+- procfs 提供进程级状态快照
 
-- Reference 
-
-- State 
-
-- Allocation Site 
+- sysfs 提供内核统计
 
 ---
 
 ## Verification
 
-重新运行IOzone：
+运行压力测试后，heap\_trace 给出 top 分配 PC，配合 procfs 输出排查内存异常。
 
-heap\_trace显示：
-
-```Plain Text
-Page → IndexNode → Arc<Page> → Reference=2
-```
-
-快速定位IndexNode持有引用导致Page无法释放。
+（Owner/Reference 自动推导输出为远期目标，尚未完全实现。）
 
 ---
 
@@ -466,75 +456,77 @@ Memory Request → Allocation → Reference Analysis → Root Cause → Fix → 
 
 ---
 
-# QA001 为什么内核堆 Buddy 分配器长时间运行后碎片越来越多？
+# QA001 为什么内核堆 Buddy 分配器长时间运行后性能退化？
 
 ## Question
 
-系统连续运行后，内核堆上大块连续内存申请失败，但统计显示 Buddy 分配器仍存在大量空闲页。注意此处讨论的 Buddy 分配器是内核堆分配器（`Heap<32>` / `OomAwareAllocator` 底层），而非物理页帧分配器（`StackFrameAllocator`）。物理页帧采用栈式分配器而非 Buddy 算法，不存在相同的外碎片问题。
+系统连续运行 basic+busybox 测试后，lmbench 中 open/close 延迟从 309 μs 退化到 746 μs（+141%），fork+exit 从 6972 μs 退化到 13169 μs（+89%），但 null syscall 完全不受影响。注意此处讨论的是内核堆 Buddy 分配器（`Heap<32>` / `OomAwareAllocator` 底层）的 dealloc 扫描退化，而非物理页帧分配器（`StackFrameAllocator`）。物理页帧采用栈式分配器，不存在此问题。
 
 ---
 
 ## Phenomenon
 
-连续执行压力测试：
+lmbench 跨窗口测量显示渐进退化：
 
 ```Plain Text
-Allocate → Free → Allocate → Free → Long Running
+W0: open/close = 309 μs
+W1: open/close = 502 μs
+W2: open/close = 638 μs
+W3: open/close = 746 μs  (+141%)
 ```
 
-Buddy状态：
-
-```Plain Text
-Order10 = 0
-
-Order9 = 0
-
-Order0 数量大量增加
-```
-
-虽然Free Page充足，但连续内存申请失败。
+退化仅出现在"创建新内核对象"的操作（文件打开/关闭、进程创建），不影响"读取已有字段"的操作（getppid）。
 
 ---
 
 ## Investigation
 
-首先检查：
-
-- bitmap状态； 
-
-- free\_area链表； 
-
-- Page Flag。 
-
-均未发现异常。
-
-继续观察释放流程：
+在 heap allocator 内部插桩精确定时，跟踪 dealloc 流程中的线性扫描步数：
 
 ```Plain Text
-Free Page → Insert FreeList → Merge Buddy
+W0: scan_steps_total = 14,316,108  (avg 22.3 steps/dealloc)
+W3: scan_steps_total = 70,421,086  (avg 30.5 steps/dealloc)
 ```
 
-发现释放后立即插入链表，再执行Merge。
+通过 `/sys/kernel/stats/heap` 暴露计数器确认：
+
+- dealloc\_ticks\_per\_call 从 10.8K 增长到 69.9K（6.5×）
+
+- scan\_steps\_per\_dealloc 从 19 步增长到 114 步（6×）
 
 ---
 
 ## Root Cause
 
-Buddy合并顺序错误。
+Buddy dealloc() 中 `for block in free_list[current_class].iter_mut()` 线性扫描整个 free-list 来查找 buddy。随着 heap 碎片化，同一 size-class 的 free-list 越来越长，每次 dealloc 都需要 O(n) 扫描——即使 buddy 已经被分配出去（大部分情况），也必须遍历整个链表才能确认。详见 `docs/09_debug/buddy-allocator-scan-drift.md`。
 
-Page提前进入FreeList，导致Buddy无法正确合并，长期运行后形成大量低阶碎片。
+```Plain Text
+dealloc(ptr):
+  push to free_list[class]
+  while current_class < ORDER:
+    buddy = current_ptr ^ (1 << current_class)
+    for block in free_list[current_class].iter_mut():  ← O(n) 扫描！
+      if block == buddy → merge
+    if no buddy → break  (但已扫描整个链表)
+```
 
 ---
 
 ## Fix
 
-调整释放流程：
+加 bitmap guard：在 O(n) 线性扫描前先用 O(1) 位图判断 buddy 是否在 free-list 中。若 buddy 不在，直接 break，跳过无效扫描。
 
 ```Plain Text
-Free Page → Find Buddy → Merge → Insert FreeList
+dealloc(ptr):
+  push to free_list[class], bitmap_set
+  while current_class < ORDER:
+    buddy = current_ptr ^ (1 << current_class)
+    if !bitmap_test(current_class, buddy): break  ← O(1) 守卫
+    for block in free_list[current_class].iter_mut():
+      if block == buddy → merge, bitmap_clear/set
 ```
 
-优先完成Merge，再进入空闲链表。
+配套边界保护：空指针检查、地址范围检查、索引越界检查、内存不足 fallback。
 
 ---
 
@@ -1236,221 +1228,111 @@ fork复制的是资源关系，而不是资源内容。
 
 ---
 
-# QA002 为什么wait无法正确回收子进程？
+# QA002 为什么 Zombie PCB 持续累积？
 
 ## Question
 
-子进程退出后，wait偶尔无法回收对应Task。
+长时间运行后 zombie PCB 计数持续增加，即使 parent 调用 wait() 也无法完全回收。
 
 ---
 
 ## Phenomenon
 
-执行：
+LA64 压力测试中观察：
 
 ```Plain Text
-fork → exit → wait
+zpcb = 73  (1000 waiter phase)
 ```
 
-系统状态：
-
-```Plain Text
-Child Exit
-
-↓
-
-Task仍存在
-
-↓
-
-Zombie增加
-```
-
----
-
-## Investigation
-
-检查Task状态：
-
-```Plain Text
-Running
-
-Ready
-
-Exited
-```
-
-状态转换正常。
-
-继续分析Parent关系：
-
-发现：
-
-```Plain Text
-Parent
-
-↓
-
-Child List
-
-↓
-
-Exited Task
-```
-
-Child仍保存在Parent链表中。
-
----
-
-## Root Cause
-
-Task退出时释放资源，但没有同步更新Parent管理结构。
-
-Zombie无法被正确回收。
-
----
-
-## Fix
-
-统一退出流程：
-
-```Plain Text
-Task Exit → Resource Release → Parent Notify → Remove Child → Recycle
-```
-
-退出与回收统一管理。
-
----
-
-## Verification
-
-连续执行大量 fork/exit/wait 迭代：
-
-```Plain Text
-fork → exit → wait
-```
-
-Zombie数量始终保持稳定。
-
----
-
-## Lessons Learned
-
-Task退出并不意味着Task结束。
-
-只有Parent完成回收，生命周期才真正结束。
-
----
-
-# QA003 为什么Zombie Task越来越多？
-
-## Question
-
-长时间运行后Zombie Task持续增加。
-
----
-
-## Phenomenon
-
-procfs统计：
+parent 进程反复 fork/wait，zombie PCB 累积。procfs 显示：
 
 ```Plain Text
 Running = 6
 
 Ready = 3
 
-Zombie = 148
+Zombie = 73
 ```
-
-系统运行正常。
-
-Zombie持续增长。
 
 ---
 
 ## Investigation
 
-检查：
+跟踪 zombie 回收路径发现：
 
-Task；
-
-Scheduler；
-
-Parent。
-
-最终发现：
-
-部分异常退出Task没有进入wait流程。
+1. `wait_child()` 消费 zombie 后未调用 `release_pid()`
+2. parent 指针未清除，zombie PCB 仍被 parent 的 child list 引用
+3. `unregister_process()` 未执行，PID 和 procfs 条目残留
+4. `SIGCHLD=SIG_IGN` 路径的自动回收不完全：state 标记了但 PCB 未释放
 
 ---
 
 ## Root Cause
 
-异常退出路径没有统一回收逻辑。
+zombie 消费路径缺少完整的清理序列：
 
-Scheduler只负责调度，不负责资源释放。
+```Plain Text
+wait_child() → consume zombie
+  missing: release_pid()
+  missing: clear parent
+  missing: unregister_process()
+```
+
+SIGCHLD=SIG_IGN 路径：
+
+```Plain Text
+exit → detect SIGCHLD=SIG_IGN
+  state dropped only
+  missing: object free
+```
 
 ---
 
 ## Fix
 
-建立统一退出流程：
+### wait() 路径修复
+
+zombie 消费后执行完整清理：
 
 ```Plain Text
-Normal Exit
-
-↓
-
-Exception Exit
-
-↓
-
-Task Release
-
-↓
-
-Zombie Queue
-
-↓
-
-wait()
-
-↓
-
-Recycle
+consume zombie
+  → release_pid()
+  → clear parent
+  → unregister_process()
+  → free PCB
 ```
 
-所有退出统一进入Recycle流程。
+### auto-reap 路径修复
+
+```Plain Text
+exit → SIGCHLD=SIG_IGN
+  → drop state
+  → clear parent
+  → release_pid()
+  → unregister_process()
+  → free PCB
+```
 
 ---
 
 ## Verification
 
-Long Running：
+LA64 stress test（`fork → exit → wait` × 数千次）：
 
 ```Plain Text
-BusyBox
-
-Lua
-
-IOzone
+Before: zpcb = 73  (1000-waiter phase)
+After:  zpcb = 0   (after drain)
 ```
 
-连续运行。
+RV64 + LA64 双架构编译验证通过。连续运行 BusyBox/Lua/IOzone zombie 保持 0。
 
-Zombie保持稳定。
+详见 Work_Log 2026-05-28。
 
 ---
 
 ## Lessons Learned
 
-Scheduler负责运行。
-
-Lifecycle负责释放。
-
-职责必须分离。
-
----
+进程退出路径必须遵循固定清理模板：释放 PID → 清除 parent → 注销 procfs → 释放 PCB。缺一步就造成 zombie 累积。
 
 # QA004 为什么Scheduler偶尔无法切换任务？
 
@@ -2224,47 +2106,29 @@ Lookup完全依赖线性搜索。
 
 ## Fix
 
-建立统一Dentry Cache：
+引入 MountFS/FS-local dentry 缓存。非 Linux 全局 dcache，而是每个 MountFS 实例维护自己的缓存结构：
 
 ```Plain Text
-Path → Dentry Cache → IndexNode → File
+Path → MountFS.DentryCache → IndexNode
 ```
 
-优先命中缓存。
+- negative\_dentry（cap 512）：缓存不存在的路径，减少 lookup 失败开销
 
-未命中再访问文件系统。
+- dir\_version：目录变更版本号，快速失效缓存
+
+- dir\_lookup\_cache：子目录项缓存，回收按版本剪枝
 
 ---
 
 ## Verification
 
-重复Open：
-
-```Plain Text
-Open
-
-↓
-
-Cache Hit
-
-↓
-
-IndexNode
-
-↓
-
-Return
-```
-
-路径解析时间明显下降。
+重复 Open 后缓存命中，路径解析时间明显下降。negative\_dentry 减少了 ENOENT 路径的重复遍历。
 
 ---
 
 ## Lessons Learned
 
-路径解析属于高频操作。
-
-Cache远比优化Lookup算法更加有效。
+嵌入式内核不需要 Linux 全局 dcache 的复杂度。FS-local 缓存配合版本剪枝足够覆盖目录遍历的热点场景。
 
 ---
 
@@ -2332,39 +2196,26 @@ IndexNode既负责文件信息，又负责缓存管理。
 
 ## Fix
 
-重新划分职责：
+旧 VFS 中 BufferCache 和 PageCache 双缓存系统导致同一数据被两份缓存维护，生命周期交叉混乱。VFS 重构（2026-05-13/15）将双缓存合并为统一缓存架构：
 
 ```Plain Text
-File → Weak IndexNode
-
-IndexNode → Metadata
-
-PageCache → Data Cache
+旧: BufferCache (block) + PageCache (file) → 数据重复
+新: PageCache (统一) → page_cache() / ensure_page_cache()
 ```
 
-IndexNode仅维护元数据。
-
-缓存独立管理。
+`page_cache()` 只读查询已有缓存，`ensure_page_cache()` 按需创建。
 
 ---
 
 ## Verification
 
-连续：
-
-```Plain Text
-Open → Close → Repeat
-```
-
-IndexNode数量保持稳定。
+连续 Open/Close 循环后 IndexNode 数量保持稳定，Page 无泄漏。
 
 ---
 
 ## Lessons Learned
 
-Metadata与Data应分别管理。
-
-统一职责能够降低生命周期复杂度。
+同一份数据只能有一份缓存。双缓存系统必然导致生命周期交叉。
 
 ---
 
@@ -3042,39 +2893,24 @@ IndexNode和PageCache同时持有Arc。
 
 ## Fix
 
-重新定义Owner：
+旧 VFS 中 BufferCache/PageCache 双缓存系统在 VFS 重构中被替换。新架构区分 `page_cache()`（只读查询）与 `ensure_page_cache()`（按需创建），缓存创建权更明确，Page 生命周期由 PageCache 统一管理。
 
 ```Plain Text
-PageCache → Owner(Page)
-
-IndexNode → WeakReference
-
-File → WeakReference
+page_cache() → 只读查询已有缓存
+ensure_page_cache() → 按需创建新缓存
 ```
-
-统一Page生命周期。
 
 ---
 
 ## Verification
 
-连续：
-
-```Plain Text
-IOzone → BusyBox → Lua
-```
-
-Page数量保持稳定。
-
-未出现Memory Leak。
+连续 IOzone → BusyBox → Lua 后 Page 数量保持稳定，无泄漏。
 
 ---
 
 ## Lessons Learned
 
-Page必须只有一个Owner。
-
-共享访问全部采用WeakReference。
+双缓存系统必然导致生命周期混乱。统一缓存创建路径是消除泄漏的前提。
 
 ---
 
@@ -3151,22 +2987,15 @@ Dirty管理依赖File。
 重新设计：
 
 ```Plain Text
-Write
-
-↓
-
-PageCache Dirty Queue
-
-↓
-
-WriteBack
-
-↓
-
-Clean Page
+Write → mark_dirty(page)
+  → InnerPageCache.dirty_pages insert
+  → PageEntry state: UpToDate → Dirty
+WriteBack → writeback_all()
+  → iterate dirty_pages
+  → submit_bio → clear Dirty flag
 ```
 
-Dirty统一管理。
+实际机制：`InnerPageCache.dirty_pages` 集合跟踪脏页，PageEntry 状态机管理转换，`writeback_all()` 执行批量回写。
 
 ---
 
@@ -3247,22 +3076,18 @@ Return
 修改策略：
 
 ```Plain Text
-Write
+Write → mark_dirty → dirty_pages insert
 
 ↓
 
-Dirty Queue
-
-↓
-
-Batch WriteBack
+writeback_all() → batch submit_bio
 
 ↓
 
 Disk
 ```
 
-批量刷新。
+PageEntry 状态机驱动 Dirty → Writeback → UpToDate 转换，`writeback_all()` 批量提交 BIO。
 
 ---
 
@@ -3436,33 +3261,31 @@ Reading
 
 ## Fix
 
-重新设计：
+实际 PageEntry 状态机：
 
 ```Plain Text
-Allocate
-
-↓
-
-Cached
-
-↓
-
-Dirty
-
-↓
-
-WriteBack
-
-↓
-
-Clean
-
-↓
-
-Release
+Loading        ← 首次访问触发磁盘 I/O，I/O 完成后进入 UpToDate
+  ↓
+UpToDate       ← 数据有效，可读；写入时为 Dirty
+  ↕
+Dirty          ← 数据已修改但未写回；writeback_all() 触发 Writeback
+  ↓
+Writeback      ← 后台回写中；完成后回到 UpToDate（或 Error）
+  ↓
+Error          ← I/O 错误
 ```
 
-统一Page状态。
+状态转换触发条件：
+
+- Loading → UpToDate：磁盘 I/O 完成
+
+- UpToDate → Dirty：写入（mark_dirty）
+
+- Dirty → Writeback：writeback_all() 选中该页
+
+- Writeback → UpToDate：BIO 完成
+
+- Writeback → Error：BIO 失败
 
 ---
 
@@ -3528,25 +3351,19 @@ WriteBack属于缓存行为。
 
 ## Fix
 
-统一WriteBack：
+实际架构没有独立 WriteBack Manager。WriteBack 由 PageEntry 状态机和 `writeback_all()` 驱动：
 
 ```Plain Text
-Dirty Queue
-
-↓
-
-WriteBack Manager
-
-↓
-
-Batch IO
-
-↓
-
-Disk
+dirty_pages (InnerPageCache)
+  ↓
+writeback_all()
+  ↓
+PageEntry: Dirty → Writeback → UpToDate/Error
+  ↓
+submit_bio → Disk
 ```
 
-统一调度。
+对于 ext4：先标记 inode 脏（dirty_inode），再处理 MetaBlockCache（256 blocks），最后刷 PageCache。
 
 ---
 
@@ -3632,23 +3449,15 @@ Memory浪费。
 
 ## Fix
 
-统一缓存体系：
+分类管理：
 
 ```Plain Text
-File Access
-
-↓
-
-PageCache
-
-↓
-
-Block Device
+File Data → PageCache
+ext4 Metadata → MetaBlockCache (256 blocks)
+ext4 Inode Dirty → 单独跟踪 (dirty_inode)
 ```
 
-BufferCache移除。
-
-所有数据统一进入PageCache。
+BufferCache 移除，文件数据统一进入 PageCache。但 ext4 元数据（block group descriptors, inode table 等）走 MetaBlockCache（固定 256 blocks），inode 脏状态独立跟踪，不经过 PageCache。
 
 ---
 
@@ -3681,16 +3490,16 @@ User Read/Write
         ↓
       VFS
         ↓
-   PageCache
-        ↓
+    PageCache
+         ↓
 Page Index Lookup
-        ↓
+         ↓
 Cache Hit / Cache Miss
-        ↓
-Dirty Queue
-        ↓
-WriteBack Manager
-        ↓
+         ↓
+InnerPageCache.dirty_pages
+         ↓
+writeback_all() / PageEntry state machine
+         ↓
 Block Device
 ```
 
@@ -4434,14 +4243,28 @@ Physical Memory
 
 # 7\.1 Network模块概述
 
-Network模块负责管理Socket、Route、Buffer以及TCP/UDP通信资源，是Kernel资源共享最复杂的模块之一。随着VFS、Memory和PageCache逐渐完善，传统Socket独立维护生命周期的设计开始暴露出大量资源泄漏、重复Bind以及Buffer长期占用等问题。
+Network模块的核心架构基于 `NetInterfaceInner { stacks, bindings }`。每个网络设备对应一个 `DeviceStack`，包含独立的 smoltcp Interface 和 SocketSet。Socket 层通过 `RouteSocketHandle → SocketBinding → smoltcp SocketHandle` 三级间接访问底层协议栈。路由由 `RouteTable/RouteKind/route_output` 管理，端口分配通过 `PortManager` 顺序递增。
 
-项目开发过程中，团队围绕Socket生命周期、统一Route管理、Buffer共享机制以及统一Network Owner进行了多轮重构，使网络模块逐步形成资源统一管理、状态统一维护和生命周期统一释放的工程架构。
+核心数据结构：
 
-统一分析流程如下：
+- `NetInterfaceInner`：全局网络状态，包含 stacks（设备栈集合）和 bindings（socket 绑定表）
+- `DeviceStack`：per-device smoltcp Interface + SocketSet
+- `RouteSocketHandle`：用户可见的 socket 句柄，关联到具体的 SocketBinding
+- `SocketBinding`：持有 smoltcp SocketHandle，封装协议类型和本地/远端地址
+- `RouteTable`：`RouteEntry` 列表，支持 Local/Connected/Gateway/Unreachable 四种路由类型
+- `PortManager`：`NEXT_EPHEMERAL_PORT` 原子递增，32768-60999 范围
+
+关键设计约束：
+
+1. Socket 生命周期由进程 fd table 管理，关闭时同步清理 SocketBinding 和 PortManager 记录
+2. 路由决策（route_output）先查 RouteTable，未命中则填默认路由
+3. DHCP 获取的网关动态更新默认路由
+4. 所有 socket I/O 非阻塞，通过 WaitQueue 实现阻塞语义
+
+分析流程如下：
 
 ```Plain Text
-Socket Request → Route Lookup → Buffer Allocation → Data Transfer → Resource Release → Regression
+Socket Create → RouteSocketHandle → SocketBinding → DeviceStack.Interface → smoltcp Socket → Data Transfer → Close → Cleanup
 ```
 
 ---
@@ -4580,119 +4403,69 @@ Socket只能有一个Owner。
 
 ---
 
-# QA002 为什么Bind偶尔失败？
+# QA002 为什么 fork 后端口分配碰撞（Heisenberg 问题）？
 
 ## Question
 
-端口已经关闭，但再次Bind提示Address Already Used。
+fork 后父子进程使用临时端口时出现随机碰撞，bind(127.0.0.1, 0) 返回 EINVAL 而非自动分配。
 
 ---
 
 ## Phenomenon
 
-执行：
+fork 后父子进程同时 connect/send，观察端口分配：
 
 ```Plain Text
-Bind
-
-↓
-
-Close
-
-↓
-
-Bind
+Parent → port 45000
+Child  → port 45000  (碰撞！)
 ```
 
-返回：
-
-```Plain Text
-EADDRINUSE
-```
-
-系统认为端口仍被占用。
+或 bind(127.0.0.1, 0) 返回 EINVAL，而 Linux 上自动分配随机端口。
 
 ---
 
 ## Investigation
 
-检查：
+检查 PortManager 逻辑：
 
-```Plain Text
-Socket Table
-
-↓
-
-Port Table
-
-↓
-
-Route
-```
-
-Socket已经释放。
-
-Port Table仍保留记录。
+1. 原随机临时端口分配在 fork 后不稳定 — fork 复制了相同的 `NEXT_EPHEMERAL_PORT` 状态，父子竞争同一序列
+2. bind(127.0.0.1, 0) 的 port=0 路径未按 Linux 语义处理 — 未触发自动分配
+3. 临时端口范围与 /proc/sys/net/ipv4/ip_local_port_range 不匹配
 
 ---
 
 ## Root Cause
 
-Close只释放Socket。
+三方面问题：
 
-没有同步更新Bind Table。
+```Plain Text
+1. NEXT_EPHEMERAL_PORT: random → fork 后父子共轭状态 → 碰撞
+2. bind(127.0.0.1, 0):  未实现 port=0 自动分配 → EINVAL
+3. 端口范围:            未对齐 Linux 标准 32768-60999
+```
 
 ---
 
 ## Fix
 
-统一释放流程：
-
 ```Plain Text
-Close Socket
-
-↓
-
-Remove Bind
-
-↓
-
-Release Route
-
-↓
-
-Recycle
+1. NEXT_EPHEMERAL_PORT 改为 atomic 顺序递增（取消 random）
+2. bind(127.0.0.1, 0) 走 Linux 自动分配路径
+3. 端口范围设为 32768-60999（Linux 标准）
+4. 跨 TCP/UDP 冲突检查
 ```
-
-统一维护端口生命周期。
 
 ---
 
 ## Verification
 
-连续：
-
-```Plain Text
-Bind
-
-Close
-
-Bind
-
-10000次
-```
-
-全部成功。
+连续 fork + connect 反复执行，无端口碰撞。bind(127.0.0.1, 0) 正确返回自动分配端口。范围 32768-60999 内分配无重复。
 
 ---
 
 ## Lessons Learned
 
-端口属于Kernel资源。
-
-必须统一管理生命周期。
-
----
+fork 复制了所有进程状态，包括端口分配器的内部计数器。必须确保分配器状态在 fork 后不产生父子竞争。
 
 # QA003 为什么Accept越来越慢？
 
@@ -4904,115 +4677,90 @@ Buffer属于通信资源。
 
 ---
 
-# QA005 为什么Route越来越复杂？
+# QA005 实际路由结构是什么样的？
 
 ## Question
 
-随着Socket增加，Route维护越来越困难。
+MangoCore 的路由模块如何组织？Route 的职责边界是什么？
 
 ---
 
 ## Phenomenon
 
-项目初期：
+实际路由结构由 `RouteTable`、`RouteEntry`、`RouteKind` 和 `route_output()` 组成。
 
 ```Plain Text
-Socket
+RouteKind:
+  - Local       → 本机地址直接交付
+  - Connected   → 直连子网
+  - Gateway     → 经网关转发
+  - Unreachable → 不可达
 
-↓
-
-Route
-
-↓
-
-Device
+RouteTable: Vec<RouteEntry>
+route_output(): 查 RouteTable → 命中返回 nexthop
+                 未命中 → 按 sk_daddr 自动填充默认路由
+                 DHCP 网关 → 动态更新默认路由
 ```
 
-后来增加：
-
-```Plain Text
-TCP
-
-UDP
-
-Loopback
-
-Virtual Device
-```
-
-Route逻辑快速膨胀。
+没有单独的 Buffer Manager 或 Route Lifecycle Manager。路由只做路径选择。
 
 ---
 
 ## Investigation
 
-统计Route职责：
+`route_output()` 查找流程：
 
-负责：
+```Plain Text
+socket send → get sk_daddr
+  → RouteTable lookup by dst addr
+  → RouteKind match:
+       Local → loopback
+       Connected → direct dev
+       Gateway → gateway MAC
+       Unreachable → error
+  → return (dev, nexthop)
+```
 
-- Lookup； 
-
-- Forward； 
-
-- 生命周期； 
-
-- Buffer管理。 
-
-职责过多。
+`NetNamespace` 提供网络命名空间隔离。
 
 ---
 
 ## Root Cause
 
-Route承担了多个模块职责。
+路由模块负责路径选择，不负责 buffer 管理或生命周期。
 
-导致代码高度耦合。
+路由表在以下时机更新：
+
+1. 设备 up/down 时添加直连路由
+
+2. DHCP 获取网关后更新默认路由
+
+3. 应用程序通过 netlink 添加删除路由
 
 ---
 
 ## Fix
 
-重新划分：
+路由架构已固定为 RouteTable + route_output + NetNamespace。无需大重构：
 
 ```Plain Text
-Socket
-
-↓
-
-Route Lookup
-
-↓
-
-Network Device
-
-↓
-
-Buffer Manager
+Socket → route_output(sk_daddr)
+  → RouteKind match
+  → DeviceStack lookup
+  → send via smoltcp
 ```
-
-Route只负责路径选择。
 
 ---
 
 ## Verification
 
-新增Loopback无需修改Socket。
-
-Route复杂度明显下降。
+新增 loopback 或多设备场景无需修改路由核心。路由表查询和 DHCP 网关更新均工作正常。
 
 ---
 
 ## Lessons Learned
 
-Route负责路径。
-
-Buffer负责数据。
-
-Socket负责生命周期。
-
-职责必须分离。
-
----
+路由只做一件事：路径选择。不耦合 buffer、生命周期或其他职责。
 
 # QA006 为什么Send/Recv路径仍有优化空间？
 
@@ -5390,7 +5138,7 @@ Long Running
 Merge
 ```
 
-任何测试失败禁止合并。
+ 合并前需通过模块级回归检查。
 
 ---
 
@@ -5404,7 +5152,7 @@ Merge
 
 - Route稳定； 
 
-- Long Running全部通过。 
+- Long Running 未出现退化。 
 
 ---
 
@@ -5416,27 +5164,27 @@ Merge
 
 # 7\.2 本章总结
 
-Network模块开发过程中，团队逐步完成了从"能够通信"到"统一资源管理"的架构演进。通过建立统一Socket生命周期、统一Route管理、统一Buffer机制、统一Socket状态机以及统一Network Owner模型，成功解决了Socket泄漏、Bind异常、Buffer长期占用、Accept性能下降以及重复Copy等典型问题。
+Network模块的核心架构为 `NetInterfaceInner { stacks, bindings }`，每个设备独立 `DeviceStack`。Socket 通过 `RouteSocketHandle → SocketBinding → smoltcp SocketHandle` 三级间接访问。路由由 `RouteTable/RouteKind/route_output` 管理，端口由 `PortManager` 顺序递增分配。
 
-最终形成如下统一网络架构：
+最终形成如下网络架构：
 
 ```Plain Text
 Application
       ↓
-Socket API
+Socket API (syscall)
       ↓
-Socket Manager
+RouteSocketHandle
       ↓
-Route Lookup
+SocketBinding (per-protocol)
       ↓
-Buffer Manager
+DeviceStack.Interface (smoltcp)
       ↓
-Network Device
+RouteTable / route_output
       ↓
-Packet Transfer
+Network Device (adapter → virtio_net)
 ```
 
-整个Network模块最终实现了Memory、PageCache和Device之间资源生命周期的一致管理，使网络系统逐步形成模块解耦、状态统一、生命周期统一和Benchmark驱动优化的工程体系。同时，通过统一Regression流程保证了每一次网络优化都能够经过BusyBox、iperf和Long Running测试验证，为MangoCore整体工业级稳定性提供了可靠支撑。
+网络系统经过多轮调试解决了 fork 后端口碰撞、路由表构建、DHCP 网关动态更新等问题。模块级回归检查通过，见 testresult/ 目录归档。
 
 # Chapter 8 Driver Research
 
@@ -6236,7 +5984,7 @@ Merge
 
 - Device稳定； 
 
-- Long Running全部通过。 
+- Long Running 未出现退化。 
 
 ---
 
@@ -6268,7 +6016,7 @@ Interrupt Handler
 Block Device / Network Device / Console
 ```
 
-整个Driver模块最终实现了Memory、PageCache、Network与Device之间资源生命周期的一致管理，使驱动系统逐步形成接口统一、状态统一、资源统一和Benchmark驱动优化的工程体系。同时，通过统一Regression流程保证每一次驱动优化都经过BusyBox、IOzone、iperf和Long Running测试验证，为MangoCore提供了稳定可靠的硬件支撑能力，并进一步体现了整个内核从功能实现向工业级工程化设计的持续演进。
+整个Driver模块最终实现了Memory、PageCache、Network与Device之间资源生命周期的一致管理，使驱动系统逐步形成接口统一、状态统一、资源统一和Benchmark驱动优化的工程体系。模块级回归检查通过，见 testresult/ 目录归档。
 
 # Chapter 9 Regression Research
 
@@ -7154,11 +6902,11 @@ Performance Baseline
 Merge
 ```
 
-Regression体系最终成为MangoCore整个Kernel开发流程的核心保障，使Memory、Process、VFS、PageCache、mmap、Network以及Driver等模块能够在统一Benchmark和统一资源监控框架下持续演进。整个项目逐步形成了**以数据驱动开发、以Benchmark验证优化、以Regression保证稳定、以Long Running验证可靠性**的工程实践模式，充分体现了工业级操作系统开发所要求的持续验证能力和系统化工程能力。
+Regression体系成为MangoCore开发流程的核心保障，使Memory、Process、VFS、PageCache、mmap、Network以及Driver等模块能够在统一Benchmark和统一资源监控框架下持续演进。整个项目逐步形成了**以数据驱动开发、以Benchmark验证优化、以Regression保证稳定**的工程实践模式。
 
 # Chapter 10 Lessons Learned
 
-# 从功能实现到工业级Kernel工程实践
+# 从功能实现到可验证的 Kernel 工程实践
 
 ---
 
