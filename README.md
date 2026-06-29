@@ -162,7 +162,7 @@ docker-compose.yml 开发容器配置
 - **禁止并行构建双架构** — 工具链 nightly 版本不同，必须串行
 - **快速验证：** `make -C os rv64-kernel-build-only`（仅内核，约 20s）
 - **双架构编译验证：** 每次变更后执行 `make -C os rv64-kernel-build-only && make -C os la64-kernel-build-only`
-- 贡献指南和开发工作流详见 `AGENTS.md`
+- 详细开发工作流（TLB 刷新、锁约定、errno 约定等）见项目根目录 `AGENTS.md`
 
 ---
 
