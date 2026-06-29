@@ -15,10 +15,19 @@ tags: [docs, index, overview]
 
 文档遵循 10 类别布局（`00_overview` 到 `09_debug`），另含工作日志、Bug 事后分析、LTP 测试计划和架构设计等遗留目录。
 
+## 评审材料（竞赛评委优先阅读）
+
+| 文档 | 说明 |
+|------|------|
+| [Technical-Report-MangoCore.md](Technical-Report-MangoCore.md) | **技术报告** — 项目完整技术综述：架构设计、模块实现、工程实践与竞赛历程 |
+| [Engineering-Casebook.md](Engineering-Casebook.md) | **工程案例手册** — 以 Q&A 形式记录各模块的设计权衡、调试过程与 Regression 案例分析 |
+
 ## 目录结构
 
-| 目录 | 主题领域 | 说明 |
+| 目录 / 文件 | 主题领域 | 说明 |
 |-----------|-----------|-------------|
+| `Technical-Report-MangoCore.md` | 评审材料 | 竞赛技术报告：项目综述与工程实践 |
+| `Engineering-Casebook.md` | 评审材料 | 竞赛工程案例手册：Q&A 与调试案例 |
 | `00_overview/` | 项目概述 | 项目高层描述、目标和范围 |
 | `01_architecture/` | 架构 | 系统架构、启动流程、HAL 设计 |
 | `02_syscall/` | 系统调用参考 | 系统调用表、ABI、分发结构 |
@@ -45,9 +54,9 @@ tags: [docs, index, overview]
 
 ### 竞赛评委
 
-审阅项目概览和功能范围，然后跳转到 `08_testing` 了解测试方法和功能矩阵。
+先阅读**评审材料**中的两份文档了解项目全貌和深度案例，再按需查阅子系统模块文档。
 
-**顺序：** `00_overview` → `08_testing` → 功能矩阵（见 08_testing）
+**顺序：** [Technical-Report-MangoCore.md](Technical-Report-MangoCore.md)（技术报告全貌）→ [Engineering-Casebook.md](Engineering-Casebook.md)（工程案例深度）→ 按需读 `03_fs/`、`06_net/` 等子系统文档 → `08_testing` 测试矩阵
 
 ### 子系统开发者
 
