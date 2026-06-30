@@ -1,7 +1,19 @@
 //! Unix Stream Socket 实现
 //!
 //! 参照 DragonOS `kernel/src/net/socket/unix/stream/mod.rs` 设计。
-//! 当前为骨架阶段，所有方法已签名但核心逻辑用 `todo!()` 占位。
+//!
+//! # Implementation Status
+//!
+//! `bind`（Path/Abstract/Unnamed）、`listen`（backlog=16）、`connect`（创建 `Connected` 对
+//! 并推入 listener 的 `incoming` 队列）、`accept`（pop `incoming` 并包装为新 fd）、
+//! `try_recv`/`try_send`（通过 `Connected` 的 `RingBuffer` pair）、`shutdown`、
+//! epoll 事件和 `wake_wait_queues` 已实现。
+//!
+//! # Limitations
+//!
+//! - `shutdown` 仅对 `Connected` 态生效，`Init`/`Listener` 返回 `ENOTCONN`
+//! - 不支持 `SCM_RIGHTS` 等 ancillary data
+//! - `backlog` 固定为 16
 
 pub mod inner;
 use self::inner::Connected;
@@ -47,7 +59,6 @@ impl core::fmt::Debug for UnixStreamSocket {
 }
 
 impl UnixStreamSocket {
-    /// 创建一个新 Unix Stream Socket（初始状态为 Init）
     pub fn new(is_nonblock: bool) -> Self {
         Self {
             inner: Mutex::new(Inner::Init(Init::new())),
@@ -61,7 +72,6 @@ impl UnixStreamSocket {
         }
     }
 
-    /// 从已有 Connected 状态创建（用于 socketpair）
     pub fn new_connected(connected: Connected, is_nonblock: bool) -> Self {
         Self {
             inner: Mutex::new(Inner::Connected(connected)),
@@ -79,7 +89,18 @@ impl UnixStreamSocket {
         self.is_nonblock.load(Ordering::Relaxed)
     }
 
-    /// 唤醒所有等待队列
+    /// 唤醒全部四个等待队列，通知所有阻塞者重新检查 readiness。
+    ///
+    /// # 触发场景
+    ///
+    /// | 队列 | 唤醒场景 |
+    /// |------|---------|
+    /// | `recv_waiters` | 对端 `try_send` 成功将数据推入本端 `rx` → 数据可读 |
+    /// | `send_waiters` | 本端 `try_recv` 消费数据 → 释放 `tx` buffer 空间 → 对端可继续写入 |
+    /// | `connect_waiters` | 连接建立完成（`Inner` 进入 `Connected` 态） |
+    /// | `accept_waiters` | 新 `Connected` 被推入 listener 的 `incoming` 队列 |
+    ///
+    /// `shutdown` 路径也在设置标志后调用本方法（通过 `EPOLLHUP` 通知对端挂断）。
     pub fn wake_wait_queues(&self) {
         self.recv_waiters.notify_events_all(
             EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM | EPollEvent::EPOLLHUP,
