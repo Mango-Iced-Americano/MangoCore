@@ -290,35 +290,4 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | 在 presentation slides 中设置 AI 工具使用说明 | 最终 slides 应复制或概括第 12 节内容，形成独立"AI 工具使用情况"页 | 待最终 slides 同步 |
 | 失败披露视为诚信问题 | 本报告主动披露 AI 工具、使用范围、证据和限制 | 已满足披露要求 |
 
-## 12. 答辩材料 AI 使用摘要
 
-以下内容可放入 presentation slides 的独立 AI disclosure 页面：
-
-> MangoCore 在 2026-04 至 2026-06 开发期间使用了 GitHub Copilot、Sisyphus、Oracle、Explore 等 AI 工具辅助开发。
->
-> **主要用途：**
-> 1. GitHub Copilot：早期网络栈 inline code completion，commit 中保留 Co-authored-by marker。
-> 2. Sisyphus：复杂任务规划、文档重构、多 agent 编排，commit 中保留 Ultraworked / Co-authored-by marker。
-> 3. Oracle：根因分析、架构审查、代码正确性验证、性能优化策略、文档 fact-check。
-> 4. Explore / sub-agents：代码搜索、模式归纳、文档资料整理。
->
-> **代表性 AI-assisted outcomes：**
-> - LTP 0 分 bug root cause analysis and fix。
-> - PageCache read-ahead la64 corruption root cause analysis。
-> - lmbench drift diagnosis and buddy allocator bitmap guard。
-> - Network stack optimization, iperf TCP 34x improvement。
-> - Technical Report / Engineering Casebook generation and multi-round Oracle fact-check。
->
-> 所有 AI 输出均由人类维护者审查、修改、双架构编译、QEMU 测试或文档事实核查后才进入提交。
-> 完整披露见 `docs/00_overview/AI-Usage-Report.md`。
-
-## 13. 本报告自身的 AI 使用声明
-
-本报告初稿由 Oracle 根据以下材料辅助生成：
-
-- git commit log evidence
-- `docs/Work_Log.md` evidence
-- 项目维护者提供的 AI 使用分析数据
-- 当前 repository 中可查询的 representative commits
-
-本报告本身也属于 AI-assisted documentation。提交前应由项目维护者人工复核，确保 commit links、line references、工具名称和披露范围与最终提交仓库一致。
