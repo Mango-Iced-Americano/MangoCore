@@ -97,7 +97,7 @@ MangoCore 基于 [NPUcore-Blossom](https://gitlab.eduxiji.net/educg-group-35806-
 | 网络诊断 | 无 | /proc/net/tcp, /proc/net/udp, /proc/net/dev 等 |
 | 内核诊断 | 无 | /proc/[pid]/*, /sys/kernel/stats, heap_trace |
 | LTP 测试覆盖 | basic/busybox/lua/libctest/lmbench | 额外支持 iperf/netperf/cyclictest 等 |
-| 模块文档 | 少量 Markdown | 21 篇网络文档 + 14 篇文件系统文档 |
+| 模块文档 | 少量 Markdown | 覆盖架构、系统调用、文件系统、内存管理、进程调度、网络、驱动、调试各子系统 |
 
 ---
 
