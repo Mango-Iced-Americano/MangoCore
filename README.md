@@ -7,7 +7,7 @@
 
 **MangoCore** 是一个 `#![no_std]` 裸机 Rust 内核，支持 **riscv64** 和 **loongarch64** 双架构，在 QEMU/OpenSBI 上运行。项目面向全国大学生操作系统竞赛内核赛道开发，实现了约 218 个 Linux 兼容系统调用，涵盖进程管理、虚拟内存、文件系统、网络、进程间通信和事件通知机制。架构设计参考了 DragonOS 的 VFS/MountFS 设计模式，行为语义以 Linux 6.6 为基准。
 
-**评审材料：** [技术报告](docs/Technical-Report-MangoCore.md) · [工程案例手册](docs/Engineering-Casebook.md)
+**评审材料：** [技术报告](docs/00_overview/Technical-Report-MangoCore.md) · [工程案例手册](docs/00_overview/Engineering-Casebook.md)
 
 ---
 
@@ -155,7 +155,7 @@ make -C os conf-inject CONF_ARCH=rv64 CONF_BLK_MODE=virt CONF_FILE=../os_test.co
   <img src="docs/diagrams/fs.png" alt="文件系统子系统架构" width="48%">
 </div>
 
-详细架构见[技术报告](docs/Technical-Report-MangoCore.md)。
+详细架构见[技术报告](docs/00_overview/Technical-Report-MangoCore.md)。
 
 ---
 
@@ -175,7 +175,7 @@ docker-compose.yml 开发容器配置
 
 ## 文档
 
-- **评审材料：** [技术报告](docs/Technical-Report-MangoCore.md) · [工程案例手册](docs/Engineering-Casebook.md)
+- **评审材料：** [技术报告](docs/00_overview/Technical-Report-MangoCore.md) · [工程案例手册](docs/00_overview/Engineering-Casebook.md)
 - [文档索引](docs/README.md) — 所有模块文档的入口
 - [测试映射](docs/ltp/) — LTP 和 OSComp 测试覆盖详情
 - [开发日志](docs/Work_Log.md) — 变更记录与调试总结
