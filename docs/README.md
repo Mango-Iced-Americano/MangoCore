@@ -57,7 +57,7 @@ tags: [docs, index, overview]
 
 先阅读**评审材料**中的两份文档了解项目全貌和深度案例，再按需查阅子系统模块文档。
 
-**顺序：** [Technical-Report-MangoCore.md](00_overview/Technical-Report-MangoCore.md)（技术报告全貌）→ [Engineering-Casebook.md](00_overview/Engineering-Casebook.md)（工程案例深度）→ 按需读 `03_fs/`、`06_net/` 等子系统文档 → `08_testing` 测试矩阵
+**顺序：** [Technical-Report-MangoCore.md](00_overview/Technical-Report-MangoCore.md)（技术报告全貌）→ [Engineering-Casebook.md](00_overview/Engineering-Casebook.md)（工程案例深度）→ 按需读 `03_fs/`、`06_net/` 等子系统文档
 
 ### 子系统开发者
 
