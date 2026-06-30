@@ -1,10 +1,14 @@
+//! `CRMD`：当前模式信息寄存器。
+//!
+//! 该 CSR 描述当前特权级、全局中断开关、watchpoint 状态以及地址翻译模式。
+//! 页表启停相关字段存在硬件不变量，写入前需要成对维护 `DA`/`PG`。
+
 use core::convert::{TryFrom, TryInto};
 
 use bit_field::BitField;
 
 use crate::hal::arch::loongarch64::register::MemoryAccessType;
 
-// 当前模式信息
 impl_define_csr!(
     CrMd,
     "Current Mode Information (CRMD)
@@ -20,6 +24,7 @@ impl core::fmt::Debug for CrMd {
             .field("plv", &self.get_plv())
             .field("ie", &self.is_interrupt_enabled())
             .field("we", &self.is_watchpoint_enabled())
+            // Safety: `pg` 和 `da` 这里只用于格式化当前 CSR 位状态，不改变地址翻译模式。
             .field("is_paging_md", unsafe { &self.pg() })
             .field("is_dir_acc", unsafe { &self.da() })
             .field("datf", &self.get_datf())
@@ -28,10 +33,11 @@ impl core::fmt::Debug for CrMd {
     }
 }
 impl CrMd {
-    // 返回整个寄存器的内容
+    /// 返回 CSR 的原始位值。
     pub fn bits(&self) -> usize {
         self.bits
     }
+    /// 覆盖 wrapper 内保存的 CSR 原始位值。
     pub fn set_bits(&mut self, bits: usize) -> &mut Self {
         self.bits = bits;
         self
@@ -51,7 +57,7 @@ impl CrMd {
     pub fn get_plv(&self) -> usize {
         self.bits.get_bits(0..2)
     }
-    // Set current privilege level.
+    /// Set current privilege level.
     pub fn set_plv(&mut self, mode: usize) -> &mut Self {
         debug_assert!(mode < 4);
         self.bits.set_bits(0..2, mode as usize);
@@ -73,15 +79,18 @@ impl CrMd {
     /// # Panic
     /// *WARNING* the function panics if the `da` and `pg` are equal.
     pub fn is_paging(&self) -> bool {
+        // Safety: 只读取 `DA`/`PG` 两个位来验证互斥关系，不执行 CSR 写入。
         unsafe {
             debug_assert_ne!(self.pg(), self.da());
         }
+        // Safety: 互斥关系验证后，`PG` 可作为当前 wrapper 的分页模式谓词。
         unsafe { self.pg() }
     }
     /// Set the true
     /// # Arguments
     /// * `on`: `true` to set the paging on and `false` otherwise.
     pub fn set_paging(&mut self, on: bool) -> &mut Self {
+        // Safety: 本方法成对更新 `PG` 与 `DA`，保持 LoongArch 对地址翻译模式的互斥要求。
         unsafe {
             self.set_pg(on);
             self.set_da(!on);
@@ -130,7 +139,6 @@ impl CrMd {
     /// otherwise, if `CSR.TLBRERA.IsTLBR`=1, the hardware restores the PWE field of CSR.TLBRPRMD here;
     /// otherwise, the hardware restores the value of the PWE field of CSR.PRMD here.
     pub fn is_watchpoint_enabled(&self) -> bool {
-        // 第9位
         self.bits.get_bit(9)
     }
     /// Instruction and data watchpoints enable bit, which is active high.
@@ -145,21 +153,39 @@ impl CrMd {
     }
 
     /// Predict for direct memory access mode.
+    ///
+    /// # Safety
+    ///
+    /// `DA` 与 `PG` 必须按 LoongArch 地址翻译规则成对解释。调用方不能只根据该位
+    /// 单独决定当前是否处于有效地址翻译模式，应同时检查 `PG` 或使用 `is_paging()`。
     pub unsafe fn da(&self) -> bool {
-        // 第3位
         self.bits.get_bit(3)
     }
-    // 获取PG
-    // 第4位
+    /// 读取页表翻译使能位 `PG`。
+    ///
+    /// # Safety
+    ///
+    /// `PG` 与 `DA` 必须保持互斥。调用方若要判断当前翻译模式，应优先使用
+    /// `is_paging()`；直接读取该位只适合保存/恢复 CSR 或调试输出。
     pub unsafe fn pg(&self) -> bool {
         self.bits.get_bit(4)
     }
-    // 设置直接地址翻译使能
+    /// 设置直接地址翻译使能位 `DA`。
+    ///
+    /// # Safety
+    ///
+    /// 调用方必须保证随后写回 CSR 时 `DA` 与 `PG` 保持互斥，并且地址翻译模式切换
+    /// 发生在架构允许的上下文中。普通调用应使用 `set_paging()` 成对维护位状态。
     pub unsafe fn set_da(&mut self, da: bool) -> &mut Self {
         self.bits.set_bit(3, da);
         self
     }
-    // 设置PG,页翻译使能
+    /// 设置页表翻译使能位 `PG`。
+    ///
+    /// # Safety
+    ///
+    /// 调用方必须保证随后写回 CSR 时 `PG` 与 `DA` 保持互斥，并同时配置合法的
+    /// `DATF`/`DATM` 等翻译相关字段。普通调用应使用 `set_paging()`。
     pub unsafe fn set_pg(&mut self, pg: bool) -> &mut Self {
         self.bits.set_bit(4, pg);
         self

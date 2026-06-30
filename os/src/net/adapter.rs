@@ -4,7 +4,6 @@ use core::result;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-// use riscv::addr::Address;
 use crate::drivers::net::NetDevice;
 use crate::drivers::net::veth::VethDriver;
 use smoltcp::phy::{Device, DeviceCapabilities, Loopback, Medium, RxToken, TxToken};
@@ -116,6 +115,16 @@ impl NetDevice for NullNetDevice {
     }
 }
 
+/// 静态路由缓冲区，`RoutingTxToken::consume` 独用。
+///
+/// # Safety
+///
+/// **单核假设**：MangoCore 是单核抢占式内核。此静态缓冲区仅被
+/// `RoutingTxToken::consume` 在 `transmit` 令牌生效期间访问，且 `transmit`
+/// 令牌是 exclusive 的（smoltcp `TxToken` 语义保证一次只有一个活跃令牌）。
+/// 因此不存在竞态。
+///
+/// 若未来支持多核并行轮询网卡，需改为 per-core 或 per-stack 分配。
 static mut ROUTING_BUF: [u8; 65536] = [0u8; 65536];
 pub struct RoutingDevice {
     pub eth: SmoltcpDeviceAdapter,
@@ -195,6 +204,28 @@ pub enum RoutingTxToken<'a> {
 }
 
 impl<'a> TxToken for RoutingTxToken<'a> {
+    /// 路由传输令牌：根据目标 MAC 或 IP 将帧分发到 eth/lo 设备。
+    ///
+    /// # Semantics
+    ///
+    /// 解析 `EthernetFrame` 的 `dst_addr`：
+    /// - 发给自己的 MAC → 仅环回 (lo)
+    /// - 广播包 → 环回 + 直通 (lo + eth)
+    /// - 其他 → 直通 (eth)
+    ///
+    /// 另外检查 IP 目的地址：若目标 IP 是回环或本地地址，覆盖为仅环回。
+    ///
+    /// # Locking
+    ///
+    /// 调用 `crate::net::net_core::current_netns().device_list.lock()`
+    /// 检查本地 IP 匹配，并间接获取接口信息。此锁在快速路径上获取，
+    /// 但 token consume 始终在 smoltcp poll 的闭包内，不应与其他路径竞争。
+    ///
+    /// # Safety
+    ///
+    /// `ROUTING_BUF` 是 `static mut`——仅被此函数访问，且此函数以
+    /// smoltcp `TxToken` 的 exclusive 语义执行（单次 poll 中只有一个
+    /// token 活跃）。若未来多核并行 poll，需要重新评估。
     fn consume<R, F>(self, len: usize, f: F) -> R
     where
         F: FnOnce(&mut [u8]) -> R,
@@ -207,7 +238,10 @@ impl<'a> TxToken for RoutingTxToken<'a> {
                 lo_tx,
                 hw_addr,
             } => {
-                // let mut buf = vec![0u8; len];
+                // Safety: `ROUTING_BUF` 是 64KB 的 static mut 缓冲区，在此
+                // smoltcp `TxToken` consume 路径中是 exclusive 的（单核，单次
+                // poll 单活跃令牌）。`len` 在 smoltcp 上层由 `max_transmission_unit`
+                // 受限于 1514 字节，远小于 64KB，不会越界。
                 let mut buf = unsafe { &mut ROUTING_BUF[..len] };
 
                 let res = f(&mut buf);
@@ -282,13 +316,6 @@ impl<'a> TxToken for RoutingTxToken<'a> {
                     });
                 }
                 if send_to_eth {
-                    // if len > 1500 {
-                    //     log::warn!(
-                    //         "[Routing] Packet too large for eth ({}), dropping instead of crashing",
-                    //         len
-                    //     );
-                    //     return res;
-                    // }
                     log::debug!("[RoutingTxToken] send to eth");
                     eth_tx.consume(len, |b| {
                         b.copy_from_slice(&buf);
@@ -349,6 +376,19 @@ pub struct NetRxToken {
 }
 
 impl RxToken for NetRxToken {
+    /// 消费收到的网络数据包。
+    ///
+    /// # Semantics
+    ///
+    /// 在将数据包传递给 smoltcp 处理前，先尝试捕获 ARP 回复更新邻居表
+    /// （`try_capture_arp_reply`）。
+    ///
+    /// # Locking
+    ///
+    /// `try_capture_arp_reply` 读取 `CURRENT_POLL_IFINDEX`（Mutex），
+    /// 并可能获取邻居表锁写入 ARP 映射。此操作在 smoltcp Rx token
+    /// 的闭包内执行，闭包由 smoltcp 的 `Interface::poll` 调用——
+    /// 应保持简短，避免额外的网络 I/O。
     fn consume<R, F>(mut self, f: F) -> R
     where
         F: FnOnce(&mut [u8]) -> R,
@@ -374,13 +414,6 @@ impl TxToken for NetTxToken {
             let mut empty_buf = [];
             return f(&mut empty_buf);
         }
-
-        // // 防止过大的包导致内存耗尽 (OOM)
-        // if len > 2048 {
-        //     log::error!("[NetTxToken] Packet too large: {}, dropping.", len);
-        //     let mut dummy_buf = vec![0u8; len];
-        //     return f(&mut dummy_buf);
-        // }
 
         let mut buf = vec![0u8; len];
         let result = f(&mut buf);

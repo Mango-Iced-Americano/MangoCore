@@ -66,6 +66,8 @@ fn ext4_prune_cycle_now() -> u64 {
     #[cfg(target_arch = "riscv64")]
     {
         let cycles: usize;
+        // Safety: `rdcycle` reads the RISC-V cycle counter CSR. It has no
+        // memory side effects and is safe to execute in any context.
         unsafe { asm!("rdcycle {}", out(reg) cycles) };
         cycles as u64
     }
@@ -73,6 +75,8 @@ fn ext4_prune_cycle_now() -> u64 {
     {
         let lo: usize;
         let hi: usize;
+        // Safety: `rdtime.d` reads the LoongArch stable timer registers.
+        // No memory side effects; safe to execute in any context.
         unsafe { asm!("rdtime.d {}, {}", out(reg) lo, out(reg) hi) };
         lo as u64
     }
@@ -233,6 +237,9 @@ impl Ext4FileSystem {
             );
         }
         let write_len = core::cmp::min(core::mem::size_of::<super::ext4_inode::Ext4Inode>(), on_disk_size);
+        // Safety: `inode` is a valid `Ext4Inode` reference. `write_len` is
+        // bounded by `size_of::<Ext4Inode>()`, so the byte slice stays within
+        // the struct. The reference is live for the duration of this function.
         let data = unsafe { core::slice::from_raw_parts(inode as *const _ as *const u8, write_len) };
         let block_id = inode_pos / self.block_size;
         let offset = inode_pos % self.block_size;
@@ -252,11 +259,15 @@ impl Ext4FileSystem {
     }
 
     pub(crate) fn sync_superblock_to_metadata_cache(&self, sb: &mut super::superblock::Ext4Superblock) {
+        // Safety: `sb` is a valid `Ext4Superblock` reference. Reinterpreting it
+        // as `&[u8]` of `size_of::<Ext4Superblock>()` is safe — the struct is
+        // `#[repr(C)]` with a well-defined byte layout.
         let data = unsafe {
             core::slice::from_raw_parts(sb as *const _ as *const u8, core::mem::size_of::<super::superblock::Ext4Superblock>())
         };
         let checksum = super::crc::ext4_crc32c(super::crc::EXT4_CRC32_INIT, data, 0x3fc);
         sb.checksum = checksum;
+        // Safety: same invariant as above — `sb` is a valid, live reference.
         let data = unsafe {
             core::slice::from_raw_parts(sb as *const _ as *const u8, core::mem::size_of::<super::superblock::Ext4Superblock>())
         };
@@ -280,6 +291,8 @@ impl Ext4FileSystem {
         let block_id = super_block.first_data_block as usize + dsc_id + 1;
         let offset = (bgid % dsc_cnt) * super_block.desc_size() as usize;
         let data = unsafe {
+            // Safety: `bg` is a valid `Ext4BlockGroup` reference (`#[repr(C, packed)]`).
+            // Reinterpreting it as `&[u8]` of `size_of::<Ext4BlockGroup>()` is safe.
             core::slice::from_raw_parts(bg as *const _ as *const u8, core::mem::size_of::<super::block_group::Ext4BlockGroup>())
         };
         self.with_metadata_block_mut(block_id, |buf| {
@@ -608,8 +621,10 @@ impl Ext4FileSystem {
 
         let filetype = InodeFileType::S_IFDIR;
 
-        // todo get this path's parent
-
+        // TODO(ext4-dir-mk): Resolve parent directory from `path` component.
+        // Currently hardcodes `ROOT_INODE` as parent — path traversal is not
+        // implemented. Exit condition: `parent` contains the actual parent inode
+        // number derived from the path components.
         // start from root
         let mut parent = ROOT_INODE;
 
@@ -1974,10 +1989,13 @@ impl Ext4FileSystem {
     }
 
     /// 在 unlink/rmdir 后清理 per-inode cache
-    /// 不清空 PageCache（文件可能仍被 fd/mmap 持有），不无条件清 metadata_dirty
-    /// 注意：不重置 cached_file_size，因为 VMA 仍可能 hold Arc<IndexNode>
-    /// 并通过 metadata() 查询文件大小触发缺页处理；
-    /// 若此时读磁盘 inode（已 unlink），可能得到 size=0 → BeyondEOF → SIGBUS
+    ///
+    /// # Semantics
+    ///
+    /// 不清空 PageCache（文件可能仍被 fd/mmap 持有），不无条件清 metadata_dirty。
+    /// 不重置 `cached_file_size`，因为 VMA 仍可能 hold `Arc<IndexNode>` 并通过
+    /// `metadata()` 查询文件大小触发缺页处理；若此时读磁盘 inode（已 unlink），
+    /// 可能得到 `size=0 → BeyondEOF → SIGBUS`。
     pub(crate) fn cleanup_inode_caches_on_unlink(&self, ino: u32) {
         if let Some(arc) = self.lookup_inode_object(ino) {
             if let Some(osi) = arc.as_any_ref().downcast_ref::<layout::Ext4OSInode>() {

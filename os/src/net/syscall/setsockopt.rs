@@ -9,6 +9,33 @@ use super::common::{
     ICMP6_FILTER, IPV6_CHECKSUM, IPV6_RECVHOPLIMIT, IPV6_RECVPKTINFO, IPV6_V6ONLY, IP_HDRINCL,
 };
 
+/// 设置 socket 选项。
+///
+/// # Semantics
+///
+/// 按 `(level, optname)` 分发到 socket 的 `set_xxx` 方法。
+/// 支持的选项：
+/// - `SOL_SOCKET`：`SO_SNDBUF`/`SO_RCVBUF`（clamped to 4KB–256KB）、
+///   `SO_KEEPALIVE`、`SO_REUSEADDR`、`SO_DONTROUTE`（no-op）、
+///   `SO_RCVTIMEO`/`SO_SNDTIMEO`（仅接受值，阻塞路径尚未使用 per-socket timeout）、
+///   `SO_BINDTODEVICE`（NUL-terminated iface name, `IFNAMSIZ=16`）。
+/// - `SOL_IP`：`IP_HDRINCL`（no-op）、`MCAST_JOIN_GROUP`/`MCAST_LEAVE_GROUP`。
+/// - `SOL_IPV6`：`IPV6_RECVPKTINFO`/`IPV6_RECVHOPLIMIT`（no-op）、
+///   `IPV6_CHECKSUM`（也接受在 `SOL_RAW`）、`IPV6_V6ONLY`。
+/// - `SOL_ICMPV6`：`ICMP6_FILTER`（256-bit bitmap）。
+/// - `SOL_TCP`：`TCP_NODELAY`（Nagle）。
+/// - `SOL_RAW`：`IPV6_CHECKSUM`（offset 必须偶数）。
+///
+/// # Errors
+///
+/// - `-EFAULT`：`optval_ptr == 0`。
+/// - `-EINVAL`：`optlen == 0`、buffer 大小不足。
+/// - `-ENOPROTOOPT`：未知 `(level, optname)` 组合（与 Linux 6.6 一致）。
+///
+/// # Linux Compatibility
+///
+/// 未知的 `level`/`optname` 返回 `-ENOPROTOOPT`（Linux 6.6 语义），而非 `-EOPNOTSUPP`。
+/// `SO_RCVTIMEO`/`SO_SNDTIMEO` 只接受值不做实际超时控制，以满足不兼容 ABI 的 libc/benchmark。
 pub fn sys_setsockopt(
     sockfd: u32,
     level: u32,

@@ -131,8 +131,6 @@ impl TryFrom<PosixArgsSocketType> for PSOCK {
 /// 新代码应直接使用 `PSOCK` 枚举，无需手动 mask。
 pub(crate) const SOCK_TYPE_MASK: u32 = 0xF;
 
-// pub const MAX_BUFFER_SIZE: usize = 1 << 15;
-// pub const MAX_BUFFER_SIZE: usize = 1 << 16;
 pub const MAX_BUFFER_SIZE: usize = 64 * 1024;
 
 // 定义全局的 UDP Sockets 集合
@@ -570,38 +568,82 @@ pub trait Socket: Send + Sync {
         false
     }
 
-    /// 获取接收等待队列引用（用于事件驱动阻塞）
+    /// 获取接收等待队列引用。
+    ///
+    /// # Wake/Block 契约
+    ///
+    /// **唤醒者**：poll 循环（`wake_tcp_waiters` / `wake_raw_waiters`）、对端
+    /// `send` 路径（Unix datagram/stream `send_to_bound` → `recv_waiters.notify`）。
+    ///
+    /// **等待者**：`sys_read` / `sys_recvfrom` 阻塞路径在 `try_recv` → `EAGAIN` 后
+    /// 注册到此队列，condition 检查 `socket_r_ready()`。
     fn recv_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
         None
     }
 
+    /// 获取接收事件队列引用（epoll/select 用）。
+    ///
+    /// 事件由与 `recv_wait_queue()` 相同的路径触发：poll 循环或对端 `send` 路径
+    /// 调用 `notify_events_all(EPOLLIN|EPOLLRDNORM)`。
     fn recv_event_queue(&self) -> Option<&EventWaitQueue> {
         None
     }
 
-    /// 获取发送等待队列引用
+    /// 获取发送等待队列引用。
+    ///
+    /// # Wake/Block 契约
+    ///
+    /// **唤醒者**：poll 循环使发送缓冲区释放空间时、对端 `recv` 路径消费数据后
+    /// （Unix stream `try_recv` → 释放 `tx` 缓冲区 → 通知 `send_waiters`）。
+    ///
+    /// **等待者**：`sys_write` / `sys_sendto` 阻塞路径在 `try_send` → `EAGAIN` 后
+    /// 注册到此队列，condition 检查 `socket_w_ready()`。
     fn send_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
         None
     }
 
+    /// 获取发送事件队列引用（epoll/select 用）。
+    ///
+    /// 事件由与 `send_wait_queue()` 相同的路径触发。
     fn send_event_queue(&self) -> Option<&EventWaitQueue> {
         None
     }
 
-    /// 获取连接等待队列引用
+    /// 获取连接等待队列引用。
+    ///
+    /// # Wake/Block 契约
+    ///
+    /// **唤醒者**：poll 循环检测到 TCP 握手完成（`wake_tcp_waiters`）后调用
+    /// `wake_if_ready()` → 通知等待连接的 socket。
+    ///
+    /// **等待者**：`sys_connect` 阻塞路径在 `try_connect` → `EAGAIN` 后注册到此队列。
     fn connect_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
         None
     }
 
+    /// 获取连接事件队列引用（epoll/select 用）。
+    ///
+    /// 事件由与 `connect_wait_queue()` 相同的路径触发。
     fn connect_event_queue(&self) -> Option<&EventWaitQueue> {
         None
     }
 
-    /// 获取 accept 等待队列引用
+    /// 获取 accept 等待队列引用。
+    ///
+    /// # Wake/Block 契约
+    ///
+    /// **唤醒者**：`wake_tcp_accept_waiters()`（每次 poll 后无条件扫描 listener）
+    /// 或 Unix stream `connect` 路径推送 `Connected` 后直接 `notify_events_all`。
+    ///
+    /// **等待者**：`sys_accept` 阻塞路径注册到此队列，condition 检查
+    /// `accept_ready()`（listener incoming 队列非空或 smoltcp listener `is_active`）。
     fn accept_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
         None
     }
 
+    /// 获取 accept 事件队列引用（epoll/select 用）。
+    ///
+    /// 事件由与 `accept_wait_queue()` 相同的路径触发。
     fn accept_event_queue(&self) -> Option<&EventWaitQueue> {
         None
     }

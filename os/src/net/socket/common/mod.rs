@@ -1,1 +1,1 @@
-// pub mod epoll_items;
+//! 通用 socket 工具模块（目前无公开子模块）。

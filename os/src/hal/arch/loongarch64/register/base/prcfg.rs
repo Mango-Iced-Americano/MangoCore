@@ -1,3 +1,7 @@
+//! `PRCFG`：特权资源配置寄存器组。
+//!
+//! 这些只读 CSR 描述硬件支持的 SAVE 寄存器数量、定时器宽度、TLB 组织方式和扩展能力。
+
 use core::fmt::Debug;
 
 use bit_field::BitField;
@@ -23,7 +27,6 @@ impl PRCfg1 {
     }
     /// The number of valid bit width of the timer.
     pub fn get_timer_bits(&self) -> usize {
-        // 返回定时器的位数
         self.bits.get_bits(4..12) + 1
     }
     /// The maximum value that can be set for the exception and interrupt vector entry spacing (CSR.ECTL.VS).

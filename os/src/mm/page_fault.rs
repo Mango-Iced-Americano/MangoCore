@@ -1,3 +1,13 @@
+//! 用户页缺页处理状态机。
+//!
+//! `AddressSpace::do_page_fault` 先定位 VMA，再把 fault 交给本模块分类并修复：
+//! 匿名懒分配、文件映射读取/写入、共享写恢复、CoW、压缩页解压和 swap-in 都在这里汇聚。
+//!
+//! # TLB
+//!
+//! 本模块通过 `Vma`/`UserMapper` 修改 PTE；具体刷新由底层 `PageTable` 方法保证。
+//! 新增直接 PTE 修改时必须同步维护 TLB 刷新契约。
+
 use super::filemap::{filemap_private_fault, filemap_read_fault, filemap_shared_write_fault};
 use super::user_mapper::UserMapper;
 use super::vma::Vma;
@@ -7,13 +17,18 @@ use crate::utils::error::SyscallErr;
 use log::{error, warn};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// 一次缺页的规范化上下文。
 pub(super) struct FaultContext {
+    /// 原始 fault 虚拟地址，保留页内偏移。
     pub addr: VirtAddr,
+    /// `addr` 所在虚拟页。
     pub vpn: VirtPageNum,
+    /// 触发 fault 的访问类型。
     pub access: FaultAccess,
 }
 
 impl FaultContext {
+    /// 从 fault 地址和访问类型构造上下文。
     pub fn new(addr: VirtAddr, access: FaultAccess) -> Self {
         Self {
             addr,
@@ -22,30 +37,49 @@ impl FaultContext {
         }
     }
 
+    /// 把页级物理页号加上 fault 地址的页内偏移。
     pub(super) fn offset_phys(self, ppn: super::PhysPageNum) -> PhysAddr {
         ppn.offset(self.addr.page_offset())
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// 缺页处理器对当前 fault 选择的修复动作。
 pub(super) enum FaultAction {
+    /// 匿名页首次访问，分配清零物理页。
     LazyAlloc,
+    /// 文件映射首次读/执行，映射 page cache 只读页。
     FileBackedRead,
+    /// 文件私有映射首次写，复制 page cache 内容到私有页。
     FileBackedWrite,
+    /// 文件共享映射首次写，取得可写 page cache 页并恢复 W。
     FileBackedSharedWrite,
     #[cfg(feature = "oom_handler")]
+    /// 压缩匿名页再次访问，需要从 zram 解压。
     Decompress,
     #[cfg(feature = "oom_handler")]
+    /// 已换出匿名页再次访问，需要从 swap/zram 换入。
     SwapIn,
+    /// 已映射共享页写 fault，仅恢复共享写权限。
     SharedWrite,
+    /// 页表保留了懒分配残留 PTE，需要先清理再重新分配。
     StaleLazyPte,
+    /// 私有映射写 fault，执行 copy-on-write。
     Cow,
+    /// 已映射页的读/执行 fault，只需返回翻译结果。
     MappedRead,
+    /// VMA 已有 resident frame，但用户 PTE 尚未安装。
     ResidentWithoutPte,
 }
 
 struct PageFaultHandler;
 
+/// 处理一个已定位到 VMA 的用户页 fault。
+///
+/// # Errors
+///
+/// 权限不匹配返回 `MemoryError::NoPermission`；后端文件、OOM、swap/zram 或 PTE
+/// 修复失败时透传对应 `MemoryError`。
 pub(super) fn handle_page_fault<T: PageTable>(
     area: &mut Vma,
     page_table: &mut T,
@@ -63,36 +97,36 @@ impl PageFaultHandler {
         check_area_permission(area, ctx)?;
 
         match Self::classify(area, page_table, ctx)? {
-            // 匿名页首次访问: 分配一个清零物理页。
+            // 匿名页首次访问：分配清零物理页并安装用户 PTE。
             FaultAction::LazyAlloc => {
                 map_lazy_zero_page(area, page_table, ctx).map(|ppn| ctx.offset_phys(ppn))
             }
-            // 文件映射页首次读取/执行: 直接映射文件页缓存。
+            // 文件映射页首次读取/执行：直接映射文件页缓存。
             FaultAction::FileBackedRead => filemap_read_fault(area, page_table, ctx),
-            // 文件映射页首次写入共享映射: 映射 page cache 帧并标脏。
+            // 文件映射页首次写入共享映射：映射 page cache 帧并标脏。
             FaultAction::FileBackedSharedWrite => filemap_shared_write_fault(area, page_table, ctx),
-            // 文件映射页首次写入私有映射: 分配私有物理页并从文件填充内容。
+            // 文件映射页首次写入私有映射：分配私有物理页并从文件填充内容。
             FaultAction::FileBackedWrite => filemap_private_fault(area, page_table, ctx),
-            // 压缩匿名页再次访问: 解压后恢复页表映射。
+            // 压缩匿名页再次访问：解压后恢复页表映射。
             #[cfg(feature = "oom_handler")]
             FaultAction::Decompress => {
                 finish_decompress_page(area, page_table, ctx).map(|ppn| ctx.offset_phys(ppn))
             }
-            // 已换出的匿名页再次访问: 从 swap/zram 换入后恢复映射。
+            // 已换出的匿名页再次访问：从 swap/zram 换入后恢复映射。
             #[cfg(feature = "oom_handler")]
             FaultAction::SwapIn => {
                 finish_swap_in_page(area, page_table, ctx).map(|ppn| ctx.offset_phys(ppn))
             }
-            // MAP_SHARED 写保护 fault: 恢复共享写权限。
+            // MAP_SHARED 写保护 fault：恢复共享写权限。
             FaultAction::SharedWrite => restore_shared_write(area, page_table, ctx),
-            // stale lazy PTE: 页表已有项但元数据仍未分配，先清理再修复。
+            // Stale lazy PTE：页表已有项但元数据仍未分配，先清理再修复。
             FaultAction::StaleLazyPte => repair_stale_lazy_pte(area, page_table, ctx),
-            // 私有已映射页写入: 触发 COW。
+            // 私有已映射页写入：触发 COW。
             FaultAction::Cow => copy_private_page(area, page_table, ctx),
-            // 已映射页读取/执行: 直接翻译物理地址。
+            // 已映射页读取/执行：直接翻译物理地址。
             FaultAction::MappedRead => translate_mapped_page(page_table, ctx),
-            // MAP_SHARED anonymous pages may preallocate shared frames but install
-            // user PTEs lazily so mincore can still observe real residency.
+            // MAP_SHARED 匿名页可以预分配共享 frame，但延迟安装用户 PTE；
+            // 这样 `mincore` 仍能观察到未访问页未 present。
             FaultAction::ResidentWithoutPte => {
                 map_existing_resident_page(area, page_table, ctx).map(|ppn| ctx.offset_phys(ppn))
             }
@@ -195,7 +229,7 @@ fn restore_shared_write<T: PageTable>(
     page_table: &mut T,
     ctx: FaultContext,
 ) -> Result<PhysAddr, MemoryError> {
-    // For file-backed shared pages: mark dirty in page cache before restoring W.
+    // 文件共享页恢复 W 之前先进入 page cache 写路径，确保 dirty 状态不会丢失。
     if area.vm_kind() == VmAreaKind::FileBacked {
         if let (Some(inode), Ok(file_offset)) =
             (area.vm_file(), area.vm_file_offset(ctx.vpn))

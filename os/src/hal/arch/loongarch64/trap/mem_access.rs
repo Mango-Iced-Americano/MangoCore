@@ -1,3 +1,7 @@
+//! LoongArch64 未对齐访存指令解码与模拟。
+//!
+//! trap 路径在需要时使用这些结构解析 load/store 指令并执行软件访存。
+
 use bit_field::BitField;
 use core::{convert::TryInto, fmt::Debug};
 use num_enum::{IntoPrimitive, TryFromPrimitive};

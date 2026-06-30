@@ -1,10 +1,20 @@
+//! 基于内存压缩页的简易 zram 后端。
+//!
+//! OOM 回收路径把匿名页压缩成 `Vec<u8>` 并交给全局 `ZRAM_DEVICE` 保存；
+//! `ZramTracker` 通过 RAII 在最后一个引用释放时回收槽位。
+//!
+//! # Locking
+//!
+//! 全局设备由 `Mutex<Zram>` 保护。调用者不应在持有 VMA/page table 锁并可能递归进入
+//! OOM 回收时长期占用该锁。
+
 use alloc::{sync::Arc, vec::Vec};
 use lazy_static::lazy_static;
 use lz4_flex::{compress_prepend_size, decompress_size_prepended};
 use spin::Mutex;
 
-#[derive(Debug)]
 /// Zram错误枚举
+#[derive(Debug)]
 pub enum ZramError {
     /// 无效索引
     InvalidIndex,
@@ -14,8 +24,8 @@ pub enum ZramError {
     NotAllocated,
 }
 
+/// 一个 zram 槽位的 RAII 跟踪器。
 #[derive(Debug)]
-/// zram跟踪器
 pub struct ZramTracker(pub usize);
 
 impl Drop for ZramTracker {
@@ -25,7 +35,7 @@ impl Drop for ZramTracker {
     }
 }
 
-/// Zram结构
+/// 固定容量的压缩页存储。
 pub struct Zram {
     /// 压缩数据存储
     compressed: Vec<Option<Vec<u8>>>,
@@ -36,44 +46,36 @@ pub struct Zram {
 }
 
 impl Zram {
-    /// 构造方法
+    /// 创建一个最多保存 `capacity` 个压缩页的设备。
     pub fn new(capacity: usize) -> Self {
-        // 预分配制定容量的向量
         let mut compressed = Vec::with_capacity(capacity);
-        // 初始化为全None状态
         compressed.resize(compressed.capacity(), None);
         Self {
             compressed,
-            // 回收列表为空
             recycled: Vec::new(),
-            // tail 从0开始
             tail: 0,
         }
     }
-    /// 数据插入
+
+    /// 插入一个已经压缩好的页，并返回对应槽位跟踪器。
     fn insert(&mut self, data: Vec<u8>) -> Result<Arc<ZramTracker>, ZramError> {
-        // 优先使用回收的索引
         let zram_id = match self.recycled.pop() {
             Some(zram_id) => zram_id as usize,
             None => {
                 if self.tail as usize == self.compressed.len() {
-                    // 空间不足，返回错误
                     return Err(ZramError::NoSpace);
                 } else {
-                    // 更新tail
                     self.tail += 1;
                     (self.tail - 1) as usize
                 }
             }
         };
-        // 存储数据
         self.compressed[zram_id] = Some(data);
-        // 返回跟踪器
         Ok(Arc::new(ZramTracker(zram_id)))
     }
-    /// 获取数据
+
+    /// 获取压缩数据。
     fn get(&self, zram_id: usize) -> Result<&Vec<u8>, ZramError> {
-        // 如果zram_id大于容器大小
         if zram_id >= self.compressed.len() {
             return Err(ZramError::InvalidIndex);
         }
@@ -82,18 +84,15 @@ impl Zram {
             None => Err(ZramError::NotAllocated),
         }
     }
-    /// 移除数据
+
+    /// 移除一个槽位并回收索引。
     fn remove(&mut self, zram_id: usize) -> Result<Vec<u8>, ZramError> {
-        // 如果索引大于容器大小
         if zram_id >= self.compressed.len() {
             return Err(ZramError::InvalidIndex);
         }
-        // 刚好等于最后一个分配的id
         if zram_id == (self.tail - 1) as usize {
-            // 回退tail
             self.tail = zram_id as u16;
         } else {
-            // 加入回收列表
             self.recycled.push(zram_id as u16);
         }
         match self.compressed[zram_id].take() {
@@ -101,33 +100,34 @@ impl Zram {
             None => Err(ZramError::NotAllocated),
         }
     }
-    /// 读接口
+
+    /// 解压指定槽位到 `buf`。
+    ///
+    /// # Errors
+    ///
+    /// 槽位越界或未分配时返回 `ZramError`。压缩数据损坏会触发底层 lz4 panic，
+    /// 因为当前 zram 只保存内核自己产生的数据。
     pub fn read(&mut self, zram_id: usize, buf: &mut [u8]) -> Result<(), ZramError> {
-        // 获取压缩数据
         match self.get(zram_id) {
             Ok(compressed_data) => {
-                // 解压数据
                 let decompressed_data =
                     decompress_size_prepended(compressed_data.as_slice()).unwrap();
-                // 复制到输出缓冲区
                 buf.copy_from_slice(decompressed_data.as_slice());
                 Ok(())
             }
             Err(error) => Err(error),
         }
     }
-    /// 写接口
+
+    /// 压缩一个页并写入 zram。
     pub fn write(&mut self, buf: &[u8]) -> Result<Arc<ZramTracker>, ZramError> {
-        // 压缩输入数据
         let mut compressed = compress_prepend_size(buf);
-        // 释放多余容量
         compressed.shrink_to_fit();
         log::trace!("[zram] compressed len: {}", compressed.len());
-        // 插入数据并返回跟踪器
         self.insert(compressed)
     }
     #[inline(always)]
-    /// 释放
+    /// 释放一个 zram 槽位。
     pub fn discard(&mut self, zram_id: usize) -> Result<(), ZramError> {
         match self.remove(zram_id) {
             Ok(_) => Ok(()),

@@ -53,6 +53,8 @@ struct TraceState {
     tracked_req: usize,
 }
 
+// Safety: `TraceState` 的 raw pointers 只指向本模块静态缓冲区，所有访问都受
+// `TRACE: Mutex<TraceState>` 串行化。
 unsafe impl Send for TraceState {}
 
 static mut ACTIVE_BUF: [ActiveEntry; ACTIVE_CAP] = [ActiveEntry {
@@ -133,10 +135,17 @@ pub fn print_summary() -> bool {
 // ── stack capture (RISC-V) ──────────────────────────────────────────────────
 
 #[cfg(target_arch = "riscv64")]
+/// 捕获当前内核栈上的返回地址。
+///
+/// # Safety
+///
+/// 只能在内核上下文中调用；当前 `s0` 必须是本内核栈上的有效 frame pointer。
+/// 本函数会按 RISC-V 调用约定读取保存的 `ra`/`fp`，并用栈范围和内核 text 范围限制遍历。
 unsafe fn capture_stack(pcs: &mut [usize; STACK_DEPTH]) -> usize {
     let mut ra: usize;
     let mut fp: usize;
     let mut sp: usize;
+    // Safety: 只读取当前寄存器值，不访问内存，也不修改控制流。
     core::arch::asm!(
         "mv {}, ra",
         "mv {}, s0",
@@ -156,6 +165,8 @@ unsafe fn capture_stack(pcs: &mut [usize; STACK_DEPTH]) -> usize {
         if fp < sp || fp > kstack_upper {
             break;
         }
+        // Safety: `fp` 已被限制在当前内核栈范围内；读取的是标准栈帧中保存的
+        // return address 和上一帧 frame pointer。
         let saved_ra = *(fp.wrapping_sub(8) as *const usize);
         let saved_fp = *(fp.wrapping_sub(16) as *const usize);
 
@@ -176,6 +187,11 @@ unsafe fn capture_stack(pcs: &mut [usize; STACK_DEPTH]) -> usize {
 }
 
 #[cfg(not(target_arch = "riscv64"))]
+/// 非 RISC-V 架构暂不捕获堆栈。
+///
+/// # Safety
+///
+/// 不读取 raw pointer 或寄存器，只把输出缓冲区清零。
 unsafe fn capture_stack(pcs: &mut [usize; STACK_DEPTH]) -> usize {
     for i in 0..STACK_DEPTH {
         pcs[i] = 0;
@@ -188,9 +204,13 @@ unsafe fn capture_stack(pcs: &mut [usize; STACK_DEPTH]) -> usize {
 impl TraceState {
     fn init_buffers(&mut self) {
         if self.active.is_null() {
+            // Safety: `ACTIVE_BUF` 是本模块静态缓冲区；写入 raw pointer 只发生在
+            // `TRACE` 锁保护下的初始化路径。
             self.active = unsafe { core::ptr::addr_of_mut!(ACTIVE_BUF).cast::<ActiveEntry>() };
         }
         if self.sites.is_null() {
+            // Safety: `SITES_BUF` 是本模块静态缓冲区；写入 raw pointer 只发生在
+            // `TRACE` 锁保护下的初始化路径。
             self.sites = unsafe { core::ptr::addr_of_mut!(SITES_BUF).cast::<SiteEntry>() };
         }
     }
@@ -198,24 +218,28 @@ impl TraceState {
     fn active_entry(&self, idx: usize) -> ActiveEntry {
         debug_assert!(!self.active.is_null());
         debug_assert!(idx < ACTIVE_CAP);
+        // Safety: 调用方在 `TRACE` 锁保护下访问，debug assertion 保证索引在静态表内。
         unsafe { *self.active.add(idx) }
     }
 
     fn active_entry_mut(&mut self, idx: usize) -> &mut ActiveEntry {
         debug_assert!(!self.active.is_null());
         debug_assert!(idx < ACTIVE_CAP);
+        // Safety: `&mut self` 来自 `TRACE` 锁保护下的独占访问，索引在静态表内。
         unsafe { &mut *self.active.add(idx) }
     }
 
     fn site_entry(&self, idx: usize) -> &SiteEntry {
         debug_assert!(!self.sites.is_null());
         debug_assert!(idx < SITES_CAP);
+        // Safety: 调用方在 `TRACE` 锁保护下访问，debug assertion 保证索引在静态表内。
         unsafe { &*self.sites.add(idx) }
     }
 
     fn site_entry_mut(&mut self, idx: usize) -> &mut SiteEntry {
         debug_assert!(!self.sites.is_null());
         debug_assert!(idx < SITES_CAP);
+        // Safety: `&mut self` 来自 `TRACE` 锁保护下的独占访问，索引在静态表内。
         unsafe { &mut *self.sites.add(idx) }
     }
 
@@ -239,6 +263,7 @@ impl TraceState {
 
     fn record_alloc_inner(&mut self, ptr: usize, req: usize, actual: usize, _align: usize) {
         let mut pcs = [0usize; STACK_DEPTH];
+        // Safety: 仅在分配器内部诊断路径调用；失败时最多得到 0 PC，不影响分配语义。
         let _depth = unsafe { capture_stack(&mut pcs) };
 
         let hash = Self::site_hash(&pcs);

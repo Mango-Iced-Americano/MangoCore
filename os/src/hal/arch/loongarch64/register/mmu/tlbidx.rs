@@ -1,3 +1,7 @@
+//! `TLBIDX`：TLB 索引与页大小寄存器。
+//!
+//! TLB 查询、读写和 refill 路径通过该 CSR 指定目标表项索引、页大小和命中状态。
+
 use bit_field::BitField;
 impl_define_csr!(TLBIdx, "TLB Index (TLBIDX)
 

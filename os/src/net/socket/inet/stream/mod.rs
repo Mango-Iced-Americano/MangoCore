@@ -293,6 +293,23 @@ fn update_ready_bit(pollee: &AtomicUsize, bit: usize, ready: bool) {
 }
 
 impl Socket for TcpSocket {
+    /// 将 TCP socket 绑定到本地 IP 端点。
+    ///
+    /// # Semantics
+    ///
+    /// 规范化 IPv4-mapped IPv6 地址，构建 `IpListenEndpoint`，通过 `Inner::bind()`
+    /// 在 smoltcp socket set 中注册绑定。记录绑定元数据到 `self.bound`（
+    /// `bound_addr`/`bound_port`/`ifindex`）。
+    ///
+    /// # Locking
+    ///
+    /// 获取 `self.inner` 锁并调用 `Inner::bind()`，释放锁后设置 `self.bound`。
+    ///
+    /// # Errors
+    ///
+    /// - `EINVAL`：`endpoint` 不是 `Endpoint::Ip`
+    /// - `EAFNOSUPPORT`：`ep.addr` 的版本与 socket 版本不匹配
+    /// - 其他错误由 `Inner::bind()` 产生
     fn bind(&self, endpoint: &Endpoint) -> SyscallRet {
         let Endpoint::Ip(ep) = endpoint else {
             return Err(SyscallErr::EINVAL);
@@ -339,6 +356,17 @@ impl Socket for TcpSocket {
         }
     }
 
+    /// 将 TCP socket 标记为监听状态。
+    ///
+    /// # Semantics
+    ///
+    /// 获取 `self.inner` 锁，调用 `Inner::listen(BACKLOG_SIZE)` 将 `Init` 转为
+    /// `Listening` 状态。成功后注册到全局 `TCP_LISTENERS` 表，后续 poll 循环
+    /// 会无条件扫描该表检查是否收到新连接（由 `wake_tcp_accept_waiters()` 驱动）。
+    ///
+    /// # Errors
+    ///
+    /// - 由 `Inner::listen()` 产生：若 socket 处于非 `Init` 状态则失败并恢复原状态
     fn listen(&self) -> SyscallRet {
         let mut inner = self.inner.lock();
         let new_inner = core::mem::replace(
@@ -367,6 +395,33 @@ impl Socket for TcpSocket {
         }
     }
 
+    /// 发起 TCP 连接到远程端点。
+    ///
+    /// # Semantics
+    ///
+    /// 通过 `Inner::connect()` 在 smoltcp 中创建新的 TCP 控制块并进入
+    /// `Connecting` 状态。调用后立即做一次 `NET_INTERFACE.poll()` 并检查
+    /// 握手是否已完成（`is_connected()` 或 `failure_reason()`）。
+    /// 若已完成，内部 `finish_connecting()` 将状态转为 `Established` 并返回
+    /// `Ok(0)`（同步连接成功）；否则返回 `Err(EAGAIN)`，上层 `sys_connect`
+    /// 将根据阻塞/非阻塞模式分别进入 `WaitQueue` 或返回 `EINPROGRESS`。
+    ///
+    /// # Locking
+    ///
+    /// 获取 `self.inner` 锁。连接失败（非 `EAGAIN` 错误）时直接设置 `pollee`
+    /// 为 `EPOLLOUT|EPOLLERR` 位，让 poll 立即返回可写和错误事件。
+    ///
+    /// # Errors
+    ///
+    /// - `EINVAL`：`endpoint` 不是 `Endpoint::Ip`
+    /// - `EAFNOSUPPORT`：地址族不匹配
+    /// - `EAGAIN`：握手未完成（正常流程，需要后续 `try_connect` 继续）
+    /// - `ECONNREFUSED`/etc：由 `Inner::connect()` 产生
+    ///
+    /// # Linux Compatibility
+    ///
+    /// 与 Linux 6.6 一致：连接失败时 poll 返回 `EPOLLOUT|EPOLLERR`，
+    /// 应用通过 `getsockopt(SO_ERROR)` 获取具体 errno。
     fn connect(&self, endpoint: &Endpoint) -> SyscallRet {
         let Endpoint::Ip(ep) = endpoint else {
             return Err(SyscallErr::EINVAL);
@@ -430,6 +485,26 @@ impl Socket for TcpSocket {
         }
     }
 
+    /// 非阻塞检查 TCP 握手进度——单次尝试，不睡眠、不 poll（上层已 poll 过）。
+    ///
+    /// # Semantics
+    ///
+    /// `sys_connect` 的 `WaitQueue` 条件闭包和 `try_connect` 路径调用此方法。
+    /// 先调用 `NET_INTERFACE.try_poll()` 推进 smoltcp 状态，然后查询底层 TCP
+    /// state。若状态已是 `Established`/`CloseWait` 但 `Inner::Connecting` 的
+    /// `result` 字段未更新，强制修正为 `ConnectResult::Connected`。
+    ///
+    /// 成功后调用 `finish_connecting()` 做状态转换并发布 fast path 键。
+    /// `Closed` 状态（对端 RST）映射为 `ECONNREFUSED`。
+    ///
+    /// **重要**：调用前必须由上层 `NET_INTERFACE.poll()` 或 `try_poll()`。
+    /// 条件闭包内不要再 poll（会导致 smoltcp 锁重入死锁）。
+    ///
+    /// # Errors
+    ///
+    /// - `Ok(0)`：已连接
+    /// - `ECONNREFUSED`：对端 RST
+    /// - `EAGAIN`：仍在握手中
     fn try_connect(&self) -> Result<isize, SyscallErr> {
         NET_INTERFACE.try_poll();
         let inner = self.inner.lock();
@@ -485,6 +560,30 @@ impl Socket for TcpSocket {
         }
     }
 
+    /// 从监听 socket 获取下一个已完成的连接。
+    ///
+    /// # Semantics
+    ///
+    /// 仅在 `Listening` 状态下调用 `Inner::accept()`，获取 `Established` 的
+    /// `Inner` 和 peer `IpEndpoint`。基于此创建新的 `TcpSocket`（设置 `BoundInner`
+    /// 元数据）并注册到全局 `TCP_SOCKETS` 表（否则 `pselect`/`epoll` 永远不会
+    /// 触发该新 socket 的事件）。然后分配新 fd，若 `addr != 0` 则写回 peer 地址。
+    ///
+    /// # Locking
+    ///
+    /// 获取 `self.inner` 锁。新 socket 由 `Self::register_tcp_socket()` 加入
+    /// 全局 `TCP_SOCKETS` 表（持有对应的全局互斥锁）。
+    ///
+    /// # Errors
+    ///
+    /// - `EINVAL`：非监听 socket
+    /// - `EAGAIN`：无可用连接
+    /// - `EMFILE`：fd 表已满
+    ///
+    /// # Linux Compatibility
+    ///
+    /// 简化实现：无独立的 SYN backlog 队列。`Listening` 状态下的 accept 无条件
+    /// 尝试从 smoltcp 的 `tcp_accept` 获取下一个连接，而非维护 backlog 计数。
     fn accept(&self, sockfd: u32, addr: usize, addrlen: usize) -> SyscallRet {
         let mut inner = self.inner.lock();
         if !matches!(&*inner, Inner::Listening(_)) {
@@ -693,6 +792,32 @@ impl Socket for TcpSocket {
         Err(SyscallErr::EOPNOTSUPP)
     }
 
+    /// 非阻塞尝试从 TCP socket 接收数据（单次，不 poll）。
+    ///
+    /// # Semantics
+    ///
+    /// 两条路径：
+    /// 1. **Fast path**（`fast_key_established()` 返回有效键）：直接通过
+    ///    `NET_INTERFACE.tcp_routed_socket()` 调用 smoltcp `recv_slice`，
+    ///    无需获取 `self.inner` 锁。若 `pollee` 缓存未设置 `EPOLLIN` 位，
+    ///    先做 `try_poll_stack(ifindex)` 确保 smoltcp 数据到达。
+    /// 2. **Slow path**：获取 `self.inner` 锁，调用 `Inner::try_recv()`。
+    ///
+    /// **阻塞模型**：此方法是 `try_xxx` 模式——不做 poll、不睡眠、不调度。
+    /// 调用者（`sys_recvfrom`）负责在调用前后轮询并管理 `WaitQueue` 交互。
+    ///
+    /// **边界情况**：`read_shutdown` 标志设置时返回 `Ok(0)`（EOF/Linux 语义）。
+    ///
+    /// # Locking
+    ///
+    /// Slow path 获取 `self.inner` 锁（spin Mutex）。Fast path 无锁，仅读取
+    /// `Atomic` 变量并做安全检查。
+    ///
+    /// # Errors
+    ///
+    /// - `Ok(0)`：FIN 已接收或 `read_shutdown`
+    /// - `ECONNRESET`：连接被对端 Reset
+    /// - `EAGAIN`：无数据可用
     fn try_recv(&self, buf: &mut [u8]) -> Result<isize, SyscallErr> {
         let fast = self.fast_key_established();
         if self.pollee.load(Ordering::Relaxed) & EPollEvent::EPOLLIN.bits() == 0 {
@@ -755,6 +880,33 @@ impl Socket for TcpSocket {
         ret
     }
 
+    /// 非阻塞尝试向 TCP socket 发送数据（单次，不 poll）。
+    ///
+    /// # Semantics
+    ///
+    /// 两条路径：
+    /// 1. **Fast path**：通过 `NET_INTERFACE.tcp_routed_socket()` 直接写入
+    ///    smoltcp，无需 `self.inner` 锁。发送前若 `pollee` 缓存未设 `EPOLLOUT`
+    ///    位，先 `try_poll_stack(ifindex)` 推进 TCP TX 窗口。
+    /// 2. **Slow path**：获取 `self.inner` 锁，调用 `Inner::try_send()`。
+    ///    如果 socket 仍在 `Connecting` 状态，在发送前调用 `try_connect()`
+    ///    完成握手（Linux TCP 语义允许在 `connect` 完全建立前发送数据）。
+    ///
+    /// **阻塞模型**：`try_xxx` 模式——不 poll、不睡眠、不调度。
+    ///
+    /// **边界情况**：`write_shutdown` → `EPIPE`（`SIGPIPE` 由 `sys_sendto`/`sys_write` 处理）。
+    ///
+    /// # Locking
+    ///
+    /// Fast path 无锁。Slow path 获取 `self.inner` 锁，且可能递归调用
+    /// `try_connect()`（后者持有自己的 `inner` 锁——`TicketMutex` 非重入，
+    /// 因此确保两次锁之间的中间状态不会冲突）。
+    ///
+    /// # Errors
+    ///
+    /// - `EPIPE`：`write_shutdown` 或对端 RESET
+    /// - `ECONNRESET`：连接被对端 Reset
+    /// - `EAGAIN`：发送缓冲满
     fn try_send(&self, buf: &[u8], _flags: MsgFlags) -> Result<isize, SyscallErr> {
         let fast = self.fast_key_established();
         if self.pollee.load(Ordering::Relaxed) & EPollEvent::EPOLLOUT.bits() == 0 {
@@ -948,7 +1100,14 @@ impl Socket for TcpSocket {
     }
 }
 
+// Safety: `TcpSocket` 所有字段均为线程安全类型：
+//   - `Mutex<Inner>` 保护内部 TCP 状态机（smoltcp handles），所有访问经过 locking
+//   - `AtomicBool` / `AtomicUsize` / `AtomicU32` / `AtomicU8` 提供无锁同步
+//   - `EventWaitQueue` 内部使用 `Mutex` 保护等待队列
+// 由于单核 `Arc<dyn Socket>` 共享，`Send` + `Sync` 允许在任务间传递 Arc 引用，
+// 不会导致数据竞争。
 unsafe impl Send for TcpSocket {}
+// Safety: 同上，`TcpSocket` 的所有可变状态通过 `Mutex` 和 `Atomic*` 安全共享。
 unsafe impl Sync for TcpSocket {}
 
 impl Drop for TcpSocket {

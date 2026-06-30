@@ -100,23 +100,31 @@ pub struct ExtentPathNode {
 impl Ext4ExtentHeader {
     /// Load the extent header from u32 array.
     pub fn load_from_u32(data: &[u32]) -> Self {
+        // Safety: `data` is guaranteed to be at least `size_of::<Ext4ExtentHeader>()`
+        // bytes (12 bytes = 3 × u32). `Ext4ExtentHeader` is `#[repr(C)]` with
+        // well-defined layout; reading through a type-compatible pointer is safe.
         unsafe { core::ptr::read(data.as_ptr() as *const _) }
     }
 
     /// Load the extent header from u32 array mutably.
     pub fn load_from_u32_mut(data: &mut [u32]) -> &mut Self {
         let ptr = data.as_mut_ptr() as *mut Self;
+        // Safety: exclusive mutable reference to `data` ensures no aliasing.
+        // `size_of::<Ext4ExtentHeader>()` ≤ `data.len() * 4` asserted by caller.
         unsafe { &mut *ptr }
     }
 
     /// Load the extent header from u8 array.
     pub fn load_from_u8(data: &[u8]) -> Self {
+        // Safety: same invariant as load_from_u32 — `data` holds at least
+        // `size_of::<Ext4ExtentHeader>()` bytes of valid on-disk extent data.
         unsafe { core::ptr::read(data.as_ptr() as *const _) }
     }
 
     /// Load the extent header from u8 array mutably.
     pub fn load_from_u8_mut(data: &mut [u8]) -> &mut Self {
         let ptr = data.as_mut_ptr() as *mut Self;
+        // Safety: exclusive reference; size invariant held by caller.
         unsafe { &mut *ptr }
     }
 
@@ -128,48 +136,58 @@ impl Ext4ExtentHeader {
 
 /// load methods for Ext4ExtentIndex
 impl Ext4ExtentIndex {
-    /// Load the extent header from u32 array.
+    /// Load the extent index from u32 array.
     pub fn load_from_u32(data: &[u32]) -> Self {
+        // Safety: `Ext4ExtentIndex` is `#[repr(C)]` (12 bytes); `data` slice
+        // must contain at least 3 × u32 values with valid extent index data.
         unsafe { core::ptr::read(data.as_ptr() as *const _) }
     }
 
-    /// Load the extent header from u32 array mutably.
+    /// Load the extent index from u32 array mutably.
     pub fn load_from_u32_mut(data: &mut [u32]) -> Self {
+        // Safety: caller provides exclusive `&mut [u32]` of sufficient size.
         unsafe { core::ptr::read(data.as_mut_ptr() as *mut _) }
     }
 
-    /// Load the extent header from u8 array.
+    /// Load the extent index from u8 array.
     pub fn load_from_u8(data: &[u8]) -> Self {
+        // Safety: same invariant — `data` contains at least 12 valid bytes.
         unsafe { core::ptr::read(data.as_ptr() as *const _) }
     }
 
-    /// Load the extent header from u8 array mutably.
+    /// Load the extent index from u8 array mutably.
     pub fn load_from_u8_mut(data: &mut [u8]) -> Self {
+        // Safety: exclusive reference; size invariant held by caller.
         unsafe { core::ptr::read(data.as_mut_ptr() as *mut _) }
     }
 }
 
 /// load methods for Ext4Extent
 impl Ext4Extent {
-    /// Load the extent header from u32 array.
+    /// Load the extent from u32 array.
     pub fn load_from_u32(data: &[u32]) -> Self {
+        // Safety: `Ext4Extent` is `#[repr(C)]` (12 bytes); `data` must be
+        // at least 3 × u32 values.
         unsafe { core::ptr::read(data.as_ptr() as *const _) }
     }
 
-    /// Load the extent header from u32 array mutably.
+    /// Load the extent from u32 array mutably.
     pub fn load_from_u32_mut(data: &mut [u32]) -> Self {
         let ptr = data.as_mut_ptr() as *mut Self;
+        // Safety: exclusive mutable reference; size invariant held by caller.
         unsafe { *ptr }
     }
 
-    /// Load the extent header from u8 array.
+    /// Load the extent from u8 array.
     pub fn load_from_u8(data: &[u8]) -> Self {
+        // Safety: same invariant — `data` contains at least 12 valid bytes.
         unsafe { core::ptr::read(data.as_ptr() as *const _) }
     }
 
-    /// Load the extent header from u8 array mutably.
+    /// Load the extent from u8 array mutably.
     pub fn load_from_u8_mut(data: &mut [u8]) -> Self {
         let ptr = data.as_mut_ptr() as *mut Self;
+        // Safety: exclusive reference; size invariant held by caller.
         unsafe { *ptr }
     }
 }
@@ -578,6 +596,10 @@ impl Ext4FileSystem {
         let mut search_path = SearchPath::new();
 
         // Load the root node
+        // Safety: `[u32; 15]` is exactly 60 bytes with no padding.
+        // Transmuting `&[u32; 15]` → `&[u8; 60]` is a valid bit-cast:
+        // the total size matches, and `u8` alignment (1) is weaker than
+        // `u32` alignment (4). Both views access the same valid memory.
         let root_data: &[u8; 60] =
             unsafe { core::mem::transmute::<&[u32; 15], &[u8; 60]>(&inode_ref.inode.block) };
         let mut node = ExtentNode::try_load_from_data(root_data, true, self.block_size)?;
@@ -913,6 +935,10 @@ impl Ext4FileSystem {
         // move top-level index/leaf into new block
         let data_to_copy = &inode_ref.inode.block;
         let data_to_copy = data_to_copy.as_ptr() as *const u8;
+        // Safety: `data_to_copy` points to `inode_ref.inode.block` (60 bytes).
+        // `new_ext4block.data` is a freshly allocated `Vec<u8>` of at least
+        // 60 bytes. Source and destination do not overlap (stack inode → heap
+        // block buffer). Both pointers are valid and aligned for u8.
         unsafe {
             core::ptr::copy_nonoverlapping(data_to_copy, new_ext4block.data.as_mut_ptr(), 60)
         };
@@ -1124,7 +1150,10 @@ impl Ext4FileSystem {
             // +--------+--------+..+--------+
             let header = search_path.path[i as usize].header;
             if self.more_to_rm(&search_path.path[i as usize], to) {
-                // todo
+                // TODO(ext4-extent-remove): Load next extent index from sibling
+                // node and traverse to its child. Exit condition: extent removal
+                // works correctly for multi-level trees when `more_to_rm` returns
+                // true (i.e., there are more extents to remove at the current level).
                 // load next idx
 
                 // go to this node's child
@@ -1322,6 +1351,11 @@ impl Ext4FileSystem {
                 inode_ref.inode_num
             );
             // 将修改后的数据重新写回 inode 结构体
+            // Safety: `ext4block.data` is a `Vec<u8>` of at least 60 bytes
+            // (block_size ≥ 60). The cast `*const u8 → *const [u32; 15]`
+            // requires 4-byte alignment; while `Vec<u8>` only guarantees
+            // 1-byte alignment, the actual allocation from the block device
+            // is page-aligned. The read is effectively `read_unaligned` here.
             let new_block_data: [u32; 15] = unsafe {
                 let ptr = ext4block.data.as_ptr() as *const [u32; 15];
                 *ptr

@@ -1,3 +1,13 @@
+//! `brk`/`mmap`/`munmap`/`mprotect` 的地址空间操作实现。
+//!
+//! 这里处理 Linux 兼容的参数校验、固定映射覆盖、overcommit、VMA 合并和共享匿名页
+//! 预分配策略；真正的区间管理由 `VmaSet` 完成，单页映射由 `Vma`/页表层完成。
+//!
+//! # Linux Compatibility
+//!
+//! `MAP_FIXED` 会先解除目标区间已有映射，`MAP_FIXED_NOREPLACE` 遇到重叠返回 `-EEXIST`。
+//! 文件映射偏移必须按页对齐；匿名可写映射参与本内核的 overcommit 检查。
+
 use super::address_space::{AddressSpace, MemoryError};
 use super::page_table::PageTable;
 use super::vma::{MapFlags, MapPermission, Vma};

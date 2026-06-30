@@ -1,3 +1,14 @@
+//! 线程控制块与 clone/exec 资源管理。
+//!
+//! `TaskControlBlock` 是调度实体，保存内核栈、trap context 槽位、线程私有信号、
+//! rlimit/身份/调度兼容状态等；`ProcessControlBlock` 保存线程组共享资源。
+//!
+//! # Locking
+//!
+//! `TaskControlBlock::inner` 保护线程私有可变状态。等待和信号路径在检查
+//! `has_actionable_signal()` 前必须释放 `task.inner`，避免信号处理和调度唤醒路径
+//! 形成锁顺序反转。
+
 use super::pid::RecycleAllocator;
 use super::process::ProcessControlBlock;
 use super::quota::TaskQuotaGuard;
@@ -752,9 +763,12 @@ impl TaskControlBlock {
         true
     }
 
-    /// !!!!!!!!!!!!!!!!WARNING!!!!!!!!!!!!!!!!!!!!!
-    /// 当前仅用于initproc加载。如果在其他地方使用，必须更改bin_path。
-    /// 任务创建（仅用于initproc）
+    /// 创建 initproc 的首个任务。
+    ///
+    /// # Semantics
+    ///
+    /// 该构造器只用于内核启动阶段加载 `/init`。普通 fork/clone 必须走
+    /// `sys_clone()`，exec 必须走 `load_elf()`。
     pub fn new(elf: Arc<vfs::File>) -> Arc<Self> {
         // 将ELF文件映射到内核空间
         let elf_data = elf.map_to_kernel_space(MMAP_BASE);

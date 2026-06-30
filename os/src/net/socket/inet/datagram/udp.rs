@@ -58,6 +58,24 @@ struct UdpSocketInner {
 }
 
 impl Socket for UdpSocket {
+    /// 将 UDP socket 绑定到本地 IP 端点。
+    ///
+    /// # Semantics
+    ///
+    /// 规范化 IPv4-mapped IPv6 地址，处理 `port=0` 的临时端口分配（
+    /// `PortManager::alloc_ephemeral_port()`）。通过 `NET_INTERFACE.udp_routed_socket()`
+    /// 在 smoltcp socket set 中调用 `socket.bind()`。
+    ///
+    /// # Locking
+    ///
+    /// 获取 `self.inner` 锁。`NET_INTERFACE.udp_routed_socket()` 通过路由句柄
+    /// 执行短闭包——闭包内不持锁、不做 I/O。
+    ///
+    /// # Errors
+    ///
+    /// - `EINVAL`：`endpoint` 不是 `Endpoint::Ip`
+    /// - `EAFNOSUPPORT`：地址族不匹配
+    /// - `EAGAIN`：poll 后绑定失败（smoltcp 接口状态不匹配）
     fn bind(&self, endpoint: &Endpoint) -> SyscallRet {
         let Endpoint::Ip(ep) = endpoint else {
             return Err(SyscallErr::EINVAL);
@@ -105,6 +123,24 @@ impl Socket for UdpSocket {
         Err(SyscallErr::EOPNOTSUPP)
     }
 
+    /// 设置 UDP socket 的远程目标地址。
+    ///
+    /// # Semantics
+    ///
+    /// 存储 `remote_endpoint` 到 `self.inner`。若 socket 尚未绑定（`local.port==0`），
+    /// 通过 `NET_INTERFACE.udp_routed_socket()` 调用 smoltcp `socket.bind()` 自动
+    /// 分配临时端口和源 IP。`unspecified` 远程地址映射为 127.0.0.1 / ::1。
+    ///
+    /// # Locking
+    ///
+    /// 获取 `self.inner` 锁。`NET_INTERFACE.udp_routed_socket()` 闭包内调用
+    /// `socket.bind()` 不持锁。
+    ///
+    /// # Errors
+    ///
+    /// - `EINVAL`：`endpoint` 不是 `Endpoint::Ip`
+    /// - `EAFNOSUPPORT`：地址族不匹配
+    /// - `EAGAIN`：poll 后 smoltcp 绑定时接口状态不匹配
     fn connect(&self, endpoint: &Endpoint) -> SyscallRet {
         let Endpoint::Ip(ep) = endpoint else {
             return Err(SyscallErr::EINVAL);
@@ -287,13 +323,39 @@ impl Socket for UdpSocket {
             return Err(SyscallErr::EINVAL);
         };
         let _ = ep;
-        todo!();
+        // TODO(udp-sendto): implement `send_to` for UDP sockets.
+        // Currently `try_send` handles the connected case; this path is unreachable
+        // because `UdpSocket` is never used as a `Raw` socket without `connect`.
+        // Exit condition: `UdpSocket` gains a code path that routes here without a connected endpoint.
+        return Err(SyscallErr::EOPNOTSUPP);
     }
 
     fn try_recv(&self, buf: &mut [u8]) -> Result<isize, SyscallErr> {
         self.try_recvmsg(buf).map(|(size, _)| size)
     }
 
+    /// 非阻塞尝试发送 UDP 数据报（不 poll）。
+    ///
+    /// # Semantics
+    ///
+    /// 通过 `self.inner` 获取 `remote_endpoint`（必须已 `connect`，否则 `ENOTCONN`）。
+    /// 支持 `MSG_MORE`：缓冲数据而非立即发送，非 `MSG_MORE` 则合并缓冲后一次性发送。
+    ///
+    /// 发送路径：本地回环直接通过 `try_deliver_local()` 推送到 peer 的 `rx_queue`；
+    /// 否则通过 `NET_INTERFACE.udp_routed_socket()` 调用 smoltcp `socket.send_slice()`。
+    ///
+    /// **阻塞模型**：`try_xxx` 模式——不做 poll、不睡眠、不调度。调用者的
+    /// `sys_sendto`/`sys_sendmsg` 负责 poll 和 WaitQueue 管理。
+    ///
+    /// **限制**：单次 `send_slice` 最多 `MAX_BUFFER_SIZE`（64KB），调用者通过
+    /// `EMSGSIZE` 检查（`>65507`）确保不超过 UDP 有效载荷上限。
+    ///
+    /// # Errors
+    ///
+    /// - `EMSGSIZE`：`buf.len() > 65507`（UDP 最大有效载荷）
+    /// - `ENOTCONN`：无 `remote_endpoint`
+    /// - `EAGAIN`：发送缓冲满（`BufferFull`）
+    /// - `ENOBUFS`：smoltcp 内部分配失败
     fn try_send(&self, buf: &[u8], flags: MsgFlags) -> Result<isize, SyscallErr> {
         // EMSGSIZE: UDP 最大负载 65535 - 20(IP头) - 8(UDP头) = 65507
         if buf.len() > 65507 {
@@ -337,6 +399,22 @@ impl Socket for UdpSocket {
             .unwrap_or(Err(SyscallErr::EAGAIN))
     }
 
+    /// 非阻塞尝试接收 UDP 数据报及其源地址。
+    ///
+    /// # Semantics
+    ///
+    /// 从 `self.inner.rx_queue` 弹出最早的数据报（`VecDeque` 前端）。
+    /// 将最多 `buf.len()` 字节数据复制到 `buf` 中，返回 `(本地读取长度, Some(Endpoint::Ip(remote)))`。
+    /// 队列由 `dispatch_udp_packets()` 填充，该函数在每次 `NET_INTERFACE.poll()` 后调用。
+    ///
+    /// **阻塞模型**：`try_xxx` 模式——仅消费已有数据，不等待。队列为空时返回
+    /// `EAGAIN`，调用者通过 `recv_wait_queue` 进入阻塞等待。
+    ///
+    /// **截断行为**：若数据报 > `buf.len()`，超出的数据丢弃（无 `MSG_TRUNC` 通知）。
+    ///
+    /// # Errors
+    ///
+    /// - `EAGAIN`：接收队列为空
     fn try_recvmsg(&self, buf: &mut [u8]) -> Result<(isize, Option<Endpoint>), SyscallErr> {
         // 从 rx_queue 非阻塞取一包数据 + 源地址
         let mut inner = self.inner.lock();
@@ -356,6 +434,29 @@ impl Socket for UdpSocket {
         }
     }
 
+    /// 非阻塞尝试发送 UDP 数据报到指定目标。
+    ///
+    /// # Semantics
+    ///
+    /// 与 `try_send` 类似，但支持显式 `dest: Option<Endpoint>` 参数：
+    /// - `Some(Endpoint::Ip(ep))`：发送到该地址
+    /// - `None`：回退到 `self.try_send()`（使用 `remote_endpoint`）
+    ///
+    /// 发送前做路由检查（`route_check`）和 `SO_BINDTODEVICE` 检查。若目标需要
+    /// 特定的输出接口，重新绑定 smoltcp handler（`rebind_routed_udp`）。
+    ///
+    /// # Locking
+    ///
+    /// 获取 `self.inner` 锁两次：一次读取 `remote_endpoint`，一次读取和消费
+    /// `msg_more_buf`。
+    ///
+    /// # Errors
+    ///
+    /// - `EMSGSIZE`：数据报过大
+    /// - `EINVAL`：`dest` 不是 `Endpoint::Ip`
+    /// - `ENOTCONN`：`dest==None` 且无 `remote_endpoint`
+    /// - `EAFNOSUPPORT`：地址族不匹配
+    /// - `EAGAIN`：发送缓冲满
     fn try_sendmsg(
         &self,
         buf: &[u8],

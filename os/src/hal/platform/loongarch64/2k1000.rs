@@ -1,3 +1,7 @@
+//! LoongArch64 2K1000 平台常量。
+//!
+//! 定义开发板 MMIO 区间、块大小、内存基址和 UART 基址。
+
 use crate::config::HIGH_BASE_EIGHT;
 
 pub const MMIO: &[(usize, usize)] = &[

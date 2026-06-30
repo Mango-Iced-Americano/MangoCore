@@ -1,3 +1,18 @@
+//! 内核全局堆分配器。
+//!
+//! 本模块在 `buddy_system_allocator::Heap` 外包一层 OOM-aware `GlobalAlloc`，
+//! 普通分配失败时会先尝试内存回收，再交给 `alloc_error_handler` 做最终诊断和 shutdown。
+//!
+//! # Locking
+//!
+//! buddy heap 由 `Mutex` 保护。分配失败后的回收路径在释放 heap 锁之后执行，避免
+//! OOM 回收过程中再次分配或释放堆内存时递归持锁。
+//!
+//! # OOM
+//!
+//! `alloc` 最多重试三次；仍失败时返回 null，由 Rust 分配路径触发
+//! `handle_alloc_error`。
+
 use crate::{config::PAGE_SIZE, hal::KERNEL_HEAP_SIZE};
 use buddy_system_allocator::Heap;
 use core::alloc::{GlobalAlloc, Layout};
@@ -19,12 +34,19 @@ pub static KERNEL_HEAP_CURRENT_BYTES: AtomicUsize = AtomicUsize::new(0);
 pub static KERNEL_HEAP_MAX_BYTES: AtomicUsize = AtomicUsize::new(0);
 
 impl OomAwareAllocator {
+    /// 创建一个尚未初始化的分配器。
     pub const fn empty() -> Self {
         Self {
             inner: Mutex::new(Heap::empty()),
         }
     }
 
+    /// 初始化底层 buddy heap。
+    ///
+    /// # Safety
+    ///
+    /// `start..start + size` 必须是一段唯一归本分配器管理的可写内存，并且在内核运行期间
+    /// 不会被其他分配器或静态对象再次占用。
     pub unsafe fn init(&self, start: usize, size: usize) {
         self.inner.lock().init(start, size);
     }
@@ -71,7 +93,14 @@ impl OomAwareAllocator {
     }
 }
 
+// Safety: `OomAwareAllocator` 使用内部 `Mutex` 序列化 buddy heap 访问，返回的指针
+// 来自初始化时唯一交给它的 `HEAP_SPACE` 区间。
 unsafe impl GlobalAlloc for OomAwareAllocator {
+    /// 分配一块满足 `layout` 的内核堆内存。
+    ///
+    /// # Safety
+    ///
+    /// 遵循 `GlobalAlloc::alloc` 契约：调用者必须用同一分配器和相同 layout 释放返回指针。
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         for _ in 0..3 {
             let mut inner = self.inner.lock();
@@ -85,7 +114,7 @@ unsafe impl GlobalAlloc for OomAwareAllocator {
                     .max(core::mem::size_of::<usize>())
                     .next_power_of_two();
                 drop(inner);
-                // Perf gauge: track current allocation and peak
+                // Perf gauge 使用 buddy 实际 block 大小统计当前占用和峰值。
                 let prev = KERNEL_HEAP_CURRENT_BYTES.fetch_add(block_size, Ordering::Relaxed);
                 let new_total = prev + block_size;
                 let mut cur_max = KERNEL_HEAP_MAX_BYTES.load(Ordering::Relaxed);
@@ -110,6 +139,12 @@ unsafe impl GlobalAlloc for OomAwareAllocator {
         core::ptr::null_mut()
     }
 
+    /// 释放一块内核堆内存。
+    ///
+    /// # Safety
+    ///
+    /// `ptr` 和 `layout` 必须来自先前成功的 `alloc` 调用；重复释放或 layout 不匹配会破坏
+    /// buddy heap 元数据。
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         if let Some(ptr) = core::ptr::NonNull::new(ptr) {
             #[cfg(feature = "heap_trace")]
@@ -129,22 +164,21 @@ unsafe impl GlobalAlloc for OomAwareAllocator {
 }
 
 #[global_allocator]
-/// 全局堆分配器
+/// 全局堆分配器。
 static HEAP_ALLOCATOR: OomAwareAllocator = OomAwareAllocator::empty();
 
-// 标记为全局分配错误处理器
 #[alloc_error_handler]
-/// 分配错误处理（带诊断信息 + 安全 shutdown）
+/// 分配错误处理（带诊断信息和安全 shutdown）。
 ///
-/// 行为：
-/// - 打印完整诊断信息（syscall 名、堆统计）
-/// - 直接 shutdown 内核
+/// # Semantics
 ///
-/// 注意：绝不能在这里调用 exit_current_and_run_next！因为 handle_alloc_error 是
-/// `-> !` 发散函数，无法 unwinding 调用栈。如果从内核代码中（syscall handler 内部）
-/// 调用 exit_current_and_run_next 调度走，被杀死任务栈上的锁守卫（Mutex/RwLock 等）
-/// 永远得不到释放，导致后续任务死锁或文件系统损坏。
-/// 正确的做法是：在 alloc() 中做好多次重试+OOM recovery，只有在万不得已时才 shutdown。
+/// 打印触发 syscall、失败 layout 和 heap trace 后直接关闭内核。
+///
+/// # Locking
+///
+/// 这里绝不能调用 `exit_current_and_run_next`。`handle_alloc_error` 是 `-> !`
+/// 发散函数，不能 unwind 当前栈；如果从 syscall handler 内部直接调度走，栈上的
+/// `Mutex`/`RwLock` guard 永远不会释放，后续任务可能死锁或破坏文件系统状态。
 pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
     println!("=== HEAP ALLOCATION FAILED (FATAL) ===");
     let syscall_name = crate::task::current_syscall_name();
@@ -157,8 +191,9 @@ pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
     crate::hal::shutdown()
 }
 
-/// 返回 (free_bytes, total_bytes, allocated_user, allocated_actual, internal_waste)
-/// where internal_waste = allocated_actual - allocated_user (fragmentation overhead)
+/// 返回 `(free_bytes, total_bytes, allocated_user, allocated_actual, internal_waste)`。
+///
+/// `internal_waste = allocated_actual - allocated_user`，表示 buddy block 对齐造成的内部碎片。
 pub fn heap_stats() -> (usize, usize, usize, usize, usize) {
     let heap = HEAP_ALLOCATOR.inner.lock();
     let total = heap.stats_total_bytes();
@@ -169,30 +204,30 @@ pub fn heap_stats() -> (usize, usize, usize, usize, usize) {
     (free, total, alloc_user, alloc_actual, waste)
 }
 
-/// 返回每 order 的空闲块数（order 0 = 1B, order 16 = 64KB, ...）
+/// 返回每个 order 的空闲块数（order 0 = 1B，order 16 = 64 KiB）。
 pub fn heap_free_histogram() -> [usize; 32] {
     HEAP_ALLOCATOR.inner.lock().free_block_counts()
 }
 
-/// 全局堆内存空间
+/// 全局堆内存空间。
 static mut HEAP_SPACE: [u8; KERNEL_HEAP_SIZE] = [0; KERNEL_HEAP_SIZE];
 
-/// 初始化用于内核加载开始时的堆
+/// 初始化内核堆。
 pub fn init_heap() {
+    // Safety: `HEAP_SPACE` 是本模块唯一的静态堆缓冲区，初始化只在启动早期执行一次。
     unsafe {
-        // 起始地址和大小
         HEAP_ALLOCATOR.init(HEAP_SPACE.as_ptr() as usize, KERNEL_HEAP_SIZE);
     }
     KERNEL_HEAP_CURRENT_BYTES.store(0, Ordering::Relaxed);
     KERNEL_HEAP_MAX_BYTES.store(0, Ordering::Relaxed);
-    // Register dealloc scan steps hook for perf stats
+    // Safety: 该全局 hook 仅在启动期写入一次，指向常驻的 perf 统计函数。
     unsafe {
         buddy_system_allocator::DEALLOC_SCAN_HOOK = crate::task::perf::record_heap_dealloc_scan_steps;
     }
 }
 
 #[allow(unused)]
-/// 堆测试函数
+/// 启动期堆分配自检。
 pub fn heap_test() {
     use alloc::boxed::Box;
     use alloc::vec::Vec;

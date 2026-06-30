@@ -1,6 +1,21 @@
+//! 架构无关页表接口。
+//!
+//! `PageTable` 描述 MangoCore 内存子系统需要的最小页表能力，具体位布局和
+//! 刷新指令由 `hal/arch/*` 实现。
+//!
+//! # TLB
+//!
+//! 默认 PTE 修改接口必须自行刷新受影响的 TLB 条目。唯一例外是名字带
+//! `_no_flush` 的批量接口，调用方必须在批量结束后调用 `flush_tlb()`。
+
 use super::{MapPermission, MemoryError, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 
-// user-copy 方向，读是从用户拿，写是往用户填
+/// 用户地址访问方向。
+///
+/// # Semantics
+///
+/// `Read` 表示内核从用户页读数据，`Write` 表示内核向用户页写数据，
+/// `ReadWrite` 用于需要同时验证读写权限的可变引用路径。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UserAccess {
     Read,
@@ -20,7 +35,12 @@ impl UserAccess {
     }
 }
 
-// 缺页时区分读写取指
+/// 缺页处理的访问类型。
+///
+/// # Semantics
+///
+/// page fault 路径使用该类型决定要补齐的权限、是否触发 CoW，以及最终应向
+/// 用户态报告哪类 fault。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FaultAccess {
     Load,
@@ -29,14 +49,29 @@ pub enum FaultAccess {
 }
 
 #[allow(unused)]
+/// 地址空间页表操作接口。
+///
+/// # Semantics
+///
+/// 实现方负责创建/销毁页表页、转换虚拟地址、修改叶子 PTE 权限和切换当前
+/// 硬件页表。调用方负责管理映射对应的物理页生命周期。
+///
+/// # TLB
+///
+/// 除 `block_and_ret_mut_no_flush` 外，所有修改有效 PTE 的方法都必须刷新
+/// 当前 hart/core 上对应的 TLB 条目。批量修改时只能使用 `_no_flush` 方法，
+/// 并在最后调用 `flush_tlb()`。
 pub trait PageTable {
-    /// 基本映射操作
-    /// map、unmap、translate、translate_va
-    /// 通过指定flags将vpn映射到ppn
-    /// # 注意
-    /// Allocation should be done elsewhere.
-    /// # 特例
-    /// Panics if the `vpn` is mapped.
+    /// 将 `vpn` 映射到 `ppn`。
+    ///
+    /// # Errors
+    ///
+    /// 返回 `MemoryError::AlreadyMapped` 表示目标 VPN 已存在有效映射。
+    /// 页表页分配失败时返回对应的 `MemoryError`。
+    ///
+    /// # TLB
+    ///
+    /// 成功写入 PTE 后必须刷新该 VPN 对应的 TLB 条目。
     fn try_map(
         &mut self,
         vpn: VirtPageNum,
@@ -50,10 +85,16 @@ pub trait PageTable {
     fn map_identical(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: MapPermission) {
         self.map(vpn, ppn, flags)
     }
-    #[allow(unused)]
     /// Unmap the `vpn` to `ppn` with the `flags`.
-    /// # Exceptions
-    /// Panics if the `vpn` is NOT mapped (invalid).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `vpn` is not currently mapped.
+    ///
+    /// # TLB
+    ///
+    /// 成功清除 PTE 后必须刷新该 VPN 对应的 TLB 条目。
+    #[allow(unused)]
     fn unmap(&mut self, vpn: VirtPageNum);
     #[inline(always)]
     fn unmap_identical(&mut self, vpn: VirtPageNum) {
@@ -65,22 +106,80 @@ pub trait PageTable {
     /// Translate the virtual address into its corresponding `PhysAddr` if mapped in current page table.
     /// `None` is returned if nothing is found.
     fn translate_va(&self, va: VirtAddr) -> Option<PhysAddr>;
+    /// 撤销 `vpn` 的写权限并返回原映射的物理页。
+    ///
+    /// # TLB
+    ///
+    /// 成功修改 PTE 后必须立即刷新该 VPN，保证后续写访问重新缺页。
     fn block_and_ret_mut(&self, vpn: VirtPageNum) -> Option<PhysPageNum>;
+
     /// Revoke writable permission and return the mapped PPN without flushing TLB.
     ///
     /// Callers that batch multiple PTE updates must call `flush_tlb()` once after
     /// finishing the batch.
     fn block_and_ret_mut_no_flush(&self, vpn: VirtPageNum) -> Option<PhysPageNum>;
+
+    /// 刷新当前页表相关的 TLB 状态。
+    ///
+    /// # Semantics
+    ///
+    /// 用于 `_no_flush` 批量修改完成后的收尾，也可用于架构无法精确单页刷新时
+    /// 执行全量刷新。
     fn flush_tlb(&self);
+
     /// Return the physical token to current page.
     fn token(&self) -> usize;
+
+    /// 撤销 `vpn` 的读权限。
+    ///
+    /// # TLB
+    ///
+    /// 成功修改 PTE 后必须刷新该 VPN。
     fn revoke_read(&mut self, vpn: VirtPageNum) -> Result<(), ()>;
+
+    /// 撤销 `vpn` 的写权限。
+    ///
+    /// # TLB
+    ///
+    /// 成功修改 PTE 后必须刷新该 VPN。
     fn revoke_write(&mut self, vpn: VirtPageNum) -> Result<(), ()>;
+
+    /// 撤销 `vpn` 的执行权限。
+    ///
+    /// # TLB
+    ///
+    /// 成功修改 PTE 后必须刷新该 VPN。
     fn revoke_execute(&mut self, vpn: VirtPageNum) -> Result<(), ()>;
+
+    /// 修改 `vpn` 指向的物理页。
+    ///
+    /// # TLB
+    ///
+    /// 成功修改 PPN 后必须刷新该 VPN。
     fn set_ppn(&mut self, vpn: VirtPageNum, ppn: PhysPageNum) -> Result<(), ()>;
+
+    /// 覆盖 `vpn` 的 PTE 权限位。
+    ///
+    /// # TLB
+    ///
+    /// 成功修改权限后必须刷新该 VPN。
     fn set_pte_flags(&mut self, vpn: VirtPageNum, flags: MapPermission) -> Result<(), ()>;
+
+    /// 清除硬件访问位。
+    ///
+    /// # TLB
+    ///
+    /// 成功修改 PTE 后必须刷新该 VPN 或执行等价的全量刷新。
     fn clear_access_bit(&mut self, vpn: VirtPageNum) -> Result<(), ()>;
+
+    /// 清除硬件 dirty 位。
+    ///
+    /// # TLB
+    ///
+    /// 成功修改 PTE 后必须刷新该 VPN 或执行等价的全量刷新。
     fn clear_dirty_bit(&mut self, vpn: VirtPageNum) -> Result<(), ()>;
+
+    /// 创建空页表。
     fn new() -> Self;
     #[inline(always)]
     fn new_kern_space() -> Self
@@ -92,9 +191,11 @@ pub trait PageTable {
     /// Release all page table frames to the frame allocator.
     /// Used when a zombie process no longer needs its address space.
     fn release_frames(&mut self);
-    /// Create an empty page table from `satp`
-    /// # Argument
-    /// * `satp` Supervisor Address Translation & Protection reg. that points to the physical page containing the root page.
+    /// 从硬件页表 token 构造页表视图。
+    ///
+    /// # Semantics
+    ///
+    /// 该方法不接管页表页所有权，通常用于临时遍历当前用户页表。
     fn from_token(satp: usize) -> Self;
     /// Predicate for the valid bit.
     fn is_mapped(&self, vpn: VirtPageNum) -> bool;
@@ -104,7 +205,11 @@ pub trait PageTable {
     fn readable(&self, vpn: VirtPageNum) -> Option<bool>;
     fn writable(&self, vpn: VirtPageNum) -> Option<bool>;
     fn executable(&self, vpn: VirtPageNum) -> Option<bool>;
-    // 只看 PTE 用户位和读写位
+    /// 只检查 PTE 用户位和请求的读写权限。
+    ///
+    /// # Semantics
+    ///
+    /// 这是非 faulting 探测，不会分配页表页、触发 CoW 或填充 lazy 映射。
     fn user_access_ok(&self, vpn: VirtPageNum, access: UserAccess) -> Option<bool>;
 }
 

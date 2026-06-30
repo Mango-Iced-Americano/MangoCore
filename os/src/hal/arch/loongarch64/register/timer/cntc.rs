@@ -1,3 +1,7 @@
+//! `CNTC`：稳定计数器补偿寄存器。
+//!
+//! 该 CSR 调整 stable counter 的可见值，用于启动或迁移场景下的时间基准校正。
+
 use bit_field::BitField;
 impl_define_csr!(CntC, "Counter Compensation, \n\
                         This register can be configured by the software to correct the timer’s readout value.\n\

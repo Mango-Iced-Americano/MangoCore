@@ -1,3 +1,7 @@
+//! `TLBEHI`：普通 TLB 表项高位寄存器。
+//!
+//! TLB 读写指令通过该 CSR 传递虚拟页号等高位表项信息。
+
 use crate::{config::VALEN, mm::VirtPageNum};
 use bit_field::BitField;
 impl_define_csr!(TLBEHi, "TLB Entry High-order Bits (TLBEHI)

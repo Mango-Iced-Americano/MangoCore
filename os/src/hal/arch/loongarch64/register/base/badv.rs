@@ -1,3 +1,7 @@
+//! `BADV`：记录地址相关异常捕获到的错误虚拟地址。
+//!
+//! trap 处理路径用它定位 page fault、地址错误和未对齐访问的 faulting VA。
+
 impl_define_csr!(BadV, "Bad Virtual Address (BADV)
 This register is used to record the bad address when a bad address exception is triggered. Such exceptions include:
 * ADdress error Exception for Fetching instructions (ADEF), at this time the PC of the instruction is recorded

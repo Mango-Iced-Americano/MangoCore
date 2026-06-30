@@ -1,3 +1,7 @@
+//! RISC-V HAL 后端。
+//!
+//! 包含 QEMU/K210/FU740 配置、SV39 页表、trap、SBI、时钟和上下文切换实现。
+
 pub mod config;
 pub mod kern_stack;
 pub mod sbi;

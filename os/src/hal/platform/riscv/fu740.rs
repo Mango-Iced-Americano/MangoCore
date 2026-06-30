@@ -1,3 +1,7 @@
+//! RISC-V FU740 平台常量和时钟探测。
+//!
+//! 定义 FU740 MMIO 区间、块设备位置，并通过 PRCI 读取 RTC 时钟频率。
+
 use crate::config::DISK_IMAGE_BASE;
 use fu740_hal::{clock::PrciExt, time::U32Ext};
 use fu740_pac::Peripherals;

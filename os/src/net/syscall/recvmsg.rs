@@ -9,6 +9,26 @@ use crate::utils::error::SyscallErr;
 
 use super::common::MsgFlags;
 
+/// 从 socket 接收消息并分散写入 `struct iovec` 数组。
+///
+/// # Semantics
+///
+/// 从 `msg_ptr` 指向的 `MsgHdr` 读取 `msg_iov`/`msg_iovlen` 描述的用户缓冲区，
+/// 调用 `Socket::try_recvmsg()` 或 `try_peek_recvmsg()` 接收数据。
+/// 填充 `msg_namelen`（发送方地址）、`msg_controllen`（控制信息，当前为 0）、
+/// `msg_flags`（`MSG_TRUNC` 等返回值标志）。
+///
+/// # Errors
+///
+/// - `-EFAULT`：`msg_ptr` 或 `msg_iov` 指针非法。
+/// - `-ENOBUFS`：内核临时缓冲区分配失败。
+/// - `-EMSGSIZE`：用户 `iovec` 总长度不足以容纳消息时设置 `MSG_TRUNC`。
+/// 其他错误由 `Socket::try_recvmsg()` 产生。
+///
+/// # Linux Compatibility
+///
+/// 当前不支持控制消息（`MSG_CTRUNC` 始终为 0），`msg_controllen` 返回 0。
+/// `MSG_PEEK` 行为与 Linux 6.6 一致：查看数据但不消费。
 pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
     let msg_flags = MsgFlags::from_bits_truncate(flags);
     let is_peek = msg_flags.contains(MsgFlags::MSG_PEEK);
@@ -94,6 +114,10 @@ pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
     if buf.try_reserve(recv_cap).is_err() {
         return -(SyscallErr::ENOBUFS as isize);
     }
+    // Safety: `try_reserve(recv_cap)` succeeded above, so the allocation
+    // has at least `recv_cap` bytes of capacity. `set_len` marks the whole
+    // capacity as initialized — it will be overwritten by `try_recvmsg()`
+    // before any read, so uninitialized bytes are never observed.
     unsafe {
         buf.set_len(recv_cap);
     }
@@ -105,6 +129,10 @@ pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
             socket.try_recvmsg(&mut buf)
         }
     };
+    // Locking: `socket.recv_wait_queue()` 由 socket 接收路径唤醒（数据到达时
+    // smoltcp 调用 `process()` → `recv_raw()` → `wake_one_if()`）。
+    // `wait_until_interruptible` 的条件闭包仅调用 `try_recvmsg()`/`try_peek_recvmsg()`，
+    // 不持有 socket 内部锁或 `NET_INTERFACE` 全局锁，不会导致锁顺序反转。
     let ret = if let Some(wq) = socket.recv_wait_queue() {
         if is_nonblock {
             NET_INTERFACE.try_poll();

@@ -1,3 +1,14 @@
+//! POSIX/Linux 信号核心实现。
+//!
+//! 本模块定义信号集合、`rt_sigaction` ABI、备用信号栈、`siginfo_t` 布局，
+//! 并在 `do_signal()` 中把 pending signal 转换为用户 handler 调用或默认动作。
+//! 进程级投递、pending 队列和等待 syscall 分别拆到子模块。
+//!
+//! # Locking
+//!
+//! `do_signal()` 在当前任务即将返回用户态时运行。它会短暂持有 `task.inner`
+//! 和 `sighand` 锁；在停止进程、退出进程或重新进入调度前必须显式 drop 这些锁。
+
 use crate::hal::{
     get_bad_addr, get_bad_instruction, get_exception_cause, MachineContext, TrapContext,
     UserContext, UserSignalMask,
@@ -721,6 +732,10 @@ pub fn do_signal() -> &'static TaskControlBlock {
                 {
                     let token = current_user_token();
                     let saved_sigmask = inner.sigmask_to_restore.take().unwrap_or(inner.sigmask);
+                    // Safety: `TrapContext` 的起始布局与 `MachineContext` 保持一致，
+                    // 架构相关 trap context 定义以通用寄存器/PC 等机器上下文为前缀。
+                    // 这里按值复制当前 trap context 的机器寄存器快照，用于构造
+                    // 用户态 `ucontext_t`，不会保留指向 trap frame 的引用。
                     let mcontext = unsafe {
                         *(inner.get_trap_cx() as *const TrapContext).cast::<MachineContext>()
                     };
@@ -988,7 +1003,13 @@ pub fn sigprocmask(how: u32, set: *const Signals, oldset: *mut Signals) -> isize
 
 #[allow(unused)]
 #[derive(Clone, Copy, Debug)]
-#[repr(C)] //UNSAFE! IS THIS CORRECT?
+#[repr(C)]
+/// Linux 兼容的 `siginfo_t` 子集。
+///
+/// # Semantics
+///
+/// 布局固定为 128 字节，当前只填充 signal number、errno、code、sender pid/uid
+/// 和 `sigval`。其它联合字段以 padding 保留，避免 copy_to_user 覆盖用户栈。
 pub struct SigInfo {
     si_signo: u32,
     si_errno: u32,

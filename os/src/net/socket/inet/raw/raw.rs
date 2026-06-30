@@ -40,6 +40,16 @@ struct RawSocketInner {
 }
 
 impl Socket for RawSocket {
+    /// 将 raw socket 绑定到本地 IP 端点。
+    ///
+    /// # Semantics
+    ///
+    /// 仅记录 `local_endpoint` 到 `self.inner`（不做 smoltcp 级别绑定）。
+    /// Raw socket 的 smoltcp handler 在创建时已分配，无需后续 bind。
+    ///
+    /// # Linux Compatibility
+    ///
+    /// 简化实现：仅 `Endpoint::Ip` 有效。不支持 `AF_PACKET` 类型端点绑定。
     fn bind(&self, endpoint: &Endpoint) -> SyscallRet {
         match endpoint {
             Endpoint::Ip(ep) => {
@@ -131,7 +141,11 @@ impl Socket for RawSocket {
 
     fn shutdown(&self, how: u32) -> GeneralRet<()> {
         info!("[RawSocket::shutdown] how {}", how);
-        todo!()
+        // TODO(raw-shutdown): implement `shutdown` for RawSocket.
+        // `shutdown(SHUT_RD)` / `shutdown(SHUT_WR)` / `shutdown(SHUT_RDWR)`
+        // should mark the socket as closed for read/write and reject future operations.
+        // Exit condition: all RawSocket shutdown semantics are implemented and tested.
+        return Err(SyscallErr::EOPNOTSUPP);
     }
 
     fn send_to(&self, user_buf: &[u8], dest: Endpoint) -> SyscallRet {
@@ -334,6 +348,31 @@ impl Socket for RawSocket {
         Ok((n, ep))
     }
 
+    /// 非阻塞尝试接收 raw IP 数据包（不 poll）。
+    ///
+    /// # Semantics
+    ///
+    /// 遍历所有 `socket_handlers`（每个网络栈一个），在每个 handler 上调用
+    /// `NET_INTERFACE.raw_routed_socket()` 尝试 `socket.recv_slice()`。
+    ///
+    /// IPv6 接收时应用 `ICMP6_FILTER`（bitmap）：阻塞位为 1 的 ICMPv6 类型
+    /// 被跳过（与 Linux `ICMP6_FILTER` 语义一致）。IPv6 接收还剥离 40 字节
+    /// IP 头部，仅返回有效载荷。
+    ///
+    /// 接收后通过解析 IP 头获取源地址并存储到 `self.inner.remote_endpoint`。
+    ///
+    /// **阻塞模型**：不 poll、不阻塞、不睡眠。所有 handlers 无数据时返回
+    /// `EAGAIN`。调用者（`sys_recvfrom`）通过 `recv_wait_queue` 管理阻塞等待。
+    ///
+    /// # Locking
+    ///
+    /// 方法内多次获取 `self.inner` 锁（获取 `ip_version`、`icmp6_filter`、写
+    /// `remote_endpoint`）。`NET_INTERFACE.raw_routed_socket()` 闭包不含锁。
+    ///
+    /// # Errors
+    ///
+    /// - `EAGAIN`：所有 handlers 无数据
+    /// - `ENOTCONN`：recv_slice 失败
     fn try_recv(&self, buf: &mut [u8]) -> Result<isize, SyscallErr> {
         let ip_version = self.inner.lock().ip_version;
         let icmp6_filter = self.inner.lock().icmp6_filter;
@@ -406,6 +445,23 @@ impl Socket for RawSocket {
         }
     }
 
+    /// 非阻塞尝试发送 raw IP 数据包（不 poll）。
+    ///
+    /// # Semantics
+    ///
+    /// 两条路径：
+    /// - **connected**（`remote_endpoint == Some`）：委托 `self.send_to()`
+    ///   构造 IP 头部和原始数据包。
+    /// - **unconnected**（`IP_HDRINCL` 模式）：通过 `NET_INTERFACE.raw_routed_socket()`
+    ///   直接发送原始字节（调用者已提供完整的 IP 包）。
+    ///
+    /// **阻塞模型**：不 poll、不睡眠、不调度。发送缓冲满时返回 `EAGAIN`。
+    ///
+    /// # Errors
+    ///
+    /// - `EAGAIN`：发送缓冲满
+    /// - `ENOBUFS`：内部分配失败
+    /// - 已连接模式下由 `self.send_to()` 产生的错误
     fn try_send(&self, buf: &[u8], _flags: MsgFlags) -> Result<isize, SyscallErr> {
         let remote = self.inner.lock().remote_endpoint;
         match remote {

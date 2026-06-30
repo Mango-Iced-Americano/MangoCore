@@ -1,3 +1,15 @@
+//! 进程控制块与进程级生命周期。
+//!
+//! `ProcessControlBlock` 保存线程组共享状态：地址空间、fd table、namespace、
+//! 信号动作、进程级 pending signal、child tree、wait 状态和 zombie 回收信息。
+//! 线程级运行状态保存在 `TaskControlBlock` 中。
+//!
+//! # Locking
+//!
+//! `ProcessControlBlock::inner` 保护进程结构性状态，`signal` 单独保护进程共享
+//! pending signal 和 group-exit 状态。涉及调度队列、父子关系和资源析构时，
+//! 遵循“锁内移动 Arc/记录状态，锁外执行唤醒或析构”的顺序。
+
 use super::{
     pid::{RecycleAllocator, TidHandle},
     quota::TaskQuotaGuard,
@@ -21,12 +33,17 @@ use log::warn;
 use spin::{Mutex, MutexGuard};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// 进程级生命周期状态。
 pub enum ProcessState {
+    /// 至少还有线程可运行或可等待。
     Running,
+    /// 因默认 stop 信号或 ptrace stop 停止。
     Stopped,
+    /// 进程已退出，等待父进程 wait 回收。
     Zombie,
 }
 
+/// 进程控制块。
 pub struct ProcessControlBlock {
     /// 用户可见进程 ID，即 getpid() 返回值。
     pub pid: usize,
@@ -40,9 +57,9 @@ pub struct ProcessControlBlock {
     process_quota: Mutex<Option<TaskQuotaGuard>>,
     /// 属于该进程的线程列表。
     pub threads: Mutex<Vec<Weak<TaskControlBlock>>>,
-    /// Number of threads currently counted as live in this process.
+    /// 当前被计入存活线程数的线程数量。
     live_threads: AtomicUsize,
-    /// Reusable user-resource slots whose trap context page is still mapped.
+    /// 保留 trap context 页映射、可被复用的用户资源槽位。
     trap_context_cache: Mutex<Vec<usize>>,
     /// 父进程 wait4() 等待子进程退出的等待队列。
     pub child_exit_wait: Mutex<WaitQueue>,
@@ -62,6 +79,7 @@ pub struct ProcessControlBlock {
     shared_pending_hint: AtomicU64,
 }
 
+/// 由 `process.inner` 保护的进程共享状态。
 pub struct ProcessInner {
     /// 可执行文件描述符（新 VFS）。
     exe: Arc<Mutex<Arc<vfs::File>>>,
@@ -198,18 +216,21 @@ pub fn is_executable_inode_busy(inode: &Arc<dyn vfs::IndexNode>) -> bool {
     EXEC_INODE_REFS.lock().get(&key).copied().unwrap_or(0) > 0
 }
 
+/// 记录一个正在以可写方式打开的 inode。
 pub fn register_writable_inode(inode: &Arc<dyn vfs::IndexNode>) {
     if let Some(key) = inode_busy_key(inode) {
         register_busy_key(&WRITE_INODE_REFS, key);
     }
 }
 
+/// 取消一个可写 inode 引用计数。
 pub fn unregister_writable_inode(inode: &Arc<dyn vfs::IndexNode>) {
     if let Some(key) = inode_busy_key(inode) {
         unregister_busy_key(&WRITE_INODE_REFS, key);
     }
 }
 
+/// 判断 inode 是否正在被可写打开。
 pub fn is_writable_inode_busy(inode: &Arc<dyn vfs::IndexNode>) -> bool {
     let key = match inode_busy_key(inode) {
         Some(key) => key,
@@ -228,6 +249,16 @@ impl ProcessControlBlock {
         }
     }
 
+    /// 创建新的进程控制块。
+    ///
+    /// # Semantics
+    ///
+    /// 构造时会注册当前可执行文件的 `exec_key`，用于 `ETXTBSY` 兼容检查。
+    /// 返回的 PCB 尚未自动注册到全局 registry，调用方需要在 clone/fork 发布路径中完成。
+    ///
+    /// # Locking
+    ///
+    /// 只短暂读取 `exe` 和 `vm` 锁，不会进入等待点。
     pub fn new(
         pid: usize,
         leader_tid: usize,
@@ -326,14 +357,17 @@ impl ProcessControlBlock {
         pcb
     }
 
+    /// 获取进程内部状态锁。
     pub fn acquire_inner_lock(&self) -> MutexGuard<ProcessInner> {
         self.inner.lock()
     }
 
+    /// 释放进程 PID/TGID。
     pub fn release_pid(&self) {
         self._pid_handle.release();
     }
 
+    /// 返回 PID 是否已经释放。
     pub fn pid_released(&self) -> bool {
         self._pid_handle.is_released()
     }
@@ -428,7 +462,7 @@ impl ProcessControlBlock {
         new_ns
     }
 
-    /// Replace the current process's network namespace.
+    /// 替换当前进程的网络命名空间。
     pub fn set_net(&self, net: Arc<NetNamespace>) {
         super::net_namespace::register_ns_for_pid(self.pid, &net);
         self.inner.lock().net = net;
@@ -454,6 +488,12 @@ impl ProcessControlBlock {
         self.inner.lock().vm.clone()
     }
 
+    /// 替换当前地址空间。
+    ///
+    /// # Semantics
+    ///
+    /// `execve` 使用该接口提交新 `AddressSpace`。提交时会清空 trap context 槽位缓存、
+    /// 更新无锁 user token hint，并刷新当前 CPU 上缓存的当前进程 token。
     pub fn replace_vm(&self, vm: AddressSpace<PageTableImpl>) {
         let token = vm.token();
         self.trap_context_cache.lock().clear();
@@ -519,6 +559,7 @@ impl ProcessControlBlock {
         inner.sched_period = period;
     }
 
+    /// 把线程加入本进程线程列表，并计入 live-thread 计数。
     pub fn add_thread(&self, task: &Arc<TaskControlBlock>) {
         self.threads.lock().push(Arc::downgrade(task));
         if !task.thread_live_counted.swap(true, Ordering::Relaxed) {
@@ -526,6 +567,11 @@ impl ProcessControlBlock {
         }
     }
 
+    /// 将线程从 live-thread 计数中移除。
+    ///
+    /// # Semantics
+    ///
+    /// 返回值表示本次调用是否实际递减了 live-thread 计数。线程弱引用表会在稀疏时压缩。
     pub fn remove_thread(&self, task: &TaskControlBlock) -> bool {
         let removed = if task.thread_live_counted.swap(false, Ordering::Relaxed) {
             self.live_threads.fetch_sub(1, Ordering::Relaxed);
@@ -554,6 +600,7 @@ impl ProcessControlBlock {
         });
     }
 
+    /// 返回当前仍计为 live 的线程列表，并清理失效弱引用。
     pub fn threads(&self) -> Vec<Arc<TaskControlBlock>> {
         let mut threads = self.threads.lock();
         let mut live_threads = Vec::new();
@@ -572,6 +619,7 @@ impl ProcessControlBlock {
         live_threads
     }
 
+    /// 返回任意一个非 zombie live 线程。
     pub fn any_live_thread(&self) -> Option<Arc<TaskControlBlock>> {
         self.threads().into_iter().find(|task| {
             let inner = task.acquire_inner_lock();
@@ -579,10 +627,16 @@ impl ProcessControlBlock {
         })
     }
 
+    /// 返回 live-thread 计数。
     pub fn live_thread_count(&self) -> usize {
         self.live_threads.load(Ordering::Relaxed)
     }
 
+    /// 尝试缓存一个 trap context 槽位以便线程复用。
+    ///
+    /// # Semantics
+    ///
+    /// group exit 或无线程存活时拒绝缓存，避免已退出进程继续保留用户资源页。
     pub fn try_cache_trap_context_slot(&self, slot: usize) -> bool {
         if self.is_group_exiting() || self.live_thread_count() == 0 {
             super::perf::record_trap_cache_store(false);
@@ -598,6 +652,7 @@ impl ProcessControlBlock {
         true
     }
 
+    /// 从 trap context 缓存中取走指定槽位。
     pub fn take_cached_trap_context_slot(&self, slot: usize) -> bool {
         let mut cache = self.trap_context_cache.lock();
         if let Some(pos) = cache.iter().position(|cached| *cached == slot) {
@@ -674,6 +729,12 @@ impl ProcessControlBlock {
         (inner.children.len(), zombie_children, live_children)
     }
 
+    /// 标记进程进入 zombie 状态。
+    ///
+    /// # Semantics
+    ///
+    /// 首次成功转换返回 `true`；重复调用返回 `false`。调用方负责随后唤醒父进程
+    /// wait 队列和执行资源回收。
     pub fn mark_zombie(&self, exit_code: u32, rusage: Rusage) -> bool {
         let mut inner = self.inner.lock();
         if inner.state == ProcessState::Zombie {
@@ -688,6 +749,7 @@ impl ProcessControlBlock {
         true
     }
 
+    /// 标记进程被 stop 信号停止，并唤醒父进程或 tracer 的 wait 队列。
     pub fn mark_stopped(&self, signum: usize) {
         let tracer_pid = {
             let inner = self.inner.lock();
@@ -713,6 +775,7 @@ impl ProcessControlBlock {
         }
     }
 
+    /// 标记进程继续运行，并生成一次 wait 可见的 continued 事件。
     pub fn mark_continued(&self) {
         let changed = {
             let mut inner = self.inner.lock();
@@ -733,6 +796,9 @@ impl ProcessControlBlock {
         }
     }
 
+    /// 取出一次 wait 可见的 stopped 状态。
+    ///
+    /// `nowait = true` 时只观察状态，不消费。
     pub fn take_stopped_status(&self, nowait: bool) -> Option<u32> {
         let mut inner = self.inner.lock();
         if inner.state != ProcessState::Stopped || inner.stopped_reported {
@@ -745,6 +811,7 @@ impl ProcessControlBlock {
         Some(((signum as u32) << 8) | 0x7f)
     }
 
+    /// 建立 ptrace attach 状态并让 tracee 进入 stopped。
     pub fn ptrace_attach(&self, tracer_pid: usize, stop_signum: usize) -> Result<(), SyscallErr> {
         {
             let mut inner = self.inner.lock();
@@ -766,6 +833,7 @@ impl ProcessControlBlock {
         Ok(())
     }
 
+    /// 取消 ptrace attach 状态并继续 tracee。
     pub fn ptrace_detach(&self, tracer_pid: usize) -> Result<(), SyscallErr> {
         {
             let mut inner = self.inner.lock();
@@ -812,6 +880,12 @@ impl ProcessControlBlock {
         rusage
     }
 
+    /// 将信号加入进程共享 pending 队列。
+    ///
+    /// # Locking
+    ///
+    /// 只持有 `signal` 锁，不持有任何任务锁。`shared_pending_hint` 在锁释放前更新，
+    /// 供等待路径无锁快速判断。
     pub fn enqueue_process_signal(&self, pending: PendingSignal) {
         let pending_bits = {
             let mut state = self.signal.lock();
@@ -822,16 +896,19 @@ impl ProcessControlBlock {
             .store(pending_bits, Ordering::Relaxed);
     }
 
+    /// 返回进程共享 pending signal 位图。
     pub fn shared_pending(&self) -> Signals {
         self.signal.lock().shared_pending.pending()
     }
 
+    /// 返回进程共享 pending signal 的无锁 hint。
     pub fn shared_pending_hint(&self) -> Signals {
         Signals::from_bits_truncate(
             self.shared_pending_hint.load(Ordering::Relaxed) as signal_type!()
         )
     }
 
+    /// 从进程共享 pending 队列移除一个信号。
     pub fn take_shared_signal(&self, signal: Signals) -> bool {
         let (removed, pending_bits) = {
             let mut state = self.signal.lock();
@@ -843,6 +920,7 @@ impl ProcessControlBlock {
         removed
     }
 
+    /// 从进程共享 pending 队列取出第一个属于 `set` 的信号。
     pub fn take_shared_matching(&self, set: Signals) -> Option<PendingSignal> {
         let (pending, pending_bits) = {
             let mut state = self.signal.lock();
@@ -854,20 +932,28 @@ impl ProcessControlBlock {
         pending
     }
 
+    /// 请求线程组退出。
     pub fn request_group_exit(&self, exit_code: u32) {
         let mut state = self.signal.lock();
         state.group_exiting = true;
         state.group_exit_code = Some(exit_code);
     }
 
+    /// 返回线程组是否正在退出。
     pub fn is_group_exiting(&self) -> bool {
         self.signal.lock().group_exiting
     }
 
+    /// 返回线程组退出码。
     pub fn group_exit_code(&self) -> Option<u32> {
         self.signal.lock().group_exit_code
     }
 
+    /// 添加 waitable 子进程。
+    ///
+    /// # Errors
+    ///
+    /// children 列表扩容失败时返回 `-ENOMEM`，调用方必须回滚尚未发布的 clone。
     pub fn add_child(&self, child: Arc<ProcessControlBlock>) -> Result<(), isize> {
         const CHILDREN_SOFT_CAP: usize = 512;
         let mut inner = self.inner.lock();
@@ -890,6 +976,7 @@ impl ProcessControlBlock {
         Ok(())
     }
 
+    /// 从 child tree 中移除指定子进程。
     pub fn detach_child(&self, child_pid: usize) {
         self.inner
             .lock()
@@ -897,6 +984,7 @@ impl ProcessControlBlock {
             .retain(|child| child.pid != child_pid);
     }
 
+    /// 更新父进程引用和无锁 parent-pid hint。
     pub fn set_parent(&self, parent: Option<Weak<ProcessControlBlock>>) {
         let parent_pid = parent
             .as_ref()
@@ -907,10 +995,12 @@ impl ProcessControlBlock {
         self.parent_pid_hint.store(parent_pid, Ordering::Relaxed);
     }
 
+    /// 记录 `CLONE_VFORK` 父线程。
     pub fn set_vfork_parent(&self, parent: &Arc<TaskControlBlock>) {
         *self.vfork_parent.lock() = Some(Arc::downgrade(parent));
     }
 
+    /// 完成 vfork，同步唤醒等待的父线程。
     pub fn complete_vfork(&self) {
         let mut parent = self.vfork_parent.lock();
         if parent.is_none() {
@@ -921,10 +1011,12 @@ impl ProcessControlBlock {
         self.vfork_done.complete();
     }
 
+    /// 不可中断地等待 vfork 子进程完成 exec 或 exit。
     pub fn wait_vfork_done_uninterruptible(&self) {
         self.vfork_done.wait_uninterruptible()
     }
 
+    /// 取走所有子进程列表。
     pub fn take_children(&self) -> Vec<Arc<ProcessControlBlock>> {
         let mut inner = self.inner.lock();
         core::mem::take(&mut inner.children)
@@ -1004,6 +1096,11 @@ impl ProcessControlBlock {
         has_children
     }
 
+    /// 关闭进程 fd table 中的所有文件。
+    ///
+    /// # Locking
+    ///
+    /// 先复制 fd 列表，再逐个 drop fd，避免遍历时修改 fd table 迭代器状态。
     pub fn close_files_on_exit(&self) {
         let files_ref = self.files();
         let mut fd_table = files_ref.lock();

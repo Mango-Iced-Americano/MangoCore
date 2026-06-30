@@ -10,6 +10,35 @@ use crate::utils::error::SyscallErr;
 
 use super::common::MsgFlags;
 
+/// 从 socket 接收数据并获取发送方地址。
+///
+/// # Semantics
+///
+/// 按 socket 类型（`Stream`/`Datagram`/`Raw`）分发：
+/// - 校验 `MsgFlags`（`MSG_OOB` → `-EINVAL`，`MSG_ERRQUEUE` → `-EAGAIN`）。
+/// - `MSG_PEEK`：委托 `try_peek_recvmsg()`（不消费数据），UDP socket 通过此标志
+///   查看队列头部的数据。
+/// - 非阻塞 `Stream` fast path：使用 `UserBufferWriter` 零拷贝接收，
+///   在 `try_recv` 前调用 `NET_INTERFACE.try_poll()` 推进 TCP 状态机。
+///   缺少此 poll 会导致非阻塞 recv 循环饿死定时器中断。
+/// - 阻塞模式与 Datagram/Raw：复制到内核 `Vec<u8>` buf 中转
+///   （`HACK(uaccess-contiguity)`：绕过 `trans_refmut!` 跨页连续性的已知 bug，
+///   详见函数体内 HACK 注释）。
+/// - `src_addr`/`addrlen`：接收前验证 `*addrlen` 值（负值或过小 → `-EINVAL`），
+///   接收后通过 `Endpoint::fill_sockaddr()` 写回用户空间。
+///
+/// **关键约束**：非阻塞路径必须在 `try_recv` 前调用 `NET_INTERFACE.try_poll()`。
+///
+/// # Errors
+///
+/// - `-EFAULT`：用户缓冲区指针非法。
+/// - `-EINVAL`：`*addrlen` 无效（`<12` 或 `>512`）。
+/// 其他错误由 `Socket::try_recv`/`try_recvmsg` 产生。
+///
+/// # Linux Compatibility
+///
+/// TCP (`SOCK_STREAM`) 下 `recvfrom` 行为等同于 `recv` —— 忽略 `src_addr`/`addrlen`。
+/// 内核 buf 中转方案是绕过 `trans_refmut!` 跨页 bug 的 workaround。
 pub fn sys_recvfrom(
     sockfd: u32,
     buf: usize,
@@ -72,9 +101,13 @@ pub fn sys_recvfrom(
         return n;
     }
 
-    // 使用 kernel buffer 中转，避免 trans_refmut! 跨页时返回非连续物理内存的 bug。
-    // trans_refmut! 验证了所有用户页，但只返回第一页的切片指针，超出第一页边界
-    // 的数据会写到错误地址。
+    // HACK(uaccess-contiguity): 使用 kernel buffer 中转，避免 `trans_refmut!` 跨页时
+    // 返回非连续物理内存的 bug。`trans_refmut!` 验证了所有用户页，但只返回第一页的
+    // 切片指针，超出第一页边界的数据会写到错误地址。
+    // Reference: `trans_refmut!` macro in `os/src/mm/uaccess.rs` — maps each page
+    //   independently but returns only the first page's virtual address.
+    // Remove when: `UserBufferWriter` supports scatter-gather writes across
+    //   non-contiguous physical pages, allowing zero-copy recv even for cross-page buffers.
     let (result, kernel_buf) = {
         let mut kernel_buf = alloc::vec![0u8; len_usize];
 
@@ -91,7 +124,7 @@ pub fn sys_recvfrom(
                     socket.try_recvmsg(&mut kernel_buf)?
                 };
                 log::info!("[sys_recvfrom] Datagram try_recvmsg returned {} bytes", ret);
-                // 注意这里是 >= 0，因为 UDP 允许发送 0 字节的空包
+                // `ret >= 0` 而非 `ret > 0`：UDP 允许发送 0 字节的数据报（空 payload）。
                 if ret >= 0 && src_addr != 0 {
                     if let Some(ep) = src_ep {
                         let _ = ep.fill_sockaddr(src_addr, addrlen);
@@ -99,7 +132,10 @@ pub fn sys_recvfrom(
                 }
                 Ok(ret)
             }
-            _ => todo!(),
+            // TODO(socket-type-recv): unknown socket type in recvfrom fallback —
+            // should return `-ESOCKTNOSUPPORT` once all socket types are covered.
+            // Exit condition: `Socket::alloc()` only produces known types (Stream/Datagram/Raw).
+            _ => Err(SyscallErr::EOPNOTSUPP),
         };
         if let Some(wait_queue) = socket.recv_wait_queue() {
             if is_nonblock {

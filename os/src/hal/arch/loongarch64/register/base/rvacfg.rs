@@ -1,3 +1,7 @@
+//! `RVACFG`：缩减虚拟地址配置寄存器。
+//!
+//! 该 CSR 描述当前实现裁剪虚拟地址位宽的方式，影响高位地址合法性判断。
+
 use core::fmt::Debug;
 
 impl_define_csr!(RVACfg, "Reduced Virtual Address Configuration\n\

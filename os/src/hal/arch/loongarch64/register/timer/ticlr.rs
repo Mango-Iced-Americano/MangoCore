@@ -1,3 +1,7 @@
+//! `TICLR`：定时器中断清除寄存器。
+//!
+//! 时钟中断处理路径通过写该 CSR 清除 timer interrupt pending 状态。
+
 use bit_field::BitField;
 impl_define_csr!(TIClr,"Timer Interrupt Clearing \n\
                         The software clears the timed interrupt signal set by the timer by writing 1 to bit 0 of this register.");

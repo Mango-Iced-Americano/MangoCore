@@ -1,3 +1,7 @@
+//! LoongArch64 MMIO 寄存器包装宏。
+//!
+//! 这些宏生成带 volatile read/write 的内存映射寄存器类型。
+
 macro_rules! impl_define_mem_reg {
     ($mem_reg_ident:ident,$mem_reg_addr:ident,$doc:expr) => {
         #[doc = $doc]
@@ -63,6 +67,9 @@ macro_rules! impl_read_mem_reg {
             #[allow(unused)]
             pub fn read(base: usize) -> $mem_reg_ident {
                 $mem_reg_ident {
+                    // Safety: generated MMIO register types are only emitted
+                    // for platform-defined register addresses, and volatile
+                    // read preserves the hardware access side effect.
                     bits: unsafe { (($mem_reg_addr as *mut u32).read_volatile()) },
                 }
             }
@@ -76,6 +83,9 @@ macro_rules! impl_write_mem_reg {
             #[inline(always)]
             #[allow(unused)]
             pub fn write(&mut self) -> &mut Self {
+                // Safety: generated MMIO register types are only emitted for
+                // platform-defined register addresses, and volatile write
+                // preserves the hardware access side effect.
                 unsafe {
                     ($mem_reg_addr as *mut u32).write_volatile(self.bits);
                 }

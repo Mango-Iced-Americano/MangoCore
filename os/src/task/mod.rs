@@ -1,3 +1,15 @@
+//! 任务、进程和调度子系统入口。
+//!
+//! 统一导出 TCB/PCB、调度队列、PID/TID、信号、namespace、sleep、timer、
+//! WaitQueue 和当前任务访问接口。MangoCore 当前为单核抢占式调度，任务切换
+//! 通过架构相关的 `__switch` 汇编完成。
+//!
+//! # Locking
+//!
+//! 阻塞路径必须先把任务状态和等待队列状态提交，再释放调用方传入的锁，
+//! 以免在“条件检查”和“睡眠入队”之间丢失唤醒。信号检查也必须在释放
+//! `TaskControlBlockInner` 锁后执行。
+
 mod completion;
 mod context;
 mod elf;
@@ -71,6 +83,12 @@ pub use task::{
 
 pub use self::processor::PROCESSOR;
 #[allow(unused)]
+/// 在当前处理器已有运行任务时主动让出 CPU。
+///
+/// # Semantics
+///
+/// 若当前处理器处于空闲态则不做任何事；否则将当前任务重新放回 ready
+/// 队列并切回调度器。
 pub fn try_yield() {
     let lock = PROCESSOR.lock();
     let mut do_suspend = false;
@@ -82,6 +100,12 @@ pub fn try_yield() {
         suspend_current_and_run_next()
     }
 }
+/// 将当前任务置为 `Ready` 并切回调度器。
+///
+/// # Locking
+///
+/// 只在持有当前任务 inner 锁期间修改任务状态和调度时间统计，入队前释放
+/// 该锁，避免调度器队列操作和任务内部锁形成反向锁序。
 pub fn suspend_current_and_run_next() {
     // There must be an application running.
     let task = take_current_task().unwrap();
@@ -101,6 +125,12 @@ pub fn suspend_current_and_run_next() {
     schedule(task_cx_ptr);
 }
 
+/// 将当前任务置为 `Interruptible` 并切回调度器。
+///
+/// # Semantics
+///
+/// 当前任务进入 interruptible 队列，不再被 ready 队列选中，直到被唤醒或
+/// 超时路径重新置为 ready。
 pub(crate) fn block_current_and_run_next() {
     // There must be an application running.
     let task = take_current_task().unwrap();
@@ -123,6 +153,11 @@ pub(crate) fn block_current_and_run_next() {
 /// 先把当前任务放入 interruptible 队列，再执行一次调用方提供的阻塞条件检查。
 /// 这用于信号等待这类路径，避免信号在“检查 pending”和“进入睡眠队列”
 /// 之间到达时丢失唤醒。
+///
+/// # Locking
+///
+/// `should_block` 在任务已进入 interruptible 队列后执行。闭包内部不得持有
+/// 调度器队列锁再获取当前任务 inner 锁。
 pub(crate) fn block_current_and_run_next_checked(
     should_block: impl FnOnce(&Arc<TaskControlBlock>) -> bool,
 ) {
@@ -146,9 +181,12 @@ pub(crate) fn block_current_and_run_next_checked(
     schedule(task_cx_ptr);
 }
 
-// 带释放锁的阻塞调度，确保任务真正进入 interruptible_queue 后再丢锁，
-// 避免在丢锁到睡眠之间丢失唤醒。
-// 注意不要重复丢锁。
+/// 带释放锁的阻塞调度。
+///
+/// # Locking
+///
+/// 当前任务先进入 interruptible 队列，再释放调用方传入的锁，最后切回调度器。
+/// 这保证唤醒方不会在“释放锁”和“睡眠入队”之间丢失唤醒。
 pub(crate) fn block_current_and_run_next_with_lock<T>(lock: MutexGuard<'_, T>) {
     // There must be an application running.
     let task = take_current_task().unwrap();
@@ -170,8 +208,12 @@ pub(crate) fn block_current_and_run_next_with_lock<T>(lock: MutexGuard<'_, T>) {
     schedule(task_cx_ptr);
 }
 
-// 带释放锁和阻塞条件复查的调度入口。
-// WaitQueue 使用它保证“入队 -> 条件复查 -> 睡眠”之间不会丢失唤醒。
+/// 带释放锁和阻塞条件复查的调度入口。
+///
+/// # Semantics
+///
+/// WaitQueue 使用该入口保证“入队 -> 条件复查 -> 睡眠”的顺序。如果复查时
+/// 条件已经满足，会把任务从 interruptible 状态恢复为 ready。
 pub(crate) fn block_current_and_run_next_with_lock_checked<T>(
     lock: MutexGuard<'_, T>,
     should_block: impl FnOnce(&Arc<TaskControlBlock>) -> bool,
@@ -207,6 +249,12 @@ fn do_exit(task: &Arc<TaskControlBlock>, exit_code: u32) {
     }
 }
 
+/// 退出当前线程并切回调度器。
+///
+/// # Semantics
+///
+/// 当前任务会进入 zombie 队列；函数不返回。因为代码仍运行在当前任务的内核栈
+/// 上，最后一个 `Arc<TaskControlBlock>` 必须延迟到切回 idle 后释放。
 pub fn exit_current_and_run_next(exit_code: u32) -> ! {
     let task = take_current_task().unwrap();
     do_exit(&task, exit_code);
@@ -217,6 +265,12 @@ pub fn exit_current_and_run_next(exit_code: u32) -> ! {
     panic!("Unreachable");
 }
 
+/// 请求整个线程组退出，并退出当前线程。
+///
+/// # Semantics
+///
+/// 其他线程先从调度队列移除并释放线程级资源，当前线程最后进入 zombie 队列。
+/// 函数不返回，且不能让任何本地 `Arc` 跨过最终的 `schedule()`。
 pub fn exit_group_and_run_next(exit_code: u32) -> ! {
     let task = take_current_task().unwrap();
 
@@ -246,6 +300,9 @@ pub fn exit_group_and_run_next(exit_code: u32) -> ! {
 }
 
 lazy_static! {
+    /// 启动阶段创建的 init 进程。
+    ///
+    /// 优先加载 `/init`，缺失时兼容传统镜像里的 `/initproc`。
     pub static ref INITPROC: Arc<TaskControlBlock> = {
         // 优先使用 /init（initramfs 模式），fallback 到 /initproc（传统模式）
         let inode = vfs_lookup_absolute("/init")
@@ -256,6 +313,7 @@ lazy_static! {
     };
 }
 
+/// 将 init 进程加入 ready 队列。
 pub fn add_initproc() {
     add_task(INITPROC.clone());
 }

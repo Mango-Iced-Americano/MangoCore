@@ -177,7 +177,9 @@ impl Drop for FatInode {
                     .unwrap_or(0),
             );
             // Modify time
-            // todo!
+            // TODO(fat32-inode-drop): Update modification time (mtime/atime)
+            // before writing the directory entry back to disk.
+            // Exit condition: `short_dir_ent` reflects the correct timestamp.
             log::debug!("[Inode drop]: new_ent: {:?}", short_dir_ent);
             // Write back
             parent_dir
@@ -187,17 +189,18 @@ impl Drop for FatInode {
     }
 }
 
-/// 构造函数
+/// FAT32 inode 的构造器。
+///
+/// 初始化 inode 的各项元数据（`fst_clus`、`file_type`、`size`、`parent_dir`
+/// 等），调用 `init_self_weak()` 建立内部弱引用链，对目录类型自动设置
+/// `set_hint()`。`fst_clus: 0` 表示尚未分配数据簇（写入时按需分配）。
 impl FatInode {
-    /// Inode 的构造函数
     /// # 参数
-    /// + `fst_clus`: 文件的第一个簇
-    /// + `file_type`: 文件类型
-    /// + `size`: NOTE: the `size` field should be set to `None` for a directory
-    /// + `parent_dir`: 父目录
-    /// + `fs`: 文件系统实例
+    /// + `fst_clus`: 文件的第一个簇。`0` 表示尚未分配簇（用于新创建的空文件）。
+    /// + `size`: 对于目录应设为 `None`（自动计算为 `clus_list.len() * clus_size`）。
+    /// + `parent_dir`: 父目录的 inode 编号；`None` 仅允许对根 inode 使用。
     /// # 返回值
-    /// 指向inode的指针
+    /// 新创建的 `Arc<FatInode>`。
     pub fn new(
         fst_clus: u32,
         file_type: DiskInodeType,

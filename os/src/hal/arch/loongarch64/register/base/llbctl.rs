@@ -1,3 +1,7 @@
+//! `LLBCTL`：LLBit 控制寄存器。
+//!
+//! 该 CSR 暴露 load-linked/store-conditional 序列使用的 `LLBit` 状态和清除控制。
+
 use bit_field::BitField;
 impl_define_csr!(
     LLBCtl,

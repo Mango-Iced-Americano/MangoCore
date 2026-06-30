@@ -1,6 +1,6 @@
 //! FileSystem trait — 具体文件系统的抽象接口
 //!
-//! 对标 DragonOS `kernel/src/filesystem/vfs/mod.rs` 中的 `FileSystem` trait。
+//! 参考 DragonOS `kernel/src/filesystem/vfs/mod.rs` 中的 `FileSystem` trait 设计。
 //! 每个具体的文件系统实现（ext4、fat32、tmpfs、devfs 等）都必须实现此 trait。
 
 use alloc::sync::Arc;
@@ -80,19 +80,34 @@ pub enum FsPermissionPolicy {
 
 /// FileSystem trait — 所有具体文件系统都必须实现
 ///
-/// 注意：这是一个精简版，对标 DragonOS 但去掉了我们暂时不需要的功能
-/// （如 `fault`、`map_pages`、`permission_policy` 等高级特性）。
+/// 参考 DragonOS `kernel/src/filesystem/vfs/mod.rs` 中的 `FileSystem` trait 设计。
+///
+/// # Limitations
+///
+/// 相比 DragonOS 参考实现，以下高级特性未支持：
+/// - `fault` / `map_pages`：VMA 反向映射和原地缺页处理 —— 当前内核仅使用
+///   `PageCache` 驱动的缺页方式，不需要 inode 级别的 `fault` 回调。
+///   Exit condition: 引入 DAX 或 GPU 直接映射等需要 inode 级别 fault 处理的场景。
+/// - `permission_policy` 配置化：权限检查固定使用标准 Unix DAC（
+///   `FsPermissionPolicy::Dac`）。`Remote` 变体预留用于未来的 FUSE 支持。
+/// - 异步 I/O 和 `O_DIRECT` 标志穿透 —— 当前所有 I/O 均经 `PageCache`，
+///   不直接操作块设备。
 pub trait FileSystem: Any + Send + Sync + Debug {
-    /// 获取文件系统的根 inode
+    /// 返回文件系统的根 `IndexNode`。
+    ///
+    /// 该 inode 的生命周期与文件系统挂载一致，多次调用返回同一个 `Arc`。
     fn root_inode(&self) -> Arc<dyn IndexNode>;
 
-    /// 获取文件系统信息
+    /// 返回文件系统的静态信息（块设备 ID、最大文件名长度、支持的特性列表）。
     fn info(&self) -> FsInfo;
 
-    /// 获取文件系统的名称（如 "ext4"、"fat32"）
+    /// 返回文件系统类型名称（如 `"ext4"`、`"fat32"`），用于日志和诊断。
     fn name(&self) -> &str;
 
-    /// 获取超级块信息
+    /// 返回文件系统的超级块信息（用于 `statfs`）。
+    ///
+    /// 默认实现返回 `SuperBlock::default()`（字段全为零，块大小为 4096）。
+    /// 具体文件系统应覆盖此方法，从磁盘超级块填充真实值。
     fn super_block(&self) -> SuperBlock {
         SuperBlock::default()
     }

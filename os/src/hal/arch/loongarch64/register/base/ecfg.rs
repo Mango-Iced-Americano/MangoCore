@@ -1,3 +1,7 @@
+//! `ECFG`：例外与中断配置寄存器。
+//!
+//! 该 CSR 控制局部中断使能位和向量入口间距，是中断屏蔽和 trap entry 布局的配置来源。
+
 use core::{convert::TryInto, fmt::Debug};
 
 use bit_field::BitField;

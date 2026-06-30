@@ -1,3 +1,18 @@
+//! 进程地址空间管理。
+//!
+//! `AddressSpace` 组合架构页表、用户 VMA 集合、堆 break、mlock 统计以及
+//! ELF/clone/mmap/fault-in 等入口。它是进程级内存状态，`CLONE_VM` 线程共享同一个实例。
+//!
+//! # Semantics
+//!
+//! 用户页通常懒分配，真正的物理页安装发生在 page fault 或显式 fault-in 路径。
+//! 所有 PTE 修改通过 `Vma`/`VmaSet`/`UserMapper` 进入页表层，由底层负责必要的 TLB 刷新。
+//!
+//! # Locking
+//!
+//! 调用者通常通过进程 `vm()` 锁持有 `AddressSpace` 的可变访问权。执行可能分配或回收
+//! 内存的路径时，不应同时持有文件系统 inode 锁或 scheduler 内部锁。
+
 use super::mapper::translate_page;
 use super::page_table::{FaultAccess, PageTable, UserAccess};
 use super::user_mapper::UserMapper;
@@ -1041,6 +1056,8 @@ impl<T: PageTable> AddressSpace<T> {
             .filter(|area| !area.vm_is_user())
             .ok_or(crate::syscall::errno::EINVAL)?;
         let area = Vma::from_another(trap_cx_area);
+        // Safety: `trap_cx` 是调用方传入的有效 `TrapContext` 引用；这里仅把它的
+        // 内存表示临时视为只读字节切片，用于复制到新地址空间的 trap context 页。
         let trap_cx_data = unsafe {
             core::slice::from_raw_parts(
                 (trap_cx as *const TrapContext).cast::<u8>(),
@@ -1314,6 +1331,8 @@ impl<T: PageTable> AddressSpace<T> {
             if bytes == 0 {
                 return Ok(());
             }
+            // Safety: `src` 是有效的 `[U]` 切片，`U: Copy` 且 `bytes` 已用 checked_mul
+            // 计算，转换后的字节切片只在当前调用中只读使用。
             let src = unsafe { core::slice::from_raw_parts(src.as_ptr() as *const u8, bytes) };
             write_user_bytes(page_table, dst, src)
         }

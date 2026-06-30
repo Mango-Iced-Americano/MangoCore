@@ -21,19 +21,30 @@ use crate::task::NetNamespace;
 // Flags (re-exported for compatibility)
 // ---------------------------------------------------------------------------
 
+/// 设备已启用（administratively up）。
 pub const IFF_UP: u32 = 0x1;
+/// 广播介质接口。
 pub const IFF_BROADCAST: u32 = 0x2;
+/// 回环接口（`lo`）。
 pub const IFF_LOOPBACK: u32 = 0x8;
+/// 设备已就绪（驱动程序加载、链路可用）。
 pub const IFF_RUNNING: u32 = 0x40;
+/// 禁用 ARP（点对点链路等）。
 pub const IFF_NOARP: u32 = 0x80;
+/// 多播介质接口。
 pub const IFF_MULTICAST: u32 = 0x1000;
 
+/// 设备操作状态：已就绪（对应 Linux `IF_OPER_UP` = 6）。
 pub const IF_OPER_UP: u8 = 6;
 
 // ---------------------------------------------------------------------------
 // DeviceEntry — thin wrapper around Arc<dyn Iface>
 // ---------------------------------------------------------------------------
 
+/// 设备注册表中的条目包装，包含 `Arc<dyn Iface>` 和对应的 `ifindex`。
+///
+/// 用于 `find_by_name()` / `find_by_index()` / `default_iface()` 等查询接口的
+/// 返回类型，将 `Iface` trait object 与 ifindex 打包在一起。
 #[derive(Clone)]
 pub struct DeviceEntry {
     pub ifindex: u32,
@@ -67,6 +78,7 @@ lazy_static! {
 
 static NEXT_IFINDEX: AtomicU32 = AtomicU32::new(3);
 
+/// 分配下一个全局唯一的 `ifindex`（`Relaxed` 单调递增，跨所有网络命名空间共享）。
 pub fn next_ifindex() -> u32 {
     NEXT_IFINDEX.fetch_add(1, Ordering::Relaxed)
 }
@@ -75,6 +87,7 @@ pub fn next_ifindex() -> u32 {
 // current_netns() helper
 // ---------------------------------------------------------------------------
 
+/// 返回当前任务所属的网络命名空间。无当前任务时回退到初始网络命名空间。
 pub fn current_netns() -> Arc<NetNamespace> {
     match crate::task::current_task() {
         Some(t) => t.process.net(),
@@ -218,14 +231,21 @@ impl Iface for NetDeviceEntry {
     }
 
     fn common(&self) -> &IfaceCommon {
-        // TODO (Wave 2): implement properly when veth/loopback concrete types
-        // are created. NetDeviceEntry is never polled via this path.
+        // TODO(net-core-refactor): 实现 `common()` 返回合法的 `IfaceCommon` 引用。
+        // 当前 `NetDeviceEntry` 无 `IfaceCommon` 字段自身；实际协议处理由
+        // `NetInterface` 的 per-stack Iface 完成。需要拆分为注册条目（元数据）
+        // 和协议栈条目（Iface trait 真正实现者）。
+        // Exit condition: 所有 `Iface` 实现者都能在本方法中返回有效的 `&IfaceCommon`，
+        // 不含任何 `panic!` 或 `unimplemented!`。
         panic!("NetDeviceEntry::common() — not supported (use NetInterface stacks)")
     }
 
     fn as_smoltcp_device(&self) -> &dyn SmoltcpDeviceAccess {
-        // TODO (Wave 2): implement properly when veth/loopback concrete types
-        // are created. NetDeviceEntry is never polled via this path.
+        // TODO(net-core-refactor): 移除 `NetDeviceEntry` 中的 dummy smoltcp 上下文，
+        // 让每条 device stack 拥有自己的 smoltcp 设备引用。
+        // `NetDeviceEntry` 是纯注册条目，不应实现 smoltcp 协议操作。
+        // Exit condition: 所有需要网卡 I/O 的 Iface 都能在此路径返回合法的
+        // `SmoltcpDeviceAccess` 引用，`NetDeviceEntry` 自身不再 panic。
         panic!("NetDeviceEntry::as_smoltcp_device() — not supported (use NetInterface stacks)")
     }
 }

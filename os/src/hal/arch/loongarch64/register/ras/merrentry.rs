@@ -1,3 +1,7 @@
+//! `MERRENTRY`：machine error 例外入口基址寄存器。
+//!
+//! machine error 发生时硬件跳转到该 CSR 指定的专用入口，区别于普通 `EENTRY`。
+
 use crate::config::PALEN;
 use bit_field::BitField;
 impl_define_csr!(MErrEntry,"Machine Error Exception Entry Base Address (MERRENTRY)\n\

@@ -1,3 +1,7 @@
+//! `PWCH`：高半地址空间页表遍历控制寄存器。
+//!
+//! 该 CSR 描述硬件页表遍历在高半地址空间使用的各级索引宽度和偏移。
+
 use core::fmt::Debug;
 
 use bit_field::BitField;

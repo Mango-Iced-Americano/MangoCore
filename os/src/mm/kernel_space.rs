@@ -1,3 +1,13 @@
+//! 内核地址空间和内核动态映射。
+//!
+//! 启动时本模块建立内核代码、只读数据、数据段、BSS、物理内存 direct map、
+//! MMIO 和 trampoline 的映射；运行时还负责内核栈与内核程序页的 framed 映射。
+//!
+//! # TLB
+//!
+//! PTE 修改通过 `KernelMapper` 进入页表实现。新增直接页表操作时必须保持架构层
+//! 的 TLB 刷新契约。
+
 use super::kernel_mapper::KernelMapper;
 use super::{
     frame_alloc, FrameTracker, MapPermission, MemoryError, PageTable, PhysAddr, PhysPageNum, VirtAddr,

@@ -1,7 +1,18 @@
 //! Unix 域数据报 Socket 实现
 //!
 //! 参照 DragonOS `kernel/src/net/socket/unix/datagram/mod.rs` 设计。
-//! 当前为骨架阶段，核心逻辑用 `todo!()` 占位。
+//!
+//! # Implementation Status
+//!
+//! `bind`（Path/Abstract/Unnamed）、`connect`、`send_to_bound`（通过 `BIND_TABLE`
+//! 查找对端并推入 `recv_queue`）、`try_recv`/`try_recvmsg`（含源地址）、
+//! `try_send`/`try_sendmsg`、epoll 事件通知已实现。
+//!
+//! # Limitations
+//!
+//! - `SO_RCVBUF`/`SO_SNDBUF` 未生效（`set_recv_buf_size` / `set_send_buf_size` 空实现）
+//! - `shutdown` 未实现
+//! - `listen`/`accept` 不支持（数据报类型无连接语义）
 
 use crate::net::socket::unix::{UnixEndpoint, UnixEndpointBound};
 use crate::net::syscall::common::MsgFlags;
@@ -170,8 +181,12 @@ impl Inner {
         if self.recv_queue.len() >= self.recv_queue_capacity {
             return None;
         }
-        // 发送到已 connect 的对端，直接将消息推入自己的接收队列
-        // 真正的实现需要查找对端 socket 并将消息推入对端的 recv_queue
+        // TODO(unix-dgram-send): `Inner::try_send` 已废弃——实际发送路径是
+        // `UnixDatagramSocket::send_to_bound()`（通过 `BIND_TABLE` 查找对端并
+        // 将消息推入对端 `recv_queue`）。此方法应删除或重构为 `Inner` 级别的
+        // send buffer 管理。
+        // Exit condition: 所有发送路径使用 `send_to_bound`（`try_send` /
+        // `try_sendmsg` 均已委托），`Inner::try_send` 不再存在。
         todo!("implement peer lookup for datagram send")
     }
 
@@ -206,7 +221,6 @@ impl core::fmt::Debug for UnixDatagramSocket {
 }
 
 impl UnixDatagramSocket {
-    /// 创建一个新 Unix 数据报 Socket
     pub fn new(is_nonblock: bool) -> Arc<Self> {
         let socket = Arc::new(Self {
             inner: Mutex::new(Inner::new()),
@@ -265,6 +279,28 @@ impl UnixDatagramSocket {
 }
 
 impl Socket for UnixDatagramSocket {
+    /// 将 Unix 域数据报 socket 绑定到本地地址。
+    ///
+    /// # Semantics
+    ///
+    /// 解析 `UnixEndpoint` 变体：
+    /// - `Unnamed`：自动分配地址，存储到 `self.inner.local_addr`。
+    /// - `Abstract`/`Path`：通过 `self.self_ref` 获取 `Arc<Self>`，注册到
+    ///   全局 `BIND_TABLE`（`AbstractTable` 或 `path_table`），供其他 socket
+    ///   的 `send_to_bound()` 查找。
+    ///
+    /// 重复绑定的 socket 返回 `EINVAL`。
+    ///
+    /// # Locking
+    ///
+    /// 获取 `self.inner` 锁和 `self.self_ref` 锁。`BIND_TABLE.register()` 获取
+    /// 内部互斥锁（独立于 socket 自身锁）。
+    ///
+    /// # Errors
+    ///
+    /// - `EAFNOSUPPORT`：`endpoint` 不是 `Endpoint::Unix`
+    /// - `EINVAL`：socket 已经绑定
+    /// - `EIO`：无法从 `self_ref` 上取 `Weak` 引用（理论上不会发生）
     fn bind(&self, endpoint: &Endpoint) -> SyscallRet {
         let unix_ep = match endpoint {
             Endpoint::Unix(ep) => ep,
@@ -313,6 +349,22 @@ impl Socket for UnixDatagramSocket {
         Err(SyscallErr::EOPNOTSUPP)
     }
 
+    /// 设置 Unix 域数据报 socket 的远程目标地址。
+    ///
+    /// # Semantics
+    ///
+    /// 存储 `peer_addr` 到 `self.inner`。对 `Abstract`/`Path` 变体，先通过
+    /// `BIND_TABLE.lookup()` 验证目标 socket 已注册，否则返回 `ECONNREFUSED`。
+    /// `Unnamed` 连接不需要验证。
+    ///
+    /// # Locking
+    ///
+    /// 获取 `self.inner` 锁。`BIND_TABLE.lookup()` 获取内部互斥锁。
+    ///
+    /// # Errors
+    ///
+    /// - `EAFNOSUPPORT`：`endpoint` 不是 `Endpoint::Unix`
+    /// - `ECONNREFUSED`：目标地址不存在于绑定表中
     fn connect(&self, endpoint: &Endpoint) -> SyscallRet {
         let unix_ep = match endpoint {
             Endpoint::Unix(ep) => ep,
@@ -369,11 +421,17 @@ impl Socket for UnixDatagramSocket {
     }
 
     fn set_recv_buf_size(&self, _size: usize) {
-        // TODO: 实现缓冲区大小调整
+        // TODO(unix-datagram-buf): 实现 `Inner` 级别的缓冲区大小调整，包括动态重分配
+        // `recv_queue_capacity` 和底层 `DEFAULT_BUF_SIZE` 的联动。
+        // Exit condition: `sys_setsockopt(SO_RCVBUF)` 对此 socket 类型生效，
+        // 且 `sys_getsockopt(SO_RCVBUF)` 返回设置后的值。
     }
 
     fn set_send_buf_size(&self, _size: usize) {
-        // TODO: 实现缓冲区大小调整
+        // TODO(unix-datagram-buf): 实现 `Inner` 级别的发送缓冲区大小调整，
+        // 包括动态重分配 `recv_queue_capacity` 和底层 `DEFAULT_BUF_SIZE` 的联动。
+        // Exit condition: `sys_setsockopt(SO_SNDBUF)` 对此 socket 类型生效，
+        // 且 `sys_getsockopt(SO_SNDBUF)` 返回设置后的值。
     }
 
     fn local_endpoint(&self) -> Option<Endpoint> {
@@ -393,15 +451,48 @@ impl Socket for UnixDatagramSocket {
     }
 
     fn shutdown(&self, _how: u32) -> GeneralRet<()> {
-        // TODO: 实现 shutdown
+        // TODO(unix-datagram-shutdown): 实现 `SHUT_RD`/`SHUT_WR`/`SHUT_RDWR` 语义。
+        // 当前 unix datagram 使用内存内 `recv_queue` 无连接状态机，shutdown 至少需要
+        // 标记"不再接收"和"不再发送"并通知 peer。
+        // Exit condition: `sys_shutdown(sockfd, SHUT_RD/SHUT_WR)` 返回 `Ok(0)`,
+        // 且对方 `write()`→`EPIPE` 或后续 `sendto()`→`ECONNREFUSED`。
         Err(SyscallErr::EOPNOTSUPP)
     }
 
+    /// 非阻塞尝试接收 Unix 域数据报（不 poll、不睡眠）。
+    ///
+    /// # Semantics
+    ///
+    /// 从 `self.inner.recv_queue` 弹出一条消息，复制最多 `buf.len()` 字节，
+    /// 超出数据静默截断。
+    ///
+    /// **阻塞模型**：`try_xxx` 模式——仅消费已有数据，队列为空时返回 `EAGAIN`。
+    /// 与 `try_recvmsg()` 的区别：不返回源地址。
+    ///
+    /// # Errors
+    ///
+    /// - `EAGAIN`：接收队列为空
     fn try_recv(&self, buf: &mut [u8]) -> Result<isize, SyscallErr> {
         let mut inner = self.inner.lock();
         inner.try_recv(buf).ok_or(SyscallErr::EAGAIN)
     }
 
+    /// 非阻塞尝试发送到已连接的对端（不 poll、不睡眠）。
+    ///
+    /// # Semantics
+    ///
+    /// 从 `self.inner.peer_addr` 获取目标地址（必须通过 `connect()` 设置，
+    /// 否则 `ENOTCONN`），然后通过 `send_to_bound()` 将消息推送到对端的
+    /// `recv_queue` 并通知其 `recv_waiters`。
+    ///
+    /// **阻塞模型**：`try_xxx` 模式——不 poll、不睡眠。对端 `recv_queue` 满时
+    /// 返回 `EAGAIN`（发送方通过 `send_wait_queue` 阻塞等待）。
+    ///
+    /// # Errors
+    ///
+    /// - `ENOTCONN`：未 `connect` 即发送
+    /// - `ECONNREFUSED`：peername 不再在绑定表中
+    /// - `EAGAIN`：对端 `recv_queue` 已满
     fn try_send(&self, buf: &[u8], _flags: MsgFlags) -> Result<isize, SyscallErr> {
         let peer_addr = self
             .inner
@@ -412,6 +503,23 @@ impl Socket for UnixDatagramSocket {
         self.send_to_bound(peer_addr, buf)
     }
 
+    /// 非阻塞尝试发送 Unix 域数据报到指定目标（不 poll、不睡眠）。
+    ///
+    /// # Semantics
+    ///
+    /// 支持显式 `dest` 参数：
+    /// - `Some(Endpoint::Unix(UnixEndpoint::Path/Abstract))`：发送到该地址
+    /// - `None`：回退到 `self.try_send()`（使用 `peer_addr`）
+    ///
+    /// 目标地址通过 `BIND_TABLE.lookup()` 查找 peer socket，然后将消息推送到
+    /// 对端的 `recv_queue`。若 peer 接收队列满则返回 `EAGAIN`。
+    ///
+    /// # Errors
+    ///
+    /// - `EINVAL`：`Unnamed` 目标（无法路由）
+    /// - `EAFNOSUPPORT`：非 Unix 端点
+    /// - `ECONNREFUSED`：目标不在绑定表中
+    /// - `EAGAIN`：对端接收队列满
     fn try_sendmsg(
         &self,
         buf: &[u8],

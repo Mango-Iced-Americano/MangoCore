@@ -1,3 +1,7 @@
+//! LoongArch64 平台内存布局和内核常量。
+//!
+//! 定义 QEMU/2K1000 使用的用户地址空间、内核栈窗口、MMIO、页大小和时钟参数。
+
 // Sizes
 /// QEMU la64 exposes high memory as memory@80000000 with size 0x30000000.
 pub const MEMORY_SIZE: usize = 0x3000_0000;
@@ -118,6 +122,8 @@ macro_rules! def_cpu_cfg {
             pub fn read() -> Self {
                 let mut bits;
                 bits = $num;
+                // Safety: `cpucfg` only reads the selected CPU configuration
+                // word into `bits`.
                 unsafe {
                     asm!("cpucfg {},{}",out(reg) bits,in(reg) bits);
                 }
@@ -165,6 +171,8 @@ macro_rules! read_tot_sec16 {
         #[inline(never)]
         fn misaligned_rd(super_block: &BPB) -> u16 {
             let ret: u16;
+            // Safety: the inline assembly performs two byte loads from a valid
+            // BPB reference and combines them without requiring aligned u16 access.
             unsafe {
                 core::arch::asm!(
                     "
@@ -191,6 +199,8 @@ macro_rules! read_root_ent_cnt {
         #[inline(never)]
         fn misaligned_rd(super_block: &BPB) -> u16 {
             let ret: u16;
+            // Safety: the inline assembly performs two byte loads from a valid
+            // BPB reference and combines them without requiring aligned u16 access.
             unsafe {
                 core::arch::asm!(
                     "
@@ -217,6 +227,8 @@ macro_rules! read_byts_per_sec {
         #[inline(never)]
         fn misaligned_rd(super_block: &BPB) -> u16 {
             let ret: u16;
+            // Safety: the inline assembly performs two byte loads from a valid
+            // BPB reference and combines them without requiring aligned u16 access.
             unsafe {
                 core::arch::asm!(
                     "
@@ -243,11 +255,16 @@ macro_rules! misaligned_wr {
 #[macro_export]
 macro_rules! copy_from_name1 {
     ($dst:expr,$name1:expr) => {{
+        // Safety: `addr_of!` obtains raw addresses without forming references
+        // to packed BPB fields.
         let mut dst = unsafe { core::ptr::addr_of!($dst[0]) as usize };
+        // Safety: same raw-address extraction contract as above.
         let mut src = unsafe { core::ptr::addr_of!($name1) as usize };
         let mut x = 0;
         // First of all, the increment should be placed after the access.
         for _ in 0..10 {
+            // Safety: callers pass BPB-compatible byte ranges of at least 10
+            // bytes; copying is byte-wise to avoid alignment requirements.
             unsafe {
                 *((dst) as *mut u8) = *((src) as *const u8);
             }
@@ -261,10 +278,15 @@ macro_rules! copy_from_name1 {
 macro_rules! copy_to_name1 {
     ($name1:expr,$src:expr) => {{
         let k: [u16; 5] = $src;
+        // Safety: `addr_of!` obtains raw addresses without forming references
+        // to packed BPB fields.
         let mut dst = unsafe { core::ptr::addr_of!($name1) as usize };
+        // Safety: local `k` is valid for the byte-wise copy below.
         let mut src = unsafe { core::ptr::addr_of!(k) as usize };
         // First of all, the increment should be placed after the access.
         for _ in 0..10 {
+            // Safety: callers pass BPB-compatible byte ranges of at least 10
+            // bytes; copying is byte-wise to avoid alignment requirements.
             unsafe {
                 *((dst) as *mut u8) = *((src) as *const u8);
             }

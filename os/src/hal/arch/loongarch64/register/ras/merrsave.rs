@@ -1,3 +1,7 @@
+//! `MERRSAVE`：machine error 例外临时保存寄存器。
+//!
+//! machine error handler 可用该 CSR 暂存一个通用值，避免依赖普通异常保存区。
+
 impl_define_csr!(MErrSave, "Machine Error Exception Data Save Register\n\
                             This register is used to store data temporarily for the system software.\n\
                             Each dava save register can hold the data of one general-purpose register.\n\

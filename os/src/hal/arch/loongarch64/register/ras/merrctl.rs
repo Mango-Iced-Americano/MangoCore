@@ -1,3 +1,7 @@
+//! `MERRCTL`：machine error 控制与状态寄存器。
+//!
+//! 该 CSR 标记当前是否处于 machine error 上下文，并保存进入异常前的关键模式字段。
+
 use bit_field::BitField;
 impl_define_csr!(MErrCtl, "Machine Error Controller\n\
                            Since the timing of machine error exceptions cannot be predicted and controlled by the software,\n\
@@ -69,8 +73,10 @@ impl MErrCtl {
         MachineError::from(code)
     }
 }
+/// LoongArch64 machine error 的简化分类。
 #[derive(Debug, Clone, Copy)]
 pub enum MachineError {
+    /// Cache check error。
     CacheCheckError,
 }
 

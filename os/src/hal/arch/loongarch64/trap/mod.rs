@@ -1,3 +1,8 @@
+//! LoongArch64 trap 分发和返回路径。
+//!
+//! 处理 syscall、TLB refill/page fault、设备中断、timer interrupt、未对齐访存
+//! 和返回用户态前的信号/调度收尾。
+
 mod context;
 mod mem_access;
 use self::context::GeneralRegs;

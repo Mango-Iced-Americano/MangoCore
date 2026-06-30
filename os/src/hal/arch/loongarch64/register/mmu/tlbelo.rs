@@ -1,3 +1,10 @@
+//! `TLBELO0`/`TLBELO1`：普通 TLB 表项低位寄存器。
+//!
+//! 这两个 CSR 描述偶/奇页的物理页号、权限、缓存属性和全局位，用于 `TLBWR`/`TLBFILL`。
+
+/// TLB 低位表项的公共字段访问接口。
+///
+/// 普通 TLB 表项和 TLB refill 表项共享低位字段布局，因此共用该 trait。
 pub trait TLBEL: BitField {
     // 页表项的有效位（V）
     fn valid(&self) -> bool {

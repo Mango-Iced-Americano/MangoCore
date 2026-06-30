@@ -431,6 +431,34 @@ fn scan_pselect(
 /// * A value of 0 indicates that the call timed out and no file descriptors were ready.
 /// * On error, -1 is returned, and errno is set appropriately.
 /// * The observed event is written back to the array, with others cleared.
+/// ppoll 系统调用 — 等待一组 fd 上的 I/O 事件。
+///
+/// # Semantics
+///
+/// - `fds`：`PollFd` 数组，每个条目包含要监控的 fd 和请求的事件（`POLLIN`/`POLLOUT` 等）
+/// - `nfds`：数组长度，最大 4096
+/// - `tmo_p`：超时（`TimeSpec`），NULL 表示无限等待
+/// - `sigmask`：非 NULL 时在等待期间临时替换当前任务的信号掩码，返回前恢复
+///
+/// 扫描过程：初次扫描 → 若有就绪事件立即返回 → 否则通过 `poll_wait` 注册到相关
+/// `WaitQueue` 并睡眠，条件闭包中反复扫描直到就绪或超时。
+///
+/// # Locking
+///
+/// 条件闭包中扫描 fd 表时获取 `files.lock()`。闭包内不得再次获取任何
+/// 文件描述符相关 inode 的内部锁（非重入 `TicketMutex`）。
+///
+/// # Linux Compatibility
+///
+/// 对齐 Linux 6.6 `ppoll(2)`。`poll` 事件通过 `poll_to_epoll`/`epoll_to_poll`
+/// 在内部与 epoll 事件模型双向转换。
+///
+/// # Errors
+///
+/// - `EBADF`：某个 `fd` 无效且 `POLLNVAL` 无法表达
+/// - `EFAULT`：`fds` 指针无效或写回失败
+/// - `EINTR`：被信号中断
+/// - `EINVAL`：`nfds > 4096`
 pub fn ppoll(
     fds: *mut PollFd,
     nfds: usize,
@@ -528,7 +556,8 @@ pub fn ppoll(
     done
 }
 
-// This may be unsafe since the size of bits is undefined.
+// `FdSet` is `#[repr(C)]` with a fixed `[u64; 16]` field — layout and size
+// (128 bytes / 1024 bits) are well-defined at compile time.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 /// Bitmap used by `pselect()` and `select` to indicate the event to wait for.
@@ -589,14 +618,47 @@ impl FdSet {
 impl Bytes<FdSet> for FdSet {
     fn as_bytes(&self) -> &[u8] {
         let size = core::mem::size_of::<FdSet>();
+        // Safety: `FdSet` is `#[repr(C)]` with a fixed array field, so its
+        // byte-level representation is well-defined.  The slice length equals
+        // `size_of::<FdSet>()`, covering the entire struct exactly once.
         unsafe { core::slice::from_raw_parts(self as *const _ as *const u8, size) }
     }
 
     fn as_bytes_mut(&mut self) -> &mut [u8] {
         let size = core::mem::size_of::<FdSet>();
+        // Safety: same rationale as `as_bytes`.  The mutable slice is valid and
+        // exclusive because the reference is `&mut self`.
         unsafe { core::slice::from_raw_parts_mut(self as *mut _ as *mut u8, size) }
     }
 }
+/// pselect 系统调用 — 按 fd_set 位图等待 I/O 事件。
+///
+/// # Semantics
+///
+/// - `read_fds`：等待可读的 fd 集合
+/// - `write_fds`：等待可写的 fd 集合
+/// - `exception_fds`：等待异常（带外数据等）的 fd 集合
+/// - `timeout`：超时（`TimeSpec`），NULL 表示无限等待
+/// - `sigmask`：非 NULL 时在等待期间临时替换当前任务的信号掩码，返回前恢复
+///
+/// `fd_set` 通过 1024 位位图表示 fd 0..1023。`nfds` 为最高编号 fd + 1（最大 1024）。
+///
+/// # Linux Compatibility
+///
+/// 对齐 Linux 6.6 `pselect6(2)`。内部通过 `scan_pselect` 遍历 fd 表
+/// 并委托各 fd 的 `File::poll_events()` 判断就绪状态。
+///
+/// # Limitations
+///
+/// 当前未区分异常 fd_set（`POLLPRI`/`POLLRDBAND` 等）——与普通读就绪合并处理。
+/// SIGIO 通知不支持 `pselect` 中的 fd_set 过滤。
+///
+/// # Errors
+///
+/// - `EBADF`：某个 fd 无效
+/// - `EFAULT`：fd_set 指针无效
+/// - `EINTR`：被信号中断
+/// - `EINVAL`：`nfds > 1024` 或超时参数非法
 pub fn pselect(
     nfds: usize,
     read_fds: &mut Option<FdSet>,

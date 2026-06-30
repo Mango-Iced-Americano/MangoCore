@@ -108,7 +108,9 @@ impl FileAttr {
             mtime: inode.mtime(),
             ctime: inode.ctime(),
             crtime: inode.i_crtime(),
-            // todo: chgtime, bkuptime
+            // TODO(ext4-inode-timestamps): Implement `chgtime` (change time)
+            // and `bkuptime` (backup time) fields. Exit condition: both fields
+            // are populated from the on-disk inode or set to meaningful values.
             chgtime: 0,
             bkuptime: 0,
             kind: inode.file_type(),
@@ -787,6 +789,11 @@ impl Ext4FileSystem {
                 inode_ref.inode.set_block([0u32; 15]);
             } else {
                 // 如果截断到特定大小，清零超出部分
+                // Safety: `block_ptr` is derived from `inode_ref.inode.block`,
+                // which is a valid `[u32; 15]` array (60 bytes). `new_size` and
+                // `old_size` are file sizes, not byte offsets — this zeroes the
+                // trailing extent entries in the block array. Bounds: caller
+                // guarantees `new_size < old_size <= 15` (number of u32 entries).
                 unsafe {
                     let block_ptr = inode_ref.inode.block.as_mut_ptr() as *mut u8;
                     core::ptr::write_bytes(

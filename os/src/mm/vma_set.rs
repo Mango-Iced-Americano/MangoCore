@@ -1,3 +1,13 @@
+//! 用户 VMA 集合和 mmap 空洞管理。
+//!
+//! `VmaSet` 用起始 VPN 索引所有 VMA，并维护 mmap arena 的空洞表、用户 VMA 计数和
+//! 用户映射页数缓存。它负责拆分、合并、覆盖、保护、建议和 grow-down 栈扩展。
+//!
+//! # Invariants
+//!
+//! `vmas` 中的区间必须非空且互不重叠；`mmap_holes` 必须位于 mmap arena 内并保持合并；
+//! `user_area_count`/`user_page_count` 必须只统计用户 VMA。
+
 use super::user_mapper::UserMapper;
 use super::vma::{MapFlags, MapPermission, Vma};
 use super::{MemoryError, PageTable, VirtAddr, VirtPageNum};

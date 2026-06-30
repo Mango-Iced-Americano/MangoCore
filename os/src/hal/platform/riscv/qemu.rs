@@ -1,3 +1,7 @@
+//! RISC-V QEMU virt 平台常量。
+//!
+//! 定义 QEMU virt 的时钟频率、virtio MMIO 区间和物理内存结束地址。
+
 pub const CLOCK_FREQ: usize = 12500000;
 
 pub const MMIO: &[(usize, usize)] = &[

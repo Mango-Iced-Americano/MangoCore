@@ -104,10 +104,10 @@ pub struct Linux2 {
 
 #[allow(unused)]
 impl Ext4Inode {
-    pub fn root_inode(ext4fs: &Arc<Ext4FileSystem>) -> Arc<Self> {
-        // 尝试获取根目录的Inode节点
-        let root_inode = ext4fs.get_inode_ref(ROOT_INODE);
-        // root_inode.inode.clone()
+    // TODO(ext4-root-inode): Implement root inode retrieval using the ext4 inode
+    // table lookup. Exit condition: `root_inode()` returns a valid `Arc<Ext4Inode>`
+    // with the EXT4_ROOT_INO (2) inode block.
+    pub fn root_inode(_ext4fs: &Arc<Ext4FileSystem>) -> Arc<Self> {
         todo!()
     }
 
@@ -456,41 +456,59 @@ impl Ext4Inode {
 
     pub fn root_extent_header_ref(&self) -> &Ext4ExtentHeader {
         let header_ptr = self.block.as_ptr() as *const Ext4ExtentHeader;
+        // Safety: `self.block` is `[u32; 15]` (60 bytes); the `Ext4ExtentHeader`
+        // is 12 bytes (`#[repr(C)]`), fitting within the array. The pointer is
+        // properly aligned for `u32` access and thus for `Ext4ExtentHeader`.
         unsafe { &*header_ptr }
     }
 
     pub fn root_extent_header(&self) -> Ext4ExtentHeader {
         let header_ptr = self.block.as_ptr() as *const Ext4ExtentHeader;
+        // Safety: same alignment and bounds invariant as `root_extent_header_ref`.
         unsafe { *header_ptr }
     }
 
     pub fn root_extent_header_mut(&mut self) -> &mut Ext4ExtentHeader {
         let header_ptr = self.block.as_mut_ptr() as *mut Ext4ExtentHeader;
+        // Safety: `&mut self` guarantees exclusive access; the return value does
+        // not alias with other live references into `self.block`.
         unsafe { &mut *header_ptr }
     }
 
     pub fn root_extent_mut_at(&mut self, pos: usize) -> &mut Ext4Extent {
         let header_ptr = self.block.as_mut_ptr() as *mut Ext4ExtentHeader;
+        // Safety: `Ext4Extent` (12 bytes) starts immediately after the header.
+        // `pos` must be within the extent tree capacity; caller is responsible
+        // for bounds checking.
         unsafe { &mut *(header_ptr.add(1) as *mut Ext4Extent).add(pos) }
     }
 
     pub fn root_extent_ref_at(&mut self, pos: usize) -> &Ext4Extent {
         let header_ptr = self.block.as_ptr() as *const Ext4ExtentHeader;
+        // Safety: shared reference into `self.block`; aliasing is safe for
+        // immutable borrows. Same layout invariants as `root_extent_mut_at`.
         unsafe { &*(header_ptr.add(1) as *const Ext4Extent).add(pos) }
     }
 
     pub fn root_extent_at(&mut self, pos: usize) -> Ext4Extent {
         let header_ptr = self.block.as_ptr() as *const Ext4ExtentHeader;
+        // Safety: `Ext4Extent` is `Copy` (`#[repr(C)]`); reading by value from
+        // the extent array at `pos` is safe under the same invariants.
         unsafe { *(header_ptr.add(1) as *const Ext4Extent).add(pos) }
     }
 
     pub fn root_first_index_mut(&mut self) -> &mut Ext4ExtentIndex {
         let header_ptr = self.block.as_mut_ptr() as *mut Ext4ExtentHeader;
+        // Safety: `Ext4ExtentIndex` (12 bytes, `#[repr(C)]`) starts at
+        // `header_ptr.add(1)`. Exclusive access via `&mut self`.
         unsafe { &mut *(header_ptr.add(1) as *mut Ext4ExtentIndex) }
     }
 
     pub fn extent_tree_init(&mut self) {
         let header_ptr = self.block.as_mut_ptr() as *mut Ext4ExtentHeader;
+        // Safety: `Ext4ExtentHeader` fits within `self.block` (60 bytes).
+        // Writes are exclusive via `&mut self` and all fields are properly
+        // typed and `#[repr(C)]`.
         unsafe {
             (*header_ptr).set_magic();
             (*header_ptr).set_entries_count(0);
@@ -502,11 +520,16 @@ impl Ext4Inode {
 
     /// View the 15-element block array as &[u8; 60] — used for fast symlink targets
     pub fn block_as_bytes(&self) -> &[u8; 60] {
+        // Safety: `self.block` is `[u32; 15]` (60 bytes). Reinterpreting as
+        // `[u8; 60]` is a valid bit-cast — `u32` alignment (4) is stricter
+        // than `u8` (1), and the total size matches exactly.
         unsafe { &*(self.block.as_ptr() as *const [u8; 60]) }
     }
 
     /// Mutable view of the 15-element block array as &mut [u8; 60] — for writing fast symlink targets
     pub fn block_mut_as_bytes(&mut self) -> &mut [u8; 60] {
+        // Safety: same size invariant as `block_as_bytes`. Exclusive access via
+        // `&mut self` ensures no aliasing.
         unsafe { &mut *(self.block.as_mut_ptr() as *mut [u8; 60]) }
     }
 
@@ -533,6 +556,10 @@ impl Ext4Inode {
         }
     }
     fn copy_to_slice(&self, slice: &mut [u8]) {
+        // Safety: `self` is a valid `Ext4Inode` (`#[repr(C)]`). Converting to
+        // `*const u8` and copying `0x9c` (156) bytes into `slice` is safe
+        // because `Ext4Inode` is exactly 156 bytes and `slice` is guaranteed
+        // to be at least that large by the caller (`sync_inode_to_disk`).
         unsafe {
             let inode_ptr = self as *const Ext4Inode as *const u8;
             let array_ptr = slice.as_ptr() as *mut u8;
@@ -603,10 +630,16 @@ impl Ext4Inode {
                 self.block[0]
             );
         }
-        // 【关键修改】取 Rust 结构体大小和磁盘 Inode 大小的最小值
-        // 即使结构体定义了 156 字节，如果磁盘只给每个 Inode 留了 128 字节，我们也只写前 128 字节
+        // Clamp write length: use `min(Rust struct size, on-disk inode size)`.
+        // If the on-disk inode slot is smaller than the Rust struct (e.g. 128 bytes
+        // instead of 156), only the first `on_disk_size` bytes are written to
+        // avoid corrupting the next inode slot.
         let write_len = core::cmp::min(core::mem::size_of::<Ext4Inode>(), on_disk_size);
 
+        // Safety: `self` is a valid `Ext4Inode` reference. `write_len` is bounded
+        // by `min(size_of::<Ext4Inode>(), on_disk_size)`, which cannot exceed the
+        // struct size. The resulting `&[u8]` is read-only and lives for the
+        // duration of this function.
         let data = unsafe { core::slice::from_raw_parts(self as *const _ as *const u8, write_len) };
 
         let block_id = inode_pos / block_size;
@@ -863,7 +896,6 @@ impl Ext4FileSystem {
         ext4_bmap_bit_set(data, rel_blk_idx);
 
         block_group.set_block_group_balloc_bitmap_csum(&super_block, data);
-        // todo!();
         self.store_metadata_block_dirty(block_bitmap_block as usize, data);
         super::counters::inc_counter!(super::counters::BLOCK_BITMAP_WRITE);
 
@@ -1090,7 +1122,10 @@ impl Ext4FileSystem {
             DirEntryType::EXT4_DE_FIFO => InodeFileType::S_IFIFO.bits(),
             DirEntryType::EXT4_DE_SOCK => InodeFileType::S_IFSOCK.bits(),
             _ => {
-                // FIXME: unsupported filetype
+                // FIXME(ext4-inode): 不支持的目录项文件类型回退到 S_IFREG。
+                // 遇到未知 ext4 文件类型时静默回退为普通文件，可能导致错误的行为
+                // （如无法区分 socket、FIFO 等特殊文件）。
+                // Risk: 读取此类 inode 时操作语义错误，且无错误返回路径。
                 InodeFileType::S_IFREG.bits()
             }
         }

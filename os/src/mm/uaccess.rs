@@ -1,3 +1,19 @@
+//! 用户地址访问辅助层。
+//!
+//! 本模块把用户指针转换、跨页缓冲区拆分、C 字符串读取和内核/用户拷贝统一
+//! 封装在当前任务地址空间上。所有会 fault-in 的路径都要求 `token` 属于当前
+//! 运行任务，避免跨进程地址空间访问绕过权限检查。
+//!
+//! # Errors
+//!
+//! 用户地址越界、NULL 指针、不属于当前任务的页表 token、跨页对象引用或缺页
+//! 处理失败均返回负 errno，主要为 `-EFAULT` 或 `-ENOMEM`。
+//!
+//! # Locking
+//!
+//! fault-in 会获取当前进程 `AddressSpace` 锁。调用方不得在已持有同一锁时进入
+//! 本模块的 faulting uaccess 路径。
+
 use core::{marker::PhantomData, ops::IndexMut};
 
 use super::page_table::{FaultAccess, PageTable, UserAccess};
@@ -8,7 +24,7 @@ use crate::task::current_task_ref;
 use alloc::{string::String, sync::Arc, vec::Vec};
 use spin::Mutex;
 
-// Cap a single user buffer translation to avoid kernel OOM.
+/// 单次用户缓冲区翻译上限，防止恶意长度导致内核 OOM。
 const MAX_BUFFER_SIZE: usize = 1024 * 1024 * 8;
 const MAX_IOVEC_COUNT: usize = 1024;
 
@@ -66,6 +82,11 @@ pub fn user_accessible_len(
 }
 
 #[derive(Clone, Copy)]
+/// 只读用户指针包装。
+///
+/// # Semantics
+///
+/// `read` 会检查 NULL、确认 token 属于当前任务，并按需触发读缺页处理。
 pub struct UserPtr<T> {
     ptr: *const T,
     _marker: PhantomData<T>,
@@ -114,6 +135,12 @@ impl<T> UserPtr<T> {
 }
 
 #[derive(Clone, Copy)]
+/// 可写用户指针包装。
+///
+/// # Semantics
+///
+/// `read` 按读权限访问用户页，`write` 按写权限访问用户页。NULL 指针在
+/// `write_optional(None)` 中被视为合法的“无输出地址”。
 pub struct UserPtrMut<T> {
     ptr: *mut T,
     _marker: PhantomData<T>,
@@ -173,6 +200,11 @@ impl<T> UserPtrMut<T> {
 }
 
 #[derive(Clone, Copy)]
+/// 用户数组切片描述符。
+///
+/// # Semantics
+///
+/// `len` 以 `T` 为单位，实际访问前会检查乘法溢出和 `MAX_BUFFER_SIZE` 上限。
 pub struct UserSlice<T> {
     ptr: *const T,
     len: usize,
@@ -230,6 +262,11 @@ impl<T> UserSlice<T> {
 }
 
 #[derive(Clone, Copy)]
+/// NUL 结尾的用户字符串指针。
+///
+/// # Semantics
+///
+/// `read` 最多读取 `MAX_BUFFER_SIZE` 字节，并在跨页时逐页 fault-in。
 pub struct UserCString {
     ptr: *const u8,
 }
@@ -260,6 +297,11 @@ pub struct UserBufferReader {
 }
 
 impl UserBufferReader {
+    /// 创建只读用户缓冲区视图。
+    ///
+    /// # Errors
+    ///
+    /// 用户地址非法、超出上限或缺页处理失败时返回负 errno。
     pub fn new(token: usize, ptr: *const u8, len: usize) -> Result<Self, isize> {
         // Try single-page fast path first; fall back to Vec of page slices
         let buffer = match translate_single_page_user_bytes(token, ptr, len, UserAccess::Read)? {
@@ -280,6 +322,8 @@ impl UserBufferReader {
         let mut dst = Vec::new();
         dst.try_reserve(self.buffer.len())
             .map_err(|_| crate::syscall::errno::ENOMEM)?;
+        // Safety: `try_reserve` has reserved `buffer.len()` bytes and `u8` has
+        // no drop glue. `UserBuffer::read` below initializes the whole slice.
         unsafe {
             dst.set_len(self.buffer.len());
         }
@@ -297,6 +341,11 @@ pub struct UserBufferWriter {
 }
 
 impl UserBufferWriter {
+    /// 创建只写用户缓冲区视图。
+    ///
+    /// # Errors
+    ///
+    /// 用户地址非法、超出上限或缺页处理失败时返回负 errno。
     pub fn new(token: usize, ptr: *mut u8, len: usize) -> Result<Self, isize> {
         let buffer = match translate_single_page_user_bytes(token, ptr as *const u8, len, UserAccess::Write)? {
             Some(slice) => UserBuffer::single(slice),
@@ -324,6 +373,11 @@ pub struct UserIoVec {
 }
 
 impl UserIoVec {
+    /// 从用户空间读取 `iovec` 数组并计算总长度。
+    ///
+    /// # Errors
+    ///
+    /// `iovcnt` 超过上限、长度累加溢出或用户数组不可读时返回负 errno。
     pub fn read_user_iovecs(
         token: usize,
         iov: *const IOVec,
@@ -340,6 +394,8 @@ impl UserIoVec {
         if iovcnt != 0 {
             copy_from_user_array(token, iov, iovecs.as_mut_ptr(), iovcnt)?;
         }
+        // Safety: `try_reserve(iovcnt)` prepared storage and a successful
+        // `copy_from_user_array` initialized exactly `iovcnt` entries.
         unsafe {
             iovecs.set_len(iovcnt);
         }
@@ -500,7 +556,12 @@ impl UserIoVec {
     }
 }
 
-// Check only user range bounds and arithmetic overflow.
+/// 检查用户地址区间边界和加法溢出。
+///
+/// # Semantics
+///
+/// 该函数不访问页表、不 fault-in 页面，只验证 `[ptr, ptr + len)` 位于用户
+/// 虚拟地址范围内。
 pub fn check_user_range(ptr: usize, len: usize) -> Result<usize, isize> {
     if len == 0 {
         return Ok(ptr);
@@ -531,9 +592,8 @@ fn current_user_vm(
     Ok(task.process.vm())
 }
 
-// 区分用户触发缺页时的权限
-// 例如：copy_from_user - Read; copy_to_user - Write; 获得可变引用-ReadWrite等
-// 通过不同权限的区分使得缺页处理更灵活更稳定
+// 区分用户触发缺页时的权限：copy_from_user 使用 Read，copy_to_user 使用
+// Write，可变引用使用 ReadWrite。这让缺页处理能正确选择 CoW/权限恢复路径。
 fn fault_in_user_va_with_vm(
     vm: &Mutex<AddressSpace<PageTableImpl>>,
     va: VirtAddr,
@@ -559,7 +619,12 @@ fn translate_user_va_checked_with_vm(
     }
 }
 
-// 将用户va翻译为pa
+/// 将当前任务的用户虚拟地址翻译为物理地址。
+///
+/// # Semantics
+///
+/// 只接受当前任务的页表 token。访问前会按 `access` 触发缺页处理，成功后返回
+/// 对应物理地址。
 pub fn translate_user_va_checked(
     token: usize,
     va: VirtAddr,
@@ -569,7 +634,12 @@ pub fn translate_user_va_checked(
     translate_user_va_checked_with_vm(&vm, va, access)
 }
 
-// Split a user buffer by page.
+/// 将用户缓冲区按页拆成内核可访问的字节切片。
+///
+/// # Semantics
+///
+/// 每个页片都会按 `access` fault-in。返回的切片指向直接映射物理内存，只能在
+/// 当前 syscall 路径内短期使用。
 pub fn translate_user_buffer_checked(
     token: usize,
     ptr: *const u8,
@@ -608,7 +678,7 @@ pub fn translate_user_buffer_checked(
     Ok(v)
 }
 
-// Append translated user buffer slices to an existing vector.
+/// 将翻译后的用户页片追加到已有 vector。
 pub fn translated_byte_buffer_append_to_existing_vec(
     existing_vec: &mut Vec<&'static mut [u8]>,
     token: usize,
@@ -629,7 +699,8 @@ pub fn translated_byte_buffer(
     translate_user_buffer_checked(token, ptr, len, access)
 }
 
-// 旧代码遗留函数，暂时不使用
+// TODO(uaccess-cleanup): 审计并迁移或删除对齐辅助函数。
+// Exit condition: 仓库中没有调用方，且不再需要按右对齐字节数处理用户对象。
 pub fn get_right_aligned_bytes<T>(ptr: *const T) -> usize {
     let ptr = ptr as usize;
     let align = core::mem::align_of::<T>();
@@ -664,7 +735,12 @@ fn append_user_cstr_bytes(dst: &mut String, bytes: &[u8], max_len: usize) -> Res
     Ok(())
 }
 
-// Read a C string from user space.
+/// 从用户空间读取 NUL 结尾字符串。
+///
+/// # Semantics
+///
+/// 逐页读取直到遇到 NUL，最大长度为 `MAX_BUFFER_SIZE`。非 ASCII 字节按原有
+/// 字节值映射到 `char`，用于兼容现有路径。
 pub fn translated_str(token: usize, ptr: *const u8) -> Result<String, isize> {
     let mut string = String::new();
     let mut cur = ptr as usize;
@@ -700,7 +776,12 @@ pub fn translated_str(token: usize, ptr: *const u8) -> Result<String, isize> {
     Ok(string)
 }
 
-// Read-only user object reference.
+/// 获取单页内只读用户对象引用。
+///
+/// # Semantics
+///
+/// 对象必须完整落在同一用户页内；跨页对象返回 `-EFAULT`，调用方应改用
+/// `copy_from_user`。
 pub fn translated_ref<T>(token: usize, ptr: *const T) -> Result<&'static T, isize> {
     let size = core::mem::size_of::<T>();
     let va = VirtAddr::from(ptr as usize);
@@ -718,7 +799,12 @@ pub fn translated_ref<T>(token: usize, ptr: *const T) -> Result<&'static T, isiz
     Ok(pa.get_ref())
 }
 
-// Read-write user object reference.
+/// 获取单页内可读写用户对象引用。
+///
+/// # Semantics
+///
+/// 对象必须完整落在同一用户页内；跨页对象返回 `-EFAULT`，调用方应改用
+/// `copy_from_user`/`copy_to_user`。
 pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> Result<&'static mut T, isize> {
     let size = core::mem::size_of::<T>();
     let va = VirtAddr::from(ptr as usize);
@@ -736,7 +822,11 @@ pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> Result<&'static mut T,
     Ok(pa.get_mut())
 }
 
-// Write-only user object reference.
+/// 获取单页内只写用户对象引用。
+///
+/// # Semantics
+///
+/// 该接口只 fault-in 写权限，不要求源页可读。
 pub fn translated_ref_write<T>(token: usize, ptr: *mut T) -> Result<&'static mut T, isize> {
     let size = core::mem::size_of::<T>();
     let va = VirtAddr::from(ptr as usize);
@@ -754,13 +844,19 @@ pub fn translated_ref_write<T>(token: usize, ptr: *mut T) -> Result<&'static mut
     Ok(pa.get_mut())
 }
 
-// 用户缓冲区，可能跨页
+// 用户缓冲区可能跨页；这里保留分段形式，避免把大用户缓冲区复制到连续内核内存。
 enum UserBufferSegments {
     Empty,
     Single(&'static mut [u8]),
     Multi(Vec<&'static mut [u8]>),
 }
 
+/// 已翻译的用户缓冲区。
+///
+/// # Semantics
+///
+/// 缓冲区由一个或多个页内切片组成，读写方法返回实际复制字节数。该对象借用
+/// 当前地址空间中已 fault-in 的物理页，不能跨调度点长期保存。
 pub struct UserBuffer {
     segments: UserBufferSegments,
     pub len: usize,
@@ -793,6 +889,8 @@ impl UserBuffer {
             UserBufferSegments::Empty => 0,
             UserBufferSegments::Single(buf) => {
                 let n = buf.len().min(dst.len());
+                // Safety: both slices are valid for `n` bytes and may overlap
+                // conservatively handled by `copy`.
                 unsafe { core::ptr::copy(buf.as_ptr(), dst.as_mut_ptr(), n); }
                 n
             }
@@ -803,10 +901,14 @@ impl UserBuffer {
                     let end = start + buffer.len();
                     if end > dst_len {
                         let n = dst_len - start;
+                        // Safety: `start < dst_len` and `n` is capped by the
+                        // remaining destination length.
                         unsafe { core::ptr::copy(buffer.as_ptr(), dst.as_mut_ptr().add(start), n); }
                         return dst_len;
                     } else {
                         let n = buffer.len();
+                        // Safety: the logical cursor guarantees the destination
+                        // range `[start, start + n)` is within `dst`.
                         unsafe { core::ptr::copy(buffer.as_ptr(), dst.as_mut_ptr().add(start), n); }
                     }
                     start = end;
@@ -821,6 +923,8 @@ impl UserBuffer {
             UserBufferSegments::Empty => 0,
             UserBufferSegments::Single(buf) => {
                 let n = buf.len().min(src.len());
+                // Safety: both slices are valid for `n` bytes and may overlap
+                // conservatively handled by `copy`.
                 unsafe { core::ptr::copy(src.as_ptr(), buf.as_mut_ptr(), n); }
                 n
             }
@@ -831,10 +935,14 @@ impl UserBuffer {
                     let end = start + buffer.len();
                     if end > src_len {
                         let n = src_len - start;
+                        // Safety: `start < src_len` and `n` is capped by the
+                        // remaining source length.
                         unsafe { core::ptr::copy(src.as_ptr().add(start), buffer.as_mut_ptr(), n); }
                         return src_len;
                     } else {
                         let n = buffer.len();
+                        // Safety: the logical cursor guarantees the source range
+                        // `[start, start + n)` is within `src`.
                         unsafe { core::ptr::copy(src.as_ptr().add(start), buffer.as_mut_ptr(), n); }
                     }
                     start = end;
@@ -853,6 +961,8 @@ impl UserBuffer {
             UserBufferSegments::Single(buf) => {
                 let start = offset;
                 let n = (buf.len() - start).min(dst.len());
+                // Safety: `offset < self.len`, and `n` is capped by both the
+                // source segment and destination slice lengths.
                 unsafe { core::ptr::copy(buf.as_ptr().add(start), dst.as_mut_ptr(), n); }
                 n
             }
@@ -873,6 +983,8 @@ impl UserBuffer {
                     let copy_buffer_start = copy_dst_start - dst_start;
                     let copy_buffer_end = copy_dst_end - dst_start;
                     let n = copy_src_end - copy_src_start;
+                    // Safety: the computed subranges are intersections of the
+                    // requested logical range with valid source/destination slices.
                     unsafe {
                         core::ptr::copy(
                             buffer.as_ptr().add(copy_buffer_start),
@@ -897,6 +1009,8 @@ impl UserBuffer {
             UserBufferSegments::Single(buf) => {
                 let start = offset;
                 let n = (buf.len() - start).min(src.len());
+                // Safety: `offset < self.len`, and `n` is capped by both the
+                // destination segment and source slice lengths.
                 unsafe { core::ptr::copy(src.as_ptr(), buf.as_mut_ptr().add(start), n); }
                 n
             }
@@ -917,6 +1031,8 @@ impl UserBuffer {
                     let copy_buffer_start = copy_dst_start - dst_start;
                     let copy_buffer_end = copy_dst_end - dst_start;
                     let n = copy_src_end - copy_src_start;
+                    // Safety: the computed subranges are intersections of the
+                    // requested logical range with valid source/destination slices.
                     unsafe {
                         core::ptr::copy(
                             src.as_ptr().add(copy_src_start),
@@ -1104,6 +1220,8 @@ fn copy_single_page_from_user(
     if let Some(user_bytes) =
         translate_single_page_user_bytes(token, src, len, UserAccess::Read)?
     {
+        // Safety: `user_bytes` is valid for `len` bytes after translation, and
+        // callers of copy_from_user provide a writable kernel `dst`.
         unsafe {
             core::ptr::copy_nonoverlapping(user_bytes.as_ptr(), dst, len);
         }
@@ -1122,6 +1240,8 @@ fn copy_single_page_to_user(
     if let Some(user_bytes) =
         translate_single_page_user_bytes(token, dst as *const u8, len, UserAccess::Write)?
     {
+        // Safety: `user_bytes` is valid writable user memory for `len` bytes,
+        // and callers of copy_to_user provide a readable kernel `src`.
         unsafe {
             core::ptr::copy_nonoverlapping(src, user_bytes.as_mut_ptr(), len);
         }
@@ -1133,6 +1253,11 @@ fn copy_single_page_to_user(
 
 /// Copy `*src: T` to kernel space.
 /// `src` is a pointer in user space, `dst` is a pointer in kernel space.
+///
+/// # Semantics
+///
+/// `token` must belong to the current task. `dst` must point to writable kernel
+/// memory for one `T`.
 pub fn copy_from_user<T: 'static + Copy>(
     token: usize,
     src: *const T,
@@ -1151,12 +1276,18 @@ pub fn copy_from_user<T: 'static + Copy>(
         size,
         UserAccess::Read,
     )?)
+    // Safety: the caller-provided kernel `dst` is valid for `size` bytes by the
+    // function contract; `UserBuffer::read` writes at most that many bytes.
     .read(unsafe { core::slice::from_raw_parts_mut(dst as *mut u8, size) });
     Ok(())
 }
 
 /// Copy array `*src: [T;len]` to kernel space.
 /// `src` is a pointer in user space, `dst` is a pointer in kernel space.
+///
+/// # Semantics
+///
+/// `dst` must point to writable kernel memory for `len` elements.
 pub fn copy_from_user_array<T: 'static + Copy>(
     token: usize,
     src: *const T,
@@ -1178,12 +1309,19 @@ pub fn copy_from_user_array<T: 'static + Copy>(
         size,
         UserAccess::Read,
     )?)
+    // Safety: the caller-provided kernel `dst` is valid for `size` bytes by the
+    // function contract; `UserBuffer::read` writes at most that many bytes.
     .read(unsafe { core::slice::from_raw_parts_mut(dst as *mut u8, size) });
     Ok(())
 }
 
 /// Copy `*src: T` to user space.
 /// `src` is a pointer in kernel space, `dst` is a pointer in user space.
+///
+/// # Semantics
+///
+/// `src` must point to readable kernel memory for one `T`; `dst` is validated
+/// against the current task's user address space.
 pub fn copy_to_user<T: 'static + Copy>(
     token: usize,
     src: *const T,
@@ -1202,6 +1340,8 @@ pub fn copy_to_user<T: 'static + Copy>(
         size,
         UserAccess::Write,
     )?)
+    // Safety: the caller-provided kernel `src` is valid for `size` bytes by the
+    // function contract; `UserBuffer::write` reads at most that many bytes.
     .write(unsafe { core::slice::from_raw_parts(src as *const u8, size) });
     Ok(())
 }
@@ -1210,6 +1350,9 @@ pub fn copy_to_user<T: 'static + Copy>(
 /// `src` is a pointer in user space, `dst` is a pointer in kernel space.
 #[inline(always)]
 pub fn get_from_user<T: 'static + Copy>(token: usize, src: *const T) -> Result<T, isize> {
+    // Safety: `copy_from_user` initializes the MaybeUninit storage on success.
+    // `T: Copy` means returning the initialized value does not create aliasing
+    // or drop-order obligations.
     unsafe {
         let mut dst = core::mem::MaybeUninit::<T>::uninit();
         copy_from_user(token, src, dst.as_mut_ptr())?;
@@ -1231,6 +1374,10 @@ pub fn try_get_from_user<T: 'static + Copy>(
 
 /// Copy array `*src: [T;len]` to user space.
 /// `src` is a pointer in kernel space, `dst` is a pointer in user space.
+///
+/// # Semantics
+///
+/// `src` must point to readable kernel memory for `len` elements.
 pub fn copy_to_user_array<T: 'static + Copy>(
     token: usize,
     src: *const T,
@@ -1252,6 +1399,8 @@ pub fn copy_to_user_array<T: 'static + Copy>(
         size,
         UserAccess::Write,
     )?)
+    // Safety: the caller-provided kernel `src` is valid for `size` bytes by the
+    // function contract; `UserBuffer::write` reads at most that many bytes.
     .write(unsafe { core::slice::from_raw_parts(src as *const u8, size) });
     Ok(())
 }
@@ -1278,6 +1427,8 @@ pub fn copy_to_user_string(token: usize, src: &str, dst: *mut u8) -> Result<(), 
         size,
         UserAccess::Write,
     )?);
+    // Safety: `src.as_ptr()` is valid for `src.len()` bytes for the lifetime of
+    // this call.
     user_buf.write(unsafe { core::slice::from_raw_parts(src.as_ptr(), src.len()) });
     user_buf.write_at(src.len(), b"\0");
     Ok(())

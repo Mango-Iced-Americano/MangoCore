@@ -1,3 +1,7 @@
+//! `PWCL`：低半地址空间页表遍历控制寄存器。
+//!
+//! 该 CSR 描述硬件页表遍历在低半地址空间使用的各级索引宽度和偏移。
+
 use bit_field::BitField;
 impl_define_csr!(PWCL, "Page Walk Controller for Lower Half Address Space (PWCL)
 

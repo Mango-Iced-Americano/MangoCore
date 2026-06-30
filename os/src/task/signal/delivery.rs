@@ -1,3 +1,9 @@
+//! 信号投递与唤醒。
+//!
+//! 本模块把进程级 pending signal、线程私有 pending signal 和调度器唤醒组合起来。
+//! 投递操作只负责把信号加入队列并唤醒可能的等待者，真正的默认动作和用户 handler
+//! 在 `do_signal()` 返回用户态前处理。
+
 use alloc::sync::Arc;
 
 use crate::syscall::errno::EAGAIN;
@@ -21,6 +27,7 @@ fn process_signal_target(
             continue;
         }
         if signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, true) {
+            // 返回 cloned Arc 后由调用方释放 task.inner 再执行调度器唤醒。
             return Some(task.clone());
         }
     }
@@ -42,6 +49,12 @@ fn wake_process_interruptible_threads(process: &ProcessControlBlock) {
     }
 }
 
+/// 向进程共享 pending 队列投递普通用户信号。
+///
+/// # Semantics
+///
+/// 返回值表示信号编号是否可转换为 pending signal；成功投递后若存在可被该信号
+/// 打断的 interruptible 线程，会唤醒其中一个。
 pub fn send_process_signal(process: &ProcessControlBlock, signal: Signals) -> bool {
     if signal.is_empty() {
         return true;
@@ -56,6 +69,12 @@ pub fn send_process_signal(process: &ProcessControlBlock, signal: Signals) -> bo
     false
 }
 
+/// 向进程共享 pending 队列投递带 `SigInfo` 的信号。
+///
+/// # Locking
+///
+/// 函数不会在持有进程 signal lock 时进入调度器。`SIGCONT` 会唤醒所有
+/// interruptible 线程，其它信号只唤醒一个合适目标。
 pub fn send_process_signal_info(
     process: &ProcessControlBlock,
     signal: Signals,
@@ -77,6 +96,9 @@ pub fn send_process_signal_info(
     true
 }
 
+/// 向进程共享 pending 队列投递信号，但不主动唤醒其它线程。
+///
+/// 当前线程即将检查 pending signal 的路径使用该接口，避免不必要的调度队列操作。
 pub fn send_process_signal_to_current_task(process: &ProcessControlBlock, signal: Signals) -> bool {
     if signal.is_empty() {
         return true;
@@ -95,6 +117,7 @@ pub fn send_process_signal_to_current_task(process: &ProcessControlBlock, signal
     true
 }
 
+/// 向指定线程投递 `tgkill` 风格的线程私有信号。
 pub fn send_thread_signal(task: &Arc<TaskControlBlock>, signal: Signals) -> Result<(), isize> {
     if signal.is_empty() {
         return Ok(());
@@ -102,6 +125,11 @@ pub fn send_thread_signal(task: &Arc<TaskControlBlock>, signal: Signals) -> Resu
     send_thread_signal_info(task, signal, None, true)
 }
 
+/// 向指定线程投递带 `SigInfo` 的信号，但延迟唤醒。
+///
+/// # Semantics
+///
+/// 用于调用方已经知道稍后会统一处理唤醒的路径，避免重复操作调度队列。
 pub fn send_thread_signal_info_deferred(
     task: &Arc<TaskControlBlock>,
     signal: Signals,

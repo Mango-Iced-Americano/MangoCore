@@ -1,3 +1,7 @@
+//! `ESTAT`：例外状态寄存器。
+//!
+//! 该 CSR 汇总中断 pending 位、例外一级/二级编码，并提供 `Trap` 分类给异常分发路径。
+
 use core::convert::{TryFrom, TryInto};
 
 use crate::hal::arch::loongarch64::{

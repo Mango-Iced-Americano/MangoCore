@@ -1,3 +1,7 @@
+//! `PGD`/`PGDH`/`PGDL`：页全局目录基址寄存器组。
+//!
+//! 这些 CSR 保存当前页表根地址，并按高半/低半地址空间区分页表遍历入口。
+
 use core::fmt::Debug;
 
 impl_define_csr!(PGD, " Page Global Directory Base Address (PGD)

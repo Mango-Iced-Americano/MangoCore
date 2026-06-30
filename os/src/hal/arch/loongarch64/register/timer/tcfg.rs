@@ -1,3 +1,7 @@
+//! `TCFG`：定时器配置寄存器。
+//!
+//! 该 CSR 控制定时器使能、周期模式和初始计数值，是时钟中断配置入口。
+
 use core::fmt::Debug;
 
 use bit_field::BitField;
@@ -21,7 +25,6 @@ impl TCfg {
     /// Only when this bit is 1,
     /// the timer will perform countdown self decrement and set up the timing interrupt signal when it decrements to 0 value.
     pub fn is_enabled(&self) -> bool {
-        //第0位
         !self.bits.get_bit(0)
     }
     /// Timer cycle mode control bit.
@@ -30,7 +33,6 @@ impl TCfg {
     /// and then continue to decrement itself in the next clock cycle.
     /// If this bit is 0, the timer will stop counting until the software configures the timer again when the countdown reaches 0.
     pub fn is_periodic(&self) -> bool {
-        //第1位
         self.bits.get_bit(1)
     }
     /// The initial value of the timer countdown self decrement count.
@@ -38,12 +40,13 @@ impl TCfg {
     /// The hardware will automatically fill in the lowest bit of the field value.
     /// Two bits of 0 are added before it is used.
     pub fn get_init_val(&self) -> usize {
-        //第2位开始
         (self.bits >> 2) << 2
     }
+    /// 返回 CSR 的原始位值。
     pub fn bits(&self) -> usize {
         self.bits
     }
+    /// 覆盖 wrapper 内保存的 CSR 原始位值。
     pub fn set_bits(&mut self, val: usize) -> &mut Self {
         self.bits = val;
         self
@@ -68,8 +71,6 @@ impl TCfg {
     /// # Warning!
     /// This initial value *MUST* be an integer multiple of 4.
     pub fn set_init_val(&mut self, val: usize) -> &mut Self {
-        // 设置计数值, 只能是4的整数倍
-        // 在数值末尾会补上2bit0
         self.bits.set_bits(2.., val >> 2);
         self
     }

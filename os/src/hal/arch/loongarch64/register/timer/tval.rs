@@ -1,3 +1,7 @@
+//! `TVAL`：定时器当前值寄存器。
+//!
+//! 该 CSR 反映当前倒计时值，供调试或需要观测 timer 剩余时间的路径读取。
+
 use core::fmt::Debug;
 
 use bit_field::BitField;

@@ -1,3 +1,8 @@
+//! RISC-V trap 分发和返回路径。
+//!
+//! 处理 syscall、缺页、设备中断、timer interrupt，并在返回用户态前完成信号
+//! 和调度相关收尾。
+
 pub mod context;
 use core::arch::{asm, global_asm};
 

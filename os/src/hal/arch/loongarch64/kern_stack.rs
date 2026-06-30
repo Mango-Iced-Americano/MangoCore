@@ -1,3 +1,7 @@
+//! LoongArch64 用户栈、trap context 和内核栈地址分配。
+//!
+//! 使用固定 slot 分配器管理 guard-window 内的 per-thread 内核栈和用户栈布局。
+
 use super::config::{
     KERNEL_STACK_BOTTOM, KERNEL_STACK_MAX_SLOTS, KERNEL_STACK_SIZE, KERNEL_STACK_SLOT_SIZE,
     KERNEL_STACK_TOP, PAGE_SIZE, TRAP_CONTEXT_BASE, USER_STACK_BASE, USER_STACK_SIZE,

@@ -28,9 +28,8 @@ pub const LAST_LONG_ENTRY: u8 = 0x40u8;
 pub struct BPB {
     /// 跳转指令到引导代码的x86汇编
     pub bs_jmp_boot: [u8; 3],
-    /// "MSWIN4.1" 关于这个字段有太多的误解
-    /// 就是一个字符串，与一些Fat的驱动程序不同，
-    /// 微软的操作系统（Windows）一般不鸟这个字段
+    /// OEM 名称字符串。FAT32 规范建议 `"MSWIN4.1"`，但 Windows 本身不校验
+    /// 此字段的值；大多数 FAT 驱动程序也将其视为纯信息字段。
     pub bs_oem_name: [u8; 8],
     /// 每扇区字节数，对于SD卡来说通常为512字节
     pub byts_per_sec: u16,
@@ -287,9 +286,9 @@ impl FATDirEnt {
                 return;
             }
         }
-        //好吧,如果到这里就是都找到了
-        //然后开始伪随机
-        let jiffies = 19382022; //随便选的数字
+        // All deterministic short-name variants are exhausted; fall back to
+        // pseudo-random suffix generation using a fixed seed.
+        let jiffies = 19382022; // Fixed seed for deterministic pseudo-random sequence
         let mut i = jiffies & 0xffff;
         let sz = ((jiffies >> 10) & 0x7) as u8;
         if baselen > 2 {

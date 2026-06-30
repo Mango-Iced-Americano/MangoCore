@@ -144,8 +144,8 @@ impl Ext4Superblock {
 
     /// 块大小
     pub fn block_size(&self) -> u32 {
-        // 1024 左移指定位数
-        // 也就是说最小是1KiB
+        // Block size = 1024 << `log_block_size`. Minimum valid value is
+        // `log_block_size == 0`, yielding 1024 bytes (1 KiB).
         1024 << self.log_block_size
     }
 
@@ -224,6 +224,9 @@ impl Ext4Superblock {
 
     /// 同步超级块到磁盘，不带校验值
     pub fn sync_to_disk(&self, block_device: Arc<dyn BlockDevice>) {
+        // Safety: `self` is a valid `Ext4Superblock` reference (`#[repr(C, packed)]`).
+        // Reinterpreting as `&[u8]` of `size_of::<Self>()` is safe — the packed
+        // representation guarantees a contiguous, well-defined byte layout.
         let data = unsafe {
             core::slice::from_raw_parts(self as *const _ as *const u8, core::mem::size_of::<Self>())
         };
@@ -240,11 +243,15 @@ impl Ext4Superblock {
 
     /// 同步超级块到磁盘，同时带有校验值
     pub fn sync_to_disk_with_csum(&mut self, block_device: Arc<dyn BlockDevice>) {
+        // Safety: same invariant as `sync_to_disk` — `self` is a valid
+        // `Ext4Superblock` with a well-defined packed byte layout.
         let data = unsafe {
             core::slice::from_raw_parts(self as *const _ as *const u8, core::mem::size_of::<Self>())
         };
         let checksum = ext4_crc32c(EXT4_CRC32_INIT, data, 0x3fc);
         self.checksum = checksum;
+        // Safety: re-computing the byte view after checksum update — the
+        // reference and size are identical to the first `from_raw_parts` call.
         let data = unsafe {
             core::slice::from_raw_parts(self as *const _ as *const u8, core::mem::size_of::<Self>())
         };

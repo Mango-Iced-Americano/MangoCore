@@ -1,3 +1,8 @@
+//! RISC-V SV39 页表实现。
+//!
+//! 实现 `PageTable` trait，负责三级页表遍历、PTE 权限转换、页表激活和
+//! `sfence.vma` TLB 刷新。
+
 use crate::mm::{
     address::*, frame_alloc, FrameTracker, MapPermission, MemoryError, PageTable, UserAccess,
 };
@@ -17,6 +22,8 @@ macro_rules! tlb_invalidate_vpn {
 
 #[inline(always)]
 pub fn tlb_invalidate() {
+    // Safety: `sfence.vma` serializes address-translation updates on the current
+    // hart and does not access memory through Rust references.
     unsafe {
         asm!("sfence.vma");
     }
@@ -26,6 +33,8 @@ pub fn tlb_invalidate() {
 /// 只刷指定虚拟地址对应的 TLB 条目，不影响其他条目
 #[inline(always)]
 pub fn tlb_invalidate_addr(vaddr: usize) {
+    // Safety: the instruction only uses `vaddr` as the architectural fence
+    // operand; it does not dereference the address.
     unsafe {
         asm!("sfence.vma {}, zero", in(reg) vaddr);
     }
@@ -137,9 +146,7 @@ impl Sv39PageTable {
                     .try_reserve(1)
                     .map_err(|_| MemoryError::OutOfMemory)?;
                 let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
-                // xein TODO:
-                // 这里有问题
-                // *pte = Sv39PageTableEntry::new(frame.ppn, PTEFlags::V | PTEFlags::A | PTEFlags::D);
+                // 非叶子页表项只设置 V，保持 R/W/X 为 0；A/D 只对叶子 PTE 有意义。
                 *pte = Sv39PageTableEntry::new(frame.ppn, PTEFlags::V);
                 self.frames.push(frame);
             }
@@ -373,9 +380,10 @@ impl PageTable for Sv39PageTable {
         }
     }
     fn activate(&self) {
-        // TODO:
         let satp = self.token();
-        // Problem in here.
+        // Safety: `satp` is built from this page table's root PPN. After writing
+        // SATP, a full `sfence.vma` is required before subsequent translations
+        // use the new page table.
         unsafe {
             satp::write(satp);
             asm!("sfence.vma");
