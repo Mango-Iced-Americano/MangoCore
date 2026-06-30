@@ -324,6 +324,14 @@ impl IndexNode for LockedRamFSInode {
                 // 页存在 → 从物理内存拷贝到 buf
                 let src = page_ptr(frame, start_in_page);
                 let dst = buf.as_mut_ptr().wrapping_add(buf_offset);
+                // Safety: `src` points into a valid, allocated `FrameTracker`
+                // page at offset `start_in_page`, and `bytes_in_page ≤
+                // PAGE_SIZE - start_in_page` so the read stays within the page
+                // boundary.  `dst` is offset from `buf.as_mut_ptr()` by
+                // `buf_offset`, and `buf_offset + bytes_in_page ≤
+                // effective_len ≤ buf.len()` (guaranteed by the outer loop).
+                // Source and destination are in disjoint address ranges
+                // (kernel-managed physical page vs. caller-owned buffer).
                 unsafe {
                     core::ptr::copy_nonoverlapping(src, dst, bytes_in_page);
                 }
@@ -407,6 +415,13 @@ impl IndexNode for LockedRamFSInode {
             let frame: &Arc<FrameTracker> = inode.pages.get(&page_idx).unwrap();
             let dst: *mut u8 = page_ptr_mut(frame, start_in_page);
             let src: *const u8 = buf.as_ptr().wrapping_add(buf_offset);
+            // Safety: `dst` points into a valid, allocated `FrameTracker` page
+            // at offset `start_in_page`, with `bytes_in_page ≤ PAGE_SIZE -
+            // start_in_page`.  `src` is offset from `buf.as_ptr()` by
+            // `buf_offset`, and `buf_offset + bytes_in_page ≤ len ≤
+            // buf.len()` (guaranteed by the caller).  Source and destination
+            // are disjoint (caller-owned buffer vs. kernel-managed physical
+            // page).
             unsafe {
                 core::ptr::copy_nonoverlapping(src, dst, bytes_in_page);
             }
@@ -760,6 +775,10 @@ impl IndexNode for LockedRamFSInode {
                     if let Some(frame) = inode.pages.get(&last_page_idx) {
                         let ptr: *mut u8 = page_ptr_mut(frame, start_zero);
                         let count: usize = PAGE_SIZE - start_zero;
+                        // Safety: `ptr` comes from `page_ptr_mut()` — a valid
+                        // pointer into an allocated `FrameTracker` page.
+                        // `count = PAGE_SIZE - start_zero`, so the write stays
+                        // entirely within the single page boundary.
                         unsafe {
                             core::ptr::write_bytes(ptr, 0, count);
                         }

@@ -585,6 +585,23 @@ fn restore_sigmask(old_mask: Option<Signals>) {
     }
 }
 
+/// 创建 epoll 实例，返回 epoll fd。
+///
+/// # Semantics
+///
+/// `flags` 仅支持 `EPOLL_CLOEXEC`。其他标志返回 `EINVAL`。
+/// 内部创建 `EventPollFile` inode 并通过 `O_RDWR` 打开，存入当前进程的 fd 表。
+///
+/// # Linux Compatibility
+///
+/// 与 Linux 6.6 一致：不传 `EPOLL_CLOEXEC` 时 fd 默认不 close-on-exec。
+/// 不支持 `epoll_create`（已弃用），用户态应通过 libc wrapper 调用本 syscall。
+///
+/// # Errors
+///
+/// - `EINVAL`：flags 包含 `EPOLL_CLOEXEC` 以外的值
+/// - `ENOMEM`：内存分配失败
+/// - `EMFILE`：进程 fd 表已满
 pub fn sys_epoll_create1(flags: usize) -> isize {
     let cloexec_flag = FileFlags::O_CLOEXEC.bits() as usize;
     if flags & !cloexec_flag != 0 {
@@ -615,6 +632,32 @@ pub fn sys_epoll_create1(flags: usize) -> isize {
     ret
 }
 
+/// 控制 epoll 实例中的文件描述符注册。
+///
+/// # Semantics
+///
+/// - `EPOLL_CTL_ADD`：注册 `fd` 到 `epfd`（嵌套 epoll 有循环检测；不支持 `epoll`/pipe/tty 以外
+///   的非流式 fd，返回 `EPERM`）
+/// - `EPOLL_CTL_MOD`：修改已注册 `fd` 的事件掩码和数据
+/// - `EPOLL_CTL_DEL`：从 `epfd` 注销 `fd`（`event` 指针可为 NULL）
+///
+/// `event` 为指向用户空间 `EpollUserEvent` 的指针，仅 ADD/MOD 时需要，DEL 时可传 NULL。
+///
+/// # Linux Compatibility
+///
+/// 支持的 epoll 事件标志包括 `EPOLLIN`、`EPOLLOUT`、`EPOLLRDNORM`、`EPOLLWRNORM`、`EPOLLERR`、
+/// `EPOLLHUP`、`EPOLLPRI`、`EPOLLET`、`EPOLLONESHOT`、`EPOLLEXCLUSIVE`、`EPOLLWAKEUP` 等。
+/// `EPOLLWAKEUP` 当前无额外行为。
+///
+/// # Errors
+///
+/// - `EBADF`：`epfd` 或 `fd` 无效
+/// - `EINVAL`：`op` 无效、`epfd` 不是 epoll fd、`epfd == fd`（自引用）
+/// - `EEXIST`：`EPOLL_CTL_ADD` 时 `fd` 已注册
+/// - `ENOENT`：`EPOLL_CTL_MOD` 或 `EPOLL_CTL_DEL` 时 `fd` 未注册
+/// - `EPERM`：`fd` 不支持 epoll（如普通文件）
+/// - `ELOOP`：嵌套 epoll 检测到循环
+/// - `EFAULT`：`event` 指针无效（ADD/MOD 时为 NULL）
 pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event: *const EpollUserEvent) -> isize {
     let task = current_task().unwrap();
     let token = task.get_user_token();
@@ -686,6 +729,34 @@ pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event: *const EpollUserE
     }
 }
 
+/// 等待 epoll 事件（ppoll 变体，带信号掩码）。
+///
+/// # Semantics
+///
+/// - `maxevents` > 0：最大返回事件数
+/// - `timeout` 毫秒：`-1` = 无限等待，`0` = 立即返回，`>0` = 超时毫秒数
+/// - `sigmask`：非 NULL 时在等待期间临时替换当前任务的信号掩码，返回前恢复
+/// - 若已有就绪事件，立即返回（不睡眠）
+///
+/// 等待期间可被信号中断，返回 `EINTR` 且 `events` 不变。
+///
+/// # Locking
+///
+/// 在 epoll 内部锁外检查信号。若 `has_actionable_signal()` 为真，
+/// 在进入 `epoll.wait()` 前返回 `EINTR`，避免持锁时信号处理导致的锁顺序反转。
+///
+/// # Linux Compatibility
+///
+/// `events` 输出使用 `EpollUserEvent` 格式（`events: u32, data: u64`），与 Linux
+/// `struct epoll_event` 兼容。
+///
+/// # Errors
+///
+/// - `EINVAL`：`maxevents <= 0`
+/// - `EFAULT`：`events` 为 NULL 或写入失败
+/// - `EBADF`：`epfd` 无效
+/// - `EINTR`：被信号中断
+/// - `ENOMEM`：内存分配失败
 pub fn sys_epoll_pwait(
     epfd: usize,
     events: *mut EpollUserEvent,
@@ -757,6 +828,21 @@ pub fn sys_epoll_pwait(
     out.len() as isize
 }
 
+/// 等待 epoll 事件（纳秒精度超时变体）。
+///
+/// # Semantics
+///
+/// 与 `sys_epoll_pwait` 相同，但 `timeout` 使用 `TimeSpec`（秒+纳秒）而非毫秒。
+/// `timeout` 为 NULL 时无限等待。nanoseconds 最大值为 999,999,999。
+///
+/// # Linux Compatibility
+///
+/// Linux 5.11+ 引入，MangoCore 与 Linux 6.6 语义对齐。
+///
+/// # Errors
+///
+/// 与 `sys_epoll_pwait` 相同，额外错误：
+/// - `EINVAL`：`tv_nsec >= 1_000_000_000` 或转换溢出
 pub fn sys_epoll_pwait2(
     epfd: usize,
     events: *mut EpollUserEvent,

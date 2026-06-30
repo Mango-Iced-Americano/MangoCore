@@ -58,6 +58,22 @@ struct TimerFdState {
     expirations: u64,
 }
 
+/// TimerFd — 基于 fd 的 POSIX 定时器。
+///
+/// 通过 `read(2)` 返回自上次读取以来的到期次数（`u64`）。定时器通过
+/// `timerfd_settime` 设置，到期后 fd 变为可读。支持单次和周期性定时器。
+///
+/// # Locking
+///
+/// `inner` 保护定时器状态（`deadline`、`expirations`、`interval`）。
+/// 定时器 sweep（`wake_expired_timerfds`）在更新 `expirations` 后
+/// 如果 0→nonzero，通过 `notify_readable` 唤醒 `read_wait` 上的阻塞读任务。
+///
+/// # Linux Compatibility
+///
+/// 对齐 Linux 6.6 timerfd。支持 `CLOCK_REALTIME`、`CLOCK_MONOTONIC`、
+/// `CLOCK_BOOTTIME`、`CLOCK_REALTIME_ALARM`、`CLOCK_BOOTTIME_ALARM`。
+/// `CLOCK_REALTIME` 定时器会随 `settimeofday` 调整。
 pub struct TimerFd {
     clock_id: usize,
     inner: Mutex<TimerFdState>,
@@ -137,6 +153,12 @@ impl TimerFd {
             .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM)
     }
 
+    /// 若到期次数从 0 变为非零，唤醒 `read_wait` 上阻塞的读任务。
+    ///
+    /// # Locking
+    ///
+    /// 内部获取 `inner` 锁以检查 `expirations`。调用者（`wake_expired_timerfds`）
+    /// 已持有全局 `TIMERFD_REGISTRY` 锁，故此处不得再获取任何全局锁。
     fn wake_if_expired(&self, now_hint: TimeSpec) -> usize {
         let became_readable = {
             let mut inner = self.inner.lock();
@@ -505,6 +527,27 @@ fn with_timerfd<R>(
     f(timerfd)
 }
 
+/// 创建 timerfd 实例，返回可读 fd。
+///
+/// # Semantics
+///
+/// - `clock_id`：支持 `CLOCK_REALTIME`、`CLOCK_MONOTONIC`、`CLOCK_BOOTTIME`
+/// - `flags`：`TFD_CLOEXEC`、`TFD_NONBLOCK`
+/// - 创建的 fd 初始为不可读状态（无到期计数），需通过 `timerfd_settime` 设置定时器后才产生可读事件
+///
+/// 内部创建 `TimerFd` inode，注册到全局 `TIMERFD_REGISTRY` 用于定时器 sweep
+/// 唤醒机制。
+///
+/// # Linux Compatibility
+///
+/// 对齐 Linux 6.6 `timerfd_create(2)`。不支持的 clock_id 返回 `EINVAL`。
+/// 不支持 `CLOCK_REALTIME_ALARM`、`CLOCK_BOOTTIME_ALARM`。
+///
+/// # Errors
+///
+/// - `EINVAL`：clock_id 无效或 flags 包含非法位
+/// - `ENOMEM`：内存分配失败
+/// - `EMFILE`：进程 fd 表已满
 pub fn sys_timerfd_create(clock_id: usize, flags: u32) -> isize {
     if validate_clock_id(clock_id).is_err() || (flags & !TFD_CREATE_VALID_FLAGS) != 0 {
         return -(SyscallErr::EINVAL as isize);
@@ -535,6 +578,18 @@ pub fn sys_timerfd_create(clock_id: usize, flags: u32) -> isize {
     ret
 }
 
+/// 获取 timerfd 的当前时间设置。
+///
+/// # Semantics
+///
+/// 返回 `TimerFdSpec`（含 `it_interval` 和 `it_value`）。`it_value` 为当前定时器剩余时间，
+/// `it_interval` 为定时间隔（未设置时为 {0,0}）。返回值通过 `curr_value_ptr` 写回用户空间。
+///
+/// # Errors
+///
+/// - `EBADF`：fd 无效
+/// - `EINVAL`：fd 不是 timerfd
+/// - `EFAULT`：`curr_value_ptr` 为 NULL 或无效
 pub fn sys_timerfd_gettime(fd: usize, curr_value_ptr: *mut TimerFdSpec) -> isize {
     let curr_value = match with_timerfd(fd, |timerfd| Ok(timerfd.get_time())) {
         Ok(value) => value,
@@ -549,6 +604,27 @@ pub fn sys_timerfd_gettime(fd: usize, curr_value_ptr: *mut TimerFdSpec) -> isize
     }
 }
 
+/// 设置 timerfd 的定时参数（启动/停止/修改定时器）。
+///
+/// # Semantics
+///
+/// - `flags`：`TFD_TIMER_ABSTIME`（绝对时间）或 0（相对时间）
+/// - `new_value`：`it_interval`（周期性间隔，零表示单次）和 `it_value`（首次到期时间，零表示停止）
+/// - `old_value`：非 NULL 时回填设置前的旧值
+///
+/// 设置后 timerfd 内部计算截止时间并注册到 sweep 路径。定时器到期时 fd 变为可读，
+/// `read(2)` 返回已到期次数（`u64`）。
+///
+/// # Linux Compatibility
+///
+/// 对齐 Linux 6.6 `timerfd_settime(2)`。不支持 `TFD_TIMER_CANCEL_ON_SET`。
+/// `CLOCK_REALTIME` 定时器会被实时时钟调整（`settimeofday`）影响。
+///
+/// # Errors
+///
+/// - `EBADF`：fd 无效
+/// - `EINVAL`：fd 不是 timerfd、flags 非法、或 `it_value.tv_nsec >= 1_000_000_000`
+/// - `EFAULT`：`new_value` 为 NULL 或无效
 pub fn sys_timerfd_settime(
     fd: usize,
     flags: u32,
