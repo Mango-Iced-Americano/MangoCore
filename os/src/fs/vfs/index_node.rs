@@ -39,17 +39,22 @@ pub struct CreateAttrs {
 pub trait IndexNode: Any + Send + Sync + Debug {
     // ── 基本 I/O ────────────────────────────────────────────────────
 
-    /// 在 inode 的指定偏移量处读取数据
+    /// 在 inode 的指定偏移量处读取数据。
     ///
-    /// # 参数
-    /// - `offset`: 读取起始位置
-    /// - `len`: 要读取的字节数
-    /// - `buf`: 目标缓冲区（buf.len() >= len）
-    /// - `data`: 文件私有数据
+    /// # Semantics
     ///
-    /// # 返回
-    /// - 成功: `Ok(读取的字节数)`
-    /// - 失败: `Err(SyscallErr)`
+    /// 从 `offset` 开始读取最多 `len` 字节到 `buf` 中。
+    /// 返回实际读取的字节数（<= len）。到达 EOF 时返回 0。
+    /// 偏移量管理由 `File` 层负责，此方法不更新 offset。
+    ///
+    /// # Locking
+    ///
+    /// 实现可能持有 inode 内部锁。调用者已将 `data`（`FilePrivateData`）
+    /// 锁传入，inode 实现不应在同一路径中再次获取同一把 inode 锁（`TicketMutex` 不可重入）。
+    ///
+    /// # Errors
+    ///
+    /// 默认返回 `ENOSYS`。具体实现按需返回 `EIO`、`EINVAL` 等。
     fn read_at(
         &self,
         _offset: usize,
@@ -60,17 +65,22 @@ pub trait IndexNode: Any + Send + Sync + Debug {
         Err(SyscallErr::ENOSYS)
     }
 
-    /// 在 inode 的指定偏移量处写入数据
+    /// 在 inode 的指定偏移量处写入数据。
     ///
-    /// # 参数
-    /// - `offset`: 写入起始位置
-    /// - `len`: 要写入的字节数
-    /// - `buf`: 源缓冲区
-    /// - `data`: 文件私有数据
+    /// # Semantics
     ///
-    /// # 返回
-    /// - 成功: `Ok(写入的字节数)`
-    /// - 失败: `Err(SyscallErr)`
+    /// 从 `offset` 开始写入 `len` 字节。返回值 < len 表示部分写入。
+    /// 偏移量管理由 `File` 层负责，此方法不更新 offset。
+    /// 写入可能触发 inode 大小扩展（具体由实现决定）。
+    ///
+    /// # Locking
+    ///
+    /// 与 `read_at` 相同的锁约束：不可在持有 inode 锁时通过 `File` 层
+    /// 回调到同一 inode 的其他方法。
+    ///
+    /// # Errors
+    ///
+    /// 默认返回 `ENOSYS`。挂载只读时返回 `EROFS`；空间不足返回 `ENOSPC`。
     fn write_at(
         &self,
         _offset: usize,
@@ -166,7 +176,16 @@ pub trait IndexNode: Any + Send + Sync + Debug {
 
     // ── 文件生命周期 ────────────────────────────────────────────────
 
-    /// 打开文件时调用
+    /// 打开文件时调用。
+    ///
+    /// # Semantics
+    ///
+    /// 在 `File::new()` 创建 fd 后立即调用，用于执行文件系统特定的打开逻辑
+    /// （如 ext4 的 truncate-on-open、设备文件的引用计数管理）。
+    ///
+    /// # Locking
+    ///
+    /// 调用时 `data`（`FilePrivateData`）锁已持有。实现应避免长时间持锁。
     fn open(
         &self,
         _data: MutexGuard<FilePrivateData>,
@@ -175,14 +194,28 @@ pub trait IndexNode: Any + Send + Sync + Debug {
         Ok(()) // 默认：无需特殊处理
     }
 
-    /// 关闭文件时调用
+    /// 关闭文件时调用。
+    ///
+    /// # Semantics
+    ///
+    /// 在最后一个引用释放时调用，用于执行资源清理（如减少设备引用计数、
+    /// 释放文件锁、写回脏页等）。
     fn close(&self, _data: MutexGuard<FilePrivateData>) -> Result<(), SyscallErr> {
         Ok(())
     }
 
     // ── 目录操作 ────────────────────────────────────────────────────
 
-    /// 在当前目录下查找名为 `name` 的子项
+    /// 在当前目录下查找名为 `name` 的子项。
+    ///
+    /// # Semantics
+    ///
+    /// 仅在当前目录范围内查找，不跨越挂载点边界。
+    /// 跨挂载点逻辑由 `MountFSInode::find()` 负责。
+    ///
+    /// # Errors
+    ///
+    /// 默认返回 `ENOSYS`。未找到返回 `ENOENT`；非目录 inode 返回 `ENOTDIR`。
     fn find(&self, _name: &str) -> Result<Arc<dyn IndexNode>, SyscallErr> {
         Err(SyscallErr::ENOSYS)
     }
@@ -208,7 +241,16 @@ pub trait IndexNode: Any + Send + Sync + Debug {
         Ok(result)
     }
 
-    /// 在当前目录下创建普通文件
+    /// 在当前目录下创建常规文件。
+    ///
+    /// # Semantics
+    ///
+    /// `file_type` 可以是 `File`、`Dir`、`SymLink` 等。`mode` 为 Unix 权限位。
+    /// 返回新创建的 inode 引用。
+    ///
+    /// # Errors
+    ///
+    /// 默认返回 `ENOSYS`。名称已存在返回 `EEXIST`；非目录 inode 返回 `ENOTDIR`。
     fn create(
         &self,
         _name: &str,
@@ -259,16 +301,40 @@ pub trait IndexNode: Any + Send + Sync + Debug {
         Ok(inode)
     }
 
-    /// 在当前目录下创建硬链接
+    /// 在当前目录下创建硬链接。
+    ///
+    /// # Semantics
+    ///
+    /// 将 `other` inode 以 `name` 为名链接到当前目录下。
+    /// 成功后 `other` 的 `nlinks` 计数增加 1。
+    ///
+    /// # Errors
+    ///
+    /// 默认返回 `ENOSYS`。名称已存在返回 `EEXIST`；跨文件系统链接返回 `EXDEV`。
     fn link(&self, _name: &str, _other: &Arc<dyn IndexNode>) -> Result<(), SyscallErr> {
         Err(SyscallErr::ENOSYS)
     }
 
-    /// 重命名/移动文件或目录到另一个位置
-    /// - `old_name`: 当前目录下的源文件名
-    /// - `new_parent`: 目标目录
-    /// - `new_name`: 目标目录下的新文件名
-    /// - `flags`: renameat2 flags (RENAME_NOREPLACE, etc.); per-FS handles overwrite
+    /// 重命名/移动文件或目录到另一个位置。
+    ///
+    /// # Semantics
+    ///
+    /// - `old_name`：当前目录下的源文件名
+    /// - `new_parent`：目标目录
+    /// - `new_name`：目标目录下的新文件名
+    /// - `flags`：`renameat2` flags（`RENAME_NOREPLACE`、`RENAME_EXCHANGE` 等）；
+    ///   具体覆盖逻辑由各文件系统处理。
+    ///
+    /// 默认实现：link + unlink（不支持 `RENAME_NOREPLACE` 语义）。
+    ///
+    /// # Locking
+    ///
+    /// 实现应确保跨目录 rename 时 dentry cache 一致性。ext4 实现需要 dentry_gen
+    /// 版本号递增以失效并发 find 路径的 stale entry。
+    ///
+    /// # Errors
+    ///
+    /// `ENOENT`（源不存在）、`ENOTDIR`（非目录）、`EXDEV`（跨文件系统）。
     fn rename(
         &self,
         old_name: &str,
@@ -282,7 +348,16 @@ pub trait IndexNode: Any + Send + Sync + Debug {
         self.unlink(old_name)
     }
 
-    /// 在当前目录下删除名为 `name` 的硬链接
+    /// 在当前目录下删除名为 `name` 的硬链接。
+    ///
+    /// # Semantics
+    ///
+    /// 将 `name` 的链接计数减 1。当链接计数降为 0 且无进程持有 fd 时，
+    /// 文件数据块可被回收。
+    ///
+    /// # Errors
+    ///
+    /// 默认返回 `ENOSYS`。名称不存在返回 `ENOENT`；是目录返回 `EISDIR`。
     fn unlink(&self, _name: &str) -> Result<(), SyscallErr> {
         Err(SyscallErr::ENOSYS)
     }
@@ -340,10 +415,25 @@ pub trait IndexNode: Any + Send + Sync + Debug {
 
     // ── 文件系统引用 ────────────────────────────────────────────────
 
-    /// 获取此 inode 所属的文件系统
+    /// 获取此 inode 所属的文件系统。
+    ///
+    /// # Semantics
+    ///
+    /// 返回的 `FileSystem` 引用必须与 inode 生命周期一致。
+    /// 用于跨文件系统操作（如 statfs、挂载点定位）。
     fn fs(&self) -> Arc<dyn super::file_system::FileSystem>;
 
-    /// 获取此 inode 的 page cache（如果有）。只读查询，不创建新 cache。
+    /// 获取此 inode 的 page cache（如果有）。
+    ///
+    /// # Semantics
+    ///
+    /// 只读查询，不创建新 cache。仅当 inode 已有 PageCache 时返回 `Some`。
+    /// 用于回写、回收、统计等读取路径——不应触发缓存创建。
+    ///
+    /// # Locking
+    ///
+    /// 实现不应在返回 `Option` 时持有 inode 内部锁（避免与 PageCache 的
+    /// entries → inner 锁顺序冲突）。
     fn page_cache(&self) -> Option<Arc<super::super::page_cache::PageCache>> {
         None
     }
@@ -357,7 +447,16 @@ pub trait IndexNode: Any + Send + Sync + Debug {
 
     // ── 其他操作 ────────────────────────────────────────────────────
 
-    /// I/O 控制
+    /// I/O 控制。
+    ///
+    /// # Semantics
+    ///
+    /// 对标 Linux `ioctl(2)`。`cmd` 为设备特定命令，`data` 为用户空间指针。
+    /// 返回值 >= 0 表示成功，负值为 errno。
+    ///
+    /// # Errors
+    ///
+    /// 默认返回 `ENOSYS`。不支持的 `cmd` 返回 `EINVAL` 或 `ENOTTY`。
     fn ioctl(
         &self,
         _cmd: u32,
@@ -367,8 +466,17 @@ pub trait IndexNode: Any + Send + Sync + Debug {
         Err(SyscallErr::ENOSYS)
     }
 
-    /// 返回读端等待队列（可选）
-    /// 仅需要阻塞读的设备（Pipe、TTY、Socket 等）需要实现此方法。
+    /// 返回读端等待队列（可选）。
+    ///
+    /// # Semantics
+    ///
+    /// 仅需要阻塞读的设备（Pipe、TTY、Socket 等）实现此方法。
+    /// `File::read()` 在遇到 `EAGAIN` 时，将当前任务加入此队列等待数据。
+    ///
+    /// # Locking
+    ///
+    /// 返回的 `WaitQueue` 引用在 inode 生命周期内有效。唤醒路径不得在持有
+    /// inode 内部锁时操作此队列（防止锁顺序反转）。
     fn read_wait_queue(&self) -> Option<&spin::Mutex<crate::task::WaitQueue>> {
         None
     }
@@ -379,8 +487,16 @@ pub trait IndexNode: Any + Send + Sync + Debug {
         None
     }
 
-    /// 返回写端等待队列（可选）
-    /// 仅需要阻塞写的设备（Pipe、Socket 等）需要实现此方法。
+    /// 返回写端等待队列（可选）。
+    ///
+    /// # Semantics
+    ///
+    /// 仅需要阻塞写的设备（Pipe、Socket 等）实现此方法。
+    /// `File::write()` 在遇到 `EAGAIN` 时，将当前任务加入此队列等待缓冲区空间。
+    ///
+    /// # Locking
+    ///
+    /// 与 `read_wait_queue` 相同的锁约束。
     fn write_wait_queue(&self) -> Option<&spin::Mutex<crate::task::WaitQueue>> {
         None
     }
@@ -390,7 +506,17 @@ pub trait IndexNode: Any + Send + Sync + Debug {
         None
     }
 
-    /// 轮询（poll/select/epoll）
+    /// 轮询（poll/select/epoll）。
+    ///
+    /// # Semantics
+    ///
+    /// 返回文件当前就绪的事件位掩码（`EPollEvent`）。由 `File::poll_events()`
+    /// 调用，epoll/poll/select 通过返回值判断 fd 是否可读/可写。
+    /// 普通文件默认返回 `EPOLLIN | EPOLLOUT`（始终就绪）。
+    ///
+    /// # Errors
+    ///
+    /// 默认返回 `ENOSYS`，`File` 层会 fallback 为始终就绪。
     fn poll(&self, _private_data: &FilePrivateData) -> Result<usize, SyscallErr> {
         Err(SyscallErr::ENOSYS)
     }

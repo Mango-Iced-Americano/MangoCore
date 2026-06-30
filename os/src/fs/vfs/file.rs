@@ -480,7 +480,7 @@ impl FdTable {
         self.fds[fd].as_ref().map(|f| &**f).ok_or(SyscallErr::EBADF)
     }
 
-    /// 获取 close_on_exec 标志
+    /// 返回 `fd` 的 `close_on_exec` 标志；若 `fd` 越界则返回 `false`。
     #[inline]
     pub fn get_cloexec(&self, fd: usize) -> bool {
         if fd >= self.cloexec.len() {
@@ -489,7 +489,7 @@ impl FdTable {
         self.cloexec[fd]
     }
 
-    /// 设置 close_on_exec 标志
+    /// 设置 `fd` 的 `close_on_exec` 标志；若 `fd` 越界则返回 `EBADF`。
     #[inline]
     pub fn set_cloexec(&mut self, fd: usize, val: bool) -> Result<(), SyscallErr> {
         if fd >= self.cloexec.len() {
@@ -499,6 +499,8 @@ impl FdTable {
         Ok(())
     }
 
+    /// 关闭 `[first, last]` 范围内的所有 fd（`fds[i]` 置 `None`，`cloexec[i]` 置 `false`）。
+    /// 若成功将 `next_fd` 回退到 `first`，以便后续 `alloc_fd` 复用低编号 fd。
     pub fn close_range(&mut self, first: usize, last: usize) {
         if first >= self.fds.len() {
             return;
@@ -513,6 +515,7 @@ impl FdTable {
         }
     }
 
+    /// 对 `[first, last]` 范围内所有已打开的 fd 设置 `close_on_exec` 标志为 `true`。
     pub fn set_cloexec_range(&mut self, first: usize, last: usize) {
         if first >= self.fds.len() {
             return;
@@ -533,7 +536,7 @@ impl FdTable {
             .filter_map(|(i, f)| f.as_ref().map(|f| (i, &**f)))
     }
 
-    /// 获取 fd 数量
+    /// 返回当前已打开的 fd 数量（`fds` 中非 `None` 的条目数，O(n) 扫描）。
     pub fn fd_count(&self) -> usize {
         self.fds.iter().filter(|f| f.is_some()).count()
     }
@@ -548,7 +551,8 @@ impl FdTable {
         self.fds.capacity()
     }
 
-    /// 获取 lock_owner_id
+    /// 返回 POSIX 文件锁的所有者 ID（用于 `release_posix_for_owner`）。
+    /// 该 ID 在 `fork()` 时通过 `try_clone()` 被继承并递增。
     pub fn lock_owner_id(&self) -> usize {
         self.lock_owner_id
     }
@@ -613,8 +617,25 @@ impl Drop for FdTable {
 
 /// 文件结构体
 ///
-/// 封装一个 `IndexNode`，管理 per-fd 状态。
+/// 封装一个 `IndexNode`，管理 per-fd 状态：
+/// - 文件偏移量（`AtomicUsize`，跨 `dup` fd 共享）
+/// - 打开标志（`AtomicU32`，`fcntl(F_SETFL)` 只改状态位）
+/// - 文件访问模式和类型
+/// - POSIX 文件锁键
+///
 /// 对标 DragonOS `kernel/src/filesystem/vfs/file.rs` 的 `File`。
+///
+/// # Locking
+///
+/// - `private_data`：`Mutex<FilePrivateData>`，由 `File::read/write` 在调用
+///   `IndexNode::read_at/write_at` 期间持有
+/// - `owner`：`Mutex<FileOwner>`，由 fcntl(F_SETOWN) 路径短暂持有
+/// - `offset`：`AtomicUsize`，无锁，`SeqCst` 以保证可见性
+///
+/// # Arc model
+///
+/// `dup` fd 共享同一个 `Arc<File>`，因此状态标志（`O_NONBLOCK`、`O_APPEND`）
+/// 按 POSIX 语义正确共享。
 pub struct File {
     /// 对应的 inode
     pub inode: Arc<dyn IndexNode>,
@@ -654,6 +675,10 @@ impl fmt::Debug for File {
     }
 }
 
+/// 用于 poll/epoll 等待的轻量句柄。
+///
+/// 持有 `_inode: Arc<dyn IndexNode>` 以保证 inode 在等待期间存活，
+/// `queue` 原始指针随该 `Arc` 的生命周期保持有效。
 pub struct PollWaitQueue {
     _inode: Arc<dyn IndexNode>,
     queue: *const Mutex<WaitQueue>,
@@ -663,16 +688,30 @@ impl PollWaitQueue {
     pub fn queue(&self) -> &Mutex<WaitQueue> {
         // `PollWaitQueue` keeps the inode Arc alive, so the queue reference
         // returned by `IndexNode` remains valid for this poll wait cycle.
+        // Safety: `self._inode` is an `Arc` that guarantees the `IndexNode`
+        // is alive. The `queue` pointer was obtained from that inode and is
+        // stable for the lifetime of the `Arc`.
         unsafe { &*self.queue }
     }
 }
 
+/// 用于 epoll / eventfd / signalfd / pidfd 的轻量句柄。
+///
+/// 持有 `_inode: Arc<dyn IndexNode>` 以保证 inode 在等待期间存活，
+/// `queue` 原始指针随该 `Arc` 的生命周期保持有效。
+/// 实现 `Send + Sync`：`Arc` 提供线程安全的引用计数，`queue` 指向的
+/// `EventWaitQueue` 由 inode 内部管理，生命周期与 `Arc` 绑定。
 #[derive(Clone)]
 pub struct EventQueueHandle {
     _inode: Arc<dyn IndexNode>,
     queue: *const EventWaitQueue,
 }
 
+// Safety: `EventQueueHandle` holds an `Arc<dyn IndexNode>` which ensures the
+// inode (and thus its `EventWaitQueue`) stays alive. The raw `queue` pointer
+// is only used to obtain a shared reference (via `&*self.queue`) whose lifetime
+// is bounded by the enclosing function scope. No mutation is performed through
+// the pointer. Therefore `Send` and `Sync` are safe to implement.
 unsafe impl Send for EventQueueHandle {}
 unsafe impl Sync for EventQueueHandle {}
 
@@ -680,12 +719,24 @@ impl EventQueueHandle {
     pub fn queue(&self) -> &EventWaitQueue {
         // `EventQueueHandle` keeps the inode Arc alive, so the queue reference
         // returned by `IndexNode` remains valid for this poll/epoll cycle.
+        // Safety: same invariant as `PollWaitQueue` — `_inode` is an `Arc`
+        // guaranteeing the `EventWaitQueue` is alive and the pointer is stable.
         unsafe { &*self.queue }
     }
 }
 
 impl File {
-    /// 根据 inode 创建新 File，返回 Arc<Self>
+    /// 根据 inode 创建新 File，返回 `Arc<Self>`。
+    ///
+    /// # Semantics
+    ///
+    /// 从 `flags` 推导 `FileMode`，设置 `open_file_id`，初始化 `private_data`
+    /// （普通文件分配 `RaState`），最后调用 `inode.open()`。
+    /// 如果 fd 可写，通过 `register_writable_inode` 注册可写 inode 以支持 writeback。
+    ///
+    /// # Errors
+    ///
+    /// `inode.open()` 失败透传错误（如 `EPERM`）。
     pub fn new(inode: Arc<dyn IndexNode>, flags: FileFlags) -> Result<Arc<Self>, SyscallErr> {
         // 推导 mode
         let mut mode = FileMode::FMODE_LSEEK | FileMode::FMODE_PREAD | FileMode::FMODE_PWRITE;
@@ -982,7 +1033,18 @@ impl File {
 
     // ── 读取 ───────────────────────────────────────────────────────
 
-    /// 从文件当前位置读取（并推进 offset）
+    /// 从文件当前位置读取（并推进 offset）。
+    ///
+    /// # Semantics
+    ///
+    /// 调用 `inode.read_at(offset, len, buf, data)` 读取数据。
+    /// 流式文件（pipe/socket）固定 offset=0 且不推进 offset。
+    /// 普通文件读取后通过 `fetch_add` 推进 offset。
+    ///
+    /// # Errors
+    ///
+    /// - `EBADF`：不可读（`FMODE_PATH` 或缺少 `FMODE_READ`）
+    /// - 其他错误由 `inode.read_at()` 透传
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, SyscallErr> {
         self.readable()?;
         let len = buf.len();
@@ -1017,7 +1079,19 @@ impl File {
 
     // ── 写入 ───────────────────────────────────────────────────────
 
-    /// 从文件当前位置写入（并推进 offset）
+    /// 从文件当前位置写入（并推进 offset）。
+    ///
+    /// # Semantics
+    ///
+    /// - `O_APPEND`：写入到文件末尾，忽略当前 offset
+    /// - 流式文件：固定 offset=0
+    /// - 写入后调用 `touch_modified()` 更新 mtime/ctime
+    ///
+    /// # Errors
+    ///
+    /// - `EBADF`：不可写（`FMODE_PATH` 或缺少 `FMODE_WRITE`）
+    /// - `EPERM`：`memfd` 写入封条已设置
+    /// - 其他错误由 `inode.write_at()` 透传
     pub fn write(&self, buf: &[u8]) -> Result<usize, SyscallErr> {
         self.writable()?;
         let flags = self.flags();
@@ -1104,6 +1178,8 @@ impl File {
             Err(SyscallErr::ENOSYS) => {
                 let mut kbuf = Vec::new();
                 kbuf.try_reserve(len).map_err(|_| SyscallErr::ENOMEM)?;
+                // Safety: `try_reserve(len)` succeeded, guaranteeing capacity >= len.
+                // The uninitialized memory is immediately filled by `read_at` below.
                 unsafe { kbuf.set_len(len); }
                 let n = self
                     .inode
@@ -1138,6 +1214,8 @@ impl File {
             Err(SyscallErr::ENOSYS) => {
                 let mut kbuf = Vec::new();
                 kbuf.try_reserve(len).map_err(|_| SyscallErr::ENOMEM)?;
+                // Safety: `try_reserve(len)` succeeded, guaranteeing capacity >= len.
+                // The uninitialized memory is immediately filled by `read_at` below.
                 unsafe { kbuf.set_len(len); }
                 let n = self
                     .inode
@@ -1188,6 +1266,8 @@ impl File {
             Err(SyscallErr::ENOSYS) => {
                 let mut kbuf = Vec::new();
                 kbuf.try_reserve(len).map_err(|_| SyscallErr::ENOMEM)?;
+                // Safety: `try_reserve(len)` succeeded, guaranteeing capacity >= len.
+                // The uninitialized memory is immediately filled by `src.read_at` below.
                 unsafe { kbuf.set_len(len); }
                 let copied = src.read_at(0, &mut kbuf);
                 let n = self.inode.write_at(
@@ -1244,6 +1324,8 @@ impl File {
             Err(SyscallErr::ENOSYS) => {
                 let mut kbuf = Vec::new();
                 kbuf.try_reserve(len).map_err(|_| SyscallErr::ENOMEM)?;
+                // Safety: `try_reserve(len)` succeeded, guaranteeing capacity >= len.
+                // The uninitialized memory is immediately filled by `src.read_at` below.
                 unsafe { kbuf.set_len(len); }
                 let copied = src.read_at(0, &mut kbuf);
                 let n = self.inode.write_at(
@@ -1366,7 +1448,16 @@ impl File {
 
     /// 统一 poll 事件检查。
     ///
-    /// 还没有实现 poll 的普通文件保持旧行为：默认读写均就绪。
+    /// # Semantics
+    ///
+    /// 委托给 `inode.poll()` 获取当前就绪事件位掩码。
+    /// 尚未实现 `poll` 的普通文件保持旧行为：默认读写均就绪
+    /// （`EPOLLIN | EPOLLOUT | EPOLLRDNORM | EPOLLWRNORM`）。
+    ///
+    /// # Locking
+    ///
+    /// 在 `private_data` 锁内调用 `inode.poll()`。实现应避免在此闭包中
+    /// 获取该 inode 的内部锁（非重入风险）。
     pub fn poll_events(&self) -> super::event::EPollEvent {
         match self.inode.poll(&*self.private_data.lock()) {
             Ok(revents) => super::event::EPollEvent::from_bits_truncate(revents),
@@ -1609,6 +1700,9 @@ impl File {
             )
             .unwrap();
 
+        // Safety: the frames were just mapped into kernel space at `base` via
+        // `insert_program_area` above, so `[base, base+size)` is a valid,
+        // writable kernel address range for the lifetime of this borrow.
         unsafe { core::slice::from_raw_parts_mut(base as *mut u8, size) }
     }
 
