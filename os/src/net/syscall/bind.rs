@@ -42,6 +42,30 @@ fn ipv4_endpoint_from_unspec_sockaddr(addr_buf: &[u8]) -> Option<Endpoint> {
     Some(Endpoint::Ip(IpEndpoint::new(IpAddress::Ipv4(ip), port)))
 }
 
+/// 将 socket 绑定到本地地址。
+///
+/// # Semantics
+///
+/// 校验 `addrlen` 后解析 `sockaddr` → `Endpoint`，按地址族分发：
+/// - `Ip`：检查 `is_local_bind_addr`（仅允许本地/环回/通配地址），特权端口检查
+///   （`CAP_NET_BIND_SERVICE`），调用 `PortManager::bind_port` 注册。
+/// - `Unix`：创建 socket 文件（`Path`）或注册抽象命名空间（`Abstract`），
+///   失败时回滚 `PATH_TABLE` 条目。
+/// - `Netlink`/`Packet`/`Unspecified`：直接委托 `socket.bind()`。
+///
+/// # Errors
+///
+/// - `-EINVAL`：`addrlen` 超限（`>512`）或抽象名称为空/过长。
+/// - `-EFAULT`：用户态 `addr` 非法。
+/// - `-EADDRNOTAVAIL`：尝试绑定非本地 IP 地址。
+/// - `-EACCES`：非 root 进程绑定特权端口（`<1024`）且无 `CAP_NET_BIND_SERVICE`。
+/// - `-EADDRINUSE`：Unix path socket 文件已存在。
+/// - `-EAFNOSUPPORT`：IP socket 绑定 Unix 端点（通过 `local_endpoint` 预检）。
+///
+/// # Linux Compatibility
+///
+/// 特权端口检查使用 `CAP_NET_BIND_SERVICE` 而非传统的 `uid==0` 检查 ——
+/// 两者的行为等价于 Linux 6.6。
 pub fn sys_bind(sockfd: u32, addr: usize, addrlen: u32) -> isize {
     match check_addrlen(addrlen) {
         Ok(_) => {}

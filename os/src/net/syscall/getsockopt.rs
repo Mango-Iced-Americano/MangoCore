@@ -8,6 +8,30 @@ use super::common::is_known_sockopt_level;
 use super::common::{SOL_IP, SOL_IPV6, SOL_SOCKET, SOL_TCP, TCP_CONGESTION, TCP_INFO, TCP_MAXSEG};
 use super::common::{SO_RCVBUF, SO_RCVTIMEO, SO_REUSEADDR, SO_SNDBUF, SO_SNDTIMEO, SO_PEERCRED, SO_ERROR, IPV6_RECVPKTINFO};
 
+/// 查询 socket 选项值。
+///
+/// # Semantics
+///
+/// 按 `(level, optname)` 分发到对应读取逻辑。
+/// 支持的选项：
+/// - `SOL_SOCKET`：`SO_ERROR`（读并清除 pending error）、`SO_SNDBUF`/`SO_RCVBUF`、
+///   `SO_REUSEADDR`、`SO_PEERCRED`（`pid,uid,gid` = 12 bytes）、
+///   `SO_RCVTIMEO`/`SO_SNDTIMEO`（返回零值 `TimeVal`）。
+/// - `SOL_TCP`：`TCP_MAXSEG`（返回 `TCP_MSS`）、`TCP_INFO`（返回 `TcpInfo` 结构体）、
+///   `TCP_CONGESTION`（返回 `"reno"`）。
+/// - `SOL_IPV6`：`IPV6_RECVPKTINFO`（返回 0）。
+///
+/// # Errors
+///
+/// - `-EFAULT`：`optval_ptr_ == 0` 或 `optlen == 0`。
+/// - `-EINVAL`：`*optlen_val < 4`。
+/// - `-ENOPROTOOPT`：已知 `level` 但未知 `optname`。
+/// - `-EOPNOTSUPP`：`level` 与 socket 类型不兼容。
+///
+/// # Linux Compatibility
+///
+/// 错误码区分逻辑与 Linux 6.6 一致：已知 level + 未知 optname → `ENOPROTOOPT`；
+/// 未知 level 或 level 不兼容 → `EOPNOTSUPP`。
 pub fn sys_getsockopt(
     sockfd: u32,
     level: u32,
@@ -47,7 +71,7 @@ pub fn sys_getsockopt(
             }
         }
         (SOL_TCP, TCP_MAXSEG) => {
-            // return max tcp fregment size (MSS)
+            // return max TCP segment size (MSS)
             let len = core::mem::size_of::<u32>();
             if optval_ptr.write(token, &TCP_MSS).is_err()
                 || optlen_ptr.write(token, &(len as u32)).is_err()
@@ -63,6 +87,9 @@ pub fn sys_getsockopt(
                 Ok(writer) => writer,
                 Err(_) => return -(SyscallErr::EFAULT as isize),
             };
+            // Safety: `&info` is a valid reference with lifetime lasting through the write.
+            // `from_raw_parts` views the `TcpInfo` struct as bytes; `info_len` matches
+            // `size_of::<TcpInfo>()`, so the slice is well-formed and write_from is safe.
             let info_bytes = unsafe {
                 core::slice::from_raw_parts(&info as *const TcpInfo as *const u8, info_len)
             };
@@ -160,6 +187,8 @@ pub fn sys_getsockopt(
                 Ok(writer) => writer,
                 Err(_) => return -(SyscallErr::EFAULT as isize),
             };
+            // Safety: `&timeout` is a valid reference with lifetime through the write.
+            // `len` equals `size_of::<TimeVal>()`, so the byte-slice view is well-formed.
             let bytes = unsafe {
                 core::slice::from_raw_parts(&timeout as *const TimeVal as *const u8, len)
             };
