@@ -350,7 +350,8 @@ impl Connecting {
             let ideal = if matches!(state, tcp::State::Established | tcp::State::CloseWait) {
                 ConnectResult::Connected
             } else if socket.is_open() {
-                // 注意：is_open() 在 SynSent/FinWait 等状态为 true，这些阶段仍为 Connecting
+                // State nuance: `is_open()` 在 `SynSent`/`FinWait` 等中间态返回 `true`，
+                // 但这些阶段连接尚未完成，仍应视为 `Connecting`。
                 ConnectResult::Connecting
             } else if was_established {
                 // 曾经建立过，后来关闭（非拒绝）
@@ -846,7 +847,6 @@ impl Inner {
         }
     }
 
-    /// 获取发送缓冲区大小
     pub fn send_buffer_size(&self) -> usize {
         match self {
             Inner::Closed(_) => 0,
@@ -861,7 +861,6 @@ impl Inner {
         }
     }
 
-    /// 获取接收缓冲区大小
     pub fn recv_buffer_size(&self) -> usize {
         match self {
             Inner::Closed(_) => 0,
@@ -876,7 +875,6 @@ impl Inner {
         }
     }
 
-    /// 关闭 socket
     pub fn close(&self) {
         match self {
             Inner::Init(init) => match init {

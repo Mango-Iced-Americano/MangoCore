@@ -41,7 +41,149 @@
 - 检查 `docs/` 中相关源码路径引用，本次未移动/重命名代码路径，未发现需要同步修改的 `code_paths` frontmatter。
 - 审阅 LoongArch timer register 注释时发现 `os/src/hal/arch/loongarch64/register/timer/tcfg.rs::is_enabled()` 的实现与公开手册常见 bit 语义可能存在方向差异；本次仅记录风险，未在注释重构中改动运行逻辑，后续可单独做语义审计。
 
-### docs: 新增代码注释规范文档
+### fs: 第二阶段注释清理 — Safety / 口语化 / 低信息量 / TODO 标准化
+
+**涉及文件：**
+
+- `os/src/fs/page_cache.rs` — 模块头"注意" → `# Limitations`；移除/重写 15 处低信息量 getter/setter 文档（`new`、`set_backend`、`page_count` 等）；"就是零" → 不变式陈述；"注意" → `// Invariant:` 格式
+- `os/src/fs/vfs/file_system.rs` — "暂不需要" → 具体的不支持条件 + exit condition；"对标" → "参考"；重写 `root_inode`/`info`/`name`/`super_block` 文档注明语义/默认实现
+- `os/src/fs/vfs/file.rs` — 为 `PollWaitQueue`/`EventQueueHandle` 添加结构体 rustdoc；为 `unsafe impl Send/Sync` 添加 Safety 文档；为 4 处 `set_len` 和 `from_raw_parts_mut` 添加 `// Safety:`；移除 `get_cloexec`/`set_cloexec`/`fd_count`/`lock_owner_id` 的低信息量文档并重写；为 `close_range`/`set_cloexec_range` 添加 rustdoc
+- `os/src/fs/inode.rs` — 为 `InodeLock`/`InodeTime` 添加 rustdoc；重写 6 处 getter/setter 文档注明时间语义（纳秒、单调时钟）
+- `os/src/fs/filesystem.rs` — 为 `FS_Type`/`FileSystem`/`new`/`detect_fs`/`pre_mount` 添加 rustdoc
+- `os/src/fs/ext4/block_group.rs` — "暂时" → 算法不变式解释；"暂时先使用2048" → 块大小硬编码理由；为 8 处 `unsafe`（`from_raw_parts`/`transmute`/`read_unaligned`/`read_as_mut`）添加 `// Safety:`；移除 panic 中的 `[todo fix ...]`；删除 `///` 伪代码注释
+- `os/src/fs/ext4/direntry.rs` — 为 6 处 `unsafe`（union 访问/`from_raw_parts`/`copy_nonoverlapping`）添加 `// Safety:`；"Debug: dump" → `DIAGNOSTIC(ext4-dir-lookup)`；"非法目录项" → 英文；"go ot" → "go to"；"chidren" → "children"；"to do" → `TODO(ext4-dir-remove):` + exit condition
+- `os/src/fs/ext4/ext4_inode.rs` — `todo!()` → `TODO(ext4-root-inode):` + exit condition；删除 `// todo!();` 死代码注释；为 12 处 `unsafe`（extent header/index 指针转换/`from_raw_parts`/`copy_nonoverlapping`）添加 `// Safety:`；"【关键修改】" → 英文技术描述
+- `os/src/fs/ext4/ext4fs.rs` — 为 2 处 `asm!` 添加 Safety 文档；为 4 处 `from_raw_parts` 添加 `// Safety:`；"// todo get this path's parent" → `TODO(ext4-dir-mk):` + exit condition；"注意：" → `# Semantics` 小节
+- `os/src/fs/ext4/extent.rs` — 为 12 处 `unsafe`（`load_from_u32`/`load_from_u8` 系列）添加 `// Safety:`；为 `transmute`/`copy_nonoverlapping`/`*ptr` 裸指针添加 Safety 文档；"// todo" → `TODO(ext4-extent-remove):` + exit condition
+- `os/src/fs/ext4/file.rs` — "// todo: chgtime" → `TODO(ext4-inode-timestamps):` + exit condition；为 `write_bytes` 不安全清零添加 `// Safety:`
+- `os/src/fs/ext4/mod.rs` — 删除残留的已注释 `EXT4_INODE_BLOCK_SIZE` 常量
+- `os/src/fs/ext4/superblock.rs` — "也就是说" → 英文技术描述；为 3 处 `from_raw_parts` 添加 `// Safety:`
+- `os/src/fs/fat32/bitmap.rs` — "也就是说" → `# Limitations` 带 exit condition
+- `os/src/fs/fat32/layout.rs` — MSWIN4.1 "一般不鸟" → 中性兼容说明；"好吧" / "随便选" → 确定性伪随机种子说明
+- `os/src/fs/fat32/fat_inode.rs` — "// todo!" → `TODO(fat32-inode-drop):` + exit condition；重写构造函数文档注明 `fst_clus: 0` 语义和目录 size 处理
+
+**统计：** 约 90 处注释修改，覆盖 16 个文件，全部仅改注释未改功能代码
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+
+### net: 第二阶段注释清理 — 死代码删除 / Safety / Locking / HACK 格式化 / 文档补全
+
+**涉及文件：**
+- `os/src/net/adapter.rs` — 删除 4 处死注释代码块（废弃 import、buffer/OOM/oversize guard 注释）
+- `os/src/net/syscall/getsockopt.rs` — 修正 typo `fregment` → `fragment`；为 2 处 `from_raw_parts` 添加 `// Safety:`
+- `os/src/net/syscall/recvfrom.rs` — workaround 说明转为标准 `HACK(uaccess-contiguity):` 格式（含 Reference / Remove when）；UDP 零长度数据报路径注释修正；match fallback 的 `todo!()` 替换为 TODO + 真实 errno
+- `os/src/net/syscall/recvmsg.rs` — 为 `sys_recvmsg` 添加 `# Semantics`/`# Errors`/`# Linux Compatibility`；添加 WaitQueue Locking 契约 + Safety 注释
+- `os/src/net/syscall/sendmsg.rs` — 为 `sys_sendmsg` 添加完整 rustdoc；添加 WaitQueue Locking 契约 + Safety 注释
+- `os/src/net/syscall/sendto.rs` — match fallback 的 `todo!()` 替换为 TODO + 真实 errno
+- `os/src/net/socket/inet/common/address.rs` — 为 `read_sockaddr` 的 `from_raw_parts` 添加 Safety 注释
+- `os/src/net/socket/inet/stream/mod.rs` — 为 `unsafe impl Send/Sync for TcpSocket` 添加 Safety 说明
+- `os/src/net/socket/inet/stream/inner.rs` — "注意" → "State nuance:" + 结构化语义说明；删除 3 个低信息 getter/close 文档
+- `os/src/net/socket/inet/datagram/udp.rs` — `todo!()` 转为 `TODO(udp-send-to):` + exit condition
+- `os/src/net/socket/inet/raw/raw.rs` — `todo!()` 转为 `TODO(raw-shutdown):` + exit condition
+- `os/src/net/socket/unix/datagram/mod.rs` — 模块文档替换为真实状态；`todo!()` 转为 TODO；删除低信息 `new()` 文档；"同上"改为完整描述
+- `os/src/net/socket/unix/stream/mod.rs` — 模块文档替换为真实状态；删除低信息 `new()` 文档；`wake_wait_queues` 展开为四列表格
+- `os/src/net/socket/unix/ns/mod.rs` — 删除 stale 注释 struct；添加模块文档 + 7 个 pub 项 rustdoc
+- `os/src/net/socket/unix/ring_buffer.rs` — `# 注意` → `# Limitations`；删除 6 个低信息 getter 注释；shutdown 方法补充 memory ordering 契约
+
+**验证：**
+- `make rv64-kernel-build-only` ✅（修复了预存的 `recvfrom.rs` 闭包类型不匹配错误）
+- `make la64-kernel-build-only` ✅
+
+
+### fs: 规范化 `os/src/fs/` 注释，对齐代码注释规范
+
+**涉及文件：**
+- `os/src/fs/page_cache.rs` — 为 `evict_clean_pages_clock`、`get_page_for_read`、`get_page_for_write`、`frame_for_read`、`frame_for_write` 添加 `# Locking` / `# Semantics` / `# Errors` 文档
+- `os/src/fs/ext4/mod.rs` — 转换 TODO 注释为标准 `TODO(ext4-path):` 格式，附带 exit condition
+- `os/src/fs/ext4/ext4_inode.rs` — 转换 `// FIXME: unsupported filetype` 为标准 `FIXME(ext4-inode):` 格式（含风险描述）；保留 ext4 磁盘格式字段注释
+- `os/src/fs/vfs/index_node.rs` — 为 `read_at`、`write_at`、`open`、`close`、`find`、`create`、`link`、`unlink`、`rename`、`fs`、`page_cache`、`read_wait_queue`、`write_wait_queue`、`ioctl`、`poll` 共 15 个 trait 方法添加 `# Semantics` / `# Errors` / `# Locking` 标准小节
+- `os/src/fs/vfs/file.rs` — 为 `File` 结构体添加 `# Locking` / `# Arc model` 文档；为 `new`、`read`、`write`、`poll_events` 添加 `# Semantics` / `# Errors` 文档
+- `os/src/fs/vfs/file_system.rs` — 将"精简版"口语化注释替换为 `# Limitations` 标准小节，明确列出未实现的高级特性
+- `os/src/fs/vfs/mount.rs` — 为 `mount_subtree_inner`、`add_mount`、`umount` 添加 `# Locking` 文档，说明锁获取顺序和 ABBA 死锁风险
+- `os/src/fs/dev/urandom.rs` — 转换 `// TODO: 实现真正的随机数生成` 为标准 `TODO(rng):` 格式，附带 exit condition
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：**
+- 纯注释修改，零功能代码变更。注释风格严格遵循 `docs/00_overview/code-comment-style.md` 规范
+- 中文叙述性描述 + 英文反引号包裹标识符/errno/syscall
+- TODO/FIXME 项统一采用 `TODO(<scope>): <action>. Exit condition: <condition>.` / `FIXME(<scope>): <bug>. Risk: <impact>.` 格式
+- sysfs 目录（`os/src/fs/sysfs/`）注释状态良好，无需修改
+
+### net: 规范化 `os/src/net/` 注释，对齐代码注释规范
+
+**涉及文件：**
+- `os/src/net/syscall/socket.rs` — 为 `sys_socket` 添加 `# Semantics`, `# Errors`, `# Linux Compatibility` 文档
+- `os/src/net/syscall/bind.rs` — 为 `sys_bind` 添加完整文档（Privileged Port, Unix bind 回滚, EAFNOSUPPORT 预检）
+- `os/src/net/syscall/connect.rs` — 为 `sys_connect` 添加阻塞/非阻塞模型、`EINPROGRESS` 语义文档
+- `os/src/net/syscall/listen.rs` — 为 `sys_listen` 添加 backlog 简化实现说明
+- `os/src/net/syscall/accept.rs` — 为 `sys_accept` 添加 WaitQueue Locking 约束（poll 不能放入闭包）、`ACCEPT_WAITER_COUNT` 优化说明
+- `os/src/net/syscall/sendto.rs` — 为 `sys_sendto` 添加 Stream/Datagram/Raw 分发逻辑、`try_poll()` 防 livelock 约束
+- `os/src/net/syscall/recvfrom.rs` — 为 `sys_recvfrom` 添加非阻塞 fast path、`trans_refmut!` 跨页 workaround 说明
+- `os/src/net/syscall/getsockname.rs` — 为 `sys_getsockname` 添加参数验证优先级（Linux 语义）
+- `os/src/net/syscall/getpeername.rs` — 为 `sys_getpeername` 添加 `prevalidate_xxx` 顺序和 `getpeername01` 测试期望
+- `os/src/net/syscall/setsockopt.rs` — 为 `sys_setsockopt` 添加支持的选项列表和 errno 语义（`ENOPROTOOPT`）
+- `os/src/net/syscall/getsockopt.rs` — 为 `sys_getsockopt` 添加支持的选项列表和 `ENOPROTOOPT` vs `EOPNOTSUPP` 区分逻辑
+- `os/src/net/syscall/shutdown.rs` — 为 `sys_sock_shutdown` 添加简洁文档
+- `os/src/net/syscall/socketpair.rs` — 为 `sys_socketpair` 添加 `EPROTONOSUPPORT` vs `EAFNOSUPPORT` 差异说明
+- `os/src/net/socket/inet/stream/mod.rs` — 为 `TcpSocket` 的 `bind`/`listen`/`connect`/`try_connect`/`accept`/`try_recv`/`try_send` 添加阻塞模型、Locking 约束、fast path 说明
+- `os/src/net/socket/inet/datagram/udp.rs` — 为 `UdpSocket` 的 `bind`/`connect`/`try_send`/`try_sendmsg`/`try_recvmsg` 添加文档
+- `os/src/net/socket/inet/raw/raw.rs` — 为 `RawSocket` 的 `bind`/`try_recv`（ICMP6_FILTER 逻辑）/`try_send` 添加文档
+- `os/src/net/socket/unix/datagram/mod.rs` — 为 `UnixDatagramSocket` 的 `bind`/`connect`/`try_recv`/`try_send`/`try_sendmsg` 添加文档；将 3 处 `// TODO: ...` 改写为标准 `TODO(scope): ... Exit condition: ...` 格式
+- `os/src/net/net_core.rs` — 将 2 处 `// TODO (Wave 2): ...` 改写为标准 `TODO(net-core-refactor): ... Exit condition: ...` 格式
+- `os/src/net/adapter.rs` — 为 `ROUTING_BUF` 静态变量添加 `# Safety` 文档（单核 exclusive 语义）；为 `RoutingTxToken::consume` 添加 Locking/Safety 说明；为 `NetRxToken::consume` 添加 Locking 说明
+- `os/src/net/config.rs` — 为 `NET_INTERFACE`、`init()`、`NetInterface`、`DeviceStack`、`NetInterfaceInner` 添加 rustdoc，覆盖 ownership 模型、Locking 约束和 smoltcp stack 路由机制
+- `os/src/net/net_core.rs` — 为 `IFF_*` / `IF_OPER_UP` 常量、`DeviceEntry`、`next_ifindex()`、`current_netns()` 添加 rustdoc
+- `os/src/net/socket/mod.rs` — 删除两行 stale 注释 `MAX_BUFFER_SIZE` 变体；为 `recv_wait_queue`/`send_wait_queue`/`connect_wait_queue`/`accept_wait_queue` 添加 `# Wake/Block 契约` 文档（指定唤醒者和等待者）；为 `recv_event_queue`/`send_event_queue`/`connect_event_queue`/`accept_event_queue` 添加事件触发路径文档
+- `os/src/net/socket/common/mod.rs` — 删除 stale 注释 `// pub mod epoll_items;`，替换为模块文档
+- `os/src/net/socket/unix/ns/mod.rs` — 删除 stale 注释 `AbstractHandle` struct；添加 `//!` 模块文档；为 `UNIX_PATH_MAX`、`ABSTRACT_TABLE`、`UnixAbstractTable`、`create_abstract_name_bytes`、`alloc_ephemeral_abstract_name`、`lookup_abstract_name_bytes`、`remove_abstract_name_bytes` 添加 rustdoc
+- `os/src/net/socket/unix/ring_buffer.rs` — 模块文档 `# 注意` 替换为 `# Limitations`；字段 `recv_shutdown`/`send_shutdown` 添加 `Release`/`Acquire` 语义说明；删除 6 个低信息 getter 注释（`is_empty`/`is_full`/`len`/`free_len`/`cap`/`new`）；`set_recv_shutdown`/`is_recv_shutdown`/`set_send_shutdown`/`is_send_shutdown` 补充 memory ordering 契约
+- `os/src/net/socket/unix/datagram/mod.rs` — 模块文档从"骨架阶段，核心逻辑用 `todo!()` 占位"替换为真实 `# Implementation Status` + `# Limitations`；`Inner::try_send` 内 `todo!()` 转换为标准 `TODO(unix-dgram-send):` 格式（含 exit condition）；删除低信息 `new()` 文档；`set_send_buf_size` 内"同上"改写为完整 TODO 描述
+- `os/src/net/socket/unix/stream/mod.rs` — 模块文档从"所有方法核心逻辑用 `todo!()` 占位"替换为真实 `# Implementation Status` + `# Limitations`；删除低信息 `new()`/`new_connected()` 文档；`wake_wait_queues` 展开为四列表格，指定每个队列的触发场景
+- `os/src/net/socket/inet/stream/inner.rs` — 删除 3 个低信息 getter/close 文档（`send_buffer_size`/`recv_buffer_size`/`close`）
+
+**验证：**
+- `make rv64-kernel-build-only` ⚠️（10 个 compile error，全为预存的 `recvfrom.rs` 闭包类型不匹配，非本次修改导致；所有评论文件无错误）
+
+**备注：**
+- 纯注释修改，零功能代码变更。遵循 `docs/00_overview/code-comment-style.md` 规范
+- 首次为 `net` 子模块引入 WaitQueue Wake/Block 契约文档模式
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：**
+- 纯注释修改，零功能代码变更。注释风格严格遵循 `docs/00_overview/code-comment-style.md` 规范
+- 中文叙述性描述 + 英文反引号包裹标识符/errno/syscall
+- TODO 项统一采用 `TODO(<scope>): <action>. Exit condition: <condition>.` 格式
+
+### net: 第二阶段注释清理 — 死代码删除、Safety/Locking 补充、todo!() 消除
+
+**涉及文件：**
+- `os/src/net/adapter.rs` — 删除 4 处死注释（`// use riscv::addr::Address`、`// let mut buf = vec![0u8; len]`、oversize-packet guard、OOM guard）
+- `os/src/net/syscall/getsockopt.rs` — 修正 typo `fregment` → `segment`；为 `TcpInfo`、`TimeVal` 的 `unsafe { from_raw_parts }` 添加 `// Safety:` 注释
+- `os/src/net/syscall/recvfrom.rs` — 将 `trans_refmut!` 跨页 workaround 注释转为 `HACK(uaccess-contiguity):` 格式（含 Reference/Remove when）；将 `// 注意这里是 >= 0` 改写为说明 UDP 零长度数据报语义；将 `_ => todo!()` 替换为 `Err(SyscallErr::EOPNOTSUPP)` + `TODO(socket-type-recv):`
+- `os/src/net/syscall/recvmsg.rs` — 为 `sys_recvmsg` 添加 `# Semantics`、`# Errors`、`# Linux Compatibility` rustdoc；为 `buf.set_len(recv_cap)` 添加 `// Safety:` 注释；为 WaitQueue 使用添加 `// Locking:` 注释（recv queue 唤醒路径）
+- `os/src/net/syscall/sendmsg.rs` — 为 `sys_sendmsg` 添加 `# Semantics`、`# Errors`、`# Linux Compatibility` rustdoc；为两处 `kbuf.set_len(...)` 添加 `// Safety:` 注释；为 `send_wait_queue()` WaitQueue 添加 `// Locking:` 注释
+- `os/src/net/syscall/sendto.rs` — 将 `_ => todo!()` 替换为 `return -(EOPNOTSUPP)` + `TODO(socket-type-sendto):`（含 exit condition）
+- `os/src/net/socket/inet/common/address.rs` — 为 `read_sockaddr` 添加 `# Safety` rustdoc 和行内 `// Safety:` 注释，说明调用方必须保证 `ptr`/`len` 有效
+- `os/src/net/socket/inet/stream/mod.rs` — 为 `unsafe impl Send/Sync for TcpSocket` 添加 `// Safety:` 注释，说明所有字段通过 `Mutex` 和 `Atomic*` 安全共享
+- `os/src/net/socket/inet/stream/inner.rs` — 将 `// 注意：is_open()...` 改写为 `// State nuance:` 格式说明中间态语义；3 个低信息 getter/close 文档已删除（先行已清理）
+- `os/src/net/socket/inet/datagram/udp.rs` — 将 `timestamp` 转换为 `TODO(udp-sendto):` + `return Err(EOPNOTSUPP)`（含 exit condition）
+- `os/src/net/socket/inet/raw/raw.rs` — 将 `todo!()` 转换为 `TODO(raw-shutdown):` + `return Err(EOPNOTSUPP)`（含 exit condition）
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：**
+- 上一轮"net 规范化"遗留的 `recvfrom.rs` 10 个 compile error 已修复：原因为 `todo!()` 的 `!` 类型可匹配闭包的 `Result` 返回类型，替换为 `return -EOPNOTSUPP` 后需改为 `Err(SyscallErr::EOPNOTSUPP)` 以保持闭包类型一致
+- 所有 `todo!()` 宏已从 `os/src/net/syscall/` 和 `os/src/net/socket/` 中消除，替换为标准 `TODO(scope):` 格式
+- 纯注释修改 + 3 处 minimal functional fix（将 `todo!()` 替换为 `Err(EOPNOTSUPP)`），无逻辑变更
 
 **涉及文件：**
 - `docs/00_overview/code-comment-style.md` — 新建代码注释规范，覆盖注释分类、rustdoc 标准小节、Safety/Locking/Linux Compatibility 注释要求、TODO/FIXME/HACK/Deprecated 格式、语言规范、审查清单
@@ -60,6 +202,26 @@
 **验证：**
 - 纯文档/配置修改，无需编译验证
 - 材料基于 git commit log 和 Work_Log.md 的事实性数据，经 Oracle 辅助整理
+
+### fs: 补全 `os/src/fs/` Safety/Locking 注释与 syscall rustdoc
+
+**涉及文件：**
+- `os/src/fs/timerfd.rs` — 为 `TimerFd` 结构体添加 Class 7 rustdoc（含 `# Locking` / `# Linux Compatibility`）；为 `wake_if_expired` 添加 WaitQueue 契约注释（expirations 0→nonzero 时唤醒 `read_wait`）
+- `os/src/fs/eventfd.rs` — 为 `EventFd` 结构体添加 Class 7 rustdoc（含 `# Locking` 契约：`read_at`→`notify_writable`、`write_at`→`notify_readable`，`counter > 0` / `counter < EVENTFD_COUNTER_MAX` 条件）
+- `os/src/fs/dev/pipe.rs` — 为 `pipe_rdcycle` 内联汇编（`rdcycle`/`rdtime.d`）添加 `// Safety:` 注释；为 `buffer_read`/`buffer_write` 中的 `copy_nonoverlapping` 添加环形缓冲区边界 Safety 证明；为 `Pipe` 结构体的 `read_wait`/`write_wait` 添加 Locking 注释（写端唤醒读者，读端唤醒写者）
+- `os/src/fs/poll.rs` — 修复 `FdSet` 过期注释（"This may be unsafe since the size of bits is undefined" → `#[repr(C)]` + 固定 `[u64; 16]` 布局说明）；为 `Bytes` trait 的 `from_raw_parts`/`from_raw_parts_mut` 添加 Safety 注释
+- `os/src/fs/ramfs/mod.rs` — 为 `read_at`/`write_at` 中的 `copy_nonoverlapping` 和 `resize` 中的 `write_bytes` 添加页面边界 Safety 证明
+- `os/src/fs/mod.rs` — 为 `link_buf.set_len(n)` 添加 Safety 注释（n 来自 `read_at()`，≤ buf 容量）；为 `flush_preload` 中所有链接器符号 `from_raw_parts` 添加块注释证明范围有效性 + 首个调用行内 Safety 引用
+- `os/src/fs/eventpoll.rs` — 已有完整 rustdoc（`sys_epoll_create1`/`sys_epoll_ctl`/`sys_epoll_pwait`/`sys_epoll_pwait2`），无需修改
+
+**验证：**
+- `make rv64-kernel-build-only` — `src/fs/*` 编译通过；最终链接失败因 `src/net/syscall/recvfrom.rs` 预存类型错误（非本次修改引入）
+- `make la64-kernel-build-only` — 同上
+
+**备注：**
+- 纯注释修改，零功能代码变更。注释风格严格遵循 `docs/00_overview/code-comment-style.md` 规范
+- 中文叙述性描述 + 英文反引号包裹标识符
+- `// Safety:` 块说明 unsafe 操作在此处的安全理由；`// Locking:` 说明 WaitQueue 唤醒关系
 
 ## 2026-06-29
 

@@ -9,6 +9,26 @@ use crate::net::{make_unix_socket_pair, SocketFile, AF_UNIX, AF_UNSPEC, PSOCK};
 use crate::task::current_task;
 use crate::utils::error::SyscallErr;
 
+/// 创建一对相互连接的 Unix 域 socket。
+///
+/// # Semantics
+///
+/// 通过 `make_unix_socket_pair()` 分配一对匿名 `UnixStreamSocket` 或
+/// `UnixDatagramSocket`（取决于 `psock` 类型），分配两个新的 fd，
+/// 并将 `[fd1, fd2]` 写入用户空间的 `sv` 数组。
+///
+/// # Errors
+///
+/// - `-EINVAL`：`socket_type` 的纯类型位无效。
+/// - `-EPROTONOSUPPORT`：`domain` 不是 `AF_UNIX`/`AF_LOCAL`/`AF_UNSPEC`
+///   （Linux `socketpair()` 仅支持 AF_UNIX，非 AF_UNIX → `EPROTONOSUPPORT`，非 `EAFNOSUPPORT`）。
+/// - `-ESOCKTNOSUPPORT`：`psock` 不是 `Stream` 或 `Datagram`。
+/// - `-EFAULT`：`sv` 地址写入失败。
+///
+/// # Linux Compatibility
+///
+/// Linux 6.6：非 `AF_UNIX`/`AF_LOCAL` → `-EPROTONOSUPPORT`（与 `Socket::alloc`
+/// 的 `EAFNOSUPPORT` 不同）。`AF_UNSPEC` 被视为 `AF_UNIX`。
 pub fn sys_socketpair(domain: u32, socket_type: u32, protocol: u32, sv: usize) -> isize {
     info!(
         "[sys_socketpair] domain {}, type {}, protocol {}, sv {}",

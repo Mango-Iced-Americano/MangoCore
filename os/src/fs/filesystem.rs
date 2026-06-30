@@ -9,6 +9,9 @@ use spin::Mutex;
 use crate::drivers::BLOCK_DEVICE;
 use crate::drivers::block::BlockDevice;
 
+/// 文件系统类型枚举。
+///
+/// `Null` 表示未检测到已知文件系统（或 `FORCE_RAMFS` 强制跳过块设备检测）。
 #[allow(unused, non_camel_case_types)]
 #[derive(Debug, PartialEq, Eq)]
 pub enum FS_Type {
@@ -17,6 +20,10 @@ pub enum FS_Type {
     Ext4,
 }
 
+/// 检测到的文件系统描述符。
+///
+/// `fs_id` 由全局自增计数器 `FS_ID_COUNTER` 分配，在当前启动周期内唯一。
+/// `fs_type` 在构造后不可变。
 #[derive(Debug)]
 pub struct FileSystem {
     pub fs_id: usize,
@@ -28,6 +35,7 @@ lazy_static! {
 }
 
 impl FileSystem {
+    /// 分配一个新的文件系统描述符，`fs_id` 自动递增。
     pub fn new(fs_type: FS_Type) -> Self {
         FS_ID_COUNTER.lock().add_assign(1);
         let fs_id = *FS_ID_COUNTER.lock();
@@ -35,6 +43,10 @@ impl FileSystem {
     }
 }
 
+/// 读取块设备的第一个扇区（`BLOCK_SIZE` 字节），通过魔数检测文件系统类型。
+///
+/// 检测顺序：FAT32（`0x55AA` 在偏移 510）→ ext4（`0xEF53` 在偏移 1080）。
+/// 均不匹配时返回 `FS_Type::Null`。
 pub fn detect_fs(block_device: &Arc<dyn BlockDevice>) -> FS_Type {
     let mut buf = vec![0u8; BLOCK_SIZE];
     block_device.read_block(0, &mut buf);
@@ -58,6 +70,10 @@ pub fn detect_fs(block_device: &Arc<dyn BlockDevice>) -> FS_Type {
     }
 }
 
+/// 挂载前的文件系统检测入口。
+///
+/// 若 `FORCE_RAMFS` 标志为 `true`，跳过块设备检测，直接返回 `FS_Type::Null`
+///（由 ramfs 接管）。否则调用 `detect_fs(&BLOCK_DEVICE)`。
 pub fn pre_mount() -> FS_Type {
     if super::FORCE_RAMFS.load(core::sync::atomic::Ordering::Relaxed) {
         println!("[fs] ramfs forced, skipping block device detection");

@@ -111,6 +111,9 @@ fn pipe_profile_enabled() -> bool {
 
 #[inline(always)]
 fn pipe_rdcycle() -> u64 {
+    // Safety: `rdcycle` / `rdtime.d` read the cycle counter register with no memory
+    // side effects.  The output is a register-only value; the instruction cannot
+    // cause undefined behaviour in any execution context.
     #[cfg(target_arch = "riscv64")]
     { let cycles: usize; unsafe { core::arch::asm!("rdcycle {}", out(reg) cycles) }; cycles as u64 }
     #[cfg(target_arch = "loongarch64")]
@@ -228,6 +231,9 @@ pub struct Pipe {
     readable: bool,
     writable: bool,
     buffer: Arc<Mutex<PipeRingBuffer>>,
+    // Locking: writes notify `read_wait` via `notify_events_at_most(EPOLLIN)`,
+    // waking blocked readers.  Reads notify `write_wait` via
+    // `notify_events_at_most(EPOLLOUT)`, waking blocked writers.
     read_wait: EventWaitQueue,
     write_wait: EventWaitQueue,
     fasync: crate::fs::vfs::fasync::FAsyncItems,
@@ -648,6 +654,11 @@ impl PipeRingBuffer {
             if read_bytes == 0 {
                 break;
             }
+            // Safety: `begin + read_bytes <= self.capacity` (guaranteed by
+            // `read_bytes ≤ end - begin ≤ self.capacity` above), and
+            // `total + read_bytes ≤ buf.len()` (guaranteed by the `while` loop
+            // bound).  Source (`self.arr`) and destination (`buf`) are disjoint
+            // (ring buffer on heap vs. caller-provided buffer).
             unsafe {
                 copy_nonoverlapping(
                     self.arr.as_ptr().add(begin),
@@ -687,6 +698,10 @@ impl PipeRingBuffer {
             if write_bytes == 0 {
                 break;
             }
+            // Safety: `begin + write_bytes ≤ self.capacity` (guaranteed by
+            // `write_bytes ≤ end - begin ≤ self.capacity` above), and
+            // `total + write_bytes ≤ buf.len()` (guaranteed by the `while` loop
+            // bound).  Source (`buf`) and destination (`self.arr`) are disjoint.
             unsafe {
                 copy_nonoverlapping(
                     buf.as_ptr().add(total),

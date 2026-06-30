@@ -424,6 +424,17 @@ impl MountFSInode {
     /// Create a new MountFS and attach it as a child of this inode's parent
     /// MountFS. When `do_propagate` is true and the parent is shared, the
     /// mount event is replicated to all peer mounts.
+    ///
+    /// # Locking
+    ///
+    /// 按序获取以下锁：
+    /// 1. `self.inner_inode.metadata()`（读 inode 元数据）
+    /// 2. `self.mount_fs.mountpoints.lock()`（通过 `add_mount`）
+    /// 3. `MOUNT_LIST`（全局挂载表注册）
+    /// 4. 如果父挂载 shared：`propagate_mount` 内部遍历 peer 列表并操作各 peer 的
+    ///    `mountpoints`
+    ///
+    /// 调用者不得持有任何 MountFS 的 `mountpoints` 锁或 `self_mountpoint` 锁。
     pub(crate) fn mount_subtree_inner(
         &self,
         inner_fs: Arc<dyn FileSystem>,
@@ -973,6 +984,17 @@ impl IndexNode for MountFSInode {
         self.mount_fs.clone()
     }
 
+    /// 卸载此 inode 下的文件系统。
+    ///
+    /// # Locking
+    ///
+    /// 获取 `self.mount_fs.mountpoints` 锁查找目标挂载，然后调用 `mounted.umount()`。
+    /// `umount()` 内部释放 `self_mountpoint`（打破 MountFS → MountFSInode 循环引用），
+    /// 并从全局 `MOUNT_LIST` 注销。
+    ///
+    /// # Errors
+    ///
+    /// 目标 inode 未挂载返回 `EINVAL`；挂载点仍有子挂载或打开文件返回 `EBUSY`。
     fn umount(&self) -> Result<Arc<MountFS>, SyscallErr> {
         if self.is_mountpoint_root() {
             self.mount_fs.umount()?;
@@ -1257,7 +1279,12 @@ impl MountFS {
         inode
     }
 
-    /// 添加子挂载点
+    /// 添加子挂载点。
+    ///
+    /// # Locking
+    ///
+    /// 获取 `self.mountpoints` 锁。如果 `inode_id` 已挂载返回 `EEXIST`。
+    /// 调用者不得在持锁时调用可能触发 mount 传播的函数（避免 ABBA 死锁）。
     pub fn add_mount(&self, inode_id: InodeId, mount_fs: Arc<MountFS>) -> Result<(), SyscallErr> {
         let mut mountpoints = self.mountpoints.lock();
         if mountpoints.contains_key(&inode_id) {

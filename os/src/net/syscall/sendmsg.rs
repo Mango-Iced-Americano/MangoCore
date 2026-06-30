@@ -10,6 +10,28 @@ use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address};
 
 use super::common::MsgFlags;
 
+/// 从用户空间的 `struct iovec` 数组收集数据并发送到 socket。
+///
+/// # Semantics
+///
+/// 从 `msg_ptr` 指向的 `MsgHdr` 读取 `msg_iov`/`msg_iovlen`/`msg_name`。
+/// 按 socket 类型分发：
+/// - `Stream`：分块发送（`send_stream_chunked`），逐 chunk 调用 `try_sendmsg`，
+///   非阻塞路径通过 `UserBufferReader` 零拷贝，阻塞路径复制到内核 buf 后等待。
+/// - `Datagram`/`Raw`：单次发送（`send_single_shot`），端口未绑定时自动分配临时端口。
+///
+/// # Errors
+///
+/// - `-EFAULT`：`msg_ptr` 或 `msg_iov` 指针非法。
+/// - `-EDESTADDRREQ`：Datagram 类型无目标地址且未 `connect`。
+/// - `-EMSGSIZE`：Datagram/Raw 数据超过 `IO_CHUNK_SIZE`。
+/// - `-ENOBUFS`：内核临时缓冲区分配失败。
+/// 其他错误由 `Socket::try_sendmsg()` 产生。
+///
+/// # Linux Compatibility
+///
+/// `MSG_OOB`（带外数据）对非 Stream socket 返回 `-EOPNOTSUPP`，与 Linux 6.6 一致。
+/// 当前不支持 `MSG_EOR`（记录结束标记）。
 pub fn sys_sendmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
     let msg_flags = MsgFlags::from_bits_truncate(flags);
     let msgdontwait = match msg_flags.validate_for_send() {
@@ -184,6 +206,9 @@ fn send_stream_chunked(
     if kbuf.try_reserve(chunk_cap).is_err() {
         return -(SyscallErr::ENOBUFS as isize);
     }
+    // Safety: `try_reserve(chunk_cap)` succeeded above, ensuring capacity.
+    // `set_len` marks the buffer as initialized — it will be fully overwritten
+    // by `ubuf.read()` below before any read, so uninitialized access is impossible.
     unsafe {
         kbuf.set_len(chunk_cap);
     }
@@ -209,6 +234,10 @@ fn send_stream_chunked(
         let send_fn =
             || socket.try_sendmsg(&kbuf[..copied.min(accessible)], dest.clone(), msg_flags);
 
+        // Locking: `socket.send_wait_queue()` 由 socket 发送路径唤醒（发送缓冲区
+        // 腾出空间时 smoltcp 调用 `dispatch()` → `wake_one_if()`）。
+        // `wait_until_interruptible` 的条件闭包仅调用 `send_fn()`（即 `try_sendmsg()`），
+        // 不持有 socket 内部锁或 `NET_INTERFACE` 全局锁，不会导致锁顺序反转。
         let sent: isize = if let Some(wq) = socket.send_wait_queue() {
             let result = WaitQueue::wait_until_interruptible(wq, || match send_fn() {
                 Ok(n) => Some(n),
@@ -282,6 +311,9 @@ fn send_single_shot(
     if kbuf.try_reserve(total_len).is_err() {
         return -(SyscallErr::ENOBUFS as isize);
     }
+    // Safety: `try_reserve(total_len)` succeeded above, ensuring capacity.
+    // `set_len` marks the buffer as initialized — it is fully overwritten
+    // by `ubuf.read()` before any consumer, so uninitialized bytes are never observed.
     unsafe {
         kbuf.set_len(total_len);
     }

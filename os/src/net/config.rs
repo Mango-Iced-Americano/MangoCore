@@ -23,8 +23,24 @@ use smoltcp::{
     wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr},
 };
 
+/// 全局网络接口单例，管理所有 `DeviceStack`、socket 绑定表和 smoltcp 轮询。
+///
+/// # Locking
+///
+/// 内部使用 `Mutex<Option<NetInterfaceInner>>` 保护。`init()` 完成后 `inner` 始终为
+/// `Some(…)`。`try_poll()` / `try_poll_stack()` 通过 `try_lock()` 实现无 spin 的快速
+/// 路径，适合中断上下文调用。
+///
+/// # Ownership
+///
+/// `DeviceStack` 仅存储在 `NetInterfaceInner::stacks` 中。`add_veth_stack()`
+/// / `remove_veth_stack()` 管理 veth 设备的全局注册，调用者负责传入正确的 `Arc<dyn Iface>`。
 pub static NET_INTERFACE: NetInterface = NetInterface::new();
 
+/// 初始化网络子系统。必须先调用 `net_core::init()` 注册 lo/eth0 设备，
+/// 再调用本函数创建对应的 `smoltcp::Interface` 并启动 DHCP 探测。
+///
+/// 如果 `NET_DEVICE` 中无网卡，仅启用 loopback。
 pub fn init() {
     // Initialize net_core first (registers lo and eth0 into the netns device list).
     // Must happen before NET_INTERFACE.init() so that NetInterfaceInner::new()
@@ -39,18 +55,45 @@ pub fn init() {
     }
 }
 
+/// smoltcp 网络栈包装器，通过 `DeviceStack` 将每个网卡与一个 `smoltcp::Interface`
+/// 和一个 `SocketSet` 关联。
+///
+/// # Locking
+///
+/// 所有公开方法获取 `self.inner` 锁。`try_poll()` / `try_poll_stack()` 使用
+/// `try_lock()` 避免在中断上下文中 spin。`poll_once()` 在持锁期间遍历所有 stack，
+/// 不能从持锁路径中重入。
+///
+/// # Ownership
+///
+/// 全局单例 `NET_INTERFACE` 拥有所有 `DeviceStack`。socket 通过 `RouteSocketHandle`
+/// 在 `bindings` 表中索引到具体的 `SocketHandle`。
 pub struct NetInterface<'a> {
     inner: Mutex<Option<NetInterfaceInner<'a>>>,
 }
 
+/// 一个网卡设备对应的完整 smoltcp 栈上下文。
+///
+/// 包含设备适配器（`IfaceDevice`）、`smoltcp::Interface` 和附带的 `SocketSet`，
+/// 以及对应的 `net_core` 设备元数据（`nic: Arc<dyn Iface>`）。
+///
+/// `sockets` 中的 `SocketHandle` 通过 `NetInterfaceInner::bindings` 表映射到
+/// 内核级 `RouteSocketHandle`。
 pub struct DeviceStack<'a> {
-    /// Reference to the net_core device for metadata (name, ifindex, flags, etc.).
+    /// 来自 `net_core` 的设备元数据（名称、ifindex、flags 等）。
     pub nic: Arc<dyn Iface>,
     pub device: IfaceDevice,
     pub iface: Interface,
     pub sockets: SocketSet<'a>,
 }
 
+/// `NetInterfaceInner` 持有所有 `DeviceStack`、socket 路由绑定表和 socket ID 计数器。
+///
+/// # Fields
+///
+/// - `stacks`: 每个已注册网卡一个 `DeviceStack`（顺序固定：lo=0, eth=1, veth…）
+/// - `bindings`: 将内核级 `RouteSocketHandle` 映射到 smoltcp `SocketHandle` + ifindex
+/// - `next_socket_id`: 单调递增的 socket ID 分配器
 pub struct NetInterfaceInner<'a> {
     pub stacks: Vec<DeviceStack<'a>>,
     pub bindings: BTreeMap<RouteSocketHandle, SocketBinding>,

@@ -11,6 +11,32 @@ use smoltcp::wire::{IpAddress, IpEndpoint};
 
 use super::common::MsgFlags;
 
+/// 发送数据到指定目标地址。
+///
+/// # Semantics
+///
+/// 按 socket 类型（`Stream`/`Datagram`/`Raw`）分发：
+/// - 校验 `MsgFlags`（`MSG_OOB` → `-EOPNOTSUPP`，`MSG_ERRQUEUE` → `-EOPNOTSUPP`）。
+/// - 非阻塞模式（fd `O_NONBLOCK` 或 `MSG_DONTWAIT`）：直接调用 `try_sendmsg`/`try_send`，
+///   前后各做一次 `NET_INTERFACE.try_poll()` 防止 livelock。
+/// - 阻塞模式：复制用户数据到内核 buf，通过 `WaitQueue::wait_until_interruptible`
+///   或 `wait_io` 等待发送就绪。
+/// - `Datagram` 类型端口未绑定时自动分配临时端口（`Endpoint::Ip(port=0)`）。
+/// - `Stream` 类型忽略 `dest_addr` 参数（POSIX 语义），但仍验证指针以防 `EFAULT` 泄露。
+///
+/// **关键约束**：`NET_INTERFACE.try_poll()` 必须在 `try_xxx` 调用前执行，
+/// 否则 smoltcp 网络栈可能不推进状态机（参见 `recvfrom.rs` 中的相同模式）。
+///
+/// # Errors
+///
+/// - `-EDESTADDRREQ`：无目标地址且未 `connect`。
+/// - `-EFAULT`：用户缓冲区访问失败。
+/// 其他错误由 `Socket::try_sendmsg`/`try_send` 产生。
+///
+/// # Linux Compatibility
+///
+/// `MSG_OOB`（带外数据）在 Linux 上针对非流式 socket 返回 `-EOPNOTSUPP`，
+/// 我们一致处理。
 pub fn sys_sendto(
     sockfd: u32,
     buf: usize,
@@ -243,6 +269,10 @@ pub fn sys_sendto(
                 )
             }
         }
-        _ => todo!(),
+        // TODO(socket-type-sendto): unknown socket type in sendto fallback —
+        // should return `-ESOCKTNOSUPPORT` once all socket types (Stream/Datagram/Raw)
+        // are covered at `Socket::alloc()`.
+        // Exit condition: no new socket types reach this match arm.
+        _ => return -(SyscallErr::EOPNOTSUPP as isize),
     }
 }

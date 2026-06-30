@@ -7,6 +7,36 @@ use crate::task::WaitResult;
 use crate::utils::error::SyscallErr;
 use core::sync::atomic::Ordering;
 
+/// 从监听 socket 接受一个连接，返回新的已连接 fd。
+///
+/// # Semantics
+///
+/// 调用 `socket.accept()` 获取新的已连接 `TcpSocket`，分配新 fd 并注册到
+/// `TCP_SOCKETS` 表。若 `addr != 0`，将 peer 地址写入用户空间。
+///
+/// **阻塞模式**：在 `WaitQueue::wait_until_interruptible` 中循环，每次迭代
+/// 调用 `socket.accept()`。遵循 harness-patterns 规则：`NET_INTERFACE.try_poll()`
+/// 在循环外调用，永不放入 `WaitQueue` 条件闭包内。
+/// 计数器 `ACCEPT_WAITER_COUNT` 防止无阻塞任务时的昂贵监听器扫描。
+///
+/// **非阻塞模式**：单次 `socket.accept()` 尝试。
+///
+/// # Locking
+///
+/// `WaitQueue` 条件闭包内不得调用 `NET_INTERFACE.poll()` —— 这在 smoltcp
+/// 内部持锁时会导致死锁或活锁。
+///
+/// # Errors
+///
+/// - `-EAGAIN`：非阻塞模式下无可用连接。
+/// - `-ERESTART`：阻塞等待期间被信号中断。
+/// - `-EMFILE`：fd 表已满。
+/// - `-EINVAL`：非监听 socket。
+///
+/// # Linux Compatibility
+///
+/// 与 Linux 不同：smoltcp 不维护独立的 backlog/accept 队列，且 accept
+/// 扫描是轮询驱动的无条件扫描，而非事件触发的精确唤醒。
 pub fn sys_accept(sockfd: u32, addr: usize, addrlen: usize) -> isize {
     let socket = crate::get_socket!(sockfd);
     let task = current_task().unwrap();

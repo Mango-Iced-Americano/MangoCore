@@ -27,6 +27,21 @@ struct EventFdInner {
     counter: u64,
 }
 
+/// EventFd — 基于 fd 的事件通知对象。
+///
+/// 维护一个 `u64` 计数器，范围 `0..EVENTFD_COUNTER_MAX`（`u64::MAX - 1`）。
+/// - `read(2)` 返回当前计数值（归零）或 `EFD_SEMAPHORE` 模式下返回 `1`（递减）。
+/// - `write(2)` 将用户值累加到计数器，溢出时阻塞或返回 `EAGAIN`。
+///
+/// # Locking
+///
+/// `inner` 保护 `counter`。`read_at` 递减后通过 `notify_writable` 唤醒 `write_wait`；
+/// `write_at` 累加后通过 `notify_readable` 唤醒 `read_wait`。
+/// 条件：`counter > 0` 时读就绪；`counter < EVENTFD_COUNTER_MAX` 时写就绪。
+///
+/// # Linux Compatibility
+///
+/// 对齐 Linux 6.6 `eventfd(2)`。支持 `EFD_CLOEXEC`、`EFD_NONBLOCK`、`EFD_SEMAPHORE`。
 pub struct EventFd {
     inner: Mutex<EventFdInner>,
     semaphore: bool,
@@ -176,6 +191,32 @@ impl IndexNode for EventFd {
     }
 }
 
+/// 创建 eventfd 实例，返回可读写的 fd。
+///
+/// # Semantics
+///
+/// `initval` 为初始计数器值。`flags` 支持：
+/// - `EFD_CLOEXEC`：fd 在 exec 时关闭
+/// - `EFD_NONBLOCK`：非阻塞模式
+/// - `EFD_SEMAPHORE`：信号量语义（read 返回 1 而非当前值，并递减 1）
+///
+/// 计数器范围为 0..`EVENTFD_COUNTER_MAX`（`u64::MAX - 1`）。
+/// 阻塞模式下：
+/// - `read(2)` 在计数器 == 0 时阻塞
+/// - `write(2)` 在计数器达到最大值时阻塞（`EAGAIN`）
+///
+/// 计数器溢出时 write 阻塞或返回 `EAGAIN`，取决于 fd 是否为非阻塞模式。
+///
+/// # Linux Compatibility
+///
+/// 对齐 Linux 6.6 `eventfd2(2)`。MangoCore 使用 `sys_eventfd2` 作为统一入口
+/// （gcc/libusb/musl 等 C 库会自动将 `eventfd()` 重写为 `eventfd2()`，无需单独 `sys_eventfd`）。
+///
+/// # Errors
+///
+/// - `EINVAL`：flags 包含非法位
+/// - `ENOMEM`：内存分配失败
+/// - `EMFILE`：进程 fd 表已满
 pub fn sys_eventfd2(initval: u32, flags: u32) -> isize {
     if (flags & !EFD_VALID_FLAGS) != 0 {
         return -(SyscallErr::EINVAL as isize);

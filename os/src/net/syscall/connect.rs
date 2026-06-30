@@ -7,6 +7,32 @@ use crate::task::WaitQueue;
 use crate::utils::error::SyscallErr;
 use alloc::format;
 
+/// 将 socket 连接到远程地址。
+///
+/// # Semantics
+///
+/// 解析 `sockaddr` → `Endpoint`，对 `Unix::Path` 做绝对路径规范化，然后调用
+/// `socket.connect()` 发起初始连接。
+///
+/// **阻塞模式**：若 `socket.connect()` 返回 `EAGAIN` 且有 `connect_wait_queue`，
+/// 进入 `WaitQueue::wait_until_interruptible` 循环，条件闭包调用 `socket.try_connect()`
+/// 检查握手状态。信号中断返回 `-ERESTART`。
+///
+/// **非阻塞模式**：`connect()` 返回 `EAGAIN` 时立即返回 `-EINPROGRESS`
+/// （与 Linux 语义一致，应用通过 `poll(EPOLLOUT)` 等待完成）。
+/// 无 `connect_wait_queue` 的 socket 回退到无条件 yield 轮询的 `wait_io`。
+///
+/// # Errors
+///
+/// - `-EINVAL`：`addrlen` 超限。
+/// - `-EINPROGRESS`：非阻塞连接尚未完成（正常，非错误）。
+/// - `-ERESTART`：阻塞等待期间被信号中断。
+/// - 其他错误由 `socket.connect()`/`try_connect()` 产生。
+///
+/// # Linux Compatibility
+///
+/// 非阻塞 `connect` 在握手未完成时返回 `-EINPROGRESS`（而非 `-EAGAIN`），
+/// 与 Linux 6.6 一致。
 pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
     match check_addrlen(addrlen) {
         Ok(_) => {}

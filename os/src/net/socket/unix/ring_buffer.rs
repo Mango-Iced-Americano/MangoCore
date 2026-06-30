@@ -3,10 +3,11 @@
 //! 使用 `Mutex<VecDeque<T>>` 实现的通用环形缓冲区。
 //! 相比 DragonOS 的原子 head/tail + RwSem 方案大幅简化。
 //!
-//! # 注意
-//! - 不是固定容量的循环缓冲区（VecDeque 内部可自动扩容），
+//! # Limitations
+//!
+//! - 不是固定容量的循环缓冲区（`VecDeque` 内部可自动扩容），
 //!   但通过 `capacity` 字段限制消息总数
-//! - 支持 shutdown 标志位
+//! - 支持 shutdown 标志位（`Release`/`Acquire` 语义）
 
 use alloc::collections::VecDeque;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -19,20 +20,16 @@ pub fn rb_bytes() -> usize { RB_BYTES.load(Ordering::Relaxed) }
 /// 通用环形缓冲区
 #[derive(Debug)]
 pub struct RingBuffer<T> {
-    /// 实际数据存储
     deque: VecDeque<T>,
     /// 最大容量（消息/字节数）
     capacity: usize,
-    /// 对端已关闭读取（本端写入应失败）
+    /// 对端已关闭读取（`Release` store，`Acquire` load）
     recv_shutdown: AtomicBool,
-    /// 本端已关闭写入（对端读取将得到 EOF）
+    /// 本端已关闭写入（`Release` store，`Acquire` load）
     send_shutdown: AtomicBool,
 }
 
 impl<T> RingBuffer<T> {
-    /// 创建新的环形缓冲区
-    ///
-    /// `capacity` 是最大元素数限制（非字节数）。
     pub fn new(capacity: usize) -> Self {
         RB_COUNT.fetch_add(1, Ordering::Relaxed);
         RB_BYTES.fetch_add(capacity, Ordering::Relaxed);
@@ -90,49 +87,49 @@ impl<T> RingBuffer<T> {
 
     // ── 查询 ───────────────────────────────────────────
 
-    /// 缓冲区是否为空
     pub fn is_empty(&self) -> bool {
         self.deque.is_empty()
     }
 
-    /// 缓冲区是否已满
     pub fn is_full(&self) -> bool {
         self.deque.len() >= self.capacity
     }
 
-    /// 当前元素数
     pub fn len(&self) -> usize {
         self.deque.len()
     }
 
-    /// 剩余可用空间
     pub fn free_len(&self) -> usize {
         self.capacity - self.deque.len()
     }
 
-    /// 最大容量
     pub fn cap(&self) -> usize {
         self.capacity
     }
 
     // ── Shutdown ──────────────────────────────────────
 
-    /// 设置对端关闭了读取（本端继续写入时将得到 EPIPE）
+    /// 设置对端关闭了读取。
+    ///
+    /// 使用 `Release` 语义确保本端在设置此标志之前的所有写入对 `is_recv_shutdown`
+    /// 的 `Acquire` 读取可见（本端后续 `write()` → `EPIPE` 路径）。 
     pub fn set_recv_shutdown(&self) {
         self.recv_shutdown.store(true, Ordering::Release);
     }
 
-    /// 对端是否已关闭读取
+    /// 查询对端是否已关闭读取（`Acquire` 语义，配对 `set_recv_shutdown` 的 `Release`）。
     pub fn is_recv_shutdown(&self) -> bool {
         self.recv_shutdown.load(Ordering::Acquire)
     }
 
-    /// 设置本端关闭了写入（对端读取将得到 EOF）
+    /// 设置本端关闭了写入。
+    ///
+    /// 使用 `Release` 语义确保对端 `Acquire` load 后能观察到本端不再生产新数据。
     pub fn set_send_shutdown(&self) {
         self.send_shutdown.store(true, Ordering::Release);
     }
 
-    /// 本端是否已关闭写入
+    /// 查询本端是否已关闭写入（`Acquire` 语义，配对 `set_send_shutdown` 的 `Release`）。
     pub fn is_send_shutdown(&self) -> bool {
         self.send_shutdown.load(Ordering::Acquire)
     }

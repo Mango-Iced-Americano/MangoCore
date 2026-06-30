@@ -637,6 +637,11 @@ pub fn vfs_lookup(
                         spin::Mutex::new(FilePrivateData::Unused).lock(),
                     )
                     .map_err(|e| -(e as isize))?;
+                // Safety: `n` comes from `read_at()` which returns the number
+                // of bytes actually read; this is always ≤ `link_buf.len()`
+                // (the buffer is initialised with capacity
+                // `link_len.min(4096)` directly above).  `set_len(n)` shrinks
+                // the logical length within the allocated capacity.
                 unsafe { link_buf.set_len(n) };
                 let s = core::str::from_utf8(&link_buf[..n])
                     .map_err(|_| crate::syscall::errno::EINVAL)?;
@@ -854,6 +859,13 @@ raw 255 RAW\n";
 
 #[allow(unused)]
 pub fn flush_preload() {
+    // Safety (linker-symbol `from_raw_parts`): every `s<name>` / `e<name>`
+    // pair below is a linker-defined symbol pair placed by the linker script.
+    // The address range `[s<name>, e<name>)` contains the raw bytes of an
+    // embedded ELF payload, fully initialised at link time.  `from_raw_parts`
+    // creates a `&[u8]` over this range; the slice is used immediately inside
+    // the `f.write()` call and never retained.  The physical frames are
+    // released via `frame_dealloc` after writing.
     extern "C" {
         fn sinitproc();
         fn einitproc();
@@ -877,9 +889,10 @@ pub fn flush_preload() {
     );
     let initproc = create_or_open_file("initproc").unwrap();
     let initproc_len = einitproc as usize - sinitproc as usize;
-    let written = initproc.write(unsafe {
-        core::slice::from_raw_parts(sinitproc as *const u8, initproc_len)
-    }).unwrap();
+    let written = initproc.write(
+        // Safety: see block comment above — linker-symbol range validity.
+        unsafe { core::slice::from_raw_parts(sinitproc as *const u8, initproc_len) },
+    ).unwrap();
     log::debug!(
         "[kernel] flush_preload: initproc write len={} => written={} size_after={}",
         initproc_len,

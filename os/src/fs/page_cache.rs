@@ -9,7 +9,10 @@
 //! - 脏页追踪：dirty_pages BTreeSet 跟踪所有脏页
 //! - 回写机制：单页回写 + 范围回写
 //!
-//! 注意：当前实现为精简版，不做异步 IO、VMA 反向映射等高级特性。
+//! # Limitations
+//!
+//! 当前实现仅支持同步 I/O 模型：不含异步 I/O 提交/完成队列、不含 VMA 反向映射
+//! （`map_pages` / `fault` 回调）、不含 `O_DIRECT` 绕过 PageCache 的路径。
 
 use crate::utils::error::SyscallErr;
 use alloc::collections::BTreeSet;
@@ -433,7 +436,7 @@ pub struct PageCache {
 }
 
 impl PageCache {
-    /// 创建新的 PageCache
+    /// 创建一个不含 backend 和 inode 关联的空 PageCache，自动注册到全局列表。
     pub fn new() -> Arc<Self> {
         let pc = Arc::new(PageCache {
             inner: Mutex::new(InnerPageCache::new()),
@@ -447,12 +450,12 @@ impl PageCache {
         pc
     }
 
-    /// 设置后端
+    /// 绑定用于读写持久化存储的 `PageCacheBackend`。
     pub fn set_backend(&self, backend: Arc<dyn PageCacheBackend>) {
         *self.backend.lock() = Some(backend);
     }
 
-    /// 设置关联的 inode
+    /// 关联一个 `IndexNode`（`Weak` 引用，不阻止 inode 回收）。
     pub fn set_inode(&self, inode: Weak<dyn IndexNode>) {
         *self.inode.lock() = Some(inode);
     }
@@ -462,33 +465,33 @@ impl PageCache {
         self.unevictable.store(val, Ordering::Release);
     }
 
-    /// 获取后端
+    /// 返回当前绑定的 `PageCacheBackend`（克隆 `Arc`）。
     pub fn backend(&self) -> Option<Arc<dyn PageCacheBackend>> {
         self.backend.lock().clone()
     }
 
-    /// 获取页数
+    /// 返回内部控制结构记录的页帧总数（含空洞，与 `self.entries.len()` 一致）。
     pub fn page_count(&self) -> usize {
         self.inner.lock().page_count()
     }
 
-    /// 检查页面是否在缓存中
+    /// 检查指定索引处的页面条目是否存在且处于 UpToDate 状态。
     pub fn contains_page(&self, page_index: usize) -> bool {
         let entries = self.entries.lock();
         page_index < entries.len() && entries[page_index].is_some()
     }
 
-    /// 检查页面是否为脏
+    /// 检查指定页面索引是否在脏页集合中（需要先持 `inner` 锁）。
     pub fn is_dirty(&self, page_index: usize) -> bool {
         self.inner.lock().dirty_pages.contains(&page_index)
     }
 
-    /// 获取脏页数量
+    /// 返回当前脏页集合的条目数（全局脏页计数同步更新）。
     pub fn dirty_count(&self) -> usize {
         self.inner.lock().dirty_pages.len()
     }
 
-    /// 获取缓存中的页面数量
+    /// 遍历 `entries` 数组统计非 `None` 条目数（O(n) 扫描，仅供诊断）。
     pub fn cached_page_count(&self) -> usize {
         self.entries.lock().iter().filter(|e| e.is_some()).count()
     }
@@ -497,7 +500,16 @@ impl PageCache {
     /// Only UpToDate pages held exclusively by the cache (refcount==1) are evicted.
     /// Pages with PG_REFERENCED get a second chance: the bit is cleared and the
     /// page survives this round.
-    /// Returns the number evicted.
+    ///
+    /// # Locking
+    ///
+    /// 获取 `self.entries` 锁并扫描，然后获取 `self.inner` 锁清理内部元数据。
+    /// 锁顺序：entries → inner（与 `get_or_create_entry` 一致）。
+    /// 非重入：调用者不得持有 inode 内部锁。
+    ///
+    /// # Semantics
+    ///
+    /// 返回实际回收的页数。对于 `unevictable` 缓存（tmpfs/shmem）直接返回 0。
     pub fn evict_clean_pages_clock(&self, target: usize) -> usize {
         // tmpfs/shmem pages must never be evicted — no persistent backend
         if self.unevictable.load(Ordering::Acquire) {
@@ -589,7 +601,7 @@ impl PageCache {
         (len, cap, live, holes)
     }
 
-    /// 获取页面状态
+    /// 返回指定索引处页面条目的当前 `PageState`；若索引越界或条目为 `None` 则返回 `None`。
     pub fn state_of(&self, page_index: usize) -> Option<PageState> {
         let entries = self.entries.lock();
         if page_index >= entries.len() {
@@ -654,8 +666,8 @@ impl PageCache {
             }
             entry
         } else if beyond_eof {
-            // 页面超出旧 EOF：零填充（frame_alloc 已零填充），valid_mask=VALID_ALL
-            // 跳过 backend read — 所有字节的正确文件可见数据就是零
+            // 页面超出旧 EOF：零填充（frame_alloc 已零填充），valid_mask=VALID_ALL。
+            // 跳过 backend read — 文件可见区域在此页面内全为零是正确行为。
             Arc::new(PageEntry::new_with_valid_mask(frame, VALID_ALL))
         } else {
             // 整页覆写（populate=false）：跳过 backend read，后续写入覆盖全部内容
@@ -674,13 +686,34 @@ impl PageCache {
         Ok(entry_clone)
     }
 
-    /// 获取页面用于读取
+    /// 获取页面用于读取。
+    ///
+    /// # Semantics
+    ///
+    /// 始终从后端 populate（`old_file_size=None` → 全量从后端加载）。
+    /// 后续由 `ensure_fully_valid` 补齐部分写入的空洞。
+    ///
+    /// # Locking
+    ///
+    /// 内部获取 `self.entries` → `self.inner`（按序）。调用者不得持有 inode 锁。
+    ///
+    /// # Errors
+    ///
+    /// 内存分配失败返回 `ENOMEM`；后端读取失败透传后端错误。
     pub fn get_page_for_read(&self, page_index: usize) -> Result<Arc<PageEntry>, SyscallErr> {
         // 读取路径：始终 populate（old_file_size=None → 全量从后端加载），后续 ensure_fully_valid 补齐空洞
         self.get_or_create_entry(page_index, true, None)
     }
 
-    /// 获取页面用于写入（默认行为：部分写时 populate）
+    /// 获取页面用于写入（默认行为：部分写时从后端 populate）。
+    ///
+    /// # Locking
+    ///
+    /// 内部获取 `self.entries` → `self.inner`（按序）。标记脏页时更新全局脏页计数。
+    ///
+    /// # Errors
+    ///
+    /// 内存分配失败返回 `ENOMEM`；后端读取失败透传后端错误。
     pub fn get_page_for_write(&self, page_index: usize) -> Result<Arc<PageEntry>, SyscallErr> {
         self.get_page_for_write_populate(page_index, None, false)
     }
@@ -730,9 +763,21 @@ impl PageCache {
         Ok(entry)
     }
 
-    /// 获取页帧用于文件映射读（如 MAP_PRIVATE file-backed page fault）。
-    /// 返回 PageCache 中的 `Arc<FrameTracker>`，不标记脏。
-    /// 只允许 UpToDate 或 Dirty 状态的页帧。
+    /// 获取页帧用于文件映射读（如 `MAP_PRIVATE` file-backed page fault）。
+    ///
+    /// # Semantics
+    ///
+    /// 返回 PageCache 中的 `Arc<FrameTracker>`，不标记脏。只允许 `UpToDate`
+    /// 或 `Dirty` 状态的页帧；其他状态返回对应错误。
+    ///
+    /// # Errors
+    ///
+    /// - `EIO`：页面状态为 `Error`
+    /// - `EAGAIN`：页面状态为 `Loading` 或 `Writeback`
+    ///
+    /// # Locking
+    ///
+    /// 内部获取 `self.entries` → `self.inner`（按序）。
     pub fn frame_for_read(&self, page_index: usize) -> Result<Arc<FrameTracker>, SyscallErr> {
         let entry = self.get_or_create_entry(page_index, true, None)?;
         // 保证部分写入的页面在映射前所有 segment 均有效
@@ -745,9 +790,21 @@ impl PageCache {
         }
     }
 
-    /// 获取页帧用于文件映射写（如 MAP_SHARED file-backed page fault）。
-    /// 返回 PageCache 中的 `Arc<FrameTracker>`，自动标记脏页。
-    /// 只允许 UpToDate 或 Dirty 状态的页帧。
+    /// 获取页帧用于文件映射写（如 `MAP_SHARED` file-backed page fault）。
+    ///
+    /// # Semantics
+    ///
+    /// 返回 PageCache 中的 `Arc<FrameTracker>`，自动通过 CAS 标记脏页。
+    /// 写回期间被再次标记脏时通过 `PG_REDIRTIED` 标志保证数据不丢失。
+    ///
+    /// # Errors
+    ///
+    /// - `EIO`：页面状态为 `Error`
+    /// - `EAGAIN`：页面状态为 `Loading` 或 `Writeback`
+    ///
+    /// # Locking
+    ///
+    /// 内部获取 `self.entries` → `self.inner`（按序）。修改全局脏页计数。
     pub fn frame_for_write(&self, page_index: usize) -> Result<Arc<FrameTracker>, SyscallErr> {
         let entry = self.get_or_create_entry(page_index, true, None)?;
         // 保证部分写入的页面在映射前所有 segment 均有效
@@ -1320,12 +1377,12 @@ impl PageCache {
 
     // ── 脏页管理 ────────────────────────────────────────────────────
 
-    /// 标记页面为脏
+    /// 将指定页面索引加入脏页集合，并原子递增全局脏页计数。
     pub fn mark_page_dirty(&self, page_index: usize) {
         self.inner.lock().mark_dirty(page_index);
     }
 
-    /// 标记页面为正在写回
+    /// 从脏页集合移除该索引，并原子递减全局脏页计数（写回完成后调用）。
     pub fn mark_page_writeback(&self, page_index: usize) {
         let mut inner = self.inner.lock();
         inner.clear_dirty(page_index);
@@ -1336,7 +1393,7 @@ impl PageCache {
     /// 单次回写批次的最大页面数
     const MAX_WRITEBACK_PAGES: usize = 32;
 
-    /// 写回单个页面
+    /// 将单个脏页通过 `backend` 写回存储介质；若页面已为 `UpToDate` 则跳过。
     pub fn writeback_page(&self, page_index: usize) -> Result<(), SyscallErr> {
         let _t0 = perf::perf_time_now();
         let entry = {
@@ -1463,7 +1520,7 @@ impl PageCache {
         }
 
         // 构建连续的 &[u8] 切片（start 即为第一个 Dirty 页的实际索引）
-        // 注意：调用者保证该范围内不存在非 Dirty 页空洞，否则需拆分 run
+        // Invariant: 调用者保证该范围内不存在非 Dirty 页空洞，否则需拆分 run。
         let actual_start = page_slices[0].0;
         let slices: Vec<&[u8]> = page_slices.iter().map(|(_, e)| e.as_slice()).collect();
 
@@ -1516,7 +1573,7 @@ impl PageCache {
         result
     }
 
-    /// 写回所有脏页
+    /// 收集当前所有脏页索引并按连续 run 分组，逐 run 写回。
     pub fn writeback_all(&self) -> Result<(), SyscallErr> {
         let dirty_indices: Vec<usize> = {
             let inner = self.inner.lock();
@@ -1547,7 +1604,7 @@ impl PageCache {
         Ok(())
     }
 
-    /// 写回指定范围的脏页
+    /// 筛选出 `[start_index, end_index]` 范围内的脏页，按连续 run 分组写回。
     pub fn writeback_range(&self, start_index: usize, end_index: usize) -> Result<(), SyscallErr> {
         let dirty_indices: Vec<usize> = {
             let inner = self.inner.lock();
@@ -1793,7 +1850,7 @@ pub struct BlockPageCacheBackend {
 }
 
 impl BlockPageCacheBackend {
-    /// 创建新的块设备后端
+    /// 创建绑定到指定 `BlockDevice` 的后端，将页面索引映射到磁盘块号。
     pub fn new(
         block_device: Arc<dyn crate::drivers::block::BlockDevice>,
         block_size: usize,
