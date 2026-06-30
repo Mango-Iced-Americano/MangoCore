@@ -22,6 +22,7 @@ allowed-tools: Read, Write, Edit, Grep, Bash, Glob
 4. 用户说"记录一下"、"更新 worklog"、"沉淀经验"
 5. 编译或测试结果有值得记录的发现
 6. **涉及性能调试、渐进退化、计数器插桩时** — 先加载 references/，再动手
+7. **涉及文档更新** — 修改代码后，检查 docs/ 中对应模块文档是否需要同步更新
 
 ## 工作流程
 
@@ -88,8 +89,37 @@ allowed-tools: Read, Write, Edit, Grep, Bash, Glob
 - 已经在 AGENTS.md Critical Pitfalls 中覆盖的
 - 纯项目特定、不可能复现的
 
+### D. 同步文档（每次代码修改后）
+
+修改代码后，检查本次改动的源文件是否命中 `docs/` 下某篇文档 YAML frontmatter 中的 `code_paths` 字段：
+
+```markdown
+---
+code_paths:
+  - "os/src/net/config.rs"
+  - "os/src/net/routing.rs"
+---
+```
+
+**检查方法：**
+1. 列出本次修改的所有 `.rs` 源文件路径
+2. 搜索 `docs/` 下所有 `.md` 文件的 `code_paths` 字段，检查是否有匹配
+3. 如果有匹配，则该文档需要更新或标记为 `draft`
+
+**操作：**
+- 如果文档内容与当前源码一致 → 无需操作
+- 如果文档已过时 → 更新文档内容，或至少在 frontmatter 中将 `status` 改为 `draft`
+- 如果文档新增/重构 → 更新 `related_docs` 和 `entry_points`
+
+**搜索命令参考：**
+```bash
+# 查找 docs/ 下引用了某源码路径的文档
+rg -l "os/src/net/config.rs" docs/ --type md
+```
+
 ## 约束
 
 - Work_Log.md 追加在**顶部**（最新在前）
 - Reference 文件按**现象分类**追加在底部
 - 使用中文编写
+- 每次代码修改后执行 **A → D** 全流程（更新 Work_Log → 沉淀经验 → 同步文档）
