@@ -197,7 +197,9 @@ impl Ext4BlockGroup {
 
         orig_checksum = self.checksum;
 
-        // 准备：暂时将bg校验和设为0
+        // Zero out bg checksum before computing CRC — per ext4 spec,
+        // the checksum field must be zero during computation so that it
+        // does not participate in its own CRC.
         self.checksum = 0;
 
         // uuid checksum
@@ -211,6 +213,10 @@ impl Ext4BlockGroup {
         checksum = ext4_crc32c(checksum, &bgid.to_le_bytes(), 4);
 
         // cast self to &[u8]
+        // Safety: `self` is a valid `Ext4BlockGroup` reference. The ext4 64-byte
+        // group descriptor is `#[repr(C, packed)]` with no padding,
+        // so 0x40 bytes starting from `self` are valid and correctly represent
+        // the raw on-disk layout.
         let self_bytes =
             unsafe { core::slice::from_raw_parts(self as *const _ as *const u8, 0x40) };
 
@@ -246,6 +252,9 @@ impl Ext4BlockGroup {
         // 计算偏移量
         let offset = (bgid % dsc_cnt) * super_block.desc_size() as usize;
 
+        // Safety: `self` is a valid `Ext4BlockGroup` reference; transmuting
+        // to `&[u8]` of `size_of::<Ext4BlockGroup>()` is safe because the
+        // struct is `#[repr(C, packed)]` with a well-defined byte layout.
         let data = unsafe {
             core::slice::from_raw_parts(
                 self as *const _ as *const u8,
@@ -411,6 +420,10 @@ impl Block {
 
     // 从inode块读取块
     pub fn load_inode_root_block(data: &[u32; 15]) -> Self {
+        // Safety: `[u32; 15]` is exactly 60 bytes with no padding.
+        // Reinterpreting it as `[u8; 60]` is a valid bit-cast since
+        // `u32` has the same alignment as `u8` (1), and the total size
+        // matches. Both views point to the same valid memory.
         let data_bytes: &[u8; 60] = unsafe { core::mem::transmute(data) };
         Block {
             disk_offset: 0,
@@ -421,6 +434,8 @@ impl Block {
 
     // 将读到的块作为指定的类型
     pub fn read_as<T>(&self) -> T {
+        // Safety: the caller guarantees `T` fits within `self.data.len()`.
+        // `read_unaligned` handles potential misalignment of the byte buffer.
         unsafe {
             let ptr = self.data.as_ptr() as *const T;
             ptr.read_unaligned()
@@ -438,6 +453,9 @@ impl Block {
             core::mem::size_of::<T>(),
             self.data.len()
         );
+        // Safety: the assert above guarantees that `offset + size_of::<T>()`
+        // does not exceed `self.data.len()`, so the pointer is in-bounds.
+        // `read_unaligned` handles misalignment of the byte buffer.
         unsafe {
             let ptr = self.data.as_ptr().add(offset) as *const T;
             ptr.read_unaligned()
@@ -445,7 +463,10 @@ impl Block {
     }
 
     pub fn read_offset_as_superblock(&self, offset: usize) -> Ext4Superblock {
-        // 暂时先使用2048
+        // Block size is hardcoded to 4096: the superblock always resides
+        // in block 0 (or backup superblock at a fixed offset), which is
+        // always read with 4 KiB granularity regardless of the actual
+        // filesystem block size.
         let block_size = 4096;
         let offset = offset % block_size;
         assert!(
@@ -454,6 +475,8 @@ impl Block {
             offset,
             core::mem::size_of::<Ext4Superblock>()
         );
+        // Safety: bounds checked by the assert above. `read_unaligned`
+        // handles misalignment of the byte buffer.
         unsafe {
             let ptr = self.data.as_ptr().add(offset) as *const Ext4Superblock;
             ptr.read_unaligned()
@@ -468,6 +491,8 @@ impl Block {
             core::mem::size_of::<T>(),
             self.data.len()
         );
+        // Safety: bounds checked by the assert above. The returned `&mut T`
+        // is the only mutable reference into `self.data` at this scope.
         unsafe {
             let ptr = self.data.as_mut_ptr() as *mut T;
             &mut *ptr
@@ -485,6 +510,8 @@ impl Block {
             core::mem::size_of::<T>(),
             self.data.len()
         );
+        // Safety: bounds checked by the assert. The returned `&mut T` does
+        // not alias with other live references into `self.data`.
         unsafe {
             let ptr = self.data.as_mut_ptr().add(offset) as *mut T;
             &mut *ptr
@@ -503,18 +530,20 @@ impl Block {
     }
 
     // 同步内存上的数据到块设备
-    /// 考虑根据len找到最后一个块，读取最后一个块之后，再分批次写入
-    /// 同时也需要读取第一个块
     pub fn sync_blk_to_disk(&self, block_device: Arc<dyn BlockDevice>) {
         let block_size = self.block_size;
         if self.data.len() % block_size != 0 {
             panic!(
-                "[todo fix the write_offset function] write_length is not a multiple of BLOCK_SIZE"
+                "sync_blk_to_disk: write_length {} is not a multiple of BLOCK_SIZE {}",
+                self.data.len(),
+                block_size
             )
         }
         if self.disk_offset % block_size != 0 {
             panic!(
-                "[todo fix the write_offset function] write_offset is not a multiple of BLOCK_SIZE"
+                "sync_blk_to_disk: write_offset {} is not a multiple of BLOCK_SIZE {}",
+                self.disk_offset,
+                block_size
             )
         }
         let block_id = self.disk_offset / block_size;

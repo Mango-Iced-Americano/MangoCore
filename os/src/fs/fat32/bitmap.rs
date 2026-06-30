@@ -12,7 +12,11 @@ const SECTORS_PER_BLOCK: usize = BLOCK_SZ / 512;
 /// *In-memory* data structure
 /// 内存内的fat数据结构.
 /// 在Fat32文件系统中，有两个fat表，这里只使用第一张fat表
-/// 也就是说还没有实现fat的检错功能
+///
+/// # Limitations
+///
+/// 未实现 FAT 检错功能：当前仅读取第一张 FAT 表，不利用第二张 FAT 表
+/// 进行数据完整性校验。Exit condition: 实现双 FAT 表交叉验证或至少检测不一致。
 pub struct Fat {
     /// The first block id of FAT.
     /// In FAT32, this is equal to bpb.rsvd_sec_cnt

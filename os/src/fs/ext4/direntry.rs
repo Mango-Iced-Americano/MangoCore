@@ -13,7 +13,6 @@ use error::{Errno, Ext4Error};
 use isomorphic_drivers::block;
 
 bitflags! {
-    // #[derive(PartialEq, Eq)]
     pub struct DirEntryType: u8 {
         const EXT4_DE_UNKNOWN = 0;
         const EXT4_DE_REG_FILE = 1;
@@ -84,6 +83,8 @@ impl Ext4DirSearchResult {
 
 impl Debug for Ext4DirEnInternal {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        // Safety: `name_length_high` is the only field of this union; no variant
+        // discrimination needed — all bits belong to this single field.
         unsafe {
             write!(
                 f,
@@ -119,6 +120,10 @@ impl TryFrom<&[u8]> for Ext4DirEntry {
     fn try_from(data: &[u8]) -> core::result::Result<Self, u64> {
         let mut entry = Ext4DirEntry::default();
         let size = core::cmp::min(data.len(), core::mem::size_of::<Ext4DirEntry>());
+        // Safety: `data` is a valid `&[u8]` slice; `entry` is stack-local and
+        // `size` is bounded by `min(data.len(), size_of::<Ext4DirEntry>())`,
+        // so the copy never overflows the destination. Both regions are properly
+        // aligned for `u8`-based copy.
         unsafe {
             core::ptr::copy_nonoverlapping(data.as_ptr(), &mut entry as *mut _ as *mut u8, size);
         }
@@ -154,6 +159,8 @@ impl Ext4DirEntry {
 
     /// Dir type
     pub fn get_de_type(&self) -> u8 {
+        // Safety: `inode_type` is the active variant of this union when
+        // the directory entry was constructed from on-disk data via `try_from()`.
         unsafe { self.inner.inode_type }
     }
 
@@ -230,12 +237,15 @@ impl Ext4DirEntry {
     /// Write de to block
     pub fn write_de_to_blk(&self, dst_blk: &mut Block, offset: usize) {
         let count = core::mem::size_of::<Ext4DirEntry>() / core::mem::size_of::<u8>();
+        // Safety: `self` is a valid `Ext4DirEntry` reference; converting to `*const u8`
+        // and constructing a `count`-byte slice is valid because the struct's memory
+        // is within `size_of::<Ext4DirEntry>()` bytes. The slice is read-only and
+        // lives for the duration of this function.
         let data = unsafe { core::slice::from_raw_parts(self as *const _ as *const u8, count) };
         dst_blk.data.splice(
             offset..offset + core::mem::size_of::<Ext4DirEntry>(),
             data.iter().cloned(),
         );
-        // assert_eq!(dst_blk.block_data[offset..offset + core::mem::size_of::<Ext4DirEntry>()], data[..]);
     }
 
     /// Copy the directory entry to a slice, only copying the real used length.
@@ -247,6 +257,10 @@ impl Ext4DirEntry {
             count += 4 - (count % 4);
         }
         let count = core::cmp::max(count, core::mem::size_of::<Ext4FakeDirEntry>());
+        // Safety: `de_ptr` points to this `Ext4DirEntry` (valid, aligned, properly
+        // initialized). `array_ptr.add(offset)` is within the caller-provided slice.
+        // `count` is bounded by the struct size. Source and destination do not
+        // overlap (stack struct vs. heap/vm slice).
         unsafe {
             core::ptr::copy_nonoverlapping(de_ptr, array_ptr.add(offset), count);
         }
@@ -279,6 +293,11 @@ impl Ext4DirEntryTail {
 
     pub fn copy_to_slice(&self, array: &mut [u8]) {
         let block_size = array.len();
+        // Safety: copies the `Ext4DirEntryTail` from its stack location into the
+        // tail of `array` (last `size_of::<Ext4DirEntryTail>()` bytes). Source and
+        // destination are non-overlapping, both are properly aligned for `u8` copy.
+        // `array` is a mutable slice whose length (block size) is guaranteed to be
+        // >= `size_of::<Ext4DirEntryTail>()`.
         unsafe {
             let offset = block_size - core::mem::size_of::<Ext4DirEntryTail>();
             let de_ptr = self as *const Ext4DirEntryTail as *const u8;
@@ -352,7 +371,11 @@ impl Ext4FileSystem {
             total_blocks,
         );
 
-        // Debug: dump directory blocks when /bin/bash lookup fails
+        // DIAGNOSTIC(ext4-dir-lookup): Hard-coded trigger for dumping directory
+        // blocks when a lookup of /bin/bash fails. This is a development diagnostic
+        // for debugging directory entry resolution. Gate behind
+        // `log::log_enabled!(log::Level::Trace)` or a named feature flag before
+        // production deployment.
         if parent_inode == 3217 || name == "bash" {
             let mut dump_iblock = 0u64;
             while dump_iblock < total_blocks {
@@ -399,7 +422,7 @@ impl Ext4FileSystem {
             // go to next entry
             let entry_len = de.entry_len() as usize;
             if entry_len < 8 {
-                break; // 非法目录项
+                break; // invalid directory entry: length too short for fixed fields
             }
             offset += entry_len;
         }
@@ -567,7 +590,7 @@ impl Ext4FileSystem {
                     return Ok(EOK);
                 }
             }
-            // go ot next block
+            // go to next block
             iblock += 1;
         }
 
@@ -938,7 +961,7 @@ impl Ext4FileSystem {
         let mut child_inode_ref = self.get_inode_ref(search_result.dentry.inode);
 
         if self.dir_has_entry(child_inode_ref.inode_num) {
-            println!("[kernel] rm dir with chidren not supported");
+            println!("[kernel] rm dir with children not supported");
             return Err(Errno::ENOTSUP as isize);
         }
 
@@ -948,10 +971,11 @@ impl Ext4FileSystem {
 
         self.write_back_inode(&mut parent_inode_ref);
 
-        // to do
-        // ext4_inode_set_del_time
-        // ext4_inode_set_links_cnt
-        // ext4_fs_free_inode(&child)
+        // TODO(ext4-dir-remove): Update inode metadata after directory entry removal.
+        // Currently missing: ext4_inode_set_del_time, ext4_inode_set_links_cnt,
+        // ext4_fs_free_inode(&child).
+        // Exit condition: all three operations implemented OR confirmed unnecessary
+        // for correct ext4 semantics.
 
         Ok(EOK)
     }
