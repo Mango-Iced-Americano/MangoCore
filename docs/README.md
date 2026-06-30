@@ -21,6 +21,7 @@ tags: [docs, index, overview]
 |------|------|
 | [Technical-Report-MangoCore.md](00_overview/Technical-Report-MangoCore.md) | **技术报告** — 项目完整技术综述：架构设计、模块实现、工程实践与竞赛历程 |
 | [Engineering-Casebook.md](00_overview/Engineering-Casebook.md) | **工程案例手册** — 以 Q&A 形式记录各模块的设计权衡、调试过程与 Regression 案例分析 |
+| [AI-Usage-Report.md](00_overview/AI-Usage-Report.md) | **AI 工具使用情况报告** — 工具清单、使用场景、证据与合规声明 |
 
 ## 目录结构
 
@@ -28,6 +29,7 @@ tags: [docs, index, overview]
 |-----------|-----------|-------------|
 | `00_overview/Technical-Report-MangoCore.md` | 评审材料 | 竞赛技术报告：项目综述与工程实践 |
 | `00_overview/Engineering-Casebook.md` | 评审材料 | 竞赛工程案例手册：Q&A 与调试案例 |
+| `00_overview/AI-Usage-Report.md` | 评审材料 | AI 工具使用情况报告：工具清单、使用场景、证据与合规声明 |
 | `00_overview/` | 项目概述 | 项目高层描述、目标和范围 |
 | `01_architecture/` | 架构 | 系统架构、启动流程、HAL 设计 |
 | `02_syscall/` | 系统调用参考 | 系统调用表、ABI、分发结构 |
@@ -57,7 +59,7 @@ tags: [docs, index, overview]
 
 先阅读**评审材料**中的两份文档了解项目全貌和深度案例，再按需查阅子系统模块文档。
 
-**顺序：** [Technical-Report-MangoCore.md](00_overview/Technical-Report-MangoCore.md)（技术报告全貌）→ [Engineering-Casebook.md](00_overview/Engineering-Casebook.md)（工程案例深度）→ 按需读 `03_fs/`、`06_net/` 等子系统文档
+**顺序：** [Technical-Report-MangoCore.md](00_overview/Technical-Report-MangoCore.md)（技术报告全貌）→ [Engineering-Casebook.md](00_overview/Engineering-Casebook.md)（工程案例深度）→ [AI-Usage-Report.md](00_overview/AI-Usage-Report.md)（AI 使用披露）→ 按需读 `03_fs/`、`06_net/` 等子系统文档
 
 ### 子系统开发者
 

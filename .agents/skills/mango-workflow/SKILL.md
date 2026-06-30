@@ -91,6 +91,11 @@ allowed-tools: Read, Write, Edit, Grep, Bash, Glob
 
 ### D. 同步文档（每次代码修改后）
 
+**特殊文档：`AI-Usage-Report.md`**
+- 当使用**新的 AI 工具/模型**时，需更新第 2 节工具清单
+- 当发生**重要的 AI-assisted 成果**（如 Oracle 发现关键 bug 根因）时，需更新第 5 节案例表和第 7/8 节证据表
+- 每次更新 Work_Log 后，检查是否需要在 AI-Usage-Report.md 中补充对应记录
+
 修改代码后，检查本次改动的源文件是否命中 `docs/` 下某篇文档 YAML frontmatter 中的 `code_paths` 字段：
 
 ```markdown
