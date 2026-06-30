@@ -2,6 +2,20 @@
 
 ---
 
+## 2026-06-30
+
+### docs: 新增 AI-Usage-Report.md（比赛 AI 使用披露）
+
+**涉及文件：**
+- `docs/00_overview/AI-Usage-Report.md` — 新建 AI 使用情况报告，覆盖工具清单（Copilot/Sisyphus/Oracle/Explore/各种 sub-agent）、使用时间线、6 类使用场景、5 个代表性案例、质量控制流程、commit 证据表、Work_Log 证据表、交互留痕方式、合规自评和答辩摘要；共 ~590 行
+- `README.md` — 评审材料增加 AI 使用报告链接
+- `docs/README.md` — 评审材料表增加 AI 使用报告；阅读指南增加 AI 使用披露步骤
+- `.agents/skills/mango-workflow/SKILL.md` — 增加 AI-Usage-Report.md 特殊维护说明（新工具/新成果时更新）
+
+**验证：**
+- 纯文档/配置修改，无需编译验证
+- 材料基于 git commit log 和 Work_Log.md 的事实性数据，经 Oracle 辅助整理
+
 ## 2026-06-29
 
 ### docs(core): 落地文档审计报告 P1/P2/P3 修正
