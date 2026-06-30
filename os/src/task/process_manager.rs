@@ -1,3 +1,8 @@
+//! 进程查找、wait 和进程组信号投递入口。
+//!
+//! `ProcessManager` 是 syscall 层使用的静态门面：它不持有状态，只把 registry、
+//! child wait 队列和信号投递组合成 Linux 兼容的进程级操作。
+
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::Cell;
@@ -11,42 +16,58 @@ use super::{
 };
 
 #[derive(Clone, Copy, Debug)]
+/// `wait4`/`waitid` 内部返回的子进程状态。
 pub(crate) struct WaitChildResult {
+    /// 被匹配到的子进程 PID。
     pub pid: usize,
+    /// Linux wait status 编码。
     pub status: u32,
 }
 
+/// 进程管理静态门面。
 pub struct ProcessManager;
 
 impl ProcessManager {
+    /// 返回当前任务所属进程。
     pub fn current_process() -> Option<Arc<ProcessControlBlock>> {
         current_task_ref().map(|task| task.process.clone())
     }
 
+    /// 按 PID 查找进程。
     pub fn find_process(pid: usize) -> Option<Arc<ProcessControlBlock>> {
         registry::find_process_by_pid(pid)
     }
 
+    /// 按 TID 查找非 zombie 任务。
     pub fn find_task(tid: usize) -> Option<Arc<TaskControlBlock>> {
         registry::find_task_by_tid(tid)
     }
 
+    /// 在指定进程内按 TID 查找任务。
     pub fn find_task_in_process(pid: usize, tid: usize) -> Option<Arc<TaskControlBlock>> {
         registry::find_task_by_pid_tid(pid, tid)
     }
 
+    /// 返回所有仍存活的进程引用。
     pub fn all_processes() -> Vec<Arc<ProcessControlBlock>> {
         registry::all_processes()
     }
 
+    /// 返回指定进程组内的进程。
     pub fn find_processes_by_pgid(pgid: usize) -> Vec<Arc<ProcessControlBlock>> {
         registry::find_processes_by_pgid(pgid)
     }
 
+    /// 返回当前任务 quota 使用数，饱和到 `u16`。
     pub fn process_count() -> u16 {
         quota::allocated_task_count().min(u16::MAX as usize) as u16
     }
 
+    /// 将已构造的 clone 子进程发布到父进程 child tree。
+    ///
+    /// # Errors
+    ///
+    /// 子进程向父进程 children 列表扩容失败时返回 `-ENOMEM`。
     pub fn publish_clone_child(
         parent: &Arc<TaskControlBlock>,
         child: Arc<TaskControlBlock>,
@@ -82,6 +103,8 @@ impl ProcessManager {
         report_continued: bool,
         nowait: bool,
     ) -> Result<Option<WaitChildResult>, isize> {
+        // `try_reap_child` 在持有 `process.inner` 时只检查/移动 child 列表；
+        // 真正释放 quota、PID 和 zombie TCB 的路径会避免持有 TASK_MANAGER 锁。
         fn child_matches_pid(
             child_pid: usize,
             child_pgid: usize,
@@ -209,6 +232,8 @@ impl ProcessManager {
             };
         }
 
+        // `child_exit_wait` 由子进程 `finish_exit`、stop/continue 事件和 ptrace
+        // stop 唤醒。条件闭包必须可重复执行，且返回 `ECHILD` 作为 Ready 值。
         match WaitQueue::wait_event_interruptible(&process.child_exit_wait, || try_reap_child()) {
             WaitResult::Ready(value) => decode(value),
             WaitResult::Interrupted => Err(ERESTART),
@@ -216,6 +241,7 @@ impl ProcessManager {
         }
     }
 
+    /// 向指定 PID 进程投递信号。
     pub fn send_signal_to_process(pid: usize, signal: Signals) -> isize {
         if let Some(process) = Self::find_process(pid) {
             send_process_signal(&process, signal);
@@ -225,6 +251,7 @@ impl ProcessManager {
         }
     }
 
+    /// 向当前进程所在进程组投递信号。
     pub fn send_signal_to_current_group(signal: Signals) -> isize {
         let process = match Self::current_process() {
             Some(process) => process,
@@ -233,6 +260,7 @@ impl ProcessManager {
         Self::send_signal_to_group(process.getpgid(), signal)
     }
 
+    /// 向指定进程组投递信号。
     pub fn send_signal_to_group(pgid: usize, signal: Signals) -> isize {
         let targets = Self::find_processes_by_pgid(pgid);
         if targets.is_empty() {
@@ -245,6 +273,7 @@ impl ProcessManager {
         }
     }
 
+    /// 向除 init 和当前进程外的所有进程投递信号。
     pub fn send_signal_to_all(signal: Signals) -> isize {
         let current_pid = current_task_ref().map(|task| task.pid()).unwrap_or(0);
         let mut sent = false;

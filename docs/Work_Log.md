@@ -4,6 +4,43 @@
 
 ## 2026-06-30
 
+### fix(code-comments): 回退 processor 上下文切换计数位置漂移
+
+**涉及文件：**
+- `os/src/task/processor.rs` — 根据 `cc-codex/comms/2026-06-30-comment-refactor-audit.md` 的 P0 审计意见，将 `record_context_switch()` 放回 `unsafe { __switch(...) }` 块内，恢复注释重构前的语句位置，仅保留新增 Safety 注释
+- `docs/Work_Log.md` — 记录本次 DeepSeek 审计修正、验证结果和文档同步检查
+
+**验证：**
+- `git diff --check` ✅
+- 低质量标记扫描：`TODO:`/`FIXME:`/`HACK:`/`暂时`/`先这样`/`应急用`/`UNSAFE!` 等无命中 ✅
+- Docker 容器内 `cd /app/os && make rv64-kernel-build-only` ✅
+- Docker 容器内 `cd /app/os && make la64-kernel-build-only` ✅
+
+**备注：**
+- 本次修正消除注释重构中唯一被审计指出的语句位置漂移；`record_context_switch()` 与 `__switch()` 的相对位置恢复为原始代码形态。
+- 检查 `docs/` 中 `os/src/task/processor.rs` 引用，均为普通源码索引或正文引用；本次未修改调度语义，未发现需要同步更新的 `code_paths` frontmatter。
+
+### docs(code): 推进 HAL/MM/task/math 注释契约重构
+
+**涉及文件：**
+- `os/src/hal/**/*.rs`、`os/src/hal/platform/**/*.rs` — 覆盖 HAL 全量 Rust 源文件，补齐模块级 `//!` 文档；为 rv64/la64 TLB、SBI/console、trap、context switch、kernel stack、平台常量、LoongArch CSR/register wrapper 和 MMIO helper 补充 Safety/Ordering/语义说明；清理低信息历史 TODO/临时注释
+- `os/src/math/mod.rs` — 新增模块级文档和 `is_power_of()` 语义说明
+- `os/src/mm/**/*.rs` — 覆盖 MM 全量 Rust 源文件，补齐模块级 `//!` 文档；补强 `PageTable`/`AddressSpace`/VMA/page fault/filemap/uaccess/frame allocator/heap/zram 的 Safety、TLB flush、Locking、Errors 和 Linux 语义说明；规范化 direct-map、用户指针翻译、uninit frame、heap OOM、压缩页等 unsafe 块注释
+- `os/src/task/**/*.rs` — 覆盖 task 与 signal 全量 Rust 源文件，补齐模块级 `//!` 文档；为调度主循环、WaitQueue/Completion、TCB/PCB、PID/registry、clone/exec/exit、quota、sleep、futex、signal action/pending/delivery/frame/wait、perf 统计和 raw current task cache 补充 Semantics/Locking/Safety 注释
+- `docs/Work_Log.md` — 记录本次按 `docs/00_overview/code-comment-style.md` 执行的全量注释重构范围、验证结果和后续审计提醒
+
+**验证：**
+- `git diff --check` ✅
+- 目标目录模块级文档覆盖扫描：`rg --files os/src/hal os/src/math os/src/mm os/src/task -g '*.rs'` 的每个 Rust 文件均在文件头部包含 `//!` ✅
+- 低质量标记扫描：`TODO:`/`FIXME:`/`HACK:`/`暂时`/`先这样`/`应急用`/`UNSAFE!` 等无命中 ✅
+- Docker 容器内 `cd /app/os && make rv64-kernel-build-only` ✅
+- Docker 容器内 `cd /app/os && make la64-kernel-build-only` ✅
+
+**备注：**
+- 本次仅重构源码注释和 rustdoc 契约，不改变运行逻辑；未运行 QEMU 集成测试。
+- 检查 `docs/` 中相关源码路径引用，本次未移动/重命名代码路径，未发现需要同步修改的 `code_paths` frontmatter。
+- 审阅 LoongArch timer register 注释时发现 `os/src/hal/arch/loongarch64/register/timer/tcfg.rs::is_enabled()` 的实现与公开手册常见 bit 语义可能存在方向差异；本次仅记录风险，未在注释重构中改动运行逻辑，后续可单独做语义审计。
+
 ### docs: 新增代码注释规范文档
 
 **涉及文件：**

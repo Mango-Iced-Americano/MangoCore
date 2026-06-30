@@ -1,3 +1,7 @@
+//! `TLBREHI`：TLB refill 专用表项高位寄存器。
+//!
+//! TLB refill 上下文中，`LDPTE` 等指令通过该 CSR 传递虚拟页号等高位表项信息。
+
 // 无论 CSR.TLBRERA.IsTLBR 等于何值，执行 TLBRD 指令都只更新 TLBEHI 寄存器
 use bit_field::BitField;
 use core::fmt::Debug;

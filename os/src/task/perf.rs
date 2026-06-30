@@ -1,3 +1,13 @@
+//! 任务、调度、内存和 I/O 热路径性能计数器。
+//!
+//! `perf_stats` feature 开启时，本模块导出真实计数器和记录函数；关闭时导出
+//! 同名 no-op/stub，保证调用点无需条件编译。运行时开关 `STATS_ON` 控制是否记录。
+//!
+//! # Semantics
+//!
+//! 计数器使用 relaxed atomic，只用于诊断和趋势观察，不提供同步或 happens-before
+//! 语义。
+
 /// Runtime gate: 0 = counters frozen (no-op), 1 = recording.
 /// Toggled via /sys/kernel/stats/stats_on. Always present so sysfs can
 /// read/write it even when `perf_stats` is disabled at compile time.
@@ -658,12 +668,16 @@ mod enabled {
         #[cfg(target_arch = "riscv64")]
         {
             let cycles: usize;
+            // Safety: `rdcycle` 只读取当前 hart 的 cycle CSR，不访问内存，
+            // 不修改控制寄存器，也不依赖栈或 ABI 外状态。
             unsafe { core::arch::asm!("rdcycle {}", out(reg) cycles) };
             cycles
         }
         #[cfg(target_arch = "loongarch64")]
         {
             let mut lo: usize; let mut hi: usize;
+            // Safety: `rdtime.d` 只读取稳定计时器到通用寄存器，不访问内存；
+            // 两个输出寄存器均由 asm! 约束分配。
             unsafe { core::arch::asm!("rdtime.d {},{}", out(reg) lo, out(reg) hi) };
             lo
         }

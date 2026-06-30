@@ -1,3 +1,7 @@
+//! LoongArch64 QEMU ACPI/PM 控制寄存器封装。
+//!
+//! 目前用于通过 PM1 control 寄存器触发 QEMU 关机。
+
 use bit_field::BitField;
 
 use crate::hal::arch::board::ACPI_BASE;

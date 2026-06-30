@@ -1,3 +1,7 @@
+//! LoongArch64 裸机入口。
+//!
+//! `_start` 设置启动栈并跳转到 Rust 侧 `rust_main`。
+
 use core::arch::asm;
 
 use crate::config::BOOT_STACK_SIZE;
@@ -6,6 +10,9 @@ use crate::config::BOOT_STACK_SIZE;
 #[no_mangle]
 #[link_section = ".text.entry"]
 unsafe extern "C" fn _start() -> ! {
+    // Safety: this is the first instruction stream after firmware jumps to the
+    // kernel. No Rust stack or references exist yet; the assembly only programs
+    // DMW registers, initializes `$sp`, and tail-jumps to `rust_main`.
     unsafe {
         asm!(
             // 以下内容看不懂的话

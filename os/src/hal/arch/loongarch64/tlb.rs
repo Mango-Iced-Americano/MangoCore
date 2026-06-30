@@ -1,3 +1,8 @@
+//! LoongArch64 TLB 与 ASID 管理。
+//!
+//! 提供用户 ASID 分配、当前 ASID 设置、页级/全局 TLB invalidation，以及少量
+//! TLB 调试读取辅助函数。
+
 use super::{ASId, TLBEHi, TLBIdx, TLBEL, TLBELO0, TLBELO1};
 use crate::config::PAGE_SIZE_BITS;
 use crate::mm::{PhysPageNum, VirtPageNum};
@@ -76,6 +81,8 @@ pub fn tlb_addr_allow_write(vpn: VirtPageNum, ppn: PhysPageNum) -> Result<(), ()
 #[inline(always)]
 /// Invalidate non-global TLB entries
 pub fn tlb_invalidate() {
+    // Safety: `invtlb 0x3` invalidates non-global TLB entries for the current
+    // core and does not access memory through Rust references.
     unsafe {
         asm!("invtlb 0x3,$zero, $zero");
     }
@@ -86,6 +93,8 @@ pub fn tlb_invalidate_page(vpn: VirtPageNum) {
     // INVTLB_ADDR_GFALSE_AND_ASID requires the target ASID in rj.
     let vaddr = (vpn.0 & !1) << PAGE_SIZE_BITS;
     let asid = current_asid() as usize;
+    // Safety: `invtlb 0x5` treats `asid` and `vaddr` as architectural operands
+    // for invalidation only; `vaddr` is not dereferenced.
     unsafe {
         asm!(
             "invtlb 0x5, {asid}, {vaddr}",
@@ -100,6 +109,8 @@ pub fn tlb_invalidate_page(vpn: VirtPageNum) {
 pub fn tlb_invalidate_global_page(vpn: VirtPageNum) {
     // INVTLB_ADDR_GTRUE_OR_ASID with ASID 0 covers global kernel mappings.
     let vaddr = (vpn.0 & !1) << PAGE_SIZE_BITS;
+    // Safety: `invtlb 0x6` invalidates by virtual address and does not
+    // dereference `vaddr`.
     unsafe {
         asm!(
             "invtlb 0x6, $zero, {vaddr}",
@@ -111,6 +122,8 @@ pub fn tlb_invalidate_global_page(vpn: VirtPageNum) {
 }
 #[inline(always)]
 pub fn tlb_global_invalidate() {
+    // Safety: `invtlb 0x0` performs a global TLB invalidation on the current
+    // core and has no Rust-visible memory access.
     unsafe {
         asm!("invtlb 0x0,$zero, $zero");
     }
@@ -148,11 +161,15 @@ pub fn tlb_search(vpn: VirtPageNum) -> Result<PhysPageNum, ()> {
 }
 
 fn tlbrd() {
+    // Safety: `tlbrd` only transfers the selected hardware TLB entry into CSR
+    // state, which is read by the caller through register wrappers.
     unsafe {
         asm!("tlbrd");
     }
 }
 fn tlbsrch() {
+    // Safety: `tlbsrch` searches the hardware TLB using CSR state prepared by
+    // the caller and writes the result back to TLBIdx.
     unsafe {
         asm!("tlbsrch");
     }

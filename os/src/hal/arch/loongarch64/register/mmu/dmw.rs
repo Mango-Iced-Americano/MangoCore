@@ -1,9 +1,17 @@
+//! `DMW0..DMW3`：直接映射窗口配置寄存器。
+//!
+//! 这些 CSR 为指定虚拟地址高位段建立无需页表遍历的直接映射，并记录可用特权级和 MAT。
+
 use core::{convert::TryFrom, fmt::Debug};
 
 use bit_field::BitField;
 
 use super::MemoryAccessType;
 
+/// 直接映射窗口寄存器的公共字段访问接口。
+///
+/// 四个 `DMW` CSR 字段布局一致，仅 CSR 编号不同，因此共用该 trait 表达 PLV、
+/// MAT 和虚拟段号配置。
 pub trait DMW: BitField {
     /// true indicates that this window can be used for direct mapping address translation at the PLV0 privilege level.
     fn plv0(&self) -> bool {

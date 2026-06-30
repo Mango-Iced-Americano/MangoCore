@@ -1,3 +1,7 @@
+//! `MISC`：处理器杂项行为控制寄存器。
+//!
+//! 该 CSR 汇集地址宽度、低特权级计数器访问、未对齐检查和页表写保护等实现相关开关。
+
 use bit_field::BitField;
 use core::ops::Mul;
 

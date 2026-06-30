@@ -1,3 +1,18 @@
+//! 单核处理器状态和调度主循环。
+//!
+//! `PROCESSOR` 保存当前任务和 idle 上下文。热路径通过一组 relaxed atomic
+//! 缓存当前任务身份信息，减少 syscall 入口查询当前任务时获取调度器锁的成本。
+//!
+//! # Locking
+//!
+//! `PROCESSOR` 锁只保护当前任务槽和 idle 上下文指针。切换到任务前必须释放该锁，
+//! 否则切回调度器时会形成自锁。
+//!
+//! # Safety
+//!
+//! `CURRENT_TASK_PTR` 只在单核调度器持有 `PROCESSOR.current` 的强引用期间发布。
+//! `take_current_task()` 在切走当前任务前清空该指针。
+
 use super::{
     __switch, do_wake_expired, has_zombie_queue_tasks_fast, take_one_interruptible_zombie,
     take_one_ready_zombie, take_zombie_tasks,
@@ -18,7 +33,11 @@ const BACKGROUND_NET_POLL_INTERVAL: usize = 64;
 const IDLE_NET_POLL_INTERVAL: usize = 64;
 const RV64_CONSOLE_POLL_INTERVAL: usize = 64;
 
-/// 处理器对象
+/// 当前 CPU 的调度状态。
+///
+/// # Semantics
+///
+/// MangoCore 当前只支持单核运行，因此该对象同时代表全局处理器状态。
 pub struct Processor {
     /// 当前正在运行的任务
     current: Option<Arc<TaskControlBlock>>,
@@ -27,7 +46,6 @@ pub struct Processor {
 }
 
 impl Processor {
-    /// 构造函数
     pub fn new() -> Self {
         Self {
             // 初始化时处理器为空闲
@@ -36,20 +54,26 @@ impl Processor {
             idle_task_cx: TaskContext::zero_init(),
         }
     }
-    /// 获取空闲任务的上下文指针
+    /// 返回 idle 任务上下文指针，供 `__switch` 保存/恢复寄存器。
     fn get_idle_task_cx_ptr(&mut self) -> *mut TaskContext {
         &mut self.idle_task_cx as *mut _
     }
-    /// 取出当前正在运行的任务
+
+    /// 取出当前正在运行的任务。
+    ///
+    /// # Semantics
+    ///
+    /// 调用方随后必须把任务重新入队、转为 zombie，或完成退出清理。
     pub fn take_current(&mut self) -> Option<Arc<TaskControlBlock>> {
         // 将current字段置空，并返回其中的值
         self.current.take()
     }
-    /// 获取当前正在运行的任务的克隆
+    /// 克隆当前正在运行的任务。
     pub fn current(&self) -> Option<Arc<TaskControlBlock>> {
         self.current.as_ref().map(Arc::clone)
     }
-    /// 检查当前 Processor 是否为空闲
+
+    /// 返回当前处理器是否没有运行任务。
     pub fn is_vacant(&self) -> bool {
         self.current.is_none()
     }
@@ -75,14 +99,26 @@ static CURRENT_PGID: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_SID: AtomicUsize = AtomicUsize::new(0);
 
 lazy_static! {
-    /// 全局的处理器对象
-    /// 使用 Mutex 包装以确保多线程安全
+    /// 全局处理器对象。
+    ///
+    /// # Locking
+    ///
+    /// 持锁期间只能更新当前任务槽或读取 idle 上下文指针，不能跨 `__switch`
+    /// 或任何可能阻塞的路径持有该锁。
     pub static ref PROCESSOR: Mutex<Processor> = Mutex::new(Processor::new());
 }
 
-/// 运行任务调度
-/// # 作用
-/// 运行任务调度器，不断从任务队列中取出任务并运行
+/// 运行调度主循环。
+///
+/// # Semantics
+///
+/// 循环执行定时唤醒、网络轮询、文件缓存回收、zombie 清理和 ready 队列取任务。
+/// 找到任务后发布当前任务缓存、释放 `PROCESSOR` 锁并切换到任务上下文。
+///
+/// # Locking
+///
+/// 调用 `__switch` 前必须释放 `PROCESSOR` 锁；被切入任务后该函数直到任务主动
+/// `schedule()` 回 idle 才会继续执行。
 pub fn run_tasks() {
     let mut schedule_tick = 0usize;
     loop {
@@ -313,8 +349,11 @@ pub fn run_tasks() {
                 SCHED_SWITCHES.fetch_add(1, SchedOrdering::Relaxed);
             }
             sched_record_loop_cycles(sched_profile, loop_t0);
+            // Safety: `idle_task_cx_ptr` points into `PROCESSOR.idle_task_cx`
+            // and `next_task_cx_ptr` points into the selected task's TCB. The
+            // processor lock has been dropped, so the switched-in task can later
+            // call `schedule()` without deadlocking on `PROCESSOR`.
             unsafe {
-                // 调用__switch 函数(汇编)切换任务
                 crate::task::perf::record_context_switch();
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
             }
@@ -339,7 +378,12 @@ pub fn run_tasks() {
     }
 }
 
-/// 取出当前正在运行的任务
+/// 取出当前正在运行的任务并清空当前任务缓存。
+///
+/// # Semantics
+///
+/// 这是切出当前任务的唯一入口。清空 atomic 缓存后，热路径查询会回退到
+/// `PROCESSOR.current` 或返回空闲状态。
 #[inline(always)]
 pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
     CURRENT_TASK_PTR.store(ptr::null_mut(), Ordering::Relaxed);
@@ -358,16 +402,21 @@ pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
     PROCESSOR.lock().take_current()
 }
 
-/// 获取当前正在运行的任务
+/// 获取当前正在运行任务的 `Arc`。
+///
+/// # Semantics
+///
+/// 单核调度器在 `CURRENT_TASK_PTR` 非空期间由 `PROCESSOR.current` 持有强引用。
+/// 本函数直接从 raw pointer 增加强引用计数，避免 syscall 热路径获取调度器锁。
 #[inline(always)]
 pub fn current_task() -> Option<Arc<TaskControlBlock>> {
     let ptr = CURRENT_TASK_PTR.load(Ordering::Relaxed);
     if ptr.is_null() {
         return None;
     }
-    // MangoCore is single-core. PROCESSOR.current owns a strong reference while
-    // CURRENT_TASK_PTR is published, so cloning from the raw pointer avoids the
-    // scheduler lock on hot syscall paths.
+    // Safety: MangoCore is single-core. `PROCESSOR.current` owns a strong
+    // reference while `CURRENT_TASK_PTR` is published, and `take_current_task`
+    // clears the pointer before removing that owner.
     unsafe {
         Arc::increment_strong_count(ptr);
         Some(Arc::from_raw(ptr))
@@ -378,12 +427,19 @@ pub fn current_task() -> Option<Arc<TaskControlBlock>> {
 ///
 /// MangoCore 当前是单核；调度器在 `PROCESSOR.current` 持有 Arc 时同步发布这个指针，
 /// `take_current_task()` 会在切走当前任务前清空它。调用者不能把引用跨调度点保存。
+///
+/// # Safety
+///
+/// 返回类型为 `'static` 是为了适配内核内部调用约定，实际生命周期只到下一次
+/// 调度点。调用者不能缓存该引用或在释放 CPU 后继续使用。
 #[inline(always)]
 pub fn current_task_ref() -> Option<&'static TaskControlBlock> {
     let ptr = CURRENT_TASK_PTR.load(Ordering::Relaxed);
     if ptr.is_null() {
         None
     } else {
+        // Safety: see the function contract above. The raw pointer is published
+        // only while `PROCESSOR.current` owns the task.
         Some(unsafe { &*ptr })
     }
 }
@@ -477,7 +533,7 @@ pub fn refresh_current_user_token_for_process(pid: usize, token: usize) {
     }
 }
 
-/// 获取当前系统调用名称（用于 OOM 诊断）
+/// 获取当前系统调用名称（用于 OOM 诊断）。
 pub fn current_syscall_name() -> &'static str {
     match CURRENT_SYSCALL_ID.load(Ordering::Relaxed) {
         0 => "<none>",
@@ -485,7 +541,11 @@ pub fn current_syscall_name() -> &'static str {
     }
 }
 
-/// 设置当前系统调用 ID
+/// 设置当前系统调用 ID。
+///
+/// # Semantics
+///
+/// 默认性能构建不会记录该字段；仅在 `heap_trace` 或 `perf_stats` 构建中写入。
 #[inline(always)]
 pub fn set_current_syscall_id(id: Option<usize>) {
     if cfg!(any(feature = "heap_trace", feature = "perf_stats")) {
@@ -493,7 +553,7 @@ pub fn set_current_syscall_id(id: Option<usize>) {
     }
 }
 
-/// 获取当前正在运行的任务的用户态页表令牌
+/// 获取当前任务的用户态页表 token。
 #[inline(always)]
 pub fn try_current_user_token() -> Option<usize> {
     let token = CURRENT_USER_TOKEN.load(Ordering::Relaxed);
@@ -504,26 +564,42 @@ pub fn try_current_user_token() -> Option<usize> {
     }
 }
 
-/// 获取当前正在运行的任务的用户态页表令牌
+/// 获取当前任务的用户态页表 token。
+///
+/// # Panics
+///
+/// 当前处理器没有运行任务时 panic。
 #[inline(always)]
 pub fn current_user_token() -> usize {
     try_current_user_token().unwrap()
 }
 
-/// 获取当前正在运行的任务的陷阱上下文
+/// 获取当前任务的陷阱上下文。
+///
+/// # Locking
+///
+/// 返回的引用来自当前任务 inner 锁保护的数据。调用方只能在立即读写 trap
+/// context 的短路径中使用，不能跨阻塞点保存。
 pub fn current_trap_cx() -> &'static mut TrapContext {
     current_task_ref().unwrap().acquire_inner_lock().get_trap_cx()
 }
 
-/// 切换到空闲任务上下文
+/// 从当前任务切换回 idle 调度上下文。
+///
+/// # Semantics
+///
+/// `switched_task_cx_ptr` 必须指向当前任务的 `TaskContext`，用于保存被切出时
+/// 的 callee-saved 寄存器。函数在 idle 再次调度该任务时返回。
 pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
     // 获取空闲任务的上下文指针
     let idle_task_cx_ptr = PROCESSOR.lock().get_idle_task_cx_ptr();
     if sched_profile_enabled() {
         SCHED_SWITCHES.fetch_add(1, SchedOrdering::Relaxed);
     }
+    // Safety: `switched_task_cx_ptr` is provided by the currently running TCB
+    // and `idle_task_cx_ptr` points into `PROCESSOR.idle_task_cx`. The
+    // `PROCESSOR` lock is not held across the assembly context switch.
     unsafe {
-        // 调用__switch 函数(汇编)切换任务
         crate::task::perf::record_context_switch();
         __switch(switched_task_cx_ptr, idle_task_cx_ptr);
     }
@@ -600,9 +676,26 @@ fn sched_profile_enabled() -> bool {
 #[inline(always)]
 fn sched_rdcycle() -> u64 {
     #[cfg(target_arch = "riscv64")]
-    { let cycles: usize; unsafe { core::arch::asm!("rdcycle {}", out(reg) cycles) }; cycles as u64 }
+    {
+        let cycles: usize;
+        // Safety: `rdcycle` only reads the architectural cycle counter and
+        // writes the output register.
+        unsafe {
+            core::arch::asm!("rdcycle {}", out(reg) cycles);
+        }
+        cycles as u64
+    }
     #[cfg(target_arch = "loongarch64")]
-    { let lo: usize; let hi: usize; unsafe { core::arch::asm!("rdtime.d {}, {}", out(reg) lo, out(reg) hi) }; lo as u64 }
+    {
+        let lo: usize;
+        let hi: usize;
+        // Safety: `rdtime.d` only reads the architectural timer and writes the
+        // two output registers.
+        unsafe {
+            core::arch::asm!("rdtime.d {}, {}", out(reg) lo, out(reg) hi);
+        }
+        lo as u64
+    }
     #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
     { 0 }
 }

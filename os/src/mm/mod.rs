@@ -1,3 +1,19 @@
+//! 内存管理子系统入口。
+//!
+//! 管理物理页帧、用户地址空间、VMA、页表、内核堆、用户指针访问和
+//! mmap/page fault 路径。架构相关页表实现经由 `PageTableImpl` 注入，
+//! 上层通过本模块导出的 trait 和辅助函数操作地址空间。
+//!
+//! # TLB
+//!
+//! 任何修改 PTE 的路径必须立即刷新对应 TLB，或明确使用
+//! `*_no_flush` 批量接口并在批量结束后调用 `flush_tlb()`。
+//!
+//! # Locking
+//!
+//! 用户地址访问会通过当前任务的 `AddressSpace` 锁 fault-in 页面。
+//! 调用方不得在持有同一地址空间锁时再次进入 uaccess 路径。
+
 pub mod address;
 mod address_space;
 mod filemap;
@@ -69,6 +85,12 @@ pub use uaccess::{
     // UserBufferIterator,
 };
 
+/// 初始化内核堆、物理页帧分配器并激活内核页表。
+///
+/// # Semantics
+///
+/// 该函数只在启动阶段调用一次。调用完成后，`KERNEL_SPACE` 成为当前页表，
+/// 后续内存分配和用户地址空间创建才能安全执行。
 pub fn init() {
     heap_allocator::init_heap();
     #[cfg(feature = "heap_trace")]

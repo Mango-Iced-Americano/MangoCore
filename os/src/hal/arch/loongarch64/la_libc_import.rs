@@ -1,3 +1,7 @@
+//! LoongArch64 链接所需的 libc 兼容符号。
+//!
+//! 为裸机内核补齐编译器或库代码可能引用的少量 C ABI 符号。
+
 extern crate rlibc;
 use rlibc::memcmp;
 #[no_mangle]

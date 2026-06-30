@@ -1,3 +1,8 @@
+//! LoongArch64 trap context 和用户信号上下文布局。
+//!
+//! 该文件定义 trap 入口保存的通用寄存器、CSR 快照和 signal frame 使用的
+//! 用户可见上下文结构。
+
 use core::fmt::Debug;
 
 use crate::{

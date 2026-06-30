@@ -1,3 +1,7 @@
+//! `TLBRENTRY`：TLB refill 例外入口基址寄存器。
+//!
+//! 该 CSR 指定 TLB refill 例外的专用入口地址，区别于普通 `EENTRY`。
+
 impl_define_csr!(
     TLBREntry,
     " TLB Refill Exception Entry Base Address (TLBRENTRY)

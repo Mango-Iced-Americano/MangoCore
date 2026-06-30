@@ -1,23 +1,26 @@
-/*
-    此文件用于定义任务上下文结构体 TaskContext
-    TaskContext 结构体包含了任务的上下文信息，包括返回地址 ra、栈指针 sp 和通用寄存器 s
-    内容与RISCV版本相同，无需修改
-*/
+//! 任务上下文保存区。
+//!
+//! `TaskContext` 是调度器切换时保存的最小内核态上下文，布局必须与
+//! 架构相关 `switch` 汇编保持一致：返回地址、内核栈指针以及 callee-saved
+//! 通用寄存器。
+
 use crate::hal::trap_return;
 
 #[repr(C)]
-/// 任务上下文
+/// 调度器保存和恢复的内核态任务上下文。
+///
+/// # Semantics
+///
+/// 该结构只保存内核线程切换所需的寄存器，不包含用户态 trap context。
+/// 字段顺序属于汇编 ABI，修改时必须同步 `hal::arch::*::switch`。
 pub struct TaskContext {
-    // 返回地址
     ra: usize,
-    // 栈指针
     sp: usize,
-    // 通用寄存器
     s: [usize; 12],
 }
 
 impl TaskContext {
-    // 空初始化
+    /// 返回全零上下文，用于占位或初始化后立即覆盖的场景。
     pub fn zero_init() -> Self {
         Self {
             ra: 0,
@@ -25,7 +28,13 @@ impl TaskContext {
             s: [0; 12],
         }
     }
-    // 从指定栈指针和返回地址初始化
+
+    /// 构造首次被调度时跳转到 `trap_return` 的上下文。
+    ///
+    /// # Semantics
+    ///
+    /// `kstack_ptr` 必须是该任务内核栈的栈顶。首次恢复该上下文时，调度器
+    /// 通过 `ra = trap_return` 进入统一的返回用户态路径。
     pub fn goto_trap_return(kstack_ptr: usize) -> Self {
         Self {
             ra: trap_return as usize,

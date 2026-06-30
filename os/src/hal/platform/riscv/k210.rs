@@ -1,3 +1,7 @@
+//! RISC-V K210 平台常量。
+//!
+//! 定义 K210 的时钟频率、MMIO 区间和物理内存结束地址。
+
 pub const CLOCK_FREQ: usize = 403000000 / 62;
 
 pub const MMIO: &[(usize, usize)] = &[

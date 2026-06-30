@@ -1,3 +1,8 @@
+//! RISC-V trap context 和用户信号上下文布局。
+//!
+//! 该文件定义从 trap 入口保存的通用寄存器、状态寄存器和 signal frame 需要的
+//! 用户可见上下文结构。
+
 use riscv::register::sstatus::{self, set_spp, Sstatus, SPP};
 
 use crate::task::{SignalStack, Signals};

@@ -1,3 +1,8 @@
+//! 任务数量 quota。
+//!
+//! clone/fork 路径通过 `TaskQuotaGuard` 预留一个任务或进程生命周期名额，Drop
+//! 时归还。硬上限返回 Linux 兼容的 `-EAGAIN`，软上限只打印一次告警。
+
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::config::{SYSTEM_TASK_LIMIT, SYSTEM_TASK_SOFT_LIMIT};
@@ -8,11 +13,22 @@ static TASK_QUOTA_USED: AtomicUsize = AtomicUsize::new(0);
 static TASK_QUOTA_SOFT_WARNED: AtomicBool = AtomicBool::new(false);
 
 #[must_use]
+/// 已占用任务 quota 的 RAII 句柄。
+///
+/// # Semantics
+///
+/// 持有该 guard 期间 `TASK_QUOTA_USED` 计数保持增加；guard drop 时自动递减。
+/// 因此 clone/fork 的失败回滚路径只需要丢弃 guard。
 pub(crate) struct TaskQuotaGuard {
     _private: (),
 }
 
 impl TaskQuotaGuard {
+    /// 尝试获取一个任务 quota。
+    ///
+    /// # Errors
+    ///
+    /// 达到 `SYSTEM_TASK_LIMIT` 时返回 `-EAGAIN`。
     pub(crate) fn try_acquire() -> Result<Self, isize> {
         let mut current = TASK_QUOTA_USED.load(Ordering::Relaxed);
         loop {
@@ -47,6 +63,11 @@ impl TaskQuotaGuard {
         }
     }
 
+    /// 为 initproc 获取 quota。
+    ///
+    /// # Panics
+    ///
+    /// initproc 无法获取 quota 时 panic，因为系统无法继续启动。
     pub(crate) fn acquire_for_init() -> Self {
         Self::try_acquire().unwrap_or_else(|_| panic!("initproc cannot acquire task quota"))
     }
@@ -62,6 +83,7 @@ impl Drop for TaskQuotaGuard {
     }
 }
 
+/// 返回当前已占用的任务 quota 数。
 pub(crate) fn allocated_task_count() -> usize {
     TASK_QUOTA_USED.load(Ordering::Relaxed)
 }

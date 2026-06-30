@@ -1,7 +1,14 @@
-/*
-    此文件内容用于
-    内容与RISCV版本相同，无需修改
-*/
+//! Futex 等待、唤醒和重排。
+//!
+//! 私有 futex 等待队列存放在进程内 `Futex` 表中；process-shared futex 使用物理地址
+//! 作为全局 key。等待路径先验证用户 futex word，再在对应 `WaitQueue` 上注册，
+//! 被信号打断时返回 Linux futex 语义的 `-EINTR`。
+//!
+//! # Locking
+//!
+//! futex table 锁只保护等待队列映射。阻塞前通过
+//! `block_current_and_run_next_with_lock_checked` 释放该锁，唤醒路径不跨等待点持锁。
+
 use core::hint::spin_loop;
 use core::sync::atomic::{AtomicBool, Ordering};
 

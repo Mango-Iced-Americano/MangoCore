@@ -1,3 +1,14 @@
+//! 硬件抽象层入口。
+//!
+//! 统一导出架构相关的启动、陷阱、页表、TLB、时钟、控制台和内核栈接口。
+//! 上层内核代码应通过本模块访问架构能力，避免直接依赖 `arch/*` 的实现细节。
+//!
+//! # TLB
+//!
+//! 修改 PTE 后必须通过本模块导出的 `tlb_invalidate` 或页表接口自带的
+//! flush 路径刷新 TLB。RISC-V 使用 `sfence.vma`，LoongArch64 使用
+//! `invtlb`。
+
 pub mod arch;
 pub use arch::__switch;
 pub use arch::config;

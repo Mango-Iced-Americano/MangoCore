@@ -1,3 +1,7 @@
+//! `TLBRBADV`：TLB refill 异常的错误虚拟地址寄存器。
+//!
+//! TLB refill handler 用它读取触发 refill 的 faulting VA。
+
 use core::fmt::Debug;
 
 impl_define_csr!(

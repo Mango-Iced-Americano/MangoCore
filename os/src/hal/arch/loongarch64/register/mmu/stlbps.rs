@@ -1,3 +1,7 @@
+//! `STLBPS`：STLB 页大小配置寄存器。
+//!
+//! 该 CSR 指定组相联单页大小 TLB 使用的页大小编码。
+
 use bit_field::BitField;
 impl_define_csr!(
     STLBPS,

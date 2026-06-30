@@ -1,3 +1,7 @@
+//! `TLBRSAVE`：TLB refill 例外临时保存寄存器。
+//!
+//! refill handler 可用该 CSR 暂存一个通用值，避免破坏普通上下文保存约定。
+
 impl_define_csr!(TLBRSave, " TLB Refill Exception Data Save Register (TLBRSAVE)
 
 This register is used to store data temporarily for the system software.

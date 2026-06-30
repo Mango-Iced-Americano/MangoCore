@@ -1,3 +1,7 @@
+//! LoongArch64 HAL 后端。
+//!
+//! 汇总平台配置、CSR 寄存器包装、LAFlex 页表、trap、SBI 兼容层、时间源和上下文切换。
+
 #[path = "../../platform/loongarch64/qemu.rs"]
 pub mod board;
 pub mod config;
@@ -49,11 +53,14 @@ pub fn machine_init() {
      * ); */
     for i in 0..=6 {
         let j: usize;
+        // Safety: `cpucfg` only reads the CPU configuration word selected by
+        // `i` into the output register.
         unsafe { core::arch::asm!("cpucfg {0},{1}",out(reg) j,in(reg) i) };
         println!("[CPUCFG {:#x}] {}", i, j);
     }
     for i in 0x10..=0x14 {
         let j: usize;
+        // Safety: same read-only CPUCFG access as above.
         unsafe { core::arch::asm!("cpucfg {0},{1}",out(reg) j,in(reg) i) };
         println!("[CPUCFG {:#x}] {}", i, j);
     }

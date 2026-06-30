@@ -1,3 +1,7 @@
+//! RISC-V 时间源和调度 tick 编程。
+//!
+//! 使用 SBI timer 设置下一次时钟中断，`get_time()` 读取硬件 time 寄存器。
+
 use super::config::CLOCK_FREQ;
 use crate::hal::arch::set_timer;
 use riscv::register::time;

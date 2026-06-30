@@ -1,3 +1,13 @@
+//! 地址和页号基础类型。
+//!
+//! 提供物理/虚拟地址、物理/虚拟页号之间的转换，以及通过内核直映区访问物理
+//! 内存的辅助方法。
+//!
+//! # Safety
+//!
+//! `PhysAddr`/`PhysPageNum` 的引用访问方法假定目标物理内存已经由调用方保证
+//! 有效、对齐且不会与其他可变引用别名。
+
 use crate::config::{MEMORY_HIGH_BASE, PAGE_SIZE, PAGE_SIZE_BITS};
 use core::fmt::{self, Debug, Formatter};
 
@@ -205,7 +215,6 @@ impl VirtPageNum {
     }
 }
 
-/// 如下方法提供了从物理地址访问内存的能力
 impl PhysAddr {
     // 物理地址通过内核直映区访问，具体偏移由架构配置给出。
     #[inline(always)]
@@ -213,16 +222,33 @@ impl PhysAddr {
         self.0 | MEMORY_HIGH_BASE
     }
 
-    /// 获取引用
+    /// 通过内核直映区获取 `T` 的共享引用。
+    ///
+    /// # Safety
+    ///
+    /// 调用方必须保证物理地址有效、满足 `T` 的对齐要求，且该内存区域在返回
+    /// 引用存活期间不会被释放或以可变方式别名访问。
     pub fn get_ref<T>(&self) -> &'static T {
+        // Safety: the caller-side contract above ensures the direct-map address
+        // is a valid, aligned `T` reference.
         unsafe { (self.direct_map_addr() as *const T).as_ref().unwrap() }
     }
-    /// 获取可变引用
+
+    /// 通过内核直映区获取 `T` 的可变引用。
+    ///
+    /// # Safety
+    ///
+    /// 调用方必须独占对应物理内存，并保证地址有效且满足 `T` 的对齐要求。
     pub fn get_mut<T>(&self) -> &'static mut T {
+        // Safety: the caller-side contract above ensures exclusive access to a
+        // valid, aligned `T` at the direct-map address.
         unsafe { (self.direct_map_addr() as *mut T).as_mut().unwrap() }
     }
-    /// 以字节数组形式获取引用
+
+    /// 以字节数组形式读取从该物理地址开始的 `size_of::<T>()` 字节。
     pub fn get_bytes_ref<T>(&self) -> &'static [u8] {
+        // Safety: bytes have alignment 1; callers guarantee the physical range
+        // is valid for `size_of::<T>()` bytes.
         unsafe {
             core::slice::from_raw_parts(
                 self.direct_map_addr() as *const u8,
@@ -230,8 +256,14 @@ impl PhysAddr {
             )
         }
     }
-    /// 以字节数组形式获取可变引用
+    /// 以字节数组形式写入从该物理地址开始的 `size_of::<T>()` 字节。
+    ///
+    /// # Safety
+    ///
+    /// 调用方必须独占对应物理字节范围。
     pub fn get_bytes_mut<T>(&self) -> &'static mut [u8] {
+        // Safety: bytes have alignment 1; callers guarantee exclusive access to
+        // a valid physical range for `size_of::<T>()` bytes.
         unsafe {
             core::slice::from_raw_parts_mut(
                 self.direct_map_addr() as *mut u8,
@@ -250,23 +282,43 @@ impl PhysPageNum {
     pub fn offset(&self, offset: usize) -> PhysAddr {
         PhysAddr::from((self.0 << PAGE_SIZE_BITS) + offset)
     }
-    /// 获取页表项数组
+    /// 将整页解释为页表项数组。
+    ///
+    /// # Safety
+    ///
+    /// 调用方必须保证该物理页确实保存 `T` 类型页表项，且当前路径独占该页表页。
     pub fn get_pte_array<T>(&self) -> &'static mut [T] {
         let pa: PhysAddr = self.clone().into();
         let entry_size = core::mem::size_of::<T>();
         assert!(entry_size != 0, "page table entry must not be zero-sized");
+        // Safety: callers guarantee this physical page stores page-table entries
+        // of type `T`; the length is derived from page size and entry size.
         unsafe {
             core::slice::from_raw_parts_mut(pa.direct_map_addr() as *mut T, PAGE_SIZE / entry_size)
         }
     }
-    /// 获取整个页的字节数组
+
+    /// 获取整个物理页的可变字节视图。
+    ///
+    /// # Safety
+    ///
+    /// 调用方必须独占该物理页。
     pub fn get_bytes_array(&self) -> &'static mut [u8] {
         let pa: PhysAddr = self.clone().into();
+        // Safety: callers guarantee exclusive access to this whole physical
+        // page through the direct map.
         unsafe { core::slice::from_raw_parts_mut(pa.direct_map_addr() as *mut u8, PAGE_SIZE) }
     }
-    /// 获取双字数组
+
+    /// 将整页解释为 `u64` 数组。
+    ///
+    /// # Safety
+    ///
+    /// 调用方必须保证该页按 `u64` 对齐并独占访问。
     pub fn get_dwords_array(&self) -> &'static mut [u64] {
         let pa: PhysAddr = self.clone().into();
+        // Safety: callers guarantee the page is valid, u64-aligned, and
+        // exclusively accessed for the returned lifetime.
         unsafe {
             core::slice::from_raw_parts_mut(
                 pa.direct_map_addr() as *mut u64,

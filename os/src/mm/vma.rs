@@ -1,3 +1,13 @@
+//! 单个虚拟内存区域（VMA）的页级操作。
+//!
+//! `Vma` 保存地址区间、权限、mmap flag、文件后端以及页帧状态表，并提供单页映射、
+//! 解除映射、fork 继承、CoW、范围伸缩和 OOM 回收等操作。
+//!
+//! # Semantics
+//!
+//! 匿名私有页支持懒分配和 CoW；`MAP_SHARED` 页不参与 CoW；文件映射的首次 fault
+//! 由 `filemap` 路径填充。修改 PTE 的方法必须通过 `UserMapper` 或页表层以保持 TLB 刷新。
+
 use core::fmt::Debug;
 
 use super::frame_store::{Frame, FrameState, VmPageStore};
@@ -472,7 +482,7 @@ impl Vma {
             if !UserMapper::new(page_table).is_mapped(vpn) {
                 return Err(MemoryError::NotMapped);
             }
-            // alloc new frame
+            // Safety: 新页会在下面立即用旧页完整覆盖，然后才替换 PTE 暴露给用户。
             let new_frame = unsafe { frame_alloc_uninit().ok_or(MemoryError::OutOfMemory)? };
             let new_ppn = new_frame.ppn;
             // copy data

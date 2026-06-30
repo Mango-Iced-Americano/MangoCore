@@ -1,3 +1,8 @@
+//! 可中断睡眠辅助。
+//!
+//! 本模块为 `nanosleep`/`clock_nanosleep` 等路径提供基于 `WaitQueue` 的睡眠。
+//! 单核 QEMU 上短尾部使用自旋补偿，以减少定时器唤醒后返回用户态的过早超时。
+
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use lazy_static::lazy_static;
@@ -16,19 +21,33 @@ lazy_static! {
 static REALTIME_CLOCK_CHANGE_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// 睡眠被信号中断时返回的剩余时间。
 pub struct SleepInterrupted {
+    /// 剩余时间；绝对时间睡眠在中断时按对应时钟重新计算。
     pub remaining: TimeSpec,
 }
 
+/// 按相对时间睡眠，允许可处理信号中断。
+///
+/// # Errors
+///
+/// 被信号中断时返回 `SleepInterrupted`，其中 `remaining` 为剩余相对时间。
 pub fn sleep_relative_interruptible(req: TimeSpec) -> Result<(), SleepInterrupted> {
     let deadline = TimeSpec::now() + req;
     sleep_until_deadline(deadline, true)
 }
 
+/// 按单调时钟绝对 deadline 睡眠，允许信号中断。
 pub fn sleep_until_interruptible(deadline: TimeSpec) -> Result<(), SleepInterrupted> {
     sleep_until_deadline(deadline, false)
 }
 
+/// 按实时时钟绝对 deadline 睡眠，允许信号和 `clock_settime` 唤醒重算。
+///
+/// # Locking
+///
+/// 通过全局 `REALTIME_ABSTIME_SLEEP_WAIT` 等待队列挂起；`clock_settime`
+/// 调用 `wake_realtime_abstime_sleepers_after_clock_set()` 唤醒所有等待者。
 pub fn sleep_until_realtime_interruptible(deadline: TimeSpec) -> Result<(), SleepInterrupted> {
     loop {
         let now_realtime = current_timespec();
@@ -61,6 +80,9 @@ pub fn sleep_until_realtime_interruptible(deadline: TimeSpec) -> Result<(), Slee
     }
 }
 
+/// 在实时时钟被修改后唤醒所有绝对实时时钟睡眠者。
+///
+/// 返回被唤醒的任务数量。
 pub fn wake_realtime_abstime_sleepers_after_clock_set() -> usize {
     REALTIME_CLOCK_CHANGE_SEQ.fetch_add(1, Ordering::Relaxed);
     REALTIME_ABSTIME_SLEEP_WAIT.lock().wake_all()

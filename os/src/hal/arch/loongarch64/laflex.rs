@@ -1,3 +1,8 @@
+//! LoongArch64 flexible page table implementation.
+//!
+//! 实现 `PageTable` trait，负责 LA64 页表页管理、PTE 权限转换、ASID/TLB 刷新
+//! 和内核全局映射激活。
+
 use super::{
     tlb::{tlb_invalidate, tlb_invalidate_global_page, tlb_invalidate_page},
     tlb_global_invalidate,
@@ -279,6 +284,8 @@ impl LAFlexPageTable {
     pub fn set_dirty_bit(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
         if self.is_ident_map(vpn) {
             if let Some(idx) = dirty_index(vpn) {
+                // Safety: `dirty_index` bounds-checks the index into the global
+                // bitmap, and MangoCore is currently single-core.
                 unsafe {
                     if DIRTY[idx] {
                         return Ok(());
@@ -512,6 +519,8 @@ impl PageTable for LAFlexPageTable {
     fn clear_dirty_bit(&mut self, vpn: VirtPageNum) -> Result<(), ()> {
         if self.is_ident_map(vpn) {
             if let Some(idx) = dirty_index(vpn) {
+                // Safety: `dirty_index` bounds-checks the index into the global
+                // bitmap, and MangoCore is currently single-core.
                 unsafe {
                     DIRTY[idx] = false;
                 }
@@ -556,6 +565,8 @@ impl PageTable for LAFlexPageTable {
     }
     fn is_dirty(&self, vpn: VirtPageNum) -> Option<bool> {
         if self.is_ident_map(vpn) {
+            // Safety: `dirty_index` returns `None` when `vpn` is outside the
+            // bitmap-covered range.
             dirty_index(vpn).map(|idx| unsafe { DIRTY[idx] })
         } else {
             self.find_pte(vpn).map(|pte| pte.is_dirty())

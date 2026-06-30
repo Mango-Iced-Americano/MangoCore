@@ -1,3 +1,9 @@
+//! PID/TID 分配和用户资源槽位地址计算。
+//!
+//! MangoCore 使用同一个可回收分配器管理用户可见 TID，以及同一地址空间内的
+//! trap context / 默认用户栈槽位编号。TID 复用策略偏向延迟复用，以降低并发
+//! clone/fork 测试观察到重复 ID 的概率。
+
 use crate::hal::{trap_cx_bottom_from_tid, ustack_bottom_from_tid};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -10,11 +16,16 @@ pub const DEFAULT_PID_MAX: usize = 32_768;
 const RESERVED_PID_REUSE_FLOOR: usize = 300;
 const FRESH_REUSE_WATERMARK: usize = DEFAULT_PID_MAX - 1024;
 
-/// 用于分配可回收 id 的结构体
+/// 可回收整数 ID 分配器。
+///
+/// # Semantics
+///
+/// `alloc()` 会优先消费回收列表；`alloc_fresh()` 在 PID/TID 路径上尽量保持
+/// 单调增长，仅在接近 `pid_max` 或收到 `ns_last_pid` hint 时复用旧 ID。
 pub struct RecycleAllocator {
-    /// 当前分配的id
+    /// 下一个线性分配 ID。
     current: usize,
-    /// 存储已经回收的id，供后续分配使用
+    /// 已回收 ID 的栈。
     recycled: Vec<usize>,
     /// O(1) membership bitmap for `recycled`.
     recycled_flags: Vec<bool>,
@@ -34,30 +45,27 @@ impl Clone for RecycleAllocator {
 }
 
 impl RecycleAllocator {
-    /// 构造函数
+    /// 创建从 ID 1 开始分配的新分配器。
     pub fn new() -> Self {
         RecycleAllocator {
-            // 当前分配的id数量初始化为0
             current: 1,
-            // 初始化为空向量
             recycled: Vec::new(),
             recycled_flags: Vec::new(),
             fresh_reuse_hint: None,
         }
     }
-    /// 分配一个新的id
+
+    /// 分配一个 ID，允许立即复用回收 ID。
     pub fn alloc(&mut self) -> usize {
-        // 从回收的id中取出一个，如果没有则分配一个新的
         if let Some(id) = self.alloc_recycled() {
             return id;
         }
-        // 当前分配的id数量加1
         self.current += 1;
         let id = self.current - 1;
         self.ensure_flag_capacity(id);
-        // 返回分配的id号
         id
     }
+
     /// 分配一个新的id，不立即复用已回收id。
     ///
     /// Linux/DragonOS 在 PID 空间高位使用循环分配并跳过低位保留 PID。
@@ -80,9 +88,18 @@ impl RecycleAllocator {
         self.ensure_flag_capacity(id);
         id
     }
+
+    /// 返回最近一次线性分配或 hint 设置后用户可见的最后 PID。
     pub fn last_allocated(&self) -> usize {
         self.current.saturating_sub(1)
     }
+
+    /// 设置下一次新分配的 hint，用于 `/proc/sys/kernel/ns_last_pid`。
+    ///
+    /// # Semantics
+    ///
+    /// hint 大于等于当前水位时直接推进水位；hint 指向已回收 ID 时，仅下一次
+    /// `alloc_fresh()` 可消费它。
     pub fn set_next_alloc_hint(&mut self, next: usize) {
         let next = next.max(1);
         if next >= self.current {
@@ -95,13 +112,16 @@ impl RecycleAllocator {
             self.fresh_reuse_hint = Some(next);
         }
     }
-    /// 回收一个id
+
+    /// 回收一个 ID，使其可被普通 `alloc()` 立即复用。
+    ///
+    /// # Panics
+    ///
+    /// ID 未分配或重复回收时 panic。调用方必须保证 `TidHandle`/槽位生命周期
+    /// 只释放一次。
     pub fn dealloc(&mut self, id: usize) {
-        // 检查id是否合法
         assert!(id < self.current);
-        // 检查id是否已经被回收
         assert!(!self.is_recycled(id), "id {} has been deallocated!", id);
-        // 将id回收，放入回收向量中
         self.mark_recycled(id, true);
         self.recycled.push(id);
     }
@@ -114,9 +134,9 @@ impl RecycleAllocator {
             self.recycled.push(id);
         }
     }
-    /// 获取已经分配的id数量
+
+    /// 返回当前已分配且尚未回收的 ID 数量。
     pub fn get_allocated(&self) -> usize {
-        // 返回当前分配的id数量减去已经回收的id数量
         let recycled_count = self.recycled_flags.iter().filter(|flag| **flag).count();
         self.current
             .saturating_sub(1)
@@ -171,7 +191,11 @@ impl RecycleAllocator {
 }
 
 lazy_static! {
-    /// 全局 tid 分配器对象，使用 Mutex 保证线程安全
+    /// 全局 TID 分配器。
+    ///
+    /// # Locking
+    ///
+    /// 所有 TID 分配和释放必须通过这把 `Mutex` 串行化。
     static ref TID_ALLOCATOR: Mutex<RecycleAllocator> = Mutex::new(RecycleAllocator::new());
 }
 
@@ -179,6 +203,11 @@ lazy_static! {
 pub struct TidHandle(pub usize, AtomicBool);
 
 impl TidHandle {
+    /// 释放 TID。
+    ///
+    /// # Semantics
+    ///
+    /// 该操作幂等；第一次释放会把 ID 记入延迟复用集合，后续调用无副作用。
     pub fn release(&self) {
         if !self.1.swap(true, Ordering::Relaxed) {
             // Normal tid_alloc() stays monotonic until the high watermark, but
@@ -187,6 +216,7 @@ impl TidHandle {
         }
     }
 
+    /// 返回该 TID 是否已经释放。
     pub fn is_released(&self) -> bool {
         self.1.load(Ordering::Relaxed)
     }
@@ -200,10 +230,12 @@ pub fn tid_alloc() -> Arc<TidHandle> {
     ))
 }
 
+/// 返回 `/proc/sys/kernel/ns_last_pid` 兼容值。
 pub fn ns_last_pid() -> usize {
     TID_ALLOCATOR.lock().last_allocated()
 }
 
+/// 设置下一次 TID 分配 hint。
 pub fn set_ns_last_pid(last_pid: usize) {
     TID_ALLOCATOR
         .lock()

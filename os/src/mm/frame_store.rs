@@ -1,3 +1,13 @@
+//! VMA 内部的页帧状态表。
+//!
+//! `VmPageStore` 记录一个 VMA 范围内哪些虚拟页已经驻留、未分配、压缩或换出。
+//! 它只维护元数据和 `FrameTracker`/swap/zram tracker 的所有权，不直接修改用户页表。
+//!
+//! # OOM
+//!
+//! 启用 `oom_handler` 时，active 队列和 compressed/swapped 计数用于浅回收、深回收以及
+//! procfs 统计。范围拆分或收缩后必须重算这些计数，避免后续回收访问越界 VPN。
+
 use core::fmt::Debug;
 
 #[cfg(feature = "zram")]

@@ -1,3 +1,7 @@
+//! RISC-V 平台内存布局和内核常量。
+//!
+//! 这些常量定义用户地址空间、内核堆、栈、trampoline、MMIO 和定时器频率。
+
 #![allow(unused)]
 
 pub const MEMORY_SIZE: usize = 0x4000_0000;

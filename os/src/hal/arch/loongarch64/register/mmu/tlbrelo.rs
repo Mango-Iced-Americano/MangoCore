@@ -1,3 +1,7 @@
+//! `TLBRELO0`/`TLBRELO1`：TLB refill 专用表项低位寄存器。
+//!
+//! refill handler 使用它们保存偶/奇页的物理页号、权限和缓存属性，与普通 `TLBELO` 区分。
+
 use core::convert::{TryFrom, TryInto};
 
 use super::{tlbelo::TLBEL, MemoryAccessType};

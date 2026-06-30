@@ -1,3 +1,7 @@
+//! LoongArch64 QEMU virt 平台常量。
+//!
+//! 定义 QEMU MMIO 区间、virtio/PCI 地址窗口、块大小和 UART 基址。
+
 use crate::config::HIGH_BASE_EIGHT;
 
 pub const MMIO: &[(usize, usize)] = &[

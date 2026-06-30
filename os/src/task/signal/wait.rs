@@ -1,3 +1,9 @@
+//! 信号等待系统调用实现。
+//!
+//! `sigsuspend` 和 `sigtimedwait` 都临时改变或检查当前线程的信号状态，并通过
+//! `WaitQueue` 进入可中断等待。等待条件检查必须在释放 `task.inner` 后执行信号
+//! 动作判定，避免信号处理路径与任务锁出现锁顺序反转。
+
 use crate::config::PAGE_SIZE;
 use crate::mm::{UserPtr, UserPtrMut};
 use crate::signal_type;
@@ -36,6 +42,7 @@ fn take_pending_signal_matching(task: &TaskControlBlock, set: Signals) -> Option
             return Some(pending);
         }
     }
+    // `task.inner` 已释放后再访问进程共享 pending 队列，避免嵌套获取任务锁。
     task.process.take_shared_matching(set)
 }
 
@@ -46,6 +53,7 @@ fn remove_one_pending_signal(task: &TaskControlBlock, signal: Signals) {
         return;
     }
     drop(inner);
+    // 信号默认忽略时，需要同时清理共享 pending；不能持有 task.inner。
     task.process.take_shared_signal(signal);
 }
 
@@ -91,6 +99,17 @@ fn take_sigtimedwait_interrupt(task: &TaskControlBlock, wait_set: Signals) -> bo
     false
 }
 
+/// 临时替换信号 mask 并等待任一可处理信号。
+///
+/// # Semantics
+///
+/// 成功的 `sigsuspend` 按 Linux 语义不会正常返回；被信号打断时返回
+/// `-ERESTART`，由 syscall 返回路径转换为 `-EINTR`。旧 mask 保存在
+/// `sigmask_to_restore`，由 `sigreturn` 恢复。
+///
+/// # Errors
+///
+/// `set` 指向的用户内存不可读时返回 `-EFAULT`。
 pub fn sigsuspend(set: *const Signals) -> isize {
     let token = current_user_token();
     let new_mask = match read_user_sigset(token, set) {
@@ -113,6 +132,23 @@ pub fn sigsuspend(set: *const Signals) -> isize {
     }
 }
 
+/// 等待 `set` 中任一信号变为 pending。
+///
+/// # Semantics
+///
+/// 成功时返回信号编号，并在 `info` 非空时写回 `SigInfo`。若等待集合外出现
+/// 可处理信号，返回 `-ERESTART` 交由 syscall 返回路径转为 `-EINTR` 或重启。
+///
+/// # Errors
+///
+/// - `-EFAULT`：`set`、`timeout` 或 `info` 指向的用户内存不可访问。
+/// - `-EINVAL`：`timeout.tv_nsec >= 1s` 或秒字段溢出。
+/// - `-EAGAIN`：超时到达且没有匹配信号。
+///
+/// # Locking
+///
+/// 条件闭包只短暂获取 `task.inner` 和进程共享 signal lock；写用户态 `info`
+/// 前不持有进程级锁。
 pub fn sigtimedwait(set: *const Signals, info: *mut SigInfo, timeout: *const TimeSpec) -> isize {
     let token = current_user_token();
     let set = match read_user_sigset(token, set) {

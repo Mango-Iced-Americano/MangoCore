@@ -1,5 +1,6 @@
-// 当触发 TLB 重填例外时，硬件会将此时处理器核的特权等级、客户机模式、全局中断使能和监视点使
-// 能位保存至该寄存器中，用于例外返回时恢复处理器核的现场
+//! `TLBRPRMD`：TLB refill 例外前模式信息寄存器。
+//!
+//! 硬件在 TLB refill 例外进入时保存先前特权级、中断使能和 watchpoint 状态。
 
 use core::fmt::Debug;
 
@@ -35,12 +36,10 @@ impl TLBRPrMd {
     /// `ERTN` instruction  from the exception handler and restoration of PLV.
     pub fn set_pplv(&mut self, pplv: usize) -> &mut Self {
         debug_assert!(pplv < 4);
-        //设置特权级
-        // 用于在进入用户程序时设置特权级
         self.bits.set_bits(0..2, pplv as usize);
         self
     }
-    // Record the `CRMD.IE`(Interrupt Enable bit) before the TLB-refill exception.
+    /// Record the `CRMD.IE`(Interrupt Enable bit) before the TLB-refill exception.
     pub fn get_pie(&self) -> bool {
         self.bits.get_bit(2)
     }

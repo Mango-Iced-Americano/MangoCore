@@ -1,3 +1,7 @@
+//! LoongArch64 时间源和调度 tick 编程。
+//!
+//! 读取 stable counter，并通过 timer CSR 设置下一次时钟中断。
+
 use core::arch::asm;
 
 use crate::config;
@@ -7,6 +11,8 @@ pub const TICKS_PER_SEC: usize = 100;
 /// Return current time measured by ticks, which is NOT divided by frequency.
 pub fn get_time() -> usize {
     let mut counter: usize;
+    // Safety: `rdtime.d` only reads the architectural stable counter and writes
+    // output registers.
     unsafe {
         asm!(
         "rdtime.d {},{}",
@@ -35,6 +41,8 @@ pub fn program_timer_delta(delta_ticks: u64) {
 
 #[inline(always)]
 pub fn get_clock_freq() -> usize {
+    // Safety: `CLOCK_FREQ` is initialized during early machine init before
+    // normal timer users run; reads are word-sized and single-core.
     unsafe { super::config::CLOCK_FREQ }
 }
 pub fn get_timer_freq_first_time() {
@@ -52,5 +60,7 @@ pub fn get_timer_freq_first_time() {
         "[get_timer_freq_first_time] clk freq: {}(from CPUCFG)",
         cc_freq
     );
+    // Safety: early boot initializes `CLOCK_FREQ` before concurrent timer users
+    // exist.
     unsafe { super::config::CLOCK_FREQ = cc_freq as usize }
 }

@@ -1,3 +1,8 @@
+//! 编译期选择的架构后端导出层。
+//!
+//! 该模块按 feature 选择 RISC-V 或 LoongArch64 后端，并向 `hal/mod.rs`
+//! 提供统一的启动、页表、陷阱、时间、控制台和上下文切换接口。
+
 #[cfg(feature = "loongarch64")]
 pub mod loongarch64;
 #[cfg(feature = "loongarch64")]

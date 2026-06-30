@@ -1,3 +1,7 @@
+//! `ASID`：地址空间标识寄存器。
+//!
+//! 该 CSR 保存当前地址空间编号和硬件支持的 ASID 位宽，用于区分不同进程的 TLB 项。
+
 use bit_field::BitField;
 impl_define_csr!(
     ASId,

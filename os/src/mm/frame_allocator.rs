@@ -1,3 +1,17 @@
+//! 物理页帧分配器。
+//!
+//! 当前实现是单调增长区间加回收栈的 4 KiB 帧分配器。`FrameTracker` 通过 RAII
+//! 在最后一个引用释放时把物理页归还给全局 `FRAME_ALLOCATOR`。
+//!
+//! # Locking
+//!
+//! 全局分配器由 `RwLock` 保护。分配路径可能触发 OOM 回收；调用者不应在持有
+//! VMA、文件系统或调度器锁时依赖 OOM 回收一定成功。
+//!
+//! # Safety
+//!
+//! `*_uninit` 接口返回未清零的物理页，仅能用于立即完全覆盖整页内容的路径。
+
 use super::{PhysAddr, PhysPageNum};
 use crate::config::{MEMORY_START, PAGE_SIZE};
 use crate::hal::MEMORY_END;
@@ -9,19 +23,22 @@ use core::fmt::{self, Debug, Formatter};
 use lazy_static::*;
 use spin::RwLock;
 
-/// 物理帧跟踪器
+/// 一个已分配物理页帧的 RAII 跟踪器。
 pub struct FrameTracker {
-    /// 跟踪的物理页号
+    /// 跟踪的物理页号。
     pub ppn: PhysPageNum,
 }
 
 impl FrameTracker {
+    /// 分配跟踪器并把整页清零。
     pub fn new(ppn: PhysPageNum) -> Self {
         let ptr = ppn.get_dwords_array().as_mut_ptr();
         const WORDS_PER_PAGE: usize = PAGE_SIZE / core::mem::size_of::<u64>();
         const UNROLL: usize = 8;
         let mut i = 0;
         while i + UNROLL <= WORDS_PER_PAGE {
+            // Safety: `ppn` 来自帧分配器的可用物理页，`get_dwords_array`
+            // 暴露的页大小正好是 `WORDS_PER_PAGE` 个 u64；循环边界保证写入不越界。
             unsafe {
                 ptr.add(i).write(0);
                 ptr.add(i + 1).write(0);
@@ -35,11 +52,19 @@ impl FrameTracker {
             i += UNROLL;
         }
         while i < WORDS_PER_PAGE {
+            // Safety: 同上，尾部循环只覆盖剩余未清零的页内 u64。
             unsafe { ptr.add(i).write(0) };
             i += 1;
         }
         Self { ppn }
     }
+
+    /// 创建不清零的帧跟踪器。
+    ///
+    /// # Safety
+    ///
+    /// 调用者必须保证 `ppn` 是刚从帧分配器取得、尚未交给其他所有者的页帧；
+    /// 返回后必须在暴露给用户或内核读取前完全初始化该页。
     pub unsafe fn new_uninit(ppn: PhysPageNum) -> Self {
         Self { ppn }
     }
@@ -51,24 +76,29 @@ impl Debug for FrameTracker {
     }
 }
 impl Drop for FrameTracker {
-    // 自动回收物理帧
+    // `FrameTracker` 是物理页唯一回收入口；释放 Arc 最后一个引用时归还帧。
     fn drop(&mut self) {
         // println!("do drop at {}", self.ppn.0);
         frame_dealloc(self.ppn);
     }
 }
 
-/// 帧分配器接口
+/// 帧分配器接口。
 trait FrameAllocator {
     fn new() -> Self;
-    /// 分配
+    /// 分配并返回一页已清零物理页。
     fn alloc(&mut self) -> Option<FrameTracker>;
+    /// 分配并返回一页未清零物理页。
+    ///
+    /// # Safety
+    ///
+    /// 调用者必须在任意读取或映射给用户前完全初始化返回页。
     unsafe fn alloc_uninit(&mut self) -> Option<FrameTracker>;
-    /// 释放
+    /// 释放一页物理页。
     fn dealloc(&mut self, ppn: PhysPageNum);
 }
 
-/// 栈式帧分配器
+/// 栈式帧分配器。
 pub struct StackFrameAllocator {
     // 可分配物理页号起点，用于把 PPN 映射到 recycled_flags 下标。
     start: usize,
@@ -83,7 +113,7 @@ pub struct StackFrameAllocator {
 }
 
 impl StackFrameAllocator {
-    /// 初始化方法
+    /// 初始化可分配物理页范围 `[l, r)`。
     pub fn init(&mut self, l: PhysPageNum, r: PhysPageNum) {
         self.start = l.0;
         self.current = l.0;
@@ -93,12 +123,12 @@ impl StackFrameAllocator {
         self.recycled_flags.resize(last_frames, false);
         println!("last {} Physical Frames.", last_frames);
     }
-    /// 计算未分配的大小
+    /// 返回当前仍可分配的帧数量。
     pub fn unallocated_frames(&self) -> usize {
         self.end - self.current + self.recycled.len()
     }
 
-    /// 诊断：帧分配器碎片化程度
+    /// 返回帧分配器碎片化诊断 `(total, fresh, recycled, recycled_ratio)`。
     pub fn frag_diagnostic(&self) -> (usize, usize, usize, f64) {
         let fresh = self.end.saturating_sub(self.current);
         let recycled = self.recycled.len();
@@ -123,7 +153,7 @@ impl FrameAllocator for StackFrameAllocator {
         }
     }
 
-    /// 分配一个物理页
+    /// 分配一个已清零物理页。
     fn alloc(&mut self) -> Option<FrameTracker> {
         let _start = crate::task::perf::perf_time_now();
         crate::task::perf::record_frame_alloc();
@@ -138,15 +168,24 @@ impl FrameAllocator for StackFrameAllocator {
             #[cfg(not(feature = "zero_init"))]
             let ft = FrameTracker::new((self.current - 1).into());
             #[cfg(feature = "zero_init")]
+            // Safety: `current - 1` 是本分配器刚取出的 fresh 帧，`zero_init`
+            // 配置下调用方承诺后续路径负责初始化。
             let ft = unsafe { FrameTracker::new_uninit((self.current - 1).into()) };
             Some(ft)
         };
         crate::task::perf::record_frame_alloc_time_us(crate::task::perf::perf_time_now().saturating_sub(_start));
         result
     }
+
+    /// 分配一个未清零物理页。
+    ///
+    /// # Safety
+    ///
+    /// 调用者必须保证返回页在读取或暴露给用户前会被完整覆盖。
     unsafe fn alloc_uninit(&mut self) -> Option<FrameTracker> {
         if let Some(ppn) = self.recycled.pop() {
             self.mark_recycled(ppn, false);
+            // Safety: `ppn` 从回收栈弹出后重新归当前分配所有；调用者负责完整初始化。
             let frame_tracker = FrameTracker::new_uninit(ppn.into());
             //log::trace!("[frame_alloc_uninit] {:?}", frame_tracker);
             Some(frame_tracker)
@@ -154,11 +193,13 @@ impl FrameAllocator for StackFrameAllocator {
             None
         } else {
             self.current += 1;
+            // Safety: `current - 1` 是 fresh 帧，尚未交给其他所有者；调用者负责初始化。
             let frame_tracker = FrameTracker::new_uninit((self.current - 1).into());
             Some(frame_tracker)
         }
     }
-    /// 释放一个物理页
+
+    /// 释放一个物理页。
     fn dealloc(&mut self, ppn: PhysPageNum) {
         let ppn = ppn.0;
         let alloc_start = PhysAddr::from(MEMORY_START).floor().0;
@@ -209,14 +250,15 @@ impl StackFrameAllocator {
 type FrameAllocatorImpl = StackFrameAllocator;
 
 lazy_static! {
-    /// 全局帧分配器
+    /// 全局帧分配器。
     pub static ref FRAME_ALLOCATOR: RwLock<FrameAllocatorImpl> =
         RwLock::new(FrameAllocatorImpl::new());
 }
-/// 初始化全局帧分配器
+
+/// 初始化全局帧分配器。
 pub fn init_frame_allocator() {
     extern "C" {
-        // 内核结束地址？
+        // 链接脚本提供的内核镜像结束地址。
         fn ekernel();
     }
     FRAME_ALLOCATOR.write().init(
@@ -228,8 +270,12 @@ pub fn init_frame_allocator() {
     );
 }
 
-/// 尝试使用所有可能的方法来释放制定数量为`req`的页
-/// 成功返回Ok(())，失败返回Err(())
+/// 尝试回收至少 `req` 个物理页。
+///
+/// # Locking
+///
+/// 该路径会尝试锁当前任务地址空间并通知所有任务执行 OOM 回收；调用者不应持有
+/// 会被回收路径再次获取的锁。
 #[cfg(feature = "oom_handler")]
 pub fn oom_handler(req: usize) -> Result<(), ()> {
     let mut released = 0;
@@ -258,9 +304,7 @@ pub fn oom_handler(req: usize) -> Result<(), ()> {
 }
 
 #[cfg(feature = "oom_handler")]
-/// 帧预留机制
-/// # 参数
-/// + num: 指定要保留的帧数量
+/// 尽力保证至少还有 `num` 个可分配帧。
 pub fn frame_reserve(num: usize) {
     // 获取还可分配的帧数量
     let remain = FRAME_ALLOCATOR.read().unallocated_frames();
@@ -276,12 +320,12 @@ pub fn frame_reserve(num: usize) {
 }
 
 #[cfg(not(feature = "oom_handler"))]
+/// OOM handler 关闭时的空实现。
 pub fn frame_reserve(_num: usize) {
-    // do nothing
 }
 
 #[cfg(feature = "oom_handler")]
-/// 带OOM的分配操作
+/// 分配一页物理页，失败时先尝试 OOM 回收。
 pub fn frame_alloc() -> Option<Arc<FrameTracker>> {
     let result = FRAME_ALLOCATOR.write().alloc();
     match result {
@@ -301,6 +345,11 @@ pub fn frame_alloc() -> Option<Arc<FrameTracker>> {
     }
 }
 
+/// 连续分配 `num` 个物理页。
+///
+/// # Errors
+///
+/// `Vec` 预留空间失败或任意单页分配失败时返回 `None`；已分配帧会随局部变量释放回收。
 pub fn frames_alloc(num: usize) -> Option<Vec<Arc<FrameTracker>>> {
     let mut frames = Vec::new();
     if frames.try_reserve(num).is_err() {
@@ -317,7 +366,7 @@ pub fn frames_alloc(num: usize) -> Option<Vec<Arc<FrameTracker>>> {
 }
 
 #[cfg(not(feature = "oom_handler"))]
-/// 常规分配操作
+/// 分配一页物理页。
 pub fn frame_alloc() -> Option<Arc<FrameTracker>> {
     FRAME_ALLOCATOR
         .write()
@@ -326,6 +375,11 @@ pub fn frame_alloc() -> Option<Arc<FrameTracker>> {
 }
 
 #[cfg(feature = "oom_handler")]
+/// 分配一页未清零物理页，失败时先尝试 OOM 回收。
+///
+/// # Safety
+///
+/// 调用者必须保证返回页在读取或映射给用户前被完整覆盖。
 pub unsafe fn frame_alloc_uninit() -> Option<Arc<FrameTracker>> {
     let result = FRAME_ALLOCATOR.write().alloc_uninit();
     match result {
@@ -339,6 +393,7 @@ pub unsafe fn frame_alloc_uninit() -> Option<Arc<FrameTracker>> {
             crate::show_frame_consumption!("GC", before);
             FRAME_ALLOCATOR
                 .write()
+                // Safety: 本函数的调用方承担未初始化页契约。
                 .alloc_uninit()
                 .map(|frame_tracker| Arc::new(frame_tracker))
         }
@@ -346,25 +401,31 @@ pub unsafe fn frame_alloc_uninit() -> Option<Arc<FrameTracker>> {
 }
 
 #[cfg(not(feature = "oom_handler"))]
+/// 分配一页未清零物理页。
+///
+/// # Safety
+///
+/// 调用者必须保证返回页在读取或映射给用户前被完整覆盖。
 pub unsafe fn frame_alloc_uninit() -> Option<Arc<FrameTracker>> {
     FRAME_ALLOCATOR
         .write()
+        // Safety: 本函数的调用方承担未初始化页契约。
         .alloc_uninit()
         .map(|frame_tracker| Arc::new(frame_tracker))
 }
 
-/// 释放帧
+/// 释放一页物理帧。
 pub fn frame_dealloc(ppn: PhysPageNum) {
     crate::task::perf::record_frame_free();
     FRAME_ALLOCATOR.write().dealloc(ppn);
 }
 
-/// 计算可用帧数量
+/// 返回当前可用帧数量。
 pub fn unallocated_frames() -> usize {
     FRAME_ALLOCATOR.read().unallocated_frames()
 }
 
-/// 诊断：帧分配器碎片化 (total_free, fresh, recycled, recycled_ratio)
+/// 诊断帧分配器碎片化 `(total_free, fresh, recycled, recycled_ratio)`。
 pub fn frame_frag_diag() -> (usize, usize, usize, f64) {
     FRAME_ALLOCATOR.read().frag_diagnostic()
 }

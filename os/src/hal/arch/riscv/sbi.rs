@@ -1,3 +1,7 @@
+//! RISC-V SBI 调用封装。
+//!
+//! 提供 timer、console、shutdown 和本地中断开关等机器环境接口。
+
 #![allow(unused)]
 
 use core::arch::asm;
@@ -17,6 +21,8 @@ const SBI_SHUTDOWN: usize = 8;
 /// `ecall` wrapper to switch trap into S level.
 fn sbi_call(which: usize, arg0: usize, arg1: usize, arg2: usize) -> usize {
     let mut ret;
+    // Safety: OpenSBI defines the ecall ABI. Arguments are passed in a0-a2/a7
+    // and the return value is read from a0; no Rust references cross the call.
     unsafe {
         asm!(
             "ecall",
@@ -48,6 +54,7 @@ pub fn console_flush() {}
 /// 保存当前中断使能状态，并关中断（用于 console 临界区）。
 pub fn local_irq_save() -> bool {
     let was_enabled = sstatus::read().sie();
+    // Safety: clearing SIE only changes the local hart interrupt-enable bit.
     unsafe { sstatus::clear_sie() };
     was_enabled
 }
@@ -55,6 +62,7 @@ pub fn local_irq_save() -> bool {
 /// 恢复中断使能状态到调用 local_irq_save 之前的值。
 pub fn local_irq_restore(was_enabled: bool) {
     if was_enabled {
+        // Safety: restoring SIE only changes the local hart interrupt-enable bit.
         unsafe { sstatus::set_sie() };
     }
 }

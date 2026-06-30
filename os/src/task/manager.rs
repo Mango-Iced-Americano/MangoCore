@@ -1,7 +1,15 @@
-/*
-    此文件用于管理任务的调度
-    内容与RISCV版本相同，无需修改
-*/
+//! 任务调度队列、等待队列和内核定时器。
+//!
+//! 调度器维护 ready/interruptible/zombie 三类任务队列；`WaitQueue` 在文件、
+//! futex、信号和计时器路径中提供条件等待；`KernelTimerQueue` 驱动超时唤醒、
+//! POSIX timer、timerfd sweep 与调度 tick。
+//!
+//! # Locking
+//!
+//! `TASK_MANAGER` 只保护调度队列。任何可能触发 TCB/PCB 析构或用户内存访问的
+//! 操作都应在释放 `TASK_MANAGER` 后进行。`WaitQueue` 的条件闭包不得反向获取
+//! 已由调用方持有的不可重入锁。
+
 use core::cmp::Ordering;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 
@@ -25,7 +33,7 @@ use lazy_static::*;
 use spin::Mutex;
 
 #[cfg(feature = "oom_handler")]
-/// 任务的激活状态跟踪器
+/// OOM handler 使用的任务活跃位图。
 pub struct ActiveTracker {
     /// 存储激活状态的位图
     bitmap: Vec<u64>,
@@ -34,26 +42,26 @@ pub struct ActiveTracker {
 #[cfg(feature = "oom_handler")]
 #[allow(unused)]
 impl ActiveTracker {
-    /// 默认大小为128
+    /// 位图初始覆盖的任务数量。
     pub const DEFAULT_SIZE: usize = SYSTEM_TASK_LIMIT;
-    /// 构造函数
+
+    /// 创建空活跃位图。
     pub fn new() -> Self {
-        // 计算位图长度，向上取整
         let len = (Self::DEFAULT_SIZE + 63) / 64;
-        // 初始化位图
         let mut bitmap = Vec::with_capacity(len);
-        // 位图全部置0
         bitmap.resize(len, 0);
         Self { bitmap }
     }
-    /// 确保位图可以容纳指定 tid
+
+    /// 确保位图能容纳指定 TID。
     pub fn ensure_capacity(&mut self, tid: usize) {
         let word = tid / 64;
         if word >= self.bitmap.len() {
             self.bitmap.resize(word + 1, 0);
         }
     }
-    /// 检查指定 tid 的任务是否处于激活状态
+
+    /// 检查指定 TID 是否被标记为活跃。
     pub fn check_active(&self, tid: usize) -> bool {
         let word = tid / 64;
         if word >= self.bitmap.len() {
@@ -61,16 +69,19 @@ impl ActiveTracker {
         }
         (self.bitmap[word] & (1 << (tid % 64))) != 0
     }
-    /// 检查指定 tid 的任务是否处于非激活状态
+
+    /// 检查指定 TID 是否未被标记为活跃。
     pub fn check_inactive(&self, tid: usize) -> bool {
         !self.check_active(tid)
     }
-    /// 标记指定 tid 的任务为激活状态
+
+    /// 标记指定 TID 为活跃。
     pub fn mark_active(&mut self, tid: usize) {
         self.ensure_capacity(tid);
         self.bitmap[tid / 64] |= 1 << (tid % 64)
     }
-    /// 标记指定 tid 的任务为非激活状态
+
+    /// 清除指定 TID 的活跃标记。
     pub fn mark_inactive(&mut self, tid: usize) {
         let word = tid / 64;
         if word >= self.bitmap.len() {
@@ -81,11 +92,11 @@ impl ActiveTracker {
 }
 
 #[cfg(feature = "oom_handler")]
-/// 任务管理器
+/// 全局调度队列状态。
 pub struct TaskManager {
-    /// 一个双端队列，用于存储就绪态任务
+    /// 就绪态任务队列。
     pub ready_queue: VecDeque<Arc<TaskControlBlock>>,
-    /// 一个双端队列，用于存储可中断状态任务
+    /// 可中断睡眠任务队列。
     pub interruptible_queue: VecDeque<Arc<TaskControlBlock>>,
     zombie_queue: VecDeque<Arc<TaskControlBlock>>,
     ready_nonzero_nice_count: usize,
@@ -94,8 +105,11 @@ pub struct TaskManager {
 }
 
 #[cfg(not(feature = "oom_handler"))]
+/// 全局调度队列状态。
 pub struct TaskManager {
+    /// 就绪态任务队列。
     pub ready_queue: VecDeque<Arc<TaskControlBlock>>,
+    /// 可中断睡眠任务队列。
     pub interruptible_queue: VecDeque<Arc<TaskControlBlock>>,
     zombie_queue: VecDeque<Arc<TaskControlBlock>>,
     ready_nonzero_nice_count: usize,
@@ -181,10 +195,12 @@ fn sub_interruptible_count(count: usize) {
     }
 }
 
+/// 无锁读取 ready 队列计数的近似值。
 pub(crate) fn ready_count_fast() -> u16 {
     READY_TASK_COUNT.load(AtomicOrdering::Relaxed).min(u16::MAX as usize) as u16
 }
 
+/// 无锁读取 interruptible 队列计数的近似值。
 pub(crate) fn interruptible_count_fast() -> u16 {
     INTERRUPTIBLE_TASK_COUNT
         .load(AtomicOrdering::Relaxed)
@@ -209,6 +225,7 @@ fn has_zombie_queue_tasks() -> bool {
     ZOMBIE_QUEUE_COUNT.load(AtomicOrdering::Relaxed) != 0
 }
 
+/// 无锁判断显式 zombie 队列是否可能非空。
 pub fn has_zombie_queue_tasks_fast() -> bool {
     has_zombie_queue_tasks()
 }
@@ -235,7 +252,11 @@ impl TaskManager {
             ready_nonzero_nice_count: 0,
         }
     }
-    /// 添加一个任务到就绪队列
+    /// 添加一个任务到就绪队列。
+    ///
+    /// # Locking
+    ///
+    /// 调用方已持有 `TASK_MANAGER` 锁；函数不获取任务内部锁。
     pub fn add(&mut self, task: Arc<TaskControlBlock>) {
         if task_has_nonzero_nice(&task) {
             self.ready_nonzero_nice_count += 1;
@@ -396,7 +417,7 @@ impl TaskManager {
             self.ready_nonzero_nice_count = self.ready_nonzero_nice_count.saturating_sub(1);
         }
     }
-    /// 从就绪队列中取出一个任务
+    /// 从就绪队列中取出下一个可运行任务。
     #[cfg(feature = "oom_handler")]
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
         match self.pop_next_ready() {
@@ -409,16 +430,18 @@ impl TaskManager {
         }
     }
     #[cfg(not(feature = "oom_handler"))]
+    /// 从就绪队列中取出下一个可运行任务。
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
         self.pop_next_ready()
     }
-    /// 添加一个任务到可中断队列
+
+    /// 添加一个任务到可中断队列。
     pub fn add_interruptible(&mut self, task: Arc<TaskControlBlock>) {
         self.interruptible_queue.push_back(task);
         crate::task::perf::record_taskq_add_interruptible();
         add_interruptible_count();
     }
-    /// 从可中断队列中删除一个任务
+    /// 从可中断队列中删除一个任务。
     pub fn drop_interruptible(&mut self, task: &Arc<TaskControlBlock>) -> bool {
         if self
             .interruptible_queue
@@ -442,7 +465,6 @@ impl TaskManager {
         }
         let old_len = self.interruptible_queue.len();
         self.interruptible_queue
-            // 使用retain过滤掉与指定任务相同的任务
             .retain(|task_in_queue| !task_ptr_eq(task_in_queue, task));
         let removed = old_len - self.interruptible_queue.len();
         sub_interruptible_count(removed);
@@ -503,10 +525,12 @@ impl TaskManager {
         }
         count
     }
-    /// 这个函数会将`task`从`interruptible_queue`中删除，并加入`ready_queue`。
-    /// 如果一切正常的话，这个`task`将会被加入`ready_queue`。如果`task`已经被唤醒，那么什么也不会发生。
-    /// # 注意
-    /// 这个函数不会改变`task_status`，你应该手动改变它以保持一致性。
+    /// 将任务从 interruptible 队列移动到 ready 队列。
+    ///
+    /// # Semantics
+    ///
+    /// 若任务已经在 ready 队列中，函数静默返回。调用方必须先把
+    /// `task_status` 改为 `Ready`，本函数只维护调度队列。
     pub fn wake_interruptible(&mut self, task: Arc<TaskControlBlock>) {
         crate::task::perf::record_taskq_wake_interruptible();
         match self.try_wake_interruptible(task) {
@@ -514,10 +538,15 @@ impl TaskManager {
             Err(_) => {}
         }
     }
-    /// 这个函数会将`task`从`interruptible_queue`中删除，并加入`ready_queue`。
-    /// 如果一切正常的话，这个`task`将会被加入`ready_queue`。如果`task`已经被唤醒，那么返回`Err()`。
-    /// # 注意
-    /// 这个函数不会改变`task_status`，你应该手动改变它以保持一致性。
+    /// 尝试将任务从 interruptible 队列移动到 ready 队列。
+    ///
+    /// # Errors
+    ///
+    /// 任务已经在 ready 队列中时返回 `WaitQueueError::AlreadyWaken`。
+    ///
+    /// # Locking
+    ///
+    /// 调用方已持有 `TASK_MANAGER` 锁；本函数不会改变 `task_status`。
     pub fn try_wake_interruptible(
         &mut self,
         task: Arc<TaskControlBlock>,
@@ -541,16 +570,14 @@ impl TaskManager {
         }
     }
     #[allow(unused)]
-    /// 调试方法
-    /// 打印就绪队列中的任务ID
+    /// 打印 ready 队列中的任务 ID，仅供诊断。
     pub fn show_ready(&self) {
         self.ready_queue.iter().for_each(|task| {
             log::error!("[show_ready] tid: {}, pid: {}", task.tid.0, task.pid());
         })
     }
     #[allow(unused)]
-    /// 调试方法
-    /// 打印可中断队列中的任务ID
+    /// 打印 interruptible 队列中的任务 ID，仅供诊断。
     pub fn show_interruptible(&self) {
         self.interruptible_queue.iter().for_each(|task| {
             log::error!(
@@ -566,6 +593,7 @@ fn enqueue_ready_batch(tasks: Vec<Arc<TaskControlBlock>>) -> usize {
     TASK_MANAGER.lock().enqueue_ready_batch(tasks)
 }
 
+/// 更新 ready 队列中任务的 nice 快速路径计数。
 pub fn update_ready_nice(task: &Arc<TaskControlBlock>, old_nice: i32, new_nice: i32) {
     TASK_MANAGER
         .lock()
@@ -573,24 +601,26 @@ pub fn update_ready_nice(task: &Arc<TaskControlBlock>, old_nice: i32, new_nice: 
 }
 
 lazy_static! {
-    /// 全局任务管理器（带互斥锁）
+    /// 全局任务管理器。
     pub static ref TASK_MANAGER: Mutex<TaskManager> = Mutex::new(TaskManager::new());
 }
 
-/// 添加一个任务到任务管理器
+/// 添加一个任务到 ready 队列。
 pub fn add_task(task: Arc<TaskControlBlock>) {
     TASK_MANAGER.lock().add(task);
 }
 
+/// 添加一个任务到显式 zombie 回收队列。
 pub fn add_zombie_task(task: Arc<TaskControlBlock>) {
     TASK_MANAGER.lock().add_zombie(task);
 }
 
-/// 从任务管理器中取出一个任务
+/// 从 ready 队列取出下一个可运行任务。
 pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
     TASK_MANAGER.lock().fetch()
 }
 
+/// 从显式 zombie 队列取出一个任务。
 pub fn take_one_zombie_task() -> Option<Arc<TaskControlBlock>> {
     if !has_zombie_queue_tasks() {
         return None;
@@ -598,6 +628,7 @@ pub fn take_one_zombie_task() -> Option<Arc<TaskControlBlock>> {
     TASK_MANAGER.lock().take_one_zombie()
 }
 
+/// 从显式 zombie 队列批量取出任务。
 pub fn take_zombie_tasks(limit: usize) -> Vec<Arc<TaskControlBlock>> {
     if limit == 0 || !has_zombie_queue_tasks() {
         return Vec::new();
@@ -674,28 +705,25 @@ pub fn do_oom(req: usize) -> Result<(), ()> {
 
 #[cfg(not(feature = "oom_handler"))]
 #[allow(unused)]
+/// 未启用 OOM handler 时的空实现。
 pub fn do_oom() {
-    // do nothing
 }
 
-/// 这个函数会将`task`加入到`interruptible_queue`，
-/// 但不会从`ready_queue`中删除。
-/// 所以需要确保`task`不会出现在`ready_queue`中。
-/// 在一般情况下，一个`task`在被调度后会从`ready_queue`中删除，
-/// 并且你可以使用`take_current_task()`来获取当前`task`的所有权。
-/// # 注意
-/// 你应该找一个地方保存`task`的`Arc<TaskControlBlock>`，
-/// 否则你将无法在将来使用`wake_interruptible()`来唤醒它。
-/// 这个函数不会改变`task_status`，你应该手动改变它以保持一致性。
+/// 将任务加入 interruptible 队列。
+///
+/// # Semantics
+///
+/// 函数不会从 ready 队列删除任务，也不会修改 `task_status`。调用方通常在
+/// 当前任务已被取出 ready 队列后，把状态设为 `Interruptible`，再调用本函数。
 pub fn sleep_interruptible(task: Arc<TaskControlBlock>) {
-    // 将任务加入可中断队列
     TASK_MANAGER.lock().add_interruptible(task);
 }
 
-/// 这个函数会将`task`从`interruptible_queue`中删除，并加入到`ready_queue`中。
-/// 这个`task`会在一切正常的情况下被调度。如果`task`已经被唤醒，什么也不会发生。
-/// # 注意
-/// 这个函数不会改变`task_status`，你应该手动改变它以保持一致性。
+/// 唤醒 interruptible 任务并加入 ready 队列。
+///
+/// # Semantics
+///
+/// 函数只维护调度队列，不修改 `task_status`。
 pub fn wake_interruptible(task: Arc<TaskControlBlock>) {
     TASK_MANAGER.lock().wake_interruptible(task)
 }
@@ -705,29 +733,34 @@ pub fn remove_tasks_from_queues(tasks: &[Arc<TaskControlBlock>]) -> usize {
     TASK_MANAGER.lock().remove_tasks(tasks)
 }
 
-/// 返回就绪队列中的任务数量
+/// 返回 ready + interruptible 队列计数的近似值。
 pub fn procs_count() -> u16 {
     ready_count_fast().saturating_add(interruptible_count_fast())
 }
 
+/// 无锁判断 ready 队列是否非空。
 pub fn has_ready_task() -> bool {
     READY_TASK_COUNT.load(AtomicOrdering::Relaxed) != 0
 }
 
-/// 返回僵尸任务数量
+/// 返回 ready/interruptible 队列中的 zombie 任务数量。
 pub fn zombie_count() -> u16 {
     let manager = TASK_MANAGER.lock();
     manager.zombie_count()
 }
 
-/// Send a signal to all interruptible tasks EXCEPT initproc (pid=1).
-/// Returns true if at least one task received the signal.
+/// 向除 initproc 以外的所有 interruptible 任务投递信号。
+///
+/// # Locking
+///
+/// 先在 `TASK_MANAGER` 锁内克隆目标任务列表，再释放锁后修改每个任务的
+/// signal 状态，最后批量入 ready 队列，避免调度队列锁和任务锁长时间嵌套。
 pub fn send_signal_to_interruptible(signal: Signals) -> bool {
     let manager = TASK_MANAGER.lock();
     let tasks: Vec<_> = manager
         .interruptible_queue
         .iter()
-        .filter(|t| t.pid() != 1) // never signal initproc via Ctrl+C
+        .filter(|t| t.pid() != 1)
         .cloned()
         .collect();
     drop(manager);
@@ -747,20 +780,27 @@ pub fn send_signal_to_interruptible(signal: Signals) -> bool {
     sent
 }
 
-/// 等待队列错误类型
+/// 等待队列唤醒错误。
 pub enum WaitQueueError {
-    /// 已经唤醒
+    /// 任务已经处于 ready 队列中。
     AlreadyWaken,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// WaitQueue 等待结果。
 pub enum WaitResult {
+    /// 条件满足，携带调用方定义的返回值。
     Ready(isize),
+    /// 被可处理信号中断。
     Interrupted,
+    /// 到达 deadline。
     TimedOut,
 }
 
 impl WaitResult {
+    /// 将等待结果转换为 syscall 返回值。
+    ///
+    /// `Ready` 直接返回内部值；其它结果通过调用方提供的转换函数编码。
     pub fn unwrap_or_else(self, f: impl FnOnce(isize) -> isize) -> isize {
         match self {
             WaitResult::Ready(value) => value,
@@ -770,57 +810,74 @@ impl WaitResult {
     }
 }
 
-/// 等待队列
-/// 内部是一个存储任务控制块弱引用的双端队列
+/// 弱引用等待队列。
+///
+/// # Semantics
+///
+/// 队列只保存 `Weak<TaskControlBlock>`，不会延长任务生命周期。等待者必须先在
+/// 关联对象的锁内检查条件，再调用 `prepare_to_wait()`，最后通过
+/// `block_current_and_run_next_*` 让出 CPU。
+///
+/// # Locking
+///
+/// `wake_*` 会获取被唤醒任务的 `task.inner` 并操作 `TASK_MANAGER`。调用方
+/// 不应在持有同一任务锁或调度器锁时调用唤醒函数。
 pub struct WaitQueue {
     inner: VecDeque<Weak<TaskControlBlock>>,
 }
 
 #[allow(unused)]
 impl WaitQueue {
-    /// 构造函数
+    /// 创建空等待队列。
     pub fn new() -> Self {
         Self {
             inner: VecDeque::new(),
         }
     }
-    /// 这个函数将一个`task`添加到 `WaitQueue`但是不会阻塞这个任务
-    /// 如果想要阻塞一个`task`，使用`block_current_and_run_next()`
+    /// 注册等待者，但不切换 CPU。
+    ///
+    /// # Locking
+    ///
+    /// 调用方应已持有保护等待条件的锁，并在之后调用阻塞原语。
     pub fn add_task(&mut self, task: Weak<TaskControlBlock>) {
-        // 将task添加到back端
         self.inner.push_back(task);
     }
-    /// 这个函数会尝试从`WaitQueue`中弹出一个`task`，但是不会唤醒它
+
+    /// 弹出一个等待者但不唤醒。
     pub fn pop_task(&mut self) -> Option<Weak<TaskControlBlock>> {
-        // 将front端的任务弹出
         self.inner.pop_front()
     }
-    /// 判断等待队列是否包含给定的task
+
+    /// 判断等待队列是否包含给定任务弱引用。
     pub fn contains(&self, task: &Weak<TaskControlBlock>) -> bool {
         self.inner
             .iter()
             .any(|task_in_queue| Weak::as_ptr(task_in_queue) == Weak::as_ptr(task))
     }
-    /// 判断等待队列是否为空
+
+    /// 判断等待队列是否为空。
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
-    /// 清理所有失效的 Weak 条目（upgrade 返回 None），返回清理数量。
+    /// 清理所有失效 `Weak` 条目，返回清理数量。
     pub fn compact_stale(&mut self) -> usize {
         let before = self.inner.len();
         self.inner.retain(|task| task.strong_count() > 0);
         before - self.inner.len()
     }
-    /// 这个函数将会唤醒等待队列中所有的任务，并将它们的任务状态改变为就绪态，
-    /// 如果一切正常，这些任务会在将来被调度。
-    /// # 警告
-    /// 这个函数会为每个被唤醒的`task`调用`acquire_inner_lock`，请注意**死锁**
+    /// 唤醒队列中的所有可唤醒任务。
+    ///
+    /// # Locking
+    ///
+    /// 会获取每个任务的 `task.inner`，并批量把任务移入 ready 队列。调用方不得
+    /// 已持有这些任务的内部锁。
     pub fn wake_all(&mut self) -> usize {
         self.wake_at_most(usize::MAX)
     }
-    /// 唤醒不超过`limit`个`task`，返回唤醒的`task`数量。
-    /// # 警告
-    /// 这个函数会为每个被唤醒的`task`调用`acquire_inner_lock`，请注意**死锁**
+
+    /// 唤醒不超过 `limit` 个等待任务。
+    ///
+    /// 返回实际唤醒或已处于 ready 状态的任务数量。
     pub fn wake_at_most(&mut self, limit: usize) -> usize {
         if limit == 0 {
             return 0;
@@ -859,11 +916,10 @@ impl WaitQueue {
                                 remaining.push_back(Arc::downgrade(&task));
                             }
                         }
-                        // 其他状态：直接丢弃（Zombie/Running 不应继续停留在等待队列中）
+                        // Zombie/Running 不应继续停留在等待队列中，直接丢弃。
                         _ => drop(inner),
                     }
                 }
-                // 失效 Weak：直接丢弃，实现自动 compact
                 None => {}
             }
         }
@@ -899,16 +955,27 @@ impl WaitQueue {
         }
         0
     }
+
+    /// 将当前任务标记为 interruptible 并加入等待队列。
+    ///
+    /// # Locking
+    ///
+    /// 调用方已持有等待队列所属对象的锁；本函数会短暂获取 `task.inner`。
     pub fn prepare_to_wait(&mut self, task: Weak<TaskControlBlock>) {
         match task.upgrade() {
             Some(task) => {
                 let mut task_inner = task.acquire_inner_lock();
                 task_inner.task_status = super::TaskStatus::Interruptible;
             }
-            None => return, // 不会发生
+            None => return,
         }
         self.add_task(task);
     }
+
+    /// 从等待队列移除任务，并把仍处于 interruptible 的任务恢复为 ready。
+    ///
+    /// 返回值表示该任务是否仍在队列中。若返回 `false`，通常说明它已经被
+    /// 正常唤醒路径移除。
     pub fn finish_wait(&mut self, task: &TaskControlBlock) -> bool {
         let task_ptr = task as *const TaskControlBlock;
         let removed = if self
@@ -939,8 +1006,6 @@ impl WaitQueue {
         }
         removed
     }
-
-    // ==================== wait_until 方法族（DragonOS 架构） ====================
 
     /// 兜底定时器的超时毫秒数，防止丢失唤醒导致永久阻塞。
     const WAIT_IO_FALLBACK_MS: usize = 10;
@@ -984,6 +1049,8 @@ impl WaitQueue {
                 return WaitResult::TimedOut;
             }
             if signal_check {
+                // 必须在不持有 task.inner 的情况下检查 actionable signal；
+                // 这里仅持有等待队列锁，`has_actionable_signal` 自行短暂取任务锁。
                 if has_actionable_signal(&task) {
                     guard.finish_wait(task.as_ref());
                     return WaitResult::Interrupted;
@@ -1086,6 +1153,7 @@ impl WaitQueue {
                 return WaitResult::TimedOut;
             }
             if signal_check {
+                // 持有的是调用方传入的对象锁，不能同时长期持有 task.inner。
                 if has_actionable_signal(&task) {
                     queue_of(&mut guard).finish_wait(task.as_ref());
                     return WaitResult::Interrupted;
@@ -1133,8 +1201,8 @@ impl WaitQueue {
     where
         F: FnMut() -> Option<isize>,
     {
-        // `cond` may be evaluated while the current task is temporarily
-        // removed from the CPU, so callers must not depend on `current_task()`.
+        // `cond` 可能在当前任务短暂让出 CPU 后再次执行，调用方不能依赖
+        // `current_task()` 返回值在闭包中保持不变。
         if let Some(res) = cond() {
             return WaitResult::Ready(res);
         }
@@ -1225,6 +1293,10 @@ impl WaitQueue {
     /// 等价于 DragonOS 的 `wait_until`（Uninterruptible）。
     /// 适用于内核内部确定性等待（无需信号检查的场景）。
     /// 文件和网络 IO 通用——`NET_INTERFACE.poll()` 等操作由调用者在 `cond` 闭包中处理。
+    ///
+    /// # Locking
+    ///
+    /// `cond` 在不持有等待队列锁时执行；调用方负责在闭包内轮询底层对象状态。
     pub fn wait_until<F>(wq: &Mutex<Self>, mut cond: F) -> isize
     where
         F: FnMut() -> Option<isize>,
@@ -1236,12 +1308,14 @@ impl WaitQueue {
         }
     }
 
-    /// 可中断等待，条件满足或收到信号时返回。
+    /// 可中断等待，条件满足或收到可处理信号时返回。
     ///
     /// 等价于 DragonOS 的 `wait_until_interruptible`。
     /// 文件和网络 IO 通用。
-    /// - `Ok(v)`：条件满足
-    /// - `Err(-ERESTART)`：被信号中断
+    /// # Semantics
+    ///
+    /// 条件满足返回 `WaitResult::Ready(v)`；被信号中断返回
+    /// `WaitResult::Interrupted`。
     pub fn wait_until_interruptible<F>(wq: &Mutex<Self>, mut cond: F) -> WaitResult
     where
         F: FnMut() -> Option<isize>,
@@ -1249,7 +1323,7 @@ impl WaitQueue {
         Self::wait_event_impl(wq, &mut cond, true, None, Some(Self::WAIT_IO_FALLBACK_MS))
     }
 
-    /// IO 等待（不可中断），正确标记 iowait 以用于 CPU iowait 统计。
+    /// I/O 等待（不可中断）。
     ///
     /// 等价于 DragonOS 的 `wait_until_io`。
     pub fn wait_until_io<F>(wq: &Mutex<Self>, mut cond: F) -> isize
@@ -1263,11 +1337,10 @@ impl WaitQueue {
         }
     }
 
-    /// IO 等待（可中断），正确标记 iowait。
+    /// I/O 等待（可中断）。
     ///
     /// 等价于 DragonOS 的 `wait_until_io_interruptible`。
-    /// - `Ok(v)`：条件满足
-    /// - `Err(-ERESTART)`：被信号中断
+    /// 返回值同 `wait_until_interruptible`。
     pub fn wait_until_io_interruptible<F>(wq: &Mutex<Self>, mut cond: F) -> WaitResult
     where
         F: FnMut() -> Option<isize>,
@@ -1275,6 +1348,7 @@ impl WaitQueue {
         Self::wait_event_impl(wq, &mut cond, true, None, Some(Self::WAIT_IO_FALLBACK_MS))
     }
 
+    /// 可中断等待，不启用 fallback timer。
     pub fn wait_event_interruptible<F>(wq: &Mutex<Self>, mut cond: F) -> WaitResult
     where
         F: FnMut() -> Option<isize>,
@@ -1282,6 +1356,7 @@ impl WaitQueue {
         Self::wait_event_impl(wq, &mut cond, true, None, None)
     }
 
+    /// 不可中断等待直到条件满足或绝对 deadline 到达。
     pub fn wait_event_timeout<F>(wq: &Mutex<Self>, mut cond: F, deadline: TimeSpec) -> WaitResult
     where
         F: FnMut() -> Option<isize>,
@@ -1289,6 +1364,7 @@ impl WaitQueue {
         Self::wait_event_impl(wq, &mut cond, false, Some(deadline), None)
     }
 
+    /// 可中断等待直到条件满足、信号到达或绝对 deadline 到达。
     pub fn wait_event_interruptible_timeout<F>(
         wq: &Mutex<Self>,
         mut cond: F,
@@ -1300,6 +1376,11 @@ impl WaitQueue {
         Self::wait_event_impl(wq, &mut cond, true, Some(deadline), None)
     }
 
+    /// 在调用方对象锁下检查条件并注册可中断等待。
+    ///
+    /// # Locking
+    ///
+    /// `queue_of` 从同一个对象锁保护的数据中返回等待队列；`cond` 也在该锁下执行。
     pub fn wait_event_interruptible_locked<T, Q, F>(
         lock: &Mutex<T>,
         queue_of: Q,
@@ -1312,6 +1393,7 @@ impl WaitQueue {
         Self::wait_event_locked_impl(lock, queue_of, &mut cond, true, None, None)
     }
 
+    /// 在调用方对象锁下检查条件并注册不可中断等待。
     pub fn wait_event_locked<T, Q, F>(lock: &Mutex<T>, queue_of: Q, mut cond: F) -> WaitResult
     where
         Q: for<'a> FnMut(&'a mut T) -> &'a mut WaitQueue,
@@ -1320,6 +1402,7 @@ impl WaitQueue {
         Self::wait_event_locked_impl(lock, queue_of, &mut cond, false, None, None)
     }
 
+    /// 在调用方对象锁下等待条件、信号或绝对 deadline。
     pub fn wait_event_interruptible_timeout_locked<T, Q, F>(
         lock: &Mutex<T>,
         queue_of: Q,
@@ -1333,6 +1416,12 @@ impl WaitQueue {
         Self::wait_event_locked_impl(lock, queue_of, &mut cond, true, Some(deadline), None)
     }
 
+    /// 带正常唤醒返回值的 locked wait。
+    ///
+    /// # Semantics
+    ///
+    /// 如果任务从等待队列中被正常唤醒而 `cond` 尚未返回值，则返回
+    /// `WaitResult::Ready(normal_wake_result)`。
     pub fn wait_event_interruptible_timeout_locked_with_wake_result<T, Q, F>(
         lock: &Mutex<T>,
         queue_of: Q,
@@ -1355,17 +1444,17 @@ impl WaitQueue {
     }
 }
 
-/// 表示一个等待超时的任务
+/// legacy 超时等待队列中的等待者。
 pub struct TimeoutWaiter {
-    /// 任务的弱引用
+    /// 等待任务弱引用。
     task: Weak<TaskControlBlock>,
-    /// 任务超时时间
+    /// 绝对超时时间。
     timeout: TimeSpec,
 }
 
-//表示到达deadline后触发的动作
+/// 内核定时器到期动作。
 pub enum TimerAction {
-    //唤醒task
+    /// 唤醒指定任务。
     WakeTask {
         task: Weak<TaskControlBlock>,
         generation: usize,
@@ -1374,7 +1463,7 @@ pub enum TimerAction {
         /// re-armed with the current generation instead of spurious-waking.
         fallback_ms: Option<usize>,
     },
-    //向某个task发送signal
+    /// 向指定任务投递信号。
     SendSignal {
         task: Weak<TaskControlBlock>,
         signal: Signals,
@@ -1394,7 +1483,7 @@ pub enum TimerAction {
     },
 }
 
-//内核中的统一计时器，目前用于itimer_real
+/// 内核定时器堆节点。
 pub struct KernelTimer {
     action: TimerAction,
     deadline: TimeSpec,
@@ -1415,7 +1504,7 @@ impl PartialOrd for KernelTimer {
 impl Eq for KernelTimer {}
 
 impl PartialEq for KernelTimer {
-    /// 仅通过比较deadline字段
+    /// 只按 deadline 判等，满足 `BinaryHeap` 排序需要。
     fn eq(&self, other: &Self) -> bool {
         self.deadline.eq(&other.deadline)
     }
@@ -1443,31 +1532,33 @@ impl KernelTimer {
     }
 }
 
-//计数器触发队列
+/// 内核定时器优先队列。
 pub struct KernelTimerQueue {
     inner: BinaryHeap<KernelTimer>,
 }
 
 impl KernelTimerQueue {
-    /// 最大定时器数量，防止内存耗尽
+    /// 最大定时器数量，防止内存耗尽。
     const MAX_TIMERS: usize = 4096;
 
+    /// 创建空定时器队列。
     pub fn new() -> Self {
         Self {
             inner: BinaryHeap::new(),
         }
     }
 
-    /// 返回当前队列中的定时器数量
+    /// 返回当前队列中的定时器数量。
     pub fn len(&self) -> usize {
         self.inner.len()
     }
 
+    /// 判断队列是否为空。
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
 
-    /// Returns the earliest deadline (ns), or 0 if the queue is empty.
+    /// 返回最早 deadline 的纳秒值，队列为空时返回 0。
     pub fn earliest_deadline_ns(&self) -> u64 {
         self.inner.peek().map(|t| t.deadline.to_ns_saturating()).unwrap_or(0)
     }
@@ -1478,6 +1569,11 @@ impl KernelTimerQueue {
         KERNEL_TIMER_QUEUE_PENDING.store(!self.inner.is_empty(), AtomicOrdering::Relaxed);
     }
 
+    /// 插入一个定时器动作。
+    ///
+    /// # Semantics
+    ///
+    /// 返回 `true` 表示新动作成为最早 deadline，调用方需要重编程硬件 timer。
     pub fn add_action(&mut self, action: TimerAction, deadline: TimeSpec) -> bool {
         let old_earliest = self.earliest_deadline_ns();
         // Keep the hot path O(log n).  WakeTask stale entries are filtered by
@@ -1492,8 +1588,11 @@ impl KernelTimerQueue {
         // was empty before, meaning a previously-idle queue now has work).
         old_earliest == 0 || new_earliest < old_earliest
     }
-    /// Pop all expired timers (up to a batch limit).
-    /// Callers must hold the lock. Run callbacks OUTSIDE the lock.
+    /// 弹出已过期定时器，最多处理一个批次。
+    ///
+    /// # Locking
+    ///
+    /// 调用方必须持有 `KERNEL_TIMER_QUEUE` 锁；返回的 callback 必须在锁外执行。
     pub fn pop_expired(&mut self, now: TimeSpec) -> Vec<KernelTimer> {
         let _pop_start = crate::task::perf::perf_time_now();
         let mut nodes = 0usize;
@@ -1553,7 +1652,12 @@ impl KernelTimerQueue {
             );
         }
     }
-    /// Run a single timer callback. Must be called WITHOUT holding KERNEL_TIMER_QUEUE.
+    /// 执行单个定时器 callback。
+    ///
+    /// # Locking
+    ///
+    /// 必须在未持有 `KERNEL_TIMER_QUEUE` 锁时调用。callback 可能获取任务锁、
+    /// 调度器锁或重新插入新的 kernel timer。
     pub fn run_timer(timer: KernelTimer, now: TimeSpec) -> bool {
         match timer.action {
             TimerAction::WakeTask { task, generation, fallback_ms } => {
@@ -1797,7 +1901,7 @@ impl KernelTimerQueue {
         }
     }
 }
-// 二叉堆是最大堆，所以我们需要反转排序
+// `BinaryHeap` 是最大堆；反转排序后最早超时的等待者排在堆顶。
 impl Ord for TimeoutWaiter {
     fn cmp(&self, other: &Self) -> Ordering {
         Ordering::reverse(self.timeout.cmp(&other.timeout))
@@ -1813,32 +1917,37 @@ impl PartialOrd for TimeoutWaiter {
 impl Eq for TimeoutWaiter {}
 
 impl PartialEq for TimeoutWaiter {
-    /// 仅通过比较timeout字段
+    /// 只按 timeout 判等，满足堆排序需要。
     fn eq(&self, other: &Self) -> bool {
         self.timeout.eq(&other.timeout)
     }
 }
 
-/// 等待超时任务队列
+/// legacy 超时等待队列。
+///
+/// # Semantics
+///
+/// 新的超时等待优先通过 `KernelTimerQueue` 驱动；本队列保留给旧路径兼容，
+/// 由 `do_wake_expired()` 和 timer interrupt 路径兜底扫描。
 pub struct TimeoutWaitQueue {
-    /// 使用二叉堆存储任务（最大堆），按超时时间排序
+    /// 反转排序后的二叉堆，最早 timeout 在堆顶。
     inner: BinaryHeap<TimeoutWaiter>,
 }
 
 impl TimeoutWaitQueue {
-    /// 构造函数
+    /// 创建空 timeout wait queue。
     pub fn new() -> Self {
         Self {
             inner: BinaryHeap::new(),
         }
     }
-    /// 这个函数会将一个`task`添加到`WaitQueue`但是**不会**阻塞这个任务，
-    /// 如果想要阻塞一个`task`，使用`block_current_and_run_next()`函数
+    /// 注册一个带绝对超时时间的任务，但不阻塞它。
     pub fn add_task(&mut self, task: Weak<TaskControlBlock>, timeout: TimeSpec) {
         self.inner.push(TimeoutWaiter { task, timeout });
         self.refresh_deadline_state();
     }
 
+    /// 判断队列是否为空。
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
@@ -1853,7 +1962,12 @@ impl TimeoutWaitQueue {
         TIMEOUT_WAITQUEUE_PENDING.store(!self.inner.is_empty(), AtomicOrdering::Relaxed);
     }
 
-    /// 唤醒所有超时的任务
+    /// 唤醒所有已经超时的任务。
+    ///
+    /// # Locking
+    ///
+    /// 调用方持有 `TIMEOUT_WAITQUEUE` 锁。函数会获取任务内部锁并批量入 ready
+    /// 队列，不应在持有其它任务锁时调用。
     pub fn wake_expired(&mut self, now: TimeSpec) {
         if self
             .inner
@@ -1865,34 +1979,24 @@ impl TimeoutWaitQueue {
             return;
         }
         let mut tasks_to_wake = Vec::new();
-        // 循环处理超时任务
         while let Some(waiter) = self.inner.pop() {
-            // 堆中剩下的任务还没有超时
             if waiter.timeout > now {
-                // 若超时时间大于当前时间，说明后面的任务都没有超时
                 self.inner.push(waiter);
                 break;
-            // 唤醒超时任务
             } else {
-                // 将弱引用升级为强引用
                 match waiter.task.upgrade() {
                     Some(task) => {
-                        // 获取内部锁
                         let mut inner = task.acquire_inner_lock();
                         match inner.task_status {
-                            // 若状态为可中断状态，改为就绪态
                             super::TaskStatus::Interruptible => {
                                 inner.task_status = super::task::TaskStatus::Ready
                             }
-                            // 对于处于 就绪态或运行态的任务，不需要做唤醒操作
-                            // 对于处于僵尸态的任务，做唤醒操作会搞砸进程管理
+                            // Ready/Running 不需要唤醒；Zombie 不能重新入队。
                             _ => continue,
                         }
-                        // 释放锁
                         drop(inner);
                         tasks_to_wake.push(task);
                     }
-                    // task is dead, just ignore
                     None => continue,
                 }
             }
@@ -1901,7 +2005,7 @@ impl TimeoutWaitQueue {
         self.refresh_deadline_state();
     }
     #[allow(unused)]
-    // debug use only
+    /// 打印等待者 deadline，仅供诊断。
     pub fn show_waiter(&self) {
         for waiter in self.inner.iter() {
             log::error!("[show_waiter] timeout: {:?}", waiter.timeout);
@@ -1910,9 +2014,9 @@ impl TimeoutWaitQueue {
 }
 
 lazy_static! {
-    /// 全局超时等待队列
+    /// 全局 legacy 超时等待队列。
     pub static ref TIMEOUT_WAITQUEUE: Mutex<TimeoutWaitQueue> = Mutex::new(TimeoutWaitQueue::new());
-    /// 全局内核计时器队列
+    /// 全局内核定时器队列。
     pub static ref KERNEL_TIMER_QUEUE: Mutex<KernelTimerQueue> =
         Mutex::new(KernelTimerQueue::new());
 }
@@ -1938,19 +2042,20 @@ fn program_next_event(next_timer_ns: u64) {
     crate::hal::program_timer_delta(delta_ticks);
 }
 
-/// (Re-)program the hardware timer to fire at the earliest of:
-///   - the next sched tick, and
-///   - the earliest KernelTimer deadline.
+/// 重编程硬件 timer，使其在下一次调度 tick 或最早 kernel timer deadline 触发。
 ///
-/// Caller must have local timer interrupts disabled before entering this
-/// function.  It shares KERNEL_TIMER_QUEUE with the timer interrupt path.
+/// # Locking
+///
+/// 调用方必须已经关闭本地 timer interrupt，因为本函数会读取
+/// `KERNEL_TIMER_QUEUE` 并与 timer interrupt 路径共享状态。
 fn reprogram_timer_irqoff() {
     let next_timer_ns = KERNEL_TIMER_QUEUE.lock().earliest_deadline_ns();
     program_next_event(next_timer_ns);
 }
 
-/// Initialise the timer subsystem: set the first sched tick and program the
-/// hardware for the first event.
+/// 初始化内核定时器子系统。
+///
+/// 设置第一个调度 tick，并把硬件 timer 编程到首个事件。
 pub fn timer_subsystem_init() {
     let flags = local_irq_save();
     let now_ns = crate::timer::now_ns();
@@ -1959,7 +2064,11 @@ pub fn timer_subsystem_init() {
     local_irq_restore(flags);
 }
 
-/// 加入一个内核计时器动作
+/// 添加一个内核定时器动作。
+///
+/// # Locking
+///
+/// 函数会短暂关闭本地中断并持有 `KERNEL_TIMER_QUEUE` 锁；callback 不在此处执行。
 pub fn add_kernel_timer(action: TimerAction, deadline: TimeSpec) {
     let flags = local_irq_save();
     let new_is_earliest = KERNEL_TIMER_QUEUE.lock().add_action(action, deadline);
@@ -1972,8 +2081,12 @@ pub fn add_kernel_timer(action: TimerAction, deadline: TimeSpec) {
     local_irq_restore(flags);
 }
 
-/// 这个函数会将一个`task`添加到全局超时等待队列中，但是不会阻塞它
-/// 如果想要阻塞一个任务，使用`block_current_and_run_next()`函数
+/// 为任务注册一次绝对超时唤醒。
+///
+/// # Semantics
+///
+/// 只添加 timer，不阻塞任务；调用方必须随后进入对应 WaitQueue 等待。每次注册
+/// 都会递增 `wait_timer_generation`，旧 timer 到期后会被识别为 stale。
 pub fn wait_with_timeout(task: Weak<TaskControlBlock>, timeout: TimeSpec) {
     crate::task::perf::record_wait_with_timeout();
     let Some(task) = task.upgrade() else {
@@ -1993,14 +2106,12 @@ pub fn wait_with_timeout(task: Weak<TaskControlBlock>, timeout: TimeSpec) {
     );
 }
 
-/// Unified timer interrupt handler — replaces the old fixed-tick
-/// do_wake_expired() + set_next_trigger() pattern.
+/// 统一 timer interrupt 处理入口。
 ///
-/// 1. Process all expired KernelTimers (callbacks run outside the lock).
-/// 2. Advance the sched tick if its deadline has passed; do periodic
-///    housekeeping (net poll, etc.) only on sched-tick boundaries.
-/// 3. Re-program the hardware for the next deadline.
-/// 4. Yield the CPU only if a task was woken or the sched tick demands it.
+/// # Semantics
+///
+/// 先弹出过期 kernel timers 并在锁外执行 callback，再处理 legacy timeout queue
+/// 和 timerfd，最后推进调度 tick 并按需让出 CPU。
 pub fn timer_interrupt_handler() {
     let handler_profile_start = crate::task::processor::sched_profile_cycle_start();
     let _irq_start = crate::task::perf::perf_time_now();
@@ -2063,7 +2174,12 @@ pub fn timer_interrupt_handler() {
     }
 }
 
-/// 唤醒全局超时等待队列中所有已超时的任务 (legacy — now handled by timer_interrupt_handler)
+/// 唤醒已过期的 legacy timeout/kernel timer。
+///
+/// # Semantics
+///
+/// 这是旧固定 tick 路径的兼容入口；新的硬件 timer 中断主要走
+/// `timer_interrupt_handler()`。
 pub fn do_wake_expired() {
     let timeout_pending = TIMEOUT_WAITQUEUE_PENDING.load(AtomicOrdering::Relaxed);
     let kernel_timer_pending = KERNEL_TIMER_QUEUE_PENDING.load(AtomicOrdering::Relaxed);
@@ -2122,9 +2238,9 @@ pub fn do_wake_expired() {
             drop(ktq);
             local_irq_restore(flags);
             expired
-        }; // ← lock released
+        };
 
-        // Run callbacks outside the lock
+        // callback 可能重新获取 timer/task/scheduler 锁，必须在锁外执行。
         let now = now.unwrap_or_else(crate::timer::TimeSpec::now);
         for timer in expired_timers {
             KernelTimerQueue::run_timer(timer, now);

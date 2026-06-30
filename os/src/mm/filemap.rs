@@ -1,3 +1,14 @@
+//! 文件映射 VMA 的缺页填充路径。
+//!
+//! 本模块把 `MAP_PRIVATE`/`MAP_SHARED` 文件映射的首次访问转成 page cache
+//! 读写，并在最后校验 VMA resident frame 与用户 PTE 是否一致。
+//!
+//! # Semantics
+//!
+//! 读取最后一个不完整文件页时会把 EOF 之后的页尾清零；超过文件大小取整到页的
+//! fault 返回 `MemoryError::BeyondEOF`。共享写 fault 会先通过 page cache 取得可写页，
+//! 再恢复用户 PTE。
+
 use super::page_fault::FaultContext;
 use super::user_mapper::UserMapper;
 use super::vma::Vma;
@@ -68,6 +79,12 @@ fn verify_filemap_fault<T: PageTable>(
     Ok(ctx.offset_phys(mapped_ppn))
 }
 
+/// 处理 `MAP_PRIVATE` 文件页的写 fault。
+///
+/// # Semantics
+///
+/// 分配一页新的私有物理页，从 page cache 拷贝文件内容，并清零 EOF 之后的页尾。
+/// 该页后续按匿名私有页处理，不再共享 page cache 帧。
 pub(super) fn filemap_private_fault<T: PageTable>(
     area: &mut Vma,
     page_table: &mut T,
@@ -93,6 +110,12 @@ pub(super) fn filemap_private_fault<T: PageTable>(
     verify_filemap_fault(area, page_table, ctx, allocated_ppn)
 }
 
+/// 处理文件映射页的读/执行 fault。
+///
+/// # Semantics
+///
+/// 直接映射 page cache 中的物理页。若 VMA 可写，首次映射会清除 W 位，使后续写入
+/// 重新进入 fault 路径并区分 CoW 或共享脏页语义。
 pub(super) fn filemap_read_fault<T: PageTable>(
     area: &mut Vma,
     page_table: &mut T,
@@ -109,11 +132,11 @@ pub(super) fn filemap_read_fault<T: PageTable>(
     let cache_frame = pc.frame_for_read(page_index).map_err(map_pc_error)?;
     let cache_ppn = cache_frame.ppn;
 
-    // Zero the tail beyond EOF for the last partial page (shared via page cache).
+    // EOF 之后的页尾对用户必须读出 0；这里修改的是共享 page cache 帧。
     zero_tail(file_size, file_offset, cache_ppn.get_bytes_array());
 
-    // For both MAP_PRIVATE and MAP_SHARED with W: clear W so first store
-    // goes through a fault, triggering CoW (private) or dirty-mark (shared).
+    // 可写文件映射首次只给只读 PTE：私有映射写入时触发 CoW，共享映射写入时
+    // 触发 page cache dirty 标记后再恢复 W。
     let map_perm = if area.vm_perm().contains(MapPermission::W) {
         area.vm_perm().difference(MapPermission::W)
     } else {
@@ -132,6 +155,11 @@ pub(super) fn filemap_read_fault<T: PageTable>(
     verify_filemap_fault(area, page_table, ctx, cache_ppn)
 }
 
+/// 处理 `MAP_SHARED` 文件页的写 fault。
+///
+/// # Semantics
+///
+/// 通过 page cache 获取可写帧，确保后端缓存被标记为写路径，再把共享帧映射回用户页表。
 pub(super) fn filemap_shared_write_fault<T: PageTable>(
     area: &mut Vma,
     page_table: &mut T,

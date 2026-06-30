@@ -1,3 +1,7 @@
+//! RISC-V 用户栈、trap context 和内核栈地址分配。
+//!
+//! 通过 slot allocator 为线程分配互不重叠的栈和 trap context 虚拟地址。
+
 use super::config::{
     KERNEL_STACK_SIZE, PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT_BASE, USER_STACK_BASE, USER_STACK_SIZE,
 };

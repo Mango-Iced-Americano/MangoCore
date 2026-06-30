@@ -1,3 +1,7 @@
+//! `EUEN`：扩展部件使能寄存器。
+//!
+//! 该 CSR 控制 FPU、SIMD/向量、二进制翻译等扩展部件在当前上下文中的可用性。
+
 use bit_field::BitField;
 impl_define_csr!(EUEn,"Extended Component Unit Enable (EUEN)
 

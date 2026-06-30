@@ -1,3 +1,7 @@
+//! `TLBRERA`：TLB refill 例外返回地址寄存器。
+//!
+//! 硬件在 TLB refill 例外进入时保存返回 PC，并用 `IsTLBR` 标记当前 refill 上下文。
+
 use core::fmt::Debug;
 
 use bit_field::BitField;
@@ -21,14 +25,12 @@ impl TLBRERA {
     /// When the execution of ERTN instruction returns from the TLB refill exception handler.
     /// (at this time, this register IsTLBR=1 and CSR.MERRCTL.IsMERR=0)
     pub fn get_pc(&self) -> usize {
-        // 返回pc
         self.bits.get_bits(2..)
     }
     /// Record the [GRLEN-1:2] bits of the PC of the instruction that triggered the TLB refill exception.
     /// When the execution of ERTN instruction returns from the TLB refill exception handler.
     /// (at this time, this register IsTLBR=1 and CSR.MERRCTL.IsMERR=0)
     pub fn set_pc(&mut self, pc: usize) -> &mut Self {
-        // 设置pc
         self.bits.set_bits(2.., pc);
         self
     }
