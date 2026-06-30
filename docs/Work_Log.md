@@ -4,14 +4,6 @@
 
 ## 2026-06-30
 
-### docs: 新增代码注释规范文档
-
-**涉及文件：**
-- `docs/00_overview/code-comment-style.md` — 新建代码注释规范，覆盖注释分类、rustdoc 标准小节、Safety/Locking/Linux Compatibility 注释要求、TODO/FIXME/HACK/Deprecated 格式、语言规范、审查清单
-
-**验证：**
-- 纯文档修改，无需编译验证
-
 ### docs: 新增 AI-Usage-Report.md（比赛 AI 使用披露）
 
 **涉及文件：**
