@@ -977,18 +977,15 @@ impl IndexNode for layout::Ext4OSInode {
         let start_lblock = (offset / block_size) as u32;
         let mut end_lblock = ((offset + write_len + block_size - 1) / block_size) as u32;
 
-        // Sequential extending write: pre-allocate blocks beyond the current
-        // request so that subsequent small writes reuse already-allocated
-        // physically-contiguous extents.  This turns 1KB-record iozone writes
-        // into 128KB+ extents instead of 2-block allocations per call.
-        // Only triggered when writing at or beyond current EOF.
+        // Sequential extending write: pre-allocate blocks to the next
+        // prealloc_lblocks boundary. This creates equal-sized extents
+        // instead of one large + many small fragments from delta-offset.
         let is_extending = offset + write_len > old_size;
         if is_extending {
-            let prealloc_lblocks = (128 * 1024 / block_size) as u32; // target 128KB extent
-            end_lblock = core::cmp::min(
-                end_lblock + prealloc_lblocks,
-                u32::MAX,
-            );
+            let prealloc_lblocks = (128 * 1024 / block_size) as u32;
+            let target = ((start_lblock / prealloc_lblocks) + 1) * prealloc_lblocks;
+            end_lblock = core::cmp::max(end_lblock, target);
+            end_lblock = core::cmp::min(end_lblock, u32::MAX);
         }
 
         let mut fresh = self.ext4fs.get_inode_ref(inode_num);
