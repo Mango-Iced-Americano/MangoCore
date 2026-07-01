@@ -24,7 +24,10 @@ use crate::hal::{
 use crate::task::perf;
 const BLOCK_RATIO: usize = BLOCK_SZ / VIRT_IO_BLOCK_SZ;
 const MAX_VIRTIO_REQ_BYTES: usize = BLOCK_SZ;
-const PCI_ECAM_BASE: usize = 0x2000_0000;
+#[cfg(not(target_arch = "riscv64"))]
+const PCI_ECAM_BASE: usize = 0x2000_0000; // loongarch64 qemu
+#[cfg(target_arch = "riscv64")]
+const PCI_ECAM_BASE: usize = 0x3000_0000; // riscv64 qemu
 const VIRT_PCI_BASE: usize = 0x4000_0000;
 const VIRT_PCI_SIZE: usize = 0x0002_0000;
 

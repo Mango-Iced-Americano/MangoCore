@@ -42,7 +42,7 @@ impl BlockDevice for DummyBlockDevice {
 
 // ── 平台相关的块设备探测 ──
 
-#[cfg(feature = "block_virt")]
+#[cfg(all(feature = "block_virt", not(feature = "block_virt_pci")))]
 fn probe_block_devices() -> [Option<Arc<dyn BlockDevice>>; 2] {
     virtio_blk::probe_rv64()
 }
