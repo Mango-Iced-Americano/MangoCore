@@ -36,9 +36,9 @@ static GLOBAL_WRITEBACK_PAGES: AtomicUsize = AtomicUsize::new(0);
 static WRITEBACK_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// 后台写回启动阈值（页数，约 8MB，高于典型 4MB 测试集避免频繁触发）
-const DIRTY_BACKGROUND: usize = 2048;
-/// 写入者节流阈值（页数，约 16MB）
-const DIRTY_THROTTLE: usize = 4096;
+const DIRTY_BACKGROUND: usize = 8192;
+/// 写入者节流阈值（页数，约 64MB）
+const DIRTY_THROTTLE: usize = 16384;
 /// 正常后台写回批次大小
 const WB_BATCH_PAGES: usize = 128;
 /// 节流时的最大写回页数
