@@ -18,7 +18,9 @@ use crate::hal::{
 };
 use crate::task::perf;
 const BLOCK_RATIO: usize = BLOCK_SZ / VIRT_IO_BLOCK_SZ;
-const MAX_VIRTIO_REQ_BYTES: usize = 32 * 1024;
+// MAX_VIRTIO_REQ_BYTES 受限于 VirtioHal::share 中 frames_alloc 不保证物理连续；
+// 每页之内安全，跨页需先修复 DMA 分配为 frames_alloc_contiguous。
+const MAX_VIRTIO_REQ_BYTES: usize = BLOCK_SZ;
 #[allow(unused)]
 const VIRTIO0: usize = 0x10001000;
 const VIRTIO_MMIO_BASE: usize = 0x10001000;
