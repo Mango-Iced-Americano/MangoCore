@@ -4,7 +4,36 @@
 
 ## 2026-07-01
 
-### ext4 perf: 添加 P0 性能计数器 + Ext4PageCacheBackend extent lookup hint cache
+### ext4 perf R3: 顺序写预分配 (128KB) + MAX_WRITEBACK_PAGES 32→64
+
+**涉及文件：**
+- `os/src/fs/ext4/ext4fs.rs:974-993` — 检测顺序扩展写，预分配 128KB extent
+- `os/src/fs/page_cache.rs:1402` — MAX_WRITEBACK_PAGES 32→64
+
+**验证：**
+- Write 5898→6129→6152 (+4.3% total), Read 8560→9157→8834 (+3.2%)
+- pc_wb_calls 583→295 (**-49%**), batch 31.5→62.1 页/次
+- blk_vwrite secs/req 78→80→96 (+23%), extent 变大
+- pc_wb_cycles: 8.24B→7.04B→6.95B (-15.6% total)
+
+**备注：** 写回调用减半但吞吐增幅递减 → 瓶颈从 writeback 转移至 VirtIO 层或 per-block write_device 开销
+
+### ext4 perf R2: Ext4MapCache extent-range + 512B batch + mballoc
+
+**涉及文件：**
+- `os/src/fs/page_cache.rs` — Ext4MapCache extent range, write_pages/read_pages 512B flatten
+- `os/src/fs/ext4/ext4_inode.rs` — get_pblock_with_extent()
+- `os/src/fs/ext4/mod.rs` — mballoc_block_limit() byte-based
+
+**验证：** Write +3.9%, Read +7.0%, cache hit 94.9%, pc_wb_cycles -14.6%
+
+### ext4 perf R1: P0 计数器 + /sys/kernel/stats/ext4
+
+**涉及文件：** `os/src/task/perf.rs` + `os/src/fs/sysfs/files/diag.rs`
+
+---
+
+## 2026-06-28
 
 **涉及文件：**
 - `os/src/task/perf.rs` — 新增 4 组 Ext4 计数器（Block Mapping / Extent Tree Search / PageCache Backend Batch / Allocation）+ PageCache Lock Contention 计数器 + direct write_at 计数器；新增对应的 `record_xxx()` 记录函数、`reset_all_counters()` 清零项、`not(feature)` no-op stub
