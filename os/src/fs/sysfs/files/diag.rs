@@ -429,6 +429,9 @@ fn stats_pagecache_content(
     let _ = writeln!(s, "wb_bg_calls={}", read_counter(&crate::task::perf::WB_BG_CALLS));
     let _ = writeln!(s, "wb_throttle_calls={}", read_counter(&crate::task::perf::WB_THROTTLE_CALLS));
     let _ = writeln!(s, "wb_redirty_pages={}", read_counter(&crate::task::perf::WB_REDIRTY_PAGES));
+    let _ = writeln!(s, "pc_lock_hold_cycles={}", read_counter(&crate::task::perf::PC_LOCK_HOLD_CYCLES));
+    let _ = writeln!(s, "pc_lock_hold_max={}", read_counter(&crate::task::perf::PC_LOCK_HOLD_MAX));
+    let _ = writeln!(s, "pc_lock_io_miss_reads={}", read_counter(&crate::task::perf::PC_LOCK_IO_MISS_READS));
     write_str(offset, len, buf, &s)
 }
 
@@ -447,6 +450,40 @@ fn stats_blockio_content(
     let _ = writeln!(s, "blk_vread_secs={}", read_counter(&crate::task::perf::BLK_VREAD_SECS));
     let _ = writeln!(s, "blk_vwrite_reqs={}", read_counter(&crate::task::perf::BLK_VWRITE_REQS));
     let _ = writeln!(s, "blk_vwrite_secs={}", read_counter(&crate::task::perf::BLK_VWRITE_SECS));
+    write_str(offset, len, buf, &s)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  STATS: Ext4
+// ═══════════════════════════════════════════════════════════════════════
+
+fn stats_ext4_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let mut s = String::with_capacity(768);
+    let _ = writeln!(s, "ext4_map_lblock_calls={}", read_counter(&crate::task::perf::EXT4_MAP_LBLOCK_CALLS));
+    let _ = writeln!(s, "ext4_map_lblock_cycles={}", read_counter(&crate::task::perf::EXT4_MAP_LBLOCK_CYCLES));
+    let _ = writeln!(s, "ext4_map_cache_hits={}", read_counter(&crate::task::perf::EXT4_MAP_CACHE_HITS));
+    let _ = writeln!(s, "ext4_map_holes={}", read_counter(&crate::task::perf::EXT4_MAP_HOLES));
+    let _ = writeln!(s, "ext4_find_extent_calls={}", read_counter(&crate::task::perf::EXT4_FIND_EXTENT_CALLS));
+    let _ = writeln!(s, "ext4_find_extent_cycles={}", read_counter(&crate::task::perf::EXT4_FIND_EXTENT_CYCLES));
+    let _ = writeln!(s, "ext4_find_extent_depth={}", read_counter(&crate::task::perf::EXT4_FIND_EXTENT_DEPTH_SUM));
+    let _ = writeln!(s, "ext4_find_extent_meta_reads={}", read_counter(&crate::task::perf::EXT4_FIND_EXTENT_META_READS));
+    let _ = writeln!(s, "ext4_pc_readpages_calls={}", read_counter(&crate::task::perf::EXT4_PC_READPAGES_CALLS));
+    let _ = writeln!(s, "ext4_pc_readpages_pages={}", read_counter(&crate::task::perf::EXT4_PC_READPAGES_PAGES));
+    let _ = writeln!(s, "ext4_pc_readpages_runs={}", read_counter(&crate::task::perf::EXT4_PC_READPAGES_RUNS));
+    let _ = writeln!(s, "ext4_pc_writepages_calls={}", read_counter(&crate::task::perf::EXT4_PC_WRITEPAGES_CALLS));
+    let _ = writeln!(s, "ext4_pc_writepages_pages={}", read_counter(&crate::task::perf::EXT4_PC_WRITEPAGES_PAGES));
+    let _ = writeln!(s, "ext4_pc_writepages_runs={}", read_counter(&crate::task::perf::EXT4_PC_WRITEPAGES_RUNS));
+    let _ = writeln!(s, "ext4_pc_512b_fallback={}", read_counter(&crate::task::perf::EXT4_PC_512B_FALLBACK_PAGES));
+    let _ = writeln!(s, "ext4_alloc_ensure_calls={}", read_counter(&crate::task::perf::EXT4_ALLOC_ENSURE_CALLS));
+    let _ = writeln!(s, "ext4_alloc_lblocks={}", read_counter(&crate::task::perf::EXT4_ALLOC_LBLOCKS));
+    let _ = writeln!(s, "ext4_alloc_new_blocks={}", read_counter(&crate::task::perf::EXT4_ALLOC_NEW_BLOCKS));
+    let _ = writeln!(s, "ext4_alloc_cycles={}", read_counter(&crate::task::perf::EXT4_ALLOC_CYCLES));
+    let _ = writeln!(s, "ext4_direct_write_at_calls={}", read_counter(&crate::task::perf::EXT4_DIRECT_WRITE_AT_CALLS));
     write_str(offset, len, buf, &s)
 }
 
@@ -484,6 +521,7 @@ pub fn register_all(kernel_dir: &Arc<SysInode>) -> Result<(), SyscallErr> {
     stats_dir.add_file("heap", ro_mode, stats_heap_content)?;
     stats_dir.add_file("pagecache", ro_mode, stats_pagecache_content)?;
     stats_dir.add_file("blockio", ro_mode, stats_blockio_content)?;
+    stats_dir.add_file("ext4", ro_mode, stats_ext4_content)?;
     stats_dir.add_file("resource", ro_mode, stats_resource_content)?;
     stats_dir.add_file("buddyinfo", ro_mode, stats_buddyinfo_content)?;
     stats_dir.add_file("zombies", ro_mode, stats_zombies_content)?;

@@ -192,6 +192,41 @@ mod enabled {
     pub static BLK_VWRITE_REQS: AtomicUsize = AtomicUsize::new(0);
     pub static BLK_VWRITE_SECS: AtomicUsize = AtomicUsize::new(0);
 
+    // ── P0: Ext4 Block Mapping ──
+    pub static EXT4_MAP_LBLOCK_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_MAP_LBLOCK_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_MAP_CACHE_HITS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_MAP_HOLES: AtomicUsize = AtomicUsize::new(0);
+
+    // ── P0: Ext4 Extent Tree Search ──
+    pub static EXT4_FIND_EXTENT_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_FIND_EXTENT_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_FIND_EXTENT_DEPTH_SUM: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_FIND_EXTENT_META_READS: AtomicUsize = AtomicUsize::new(0);
+
+    // ── P0: Ext4 PageCache Backend Batch ──
+    pub static EXT4_PC_READPAGES_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_PC_READPAGES_PAGES: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_PC_READPAGES_RUNS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_PC_WRITEPAGES_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_PC_WRITEPAGES_PAGES: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_PC_WRITEPAGES_RUNS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_PC_512B_FALLBACK_PAGES: AtomicUsize = AtomicUsize::new(0);
+
+    // ── P0: Ext4 Allocation ──
+    pub static EXT4_ALLOC_ENSURE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_ALLOC_LBLOCKS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_ALLOC_NEW_BLOCKS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_ALLOC_CYCLES: AtomicUsize = AtomicUsize::new(0);
+
+    // ── P0: PageCache Lock Contention ──
+    pub static PC_LOCK_HOLD_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_LOCK_HOLD_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_LOCK_IO_MISS_READS: AtomicUsize = AtomicUsize::new(0);
+
+    // ── P0: Ext4 direct write_at ──
+    pub static EXT4_DIRECT_WRITE_AT_CALLS: AtomicUsize = AtomicUsize::new(0);
+
     // ── P0: Heap Allocator Cost ──
     pub static HEAP_ALLOC_CALLS: AtomicUsize = AtomicUsize::new(0);
     pub static HEAP_ALLOC_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
@@ -523,6 +558,128 @@ mod enabled {
         BLK_VWRITE_SECS.fetch_add(sectors, Ordering::Relaxed);
     }
 
+    // ── Ext4 Block Mapping recorders ──
+
+    #[inline(always)]
+    pub fn record_ext4_map_lblock() {
+        if !stats_enabled() { return; }
+        EXT4_MAP_LBLOCK_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_map_lblock_cost(cycles: usize) {
+        if !stats_enabled() { return; }
+        EXT4_MAP_LBLOCK_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_map_cache_hit() {
+        if !stats_enabled() { return; }
+        EXT4_MAP_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_map_hole() {
+        if !stats_enabled() { return; }
+        EXT4_MAP_HOLES.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // ── Ext4 Extent Tree Search recorders ──
+
+    #[inline(always)]
+    pub fn record_ext4_find_extent_call() {
+        if !stats_enabled() { return; }
+        EXT4_FIND_EXTENT_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_find_extent_cost(cycles: usize, depth: usize, meta_reads: usize) {
+        if !stats_enabled() { return; }
+        EXT4_FIND_EXTENT_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+        EXT4_FIND_EXTENT_DEPTH_SUM.fetch_add(depth, Ordering::Relaxed);
+        EXT4_FIND_EXTENT_META_READS.fetch_add(meta_reads, Ordering::Relaxed);
+    }
+
+    // ── Ext4 PageCache Backend Batch recorders ──
+
+    #[inline(always)]
+    pub fn record_ext4_pc_readpages_calls() {
+        if !stats_enabled() { return; }
+        EXT4_PC_READPAGES_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_pc_readpages_pages(n: usize) {
+        if !stats_enabled() { return; }
+        EXT4_PC_READPAGES_PAGES.fetch_add(n, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_pc_readpages_runs(n: usize) {
+        if !stats_enabled() { return; }
+        EXT4_PC_READPAGES_RUNS.fetch_add(n, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_pc_writepages_calls() {
+        if !stats_enabled() { return; }
+        EXT4_PC_WRITEPAGES_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_pc_writepages_pages(n: usize) {
+        if !stats_enabled() { return; }
+        EXT4_PC_WRITEPAGES_PAGES.fetch_add(n, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_pc_writepages_runs(n: usize) {
+        if !stats_enabled() { return; }
+        EXT4_PC_WRITEPAGES_RUNS.fetch_add(n, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_pc_512b_fallback(n: usize) {
+        if !stats_enabled() { return; }
+        EXT4_PC_512B_FALLBACK_PAGES.fetch_add(n, Ordering::Relaxed);
+    }
+
+    // ── Ext4 Allocation recorders ──
+
+    #[inline(always)]
+    pub fn record_ext4_alloc_ensure_calls() {
+        if !stats_enabled() { return; }
+        EXT4_ALLOC_ENSURE_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_alloc_ensure(lblocks: usize, new_blocks: usize, cycles: usize) {
+        if !stats_enabled() { return; }
+        EXT4_ALLOC_LBLOCKS.fetch_add(lblocks, Ordering::Relaxed);
+        EXT4_ALLOC_NEW_BLOCKS.fetch_add(new_blocks, Ordering::Relaxed);
+        EXT4_ALLOC_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+    }
+
+    // ── PageCache Lock Contention recorders ──
+
+    #[inline(always)]
+    pub fn record_pc_lock_hold(cycles: usize, io_miss: bool) {
+        if !stats_enabled() { return; }
+        PC_LOCK_HOLD_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+        update_max(&PC_LOCK_HOLD_MAX, cycles);
+        if io_miss {
+            PC_LOCK_IO_MISS_READS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    // ── Ext4 direct write_at recorder ──
+
+    #[inline(always)]
+    pub fn record_ext4_direct_write_at() {
+        if !stats_enabled() { return; }
+        EXT4_DIRECT_WRITE_AT_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Reset all P0+P1 performance counters (writable via /sys/kernel/stats/reset).
     pub fn reset_all_counters() {
         // Scheduler / Task Queue
@@ -618,6 +775,35 @@ mod enabled {
         BLK_VREAD_SECS.store(0, Ordering::Relaxed);
         BLK_VWRITE_REQS.store(0, Ordering::Relaxed);
         BLK_VWRITE_SECS.store(0, Ordering::Relaxed);
+        // Ext4 Block Mapping (P0)
+        EXT4_MAP_LBLOCK_CALLS.store(0, Ordering::Relaxed);
+        EXT4_MAP_LBLOCK_CYCLES.store(0, Ordering::Relaxed);
+        EXT4_MAP_CACHE_HITS.store(0, Ordering::Relaxed);
+        EXT4_MAP_HOLES.store(0, Ordering::Relaxed);
+        // Ext4 Extent Tree Search (P0)
+        EXT4_FIND_EXTENT_CALLS.store(0, Ordering::Relaxed);
+        EXT4_FIND_EXTENT_CYCLES.store(0, Ordering::Relaxed);
+        EXT4_FIND_EXTENT_DEPTH_SUM.store(0, Ordering::Relaxed);
+        EXT4_FIND_EXTENT_META_READS.store(0, Ordering::Relaxed);
+        // Ext4 PageCache Backend Batch (P0)
+        EXT4_PC_READPAGES_CALLS.store(0, Ordering::Relaxed);
+        EXT4_PC_READPAGES_PAGES.store(0, Ordering::Relaxed);
+        EXT4_PC_READPAGES_RUNS.store(0, Ordering::Relaxed);
+        EXT4_PC_WRITEPAGES_CALLS.store(0, Ordering::Relaxed);
+        EXT4_PC_WRITEPAGES_PAGES.store(0, Ordering::Relaxed);
+        EXT4_PC_WRITEPAGES_RUNS.store(0, Ordering::Relaxed);
+        EXT4_PC_512B_FALLBACK_PAGES.store(0, Ordering::Relaxed);
+        // Ext4 Allocation (P0)
+        EXT4_ALLOC_ENSURE_CALLS.store(0, Ordering::Relaxed);
+        EXT4_ALLOC_LBLOCKS.store(0, Ordering::Relaxed);
+        EXT4_ALLOC_NEW_BLOCKS.store(0, Ordering::Relaxed);
+        EXT4_ALLOC_CYCLES.store(0, Ordering::Relaxed);
+        // PageCache Lock Contention (P0)
+        PC_LOCK_HOLD_CYCLES.store(0, Ordering::Relaxed);
+        PC_LOCK_HOLD_MAX.store(0, Ordering::Relaxed);
+        PC_LOCK_IO_MISS_READS.store(0, Ordering::Relaxed);
+        // Ext4 direct write_at (P0)
+        EXT4_DIRECT_WRITE_AT_CALLS.store(0, Ordering::Relaxed);
     }
 
     /// Print accumulated timing stats, then reset.
@@ -1306,6 +1492,59 @@ pub fn record_blk_vread(_sectors: usize) {}
 #[inline(always)]
 pub fn record_blk_vwrite(_sectors: usize) {}
 
+// ── Ext4/P0 recorders (no-op when perf_stats disabled) ──
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_map_lblock() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_map_lblock_cost(_cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_map_cache_hit() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_map_hole() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_find_extent_call() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_find_extent_cost(_cycles: usize, _depth: usize, _meta_reads: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_pc_readpages_calls() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_pc_readpages_pages(_n: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_pc_readpages_runs(_n: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_pc_writepages_calls() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_pc_writepages_pages(_n: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_pc_writepages_runs(_n: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_pc_512b_fallback(_n: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_alloc_ensure_calls() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_alloc_ensure(_lblocks: usize, _new_blocks: usize, _cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pc_lock_hold(_cycles: usize, _io_miss: bool) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_direct_write_at() {}
+
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
 pub fn reset_all_counters() {}
@@ -1489,6 +1728,64 @@ pub static BLK_VREAD_SECS: core::sync::atomic::AtomicUsize = core::sync::atomic:
 pub static BLK_VWRITE_REQS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static BLK_VWRITE_SECS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── Ext4 Block Mapping stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_MAP_LBLOCK_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_MAP_LBLOCK_CYCLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_MAP_CACHE_HITS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_MAP_HOLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── Ext4 Extent Tree Search stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_FIND_EXTENT_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_FIND_EXTENT_CYCLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_FIND_EXTENT_DEPTH_SUM: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_FIND_EXTENT_META_READS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── Ext4 PageCache Backend Batch stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_PC_READPAGES_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_PC_READPAGES_PAGES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_PC_READPAGES_RUNS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_PC_WRITEPAGES_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_PC_WRITEPAGES_PAGES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_PC_WRITEPAGES_RUNS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_PC_512B_FALLBACK_PAGES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── Ext4 Allocation stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_ALLOC_ENSURE_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_ALLOC_LBLOCKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_ALLOC_NEW_BLOCKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_ALLOC_CYCLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── PageCache Lock Contention stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_LOCK_HOLD_CYCLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_LOCK_HOLD_MAX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_LOCK_IO_MISS_READS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── Ext4 direct write_at stub ──
+#[cfg(not(feature = "perf_stats"))]
+pub static EXT4_DIRECT_WRITE_AT_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 // ── TLB counter stubs (zero-valued when perf_stats disabled) ──
 #[cfg(not(feature = "perf_stats"))]
