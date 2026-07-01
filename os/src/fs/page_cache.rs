@@ -1399,7 +1399,7 @@ impl PageCache {
     // ── 回写 ─────────────────────────────────────────────────────────
 
     /// 单次回写批次的最大页面数
-    const MAX_WRITEBACK_PAGES: usize = 32;
+    const MAX_WRITEBACK_PAGES: usize = 64;
 
     /// 将单个脏页通过 `backend` 写回存储介质；若页面已为 `UpToDate` 则跳过。
     pub fn writeback_page(&self, page_index: usize) -> Result<(), SyscallErr> {
