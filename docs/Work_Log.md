@@ -2,6 +2,28 @@
 
 ---
 
+## 2026-07-02
+
+### la64 vs rv64 性能对比 — rv64 VirtIO MMIO 瓶颈确认
+
+**测试**: iozone 4MB/1KB + lmbench + unixbench (perf_diag)
+
+| 指标 | rv64 (最佳) | la64 | la64/rv64 |
+|------|-----------|------|-----------|
+| iozone Write | 6,152 KB/s | **11,001** | **1.8x** |
+| iozone Rewrite | 7,500 | 23,270 | 3.1x |
+| iozone Random Write | 5,557 | 19,787 | 3.6x |
+| iozone Read | 9,157 | 13,296 | 1.45x |
+| Unixbench FS_WRITE_BIG | 25,270 | **55,110** | 2.2x |
+| pc_wb_cycles | 6,950M | **475M** | **14.6x** |
+| blk_vwrite_reqs | 1,555 | 1,168 | 1.3x |
+
+**结论**: 软件层优化已到位（extent cache 95% 命中、wb_calls -74%、alloc 批量化）。rv64 写性能瓶颈不在文件系统代码，而在 QEMU riscv64 MMIO VirtIO 模拟 — 每次 I/O ~4.5M cycles vs la64 PCI ~0.4M cycles。
+
+**验证**: `ext4_direct_write_at_calls=0` 双架构确认 iozone 走 PageCache 路径。
+
+---
+
 ## 2026-07-01
 
 ### ext4 perf R3: 顺序写预分配 (128KB) + MAX_WRITEBACK_PAGES 32→64
