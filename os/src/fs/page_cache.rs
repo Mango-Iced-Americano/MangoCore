@@ -18,7 +18,7 @@ use crate::utils::error::SyscallErr;
 use alloc::collections::BTreeSet;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 use spin::Mutex;
 
 use super::vfs::IndexNode;
@@ -632,6 +632,8 @@ impl PageCache {
         let init_mask = old_file_size.map_or(0, |s| initial_valid_mask(page_index, s));
         let beyond_eof = init_mask == VALID_ALL;
 
+        let _t_lock = perf::perf_time_now();
+        let mut had_io_miss = false;
         let mut entries = self.entries.lock();
 
         // 扩展 entries 数组
@@ -640,6 +642,8 @@ impl PageCache {
         }
 
         if let Some(entry) = &entries[page_index] {
+            let elapsed = perf::perf_time_now().wrapping_sub(_t_lock);
+            perf::record_pc_lock_hold(elapsed, false);
             entry.mark_referenced();
             return Ok(entry.clone());
         }
@@ -652,6 +656,7 @@ impl PageCache {
         let entry = if populate && !beyond_eof {
             // 正常路径：从后端读取数据
             perf::record_pc_miss();
+            had_io_miss = true;
             let entry = Arc::new(PageEntry::new(frame, PageState::UpToDate));
             if let Some(backend) = self.backend() {
                 let buf = entry.as_slice_mut();
@@ -682,6 +687,9 @@ impl PageCache {
 
         // Clock eviction: mark page as recently referenced
         entry_clone.mark_referenced();
+
+        let elapsed = perf::perf_time_now().wrapping_sub(_t_lock);
+        perf::record_pc_lock_hold(elapsed, had_io_miss);
 
         Ok(entry_clone)
     }
@@ -2047,6 +2055,29 @@ impl PageCacheBackend for FatPageCacheBackend {
 
 // ── Ext4PageCacheBackend ─────────────────────────────────────────────────
 
+/// Extent lookup cache: avoids repeated extent tree walks for sequential block access.
+/// Uses lock-free atomics — just a hint cache, reset on miss.
+struct Ext4MapCache {
+    valid: AtomicBool,
+    inode_num: AtomicU32,
+    lblock_start: AtomicU32,
+    /// u32::MAX sentinel for holes
+    pblock_start: AtomicU32,
+    lblock_count: AtomicU32,
+}
+
+impl Ext4MapCache {
+    fn new() -> Self {
+        Ext4MapCache {
+            valid: AtomicBool::new(false),
+            inode_num: AtomicU32::new(0),
+            lblock_start: AtomicU32::new(0),
+            pblock_start: AtomicU32::new(0),
+            lblock_count: AtomicU32::new(0),
+        }
+    }
+}
+
 /// EXT4 文件系统专用 PageCache 后端
 ///
 /// 通过弱引用访问 Ext4FileSystem + inode_num，将页面偏移动态映射为物理块号。
@@ -2056,6 +2087,8 @@ pub struct Ext4PageCacheBackend {
     inode_num: u32,
     block_size: usize,
     blocks_per_page: usize,
+    /// Extent lookup hint cache: avoids repeated extent tree walks for sequential block access
+    map_cache: Ext4MapCache,
 }
 
 impl Ext4PageCacheBackend {
@@ -2071,16 +2104,59 @@ impl Ext4PageCacheBackend {
             inode_num,
             block_size,
             blocks_per_page,
+            map_cache: Ext4MapCache::new(),
         }
     }
 
     fn block_id_for_offset(&self, page_index: usize, block_off: usize) -> Option<usize> {
+        let lblock = (page_index * self.blocks_per_page + block_off) as u32;
+
+        // Fast path: check extent hint cache
+        if self.map_cache.valid.load(Ordering::Relaxed)
+            && self.map_cache.inode_num.load(Ordering::Relaxed) == self.inode_num
+        {
+            let cache_start = self.map_cache.lblock_start.load(Ordering::Relaxed);
+            let cache_count = self.map_cache.lblock_count.load(Ordering::Relaxed);
+            if lblock >= cache_start && lblock < cache_start.saturating_add(cache_count) {
+                crate::task::perf::record_ext4_map_cache_hit();
+                let pstart = self.map_cache.pblock_start.load(Ordering::Relaxed);
+                if pstart == u32::MAX {
+                    return None; // cached hole
+                }
+                return Some(pstart as usize + (lblock - cache_start) as usize);
+            }
+        }
+
+        // Slow path: extent tree lookup
+        crate::task::perf::record_ext4_map_lblock();
         let fs = self.ext4fs.upgrade()?;
         let ino_ref = fs.get_inode_ref(self.inode_num);
-        let lblock = (page_index * self.blocks_per_page + block_off) as u32;
-        match fs.get_pblock_idx(&ino_ref, lblock) {
-            Ok(pblock) => Some(pblock as usize),
-            Err(_) => None, // hole
+        let _t = perf::perf_time_now();
+        match fs.get_pblock_with_extent(&ino_ref, lblock) {
+            Ok((pblock, ext_first, ext_len)) => {
+                let elapsed = perf::perf_time_now().wrapping_sub(_t);
+                perf::record_ext4_map_lblock_cost(elapsed);
+                // Cache the full extent range
+                self.map_cache.valid.store(true, Ordering::Relaxed);
+                self.map_cache.inode_num.store(self.inode_num, Ordering::Relaxed);
+                self.map_cache.lblock_start.store(ext_first, Ordering::Relaxed);
+                self.map_cache.pblock_start
+                    .store(pblock - (lblock - ext_first), Ordering::Relaxed);
+                self.map_cache.lblock_count.store(ext_len, Ordering::Relaxed);
+                Some(pblock as usize)
+            }
+            Err(_) => {
+                let elapsed = perf::perf_time_now().wrapping_sub(_t);
+                perf::record_ext4_map_lblock_cost(elapsed);
+                crate::task::perf::record_ext4_map_hole();
+                // Cache the hole (single block only — extent range doesn't cover holes)
+                self.map_cache.valid.store(true, Ordering::Relaxed);
+                self.map_cache.inode_num.store(self.inode_num, Ordering::Relaxed);
+                self.map_cache.lblock_start.store(lblock, Ordering::Relaxed);
+                self.map_cache.pblock_start.store(u32::MAX, Ordering::Relaxed);
+                self.map_cache.lblock_count.store(1, Ordering::Relaxed);
+                None
+            }
         }
     }
 }
@@ -2144,13 +2220,73 @@ impl PageCacheBackend for Ext4PageCacheBackend {
     }
 
     fn write_pages(&self, start_index: usize, pages: &[&[u8]]) -> Result<usize, SyscallErr> {
-        // 只有 block_size == PAGE_SIZE 时才能做物理块级的批量合并
+        crate::task::perf::record_ext4_pc_writepages_calls();
+        crate::task::perf::record_ext4_pc_writepages_pages(pages.len());
+        // 当 blocks_per_page > 1 时，打平所有 lblock，按物理连续分组批量写入
         if self.blocks_per_page != 1 {
-            let mut written = 0;
+            let fs = self.ext4fs.upgrade().ok_or(SyscallErr::EIO)?;
+            let blk = &fs.block_device;
+            let block_sz = self.block_size;
+            let bpp = self.blocks_per_page;
+            let mut run_count = 0usize;
+
+            // 阶段 1：打平所有 (page_idx, block_off, pblock)
+            let mut block_list: Vec<(usize, usize, usize)> = Vec::new();
             for (i, page) in pages.iter().enumerate() {
-                written += self.write_page(start_index + i, page)?;
+                if page.len() < crate::config::PAGE_SIZE {
+                    return Err(SyscallErr::ENOBUFS);
+                }
+                let page_index = start_index + i;
+                for bo in 0..bpp {
+                    match self.block_id_for_offset(page_index, bo) {
+                        Some(pblock) => block_list.push((i, bo, pblock)),
+                        None => return Err(SyscallErr::EIO),
+                    }
+                }
             }
-            return Ok(written);
+
+            // 阶段 2：按物理连续分组为 run，从页面收集数据后逐块写入
+            let mut i = 0;
+            while i < block_list.len() {
+                let first_pblock = block_list[i].2;
+                let run_start = i;
+                let mut run_len = 1;
+                let mut expected_pblock = first_pblock + 1;
+                i += 1;
+                while i < block_list.len() && block_list[i].2 == expected_pblock {
+                    run_len += 1;
+                    expected_pblock = block_list[i].2 + 1;
+                    i += 1;
+                }
+
+                // 收集 run 中各块数据到 staging buffer
+                let staging_size = run_len * block_sz;
+                let mut staging: Vec<u8> = alloc::vec![0u8; staging_size];
+                for j in 0..run_len {
+                    let (page_idx, block_off, _) = block_list[run_start + j];
+                    let src_start = block_off * block_sz;
+                    let dst_start = j * block_sz;
+                    staging[dst_start..dst_start + block_sz]
+                        .copy_from_slice(&pages[page_idx][src_start..src_start + block_sz]);
+                }
+
+                // 逐块写回
+                for j in 0..run_len {
+                    let pblock = block_list[run_start + j].2;
+                    let dst_start = j * block_sz;
+                    blk.write_block(pblock, &staging[dst_start..dst_start + block_sz]);
+                    crate::fs::ext4::counters::inc_counter!(
+                        crate::fs::ext4::counters::DATA_BLOCK_WRITE
+                    );
+                    crate::fs::ext4::counters::inc_counter!(
+                        crate::fs::ext4::counters::BLOCK_WRITE_TOTAL
+                    );
+                }
+                run_count += 1;
+            }
+
+            crate::task::perf::record_ext4_pc_writepages_runs(run_count);
+            return Ok(pages.len() * crate::config::PAGE_SIZE);
         }
 
         let fs = self.ext4fs.upgrade().ok_or(SyscallErr::EIO)?;
@@ -2172,6 +2308,7 @@ impl PageCacheBackend for Ext4PageCacheBackend {
 
         // 第二阶段：将物理连续块分组为 run，通过 staging buffer 批量写入
         let mut i = 0;
+        let mut run_count = 0usize;
         let blk = &fs.block_device;
         while i < block_map.len() {
             let first_pblock = block_map[i].1;
@@ -2207,8 +2344,10 @@ impl PageCacheBackend for Ext4PageCacheBackend {
                     crate::fs::ext4::counters::BLOCK_WRITE_TOTAL
                 );
             }
+            run_count += 1;
         }
 
+        crate::task::perf::record_ext4_pc_writepages_runs(run_count);
         Ok(pages.len() * crate::config::PAGE_SIZE)
     }
 
@@ -2217,13 +2356,90 @@ impl PageCacheBackend for Ext4PageCacheBackend {
         start_index: usize,
         pages: &mut [&mut [u8]],
     ) -> Result<usize, SyscallErr> {
-        // 只有 block_size == PAGE_SIZE 时才能做物理块级的批量合并
+        crate::task::perf::record_ext4_pc_readpages_calls();
+        crate::task::perf::record_ext4_pc_readpages_pages(pages.len());
+        // 当 blocks_per_page > 1 时，打平所有 lblock，按物理连续分组批量读取
         if self.blocks_per_page != 1 {
-            let mut total = 0;
-            for (i, page) in pages.iter_mut().enumerate() {
-                total += self.read_page(start_index + i, *page)?;
+            let fs = self.ext4fs.upgrade().ok_or(SyscallErr::EIO)?;
+            let blk = &fs.block_device;
+            let block_sz = self.block_size;
+            let bpp = self.blocks_per_page;
+
+            // 阶段 1：打平所有 (page_idx, block_off, pblock_opt)
+            let mut block_list: Vec<(usize, usize, Option<usize>)> = Vec::new();
+            for (i, page) in pages.iter().enumerate() {
+                if page.len() < crate::config::PAGE_SIZE {
+                    return Err(SyscallErr::ENOBUFS);
+                }
+                let page_index = start_index + i;
+                for bo in 0..bpp {
+                    let pblock = self.block_id_for_offset(page_index, bo);
+                    block_list.push((i, bo, pblock));
+                }
             }
-            return Ok(total);
+
+            // 阶段 2：按物理连续分组为 run，批量读取后分散到各页面
+            let mut i = 0;
+            let mut run_count = 0usize;
+            while i < block_list.len() {
+                // 跳过空洞（零填充在循环外统一处理）
+                if block_list[i].2.is_none() {
+                    i += 1;
+                    continue;
+                }
+
+                let first_pblock = block_list[i].2.unwrap();
+                let run_start = i;
+                let mut run_len = 1;
+                let mut expected_pblock = first_pblock + 1;
+                i += 1;
+                while i < block_list.len() {
+                    match block_list[i].2 {
+                        Some(pb) if pb == expected_pblock => {
+                            run_len += 1;
+                            expected_pblock = pb + 1;
+                            i += 1;
+                        }
+                        _ => break,
+                    }
+                }
+
+                // 批量读取到 staging buffer
+                let staging_size = run_len * block_sz;
+                let mut staging: Vec<u8> = alloc::vec![0u8; staging_size];
+                blk.read_block(first_pblock, &mut staging);
+
+                // 分散到各页面的对应 block_off 位置
+                for j in 0..run_len {
+                    let (page_idx, block_off, _) = block_list[run_start + j];
+                    let src_start = j * block_sz;
+                    let dst_start = block_off * block_sz;
+                    pages[page_idx][dst_start..dst_start + block_sz]
+                        .copy_from_slice(&staging[src_start..src_start + block_sz]);
+                }
+
+                // 更新计数器
+                for _ in 0..run_len {
+                    crate::fs::ext4::counters::inc_counter!(
+                        crate::fs::ext4::counters::DATA_BLOCK_READ
+                    );
+                    crate::fs::ext4::counters::inc_counter!(
+                        crate::fs::ext4::counters::BLOCK_READ_TOTAL
+                    );
+                }
+                run_count += 1;
+            }
+
+            // 阶段 3：零填充所有空洞对应的 page 位置
+            for (page_idx, block_off, pblock_opt) in &block_list {
+                if pblock_opt.is_none() {
+                    let dst_start = block_off * block_sz;
+                    pages[*page_idx][dst_start..dst_start + block_sz].fill(0);
+                }
+            }
+
+            crate::task::perf::record_ext4_pc_readpages_runs(run_count);
+            return Ok(pages.len() * crate::config::PAGE_SIZE);
         }
 
         let fs = self.ext4fs.upgrade().ok_or(SyscallErr::EIO)?;
@@ -2244,6 +2460,7 @@ impl PageCacheBackend for Ext4PageCacheBackend {
         // 第二阶段：将物理连续块分组为 run，批量读取
         // 只对映射块做批量读取；空洞单独零填充
         let mut idx = 0;
+        let mut run_count = 0usize;
         let blk = &fs.block_device;
         while idx < block_map.len() {
             // 跳过空洞（零填充在循环外统一处理）
@@ -2291,6 +2508,7 @@ impl PageCacheBackend for Ext4PageCacheBackend {
                     crate::fs::ext4::counters::BLOCK_READ_TOTAL
                 );
             }
+            run_count += 1;
         }
 
         // 第三阶段：零填充所有空洞页面
@@ -2300,6 +2518,7 @@ impl PageCacheBackend for Ext4PageCacheBackend {
             }
         }
 
+        crate::task::perf::record_ext4_pc_readpages_runs(run_count);
         Ok(pages.len() * crate::config::PAGE_SIZE)
     }
 }

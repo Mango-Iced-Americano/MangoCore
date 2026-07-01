@@ -468,10 +468,14 @@ impl Ext4FileSystem {
         start_lblock: u32,
         end_lblock: u32,
     ) -> Result<Vec<u32>, isize> {
+        crate::task::perf::record_ext4_alloc_ensure_calls();
+        let _t0 = crate::task::perf::perf_time_now();
         let mut allocated = Vec::new();
         let mut l = start_lblock;
+        let mut total_lblocks: usize = 0;
+        let mut total_new_blocks: usize = 0;
 
-        const MBALLOC_BATCH: u32 = MAX_MBALLOC_BLOCKS;
+        let mballoc_batch = super::mballoc_block_limit(self.block_size as u32);
 
         while l < end_lblock {
             // Skip already-mapped blocks
@@ -484,7 +488,7 @@ impl Ext4FileSystem {
             let run_start = l;
             let mut run_len: u32 = 0;
             while l < end_lblock
-                && run_len < MBALLOC_BATCH
+                && run_len < mballoc_batch
                 && self.get_pblock_idx(inode_ref, l).is_err()
             {
                 l += 1;
@@ -507,8 +511,13 @@ impl Ext4FileSystem {
             // blocks when no contiguous run is available.
             let blocks = self.balloc_alloc_contiguous_blocks(inode_ref, goal, run_len);
             if blocks.is_empty() {
+                let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_t0);
+                crate::task::perf::record_ext4_alloc_ensure(total_lblocks, total_new_blocks, elapsed);
                 return Err(Errno::ENOSPC as isize);
             }
+
+            total_new_blocks += blocks.len();
+            total_lblocks += run_len as usize;
 
             // Insert extents: group consecutive physical blocks into
             // multi-block extents, single blocks get block_count=1.
@@ -545,6 +554,8 @@ impl Ext4FileSystem {
                 p += count;
             }
         }
+        let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_t0);
+        crate::task::perf::record_ext4_alloc_ensure(total_lblocks, total_new_blocks, elapsed);
         Ok(allocated)
     }
 
