@@ -185,7 +185,7 @@ pub struct RaState {
 /// 最小预取页数（冷启动窗口）
 pub const MIN_RA_PAGES: usize = 4;
 /// 最大预取页数（= IO_CHUNK_SIZE / PAGE_SIZE = 64）
-pub const MAX_RA_PAGES: usize = crate::hal::IO_CHUNK_SIZE / PAGE_SIZE;
+pub const MAX_RA_PAGES: usize = 128;
 
 impl RaState {
     pub fn new() -> Self {
