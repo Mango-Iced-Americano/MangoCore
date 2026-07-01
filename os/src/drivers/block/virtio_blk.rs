@@ -18,8 +18,10 @@ use crate::hal::{
 };
 use crate::task::perf;
 const BLOCK_RATIO: usize = BLOCK_SZ / VIRT_IO_BLOCK_SZ;
-// MAX_VIRTIO_REQ_BYTES 受限于 VirtioHal::share 中 frames_alloc 不保证物理连续；
-// 每页之内安全，跨页需先修复 DMA 分配为 frames_alloc_contiguous。
+// MUST stay at BLOCK_SZ: consecutive frame_alloc()s are not guaranteed
+// contiguous due to interrupt-time allocations (verified: page 1 gap of 2 at boot).
+// Fixing requires disabling interrupts during multi-page alloc or a dedicated
+// contiguous-frame allocator. Until then, one-page-at-a-time DMA only.
 const MAX_VIRTIO_REQ_BYTES: usize = BLOCK_SZ;
 #[allow(unused)]
 const VIRTIO0: usize = 0x10001000;
@@ -122,18 +124,30 @@ unsafe impl Hal for VirtioHal {
     unsafe fn share(buffer: NonNull<[u8]>, direction: BufferDirection) -> usize {
         let buffer = buffer.as_ref();
         let pages = (buffer.len() + PAGE_SIZE - 1) >> PAGE_SIZE_BITS;
-        let frames = frames_alloc(pages).expect("share: failed to alloc frames");
+
+        // Allocate frames with contiguity assertion — same pattern as virtio_dma_alloc.
+        // Stack allocator LIFO order guarantees contiguity for consecutive allocs;
+        // assertion catches fragmentation from interrupt-time allocations.
+        let mut ppn_base = PhysPageNum(0);
+        let mut frames = Vec::with_capacity(pages);
+        for i in 0..pages {
+            let frame = frame_alloc().expect("share: failed to alloc frames");
+            if i == 0 { ppn_base = frame.ppn; }
+            assert_eq!(frame.ppn.0, ppn_base.0 + i,
+                "[virtio] share: non-contiguous frame at page {}", i);
+            frames.push(frame);
+        }
 
         if matches!(
             direction,
             BufferDirection::DriverToDevice | BufferDirection::Both
         ) {
-            let pa_start = frames[0].ppn.start_addr().0;
+            let pa_start = ppn_base.start_addr().0;
             let dst_slice = core::slice::from_raw_parts_mut(pa_start as *mut u8, buffer.len());
             dst_slice.copy_from_slice(buffer);
         }
 
-        let pa = frames[0].ppn.start_addr().0;
+        let pa = ppn_base.start_addr().0;
         let old = QUEUE_FRAMES.lock().insert(pa, frames);
         assert!(old.is_none(), "[virtio] DMA frame key collision pa=0x{:x}", pa);
         pa
