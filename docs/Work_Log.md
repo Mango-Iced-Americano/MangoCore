@@ -2,7 +2,46 @@
 
 ---
 
-## 2026-06-30
+## 2026-07-01
+
+### ext4 perf: 添加 P0 性能计数器 + Ext4PageCacheBackend extent lookup hint cache
+
+**涉及文件：**
+- `os/src/task/perf.rs` — 新增 4 组 Ext4 计数器（Block Mapping / Extent Tree Search / PageCache Backend Batch / Allocation）+ PageCache Lock Contention 计数器 + direct write_at 计数器；新增对应的 `record_xxx()` 记录函数、`reset_all_counters()` 清零项、`not(feature)` no-op stub
+- `os/src/fs/sysfs/files/diag.rs` — 新增 `stats_ext4_content()` 导出所有 Ext4 计数器到 `/sys/kernel/stats/ext4`；扩展 `stats_pagecache_content()` 增加 `pc_lock_hold_cycles/max/io_miss_reads`
+- `os/src/fs/page_cache.rs` — 新增 `Ext4MapCache` 结构（lock-free 原子 hint cache），在 `Ext4PageCacheBackend` 中集成 extent cache 字段；重写 `block_id_for_offset()`：cache hit fast path → miss 后 extent tree walk + 更新 cache（包括 hole 缓存）；在 `read_pages()`/`write_pages()` 添加 `record_ext4_pc_readpages/writepages_*` 计数器；在 `get_or_create_entry()` 添加 `record_pc_lock_hold()` 计时
+- `os/src/fs/ext4/ext4_inode.rs` — `get_pblock_idx()` 添加 perf 计时 + extent tree depth/meta_reads 记录
+- `os/src/fs/ext4/ext4fs.rs` — `ensure_blocks_allocated()` 添加 `record_ext4_alloc_ensure_*` 计数（lblocks scanned / new_blocks / cycles）
+- `os/src/fs/ext4/file.rs` — `write_at()` 添加 `record_ext4_direct_write_at()` 检测直接 I/O 路径是否被触发
+
+**验证：**
+- `make rv64-kernel-build-only` ✅（docker compose exec os-dev，release profile）
+
+**备注：**
+- Ext4MapCache 使用 `AtomicU32` + `AtomicBool` 实现无锁 hint cache，仅缓存单个 extent（lblock_start + lblock_count + pblock_start），cache miss 时整个替换；顺序访问场景下可消除重复 extent tree walk
+- 新增计数器均在 `perf_stats` feature 门控下；`reset_all_counters()` / sysfs export / no-op stub 均完整覆盖
+- `METADATA_BLOCK_READ_COUNT` 为 `AtomicU64`，传给 `record_ext4_find_extent_cost()` 时需 `as usize`（riscv64 上 usize=u64 安全）
+
+
+### ext4 512B: Cache 全 extent range + 512B 批量 I/O + mballoc 字节化
+
+**涉及文件：**
+- `os/src/fs/ext4/ext4_inode.rs` — 新增 `get_pblock_with_extent()` 方法：与 `get_pblock_idx()` 同逻辑但额外返回 extent 的 `(ext_first, ext_len)` 范围信息
+- `os/src/fs/page_cache.rs` — `block_id_for_offset()` 慢路径改用 `get_pblock_with_extent()` 获取 extent 范围，cache 时存储完整 extent（`lblock_start=ext_first`, `lblock_count=ext_len`, `pblock_start` 反算），消除 extent 内重复 tree walk；`write_pages()` 和 `read_pages()` 的 `blocks_per_page != 1` fallback 路径重写为打平 lblock→按物理连续分 run→staging buffer 批量 I/O，支持 512B 块高效批量读写
+- `os/src/fs/ext4/mod.rs` — `MAX_MBALLOC_BLOCKS` 常量（固定 64 块）改为 `mballoc_block_limit(block_size)` 函数：target 256KB 字节 / block_size，最低 8 块；512B 块 → 512 块，4KB 块 → 64 块（与旧行为等价）
+- `os/src/fs/ext4/ext4fs.rs` — `ensure_blocks_allocated()` 中 `MBALLOC_BATCH` 改为动态计算 `mballoc_batch`
+- `os/src/fs/ext4/balloc.rs` — 文档注释更新引用
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：**
+- Ext4MapCache 仍为 lock-free 原子 hint cache（AtomicU32 + AtomicBool），不加 Mutex
+- 512B 批量读写通过 staging buffer 逐块调用 `write_block`/`read_block`，不要求 buf 为 BLOCK_SZ 整数倍
+- mballoc 字节化对 4KB 块无行为变化（256*1024/4096=64）；对 512B 块从 64 块（32KB）提升到 512 块（256KB）
+
+
 
 ### fix(code-comments): 回退 processor 上下文切换计数位置漂移
 
