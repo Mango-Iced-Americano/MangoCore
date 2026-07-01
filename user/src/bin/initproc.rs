@@ -63,7 +63,7 @@ const DEFAULT_ORDER: &[&str] = &[
     "libctest",
     "cyclictest",
     "ltp",
-    // "unixbench",
+    "unixbench",
 ];
 
 /// 每组默认超时（秒），索引 0..11 与 TEST_GROUPS 一一对应
@@ -74,7 +74,7 @@ const DEFAULT_TIMEOUTS: [u64; 12] = [
     60,   // [2]  lua
     120,  // [3]  libctest
     480,  // [4]  iozone
-    90,   // [5]  unixbench
+    900,   // [5]  unixbench
     40,   // [6]  iperf
     120,  // [7]  libcbench
     900, // [8]  lmbench
@@ -1818,6 +1818,7 @@ fn drift_snapshot(window: u64, libc: &str, stage: &str, environ: &[*const u8]) {
     let _ = run_bash_cmd("cat /sys/kernel/stats/seccomp\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/buddyinfo\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/zombies\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/ext4\0", environ);
     println!(
         "[initproc] [drift] === drift_window W{} {} {} end ===",
         window, libc, stage
@@ -1902,6 +1903,7 @@ fn snapshot_diag(diag: bool, n: usize, group: &str, libc: &str, environ: &[*cons
     let _ = run_bash_cmd("cat /sys/kernel/stats/zombies\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/pagecache\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/blockio\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/ext4\0", environ);
     println!("[initproc] [diag] === stats T{} {}:{} end ===", n, group, libc);
 }
 
