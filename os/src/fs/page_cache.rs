@@ -40,7 +40,7 @@ const DIRTY_BACKGROUND: usize = 2048;
 /// 写入者节流阈值（页数，约 16MB）
 const DIRTY_THROTTLE: usize = 4096;
 /// 正常后台写回批次大小
-const WB_BATCH_PAGES: usize = 64;
+const WB_BATCH_PAGES: usize = 128;
 /// 节流时的最大写回页数
 const WB_BG_MAX_PAGES: usize = 128;
 
@@ -1399,7 +1399,7 @@ impl PageCache {
     // ── 回写 ─────────────────────────────────────────────────────────
 
     /// 单次回写批次的最大页面数
-    const MAX_WRITEBACK_PAGES: usize = 64;
+    const MAX_WRITEBACK_PAGES: usize = 128;
 
     /// 将单个脏页通过 `backend` 写回存储介质；若页面已为 `UpToDate` 则跳过。
     pub fn writeback_page(&self, page_index: usize) -> Result<(), SyscallErr> {
