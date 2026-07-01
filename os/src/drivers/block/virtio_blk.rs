@@ -18,7 +18,7 @@ use crate::hal::{
 };
 use crate::task::perf;
 const BLOCK_RATIO: usize = BLOCK_SZ / VIRT_IO_BLOCK_SZ;
-const MAX_VIRTIO_REQ_BYTES: usize = BLOCK_SZ;
+const MAX_VIRTIO_REQ_BYTES: usize = 32 * 1024;
 #[allow(unused)]
 const VIRTIO0: usize = 0x10001000;
 const VIRTIO_MMIO_BASE: usize = 0x10001000;

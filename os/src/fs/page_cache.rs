@@ -2270,11 +2270,14 @@ impl PageCacheBackend for Ext4PageCacheBackend {
                         .copy_from_slice(&pages[page_idx][src_start..src_start + block_sz]);
                 }
 
-                // 逐块写回
-                for j in 0..run_len {
-                    let pblock = block_list[run_start + j].2;
-                    let dst_start = j * block_sz;
-                    blk.write_block(pblock, &staging[dst_start..dst_start + block_sz]);
+                // 批量写入块设备：将整个 run 作为一次 write_block 调用
+                // pblock 是 512B 单位，需转为 BLOCK_SZ 单位（pblock / blocks_per_page）
+                // staging 按 512B 拼接，因 run 跨整页边界，staging_size 必为 BLOCK_SZ 的整数倍
+                let first_pblock_4k = first_pblock / bpp;
+                blk.write_block(first_pblock_4k, &staging);
+
+                // 更新计数器（等价于逐块调用）
+                for _ in 0..run_len {
                     crate::fs::ext4::counters::inc_counter!(
                         crate::fs::ext4::counters::DATA_BLOCK_WRITE
                     );
