@@ -123,9 +123,9 @@ ifeq ($(BOARD), rvqemu)
   		-nographic \
   		-bios $(BOOTLOADER) \
   		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
-  		-drive if=none,file=$(ROOTFS_IMG),format=raw,id=x0 \
+        -drive if=none,file=$(ROOTFS_IMG),format=raw,id=x0 \
         -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-  		-drive if=none,file=../disk.img,format=raw,id=x1 \
+        -drive if=none,file=../disk.img,format=raw,id=x1 \
         -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
   		-m 1024 \
   		-smp threads=$(CORE_NUM)
