@@ -4,6 +4,49 @@
 
 ## 2026-07-02
 
+### ext4 perf R6: WB_BATCH_PAGES + MAX_WRITEBACK_PAGES 128→256
+
+**涉及文件：**
+- `os/src/fs/page_cache.rs` — WB_BATCH_PAGES 128→256, WB_BG_MAX_PAGES 128→256, MAX_WRITEBACK_PAGES 128→256
+
+**验证：**
+- Write 5453→5988 (+9.8%, fresh disk baseline)
+- wb_calls 152→79 (-47.7%), wb_pages/call 122→233
+- blk_vwrite_reqs 1523→1421 (-6.7%)
+- wb_cycles 6.87B→7.21B (+5%, I/O work same, less per-call overhead)
+
+**备注：** wb_calls 总降幅：基线 583→v15 79 (-86%)，分两阶段（32→64→128→256）
+
+### ext4 perf R5: WB_BATCH_PAGES + MAX_WRITEBACK_PAGES 64→128
+
+**涉及文件：** `os/src/fs/page_cache.rs`
+
+**验证：** wb_calls 295→151 (-49%), wb_cycles 6.95B→6.65B (-4%)
+
+### ext4 perf R4: 预分配边界对齐 + VirtIO DMA 连续性验证 + rv64 PCI 基础设施
+
+**涉及文件：**
+- `os/src/fs/ext4/ext4fs.rs` — 预分配从 delta-offset 改为边界对齐
+- `os/src/drivers/block/virtio_blk.rs` — share() 连续性断言，确认中断打破连续帧
+- `os/src/drivers/block/virtio_blk_pci.rs` — PCI_ECAM_BASE cfg-based (0x3000_0000 rv64)
+- `os/src/drivers/block/mod.rs` — rv64 PCI probe routing
+
+**验证：**
+- DMA 连续性：两次 frame_alloc 之间中断偷帧（ppn gap=2），MAX_VIRTIO_REQ_BYTES 必须保持 BLOCK_SZ
+- rv64 PCI ECAM 0x3000_0000 已映射但启动崩溃，待调试
+
+### ext4 perf R3: 脏页阈值 DIRTY_BACKGROUND 2048→8192, DIRTY_THROTTLE 4096→16384
+
+**验证：** 4MB iozone 文件完全容纳在脏缓存中，不再触发中间写回。Write 6181 (+0.5%)
+
+### ext4 perf R2: MAX_RA_PAGES 64→128
+
+**验证：** 预读窗口翻倍至 512KB。Write 6254 (+1.2%), Read 8911 (~flat)
+
+---
+
+## 2026-07-01
+
 ### la64 vs rv64 性能对比 — rv64 VirtIO MMIO 瓶颈确认
 
 **测试**: iozone 4MB/1KB + lmbench + unixbench (perf_diag)
