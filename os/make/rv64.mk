@@ -4,7 +4,17 @@ MODE := release
 KERNEL_ELF := target/$(TARGET)/$(MODE)/os
 KERNEL_BIN := $(KERNEL_ELF).bin
 DISASM_TMP := target/$(TARGET)/$(MODE)/asm
-BLK_MODE := virt
+BLK_MODE ?= virt
+# QEMU device types based on transport
+ifeq ($(BLK_MODE),virt_pci)
+  BLK_DEV_x0 = -device virtio-blk-pci,drive=x0
+  BLK_DEV_x1 = -device virtio-blk-pci,drive=x1
+  NET_DEV     = -device virtio-net-pci,netdev=net -netdev user,id=net
+else
+  BLK_DEV_x0 = -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+  BLK_DEV_x1 = -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
+  NET_DEV     = -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.7 -netdev user,id=net
+endif
 FS_MODE ?= ext4
 ROOTFS_IMG_NAME = rootfs-rv.img
 ROOTFS_IMG_DIR := ../fs-img-dir
@@ -124,9 +134,9 @@ ifeq ($(BOARD), rvqemu)
   		-bios $(BOOTLOADER) \
   		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
         -drive if=none,file=$(ROOTFS_IMG),format=raw,id=x0 \
-        -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+        $(BLK_DEV_x0) \
         -drive if=none,file=../disk.img,format=raw,id=x1 \
-        -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
+        $(BLK_DEV_x1) \
   		-m 1024 \
   		-smp threads=$(CORE_NUM)
 endif
@@ -141,9 +151,9 @@ gdb:
 	-bios $(BOOTLOADER) \
 	-device loader,file=target/riscv64gc-unknown-none-elf/debug/os,addr=0x80200000 \
 	-drive file=$(ROOTFS_IMG),if=none,format=raw,id=x0 \
-	-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+	$(BLK_DEV_x0) \
 	-drive file=../disk.img,if=none,format=raw,id=x1 \
-	-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
+	$(BLK_DEV_x1) \
 	-m 1024 \
 	-smp threads=$(CORE_NUM) -S -s | tee qemu.log
 
@@ -155,9 +165,9 @@ runsimple:
 		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
 		-drive file=$(ROOTFS_IMG),if=none,format=raw,id=x0 \
 		-m 1024 \
-        -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+        $(BLK_DEV_x0) \
 		-drive file=../disk.img,if=none,format=raw,id=x1 \
-        -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
+        $(BLK_DEV_x1) \
 		-smp threads=$(CORE_NUM)
 
 comp:
@@ -169,12 +179,12 @@ comp:
 		-smp 1 \
 		-bios default \
 		-drive file=$(SDCARD_RV),if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(BLK_DEV_x0) \
 		-drive file=../disk.img,if=none,format=raw,id=x1 \
-		-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
+		$(BLK_DEV_x1) \
 		-no-reboot \
 		-rtc base=utc \
-		-device virtio-net-device,netdev=net,bus=virtio-mmio-bus.7 -netdev user,id=net \
+		$(NET_DEV) \
 		-object filter-dump,id=f1,netdev=net,file=packets.pcap
 
 comp-gdb:
@@ -186,12 +196,12 @@ comp-gdb:
         -smp 1 \
         -bios default \
         -drive file=$(SDCARD_RV),if=none,format=raw,id=x0 \
-        -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+        $(BLK_DEV_x0) \
         -drive file=../disk.img,if=none,format=raw,id=x1 \
-        -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
+        $(BLK_DEV_x1) \
         -no-reboot \
         -rtc base=utc \
-	-device virtio-net-device,netdev=net,bus=virtio-mmio-bus.7 -netdev user,id=net \
+	$(NET_DEV) \
 	-object filter-dump,id=f1,netdev=net,file=packets.pcap \
         -S \
         -s
