@@ -4,6 +4,47 @@
 
 ## 2026-07-02
 
+### ext4 perf R8: rv64 PCI VirtIO ECAM fix + BLK_MODE switch
+
+**涉及文件：**
+- `os/src/hal/platform/riscv/qemu.rs` — MMIO 列表新增 PCIe ECAM (0x3000_0000) 和 BAR 窗口 (0x4000_0000)
+- `os/make/rv64.mk` — BLK_MODE 条件切换，virt/virt_pci 自动选择 QEMU 设备类型
+- `docs/09_debug/rv64-pci-ecam-not-mapped.md` — 事后分析文档
+
+**根因：** `kernel_space.rs` 遍历 `MMIO` 常量做恒等映射，但 rv64 的 MMIO 列表缺少 PCI 区域。PCI_ECAM_BASE (0x3000_0000) 未映射 → 首次 config read 触发 page fault → 内核崩溃。
+
+**修复：** 在 MMIO 列表加两行 PCI 区间。2 行代码修复。
+
+**启动验证：** `make rv64-run BLK_MODE=virt_pci` ✅
+```
+[PCI] ECAM base: 0x30000000
+[PCI] Device DeviceFunction { bus: 0, device: 1 }: vendor=0x1af4 device=0x1001
+[PCI] VirtIO device: Block
+[kernel] block device 0: official fs (DeviceFunction { bus: 0, device: 1, function: 0 })
+```
+
+**性能对比 (iozone musl 4MB/1KB):**
+
+| 指标 | MMIO (best) | PCI | 差异 |
+|------|-----------|-----|------|
+| Write | 5988 | 5946 | -0.7% |
+| Read | 8911 | 9094 | +2.1% |
+| wb_cycles | 6.03B | 7.63B | +26% |
+| simple syscall | 36µs | 34µs | -5.6% |
+
+**结论：** rv64 上 PCI 与 MMIO 性能持平。之前 la64 vs rv64 的 14.6x 差距来自 QEMU 架构模拟效率差异，而非传输层。PCI 修复是正确性补全（不再假设恒等映射覆盖所有地址），不是性能优化。默认仍使用 MMIO (`BLK_MODE ?= virt`)。
+
+### ext4 perf R7: skip ensure_blocks_allocated when first lblock already mapped
+
+**涉及文件：**
+- `os/src/fs/ext4/ext4fs.rs` — write_at() 中先检查首块是否已分配 (get_pblock_idx extent cache 命中)，已分配则跳过 ensure_blocks_allocated 扫描
+
+**验证：**
+- wb_cycles 7.21B→6.03B (-16.4%)
+- Write 5988→5968 (~flat，I/O 仍主导)
+
+**备注：** 预分配保证后续写命中已分配块，跳过 ~99% 的无用扫描 (4096→~32 calls per iozone pass)
+
 ### ext4 perf R6: WB_BATCH_PAGES + MAX_WRITEBACK_PAGES 128→256
 
 **涉及文件：**
