@@ -2,6 +2,35 @@
 
 ---
 
+## 2026-07-03
+
+### UnixBench SHELL 测试缺失 sort.src（非内核 bug，镜像 provisioning 问题）
+
+**涉及文件：**
+- `sdcard-rv.img` / `sdcard-la.img`（来自 `oscomp/testsuits-for-oskernel` 的预编译镜像）
+  - `/musl/tst.sh:17` — `./busybox sort > sort.$$ < $1`，依赖 `sort.src` 作为输入
+  - `/musl/multi.sh:20` — `"./tst.sh" "./sort.src" &`，将 `sort.src` 作为参数传入
+
+**现象：**
+- SHELL1/8/16 测试大量报错 `./sort.src: No such file or directory`
+- SHELL1(musl)=23 lpm, SHELL8=3, SHELL16=1（正常应在数千级别，这些数值无效）
+- 其他 UnixBench 项（DHRY2、WHETSTONE、FS 测试等）完全正常
+
+**根因：**
+- `sort.src` 是 UnixBench SHELL 子测试的**标准输入数据文件**，上游 `oscomp/testsuits-for-oskernel` 打包镜像时遗漏
+- 非零结果是 `multi.sh` 的 bare `wait` 不检查后台进程 exit status 导致 `looper` 仍计空跑循环数
+- **非内核 bug，纯测试镜像包装问题**
+
+**验证：**
+- 无需编译验证（不涉及任何内核代码）
+
+**备注：**
+- 修复需要在 `sdcard-rv.img` 的 `/musl/` 和 `/glibc/` 目录下补入标准 UnixBench `sort.src` 文件
+- 建议给 `unixbench_testcode.sh` 加预检 `[ -r ./sort.src ] || exit 1`
+- 非紧急问题，暂时搁置
+
+---
+
 ## 2026-07-02
 
 ### ext4 perf R8: rv64 PCI VirtIO ECAM fix + BLK_MODE switch

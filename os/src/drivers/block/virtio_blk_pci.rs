@@ -19,7 +19,7 @@ use virtio_drivers::{BufferDirection, Hal};
 const VIRT_IO_BLOCK_SZ: usize = 512;
 use crate::hal::{
     config::{PAGE_SIZE, PAGE_SIZE_BITS},
-    BLOCK_SZ,
+    local_irq_restore, local_irq_save, BLOCK_SZ,
 };
 use crate::task::perf;
 const BLOCK_RATIO: usize = BLOCK_SZ / VIRT_IO_BLOCK_SZ;
@@ -44,8 +44,9 @@ impl BlockDevice for VirtIOBlock {
         assert!(buf.len() % BLOCK_SZ == 0);
         perf::record_blk_vread(buf.len() / VIRT_IO_BLOCK_SZ);
         let mut dev = self.0.lock();
+        let blocks_per_chunk = MAX_VIRTIO_REQ_BYTES / BLOCK_SZ;
         for (chunk_idx, chunk) in buf.chunks_mut(MAX_VIRTIO_REQ_BYTES).enumerate() {
-            let first_sector = (block_id + chunk_idx) * BLOCK_RATIO;
+            let first_sector = (block_id + chunk_idx * blocks_per_chunk) * BLOCK_RATIO;
             dev.read_blocks(first_sector, chunk)
                 .expect("read error");
         }
@@ -55,8 +56,9 @@ impl BlockDevice for VirtIOBlock {
         assert!(buf.len() % BLOCK_SZ == 0);
         perf::record_blk_vwrite(buf.len() / VIRT_IO_BLOCK_SZ);
         let mut dev = self.0.lock();
+        let blocks_per_chunk = MAX_VIRTIO_REQ_BYTES / BLOCK_SZ;
         for (chunk_idx, chunk) in buf.chunks(MAX_VIRTIO_REQ_BYTES).enumerate() {
-            let first_sector = (block_id + chunk_idx) * BLOCK_RATIO;
+            let first_sector = (block_id + chunk_idx * blocks_per_chunk) * BLOCK_RATIO;
             dev.write_blocks(first_sector, chunk)
                 .expect("write error");
         }
@@ -306,14 +308,19 @@ unsafe impl Hal for VirtioHal {
 pub fn virtio_dma_alloc(pages: usize) -> PhysAddr {
     let mut ppn_base = PhysPageNum(0);
     let mut frames = Vec::with_capacity(pages);
+
+    let was_enabled = local_irq_save();
     for i in 0..pages {
         let frame = frame_alloc().unwrap();
         if i == 0 {
             ppn_base = frame.ppn;
         }
-        assert_eq!(frame.ppn.0, ppn_base.0 + i);
+        assert_eq!(frame.ppn.0, ppn_base.0 + i,
+            "virtio_dma_alloc: non-contiguous at page {}", i);
         frames.push(frame);
     }
+    local_irq_restore(was_enabled);
+
     let pa = PhysAddr::from(ppn_base).0;
     let old = QUEUE_FRAMES.lock().insert(pa, frames);
     assert!(old.is_none(), "[virtio-pci] dma_alloc key collision pa=0x{:x}", pa);

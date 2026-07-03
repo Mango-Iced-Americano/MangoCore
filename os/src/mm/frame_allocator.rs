@@ -13,6 +13,7 @@
 //! `*_uninit` 接口返回未清零的物理页，仅能用于立即完全覆盖整页内容的路径。
 
 use super::{PhysAddr, PhysPageNum};
+use crate::hal::{local_irq_restore, local_irq_save};
 use crate::config::{MEMORY_START, PAGE_SIZE};
 use crate::hal::MEMORY_END;
 #[cfg(feature = "oom_handler")]
@@ -347,19 +348,37 @@ pub fn frame_alloc() -> Option<Arc<FrameTracker>> {
 
 /// 连续分配 `num` 个物理页。
 ///
+/// 通过 `local_irq_save`/`local_irq_restore` 禁止中断抢占，保证 LIFO
+/// 栈分配器产出的页物理连续（中断处理中也可能分配帧）。中断关闭窗口仅覆盖
+/// 分配循环自身，不包含 `Vec` 预留。
+///
 /// # Errors
 ///
-/// `Vec` 预留空间失败或任意单页分配失败时返回 `None`；已分配帧会随局部变量释放回收。
+/// `Vec` 预留空间失败、任意单页分配失败、或分配页物理不连续时返回 `None`；
+/// 已分配帧会随局部变量释放回收。
 pub fn frames_alloc(num: usize) -> Option<Vec<Arc<FrameTracker>>> {
     let mut frames = Vec::new();
     if frames.try_reserve(num).is_err() {
         return None;
     }
+    let was_enabled = local_irq_save();
     for _ in 0..num {
         if let Some(frame_tracker) = frame_alloc() {
             frames.push(frame_tracker);
         } else {
+            local_irq_restore(was_enabled);
             return None;
+        }
+    }
+    local_irq_restore(was_enabled);
+    // Verify physical contiguity — LIFO stack may not yield consecutive
+    // page numbers after fragmented free patterns.
+    if num > 1 {
+        let base = frames[0].ppn.0;
+        for i in 1..num {
+            if frames[i].ppn.0 != base + i {
+                return None;
+            }
         }
     }
     Some(frames)

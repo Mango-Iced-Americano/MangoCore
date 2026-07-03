@@ -14,14 +14,15 @@ use virtio_drivers::{BufferDirection, Hal};
 const VIRT_IO_BLOCK_SZ: usize = 512;
 use crate::hal::{
     config::{PAGE_SIZE, PAGE_SIZE_BITS},
-    BLOCK_SZ,
+    local_irq_restore, local_irq_save, BLOCK_SZ,
 };
 use crate::task::perf;
 const BLOCK_RATIO: usize = BLOCK_SZ / VIRT_IO_BLOCK_SZ;
-// MUST stay at BLOCK_SZ: consecutive frame_alloc()s are not guaranteed
-// contiguous due to interrupt-time allocations (verified: page 1 gap of 2 at boot).
-// Fixing requires disabling interrupts during multi-page alloc or a dedicated
-// contiguous-frame allocator. Until then, one-page-at-a-time DMA only.
+// Multi-page DMA requires contiguous physical pages. The recycled stack in the
+// LIFO frame allocator does not preserve contiguity after free patterns mix.
+// Set to BLOCK_SZ for safety; increase when a contiguous allocator (fresh pool
+// or DMA buffer pool) becomes available.  The interrupt-safe frames_alloc() and
+// first_sector calculation are ready for the upgrade.
 const MAX_VIRTIO_REQ_BYTES: usize = BLOCK_SZ;
 #[allow(unused)]
 const VIRTIO0: usize = 0x10001000;
@@ -39,8 +40,9 @@ impl BlockDevice for VirtIOBlock {
         assert!(buf.len() % BLOCK_SZ == 0);
         perf::record_blk_vread(buf.len() / VIRT_IO_BLOCK_SZ);
         let mut dev = self.0.lock();
+        let blocks_per_chunk = MAX_VIRTIO_REQ_BYTES / BLOCK_SZ;
         for (chunk_idx, chunk) in buf.chunks_mut(MAX_VIRTIO_REQ_BYTES).enumerate() {
-            let first_sector = (block_id + chunk_idx) * BLOCK_RATIO;
+            let first_sector = (block_id + chunk_idx * blocks_per_chunk) * BLOCK_RATIO;
             dev.read_blocks(first_sector, chunk)
                 .expect("Error when reading VirtIOBlk");
         }
@@ -49,8 +51,9 @@ impl BlockDevice for VirtIOBlock {
         assert!(buf.len() % BLOCK_SZ == 0);
         perf::record_blk_vwrite(buf.len() / VIRT_IO_BLOCK_SZ);
         let mut dev = self.0.lock();
+        let blocks_per_chunk = MAX_VIRTIO_REQ_BYTES / BLOCK_SZ;
         for (chunk_idx, chunk) in buf.chunks(MAX_VIRTIO_REQ_BYTES).enumerate() {
-            let first_sector = (block_id + chunk_idx) * BLOCK_RATIO;
+            let first_sector = (block_id + chunk_idx * blocks_per_chunk) * BLOCK_RATIO;
             dev.write_blocks(first_sector, chunk)
                 .expect("Error when writing VirtIOBlk");
         }
@@ -125,18 +128,11 @@ unsafe impl Hal for VirtioHal {
         let buffer = buffer.as_ref();
         let pages = (buffer.len() + PAGE_SIZE - 1) >> PAGE_SIZE_BITS;
 
-        // Allocate frames with contiguity assertion — same pattern as virtio_dma_alloc.
-        // Stack allocator LIFO order guarantees contiguity for consecutive allocs;
-        // assertion catches fragmentation from interrupt-time allocations.
-        let mut ppn_base = PhysPageNum(0);
-        let mut frames = Vec::with_capacity(pages);
-        for i in 0..pages {
-            let frame = frame_alloc().expect("share: failed to alloc frames");
-            if i == 0 { ppn_base = frame.ppn; }
-            assert_eq!(frame.ppn.0, ppn_base.0 + i,
-                "[virtio] share: non-contiguous frame at page {}", i);
-            frames.push(frame);
-        }
+        // frames_alloc() guarantees physical contiguity
+        // (disables/restores interrupts internally)
+        let frames = crate::mm::frames_alloc(pages)
+            .expect("share: failed to alloc frames");
+        let ppn_base = frames[0].ppn;
 
         if matches!(
             direction,
@@ -179,14 +175,19 @@ unsafe impl Hal for VirtioHal {
 pub extern "C" fn virtio_dma_alloc(pages: usize) -> PhysAddr {
     let mut ppn_base = PhysPageNum(0);
     let mut frames = Vec::with_capacity(pages);
+
+    let was_enabled = local_irq_save();
     for i in 0..pages {
         let frame = frame_alloc().unwrap();
         if i == 0 {
             ppn_base = frame.ppn;
         }
-        assert_eq!(frame.ppn.0, ppn_base.0 + i);
+        assert_eq!(frame.ppn.0, ppn_base.0 + i,
+            "virtio_dma_alloc: non-contiguous at page {}", i);
         frames.push(frame);
     }
+    local_irq_restore(was_enabled);
+
     let pa = PhysAddr::from(ppn_base).0;
     let old = QUEUE_FRAMES.lock().insert(pa, frames);
     assert!(old.is_none(), "[virtio] dma_alloc key collision pa=0x{:x}", pa);
