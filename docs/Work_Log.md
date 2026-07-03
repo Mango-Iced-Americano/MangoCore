@@ -4,6 +4,31 @@
 
 ## 2026-07-03
 
+### R9: VirtIO 中断保护多页 DMA 基础设施 + 批量提交分析
+
+**涉及文件：**
+- `os/src/mm/frame_allocator.rs` — `frames_alloc()` 加 `local_irq_save/restore` 保护分配循环 + 物理连续性校验
+- `os/src/drivers/block/virtio_blk.rs` — `share()` 改用 `frames_alloc()` 去重（与 PCI 变体一致），`virtio_dma_alloc()` 加关中断保护，`read_block/write_block` 修正 `first_sector` 多块偏移计算
+- `os/src/drivers/block/virtio_blk_pci.rs` — 同上 `virtio_dma_alloc` 关中断 + `first_sector` 修正
+
+**关键发现：**
+1. **LIFO 帧分配器不支持多页连续分配。** `frames_alloc(32)` (128KB) 返回 `None` 因为 recycled 栈保存的 freed 页无序。128KB→16KB→8KB→4KB 逐步回退测试，仅在 `BLOCK_SZ` (4KB) 稳定工作。
+2. 连续分配的正确来源是分配器的 fresh 区域（单调递增 `current..end`），需引入专门的 `frames_alloc_contiguous()` API。
+3. **DragonOS 对照：** DragonOS 通过 `DmaAllocator` 页池类（1/2/4/8/16 pages）实现，我们的 LIFO 栈架构需要类似改造。
+4. **Oracle 分析：** 与 Linux 的 ~4x 差距根因在 VirtIO 驱动路径 — 每个请求 `add_notify_wait_pop` 忙等，无队列深度/中断完成。批量提交的关键瓶颈是 DMA 连续性。
+5. **iperf hang 分析：** 全量归档 (20260703) 中 iperf-musl 完成后 diag snapshot 卡死在 `cat /sys/kernel/stats/taskq` — 疑似网络 I/O 后访问 sysfs 时竞态/死锁，与 perf_diag 计数器相关。临时方案：`diag=0`。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅ + `make la64-kernel-build-only` ✅
+- QEMU boot 正常（无 panic）
+- iozone musl/glibc exit_code=0 ✅（Write=6042, Read=8814 KB/s）
+- lmbench musl/glibc exit_code=0 ✅
+
+**待实现：**
+- `frames_alloc_contiguous()` 从 fresh 池分配 → 可提升 `MAX_VIRTIO_REQ_BYTES`
+- DMA 缓冲区池预分配（boot 时预留 128KB 连续区）
+- iperf diag 竞态根因定位
+
 ### UnixBench SHELL 测试缺失 sort.src（非内核 bug，镜像 provisioning 问题）
 
 **涉及文件：**
