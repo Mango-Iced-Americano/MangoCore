@@ -2,6 +2,50 @@
 
 ---
 
+## 2026-07-04
+
+### R10: DMA 池基础设施 — `frames_alloc_fresh_contiguous()` + `virtio_dma_pool.rs`
+
+**涉及文件：**
+- `os/src/mm/frame_allocator.rs` — 新增 `StackFrameAllocator::fresh_available()` 和 `alloc_fresh()` 方法（从 fresh pool 分配物理连续页），新增公共函数 `frames_alloc_fresh_contiguous()`
+- `os/src/mm/mod.rs` — 导出 `frames_alloc_fresh_contiguous`
+- `os/src/drivers/block/virtio_dma_pool.rs` — 完整实现 DMA 缓冲区池：4 槽位 × 16 页（64 KiB/槽），Free→Reserved→InUse→Free 状态机，代际计数器防 ABA，`dma_pool_init_once/reserve/consume_reserved/cancel_reservation/lookup/finish_unshare` 全部 API
+- `os/src/drivers/block/mod.rs` — 声明 `pub mod virtio_dma_pool;`（已有）
+
+**设计要点：**
+- `frames_alloc_fresh_contiguous()` 从 `StackFrameAllocator` 的单调 `current` 计数器直接分配，完全绕过 recycled 栈 → 保证物理连续
+- 池页面在内核生命周期内永不归还帧分配器（由 `DmaSlot.frames` 持有 `Arc<FrameTracker>`）
+- `dma_pool_init_once()` 提前释放 DMA_POOL 锁再进行 `frames_alloc_fresh_contiguous()` 调用，避免与 FRAME_ALLOCATOR 锁嵌套
+- 池初始化失败时静默禁用，驱动端通过 `dma_pool_reserve()` 返回 `None` 回退到单页分配
+
+**验证：**
+- `make rv64-kernel-build-only` ✅（MODE=debug）
+- `make la64-kernel-build-only` ✅（MODE=debug）
+- 无新增编译警告
+
+**待续：** 独立 Agent 将修改 `virtio_blk.rs` / `virtio_blk_pci.rs` 使用此模块。
+
+### R10b: VirtIO 块驱动接入 DMA 池
+
+**涉及文件：**
+- `os/src/drivers/block/virtio_blk.rs` — 重写读写循环为 while-循环 + DMA 池预留；新增 `PENDING_DMA_RESERVATION` 静态桥接 `read_block`/`write_block` 与 `VirtioHal::share()`；修改 `share()` 优先消费池预留再回退单页分配；修改 `unshare()` 先查 `dma_pool_lookup` 再回退 `QUEUE_FRAMES`；`probe_rv64()` 中调用 `dma_pool_init_once()`
+- `os/src/drivers/block/virtio_blk_pci.rs` — 同上所有修改，`probe_la64()` 中 i==0 时调用 `dma_pool_init_once()`
+- `os/src/drivers/block/virtio_dma_pool.rs` — 占位桩：全部 API（`reserve` 返回 `None`、`consume` panic、lookup 返回 `None`）→ 当前池未分配，驱动回退到 `BLOCK_SZ` 单页 `frames_alloc()`，语义与修改前等价
+- `os/src/drivers/block/mod.rs` — 追加 `pub mod virtio_dma_pool;` 声明
+
+**设计要点 — 预留桥接模式：**
+- `share()` 签名固定（virtio-drivers Hal trait），无法传参；通过 `PENDING_DMA_RESERVATION: Mutex<Option<(usize, usize)>>` 静态变量在 `read_block`/`write_block`（设置）与 `share()`（消费）之间传递槽位号和代际
+- `reservation.map(|r| (r.slot, r.gen))` 消费原始 `DmaReservation` 并将其字段写入静态变量
+- `share()` 从静态变量中取出元组，重建 `DmaReservation`，调用 `dma_pool_consume_reserved()`
+- I/O 完成后，若 `share()` 未消费预留（池初始化失败或库端拆分了缓冲区），通过 `cancel_reservation` 显式释放槽位
+- 多页无预留路径由 `assert_eq!(pages, 1)` 守卫，因读写循环仅在成功预留时才提交多页 chunk
+- 读写锁序：`self.0.lock()`（VirtIOBlk）→ `PENDING_DMA_RESERVATION.lock()`（share 内）→ `QUEUE_FRAMES.lock()`（share/unshare 内），独立 Mutex 无死锁
+
+**验证：**
+- `make rv64-kernel-build-only` ✅（MODE=release）
+- `make la64-kernel-build-only` ✅（MODE=release）
+- 无新增编译警告；两文件原有 `unused imports: StepByOne, frame_dealloc` 告警不变
+
 ## 2026-07-03
 
 ### R9: VirtIO 中断保护多页 DMA 基础设施 + 批量提交分析
