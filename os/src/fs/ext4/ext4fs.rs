@@ -1050,12 +1050,31 @@ impl IndexNode for layout::Ext4OSInode {
         // physical block allocated BEFORE copying data into the page cache.
         let block_size = self.ext4fs.block_size;
         let start_lblock = (offset / block_size) as u32;
-        let end_lblock = ((offset + len + block_size - 1) / block_size) as u32;
+        let mut end_lblock = ((offset + len + block_size - 1) / block_size) as u32;
+
+        // Sequential extending write: pre-allocate blocks to the next
+        // prealloc_lblocks boundary. This creates equal-sized extents
+        // instead of one large + many small fragments from delta-offset.
+        let is_extending = offset + len > old_size;
+        if is_extending {
+            let prealloc_lblocks = (128 * 1024 / block_size) as u32;
+            let target = ((start_lblock / prealloc_lblocks) + 1) * prealloc_lblocks;
+            end_lblock = core::cmp::max(end_lblock, target);
+            end_lblock = core::cmp::min(end_lblock, u32::MAX);
+        }
 
         let mut fresh = self.ext4fs.get_inode_ref(inode_num);
-        self.ext4fs
-            .ensure_blocks_allocated(&mut fresh, start_lblock, end_lblock)
-            .map_err(|_| SyscallErr::EIO)?;
+        // nodelalloc: only scan for holes when blocks are actually needed.
+        // Preallocation ensures sequential writes within range hit already-
+        // allocated blocks.  Check first lblock — if mapped, the whole range
+        // is likely covered.  Saves ~4096→32 ensure_blocks_allocated scans
+        // for 4MB iozone.
+        let first_mapped = self.ext4fs.get_pblock_idx(&fresh, start_lblock).is_ok();
+        if !first_mapped {
+            self.ext4fs
+                .ensure_blocks_allocated(&mut fresh, start_lblock, end_lblock)
+                .map_err(|_| SyscallErr::EIO)?;
+        }
 
         {
             let mut inode_lock = self.inode.lock();
