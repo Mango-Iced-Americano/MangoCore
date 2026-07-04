@@ -29,7 +29,7 @@ OOM 行为受 feature 控制。未启用 `oom_handler` 时，部分回收路径�
 
 | 功能 | 状态 |
 |------|------|
-| 内核堆 OOM recovery | `OomAwareAllocator` 最多重试 3 次，失败后 fatal handler 关机 |
+| 内核堆 OOM recovery | `KernelAllocator`（slab + buddy）最多重试 3 次，失败后 fatal handler 关机 |
 | 物理页 OOM recovery | `frame_alloc()` 在 `oom_handler` feature 下调用回收后重试 |
 | overcommit | `sysctl.rs` 提供 overcommit_memory/ratio 与 commit limit |
 | locked pages | `AddressSpace` 维护 locked page 标记，`mlock`/`mlock2` 按 rlimit 校验 |
@@ -38,12 +38,12 @@ OOM 行为受 feature 控制。未启用 `oom_handler` 时，部分回收路径�
 
 ## 3. 内核堆 OOM
 
-`OomAwareAllocator` 的分配逻辑：
+`KernelAllocator` 的分配逻辑：
 
 ```text
 alloc(layout)
   ├── 最多尝试 3 次
-  ├── inner.alloc(layout)
+  ├── slab_class_for(layout) → slab alloc 或 inner.heap.alloc(layout)
   ├── 成功: 记录 perf 与 heap gauge
   ├── 失败: recover_for(layout)
   └── recovery 失败: 返回 null

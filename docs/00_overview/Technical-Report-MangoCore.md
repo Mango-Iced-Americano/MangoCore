@@ -210,7 +210,7 @@ User Space
 
  TaskManager PageCache      FAT32        Unix sockets
 
-Trap        OomAwareAllocator procfs    smoltcp
+Trap        KernelAllocator procfs    smoltcp
 
 ==================================================
 
@@ -392,16 +392,16 @@ Physical Frames
 
 Kernel Heap
    │
-OomAwareAllocator
+KernelAllocator (slab + buddy)
    │
-buddy_system_allocator::Heap<32>
+SlabAllocator + MetadataHeap<32, 12>
 ```
 
 每个进程维护独立的 AddressSpace，AddressSpace 通过 VmaSet 管理用户地址空间中的多个 Vma 区域，用于描述代码段、数据段、堆、栈以及 mmap 映射区域。发生缺页异常时，内核根据 Vma 信息、页表状态和访问类型决定 lazy allocation、文件映射、共享写、CoW、swap/zram恢复等处理路径。
 
-物理页由 `StackFrameAllocator` 管理。它优先复用 `recycled` 中的回收页；若无可复用页，则按照 `current` 游标递增分配新页。内核堆的小对象分配由 `buddy_system_allocator::Heap<32>` 承担。
+物理页由 `StackFrameAllocator` 管理。它优先复用 `recycled` 中的回收页；若无可复用页，则按照 `current` 游标递增分配新页。
 
-内核堆由 `OomAwareAllocator` 包装 `buddy_system_allocator::Heap<32>` 实现，用于管理Rust内核对象的动态申请。PageCache负责文件数据页缓存；mmap文件映射缺页通过文件映射与PageCache相关路径建立映射。MAP_PRIVATE写缺页触发CoW复制，MAP_SHARED写缺页走共享写路径并维护脏页状态。
+内核堆由 `KernelAllocator` 实现，组合了 slab 分配器（9 个 size class: 8~2048 bytes）和 `MetadataHeap<32, 12>` buddy allocator。小对象走 slab（O(1) 分配/释放），大对象直接走 buddy。PageCache负责文件数据页缓存；mmap文件映射缺页通过文件映射与PageCache相关路径建立映射。MAP_PRIVATE写缺页触发CoW复制，MAP_SHARED写缺页走共享写路径并维护脏页状态。
 
 ---
 
@@ -816,17 +816,22 @@ StackFrameAllocator 适合管理物理页（通常 4KB），而 Kernel 内部大
 
 ### 5\.5\.1 设计原理
 
-MangoCore 采用 `OomAwareAllocator` 包装 `buddy_system_allocator::Heap<32>` 构建内核堆。
+MangoCore 采用 `KernelAllocator` 构建内核堆，组合 slab 分配器和 `MetadataHeap<32, 12>` buddy allocator。
 
-源码位置：`os/src/mm/heap_allocator.rs`
+源码位置：`os/src/mm/heap_allocator.rs`、`os/src/mm/slab.rs`
 
 ```rust
-pub struct OomAwareAllocator {
-    inner: Mutex<Heap<32>>,
+struct KernelHeapInner {
+    heap: MetadataHeap<32, 12>,
+    slab: SlabAllocator,
+}
+
+pub struct KernelAllocator {
+    inner: Mutex<KernelHeapInner>,
 }
 
 #[global_allocator]
-static HEAP_ALLOCATOR: OomAwareAllocator = OomAwareAllocator::empty();
+static HEAP_ALLOCATOR: KernelAllocator = KernelAllocator::empty();
 ```
 
 ### 5\.5\.2 堆空间初始化
@@ -852,7 +857,12 @@ Kernel Object Request
  #[global_allocator] HEAP_ALLOCATOR
        │
        ▼
-  buddy_system_allocator::Heap<32>
+  slab_class_for(layout)
+       │
+       ├─ ≤2048 bytes: SlabAllocator (9 size classes)
+       │     └─ 需要时 alloc_pages from MetadataHeap
+       │
+       └─ > 2048 bytes: MetadataHeap<32,12> buddy alloc
        │
        ▼
   从 HEAP_SPACE 中分配
@@ -861,7 +871,7 @@ Kernel Object Request
   返回对象指针
 ```
 
-当前堆空间来自静态 `HEAP_SPACE: [u8; KERNEL_HEAP_SIZE]`。当分配失败时，`OomAwareAllocator` 会在 `oom_handler` feature 启用时尝试走 OOM recovery；堆扩展策略由该静态堆空间和 OOM recovery 路径共同决定。
+当前堆空间来自静态 `HEAP_SPACE: [u8; KERNEL_HEAP_SIZE]`。当分配失败时，`KernelAllocator` 会在 `oom_handler` feature 启用时尝试走 OOM recovery；堆扩展策略由该静态堆空间和 OOM recovery 路径共同决定。
 
 ## 5\.6 虚拟内存管理机制设计
 
@@ -1166,7 +1176,7 @@ TLB 刷新发生在以下场景：
 
 ## 5\.11 本章小结
 
-本章介绍 MangoCore 内存管理子系统。物理页由 StackFrameAllocator 管理，内核堆由 OomAwareAllocator/Heap\<32\> 管理，用户虚拟地址空间由 AddressSpace/VmaSet/Vma 管理，缺页异常处理覆盖 lazy allocation、文件映射、CoW 以及 feature\-gated 的 OOM/zram/swap 路径。
+本章介绍 MangoCore 内存管理子系统。物理页由 StackFrameAllocator 管理，内核堆由 KernelAllocator（slab + MetadataHeap<32,12>）管理，用户虚拟地址空间由 AddressSpace/VmaSet/Vma 管理，缺页异常处理覆盖 lazy allocation、文件映射、CoW 以及 feature\-gated 的 OOM/zram/swap 路径。
 
 与早期版本相比，当前内存管理已经从简单页分配扩展到分层抽象、按需分配、共享与 CoW、交换与压缩等机制。
 
@@ -2559,7 +2569,7 @@ User Space
 
 - StackFrameAllocator 物理页管理；
 
-- OomAwareAllocator / Heap\<32\> 内核堆（buddy\_system\_allocator）；
+- KernelAllocator / MetadataHeap<32,12> / SlabAllocator 内核堆（buddy_system_allocator + slab）；
 
 - AddressSpace/VmaSet/Vma 虚拟内存管理；
 

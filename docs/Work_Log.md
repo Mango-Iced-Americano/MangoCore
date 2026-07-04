@@ -2,6 +2,50 @@
 
 ---
 
+## 2026-07-05
+
+### MetadataHeap 扩展 — `alloc_pages` / `dealloc_pages` / `LockedMetadataHeap`
+
+**涉及文件：**
+- `/home/pxy/projects/buddy_system_allocator/src/metadata_heap.rs` — 新增 `AllocError`、`PageOrder`、`PageRun` 类型（页粒度分配句柄），新增 `alloc_pages(order)` / `dealloc_pages(run)` / `free_block_counts()` 方法到 `MetadataHeap` public API，新增 `unsafe impl Send` 和 `LockedMetadataHeap`（spin-locked wrapper，`use_spin` 特性门控），新增 3 个单元测试
+
+**设计要点：**
+- `alloc_pages` 逻辑镜像现有 `alloc(Layout)` 方法，但接受显式 `PageOrder` 而非从 `Layout` 推导
+- `dealloc_pages` 镜像现有 `dealloc`，O(1) buddy 合并，无需 layout 参数
+- `free_block_counts()` 直接返回 `free_area[i].len` 直方图
+- `LockedMetadataHeap` 遵循 `LockedHeap` 模式：`Mutex<MetadataHeap>` + `Deref<Target=Mutex<…>>`
+
+**验证：**
+- `cargo test --features "metadata_heap,use_spin"` ✅ — 42 passed (29 原有 + 10 已有 MetadataHeap + 3 新增)
+- `nightly-2025-02-01` 工具链
+
+**依赖上下文：** 该 fork (branch: `feat/metadata-heap`) 为 MangoCore 的 `metadata_heap` 特性提供页粒度分配 API，供 slab 分配器等上层组件使用。
+
+### Slab 分配器实现 + KernelAllocator 替换 OomAwareAllocator
+
+**涉及文件：**
+- `os/src/mm/slab.rs` — 新增完整 slab 分配器（9 个 size class: 8~2048 bytes），基于 MetadataHeap 的 alloc_pages/dealloc_pages，SlabPage 元数据内嵌于页面尾部（零额外分配）
+- `os/src/mm/heap_allocator.rs` — OomAwareAllocator 重命名为 KernelAllocator，KernelHeapInner 包含 MetadataHeap + SlabAllocator；alloc 路由：slab_class_for → slab 分配，否则用 MetadataHeap::alloc；dealloc 同样路由；保留 3-retry OOM 回收、perf 计数器、heap_trace hooks、KERNEL_HEAP_CURRENT/MAX_BYTES 原子统计
+- `os/src/mm/mod.rs` — 新增 `mod slab;`
+
+**设计要点：**
+- 9 个 size class（8, 16, 32, 64, 128, 256, 512, 1024, 2048），通过 `slab_class_for(layout)` 自动路由
+- SlabPage 分配 1-page（PageOrder(12)），元数据 `SlabPage` 结构体嵌入每页尾部，通过 `from_object(ptr)` O(1) 定位
+- Freelist 使用内联链表（每个 free object 的前 2 字节存储 next index），无额外空间开销
+- Bitmap 双保险检测 double-free（bitmap_test 在 dealloc 时断言已分配）
+- SlabCache 维护 3 个链表（partial/empty/full），优先从 partial 分配避免 page thrashing
+- `reclaim_empty` / `release_one_empty` / `trim_empty_over_limit` 支持归还空闲页给 buddy
+- `PageAllocator` trait + `HeapPageAlloc` 适配器解耦 slab 与 MetadataHeap
+- alloc 路径锁外调用 `frame_allocator::oom_handler()` 防止 OOM 递归持锁
+- heap_stats 聚合 slab user bytes + buddy user bytes
+- `HEAP_ALLOCATOR` 注册为 `#[global_allocator]`，与原有 `#[alloc_error_handler]` 兼容
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+---
+
 ## 2026-07-04
 
 ### R10: DMA 池基础设施 — `frames_alloc_fresh_contiguous()` + `virtio_dma_pool.rs`
