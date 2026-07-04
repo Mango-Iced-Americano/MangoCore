@@ -1,6 +1,6 @@
 # ext4 性能差距分析及迁移方案
 
-**状态：待调研** | **日期：2026-07-04** | **分支：perf/fs R12**
+**状态：lwext4 集成方案已调研** | **日期：2026-07-04** | **分支：perf/fs R12**
 
 ---
 
@@ -77,6 +77,69 @@ C 库 lwext4 起源于 HelenOS，历史最久（2014 年开始），功能最完
 ### 方案 C：保持现状
 
 当前 7227/9028 KB/s 的读写吞吐在单核 QEMU 环境下可用。如果赛事性能要求不严格，可以搁置。
+
+---
+
+## lwext4 集成详细评估（方案 A）
+
+### 代码规模
+
+| 组件 | 规模 | 说明 |
+|------|------|------|
+| lwext4 C 库 | ~20K 行 C + ~5K 行头文件 | ext4 核心逻辑 |
+| lwext4_rust wrapper | ~800 LOC | 薄 FFI 封装（含 ~4500 行自动生成的 bindings.rs） |
+| StarryOS VFS 适配器 | ~370 LOC | 参考实现 |
+| **MangoCore 需新增** | **~360 LOC** | 块设备适配 70 行 + VFS 适配 250 行 + 构建 30 行 |
+
+### ext4 特性覆盖
+
+lwext4 已支持（CONFIG_SET_FULL_EXT4）：
+
+| 特性 | 支持 | MangoCore 手搓 |
+|------|------|---------------|
+| extent 树 | ✅ | ✅ |
+| journal (JBD) | ✅ | ❌ |
+| 目录索引 (dir_index) | ✅ | ❌ |
+| flex_bg | ✅ | ❌ |
+| 64bit | ✅ | ❌ |
+| 元数据校验和 (metadata_csum) | ✅ | ❌ |
+| 扩展属性 (xattr) | ✅ | ❌ |
+| delayed allocation | N/A（块层特性） | N/A |
+| 内联数据 (inline_data) | ❌ | ❌ |
+
+### 架构分层
+
+```
+┌─────────────────────────────────────────┐
+│  MangoCore VFS 适配器  (~250 LOC)       │  ← 需实现 IndexNode trait
+├─────────────────────────────────────────┤
+│  lwext4_rust                            │
+│  ├─ Ext4File (open/read/write/seek)      │
+│  ├─ Ext4BlockWrapper (mount/umount)      │
+│  └─ bindings.rs (FFI)                    │
+├─────────────────────────────────────────┤
+│  liblwext4-riscv64.a  (~51KB .text)     │  ← musl-gcc 交叉编译
+├─────────────────────────────────────────┤
+│  KernelDevOp (~70 LOC)                  │  ← 包装现有 VirtIOBlock
+└─────────────────────────────────────────┘
+```
+
+### 集成步骤
+
+| 步骤 | 内容 | 估时 |
+|------|------|------|
+| 1. 构建链 | 用 `riscv64-linux-musl-gcc` 编译 lwext4 → `.a`，`build.rs` 链接 | 半天 |
+| 2. 块设备适配 | 实现 `KernelDevOp` trait，包装 `VirtIOBlock`（read/write/seek/flush） | 1 小时 |
+| 3. VFS 适配 | 仿照 StarryOS `ext4fs.rs`，实现 MangoCore 的 `IndexNode` trait | 半天 |
+| 4. 测试 | 构造 ext4 镜像，mount，跑 basic/iozone/lmbench | 半天 |
+| **总计** | | **2-3 天** |
+
+### 注意事项
+
+1. **构建工具链**：需要 `riscv64-linux-musl-gcc`。lwext4 已为 cortex-m 等裸机目标配置了交叉编译，但 riscv64-none-elf 没有现成工具链文件。musl 工作流最省事。
+2. **双重缓存**：lwext4 有内部块缓存（默认 16 块）。建议设为 1-2 块或禁用，避免与 MangoCore PageCache 冲突。
+3. **许可兼容**：`ext4_extent.c` 和 `ext4_xattr.c` 是 GPLv2，其余 BSD-3。MangoCore 是 GPLv3，兼容。
+4. **la64 交叉编译**：需要 `loongarch64-linux-musl-gcc`，逻辑同 rv64。
 
 ---
 
