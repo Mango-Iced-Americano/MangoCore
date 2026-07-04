@@ -20,6 +20,7 @@ mod filemap;
 mod frame_store;
 mod frame_allocator;
 mod heap_allocator;
+mod slab;
 #[cfg(feature = "heap_trace")]
 pub mod heap_trace;
 mod kernel_mapper;
