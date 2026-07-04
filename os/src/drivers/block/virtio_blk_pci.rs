@@ -1,7 +1,7 @@
 use super::BlockDevice;
 use crate::mm::{
-    frame_alloc, frame_dealloc, frames_alloc, kernel_token, FrameTracker, PageTable, PageTableImpl,
-    PhysAddr, PhysPageNum, StepByOne, VirtAddr,
+    frame_alloc, frame_dealloc, frames_alloc, frames_alloc_fresh_contiguous, kernel_token,
+    FrameTracker, PageTable, PageTableImpl, PhysAddr, PhysPageNum, StepByOne, VirtAddr,
 };
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -22,8 +22,9 @@ use crate::hal::{
     local_irq_restore, local_irq_save, BLOCK_SZ,
 };
 use crate::task::perf;
+use super::virtio_dma_pool;
 const BLOCK_RATIO: usize = BLOCK_SZ / VIRT_IO_BLOCK_SZ;
-const MAX_VIRTIO_REQ_BYTES: usize = BLOCK_SZ;
+const MAX_VIRTIO_REQ_BYTES: usize = virtio_dma_pool::DMA_POOL_BUF_BYTES;
 #[cfg(not(target_arch = "riscv64"))]
 const PCI_ECAM_BASE: usize = 0x2000_0000; // loongarch64 qemu
 #[cfg(target_arch = "riscv64")]
@@ -39,16 +40,34 @@ lazy_static! {
         Mutex::new(PciRangeAllocator::new(VIRT_PCI_BASE, VIRT_PCI_SIZE));
 }
 
+static PENDING_DMA_RESERVATION: Mutex<Option<(usize, usize)>> = Mutex::new(None);
+
 impl BlockDevice for VirtIOBlock {
     fn read_block(&self, block_id: usize, buf: &mut [u8]) {
         assert!(buf.len() % BLOCK_SZ == 0);
         perf::record_blk_vread(buf.len() / VIRT_IO_BLOCK_SZ);
         let mut dev = self.0.lock();
-        let blocks_per_chunk = MAX_VIRTIO_REQ_BYTES / BLOCK_SZ;
-        for (chunk_idx, chunk) in buf.chunks_mut(MAX_VIRTIO_REQ_BYTES).enumerate() {
-            let first_sector = (block_id + chunk_idx * blocks_per_chunk) * BLOCK_RATIO;
-            dev.read_blocks(first_sector, chunk)
+
+        let mut offset: usize = 0;
+        while offset < buf.len() {
+            let remaining = buf.len() - offset;
+            let wanted = remaining.min(MAX_VIRTIO_REQ_BYTES);
+            let pages = (wanted + PAGE_SIZE - 1) >> PAGE_SIZE_BITS;
+
+            let reservation = virtio_dma_pool::dma_pool_reserve(pages);
+            let chunk_len = if reservation.is_some() { wanted } else { BLOCK_SZ };
+
+            *PENDING_DMA_RESERVATION.lock() = reservation.map(|r| (r.slot, r.gen));
+
+            let first_sector = (block_id + offset / BLOCK_SZ) * BLOCK_RATIO;
+            dev.read_blocks(first_sector, &mut buf[offset..offset + chunk_len])
                 .expect("read error");
+
+            if let Some((slot, gen)) = PENDING_DMA_RESERVATION.lock().take() {
+                virtio_dma_pool::dma_pool_cancel_reservation(slot, gen);
+            }
+
+            offset += chunk_len;
         }
     }
 
@@ -56,11 +75,27 @@ impl BlockDevice for VirtIOBlock {
         assert!(buf.len() % BLOCK_SZ == 0);
         perf::record_blk_vwrite(buf.len() / VIRT_IO_BLOCK_SZ);
         let mut dev = self.0.lock();
-        let blocks_per_chunk = MAX_VIRTIO_REQ_BYTES / BLOCK_SZ;
-        for (chunk_idx, chunk) in buf.chunks(MAX_VIRTIO_REQ_BYTES).enumerate() {
-            let first_sector = (block_id + chunk_idx * blocks_per_chunk) * BLOCK_RATIO;
-            dev.write_blocks(first_sector, chunk)
+
+        let mut offset: usize = 0;
+        while offset < buf.len() {
+            let remaining = buf.len() - offset;
+            let wanted = remaining.min(MAX_VIRTIO_REQ_BYTES);
+            let pages = (wanted + PAGE_SIZE - 1) >> PAGE_SIZE_BITS;
+
+            let reservation = virtio_dma_pool::dma_pool_reserve(pages);
+            let chunk_len = if reservation.is_some() { wanted } else { BLOCK_SZ };
+
+            *PENDING_DMA_RESERVATION.lock() = reservation.map(|r| (r.slot, r.gen));
+
+            let first_sector = (block_id + offset / BLOCK_SZ) * BLOCK_RATIO;
+            dev.write_blocks(first_sector, &buf[offset..offset + chunk_len])
                 .expect("write error");
+
+            if let Some((slot, gen)) = PENDING_DMA_RESERVATION.lock().take() {
+                virtio_dma_pool::dma_pool_cancel_reservation(slot, gen);
+            }
+
+            offset += chunk_len;
         }
     }
 
@@ -234,6 +269,9 @@ pub fn probe_la64() -> [Option<alloc::sync::Arc<dyn super::BlockDevice>>; 2] {
         }
         match VirtIOBlk::<VirtioHal, PciTransport>::new(transport) {
             Ok(blk) => {
+                if i == 0 {
+                    virtio_dma_pool::dma_pool_init_once();
+                }
                 let label = if i == 0 { "official fs" } else { "tools disk" };
                 result[i] = Some(Arc::new(VirtIOBlock(Mutex::new(blk))) as Arc<dyn super::BlockDevice>);
                 println!("[kernel] block device {}: {} ({:?})", i, label, df);
@@ -278,19 +316,49 @@ unsafe impl Hal for VirtioHal {
     unsafe fn share(buffer: NonNull<[u8]>, dir: BufferDirection) -> usize {
         let buffer = buffer.as_ref();
         let pages = (buffer.len() + PAGE_SIZE - 1) >> PAGE_SIZE_BITS;
-        let frames = frames_alloc(pages).unwrap();
+
+        let mut pending = PENDING_DMA_RESERVATION.lock();
+        if let Some((slot, gen)) = pending.take() {
+            if buffer.len() >= BLOCK_SZ {
+                drop(pending);
+                let reservation = virtio_dma_pool::DmaReservation { slot, gen };
+                let pa = virtio_dma_pool::dma_pool_consume_reserved(reservation);
+
+                if matches!(dir, BufferDirection::DriverToDevice | BufferDirection::Both) {
+                    core::slice::from_raw_parts_mut(pa as *mut u8, buffer.len())
+                        .copy_from_slice(buffer);
+                }
+                return pa;
+            }
+            // Small descriptor (header/status) — put reservation back for data call
+            *pending = Some((slot, gen));
+        }
+        drop(pending);
+
+        assert_eq!(pages, 1, "share: multi-page DMA without pool reservation");
+        let frames = frames_alloc(1)
+            .expect("share: failed to alloc frame");
+        let pa = frames[0].ppn.start_addr().0;
         if matches!(dir, BufferDirection::DriverToDevice | BufferDirection::Both) {
-            let pa_start = frames[0].ppn.start_addr().0;
-            core::slice::from_raw_parts_mut(pa_start as *mut u8, buffer.len())
+            core::slice::from_raw_parts_mut(pa as *mut u8, buffer.len())
                 .copy_from_slice(buffer);
         }
-        let pa = frames[0].ppn.start_addr().0;
         let old = QUEUE_FRAMES.lock().insert(pa, frames);
         assert!(old.is_none(), "[virtio-pci] DMA frame key collision pa=0x{:x}", pa);
         pa
     }
 
     unsafe fn unshare(paddr: usize, mut buffer: NonNull<[u8]>, dir: BufferDirection) {
+        if let Some(slot) = virtio_dma_pool::dma_pool_lookup(paddr) {
+            if matches!(dir, BufferDirection::DeviceToDriver | BufferDirection::Both) {
+                let buffer = buffer.as_mut();
+                let src = paddr as *const u8;
+                buffer.copy_from_slice(core::slice::from_raw_parts(src, buffer.len()));
+            }
+            virtio_dma_pool::dma_pool_finish_unshare(slot);
+            return;
+        }
+
         let frames = QUEUE_FRAMES.lock()
             .remove(&paddr)
             .unwrap_or_else(|| panic!("[virtio-pci] unshare unknown paddr=0x{:x}", paddr));
@@ -306,25 +374,14 @@ unsafe impl Hal for VirtioHal {
 }
 
 pub fn virtio_dma_alloc(pages: usize) -> PhysAddr {
-    let mut ppn_base = PhysPageNum(0);
-    let mut frames = Vec::with_capacity(pages);
+    let frames = frames_alloc_fresh_contiguous(pages)
+        .expect("virtio_dma_alloc: failed to alloc contiguous fresh frames");
 
-    let was_enabled = local_irq_save();
-    for i in 0..pages {
-        let frame = frame_alloc().unwrap();
-        if i == 0 {
-            ppn_base = frame.ppn;
-        }
-        assert_eq!(frame.ppn.0, ppn_base.0 + i,
-            "virtio_dma_alloc: non-contiguous at page {}", i);
-        frames.push(frame);
-    }
-    local_irq_restore(was_enabled);
-
-    let pa = PhysAddr::from(ppn_base).0;
+    let pa = PhysAddr::from(frames[0].ppn).0;
+    let ppn = frames[0].ppn;
     let old = QUEUE_FRAMES.lock().insert(pa, frames);
     assert!(old.is_none(), "[virtio-pci] dma_alloc key collision pa=0x{:x}", pa);
-    ppn_base.into()
+    ppn.into()
 }
 
 pub fn virtio_dma_dealloc(pa: PhysAddr, _pages: usize) -> i32 {

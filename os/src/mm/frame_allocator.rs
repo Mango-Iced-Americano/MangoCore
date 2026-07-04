@@ -141,6 +141,34 @@ impl StackFrameAllocator {
         };
         (total, fresh, recycled, ratio)
     }
+
+    /// 返回未分配 fresh 页的数量。
+    pub fn fresh_available(&self) -> usize {
+        self.end.saturating_sub(self.current)
+    }
+
+    /// 从 fresh pool 分配 `num` 个物理连续页，绕过回收栈。
+    ///
+    /// 调用方必须持有 `FRAME_ALLOCATOR` 锁。空分配（`num == 0`）返回空 `Vec`。
+    /// fresh 页不足或 `Vec` 预留失败时返回 `None`。
+    pub fn alloc_fresh(&mut self, num: usize) -> Option<Vec<Arc<FrameTracker>>> {
+        if self.end.saturating_sub(self.current) < num {
+            return None;
+        }
+        if num == 0 {
+            return Some(Vec::new());
+        }
+        let mut frames = Vec::new();
+        if frames.try_reserve(num).is_err() {
+            return None;
+        }
+        for _ in 0..num {
+            self.current += 1;
+            let ppn = PhysPageNum(self.current - 1);
+            frames.push(Arc::new(FrameTracker::new(ppn)));
+        }
+        Some(frames)
+    }
 }
 
 impl FrameAllocator for StackFrameAllocator {
@@ -382,6 +410,19 @@ pub fn frames_alloc(num: usize) -> Option<Vec<Arc<FrameTracker>>> {
         }
     }
     Some(frames)
+}
+
+/// 从 fresh pool 分配 `num` 个物理连续页，完全绕过回收栈。
+///
+/// 从 `FRAME_ALLOCATOR` 单调递增计数器直接分配，保证物理连续且不受
+/// 碎片化回收模式影响。适用于 DMA/VirtIO 等要求物理连续的场景。
+///
+/// # Errors
+///
+/// fresh 页不足或 `Vec` 预留失败时返回 `None`；已分配帧会随局部变量释放回收。
+pub fn frames_alloc_fresh_contiguous(num: usize) -> Option<Vec<Arc<FrameTracker>>> {
+    let mut allocator = FRAME_ALLOCATOR.write();
+    allocator.alloc_fresh(num)
 }
 
 #[cfg(not(feature = "oom_handler"))]

@@ -41,7 +41,7 @@ use address::VPNRange;
 pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 pub use frame_allocator::{
     frame_alloc, frame_alloc_uninit, frame_dealloc, frame_frag_diag, frame_reserve, frames_alloc,
-    unallocated_frames, FrameTracker,
+    frames_alloc_fresh_contiguous, unallocated_frames, FrameTracker,
 };
 pub use frame_store::Frame;
 pub use heap_allocator::{heap_free_histogram, heap_stats, KERNEL_HEAP_CURRENT_BYTES, KERNEL_HEAP_MAX_BYTES};

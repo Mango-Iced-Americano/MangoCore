@@ -2,6 +2,7 @@ mod block_dev;
 mod mem_blk;
 pub mod partition;
 mod sata_blk;
+pub mod virtio_dma_pool;
 #[cfg(feature = "block_virt")]
 pub mod virtio_blk;
 #[cfg(feature = "block_virt_pci")]
