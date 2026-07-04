@@ -412,6 +412,30 @@ pub fn frames_alloc(num: usize) -> Option<Vec<Arc<FrameTracker>>> {
     Some(frames)
 }
 
+/// Allocate `num` physical pages without requiring physical contiguity.
+///
+/// Unlike `frames_alloc`, this does NOT enforce `base + i` PPN ordering.
+/// Suitable for virtual-memory mappings (e.g. SysV SHM) that map pages
+/// individually via page tables.  DMA callers must use `frames_alloc` or
+/// `frames_alloc_fresh_contiguous`.
+///
+/// # Errors
+/// `Vec` reservation failure or any single-page allocation failure → `None`.
+pub fn frames_alloc_any(num: usize) -> Option<Vec<Arc<FrameTracker>>> {
+    let mut frames = Vec::new();
+    if frames.try_reserve(num).is_err() {
+        return None;
+    }
+    for _ in 0..num {
+        if let Some(frame_tracker) = frame_alloc() {
+            frames.push(frame_tracker);
+        } else {
+            return None;
+        }
+    }
+    Some(frames)
+}
+
 /// 从 fresh pool 分配 `num` 个物理连续页，完全绕过回收栈。
 ///
 /// 从 `FRAME_ALLOCATOR` 单调递增计数器直接分配，保证物理连续且不受
