@@ -28,9 +28,11 @@ pub fn from_lwext4(e: i32) -> SyscallErr {
         22 => SyscallErr::EINVAL,
         28 => SyscallErr::ENOSPC,
         30 => SyscallErr::EROFS,
+        34 => SyscallErr::ERANGE,
         36 => SyscallErr::ENAMETOOLONG,
         39 => SyscallErr::ENOTEMPTY,
         40 => SyscallErr::ELOOP,
+        61 => SyscallErr::ENODATA,
         95 => SyscallErr::EOPNOTSUPP,
         _ => {
             log::warn!("[lwext4] unmapped errno {}, falling back to EIO", e);

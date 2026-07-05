@@ -170,14 +170,6 @@ impl Ext4File {
     }
 
     pub fn file_seek(&mut self, offset: i64, seek_type: u32) -> Result<usize, i32> {
-        let mut offset = offset;
-        let size = self.file_size() as i64;
-
-        if offset > size {
-            warn!("Seek beyond the end of the file");
-            offset = size;
-        }
-
         let r = unsafe { ext4_fseek(&mut self.file_desc, offset, seek_type) };
         if r != EOK as i32 {
             error!("ext4_fseek: rc = {}", r);
@@ -402,8 +394,12 @@ impl Ext4File {
 
         //info!("ls {}", str::from_utf8(path).unwrap());
         unsafe {
-            ext4_dir_open(&mut d, c_path);
+            let r = ext4_dir_open(&mut d, c_path);
             drop(CString::from_raw(c_path));
+            if r != EOK as i32 {
+                error!("ext4_dir_open failed: rc = {}", r);
+                return Err(r);
+            }
 
             let mut de = ext4_dir_entry_next(&mut d);
             while !de.is_null() {

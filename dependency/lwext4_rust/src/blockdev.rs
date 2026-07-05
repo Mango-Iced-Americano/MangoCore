@@ -100,9 +100,10 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
         // lwext4_mount
         // let c_mountpoint = c_mountpoint as *const _ as *const c_char;
         unsafe {
-            ext4bd
-                .lwext4_mount()
-                .expect("Failed to mount the ext4 file system, perhaps the disk is not an EXT4 file system.");
+            ext4bd.lwext4_mount().map_err(|e| {
+                error!("Failed to mount the ext4 file system, perhaps the disk is not an EXT4 file system.");
+                e
+            })?;
         }
 
         ext4bd.lwext4_dir_ls();
@@ -383,7 +384,7 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
 impl<K: KernelDevOp> Drop for Ext4BlockWrapper<K> {
     fn drop(&mut self) {
         info!("Drop struct Ext4BlockWrapper");
-        self.lwext4_umount().unwrap();
+        self.lwext4_umount().ok();
         let devtype = unsafe { Box::from_raw((*(&self.value).bdif).p_user as *mut K::DevType) };
         drop(devtype);
     }
