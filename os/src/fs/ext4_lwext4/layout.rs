@@ -861,10 +861,278 @@ impl IndexNode for Ext4OSInode {
 
     fn set_metadata(&self, metadata: &Metadata) -> Result<(), SyscallErr> {
         let _lock = self.fs.lw.lock();
+
+        // 1. chmod — fmode_set is a standalone operation (path-based, no open needed)
         let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_UNKNOWN);
         f.file_mode_set(metadata.mode.bits())
             .map_err(|e| from_lwext4(e.abs()))?;
-        // uid/gid/time: lwext4 doesn't expose chown/utime; skip for now
+
+        let c_path = CString::new(self.path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
+        let raw = c_path.into_raw();
+
+        // 2. chown — ext4_owner_set(path, uid: u32, gid: u32) -> c_int
+        //    Non-root callers will get EPERM; silently ignore.
+        let _ =
+            unsafe { lwext4_rust::bindings::ext4_owner_set(raw, metadata.uid, metadata.gid) };
+
+        // 3. utime — ext4_{atime,mtime,ctime}_set(path, timestamp: u32) -> c_int
+        //    Only set timestamps with non-zero tv_sec (caller signals intent).
+        if metadata.atime.tv_sec != 0 {
+            let _ = unsafe {
+                lwext4_rust::bindings::ext4_atime_set(raw, metadata.atime.tv_sec as u32)
+            };
+        }
+        if metadata.mtime.tv_sec != 0 {
+            let _ = unsafe {
+                lwext4_rust::bindings::ext4_mtime_set(raw, metadata.mtime.tv_sec as u32)
+            };
+        }
+        if metadata.ctime.tv_sec != 0 {
+            let _ = unsafe {
+                lwext4_rust::bindings::ext4_ctime_set(raw, metadata.ctime.tv_sec as u32)
+            };
+        }
+
+        unsafe { let _ = CString::from_raw(raw); }
         Ok(())
+    }
+
+    // ── mknod ───────────────────────────────────────────────────────────
+
+    /// Create a special file (FIFO, char/block device, socket).
+    ///
+    /// Wraps lwext4's `ext4_mknod` FFI:
+    ///   ext4_mknod(path, filetype: c_int, dev: u32) -> c_int
+    ///
+    /// Filetype mapping: EXT4_DE_CHRDEV=3, EXT4_DE_BLKDEV=4,
+    /// EXT4_DE_FIFO=5, EXT4_DE_SOCK=6
+    fn mknod(
+        &self,
+        filename: &str,
+        mode: InodeMode,
+        dev_t: u64,
+    ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+        if self.file_type != FileType::Dir {
+            return Err(SyscallErr::ENOTDIR);
+        }
+        if filename.is_empty() || filename.len() > 255 || filename.contains('/') {
+            return Err(SyscallErr::EINVAL);
+        }
+
+        let child_path = join_path(&self.path, filename);
+        let child_inode_id = self
+            .fs
+            .get_inode_id(&child_path)
+            .unwrap_or_else(|_| hash_path(&child_path));
+
+        // Map InodeMode::S_IFMT to lwext4 EXT4_DE_* file type constant
+        let mode_bits = mode & InodeMode::S_IFMT;
+        let (lw_type, file_type): (i32, FileType) = if mode_bits == InodeMode::S_IFIFO {
+            (5, FileType::Pipe)  // EXT4_DE_FIFO
+        } else if mode_bits == InodeMode::S_IFCHR {
+            (3, FileType::CharDevice) // EXT4_DE_CHRDEV
+        } else if mode_bits == InodeMode::S_IFBLK {
+            (4, FileType::BlockDevice) // EXT4_DE_BLKDEV
+        } else if mode_bits == InodeMode::S_IFSOCK {
+            (6, FileType::Socket) // EXT4_DE_SOCK
+        } else {
+            return Err(SyscallErr::EINVAL);
+        };
+
+        let _lock = self.fs.lw.lock();
+
+        let c_path = CString::new(child_path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
+        let c_path = c_path.into_raw();
+        let r = unsafe {
+            lwext4_rust::bindings::ext4_mknod(c_path, lw_type, dev_t as u32)
+        };
+        unsafe { let _ = CString::from_raw(c_path); }
+        if r != 0 {
+            return Err(from_lwext4(r.abs()));
+        }
+
+        // Set permission bits on the new special file
+        let mut f = Ext4File::new(&child_path, InodeTypes::EXT4_DE_UNKNOWN);
+        let _ = f.file_mode_set(mode.bits());
+
+        Ok(Ext4OSInode::new_child(
+            self.fs.clone(),
+            child_path,
+            child_inode_id,
+            file_type,
+        ))
+    }
+
+    // ── extended attributes ─────────────────────────────────────────────
+
+    /// Get an extended attribute value.
+    ///
+    /// Wraps lwext4's `ext4_getxattr` FFI:
+    ///   ext4_getxattr(path, name, name_len, buf, buf_size, data_size) -> c_int
+    ///
+    /// If `buf` is empty, returns the attribute value size without writing.
+    /// Returns `ENODATA` if the attribute does not exist.
+    fn getxattr(&self, name: &str, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+        let _lock = self.fs.lw.lock();
+
+        let c_path = CString::new(self.path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
+        let c_path = c_path.into_raw();
+
+        let mut data_size: usize = 0;
+        let buf_ptr: *mut core::ffi::c_void = if buf.is_empty() {
+            core::ptr::null_mut()
+        } else {
+            buf.as_mut_ptr() as *mut _
+        };
+        let r = unsafe {
+            lwext4_rust::bindings::ext4_getxattr(
+                c_path,
+                name.as_ptr() as *const _,
+                name.len(),
+                buf_ptr,
+                buf.len(),
+                &mut data_size,
+            )
+        };
+        unsafe { let _ = CString::from_raw(c_path); }
+
+        if r != 0 {
+            return Err(from_lwext4(r.abs()));
+        }
+        Ok(data_size)
+    }
+
+    /// Set an extended attribute value.
+    ///
+    /// Wraps lwext4's `ext4_setxattr` FFI:
+    ///   ext4_setxattr(path, name, name_len, data, data_size) -> c_int
+    ///
+    /// Flags: XATTR_CREATE(1) fails if attr exists, XATTR_REPLACE(2)
+    /// fails if attr does not exist, 0 = create-or-replace.
+    fn setxattr(
+        &self,
+        name: &str,
+        value: &[u8],
+        flags: u32,
+    ) -> Result<usize, SyscallErr> {
+        let _lock = self.fs.lw.lock();
+
+        let c_path = CString::new(self.path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
+        let c_path = c_path.into_raw();
+
+        // Handle XATTR_CREATE / XATTR_REPLACE semantics
+        if flags == 1 {
+            // XATTR_CREATE: fail if attribute already exists
+            let mut _ds: usize = 0;
+            let probe = unsafe {
+                lwext4_rust::bindings::ext4_getxattr(
+                    c_path,
+                    name.as_ptr() as *const _,
+                    name.len(),
+                    core::ptr::null_mut(),
+                    0,
+                    &mut _ds,
+                )
+            };
+            if probe == 0 {
+                unsafe { let _ = CString::from_raw(c_path); }
+                return Err(SyscallErr::EEXIST);
+            }
+        } else if flags == 2 {
+            // XATTR_REPLACE: fail if attribute does not exist
+            let mut _ds: usize = 0;
+            let probe = unsafe {
+                lwext4_rust::bindings::ext4_getxattr(
+                    c_path,
+                    name.as_ptr() as *const _,
+                    name.len(),
+                    core::ptr::null_mut(),
+                    0,
+                    &mut _ds,
+                )
+            };
+            if probe != 0 {
+                unsafe { let _ = CString::from_raw(c_path); }
+                return Err(SyscallErr::ENODATA);
+            }
+        }
+
+        let r = unsafe {
+            lwext4_rust::bindings::ext4_setxattr(
+                c_path,
+                name.as_ptr() as *const _,
+                name.len(),
+                value.as_ptr() as *const _,
+                value.len(),
+            )
+        };
+        unsafe { let _ = CString::from_raw(c_path); }
+
+        if r != 0 {
+            return Err(from_lwext4(r.abs()));
+        }
+        Ok(0)
+    }
+
+    /// List all extended attribute names (null-separated).
+    ///
+    /// Wraps lwext4's `ext4_listxattr` FFI:
+    ///   ext4_listxattr(path, list, size, ret_size) -> c_int
+    ///
+    /// If `buf` is empty, returns the total size needed.
+    /// Returns `ERANGE` if the buffer is too small.
+    fn listxattr(&self, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+        let _lock = self.fs.lw.lock();
+
+        let c_path = CString::new(self.path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
+        let c_path = c_path.into_raw();
+
+        let mut ret_size: usize = 0;
+        let list_ptr: *mut core::ffi::c_char = if buf.is_empty() {
+            core::ptr::null_mut()
+        } else {
+            buf.as_mut_ptr() as *mut _
+        };
+        let r = unsafe {
+            lwext4_rust::bindings::ext4_listxattr(
+                c_path,
+                list_ptr,
+                buf.len(),
+                &mut ret_size,
+            )
+        };
+        unsafe { let _ = CString::from_raw(c_path); }
+
+        if r != 0 {
+            return Err(from_lwext4(r.abs()));
+        }
+        Ok(ret_size)
+    }
+
+    /// Remove an extended attribute.
+    ///
+    /// Wraps lwext4's `ext4_removexattr` FFI:
+    ///   ext4_removexattr(path, name, name_len) -> c_int
+    ///
+    /// Returns `ENODATA` if the attribute does not exist.
+    fn removexattr(&self, name: &str) -> Result<usize, SyscallErr> {
+        let _lock = self.fs.lw.lock();
+
+        let c_path = CString::new(self.path.as_str()).map_err(|_| SyscallErr::EINVAL)?;
+        let c_path = c_path.into_raw();
+
+        let r = unsafe {
+            lwext4_rust::bindings::ext4_removexattr(
+                c_path,
+                name.as_ptr() as *const _,
+                name.len(),
+            )
+        };
+        unsafe { let _ = CString::from_raw(c_path); }
+
+        if r != 0 {
+            return Err(from_lwext4(r.abs()));
+        }
+        Ok(0)
     }
 }
