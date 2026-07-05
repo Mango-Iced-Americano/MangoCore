@@ -2,6 +2,8 @@ pub mod dev;
 pub mod eventfd;
 pub mod eventpoll;
 pub mod ext4;
+#[cfg(feature = "lwext4")]
+pub mod ext4_lwext4;
 pub mod fat32;
 pub mod pidfd;
 mod filesystem;
@@ -72,6 +74,18 @@ lazy_static! {
                 self::vfs::MountFS::new(efs, self::vfs::MountFlags::empty())
             }
             self::filesystem::FS_Type::Ext4 => {
+                #[cfg(feature = "lwext4")]
+                let ext4 = match self::ext4_lwext4::ext4fs::Ext4FileSystem::open_ext4rs(
+                    crate::drivers::BLOCK_DEVICE.clone(),
+                ) {
+                    Ok(fs) => fs,
+                    Err(e) => {
+                        println!("[kernel] lwext4 mount failed: {:?}, falling back to ramfs", e);
+                        let ramfs = self::ramfs::RamFS::new();
+                        return self::vfs::MountFS::new(ramfs, self::vfs::MountFlags::empty());
+                    }
+                };
+                #[cfg(not(feature = "lwext4"))]
                 let ext4 = self::ext4::ext4fs::Ext4FileSystem::open_ext4rs(
                     crate::drivers::BLOCK_DEVICE.clone(),
                 );
@@ -313,6 +327,15 @@ pub fn mount_block_fs(
     let fs_type = detect_fs(block_device);
     let mfs = match fs_type {
         self::filesystem::FS_Type::Ext4 => {
+            #[cfg(feature = "lwext4")]
+            let ext4 = match self::ext4_lwext4::ext4fs::Ext4FileSystem::open_ext4rs(block_device.clone()) {
+                Ok(fs) => fs,
+                Err(e) => {
+                    println!("[kernel] mount_block_fs: lwext4 mount failed: {:?}", e);
+                    return None;
+                }
+            };
+            #[cfg(not(feature = "lwext4"))]
             let ext4 = self::ext4::ext4fs::Ext4FileSystem::open_ext4rs(block_device.clone());
             self::vfs::MountFS::new(ext4, MountFlags::empty())
         }
