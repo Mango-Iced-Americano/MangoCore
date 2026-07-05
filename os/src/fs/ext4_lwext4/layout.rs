@@ -177,57 +177,60 @@ impl IndexNode for Ext4OSInode {
     // ── metadata ─────────────────────────────────────────────────────
 
     fn metadata(&self) -> Result<Metadata, SyscallErr> {
-        let _lock = self.fs.lw.lock();
+        // Inline probe type and mode inside a single lock scope.
+        // Do NOT call self.fs.probe_type() which would re-lock self.fs.lw
+        // and cause a spin::Mutex deadlock (spin::Mutex is not reentrant).
+        let (file_type, inode_mode, size, blocks) = {
+            let _lock = self.fs.lw.lock();
+            let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_UNKNOWN);
+            let mode_raw = f.file_mode_get().map_err(|e| from_lwext4(e.abs()))?;
+            let mapped = map_lwext4_mode(mode_raw);
 
-        // Use probe_type (fmode_get) which works for all file types including dirs
-        let mapped = self.fs.probe_type(&self.path)?;
-
-        // Get size and block count based on file type
-        let (size, blocks) = match mapped.file_type {
-            FileType::Dir => {
-                // Directories don't have a meaningful size in ext4
-                (0i64, 0usize)
-            }
-            FileType::SymLink => {
-                // Use ext4_readlink to get the symlink target length
-                let mut rbuf = [0u8; 256];
-                let mut rcnt: usize = 0;
-                let c_path = CString::new(self.path.as_str())
-                    .map_err(|_| SyscallErr::EINVAL)?;
-                let c_path = c_path.into_raw();
-                let r = unsafe {
-                    lwext4_rust::bindings::ext4_readlink(
-                        c_path,
-                        rbuf.as_mut_ptr() as *mut _,
-                        255,
-                        &mut rcnt,
-                    )
-                };
-                unsafe { let _ = CString::from_raw(c_path); }
-                if r != 0 {
-                    (0i64, 0usize)
-                } else {
-                    (rcnt as i64, 0usize)
+            let (size, blocks) = match mapped.file_type {
+                FileType::Dir => (0i64, 0usize),
+                FileType::SymLink => {
+                    let mut rbuf = [0u8; 256];
+                    let mut rcnt: usize = 0;
+                    let c_path = CString::new(self.path.as_str())
+                        .map_err(|_| SyscallErr::EINVAL)?;
+                    let c_path = c_path.into_raw();
+                    let r = unsafe {
+                        lwext4_rust::bindings::ext4_readlink(
+                            c_path,
+                            rbuf.as_mut_ptr() as *mut _,
+                            255,
+                            &mut rcnt,
+                        )
+                    };
+                    unsafe { let _ = CString::from_raw(c_path); }
+                    if r != 0 {
+                        (0i64, 0usize)
+                    } else {
+                        (rcnt as i64, 0usize)
+                    }
                 }
-            }
-            _ => {
-                // Regular file: open and get size
-                let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_REG_FILE);
-                let size = match f.file_open(&self.path, 0x0) {
-                    Ok(_) => f.file_size(),
-                    Err(_) => 0,
-                };
-                f.file_close().ok();
-                let size_i64 = size as i64;
-                let blks = if size > 0 {
-                    ((size + self.fs.block_size() as u64 - 1) / self.fs.block_size() as u64) as usize
-                } else {
-                    0
-                };
-                (size_i64, blks)
-            }
+                _ => {
+                    let mut ff = Ext4File::new(&self.path, InodeTypes::EXT4_DE_REG_FILE);
+                    if ff.file_open(&self.path, 0x0).is_ok() {
+                        let s = ff.file_size();
+                        ff.file_close().ok();
+                        let size_i64 = s as i64;
+                        let blks = if s > 0 {
+                            ((s as usize + self.fs.block_size() - 1)
+                                / self.fs.block_size())
+                        } else {
+                            0
+                        };
+                        (size_i64, blks)
+                    } else {
+                        (0i64, 0usize)
+                    }
+                }
+            };
+            (mapped.file_type, mapped.inode_mode, size, blocks)
         };
 
+        // Metadata construction does NOT hold the lw lock.
         Ok(Metadata {
             dev_id: self.fs.dev_id(),
             inode_id: self.inode_id,
@@ -237,10 +240,10 @@ impl IndexNode for Ext4OSInode {
             atime: TimeSpec::new(),
             mtime: TimeSpec::new(),
             ctime: TimeSpec::new(),
-            file_type: mapped.file_type,
-            mode: mapped.inode_mode,
+            file_type,
+            mode: inode_mode,
             flags: InodeFlags::empty(),
-            nlinks: if mapped.file_type == FileType::Dir { 2 } else { 1 },
+            nlinks: if file_type == FileType::Dir { 2 } else { 1 },
             uid: 0,
             gid: 0,
             raw_dev: 0,
@@ -436,8 +439,9 @@ impl IndexNode for Ext4OSInode {
             if let Ok(s) = core::str::from_utf8(&name_bytes[..len]) {
                 if !s.is_empty() {
                     let child_path = join_path(&self.path, s);
-                    // Get real ext4 inode number
-                    let inode_id = self.fs.get_inode_id(&child_path).unwrap_or(0);
+                    // Use hash-based pseudo inode ID to avoid re-locking
+                    // self.fs.lw (spin::Mutex is not reentrant).
+                    let inode_id = hash_path(&child_path);
                     let ft = match types.get(i).unwrap_or(&InodeTypes::EXT4_DE_UNKNOWN) {
                         InodeTypes::EXT4_DE_REG_FILE => FileType::File,
                         InodeTypes::EXT4_DE_DIR => FileType::Dir,
@@ -484,6 +488,11 @@ impl IndexNode for Ext4OSInode {
     // ── sync / datasync ───────────────────────────────────────────────
 
     fn sync(&self) -> Result<(), SyscallErr> {
+        // Flush VFS PageCache dirty pages to disk first
+        if let Some(pc) = self.page_cache.lock().clone() {
+            pc.writeback_all().map_err(|_| SyscallErr::EIO)?;
+        }
+        // Then flush lwext4 internal caches
         let _lock = self.fs.lw.lock();
         let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_UNKNOWN);
         f.file_cache_flush().map_err(|e| from_lwext4(e.abs()))?;
@@ -709,11 +718,12 @@ impl IndexNode for Ext4OSInode {
         let child_path = join_path(&self.path, name);
         let _lock = self.fs.lw.lock();
         // Verify the file exists (file_remove tolerates ENOENT in lwext4)
-        let mut probe = Ext4File::new(&child_path, InodeTypes::EXT4_DE_REG_FILE);
-        if !probe.check_inode_exist(&child_path, InodeTypes::EXT4_DE_REG_FILE) {
+        // Use EXT4_DE_UNKNOWN to accept any non-directory type (files, symlinks, FIFOs, etc.)
+        let mut probe = Ext4File::new(&child_path, InodeTypes::EXT4_DE_UNKNOWN);
+        if !probe.check_inode_exist(&child_path, InodeTypes::EXT4_DE_UNKNOWN) {
             return Err(SyscallErr::ENOENT);
         }
-        let mut f = Ext4File::new(&child_path, InodeTypes::EXT4_DE_REG_FILE);
+        let mut f = Ext4File::new(&child_path, InodeTypes::EXT4_DE_UNKNOWN);
         let r = f.file_remove(&child_path);
         if r.is_err() {
             return Err(from_lwext4(r.unwrap_err().abs()));
