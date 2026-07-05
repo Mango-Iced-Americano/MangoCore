@@ -4,6 +4,23 @@
 
 ## 2026-07-06
 
+### lwext4 VFS 适配器 — Oracle 审计修复（死锁/panic/文件句柄泄漏/EOF clamp/dir_open/errno）
+
+**涉及文件：**
+- `os/src/fs/ext4_lwext4/layout.rs` — `metadata()`: 内联 `probe_type()` 逻辑避免 `spin::Mutex` 重入死锁（`metadata()` 持有 `fs.lw.lock()` 时调用 `probe_type()` 会再次尝试加锁）；`list_dirents()`: 用 `hash_path()` 替代 `get_inode_id()` 避免相同死锁；`sync()`: 新增 PageCache `writeback_all()` flush，在 lwext4 内部缓存刷新前将脏页写入磁盘；`unlink()`: `check_inode_exist` 类型从 `EXT4_DE_REG_FILE` 改为 `EXT4_DE_UNKNOWN`，支持 symlink/FIFO 等非目录类型的删除
+- `os/src/fs/ext4_lwext4/page_cache.rs` — `read_page()`/`write_page()`/`read_pages()`/`write_pages()`: 用闭包包裹 I/O 操作，在所有 `?` 提前返回路径上保证 `file_close()` 被调用（之前 `file_seek`/`file_read`/`file_write` 失败时文件句柄泄漏）
+- `dependency/lwext4_rust/src/blockdev.rs` — `new()`: `lwext4_mount().expect()` 改为 `?`，挂载失败时返回 Err 而非 panic；`Drop::drop()`: `lwext4_umount().unwrap()` 改为 `.ok()`，防止双重卸载时 panic
+- `dependency/lwext4_rust/src/file.rs` — `file_seek()`: 移除 EOF clamp（`offset > size → offset = size`），POSIX 允许 seek 超出文件末尾创建空洞；`lwext4_dir_entries()`: 检查 `ext4_dir_open()` 返回值，fail 时返回错误而非操作未初始化的 `ext4_dir` 结构（C 端 null pointer deref）
+- `os/src/fs/ext4_lwext4/errno.rs` — 补充 `ERANGE(34)` 和 `ENODATA(61)` 的 lwext4 errno 映射，供 xattr 操作使用
+
+**验证：**
+- `make rv64-kernel-build-only` ✅ — 0 错误，仅预存 warnings
+- `make la64-kernel-build-only` ⚠️ — 因预存 `el-linux-gnu.cmake` 缺失而失败，与本次修改无关
+
+**备注：**
+- 本批 8 个修复覆盖 4 个严重级别：2 CRITICAL（死锁/panic）、2 HIGH（句柄泄漏/EOF clamp）、2 MEDIUM（dir_open/unlink）、2 LOW（errno 映射）
+- 关键架构约束：`spin::Mutex` 不可重入，`probe_type()` 和 `get_inode_id()` 都在内部调用 `self.lw.lock()`，持有外层锁时调用会死锁。解决方案：要么内联逻辑，要么释放外层锁后再调用
+
 ### lwext4 设为默认 ext4 实现（移除 feature gate）
 
 **涉及文件：**
