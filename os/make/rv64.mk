@@ -151,11 +151,9 @@ $(INITRAMFS_CPIO_RV): user
 	@touch src/initramfs-rv.S  # 强制 Cargo 重编译（.incbin 时间戳变化）
 
 # xein TODO: 注意需要评估zero_init启用与否的影响
-# lwext4 conditional build: only build C lib when lwext4 is in EXTRA_FEATURES
-ifneq ($(findstring lwext4,$(EXTRA_FEATURES)),)
-  LWEXT4_PREREQ := lwext4-rv64
-  LWEXT4_ENV := LWEXT4_LIB_DIR=$(abspath $(LWEXT4_DIR))
-endif
+# lwext4: always build C library (now the default ext4 backend)
+LWEXT4_PREREQ := lwext4-rv64
+LWEXT4_ENV := LWEXT4_LIB_DIR=$(abspath $(LWEXT4_DIR))
 
 kernel: $(LWEXT4_PREREQ)
 	@echo Platform: $(BOARD)

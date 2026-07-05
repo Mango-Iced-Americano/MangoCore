@@ -118,11 +118,9 @@ $(INITRAMFS_CPIO_LA): user
 	./build_initramfs.sh la64 $(MODE) $(INITRAMFS_CPIO_LA)
 	@touch src/initramfs-la.S
 
-# lwext4 conditional build: only build C lib when lwext4 is in EXTRA_FEATURES
-ifneq ($(findstring lwext4,$(EXTRA_FEATURES)),)
-  LWEXT4_LA_PREREQ := lwext4-la64
-  LWEXT4_LA_ENV := LWEXT4_LIB_DIR=$(abspath $(LWEXT4_LA_DIR))
-endif
+# lwext4: always build C library (now the default ext4 backend)
+LWEXT4_LA_PREREQ := lwext4-la64
+LWEXT4_LA_ENV := LWEXT4_LIB_DIR=$(abspath $(LWEXT4_LA_DIR))
 
 kernel: $(LWEXT4_LA_PREREQ)
 	@echo Platform: $(BOARD)

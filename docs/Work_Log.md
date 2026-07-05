@@ -2,7 +2,89 @@
 
 ---
 
-## 2026-07-05
+## 2026-07-06
+
+### lwext4 设为默认 ext4 实现（移除 feature gate）
+
+**涉及文件：**
+- `os/Cargo.toml` — `lwext4_rust` 依赖从 `optional = true` 改为必需；移除 `lwext4 = ["lwext4_rust"]` feature
+- `os/src/fs/mod.rs` — 移除 `#[cfg(feature = "lwext4")]` gate，`ext4_lwext4` 模块无条件编译；VFS_ROOT 和 `mount_block_fs` 的 Ext4 分支统一使用 `ext4_lwext4::ext4fs::Ext4FileSystem::open_ext4rs()`；遗留 `ext4` 模块保留编译（供 reclaim/counters/page_cache 等模块引用类型）但不再被实例化
+- `os/src/fs/ext4_lwext4/mod.rs` — 移除 `#![cfg(feature = "lwext4")]` 顶层 gate
+- `os/make/rv64.mk` — `LWEXT4_PREREQ` 和 `LWEXT4_ENV` 从条件赋值（依赖于 EXTRA_FEATURES 包含 lwext4）改为无条件赋值，lwext4 C 库始终构建
+- `os/make/la64.mk` — 同上，`LWEXT4_LA_PREREQ` 和 `LWEXT4_LA_ENV` 改为无条件
+
+**验证：**
+- `make rv64-kernel-build-only`（无需 EXTRA_FEATURES）✅ — 0 错误，仅预存 warnings
+- `make la64-kernel-build-only` ⚠️ — Rust 编译应正常，但 lwext4 C 库构建因缺少 `el-linux-gnu.cmake` 失败（预存环境问题，不影响 rv64）
+
+**备注：**
+- 遗留 ext4 模块（`os/src/fs/ext4/`）**保留在磁盘且继续编译**，供 `os/src/fs/reclaim.rs`（`EXT4_REGISTRY`）、`os/src/fs/page_cache.rs`（`Ext4PageCacheBackend`）、`os/src/fs/procfs/`（ext4 计数器）等模块引用类型
+- lwext4 feature 已从 Cargo.toml features 列表中完全移除，`cargo build` 不再接受 `--features lwext4`
+
+### lwext4 VFS 适配器 — POSIX gap 填补（chown/utime/mknod/xattr）
+
+**涉及文件：**
+- `os/src/fs/ext4_lwext4/layout.rs` — `set_metadata()`: chown 通过 `ext4_owner_set` FFI 实现（非 root 返回 EPERM 时静默忽略）；utime 通过 `ext4_atime_set`/`ext4_mtime_set`/`ext4_ctime_set` FFI 实现（仅非零 tv_sec 调用）。新增 `mknod()`: 通过 `ext4_mknod` FFI 创建 FIFO/chardev/blockdev/socket，`InodeMode::S_IFMT` 映射到 lwext4 `EXT4_DE_*` 常量，之后 `file_mode_set` 设权限位。新增 `getxattr()`: 通过 `ext4_getxattr` FFI，空 buf 查询大小（data_size 输出参数），错误码通过 `from_lwext4` 映射。新增 `setxattr()`: 通过 `ext4_setxattr` FFI，XATTR_CREATE(flags=1) 和 XATTR_REPLACE(flags=2) 先 `ext4_getxattr` 探测再调用。新增 `listxattr()`: 通过 `ext4_listxattr` FFI（null-separated 名称列表）。新增 `removexattr()`: 通过 `ext4_removexattr` FFI。
+
+**FFI 签名（已确认）：**
+- `ext4_owner_set(path, uid: u32, gid: u32) -> c_int`
+- `ext4_atime_set(path, atime: u32) -> c_int` / `ext4_mtime_set` / `ext4_ctime_set`
+- `ext4_mknod(path, filetype: c_int, dev: u32) -> c_int`（CHRDEV=3, BLKDEV=4, FIFO=5, SOCK=6）
+- `ext4_setxattr(path, name, name_len, data, data_size) -> c_int`
+- `ext4_getxattr(path, name, name_len, buf, buf_size, data_size: *mut usize) -> c_int`
+- `ext4_listxattr(path, list, size, ret_size: *mut usize) -> c_int`
+- `ext4_removexattr(path, name, name_len) -> c_int`
+
+**验证：**
+- `make rv64-kernel-build-only EXTRA_FEATURES=lwext4` ✅（0 错误，仅预存 warnings）
+
+### lwext4 VFS 适配器 — PageCache 集成（LwExt4PageCacheBackend）
+
+**涉及文件：**
+- `os/src/fs/ext4_lwext4/page_cache.rs` — **新建文件**：实现 `LwExt4PageCacheBackend`，为 lwext4 VFS 适配器提供 `PageCacheBackend` 实现。后端通过 lwext4 file API（fopen/fseek/fread/fwrite/fclose）读写页面，不需要了解 ext4 磁盘结构。批量 I/O（`read_pages`/`write_pages`）打开一次文件后做顺序 I/O。使用 `AtomicUsize` 缓存文件大小（满足 `PageCacheBackend: Sync` 约束）。
+- `os/src/fs/ext4_lwext4/layout.rs` — 新增 `page_cache: Mutex<Option<Arc<PageCache>>>` 字段到 `Ext4OSInode`；实现 `page_cache()`（只读查询）和 `ensure_page_cache()`（按需创建）；`read_at`/`write_at` 在 PageCache 可用时优先委托给 `pc.read()`/`pc.write()`，不可用时回退到直接 I/O
+- `os/src/fs/ext4_lwext4/mod.rs` — 新增 `pub mod page_cache;`
+
+**验证：**
+- `make rv64-kernel-build-only EXTRA_FEATURES=lwext4` ✅ — 0 errors
+
+**备注：**
+- `PageCacheBackend` trait 要求 `Send + Sync`，因此 `size` 字段必须用 `AtomicUsize` 而非 `Cell<usize>`
+- `PageCache::new()` 不接受参数，需通过 `set_backend()` 绑定后端（与任务设计草稿中的 `PageCache::new(backend)` 不同）
+- `PageCache::read(offset, buf)` 和 `PageCache::write(offset, buf, old_file_size)` 是高层 API，内部按页粒度调用后端的 `read_page`/`write_page`
+- PageCache 仅在 `ensure_page_cache()` 被调用（如 mmap）时按需创建，`read_at`/`write_at` 使用 `page_cache()` 只读查询，不触发懒创建
+- `read_pages` 中的 `page[n..PAGE_SIZE.min(page.len())]` 需先提取 `page.len()` 到局部变量，避免 Rust 借用冲突
+
+### lwext4 VFS 适配器 Phase 4 — 全部写/创建/删除方法实现
+
+**涉及文件：**
+- `os/src/fs/ext4_lwext4/layout.rs` — **实现 15 个 Phase 4 方法**，替换 ENOSYS 桩：
+  - `write_at()` — O_RDWR ("r+" flag 0x2) 优先，文件不存在时 fallback 到 "w+" (0x242) 创建，**不截断已有内容**
+  - `create()` — File 分支：O_RDWR|O_CREAT|O_TRUNC 创建空文件 + `file_mode_set()` 设权限；Dir 分支：委托 `mkdir()`
+  - `create_with_data()` — SymLink 类型时用 `CStr::from_ptr()` 安全解析 target 字符串，委托 `symlink()`；否则 fallback 到 `create()`
+  - `create_with_attrs()` — 创建 → `metadata()` → 设 uid/gid → `set_metadata()`
+  - `mkdir()` — `dir_mk()` + 权限设置，通过 `hash_path()` DJB2 哈希生成 fallback inode ID
+  - `unlink()` — `check_inode_exist()` 预检避免 ENOENT 被 `file_remove()` 吞掉
+  - `rmdir()` — `lwext4_dir_entries()` 枚举子项，过滤 "." / ".."，非空返回 ENOTEMPTY 后调用 `dir_rm()`（防递归删除）
+  - `rename()` — 先尝试 `file_rename()`，失败则 fallback `dir_mv()`；通过 `downcast_ref::<Ext4OSInode>()` 校验同 FS
+  - `truncate()` / `resize()` — O_RDWR 打开 → `file_truncate()`
+  - `symlink()` — `ext4_fsymlink()` FFI 直接调用（`CString` → raw → `from_raw` 回收）
+  - `link()` — `ext4_flink()` FFI，验证源 inode 类型为 `Ext4OSInode`（返回 EXDEV 否则）
+  - `set_metadata()` — `file_mode_set()` 仅同步权限位（uid/gid/time 保持默认值）
+  - `read_at_user()` / `write_at_user()` — 内核缓冲区中转：`UserBuffer::read()`/`write()` ↔ `read_at()`/`write_at()`
+- 新增 `hash_path()` 辅助函数（DJB2），作为 `get_inode_id()` 的 fallback
+- 新增 `use core::ffi::CStr;` 导入
+- 更新模块 doc comment 反映 Phase 4 完成状态
+
+**验证：**
+- `make rv64-kernel-build-only EXTRA_FEATURES=lwext4` ✅ — 0 errors（la64 因环境缺少 cmake toolchain 文件跳过）
+
+**备注：**
+- 编译中发现的 3 类错误已修复：`fmode_set` → `file_mode_set`（lwext4_rust API 实际名称）；`FileGuard` 通过 `guard.f` 访问内部 `Ext4File` 避免双重可变借用；`CStr::from_ptr()` 参数类型应为 `*const u8`（nightly-2025-01-18 上 `c_char = u8`）
+- `rmdir()` 先检查空目录再删除的关键性：lwext4 的 `dir_rm()` 是递归的，直接调用会删除所有子项，违反 POSIX rmdir 语义
+- `write_at()` 优先 O_RDWR 再 fallback 创建的模式防止 `O_CREAT|O_TRUNC` 意外截断已有文件
+- `create()` 中 File vs Dir 分支分别管理锁范围，Dir 分支调用 `self.mkdir()` 之前不持有 `fs.lw` 锁（`mkdir()` 内部自行加锁），防止死锁
+- `create_with_data()` 使用 `CStr::from_ptr(data as *const u8)` 而非裸指针解引用，安全解析 symlink 目标字符串
 
 ### lwext4 VFS 适配器 — Oracle 审查修复（安全加固 Phase 3）
 

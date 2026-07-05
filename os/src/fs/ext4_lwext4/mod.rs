@@ -3,8 +3,6 @@
 //! Replace the legacy hand-written ext4 driver with the lightweight lwext4
 //! C library behind the `lwext4` feature flag.  Only mount, metadata, find,
 //! list, and read_at are implemented — no writes, creates, or deletes.
-#![cfg(feature = "lwext4")]
-
 pub mod blockdev;
 pub mod errno;
 pub mod ext4fs;

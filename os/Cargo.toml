@@ -24,7 +24,7 @@ volatile = "0.3.0"
 rand_core = "0.6.4"
 managed = { version = "0.8", default-features = false, features = ["map"] }
 virtio-drivers = { path = "../dependency/virtio-drivers", default-features = false, features = ["alloc"] }
-lwext4_rust = { path = "../dependency/lwext4_rust", default-features = false, optional = true }
+lwext4_rust = { path = "../dependency/lwext4_rust", default-features = false }
 
 rustsbi = { path = "../dependency/rustsbi" }
 
@@ -74,7 +74,6 @@ perf_diag = ["perf_stats"]
 initramfs = []
 legacy_block_root = []
 preload_payloads = []
-lwext4 = ["lwext4_rust"]
 
 # LoongArch Boards:
 loongarch64 = []
