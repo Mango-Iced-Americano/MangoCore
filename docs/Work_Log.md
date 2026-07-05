@@ -4,6 +4,106 @@
 
 ## 2026-07-05
 
+### lwext4 VFS 适配器 — Oracle 审查修复（安全加固 Phase 3）
+
+**涉及文件：**
+- `os/src/fs/ext4_lwext4/layout.rs` — **全部 Phase 4 写方法门控为 ENOSYS 桩**（`write_at`/`create`/`create_with_data`/`create_with_attrs`/`mkdir`/`unlink`/`rmdir`/`rename`/`truncate`/`resize`/`symlink`/`link`/`set_metadata`）；**修复 `read_at()`** 对 symlink 的正确支持（`ext4_readlink` FFI）；**修复 `metadata()`** 使用 `probe_type` + 真实 inode 数据；**新增 `FileGuard` RAII** 自动关闭文件句柄防止泄露；**`find()` 增加名称校验**（ENOTDIR/ENOENT/ENAMETOOLONG/含斜杠）；**使用 `ext4_raw_inode_fill` 获取真实 inode 号**替代 DJB2 path hash；`read_at_user`/`write_at_user` 改为 ENOSYS 桩
+- `os/src/fs/ext4_lwext4/ext4fs.rs` — **`open_ext4rs()` 返回 `Result`** 而非 panic；**新增 `mounted: AtomicBool`** 使 `on_umount` 幂等（防止重复卸载）；**新增 `dev_id()` / `block_size()` / `get_inode_id()`** 方法；**`super_block()` 用 `ext4_mount_point_stats()` 真实统计数据**替代硬编码零值；**新增 `NEXT_FS_ID` 原子计数器**生成唯一 per-instance dev_id
+- `os/src/fs/ext4_lwext4/errno.rs` — **新增 5 个 errno 映射**：EBUSY(16)、EXDEV(18)、ENODEV(19)、EROFS(30)、ELOOP(40)
+- `os/src/fs/mod.rs` — **适配 `open_ext4rs()` 返回 `Result`**：VFS_ROOT 挂载失败时 fallback 到 ramfs；`mount_block_fs` 挂载失败时返回 None
+- `dependency/lwext4_rust/src/file.rs` — **修复 `lwext4_dir_entries()` 缓冲区溢出**：当 `name_length == 255` 时 `sss[255] = 0` 越界，改为分配 `len+1` 字节的 `Vec`
+- `dependency/lwext4_rust/src/blockdev.rs` — **添加 TODO 注释**：标记硬编码的 `"ext4_fs"` / `"/"` mount 名称限制多挂载
+
+**验证：**
+- `make rv64-kernel-build-only EXTRA_FEATURES=lwext4` ✅ — 0 errors
+
+**备注：**
+- `FileGuard` 使用 `&'a mut Ext4File` 的 Drop 模式，在 `?` 提前返回时自动调用 `file_close()`，解决了之前错误路径遗漏 close 的资源泄漏
+- `ext4_raw_inode_fill()` FFI 函数可通过 `ret_ino: *mut u32` 参数同时获取 inode 号，替代了 DJB2 path hash 的伪 inode
+- 多挂载支持受限于 lwext4_rust 内部硬编码的设备名和挂载点，需修改 `Ext4BlockWrapper::new()` 后方可启用
+- 所​有写操作返回 `ENOSYS` 而非 `EROFS`，因为 lwext4_rust 的 write 能力尚未经过安全审查
+
+### lwext4 VFS 适配器 Phase 3 — 只读 ext4（`#[cfg(feature = "lwext4")]`）
+
+**涉及文件：**
+- `os/src/fs/ext4_lwext4/mod.rs`（新建）— `#![cfg(feature = "lwext4")]` 模块声明，导出 `blockdev` / `errno` / `ext4fs` / `layout` 四个子模块
+- `os/src/fs/ext4_lwext4/errno.rs`（新建）— `from_lwext4(e: i32) -> SyscallErr`，映射 lwext4 返回的 Linux 标准 errno（1→EPERM, 2→ENOENT, 5→EIO, 12→ENOMEM, 95→EOPNOTSUPP 等 13 种）
+- `os/src/fs/ext4_lwext4/blockdev.rs`（移动）— 从 `os/src/fs/ext4/lwext4_blockdev.rs` 移动至此（Phase 2 产物），`MangoBlockDev` + `MangoKernelDevOp` 桥接 MangoCore `BlockDevice` ↔ lwext4 字节级 I/O
+- `os/src/fs/ext4_lwext4/ext4fs.rs`（新建）— `Ext4FileSystem` 结构体包裹 `Mutex<Ext4BlockWrapper<MangoKernelDevOp>>`（序列化 lwext4 C 全局状态），实现 `FileSystem` trait（`root_inode` / `name` / `info` / `super_block` / `statfs` / `on_umount` / `as_any_ref`），`open_ext4rs()` 构造器调用 `Ext4BlockWrapper::new()` 挂载 + journal start
+- `os/src/fs/ext4_lwext4/layout.rs`（新建）— `Ext4OSInode` 结构体，基于路径字符串的 lwext4 `Ext4File` API 实现 `IndexNode` trait：`metadata()`（fopen→fsize+fmode_get→fclose）、`read_at()`（fopen→fseek→fread→fclose）、`find()`（join 路径→probe_type）、`list()`（lwext4_dir_entries）、`fs()` / `open()` / `close()` / `as_any_ref()`。使用 `Arc::new_cyclic` + `Weak` 处理 `.` 自引用。`map_lwext4_mode()` 将 raw mode bits 映射为 `FileType` + `InodeMode`。伪 inode ID 使用 DJB2 path hash
+- `os/src/fs/mod.rs` — 添加 `#[cfg(feature = "lwext4")] pub mod ext4_lwext4;`，VFS_ROOT 和 `mount_block_fs` 中的 `FS_Type::Ext4` 分支改为 `#[cfg(feature = "lwext4")]` / `#[cfg(not(feature = "lwext4"))]` 条件编译
+- `os/src/fs/ext4/mod.rs` — 移除 `#[cfg(feature = "lwext4")] pub mod lwext4_blockdev;`（已迁移至 `ext4_lwext4/blockdev.rs`）
+- `os/src/fs/ext4/lwext4_blockdev.rs` — **已删除**（移动至以上位置）
+- `dependency/lwext4_rust/c/ulibc.c` — 添加 `memcpy` / `__memcpy_chk` / `__memset_chk` / `__strcpy_chk` 桩实现（`__attribute__((used))` 强符号），解决 glibc-linux-gnu 工具链在 `-O2` 下生成的 fortified 函数调用
+- `dependency/lwext4_rust/c/elf-linux-gnu.cmake` — 添加 `-U_FORTIFY_SOURCE` 到 `CMAKE_C_FLAGS`，禁止 GCC 生成 fortified 函数调用
+
+**验证：**
+- `make rv64-kernel-build-only EXTRA_FEATURES=lwext4` ✅ — lwext4 C 库编译 + Rust 编译 + 链接全部通过
+- `make rv64-kernel-build-only`（不带 lwext4）✅ — 遗留 ext4 驱动不受影响
+- `make la64-kernel-build-only`（不带 lwext4）✅ — la64 构建不受影响
+
+**备注：**
+- `Ext4FileSystem` 和 `Ext4OSInode` 均使用 `unsafe impl Send + Sync`，因为 lwext4 `Ext4BlockWrapper` 包含裸 C 指针，编译器无法自动推导。MangoCore 为单核环境，安全性由 `Mutex` 序列化保证
+- 路径式 API：所有 lwext4 操作（`fopen`/`fread`/`fclose`）均通过文件路径而非 inode 号，每次 I/O 操作为 open→seek→read→close，Phase 5（PageCache）将优化此路径
+- Phase 3 仅实现只读：`open()` / `close()` 为 no-op，未实现 `create` / `write_at` / `unlink` / `rename` / `truncate` / `set_metadata` / `symlink` 等
+- Fortified wrapper issue：`riscv64-linux-gnu-gcc -O2` 会将 `memcpy`/`memset`/`strcpy` 替换为 `__memcpy_chk`/`__memset_chk`/`__strcpy_chk`（glibc _FORTIFY_SOURCE）。解决方法：`-U_FORTIFY_SOURCE`（预防）+ 强符号桩实现（保底）
+
+### lwext4 BlockDevice 桥接层 — `MangoKernelDevOp` 实现
+
+**涉及文件：**
+- `os/src/fs/ext4/lwext4_blockdev.rs`（新建）— `MangoBlockDev` 结构体 + `MangoKernelDevOp` 实现 `KernelDevOp` trait，将 lwext4 的字节级 seek+read/write 调用翻译为 MangoCore 的 4096 字节块级 `read_block`/`write_block`
+- `os/src/fs/ext4/mod.rs` — 添加 `#[cfg(feature = "lwext4")] pub mod lwext4_blockdev;` 声明
+
+**验证：**
+- `cargo check --features ... lwext4` ✅ — 桥接代码编译通过，无新增 warning
+- `cargo check --features ...`（不带 lwext4）✅ — `#[cfg]` 门控正确，不影响现有构建
+- `make rv64-kernel-build-only EXTRA_FEATURES=lwext4` ⚠️ — Rust 编译通过，链接失败（已知 issue：`lwext4-riscv64.a` 使用 `riscv64-linux-musl-gcc` 编译，与 `riscv64gc-unknown-none-elf` target 的 rust-lld 不兼容）
+
+**备注：**
+- 翻译规则：lwext4 byte position → `mango_block_id = byte_pos / 4096`，`mango_block_off = byte_pos % 4096`
+- 读取：按需切分跨块读取，每个 MangoCore 块读 4096B 后拷贝所需片段
+- 写入：全块对齐直接透传；部分块使用 read-modify-write
+- `flush` 为 no-op（块设备无需显式 flush）
+- 无需 unsafe，无 VFS 集成 — 纯桥接层
+
+### lwext4_rust 集成 — 构建系统搭建
+
+**涉及文件：**
+- `dependency/lwext4_rust/build.rs` — 重写为仅链接预编译 `.a`，通过 `LWEXT4_LIB_DIR` 环境变量指定路径
+- `dependency/lwext4_rust/Cargo.toml` — 移除 `build-dependencies` 中的 `bindgen`（新 build.rs 不再使用）
+- `dependency/lwext4_rust/src/lib.rs` — 移除未使用的 `#![feature(associated_type_defaults)]` gate
+- `dependency/lwext4_rust/c/ulibc.c` — 添加 `#include <stdio.h>` + `<stdlib.h>`，修复 `FILE *const stdout` → `FILE * stdout`（与 glibc `<stdio.h>` 冲突），修复 `void qsort` 返回值的 `-pedantic` 警告
+- `dependency/lwext4_rust/c/elf-linux-gnu.cmake` — 新建 cmake 工具链文件，使用 `riscv64-linux-gnu-gcc`（而非 musl），添加 `-ffreestanding -fno-builtin -nostdlib`
+- `os/Cargo.toml` — 添加 `lwext4 = ["lwext4_rust"]` 特性 + `lwext4_rust` 可选依赖（`optional = true`，`default-features = false`）
+- `os/make/rv64.mk` — 添加 `lwext4-rv64` 目标：拷贝 cmake 工具链 + ulibc.c，注入 CMakeLists.txt，cmake + make 生成 `liblwext4-riscv64.a`；kernel 目标条件性设置 `LWEXT4_LIB_DIR` 环境变量
+- `os/make/la64.mk` — 添加 `lwext4-la64` 桩目标（提示 loongarch64 交叉编译器未安装）
+- `os/Makefile` — 添加 `lwext4-rv64` / `lwext4-la64` 委托目标
+
+**验证：**
+- `make rv64-kernel-build-only` ✅ — 不带 lwext4 特性，内核构建不受影响
+- `make rv64-kernel-build-only EXTRA_FEATURES=lwext4` ✅ — C 库编译 → `.a` → cargo link 全部通过
+- `make la64-kernel-build-only` ✅ — la64 构建不受影响
+- `make lwext4-rv64` / `make lwext4-la64` ✅ — 目标语法正确
+
+**备注：**
+- `lwext4` 特性通过 `optional = true` 控制依赖编译，不启用时 `lwext4_rust` 完全不参与构建
+- C 编译绕过 lwext4 的 Makefile 和 git apply，直接调用 cmake 并用 sed 注入 `ulibc.c`
+- `LIB_ONLY=TRUE` 模式避免编译 blockdev 驱动和 fs_test，只产出静态库
+
+### la64 lwext4 — 自动下载 + 缓存交叉编译器机制
+
+**涉及文件：**
+- `os/make/la64.mk` — 替换桩目标为完整的自动下载 + 缓存 + 编译流程。首次运行时从 GitHub Releases 下载 ~100MB loongarch64 交叉编译器到 `~/.cache/mangocore/toolchains/`，之后复用缓存。编译逻辑与 rv64 对齐：拷贝 ulibc.c，cmake + 工具链文件 + `ARCH=loongarch64` 生成 `liblwext4-loongarch64.a`。kernel 目标条件性依赖 lwext4-la64 并注入 `LWEXT4_LIB_DIR` 环境变量。
+
+**验证：**
+- Makefile 语法检查 ✅ — 变量展开、`$$PATH`/`$$(nproc)` 转义、条件分支正确
+- 依赖链: `lwext4-la64` → 编译器二进制 (order-only `|`) → `.a` → cmake + make ✅
+
+**备注：**
+- 交叉编译器缓存于 `~/.cache/mangocore/toolchains/` — 位于 git 仓库外部，不会意外提交
+- tarball 下载后保留在缓存中，后续运行跳过下载
+- 工具链文件 `elf-linux-gnu.cmake` 通过 `$ENV{ARCH}` 读取架构名，cmake 调用通过 `-DARCH=loongarch64` 传入（工具链文件本身未修改）
+
 ### MetadataHeap 扩展 — `alloc_pages` / `dealloc_pages` / `LockedMetadataHeap`
 
 **涉及文件：**
