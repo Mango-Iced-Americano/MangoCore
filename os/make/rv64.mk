@@ -25,6 +25,44 @@ KERNEL_LA := ../kernel-la
 SDCARD_RV := ../sdcard-rv.img
 SDCARD_LA := ../sdcard-la.img
 
+# ============================================================
+# lwext4 C library
+# ============================================================
+LWEXT4_DIR := ../dependency/lwext4_rust/c/lwext4
+LWEXT4_RV_LIB := $(LWEXT4_DIR)/liblwext4-riscv64.a
+LWEXT4_CMAKE := ../dependency/lwext4_rust/c/elf-linux-gnu.cmake
+LWEXT4_PATCH := ../dependency/lwext4_rust/c/lwext4-make.patch
+
+lwext4-rv64: $(LWEXT4_RV_LIB)
+
+$(LWEXT4_RV_LIB):
+	@echo "=== Building lwext4 C library for riscv64 ==="
+	@# Copy our cmake toolchain (linux-gnu) over the musl-generic one
+	@cp -f $(LWEXT4_CMAKE) $(LWEXT4_DIR)/toolchain/musl-generic.cmake
+	@# Copy ulibc.c into lwext4 src tree so it gets compiled into the .a
+	@cp -f ../dependency/lwext4_rust/c/ulibc.c $(LWEXT4_DIR)/src/ulibc.c
+	@# Ensure ulibc.c is in the library sources (no git apply needed)
+	@grep -q 'ulibc.c' $(LWEXT4_DIR)/src/CMakeLists.txt 2>/dev/null || \
+		sed -i '/aux_source_directory/a set(M_SRC ulibc.c)' $(LWEXT4_DIR)/src/CMakeLists.txt
+	@grep -q '$${M_SRC}' $(LWEXT4_DIR)/src/CMakeLists.txt 2>/dev/null || \
+		sed -i 's/add_library(lwext4 STATIC $${LWEXT4_SRC})/add_library(lwext4 STATIC $${LWEXT4_SRC} $${M_SRC})/' $(LWEXT4_DIR)/src/CMakeLists.txt
+	@# Build with cmake directly (bypasses the lwext4 Makefile)
+	@mkdir -p $(LWEXT4_DIR)/build_musl-generic
+	@cd $(LWEXT4_DIR)/build_musl-generic && \
+		ARCH=riscv64 cmake -G"Unix Makefiles" \
+			-DCMAKE_BUILD_TYPE=Release \
+			-DVERSION_MAJOR=1 -DVERSION_MINOR=0 -DVERSION_PATCH=0 \
+			-DLWEXT4_BUILD_SHARED_LIB=OFF \
+			-DLIB_ONLY=TRUE \
+			-DCMAKE_TOOLCHAIN_FILE=../toolchain/musl-generic.cmake \
+			.. 2>&1 | tail -5
+	@cd $(LWEXT4_DIR)/build_musl-generic && make lwext4 -j$$(nproc)
+	@cp -f $(LWEXT4_DIR)/build_musl-generic/src/liblwext4.a $(LWEXT4_RV_LIB)
+	@echo "=== lwext4 riscv64 .a built at $(LWEXT4_RV_LIB) ==="
+
+clean-lwext4-rv:
+	@rm -rf $(LWEXT4_DIR)/build_musl-generic $(LWEXT4_RV_LIB)
+
 ifeq ($(BOARD), vf2)
 	ROOTFS_IMG := /dev/sdc
 else
@@ -113,13 +151,19 @@ $(INITRAMFS_CPIO_RV): user
 	@touch src/initramfs-rv.S  # 强制 Cargo 重编译（.incbin 时间戳变化）
 
 # xein TODO: 注意需要评估zero_init启用与否的影响
-kernel:
+# lwext4 conditional build: only build C lib when lwext4 is in EXTRA_FEATURES
+ifneq ($(findstring lwext4,$(EXTRA_FEATURES)),)
+  LWEXT4_PREREQ := lwext4-rv64
+  LWEXT4_ENV := LWEXT4_LIB_DIR=$(abspath $(LWEXT4_DIR))
+endif
+
+kernel: $(LWEXT4_PREREQ)
 	@echo Platform: $(BOARD)
 	@cp -f src/hal/arch/riscv/linker-$(BOARD).ld src/hal/arch/riscv/linker.ld
     ifeq ($(MODE), debug)
-		@LOG=${LOG} cargo build --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)"
+		@$(LWEXT4_ENV) LOG=${LOG} cargo build --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)"
     else
-		@LOG=${LOG} cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)"
+		@$(LWEXT4_ENV) LOG=${LOG} cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)"
     endif
 
 clean:

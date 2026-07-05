@@ -14,6 +14,38 @@ KERNEL_LA := ../kernel-la
 SDCARD_LA := ../sdcard-la.img
 DISK_LA := ../disk-la.img
 
+# ============================================================
+# lwext4 C library (la64: uses pre-installed cross-compiler)
+# ============================================================
+LWEXT4_LA_DIR := ../dependency/lwext4_rust/c/lwext4
+LWEXT4_LA_LIB := $(LWEXT4_LA_DIR)/liblwext4-loongarch64.a
+LWEXT4_LA_TOOLCHAIN_PATH := /opt/gcc-13.2.0-loongarch64-linux-gnu/bin
+
+lwext4-la64: $(LWEXT4_LA_LIB)
+
+$(LWEXT4_LA_LIB):
+	@echo "=== Building lwext4 C library for loongarch64 ==="
+	@cp -f ../dependency/lwext4_rust/c/el-linux-gnu.cmake $(LWEXT4_LA_DIR)/toolchain/musl-generic.cmake
+	@cp -f ../dependency/lwext4_rust/c/ulibc.c $(LWEXT4_LA_DIR)/src/ulibc.c
+	@grep -q 'ulibc.c' $(LWEXT4_LA_DIR)/src/CMakeLists.txt 2>/dev/null || \
+		sed -i '/aux_source_directory/a set(M_SRC ulibc.c)' $(LWEXT4_LA_DIR)/src/CMakeLists.txt
+	@grep -q '$${M_SRC}' $(LWEXT4_LA_DIR)/src/CMakeLists.txt 2>/dev/null || \
+		sed -i 's/add_library(lwext4 STATIC $${LWEXT4_SRC})/add_library(lwext4 STATIC $${LWEXT4_SRC} $${M_SRC})/' $(LWEXT4_LA_DIR)/src/CMakeLists.txt
+	@mkdir -p $(LWEXT4_LA_DIR)/build_musl-generic
+	@PATH="$(LWEXT4_LA_TOOLCHAIN_PATH):$$PATH" \
+	 ARCH=loongarch64 cmake -G"Unix Makefiles" \
+	   -DCMAKE_BUILD_TYPE=Release \
+	   -DVERSION_MAJOR=1 -DVERSION_MINOR=0 -DVERSION_PATCH=0 \
+	   -DLWEXT4_BUILD_SHARED_LIB=OFF \
+	   -DLIB_ONLY=TRUE \
+	   -DCMAKE_TOOLCHAIN_FILE=../toolchain/musl-generic.cmake \
+	   -S $(LWEXT4_LA_DIR) \
+	   -B $(LWEXT4_LA_DIR)/build_musl-generic 2>&1 | tail -5
+	@PATH="$(LWEXT4_LA_TOOLCHAIN_PATH):$$PATH" \
+	 $(MAKE) -C $(LWEXT4_LA_DIR)/build_musl-generic lwext4 -j$$(nproc)
+	@cp -f $(LWEXT4_LA_DIR)/build_musl-generic/src/liblwext4.a $(LWEXT4_LA_LIB)
+	@echo "=== lwext4 loongarch64 .a built ==="
+
 # BOARD
 BOARD ?= laqemu
 
@@ -86,13 +118,19 @@ $(INITRAMFS_CPIO_LA): user
 	./build_initramfs.sh la64 $(MODE) $(INITRAMFS_CPIO_LA)
 	@touch src/initramfs-la.S
 
-kernel:
+# lwext4 conditional build: only build C lib when lwext4 is in EXTRA_FEATURES
+ifneq ($(findstring lwext4,$(EXTRA_FEATURES)),)
+  LWEXT4_LA_PREREQ := lwext4-la64
+  LWEXT4_LA_ENV := LWEXT4_LIB_DIR=$(abspath $(LWEXT4_LA_DIR))
+endif
+
+kernel: $(LWEXT4_LA_PREREQ)
 	@echo Platform: $(BOARD)
 	@cp -f src/hal/arch/loongarch64/linker-$(BOARD).ld src/hal/arch/loongarch64/linker.ld 2>/dev/null || true
 ifeq ($(MODE), debug)
-	@LOG=$(LOG) cargo build --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
+	@$(LWEXT4_LA_ENV) LOG=$(LOG) cargo build --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
 else
-	@LOG=$(LOG) cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
+	@$(LWEXT4_LA_ENV) LOG=$(LOG) cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
 endif
 
 # uImage (la64-specific: for uboot boot)

@@ -494,3 +494,14 @@ initramfs-la: user
 	@DNS_SERVER=$(DNS_SERVER) ./build_initramfs.sh la64 $(MODE) $(INITRAMFS_DIR_LA)
 
 initramfs-all: initramfs-rv initramfs-la
+
+# ============================================================
+# lwext4 targets
+# ============================================================
+lwext4-rv64:
+	make -f make/rv64.mk lwext4-rv64
+
+lwext4-la64:
+	make -f make/la64.mk lwext4-la64
+
+.PHONY: lwext4-rv64 lwext4-la64
