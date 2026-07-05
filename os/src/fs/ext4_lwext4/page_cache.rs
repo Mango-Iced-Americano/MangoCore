@@ -78,16 +78,20 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
         let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_REG_FILE);
         f.file_open(&self.path, 0x0)
             .map_err(|e| from_lwext4(e.abs()))?;
-        f.file_seek(offset as i64, 0)
-            .map_err(|e| from_lwext4(e.abs()))?;
-        let n = f.file_read(&mut buf[..read_len])
-            .map_err(|e| from_lwext4(e.abs()))?;
-        // Zero-fill the remainder of the page (last partial page or sparse)
-        if n < PAGE_SIZE {
-            buf[n..PAGE_SIZE].fill(0);
-        }
+        // Use closure to ensure file_close() on all error paths
+        let result = (|| -> Result<usize, SyscallErr> {
+            f.file_seek(offset as i64, 0)
+                .map_err(|e| from_lwext4(e.abs()))?;
+            let n = f.file_read(&mut buf[..read_len])
+                .map_err(|e| from_lwext4(e.abs()))?;
+            // Zero-fill the remainder of the page (last partial page or sparse)
+            if n < PAGE_SIZE {
+                buf[n..PAGE_SIZE].fill(0);
+            }
+            Ok(PAGE_SIZE)
+        })();
         f.file_close().ok();
-        Ok(PAGE_SIZE)
+        result
     }
 
     fn write_page(&self, index: usize, buf: &[u8]) -> Result<usize, SyscallErr> {
@@ -104,15 +108,19 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
             f.file_open(&self.path, 0x242)
                 .map_err(|e| from_lwext4(e.abs()))?;
         }
-        f.file_seek(offset as i64, 0)
-            .map_err(|e| from_lwext4(e.abs()))?;
-        let n = f.file_write(&buf[..write_len])
-            .map_err(|e| from_lwext4(e.abs()))?;
+        // Use closure to ensure file_close() on all error paths
+        let result = (|| -> Result<usize, SyscallErr> {
+            f.file_seek(offset as i64, 0)
+                .map_err(|e| from_lwext4(e.abs()))?;
+            let n = f.file_write(&buf[..write_len])
+                .map_err(|e| from_lwext4(e.abs()))?;
+            // Update cached size so npages() reflects the new length
+            let new_end = (offset + n).max(self.size.load(Ordering::Relaxed));
+            self.size.store(new_end, Ordering::Relaxed);
+            Ok(n)
+        })();
         f.file_close().ok();
-        // Update cached size so npages() reflects the new length
-        let new_end = (offset + n).max(self.size.load(Ordering::Relaxed));
-        self.size.store(new_end, Ordering::Relaxed);
-        Ok(n)
+        result
     }
 
     fn read_pages(
@@ -126,22 +134,24 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
         f.file_open(&self.path, 0x0)
             .map_err(|e| from_lwext4(e.abs()))?;
         let start_offset = start_index * PAGE_SIZE;
-        f.file_seek(start_offset as i64, 0)
-            .map_err(|e| from_lwext4(e.abs()))?;
-
-        let mut total = 0;
-        for page in pages.iter_mut() {
-            let read_len = PAGE_SIZE.min(page.len());
-            let n = f.file_read(&mut page[..read_len])
+        let result = (|| -> Result<usize, SyscallErr> {
+            f.file_seek(start_offset as i64, 0)
                 .map_err(|e| from_lwext4(e.abs()))?;
-            if n < PAGE_SIZE {
-                let page_len = page.len();
-                page[n..PAGE_SIZE.min(page_len)].fill(0);
+            let mut total = 0;
+            for page in pages.iter_mut() {
+                let read_len = PAGE_SIZE.min(page.len());
+                let n = f.file_read(&mut page[..read_len])
+                    .map_err(|e| from_lwext4(e.abs()))?;
+                if n < PAGE_SIZE {
+                    let page_len = page.len();
+                    page[n..PAGE_SIZE.min(page_len)].fill(0);
+                }
+                total += n;
             }
-            total += n;
-        }
+            Ok(total)
+        })();
         f.file_close().ok();
-        Ok(total)
+        result
     }
 
     fn write_pages(
@@ -157,20 +167,23 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
                 .map_err(|e| from_lwext4(e.abs()))?;
         }
         let start_offset = start_index * PAGE_SIZE;
-        f.file_seek(start_offset as i64, 0)
-            .map_err(|e| from_lwext4(e.abs()))?;
-
-        let mut total = 0;
-        for (i, page) in pages.iter().enumerate() {
-            let write_len = PAGE_SIZE.min(page.len());
-            let n = f.file_write(&page[..write_len])
+        let result = (|| -> Result<usize, SyscallErr> {
+            f.file_seek(start_offset as i64, 0)
                 .map_err(|e| from_lwext4(e.abs()))?;
-            total += n;
-            let new_end = (start_offset + (i + 1) * PAGE_SIZE).max(self.size.load(Ordering::Relaxed));
-            self.size.store(new_end, Ordering::Relaxed);
-        }
+            let mut total = 0;
+            for (i, page) in pages.iter().enumerate() {
+                let write_len = PAGE_SIZE.min(page.len());
+                let n = f.file_write(&page[..write_len])
+                    .map_err(|e| from_lwext4(e.abs()))?;
+                total += n;
+                let new_end = (start_offset + (i + 1) * PAGE_SIZE)
+                    .max(self.size.load(Ordering::Relaxed));
+                self.size.store(new_end, Ordering::Relaxed);
+            }
+            Ok(total)
+        })();
         f.file_close().ok();
-        Ok(total)
+        result
     }
 
     fn npages(&self) -> usize {
