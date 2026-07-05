@@ -23,10 +23,12 @@ use crate::fs::vfs::{
 };
 use crate::fs::vfs::file::FileFlags;
 use crate::fs::vfs::file_system::FileSystem;
+use crate::fs::page_cache::PageCache;
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
 
 use super::errno::from_lwext4;
+use super::page_cache::LwExt4PageCacheBackend;
 use lwext4_rust::{Ext4File, InodeTypes};
 
 /// Result of mapping lwext4 mode bits to MangoCore types.
@@ -108,6 +110,8 @@ pub struct Ext4OSInode {
     file_type: FileType,
     /// Weak self-reference for `find(".")`.
     self_ref: Mutex<Option<Weak<Ext4OSInode>>>,
+    /// On-demand PageCache — created on first `ensure_page_cache()` call.
+    page_cache: Mutex<Option<Arc<PageCache>>>,
 }
 
 // Safety: MangoCore is single-core; the circular Weak<Self> reference is
@@ -138,6 +142,7 @@ impl Ext4OSInode {
                 inode_id,
                 file_type: FileType::Dir,
                 self_ref: Mutex::new(Some(weak.clone())),
+                page_cache: Mutex::new(None),
             }
         })
     }
@@ -158,6 +163,7 @@ impl Ext4OSInode {
                 inode_id,
                 file_type,
                 self_ref: Mutex::new(Some(weak.clone())),
+                page_cache: Mutex::new(None),
             }
         })
     }
@@ -255,29 +261,11 @@ impl IndexNode for Ext4OSInode {
         }
         let actual = len.min(buf.len());
 
-        let _lock = self.fs.lw.lock();
-
         match self.file_type {
-            FileType::File => {
-                let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_REG_FILE);
-                // Open read-only
-                f.file_open(&self.path, 0x0)
-                    .map_err(|e| from_lwext4(e.abs()))?;
-                let guard = FileGuard::new(&mut f);
-
-                // Seek to offset
-                guard.f.file_seek(offset as i64, 0)
-                    .map_err(|e| from_lwext4(e.abs()))?;
-
-                // Read
-                let read_bytes = &mut buf[..actual];
-                let n = guard.f.file_read(read_bytes)
-                    .map_err(|e| from_lwext4(e.abs()))?;
-
-                Ok(n)
-            }
+            FileType::Dir => Err(SyscallErr::EISDIR),
             FileType::SymLink => {
                 // Use ext4_readlink to get the symlink target content
+                let _lock = self.fs.lw.lock();
                 let mut rbuf = [0u8; 256];
                 let mut rcnt: usize = 0;
                 let c_path = CString::new(self.path.as_str())
@@ -302,7 +290,25 @@ impl IndexNode for Ext4OSInode {
                 buf[..n].copy_from_slice(&rbuf[offset..offset + n]);
                 Ok(n)
             }
-            FileType::Dir => Err(SyscallErr::EISDIR),
+            FileType::File => {
+                // Try PageCache first
+                if let Some(pc) = self.page_cache() {
+                    return pc.read(offset, &mut buf[..actual])
+                        .map_err(|_| SyscallErr::EIO);
+                }
+                // Direct I/O fallback
+                let _lock = self.fs.lw.lock();
+                let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_REG_FILE);
+                f.file_open(&self.path, 0x0)
+                    .map_err(|e| from_lwext4(e.abs()))?;
+                let guard = FileGuard::new(&mut f);
+                guard.f.file_seek(offset as i64, 0)
+                    .map_err(|e| from_lwext4(e.abs()))?;
+                let read_bytes = &mut buf[..actual];
+                let n = guard.f.file_read(read_bytes)
+                    .map_err(|e| from_lwext4(e.abs()))?;
+                Ok(n)
+            }
             _ => Err(SyscallErr::EINVAL),
         }
     }
@@ -520,6 +526,31 @@ impl IndexNode for Ext4OSInode {
         self.write_at(offset, actual, &kbuf[..actual], guard)
     }
 
+    // ── page_cache ────────────────────────────────────────────────────
+
+    /// Read-only query of existing page cache (no lazy creation).
+    fn page_cache(&self) -> Option<Arc<PageCache>> {
+        self.page_cache.lock().clone()
+    }
+
+    /// Ensure a PageCache exists, creating one if necessary.
+    ///
+    /// Called by mmap page-fault and other VFS paths that need file data
+    /// pages.  The backend delegates I/O to lwext4's file API.
+    fn ensure_page_cache(&self) -> Option<Arc<PageCache>> {
+        let mut cache = self.page_cache.lock();
+        if cache.is_none() {
+            let backend = Arc::new(LwExt4PageCacheBackend::new(
+                Arc::downgrade(&self.fs),
+                self.path.clone(),
+            ));
+            let pc = PageCache::new();
+            pc.set_backend(backend);
+            *cache = Some(pc);
+        }
+        cache.clone()
+    }
+
     // ═══════════════════════════════════════════════════════════════════
     //  Phase 4: write/create/delete methods
     // ═══════════════════════════════════════════════════════════════════
@@ -538,6 +569,14 @@ impl IndexNode for Ext4OSInode {
             return Ok(0);
         }
         let actual = len.min(buf.len());
+
+        // Try PageCache first
+        if let Some(pc) = self.page_cache() {
+            return pc.write(offset, &buf[..actual], None)
+                .map_err(|_| SyscallErr::EIO);
+        }
+
+        // Direct I/O fallback
         let _lock = self.fs.lw.lock();
         let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_REG_FILE);
         // O_RDWR ("r+"): does not truncate. Fall back to O_RDWR|O_CREAT|O_TRUNC

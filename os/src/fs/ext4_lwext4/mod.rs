@@ -9,3 +9,4 @@ pub mod blockdev;
 pub mod errno;
 pub mod ext4fs;
 pub mod layout;
+pub mod page_cache;
