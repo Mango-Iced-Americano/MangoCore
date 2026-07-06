@@ -4,6 +4,20 @@
 
 ## 2026-07-06
 
+### 回退 lwext4 mount prefix 变更 — 恢复使用 `self.path` 直传
+
+**涉及文件：**
+- `os/src/fs/ext4_lwext4/ext4fs.rs` — 移除 `lw_prefix: String` 字段、`to_lw_path()` 方法；`open_ext4rs()` 恢复 mount point 为 `"/"`（保留唯一 `dev_name`）；`get_inode_id()`、`probe_type()` 恢复使用 `full_path` 直传；`super_block()` 恢复使用 `"/"` 硬编码；移除未使用的 `use alloc::string::String` 导入
+- `os/src/fs/ext4_lwext4/layout.rs` — 移除 `lw_path()` 辅助方法；所有 lwext4 API 调用恢复使用 `self.path` / `child_path` 直传（不再通过 `to_lw_path()` 添加前缀）；`ensure_page_cache()` 传递 `self.path.clone()` 替代 `self.lw_path()`
+
+**验证：**
+- `make rv64-kernel-build-only` ✅ — 0 错误
+
+**备注：**
+- 回退原因：使用唯一 mount point（`"/ext4_N"`）需要在整条 VFS 适配器路径上做前缀感知的路径翻译，脆弱且复杂
+- 保留部分：`NEXT_FS_ID` 生成的唯一 `dev_name`（`"ext4_{id}"`）**不变**，用于避免 `ext4_device_register()` 的 EEXIST 碰撞；`new_with_names(mbd, &dev_name, "/")` — mount point 恢复为 `"/"`
+- 已知限制：仅第一个 ext4 挂载实际注册到 lwext4，后续 `ext4_mount("ext4_N", "/")` 在 `"/"` 已挂载时是 no-op（tools 盘挂载为伪成功），详见 `docs/10_plan/lwext4-upstream-fixes.md`
+
 ### lwext4 多实例挂载点碰撞修复 — 唯一 mount point
 
 **涉及文件：**

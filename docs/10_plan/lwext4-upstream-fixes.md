@@ -83,8 +83,8 @@ let c_mountpoint = CString::new("/")...      // 挂载点硬编码
 
 **修复**（MangoCore 侧）：
 - 添加 `new_with_names(dev, dev_name, mount_point)` 构造函数
-- `open_ext4rs()` 使用原子计数器生成唯一设备名和挂载点
-- VFS 适配器在所有 lwext4 API 调用前自动添加挂载点前缀
+- `open_ext4rs()` 使用原子计数器生成唯一设备名 `"ext4_{id}"`，mount point 保持 `"/"`
+- **注**：曾尝试使用唯一 mount point（`"/ext4_{id}"`），但需要全路径前缀翻译，已在 commit `bcd27725→回退` 后恢复为简单方案（唯一 dev_name + 统一 `"/"` mount point）
 
 **上游 PR 建议**：建议 `Ext4BlockWrapper::new()` 接受可选 name/mount_point 参数，或提供 builder pattern。同时文档说明多实例用法。
 
