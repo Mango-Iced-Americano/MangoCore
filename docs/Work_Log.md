@@ -4,6 +4,50 @@
 
 ## 2026-07-06
 
+### lwext4 性能评测 Round 2 — PageCache 懒创建后对比
+
+**背景：** 完成 PageCache 懒创建修复后（`read_at`/`write_at` 强制走 PageCache），在 rv64 QEMU 上跑第二轮 iozone+lmbench 并对比修复前后。
+
+**Round 2 关键对比 (vs 修复前):**
+
+| 测试 | 旧 ext4 | lwext4 修复前 | lwext4 修复后 | vs 旧 ext4 | vs 修复前 |
+|------|---------|---------------|---------------|-----------|-----------|
+| **4 readers** | 2296 | 1901 | **8014** | **+249%** | **+4.2x** |
+| **4 re-readers** | 2295 | 1924 | **8026** | **+250%** | **+4.2x** |
+| **4 random readers** | 1681 | 1776 | **5987** | **+256%** | **+3.4x** |
+| **4 reverse readers** | 1681 | 1760 | **5953** | **+254%** | **+3.4x** |
+| 4 writers | 1818 | 116 | 155 | -91.5% | +33% |
+| 4 random writers | 1336 | 150 | 158 | -88.2% | +5% |
+
+**单进程 auto mode (musl):**
+
+| 操作 | 修复前 | 修复后 | 提升 |
+|------|--------|--------|------|
+| read | 1850 | **7751** | **4.2x** |
+| reread | 1882 | **7780** | **4.1x** |
+| random read | 1754 | **5899** | **3.4x** |
+| write | 117 | 161 | 1.4x |
+
+**lmbench 微基准：** 基本不变（bw_file_rd、fork+/bin/sh -c 等），因为这些测试走 `/var/tmp`（tmpfs），不走 ext4。
+
+**分析结论：**
+- 读热路径已解决 — PageCache 命中后直接 copy from page，不经过 lwext4 FFI
+- 写瓶颈仍在 journal — `write_pages` 虽然 batch 了 open/seek/close，但循环内每页一次 `f.file_write()`，每次 lwext4 内部 `ext4_fwrite` → `ext4_trans_start/stop`，4MB 文件 = 1024 个 journal 事务
+- 下一步：backend write coalescing（拼 staging buffer → 单次 `file_write`），预计从 1024 次事务 → ~4 次
+
+**ORACLE 关键发现：**
+- `ext4_fclose` 不提交 journal（只清零 mp/flags/inode/fpos/fsize），journal commit 在 `ext4_fwrite` 内部
+- per-inode file handle cache 只省 open/seek，不省 journal commit，优先级低于 write coalescing
+
+**涉及文件：**
+- 无新代码修改（仅测试运行）
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+- QEMU lmbench 全部通过（musl 81s, glibc 88s）exit_code=0
+- QEMU iozone musl 超时 480s（写仍然慢），glibc 被全局超时截断
+
 ### lwext4 PageCache 懒创建 — read_at/write_at 始终走 PageCache
 
 **涉及文件：**
