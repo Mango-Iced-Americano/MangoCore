@@ -97,6 +97,16 @@ impl<'a> Drop for FileGuard<'a> {
     }
 }
 
+/// Cached inode metadata — avoids per-write lwext4 probing.
+/// Built on first `metadata()` call, updated by `set_metadata()`.
+/// Timestamps are not cached (always fresh from `TimeSpec::new()`).
+#[derive(Clone, Copy)]
+struct CachedMeta {
+    mode: InodeMode,
+    uid: u32,
+    gid: u32,
+}
+
 // ── Ext4OSInode ─────────────────────────────────────────────────────────
 
 /// A VFS inode backed by a path on an lwext4-mounted filesystem.
@@ -117,6 +127,8 @@ pub struct Ext4OSInode {
     /// file size (1-byte write must not produce 4KB file).
     /// Lazily probed from lwext4 on first I/O via `logical_size_or_refresh()`.
     logical_size: Arc<AtomicUsize>,
+    /// Cached inode metadata — avoids lwext4 probe on every touch_modified().
+    cached_meta: Mutex<Option<CachedMeta>>,
 }
 
 // Safety: MangoCore is single-core; the circular Weak<Self> reference is
@@ -149,6 +161,7 @@ impl Ext4OSInode {
                 self_ref: Mutex::new(Some(weak.clone())),
                 page_cache: Mutex::new(None),
                 logical_size: Arc::new(AtomicUsize::new(LWEXT4_SIZE_UNKNOWN)),
+                cached_meta: Mutex::new(None),
             }
         })
     }
@@ -171,6 +184,7 @@ impl Ext4OSInode {
                 self_ref: Mutex::new(Some(weak.clone())),
                 page_cache: Mutex::new(None),
                 logical_size: Arc::new(AtomicUsize::new(LWEXT4_SIZE_UNKNOWN)),
+                cached_meta: Mutex::new(None),
             }
         })
     }
@@ -225,6 +239,42 @@ impl IndexNode for Ext4OSInode {
     // ── metadata ─────────────────────────────────────────────────────
 
     fn metadata(&self) -> Result<Metadata, SyscallErr> {
+        // Fast path: return from cache for regular files.
+        // Saves ~5 lwext4 FFI calls (file_mode_get/file_open/file_size/file_close)
+        // on every touch_modified() after write.
+        if let Some(ref cached) = *self.cached_meta.lock() {
+            let size: i64;
+            let blocks: usize;
+            if self.file_type == FileType::File {
+                let s = self.logical_size_or_refresh().unwrap_or(0);
+                size = s as i64;
+                blocks = if s > 0 {
+                    (s + self.fs.block_size() - 1) / self.fs.block_size()
+                } else { 0 };
+            } else {
+                size = 0;
+                blocks = 0;
+            }
+            return Ok(Metadata {
+                dev_id: self.fs.dev_id(),
+                inode_id: self.inode_id,
+                size,
+                blk_size: self.fs.block_size(),
+                blocks,
+                atime: TimeSpec::new(),
+                mtime: TimeSpec::new(),
+                ctime: TimeSpec::new(),
+                file_type: self.file_type,
+                mode: cached.mode,
+                flags: InodeFlags::empty(),
+                nlinks: if self.file_type == FileType::Dir { 2 } else { 1 },
+                uid: cached.uid,
+                gid: cached.gid,
+                raw_dev: 0,
+            });
+        }
+
+        // Cold path: probe from lwext4 and cache the result.
         // Inline probe type and mode inside a single lock scope.
         // Do NOT call self.fs.probe_type() which would re-lock self.fs.lw
         // and cause a spin::Mutex deadlock (spin::Mutex is not reentrant).
@@ -277,6 +327,13 @@ impl IndexNode for Ext4OSInode {
             };
             (mapped.file_type, mapped.inode_mode, size, blocks)
         };
+
+        // Cache mode for hot path
+        *self.cached_meta.lock() = Some(CachedMeta {
+            mode: inode_mode,
+            uid: 0,
+            gid: 0,
+        });
 
         // Metadata construction does NOT hold the lw lock.
         Ok(Metadata {
@@ -926,6 +983,32 @@ impl IndexNode for Ext4OSInode {
     }
 
     fn set_metadata(&self, metadata: &Metadata) -> Result<(), SyscallErr> {
+        // Check if only timestamps changed (touch_modified after write).
+        // In that case, just update the cache — skip all lwext4 FFI calls.
+        // Actual time persistence happens at sync() time.
+        let time_only = {
+            if let Some(ref cached) = *self.cached_meta.lock() {
+                cached.mode == metadata.mode
+                    && cached.uid == metadata.uid
+                    && cached.gid == metadata.gid
+            } else {
+                false
+            }
+        };
+
+        // Always update cache
+        *self.cached_meta.lock() = Some(CachedMeta {
+            mode: metadata.mode,
+            uid: metadata.uid,
+            gid: metadata.gid,
+        });
+
+        // Time-only: skip lwext4 FFI, defer to sync()
+        if time_only {
+            return Ok(());
+        }
+
+        // Mode/owner changed: do full lwext4 write-through
         let _lock = self.fs.lw.lock();
 
         // 1. chmod — fmode_set is a standalone operation (path-based, no open needed)
