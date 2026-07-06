@@ -31,11 +31,22 @@ pub struct Ext4BlockWrapper<K: KernelDevOp> {
 }
 
 impl<K: KernelDevOp> Ext4BlockWrapper<K> {
+    /// Convenience constructor: uses default device name "ext4_fs" and mount point "/".
+    /// For multi-filesystem setups, use `new_with_names()` instead.
     pub fn new(block_dev: K::DevType) -> Result<Self, i32> {
+        Self::new_with_names(block_dev, "ext4_fs", "/")
+    }
+
+    /// Full constructor with custom device name and mount point.
+    /// Use this when mounting multiple ext4 filesystems simultaneously to avoid
+    /// `ext4_device_register()` EEXIST collisions.
+    pub fn new_with_names(
+        block_dev: K::DevType,
+        dev_name: &str,
+        mount_point_str: &str,
+    ) -> Result<Self, i32> {
         // note this ownership
         let devt_user = Box::into_raw(Box::new(block_dev)) as *mut c_void;
-        //let devt_user = devt.as_mut() as *mut _ as *mut c_void;
-        //let devt_user = &mut block_dev as *mut _ as *mut c_void;
 
         // Block size buffer
         let bbuf = Box::new([0u8; EXT4_DEV_BSIZE as usize]);
@@ -70,35 +81,30 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
             journal: null_mut(),
         };
 
-        // TODO(Phase 4): Support configurable device name and mount point.
-        // Currently hardcoded to "ext4_fs" and "/", which prevents
-        // mounting multiple ext4 filesystems simultaneously.
-        // Future: add new_with_names() or setters for name/mount_point.
-        let c_name = CString::new("ext4_fs").expect("CString::new ext4_fs failed");
-        let c_name = c_name.as_bytes_with_nul(); // + '\0'
-                                                 //let c_mountpoint = CString::new("/mp/").unwrap();
-        let c_mountpoint = CString::new("/").unwrap();
+        // Use caller-provided device name (must fit in [u8; 16])
+        let c_name = CString::new(dev_name).expect("CString::new dev_name failed");
+        let c_name = c_name.as_bytes_with_nul();
+
+        // Use caller-provided mount point (must fit in [u8; 32])
+        let c_mountpoint = CString::new(mount_point_str).unwrap();
         let c_mountpoint = c_mountpoint.as_bytes_with_nul();
 
         let mut name: [u8; 16] = [0; 16];
         let mut mount_point: [u8; 32] = [0; 32];
-        name[..c_name.len()].copy_from_slice(c_name);
-        mount_point[..c_mountpoint.len()].copy_from_slice(c_mountpoint);
+        name[..c_name.len().min(16)].copy_from_slice(&c_name[..c_name.len().min(16)]);
+        mount_point[..c_mountpoint.len().min(32)]
+            .copy_from_slice(&c_mountpoint[..c_mountpoint.len().min(32)]);
 
         let mut ext4bd = Self {
             value: Box::new(ext4dev),
-            //block_dev,
             name,
             mount_point,
             pd: core::marker::PhantomData,
         };
 
-        info!("New an Ext4 Block Device");
+        info!("New an Ext4 Block Device: {}", dev_name);
         ext4bd.ext4_set_debug();
 
-        // ext4_blockdev into static instance
-        // lwext4_mount
-        // let c_mountpoint = c_mountpoint as *const _ as *const c_char;
         unsafe {
             ext4bd.lwext4_mount().map_err(|e| {
                 error!("Failed to mount the ext4 file system, perhaps the disk is not an EXT4 file system.");

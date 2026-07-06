@@ -4,6 +4,20 @@
 
 ## 2026-07-06
 
+### lwext4 多盘挂载修复 — `ext4_device_register()` EEXIST 碰撞
+
+**涉及文件：**
+- `dependency/lwext4_rust/src/blockdev.rs` — 新增 `new_with_names(block_dev, dev_name, mount_point_str)` 构造器，允许调用方指定自定义设备名和挂载点；原有 `new()` 改为调用 `new_with_names()` 的便利包装（默认 `"ext4_fs"` + `"/"`）
+- `os/src/fs/ext4_lwext4/ext4fs.rs` — `open_ext4rs()`: 使用 `NEXT_FS_ID` 生成唯一设备名 `"ext4_{id}"` 并调用 `new_with_names()`；`fs_id` 计算移到 `Ext4BlockWrapper` 构造之前，确保设备注册发生在 `fetch_add` 之后
+
+**验证：**
+- `make rv64-kernel-build-only` ✅ — 0 错误
+- `make la64-kernel-build-only` ✅ — 0 错误
+
+**备注：**
+- 根因：lwext4_rust 的 `Ext4BlockWrapper::new()` 将设备名硬编码为 `"ext4_fs"`，lwext4 C 库的 `ext4_device_register()` 要求设备名全局唯一，挂载第二个 ext4 文件系统时返回 EEXIST
+- 修复策略：最小侵入 — 只改构造期，不动 `lwext4_mount()`/`lwext4_umount()` 路径；`new_with_names` 同时接受 `dev_name` 和 `mount_point_str` 两个参数（虽然目前 mount_point 仍用 `"/"`），为未来多挂载点场景预留灵活性
+
 ### lwext4 VFS 适配器 — Oracle 审计修复（死锁/panic/文件句柄泄漏/EOF clamp/dir_open/errno）
 
 **涉及文件：**

@@ -87,16 +87,23 @@ impl Ext4FileSystem {
 
         // 2. Mount: this calls ext4_device_register, ext4_mount, ext4_recover,
         //    ext4_journal_start internally.
-        let lw = Ext4BlockWrapper::<MangoKernelDevOp>::new(mbd)
+        //    Use unique device name to avoid ext4_device_register() EEXIST
+        //    when mounting multiple ext4 filesystems.
+        let fs_id = NEXT_FS_ID.fetch_add(1, Ordering::Relaxed);
+        let dev_name = alloc::format!("ext4_{}", fs_id);
+        let lw = Ext4BlockWrapper::<MangoKernelDevOp>::new_with_names(mbd, &dev_name, "/")
             .map_err(|e| {
-                log::error!("[lwext4] failed to mount ext4 filesystem: errno={}", e);
-                from_lwext4(e.abs())
+                log::error!(
+                    "[lwext4] failed to mount ext4 filesystem (id={}): errno={}",
+                    fs_id,
+                    e
+                );
+                SyscallErr::EIO
             })?;
 
         log::info!("[lwext4] Ext4BlockWrapper created, block_size={}", crate::hal::BLOCK_SZ);
 
         // 3. Build FS struct
-        let fs_id = NEXT_FS_ID.fetch_add(1, Ordering::Relaxed);
         let fs_info = FsInfo {
             blk_dev_id: fs_id,
             max_name_len: 255,
