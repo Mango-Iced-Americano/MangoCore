@@ -79,6 +79,14 @@ int fflush(FILE *f)
 
 // +++++++++ uClibc +++++++++
 
+__attribute__((weak))
+size_t strlen(const char *s)
+{
+        const char *p = s;
+        while (*p) p++;
+        return p - s;
+}
+
 __attribute__((weak)) 
 void *memset(void *s, int c, size_t n)
 {

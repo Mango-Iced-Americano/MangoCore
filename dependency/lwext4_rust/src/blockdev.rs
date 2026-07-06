@@ -112,7 +112,8 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
 
         Ok(ext4bd)
     }
-    pub unsafe extern "C" fn dev_open(bdev: *mut ext4_blockdev) -> ::core::ffi::c_int {
+    pub extern "C" fn dev_open(bdev: *mut ext4_blockdev) -> ::core::ffi::c_int {
+        unsafe {
         let p_user = (*(*bdev).bdif).p_user;
         debug!("OPEN Ext4 block device p_user={:#x}", p_user as usize);
         // DevType: Disk
@@ -139,13 +140,15 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
         (*bdev).part_size = cur as u64; //ftello()
         (*(*bdev).bdif).ph_bcnt = (*bdev).part_size / (*(*bdev).bdif).ph_bsize as u64;
         EOK as _
+        }
     }
-    pub unsafe extern "C" fn dev_bread(
+    pub extern "C" fn dev_bread(
         bdev: *mut ext4_blockdev,
         buf: *mut ::core::ffi::c_void,
         blk_id: u64,
         blk_cnt: u32,
     ) -> ::core::ffi::c_int {
+        unsafe {
         debug!("READ Ext4 block id: {}, count: {}", blk_id, blk_cnt);
         let devt = unsafe { &mut *((*(*bdev).bdif).p_user as *mut K::DevType) };
 
@@ -173,13 +176,15 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
         };
 
         EOK as _
+        }
     }
-    pub unsafe extern "C" fn dev_bwrite(
+    pub extern "C" fn dev_bwrite(
         bdev: *mut ext4_blockdev,
         buf: *const ::core::ffi::c_void,
         blk_id: u64,
         blk_cnt: u32,
     ) -> ::core::ffi::c_int {
+        unsafe {
         debug!("WRITE Ext4 block id: {}, count: {}", blk_id, blk_cnt);
 
         let devt = unsafe { &mut *((*(*bdev).bdif).p_user as *mut K::DevType) };
@@ -213,8 +218,9 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
         // sync
 
         EOK as _
+        }
     }
-    pub unsafe extern "C" fn dev_close(_bdev: *mut ext4_blockdev) -> ::core::ffi::c_int {
+    pub extern "C" fn dev_close(_bdev: *mut ext4_blockdev) -> ::core::ffi::c_int {
         debug!("CLOSE Ext4 block device");
         //fclose(dev_file);
         EOK as _

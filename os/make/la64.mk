@@ -25,13 +25,13 @@ lwext4-la64: $(LWEXT4_LA_LIB)
 
 $(LWEXT4_LA_LIB):
 	@echo "=== Building lwext4 C library for loongarch64 ==="
-	@cp -f ../dependency/lwext4_rust/c/el-linux-gnu.cmake $(LWEXT4_LA_DIR)/toolchain/musl-generic.cmake
+	@cp -f ../dependency/lwext4_rust/c/elf-linux-gnu.cmake $(LWEXT4_LA_DIR)/toolchain/musl-generic.cmake
 	@cp -f ../dependency/lwext4_rust/c/ulibc.c $(LWEXT4_LA_DIR)/src/ulibc.c
 	@grep -q 'ulibc.c' $(LWEXT4_LA_DIR)/src/CMakeLists.txt 2>/dev/null || \
 		sed -i '/aux_source_directory/a set(M_SRC ulibc.c)' $(LWEXT4_LA_DIR)/src/CMakeLists.txt
 	@grep -q '$${M_SRC}' $(LWEXT4_LA_DIR)/src/CMakeLists.txt 2>/dev/null || \
 		sed -i 's/add_library(lwext4 STATIC $${LWEXT4_SRC})/add_library(lwext4 STATIC $${LWEXT4_SRC} $${M_SRC})/' $(LWEXT4_LA_DIR)/src/CMakeLists.txt
-	@mkdir -p $(LWEXT4_LA_DIR)/build_musl-generic
+	@mkdir -p $(LWEXT4_LA_DIR)/build_lwext4-la64
 	@PATH="$(LWEXT4_LA_TOOLCHAIN_PATH):$$PATH" \
 	 ARCH=loongarch64 cmake -G"Unix Makefiles" \
 	   -DCMAKE_BUILD_TYPE=Release \
@@ -40,10 +40,10 @@ $(LWEXT4_LA_LIB):
 	   -DLIB_ONLY=TRUE \
 	   -DCMAKE_TOOLCHAIN_FILE=../toolchain/musl-generic.cmake \
 	   -S $(LWEXT4_LA_DIR) \
-	   -B $(LWEXT4_LA_DIR)/build_musl-generic 2>&1 | tail -5
+	   -B $(LWEXT4_LA_DIR)/build_lwext4-la64 2>&1 | tail -5
 	@PATH="$(LWEXT4_LA_TOOLCHAIN_PATH):$$PATH" \
-	 $(MAKE) -C $(LWEXT4_LA_DIR)/build_musl-generic lwext4 -j$$(nproc)
-	@cp -f $(LWEXT4_LA_DIR)/build_musl-generic/src/liblwext4.a $(LWEXT4_LA_LIB)
+	 $(MAKE) -C $(LWEXT4_LA_DIR)/build_lwext4-la64 lwext4 -j$$(nproc)
+	@cp -f $(LWEXT4_LA_DIR)/build_lwext4-la64/src/liblwext4.a $(LWEXT4_LA_LIB)
 	@echo "=== lwext4 loongarch64 .a built ==="
 
 # BOARD
@@ -119,16 +119,16 @@ $(INITRAMFS_CPIO_LA): user
 	@touch src/initramfs-la.S
 
 # lwext4: always build C library (now the default ext4 backend)
+export LWEXT4_LIB_DIR := $(abspath $(LWEXT4_LA_DIR))
 LWEXT4_LA_PREREQ := lwext4-la64
-LWEXT4_LA_ENV := LWEXT4_LIB_DIR=$(abspath $(LWEXT4_LA_DIR))
 
 kernel: $(LWEXT4_LA_PREREQ)
 	@echo Platform: $(BOARD)
 	@cp -f src/hal/arch/loongarch64/linker-$(BOARD).ld src/hal/arch/loongarch64/linker.ld 2>/dev/null || true
 ifeq ($(MODE), debug)
-	@$(LWEXT4_LA_ENV) LOG=$(LOG) cargo build --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
+	@LOG=$(LOG) cargo build --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
 else
-	@$(LWEXT4_LA_ENV) LOG=$(LOG) cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
+	@LOG=$(LOG) cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
 endif
 
 # uImage (la64-specific: for uboot boot)

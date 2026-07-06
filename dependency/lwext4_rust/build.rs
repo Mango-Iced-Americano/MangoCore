@@ -10,7 +10,7 @@ fn main() {
     };
     let lib_name = format!("lwext4-{}", std::env::var("CARGO_CFG_TARGET_ARCH").unwrap());
 
-    println!("cargo:rustc-link-lib=static={}", lib_name);
+    println!("cargo:rustc-link-lib=static:+whole-archive={}", lib_name);
     println!("cargo:rustc-link-search=native={}", lib_dir);
     println!("cargo:rerun-if-env-changed=LWEXT4_LIB_DIR");
     println!("cargo:rerun-if-changed=build.rs");

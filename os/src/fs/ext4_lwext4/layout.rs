@@ -658,7 +658,8 @@ impl IndexNode for Ext4OSInode {
         if file_type == FileType::SymLink {
             // data is a *const c_char null-terminated string in kernel space
             // SAFETY: caller guarantees data is a valid null-terminated C string
-            let target_bytes = unsafe { CStr::from_ptr(data as *const u8) };
+            // c_char type varies across Rust nightly versions; core::ffi::c_char is always correct
+            let target_bytes = unsafe { CStr::from_ptr(data as *const core::ffi::c_char) };
             let target = target_bytes.to_str().map_err(|_| SyscallErr::EINVAL)?;
             self.symlink(name, target)
         } else {

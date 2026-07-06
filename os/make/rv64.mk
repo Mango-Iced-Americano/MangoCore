@@ -47,8 +47,8 @@ $(LWEXT4_RV_LIB):
 	@grep -q '$${M_SRC}' $(LWEXT4_DIR)/src/CMakeLists.txt 2>/dev/null || \
 		sed -i 's/add_library(lwext4 STATIC $${LWEXT4_SRC})/add_library(lwext4 STATIC $${LWEXT4_SRC} $${M_SRC})/' $(LWEXT4_DIR)/src/CMakeLists.txt
 	@# Build with cmake directly (bypasses the lwext4 Makefile)
-	@mkdir -p $(LWEXT4_DIR)/build_musl-generic
-	@cd $(LWEXT4_DIR)/build_musl-generic && \
+	@mkdir -p $(LWEXT4_DIR)/build_lwext4-rv64
+	@cd $(LWEXT4_DIR)/build_lwext4-rv64 && \
 		ARCH=riscv64 cmake -G"Unix Makefiles" \
 			-DCMAKE_BUILD_TYPE=Release \
 			-DVERSION_MAJOR=1 -DVERSION_MINOR=0 -DVERSION_PATCH=0 \
@@ -56,12 +56,12 @@ $(LWEXT4_RV_LIB):
 			-DLIB_ONLY=TRUE \
 			-DCMAKE_TOOLCHAIN_FILE=../toolchain/musl-generic.cmake \
 			.. 2>&1 | tail -5
-	@cd $(LWEXT4_DIR)/build_musl-generic && make lwext4 -j$$(nproc)
-	@cp -f $(LWEXT4_DIR)/build_musl-generic/src/liblwext4.a $(LWEXT4_RV_LIB)
+	@cd $(LWEXT4_DIR)/build_lwext4-rv64 && make lwext4 -j$$(nproc)
+	@cp -f $(LWEXT4_DIR)/build_lwext4-rv64/src/liblwext4.a $(LWEXT4_RV_LIB)
 	@echo "=== lwext4 riscv64 .a built at $(LWEXT4_RV_LIB) ==="
 
 clean-lwext4-rv:
-	@rm -rf $(LWEXT4_DIR)/build_musl-generic $(LWEXT4_RV_LIB)
+	@rm -rf $(LWEXT4_DIR)/build_lwext4-rv64 $(LWEXT4_RV_LIB)
 
 ifeq ($(BOARD), vf2)
 	ROOTFS_IMG := /dev/sdc
@@ -152,16 +152,16 @@ $(INITRAMFS_CPIO_RV): user
 
 # xein TODO: 注意需要评估zero_init启用与否的影响
 # lwext4: always build C library (now the default ext4 backend)
+export LWEXT4_LIB_DIR := $(abspath $(LWEXT4_DIR))
 LWEXT4_PREREQ := lwext4-rv64
-LWEXT4_ENV := LWEXT4_LIB_DIR=$(abspath $(LWEXT4_DIR))
 
 kernel: $(LWEXT4_PREREQ)
 	@echo Platform: $(BOARD)
 	@cp -f src/hal/arch/riscv/linker-$(BOARD).ld src/hal/arch/riscv/linker.ld
     ifeq ($(MODE), debug)
-		@$(LWEXT4_ENV) LOG=${LOG} cargo build --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)"
+		@LOG=${LOG} cargo build --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)"
     else
-		@$(LWEXT4_ENV) LOG=${LOG} cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)"
+		@LOG=${LOG} cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)"
     endif
 
 clean:
