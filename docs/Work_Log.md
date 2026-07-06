@@ -4,6 +4,55 @@
 
 ## 2026-07-06
 
+### lwext4 性能评测 Round 4 — metadata 缓存消除 touch_modified() 瓶颈
+
+**背景：** Oracle 诊断出写路径瓶颈不在 `PageCache::write()`，而在之后的 `File::touch_modified()` → `metadata()` + `set_metadata()`，每次触发 5-6 次 lwext4 FFI 调用。修复：`Ext4OSInode` 新增 `cached_meta`（模式/uid/gid），`metadata()` 优先从缓存返回，`set_metadata()` 仅在模式/所有者变化时才走 lwext4（时间戳更新仅更新缓存，推迟到 sync()）。
+
+**Round 4 关键数据 (musl):**
+
+| 测试 | Round 3 | Round 4 | vs 旧 ext4 |
+|------|---------|---------|-----------|
+| **4 initial writers** | 164 | **7021** | **+286%** 🎉 |
+| **4 rewriters** | 150 | **7489** | **+315%** 🎉 |
+| **4 random writers** | 158 | **5415** | **+305%** 🎉 |
+| 4 readers | 8226 | 7968 | **+247%** ✅ |
+| 4 fwriters | — | **6552** | — |
+
+单进程 auto mode (musl): write=8554, rewrite=8798, read=7484
+
+**iozone 完整流程通过 (131s, exit_code=0)** — 首次无 480s 超时！
+
+**四轮优化总结：**
+
+| 回合 | 优化 | 写吞吐 | vs R1 | 瓶颈 |
+|------|------|--------|-------|------|
+| R1 | baseline (direct I/O) | 116 | — | per-write open/journal/close |
+| R2 | +PageCache lazy create | 155 | +34% | PageCache writeback journal |
+| R3 | +write coalescing | 164 | +41% | touch_modified() lwext4 FFI |
+| **R4** | **+metadata cache** | **7021** | **+60x** | QEMU CPU 上限 |
+
+**对比旧 ext4 全指标 (musl):**
+
+| 测试 | 旧 ext4 | lwext4 R4 |
+|------|---------|-----------|
+| 4 writers | 1818 | **7021** (+286%) |
+| 4 rewriters | 1805 | **7489** (+315%) |
+| 4 readers | 2296 | **7968** (+247%) |
+| 4 random writers | 1336 | **5415** (+305%) |
+| 4 random readers | 1681 | **5882** (+250%) |
+
+**涉及文件：**
+- `os/src/fs/ext4_lwext4/layout.rs` — Ext4OSInode: 新增 `cached_meta: Mutex<Option<CachedMeta>>` 字段；`metadata()` 优先从缓存返回（+logical_size）；`set_metadata()` 仅在模式/所有者变化时走 lwext4（时间戳更新仅更新缓存）
+
+**验证：**
+- `make rv64-kernel-build-only` ✅ (3m11s)
+- `make la64-kernel-build-only` ✅ (2m19s)
+- QEMU iozone musl 全部完成 (131s, exit_code=0)，glibc 部分完成（被全局超时截断）
+
+**备注：**
+- 根因确认：`File::touch_modified()`（file.rs:1559）在每次 `write()` 后无条件调用，lwext4 的 `metadata()` 每次 `file_open+file_size+file_close`，`set_metadata()` 每次 `file_mode_set+ext4_owner_set+ext4_mtime_set+ext4_ctime_set`
+- 旧 ext4 驱动的 `metadata()` 是 inode snapshot/cache（O(1)），`set_metadata()` 直接写 inode 块
+
 ### lwext4 性能评测 Round 2 — PageCache 懒创建后对比
 
 **背景：** 完成 PageCache 懒创建修复后（`read_at`/`write_at` 强制走 PageCache），在 rv64 QEMU 上跑第二轮 iozone+lmbench 并对比修复前后。
