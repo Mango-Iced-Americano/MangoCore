@@ -202,19 +202,41 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
         }
         let start_offset = start_index * PAGE_SIZE;
         let result = (|| -> Result<usize, SyscallErr> {
+            // Compute total raw bytes from all pages
+            let raw_total: usize = pages.iter().map(|p| PAGE_SIZE.min(p.len())).sum();
+            // Clamp to logical EOF to avoid writing a full page for a partial last page
+            let eof = self.logical_size.load(Ordering::Relaxed);
+            let total_bytes = if eof == LWEXT4_SIZE_UNKNOWN {
+                raw_total
+            } else {
+                raw_total.min(eof.saturating_sub(start_offset))
+            };
+            if total_bytes == 0 {
+                return Ok(0);
+            }
+
+            // Build staging buffer: concatenate all pages for a single file_write.
+            // This avoids per-page ext4_fwrite → ext4_trans_start/stop overhead:
+            // 4MB file drops from ~1024 journal transactions to ~4.
+            let mut staging = alloc::vec![0u8; total_bytes];
+            let mut copied = 0;
+            for page in pages.iter() {
+                let page_bytes = PAGE_SIZE.min(page.len());
+                let remaining = total_bytes.saturating_sub(copied);
+                if remaining == 0 { break; }
+                let n = page_bytes.min(remaining);
+                staging[copied..copied + n].copy_from_slice(&page[..n]);
+                copied += n;
+            }
+
             f.file_seek(start_offset as i64, 0)
                 .map_err(|e| from_lwext4(e.abs()))?;
-            let mut total = 0;
-            for (i, page) in pages.iter().enumerate() {
-                let write_len = PAGE_SIZE.min(page.len());
-                let n = f.file_write(&page[..write_len])
-                    .map_err(|e| from_lwext4(e.abs()))?;
-                total += n;
-                // fetch_max: update logical_size if we extended the file
-                let new_end = start_offset + (i * PAGE_SIZE) + n;
-                Self::note_logical_size_atomic(&self.logical_size, new_end);
-            }
-            Ok(total)
+            let n = f.file_write(&staging[..total_bytes])
+                .map_err(|e| from_lwext4(e.abs()))?;
+
+            // Single logical_size update for entire batch
+            Self::note_logical_size_atomic(&self.logical_size, start_offset + n);
+            Ok(n)
         })();
         f.file_close().ok();
         result

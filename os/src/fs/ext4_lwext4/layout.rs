@@ -186,7 +186,10 @@ impl Ext4OSInode {
             let _lock = self.fs.lw.lock();
             let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_REG_FILE);
             if f.file_open(&self.path, 0x0).is_err() {
-                // File doesn't exist yet (will be created on first write)
+                // File doesn't exist yet — store 0 to avoid re-probing on
+                // every write_at call. The file will be created on first
+                // writeback (via O_RDWR|O_CREAT|O_TRUNC in write_page).
+                self.logical_size.store(0, Ordering::Relaxed);
                 return Ok(0);
             }
             let s = f.file_size() as usize;
