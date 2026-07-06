@@ -4,6 +4,20 @@
 
 ## 2026-07-06
 
+### lwext4 多实例挂载点碰撞修复 — 唯一 mount point
+
+**涉及文件：**
+- `os/src/fs/ext4_lwext4/ext4fs.rs` — 新增 `lw_prefix: String` 字段（如 `"/ext4_0"`）、`to_lw_path()` 方法；`open_ext4rs()` 中使用唯一 mount point `"/ext4_{id}"` 替代硬编码 `"/"`；`probe_type()`、`get_inode_id()`、`super_block()` 改用 lwext4 前缀路径
+- `os/src/fs/ext4_lwext4/layout.rs` — 新增 `lw_path()` 辅助方法；所有 lwext4 API 调用（`Ext4File::new`、`file_open`、`CString::new` 等）改用 lwext4 前缀路径；`ensure_page_cache()` 传递 lwext4 路径供 PageCache 后端使用
+
+**验证：**
+- `make rv64-kernel-build-only` ✅ — 0 错误
+
+**备注：**
+- 根因：此前 `NEXT_FS_ID` 已解决 `ext4_device_register()` 的设备名唯一性（EEXIST），但 mount point 仍硬编码为 `"/"`。`ext4_mount()` 发现重复挂载点时静默返回 EOK 而不执行实际挂载，导致第二块盘看似挂载成功但内容为空
+- 修复策略：为每个 ext4 实例分配唯一 lwext4 mount point（`"/ext4_{id}"`），所有 lwext4 C API 路径调用前由 `to_lw_path()` 添加前缀；VFS 层路径（`self.path`）**完全不变**，前缀仅对 lwext4 内部透明
+- PageCache 后端（`LwExt4PageCacheBackend`）通过 `ensure_page_cache()` 传入 lwext4 路径，无需修改其内部逻辑
+
 ### lwext4 多盘挂载修复 — `ext4_device_register()` EEXIST 碰撞
 
 **涉及文件：**

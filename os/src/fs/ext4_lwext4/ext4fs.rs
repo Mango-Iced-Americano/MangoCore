@@ -6,6 +6,7 @@
 //! library uses global state internally.
 
 use alloc::ffi::CString;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use core::any::Any;
@@ -52,6 +53,8 @@ pub struct Ext4FileSystem {
     block_size: usize,
     /// Unique per-instance device ID.
     fs_id: usize,
+    /// lwext4 internal mount point prefix, e.g. "/ext4_0"
+    pub(crate) lw_prefix: String,
     /// Whether the filesystem is currently mounted (for idempotent umount).
     mounted: AtomicBool,
 }
@@ -88,10 +91,12 @@ impl Ext4FileSystem {
         // 2. Mount: this calls ext4_device_register, ext4_mount, ext4_recover,
         //    ext4_journal_start internally.
         //    Use unique device name to avoid ext4_device_register() EEXIST
+        //    and unique mount point to avoid ext4_mount() duplicate collision
         //    when mounting multiple ext4 filesystems.
         let fs_id = NEXT_FS_ID.fetch_add(1, Ordering::Relaxed);
         let dev_name = alloc::format!("ext4_{}", fs_id);
-        let lw = Ext4BlockWrapper::<MangoKernelDevOp>::new_with_names(mbd, &dev_name, "/")
+        let mount_point = alloc::format!("/ext4_{}", fs_id);
+        let lw = Ext4BlockWrapper::<MangoKernelDevOp>::new_with_names(mbd, &dev_name, &mount_point)
             .map_err(|e| {
                 log::error!(
                     "[lwext4] failed to mount ext4 filesystem (id={}): errno={}",
@@ -117,6 +122,7 @@ impl Ext4FileSystem {
             fs_info,
             block_size: crate::hal::BLOCK_SZ,
             fs_id,
+            lw_prefix: mount_point,
             mounted: AtomicBool::new(true),
         });
 
@@ -138,14 +144,28 @@ impl Ext4FileSystem {
         self.block_size
     }
 
+    /// Convert VFS path to lwext4 internal path by prepending mount prefix.
+    ///
+    /// VFS path "/bin/busybox" on fs with prefix "/ext4_0" becomes
+    /// "/ext4_0/bin/busybox".  This is ONLY used for lwext4 API arguments;
+    /// VFS-visible paths are unchanged.
+    pub(crate) fn to_lw_path(&self, vfs_path: &str) -> String {
+        if vfs_path == "/" {
+            self.lw_prefix.clone()
+        } else {
+            alloc::format!("{}{}", self.lw_prefix, vfs_path)
+        }
+    }
+
     /// Get the real ext4 inode number for a path using ext4_raw_inode_fill.
     ///
     /// Returns the ext4 inode number on success, or 0 on failure (with a
     /// logged warning).  Zero is used as a safe fallback since inode 0 is
     /// reserved in ext4.
     pub(crate) fn get_inode_id(&self, full_path: &str) -> Result<usize, SyscallErr> {
+        let lw_path = self.to_lw_path(full_path);
         let _lock = self.lw.lock();
-        let c_path = CString::new(full_path).map_err(|_| SyscallErr::EINVAL)?;
+        let c_path = CString::new(lw_path).map_err(|_| SyscallErr::EINVAL)?;
         let c_path = c_path.into_raw();
         let mut ino: u32 = 0;
         let mut raw_inode: lwext4_rust::bindings::ext4_inode = unsafe { core::mem::zeroed() };
@@ -154,7 +174,7 @@ impl Ext4FileSystem {
         };
         unsafe { let _ = CString::from_raw(c_path); }
         if r != 0 {
-            log::warn!("[lwext4] get_inode_id failed for '{}': errno={}", full_path, r);
+            log::warn!("[lwext4] get_inode_id failed for '{}' (lw_path): errno={}", full_path, r);
             return Err(from_lwext4(r.abs()));
         }
         Ok(ino as usize)
@@ -178,8 +198,9 @@ impl Ext4FileSystem {
     /// Uses `fmode_get()` which works for all inode types (files, dirs,
     /// symlinks, devices).
     pub(crate) fn probe_type(&self, full_path: &str) -> Result<super::layout::MappedType, SyscallErr> {
+        let lw_path = self.to_lw_path(full_path);
         let _lock = self.lw.lock();
-        let mut f = lwext4_rust::Ext4File::new(full_path, InodeTypes::EXT4_DE_UNKNOWN);
+        let mut f = lwext4_rust::Ext4File::new(&lw_path, InodeTypes::EXT4_DE_UNKNOWN);
         let mode = f.file_mode_get().map_err(|e| from_lwext4(e.abs()))?;
         Ok(super::layout::map_lwext4_mode(mode))
     }
@@ -211,7 +232,7 @@ impl FileSystem for Ext4FileSystem {
         let _lock = self.lw.lock();
         let mut stats: lwext4_rust::bindings::ext4_mount_stats =
             unsafe { core::mem::zeroed() };
-        let c_mp = CString::new("/").unwrap();
+        let c_mp = CString::new(self.lw_prefix.as_str()).unwrap();
         let c_mp = c_mp.into_raw();
         unsafe {
             lwext4_rust::bindings::ext4_mount_point_stats(c_mp, &mut stats);
