@@ -138,8 +138,9 @@ uimage: $(KERNEL_BIN)
 	  -n NPUcore+ -d $(KERNEL_BIN) $(KERNEL_UIMG)
 
 clean:
-	@cargo clean
+	@which cargo >/dev/null 2>&1 && cargo clean || true
 	@rm -rf $(KERNEL_LA)
+	@rm -rf $(LWEXT4_LA_DIR)/build_lwext4-la64 $(LWEXT4_LA_LIB)
 
 # ============================================================
 # QEMU run targets

@@ -165,8 +165,9 @@ kernel: $(LWEXT4_PREREQ)
     endif
 
 clean:
-	@cargo clean
+	@which cargo >/dev/null 2>&1 && cargo clean || true
 	@rm -rf $(KERNEL_RV)
+	@rm -rf $(LWEXT4_DIR)/build_lwext4-rv64 $(LWEXT4_RV_LIB)
 
 run: build
 ifeq ($(BOARD), rvqemu)
