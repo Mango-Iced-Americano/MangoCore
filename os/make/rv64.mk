@@ -64,12 +64,10 @@ clean-lwext4-rv:
 	@rm -rf $(LWEXT4_DIR)/build_lwext4-rv64 $(LWEXT4_RV_LIB)
 
 ifeq ($(BOARD), vf2)
-	ROOTFS_IMG := /dev/sdc
+ROOTFS_IMG := /dev/sdc
 else
-	ROOTFS_IMG := ${ROOTFS_IMG_DIR}/${ROOTFS_IMG_NAME}
+ROOTFS_IMG := ${ROOTFS_IMG_DIR}/${ROOTFS_IMG_NAME}
 endif
-# Ensure ROOTFS_IMG is never empty
-ROOTFS_IMG ?= ${ROOTFS_IMG_DIR}/${ROOTFS_IMG_NAME}
 
 APPS := ../user/src/bin/*
 
