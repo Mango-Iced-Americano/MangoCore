@@ -690,3 +690,18 @@ diag=1
 
 - **相关文件**: `os/src/fs/page_cache.rs`（`sync_batch_read_pages`、`evict_clean_pages_clock`）
 - **相关文件**: `os/src/fs/vfs/mount.rs` (`do_find`, `lookup_dotdot`, `do_parent`)
+
+## Buffered I/O 必须始终走 PageCache — 禁止 fallback 到 direct I/O
+
+- **根因**: 当 `read_at`/`write_at` 使用 `if let Some(pc) = self.page_cache()` 模式时，PageCache 未创建时 fallback 到直接 open/seek/read/write/close。对于每次 I/O 都触发 open/close 的后端（如 lwext4 的 path-based API），这导致 read 吞吐降为 1/17、write 降为 1/15（vs 走 PageCache 的热路径）。
+
+- **症状**: iozone 4 readers 从 8014 KB/s（走 PageCache）降到 1901 KB/s（fallback direct I/O）；4 writers 从 155 降到 116；单次 1KB write 触发完整 open→journal→write→commit→close 链路。
+
+- **修复**: 用 `ensure_page_cache()`（懒创建）替代 `page_cache()`（只读查询）。I/O 永远路由到 PageCache，后端通过 `read_page`/`write_pages` 做实际 I/O。需配套 `logical_size` 共享计数器防止写回时 1 字节写入被 PageCache 整页写回扩成 4KB 文件。
+
+- **教训**:
+  1. 任何 buffered I/O 实现中，`page_cache()` 的 `Option` 返回只应用于 mmap 和内存管理路径；read/write 热路径必须用 `ensure_page_cache()` 确保缓存存在，没有直接 I/O fallback
+  2. 写路径的 PageCache 必须配合 shared `logical_size` 跟踪 VFS 文件大小，否则 writeback 按整页粒度写回会破坏 POSIX 文件大小语义
+  3. 当后端 I/O 有 per-call 事务开销（如 journal commit）时，仅 batch open/seek/close 不够 — 必须也 batch write 调用本身（write coalescing），否则事务次数 = 页面数而非批次数
+
+- **相关文件**: `os/src/fs/ext4_lwext4/layout.rs`（`read_at`、`write_at`、`ensure_page_cache`、`logical_size_or_refresh`）、`os/src/fs/ext4_lwext4/page_cache.rs`（`LwExt4PageCacheBackend`、`LWEXT4_SIZE_UNKNOWN`、`ensure_size_known`）
