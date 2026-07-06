@@ -8,7 +8,7 @@
 //! Slow but correct — each page I/O does fopen/fseek/fread/fwrite/fclose.
 //! For batching, `read_pages`/`write_pages` open once and do sequential I/O.
 
-use alloc::sync::Weak;
+use alloc::sync::{Arc, Weak};
 use alloc::string::String;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -20,43 +20,75 @@ use lwext4_rust::{Ext4File, InodeTypes};
 
 use super::errno::from_lwext4;
 
+/// Sentinel: size has not been fetched from lwext4 yet.
+/// usize::MAX is chosen because no real file can be > 2^64 bytes,
+/// and on a 64-bit system usize::MAX = u64::MAX.
+pub(crate) const LWEXT4_SIZE_UNKNOWN: usize = usize::MAX;
+
 /// PageCache backend that reads/writes pages through lwext4 file API.
 ///
 /// Holds a `Weak` reference to the owning filesystem (for lwext4 C call
-/// serialization) and a cached file size (`Cell<usize>`) refreshed on each
-/// `npages()` call.
+/// serialization) and a shared logical file size (updated by write operations,
+/// lazily probed from lwext4 on first read).
 pub struct LwExt4PageCacheBackend {
     /// Weak reference to the owning filesystem (for lwext4 C call serialization)
     fs: Weak<super::ext4fs::Ext4FileSystem>,
     /// Full path from mount root, e.g. "/bin/busybox"
     path: String,
-    /// Cached file size (refreshed on each `npages()` call)
-    size: AtomicUsize,
+    /// Shared logical file size — writeback clamps to this to prevent
+    /// 1-byte writes from producing 4KB files. Lazily refreshed on first I/O.
+    logical_size: Arc<AtomicUsize>,
 }
 
 impl LwExt4PageCacheBackend {
     /// Create a new backend for the given file path.
     ///
-    /// Probes the current file size on construction so `npages()` returns a
-    /// sensible value even before the first I/O.
-    pub fn new(fs: Weak<super::ext4fs::Ext4FileSystem>, path: String) -> Self {
-        let size = if let Some(fs_arc) = fs.upgrade() {
-            let _lock = fs_arc.lw.lock();
-            let mut f = Ext4File::new(&path, InodeTypes::EXT4_DE_REG_FILE);
-            if f.file_open(&path, 0x0).is_ok() {
-                let s = f.file_size() as usize;
-                f.file_close().ok();
-                s
-            } else {
-                0
-            }
-        } else {
-            0
-        };
+    /// `logical_size` is shared with the parent `Ext4OSInode`. It starts as
+    /// `LWEXT4_SIZE_UNKNOWN` and is lazily refreshed on first I/O.
+    pub fn new(
+        fs: Weak<super::ext4fs::Ext4FileSystem>,
+        path: String,
+        logical_size: Arc<AtomicUsize>,
+    ) -> Self {
         Self {
             fs,
             path,
-            size: AtomicUsize::new(size),
+            logical_size,
+        }
+    }
+
+    /// Ensure `logical_size` is known, probing from lwext4 on first call.
+    fn ensure_size_known(&self, fs: &Arc<super::ext4fs::Ext4FileSystem>) -> Result<usize, SyscallErr> {
+        let cached = self.logical_size.load(Ordering::Relaxed);
+        if cached != LWEXT4_SIZE_UNKNOWN {
+            return Ok(cached);
+        }
+        let _lock = fs.lw.lock();
+        let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_REG_FILE);
+        let size = if f.file_open(&self.path, 0x0).is_ok() {
+            let s = f.file_size() as usize;
+            f.file_close().ok();
+            s
+        } else {
+            0
+        };
+        self.logical_size.store(size, Ordering::Relaxed);
+        Ok(size)
+    }
+
+    /// Atomic fetch_max update for `logical_size`, treating UNKNOWN as 0.
+    fn note_logical_size_atomic(logical_size: &AtomicUsize, new_size: usize) {
+        let mut prev = logical_size.load(Ordering::Relaxed);
+        if prev == LWEXT4_SIZE_UNKNOWN {
+            prev = 0;
+        }
+        while new_size > prev {
+            match logical_size.compare_exchange_weak(
+                prev, new_size, Ordering::Relaxed, Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => prev = actual,
+            }
         }
     }
 }
@@ -68,7 +100,10 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
         }
         let fs = self.fs.upgrade().ok_or(SyscallErr::EIO)?;
         let offset = index * PAGE_SIZE;
-        let read_len = PAGE_SIZE.min(self.size.load(Ordering::Relaxed).saturating_sub(offset));
+
+        // Lazy refresh: probe file size from lwext4 on first call
+        let file_size = self.ensure_size_known(&fs).unwrap_or(0);
+        let read_len = PAGE_SIZE.min(file_size.saturating_sub(offset));
         if read_len == 0 {
             // Past EOF — fill with zeros
             buf[..PAGE_SIZE].fill(0);
@@ -114,9 +149,8 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
                 .map_err(|e| from_lwext4(e.abs()))?;
             let n = f.file_write(&buf[..write_len])
                 .map_err(|e| from_lwext4(e.abs()))?;
-            // Update cached size so npages() reflects the new length
-            let new_end = (offset + n).max(self.size.load(Ordering::Relaxed));
-            self.size.store(new_end, Ordering::Relaxed);
+            // fetch_max: update logical_size if we extended the file
+            Self::note_logical_size_atomic(&self.logical_size, offset + n);
             Ok(n)
         })();
         f.file_close().ok();
@@ -176,9 +210,9 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
                 let n = f.file_write(&page[..write_len])
                     .map_err(|e| from_lwext4(e.abs()))?;
                 total += n;
-                let new_end = (start_offset + (i + 1) * PAGE_SIZE)
-                    .max(self.size.load(Ordering::Relaxed));
-                self.size.store(new_end, Ordering::Relaxed);
+                // fetch_max: update logical_size if we extended the file
+                let new_end = start_offset + (i * PAGE_SIZE) + n;
+                Self::note_logical_size_atomic(&self.logical_size, new_end);
             }
             Ok(total)
         })();
@@ -187,16 +221,22 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
     }
 
     fn npages(&self) -> usize {
-        // Refresh size from lwext4
-        if let Some(fs) = self.fs.upgrade() {
-            let _lock = fs.lw.lock();
-            let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_REG_FILE);
-            if f.file_open(&self.path, 0x0).is_ok() {
-                let s = f.file_size() as usize;
-                self.size.store(s, Ordering::Relaxed);
-                f.file_close().ok();
+        // Refresh size from lwext4 on first call
+        if self.logical_size.load(Ordering::Relaxed) == LWEXT4_SIZE_UNKNOWN {
+            if let Some(fs) = self.fs.upgrade() {
+                let _lock = fs.lw.lock();
+                let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_REG_FILE);
+                if f.file_open(&self.path, 0x0).is_ok() {
+                    let s = f.file_size() as usize;
+                    self.logical_size.store(s, Ordering::Relaxed);
+                    f.file_close().ok();
+                }
             }
         }
-        (self.size.load(Ordering::Relaxed) + PAGE_SIZE - 1) / PAGE_SIZE
+        let size = self.logical_size.load(Ordering::Relaxed);
+        if size == LWEXT4_SIZE_UNKNOWN {
+            return 0;
+        }
+        (size + PAGE_SIZE - 1) / PAGE_SIZE
     }
 }

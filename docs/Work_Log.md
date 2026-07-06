@@ -4,6 +4,59 @@
 
 ## 2026-07-06
 
+### lwext4 PageCache 懒创建 — read_at/write_at 始终走 PageCache
+
+**涉及文件：**
+- `os/src/fs/ext4_lwext4/layout.rs` — Ext4OSInode: 新增 `logical_size: Arc<AtomicUsize>` 共享字段；`read_at`/`write_at` 改为 `ensure_page_cache()` 强制走 PageCache（不再 fallback 直接 I/O）；新增 `logical_size_or_refresh()`/`note_logical_size()` 方法；`create()` 新文件设 `logical_size=0`；`ensure_page_cache()` 传 `logical_size` 给 backend
+- `os/src/fs/ext4_lwext4/page_cache.rs` — `LwExt4PageCacheBackend::size: AtomicUsize` 替换为 `logical_size: Arc<AtomicUsize>`（与 Ext4OSInode 共享）；新增 `LWEXT4_SIZE_UNKNOWN` 哨兵常量；`new()` 不再 probe 文件大小（延迟到首次 I/O）；`read_page`/`write_page`/`write_pages`/`npages` 全部改用 `logical_size` + fetch_max 语义；新增 `ensure_size_known()`/`note_logical_size_atomic()` 辅助方法
+
+**验证：**
+- `make rv64-kernel-build-only` ✅ — 0 errors
+- `make la64-kernel-build-only` ✅ — 0 errors
+
+**备注：**
+- `read_at` 对普通文件强制走 PageCache（懒创建），加了 EOF-bounded read 短路优化
+- `write_at` 对普通文件强制走 PageCache，传 `old_size` hint 避免不必要的后端读取；`note_logical_size` 处理 UNKNOWN 哨兵 = 0 防止 fetch_max 死循环
+- 非 File 类型（Dir/SymLink 等）行为保持不变
+- 设计参考旧 ext4 驱动的 `get_new_page_cache()` 模式
+
+### lwext4 性能评测 — iozone + lmbench 对比旧 ext4 驱动
+
+**背景：** 为验证 lwext4 替换手写 ext4 驱动的性能影响，在 rv64 QEMU 上跑 iozone（bit4）和 lmbench（bit8）并对比 `testresult/archive_20260704_192616/`（旧驱动基线）。
+
+**关键发现：**
+
+| 类别 | 核心结论 |
+|------|---------|
+| **写吞吐 (iozone)** | **-93% (15x 回退)** — 4 writers 从 1818 KB/s 降至 116 KB/s |
+| **读吞吐 (iozone)** | **-17%** — 4 readers 从 2296→1901 KB/s |
+| **随机读 (iozone)** | **+5.7%** — 4 random readers 1681→1776 KB/s（lwext4 extent 树优于旧手写实现） |
+| **mmap 读 (lmbench)** | **持平** — 4294→4329 MB/s（不走 ext4 读写路径） |
+| **fork+/bin/sh -c** | **+285%** (3.8x 变慢) — shell 启动时大量小文件读 |
+| **Pipe bandwidth** | **-51%** — 26 vs 54 MB/s（原因不明，pipe 不走 ext4，可能 run-to-run 方差） |
+| **微基准 (syscall/read/write/stat)** | **基本一致** |
+| **上下文切换** | **所有测试均改善 7-30%**（可能为调度随机波动） |
+
+**根因分析：**
+- 旧驱动仅实现基本块读写 + inode 操作，无 journal、checksum、flex_bg 等，快但不完整
+- lwext4 是完整 ext4 实现，每次 `write()` 需要：路径查找 → open → 申请事务 → journal commit → close metadata 回写
+- PageCache 目前主要做读缓存，写路径的 LRU writeback 尚未充分优化
+- 可改进方向：关 `LWEXT4_CONFIG_JOURNAL_ASYNC` 编译选项减少 journal 同步，或利用 tmpfs 绕过 ext4 写路径
+
+**涉及文件：**
+- 无代码修改，仅测试运行
+
+**验证：**
+- `make rv64-kernel-build-only` ✅（此前已通过）
+- `make la64-kernel-build-only` ✅（此前已通过）
+- QEMU lmbench 全部完成（musl 81s, glibc 91s）exit_code=0
+- QEMU iozone: musl 超时被 SIGKILL（480s timeout），glibc 完成多数 throughput 测试后被全局超时终止
+
+**备注：**
+- mask 位映射与 AGENTS.md 不一致：实际 lmbench=bit8（0x100），非 bit5
+- `docs/10_plan/ext4-perf-gap.md` 中此前预计 lwext4 可达 7227/9028 KB/s（vs Linux 对比），本次实测仅 116 KB/s，差距远超预期
+- 参见 lwext4-upstream-fixes.md 已知限制
+
 ### 回退 lwext4 mount prefix 变更 — 恢复使用 `self.path` 直传
 
 **涉及文件：**

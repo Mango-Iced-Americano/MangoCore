@@ -15,6 +15,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 use core::ffi::CStr;
 use core::fmt;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::{Mutex, MutexGuard};
 
 use crate::fs::vfs::{
@@ -28,7 +29,7 @@ use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
 
 use super::errno::from_lwext4;
-use super::page_cache::LwExt4PageCacheBackend;
+use super::page_cache::{LwExt4PageCacheBackend, LWEXT4_SIZE_UNKNOWN};
 use lwext4_rust::{Ext4File, InodeTypes};
 
 /// Result of mapping lwext4 mode bits to MangoCore types.
@@ -112,6 +113,10 @@ pub struct Ext4OSInode {
     self_ref: Mutex<Option<Weak<Ext4OSInode>>>,
     /// On-demand PageCache — created on first `ensure_page_cache()` call.
     page_cache: Mutex<Option<Arc<PageCache>>>,
+    /// Shared logical file size — prevents writeback from corrupting
+    /// file size (1-byte write must not produce 4KB file).
+    /// Lazily probed from lwext4 on first I/O via `logical_size_or_refresh()`.
+    logical_size: Arc<AtomicUsize>,
 }
 
 // Safety: MangoCore is single-core; the circular Weak<Self> reference is
@@ -143,6 +148,7 @@ impl Ext4OSInode {
                 file_type: FileType::Dir,
                 self_ref: Mutex::new(Some(weak.clone())),
                 page_cache: Mutex::new(None),
+                logical_size: Arc::new(AtomicUsize::new(LWEXT4_SIZE_UNKNOWN)),
             }
         })
     }
@@ -164,8 +170,47 @@ impl Ext4OSInode {
                 file_type,
                 self_ref: Mutex::new(Some(weak.clone())),
                 page_cache: Mutex::new(None),
+                logical_size: Arc::new(AtomicUsize::new(LWEXT4_SIZE_UNKNOWN)),
             }
         })
+    }
+
+    /// Get logical file size, lazily probing from lwext4 on first call.
+    fn logical_size_or_refresh(&self) -> Result<usize, SyscallErr> {
+        let cached = self.logical_size.load(Ordering::Relaxed);
+        if cached != LWEXT4_SIZE_UNKNOWN {
+            return Ok(cached);
+        }
+        // One-time probe: open + file_size + close
+        let size = {
+            let _lock = self.fs.lw.lock();
+            let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_REG_FILE);
+            if f.file_open(&self.path, 0x0).is_err() {
+                // File doesn't exist yet (will be created on first write)
+                return Ok(0);
+            }
+            let s = f.file_size() as usize;
+            f.file_close().ok();
+            s
+        };
+        self.logical_size.store(size, Ordering::Relaxed);
+        Ok(size)
+    }
+
+    /// Update logical size if `new_size` is larger (fetch_max semantic).
+    fn note_logical_size(&self, new_size: usize) {
+        let mut prev = self.logical_size.load(Ordering::Relaxed);
+        if prev == LWEXT4_SIZE_UNKNOWN {
+            prev = 0;
+        }
+        while new_size > prev {
+            match self.logical_size.compare_exchange_weak(
+                prev, new_size, Ordering::Relaxed, Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => prev = actual,
+            }
+        }
     }
 }
 
@@ -294,23 +339,16 @@ impl IndexNode for Ext4OSInode {
                 Ok(n)
             }
             FileType::File => {
-                // Try PageCache first
-                if let Some(pc) = self.page_cache() {
-                    return pc.read(offset, &mut buf[..actual])
-                        .map_err(|_| SyscallErr::EIO);
+                // Always use PageCache (lazily created on first I/O)
+                let pc = self.ensure_page_cache().ok_or(SyscallErr::EIO)?;
+                let file_size = self.logical_size_or_refresh().unwrap_or(0);
+                let read_end = (offset + actual).min(file_size);
+                if offset >= read_end {
+                    return Ok(0);
                 }
-                // Direct I/O fallback
-                let _lock = self.fs.lw.lock();
-                let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_REG_FILE);
-                f.file_open(&self.path, 0x0)
-                    .map_err(|e| from_lwext4(e.abs()))?;
-                let guard = FileGuard::new(&mut f);
-                guard.f.file_seek(offset as i64, 0)
-                    .map_err(|e| from_lwext4(e.abs()))?;
-                let read_bytes = &mut buf[..actual];
-                let n = guard.f.file_read(read_bytes)
-                    .map_err(|e| from_lwext4(e.abs()))?;
-                Ok(n)
+                let read_len = read_end - offset;
+                pc.read(offset, &mut buf[..read_len])
+                    .map_err(|_| SyscallErr::EIO)
             }
             _ => Err(SyscallErr::EINVAL),
         }
@@ -552,6 +590,7 @@ impl IndexNode for Ext4OSInode {
             let backend = Arc::new(LwExt4PageCacheBackend::new(
                 Arc::downgrade(&self.fs),
                 self.path.clone(),
+                self.logical_size.clone(),
             ));
             let pc = PageCache::new();
             pc.set_backend(backend);
@@ -579,7 +618,18 @@ impl IndexNode for Ext4OSInode {
         }
         let actual = len.min(buf.len());
 
-        // Try PageCache first
+        // Regular files: always use PageCache (lazily created on first I/O)
+        if self.file_type == FileType::File {
+            let pc = self.ensure_page_cache().ok_or(SyscallErr::EIO)?;
+            let old_size = self.logical_size_or_refresh().unwrap_or(0);
+            let n = pc.write(offset, &buf[..actual], Some(old_size))
+                .map_err(|_| SyscallErr::EIO)?;
+            let new_end = offset + n;
+            self.note_logical_size(new_end);
+            return Ok(n);
+        }
+
+        // Non-File types: keep existing behavior (PageCache or direct I/O)
         if let Some(pc) = self.page_cache() {
             return pc.write(offset, &buf[..actual], None)
                 .map_err(|_| SyscallErr::EIO);
@@ -636,12 +686,14 @@ impl IndexNode for Ext4OSInode {
                 }
                 let _ = f.file_mode_set(mode.bits());
                 drop(_lock);
-                Ok(Ext4OSInode::new_child(
+                let inode = Ext4OSInode::new_child(
                     self.fs.clone(),
                     child_path,
                     child_inode_id,
                     FileType::File,
-                ))
+                );
+                inode.logical_size.store(0, Ordering::Relaxed);
+                Ok(inode)
             }
             FileType::Dir => self.mkdir(name, mode),
             _ => Err(SyscallErr::EINVAL),
