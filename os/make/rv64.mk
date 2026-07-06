@@ -68,6 +68,8 @@ ifeq ($(BOARD), vf2)
 else
 	ROOTFS_IMG := ${ROOTFS_IMG_DIR}/${ROOTFS_IMG_NAME}
 endif
+# Ensure ROOTFS_IMG is never empty
+ROOTFS_IMG ?= ${ROOTFS_IMG_DIR}/${ROOTFS_IMG_NAME}
 
 APPS := ../user/src/bin/*
 
