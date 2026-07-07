@@ -870,3 +870,16 @@ pub fn compact_fifo_registry() -> usize {
     }
     removed
 }
+
+// ── Public accessors for /sys/kernel/stats/pipe ──────────────────────
+
+pub fn pipe_read_calls() -> u64  { PIPE_READ_CALLS.load(Ordering::Relaxed) }
+pub fn pipe_write_calls() -> u64 { PIPE_WRITE_CALLS.load(Ordering::Relaxed) }
+pub fn pipe_read_bytes() -> u64  { PIPE_READ_BYTES.load(Ordering::Relaxed) }
+pub fn pipe_write_bytes() -> u64 { PIPE_WRITE_BYTES.load(Ordering::Relaxed) }
+pub fn pipe_read_cycles() -> u64  { PIPE_READ_CYCLES_TOTAL.load(Ordering::Relaxed) }
+pub fn pipe_write_cycles() -> u64 { PIPE_WRITE_CYCLES_TOTAL.load(Ordering::Relaxed) }
+pub fn pipe_read_cycles_max() -> u64  { PIPE_READ_CYCLES_MAX.load(Ordering::Relaxed) }
+pub fn pipe_write_cycles_max() -> u64 { PIPE_WRITE_CYCLES_MAX.load(Ordering::Relaxed) }
+pub fn pipe_read_eagain() -> u64  { PIPE_READ_EAGAIN.load(Ordering::Relaxed) }
+pub fn pipe_write_eagain() -> u64 { PIPE_WRITE_EAGAIN.load(Ordering::Relaxed) }

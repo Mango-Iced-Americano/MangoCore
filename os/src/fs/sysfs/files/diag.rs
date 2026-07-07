@@ -488,6 +488,27 @@ fn stats_ext4_content(
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+//  STATS: Pipe
+// ═══════════════════════════════════════════════════════════════════════
+
+fn stats_pipe_content(_extra: usize, offset: usize, len: usize, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+    let mut s = String::with_capacity(384);
+    let _ = writeln!(s, "read_calls={}", crate::fs::dev::pipe::pipe_read_calls());
+    let _ = writeln!(s, "read_bytes={}", crate::fs::dev::pipe::pipe_read_bytes());
+    let _ = writeln!(s, "read_eagain={}", crate::fs::dev::pipe::pipe_read_eagain());
+    let _ = writeln!(s, "read_cycles_total={}", crate::fs::dev::pipe::pipe_read_cycles());
+    let _ = writeln!(s, "read_cycles_max={}", crate::fs::dev::pipe::pipe_read_cycles_max());
+    let _ = writeln!(s, "write_calls={}", crate::fs::dev::pipe::pipe_write_calls());
+    let _ = writeln!(s, "write_bytes={}", crate::fs::dev::pipe::pipe_write_bytes());
+    let _ = writeln!(s, "write_eagain={}", crate::fs::dev::pipe::pipe_write_eagain());
+    let _ = writeln!(s, "write_cycles_total={}", crate::fs::dev::pipe::pipe_write_cycles());
+    let _ = writeln!(s, "write_cycles_max={}", crate::fs::dev::pipe::pipe_write_cycles_max());
+    let _ = writeln!(s, "buf_alive={}", crate::fs::dev::pipe::pipe_buf_alive());
+    let _ = writeln!(s, "buf_bytes={}", crate::fs::dev::pipe::pipe_buf_bytes());
+    write_str(offset, len, buf, &s)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 //  Registration
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -525,6 +546,7 @@ pub fn register_all(kernel_dir: &Arc<SysInode>) -> Result<(), SyscallErr> {
     stats_dir.add_file("resource", ro_mode, stats_resource_content)?;
     stats_dir.add_file("buddyinfo", ro_mode, stats_buddyinfo_content)?;
     stats_dir.add_file("zombies", ro_mode, stats_zombies_content)?;
+    stats_dir.add_file("pipe", ro_mode, stats_pipe_content)?;
 
     // ── /sys/kernel/tracing/ ──
     let trace_dir = kernel_dir.add_dir_inner("tracing", InodeMode::from_bits_truncate(0o555))?;
