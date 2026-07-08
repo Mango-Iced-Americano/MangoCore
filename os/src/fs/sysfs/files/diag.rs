@@ -215,6 +215,26 @@ fn stats_resource_content(_extra: usize, offset: usize, len: usize, buf: &mut [u
     let _ = writeln!(s, "pc_entries_len={}", pc_ent_len);
     let _ = writeln!(s, "pc_entries_live={}", pc_ent_live);
     let _ = writeln!(s, "pc_entries_holes={}", pc_ent_holes);
+    // lwext4 metadata probes (embedded here so old initproc can see them)
+    let lw = crate::fs::ext4_lwext4::counters::snapshot();
+    let _ = writeln!(s, "lwext4_find={}", lw.0);
+    let _ = writeln!(s, "lwext4_find_cycles={}", lw.1);
+    let _ = writeln!(s, "lwext4_meta_cold={}", lw.7);
+    let _ = writeln!(s, "lwext4_meta_hot={}", lw.8);
+    let _ = writeln!(s, "lwext4_file_open={}", lw.10);
+    let _ = writeln!(s, "lwext4_file_close={}", lw.13);
+    let _ = writeln!(s, "lwext4_dir_entries={}", lw.15);
+    let _ = writeln!(s, "lwext4_create_pre={}", lw.17);
+    let _ = writeln!(s, "lwext4_ensure_pc={}", lw.20);
+    // mount/bind probes
+    let mnt = crate::fs::vfs::mount::counters::mount_perf_snapshot();
+    let _ = writeln!(s, "mnt_propagate={}", mnt.0);
+    let _ = writeln!(s, "mnt_remove_fs_scan={}", mnt.3);
+    let _ = writeln!(s, "mnt_rbind_calls={}", mnt.4);
+    let _ = writeln!(s, "mnt_rbind_cycles={}", mnt.5);
+    let _ = writeln!(s, "mnt_rbind_entries={}", mnt.6);
+    let _ = writeln!(s, "mnt_rbind_dirent={}", mnt.7);
+    let _ = writeln!(s, "mnt_rbind_seen_scan={}", mnt.8);
     write_str(offset, len, buf, &s)
 }
 
@@ -488,6 +508,66 @@ fn stats_ext4_content(
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+//  STATS: lwext4 metadata probes
+// ═══════════════════════════════════════════════════════════════════════
+
+fn stats_lwext4_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let lw = crate::fs::ext4_lwext4::counters::snapshot();
+    let mut s = String::with_capacity(512);
+    let _ = writeln!(s, "lwext4_find_calls={}", lw.0);
+    let _ = writeln!(s, "lwext4_find_cycles={}", lw.1);
+    let _ = writeln!(s, "lwext4_probe_type_calls={}", lw.2);
+    let _ = writeln!(s, "lwext4_probe_type_cycles={}", lw.3);
+    let _ = writeln!(s, "lwext4_get_inode_id_calls={}", lw.4);
+    let _ = writeln!(s, "lwext4_get_inode_id_enoint={}", lw.5);
+    let _ = writeln!(s, "lwext4_get_inode_id_cycles={}", lw.6);
+    let _ = writeln!(s, "lwext4_metadata_cold={}", lw.7);
+    let _ = writeln!(s, "lwext4_metadata_hot={}", lw.8);
+    let _ = writeln!(s, "lwext4_metadata_cold_cycles={}", lw.9);
+    let _ = writeln!(s, "lwext4_file_open_calls={}", lw.10);
+    let _ = writeln!(s, "lwext4_file_open_cycles={}", lw.11);
+    let _ = writeln!(s, "lwext4_file_size_calls={}", lw.12);
+    let _ = writeln!(s, "lwext4_file_close_calls={}", lw.13);
+    let _ = writeln!(s, "lwext4_file_close_cycles={}", lw.14);
+    let _ = writeln!(s, "lwext4_dir_entries_calls={}", lw.15);
+    let _ = writeln!(s, "lwext4_dir_entries_cycles={}", lw.16);
+    let _ = writeln!(s, "lwext4_create_pre_check={}", lw.17);
+    let _ = writeln!(s, "lwext4_logical_size_calls={}", lw.18);
+    let _ = writeln!(s, "lwext4_logical_size_cycles={}", lw.19);
+    let _ = writeln!(s, "lwext4_ensure_pc_calls={}", lw.20);
+    write_str(offset, len, buf, &s)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  STATS: Mount/bind probes
+// ═══════════════════════════════════════════════════════════════════════
+
+fn stats_mount_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let mnt = crate::fs::vfs::mount::counters::mount_perf_snapshot();
+    let mut s = String::with_capacity(256);
+    let _ = writeln!(s, "mount_propagate_calls={}", mnt.0);
+    let _ = writeln!(s, "mount_propagate_cycles={}", mnt.1);
+    let _ = writeln!(s, "mount_remove_fs_calls={}", mnt.2);
+    let _ = writeln!(s, "mount_remove_fs_scan={}", mnt.3);
+    let _ = writeln!(s, "mount_rbind_calls={}", mnt.4);
+    let _ = writeln!(s, "mount_rbind_cycles={}", mnt.5);
+    let _ = writeln!(s, "mount_rbind_entries={}", mnt.6);
+    let _ = writeln!(s, "mount_rbind_dirent_calls={}", mnt.7);
+    let _ = writeln!(s, "mount_rbind_seen_scan={}", mnt.8);
+    write_str(offset, len, buf, &s)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 //  STATS: Pipe
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -547,6 +627,8 @@ pub fn register_all(kernel_dir: &Arc<SysInode>) -> Result<(), SyscallErr> {
     stats_dir.add_file("buddyinfo", ro_mode, stats_buddyinfo_content)?;
     stats_dir.add_file("zombies", ro_mode, stats_zombies_content)?;
     stats_dir.add_file("pipe", ro_mode, stats_pipe_content)?;
+    stats_dir.add_file("lwext4", ro_mode, stats_lwext4_content)?;
+    stats_dir.add_file("mount", ro_mode, stats_mount_content)?;
 
     // ── /sys/kernel/tracing/ ──
     let trace_dir = kernel_dir.add_dir_inner("tracing", InodeMode::from_bits_truncate(0o555))?;

@@ -28,6 +28,7 @@ use crate::fs::page_cache::PageCache;
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
 
+use super::counters;
 use super::errno::from_lwext4;
 use super::page_cache::{LwExt4PageCacheBackend, LWEXT4_SIZE_UNKNOWN};
 use lwext4_rust::{Ext4File, InodeTypes};
@@ -191,8 +192,14 @@ impl Ext4OSInode {
 
     /// Get logical file size, lazily probing from lwext4 on first call.
     fn logical_size_or_refresh(&self) -> Result<usize, SyscallErr> {
+        let _start = crate::task::perf::perf_time_now();
         let cached = self.logical_size.load(Ordering::Relaxed);
         if cached != LWEXT4_SIZE_UNKNOWN {
+            counters::LWEXT4_LOGICAL_SIZE_CALLS.fetch_add(1, Ordering::Relaxed);
+            counters::LWEXT4_LOGICAL_SIZE_CYCLES.fetch_add(
+                crate::task::perf::perf_time_now().wrapping_sub(_start),
+                Ordering::Relaxed,
+            );
             return Ok(cached);
         }
         // One-time probe: open + file_size + close
@@ -204,6 +211,11 @@ impl Ext4OSInode {
                 // every write_at call. The file will be created on first
                 // writeback (via O_RDWR|O_CREAT|O_TRUNC in write_page).
                 self.logical_size.store(0, Ordering::Relaxed);
+                counters::LWEXT4_LOGICAL_SIZE_CALLS.fetch_add(1, Ordering::Relaxed);
+                counters::LWEXT4_LOGICAL_SIZE_CYCLES.fetch_add(
+                    crate::task::perf::perf_time_now().wrapping_sub(_start),
+                    Ordering::Relaxed,
+                );
                 return Ok(0);
             }
             let s = f.file_size() as usize;
@@ -211,6 +223,11 @@ impl Ext4OSInode {
             s
         };
         self.logical_size.store(size, Ordering::Relaxed);
+        counters::LWEXT4_LOGICAL_SIZE_CALLS.fetch_add(1, Ordering::Relaxed);
+        counters::LWEXT4_LOGICAL_SIZE_CYCLES.fetch_add(
+            crate::task::perf::perf_time_now().wrapping_sub(_start),
+            Ordering::Relaxed,
+        );
         Ok(size)
     }
 
@@ -243,6 +260,7 @@ impl IndexNode for Ext4OSInode {
         // Saves ~5 lwext4 FFI calls (file_mode_get/file_open/file_size/file_close)
         // on every touch_modified() after write.
         if let Some(ref cached) = *self.cached_meta.lock() {
+            counters::LWEXT4_METADATA_HOT.fetch_add(1, Ordering::Relaxed);
             let size: i64;
             let blocks: usize;
             if self.file_type == FileType::File {
@@ -278,6 +296,8 @@ impl IndexNode for Ext4OSInode {
         // Inline probe type and mode inside a single lock scope.
         // Do NOT call self.fs.probe_type() which would re-lock self.fs.lw
         // and cause a spin::Mutex deadlock (spin::Mutex is not reentrant).
+        let _cold_start = crate::task::perf::perf_time_now();
+        counters::LWEXT4_METADATA_COLD.fetch_add(1, Ordering::Relaxed);
         let (file_type, inode_mode, size, blocks) = {
             let _lock = self.fs.lw.lock();
             let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_UNKNOWN);
@@ -308,10 +328,24 @@ impl IndexNode for Ext4OSInode {
                     }
                 }
                 _ => {
+                    let _fo_start = crate::task::perf::perf_time_now();
                     let mut ff = Ext4File::new(&self.path, InodeTypes::EXT4_DE_REG_FILE);
-                    if ff.file_open(&self.path, 0x0).is_ok() {
+                    let open_ok = ff.file_open(&self.path, 0x0).is_ok();
+                    counters::LWEXT4_FILE_OPEN_CALLS.fetch_add(1, Ordering::Relaxed);
+                    counters::LWEXT4_FILE_OPEN_CYCLES.fetch_add(
+                        crate::task::perf::perf_time_now().wrapping_sub(_fo_start),
+                        Ordering::Relaxed,
+                    );
+                    if open_ok {
                         let s = ff.file_size();
+                        counters::LWEXT4_FILE_SIZE_CALLS.fetch_add(1, Ordering::Relaxed);
+                        let _fc_start = crate::task::perf::perf_time_now();
                         ff.file_close().ok();
+                        counters::LWEXT4_FILE_CLOSE_CALLS.fetch_add(1, Ordering::Relaxed);
+                        counters::LWEXT4_FILE_CLOSE_CYCLES.fetch_add(
+                            crate::task::perf::perf_time_now().wrapping_sub(_fc_start),
+                            Ordering::Relaxed,
+                        );
                         let size_i64 = s as i64;
                         let blks = if s > 0 {
                             ((s as usize + self.fs.block_size() - 1)
@@ -334,6 +368,11 @@ impl IndexNode for Ext4OSInode {
             uid: 0,
             gid: 0,
         });
+
+        counters::LWEXT4_METADATA_COLD_CYCLES.fetch_add(
+            crate::task::perf::perf_time_now().wrapping_sub(_cold_start),
+            Ordering::Relaxed,
+        );
 
         // Metadata construction does NOT hold the lw lock.
         Ok(Metadata {
@@ -417,58 +456,80 @@ impl IndexNode for Ext4OSInode {
     // ── find ─────────────────────────────────────────────────────────
 
     fn find(&self, name: &str) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+        let _start = crate::task::perf::perf_time_now();
         // Validate parent is a directory
         if self.file_type != FileType::Dir && name != "." && name != ".." {
+            let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_start);
+            counters::LWEXT4_FIND_CALLS.fetch_add(1, Ordering::Relaxed);
+            counters::LWEXT4_FIND_CYCLES.fetch_add(elapsed, Ordering::Relaxed);
             return Err(SyscallErr::ENOTDIR);
         }
         if name.is_empty() {
+            let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_start);
+            counters::LWEXT4_FIND_CALLS.fetch_add(1, Ordering::Relaxed);
+            counters::LWEXT4_FIND_CYCLES.fetch_add(elapsed, Ordering::Relaxed);
             return Err(SyscallErr::ENOENT);
         }
         if name.len() > 255 {
+            let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_start);
+            counters::LWEXT4_FIND_CALLS.fetch_add(1, Ordering::Relaxed);
+            counters::LWEXT4_FIND_CYCLES.fetch_add(elapsed, Ordering::Relaxed);
             return Err(SyscallErr::ENAMETOOLONG);
         }
         if name.contains('/') {
+            let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_start);
+            counters::LWEXT4_FIND_CALLS.fetch_add(1, Ordering::Relaxed);
+            counters::LWEXT4_FIND_CYCLES.fetch_add(elapsed, Ordering::Relaxed);
             return Err(SyscallErr::EINVAL);
         }
 
         // "." — return self via Weak upgrade
         if name == "." {
-            return self
+            let result = self
                 .self_ref
                 .lock()
                 .as_ref()
                 .and_then(|w| w.upgrade())
                 .map(|arc| arc as Arc<dyn IndexNode>)
                 .ok_or(SyscallErr::EIO);
+            let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_start);
+            counters::LWEXT4_FIND_CALLS.fetch_add(1, Ordering::Relaxed);
+            counters::LWEXT4_FIND_CYCLES.fetch_add(elapsed, Ordering::Relaxed);
+            return result;
         }
 
         // ".." — return parent, or self if already at root
         if name == ".." {
-            if self.path == "/" {
-                return self
+            let result = if self.path == "/" {
+                self
                     .self_ref
                     .lock()
                     .as_ref()
                     .and_then(|w| w.upgrade())
                     .map(|arc| arc as Arc<dyn IndexNode>)
-                    .ok_or(SyscallErr::EIO);
-            }
-            // Compute parent path
-            let parent_path = match self.path.rfind('/') {
-                Some(0) => "/",
-                Some(pos) => &self.path[..pos],
-                None => "/",
+                    .ok_or(SyscallErr::EIO)
+            } else {
+                // Compute parent path
+                let parent_path = match self.path.rfind('/') {
+                    Some(0) => "/",
+                    Some(pos) => &self.path[..pos],
+                    None => "/",
+                };
+                let parent_path = String::from(parent_path);
+                // Get real inode number for parent
+                let inode_id = self.fs.get_inode_id(&parent_path)
+                    .unwrap_or(0);
+                Ok(Ext4OSInode::new_child(
+                    self.fs.clone(),
+                    parent_path,
+                    inode_id,
+                    FileType::Dir,
+                ) as Arc<dyn IndexNode>)
             };
-            let parent_path = String::from(parent_path);
-            // Get real inode number for parent
-            let inode_id = self.fs.get_inode_id(&parent_path)
-                .unwrap_or(0);
-            return Ok(Ext4OSInode::new_child(
-                self.fs.clone(),
-                parent_path,
-                inode_id,
-                FileType::Dir,
-            ));
+            let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_start);
+            counters::LWEXT4_FIND_CALLS.fetch_add(1, Ordering::Relaxed);
+            counters::LWEXT4_FIND_CYCLES.fetch_add(elapsed, Ordering::Relaxed);
+            return result;
         }
 
         // Build child path
@@ -481,12 +542,16 @@ impl IndexNode for Ext4OSInode {
         let inode_id = self.fs.get_inode_id(&child_path)
             .unwrap_or(0);
 
-        Ok(Ext4OSInode::new_child(
+        let result = Ok(Ext4OSInode::new_child(
             self.fs.clone(),
             child_path,
             inode_id,
             mapped.file_type,
-        ))
+        ) as Arc<dyn IndexNode>);
+        let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_start);
+        counters::LWEXT4_FIND_CALLS.fetch_add(1, Ordering::Relaxed);
+        counters::LWEXT4_FIND_CYCLES.fetch_add(elapsed, Ordering::Relaxed);
+        result
     }
 
     // ── list ─────────────────────────────────────────────────────────
@@ -499,9 +564,15 @@ impl IndexNode for Ext4OSInode {
         let _lock = self.fs.lw.lock();
         let dir = Ext4File::new(&self.path, InodeTypes::EXT4_DE_DIR);
 
+        let _de_start = crate::task::perf::perf_time_now();
         let (names, _types) = dir
             .lwext4_dir_entries()
             .map_err(|e| from_lwext4(e.abs()))?;
+        counters::LWEXT4_DIR_ENTRIES_CALLS.fetch_add(1, Ordering::Relaxed);
+        counters::LWEXT4_DIR_ENTRIES_CYCLES.fetch_add(
+            crate::task::perf::perf_time_now().wrapping_sub(_de_start),
+            Ordering::Relaxed,
+        );
 
         let mut result = Vec::with_capacity(names.len());
         for name_bytes in &names {
@@ -528,8 +599,14 @@ impl IndexNode for Ext4OSInode {
         }
         let _lock = self.fs.lw.lock();
         let dir = Ext4File::new(&self.path, InodeTypes::EXT4_DE_DIR);
+        let _de_start = crate::task::perf::perf_time_now();
         let (names, types) = dir.lwext4_dir_entries()
             .map_err(|e| from_lwext4(e.abs()))?;
+        counters::LWEXT4_DIR_ENTRIES_CALLS.fetch_add(1, Ordering::Relaxed);
+        counters::LWEXT4_DIR_ENTRIES_CYCLES.fetch_add(
+            crate::task::perf::perf_time_now().wrapping_sub(_de_start),
+            Ordering::Relaxed,
+        );
 
         let mut result = Vec::with_capacity(names.len());
         for (i, name_bytes) in names.iter().enumerate() {
@@ -645,6 +722,7 @@ impl IndexNode for Ext4OSInode {
     /// Called by mmap page-fault and other VFS paths that need file data
     /// pages.  The backend delegates I/O to lwext4's file API.
     fn ensure_page_cache(&self) -> Option<Arc<PageCache>> {
+        counters::LWEXT4_ENSURE_PC_CALLS.fetch_add(1, Ordering::Relaxed);
         let mut cache = self.page_cache.lock();
         if cache.is_none() {
             let backend = Arc::new(LwExt4PageCacheBackend::new(
@@ -727,6 +805,7 @@ impl IndexNode for Ext4OSInode {
             return Err(SyscallErr::EINVAL);
         }
         let child_path = join_path(&self.path, name);
+        counters::LWEXT4_CREATE_PRE_CHECK.fetch_add(1, Ordering::Relaxed);
         let child_inode_id = self
             .fs
             .get_inode_id(&child_path)
@@ -805,6 +884,7 @@ impl IndexNode for Ext4OSInode {
             return Err(SyscallErr::EINVAL);
         }
         let child_path = join_path(&self.path, name);
+        counters::LWEXT4_CREATE_PRE_CHECK.fetch_add(1, Ordering::Relaxed);
         let child_inode_id = self
             .fs
             .get_inode_id(&child_path)
@@ -852,9 +932,15 @@ impl IndexNode for Ext4OSInode {
         let _lock = self.fs.lw.lock();
         // Check directory is empty (lwext4 dir_rm is recursive)
         let dir = Ext4File::new(&child_path, InodeTypes::EXT4_DE_DIR);
+        let _de_start = crate::task::perf::perf_time_now();
         let (entries, _) = dir
             .lwext4_dir_entries()
             .map_err(|e| from_lwext4(e.abs()))?;
+        counters::LWEXT4_DIR_ENTRIES_CALLS.fetch_add(1, Ordering::Relaxed);
+        counters::LWEXT4_DIR_ENTRIES_CYCLES.fetch_add(
+            crate::task::perf::perf_time_now().wrapping_sub(_de_start),
+            Ordering::Relaxed,
+        );
         let has_children = entries.iter().any(|b| {
             let len = b.iter().position(|&x| x == 0).unwrap_or(b.len());
             let s = core::str::from_utf8(&b[..len]).unwrap_or("");
@@ -929,6 +1015,7 @@ impl IndexNode for Ext4OSInode {
             return Err(SyscallErr::EINVAL);
         }
         let child_path = join_path(&self.path, name);
+        counters::LWEXT4_CREATE_PRE_CHECK.fetch_add(1, Ordering::Relaxed);
         let child_inode_id = self
             .fs
             .get_inode_id(&child_path)
@@ -1069,6 +1156,7 @@ impl IndexNode for Ext4OSInode {
         }
 
         let child_path = join_path(&self.path, filename);
+        counters::LWEXT4_CREATE_PRE_CHECK.fetch_add(1, Ordering::Relaxed);
         let child_inode_id = self
             .fs
             .get_inode_id(&child_path)

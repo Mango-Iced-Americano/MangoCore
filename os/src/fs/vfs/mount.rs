@@ -153,6 +153,31 @@ pub mod counters {
             MFSI_FROM_BACKREF.load(core::sync::atomic::Ordering::Relaxed),
         )
     }
+
+    // Mount/bind performance counters
+    pub static MOUNT_LIST_PROPAGATE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static MOUNT_LIST_PROPAGATE_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static MOUNT_LIST_REMOVE_FS_SCAN: AtomicUsize = AtomicUsize::new(0);
+    pub static MOUNT_LIST_REMOVE_FS_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static RBIND_SNAPSHOT_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static RBIND_SNAPSHOT_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static RBIND_SNAPSHOT_ENTRIES: AtomicUsize = AtomicUsize::new(0);
+    pub static RBIND_DIRENT_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static RBIND_SEEN_SCAN: AtomicUsize = AtomicUsize::new(0);
+
+    pub fn mount_perf_snapshot() -> (usize, usize, usize, usize, usize, usize, usize, usize, usize) {
+        (
+            MOUNT_LIST_PROPAGATE_CALLS.load(core::sync::atomic::Ordering::Relaxed),
+            MOUNT_LIST_PROPAGATE_CYCLES.load(core::sync::atomic::Ordering::Relaxed),
+            MOUNT_LIST_REMOVE_FS_SCAN.load(core::sync::atomic::Ordering::Relaxed),
+            MOUNT_LIST_REMOVE_FS_CALLS.load(core::sync::atomic::Ordering::Relaxed),
+            RBIND_SNAPSHOT_CALLS.load(core::sync::atomic::Ordering::Relaxed),
+            RBIND_SNAPSHOT_CYCLES.load(core::sync::atomic::Ordering::Relaxed),
+            RBIND_SNAPSHOT_ENTRIES.load(core::sync::atomic::Ordering::Relaxed),
+            RBIND_DIRENT_CALLS.load(core::sync::atomic::Ordering::Relaxed),
+            RBIND_SEEN_SCAN.load(core::sync::atomic::Ordering::Relaxed),
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1767,6 +1792,7 @@ impl MountList {
     /// identity avoids leaving a strong reference in the global mount list.
     pub fn remove_fs(&self, fs: &Arc<MountFS>) -> Option<Arc<MountFS>> {
         let mut inner = self.mounts.lock();
+        let len = inner.len();
         let mut empty_path: Option<Arc<MountPath>> = None;
         let mut removed: Option<Arc<MountFS>> = None;
 
@@ -1784,6 +1810,9 @@ impl MountList {
         if let Some(path) = empty_path {
             inner.remove(&path);
         }
+
+        counters::MOUNT_LIST_REMOVE_FS_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        counters::MOUNT_LIST_REMOVE_FS_SCAN.fetch_add(len, core::sync::atomic::Ordering::Relaxed);
 
         removed
     }

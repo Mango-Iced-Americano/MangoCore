@@ -4250,6 +4250,7 @@ fn collect_rbind_snapshot(
     source_mfs: Arc<vfs::MountFS>,
     source_subtree_root: Arc<dyn vfs::IndexNode>,
 ) -> Vec<RbindEntry> {
+    let _start = crate::task::perf::perf_time_now();
     const MAX_DEPTH: usize = 256;
 
     let mut queue: VecDeque<(Arc<vfs::MountFS>, Arc<dyn vfs::IndexNode>)> = VecDeque::new();
@@ -4266,7 +4267,11 @@ fn collect_rbind_snapshot(
         };
         for (ino, child_mfs) in &entries {
             let ptr = Arc::as_ptr(child_mfs) as usize;
+            // Linear scan cost: seen.len()
+            crate::fs::vfs::mount::counters::RBIND_SEEN_SCAN.fetch_add(seen.len(), Ordering::Relaxed);
             if seen.contains(&ptr) { continue; }
+            // list_dirents call
+            crate::fs::vfs::mount::counters::RBIND_DIRENT_CALLS.fetch_add(1, Ordering::Relaxed);
             if let Ok(dirents) = source_subtree_root.list_dirents() {
                 if let Some((name, _, _)) = dirents.iter().find(|(_, i, _)| *i == *ino) {
                     seen.push(ptr);
@@ -4291,9 +4296,13 @@ fn collect_rbind_snapshot(
         let mps = child_mfs.mountpoints.lock();
         for (&grand_ino, grandchild) in mps.iter() {
             let ptr = Arc::as_ptr(grandchild) as usize;
+            // Linear scan cost: seen.len()
+            crate::fs::vfs::mount::counters::RBIND_SEEN_SCAN.fetch_add(seen.len(), Ordering::Relaxed);
             if seen.contains(&ptr) { continue; }
             seen.push(ptr);
             if let Some(ref child_mfs_inode) = child_root.as_any_ref().downcast_ref::<vfs::MountFSInode>() {
+                // list_dirents call
+                crate::fs::vfs::mount::counters::RBIND_DIRENT_CALLS.fetch_add(1, Ordering::Relaxed);
                 if let Ok(dirents) = child_mfs_inode.inner_inode.list_dirents() {
                     if let Some((name, _, _)) = dirents.iter().find(|(_, i, _)| *i == grand_ino) {
                         result.push(RbindEntry {
@@ -4308,6 +4317,11 @@ fn collect_rbind_snapshot(
             }
         }
     }
+
+    let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_start);
+    crate::fs::vfs::mount::counters::RBIND_SNAPSHOT_CALLS.fetch_add(1, Ordering::Relaxed);
+    crate::fs::vfs::mount::counters::RBIND_SNAPSHOT_CYCLES.fetch_add(elapsed, Ordering::Relaxed);
+    crate::fs::vfs::mount::counters::RBIND_SNAPSHOT_ENTRIES.fetch_add(result.len(), Ordering::Relaxed);
     result
 }
 

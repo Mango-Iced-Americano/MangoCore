@@ -152,6 +152,7 @@ impl Ext4FileSystem {
     /// logged warning).  Zero is used as a safe fallback since inode 0 is
     /// reserved in ext4.
     pub(crate) fn get_inode_id(&self, full_path: &str) -> Result<usize, SyscallErr> {
+        let _start = crate::task::perf::perf_time_now();
         let _lock = self.lw.lock();
         let c_path = CString::new(full_path).map_err(|_| SyscallErr::EINVAL)?;
         let c_path = c_path.into_raw();
@@ -161,8 +162,14 @@ impl Ext4FileSystem {
             lwext4_rust::bindings::ext4_raw_inode_fill(c_path, &mut ino, &mut raw_inode)
         };
         unsafe { let _ = CString::from_raw(c_path); }
+        let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_start);
+        super::counters::LWEXT4_GET_INODE_ID_CALLS.fetch_add(1, Ordering::Relaxed);
+        super::counters::LWEXT4_GET_INODE_ID_CYCLES.fetch_add(elapsed, Ordering::Relaxed);
         if r != 0 {
-            log::warn!("[lwext4] get_inode_id failed for '{}': errno={}", full_path, r);
+            // Only log at debug level — ENOENT is expected during create/mkdir
+            // pre-checks and would spam serial at warn/error.
+            log::debug!("[lwext4] get_inode_id failed for '{}': errno={}", full_path, r);
+            super::counters::LWEXT4_GET_INODE_ID_ENOENT.fetch_add(1, Ordering::Relaxed);
             return Err(from_lwext4(r.abs()));
         }
         Ok(ino as usize)
@@ -186,9 +193,13 @@ impl Ext4FileSystem {
     /// Uses `fmode_get()` which works for all inode types (files, dirs,
     /// symlinks, devices).
     pub(crate) fn probe_type(&self, full_path: &str) -> Result<super::layout::MappedType, SyscallErr> {
+        let _start = crate::task::perf::perf_time_now();
         let _lock = self.lw.lock();
         let mut f = lwext4_rust::Ext4File::new(full_path, InodeTypes::EXT4_DE_UNKNOWN);
         let mode = f.file_mode_get().map_err(|e| from_lwext4(e.abs()))?;
+        let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_start);
+        super::counters::LWEXT4_PROBE_TYPE_CALLS.fetch_add(1, Ordering::Relaxed);
+        super::counters::LWEXT4_PROBE_TYPE_CYCLES.fetch_add(elapsed, Ordering::Relaxed);
         Ok(super::layout::map_lwext4_mode(mode))
     }
 }
