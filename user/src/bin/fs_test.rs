@@ -2529,6 +2529,32 @@ fn test_perf_read_bb() -> bool {
     true
 }
 
+fn test_perf_read_full() -> bool {
+    const N: usize = 5;
+    // Read ENTIRE 800KB busybox in 4KB chunks (sequential — exercises readahead)
+    let paths = [("/bin/busybox\0", "bin"), ("/tmp/bb\0", "tmp")];
+    for (path, label) in &paths {
+        let mut t0: TimeSpec = TimeSpec { tv_sec:0, tv_nsec:0 };
+        sys_clock_gettime(1, &mut t0);
+        for _ in 0..N {
+            let fd = sys_open(path, 0);
+            if fd < 0 { println!("  FAIL: open {} returned {}", label, fd); return false; }
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = sys_read(fd as usize, &mut buf);
+                if n <= 0 { break; }
+            }
+            sys_close(fd as usize);
+        }
+        let mut t1: TimeSpec = TimeSpec { tv_sec:0, tv_nsec:0 };
+        sys_clock_gettime(1, &mut t1);
+        let total_ns = ts_diff_ns(&t0, &t1);
+        let avg_ns = total_ns / N as u64;
+        println!("  read full {} (800KB) x{}: total={}ns avg={}ns", label, N, total_ns, avg_ns);
+    }
+    true
+}
+
 fn test_perf_proc_mounts() -> bool {
     const N: usize = 10;
     let mut t0: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
@@ -2684,6 +2710,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         TestCase { name: "perf_fork_only", desc: "perf: fork-only x50", func: test_perf_fork_only },
         TestCase { name: "perf_fork_exec_tmp", desc: "perf: fork+exec /tmp/bb (ramfs) x50", func: test_perf_fork_exec_tmp },
         TestCase { name: "perf_read_bb", desc: "perf: read bin/tmp busybox 4KB x50", func: test_perf_read_bb },
+        TestCase { name: "perf_read_full", desc: "perf: read full 800KB busybox x5", func: test_perf_read_full },
         TestCase { name: "perf_exec_twice", desc: "perf: exec cold vs warm", func: test_perf_exec_twice },
         TestCase { name: "perf_proc_mounts", desc: "perf: read /proc/mounts x10", func: test_perf_proc_mounts },
     ];

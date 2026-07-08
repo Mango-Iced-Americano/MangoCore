@@ -3083,7 +3083,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     println!("[initproc] running fs_test mount bench...");
     // Copy busybox to ramfs to isolate exec-from-lwext4 cost
     let _ = run_bash_cmd("cp /bin/busybox /tmp/bb\0", &environ);
-    let bench_cmd = "cd / && ./fs_test perf_fork_exec perf_fork_exec_tmp perf_exec_twice perf_read_bb\0";
+    let bench_cmd = "cd / && ./fs_test perf_fork_exec perf_fork_exec_tmp perf_read_full perf_exec_twice\0";
     let bench_ret = run_bash_cmd(bench_cmd, &environ);
     println!("[initproc] fs_test mount bench returned exit_code={}", bench_ret);
 
