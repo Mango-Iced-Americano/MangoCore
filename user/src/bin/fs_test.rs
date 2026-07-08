@@ -2400,6 +2400,79 @@ fn test_mount_bench_rbind_scale() -> bool {
     true
 }
 
+fn test_perf_fork_exec() -> bool {
+    const N: usize = 50;
+    let mut t0: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t0);
+    for _ in 0..N {
+        let pid = sys_fork();
+        if pid == 0 {
+            let args: [*const u8; 2] = ["/bin/busybox\0".as_ptr(), "true\0".as_ptr()];
+            let envp: [*const u8; 0] = [];
+            sys_exec("/bin/busybox\0", &args, &envp);
+            sys_exit(1);
+        } else if pid > 0 {
+            let mut status: i32 = 0;
+            sys_waitpid(pid, &mut status);
+        } else {
+            println!("  FAIL: fork returned {}", pid);
+            return false;
+        }
+    }
+    let mut t1: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t1);
+    let total_ns = ts_diff_ns(&t0, &t1);
+    let avg_ns = total_ns / N as u64;
+    println!("  fork+exec /bin/true x{}: total={}ns avg={}ns", N, total_ns, avg_ns);
+    true
+}
+
+fn test_perf_fork_only() -> bool {
+    const N: usize = 50;
+    let mut t0: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t0);
+    for _ in 0..N {
+        let pid = sys_fork();
+        if pid == 0 {
+            sys_exit(0);
+        } else if pid > 0 {
+            let mut status: i32 = 0;
+            sys_waitpid(pid, &mut status);
+        } else {
+            println!("  FAIL: fork returned {}", pid);
+            return false;
+        }
+    }
+    let mut t1: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t1);
+    let total_ns = ts_diff_ns(&t0, &t1);
+    let avg_ns = total_ns / N as u64;
+    println!("  fork-only x{}: total={}ns avg={}ns", N, total_ns, avg_ns);
+    true
+}
+
+fn test_perf_proc_mounts() -> bool {
+    const N: usize = 10;
+    let mut t0: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t0);
+    for _ in 0..N {
+        let fd = sys_open("/proc/mounts\0", 0);
+        if fd < 0 {
+            println!("  FAIL: open /proc/mounts returned {}", fd);
+            return false;
+        }
+        let mut buf = [0u8; 4096];
+        let _n = sys_read(fd as usize, &mut buf);
+        sys_close(fd as usize);
+    }
+    let mut t1: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t1);
+    let total_ns = ts_diff_ns(&t0, &t1);
+    let avg_ns = total_ns / N as u64;
+    println!("  read /proc/mounts x{}: total={}ns avg={}ns", N, total_ns, avg_ns);
+    true
+}
+
 #[no_mangle]
 #[link_section = ".text.entry"]
 pub extern "C" fn _start() -> ! {
@@ -2496,6 +2569,9 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         TestCase { name: "mount_bench_bind", desc: "mount bench: bind 8 levels", func: test_mount_bench_bind },
         TestCase { name: "mount_bench_rbind", desc: "mount bench: rbind 8 levels", func: test_mount_bench_rbind },
         TestCase { name: "mount_bench_rbind_scale", desc: "mount bench: rbind scale 1,2,4,8", func: test_mount_bench_rbind_scale },
+        TestCase { name: "perf_fork_exec", desc: "perf: fork+exec /bin/true x50", func: test_perf_fork_exec },
+        TestCase { name: "perf_fork_only", desc: "perf: fork-only x50", func: test_perf_fork_only },
+        TestCase { name: "perf_proc_mounts", desc: "perf: read /proc/mounts x10", func: test_perf_proc_mounts },
     ];
 
     let total = tests.len();

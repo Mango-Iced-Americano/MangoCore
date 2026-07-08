@@ -3081,7 +3081,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     );
 
     println!("[initproc] running fs_test mount bench...");
-    let bench_cmd = "cd / && ./fs_test mount_bench_bind mount_bench_rbind mount_bench_rbind_scale\0";
+    let bench_cmd = "cd / && ./fs_test mount_bench_bind mount_bench_rbind perf_fork_exec perf_fork_only perf_proc_mounts\0";
     let bench_ret = run_bash_cmd(bench_cmd, &environ);
     println!("[initproc] fs_test mount bench returned exit_code={}", bench_ret);
 
