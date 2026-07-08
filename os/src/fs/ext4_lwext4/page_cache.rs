@@ -95,6 +95,7 @@ impl LwExt4PageCacheBackend {
 
 impl PageCacheBackend for LwExt4PageCacheBackend {
     fn read_page(&self, index: usize, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+        crate::task::perf::record_pc_miss();
         if buf.len() < PAGE_SIZE {
             return Err(SyscallErr::ENOBUFS);
         }

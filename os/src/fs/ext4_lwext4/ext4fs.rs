@@ -5,9 +5,10 @@
 //! serialized through a `Mutex<Ext4BlockWrapper>` because the C
 //! library uses global state internally.
 
+use alloc::collections::BTreeMap;
 use alloc::ffi::CString;
 use alloc::string::String;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use core::any::Any;
 use core::fmt;
@@ -64,6 +65,10 @@ pub struct Ext4FileSystem {
     fs_id: usize,
     /// Whether the filesystem is currently mounted (for idempotent umount).
     mounted: AtomicBool,
+    /// PageCache registry keyed by inode_id — shares PageCache across
+    /// different Ext4OSInode instances pointing to the same file.
+    /// Mimics legacy ext4's `page_caches: Mutex<BTreeMap<usize, Weak<NewPageCache>>>`.
+    pub(crate) page_caches: Mutex<BTreeMap<usize, Weak<crate::fs::page_cache::PageCache>>>,
 }
 
 // Safety: MangoCore is single-core; lwext4 C global state is only accessed
@@ -136,6 +141,7 @@ impl Ext4FileSystem {
             block_size: crate::hal::BLOCK_SZ,
             fs_id,
             mounted: AtomicBool::new(true),
+            page_caches: Mutex::new(BTreeMap::new()),
         });
 
         // 4. Create root inode (inode 2 is always root in ext4)

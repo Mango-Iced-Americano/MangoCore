@@ -473,6 +473,14 @@ impl IndexNode for Ext4OSInode {
                     return Ok(0);
                 }
                 let read_len = read_end - offset;
+                // ── Readahead: batch prefetch sequential pages (like legacy ext4) ──
+                if let FilePrivateData::Readahead { ra_state } = &*_data {
+                    let start_page = offset >> crate::config::PAGE_SIZE_BITS;
+                    let end_page = (offset + actual.saturating_sub(1)) >> crate::config::PAGE_SIZE_BITS;
+                    let req_pages = end_page.saturating_sub(start_page) + 1;
+                    let mut ra = ra_state.lock();
+                    pc.maybe_readahead(start_page, &mut ra, req_pages);
+                }
                 pc.read(offset, &mut buf[..read_len])
                     .map_err(|_| SyscallErr::EIO)
             }
@@ -756,6 +764,17 @@ impl IndexNode for Ext4OSInode {
         counters::LWEXT4_ENSURE_PC_CALLS.fetch_add(1, Ordering::Relaxed);
         let mut cache = self.page_cache.lock();
         if cache.is_none() {
+            // Check global registry for existing PageCache (shared across inode instances)
+            {
+                let registry = self.fs.page_caches.lock();
+                if let Some(weak) = registry.get(&self.inode_id) {
+                    if let Some(pc) = weak.upgrade() {
+                        *cache = Some(pc.clone());
+                        return cache.clone();
+                    }
+                }
+            }
+            // No existing PageCache — create new one and register
             let backend = Arc::new(LwExt4PageCacheBackend::new(
                 Arc::downgrade(&self.fs),
                 self.path.clone(),
@@ -763,6 +782,8 @@ impl IndexNode for Ext4OSInode {
             ));
             let pc = PageCache::new();
             pc.set_backend(backend);
+            // Register in global registry for sharing
+            self.fs.page_caches.lock().insert(self.inode_id, Arc::downgrade(&pc));
             *cache = Some(pc);
             counters::LWEXT4_ENSURE_PC_CREATES.fetch_add(1, Ordering::Relaxed);
         }
