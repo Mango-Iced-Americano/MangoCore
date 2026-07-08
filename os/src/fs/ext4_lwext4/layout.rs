@@ -567,24 +567,7 @@ impl IndexNode for Ext4OSInode {
         // Build child path
         let child_path = join_path(&self.path, name);
 
-        // Try cache first
-        if let Some(entry) = self.fs.cache_lookup(&child_path) {
-            let result = Ok(Ext4OSInode::new_child_seeded(
-                self.fs.clone(),
-                child_path,
-                entry.inode_id,
-                entry.file_type,
-                entry.inode_mode,
-                entry.size,
-            ) as Arc<dyn IndexNode>);
-            let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_start);
-            counters::LWEXT4_FIND_CALLS.fetch_add(1, Ordering::Relaxed);
-            counters::LWEXT4_FIND_CYCLES.fetch_add(elapsed, Ordering::Relaxed);
-            counters::LWEXT4_FIND_CACHE_HIT.fetch_add(1, Ordering::Relaxed);
-            return result;
-        }
-
-        // Cache miss: single lwext4 probe
+        // Single lwext4 probe
         let entry = self.fs.probe_inode_meta(&child_path)?;
 
         let result = Ok(Ext4OSInode::new_child_seeded(
@@ -813,7 +796,6 @@ impl IndexNode for Ext4OSInode {
                 .map_err(|_| SyscallErr::EIO)?;
             let new_end = offset + n;
             self.note_logical_size(new_end);
-            self.fs.cache_invalidate_size(&self.path);
             return Ok(n);
         }
 
@@ -870,8 +852,6 @@ impl IndexNode for Ext4OSInode {
                 }
                 let _ = f.file_mode_set(mode.bits());
                 drop(_lock);
-                // Invalidate cache so next find() re-probes with fresh inode
-                self.fs.cache_invalidate_path(&child_path);
                 let h = hash_path(&child_path);
                 let inode = Ext4OSInode::new_child_seeded(
                     self.fs.clone(),
@@ -940,7 +920,6 @@ impl IndexNode for Ext4OSInode {
         // Set mode on the newly created directory
         let _ = d.file_mode_set(mode.bits());
         drop(_lock);
-        self.fs.cache_invalidate_path(&child_path);
         let h = hash_path(&child_path);
         Ok(Ext4OSInode::new_child_seeded(
             self.fs.clone(),
@@ -969,7 +948,6 @@ impl IndexNode for Ext4OSInode {
         if r.is_err() {
             return Err(from_lwext4(r.unwrap_err().abs()));
         }
-        self.fs.cache_invalidate_path(&child_path);
         Ok(())
     }
 
@@ -1001,7 +979,6 @@ impl IndexNode for Ext4OSInode {
         let mut f = Ext4File::new(&child_path, InodeTypes::EXT4_DE_DIR);
         f.dir_rm(&child_path)
             .map_err(|e| from_lwext4(e.abs()))?;
-        self.fs.cache_invalidate_path(&child_path);
         Ok(())
     }
 
@@ -1031,8 +1008,6 @@ impl IndexNode for Ext4OSInode {
             d.dir_mv(&old_path, &new_path)
                 .map_err(|e| from_lwext4(e.abs()))?;
         }
-        self.fs.cache_invalidate_path(&old_path);
-        self.fs.cache_invalidate_path(&new_path);
         Ok(())
     }
 
@@ -1049,7 +1024,6 @@ impl IndexNode for Ext4OSInode {
             .map_err(|e| from_lwext4(e.abs()))?;
         drop(guard);
         self.logical_size.store(len, Ordering::Relaxed);
-        self.fs.cache_invalidate_size(&self.path);
         Ok(())
     }
 
@@ -1084,7 +1058,6 @@ impl IndexNode for Ext4OSInode {
             return Err(from_lwext4(r.abs()));
         }
         drop(_lock);
-        self.fs.cache_invalidate_path(&child_path);
         let h = hash_path(&child_path);
         Ok(Ext4OSInode::new_child_seeded(
             self.fs.clone(),
@@ -1240,7 +1213,6 @@ impl IndexNode for Ext4OSInode {
         let mut f = Ext4File::new(&child_path, InodeTypes::EXT4_DE_UNKNOWN);
         let _ = f.file_mode_set(mode.bits());
 
-        self.fs.cache_invalidate_path(&child_path);
         let h = hash_path(&child_path);
         Ok(Ext4OSInode::new_child_seeded(
             self.fs.clone(),
