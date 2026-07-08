@@ -2425,6 +2425,9 @@ struct TestCase {
 #[no_mangle]
 fn main(_argc: usize, _argv: &[&str]) -> i32 {
     println!("=== FS Test Suite ===");
+    // Filter: if arguments given, only run tests whose name matches any arg
+    let filter: &[&str] = if _argc > 0 { _argv } else { &[] };
+    let has_filter = !filter.is_empty();
 
     let tests: &[TestCase] = &[
         TestCase { name: "mkdir", desc: "mkdir", func: test_mkdir },
@@ -2500,6 +2503,10 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     let mut failed = 0;
 
     for (i, tc) in tests.iter().enumerate() {
+        // Skip if filter is active and this test doesn't match any filter item
+        if has_filter && !filter.iter().any(|f| *f == tc.name) {
+            continue;
+        }
         println!("[{}/{}] {}", i + 1, total, tc.desc);
         if run_test(tc.name, tc.func) {
             passed += 1;

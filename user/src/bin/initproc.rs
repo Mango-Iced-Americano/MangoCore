@@ -3080,10 +3080,10 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         bash_ret, has_bin_bash
     );
 
-    // println!("[initproc] running fs_test...");
-    // let fs_test_cmd = "cd / && ./fs_test\0";
-    // let fs_test_ret = run_bash_cmd(fs_test_cmd, &environ);
-    // println!("[initproc] fs_test returned exit_code={}", fs_test_ret);
+    println!("[initproc] running fs_test mount bench...");
+    let bench_cmd = "cd / && ./fs_test mount_bench_bind mount_bench_rbind mount_bench_rbind_scale\0";
+    let bench_ret = run_bash_cmd(bench_cmd, &environ);
+    println!("[initproc] fs_test mount bench returned exit_code={}", bench_ret);
 
     // println!("[initproc] running inet_test...");
     // let inet_test_cmd = "cd / && ./tests/inet_test\0";
