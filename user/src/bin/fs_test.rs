@@ -2451,6 +2451,60 @@ fn test_perf_fork_only() -> bool {
     true
 }
 
+fn test_perf_fork_exec_tmp() -> bool {
+    const N: usize = 50;
+    let mut t0: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t0);
+    for _ in 0..N {
+        let pid = sys_fork();
+        if pid == 0 {
+            let args: [*const u8; 2] = ["/tmp/bb\0".as_ptr(), "true\0".as_ptr()];
+            let envp: [*const u8; 0] = [];
+            sys_exec("/tmp/bb\0", &args, &envp);
+            sys_exit(1);
+        } else if pid > 0 {
+            let mut status: i32 = 0;
+            sys_waitpid(pid, &mut status);
+        } else {
+            println!("  FAIL: fork returned {}", pid);
+            return false;
+        }
+    }
+    let mut t1: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t1);
+    let total_ns = ts_diff_ns(&t0, &t1);
+    let avg_ns = total_ns / N as u64;
+    println!("  fork+exec /tmp/bb (ramfs) x{}: total={}ns avg={}ns", N, total_ns, avg_ns);
+    true
+}
+
+fn test_perf_fork_exec_small() -> bool {
+    const N: usize = 50;
+    let mut t0: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t0);
+    for _ in 0..N {
+        let pid = sys_fork();
+        if pid == 0 {
+            let args: [*const u8; 1] = ["/fs_test\0".as_ptr()];
+            let envp: [*const u8; 0] = [];
+            sys_exec("/fs_test\0", &args, &envp);
+            sys_exit(1);
+        } else if pid > 0 {
+            let mut status: i32 = 0;
+            sys_waitpid(pid, &mut status);
+        } else {
+            println!("  FAIL: fork returned {}", pid);
+            return false;
+        }
+    }
+    let mut t1: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    sys_clock_gettime(1, &mut t1);
+    let total_ns = ts_diff_ns(&t0, &t1);
+    let avg_ns = total_ns / N as u64;
+    println!("  fork+exec /fs_test (ramfs,small) x{}: total={}ns avg={}ns", N, total_ns, avg_ns);
+    true
+}
+
 fn test_perf_proc_mounts() -> bool {
     const N: usize = 10;
     let mut t0: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
@@ -2571,6 +2625,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         TestCase { name: "mount_bench_rbind_scale", desc: "mount bench: rbind scale 1,2,4,8", func: test_mount_bench_rbind_scale },
         TestCase { name: "perf_fork_exec", desc: "perf: fork+exec /bin/true x50", func: test_perf_fork_exec },
         TestCase { name: "perf_fork_only", desc: "perf: fork-only x50", func: test_perf_fork_only },
+        TestCase { name: "perf_fork_exec_tmp", desc: "perf: fork+exec /tmp/bb (ramfs) x50", func: test_perf_fork_exec_tmp },
         TestCase { name: "perf_proc_mounts", desc: "perf: read /proc/mounts x10", func: test_perf_proc_mounts },
     ];
 
