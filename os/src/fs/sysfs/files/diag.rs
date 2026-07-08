@@ -226,6 +226,9 @@ fn stats_resource_content(_extra: usize, offset: usize, len: usize, buf: &mut [u
     let _ = writeln!(s, "lwext4_dir_entries={}", lw.15);
     let _ = writeln!(s, "lwext4_create_pre={}", lw.17);
     let _ = writeln!(s, "lwext4_ensure_pc={}", lw.20);
+    let _ = writeln!(s, "lwext4_find_cache_hit={}", lw.21);
+    let _ = writeln!(s, "lwext4_find_cache_miss={}", lw.22);
+    let _ = writeln!(s, "lwext4_ensure_pc_creates={}", lw.23);
     // mount/bind probes
     let mnt = crate::fs::vfs::mount::counters::mount_perf_snapshot();
     let _ = writeln!(s, "mnt_propagate={}", mnt.0);
@@ -540,6 +543,9 @@ fn stats_lwext4_content(
     let _ = writeln!(s, "lwext4_logical_size_calls={}", lw.18);
     let _ = writeln!(s, "lwext4_logical_size_cycles={}", lw.19);
     let _ = writeln!(s, "lwext4_ensure_pc_calls={}", lw.20);
+    let _ = writeln!(s, "lwext4_find_cache_hit={}", lw.21);
+    let _ = writeln!(s, "lwext4_find_cache_miss={}", lw.22);
+    let _ = writeln!(s, "lwext4_ensure_pc_creates={}", lw.23);
     write_str(offset, len, buf, &s)
 }
 

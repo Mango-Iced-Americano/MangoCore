@@ -5,7 +5,9 @@
 //! serialized through a `Mutex<Ext4BlockWrapper>` because the C
 //! library uses global state internally.
 
+use alloc::collections::BTreeMap;
 use alloc::ffi::CString;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use core::any::Any;
@@ -15,7 +17,7 @@ use spin::Mutex;
 
 use crate::drivers::block::BlockDevice;
 use crate::fs::vfs::{
-    FileSystem, FsInfo, IndexNode, SuperBlock,
+    FileSystem, FsInfo, FileType, IndexNode, InodeMode, SuperBlock,
 };
 use crate::fs::vfs::file_system::FsPermissionPolicy;
 use crate::utils::error::SyscallErr;
@@ -31,6 +33,17 @@ static NEXT_FS_ID: AtomicUsize = AtomicUsize::new(1);
 
 /// Back-reference type stored in inodes.
 pub type Ext4FsRef = Arc<Ext4FileSystem>;
+
+/// Cached result of a single `ext4_raw_inode_fill()` probe.
+#[derive(Clone, Debug)]
+pub(crate) struct LookupCacheEntry {
+    pub inode_id: usize,
+    pub file_type: FileType,
+    pub inode_mode: InodeMode,
+    pub size: usize,
+}
+
+const MAX_LOOKUP_CACHE: usize = 4096;
 
 /// lwext4-based ext4 filesystem.
 ///
@@ -54,6 +67,8 @@ pub struct Ext4FileSystem {
     fs_id: usize,
     /// Whether the filesystem is currently mounted (for idempotent umount).
     mounted: AtomicBool,
+    /// Positive path→inode lookup cache.  Invalidated on mutation.
+    lookup_cache: Mutex<BTreeMap<String, LookupCacheEntry>>,
 }
 
 // Safety: MangoCore is single-core; lwext4 C global state is only accessed
@@ -126,6 +141,7 @@ impl Ext4FileSystem {
             block_size: crate::hal::BLOCK_SZ,
             fs_id,
             mounted: AtomicBool::new(true),
+            lookup_cache: Mutex::new(BTreeMap::new()),
         });
 
         // 4. Create root inode (inode 2 is always root in ext4)
@@ -202,6 +218,85 @@ impl Ext4FileSystem {
         super::counters::LWEXT4_PROBE_TYPE_CYCLES.fetch_add(elapsed, Ordering::Relaxed);
         Ok(super::layout::map_lwext4_mode(mode))
     }
+
+    // ── lookup cache ─────────────────────────────────────────────────
+
+    /// Lookup cache query (does not lock lw).
+    pub(crate) fn cache_lookup(&self, path: &str) -> Option<LookupCacheEntry> {
+        self.lookup_cache.lock().get(path).cloned()
+    }
+
+    /// Insert into cache. Evict all if over MAX_LOOKUP_CACHE.
+    pub(crate) fn cache_insert(&self, path: &str, entry: LookupCacheEntry) {
+        let mut cache = self.lookup_cache.lock();
+        if cache.len() >= MAX_LOOKUP_CACHE {
+            cache.clear();
+        }
+        cache.insert(String::from(path), entry);
+    }
+
+    /// Invalidate cache for a path and all its children.
+    /// Called after unlink/rmdir/rename/truncate/write.
+    pub(crate) fn cache_invalidate_path(&self, target: &str) {
+        let mut cache = self.lookup_cache.lock();
+        cache.retain(|p, _| !is_path_affected(p, target));
+    }
+
+    /// Invalidate size hint for a path (after write/truncate),
+    /// so next `metadata()` re-probes the real size.
+    pub(crate) fn cache_invalidate_size(&self, path: &str) {
+        let mut cache = self.lookup_cache.lock();
+        if let Some(entry) = cache.get_mut(path) {
+            entry.size = 0; // will re-probe on next logical_size_or_refresh
+        }
+    }
+
+    /// Single lwext4 FFI: fill raw inode, extract ALL metadata, cache result.
+    /// Uses `ext4_raw_inode_fill(path, &ret_ino, &raw_inode)` — ONE call.
+    pub(crate) fn probe_inode_meta(
+        &self,
+        path: &str,
+    ) -> Result<LookupCacheEntry, SyscallErr> {
+        let _lock = self.lw.lock();
+        let c_path =
+            CString::new(path).map_err(|_| SyscallErr::EINVAL)?;
+        let c_path = c_path.into_raw();
+        let mut ret_ino: u32 = 0;
+        let mut raw_inode: lwext4_rust::bindings::ext4_inode =
+            unsafe { core::mem::zeroed() };
+        let r = unsafe {
+            lwext4_rust::bindings::ext4_raw_inode_fill(
+                c_path,
+                &mut ret_ino,
+                &mut raw_inode,
+            )
+        };
+        unsafe {
+            let _ = CString::from_raw(c_path);
+        }
+        if r != 0 {
+            return Err(from_lwext4(r.abs()));
+        }
+        let mode_raw = raw_inode.mode as u32;
+        let mapped = super::layout::map_lwext4_mode(mode_raw);
+        let size = (raw_inode.size_lo as usize)
+            | ((raw_inode.size_hi as usize) << 32);
+        let entry = LookupCacheEntry {
+            inode_id: ret_ino as usize,
+            file_type: mapped.file_type,
+            inode_mode: mapped.inode_mode,
+            size,
+        };
+        drop(_lock);
+        // Insert into cache outside lw lock to minimise hold time.
+        self.cache_insert(path, entry.clone());
+        Ok(entry)
+    }
+}
+
+/// Returns true if `path` is `target` or a descendant of `target/`.
+fn is_path_affected(path: &str, target: &str) -> bool {
+    path == target || path.starts_with(&alloc::format!("{}/", target))
 }
 
 impl FileSystem for Ext4FileSystem {

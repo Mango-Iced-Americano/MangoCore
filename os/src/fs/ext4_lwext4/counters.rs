@@ -10,6 +10,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub static LWEXT4_FIND_CALLS: AtomicUsize = AtomicUsize::new(0);
 pub static LWEXT4_FIND_CYCLES: AtomicUsize = AtomicUsize::new(0);
+pub static LWEXT4_FIND_CACHE_HIT: AtomicUsize = AtomicUsize::new(0);
+pub static LWEXT4_FIND_CACHE_MISS: AtomicUsize = AtomicUsize::new(0);
 pub static LWEXT4_PROBE_TYPE_CALLS: AtomicUsize = AtomicUsize::new(0);
 pub static LWEXT4_PROBE_TYPE_CYCLES: AtomicUsize = AtomicUsize::new(0);
 pub static LWEXT4_GET_INODE_ID_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -30,6 +32,7 @@ pub static LWEXT4_CREATE_PRE_CHECK: AtomicUsize = AtomicUsize::new(0);
 pub static LWEXT4_LOGICAL_SIZE_CALLS: AtomicUsize = AtomicUsize::new(0);
 pub static LWEXT4_LOGICAL_SIZE_CYCLES: AtomicUsize = AtomicUsize::new(0);
 pub static LWEXT4_ENSURE_PC_CALLS: AtomicUsize = AtomicUsize::new(0);
+pub static LWEXT4_ENSURE_PC_CREATES: AtomicUsize = AtomicUsize::new(0);
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -42,6 +45,8 @@ fn load(c: &AtomicUsize) -> usize {
 pub fn reset() {
     LWEXT4_FIND_CALLS.store(0, Ordering::Relaxed);
     LWEXT4_FIND_CYCLES.store(0, Ordering::Relaxed);
+    LWEXT4_FIND_CACHE_HIT.store(0, Ordering::Relaxed);
+    LWEXT4_FIND_CACHE_MISS.store(0, Ordering::Relaxed);
     LWEXT4_PROBE_TYPE_CALLS.store(0, Ordering::Relaxed);
     LWEXT4_PROBE_TYPE_CYCLES.store(0, Ordering::Relaxed);
     LWEXT4_GET_INODE_ID_CALLS.store(0, Ordering::Relaxed);
@@ -61,6 +66,7 @@ pub fn reset() {
     LWEXT4_LOGICAL_SIZE_CALLS.store(0, Ordering::Relaxed);
     LWEXT4_LOGICAL_SIZE_CYCLES.store(0, Ordering::Relaxed);
     LWEXT4_ENSURE_PC_CALLS.store(0, Ordering::Relaxed);
+    LWEXT4_ENSURE_PC_CREATES.store(0, Ordering::Relaxed);
 }
 
 /// Snapshot all counters for `print_snapshot()`.
@@ -69,6 +75,7 @@ pub fn snapshot() -> (
     usize, usize, usize, usize, usize, usize,
     usize, usize, usize, usize, usize, usize,
     usize, usize,
+    usize, usize, usize,
 ) {
     (
         load(&LWEXT4_FIND_CALLS),
@@ -92,5 +99,8 @@ pub fn snapshot() -> (
         load(&LWEXT4_LOGICAL_SIZE_CALLS),
         load(&LWEXT4_LOGICAL_SIZE_CYCLES),
         load(&LWEXT4_ENSURE_PC_CALLS),
+        load(&LWEXT4_FIND_CACHE_HIT),
+        load(&LWEXT4_FIND_CACHE_MISS),
+        load(&LWEXT4_ENSURE_PC_CREATES),
     )
 }
