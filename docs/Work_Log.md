@@ -2,7 +2,100 @@
 
 ---
 
-## 2026-07-06
+## 2026-07-08
+
+### fs_bind 慢最终根因确诊: fork(30ms) + exec 从 lwext4(58ms) = 88ms/shell 命令
+
+**诊断数据 (QEMU 内直接 syscall bench):**
+
+| 操作 | 耗时 | 说明 |
+|------|------|------|
+| `mount(MS_BIND)` | ~400µs O(1) | 不慢 |
+| `mount(MS_BIND\|MS_REC)` depth=8 | ~8ms | 不慢 |
+| `read /proc/mounts` | 1.5ms | 不慢 |
+| `read busybox 4KB block` (lwext4) | 400µs | 单块 I/O 正常 |
+| `read busybox 4KB block` (ramfs) | 415µs | 几乎相同 |
+| **fork-only** | **30ms** | 🔴 共享代码, 疑似 buddy+slab |
+| **fork+exec lwext4** ×50 | **88-108ms/次** | 🔴 每次 shell 命令 |
+| **fork+exec ramfs** ×50 | **10-30ms/次** | 🟢 3.6x 快 |
+| exec cold vs warm | ratio=1.0x | PageCache 对 exec 无帮助 |
+
+**根因:** fs_bind 每 case 跑 50+ 条 shell 命令, 每条 fork+exec busybox。
+lwext4 上 exec 的 58ms 额外开销来自: 每页 `ensure_page_cache()` → 创建 PageCache
++ `LwExt4PageCacheBackend` → 读页过 lwext4 FFI。200 页 × (创建 + FFI) ≈ 58ms。
+
+**fork 30ms:** 共享代码 (clone/进程创建), 不是 lwext4 的问题。疑似 `55066a0c`
+(buddy+slab 分配器) 引入的退化, 与 pipe 回退同源。**待单独调查, 暂不处理。**
+
+**涉及文件:** `user/src/bin/fs_test.rs` (7 个 bench 函数), `user/src/bin/initproc.rs` (启动时调用 bench)
+
+### 新增 mount/rbind bench 测试到 fs_test
+
+**涉及文件：**
+- `user/src/syscall.rs` — 新增 `sys_umount2()` 包装函数（此前仅有 `SYSCALL_UMOUNT2` 常量但无公开包装）
+- `user/src/bin/fs_test.rs` — 新增 §Mount bench tests（helpers: `ts_diff_ns`, `create_dir_tree`, `read_sysfs`；测试: `test_mount_bench_bind`, `test_mount_bench_rbind`, `test_mount_bench_rbind_scale`）；在 `main()` 中注册 3 个新 TestCase
+
+**验证：**
+- `make MODE=release` (user) ✅
+- `EXTRA_FEATURES='perf_diag' make rv64-kernel-build-only` ✅
+- `EXTRA_FEATURES='perf_diag' make la64-kernel-build-only` ✅
+
+**备注：** bind 测试逐级挂载 8 层并计时；rbind 测试构建含 submount 的 8 层目录链，单次 MS_BIND|MS_REC 挂载并计时；rbind_scale 测试在深度 1/2/4/8 下测量 rbind 耗时（预期 O(n²) 回归时可见）。每次测试前打印 `/sys/kernel/stats/lwext4` 和 `/sys/kernel/stats/mount` 快照。所有测试均在结束时 cleanup 创建的目录/挂载点。常量：`MS_BIND=4096`，`MS_REC=16384`。
+
+### Partial revert: 移除 BTreeMap 路径缓存，保留 probe_inode_meta + new_child_seeded
+
+**涉及文件：**
+- `os/src/fs/ext4_lwext4/ext4fs.rs` — 移除 `LookupCacheEntry` 的 `Clone` derive（保留结构体作为 `probe_inode_meta` 返回类型）；移除 `MAX_LOOKUP_CACHE` 常量；移除 `lookup_cache: Mutex<BTreeMap<String, LookupCacheEntry>>` 字段及初始化；移除 `cache_lookup()`、`cache_insert()`、`cache_invalidate_path()`、`cache_invalidate_size()` 方法；移除 `is_path_affected()` 辅助函数；移除 `use alloc::collections::BTreeMap;` 导入；`probe_inode_meta()` 移除末尾 `cache_insert()` 调用，直接返回 `Ok(entry)`
+- `os/src/fs/ext4_lwext4/layout.rs` — `find()` 移除 cache-hit 快速路径（`cache_lookup` 分支），保留 cache-miss 单次 `probe_inode_meta` 调用；所有 mutation 方法移除 `cache_invalidate_path()` / `cache_invalidate_size()` 调用：`write_at()`、`create()`、`mkdir()`、`unlink()`、`rmdir()`、`rename()`、`truncate()`、`symlink()`、`mknod()`
+
+**验证：**
+- `EXTRA_FEATURES='perf_diag' make rv64-kernel-build-only` ✅
+- `EXTRA_FEATURES='perf_diag' make la64-kernel-build-only` ✅
+
+**备注：** 决策原因——BTreeMap 路径缓存在单核环境下引入不必要的同步开销（`Mutex<BTreeMap>`），且缓存失效边界（`is_path_affected` 前缀匹配）不精确，rename/hardlink 场景下可能产生陈旧数据。`find()` 仍由 `probe_inode_meta` 单次 FFI 完成，子 inode 通过 `new_child_seeded()` 预填充元数据，后续 `metadata()` 走热路径无 FFI。所有性能计数器均保留。
+
+### lwext4 cache-first single-probe find() — 2 FFI→1 per cache-miss (0 for cache-hit)
+
+**涉及文件：**
+
+- `os/src/fs/ext4_lwext4/counters.rs` — 新增 3 个计数器：`LWEXT4_FIND_CACHE_HIT`、`LWEXT4_FIND_CACHE_MISS`、`LWEXT4_ENSURE_PC_CREATES`；`snapshot()` 扩展为 24-tuple
+- `os/src/fs/ext4_lwext4/ext4fs.rs` — 新增 `LookupCacheEntry` 结构体 + `BTreeMap<String, LookupCacheEntry>` 路径缓存（`MAX_LOOKUP_CACHE=4096`，溢出清空）；新增 `cache_lookup()`、`cache_insert()`、`cache_invalidate_path()`、`cache_invalidate_size()`、`probe_inode_meta()`（单次 FFI 调用 `ext4_raw_inode_fill` 提取 mode+size+inode_id）
+- `os/src/fs/ext4_lwext4/layout.rs` — 新增 `new_child_seeded()` 构造函数（预填充 `cached_meta` + `logical_size`，绕过后续 `metadata()` 冷路径）；`find()` 重构为 cache-first 单探针模式（cache-hit → 0 FFI，cache-miss → 1 FFI）；`find("..")` 改用 `probe_inode_meta`（缓存可命中）；`metadata()` 热路径优化：直接加载 `logical_size` atomic，仅在 `LWEXT4_SIZE_UNKNOWN` 时才调用 `logical_size_or_refresh()`；`ensure_page_cache()` 新增 `LWEXT4_ENSURE_PC_CREATES` 计数器；`create()`/`mkdir()`/`symlink()`/`mknod()` 移除无用的 `get_inode_id()` 预检查，改用 `hash_path()`；所有 mutation（`create`、`mkdir`、`unlink`、`rmdir`、`rename`、`symlink`、`mknod`）添加 `cache_invalidate_path()`；`write_at`、`truncate` 添加 `cache_invalidate_size()` + 更新 `logical_size`
+- `os/src/task/perf.rs` — `print_snapshot()` lwext4 行新增 `cache_hit`、`cache_miss`、`pc_creates` 字段
+- `os/src/fs/sysfs/files/diag.rs` — `stats_resource_content` 和 `stats_lwext4_content` 新增 3 个计数器的输出行
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：** `find()` 原先每路径组件 2 次 FFI（`probe_type` + `get_inode_id`），现在 cache-hit 0 次、cache-miss 1 次。子 inode 通过 `new_child_seeded()` 预填充 `cached_meta`，后续 `metadata()` 走热路径，不触发 FFI。预期 fs_bind 测试组从 2→20+ cases/min。
+
+### lwext4 LTP 性能回归诊断 — 性能插桩计数器（3 组）
+
+**背景：** LTP 测试速率从旧 ext4 的 40 case/min 降到 lwext4 的 7 case/min。需要在关键路径上添加原子计数器，用于归因瓶颈位置（lwext4 FFI 调用 vs VFS/MountFS 开销）。
+
+**涉及文件：**
+
+- **新增** `os/src/fs/ext4_lwext4/counters.rs` — lwext4 性能探针计数器（21 项）：`find`、`probe_type`、`get_inode_id`（含 ENOENT 计数）、`metadata`（冷/热路径）、`file_open/file_size/file_close`、`dirent`、`create_pre_check`、`logical_size`、`ensure_page_cache`，含 `snapshot()` 和 `reset()`
+- `os/src/fs/ext4_lwext4/mod.rs` — 添加 `pub mod counters;`
+- `os/src/fs/ext4_lwext4/ext4fs.rs` — `get_inode_id()` 添加计时 + ENOENT 计数；`warn!` 降级为 `debug!`（ENOENT 在 create/mkdir 预检查期间是预期行为，不应 spam 串口）；`probe_type()` 添加计时
+- `os/src/fs/ext4_lwext4/layout.rs` — 插桩 10+ 函数：`find()`（全路径计时含所有早期返回分支）、`metadata()`（热路径 `LWEXT4_METADATA_HOT` + 冷路径 `LWEXT4_METADATA_COLD`/`_COLD_CYCLES`，冷路径内 `file_open/size/close` 单独计数器）、`ensure_page_cache()`、`logical_size_or_refresh()`、`create()`/`mkdir()`/`symlink()`/`mknod()`（添加 `LWEXT4_CREATE_PRE_CHECK`）、`rmdir()`/`list()`/`list_dirents()`（`lwext4_dir_entries` 计时）
+- `os/src/fs/vfs/mount.rs` — counters 模块新增 9 项挂载/绑定性能计数器：`MOUNT_LIST_PROPAGATE_CALLS/CYCLES`、`MOUNT_LIST_REMOVE_FS_SCAN/CALLS`、`RBIND_SNAPSHOT_CALLS/CYCLES/ENTRIES`、`RBIND_DIRENT_CALLS`、`RBIND_SEEN_SCAN`；`remove_fs()` 插桩扫描步数
+- `os/src/syscall/fs.rs` — `collect_rbind_snapshot()` 全路径计时 + 每次 `list_dirents` 调用 + 每次 `seen.contains()` 线性扫描长度
+- `os/src/task/perf.rs` — `print_snapshot()` 新增两个诊断行：`[lwext4]` 和 `[mount_perf]`，打印所有 21 项 lwext4 计数器 + 9 项挂载计数器
+- `os/src/fs/vfs/propagation.rs` — `propagate_mount()` 添加调用计数和周期计时
+
+**计数器输出格式（`perf_snapshot` 触发时）：**
+
+```
+[lwext4] find={} find_cycles={} probe_type={} pt_cycles={} get_inode_id={} gii_enoent={} gii_cycles={} meta_cold={} meta_hot={} meta_cold_cycles={} file_open={} fo_cycles={} file_size={} file_close={} fc_cycles={} dirent={} de_cycles={} create_pre={} logical_size={} ls_cycles={} ensure_pc={}
+[mount_perf] propagate={} prop_cycles={} remove_fs={} rf_scan={} rbind={} rbind_cycles={} rbind_entries={} dirent_calls={} seen_scan={}
+```
+
+**验证：**
+- `EXTRA_FEATURES='perf_diag' make rv64-kernel-build-only` ✅
+
+**备注：** 所有计数器使用 `AtomicUsize` + `Relaxed` ordering；`perf_time_now()` 在 perf_stats 关闭时返回 0，无需条件编译；`perf_stats` 关闭时计数器仍运行但不 print（`stats_enabled()` 为 false 时不会调用 `print_snapshot`）
 
 ### lwext4 性能评测 Round 4 — metadata 缓存消除 touch_modified() 瓶颈
 
