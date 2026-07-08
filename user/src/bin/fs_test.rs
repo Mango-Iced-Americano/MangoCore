@@ -2505,6 +2505,30 @@ fn test_perf_fork_exec_small() -> bool {
     true
 }
 
+fn test_perf_read_bb() -> bool {
+    const CHUNK: usize = 4096;
+    const N: usize = 50;
+    // Read /bin/busybox (possibly lwext4) vs /tmp/bb (ramfs)
+    let paths = [("/bin/busybox\0", "bin"), ("/tmp/bb\0", "tmp")];
+    for (path, label) in &paths {
+        let mut t0: TimeSpec = TimeSpec { tv_sec:0, tv_nsec:0 };
+        sys_clock_gettime(1, &mut t0);
+        for _ in 0..N {
+            let fd = sys_open(path, 0);
+            if fd < 0 { println!("  FAIL: open {} returned {}", label, fd); return false; }
+            let mut buf = [0u8; CHUNK];
+            let _n = sys_read(fd as usize, &mut buf);
+            sys_close(fd as usize);
+        }
+        let mut t1: TimeSpec = TimeSpec { tv_sec:0, tv_nsec:0 };
+        sys_clock_gettime(1, &mut t1);
+        let total_ns = ts_diff_ns(&t0, &t1);
+        let avg_ns = total_ns / N as u64;
+        println!("  read {}/{}B x{}: total={}ns avg={}ns", label, CHUNK, N, total_ns, avg_ns);
+    }
+    true
+}
+
 fn test_perf_proc_mounts() -> bool {
     const N: usize = 10;
     let mut t0: TimeSpec = TimeSpec { tv_sec: 0, tv_nsec: 0 };
@@ -2524,6 +2548,39 @@ fn test_perf_proc_mounts() -> bool {
     let total_ns = ts_diff_ns(&t0, &t1);
     let avg_ns = total_ns / N as u64;
     println!("  read /proc/mounts x{}: total={}ns avg={}ns", N, total_ns, avg_ns);
+    true
+}
+
+fn test_perf_exec_twice() -> bool {
+    // First run: cold (PageCache miss on lwext4)
+    let mut t0: TimeSpec = TimeSpec { tv_sec:0, tv_nsec:0 };
+    sys_clock_gettime(1, &mut t0);
+    let args: [*const u8; 2] = ["/bin/busybox\0".as_ptr(), "true\0".as_ptr()];
+    let envp: [*const u8; 0] = [];
+    let pid = sys_fork();
+    if pid == 0 {
+        sys_exec("/bin/busybox\0", &args, &envp);
+        sys_exit(1);
+    }
+    let mut s: i32 = 0;
+    sys_waitpid(pid, &mut s);
+    let mut t1: TimeSpec = TimeSpec { tv_sec:0, tv_nsec:0 };
+    sys_clock_gettime(1, &mut t1);
+    let cold_ns = ts_diff_ns(&t0, &t1);
+
+    // Second run: warm (PageCache should be hot)
+    let mut t0_2: TimeSpec = TimeSpec { tv_sec:0, tv_nsec:0 };
+    sys_clock_gettime(1, &mut t0_2);
+    let pid2 = sys_fork();
+    if pid2 == 0 {
+        sys_exec("/bin/busybox\0", &args, &envp);
+        sys_exit(1);
+    }
+    sys_waitpid(pid2, &mut s);
+    let mut t1_2: TimeSpec = TimeSpec { tv_sec:0, tv_nsec:0 };
+    sys_clock_gettime(1, &mut t1_2);
+    let warm_ns = ts_diff_ns(&t0_2, &t1_2);
+    println!("  exec cold={}ns warm={}ns ratio={:.1}x", cold_ns, warm_ns, cold_ns as f64 / warm_ns.max(1) as f64);
     true
 }
 
@@ -2626,6 +2683,8 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         TestCase { name: "perf_fork_exec", desc: "perf: fork+exec /bin/true x50", func: test_perf_fork_exec },
         TestCase { name: "perf_fork_only", desc: "perf: fork-only x50", func: test_perf_fork_only },
         TestCase { name: "perf_fork_exec_tmp", desc: "perf: fork+exec /tmp/bb (ramfs) x50", func: test_perf_fork_exec_tmp },
+        TestCase { name: "perf_read_bb", desc: "perf: read bin/tmp busybox 4KB x50", func: test_perf_read_bb },
+        TestCase { name: "perf_exec_twice", desc: "perf: exec cold vs warm", func: test_perf_exec_twice },
         TestCase { name: "perf_proc_mounts", desc: "perf: read /proc/mounts x10", func: test_perf_proc_mounts },
     ];
 
