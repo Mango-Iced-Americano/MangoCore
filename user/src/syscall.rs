@@ -189,6 +189,10 @@ pub fn sys_mount(
     )
 }
 
+pub fn sys_umount2(target: *const u8, flags: u32) -> isize {
+    syscall(SYSCALL_UMOUNT2, [target as usize, flags as usize, 0])
+}
+
 pub fn sys_pipe(pipe: &mut [i32]) -> isize {
     syscall(SYSCALL_PIPE, [pipe.as_mut_ptr() as usize, 0, 0])
 }
