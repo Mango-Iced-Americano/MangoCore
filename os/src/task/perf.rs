@@ -97,6 +97,13 @@ mod enabled {
     pub static TLB_FULL_FLUSH_CYCLES: AtomicUsize = AtomicUsize::new(0);
     pub static TLB_ACTIVATE_CYCLES: AtomicUsize = AtomicUsize::new(0);
 
+    // ── Execve phase cycle counters ──
+    pub static EXECVE_MAP_ELF_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXECVE_KERNEL_MAP_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXECVE_INTERP_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXECVE_STACK_TABLES_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXECVE_TEARDOWN_TICKS: AtomicUsize = AtomicUsize::new(0);
+
     // Fine-grained TLB counters
     pub static TLB_FLUSHES: AtomicUsize = AtomicUsize::new(0);    // total
     pub static TLB_FULL: AtomicUsize = AtomicUsize::new(0);       // full inval (invtlb 0x3 / sfence.vma no-arg)
@@ -854,6 +861,13 @@ mod enabled {
         TLB_PAGE_FLUSH_CYCLES.store(0, Ordering::Relaxed);
         TLB_FULL_FLUSH_CYCLES.store(0, Ordering::Relaxed);
         TLB_ACTIVATE_CYCLES.store(0, Ordering::Relaxed);
+
+        // ── Execve phase cycles ──
+        EXECVE_MAP_ELF_TICKS.store(0, Ordering::Relaxed);
+        EXECVE_KERNEL_MAP_TICKS.store(0, Ordering::Relaxed);
+        EXECVE_INTERP_TICKS.store(0, Ordering::Relaxed);
+        EXECVE_STACK_TABLES_TICKS.store(0, Ordering::Relaxed);
+        EXECVE_TEARDOWN_TICKS.store(0, Ordering::Relaxed);
     }
 
     /// Print accumulated timing stats, then reset.
@@ -1971,6 +1985,18 @@ pub static TLB_PAGE_FLUSH_CYCLES: core::sync::atomic::AtomicUsize = core::sync::
 pub static TLB_FULL_FLUSH_CYCLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static TLB_ACTIVATE_CYCLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── Execve phase cycle stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub static EXECVE_MAP_ELF_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXECVE_KERNEL_MAP_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXECVE_INTERP_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXECVE_STACK_TABLES_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXECVE_TEARDOWN_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 // ── PF action names stub ──
 #[cfg(not(feature = "perf_stats"))]

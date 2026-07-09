@@ -14,6 +14,7 @@ use super::process::ProcessControlBlock;
 use super::quota::TaskQuotaGuard;
 use super::registry;
 use super::signal::*;
+use super::perf;
 use super::threads::{futex_wake_shared, Futex};
 use super::TaskContext;
 use super::{
@@ -1007,19 +1008,28 @@ impl TaskControlBlock {
         }
 
         // 将ELF文件映射到内核空间
+        let _t_kmap = perf::perf_time_now();
         let elf_data = elf.map_to_kernel_space(MMAP_BASE);
         if elf_data.is_empty() {
             log::error!("[load_elf] ELF file is empty (size=0)");
             return Err(ENOEXEC);
         }
+        let _kmap_ticks = perf::perf_time_now().wrapping_sub(_t_kmap);
+        perf::EXECVE_KERNEL_MAP_TICKS.fetch_add(_kmap_ticks, Ordering::Relaxed);
         // 带有ELF程序头/跳板/陷阱上下文/用户栈的用户地址空间（AddressSpace）
+        let _t_map = perf::perf_time_now();
         let load_result = AddressSpace::from_elf(elf_data);
+        let _map_ticks = perf::perf_time_now().wrapping_sub(_t_map);
+        perf::EXECVE_MAP_ELF_TICKS.fetch_add(_map_ticks, Ordering::Relaxed);
 
         // 清除临时映射
+        let _t_teardown = perf::perf_time_now();
         crate::mm::KERNEL_SPACE
             .lock()
             .remove_area_with_start_vpn(VirtAddr::from(MMAP_BASE).floor())
             .unwrap();
+        let _td_ticks = perf::perf_time_now().wrapping_sub(_t_teardown);
+        perf::EXECVE_TEARDOWN_TICKS.fetch_add(_td_ticks, Ordering::Relaxed);
 
         let (mut memory_set, program_break, elf_info) = match load_result {
             Ok(result) => result,
@@ -1037,6 +1047,7 @@ impl TaskControlBlock {
             MapPermission::R | MapPermission::W | MapPermission::U,
         );
         // 为当前线程分配用户资源，并保留 trap context PPN，避免再次页表遍历。
+        let _t_stack = perf::perf_time_now();
         let trap_cx_ppn = memory_set
             .alloc_user_res_with_trap_ppn(self.user_res_slot, true)
             .map_err(|_| ENOMEM)?;
@@ -1044,6 +1055,8 @@ impl TaskControlBlock {
         // 创建ELF参数表
         let user_sp =
             memory_set.create_elf_tables(self.ustack_bottom_va(), argv_vec, envp_vec, &elf_info)?;
+        let _stack_ticks = perf::perf_time_now().wrapping_sub(_t_stack);
+        perf::EXECVE_STACK_TABLES_TICKS.fetch_add(_stack_ticks, Ordering::Relaxed);
         // 初始化陷阱上下文
         let trap_cx = TrapContext::app_init_context(
             if let Some(interp_entry) = elf_info.interp_entry {
@@ -1112,6 +1125,108 @@ impl TaskControlBlock {
         Ok(())
         // **** 释放当前PCB锁
     }
+
+    /// 加载ELF文件（零拷贝路径：直接通过 PageCache 映射，无需内核空间临时映射）。
+    /// 若文件所在文件系统无 PageCache，返回 `ENOSYS` 以触发回退到 `load_elf`。
+    pub fn load_elf_direct(
+        &self,
+        elf: Arc<vfs::File>,
+        argv_vec: &Vec<String>,
+        envp_vec: &Vec<String>,
+    ) -> Result<(), isize> {
+        if elf.is_dir() {
+            return Err(EISDIR);
+        }
+        // 旧 VM 没有被其他 CLONE_VM 进程共享时，可以先释放用户数据页。
+        let current_vm = self.process.vm();
+        if Arc::strong_count(&current_vm) <= 2 {
+            current_vm.lock().recycle_data_pages();
+        }
+
+        // 直接从 inode 和 PageCache 解析 ELF 并映射到用户地址空间
+        let _t_map = perf::perf_time_now();
+        let load_result = AddressSpace::from_elf_inode(elf.clone());
+        let _map_ticks = perf::perf_time_now().wrapping_sub(_t_map);
+        perf::EXECVE_MAP_ELF_TICKS.fetch_add(_map_ticks, Ordering::Relaxed);
+        // 零拷贝路径无需 kmap 和 teardown —— 记录零值用于性能对比
+        perf::EXECVE_KERNEL_MAP_TICKS.fetch_add(0, Ordering::Relaxed);
+        perf::EXECVE_TEARDOWN_TICKS.fetch_add(0, Ordering::Relaxed);
+
+        let (mut memory_set, program_break, elf_info) = match load_result {
+            Ok(result) => result,
+            Err(e) => return Err(e),
+        };
+        // 为 glibc 分配用户 heap 空间
+        use crate::mm::{MapPermission, VirtAddr};
+
+        let page_size = 0x1000;
+        let heap_start = align_up(program_break, page_size);
+        let heap_end = heap_start + 0x20000; // 64KiB
+        memory_set.insert_framed_area(
+            VirtAddr::from(heap_start),
+            VirtAddr::from(heap_end),
+            MapPermission::R | MapPermission::W | MapPermission::U,
+        );
+        // 为当前线程分配用户资源
+        let _t_stack = perf::perf_time_now();
+        let trap_cx_ppn = memory_set
+            .alloc_user_res_with_trap_ppn(self.user_res_slot, true)
+            .map_err(|_| ENOMEM)?;
+        self.user_stack_allocated.store(true, Ordering::Relaxed);
+        // 创建ELF参数表
+        let user_sp =
+            memory_set.create_elf_tables(self.ustack_bottom_va(), argv_vec, envp_vec, &elf_info)?;
+        let _stack_ticks = perf::perf_time_now().wrapping_sub(_t_stack);
+        perf::EXECVE_STACK_TABLES_TICKS.fetch_add(_stack_ticks, Ordering::Relaxed);
+        // 初始化陷阱上下文
+        let trap_cx = TrapContext::app_init_context(
+            if let Some(interp_entry) = elf_info.interp_entry {
+                interp_entry
+            } else {
+                elf_info.entry
+            },
+            user_sp,
+            KERNEL_SPACE.lock().token(),
+            self.kstack.get_top(),
+            trap_handler as usize,
+        );
+        let other_threads: Vec<_> = self
+            .process
+            .threads()
+            .into_iter()
+            .filter(|task| task.tid.0 != self.tid.0)
+            .collect();
+        for task in &other_threads {
+            task.exit_thread_resources(Signals::SIGKILL.to_signum().unwrap() as u32);
+        }
+        super::remove_tasks_from_queues(&other_threads);
+
+        {
+            let mut inner = self.acquire_inner_lock();
+            inner.trap_cx_ppn = trap_cx_ppn;
+            *inner.get_trap_cx() = trap_cx;
+            inner.clear_child_tid = 0;
+            inner.robust_list = RobustList::default();
+            inner.signal_stack = SignalStack::disabled();
+        }
+        if Arc::strong_count(&current_vm) > 2 {
+            current_vm.lock().dealloc_user_res_with_stack(
+                self.user_res_slot,
+                self.user_stack_allocated.load(Ordering::Relaxed),
+            );
+        }
+        self.process.replace_exe(elf);
+        {
+            let files_ref = self.process.files();
+            let mut fd_table = files_ref.lock();
+            crate::syscall::fs::close_cloexec_and_release_fcntl_locks(self.pid(), &mut fd_table);
+        }
+        self.process.replace_vm(memory_set);
+        self.process.sighand().lock().reset();
+        self.process.futex().lock().clear();
+        Ok(())
+    }
+
     /// 创建新的任务控制块
     pub fn sys_clone(
         self: &Arc<TaskControlBlock>,

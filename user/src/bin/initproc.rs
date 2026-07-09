@@ -1802,26 +1802,52 @@ fn run_ltp_suite_runner(
     );
 }
 
-fn drift_snapshot(window: u64, libc: &str, stage: &str, environ: &[*const u8]) {
+/// Read a /sys/kernel/stats/ file and dump to stdout via direct syscalls (no fork/exec).
+fn drift_read_stats(path: &str) {
+    let fd = open(path, OpenFlags::RDONLY);
+    if fd >= 0 {
+        let mut buf = [0u8; 2048];
+        let n = read(fd as usize, &mut buf);
+        if n > 0 {
+            let _ = write(1, &buf[..n as usize]);
+        }
+        close(fd as usize);
+    }
+}
+
+/// Write a short string to a /sys file via direct syscalls.
+fn drift_write_sys(path: &str, val: &str) {
+    let fd = open(path, OpenFlags::WRONLY);
+    if fd >= 0 {
+        let buf = alloc::string::String::from(val);
+        let _ = write(fd as usize, buf.as_bytes());
+        close(fd as usize);
+    }
+}
+
+fn drift_snapshot(window: u64, libc: &str, stage: &str, _environ: &[*const u8]) {
     println!(
         "[initproc] [drift] === drift_window W{} {} {} ===",
         window, libc, stage
     );
-    let _ = run_bash_cmd("cat /sys/kernel/stats/taskq\0", environ);
-    let _ = run_bash_cmd("cat /sys/kernel/stats/timer\0", environ);
-    let _ = run_bash_cmd("cat /sys/kernel/stats/syscall\0", environ);
-    let _ = run_bash_cmd("cat /sys/kernel/stats/ctxsw\0", environ);
-    let _ = run_bash_cmd("cat /sys/kernel/stats/reclaim\0", environ);
-    let _ = run_bash_cmd("cat /sys/kernel/stats/tlb\0", environ);
-    let _ = run_bash_cmd("cat /sys/kernel/stats/heap\0", environ);
-    let _ = run_bash_cmd("cat /sys/kernel/stats/resource\0", environ);
-    let _ = run_bash_cmd("cat /sys/kernel/stats/seccomp\0", environ);
-    let _ = run_bash_cmd("cat /sys/kernel/stats/buddyinfo\0", environ);
-    let _ = run_bash_cmd("cat /sys/kernel/stats/zombies\0", environ);
-    let _ = run_bash_cmd("cat /sys/kernel/stats/pipe\0", environ);
-    let _ = run_bash_cmd("cat /sys/kernel/stats/ext4\0", environ);
-    let _ = run_bash_cmd("cat /sys/kernel/stats/lwext4\0", environ);
-    let _ = run_bash_cmd("cat /sys/kernel/stats/mount\0", environ);
+    drift_read_stats("/sys/kernel/stats/taskq\0");
+    drift_read_stats("/sys/kernel/stats/timer\0");
+    drift_read_stats("/sys/kernel/stats/syscall\0");
+    drift_read_stats("/sys/kernel/stats/ctxsw\0");
+    drift_read_stats("/sys/kernel/stats/reclaim\0");
+    drift_read_stats("/sys/kernel/stats/tlb\0");
+    drift_read_stats("/sys/kernel/stats/heap\0");
+    drift_read_stats("/sys/kernel/stats/resource\0");
+    drift_read_stats("/sys/kernel/stats/seccomp\0");
+    drift_read_stats("/sys/kernel/stats/buddyinfo\0");
+    drift_read_stats("/sys/kernel/stats/zombies\0");
+    drift_read_stats("/sys/kernel/stats/pipe\0");
+    drift_read_stats("/sys/kernel/stats/ext4\0");
+    drift_read_stats("/sys/kernel/stats/lwext4\0");
+    drift_read_stats("/sys/kernel/stats/mount\0");
+    drift_read_stats("/sys/kernel/stats/syscall_top\0");
+    drift_read_stats("/sys/kernel/stats/pagefault\0");
+    drift_read_stats("/sys/kernel/stats/vm\0");
     println!(
         "[initproc] [drift] === drift_window W{} {} {} end ===",
         window, libc, stage
@@ -1829,8 +1855,8 @@ fn drift_snapshot(window: u64, libc: &str, stage: &str, environ: &[*const u8]) {
 }
 
 fn run_drift_windows(environ: &[*const u8], cfg: &RuntimeConfig) {
-    let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/stats_on\0", environ);
-    let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/reset\0", environ);
+    drift_write_sys("/sys/kernel/stats/stats_on\0", "1");
+    drift_write_sys("/sys/kernel/stats/reset\0", "1");
 
     let libc_list: &[&str] = match cfg.drift_libc.as_str() {
         "musl" => &["musl"],
@@ -1845,7 +1871,7 @@ fn run_drift_windows(environ: &[*const u8], cfg: &RuntimeConfig) {
             libc, total_windows
         );
         for w in 0..total_windows {
-            let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/reset\0", environ);
+            drift_write_sys("/sys/kernel/stats/reset\0", "1");
 
             // Run pre-workload test groups selected by drift_pre_mask.
             // Each bit corresponds to TEST_GROUPS index (bit0=basic, bit1=busybox, …).
@@ -1864,18 +1890,40 @@ fn run_drift_windows(environ: &[*const u8], cfg: &RuntimeConfig) {
                         );
                     }
                 }
-                let _ = run_bash_cmd("echo 1 > /sys/kernel/stats/reset\0", environ);
+                let _ = drift_write_sys("/sys/kernel/stats/reset\0", "1");
             }
 
             drift_snapshot(w, libc, "pre", environ);
 
-            // Measurement command: null (lat_syscall null) or full (all lmbench)
-            let cmd = if cfg.drift_measure == "full" {
-                alloc::format!("cd /{} && sh lmbench_testcode.sh\0", libc)
+            // Measurement command: null (lat_syscall null), full (all lmbench), or shell (fork+/bin/sh -c)
+            if cfg.drift_measure == "shell" {
+                // Direct fork+exec of /bin/sh, no bash wrapper — avoids extra execve
+                let pid = fork();
+                if pid == 0 {
+                    let sh = "/bin/sh\0";
+                    let dash_c = "-c\0";
+                    let true_cmd = "true\0";
+                    let args: [*const u8; 4] = [
+                        sh.as_ptr(),
+                        dash_c.as_ptr(),
+                        true_cmd.as_ptr(),
+                        core::ptr::null(),
+                    ];
+                    exec(sh, &args, environ);
+                    exit(127);
+                }
+                if pid > 0 {
+                    let mut code = 0;
+                    waitpid(pid as usize, &mut code);
+                }
             } else {
-                alloc::format!("cd /{} && ./lmbench_all lat_syscall -P 1 null\0", libc)
-            };
-            let _ = run_bash_cmd(&cmd, environ);
+                let cmd = if cfg.drift_measure == "full" {
+                    alloc::format!("cd /{} && sh lmbench_testcode.sh\0", libc)
+                } else {
+                    alloc::format!("cd /{} && ./lmbench_all lat_syscall -P 1 null\0", libc)
+                };
+                let _ = run_bash_cmd(&cmd, environ);
+            }
 
             drift_snapshot(w, libc, "post", environ);
             sleep(100); // 100ms between windows
@@ -1910,6 +1958,9 @@ fn snapshot_diag(diag: bool, n: usize, group: &str, libc: &str, environ: &[*cons
     let _ = run_bash_cmd("cat /sys/kernel/stats/lwext4\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/mount\0", environ);
     let _ = run_bash_cmd("cat /sys/kernel/stats/pipe\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/syscall_top\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/pagefault\0", environ);
+    let _ = run_bash_cmd("cat /sys/kernel/stats/vm\0", environ);
     println!("[initproc] [diag] === stats T{} {}:{} end ===", n, group, libc);
 }
 

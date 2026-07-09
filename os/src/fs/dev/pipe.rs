@@ -486,10 +486,8 @@ impl IndexNode for Pipe {
                 (Err(SyscallErr::EAGAIN), read_end)
             } else {
                 // Direct UserBuffer→ring copy, segment by segment.
-                // Use PAGE_SIZE stack buffer per iteration to keep stack usage safe.
                 let mut total = 0usize;
                 let src_len = src.len();
-                let mut stack_buf = [0u8; PAGE_SIZE];
                 while total < src_len && ring.status != RingBufferStatus::FULL {
                     let seg_start = ring.tail;
                     let seg_end = if ring.tail < ring.head {
@@ -505,19 +503,10 @@ impl IndexNode for Pipe {
                     if seg_len == 0 {
                         break;
                     }
-                    // Read from UserBuffer into stack buffer, then copy to ring
-                    let n = src.read_at(total, &mut stack_buf[..seg_len]);
+                    // Read directly from UserBuffer into ring buffer
+                    let n = src.read_at(total, &mut ring.arr[seg_start..seg_start + seg_len]);
                     if n == 0 {
                         break;
-                    }
-                    // Safety: `seg_start + n ≤ ring.capacity` (guaranteed by
-                    // seg_len bounds above) and stack_buf/dst (ring.arr) are disjoint.
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            stack_buf.as_ptr(),
-                            ring.arr.as_mut_ptr().add(seg_start),
-                            n,
-                        );
                     }
                     ring.tail = if seg_start + n == ring.capacity {
                         0

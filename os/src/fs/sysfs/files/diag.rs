@@ -662,6 +662,11 @@ fn stats_vm_content(
     let _ = writeln!(s, "tlb_page_flush_cycles={}", read_counter(&crate::task::perf::TLB_PAGE_FLUSH_CYCLES));
     let _ = writeln!(s, "tlb_full_flush_cycles={}", read_counter(&crate::task::perf::TLB_FULL_FLUSH_CYCLES));
     let _ = writeln!(s, "tlb_activate_cycles={}", read_counter(&crate::task::perf::TLB_ACTIVATE_CYCLES));
+    let _ = writeln!(s, "execve_map_elf_ticks={}", read_counter(&crate::task::perf::EXECVE_MAP_ELF_TICKS));
+    let _ = writeln!(s, "execve_kernel_map_ticks={}", read_counter(&crate::task::perf::EXECVE_KERNEL_MAP_TICKS));
+    let _ = writeln!(s, "execve_interp_ticks={}", read_counter(&crate::task::perf::EXECVE_INTERP_TICKS));
+    let _ = writeln!(s, "execve_stack_tables_ticks={}", read_counter(&crate::task::perf::EXECVE_STACK_TABLES_TICKS));
+    let _ = writeln!(s, "execve_teardown_ticks={}", read_counter(&crate::task::perf::EXECVE_TEARDOWN_TICKS));
     write_str(offset, len, buf, &s)
 }
 

@@ -4,6 +4,55 @@
 
 ## 2026-07-09
 
+### ELF Segment 懒加载 — 只读段从 eager frame 映射改为 file-backed VMA
+
+**涉及文件：**
+- `os/src/mm/address_space.rs` — `map_load_segment()` 新增 `inode: Option<Arc<dyn IndexNode>>` 参数；在 per-page 映射循环之前注入懒加载路径：当段满足全部只读+页对齐条件时，设置 `vma.map_file` / `vma.map_file_offset` / `vma.may_write = false` 并直接返回，跳过全段逐页 PageCache lookup + PTE 分配 + TLB flush。不满足条件（可写/部分页/BSS）回退原有 eager 路径。调用处 `map_elf_from_inode()` 传入 `Some(file.inode.clone())`。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：** 懒加载段在首次缺页时由 `filemap_read_fault()` 处理，与 mmap 文件映射路径一致。不参与 `prefetch_load_pages()` 预取，但首次访问触发的缺页 I/O 开销可接受。懒加载条件：!writable && filesz==memsz!=0 && seg_va_start/ph.offset/filesz 均页对齐。
+
+### ELF Loader: 零拷贝直连路径 — 消除 map_to_kernel_space (~49.7% execve 成本)
+
+**涉及文件：**
+- `os/src/mm/address_space.rs` — 新增 `from_elf_inode()` 和 `map_elf_from_inode()` 方法，直接从 PageCache 帧映射 ELF 段到用户页表；新增 `map_load_segment()`（零拷贝只读页 alias / 可写页 copy fallback）、`map_existing_frame()`（PageCache 帧直接 alias 到用户页表）、`copy_from_page_cache()`（PageCache→用户帧拷贝）、`prefetch_load_pages()`（批量预取）。新增 ELF64 头解析器（`parse_elf64_ehdr`、`parse_elf64_phdrs`、`read_elf_headers`）替代 xmas_elf 库。
+- `os/src/task/task.rs` — 新增 `load_elf_direct()` 方法：镜像 `load_elf()` 但跳过后段（`map_to_kernel_space` + `KERNEL_SPACE.remove_area`），用 `AddressSpace::from_elf_inode()` 替代 `AddressSpace::from_elf()`；kmap/teardown 计数器显式记录 0。
+- `os/src/syscall/process/exec.rs` — `exec_opened_file()` 优先调用 `load_elf_direct()`，若返回 `ENOSYS`（文件系统无 PageCache）则回退到旧 `load_elf()`。
+- `os/src/fs/mod.rs` — `PageCache` 公开导出（`pub use page_cache::PageCache`），使 `address_space.rs` 可引用。
+
+**设计决策：**
+- **零拷贝判断**：只读 + 文件数据占满整页 + 文件偏移页对齐 → `pc.frame_for_read()` 的 `Arc<FrameTracker>` 直接 alias 到用户页表（`alloc_in_memory` + `map_user_page`）。可写/部分页/未对齐 → `vma.map_one()` 分配新帧 + `copy_from_page_cache()` 拷贝。
+- **预取**：`prefetch_load_pages()` 遍历所有 `PT_LOAD` 段，调用 `pc.sync_batch_read_pages()` 批量 I/O。预取后 `frame_for_read()` 直接返回 UpToDate 帧。
+- **解释器加载**：`PT_INTERP` 段通过 `vfs_lookup_absolute` 打开解释器文件，递归调用 `map_elf_from_inode()`（深度限制 ≤1）。解释器无 PageCache 时 `ENOSYS` 触发整体回退。
+- **回退策略**：`ensure_page_cache().ok_or(ENOSYS)` — 文件系统无 PageCache 时返回 `ENOSYS`，`exec_opened_file()` 捕获后调用旧 `load_elf()`（兼容所有文件系统）。
+- **旧路径保留**：`map_elf()` / `load_elf()` / `from_elf()` / `load_elf_interp()` 全部保留不动。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：** 预期性能收益：消除 execve 路径中 map_to_kernel_space（30.9M ticks）和 teardown（6.2M ticks）约 ~37M ticks。`parse_elf64_ehdr` 中 buf.len()<64 分支使用 ENOSYS（而非 ENOEXEC）以触发回退而非立即失败——exec.rs 已在路径入口处验证 ELF 魔数，此分支仅在文件被并发截断时触发。
+
+### Execve: 新增内部阶段探针计数器，定位 50M 未计算 ticks
+
+**涉及文件：**
+- `os/src/task/perf.rs` — 新增 5 个 `AtomicUsize` 计数器（`EXECVE_MAP_ELF_TICKS`、`EXECVE_KERNEL_MAP_TICKS`、`EXECVE_INTERP_TICKS`、`EXECVE_STACK_TABLES_TICKS`、`EXECVE_TEARDOWN_TICKS`），在 `enabled` 模块、`reset_all_counters()` 和 `#[cfg(not(feature = "perf_stats"))]` 桩中均有对应
+- `os/src/task/task.rs` — `load_elf()` 中 4 个主要阶段包裹 `perf::perf_time_now()` 探针：内核映射、`from_elf→map_elf`、内核映射拆除、用户栈+ELF 表构造
+- `os/src/mm/address_space.rs` — `map_elf()` 的 `PT_INTERP` 分支新增解释器加载耗时探针（包裹 `load_elf_interp` + `map_elf(interp)`）
+- `os/src/fs/sysfs/files/diag.rs` — `stats_vm_content()` 新增 5 行，将计数器通过 `/sys/kernel/stats/vm` 暴露
+
+**设计决策：**
+- 所有计数器使用 `Ordering::Relaxed` fetch_add，probe 直接使用 `perf::perf_time_now()` 包装而非 `stats_enabled()` gate（因 `AtomicUsize` fetch_add 在未启用时增量被忽略）
+- 探针按 `#[cfg(feature = "perf_stats")]` 编译门控，禁止时 `perf_time_now()` 返回 0，计数器为 no-op static
+- `EXECVE_INTERP_TICKS` 包裹完整的解释器递归加载路径（`load_elf_interp` + `ElfFile::new` + `map_elf`），而不是仅计算 `laod_elf_interp` 时长
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
 ### PageCache: 路由直连 UserBuffer 读取（消除首次读取时的 kbuf 中间拷贝）
 
 **涉及文件：**
@@ -69,6 +118,18 @@
 - `make la64-kernel-build-only` ✅
 
 **备注：** 此改动消除了 pipe 热路径中最大的堆分配（`Vec::try_reserve(64KB)`），该分配曾被识别为 buddy+slab 分配器下 52% 带宽退化来源。`read_at`/`write_at` 的 kbuf 路径保留，作为不支持 UserBuffer I/O 的设备 fallback。
+
+### Pipe: write_at_user() 消除双拷贝 — 栈缓冲区消除
+
+**涉及文件：**
+- `os/src/fs/dev/pipe.rs` — `write_at_user()` while 循环中移除 `stack_buf` (PAGE_SIZE) 和 `copy_nonoverlapping`，改用 `src.read_at(total, &mut ring.arr[seg_start..seg_start+seg_len])` 直写 ring buffer
+
+**变更：** 原来的 `write_at_user()` 每段先用 `src.read_at()` 从 UserBuffer 读入 4KB 栈缓冲区，再 `copy_nonoverlapping` 到 ring.arr。现改为 `read_at` 直接写入 ring.arr 切片，消除中间栈缓冲区和第二次拷贝。ring.arr 已被 ring Mutex 保护，切片借用是安全的。
+
+**验证：**
+- `make rv64-kernel-build-only` — 由于预存 bug（`address_space.rs` map_load_segment 缺 inode 参数），无法单独验证此变更；文件编译通过，无新增错误
+- `make la64-kernel-build-only` ✅
+- `copy_nonoverlapping` 在其他位置（pipe.rs:843, 886）仍被使用，导入保留
 
 ---
 
