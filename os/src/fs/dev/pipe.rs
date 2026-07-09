@@ -5,6 +5,7 @@ use core::ptr::copy_nonoverlapping;
 use spin::Mutex;
 
 use crate::config::PAGE_SIZE;
+use crate::mm::UserBuffer;
 use crate::fs::vfs::{
     FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata,
 };
@@ -308,6 +309,89 @@ impl IndexNode for Pipe {
         result
     }
 
+    fn read_at_user(
+        &self,
+        _offset: usize,
+        _len: usize,
+        dst: &mut UserBuffer,
+    ) -> Result<usize, SyscallErr> {
+        let profiling = pipe_profile_enabled();
+        pipe_inc(profiling, &PIPE_READ_CALLS);
+        let profile_start = pipe_profile_start(profiling);
+        if !self.readable {
+            let result = Err(SyscallErr::EBADF);
+            pipe_finish_read(profile_start, &result);
+            return result;
+        }
+        if dst.len() == 0 {
+            let result = Ok(0);
+            pipe_finish_read(profile_start, &result);
+            return result;
+        }
+        let (result, write_end) = {
+            let mut ring = self.buffer.lock();
+            let write_end = ring.write_end.as_ref().and_then(Weak::upgrade);
+            if ring.status == RingBufferStatus::EMPTY {
+                if write_end.is_none() {
+                    pipe_record_ring_sizes(0, ring.get_free_size());
+                    let result = Ok(0);
+                    pipe_finish_read(profile_start, &result);
+                    return result;
+                }
+                pipe_record_ring_sizes(0, ring.get_free_size());
+                let result = Err(SyscallErr::EAGAIN);
+                pipe_finish_read(profile_start, &result);
+                return result;
+            }
+            // Direct ring→UserBuffer copy, segment by segment
+            let mut total = 0usize;
+            let dst_len = dst.len();
+            while total < dst_len && ring.status != RingBufferStatus::EMPTY {
+                let seg_start = ring.head;
+                let seg_end = if ring.tail <= ring.head {
+                    ring.capacity
+                } else {
+                    ring.tail
+                };
+                let seg_len = (dst_len - total).min(seg_end - seg_start);
+                if seg_len == 0 {
+                    break;
+                }
+                let seg_bytes = &ring.arr[seg_start..seg_start + seg_len];
+                let n = dst.write_at(total, seg_bytes);
+                ring.head = if seg_start + n == ring.capacity {
+                    0
+                } else {
+                    seg_start + n
+                };
+                total += n;
+                ring.status = if ring.head == ring.tail {
+                    RingBufferStatus::EMPTY
+                } else {
+                    RingBufferStatus::NORMAL
+                };
+                if n < seg_len {
+                    break;
+                }
+            }
+            pipe_record_ring_sizes(ring.get_used_size(), ring.get_free_size());
+            (Ok(total), write_end)
+        };
+        if let Ok(_n) = &result {
+            if let Some(write_end) = write_end {
+                write_end
+                    .write_wait
+                    .notify_events_at_most(EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM, 1);
+                pipe_inc(profiling, &PIPE_NOTIFY_WRITE);
+                if !write_end.fasync.is_empty() {
+                    write_end.fasync.send_sigio(None);
+                }
+            }
+        }
+        pipe_finish_read(profile_start, &result);
+        result
+    }
+
     fn write_at(
         &self,
         _offset: usize,
@@ -369,6 +453,109 @@ impl IndexNode for Pipe {
         result
     }
 
+    fn write_at_user(
+        &self,
+        _offset: usize,
+        _len: usize,
+        src: &UserBuffer,
+    ) -> Result<usize, SyscallErr> {
+        let profiling = pipe_profile_enabled();
+        pipe_inc(profiling, &PIPE_WRITE_CALLS);
+        let profile_start = pipe_profile_start(profiling);
+        if !self.writable {
+            let result = Err(SyscallErr::EBADF);
+            pipe_finish_write(profile_start, &result);
+            return result;
+        }
+        if src.len() == 0 {
+            let result = Ok(0);
+            pipe_finish_write(profile_start, &result);
+            return result;
+        }
+        let (result, read_end) = {
+            let mut ring = self.buffer.lock();
+            let read_end = ring.read_end.as_ref().and_then(Weak::upgrade);
+            if read_end.is_none() {
+                pipe_record_ring_sizes(ring.get_used_size(), ring.get_free_size());
+                (Err(SyscallErr::EPIPE), None)
+            } else if ring.status == RingBufferStatus::FULL {
+                pipe_record_ring_sizes(ring.get_used_size(), 0);
+                (Err(SyscallErr::EAGAIN), read_end)
+            } else if src.len() <= PAGE_SIZE && ring.get_free_size() < src.len() {
+                pipe_record_ring_sizes(ring.get_used_size(), ring.get_free_size());
+                (Err(SyscallErr::EAGAIN), read_end)
+            } else {
+                // Direct UserBuffer→ring copy, segment by segment.
+                // Use PAGE_SIZE stack buffer per iteration to keep stack usage safe.
+                let mut total = 0usize;
+                let src_len = src.len();
+                let mut stack_buf = [0u8; PAGE_SIZE];
+                while total < src_len && ring.status != RingBufferStatus::FULL {
+                    let seg_start = ring.tail;
+                    let seg_end = if ring.tail < ring.head {
+                        ring.head
+                    } else {
+                        ring.capacity
+                    };
+                    let free = ring.get_free_size();
+                    let seg_len = (src_len - total)
+                        .min(free)
+                        .min(seg_end - seg_start)
+                        .min(PAGE_SIZE);
+                    if seg_len == 0 {
+                        break;
+                    }
+                    // Read from UserBuffer into stack buffer, then copy to ring
+                    let n = src.read_at(total, &mut stack_buf[..seg_len]);
+                    if n == 0 {
+                        break;
+                    }
+                    // Safety: `seg_start + n ≤ ring.capacity` (guaranteed by
+                    // seg_len bounds above) and stack_buf/dst (ring.arr) are disjoint.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            stack_buf.as_ptr(),
+                            ring.arr.as_mut_ptr().add(seg_start),
+                            n,
+                        );
+                    }
+                    ring.tail = if seg_start + n == ring.capacity {
+                        0
+                    } else {
+                        seg_start + n
+                    };
+                    total += n;
+                    ring.status = if ring.head == ring.tail {
+                        RingBufferStatus::FULL
+                    } else {
+                        RingBufferStatus::NORMAL
+                    };
+                    if n < seg_len {
+                        break;
+                    }
+                }
+                pipe_record_ring_sizes(ring.get_used_size(), ring.get_free_size());
+                (Ok(total), read_end)
+            }
+        };
+        if matches!(result, Err(SyscallErr::EPIPE)) {
+            send_sigpipe_to_current();
+        }
+        if let Ok(_n) = &result {
+            if let Some(read_end) = read_end {
+                read_end
+                    .read_wait
+                    .notify_events_at_most(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM, 1);
+                pipe_inc(profiling, &PIPE_NOTIFY_READ);
+                if !read_end.fasync.is_empty() {
+                    read_end.fasync.send_sigio(None);
+                }
+            }
+        }
+        pipe_finish_write(profile_start, &result);
+        result
+    }
+
     fn metadata(&self) -> Result<Metadata, SyscallErr> {
         Ok(Metadata {
             dev_id: 0,
@@ -390,6 +577,10 @@ impl IndexNode for Pipe {
     }
 
     fn is_stream(&self) -> bool {
+        true
+    }
+
+    fn supports_user_buffer_io(&self) -> bool {
         true
     }
 
