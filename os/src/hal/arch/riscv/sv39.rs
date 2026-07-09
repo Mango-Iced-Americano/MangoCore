@@ -201,7 +201,7 @@ impl PageTable for Sv39PageTable {
         Sv39PageTable {
             root_ppn: frame.ppn,
             frames: {
-                let mut vec = Vec::with_capacity(256);
+                let mut vec = Vec::with_capacity(32);
                 vec.push(frame);
                 vec
             },
@@ -212,7 +212,7 @@ impl PageTable for Sv39PageTable {
         Sv39PageTable {
             root_ppn: frame.ppn,
             frames: {
-                let mut vec = Vec::with_capacity(256);
+                let mut vec = Vec::with_capacity(32);
                 vec.push(frame);
                 vec
             },

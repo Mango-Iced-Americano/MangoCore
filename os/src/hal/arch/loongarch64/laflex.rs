@@ -319,7 +319,7 @@ impl PageTable for LAFlexPageTable {
         LAFlexPageTable {
             root_ppn: LAPTRoot(frame.ppn.0 << 32),
             frames: {
-                let mut vec = Vec::with_capacity(256);
+                let mut vec = Vec::with_capacity(32);
                 vec.push(frame);
                 vec
             },
@@ -330,7 +330,7 @@ impl PageTable for LAFlexPageTable {
         LAFlexPageTable {
             root_ppn: LAPTRoot(frame.ppn.0),
             frames: {
-                let mut vec = Vec::with_capacity(256);
+                let mut vec = Vec::with_capacity(32);
                 vec.push(frame);
                 vec
             },
