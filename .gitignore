@@ -47,3 +47,4 @@ sdcard-rv-noconf.img
 /tools/
 .omo/
 .env
+os/rootfs-rv.img
