@@ -163,6 +163,7 @@ impl PageCacheBackend for LwExt4PageCacheBackend {
         start_index: usize,
         pages: &mut [&mut [u8]],
     ) -> Result<usize, SyscallErr> {
+        crate::task::perf::record_pc_miss();
         let fs = self.fs.upgrade().ok_or(SyscallErr::EIO)?;
         let _lock = fs.lw.lock();
         let mut f = Ext4File::new(&self.path, InodeTypes::EXT4_DE_REG_FILE);

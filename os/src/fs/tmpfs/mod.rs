@@ -443,7 +443,7 @@ impl IndexNode for LockedTmpFSInode {
     fn supports_user_buffer_io(&self) -> bool {
         let inode = self.0.lock();
         let ft = inode.metadata.file_type;
-        (ft == FileType::File || ft == FileType::SymLink) && inode.page_cache.is_some()
+        ft == FileType::File || ft == FileType::SymLink
     }
 
     fn metadata(&self) -> Result<Metadata, SyscallErr> {

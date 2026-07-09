@@ -1113,9 +1113,11 @@ impl IndexNode for layout::Ext4OSInode {
     }
 
     fn supports_user_buffer_io(&self) -> bool {
-        // Use read-only page_cache() to avoid creating a PageCache as a side effect.
-        // get_new_page_cache() would allocate on miss, which is wrong for a predicate.
-        self.page_cache().is_some()
+        // Return true for any regular file that CAN use PageCache.
+        // read_at_user() will create the PageCache on demand (via get_new_page_cache()).
+        // Directories and symlinks don't have file data pages.
+        let inode = self.inode.lock();
+        !inode.inode.is_dir() && !inode.inode.is_link()
     }
 
     fn sync(&self) -> Result<(), SyscallErr> {

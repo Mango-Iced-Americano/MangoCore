@@ -70,6 +70,33 @@ mod enabled {
     static SYSCALL_YIELD: AtomicUsize = AtomicUsize::new(0);
     static LAST_SYSCALL_ID: AtomicUsize = AtomicUsize::new(0);
     static LAST_SYSCALL_RET: AtomicUsize = AtomicUsize::new(0);
+
+    // ── Per-syscall profiling ──
+    pub const PERF_SYSCOUNT: usize = 512;
+    static SYSCALL_COUNT: [AtomicUsize; PERF_SYSCOUNT] = [const { AtomicUsize::new(0) }; PERF_SYSCOUNT];
+    static SYSCALL_TICKS: [AtomicUsize; PERF_SYSCOUNT] = [const { AtomicUsize::new(0) }; PERF_SYSCOUNT];
+
+    // ── Page fault per-action profile ──
+    // action 0=LazyAlloc 1=FileBackedRead 2=FileBackedSharedWrite
+    //        3=FileBackedWrite 4=SharedWrite 5=Cow 6=Other
+    pub const PF_ACTION_NAMES: [&str; 7] = [
+        "LazyAlloc", "FileBackedRead", "FileBackedSharedWrite",
+        "FileBackedWrite", "SharedWrite", "Cow", "Other",
+    ];
+    static PF_ACTION_COUNT: [AtomicUsize; 7] = [const { AtomicUsize::new(0) }; 7];
+    static PF_ACTION_TICKS: [AtomicUsize; 7] = [const { AtomicUsize::new(0) }; 7];
+
+    // ── Filemap fault phase counters ──
+    pub static FILEMAP_FAULT_FRAMES: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_FAULT_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_PRIVATE_COPY_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_MAP_USER_TICKS: AtomicUsize = AtomicUsize::new(0);
+
+    // ── TLB flush cycle counters ──
+    pub static TLB_PAGE_FLUSH_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static TLB_FULL_FLUSH_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static TLB_ACTIVATE_CYCLES: AtomicUsize = AtomicUsize::new(0);
+
     // Fine-grained TLB counters
     pub static TLB_FLUSHES: AtomicUsize = AtomicUsize::new(0);    // total
     pub static TLB_FULL: AtomicUsize = AtomicUsize::new(0);       // full inval (invtlb 0x3 / sfence.vma no-arg)
@@ -804,6 +831,29 @@ mod enabled {
         PC_LOCK_IO_MISS_READS.store(0, Ordering::Relaxed);
         // Ext4 direct write_at (P0)
         EXT4_DIRECT_WRITE_AT_CALLS.store(0, Ordering::Relaxed);
+
+        // ── Per-syscall profiling ──
+        for i in 0..PERF_SYSCOUNT {
+            SYSCALL_COUNT[i].store(0, Ordering::Relaxed);
+            SYSCALL_TICKS[i].store(0, Ordering::Relaxed);
+        }
+
+        // ── Page fault per-action ──
+        for i in 0..7 {
+            PF_ACTION_COUNT[i].store(0, Ordering::Relaxed);
+            PF_ACTION_TICKS[i].store(0, Ordering::Relaxed);
+        }
+
+        // ── Filemap fault phase ──
+        FILEMAP_FAULT_FRAMES.store(0, Ordering::Relaxed);
+        FILEMAP_FAULT_TICKS.store(0, Ordering::Relaxed);
+        FILEMAP_PRIVATE_COPY_TICKS.store(0, Ordering::Relaxed);
+        FILEMAP_MAP_USER_TICKS.store(0, Ordering::Relaxed);
+
+        // ── TLB flush cycles ──
+        TLB_PAGE_FLUSH_CYCLES.store(0, Ordering::Relaxed);
+        TLB_FULL_FLUSH_CYCLES.store(0, Ordering::Relaxed);
+        TLB_ACTIVATE_CYCLES.store(0, Ordering::Relaxed);
     }
 
     /// Print accumulated timing stats, then reset.
@@ -1158,6 +1208,63 @@ mod enabled {
         }
     }
 
+    // ── Per-syscall time recorder ──
+    #[inline(always)]
+    pub fn record_syscall_time(syscall_id: usize, elapsed: usize) {
+        if !stats_enabled() { return; }
+        if syscall_id < PERF_SYSCOUNT {
+            SYSCALL_COUNT[syscall_id].fetch_add(1, Ordering::Relaxed);
+            SYSCALL_TICKS[syscall_id].fetch_add(elapsed, Ordering::Relaxed);
+        }
+    }
+
+    /// Read syscall count by ID (0 if out of range).
+    pub fn syscall_count(id: usize) -> usize {
+        if id < PERF_SYSCOUNT { SYSCALL_COUNT[id].load(Ordering::Relaxed) } else { 0 }
+    }
+
+    /// Read syscall total ticks by ID (0 if out of range).
+    pub fn syscall_ticks(id: usize) -> usize {
+        if id < PERF_SYSCOUNT { SYSCALL_TICKS[id].load(Ordering::Relaxed) } else { 0 }
+    }
+
+    // ── Page fault per-action recorders ──
+    #[inline(always)]
+    pub fn record_pagefault_action(action_tag: usize, elapsed: usize) {
+        if !stats_enabled() { return; }
+        if action_tag < 7 {
+            PF_ACTION_COUNT[action_tag].fetch_add(1, Ordering::Relaxed);
+            PF_ACTION_TICKS[action_tag].fetch_add(elapsed, Ordering::Relaxed);
+        }
+    }
+
+    pub fn pf_action_count(action_tag: usize) -> usize {
+        if action_tag < 7 { PF_ACTION_COUNT[action_tag].load(Ordering::Relaxed) } else { 0 }
+    }
+
+    pub fn pf_action_ticks(action_tag: usize) -> usize {
+        if action_tag < 7 { PF_ACTION_TICKS[action_tag].load(Ordering::Relaxed) } else { 0 }
+    }
+
+    // ── TLB flush cycle recorders ──
+    #[inline(always)]
+    pub fn record_tlb_page_flush_cycles(cycles: usize) {
+        if !stats_enabled() { return; }
+        TLB_PAGE_FLUSH_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_tlb_full_flush_cycles(cycles: usize) {
+        if !stats_enabled() { return; }
+        TLB_FULL_FLUSH_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_tlb_activate_cycles(cycles: usize) {
+        if !stats_enabled() { return; }
+        TLB_ACTIVATE_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+    }
+
     #[inline(always)]
     pub fn record_syscall(syscall_id: usize, ret: isize) {
         LAST_SYSCALL_ID.store(syscall_id, Ordering::Relaxed);
@@ -1253,6 +1360,38 @@ pub fn record_futex_wake(_shared: bool, _woke: isize) {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
 pub fn record_syscall(_syscall_id: usize, _ret: isize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_syscall_time(_syscall_id: usize, _elapsed: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+pub fn syscall_count(_id: usize) -> usize { 0 }
+
+#[cfg(not(feature = "perf_stats"))]
+pub fn syscall_ticks(_id: usize) -> usize { 0 }
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pagefault_action(_action_tag: usize, _elapsed: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+pub fn pf_action_count(_action_tag: usize) -> usize { 0 }
+
+#[cfg(not(feature = "perf_stats"))]
+pub fn pf_action_ticks(_action_tag: usize) -> usize { 0 }
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_tlb_page_flush_cycles(_cycles: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_tlb_full_flush_cycles(_cycles: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_tlb_activate_cycles(_cycles: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
@@ -1810,3 +1949,32 @@ pub static TLB_PAGE: core::sync::atomic::AtomicUsize = core::sync::atomic::Atomi
 pub static TLB_ACTIVATE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static TLB_GLOBAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── Per-syscall profiling stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub const PERF_SYSCOUNT: usize = 512;
+
+// ── Filemap fault phase stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub static FILEMAP_FAULT_FRAMES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static FILEMAP_FAULT_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static FILEMAP_PRIVATE_COPY_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static FILEMAP_MAP_USER_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── TLB flush cycle stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub static TLB_PAGE_FLUSH_CYCLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TLB_FULL_FLUSH_CYCLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TLB_ACTIVATE_CYCLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── PF action names stub ──
+#[cfg(not(feature = "perf_stats"))]
+pub const PF_ACTION_NAMES: [&str; 7] = [
+    "LazyAlloc", "FileBackedRead", "FileBackedSharedWrite",
+    "FileBackedWrite", "SharedWrite", "Cow", "Other",
+];

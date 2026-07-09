@@ -2,6 +2,105 @@
 
 ---
 
+## 2026-07-09
+
+### PageCache: 路由直连 UserBuffer 读取（消除首次读取时的 kbuf 中间拷贝）
+
+**涉及文件：**
+- `os/src/fs/ext4/ext4fs.rs` — `supports_user_buffer_io()` 改为检查 inode 类型（`!is_dir() && !is_link()`）而非 `page_cache().is_some()`，使首次读取也能走直连 UserBuffer 路径
+- `os/src/fs/ext4_lwext4/layout.rs` — 新增 `supports_user_buffer_io()` （`FileType::File` 返回 true）；重写 `read_at_user()`：`FileType::File` 分支调用 `ensure_page_cache()` + `pc.read_user()` 直连 UserBuffer（消除 kbuf 分配+拷贝），`FileType::SymLink` 保持原 kbuf 路径
+- `os/src/fs/tmpfs/mod.rs` — `supports_user_buffer_io()` 移除 `page_cache.is_some()` 条件，直接按 file type 判断
+- `os/src/fs/page_cache.rs` — `read_user()` 三个取数路径（单页快速、多页批量命中、多页 fallback）添加 `record_pc_copy_cycles()` 性能计数器，复用现有 `PC_COPY_CYCLES` 指标
+
+**路由变化：** 之前 `supports_user_buffer_io()` 返回 false 当 PageCache 尚未创建（如 bash ELF 首次加载），导致 `read_into_user()` 走 TWO-copy kbuf 路径。修复后所有常规文件从首次读取开始就走 ONE-copy 直连 UserBuffer 路径。
+
+**设计决策：**
+- ext4: `supports_user_buffer_io()` 现在只做纯类型检查，`read_at_user()` 通过 `get_new_page_cache()` 按需创建 PageCache
+- lwext4: 新增的 `supports_user_buffer_io()` 也做纯类型检查，`read_at_user()` 通过 `ensure_page_cache()` 按需创建 PageCache；SymLink 保持高成本 kbuf 路径（极少触发）
+- tmpfs: 移除 `page_cache.is_some()` 后，极少数无缓存场景下 `read_at_user()` 返回 `EIO`（tmpfs 文件创建时即初始化 PageCache，此场景几乎不会出现）
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：** 此改动将首次读取也从 43K cycles/page（2 次 4KB 拷贝）降至 ~1 次拷贝。直连 UserBuffer 路径在之前的 Pipe 改造中已验证正确性。
+
+---
+
+### PageCache: read()/read_user() 批量锁定优化 — 热路径只需 1 次 entries 锁
+
+**涉及文件：**
+- `os/src/fs/page_cache.rs` — 新增 `ReadCopy`/`MissRun`/`ReadPlan` 类型；新增 `lookup_read_range_fast()`（单锁批量扫描）和 `fill_miss_runs()`（publish-after-I/O 批量填充）；重写 `read()` 和 `read_user()` 多页路径，hot path 满命中的 200 页读仅需 1 次 entries 锁
+- `os/src/fs/ext4_lwext4/page_cache.rs` — `read_pages()` 起始添加 `record_pc_miss()` 调用
+
+**设计决策：**
+- hot path（全部命中缓存 + 全部 fully valid）：`lookup_read_range_fast()` 单次 entries 锁扫描整段 → 返回 `ReadCopy` 列表 → 解锁拷贝。原来每个 page 调一次 `get_page_for_read()` + `ensure_fully_valid()`（400+ 锁操作），现降为 1 次。
+- miss 分支：首次扫描收集 `MissRun`（合并连续 miss），通过 `fill_miss_runs()` 批量 `read_pages()` 后 publish；然后 auto-retry 一次。
+- 部分 valid 页面：走 `needs_valid_fill` → 调用现有 `ensure_fully_valid()` 逐页补齐。
+- 已经 retry 过仍未命中 → fallback 到原 per-page `get_page_for_read()` + `ensure_fully_valid()` 路径，保证正确性。
+- 单页读取路径保持完全不变（`read()` 和 `read_user()` 中 `start_page == end_page` 快速路径）。
+
+**发布后 I/O 模式：** 与现有的 `sync_batch_read_pages`（用于 readahead）不同，`fill_miss_runs()` 直接用 `UpToDate` 状态创建 entries，IO 后 publish。无 Loading 过渡态，无 CAS 重试，更简单。
+
+**锁顺序：** entries → inner（与现有代码一致）。I/O 期间不持 entries 锁。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：** 此改动预期对 lwext4 缓存命中路径提供 ~4x 加速（将 400+ 次锁操作减少为 1 次）。未改动的调用方（`frame_for_read`/`frame_for_write`/`maybe_readahead`）继续使用 `get_page_for_read`/`get_or_create_entry`/`sync_batch_read_pages`，不受影响。
+
+---
+
+### Pipe: 实现 direct UserBuffer I/O（消除 read_at/write_at 中 64KB kbuf 堆分配）
+
+**涉及文件：**
+- `os/src/fs/dev/pipe.rs` — 添加 `supports_user_buffer_io() → true`；新增 `read_at_user()` 和 `write_at_user()` 方法
+- （无需修改 syscall 层 — `read_into_user`/`write_from_user` 已通过 `supports_user_buffer_io()` 自动分流到 `read_user`/`write_user` → `read_at_user`/`write_at_user`）
+
+**实现细节：**
+- `read_at_user()`: ring → UserBuffer 直连拷贝，按 ring 段分片，每段调用 `dst.write_at(total, seg_bytes)`
+- `write_at_user()`: UserBuffer → ring 直连拷贝，使用 4KB 栈缓冲区中转（避免 64KB 内核栈分配），每段 `src.read_at(total, &mut stack_buf[..seg_len])` 后 `copy_nonoverlapping` 到 ring
+- 错误语义完全镜像现有 `read_at`/`write_at`：EBADF/EAGAIN/EPIPE/SIGPIPE/PIPE_BUF 原子性
+- epoll 唤醒、fasync SIGIO、profile 计数器与现有 kbuf 路径保持一致
+
+**验证：**
+- `EXTRA_FEATURES='perf_diag' make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：** 此改动消除了 pipe 热路径中最大的堆分配（`Vec::try_reserve(64KB)`），该分配曾被识别为 buddy+slab 分配器下 52% 带宽退化来源。`read_at`/`write_at` 的 kbuf 路径保留，作为不支持 UserBuffer I/O 的设备 fallback。
+
+---
+
+### Sv39PageTable/LAFlexPageTable 初始 Vec 容量从 256 降至 32
+
+**涉及文件：**
+- `os/src/hal/arch/riscv/sv39.rs` — `new()` 和 `from_existing()` 中 `Vec::with_capacity(256)` → `Vec::with_capacity(32)`
+- `os/src/hal/arch/loongarch64/laflex.rs` — 同上，共 4 处修改
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：** 256 × 8B = 2048 字节分配命中 slab allocator 的最差 size class（每 4KB 页仅 1 个对象）。改为 32（256 字节）命中 256B slab class，典型进程页表 20-50 frames 无需扩缩容。
+
+---
+
+### lwext4 read 路径添加 readahead + PageCache 共享
+
+**涉及文件：**
+- `os/src/fs/ext4_lwext4/ext4fs.rs` — 添加 `page_caches: Mutex<BTreeMap<usize, Weak<PageCache>>>` 字段及初始化，用于在 inode 实例间共享 PageCache
+- `os/src/fs/ext4_lwext4/layout.rs` — `ensure_page_cache()` 增加 registry 查找逻辑，优先复用已有 PageCache（按 inode_id 索引）；`read_at()` FileType::File 分支增加顺序 readahead，调用 `pc.maybe_readahead()`
+- `os/src/fs/ext4_lwext4/page_cache.rs` — `read_page()` 入口增加 `record_pc_miss()` 计数器调用
+
+**验证：**
+- `EXTRA_FEATURES='perf_diag' make rv64-kernel-build-only` ✅
+- `EXTRA_FEATURES='perf_diag' make la64-kernel-build-only` ✅
+
+**备注：** 模仿 legacy ext4 的 readahead 模式（`os/src/fs/ext4/ext4fs.rs:873-878`）和 PageCache 共享模式（`os/src/fs/ext4/layout.rs:149-187`）。`PC_READ_MISS` 计数器和 diag 暴露已存在于 `perf.rs`/`diag.rs` 中，无需新增。
+
+---
+
 ## 2026-07-08
 
 ### fs_bind 慢最终根因确诊: fork(30ms) + exec 从 lwext4(58ms) = 88ms/shell 命令

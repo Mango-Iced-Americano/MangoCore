@@ -595,6 +595,77 @@ fn stats_pipe_content(_extra: usize, offset: usize, len: usize, buf: &mut [u8]) 
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+//  STATS: syscall_top (ro) — top-20 syscalls by total ticks
+// ═══════════════════════════════════════════════════════════════════════
+
+fn stats_syscall_top_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let mut s = String::with_capacity(2048);
+    let mut entries: alloc::vec::Vec<(usize, usize, usize)> = alloc::vec::Vec::new();
+    let syscount = crate::task::perf::PERF_SYSCOUNT;
+    for id in 0..syscount {
+        let count = crate::task::perf::syscall_count(id);
+        let ticks = crate::task::perf::syscall_ticks(id);
+        if count > 0 {
+            entries.push((id, count, ticks));
+        }
+    }
+    entries.sort_by(|a, b| b.2.cmp(&a.2));
+    let freq = crate::hal::get_clock_freq();
+    for &(id, count, ticks) in entries.iter().take(20) {
+        let name = crate::syscall::syscall_name(id);
+        let avg = if count > 0 { ticks / count } else { 0 };
+        let _ = writeln!(s, "{}:{} count:{} ticks:{} avg:{}", id, name, count, ticks, avg);
+    }
+    write_str(offset, len, buf, &s)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  STATS: pagefault (ro) — per-action page fault stats
+// ═══════════════════════════════════════════════════════════════════════
+
+fn stats_pagefault_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let mut s = String::with_capacity(512);
+    let names = &crate::task::perf::PF_ACTION_NAMES;
+    for tag in 0..names.len() {
+        let count = crate::task::perf::pf_action_count(tag);
+        let ticks = crate::task::perf::pf_action_ticks(tag);
+        let _ = writeln!(s, "{} count={} ticks={}", names[tag], count, ticks);
+    }
+    write_str(offset, len, buf, &s)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  STATS: vm (ro) — filemap + TLB cycle stats
+// ═══════════════════════════════════════════════════════════════════════
+
+fn stats_vm_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    let mut s = String::with_capacity(512);
+    let _ = writeln!(s, "filemap_fault_frames={}", read_counter(&crate::task::perf::FILEMAP_FAULT_FRAMES));
+    let _ = writeln!(s, "filemap_fault_ticks={}", read_counter(&crate::task::perf::FILEMAP_FAULT_TICKS));
+    let _ = writeln!(s, "filemap_private_copy_ticks={}", read_counter(&crate::task::perf::FILEMAP_PRIVATE_COPY_TICKS));
+    let _ = writeln!(s, "filemap_map_user_ticks={}", read_counter(&crate::task::perf::FILEMAP_MAP_USER_TICKS));
+    let _ = writeln!(s, "tlb_page_flush_cycles={}", read_counter(&crate::task::perf::TLB_PAGE_FLUSH_CYCLES));
+    let _ = writeln!(s, "tlb_full_flush_cycles={}", read_counter(&crate::task::perf::TLB_FULL_FLUSH_CYCLES));
+    let _ = writeln!(s, "tlb_activate_cycles={}", read_counter(&crate::task::perf::TLB_ACTIVATE_CYCLES));
+    write_str(offset, len, buf, &s)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 //  Registration
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -635,6 +706,9 @@ pub fn register_all(kernel_dir: &Arc<SysInode>) -> Result<(), SyscallErr> {
     stats_dir.add_file("pipe", ro_mode, stats_pipe_content)?;
     stats_dir.add_file("lwext4", ro_mode, stats_lwext4_content)?;
     stats_dir.add_file("mount", ro_mode, stats_mount_content)?;
+    stats_dir.add_file("syscall_top", ro_mode, stats_syscall_top_content)?;
+    stats_dir.add_file("pagefault", ro_mode, stats_pagefault_content)?;
+    stats_dir.add_file("vm", ro_mode, stats_vm_content)?;
 
     // ── /sys/kernel/tracing/ ──
     let trace_dir = kernel_dir.add_dir_inner("tracing", InodeMode::from_bits_truncate(0o555))?;

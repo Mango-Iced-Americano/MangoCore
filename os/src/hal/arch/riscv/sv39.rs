@@ -22,22 +22,28 @@ macro_rules! tlb_invalidate_vpn {
 
 #[inline(always)]
 pub fn tlb_invalidate() {
+    let start = crate::task::perf::perf_time_now();
     // Safety: `sfence.vma` serializes address-translation updates on the current
     // hart and does not access memory through Rust references.
     unsafe {
         asm!("sfence.vma");
     }
+    let elapsed = crate::task::perf::perf_time_now().wrapping_sub(start);
+    crate::task::perf::record_tlb_full_flush_cycles(elapsed);
     crate::task::perf::record_tlb_full();
 }
 
 /// 只刷指定虚拟地址对应的 TLB 条目，不影响其他条目
 #[inline(always)]
 pub fn tlb_invalidate_addr(vaddr: usize) {
+    let start = crate::task::perf::perf_time_now();
     // Safety: the instruction only uses `vaddr` as the architectural fence
     // operand; it does not dereference the address.
     unsafe {
         asm!("sfence.vma {}, zero", in(reg) vaddr);
     }
+    let elapsed = crate::task::perf::perf_time_now().wrapping_sub(start);
+    crate::task::perf::record_tlb_page_flush_cycles(elapsed);
     crate::task::perf::record_tlb_page();
 }
 bitflags! {
@@ -386,7 +392,10 @@ impl PageTable for Sv39PageTable {
         // use the new page table.
         unsafe {
             satp::write(satp);
+            let start = crate::task::perf::perf_time_now();
             asm!("sfence.vma");
+            let elapsed = crate::task::perf::perf_time_now().wrapping_sub(start);
+            crate::task::perf::record_tlb_activate_cycles(elapsed);
             crate::task::perf::record_tlb_activate();
         };
     }

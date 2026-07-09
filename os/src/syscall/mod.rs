@@ -942,6 +942,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         crate::task::perf::record_getppid_cost(_syscall_ticks);
     }
     crate::task::perf::record_syscall(syscall_id, ret);
+    crate::task::perf::record_syscall_time(syscall_id, _syscall_ticks);
     ret
 }
 

@@ -719,19 +719,43 @@ impl IndexNode for Ext4OSInode {
 
     // ── user buffer I/O ───────────────────────────────────────────────
 
+    fn supports_user_buffer_io(&self) -> bool {
+        // Regular files can use PageCache → UserBuffer direct I/O.
+        // Directories and symlinks are handled by their own paths.
+        self.file_type == FileType::File
+    }
+
     fn read_at_user(
         &self,
         offset: usize,
         len: usize,
         dst: &mut crate::mm::UserBuffer,
     ) -> Result<usize, SyscallErr> {
-        let actual_len = len.min(dst.len());
-        let mut kbuf = alloc::vec![0u8; actual_len];
-        let dummy = spin::Mutex::new(FilePrivateData::Unused);
-        let guard = dummy.lock();
-        let n = self.read_at(offset, actual_len, &mut kbuf, guard)?;
-        dst.write(&kbuf[..n]);
-        Ok(n)
+        match self.file_type {
+            FileType::Dir => Err(SyscallErr::EISDIR),
+            FileType::SymLink => {
+                // Symlinks: use existing read_at path (reads link target content)
+                let actual_len = len.min(dst.len());
+                let mut kbuf = alloc::vec![0u8; actual_len];
+                let dummy = spin::Mutex::new(FilePrivateData::Unused);
+                let guard = dummy.lock();
+                let n = self.read_at(offset, actual_len, &mut kbuf, guard)?;
+                dst.write(&kbuf[..n]);
+                Ok(n)
+            }
+            FileType::File => {
+                let pc = self.ensure_page_cache().ok_or(SyscallErr::EIO)?;
+                let file_size = self.logical_size_or_refresh().unwrap_or(0);
+                let read_end = (offset + len).min(file_size);
+                if offset >= read_end {
+                    return Ok(0);
+                }
+                // Direct PageCache → UserBuffer: ONE copy, no intermediate kbuf
+                pc.read_user(offset, read_end - offset, dst)
+                    .map_err(|_| SyscallErr::EIO)
+            }
+            _ => Err(SyscallErr::EINVAL),
+        }
     }
 
     fn write_at_user(
