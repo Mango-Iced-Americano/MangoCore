@@ -156,6 +156,12 @@ pub fn rust_main() -> ! {
     machine_init();
     crate::task::timer_subsystem_init();
 
+    // Explicit opt-in validation for the integrated 2K1000 SATA controller.
+    // This performs IDENTIFY and repeated reads of LBA0 only; force_ramfs below
+    // remains active, so the SSD is neither mounted nor written.
+    #[cfg(all(feature = "board_2k1000", feature = "sata_probe"))]
+    drivers::block::sata_read_only_probe();
+
     // ── Initramfs 启动路径 ──
     #[cfg(feature = "initramfs")]
     {

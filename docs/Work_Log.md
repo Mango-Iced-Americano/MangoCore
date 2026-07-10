@@ -4,6 +4,38 @@
 
 ## 2026-07-10
 
+### board: 修复 2K1000LA AHCI 并加入 SSD 只读验收镜像
+
+**涉及文件：**
+- `dependency/dep_iso/src/block/ahci.rs` — 将控制器/端口/命令等待改为有界轮询并返回寄存器快照；修正 PxCMD 状态位判断和 H2D FIS 长度；检查 `TFD/PxIS/PxSERR`；增加 IDENTIFY 容量、LBA 越界、写后 FLUSH 和超时后安全停机
+- `dependency/dep_iso/src/block/ahci.rs` — 根据实板结果移除 `PxSIG == 0x00000101` 的错误前置门槛；2K1000LA 在 HBA reset 后可能返回 `0xffffffff`，改由链路状态和只读 `IDENTIFY DEVICE` 判定设备是否可用
+- `os/src/drivers/block/sata_blk.rs` — 按 2K1000LA 手册固定探测 `00:08.0`（vendor/device `0014:7a08`、class `01/06/01`、BAR0 `0x400e0000`）；PCI Command 使用 16 位读改写；DMA 页限制在 4 GiB 以下；实现 `size_bytes()` 和只读 `IDENTIFY + 两次 LBA0` 探针
+- `os/src/drivers/block/mod.rs`、`os/src/main.rs`、`os/Cargo.toml` — 增加显式 `sata_probe` feature 和早期只读探测入口；保留 2K1000 `force_ramfs()` 与跳过外盘挂载保护
+- `os/Makefile` — 增加 `la64-2k1000-sata-probe` 目标并输出稳定文件名
+- `kernel-2k1000-sata-probe.ui` — 只读 SSD 验收 uImage
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- 竞赛 Docker 镜像内 `make la64-kernel-build-only` ✅
+- 竞赛 Docker 镜像内 `make la64-2k1000-sata-probe`（`LOG=off`）✅
+- rv64 QEMU 使用两个 `/tmp` 空白稀疏盘启动：完成 MM/VFS/双块设备初始化并进入 initramfs 用户态 ✅
+- la64 QEMU 使用两个 `/tmp` 空白稀疏盘启动：完成 PCI virtio-net/blk、VFS 初始化并进入 initramfs 用户态 ✅
+- `rustfmt --check`（AHCI/SATA 文件）与 `git diff --check` ✅
+- uImage：总长 `12311408` 字节，payload `12311344` 字节，`Load/Entry = 0x90000000`，SHA-256 `b5e6ce8478583936551769e22424245acd6785318387cbfcfa1f288332dc3eb5` ✅
+- `strings` 确认保留 `[sata-probe] begin/PASS`，且不再包含 syscall info 的 `args:`/返回值格式串 ✅
+- 实板第一轮：U-Boot 可识别 `TS32GMTS400`（29.8 GiB），内核 PCI/BAR 探测正确，但旧驱动因 `PxSIG=0xffffffff` 提前退出；已据此修复 ✅
+- 修复后 Docker 内 `make rv64-kernel-build-only`、`make la64-kernel-build-only`、`make la64-2k1000-sata-probe` 全部通过 ✅
+- 新 uImage：总长 `12307280` 字节，payload `12307216` 字节，SHA-256 `1134065c2a25e8e1cbae52c2f7ece839ebbcf89a239205744e5f517ef256ed41` ✅
+- 实板第二轮：Mac TFTP 加载新版 uImage 后，内核 IDENTIFY 成功识别 `TS32GMTS400`、序列号 `F697095467`、固件 `S0322B`、`62533296` 扇区（`32017047552` 字节）；连续两次 LBA0 读取一致，探针输出 `PASS` ✅
+
+**备注：**
+- 资料复核确认 2K1000LA 是片上 AHCI：PCI 配置头物理地址 `0xfe00004000`，AHCI ABAR 在 BAR0，不应按通用 PC 习惯改查 BAR5；官方 U-Boot 同样把 BAR0 配置为 `0x400e0000`。
+- 星云板 M.2 2242 插槽连接 SATA 信号，不是 NVMe；SoC 资料声明 I/O DMA cache coherent，驱动仍使用顺序栅栏并遵守 32 位 DMA mask。
+- 专用镜像不会挂载或写入 SSD。实板已经看到 `[sata-probe] PASS`，并核对了型号、容量和重复 LBA0；当前盘没有分区表，因此签名为 `0000` 而不是 `55aa`。下一阶段才进入分区创建、分区解析和只读文件系统挂载。
+- 随板 U-Boot 的 AHCI 初始化只用 `PxSSTS.DET=3` 注册链路端口，不在命令前按 `PxSIG` 拒绝设备；Linux 也仅用 `PxSIG` 做设备分类。新版继续保留全部命令超时和错误寄存器检查，未放宽写保护。
+- LBA0 前 16 字节全零且结尾签名为 `0000`，与 U-Boot 的 `No partition table` 一致，说明 SSD 当前未分区；这是磁盘内容状态，不是 AHCI 读失败。实板验证后内核仍执行 `force_ramfs()` 并跳过块设备挂载，全程未写盘。
+- 仓库 Compose 硬编码 `/dev/sdb`，macOS 无该设备；la64 验证改用同一竞赛镜像的 one-off `docker run`，不改变编译环境。
+
 ### docs(code): 补齐 2K1000LA 关键适配源码的原因注释
 
 **涉及文件：**

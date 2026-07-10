@@ -94,6 +94,11 @@ pub fn get_block_device(index: usize) -> Option<Arc<dyn BlockDevice>> {
     BLOCK_DEVICES.get(index).and_then(|dev| dev.clone())
 }
 
+#[cfg(all(feature = "board_2k1000", feature = "sata_probe"))]
+pub fn sata_read_only_probe() {
+    sata_blk::read_only_probe();
+}
+
 #[allow(unused)]
 pub fn block_device_test() {
     let block_device = BLOCK_DEVICE.clone();

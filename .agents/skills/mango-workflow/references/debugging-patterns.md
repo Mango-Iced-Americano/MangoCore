@@ -285,3 +285,12 @@
   7. PGDL/ASID 切换与 `invtlb` 操作是否覆盖目标项的 global、ASID 和 paired-page 语义；ASID 分配失败哨兵绝不能直接写入 CSR。
 - **验证方式**: 编译期断言固定关键边界；启动期打印并断言 CPUCFG；对 refill/restore 裸汇编做目标文件反汇编；最后必须实际进入用户态，只有内核早期日志不算通过。
 - **相关文件**: `os/src/hal/arch/loongarch64/config.rs`, `os/src/hal/arch/loongarch64/laflex.rs`, `os/src/hal/arch/loongarch64/tlb.rs`, `os/src/hal/arch/loongarch64/trap/`, `os/src/drivers/block/sata_blk.rs`
+
+### 片上 AHCI 上板先按 SoC 资料定址，再做只读分阶段验收
+
+- **现象**: QEMU/通用 PC 经验会让驱动默认从 BAR5 找 AHCI ABAR，或直接扫描 PCI 后挂载磁盘；在 SoC 实板上可能找不到控制器、误碰保留寄存器，或在命令状态异常时永久自旋。
+- **根因**: 片上 PCI 设备可以使用厂商固定的 BDF、BAR 和 DMA 约束，不一定遵循独立 PC AHCI 控制器的常见布局。2K1000LA 的 SATA 是 `00:08.0`，ABAR 位于 BAR0 `0x400e0000`；其 PCI capability pointer 还是保留字段，不能用“存在 capability list”作为 AHCI 前置条件。
+- **修复**: 先交叉核对芯片手册、板级原理图、官方 U-Boot/Linux DTS；只读配置头并验证 vendor/device/class/prog-if/BAR；PCI Command 用 16 位访问避免写回 W1C Status；所有 GHC/PxCMD/CI 等等待必须有界并在错误中携带 `TFD/PxIS/PxSERR`；DMA 地址遵守控制器 mask 和平台一致性模型。`PxSIG` 只作为设备分类提示，部分 SoC HBA reset 后可能暂时读到 `0xffffffff`；链路已 active 时应由只读 `IDENTIFY DEVICE` 做最终判定，不能仅凭签名提前拒绝端口。
+- **验收顺序**: `IDENTIFY DEVICE` 打印型号/容量 → 两次读取 LBA0 并比较 → 多个固定 LBA 只读比较 → 分区解析 → 只读文件系统挂载 → 最后才开放写入和 cache flush。每一步失败都保持 ramfs/initramfs 可启动，禁止直接解除块设备保护。
+- **教训**: “AHCI 标准协议”不等于“PCI 集成方式标准”。上板时应把控制器定址、DMA 可见性、命令协议和文件系统挂载拆成独立验证层，避免把硬件探测问题误判成 ext4/VFS 问题，也避免尚未验证的写路径损坏 SSD。
+- **相关文件**: `dependency/dep_iso/src/block/ahci.rs`, `os/src/drivers/block/sata_blk.rs`, `os/src/main.rs`
