@@ -271,3 +271,33 @@ ktest-run: user $(LWEXT4_PREREQ)
 		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
 		-m 512 \
 		-smp threads=1
+
+# ─────────────────────────────────────────────────────────
+#  L4 User-mode regression test (mango.mode=regression)
+# ─────────────────────────────────────────────────────────
+# Builds minimal initramfs with /init=regression_init and
+# /regression. Launches QEMU with NO disk drives. Parses
+# console for [L4 REGRESSION RESULT: PASS] / FAIL markers.
+REGRESSION_CMDLINE := mango.mode=regression
+
+regression-run: user $(LWEXT4_PREREQ)
+	@echo "[regression] Building regression initramfs..."
+	@mkdir -p ../fs-img-dir
+	./build_initramfs.sh rv64 $(MODE) $(INITRAMFS_CPIO_RV) regression
+	@touch src/initramfs-rv.S
+	@echo "[regression] Rebuilding kernel with: $(REGRESSION_CMDLINE)"
+	@cp -f src/hal/arch/riscv/linker-$(BOARD).ld src/hal/arch/riscv/linker.ld
+	@MANGO_CMDLINE="$(REGRESSION_CMDLINE)" LOG=${LOG} \
+		cargo build --$(MODE) --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)"
+	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
+	@echo "[regression] Launching QEMU (no disks, timeout 60s)..."
+	@timeout --foreground 60 qemu-system-riscv64 \
+		-machine virt \
+		-nographic \
+		-bios $(BOOTLOADER) \
+		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
+		-m 256 \
+		-smp threads=1 2>&1 | tee /tmp/regression-rv.log
+	@grep -q "L4 REGRESSION RESULT: PASS" /tmp/regression-rv.log \
+		&& echo "=== REGRESSION PASS ===" \
+		|| (echo "=== REGRESSION FAIL ===" && exit 1)

@@ -141,6 +141,9 @@ pub fn rust_main() -> ! {
     machine_init();
     crate::task::timer_subsystem_init();
 
+    // 尽早加载 bootargs — Regression/Ktest 模式需要跳过某些 init 步骤
+    let boot_config = crate::bootargs::load();
+
     // ── Initramfs 启动路径 ──
     #[cfg(feature = "initramfs")]
     {
@@ -148,15 +151,20 @@ pub fn rust_main() -> ! {
         crate::fs::vfs::posix_lock::init_posix_lock_manager();
         fs::initramfs_init();
 
-        drivers::init_net_device();
-        net::config::init();
+        // Regression 模式：跳过网卡和块设备初始化（纯 initramfs，无外部磁盘）
+        if boot_config.mode != crate::bootargs::BootMode::Regression {
+            drivers::init_net_device();
+            net::config::init();
 
-        // 先探测块设备（需要连续物理页 DMA，必须在 preload 分配页之前做）
-        fs::mount_boot_block_devices();
+            // 先探测块设备（需要连续物理页 DMA，必须在 preload 分配页之前做）
+            fs::mount_boot_block_devices();
 
-        // 安装预装载的测试 payload（迁移期保留，在块设备探测之后避免页碎片化）
-        #[cfg(feature = "preload_payloads")]
-        fs::install_preload_payloads();
+            // 安装预装载的测试 payload（迁移期保留，在块设备探测之后避免页碎片化）
+            #[cfg(feature = "preload_payloads")]
+            fs::install_preload_payloads();
+        } else {
+            crate::println!("[kernel] Regression mode — skipping net/block init");
+        }
     }
 
     // ── Legacy 启动路径（initramfs 特性未启用时）──
@@ -180,7 +188,6 @@ pub fn rust_main() -> ! {
     // When ktest runs with the scheduler active, we spawn the test runner
     // as a kernel task and enter run_tasks().  The runner and any spawned
     // test helpers are the only tasks — initproc is *not* added.
-    let boot_config = crate::bootargs::load();
     if boot_config.mode == crate::bootargs::BootMode::Ktest {
         crate::println!(
             "[kernel] Entering kernel test mode (ktest) — tests: {:?}, repeat: {}",

@@ -4,6 +4,25 @@
 
 ## 2026-07-10
 
+### L4 regression 自包含 initramfs 流程：`make regression` 零磁盘启动
+
+**涉及文件：**
+- `user/src/bin/regression_init.rs` — (新增) 最小 PID1 包装器：fork + exec `/regression` + waitpid + 打印 `[L4 REGRESSION RESULT: PASS/FAIL]` + shutdown。单文件 ~50 行，复用 `user_lib` 的 `fork/exec/waitpid/shutdown`。
+- `os/build_initramfs.sh` — 新增第 4 可选参数 `[profile]`。当 `profile=regression` 时跳过 common skeleton 和 busybox，仅安装 `regression_init`→`/init`、`regression`→`/regression`，生成最小 cpio（~400KB）。
+- `os/src/main.rs` — `boot_config` 加载提前至 `timer_subsystem_init()` 之后；initramfs 路径中新增 `BootMode::Regression` 分支，跳过 `init_net_device()`、`net::config::init()`、`mount_boot_block_devices()`、`install_preload_payloads()`。
+- `os/make/rv64.mk` — 新增 `regression-run` 目标：构建回归 initramfs（覆盖原 cpio）→ 用 `MANGO_CMDLINE="mango.mode=regression"` 重编译内核 → 启动 QEMU（无 `-drive`，256MB，60s 超时）→ grep 解析 PASS/FAIL。
+- `os/make/la64.mk` — 同上，la64 架构镜像目标。
+- `os/Makefile` — `rv64-regression`/`la64-regression` 目标重写为调用 `make -f make/{arch}.mk regression-run`，移除旧的 debugfs 注入和磁盘依赖。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅ (188 warnings, 均为既有)
+- `make la64-kernel-build-only` ✅ (173 warnings, 均为既有)
+- `make -C os rv64-regression` QEMU 运行 ⏸️ (需在 Docker 内执行完整流程)
+
+**备注：** 设计决策：(1) 不修改 `BootMode` 枚举（已在 `mango-kernel-core` 中预定义）；(2) `regression_init.rs` 不走 initproc 的复杂模式分发，而是独立 PID1，fork→exec→wait→print→shutdown 线性流程；(3) QEMU 命令不含任何 `-drive` 参数，纯 initramfs 启动；(4) 回归 initramfs 覆盖正常的 `initramfs-{rv,la}.cpio`，通过 `touch src/initramfs-{rv,la}.S` 触发 cargo 重编译。后续可考虑分离为独立 `.S` 文件避免覆盖。
+
+---
+
 ### ktest 多任务调度测试基础设施：spawn_ktest_task + 调度器内运行测试
 
 **涉及文件：**
