@@ -32,6 +32,22 @@ pub type Nsec = u64;
 //  TimeSpec — POSIX timespec
 // ────────────────────────────────────────────────────────────────────────
 
+/// POSIX `timespec`: seconds + nanoseconds.
+///
+/// # Examples
+///
+/// ```
+/// use mango_kernel_core::time::TimeSpec;
+///
+/// let t = TimeSpec::from_ms(1500);
+/// assert_eq!(t.tv_sec, 1);
+/// assert_eq!(t.tv_nsec, 500_000_000);
+/// assert_eq!(t.to_ns(), 1_500_000_000);
+///
+/// let sum = TimeSpec::from_ns(700_000_000) + TimeSpec::from_ns(500_000_000);
+/// assert_eq!(sum.tv_sec, 1);
+/// assert_eq!(sum.tv_nsec, 200_000_000);
+/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
 pub struct TimeSpec {

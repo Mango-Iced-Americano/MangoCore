@@ -39,6 +39,21 @@ pub const PG_DIRTY: u8 = 1 << 1;
 /// bytes. The bitmask has bit 0 for segment 0, bit 1 for segment 1, etc.
 /// Partially covered segments are considered valid.
 ///
+/// Compute a validity bitmask for a range within a page.
+///
+/// # Examples
+///
+/// ```
+/// use mango_kernel_core::page_cache::mask_for_range;
+///
+/// // Full page write → all 8 segments valid
+/// assert_eq!(mask_for_range(0, 4096), 0xFF);
+/// // Single segment at offset 0
+/// assert_eq!(mask_for_range(0, 512), 0x01);
+/// // Zero-length → empty mask
+/// assert_eq!(mask_for_range(0, 0), 0x00);
+/// ```
+///
 /// # Safety fix
 ///
 /// Uses `u8::MAX >> (8 - VALID_SEG_COUNT)` pattern to avoid `1u8 << 8` panic
