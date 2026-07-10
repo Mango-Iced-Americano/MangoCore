@@ -32,6 +32,8 @@ rustsbi = { path = "../dependency/rustsbi" }
 pci = {  path = "../dependency/dep_pci/pci"  }
 isomorphic_drivers = { path = "../dependency/dep_iso" }
 
+mango-kernel-core = { path = "../libs/mango-kernel-core" }
+
 smoltcp = { version = "0.10.0", default-features = false, features = [
     "alloc",
     "log",

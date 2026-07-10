@@ -205,3 +205,22 @@ comp-gdb:
 		-s
 
 .PHONY: all build kernel fs-img user clean run runsimple comp comp-gdb
+
+# ─────────────────────────────────────────────────────────
+#  L3 Kernel self-test (mango.mode=ktest)
+# ─────────────────────────────────────────────────────────
+# Rebuilds kernel with MANGO_CMDLINE env var, then launches QEMU.
+ktest-run: user $(LWEXT4_LA_PREREQ)
+	@echo "[ktest] Rebuilding kernel with: $(KTEST_CMDLINE)"
+	@cp -f src/hal/arch/loongarch64/linker-$(BOARD).ld src/hal/arch/loongarch64/linker.ld
+	@MANGO_CMDLINE="$(KTEST_CMDLINE)" LOG=${LOG} \
+		cargo build --$(MODE) --features "board_$(BOARD) $(LOG_OPTION) block_$(LA64_BLK_MODE) oom_handler $(EXTRA_FEATURES)"
+	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
+	@echo "[ktest] Launching QEMU..."
+	@qemu-system-loongarch64 \
+		-machine virt \
+		-nographic \
+		-bios $(BOOTLOADER) \
+		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
+		-m 512 \
+		-smp threads=1

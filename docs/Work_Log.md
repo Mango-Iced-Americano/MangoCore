@@ -4,6 +4,38 @@
 
 ## 2026-07-10
 
+### 设计并实现分层测试体系（第一阶段 — L3 内核自检框架）
+
+**涉及文件：**
+
+新增：
+- `os/src/bootargs.rs` — bootargs 解析器（Cmdline + BootConfig + 编译期 `option_env!("MANGO_CMDLINE")`）
+- `os/src/kernel_tests/mod.rs` — L3 测试框架入口，注册所有测试组，`run_from_bootargs()` 分发
+- `os/src/kernel_tests/runner.rs` — TAP 格式测试运行器（timeout/repeat/failfast/arch 诊断）
+- `os/src/kernel_tests/waitqueue.rs` — WaitQueue 测试（wake_before_wait_should_not_sleep, basic_queue_ops）
+- `os/src/kernel_tests/timer.rs` — Timer 测试（tick_advances, time_spec_ops）
+- `os/src/kernel_tests/sched.rs` — Scheduler 测试（current_task_exists, ready_queue_has_init）
+- `os/src/kernel_tests/mm.rs` — 页分配器测试（alloc_free_one_page, alloc_contiguous_pages）
+- `docs/08_testing/README.md` — 分层测试体系完整设计文档（L0-L5）
+
+修改：
+- `os/src/main.rs` — 添加 `mod bootargs;` `mod kernel_tests;`，ktest 分支在 `add_initproc()` 之后 `run_tasks()` 之前
+- `os/make/rv64.mk` — 添加 `ktest-run` 目标（编译+QEMU 启动，无磁盘镜像）
+- `os/make/la64.mk` — 添加 `ktest-run` 目标
+- `os/Makefile` — 添加 `rv64-ktest`/`la64-ktest`/`check-fast`/`bugscan` 目标
+
+**验证：**
+- `make rv64-ktest KTEST=all` cargo check ✅
+- `make la64-ktest KTEST=all` cargo check ✅
+- 默认模式（无 MANGO_CMDLINE）编译通过 ✅
+- ktest 模式编译通过 ✅
+
+**备注：**
+- bootargs 当前使用编译期常量 `env!("MANGO_CMDLINE")` 作为 workaround，后续真 DTB/EFI 支持后改为运行时读取
+- 多任务 WaitQueue/scheduler 测试（wake_once, wake_all, spawn_and_yield）需要最小内核线程 spawn API，当前暂缺
+- timeout 机制为 advisory-only（测试返回后检查），无法中断挂死测试；需要后续添加 watchdog timer
+- ktest 插入点在所有子系统初始化完成之后（含 fs/net/block），保证测试可访问完整内核状态
+
 ### 新增 VisionFive 2 (JH7110) 平台支持
 
 **涉及文件：**

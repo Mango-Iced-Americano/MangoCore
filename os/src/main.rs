@@ -30,9 +30,11 @@ extern crate bitflags;
 
 #[macro_use]
 mod console;
+mod bootargs;
 mod drivers;
 mod fs;
 mod hal;
+mod kernel_tests;
 mod lang_items;
 mod math;
 mod mm;
@@ -174,6 +176,21 @@ pub fn rust_main() -> ! {
 
     crate::fs::vfs::posix_lock::init_posix_lock_manager();
     task::add_initproc();
+
+    // ── Kernel self-test mode (mango.mode=ktest) ──
+    // Runs after all subsystem init (fs, net, block, tasks) but before
+    // the scheduler starts running user-mode init. Allows tests to access
+    // fully-initialized kernel state.
+    let boot_config = crate::bootargs::load();
+    if boot_config.mode == crate::bootargs::BootMode::Ktest {
+        crate::println!(
+            "[kernel] Entering kernel test mode (ktest) — tests: {:?}, repeat: {}",
+            boot_config.tests,
+            boot_config.repeat,
+        );
+        crate::kernel_tests::run_from_bootargs(&boot_config);
+    }
+
     // note that in run_tasks(), there is yet *another* pre_start_init(),
     // which is used to turn on interrupts in some archs like LoongArch.
     task::run_tasks();

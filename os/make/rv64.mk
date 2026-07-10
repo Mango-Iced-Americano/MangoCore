@@ -250,3 +250,24 @@ comp-gdb:
         -s
 
 .PHONY: user
+
+# ─────────────────────────────────────────────────────────
+#  L3 Kernel self-test (mango.mode=ktest)
+# ─────────────────────────────────────────────────────────
+# Rebuilds kernel with MANGO_CMDLINE env var, then launches QEMU.
+# The kernel needs initramfs cpio (embedded via .S), so user
+# programs must be built first.
+ktest-run: user $(LWEXT4_PREREQ)
+	@echo "[ktest] Rebuilding kernel with: $(KTEST_CMDLINE)"
+	@cp -f src/hal/arch/riscv/linker-$(BOARD).ld src/hal/arch/riscv/linker.ld
+	@MANGO_CMDLINE="$(KTEST_CMDLINE)" LOG=${LOG} \
+		cargo build --$(MODE) --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)"
+	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
+	@echo "[ktest] Launching QEMU..."
+	@qemu-system-riscv64 \
+		-machine virt \
+		-nographic \
+		-bios $(BOOTLOADER) \
+		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
+		-m 512 \
+		-smp threads=1

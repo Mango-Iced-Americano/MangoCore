@@ -220,6 +220,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ca88d725a0a943b096803bd34e73a4437208b6077654cc4ecb2947a5f91618d"
 
 [[package]]
+name = "mango-kernel-core"
+version = "0.1.0"
+
+[[package]]
 name = "memchr"
 version = "2.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -266,6 +270,7 @@ dependencies = [
  "lwext4_rust",
  "lz4_flex",
  "managed",
+ "mango-kernel-core",
  "nb",
  "num_enum",
  "pci",

@@ -4,6 +4,8 @@ docker-compose.override.yml
 
 os/target/
 
+target/
+
 os/qemu.log
 
 user/target/

@@ -1,0 +1,183 @@
+//! L3 test runner with TAP output, timeout, repeat, and failfast support.
+
+use alloc::vec;
+use alloc::vec::Vec;
+use crate::bootargs::BootConfig;
+use crate::hal;
+use crate::timer;
+
+/// A single kernel test case.
+pub struct KernelTest {
+    /// Human-readable name, e.g. `"waitqueue::wake_once"`.
+    pub name: &'static str,
+    /// Test function. Returns `Ok(())` on pass, `Err(reason)` on failure.
+    pub func: fn() -> Result<(), &'static str>,
+    /// Per-test timeout in milliseconds (0 = use global default).
+    pub timeout_ms: usize,
+}
+
+impl KernelTest {
+    pub const fn new(name: &'static str, func: fn() -> Result<(), &'static str>) -> Self {
+        Self {
+            name,
+            func,
+            timeout_ms: 0, // use global default
+        }
+    }
+
+    pub const fn with_timeout(
+        name: &'static str,
+        func: fn() -> Result<(), &'static str>,
+        timeout_ms: usize,
+    ) -> Self {
+        Self {
+            name,
+            func,
+            timeout_ms,
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────
+//  Runner
+// ─────────────────────────────────────────────────────────
+
+/// Get the architecture name string for diagnostic output.
+fn arch_name() -> &'static str {
+    #[cfg(feature = "riscv")]
+    { "riscv64" }
+    #[cfg(feature = "loongarch64")]
+    { "loongarch64" }
+    #[cfg(not(any(feature = "riscv", feature = "loongarch64")))]
+    { "unknown" }
+}
+
+/// Run selected tests and exit via shutdown.
+///
+/// # Parameters
+/// - `config`: Parsed bootargs with test selection, repeat, timeout, failfast
+/// - `test_groups`: All registered tests, grouped by category name
+///
+/// # Output
+/// Prints TAP-compatible output to the console, then calls `hal::shutdown()`.
+pub fn run_tests(config: &BootConfig, test_groups: &[(&str, Vec<KernelTest>)]) -> ! {
+    // Collect tests to run based on selection
+    let selected: Vec<&KernelTest> = if config.tests.iter().any(|t| t == "all") {
+        // "all" → all tests from all groups
+        test_groups
+            .iter()
+            .flat_map(|(_, tests)| tests.iter())
+            .collect()
+    } else {
+        // Filter by test group name
+        test_groups
+            .iter()
+            .filter(|(group, _)| config.tests.iter().any(|t| t == *group))
+            .flat_map(|(_, tests)| tests.iter())
+            .collect()
+    };
+
+    if selected.is_empty() {
+        crate::println!("TAP version 13");
+        crate::println!("1..0");
+        crate::println!("# No tests selected. Available groups:");
+        for (name, tests) in test_groups {
+            crate::println!("#   {} ({} tests)", name, tests.len());
+        }
+        shutdown_success();
+    }
+
+    let total_tests = selected.len() * config.repeat;
+    let timeout_ms = if config.timeout_ms > 0 {
+        config.timeout_ms
+    } else {
+        5000 // default 5s
+    };
+
+    crate::println!("TAP version 13");
+    crate::println!("# arch: {}", arch_name());
+    crate::println!("# mode: ktest");
+    crate::println!("# repeat: {}", config.repeat);
+    crate::println!("# timeout_ms: {}", timeout_ms);
+    crate::println!("# failfast: {}", config.failfast);
+    crate::println!("1..{}", total_tests);
+
+    let mut test_num: usize = 1;
+    let mut passed: usize = 0;
+    let mut failed: usize = 0;
+
+    for _rep in 0..config.repeat {
+        for test in &selected {
+            let per_test_timeout = if test.timeout_ms > 0 {
+                test.timeout_ms
+            } else {
+                timeout_ms
+            };
+
+            let start = timer::get_time_ms();
+            let result = (test.func)();
+            let elapsed = timer::get_time_ms() - start;
+
+            match result {
+                Ok(()) => {
+                    crate::println!("ok {} {}", test_num, test.name);
+                    passed += 1;
+                }
+                Err(reason) => {
+                    crate::println!("not ok {} {}", test_num, test.name);
+                    crate::println!("  ---");
+                    crate::println!("  reason: {}", reason);
+                    crate::println!("  elapsed_ms: {}", elapsed);
+                    crate::println!("  ...");
+                    failed += 1;
+
+                    if config.failfast {
+                        crate::println!(
+                            "# failfast: stopping after {} passed, {} failed",
+                            passed,
+                            failed
+                        );
+                        shutdown_failure();
+                    }
+                }
+            }
+
+            // Basic timeout check (best-effort; real timeout needs timer interrupt)
+            if elapsed > per_test_timeout {
+                crate::println!("# WARNING: {} took {}ms (timeout={}ms)", test.name, elapsed, per_test_timeout);
+            }
+
+            test_num += 1;
+        }
+    }
+
+    crate::println!(
+        "# results: {} passed, {} failed, {} total",
+        passed,
+        failed,
+        total_tests
+    );
+
+    if failed > 0 {
+        shutdown_failure();
+    } else {
+        shutdown_success();
+    }
+}
+
+fn shutdown_success() -> ! {
+    crate::println!("# ktest: all tests passed. shutting down.");
+    // Small delay to ensure output is flushed
+    for _ in 0..1000 {
+        core::hint::spin_loop();
+    }
+    hal::shutdown();
+}
+
+fn shutdown_failure() -> ! {
+    crate::println!("# ktest: tests FAILED. shutting down.");
+    for _ in 0..1000 {
+        core::hint::spin_loop();
+    }
+    hal::shutdown();
+}

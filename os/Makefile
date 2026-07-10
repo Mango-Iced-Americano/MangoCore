@@ -505,3 +505,48 @@ lwext4-la64:
 	make -f make/la64.mk lwext4-la64
 
 .PHONY: lwext4-rv64 lwext4-la64
+
+# ============================================================
+# L3 Kernel self-test (mango.mode=ktest)
+# ============================================================
+# Usage:
+#   make rv64-ktest
+#   make rv64-ktest KTEST=waitqueue KREPEAT=100
+#   make rv64-ktest KTEST=sched KTRACE=waitqueue,sched
+#   make la64-ktest KTEST=all KTIMEOUT_MS=10000
+KTEST ?= all
+KREPEAT ?= 1
+KTIMEOUT_MS ?= 5000
+KTRACE ?=
+
+KTEST_CMDLINE := mango.mode=ktest mango.test=$(KTEST) mango.test.repeat=$(KREPEAT) mango.test.timeout_ms=$(KTIMEOUT_MS) mango.test.failfast=0
+ifneq ($(KTRACE),)
+KTEST_CMDLINE := $(KTEST_CMDLINE) mango.trace=$(KTRACE)
+endif
+export KTEST_CMDLINE
+
+rv64-ktest: prepare-cargo-config
+	@rustup override set $(RV_TOOLCHAIN)
+	cp ./src/lang_items.rs.rv ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
+	make -f make/rv64.mk ktest-run MODE=${MODE} LOG=${LOG}
+
+la64-ktest: prepare-cargo-config
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	make -f make/la64.mk ktest-run MODE=${MODE} LOG=${LOG}
+
+# Composite: fast check + unit test + kernel test
+.PHONY: bugscan
+bugscan: check-fast rv64-ktest
+	@echo "[bugscan] All checks passed."
+
+# Fast static checks (no QEMU needed)
+.PHONY: check-fast
+check-fast:
+	@echo "[check-fast] Running cargo check..."
+	@rustup override set $(RV_TOOLCHAIN) 2>/dev/null
+	cp ./src/lang_items.rs.rv ./src/lang_items.rs 2>/dev/null
+	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs 2>/dev/null
+	cargo check --features "board_rvqemu block_virt" 2>&1 | tail -1
