@@ -633,3 +633,29 @@ pub fn sys_clock_nanosleep(
         [clock_id, flags as usize, req as usize, rem as usize],
     )
 }
+
+// ── mmap / mprotect / munmap wrappers ──────────────────────────────────
+
+pub fn sys_mmap(addr: usize, length: usize, prot: usize, flags: usize, fd: usize, offset: usize) -> isize {
+    syscall6(SYSCALL_MMAP, [addr, length, prot, flags, fd, offset])
+}
+
+pub fn sys_mprotect(addr: usize, len: usize, prot: usize) -> isize {
+    syscall(SYSCALL_MPROTECT, [addr, len, prot])
+}
+
+pub fn sys_munmap(addr: usize, len: usize) -> isize {
+    syscall(SYSCALL_MUNMAP, [addr, len, 0])
+}
+
+// ── openat raw-pointer wrapper ─────────────────────────────────────────
+
+pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize {
+    syscall4(SYSCALL_OPENAT, [dirfd as usize, path as usize, flags as usize, mode as usize])
+}
+
+// ── Raw read (for bad-buffer fault injection test) ─────────────────────
+
+pub fn sys_read_raw(fd: usize, buf: *mut u8, len: usize) -> isize {
+    syscall(SYSCALL_READ, [fd, buf as usize, len])
+}

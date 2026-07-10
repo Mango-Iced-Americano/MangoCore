@@ -46,7 +46,7 @@ L0: 编译与静态检查
 
 L1: 纯逻辑单元测试
     cargo test -p mango-kernel-core
-    → 无内核依赖，host 上运行。当前覆盖：bootargs 解析器 (28 个用例)
+    → 无内核依赖，host 上运行。当前覆盖：7 个模块，147 个用例
 
 L2: 属性测试 / 模型测试 (规划中)
     proptest 页缓存状态机  |  loom 并发 waitqueue
@@ -101,8 +101,14 @@ L1 和 L2 在逻辑上分层，但都走 `cargo test`。L1 测确定性逻辑（
 libs/mango-kernel-core/
 ├── Cargo.toml          # #![no_std] lib, host-testable
 └── src/
-    ├── lib.rs           # extern crate alloc; pub mod bootargs;
-    └── bootargs.rs      # Cmdline, BootConfig, BootMode + #[cfg(test)]
+    ├── lib.rs           # extern crate alloc; pub mod bootargs; ...
+    ├── bootargs.rs      # Cmdline, BootConfig, BootMode + #[cfg(test)]  (28 tests)
+    ├── time.rs          # TimeSpec, TimeVal, ItimerVal + #[cfg(test)]   (50 tests)
+    ├── page_cache.rs    # PageState, RAMask, ReadAhead + #[cfg(test)]   (25 tests)
+    ├── ring_buffer.rs   # Bounded VecDeque-backed ring buffer           (11 tests)
+    ├── path.rs          # Path normalization with '.'/'..' resolution   (12 tests)
+    ├── wait_result.rs   # WaitQueue result enum + errno encoding         (7 tests)
+    └── recycle_alloc.rs # Recyclable ID allocator (PID/TID)             (14 tests)
 ```
 
 `lib.rs` 是标准 `#![no_std]` 库入口。测试时 Cargo 自动注入 `std` 和 test harness，源码中的 `extern crate alloc` 在 host 测试下正常工作。
@@ -113,23 +119,17 @@ libs/mango-kernel-core/
 cargo test -p mango-kernel-core
 ```
 
-### 当前覆盖 (28 个用例)
+### 当前覆盖 (147 个用例)
 
-| 类别 | 用例 | 说明 |
-|------|------|------|
-| BootMode | `test_default_boot_mode_normal`, `test_ktest_mode` | 模式解析 |
-| test 选择 | `test_single_test_group`, `test_multiple_test_groups_comma`, `test_all_tests` | 测试组逗号列表 |
-| 数值参数 | `test_repeat_default_is_1`, `test_repeat_custom`, `test_repeat_clamped_to_min_1` | repeat 解析与钳位 |
-| timeout | `test_timeout_default`, `test_timeout_custom`, `test_timeout_clamped_to_min_100` | timeout 解析与钳位 |
-| bool | `test_failfast_default_false`, `test_failfast_true`, `test_failfast_true_alt` | bool 多值解析 |
-| trace | `test_trace_groups` | trace group 逗号列表 |
-| init/root | `test_init_override`, `test_root_override` | 路径覆写 |
-| Cmdline | `test_cmdline_parse_simple`, `test_cmdline_parse_flag`, `test_cmdline_parse_multiple` | 基础解析 |
-| Cmdline list | `test_cmdline_get_list`, `test_cmdline_get_list_empty_value` | 列表拆分与空值 |
-| Cmdline usize | `test_cmdline_get_usize`, `test_cmdline_get_usize_invalid` | usize 解析与非法输入 |
-| Cmdline bool | `test_cmdline_get_bool_variants` | bool 多值 (1/true/yes/on/0/false) |
-| 边界 | `test_cmdline_empty_string`, `test_cmdline_missing_key` | 空串与缺失 key |
-| 综合 | `test_complex_cmdline` | 完整 ktest 命令行 |
+| 模块 | 文件 | 用例数 | 说明 |
+|------|------|--------|------|
+| bootargs | `bootargs.rs` | 28 | Cmdline 解析、BootMode、BootConfig、参数验证 |
+| time | `time.rs` | 50 | TimeSpec/TimeVal 算术、构造、比较、钳位 |
+| page_cache | `page_cache.rs` | 25 | PageState、RAState、segments/mask 操作 |
+| ring_buffer | `ring_buffer.rs` | 11 | 有界队列 push/pop/slice/shutdown 语义 |
+| **path** | `path.rs` | **12** | 路径分词、`.` `..` 标准化、连续斜线归一化 |
+| **wait_result** | `wait_result.rs` | **7** | Ready/Interrupted/TimedOut 与 errno 编码 |
+| **recycle_alloc** | `recycle_alloc.rs` | **14** | ID 分配/回收、fresh vs 回收优先、水位线行为 |
 
 ### 添加新的 L1 测试
 
@@ -413,7 +413,7 @@ L5 发现 bug 后：先尝试写 L4 regression → 如涉及内核机制，进�
 make check-fast                      # 编译 + 格式检查
 
 # L1
-cargo test -p mango-kernel-core      # 纯逻辑单元测试 (28 用例)
+cargo test -p mango-kernel-core      # 纯逻辑单元测试 (147 用例)
 
 # L3
 make rv64-ktest                      # rv64 全部 L3 测试

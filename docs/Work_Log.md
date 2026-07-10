@@ -4,6 +4,51 @@
 
 ## 2026-07-10
 
+### L4 用户态回归测试程序：pipe / mmap / timerfd / rename 历史 bug 防复发
+
+**涉及文件：**
+
+新增：
+- `user/src/bin/regression_usercopy_pipe.rs` — 验证 pipe 读失败 (EFAULT) 不消耗数据
+- `user/src/bin/regression_mmap_edge_cases.rs` — 验证 mmap len=0→EINVAL、mprotect 子页范围、MAP_FIXED 不 crash
+- `user/src/bin/regression_timer_realtime_jump.rs` — 验证 CLOCK_REALTIME timerfd 相对定时器不受 clock_settime 跳变影响
+- `user/src/bin/regression_rename_long_name.rs` — 验证 ≥256 字节文件名 rename 返回错误不 panic
+
+修改：
+- `user/src/syscall.rs` — 新增 sys_mmap、sys_mprotect、sys_munmap、sys_openat、sys_read_raw 包装器
+
+**验证：**
+- `make rust-user BOARD=rvqemu MODE=release` ✅
+- `make rust-user BOARD=laqemu MODE=release` ✅
+
+**备注：** 4 个程序均为 L4 用户态独立二进制，exit 0=成功/非零=失败。每个程序头部注释记录 bug 来源、预期行为、相关子系统和 LTP 对应关系。sys_mmap/mprotect/munmap/openat 包装器为通用库函数，可供后续用户程序复用。
+
+---
+
+### L1 纯逻辑模块提取：path / wait_result / recycle_alloc + 单元测试 (33 新用例)
+
+**涉及文件：**
+
+新增：
+- `libs/mango-kernel-core/src/path.rs` — 从 `os/src/fs/mod.rs::parse_path()` 提取路径分词/标准化逻辑；12 个测试（空串、`.`、`..`、连续斜线、绝对路径、尾斜线等）
+- `libs/mango-kernel-core/src/wait_result.rs` — 从 `os/src/task/manager.rs::WaitResult` 提取等待结果枚举；内含 `ERESTART`/`EAGAIN` 常量与 `unwrap_or_else` 方法；7 个测试（Ready/Interrupted/TimedOut 变体与 errno 编码）
+- `libs/mango-kernel-core/src/recycle_alloc.rs` — 从 `os/src/task/pid.rs::RecycleAllocator` 提取可回收 ID 分配器；含 `alloc()`/`alloc_fresh()`/`dealloc()`/`release_fresh_id()`/`set_next_alloc_hint()` 等完整 API；14 个测试（递增分配、回收复用、fresh 跳过、hint 推进、重复 dealloc panic、克隆独立性、水位线行为）
+- `libs/mango-kernel-core/src/lib.rs` — 新增 `pub mod path;` / `pub mod wait_result;` / `pub mod recycle_alloc;`
+
+修改：
+- `docs/08_testing/README.md` — L1 覆盖从 "28 个用例" 更新为 "147 个用例，7 个模块"；新增模块表格（path/wait_result/recycle_alloc）；更新树形目录结构与 Makefile 速查命令
+
+**测试数量变化：** 114 → 147（新增 path 12 + wait_result 7 + recycle_alloc 14 = 33）
+
+**验证：**
+- `cargo test -p mango-kernel-core` ✅ — 147 passed, 0 failed (含 1 doc-test)
+- `make rv64-kernel-build-only` ⚠️ 预存问题：`user/src/bin/regression_rename_long_name.rs` 编译失败（缺少 `use alloc::vec::Vec;` 等导入），与本次修改无关
+- `make la64-kernel-build-only` ⚠️ 同上预存问题
+
+**备注：** 三个模块均为纯逻辑（零 arch 依赖、零全局状态、零 I/O），内核源文件未修改（仅做提取副本，不替换原代码）。`WaitResult::unwrap_or_else` 中硬编码了 `ERESTART = -85` / `EAGAIN = -11` 常量（与 `SyscallErr` 枚举判定位一致）。`RecycleAllocator::new()` 从 ID=1 起始（非 0），首次 `alloc()` 返回 1。
+
+---
+
 ### L3 内核自检加固 — 着色输出 / 退出码区分 / 薄弱测试修复
 
 **涉及文件：**
