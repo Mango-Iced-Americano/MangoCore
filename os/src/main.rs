@@ -166,15 +166,22 @@ pub fn rust_main() -> ! {
     #[cfg(feature = "initramfs")]
     {
         // 在 mm::init() 之后创建 VFS_ROOT: 创建 RamFS + 解包 cpio + 挂载 devfs/proc/tmp
-        #[cfg(feature = "board_2k1000")]
+        #[cfg(all(
+            feature = "board_2k1000",
+            any(not(feature = "block_sata"), feature = "sata_probe")
+        ))]
         {
-            // 2K1000LA 实板首阶段只验证 U-Boot -> uImage -> UART -> initramfs。
-            // 当前构建仍可能携带 `block_virt_pci` / `block_sata` feature；在 SATA/AHCI
-            // 和板载网卡路径逐项验证前，先禁止任何外部块设备延迟探测，避免早期
-            // 误扫 QEMU virtio PCI 或未稳定的 AHCI 路径导致串口首启被干扰。
+            // 救援镜像和 sata_probe 镜像必须保持与文件系统探测解耦；普通的
+            // board_2k1000 + block_sata 镜像才进入下方只读挂载路径。
             fs::force_ramfs();
             println!("[kernel] 2K1000 board bring-up: ramfs-only block path enabled");
         }
+        #[cfg(all(
+            feature = "board_2k1000",
+            feature = "block_sata",
+            not(feature = "sata_probe")
+        ))]
+        println!("[kernel] 2K1000 board bring-up: SATA read-only mount enabled");
 
         crate::fs::vfs::posix_lock::init_posix_lock_manager();
         fs::initramfs_init();
@@ -189,15 +196,24 @@ pub fn rust_main() -> ! {
         }
         net::config::init();
 
-        // QEMU 路径先探测块设备（需要连续物理页 DMA，必须在 preload 分配页之前做）。
-        // 2K1000 实板最小上板路径已在上方 force_ramfs()，此处不触发 BLOCK_DEVICES。
+        // 在安装 preload payload 前探测，保证 AHCI/virtio DMA 页仍可从低碎片
+        // 物理内存中分配。
         #[cfg(not(feature = "board_2k1000"))]
         fs::mount_boot_block_devices();
-        #[cfg(feature = "board_2k1000")]
+        #[cfg(all(
+            feature = "board_2k1000",
+            feature = "block_sata",
+            not(feature = "sata_probe")
+        ))]
+        fs::mount_boot_block_devices_read_only();
+        #[cfg(all(
+            feature = "board_2k1000",
+            any(not(feature = "block_sata"), feature = "sata_probe")
+        ))]
         println!("[kernel] 2K1000 board bring-up: block device mount skipped");
 
-        // 安装预装载的测试载荷。QEMU 路径在块设备探测之后执行，以减少 DMA 页碎片；
-        // 2K1000 最小上板路径无外部块设备，直接安装到 initramfs/ramfs 根。
+        // 安装预装载的测试载荷。QEMU 和 2K1000 SATA 路径都先完成块设备探测，
+        // 以减少 DMA 页碎片；救援/probe 镜像则直接安装到 initramfs/ramfs 根。
         #[cfg(feature = "preload_payloads")]
         {
             #[cfg(feature = "board_2k1000")]

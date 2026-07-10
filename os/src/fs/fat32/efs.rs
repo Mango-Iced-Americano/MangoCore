@@ -3,7 +3,7 @@ use core::arch::asm;
 use core::ptr::addr_of;
 
 use crate::fs::fat32::FatInode;
-use crate::hal::{self, BLOCK_SZ};
+use crate::config::PAGE_SIZE;
 
 use super::{layout::BPB};
 use super::{BlockDevice, DiskInodeType, Fat};
@@ -70,10 +70,11 @@ impl EasyFileSystem {
         block_device: Arc<dyn BlockDevice>,
     ) -> Arc<Self> {
         // 直接读取 BPB 获取文件系统参数
-        let mut bpb_buf = alloc::vec![0u8; BLOCK_SZ];
+        // The mounted device is adapted to BPB_BytsPerSec before this call.
+        // Reading one page covers every FAT sector size supported by the probe.
+        let mut bpb_buf = alloc::vec![0u8; PAGE_SIZE];
         block_device.read_block(0, &mut bpb_buf);
         let super_block = unsafe { &*(bpb_buf.as_ptr() as *const BPB) };
-        debug_assert!(super_block.byts_per_sec as usize == hal::BLOCK_SZ);
         debug_assert!(super_block.is_valid(), "Error loading EFS!");
 
         let root_clus = super_block.root_clus;

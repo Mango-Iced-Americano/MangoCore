@@ -3,7 +3,7 @@ title: "启动与陷阱路径 (Boot and Trap Flow)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-07-09
+last_update: 2026-07-10
 tags: [architecture, boot, trap, syscall]
 ---
 
@@ -48,6 +48,23 @@ trap_handler() -> syscall/MM/task
 
 `main.rs` 中 la64 entry 的 `global_asm!` 行处于注释状态；la64 的实际入口由该架构构建链路脚本和后端文件承担。文档只记录 `main.rs` 当前显式引入的段。
 
+### 2.1 2K1000LA U-Boot TFTP 启动
+
+实板调试统一使用 `192.168.9.0/24` 直连网段：开发主机/TFTP 服务器为 `192.168.9.10`，开发板为 `192.168.9.20`，掩码为 `255.255.255.0`。macOS 主机使用 `en8` 直连开发板时，TFTP 根目录为 `/private/tftpboot`。U-Boot 下载地址固定使用第二个 DRAM bank 内已经实板验证的 `0x9000000098000000`，避免覆盖 U-Boot 重定位区、设备树和保留内存。
+
+```text
+setenv ipaddr 192.168.9.20
+setenv serverip 192.168.9.10
+setenv netmask 255.255.255.0
+setenv loadaddr 0x9000000098000000
+ping ${serverip}
+tftpboot ${loadaddr} <uImage文件名>
+iminfo ${loadaddr}
+bootm ${loadaddr}
+```
+
+`iminfo` 必须确认架构为 `LoongArch`、校验为 `OK`，再执行 `bootm`。bring-up 阶段不执行 `saveenv`，避免临时网络参数或测试启动命令覆盖板载默认环境。连续向串口注入命令时应等待上一条命令返回 `=>`，否则 U-Boot 忙于校验或网络传输时可能丢失输入字符。
+
 ## 3. `rust_main()` 控制流
 
 ### 3.1 固定前缀
@@ -78,17 +95,19 @@ task::timer_subsystem_init()
 
 ```
 fs::vfs::posix_lock::init_posix_lock_manager()
-fs::force_ramfs()                  [board_2k1000]
+fs::force_ramfs()                  [board_2k1000 rescue/sata_probe]
 fs::initramfs_init()
 drivers::init_net_device()         [not board_2k1000]
 net::config::init()
 fs::mount_boot_block_devices()     [not board_2k1000]
+fs::mount_boot_block_devices_read_only()
+                                   [board_2k1000 + block_sata - sata_probe]
 fs::install_preload_payloads()       [preload_payloads]
 ```
 
 默认分支先建立 initramfs 根，再初始化网络设备与网络配置，随后探测启动块设备。`main.rs` 注释说明块设备探测需要连续物理页 DMA，因此放在 payload 安装之前。
 
-`board_2k1000` 实板最小上板路径是例外：在建立 initramfs 根前调用 `fs::force_ramfs()`，并跳过外部网卡和块设备探测。该路径用于先验证 U-Boot -> uImage -> UART -> initramfs，SATA/AHCI 与板载 GMAC/PHY 驱动后续再单独接入。
+`board_2k1000` 始终跳过 QEMU virtio 网卡枚举。救援镜像和 `sata_probe` 镜像在建立 initramfs 根前调用 `fs::force_ramfs()`；普通 `block_sata` 镜像则探测 SATA SSD，并通过 `mount_boot_block_devices_read_only()` 只读挂载裸 ext4/FAT32 或 MBR 主分区。板载 GMAC/PHY 仍未接入。
 
 ### 3.3 legacy 分支
 

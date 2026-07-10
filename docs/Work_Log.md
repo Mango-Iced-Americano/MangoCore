@@ -4,6 +4,54 @@
 
 ## 2026-07-10
 
+### board/docs: 固化 2K1000LA TFTP 网段并完成 SSD 只读镜像实板启动
+
+**涉及文件：**
+- `docs/01_architecture/boot-and-trap.md` — 记录固定的 `192.168.9.0/24` 直连网段、macOS TFTP 根目录、安全下载地址以及逐条校验/启动命令
+- `docs/Work_Log.md` — 记录本轮 U-Boot、TFTP、uImage、AHCI 和文件系统探测的实板结果
+
+**验证：**
+- U-Boot `ping 192.168.9.10` 成功，`ethernet@40040000` 协商为 1000 Mbps 全双工 ✅
+- 从 `/private/tftpboot` 下载 `kernel-2k1000-sata-mount-ro.ui`：`12340008` 字节，约 `7.5 MiB/s`；与本地文件大小一致 ✅
+- `iminfo` 确认镜像名 `MangoCore`、LoongArch、payload `12339944` 字节、`Load/Entry = 0x90000000`、CRC `OK` ✅
+- 实板 `bootm` 成功进入 initproc；VALEN/PALEN、高地址内核栈探针、首次上下文切换和用户态入口全部通过，无 panic ✅
+- 内核识别 2K1000LA AHCI `00:08.0`（`0014:7a08`，ABAR `0x400e0000`）；空 SSD 被明确判定为“无支持文件系统且无 MBR”，随后保持 initramfs 启动 ✅
+
+**备注：**
+- 后续实板网络统一使用：主机/TFTP `192.168.9.10`，开发板 `192.168.9.20`，掩码 `255.255.255.0`。
+- 当前 32GB SSD 未分区、未格式化，因此 `/sdcard`、`/tools` 不会挂载，比赛测试脚本缺失属于预期结果。下一步需要在主机侧准备裸 ext4/FAT32 或传统 MBR 主分区后再做只读挂载验收。
+- 本轮只修改文档；没有持久化 U-Boot 环境，也没有写入 SSD。
+
+### board/fs: 接入 2K1000LA SSD 的裸文件系统与 MBR 只读挂载
+
+**涉及文件：**
+- `os/src/drivers/block/partition.rs` — 保留 MBR 的 512 字节 LBA 语义，解析四个主分区并校验容量边界；`PartitionBlockDevice` 对未按平台 `BLOCK_SZ` 对齐的分区使用 bounce buffer，对齐访问走整块直接 I/O
+- `os/src/fs/filesystem.rs` — ext4 按超级块识别并读取 1/2/4KiB 原生块大小；FAT32 增加 BPB 字段校验并读取 512/1/2/4KiB 扇区大小，不再把任意带 `0x55AA` 的 MBR 误判成 FAT
+- `os/src/fs/mod.rs` — 原盘先识别裸 ext4/FAT32，失败后解析 MBR 并逐分区识别；按文件系统原生块大小包装 `BlockSizeAdapter`，实际读取根目录后再挂载；QEMU 注册 `vda/vdb`，2K1000 SATA 注册 `sda/sdaN` 和兼容 `vda/vdaN`；增加只读挂载入口
+- `os/src/fs/fat32/efs.rs`、`os/src/fs/page_cache.rs` — FAT BPB/FAT 表/文件页读取统一使用 BPB 扇区号语义，支持其扇区大小与平台 `BLOCK_SZ` 不同
+- `os/src/fs/dev/block.rs` — 只读实板设备节点权限改为 `0440`，所有节点写请求返回 `EROFS`
+- `os/src/main.rs` — `sata_probe` 和非 SATA 救援构建继续 ramfs-only；普通 `board_2k1000 + block_sata` 构建启用 SSD 只读挂载
+- `os/Makefile` — 增加 `la64-2k1000-sata-mount-ro`，稳定产出 `kernel-2k1000-sata-mount-ro.ui`
+- `docs/01_architecture/{boot-and-trap,initialization-flow}.md`、`docs/03_fs/{devfs,init-and-rootfs}.md`、`.agents/skills/mango-workflow/references/debugging-patterns.md` — 同步分阶段启动、设备命名、探测顺序、只读边界和多层块大小的调试模式
+
+**验证：**
+- 竞赛 Docker 镜像内 `make -C os rv64-kernel-build-only` ✅
+- 竞赛 Docker 镜像内 `make -C os la64-kernel-build-only` ✅
+- 竞赛 Docker 镜像内 `board_2k1000 + block_sata + initramfs + preload_payloads` 编译 ✅
+- LA64 QEMU + raw ext4：识别 `/dev/vda contains raw Ext4`，挂载 `/sdcard` 并进入 stage-1 ✅
+- LA64 QEMU + LBA2048 MBR ext4：注册 `/dev/vdb1`，挂载 `/tools` 并进入 stage-1 ✅
+- LA64 QEMU + LBA63 MBR + ext4 1KiB 原生块：转换 1KiB → 4KiB 平台块，根目录读取 4 项，挂载 `/tools` 并进入 stage-1 ✅
+- LA64 QEMU + LBA63 MBR + FAT32 512B 扇区：转换 512B → 4KiB 平台块，根目录读取 2 项，挂载 `/tools` 并进入 stage-1 ✅
+- LA64 QEMU + protective/hybrid MBR：打印 `GPT is not supported yet`，整盘报告 unsupported，不挂载 `/tools`，继续进入 stage-1 ✅
+- `make -C os la64-2k1000-sata-mount-ro` ✅；uImage 名称 `MangoCore`，payload `12339944` 字节，`Load/Entry = 0x90000000`，SHA-256 `c538699dfd3c1f0296b27a1eb31fdec5b4ea073eb2d4791464dfb28059b578ac` ✅
+- `git diff --check` ✅
+
+**备注：**
+- 按本阶段范围只支持裸 ext4/FAT32 和 MBR 四个主分区；扩展分区与 GPT 明确报告 unsupported，不做解析或猜测挂载。
+- 实板镜像使用三层写保护：`MountFlags::RDONLY`、只读块设备节点的 `EROFS`、文件系统底层 `ReadOnlyBlockDevice` 内部写屏蔽；QEMU/CI 路径保持原有读写挂载。
+- 已知实板 SSD 当前 LBA0 全零且无分区表，因此直接启动本镜像时预期打印“既无支持的裸文件系统也无 MBR”，随后继续从 initramfs 进入 shell。需要先准备 raw ext4/FAT32 或 MBR 主分区后，才能在 `/sdcard` 看到内容。
+- 新镜像尚未在 2K1000LA 实板复测；实板验收只检查 SATA 型号/容量、`sda/sdaN` 注册、文件系统类型、`RDONLY` 挂载和目录读取，不做创建/删除/写文件测试。
+
 ### board: 修复 2K1000LA AHCI 并加入 SSD 只读验收镜像
 
 **涉及文件：**
@@ -35,6 +83,23 @@
 - 随板 U-Boot 的 AHCI 初始化只用 `PxSSTS.DET=3` 注册链路端口，不在命令前按 `PxSIG` 拒绝设备；Linux 也仅用 `PxSIG` 做设备分类。新版继续保留全部命令超时和错误寄存器检查，未放宽写保护。
 - LBA0 前 16 字节全零且结尾签名为 `0000`，与 U-Boot 的 `No partition table` 一致，说明 SSD 当前未分区；这是磁盘内容状态，不是 AHCI 读失败。实板验证后内核仍执行 `force_ramfs()` 并跳过块设备挂载，全程未写盘。
 - 仓库 Compose 硬编码 `/dev/sdb`，macOS 无该设备；la64 验证改用同一竞赛镜像的 one-off `docker run`，不改变编译环境。
+
+### board: 重新生成 MangoCore 2K1000LA 串口 shell 镜像
+
+**涉及文件：**
+- `os/target/loongarch64-unknown-linux-gnu/release/os-shell.ui` — 使用当前 2K1000LA 内核和 `mode=shell` 配置重新生成，uImage 名称为 `MangoCore-shell`
+- `os_test.conf` — 构建期间临时切换到 `mode=shell`；产物生成后已恢复 `mode=run`
+
+**验证：**
+- Docker 内以 `nightly-2024-05-01` 执行 `make -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=virt_pci LOG=off EXTRA_FEATURES="initramfs preload_payloads"` ✅
+- `file os-shell.ui`：payload `12323920` 字节，`Load/Entry = 0x90000000`，镜像名 `MangoCore-shell` ✅
+- `strings os-shell.ui` 精确命中 `mode=shell`；仓库配置和正常 `os.ui` 精确命中 `mode=run` ✅
+- shell 镜像 SHA-256：`95c33e322662dba6d1f8a45459787f27c095ad034ddde38b12e6005779e46b53` ✅
+- 正常 `os.ui` 已恢复为构建前 SHA-256：`e8cf6b87ebd4800f3909fc9aad25d5b7d96957743f5c98fbfd7f7ba4eb8cca78` ✅
+
+**备注：**
+- `os-shell.ui` 尚未在 2K1000LA 实板复测；预期 initproc 读取 `/os_test.conf` 后直接进入 `/bin/bash`，串口提示符为 `MangoCore:/#`。
+- 实板构建产生的 `linker.ld` 已恢复为默认 QEMU 模板，未留下板级构建副作用。
 
 ### docs(code): 补齐 2K1000LA 关键适配源码的原因注释
 

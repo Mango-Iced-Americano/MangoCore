@@ -3,7 +3,7 @@ title: "初始化流程 (Initialization Flow)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-07-09
+last_update: 2026-07-10
 tags: [architecture, boot, init]
 ---
 
@@ -37,11 +37,13 @@ task::timer_subsystem_init()
 
 if initramfs:
   fs::vfs::posix_lock::init_posix_lock_manager()
-  fs::force_ramfs()                    [board_2k1000]
+  fs::force_ramfs()                    [board_2k1000 rescue/sata_probe]
   fs::initramfs_init()
   drivers::init_net_device()           [not board_2k1000]
   net::config::init()
   fs::mount_boot_block_devices()       [not board_2k1000]
+  fs::mount_boot_block_devices_read_only()
+                                        [board_2k1000 + block_sata - sata_probe]
   fs::install_preload_payloads()        [preload_payloads]
 else:
   drivers::init_net_device()
@@ -85,10 +87,11 @@ pub fn rust_main() -> ! {
     {
         // 在 mm::init() 之后创建 VFS_ROOT: 创建 RamFS + 解包 cpio + 挂载 devfs/proc/tmp
         crate::fs::vfs::posix_lock::init_posix_lock_manager();
-        #[cfg(feature = "board_2k1000")]
+        #[cfg(all(
+            feature = "board_2k1000",
+            any(not(feature = "block_sata"), feature = "sata_probe")
+        ))]
         {
-            // 2K1000LA 实板首阶段只验证 U-Boot -> uImage -> UART -> initramfs。
-            // 在 SATA/AHCI 和板载网卡路径逐项验证前，先禁止外部块设备 lazy probe。
             fs::force_ramfs();
         }
         fs::initramfs_init();
@@ -104,10 +107,12 @@ pub fn rust_main() -> ! {
         // 先探测块设备（需要连续物理页 DMA，必须在 preload 分配页之前做）
         #[cfg(not(feature = "board_2k1000"))]
         fs::mount_boot_block_devices();
-        #[cfg(feature = "board_2k1000")]
-        {
-            // 最小上板路径已 force_ramfs()，此处不触发 BLOCK_DEVICES。
-        }
+        #[cfg(all(
+            feature = "board_2k1000",
+            feature = "block_sata",
+            not(feature = "sata_probe")
+        ))]
+        fs::mount_boot_block_devices_read_only();
 
         // 安装预装载的测试 payload（迁移期保留，在块设备探测之后避免页碎片化）
         #[cfg(feature = "preload_payloads")]
@@ -138,7 +143,7 @@ pub fn rust_main() -> ! {
 }
 ```
 
-函数体中的 feature 分支决定启动阶段能看到哪些外部镜像和根文件系统。`block_mem` 路径会先把链接进内核的镜像移动到高地址；默认 `initramfs` 路径先建立 initramfs 根，再初始化网卡并挂载启动块设备；`board_2k1000` 实板最小上板路径在建立 initramfs 根前调用 `force_ramfs()`，并跳过外部 net/block probe。非 `initramfs` 路径则通过 `flush_preload()` 和 `mount_tools_disk()` 准备 legacy 测试环境。两条分支最后都把初始进程放入调度队列。
+函数体中的 feature 分支决定启动阶段能看到哪些外部镜像和根文件系统。`block_mem` 路径会先把链接进内核的镜像移动到高地址；默认 `initramfs` 路径先建立 initramfs 根，再初始化网卡并挂载启动块设备。`board_2k1000` 救援/探测构建保持 ramfs-only，普通 SATA 构建跳过外部网卡但只读挂载 SSD。非 `initramfs` 路径则通过 `flush_preload()` 和 `mount_tools_disk()` 准备 legacy 测试环境。两条分支最后都把初始进程放入调度队列。
 
 ## 3. 早期阶段
 
@@ -221,11 +226,13 @@ KERNEL_SPACE.lock().activate()
 
 ```
 fs::vfs::posix_lock::init_posix_lock_manager()
-fs::force_ramfs()                     [board_2k1000]
+fs::force_ramfs()                     [board_2k1000 rescue/sata_probe]
 fs::initramfs_init()
 drivers::init_net_device()            [not board_2k1000]
 net::config::init()
 fs::mount_boot_block_devices()        [not board_2k1000]
+fs::mount_boot_block_devices_read_only()
+                                      [board_2k1000 + block_sata - sata_probe]
 fs::install_preload_payloads()          [preload_payloads]
 ```
 
@@ -243,7 +250,7 @@ fs::install_preload_payloads()          [preload_payloads]
 
 默认 initramfs 路径中，`fs::mount_boot_block_devices()` 在 `fs::install_preload_payloads()` 之前调用。`main.rs` 注释给出的理由是块设备探测需要连续物理页 DMA，先于 preload 分配页可以降低页碎片影响。
 
-`board_2k1000` 最小上板阶段先调用 `fs::force_ramfs()`，再跳过 `fs::mount_boot_block_devices()`。这样可以先验证串口输出、cpio 解包和 `/init` 加载，避免 SATA/AHCI 或残留 QEMU virtio 块设备路径影响首启定位。
+`board_2k1000` 的救援和 `sata_probe` 构建调用 `fs::force_ramfs()` 并跳过挂载；普通 `block_sata` 构建调用 `mount_boot_block_devices_read_only()`，在 payload 安装前完成 AHCI 探测、MBR/文件系统识别和根目录读取。三种构建均跳过 QEMU virtio 网卡枚举。
 
 ## 7. legacy 启动路径
 

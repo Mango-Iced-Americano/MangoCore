@@ -13,7 +13,8 @@ AUTO_REBUILD_MEM ?= 1
 RV_TOOLCHAIN ?= nightly-2025-01-18
 LA_TOOLCHAIN ?= nightly-2024-05-01
 
-.PHONY: all $(ARCHS) clean prepare-cargo-config la64-2k1000-sata-probe
+.PHONY: all $(ARCHS) clean prepare-cargo-config \
+	la64-2k1000-sata-probe la64-2k1000-sata-mount-ro
 
 all: prepare-cargo-config rv64_all la64_all
 
@@ -88,6 +89,16 @@ la64-2k1000-sata-probe: prepare-cargo-config
 		EXTRA_FEATURES=sata_probe MODE=$(MODE) LOG=off
 	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
 		../kernel-2k1000-sata-probe.ui
+
+# 首次文件系统验收镜像：识别裸盘/MBR 中的 ext4 或 FAT32，并以只读方式挂载。
+la64-2k1000-sata-mount-ro: prepare-cargo-config
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
+		MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../kernel-2k1000-sata-mount-ro.ui
 
 la64-debug:
 	@rustup override set $(LA_TOOLCHAIN)

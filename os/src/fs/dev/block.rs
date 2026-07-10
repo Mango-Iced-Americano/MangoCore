@@ -22,14 +22,25 @@ pub struct BlockDevInode {
     pub inner: Arc<dyn BlockDevice>,
     raw_dev: u64,
     pub label: String,
+    read_only: bool,
 }
 
 impl BlockDevInode {
     pub fn new(inner: Arc<dyn BlockDevice>, minor: u64, label: String) -> Arc<Self> {
+        Self::new_with_read_only(inner, minor, label, false)
+    }
+
+    pub fn new_with_read_only(
+        inner: Arc<dyn BlockDevice>,
+        minor: u64,
+        label: String,
+        read_only: bool,
+    ) -> Arc<Self> {
         Arc::new(Self {
             inner,
             raw_dev: crate::fs::dev::mkdev(VIRTIO_BLK_MAJOR, minor),
             label,
+            read_only,
         })
     }
 
@@ -42,6 +53,7 @@ impl fmt::Debug for BlockDevInode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BlockDevInode")
             .field("label", &self.label)
+            .field("read_only", &self.read_only)
             .finish()
     }
 }
@@ -61,7 +73,11 @@ impl IndexNode for BlockDevInode {
             ctime: now,
             file_type: FileType::BlockDevice,
             mode: crate::fs::vfs::InodeMode::S_IFBLK
-                | crate::fs::vfs::InodeMode::from_bits_truncate(0o660),
+                | crate::fs::vfs::InodeMode::from_bits_truncate(if self.read_only {
+                    0o440
+                } else {
+                    0o660
+                }),
             nlinks: 1,
             uid: 0,
             gid: 0,
@@ -126,6 +142,9 @@ impl IndexNode for BlockDevInode {
         buf: &[u8],
         _data: MutexGuard<FilePrivateData>,
     ) -> Result<usize, SyscallErr> {
+        if self.read_only {
+            return Err(SyscallErr::EROFS);
+        }
         let total = core::cmp::min(len, buf.len());
         if total == 0 {
             return Ok(0);

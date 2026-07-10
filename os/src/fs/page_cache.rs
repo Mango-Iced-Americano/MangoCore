@@ -1984,21 +1984,16 @@ impl PageCacheBackend for FatPageCacheBackend {
         if buf.len() < crate::config::PAGE_SIZE {
             return Err(SyscallErr::ENOBUFS);
         }
-        let ratio = crate::config::PAGE_SIZE / self.block_size;
         for block_off in 0..self.blocks_per_page {
             let start = block_off * self.block_size;
             assert!(start + self.block_size <= crate::config::PAGE_SIZE);
             match self.block_id_for_offset(index, block_off) {
                 Some(sec_id) => {
-                    // FAT32 sector 是 512 字节，BlockDevice 以 PAGE_SIZE/BLOCK_SZ(4096) 为单位
-                    let blk_id = sec_id / ratio;
-                    let blk_off = (sec_id % ratio) * self.block_size;
-                    let mut blk_buf = alloc::vec![0u8; crate::config::PAGE_SIZE];
+                    // The filesystem mount path wraps the device so block_id is expressed
+                    // in BPB_BytsPerSec units, independent of the platform BLOCK_SZ.
                     self.fs
                         .block_device
-                        .read_block(blk_id, &mut blk_buf);
-                    buf[start..start + self.block_size]
-                        .copy_from_slice(&blk_buf[blk_off..blk_off + self.block_size]);
+                        .read_block(sec_id, &mut buf[start..start + self.block_size]);
                 }
                 None => {
                     buf[start..start + self.block_size].fill(0);
@@ -2012,22 +2007,13 @@ impl PageCacheBackend for FatPageCacheBackend {
         if buf.len() < crate::config::PAGE_SIZE {
             return Err(SyscallErr::ENOBUFS);
         }
-        let ratio = crate::config::PAGE_SIZE / self.block_size;
         for block_off in 0..self.blocks_per_page {
             let start = block_off * self.block_size;
             assert!(start + self.block_size <= crate::config::PAGE_SIZE);
             if let Some(sec_id) = self.block_id_for_offset(index, block_off) {
-                let blk_id = sec_id / ratio;
-                let blk_off = (sec_id % ratio) * self.block_size;
-                let mut blk_buf = alloc::vec![0u8; crate::config::PAGE_SIZE];
                 self.fs
                     .block_device
-                    .read_block(blk_id, &mut blk_buf);
-                blk_buf[blk_off..blk_off + self.block_size]
-                    .copy_from_slice(&buf[start..start + self.block_size]);
-                self.fs
-                    .block_device
-                    .write_block(blk_id, &blk_buf);
+                    .write_block(sec_id, &buf[start..start + self.block_size]);
             }
         }
         Ok(crate::config::PAGE_SIZE)

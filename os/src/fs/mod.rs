@@ -53,31 +53,59 @@ pub fn force_ramfs() {
     crate::drivers::block::disable_block_device();
 }
 
+fn adapt_filesystem_device(
+    block_device: Arc<dyn BlockDevice>,
+    native_block_size: usize,
+    read_only: bool,
+) -> Arc<dyn BlockDevice> {
+    use crate::drivers::block::partition::{BlockSizeAdapter, ReadOnlyBlockDevice};
+
+    let mut device = block_device;
+    if native_block_size != crate::hal::BLOCK_SZ {
+        println!(
+            "[fs] adapting native block size {} to platform block size {}",
+            native_block_size,
+            crate::hal::BLOCK_SZ
+        );
+        device = Arc::new(BlockSizeAdapter::new(device, native_block_size));
+    }
+    if read_only {
+        device = Arc::new(ReadOnlyBlockDevice::new(device));
+    }
+    device
+}
+
 // ── VFS_ROOT：根据特性选择初始化策略 ──
 
 /// 非 initramfs 模式：传统块设备检测，失败时 fallback 到 ramfs
 #[cfg(not(feature = "initramfs"))]
 lazy_static! {
     pub static ref VFS_ROOT: Arc<self::vfs::MountFS> = {
-        let fs_type = if FORCE_RAMFS.load(Ordering::Relaxed) {
-            self::filesystem::FS_Type::Null
+        let detected = if FORCE_RAMFS.load(Ordering::Relaxed) {
+            None
         } else {
-            self::filesystem::pre_mount()
+            self::filesystem::detect_fs_layout(&crate::drivers::BLOCK_DEVICE)
         };
-        let mfs = match fs_type {
-            self::filesystem::FS_Type::Fat32 => {
-                let efs = self::fat32::EasyFileSystem::open(
+        let mfs = match detected {
+            Some(detected) if detected.fs_type == self::filesystem::FS_Type::Fat32 => {
+                let device = adapt_filesystem_device(
                     crate::drivers::BLOCK_DEVICE.clone(),
+                    detected.block_size,
+                    false,
                 );
+                let efs = self::fat32::EasyFileSystem::open(device);
                 self::vfs::MountFS::new(efs, self::vfs::MountFlags::empty())
             }
-            self::filesystem::FS_Type::Ext4 => {
-                let ext4 = self::ext4::ext4fs::Ext4FileSystem::open_ext4rs(
+            Some(detected) if detected.fs_type == self::filesystem::FS_Type::Ext4 => {
+                let device = adapt_filesystem_device(
                     crate::drivers::BLOCK_DEVICE.clone(),
+                    detected.block_size,
+                    false,
                 );
+                let ext4 = self::ext4::ext4fs::Ext4FileSystem::open_ext4rs(device);
                 self::vfs::MountFS::new(ext4, self::vfs::MountFlags::empty())
             }
-            self::filesystem::FS_Type::Null => {
+            _ => {
                 println!("[kernel] No filesystem found, falling back to ramfs");
                 let ramfs = self::ramfs::RamFS::new();
                 self::vfs::MountFS::new(ramfs, self::vfs::MountFlags::empty())
@@ -307,24 +335,65 @@ pub fn mount_block_fs(
     mount_point: &str,
     label: &str,
 ) -> Option<Arc<self::vfs::MountFS>> {
-    use self::filesystem::detect_fs;
-    use self::vfs::MountFlags;
+    mount_block_fs_with_flags(
+        parent_mfs,
+        block_device,
+        mount_point,
+        label,
+        self::vfs::MountFlags::empty(),
+    )
+}
 
-    let fs_type = detect_fs(block_device);
-    let mfs = match fs_type {
-        self::filesystem::FS_Type::Ext4 => {
-            let ext4 = self::ext4::ext4fs::Ext4FileSystem::open_ext4rs(block_device.clone());
-            self::vfs::MountFS::new(ext4, MountFlags::empty())
-        }
-        self::filesystem::FS_Type::Fat32 => {
-            let efs = self::fat32::EasyFileSystem::open(block_device.clone());
-            self::vfs::MountFS::new(efs, MountFlags::empty())
-        }
-        self::filesystem::FS_Type::Null => {
-            println!("[kernel] mount_block_fs: {} — no filesystem detected on block device", label);
+pub fn mount_block_fs_with_flags(
+    parent_mfs: &Arc<self::vfs::MountFS>,
+    block_device: &Arc<dyn BlockDevice>,
+    mount_point: &str,
+    label: &str,
+    mount_flags: self::vfs::MountFlags,
+) -> Option<Arc<self::vfs::MountFS>> {
+    let detected = match self::filesystem::detect_fs_layout(block_device) {
+        Some(detected) => detected,
+        None => {
+            println!(
+                "[kernel] mount_block_fs: {} — no filesystem detected on block device",
+                label
+            );
             return None;
         }
     };
+    let fs_device = adapt_filesystem_device(
+        block_device.clone(),
+        detected.block_size,
+        mount_flags.contains(self::vfs::MountFlags::RDONLY),
+    );
+
+    let fs_type = detected.fs_type;
+    let mfs = match fs_type {
+        self::filesystem::FS_Type::Ext4 => {
+            let ext4 = self::ext4::ext4fs::Ext4FileSystem::open_ext4rs(fs_device);
+            self::vfs::MountFS::new(ext4, mount_flags)
+        }
+        self::filesystem::FS_Type::Fat32 => {
+            let efs = self::fat32::EasyFileSystem::open(fs_device);
+            self::vfs::MountFS::new(efs, mount_flags)
+        }
+        self::filesystem::FS_Type::Null => unreachable!(),
+    };
+
+    match mfs.mountpoint_root_inode().list() {
+        Ok(entries) => println!(
+            "[fs] {} root directory readable: {} entries",
+            label,
+            entries.len()
+        ),
+        Err(error) => {
+            println!(
+                "[kernel] mount_block_fs: {} root directory read failed: {:?}",
+                label, error
+            );
+            return None;
+        }
+    }
 
     let root = parent_mfs.mountpoint_root_inode();
     let mount_inode = root.find(mount_point).unwrap_or_else(|_| {
@@ -357,7 +426,10 @@ pub fn mount_block_fs(
         return None;
     }
 
-    println!("[kernel] {} mounted at {}", label, mount_point);
+    println!(
+        "[kernel] {} ({:?}) mounted at {} flags={:?}",
+        label, fs_type, mount_point, mount_flags
+    );
     Some(mfs)
 }
 
@@ -380,120 +452,176 @@ pub fn vfs_root() -> Arc<self::vfs::MountFS> {
     VFS_ROOT.clone()
 }
 
-/// 注册 /dev/vda 和 /dev/vdb 块设备节点到当前 devfs。
+/// 注册启动块设备节点到当前 devfs。
 /// 无需单独调用 — 由 mount_boot_block_devices 间接调用。
 pub fn register_block_device_nodes() {
     // 保留空函数体供未来 devfs 重构使用；当前块设备节点已在
     // mount_common_filesystems 中注册（使用 block_devices() 安全探测）。
 }
 
-/// 在 initramfs 模式下，首次触发 BLOCK_DEVICES 探测，并尝试挂载块设备：
-/// - x0 → /sdcard（官方 fs）
-/// - x1 → /tools（工具盘）
-///
-/// 任何设备缺失或挂载失败都只打印 warning，不 panic。
-pub fn mount_boot_block_devices() {
-    let root = vfs_root();
+fn register_block_node(
+    name: &str,
+    device: Arc<dyn BlockDevice>,
+    minor: u64,
+    read_only: bool,
+) {
+    let inode = crate::fs::dev::block::BlockDevInode::new_with_read_only(
+        device,
+        minor,
+        String::from(name),
+        read_only,
+    );
+    if let Err(error) = crate::fs::dev::DEV_FS.add_dev(name, inode) {
+        println!("[block] failed to register /dev/{}: {:?}", name, error);
+    }
+}
 
-    // 首次真正触发 BLOCK_DEVICES probe，但此时 VFS_ROOT 已经存在
-    let devs = crate::drivers::block::block_devices();
+fn discover_mount_device(
+    raw: &Arc<dyn BlockDevice>,
+    base_name: &str,
+    raw_minor: u64,
+    raw_alias: Option<(&str, u64)>,
+    partition_alias_base: Option<&str>,
+    read_only: bool,
+) -> Option<(Arc<dyn BlockDevice>, String)> {
+    use crate::drivers::block::partition::{probe_mbr, MbrProbe, PartitionBlockDevice};
 
-    // 注册 /dev/vda（原始根设备，不做 MBR 解析以避免 FAT32 55AA 误判）
-    if let Some(ref blk0) = devs[0] {
-        let _ = crate::fs::dev::DEV_FS.add_dev(
-            "vda",
-            crate::fs::dev::block::BlockDevInode::new(blk0.clone(), 0, String::from("vda")),
-        );
+    register_block_node(base_name, raw.clone(), raw_minor, read_only);
+    if let Some((alias, minor)) = raw_alias {
+        register_block_node(alias, raw.clone(), minor, read_only);
     }
 
-    // 尝试挂载 x0 → /sdcard
-    match devs[0].as_ref() {
-        Some(dev) => {
-            if mount_block_fs(&root, dev, "sdcard", "official fs (x0)").is_none() {
-                println!("[initramfs] official fs (x0) mount failed, leaving /sdcard empty");
+    let raw_fs = self::filesystem::detect_fs(raw);
+    if raw_fs != self::filesystem::FS_Type::Null {
+        println!("[block] /dev/{} contains raw {:?}", base_name, raw_fs);
+        return Some((raw.clone(), alloc::format!("/dev/{}", base_name)));
+    }
+
+    match probe_mbr(raw) {
+        MbrProbe::Partitions(partitions) => {
+            let mut selected = None;
+            for partition in partitions {
+                let part_device = Arc::new(PartitionBlockDevice::new(
+                    raw.clone(),
+                    partition.start_lba,
+                    partition.sectors,
+                )) as Arc<dyn BlockDevice>;
+                let name = alloc::format!("{}{}", base_name, partition.partno);
+                let minor = raw_minor
+                    .saturating_mul(16)
+                    .saturating_add(partition.partno as u64);
+                register_block_node(&name, part_device.clone(), minor, read_only);
+                if let Some(alias_base) = partition_alias_base {
+                    let alias = alloc::format!("{}{}", alias_base, partition.partno);
+                    register_block_node(
+                        &alias,
+                        part_device.clone(),
+                        100 + raw_minor.saturating_mul(16) + partition.partno as u64,
+                        read_only,
+                    );
+                }
+
+                let fs_type = self::filesystem::detect_fs(&part_device);
+                println!(
+                    "[mbr] /dev/{} type={:#04x} start_lba={} sectors={} size={}MiB fs={:?}",
+                    name,
+                    partition.type_code,
+                    partition.start_lba,
+                    partition.sectors,
+                    partition.size_bytes() / (1024 * 1024),
+                    fs_type
+                );
+                if selected.is_none() && fs_type != self::filesystem::FS_Type::Null {
+                    selected = Some((part_device, alloc::format!("/dev/{}", name)));
+                }
             }
+            selected
         }
-        None => {
-            println!("[initramfs] official fs (x0) not found, skipping /sdcard mount");
-        }
-    }
-
-    // 注册 /dev/vdb（原始工具盘）+ MBR 分区解析 + 分区设备注册 + 挂载
-    match devs[1].as_ref() {
-        Some(raw_vdb) => {
-            let _ = crate::fs::dev::DEV_FS.add_dev(
-                "vdb",
-                crate::fs::dev::block::BlockDevInode::new(
-                    raw_vdb.clone(), 1, String::from("vdb"),
-                ),
+        MbrProbe::NoMbr => {
+            println!(
+                "[block] /dev/{} has neither a supported filesystem nor an MBR",
+                base_name
             );
-
-            use crate::drivers::block::partition::{probe_mbr, PartitionBlockDevice, MbrProbe};
-
-            match probe_mbr(raw_vdb) {
-                MbrProbe::Partitions(parts) => {
-                    let mut vdb1_dev: Option<Arc<dyn BlockDevice>> = None;
-
-                    for p in &parts {
-                        let part_dev = Arc::new(PartitionBlockDevice::new(
-                            raw_vdb.clone(),
-                            p.start_lba,
-                            p.sectors,
-                        )) as Arc<dyn BlockDevice>;
-
-                        let name = alloc::format!("vdb{}", p.partno);
-                        let minor = 1 + p.partno as u64; // vdb1→2, vdb2→3
-                        let inode = crate::fs::dev::block::BlockDevInode::new(
-                            part_dev.clone(), minor, name.clone(),
-                        );
-                        let _ = crate::fs::dev::DEV_FS.add_dev(&name, inode);
-                        println!(
-                            "[mbr] registered /dev/{} (type={:#x}, size={}M)",
-                            name,
-                            p.type_code,
-                            p.sectors * 512 / (1024 * 1024)
-                        );
-
-                        let alias = alloc::format!("vda{}", p.partno);
-                        let alias_minor = 100 + p.partno as u64;
-                        let alias_inode = crate::fs::dev::block::BlockDevInode::new(
-                            part_dev.clone(), alias_minor, alias.clone(),
-                        );
-                        let _ = crate::fs::dev::DEV_FS.add_dev(&alias, alias_inode);
-
-                        if p.partno == 1 {
-                            vdb1_dev = Some(part_dev);
-                        }
-                    }
-
-                    // 从 vdb1 挂载 /tools
-                    match vdb1_dev {
-                        Some(ref dev) => {
-                            if mount_block_fs(&root, dev, "tools", "tools disk (vdb1)").is_none() {
-                                println!("[initramfs] tools disk (vdb1) mount failed, leaving /tools empty");
-                            }
-                        }
-                        None => {
-                            println!("[mbr] no partition 1 found, /tools not mounted");
-                        }
-                    }
-                }
-                MbrProbe::NoMbr => {
-                    // 无 MBR → 旧镜像兼容：从原始 /dev/vdb 挂载
-                    println!("[mbr] no MBR on tools disk, mounting raw /dev/vdb as /tools");
-                    if mount_block_fs(&root, raw_vdb, "tools", "tools disk (raw vdb)").is_none() {
-                        println!("[initramfs] tools disk (raw vdb) mount failed, leaving /tools empty");
-                    }
-                }
-                MbrProbe::Unsupported => {
-                    println!("[mbr] tools disk MBR present but no supported partitions, /tools not mounted");
-                }
-            }
+            None
         }
-        None => {
-            println!("[initramfs] tools disk (x1) not found, skipping /tools mount");
+        MbrProbe::Unsupported => {
+            println!(
+                "[block] /dev/{} has an unsupported partition table",
+                base_name
+            );
+            None
         }
     }
+}
+
+fn mount_boot_block_devices_with_flags(mount_flags: self::vfs::MountFlags) {
+    let root = vfs_root();
+    let devices = crate::drivers::block::block_devices();
+    let read_only = mount_flags.contains(self::vfs::MountFlags::RDONLY);
+
+    match devices[0].as_ref() {
+        Some(raw) => {
+            #[cfg(feature = "board_2k1000")]
+            let candidate = discover_mount_device(
+                raw,
+                "sda",
+                0,
+                Some(("vda", 100)),
+                Some("vda"),
+                read_only,
+            );
+            #[cfg(not(feature = "board_2k1000"))]
+            let candidate = discover_mount_device(raw, "vda", 0, None, None, read_only);
+
+            match candidate {
+                Some((device, source)) => {
+                    if mount_block_fs_with_flags(
+                        &root,
+                        &device,
+                        "sdcard",
+                        &alloc::format!("official fs ({})", source),
+                        mount_flags,
+                    )
+                    .is_none()
+                    {
+                        println!("[initramfs] official fs mount failed, leaving /sdcard empty");
+                    }
+                }
+                None => println!("[initramfs] no mountable official fs, leaving /sdcard empty"),
+            }
+        }
+        None => println!("[initramfs] official fs (x0) not found, skipping /sdcard mount"),
+    }
+
+    match devices[1].as_ref() {
+        Some(raw) => match discover_mount_device(raw, "vdb", 1, None, Some("vda"), read_only) {
+            Some((device, source)) => {
+                if mount_block_fs_with_flags(
+                    &root,
+                    &device,
+                    "tools",
+                    &alloc::format!("tools fs ({})", source),
+                    mount_flags,
+                )
+                .is_none()
+                {
+                    println!("[initramfs] tools fs mount failed, leaving /tools empty");
+                }
+            }
+            None => println!("[initramfs] no mountable tools fs, leaving /tools empty"),
+        },
+        None => println!("[initramfs] tools disk (x1) not found, skipping /tools mount"),
+    }
+}
+
+/// 探测启动块设备并以读写方式挂载识别出的文件系统。
+pub fn mount_boot_block_devices() {
+    mount_boot_block_devices_with_flags(self::vfs::MountFlags::empty());
+}
+
+/// 实板首次文件系统验收路径：注册设备，但只读挂载文件系统。
+pub fn mount_boot_block_devices_read_only() {
+    mount_boot_block_devices_with_flags(self::vfs::MountFlags::RDONLY);
 }
 
 /// 主动初始化 initramfs VFS_ROOT（触发 lazy_static）。

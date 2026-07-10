@@ -294,3 +294,11 @@
 - **验收顺序**: `IDENTIFY DEVICE` 打印型号/容量 → 两次读取 LBA0 并比较 → 多个固定 LBA 只读比较 → 分区解析 → 只读文件系统挂载 → 最后才开放写入和 cache flush。每一步失败都保持 ramfs/initramfs 可启动，禁止直接解除块设备保护。
 - **教训**: “AHCI 标准协议”不等于“PCI 集成方式标准”。上板时应把控制器定址、DMA 可见性、命令协议和文件系统挂载拆成独立验证层，避免把硬件探测问题误判成 ext4/VFS 问题，也避免尚未验证的写路径损坏 SSD。
 - **相关文件**: `dependency/dep_iso/src/block/ahci.rs`, `os/src/drivers/block/sata_blk.rs`, `os/src/main.rs`
+
+### 分区表 LBA 与内核块大小不能混用
+
+- **现象**: MBR 中分区起点和容量看起来正确，但挂载后读不到 ext4 超级块；换成 1MiB 对齐分区后又能工作，容易被误判为磁盘或文件系统偶发故障。
+- **根因**: MBR 字段始终以 512 字节逻辑扇区为单位，而内核 `BlockDevice` 的块大小随平台变化（当前 rv64/LA QEMU 为 4KiB，2K1000LA 为 2KiB）。直接执行 `start_lba / (BLOCK_SZ / 512)` 会截断未对齐起点，使所有分区内偏移发生偏移。即使分区起点正确，ext4 物理块号和 FAT 扇区号仍以文件系统声明的原生块大小为单位，不能直接当成 `BLOCK_SZ` 块号。
+- **修复**: 分区设备内部保存字节起点 `start_lba * 512`；自然对齐访问直接转发整块，未对齐访问使用父设备块 bounce buffer。文件系统打开前再按 ext4 超级块或 FAT BPB 套 `BlockSizeAdapter`。文件系统识别必须先验证裸 ext4/FAT32，再解析 MBR；不能仅凭 `0x55AA` 把 MBR 当成 FAT。
+- **验收**: 同时测试 raw ext4、非平台块对齐 MBR ext4、ext4 原生块小于 `BLOCK_SZ`、FAT 512B 扇区，并实际读取根目录，不能只检查魔数或“mounted”日志。GPT/扩展分区必须显式报告 unsupported；protective/hybrid MBR 不能退化成普通 MBR 挂载。
+- **相关文件**: `os/src/drivers/block/partition.rs`, `os/src/fs/filesystem.rs`, `os/src/fs/mod.rs`

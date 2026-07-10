@@ -4,7 +4,7 @@ module: fs/dev
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-06-29"
+last_updated: "2026-07-10"
 code_paths:
   - "os/src/fs/dev/mod.rs"
   - "os/src/fs/dev/null.rs"
@@ -16,6 +16,9 @@ code_paths:
   - "os/src/fs/dev/pty.rs"
   - "os/src/fs/dev/rtc.rs"
   - "os/src/fs/dev/block.rs"
+  - "os/src/drivers/block/partition.rs"
+  - "os/src/fs/page_cache.rs"
+  - "os/src/fs/mod.rs"
 entry_points:
   - "DEV_FS"
   - "DevFS"
@@ -185,16 +188,35 @@ BlockDevInode 包装 `Arc<dyn BlockDevice>`，提供原始块设备访问。主�
 - `BLKGETSIZE64`：获取设备字节大小
 - `BLKSSZGET`：获取逻辑扇区大小（固定返回 512）
 
-**动态注册路径**：`mount_boot_block_devices` 在探测到底层块设备后依次注册：
+**动态注册路径**：`mount_boot_block_devices` 先注册原始设备，再对未识别为裸
+ext4/FAT32 的设备解析 MBR 主分区。QEMU 使用：
 
 ```
 /dev/vda       (原始根设备, minor=0)
 /dev/vdb       (工具盘, minor=1)
-/dev/vdb1..N   (MBR 分区, minor=2..)
-/dev/vda1..N   (别名, minor=100..)
+/dev/vda1..N   (vda 的 MBR 主分区，或 vdb 分区兼容别名)
+/dev/vdb1..N   (vdb 的 MBR 主分区)
 ```
 
-分区节点通过 `probe_mbr` 解析 MBR 表，为每个有效分区创建 `PartitionBlockDevice` 包装器，再封装为 `BlockDevInode` 注册到 DEV_FS。
+2K1000LA 的单块 SATA SSD 使用：
+
+```
+/dev/sda       (原始 SATA SSD)
+/dev/sda1..N   (MBR 主分区)
+/dev/vda       (sda 兼容别名)
+/dev/vda1..N   (sdaN 兼容别名)
+```
+
+`PartitionBlockDevice` 保留 MBR 的 512 字节 LBA 语义，并转换到平台
+`BLOCK_SZ`。未按 2KiB/4KiB 对齐的分区通过 bounce buffer 访问；自然对齐分区
+走整块直接 I/O。文件系统打开前还会按 ext4 原生块大小或 FAT BPB
+`BytsPerSec` 包装 `BlockSizeAdapter`，因此文件系统块号不会被误当成平台块号。
+当前只解析四个 MBR 主分区，不支持扩展分区和 GPT；包含 protective MBR 的
+混合分区表也会整盘拒绝。
+
+2K1000LA 只读验收镜像将 `/dev/sda*` 与 `/dev/vda*` 节点标记为 `0440`，
+节点写入直接返回 `EROFS`。挂载使用 `MountFlags::RDONLY`，底层再套一层
+`ReadOnlyBlockDevice`，用于拦截 FAT inode drop 等绕过 VFS 的内部回写。
 
 ### /dev/cpu_dma_latency
 
@@ -219,9 +241,10 @@ rust_main
         -> misc_dir.add_dev("rtc")  // /dev/misc/rtc
       -> DEV_FS.add_dir("shm")      // /dev/shm 覆盖挂载点
     -> mount_boot_block_devices()
-      -> DEV_FS.add_dev("vda")     // 原始块设备
-      -> DEV_FS.add_dev("vdb")     // 工具盘
-      -> probe_mbr -> DEV_FS.add_dev("vdb1")...  // 分区节点
+      -> detect_fs(raw)             // 优先识别整盘裸 ext4/FAT32
+      -> probe_mbr(raw)             // 裸盘未识别时解析主分区
+      -> DEV_FS.add_dev("vda1")...  // 或 2K1000 的 sda/sdaN
+      -> detect_fs(partition)       // 选择首个可挂载分区
 ```
 
 ## Test Mapping
@@ -236,7 +259,9 @@ rust_main
 | pipe 环形缓冲 | pipe() syscall | LTP pipe*, libc 测试 | pass |
 | pty pair 创建 | /dev/ptmx | busybox, telnetd | pass |
 | rtc 时间查询 | /dev/rtc | hwclock, LTP | pass |
-| 块设备原始 IO | /dev/vda | dd, mkfs, mount | pass |
+| 块设备原始 IO | /dev/vda、/dev/sda | dd, mkfs, mount | pass/board pending |
+| MBR 分区节点 | /dev/vdb1、/dev/sda1 | QEMU LBA63 ext4/FAT32 镜像 | pass/board pending |
+| 原生块大小转换 | BlockSizeAdapter | ext4 1KiB、FAT32 512B 根目录读取 | pass/board pending |
 
 ## Known Issues
 
@@ -269,3 +294,9 @@ rust_main
    - 根因：Teletype 的 `last_char` 暂存仅缓存一个字符，没有行缓冲或 raw 模式连续读取
    - 影响：cat 等逐字节读取工作的应用性能差
    - 修复方向：实现 ICANON 模式的行缓冲和 raw 模式的批量读取
+
+6. **分区表范围仅覆盖 MBR 主分区**
+   - 现象：protective MBR、GPT 和扩展分区会报告 unsupported
+   - 原因：本阶段只为 2K1000LA SSD 的首次只读挂载接入传统 MBR
+   - 影响：GPT 格式 SSD 不能挂载
+   - 后续方向：实板 MBR 路径稳定后，再独立实现 GPT 校验和分区项解析
