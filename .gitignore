@@ -48,3 +48,4 @@ sdcard-rv-noconf.img
 .omo/
 .env
 os/rootfs-rv.img
+os.bin

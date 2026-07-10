@@ -22,18 +22,25 @@ pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x10000;
 pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x2000;
 #[cfg(feature = "board_cv1811h")]
 pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x2000;
+#[cfg(feature = "board_vf2")]
+pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x2000;
 pub const MMAP_BASE: usize = 0x2000_0000;
 pub const MMAP_END: usize = 0xb800_0000;
 pub const SKIP_NUM: usize = 2;
 
 // manually make usable memory space equal
+#[cfg(not(feature = "board_vf2"))]
 pub const MEMORY_START: usize = 0x0000_0000_8000_0000;
+#[cfg(feature = "board_vf2")]
+pub const MEMORY_START: usize = 0x4000_0000;
 #[cfg(feature = "board_rvqemu")]
 pub const MEMORY_END: usize = MEMORY_START + MEMORY_SIZE;
 #[cfg(feature = "board_fu740")]
 pub const MEMORY_END: usize = 0x9000_0000;
 #[cfg(feature = "board_cv1811h")]
 pub const MEMORY_END: usize = 0x9000_0000; //256M
+#[cfg(feature = "board_vf2")]
+pub const MEMORY_END: usize = 0xC000_0000;
 pub const PAGE_SIZE: usize = 0x1000;
 pub const PAGE_SIZE_BITS: usize = 0xc;
 

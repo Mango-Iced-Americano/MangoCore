@@ -2,6 +2,24 @@
 
 ---
 
+## 2026-07-10
+
+### 新增 VisionFive 2 (JH7110) 平台支持
+
+**涉及文件：**
+- `os/src/hal/platform/riscv/vf2.rs` — 新建：SBI 基础平台文件，CLOCK_FREQ=4MHz（JH7110 DTS timebase-frequency），MMIO 仅含 UART0 身份映射
+- `os/src/hal/arch/riscv/linker-vf2.ld` — 新建：复制 linker-rvqemu.ld，BASE_ADDRESS 改为 0x40200000
+- `os/src/hal/arch/riscv/mod.rs` — 将硬编码 `#[path = "...qemu.rs"]` 改为 `#[cfg(feature = "board_rvqemu")]` / `#[cfg(feature = "board_vf2")]` 门控选择；文档注释新增 VisionFive2
+- `os/src/hal/arch/riscv/config.rs` — 新增 `#[cfg(feature = "board_vf2")]` 块：MEMORY_START=0x4000_0000、KERNEL_HEAP_SIZE=PAGE_SIZE*0x2000、MEMORY_END=0xC000_0000；MEMORY_START 原本无条件定义改用 `#[cfg(not(feature = "board_vf2"))]` 包裹，避免重复定义
+- `os/Cargo.toml` — 新增 `board_vf2 = ["oom_handler", "riscv"]` feature
+- `os/make/rv64.mk` — 修正 VF2 KERNEL_ENTRY_PA 从 0x80020000 为 0x40200000
+
+**验证：**
+- `make BOARD=vf2 rv64-kernel-build-only`（cargo build --features board_vf2） ✅
+- `make la64-kernel-build-only`（cargo check --features board_laqemu、loongarch64） ✅ — 零回归
+
+**备注：** VF2 平台使用纯 SBI ecall 接口（与 QEMU virt 相同），不添加 fu740_hal/fu740_pac 依赖。DRAM 基址 0x4000_0000，OpenSBI 占用 0x40000000-0x40200000，内核入口 0x40200000。MEMORY_START 改为 0x4000_0000 是刚需——否则 frame_allocator::dealloc 会静默拒绝所有有效物理页。
+
 ## 2026-07-09
 
 ### ELF Segment 懒加载 — 只读段从 eager frame 映射改为 file-backed VMA

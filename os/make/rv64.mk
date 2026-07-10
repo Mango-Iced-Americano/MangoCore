@@ -97,7 +97,7 @@ endif
 ifeq ($(BOARD), rvqemu)
 	KERNEL_ENTRY_PA := 0x80200000
 else ifeq ($(BOARD), vf2)
-	KERNEL_ENTRY_PA := 0x80020000
+	KERNEL_ENTRY_PA := 0x40200000
 endif
 
 # Binutils from rustup's llvm-tools-preview component. This avoids depending on
