@@ -93,6 +93,19 @@ rv64-only:
 regression:
 	make -C os rv64-regression
 
+# ── Testing shortcuts (run inside Docker container) ──
+check-fast:
+	cargo check -p mango-kernel-core
+	cargo fmt --check -p mango-kernel-core
+	cargo clippy -p mango-kernel-core 2>/dev/null || true
+
+unittest:
+	cargo test -p mango-kernel-core
+
+bugscan: unittest
+	@echo "[bugscan] L1 passed, running L3 ktest..."
+	make -C os rv64-ktest KTEST=all
+
 docker:
 	@if docker compose ps --status running 2>/dev/null | grep -q os-dev; then \
 		docker compose exec -it os-dev bash; \
@@ -110,4 +123,4 @@ testsuits-download:
 
 	
 
-.PHONY: all kernel run clean testsuits-download docker docker-test-parallel
+.PHONY: all kernel run clean testsuits-download docker docker-test-parallel regression check-fast unittest bugscan

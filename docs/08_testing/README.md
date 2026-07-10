@@ -13,6 +13,31 @@ tags: [testing, ktest, cargo-test, LTP, regression, tap]
 
 MangoCore 采用五层自底向上的测试体系，从纯逻辑单元测试到内核自检、再到用户态回归测试和官方集成测试，建立完整的 bug 扫描工具链。目标是把问题定位逐步下沉——能在 `cargo test` 解决的不拖到 QEMU，能在 L3 解决的不拖到 LTP。
 
+## 快速开始
+
+所有测试命令在 **Docker 容器内**执行（`make docker` 进入）：
+
+```bash
+# ── L1: 纯逻辑单元测试（秒级，host 上跑）──
+cd /app
+cargo test -p mango-kernel-core   # 148 个测试
+
+# ── L3: 内核自检（分钟级，QEMU 内跑）──
+cd /app/os
+make rv64-ktest                    # 全部 L3 测试
+make rv64-ktest KTEST=waitqueue    # 指定模块
+make rv64-ktest KTEST=all KREPEAT=100  # 压力测试
+
+# ── L4: 用户态回归（分钟级，QEMU 内跑）──
+cd /app
+make regression
+
+# ── 一键全扫 ──
+make bugscan                       # L1 + L3
+```
+
+> ⚠️ **不要**在 `os/` 或 `user/` 目录下直接跑 `cargo test`——它们是 `#![no_std]` 裸机 crate，host 上无法编译测试。L1 的 `cargo test` 只能在项目根目录通过 `-p mango-kernel-core` 指定纯逻辑库 crate。
+
 ```
 cargo test (L1/L2)       →  判断纯逻辑模块是否正确
 ktest / L3               →  判断真实内核机制是否正确
@@ -395,24 +420,28 @@ L5 发现 bug 后：先尝试写 L4 regression → 如涉及内核机制，进�
 
 ## Makefile 命令速查
 
+> 所有命令在 **Docker 容器内**的项目根目录 (`/app`) 执行。
+> `make docker` 进入容器。
+
 ```bash
-# L0
-make check-fast                      # 编译 + 格式检查
+# L0 — 静态检查
+make check-fast
 
-# L1
-cargo test -p mango-kernel-core      # 纯逻辑单元测试 (147 用例)
+# L1 — 纯逻辑单元测试（秒级，host 跑，不需要 QEMU）
+make unittest                        # 等价于 cargo test -p mango-kernel-core
 
-# L3
-make rv64-ktest                      # rv64 全部 L3 测试
-make rv64-ktest KTEST=waitqueue      # 指定测试组
-make rv64-ktest KTEST=timer KREPEAT=100  # 重复 100 次
-make la64-ktest KTEST=all            # la64 对照
+# L3 — 内核自检（分钟级，QEMU 内跑）
+make -C os rv64-ktest                # rv64 全部 L3
+make -C os rv64-ktest KTEST=waitqueue KREPEAT=100
 
-# 复合入口
-make bugscan                         # check-fast + cargo test + ktest
-make regression                      # L4 用户态回归
-make official                        # L5 LTP + lmbench + iperf (规划)
+# L4 — 用户态回归
+make regression
+
+# 一键扫 bug
+make bugscan                         # unittest + L3 ktest
 ```
+
+> ⚠️ **常见错误**：不要在 `os/` 或 `user/` 目录下跑 `cargo test`——它们是 `#![no_std]` 裸机 crate，host 上无法编译。L1 测试只能用 `make unittest` 或在根目录 `cargo test -p mango-kernel-core`。
 
 ---
 
