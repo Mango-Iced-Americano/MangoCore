@@ -117,6 +117,9 @@ pub struct TaskControlBlock {
     pub tid: Arc<TidHandle>,
     /// 同一地址空间内 trap context / 默认用户栈的资源槽位
     pub user_res_slot: usize,
+    /// Whether this task owns its user_res_slot. ktest tasks set this false
+    /// to avoid double-free of shared slot 0.
+    pub owns_user_res_slot: bool,
     /// 所属用户可见进程
     pub process: Arc<ProcessControlBlock>,
     /// 内核栈
@@ -747,18 +750,20 @@ impl TaskControlBlock {
 
         let keep_trap_context = self.process.try_cache_trap_context_slot(self.user_res_slot);
         super::perf::record_exit_thread(clear_child_tid != 0, keep_trap_context);
-        let vm = self.process.vm();
-        let mut vm = vm.lock();
-        if keep_trap_context {
-            vm.dealloc_user_res_keep_trap(
-                self.user_res_slot,
-                self.user_stack_allocated.load(Ordering::Relaxed),
-            );
-        } else {
-            vm.dealloc_user_res_with_stack(
-                self.user_res_slot,
-                self.user_stack_allocated.load(Ordering::Relaxed),
-            );
+        if self.owns_user_res_slot {
+            let vm = self.process.vm();
+            let mut vm = vm.lock();
+            if keep_trap_context {
+                vm.dealloc_user_res_keep_trap(
+                    self.user_res_slot,
+                    self.user_stack_allocated.load(Ordering::Relaxed),
+                );
+            } else {
+                vm.dealloc_user_res_with_stack(
+                    self.user_res_slot,
+                    self.user_stack_allocated.load(Ordering::Relaxed),
+                );
+            }
         }
 
         true
@@ -876,6 +881,7 @@ impl TaskControlBlock {
         let task_control_block = Arc::new(Self {
             tid: tid_handle,
             user_res_slot,
+            owns_user_res_slot: true,
             process,
             kstack,
             ustack_base: ustack_bottom_from_slot(user_res_slot),
@@ -1004,6 +1010,7 @@ impl TaskControlBlock {
         Arc::new(Self {
             tid,
             user_res_slot: 0,
+            owns_user_res_slot: false,
             process,
             kstack,
             ustack_base: 0,
@@ -1560,6 +1567,7 @@ impl TaskControlBlock {
             // 基础标识信息
             tid: tid_handle,
             user_res_slot,
+            owns_user_res_slot: true,
             process,
             kstack,
             ustack_base: if !stack.is_null() {
@@ -1843,10 +1851,12 @@ impl Drop for TaskControlBlock {
         self.unaccount_seccomp_enabled();
         registry::unregister_task(self.tid.0);
         self.process.remove_thread(self);
-        self.process
-            .user_res_slot_allocator()
-            .lock()
-            .dealloc(self.user_res_slot);
+        if self.owns_user_res_slot {
+            self.process
+                .user_res_slot_allocator()
+                .lock()
+                .dealloc(self.user_res_slot);
+        }
         // Free ASID if one was allocated (la64 only; no-op on rv64)
         let asid = self.asid.load(core::sync::atomic::Ordering::Relaxed);
         if asid != 0 {

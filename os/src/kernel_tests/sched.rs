@@ -1,7 +1,8 @@
 //! L3 tests for the scheduler.
 //!
-//! Multi-task tests (spawn_and_yield) require the scheduler to be active
-//! (mango.mode=ktest with the new multi-task harness).
+//! In ktest mode, the runner is spawned via spawn_ktest_task() and
+//! runs inside the scheduler (run_tasks() is active). Tests verify
+//! that the scheduler is operational and tasks can be spawned+yielded.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -13,39 +14,37 @@ use crate::task;
 pub fn tests() -> Vec<KernelTest> {
     vec![
         KernelTest::new("sched::current_task_exists", test_current_task_exists),
-        KernelTest::new("sched::ready_queue_has_init", test_ready_queue_has_init),
-        KernelTest::new("sched::task_manager_counts", test_task_manager_counts),
+        KernelTest::new("sched::scheduler_is_running", test_scheduler_is_running),
+        KernelTest::new("sched::counts_in_range", test_counts_in_range),
         KernelTest::new("sched::spawn_and_yield", test_spawn_and_yield),
     ]
 }
 
-/// Verify tasks exist after add_initproc().
+/// Verify we have a current task (scheduler assigned one to run).
 fn test_current_task_exists() -> Result<(), &'static str> {
-    // In scheduler-active ktest, this runs inside a scheduled task
-    // so we expect a valid current_task().
-    if task::current_task().is_some() || task::task_manager_counts().map(|(r, _)| r > 0).unwrap_or(false) {
-        Ok(())
-    } else {
-        Err("no current task and no ready tasks")
+    match task::current_task() {
+        Some(_) => Ok(()),
+        None => Err("no current task — scheduler may not have started"),
     }
 }
 
-/// Verify the scheduler has ready tasks.
-fn test_ready_queue_has_init() -> Result<(), &'static str> {
-    if task::has_ready_task() {
+/// Verify the scheduler is running (we're inside a scheduled task).
+fn test_scheduler_is_running() -> Result<(), &'static str> {
+    // After spawn_ktest_task + run_tasks(), the runner IS the current task.
+    // If the scheduler weren't running, current_task() would be None.
+    if task::current_task().is_some() {
         Ok(())
     } else {
-        Err("no ready tasks after init")
+        Err("scheduler is not running — no current task")
     }
 }
 
-/// Verify task_manager_counts() returns sensible values.
-fn test_task_manager_counts() -> Result<(), &'static str> {
+/// Verify task_manager_counts returns valid values (no overflow/garbage).
+fn test_counts_in_range() -> Result<(), &'static str> {
     let (ready, interruptible) = task::task_manager_counts()
         .ok_or("task_manager_counts returned None")?;
-    if ready == 0 {
-        return Err("ready_count should be > 0");
-    }
+    // In ktest mode, ready can be 0 (only the runner is active).
+    // Both counts must be in a reasonable range.
     if ready > 4096 || interruptible > 4096 {
         return Err("task counts implausibly high");
     }
@@ -53,11 +52,6 @@ fn test_task_manager_counts() -> Result<(), &'static str> {
 }
 
 /// Spawn a kernel task, yield, and verify it ran.
-///
-/// Pattern:
-/// 1. Spawn a helper task that sets a flag and exits.
-/// 2. Yield to let the spawned task run.
-/// 3. Verify the flag was set.
 fn test_spawn_and_yield() -> Result<(), &'static str> {
     static SPAWNED_RAN: AtomicBool = AtomicBool::new(false);
 
