@@ -16,6 +16,10 @@ DISK_LA := ../disk-la.img
 
 # BOARD
 BOARD ?= laqemu
+# 开发板型号同时决定链接地址和早期入口实现。这里必须保留独立的板级链接脚本来源；
+# 如果静默复用上一次 QEMU/2K1000 构建遗留的 linker.ld，可能得到格式正确但绝对地址
+# 不适用于当前机器的 ELF。
+LINKER_SCRIPT := src/hal/arch/loongarch64/linker-$(BOARD).ld
 
 # Logging
 ifndef LOG
@@ -32,9 +36,16 @@ OBJCOPY := loongarch64-linux-gnu-objcopy
 OBJDUMP := loongarch64-linux-gnu-objdump
 READELF := loongarch64-linux-gnu-readelf
 
-# uImage config
+# uImage 配置。
+# 传统 uImage 的装载地址和入口字段只有 32 位。2K1000 的 U-Boot 会在跳转前
+# 通过 DMW 将物理地址映射到 0x9000... 缓存别名，因此镜像头必须填写低物理地址。
+ifeq ($(BOARD), 2k1000)
+LA_LOAD_ADDR := 0x90000000
+LA_ENTRY_POINT := 0x90000000
+else
 LA_LOAD_ADDR := 0x9000000090000000
 LA_ENTRY_POINT := 0x9000000090000000
+endif
 
 # Applications
 APPS := ../user/src/bin/*
@@ -88,7 +99,9 @@ $(INITRAMFS_CPIO_LA): user
 
 kernel:
 	@echo Platform: $(BOARD)
-	@cp -f src/hal/arch/loongarch64/linker-$(BOARD).ld src/hal/arch/loongarch64/linker.ld 2>/dev/null || true
+	# 在调用 rustc 前直接失败，避免继续使用过期的 linker.ld 编译。
+	@test -f $(LINKER_SCRIPT) || { echo "missing linker script: $(LINKER_SCRIPT)" >&2; exit 1; }
+	@cp -f $(LINKER_SCRIPT) src/hal/arch/loongarch64/linker.ld
 ifeq ($(MODE), debug)
 	@LOG=$(LOG) cargo build --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
 else
@@ -99,7 +112,7 @@ endif
 uimage: $(KERNEL_BIN)
 	../util/mkimage -A loongarch -O linux -T kernel -C none \
 	  -a $(LA_LOAD_ADDR) -e $(LA_ENTRY_POINT) \
-	  -n NPUcore+ -d $(KERNEL_BIN) $(KERNEL_UIMG)
+	  -n MangoCore -d $(KERNEL_BIN) $(KERNEL_UIMG)
 
 clean:
 	@cargo clean

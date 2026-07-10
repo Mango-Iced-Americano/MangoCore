@@ -2,12 +2,12 @@
 
 > Document path: `docs/00_overview/AI-Usage-Report.md`  
 > Project: MangoCore  
-> Coverage: 2026-04-01 to 2026-06-30  
+> Coverage: 2026-04-01 to 2026-07-10
 > Purpose: OS competition AI usage disclosure
 
 ## 1. 合规声明
 
-MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 AI 工具辅助代码开发、调试、架构审查、性能分析、文档生成与文档事实核查。本报告按照比赛诚信与披露要求，对已使用的 AI 工具、模型名称或平台、使用场景、产出结果、交互记录留痕和人工验证方式进行集中说明。
+MangoCore 项目在 2026 年 4 月至 2026 年 7 月开发期间使用了多种 AI 工具辅助代码开发、调试、架构审查、性能分析、文档生成与文档事实核查。本报告按照比赛诚信与披露要求，对已使用的 AI 工具、模型名称或平台、使用场景、产出结果、交互记录留痕和人工验证方式进行集中说明。
 
 本项目声明：
 
@@ -27,6 +27,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | Oracle | 高推理能力代码审查与架构咨询 agent；当前会话模型标识为 GPT-5.5 | OhMyOpenCode agent | 2026-04 至 2026-06 | 根因分析、架构评审、代码正确性验证、性能优化策略、文档事实核查 | `docs/Work_Log.md` 多处记录 `Oracle reviewed`、`Oracle analysis confirmed`、`Root cause analysis by Oracle` |
 | Explore | Codebase search / pattern discovery agent | OhMyOpenCode sub-agent | 2026-05 至 2026-06 | 跨模块代码搜索、调用关系梳理、实现模式对比 | Work log 和 Sisyphus task records |
 | librarian / plan / deep 等 sub-agents | 专用辅助 agents | OhMyOpenCode sub-agents | 2026-06 | 文档整理、资料检索、复杂任务拆分、局部实现检查 | Sisyphus 编排记录、文档生成 commit、Work_Log 记录 |
+| OpenAI Codex multi-agent | 当前主会话基于 GPT-5；并行 subagent 的具体后端版本未单独暴露 | Codex desktop | 2026-07 | 2K1000LA 实板 bring-up、LoongArch VALEN/TLB/PTE/DMW 并行审计、代码修复、构建和 QEMU 验证 | `docs/Work_Log.md` 2026-07-10 记录、目标文件反汇编和 uImage 哈希 |
 
 说明：部分 AI 平台不会在 commit metadata 中公开精确模型版本。本报告对可确认的工具名称、平台、agent 名称、commit marker 和工作日志证据进行披露；对无法从现有记录恢复的底层模型版本标注为"未完整记录"，不以猜测替代事实。
 
@@ -40,6 +41,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 6 月开发期间使用了多种 
 | LTP 修复与 FS 性能优化 | 2026-06-10 至 2026-06-16 | Oracle, Sisyphus | LTP syscall 兼容性修复、FS hot path 优化、PageCache fast path、UserBuffer fast path | 修复多批 LTP 失败项，提升 lmbench/IO 性能 |
 | 性能退化调试系统 | 2026-06-19 至 2026-06-20 | Oracle, Sisyphus, specialized agents | `perf_diag` counters、`drift_window`、lmbench 漂移分析、buddy allocator bitmap guard | 建立自动漂移分析脚本与诊断 counters，定位并修复 allocator 退化 |
 | 后期文档系统与评审材料 | 2026-06-28 至 2026-06-30 | Sisyphus, Oracle, Explore | `Technical-Report-MangoCore.md`、`Engineering-Casebook.md`、FS/Net/MM 文档、README、评审材料事实核查 | 生成和重构大量文档，并经多轮 Oracle fact-check 修正事实错误 |
+| 2K1000LA 实板地址/TLB 审计 | 2026-07-10 | OpenAI Codex multi-agent | 将 QEMU 内核迁移到 VALEN=40 实板；并行审计 canonical VA、VPN/VPPN、PTE PPN、TLB refill、ASID、DMW 和栈窗口 | 修复 TLB PS、PPN/VPPN、ASID、映射边界和 MMIO 别名；完成双架构编译、LA64 QEMU 用户态启动和实板 uImage 构建 |
 
 ## 4. 详细使用场景
 
@@ -145,6 +147,8 @@ Ultraworked with Sisyphus (https://github.com/code-yeongyu/oh-my-openagent)
 Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 ```
 
+2026-07-10 的 2K1000LA 审计使用 Codex multi-agent 将任务拆为掩码/符号扩展、TLB/PTE/CSR、内核栈布局、启动链路和 MMIO/DMW 五个方向。主流程没有直接接受 subagent 结论，而是逐项对照本地《龙芯架构参考手册卷一》、源码、双架构构建、LA64 QEMU 用户态日志和目标文件反汇编后才修改代码。
+
 ## 5. 代表性案例
 
 ### Case 1: LTP 0 分根因分析与修复
@@ -203,6 +207,15 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - Human action: 根据 Oracle review 修改文档，移除或修正不准确内容。
 - Result: 多轮文档修复 commit 保留 Sisyphus co-author marker，Work_Log 记录 Oracle 审查发现和修复项。
 
+### Case 6: 2K1000LA VALEN=40 与 TLB 全链路审计
+
+- Evidence: `docs/Work_Log.md` 2026-07-10、`docs/09_debug/bug-la64-kernel-stack-overflow.md`
+- AI tools: OpenAI Codex multi-agent
+- Problem: QEMU 的 48 位高栈窗口迁移到实板后触发 `AddressError`；修正为 40 位 canonical 高栈后，还需确认 VA/VPN/VPPN、PTE、TLB refill、ASID 和 DMW 不受连带影响。
+- AI contribution: 五个并行 subagents 独立检查不同硬件语义，主流程汇总后发现 TLB 页大小错误、PTE PPN 掩码过宽、VPPN 裁剪/符号扩展缺失、ASIDBITS 污染和高物理 MMIO VA 属性问题。
+- Human verification: 对照本地 LoongArch 官方手册字段定义；检查每处 diff；执行 rv64/la64 编译、LA64 QEMU 到 init 用户态、2K1000 uImage 构建和 `__rfill/__restore` 反汇编。
+- Result: 生成 `Load/Entry=0x90000000` 的实板镜像，SHA-256 `e8cf6b87ebd4800f3909fc9aad25d5b7d96957743f5c98fbfd7f7ba4eb8cca78`；实板运行验证仍待完成。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -250,6 +263,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log.md:1093-1125` | Network optimization | 记录 iperf TCP 34x、netperf CRR +19% 的多轮优化 |
 | `docs/Work_Log.md:1455-1658` | Timer subsystem | 记录 timer deadline / one-shot / timekeeping 修复与测试 |
 | `docs/Work_Log.md:5963-6006` | LTP zero score | 记录 Oracle 分析后发现 `/dev/null ENOSYS`、missing symlinks、MAP_SHARED SIGBUS 等问题 |
+| `docs/Work_Log.md` 2026-07-10 | 2K1000LA VALEN/TLB 审计 | 记录 Codex 五路并行审计、官方手册交叉核对、代码修复、反汇编与构建/QEMU 证据 |
 
 ## 9. 交互记录与留痕方式
 
@@ -289,5 +303,3 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | 在设计文档中说明 AI 参与的设计、审查和结果 | 本文件第 4、5、8 节说明架构咨询、设计审查、Work_Log 证据 | 已满足 |
 | 在 presentation slides 中设置 AI 工具使用说明 | 最终 slides 应复制或概括第 12 节内容，形成独立"AI 工具使用情况"页 | 待最终 slides 同步 |
 | 失败披露视为诚信问题 | 本报告主动披露 AI 工具、使用范围、证据和限制 | 已满足披露要求 |
-
-

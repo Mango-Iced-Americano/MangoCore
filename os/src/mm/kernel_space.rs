@@ -328,10 +328,24 @@ impl<T: PageTable> KernelSpace<T> {
         permission: MapPermission,
         frames: Vec<Arc<FrameTracker>>,
     ) -> Result<(), MemoryError> {
-        let start_vpn = start_va.floor();
-        let end_vpn = VirtPageNum::from(start_vpn.0 + frames.len());
-        if start_vpn == end_vpn {
+        if frames.is_empty() {
             return Ok(());
+        }
+        let start_vpn = start_va.floor();
+        let end_vpn = VirtPageNum::from(
+            start_vpn
+                .0
+                .checked_add(frames.len())
+                .ok_or(MemoryError::BadAddress)?,
+        );
+        // 程序载荷只会在此临时映射到完成 ELF 解析。LoongArch 上若允许该区间越过
+        // KERNEL_PROGRAM_END，就可能命中与高地址内核栈相同的低 39 位 PGDH 索引。
+        // 普通区间重叠检查无法发现这种架构别名，因此必须在安装任何 PTE 前拒绝该
+        // 范围。上方 checked_add 还可防止 end_vpn 回绕后绕过边界比较。
+        let arena_start = VirtAddr::from(MMAP_BASE).floor();
+        let arena_end = VirtAddr::from(KERNEL_PROGRAM_END).floor();
+        if start_vpn < arena_start || end_vpn > arena_end {
+            return Err(MemoryError::BadAddress);
         }
         if self.kernel_mappings.has_overlap(start_vpn, end_vpn) {
             return Err(MemoryError::AlreadyMapped);

@@ -36,7 +36,7 @@ change-kernel-only:
 	cd os && make build && make runsimple
 
 print-logo:
-	@echo "Welcome to NPUCore Project Aspera🚀"
+	@echo "Welcome to MangoCore Project Aspera🚀"
 	@echo "                                                                            "
 	@echo "  ________    ________    ________    _______     ________    ________      "
 	@echo " |\   __  \  |\   ____\  |\   __  \  |\  ___ \   |\   __  \  |\   __  \     "

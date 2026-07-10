@@ -770,20 +770,31 @@ impl TaskControlBlock {
     /// 该构造器只用于内核启动阶段加载 `/init`。普通 fork/clone 必须走
     /// `sys_clone()`，exec 必须走 `load_elf()`。
     pub fn new(elf: Arc<vfs::File>) -> Arc<Self> {
+        macro_rules! init_task_trace {
+            ($($arg:tt)*) => {
+                #[cfg(feature = "board_2k1000")]
+                println!("[bringup][tcb] {}", format_args!($($arg)*));
+            };
+        }
+
         // 将ELF文件映射到内核空间
+        init_task_trace!("01 map init ELF into kernel space");
         let elf_data = elf.map_to_kernel_space(MMAP_BASE);
         if elf_data.is_empty() {
             panic!("[TCB::new] initproc ELF is empty");
         }
+        init_task_trace!("02 init ELF mapped: {} bytes", elf_data.len());
         // 带有ELF程序头/跳板的用户地址空间（AddressSpace）
         // 解析ELF文件，初始化内存映射
         let (mut memory_set, _user_heap, elf_info) =
             AddressSpace::<PageTableImpl>::from_elf(elf_data).expect("initproc ELF is invalid");
+        init_task_trace!("03 ELF parsed: user entry={:#x}", elf_info.entry);
         // 在内核空间中删除ELF区域
         crate::mm::KERNEL_SPACE
             .lock()
             .remove_area_with_start_vpn(VirtAddr::from(MMAP_BASE).floor())
             .unwrap();
+        init_task_trace!("04 temporary kernel ELF mapping removed");
 
         // 获取用户资源槽位分配器
         let user_res_slot_allocator = Arc::new(Mutex::new(RecycleAllocator::new()));
@@ -798,11 +809,18 @@ impl TaskControlBlock {
         let kstack = kstack_alloc();
         // 获取内核栈的顶部
         let kstack_top = kstack.get_top();
+        init_task_trace!(
+            "05 ids and kernel stack allocated: pid={} slot={} kstack_top={:#x}",
+            pid,
+            user_res_slot,
+            kstack_top
+        );
 
         // 为当前线程分配用户资源，并保留 trap context PPN，避免再次页表遍历。
         let trap_cx_ppn = memory_set
             .alloc_user_res_with_trap_ppn(user_res_slot, true)
             .expect("init task user resource allocation failed");
+        init_task_trace!("06 user stack and trap context pages allocated");
 
         // 构造初始进程的 argc/argv/envp 栈
         let init_sp = {
@@ -821,6 +839,7 @@ impl TaskControlBlock {
                 )
                 .expect("init task stack setup failed")
         };
+        init_task_trace!("07 argc/argv/envp stack created: user_sp={:#x}", init_sp);
         // 初始化新 VFS 文件描述符表
         let mut fd_table = vfs::FdTable::new();
         // 打开 /dev/tty 并分配 stdin/stdout/stderr（fd 0, 1, 2）
@@ -833,6 +852,7 @@ impl TaskControlBlock {
         let tty_inode = vfs_lookup_absolute("/dev/tty").unwrap();
         let tty_file = vfs::File::new(tty_inode, vfs::FileFlags::O_RDWR).unwrap();
         fd_table.alloc_fd(tty_file, false).unwrap();
+        init_task_trace!("08 /dev/tty attached to fd 0, 1 and 2");
 
         // 初始化工作目录为根目录
         let root_inode = vfs_root().mountpoint_root_inode();
@@ -870,6 +890,7 @@ impl TaskControlBlock {
             Arc::new(Mutex::new(Futex::new())),
             user_res_slot_allocator,
         ));
+        init_task_trace!("09 process control block created");
 
         // 创建任务控制块
         let task_control_block = Arc::new(Self {
@@ -974,6 +995,7 @@ impl TaskControlBlock {
         task_control_block.process.add_thread(&task_control_block);
         registry::register_process(&task_control_block.process);
         registry::register_task(&task_control_block);
+        init_task_trace!("10 task registered in process and task registries");
         // 准备用户空间的陷阱上下文
         let trap_cx = task_control_block.acquire_inner_lock().get_trap_cx();
         // 初始化陷阱上下文
@@ -983,6 +1005,11 @@ impl TaskControlBlock {
             KERNEL_SPACE.lock().token(),
             kstack_top,
             trap_handler as usize,
+        );
+        init_task_trace!(
+            "11 initial trap context ready: pc={:#x} sp={:#x}",
+            trap_cx.gp.pc,
+            trap_cx.gp.sp
         );
         task_control_block
     }

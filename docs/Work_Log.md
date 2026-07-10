@@ -2,6 +2,227 @@
 
 ---
 
+## 2026-07-10
+
+### docs(code): 补齐 2K1000LA 关键适配源码的原因注释
+
+**涉及文件：**
+- `os/make/la64.mk`、`os/src/main.rs`、`os/src/hal/arch/loongarch64/{mod.rs,linker.ld,linker-2k1000.ld,linker-laqemu.ld}` — 解释板级链接脚本隔离、legacy uImage 低地址、U-Boot DMW 入口切换和 feature 互斥的必要性
+- `os/src/hal/arch/loongarch64/config.rs`、`os/src/mm/kernel_space.rs`、`os/src/hal/arch/riscv/config.rs` — 解释 40 位 canonical address、DRAM 起点、高栈窗口、低 39 位页表别名和临时 ELF 映射边界
+- `os/src/hal/arch/loongarch64/{laflex.rs,register/base/rvacfg.rs,register/mmu/tlbehi.rs,register/mmu/tlbrehi.rs,trap/mod.rs,trap/trap.S}` — 解释 PPN 掩码、VPN/VPPN 区别、4KiB PS 编码、RVACFG 字段保护、TLB refill 清位和 PGDL/ASID 同步
+
+**验证：**
+- `git diff --check` ✅
+- `make -f make/la64.mk -n kernel BOARD=2k1000 BLK_MODE=virt_pci LOG=off EXTRA_FEATURES="initramfs preload_payloads"` ✅
+- Docker one-off 容器内 `make -C os rv64-kernel-build-only` ✅
+- Docker one-off 容器内 `make -C os la64-kernel-build-only` ✅
+
+**备注：**
+- 本轮只增加或细化源码注释，没有修改运行逻辑；SATA DMW、ramfs-only、实板关机和 bring-up 探针原有注释已经能说明边界，未重复堆叠。
+- 根据项目交流约定，本次适配新增的英文自然语言注释已全部改为中文；CPUCFG1、PGDH、ASID、MMIO、feature 名和文件名等代码标识保留原名。后续新增源码注释统一使用中文。
+- 已核对相关架构和 MM 文档，现有内容与源码行为一致，无需同步正文；本轮没有产生新的可复用调试模式，因此未追加 references。
+
+### build: 将 Makefile 中的 NPUcore 名称统一为 MangoCore
+
+**涉及文件：**
+- `Makefile` — 根目录欢迎信息改为 `Welcome to MangoCore Project Aspera`
+- `os/make/la64.mk` — LoongArch legacy uImage 的镜像名改为 `MangoCore`，不保留原有 `+` 后缀
+
+**验证：**
+- 全部 `Makefile`/`*.mk` 中不再包含大小写形式的 `NPUcore`，也不包含 `MangoCore+` ✅
+- `make -f make/la64.mk -n uimage BOARD=2k1000` 确认生成命令使用 `mkimage ... -n MangoCore` ✅
+- `git diff --check -- Makefile os/make/la64.mk` ✅
+- Docker one-off 容器内 `make -C os rv64-kernel-build-only` ✅
+- Docker one-off 容器内 `make -C os la64-kernel-build-only` ✅
+
+**备注：**
+- 已存在的 `.ui` 镜像头不会随 Makefile 自动变化；重新执行 uImage 构建后，新产物才会显示 `Image Name: MangoCore`。
+
+### board: 生成 2K1000LA 串口交互 shell 镜像
+
+**涉及文件：**
+- `os/target/loongarch64-unknown-linux-gnu/release/os-shell.ui` — 基于当前 2K1000 内核生成独立 `mode=shell` uImage，启动后由 initproc 跳过测试组并在 `/dev/tty` 上执行预置 `/bin/bash`
+- `os_test.conf` — 构建 shell 镜像时临时切换为 `mode=shell`；产物生成后已恢复 `mode=run`，正常 `os.ui` 不受影响
+
+**验证：**
+- `file os-shell.ui`：镜像名 `NPUcore+-shell`，payload `12327864` 字节，`Load/Entry = 0x90000000` ✅
+- `strings os-shell.ui` 精确命中 `mode=shell`；正常 `os.ui` 精确命中 `mode=run` ✅
+- shell 镜像 SHA-256：`c9aa7b64bc8af7878069bab453330d18be49b33bc448e2a12a5ed10f772bcc67` ✅
+
+**备注：**
+- 当前 ramfs-only bring-up 主动跳过 `/sdcard` 和 `/tools`，所以 `basic_testcode.sh`、`busybox_testcode.sh` 等比赛脚本不存在是预期现象，不代表内核 VFS 或 exec 失败。
+- shell 镜像尚未在 2K1000 实板复测。预期日志出现 `[initproc] config source=/os_test.conf mode=shell` 和 `[initproc] entering shell mode` 后显示 `MangoCore:/#` 提示符。
+
+### la64: 完成 VALEN=40 与高栈窗口全链路审计并修复 TLB 地址语义
+
+**涉及文件：**
+- `os/src/hal/arch/loongarch64/config.rs` — 为 QEMU/2K1000 分别固定 48/40 位 `PALEN/VALEN`；新增 VA/VPN/VPPN 掩码、canonical helper、39-bit 页表索引边界和编译期不变量；2K1000 首栈顶固定为 `0xfffffffffffef000`
+- `os/src/hal/arch/loongarch64/laflex.rs` — 修正 PTE PPN 掩码；内核 PGDH 动态映射修改后刷新所有 ASID 的 TLB，避免复用栈/程序 VA 命中旧非 global 项
+- `os/src/hal/arch/loongarch64/register/{base/rvacfg,mmu/tlbehi,mmu/tlbrehi}.rs` — 按寄存器字段宽度处理 `RVACFG.RBits`、VPPN 裁剪、paired-page VPN 恢复与高 VPN 符号扩展
+- `os/src/hal/arch/loongarch64/mod.rs`、`trap/mod.rs`、`trap/trap.S` — 在 MM 初始化前关闭 reduced-VA 模式并校验 CPUCFG1；TLB 页大小改为 4KiB 的 PS=12；refill 失败分支先清 PS 再写 12；修复 PGDL/ASID 同步、ASIDBITS 污染和 ASID 耗尽哨兵写 CSR
+- `os/src/mm/kernel_space.rs`、`os/src/hal/arch/riscv/config.rs` — 为临时内核 ELF 映射增加架构上界，避开实板栈窗口与 QEMU 低 39 位页表别名
+- `os/src/drivers/block/sata_blk.rs` — 2K1000 PCI ECAM/AHCI CPU 访问使用 DMW2 SUC 别名，DMA 继续使用原始物理地址
+- `os/src/main.rs`、`os/make/la64.mk` — 增加板级 feature 约束；linker 模板缺失时直接失败，不再静默沿用旧 `linker.ld`
+- `docs/01_architecture/{loongarch64-platform,initialization-flow,boot-and-trap}.md`、`docs/09_debug/bug-la64-kernel-stack-overflow.md` — 同步地址/TLB/ASID/DMW 架构说明和审计结论
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀 LoongArch 地址位宽迁移的联审矩阵
+
+**验证：**
+- 5 个并行 subagents 分别审计掩码与符号扩展、TLB/PTE/CSR、栈窗口、启动全链路、MMIO/DMW；再由主流程逐项交叉核对源码和本地《龙芯架构参考手册卷一》 ✅
+- `git diff --check` ✅
+- Docker one-off 容器内 `make -C os rv64-kernel-build-only` ✅
+- Docker one-off 容器内 `make -C os la64-kernel-build-only` ✅
+- LA64 QEMU 30 秒烟雾测试：报告硬件/构建 `VALEN=PALEN=48`，成功进入 stage-1 init、initproc 和测试组；外层 timeout 主动结束 ✅
+- 锁定 `nightly-2024-05-01` 直接构建 `board_2k1000 + initramfs + preload_payloads` 内核，再执行 objcopy/mkimage ✅
+- 目标文件反汇编确认 `__rfill` 执行 `bstrins.d PS[5:0]=0` 后写 12；`__restore` 分别比较 PGDL/ASID并连续写入 CSR ✅
+- 新镜像 `os/target/loongarch64-unknown-linux-gnu/release/os.ui`：文件总长 `12323984` 字节，payload `12323920` 字节，`Load/Entry = 0x90000000`，SHA-256 `e8cf6b87ebd4800f3909fc9aad25d5b7d96957743f5c98fbfd7f7ba4eb8cca78` ✅
+
+**备注：**
+- 2K1000 完整栈窗口为 `0xfffffffff7bef000..0xfffffffffffef000`，大小 `0x08400000`；所有 1024 个 128KiB 栈及 4KiB guard 均位于 40 位 canonical 高半区。`VA_MASK/SEG_MASK` 本身随 VALEN 推导正确，关键是 VPN 与 VPPN 不能复用 VA 掩码。
+- 审计发现原 `STLBPS/TLBREHI.PS=3`、PTE PPN 掩码过宽、VPPN 高位未裁剪和 ASIDBITS 混入 ASID 等既有问题；这些并非首栈地址导致，但会让高地址上板结果不稳定，因此本轮一并修复。
+- `make -f make/la64.mk` 本身不设置 `os/` 的 rustup override；实板构建必须通过外层目标或显式 `rustup run nightly-2024-05-01-x86_64-unknown-linux-gnu`。
+- 仍待独立处理：kernel stack slot 耗尽转为 fallible、临时 ELF 映射失败路径 RAII 回滚、跨越单页 guard 的大栈跳转防护。2K1000 实板尚未复测本 SHA-256 镜像。
+
+### la64: 修复 2K1000LA 40 位虚拟地址下的非规范内核栈窗口
+
+**涉及文件：**
+- `os/src/hal/arch/loongarch64/config.rs` — 从 `CPUCFG1` 读取地址位宽；2K1000 使用实板报告的 `PALEN=VALEN=40`，并将 guarded kernel stack 从非法的 `MMAP_BASE` 下方迁到 `MMAP_END` 附近；QEMU 保持 48 位布局
+- `os/src/hal/arch/loongarch64/mod.rs` — 启动时输出硬件与构建配置的 `VALEN/PALEN` 对照，避免平台常量再次静默失配
+- `os/src/hal/arch/loongarch64/kern_stack.rs` — 将实板高栈 volatile 探针限制为首个栈执行一次，用于确认新窗口可写且不增加后续任务创建开销
+- `docs/01_architecture/loongarch64-platform.md` — 补充 CPUCFG1 解码、40 位 canonical address 和双平台栈窗口说明
+- `docs/09_debug/bug-la64-kernel-stack-overflow.md` — 记录实板 AddressError 证据、根因和验证判据
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀 AddressError 与页表/TLB 故障的分层排查模式
+
+**验证：**
+- `git diff --check` ✅
+- Docker one-off 容器内 `make -C os rv64-kernel-build-only` ✅
+- Docker one-off 容器内 `make -C os la64-kernel-build-only` ✅
+- LA64 QEMU 25 秒烟雾测试：硬件/构建均报告 `VALEN=PALEN=48`，成功进入 stage-1 init 和 initproc 用户态；外层 timeout 主动结束 ✅
+- Docker one-off 容器内以 `nightly-2024-05-01` 构建 2K1000 uImage ✅
+- 新镜像 `os/target/loongarch64-unknown-linux-gnu/release/os.ui`：文件总长 `12327840` 字节，payload `12327776` 字节，`Load/Entry = 0x90000000`，SHA-256 `5b7594d1e48fe68c987d1bf6f1fd6a1d9713b55435563b34f232c3e370da0b8e`；`strings` 确认包含地址位宽、`kstack:01/02`、`sched:01` 和 `user:01` 探针 ✅
+
+**备注：**
+- 实板 panic 中 `bad addr=0xffffff7fffffeff8`；`CPUCFG1=0x03e2727e` 解码得到 `PABITS=VABITS=40`。`MMAP_BASE=0xffffff8000000000` 是 40 位地址空间第一个合法高半地址，旧栈地址位于其下方，CPU 在页表查询前直接抛出 AddressError。
+- 本次保留映射栈和 guard page，不回退到上一届的 heap `Vec<u8>` 栈。新首栈顶约为 `0xfffffffffffef000`，1024 个 132KiB slot 全部位于合法高半区。
+- QEMU 已完成回归；2K1000LA 实板仍需用本条记录中的新 SHA-256 镜像复测，预期日志顺序为 `kstack:01 -> kstack:02 -> sched:01 -> user:01`。
+
+### la64: 细分 2K1000LA 首次上下文切换与高地址内核栈故障边界
+
+**涉及文件：**
+- `os/src/hal/arch/loongarch64/kern_stack.rs` — 在 2K1000 分配首个高地址内核栈后输出栈区间、软件记录 PPN 和 PGDH，并在仍使用启动栈时对新栈顶执行 volatile 写回读探针
+- `os/src/task/context.rs` — 为 2K1000 调试构建提供只读的初始 `ra/sp` 快照接口
+- `os/src/task/processor.rs` — 首次 `__switch` 前同时输出实际 resume PC、预期 `trap_return` 地址和 resume SP，区分上下文内容损坏与切换后故障
+- `docs/Work_Log.md` — 记录本轮实板日志结论、对照证据和验证结果
+
+**验证：**
+- `git diff --check` ✅
+- Docker one-off 容器内 `make -C os rv64-kernel-build-only` ✅
+- Docker one-off 容器内 `make -C os la64-kernel-build-only` ✅
+- Docker one-off 容器内以 `nightly-2024-05-01` 构建 2K1000 uImage ✅
+- 新镜像 `os/target/loongarch64-unknown-linux-gnu/release/os.ui`：`Data Size = 12311232 Bytes`，`Load/Entry = 0x90000000`，SHA-256 `d82ea4dafdbc2b77a82dd525a069a9debc3852e8a6c8938cb315d5d7a28a2a85`；`strings` 确认包含 `kstack:01/02` 和扩展 `sched:01` ✅
+
+**备注：**
+- 实板旧日志完成 TCB 创建并停在 `[bringup][sched:01]`，未进入 `[bringup][user:01]`，故障已限定在 `__switch` 恢复 `ra/sp` 到 `trap_return` 首条输出之前。
+- 当前首个内核栈顶为 `0xffffff7ffffff000`，依赖 PGDH 高半地址页表；上一届 `oskernel2025-npucore-blossom` 的 LoongArch 内核栈使用 kernel heap `Vec<u8>` 低地址，且两边 `switch.S` 相同，因此当前首要怀疑是实板高地址内核栈映射/TLB refill，而不是 `switch.S` ABI。
+- 新探针不会切换到低地址栈：若仅出现 `kstack:01` 而没有 `kstack:02`，即可直接确认高地址栈首次访存失败；若二者都出现，再根据 `sched:01` 的 resume PC/SP 判断上下文恢复。
+- 文档同步检查：现有内核栈和调度文档描述仍准确；本轮仅增加 `board_2k1000` 条件诊断代码，不改变栈分配或调度语义。
+
+### la64: 为 2K1000LA 首次用户态切换增加分阶段启动探针
+
+**涉及文件：**
+- `os/src/main.rs` — 在 payload 安装、init 任务创建和进入调度器前后增加 2K1000 专用总阶段输出
+- `os/src/fs/mod.rs` — 为 `/initproc`、bash、busybox、测试配置、兼容库和 ltprunner 的写入及嵌入页释放增加细粒度 preload 检查点
+- `os/src/task/mod.rs` — 输出实际选择的用户态入口（`/init` 或 `/initproc`）以及初始任务入队状态
+- `os/src/task/task.rs` — 覆盖 init ELF 映射/解析、用户地址空间、内核栈、trap context、用户栈、TTY、PCB/TCB 注册等创建阶段
+- `os/src/task/processor.rs` — 仅在 2K1000 首次调度时输出 idle 到 init 的上下文切换，并在任务首次返回 idle 时输出回程检查点
+- `os/src/hal/arch/loongarch64/trap/mod.rs` — 仅在 2K1000 首次 `trap_return()` 输出信号检查结果和进入 PLV3 前的 PC、SP、trap context、页表 token、ASID、restore 地址
+- `docs/Work_Log.md` — 记录本次实板启动插桩、构建与 QEMU 烟雾验证
+
+**验证：**
+- `git diff --check` ✅
+- Docker one-off 容器内 `make -C os rv64-kernel-build-only` ✅
+- Docker one-off 容器内 `make -C os la64-kernel-build-only` ✅
+- Docker one-off 容器内以 `nightly-2024-05-01` 执行 `make -C os -f make/la64.mk uimage BOARD=2k1000 EXTRA_FEATURES="initramfs preload_payloads"` ✅
+- 2K1000 uImage：`os/target/loongarch64-unknown-linux-gnu/release/os.ui`，`Load Address = 0x90000000`，`Entry Point = 0x90000000`，`Data Size = 12048768 Bytes`（约 11.49 MiB）；`strings` 确认包含全部 `[bringup]` 探针 ✅
+- rv64 QEMU initramfs-only 烟雾测试进入 `[init] MangoCore stage-1 boot` 并执行到 `initproc`；30 秒后由外层 timeout 主动结束 ✅
+
+**备注：**
+- 所有新增探针均受 `board_2k1000` feature 控制，常规 rv64/la64 QEMU 构建不输出这些日志。
+- 下一次实板启动时以“最后出现的 `[bringup]` 行”为完成边界、以下一条缺失行为故障区间；重点观察 preload 01-18、TCB 01-11、sched 01 和 user 01-03。
+- Docker Compose 仍因 `blkio_config` 引用宿主机不存在的 `/dev/sdb` 无法启动，本次沿用同镜像 one-off 容器验证；未执行 2K1000LA 实板复测。
+- 文档同步检查：`docs/03_fs/init-and-rootfs.md` 已为 `draft` 且当前控制流说明仍准确；其余改动仅增加条件调试输出，不改变调度、trap 或 VFS 语义。
+
+## 2026-07-09
+
+### la64: 增加 2K1000LA 最小上板 ramfs-only 分支
+
+**涉及文件：**
+- `os/src/main.rs` — 在 `board_2k1000 + initramfs` 路径中先调用 `fs::force_ramfs()`，明确注释首阶段只验证 U-Boot -> uImage -> UART -> initramfs；跳过外部网卡枚举和启动块设备挂载，避免残留 virtio-pci、SATA/AHCI 或未接入 GMAC/PHY 路径干扰实板首启
+- `docs/03_fs/init-and-rootfs.md` — 同步说明 2K1000LA 实板最小上板使用 ramfs-only，默认 QEMU/CI 路径仍保留 `mount_boot_block_devices()`
+- `docs/01_architecture/initialization-flow.md` — 更新 `rust_main()` 伪代码和 initramfs 分支说明，标明 `board_2k1000` 与默认路径的差异
+- `docs/01_architecture/boot-and-trap.md` — 更新启动总览中的 initramfs 控制流，记录实板路径跳过外部 net/block probe
+- `docs/Work_Log.md` — 记录本次实板最小上板保护、验证结果和剩余风险
+
+**验证：**
+- Docker one-off 容器内 `cd /app/os && make rv64-kernel-build-only` ✅
+- Docker one-off 容器内 `cd /app/os && make la64-kernel-build-only` ✅
+- Docker one-off 容器内 `cd /app/os && make -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=virt_pci LOG=off` ✅
+- 生成的 2K1000 uImage：`os/target/loongarch64-unknown-linux-gnu/release/os.ui`，`Load Address = 0x90000000`，`Entry Point = 0x90000000`，`Data Size = 12302040 Bytes`（约 11.73 MiB）✅
+
+**备注：**
+- 本机 Docker Compose 仍因 `docker-compose.yml` 中 `blkio_config` 引用不存在的 `/dev/sdb` 无法启动；本次使用 `zhouzhouyi/os-contest:20260104` one-off Docker 容器完成构建验证。
+- 未执行 QEMU 运行测试和 2K1000LA 实板 `bootm` 启动；下一步应通过串口记录 U-Boot 加载 uImage 后的首屏日志，确认能看到新增的 `2K1000 board bring-up` 提示。
+
+### la64: 对齐 2K1000LA 实板 uImage 地址与启动入口
+
+**涉及文件：**
+- `os/src/hal/arch/loongarch64/mod.rs` — 按 `board_laqemu` / `board_2k1000` feature 选择 QEMU 或 2K1000 板级配置；`boot.rs` 仅在 QEMU 构建中启用，避免与实板 `entry.asm` 重复定义 `_start`
+- `os/src/main.rs` — 仅在 `loongarch64 + board_2k1000` 构建中启用 `hal/arch/loongarch64/entry.asm`
+- `os/make/la64.mk` — `BOARD=2k1000` 时将 legacy uImage 头部 `Load Address` / `Entry Point` 改为低 32 位物理地址 `0x90000000`
+- `os/src/hal/arch/loongarch64/linker-2k1000.ld` — 新增 2K1000 实板 linker 模板，基址 `0x90000000`
+- `os/src/hal/arch/loongarch64/linker-laqemu.ld` — 新增 QEMU linker 模板，保留基址 `0x80000000`，避免实板构建后污染 QEMU 构建
+
+**验证：**
+- `make -C os -f make/la64.mk -pn BOARD=2k1000` 解析确认 `LA_LOAD_ADDR := 0x90000000`、`LA_ENTRY_POINT := 0x90000000` ✅
+- `make -C os -f make/la64.mk -pn BOARD=laqemu` 解析确认 QEMU 地址保持原配置 ✅
+- `make -C os -f make/la64.mk -n kernel BOARD=2k1000 BLK_MODE=virt_pci LOG=off` 干跑确认会复制 `linker-2k1000.ld` 并启用 `board_2k1000` feature ✅
+
+**备注：**
+- 本次依据 2K1000LA 随包 U-Boot/Linux 资料：legacy uImage 的 `ih_load` / `ih_ep` 为 32 位字段，U-Boot 在 LoongArch `bootm` 路径中通过 `map_to_sysmem()` 将低物理地址映射到 `0x9000...` cached DMW 后跳转。
+- 未执行双架构完整编译和 QEMU 集成测试；本次仅完成实板启动地址/入口路径的构建侧对齐。
+- 检查 `docs/` 中相关架构文档引用，本次未重构架构接口，暂未同步正文文档。
+
+### la64: 拆分 2K1000LA 实板物理内存起点
+
+**涉及文件：**
+- `os/src/hal/arch/loongarch64/config.rs` — `board_laqemu` 保持 `MEMORY_START=0x80000000`；`board_2k1000` 改为 `MEMORY_START=0x90000000`，使用实板第二段 DRAM 的 768MiB 保守子集 `0x90000000..0xC0000000`
+- `os/src/hal/arch/loongarch64/config.rs` — 2K1000 下 `DISK_IMAGE_BASE` 暂设为 `MEMORY_END`，避免未启用 `block_mem` 阶段与内核起点或 frame allocator 管理范围重叠
+- `docs/Work_Log.md` — 记录本次实板内存布局调整和验证范围
+
+**验证：**
+- `git diff --check` ✅
+- `make -C os -f make/la64.mk -n kernel BOARD=2k1000 BLK_MODE=virt_pci LOG=off` 干跑确认 2K1000 构建仍选择 `board_2k1000` 和 `linker-2k1000.ld` ✅
+- `rg` 检查 `docs/` 中 `MEMORY_START` / `MEMORY_SIZE` / `DISK_IMAGE_BASE` 引用，未发现需要同步的精确 `code_paths` frontmatter ✅
+
+**备注：**
+- 本次仍未启用 `block_mem`；2K1000 的 `DISK_IMAGE_BASE` 仅作为占位，后续若恢复内存块设备，需要单独设计保留区和映射范围。
+- 未执行双架构完整编译和 QEMU 集成测试。
+
+### la64: 区分 QEMU 与 2K1000 实板关机路径
+
+**涉及文件：**
+- `os/src/hal/arch/loongarch64/sbi.rs` — `board_laqemu` 保留 QEMU power-management MMIO shutdown；`board_2k1000` 改为仅自旋 halt，避免实板误写 QEMU 专用 MMIO 地址
+- `os/src/hal/arch/loongarch64/sbi.rs` — 为 2K1000 halt 路径添加符合 `docs/00_overview/code-comment-style.md` 的 `HACK(2k1000-shutdown)` 注释，包含 Reference 与 Remove when
+- `docs/Work_Log.md` — 记录本次实板关机路径临时处理和验证范围
+
+**验证：**
+- `git diff --check` ✅
+- `make -C os -f make/la64.mk -n kernel BOARD=2k1000 BLK_MODE=virt_pci LOG=off` 干跑确认 2K1000 构建仍选择 `board_2k1000` ✅
+- `rg` 检查 `docs/` 中 `shutdown()` 引用，未发现需要同步的精确 `code_paths` frontmatter ✅
+
+**备注：**
+- 2K1000 真正 ACPI/PM S5 关机序列尚未验证；当前路径只保证不会写错 QEMU MMIO。
+- 未执行双架构完整编译和 QEMU 集成测试。
+
 ## 2026-06-30
 
 ### fix(code-comments): 回退 processor 上下文切换计数位置漂移

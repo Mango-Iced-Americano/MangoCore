@@ -859,6 +859,13 @@ raw 255 RAW\n";
 
 #[allow(unused)]
 pub fn flush_preload() {
+    macro_rules! preload_trace {
+        ($($arg:tt)*) => {
+            #[cfg(feature = "board_2k1000")]
+            println!("[bringup][preload] {}", format_args!($($arg)*));
+        };
+    }
+
     // Safety (linker-symbol `from_raw_parts`): every `s<name>` / `e<name>`
     // pair below is a linker-defined symbol pair placed by the linker script.
     // The address range `[s<name>, e<name>)` contains the raw bytes of an
@@ -887,12 +894,15 @@ pub fn flush_preload() {
         sinitproc as usize, einitproc as usize, sbash as usize, ebash as usize, sbusybox as usize, ebusybox as usize,
         sosconfig as usize, eosconfig as usize,
     );
+    preload_trace!("01 create /initproc");
     let initproc = create_or_open_file("initproc").unwrap();
     let initproc_len = einitproc as usize - sinitproc as usize;
+    preload_trace!("02 /initproc opened, writing {} bytes", initproc_len);
     let written = initproc.write(
         // Safety: see block comment above — linker-symbol range validity.
         unsafe { core::slice::from_raw_parts(sinitproc as *const u8, initproc_len) },
     ).unwrap();
+    preload_trace!("03 /initproc write complete: {} bytes", written);
     log::debug!(
         "[kernel] flush_preload: initproc write len={} => written={} size_after={}",
         initproc_len,
@@ -905,7 +915,9 @@ pub fn flush_preload() {
     ) {
         crate::mm::frame_dealloc(ppn);
     }
+    preload_trace!("04 /initproc embedded frames released");
     // bash/busybox/os_test.conf/fs_test: 失败不阻塞启动
+    preload_trace!("05 install /bash");
     let _ = create_or_open_file("bash").map(|f| {
         let _ = f.write(unsafe { core::slice::from_raw_parts(sbash as *const u8, ebash as usize - sbash as usize) });
     });
@@ -915,6 +927,8 @@ pub fn flush_preload() {
     ) {
         crate::mm::frame_dealloc(ppn);
     }
+    preload_trace!("06 /bash installed and embedded frames released");
+    preload_trace!("07 install /busybox and /bin/busybox");
     let _ = create_or_open_file("busybox").map(|f| {
         let _ = f.write(unsafe { core::slice::from_raw_parts(sbusybox as *const u8, ebusybox as usize - sbusybox as usize) });
     });
@@ -941,6 +955,8 @@ pub fn flush_preload() {
     ) {
         crate::mm::frame_dealloc(ppn);
     }
+    preload_trace!("08 busybox copies installed and embedded frames released");
+    preload_trace!("09 install /os_test.conf");
     match file_size("os_test.conf") {
         Ok(size) => {
             log::info!("[kernel] flush_preload: keep existing /os_test.conf size={}", size);
@@ -959,7 +975,9 @@ pub fn flush_preload() {
     ) {
         crate::mm::frame_dealloc(ppn);
     }
+    preload_trace!("10 /os_test.conf ready and embedded frames released");
     {
+        preload_trace!("11 install /fs_test");
         let _ = create_or_open_file("fs_test").map(|f| {
             let _ = f.write(unsafe { core::slice::from_raw_parts(sfstest as *const u8, efstest as usize - sfstest as usize) });
         });
@@ -969,8 +987,10 @@ pub fn flush_preload() {
         ) {
             crate::mm::frame_dealloc(ppn);
         }
+        preload_trace!("12 /fs_test installed and embedded frames released");
     }
     {
+        preload_trace!("13 install /ltp_proto_compat.so");
         let _ = vfs_lookup_absolute("ltp_proto_compat.so")
             .and_then(|inode| inode.resize(0).map_err(|e| e as isize));
         let _ = create_or_open_file("ltp_proto_compat.so").map(|f| {
@@ -982,8 +1002,10 @@ pub fn flush_preload() {
         ) {
             crate::mm::frame_dealloc(ppn);
         }
+        preload_trace!("14 /ltp_proto_compat.so installed and embedded frames released");
     }
     {
+        preload_trace!("15 install /ltprunner");
         let _ = vfs_lookup_absolute("ltprunner")
             .and_then(|inode| inode.resize(0).map_err(|e| e as isize));
         let _ = create_or_open_file("ltprunner").map(|f| {
@@ -995,6 +1017,9 @@ pub fn flush_preload() {
         ) {
             crate::mm::frame_dealloc(ppn);
         }
+        preload_trace!("16 /ltprunner installed and embedded frames released");
     }
+    preload_trace!("17 install compatibility files under /etc");
     ensure_ltp_compat_etc_files();
+    preload_trace!("18 all preload payloads installed");
 }

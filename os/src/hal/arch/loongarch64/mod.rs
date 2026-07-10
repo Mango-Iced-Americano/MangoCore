@@ -2,13 +2,21 @@
 //!
 //! 汇总平台配置、CSR 寄存器包装、LAFlex 页表、trap、SBI 兼容层、时间源和上下文切换。
 
+// 平台常量不可混用，尤其是 QEMU 与 2K1000 使用不同的 UART 地址和 MMIO 访问路径。
+#[cfg(feature = "board_laqemu")]
 #[path = "../../platform/loongarch64/qemu.rs"]
+pub mod board;
+#[cfg(feature = "board_2k1000")]
+#[path = "../../platform/loongarch64/2k1000.rs"]
 pub mod board;
 pub mod config;
 pub mod laflex;
 #[macro_use]
 mod mem_reg_macro;
 mod acpi;
+// boot.rs 定义 QEMU 的 `_start`。实板必须从 U-Boot 继承的 DMW 地址环境切换出去，
+// 因而使用 entry.asm。
+#[cfg(feature = "board_laqemu")]
 mod boot;
 mod sbi;
 pub mod switch;
@@ -21,7 +29,10 @@ pub use switch::__switch;
 pub use tlb::{asid_alloc, asid_free, set_asid, tlb_global_invalidate, tlb_invalidate};
 
 use crate::{
-    config::{DIR_WIDTH, MMAP_BASE, PAGE_SIZE_BITS, PTE_WIDTH, PTE_WIDTH_BITS, SUC_DMW_VSEG},
+    config::{
+        CPUCfg1, DIR_WIDTH, MMAP_BASE, PAGE_SIZE, PAGE_SIZE_BITS, PALEN, PTE_WIDTH,
+        SUC_DMW_VSEG, VALEN,
+    },
     hal::arch::loongarch64::{
         board::UART_BASE,
         trap::{set_kernel_trap_entry, set_machine_err_trap_ent},
@@ -46,11 +57,14 @@ pub fn machine_init() {
     // remap_test not supported for lack of DMW read only privilege support
     trap::init();
     get_timer_freq_first_time();
-    /* println!(
-     *     "[machine_init] VALEN: {}, PALEN: {}",
-     *     cfg0.get_valen(),
-     *     cfg0.get_palen()
-     * ); */
+    let cfg1 = CPUCfg1::read();
+    println!(
+        "[machine_init] address bits: hardware VALEN={} PALEN={}, build VALEN={} PALEN={}",
+        cfg1.get_valen(),
+        cfg1.get_palen(),
+        VALEN,
+        PALEN
+    );
     for i in 0..=6 {
         let j: usize;
         // Safety: `cpucfg` only reads the CPU configuration word selected by
@@ -88,6 +102,9 @@ pub fn bootstrap_init() {
     // Timer & other Interrupts
     TIClr::read().clear_timer().write();
     TCfg::read().set_enable(false).write();
+    // 地址布局按 CPUCFG1 的完整 VALEN 构建，不能继承固件选择的缩减虚拟地址模式；
+    // 否则按构建期 VALEN 判断为规范的地址仍可能在页表转换前触发异常。
+    RVACfg::read().set_rbits(0).write();
     CrMd::read()
         .set_watchpoint_enabled(false)
         .set_paging(true)
@@ -111,8 +128,10 @@ pub fn bootstrap_init() {
     DMW3::empty().write();
     //DMW1::empty().write();
 
-    STLBPS::read().set_ps(PTE_WIDTH_BITS).write();
-    TLBREHi::read().set_page_size(PTE_WIDTH_BITS).write();
+    // STLBPS 保存页面大小以 2 为底的对数，4KiB 对应 12。TLBREHi 包装接口接收字节数并在
+    // 内部生成同一编码。两者都与 PTE_WIDTH_BITS=3 无关，后者只表示 PTE 为 8 字节。
+    STLBPS::read().set_ps(PAGE_SIZE_BITS).write();
+    TLBREHi::read().set_page_size(PAGE_SIZE).write();
     PWCL::read()
         .set_ptbase(PAGE_SIZE_BITS)
         .set_ptwidth(DIR_WIDTH)
@@ -130,5 +149,17 @@ pub fn bootstrap_init() {
         .write();
 
     println!("[kernel] UART address: {:#x}", UART_BASE);
+    let cfg1 = CPUCfg1::read();
+    println!(
+        "[bootstrap_init] address bits: hardware VALEN={} PALEN={}, build VALEN={} PALEN={}",
+        cfg1.get_valen(),
+        cfg1.get_palen(),
+        VALEN,
+        PALEN
+    );
+    // 如果镜像按错误的开发板配置构建，应在启用正常内存分配前停止。继续运行会让
+    // PTE 掩码和规范地址检查与 CPU 不一致，使后续异常表现为误导性的 MMU 故障。
+    assert_eq!(cfg1.get_valen(), VALEN, "kernel VALEN does not match CPUCFG1");
+    assert_eq!(cfg1.get_palen(), PALEN, "kernel PALEN does not match CPUCFG1");
     println!("[bootstrap_init] {:?}", PRCfg1::read());
 }

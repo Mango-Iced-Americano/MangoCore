@@ -95,13 +95,17 @@ __restore:
 
     slli.d $a1, $a1, 12
     csrrd  $t0, CSR_PGDL
-    beq    $t0, $a1, 1f
-    # PGDL changed → write PGDL + ASID atomically (PTW requires no branch between them)
-    csrwr  $a1, CSR_PGDL
-    # ASID: read-modify-write to preserve ASID-width field (bits 16-23)
     csrrd  $t1, CSR_ASID
-    bstrpick.d $t1, $t1, 23, 16  # extract bits 16-23 (ASID width)
-    or     $a2, $a2, $t1         # combine with new ASID (bits 0-9)
+    # CSR_ASID[9:0] 是当前 ASID；第 [23:16] 位描述硬件实现的 ASID 位宽，绝不能
+    # 将其按位或到进程 ASID 值中。
+    bstrpick.d $t1, $t1, 9, 0
+    # PGDL 相同不代表地址空间上下文相同：两个任务可能共享页表根但使用不同 ASID。
+    # 任一字段变化时都必须重写这一对寄存器。
+    bne    $t0, $a1, 2f
+    beq    $t1, $a2, 1f
+2:
+    # 保持 PGDL 与 ASID 同步，两次写寄存器之间不能插入分支。
+    csrwr  $a1, CSR_PGDL
     csrwr  $a2, CSR_ASID
     invtlb 0x3, $zero, $zero
 1:

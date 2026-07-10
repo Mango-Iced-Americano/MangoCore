@@ -1,4 +1,6 @@
 use crate::config::PAGE_SIZE;
+#[cfg(feature = "board_2k1000")]
+use crate::config::HIGH_BASE_EIGHT;
 use crate::drivers::block::BlockDevice;
 use crate::hal::BLOCK_SZ;
 use crate::mm::{frame_alloc, frame_dealloc, PhysAddr};
@@ -9,6 +11,19 @@ use isomorphic_drivers::{
 use log::info;
 use pci::*;
 use spin::Mutex;
+
+#[inline(always)]
+fn cpu_mmio_addr(physical: usize) -> usize {
+    #[cfg(feature = "board_2k1000")]
+    {
+        // 2K1000 的 DMW2 将 VSEG=8 映射为强序非缓存区域。PCI/DMA 描述符仍需使用
+        // 原始物理地址，只有 CPU 解引用 MMIO 寄存器时才使用该别名。
+        return physical | HIGH_BASE_EIGHT;
+    }
+    #[cfg(not(feature = "board_2k1000"))]
+    physical
+}
+
 pub struct SataBlock(Mutex<AHCI<Provider>>);
 
 impl SataBlock {
@@ -71,7 +86,7 @@ impl provider::Provider for Provider {
 
 // 扫描pci设备
 // 查看手册得知，配置空间位于 0xFE_0000_0000
-const PCI_CONFIG_ADDRESS: usize = 0xFE_0000_0000;
+const PCI_CONFIG_PHYS_ADDRESS: usize = 0xFE_0000_0000;
 const PCI_COMMAND: u16 = 0x04;
 
 struct UnusedPort;
@@ -108,7 +123,7 @@ pub fn pci_init() -> Option<AHCI<Provider>> {
         scan_bus(
             &UnusedPort,
             CSpaceAccessMethod::MemoryMapped,
-            PCI_CONFIG_ADDRESS,
+            cpu_mmio_addr(PCI_CONFIG_PHYS_ADDRESS),
         )
     } {
         info!(
@@ -143,7 +158,7 @@ pub fn pci_init() -> Option<AHCI<Provider>> {
                     return None;
                 }
                 unsafe { enable(dev.loc) };
-                if let Some(x) = AHCI::new(pa as usize, len as usize) {
+                if let Some(x) = AHCI::new(cpu_mmio_addr(pa as usize), len as usize) {
                     return Some(x);
                 }
             }

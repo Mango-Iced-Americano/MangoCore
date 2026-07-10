@@ -8,6 +8,7 @@ mod mem_access;
 use self::context::GeneralRegs;
 
 use super::register::{self, Exception, Interrupt, Trap, ERA};
+use super::tlb::{ASID_NONE, KERN_ASID};
 use super::MErrEntry;
 use crate::hal::arch::get_clock_freq;
 use crate::hal::arch::loongarch64::laflex::LAFlexPageTable;
@@ -25,6 +26,10 @@ use crate::task::{
 };
 use core::arch::{asm, global_asm};
 use core::ptr::{addr_of, addr_of_mut};
+
+#[cfg(feature = "board_2k1000")]
+static BOARD_FIRST_TRAP_RETURN: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
 pub use context::{MachineContext, TrapContext, UserContext, UserSignalMask};
 use register::{
@@ -95,6 +100,9 @@ pub extern "C" fn __rfill() {
     ertn
 1:
     csrrd  $t0, 0x8e
+    # TLBREHI.PS 可能保留固件或上一次 TLB 重填的状态。若不先清除第 5:0 位，
+    # 直接与 0xC 按位或无法保证得到 4KiB 所需的 PS=12。
+    bstrins.d $t0, $zero, 5, 0
     ori    $t0, $t0, 0xC
     csrwr  $t0, 0x8e
 
@@ -415,17 +423,47 @@ fn read_bp() {
 }
 #[no_mangle]
 pub fn trap_return() -> ! {
+    #[cfg(feature = "board_2k1000")]
+    let trace_first_return =
+        !BOARD_FIRST_TRAP_RETURN.swap(true, core::sync::atomic::Ordering::Relaxed);
+    #[cfg(feature = "board_2k1000")]
+    if trace_first_return {
+        println!("[bringup][user:01] first task reached trap_return");
+    }
     let task = do_signal();
+    #[cfg(feature = "board_2k1000")]
+    if trace_first_return {
+        println!("[bringup][user:02] initial signal check complete");
+    }
     set_user_trap_entry();
     let trap_cx = task.acquire_inner_lock().get_trap_cx();
     let trap_cx_ptr = trap_cx as *const TrapContext as usize;
     trap_cx.sstatus.set_pplv(3).set_pie(true);
-    let asid = task.asid.load(core::sync::atomic::Ordering::Relaxed);
+    let allocated_asid = task.asid.load(core::sync::atomic::Ordering::Relaxed);
+    // ASID_NONE 是软件分配失败哨兵，不是硬件 ASID。这里使用保留的内核 ASID 0；
+    // 地址空间激活路径会执行保守刷新，以保持回退地址空间之间的隔离。
+    let asid = if allocated_asid == ASID_NONE {
+        KERN_ASID
+    } else {
+        allocated_asid
+    };
     if asid != 0 {
         crate::task::perf::record_tlb_activate();
     }
     let user_satp = current_user_token();
     let restore_va = __restore as usize - __alltraps as usize + strampoline as usize;
+    #[cfg(feature = "board_2k1000")]
+    if trace_first_return {
+        println!(
+            "[bringup][user:03] entering PLV3: pc={:#x} sp={:#x} trap_cx={:#x} token={:#x} asid={} restore={:#x}",
+            trap_cx.gp.pc,
+            trap_cx.gp.sp,
+            trap_cx_ptr,
+            user_satp,
+            asid,
+            restore_va
+        );
+    }
     unsafe {
         asm!(
             "ibar 0",

@@ -6,7 +6,7 @@
 use bit_field::BitField;
 use core::fmt::Debug;
 
-use crate::config::VALEN;
+use crate::config::{VALEN, VPPN_MASK};
 impl_define_csr!(TLBREHi,"
 When in the TLB refill exception context (`CSR.TLBRERA.IsTLBR`=1),
 the `TLBREHI` register stores the information related to the physical page number of the low-order bits of the TLB table entry,
@@ -38,6 +38,9 @@ impl TLBREHi {
     }
     /// Set the page size used by `TLBWR` & `TLBFILL` when `CSR.TLBRERA.IsTLBR`=1.
     pub fn set_page_size(&mut self, page_size: usize) -> &mut Self {
+        // 此接口接收字节数，而 STLBPS::set_ps 接收大小以 2 为底的对数。拒绝非 2 的幂，
+        // 可以防止 trailing_zeros 静默编码出无关的页面大小。
+        assert!(page_size.is_power_of_two(), "TLBREHI page size must be a power of two");
         self.bits
             .set_bits(0..=5, page_size.trailing_zeros() as usize);
         self
@@ -50,7 +53,7 @@ impl TLBREHi {
     }
     /// Set the `VPPN` used by `TLBSRCH`, `TLBWR` & `TLBFILL` when `CSR.TLBRERA.IsTLBR`=1.
     pub fn set_vppn(&mut self, vppn: usize) -> &mut Self {
-        self.bits.set_bits(13..VALEN, vppn);
+        self.bits.set_bits(13..VALEN, vppn & VPPN_MASK);
         self
     }
 }

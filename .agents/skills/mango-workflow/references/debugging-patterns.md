@@ -263,3 +263,25 @@
 - **修复**: 不直接删除 sweep；为 timer queue 和 timeout waitqueue 维护 cached earliest deadline。热路径先读 pending + next deadline，未到期直接返回；只有到期或 next deadline 不可信时才加锁处理。这个模式类似 Linux timer/hrtimer 使用 cached next expiry 决定下一次处理/重编程。
 - **教训**: 对早期启动、NTP、nanosleep、futex timeout、timerfd 这类等待路径，正确性兜底往往比性能优化更早暴露风险。优化顺序应是“让兜底便宜”，不是先删除兜底。
 - **相关文件**: `os/src/task/manager.rs`, `os/src/task/processor.rs`
+
+### LoongArch AddressError 先查地址规范性，不要先查页表
+
+- **现象**: 软件页表查询能找到 PPN，PGDH 也已设置，但对某个高虚拟地址首次 load/store 立即触发 `Exception(AddressError)`，没有进入预期的 TLB refill 或 page fault 路径。
+- **根因**: 虚拟地址不符合处理器实际 `VALEN` 的规范地址规则。以 40 位 VALEN 为例，高半区从 `0xffffff8000000000` 开始；紧邻其下的地址属于非规范区，CPU 会在页表查询之前拒绝访问。
+- **修复**: 从 `CPUCFG1` 解码 `PABITS=[11:4]+1` 和 `VABITS=[19:12]+1`，将平台 `PALEN/VALEN` 与硬件对齐；逐一验证 kernel stack、mmap、direct map 等固定窗口处于合法低半或高半区。用启动栈上的一次 volatile 写回读探针验证新映射，再进入 context switch。
+- **教训**: `AddressError` 与 `PageInvalid*`/TLB refill 是不同故障层级。前者先查地址位宽和 canonical form；后者才查 PGDH、PTE、权限、ASID 和 TLB 刷新。软件 `mapped_frame()` 成功不能证明该虚拟地址对 CPU 合法。
+- **相关文件**: `os/src/hal/arch/loongarch64/config.rs`, `os/src/hal/arch/loongarch64/kern_stack.rs`, `os/src/hal/arch/loongarch64/trap/mod.rs`
+
+### LoongArch 地址位宽变更必须联审 VA、TLB、PTE 与 DMW
+
+- **触发场景**: 修改 `VALEN/PALEN`、迁移高半地址窗口，或把 QEMU 地址布局带到实板。
+- **最小审计矩阵**:
+  1. `CPUCFG1` 的 `PABITS/VABITS` 与构建常量是否一致，`RVACFG.RBits` 是否改变有效 VALEN。
+  2. `VA_MASK/SEG_MASK`、VPN 掩码和 VPN 符号扩展是否分别按 VA 位宽与右移后的页号表示计算。
+  3. TLB VPPN 是否严格对应 `VA[VALEN-1:13]`，paired-page VPN 读回是否补回低位；TLB 页大小字段应写 `log2(PAGE_SIZE)`，不能写 `log2(PTE_SIZE)`。
+  4. PTE/TLBELO 的 PPN 是否对应 `PA[PALEN-1:12]`，不要把 PALEN 位掩码整体再左移 12 位。
+  5. 页表实际索引位数是否小于 VALEN；若软件只索引低 39 位，必须检查不同高位 VA 的页表别名和动态映射边界。
+  6. 高物理 MMIO 地址是否能作为 canonical 页模式 VA；不能时使用正确 MAT 的 DMW CPU 别名，同时保持 DMA 地址为原始 PA。
+  7. PGDL/ASID 切换与 `invtlb` 操作是否覆盖目标项的 global、ASID 和 paired-page 语义；ASID 分配失败哨兵绝不能直接写入 CSR。
+- **验证方式**: 编译期断言固定关键边界；启动期打印并断言 CPUCFG；对 refill/restore 裸汇编做目标文件反汇编；最后必须实际进入用户态，只有内核早期日志不算通过。
+- **相关文件**: `os/src/hal/arch/loongarch64/config.rs`, `os/src/hal/arch/loongarch64/laflex.rs`, `os/src/hal/arch/loongarch64/tlb.rs`, `os/src/hal/arch/loongarch64/trap/`, `os/src/drivers/block/sata_blk.rs`

@@ -9,7 +9,6 @@ use embedded_hal::serial::nb::{Read, Write};
 use crate::drivers::Ns16550a;
 use core::{arch::asm, mem::MaybeUninit};
 
-use super::acpi::Pm1Cnt;
 use super::board::UART_BASE;
 use super::register::CrMd;
 
@@ -58,13 +57,24 @@ pub fn local_irq_restore(was_enabled: bool) {
     }
 }
 
+/// 通过 QEMU 平台关机寄存器关闭 LoongArch 虚拟机。
+#[cfg(feature = "board_laqemu")]
 pub fn shutdown() -> ! {
-    let mut pm1_cnt: Pm1Cnt = Pm1Cnt::empty();
-    // pm1_cnt.set_s5().write();
     // Safety: this writes the QEMU power-management MMIO shutdown register.
     // The address is platform-defined and the access is volatile.
     unsafe {
         (0x100E_001C as *mut u8).write_volatile(0x34);
     }
     loop {}
+}
+
+/// 内核请求关机时停止 2K1000 开发板执行。
+#[cfg(feature = "board_2k1000")]
+pub fn shutdown() -> ! {
+    // HACK(2k1000-shutdown)：避免在实板上写入 QEMU 专用电源 MMIO 寄存器。
+    // 依据：2K1000LA 早期上板尚未验证 ACPI/PM S5 关机序列。
+    // 移除条件：`board_2k1000` 具备经过实板验证的 ACPI/PM S5 关机实现。
+    loop {
+        core::hint::spin_loop();
+    }
 }

@@ -24,6 +24,9 @@ pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x2000;
 pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x2000;
 pub const MMAP_BASE: usize = 0x2000_0000;
 pub const MMAP_END: usize = 0xb800_0000;
+// 公共内核 ELF 映射代码需要架构专属上界。RISC-V 不存在独立的高地址 PGDH 栈别名，
+// 因此沿用 MMAP_END 作为正确上界，该常量不会改变 RISC-V 的既有地址布局。
+pub const KERNEL_PROGRAM_END: usize = MMAP_END;
 pub const SKIP_NUM: usize = 2;
 
 // manually make usable memory space equal

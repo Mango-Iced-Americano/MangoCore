@@ -4,8 +4,9 @@ module: "fs/init"
 category: fs
 status: draft
 owner: MangoCore Team
-last_updated: 2026-06-29
+last_updated: 2026-07-09
 code_paths:
+  - "os/src/main.rs"
   - "os/src/fs/mod.rs"
   - "os/src/fs/filesystem.rs"
   - "os/src/fs/initramfs.rs"
@@ -36,7 +37,7 @@ related_docs:
 
 根文件系统初始化是内核启动的关键阶段。它在内存管理初始化之后执行，负责探测块设备、识别文件系统类型、创建 VFS 根并挂载默认伪文件系统。无论底层是 ext4、FAT32 还是 ramfs，最终的根文件系统都被包装为统一的 `MountFS` 实例，供上层系统和用户进程通过 VFS 接口访问。
 
-整个初始化逻辑集中在 `os/src/fs/mod.rs` 的 `VFS_ROOT` lazy_static 和 `mount_common_filesystems` 函数中，由 `rust_main` 在合适的时机触发。
+整个初始化逻辑集中在 `os/src/fs/mod.rs` 的 `VFS_ROOT` lazy_static 和 `mount_common_filesystems` 函数中，由 `os/src/main.rs::rust_main()` 在合适的时机触发。`board_2k1000` 实板最小上板路径会在触发 VFS_ROOT 前显式调用 `force_ramfs()`，避免尚未验证的外部块设备路径参与首启。
 
 ## 2. 启动流程
 
@@ -47,6 +48,7 @@ rust_main()
   |-- timer_subsystem_init()           定时器子系统初始化
   |
   |-- [initramfs 特性启用]
+  |     |-- [board_2k1000] fs::force_ramfs()
   |     |-- fs::initramfs_init()       触发 VFS_ROOT lazy_static
   |     |     |-- [new RamFS]
   |     |     |-- [unpack_embedded()]  解包内嵌 cpio 归档
@@ -58,9 +60,10 @@ rust_main()
   |     |     |     |-- /dev/shm (tmpfs)
   |     |     |     |-- /mnt, /run, /var/tmp (目录)
   |     |
-  |     |-- drivers::init_net_device()
+  |     |-- [not board_2k1000] drivers::init_net_device()
   |     |-- net::config::init()
-  |     |-- fs::mount_boot_block_devices()  探测块设备并挂载
+  |     |-- [not board_2k1000] fs::mount_boot_block_devices()  探测块设备并挂载
+  |     |-- [board_2k1000] 跳过外部 net/block probe
   |
   |-- [initramfs 特性未启用: legacy 路径]
   |     |-- drivers::init_net_device()
@@ -81,8 +84,10 @@ rust_main()
 1. 创建空 `RamFS` 作为根文件系统。
 2. 通过 `initramfs::unpack_embedded()` 解包编译时通过 `.incbin` 嵌入内核的 newc cpio 归档，将 init 程序、busybox 等注入 RamFS。
 3. 挂载 devfs、procfs、sysfs、tmpfs 等伪文件系统。
-4. 调用 `mount_boot_block_devices()` 探测 virtio 块设备，注册 `/dev/vda` 和 `/dev/vdb`，解析 MBR 分区，将 x0 挂载到 `/sdcard`、x1 挂载到 `/tools`。
+4. 默认 QEMU/CI 路径调用 `mount_boot_block_devices()` 探测 virtio 块设备，注册 `/dev/vda` 和 `/dev/vdb`，解析 MBR 分区，将 x0 挂载到 `/sdcard`、x1 挂载到 `/tools`。
 5. 块设备故障只打印 warning，不 panic。
+
+`board_2k1000` 是 initramfs 模式的实板特例：首阶段目标是先验证 U-Boot -> uImage -> UART -> initramfs，因此 `rust_main()` 在 `fs::initramfs_init()` 前调用 `force_ramfs()`，并跳过 `drivers::init_net_device()` 与 `mount_boot_block_devices()`。SATA/AHCI 与板载 GMAC/PHY 驱动后续单独验证后再恢复。
 
 **Legacy 模式**（`initramfs` 特性未启用）：
 
@@ -103,7 +108,7 @@ pub fn force_ramfs() {
 }
 ```
 
-调用 `force_ramfs()` 可在块设备初始化之前跳过物理设备探测，直接使用 ramfs 启动。这个路径用于 VFS 层调试或 legacy block root 模式。它同时禁用块设备子系统，确保后续代码不会误访问硬件。
+调用 `force_ramfs()` 可在块设备初始化之前跳过物理设备探测，直接使用 ramfs 启动。这个路径用于 VFS 层调试、legacy block root 模式，以及 2K1000LA 实板最小上板。它同时禁用块设备子系统，确保后续代码不会误访问硬件。
 
 ## 3. VFS_ROOT lazy_static
 
@@ -124,7 +129,7 @@ lazy_static! {
 }
 ```
 
-初始化流程：new RamFS → MountFS 包装 → 解包 cpio → 挂载伪文件系统。块设备在此阶段不参与，后续通过 `mount_boot_block_devices()` 以子挂载形式接入。
+初始化流程：new RamFS → MountFS 包装 → 解包 cpio → 挂载伪文件系统。块设备在此阶段不参与；QEMU/CI 路径后续通过 `mount_boot_block_devices()` 以子挂载形式接入，`board_2k1000` 首阶段保持 ramfs-only。
 
 ### 3.2 Legacy 模式
 
@@ -214,6 +219,7 @@ pub fn vfs_root() -> Arc<MountFS> {
 
 - **VFS_ROOT 初始化顺序**：必须发生在 `mm::init()` 之后（需要堆分配器），且在 `task::add_initproc()` 之前（init 进程需要根文件系统）。
 - **initramfs 中块设备延迟探测**：块设备探测需要连续物理页 DMA，必须在内存分配压力低时进行。initramfs 路径将块设备探测（`mount_boot_block_devices`）推迟到网络初始化之后、preload payload 安装之前。
+- **2K1000LA 最小上板保护**：`board_2k1000 + initramfs` 在创建 VFS_ROOT 前调用 `force_ramfs()`，并跳过外部 net/block probe；目标是先验证串口和 initramfs，SATA/GMAC 后续按驱动成熟度逐项打开。
 - **不可递归触发 VFS_ROOT**：initramfs 解包期间（`unpack_newc`）严禁调用 `vfs_root()`，必须使用传入的 `root` 参数，否则引发递归 lazy_static 初始化死锁。
 - **块设备故障不 panic**：无论是根文件系统未识别还是 tools 盘缺失，均 fallback 到 ramfs 或打印 warning 继续执行。这对调试和 CI 环境至关重要。
 - **MountFS 包装统一入口**：无论底层是磁盘文件系统（ext4/FAT32）还是伪文件系统（ramfs），全部包装为 `MountFS`，使路径解析、子挂载管理、挂载传播通过统一的 MountFS 层处理。

@@ -3,7 +3,7 @@ title: "初始化流程 (Initialization Flow)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-09
 tags: [architecture, boot, init]
 ---
 
@@ -37,10 +37,11 @@ task::timer_subsystem_init()
 
 if initramfs:
   fs::vfs::posix_lock::init_posix_lock_manager()
+  fs::force_ramfs()                    [board_2k1000]
   fs::initramfs_init()
-  drivers::init_net_device()
+  drivers::init_net_device()           [not board_2k1000]
   net::config::init()
-  fs::mount_boot_block_devices()
+  fs::mount_boot_block_devices()       [not board_2k1000]
   fs::install_preload_payloads()        [preload_payloads]
 else:
   drivers::init_net_device()
@@ -84,13 +85,29 @@ pub fn rust_main() -> ! {
     {
         // 在 mm::init() 之后创建 VFS_ROOT: 创建 RamFS + 解包 cpio + 挂载 devfs/proc/tmp
         crate::fs::vfs::posix_lock::init_posix_lock_manager();
+        #[cfg(feature = "board_2k1000")]
+        {
+            // 2K1000LA 实板首阶段只验证 U-Boot -> uImage -> UART -> initramfs。
+            // 在 SATA/AHCI 和板载网卡路径逐项验证前，先禁止外部块设备 lazy probe。
+            fs::force_ramfs();
+        }
         fs::initramfs_init();
 
+        #[cfg(not(feature = "board_2k1000"))]
         drivers::init_net_device();
+        #[cfg(feature = "board_2k1000")]
+        {
+            // 实板网卡不是 QEMU virtio-net，最小上板阶段暂不枚举 virtio PCI 网卡。
+        }
         net::config::init();
 
         // 先探测块设备（需要连续物理页 DMA，必须在 preload 分配页之前做）
+        #[cfg(not(feature = "board_2k1000"))]
         fs::mount_boot_block_devices();
+        #[cfg(feature = "board_2k1000")]
+        {
+            // 最小上板路径已 force_ramfs()，此处不触发 BLOCK_DEVICES。
+        }
 
         // 安装预装载的测试 payload（迁移期保留，在块设备探测之后避免页碎片化）
         #[cfg(feature = "preload_payloads")]
@@ -121,7 +138,7 @@ pub fn rust_main() -> ! {
 }
 ```
 
-函数体中的 feature 分支决定启动阶段能看到哪些外部镜像和根文件系统。`block_mem` 路径会先把链接进内核的镜像移动到高地址；`initramfs` 路径先建立 initramfs 根，再初始化网卡并挂载启动块设备；非 `initramfs` 路径则通过 `flush_preload()` 和 `mount_tools_disk()` 准备 legacy 测试环境。两条分支最后都把初始进程放入调度队列。
+函数体中的 feature 分支决定启动阶段能看到哪些外部镜像和根文件系统。`block_mem` 路径会先把链接进内核的镜像移动到高地址；默认 `initramfs` 路径先建立 initramfs 根，再初始化网卡并挂载启动块设备；`board_2k1000` 实板最小上板路径在建立 initramfs 根前调用 `force_ramfs()`，并跳过外部 net/block probe。非 `initramfs` 路径则通过 `flush_preload()` 和 `mount_tools_disk()` 准备 legacy 测试环境。两条分支最后都把初始进程放入调度队列。
 
 ## 3. 早期阶段
 
@@ -132,9 +149,9 @@ pub fn rust_main() -> ! {
 | 架构 | 当前行为 |
 |------|----------|
 | rv64 | `hal/arch/riscv/mod.rs` 中为空实现 |
-| la64 | `hal/arch/loongarch64/mod.rs` 中只允许 core 0 继续；配置 exception entry、TLB refill entry、timer vector、FPU/SIMD、paging、DMW2、page walk 寄存器 |
+| la64 | `hal/arch/loongarch64/mod.rs` 中只允许 core 0 继续；关闭 `RVACFG` 缩减模式，配置 exception entry、TLB refill entry、4KiB TLB page size、timer vector、FPU/SIMD、paging、DMW2、page walk，并校验 `CPUCFG1` 的 VALEN/PALEN |
 
-la64 的 `bootstrap_init()` 执行在 `mem_clear()` 前，因此该阶段只依赖架构寄存器、链接符号和已可用的基础输出路径。rv64 对应配置主要由 OpenSBI 和后续 `machine_init()` 承担。
+la64 的 `bootstrap_init()` 执行在 `mem_clear()` 前，因此该阶段只依赖架构寄存器、链接符号和已可用的基础输出路径。硬件/构建地址位宽不一致会在 `mm::init()` 前直接 panic。rv64 对应配置主要由 OpenSBI 和后续 `machine_init()` 承担。
 
 ### 3.2 `mem_clear()`
 
@@ -204,10 +221,11 @@ KERNEL_SPACE.lock().activate()
 
 ```
 fs::vfs::posix_lock::init_posix_lock_manager()
+fs::force_ramfs()                     [board_2k1000]
 fs::initramfs_init()
-drivers::init_net_device()
+drivers::init_net_device()            [not board_2k1000]
 net::config::init()
-fs::mount_boot_block_devices()
+fs::mount_boot_block_devices()        [not board_2k1000]
 fs::install_preload_payloads()          [preload_payloads]
 ```
 
@@ -217,11 +235,15 @@ fs::install_preload_payloads()          [preload_payloads]
 
 ### 6.2 网卡与网络配置
 
-initramfs 路径先执行 `drivers::init_net_device()`，再执行 `net::config::init()`。这个顺序保证网络协议栈配置时可以看到已注册的网络设备。
+默认 initramfs 路径先执行 `drivers::init_net_device()`，再执行 `net::config::init()`。这个顺序保证网络协议栈配置时可以看到已注册的网络设备。
+
+`board_2k1000` 最小上板阶段跳过 `drivers::init_net_device()`，只保留 `net::config::init()` 的协议栈配置。原因是实板网卡不是 QEMU virtio-net，GMAC/PHY 驱动接入前不应枚举 virtio PCI 网卡。
 
 ### 6.3 块设备挂载和 payload
 
-`fs::mount_boot_block_devices()` 在 `fs::install_preload_payloads()` 之前调用。`main.rs` 注释给出的理由是块设备探测需要连续物理页 DMA，先于 preload 分配页可以降低页碎片影响。
+默认 initramfs 路径中，`fs::mount_boot_block_devices()` 在 `fs::install_preload_payloads()` 之前调用。`main.rs` 注释给出的理由是块设备探测需要连续物理页 DMA，先于 preload 分配页可以降低页碎片影响。
+
+`board_2k1000` 最小上板阶段先调用 `fs::force_ramfs()`，再跳过 `fs::mount_boot_block_devices()`。这样可以先验证串口输出、cpio 解包和 `/init` 加载，避免 SATA/AHCI 或残留 QEMU virtio 块设备路径影响首启定位。
 
 ## 7. legacy 启动路径
 

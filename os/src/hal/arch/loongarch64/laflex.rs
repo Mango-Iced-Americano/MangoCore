@@ -4,12 +4,12 @@
 //! 和内核全局映射激活。
 
 use super::{
-    tlb::{tlb_invalidate, tlb_invalidate_global_page, tlb_invalidate_page},
+    tlb::{tlb_invalidate, tlb_invalidate_page},
     tlb_global_invalidate,
 };
 use crate::{
     config::{
-        MEMORY_HIGH_BASE_VPN, MEMORY_SIZE, PAGE_SIZE, PAGE_SIZE_BITS, PALEN, VA_MASK,
+        MEMORY_HIGH_BASE_VPN, MEMORY_SIZE, PAGE_SIZE, PAGE_SIZE_BITS, PALEN, VPN_MASK,
         VPN_SEG_MASK,
     },
     mm::{address::*, frame_alloc, FrameTracker, MapPermission, MemoryError, PageTable, UserAccess},
@@ -24,7 +24,9 @@ static mut DIRTY: [bool; DIRTY_LEN] = [false; DIRTY_LEN];
 use super::register::MemoryAccessType;
 
 fn dirty_index(vpn: VirtPageNum) -> Option<usize> {
-    let idx = vpn.0 & VA_MASK;
+    // vpn.0 已经移除了 PAGE_SIZE_BITS。若在这里使用 VA_MASK，会多保留 VPN 中
+    // 不存在的 12 位，并破坏高地址折叠结果。
+    let idx = vpn.0 & VPN_MASK;
     (idx < DIRTY_LEN).then_some(idx)
 }
 
@@ -88,10 +90,15 @@ pub struct LAFlexPageTableEntry {
     pub bits: usize,
 }
 impl LAFlexPageTableEntry {
-    const PPN_MASK: usize = ((1usize << PALEN) - 1) << 12;
+    // PALEN 表示物理地址位数。PTE 保存的是 PA[PALEN-1:12]，而不是从第 12 位
+    // 开始的 PALEN 位；后者会让掩码向高位多延伸 12 位，并把保留位或软件字段
+    // 错误解释为 PPN 的一部分。
+    const PPN_MASK: usize = ((1usize << PALEN) - 1) & !(PAGE_SIZE - 1);
+    const PPN_LIMIT: usize = 1usize << (PALEN - PAGE_SIZE_BITS);
     #[inline(always)]
     pub fn new(ppn: PhysPageNum, flags: LAPTEFlagBits) -> Self {
-        let bits: usize = ((ppn.0 << 12) & Self::PPN_MASK) | flags.bits as usize;
+        assert!(ppn.0 < Self::PPN_LIMIT, "la64 PPN exceeds PALEN");
+        let bits: usize = ((ppn.0 << PAGE_SIZE_BITS) & Self::PPN_MASK) | flags.bits as usize;
         LAFlexPageTableEntry { bits }
     }
     #[allow(unused)]
@@ -101,11 +108,13 @@ impl LAFlexPageTableEntry {
     }
     #[inline(always)]
     pub fn ppn(&self) -> PhysPageNum {
-        ((self.bits & Self::PPN_MASK) >> 12).into()
+        ((self.bits & Self::PPN_MASK) >> PAGE_SIZE_BITS).into()
     }
     #[inline(always)]
     pub fn set_ppn(&mut self, ppn: PhysPageNum) {
-        self.bits = (self.bits & !Self::PPN_MASK) | ((ppn.0 << 12) & Self::PPN_MASK)
+        assert!(ppn.0 < Self::PPN_LIMIT, "la64 PPN exceeds PALEN");
+        self.bits =
+            (self.bits & !Self::PPN_MASK) | ((ppn.0 << PAGE_SIZE_BITS) & Self::PPN_MASK)
     }
     #[inline(always)]
     pub fn flags(&self) -> LAPTEFlagBits {
@@ -214,7 +223,9 @@ impl LAFlexPageTable {
     #[inline(always)]
     fn invalidate_page(&self, vpn: VirtPageNum) {
         if self.is_kernel_pt() {
-            tlb_invalidate_global_page(vpn);
+            // 动态 PGDH 映射不保证形成全局偶奇双页 TLB 项。必须刷新全部 ASID，
+            // 防止复用的栈或程序虚拟地址保留其他任务留下的非全局旧表项。
+            tlb_global_invalidate();
         } else {
             tlb_invalidate_page(vpn);
         }
@@ -552,9 +563,14 @@ impl PageTable for LAFlexPageTable {
                     asid = super::tlb::asid_alloc();
                     task.asid.store(asid, core::sync::atomic::Ordering::Relaxed);
                 }
-                if asid != super::tlb::ASID_NONE {
-                    super::tlb::set_asid(asid);
-                }
+                // ASID 分配耗尽时回退到 ASID 0；上方完整的非全局表项刷新用于保持
+                // 回退地址空间之间的隔离。
+                let active_asid = if asid == super::tlb::ASID_NONE {
+                    super::tlb::KERN_ASID
+                } else {
+                    asid
+                };
+                super::tlb::set_asid(active_asid);
             }
             // 4. Set user page table base
             super::register::PGDL::from(self.get_root_ppn().0 << PAGE_SIZE_BITS).write();

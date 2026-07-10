@@ -3,7 +3,7 @@ title: "启动与陷阱路径 (Boot and Trap Flow)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-06-29
+last_update: 2026-07-09
 tags: [architecture, boot, trap, syscall]
 ---
 
@@ -78,14 +78,17 @@ task::timer_subsystem_init()
 
 ```
 fs::vfs::posix_lock::init_posix_lock_manager()
+fs::force_ramfs()                  [board_2k1000]
 fs::initramfs_init()
-drivers::init_net_device()
+drivers::init_net_device()         [not board_2k1000]
 net::config::init()
-fs::mount_boot_block_devices()
+fs::mount_boot_block_devices()     [not board_2k1000]
 fs::install_preload_payloads()       [preload_payloads]
 ```
 
-该分支先建立 initramfs 根，再初始化网络设备与网络配置，随后探测启动块设备。`main.rs` 注释说明块设备探测需要连续物理页 DMA，因此放在 payload 安装之前。
+默认分支先建立 initramfs 根，再初始化网络设备与网络配置，随后探测启动块设备。`main.rs` 注释说明块设备探测需要连续物理页 DMA，因此放在 payload 安装之前。
+
+`board_2k1000` 实板最小上板路径是例外：在建立 initramfs 根前调用 `fs::force_ramfs()`，并跳过外部网卡和块设备探测。该路径用于先验证 U-Boot -> uImage -> UART -> initramfs，SATA/AHCI 与板载 GMAC/PHY 驱动后续再单独接入。
 
 ### 3.3 legacy 分支
 
@@ -245,6 +248,8 @@ __restore(trap_cx, token, asid)
 ```
 
 两套路径的共同点是：信号处理一定发生在恢复用户上下文之前。
+
+la64 的 `__restore` 同时维护 PGDL 和 ASID。恢复汇编比较当前 PGDL/ASID，任一变化时连续写入二者并清除非 global TLB 项；ASID 只取 `CSR.ASID[9:0]`，只读的 `ASIDBITS[23:16]` 不参与新 ASID 值。这样可以避免页表根未变化但 ASID 需要更新时继续使用旧 TLB 地址空间标识。
 
 ## 10. 控制流图
 
