@@ -175,12 +175,11 @@ pub fn rust_main() -> ! {
     }
 
     crate::fs::vfs::posix_lock::init_posix_lock_manager();
-    task::add_initproc();
 
     // ── Kernel self-test mode (mango.mode=ktest) ──
-    // Runs after all subsystem init (fs, net, block, tasks) but before
-    // the scheduler starts running user-mode init. Allows tests to access
-    // fully-initialized kernel state.
+    // When ktest runs with the scheduler active, we spawn the test runner
+    // as a kernel task and enter run_tasks().  The runner and any spawned
+    // test helpers are the only tasks — initproc is *not* added.
     let boot_config = crate::bootargs::load();
     if boot_config.mode == crate::bootargs::BootMode::Ktest {
         crate::println!(
@@ -188,9 +187,19 @@ pub fn rust_main() -> ! {
             boot_config.tests,
             boot_config.repeat,
         );
-        crate::kernel_tests::run_from_bootargs(&boot_config);
+        // Store the config so the fn()-only trampoline can access it.
+        *crate::kernel_tests::KTEST_BOOT_CONFIG.lock() = Some(boot_config);
+        // Spawn the test runner as a kernel task.  It will run all
+        // selected tests, then call hal::shutdown().
+        // Spawned test helpers (wakers, additional waiters) run and exit
+        // within the scheduler before the runner finishes.
+        crate::task::spawn_ktest_task(crate::kernel_tests::run_ktest_entry);
+        // Enter scheduler — ktest runner runs as a scheduled task.
+        task::run_tasks();
     }
 
+    // ── Normal boot ──
+    task::add_initproc();
     // note that in run_tasks(), there is yet *another* pre_start_init(),
     // which is used to turn on interrupts in some archs like LoongArch.
     task::run_tasks();

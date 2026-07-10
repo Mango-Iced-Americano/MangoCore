@@ -1,12 +1,11 @@
 //! L3 tests for the scheduler.
 //!
-//! # Note on spawn_and_yield
-//!
-//! Full scheduler tests (spawn a kernel thread, yield, verify it ran) require
-//! a minimal kernel-thread spawn API. This is planned as a follow-up.
+//! Multi-task tests (spawn_and_yield) require the scheduler to be active
+//! (mango.mode=ktest with the new multi-task harness).
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 use crate::kernel_tests::runner::KernelTest;
 use crate::task;
 
@@ -16,33 +15,27 @@ pub fn tests() -> Vec<KernelTest> {
         KernelTest::new("sched::current_task_exists", test_current_task_exists),
         KernelTest::new("sched::ready_queue_has_init", test_ready_queue_has_init),
         KernelTest::new("sched::task_manager_counts", test_task_manager_counts),
-        // TODO: spawn_and_yield — requires kernel thread spawn API
+        KernelTest::new("sched::spawn_and_yield", test_spawn_and_yield),
     ]
 }
 
 /// Verify tasks exist after add_initproc().
-///
-/// In ktest mode, the scheduler hasn't started yet (`run_tasks()` is called
-/// after tests finish), so `current_task()` is None.  Instead we verify that
-/// the task manager's ready queue is non-empty — the initproc was added by
-/// `add_initproc()` before ktest runs.
 fn test_current_task_exists() -> Result<(), &'static str> {
-    if let Some((ready, _interruptible)) = task::task_manager_counts() {
-        if ready == 0 {
-            return Err("no ready tasks: add_initproc() should have added at least one");
-        }
+    // In scheduler-active ktest, this runs inside a scheduled task
+    // so we expect a valid current_task().
+    if task::current_task().is_some() || task::task_manager_counts().map(|(r, _)| r > 0).unwrap_or(false) {
         Ok(())
     } else {
-        Err("task_manager_counts returned None")
+        Err("no current task and no ready tasks")
     }
 }
 
-/// Verify the initproc was added to the ready queue.
+/// Verify the scheduler has ready tasks.
 fn test_ready_queue_has_init() -> Result<(), &'static str> {
     if task::has_ready_task() {
         Ok(())
     } else {
-        Err("no ready tasks after add_initproc()")
+        Err("no ready tasks after init")
     }
 }
 
@@ -50,14 +43,34 @@ fn test_ready_queue_has_init() -> Result<(), &'static str> {
 fn test_task_manager_counts() -> Result<(), &'static str> {
     let (ready, interruptible) = task::task_manager_counts()
         .ok_or("task_manager_counts returned None")?;
-    // After add_initproc(), ready should be > 0.
-    // interruptible can be 0 or more — just verify both are valid u16 values.
     if ready == 0 {
-        return Err("ready_count should be > 0 after add_initproc()");
+        return Err("ready_count should be > 0");
     }
-    // Sanity: counts should not be absurdly high
     if ready > 4096 || interruptible > 4096 {
         return Err("task counts implausibly high");
     }
+    Ok(())
+}
+
+/// Spawn a kernel task, yield, and verify it ran.
+///
+/// Pattern:
+/// 1. Spawn a helper task that sets a flag and exits.
+/// 2. Yield to let the spawned task run.
+/// 3. Verify the flag was set.
+fn test_spawn_and_yield() -> Result<(), &'static str> {
+    static SPAWNED_RAN: AtomicBool = AtomicBool::new(false);
+
+    task::spawn_ktest_task(|| {
+        SPAWNED_RAN.store(true, Ordering::SeqCst);
+    });
+
+    // Yield to let the spawned task run and exit.
+    task::suspend_current_and_run_next();
+
+    if !SPAWNED_RAN.load(Ordering::SeqCst) {
+        return Err("spawned task did not run");
+    }
+
     Ok(())
 }

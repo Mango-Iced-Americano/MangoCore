@@ -4,6 +4,43 @@
 
 ## 2026-07-10
 
+### ktest 多任务调度测试基础设施：spawn_ktest_task + 调度器内运行测试
+
+**涉及文件：**
+- `os/src/task/context.rs` — 新增 `TaskContext::goto_address(addr, sp)` 构造器，允许 ktest 任务首次切入时跳到任意地址而非 trap_return
+- `os/src/task/task.rs` — 新增 `TaskControlBlock::new_ktest_minimal()` 构造器，创建无用户内存/无 fd table 的最小化 TCB（仅内核栈 + TaskContext），共享 INITPROC 的 ProcessControlBlock
+- `os/src/task/mod.rs` — 新增 `spawn_ktest_task(f: fn())`（分配内核栈、创建最小 TCB、加入 ready 队列）；新增 `zombify_current_and_run_next()`（ktest 专用最小 exit，不做进程级清理）；新增 `ktest_trampoline`（通过 Mutex<fn()> 传递闭包到首次切入的 trampoline）
+- `os/src/kernel_tests/mod.rs` — 新增 `KTEST_BOOT_CONFIG` 全局存储（避免闭包捕获导致无法转为 fn()）；新增 `run_ktest_entry()`（fn() 入口，从全局读取 BootConfig 后调用 run_tests）
+- `os/src/kernel_tests/runner.rs` — 重构：提取 `run_tests_return()` 返回 `TestResults` 结构体；`run_tests()` 改为调用 `run_tests_return()` 后 shutdown；新增 `TestResults` 结构体
+- `os/src/main.rs` — 重构 ktest 启动路径：ktest 模式下不调用 `add_initproc()`，改为 `spawn_ktest_task(run_ktest_entry)` 后进入 `task::run_tasks()`；normal 模式不变
+- `os/src/kernel_tests/waitqueue.rs` — 新增 `test_wake_one`：spawn waker task → waiter 调用 wait_until 阻塞 → waker 唤醒 → waiter 返回；使用 `lazy_static!` 避免 `WaitQueue::new()` 非 const 问题
+- `os/src/kernel_tests/sched.rs` — 新增 `test_spawn_and_yield`：spawn helper task 设置 flag → yield → 验证 flag 为 true；`test_current_task_exists` 适配调度器已启动的场景（优先检查 `current_task().is_some()`）
+- `os/src/fs/vfs/dentry_cache.rs` — 移除死代码 `advance_clock_one()`（文档声称被 get() 调用，但 get() 明确只在插入路径做逐出）
+
+**验证：**
+- `make rv64-kernel-build-only` ✅ (188 warnings, 均为既有)
+- `make la64-kernel-build-only` ✅ (173 warnings, 均为既有)
+
+**备注：** 核心设计决策：(1) ktest 任务共享 `INITPROC.process` 作为 PCB，避免重复构造复杂 PCB；(2) trampoline 通过 `static Mutex<fn()>` 传递闭包，支持 Rust 的 fn() 类型约束；(3) ktest 路径不调用 `add_initproc()`，只有 runner 和 spawned helper 在 ready 队列中，runner 调用 `hal::shutdown()` 结束测试。未在 QEMU 中实际运行，后续需要验证 wake_one 和 spawn_and_yield 的行为正确性。
+
+---
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — 新增 `RunMode::Regression` 枚举变体；`parse_mode()` 支持 `"regression"`；`mode_name()` 新增匹配；`main()` 新增 regression 提前返回分支（fork + exec `/regression` + waitpid + 打印 `[L4 REGRESSION PASSED/FAILED]` + shutdown）
+- `regression_test.conf` — (新增) 回归测试配置，`mode=regression`，`mask=0x000`
+- `os/Makefile` — 新增 `rv64-regression`、`la64-regression` 目标：编译用户程序 → 构建文件系统镜像 → 构建内核 → 注入配置 → 启动 QEMU → 解析输出判定 pass/fail
+- `Makefile` — 新增 `regression` 顶层快捷目标（→ `rv64-regression`）
+
+**验证：**
+- `make rust-user BOARD=rvqemu MODE=release` ✅
+- `make rust-user BOARD=laqemu MODE=release` ✅
+- `make rv64-kernel-build-only` ❌（预存问题：`main.rs` 引用了不存在的 `run_ktest_entry` / `task::run_tests()`，与本次改动无关）
+- `make la64-kernel-build-only` ⏸️（同上的预存问题）
+
+**备注：** regression 模式在 `load_runtime_config()` 后立即执行，跳过 `prepare_symlink()` 等环境准备，直接 fork+exec `/regression`。regression 二进制输出 TAP 格式结果，initproc 通过 `exit_code_from_waitpid_status()` 判断退出码。Makefile 目标通过 `debugfs` 将 `regression_test.conf` 注入 rootfs 镜像，QEMU stderr/stdout tee 到 `/tmp/regression-{rv,la}.log`，用 grep 检查 `[L4 REGRESSION PASSED]` 字样。
+
+---
+
 ### L4 用户态回归测试程序：pipe / mmap / timerfd / rename 历史 bug 防复发
 
 **涉及文件：**

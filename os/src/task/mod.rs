@@ -317,3 +317,57 @@ lazy_static! {
 pub fn add_initproc() {
     add_task(INITPROC.clone());
 }
+
+// ── ktest multi-task harness ────────────────────────────────────────
+
+/// Stores the function pointer for the next ktest spawned task.
+/// The trampoline reads this to know which test function to invoke.
+static KTEST_SPAWN_FN: spin::Mutex<fn()> = spin::Mutex::new(|| {});
+
+/// Trampoline for ktest kernel tasks.
+///
+/// Called via `TaskContext.ra` when the scheduler first switches to a
+/// ktest-spawned task. It invokes the stored function, then exits the
+/// task without process-level cleanup.
+extern "C" fn ktest_trampoline() -> ! {
+    let f = *KTEST_SPAWN_FN.lock();
+    f();
+    zombify_current_and_run_next();
+}
+
+/// Spawn a minimal kernel task for ktest mode only.
+///
+/// The task has a bare kernel stack, no user memory, no file descriptors.
+/// It runs `f()` and then calls [`zombify_current_and_run_next`].
+///
+/// # Panics
+///
+/// Panics if called outside ktest mode (no `current_task()` is running).
+pub fn spawn_ktest_task(f: fn()) {
+    *KTEST_SPAWN_FN.lock() = f;
+    let tid_handle = tid_alloc();
+    let kstack = crate::hal::kstack_alloc();
+    let kstack_top = kstack.get_top();
+    let task_cx = TaskContext::goto_address(ktest_trampoline as usize, kstack_top);
+    let pcb = INITPROC.process.clone();
+    let tcb = TaskControlBlock::new_ktest_minimal(tid_handle, pcb, kstack, task_cx);
+    add_task(tcb);
+}
+
+/// Minimal exit for ktest tasks: mark as zombie and schedule away.
+///
+/// Unlike [`exit_current_and_run_next`], this does NOT call process-level
+/// cleanup. It only marks the task as [`TaskStatus::Zombie`], adds it to
+/// the zombie queue, and switches back to the scheduler. The scheduler
+/// will eventually drop the TCB via `take_zombie_tasks`.
+pub fn zombify_current_and_run_next() -> ! {
+    let task = take_current_task().unwrap();
+    {
+        let mut task_inner = task.acquire_inner_lock();
+        task_inner.task_status = TaskStatus::Zombie;
+    }
+    add_zombie_task(task);
+    let mut _unused = TaskContext::zero_init();
+    schedule(&mut _unused as *mut _);
+    panic!("Unreachable after zombify_current_and_run_next");
+}

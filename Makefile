@@ -90,6 +90,9 @@ clean:
 rv64-only:
 	make -C os rv64-only BLK_MODE=${BLK_MODE}
 
+regression:
+	make -C os rv64-regression
+
 docker:
 	@if docker compose ps --status running 2>/dev/null | grep -q os-dev; then \
 		docker compose exec -it os-dev bash; \

@@ -67,6 +67,30 @@ rv64-run: prepare-cargo-config
 	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
 	make -f make/rv64.mk comp
 
+# Regression test: build + inject config + run QEMU + parse TAP output
+rv64-regression: prepare-cargo-config
+	@rustup override set $(RV_TOOLCHAIN)
+	cp ./src/lang_items.rs.rv ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs
+	cd ../user && make rust-user BOARD=rvqemu MODE=release
+	make -f make/rv64.mk fs-img MODE=release FS_MODE=ext4
+	make -f make/rv64.mk build MODE=release
+	@echo "[regression] Injecting regression config into rootfs..."
+	@printf 'rm /os_test.conf\nwrite $(CURDIR)/../regression_test.conf /os_test.conf\n' | debugfs -w -f /dev/stdin $(CURDIR)/../fs-img-dir/rootfs-rv.img 2>/dev/null || true
+	@echo "[regression] Launching QEMU..."
+	@timeout --foreground 120 qemu-system-riscv64 \
+		-machine virt \
+		-kernel $(CURDIR)/../kernel-rv \
+		-m 256 \
+		-nographic \
+		-smp 1 \
+		-bios default \
+		-drive file=$(CURDIR)/../fs-img-dir/rootfs-rv.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		-no-reboot \
+		-rtc base=utc 2>&1 | tee /tmp/regression-rv.log
+	@grep -q "L4 REGRESSION PASSED" /tmp/regression-rv.log && echo "=== REGRESSION PASS ===" || (echo "=== REGRESSION FAIL ===" && exit 1)
+
 la64-only: prepare-cargo-config
 	@rustup override set $(LA_TOOLCHAIN)
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
@@ -96,6 +120,28 @@ la64-run: prepare-cargo-config
 	cp ./src/lang_items.rs.la ./src/lang_items.rs
 	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
 	make -f make/la64.mk comp MODE=${MODE} LOG=${LOG}
+
+la64-regression: prepare-cargo-config
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	cd ../user && make rust-user BOARD=laqemu MODE=release
+	make -f make/la64.mk fs-img MODE=release FS_MODE=ext4
+	make -f make/la64.mk build MODE=release
+	@echo "[regression] Injecting regression config into rootfs..."
+	@printf 'rm /os_test.conf\nwrite $(CURDIR)/../regression_test.conf /os_test.conf\n' | debugfs -w -f /dev/stdin $(CURDIR)/../fs-img-dir/rootfs-la.img 2>/dev/null || true
+	@echo "[regression] Launching QEMU..."
+	@timeout --foreground 120 qemu-system-loongarch64 \
+		-machine virt \
+		-kernel $(CURDIR)/../kernel-la \
+		-m 1G \
+		-nographic \
+		-smp 1 \
+		-drive file=$(CURDIR)/../fs-img-dir/rootfs-la.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-pci,drive=x0 \
+		-no-reboot \
+		-rtc base=utc 2>&1 | tee /tmp/regression-la.log
+	@grep -q "L4 REGRESSION PASSED" /tmp/regression-la.log && echo "=== REGRESSION PASS ===" || (echo "=== REGRESSION FAIL ===" && exit 1)
 
 comp:
 	make -f make/$(CURR_ARCH).mk comp
@@ -518,6 +564,8 @@ KTEST ?= all
 KREPEAT ?= 1
 KTIMEOUT_MS ?= 5000
 KTRACE ?=
+KTEST_QEMU_TIMEOUT ?= 30
+export KTEST_QEMU_TIMEOUT
 
 KTEST_CMDLINE := mango.mode=ktest mango.test=$(KTEST) mango.test.repeat=$(KREPEAT) mango.test.timeout_ms=$(KTIMEOUT_MS) mango.test.failfast=0
 ifneq ($(KTRACE),)

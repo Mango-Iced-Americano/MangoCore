@@ -1,23 +1,12 @@
 //! L3 tests for the WaitQueue subsystem.
 //!
-//! # Note on wake_once / wake_all tests
-//!
-//! Full `wake_once` and `wake_all` tests require multiple kernel tasks
-//! (one waiter, one waker). This needs a minimal kernel-thread spawn API
-//! which is planned as a follow-up. For now, we test:
-//! - The no-lost-wakeup invariant (condition already true → no sleep)
-//! - Basic queue operations (add, is_empty, compact_stale)
-//! - wake_all on empty queue returns 0
-//!
-//! # Note on false-condition test
-//!
-//! We cannot test `wait_until` with a false condition because there is
-//! no waker thread to unblock it. While `wait_until` has an internal
-//! fallback timeout, relying on it would make the test flaky.
+//! Multi-task tests (wake_one) require the scheduler to be active
+//! (mango.mode=ktest with the new multi-task harness).
 
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
+use lazy_static::lazy_static;
 use spin::Mutex;
 use crate::kernel_tests::runner::KernelTest;
 use crate::task::WaitQueue;
@@ -31,15 +20,11 @@ pub fn tests() -> Vec<KernelTest> {
         ),
         KernelTest::new("waitqueue::basic_queue_ops", test_basic_queue_ops),
         KernelTest::new("waitqueue::wake_all_on_empty", test_wake_all_on_empty),
-        // TODO: wake_once, wake_all — requires kernel thread spawn API
+        KernelTest::new("waitqueue::wake_one", test_wake_one),
     ]
 }
 
 /// Condition already satisfied: wait_until must return immediately.
-/// This is the classic lost-wakeup prevention test.
-///
-/// With flag=true, the closure returns `Some(42)` on the first call,
-/// so `wait_until` should return 42 without blocking.
 fn test_wake_before_wait_should_not_sleep() -> Result<(), &'static str> {
     let wq = Mutex::new(WaitQueue::new());
     let flag = AtomicBool::new(true);
@@ -63,12 +48,10 @@ fn test_wake_before_wait_should_not_sleep() -> Result<(), &'static str> {
 fn test_basic_queue_ops() -> Result<(), &'static str> {
     let mut wq = WaitQueue::new();
 
-    // New queue should start empty.
     if !wq.is_empty() {
         return Err("new WaitQueue should be empty");
     }
 
-    // compact_stale on empty queue should return 0 and leave it empty.
     let removed = wq.compact_stale();
     if removed != 0 {
         return Err("compact_stale on empty queue should return 0");
@@ -87,5 +70,48 @@ fn test_wake_all_on_empty() -> Result<(), &'static str> {
     if woken != 0 {
         return Err("wake_all on empty queue should return 0");
     }
+    Ok(())
+}
+
+/// Full wake_one test with real scheduler participation.
+///
+/// Pattern:
+/// 1. Spawn a waker task that calls wake_all on the shared WQ.
+/// 2. Current task (waiter) calls wait_until — blocks because condition false.
+/// 3. Scheduler picks waker → waker sets WAKER_RAN flag then calls wake_all.
+/// 4. Waker exits → scheduler picks waiter → condition now true → returns.
+fn test_wake_one() -> Result<(), &'static str> {
+    lazy_static! {
+        static ref WQ: Mutex<WaitQueue> = Mutex::new(WaitQueue::new());
+    }
+    static WAKER_RAN: AtomicBool = AtomicBool::new(false);
+
+    // Spawn waker task — will run after this task blocks.
+    crate::task::spawn_ktest_task(|| {
+        WAKER_RAN.store(true, Ordering::SeqCst);
+        WQ.lock().wake_all();
+    });
+
+    // Current task: wait for the waker to wake us.
+    let result = WaitQueue::wait_until(&WQ, || {
+        if WAKER_RAN.load(Ordering::SeqCst) {
+            Some(1)
+        } else {
+            None
+        }
+    });
+
+    if result != 1 {
+        return Err("wait_until should have returned 1 after waker ran");
+    }
+
+    // Let the waker task finish its remaining schedule before returning.
+    // (The waker may have already exited, but yield once to be safe.)
+    crate::task::suspend_current_and_run_next();
+
+    if !WAKER_RAN.load(Ordering::SeqCst) {
+        return Err("waker task did not run");
+    }
+
     Ok(())
 }

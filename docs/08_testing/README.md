@@ -56,9 +56,9 @@ L3: 内核态 self-test
     mango.mode=ktest  |  QEMU 内运行  |  TAP 输出
     → 不启动用户态 init。当前覆盖：waitqueue / timer / sched / mm (11 个用例)
 
-L4: 用户态 regression test (规划中)
+L4: 用户态 regression test
     user/src/bin/regression_*.rs  |  make regression
-    → 每个 bug 沉淀一个最小复现程序
+    → 每个 bug 沉淀一个最小复现程序。initproc 新增 RunMode::Regression，配置文件注入 `mode=regression`，initproc fork+exec `/regression` → 打印 `[L4 REGRESSION PASSED/FAILED]` → shutdown
 
 L5: 官方集成测试
     LTP / lmbench / iperf / libc-test / 比赛测例
@@ -332,35 +332,22 @@ mango.root=/dev/vda
 
 ### 规范
 
-每遇到一个 LTP/lmbench/手写测试暴露的 bug，沉淀一个最小用户态复现程序。
-
-### 目录规划
-
-```
-user/src/bin/regression_pipe_lost_wakeup.rs
-user/src/bin/regression_pipe_close_read_eof.rs
-user/src/bin/regression_fork_fd_table.rs
-user/src/bin/regression_tmpfs_unlink_open_file.rs
-user/src/bin/regression_select_100fds.rs
-```
-
-### 文件格式
-
-每个 regression 文件头注释记录 bug 来源和修复点：
-
-```rust
-//! Regression: LTP pipe13 hang
-//! Bug: reader sleeps forever after writer wake
-//! Expected: process exits within 1s
-//! Related subsystem: pipe / waitqueue / scheduler
-//! Fix commit: <commit hash>
-```
-
-### 入口 (规划)
+每遇到一个 LTP/lmbench/手写测试暴露的 bug，沉淀一个最小用户态复现程序，放入 `user/src/bin/regression/` 目录。运行入口：
 
 ```bash
-make regression   # 启动 MangoCore 正常模式，运行所有 regression_* 程序
+make regression        # rv64 回归测试
+make rv64-regression   # 同上（显式架构）
+make la64-regression   # la64 架构
 ```
+
+### 运行机制
+
+1. `make regression` → 编译所有用户程序（含 `regression` 二进制） → 构建文件系统镜像 → 构建内核 → 通过 `debugfs` 将 `regression_test.conf`（`mode=regression`）注入 rootfs → 启动 QEMU → 解析串口输出中的 `[L4 REGRESSION PASSED/FAILED]` 字样
+2. initproc 启动后读取 `/os_test.conf`，识别 `mode=regression`，跳过 `prepare_symlink` 等环境准备，直接 fork + exec `/regression`
+3. `/regression` 输出 TAP 格式结果（`ok N name` / `not ok N name`）、累加 pass/fail 计数，exit 0=全部通过 / 非零=有失败
+4. initproc 通过 `exit_code_from_waitpid_status()` 获取子进程退出码，打印 `[L4 REGRESSION PASSED]` 或 `[L4 REGRESSION FAILED]`，然后 `shutdown()`
+
+### 当前覆盖 (4 个用例)
 
 ---
 
@@ -421,10 +408,10 @@ make rv64-ktest KTEST=waitqueue      # 指定测试组
 make rv64-ktest KTEST=timer KREPEAT=100  # 重复 100 次
 make la64-ktest KTEST=all            # la64 对照
 
-# 复合入口 (规划)
+# 复合入口
 make bugscan                         # check-fast + cargo test + ktest
 make regression                      # L4 用户态回归
-make official                        # L5 LTP + lmbench + iperf
+make official                        # L5 LTP + lmbench + iperf (规划)
 ```
 
 ---
@@ -448,7 +435,7 @@ make official                        # L5 LTP + lmbench + iperf
 | L3 timeout 是 advisory-only | 无法中断挂死测试 | Phase 2 添加 watchdog timer |
 | 缺少内核线程 spawn API | wake_once/wake_all/spawn_and_yield 暂缺 | Phase 2 实现 |
 | bootargs 仅编译期常量 | 真板子需要重新编译 | DTB/EFI 支持后改为运行时优先 |
-| L4/L2 未实现 | 暂无回归测试和属性测试 | Phase 3 |
+| L4 已实现，L2 未实现 | 暂无属性测试和模型测试 | Phase 3 |
 
 ---
 

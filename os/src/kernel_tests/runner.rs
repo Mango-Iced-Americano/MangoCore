@@ -65,24 +65,40 @@ fn arch_name() -> &'static str {
     { "unknown" }
 }
 
-/// Run selected tests and exit via shutdown.
+/// Test result summary returned by the runner.
+pub struct TestResults {
+    pub passed: usize,
+    pub failed: usize,
+    pub total: usize,
+}
+
+impl TestResults {
+    pub fn all_passed(&self) -> bool {
+        self.failed == 0 && self.total > 0
+    }
+}
+
+/// Run selected tests, print TAP output, and **return** results.
+///
+/// Does NOT call `hal::shutdown()`. The caller decides what to do next.
 ///
 /// # Parameters
 /// - `config`: Parsed bootargs with test selection, repeat, timeout, failfast
 /// - `test_groups`: All registered tests, grouped by category name
 ///
-/// # Output
-/// Prints TAP-compatible output to the console, then calls `hal::shutdown()`.
-pub fn run_tests(config: &BootConfig, test_groups: &[(&str, Vec<KernelTest>)]) -> ! {
+/// # Returns
+/// A `TestResults` struct with pass/fail/total counts.
+pub fn run_tests_return(
+    config: &BootConfig,
+    test_groups: &[(&str, Vec<KernelTest>)],
+) -> TestResults {
     // Collect tests to run based on selection
     let selected: Vec<&KernelTest> = if config.tests.iter().any(|t| t == "all") {
-        // "all" → all tests from all groups
         test_groups
             .iter()
             .flat_map(|(_, tests)| tests.iter())
             .collect()
     } else {
-        // Filter by test group name
         test_groups
             .iter()
             .filter(|(group, _)| config.tests.iter().any(|t| t == *group))
@@ -97,7 +113,11 @@ pub fn run_tests(config: &BootConfig, test_groups: &[(&str, Vec<KernelTest>)]) -
         for (name, tests) in test_groups {
             crate::println!("#   {} ({} tests)", name, tests.len());
         }
-        shutdown_success();
+        return TestResults {
+            passed: 0,
+            failed: 0,
+            total: 0,
+        };
     }
 
     let total_tests = selected.len() * config.repeat;
@@ -150,12 +170,15 @@ pub fn run_tests(config: &BootConfig, test_groups: &[(&str, Vec<KernelTest>)]) -
                             passed,
                             failed
                         );
-                        shutdown_failure();
+                        return TestResults {
+                            passed,
+                            failed,
+                            total: total_tests,
+                        };
                     }
                 }
             }
 
-            // Basic timeout check (best-effort; real timeout needs timer interrupt)
             if elapsed > per_test_timeout {
                 crate::println!(
                     "{}# WARNING:{} {} took {}ms (timeout={}ms)",
@@ -167,16 +190,34 @@ pub fn run_tests(config: &BootConfig, test_groups: &[(&str, Vec<KernelTest>)]) -
         }
     }
 
-    if failed > 0 {
+    TestResults {
+        passed,
+        failed,
+        total: total_tests,
+    }
+}
+
+/// Run selected tests and exit via shutdown.
+///
+/// # Parameters
+/// - `config`: Parsed bootargs with test selection, repeat, timeout, failfast
+/// - `test_groups`: All registered tests, grouped by category name
+///
+/// # Output
+/// Prints TAP-compatible output to the console, then calls `hal::shutdown()`.
+pub fn run_tests(config: &BootConfig, test_groups: &[(&str, Vec<KernelTest>)]) -> ! {
+    let results = run_tests_return(config, test_groups);
+
+    if results.failed > 0 {
         crate::println!(
             "{}# results: {} passed, {} failed, {} total{}",
-            COLOR_RED, passed, failed, total_tests, COLOR_RESET
+            COLOR_RED, results.passed, results.failed, results.total, COLOR_RESET
         );
         shutdown_failure();
     } else {
         crate::println!(
             "{}# results: {} passed, {} failed, {} total{}",
-            COLOR_GREEN, passed, failed, total_tests, COLOR_RESET
+            COLOR_GREEN, results.passed, results.failed, results.total, COLOR_RESET
         );
         shutdown_success();
     }
@@ -185,7 +226,6 @@ pub fn run_tests(config: &BootConfig, test_groups: &[(&str, Vec<KernelTest>)]) -
 fn shutdown_success() -> ! {
     crate::println!("{}[KTEST RESULT: PASS]{}", COLOR_GREEN, COLOR_RESET);
     crate::println!("# ktest: all tests passed. shutting down.");
-    // Small delay to ensure output is flushed
     for _ in 0..1000 {
         core::hint::spin_loop();
     }

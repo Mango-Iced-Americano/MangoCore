@@ -309,6 +309,7 @@ enum RunMode {
     Shell,
     RunThenShell,
     DriftWindow,
+    Regression,
 }
 
 fn mode_name(mode: RunMode) -> &'static str {
@@ -317,6 +318,7 @@ fn mode_name(mode: RunMode) -> &'static str {
         RunMode::Shell => "shell",
         RunMode::RunThenShell => "run_then_shell",
         RunMode::DriftWindow => "drift_window",
+        RunMode::Regression => "regression",
     }
 }
 
@@ -491,6 +493,7 @@ fn parse_mode(bytes: &[u8]) -> Option<RunMode> {
         b"shell" => Some(RunMode::Shell),
         b"run_then_shell" => Some(RunMode::RunThenShell),
         b"drift_window" => Some(RunMode::DriftWindow),
+        b"regression" => Some(RunMode::Regression),
         _ => None,
     }
 }
@@ -3120,6 +3123,32 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         core::ptr::null(),
     ];
 
+    let cfg = load_runtime_config();
+
+    // Regression mode: run /regression binary standalone, report result, shutdown.
+    if cfg.mode == RunMode::Regression {
+        println!("[initproc] regression mode: running /regression");
+        let pid = fork();
+        if pid == 0 {
+            let prog = "/regression\0";
+            exec(prog, &[prog.as_ptr(), core::ptr::null()], &environ);
+            println!("[initproc] exec /regression failed");
+            exit(127);
+        }
+        if pid > 0 {
+            let mut code: i32 = 0;
+            waitpid(pid as usize, &mut code);
+            let exit_code = exit_code_from_waitpid_status(code);
+            if exit_code == 0 {
+                println!("[L4 REGRESSION PASSED]");
+            } else {
+                println!("[L4 REGRESSION FAILED] exit_code={}", exit_code);
+            }
+        }
+        shutdown();
+        return 0;
+    }
+
     prepare_symlink(&environ);
 
     let bash_check = "test -x /bin/bash && echo BIN_BASH_OK || echo BIN_BASH_BAD\0";
@@ -3142,8 +3171,6 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     // let inet_test_cmd = "cd / && ./tests/inet_test\0";
     // let inet_test_ret = run_bash_cmd(inet_test_cmd, &environ);
     // println!("[initproc] inet_test returned exit_code={}", inet_test_ret);
-
-    let cfg = load_runtime_config();
 
     if cfg.timer_smoke && !run_timerfd_smoke() {
         println!("[initproc] timer_smoke failed");

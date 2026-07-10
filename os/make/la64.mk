@@ -216,8 +216,8 @@ ktest-run: user $(LWEXT4_LA_PREREQ)
 	@MANGO_CMDLINE="$(KTEST_CMDLINE)" LOG=${LOG} \
 		cargo build --$(MODE) --features "board_$(BOARD) $(LOG_OPTION) block_$(LA64_BLK_MODE) oom_handler $(EXTRA_FEATURES)"
 	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
-	@echo "[ktest] Launching QEMU..."
-	@qemu-system-loongarch64 \
+	@echo "[ktest] Launching QEMU (timeout: ${KTEST_QEMU_TIMEOUT}s)..."
+	@timeout --foreground ${KTEST_QEMU_TIMEOUT} qemu-system-loongarch64 \
 		-machine virt \
 		-nographic \
 		-bios $(BOOTLOADER) \
