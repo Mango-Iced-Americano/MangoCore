@@ -1,10 +1,23 @@
 //! L3 test runner with TAP output, timeout, repeat, and failfast support.
+//!
+//! Output is color-coded using ANSI escape sequences for readability:
+//! - Green for passing tests
+//! - Red for failures
+//! - Yellow for warnings
+//!
+//! A machine-parseable result marker is printed before shutdown for CI integration.
 
 use alloc::vec;
 use alloc::vec::Vec;
 use crate::bootargs::BootConfig;
 use crate::hal;
 use crate::timer;
+
+// ── ANSI color constants ────────────────────────────────────────
+const COLOR_GREEN: &str = "\x1b[32m";
+const COLOR_RED: &str = "\x1b[31m";
+const COLOR_YELLOW: &str = "\x1b[33m";
+const COLOR_RESET: &str = "\x1b[0m";
 
 /// A single kernel test case.
 pub struct KernelTest {
@@ -120,11 +133,11 @@ pub fn run_tests(config: &BootConfig, test_groups: &[(&str, Vec<KernelTest>)]) -
 
             match result {
                 Ok(()) => {
-                    crate::println!("ok {} {}", test_num, test.name);
+                    crate::println!("{}ok{} {} {}", COLOR_GREEN, COLOR_RESET, test_num, test.name);
                     passed += 1;
                 }
                 Err(reason) => {
-                    crate::println!("not ok {} {}", test_num, test.name);
+                    crate::println!("{}not ok{} {} {}", COLOR_RED, COLOR_RESET, test_num, test.name);
                     crate::println!("  ---");
                     crate::println!("  reason: {}", reason);
                     crate::println!("  elapsed_ms: {}", elapsed);
@@ -144,28 +157,33 @@ pub fn run_tests(config: &BootConfig, test_groups: &[(&str, Vec<KernelTest>)]) -
 
             // Basic timeout check (best-effort; real timeout needs timer interrupt)
             if elapsed > per_test_timeout {
-                crate::println!("# WARNING: {} took {}ms (timeout={}ms)", test.name, elapsed, per_test_timeout);
+                crate::println!(
+                    "{}# WARNING:{} {} took {}ms (timeout={}ms)",
+                    COLOR_YELLOW, COLOR_RESET, test.name, elapsed, per_test_timeout
+                );
             }
 
             test_num += 1;
         }
     }
 
-    crate::println!(
-        "# results: {} passed, {} failed, {} total",
-        passed,
-        failed,
-        total_tests
-    );
-
     if failed > 0 {
+        crate::println!(
+            "{}# results: {} passed, {} failed, {} total{}",
+            COLOR_RED, passed, failed, total_tests, COLOR_RESET
+        );
         shutdown_failure();
     } else {
+        crate::println!(
+            "{}# results: {} passed, {} failed, {} total{}",
+            COLOR_GREEN, passed, failed, total_tests, COLOR_RESET
+        );
         shutdown_success();
     }
 }
 
 fn shutdown_success() -> ! {
+    crate::println!("{}[KTEST RESULT: PASS]{}", COLOR_GREEN, COLOR_RESET);
     crate::println!("# ktest: all tests passed. shutting down.");
     // Small delay to ensure output is flushed
     for _ in 0..1000 {
@@ -175,6 +193,7 @@ fn shutdown_success() -> ! {
 }
 
 fn shutdown_failure() -> ! {
+    crate::println!("{}[KTEST RESULT: FAIL]{}", COLOR_RED, COLOR_RESET);
     crate::println!("# ktest: tests FAILED. shutting down.");
     for _ in 0..1000 {
         core::hint::spin_loop();

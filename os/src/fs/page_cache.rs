@@ -92,7 +92,9 @@ fn mask_for_range(page_offset: usize, len: usize) -> u8 {
     if seg_start >= VALID_SEG_COUNT {
         return 0;
     }
-    ((1u8 << (seg_end - seg_start)) - 1) << seg_start
+    let count = seg_end - seg_start;
+    let low_mask: u8 = if count == 8 { u8::MAX } else { (1u8 << count) - 1 };
+    low_mask << seg_start
 }
 
 static PAGE_CACHE_REGISTRY: Mutex<Vec<Weak<PageCache>>> = Mutex::new(Vec::new());

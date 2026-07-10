@@ -4,6 +4,64 @@
 
 ## 2026-07-10
 
+### L3 内核自检加固 — 着色输出 / 退出码区分 / 薄弱测试修复
+
+**涉及文件：**
+
+修改：
+- `os/src/kernel_tests/runner.rs` — 新增 ANSI 颜色常量（绿/红/黄），"ok"/"not ok" 行着色，WARNING 黄色输出，结果摘要着色；新增机器可解析退出标记 `[KTEST RESULT: PASS]` / `[KTEST RESULT: FAIL]` 在 shutdown 前打印
+- `os/src/kernel_tests/sched.rs` — **修复** `test_current_task_exists`：原先 body `let _ = task::current_task(); Ok(())` 恒通过（无用断言），改为通过 `task_manager_counts()` 验证 ready 队列非空。**新增** `sched::task_manager_counts` 测试：验证 ready_count > 0 且计数在合理范围内
+- `os/src/kernel_tests/timer.rs` — **修复** `test_tick_advances`：从严要求 `t1 > t0`（原 `t1 >= t0` 允许时间为零增长），加大 busy-wait 循环到 200 万次。**扩展** `test_time_spec_ops`：新增 construction 精度校验（from_ms/us/s → to_ns）、加法进位（700M ns + 500M ns = 1s+200M ns）、减法/钳位、跨单位等价比较（from_ms(1000) == from_s(1)）、严格偏序、is_zero 双向验证。**新增** `timer::now_monotonic` 测试：两次 now() 调用验证单调不倒退
+- `os/src/kernel_tests/waitqueue.rs` — **修复** `test_basic_queue_ops`：新增 `compact_stale` 后 `is_empty()` 二次验证。**新增** `test_wake_all_on_empty`：空队列 `wake_all()` 返回 0。补充文档注释说明无法测试 false 条件（缺少 waker 线程）
+- `os/src/kernel_tests/mm.rs` — **扩展** `test_alloc_contiguous_pages`：新增显式物理连续性校验（PPN 逐页递增）。**新增** `test_alloc_then_free_then_alloc`：分配 8 页 → 释放 → 再分配 8 页（验证 allocator 复用能力）
+
+**测试数量变化：** 8 → 11（新增 sched::task_manager_counts / timer::now_monotonic / mm::alloc_then_free_then_alloc）
+
+**验证：**
+- `make rv64-kernel-build-only` ✅ (187 warnings pre-existing, 0 errors)
+- `make la64-kernel-build-only` ✅ (172 warnings pre-existing, 0 errors)
+
+**备注：** `test_current_task_exists` 未使用 `current_task().is_some()` 因为 ktest 模式下调度器尚未启动（`CURRENT_TASK_PTR` 为 null），改用 `task_manager_counts()` 间接验证任务存在性。ANSI 转义码在 QEMU `-nographic` 串口输出到终端时正常工作。
+
+---
+
+### L1 纯逻辑模块提取：time / page_cache / ring_buffer + 单元测试
+
+**涉及文件：**
+
+新增：
+- `libs/mango-kernel-core/src/time.rs` — 从 `os/src/timer.rs` 提取纯逻辑：`TimeSpec` + `TimeVal` 结构体及 `Add/Sub/AddAssign/Ord` impl、`from_ms/from_us/from_ns/from_s/to_ns/to_ns_saturating/is_zero`、`TimeZone/ITimerVal/Times/TimeRange` 辅助类型、时间常量。50 个 L1 测试。
+- `libs/mango-kernel-core/src/page_cache.rs` — 从 `os/src/fs/page_cache.rs` 提取纯逻辑：`mask_for_range()`、`initial_valid_mask()`、`PageState` 枚举、`RaState` 结构体、`PAGE_SIZE/VALID_SEG_*/DIRTY_BACKGROUND/DIRTY_THROTTLE` 常量。25 个 L1 测试。
+- `libs/mango-kernel-core/src/ring_buffer.rs` — 从 `os/src/net/socket/unix/ring_buffer.rs` 提取纯逻辑：`RingBuffer<T>` 泛型结构体及所有方法（push/pop/push_slice/pop_slice/push_drop_oldest + shutdown 标志 + 容量查询），全局 `RB_COUNT/RB_BYTES` 计数器通过 `counters` feature 可选启用。16 个 L1 测试。
+
+修改：
+- `libs/mango-kernel-core/src/lib.rs` — 新增 `pub mod time; pub mod page_cache; pub mod ring_buffer;`
+- `libs/mango-kernel-core/Cargo.toml` — 新增 `[features]`，默认 `counters`
+- `os/src/timer.rs` — **Bug fix**: `TimeSpec::AddAssign` 新增归一化 `tv_nsec` 逻辑（`tv_sec += tv_nsec / NSEC_PER_SEC; tv_nsec %= NSEC_PER_SEC`），防止链式 `+=` 后 `tv_nsec >= NSEC_PER_SEC`
+- `os/src/fs/page_cache.rs` — **Bug fix**: `mask_for_range()` 新增安全 shift 防护（`count == 8` 时用 `u8::MAX` 替代 `(1u8 << 8) - 1`），消除 debug 模式 panic
+- `os/src/kernel_tests/sched.rs` — **编译修复**: `task_manager_counts()` 返回 `Option<(u16, u16)>`，补充分支解构（la64 工具链 nightly-2024-05-01 报错，rv64 未爆）
+
+**验证：**
+- `cargo test -p mango-kernel-core` ✅ (114/114 通过: 28 bootargs + 50 time + 25 page_cache + 11 ring_buffer)
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅（修复 sched.rs 预编译错误后通过）
+
+**Bug 详情：**
+
+1. **TimeSpec::AddAssign 不归一化** (`os/src/timer.rs:138-144`)
+   - 根因：`add_assign` 仅 `self.tv_sec += rhs.tv_sec; self.tv_nsec += rhs.tv_nsec;`，未做进位处理
+   - 影响：链式 `+=` 后 `tv_nsec >= 1_000_000_000`，导致后续 `to_ns()` 溢出、比较错误
+   - 修复：新增 `self.tv_sec += self.tv_nsec / NSEC_PER_SEC; self.tv_nsec %= NSEC_PER_SEC;`
+   - 已在 `mango-kernel-core/src/time.rs` 和 `os/src/timer.rs` 两处同步修复
+
+2. **mask_for_range debug panic** (`os/src/fs/page_cache.rs:95`)
+   - 根因：`(1u8 << (seg_end - seg_start)) - 1` 当差值 = 8 时，shift 宽度 = u8 位宽，debug 模式 panic
+   - 修复：`let low_mask = if count == 8 { u8::MAX } else { (1u8 << count) - 1 };`
+
+**备注：** 内核继续使用 `os/src/timer.rs` 中原有类型定义（未做去重），lib crate 中有独立副本用于测试。`mango-kernel-core` 的 `counters` feature 默认开启以兼容内核行为。
+
+---
+
 ### 测试体系文档正式化
 
 **涉及文件：**

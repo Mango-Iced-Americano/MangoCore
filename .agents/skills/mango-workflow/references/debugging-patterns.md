@@ -297,3 +297,27 @@
 - **修复**: 移除 clamp，直接将原始 offset 传递给 `ext4_fseek`。
 - **教训**: 不要对 POSIX 行为做"防御性"修正，尤其当底层 C 库（lwext4 ext4_fseek）已经实现了 POSIX 语义时。mmap 脏页回写、pwrite 等场景依赖 seek-beyond-EOF。
 - **相关文件**: `dependency/lwext4_rust/src/file.rs`
+
+## 纯逻辑 Bug
+
+### TimeSpec::AddAssign 不归一化导致时间计算错误
+
+- **现象**: 链式 `+=` 操作后，`TimeSpec.tv_nsec >= NSEC_PER_SEC (1_000_000_000)`，导致 `to_ns()` 溢出和比较运算符产生错误结果。
+- **根因**: `AddAssign` 仅做分量加法 `self.tv_sec += rhs.tv_sec; self.tv_nsec += rhs.tv_nsec;`，未做进位处理。而 `Add` trait 实现中正确进行了归一化，两个 trait 实现不一致。
+- **修复**: `AddAssign` 末尾添加 `self.tv_sec += self.tv_nsec / NSEC_PER_SEC; self.tv_nsec %= NSEC_PER_SEC;`
+- **教训**: 
+  - 实现 `AddAssign` 时必须保证与 `Add` 等价：`a += b` 应等于 `a = a + b`。
+  - 需要单元测试覆盖链式 `+=` 场景（至少 3 次累加带进位）。
+  - 任何含有多个分量且分量之间存在进位关系的类型（钟表 / 日历 / 坐标加法），`AddAssign` 必须做归一化。
+- **相关文件**: `os/src/timer.rs:138`, `libs/mango-kernel-core/src/time.rs`
+
+### `1u8 << N` 在 N == 8 时 debug panic
+
+- **现象**: 当 `VALID_SEG_COUNT == 8` 且 `(seg_end - seg_start) == 8` 时，`(1u8 << 8) - 1` 在 debug 模式下 panic（shift-width-equal-to-bit-width）。
+- **根因**: Rust 规定 `1u8 << 8` 是未定义行为，debug 模式会 panic。当所有 8 个 512B segment 都要标记为 valid 时，计算 `(1 << 8) - 1` 即触发此 panic。
+- **修复**: 安全写法 `if count == 8 { u8::MAX } else { (1u8 << count) - 1 }` 或 `u8::MAX >> (8 - count)`。
+- **教训**:
+  - 任何 `1uN << M` 表达式都必须保证 `M < N`（移位宽度严格小于位数）。
+  - 边界条件 `M == N` 发生在 bitmap full-set 场景（全掩码），需要用 `MAX` 常量代替。
+  - 此模式在 bitmask 计算中极常见，编写时主动加断言或安全分支。
+- **相关文件**: `os/src/fs/page_cache.rs:95`, `libs/mango-kernel-core/src/page_cache.rs`

@@ -54,7 +54,7 @@ L2: 属性测试 / 模型测试 (规划中)
 
 L3: 内核态 self-test
     mango.mode=ktest  |  QEMU 内运行  |  TAP 输出
-    → 不启动用户态 init。当前覆盖：waitqueue / timer / sched / mm (8 个用例)
+    → 不启动用户态 init。当前覆盖：waitqueue / timer / sched / mm (11 个用例)
 
 L4: 用户态 regression test (规划中)
     user/src/bin/regression_*.rs  |  make regression
@@ -241,18 +241,22 @@ not ok 5 sched::ready_queue_has_init
 
 TAP 兼容标准测试消费者。失败时 YAML block 包含 `reason` 和 `elapsed_ms`。
 
-### 当前测试清单 (8 个)
+### 当前测试清单 (11 个)
 
 | 测试 | 文件 | 说明 |
 |------|------|------|
-| `mm::alloc_free_one_page` | `mm.rs` | 分配单页 → 释放 → 验证 |
-| `mm::alloc_contiguous_pages` | `mm.rs` | 分配 4 连续页 → 计数校验 → 释放 |
-| `sched::current_task_exists` | `sched.rs` | 验证 `current_task()` 接口可用 |
+| `mm::alloc_free_one_page` | `mm.rs` | 分配单页 → 释放 → 验证 PPN 有效 |
+| `mm::alloc_contiguous_pages` | `mm.rs` | 分配 4 连续页 → 计数与连续性校验 → 释放 |
+| `mm::alloc_then_free_then_alloc` | `mm.rs` | 分配 8 页 → 释放 → 再分配 8 页（复用验证） |
+| `sched::current_task_exists` | `sched.rs` | 验证 `add_initproc()` 后 `task_manager_counts()` 返回 ready>0 |
 | `sched::ready_queue_has_init` | `sched.rs` | 验证 `add_initproc()` 后 `has_ready_task()` |
-| `timer::tick_advances` | `timer.rs` | busy-wait 后时间不倒退 |
-| `timer::time_spec_ops` | `timer.rs` | TimeSpec 算术与比较 |
-| `waitqueue::wake_before_wait_should_not_sleep` | `waitqueue.rs` | 条件已满足时 `wait_until` 立即返回 |
-| `waitqueue::basic_queue_ops` | `waitqueue.rs` | 新建队列 → is_empty → compact_stale |
+| `sched::task_manager_counts` | `sched.rs` | 验证 ready/interruptible 计数在合理范围 |
+| `timer::tick_advances` | `timer.rs` | busy-wait 后时间严格递增 (`t1 > t0`) |
+| `timer::time_spec_ops` | `timer.rs` | TimeSpec 构造精度、进位加法、减法钳位、跨单位等价、偏序、is_zero |
+| `timer::now_monotonic` | `timer.rs` | 两次 `now()` 验证单调不倒退 |
+| `waitqueue::wake_before_wait_should_not_sleep` | `waitqueue.rs` | 条件已满足时 `wait_until` 立即返回正确值 |
+| `waitqueue::basic_queue_ops` | `waitqueue.rs` | 新建队列 → is_empty → compact_stale → is_empty |
+| `waitqueue::wake_all_on_empty` | `waitqueue.rs` | 空队列 `wake_all()` 返回 0 |
 
 **规划中**（需要内核线程 spawn API）：
 - `waitqueue::wake_once`, `wake_all` — 多任务唤醒
