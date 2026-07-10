@@ -4,6 +4,38 @@
 
 ## 2026-07-10
 
+### 测试体系文档正式化
+
+**涉及文件：**
+- `docs/08_testing/README.md` — 重写为项目标准格式（YAML frontmatter、依据范围表、ASCII 架构图、逐层详解、速查命令表）
+
+**验证：** 无代码变更，纯文档
+
+### 实现 L1 cargo test 基础设施 + bootargs 单元测试
+
+**涉及文件：**
+
+新增：
+- `Cargo.toml` (根目录) — 工作区配置，members 仅含 `libs/mango-kernel-core`，排除 `os`/`user`/`dependency`/`bootloader`
+- `libs/mango-kernel-core/Cargo.toml` — `#![cfg_attr(not(test), no_std)]` + `extern crate alloc`，零外部依赖
+- `libs/mango-kernel-core/src/lib.rs` — 库入口，导出 `pub mod bootargs;`
+- `libs/mango-kernel-core/src/bootargs.rs` — 从 `os/src/bootargs.rs` 迁移的纯逻辑（`BootMode` 枚举、`BootConfig` 结构体 + `from_cmdline()`、`Cmdline` 结构体 + parse/get/get_list/get_usize/get_bool/has），添加 28 个 L1 单元测试（`#[cfg(test)]`）
+
+修改：
+- `os/src/bootargs.rs` — 重写为瘦包装层：`pub use mango_kernel_core::bootargs::{BootConfig, BootMode, Cmdline};` + `get_cmdline()` + `load()`（架构相关部分保留不迁移）
+- `os/Cargo.toml` — 添加 `mango-kernel-core = { path = "../libs/mango-kernel-core" }`
+- `os/src/main.rs` — `crate::bootargs::BootConfig::load()` → `crate::bootargs::load()`
+- `docs/08_testing/README.md` — L1 章节更新：运行方式、当前覆盖、如何添加更多测试
+
+**验证：**
+- `cargo test -p mango-kernel-core` ✅ (28/28 通过)
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：** 架构相关代码（`get_cmdline()` 使用 `option_env!("MANGO_CMDLINE")`，`load()` 调用 `get_cmdline()`）保留在 `os/src/bootargs.rs` 瘦包装中；`kernel_tests/` 目录下 `crate::bootargs::BootConfig` 引用通过 re-export 继续工作，无需修改。
+
+---
+
 ### 设计并实现分层测试体系（第一阶段 — L3 内核自检框架）
 
 **涉及文件：**
