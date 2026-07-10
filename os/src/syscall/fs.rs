@@ -4105,7 +4105,9 @@ fn do_bind_mount(
         None => return Err(EINVAL),
     };
 
-    let mnt_flags = vfs::MountFlags::from_bits_truncate(mountflags.bits() as u32);
+    // bind mount 克隆源挂载的长期属性。只使用调用参数会让 `MS_BIND` 从只读
+    // `/sdcard` 创建出可写 `/musl`/`/glibc` 视图，绕过 MountFS 的 EROFS 检查。
+    let mnt_flags = source_mount_fs.mount_flags().persistent();
     // Use mount_subtree_inner(false) to skip automatic propagation.
     // We'll set up the final propagation group and propagate manually,
     // ensuring peers get the correct group membership.
@@ -4390,7 +4392,7 @@ fn apply_rbind_snapshot(
         match target_mfs_inode.mount_subtree_inner(
             entry.child_mfs.inner_filesystem(),
             entry.child_mfs.root_inner_inode(),
-            vfs::MountFlags::empty(),
+            entry.child_mfs.mount_flags().persistent(),
             Some(mount_path),
             false,
         ) {

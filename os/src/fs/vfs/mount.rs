@@ -64,6 +64,17 @@ bitflags! {
     }
 }
 
+impl MountFlags {
+    /// 返回可以保存在挂载实例上的属性位。
+    ///
+    /// `REMOUNT`、`BIND` 和 `REC` 只描述本次 mount 操作，不能被 bind/传播副本
+    /// 当作长期挂载属性保存；`RDONLY` 等属性位必须随副本继承。
+    pub fn persistent(self) -> Self {
+        let operation_bits = (Self::REMOUNT | Self::BIND | Self::REC).bits();
+        Self::from_bits_truncate(self.bits() & !operation_bits)
+    }
+}
+
 // ── MountPath ────────────────────────────────────────────────────────────
 
 /// 挂载路径，用于全局挂载表

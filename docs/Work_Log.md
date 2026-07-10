@@ -2,6 +2,47 @@
 
 ---
 
+## 2026-07-11
+
+### board: 完成 2K1000LA 真实 SSD 的 MBR/ext4 只读挂载验收
+
+**涉及文件：**
+- `docs/Work_Log.md` — 记录阶段一磁盘镜像、U-Boot 只读核验、内核挂载结果和只读写入错误路径
+
+**验证：**
+- 阶段一磁盘镜像为 65 MiB，SHA-256 `101160c0603103131832fd82b83b52368dfe2cacde7c13bcd283bf1d1dcbba3d`；MBR 磁盘 ID `0x4d414e47`，分区 1 为 `type=0x83`、`start_lba=2048`、`sectors=131072`、64 MiB ext4（4 KiB block）✅
+- 离线 `e2fsck -fn` 五阶段通过；MBR `55aa`、ext4 `53ef`、根目录和嵌入分区逐字节一致性检查通过 ✅
+- U-Boot `scsi info` 识别 `TS32GMTS400`（29.8 GiB）；`ext4ls scsi 0:1 /` 读出 `MANGO_TEST.txt`、`glibc/`、`musl/`，`ext4load` 读回的 178 字节标识内容与生成镜像一致 ✅
+- 固定网络 `192.168.9.20 -> 192.168.9.10` ping 成功；TFTP 下载 `kernel-2k1000-sata-mount-ro.ui` 共 `12340008` 字节，约 `7.3 MiB/s`，`iminfo` CRC `OK` ✅
+- 内核识别 MBR 主分区 `/dev/sda1`，将 ext4 原生 4 KiB block 适配到 2 KiB 平台块，读取根目录 6 项并以 `RDONLY` 挂载到 `/sdcard` ✅
+- init 成功 bind `/sdcard/musl -> /musl` 和 `/sdcard/glibc -> /glibc`；高地址内核栈、首次上下文切换和用户态入口继续通过，无 panic ✅
+
+**备注：**
+- SSD 已经包含阶段一镜像，因此本轮先通过 U-Boot 只读验证内容并跳过重复 `scsi write`，避免无意义覆盖；当前只使用前 65 MiB，其余空间仍未分配。
+- 该 U-Boot 未编译 `part` 命令，`part list scsi 0` 返回 unknown；`ext4ls/ext4load scsi 0:1` 可直接验证分区识别和文件内容。
+- 默认 `bootcmd` 会尝试从 `/boot/uImage` 启动；阶段一分区没有该文件，因此自动启动失败后回到 `=>` 属于预期行为，当前内核仍通过 TFTP 启动。
+- 本轮发现 initproc 对 bind 后的只读 `/glibc` 执行 `mkdir/ln` 时没有在 VFS 操作入口立即返回 `EROFS`，而是进入 ext4 分配路径；问题已在下节修复并完成 QEMU/实板回归。
+
+### fs: 修复 bind 与挂载传播副本丢失只读属性
+
+**涉及文件：**
+- `os/src/fs/vfs/mount.rs` — 增加挂载标志持久属性过滤，排除仅描述本次操作的 `REMOUNT/BIND/REC`
+- `os/src/syscall/fs.rs` — 普通 bind 和 recursive bind 从源挂载继承 `RDONLY` 等持久属性
+- `os/src/fs/vfs/propagation.rs` — shared/slave 挂载传播副本继承源挂载持久属性
+- `docs/03_fs/{README,init-and-rootfs}.md` — 记录只读 bind 的 VFS 错误边界与标志继承语义
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀只读 bind 误入底层文件系统分配器的排查模式
+
+**验证：**
+- Docker 内顺序执行 `make rv64-kernel-build-only` 与 `make la64-kernel-build-only`，均成功 ✅
+- RV64 QEMU 使用正式测试盘的 APFS 临时克隆，完成 `/sdcard` remount 只读后 bind 到 `/tmp/robind`；`mkdir`、文件创建、硬链接和删除现有文件均返回 `Read-only file system`，四类操作均未留下对象，原 `/os_test.conf` 仍存在 ✅
+- `make -C os la64-2k1000-sata-mount-ro` 成功；uImage payload `12339936` 字节，SHA-256 `10a84f23461af266510581577acc29442597cb600c9608055f1e2b03926b9b14` ✅
+- 2K1000LA 实板经固定 TFTP 网段加载 `12340000` 字节，U-Boot CRC 通过；`/dev/sda1` 以 `RDONLY` 挂载后 bind `/sdcard/glibc -> /glibc`，`mkdir /glibc/lib` 明确返回 `Read-only file system`，不再出现 `[balloc] No free blocks available`、`Function not implemented` 或 panic ✅
+- `git diff --check` ✅
+
+**备注：**
+- `MS_BIND`、`MS_REC` 和 `MS_REMOUNT` 是 mount 系统调用操作控制位，不应作为新挂载的长期属性保存；`RDONLY` 等属性必须由源挂载继承。
+- 底层 `ReadOnlyBlockDevice` 仍作为最后一道写保护，但正确的失败位置是 `MountFSInode` 的 VFS 修改入口，避免只读请求触发 ext4 元数据分配和误导性错误码。
+
 ## 2026-07-10
 
 ### board/docs: 固化 2K1000LA TFTP 网段并完成 SSD 只读镜像实板启动

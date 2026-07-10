@@ -508,7 +508,7 @@ fn propagate_to_mount(
             if let Ok(new_mount) = target_root.mount_subtree_inner(
                 new_child.inner_filesystem(),
                 new_child.root_inner_inode(),
-                super::MountFlags::empty(),
+                new_child.mount_flags().persistent(),
                 Some(mount_path),
                 false,
             ) {
@@ -529,7 +529,7 @@ fn propagate_to_mount(
     let new_mount = MountFS::new_with_root(
         new_child.inner_filesystem(),
         new_child.root_inner_inode(),
-        super::MountFlags::empty(),
+        new_child.mount_flags().persistent(),
     );
     let backref = MountFSInode::new(inner_inode, Arc::clone(target));
     new_mount.set_self_mountpoint(Some(backref));
@@ -563,7 +563,7 @@ fn propagate_to_mount(
             if let Ok(descend) = ex_root.mount_subtree_inner(
                 new_child.inner_filesystem(),
                 new_child.root_inner_inode(),
-                super::MountFlags::empty(),
+                new_child.mount_flags().persistent(),
                 Some(ex_path),
                 false,
             ) {

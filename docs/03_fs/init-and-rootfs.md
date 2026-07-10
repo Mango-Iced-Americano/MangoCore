@@ -4,11 +4,14 @@ module: "fs/init"
 category: fs
 status: draft
 owner: MangoCore Team
-last_updated: 2026-07-10
+last_updated: 2026-07-11
 code_paths:
   - "os/src/main.rs"
   - "os/src/fs/mod.rs"
   - "os/src/fs/filesystem.rs"
+  - "os/src/fs/vfs/mount.rs"
+  - "os/src/fs/vfs/propagation.rs"
+  - "os/src/syscall/fs.rs"
   - "os/src/drivers/block/partition.rs"
   - "os/src/fs/initramfs.rs"
 entry_points:
@@ -178,6 +181,10 @@ MBR 的偏移和长度单位固定为 512 字节 LBA，与平台 `BLOCK_SZ` 无�
 
 2K1000LA 验收路径有三层写保护：`MountFlags::RDONLY` 阻止普通 VFS 修改，
 只读块设备节点写入返回 `EROFS`，`ReadOnlyBlockDevice` 最后拦截文件系统内部回写。
+普通 bind、recursive bind 和挂载传播副本只继承源挂载的持久属性，并排除
+`REMOUNT/BIND/REC` 这类操作控制位；因此 `/sdcard/musl`、`/sdcard/glibc`
+被 bind 后仍保持 `RDONLY`，创建、写入、链接、重命名和删除会在 `MountFSInode`
+入口返回 `EROFS`，不会进入 ext4 元数据分配路径。
 这不等同于 AHCI 驱动已经完成写路径验收；本阶段仍只允许读取 SSD。
 
 ## 4. 默认挂载点

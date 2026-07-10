@@ -302,3 +302,11 @@
 - **修复**: 分区设备内部保存字节起点 `start_lba * 512`；自然对齐访问直接转发整块，未对齐访问使用父设备块 bounce buffer。文件系统打开前再按 ext4 超级块或 FAT BPB 套 `BlockSizeAdapter`。文件系统识别必须先验证裸 ext4/FAT32，再解析 MBR；不能仅凭 `0x55AA` 把 MBR 当成 FAT。
 - **验收**: 同时测试 raw ext4、非平台块对齐 MBR ext4、ext4 原生块小于 `BLOCK_SZ`、FAT 512B 扇区，并实际读取根目录，不能只检查魔数或“mounted”日志。GPT/扩展分区必须显式报告 unsupported；protective/hybrid MBR 不能退化成普通 MBR 挂载。
 - **相关文件**: `os/src/drivers/block/partition.rs`, `os/src/fs/filesystem.rs`, `os/src/fs/mod.rs`
+
+### 只读源挂载经 bind 后写操作进入文件系统分配器
+
+- **现象**: 原挂载明确带 `RDONLY`，底层块设备也禁止写入，但 bind 视图上的 `mkdir`、`link` 或文件创建没有返回 `EROFS`，反而进入 ext4 分配路径并报告 `No free blocks`、`ENOSYS` 等误导性错误。
+- **根因**: bind/recursive bind 或挂载传播在构造新 `MountFS` 时使用了本次 syscall 的 `MS_BIND/MS_REC` 或空标志，没有继承源挂载的 `RDONLY`。底层只读块设备只能阻止最终持久写盘，无法替代 VFS 挂载属性检查。
+- **修复**: 明确区分挂载的持久属性与操作控制位；克隆挂载时从源挂载继承持久属性，并过滤 `REMOUNT/BIND/REC`。所有 `MountFSInode` 修改入口继续统一检查 `RDONLY` 并返回 `EROFS`。
+- **教训**: 验证只读挂载不能只测试原挂载点或块设备写函数，还必须覆盖 bind、recursive bind 和传播副本，并至少测试创建、写入、链接、重命名与删除。出现底层 allocator 日志说明失败层级已经过晚。
+- **相关文件**: `os/src/fs/vfs/mount.rs`, `os/src/fs/vfs/propagation.rs`, `os/src/syscall/fs.rs`
