@@ -1,187 +1,302 @@
-# MangoCore 分层测试体系
+---
+title: "测试体系 (Testing Framework)"
+category: testing
+status: stable
+author: MangoCore Team
+last_update: 2026-07-10
+tags: [testing, ktest, cargo-test, LTP, regression, tap]
+---
 
-> 状态：设计阶段 → 最小可用实现中
-> 最后更新：2026-07-10
+# 测试体系
 
-## 1. 目标
+## 概述
 
-建立一套从底层单元测试到内核自检、再到用户态回归测试和官方测试的多层 bug 扫描工具链。不再单纯依赖集成测试（LTP/lmbench）来调试，而是把 bug 定位逐步下沉到更底层、更快的测试层。
+MangoCore 采用五层自底向上的测试体系，从纯逻辑单元测试到内核自检、再到用户态回归测试和官方集成测试，建立完整的 bug 扫描工具链。目标是把问题定位逐步下沉——能在 `cargo test` 解决的不拖到 QEMU，能在 L3 解决的不拖到 LTP。
 
 ```
-cargo test (L1/L2)
-    → 判断纯逻辑模块是否正确
-ktest / L3
-    → 判断真实内核机制是否正确
-user regression / L4
-    → 判断用户态可见行为是否正确
-LTP/lmbench/official / L5
-    → 判断系统兼容性、性能和比赛表现
+cargo test (L1/L2)       →  判断纯逻辑模块是否正确
+ktest / L3               →  判断真实内核机制是否正确
+user regression / L4     →  判断用户态可见行为是否正确
+LTP/lmbench/official /L5 →  判断系统兼容性、性能和比赛表现
 ```
 
-## 2. 测试分层
+## 依据范围
 
-### L0：编译与静态检查
+| 主题 | 主要源码 |
+|------|----------|
+| L1 纯逻辑库 crate | `libs/mango-kernel-core/src/` |
+| L1 os 侧 wrapper | `os/src/bootargs.rs` |
+| L3 测试框架入口 | `os/src/kernel_tests/mod.rs` |
+| L3 测试运行器 | `os/src/kernel_tests/runner.rs` |
+| L3 waitqueue 测试 | `os/src/kernel_tests/waitqueue.rs` |
+| L3 timer 测试 | `os/src/kernel_tests/timer.rs` |
+| L3 scheduler 测试 | `os/src/kernel_tests/sched.rs` |
+| L3 页分配器测试 | `os/src/kernel_tests/mm.rs` |
+| ktest 启动分支 | `os/src/main.rs` (`add_initproc()` 之后) |
+| ktest Makefile 目标 | `os/Makefile`, `os/make/rv64.mk`, `os/make/la64.mk` |
+| L5 测试配置与注入 | `os_test.conf`, `os/Makefile` (`conf-inject`) |
+| L5 测试脚本 | `scripts/run_full_test.py` |
 
-| 命令 | 说明 |
-|------|------|
-| `cargo check` | 类型检查 |
-| `cargo fmt --check` | 格式检查 |
-| `cargo clippy` | Lint 检查 |
+## 分层总览
 
-入口：`make check-fast`
+```
+L0: 编译与静态检查
+    cargo check  |  cargo fmt --check  |  cargo clippy
+    → 秒级反馈，CI 第一道关卡
 
-目标：秒级反馈，CI 第一道关卡。
+L1: 纯逻辑单元测试
+    cargo test -p mango-kernel-core
+    → 无内核依赖，host 上运行。当前覆盖：bootargs 解析器 (28 个用例)
 
-### L1：纯逻辑单元测试
+L2: 属性测试 / 模型测试 (规划中)
+    proptest 页缓存状态机  |  loom 并发 waitqueue
+    → 同 L1 机制，未来引入
 
-- 使用 `cargo test` 在 host 上运行
-- 测试对象：bootargs parser、bitmap、id allocator、buddy 算法、ring buffer、path 解析、pagecache 状态转换、dentry tree 纯逻辑等
-- 要求：低耦合、可在 host 上独立运行
+L3: 内核态 self-test
+    mango.mode=ktest  |  QEMU 内运行  |  TAP 输出
+    → 不启动用户态 init。当前覆盖：waitqueue / timer / sched / mm (8 个用例)
 
-#### 运行方式
+L4: 用户态 regression test (规划中)
+    user/src/bin/regression_*.rs  |  make regression
+    → 每个 bug 沉淀一个最小复现程序
+
+L5: 官方集成测试
+    LTP / lmbench / iperf / libc-test / 比赛测例
+    → 最终验收和性能趋势观察，通过 os_test.conf mask 控制范围
+```
+
+---
+
+## L0 — 编译与静态检查
+
+### 入口
 
 ```bash
-# 从仓库根目录运行
+make check-fast
+```
+
+### 覆盖
+
+| 检查 | 命令 | 耗时 |
+|------|------|------|
+| 类型检查 | `cargo check` | ~15s |
+| 格式检查 | `cargo fmt --check` | ~2s |
+| Lint | `cargo clippy` | ~30s |
+
+编译器在 `os/` 目录内通过 Makefile 执行，自动处理双架构的工具链切换和 `lang_items.rs` 变体拷贝。
+
+---
+
+## L1 — 纯逻辑单元测试 (`cargo test`)
+
+### 设计原则
+
+L1 和 L2 在逻辑上分层，但都走 `cargo test`。L1 测确定性逻辑（解析、算术、状态转换），L2 测随机性质（proptest）或并发模型（loom）。
+
+纯逻辑模块被提取到独立库 crate，在 host 上编译和测试。内核通过 path dependency 引用同一份源码，不维护两份副本。
+
+### 库 crate
+
+```
+libs/mango-kernel-core/
+├── Cargo.toml          # #![no_std] lib, host-testable
+└── src/
+    ├── lib.rs           # extern crate alloc; pub mod bootargs;
+    └── bootargs.rs      # Cmdline, BootConfig, BootMode + #[cfg(test)]
+```
+
+`lib.rs` 是标准 `#![no_std]` 库入口。测试时 Cargo 自动注入 `std` 和 test harness，源码中的 `extern crate alloc` 在 host 测试下正常工作。
+
+### 执行
+
+```bash
 cargo test -p mango-kernel-core
-
-# 显示测试输出（打印 pass/fail 细节）
-cargo test -p mango-kernel-core -- --nocapture
-
-# 运行特定测试
-cargo test -p mango-kernel-core test_cmdline_parse
 ```
 
-#### 当前覆盖
+### 当前覆盖 (28 个用例)
 
-| 模块 | 文件 | 测试数 | 说明 |
-|------|------|--------|------|
-| bootargs parser | `libs/mango-kernel-core/src/bootargs.rs` | 15 | BootConfig 解析、Cmdline get/get_list/get_usize/get_bool/has |
+| 类别 | 用例 | 说明 |
+|------|------|------|
+| BootMode | `test_default_boot_mode_normal`, `test_ktest_mode` | 模式解析 |
+| test 选择 | `test_single_test_group`, `test_multiple_test_groups_comma`, `test_all_tests` | 测试组逗号列表 |
+| 数值参数 | `test_repeat_default_is_1`, `test_repeat_custom`, `test_repeat_clamped_to_min_1` | repeat 解析与钳位 |
+| timeout | `test_timeout_default`, `test_timeout_custom`, `test_timeout_clamped_to_min_100` | timeout 解析与钳位 |
+| bool | `test_failfast_default_false`, `test_failfast_true`, `test_failfast_true_alt` | bool 多值解析 |
+| trace | `test_trace_groups` | trace group 逗号列表 |
+| init/root | `test_init_override`, `test_root_override` | 路径覆写 |
+| Cmdline | `test_cmdline_parse_simple`, `test_cmdline_parse_flag`, `test_cmdline_parse_multiple` | 基础解析 |
+| Cmdline list | `test_cmdline_get_list`, `test_cmdline_get_list_empty_value` | 列表拆分与空值 |
+| Cmdline usize | `test_cmdline_get_usize`, `test_cmdline_get_usize_invalid` | usize 解析与非法输入 |
+| Cmdline bool | `test_cmdline_get_bool_variants` | bool 多值 (1/true/yes/on/0/false) |
+| 边界 | `test_cmdline_empty_string`, `test_cmdline_missing_key` | 空串与缺失 key |
+| 综合 | `test_complex_cmdline` | 完整 ktest 命令行 |
 
-#### 如何添加更多 L1 测试
+### 添加新的 L1 测试
 
-1. 在 `libs/mango-kernel-core/src/` 下创建新模块（如 `bitmap.rs`）
-2. 在 `libs/mango-kernel-core/src/lib.rs` 中声明 `pub mod bitmap;`
-3. 在模块底部添加 `#[cfg(test)] mod tests { ... }`
-4. 运行 `cargo test -p mango-kernel-core` 验证
-5. 将从 `os/src/` 移动的纯逻辑模块在 `lib.rs` 中 `pub mod` 导出
-6. 在 `os/src/` 中通过 `use mango_kernel_core::xxx;` 或 `pub use` 引用
+1. 将纯逻辑模块移动到 `libs/mango-kernel-core/src/`
+2. 在 `lib.rs` 中 `pub mod my_module;`
+3. 在模块底部加 `#[cfg(test)] mod tests { ... }`
+4. 如模块被内核引用，在 `os/src/` 中创建 wrapper re-export
 
-**规则：** 只有无 `os/` 内部依赖、不 `unsafe`、可在 host 上运行的纯逻辑才能放入 `mango-kernel-core`。
+判断标准：模块**零 arch 依赖**、**零全局状态**、**零 I/O** — 纯 `String → Struct` 转换、算法、状态机均可。
 
-### L2：属性测试 / 模型测试（未来）
+---
 
-- proptest：pagecache、dentry cache 状态机性质测试
-- loom：waitqueue、pipe wakeup 并发状态机测试
-- 当前阶段仅设计接口，不强制引入依赖
+## L2 — 属性测试 / 模型测试
 
-### L3：内核态 self-test（当前优先）
+### 规划
 
-- 内核内部运行，特殊 boot mode（`mango.mode=ktest`）
-- 不启动普通用户态 init
-- 测试对象：allocator、scheduler、timer、waitqueue、page table、VFS、pagecache 等
-- 输出：TAP 格式
-- 特性：timeout、repeat、failfast
+| 目标 | 工具 | 场景 |
+|------|------|------|
+| PageCache 状态机 | `proptest` | 随机操作序列验证 dirty/clean/evict 状态一致性 |
+| Dentry tree | `proptest` | 随机 lookup/create/unlink 验证树结构不变式 |
+| WaitQueue 并发 | `loom` | 多线程 wake/wait 交错验证无丢唤醒 |
+| Pipe buffer | `loom` | reader/writer 并发验证数据完整性和阻塞语义 |
 
-### L4：用户态 regression test
+### 机制
 
-- 每遇到一个 bug，沉淀最小用户态复现程序
-- 目录：`user/src/bin/regression_*.rs`
-- 入口：`make regression`
+与 L1 相同，所有依赖加入 `libs/mango-kernel-core` 的 `[dev-dependencies]`，不影响内核编译。当前阶段接口已就绪，具体测试用例待后续迭代。
 
-### L5：官方测试
+---
 
-- LTP、lmbench、iperf、libc-test、比赛测例
-- 最终验收和性能趋势观察
-- 如果 L5 发现 bug，尽量下沉成 L4 → L3 → L1
+## L3 — 内核态 Self-Test
 
-## 3. L3 内核测试框架
+### 设计
 
-### 3.1 目录结构
+L3 是测试体系的核心创新。测试代码**编译进内核**，但只在 `mango.mode=ktest` 时运行——内核完成全部子系统初始化后，不启动用户态 init，直接进入测试运行器，执行完毕后通过 HAL `shutdown()` 退出。
 
-```
-os/src/
-  config.rs              # BootConfig 结构体
-  bootargs.rs            # key=value 解析器
-  kernel_tests/
-    mod.rs               # 注册所有测试，run_from_bootargs 入口
-    runner.rs            # TAP 输出、timeout、repeat、failfast
-    mm.rs                # alloc_free_one_page, alloc_many_pages
-    sched.rs             # spawn_and_yield
-    timer.rs             # sleep_returns
-    waitqueue.rs         # wake_once, wake_all, wake_before_wait_should_not_sleep
-    fs.rs                # tmpfs_create_write_read_unlink
-    pagecache.rs         # basic_insert_lookup_evict
-    block.rs             # read_first_block
-```
-
-### 3.2 测试项结构
-
-```rust
-pub struct KernelTest {
-    pub name: &'static str,
-    pub func: fn() -> Result<(), &'static str>,
-    pub timeout_ms: usize,
-}
-```
-
-### 3.3 Runner 职责
-
-1. 根据 BootConfig.tests 选择测试组
-2. 运行测试（支持 repeat）
-3. 每个测试分配独立超时
-4. 统计 passed/failed/skipped
-5. 打印 TAP 格式日志
-6. 支持 failfast（第一个失败即停）
-7. 测试结束后调用 HAL `shutdown()`
-
-### 3.4 TAP 输出格式
-
-```
-TAP version 13
-1..5
-ok 1 waitqueue::wake_once
-ok 2 waitqueue::wake_all
-not ok 3 waitqueue::wake_before_wait_should_not_sleep
-  ---
-  reason: timeout after 5000ms
-  ...
-ok 4 timer::sleep_returns
-ok 5 sched::spawn_and_yield
-```
-
-### 3.5 启动流程
+### 启动流程
 
 ```
 rust_main()
-  → bootstrap_init()
-  → mem_clear()
-  → console::log_init()
-  → trace::init()
-  → mm::init()
-  → machine_init()
-  → timer_subsystem_init()
+  → bootstrap_init() → mem_clear() → console::log_init()
+  → trace::init() → mm::init()
+  → machine_init() → timer_subsystem_init()
+  → [fs init, net init, block probe, preload payloads]
+  → posix_lock::init()
+  → add_initproc()
   → [NEW] BootConfig::load()
   → [NEW] if mode == Ktest: kernel_tests::run_from_bootargs() → shutdown()
-  → [continue normal init...]
+  → run_tasks()  // normal path only
 ```
 
-### 3.6 两阶段测试
+插入点在 `add_initproc()` 之后、`run_tasks()` 之前。此时所有子系统（文件系统、网络、块设备）均已初始化完毕，测试可访问完整内核状态。
 
-由于部分测试（fs、pagecache、block）需要文件系统初始化后才能运行，L3 测试分两阶段：
-
-- **Phase 1**（fs init 前）：waitqueue、timer、scheduler、mm 基础分配
-- **Phase 2**（fs init 后）：tmpfs/pagecache/block 等需要 FS 的测试
-
-等价的分组方式：
-- `mango.test=basic` → Phase 1 测试
-- `mango.test=fs` → Phase 2 测试
-- `mango.test=all` → 全部
-
-## 4. Bootargs 设计
-
-### 4.1 格式
+### 目录结构
 
 ```
+os/src/kernel_tests/
+├── mod.rs            # 注册所有测试组，run_from_bootargs() 入口
+├── runner.rs         # TAP 输出、timeout/repeat/failfast
+├── waitqueue.rs      # wake_before_wait_should_not_sleep 等
+├── timer.rs          # tick_advances, time_spec_ops
+├── sched.rs          # current_task_exists, ready_queue_has_init
+└── mm.rs             # alloc_free_one_page, alloc_contiguous_pages
+```
+
+### 测试项结构
+
+```rust
+pub struct KernelTest {
+    pub name: &'static str,       // "waitqueue::wake_once"
+    pub func: fn() -> Result<(), &'static str>,
+    pub timeout_ms: usize,        // 0 = use global default
+}
+```
+
+### Runner 行为
+
+| 特性 | 说明 |
+|------|------|
+| 测试选择 | 根据 `mango.test=waitqueue,sched` 过滤测试组；`all` 跑全部 |
+| repeat | `mango.test.repeat=N`，每个测试重复 N 次（抓偶发 bug） |
+| timeout | `mango.test.timeout_ms=N`，全局超时；测试可覆盖 |
+| failfast | `mango.test.failfast=1`，遇第一个失败即停 |
+| arch 诊断 | 输出 `# arch: riscv64` / `loongarch64` 用于 CI 区分 |
+
+**限制**：当前 timeout 是 advisory-only — 在测试函数返回后检查耗时，无法中断挂死测试。需要后续添加 watchdog timer 才可实现抢占式超时。
+
+### TAP 输出格式
+
+```
+TAP version 13
+# arch: riscv64
+# mode: ktest
+# repeat: 1
+# timeout_ms: 5000
+# failfast: false
+1..5
+ok 1 waitqueue::wake_before_wait_should_not_sleep
+ok 2 waitqueue::basic_queue_ops
+ok 3 timer::tick_advances
+ok 4 timer::time_spec_ops
+not ok 5 sched::ready_queue_has_init
+  ---
+  reason: no ready tasks after add_initproc()
+  elapsed_ms: 0
+  ...
+# results: 4 passed, 1 failed, 5 total
+# ktest: tests FAILED. shutting down.
+```
+
+TAP 兼容标准测试消费者。失败时 YAML block 包含 `reason` 和 `elapsed_ms`。
+
+### 当前测试清单 (8 个)
+
+| 测试 | 文件 | 说明 |
+|------|------|------|
+| `mm::alloc_free_one_page` | `mm.rs` | 分配单页 → 释放 → 验证 |
+| `mm::alloc_contiguous_pages` | `mm.rs` | 分配 4 连续页 → 计数校验 → 释放 |
+| `sched::current_task_exists` | `sched.rs` | 验证 `current_task()` 接口可用 |
+| `sched::ready_queue_has_init` | `sched.rs` | 验证 `add_initproc()` 后 `has_ready_task()` |
+| `timer::tick_advances` | `timer.rs` | busy-wait 后时间不倒退 |
+| `timer::time_spec_ops` | `timer.rs` | TimeSpec 算术与比较 |
+| `waitqueue::wake_before_wait_should_not_sleep` | `waitqueue.rs` | 条件已满足时 `wait_until` 立即返回 |
+| `waitqueue::basic_queue_ops` | `waitqueue.rs` | 新建队列 → is_empty → compact_stale |
+
+**规划中**（需要内核线程 spawn API）：
+- `waitqueue::wake_once`, `wake_all` — 多任务唤醒
+- `sched::spawn_and_yield` — 创建线程 → yield → 验证运行
+- `timer::sleep_returns` — 真正阻塞等待 deadline
+- `fs::tmpfs_create_write_read_unlink` — VFS 基础路径
+- `pagecache::basic_insert_lookup_evict` — 页缓存操作
+- `block::read_first_block` — 块设备读取
+
+### 执行
+
+```bash
+# 跑全部 L3 测试
+make rv64-ktest
+
+# 指定测试组
+make rv64-ktest KTEST=waitqueue
+
+# 压力测试（重复 1000 次抓偶发 bug）
+make rv64-ktest KTEST=waitqueue KREPEAT=1000
+
+# 打开 trace
+make rv64-ktest KTEST=sched KTRACE=waitqueue,sched
+
+# 跨架构对照
+make la64-ktest KTEST=all
+```
+
+Makefile 在编译时通过 `MANGO_CMDLINE` 环境变量注入 bootargs，内核通过 `option_env!("MANGO_CMDLINE")` 读取。Ktest 模式的 QEMU 启动不挂载磁盘镜像，仅需内核二进制。
+
+### 添加新的 L3 测试
+
+1. 在 `os/src/kernel_tests/` 下创建 `my_subsystem.rs`
+2. 实现 `pub fn tests() -> Vec<KernelTest>`
+3. 在 `mod.rs` 中注册：`#[path = "my_subsystem.rs"] mod kt_my;` 并在 `all_tests()` 中添加条目
+4. 确保测试函数 compute-bounded（不无限阻塞），失败路径返回 `Err("reason")`
+
+---
+
+## Bootargs 机制
+
+### 格式
+
+```text
 mango.mode=normal|ktest|regression
 mango.test=all|waitqueue|sched|timer|mm|fs|pagecache|block|arch|basic
 mango.test.repeat=100
@@ -192,39 +307,30 @@ mango.init=/bin/sh
 mango.root=/dev/vda
 ```
 
-解析规则：
-- 空格分隔
-- `key=value`
-- 逗号列表
-- 不要求引号/转义
+解析规则：空格分隔、`key=value`、逗号列表值、无值 flag、无引号/转义。
 
-### 4.2 当前 Workaround
+### 实现
 
-由于内核尚不支持 DTB/EFI 读取 cmdline，使用**编译期常量**：
+纯解析逻辑在 `libs/mango-kernel-core/src/bootargs.rs`（L1 可测）。内核侧 wrapper (`os/src/bootargs.rs`) 提供 `load()` 函数，当前通过编译期 `env!("MANGO_CMDLINE")` 获取命令行。后续 DTB `/chosen/bootargs` 或 EFI 支持后，运行时源优先，编译期常量作为 fallback。
 
-```rust
-// 编译时通过环境变量注入
-// MANGO_CMDLINE="mango.mode=ktest mango.test=waitqueue"
-pub const CMDLINE: &str = env!("MANGO_CMDLINE");
-```
+### HAL/Arch 分层
 
-Makefile 构造：
-```makefile
-MANGO_CMDLINE = "mango.mode=ktest mango.test=$(TEST) mango.test.repeat=$(REPEAT)"
-cargo build --release --features "board_rvqemu ..."
-```
+| 层 | 职责 |
+|----|------|
+| HAL/arch | 提供事实：如何拿到 cmdline、shutdown、timer、console |
+| 通用内核 | 策略：解析 `mango.mode`、选择测试、控制 repeat/timeout/trace |
 
-后续真 bootargs 支持后，优先从 DTB/EFI 读取，编译期常量作为 fallback。
+同一串 `mango.mode=ktest mango.test=waitqueue` 在 rv64 和 la64 上语义一致。
 
-### 4.3 HAL/Arch 分层原则
+---
 
-- HAL/arch 层只负责提供**事实**：如何拿到 cmdline、shutdown、timer、console
-- 通用内核层负责**策略**：解析 `mango.mode`、选择测试、控制行为
-- 同一串 `mango.mode=ktest mango.test=waitqueue` 在 RV 和 LA 上语义一致
+## L4 — 用户态 Regression Test
 
-## 5. 用户态 Regression Test 规范
+### 规范
 
-### 5.1 目录
+每遇到一个 LTP/lmbench/手写测试暴露的 bug，沉淀一个最小用户态复现程序。
+
+### 目录规划
 
 ```
 user/src/bin/regression_pipe_lost_wakeup.rs
@@ -234,9 +340,9 @@ user/src/bin/regression_tmpfs_unlink_open_file.rs
 user/src/bin/regression_select_100fds.rs
 ```
 
-### 5.2 文件格式
+### 文件格式
 
-每个 regression 文件开头写注释：
+每个 regression 文件头注释记录 bug 来源和修复点：
 
 ```rust
 //! Regression: LTP pipe13 hang
@@ -246,72 +352,109 @@ user/src/bin/regression_select_100fds.rs
 //! Fix commit: <commit hash>
 ```
 
-### 5.3 入口
+### 入口 (规划)
 
 ```bash
 make regression   # 启动 MangoCore 正常模式，运行所有 regression_* 程序
 ```
 
-## 6. Makefile 入口
+---
+
+## L5 — 官方集成测试
+
+### 测试组
+
+由 `os_test.conf` 的 `mask` 字段控制（12-bit）：
+
+| 位 | 掩码 | 测试组 | 用途 |
+|----|------|--------|------|
+| 0 | `0x001` | basic | 冒烟 |
+| 1 | `0x002` | busybox | 基础命令 |
+| 2 | `0x004` | lua | 脚本解释器 |
+| 3 | `0x008` | libctest | C 库测试 |
+| 4 | `0x010` | iozone | 文件 I/O 性能 |
+| 5 | `0x020` | unixbench | 系统基准 |
+| 6 | `0x040` | iperf | 网络吞吐 |
+| 7 | `0x080` | libcbench | C 库基准 |
+| 8 | `0x100` | lmbench | 微基准 |
+| 9 | `0x200` | netperf | 网络性能 |
+| 10 | `0x400` | cyclictest | 实时延迟 |
+| 11 | `0x800` | LTP | Linux 兼容性 |
+
+常用 mask：`0x001` (basic)、`0x003` (basic+busybox)、`0x800` (LTP)、`0xFFF` (全量)。
+
+### 执行
 
 ```bash
-# L0 - 静态检查
-make check-fast
+# 注入测试配置
+make -C os conf-inject CONF_ARCH=rv64 CONF_FILE=../os_test.conf
 
-# L1/L2 - 单元测试
-make unittest        # cargo test 可测试 crate
+# QEMU 运行
+cd os && make rv64-run
 
-# L3 - 内核自检
-make ktest TEST=waitqueue REPEAT=100 TIMEOUT_MS=5000
-make rv64-ktest TEST=waitqueue TRACE=waitqueue,sched REPEAT=1000
-make la64-ktest TEST=waitqueue TRACE=waitqueue,sched REPEAT=1000
-
-# L4 - 用户态回归
-make regression
-
-# 复合入口
-make bugscan         # check-fast + unittest + ktest + regression
-
-# L5 - 官方测试
-make official        # LTP + lmbench + iperf
+# 全量自动化
+python3 scripts/run_full_test.py
 ```
 
-## 7. 实现计划
+### Bug 下沉流程
 
-### 第一阶段（最小闭环）
+L5 发现 bug 后：先尝试写 L4 regression → 如涉及内核机制，进一步下沉为 L3 → 如根因在纯逻辑，提取 L1 用例。
 
-1. [x] 设计方案文档
-2. [ ] 创建 `os/src/bootargs.rs` — bootargs 解析器
-3. [ ] 创建 `os/src/config.rs` — BootConfig + 编译期常量
-4. [ ] 创建 `os/src/kernel_tests/` 模块骨架
-5. [ ] 实现 `runner.rs` — TAP 输出 + timeout + repeat
-6. [ ] 实现 `waitqueue.rs` 测试 — wake_once, wake_all, wake_before_wait_should_not_sleep
-7. [ ] 实现 `timer.rs` 测试 — sleep_returns
-8. [ ] 实现 `sched.rs` 测试 — spawn_and_yield
-9. [ ] 实现 `mm.rs` 测试 — alloc_free_one_page
-10. [ ] 修改 `main.rs` — 插入 ktest 分支
-11. [ ] 添加 `make rv64-ktest` Makefile 目标
-12. [ ] QEMU 验证
+---
 
-### 第二阶段（完整化）
+## Makefile 命令速查
 
-1. [ ] LA 架构 ktest 支持
-2. [ ] `make la64-ktest` 目标
-3. [ ] `make bugscan` 复合入口
-4. [ ] 更多 L3 测试（fs, pagecache, block）
-5. [ ] trace group 接入 bootargs
+```bash
+# L0
+make check-fast                      # 编译 + 格式检查
 
-### 第三阶段（L4 回归）
+# L1
+cargo test -p mango-kernel-core      # 纯逻辑单元测试 (28 用例)
 
-1. [ ] `user/src/bin/regression_*` 框架
-2. [ ] `make regression` 目标
-3. [ ] 沉淀 3+ 历史 bug 的 regression
+# L3
+make rv64-ktest                      # rv64 全部 L3 测试
+make rv64-ktest KTEST=waitqueue      # 指定测试组
+make rv64-ktest KTEST=timer KREPEAT=100  # 重复 100 次
+make la64-ktest KTEST=all            # la64 对照
 
-## 8. 参考
+# 复合入口 (规划)
+make bugscan                         # check-fast + cargo test + ktest
+make regression                      # L4 用户态回归
+make official                        # L5 LTP + lmbench + iperf
+```
 
-- Tock OS: in-kernel test vs cargo test 分层
-- Rust-for-Linux: KUnit 集成模式
-- Theseus OS: test application crate 组织方式
-- phil-opp: no_std 自定义 test runner
-- zCore/rCore: 测试命令统一入口 + rootfs 组织
-- DragonOS: Rust 内核工程结构参考
+---
+
+## 跨架构定位策略
+
+| 现象 | 优先怀疑 |
+|------|----------|
+| RV **和** LA 的 L3 都挂 | 通用 waitqueue/scheduler/VFS 逻辑 |
+| 只有 LA 挂 | LA arch 层、timer、中断、上下文切换、原子操作、TLB/CSR |
+| 只有 RV 挂 | RV arch 层、SBI、timer interrupt、trap、satp/page table |
+| L3 都过，L4 regression 挂 | syscall、VFS、fd table、用户态 ABI、copyin/copyout |
+| L4 都过，L5 挂 | 边界语义、特殊文件、procfs/devfs、权限、资源限制、脚本假设 |
+
+---
+
+## 已知限制
+
+| 限制 | 影响 | 计划 |
+|------|------|------|
+| L3 timeout 是 advisory-only | 无法中断挂死测试 | Phase 2 添加 watchdog timer |
+| 缺少内核线程 spawn API | wake_once/wake_all/spawn_and_yield 暂缺 | Phase 2 实现 |
+| bootargs 仅编译期常量 | 真板子需要重新编译 | DTB/EFI 支持后改为运行时优先 |
+| L4/L2 未实现 | 暂无回归测试和属性测试 | Phase 3 |
+
+---
+
+## 参考
+
+| 项目 | 借鉴点 |
+|------|--------|
+| Tock OS | in-kernel test 与 cargo test 分层 |
+| Rust-for-Linux | KUnit 集成、`#[test]` 风格测试 |
+| Theseus OS | test application crate 组织方式 |
+| phil-opp (Writing an OS in Rust) | no_std 自定义 test runner、QEMU 退出码 |
+| zCore / rCore | 测试命令统一入口、rootfs 测试组织 |
+| DragonOS | Rust 内核工程结构、HAL/arch 分层 |
