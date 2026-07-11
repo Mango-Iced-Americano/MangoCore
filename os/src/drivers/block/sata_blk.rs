@@ -81,6 +81,12 @@ pub struct Provider;
 
 impl provider::Provider for Provider {
     const PAGE_SIZE: usize = PAGE_SIZE;
+    #[cfg(feature = "board_2k1000")]
+    // The 2K1000 HBA reset clears PI. The vendor U-Boot restores 0x0f before
+    // probing, so the kernel must do the same instead of depending on whether
+    // U-Boot happened to execute `scsi scan` before bootm.
+    const AHCI_PORTS_IMPLEMENTED: Option<u32> = Some(0x0f);
+
     fn alloc_dma(size: usize) -> (usize, usize) {
         assert!(
             size > 0 && size <= PAGE_SIZE,
@@ -247,7 +253,10 @@ fn sata_init() -> Result<AHCI<Provider>, SataInitError> {
     );
     boot_trace!(
         "[sata] BAR0={:#010x} BAR1={:#010x} ABAR={:#x} size={:#x}",
-        raw_bar0, raw_bar1, abar, SATA_ABAR_SIZE
+        raw_bar0,
+        raw_bar1,
+        abar,
+        SATA_ABAR_SIZE
     );
     AHCI::new(cpu_mmio_addr(abar as usize), SATA_ABAR_SIZE).map_err(Into::into)
 }

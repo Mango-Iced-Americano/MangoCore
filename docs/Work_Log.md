@@ -4,6 +4,26 @@
 
 ## 2026-07-11
 
+### board: 修复 2K1000 AHCI reset 后 PI 清零
+
+**涉及文件：**
+- `dependency/dep_iso/src/provider.rs` — 增加默认关闭的板级 AHCI 端口图恢复策略
+- `dependency/dep_iso/src/block/ahci.rs` — HBA reset 完成后按 Provider 显式恢复 `HOST_PORTS_IMPL`，并读回刷新 MMIO 写入
+- `os/src/drivers/block/sata_blk.rs` — 2K1000 使用配套 U-Boot 相同的端口图 `0x0f`，消除对 U-Boot 预先执行 `scsi scan` 的依赖
+- `docs/01_architecture/boot-and-trap.md` — 记录一键 TFTP 启动不需要额外的 U-Boot SCSI 初始化
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀 AHCI reset 后恢复实现寄存器的排查模式
+
+**验证：**
+- 对照随板 U-Boot `drivers/ata/ahci.c`：reset 后显式写 `HOST_PORTS_IMPL=0x0f`；对照随板 Linux `libahci.c`：reset 前保存、reset 后恢复 CAP/CAP2/PI ✅
+- 改动文件 `rustfmt --check` 与 `git diff --check` 通过 ✅
+- Docker 顺序执行 LA64、RV64 内核编译，均成功 ✅
+- `make -C os la64-2k1000-run-clean` 成功；新 uImage 为 `12319472` 字节，SHA-256 `e362f8fd6d5d6ef255b247398344cadbdb4151e4cbd74fc47468138b00899d06`，仓库与 `/private/tftpboot` 一致 ✅
+- 2K1000LA 实板经一键 TFTP 启动后越过 AHCI 初始化与 SSD 分区挂载，成功进入测例运行环节；`implemented: 0` panic 不再出现 ✅
+
+**备注：**
+- 原 panic 的 `NoUsablePort { implemented: 0, port0_status: 1 }` 发生在控制器已定址、HBA reset 完成后，不表示 SSD 分区或文件系统损坏。
+- 首次自动复测等待 RESET 120 秒后曾安全超时；操作者随后复位并确认修复镜像已进入测例运行。
+
 ### board/tooling: 增加 macOS 一键 TFTP 启动
 
 **涉及文件：**

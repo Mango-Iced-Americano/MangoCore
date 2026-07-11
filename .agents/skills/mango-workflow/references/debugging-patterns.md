@@ -342,3 +342,11 @@
 - **修复**: 每条控制命令都读取到完整 `=>` prompt 后再发送下一条；TFTP 后同时校验 `Bytes transferred`、本地与 U-Boot CRC32，再用 `iminfo` 确认架构和镜像 checksum。`bootm` 之后切换为纯串口透传，主机侧 Ctrl-C 只关闭监视器。
 - **安全边界**: 网络参数只用 `setenv`，禁止自动 `saveenv`；普通启动脚本禁止包含块设备写命令。自动接管串口时只关闭能明确匹配同一设备路径的 screen，未知占用者必须报错停止。
 - **相关文件**: `scripts/boot_2k1000_tftp.py`, `Makefile`
+
+### AHCI HBA reset 后不能假定 PI 保持不变
+
+- **现象**: 同一控制器和 SSD 在 U-Boot 执行过 `scsi scan` 后可用，但直接 TFTP/`bootm` 时内核报 `NoUsablePort { implemented: 0, ... }`；PCI ID、class 和 ABAR 都已验证正确。
+- **根因**: 部分片上 AHCI 控制器的 HBA reset 会清空可写的 `HOST_PORTS_IMPL`。若 bootloader 先扫描磁盘，它可能已经回写 PI，从而掩盖内核初始化缺失并形成隐式启动顺序依赖。
+- **修复**: 对照厂商 U-Boot/Linux：reset 前保存实现寄存器，或由板级 Provider 提供固件定义的端口图；reset 后回写 PI 并读回刷新 posted MMIO write，再做端口和链路探测。未知平台不能使用无条件固定掩码。
+- **教训**: “同一镜像偶尔能识别 SSD”要检查 bootloader 前置命令是否改变了控制器状态。内核驱动必须从其声明的硬件初始条件独立建立完整状态，不能依赖人工调试命令的副作用。
+- **相关文件**: `dependency/dep_iso/src/provider.rs`, `dependency/dep_iso/src/block/ahci.rs`, `os/src/drivers/block/sata_blk.rs`

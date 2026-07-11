@@ -497,6 +497,14 @@ impl<P: Provider> AHCI<P> {
 
         ghc.enable()?;
 
+        // Some integrated controllers clear the writable PI register during
+        // HBA reset. Restore only a bitmap supplied by the platform provider;
+        // generic PCI controllers continue to use their hardware value.
+        if let Some(port_map) = P::AHCI_PORTS_IMPLEMENTED {
+            ghc.port_implemented.write(port_map);
+            ghc.port_implemented.read(); // Flush the posted MMIO write.
+        }
+
         assert_eq!(size_of::<SATAFISRegH2D>(), 64);
         assert_eq!(size_of::<AHCIReceivedFIS>(), 256);
         assert_eq!(size_of::<AHCICommandHeader>(), 32);
