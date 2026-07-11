@@ -60,10 +60,12 @@
 - LA64 QEMU 以单盘快照启动，读取 `/sdcard/os_test.conf` 的 `mask=0xFFF`；musl/glibc basic 全部完成，`test_mount` 与 `test_umount` 均将 `/dev/vda2` 的 512B FAT32 适配到 4KiB 平台块并返回 0，无 panic ✅
 - Docker 内最终 `make rv64-kernel-build-only`、`make la64-kernel-build-only`、`make la64-2k1000-sata-mount-ro` 均成功 ✅
 - 最终 uImage payload `12339848` 字节，SHA-256 `cd02b6dbb1d9c90945ebed2bfa9ac3c4848beed99e96ae5b670a2c2fec2f49d2` ✅
+- 实体 `TS32GMTS400` SSD 经 U-Boot 分 24 个 256MiB 块和 1 个 1MiB 块写入；全部 `12584960` 个 sector 均完成 TFTP 内存 CRC、`scsi write`、`scsi read` 与读回 CRC 四步校验，总耗时 25.2 分钟 ✅
+- 实板重启后识别 P1 Ext4、P2 Fat32、P3 Ext4；P1/P3 分别以 `RDONLY` 挂到 `/sdcard`、`/tools`，`/tools/{bin,sbin,lib,usr,tests}` 和 `/sdcard/{musl,glibc}` bind 成功，并从 P1 读取 `mode=run mask=0xFFF` ✅
 
 **备注：**
-- 完整镜像和压缩包位于 `/private/tftpboot/`；内核 uImage 可以 TFTP，6GiB 整盘镜像超过开发板 2GiB 内存，必须将 SSD 连接主机后按 raw image 从 LBA0 写入。
-- 本轮没有覆盖物理 SSD。2K1000LA 当前仍使用只读挂载内核；完整文件树可验收，但依赖持久写入的实板测试要等 AHCI 写路径和 flush 验收后再开放。
+- 完整镜像和压缩包位于 `/private/tftpboot/`；6GiB 镜像不能单次装入 2GiB 内存，但已验证用 256MiB 分块从 LBA0 依次 `tftpboot + scsi write/read + crc32` 写入。
+- 2K1000LA 当前仍使用只读挂载内核；完整文件树可验收，但依赖持久写入的实板测试要等 AHCI 写路径和 flush 验收后再开放。
 
 ## 2026-07-10
 

@@ -318,3 +318,11 @@
 - **修复**: 所有块文件系统打开入口都必须保留完整的 `DetectedFs`，并在构造 ext4/FAT 实例前调用同一个原生块到平台块适配函数；`MS_RDONLY` 同时下沉为底层只读包装器。
 - **教训**: “启动能挂载”不能覆盖用户态 mount 回归。多块大小验证必须包含设备节点路径的 `mount + I/O + umount`，并覆盖 512B FAT、1KiB ext4 和平台自然块三类组合。
 - **相关文件**: `os/src/fs/mod.rs`, `os/src/fs/filesystem.rs`, `os/src/drivers/block/partition.rs`, `os/src/syscall/fs.rs`
+
+### U-Boot 内存小于整盘镜像时通过网络分块写盘
+
+- **现象**: raw disk image 大于开发板 DRAM，单次 `tftpboot` 无法加载，但 SSD 留在板上且只能通过网线和串口操作。
+- **方法**: 按固定的 512B sector 整数倍切块，块大小必须落在已验证的空闲 DRAM 区间；逐块执行 TFTP、内存 CRC、`scsi write`、同 LBA `scsi read` 和读回 CRC，后一块起始 LBA 累加前一块 sector 数。写盘前硬匹配 `scsi info` 的型号与容量，镜像 sector 总数还必须小于设备容量。
+- **验收**: 所有块读回 CRC 一致后重新 `scsi reset`，检查 DOS/MBR 分区长度，再分别用 `ext4ls`/`fatls` 读取每个分区；最后启动目标内核验证设备节点、文件系统类型和实际挂载点。任何短传、短写、CRC 不一致或目标型号变化都立即停止。
+- **实测参数**: 2K1000LA 的 6,443,499,520B 镜像使用 24 个 256MiB 块加 1 个 1MiB 块；256MiB 对应 `0x80000` sectors，加载地址 `0x9000000098000000`，目标为 `TS32GMTS400`。
+- **相关文档**: `docs/03_fs/2k1000-full-test-disk.md`
