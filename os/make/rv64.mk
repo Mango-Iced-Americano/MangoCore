@@ -280,15 +280,24 @@ ktest-run: user $(LWEXT4_PREREQ)
 # console for [L4 REGRESSION RESULT: PASS] / FAIL markers.
 REGRESSION_CMDLINE := mango.mode=regression
 
+REGRESSION_CPIO_RV := ../fs-img-dir/initramfs-regression-rv.cpio
+
 regression-run: user $(LWEXT4_PREREQ)
 	@echo "[regression] Building regression initramfs..."
 	@mkdir -p ../fs-img-dir
-	./build_initramfs.sh rv64 $(MODE) $(INITRAMFS_CPIO_RV) regression
+	./build_initramfs.sh rv64 $(MODE) $(REGRESSION_CPIO_RV) regression
+	@# Swap regression cpio in for the build, restore after
+	@cp $(INITRAMFS_CPIO_RV) $(INITRAMFS_CPIO_RV).bak 2>/dev/null || true
+	@cp $(REGRESSION_CPIO_RV) $(INITRAMFS_CPIO_RV)
 	@echo "[regression] Rebuilding kernel with: $(REGRESSION_CMDLINE)"
 	@cp -f src/hal/arch/riscv/linker-$(BOARD).ld src/hal/arch/riscv/linker.ld
-	@MANGO_CMDLINE="$(REGRESSION_CMDLINE)" LOG=${LOG} \
+	@# Ensure lwext4 is built and LWEXT4_LIB_DIR is set
+	@$(MAKE) lwext4-rv64
+	@MANGO_CMDLINE="$(REGRESSION_CMDLINE)" LWEXT4_LIB_DIR="$(LWEXT4_LIB_DIR)" LOG=${LOG} \
 		cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)"
 	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
+	@# Restore normal cpio
+	@mv $(INITRAMFS_CPIO_RV).bak $(INITRAMFS_CPIO_RV) 2>/dev/null || true
 	@echo "[regression] Launching QEMU (no disks, timeout 60s)..."
 	@timeout --foreground 60 qemu-system-riscv64 \
 		-machine virt \

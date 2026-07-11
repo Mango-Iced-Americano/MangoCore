@@ -25,7 +25,12 @@ esac
 if [ "$PROFILE" = "regression" ]; then
     echo "[initramfs] Building regression initramfs for $ARCH ($MODE)..."
 
-    # 2. 确定架构相关的路径
+    # Copy common skeleton (needed for /dev, /etc, /tmp dirs etc.)
+    cp -a "$SCRIPT_DIR/initramfs/common/." "$STAGE/"
+    # Remove files we don't need in regression mode
+    rm -rf "$STAGE/bin" "$STAGE/rescue" "$STAGE/apk" 2>/dev/null || true
+
+    # Determine arch-specific paths
     case "$ARCH" in
       rv64)
         INIT_SRC="../user/target/riscv64gc-unknown-none-elf/$MODE/regression_init"
