@@ -4,6 +4,23 @@
 
 ## 2026-07-11
 
+### Fix execve EFAULT + la64 regression 对等
+
+**涉及文件：**
+- `user/src/bin/regression_init.rs` — 修复 `execve` EFAULT 根因：`&[]` 作为 envp 产生非空悬垂指针，内核 `read_exec_vectors()` 将其当 C `char*[]` 解引用 → -14 EFAULT。改为显式 `let envp: [*const u8; 1] = [core::ptr::null()]` 即 null-terminated 空数组。同时 path 字符串添加显式 `\0` 结尾。
+- `os/src/initramfs-regression-la.S` — (新增) mirror of `initramfs-regression-rv.S`，`.incbin` 指向 `initramfs-regression-la.cpio`，导出相同 `sinitramfs`/`einitramfs` 符号
+- `os/src/main.rs` — la64 initramfs include 拆为两个条件编译：`not(regression_initramfs)` → `initramfs-la.S`，`regression_initramfs` → `initramfs-regression-la.S`（与 rv64 对称）
+- `os/make/la64.mk` — (重构) 全程参数化：`INITRAMFS_PROFILE`（`normal`/`regression`），`KERNEL_INITRAMFS_CPIO_LA` 自动选择 cpio 路径，`KERNEL_CMDLINE` 默认 `mango.mode=normal`，cargo build 注入 `MANGO_CMDLINE` + `INITRAMFS_PROFILE_FEATURES`；`regression-run` 重写为委托 `$(MAKE) build INITRAMFS_PROFILE=regression`，QEMU 改用 `-kernel $(KERNEL_ELF)`（非 `-bios`/`-device loader`，`BOOTLOADER` 未定义）；ktest-run `-m` 统一 1024MB
+- `os/Makefile` — 新增 `regression-all` 和 `ktest-all` 聚合目标（双架构串行 `$(MAKE)`）
+- `Makefile` (根) — `regression:` 改为 `$(MAKE) -C os regression-all`
+
+**验证：**
+- `make -f make/rv64.mk regression-run MODE=release` ✅ — EFAULT fixed，regression 正常执行（3/4 PASS，1 FAIL 为既有 `mmap_edge_cases`）
+- `make rv64-kernel-build-only` ✅ (188 warnings 均为既有)
+- `make la64-kernel-build-only` ✅ (173 warnings 均为既有)
+
+**备注：** (1) la64 回归 QEMU 用 `-kernel` 而非 `-bios $(BOOTLOADER)`，因 `BOOTLOADER` 在 la64.mk 中未定义，且 `-kernel` 是 la64 QEMU 标准启动方式（与 `run` target 一致）；(2) rv64 回归中 `mmap_edge_cases` 失败为既有问题，与本次修改无关
+
 ### regression 构建链重构：Cargo feature + Makefile 参数化，消除 cpio 交换 hack
 
 **涉及文件：**

@@ -14,10 +14,11 @@ use user_lib::{exec, println};
 fn main(_argc: usize, _argv: &[&str]) -> i32 {
     println!("[regression_init] starting regression suite");
 
-    let prog = "/regression";
+    let prog = "/regression\0";
     let args: [*const u8; 2] = [prog.as_ptr(), core::ptr::null()];
+    let envp: [*const u8; 1] = [core::ptr::null()];
 
-    let ret = exec(prog, &args, &[]);
+    let ret = exec(prog, &args, &envp);
     println!("[regression_init] exec failed, errno={}", ret);
     println!("[L4 REGRESSION RESULT: FAIL] exit_code=127");
     127

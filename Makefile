@@ -91,7 +91,7 @@ rv64-only:
 	make -C os rv64-only BLK_MODE=${BLK_MODE}
 
 regression:
-	make -C os rv64-regression
+	$(MAKE) -C os regression-all
 
 # ── Testing shortcuts (run inside Docker container) ──
 check-fast:

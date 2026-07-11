@@ -565,3 +565,15 @@ check-fast:
 	cp ./src/lang_items.rs.rv ./src/lang_items.rs 2>/dev/null
 	cp ../user/src/lang_items.rs.rv ../user/src/lang_items.rs 2>/dev/null
 	cargo check --features "board_rvqemu block_virt" 2>&1 | tail -1
+
+# ─────────────────────────────────────────────────────────
+#  Aggregate targets — serial execution (toolchain conflict)
+# ─────────────────────────────────────────────────────────
+
+regression-all:
+	@$(MAKE) rv64-regression
+	@$(MAKE) la64-regression
+
+ktest-all:
+	@$(MAKE) rv64-ktest KTEST=all
+	@$(MAKE) la64-ktest KTEST=all

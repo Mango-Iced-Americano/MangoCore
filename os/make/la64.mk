@@ -108,15 +108,32 @@ $(APPS):
 fs-img: user
 	./buildfs.sh "$(ROOTFS_IMG)" "$(BOARD)" $(MODE) $(FS_MODE)
 
-# Initramfs cpio generation (always needed when feature is in Cargo defaults)
+# Initramfs cpio generation — parameterized for normal / regression profiles
 INITRAMFS_CPIO_LA := ../fs-img-dir/initramfs-la.cpio
+REGRESSION_CPIO_LA := ../fs-img-dir/initramfs-regression-la.cpio
 
-kernel: $(INITRAMFS_CPIO_LA)
+INITRAMFS_PROFILE ?= normal
+ifeq ($(INITRAMFS_PROFILE),regression)
+  KERNEL_INITRAMFS_CPIO_LA := $(REGRESSION_CPIO_LA)
+  INITRAMFS_PROFILE_FEATURES := regression_initramfs
+else
+  KERNEL_INITRAMFS_CPIO_LA := $(INITRAMFS_CPIO_LA)
+  INITRAMFS_PROFILE_FEATURES :=
+endif
+
+KERNEL_CMDLINE ?= mango.mode=normal
+
+kernel: $(KERNEL_INITRAMFS_CPIO_LA)
 
 $(INITRAMFS_CPIO_LA): user
 	@mkdir -p ../fs-img-dir
 	./build_initramfs.sh la64 $(MODE) $(INITRAMFS_CPIO_LA)
 	@touch src/initramfs-la.S
+
+$(REGRESSION_CPIO_LA): user
+	@mkdir -p ../fs-img-dir
+	./build_initramfs.sh la64 $(MODE) $(REGRESSION_CPIO_LA) regression
+	@touch src/initramfs-regression-la.S
 
 # lwext4: always build C library (now the default ext4 backend)
 export LWEXT4_LIB_DIR := $(abspath $(LWEXT4_LA_DIR))
@@ -126,9 +143,9 @@ kernel: $(LWEXT4_LA_PREREQ)
 	@echo Platform: $(BOARD)
 	@cp -f src/hal/arch/loongarch64/linker-$(BOARD).ld src/hal/arch/loongarch64/linker.ld 2>/dev/null || true 2>/dev/null || true
 ifeq ($(MODE), debug)
-	@LOG=$(LOG) cargo build --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
+	@MANGO_CMDLINE="$(KERNEL_CMDLINE)" LOG=$(LOG) cargo build --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(INITRAMFS_PROFILE_FEATURES) $(EXTRA_FEATURES)" --target $(TARGET)
 else
-	@LOG=$(LOG) cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
+	@MANGO_CMDLINE="$(KERNEL_CMDLINE)" LOG=$(LOG) cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(INITRAMFS_PROFILE_FEATURES) $(EXTRA_FEATURES)" --target $(TARGET)
 endif
 
 # uImage (la64-specific: for uboot boot)
@@ -222,7 +239,7 @@ ktest-run: user $(LWEXT4_LA_PREREQ)
 		-nographic \
 		-bios $(BOOTLOADER) \
 		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
-		-m 512 \
+		-m 1024 \
 		-smp threads=1
 
 # ─────────────────────────────────────────────────────────
@@ -233,23 +250,16 @@ ktest-run: user $(LWEXT4_LA_PREREQ)
 # console for [L4 REGRESSION RESULT: PASS] / FAIL markers.
 REGRESSION_CMDLINE := mango.mode=regression
 
-regression-run: user $(LWEXT4_LA_PREREQ)
-	@echo "[regression] Building regression initramfs..."
-	@mkdir -p ../fs-img-dir
-	./build_initramfs.sh la64 $(MODE) $(INITRAMFS_CPIO_LA) regression
-	@touch src/initramfs-la.S
-	@echo "[regression] Rebuilding kernel with: $(REGRESSION_CMDLINE)"
-	@cp -f src/hal/arch/loongarch64/linker-$(BOARD).ld src/hal/arch/loongarch64/linker.ld 2>/dev/null || true
-	@MANGO_CMDLINE="$(REGRESSION_CMDLINE)" LOG=${LOG} \
-		cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
-	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
+regression-run:
+	@echo "[regression] Building la64 kernel with regression initramfs..."
+	@$(MAKE) -f $(firstword $(MAKEFILE_LIST)) build INITRAMFS_PROFILE=regression KERNEL_CMDLINE="$(REGRESSION_CMDLINE)" \
+		BLK_MODE=$(BLK_MODE) MODE=$(MODE) LOG=${LOG}
 	@echo "[regression] Launching QEMU (no disks, timeout 60s)..."
 	@timeout --foreground 60 qemu-system-loongarch64 \
 		-machine virt \
 		-nographic \
-		-bios $(BOOTLOADER) \
-		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
-		-m 256 \
+		-kernel $(KERNEL_ELF) \
+		-m 1024 \
 		-smp threads=1 2>&1 | tee /tmp/regression-la.log
 	@grep -q "L4 REGRESSION RESULT: PASS" /tmp/regression-la.log \
 		&& echo "=== REGRESSION PASS ===" \
