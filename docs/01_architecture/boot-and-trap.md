@@ -77,6 +77,33 @@ make -C os la64-2k1000-run-clean
 
 需要重新定位早期上板故障时，可在底层 `make/la64.mk` 构建中显式加入 `EXTRA_FEATURES=board_bringup_trace`，不能修改正式 clean 目标。
 
+### 2.3 macOS 一键 TFTP 启动
+
+开发板保持上电、USB_DEBUG 和网线连接后，先执行无副作用检查：
+
+```bash
+make 2k1000-boot-check
+```
+
+确认通过后执行：
+
+```bash
+make 2k1000-boot
+```
+
+脚本 `scripts/boot_2k1000_tftp.py` 会检查或设置 `en8=192.168.9.10/24`，确认 macOS `com.apple.tftpd` 与 `/private/tftpboot/kernel-2k1000-run.ui`，自动识别唯一的 `/dev/cu.wchusbserial*`。若同一串口被 screen 占用，只关闭对应 screen 会话；随后提示按一次 RESET，并持续发送 `c` 截停自动启动。
+
+进入 U-Boot 后，脚本逐条等待 `=>` 再设置网络参数，依次完成 `ping`、`tftpboot` 字节数校验、内存 CRC32、`iminfo` 架构与镜像校验，全部通过才执行 `bootm`。启动后当前终端成为串口监视器；`Ctrl-C` 只退出监视器，不会向开发板发送中断。脚本不执行 `saveenv`，也不包含任何 `scsi write`。
+
+网卡、镜像或串口设备名变化时可覆盖 Make 变量：
+
+```bash
+make 2k1000-boot \
+  BOARD_NET_IFACE=en9 \
+  BOARD_KERNEL=kernel-2k1000-run.ui \
+  BOARD_SERIAL=/dev/cu.wchusbserial120
+```
+
 ## 3. `rust_main()` 控制流
 
 ### 3.1 固定前缀

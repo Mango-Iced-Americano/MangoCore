@@ -3,6 +3,9 @@ FS_MODE ?= fat32
 BLK_MODE ?= virt
 DOCKER_IMAGE ?= docker.educg.net/cg/os-contest:20250614
 LA_TOOLCHAIN ?= nightly-2024-05-01
+BOARD_NET_IFACE ?= en8
+BOARD_KERNEL ?= kernel-2k1000-run.ui
+BOARD_SERIAL_ARG = $(if $(BOARD_SERIAL),--serial $(BOARD_SERIAL),)
 
 QEMU_TAR := qemu-2k1000-static.20240526.tar.xz
 QEMU_URL := https://gitlab.educg.net/wangmingjian/os-contest-2024-image/-/raw/master/$(QEMU_TAR)
@@ -48,7 +51,8 @@ print-logo:
 	@echo "                \|_________|                                                "
 	@echo "                                                                            "
 	@echo "                                                                            "
-.PHONY: all clean print-logo run run-simple qemu-download prepare-cargo-config
+.PHONY: all clean print-logo run run-simple qemu-download prepare-cargo-config \
+	2k1000-boot 2k1000-boot-check
 
 qemu-download: $(QEMU_DIR)/.extracted
 	chmod +x util/mkimage
@@ -99,6 +103,17 @@ docker:
 
 docker-test-parallel:
 	bash scripts/run_test_docker_parallel.sh
+
+2k1000-boot:
+	python3 scripts/boot_2k1000_tftp.py \
+		--interface $(BOARD_NET_IFACE) \
+		--image $(BOARD_KERNEL) $(BOARD_SERIAL_ARG)
+
+2k1000-boot-check:
+	python3 scripts/boot_2k1000_tftp.py \
+		--interface $(BOARD_NET_IFACE) \
+		--image $(BOARD_KERNEL) $(BOARD_SERIAL_ARG) \
+		--no-host-config --check-only
 
 testsuits-download:
 	cd fs-img-dir && \

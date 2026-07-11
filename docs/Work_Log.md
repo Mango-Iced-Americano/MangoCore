@@ -4,6 +4,23 @@
 
 ## 2026-07-11
 
+### board/tooling: 增加 macOS 一键 TFTP 启动
+
+**涉及文件：**
+- `scripts/boot_2k1000_tftp.py` — 自动准备主机网口/TFTP/镜像、接管对应 screen 串口、截停 U-Boot、校验 TFTP 与 uImage 后启动并持续转发控制台
+- `Makefile` — 新增 `2k1000-boot` 和无副作用的 `2k1000-boot-check`，支持覆盖网卡、镜像和串口
+- `docs/01_architecture/boot-and-trap.md`, `docs/03_fs/2k1000-full-test-disk.md` — 记录一键入口、手工等价命令和安全边界
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀 U-Boot 串口自动化的 prompt/CRC 驱动模式
+
+**验证：**
+- 系统 Python 3.9 `compile()` 语法检查和 `--help` 参数解析通过 ✅
+- `make -n 2k1000-boot` 正确展开默认 `en8` 与 `kernel-2k1000-run.ui` ✅
+- `make 2k1000-boot-check` 实机只读检查通过：`en8=192.168.9.10/24`、TFTP launchd、镜像 SHA-256 和 `/dev/cu.wchusbserial120` 均正确，且未打开串口或发送 U-Boot 命令 ✅
+
+**备注：**
+- 正式启动需要操作者在脚本提示后按一次开发板 RESET；其余步骤自动完成。
+- 脚本只设置当前 U-Boot 环境，不调用 `saveenv`；只读取/启动内核，不包含 SSD 写命令。
+
 ### board/build: 关闭 bring-up 输出并生成纯净 mode=run 镜像
 
 **涉及文件：**

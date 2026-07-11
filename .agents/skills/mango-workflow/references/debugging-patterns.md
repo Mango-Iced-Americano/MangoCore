@@ -334,3 +334,11 @@
 - **修复**: 板型 feature 只负责链接地址、入口和驱动选择；另设默认关闭的诊断 feature。成功型早期输出使用统一编译期宏，带额外读写或原子状态的探针则整段 `cfg` 移除；panic 和真实错误路径不应静默。
 - **验收**: 除双架构编译外，必须直接扫描最终 uImage/ELF，确认调试字符串不存在，同时确认正式配置与错误诊断字符串仍在；不要只搜索源码或依赖 `LOG=off`。
 - **相关文件**: `os/Cargo.toml`, `os/src/console.rs`, `os/src/main.rs`, `os/src/hal/arch/loongarch64/`, `os/Makefile`
+
+### U-Boot 串口自动化必须由 prompt 和内容校验驱动
+
+- **现象**: 把多条 `setenv/tftpboot/bootm` 用固定 sleep 或一次性串口注入时，U-Boot 可能仍在网卡协商、TFTP 或 CRC，后续字符被丢弃；最终表现为偶发找不到镜像、命令截断或在未校验镜像时直接启动。
+- **根因**: U-Boot 各命令耗时不固定，串口发送成功不代表命令执行完成；只检查 TFTP 返回也无法发现短传、错误文件或内存内容损坏。
+- **修复**: 每条控制命令都读取到完整 `=>` prompt 后再发送下一条；TFTP 后同时校验 `Bytes transferred`、本地与 U-Boot CRC32，再用 `iminfo` 确认架构和镜像 checksum。`bootm` 之后切换为纯串口透传，主机侧 Ctrl-C 只关闭监视器。
+- **安全边界**: 网络参数只用 `setenv`，禁止自动 `saveenv`；普通启动脚本禁止包含块设备写命令。自动接管串口时只关闭能明确匹配同一设备路径的 screen，未知占用者必须报错停止。
+- **相关文件**: `scripts/boot_2k1000_tftp.py`, `Makefile`

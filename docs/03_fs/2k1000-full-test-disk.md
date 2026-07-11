@@ -102,6 +102,15 @@ ext4ls scsi 0:3 /
 
 内核仍使用固定 TFTP 网段启动：
 
+macOS 上推荐直接使用一键入口：
+
+```bash
+make 2k1000-boot-check
+make 2k1000-boot
+```
+
+手工等价命令为：
+
 ```text
 setenv ipaddr 192.168.9.20
 setenv serverip 192.168.9.10
