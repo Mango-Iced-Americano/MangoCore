@@ -82,6 +82,9 @@ impl EasyFileSystem {
         let byts_per_sec = super_block.byts_per_sec;
         let data_area_start_block = super_block.first_data_sector();
         let rsvd_sec_cnt = super_block.rsvd_sec_cnt as usize;
+        let sectors_per_fat = super_block.fat_sz32 as usize;
+        let num_fats = super_block.num_fats as usize;
+        let ext_flags = super_block.ext_flags;
         let data_sector_count = super_block.data_sector_count();
 
         // 用 Arc::new_cyclic 初始化 __self_ref
@@ -91,6 +94,9 @@ impl EasyFileSystem {
                 fat: Fat::new(
                     rsvd_sec_cnt,
                     byts_per_sec as usize,
+                    sectors_per_fat,
+                    num_fats,
+                    ext_flags,
                     (data_sector_count / sec_per_clus as u32) as usize,
                 ),
                 root_clus,

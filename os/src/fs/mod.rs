@@ -661,6 +661,129 @@ pub fn mount_boot_block_devices_read_only() {
     mount_boot_block_devices_with_flags(self::vfs::MountFlags::RDONLY);
 }
 
+#[cfg(all(feature = "board_2k1000", feature = "sata_fs_write_probe"))]
+fn board_scratch_fat32_root() -> Result<Arc<dyn self::vfs::IndexNode>, &'static str> {
+    use crate::drivers::block::partition::{probe_mbr, MbrProbe, PartitionBlockDevice};
+    use self::vfs::FileSystem;
+
+    let raw = crate::drivers::block::block_devices()[0]
+        .as_ref()
+        .cloned()
+        .ok_or("SATA device 0 is absent")?;
+    let partitions = match probe_mbr(&raw) {
+        MbrProbe::Partitions(partitions) => partitions,
+        _ => return Err("expected MBR is absent or unsupported"),
+    };
+    let partition = partitions
+        .into_iter()
+        .find(|partition| partition.partno == 2 && partition.type_code == 0x0c)
+        .ok_or("P2 is not the expected FAT32 LBA partition")?;
+    let partition_device = Arc::new(PartitionBlockDevice::new(
+        raw,
+        partition.start_lba,
+        partition.sectors,
+    )) as Arc<dyn BlockDevice>;
+    let detected = self::filesystem::detect_fs_layout(&partition_device)
+        .ok_or("P2 filesystem was not detected")?;
+    if detected.fs_type != self::filesystem::FS_Type::Fat32 {
+        return Err("P2 is not FAT32");
+    }
+    let fs_device = adapt_filesystem_device(partition_device, detected.block_size, false);
+    let filesystem = self::fat32::EasyFileSystem::open(fs_device);
+    Ok(filesystem.root_inode())
+}
+
+/// Exercise FAT32 metadata and data persistence on the dedicated P2 scratch
+/// partition without exposing a writable device node to userspace.
+#[cfg(all(feature = "board_2k1000", feature = "sata_fs_write_probe"))]
+pub fn run_board_scratch_write_probe() {
+    use self::vfs::{FilePrivateData, FileType, InodeMode};
+
+    macro_rules! probe_fatal {
+        ($fmt:literal $(, $arg:expr)* $(,)?) => {
+            panic!(concat!("[sata-fs-write-probe] FATAL: ", $fmt), $($arg),*)
+        };
+    }
+
+    const DIR_NAME: &str = "MANGO_RW_PROBE";
+    const FILE_NAME: &str = "PAYLOAD.BIN";
+    const PAYLOAD_LEN: usize = 6144;
+
+    println!("[sata-fs-write-probe] begin (P2 FAT32 only)");
+    let root = match board_scratch_fat32_root() {
+        Ok(root) => root,
+        Err(error) => probe_fatal!("REFUSED: {}", error),
+    };
+    if root.find(DIR_NAME).is_ok() {
+        probe_fatal!("REFUSED: stale probe directory exists");
+    }
+    let directory = match root.mkdir(DIR_NAME, InodeMode::from_bits_truncate(0o755)) {
+        Ok(directory) => directory,
+        Err(error) => probe_fatal!("mkdir failed: {:?}", error),
+    };
+    let file = match directory.create(
+        FILE_NAME,
+        FileType::File,
+        InodeMode::from_bits_truncate(0o644),
+    ) {
+        Ok(file) => file,
+        Err(error) => probe_fatal!("create failed: {:?}", error),
+    };
+    let mut expected = alloc::vec![0u8; PAYLOAD_LEN];
+    for (index, byte) in expected.iter_mut().enumerate() {
+        *byte = 0x6d ^ (index as u8).wrapping_mul(0x3d) ^ ((index >> 8) as u8);
+    }
+    let private = spin::Mutex::new(FilePrivateData::Unused);
+    match file.write_at(0, expected.len(), &expected, private.lock()) {
+        Ok(written) if written == expected.len() => {}
+        Ok(written) => probe_fatal!("short write: {} != {}", written, expected.len()),
+        Err(error) => probe_fatal!("write failed: {:?}", error),
+    }
+    crate::fs::page_cache::flush_all_page_caches();
+    drop(file);
+    drop(directory);
+    drop(root);
+
+    let reopened_root = match board_scratch_fat32_root() {
+        Ok(root) => root,
+        Err(error) => probe_fatal!("reopen failed: {}", error),
+    };
+    let reopened_dir = match reopened_root.find(DIR_NAME) {
+        Ok(directory) => directory,
+        Err(error) => probe_fatal!("persisted directory missing: {:?}", error),
+    };
+    let reopened_file = match reopened_dir.find(FILE_NAME) {
+        Ok(file) => file,
+        Err(error) => probe_fatal!("persisted file missing: {:?}", error),
+    };
+    let mut actual = alloc::vec![0u8; PAYLOAD_LEN];
+    let private = spin::Mutex::new(FilePrivateData::Unused);
+    match reopened_file.read_at(0, actual.len(), &mut actual, private.lock()) {
+        Ok(read) if read == actual.len() && actual == expected => {}
+        Ok(read) => probe_fatal!("persisted data mismatch: read={}", read),
+        Err(error) => probe_fatal!("persisted read failed: {:?}", error),
+    }
+    drop(reopened_file);
+    if let Err(error) = reopened_dir.unlink(FILE_NAME) {
+        probe_fatal!("unlink failed: {:?}", error);
+    }
+    drop(reopened_dir);
+    if let Err(error) = reopened_root.rmdir(DIR_NAME) {
+        probe_fatal!("rmdir failed: {:?}", error);
+    }
+    crate::fs::page_cache::flush_all_page_caches();
+    drop(reopened_root);
+
+    let final_root = match board_scratch_fat32_root() {
+        Ok(root) => root,
+        Err(error) => probe_fatal!("final reopen failed: {}", error),
+    };
+    if final_root.find(DIR_NAME).is_ok() {
+        probe_fatal!("cleanup was not persistent");
+    }
+    println!("[sata-fs-write-probe] PASS: create/write/flush/reopen/read/unlink/rmdir persisted");
+}
+
 /// 主动初始化 initramfs VFS_ROOT（触发 lazy_static）。
 /// 在 `mm::init()` 之后、`drivers::init_net_device()` 之前调用。
 #[cfg(feature = "initramfs")]

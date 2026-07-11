@@ -350,3 +350,28 @@
 - **修复**: 对照厂商 U-Boot/Linux：reset 前保存实现寄存器，或由板级 Provider 提供固件定义的端口图；reset 后回写 PI 并读回刷新 posted MMIO write，再做端口和链路探测。未知平台不能使用无条件固定掩码。
 - **教训**: “同一镜像偶尔能识别 SSD”要检查 bootloader 前置命令是否改变了控制器状态。内核驱动必须从其声明的硬件初始条件独立建立完整状态，不能依赖人工调试命令的副作用。
 - **相关文件**: `dependency/dep_iso/src/provider.rs`, `dependency/dep_iso/src/block/ahci.rs`, `os/src/drivers/block/sata_blk.rs`
+
+### 块设备写路径开放前使用分区外自恢复探针
+
+- **场景**: 读取、分区识别和只读挂载已经通过，但 DMA 写命令、设备 cache flush 与持久性尚未在实板验证。
+- **方法**: 独立 feature 硬匹配设备型号和分区表身份；动态计算最后一个分区末端，在明确 guard 后选择小范围扇区。先备份，再写测试模式、flush、读回比较，最后无条件恢复备份、再次 flush 并读回验证。
+- **失败策略**: 第一次写命令发出前的错误可以安全返回；之后即使命令报告失败也要假定介质可能已修改并尝试恢复。恢复失败必须停止系统，不能继续挂载或运行测例。探针构建保持 ramfs-only，正式镜像继续只读。
+- **教训**: “驱动存在 write_block”不代表文件系统可以改成读写。先验证原始命令和 flush，再开放单独 scratch 分区，最后才允许文件系统元数据写回。
+- **相关文件**: `os/src/drivers/block/sata_blk.rs`, `os/src/main.rs`, `os/Makefile`
+
+### SATA 暖复位后 PxSSTS=1 需要定时 COMRESET
+
+- **现象**: 冷启动或前一轮探针可以识别 SSD，紧接着按板载 RESET 再启动时却报 `LinkTimeout { sata_status: 1 }`；尚未进入任何文件系统写操作。
+- **根因**: `DET=1` 仅表示检测到设备但 PHY 通信未建立。按 CPU 速度相关的固定循环轮询可能在链路完成协商前就耗尽，而且 HBA reset 不等于 SATA PHY COMRESET。
+- **修复**: Provider 提供基于架构 stable counter 的真实微秒延时。先给正常 spin-up 一个短时间窗口；未 active 时按 AHCI/Linux 顺序写 `PxSCTL.DET=1` 保持至少 1ms，再写 `DET=0` 释放，并在真实 10s 上限内等待 `DET=3, IPM=1`。
+- **教训**: 硬件协议中的毫秒/秒级 deadline 不能用无时间基准的 spin 次数表达；冷启动成功不能覆盖暖复位回归。
+- **相关文件**: `dependency/dep_iso/src/provider.rs`, `dependency/dep_iso/src/block/ahci.rs`, `os/src/drivers/block/sata_blk.rs`
+
+### FAT32 写入后重挂载出现空文件或已删除项复现
+
+- **现象**: `write()` 返回完整字节数，原始块写入和 flush 也已通过，但重新打开文件时长度为 0；或 `unlink()` 返回成功后，由新 inode 实例执行 `rmdir()` 仍报 `ENOTEMPTY`。
+- **根因一**: `BlockSizeAdapter` 已把 `BlockDevice` 的 block id 统一为 BPB 扇区单位，FAT 层又按全局 `BLOCK_SZ/512` 二次换算，实际访问了错误 FAT sector。块大小适配边界不清晰会让数据区写入看似成功而 FAT 链损坏。
+- **根因二**: 文件大小、首簇和删除目录项只在 `FatInode::drop()` 中回写。VFS 引用或独立 page cache 延长生命周期时，新 `find()` 构造的 inode 会直接读取尚未落盘的旧目录项；Rust 对象析构不是文件系统持久化协议。
+- **修复**: FAT 内部只使用 BPB 声明的扇区单位，检查簇号 `2..cluster_count+2`、FAT 容量、双 FAT 镜像和 ExtFlags；write/resize 显式更新短目录项，inode `sync()` 依次写回数据页、父目录项和父目录页，unlink/rmdir 在成功返回前持久化目录页。
+- **验收**: 探针必须跨新文件系统实例完成 create/write/flush/reopen/read/content-compare/unlink/rmdir/final-reopen，不能只在同一 inode/page cache 内回读。失败后用受限分区恢复工具重建 scratch 分区，避免在已损坏 FAT 上反复试写。
+- **相关文件**: `os/src/fs/fat32/bitmap.rs`, `os/src/fs/fat32/efs.rs`, `os/src/fs/fat32/fat_inode.rs`, `os/src/fs/mod.rs`, `scripts/restore_2k1000_p2.py`

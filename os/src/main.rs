@@ -34,6 +34,13 @@ compile_error!("loongarch64 requires exactly one board_laqemu or board_2k1000 fe
 compile_error!("board_2k1000 bring-up requires the initramfs feature");
 #[cfg(all(feature = "board_2k1000", feature = "block_mem"))]
 compile_error!("board_2k1000 does not define a reserved block_mem region");
+#[cfg(all(feature = "sata_probe", feature = "sata_write_probe"))]
+compile_error!("sata_probe and sata_write_probe are mutually exclusive");
+#[cfg(all(
+    feature = "sata_fs_write_probe",
+    any(feature = "sata_probe", feature = "sata_write_probe")
+))]
+compile_error!("sata_fs_write_probe cannot be combined with another SATA probe");
 pub use hal::config;
 extern crate alloc;
 extern crate core;
@@ -162,13 +169,19 @@ pub fn rust_main() -> ! {
     #[cfg(all(feature = "board_2k1000", feature = "sata_probe"))]
     drivers::block::sata_read_only_probe();
 
+    // Explicit destructive validation. The probe verifies the prepared disk,
+    // writes only beyond all MBR partitions, and restores the original sectors
+    // before the ramfs-only boot continues.
+    #[cfg(all(feature = "board_2k1000", feature = "sata_write_probe"))]
+    drivers::block::sata_write_probe();
+
     // ── Initramfs 启动路径 ──
     #[cfg(feature = "initramfs")]
     {
         // 在 mm::init() 之后创建 VFS_ROOT: 创建 RamFS + 解包 cpio + 挂载 devfs/proc/tmp
         #[cfg(all(
             feature = "board_2k1000",
-            any(not(feature = "block_sata"), feature = "sata_probe")
+            any(not(feature = "block_sata"), feature = "sata_probe", feature = "sata_write_probe")
         ))]
         {
             // 救援镜像和 sata_probe 镜像必须保持与文件系统探测解耦；普通的
@@ -179,7 +192,7 @@ pub fn rust_main() -> ! {
         #[cfg(all(
             feature = "board_2k1000",
             feature = "block_sata",
-            not(feature = "sata_probe")
+            not(any(feature = "sata_probe", feature = "sata_write_probe"))
         ))]
         boot_trace!("[kernel] 2K1000 board bring-up: SATA read-only mount enabled");
 
@@ -203,12 +216,14 @@ pub fn rust_main() -> ! {
         #[cfg(all(
             feature = "board_2k1000",
             feature = "block_sata",
-            not(feature = "sata_probe")
+            not(any(feature = "sata_probe", feature = "sata_write_probe"))
         ))]
         fs::mount_boot_block_devices_read_only();
+        #[cfg(all(feature = "board_2k1000", feature = "sata_fs_write_probe"))]
+        fs::run_board_scratch_write_probe();
         #[cfg(all(
             feature = "board_2k1000",
-            any(not(feature = "block_sata"), feature = "sata_probe")
+            any(not(feature = "block_sata"), feature = "sata_probe", feature = "sata_write_probe")
         ))]
         boot_trace!("[kernel] 2K1000 board bring-up: block device mount skipped");
 

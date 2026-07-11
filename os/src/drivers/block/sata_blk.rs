@@ -5,6 +5,7 @@ use crate::drivers::block::BlockDevice;
 use crate::hal::BLOCK_SZ;
 use crate::mm::{frame_alloc, frame_dealloc, PhysAddr};
 use alloc::sync::Arc;
+use core::convert::TryInto;
 use isomorphic_drivers::{
     block::ahci::{AhciError, AHCI, BLOCK_SIZE},
     provider,
@@ -86,6 +87,15 @@ impl provider::Provider for Provider {
     // probing, so the kernel must do the same instead of depending on whether
     // U-Boot happened to execute `scsi scan` before bootm.
     const AHCI_PORTS_IMPLEMENTED: Option<u32> = Some(0x0f);
+
+    fn delay_us(micros: usize) {
+        let frequency = crate::hal::get_clock_freq();
+        let ticks = ((frequency as u128 * micros as u128 + 999_999) / 1_000_000) as usize;
+        let start = crate::hal::get_time();
+        while crate::hal::get_time().wrapping_sub(start) < ticks.max(1) {
+            core::hint::spin_loop();
+        }
+    }
 
     fn alloc_dma(size: usize) -> (usize, usize) {
         assert!(
@@ -349,4 +359,200 @@ pub fn read_only_probe() {
         "[sata-probe] PASS: repeated LBA0 reads match; MBR signature={:02x}{:02x}",
         first[510], first[511]
     );
+}
+
+const WRITE_PROBE_SECTORS: usize = 8;
+const WRITE_PROBE_GUARD_SECTORS: u64 = 2048;
+const EXPECTED_DISK_MODEL: &str = "TS32GMTS400";
+const EXPECTED_MBR_DISK_ID: u32 = 0x4d41_4e47;
+
+#[derive(Debug)]
+enum WriteProbeError {
+    Ahci(AhciError),
+    VerifyMismatch { lba: u64 },
+}
+
+impl From<AhciError> for WriteProbeError {
+    fn from(value: AhciError) -> Self {
+        Self::Ahci(value)
+    }
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for &byte in bytes {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xedb8_8320 & (0u32.wrapping_sub(crc & 1)));
+        }
+    }
+    !crc
+}
+
+fn read_probe_sectors(
+    controller: &mut AHCI<Provider>,
+    start_lba: u64,
+    bytes: &mut [u8],
+) -> Result<(), AhciError> {
+    assert_eq!(bytes.len(), WRITE_PROBE_SECTORS * BLOCK_SIZE);
+    for (index, sector) in bytes.chunks_exact_mut(BLOCK_SIZE).enumerate() {
+        controller.read_block((start_lba + index as u64) as usize, sector)?;
+    }
+    Ok(())
+}
+
+fn write_probe_sectors(
+    controller: &mut AHCI<Provider>,
+    start_lba: u64,
+    bytes: &[u8],
+) -> Result<(), AhciError> {
+    assert_eq!(bytes.len(), WRITE_PROBE_SECTORS * BLOCK_SIZE);
+    for (index, sector) in bytes.chunks_exact(BLOCK_SIZE).enumerate() {
+        controller.write_block((start_lba + index as u64) as usize, sector)?;
+    }
+    controller.flush()
+}
+
+fn verify_probe_sectors(
+    controller: &mut AHCI<Provider>,
+    start_lba: u64,
+    expected: &[u8],
+) -> Result<(), WriteProbeError> {
+    let mut actual = alloc::vec![0u8; expected.len()];
+    read_probe_sectors(controller, start_lba, &mut actual)?;
+    for (index, (actual_sector, expected_sector)) in actual
+        .chunks_exact(BLOCK_SIZE)
+        .zip(expected.chunks_exact(BLOCK_SIZE))
+        .enumerate()
+    {
+        if actual_sector != expected_sector {
+            return Err(WriteProbeError::VerifyMismatch {
+                lba: start_lba + index as u64,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn last_mbr_partition_end(mbr: &[u8; BLOCK_SIZE]) -> Option<u64> {
+    if mbr[510..512] != [0x55, 0xaa]
+        || u32::from_le_bytes(mbr[440..444].try_into().ok()?) != EXPECTED_MBR_DISK_ID
+    {
+        return None;
+    }
+
+    let mut last_end = 0u64;
+    for partno in 0..4 {
+        let offset = 446 + partno * 16;
+        let start = u32::from_le_bytes(mbr[offset + 8..offset + 12].try_into().ok()?) as u64;
+        let sectors = u32::from_le_bytes(mbr[offset + 12..offset + 16].try_into().ok()?) as u64;
+        if sectors != 0 {
+            last_end = last_end.max(start.checked_add(sectors)?);
+        }
+    }
+    (last_end != 0).then_some(last_end)
+}
+
+/// Validate real SSD writes without exposing a writable filesystem.
+///
+/// This probe is deliberately available only through the `sata_write_probe`
+/// feature. It operates after the final MBR partition, restores the original
+/// sectors on every post-write path, and panics if restoration cannot be
+/// verified because continuing with unknown media state would be unsafe.
+pub fn write_probe() {
+    println!("[sata-write-probe] begin (destructive, self-restoring)");
+    let mut controller = match sata_init() {
+        Ok(controller) => controller,
+        Err(err) => {
+            println!(
+                "[sata-write-probe] controller initialization failed: {:?}",
+                err
+            );
+            return;
+        }
+    };
+    if controller.model() != EXPECTED_DISK_MODEL {
+        println!(
+            "[sata-write-probe] REFUSED: model '{}' != expected '{}'",
+            controller.model(),
+            EXPECTED_DISK_MODEL
+        );
+        return;
+    }
+
+    let mut mbr = [0u8; BLOCK_SIZE];
+    if let Err(err) = controller.read_block(0, &mut mbr) {
+        println!("[sata-write-probe] MBR read failed: {:?}", err);
+        return;
+    }
+    let Some(partition_end) = last_mbr_partition_end(&mbr) else {
+        println!("[sata-write-probe] REFUSED: unexpected MBR signature or disk id");
+        return;
+    };
+    let Some(start_lba) = partition_end.checked_add(WRITE_PROBE_GUARD_SECTORS) else {
+        println!("[sata-write-probe] REFUSED: test LBA overflow");
+        return;
+    };
+    let Some(test_end) = start_lba.checked_add(WRITE_PROBE_SECTORS as u64) else {
+        println!("[sata-write-probe] REFUSED: test range overflow");
+        return;
+    };
+    if test_end > controller.capacity_sectors() {
+        println!(
+            "[sata-write-probe] REFUSED: range {}..{} exceeds {} sectors",
+            start_lba,
+            test_end,
+            controller.capacity_sectors()
+        );
+        return;
+    }
+
+    let probe_bytes = WRITE_PROBE_SECTORS * BLOCK_SIZE;
+    let mut backup = alloc::vec![0u8; probe_bytes];
+    if let Err(err) = read_probe_sectors(&mut controller, start_lba, &mut backup) {
+        println!("[sata-write-probe] backup read failed: {:?}", err);
+        return;
+    }
+    let mut pattern = alloc::vec![0u8; probe_bytes];
+    for (sector_index, sector) in pattern.chunks_exact_mut(BLOCK_SIZE).enumerate() {
+        for (byte_index, byte) in sector.iter_mut().enumerate() {
+            *byte = 0xa5
+                ^ (sector_index as u8).wrapping_mul(0x31)
+                ^ (byte_index as u8).wrapping_mul(0x5b);
+        }
+    }
+
+    println!(
+        "[sata-write-probe] range={}..{} backup_crc={:08x} pattern_crc={:08x}",
+        start_lba,
+        test_end,
+        crc32(&backup),
+        crc32(&pattern)
+    );
+
+    let test_result = write_probe_sectors(&mut controller, start_lba, &pattern)
+        .map_err(WriteProbeError::from)
+        .and_then(|()| verify_probe_sectors(&mut controller, start_lba, &pattern));
+
+    // A write command may have reached the media even when it reports an
+    // error, so restoration is unconditional after the first write attempt.
+    let restore_result = write_probe_sectors(&mut controller, start_lba, &backup)
+        .map_err(WriteProbeError::from)
+        .and_then(|()| verify_probe_sectors(&mut controller, start_lba, &backup));
+    if let Err(err) = restore_result {
+        panic!(
+            "[sata-write-probe] FATAL: original sectors could not be restored: {:?}",
+            err
+        );
+    }
+
+    match test_result {
+        Ok(()) => println!(
+            "[sata-write-probe] PASS: write/read/flush verified; original sectors restored"
+        ),
+        Err(err) => println!(
+            "[sata-write-probe] FAIL: {:?}; original sectors restored and verified",
+            err
+        ),
+    }
 }

@@ -121,6 +121,13 @@ fn fat_disk_type_to_vfs_type(dt: DiskInodeType) -> FileType {
 }
 
 impl FatInode {
+    fn writeback_page_cache(&self) -> Result<(), ()> {
+        if let Some(ref pc) = *self.new_page_cache.lock() {
+            pc.writeback_all().map_err(|_| ())?;
+        }
+        Ok(())
+    }
+
     /// 初始化 self_weak（在 Arc 构造完成后调用）
     pub fn init_self_weak(self: &Arc<Self>) {
         *self.self_weak.lock() = Some(Arc::downgrade(self));
@@ -159,32 +166,8 @@ impl Drop for FatInode {
             let mut lock = self.file_content.write();
             let length = lock.clus_list.len();
             self.dealloc_clus(&mut lock, length);
-        } else {
-            if self.parent_dir.lock().is_none() {
-                return;
-            }
-            let par_dir_lock = self.parent_dir.lock();
-            let (parent_dir, offset) = par_dir_lock.as_ref().unwrap();
-
-            let par_inode_lock = parent_dir.write();
-            let dir_ent = parent_dir.get_dir_ent(&par_inode_lock, *offset).unwrap();
-            let mut short_dir_ent = *dir_ent.get_short_ent().unwrap();
-            // Modify size
-            short_dir_ent.file_size = self.get_file_size();
-            // Modify fst cluster
-            short_dir_ent.set_fst_clus(
-                self.get_first_clus_lock(&self.file_content.read())
-                    .unwrap_or(0),
-            );
-            // Modify time
-            // TODO(fat32-inode-drop): Update modification time (mtime/atime)
-            // before writing the directory entry back to disk.
-            // Exit condition: `short_dir_ent` reflects the correct timestamp.
-            log::debug!("[Inode drop]: new_ent: {:?}", short_dir_ent);
-            // Write back
-            parent_dir
-                .set_dir_ent(&par_inode_lock, *offset, dir_ent)
-                .unwrap();
+        } else if let Err(()) = self.sync_parent_dir_entry() {
+            log::error!("[Inode drop]: failed to update parent directory entry");
         }
     }
 }
@@ -195,6 +178,34 @@ impl Drop for FatInode {
 /// 等），调用 `init_self_weak()` 建立内部弱引用链，对目录类型自动设置
 /// `set_hint()`。`fst_clus: 0` 表示尚未分配数据簇（写入时按需分配）。
 impl FatInode {
+    /// Synchronize the inode fields stored in its FAT short directory entry.
+    ///
+    /// This must run when size or the first cluster changes. Deferring it only
+    /// to `Drop` is incorrect because VFS/page-cache references may keep the
+    /// inode alive after userspace closes it or after a filesystem flush.
+    fn sync_parent_dir_entry(&self) -> Result<(), ()> {
+        let parent = self.parent_dir.lock().as_ref().cloned();
+        let Some((parent_dir, offset)) = parent else {
+            return Ok(());
+        };
+
+        let par_inode_lock = parent_dir.write();
+        let dir_ent = parent_dir.get_dir_ent(&par_inode_lock, offset)?;
+        let mut short_dir_ent = *dir_ent.get_short_ent().ok_or(())?;
+        short_dir_ent.file_size = self.get_file_size();
+        short_dir_ent.set_fst_clus(
+            self.get_first_clus_lock(&self.file_content.read())
+                .unwrap_or(0),
+        );
+        parent_dir.set_dir_ent(
+            &par_inode_lock,
+            offset,
+            FATDirEnt {
+                short_entry: short_dir_ent,
+            },
+        )
+    }
+
     /// # 参数
     /// + `fst_clus`: 文件的第一个簇。`0` 表示尚未分配簇（用于新创建的空文件）。
     /// + `size`: 对于目录应设为 `None`（自动计算为 `clus_list.len() * clus_size`）。
@@ -954,10 +965,14 @@ impl FatInode {
     /// # 警告
     /// 这个函数会给parent_dir上锁，可能会导致死锁
     pub fn delete_self_dir_ent(&self) -> Result<(), ()> {
-        if let Some((par_inode, offset)) = &*self.parent_dir.lock() {
-            return par_inode.delete_dir_ent(&par_inode.write(), *offset);
-        }
-        Err(())
+        let (par_inode, offset) = self.parent_dir.lock().as_ref().cloned().ok_or(())?;
+        let par_inode_lock = par_inode.write();
+        par_inode.delete_dir_ent(&par_inode_lock, offset)?;
+        drop(par_inode_lock);
+
+        // `find()` currently creates independent FAT inode/page-cache objects.
+        // Persist the deletion before another instance reopens this directory.
+        par_inode.writeback_page_cache()
     }
 
     /// Delete the file from the disk.
@@ -1166,6 +1181,8 @@ impl IndexNode for FatInode {
         if diff > 0 {
             let inode_lock = self.write();
             self.modify_size_lock(&inode_lock, diff, false);
+            drop(inode_lock);
+            self.sync_parent_dir_entry().map_err(|_| SyscallErr::EIO)?;
         }
         let write_end = (offset + write_len).min(self.get_file_size() as usize);
         if offset >= write_end {
@@ -1346,6 +1363,8 @@ impl IndexNode for FatInode {
         let diff = len as isize - old_size as isize;
         let inode_lock = self.write();
         self.modify_size_lock(&inode_lock, diff, false);
+        drop(inode_lock);
+        self.sync_parent_dir_entry().map_err(|_| SyscallErr::EIO)?;
         // 截断新 PageCache 超出新大小的页面
         if len < old_size {
             if let Some(ref pc) = *self.new_page_cache.lock() {
@@ -1361,6 +1380,17 @@ impl IndexNode for FatInode {
 
     fn page_cache(&self) -> Option<Arc<super::super::page_cache::PageCache>> {
         Some(self.get_new_page_cache())
+    }
+
+    fn sync(&self) -> Result<(), SyscallErr> {
+        self.writeback_page_cache().map_err(|_| SyscallErr::EIO)?;
+        self.sync_parent_dir_entry().map_err(|_| SyscallErr::EIO)?;
+
+        let parent = self.parent_dir.lock().as_ref().map(|(parent, _)| parent.clone());
+        if let Some(parent) = parent {
+            parent.writeback_page_cache().map_err(|_| SyscallErr::EIO)?;
+        }
+        Ok(())
     }
 
     fn as_any_ref(&self) -> &dyn Any {

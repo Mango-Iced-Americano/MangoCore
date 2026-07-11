@@ -14,7 +14,9 @@ RV_TOOLCHAIN ?= nightly-2025-01-18
 LA_TOOLCHAIN ?= nightly-2024-05-01
 
 .PHONY: all $(ARCHS) clean prepare-cargo-config \
-	la64-2k1000-sata-probe la64-2k1000-sata-mount-ro \
+	la64-2k1000-sata-probe la64-2k1000-sata-write-probe \
+	la64-2k1000-sata-fs-write-probe \
+	la64-2k1000-sata-mount-ro \
 	la64-2k1000-run-clean
 
 all: prepare-cargo-config rv64_all la64_all
@@ -90,6 +92,28 @@ la64-2k1000-sata-probe: prepare-cargo-config
 		EXTRA_FEATURES=sata_probe MODE=$(MODE) LOG=off
 	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
 		../kernel-2k1000-sata-probe.ui
+
+# Destructive but self-restoring real-board validation. The kernel verifies the
+# expected SSD/MBR, tests sectors beyond all partitions, then restores them.
+la64-2k1000-sata-write-probe: prepare-cargo-config
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
+		EXTRA_FEATURES=sata_write_probe MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../kernel-2k1000-sata-write-probe.ui
+
+# Filesystem-level validation: keep normal board mounts read-only, but exercise
+# create/write/reopen/unlink on the dedicated P2 FAT32 scratch partition.
+la64-2k1000-sata-fs-write-probe: prepare-cargo-config
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
+		EXTRA_FEATURES=sata_fs_write_probe MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../kernel-2k1000-sata-fs-write-probe.ui
 
 # 首次文件系统验收镜像：识别裸盘/MBR 中的 ext4 或 FAT32，并以只读方式挂载。
 la64-2k1000-sata-mount-ro: prepare-cargo-config

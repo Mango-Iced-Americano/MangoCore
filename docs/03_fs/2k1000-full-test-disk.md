@@ -7,7 +7,11 @@ owner: MangoCore Team
 last_updated: 2026-07-11
 code_paths:
   - "scripts/make_2k1000_full_test_disk.py"
+  - "scripts/restore_2k1000_p2.py"
   - "os/src/fs/mod.rs"
+  - "os/src/fs/fat32/bitmap.rs"
+  - "os/src/fs/fat32/efs.rs"
+  - "os/src/fs/fat32/fat_inode.rs"
   - "os/src/syscall/fs.rs"
   - "os/src/drivers/block/partition.rs"
 entry_points:
@@ -123,4 +127,47 @@ bootm 0x9000000098000000
 
 预期日志应包含 `/dev/sda1` Ext4、`/dev/sda2` Fat32、`/dev/sda3` Ext4，随后 P1 以 `RDONLY` 挂到 `/sdcard`、P3 以 `RDONLY` 挂到 `/tools`。
 
-2026-07-11 已在 `TS32GMTS400` 实体 SSD 上完成 25 块网络写入，全部 `12584960` 个 sector 均通过逐块读回 CRC；U-Boot 可读取三个分区，MangoCore 实板启动后成功完成上述三分区识别、只读挂载及 `/tools`、`/musl`、`/glibc` bind。当前仍只验收读取路径；AHCI 持久写入与 flush 未验收前不能解除内核只读保护。
+2026-07-11 已在 `TS32GMTS400` 实体 SSD 上完成 25 块网络写入，全部 `12584960` 个 sector 均通过逐块读回 CRC；U-Boot 可读取三个分区，MangoCore 实板启动后成功完成上述三分区识别、只读挂载及 `/tools`、`/musl`、`/glibc` bind。原始 AHCI 写入/flush 和 P2 FAT32 文件级探针也已通过，但正式 `mode=run` 镜像仍保持 P1/P3 只读，尚未把 P2 作为用户态可写挂载开放。
+
+## 6. 内核 AHCI 写入探针
+
+正式解除只读前，使用独立 feature 构建自恢复探针：
+
+```bash
+make -C os la64-2k1000-sata-write-probe
+make 2k1000-boot BOARD_KERNEL=kernel-2k1000-sata-write-probe.ui
+```
+
+探针硬匹配 SSD 型号 `TS32GMTS400`、MBR 签名和 disk id `0x4d414e47`，解析四个主分区后，在最后一个分区末端之外保留 2048 个 sector，再测试连续 8 个 sector。当前镜像对应测试范围为 `12587008..12587015`，不属于 P1/P2/P3。
+
+测试顺序固定为：备份原 4KiB → 写入确定性模式 → `FLUSH CACHE EXT` → 读回逐扇区比较 → 写回备份 → 再次 flush → 读回确认恢复。第一次写命令发出后，无论中间步骤成功或失败都必须执行恢复；恢复不能完成或不能验证时内核立即 panic，不再继续文件系统路径。该 feature 保持 ramfs-only，不注册可写设备节点，也不改变正式 run 镜像的三层只读保护。
+
+原始扇区探针通过后，使用第二个独立镜像验证 P2 FAT32：
+
+```bash
+make -C os la64-2k1000-sata-fs-write-probe
+make 2k1000-boot BOARD_KERNEL=kernel-2k1000-sata-fs-write-probe.ui
+```
+
+该镜像仍按正式路径只读挂载 P1/P3，并保持 `/dev/vda2` 只读；内核仅为探针构造一个不暴露给用户态的 P2 可写视图，创建 `MANGO_RW_PROBE/PAYLOAD.BIN`，写入 6KiB 后强制 page cache 写回，重新打开 FAT32 验证目录、文件和内容，再删除并第三次打开确认清理持久化。只有该阶段通过后，才允许把 P2 作为用户态 scratch 分区开放。
+
+实板最终通过镜像 SHA-256 为 `8f3a6abef28b4a15fd6930da259ba0c9c1d112f393a26bd7c82c1ce4f4ee6fdb`，串口结果为：
+
+```text
+[sata-fs-write-probe] PASS: create/write/flush/reopen/read/unlink/rmdir persisted
+```
+
+调试中确认了两个独立 FAT32 持久化问题：FAT 层在已经经过 `BlockSizeAdapter` 的设备上再次按平台块重算扇区，导致 FAT 表定位错误；文件大小、首簇和删除目录项只依赖 inode `Drop` 写回，而 `find()` 创建的独立 inode/page cache 可能在新实例读取磁盘前尚未落盘。修复后 FAT 访问统一使用 BPB 扇区单位并正确处理双 FAT/ExtFlags，文件大小与首簇在 write/resize 时显式同步，unlink/rmdir 在返回成功前写回所属目录页，`sync()` 同步数据页和父目录项。
+
+探针失败并留下 `MANGO_RW_PROBE` 时，不要手工猜测 FAT 元数据。可从母镜像提取的干净 P2 分块，通过受限脚本仅恢复 P2：
+
+```bash
+python3 scripts/restore_2k1000_p2.py \
+  --interface en8 \
+  --no-host-config \
+  --confirm-p2-start 0x800800
+```
+
+脚本硬限制写入范围为 `0x800800..0xa80800`，并校验 `TS32GMTS400`、MBR CRC、每个 256MiB 分块的 TFTP/写入/读回 CRC，以及最终 FAT32 卷标和空根目录。不得把确认起点改成其他值来复用为通用写盘工具。
+
+暖复位时若看到 `PxSSTS=1`，表示设备已检测但 PHY 通信尚未建立。驱动会先按稳定计数器等待 200ms；仍未上线时通过 `PxSCTL.DET` 发出至少 1ms 的 COMRESET，释放后按 AHCI 上限继续等待 10s。不得用固定次数空转替代这段真实时间，也不应要求操作者通过冷断电规避。

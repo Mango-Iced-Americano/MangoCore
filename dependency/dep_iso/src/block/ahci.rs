@@ -288,20 +288,37 @@ impl AHCIPort {
         })
     }
 
-    fn wait_link_active(&mut self, port: usize) -> Result<(), AhciError> {
-        for _ in 0..REGISTER_POLL_LIMIT {
+    fn wait_link_active<P: Provider>(
+        &mut self,
+        port: usize,
+        attempts: usize,
+    ) -> Result<(), AhciError> {
+        for _ in 0..attempts {
             let status = self.sata_status.read();
             let det_present = status.get_bits(0..4) == 3;
             let ipm_active = status.get_bits(8..12) == 1;
             if det_present && ipm_active {
                 return Ok(());
             }
-            spin_loop();
+            P::delay_us(1_000);
         }
         Err(AhciError::LinkTimeout {
             port,
             sata_status: self.sata_status.read(),
         })
+    }
+
+    fn hard_reset_link<P: Provider>(&mut self) {
+        // AHCI 1.3.1 section 10.4.2 and Linux sata_link_hardreset(): assert
+        // COMRESET through SControl.DET for at least 1 ms, then release it.
+        // Preserve the negotiated speed limit (SPD) and disallow partial and
+        // slumber states while bringing the link back.
+        let speed = self.sata_control.read() & 0x0f0;
+        self.sata_control.write(speed | 0x301);
+        self.sata_control.read();
+        P::delay_us(1_000);
+        self.sata_control.write(speed | 0x300);
+        self.sata_control.read();
     }
 
     fn spin_on_slot(&mut self, slot: usize, operation: &'static str) -> Result<(), AhciError> {
@@ -582,7 +599,14 @@ impl<P: Provider> AHCI<P> {
             *c &= !(0xf << 28);
             *c |= 1 << 28; // PxCMD.ICC = active
         });
-        ahci.port.wait_link_active(port_num)?;
+        // Warm board resets can leave PxSSTS.DET at 1 (device detected but no
+        // PHY communication). A short timed wait handles normal spin-up; if it
+        // does not converge, establish a fresh link with COMRESET and use the
+        // AHCI-defined 10 second upper bound.
+        if ahci.port.wait_link_active::<P>(port_num, 200).is_err() {
+            ahci.port.hard_reset_link::<P>();
+            ahci.port.wait_link_active::<P>(port_num, 10_000)?;
+        }
         // PxSIG is only a classification hint. 2K1000LA may return 0xffff_ffff
         // here after HBA reset even though PxSSTS reports an active SATA link;
         // the board U-Boot likewise proceeds from link-up to an ATA command

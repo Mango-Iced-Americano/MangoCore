@@ -4,6 +4,51 @@
 
 ## 2026-07-11
 
+### fs/board: 完成 2K1000LA P2 FAT32 持久写入闭环
+
+**涉及文件：**
+- `os/src/fs/fat32/bitmap.rs`, `os/src/fs/fat32/efs.rs` — FAT 表访问统一使用 BPB 扇区单位，修正数据簇范围、双 FAT 镜像和 ExtFlags active FAT 语义
+- `os/src/fs/fat32/fat_inode.rs` — write/resize 显式同步文件大小与首簇，实现 FAT inode `sync()`，unlink/rmdir 返回前持久化目录页
+- `os/src/fs/mod.rs` — 增加只对 P2 开放的文件级写探针，任一步失败立即 panic，成功后重新挂载验证内容与清理结果
+- `scripts/restore_2k1000_p2.py` — 增加硬限制 P2 LBA 范围、SSD/MBR 身份和逐块回读 CRC 的定向恢复工具
+- `docs/03_fs/2k1000-full-test-disk.md` — 记录实板结果、根因、恢复流程和正式镜像只读边界
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀适配后块单位重复换算与依赖 inode Drop 持久化的排查模式
+
+**验证：**
+- Docker 顺序执行 `rv64-kernel-build-only`、`la64-kernel-build-only`，均成功；`la64-2k1000-sata-fs-write-probe` 构建成功 ✅
+- P2 定向恢复两次完成五段 `0x80000` sector 写入与读回 CRC，最终 FAT32 空根目录校验通过；P1/P3 未写入 ✅
+- 首轮修复后实板成功重开并比对 6144 字节 payload，但清理阶段暴露 `rmdir: ENOTEMPTY`，证明 unlink 目录页仍依赖延迟 Drop；补充显式写回后复测通过 ✅
+- 最终 uImage SHA-256 `8f3a6abef28b4a15fd6930da259ba0c9c1d112f393a26bd7c82c1ce4f4ee6fdb`；TFTP 字节数、CRC32 `3799d2e0` 和 U-Boot `iminfo` 均通过 ✅
+- 2K1000LA + `TS32GMTS400` 实板输出 `[sata-fs-write-probe] PASS: create/write/flush/reopen/read/unlink/rmdir persisted` ✅
+
+**备注：**
+- 正式 `kernel-2k1000-run.ui` 仍以只读方式挂载 P1/P3，P2 也尚未作为用户态 scratch 挂载开放；本次通过的是隔离的内核探针视图。
+- 探针之后出现的 `/bin: Read-only file system` 来自现有测试初始化尝试修改只读 bind，不属于 P2 FAT32 写探针失败。
+
+### board: 增加自恢复 AHCI 写入与 flush 探针
+
+**涉及文件：**
+- `os/Cargo.toml`, `os/Makefile` — 增加显式 `sata_write_probe` feature 和 `la64-2k1000-sata-write-probe` 独立镜像目标
+- `os/src/main.rs`, `os/src/drivers/block/mod.rs` — 写探针仅在 2K1000 opt-in 构建中运行，并强制保持 ramfs-only、跳过文件系统挂载
+- `os/src/drivers/block/sata_blk.rs` — 核验 SSD/MBR/容量，在分区外备份、写入、flush、读回并无条件恢复 8 个 sector
+- `docs/03_fs/2k1000-full-test-disk.md` — 记录测试范围、执行命令、恢复协议和只读边界
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀块设备写入开放前的自恢复探针模式
+
+**验证：**
+- 本地镜像 MBR 校验：disk id `0x4d414e47`，P3 结束于 LBA `12584960`；探针范围 `12587008..12587015` 位于所有分区外 ✅
+- Docker 顺序执行 `rv64-kernel-build-only`、`la64-kernel-build-only`，均成功 ✅
+- `la64-2k1000-sata-write-probe` 构建成功；uImage SHA-256 `e170b0afadaba699d688b9182e5da9a8b8d318b14bebef38166543d32711b0ff`，包含独立探针标识 ✅
+- 2K1000LA 实板测试范围 `12587008..12587015`：备份 CRC `c71c0011`，模式 CRC `0b88cfd1`；写入、`FLUSH CACHE EXT`、读回比较、原扇区恢复及恢复复核全部通过 ✅
+- `la64-2k1000-sata-fs-write-probe` 构建成功；uImage SHA-256 `00090b477cf2553cd6193b0f09fc9f327ce0f22199263a40858b6e630ca9c3b7` ✅
+- P2 首次启动在写入前暴露暖复位链路问题：`PxSSTS=1`，旧固定空转循环返回 `LinkTimeout`；补充稳定计数器微秒延时和 Linux/AHCI 顺序 COMRESET，修复后探针镜像 SHA-256 `c3311dec4ee243195e716bc936bce6c18b155d049b063a0a427e7be1f55dd918` ✅
+- COMRESET 修复后 Docker 顺序执行 RV64、LA64 默认内核构建，均成功 ✅
+- P2 FAT32 文件级测试已在后续修复 FAT 扇区单位和目录项显式写回后完成，最终 create/write/flush/reopen/read/unlink/rmdir 全链路通过 ✅
+
+**备注：**
+- 正式 `kernel-2k1000-run.ui` 仍只读；只有独立探针镜像包含测试入口。
+- 原始 AHCI 写模式和恢复已通过；P2 探针仍不开放用户态写节点，只在内核中验证 create/write/flush/reopen/read/unlink/rmdir 持久化。
+- 2K1000 Provider 的延时来自 100MHz stable counter；链路先等待 200ms，仍未 active 才执行至少 1ms 的 COMRESET，并按真实时间最多等待 10s。
+
 ### board: 修复 2K1000 AHCI reset 后 PI 清零
 
 **涉及文件：**
