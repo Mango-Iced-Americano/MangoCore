@@ -4,7 +4,7 @@ module: fs/dev
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-07-10"
+last_updated: "2026-07-11"
 code_paths:
   - "os/src/fs/dev/mod.rs"
   - "os/src/fs/dev/null.rs"
@@ -17,6 +17,7 @@ code_paths:
   - "os/src/fs/dev/rtc.rs"
   - "os/src/fs/dev/block.rs"
   - "os/src/drivers/block/partition.rs"
+  - "os/src/syscall/fs.rs"
   - "os/src/fs/page_cache.rs"
   - "os/src/fs/mod.rs"
 entry_points:
@@ -207,10 +208,20 @@ ext4/FAT32 的设备解析 MBR 主分区。QEMU 使用：
 /dev/vda1..N   (sdaN 兼容别名)
 ```
 
+完整测试镜像固定保留以下设备 ABI：
+
+| 分区 | 兼容节点 | 内容 | 自动挂载 |
+|------|----------|------|----------|
+| P1 | `/dev/vda1` | 4GiB 官方 LA64 测试集 ext4 | `/sdcard` |
+| P2 | `/dev/vda2` | 1280MiB FAT32 暂存盘 | 否；由 basic/mount 测试临时挂载 |
+| P3 | `/dev/vda3` | 768MiB MangoCore 工具 ext4 | 无第二块盘时挂到 `/tools` |
+
 `PartitionBlockDevice` 保留 MBR 的 512 字节 LBA 语义，并转换到平台
 `BLOCK_SZ`。未按 2KiB/4KiB 对齐的分区通过 bounce buffer 访问；自然对齐分区
 走整块直接 I/O。文件系统打开前还会按 ext4 原生块大小或 FAT BPB
 `BytsPerSec` 包装 `BlockSizeAdapter`，因此文件系统块号不会被误当成平台块号。
+用户态 `mount(2)` 打开 ext4/FAT32 时也走同一 `detect_fs_layout()` 和
+`BlockSizeAdapter` 路径，不能直接把 `BlockDevInode.inner` 交给文件系统。
 当前只解析四个 MBR 主分区，不支持扩展分区和 GPT；包含 protective MBR 的
 混合分区表也会整盘拒绝。
 

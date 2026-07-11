@@ -35,7 +35,7 @@ pub use self::layout::*;
 
 pub use self::fat32::DiskInodeType;
 pub use crate::drivers::block::BlockDevice;
-pub use self::filesystem::{detect_fs, FS_Type};
+pub use self::filesystem::{detect_fs, detect_fs_layout, DetectedFs, FS_Type};
 
 use alloc::{string::String, sync::Arc};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -53,7 +53,7 @@ pub fn force_ramfs() {
     crate::drivers::block::disable_block_device();
 }
 
-fn adapt_filesystem_device(
+pub(crate) fn adapt_filesystem_device(
     block_device: Arc<dyn BlockDevice>,
     native_block_size: usize,
     read_only: bool,
@@ -476,14 +476,21 @@ fn register_block_node(
     }
 }
 
-fn discover_mount_device(
+#[derive(Clone)]
+struct MountCandidate {
+    device: Arc<dyn BlockDevice>,
+    source: String,
+    partno: Option<u8>,
+}
+
+fn discover_mount_devices(
     raw: &Arc<dyn BlockDevice>,
     base_name: &str,
     raw_minor: u64,
     raw_alias: Option<(&str, u64)>,
     partition_alias_base: Option<&str>,
     read_only: bool,
-) -> Option<(Arc<dyn BlockDevice>, String)> {
+) -> alloc::vec::Vec<MountCandidate> {
     use crate::drivers::block::partition::{probe_mbr, MbrProbe, PartitionBlockDevice};
 
     register_block_node(base_name, raw.clone(), raw_minor, read_only);
@@ -494,12 +501,16 @@ fn discover_mount_device(
     let raw_fs = self::filesystem::detect_fs(raw);
     if raw_fs != self::filesystem::FS_Type::Null {
         println!("[block] /dev/{} contains raw {:?}", base_name, raw_fs);
-        return Some((raw.clone(), alloc::format!("/dev/{}", base_name)));
+        return alloc::vec![MountCandidate {
+            device: raw.clone(),
+            source: alloc::format!("/dev/{}", base_name),
+            partno: None,
+        }];
     }
 
     match probe_mbr(raw) {
         MbrProbe::Partitions(partitions) => {
-            let mut selected = None;
+            let mut candidates = alloc::vec::Vec::new();
             for partition in partitions {
                 let part_device = Arc::new(PartitionBlockDevice::new(
                     raw.clone(),
@@ -531,25 +542,29 @@ fn discover_mount_device(
                     partition.size_bytes() / (1024 * 1024),
                     fs_type
                 );
-                if selected.is_none() && fs_type != self::filesystem::FS_Type::Null {
-                    selected = Some((part_device, alloc::format!("/dev/{}", name)));
+                if fs_type != self::filesystem::FS_Type::Null {
+                    candidates.push(MountCandidate {
+                        device: part_device,
+                        source: alloc::format!("/dev/{}", name),
+                        partno: Some(partition.partno),
+                    });
                 }
             }
-            selected
+            candidates
         }
         MbrProbe::NoMbr => {
             println!(
                 "[block] /dev/{} has neither a supported filesystem nor an MBR",
                 base_name
             );
-            None
+            alloc::vec::Vec::new()
         }
         MbrProbe::Unsupported => {
             println!(
                 "[block] /dev/{} has an unsupported partition table",
                 base_name
             );
-            None
+            alloc::vec::Vec::new()
         }
     }
 }
@@ -558,11 +573,12 @@ fn mount_boot_block_devices_with_flags(mount_flags: self::vfs::MountFlags) {
     let root = vfs_root();
     let devices = crate::drivers::block::block_devices();
     let read_only = mount_flags.contains(self::vfs::MountFlags::RDONLY);
+    let mut same_disk_tools = None;
 
     match devices[0].as_ref() {
         Some(raw) => {
             #[cfg(feature = "board_2k1000")]
-            let candidate = discover_mount_device(
+            let candidates = discover_mount_devices(
                 raw,
                 "sda",
                 0,
@@ -571,15 +587,23 @@ fn mount_boot_block_devices_with_flags(mount_flags: self::vfs::MountFlags) {
                 read_only,
             );
             #[cfg(not(feature = "board_2k1000"))]
-            let candidate = discover_mount_device(raw, "vda", 0, None, None, read_only);
+            let candidates = discover_mount_devices(raw, "vda", 0, None, None, read_only);
 
-            match candidate {
-                Some((device, source)) => {
+            // 实板只有一块 SATA SSD。P2 必须保留给官方测试固定使用的
+            // `/dev/vda2` FAT32 暂存盘，因此完整镜像把工具集放在 P3。
+            // QEMU 的第二块独立工具盘仍有更高优先级。
+            same_disk_tools = candidates
+                .iter()
+                .find(|candidate| candidate.partno == Some(3))
+                .cloned();
+
+            match candidates.first() {
+                Some(candidate) => {
                     if mount_block_fs_with_flags(
                         &root,
-                        &device,
+                        &candidate.device,
                         "sdcard",
-                        &alloc::format!("official fs ({})", source),
+                        &alloc::format!("official fs ({})", candidate.source),
                         mount_flags,
                     )
                     .is_none()
@@ -593,24 +617,37 @@ fn mount_boot_block_devices_with_flags(mount_flags: self::vfs::MountFlags) {
         None => println!("[initramfs] official fs (x0) not found, skipping /sdcard mount"),
     }
 
-    match devices[1].as_ref() {
-        Some(raw) => match discover_mount_device(raw, "vdb", 1, None, Some("vda"), read_only) {
-            Some((device, source)) => {
-                if mount_block_fs_with_flags(
-                    &root,
-                    &device,
-                    "tools",
-                    &alloc::format!("tools fs ({})", source),
-                    mount_flags,
-                )
-                .is_none()
-                {
-                    println!("[initramfs] tools fs mount failed, leaving /tools empty");
-                }
+    let separate_tools = devices[1].as_ref().and_then(|raw| {
+        discover_mount_devices(raw, "vdb", 1, None, Some("vda"), read_only)
+            .into_iter()
+            .next()
+    });
+    let use_same_disk_tools = separate_tools.is_none() && same_disk_tools.is_some();
+
+    if use_same_disk_tools {
+        if let Some(candidate) = same_disk_tools.as_ref() {
+            println!(
+                "[initramfs] tools disk (x1) not found; using {} from x0",
+                candidate.source
+            );
+        }
+    }
+    let tools_candidate = separate_tools.or(same_disk_tools);
+    match tools_candidate {
+        Some(candidate) => {
+            if mount_block_fs_with_flags(
+                &root,
+                &candidate.device,
+                "tools",
+                &alloc::format!("tools fs ({})", candidate.source),
+                mount_flags,
+            )
+            .is_none()
+            {
+                println!("[initramfs] tools fs mount failed, leaving /tools empty");
             }
-            None => println!("[initramfs] no mountable tools fs, leaving /tools empty"),
-        },
-        None => println!("[initramfs] tools disk (x1) not found, skipping /tools mount"),
+        }
+        None => println!("[initramfs] no mountable tools fs, leaving /tools empty"),
     }
 }
 

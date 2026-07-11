@@ -43,6 +43,28 @@
 - `MS_BIND`、`MS_REC` 和 `MS_REMOUNT` 是 mount 系统调用操作控制位，不应作为新挂载的长期属性保存；`RDONLY` 等属性必须由源挂载继承。
 - 底层 `ReadOnlyBlockDevice` 仍作为最后一道写保护，但正确的失败位置是 `MountFSInode` 的 VFS 修改入口，避免只读请求触发 ext4 元数据分配和误导性错误码。
 
+### board/image: 生成单 SSD 完整测试集镜像并补齐 FAT mount 适配
+
+**涉及文件：**
+- `scripts/make_2k1000_full_test_disk.py` — 生成传统 MBR 三分区镜像，逐字节核对嵌入 payload 并输出布局 manifest
+- `os/src/fs/mod.rs` — 收集同盘全部可识别分区；无 `x1` 时固定将 P3 工具分区挂到 `/tools`，保留 P2 `/dev/vda2` 给官方 FAT 挂载测试
+- `os/src/syscall/fs.rs` — 普通 ext4/FAT mount 复用 `detect_fs_layout()` 与 `BlockSizeAdapter`，修复 512B FAT 请求绕过平台块适配导致的 panic
+- `docs/03_fs/{2k1000-full-test-disk,devfs,init-and-rootfs}.md` — 记录布局、生成/刷盘方法、设备 ABI 和当前只读边界
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀启动挂载与 `mount(2)` 适配路径不一致的排查模式
+
+**验证：**
+- 当前工作副本 `sdcard-la.img` 的只读 `e2fsck` 暴露大量历史写入不一致，因此弃用；从 `fs-img-dir/sdcard-la.img.xz` 全新解压后，配置注入前后均通过 e2fsck 五阶段检查 ✅
+- 缩小版镜像验证 MBR/P1 ext4/P2 FAT32/P3 ext4 生成、payload 逐字节校验和 manifest 输出；RV64 QEMU 单盘识别三分区并将 `/dev/vda1 -> /sdcard`、`/dev/vda3 -> /tools` ✅
+- 正式 raw 镜像 `6443499520` 字节（6145MiB），MBR disk id `0x4d414e47`；`fdisk -l` 确认 P1=4GiB type 0x83、P2=1280MiB type 0x0c、P3=768MiB type 0x83 ✅
+- raw SHA-256 `416f84060bca79ab06ef5596d8cfd1801b8ae3e56ae3d2e65e99a66b612ef19f`；400MiB xz SHA-256 `80e1e2addac136da2b9ccffbcad349d915b3b4fec20ef25e11a86193162bc584` ✅
+- LA64 QEMU 以单盘快照启动，读取 `/sdcard/os_test.conf` 的 `mask=0xFFF`；musl/glibc basic 全部完成，`test_mount` 与 `test_umount` 均将 `/dev/vda2` 的 512B FAT32 适配到 4KiB 平台块并返回 0，无 panic ✅
+- Docker 内最终 `make rv64-kernel-build-only`、`make la64-kernel-build-only`、`make la64-2k1000-sata-mount-ro` 均成功 ✅
+- 最终 uImage payload `12339848` 字节，SHA-256 `cd02b6dbb1d9c90945ebed2bfa9ac3c4848beed99e96ae5b670a2c2fec2f49d2` ✅
+
+**备注：**
+- 完整镜像和压缩包位于 `/private/tftpboot/`；内核 uImage 可以 TFTP，6GiB 整盘镜像超过开发板 2GiB 内存，必须将 SSD 连接主机后按 raw image 从 LBA0 写入。
+- 本轮没有覆盖物理 SSD。2K1000LA 当前仍使用只读挂载内核；完整文件树可验收，但依赖持久写入的实板测试要等 AHCI 写路径和 flush 验收后再开放。
+
 ## 2026-07-10
 
 ### board/docs: 固化 2K1000LA TFTP 网段并完成 SSD 只读镜像实板启动

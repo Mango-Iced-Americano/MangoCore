@@ -310,3 +310,11 @@
 - **修复**: 明确区分挂载的持久属性与操作控制位；克隆挂载时从源挂载继承持久属性，并过滤 `REMOUNT/BIND/REC`。所有 `MountFSInode` 修改入口继续统一检查 `RDONLY` 并返回 `EROFS`。
 - **教训**: 验证只读挂载不能只测试原挂载点或块设备写函数，还必须覆盖 bind、recursive bind 和传播副本，并至少测试创建、写入、链接、重命名与删除。出现底层 allocator 日志说明失败层级已经过晚。
 - **相关文件**: `os/src/fs/vfs/mount.rs`, `os/src/fs/vfs/propagation.rs`, `os/src/syscall/fs.rs`
+
+### 启动挂载正常但用户 mount 小扇区文件系统 panic
+
+- **现象**: 启动阶段能识别并挂载 ext4/FAT，但用户态对同一个分区执行 `mount(2)` 时，在 `I/O length must be a multiple of the logical block size` 断言处 panic；典型请求是 512B FAT 扇区，而平台块为 2/4KiB。
+- **根因**: 启动自动挂载调用了 `detect_fs_layout()` 和 `BlockSizeAdapter`，普通 mount syscall 却只做类型探测，随后把原始 `PartitionBlockDevice` 直接交给文件系统。两条打开路径的块大小语义不一致。
+- **修复**: 所有块文件系统打开入口都必须保留完整的 `DetectedFs`，并在构造 ext4/FAT 实例前调用同一个原生块到平台块适配函数；`MS_RDONLY` 同时下沉为底层只读包装器。
+- **教训**: “启动能挂载”不能覆盖用户态 mount 回归。多块大小验证必须包含设备节点路径的 `mount + I/O + umount`，并覆盖 512B FAT、1KiB ext4 和平台自然块三类组合。
+- **相关文件**: `os/src/fs/mod.rs`, `os/src/fs/filesystem.rs`, `os/src/drivers/block/partition.rs`, `os/src/syscall/fs.rs`

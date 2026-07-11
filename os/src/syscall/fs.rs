@@ -4907,24 +4907,35 @@ pub fn sys_mount(
                     };
                     let blk_dev = &bdi.inner;
 
-                    // 2. Detect actual FS type from superblock
-                    let detected = crate::fs::detect_fs(blk_dev);
+                    // 2. 同时识别磁盘格式和文件系统原生块单位。普通 mount 必须复用
+                    // 启动挂载的适配路径；否则 512 字节 FAT 扇区会直接到达平台块设备，
+                    // 违反底层 I/O 粒度约束。
+                    let detected = match crate::fs::detect_fs_layout(blk_dev) {
+                        Some(detected) => detected,
+                        None => return -(SyscallErr::EINVAL as isize),
+                    };
 
                     // 3. Validate FS type matches user request
                     let is_ext = matches!(filesystemtype.as_str(), "ext2" | "ext3" | "ext4");
-                    match (&detected, is_ext) {
+                    match (detected.fs_type, is_ext) {
                         (crate::fs::FS_Type::Ext4, true) => {}
                         (crate::fs::FS_Type::Fat32, false) => {}
                         _ => return -(SyscallErr::EINVAL as isize),
                     }
 
-                    // 4. Open the filesystem
-                    let new_fs: Arc<dyn vfs::FileSystem> = match detected {
+                    // 4. 将文件系统原生块转换为平台设备块后再打开文件系统。
+                    // MS_RDONLY 除 VFS 挂载标志外，还会下沉为底层物理写屏障。
+                    let fs_device = crate::fs::adapt_filesystem_device(
+                        blk_dev.clone(),
+                        detected.block_size,
+                        mountflags.contains(MountFlags::MS_RDONLY),
+                    );
+                    let new_fs: Arc<dyn vfs::FileSystem> = match detected.fs_type {
                         crate::fs::FS_Type::Ext4 => {
-                            crate::fs::ext4::ext4fs::Ext4FileSystem::open_ext4rs(blk_dev.clone())
+                            crate::fs::ext4::ext4fs::Ext4FileSystem::open_ext4rs(fs_device)
                         }
                         crate::fs::FS_Type::Fat32 => {
-                            crate::fs::fat32::EasyFileSystem::open(blk_dev.clone())
+                            crate::fs::fat32::EasyFileSystem::open(fs_device)
                         }
                         _ => return -(SyscallErr::EINVAL as isize),
                     };

@@ -33,6 +33,7 @@ related_docs:
   - "docs/03_fs/architecture.md"
   - "docs/03_fs/vfs-core.md"
   - "docs/03_fs/page-cache.md"
+  - "docs/03_fs/2k1000-full-test-disk.md"
 ---
 
 # 文件系统初始化与根文件系统设置
@@ -164,12 +165,13 @@ lazy_static! {
 
 ### 3.3 裸文件系统与 MBR 选择
 
-`discover_mount_device()` 按以下顺序选择挂载对象：
+`discover_mount_devices()` 按以下顺序发现挂载对象：
 
 1. 在原始设备上调用 `detect_fs()`；识别到裸 ext4/FAT32 时直接使用整盘。
 2. 裸盘未识别时调用 `probe_mbr()`，解析最多四个主分区。
 3. 为每个有效分区注册设备节点并调用 `detect_fs()`。
-4. 选择第一个识别为 ext4/FAT32 的分区挂载。
+4. 第一个可识别文件系统挂到 `/sdcard`；第二块设备 `x1` 的第一个文件系统优先挂到 `/tools`。
+5. 没有 `x1` 时，单盘完整镜像固定选择 P3 工具分区挂到 `/tools`，P2 FAT32 留给官方测试通过 `/dev/vda2` 临时挂载。
 
 MBR 的偏移和长度单位固定为 512 字节 LBA，与平台 `BLOCK_SZ` 无关。分区起点未按平台块对齐时，`PartitionBlockDevice` 使用 bounce buffer 跨父设备块读取。当前明确不支持扩展分区和 GPT；遇到 protective MBR 时只打印诊断并继续从 initramfs 启动。
 
@@ -178,6 +180,9 @@ MBR 的偏移和长度单位固定为 512 字节 LBA，与平台 `BLOCK_SZ` 无�
 `BlockSizeAdapter` 将这些原生块号转换为平台 `BLOCK_SZ`，再交给
 `PartitionBlockDevice` 处理分区字节偏移。挂载前会实际枚举根目录；根目录读取失败
 则放弃该挂载并继续从 initramfs 启动，避免只凭魔数暴露一个不可用文件系统。
+启动自动挂载和用户态 `mount(2)` 必须复用同一适配入口；后者先调用
+`detect_fs_layout()`，再按检测出的原生块大小包装设备。否则 512 字节 FAT 请求会
+绕过 `BlockSizeAdapter`，直接违反 2/4KiB 平台设备的 I/O 粒度约束。
 
 2K1000LA 验收路径有三层写保护：`MountFlags::RDONLY` 阻止普通 VFS 修改，
 只读块设备节点写入返回 `EROFS`，`ReadOnlyBlockDevice` 最后拦截文件系统内部回写。
