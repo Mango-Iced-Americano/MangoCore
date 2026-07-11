@@ -140,15 +140,34 @@ $(APPS):
 fs-img: user
 	./buildfs.sh "$(ROOTFS_IMG)" "rvqemu" $(MODE) $(FS_MODE)
 
-# Initramfs cpio generation (always needed when feature is in Cargo defaults)
+# Initramfs cpio generation — parameterized for normal / regression profiles
 INITRAMFS_CPIO_RV := ../fs-img-dir/initramfs-rv.cpio
+REGRESSION_CPIO_RV := ../fs-img-dir/initramfs-regression-rv.cpio
 
-kernel: $(INITRAMFS_CPIO_RV)
+# INITRAMFS_PROFILE: "normal" (default) or "regression"
+INITRAMFS_PROFILE ?= normal
+
+ifeq ($(INITRAMFS_PROFILE),regression)
+  KERNEL_INITRAMFS_CPIO_RV := $(REGRESSION_CPIO_RV)
+  INITRAMFS_PROFILE_FEATURES := regression_initramfs
+else
+  KERNEL_INITRAMFS_CPIO_RV := $(INITRAMFS_CPIO_RV)
+  INITRAMFS_PROFILE_FEATURES :=
+endif
+
+KERNEL_CMDLINE ?= mango.mode=normal
+
+kernel: $(KERNEL_INITRAMFS_CPIO_RV)
 
 $(INITRAMFS_CPIO_RV): user
 	@mkdir -p ../fs-img-dir
 	./build_initramfs.sh rv64 $(MODE) $(INITRAMFS_CPIO_RV)
 	@touch src/initramfs-rv.S  # 强制 Cargo 重编译（.incbin 时间戳变化）
+
+$(REGRESSION_CPIO_RV): user
+	@mkdir -p ../fs-img-dir
+	./build_initramfs.sh rv64 $(MODE) $(REGRESSION_CPIO_RV) regression
+	@touch src/initramfs-regression-rv.S
 
 # xein TODO: 注意需要评估zero_init启用与否的影响
 # lwext4: always build C library (now the default ext4 backend)
@@ -159,9 +178,9 @@ kernel: $(LWEXT4_PREREQ)
 	@echo Platform: $(BOARD)
 	@cp -f src/hal/arch/riscv/linker-$(BOARD).ld src/hal/arch/riscv/linker.ld
     ifeq ($(MODE), debug)
-		@LOG=${LOG} cargo build --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)"
+		@MANGO_CMDLINE="$(KERNEL_CMDLINE)" LOG=${LOG} cargo build --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(INITRAMFS_PROFILE_FEATURES) $(EXTRA_FEATURES)"
     else
-		@LOG=${LOG} cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)"
+		@MANGO_CMDLINE="$(KERNEL_CMDLINE)" LOG=${LOG} cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(INITRAMFS_PROFILE_FEATURES) $(EXTRA_FEATURES)"
     endif
 
 clean:
@@ -269,42 +288,25 @@ ktest-run: user $(LWEXT4_PREREQ)
 		-nographic \
 		-bios $(BOOTLOADER) \
 		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
-		-m 512 \
+		-m 1024 \
 		-smp threads=1
 
 # ─────────────────────────────────────────────────────────
 #  L4 User-mode regression test (mango.mode=regression)
 # ─────────────────────────────────────────────────────────
-# Builds minimal initramfs with /init=regression_init and
-# /regression. Launches QEMU with NO disk drives. Parses
-# console for [L4 REGRESSION RESULT: PASS] / FAIL markers.
 REGRESSION_CMDLINE := mango.mode=regression
 
-REGRESSION_CPIO_RV := ../fs-img-dir/initramfs-regression-rv.cpio
-
-regression-run: user $(LWEXT4_PREREQ)
-	@echo "[regression] Building regression initramfs..."
-	@mkdir -p ../fs-img-dir
-	./build_initramfs.sh rv64 $(MODE) $(REGRESSION_CPIO_RV) regression
-	@# Swap regression cpio in for the build, restore after
-	@cp $(INITRAMFS_CPIO_RV) $(INITRAMFS_CPIO_RV).bak 2>/dev/null || true
-	@cp $(REGRESSION_CPIO_RV) $(INITRAMFS_CPIO_RV)
-	@echo "[regression] Rebuilding kernel with: $(REGRESSION_CMDLINE)"
-	@cp -f src/hal/arch/riscv/linker-$(BOARD).ld src/hal/arch/riscv/linker.ld
-	@# Ensure lwext4 is built and LWEXT4_LIB_DIR is set
-	@$(MAKE) lwext4-rv64
-	@MANGO_CMDLINE="$(REGRESSION_CMDLINE)" LWEXT4_LIB_DIR="$(LWEXT4_LIB_DIR)" LOG=${LOG} \
-		cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)"
-	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
-	@# Restore normal cpio
-	@mv $(INITRAMFS_CPIO_RV).bak $(INITRAMFS_CPIO_RV) 2>/dev/null || true
+regression-run:
+	@echo "[regression] Building kernel with regression initramfs..."
+	@$(MAKE) -f $(firstword $(MAKEFILE_LIST)) build INITRAMFS_PROFILE=regression KERNEL_CMDLINE="$(REGRESSION_CMDLINE)" \
+		BLK_MODE=$(BLK_MODE) MODE=$(MODE) LOG=${LOG}
 	@echo "[regression] Launching QEMU (no disks, timeout 60s)..."
 	@timeout --foreground 60 qemu-system-riscv64 \
 		-machine virt \
 		-nographic \
 		-bios $(BOOTLOADER) \
 		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
-		-m 256 \
+		-m 1024 \
 		-smp threads=1 2>&1 | tee /tmp/regression-rv.log
 	@grep -q "L4 REGRESSION RESULT: PASS" /tmp/regression-rv.log \
 		&& echo "=== REGRESSION PASS ===" \

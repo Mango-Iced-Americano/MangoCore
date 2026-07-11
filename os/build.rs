@@ -15,6 +15,7 @@ fn main() {
     // Re-run if the embedded initramfs cpio changes (referenced by
     // initramfs-rv.S / initramfs-la.S via .incbin)
     println!("cargo:rerun-if-changed=../fs-img-dir/initramfs-rv.cpio");
+    println!("cargo:rerun-if-changed=../fs-img-dir/initramfs-regression-rv.cpio");
     println!("cargo:rerun-if-changed=../fs-img-dir/initramfs-la.cpio");
 
     // Re-run if MANGO_CMDLINE changes between builds

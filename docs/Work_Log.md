@@ -2,6 +2,32 @@
 
 ---
 
+## 2026-07-11
+
+### regression 构建链重构：Cargo feature + Makefile 参数化，消除 cpio 交换 hack
+
+**涉及文件：**
+- `os/Cargo.toml` — 新增 `regression_initramfs = []` feature flag
+- `os/src/initramfs-regression-rv.S` — (新增) 与 `initramfs-rv.S` 导出相同符号 (`sinitramfs`/`einitramfs`)，但 `.incbin` 指向 `initramfs-regression-rv.cpio`
+- `os/src/main.rs` — 条件编译 initramfs include：当 `regression_initramfs` feature 启用时使用 `initramfs-regression-rv.S`，否则使用 `initramfs-rv.S`；la64 暂不受影响
+- `os/build.rs` — 新增 `rerun-if-changed` 追踪回归 cpio
+- `os/make/rv64.mk` — 重构 initramfs 参数化：
+  - 新增 `INITRAMFS_PROFILE` 变量（`normal`/`regression`），自动选择 cpio 路径和 Cargo feature
+  - `KERNEL_CMDLINE` 默认 `mango.mode=normal`，所有 cargo build 命令统一注入 `MANGO_CMDLINE` 和 `$(INITRAMFS_PROFILE_FEATURES)`
+  - `regression-run` 重写为 `$(MAKE) -f $(firstword $(MAKEFILE_LIST)) build INITRAMFS_PROFILE=regression ...` — 复用标准 `build` 管道，不再直接 `cargo build`，不再执行 cpio 交换/恢复
+  - `regression-run` 和 `ktest-run` QEMU 内存统一改为 `-m 1024`（原 regression 256MB 导致 `mem_clear` 挂起）
+  - 修复 `$(MAKE) build` 不继承 `-f` 标志的问题（GNU Make `-f` 不在 `MAKEFLAGS` 中传递）
+
+**验证：**
+- `make rv64-kernel-build-only` ✅ (188 warnings，均为既有)
+- `make -f make/rv64.mk regression-run MODE=release` ✅ — 构建流程正确（`regression_initramfs` feature + `MANGO_CMDLINE=mango.mode=regression`），QEMU 启动 1024MB
+- regression 后正常 rv64 构建 ✅ — cpio 未被污染（回归 cpio 为独立文件）
+- `make la64-kernel-build-only` ✅ (173 warnings，均为既有)
+
+**备注：** 设计取舍：(1) `$(MAKE)` 递归调用时 `-f` 标志不在 `MAKEFLAGS` 中自动传递，使用 `$(firstword $(MAKEFILE_LIST))` 显式传递；(2) `initramfs-regression-rv.S` 与 `initramfs-rv.S` 导出相同符号名 (`sinitramfs`/`einitramfs`)，`VFS_ROOT` 解包代码无需任何修改；(3) 回归 cpio 与正常 cpio 完全独立，通过 `$(REGRESSION_CPIO_RV): user` 规则在需要时按需构建；(4) la64 回归 `.S` 文件留待后续补充
+
+---
+
 ## 2026-07-10
 
 ### L4 regression 自包含 initramfs 流程：`make regression` 零磁盘启动

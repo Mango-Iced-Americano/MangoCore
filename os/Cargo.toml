@@ -74,6 +74,7 @@ heap_trace = []
 perf_stats = []
 perf_diag = ["perf_stats"]
 initramfs = []
+regression_initramfs = []
 legacy_block_root = []
 preload_payloads = []
 

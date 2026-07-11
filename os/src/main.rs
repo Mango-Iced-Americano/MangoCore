@@ -58,8 +58,10 @@ core::arch::global_asm!(include_str!("hal/arch/riscv/entry.asm"));
 // ── Initramfs root cpio (small boot root filesystem) ──
 #[cfg(all(feature = "initramfs", feature = "loongarch64"))]
 core::arch::global_asm!(include_str!("initramfs-la.S"));
-#[cfg(all(feature = "initramfs", feature = "riscv"))]
+	#[cfg(all(feature = "initramfs", feature = "riscv", not(feature = "regression_initramfs")))]
 core::arch::global_asm!(include_str!("initramfs-rv.S"));
+#[cfg(all(feature = "initramfs", feature = "riscv", feature = "regression_initramfs"))]
+core::arch::global_asm!(include_str!("initramfs-regression-rv.S"));
 
 // ── Legacy: block_mem full rootfs image ──
 #[cfg(all(feature = "block_mem", feature = "loongarch64"))]
