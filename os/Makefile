@@ -16,6 +16,7 @@ LA_TOOLCHAIN ?= nightly-2024-05-01
 .PHONY: all $(ARCHS) clean prepare-cargo-config \
 	la64-2k1000-sata-probe la64-2k1000-sata-write-probe \
 	la64-2k1000-sata-fs-write-probe \
+	la64-2k1000-scratch-rw \
 	la64-2k1000-sata-mount-ro \
 	la64-2k1000-run-clean
 
@@ -114,6 +115,20 @@ la64-2k1000-sata-fs-write-probe: prepare-cargo-config
 		EXTRA_FEATURES=sata_fs_write_probe MODE=$(MODE) LOG=off
 	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
 		../kernel-2k1000-sata-fs-write-probe.ui
+
+# Staged writable image: P1/P3 and every userspace block node remain read-only;
+# only P2 FAT32 is mounted at /scratch with write access.
+la64-2k1000-scratch-rw: prepare-cargo-config
+	@grep -Eq '^mode=run$$' ../os_test.conf || { \
+		echo "os_test.conf must contain mode=run" >&2; exit 1; \
+	}
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
+		EXTRA_FEATURES=sata_scratch_rw MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../kernel-2k1000-scratch-rw.ui
 
 # 首次文件系统验收镜像：识别裸盘/MBR 中的 ext4 或 FAT32，并以只读方式挂载。
 la64-2k1000-sata-mount-ro: prepare-cargo-config

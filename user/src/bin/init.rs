@@ -4,7 +4,7 @@ extern crate alloc;
 
 use alloc::format;
 use user_lib::*;
-use user_lib::syscall::sys_mkdirat;
+use user_lib::syscall::{sys_fsync, sys_ftruncate, sys_mkdirat, sys_unlinkat};
 use user_lib::syscall::sys_clock_settime;
 use user_lib::syscall::TimeSpec;
 
@@ -13,6 +13,90 @@ const AT_FDCWD: isize = -100;
 const NTP_ATTEMPTS: usize = 2;
 const NTP_TIMEOUT_MS: usize = 3_000;
 const NTP_POLL_MS: usize = 50;
+const ENOENT: isize = -2;
+const AT_REMOVEDIR: u32 = 0x200;
+
+fn run_scratch_rw_smoke() -> bool {
+    const DIR: &str = "/scratch/MANGO_USR_PROBE\0";
+    const FILE: &str = "/scratch/MANGO_USR_PROBE/PAYLOAD.BIN\0";
+    const PAYLOAD_LEN: usize = 6144;
+    const TRUNCATED_LEN: usize = 2048;
+
+    let mkdir_ret = sys_mkdirat(AT_FDCWD, DIR, 0o755);
+    if mkdir_ret == ENOENT {
+        println!("[scratch-smoke] /scratch absent, skipping");
+        return true;
+    }
+    if mkdir_ret != 0 {
+        println!("[scratch-smoke] mkdir failed: {}", mkdir_ret);
+        return false;
+    }
+
+    let mut expected = alloc::vec![0u8; PAYLOAD_LEN];
+    for (index, byte) in expected.iter_mut().enumerate() {
+        *byte = 0x73 ^ (index as u8).wrapping_mul(0x29) ^ ((index >> 8) as u8);
+    }
+
+    let fd = open(FILE, OpenFlags::CREATE | OpenFlags::RDWR | OpenFlags::TRUNC);
+    if fd < 0 {
+        println!("[scratch-smoke] open for write failed: {}", fd);
+        return false;
+    }
+    let written = write(fd as usize, &expected);
+    if written != PAYLOAD_LEN as isize {
+        println!("[scratch-smoke] write failed: {}", written);
+        close(fd as usize);
+        return false;
+    }
+    if sys_fsync(fd as usize) != 0 {
+        println!("[scratch-smoke] fsync failed");
+        close(fd as usize);
+        return false;
+    }
+    if sys_ftruncate(fd as usize, TRUNCATED_LEN as isize) != 0 {
+        println!("[scratch-smoke] ftruncate failed");
+        close(fd as usize);
+        return false;
+    }
+    if sys_fsync(fd as usize) != 0 || close(fd as usize) != 0 {
+        println!("[scratch-smoke] final sync/close failed");
+        return false;
+    }
+
+    let fd = open(FILE, OpenFlags::RDONLY);
+    if fd < 0 {
+        println!("[scratch-smoke] reopen failed: {}", fd);
+        return false;
+    }
+    let mut actual = alloc::vec![0u8; TRUNCATED_LEN];
+    let read_len = read(fd as usize, &mut actual);
+    let mut eof = [0u8; 1];
+    let eof_len = read(fd as usize, &mut eof);
+    close(fd as usize);
+    if read_len != TRUNCATED_LEN as isize
+        || actual.as_slice() != &expected[..TRUNCATED_LEN]
+        || eof_len != 0
+    {
+        println!(
+            "[scratch-smoke] persisted data mismatch: read={} eof={}",
+            read_len, eof_len
+        );
+        return false;
+    }
+
+    let unlink_ret = sys_unlinkat(AT_FDCWD, FILE, 0);
+    if unlink_ret != 0 {
+        println!("[scratch-smoke] unlink failed: {}", unlink_ret);
+        return false;
+    }
+    let rmdir_ret = sys_unlinkat(AT_FDCWD, DIR, AT_REMOVEDIR);
+    if rmdir_ret != 0 {
+        println!("[scratch-smoke] rmdir failed: {}", rmdir_ret);
+        return false;
+    }
+    println!("[scratch-smoke] PASS: write/fsync/truncate/reopen/read/unlink/rmdir");
+    true
+}
 
 fn try_mount(source: &str, target: &str, fstype: &str, flags: usize, data: usize) -> isize {
     let src_c = format!("{}\0", source);
@@ -136,6 +220,11 @@ fn set_system_time(secs: usize, nsecs: usize) {
 #[no_mangle]
 fn main(_argc: usize, _argv: &[&str]) -> i32 {
     println!("[init] MangoCore stage-1 boot (initramfs mode)");
+
+    if !run_scratch_rw_smoke() {
+        println!("[init] FATAL: writable scratch smoke test failed");
+        loop {}
+    }
 
     try_ntp_sync();
 

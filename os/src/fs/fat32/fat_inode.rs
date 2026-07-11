@@ -154,9 +154,14 @@ impl FatInode {
 }
 
 impl Drop for FatInode {
-    /// 在删除该inode之前，写回脏页并更新父目录
+    /// Flush dirty file data and release clusters owned by a deleted inode.
+    ///
+    /// Parent directory metadata is updated synchronously by mutating
+    /// operations. Doing that here is unsafe because FAT lookups can create
+    /// multiple inode objects for the same directory entry; a stale object's
+    /// destructor must never overwrite a newer entry or resurrect an unlinked
+    /// file.
     fn drop(&mut self) {
-        // 写回新 PageCache 的所有脏页（简单且正确：直接写回全部）
         if let Some(ref pc) = *self.new_page_cache.lock() {
             let _ = pc.writeback_all();
         }
@@ -166,8 +171,6 @@ impl Drop for FatInode {
             let mut lock = self.file_content.write();
             let length = lock.clus_list.len();
             self.dealloc_clus(&mut lock, length);
-        } else if let Err(()) = self.sync_parent_dir_entry() {
-            log::error!("[Inode drop]: failed to update parent directory entry");
         }
     }
 }
@@ -1126,6 +1129,7 @@ fn fat_do_create(
 
     let short_ent_offset =
         parent.create_dir_ent(&parent_inode_lock, short_ent, long_ents)?;
+    drop(parent_inode_lock);
 
     let current_file = FatInode::from_fat_ent(parent, &short_ent, short_ent_offset);
 
@@ -1134,6 +1138,13 @@ fn fat_do_create(
             2 * core::mem::size_of::<FATDirEnt>() as u32;
         FatInode::fill_empty_dir(parent, &current_file, fst_clus);
     }
+
+    // EasyFileSystem::root_inode() currently yields independent FatInode and
+    // PageCache objects. Persist both sides of the directory transaction before
+    // returning so a subsequent operation through another root inode observes
+    // the newly-created entry and an initialized directory body.
+    current_file.writeback_page_cache()?;
+    parent.writeback_page_cache()?;
 
     log::debug!(
         "[fat_do_create] parent_inode: {:?}, name: {:?}, file_type: {:?}",

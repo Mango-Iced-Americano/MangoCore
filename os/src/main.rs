@@ -41,6 +41,17 @@ compile_error!("sata_probe and sata_write_probe are mutually exclusive");
     any(feature = "sata_probe", feature = "sata_write_probe")
 ))]
 compile_error!("sata_fs_write_probe cannot be combined with another SATA probe");
+#[cfg(all(feature = "sata_scratch_rw", not(feature = "board_2k1000")))]
+compile_error!("sata_scratch_rw is supported only on board_2k1000");
+#[cfg(all(
+    feature = "sata_scratch_rw",
+    any(
+        feature = "sata_probe",
+        feature = "sata_write_probe",
+        feature = "sata_fs_write_probe"
+    )
+))]
+compile_error!("sata_scratch_rw cannot be combined with a SATA probe");
 pub use hal::config;
 extern crate alloc;
 extern crate core;
@@ -218,7 +229,10 @@ pub fn rust_main() -> ! {
             feature = "block_sata",
             not(any(feature = "sata_probe", feature = "sata_write_probe"))
         ))]
+        #[cfg(not(feature = "sata_scratch_rw"))]
         fs::mount_boot_block_devices_read_only();
+        #[cfg(feature = "sata_scratch_rw")]
+        fs::mount_boot_block_devices_with_writable_scratch();
         #[cfg(all(feature = "board_2k1000", feature = "sata_fs_write_probe"))]
         fs::run_board_scratch_write_probe();
         #[cfg(all(

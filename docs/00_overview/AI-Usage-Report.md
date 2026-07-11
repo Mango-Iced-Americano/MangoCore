@@ -2,7 +2,7 @@
 
 > Document path: `docs/00_overview/AI-Usage-Report.md`  
 > Project: MangoCore  
-> Coverage: 2026-04-01 to 2026-07-10
+> Coverage: 2026-04-01 to 2026-07-11
 > Purpose: OS competition AI usage disclosure
 
 ## 1. 合规声明
@@ -42,6 +42,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 7 月开发期间使用了多种 
 | 性能退化调试系统 | 2026-06-19 至 2026-06-20 | Oracle, Sisyphus, specialized agents | `perf_diag` counters、`drift_window`、lmbench 漂移分析、buddy allocator bitmap guard | 建立自动漂移分析脚本与诊断 counters，定位并修复 allocator 退化 |
 | 后期文档系统与评审材料 | 2026-06-28 至 2026-06-30 | Sisyphus, Oracle, Explore | `Technical-Report-MangoCore.md`、`Engineering-Casebook.md`、FS/Net/MM 文档、README、评审材料事实核查 | 生成和重构大量文档，并经多轮 Oracle fact-check 修正事实错误 |
 | 2K1000LA 实板地址/TLB 审计 | 2026-07-10 | OpenAI Codex multi-agent | 将 QEMU 内核迁移到 VALEN=40 实板；并行审计 canonical VA、VPN/VPPN、PTE PPN、TLB refill、ASID、DMW 和栈窗口 | 修复 TLB PS、PPN/VPPN、ASID、映射边界和 MMIO 别名；完成双架构编译、LA64 QEMU 用户态启动和实板 uImage 构建 |
+| 2K1000LA SATA/FAT32 分阶段写入 | 2026-07-11 | OpenAI Codex | AHCI 暖复位、P2 定向恢复、FAT32 元数据持久化、用户态 `/scratch` 隔离写入与实板串口验证 | 完成 raw write/flush、内核文件探针和用户态 write/fsync/truncate/reopen/unlink/rmdir 闭环；P1/P3 保持只读 |
 
 ## 4. 详细使用场景
 

@@ -61,6 +61,9 @@ pub enum AhciError {
     LinkTimeout {
         port: usize,
         sata_status: u32,
+        sata_control: u32,
+        sata_error: u32,
+        command: u32,
     },
     DeviceBusyTimeout {
         operation: &'static str,
@@ -305,7 +308,19 @@ impl AHCIPort {
         Err(AhciError::LinkTimeout {
             port,
             sata_status: self.sata_status.read(),
+            sata_control: self.sata_control.read(),
+            sata_error: self.sata_error.read(),
+            command: self.command.read(),
         })
+    }
+
+    fn request_power_and_active_state(&mut self) {
+        self.command.update(|command| {
+            command.set_bit(1, true); // PxCMD.SUD: spin-up device
+            command.set_bit(2, true); // PxCMD.POD: power on device
+            command.set_bits(28..32, 1); // PxCMD.ICC: active
+        });
+        self.command.read();
     }
 
     fn hard_reset_link<P: Provider>(&mut self) {
@@ -313,12 +328,18 @@ impl AHCIPort {
         // COMRESET through SControl.DET for at least 1 ms, then release it.
         // Preserve the negotiated speed limit (SPD) and disallow partial and
         // slumber states while bringing the link back.
+        self.sata_error.write(u32::MAX);
+        self.sata_error.read();
         let speed = self.sata_control.read() & 0x0f0;
         self.sata_control.write(speed | 0x301);
         self.sata_control.read();
         P::delay_us(1_000);
         self.sata_control.write(speed | 0x300);
         self.sata_control.read();
+        P::delay_us(1_000);
+        self.sata_error.write(u32::MAX);
+        self.sata_error.read();
+        self.request_power_and_active_state();
     }
 
     fn spin_on_slot(&mut self, slot: usize, operation: &'static str) -> Result<(), AhciError> {
@@ -593,12 +614,10 @@ impl<P: Provider> AHCI<P> {
             model: String::new(),
         };
 
-        // Spin up the drive and request the active interface power state.
-        ahci.port.command.update(|c| *c |= 1 << 1); // PxCMD.SUD
-        ahci.port.command.update(|c| {
-            *c &= !(0xf << 28);
-            *c |= 1 << 28; // PxCMD.ICC = active
-        });
+        // Power on and spin up the drive before requesting the active interface
+        // state. POD matters on warm reset even when cold boot firmware happened
+        // to leave the port powered.
+        ahci.port.request_power_and_active_state();
         // Warm board resets can leave PxSSTS.DET at 1 (device detected but no
         // PHY communication). A short timed wait handles normal spin-up; if it
         // does not converge, establish a fresh link with COMRESET and use the

@@ -4,7 +4,7 @@ module: fs/fat32
 category: fs
 status: draft
 owner: MangoCore Team
-last_updated: "2026-06-29"
+last_updated: "2026-07-11"
 code_paths:
   - "os/src/fs/fat32/"
 entry_points:
@@ -96,7 +96,7 @@ pub struct FatInode {
 
 - `file_content` 包含 `size`（文件大小）和 `clus_list`（簇号数组）。
 - `new_page_cache` 是懒初始化的 PageCache 实例，用于缓存文件数据和加速读写。
-- `parent_dir` 记录父目录 inode 和目录项偏移，用于 `Drop` 时写回元数据。
+- `parent_dir` 记录父目录 inode 和目录项偏移，用于修改操作同步短目录项及目录页。
 
 ### Fat / FAT 表
 
@@ -180,6 +180,8 @@ FAT32 卷的磁盘布局如下：
 2. 若需扩容，调用 `modify_size_lock` 分配新簇并追加到 `clus_list`。
 3. 写入数据到 PageCache，标记脏页。
 
+文件首次分配簇或大小变化后，write/resize 路径必须立即更新父目录中的短目录项；`sync()` 还要依次写回文件数据页、短目录项和父目录页。不能把这一步延迟到 Rust `Drop`，因为对象生命周期不是文件系统提交协议。
+
 ### 大小调整
 
 `modify_size_lock(diff, clear)` 处理文件伸缩：
@@ -191,6 +193,12 @@ FAT32 卷的磁盘布局如下：
 ### 删除与回收
 
 `unlink_lock(delete)` 从父目录中删除目录项并可选释放数据簇。删除操作将目录项首字节标记为 `0xE5`，同时更新父目录的 `hint` 指针。若 `delete=true`，`Drop` 时实际调用 `dealloc_clus` 回收到 FAT 表。
+
+### 目录事务与 inode 别名
+
+当前 `EasyFileSystem::root_inode()` 和 `FatInode::find()` 可能为同一个磁盘对象构造独立 inode/PageCache。目录创建若只把父目录项留在某个 PageCache 中，后续通过另一份根 inode 执行 `rmdir` 会直接从磁盘读到 `ENOENT`。因此 `fat_do_create()` 在返回前显式写回父目录；创建目录时还要先写回 `.`、`..` 和结束标记。unlink/rmdir 同样在成功返回前提交所属目录页。
+
+stale inode 的 `Drop` 只允许写回自身脏数据和回收已删除 inode 的簇，不再更新父目录元数据。否则旧对象可能覆盖复用后的目录项，甚至复活已删除文件。长期方案仍是为 FAT inode/page cache 建立规范化缓存；在此之前，所有元数据修改必须以显式提交点为边界。
 
 ## PageCache 集成
 

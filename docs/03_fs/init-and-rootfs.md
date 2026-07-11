@@ -42,7 +42,7 @@ related_docs:
 
 根文件系统初始化是内核启动的关键阶段。它在内存管理初始化之后执行，负责探测块设备、识别文件系统类型、创建 VFS 根并挂载默认伪文件系统。无论底层是 ext4、FAT32 还是 ramfs，最终的根文件系统都被包装为统一的 `MountFS` 实例，供上层系统和用户进程通过 VFS 接口访问。
 
-整个初始化逻辑集中在 `os/src/fs/mod.rs` 的 `VFS_ROOT` lazy_static 和 `mount_common_filesystems` 函数中，由 `os/src/main.rs::rust_main()` 在合适的时机触发。`board_2k1000` 的救援镜像和 `sata_probe` 镜像继续调用 `force_ramfs()`；普通 `board_2k1000 + block_sata` 镜像会探测 SATA SSD，并以只读方式挂载识别出的裸文件系统或 MBR 主分区。
+整个初始化逻辑集中在 `os/src/fs/mod.rs` 的 `VFS_ROOT` lazy_static 和 `mount_common_filesystems` 函数中，由 `os/src/main.rs::rust_main()` 在合适的时机触发。`board_2k1000` 的救援镜像和 `sata_probe` 镜像继续调用 `force_ramfs()`；普通 `board_2k1000 + block_sata` 镜像会探测 SATA SSD，并以只读方式挂载识别出的裸文件系统或 MBR 主分区。opt-in `sata_scratch_rw` staged 镜像只把 P2 FAT32 以读写方式挂载到 `/scratch`。
 
 ## 2. 启动流程
 
@@ -69,6 +69,7 @@ rust_main()
   |     |-- net::config::init()
   |     |-- [not board_2k1000] fs::mount_boot_block_devices()  读写挂载
   |     |-- [board_2k1000 + block_sata] mount_boot_block_devices_read_only()
+  |     |-- [board_2k1000 + sata_scratch_rw] P2 FAT32 -> /scratch (rw)，P1/P3 保持 ro
   |     |-- [board_2k1000 rescue/sata_probe] 跳过块设备挂载
   |
   |-- [initramfs 特性未启用: legacy 路径]

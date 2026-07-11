@@ -17,6 +17,7 @@ code_paths:
 entry_points:
   - "discover_mount_devices"
   - "mount_boot_block_devices_read_only"
+  - "mount_boot_block_devices_with_writable_scratch"
 arch:
   rv64: supported
   la64: supported
@@ -39,6 +40,7 @@ related_docs:
 | `mango-2k1000la-full-test-mbr.img.layout.json` | 702 B | 分区起点、长度和 payload 哈希 |
 | `kernel-2k1000-sata-mount-ro.ui` | 约 12MiB | `cd02b6dbb1d9c90945ebed2bfa9ac3c4848beed99e96ae5b670a2c2fec2f49d2` |
 | `kernel-2k1000-run.ui` | 12,319,472 B | `9fcb0df721f115af8b3d42358cf9560344d3fe1adabb5acc731ef5bf44c0f3f1` |
+| `kernel-2k1000-scratch-rw.ui` | 12,343,864 B | `8d152e9ba61f996c7c76778560a1f2d717509c075364835f2815bafc9f57ec98` |
 
 ## 2. MBR 布局
 
@@ -47,7 +49,7 @@ related_docs:
 | 分区 | LBA 范围 | 大小 | 类型 | 用途 |
 |------|----------|------|------|------|
 | P1 | `2048..8390655` | 4GiB | `0x83` ext4 | 官方 LA64 完整测试集，自动挂载 `/sdcard` |
-| P2 | `8390656..11012095` | 1280MiB | `0x0c` FAT32 | 保持 `/dev/vda2` 兼容，供 basic/mount 测试临时挂载 |
+| P2 | `8390656..11012095` | 1280MiB | `0x0c` FAT32 | 保持 `/dev/vda2` 兼容；staged 镜像额外挂载为 `/scratch` |
 | P3 | `11012096..12584959` | 768MiB | `0x83` ext4 | MangoCore 工具，单盘时自动挂载 `/tools` |
 
 P1 来自干净的 `fs-img-dir/sdcard-la.img.xz`，注入当前 `os_test.conf`（`mode=run`、`mask=0xFFF`）。不要使用被 QEMU 写过的仓库根目录 `sdcard-la.img` 作为母盘，除非它重新通过只读 `e2fsck -f -n`。
@@ -127,7 +129,7 @@ bootm 0x9000000098000000
 
 预期日志应包含 `/dev/sda1` Ext4、`/dev/sda2` Fat32、`/dev/sda3` Ext4，随后 P1 以 `RDONLY` 挂到 `/sdcard`、P3 以 `RDONLY` 挂到 `/tools`。
 
-2026-07-11 已在 `TS32GMTS400` 实体 SSD 上完成 25 块网络写入，全部 `12584960` 个 sector 均通过逐块读回 CRC；U-Boot 可读取三个分区，MangoCore 实板启动后成功完成上述三分区识别、只读挂载及 `/tools`、`/musl`、`/glibc` bind。原始 AHCI 写入/flush 和 P2 FAT32 文件级探针也已通过，但正式 `mode=run` 镜像仍保持 P1/P3 只读，尚未把 P2 作为用户态可写挂载开放。
+2026-07-11 已在 `TS32GMTS400` 实体 SSD 上完成 25 块网络写入，全部 `12584960` 个 sector 均通过逐块读回 CRC；U-Boot 可读取三个分区，MangoCore 实板启动后成功完成上述三分区识别、只读挂载及 `/tools`、`/musl`、`/glibc` bind。原始 AHCI 写入/flush、内核 P2 FAT32 文件探针和 staged 用户态 `/scratch` 冒烟测试均已通过；正式 `kernel-2k1000-run.ui` 仍保持全盘只读。
 
 ## 6. 内核 AHCI 写入探针
 
@@ -171,3 +173,24 @@ python3 scripts/restore_2k1000_p2.py \
 脚本硬限制写入范围为 `0x800800..0xa80800`，并校验 `TS32GMTS400`、MBR CRC、每个 256MiB 分块的 TFTP/写入/读回 CRC，以及最终 FAT32 卷标和空根目录。不得把确认起点改成其他值来复用为通用写盘工具。
 
 暖复位时若看到 `PxSSTS=1`，表示设备已检测但 PHY 通信尚未建立。驱动会先按稳定计数器等待 200ms；仍未上线时通过 `PxSCTL.DET` 发出至少 1ms 的 COMRESET，释放后按 AHCI 上限继续等待 10s。不得用固定次数空转替代这段真实时间，也不应要求操作者通过冷断电规避。
+
+## 7. Staged 用户态 `/scratch`
+
+内核文件探针通过后，可构建只开放 P2 的 staged 镜像：
+
+```bash
+make -C os la64-2k1000-scratch-rw
+python3 scripts/boot_2k1000_tftp.py \
+  --interface en8 \
+  --image kernel-2k1000-scratch-rw.ui
+```
+
+该目标强制 `os_test.conf` 为 `mode=run`，并要求 P2 同时满足 partno 2、MBR type `0x0c` 和 FAT32 三个条件才挂载到 `/scratch`。P1 `/sdcard`、P3 `/tools` 以及 `/dev/sda*`、`/dev/vda*` 块设备节点仍为只读，避免用户态绕过挂载策略直接覆盖磁盘。
+
+stage-1 会创建 `/scratch/MANGO_USR_PROBE/PAYLOAD.BIN`，写入 6144 字节确定性数据，执行 fsync、截断到 2048 字节、关闭重开、内容和 EOF 比对，最后 unlink/rmdir。任一步失败都会停止进入测例；成功标志为：
+
+```text
+[scratch-smoke] PASS: write/fsync/truncate/reopen/read/unlink/rmdir
+```
+
+首轮用户态测试曾出现 `unlink=0`、随后 `rmdir=-ENOENT`。U-Boot 复位后 `fatls scsi 0:2 /` 显示空根目录，证明创建目录项只存在于某个 FAT 根 PageCache。根因是 `EasyFileSystem::root_inode()` 产生独立 inode/PageCache，而 create 没有在返回前提交父目录页。修复后 create 显式写回父目录和新目录内容，stale inode `Drop` 不再隐式覆盖父目录项；实板已通过上述完整标志并继续进入测例。

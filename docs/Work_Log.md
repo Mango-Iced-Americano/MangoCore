@@ -4,6 +4,29 @@
 
 ## 2026-07-11
 
+### fs/board: 开放隔离的 P2 `/scratch` 并通过用户态持久写入验收
+
+**涉及文件：**
+- `os/Cargo.toml`, `os/Makefile`, `os/src/main.rs` — 增加 opt-in `sata_scratch_rw` feature 和 `la64-2k1000-scratch-rw` 构建目标，仅在 2K1000LA 上启用
+- `os/src/fs/mod.rs` — 严格匹配 P2、MBR type `0x0c` 和 FAT32 后以读写方式挂载 `/scratch`；P1 `/sdcard`、P3 `/tools` 及全部块设备节点继续只读
+- `user/src/bin/init.rs`, `user/src/lib.rs` — 修正用户态 `O_CREAT/O_TRUNC` ABI 位值，并在 stage-1 执行 write/fsync/truncate/reopen/read/unlink/rmdir 冒烟测试
+- `os/src/fs/fat32/fat_inode.rs` — create 返回前显式写回父目录和新目录页；移除 stale inode `Drop` 中可能覆盖新目录项的隐式元数据回写
+- `dependency/dep_iso/src/block/ahci.rs` — 暖复位时请求 POD/SUD/active，COMRESET 前后清 SERR，并扩充链路超时寄存器快照
+- `docs/03_fs/{fat32,init-and-rootfs,2k1000-full-test-disk}.md` — 记录隔离写策略、构建入口、FAT 目录事务和实板结果
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀独立根 inode/PageCache 导致目录修改仅缓存可见的排查模式
+
+**验证：**
+- Docker 顺序执行 `make -C os rv64-kernel-build-only`、`make -C os la64-kernel-build-only`、`make -C os la64-2k1000-scratch-rw`，均成功 ✅
+- U-Boot 现场检查确认旧实现失败后 P2 为 `0 file(s), 0 dir(s)`，证明 `mkdir` 未持久化而非目录项 offset 错误 ✅
+- `restore_2k1000_p2.py --confirm-p2-start 0x800800` 完成 P2 五段写入/读回 CRC，并确认空 FAT32 根目录；P1/P3 未写入 ✅
+- 最终 uImage 为 `12343864` 字节，SHA-256 `8d152e9ba61f996c7c76778560a1f2d717509c075364835f2815bafc9f57ec98`；TFTP CRC32 `9cb9ec21` 和 U-Boot `iminfo` 通过 ✅
+- 2K1000LA + `TS32GMTS400` 实板输出 `[scratch-smoke] PASS: write/fsync/truncate/reopen/read/unlink/rmdir`，随后进入完整测例调度 ✅
+
+**备注：**
+- 这是 staged 镜像，不替换正式 `kernel-2k1000-run.ui`；正式镜像仍全盘只读。
+- `/bin`、`/lib`、`/usr` 的 `Read-only file system` 提示来自 P3 只读 bind，符合本阶段只开放 P2 的安全边界。
+- 本轮成功启动发生在 P2 恢复工具执行过 U-Boot SCSI 命令之后；提交前另开 120 秒窗口尝试在默认 `scsi reset` 前截停，但未观察到第二次 RESET。AHCI POD/SUD/COMRESET 改动已编译并在当前启动链工作，完全脱离 U-Boot SCSI 前置状态的暖复位仍需单独复测。
+
 ### fs/board: 完成 2K1000LA P2 FAT32 持久写入闭环
 
 **涉及文件：**

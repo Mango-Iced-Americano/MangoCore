@@ -369,9 +369,10 @@
 
 ### FAT32 写入后重挂载出现空文件或已删除项复现
 
-- **现象**: `write()` 返回完整字节数，原始块写入和 flush 也已通过，但重新打开文件时长度为 0；或 `unlink()` 返回成功后，由新 inode 实例执行 `rmdir()` 仍报 `ENOTEMPTY`。
+- **现象**: `write()` 返回完整字节数，原始块写入和 flush 也已通过，但重新打开文件时长度为 0；`unlink()` 后新 inode 执行 `rmdir()` 报 `ENOTEMPTY`；或同一启动中创建/访问成功，换一份根 inode 后 `rmdir()` 报 `ENOENT`。
 - **根因一**: `BlockSizeAdapter` 已把 `BlockDevice` 的 block id 统一为 BPB 扇区单位，FAT 层又按全局 `BLOCK_SZ/512` 二次换算，实际访问了错误 FAT sector。块大小适配边界不清晰会让数据区写入看似成功而 FAT 链损坏。
 - **根因二**: 文件大小、首簇和删除目录项只在 `FatInode::drop()` 中回写。VFS 引用或独立 page cache 延长生命周期时，新 `find()` 构造的 inode 会直接读取尚未落盘的旧目录项；Rust 对象析构不是文件系统持久化协议。
-- **修复**: FAT 内部只使用 BPB 声明的扇区单位，检查簇号 `2..cluster_count+2`、FAT 容量、双 FAT 镜像和 ExtFlags；write/resize 显式更新短目录项，inode `sync()` 依次写回数据页、父目录项和父目录页，unlink/rmdir 在成功返回前持久化目录页。
+- **根因三**: `EasyFileSystem::root_inode()`/`find()` 可生成同一磁盘对象的独立 inode/PageCache。create 只修改旧父目录缓存时，路径 dentry cache 会让后续 open 暂时成功，但另一份根 inode 直接读盘时完全看不到该目录。
+- **修复**: FAT 内部只使用 BPB 声明的扇区单位，检查簇号 `2..cluster_count+2`、FAT 容量、双 FAT 镜像和 ExtFlags；write/resize 显式更新短目录项，inode `sync()` 依次写回数据页、父目录项和父目录页，create/unlink/rmdir 在成功返回前持久化目录页；stale inode `Drop` 不再修改父目录元数据。
 - **验收**: 探针必须跨新文件系统实例完成 create/write/flush/reopen/read/content-compare/unlink/rmdir/final-reopen，不能只在同一 inode/page cache 内回读。失败后用受限分区恢复工具重建 scratch 分区，避免在已损坏 FAT 上反复试写。
 - **相关文件**: `os/src/fs/fat32/bitmap.rs`, `os/src/fs/fat32/efs.rs`, `os/src/fs/fat32/fat_inode.rs`, `os/src/fs/mod.rs`, `scripts/restore_2k1000_p2.py`

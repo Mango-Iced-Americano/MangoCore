@@ -481,6 +481,8 @@ struct MountCandidate {
     device: Arc<dyn BlockDevice>,
     source: String,
     partno: Option<u8>,
+    partition_type: Option<u8>,
+    fs_type: self::filesystem::FS_Type,
 }
 
 fn discover_mount_devices(
@@ -505,6 +507,8 @@ fn discover_mount_devices(
             device: raw.clone(),
             source: alloc::format!("/dev/{}", base_name),
             partno: None,
+            partition_type: None,
+            fs_type: raw_fs,
         }];
     }
 
@@ -547,6 +551,8 @@ fn discover_mount_devices(
                         device: part_device,
                         source: alloc::format!("/dev/{}", name),
                         partno: Some(partition.partno),
+                        partition_type: Some(partition.type_code),
+                        fs_type,
                     });
                 }
             }
@@ -569,11 +575,15 @@ fn discover_mount_devices(
     }
 }
 
-fn mount_boot_block_devices_with_flags(mount_flags: self::vfs::MountFlags) {
+fn mount_boot_block_devices_with_flags(
+    mount_flags: self::vfs::MountFlags,
+    writable_scratch: bool,
+) {
     let root = vfs_root();
     let devices = crate::drivers::block::block_devices();
     let read_only = mount_flags.contains(self::vfs::MountFlags::RDONLY);
     let mut same_disk_tools = None;
+    let mut same_disk_scratch = None;
 
     match devices[0].as_ref() {
         Some(raw) => {
@@ -596,6 +606,16 @@ fn mount_boot_block_devices_with_flags(mount_flags: self::vfs::MountFlags) {
                 .iter()
                 .find(|candidate| candidate.partno == Some(3))
                 .cloned();
+            if writable_scratch {
+                same_disk_scratch = candidates
+                    .iter()
+                    .find(|candidate| {
+                        candidate.partno == Some(2)
+                            && candidate.partition_type == Some(0x0c)
+                            && candidate.fs_type == self::filesystem::FS_Type::Fat32
+                    })
+                    .cloned();
+            }
 
             match candidates.first() {
                 Some(candidate) => {
@@ -615,6 +635,25 @@ fn mount_boot_block_devices_with_flags(mount_flags: self::vfs::MountFlags) {
             }
         }
         None => println!("[initramfs] official fs (x0) not found, skipping /sdcard mount"),
+    }
+
+    if writable_scratch {
+        match same_disk_scratch {
+            Some(candidate) => {
+                if mount_block_fs_with_flags(
+                    &root,
+                    &candidate.device,
+                    "scratch",
+                    &alloc::format!("writable scratch ({})", candidate.source),
+                    self::vfs::MountFlags::empty(),
+                )
+                .is_none()
+                {
+                    panic!("2K1000 writable P2 scratch mount failed");
+                }
+            }
+            None => panic!("2K1000 writable P2 FAT32 scratch partition not found"),
+        }
     }
 
     let separate_tools = devices[1].as_ref().and_then(|raw| {
@@ -653,12 +692,19 @@ fn mount_boot_block_devices_with_flags(mount_flags: self::vfs::MountFlags) {
 
 /// 探测启动块设备并以读写方式挂载识别出的文件系统。
 pub fn mount_boot_block_devices() {
-    mount_boot_block_devices_with_flags(self::vfs::MountFlags::empty());
+    mount_boot_block_devices_with_flags(self::vfs::MountFlags::empty(), false);
 }
 
 /// 实板首次文件系统验收路径：注册设备，但只读挂载文件系统。
 pub fn mount_boot_block_devices_read_only() {
-    mount_boot_block_devices_with_flags(self::vfs::MountFlags::RDONLY);
+    mount_boot_block_devices_with_flags(self::vfs::MountFlags::RDONLY, false);
+}
+
+/// Staged 2K1000 migration policy: keep P1/P3 and all block device nodes
+/// read-only, while mounting the validated P2 FAT32 partition at `/scratch`.
+#[cfg(all(feature = "board_2k1000", feature = "sata_scratch_rw"))]
+pub fn mount_boot_block_devices_with_writable_scratch() {
+    mount_boot_block_devices_with_flags(self::vfs::MountFlags::RDONLY, true);
 }
 
 #[cfg(all(feature = "board_2k1000", feature = "sata_fs_write_probe"))]
