@@ -772,7 +772,7 @@ impl TaskControlBlock {
     pub fn new(elf: Arc<vfs::File>) -> Arc<Self> {
         macro_rules! init_task_trace {
             ($($arg:tt)*) => {
-                #[cfg(feature = "board_2k1000")]
+                #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
                 println!("[bringup][tcb] {}", format_args!($($arg)*));
             };
         }

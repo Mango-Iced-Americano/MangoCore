@@ -63,7 +63,7 @@ lazy_static! {
     /// 每个条目在设备未探测到时为 None。
     pub static ref BLOCK_DEVICES: [Option<Arc<dyn BlockDevice>>; 2] = {
         if SKIP_BLOCK_DEVICE.load(Ordering::Relaxed) {
-            println!("[kernel] block devices skipped (ramfs-only mode)");
+            boot_trace!("[kernel] block devices skipped (ramfs-only mode)");
             [None, None]
         } else {
             probe_block_devices()
@@ -74,7 +74,7 @@ lazy_static! {
     /// ramfs-only 模式下返回 DummyBlockDevice；否则要求 device 0 存在。
     pub static ref BLOCK_DEVICE: Arc<dyn BlockDevice> = {
         if SKIP_BLOCK_DEVICE.load(Ordering::Relaxed) {
-            println!("[kernel] block device skipped (ramfs-only mode)");
+            boot_trace!("[kernel] block device skipped (ramfs-only mode)");
             Arc::new(DummyBlockDevice)
         } else {
             BLOCK_DEVICES[0].clone().expect(

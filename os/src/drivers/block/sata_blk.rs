@@ -241,11 +241,11 @@ fn sata_init() -> Result<AHCI<Provider>, SataInitError> {
         return Err(SataInitError::PciCommandEnableFailed { command });
     }
 
-    println!(
+    boot_trace!(
         "[sata] pci 00:08.0 vendor={:#06x} device={:#06x} class={:02x}/{:02x}/{:02x} command={:#06x}",
         vendor, device, class, subclass, prog_if, command
     );
-    println!(
+    boot_trace!(
         "[sata] BAR0={:#010x} BAR1={:#010x} ABAR={:#x} size={:#x}",
         raw_bar0, raw_bar1, abar, SATA_ABAR_SIZE
     );

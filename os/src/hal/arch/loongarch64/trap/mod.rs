@@ -27,7 +27,7 @@ use crate::task::{
 use core::arch::{asm, global_asm};
 use core::ptr::{addr_of, addr_of_mut};
 
-#[cfg(feature = "board_2k1000")]
+#[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
 static BOARD_FIRST_TRAP_RETURN: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
@@ -423,15 +423,15 @@ fn read_bp() {
 }
 #[no_mangle]
 pub fn trap_return() -> ! {
-    #[cfg(feature = "board_2k1000")]
+    #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
     let trace_first_return =
         !BOARD_FIRST_TRAP_RETURN.swap(true, core::sync::atomic::Ordering::Relaxed);
-    #[cfg(feature = "board_2k1000")]
+    #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
     if trace_first_return {
         println!("[bringup][user:01] first task reached trap_return");
     }
     let task = do_signal();
-    #[cfg(feature = "board_2k1000")]
+    #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
     if trace_first_return {
         println!("[bringup][user:02] initial signal check complete");
     }
@@ -452,7 +452,7 @@ pub fn trap_return() -> ! {
     }
     let user_satp = current_user_token();
     let restore_va = __restore as usize - __alltraps as usize + strampoline as usize;
-    #[cfg(feature = "board_2k1000")]
+    #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
     if trace_first_return {
         println!(
             "[bringup][user:03] entering PLV3: pc={:#x} sp={:#x} trap_cx={:#x} token={:#x} asid={} restore={:#x}",

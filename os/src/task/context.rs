@@ -44,7 +44,7 @@ impl TaskContext {
     }
 
     /// 返回 2K1000 上板首次上下文切换优先使用的两个寄存器。
-    #[cfg(feature = "board_2k1000")]
+    #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
     pub fn bringup_resume_state(&self) -> (usize, usize) {
         (self.ra, self.sp)
     }

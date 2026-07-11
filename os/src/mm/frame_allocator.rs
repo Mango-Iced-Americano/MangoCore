@@ -121,7 +121,7 @@ impl StackFrameAllocator {
         let last_frames = self.end - self.current;
         self.recycled.reserve(last_frames);
         self.recycled_flags.resize(last_frames, false);
-        println!("last {} Physical Frames.", last_frames);
+        boot_trace!("last {} Physical Frames.", last_frames);
     }
     /// 返回当前仍可分配的帧数量。
     pub fn unallocated_frames(&self) -> usize {

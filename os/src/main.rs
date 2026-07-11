@@ -146,9 +146,9 @@ pub fn rust_main() -> ! {
     move_to_high_address();
     console::log_init();
     trace::init();
-    println!("[kernel] Console initialized.");
+    boot_trace!("[kernel] Console initialized.");
     mm::init();
-    println!("[kernel] Hello, world!");
+    boot_trace!("[kernel] Hello, world!");
     // note that remap_test is currently NOT supported by LA64, for the whole kernel space is RW!
     // #[cfg(feature = "riscv")]
     // mm::remap_test();
@@ -174,14 +174,14 @@ pub fn rust_main() -> ! {
             // 救援镜像和 sata_probe 镜像必须保持与文件系统探测解耦；普通的
             // board_2k1000 + block_sata 镜像才进入下方只读挂载路径。
             fs::force_ramfs();
-            println!("[kernel] 2K1000 board bring-up: ramfs-only block path enabled");
+            boot_trace!("[kernel] 2K1000 board bring-up: ramfs-only block path enabled");
         }
         #[cfg(all(
             feature = "board_2k1000",
             feature = "block_sata",
             not(feature = "sata_probe")
         ))]
-        println!("[kernel] 2K1000 board bring-up: SATA read-only mount enabled");
+        boot_trace!("[kernel] 2K1000 board bring-up: SATA read-only mount enabled");
 
         crate::fs::vfs::posix_lock::init_posix_lock_manager();
         fs::initramfs_init();
@@ -192,7 +192,7 @@ pub fn rust_main() -> ! {
         {
             // 实板网卡不是 QEMU virtio-net；最小上板阶段保留回环接口和网络核心，
             // 暂不枚举 virtio PCI 网卡，后续再接 GMAC/PHY 驱动。
-            println!("[kernel] 2K1000 board bring-up: external net probe skipped");
+            boot_trace!("[kernel] 2K1000 board bring-up: external net probe skipped");
         }
         net::config::init();
 
@@ -210,17 +210,17 @@ pub fn rust_main() -> ! {
             feature = "board_2k1000",
             any(not(feature = "block_sata"), feature = "sata_probe")
         ))]
-        println!("[kernel] 2K1000 board bring-up: block device mount skipped");
+        boot_trace!("[kernel] 2K1000 board bring-up: block device mount skipped");
 
         // 安装预装载的测试载荷。QEMU 和 2K1000 SATA 路径都先完成块设备探测，
         // 以减少 DMA 页碎片；救援/probe 镜像则直接安装到 initramfs/ramfs 根。
         #[cfg(feature = "preload_payloads")]
         {
             #[cfg(feature = "board_2k1000")]
-            println!("[bringup][main:01] preload payload installation begin");
+            boot_trace!("[bringup][main:01] preload payload installation begin");
             fs::install_preload_payloads();
             #[cfg(feature = "board_2k1000")]
-            println!("[bringup][main:02] preload payload installation complete");
+            boot_trace!("[bringup][main:02] preload payload installation complete");
         }
     }
 
@@ -241,10 +241,10 @@ pub fn rust_main() -> ! {
 
     crate::fs::vfs::posix_lock::init_posix_lock_manager();
     #[cfg(feature = "board_2k1000")]
-    println!("[bringup][main:03] init task construction begin");
+    boot_trace!("[bringup][main:03] init task construction begin");
     task::add_initproc();
     #[cfg(feature = "board_2k1000")]
-    println!("[bringup][main:04] init task queued; entering scheduler");
+    boot_trace!("[bringup][main:04] init task queued; entering scheduler");
     // note that in run_tasks(), there is yet *another* pre_start_init(),
     // which is used to turn on interrupts in some archs like LoongArch.
     task::run_tasks();

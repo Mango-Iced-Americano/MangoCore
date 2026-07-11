@@ -49,9 +49,9 @@ pub fn init() {
     net_core::init();
     NET_INTERFACE.init();
     if has_nic {
-        println!("[kernel] net interface initialized (RoutingDevice: lo + eth)");
+        boot_trace!("[kernel] net interface initialized (RoutingDevice: lo + eth)");
     } else {
-        println!("[kernel] net interface initialized (loopback only, no NIC)");
+        boot_trace!("[kernel] net interface initialized (loopback only, no NIC)");
     }
 }
 
@@ -157,7 +157,7 @@ impl<'a> NetInterfaceInner<'a> {
                 (SmoltcpDeviceAdapter::new(net_device), EthernetAddress(mac), true)
             }
             None => {
-                println!("[kernel] No net device, using null device (loopback only)");
+                boot_trace!("[kernel] No net device, using null device (loopback only)");
                 let null_dev = Arc::new(NullNetDevice);
                 let null_mac = [0x02u8, 0, 0, 0, 0, 1];
                 (SmoltcpDeviceAdapter::new(null_dev), EthernetAddress(null_mac), false)

@@ -14,7 +14,8 @@ RV_TOOLCHAIN ?= nightly-2025-01-18
 LA_TOOLCHAIN ?= nightly-2024-05-01
 
 .PHONY: all $(ARCHS) clean prepare-cargo-config \
-	la64-2k1000-sata-probe la64-2k1000-sata-mount-ro
+	la64-2k1000-sata-probe la64-2k1000-sata-mount-ro \
+	la64-2k1000-run-clean
 
 all: prepare-cargo-config rv64_all la64_all
 
@@ -99,6 +100,20 @@ la64-2k1000-sata-mount-ro: prepare-cargo-config
 		MODE=$(MODE) LOG=off
 	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
 		../kernel-2k1000-sata-mount-ro.ui
+
+# Competition run image: no board bring-up trace, log level off, and the
+# embedded fallback configuration must be the normal full-suite run mode.
+la64-2k1000-run-clean: prepare-cargo-config
+	@grep -Eq '^mode=run$$' ../os_test.conf || { \
+		echo "os_test.conf must contain mode=run" >&2; exit 1; \
+	}
+	@rustup override set $(LA_TOOLCHAIN)
+	cp ./src/lang_items.rs.la ./src/lang_items.rs
+	cp ../user/src/lang_items.rs.la ../user/src/lang_items.rs
+	$(MAKE) -B -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
+		MODE=$(MODE) LOG=off
+	cp -f target/loongarch64-unknown-linux-gnu/$(MODE)/os.ui \
+		../kernel-2k1000-run.ui
 
 la64-debug:
 	@rustup override set $(LA_TOOLCHAIN)

@@ -202,7 +202,7 @@ pub fn probe_mbr(dev: &Arc<dyn BlockDevice>) -> MbrProbe {
         // A hybrid protective MBR must not be partially interpreted as a normal MBR.
         MbrProbe::Unsupported
     } else if !partitions.is_empty() {
-        println!(
+        boot_trace!(
             "[mbr] valid MBR with {} usable partition(s)",
             partitions.len()
         );

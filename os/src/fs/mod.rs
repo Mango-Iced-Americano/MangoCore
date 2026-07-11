@@ -62,7 +62,7 @@ pub(crate) fn adapt_filesystem_device(
 
     let mut device = block_device;
     if native_block_size != crate::hal::BLOCK_SZ {
-        println!(
+        boot_trace!(
             "[fs] adapting native block size {} to platform block size {}",
             native_block_size,
             crate::hal::BLOCK_SZ
@@ -127,7 +127,7 @@ lazy_static! {
         // 解包 initramfs cpio
         match self::initramfs::unpack_embedded(&mfs) {
             Ok(stats) => {
-                println!(
+                boot_trace!(
                     "[initramfs] unpacked: files={} dirs={} symlinks={} bytes={}",
                     stats.files, stats.dirs, stats.symlinks, stats.bytes,
                 );
@@ -381,7 +381,7 @@ pub fn mount_block_fs_with_flags(
     };
 
     match mfs.mountpoint_root_inode().list() {
-        Ok(entries) => println!(
+        Ok(entries) => boot_trace!(
             "[fs] {} root directory readable: {} entries",
             label,
             entries.len()
@@ -426,7 +426,7 @@ pub fn mount_block_fs_with_flags(
         return None;
     }
 
-    println!(
+    boot_trace!(
         "[kernel] {} ({:?}) mounted at {} flags={:?}",
         label, fs_type, mount_point, mount_flags
     );
@@ -500,7 +500,7 @@ fn discover_mount_devices(
 
     let raw_fs = self::filesystem::detect_fs(raw);
     if raw_fs != self::filesystem::FS_Type::Null {
-        println!("[block] /dev/{} contains raw {:?}", base_name, raw_fs);
+        boot_trace!("[block] /dev/{} contains raw {:?}", base_name, raw_fs);
         return alloc::vec![MountCandidate {
             device: raw.clone(),
             source: alloc::format!("/dev/{}", base_name),
@@ -533,7 +533,7 @@ fn discover_mount_devices(
                 }
 
                 let fs_type = self::filesystem::detect_fs(&part_device);
-                println!(
+                boot_trace!(
                     "[mbr] /dev/{} type={:#04x} start_lba={} sectors={} size={}MiB fs={:?}",
                     name,
                     partition.type_code,
@@ -626,7 +626,7 @@ fn mount_boot_block_devices_with_flags(mount_flags: self::vfs::MountFlags) {
 
     if use_same_disk_tools {
         if let Some(candidate) = same_disk_tools.as_ref() {
-            println!(
+            boot_trace!(
                 "[initramfs] tools disk (x1) not found; using {} from x0",
                 candidate.source
             );
@@ -666,7 +666,7 @@ pub fn mount_boot_block_devices_read_only() {
 #[cfg(feature = "initramfs")]
 pub fn initramfs_init() {
     let _root = VFS_ROOT.clone();
-    println!("[initramfs] VFS_ROOT initialized (ramfs + cpio unpack + dev/proc/tmp)");
+    boot_trace!("[initramfs] VFS_ROOT initialized (ramfs + cpio unpack + dev/proc/tmp)");
 }
 
 /// 安装预装载的用户态 payload（initproc、bash、busybox 等）。
@@ -1026,7 +1026,7 @@ raw 255 RAW\n";
 pub fn flush_preload() {
     macro_rules! preload_trace {
         ($($arg:tt)*) => {
-            #[cfg(feature = "board_2k1000")]
+            #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
             println!("[bringup][preload] {}", format_args!($($arg)*));
         };
     }
@@ -1054,7 +1054,7 @@ pub fn flush_preload() {
         fn sltprunner();
         fn eltprunner();
     }
-    println!(
+    boot_trace!(
         "sinitproc: {:X}, einitproc: {:X}, sbash: {:X}, ebash: {:X}, sbusybox: {:X}, ebusybox: {:X}, sosconfig: {:X}, eosconfig: {:X}",
         sinitproc as usize, einitproc as usize, sbash as usize, ebash as usize, sbusybox as usize, ebusybox as usize,
         sosconfig as usize, eosconfig as usize,

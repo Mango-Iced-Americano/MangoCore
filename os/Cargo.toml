@@ -75,6 +75,7 @@ perf_diag = ["perf_stats"]
 initramfs = []
 legacy_block_root = []
 preload_payloads = []
+board_bringup_trace = []
 
 # LoongArch Boards:
 loongarch64 = []

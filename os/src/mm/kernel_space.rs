@@ -168,10 +168,10 @@ impl<T: PageTable> KernelSpace<T> {
             kernel_space.map_trampoline();
         }
         // map kernel sections
-        println!(".text [{:#x}, {:#x})", stext as usize, etext as usize);
-        println!(".rodata [{:#x}, {:#x})", srodata as usize, erodata as usize);
-        println!(".data [{:#x}, {:#x})", sdata as usize, edata as usize);
-        println!(
+        boot_trace!(".text [{:#x}, {:#x})", stext as usize, etext as usize);
+        boot_trace!(".rodata [{:#x}, {:#x})", srodata as usize, erodata as usize);
+        boot_trace!(".data [{:#x}, {:#x})", sdata as usize, edata as usize);
+        boot_trace!(
             ".bss [{:#x}, {:#x})",
             sbss_with_stack as usize, ebss as usize
         );
@@ -186,7 +186,7 @@ impl<T: PageTable> KernelSpace<T> {
                     .unwrap();
             };
             ($name:literal,$begin:expr,$end:expr,$permission:expr) => {
-                println!("mapping {}", $name);
+                boot_trace!("mapping {}", $name);
                 kernel_identical_map!($begin, $end, $permission);
             };
         }
@@ -216,7 +216,7 @@ impl<T: PageTable> KernelSpace<T> {
             MapPermission::R | MapPermission::W | MapPermission::G
         );
 
-        println!("mapping memory-mapped registers");
+        boot_trace!("mapping memory-mapped registers");
         for pair in MMIO {
             kernel_identical_map!(
                 (*pair).0,

@@ -313,13 +313,13 @@ lazy_static! {
             ),
         };
         #[cfg(feature = "board_2k1000")]
-        println!("[bringup][init:01] selected userspace entry {}", _init_path);
+        boot_trace!("[bringup][init:01] selected userspace entry {}", _init_path);
         let elf = fs::vfs::File::new(inode, fs::vfs::FileFlags::O_RDONLY).unwrap();
         #[cfg(feature = "board_2k1000")]
-        println!("[bringup][init:02] entry file opened; building initial task");
+        boot_trace!("[bringup][init:02] entry file opened; building initial task");
         let task = TaskControlBlock::new(elf);
         #[cfg(feature = "board_2k1000")]
-        println!(
+        boot_trace!(
             "[bringup][init:03] initial task built: pid={} tid={}",
             task.pid(),
             task.gettid()
@@ -331,8 +331,8 @@ lazy_static! {
 /// 将 init 进程加入 ready 队列。
 pub fn add_initproc() {
     #[cfg(feature = "board_2k1000")]
-    println!("[bringup][init:04] enqueue initial task");
+    boot_trace!("[bringup][init:04] enqueue initial task");
     add_task(INITPROC.clone());
     #[cfg(feature = "board_2k1000")]
-    println!("[bringup][init:05] initial task is on ready queue");
+    boot_trace!("[bringup][init:05] initial task is on ready queue");
 }

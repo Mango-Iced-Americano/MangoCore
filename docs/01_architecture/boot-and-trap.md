@@ -3,7 +3,7 @@ title: "启动与陷阱路径 (Boot and Trap Flow)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-07-10
+last_update: 2026-07-11
 tags: [architecture, boot, trap, syscall]
 ---
 
@@ -64,6 +64,18 @@ bootm ${loadaddr}
 ```
 
 `iminfo` 必须确认架构为 `LoongArch`、校验为 `OK`，再执行 `bootm`。bring-up 阶段不执行 `saveenv`，避免临时网络参数或测试启动命令覆盖板载默认环境。连续向串口注入命令时应等待上一条命令返回 `=>`，否则 U-Boot 忙于校验或网络传输时可能丢失输入字符。
+
+### 2.2 2K1000LA 正式 run 镜像
+
+正式比赛镜像使用以下目标构建：
+
+```bash
+make -C os la64-2k1000-run-clean
+```
+
+目标会强制检查仓库根目录 `os_test.conf` 包含 `mode=run`，并使用 `LOG=off`、`board_2k1000 + block_sata` 生成 `kernel-2k1000-run.ui`。`board_bringup_trace` 默认不启用，因此 CPUCFG、地址布局、内存映射、预装载步骤、首次内核栈探针、首次调度切换和 PLV3 返回诊断不会进入最终二进制；panic、真实初始化错误和用户态测试结果仍然保留。
+
+需要重新定位早期上板故障时，可在底层 `make/la64.mk` 构建中显式加入 `EXTRA_FEATURES=board_bringup_trace`，不能修改正式 clean 目标。
 
 ## 3. `rust_main()` 控制流
 

@@ -57,30 +57,36 @@ pub fn machine_init() {
     // remap_test not supported for lack of DMW read only privilege support
     trap::init();
     get_timer_freq_first_time();
-    let cfg1 = CPUCfg1::read();
-    println!(
-        "[machine_init] address bits: hardware VALEN={} PALEN={}, build VALEN={} PALEN={}",
-        cfg1.get_valen(),
-        cfg1.get_palen(),
-        VALEN,
-        PALEN
-    );
-    for i in 0..=6 {
-        let j: usize;
-        // Safety: `cpucfg` only reads the CPU configuration word selected by
-        // `i` into the output register.
-        unsafe { core::arch::asm!("cpucfg {0},{1}",out(reg) j,in(reg) i) };
-        println!("[CPUCFG {:#x}] {}", i, j);
+    #[cfg(any(
+        not(feature = "board_2k1000"),
+        feature = "board_bringup_trace"
+    ))]
+    {
+        let cfg1 = CPUCfg1::read();
+        boot_trace!(
+            "[machine_init] address bits: hardware VALEN={} PALEN={}, build VALEN={} PALEN={}",
+            cfg1.get_valen(),
+            cfg1.get_palen(),
+            VALEN,
+            PALEN
+        );
+        for i in 0..=6 {
+            let j: usize;
+            // Safety: `cpucfg` only reads the CPU configuration word selected by
+            // `i` into the output register.
+            unsafe { core::arch::asm!("cpucfg {0},{1}",out(reg) j,in(reg) i) };
+            boot_trace!("[CPUCFG {:#x}] {}", i, j);
+        }
+        for i in 0x10..=0x14 {
+            let j: usize;
+            // Safety: same read-only CPUCFG access as above.
+            unsafe { core::arch::asm!("cpucfg {0},{1}",out(reg) j,in(reg) i) };
+            boot_trace!("[CPUCFG {:#x}] {}", i, j);
+        }
+        boot_trace!("{:?}", Misc::read());
+        boot_trace!("{:?}", RVACfg::read());
+        boot_trace!("[machine_init] MMAP_BASE: {:#x}", MMAP_BASE);
     }
-    for i in 0x10..=0x14 {
-        let j: usize;
-        // Safety: same read-only CPUCFG access as above.
-        unsafe { core::arch::asm!("cpucfg {0},{1}",out(reg) j,in(reg) i) };
-        println!("[CPUCFG {:#x}] {}", i, j);
-    }
-    println!("{:?}", Misc::read());
-    println!("{:?}", RVACfg::read());
-    println!("[machine_init] MMAP_BASE: {:#x}", MMAP_BASE);
     trap::enable_timer_interrupt();
 }
 pub fn pre_start_init() {
@@ -148,9 +154,9 @@ pub fn bootstrap_init() {
         .set_dir4_width(0)
         .write();
 
-    println!("[kernel] UART address: {:#x}", UART_BASE);
+    boot_trace!("[kernel] UART address: {:#x}", UART_BASE);
     let cfg1 = CPUCfg1::read();
-    println!(
+    boot_trace!(
         "[bootstrap_init] address bits: hardware VALEN={} PALEN={}, build VALEN={} PALEN={}",
         cfg1.get_valen(),
         cfg1.get_palen(),
@@ -161,5 +167,5 @@ pub fn bootstrap_init() {
     // PTE 掩码和规范地址检查与 CPU 不一致，使后续异常表现为误导性的 MMU 故障。
     assert_eq!(cfg1.get_valen(), VALEN, "kernel VALEN does not match CPUCFG1");
     assert_eq!(cfg1.get_palen(), PALEN, "kernel PALEN does not match CPUCFG1");
-    println!("[bootstrap_init] {:?}", PRCfg1::read());
+    boot_trace!("[bootstrap_init] {:?}", PRCfg1::read());
 }

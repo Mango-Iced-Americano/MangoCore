@@ -34,6 +34,7 @@ related_docs:
 | `mango-2k1000la-full-test-mbr.img.xz` | 400MiB | `80e1e2addac136da2b9ccffbcad349d915b3b4fec20ef25e11a86193162bc584` |
 | `mango-2k1000la-full-test-mbr.img.layout.json` | 702 B | 分区起点、长度和 payload 哈希 |
 | `kernel-2k1000-sata-mount-ro.ui` | 约 12MiB | `cd02b6dbb1d9c90945ebed2bfa9ac3c4848beed99e96ae5b670a2c2fec2f49d2` |
+| `kernel-2k1000-run.ui` | 12,319,472 B | `9fcb0df721f115af8b3d42358cf9560344d3fe1adabb5acc731ef5bf44c0f3f1` |
 
 ## 2. MBR 布局
 
@@ -105,9 +106,11 @@ ext4ls scsi 0:3 /
 setenv ipaddr 192.168.9.20
 setenv serverip 192.168.9.10
 setenv netmask 255.255.255.0
-tftpboot 0x9000000098000000 kernel-2k1000-sata-mount-ro.ui
+tftpboot 0x9000000098000000 kernel-2k1000-run.ui
 bootm 0x9000000098000000
 ```
+
+`kernel-2k1000-run.ui` 是默认关闭上板诊断、`LOG=off` 且嵌入 `mode=run`/`mask=0xFFF` fallback 配置的正式镜像。旧的 `kernel-2k1000-sata-mount-ro.ui` 仅保留为前期验收基线。
 
 预期日志应包含 `/dev/sda1` Ext4、`/dev/sda2` Fat32、`/dev/sda3` Ext4，随后 P1 以 `RDONLY` 挂到 `/sdcard`、P3 以 `RDONLY` 挂到 `/tools`。
 

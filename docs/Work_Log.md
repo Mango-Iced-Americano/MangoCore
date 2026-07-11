@@ -4,6 +4,25 @@
 
 ## 2026-07-11
 
+### board/build: 关闭 bring-up 输出并生成纯净 mode=run 镜像
+
+**涉及文件：**
+- `os/Cargo.toml`, `os/src/console.rs` — 新增默认关闭的 `board_bringup_trace` 和统一 `boot_trace!` 编译期门控
+- `os/src/{main,fs,mm,net,task}/`, `os/src/hal/arch/loongarch64/`, `os/src/drivers/block/` — 静默 2K1000LA 成功型启动诊断，并从正式构建移除首次栈/调度/PLV3 探针；错误和 panic 输出保留
+- `os/Makefile` — 新增 `la64-2k1000-run-clean`，强制 `mode=run`、`LOG=off`，输出 `kernel-2k1000-run.ui`
+- `docs/01_architecture/boot-and-trap.md`, `docs/03_fs/2k1000-full-test-disk.md` — 记录正式构建目标、诊断恢复方式与产物信息
+- `.agents/skills/mango-workflow/references/debugging-patterns.md` — 沉淀板型选择与诊断 feature 分离规则
+
+**验证：**
+- Docker 临时容器明确挂载当前仓库到 `/app`，顺序执行 `make -C os rv64-kernel-build-only` 与 `make -C os la64-kernel-build-only`，均成功 ✅
+- `make -C os la64-2k1000-run-clean` 成功；uImage 为未压缩 LoongArch kernel，payload `12319408` 字节，`Load/Entry=0x90000000` ✅
+- 最终文件 `kernel-2k1000-run.ui` 为 `12319472` 字节，SHA-256 `9fcb0df721f115af8b3d42358cf9560344d3fe1adabb5acc731ef5bf44c0f3f1`；仓库与 `/private/tftpboot` 副本一致 ✅
+- 二进制审计确认 `[bringup]`、CPUCFG、地址/映射、SATA/MBR 成功诊断和旧启动提示均不存在；`mode=run`、`mask=0xFFF`、测试组标识及 SATA 错误诊断均存在 ✅
+
+**备注：**
+- 按本轮“只构建”要求未复位或启动开发板，避免打断当前运行；验证边界为双架构编译、板级 uImage 构建和最终二进制内容审计。
+- 正式镜像仍保持 SATA 只读挂载；本次仅收敛输出，不改变 AHCI、VFS、调度或测试行为。
+
 ### board: 完成 2K1000LA 真实 SSD 的 MBR/ext4 只读挂载验收
 
 **涉及文件：**

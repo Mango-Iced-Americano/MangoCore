@@ -33,7 +33,7 @@ const BACKGROUND_NET_POLL_INTERVAL: usize = 64;
 const IDLE_NET_POLL_INTERVAL: usize = 64;
 const RV64_CONSOLE_POLL_INTERVAL: usize = 64;
 
-#[cfg(feature = "board_2k1000")]
+#[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
 static BOARD_FIRST_TASK_SWITCH: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
@@ -304,7 +304,7 @@ pub fn run_tasks() {
         }
         super::perf::record_schedule_loop(next_task.is_some());
         if let Some(task) = next_task {
-            #[cfg(feature = "board_2k1000")]
+            #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
             let trace_first_switch = !BOARD_FIRST_TASK_SWITCH.swap(true, Ordering::Relaxed);
             let stage_t0 = sched_profile_start(sched_profile);
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
@@ -355,7 +355,7 @@ pub fn run_tasks() {
                 SCHED_SWITCHES.fetch_add(1, SchedOrdering::Relaxed);
             }
             sched_record_loop_cycles(sched_profile, loop_t0);
-            #[cfg(feature = "board_2k1000")]
+            #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
             if trace_first_switch {
                 // 安全性：选中任务仍由 `processor.current` 持有，在 `__switch` 使用
                 // 该上下文前不会发生修改。
@@ -379,7 +379,7 @@ pub fn run_tasks() {
                 crate::task::perf::record_context_switch();
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
             }
-            #[cfg(feature = "board_2k1000")]
+            #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
             if trace_first_switch {
                 println!("[bringup][sched:02] first init context returned to idle scheduler");
             }
