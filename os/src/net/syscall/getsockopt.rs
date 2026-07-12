@@ -70,6 +70,14 @@ pub fn sys_getsockopt(
                 return -(SyscallErr::EFAULT as isize);
             }
         }
+        (SOL_SOCKET, SO_TYPE) => {
+            let ty = socket.socket_type() as u32;
+            if optval_ptr.write(token, &ty).is_err()
+                || optlen_ptr.write(token, &4u32).is_err()
+            {
+                return -(SyscallErr::EFAULT as isize);
+            }
+        }
         (SOL_TCP, TCP_MAXSEG) => {
             // return max TCP segment size (MSS)
             let len = core::mem::size_of::<u32>();

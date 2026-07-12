@@ -1838,6 +1838,16 @@ impl File {
         }
 
         self.offset.store(new_offset as usize, Ordering::SeqCst);
+
+        // When no entries were written but offset was non-zero, the
+        // directory changed between calls (e.g. rm -rf deleted entries
+        // that shifted positions).  Reset and retry once to avoid
+        // silently returning empty while entries still exist.
+        if written == 0 && current_offset > 0 {
+            self.offset.store(0, Ordering::SeqCst);
+            return self.get_dirent64(buf);
+        }
+
         Ok(written)
     }
 
