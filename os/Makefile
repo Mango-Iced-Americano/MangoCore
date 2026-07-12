@@ -217,6 +217,12 @@ TOOLS_SIZE_LA := 768
 TOOLS_SRC_RV := ../user/tools/riscv64
 TOOLS_SRC_LA := ../user/tools/loongarch64
 
+# CPython runtime
+CPYTHON_COMMON := ../user/tools/cpython
+CPYTHON_SRC_RV := ../user/tools/riscv64/tests/cpython
+CPYTHON_SRC_LA := ../user/tools/loongarch64/tests/cpython
+CPYTHON_AUTO ?= 1
+
 # MBR 脚本路径
 MBR_SCRIPT := ../scripts/make_mbr_tools_disk.py
 
@@ -241,6 +247,25 @@ define build_tools_disk
 		if [ -f "$$src" ]; then cp -a "$$src" /tmp/tools-mnt/tests/; echo "    $$t"; \
 		else echo "    [skip] $$t (not built)"; fi; \
 	done
+	@echo "  copying CPython runtime/tests..."
+	@if [ -d $(CPYTHON_COMMON) ]; then \
+		mkdir -p /tmp/tools-mnt/tests/cpython; \
+		cp -a $(CPYTHON_COMMON)/. /tmp/tools-mnt/tests/cpython/; \
+		echo "    [cpython] common scripts included"; \
+	else \
+		echo "    [cpython] common scripts missing, skipping"; \
+	fi
+	@if [ -d $(3)/tests/cpython ]; then \
+		mkdir -p /tmp/tools-mnt/tests/cpython; \
+		cp -a $(3)/tests/cpython/. /tmp/tools-mnt/tests/cpython/; \
+		if [ -x /tmp/tools-mnt/tests/cpython/usr/bin/python3 ]; then \
+			echo "    [cpython] runtime included"; \
+		else \
+			echo "    [cpython] arch runtime copied but python3 not found"; \
+		fi; \
+	else \
+		echo "    [cpython] no arch runtime cache, skipping"; \
+	fi
 	@if [ -d $(3)/apk ]; then \
 		cp -a $(3)/apk /tmp/tools-mnt/ 2>/dev/null; \
 		echo "  [apk] local repo included"; \
@@ -283,10 +308,10 @@ define build_tools_disk
 	@echo "[tools-disk] $(1) ready."
 endef
 
-tools-disk-rv:
+tools-disk-rv: maybe-tools-cpython-rv
 	$(call build_tools_disk,$(TOOLS_IMG_RV),$(TOOLS_SIZE_RV),$(TOOLS_SRC_RV),rv)
 
-tools-disk-la:
+tools-disk-la: maybe-tools-cpython-la
 	$(call build_tools_disk,$(TOOLS_IMG_LA),$(TOOLS_SIZE_LA),$(TOOLS_SRC_LA),la)
 
 tools-disk: tools-disk-rv tools-disk-la
@@ -357,6 +382,46 @@ tools-alpine-la:
 	@echo "[alpine] loongarch64 done."
 
 tools-alpine: tools-alpine-rv tools-alpine-la
+
+# ============================================================
+# CPython runtime downloader（从 Alpine 下载 python3 及依赖）
+# 缓存到 user/tools/{arch}/tests/cpython/（gitignored）
+# ============================================================
+
+tools-cpython-rv:
+	@python3 ../scripts/fetch_cpython_runtime.py \
+		--arch riscv64 \
+		--mirror $(ALPINE_MIRROR) \
+		--dest ../user/tools/riscv64/tests/cpython
+
+tools-cpython-la:
+	@python3 ../scripts/fetch_cpython_runtime.py \
+		--arch loongarch64 \
+		--mirror $(ALPINE_MIRROR) \
+		--dest ../user/tools/loongarch64/tests/cpython
+
+tools-cpython: tools-cpython-rv tools-cpython-la
+
+maybe-tools-cpython-rv:
+	@if [ "$(CPYTHON_AUTO)" = "1" ]; then \
+		$(MAKE) --no-print-directory tools-cpython-rv || \
+		echo "[cpython] riscv64 download failed, continuing without CPython runtime"; \
+	else \
+		echo "[cpython] CPYTHON_AUTO=0, skipping riscv64 runtime"; \
+	fi
+
+maybe-tools-cpython-la:
+	@if [ "$(CPYTHON_AUTO)" = "1" ]; then \
+		$(MAKE) --no-print-directory tools-cpython-la || \
+		echo "[cpython] loongarch64 download failed, continuing without CPython runtime"; \
+	else \
+		echo "[cpython] CPYTHON_AUTO=0, skipping loongarch64 runtime"; \
+	fi
+
+tools-cpython-clean:
+	@rm -rf $(CPYTHON_SRC_RV)/.apk-cache $(CPYTHON_SRC_RV)/lib $(CPYTHON_SRC_RV)/usr $(CPYTHON_SRC_RV)/etc $(CPYTHON_SRC_RV)/var $(CPYTHON_SRC_RV)/.cpython-*.stamp $(CPYTHON_SRC_RV)/manifest*.txt
+	@rm -rf $(CPYTHON_SRC_LA)/.apk-cache $(CPYTHON_SRC_LA)/lib $(CPYTHON_SRC_LA)/usr $(CPYTHON_SRC_LA)/etc $(CPYTHON_SRC_LA)/var $(CPYTHON_SRC_LA)/.cpython-*.stamp $(CPYTHON_SRC_LA)/manifest*.txt
+	@echo "[cpython] cache cleaned"
 
 # ============================================================
 # apk 包管理器下载 + 本地 repo 配置

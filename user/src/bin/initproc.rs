@@ -24,7 +24,7 @@ const LIBGCC_S_SO: &[u8] = include_bytes!("../../assets/libgcc_s/loongarch64/lib
 // 索引 0..11 与 mask 的 bit0..bit11 一一对应
 // ⚠️ DEFAULT_TIMEOUTS 的索引与此数组一致
 // ============================================================
-const TEST_GROUPS: [(&str, &str); 12] = [
+const TEST_GROUPS: [(&str, &str); 13] = [
     ("basic", "basic_testcode.sh"),
     ("busybox", "busybox_testcode.sh"),
     ("lua", "lua_testcode.sh"),
@@ -37,6 +37,7 @@ const TEST_GROUPS: [(&str, &str); 12] = [
     ("netperf", "netperf_testcode.sh"),
     ("cyclictest", "cyclictest_testcode.sh"),
     ("ltp", "ltp_testcode.sh"),
+    ("cpython", "cpython_testcode.sh"),
 ];
 
 // ============================================================
@@ -63,12 +64,13 @@ const DEFAULT_ORDER: &[&str] = &[
     "libctest",
     "cyclictest",
     "ltp",
+    "cpython",
     "unixbench",
 ];
 
 /// 每组默认超时（秒），索引 0..11 与 TEST_GROUPS 一一对应
 /// 例如 [6]=90 表示 TEST_GROUPS[6] (iperf) 的超时时间为 90 秒
-const DEFAULT_TIMEOUTS: [u64; 12] = [
+const DEFAULT_TIMEOUTS: [u64; 13] = [
     60,   // [0]  basic
     120,   // [1]  busybox
     60,   // [2]  lua
@@ -81,6 +83,7 @@ const DEFAULT_TIMEOUTS: [u64; 12] = [
     90,   // [9]  netperf
     60,   // [10] cyclictest
     2400, // [11] ltp
+    600,  // [12] cpython
 ];
 
 /// LTP 默认排除测例名列表
@@ -329,7 +332,7 @@ struct RuntimeConfig {
     /// 执行顺序：TEST_GROUPS 的索引数组，按此顺序依次执行每组
     order: Vec<usize>,
     /// 每测例超时（秒），索引与 TEST_GROUPS 一一绑定，不与 order 位置绑定
-    timeouts: [u64; 12],
+    timeouts: [u64; 13],
     /// LTP 排除测例名列表（musl 和 glibc 共用）
     ltp_exclude: Vec<String>,
     /// LTP musl 专属排除测例
@@ -857,7 +860,9 @@ fn run_group_in_dir(
     let group_start_ms = get_time() as u64;
     let log_dir = display_path(dir);
     // 构造比赛的 START/END 标记
-    let libc_suffix = if log_dir.contains("musl") {
+    let libc_suffix = if group_name == "cpython" {
+        "isolated"
+    } else if log_dir.contains("musl") {
         "musl"
     } else {
         "glibc"
@@ -2079,6 +2084,19 @@ fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
                 if(cfg.diag) {
                     snapshot_diag(cfg.diag, n, group_name, "glibc", environ);
                 }
+            }
+        } else if group_name == "cpython" {
+            run_group_in_dir(
+                environ,
+                "/tools/tests/cpython\0",
+                group_name,
+                script,
+                timeout_secs,
+                1,  // max_retries=1
+                cfg,
+            );
+            if cfg.diag {
+                snapshot_diag(cfg.diag, n, group_name, "isolated", environ);
             }
         } else {
             let retries = if group_name == "lmbench" { 1 } else { MAX_GROUP_RETRIES };

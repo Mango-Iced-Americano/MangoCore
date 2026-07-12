@@ -4,6 +4,110 @@
 
 ## 2026-07-12
 
+### 新增 CPython L7-L9 测试脚本
+
+**涉及文件：**
+- `user/tools/cpython/L7_filesystem.py` — 新增：文件系统语义测试（open/read/write/close、O_CREAT/O_TRUNC/O_APPEND、相对路径、mkdir/rmdir、rename、unlink、symlink、stat/lstat、listdir/scandir、ftruncate、fsync、tempfile、open-unlink 仍可读）
+- `user/tools/cpython/L8_thread.py` — 新增：线程测试（start/join、互斥锁竞争、Queue put/get、四线程计数器、daemon 线程）
+- `user/tools/cpython/L8_subprocess.py` — 新增：子进程测试（subprocess.run capture_output、Popen pipe 通信、退出码传播、stderr 捕获、busybox echo）
+- `user/tools/cpython/L9_socket.py` — 新增：网络分层测试（socket create/close、socketpair 本地通信、DNS 解析、TCP HTTP、HTTPS urllib，无网络时 SKIP）
+- `user/tools/cpython/cpython_testcode.sh` — 新增 L7-L9 调用入口
+
+**验证：**
+- 非内核修改，无需内核编译验证
+- 变更属于用户态测试脚本，不影响内核
+
+**备注：** 无 shebang，由 `run_py()` 通过 `$CPYTHON_LD` + `$CPYTHON_PY` 执行。L9 通过 `CPYTHON_L9_REQUIRE_NET=1` 控制：设为 1 时网络不可用则 FAIL，否则 SKIP。
+
+### CPython 测试脚本：.so 版本后缀 glob 修复 + SyntaxWarning 修复
+
+**涉及文件：**
+- `user/tools/cpython/L3_check_files.sh` — libpython3 和 libc 的 glob 添加 `*` 后缀以匹配带有版本后缀的 .so 文件（如 `libpython3.14.so.1.0`、`libc.musl-riscv64.so.1`），libc 检查改用 `for` 循环以匹配多个候选文件
+- `user/tools/cpython/L5_language.py` — `assert 0 is not None` → `assert 0 != None`，消除 Python 3.14 的 `SyntaxWarning: "is not" with a literal` 警告
+
+**验证：**
+- 非内核修改，无需内核编译验证
+- 变更属于用户态测试脚本，不影响内核
+
+**备注：** libcrypto/libssl 的 glob 在之前的修复中已使用 `"$soname"*` 模式，本次仅修复 libpython3 和 libc。
+
+### CPython 测试脚本 7 个 bug 修复（Oracle 审计结果）
+
+**涉及文件：**
+- `user/tools/cpython/run_cpython.sh` — `set -eu` → `set -u`：移除 `-e` 防止被 source 时 errexit 传播到父脚本
+- `user/tools/cpython/cpython_testcode.sh` — `run_sh()` 和 `run_py()` 改用 `if command; then rc=0; else rc=$?; fi` 防御式捕获退出码
+- `user/tools/cpython/L4_startup.sh` — Test 2（`sys.exit(37)`）改用 `if/else` 捕获退出码，避免 errexit 导致脚本在 `rc=$?` 前退出
+- `user/tools/cpython/L5_language.py` — `check()` 添加 `@contextmanager` 装饰器 + `from contextlib import contextmanager` 导入（原为裸 generator 无法用于 `with` 语句）
+- `user/tools/cpython/L6_stdlib.py` — 同上 `@contextmanager` 修复；`os.environ` 测试从 `isinstance(..., dict)` 改为 `.get("HOME")` 的实际调用验证（`os.environ` 是 `MutableMapping` 而非 `dict`）
+- `user/tools/cpython/L3_check_files.sh` — `.so` glob 循环替换为带 `found` 标记的分组检查（libpython3、libc、libcrypto/libssl），缺失时明确报 FAIL 而非静默通过
+- `judge/judge_cpython-isolated.py` — 新增 START/END 标记验证，脚本中途死亡时返回 `{"error": "missing END marker"}` 而非部分评分
+
+**根因分析：** `sys.exit(37)` hang 的根因不是内核 bug，而是 `set -e` 通过 `source` 传播。`run_cpython.sh` 被 `cpython_testcode.sh` 第 11 行 `. ./run_cpython.sh` source，又被 `L4_startup.sh` 第 21 行 `. /tools/tests/cpython/run_cpython.sh` source。`-e` 标志导致 `sys.exit(37)`（返回非零退出码 37）在 `rc=$?` 捕获之前就终止了脚本执行。
+
+**验证：**
+- `make rv64-kernel-build-only` ✅
+- `make la64-kernel-build-only` ✅
+
+**备注：** 防御式修复采用双重策略：(1) 移除源头 `-e`；(2) 所有子脚本用 `if/else` 捕获退出码以防未来重新引入 errexit。L5/L6 的 `@contextmanager` 缺失会导致运行时报 `AttributeError: 'generator' object has no attribute '__enter__'`。
+
+### CPython bringup 基础设施：下载器 + 隔离脚本 + 构建集成
+
+**涉及文件：**
+- `.gitignore` — 新增 14 条 CPython runtime 缓存忽略规则（`user/tools/*/tests/cpython/{.apk-cache,bin,lib,usr,etc,var,tmp}`, `*.apk`, `.cpython-*.stamp`, `**/*.so`, `**/*.so.*`）
+- `scripts/fetch_cpython_runtime.py` — 新建：从 Alpine APKINDEX 自动解析 python3 依赖闭包并下载解包到缓存目录（248 LOC，支持 `--arch`、`--dest`、`--dry-run`、`--force`，解析 P/V/D/p/S/I 字段，处理 `so:` 依赖，安全解包拒绝 `..` 路径）
+- `user/tools/cpython/run_cpython.sh` — 新建：运行时隔离环境（`PYTHONHOME`、`LD_LIBRARY_PATH`、musl loader 显式调用、`PYTHONUTF8=1`、`PYTHONDONTWRITEBYTECODE=1`）
+- `user/tools/cpython/cpython_testcode.sh` — 新建：测试入口，依次调用 L3→L6 各层，打印 `[CPYTHON Lx PASS/FAIL]` 标记
+- `user/tools/cpython/L3_check_files.sh` — 新建：二进制完整性检查（python3、musl loader、encodings、CA 证书、.so 非空）
+- `user/tools/cpython/L4_startup.sh` — 新建：最小启动测试（`--version`、`sys.exit(37)` exit code 验证、`import encodings`、`sys.prefix`）
+- `os/Makefile` — 新增 `CPYTHON_*` 变量、`tools-cpython-rv/la`、`maybe-tools-cpython-rv/la`、`tools-cpython-clean` targets；`tools-disk-rv/la` 新增 `maybe-tools-cpython-*` 依赖；`build_tools_disk` 内插入 cpython 拷贝逻辑（先拷贝共享脚本，再拷贝架构专属 runtime，均支持 graceful skip）
+
+**验证：**
+- `scripts/fetch_cpython_runtime.py --dry-run --arch riscv64` ✅（18 个包，12.95 MiB 下载，32.58 MiB 安装）
+- `os/Makefile` targets syntax check ✅（`make -n tools-disk-rv`、`tools-cpython-clean`）
+- QEMU 内交互测试 ✅（`python3 --version` → `Python 3.14.5`，`os._exit(37)` 和 `sys.exit(37)` 均正常）
+
+**备注：** CPython runtime 完全隔离在 `/tools/tests/cpython/`，不污染系统 `/bin`/`/lib`。tools disk 当前 768 MiB，runtime 仅占 ~33 MiB，无需扩容。所有二进制 gitignored，仓库只提交脚本。
+
+### 新增 cpython 测试组（mask bit 12）
+
+**涉及文件：**
+- `user/src/bin/initproc.rs` — `TEST_GROUPS` 扩容 12→13，新增 `("cpython", "cpython_testcode.sh")`；`DEFAULT_TIMEOUTS` 扩容 12→13，新增 `600` 秒；`DEFAULT_ORDER` 在 `ltp` 和 `unixbench` 之间插入 `cpython`；`RuntimeConfig.timeouts` 类型从 `[u64; 12]` 改为 `[u64; 13]`；新增 cpython dispatch 分支（`run_group_in_dir` 传入 `/tools/tests/cpython\0`，max_retries=1）；`run_group_in_dir` 中 libc_suffix 对 cpython 返回 `"isolated"` 而非 `"musl"/"glibc"`
+
+**验证：**
+- `make rv64-user-build-only` (Docker) ✅
+- `make la64-user-build-only` (Docker) ✅
+
+**备注：** 默认 mask 保持 `0x0fff`（bits 0-11），cpython 为 opt-in（需 `mask=0x1000` 才启用）。cpython 测试从 `/tools/tests/cpython/` 目录运行，使用 isolated suffix 而非 musl/glibc，与其他测试组的 `/musl/`、`/glibc/` 目录区分。
+
+### CPython bringup 测试脚本：L5 语言核心 + L6 标准库 + 评分解析器
+
+**涉及文件：**
+- `user/tools/cpython/L5_language.py` — 新建：Python 语言核心特性冒烟测试（算术、字符串、列表、字典、推导式、异常、函数/闭包、循环、布尔、集合），通过 `run_cpython.sh --exec` 运行，使用 `[CPYTHON L5]` 标记
+- `user/tools/cpython/L6_stdlib.py` — 新建：标准库模块冒烟测试（os、time、math、json、re、random、hashlib、zlib、select、tempfile、pathlib、struct、sqlite3），使用 `[CPYTHON L6]` 标记
+- `judge/judge_cpython-isolated.py` — 新建：评分解析器，从 `#### OS COMP TEST GROUP START cpython-isolated ####` 段内解析 `[CPYTHON Lx PASS/FAIL]` 标记，输出 `{"all": N, "pass": M}` JSON，兼容现有 `run_judge.py` 框架
+
+**验证：**
+- `python3 judge/judge_cpython-isolated.py` 样例输入解析 ✅（5 tests / 3 pass → `{"all": 5, "pass": 3}`）
+- L5/L6 无 shebang（通过 `run_cpython.sh --exec` 启动）✅
+- `judge_cpython-isolated.py` 可执行 ✅
+
+**备注：** 测试脚本不依赖网络、不依赖 Alpine 外部包；`print(..., flush=True)` 确保串口输出即时可见；judge 脚本通过两个独立 for 循环避免 PASS/FAIL 和 OK 行交叉匹配。
+
+### Alpine CPython runtime 获取脚本
+
+**涉及文件：**
+- `scripts/fetch_cpython_runtime.py` — 重写为宿主机 Python3 脚本：下载并解析 `{mirror}/{arch}/APKINDEX.tar.gz`，从 `python3` 与 `ca-certificates-bundle` 动态递归解析包依赖和 `so:` provider；按需下载 `.apk` 到 `{dest}/.apk-cache/`，安全解包到 `{dest}`，支持 `--arch`、`--dest`、`--mirror`、`--force`、`--dry-run`，成功后写入 `.cpython-runtime.stamp`
+
+**验证：**
+- `python3 -m py_compile scripts/fetch_cpython_runtime.py` ✅
+- `python3 scripts/fetch_cpython_runtime.py --help` ✅
+- `python3 scripts/fetch_cpython_runtime.py --arch riscv64 --dest /tmp/opencode/cpython-runtime-dry --dry-run` ✅（18 packages，12.95 MiB）
+- `python3 scripts/fetch_cpython_runtime.py --arch loongarch64 --dest /tmp/opencode/cpython-runtime-dry-la --dry-run` ✅（18 packages，13.12 MiB）
+- `python3 scripts/fetch_cpython_runtime.py --arch riscv64 --dest /tmp/opencode/cpython-runtime-full --force` ✅（下载/缓存 18 个 apk，解包 901 个条目并写 stamp）
+- `awk '!/^[[:space:]]*$/ && !/^[[:space:]]*(\\/\\/|#|--)/' scripts/fetch_cpython_runtime.py | wc -l` ✅（248 pure LOC）
+
+**备注：** 脚本不执行目标架构二进制、不使用 Docker/chroot/qemu-user；解包时拒绝绝对路径和 `..` 路径，避免写出 `--dest`。
+
 ### lwext4 多实例挂载隔离：唯一内部 mount point + 路径翻译
 
 **涉及文件：**

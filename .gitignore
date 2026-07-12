@@ -44,6 +44,21 @@ EXPERIENCE.md
 __pycache__/
 *.pyc
 *.pyo
+
+# CPython runtime cache for tools disk
+/user/tools/*/tests/cpython/.apk-cache/
+/user/tools/*/tests/cpython/bin/
+/user/tools/*/tests/cpython/lib/
+/user/tools/*/tests/cpython/usr/
+/user/tools/*/tests/cpython/etc/
+/user/tools/*/tests/cpython/var/
+/user/tools/*/tests/cpython/tmp/
+/user/tools/*/tests/cpython/*.apk
+/user/tools/*/tests/cpython/*.tar.gz
+/user/tools/*/tests/cpython/.cpython-*.stamp
+/user/tools/*/tests/cpython/manifest*.txt
+/user/tools/*/tests/cpython/**/*.so
+/user/tools/*/tests/cpython/**/*.so.*
 .sisyphus/
 sdcard-rv-noconf.img
 /tools/
